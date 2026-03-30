@@ -1,0 +1,16 @@
+[package]
+name = "fem-ceed"
+version = "0.1.0"
+edition = "2021"
+description = "Bridge between fem-rs mesh types and the reed discretization library"
+
+[dependencies]
+fem-core  = { path = "../core" }
+fem-mesh  = { path = "../mesh" }
+thiserror = { workspace = true }
+
+# reed lives in vendor/reed as a git submodule (independent workspace).
+# Reference the individual crates via relative path.
+reed-core = { path = "../../vendor/reed/crates/core" }
+reed-cpu  = { path = "../../vendor/reed/crates/cpu", default-features = false }
+reed      = { path = "../../vendor/reed", default-features = false }

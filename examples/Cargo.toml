@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fem-core   = { path = "../crates/core" }
-fem-mesh   = { path = "../crates/mesh" }
-fem-linalg = { path = "../crates/linalg" }
-fem-io     = { path = "../crates/io" }
-log        = { workspace = true }
-env_logger = { workspace = true }
+fem-core     = { path = "../crates/core" }
+fem-mesh     = { path = "../crates/mesh" }
+fem-linalg   = { path = "../crates/linalg" }
+fem-io       = { path = "../crates/io" }
+fem-parallel = { path = "../crates/parallel" }
+fem-ceed     = { path = "../crates/ceed" }
+log          = { workspace = true }
+env_logger   = { workspace = true }
 
 [[example]]
 name = "em_electrostatics"
@@ -18,6 +20,14 @@ path = "em_electrostatics.rs"
 [[example]]
 name = "em_magnetostatics_2d"
 path = "em_magnetostatics_2d.rs"
+
+[[example]]
+name = "par_mesh_verify"
+path = "par_mesh_verify.rs"
+
+[[example]]
+name = "ceed_mass"
+path = "ceed_mass.rs"
 
 [lib]
 name = "fem_examples"

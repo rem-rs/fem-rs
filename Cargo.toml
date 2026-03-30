@@ -12,8 +12,12 @@ members = [
     "crates/parallel",
     "crates/io",
     "crates/wasm",
+    "crates/ceed",        # bridge: fem-rs ↔ reed (libCEED analogue)
     "examples",
 ]
+# reed lives in vendor/reed as a git submodule and is its own Cargo workspace.
+# Exclude it so Cargo does not try to merge the two workspace graphs.
+exclude = ["vendor/reed"]
 
 [workspace.dependencies]
 # shared versions — reference from crates with { workspace = true }
@@ -25,6 +29,9 @@ rayon       = "1.10"
 serde       = { version = "1", features = ["derive"] }
 bytemuck    = { version = "1", features = ["derive"] }
 env_logger  = "0.11"
+# rsmpi — Rust MPI bindings (crates.io package name: `mpi`)
+# Used by fem-parallel; feature-gated so builds without MPI remain possible.
+mpi         = { version = "0.8", features = ["user-operations"] }
 
 [profile.release]
 opt-level   = 3

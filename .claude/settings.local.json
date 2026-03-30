@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustup target:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(find /c/Users/lilu/works/reed -type f -not -path */target/* -not -path */.git/* -not -path */node_modules/* -not -path */dist/*)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/lib.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/vector.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/elem_restriction.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/basis.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/operator.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/qfunction.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/scalar.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/error.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/src/enums.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/Cargo.toml)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/cpu/Cargo.toml)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/cpu/src/lib.rs)",
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/design.md)"
+    ]
+  }
+}
