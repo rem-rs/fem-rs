@@ -18,7 +18,9 @@
       "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/core/Cargo.toml)",
       "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/cpu/Cargo.toml)",
       "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/cpu/src/lib.rs)",
-      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/design.md)"
+      "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/design.md)",
+      "Bash(git submodule:*)",
+      "Bash(grep -E \"test .* \\\\.\\\\.\\\\.|FAILED|error|ok$|running [0-9]+ test\")"
     ]
   }
 }

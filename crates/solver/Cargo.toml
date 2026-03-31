@@ -6,4 +6,6 @@ edition = "2021"
 [dependencies]
 fem-core   = { path = "../core" }
 fem-linalg = { path = "../linalg" }
+linger     = { path = "../../vendor/linger", default-features = false, features = ["rayon"] }
 log        = { workspace = true }
+thiserror  = { workspace = true }
