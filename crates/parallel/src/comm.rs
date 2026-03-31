@@ -112,24 +112,31 @@ impl Comm {
         out
     }
 
-    // ── raw byte operations (for GhostExchange) ───────────────────────────────
-
-    /// Raw byte send — used internally by ghost exchange.
+    /// Broadcast a raw byte buffer from `root` to all ranks in-place.
+    ///
+    /// On non-root ranks `buf` is overwritten with the root's contents.
     #[inline]
-    pub(crate) fn send_bytes(&self, dest: Rank, tag: i32, data: &[u8]) {
+    pub fn broadcast_bytes(&self, root: Rank, buf: &mut Vec<u8>) {
+        self.inner.broadcast_bytes(root, buf);
+    }
+
+    // ── raw byte operations (for GhostExchange + tests) ───────────────────────
+
+    /// Raw byte send — blocking point-to-point.
+    #[inline]
+    pub fn send_bytes(&self, dest: Rank, tag: i32, data: &[u8]) {
         self.inner.send_bytes(dest, tag, data);
     }
 
-    /// Raw byte receive — used internally by ghost exchange.
+    /// Raw byte receive — blocking point-to-point.
     #[inline]
-    pub(crate) fn recv_bytes(&self, src: Rank, tag: i32) -> Vec<u8> {
+    pub fn recv_bytes(&self, src: Rank, tag: i32) -> Vec<u8> {
         self.inner.recv_bytes(src, tag)
     }
 
-    /// Sparse all-to-all byte exchange.
-    #[allow(dead_code)] // used by GhostExchange in Phase 10
+    /// Sparse all-to-all variable-length byte exchange.
     #[inline]
-    pub(crate) fn alltoallv_bytes(
+    pub fn alltoallv_bytes(
         &self,
         sends: &[(Rank, Vec<u8>)],
     ) -> Vec<(Rank, Vec<u8>)> {

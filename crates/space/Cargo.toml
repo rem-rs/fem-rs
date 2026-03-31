@@ -7,4 +7,5 @@ edition = "2021"
 fem-core    = { path = "../core" }
 fem-mesh    = { path = "../mesh" }
 fem-element = { path = "../element" }
+fem-linalg  = { path = "../linalg" }
 nalgebra    = { workspace = true }

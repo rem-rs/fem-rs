@@ -9,3 +9,10 @@ fem-linalg = { path = "../linalg" }
 linger     = { path = "../../vendor/linger", default-features = false, features = ["rayon"] }
 log        = { workspace = true }
 thiserror  = { workspace = true }
+
+[dev-dependencies]
+fem-assembly = { path = "../assembly" }
+fem-element  = { path = "../element" }
+fem-linalg   = { path = "../linalg" }
+fem-mesh     = { path = "../mesh" }
+fem-space    = { path = "../space" }

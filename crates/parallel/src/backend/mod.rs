@@ -93,5 +93,9 @@ pub trait CommBackend: Send + Sync {
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
 
+/// In-process channel backend for [`ThreadLauncher`] (non-wasm32 only).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod channel;
+
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;

@@ -47,7 +47,7 @@ pub mod partition;
 // Flat re-exports for ergonomic `use fem_parallel::*`.
 pub use comm::{Comm, Universe};
 pub use ghost::GhostExchange;
-pub use launcher::Launcher;
+pub use launcher::{Launcher, WorkerConfig};
 pub use par_mesh::ParallelMesh;
 pub use par_simplex::partition_simplex;
 pub use partition::MeshPartition;

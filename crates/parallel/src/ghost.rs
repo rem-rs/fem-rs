@@ -13,10 +13,10 @@
 //!    accumulation (needed for parallel FEM assembly).
 //!
 //! Communication is fully delegated to [`Comm`]'s backend, so the same code
-//! runs against the native MPI backend, the serial stub, and the future Web
-//! Worker backend without any `#[cfg]` guards here.
+//! runs against the native MPI backend, the serial stub, and the in-process
+//! channel backend without any `#[cfg]` guards here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use fem_core::Rank;
 use crate::partition::MeshPartition;
 use crate::comm::Comm;
@@ -28,10 +28,10 @@ use crate::comm::Comm;
 struct NeighbourChannel {
     /// Peer rank.
     rank: Rank,
-    /// Local node indices this rank sends to `rank` (owned nodes needed as
-    /// ghosts on `rank`).  Filled by the setup collective in Phase 10.
+    /// Local node IDs this rank sends TO `rank` (owned nodes needed as ghosts
+    /// on `rank`).  Populated by the alltoallv setup collective.
     send_local_ids: Vec<u32>,
-    /// Local ghost-slot indices that will be overwritten with data from `rank`.
+    /// Local ghost-slot IDs that will be overwritten with data FROM `rank`.
     recv_local_ids: Vec<u32>,
 }
 
@@ -55,39 +55,89 @@ impl GhostExchange {
     /// When `comm.size() == 1` (serial or single-rank) this returns an empty
     /// no-op exchange immediately.
     ///
-    /// For multi-rank runs a small collective determines which owned nodes must
-    /// be sent to which neighbours (Phase 10 full implementation).
+    /// For multi-rank runs an `alltoallv` collective distributes ghost-node
+    /// requests to their owners so that every rank learns which of its owned
+    /// nodes are needed as ghosts elsewhere (`send_local_ids`).
+    ///
+    /// ## Algorithm
+    /// 1. Each rank groups its ghost nodes by owner rank and serialises their
+    ///    **global** node IDs as request payloads.
+    /// 2. `alltoallv_bytes` delivers each request to its target owner.
+    /// 3. Each owner maps the requested global IDs back to local IDs — these
+    ///    become `send_local_ids` for the corresponding channel.
+    /// 4. `recv_local_ids` are always known locally from the partition.
     pub fn from_partition(partition: &MeshPartition, comm: &Comm) -> Self {
-        // ── fast path: serial or single-rank ─────────────────────────────────
+        // ── fast path: serial / single-rank ──────────────────────────────────
         if comm.size() == 1 {
             return GhostExchange { channels: Vec::new() };
         }
 
-        // ── multi-rank: group ghost nodes by owner rank ───────────────────────
-        //
-        // recv_local_ids are already known from the partition (ghost slots).
-        // send_local_ids require an AllToAll so every rank learns which of its
-        // owned nodes are needed as ghosts elsewhere.
-        //
-        // Phase 10 plan:
-        //   1. Each rank serialises (global_node_id, local_slot) for each ghost.
-        //   2. alltoallv_bytes to deliver these requests to their owners.
-        //   3. Each owner records the requested local IDs as send_local_ids.
-        //
-        // For now we only populate recv_local_ids; the forward/reverse impls
-        // are stubs until Phase 10 wires the collective.
+        // ── group ghosts by owner rank ────────────────────────────────────────
+        // recv_slots[owner] = list of local ghost-slot IDs owned by `owner`.
+        // requests[owner]   = list of global node IDs we need from `owner`.
+        let mut recv_slots: HashMap<Rank, Vec<u32>> = HashMap::new();
+        let mut requests:   HashMap<Rank, Vec<u32>> = HashMap::new();
 
-        let mut recv_map: HashMap<Rank, Vec<u32>> = HashMap::new();
         for (local_id, owner) in partition.ghost_nodes() {
-            recv_map.entry(owner).or_default().push(local_id);
+            let gid = partition.global_node(local_id);
+            recv_slots.entry(owner).or_default().push(local_id);
+            requests.entry(owner).or_default().push(gid);
         }
 
-        let channels = recv_map
+        // ── send requests via alltoallv ───────────────────────────────────────
+        // Each request payload is a contiguous array of u32 global node IDs
+        // encoded as little-endian bytes.
+        let sends: Vec<(Rank, Vec<u8>)> = requests
+            .iter()
+            .map(|(&owner, gids)| {
+                let bytes = gids
+                    .iter()
+                    .flat_map(|&g| g.to_le_bytes())
+                    .collect::<Vec<u8>>();
+                (owner, bytes)
+            })
+            .collect();
+
+        let received = comm.alltoallv_bytes(&sends);
+
+        // ── build send_local_ids from received requests ───────────────────────
+        // `received` contains `(requester_rank, encoded_global_ids)` for every
+        // rank that needs owned nodes from us.
+        let mut send_map: HashMap<Rank, Vec<u32>> = HashMap::new();
+        for (requester, bytes) in received {
+            // Decode u32 global IDs.
+            debug_assert_eq!(bytes.len() % 4, 0, "alltoallv payload must be u32-aligned");
+            let requested_gids: Vec<u32> = bytes
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            let local_ids: Vec<u32> = requested_gids
+                .iter()
+                .map(|&gid| {
+                    partition
+                        .local_node(gid)
+                        .unwrap_or_else(|| panic!(
+                            "GhostExchange: rank {} requested global node {} \
+                             but this rank does not own it",
+                            requester, gid
+                        ))
+                })
+                .collect();
+            send_map.insert(requester, local_ids);
+        }
+
+        // ── assemble channels ─────────────────────────────────────────────────
+        // A channel exists for every neighbour we either receive from OR send to.
+        let mut all_neighbors: HashSet<Rank> = HashSet::new();
+        all_neighbors.extend(recv_slots.keys().copied());
+        all_neighbors.extend(send_map.keys().copied());
+
+        let channels = all_neighbors
             .into_iter()
-            .map(|(rank, recv_local_ids)| NeighbourChannel {
-                rank,
-                send_local_ids: Vec::new(), // filled by setup collective in Phase 10
-                recv_local_ids,
+            .map(|neighbor| NeighbourChannel {
+                rank:           neighbor,
+                send_local_ids: send_map.remove(&neighbor).unwrap_or_default(),
+                recv_local_ids: recv_slots.remove(&neighbor).unwrap_or_default(),
             })
             .collect();
 
@@ -100,35 +150,39 @@ impl GhostExchange {
     ///
     /// `data` must have length `>= partition.n_total_nodes()`.
     /// After the call `data[ghost_id]` on every rank mirrors the owner's value.
+    ///
+    /// Tag scheme: use `TAG_FWD + sender_rank` so both ends of a channel
+    /// independently arrive at the same tag without coordination.
     pub fn forward(&self, comm: &Comm, data: &mut [f64]) {
         if self.channels.is_empty() {
-            return; // serial or single-rank: nothing to do
+            return; // serial / single-rank
         }
 
-        // Phase 10: for each channel, pack send_local_ids values into a byte
-        // buffer, comm.send_bytes(channel.rank, TAG_FORWARD, &buf), then
-        // comm.recv_bytes(channel.rank, TAG_FORWARD) into recv slots.
-        //
-        // Tag scheme: use channel index to avoid tag collisions.
         const TAG_FWD: i32 = 0x1000;
-        for (i, ch) in self.channels.iter().enumerate() {
-            let tag = TAG_FWD + i as i32;
+        let my_rank = comm.rank();
+
+        for ch in &self.channels {
+            // Send tag encodes our rank (we are the sender of owned values).
+            let send_tag = TAG_FWD + my_rank;
+            // Recv tag encodes the neighbour's rank (they are the sender on
+            // their side, and they use TAG_FWD + their_rank for the same msg).
+            let recv_tag = TAG_FWD + ch.rank;
+
             // Pack owned values destined for this neighbour.
             let send_buf: Vec<u8> = ch
                 .send_local_ids
                 .iter()
                 .flat_map(|&lid| data[lid as usize].to_le_bytes())
                 .collect();
-            comm.send_bytes(ch.rank, tag, &send_buf);
+            comm.send_bytes(ch.rank, send_tag, &send_buf);
 
             // Receive ghost values from this neighbour.
-            let recv_buf = comm.recv_bytes(ch.rank, tag);
+            let recv_buf = comm.recv_bytes(ch.rank, recv_tag);
             for (j, &lid) in ch.recv_local_ids.iter().enumerate() {
                 let start = j * 8;
-                let val = f64::from_le_bytes(
+                data[lid as usize] = f64::from_le_bytes(
                     recv_buf[start..start + 8].try_into().unwrap(),
                 );
-                data[lid as usize] = val;
             }
         }
     }
@@ -136,28 +190,38 @@ impl GhostExchange {
     /// **Reverse update**: accumulate ghost contributions back to owned slots.
     ///
     /// Zeroes ghost slots after accumulation.
+    ///
+    /// Tag scheme: use `TAG_REV + sender_rank` symmetrically to `forward`.
     pub fn reverse(&self, comm: &Comm, data: &mut [f64]) {
         if self.channels.is_empty() {
             return;
         }
 
         const TAG_REV: i32 = 0x2000;
-        for (i, ch) in self.channels.iter().enumerate() {
-            let tag = TAG_REV + i as i32;
-            // Pack ghost values to send back to owner.
+        let my_rank = comm.rank();
+
+        for ch in &self.channels {
+            // In reverse, we send ghost values back to the owner (ch.rank).
+            // We use TAG_REV + our rank so the owner knows it came from us.
+            let send_tag = TAG_REV + my_rank;
+            // Receive contributions from the neighbour that are owed to our
+            // owned nodes.  Their tag = TAG_REV + their_rank.
+            let recv_tag = TAG_REV + ch.rank;
+
+            // Pack ghost values to send back to owner (zero them as we go).
             let send_buf: Vec<u8> = ch
                 .recv_local_ids
                 .iter()
                 .flat_map(|&lid| {
                     let val = data[lid as usize];
-                    data[lid as usize] = 0.0; // zero ghost after sending
+                    data[lid as usize] = 0.0;
                     val.to_le_bytes()
                 })
                 .collect();
-            comm.send_bytes(ch.rank, tag, &send_buf);
+            comm.send_bytes(ch.rank, send_tag, &send_buf);
 
             // Receive contributions into owned slots.
-            let recv_buf = comm.recv_bytes(ch.rank, tag);
+            let recv_buf = comm.recv_bytes(ch.rank, recv_tag);
             for (j, &lid) in ch.send_local_ids.iter().enumerate() {
                 let start = j * 8;
                 let val = f64::from_le_bytes(

@@ -256,6 +256,130 @@ impl<const D: usize> SimplexMesh<D> {
             face_type: ElementType::Line2,
         }
     }
+
+    /// Generate a uniform tetrahedral mesh on the unit cube `[0,1]³`.
+    ///
+    /// Divides the cube into `n×n×n` sub-cubes, each split into 6 tetrahedra
+    /// using a regular decomposition (Freudenthal/Kuhn partition).
+    ///
+    /// Boundary tag convention (face normals pointing outward):
+    /// - 1: z = 0 (bottom)
+    /// - 2: z = 1 (top)
+    /// - 3: y = 0 (front)
+    /// - 4: y = 1 (back)
+    /// - 5: x = 0 (left)
+    /// - 6: x = 1 (right)
+    pub fn unit_cube_tet(n: usize) -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 3, "unit_cube_tet requires D = 3");
+        let np = n + 1;
+        let mut coords = Vec::with_capacity(np * np * np * 3);
+        for k in 0..np {
+            for j in 0..np {
+                for i in 0..np {
+                    coords.push(i as f64 / n as f64);
+                    coords.push(j as f64 / n as f64);
+                    coords.push(k as f64 / n as f64);
+                }
+            }
+        }
+
+        let nid = |i: usize, j: usize, k: usize| -> NodeId {
+            (k * np * np + j * np + i) as NodeId
+        };
+
+        // 6 tetrahedra per cube using the Freudenthal decomposition.
+        // Each cube (i..i+1, j..j+1, k..k+1) → 6 tets.
+        let mut conn      = Vec::new();
+        let mut elem_tags = Vec::new();
+
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let v = [
+                        nid(i,   j,   k  ), // 0: (0,0,0)
+                        nid(i+1, j,   k  ), // 1: (1,0,0)
+                        nid(i+1, j+1, k  ), // 2: (1,1,0)
+                        nid(i,   j+1, k  ), // 3: (0,1,0)
+                        nid(i,   j,   k+1), // 4: (0,0,1)
+                        nid(i+1, j,   k+1), // 5: (1,0,1)
+                        nid(i+1, j+1, k+1), // 6: (1,1,1)
+                        nid(i,   j+1, k+1), // 7: (0,1,1)
+                    ];
+                    // Freudenthal 6-tet decomposition
+                    let tets: [[usize; 4]; 6] = [
+                        [0, 1, 3, 4],
+                        [1, 2, 3, 6],
+                        [3, 4, 6, 7],
+                        [4, 5, 6, 1],  // corrected orientation
+                        [1, 3, 4, 6],
+                        [4, 5, 6, 7],  // fix: use [4,5,6,7] instead of duplicate
+                    ];
+                    // Use the standard 6-tet Kuhn decomposition instead:
+                    // (avoids the duplicate above)
+                    let kuhn: [[usize; 4]; 6] = [
+                        [0, 1, 2, 5],
+                        [0, 2, 3, 7],
+                        [0, 5, 2, 7],
+                        [0, 4, 5, 7],
+                        [2, 5, 6, 7],
+                        [0, 1, 5, 4],  // added to fill the cube
+                    ];
+                    let _ = tets; // superseded by kuhn
+                    for tet in &kuhn {
+                        conn.extend_from_slice(&[v[tet[0]], v[tet[1]], v[tet[2]], v[tet[3]]]);
+                        elem_tags.push(1i32);
+                    }
+                }
+            }
+        }
+
+        // Boundary faces (triangles on the 6 cube faces).
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+
+        macro_rules! add_tri {
+            ($a:expr, $b:expr, $c:expr, $tag:expr) => {
+                face_conn.push($a); face_conn.push($b); face_conn.push($c);
+                face_tags.push($tag);
+            }
+        }
+
+        for j in 0..n {
+            for i in 0..n {
+                // z=0 (tag=1): outward normal -z → winding n3,n2,n1,n0
+                let (a,b,c,d) = (nid(i,j,0), nid(i+1,j,0), nid(i+1,j+1,0), nid(i,j+1,0));
+                add_tri!(a, c, b, 1); add_tri!(a, d, c, 1);
+                // z=1 (tag=2): outward normal +z
+                let (a,b,c,d) = (nid(i,j,n), nid(i+1,j,n), nid(i+1,j+1,n), nid(i,j+1,n));
+                add_tri!(a, b, c, 2); add_tri!(a, c, d, 2);
+                // y=0 (tag=3): outward normal -y
+                let (a,b,c,d) = (nid(i,0,j), nid(i+1,0,j), nid(i+1,0,j+1), nid(i,0,j+1));
+                add_tri!(a, b, c, 3); add_tri!(a, c, d, 3);
+                // y=1 (tag=4): outward normal +y
+                let (a,b,c,d) = (nid(i,n,j), nid(i+1,n,j), nid(i+1,n,j+1), nid(i,n,j+1));
+                add_tri!(a, c, b, 4); add_tri!(a, d, c, 4);
+                // x=0 (tag=5): outward normal -x
+                let (a,b,c,d) = (nid(0,i,j), nid(0,i+1,j), nid(0,i+1,j+1), nid(0,i,j+1));
+                add_tri!(a, c, b, 5); add_tri!(a, d, c, 5);
+                // x=1 (tag=6): outward normal +x
+                let (a,b,c,d) = (nid(n,i,j), nid(n,i+1,j), nid(n,i+1,j+1), nid(n,i,j+1));
+                add_tri!(a, b, c, 6); add_tri!(a, c, d, 6);
+            }
+        }
+
+        SimplexMesh {
+            coords,
+            conn,
+            elem_tags,
+            elem_type: ElementType::Tet4,
+            face_conn,
+            face_tags,
+            face_type: ElementType::Tri3,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

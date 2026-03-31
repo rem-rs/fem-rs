@@ -132,10 +132,49 @@ impl CommBackend for NativeMpiBackend {
         msg
     }
 
-    fn alltoallv_bytes(&self, _sends: &[(Rank, Vec<u8>)]) -> Vec<(Rank, Vec<u8>)> {
-        // Phase 10: implement sparse Isend/Irecv exchange.
-        // Pattern: send counts via Alltoall, then exchange payloads via Alltoallv
-        // or a series of Isend/Irecv pairs for sparse topologies.
-        todo!("NativeMpiBackend::alltoallv_bytes — full impl in Phase 10")
+    fn alltoallv_bytes(&self, sends: &[(Rank, Vec<u8>)]) -> Vec<(Rank, Vec<u8>)> {
+        use ::mpi::topology::SystemCommunicator;
+        use ::mpi::traits::{Communicator, CommunicatorCollectives};
+
+        let world = SystemCommunicator::world();
+        let n     = self.size as usize;
+
+        // Step 1: AllToAll on message counts so each rank knows how many bytes
+        // it will receive from each peer (0 = no message expected).
+        let mut send_counts = vec![0i64; n];
+        for (dest, data) in sends {
+            send_counts[*dest as usize] = data.len() as i64;
+        }
+        let mut recv_counts = vec![0i64; n];
+        world.all_to_all_into(&send_counts, &mut recv_counts);
+
+        // Step 2: sparse Isend / blocking-receive exchange.
+        //
+        // Tag scheme: sender encodes its own rank so that per-source tags are
+        // unique within the TAG_A2AV namespace.  We send-then-receive to avoid
+        // MPI deadlock (standard "first-half sends, second-half receives"
+        // ordering is not needed here because we use MPI_Send which is allowed
+        // to buffer, and receive counts are already known).
+        const TAG_A2AV: i32 = 0x3000;
+
+        // Post all sends first (MPI may buffer or rendezvous internally).
+        for (dest, data) in sends {
+            let tag = TAG_A2AV + self.rank;
+            world.process_at_rank(*dest).send_with_tag(data.as_slice(), tag);
+        }
+
+        // Collect incoming messages in sender-rank order.
+        let mut results: Vec<(Rank, Vec<u8>)> = Vec::new();
+        for src in 0..n {
+            if recv_counts[src] == 0 {
+                continue;
+            }
+            let tag = TAG_A2AV + src as i32;
+            let (msg, _status) = world
+                .process_at_rank(src as i32)
+                .receive_vec_with_tag::<u8>(tag);
+            results.push((src as Rank, msg));
+        }
+        results
     }
 }

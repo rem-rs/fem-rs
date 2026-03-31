@@ -424,9 +424,13 @@ dependencies = [
 name = "fem-amg"
 version = "0.1.0"
 dependencies = [
+ "fem-assembly",
  "fem-core",
+ "fem-element",
  "fem-linalg",
+ "fem-mesh",
  "fem-solver",
+ "fem-space",
  "linger",
  "log",
  "thiserror 2.0.18",
@@ -535,8 +539,12 @@ dependencies = [
 name = "fem-solver"
 version = "0.1.0"
 dependencies = [
+ "fem-assembly",
  "fem-core",
+ "fem-element",
  "fem-linalg",
+ "fem-mesh",
+ "fem-space",
  "linger",
  "log",
  "thiserror 2.0.18",
@@ -548,6 +556,7 @@ version = "0.1.0"
 dependencies = [
  "fem-core",
  "fem-element",
+ "fem-linalg",
  "fem-mesh",
  "nalgebra 0.33.3",
 ]
@@ -558,8 +567,12 @@ version = "0.1.0"
 dependencies = [
  "fem-assembly",
  "fem-core",
+ "fem-element",
  "fem-io",
+ "fem-linalg",
+ "fem-mesh",
  "fem-solver",
+ "fem-space",
  "serde",
  "wasm-bindgen",
 ]

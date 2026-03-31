@@ -6,9 +6,10 @@
 //!   process.
 //!
 //! * [`ThreadLauncher`] — spawns N OS threads each running the user function
-//!   with a fake in-process communicator backed by channels.  No MPI install
-//!   required; suitable for unit tests and CI environments.
+//!   with a fake in-process communicator backed by [`ChannelBackend`].  No MPI
+//!   install required; suitable for unit tests and CI environments.
 
+use std::sync::Arc;
 use crate::comm::Comm;
 use crate::launcher::{Launcher, WorkerConfig};
 
@@ -55,16 +56,19 @@ impl Launcher for MpiLauncher {
 /// In-process multi-threaded launcher for testing without an MPI install.
 ///
 /// Spawns `config.n_workers` OS threads.  Each thread receives a [`Comm`]
-/// backed by a channel-based fake communicator.
+/// backed by [`ChannelBackend`] — a shared `Mutex`/`Condvar` in-process
+/// communicator that correctly implements all collective and point-to-point
+/// operations.
 ///
-/// # Limitations
-/// * Collective ops (`allreduce`, `barrier`) are implemented via a
-///   `Mutex`+`Condvar` rendezvous; they are correct but not high-performance.
-/// * Not suitable for production — use [`MpiLauncher`] for real runs.
+/// # Usage
+/// ```no_run
+/// use fem_parallel::launcher::native::ThreadLauncher;
+/// use fem_parallel::WorkerConfig;
 ///
-/// # Status
-/// The channel backend is a **Phase 10 TODO**.  Currently `launch` runs `f`
-/// once with a single-rank serial comm (equivalent to `n_workers = 1`).
+/// ThreadLauncher::new(WorkerConfig::new(4)).launch(|comm| {
+///     println!("rank {} / {}", comm.rank(), comm.size());
+/// });
+/// ```
 pub struct ThreadLauncher {
     config: WorkerConfig,
 }
@@ -76,27 +80,41 @@ impl ThreadLauncher {
 
     /// Spawn `config.n_workers` threads, each executing `f(comm)`.
     ///
-    /// Blocks until all threads complete.
+    /// Blocks until all threads complete.  For `n_workers == 1` no new thread
+    /// is spawned (the closure runs on the calling thread with a
+    /// [`SerialBackend`](crate::backend::native::SerialBackend)).
     pub fn launch<F>(&self, f: F)
     where
         F: Fn(Comm) + Send + Sync + 'static,
     {
         let n = self.config.n_workers;
+
         if n <= 1 {
-            // Fast path: no spawning needed for a single worker.
             use crate::backend::native::SerialBackend;
             f(Comm::from_backend(Box::new(SerialBackend)));
             return;
         }
 
-        // Phase 10: build shared channel backend, spawn threads.
-        // For now fall back to serial (single thread).
-        log::warn!(
-            "ThreadLauncher: multi-worker channel backend not yet implemented; \
-             running single-threaded (n_workers forced to 1)"
-        );
-        use crate::backend::native::SerialBackend;
-        f(Comm::from_backend(Box::new(SerialBackend)));
+        // Build the shared channel state and wrap `f` in an Arc for sharing.
+        use crate::backend::channel::{ChannelBackend, ChannelShared};
+        let shared = ChannelShared::new(n);
+        let f_arc  = Arc::new(f);
+
+        let handles: Vec<_> = (0..n as i32)
+            .map(|rank| {
+                let shared_clone = Arc::clone(&shared);
+                let f_clone      = Arc::clone(&f_arc);
+                std::thread::spawn(move || {
+                    let backend = ChannelBackend::new(rank, shared_clone);
+                    let comm    = Comm::from_backend(Box::new(backend));
+                    f_clone(comm);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("ThreadLauncher: worker thread panicked");
+        }
     }
 }
 

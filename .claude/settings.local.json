@@ -20,7 +20,10 @@
       "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/crates/cpu/src/lib.rs)",
       "Bash(curl -s https://raw.githubusercontent.com/javagg/reed/main/design.md)",
       "Bash(git submodule:*)",
-      "Bash(grep -E \"test .* \\\\.\\\\.\\\\.|FAILED|error|ok$|running [0-9]+ test\")"
+      "Bash(grep -E \"test .* \\\\.\\\\.\\\\.|FAILED|error|ok$|running [0-9]+ test\")",
+      "Bash(CARGO_TARGET_DIR=/tmp/femcheck cargo check --manifest-path Cargo.toml)",
+      "Bash(taskkill /F /IM thread_launcher-682ad08f60002e7e.exe)",
+      "Bash(cmd /c \"taskkill /F /IM thread_launcher*.exe 2>nul\")"
     ]
   }
 }

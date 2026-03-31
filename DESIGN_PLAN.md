@@ -3,6 +3,31 @@
 
 ---
 
+## Implementation Status
+
+| Phase | Crate | Status | Date | Notes |
+|-------|-------|--------|------|-------|
+| 0 | workspace | ✅ Done | 2026-03-30 | 11-crate workspace, toolchain, cargo aliases |
+| 1 | core | ✅ Done | 2026-03-30 | Scalar, FemError, NodeId/DofId, nalgebra re-exports |
+| 2 | mesh | ✅ Done | 2026-03-30 | SimplexMesh\<D\>, MeshTopology, unit_square_tri generator |
+| 3 | element | ✅ Done | 2026-03-31 | ReferenceElement trait; SegP1/P2, TriP1/P2, TetP1, QuadQ1, HexQ1; 26 tests |
+| 4 | linalg | ✅ Done | 2026-03-31 | CsrMatrix, CooMatrix, Vector; + SparsityPattern, dense LU; 16 tests |
+| 5 | space | ✅ Done | 2026-03-31 | H1Space(P1/P2), L2Space(P0/P1), DofManager, apply_dirichlet, boundary_dofs; 18 tests |
+| 6 | assembly | ✅ Done | 2026-03-31 | Assembler, BilinearIntegrator/LinearIntegrator/BoundaryLinearIntegrator; DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator, NeumannIntegrator; P1/P2 Poisson verified (rate=2.0/3.0); 12 tests |
+| 7 | solver | ✅ Done | 2026-03-31 | Backed by linger: CG, PCG+Jacobi, PCG+ILU0, GMRES, BiCGSTAB; end-to-end Poisson solve verified (all 5 solvers) |
+| 8 | amg | ✅ Done | 2026-03-31 | Backed by linger: SA-AMG + RS-AMG, AmgSolver (reusable hierarchy); AMG-CG fewer iters than CG on 64×64 mesh (38 vs 84) |
+| 9 | io | ✅ Done | 2026-03-31 | GMSH v4.1 ASCII reader + VTK .vtu XML writer; unit_cube_tet generator added to fem-mesh; 12 tests |
+| 10 | parallel | ✅ Done | 2026-03-31 | ChannelBackend (in-process multi-threading), ThreadLauncher (n-worker), GhostExchange (alltoallv + forward/reverse), NativeMpiBackend::alltoallv_bytes; 20 tests (12 thread + 8 ghost) |
+| 11 | wasm | ✅ Done | 2026-03-31 | WasmSolver (unit-square P1 Poisson, wasm-bindgen optional), assemble_constant_rhs / assemble_nodal_rhs / solve / node_coords / connectivity; 7 native tests |
+
+### Vendor submodules
+| Submodule | URL | Role |
+|-----------|-----|------|
+| `vendor/reed` | javagg/reed | libCEED analogue; bridged via `crates/ceed` |
+| `vendor/linger` | javagg/linger | Krylov solvers + AMG; drives `fem-solver` and `fem-amg` |
+
+---
+
 ## Phase 0: Workspace Bootstrap
 
 **Goal**: Compilable workspace skeleton, all crates registered, CI green.
