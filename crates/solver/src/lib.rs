@@ -15,7 +15,7 @@
 use fem_linalg::CsrMatrix as FemCsr;
 use linger::{
     core::scalar::Scalar as LingerScalar,
-    iterative::{BiCgStab, ConjugateGradient, Gmres},
+    iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres},
     sparse::CsrMatrix as LingerCsr,
     DenseVec, Ilu0Precond, JacobiPrecond, KrylovSolver, SolverParams, VerboseLevel,
 };
@@ -209,6 +209,54 @@ pub fn solve_bicgstab<T: LingerScalar>(
     Ok(into_result(res))
 }
 
+/// Flexible GMRES — allows a variable preconditioner per iteration.
+///
+/// Unlike standard GMRES, the preconditioner may change at each Krylov step
+/// (e.g. inner Krylov solve, AMG V-cycle, or any nonlinear operator).
+/// With a fixed preconditioner, FGMRES produces identical iterates to
+/// right-preconditioned GMRES.
+///
+/// `restart` controls the Krylov subspace dimension before restart (default 30).
+pub fn solve_fgmres<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let solver = Fgmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, None, &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// Flexible GMRES with Jacobi preconditioner.
+pub fn solve_fgmres_jacobi<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::Linger(e.to_string()))?;
+    let solver = Fgmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn check_dims<T>(a: &FemCsr<T>, b: &[T], x: &[T]) -> Result<(), SolverError> {
@@ -233,13 +281,14 @@ pub fn into_result(r: linger::SolverResult) -> SolveResult {
 pub mod block;
 pub mod eigen;
 pub mod ode;
-pub use block::{BlockSystem, BlockDiagonalPrecond, SchurComplementSolver, MinresSolver};
+pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use eigen::{lobpcg, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver};
 pub use ode::{
     TimeStepper, ImplicitTimeStepper,
     ForwardEuler, Rk4, Rk45,
     ImplicitEuler, Sdirk2,
     Bdf2, Bdf2State,
+    Newmark, NewmarkState,
 };
 
 #[cfg(test)]
@@ -292,5 +341,26 @@ mod tests {
         let mut x = vec![0.0_f64; n];
         let res = solve_gmres(&a, &b, &mut x, 30, &SolverConfig::default()).unwrap();
         assert!(res.converged);
+    }
+
+    #[test]
+    fn fgmres_laplacian() {
+        let n = 20;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_fgmres(&a, &b, &mut x, 30, &SolverConfig::default()).unwrap();
+        assert!(res.converged);
+    }
+
+    #[test]
+    fn fgmres_jacobi_laplacian() {
+        let n = 50;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_fgmres_jacobi(&a, &b, &mut x, 30, &SolverConfig::default()).unwrap();
+        assert!(res.converged);
+        assert!(res.iterations < 60, "too many iterations: {}", res.iterations);
     }
 }

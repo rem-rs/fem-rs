@@ -182,6 +182,129 @@ impl<T: Scalar> CsrMatrix<T> {
         }
         d
     }
+
+    // -----------------------------------------------------------------------
+    // Transpose
+    // -----------------------------------------------------------------------
+
+    /// Return the transpose `Aᵀ` as a new CSR matrix.
+    ///
+    /// `Aᵀ[j,i] = A[i,j]` for every stored entry.  The result has
+    /// dimensions `ncols × nrows`.
+    pub fn transpose(&self) -> CsrMatrix<T> {
+        let m = self.nrows;
+        let n = self.ncols;
+        let nnz = self.nnz();
+
+        // Count entries per column (= per row of Aᵀ).
+        let mut col_count = vec![0usize; n];
+        for &c in &self.col_idx {
+            col_count[c as usize] += 1;
+        }
+
+        // Build row_ptr for Aᵀ (prefix sum of col_count).
+        let mut t_row_ptr = vec![0usize; n + 1];
+        for j in 0..n {
+            t_row_ptr[j + 1] = t_row_ptr[j] + col_count[j];
+        }
+
+        // Scatter entries.
+        let mut t_col_idx = vec![0u32; nnz];
+        let mut t_values  = vec![T::zero(); nnz];
+        let mut offset    = t_row_ptr.clone(); // write cursors
+        for i in 0..m {
+            let start = self.row_ptr[i];
+            let end   = self.row_ptr[i + 1];
+            for k in start..end {
+                let j = self.col_idx[k] as usize;
+                let pos = offset[j];
+                t_col_idx[pos] = i as u32;
+                t_values[pos]  = self.values[k];
+                offset[j] += 1;
+            }
+        }
+
+        CsrMatrix {
+            nrows:   n,
+            ncols:   m,
+            row_ptr: t_row_ptr,
+            col_idx: t_col_idx,
+            values:  t_values,
+        }
+    }
+}
+
+// ─── Free functions ──────────────────────────────────────────────────────────
+
+/// Sparse matrix addition: `C = A + B`.
+///
+/// Both matrices must have the same dimensions.  The result has the union
+/// of the sparsity patterns; entries present in both are summed.
+///
+/// # Panics
+/// Panics if `A` and `B` have different dimensions.
+pub fn spadd<T: Scalar>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> CsrMatrix<T> {
+    assert_eq!(a.nrows, b.nrows, "spadd: row count mismatch");
+    assert_eq!(a.ncols, b.ncols, "spadd: col count mismatch");
+
+    let m = a.nrows;
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    let mut col_idx = Vec::new();
+    let mut values  = Vec::new();
+
+    row_ptr.push(0);
+
+    for i in 0..m {
+        let a_start = a.row_ptr[i];
+        let a_end   = a.row_ptr[i + 1];
+        let b_start = b.row_ptr[i];
+        let b_end   = b.row_ptr[i + 1];
+
+        let mut ja = a_start;
+        let mut jb = b_start;
+
+        // Merge two sorted column-index streams.
+        while ja < a_end && jb < b_end {
+            let ca = a.col_idx[ja];
+            let cb = b.col_idx[jb];
+            if ca < cb {
+                col_idx.push(ca);
+                values.push(a.values[ja]);
+                ja += 1;
+            } else if ca > cb {
+                col_idx.push(cb);
+                values.push(b.values[jb]);
+                jb += 1;
+            } else {
+                // Same column — sum values.
+                col_idx.push(ca);
+                values.push(a.values[ja] + b.values[jb]);
+                ja += 1;
+                jb += 1;
+            }
+        }
+        // Flush remaining entries.
+        while ja < a_end {
+            col_idx.push(a.col_idx[ja]);
+            values.push(a.values[ja]);
+            ja += 1;
+        }
+        while jb < b_end {
+            col_idx.push(b.col_idx[jb]);
+            values.push(b.values[jb]);
+            jb += 1;
+        }
+
+        row_ptr.push(col_idx.len());
+    }
+
+    CsrMatrix {
+        nrows: m,
+        ncols: a.ncols,
+        row_ptr,
+        col_idx,
+        values,
+    }
 }
 
 #[cfg(test)]
@@ -227,5 +350,94 @@ mod tests {
         assert!((a.get(0, 1)).abs() < 1e-14, "off-diag should be zero");
         assert!((a.get(0, 0) - 1.0).abs() < 1e-14, "diagonal should be 1");
         assert!((rhs[0] - 5.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn transpose_symmetric() {
+        // Symmetric matrix → transpose should be identical.
+        let a = small_matrix();
+        let at = a.transpose();
+        assert_eq!(at.nrows, a.ncols);
+        assert_eq!(at.ncols, a.nrows);
+        let da = a.to_dense();
+        let dt = at.to_dense();
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((da[i * 3 + j] - dt[j * 3 + i]).abs() < 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn transpose_rectangular() {
+        // 2×3 matrix
+        let mut c = CooMatrix::<f64>::new(2, 3);
+        c.add(0, 0, 1.0); c.add(0, 2, 3.0);
+        c.add(1, 1, 4.0); c.add(1, 2, 5.0);
+        let a = c.into_csr();
+        let at = a.transpose();
+        assert_eq!(at.nrows, 3);
+        assert_eq!(at.ncols, 2);
+        assert!((at.get(0, 0) - 1.0).abs() < 1e-14);
+        assert!((at.get(2, 0) - 3.0).abs() < 1e-14);
+        assert!((at.get(1, 1) - 4.0).abs() < 1e-14);
+        assert!((at.get(2, 1) - 5.0).abs() < 1e-14);
+        assert!((at.get(0, 1)).abs() < 1e-14); // zero entry
+    }
+
+    #[test]
+    fn transpose_double_is_identity() {
+        let a = small_matrix();
+        let att = a.transpose().transpose();
+        let da = a.to_dense();
+        let dt = att.to_dense();
+        for k in 0..da.len() {
+            assert!((da[k] - dt[k]).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn spadd_basic() {
+        let a = small_matrix();
+        let b = small_matrix();
+        let c = super::spadd(&a, &b);
+        // C should be 2*A
+        let dc = c.to_dense();
+        let da = a.to_dense();
+        for k in 0..dc.len() {
+            assert!((dc[k] - 2.0 * da[k]).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn spadd_with_empty() {
+        let a = small_matrix();
+        let b = CsrMatrix::<f64>::new_empty(3, 3);
+        // Need row_ptr for b to have correct length
+        let b = CooMatrix::<f64>::new(3, 3).into_csr();
+        let c = super::spadd(&a, &b);
+        let dc = c.to_dense();
+        let da = a.to_dense();
+        for k in 0..dc.len() {
+            assert!((dc[k] - da[k]).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn spadd_different_patterns() {
+        // A has entries on diagonal, B has off-diagonal only
+        let mut ca = CooMatrix::<f64>::new(2, 2);
+        ca.add(0, 0, 1.0); ca.add(1, 1, 2.0);
+        let a = ca.into_csr();
+
+        let mut cb = CooMatrix::<f64>::new(2, 2);
+        cb.add(0, 1, 3.0); cb.add(1, 0, 4.0);
+        let b = cb.into_csr();
+
+        let c = super::spadd(&a, &b);
+        assert!((c.get(0, 0) - 1.0).abs() < 1e-14);
+        assert!((c.get(0, 1) - 3.0).abs() < 1e-14);
+        assert!((c.get(1, 0) - 4.0).abs() < 1e-14);
+        assert!((c.get(1, 1) - 2.0).abs() < 1e-14);
     }
 }

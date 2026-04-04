@@ -3,6 +3,8 @@
 //! Integrators receive per-quadrature-point data and accumulate contributions
 //! into an element matrix (bilinear) or element vector (linear).
 
+use fem_core::types::ElemId;
+
 // ─── Volume integrals ─────────────────────────────────────────────────────────
 
 /// Data available to integrators at each volume quadrature point.
@@ -21,6 +23,12 @@ pub struct QpData<'a> {
     pub grad_phys: &'a [f64],
     /// Physical coordinates of this quadrature point; length `dim`.
     pub x_phys:    &'a [f64],
+    /// Element index (for piecewise coefficients).
+    pub elem_id:   ElemId,
+    /// Element material / region tag (from mesh physical groups).
+    pub elem_tag:  i32,
+    /// Global DOF indices for this element (for [`GridFunctionCoeff`]).
+    pub elem_dofs: Option<&'a [u32]>,
 }
 
 /// Accumulate a bilinear-form contribution into the element stiffness matrix.
@@ -59,6 +67,10 @@ pub struct BdQpData<'a> {
     pub x_phys:  &'a [f64],
     /// Outward unit normal to the face; length `dim`.
     pub normal:  &'a [f64],
+    /// Element index that owns this boundary face.
+    pub elem_id: ElemId,
+    /// Element material / region tag.
+    pub elem_tag: i32,
 }
 
 /// Accumulate a boundary linear-form contribution into a face load vector.
@@ -66,4 +78,13 @@ pub struct BdQpData<'a> {
 /// `f_face` has length `n_dofs` (number of DOFs on the face).
 pub trait BoundaryLinearIntegrator: Send + Sync {
     fn add_to_face_vector(&self, qp: &BdQpData<'_>, f_face: &mut [f64]);
+}
+
+/// Accumulate a boundary bilinear-form contribution into a face stiffness matrix.
+///
+/// `k_face` is row-major with shape `[n_dofs × n_dofs]`.
+///
+/// Implementors must **add** their contribution (not overwrite).
+pub trait BoundaryBilinearIntegrator: Send + Sync {
+    fn add_to_face_matrix(&self, qp: &BdQpData<'_>, k_face: &mut [f64]);
 }

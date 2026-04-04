@@ -41,6 +41,105 @@ pub fn gauss_legendre_01(n: usize) -> (Vec<f64>, Vec<f64>) {
     (pts, wts)
 }
 
+// ─── Gauss-Lobatto on [-1,1] ──────────────────────────────────────────────────
+
+/// Gauss-Lobatto-Legendre points and weights on `[-1, 1]`, for `n` points (2 ≤ n ≤ 5).
+///
+/// Gauss-Lobatto rules **include the endpoints** ±1.  With `n` points they are
+/// exact for polynomials up to degree `2n − 3`.  They are the standard choice
+/// for spectral-element / nodal DG methods because the interpolation nodes
+/// coincide with the quadrature points.
+///
+/// | n | interior pts | exactness |
+/// |---|--------------|-----------|
+/// | 2 | 0            | degree 1  |
+/// | 3 | 1            | degree 3  |
+/// | 4 | 2            | degree 5  |
+/// | 5 | 3            | degree 7  |
+fn gauss_lobatto_1d(n: usize) -> (Vec<f64>, Vec<f64>) {
+    match n {
+        2 => (vec![-1.0, 1.0], vec![1.0, 1.0]),
+        3 => (vec![-1.0, 0.0, 1.0], vec![1.0 / 3.0, 4.0 / 3.0, 1.0 / 3.0]),
+        4 => {
+            let x = (1.0_f64 / 5.0).sqrt();
+            (
+                vec![-1.0, -x, x, 1.0],
+                vec![1.0 / 6.0, 5.0 / 6.0, 5.0 / 6.0, 1.0 / 6.0],
+            )
+        }
+        5 => {
+            let x = (3.0_f64 / 7.0).sqrt();
+            (
+                vec![-1.0, -x, 0.0, x, 1.0],
+                vec![1.0 / 10.0, 49.0 / 90.0, 32.0 / 45.0, 49.0 / 90.0, 1.0 / 10.0],
+            )
+        }
+        _ => panic!("gauss_lobatto_1d: only n=2..5 supported, got {n}"),
+    }
+}
+
+/// Gauss-Lobatto rule on `[0, 1]` with `n` points (transform from `[-1,1]`).
+///
+/// Weights sum to 1.  Points include the endpoints 0 and 1.
+pub fn gauss_lobatto_01(n: usize) -> (Vec<f64>, Vec<f64>) {
+    let (xs, ws) = gauss_lobatto_1d(n);
+    let pts = xs.iter().map(|x| 0.5 * (x + 1.0)).collect();
+    let wts = ws.iter().map(|w| 0.5 * w).collect();
+    (pts, wts)
+}
+
+/// Gauss-Lobatto quadrature rule on the reference segment `[0, 1]`.
+///
+/// Uses `n` Gauss-Lobatto points (includes endpoints);
+/// exact for polynomials up to degree `2n − 3`.
+pub fn seg_lobatto_rule(order: u8) -> QuadratureRule {
+    // n points integrates degree 2n-3 exactly; need 2n-3 >= order => n >= (order+3)/2
+    let n = ((order as usize + 4) / 2).max(2).min(5);
+    let (pts, wts) = gauss_lobatto_01(n);
+    QuadratureRule {
+        points: pts.into_iter().map(|x| vec![x]).collect(),
+        weights: wts,
+    }
+}
+
+/// Tensor-product Gauss-Lobatto rule on the reference quad `[-1,1]²`.
+///
+/// Uses `n×n` Gauss-Lobatto points; exact for polynomials of degree ≤ `2n−3`
+/// in each variable.  Points include all edges and corners of the reference quad.
+pub fn quad_lobatto_rule(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 4) / 2).max(2).min(5);
+    let (xs, ws) = gauss_lobatto_1d(n);
+    let mut pts = Vec::with_capacity(n * n);
+    let mut wts = Vec::with_capacity(n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            pts.push(vec![*xi, *xj]);
+            wts.push(wi * wj);
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
+/// Tensor-product Gauss-Lobatto rule on the reference hex `[-1,1]³`.
+///
+/// Uses `n×n×n` Gauss-Lobatto points; exact for polynomials of degree ≤ `2n−3`
+/// in each variable.
+pub fn hex_lobatto_rule(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 4) / 2).max(2).min(5);
+    let (xs, ws) = gauss_lobatto_1d(n);
+    let mut pts = Vec::with_capacity(n * n * n);
+    let mut wts = Vec::with_capacity(n * n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            for (xk, wk) in xs.iter().zip(ws.iter()) {
+                pts.push(vec![*xi, *xj, *xk]);
+                wts.push(wi * wj * wk);
+            }
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
 // ─── Segment [0,1] ────────────────────────────────────────────────────────────
 
 /// Quadrature rule on the reference segment `[0,1]`.
@@ -232,5 +331,79 @@ mod tests {
             .map(|(w, p)| w * p[0].powi(2))
             .sum();
         assert!((val - 1.0 / 3.0).abs() < 1e-14);
+    }
+
+    // ── Gauss-Lobatto tests ───────────────────────────────────────────────
+
+    #[test]
+    fn lobatto_1d_weights_sum_to_two() {
+        // Gauss-Lobatto on [-1,1]: weights sum to 2
+        for n in 2..=5 {
+            let (_, ws) = super::gauss_lobatto_1d(n);
+            let s: f64 = ws.iter().sum();
+            assert!((s - 2.0).abs() < 1e-14, "n={n}, sum={s}");
+        }
+    }
+
+    #[test]
+    fn lobatto_01_weights_sum_to_one() {
+        for n in 2..=5 {
+            let (_, ws) = gauss_lobatto_01(n);
+            let s: f64 = ws.iter().sum();
+            assert!((s - 1.0).abs() < 1e-14, "n={n}");
+        }
+    }
+
+    #[test]
+    fn lobatto_01_includes_endpoints() {
+        for n in 2..=5 {
+            let (pts, _) = gauss_lobatto_01(n);
+            assert!((pts[0]).abs() < 1e-14, "n={n}: first point should be 0");
+            assert!((pts[n - 1] - 1.0).abs() < 1e-14, "n={n}: last point should be 1");
+        }
+    }
+
+    #[test]
+    fn seg_lobatto_integrate_x_squared() {
+        // 3-point Lobatto on [0,1] is exact for degree 3 => x² should be exact.
+        let r = seg_lobatto_rule(2);
+        let val: f64 = r.weights.iter().zip(r.points.iter())
+            .map(|(w, p)| w * p[0].powi(2))
+            .sum();
+        assert!((val - 1.0 / 3.0).abs() < 1e-14, "got {val}");
+    }
+
+    #[test]
+    fn quad_lobatto_weights_sum_to_four() {
+        for order in [1u8, 3, 5] {
+            let r = quad_lobatto_rule(order);
+            assert!((weight_sum(&r) - 4.0).abs() < 1e-13, "order={order}");
+        }
+    }
+
+    #[test]
+    fn hex_lobatto_weights_sum_to_eight() {
+        for order in [1u8, 3] {
+            let r = hex_lobatto_rule(order);
+            assert!((weight_sum(&r) - 8.0).abs() < 1e-12, "order={order}");
+        }
+    }
+
+    #[test]
+    fn lobatto_exactness_degree() {
+        // n=3 Lobatto on [-1,1] should integrate x³ exactly (degree 2n-3=3)
+        let (xs, ws) = super::gauss_lobatto_1d(3);
+        let val: f64 = xs.iter().zip(ws.iter())
+            .map(|(x, w)| w * x.powi(3))
+            .sum();
+        // ∫_{-1}^{1} x³ dx = 0
+        assert!(val.abs() < 1e-14, "integral of x³ = {val}");
+
+        // n=4 Lobatto should integrate x⁵ exactly (degree 2*4-3=5)
+        let (xs, ws) = super::gauss_lobatto_1d(4);
+        let val: f64 = xs.iter().zip(ws.iter())
+            .map(|(x, w)| w * x.powi(5))
+            .sum();
+        assert!(val.abs() < 1e-14, "integral of x⁵ = {val}");
     }
 }

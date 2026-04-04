@@ -14,6 +14,7 @@
 //! Element DOFs must be **interleaved** (node-major):
 //! `[u_x(0), u_y(0), u_x(1), u_y(1), …]` as produced by [`VectorH1Space`].
 
+use crate::coefficient::{CoeffCtx, ScalarCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 
 /// Bilinear integrator for the isotropic linear elasticity operator.
@@ -25,40 +26,31 @@ use crate::integrator::{BilinearIntegrator, QpData};
 /// # Relation to Young's modulus and Poisson ratio
 /// - `E  = mu * (3*lambda + 2*mu) / (lambda + mu)`
 /// - `nu = lambda / (2*(lambda + mu))`
-pub struct ElasticityIntegrator {
+pub struct ElasticityIntegrator<C1: ScalarCoeff = f64, C2: ScalarCoeff = f64> {
     /// First Lamé parameter.
-    pub lambda: f64,
+    pub lambda: C1,
     /// Second Lamé parameter (shear modulus).
-    pub mu: f64,
+    pub mu: C2,
 }
 
-impl BilinearIntegrator for ElasticityIntegrator {
+impl<C1: ScalarCoeff, C2: ScalarCoeff> BilinearIntegrator for ElasticityIntegrator<C1, C2> {
     /// Accumulates the element elasticity matrix assuming interleaved DOFs.
-    ///
-    /// For a 2-D triangle with `n_nodes` nodes, the element DOF count is
-    /// `2 * n_nodes`.  DOF `2*k` = x-component of node `k`, DOF `2*k+1` = y.
     fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
         let dim   = qp.dim;
         let n     = qp.n_dofs;              // total DOFs (n_nodes * dim)
         let n_nodes = n / dim;
         let w = qp.weight;
-        let lam = self.lambda;
-        let mu  = self.mu;
-
-        // grad_phys layout: [n_nodes * dim], scalar basis functions.
-        // For vector element (k, c): global DOF = k * dim + c.
-        // Strain tensor:
-        //   ε_{ij}(φ^{k,c}) = ½ ( δ_{jc} ∂φ_k/∂x_i + δ_{ic} ∂φ_k/∂x_j )
-        //
-        // K[(k,a),(l,b)] += w * [lam * ∑_i ε_{ii}^{k,a} * ∑_j ε_{jj}^{l,b}
-        //                        + 2mu * ∑_{i,j} ε_{ij}^{k,a} * ε_{ij}^{l,b}]
+        let ctx = CoeffCtx::from_qp(
+            qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag,
+            Some(qp.phi), qp.elem_dofs,
+        );
+        let lam = self.lambda.eval(&ctx);
+        let mu  = self.mu.eval(&ctx);
 
         for k in 0..n_nodes {
             for a in 0..dim {
                 let row = k * dim + a;
-                // ∇φ_k (scalar) at physical coords
                 let grad_k: Vec<f64> = (0..dim).map(|d| qp.grad_phys[k * dim + d]).collect();
-                // div(φ^{k,a}) = ∂φ_k/∂x_a  (only component a is non-zero)
                 let div_ka = grad_k[a];
 
                 for l in 0..n_nodes {
@@ -67,18 +59,11 @@ impl BilinearIntegrator for ElasticityIntegrator {
                         let grad_l: Vec<f64> = (0..dim).map(|d| qp.grad_phys[l * dim + d]).collect();
                         let div_lb = grad_l[b];
 
-                        // Volumetric (λ div·div) term
                         let vol = lam * div_ka * div_lb;
 
-                        // Shear (2μ ε:ε) term
-                        // ε_{ij}^{k,a} = ½(δ_{ja}(∂φ_k/∂x_i) + δ_{ia}(∂φ_k/∂x_j))
-                        // ε_{ij}^{l,b} = ½(δ_{jb}(∂φ_l/∂x_i) + δ_{ib}(∂φ_l/∂x_j))
-                        // 2μ ε:ε = 2μ ∑_{i,j} ε_{ij}^{k,a} ε_{ij}^{l,b}
                         let mut shear = 0.0;
                         for i in 0..dim {
                             for j in 0..dim {
-                                // ε_{ij}^{k,a}: non-zero when j==a (gives ∂φ_k/∂x_i / 2)
-                                //               or  i==a (gives ∂φ_k/∂x_j / 2)
                                 let eps_ka_ij =
                                     0.5 * (if j == a { grad_k[i] } else { 0.0 }
                                          + if i == a { grad_k[j] } else { 0.0 });

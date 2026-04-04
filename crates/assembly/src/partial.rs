@@ -33,6 +33,7 @@
 //! op.apply(&x, &mut y);  // y += K x  (matrix-free)
 //! ```
 
+use crate::coefficient::{CoeffCtx, ScalarCoeff};
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, lagrange::{TetP1, TriP1, TriP2}};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -61,24 +62,24 @@ pub trait MatFreeOperator: Send + Sync {
 ///
 /// Each call to `apply` sweeps all elements, evaluates the mass at each
 /// quadrature point, and scatters into `y`.  No matrix is stored.
-pub struct PAMassOperator<S: FESpace> {
+pub struct PAMassOperator<S: FESpace, C: ScalarCoeff = f64> {
     space:      S,
-    rho:        f64,
+    rho:        C,
     quad_order: u8,
 }
 
-impl<S: FESpace> PAMassOperator<S> {
+impl<S: FESpace, C: ScalarCoeff> PAMassOperator<S, C> {
     /// Construct the operator.
     ///
     /// - `space`      — FE space (ownership taken).
-    /// - `rho`        — density coefficient (uniform).
+    /// - `rho`        — density coefficient (can be constant `f64` or spatially varying).
     /// - `quad_order` — quadrature order for integration.
-    pub fn new(space: S, rho: f64, quad_order: u8) -> Self {
+    pub fn new(space: S, rho: C, quad_order: u8) -> Self {
         PAMassOperator { space, rho, quad_order }
     }
 }
 
-impl<S: FESpace> MatFreeOperator for PAMassOperator<S> {
+impl<S: FESpace, C: ScalarCoeff> MatFreeOperator for PAMassOperator<S, C> {
     fn n_dofs(&self) -> usize { self.space.n_dofs() }
 
     fn apply(&self, x: &[f64], y: &mut [f64]) {
@@ -95,7 +96,9 @@ impl<S: FESpace> MatFreeOperator for PAMassOperator<S> {
             let quad = re.quadrature(self.quad_order);
             let gd: Vec<usize> = self.space.element_dofs(e).iter().map(|&d| d as usize).collect();
             let nodes = mesh.element_nodes(e);
-            let (_, det_j) = simplex_jac(mesh, nodes, dim);
+            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
+            let elem_tag = mesh.element_tag(e);
+            let x0 = mesh.node_coords(nodes[0]);
 
             phi.resize(n, 0.0);
 
@@ -107,10 +110,16 @@ impl<S: FESpace> MatFreeOperator for PAMassOperator<S> {
                 let w = quad.weights[qi] * det_j.abs();
                 re.eval_basis(xi, &mut phi);
 
+                let xp: Vec<f64> = (0..dim)
+                    .map(|i| x0[i] + (0..dim).map(|k| jac[(i,k)] * xi[k]).sum::<f64>())
+                    .collect();
+                let ctx = CoeffCtx::from_qp(&xp, dim, e, elem_tag, None, None);
+                let rho_qp = self.rho.eval(&ctx);
+
                 // y_elem[i] += w * ρ * φᵢ * Σⱼ φⱼ xⱼ
                 let ux: f64 = phi.iter().zip(x_elem.iter()).map(|(ph, xe)| ph * xe).sum();
                 for i in 0..n {
-                    y_elem[i] += w * self.rho * phi[i] * ux;
+                    y_elem[i] += w * rho_qp * phi[i] * ux;
                 }
             }
 
@@ -125,37 +134,21 @@ impl<S: FESpace> MatFreeOperator for PAMassOperator<S> {
 
 /// Matrix-free diffusion operator `K x` where `K[i,j] = ∫ κ ∇φᵢ·∇φⱼ dx`.
 ///
-/// Supports spatially varying `kappa` via a closure `κ(x_phys)`.
-pub struct PADiffusionOperator<S: FESpace, K>
-where
-    K: Fn(&[f64]) -> f64 + Send + Sync,
-{
+/// Supports spatially varying `kappa` via any [`ScalarCoeff`] implementation.
+pub struct PADiffusionOperator<S: FESpace, K: ScalarCoeff = f64> {
     space:      S,
     kappa:      K,
     quad_order: u8,
 }
 
-impl<S: FESpace, K> PADiffusionOperator<S, K>
-where
-    K: Fn(&[f64]) -> f64 + Send + Sync,
-{
-    /// Construct with spatially varying `kappa(x)`.
+impl<S: FESpace, K: ScalarCoeff> PADiffusionOperator<S, K> {
+    /// Construct with any coefficient (constant `f64`, `FnCoeff`, `PWConstCoeff`, etc.).
     pub fn new(space: S, kappa: K, quad_order: u8) -> Self {
         PADiffusionOperator { space, kappa, quad_order }
     }
 }
 
-impl<S: FESpace> PADiffusionOperator<S, fn(&[f64]) -> f64> {
-    /// Construct with constant `kappa`.
-    pub fn uniform(space: S, kappa_val: f64, quad_order: u8) -> PADiffusionOperator<S, impl Fn(&[f64]) -> f64 + Send + Sync> {
-        PADiffusionOperator { space, kappa: move |_| kappa_val, quad_order }
-    }
-}
-
-impl<S: FESpace, K> MatFreeOperator for PADiffusionOperator<S, K>
-where
-    K: Fn(&[f64]) -> f64 + Send + Sync,
-{
+impl<S: FESpace, K: ScalarCoeff> MatFreeOperator for PADiffusionOperator<S, K> {
     fn n_dofs(&self) -> usize { self.space.n_dofs() }
 
     fn apply(&self, x: &[f64], y: &mut [f64]) {
@@ -176,6 +169,7 @@ where
             let (jac, det_j) = simplex_jac(mesh, nodes, dim);
             let jit = jac.clone().try_inverse().unwrap().transpose();
             let x0  = mesh.node_coords(nodes[0]);
+            let elem_tag = mesh.element_tag(e);
 
             grad_ref.resize(n * dim, 0.0);
             grad_phys.resize(n * dim, 0.0);
@@ -192,7 +186,8 @@ where
                 let xp: Vec<f64> = (0..dim)
                     .map(|i| x0[i] + (0..dim).map(|k| jac[(i,k)] * xi[k]).sum::<f64>())
                     .collect();
-                let kappa_qp = (self.kappa)(&xp);
+                let ctx = CoeffCtx::from_qp(&xp, dim, e, elem_tag, None, None);
+                let kappa_qp = self.kappa.eval(&ctx);
 
                 // ∇u at this qp = Σⱼ xⱼ ∇φⱼ
                 let grad_u: Vec<f64> = (0..dim).map(|d| {
@@ -317,6 +312,7 @@ mod tests {
     use super::*;
     use fem_mesh::SimplexMesh;
     use fem_space::H1Space;
+    use crate::coefficient::FnCoeff;
     use crate::assembler::Assembler;
     use crate::standard::{DiffusionIntegrator, MassIntegrator};
 
@@ -354,7 +350,7 @@ mod tests {
         let k_assembled = Assembler::assemble_bilinear(
             &space, &[&DiffusionIntegrator { kappa: 2.0 }], 3);
 
-        let op = PADiffusionOperator::new(space, |_| 2.0, 3);
+        let op = PADiffusionOperator::new(space, FnCoeff(|_: &[f64]| 2.0), 3);
 
         let x = vec![1.0_f64; n];
         let mut y_mf  = vec![0.0_f64; n];
@@ -384,7 +380,7 @@ mod tests {
         let mesh  = SimplexMesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
-        let op = PADiffusionOperator::new(space, |_| 1.0, 3);
+        let op = PADiffusionOperator::new(space, FnCoeff(|_: &[f64]| 1.0), 3);
         let x = vec![1.0_f64; n]; // u = 1 (constant)
         let mut y = vec![0.0_f64; n];
         op.apply(&x, &mut y);

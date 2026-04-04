@@ -207,6 +207,7 @@ impl VectorAssembler {
                 space.element_dofs(e).iter().map(|&d| d as usize).collect();
             let signs = space.element_signs(e);
             let nodes = mesh.element_nodes(e);
+            let elem_tag = mesh.element_tag(e);
 
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let j_inv_t = jac.clone().try_inverse()
@@ -259,6 +260,8 @@ impl VectorAssembler {
                     curl: &phys_curl,
                     div: &phys_div,
                     x_phys: &xp,
+                    elem_id: e,
+                    elem_tag,
                 };
 
                 for integ in integrators {
@@ -303,6 +306,7 @@ impl VectorAssembler {
                 space.element_dofs(e).iter().map(|&d| d as usize).collect();
             let signs = space.element_signs(e);
             let nodes = mesh.element_nodes(e);
+            let elem_tag = mesh.element_tag(e);
 
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
@@ -348,6 +352,8 @@ impl VectorAssembler {
                     curl: &phys_curl,
                     div: &phys_div,
                     x_phys: &xp,
+                    elem_id: e,
+                    elem_tag,
                 };
 
                 for integ in integrators {

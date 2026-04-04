@@ -12,7 +12,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
-use crate::integrator::{BdQpData, BoundaryLinearIntegrator, BilinearIntegrator, LinearIntegrator, QpData};
+use crate::integrator::{BdQpData, BoundaryBilinearIntegrator, BoundaryLinearIntegrator, BilinearIntegrator, LinearIntegrator, QpData};
 
 // ─── Reference element factory ───────────────────────────────────────────────
 
@@ -133,10 +133,13 @@ impl Assembler {
             let n_ldofs   = ref_elem.n_dofs();
             let quad      = ref_elem.quadrature(quad_order);
 
+            let raw_dofs: Vec<DofId> =
+                space.element_dofs(e).to_vec();
             let global_dofs: Vec<usize> =
-                space.element_dofs(e).iter().map(|&d| d as usize).collect();
+                raw_dofs.iter().map(|&d| d as usize).collect();
             let n_elem_dofs = global_dofs.len(); // may be n_ldofs * dim for vector spaces
             let nodes = mesh.element_nodes(e);
+            let elem_tag = mesh.element_tag(e);
 
             // Geometric Jacobian (linear/affine map from first dim+1 nodes).
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
@@ -166,6 +169,9 @@ impl Assembler {
                     phi:       &phi,
                     grad_phys: &grad_phys,
                     x_phys:    &xp,
+                    elem_id:   e,
+                    elem_tag,
+                    elem_dofs: Some(&raw_dofs),
                 };
 
                 for integ in integrators {
@@ -204,9 +210,12 @@ impl Assembler {
             let n_ldofs   = ref_elem.n_dofs();
             let quad      = ref_elem.quadrature(quad_order);
 
+            let raw_dofs: Vec<DofId> =
+                space.element_dofs(e).to_vec();
             let global_dofs: Vec<usize> =
-                space.element_dofs(e).iter().map(|&d| d as usize).collect();
+                raw_dofs.iter().map(|&d| d as usize).collect();
             let nodes = mesh.element_nodes(e);
+            let elem_tag = mesh.element_tag(e);
 
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
@@ -233,6 +242,9 @@ impl Assembler {
                     phi:       &phi,
                     grad_phys: &grad_phys,
                     x_phys:    &xp,
+                    elem_id:   e,
+                    elem_tag,
+                    elem_dofs: Some(&raw_dofs),
                 };
 
                 for integ in integrators {
@@ -314,6 +326,8 @@ impl Assembler {
                     phi:     &phi,
                     x_phys:  &xp,
                     normal:  &normal,
+                    elem_id: 0, // boundary faces: owner element not tracked yet
+                    elem_tag: mesh.face_tag(f),
                 };
 
                 for integ in integrators {
@@ -326,6 +340,84 @@ impl Assembler {
         }
 
         rhs
+    }
+
+    // ── Boundary bilinear form ───────────────────────────────────────────────
+
+    /// Assemble a boundary bilinear form (e.g. boundary mass ∫_Γ α u v ds).
+    ///
+    /// # Arguments
+    /// * `n_dofs`      — total number of global DOFs.
+    /// * `mesh`        — mesh topology.
+    /// * `face_dofs`   — closure: `face_id → &[global_dof_id]` for each boundary face.
+    /// * `order`       — polynomial order of the face reference element.
+    /// * `integrators` — boundary bilinear integrators to accumulate.
+    /// * `tags`        — only process boundary faces whose tag is in this list.
+    /// * `quad_order`  — quadrature accuracy order.
+    pub fn assemble_boundary_bilinear(
+        n_dofs:      usize,
+        mesh:        &dyn MeshTopology,
+        face_dofs:   &dyn Fn(u32) -> Vec<DofId>,
+        order:       u8,
+        integrators: &[&dyn BoundaryBilinearIntegrator],
+        tags:        &[i32],
+        quad_order:  u8,
+    ) -> CsrMatrix<f64> {
+        let dim = mesh.dim() as usize;
+        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+
+        for f in mesh.face_iter() {
+            if !tags.contains(&mesh.face_tag(f)) { continue; }
+
+            let fdofs: Vec<DofId> = face_dofs(f);
+            let n_fdofs = fdofs.len();
+
+            let face_type = match mesh.face_nodes(f).len() {
+                2 => ElementType::Line2,
+                3 => ElementType::Tri3,
+                _ => panic!("unsupported boundary face node count"),
+            };
+            let ref_elem = ref_elem_face(face_type, order);
+            let quad = ref_elem.quadrature(quad_order);
+
+            let face_nodes = mesh.face_nodes(f);
+            let (face_j_mag, normal) = face_jacobian_and_normal(mesh, face_nodes, dim);
+
+            let mut phi    = vec![0.0_f64; n_fdofs];
+            let mut k_face = vec![0.0_f64; n_fdofs * n_fdofs];
+            let x0 = mesh.node_coords(face_nodes[0]);
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                let w = quad.weights[q] * face_j_mag;
+
+                ref_elem.eval_basis(xi, &mut phi);
+
+                let xp: Vec<f64> = (0..dim).map(|i| {
+                    let x1 = mesh.node_coords(face_nodes[1]);
+                    x0[i] + (x1[i] - x0[i]) * xi[0]
+                }).collect();
+
+                let qp = BdQpData {
+                    n_dofs:  n_fdofs,
+                    dim,
+                    weight:  w,
+                    phi:     &phi,
+                    x_phys:  &xp,
+                    normal:  &normal,
+                    elem_id: 0,
+                    elem_tag: mesh.face_tag(f),
+                };
+
+                for integ in integrators {
+                    integ.add_to_face_matrix(&qp, &mut k_face);
+                }
+            }
+
+            let global: Vec<usize> = fdofs.iter().map(|&d| d as usize).collect();
+            coo.add_element_matrix(&global, &k_face);
+        }
+
+        coo.into_csr()
     }
 }
 

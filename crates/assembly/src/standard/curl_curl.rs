@@ -9,21 +9,26 @@
 //! In 2-D, `∇×u` is a scalar, so the integrand is `μ · curl_u · curl_v`.
 //! In 3-D, `∇×u` is a 3-vector, so the integrand is `μ · (curl_u · curl_v)`.
 
+use crate::coefficient::{CoeffCtx, ScalarCoeff};
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorQpData};
 
 /// Bilinear integrator for the curl-curl operator `μ (∇×u)·(∇×v)`.
 ///
 /// Used for Maxwell equations, eddy-current problems, and electromagnetic
 /// cavity eigenvalue problems.
-pub struct CurlCurlIntegrator {
+pub struct CurlCurlIntegrator<C: ScalarCoeff = f64> {
     /// Permeability coefficient (μ).  For vacuum, μ = μ₀ ≈ 4π×10⁻⁷.
-    pub mu: f64,
+    pub mu: C,
 }
 
-impl VectorBilinearIntegrator for CurlCurlIntegrator {
+impl<C: ScalarCoeff> VectorBilinearIntegrator for CurlCurlIntegrator<C> {
     fn add_to_element_matrix(&self, qp: &VectorQpData<'_>, k_elem: &mut [f64]) {
         let n = qp.n_dofs;
-        let w_mu = qp.weight * self.mu;
+        let ctx = CoeffCtx::from_qp(
+            qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag,
+            None, None,
+        );
+        let w_mu = qp.weight * self.mu.eval(&ctx);
 
         if qp.dim == 2 {
             // Scalar curl: curl[i] is a single f64.
@@ -73,7 +78,6 @@ mod tests {
 
     #[test]
     fn curl_curl_positive_semi_definite() {
-        // The curl-curl matrix should have non-negative diagonal entries.
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let integ = CurlCurlIntegrator { mu: 1.0 };
@@ -102,7 +106,6 @@ mod tests {
 
     #[test]
     fn curl_curl_plus_mass_is_spd() {
-        // K + M should be strictly positive definite (all positive diagonals).
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let cc = CurlCurlIntegrator { mu: 1.0 };

@@ -5,6 +5,8 @@
 //! [`BilinearIntegrator`](crate::integrator::BilinearIntegrator), and
 //! [`LinearIntegrator`](crate::integrator::LinearIntegrator).
 
+use fem_core::types::ElemId;
+
 // ─── Quadrature-point data ──────────────────────────────────────────────────
 
 /// Data available to vector integrators at each volume quadrature point.
@@ -37,6 +39,10 @@ pub struct VectorQpData<'a> {
     pub div: &'a [f64],
     /// Physical coordinates of this quadrature point; length `dim`.
     pub x_phys: &'a [f64],
+    /// Element index (for piecewise coefficients).
+    pub elem_id: ElemId,
+    /// Element material / region tag.
+    pub elem_tag: i32,
 }
 
 // ─── Integrator traits ──────────────────────────────────────────────────────

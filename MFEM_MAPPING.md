@@ -110,7 +110,7 @@
 | Gauss-Legendre on triangle | `gauss_triangle(order)` | ✅ |
 | Gauss-Legendre on tet | `gauss_tet(order)` | ✅ |
 | Tensor product (quad, hex) | `tensor_gauss(order, dim)` | ✅ |
-| Gauss-Lobatto | — | 🔲 |
+| Gauss-Lobatto | `gauss_lobatto_1d`, `seg_lobatto_rule`, `quad_lobatto_rule`, `hex_lobatto_rule` | ✅ |
 
 ---
 
@@ -158,19 +158,21 @@
 ## 4. Coefficients
 
 MFEM provides a rich coefficient hierarchy for spatially- and
-time-varying material properties.  fem-rs uses closures `Fn(x,y)->T`.
+time-varying material properties.  fem-rs uses a trait-based system:
+`ScalarCoeff`, `VectorCoeff`, `MatrixCoeff` traits with `f64` as the
+default (zero-cost for constants).
 
 | MFEM class | fem-rs | Status |
 |---|---|---|
-| `ConstantCoefficient(c)` | `|_,_| c` closure | ✅ (examples) |
-| `FunctionCoefficient(f)` | `|x,y| f(x,y)` closure | ✅ (examples) |
-| `GridFunctionCoefficient` | Evaluate `GridFunction` at quadrature points | 🔲 Phase 6 |
-| `PWConstCoefficient` | Piecewise constant per element tag | 🔲 Phase 6 |
-| `PWCoefficient` | Piecewise per-domain | 🔲 Phase 6 |
-| `VectorCoefficient` | `Fn(&[f64]) -> [f64; D]` | 🔲 Phase 6 |
-| `MatrixCoefficient` | `Fn(&[f64]) -> [[f64;D];D]` | 🔲 Phase 6 (anisotropic diffusion) |
-| `InnerProductCoefficient` | Composed scalar product | 🔲 Phase 6 |
-| `TransformedCoefficient` | Compose with a transform | 🔲 Phase 6 |
+| `ConstantCoefficient(c)` | `f64` (implements `ScalarCoeff`) | ✅ |
+| `FunctionCoefficient(f)` | `FnCoeff(\|x\| f(x))` | ✅ |
+| `GridFunctionCoefficient` | `GridFunctionCoeff::new(dof_vec)` | ✅ |
+| `PWConstCoefficient` | `PWConstCoeff::new([(tag, val), ...])` | ✅ |
+| `PWCoefficient` | `PWCoeff::new(default).add_region(tag, coeff)` | ✅ |
+| `VectorCoefficient` | `VectorCoeff` trait + `FnVectorCoeff`, `ConstantVectorCoeff` | ✅ |
+| `MatrixCoefficient` | `MatrixCoeff` trait + `FnMatrixCoeff`, `ConstantMatrixCoeff`, `ScalarMatrixCoeff` | ✅ |
+| `InnerProductCoefficient` | `InnerProductCoeff { a, b }` | ✅ |
+| `TransformedCoefficient` | `TransformedCoeff { inner, transform }` | ✅ |
 
 ---
 
@@ -203,18 +205,18 @@ time-varying material properties.  fem-rs uses closures `Fn(x,y)->T`.
 |---|---|---|---|
 | `DiffusionIntegrator(κ)` | ∫ κ ∇u·∇v dx | `DiffusionIntegrator` | ✅ |
 | `MassIntegrator(ρ)` | ∫ ρ u v dx | `MassIntegrator` | ✅ |
-| `ConvectionIntegrator(b)` | ∫ (b·∇u) v dx | `ConvectionIntegrator` | 🔲 |
+| `ConvectionIntegrator(b)` | ∫ (b·∇u) v dx | `ConvectionIntegrator` | ✅ |
 | `ElasticityIntegrator(λ,μ)` | ∫ σ(u):ε(v) dx | `ElasticityIntegrator` | ✅ |
 | `CurlCurlIntegrator(μ)` | ∫ μ (∇×u)·(∇×v) dx | `CurlCurlIntegrator` | ✅ |
 | `VectorFEMassIntegrator` | ∫ u·v dx (H(curl)/H(div)) | `VectorMassIntegrator` | ✅ |
 | `DivDivIntegrator(κ)` | ∫ κ (∇·u)(∇·v) dx | `DivIntegrator` | ✅ |
-| `VectorDiffusionIntegrator` | ∫ κ ∇uᵢ·∇vᵢ (vector Laplacian) | — | 🔲 |
-| `BoundaryMassIntegrator` | ∫_Γ α u v ds | — | 🔲 |
+| `VectorDiffusionIntegrator` | ∫ κ ∇uᵢ·∇vᵢ (vector Laplacian) | `VectorDiffusionIntegrator` | ✅ |
+| `BoundaryMassIntegrator` | ∫_Γ α u v ds | `BoundaryMassIntegrator` | ✅ |
 | `VectorFEDivergenceIntegrator` | ∫ (∇·u) q dx (Darcy/Stokes) | `PressureDivIntegrator` | ✅ |
-| `GradDivIntegrator` | ∫ (∇·u)(∇·v) dx | — | 🔲 |
+| `GradDivIntegrator` | ∫ (∇·u)(∇·v) dx | `GradDivIntegrator` | ✅ |
 | `DGDiffusionIntegrator` | Interior penalty DG diffusion | `DgAssembler::assemble_sip` | ✅ |
-| `TransposeIntegrator` | Transposes a bilinear form | — | 🔲 |
-| `SumIntegrator` | Sum of integrators | — | 🔲 |
+| `TransposeIntegrator` | Transposes a bilinear form | `TransposeIntegrator` | ✅ |
+| `SumIntegrator` | Sum of integrators | `SumIntegrator` | ✅ |
 
 ### 5.4 Linear Integrators
 
@@ -222,9 +224,9 @@ time-varying material properties.  fem-rs uses closures `Fn(x,y)->T`.
 |---|---|---|---|
 | `DomainLFIntegrator(f)` | ∫ f v dx | `DomainSourceIntegrator` | ✅ |
 | `BoundaryLFIntegrator(g)` | ∫_Γ g v ds | `NeumannIntegrator` | ✅ |
-| `VectorDomainLFIntegrator` | ∫ **f**·**v** dx | — | 🔲 |
-| `BoundaryNormalLFIntegrator` | ∫_Γ g (n·v) ds | — | 🔲 |
-| `VectorFEBoundaryFluxLFIntegrator` | ∫_Γ f (v·n) ds (RT) | — | 🔲 |
+| `VectorDomainLFIntegrator` | ∫ **f**·**v** dx | `VectorDomainLFIntegrator` | ✅ |
+| `BoundaryNormalLFIntegrator` | ∫_Γ g (n·v) ds | `BoundaryNormalLFIntegrator` | ✅ |
+| `VectorFEBoundaryFluxLFIntegrator` | ∫_Γ f (v·n) ds (RT) | `VectorFEBoundaryFluxLFIntegrator` | ✅ |
 
 ### 5.5 Assembly Pipeline
 
@@ -399,16 +401,16 @@ time-varying material properties.  fem-rs uses closures `Fn(x,y)->T`.
 
 | MFEM class / method | fem-rs equivalent | Status |
 |---|---|---|
-| `GridFunction(fes)` | `Vec<f64>` (nodal DOF vector) | 🔨 no wrapper type |
+| `GridFunction(fes)` | `GridFunction<S>` (wraps DOF vec + space ref) | ✅ |
 | `GridFunction::ProjectCoefficient()` | `FESpace::interpolate(f)` | ✅ |
-| `GridFunction::ComputeL2Error()` | `l2_error()` utilities | ✅ |
-| `GridFunction::ComputeH1Error()` | — | 🔲 |
-| `GridFunction::GetGradient()` | gradient recovery (ZZ estimator) | ✅ |
-| `GridFunction::GetCurl()` | — | 🔲 |
-| `GridFunction::GetDivergence()` | — | 🔲 |
+| `GridFunction::ComputeL2Error()` | `GridFunction::compute_l2_error()` | ✅ |
+| `GridFunction::ComputeH1Error()` | `GridFunction::compute_h1_error()` / `compute_h1_full_error()` | ✅ |
+| `GridFunction::GetGradient()` | `postprocess::compute_element_gradients()` / `recover_gradient_nodal()` | ✅ |
+| `GridFunction::GetCurl()` | `postprocess::compute_element_curl()` | ✅ |
+| `GridFunction::GetDivergence()` | `postprocess::compute_element_divergence()` | ✅ |
 | `ZZErrorEstimator` (Zienkiewicz-Zhu) | `zz_error_estimator()` | ✅ |
 | `KellyErrorEstimator` | — | 🔲 |
-| `DiscreteLinearOperator` | Gradient, curl, div operators | 🔲 |
+| `DiscreteLinearOperator` | Gradient, curl, div operators | ✅ `DiscreteLinearOperator::gradient/curl_2d/divergence` |
 
 ---
 
@@ -431,7 +433,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | MFEM example | PDE | FEM space | fem-rs milestone |
 |---|---|---|---|
 | **ex3** (curl) | ∇×∇×**u** + **u** = **f** (Maxwell) | H(curl) Nédélec | ✅ `ex3_maxwell` O(h) |
-| **ex4** | −∇·(**u**) = f, **u** = −κ∇p (Darcy) | H(div) RT + L² | 🔨 RT space done, full ex4 pending |
+| **ex4** | −∇·(**u**) = f, **u** = −κ∇p (Darcy) | H(div) RT + L² | ✅ `ex4_darcy` H(div) RT0 grad-div MINRES |
 | **ex5** | Saddle-point Darcy/Stokes | H(div) × L² | ✅ `ex5_mixed_darcy` block PGMRES |
 | **ex22** | Time-harmonic Maxwell (complex coeff.) | H(curl) | Phase 7+ |
 | **em_magnetostatics_2d** (this project) | −∇·(ν∇Az) = Jz | H¹ P1 (2D A_z) | ✅ |
@@ -441,7 +443,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | MFEM example | PDE | Time method | fem-rs milestone |
 |---|---|---|---|
 | **ex9** (heat) | ∂u/∂t − ∇²u = 0 | BDF1 / Crank-Nicolson | ✅ `ex10_heat_equation` SDIRK-2 |
-| **ex10** (wave) | ∂²u/∂t² − ∇²u = 0 | Leapfrog / Newmark | 🔲 Phase 7+ |
+| **ex10** (wave) | ∂²u/∂t² − ∇²u = 0 | Leapfrog / Newmark | ✅ `ex10_wave_equation` Newmark-β |
 | **ex14** (DG heat) | ∂u/∂t − ∇²u + b·∇u = 0 | Explicit RK + DG | ✅ `ex9_dg_advection` SIP-DG O(h²) |
 | **ex16** (elastodynamics) | ρ ∂²**u**/∂t² = ∇·σ | Generalized-α | ✅ `ex16_nonlinear_heat` Newton |
 
@@ -451,7 +453,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 |---|---|---|
 | **ex4** (nonlinear) | −Δu + exp(u) = 0 | ✅ `NewtonSolver` |
 | **ex6** | AMR Poisson with ZZ estimator | ✅ `refine_marked()`, `ZZErrorEstimator` |
-| **ex15** | DG advection with AMR | 🔲 Phase 6+ |
+| **ex15** | DG advection with AMR | ✅ `ex15_dg_amr` P1 + ZZ + Dörfler + refinement |
 | **ex19** | Incompressible Navier-Stokes | 🔲 Phase 7+ |
 
 ### Tier 5 — HPC & Parallel (Phase 10)
@@ -475,7 +477,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | **Web target** | emscripten (experimental) | `fem-wasm` crate (wasm-bindgen) | First-class JS interop |
 | **AMG default** | Ruge-Stüben (classical) | Smoothed Aggregation | Better performance on vector problems |
 | **Quadrature** | Hard-coded tables | Generated tables in `quadrature.rs` | Reproducible, testable |
-| **Coefficient API** | Polymorphic `Coefficient*` objects | Closures `Fn(f64,f64)->f64` | Simpler ownership semantics |
+| **Coefficient API** | Polymorphic `Coefficient*` objects | `ScalarCoeff`/`VectorCoeff`/`MatrixCoeff` traits; `f64` default | Zero-cost constants, composable, trait-based |
 | **Memory layout** | Column-major `DenseMatrix` | Row-major element buffers; nalgebra for Jacobians | Cache-friendly assembly |
 | **Error handling** | Exceptions / abort | `FemResult<T>` everywhere | Propagate, never panic in library |
 | **BC application** | `FormLinearSystem()` (symmetric elim.) | `solve_dirichlet_reduced()` (reduced system) | Avoids scale artefacts with small ε |
@@ -513,3 +515,10 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 23 | `space` | HCurlSpace (Nédélec ND1), HDivSpace (RT0), element_signs | ✅ |
 | 24 | `assembly` | VectorAssembler, CurlCurlIntegrator, VectorMassIntegrator | ✅ |
 | 25 | `assembly`+`solver` | DG-SIP face normals fix, SchurComplement PGMRES, MINRES rewrite, TriND1 fix; all 8 MFEM-style examples verified | ✅ |
+| 26 | `assembly` | Coefficient system: ScalarCoeff/VectorCoeff/MatrixCoeff traits, PWConstCoeff, PWCoeff, GridFunctionCoeff, composition | ✅ |
+| 27 | `assembly` | Convection, VectorDiffusion, BoundaryMass, GradDiv, Transpose, Sum integrators; VectorDomainLF, BoundaryNormalLF | ✅ |
+| 28 | `assembly` | GridFunction wrapper, L²/H¹ error, element gradients/curl/div, nodal gradient recovery | ✅ |
+| 29 | `assembly` | DiscreteLinearOperator: gradient, curl_2d, divergence as sparse matrices; de Rham exact sequence | ✅ |
+| 30 | `solver` | Newmark-β time integrator; ex10_wave_equation example | ✅ |
+| 31 | `element` | Gauss-Lobatto quadrature (seg, quad, hex) | ✅ |
+| 32 | `examples` | ex4_darcy (H(div) RT0), ex15_dg_amr (P1 + ZZ + Dörfler) | ✅ |

@@ -153,6 +153,76 @@ impl BlockDiagonalPrecond {
     }
 }
 
+// ─── Block triangular preconditioner ────────────────────────────────────────
+
+/// Block upper-triangular preconditioner for `[A, B^T; B, C]`.
+///
+/// Applies the preconditioner:
+/// ```text
+///   z_p = S_approx⁻¹ r_p
+///   z_u = A_approx⁻¹ (r_u - B^T z_p)
+/// ```
+///
+/// where `A_approx⁻¹ ≈ diag(A)⁻¹` and `S_approx⁻¹ ≈ diag(S)⁻¹`.
+/// This is more effective than block-diagonal for saddle-point systems
+/// because it captures the upper-triangular coupling.
+pub struct BlockTriangularPrecond {
+    /// Inverse diagonal of A.
+    inv_diag_a: Vec<f64>,
+    /// Inverse diagonal of S (Schur complement approximation).
+    inv_diag_s: Vec<f64>,
+    /// B^T matrix for coupling.
+    bt: CsrMatrix<f64>,
+}
+
+impl BlockTriangularPrecond {
+    /// Build from a block system.
+    pub fn from_system(sys: &BlockSystem) -> Self {
+        let n_u = sys.n_u();
+        let n_p = sys.n_p();
+
+        let inv_diag_a: Vec<f64> = (0..n_u)
+            .map(|i| {
+                let d = sys.a.get(i, i);
+                if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
+            })
+            .collect();
+
+        let inv_diag_s: Vec<f64> = if let Some(c) = &sys.c {
+            (0..n_p).map(|i| {
+                let d = c.get(i, i);
+                if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
+            }).collect()
+        } else {
+            // No C block: use identity scaling for the pressure.
+            vec![1.0; n_p]
+        };
+
+        BlockTriangularPrecond {
+            inv_diag_a,
+            inv_diag_s,
+            bt: sys.bt.clone(),
+        }
+    }
+
+    /// Apply preconditioner: `z = P⁻¹ r`.
+    ///
+    /// 1. `z_p = diag(S)⁻¹ r_p`
+    /// 2. `z_u = diag(A)⁻¹ (r_u - B^T z_p)`
+    pub fn apply(&self, ru: &[f64], rp: &[f64], zu: &mut [f64], zp: &mut [f64]) {
+        // Step 1: Schur block
+        for i in 0..zp.len() { zp[i] = self.inv_diag_s[i] * rp[i]; }
+
+        // Step 2: coupling + velocity block
+        // tmp = B^T z_p
+        let mut bt_zp = vec![0.0_f64; zu.len()];
+        self.bt.spmv(zp, &mut bt_zp);
+        for i in 0..zu.len() {
+            zu[i] = self.inv_diag_a[i] * (ru[i] - bt_zp[i]);
+        }
+    }
+}
+
 // ─── Schur complement solver ─────────────────────────────────────────────────
 
 /// Solver for saddle-point systems using the flat GMRES approach.
