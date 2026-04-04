@@ -36,12 +36,16 @@ pub mod interior_faces;
 pub mod dg;
 pub mod nonlinear;
 pub mod partial;
+pub mod vector_integrator;
+pub mod vector_assembler;
 
 pub use assembler::{Assembler, face_dofs_p1, face_dofs_p2};
 pub use integrator::{
     BdQpData, BilinearIntegrator, BoundaryLinearIntegrator,
     LinearIntegrator, QpData,
 };
+pub use vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};
+pub use vector_assembler::VectorAssembler;
 pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator};
 pub use dg::{DgAssembler};
 pub use interior_faces::InteriorFaceList;

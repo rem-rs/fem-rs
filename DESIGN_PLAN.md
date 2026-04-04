@@ -30,13 +30,15 @@
 | 20 | solver | ✅ Done | 2026-04-03 | LOBPCG eigenvalue solver; GeneralizedEigenSolver trait; LobpcgSolver; handles standard + generalized A x=λBx; 1-D Laplacian eigenvalues verified; 4 tests |
 | 21 | solver + linalg | ✅ Done | 2026-04-03 | BlockSystem (2×2 saddle-point); BlockDiagonalPrecond; SchurComplementSolver (GMRES on flat system); MinresSolver; 4 tests |
 | 22 | assembly + ceed | ✅ Done | 2026-04-03 | Partial assembly (matrix-free): PAMassOperator, PADiffusionOperator (spatially varying κ), LumpedMassOperator; MatFreeOperator trait; results match assembled matrix × vector to 1e-11; 5 tests |
+| 23 | space | ✅ Done | 2026-04-04 | HCurlSpace (Nédélec ND1 edge DOFs, sign convention, 2D+3D) + HDivSpace (RT0 face DOFs, geometric sign computation, 2D+3D); FESpace::element_signs(); EdgeKey/FaceKey public; boundary_dofs_hcurl/hdiv; 13 tests |
+| 24 | assembly | ✅ Done | 2026-04-04 | VectorAssembler (Piola transforms + sign application); VectorQpData + VectorBilinearIntegrator/VectorLinearIntegrator traits; CurlCurlIntegrator (∫ μ curl u · curl v); VectorMassIntegrator (∫ α u·v); H(curl) assembly verified symmetric + PSD; 10 tests |
 
 ### Vendor submodules
 | Submodule | URL | Role |
 |-----------|-----|------|
 | `vendor/reed` | javagg/reed | libCEED analogue; bridged via `crates/ceed` |
 | `vendor/linger` | javagg/linger | Krylov solvers + AMG; drives `fem-solver` and `fem-amg` |
-| `vendor/rmetis` | javagg/rmetis | Pure-Rust METIS-compatible graph partitioner; will drive `fem-parallel` Phase 18 |
+| `vendor/rmetis` | javagg/rmetis | Pure-Rust BFS graph partitioner; drives `fem-parallel` Phase 18 |
 
 ---
 

@@ -10,11 +10,25 @@ use fem_mesh::topology::MeshTopology;
 
 /// A canonical (sorted) edge key for deduplication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct EdgeKey(NodeId, NodeId);
+pub struct EdgeKey(pub NodeId, pub NodeId);
 
 impl EdgeKey {
-    fn new(a: NodeId, b: NodeId) -> Self {
+    pub fn new(a: NodeId, b: NodeId) -> Self {
         if a < b { EdgeKey(a, b) } else { EdgeKey(b, a) }
+    }
+}
+
+// ─── FaceKey ─────────────────────────────────────────────────────────────────
+
+/// A canonical (sorted) triangular face key for deduplication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FaceKey(pub NodeId, pub NodeId, pub NodeId);
+
+impl FaceKey {
+    pub fn new(a: NodeId, b: NodeId, c: NodeId) -> Self {
+        let mut v = [a, b, c];
+        v.sort_unstable();
+        FaceKey(v[0], v[1], v[2])
     }
 }
 

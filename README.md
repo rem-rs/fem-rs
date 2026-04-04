@@ -12,17 +12,18 @@ extensibility, MPI/AMG parallelism, and WASM compilation.
 fem-rs/
 ├── crates/
 │   ├── core/       fem-core     — scalar types, index aliases, FemError
-│   ├── mesh/       fem-mesh     — mesh topology, SimplexMesh, boundary tags
-│   ├── element/    fem-element  — reference elements, quadrature rules  [stub]
-│   ├── space/      fem-space    — H1/L2 DOF management                  [stub]
-│   ├── assembly/   fem-assembly — bilinear/linear form assembly          [stub]
-│   ├── linalg/     fem-linalg   — CsrMatrix, CooMatrix, Vector
-│   ├── solver/     fem-solver   — CG, GMRES, preconditioners            [stub]
-│   ├── amg/        fem-amg      — algebraic multigrid                   [stub]
-│   ├── parallel/   fem-parallel — MPI parallel mesh/assembly            [stub]
-│   ├── io/         fem-io       — GMSH .msh v4 reader, VTK .vtu writer
-│   └── wasm/       fem-wasm     — wasm-bindgen JS bindings              [stub]
-└── examples/       fem-examples — runnable EM simulation examples
+│   ├── mesh/       fem-mesh     — SimplexMesh<D>, AMR, CurvedMesh, generators
+│   ├── element/    fem-element  — Lagrange P1–P2, Nedelec, Raviart-Thomas, quadrature
+│   ├── space/      fem-space    — H1/L2/HCurl/HDiv/VectorH1 spaces, DOF management
+│   ├── assembly/   fem-assembly — bilinear/linear/mixed/DG/nonlinear assembly
+│   ├── linalg/     fem-linalg   — CsrMatrix, CooMatrix, Vector, BlockMatrix
+│   ├── solver/     fem-solver   — CG, GMRES, BiCGSTAB, LOBPCG, ODE integrators
+│   ├── amg/        fem-amg      — SA-AMG + RS-AMG (via linger)
+│   ├── parallel/   fem-parallel — thread/MPI backends, METIS partitioning, ghost exchange
+│   ├── io/         fem-io       — GMSH .msh v4 reader, VTK .vtu XML writer
+│   ├── wasm/       fem-wasm     — wasm-bindgen Poisson solver
+│   └── ceed/       fem-ceed     — libCEED-style partial assembly operators
+└── examples/       fem-examples — 11 runnable FEM examples
 ```
 
 Dependency order (each crate depends only on crates listed above it):
@@ -276,7 +277,7 @@ See [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) for:
 - WASM target rules and JS API
 
 See [DESIGN_PLAN.md](DESIGN_PLAN.md) for:
-- Phase-by-phase implementation roadmap (Phases 0–11)
+- Phase-by-phase implementation roadmap (Phases 0–22, all complete)
 - Module-level file trees for each crate
 - Per-phase acceptance criteria and convergence tests
 
@@ -310,16 +311,19 @@ check-all  = "check --workspace --all-features"
 
 ## Implementation Status
 
+All 22 phases are complete. 206 tests passing across the workspace.
+
 | Crate | Status | Notes |
 |-------|--------|-------|
 | `fem-core` | ✅ Complete | Scalar, FemError, index types, coord aliases |
-| `fem-mesh` | ✅ Complete | SimplexMesh, MeshTopology, GMSH type mapping |
-| `fem-linalg` | ✅ Complete | CsrMatrix, CooMatrix, Vector |
-| `fem-io` | ✅ Complete | GMSH v4.1 ASCII reader |
-| `fem-element` | 🔲 Stub | Phase 3: Lagrange P1–P3, Nedelec, RT |
-| `fem-space` | 🔲 Stub | Phase 5: H1Space, L2Space, DOF manager |
-| `fem-assembly` | 🔲 Stub | Phase 6: Assembler, standard integrators |
-| `fem-solver` | 🔲 Stub | Phase 7: CG, GMRES, ILU(0) |
-| `fem-amg` | 🔲 Stub | Phase 8: Smoothed Aggregation AMG |
-| `fem-parallel` | 🔲 Stub | Phase 10: MPI distributed mesh |
-| `fem-wasm` | 🔲 Stub | Phase 11: wasm-bindgen JS API |
+| `fem-mesh` | ✅ Complete | SimplexMesh, AMR (red refinement, ZZ estimator, Dörfler marking), CurvedMesh (P2 isoparametric) |
+| `fem-element` | ✅ Complete | Lagrange P1/P2 (Seg, Tri, Tet, Quad, Hex); Nedelec ND1 (Tri, Tet); Raviart-Thomas RT0 (Tri, Tet); quadrature rules |
+| `fem-linalg` | ✅ Complete | CsrMatrix, CooMatrix, Vector, SparsityPattern, dense LU, BlockMatrix/BlockVector |
+| `fem-space` | ✅ Complete | H1Space (P1/P2), L2Space (P0/P1), VectorH1Space, HCurlSpace (Nédélec ND1), HDivSpace (Raviart-Thomas RT0), DofManager, boundary DOFs, Dirichlet BC |
+| `fem-assembly` | ✅ Complete | Assembler, Diffusion/Mass/Source/Neumann/Elasticity integrators; MixedAssembler; DG SIP; NonlinearForm + Newton; partial assembly (PA mass/diffusion, matrix-free); VectorAssembler (Piola transforms); CurlCurlIntegrator; VectorMassIntegrator |
+| `fem-solver` | ✅ Complete | CG, PCG+Jacobi/ILU0, GMRES, BiCGSTAB (via linger); ODE: ForwardEuler, RK4, RK45, ImplicitEuler, SDIRK-2, BDF-2; LOBPCG eigenvalue solver; MINRES; SchurComplement block solver |
+| `fem-amg` | ✅ Complete | SA-AMG + RS-AMG (via linger), reusable AmgSolver hierarchy |
+| `fem-io` | ✅ Complete | GMSH v4.1 ASCII reader, VTK .vtu XML writer, unit_cube_tet generator |
+| `fem-parallel` | ✅ Complete | ChannelBackend (multi-thread), GhostExchange, METIS k-way partitioning (pure-Rust) |
+| `fem-wasm` | ✅ Complete | WasmSolver (unit-square P1 Poisson), wasm-bindgen JS API |
+| `fem-ceed` | ✅ Complete | PA operators (mass, diffusion, lumped mass), MatFreeOperator trait |

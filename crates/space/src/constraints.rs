@@ -6,7 +6,9 @@
 use fem_core::types::DofId;
 use fem_linalg::CsrMatrix;
 
-use crate::dof_manager::DofManager;
+use crate::dof_manager::{DofManager, EdgeKey, FaceKey};
+use crate::hcurl::HCurlSpace;
+use crate::hdiv::HDivSpace;
 
 /// Apply Dirichlet boundary conditions to the assembled system `(K, f)`.
 ///
@@ -85,9 +87,91 @@ pub fn boundary_dofs(
     out
 }
 
+/// Identify H(curl) DOFs on boundary faces with the given tag(s).
+///
+/// Collects all edges that lie on tagged boundary faces, then looks up
+/// the corresponding global DOF in the space.
+pub fn boundary_dofs_hcurl<M: fem_mesh::topology::MeshTopology>(
+    mesh: &M,
+    space: &HCurlSpace<M>,
+    tags: &[i32],
+) -> Vec<DofId> {
+    use std::collections::HashSet;
+
+    // Collect boundary edges from tagged boundary faces.
+    let dim = mesh.dim() as usize;
+    let mut boundary_edges: HashSet<EdgeKey> = HashSet::new();
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        if tags.contains(&mesh.face_tag(f)) {
+            let nodes = mesh.face_nodes(f);
+            if dim == 2 {
+                // Boundary face in 2-D is an edge.
+                if nodes.len() >= 2 {
+                    boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
+                }
+            } else {
+                // Boundary face in 3-D is a triangle: collect its 3 edges.
+                if nodes.len() >= 3 {
+                    boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
+                    boundary_edges.insert(EdgeKey::new(nodes[1], nodes[2]));
+                    boundary_edges.insert(EdgeKey::new(nodes[0], nodes[2]));
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<DofId> = boundary_edges
+        .iter()
+        .filter_map(|ek| space.edge_dof(*ek))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Identify H(div) DOFs on boundary faces with the given tag(s).
+///
+/// In 2-D, boundary faces are edges; in 3-D, they are triangular faces.
+pub fn boundary_dofs_hdiv<M: fem_mesh::topology::MeshTopology>(
+    mesh: &M,
+    space: &HDivSpace<M>,
+    tags: &[i32],
+) -> Vec<DofId> {
+    let dim = mesh.dim() as usize;
+    let mut out: Vec<DofId> = Vec::new();
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        if tags.contains(&mesh.face_tag(f)) {
+            let nodes = mesh.face_nodes(f);
+            let dof = if dim == 2 {
+                if nodes.len() >= 2 {
+                    space.edge_face_dof(EdgeKey::new(nodes[0], nodes[1]))
+                } else {
+                    None
+                }
+            } else {
+                if nodes.len() >= 3 {
+                    space.tri_face_dof(FaceKey::new(nodes[0], nodes[1], nodes[2]))
+                } else {
+                    None
+                }
+            };
+            if let Some(d) = dof {
+                out.push(d);
+            }
+        }
+    }
+
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fe_space::FESpace;
     use fem_linalg::CooMatrix;
     use fem_mesh::SimplexMesh;
 
@@ -140,5 +224,37 @@ mod tests {
         // At least some DOFs should be edge-midpoint DOFs (index >= n_nodes)
         let edge_dofs: Vec<_> = dofs.iter().filter(|&&d| d as usize >= n_nodes).collect();
         assert!(!edge_dofs.is_empty(), "no edge-midpoint boundary DOFs found for P2");
+    }
+
+    #[test]
+    fn boundary_dofs_hcurl_unit_square() {
+        use crate::hcurl::HCurlSpace;
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = HCurlSpace::new(mesh, 1);
+        let dofs = boundary_dofs_hcurl(space.mesh(), &space, &[1, 2, 3, 4]);
+        assert!(!dofs.is_empty(), "should find boundary edge DOFs");
+        // 4×4 grid boundary has 4×4 = 16 boundary edges.
+        assert_eq!(dofs.len(), 16, "4×4 unit square has 16 boundary edges");
+        for &d in &dofs {
+            assert!((d as usize) < space.n_dofs(), "DOF {d} out of range");
+        }
+        // Check sorted
+        for i in 1..dofs.len() {
+            assert!(dofs[i] > dofs[i - 1]);
+        }
+    }
+
+    #[test]
+    fn boundary_dofs_hdiv_unit_square() {
+        use crate::hdiv::HDivSpace;
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = HDivSpace::new(mesh, 0);
+        let dofs = boundary_dofs_hdiv(space.mesh(), &space, &[1, 2, 3, 4]);
+        assert!(!dofs.is_empty(), "should find boundary face DOFs");
+        // Same count as HCurl in 2-D: 16 boundary edges.
+        assert_eq!(dofs.len(), 16, "4×4 unit square has 16 boundary edges");
+        for &d in &dofs {
+            assert!((d as usize) < space.n_dofs(), "DOF {d} out of range");
+        }
     }
 }

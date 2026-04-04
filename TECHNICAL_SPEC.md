@@ -23,17 +23,22 @@ fem-rs/
 ├── Cargo.toml                  # workspace root
 ├── crates/
 │   ├── core/               # fundamental traits, numeric types, error
-│   ├── mesh/               # mesh topology + geometry
-│   ├── element/            # FE basis functions, quadrature rules
-│   ├── space/              # DOF management, FE spaces (H1, Hdiv, Hcurl, L2)
-│   ├── assembly/           # bilinear/linear form assembly
-│   ├── linalg/             # CSR matrix, dense vector, BLAS traits
-│   ├── solver/             # iterative solvers (CG, GMRES) + preconditioners
-│   ├── amg/                # algebraic multigrid (standalone, no hypre dep)
-│   ├── parallel/           # MPI communicators, distributed mesh, parallel assembly
-│   ├── io/                 # GMSH .msh, VTK .vtu, HDF5 reader/writer
-│   └── wasm/               # wasm32 bindings (wasm-bindgen), no MPI
-├── examples/
+│   ├── mesh/               # mesh topology, geometry, AMR, CurvedMesh
+│   ├── element/            # FE basis functions (Lagrange, Nedelec, RT), quadrature
+│   ├── space/              # DOF management, FE spaces (H1, L2, HCurl, HDiv, VectorH1)
+│   ├── assembly/           # bilinear/linear/mixed/DG/nonlinear form assembly
+│   ├── linalg/             # CSR/COO matrix, dense vector, BlockMatrix/BlockVector
+│   ├── solver/             # iterative solvers (CG, GMRES, BiCGSTAB), Newton, ODE, LOBPCG
+│   ├── amg/                # algebraic multigrid (SA-AMG + RS-AMG via linger)
+│   ├── parallel/           # thread/MPI backends, METIS partitioning, ghost exchange
+│   ├── io/                 # GMSH .msh v4 reader, VTK .vtu XML writer
+│   ├── wasm/               # wasm32 bindings (wasm-bindgen), Poisson solver
+│   └── ceed/               # libCEED-style partial assembly operators (via reed)
+├── examples/               # 11 runnable FEM examples
+├── vendor/
+│   ├── linger/             # Krylov solvers + AMG engine
+│   ├── reed/               # libCEED analogue (operator decomposition)
+│   └── rmetis/             # pure-Rust METIS-compatible graph partitioner
 ├── benches/
 └── tests/                      # integration tests
 ```
@@ -42,8 +47,9 @@ fem-rs/
 ```
 fem-wasm      → fem-assembly, fem-io, fem-solver
 fem-parallel  → fem-assembly, fem-linalg, fem-amg
-fem-amg       → fem-linalg
-fem-solver    → fem-linalg
+fem-ceed      → fem-assembly, fem-element, fem-linalg (bridges to vendor/reed)
+fem-amg       → fem-linalg (bridges to vendor/linger)
+fem-solver    → fem-linalg (bridges to vendor/linger)
 fem-assembly  → fem-element, fem-space, fem-linalg
 fem-space     → fem-element, fem-mesh, fem-core
 fem-element   → fem-core
@@ -180,9 +186,12 @@ pub trait FESpace: Send + Sync {
     fn element_dofs(&self, elem: ElemId) -> &[DofId];
     fn interpolate(&self, f: &dyn Fn(&[f64]) -> f64) -> Vector<f64>;
     fn space_type(&self) -> SpaceType;
+    fn order(&self) -> u8;
+    /// Orientation signs (±1.0) for H(curl)/H(div) DOFs; None for H1/L2.
+    fn element_signs(&self, _elem: u32) -> Option<&[f64]> { None }
 }
 
-pub enum SpaceType { H1, Hdiv, Hcurl, L2, Vector(u8) }
+pub enum SpaceType { H1, Hdiv, Hcurl, L2, VectorH1(u8) }
 ```
 
 ### 5.4 Integrators (Forms)
