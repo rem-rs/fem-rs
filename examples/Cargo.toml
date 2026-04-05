@@ -101,6 +101,10 @@ path = "pex3_maxwell.rs"
 name = "pex5_darcy"
 path = "pex5_darcy.rs"
 
+[[example]]
+name = "ex_stokes"
+path = "ex_stokes.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
