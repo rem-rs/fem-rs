@@ -16,7 +16,7 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, lagrange::{TetP1, TriP1, TriP2}};
+use fem_element::{ReferenceElement, lagrange::{TetP1, TriP1, TriP2, QuadQ1, HexQ1}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -223,6 +223,8 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
+        (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
+        (ElementType::Hex8, 1)                           => Box::new(HexQ1),
         _ => panic!("mixed_assembler ref_elem_vol: unsupported ({elem_type:?}, order={order})"),
     }
 }

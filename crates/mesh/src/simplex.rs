@@ -218,6 +218,56 @@ impl<const D: usize> SimplexMesh<D> {
         )
     }
 
+    /// Generate a uniform quadrilateral mesh on the unit square `[0,1]²`.
+    ///
+    /// The square is divided into `n × n` quadrilateral elements.
+    /// Boundary tag convention matches `unit_square_tri`:
+    /// - 1: bottom, 2: right, 3: top, 4: left
+    pub fn unit_square_quad(n: usize) -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 2, "unit_square_quad requires D = 2");
+        let np = n + 1;
+        let mut coords = Vec::with_capacity(np * np * 2);
+        for j in 0..np {
+            for i in 0..np {
+                coords.push(i as f64 / n as f64);
+                coords.push(j as f64 / n as f64);
+            }
+        }
+
+        let nid = |i: usize, j: usize| -> NodeId { (j * np + i) as NodeId };
+
+        let mut conn      = Vec::with_capacity(n * n * 4);
+        let mut elem_tags = Vec::with_capacity(n * n);
+        for j in 0..n {
+            for i in 0..n {
+                // Counter-clockwise: bottom-left, bottom-right, top-right, top-left
+                conn.extend_from_slice(&[nid(i,j), nid(i+1,j), nid(i+1,j+1), nid(i,j+1)]);
+                elem_tags.push(1);
+            }
+        }
+
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+        let add_edge = |fc: &mut Vec<NodeId>, ft: &mut Vec<i32>,
+                        a: NodeId, b: NodeId, tag: i32| {
+            fc.push(a); fc.push(b); ft.push(tag);
+        };
+        for i in 0..n {
+            add_edge(&mut face_conn, &mut face_tags, nid(i,0), nid(i+1,0), 1);
+            add_edge(&mut face_conn, &mut face_tags, nid(n,i), nid(n,i+1), 2);
+            add_edge(&mut face_conn, &mut face_tags, nid(i+1,n), nid(i,n), 3);
+            add_edge(&mut face_conn, &mut face_tags, nid(0,i+1), nid(0,i), 4);
+        }
+
+        SimplexMesh::uniform(
+            coords, conn, elem_tags, ElementType::Quad4,
+            face_conn, face_tags, ElementType::Line2,
+        )
+    }
+
     /// Generate a coaxial cable cross-section mesh (annular region).
     ///
     /// Outer square boundary `[-a, a]²`, inner circular conductor radius `r`.

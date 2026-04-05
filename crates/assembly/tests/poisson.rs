@@ -169,6 +169,54 @@ fn poisson_p2_convergence_rate() {
     assert!(rate > 2.8, "P2 convergence rate {rate:.2} < 2.8");
 }
 
+// ─── Quad4 Poisson tests ────────────────────────────────────────────────────
+
+/// Solve Poisson on a Quad4 mesh and return the max nodal error.
+fn solve_poisson_quad(n: usize) -> f64 {
+    use fem_element::lagrange::QuadQ1;
+
+    let mesh = SimplexMesh::<2>::unit_square_quad(n);
+    let space = H1Space::new(mesh.clone(), 1);
+
+    let diffusion = DiffusionIntegrator { kappa: 1.0 };
+    let source    = DomainSourceIntegrator::new(forcing);
+
+    let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], 3);
+    let mut rhs = Assembler::assemble_linear(&space, &[&source], 3);
+
+    let bdofs  = boundary_dofs(&mesh, space.dof_manager(), &[1, 2, 3, 4]);
+    let values = vec![0.0_f64; bdofs.len()];
+    apply_dirichlet(&mut mat, &mut rhs, &bdofs, &values);
+
+    let uh = dense_solve(&mat, &rhs);
+
+    // Max nodal error
+    let dm = space.dof_manager();
+    let mut max_err = 0.0_f64;
+    for i in 0..dm.n_dofs {
+        let c = dm.dof_coord(i as u32);
+        let err = (uh[i] - u_exact(c)).abs();
+        if err > max_err { max_err = err; }
+    }
+    max_err
+}
+
+#[test]
+fn poisson_q1_16x16_error() {
+    let err = solve_poisson_quad(16);
+    println!("Q1 16×16 max nodal error = {err:.3e}");
+    assert!(err < 2e-2, "Q1 max error too large: {err:.3e}");
+}
+
+#[test]
+fn poisson_q1_convergence_rate() {
+    let err8  = solve_poisson_quad(8);
+    let err16 = solve_poisson_quad(16);
+    let rate = (err8 / err16).log2();
+    println!("Q1 quad convergence rate = {rate:.2}");
+    assert!(rate > 1.8, "Q1 convergence rate {rate:.2} < 1.8");
+}
+
 /// Patch test: a linear function u(x,y)=x is exactly represented by P1
 /// elements (zero error in H1 norm for a compatible load).
 #[test]

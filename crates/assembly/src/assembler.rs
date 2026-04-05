@@ -7,7 +7,7 @@
 use nalgebra::DMatrix;
 
 use fem_core::types::DofId;
-use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, TetP1, TriP1, TriP2}};
+use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, TetP1, TriP1, TriP2, QuadQ1, HexQ1}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -22,6 +22,8 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
+        (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
+        (ElementType::Hex8, 1)                           => Box::new(HexQ1),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
@@ -37,6 +39,11 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
 }
 
 // ─── Jacobian helpers ─────────────────────────────────────────────────────────
+
+/// Whether this element type has a constant (affine) Jacobian.
+fn is_affine(et: ElementType) -> bool {
+    matches!(et, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Line2 | ElementType::Line3)
+}
 
 /// Build the Jacobian matrix `J[i, j] = x_{j+1}[i] − x_0[i]` for a simplex
 /// with nodes listed in `geo_nodes` (first `dim+1` nodes are the vertices).
@@ -68,6 +75,43 @@ fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64>
         }
     }
     xp
+}
+
+/// Isoparametric Jacobian for non-affine elements (Quad4, Hex8, etc.).
+///
+/// `J_{ij}(ξ) = Σ_k x_k[i] · ∂φ_k/∂ξ_j`
+///
+/// where φ_k are the **geometry** basis functions (same as solution basis for
+/// Q1 elements) and x_k are the physical node coordinates.
+///
+/// Returns `(J, det J, x_phys)`.
+fn isoparametric_jacobian<M: MeshTopology>(
+    mesh: &M,
+    nodes: &[u32],
+    geo_elem: &dyn ReferenceElement,
+    xi: &[f64],
+    dim: usize,
+) -> (DMatrix<f64>, f64, Vec<f64>) {
+    let n_geo = geo_elem.n_dofs();
+    let mut grad_geo = vec![0.0_f64; n_geo * dim];
+    let mut phi_geo  = vec![0.0_f64; n_geo];
+    geo_elem.eval_grad_basis(xi, &mut grad_geo);
+    geo_elem.eval_basis(xi, &mut phi_geo);
+
+    let mut j = DMatrix::<f64>::zeros(dim, dim);
+    let mut xp = vec![0.0_f64; dim];
+
+    for k in 0..n_geo {
+        let xk = mesh.node_coords(nodes[k]);
+        for i in 0..dim {
+            xp[i] += phi_geo[k] * xk[i];
+            for d in 0..dim {
+                j[(i, d)] += xk[i] * grad_geo[k * dim + d];
+            }
+        }
+    }
+    let det = j.determinant();
+    (j, det, xp)
 }
 
 /// Transform reference gradients to physical gradients:
@@ -141,11 +185,25 @@ impl Assembler {
             let nodes = mesh.element_nodes(e);
             let elem_tag = mesh.element_tag(e);
 
-            // Geometric Jacobian (linear/affine map from first dim+1 nodes).
-            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
-            let j_inv_t = jac.clone().try_inverse()
-                .expect("degenerate element — zero-area/volume triangle")
-                .transpose();
+            let affine = is_affine(elem_type);
+
+            // For affine elements, compute Jacobian once.
+            let (jac_aff, det_aff, j_inv_t_aff) = if affine {
+                let (j, d) = simplex_jacobian(mesh, nodes, dim);
+                let jit = j.clone().try_inverse()
+                    .expect("degenerate element — zero-area/volume triangle")
+                    .transpose();
+                (j, d, jit)
+            } else {
+                (DMatrix::zeros(dim, dim), 0.0, DMatrix::zeros(dim, dim))
+            };
+
+            // For non-affine, we need a geometry reference element.
+            let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
+                Some(ref_elem_vol(elem_type, 1)) // Q1 geometry
+            } else {
+                None
+            };
 
             let mut k_elem = vec![0.0_f64; n_elem_dofs * n_elem_dofs];
             phi.resize(n_ldofs, 0.0);
@@ -155,12 +213,46 @@ impl Assembler {
             let x0 = mesh.node_coords(nodes[0]);
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
+                // Compute Jacobian, det, inverse-transpose, physical coords.
+                let (w, j_inv_t_ref, xp);
+                if affine {
+                    w = quad.weights[q] * det_aff.abs();
+                    j_inv_t_ref = &j_inv_t_aff;
+                    xp = phys_coords(x0, &jac_aff, xi, dim);
+                } else {
+                    let geo = geo_elem.as_ref().unwrap();
+                    let (jac_qp, det_qp, xp_qp) =
+                        isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
+                    w = quad.weights[q] * det_qp.abs();
+                    // We need j_inv_t to live beyond this block — store in grad_phys_buf
+                    let jit = jac_qp.try_inverse()
+                        .expect("degenerate quad/hex element")
+                        .transpose();
+                    // We'll use a temporary for the non-affine case.
+                    ref_elem.eval_basis(xi, &mut phi);
+                    ref_elem.eval_grad_basis(xi, &mut grad_ref);
+                    transform_grads(&jit, &grad_ref, &mut grad_phys, n_ldofs, dim);
+
+                    let qp = QpData {
+                        n_dofs:    n_elem_dofs,
+                        dim,
+                        weight:    w,
+                        phi:       &phi,
+                        grad_phys: &grad_phys,
+                        x_phys:    &xp_qp,
+                        elem_id:   e,
+                        elem_tag,
+                        elem_dofs: Some(&raw_dofs),
+                    };
+                    for integ in integrators {
+                        integ.add_to_element_matrix(&qp, &mut k_elem);
+                    }
+                    continue;
+                };
 
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, dim);
-                let xp = phys_coords(x0, &jac, xi, dim);
+                transform_grads(j_inv_t_ref, &grad_ref, &mut grad_phys, n_ldofs, dim);
 
                 let qp = QpData {
                     n_dofs:    n_elem_dofs,
@@ -217,10 +309,21 @@ impl Assembler {
             let nodes = mesh.element_nodes(e);
             let elem_tag = mesh.element_tag(e);
 
-            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
-            let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
+            let affine = is_affine(elem_type);
 
-            let mut f_elem = vec![0.0_f64; n_ldofs];
+            let (jac_aff, det_aff, j_inv_t_aff) = if affine {
+                let (j, d) = simplex_jacobian(mesh, nodes, dim);
+                let jit = j.clone().try_inverse().unwrap().transpose();
+                (j, d, jit)
+            } else {
+                (DMatrix::zeros(dim, dim), 0.0, DMatrix::zeros(dim, dim))
+            };
+            let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
+                Some(ref_elem_vol(elem_type, 1))
+            } else { None };
+
+            let n_elem_dofs = global_dofs.len();
+            let mut f_elem = vec![0.0_f64; n_elem_dofs];
             phi.resize(n_ldofs, 0.0);
             grad_ref.resize(n_ldofs * dim, 0.0);
             grad_phys.resize(n_ldofs * dim, 0.0);
@@ -228,15 +331,28 @@ impl Assembler {
             let x0 = mesh.node_coords(nodes[0]);
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
-
-                ref_elem.eval_basis(xi, &mut phi);
-                ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, dim);
-                let xp = phys_coords(x0, &jac, xi, dim);
+                let (w, xp);
+                if affine {
+                    w = quad.weights[q] * det_aff.abs();
+                    ref_elem.eval_basis(xi, &mut phi);
+                    ref_elem.eval_grad_basis(xi, &mut grad_ref);
+                    transform_grads(&j_inv_t_aff, &grad_ref, &mut grad_phys, n_ldofs, dim);
+                    xp = phys_coords(x0, &jac_aff, xi, dim);
+                } else {
+                    let geo = geo_elem.as_ref().unwrap();
+                    let (jac_qp, det_qp, xp_qp) =
+                        isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
+                    w = quad.weights[q] * det_qp.abs();
+                    let jit = jac_qp.try_inverse()
+                        .expect("degenerate quad/hex element").transpose();
+                    ref_elem.eval_basis(xi, &mut phi);
+                    ref_elem.eval_grad_basis(xi, &mut grad_ref);
+                    transform_grads(&jit, &grad_ref, &mut grad_phys, n_ldofs, dim);
+                    xp = xp_qp;
+                }
 
                 let qp = QpData {
-                    n_dofs:    n_ldofs,
+                    n_dofs:    n_elem_dofs,
                     dim,
                     weight:    w,
                     phi:       &phi,
