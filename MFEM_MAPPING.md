@@ -32,7 +32,7 @@
 | `Mesh` (2D/3D unstructured) | `SimplexMesh<D>` | ✅ | Uniform element type per mesh |
 | `Mesh` (mixed elements) | `SimplexMesh<D>` + multiple `elem_type` | 🔲 | Phase 2: per-element type array |
 | `NCMesh` (non-conforming) | — | 🔲 | Phase 2+: hanging nodes for AMR |
-| `ParMesh` | `ParallelMesh<M>` | 🔲 | Phase 10 |
+| `ParMesh` | `ParallelMesh<M>` | ✅ | Phase 10+33 |
 | `Mesh::GetNV()` | `MeshTopology::n_nodes()` | ✅ | |
 | `Mesh::GetNE()` | `MeshTopology::n_elements()` | ✅ | |
 | `Mesh::GetNBE()` | `MeshTopology::n_boundary_faces()` | ✅ | |
@@ -362,11 +362,18 @@ default (zero-cost for constants).
 
 | MFEM / hypre class | fem-rs struct | Status |
 |---|---|---|
-| `HypreParMatrix` | `ParCsrMatrix` (via ChannelBackend) | 🔨 Thread-based, not MPI |
-| `HypreParVector` | `ParVector` | 🔨 Thread-based |
-| `HypreParMatrix::Mult()` | `par_spmv()` via ghost exchange | ✅ |
-| `HypreParMatrix::GetDiag()` | local diagonal block | ✅ |
-| `HypreParMatrix::GetOffd()` | off-diagonal via ghost cols | ✅ |
+| `HypreParMatrix` | `ParCsrMatrix` (diag+offd blocks) | ✅ Thread + MPI backends |
+| `HypreParVector` | `ParVector` (owned+ghost layout) | ✅ |
+| `HypreParMatrix::Mult()` | `ParCsrMatrix::spmv()` via ghost exchange | ✅ |
+| `HypreParMatrix::GetDiag()` | `ParCsrMatrix::diag` | ✅ |
+| `HypreParMatrix::GetOffd()` | `ParCsrMatrix::offd` | ✅ |
+| `ParFiniteElementSpace` | `ParallelFESpace<S>` (P1+P2) | ✅ |
+| `ParBilinearForm::Assemble()` | `ParAssembler::assemble_bilinear()` | ✅ |
+| `ParLinearForm::Assemble()` | `ParAssembler::assemble_linear()` | ✅ |
+| `HypreSolver` (PCG+Jacobi) | `par_solve_pcg_jacobi()` | ✅ |
+| `HypreBoomerAMG` | `ParAmgHierarchy` (local smoothed aggregation) | ✅ |
+| `par_solve_pcg_amg()` | PCG + AMG V-cycle preconditioner | ✅ |
+| `MPI_Comm_split` | `Comm::split(color, key)` | ✅ |
 
 ---
 

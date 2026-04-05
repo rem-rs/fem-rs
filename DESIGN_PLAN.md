@@ -45,6 +45,9 @@
 | 33c | parallel | ✅ Done | 2026-04-05 | ParVector (distributed vector, global_dot/norm, ghost exchange) + ParCsrMatrix (diag+offd split, parallel SpMV); 7 tests |
 | 33d | parallel | ✅ Done | 2026-04-05 | ParAssembler: parallel bilinear/linear form assembly with ghost-row exchange via alltoallv; parallel Dirichlet BCs; 3 tests |
 | 33e | parallel + examples | ✅ Done | 2026-04-05 | par_solve_cg + par_solve_pcg_jacobi; pex1_poisson example (2-rank PCG, 21 iters, L² error 1.5e-3); 2 tests |
+| 34 | parallel | ✅ Done | 2026-04-05 | P2 parallel spaces: DofPartition::from_dof_manager (edge DOF ownership via min-owner rule), ghost edge ID exchange, DOF permutation (dm↔partition), ParAssembler auto-permute; pex1 --p2 (L² error 5.5e-4); 7 new tests |
+| 35 | parallel | ✅ Done | 2026-04-05 | Parallel AMG: ParAmgHierarchy (local smoothed aggregation, Galerkin R*A*P), damped Jacobi smoother, par_solve_pcg_amg; AMG fewer iters than Jacobi verified; 3 tests |
+| 36 | parallel | ✅ Done | 2026-04-05 | Comm::split(color,key) sub-communicator; CommBackend::split trait method; ChannelBackend impl (Arc pointer sharing); 2 tests |
 
 ### Vendor submodules
 | Submodule | URL | Role |
@@ -52,6 +55,7 @@
 | `vendor/reed` | javagg/reed | libCEED analogue; bridged via `crates/ceed` |
 | `vendor/linger` | javagg/linger | Krylov solvers + AMG; drives `fem-solver` and `fem-amg` |
 | `vendor/rmetis` | javagg/rmetis | Pure-Rust BFS graph partitioner; drives `fem-parallel` Phase 18 |
+| `vendor/jsmpi` | javagg/jsmpi | JavaScript MPI shim for WASM Web Workers; drives `fem-parallel` Phase 33a |
 
 ---
 
