@@ -58,7 +58,7 @@ pub use comm::{Comm, Universe};
 pub use dof_partition::DofPartition;
 pub use ghost::GhostExchange;
 pub use launcher::{Launcher, WorkerConfig};
-pub use metis::{MetisPartitioner, MetisOptions, partition_simplex_metis};
+pub use metis::{MetisPartitioner, MetisOptions, partition_simplex_metis, partition_simplex_metis_streaming};
 pub use par_assembler::ParAssembler;
 pub use par_amg::{ParAmgConfig, ParAmgHierarchy, par_solve_pcg_amg};
 pub use par_csr::ParCsrMatrix;

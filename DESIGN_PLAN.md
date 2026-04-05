@@ -49,6 +49,7 @@
 | 35 | parallel | ✅ Done | 2026-04-05 | Parallel AMG: ParAmgHierarchy (local smoothed aggregation, Galerkin R*A*P), damped Jacobi smoother, par_solve_pcg_amg; AMG fewer iters than Jacobi verified; 3 tests |
 | 36 | parallel | ✅ Done | 2026-04-05 | Comm::split(color,key) sub-communicator; CommBackend::split trait method; ChannelBackend impl (Arc pointer sharing); 2 tests |
 | 37 | parallel + wasm | ✅ Done | 2026-04-05 | WASM multi-Worker + streaming mesh partition: WorkerInitMsg::from_jsmpi_env(), spawn_async()+WasmJob, MeshPartition::from_raw(), binary mesh_serde (encode/decode), partition_simplex_streaming() (rank 0 distributes sub-meshes via send/recv), extract_submesh_for_rank() refactor, WasmParSolver + jsmpi_main entry point, wasm-parallel feature; 13 new tests |
+| 38 | parallel | ✅ Done | 2026-04-05 | METIS streaming partition + pex1 CLI: extract_submesh_from_partition(elem_part) generalized extractor, partition_simplex_metis_streaming(), metis.rs refactored to shared extractor (−80 lines duplication), pex1 enhanced with --n/--ranks/--metis/--streaming flags; 3 new tests |
 
 ### Vendor submodules
 | Submodule | URL | Role |

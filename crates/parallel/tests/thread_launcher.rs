@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use fem_parallel::{
     launcher::native::ThreadLauncher,
+    metis::{MetisOptions, partition_simplex_metis_streaming},
     par_simplex::{partition_simplex, partition_simplex_streaming},
     GhostExchange,
     WorkerConfig,
@@ -442,4 +443,79 @@ fn streaming_4_ranks() {
     let mut r = results.lock().unwrap().clone();
     r.sort();
     assert_eq!(r, vec![0, 1, 2, 3]);
+}
+
+// ── METIS streaming partition ───────────────────────────────────────────────
+
+#[test]
+fn metis_streaming_2_ranks() {
+    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let total_elems = mesh.n_elems();
+    let total_nodes = mesh.n_nodes();
+    let opts = MetisOptions::default();
+
+    launcher(2).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
+        let pmesh = partition_simplex_metis_streaming(mesh_opt, &comm, &opts)
+            .expect("METIS streaming partition failed");
+
+        assert_eq!(pmesh.global_n_elems(), total_elems);
+        assert_eq!(pmesh.global_n_nodes(), total_nodes);
+        pmesh.local_mesh().check().expect("local mesh check failed");
+    });
+}
+
+#[test]
+fn metis_streaming_4_ranks() {
+    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let total_elems = mesh.n_elems();
+    let total_nodes = mesh.n_nodes();
+    let opts = MetisOptions::default();
+
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let res = Arc::clone(&results);
+    launcher(4).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
+        let pmesh = partition_simplex_metis_streaming(mesh_opt, &comm, &opts)
+            .expect("METIS streaming partition failed");
+
+        assert_eq!(pmesh.global_n_elems(), total_elems);
+        assert_eq!(pmesh.global_n_nodes(), total_nodes);
+        pmesh.local_mesh().check().expect("local mesh check failed");
+
+        res.lock().unwrap().push(comm.rank());
+    });
+
+    let mut r = results.lock().unwrap().clone();
+    r.sort();
+    assert_eq!(r, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn metis_streaming_ghost_exchange() {
+    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let opts = MetisOptions::default();
+
+    launcher(2).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
+        let pmesh = partition_simplex_metis_streaming(mesh_opt, &comm, &opts)
+            .expect("METIS streaming partition failed");
+
+        let n_total = pmesh.n_total_nodes();
+        let mut data = vec![-1.0_f64; n_total];
+        for lid in 0..pmesh.n_owned_nodes() {
+            data[lid] = pmesh.global_node_id(lid as u32) as f64;
+        }
+
+        pmesh.forward_exchange(&mut data);
+
+        for lid in 0..n_total {
+            let expected = pmesh.global_node_id(lid as u32) as f64;
+            assert!(
+                (data[lid] - expected).abs() < 1e-12,
+                "rank {}: data[{lid}] = {}, expected {}",
+                comm.rank(), data[lid], expected,
+            );
+        }
+    });
 }

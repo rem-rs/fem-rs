@@ -5,16 +5,23 @@
 //! u(x,y) = sin(pi*x) sin(pi*y).
 //!
 //! Usage:
-//!   cargo run --example pex1_poisson            # P1 (default)
-//!   cargo run --example pex1_poisson -- --p2    # P2
+//!   cargo run --example pex1_poisson                             # P1, 2 ranks, 16×16
+//!   cargo run --example pex1_poisson -- --p2                     # P2 elements
+//!   cargo run --example pex1_poisson -- --n 32 --ranks 4         # 32×32 mesh, 4 ranks
+//!   cargo run --example pex1_poisson -- --metis                  # METIS graph partitioner
+//!   cargo run --example pex1_poisson -- --streaming              # streaming partition
+//!   cargo run --example pex1_poisson -- --metis --streaming      # METIS + streaming
 
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_mesh::SimplexMesh;
 use fem_parallel::{
-    ParAssembler, ParVector, ParallelFESpace,
-    par_solve_pcg_jacobi, partition_simplex,
+    MetisOptions, ParAssembler, ParVector, ParallelFESpace,
+    par_simplex::{partition_simplex, partition_simplex_streaming},
+    metis::{partition_simplex_metis, partition_simplex_metis_streaming},
+    par_solve_pcg_jacobi,
     WorkerConfig,
 };
 use fem_parallel::launcher::native::ThreadLauncher;
@@ -28,19 +35,42 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let use_p2 = args.iter().any(|a| a == "--p2");
+    let use_metis = args.iter().any(|a| a == "--metis");
+    let use_streaming = args.iter().any(|a| a == "--streaming");
     let order: u8 = if use_p2 { 2 } else { 1 };
 
-    let n_workers = 2;
-    let mesh_n = 16;
+    let n_workers = parse_arg(&args, "--ranks").unwrap_or(2);
+    let mesh_n = parse_arg(&args, "--n").unwrap_or(16);
+
+    let partitioner_name = match (use_metis, use_streaming) {
+        (false, false) => "contiguous",
+        (false, true)  => "contiguous+streaming",
+        (true,  false) => "METIS",
+        (true,  true)  => "METIS+streaming",
+    };
 
     println!("=== fem-rs pex1: Parallel Poisson (P{order}) ===");
-    println!("  Workers: {n_workers}, Mesh: {mesh_n}x{mesh_n}");
+    println!("  Workers: {n_workers}, Mesh: {mesh_n}x{mesh_n}, Partitioner: {partitioner_name}");
+
+    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(mesh_n));
 
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
     launcher.launch(move |comm| {
         // 1. Build and partition mesh.
-        let mesh = SimplexMesh::<2>::unit_square_tri(mesh_n);
-        let par_mesh = partition_simplex(&mesh, &comm);
+        let par_mesh = if use_streaming {
+            let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
+            if use_metis {
+                partition_simplex_metis_streaming(mesh_opt, &comm, &MetisOptions::default())
+                    .expect("METIS streaming partition failed")
+            } else {
+                partition_simplex_streaming(mesh_opt, &comm)
+                    .expect("streaming partition failed")
+            }
+        } else if use_metis {
+            partition_simplex_metis(&mesh, &comm, &MetisOptions::default())
+        } else {
+            partition_simplex(&mesh, &comm)
+        };
 
         let rank = comm.rank();
         if rank == 0 {
@@ -104,7 +134,6 @@ fn main() {
         let err_dm = par_space.local_space().dof_manager();
         let mut local_err_sq = 0.0_f64;
         for pid in 0..n_owned {
-            // Map partition local ID back to DofManager ID for coordinate lookup.
             let dm_id = dof_part.unpermute_dof(pid as u32);
             let coord = err_dm.dof_coord(dm_id);
             let exact = (PI * coord[0]).sin() * (PI * coord[1]).sin();
@@ -116,8 +145,14 @@ fn main() {
         let l2_err = (global_err_sq / n_global).sqrt();
 
         if rank == 0 {
-            println!("  L2 error (pointwise): {:.6e}", l2_err);
+            println!("  L2 error (pointwise): {l2_err:.6e}");
             println!("=== Done ===");
         }
     });
+}
+
+fn parse_arg(args: &[String], flag: &str) -> Option<usize> {
+    args.iter().position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
 }

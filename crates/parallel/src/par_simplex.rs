@@ -69,7 +69,7 @@ pub fn partition_simplex<const D: usize>(
 
 /// Streaming mesh partition tag base (avoids ghost `0x1000`/`0x2000` and
 /// alltoallv `0x4000`/`0x5000`).
-const STREAM_TAG_BASE: i32 = 0x3700;
+pub(crate) const STREAM_TAG_BASE: i32 = 0x3700;
 
 /// Distribute a mesh using streaming: only rank 0 holds the full mesh.
 ///
@@ -121,25 +121,48 @@ pub fn partition_simplex_streaming<const D: usize>(
 
 // ── extract_submesh_for_rank ─────────────────────────────────────────────────
 
-/// Extract the sub-mesh and partition descriptor for a given rank.
+/// Extract the sub-mesh for a given rank using contiguous element blocks.
 ///
-/// This is the core partitioning logic: contiguous element blocks assigned to
-/// ranks, with ghost elements and nodes computed for each rank's stencil.
+/// This is a convenience wrapper around [`extract_submesh_from_partition`] that
+/// builds a contiguous-block partition vector internally.
 fn extract_submesh_for_rank<const D: usize>(
     mesh: &SimplexMesh<D>,
     target_rank: Rank,
     n_ranks: usize,
 ) -> (SimplexMesh<D>, MeshPartition) {
     let n_elems = mesh.n_elems();
-
-    // 1. Assign elements to ranks (contiguous blocks).
     let chunk = n_elems.div_ceil(n_ranks);
-    let e_start = (target_rank as usize * chunk).min(n_elems);
-    let e_end = (e_start + chunk).min(n_elems);
-    let local_elem_gids: Vec<u32> = (e_start..e_end).map(|e| e as u32).collect();
+    let elem_part: Vec<Rank> = (0..n_elems)
+        .map(|e| (e / chunk) as Rank)
+        .collect();
+    extract_submesh_from_partition(mesh, target_rank, &elem_part)
+}
+
+/// Extract the sub-mesh and partition descriptor for a given rank from an
+/// arbitrary element partition vector.
+///
+/// This is the shared core used by both the contiguous-block partitioner
+/// (`partition_simplex`) and the METIS graph partitioner
+/// (`partition_simplex_metis`).
+///
+/// # Arguments
+/// * `mesh` — the full serial mesh.
+/// * `target_rank` — the rank whose sub-mesh to extract.
+/// * `elem_part` — `elem_part[e]` is the rank that owns element `e`.
+pub(crate) fn extract_submesh_from_partition<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    target_rank: Rank,
+    elem_part: &[Rank],
+) -> (SimplexMesh<D>, MeshPartition) {
+    let n_elems = mesh.n_elems();
+
+    // 1. Collect elements owned by target_rank.
+    let local_elem_gids: Vec<u32> = (0..n_elems as u32)
+        .filter(|&e| elem_part[e as usize] == target_rank)
+        .collect();
 
     // 2. Node ownership: owner = rank of first element containing the node.
-    let node_owners = compute_node_owners(mesh, mesh.n_nodes(), n_elems, n_ranks);
+    let node_owners = compute_node_owners_from_partition(mesh, elem_part);
 
     // 3. Collect all nodes touched by local (owned) elements.
     let mut node_set: BTreeSet<NodeId> = BTreeSet::new();
@@ -153,8 +176,7 @@ fn extract_submesh_for_rank<const D: usize>(
     // least one node with our owned elements.
     let mut ghost_elem_gids: Vec<u32> = Vec::new();
     for e in 0..n_elems as u32 {
-        let owner_rank = (e as usize / chunk) as Rank;
-        if owner_rank == target_rank { continue; }
+        if elem_part[e as usize] == target_rank { continue; }
         let shares_node = mesh.elem_nodes(e).iter().any(|n| node_set.contains(n));
         if shares_node {
             ghost_elem_gids.push(e);
@@ -230,7 +252,7 @@ fn extract_submesh_for_rank<const D: usize>(
     let partition = MeshPartition::from_partitioner(
         &owned_global,
         &ghost_global,
-        &local_elem_gids,  // only owned elements in the partition
+        &local_elem_gids,
         target_rank,
     );
 
@@ -239,28 +261,25 @@ fn extract_submesh_for_rank<const D: usize>(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// For each global node, compute which rank owns it.
+/// For each global node, compute which rank owns it given an arbitrary
+/// element partition vector.
 ///
 /// A node is owned by the rank that owns the lowest-indexed element containing
 /// it.  Sweeping elements 0 → n_elems in order, the first rank to "see" a node
 /// becomes its owner.
-fn compute_node_owners<const D: usize>(
+pub(crate) fn compute_node_owners_from_partition<const D: usize>(
     mesh: &SimplexMesh<D>,
-    n_nodes: usize,
-    n_elems: usize,
-    n_ranks: usize,
+    elem_part: &[Rank],
 ) -> Vec<Rank> {
-    let chunk = n_elems.div_ceil(n_ranks);
+    let n_nodes = mesh.n_nodes();
     let mut owners = vec![-1_i32; n_nodes];
-    for e in 0..n_elems {
-        let rank = (e / chunk) as Rank;
+    for (e, &rank) in elem_part.iter().enumerate() {
         for &n in mesh.elem_nodes(e as u32) {
             if owners[n as usize] < 0 {
                 owners[n as usize] = rank;
             }
         }
     }
-    // Isolated nodes (not in any element) go to rank 0.
     for o in &mut owners {
         if *o < 0 { *o = 0; }
     }

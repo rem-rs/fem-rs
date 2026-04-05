@@ -537,3 +537,4 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 35 | `parallel` | Parallel AMG (ParAmgHierarchy, smoothed aggregation, par_solve_pcg_amg) | ✅ |
 | 36 | `parallel` | Comm::split sub-communicators | ✅ |
 | 37 | `parallel`+`wasm` | WASM multi-Worker (spawn_async, jsmpi_main), streaming mesh partition (partition_simplex_streaming), binary mesh serde | ✅ |
+| 38 | `parallel` | METIS streaming partition (partition_simplex_metis_streaming), generalized submesh extractor, pex1 CLI flags | ✅ |

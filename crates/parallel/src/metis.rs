@@ -21,10 +21,12 @@
 
 use std::collections::HashMap;
 
-use fem_core::{ElemId, FaceId, NodeId, Rank};
+use fem_core::{ElemId, NodeId, Rank};
 use fem_mesh::SimplexMesh;
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
+use crate::mesh_serde;
+use crate::par_simplex::{extract_submesh_from_partition, STREAM_TAG_BASE};
 
 // ─── Options ──────────────────────────────────────────────────────────────────
 
@@ -170,6 +172,10 @@ fn local_faces_of_elem<const D: usize>(nodes: &[NodeId]) -> Vec<Vec<NodeId>> {
 // ─── partition_simplex_metis ──────────────────────────────────────────────────
 
 /// Distribute `mesh` across `comm.size()` ranks using k-way partitioning.
+///
+/// **Note**: every rank must hold the full serial mesh.  For a
+/// memory-efficient alternative where only rank 0 holds the mesh, use
+/// [`partition_simplex_metis_streaming`].
 pub fn partition_simplex_metis<const D: usize>(
     mesh: &SimplexMesh<D>,
     comm: &Comm,
@@ -188,109 +194,66 @@ pub fn partition_simplex_metis<const D: usize>(
     let elem_part = MetisPartitioner::partition_mesh(mesh, size, opts)
         .expect("partitioning failed");
 
-    build_parallel_mesh_from_partition(mesh, comm, &elem_part)
-}
-
-fn build_parallel_mesh_from_partition<const D: usize>(
-    mesh:      &SimplexMesh<D>,
-    comm:      &Comm,
-    elem_part: &[Rank],
-) -> ParallelMesh<SimplexMesh<D>> {
-    let n_elems = mesh.n_elems();
-    let n_nodes = mesh.n_nodes();
-    let local_rank = comm.rank();
-
-    let mut node_owners = vec![usize::MAX; n_nodes];
-    for e in 0..n_elems {
-        let rank = elem_part[e] as usize;
-        for &n in mesh.elem_nodes(e as ElemId) {
-            if node_owners[n as usize] == usize::MAX {
-                node_owners[n as usize] = rank;
-            }
-        }
-    }
-    for o in &mut node_owners { if *o == usize::MAX { *o = 0; } }
-
-    let local_elem_gids: Vec<u32> = (0..n_elems as ElemId)
-        .filter(|&e| elem_part[e as usize] as usize == local_rank as usize)
-        .collect();
-
-    let mut node_set: std::collections::BTreeSet<NodeId> = Default::default();
-    for &ge in &local_elem_gids {
-        for &n in mesh.elem_nodes(ge) { node_set.insert(n); }
-    }
-
-    let mut owned_global: Vec<NodeId> = Vec::new();
-    let mut ghost_global: Vec<(NodeId, Rank)> = Vec::new();
-    for gn in &node_set {
-        let owner = node_owners[*gn as usize] as Rank;
-        if owner == local_rank { owned_global.push(*gn); }
-        else { ghost_global.push((*gn, owner)); }
-    }
-
-    let ghost_base = owned_global.len();
-    let mut g2l: HashMap<NodeId, u32> = HashMap::new();
-    for (lid, &gn) in owned_global.iter().enumerate() { g2l.insert(gn, lid as u32); }
-    for (idx, &(gn, _)) in ghost_global.iter().enumerate() {
-        g2l.insert(gn, (ghost_base + idx) as u32);
-    }
-
-    let total_local_nodes = g2l.len();
-    let mut local_coords = Vec::with_capacity(total_local_nodes * D);
-    for &gn in owned_global.iter().chain(ghost_global.iter().map(|(gn, _)| gn)) {
-        local_coords.extend_from_slice(&mesh.coords_of(gn));
-    }
-
-    let npe = mesh.elem_type.nodes_per_element();
-    let mut local_conn = Vec::with_capacity(local_elem_gids.len() * npe);
-    let mut local_elem_tags = Vec::new();
-    for &ge in &local_elem_gids {
-        for &gn in mesh.elem_nodes(ge) { local_conn.push(g2l[&gn]); }
-        local_elem_tags.push(mesh.elem_tags[ge as usize]);
-    }
-
-    let (local_face_conn, local_face_tags) =
-        extract_local_faces(mesh, &g2l, &node_owners, local_rank as usize);
-
-    let local_mesh = SimplexMesh::<D> {
-        coords:    local_coords,
-        conn:      local_conn,
-        elem_tags: local_elem_tags,
-        elem_type: mesh.elem_type,
-        face_conn: local_face_conn,
-        face_tags: local_face_tags,
-        face_type: mesh.face_type,
-    };
-
-    let partition = MeshPartition::from_partitioner(
-        &owned_global,
-        &ghost_global,
-        &local_elem_gids,
-        local_rank,
+    let (local_mesh, partition) = extract_submesh_from_partition(
+        mesh, comm.rank(), &elem_part,
     );
-
     ParallelMesh::new(local_mesh, comm.clone(), partition)
 }
 
-fn extract_local_faces<const D: usize>(
-    mesh:        &SimplexMesh<D>,
-    g2l:         &HashMap<NodeId, u32>,
-    node_owners: &[usize],
-    local_rank:  usize,
-) -> (Vec<NodeId>, Vec<i32>) {
-    let n_bfaces = mesh.n_faces();
-    let mut face_conn = Vec::new();
-    let mut face_tags = Vec::new();
+// ─── partition_simplex_metis_streaming ────────────────────────────────────────
 
-    for f in 0..n_bfaces as u32 {
-        let bnodes = mesh.bface_nodes(f as FaceId);
-        if bnodes.iter().any(|gn| !g2l.contains_key(gn)) { continue; }
-        let min_gn = *bnodes.iter().min().expect("face has no nodes");
-        if node_owners[min_gn as usize] != local_rank { continue; }
-        for &gn in bnodes { face_conn.push(g2l[&gn]); }
-        face_tags.push(mesh.face_tags[f as usize]);
+/// Streaming METIS partition: only rank 0 holds the full mesh.
+///
+/// Rank 0 runs the METIS graph partitioner, then sends each rank's sub-mesh
+/// via point-to-point messages.  Other ranks receive their sub-mesh without
+/// ever loading the full mesh.
+///
+/// # Arguments
+/// * `mesh` — `Some(&full_mesh)` on rank 0, `None` on other ranks.
+/// * `comm` — communicator spanning all ranks.
+/// * `opts` — METIS options (verbose flag, etc.).
+///
+/// # Errors
+/// Returns `Err` if partitioning or mesh decode fails.
+pub fn partition_simplex_metis_streaming<const D: usize>(
+    mesh: Option<&SimplexMesh<D>>,
+    comm: &Comm,
+    opts: &MetisOptions,
+) -> Result<ParallelMesh<SimplexMesh<D>>, String> {
+    let size = comm.size();
+
+    if size == 1 {
+        let m = mesh.ok_or("rank 0 must provide the mesh")?;
+        let partition = MeshPartition::new_serial(m.n_nodes(), m.n_elems());
+        return Ok(ParallelMesh::new(m.clone(), comm.clone(), partition));
     }
-    (face_conn, face_tags)
+
+    if comm.is_root() {
+        let m = mesh.ok_or("rank 0 must provide the mesh")?;
+
+        let elem_part = MetisPartitioner::partition_mesh(m, size, opts)
+            .map_err(|e| e.to_string())?;
+
+        // Send sub-meshes to ranks 1..N-1.
+        for target in 1..size as Rank {
+            let (sub_mesh, sub_part) = extract_submesh_from_partition(
+                m, target, &elem_part,
+            );
+            let encoded = mesh_serde::encode_submesh(&sub_mesh, &sub_part);
+            comm.send_bytes(target, STREAM_TAG_BASE + target, &encoded);
+        }
+
+        // Extract rank 0's own sub-mesh.
+        let (local_mesh, partition) = extract_submesh_from_partition(
+            m, 0, &elem_part,
+        );
+        Ok(ParallelMesh::new(local_mesh, comm.clone(), partition))
+    } else {
+        let local_rank = comm.rank();
+        let buf = comm.recv_bytes(0, STREAM_TAG_BASE + local_rank);
+        let (local_mesh, partition) = mesh_serde::decode_submesh::<D>(&buf)?;
+        Ok(ParallelMesh::new(local_mesh, comm.clone(), partition))
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
