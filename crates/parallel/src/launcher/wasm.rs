@@ -1,41 +1,39 @@
 //! Web Worker launcher for `wasm32` targets.
 //!
-//! ## Planned architecture
+//! ## Architecture
 //!
 //! ```text
 //!  JS / main thread
 //!  ┌──────────────────────────────────────────────────────────────┐
 //!  │  WorkerLauncher::spawn(n)                                    │
-//!  │    1. allocate SharedArrayBuffer(arena_bytes)                │
+//!  │    1. create jsmpi runtime for each rank                     │
 //!  │    2. for rank in 0..n:                                      │
 //!  │         worker = new Worker("fem_solver.js")                 │
-//!  │         worker.postMessage({ rank, size: n, sab })           │
+//!  │         worker.postMessage({ rank, size: n, comm })          │
 //!  │    3. wait for all workers to post "ready"                   │
 //!  │    4. post "go" broadcast → workers call fem_entry(comm)     │
 //!  └──────────────────────────────────────────────────────────────┘
 //!
 //!  Inside each worker (wasm32 context)
 //!  ┌──────────────────────────────────────────────────────────────┐
-//!  │  onmessage({ rank, size, sab })                              │
-//!  │    backend = WasmWorkerBackend::from_init_msg(rank, size, sab)│
+//!  │  onmessage({ rank, size, comm })                             │
+//!  │    backend = JsMpiBackend::from_communicator(comm)            │
 //!  │    comm    = Comm::from_backend(backend)                     │
 //!  │    fem_entry(comm)   // user solver entry point              │
 //!  └──────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! The SAB is divided into fixed-size slots: one control word (for barriers and
-//! message metadata) per rank plus a payload ring-buffer.  Blocking is achieved
-//! via `Atomics.wait()` (permitted inside dedicated workers under COOP/COEP
-//! HTTP headers) and `Atomics.notify()`.
+//! Communication is handled by the jsmpi crate which provides MPI-style
+//! messaging via Web Workers + SharedArrayBuffer.
 //!
 //! ## Current status
 //!
-//! This module is a **stub**.  The types exist and the code compiles for
-//! `wasm32-unknown-unknown`, but `WorkerLauncher::spawn` panics with `todo!`.
-//! Wiring up the `wasm-bindgen` + `js-sys` + `web-sys` calls is deferred to
-//! the `fem-wasm` crate integration (Phase 11).
+//! `WorkerLauncher::spawn` for multi-worker mode still panics with `todo!`.
+//! The `JsMpiBackend` is fully wired; `WorkerInitMsg::into_comm` can create
+//! a live multi-worker backend when given a jsmpi `SimpleCommunicator`.
+//! Wiring up the JS-side worker spawning is deferred to `fem-wasm`.
 
-use crate::backend::wasm::WasmWorkerBackend;
+use crate::backend::wasm::JsMpiBackend;
 use crate::comm::Comm;
 use crate::launcher::{Launcher, WorkerConfig};
 
@@ -82,7 +80,7 @@ impl Launcher for WorkerLauncher {
     }
 
     fn world_comm(&self) -> Comm {
-        Comm::from_backend(Box::new(WasmWorkerBackend::single()))
+        Comm::from_backend(Box::new(JsMpiBackend::serial()))
     }
 }
 
@@ -91,28 +89,26 @@ impl Launcher for WorkerLauncher {
 /// Typed representation of the init message a worker receives from the launcher.
 ///
 /// In the full implementation this is deserialised from the `MessageEvent` data
-/// passed by `postMessage({ rank, size, sab })`.
+/// passed by `postMessage({ rank, size, comm })`.
 ///
 /// Fields are public so `fem-wasm` can construct this from `wasm-bindgen`
 /// callbacks without requiring a dependency back on `fem-parallel`'s internals.
 pub struct WorkerInitMsg {
     pub rank: u32,
     pub size: u32,
-    // Future: pub sab: js_sys::SharedArrayBuffer,
+    /// Optional jsmpi communicator for multi-worker mode.
+    pub comm: Option<jsmpi::SimpleCommunicator>,
 }
 
 impl WorkerInitMsg {
     /// Build a [`Comm`] from this init message.
     ///
-    /// # Panics
-    /// Panics if `size > 1` until the SAB backend is implemented.
+    /// If `comm` is `Some`, creates a real multi-worker backend via jsmpi.
+    /// Otherwise falls back to a serial stub.
     pub fn into_comm(self) -> Comm {
-        let backend = if self.size <= 1 {
-            WasmWorkerBackend::single()
-        } else {
-            // The SharedArena handle will be passed here once wasm-bindgen
-            // integration is complete.
-            todo!("WorkerInitMsg::into_comm — SharedArena pending")
+        let backend = match self.comm {
+            Some(communicator) => JsMpiBackend::from_communicator(communicator),
+            None => JsMpiBackend::serial(),
         };
         Comm::from_backend(Box::new(backend))
     }

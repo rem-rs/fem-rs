@@ -188,8 +188,8 @@ impl Universe {
 
         #[cfg(target_arch = "wasm32")]
         {
-            use crate::backend::wasm::WasmWorkerBackend;
-            return Comm::from_backend(Box::new(WasmWorkerBackend::single()));
+            use crate::backend::wasm::JsMpiBackend;
+            return Comm::from_backend(Box::new(JsMpiBackend::serial()));
         }
 
         #[cfg(all(not(target_arch = "wasm32"), not(feature = "mpi")))]

@@ -8,7 +8,7 @@
 //! |---------|-------------|--------|
 //! | [`SerialBackend`]       | non-wasm32, no `mpi` feature | ✅ complete |
 //! | [`NativeMpiBackend`]    | non-wasm32, `mpi` feature    | ✅ Phase 10 |
-//! | [`WasmWorkerBackend`]   | `wasm32` target              | 🔲 stub, Web Worker impl planned |
+//! | [`JsMpiBackend`]        | `wasm32` target              | ✅ via jsmpi |
 //!
 //! ## Byte-level API
 //!
@@ -34,9 +34,8 @@ use fem_core::Rank;
 /// [`MeshTopology`] (which has `Send + Sync` supertraits).
 ///
 /// On `wasm32` the target is single-threaded, so `Send + Sync` carry no real
-/// cost.  [`WasmWorkerBackend`](super::wasm::WasmWorkerBackend) provides
-/// `unsafe impl Send/Sync` since wasm32-unknown-unknown never has actual
-/// concurrent access.
+/// cost.  [`JsMpiBackend`](wasm::JsMpiBackend) provides `unsafe impl
+/// Send/Sync` since wasm32-unknown-unknown never has actual concurrent access.
 pub trait CommBackend: Send + Sync {
     // ── topology ─────────────────────────────────────────────────────────────
 

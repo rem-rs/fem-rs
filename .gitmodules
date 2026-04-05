@@ -4,3 +4,6 @@
 [submodule "vendor/linger"]
 	path = vendor/linger
 	url = https://github.com/javagg/linger.git
+[submodule "vendor/jsmpi"]
+	path = vendor/jsmpi
+	url = https://github.com/jsmpi/jsmpi

@@ -85,6 +85,10 @@ path = "ex15_dg_amr.rs"
 name = "ex16_nonlinear_heat"
 path = "ex16_nonlinear_heat.rs"
 
+[[example]]
+name = "pex1_poisson"
+path = "pex1_poisson.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"

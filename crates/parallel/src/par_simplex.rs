@@ -66,7 +66,7 @@ pub fn partition_simplex<const D: usize>(
     // 2. Node ownership: owner = rank of first element containing the node.
     let node_owners = compute_node_owners(mesh, n_nodes_total, n_elems, size);
 
-    // 3. Collect all nodes touched by local elements; classify owned vs ghost.
+    // 3. Collect all nodes touched by local (owned) elements.
     let mut node_set: BTreeSet<NodeId> = BTreeSet::new();
     for &ge in &local_elem_gids {
         for &n in mesh.elem_nodes(ge) {
@@ -74,6 +74,27 @@ pub fn partition_simplex<const D: usize>(
         }
     }
 
+    // 3b. Find ghost elements: elements NOT owned by this rank that share at
+    // least one node with our owned elements.  This ensures that all
+    // contributions to owned-row DOFs are captured during local assembly.
+    let mut ghost_elem_gids: Vec<u32> = Vec::new();
+    for e in 0..n_elems as u32 {
+        let owner_rank = (e as usize / chunk) as Rank;
+        if owner_rank == local_rank { continue; }
+        let shares_node = mesh.elem_nodes(e).iter().any(|n| node_set.contains(n));
+        if shares_node {
+            ghost_elem_gids.push(e);
+        }
+    }
+
+    // 3c. Add nodes from ghost elements to the node set.
+    for &ge in &ghost_elem_gids {
+        for &n in mesh.elem_nodes(ge) {
+            node_set.insert(n);
+        }
+    }
+
+    // 4. Classify nodes as owned vs ghost.
     let mut owned_global: Vec<NodeId> = Vec::new();
     let mut ghost_global: Vec<(NodeId, Rank)> = Vec::new();
     for gn in &node_set {
@@ -105,11 +126,12 @@ pub fn partition_simplex<const D: usize>(
         local_coords.extend_from_slice(&mesh.coords_of(gn));
     }
 
-    // 6. Build local connectivity with remapped node IDs.
+    // 6. Build local connectivity with remapped node IDs (owned + ghost elements).
     let npe = mesh.elem_type.nodes_per_element();
-    let mut local_conn = Vec::with_capacity(local_elem_gids.len() * npe);
-    let mut local_elem_tags = Vec::with_capacity(local_elem_gids.len());
-    for &ge in &local_elem_gids {
+    let all_local_elems = local_elem_gids.len() + ghost_elem_gids.len();
+    let mut local_conn = Vec::with_capacity(all_local_elems * npe);
+    let mut local_elem_tags = Vec::with_capacity(all_local_elems);
+    for &ge in local_elem_gids.iter().chain(ghost_elem_gids.iter()) {
         for &gn in mesh.elem_nodes(ge) {
             local_conn.push(g2l[&gn]);
         }
@@ -134,7 +156,7 @@ pub fn partition_simplex<const D: usize>(
     let partition = MeshPartition::from_partitioner(
         &owned_global,
         &ghost_global,
-        &local_elem_gids,
+        &local_elem_gids,  // only owned elements in the partition
         local_rank,
     );
 
