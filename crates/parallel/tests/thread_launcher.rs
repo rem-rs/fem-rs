@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use fem_parallel::{
     launcher::native::ThreadLauncher,
-    par_simplex::partition_simplex,
+    par_simplex::{partition_simplex, partition_simplex_streaming},
     GhostExchange,
     WorkerConfig,
 };
@@ -330,4 +330,116 @@ fn comm_split_single_group() {
         let sum = sub_comm.allreduce_sum_f64(1.0);
         assert!((sum - 3.0).abs() < 1e-14);
     });
+}
+
+// ── streaming partition ─────────────────────────────────────────────────────
+
+#[test]
+fn streaming_single_rank() {
+    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    launcher(1).launch(move |comm| {
+        let pmesh = partition_simplex_streaming(Some(&mesh), &comm)
+            .expect("streaming partition failed");
+        assert_eq!(pmesh.global_n_nodes(), mesh.n_nodes());
+        assert_eq!(pmesh.global_n_elems(), mesh.n_elems());
+        assert_eq!(pmesh.n_ghost_nodes(), 0);
+    });
+}
+
+#[test]
+fn streaming_matches_replicated_2_ranks() {
+    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let mesh2 = Arc::clone(&mesh);
+
+    // Replicated partition for reference.
+    let replicated_nodes = Arc::new(Mutex::new(Vec::new()));
+    let replicated_elems = Arc::new(Mutex::new(Vec::new()));
+    let rn = Arc::clone(&replicated_nodes);
+    let re = Arc::clone(&replicated_elems);
+    let mesh_ref = Arc::clone(&mesh);
+    launcher(2).launch(move |comm| {
+        let pmesh = partition_simplex(&mesh_ref, &comm);
+        rn.lock().unwrap().push((comm.rank(), pmesh.n_owned_nodes(), pmesh.n_ghost_nodes()));
+        re.lock().unwrap().push((comm.rank(), pmesh.global_n_nodes(), pmesh.global_n_elems()));
+    });
+
+    // Streaming partition.
+    let streaming_nodes = Arc::new(Mutex::new(Vec::new()));
+    let streaming_elems = Arc::new(Mutex::new(Vec::new()));
+    let sn = Arc::clone(&streaming_nodes);
+    let se = Arc::clone(&streaming_elems);
+    launcher(2).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh2) } else { None };
+        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+            .expect("streaming partition failed");
+        sn.lock().unwrap().push((comm.rank(), pmesh.n_owned_nodes(), pmesh.n_ghost_nodes()));
+        se.lock().unwrap().push((comm.rank(), pmesh.global_n_nodes(), pmesh.global_n_elems()));
+    });
+
+    let mut rn = replicated_nodes.lock().unwrap().clone();
+    let mut sn = streaming_nodes.lock().unwrap().clone();
+    rn.sort_by_key(|t| t.0);
+    sn.sort_by_key(|t| t.0);
+    assert_eq!(rn, sn, "owned/ghost node counts must match between replicated and streaming");
+
+    let mut re = replicated_elems.lock().unwrap().clone();
+    let mut se = streaming_elems.lock().unwrap().clone();
+    re.sort_by_key(|t| t.0);
+    se.sort_by_key(|t| t.0);
+    assert_eq!(re, se, "global node/elem counts must match");
+}
+
+#[test]
+fn streaming_ghost_exchange_after_partition() {
+    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(4));
+    launcher(2).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
+        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+            .expect("streaming partition failed");
+
+        // Set owned nodes to their global ID, ghosts to -1.
+        let n_total = pmesh.n_total_nodes();
+        let mut data = vec![-1.0_f64; n_total];
+        for lid in 0..pmesh.n_owned_nodes() {
+            data[lid] = pmesh.global_node_id(lid as u32) as f64;
+        }
+
+        // Forward exchange should fill ghost slots.
+        pmesh.forward_exchange(&mut data);
+
+        for lid in 0..n_total {
+            let expected = pmesh.global_node_id(lid as u32) as f64;
+            assert!(
+                (data[lid] - expected).abs() < 1e-12,
+                "rank {}: data[{lid}] = {}, expected {} (global={})",
+                comm.rank(), data[lid], expected, pmesh.global_node_id(lid as u32),
+            );
+        }
+    });
+}
+
+#[test]
+fn streaming_4_ranks() {
+    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let total_elems = mesh.n_elems();
+    let total_nodes = mesh.n_nodes();
+
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let res = Arc::clone(&results);
+    launcher(4).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
+        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+            .expect("streaming partition failed");
+
+        assert_eq!(pmesh.global_n_elems(), total_elems);
+        assert_eq!(pmesh.global_n_nodes(), total_nodes);
+
+        pmesh.local_mesh().check().expect("local mesh check failed");
+
+        res.lock().unwrap().push(comm.rank());
+    });
+
+    let mut r = results.lock().unwrap().clone();
+    r.sort();
+    assert_eq!(r, vec![0, 1, 2, 3]);
 }

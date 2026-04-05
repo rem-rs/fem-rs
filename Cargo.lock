@@ -596,14 +596,18 @@ dependencies = [
 name = "fem-wasm"
 version = "0.1.0"
 dependencies = [
+ "console_error_panic_hook",
  "fem-assembly",
  "fem-core",
  "fem-element",
  "fem-io",
  "fem-linalg",
  "fem-mesh",
+ "fem-parallel",
  "fem-solver",
  "fem-space",
+ "jsmpi",
+ "log",
  "serde",
  "wasm-bindgen",
 ]

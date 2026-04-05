@@ -48,6 +48,7 @@
 | 34 | parallel | ✅ Done | 2026-04-05 | P2 parallel spaces: DofPartition::from_dof_manager (edge DOF ownership via min-owner rule), ghost edge ID exchange, DOF permutation (dm↔partition), ParAssembler auto-permute; pex1 --p2 (L² error 5.5e-4); 7 new tests |
 | 35 | parallel | ✅ Done | 2026-04-05 | Parallel AMG: ParAmgHierarchy (local smoothed aggregation, Galerkin R*A*P), damped Jacobi smoother, par_solve_pcg_amg; AMG fewer iters than Jacobi verified; 3 tests |
 | 36 | parallel | ✅ Done | 2026-04-05 | Comm::split(color,key) sub-communicator; CommBackend::split trait method; ChannelBackend impl (Arc pointer sharing); 2 tests |
+| 37 | parallel + wasm | ✅ Done | 2026-04-05 | WASM multi-Worker + streaming mesh partition: WorkerInitMsg::from_jsmpi_env(), spawn_async()+WasmJob, MeshPartition::from_raw(), binary mesh_serde (encode/decode), partition_simplex_streaming() (rank 0 distributes sub-meshes via send/recv), extract_submesh_for_rank() refactor, WasmParSolver + jsmpi_main entry point, wasm-parallel feature; 13 new tests |
 
 ### Vendor submodules
 | Submodule | URL | Role |

@@ -6,10 +6,11 @@
 //!
 //! ## Feature flags
 //!
-//! | Feature  | Effect |
-//! |----------|--------|
-//! | `wasm`   | Enable `wasm-bindgen` attribute macros; required when building with `wasm-pack`. |
-//! | *(none)* | Compile as a plain `rlib` — all logic is testable with `cargo test`. |
+//! | Feature         | Effect |
+//! |-----------------|--------|
+//! | `wasm`          | Enable `wasm-bindgen` attribute macros; required when building with `wasm-pack`. |
+//! | `wasm-parallel` | Multi-worker parallel solver via jsmpi; includes `wasm` + `fem-parallel`. |
+//! | *(none)*        | Compile as a plain `rlib` — all logic is testable with `cargo test`. |
 //!
 //! ## Quick start (native test)
 //! ```rust
@@ -24,5 +25,8 @@
 //! ```
 
 mod solver;
+
+#[cfg(feature = "wasm-parallel")]
+pub mod par_solver;
 
 pub use solver::WasmSolver;

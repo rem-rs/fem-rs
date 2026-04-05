@@ -374,6 +374,9 @@ default (zero-cost for constants).
 | `HypreBoomerAMG` | `ParAmgHierarchy` (local smoothed aggregation) | ✅ |
 | `par_solve_pcg_amg()` | PCG + AMG V-cycle preconditioner | ✅ |
 | `MPI_Comm_split` | `Comm::split(color, key)` | ✅ |
+| Streaming mesh distribution | `partition_simplex_streaming()` | ✅ Phase 37 |
+| WASM multi-Worker MPI | `WorkerLauncher::spawn_async()` + `jsmpi_main` | ✅ Phase 37 |
+| Binary sub-mesh serde | `mesh_serde::encode/decode_submesh()` | ✅ Phase 37 |
 
 ---
 
@@ -529,3 +532,8 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 30 | `solver` | Newmark-β time integrator; ex10_wave_equation example | ✅ |
 | 31 | `element` | Gauss-Lobatto quadrature (seg, quad, hex) | ✅ |
 | 32 | `examples` | ex4_darcy (H(div) RT0), ex15_dg_amr (P1 + ZZ + Dörfler) | ✅ |
+| 33a-e | `parallel` | jsmpi backend, DofPartition, ParVector, ParCsrMatrix, ParAssembler, par_solve_pcg_jacobi, pex1 | ✅ |
+| 34 | `parallel` | P2 parallel spaces (DofPartition::from_dof_manager, edge DOF ownership, auto-permute) | ✅ |
+| 35 | `parallel` | Parallel AMG (ParAmgHierarchy, smoothed aggregation, par_solve_pcg_amg) | ✅ |
+| 36 | `parallel` | Comm::split sub-communicators | ✅ |
+| 37 | `parallel`+`wasm` | WASM multi-Worker (spawn_async, jsmpi_main), streaming mesh partition (partition_simplex_streaming), binary mesh serde | ✅ |

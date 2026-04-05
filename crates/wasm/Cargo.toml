@@ -15,15 +15,22 @@ fem-space    = { path = "../space" }
 fem-assembly = { path = "../assembly" }
 fem-solver   = { path = "../solver" }
 fem-io       = { path = "../io" }
+fem-parallel = { path = "../parallel", optional = true }
+log          = { workspace = true }
 serde        = { workspace = true }
 
 [dependencies.wasm-bindgen]
 version  = "0.2"
 optional = true
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+jsmpi = { path = "../../vendor/jsmpi", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
 [features]
-default = []
-wasm    = ["dep:wasm-bindgen"]
+default       = []
+wasm          = ["dep:wasm-bindgen"]
+wasm-parallel = ["wasm", "dep:fem-parallel", "dep:jsmpi", "dep:console_error_panic_hook"]
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O3"]

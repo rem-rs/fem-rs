@@ -211,6 +211,52 @@ impl MeshPartition {
         self.node_owner[local_id as usize]
     }
 
+    /// Construct from raw flat arrays (used by streaming mesh deserialisation).
+    ///
+    /// Builds the internal global→local lookup tables automatically.
+    ///
+    /// # Panics
+    /// Panics if `global_node_ids.len() != n_owned_nodes + n_ghost_nodes` or
+    /// `node_owner.len() != n_owned_nodes + n_ghost_nodes`.
+    pub fn from_raw(
+        n_owned_nodes: usize,
+        n_ghost_nodes: usize,
+        global_node_ids: Vec<NodeId>,
+        node_owner: Vec<Rank>,
+        global_elem_ids: Vec<ElemId>,
+    ) -> Self {
+        let total = n_owned_nodes + n_ghost_nodes;
+        assert_eq!(global_node_ids.len(), total,
+            "global_node_ids.len()={} != n_owned+n_ghost={}",
+            global_node_ids.len(), total);
+        assert_eq!(node_owner.len(), total,
+            "node_owner.len()={} != n_owned+n_ghost={}",
+            node_owner.len(), total);
+
+        let n_local_elems = global_elem_ids.len();
+        let node_global_to_local = global_node_ids
+            .iter()
+            .enumerate()
+            .map(|(lid, &gid)| (gid, lid as u32))
+            .collect();
+        let elem_global_to_local = global_elem_ids
+            .iter()
+            .enumerate()
+            .map(|(lid, &gid)| (gid, lid as u32))
+            .collect();
+
+        MeshPartition {
+            n_owned_nodes,
+            n_ghost_nodes,
+            global_node_ids,
+            node_owner,
+            n_local_elems,
+            global_elem_ids,
+            node_global_to_local,
+            elem_global_to_local,
+        }
+    }
+
     /// Rebuild the global→local lookup tables.
     ///
     /// Call this if `global_node_ids` or `global_elem_ids` were mutated after

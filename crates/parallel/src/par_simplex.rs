@@ -29,6 +29,7 @@ use fem_core::{FaceId, NodeId, Rank};
 use fem_mesh::SimplexMesh;
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
+use crate::mesh_serde;
 
 // ── public entry point ────────────────────────────────────────────────────────
 
@@ -36,6 +37,10 @@ use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
 ///
 /// Returns a [`ParallelMesh`] whose local sub-mesh contains only the elements
 /// and nodes (owned + ghost) assigned to the calling rank.
+///
+/// **Note**: every rank must hold the full serial mesh.  For a
+/// memory-efficient alternative where only rank 0 holds the mesh, use
+/// [`partition_simplex_streaming`].
 ///
 /// # Panics
 /// Panics if the mesh has zero elements.
@@ -54,17 +59,87 @@ pub fn partition_simplex<const D: usize>(
     }
 
     // ── multi-rank partitioning ──────────────────────────────────────────────
+    let (local_mesh, partition) = extract_submesh_for_rank(
+        mesh, comm.rank(), comm.size(),
+    );
+    ParallelMesh::new(local_mesh, comm.clone(), partition)
+}
+
+// ── streaming partition ──────────────────────────────────────────────────────
+
+/// Streaming mesh partition tag base (avoids ghost `0x1000`/`0x2000` and
+/// alltoallv `0x4000`/`0x5000`).
+const STREAM_TAG_BASE: i32 = 0x3700;
+
+/// Distribute a mesh using streaming: only rank 0 holds the full mesh.
+///
+/// Rank 0 partitions the mesh and sends each rank's sub-mesh via point-to-point
+/// messages.  Other ranks receive their sub-mesh without ever loading the full
+/// mesh — saving memory on WASM workers.
+///
+/// # Arguments
+/// * `mesh` — `Some(&full_mesh)` on rank 0, `None` on other ranks.
+/// * `comm` — communicator spanning all ranks.
+///
+/// # Errors
+/// Returns `Err` if the binary mesh decode fails on a receiving rank.
+pub fn partition_simplex_streaming<const D: usize>(
+    mesh: Option<&SimplexMesh<D>>,
+    comm: &Comm,
+) -> Result<ParallelMesh<SimplexMesh<D>>, String> {
     let size = comm.size();
-    let local_rank = comm.rank();
+
+    // ── single-rank fast path ────────────────────────────────────────────────
+    if size == 1 {
+        let m = mesh.ok_or("rank 0 must provide the mesh")?;
+        let partition = MeshPartition::new_serial(m.n_nodes(), m.n_elems());
+        return Ok(ParallelMesh::new(m.clone(), comm.clone(), partition));
+    }
+
+    if comm.is_root() {
+        // ── root: partition and distribute ────────────────────────────────────
+        let m = mesh.ok_or("rank 0 must provide the mesh")?;
+
+        // Send sub-meshes to ranks 1..N-1.
+        for target in 1..size as Rank {
+            let (sub_mesh, sub_part) = extract_submesh_for_rank(m, target, size);
+            let encoded = mesh_serde::encode_submesh(&sub_mesh, &sub_part);
+            comm.send_bytes(target, STREAM_TAG_BASE + target, &encoded);
+        }
+
+        // Extract rank 0's own sub-mesh.
+        let (local_mesh, partition) = extract_submesh_for_rank(m, 0, size);
+        Ok(ParallelMesh::new(local_mesh, comm.clone(), partition))
+    } else {
+        // ── non-root: receive sub-mesh ───────────────────────────────────────
+        let local_rank = comm.rank();
+        let buf = comm.recv_bytes(0, STREAM_TAG_BASE + local_rank);
+        let (local_mesh, partition) = mesh_serde::decode_submesh::<D>(&buf)?;
+        Ok(ParallelMesh::new(local_mesh, comm.clone(), partition))
+    }
+}
+
+// ── extract_submesh_for_rank ─────────────────────────────────────────────────
+
+/// Extract the sub-mesh and partition descriptor for a given rank.
+///
+/// This is the core partitioning logic: contiguous element blocks assigned to
+/// ranks, with ghost elements and nodes computed for each rank's stencil.
+fn extract_submesh_for_rank<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    target_rank: Rank,
+    n_ranks: usize,
+) -> (SimplexMesh<D>, MeshPartition) {
+    let n_elems = mesh.n_elems();
 
     // 1. Assign elements to ranks (contiguous blocks).
-    let chunk = n_elems.div_ceil(size);
-    let e_start = (local_rank as usize * chunk).min(n_elems);
+    let chunk = n_elems.div_ceil(n_ranks);
+    let e_start = (target_rank as usize * chunk).min(n_elems);
     let e_end = (e_start + chunk).min(n_elems);
     let local_elem_gids: Vec<u32> = (e_start..e_end).map(|e| e as u32).collect();
 
     // 2. Node ownership: owner = rank of first element containing the node.
-    let node_owners = compute_node_owners(mesh, n_nodes_total, n_elems, size);
+    let node_owners = compute_node_owners(mesh, mesh.n_nodes(), n_elems, n_ranks);
 
     // 3. Collect all nodes touched by local (owned) elements.
     let mut node_set: BTreeSet<NodeId> = BTreeSet::new();
@@ -75,12 +150,11 @@ pub fn partition_simplex<const D: usize>(
     }
 
     // 3b. Find ghost elements: elements NOT owned by this rank that share at
-    // least one node with our owned elements.  This ensures that all
-    // contributions to owned-row DOFs are captured during local assembly.
+    // least one node with our owned elements.
     let mut ghost_elem_gids: Vec<u32> = Vec::new();
     for e in 0..n_elems as u32 {
         let owner_rank = (e as usize / chunk) as Rank;
-        if owner_rank == local_rank { continue; }
+        if owner_rank == target_rank { continue; }
         let shares_node = mesh.elem_nodes(e).iter().any(|n| node_set.contains(n));
         if shares_node {
             ghost_elem_gids.push(e);
@@ -99,14 +173,14 @@ pub fn partition_simplex<const D: usize>(
     let mut ghost_global: Vec<(NodeId, Rank)> = Vec::new();
     for gn in &node_set {
         let owner = node_owners[*gn as usize];
-        if owner == local_rank {
+        if owner == target_rank {
             owned_global.push(*gn);
         } else {
             ghost_global.push((*gn, owner));
         }
     }
 
-    // 4. Build global → local node mapping (owned first, then ghost).
+    // 4b. Build global → local node mapping (owned first, then ghost).
     let ghost_base = owned_global.len();
     let mut g2l: HashMap<NodeId, u32> =
         HashMap::with_capacity(owned_global.len() + ghost_global.len());
@@ -140,7 +214,7 @@ pub fn partition_simplex<const D: usize>(
 
     // 7. Assign boundary faces to this rank.
     let (local_face_conn, local_face_tags) =
-        extract_local_faces(mesh, &g2l, &node_owners, local_rank);
+        extract_local_faces(mesh, &g2l, &node_owners, target_rank);
 
     // 8. Assemble the local sub-mesh.
     let local_mesh = SimplexMesh::<D> {
@@ -157,10 +231,10 @@ pub fn partition_simplex<const D: usize>(
         &owned_global,
         &ghost_global,
         &local_elem_gids,  // only owned elements in the partition
-        local_rank,
+        target_rank,
     );
 
-    ParallelMesh::new(local_mesh, comm.clone(), partition)
+    (local_mesh, partition)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
