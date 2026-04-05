@@ -297,7 +297,7 @@ default (zero-cost for constants).
 |---|---|---|---|
 | `DSmoother` | Jacobi / diagonal scaling | PCG+Jacobi (via linger) | ✅ |
 | `GSSmoother` | Gauss-Seidel | `SmootherKind::GaussSeidel` (AMG) | ✅ |
-| Chebyshev smoother | Chebyshev polynomial | — | 🔲 |
+| Chebyshev smoother | Chebyshev polynomial | `SmootherType::Chebyshev` | ✅ |
 | `SparseSmoothedProjection` | ILU-based | PCG+ILU0 (via linger) | ✅ |
 | `BlockDiagonalPreconditioner` | Block Jacobi | `BlockDiagonalPrecond` | ✅ |
 | `BlockTriangularPreconditioner` | Block triangular | `BlockTriangularPrecond` | ✅ |
@@ -331,7 +331,7 @@ default (zero-cost for constants).
 | Post-smoother | Post-smooth steps | ✅ |
 | V-cycle | `CycleType::V` | ✅ |
 | W-cycle | `CycleType::W` | ✅ |
-| F-cycle | `CycleType::F` | 🔲 |
+| F-cycle | `CycleType::F` | ✅ |
 | Max levels | Max levels config | ✅ |
 | Coarse-grid direct solve | Dense LU | ✅ |
 | hypre binding | feature `amg/hypre` | 🔲 |
@@ -471,9 +471,9 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | MFEM example | Problem | fem-rs milestone |
 |---|---|---|
 | **pex1** | Parallel Poisson (Poisson) | ✅ `pex1_poisson` (contiguous/METIS + streaming) |
-| **pex2** | Parallel mixed Poisson | 🔲 Phase 10+ |
-| **pex3** | Parallel Maxwell (H(curl)) | 🔲 Phase 10+ |
-| **pex5** | Parallel Darcy | 🔲 Phase 10+ |
+| **pex2** | Parallel mixed Poisson | ✅ `pex2_mixed_darcy` |
+| **pex3** | Parallel Maxwell (H(curl)) | ✅ `pex3_maxwell` |
+| **pex5** | Parallel Darcy | ✅ `pex5_darcy` |
 
 ---
 
@@ -539,6 +539,8 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 37 | `parallel`+`wasm` | WASM multi-Worker (spawn_async, jsmpi_main), streaming mesh partition (partition_simplex_streaming), binary mesh serde | ✅ |
 | 38 | `parallel` | METIS streaming partition (partition_simplex_metis_streaming), generalized submesh extractor, pex1 CLI flags | ✅ |
 | 38b | `io` | GMSH v2 ASCII + v4.1 binary reader (unified `read_msh_file()` entry point) | ✅ |
+| 39 | `parallel`+`examples` | pex2 (mixed Poisson), pex3 (Maxwell), pex5 (Darcy) parallel examples | ✅ |
+| 39b | `amg` | Chebyshev smoother (`SmootherType::Chebyshev`), F-cycle (`CycleType::F`) | ✅ |
 
 ---
 
@@ -568,9 +570,9 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 ### Solvers
 | Item | Status | Priority |
 |------|--------|----------|
-| Chebyshev smoother (AMG) | 🔲 | Medium |
+| Chebyshev smoother (AMG) | ✅ | ~~Medium~~ Done |
 | SLISolver (stationary iteration) | 🔲 | Low |
-| AMG F-cycle | 🔲 | Low |
+| AMG F-cycle | ✅ | ~~Low~~ Done |
 | hypre binding | 🔲 | Low |
 
 ### Spaces & Post-processing
@@ -585,9 +587,9 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 ### Parallel Examples
 | Item | Status | Priority |
 |------|--------|----------|
-| pex2 (parallel mixed Poisson) | 🔲 | Medium |
-| pex3 (parallel Maxwell) | 🔲 | Medium |
-| pex5 (parallel Darcy) | 🔲 | Medium |
+| pex2 (parallel mixed Poisson) | ✅ | ~~Medium~~ Done |
+| pex3 (parallel Maxwell) | ✅ | ~~Medium~~ Done |
+| pex5 (parallel Darcy) | ✅ | ~~Medium~~ Done |
 | ex19 (Navier-Stokes) | 🔲 | Medium |
 | Browser E2E (WASM parallel) | 🔲 | Medium |
 
@@ -598,24 +600,24 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 Based on the completed 38 phases and remaining gaps, here is a recommended
 prioritized roadmap for continued development.
 
-### Phase 39 — Parallel Examples Expansion (pex2 / pex3 / pex5)
-> **Priority: High** — validates parallel infrastructure across all FE spaces
+### Phase 39 — Parallel Examples Expansion (pex2 / pex3 / pex5) ✅
+> **Completed** — validates parallel infrastructure across all FE spaces
 
-| Task | Space | Depends on |
-|------|-------|------------|
-| `pex2_mixed_poisson` | H(div) RT0 × L² | ParAssembler + BlockSystem |
-| `pex3_maxwell` | H(curl) ND1 | ParAssembler + VectorAssembler |
-| `pex5_darcy` | H(div) × L² saddle-point | ParAssembler + SchurComplement |
+| Task | Space | Status |
+|------|-------|--------|
+| `pex2_mixed_darcy` | H(div) RT0 × L² | ✅ |
+| `pex3_maxwell` | H(curl) ND1 | ✅ |
+| `pex5_darcy` | H(div) × L² saddle-point | ✅ |
 
-### Phase 40 — Chebyshev Smoother + AMG F-cycle
-> **Priority: Medium** — smoother quality directly impacts AMG convergence
+### Phase 39b — Chebyshev Smoother + AMG F-cycle ✅
+> **Completed** — smoother quality directly impacts AMG convergence
 
-- Chebyshev polynomial smoother (degree 2–4) as `SmootherKind::Chebyshev`
-- Eigenvalue estimate via a few CG iterations (λ_max bound)
-- F-cycle: `CycleType::F` (V on first coarse visit, W after)
-- Benchmark vs Jacobi/GS on 3D Poisson and elasticity
+- ✅ Chebyshev polynomial smoother (degree 2–4) as `SmootherType::Chebyshev`
+- ✅ Eigenvalue estimate via spectral radius bound (λ_max)
+- ✅ F-cycle: `CycleType::F` (V on first coarse visit, W after)
+- ✅ Tests: Chebyshev, F-cycle, Chebyshev+F-cycle combinations
 
-### Phase 41 — Taylor-Hood P2-P1 Stokes Example
+### Phase 40 — Taylor-Hood P2-P1 Stokes Example
 > **Priority: Medium** — demonstrates mixed FEM at production quality
 
 - Full `ex_stokes` example: lid-driven cavity or backward-facing step
