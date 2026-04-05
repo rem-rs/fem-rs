@@ -5,7 +5,8 @@
 //! u(x,y) = sin(pi*x) sin(pi*y).
 //!
 //! Usage:
-//!   cargo run --example pex1_poisson
+//!   cargo run --example pex1_poisson            # P1 (default)
+//!   cargo run --example pex1_poisson -- --p2    # P2
 
 use std::f64::consts::PI;
 
@@ -20,14 +21,19 @@ use fem_parallel::launcher::native::ThreadLauncher;
 use fem_solver::SolverConfig;
 use fem_space::{H1Space, fe_space::FESpace};
 use fem_space::constraints::boundary_dofs;
+use fem_space::dof_manager::DofManager;
 
 fn main() {
     env_logger::init();
 
+    let args: Vec<String> = std::env::args().collect();
+    let use_p2 = args.iter().any(|a| a == "--p2");
+    let order: u8 = if use_p2 { 2 } else { 1 };
+
     let n_workers = 2;
     let mesh_n = 16;
 
-    println!("=== fem-rs pex1: Parallel Poisson ===");
+    println!("=== fem-rs pex1: Parallel Poisson (P{order}) ===");
     println!("  Workers: {n_workers}, Mesh: {mesh_n}x{mesh_n}");
 
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
@@ -42,30 +48,39 @@ fn main() {
                 par_mesh.global_n_nodes(), par_mesh.global_n_elems());
         }
 
-        // 2. Build parallel FE space (P1).
-        let local_space = H1Space::new(par_mesh.local_mesh().clone(), 1);
-        let par_space = ParallelFESpace::new(local_space, &par_mesh, comm.clone());
+        // 2. Build parallel FE space.
+        let local_mesh = par_mesh.local_mesh().clone();
+        let dm = DofManager::new(&local_mesh, order);
+        let local_space = H1Space::new(local_mesh, order);
+        let par_space = if order >= 2 {
+            ParallelFESpace::new_with_dof_manager(local_space, &par_mesh, &dm, comm.clone())
+        } else {
+            ParallelFESpace::new(local_space, &par_mesh, comm.clone())
+        };
 
         if rank == 0 {
             println!("  Global DOFs: {}", par_space.n_global_dofs());
         }
 
         // 3. Parallel assembly.
+        let quad_order = if order >= 2 { 4 } else { 3 };
         let diff = DiffusionIntegrator { kappa: 1.0 };
-        let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 3);
+        let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], quad_order);
 
         let source = DomainSourceIntegrator::new(|x: &[f64]| {
             2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
         });
-        let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+        let rhs_quad = if order >= 2 { 5 } else { 3 };
+        let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], rhs_quad);
 
         // 4. Apply Dirichlet BCs: u=0 on all boundary faces.
-        let dm = par_space.local_space().dof_manager();
-        let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+        let bc_dm = par_space.local_space().dof_manager();
+        let bc_dofs = boundary_dofs(par_space.local_space().mesh(), bc_dm, &[1, 2, 3, 4]);
+        let dof_part = par_space.dof_partition();
         for &d in &bc_dofs {
-            let lid = d as usize;
-            if lid < par_space.dof_partition().n_owned_dofs {
-                a_mat.apply_dirichlet_par(lid, 0.0, &mut rhs);
+            let pid = dof_part.permute_dof(d) as usize;
+            if pid < dof_part.n_owned_dofs {
+                a_mat.apply_dirichlet_par(pid, 0.0, &mut rhs);
             }
         }
 
@@ -85,15 +100,16 @@ fn main() {
         }
 
         // 6. Compute L2 error against exact solution u_exact = sin(pi*x)*sin(pi*y).
-        // Approximate: |u - u_exact|^2 at DOF points, sum over owned DOFs.
-        let n_owned = par_space.dof_partition().n_owned_dofs;
-        let dm = par_space.local_space().dof_manager();
+        let n_owned = dof_part.n_owned_dofs;
+        let err_dm = par_space.local_space().dof_manager();
         let mut local_err_sq = 0.0_f64;
-        for lid in 0..n_owned {
-            let coord = dm.dof_coord(lid as u32);
+        for pid in 0..n_owned {
+            // Map partition local ID back to DofManager ID for coordinate lookup.
+            let dm_id = dof_part.unpermute_dof(pid as u32);
+            let coord = err_dm.dof_coord(dm_id);
             let exact = (PI * coord[0]).sin() * (PI * coord[1]).sin();
-            let diff = u.as_slice()[lid] - exact;
-            local_err_sq += diff * diff;
+            let diff_val = u.as_slice()[pid] - exact;
+            local_err_sq += diff_val * diff_val;
         }
         let global_err_sq = comm.allreduce_sum_f64(local_err_sq);
         let n_global = par_space.n_global_dofs() as f64;

@@ -58,6 +58,11 @@ pub struct DofManager {
     pub dof_coords: Vec<f64>,
     /// Spatial dimension.
     pub dim: usize,
+    /// Number of mesh nodes (vertex DOFs). For P2, edge DOFs start at this index.
+    pub n_vertex_dofs: usize,
+    /// Edge-to-DOF mapping (P2 only). Maps canonical edge keys to global DOF IDs.
+    /// Empty for P1.
+    pub edge_dof_map: HashMap<EdgeKey, DofId>,
 }
 
 impl DofManager {
@@ -111,7 +116,7 @@ impl DofManager {
             dof_coords.extend_from_slice(mesh.node_coords(n));
         }
 
-        DofManager { order: 1, n_dofs: n_nodes, dofs_flat, dofs_per_elem: npe, dof_coords, dim }
+        DofManager { order: 1, n_dofs: n_nodes, dofs_flat, dofs_per_elem: npe, dof_coords, dim, n_vertex_dofs: n_nodes, edge_dof_map: HashMap::new() }
     }
 
     // ─── P2 ──────────────────────────────────────────────────────────────────
@@ -176,7 +181,7 @@ impl DofManager {
             }
         }
 
-        DofManager { order: 2, n_dofs, dofs_flat, dofs_per_elem, dof_coords, dim }
+        DofManager { order: 2, n_dofs, dofs_flat, dofs_per_elem, dof_coords, dim, n_vertex_dofs: n_nodes, edge_dof_map: edge_map }
     }
 }
 

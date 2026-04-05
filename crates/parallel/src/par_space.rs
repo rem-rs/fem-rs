@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use fem_space::fe_space::FESpace;
+use fem_space::dof_manager::DofManager;
 use fem_mesh::topology::MeshTopology;
 
 use crate::comm::Comm;
@@ -16,8 +17,8 @@ use crate::par_mesh::ParallelMesh;
 /// A parallel finite element space: wraps a serial FESpace with DOF-level
 /// partitioning and ghost exchange.
 ///
-/// For P1 spaces, DOFs correspond 1:1 with mesh nodes and the DOF ghost
-/// exchange mirrors the node ghost exchange.
+/// For P1 spaces, DOFs correspond 1:1 with mesh nodes.  For P2, edge DOFs
+/// are added with ownership based on the minimum-owner-rank rule.
 pub struct ParallelFESpace<S: FESpace> {
     local_space: S,
     dof_partition: DofPartition,
@@ -33,26 +34,43 @@ where
     /// Build a parallel FE space from a local space and parallel mesh.
     ///
     /// The DOF partition is derived from the mesh partition (P1: DOFs = nodes).
-    /// A DOF-level ghost exchange is built for communicating DOF values between
-    /// ranks.
+    /// For P2+ spaces, use [`new_with_dof_manager`](Self::new_with_dof_manager).
     pub fn new<M: MeshTopology>(
         local_space: S,
         par_mesh: &ParallelMesh<M>,
         comm: Comm,
     ) -> Self {
         let dof_partition = DofPartition::from_mesh_partition(par_mesh.partition(), &comm);
+        Self::finish(local_space, dof_partition, &comm)
+    }
 
-        // Build DOF-level ghost exchange using the same algorithm as the mesh
-        // ghost exchange but based on DOF ownership.
-        let dof_ghost_exchange = Arc::new(build_dof_ghost_exchange(&dof_partition, &comm));
+    /// Build a parallel FE space with an explicit `DofManager`.
+    ///
+    /// This constructor supports P2 (and future higher-order) spaces by using
+    /// the edge-to-DOF mapping from the `DofManager` to determine edge DOF
+    /// ownership across ranks.
+    pub fn new_with_dof_manager<M: MeshTopology>(
+        local_space: S,
+        par_mesh: &ParallelMesh<M>,
+        dof_manager: &DofManager,
+        comm: Comm,
+    ) -> Self {
+        let dof_partition = DofPartition::from_dof_manager(
+            dof_manager, par_mesh.partition(), &comm,
+        );
+        Self::finish(local_space, dof_partition, &comm)
+    }
 
+    /// Common construction: build ghost exchange and count global DOFs.
+    fn finish(local_space: S, dof_partition: DofPartition, comm: &Comm) -> Self {
+        let dof_ghost_exchange = Arc::new(build_dof_ghost_exchange(&dof_partition, comm));
         let n_global_dofs = comm.allreduce_sum_i64(dof_partition.n_owned_dofs as i64) as usize;
 
         ParallelFESpace {
             local_space,
             dof_partition,
             dof_ghost_exchange,
-            comm,
+            comm: comm.clone(),
             n_global_dofs,
         }
     }
@@ -95,21 +113,15 @@ where
 }
 
 /// Build a `GhostExchange` from DOF ownership data.
-///
-/// Uses the same algorithm as `GhostExchange::from_partition` but with DOF
-/// indices instead of node indices.
 fn build_dof_ghost_exchange(dof_part: &DofPartition, comm: &Comm) -> GhostExchange {
     use crate::partition::MeshPartition;
 
-    // Reuse the existing GhostExchange::from_partition by building a
-    // temporary MeshPartition with DOF data.  This avoids duplicating the
-    // exchange-pattern construction logic.
     let tmp_partition = MeshPartition::from_partitioner(
         &dof_part.global_dof_ids[..dof_part.n_owned_dofs],
         &dof_part.ghost_dofs().map(|(lid, owner)| {
             (dof_part.global_dof(lid), owner)
         }).collect::<Vec<_>>(),
-        &[], // no elements needed
+        &[],
         comm.rank(),
     );
 
@@ -124,9 +136,10 @@ mod tests {
     use crate::par_simplex::partition_simplex;
     use fem_mesh::SimplexMesh;
     use fem_space::H1Space;
+    use fem_space::dof_manager::DofManager;
 
     #[test]
-    fn par_space_global_dofs_match_serial() {
+    fn par_space_global_dofs_match_serial_p1() {
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let serial_n_dofs = mesh.n_nodes(); // P1
 
@@ -141,7 +154,27 @@ mod tests {
     }
 
     #[test]
-    fn par_space_ghost_exchange() {
+    fn par_space_global_dofs_match_serial_p2() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let serial_space = H1Space::new(mesh.clone(), 2);
+        let serial_n_dofs = serial_space.n_dofs();
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_mesh = pmesh.local_mesh().clone();
+            let dm = DofManager::new(&local_mesh, 2);
+            let local_space = H1Space::new(local_mesh, 2);
+            let par_space = ParallelFESpace::new_with_dof_manager(
+                local_space, &pmesh, &dm, comm.clone(),
+            );
+
+            assert_eq!(par_space.n_global_dofs(), serial_n_dofs);
+        });
+    }
+
+    #[test]
+    fn par_space_ghost_exchange_p1() {
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
@@ -153,14 +186,48 @@ mod tests {
             let n_local = par_space.n_local_dofs();
             let n_owned = par_space.dof_partition().n_owned_dofs;
 
-            // Set owned DOFs to their global ID, ghost DOFs to -1.
             let mut data = vec![-1.0_f64; n_local];
             for lid in 0..n_owned {
                 let gid = par_space.dof_partition().global_dof(lid as u32);
                 data[lid] = gid as f64;
             }
 
-            // Forward exchange should fill ghost slots with the correct global IDs.
+            par_space.forward_dof_exchange(&mut data);
+
+            for lid in n_owned..n_local {
+                let expected = par_space.dof_partition().global_dof(lid as u32) as f64;
+                assert!(
+                    (data[lid] - expected).abs() < 1e-14,
+                    "rank {}: ghost DOF local={lid} expected {expected}, got {}",
+                    comm.rank(), data[lid]
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn par_space_ghost_exchange_p2() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_mesh = pmesh.local_mesh().clone();
+            let dm = DofManager::new(&local_mesh, 2);
+            let local_space = H1Space::new(local_mesh, 2);
+            let par_space = ParallelFESpace::new_with_dof_manager(
+                local_space, &pmesh, &dm, comm.clone(),
+            );
+
+            let n_local = par_space.n_local_dofs();
+            let n_owned = par_space.dof_partition().n_owned_dofs;
+
+            let mut data = vec![-1.0_f64; n_local];
+            for lid in 0..n_owned {
+                let gid = par_space.dof_partition().global_dof(lid as u32);
+                data[lid] = gid as f64;
+            }
+
             par_space.forward_dof_exchange(&mut data);
 
             for lid in n_owned..n_local {

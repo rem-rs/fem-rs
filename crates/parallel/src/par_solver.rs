@@ -261,4 +261,47 @@ mod tests {
                 comm.rank(), res.iterations, res.final_residual);
         });
     }
+
+    #[test]
+    fn par_pcg_jacobi_p2_two_ranks() {
+        // Two-rank parallel PCG on Poisson with P2 elements.
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_mesh = pmesh.local_mesh().clone();
+            let dm = fem_space::dof_manager::DofManager::new(&local_mesh, 2);
+            let local_space = H1Space::new(local_mesh, 2);
+            let par_space = ParallelFESpace::new_with_dof_manager(
+                local_space, &pmesh, &dm, comm.clone(),
+            );
+
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 4);
+
+            let source = fem_assembly::standard::DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 5);
+
+            // Apply Dirichlet BCs: u=0 on boundary.
+            // boundary_dofs returns DOF IDs in DofManager numbering.
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(),
+                par_space.local_space().dof_manager(), &[1, 2, 3, 4]);
+            let dof_part = par_space.dof_partition();
+            for &d in &bc_dofs {
+                let pid = dof_part.permute_dof(d) as usize;
+                if pid < dof_part.n_owned_dofs {
+                    a_mat.apply_dirichlet_row(pid, 0.0, &mut rhs.data);
+                }
+            }
+
+            let mut u = ParVector::zeros(&par_space);
+            let cfg = SolverConfig { rtol: 1e-8, ..SolverConfig::default() };
+            let res = par_solve_pcg_jacobi(&a_mat, &rhs, &mut u, &cfg).unwrap();
+
+            assert!(res.converged,
+                "rank {}: P2 PCG did not converge: {} iters, res={:.3e}",
+                comm.rank(), res.iterations, res.final_residual);
+        });
+    }
 }
