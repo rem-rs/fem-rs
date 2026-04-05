@@ -254,7 +254,7 @@ default (zero-cost for constants).
 | `SparseMatrix::EliminateRow()` | `apply_dirichlet_row_zeroing()` | ✅ |
 | `SparseMatrix::GetDiag()` | `CsrMatrix::diagonal()` | ✅ |
 | `SparseMatrix::Transpose()` | `CsrMatrix::transpose()` | ✅ |
-| `SparseMatrix::Add(A,B)` | — | 🔲 |
+| `SparseMatrix::Add(A,B)` | `spadd(&A, &B)` | ✅ |
 | `SparseMatrix::Mult(A,B)` | SpGEMM (via linger) | ✅ |
 | `DenseMatrix` (local dense) | `nalgebra::SMatrix` | ✅ |
 | `DenseTensor` | nested matrices | 🔲 |
@@ -283,7 +283,7 @@ default (zero-cost for constants).
 | `CGSolver` | SPD: A x = b | `solver` (via linger) | ✅ |
 | `PCGSolver` | SPD + preconditioner | `solver` (PCG+Jacobi/ILU0) | ✅ |
 | `GMRESSolver(m)` | General: A x = b | `solver` (via linger) | ✅ |
-| `FGMRESSolver` | Flexible GMRES | — | 🔲 |
+| `FGMRESSolver` | Flexible GMRES | `solve_fgmres` / `solve_fgmres_jacobi` | ✅ |
 | `BiCGSTABSolver` | Non-symmetric | `solver` (via linger) | ✅ |
 | `MINRESSolver` | Indefinite symmetric | `MinresSolver` | ✅ |
 | `SLISolver` | Stationary linear iteration | — | 🔲 |
@@ -300,7 +300,7 @@ default (zero-cost for constants).
 | Chebyshev smoother | Chebyshev polynomial | — | 🔲 |
 | `SparseSmoothedProjection` | ILU-based | PCG+ILU0 (via linger) | ✅ |
 | `BlockDiagonalPreconditioner` | Block Jacobi | `BlockDiagonalPrecond` | ✅ |
-| `BlockTriangularPreconditioner` | Block triangular | — | 🔲 |
+| `BlockTriangularPreconditioner` | Block triangular | `BlockTriangularPrecond` | ✅ |
 | `SchurComplement` | Elimination for saddle point | `SchurComplementSolver` | ✅ |
 
 ### 7.3 Solver Convergence Monitors
