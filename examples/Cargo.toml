@@ -105,6 +105,10 @@ path = "pex5_darcy.rs"
 name = "ex_stokes"
 path = "ex_stokes.rs"
 
+[[example]]
+name = "ex_navier_stokes"
+path = "ex_navier_stokes.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
