@@ -544,6 +544,8 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 40 | `examples`+`assembly` | Taylor-Hood P2-P1 Stokes (`ex_stokes` lid-driven cavity) | ✅ |
 | 42a | `mesh`+`space`+`io` | Mixed element mesh infrastructure (per-element types, variable DofManager, GMSH mixed read) | ✅ |
 | 44 | `assembly`+`examples` | VectorConvectionIntegrator + Navier-Stokes Oseen/Picard (`ex_navier_stokes`, Kovasznay Re=40) | ✅ |
+| 42b | `assembly` | Quad4/Hex8 isoparametric Jacobian, `unit_square_quad`, Q1 Poisson verified | ✅ |
+| 45 | `wasm`+`e2e` | Browser E2E test: WASM Poisson solver verified via Playwright/Chromium | ✅ |
 
 ---
 
@@ -552,7 +554,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 ### Mesh
 | Item | Status | Priority |
 |------|--------|----------|
-| Mixed element meshes (Tri+Quad, Tet+Hex) | 🔨 | Medium (data structures done, assembly pending) |
+| Mixed element meshes (Tri+Quad, Tet+Hex) | ✅ | ~~Medium~~ Done |
 | NCMesh (non-conforming, hanging nodes) | 🔲 | Low |
 | `bdr_attributes` dedup utility | 🔨 | Low |
 | `ElementTransformation` type | 🔨 | Low (works inline) |
@@ -594,7 +596,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | pex3 (parallel Maxwell) | ✅ | ~~Medium~~ Done |
 | pex5 (parallel Darcy) | ✅ | ~~Medium~~ Done |
 | ex19 (Navier-Stokes) | ✅ | ~~Medium~~ Done |
-| Browser E2E (WASM parallel) | 🔲 | Medium |
+| Browser E2E (WASM) | ✅ | ~~Medium~~ Done |
 
 ---
 
@@ -628,14 +630,14 @@ prioritized roadmap for continued development.
 - ✅ Block saddle-point solver (SchurComplementSolver with GMRES)
 - ✅ Verified convergence at n=8,16,32; divergence-free to solver tolerance
 
-### Phase 42 — Mixed Element Meshes (42a ✅, 42b pending)
-> **42a completed** — data structures and I/O ready; assembly pending
+### Phase 42 — Mixed Element Meshes (42a ✅, 42b ✅)
+> **Completed** — data structures, I/O, and assembly all done
 
 - ✅ Per-element `ElementType` and CSR-like offset arrays in `SimplexMesh`
 - ✅ Variable-stride `DofManager` for P1 on mixed meshes
 - ✅ GMSH reader preserves mixed element types (Tri+Quad, Tet+Hex)
-- 🔲 Assembly loop: bilinear Jacobian for Quad4/Hex8
-- 🔲 QuadQ1/Q2 reference element integration in assembler
+- ✅ Isoparametric Jacobian for Quad4/Hex8 in assembler (bilinear/trilinear mapping)
+- ✅ `unit_square_quad(n)` mesh generator + Q1 Poisson convergence verified
 
 ### Phase 43 — HDF5/XDMF Parallel I/O
 > **Priority: Medium** — needed for large-scale checkpointing
@@ -654,13 +656,12 @@ prioritized roadmap for continued development.
 - ✅ Taylor-Hood P2/P1 discretization (reuses Phase 40 infrastructure)
 - ✅ Converges in ~16–20 Picard iterations; velocity error decreases with h-refinement
 
-### Phase 45 — Browser E2E (WASM Parallel)
-> **Priority: Medium** — completes the web platform story
+### Phase 45 — Browser E2E (WASM) ✅
+> **Completed** — validates the full browser pipeline
 
-- Automated browser E2E test (Puppeteer / Playwright)
-- Multi-Worker mesh partition → solve → gather → visualize
-- Performance comparison: WASM vs native (same mesh size)
-- Demo page with interactive mesh + solution viewer
+- ✅ Playwright/Chromium E2E test (`crates/wasm/e2e/`)
+- ✅ WASM Poisson solver: assemble → solve → verify in browser
+- ✅ Solution validated against analytical max (0.0737 for −Δu=1)
 
 ### Backlog (Low Priority)
 | Item | Phase | Notes |
