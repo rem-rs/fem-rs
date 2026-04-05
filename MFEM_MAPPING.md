@@ -137,8 +137,8 @@
 | `FES::GetElementDofs()` | `FESpace::element_dofs()` | ✅ |
 | `FES::GetBdrElementDofs()` | `boundary_dofs()` | ✅ |
 | `FES::GetEssentialTrueDofs()` | `boundary_dofs()` + `apply_dirichlet()` | ✅ |
-| `FES::GetTrueDofs()` | — | 🔲 Parallel DOF ownership |
-| `FES::TransferToTrue()` / `Transfer()` | — | 🔲 |
+| `FES::GetTrueDofs()` | `DofPartition::n_owned_dofs` + `global_dof()` | ✅ | Phase 33b |
+| `FES::TransferToTrue()` / `Transfer()` | `DofPartition::permute_dof()` / `unpermute_dof()` | ✅ | Phase 34 |
 | `DofTransformation` | `FESpace::element_signs()` | ✅ | HCurlSpace/HDivSpace sign convention |
 | `FES::GetFE()` | `FESpace::element_type()` | ✅ |
 
@@ -436,7 +436,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | **ex2** | −∇²u = f, mixed BCs | H¹ P1/P2 | Dirichlet + Neumann | ✅ `ex2_elasticity` |
 | **ex3** (scalar) | −∇²u + αu = f (reaction-diffusion) | H¹ P1 | Dirichlet | ✅ Phase 6: `MassIntegrator` |
 | **ex13** | −∇·(ε∇φ) = 0, elasticity | H¹ vector | Mixed | Phase 6: `ElasticityIntegrator` |
-| **pex1** | Parallel Poisson | H¹ + MPI | Dirichlet | Phase 10 |
+| **pex1** | Parallel Poisson | H¹ + MPI | Dirichlet | ✅ `pex1_poisson` (contiguous/METIS, streaming) |
 
 ### Tier 2 — Mixed & H(curl)/H(div) (Phase 6+)
 
@@ -470,10 +470,10 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 
 | MFEM example | Problem | fem-rs milestone |
 |---|---|---|
-| **pex1** | Parallel Poisson (Poisson) | Phase 10: `ParallelMesh` + `ParCsrMatrix` |
-| **pex2** | Parallel mixed Poisson | Phase 10 |
-| **pex3** | Parallel Maxwell (H(curl)) | Phase 10 |
-| **pex5** | Parallel Darcy | Phase 10 |
+| **pex1** | Parallel Poisson (Poisson) | ✅ `pex1_poisson` (contiguous/METIS + streaming) |
+| **pex2** | Parallel mixed Poisson | 🔲 Phase 10+ |
+| **pex3** | Parallel Maxwell (H(curl)) | 🔲 Phase 10+ |
+| **pex5** | Parallel Darcy | 🔲 Phase 10+ |
 
 ---
 
@@ -538,3 +538,54 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 36 | `parallel` | Comm::split sub-communicators | ✅ |
 | 37 | `parallel`+`wasm` | WASM multi-Worker (spawn_async, jsmpi_main), streaming mesh partition (partition_simplex_streaming), binary mesh serde | ✅ |
 | 38 | `parallel` | METIS streaming partition (partition_simplex_metis_streaming), generalized submesh extractor, pex1 CLI flags | ✅ |
+
+---
+
+## Remaining Items Summary (🔲 Planned · 🔨 Partial)
+
+### Mesh
+| Item | Status | Priority |
+|------|--------|----------|
+| Mixed element meshes (Tri+Quad, Tet+Hex) | 🔲 | Medium |
+| NCMesh (non-conforming, hanging nodes) | 🔲 | Low |
+| `bdr_attributes` dedup utility | 🔨 | Low |
+| `ElementTransformation` type | 🔨 | Low (works inline) |
+| `GetBoundingBox()` | 🔲 | Low |
+| Periodic mesh generation | 🔲 | Low |
+
+### I/O
+| Item | Status | Priority |
+|------|--------|----------|
+| GMSH v4.1 binary reader | 🔲 | **High** |
+| GMSH v2 reader | 🔲 | Medium |
+| HDF5/XDMF parallel I/O | 🔲 | Medium |
+| Netgen `.vol` reader | 🔲 | Low |
+| Abaqus `.inp` reader | 🔲 | Low |
+| `GridFunction::Load()` | 🔲 | Low |
+| Restart files (checkpoint) | 🔲 | Low |
+
+### Solvers
+| Item | Status | Priority |
+|------|--------|----------|
+| Chebyshev smoother (AMG) | 🔲 | Medium |
+| SLISolver (stationary iteration) | 🔲 | Low |
+| AMG F-cycle | 🔲 | Low |
+| hypre binding | 🔲 | Low |
+
+### Spaces & Post-processing
+| Item | Status | Priority |
+|------|--------|----------|
+| H1_Trace_FECollection | 🔲 | Low |
+| Taylor-Hood P2-P1 (full example) | 🔨 | Medium |
+| Kelly error estimator | 🔲 | Low |
+| `DenseTensor` | 🔲 | Low |
+| `SetSubVector` slice assignment | 🔲 | Low |
+
+### Parallel Examples
+| Item | Status | Priority |
+|------|--------|----------|
+| pex2 (parallel mixed Poisson) | 🔲 | Medium |
+| pex3 (parallel Maxwell) | 🔲 | Medium |
+| pex5 (parallel Darcy) | 🔲 | Medium |
+| ex19 (Navier-Stokes) | 🔲 | Medium |
+| Browser E2E (WASM parallel) | 🔲 | Medium |
