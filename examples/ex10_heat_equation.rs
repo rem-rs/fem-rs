@@ -78,7 +78,7 @@ fn main() {
     let n_steps = (t_end / dt).ceil() as usize;
     println!("  Steps: {n_steps}  (dt={dt:.4e})");
 
-    let solve_cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 1000, verbose: false };
+    let solve_cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
 
     // ─── ODE RHS: dudt = M⁻¹(−K u) ──────────────────────────────────────────
     // Capture references to k_mat, m_mat, bnd, solve_cfg.

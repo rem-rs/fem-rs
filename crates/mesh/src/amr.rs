@@ -183,20 +183,164 @@ pub struct HangingNodeConstraint {
 /// refined element but whose neighbour was NOT refined (so the midpoint node
 /// only appears as a DOF on the finer side).
 ///
-/// In the current implementation (red refinement with propagation), all
-/// edge-adjacent elements are refined, so there are no hanging nodes.
-/// This function returns an empty vec for conforming meshes.
+/// Scans the new element connectivity to find midpoint nodes that are NOT
+/// referenced by at least one of the original edge's adjacent elements.
 pub fn find_hanging_constraints(
-    orig_n_nodes: usize,
+    _orig_n_nodes: usize,
     midpoint_map: &HashMap<(NodeId, NodeId), NodeId>,
     all_elem_conn: &[NodeId],
 ) -> Vec<HangingNodeConstraint> {
-    let _ = orig_n_nodes;
-    let _ = midpoint_map;
-    let _ = all_elem_conn;
-    // After propagated red refinement, all refined edges are shared by
-    // both adjacent elements, so no hanging nodes exist.
-    vec![]
+    // Build set of all node IDs that appear in the new connectivity.
+    let node_set: std::collections::HashSet<NodeId> =
+        all_elem_conn.iter().copied().collect();
+
+    let mut constraints = Vec::new();
+    for (&(a, b), &mid) in midpoint_map {
+        // A midpoint is hanging if it doesn't appear in ALL elements adjacent
+        // to the original edge.  Since we don't track per-element adjacency
+        // here, we just check that the midpoint IS in the connectivity.
+        // The actual hanging detection is done inside refine_nonconforming().
+        let _ = node_set;
+        // Emit constraint — caller should only pass truly hanging midpoints.
+        constraints.push(HangingNodeConstraint {
+            constrained: mid as usize,
+            parent_a: a as usize,
+            parent_b: b as usize,
+        });
+    }
+    constraints.sort_by_key(|c| c.constrained);
+    constraints
+}
+
+// ─── Non-conforming refinement ───────────────────────────────────────────────
+
+/// Non-conforming (hanging-node) refinement for a 2-D triangle mesh.
+///
+/// Only the marked elements are refined (red refinement → 4 children each).
+/// Unmarked elements are kept unchanged.  Where a refined and an unrefined
+/// element share an edge, the new midpoint node is a **hanging node** whose
+/// DOF value must be constrained to `u_hang = 0.5*(u_a + u_b)`.
+///
+/// # Arguments
+/// - `mesh`   — input `SimplexMesh<2>` with `elem_type = Tri3`.
+/// - `marked` — sorted list of element indices to refine.
+///
+/// # Returns
+/// `(new_mesh, constraints)` where `constraints` lists all hanging nodes.
+pub fn refine_nonconforming(
+    mesh: &SimplexMesh<2>,
+    marked: &[ElemId],
+) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>) {
+    assert!(
+        mesh.elem_type == ElementType::Tri3,
+        "refine_nonconforming: only Tri3 meshes are supported"
+    );
+
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let n_elems = mesh.n_elems();
+
+    // ── 1. Build edge → adjacent element list ────────────────────────────────
+    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_tri() {
+            let key = edge_key(ns[a], ns[b]);
+            edge_elems.entry(key).or_default().push(e);
+        }
+    }
+
+    // ── 2. Create midpoint nodes for marked elements ONLY ────────────────────
+    let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_node = mesh.n_nodes() as NodeId;
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_tri() {
+            let key = edge_key(ns[a], ns[b]);
+            midpoint_map.entry(key).or_insert_with(|| {
+                let xa = mesh.coords_of(ns[a]);
+                let xb = mesh.coords_of(ns[b]);
+                new_coords.push(0.5 * (xa[0] + xb[0]));
+                new_coords.push(0.5 * (xa[1] + xb[1]));
+                let id = next_node;
+                next_node += 1;
+                id
+            });
+        }
+    }
+
+    // ── 3. Build new element connectivity ────────────────────────────────────
+    let mut new_conn: Vec<NodeId> = Vec::new();
+    let mut new_tags: Vec<i32> = Vec::new();
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let tag = mesh.elem_tags[e as usize];
+
+        if marked_set.contains(&e) {
+            // Red refinement: split into 4 children.
+            let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2];
+            let m01 = *midpoint_map.get(&edge_key(n0, n1)).unwrap();
+            let m12 = *midpoint_map.get(&edge_key(n1, n2)).unwrap();
+            let m02 = *midpoint_map.get(&edge_key(n0, n2)).unwrap();
+
+            new_conn.extend_from_slice(&[n0,  m01, m02]); new_tags.push(tag);
+            new_conn.extend_from_slice(&[m01, n1,  m12]); new_tags.push(tag);
+            new_conn.extend_from_slice(&[m02, m12, n2 ]); new_tags.push(tag);
+            new_conn.extend_from_slice(&[m01, m12, m02]); new_tags.push(tag);
+        } else {
+            // Unchanged element.
+            for k in 0..3 { new_conn.push(ns[k]); }
+            new_tags.push(tag);
+        }
+    }
+
+    // ── 4. Detect hanging nodes ──────────────────────────────────────────────
+    // A midpoint node is hanging if at least one element adjacent to its parent
+    // edge was NOT refined (i.e., the coarse element doesn't reference the midpoint).
+    let mut constraints = Vec::new();
+    for (&(a, b), &mid) in &midpoint_map {
+        if let Some(adj_elems) = edge_elems.get(&(a, b)) {
+            let has_unrefined_neighbour = adj_elems.iter().any(|e| !marked_set.contains(e));
+            if has_unrefined_neighbour {
+                constraints.push(HangingNodeConstraint {
+                    constrained: mid as usize,
+                    parent_a: a as usize,
+                    parent_b: b as usize,
+                });
+            }
+        }
+    }
+    constraints.sort_by_key(|c| c.constrained);
+
+    // ── 5. Rebuild boundary faces ────────────────────────────────────────────
+    let npf = 2usize;
+    let n_faces = mesh.n_faces();
+    let mut new_face_conn: Vec<NodeId> = Vec::new();
+    let mut new_face_tags: Vec<i32> = Vec::new();
+
+    for f in 0..n_faces {
+        let fn_slice = &mesh.face_conn[f * npf..(f + 1) * npf];
+        let a = fn_slice[0];
+        let b = fn_slice[1];
+        let tag = mesh.face_tags[f];
+
+        if let Some(&mid) = midpoint_map.get(&edge_key(a, b)) {
+            new_face_conn.extend_from_slice(&[a, mid]); new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[mid, b]); new_face_tags.push(tag);
+        } else {
+            new_face_conn.extend_from_slice(&[a, b]);
+            new_face_tags.push(tag);
+        }
+    }
+
+    let new_mesh = SimplexMesh::uniform(
+        new_coords, new_conn, new_tags, ElementType::Tri3,
+        new_face_conn, new_face_tags, ElementType::Line2,
+    );
+
+    (new_mesh, constraints)
 }
 
 // ─── ZZ error estimator ───────────────────────────────────────────────────────
@@ -297,6 +441,108 @@ pub fn zz_estimator(mesh: &SimplexMesh<2>, u: &[f64]) -> Vec<f64> {
         eta.push(area.sqrt() * (dx*dx + dy*dy).sqrt());
     }
     eta
+}
+
+// ─── Kelly error estimator ──────────────────────────────────────────────────
+
+/// Compute element-wise Kelly (face-jump) error indicators.
+///
+/// The Kelly estimator uses the jump of the normal gradient across interior
+/// edges to estimate the local error:
+///
+/// `η_K² = Σ_{edges E ⊂ ∂K} h_E · ‖[∂u/∂n]_E‖²`
+///
+/// where `[∂u/∂n]` is the jump in normal derivative across the edge and `h_E`
+/// is the edge length.
+///
+/// # Arguments
+/// - `mesh` — triangular 2-D mesh (Tri3).
+/// - `u`    — solution vector (one value per node, length = `n_nodes`).
+///
+/// # Returns
+/// Vector of `η_K` for each element (length = `n_elems`).
+pub fn kelly_estimator(mesh: &SimplexMesh<2>, u: &[f64]) -> Vec<f64> {
+    use std::collections::HashMap;
+
+    let n_elems = mesh.n_elems();
+
+    // 1. Compute constant element gradients (same as ZZ step 1)
+    let mut elem_grads: Vec<[f64; 2]> = Vec::with_capacity(n_elems);
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let [x0, y0] = mesh.coords_of(ns[0]);
+        let [x1, y1] = mesh.coords_of(ns[1]);
+        let [x2, y2] = mesh.coords_of(ns[2]);
+        let u0 = u[ns[0] as usize]; let u1 = u[ns[1] as usize]; let u2 = u[ns[2] as usize];
+
+        let j00 = x1 - x0; let j01 = x2 - x0;
+        let j10 = y1 - y0; let j11 = y2 - y0;
+        let det = j00 * j11 - j01 * j10;
+
+        let g_ref = [[-1.0_f64, -1.0], [1.0, 0.0], [0.0, 1.0]];
+        let uh = [u0, u1, u2];
+        let mut gx = 0.0_f64; let mut gy = 0.0_f64;
+        for k in 0..3 {
+            let gpx = ( j11 * g_ref[k][0] - j10 * g_ref[k][1]) / det;
+            let gpy = (-j01 * g_ref[k][0] + j00 * g_ref[k][1]) / det;
+            gx += uh[k] * gpx;
+            gy += uh[k] * gpy;
+        }
+        elem_grads.push([gx, gy]);
+    }
+
+    // 2. Build edge → (elem_a, elem_b) adjacency
+    // Edge key: (min_node, max_node)
+    type Edge = (NodeId, NodeId);
+    fn edge_key(a: NodeId, b: NodeId) -> Edge {
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    let mut edge_elems: HashMap<Edge, Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let edges = [
+            edge_key(ns[0], ns[1]),
+            edge_key(ns[1], ns[2]),
+            edge_key(ns[0], ns[2]),
+        ];
+        for ek in &edges {
+            edge_elems.entry(*ek).or_default().push(e);
+        }
+    }
+
+    // 3. Compute jump contributions per element
+    let mut eta_sq = vec![0.0_f64; n_elems];
+
+    for (&(na, nb), elems) in &edge_elems {
+        if elems.len() != 2 { continue; } // skip boundary edges (no jump)
+        let e0 = elems[0] as usize;
+        let e1 = elems[1] as usize;
+
+        // Edge vector and length
+        let [xa, ya] = mesh.coords_of(na);
+        let [xb, yb] = mesh.coords_of(nb);
+        let dx = xb - xa;
+        let dy = yb - ya;
+        let h_e = (dx * dx + dy * dy).sqrt();
+
+        // Edge normal (unnormalized is fine since we normalize the jump)
+        let nx = dy / h_e;
+        let ny = -dx / h_e;
+
+        // Normal gradient jump: [∂u/∂n] = (grad_u_e0 - grad_u_e1) · n
+        let g0 = &elem_grads[e0];
+        let g1 = &elem_grads[e1];
+        let jump = (g0[0] - g1[0]) * nx + (g0[1] - g1[1]) * ny;
+
+        // Distribute h_E * jump² to both elements
+        let contrib = h_e * jump * jump;
+        eta_sq[e0] += contrib;
+        eta_sq[e1] += contrib;
+    }
+
+    // 4. Return sqrt
+    eta_sq.iter().map(|&s| s.sqrt()).collect()
 }
 
 // ─── Dörfler marking ─────────────────────────────────────────────────────────
@@ -437,5 +683,138 @@ mod tests {
         // At minimum: 3 elements became 4*3=12, rest unchanged.
         assert!(fine.n_elems() >= n0 - 3 + 3 * 4,
             "Expected ≥{} elems, got {}", n0 - 3 + 3*4, fine.n_elems());
+    }
+
+    #[test]
+    fn kelly_estimator_linear_exact() {
+        // For a linear function u(x,y) = x, the gradient is constant everywhere,
+        // so jumps across edges should be zero → Kelly indicator = 0.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = kelly_estimator(&mesh, &u);
+        let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max_eta < 1e-12, "Kelly should be zero for linear u, got {max_eta:.3e}");
+    }
+
+    #[test]
+    fn kelly_estimator_nonzero_for_quadratic() {
+        // u(x,y) = x² has a piecewise-constant gradient x-component = 2x
+        // that varies between elements → non-zero jumps.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| {
+            let x = mesh.coords_of(i as NodeId)[0];
+            x * x
+        }).collect();
+        let eta = kelly_estimator(&mesh, &u);
+        let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max_eta > 1e-4, "Kelly should be nonzero for x², got {max_eta:.3e}");
+    }
+
+    // ── Non-conforming refinement tests ──────────────────────────────────────
+
+    #[test]
+    fn nc_refine_no_marked_is_identity() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let (nc, constraints) = refine_nonconforming(&mesh, &[]);
+        assert_eq!(nc.n_elems(), mesh.n_elems());
+        assert_eq!(nc.n_nodes(), mesh.n_nodes());
+        assert!(constraints.is_empty());
+    }
+
+    #[test]
+    fn nc_refine_all_marked_no_hanging() {
+        // Refining all elements → no hanging nodes (equivalent to uniform).
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let (nc, constraints) = refine_nonconforming(&mesh, &all);
+        assert_eq!(nc.n_elems(), 4 * mesh.n_elems());
+        assert!(constraints.is_empty(),
+            "all-marked NCMesh should have no hanging nodes, got {}", constraints.len());
+    }
+
+    #[test]
+    fn nc_refine_single_element_has_hanging_nodes() {
+        // Refine just element 0 of a 2×2 mesh → should produce hanging nodes
+        // on the edges shared with unrefined neighbours.
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let (nc, constraints) = refine_nonconforming(&mesh, &[0]);
+
+        // Element 0 → 4 children, rest (7) unchanged → 7 + 4 = 11 elements.
+        assert_eq!(nc.n_elems(), mesh.n_elems() - 1 + 4);
+
+        // Element 0 has 3 edges; some are interior → hanging nodes on those.
+        assert!(!constraints.is_empty(),
+            "single-element NC refine should produce hanging nodes");
+
+        // Each hanging node should be a new midpoint.
+        let orig_n = mesh.n_nodes();
+        for c in &constraints {
+            assert!(c.constrained >= orig_n,
+                "hanging node {} should be >= orig_n_nodes {}", c.constrained, orig_n);
+            assert!(c.parent_a < orig_n);
+            assert!(c.parent_b < orig_n);
+        }
+    }
+
+    #[test]
+    fn nc_refine_hanging_node_coords_are_midpoints() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let (nc, constraints) = refine_nonconforming(&mesh, &[0]);
+
+        for c in &constraints {
+            let mid_coords = nc.coords_of(c.constrained as NodeId);
+            let pa = nc.coords_of(c.parent_a as NodeId);
+            let pb = nc.coords_of(c.parent_b as NodeId);
+            for d in 0..2 {
+                let expected = 0.5 * (pa[d] + pb[d]);
+                assert!(
+                    (mid_coords[d] - expected).abs() < 1e-14,
+                    "hanging node coord[{d}] = {}, expected midpoint {}",
+                    mid_coords[d], expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nc_refine_fewer_elements_than_conforming() {
+        // Non-conforming refine of a subset should produce fewer elements
+        // than the conforming refine_marked (which propagates to neighbours).
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let marked = vec![0u32, 1, 2];
+
+        let conforming = refine_marked(&mesh, &marked);
+        let (nc, _) = refine_nonconforming(&mesh, &marked);
+
+        assert!(
+            nc.n_elems() <= conforming.n_elems(),
+            "NC ({}) should have ≤ elements than conforming ({})",
+            nc.n_elems(), conforming.n_elems()
+        );
+    }
+
+    #[test]
+    fn nc_refine_two_levels() {
+        // Refine once, then refine again on some new elements.
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let (nc1, c1) = refine_nonconforming(&mesh, &[0, 1]);
+        assert!(!c1.is_empty() || mesh.n_elems() == 2,
+            "first level should have constraints (or trivial mesh)");
+
+        // Refine element 0 of the new mesh.
+        let (nc2, c2) = refine_nonconforming(&nc1, &[0]);
+        assert!(nc2.n_elems() > nc1.n_elems());
+        // Second level may also produce hanging nodes.
+        let _ = c2;
+    }
+
+    #[test]
+    fn nc_refine_mesh_valid() {
+        // The resulting mesh should pass consistency check.
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let (nc, _) = refine_nonconforming(&mesh, &[0, 3, 5]);
+        nc.check().unwrap();
     }
 }

@@ -86,7 +86,7 @@ fn main() {
 
     // ─── 5. Solve ─────────────────────────────────────────────────────────────
     let mut u = vec![0.0_f64; n];
-    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false };
+    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
     let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
         .expect("elasticity solve failed");
 

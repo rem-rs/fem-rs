@@ -620,7 +620,7 @@ mod tests {
         let (sys, f, g) = small_saddle_point();
         let mut u = vec![0.0_f64; 2];
         let mut p = vec![0.0_f64; 1];
-        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() };
         SchurComplementSolver::solve(&sys, &f, &g, &mut u, &mut p, &cfg).unwrap();
         // Check residuals: A u + B^T p ≈ f, B u ≈ g
         let mut ru = vec![0.0_f64; 2];
@@ -666,7 +666,7 @@ mod tests {
         let k = coo.into_csr();
         let b = vec![1.0, 2.0, 3.0];
         let mut x = vec![0.0_f64; 3];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10, verbose: false, ..SolverConfig::default() };
         let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
         assert!(res.converged);
         assert!((x[0] - 1.0).abs() < 1e-8);
@@ -682,7 +682,7 @@ mod tests {
         let k = coo.into_csr();
         let b = vec![4.0, 9.0];
         let mut x = vec![0.0_f64; 2];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10, verbose: false, ..SolverConfig::default() };
         let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
         assert!(res.converged);
         assert!((x[0] - 2.0).abs() < 1e-8, "x[0]={}", x[0]);
@@ -699,7 +699,7 @@ mod tests {
         let k = coo.into_csr();
         let b = vec![2.0, 2.0, 2.0];
         let mut x = vec![0.0_f64; 3];
-        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() };
         let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
         // Verify actual residual
         let mut kx = vec![0.0_f64; 3];

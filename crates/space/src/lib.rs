@@ -15,6 +15,7 @@
 pub mod dof_manager;
 pub mod fe_space;
 pub mod h1;
+pub mod h1_trace;
 pub mod l2;
 pub mod hcurl;
 pub mod hdiv;
@@ -24,9 +25,10 @@ pub mod vector_h1;
 pub use dof_manager::{DofManager, EdgeKey, FaceKey};
 pub use fe_space::{FESpace, SpaceType};
 pub use h1::H1Space;
+pub use h1_trace::H1TraceSpace;
 pub use l2::L2Space;
 pub use hcurl::HCurlSpace;
 pub use hdiv::HDivSpace;
 pub use vector_h1::VectorH1Space;
-pub use constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
+pub use constraints::{apply_dirichlet, apply_hanging_constraints, recover_hanging_values, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
 

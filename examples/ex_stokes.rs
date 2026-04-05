@@ -118,6 +118,7 @@ fn main() {
         atol: 1e-12,
         max_iter: 5_000,
         verbose: false,
+        ..SolverConfig::default()
     };
     let res = SchurComplementSolver::solve(&sys, &f_u, &g_p, &mut u_sol, &mut p_sol, &cfg)
         .expect("Stokes solve failed");

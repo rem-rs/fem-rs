@@ -31,7 +31,7 @@
 |---|---|---|---|
 | `Mesh` (2D/3D unstructured) | `SimplexMesh<D>` | ✅ | Uniform element type per mesh |
 | `Mesh` (mixed elements) | `SimplexMesh<D>` + `elem_types`/`elem_offsets` | 🔨 | Phase 42a: data structures + I/O done |
-| `NCMesh` (non-conforming) | — | 🔲 | Phase 2+: hanging nodes for AMR |
+| `NCMesh` (non-conforming) | `refine_nonconforming()` + `HangingNodeConstraint` | 🔨 | Single-level 2-D Tri3; multi-level TBD |
 | `ParMesh` | `ParallelMesh<M>` | ✅ | Phase 10+33 |
 | `Mesh::GetNV()` | `MeshTopology::n_nodes()` | ✅ | |
 | `Mesh::GetNE()` | `MeshTopology::n_elements()` | ✅ | |
@@ -41,14 +41,14 @@
 | `Mesh::GetBdrElementVertices()` | `MeshTopology::face_nodes()` | ✅ | |
 | `Mesh::GetBdrAttribute()` | `MeshTopology::face_tag()` | ✅ | Tags match GMSH physical group IDs |
 | `Mesh::GetAttribute()` | `MeshTopology::element_tag()` | ✅ | Material group tag |
-| `Mesh::bdr_attributes` | `SimplexMesh::face_tags` (unique set) | 🔨 | No dedup utility yet |
+| `Mesh::bdr_attributes` | `SimplexMesh::unique_boundary_tags()` | ✅ | Sorted, deduplicated boundary tag set |
 | `Mesh::GetDim()` | `MeshTopology::dim()` | ✅ | Returns `u8` (2 or 3) |
 | `Mesh::GetSpaceDim()` | same as `dim()` for flat meshes | ✅ | |
 | `Mesh::UniformRefinement()` | `refine_uniform()` | ✅ | Red refinement (Tri3→4 children) |
 | `Mesh::AdaptiveRefinement()` | `refine_marked()` + ZZ estimator + Dörfler marking | ✅ | Phase 17 |
 | `Mesh::GetElementTransformation()` | Jacobian computed inline in assembly | 🔨 | No `ElementTransformation` type yet |
 | `Mesh::GetFaceElementTransformations()` | `InteriorFaceList` | ✅ | Used by DG assembler |
-| `Mesh::GetBoundingBox()` | utility fn (not yet) | 🔲 | Low priority |
+| `Mesh::GetBoundingBox()` | `SimplexMesh::bounding_box()` | ✅ | Returns `(min, max)` per axis |
 
 ### 1.2 Element Types
 
@@ -74,7 +74,7 @@
 |---|---|---|
 | `Mesh::MakeCartesian2D()` | `SimplexMesh::unit_square_tri(n)` | ✅ |
 | `Mesh::MakeCartesian3D()` | `SimplexMesh::unit_cube_tet(n)` | ✅ | Added in Phase 9 |
-| `Mesh::MakePeriodic()` | — | 🔲 Phase 2+ |
+| `Mesh::MakePeriodic()` | `SimplexMesh::make_periodic()` | ✅ | Node merging + face removal |
 | Reading MFEM format | — | ❌ use GMSH instead |
 | Reading GMSH `.msh` v4 | `fem_io::read_msh_file()` | ✅ |
 | Reading Netgen | — | 🔲 Phase 9 |
@@ -125,7 +125,7 @@
 | `DG_FECollection(p)` | L²(Ω): DG (element-interior only) | `L2Space` | ✅ |
 | `ND_FECollection(p)` | H(curl): Nédélec tangential | `HCurlSpace` | ✅ |
 | `RT_FECollection(p)` | H(div): Raviart-Thomas normal | `HDivSpace` | ✅ |
-| `H1_Trace_FECollection` | H½: traces of H¹ on faces | — | 🔲 |
+| `H1_Trace_FECollection` | H½: traces of H¹ on faces | `H1TraceSpace` | ✅ | P1 boundary trace |
 | `NURBS_FECollection` | NURBS isogeometric | — | ❌ out of scope |
 
 ### 3.2 Finite Element Space (DOF management)
@@ -257,7 +257,7 @@ default (zero-cost for constants).
 | `SparseMatrix::Add(A,B)` | `spadd(&A, &B)` | ✅ |
 | `SparseMatrix::Mult(A,B)` | SpGEMM (via linger) | ✅ |
 | `DenseMatrix` (local dense) | `nalgebra::SMatrix` | ✅ |
-| `DenseTensor` | nested matrices | 🔲 |
+| `DenseTensor` | `DenseTensor` (3-D array) | ✅ | Row-major slab access |
 
 ### 6.2 Vector
 
@@ -269,7 +269,7 @@ default (zero-cost for constants).
 | `Vector::operator * (dot)` | `Vector::dot()` | ✅ |
 | `Vector::Norml2()` | `Vector::norm()` | ✅ |
 | `Vector::Neg()` | `vector.scale(-1.0)` | ✅ |
-| `Vector::SetSubVector()` | index slice assignment | 🔲 |
+| `Vector::SetSubVector()` | `Vector::set_sub_vector()` / `get_sub_vector()` | ✅ | Offset-based slice ops |
 | `BlockVector` | `BlockVector` | ✅ |
 
 ---
@@ -286,7 +286,7 @@ default (zero-cost for constants).
 | `FGMRESSolver` | Flexible GMRES | `solve_fgmres` / `solve_fgmres_jacobi` | ✅ |
 | `BiCGSTABSolver` | Non-symmetric | `solver` (via linger) | ✅ |
 | `MINRESSolver` | Indefinite symmetric | `MinresSolver` | ✅ |
-| `SLISolver` | Stationary linear iteration | — | 🔲 |
+| `SLISolver` | Stationary linear iteration | `solve_jacobi_sli` / `solve_gs_sli` | ✅ |
 | `NewtonSolver` | Nonlinear F(x)=0 | `NewtonSolver` | ✅ |
 | `UMFPackSolver` | Direct (SuiteSparse) | `dense::lu_solve` (small systems) | ✅ |
 | `MUMPSSolver` | Parallel direct | — | ❌ |
@@ -311,7 +311,7 @@ default (zero-cost for constants).
 | `IterativeSolver::SetMaxIter()` | `max_iter` parameter | ✅ |
 | `IterativeSolver::GetFinalNorm()` | `SolverResult::residual_norm` | ✅ |
 | `IterativeSolver::GetNumIterations()` | `SolverResult::iterations` | ✅ |
-| `IterativeSolver::SetPrintLevel()` | verbose flag / `log` integration | 🔨 |
+| `IterativeSolver::SetPrintLevel()` | `SolverConfig::print_level` / `PrintLevel` enum | ✅ | Silent/Summary/Iterations/Debug |
 
 ---
 
@@ -402,7 +402,7 @@ default (zero-cost for constants).
 | MFEM concept | fem-rs | Status |
 |---|---|---|
 | `GridFunction::Save()` | VTK point data | ✅ scalar + vector |
-| `GridFunction::Load()` | — | 🔲 |
+| `GridFunction::Load()` | `read_vtu_point_data()` | ✅ | ASCII VTU reader |
 | Restart files | HDF5 mesh + solution | 🔲 |
 
 ---
@@ -419,7 +419,7 @@ default (zero-cost for constants).
 | `GridFunction::GetCurl()` | `postprocess::compute_element_curl()` | ✅ |
 | `GridFunction::GetDivergence()` | `postprocess::compute_element_divergence()` | ✅ |
 | `ZZErrorEstimator` (Zienkiewicz-Zhu) | `zz_error_estimator()` | ✅ |
-| `KellyErrorEstimator` | — | 🔲 |
+| `KellyErrorEstimator` | `kelly_estimator()` | ✅ | Face-jump based error indicator |
 | `DiscreteLinearOperator` | Gradient, curl, div operators | ✅ `DiscreteLinearOperator::gradient/curl_2d/divergence` |
 
 ---
@@ -546,6 +546,8 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 44 | `assembly`+`examples` | VectorConvectionIntegrator + Navier-Stokes Oseen/Picard (`ex_navier_stokes`, Kovasznay Re=40) | ✅ |
 | 42b | `assembly` | Quad4/Hex8 isoparametric Jacobian, `unit_square_quad`, Q1 Poisson verified | ✅ |
 | 45 | `wasm`+`e2e` | Browser E2E test: WASM Poisson solver verified via Playwright/Chromium | ✅ |
+| 46 | `mesh`+`linalg`+`solver`+`space`+`io` | Backlog: bounding_box, periodic mesh, DenseTensor, SLI, H1Trace, VTK reader, PrintLevel | ✅ |
+| 47 | `mesh`+`space` | NCMesh: `refine_nonconforming`, `apply_hanging_constraints`, single-level hanging nodes | ✅ |
 
 ---
 
@@ -555,11 +557,11 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | Item | Status | Priority |
 |------|--------|----------|
 | Mixed element meshes (Tri+Quad, Tet+Hex) | ✅ | ~~Medium~~ Done |
-| NCMesh (non-conforming, hanging nodes) | 🔲 | Low |
-| `bdr_attributes` dedup utility | 🔨 | Low |
+| NCMesh (non-conforming, hanging nodes) | 🔨 | Low (single-level 2-D Tri3) |
+| `bdr_attributes` dedup utility | ✅ | ~~Low~~ Done |
 | `ElementTransformation` type | 🔨 | Low (works inline) |
-| `GetBoundingBox()` | 🔲 | Low |
-| Periodic mesh generation | 🔲 | Low |
+| `GetBoundingBox()` | ✅ | ~~Low~~ Done |
+| Periodic mesh generation | ✅ | ~~Low~~ Done |
 
 ### I/O
 | Item | Status | Priority |
@@ -569,25 +571,25 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | HDF5/XDMF parallel I/O | 🔲 | Medium |
 | Netgen `.vol` reader | 🔲 | Low |
 | Abaqus `.inp` reader | 🔲 | Low |
-| `GridFunction::Load()` | 🔲 | Low |
+| `GridFunction::Load()` | ✅ | ~~Low~~ Done |
 | Restart files (checkpoint) | 🔲 | Low |
 
 ### Solvers
 | Item | Status | Priority |
 |------|--------|----------|
 | Chebyshev smoother (AMG) | ✅ | ~~Medium~~ Done |
-| SLISolver (stationary iteration) | 🔲 | Low |
+| SLISolver (stationary iteration) | ✅ | ~~Low~~ Done |
 | AMG F-cycle | ✅ | ~~Low~~ Done |
 | hypre binding | 🔲 | Low |
 
 ### Spaces & Post-processing
 | Item | Status | Priority |
 |------|--------|----------|
-| H1_Trace_FECollection | 🔲 | Low |
+| H1_Trace_FECollection | ✅ | ~~Low~~ Done |
 | Taylor-Hood P2-P1 | Stokes flow | ✅ `ex_stokes` (lid-driven cavity) |
-| Kelly error estimator | 🔲 | Low |
-| `DenseTensor` | 🔲 | Low |
-| `SetSubVector` slice assignment | 🔲 | Low |
+| Kelly error estimator | ✅ | ~~Low~~ Done |
+| `DenseTensor` | ✅ | ~~Low~~ Done |
+| `SetSubVector` slice assignment | ✅ | ~~Low~~ Done |
 
 ### Parallel Examples
 | Item | Status | Priority |
@@ -663,13 +665,38 @@ prioritized roadmap for continued development.
 - ✅ WASM Poisson solver: assemble → solve → verify in browser
 - ✅ Solution validated against analytical max (0.0737 for −Δu=1)
 
+### Phase 46 — Backlog Cleanup ✅
+> **Completed** — 9 remaining items resolved
+
+- ✅ `SimplexMesh::bounding_box()` — axis-aligned bounding box (2-D / 3-D)
+- ✅ `SimplexMesh::unique_boundary_tags()` — sorted/deduped boundary tag set
+- ✅ `SimplexMesh::make_periodic()` — node merging for periodic BCs
+- ✅ `DenseTensor` — 3-D row-major tensor with slab access
+- ✅ `solve_jacobi_sli()` / `solve_gs_sli()` — Jacobi/GS stationary iteration
+- ✅ `H1TraceSpace` — H½ trace of H¹ on boundary faces (P1)
+- ✅ `read_vtu_point_data()` — VTK `.vtu` ASCII reader for solution loading
+- ✅ `PrintLevel` enum — structured solver verbosity (Silent/Summary/Iterations/Debug)
+- ✅ `kelly_estimator()` was already implemented — marked in MFEM_MAPPING
+- ✅ `SetSubVector` / `GetSubVector` were already implemented — marked in MFEM_MAPPING
+
+### Phase 47 — NCMesh (Non-Conforming Mesh / Hanging Nodes) 🔨
+> **Partial** — single-level 2-D Tri3 implemented; multi-level constraint tree TBD
+
+- ✅ `refine_nonconforming()` — red-refines only marked elements, no propagation
+- ✅ `HangingNodeConstraint` detection — identifies midpoints on coarse/fine edges
+- ✅ `apply_hanging_constraints()` — P^T K P static condensation via COO rebuild
+- ✅ `recover_hanging_values()` — post-solve interpolation for constrained DOFs
+- ✅ `ex15_dg_amr --nc` — demonstrates single-level NC AMR with error reduction
+- 🔲 Multi-level constraint tree (accumulate constraints across refinement levels)
+- 🔲 3-D support (Tet4 hanging faces)
+- 🔲 P2 hanging-node interpolation
+
 ### Backlog (Low Priority)
 | Item | Phase | Notes |
 |------|-------|-------|
-| NCMesh (hanging nodes) | TBD | Needed for h-AMR with coarsening |
-| Periodic meshes | TBD | Mapped to constraint DOFs |
-| Kelly error estimator | TBD | Face-jump based, alternative to ZZ |
-| H1 Trace space | TBD | Boundary element coupling |
+| NCMesh multi-level | TBD | Constraint tree for iterative NC refinement |
 | hypre binding | TBD | Optional FFI for production AMG |
 | Netgen / Abaqus readers | TBD | Additional mesh import formats |
-| `DenseTensor` / `SetSubVector` | TBD | Convenience APIs |
+| HDF5/XDMF I/O | TBD | Large-scale checkpointing |
+| Restart files | TBD | Requires HDF5 |
+| `ElementTransformation` type | TBD | Works inline; low priority wrapper |

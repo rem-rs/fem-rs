@@ -56,6 +56,23 @@ pub struct SolveResult {
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
+/// Verbosity level for iterative solvers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintLevel {
+    /// No output.
+    Silent,
+    /// Print summary on convergence/failure only.
+    Summary,
+    /// Print residual at each iteration.
+    Iterations,
+    /// Print residual at each iteration plus extra diagnostics.
+    Debug,
+}
+
+impl Default for PrintLevel {
+    fn default() -> Self { PrintLevel::Silent }
+}
+
 /// Convergence parameters passed to every solver.
 #[derive(Debug, Clone)]
 pub struct SolverConfig {
@@ -67,22 +84,40 @@ pub struct SolverConfig {
     pub max_iter: usize,
     /// Print residual each iteration when `true`.
     pub verbose: bool,
+    /// Structured verbosity level (overrides `verbose` when not Silent).
+    pub print_level: PrintLevel,
 }
 
 impl Default for SolverConfig {
     fn default() -> Self {
-        SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 1_000, verbose: false }
+        SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 1_000, verbose: false, print_level: PrintLevel::Silent }
     }
 }
 
 impl SolverConfig {
     pub fn to_linger(&self) -> SolverParams {
+        let level = match self.effective_print_level() {
+            PrintLevel::Silent => VerboseLevel::Silent,
+            PrintLevel::Summary => VerboseLevel::Summary,
+            _ => VerboseLevel::Iterations,
+        };
         SolverParams {
             rtol:           self.rtol,
             atol:           self.atol,
             max_iter:       self.max_iter,
-            verbose: if self.verbose { VerboseLevel::Iterations } else { VerboseLevel::Silent },
+            verbose:        level,
             check_interval: 10,
+        }
+    }
+
+    /// Effective print level: uses `print_level` if set, falls back to `verbose`.
+    pub fn effective_print_level(&self) -> PrintLevel {
+        if self.print_level != PrintLevel::Silent {
+            self.print_level
+        } else if self.verbose {
+            PrintLevel::Iterations
+        } else {
+            PrintLevel::Silent
         }
     }
 }
@@ -290,6 +325,8 @@ pub use ode::{
     Bdf2, Bdf2State,
     Newmark, NewmarkState,
 };
+pub mod sli;
+pub use sli::{solve_jacobi_sli, solve_gs_sli};
 
 #[cfg(test)]
 mod tests {

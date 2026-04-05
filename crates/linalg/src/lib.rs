@@ -23,3 +23,4 @@ pub use csr::spadd;
 pub use sparsity::SparsityPattern;
 pub use vector::Vector;
 pub use block::{BlockMatrix, BlockVector};
+pub use dense::DenseTensor;

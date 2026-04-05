@@ -15,7 +15,7 @@ pub mod element_type;
 pub mod simplex;
 pub mod topology;
 
-pub use amr::{refine_marked, refine_uniform, dorfler_mark, zz_estimator};
+pub use amr::{refine_marked, refine_nonconforming, refine_uniform, dorfler_mark, zz_estimator, kelly_estimator, HangingNodeConstraint};
 pub use boundary::{BoundaryTag, PhysicalGroup};
 pub use curved::CurvedMesh;
 pub use element_type::ElementType;

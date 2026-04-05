@@ -88,7 +88,7 @@ fn main() {
     // Note: For this problem the system is SPD (α,β > 0), so CG would also
     // work, but MINRES handles the general grad-div case robustly.
     let mut u = vec![0.0_f64; n];
-    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false };
+    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
     let res = MinresSolver::solve(&mat, &rhs, &mut u, &cfg)
         .expect("MINRES solve failed");
 

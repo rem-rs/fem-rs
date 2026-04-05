@@ -134,6 +134,7 @@ fn main() {
         atol: 1e-14,
         max_iter: 5_000,
         verbose: false,
+        ..SolverConfig::default()
     };
 
     let picard_tol = 1e-8;

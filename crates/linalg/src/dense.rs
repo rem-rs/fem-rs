@@ -140,6 +140,94 @@ pub fn dense_matmat(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: 
 }
 
 // -------------------------------------------------------------------------
+// DenseTensor — a 3-D array of f64
+// -------------------------------------------------------------------------
+
+/// A dense 3-D tensor stored in row-major order.
+///
+/// Layout: element `(i, j, k)` is at index `i * d2 * d3 + j * d3 + k`.
+/// Typical use: storing per-element local matrices (n_elems × n_dofs × n_dofs)
+/// or per-quadrature-point Jacobians (n_qp × dim × dim).
+#[derive(Debug, Clone)]
+pub struct DenseTensor {
+    data: Vec<f64>,
+    d1: usize,
+    d2: usize,
+    d3: usize,
+}
+
+impl DenseTensor {
+    /// Create a zero-filled tensor of shape `(d1, d2, d3)`.
+    pub fn zeros(d1: usize, d2: usize, d3: usize) -> Self {
+        DenseTensor { data: vec![0.0; d1 * d2 * d3], d1, d2, d3 }
+    }
+
+    /// Create from an existing flat `Vec<f64>` and dimensions.
+    ///
+    /// # Panics
+    /// Panics if `data.len() != d1 * d2 * d3`.
+    pub fn from_vec(data: Vec<f64>, d1: usize, d2: usize, d3: usize) -> Self {
+        assert_eq!(data.len(), d1 * d2 * d3, "DenseTensor: data length mismatch");
+        DenseTensor { data, d1, d2, d3 }
+    }
+
+    /// Shape as `(d1, d2, d3)`.
+    pub fn shape(&self) -> (usize, usize, usize) { (self.d1, self.d2, self.d3) }
+
+    /// Total number of entries.
+    pub fn len(&self) -> usize { self.data.len() }
+
+    /// Whether the tensor is empty.
+    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+
+    /// Access element `(i, j, k)`.
+    #[inline]
+    pub fn get(&self, i: usize, j: usize, k: usize) -> f64 {
+        self.data[i * self.d2 * self.d3 + j * self.d3 + k]
+    }
+
+    /// Mutably access element `(i, j, k)`.
+    #[inline]
+    pub fn get_mut(&mut self, i: usize, j: usize, k: usize) -> &mut f64 {
+        &mut self.data[i * self.d2 * self.d3 + j * self.d3 + k]
+    }
+
+    /// Set element `(i, j, k)`.
+    #[inline]
+    pub fn set(&mut self, i: usize, j: usize, k: usize, val: f64) {
+        self.data[i * self.d2 * self.d3 + j * self.d3 + k] = val;
+    }
+
+    /// Return the `i`-th slab as a `d2 × d3` row-major slice.
+    #[inline]
+    pub fn slab(&self, i: usize) -> &[f64] {
+        let off = i * self.d2 * self.d3;
+        &self.data[off..off + self.d2 * self.d3]
+    }
+
+    /// Mutable slab access.
+    #[inline]
+    pub fn slab_mut(&mut self, i: usize) -> &mut [f64] {
+        let off = i * self.d2 * self.d3;
+        let len = self.d2 * self.d3;
+        &mut self.data[off..off + len]
+    }
+
+    /// Borrow the flat data slice.
+    pub fn as_slice(&self) -> &[f64] { &self.data }
+
+    /// Fill with a constant value.
+    pub fn fill(&mut self, val: f64) {
+        for v in &mut self.data { *v = val; }
+    }
+
+    /// Scale all entries: `T *= alpha`.
+    pub fn scale(&mut self, alpha: f64) {
+        for v in &mut self.data { *v *= alpha; }
+    }
+}
+
+// -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
 
@@ -246,5 +334,42 @@ mod tests {
         assert!((c[1] - 2.0).abs() < 1e-14);
         assert!((c[2] - 4.0).abs() < 1e-14);
         assert!((c[3] - 3.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn dense_tensor_zeros() {
+        let t = DenseTensor::zeros(2, 3, 4);
+        assert_eq!(t.shape(), (2, 3, 4));
+        assert_eq!(t.len(), 24);
+        assert!((t.get(1, 2, 3)).abs() < 1e-14);
+    }
+
+    #[test]
+    fn dense_tensor_set_get() {
+        let mut t = DenseTensor::zeros(3, 4, 5);
+        t.set(1, 2, 3, 42.0);
+        assert!((t.get(1, 2, 3) - 42.0).abs() < 1e-14);
+        assert!((t.get(0, 0, 0)).abs() < 1e-14);
+    }
+
+    #[test]
+    fn dense_tensor_slab() {
+        let mut t = DenseTensor::zeros(2, 2, 3);
+        t.set(1, 0, 0, 1.0);
+        t.set(1, 0, 1, 2.0);
+        t.set(1, 0, 2, 3.0);
+        let s = t.slab(1);
+        assert_eq!(s.len(), 6);
+        assert!((s[0] - 1.0).abs() < 1e-14);
+        assert!((s[1] - 2.0).abs() < 1e-14);
+        assert!((s[2] - 3.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn dense_tensor_scale() {
+        let mut t = DenseTensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], 2, 1, 2);
+        t.scale(3.0);
+        assert!((t.get(0, 0, 0) - 3.0).abs() < 1e-14);
+        assert!((t.get(1, 0, 1) - 12.0).abs() < 1e-14);
     }
 }

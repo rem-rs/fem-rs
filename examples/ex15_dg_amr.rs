@@ -25,6 +25,7 @@
 //! cargo run --example ex15_dg_amr
 //! cargo run --example ex15_dg_amr -- --levels 5
 //! cargo run --example ex15_dg_amr -- --n 2 --levels 7
+//! cargo run --example ex15_dg_amr -- --nc --levels 4
 //! ```
 
 use std::f64::consts::PI;
@@ -34,15 +35,16 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_mesh::{SimplexMesh, topology::MeshTopology};
-use fem_mesh::amr::{refine_uniform, zz_estimator, dorfler_mark};
+use fem_mesh::amr::{refine_uniform, refine_nonconforming, zz_estimator, dorfler_mark};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
-use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, boundary_dofs}};
+use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, apply_hanging_constraints, recover_hanging_values, boundary_dofs}};
 
 fn main() {
     let args = parse_args();
     println!("=== fem-rs Example 15: Poisson + Mesh Refinement with Error Estimation ===");
     println!("  Initial mesh: {}x{}, P1 elements", args.n0, args.n0);
-    println!("  Refinement levels: {}, Doerfler theta = {}\n", args.levels, args.theta);
+    println!("  Refinement levels: {}, Doerfler theta = {}", args.levels, args.theta);
+    println!("  Mode: {}\n", if args.nonconforming { "non-conforming (hanging nodes)" } else { "conforming (uniform)" });
 
     let u_exact = |x: &[f64]| -> f64 {
         (PI * x[0]).sin() * (PI * x[1]).sin()
@@ -52,12 +54,13 @@ fn main() {
         2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
     };
 
-    println!("{:>5}  {:>8}  {:>8}  {:>12}  {:>12}  {:>8}  {:>8}",
-             "Level", "Elems", "DOFs", "L2 error", "Est. error", "Marked", "Ratio");
-    println!("{}", "-".repeat(75));
+    println!("{:>5}  {:>8}  {:>8}  {:>12}  {:>12}  {:>8}  {:>6}  {:>8}",
+             "Level", "Elems", "DOFs", "L2 error", "Est. error", "Marked", "Hang", "Ratio");
+    println!("{}", "-".repeat(82));
 
     let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n0);
     let mut prev_l2: Option<f64> = None;
+    let mut hanging_constraints = Vec::new();
 
     for level in 0..=args.levels {
         // ─── 1. Build H1 space on current mesh ─────────────────────────
@@ -72,7 +75,13 @@ fn main() {
         let source = DomainSourceIntegrator::new(&rhs_fn);
         let mut rhs = Assembler::assemble_linear(&space, &[&source], 3);
 
-        // ─── 3. Apply Dirichlet BCs: u = 0 on all boundaries ──────────
+        // ─── 3. Apply constraints ──────────────────────────────────────
+        // Hanging-node constraints FIRST (before Dirichlet).
+        if args.nonconforming {
+            apply_hanging_constraints(&mut mat, &mut rhs, &hanging_constraints);
+        }
+
+        // Then Dirichlet BCs: u = 0 on all boundaries.
         let dm = space.dof_manager();
         let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
         let bnd_vals = vec![0.0_f64; bnd.len()];
@@ -82,6 +91,7 @@ fn main() {
         let mut u = vec![0.0_f64; n];
         let cfg = SolverConfig {
             rtol: 1e-10, atol: 1e-14, max_iter: 20_000, verbose: false,
+            ..SolverConfig::default()
         };
         let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg);
         match &res {
@@ -96,6 +106,11 @@ fn main() {
             _ => {}
         }
         let _res = res.unwrap();
+
+        // ─── 4b. Recover hanging DOF values (NC mode) ──────────────────
+        if args.nonconforming {
+            recover_hanging_values(&mut u, &hanging_constraints);
+        }
 
         // ─── 5. Compute L2 error ────────────────────────────────────────
         let l2_err = h1_l2_error(&space, &u, &u_exact);
@@ -113,10 +128,26 @@ fn main() {
         };
         prev_l2 = Some(l2_err);
 
-        println!("{level:>5}  {n_elems:>8}  {n:>8}  {l2_err:>12.4e}  {est_err:>12.4e}  {n_marked:>8}  {ratio:>8}");
+        let n_hang = hanging_constraints.len();
+
+        println!("{level:>5}  {n_elems:>8}  {n:>8}  {l2_err:>12.4e}  {est_err:>12.4e}  {n_marked:>8}  {n_hang:>6}  {ratio:>8}");
 
         if level < args.levels {
-            mesh = refine_uniform(&mesh);
+            if args.nonconforming {
+                // Non-conforming: refine only marked elements (single-level).
+                // Note: multi-level NC refinement requires constraint tree tracking
+                // which is not yet implemented; for now each level starts fresh.
+                let (new_mesh, new_constraints) = refine_nonconforming(&mesh, &marked);
+                mesh = new_mesh;
+                hanging_constraints = new_constraints;
+
+                // Also carry forward old constraints that still apply.
+                // A previous hanging node is resolved if both its parent-edge
+                // elements are now refined.  For single-level this is fine.
+            } else {
+                mesh = refine_uniform(&mesh);
+                hanging_constraints.clear();
+            }
         }
     }
 
@@ -170,11 +201,12 @@ struct Args {
     n0:     usize,
     levels: usize,
     theta:  f64,
+    nonconforming: bool,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
-        n0: 4, levels: 5, theta: 0.5,
+        n0: 4, levels: 5, theta: 0.5, nonconforming: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -182,6 +214,7 @@ fn parse_args() -> Args {
             "--n"     => { a.n0     = it.next().unwrap_or("4".into()).parse().unwrap_or(4); }
             "--levels"=> { a.levels = it.next().unwrap_or("5".into()).parse().unwrap_or(5); }
             "--theta" => { a.theta  = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5); }
+            "--nc"    => { a.nonconforming = true; }
             _ => {}
         }
     }

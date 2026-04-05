@@ -65,7 +65,7 @@ fn main() {
     k_mat.spmv(&u, &mut ku);
     let rhs_init: Vec<f64> = ku.iter().map(|&v| -v).collect();
     let mut acc0 = vec![0.0_f64; ndof];
-    let solve_cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 1000, verbose: false };
+    let solve_cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
     solve_cg(&m_mat, &rhs_init, &mut acc0, &solve_cfg).expect("initial acceleration solve failed");
     for &d in &bnd { acc0[d as usize] = 0.0; }
 

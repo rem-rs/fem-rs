@@ -82,7 +82,7 @@ fn main() {
     let mut u_sol = vec![0.0_f64; nu];
     let mut p_sol = vec![0.0_f64; np];
 
-    let cfg = SolverConfig { rtol: 1e-6, atol: 1e-10, max_iter: 2_000, verbose: false };
+    let cfg = SolverConfig { rtol: 1e-6, atol: 1e-10, max_iter: 2_000, verbose: false, ..SolverConfig::default() };
     let res = SchurComplementSolver::solve(&sys, &f_u, &g, &mut u_sol, &mut p_sol, &cfg)
         .expect("Uzawa solve failed");
 

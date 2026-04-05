@@ -239,7 +239,7 @@ impl ImplicitTimeStepper for ImplicitEuler {
         let sys = identity_minus_dt_jac(&jac, dt);
         let b: Vec<f64> = dudt.iter().map(|&v| dt * v).collect();
 
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
         let mut du = vec![0.0_f64; n];
         solve_gmres(&sys, &b, &mut du, 30, &cfg).expect("ImplicitEuler: linear solve failed");
 
@@ -279,7 +279,7 @@ impl ImplicitTimeStepper for Sdirk2 {
         let sys1 = identity_minus_dt_jac(&jac1, dt * g);
         let mut f1 = vec![0.0_f64; n];
         rhs(t + g * dt, u, &mut f1);
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
         let mut k1 = vec![0.0_f64; n];
         solve_gmres(&sys1, &f1, &mut k1, 30, &cfg).expect("SDIRK2 stage 1 solve failed");
 
@@ -341,7 +341,7 @@ impl Bdf2 {
         J: Fn(f64, &[f64]) -> CsrMatrix<f64>,
     {
         let n = u.len();
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
 
         match &state.u_prev {
             None => {
@@ -426,7 +426,7 @@ impl NewmarkState {
         stiff.spmv(u, &mut ku);
         let rhs: Vec<f64> = (0..n).map(|i| force[i] - ku[i]).collect();
         let mut acc = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
         crate::solve_cg(mass, &rhs, &mut acc, &cfg).expect("Newmark init: mass solve failed");
         NewmarkState { vel, acc }
     }
@@ -482,7 +482,7 @@ impl Newmark {
 
         // Solve for a_{n+1}
         let mut a_new = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
         crate::solve_cg(&eff, &rhs, &mut a_new, &cfg).expect("Newmark: effective system solve failed");
 
         // Correct: u_{n+1} = u_pred + β dt² a_{n+1}

@@ -109,6 +109,164 @@ impl<const D: usize> SimplexMesh<D> {
         self.elem_types.is_some()
     }
 
+    /// Compute the axis-aligned bounding box of the mesh.
+    ///
+    /// Returns `(min_coords, max_coords)` where each is a `[f64; D]` array.
+    ///
+    /// # Panics
+    /// Panics if the mesh has no nodes.
+    pub fn bounding_box(&self) -> ([f64; D], [f64; D]) {
+        assert!(self.n_nodes() > 0, "bounding_box: mesh has no nodes");
+        let mut lo = [f64::INFINITY; D];
+        let mut hi = [f64::NEG_INFINITY; D];
+        for n in 0..self.n_nodes() as NodeId {
+            let c = self.coords_of(n);
+            for d in 0..D {
+                if c[d] < lo[d] { lo[d] = c[d]; }
+                if c[d] > hi[d] { hi[d] = c[d]; }
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Return the sorted, deduplicated set of boundary face tags.
+    pub fn unique_boundary_tags(&self) -> Vec<BoundaryTag> {
+        let mut tags: Vec<BoundaryTag> = self.face_tags.clone();
+        tags.sort_unstable();
+        tags.dedup();
+        tags
+    }
+
+    /// Create a periodic mesh by identifying matching node pairs on opposite
+    /// boundary faces.
+    ///
+    /// For each `(tag_a, tag_b)` pair, nodes on boundary `tag_a` are matched
+    /// to nodes on boundary `tag_b` using the `translation` vector: a node at
+    /// position `x` on side A matches a node at position `x + translation` on
+    /// side B (within tolerance `tol`).
+    ///
+    /// The returned mesh has all "B-side" nodes remapped to their A-side
+    /// partners, effectively merging them.  The periodic boundary faces are
+    /// removed from the face lists.
+    ///
+    /// # Arguments
+    /// * `pairs` — slice of `(tag_a, tag_b, translation)` triples.
+    /// * `tol`   — geometric matching tolerance.
+    pub fn make_periodic(
+        &self,
+        pairs: &[(BoundaryTag, BoundaryTag, [f64; D])],
+        tol: f64,
+    ) -> FemResult<Self> {
+        // 1. Collect boundary nodes per tag
+        let mut tag_nodes = std::collections::HashMap::<BoundaryTag, Vec<NodeId>>::new();
+        let n_faces = self.n_faces();
+        for f in 0..n_faces as FaceId {
+            let tag = self.face_tags[f as usize];
+            let ns = self.bface_nodes(f);
+            for &n in ns {
+                tag_nodes.entry(tag).or_default().push(n);
+            }
+        }
+        // Dedup node lists
+        for list in tag_nodes.values_mut() {
+            list.sort_unstable();
+            list.dedup();
+        }
+
+        // 2. Build node remap: b_node → a_node
+        let mut remap = vec![u32::MAX; self.n_nodes()];
+        for (i, r) in remap.iter_mut().enumerate() {
+            *r = i as u32;
+        }
+
+        let mut periodic_tags = std::collections::HashSet::new();
+
+        for &(tag_a, tag_b, ref translation) in pairs {
+            periodic_tags.insert(tag_a);
+            periodic_tags.insert(tag_b);
+
+            let nodes_a = tag_nodes.get(&tag_a).ok_or_else(|| {
+                FemError::Mesh(format!("periodic: tag_a={tag_a} not found on boundary"))
+            })?;
+            let nodes_b = tag_nodes.get(&tag_b).ok_or_else(|| {
+                FemError::Mesh(format!("periodic: tag_b={tag_b} not found on boundary"))
+            })?;
+
+            // For each node on B, find matching node on A
+            for &nb in nodes_b {
+                let cb = self.coords_of(nb);
+                let mut matched = false;
+                for &na in nodes_a {
+                    let ca = self.coords_of(na);
+                    let mut dist2 = 0.0;
+                    for d in 0..D {
+                        let diff = cb[d] - (ca[d] + translation[d]);
+                        dist2 += diff * diff;
+                    }
+                    if dist2.sqrt() < tol {
+                        remap[nb as usize] = na;
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    return Err(FemError::Mesh(format!(
+                        "periodic: no match for node {nb} on tag_b={tag_b}"
+                    )));
+                }
+            }
+        }
+
+        // 3. Build new compact node numbering (skip merged-away nodes)
+        let mut new_id = vec![u32::MAX; self.n_nodes()];
+        let mut new_coords = Vec::new();
+        let mut next = 0u32;
+        for i in 0..self.n_nodes() {
+            if remap[i] == i as u32 {
+                // This node is kept (not remapped to another)
+                new_id[i] = next;
+                let off = i * D;
+                new_coords.extend_from_slice(&self.coords[off..off + D]);
+                next += 1;
+            }
+        }
+        // Map remapped nodes to their target's new ID
+        for i in 0..self.n_nodes() {
+            if remap[i] != i as u32 {
+                let target = remap[i] as usize;
+                new_id[i] = new_id[target];
+            }
+        }
+
+        // 4. Remap element connectivity
+        let new_conn: Vec<NodeId> = self.conn.iter().map(|&n| new_id[n as usize]).collect();
+
+        // 5. Filter boundary faces (remove periodic ones)
+        let mut new_face_conn = Vec::new();
+        let mut new_face_tags = Vec::new();
+        for f in 0..n_faces as FaceId {
+            let tag = self.face_tags[f as usize];
+            if periodic_tags.contains(&tag) {
+                continue; // skip periodic boundary faces
+            }
+            let ns = self.bface_nodes(f);
+            for &n in ns {
+                new_face_conn.push(new_id[n as usize]);
+            }
+            new_face_tags.push(tag);
+        }
+
+        Ok(SimplexMesh::uniform(
+            new_coords,
+            new_conn,
+            self.elem_tags.clone(),
+            self.elem_type,
+            new_face_conn,
+            new_face_tags,
+            self.face_type,
+        ))
+    }
+
     /// Validate internal consistency.
     pub fn check(&self) -> FemResult<()> {
         let nn = self.n_nodes();
@@ -555,5 +713,81 @@ mod tests {
         let tags: std::collections::HashSet<i32> = m.face_tags.iter().copied().collect();
         assert!(tags.contains(&1));
         assert!(tags.contains(&3));
+    }
+
+    #[test]
+    fn bounding_box_unit_square() {
+        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let (lo, hi) = m.bounding_box();
+        assert!((lo[0]).abs() < 1e-14);
+        assert!((lo[1]).abs() < 1e-14);
+        assert!((hi[0] - 1.0).abs() < 1e-14);
+        assert!((hi[1] - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn bounding_box_unit_cube() {
+        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let (lo, hi) = m.bounding_box();
+        for d in 0..3 {
+            assert!(lo[d].abs() < 1e-14, "lo[{d}] = {}", lo[d]);
+            assert!((hi[d] - 1.0).abs() < 1e-14, "hi[{d}] = {}", hi[d]);
+        }
+    }
+
+    #[test]
+    fn unique_boundary_tags_unit_square() {
+        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let tags = m.unique_boundary_tags();
+        assert_eq!(tags, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn unique_boundary_tags_unit_cube() {
+        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let tags = m.unique_boundary_tags();
+        assert_eq!(tags, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn make_periodic_x_direction() {
+        // Unit square with tags: 1=bottom, 2=right, 3=top, 4=left.
+        // Make periodic in x: pair left (tag=4) with right (tag=2),
+        // translation = [1, 0].
+        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let n_before = m.n_nodes();
+        let pm = m.make_periodic(&[(4, 2, [1.0, 0.0])], 1e-10).unwrap();
+
+        // Should have fewer nodes: left boundary nodes merged with right
+        // n+1 nodes per side, n-1 interior per side → merge n+1 nodes
+        assert!(pm.n_nodes() < n_before,
+            "periodic mesh should have fewer nodes: {} vs {}", pm.n_nodes(), n_before);
+
+        // Same number of elements
+        assert_eq!(pm.n_elems(), m.n_elems());
+
+        // Periodic boundaries removed: only top and bottom remain
+        let tags = pm.unique_boundary_tags();
+        assert!(!tags.contains(&2), "right boundary should be removed");
+        assert!(!tags.contains(&4), "left boundary should be removed");
+        assert!(tags.contains(&1), "bottom should remain");
+        assert!(tags.contains(&3), "top should remain");
+    }
+
+    #[test]
+    fn make_periodic_both_directions() {
+        // Make fully periodic (x and y)
+        let m = SimplexMesh::<2>::unit_square_tri(3);
+        let pm = m.make_periodic(
+            &[
+                (4, 2, [1.0, 0.0]),  // left → right
+                (1, 3, [0.0, 1.0]),  // bottom → top
+            ],
+            1e-10,
+        ).unwrap();
+
+        // No boundary faces should remain
+        assert_eq!(pm.n_faces(), 0, "fully periodic mesh should have no boundary faces");
+        assert_eq!(pm.n_elems(), m.n_elems());
     }
 }
