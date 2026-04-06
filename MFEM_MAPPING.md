@@ -46,7 +46,7 @@
 | `Mesh::GetSpaceDim()` | same as `dim()` for flat meshes | ✅ | |
 | `Mesh::UniformRefinement()` | `refine_uniform()` | ✅ | Red refinement (Tri3→4 children) |
 | `Mesh::AdaptiveRefinement()` | `refine_marked()` + ZZ estimator + Dörfler marking | ✅ | Phase 17 |
-| `Mesh::GetElementTransformation()` | Jacobian computed inline in assembly | 🔨 | No `ElementTransformation` type yet |
+| `Mesh::GetElementTransformation()` | `ElementTransformation` + inline Jacobian paths | 🔨 | Wrapper available for simplex; full assembler migration TBD |
 | `Mesh::GetFaceElementTransformations()` | `InteriorFaceList` | ✅ | Used by DG assembler |
 | `Mesh::GetBoundingBox()` | `SimplexMesh::bounding_box()` | ✅ | Returns `(min, max)` per axis |
 
@@ -547,7 +547,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 42b | `assembly` | Quad4/Hex8 isoparametric Jacobian, `unit_square_quad`, Q1 Poisson verified | ✅ |
 | 45 | `wasm`+`e2e` | Browser E2E test: WASM Poisson solver verified via Playwright/Chromium | ✅ |
 | 46 | `mesh`+`linalg`+`solver`+`space`+`io` | Backlog: bounding_box, periodic mesh, DenseTensor, SLI, H1Trace, VTK reader, PrintLevel | ✅ |
-| 47 | `mesh`+`space` | NCMesh: `refine_nonconforming`, `apply_hanging_constraints`, single-level hanging nodes | ✅ |
+| 47 | `mesh`+`space` | NCMesh: nonconforming refine + hanging constraints + `NCState` multi-level + P2 prolongation | ✅ |
 
 ---
 
@@ -557,7 +557,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | Item | Status | Priority |
 |------|--------|----------|
 | Mixed element meshes (Tri+Quad, Tet+Hex) | ✅ | ~~Medium~~ Done |
-| NCMesh (non-conforming, hanging nodes) | 🔨 | Low (single-level 2-D Tri3) |
+| NCMesh (non-conforming, hanging nodes) | 🔨 | Low (2-D Tri3 multi-level; 3-D TBD) |
 | `bdr_attributes` dedup utility | ✅ | ~~Low~~ Done |
 | `ElementTransformation` type | 🔨 | Low (works inline) |
 | `GetBoundingBox()` | ✅ | ~~Low~~ Done |
@@ -694,9 +694,7 @@ prioritized roadmap for continued development.
 ### Backlog (Low Priority)
 | Item | Phase | Notes |
 |------|-------|-------|
-| NCMesh multi-level | TBD | Constraint tree for iterative NC refinement |
 | hypre binding | TBD | Optional FFI for production AMG |
 | Netgen / Abaqus readers | TBD | Additional mesh import formats |
 | HDF5/XDMF I/O | TBD | Large-scale checkpointing |
 | Restart files | TBD | Requires HDF5 |
-| `ElementTransformation` type | TBD | Works inline; low priority wrapper |

@@ -10,6 +10,7 @@ use fem_element::reference::VectorReferenceElement;
 use fem_element::ReferenceElement;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
+use fem_mesh::ElementTransformation;
 use fem_space::fe_space::{FESpace, SpaceType};
 
 // ─── Reference element factories ───────────────────────────────────────────
@@ -38,18 +39,9 @@ fn vec_ref_elem(space_type: SpaceType, dim: usize) -> Box<dyn VectorReferenceEle
 fn simplex_jacobian<M: MeshTopology>(
     mesh: &M,
     geo_nodes: &[u32],
-    dim: usize,
 ) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(geo_nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(geo_nodes[col + 1]);
-        for row in 0..dim {
-            j[(row, col)] = xc[row] - x0[row];
-        }
-    }
-    let det = j.determinant();
-    (j, det)
+    let tr = ElementTransformation::from_simplex_nodes(mesh, geo_nodes);
+    (tr.jacobian().clone(), tr.det_j())
 }
 
 fn transform_grads(
@@ -91,7 +83,7 @@ pub fn compute_element_gradients<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec
         let elem_dofs = space.element_dofs(e);
         let nodes = mesh.element_nodes(e);
 
-        let (jac, _det_j) = simplex_jacobian(mesh, nodes, dim);
+        let (jac, _det_j) = simplex_jacobian(mesh, nodes);
         let j_inv_t = jac.try_inverse().expect("degenerate element").transpose();
 
         // Evaluate at centroid: (1/3, 1/3) for tri, (1/4, 1/4, 1/4) for tet.
@@ -144,7 +136,7 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
         let signs = space.element_signs(e);
         let nodes = mesh.element_nodes(e);
 
-        let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+        let (jac, det_j) = simplex_jacobian(mesh, nodes);
 
         ref_elem.eval_curl(&xi, &mut ref_curl);
 
@@ -216,7 +208,7 @@ pub fn compute_element_divergence<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<f6
         let signs = space.element_signs(e);
         let nodes = mesh.element_nodes(e);
 
-        let (_jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+        let (_jac, det_j) = simplex_jacobian(mesh, nodes);
 
         ref_elem.eval_div(&xi, &mut ref_div);
 
@@ -271,7 +263,7 @@ pub fn recover_gradient_nodal<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f6
         let elem_dofs = space.element_dofs(e);
         let nodes = mesh.element_nodes(e);
 
-        let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+        let (jac, det_j) = simplex_jacobian(mesh, nodes);
         let j_inv_t = jac.try_inverse().expect("degenerate element").transpose();
 
         // Element area/volume (for a simplex: |det_j| / d!)

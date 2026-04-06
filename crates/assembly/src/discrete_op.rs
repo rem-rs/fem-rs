@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use fem_element::{TriND1, TriRT0, VectorReferenceElement};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::topology::MeshTopology;
+use fem_mesh::{topology::MeshTopology, ElementTransformation};
 use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space};
 
@@ -125,7 +125,6 @@ impl DiscreteLinearOperator {
 
         let n_l2 = l2_space.n_dofs();
         let n_hcurl = hcurl_space.n_dofs();
-        let dim = 2;
 
         let mut coo = CooMatrix::<f64>::new(n_l2, n_hcurl);
 
@@ -144,7 +143,7 @@ impl DiscreteLinearOperator {
             let l2_dof = l2_dofs[0] as usize;
 
             // Compute Jacobian determinant
-            let det_j = simplex_det(mesh, nodes, dim);
+            let det_j = simplex_det(mesh, nodes);
 
             // Physical curl = curl_ref / det_j
             // Integral over element = curl_phys * |det_j| * area_ref
@@ -182,7 +181,6 @@ impl DiscreteLinearOperator {
         assert_eq!(l2_space.order(), 0, "divergence: only P0 L2 supported");
 
         let mesh = hdiv_space.mesh();
-        let dim = mesh.dim() as usize;
 
         let n_l2 = l2_space.n_dofs();
         let n_hdiv = hdiv_space.n_dofs();
@@ -204,7 +202,7 @@ impl DiscreteLinearOperator {
             let l2_dof = l2_dofs[0] as usize;
 
             // Compute Jacobian determinant
-            let det_j = simplex_det(mesh, nodes, dim);
+            let det_j = simplex_det(mesh, nodes);
 
             // Physical div = div_ref / det_j  (Piola transform)
             // Integral over element = div_phys * |det_j| * area_ref
@@ -225,31 +223,8 @@ impl DiscreteLinearOperator {
 // ---- Helper ----------------------------------------------------------------
 
 /// Compute the determinant of the simplex Jacobian for element `e`.
-fn simplex_det<M: MeshTopology>(mesh: &M, geo_nodes: &[u32], dim: usize) -> f64 {
-    let x0 = mesh.node_coords(geo_nodes[0]);
-    match dim {
-        2 => {
-            let x1 = mesh.node_coords(geo_nodes[1]);
-            let x2 = mesh.node_coords(geo_nodes[2]);
-            let j00 = x1[0] - x0[0];
-            let j10 = x1[1] - x0[1];
-            let j01 = x2[0] - x0[0];
-            let j11 = x2[1] - x0[1];
-            j00 * j11 - j01 * j10
-        }
-        3 => {
-            let x1 = mesh.node_coords(geo_nodes[1]);
-            let x2 = mesh.node_coords(geo_nodes[2]);
-            let x3 = mesh.node_coords(geo_nodes[3]);
-            let a = [x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]];
-            let b = [x2[0] - x0[0], x2[1] - x0[1], x2[2] - x0[2]];
-            let c = [x3[0] - x0[0], x3[1] - x0[1], x3[2] - x0[2]];
-            a[0] * (b[1] * c[2] - b[2] * c[1])
-                - a[1] * (b[0] * c[2] - b[2] * c[0])
-                + a[2] * (b[0] * c[1] - b[1] * c[0])
-        }
-        _ => panic!("simplex_det: unsupported dim {dim}"),
-    }
+fn simplex_det<M: MeshTopology>(mesh: &M, geo_nodes: &[u32]) -> f64 {
+    ElementTransformation::from_simplex_nodes(mesh, geo_nodes).det_j()
 }
 
 // ---- Tests -----------------------------------------------------------------
