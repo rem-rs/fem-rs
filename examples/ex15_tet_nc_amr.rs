@@ -9,12 +9,14 @@
 //! cargo run --example ex15_tet_nc_amr
 //! cargo run --example ex15_tet_nc_amr -- --n 2 --levels 4 --fraction 0.35
 //! cargo run --example ex15_tet_nc_amr -- --solve --levels 3
+//! cargo run --example ex15_tet_nc_amr -- --solve --vtk --vtk-dir output/ex15_tet
 //! ```
 
 use fem_core::ElemId;
 use fem_mesh::{SimplexMesh, NCState3D, prolongate_p1};
 use fem_mesh::topology::MeshTopology;
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
+use fem_io::vtk::{DataArray, VtkWriter};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace};
 use fem_space::constraints::{apply_dirichlet, apply_hanging_constraints, recover_hanging_values, boundary_dofs};
@@ -28,7 +30,14 @@ fn main() {
     println!("  Initial mesh: {}x{}x{} Tet4", args.n0, args.n0, args.n0);
     println!("  Levels: {}, mark fraction: {:.2}", args.levels, args.fraction);
     println!("  Mode: {}", if args.solve { "Poisson solve + NC AMR" } else { "NC AMR plumbing" });
+    if args.vtk {
+        println!("  VTK output: enabled ({})", args.vtk_dir);
+    }
     println!();
+
+    if args.vtk {
+        std::fs::create_dir_all(&args.vtk_dir).expect("failed to create VTK output directory");
+    }
 
     let mut mesh = SimplexMesh::<3>::unit_cube_tet(args.n0);
     let mut nc3 = NCState3D::new();
@@ -57,6 +66,13 @@ fn main() {
             let err = max_linear_error(&mesh, &u);
             println!("{:>5}  {:>8}  {:>8}  {:>8}  {:>10.3e}",
                      level, mesh.n_elems(), mesh.n_nodes(), hang, err);
+        }
+
+        if args.vtk {
+            let path = format!("{}/level_{:02}.vtu", args.vtk_dir, level);
+            let mut writer = VtkWriter::new(&mesh);
+            writer.add_point_data(DataArray::scalars("u", u.clone()));
+            writer.write_file(&path).expect("failed to write VTK");
         }
 
         if level == args.levels {
@@ -150,6 +166,8 @@ struct Args {
     levels: usize,
     fraction: f64,
     solve: bool,
+    vtk: bool,
+    vtk_dir: String,
 }
 
 fn parse_args() -> Args {
@@ -158,6 +176,8 @@ fn parse_args() -> Args {
         levels: 3,
         fraction: 0.30,
         solve: false,
+        vtk: false,
+        vtk_dir: "output/ex15_tet_nc_amr".to_string(),
     };
 
     let mut it = std::env::args().skip(1);
@@ -174,6 +194,12 @@ fn parse_args() -> Args {
             }
             "--solve" => {
                 a.solve = true;
+            }
+            "--vtk" => {
+                a.vtk = true;
+            }
+            "--vtk-dir" => {
+                a.vtk_dir = it.next().unwrap_or("output/ex15_tet_nc_amr".to_string());
             }
             _ => {}
         }
