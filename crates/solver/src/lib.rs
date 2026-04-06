@@ -318,6 +318,31 @@ pub mod eigen;
 pub mod ode;
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use eigen::{lobpcg, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver};
+
+#[cfg(test)]
+mod linger_integration_tests {
+    use linger::{DenseVec, LinearOperator};
+    use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix as NaCsr};
+
+    #[test]
+    fn nalgebra_csr_linear_operator_spmv() {
+        // 2x2 matrix: [2 1; 0 3]
+        let mut coo = CooMatrix::<f64>::new(2, 2);
+        coo.push(0, 0, 2.0);
+        coo.push(0, 1, 1.0);
+        coo.push(1, 1, 3.0);
+        let a: NaCsr<f64> = NaCsr::from(&coo);
+
+        let x = DenseVec::from_vec(vec![1.0, 2.0]);
+        let mut y = DenseVec::zeros(2);
+
+        a.apply(&x, &mut y);
+
+        let ys = y.as_slice();
+        assert!((ys[0] - 4.0).abs() < 1e-12);
+        assert!((ys[1] - 6.0).abs() < 1e-12);
+    }
+}
 pub use ode::{
     TimeStepper, ImplicitTimeStepper,
     ForwardEuler, Rk4, Rk45,

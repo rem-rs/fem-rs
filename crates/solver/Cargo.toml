@@ -17,3 +17,4 @@ fem-element  = { path = "../element" }
 fem-linalg   = { path = "../linalg" }
 fem-mesh     = { path = "../mesh" }
 fem-space    = { path = "../space" }
+nalgebra-sparse = "0.4"
