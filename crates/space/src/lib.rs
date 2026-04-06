@@ -30,5 +30,5 @@ pub use l2::L2Space;
 pub use hcurl::HCurlSpace;
 pub use hdiv::HDivSpace;
 pub use vector_h1::VectorH1Space;
-pub use constraints::{apply_dirichlet, apply_hanging_constraints, recover_hanging_values, prolongate_p2_hanging, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
+pub use constraints::{apply_dirichlet, apply_hanging_constraints, apply_hanging_face_constraints, recover_hanging_values, recover_hanging_face_values, prolongate_p2_hanging, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
 

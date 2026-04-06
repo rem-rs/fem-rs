@@ -31,7 +31,7 @@
 |---|---|---|---|
 | `Mesh` (2D/3D unstructured) | `SimplexMesh<D>` | ✅ | Uniform element type per mesh |
 | `Mesh` (mixed elements) | `SimplexMesh<D>` + `elem_types`/`elem_offsets` | 🔨 | Phase 42a: data structures + I/O done |
-| `NCMesh` (non-conforming) | `refine_nonconforming()` + `HangingNodeConstraint` + `NCState` | 🔨 | 2-D Tri3 multi-level constraints; 3-D hanging faces TBD |
+| `NCMesh` (non-conforming) | `refine_nonconforming()` (2-D) + `refine_nonconforming_3d()` (3-D) + constraints | 🔨 | 2-D Tri3 multi-level complete; 3-D Tet4 infrastructure ready (multi-level TBD) |
 | `ParMesh` | `ParallelMesh<M>` | ✅ | Phase 10+33 |
 | `Mesh::GetNV()` | `MeshTopology::n_nodes()` | ✅ | |
 | `Mesh::GetNE()` | `MeshTopology::n_elements()` | ✅ | |
@@ -680,8 +680,9 @@ prioritized roadmap for continued development.
 - ✅ `SetSubVector` / `GetSubVector` were already implemented — marked in MFEM_MAPPING
 
 ### Phase 47 — NCMesh (Non-Conforming Mesh / Hanging Nodes) 🔨
-> **Partial** — 2-D Tri3 single/multi-level implemented; 3-D hanging faces TBD
+> **Partial** — 2-D Tri3 complete (single/multi-level); 3-D Tet4 infrastructure ready
 
+#### 2-D (Tri3) Hanging Edge Constraints
 - ✅ `refine_nonconforming()` — red-refines only marked elements, no propagation
 - ✅ `HangingNodeConstraint` detection — identifies midpoints on coarse/fine edges
 - ✅ `apply_hanging_constraints()` — P^T K P static condensation via COO rebuild
@@ -689,7 +690,17 @@ prioritized roadmap for continued development.
 - ✅ `NCState` multi-level constraint tracking — carries and resolves hanging constraints across successive NC refinements
 - ✅ `prolongate_p2_hanging()` — P2 hanging-node prolongation by coarse P2 field evaluation at fine DOF coordinates
 - ✅ `ex15_dg_amr --nc` — demonstrates single-level NC AMR with error reduction
-- 🔲 3-D support (Tet4 hanging faces)
+
+#### 3-D (Tet4) Hanging Face Constraints (NEW)
+- ✅ `HangingFaceConstraint` struct — represents face-center hanging constraints: `u[mid] = (1/3)*(u[a] + u[b] + u[c])`
+- ✅ `refine_nonconforming_3d(mesh, marked)` — red-refines Tet4 elements into 8 children, creates edge midpoints + face centers
+- ✅ `local_faces_tet()` — helper returns 4 triangular face local indices for Tet4
+- ✅ `face_key_3d()` — canonical face key (sorted triplet) for face uniqueness
+- ✅ `apply_hanging_face_constraints()` — static condensation for 3-D face constraints (P^T K P with weights 1/3)
+- ✅ `recover_hanging_face_values()` — post-solve recovery for face constraints with chaining support
+- ✅ Unit tests — `tet4_nonconforming_refine_single_element()`, `tet4_nonconforming_refine_with_neighbor()`, face constraint recovery
+- 🔲 Integration with NCState for 3-D multi-level refinement
+- 🔲 Tet4 3-D example demonstrating NC AMR with error estimation
 
 ### Backlog (Low Priority)
 | Item | Phase | Notes |
@@ -698,3 +709,5 @@ prioritized roadmap for continued development.
 | Netgen / Abaqus readers | TBD | Additional mesh import formats |
 | HDF5/XDMF I/O | TBD | Large-scale checkpointing |
 | Restart files | TBD | Requires HDF5 |
+| NCState 3-D multi-level | Phase 48 | Extend NCState::refine to handle Tet4 + face constraints |
+| Tet4 NC AMR example | Phase 48 | Demonstrate 3-D error estimation + NC refinement |

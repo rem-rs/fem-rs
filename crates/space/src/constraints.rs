@@ -9,7 +9,7 @@
 
 use fem_core::types::DofId;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::amr::HangingNodeConstraint;
+use fem_mesh::amr::{HangingNodeConstraint, HangingFaceConstraint};
 use fem_mesh::topology::MeshTopology;
 
 use crate::dof_manager::{DofManager, EdgeKey, FaceKey};
@@ -325,6 +325,135 @@ pub fn recover_hanging_values(
     // Handle any remaining (shouldn't happen with valid constraints, but just in case).
     for c in remaining {
         x[c.constrained] = 0.5 * (x[c.parent_a] + x[c.parent_b]);
+    }
+}
+
+/// Apply hanging face constraints (3-D) to the assembled system `(K, f)`.
+///
+/// For each 3-D face constraint: `u_hang = (1/3)*(u_a + u_b + u_c)`.
+/// Implements static condensation via P^T K P and P^T f, similar to edges.
+pub fn apply_hanging_face_constraints(
+    mat: &mut CsrMatrix<f64>,
+    rhs: &mut [f64],
+    constraints: &[HangingFaceConstraint],
+) {
+    if constraints.is_empty() { return; }
+
+    let n = mat.nrows;
+
+    let mut constraint_map = std::collections::HashMap::new();
+    for c in constraints {
+        constraint_map.insert(c.constrained, (c.parent_a, c.parent_b, c.parent_c));
+    }
+
+    // Recursively expand a DOF into its free-DOF contributions.
+    // For face constraints, each constrained DOF is a weighted sum of 3 parents.
+    fn expand_dof_faces(
+        dof: usize,
+        weight: f64,
+        constraint_map: &std::collections::HashMap<usize, (usize, usize, usize)>,
+        out: &mut Vec<(usize, f64)>,
+        depth: usize,
+    ) {
+        if depth > 20 { return; } // safety guard
+        if let Some(&(a, b, c)) = constraint_map.get(&dof) {
+            let w = weight / 3.0;
+            expand_dof_faces(a, w, constraint_map, out, depth + 1);
+            expand_dof_faces(b, w, constraint_map, out, depth + 1);
+            expand_dof_faces(c, w, constraint_map, out, depth + 1);
+        } else {
+            out.push((dof, weight));
+        }
+    }
+
+    // Build K' in COO format.
+    let mut coo = CooMatrix::<f64>::new(n, n);
+
+    for i in 0..n {
+        let start = mat.row_ptr[i];
+        let end = mat.row_ptr[i + 1];
+
+        let mut i_targets: Vec<(usize, f64)> = Vec::new();
+        expand_dof_faces(i, 1.0, &constraint_map, &mut i_targets, 0);
+
+        for p in start..end {
+            let j = mat.col_idx[p] as usize;
+            let v = mat.values[p];
+            if v.abs() < 1e-30 { continue; }
+
+            let mut j_targets: Vec<(usize, f64)> = Vec::new();
+            expand_dof_faces(j, 1.0, &constraint_map, &mut j_targets, 0);
+
+            for &(ii, ai) in &i_targets {
+                for &(jj, aj) in &j_targets {
+                    coo.add(ii, jj, v * ai * aj);
+                }
+            }
+        }
+    }
+
+    // Set identity rows for constrained DOFs.
+    for c in constraints {
+        coo.add(c.constrained, c.constrained, 1.0);
+    }
+
+    // Build f' = P^T f with recursive expansion.
+    let mut new_rhs = vec![0.0_f64; n];
+    for i in 0..n {
+        if rhs[i].abs() < 1e-30 { continue; }
+        let mut targets = Vec::new();
+        expand_dof_faces(i, 1.0, &constraint_map, &mut targets, 0);
+        for &(t, w) in &targets {
+            new_rhs[t] += w * rhs[i];
+        }
+    }
+    // Zero out constrained DOF RHS.
+    for c in constraints {
+        new_rhs[c.constrained] = 0.0;
+    }
+    rhs.copy_from_slice(&new_rhs);
+
+    *mat = coo.into_csr();
+}
+
+/// Recover hanging face DOF values after solving.
+///
+/// Sets `x[c] = (1/3)*(x[a] + x[b] + x[c])` for each hanging-face constraint.
+/// Handles chained constraints by processing in topological order.
+pub fn recover_hanging_face_values(
+    x: &mut [f64],
+    constraints: &[HangingFaceConstraint],
+) {
+    if constraints.is_empty() { return; }
+
+    let constrained_set: std::collections::HashSet<usize> =
+        constraints.iter().map(|c| c.constrained).collect();
+
+    // Topological sort
+    let mut remaining: Vec<&HangingFaceConstraint> = constraints.iter().collect();
+    let mut resolved = std::collections::HashSet::new();
+
+    for _ in 0..constraints.len() + 1 {
+        let mut progress = false;
+        remaining.retain(|c| {
+            let a_free = !constrained_set.contains(&c.parent_a) || resolved.contains(&c.parent_a);
+            let b_free = !constrained_set.contains(&c.parent_b) || resolved.contains(&c.parent_b);
+            let c_free = !constrained_set.contains(&c.parent_c) || resolved.contains(&c.parent_c);
+            if a_free && b_free && c_free {
+                x[c.constrained] = (x[c.parent_a] + x[c.parent_b] + x[c.parent_c]) / 3.0;
+                resolved.insert(c.constrained);
+                progress = true;
+                false
+            } else {
+                true
+            }
+        });
+        if remaining.is_empty() || !progress { break; }
+    }
+
+    // Handle remaining
+    for c in remaining {
+        x[c.constrained] = (x[c.parent_a] + x[c.parent_b] + x[c.parent_c]) / 3.0;
     }
 }
 
@@ -677,5 +806,64 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn recover_hanging_face_values_simple() {
+        // Test face constraint recovery: u[c] = (1/3)*(u[a] + u[b] + u[c])
+        let mut x = vec![1.0, 2.0, 0.0, 4.0, 5.0];
+        let constraints = vec![
+            HangingFaceConstraint {
+                constrained: 2,
+                parent_a: 0,
+                parent_b: 1,
+                parent_c: 3,
+            },
+        ];
+
+        recover_hanging_face_values(&mut x, &constraints);
+
+        // x[2] should be 1/3 * (1 + 2 + 4) = 7/3 ≈ 2.333...
+        let expected = (1.0 + 2.0 + 4.0) / 3.0;
+        assert!(
+            (x[2] - expected).abs() < 1e-10,
+            "hanging face DOF: x[2]={}, expected {}", x[2], expected
+        );
+    }
+
+    #[test]
+    fn recover_hanging_face_values_chained() {
+        // Test chained face constraints
+        let mut x = vec![1.0, 2.0, 0.0, 3.0, 0.0];
+        let constraints = vec![
+            // x[2] = (1/3)*(x[0] + x[1] + x[3])
+            HangingFaceConstraint {
+                constrained: 2,
+                parent_a: 0,
+                parent_b: 1,
+                parent_c: 3,
+            },
+            // x[4] = (1/3)*(x[0] + x[2] + x[3]) — depends on x[2]
+            HangingFaceConstraint {
+                constrained: 4,
+                parent_a: 0,
+                parent_b: 2,
+                parent_c: 3,
+            },
+        ];
+
+        recover_hanging_face_values(&mut x, &constraints);
+
+        // x[2] = (1/3)*(1 + 2 + 3) = 2
+        assert!(
+            (x[2] - 2.0).abs() < 1e-10,
+            "first constraint: x[2]={}, expected 2", x[2]
+        );
+
+        // x[4] = (1/3)*(1 + 2 + 3) = 2
+        assert!(
+            (x[4] - 2.0).abs() < 1e-10,
+            "second constraint: x[4]={}, expected 2", x[4]
+        );
     }
 }
