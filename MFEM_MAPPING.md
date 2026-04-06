@@ -708,4 +708,4 @@ prioritized roadmap for continued development.
 | Netgen / Abaqus readers | TBD | Additional mesh import formats |
 | HDF5/XDMF I/O | TBD | Large-scale checkpointing |
 | Restart files | TBD | Requires HDF5 |
-| Tet4 NC AMR example | TBD | Optional showcase example (core Tet4 NC support is complete) |
+| Tet4 NC AMR example | ✅ | ~~TBD~~ Done (`ex15_tet_nc_amr`) |

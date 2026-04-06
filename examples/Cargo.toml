@@ -82,6 +82,10 @@ name = "ex15_dg_amr"
 path = "ex15_dg_amr.rs"
 
 [[example]]
+name = "ex15_tet_nc_amr"
+path = "ex15_tet_nc_amr.rs"
+
+[[example]]
 name = "ex16_nonlinear_heat"
 path = "ex16_nonlinear_heat.rs"
 
