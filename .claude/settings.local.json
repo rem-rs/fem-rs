@@ -23,7 +23,32 @@
       "Bash(grep -E \"test .* \\\\.\\\\.\\\\.|FAILED|error|ok$|running [0-9]+ test\")",
       "Bash(CARGO_TARGET_DIR=/tmp/femcheck cargo check --manifest-path Cargo.toml)",
       "Bash(taskkill /F /IM thread_launcher-682ad08f60002e7e.exe)",
-      "Bash(cmd /c \"taskkill /F /IM thread_launcher*.exe 2>nul\")"
+      "Bash(cmd /c \"taskkill /F /IM thread_launcher*.exe 2>nul\")",
+      "Bash(wc -l /Users/alex/works/fem-rs/crates/element/src/lagrange/*.rs)",
+      "Bash(wc -l /Users/alex/works/fem-rs/crates/linalg/src/*.rs)",
+      "Bash(wc -l /Users/alex/works/fem-rs/crates/io/src/*.rs)",
+      "Bash(wc -l /Users/alex/works/fem-rs/crates/parallel/src/*.rs /Users/alex/works/fem-rs/crates/parallel/src/backend/*.rs /Users/alex/works/fem-rs/crates/parallel/src/launcher/*.rs)",
+      "Bash(wc -l /Users/alex/works/fem-rs/crates/wasm/src/*.rs)",
+      "Bash(wc -l /Users/alex/works/fem-rs/crates/ceed/src/*.rs)",
+      "Bash(wc -l /Users/alex/works/fem-rs/examples/*.rs)",
+      "Bash(cargo test:*)",
+      "Read(//tmp/**)",
+      "Bash(cargo check:*)",
+      "Bash(grep -n \"VectorReferenceElement\\\\|element_signs\" /Users/alex/works/fem-rs/crates/assembly/src/*.rs /Users/alex/works/fem-rs/crates/assembly/src/**/*.rs)",
+      "Bash(grep -n \"VectorReferenceElement\" /Users/alex/works/fem-rs/crates/element/src/*.rs)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(cargo run:*)",
+      "Bash(grep -v \"^warning\\\\|^  -->\\\\|^   |\\\\|^$\\\\|^   =\")",
+      "Bash(cargo build:*)",
+      "Bash(ls -la /Users/alex/works/fem-rs/*.md)",
+      "Bash(find . -name \"lib.rs\" -path \"*/solver/*\" -exec head -50 {} \\\\;)",
+      "Bash(grep -n \"face_iter\\\\|element_faces\" /Users/alex/works/fem-rs/crates/mesh/src/*.rs)",
+      "Bash(python3 /tmp/test_dg.py)",
+      "Bash(grep -v \"^$\")",
+      "Bash(ls -lh /Users/alex/works/fem-rs/COEFFICIENT*.md)",
+      "Bash(du -sh /Users/alex/works/fem-rs/COEFFICIENT*.md)",
+      "Bash(grep -v \"ignored$\")"
     ]
   }
 }

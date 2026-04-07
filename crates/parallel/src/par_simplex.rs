@@ -29,6 +29,7 @@ use fem_core::{FaceId, NodeId, Rank};
 use fem_mesh::SimplexMesh;
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
+use crate::mesh_serde;
 
 // ── public entry point ────────────────────────────────────────────────────────
 
@@ -36,6 +37,10 @@ use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
 ///
 /// Returns a [`ParallelMesh`] whose local sub-mesh contains only the elements
 /// and nodes (owned + ghost) assigned to the calling rank.
+///
+/// **Note**: every rank must hold the full serial mesh.  For a
+/// memory-efficient alternative where only rank 0 holds the mesh, use
+/// [`partition_simplex_streaming`].
 ///
 /// # Panics
 /// Panics if the mesh has zero elements.
@@ -54,19 +59,112 @@ pub fn partition_simplex<const D: usize>(
     }
 
     // ── multi-rank partitioning ──────────────────────────────────────────────
-    let size = comm.size();
-    let local_rank = comm.rank();
+    let (local_mesh, partition) = extract_submesh_for_rank(
+        mesh, comm.rank(), comm.size(),
+    );
+    ParallelMesh::new(local_mesh, comm.clone(), partition)
+}
 
-    // 1. Assign elements to ranks (contiguous blocks).
-    let chunk = n_elems.div_ceil(size);
-    let e_start = (local_rank as usize * chunk).min(n_elems);
-    let e_end = (e_start + chunk).min(n_elems);
-    let local_elem_gids: Vec<u32> = (e_start..e_end).map(|e| e as u32).collect();
+// ── streaming partition ──────────────────────────────────────────────────────
+
+/// Streaming mesh partition tag base (avoids ghost `0x1000`/`0x2000` and
+/// alltoallv `0x4000`/`0x5000`).
+pub(crate) const STREAM_TAG_BASE: i32 = 0x3700;
+
+/// Distribute a mesh using streaming: only rank 0 holds the full mesh.
+///
+/// Rank 0 partitions the mesh and sends each rank's sub-mesh via point-to-point
+/// messages.  Other ranks receive their sub-mesh without ever loading the full
+/// mesh — saving memory on WASM workers.
+///
+/// # Arguments
+/// * `mesh` — `Some(&full_mesh)` on rank 0, `None` on other ranks.
+/// * `comm` — communicator spanning all ranks.
+///
+/// # Errors
+/// Returns `Err` if the binary mesh decode fails on a receiving rank.
+pub fn partition_simplex_streaming<const D: usize>(
+    mesh: Option<&SimplexMesh<D>>,
+    comm: &Comm,
+) -> Result<ParallelMesh<SimplexMesh<D>>, String> {
+    let size = comm.size();
+
+    // ── single-rank fast path ────────────────────────────────────────────────
+    if size == 1 {
+        let m = mesh.ok_or("rank 0 must provide the mesh")?;
+        let partition = MeshPartition::new_serial(m.n_nodes(), m.n_elems());
+        return Ok(ParallelMesh::new(m.clone(), comm.clone(), partition));
+    }
+
+    if comm.is_root() {
+        // ── root: partition and distribute ────────────────────────────────────
+        let m = mesh.ok_or("rank 0 must provide the mesh")?;
+
+        // Send sub-meshes to ranks 1..N-1.
+        for target in 1..size as Rank {
+            let (sub_mesh, sub_part) = extract_submesh_for_rank(m, target, size);
+            let encoded = mesh_serde::encode_submesh(&sub_mesh, &sub_part);
+            comm.send_bytes(target, STREAM_TAG_BASE + target, &encoded);
+        }
+
+        // Extract rank 0's own sub-mesh.
+        let (local_mesh, partition) = extract_submesh_for_rank(m, 0, size);
+        Ok(ParallelMesh::new(local_mesh, comm.clone(), partition))
+    } else {
+        // ── non-root: receive sub-mesh ───────────────────────────────────────
+        let local_rank = comm.rank();
+        let buf = comm.recv_bytes(0, STREAM_TAG_BASE + local_rank);
+        let (local_mesh, partition) = mesh_serde::decode_submesh::<D>(&buf)?;
+        Ok(ParallelMesh::new(local_mesh, comm.clone(), partition))
+    }
+}
+
+// ── extract_submesh_for_rank ─────────────────────────────────────────────────
+
+/// Extract the sub-mesh for a given rank using contiguous element blocks.
+///
+/// This is a convenience wrapper around [`extract_submesh_from_partition`] that
+/// builds a contiguous-block partition vector internally.
+fn extract_submesh_for_rank<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    target_rank: Rank,
+    n_ranks: usize,
+) -> (SimplexMesh<D>, MeshPartition) {
+    let n_elems = mesh.n_elems();
+    let chunk = n_elems.div_ceil(n_ranks);
+    let elem_part: Vec<Rank> = (0..n_elems)
+        .map(|e| (e / chunk) as Rank)
+        .collect();
+    extract_submesh_from_partition(mesh, target_rank, &elem_part)
+}
+
+/// Extract the sub-mesh and partition descriptor for a given rank from an
+/// arbitrary element partition vector.
+///
+/// This is the shared core used by both the contiguous-block partitioner
+/// (`partition_simplex`) and the METIS graph partitioner
+/// (`partition_simplex_metis`).
+///
+/// # Arguments
+/// * `mesh` — the full serial mesh.
+/// * `target_rank` — the rank whose sub-mesh to extract.
+/// * `elem_part` — `elem_part[e]` is the rank that owns element `e`.
+pub(crate) fn extract_submesh_from_partition<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    target_rank: Rank,
+    elem_part: &[Rank],
+) -> (SimplexMesh<D>, MeshPartition) {
+    let n_elems = mesh.n_elems();
+
+    // 1. Collect elements owned by target_rank.
+    let local_elem_gids: Vec<u32> = (0..n_elems as u32)
+        .filter(|&e| elem_part[e as usize] == target_rank)
+        .collect();
 
     // 2. Node ownership: owner = rank of first element containing the node.
-    let node_owners = compute_node_owners(mesh, n_nodes_total, n_elems, size);
+    let node_owners = compute_node_owners_from_partition(mesh, elem_part);
 
-    // 3. Collect all nodes touched by local elements; classify owned vs ghost.
+    // 3. Collect all nodes touched by local (owned) elements.
     let mut node_set: BTreeSet<NodeId> = BTreeSet::new();
     for &ge in &local_elem_gids {
         for &n in mesh.elem_nodes(ge) {
@@ -74,18 +172,37 @@ pub fn partition_simplex<const D: usize>(
         }
     }
 
+    // 3b. Find ghost elements: elements NOT owned by this rank that share at
+    // least one node with our owned elements.
+    let mut ghost_elem_gids: Vec<u32> = Vec::new();
+    for e in 0..n_elems as u32 {
+        if elem_part[e as usize] == target_rank { continue; }
+        let shares_node = mesh.elem_nodes(e).iter().any(|n| node_set.contains(n));
+        if shares_node {
+            ghost_elem_gids.push(e);
+        }
+    }
+
+    // 3c. Add nodes from ghost elements to the node set.
+    for &ge in &ghost_elem_gids {
+        for &n in mesh.elem_nodes(ge) {
+            node_set.insert(n);
+        }
+    }
+
+    // 4. Classify nodes as owned vs ghost.
     let mut owned_global: Vec<NodeId> = Vec::new();
     let mut ghost_global: Vec<(NodeId, Rank)> = Vec::new();
     for gn in &node_set {
         let owner = node_owners[*gn as usize];
-        if owner == local_rank {
+        if owner == target_rank {
             owned_global.push(*gn);
         } else {
             ghost_global.push((*gn, owner));
         }
     }
 
-    // 4. Build global → local node mapping (owned first, then ghost).
+    // 4b. Build global → local node mapping (owned first, then ghost).
     let ghost_base = owned_global.len();
     let mut g2l: HashMap<NodeId, u32> =
         HashMap::with_capacity(owned_global.len() + ghost_global.len());
@@ -105,11 +222,12 @@ pub fn partition_simplex<const D: usize>(
         local_coords.extend_from_slice(&mesh.coords_of(gn));
     }
 
-    // 6. Build local connectivity with remapped node IDs.
-    let npe = mesh.elem_type.nodes_per_element();
-    let mut local_conn = Vec::with_capacity(local_elem_gids.len() * npe);
-    let mut local_elem_tags = Vec::with_capacity(local_elem_gids.len());
-    for &ge in &local_elem_gids {
+    // 6. Build local connectivity with remapped node IDs (owned + ghost elements).
+    let npe = mesh.elem_type.nodes_per_element(); // assumes uniform mesh for parallel
+    let all_local_elems = local_elem_gids.len() + ghost_elem_gids.len();
+    let mut local_conn = Vec::with_capacity(all_local_elems * npe);
+    let mut local_elem_tags = Vec::with_capacity(all_local_elems);
+    for &ge in local_elem_gids.iter().chain(ghost_elem_gids.iter()) {
         for &gn in mesh.elem_nodes(ge) {
             local_conn.push(g2l[&gn]);
         }
@@ -118,53 +236,45 @@ pub fn partition_simplex<const D: usize>(
 
     // 7. Assign boundary faces to this rank.
     let (local_face_conn, local_face_tags) =
-        extract_local_faces(mesh, &g2l, &node_owners, local_rank);
+        extract_local_faces(mesh, &g2l, &node_owners, target_rank);
 
     // 8. Assemble the local sub-mesh.
-    let local_mesh = SimplexMesh::<D> {
-        coords:     local_coords,
-        conn:       local_conn,
-        elem_tags:  local_elem_tags,
-        elem_type:  mesh.elem_type,
-        face_conn:  local_face_conn,
-        face_tags:  local_face_tags,
-        face_type:  mesh.face_type,
-    };
+    let local_mesh = SimplexMesh::uniform(
+        local_coords, local_conn, local_elem_tags, mesh.elem_type,
+        local_face_conn, local_face_tags, mesh.face_type,
+    );
 
     let partition = MeshPartition::from_partitioner(
         &owned_global,
         &ghost_global,
         &local_elem_gids,
-        local_rank,
+        target_rank,
     );
 
-    ParallelMesh::new(local_mesh, comm.clone(), partition)
+    (local_mesh, partition)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// For each global node, compute which rank owns it.
+/// For each global node, compute which rank owns it given an arbitrary
+/// element partition vector.
 ///
 /// A node is owned by the rank that owns the lowest-indexed element containing
 /// it.  Sweeping elements 0 → n_elems in order, the first rank to "see" a node
 /// becomes its owner.
-fn compute_node_owners<const D: usize>(
+pub(crate) fn compute_node_owners_from_partition<const D: usize>(
     mesh: &SimplexMesh<D>,
-    n_nodes: usize,
-    n_elems: usize,
-    n_ranks: usize,
+    elem_part: &[Rank],
 ) -> Vec<Rank> {
-    let chunk = n_elems.div_ceil(n_ranks);
+    let n_nodes = mesh.n_nodes();
     let mut owners = vec![-1_i32; n_nodes];
-    for e in 0..n_elems {
-        let rank = (e / chunk) as Rank;
+    for (e, &rank) in elem_part.iter().enumerate() {
         for &n in mesh.elem_nodes(e as u32) {
             if owners[n as usize] < 0 {
                 owners[n as usize] = rank;
             }
         }
     }
-    // Isolated nodes (not in any element) go to rank 0.
     for o in &mut owners {
         if *o < 0 { *o = 0; }
     }

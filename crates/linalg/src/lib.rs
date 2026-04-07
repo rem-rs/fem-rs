@@ -19,6 +19,8 @@ pub mod block;
 
 pub use coo::CooMatrix;
 pub use csr::CsrMatrix;
+pub use csr::spadd;
 pub use sparsity::SparsityPattern;
 pub use vector::Vector;
 pub use block::{BlockMatrix, BlockVector};
+pub use dense::DenseTensor;

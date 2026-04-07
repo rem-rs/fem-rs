@@ -22,9 +22,9 @@
 //! (Nédélec 1980, also MFEM `ND_TriangleElement` order 1) is:
 //!
 //! ```text
-//!   Φ₀ = [  η,   −ξ  ]
-//!   Φ₁ = [ 1−η,   ξ  ]
-//!   Φ₂ = [ −η,   ξ−1 ]   (or equivalently [−η, ξ−1])
+//!   Φ₀ = [  1−η,   ξ  ]
+//!   Φ₁ = [ −η,    ξ  ]
+//!   Φ₂ = [  η,   1−ξ ]
 //! ```
 //!
 //! Wait — the standard presentation uses the **Whitney form** based on barycentric
@@ -40,7 +40,7 @@
 //! ```text
 //!   Φ₀ = λ₀ ∇λ₁ − λ₁ ∇λ₀ = (1−ξ−η)(1,0) − ξ(−1,−1) = (1−η, ξ)
 //!   Φ₁ = λ₁ ∇λ₂ − λ₂ ∇λ₁ = ξ(0,1) − η(1,0)          = (−η, ξ)
-//!   Φ₂ = λ₂ ∇λ₀ − λ₀ ∇λ₂ = η(−1,−1) − (1−ξ−η)(0,1) = (−η, −1+ξ)
+//!   Φ₂ = λ₀ ∇λ₂ − λ₂ ∇λ₀ = (1−ξ−η)(0,1) − η(−1,−1)  = (η, 1−ξ)
 //! ```
 //!
 //! DOF i is the tangential moment on edge i:
@@ -60,10 +60,10 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 ///
 /// Reference domain: triangle with vertices (0,0), (1,0), (0,1).
 ///
-/// Basis functions (Whitney 1-forms):
-/// - Φ₀ = (1−η,  ξ)    — edge e₀: v₀(0,0) → v₁(1,0)
-/// - Φ₁ = (−η,   ξ)    — edge e₁: v₁(1,0) → v₂(0,1)
-/// - Φ₂ = (−η,  ξ−1)   — edge e₂: v₀(0,0) → v₂(0,1)
+/// Basis functions (Whitney 1-forms `w_{ij} = λᵢ ∇λⱼ − λⱼ ∇λᵢ`):
+/// - Φ₀ = w₀₁ = (1−η,  ξ)    — edge e₀: v₀→v₁, curl = +2
+/// - Φ₁ = w₁₂ = (−η,   ξ)    — edge e₁: v₁→v₂, curl = +2
+/// - Φ₂ = w₀₂ = ( η,  1−ξ)   — edge e₂: v₀→v₂, curl = −2
 ///
 /// The scalar 2-D curl of a vector field (Φ_x, Φ_y) is `∂Φ_y/∂ξ − ∂Φ_x/∂η`.
 pub struct TriND1;
@@ -76,12 +76,12 @@ impl VectorReferenceElement for TriND1 {
     /// `values[i*2 + c]` = component c of basis function i.
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
-        // Φ₀ = (1−η, ξ)
+        // Φ₀ = w_{01} = (1−η, ξ)
         values[0] = 1.0 - y;  values[1] = x;
-        // Φ₁ = (−η, ξ)
+        // Φ₁ = w_{12} = (−η, ξ)
         values[2] = -y;        values[3] = x;
-        // Φ₂ = (−η, ξ−1)
-        values[4] = -y;        values[5] = x - 1.0;
+        // Φ₂ = w_{02} = (η, 1−ξ)
+        values[4] = y;         values[5] = 1.0 - x;
     }
 
     /// 2-D scalar curl: `curl_vals[i] = ∂Φᵢ_y/∂ξ − ∂Φᵢ_x/∂η`
@@ -90,8 +90,8 @@ impl VectorReferenceElement for TriND1 {
         curl_vals[0] = 2.0;
         // Φ₁ = (−η, ξ):   ∂(ξ)/∂ξ − ∂(−η)/∂η  = 1 − (−1) = 2
         curl_vals[1] = 2.0;
-        // Φ₂ = (−η, ξ−1): ∂(ξ−1)/∂ξ − ∂(−η)/∂η = 1 − (−1) = 2
-        curl_vals[2] = 2.0;
+        // Φ₂ = (η, 1−ξ):  ∂(1−ξ)/∂ξ − ∂(η)/∂η = −1 − 1 = −2
+        curl_vals[2] = -2.0;
     }
 
     /// Divergence — not the natural operator for H(curl); returns zeros.
@@ -115,16 +115,17 @@ impl VectorReferenceElement for TriND1 {
 mod tests {
     use super::*;
 
-    /// curl of every ND1 basis function on the reference triangle equals 2.
+    /// curl of ND1 basis functions on the reference triangle: [2, 2, -2].
     #[test]
     fn nd1_curl_constant() {
         let elem = TriND1;
         let mut curl = vec![0.0; 3];
+        let expected = [2.0, 2.0, -2.0];
         let qr = elem.quadrature(3);
         for pt in &qr.points {
             elem.eval_curl(pt, &mut curl);
             for (i, &c) in curl.iter().enumerate() {
-                assert!((c - 2.0).abs() < 1e-13, "curl[{i}] = {c}");
+                assert!((c - expected[i]).abs() < 1e-13, "curl[{i}] = {c}, expected {}", expected[i]);
             }
         }
     }
@@ -137,18 +138,14 @@ mod tests {
     #[test]
     fn nd1_nodal_basis() {
         let elem = TriND1;
-        // Edge tangents (unit, direction v_a → v_b):
-        // e₀: (1,0)       length 1
-        // e₁: (−1,1)/√2   length √2  → tangent (−1,1)/√2
-        // e₂: (0,1)        length 1
-        // Tangent directions follow the Whitney ordering:
-        // e₀: v₀→v₁  tangent (1,0)
-        // e₁: v₁→v₂  tangent (−1,1)/√2
-        // e₂: v₂→v₀  tangent (0,−1)   ← note: v₂→v₀, not v₀→v₂
+        // Edge tangents (unit, direction of local edge):
+        // e₀: v₀→v₁  tangent (1,0)       length 1
+        // e₁: v₁→v₂  tangent (−1,1)/√2   length √2
+        // e₂: v₀→v₂  tangent (0,1)       length 1
         let tangents: [[f64; 2]; 3] = [
             [1.0, 0.0],
             [-1.0 / 2f64.sqrt(), 1.0 / 2f64.sqrt()],
-            [0.0, -1.0],
+            [0.0, 1.0],
         ];
         let edge_len = [1.0_f64, 2f64.sqrt(), 1.0_f64];
 
@@ -172,7 +169,7 @@ mod tests {
         }
     }
 
-    /// The vector sum Σ Φᵢ should equal the vector (1−η+−η−η, ξ+ξ+ξ−1) = (1−3η, 3ξ−1).
+    /// The vector sum Σ Φᵢ = (1−η−η+η, ξ+ξ+1−ξ) = (1−η, ξ+1).
     /// Not a fixed constant, but a useful sanity-check that the definitions are consistent.
     #[test]
     fn nd1_basis_values_at_centroid() {
@@ -186,8 +183,8 @@ mod tests {
         // Φ₁ = (−1/3, 1/3)
         assert!((vals[2] + 1.0 / 3.0).abs() < 1e-14);
         assert!((vals[3] - 1.0 / 3.0).abs() < 1e-14);
-        // Φ₂ = (−1/3, 1/3−1) = (−1/3, −2/3)
-        assert!((vals[4] + 1.0 / 3.0).abs() < 1e-14);
-        assert!((vals[5] + 2.0 / 3.0).abs() < 1e-14);
+        // Φ₂ = (η, 1−ξ) = (1/3, 2/3)
+        assert!((vals[4] - 1.0 / 3.0).abs() < 1e-14);
+        assert!((vals[5] - 2.0 / 3.0).abs() < 1e-14);
     }
 }

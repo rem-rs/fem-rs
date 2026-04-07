@@ -30,13 +30,34 @@
 | 20 | solver | ✅ Done | 2026-04-03 | LOBPCG eigenvalue solver; GeneralizedEigenSolver trait; LobpcgSolver; handles standard + generalized A x=λBx; 1-D Laplacian eigenvalues verified; 4 tests |
 | 21 | solver + linalg | ✅ Done | 2026-04-03 | BlockSystem (2×2 saddle-point); BlockDiagonalPrecond; SchurComplementSolver (GMRES on flat system); MinresSolver; 4 tests |
 | 22 | assembly + ceed | ✅ Done | 2026-04-03 | Partial assembly (matrix-free): PAMassOperator, PADiffusionOperator (spatially varying κ), LumpedMassOperator; MatFreeOperator trait; results match assembled matrix × vector to 1e-11; 5 tests |
+| 23 | space | ✅ Done | 2026-04-04 | HCurlSpace (Nédélec ND1 edge DOFs, sign convention, 2D+3D) + HDivSpace (RT0 face DOFs, geometric sign computation, 2D+3D); FESpace::element_signs(); EdgeKey/FaceKey public; boundary_dofs_hcurl/hdiv; 13 tests |
+| 24 | assembly | ✅ Done | 2026-04-04 | VectorAssembler (Piola transforms + sign application); VectorQpData + VectorBilinearIntegrator/VectorLinearIntegrator traits; CurlCurlIntegrator (∫ μ curl u · curl v); VectorMassIntegrator (∫ α u·v); H(curl) assembly verified symmetric + PSD; 10 tests |
+| 25 | assembly + solver | ✅ Done | 2026-04-04 | Fix SIP-DG interior face normals (single consistent n_L + orient_normal_outward); SchurComplementSolver rewritten with right-preconditioned GMRES + block-diagonal precond; MINRES rewritten (Choi-Paige-Saunders); TriND1 Φ₂ basis orientation fix; all 8 examples passing |
+| 26 | assembly | ✅ Done | 2026-04-04 | Coefficient system: ScalarCoeff/VectorCoeff/MatrixCoeff traits, PWConstCoeff, PWCoeff, GridFunctionCoeff, composition |
+| 27 | assembly | ✅ Done | 2026-04-04 | Convection, VectorDiffusion, BoundaryMass, GradDiv, Transpose, Sum integrators; VectorDomainLF, BoundaryNormalLF |
+| 28 | assembly | ✅ Done | 2026-04-04 | GridFunction wrapper (evaluate, L²/H¹ errors); postprocess (element gradients, curl, divergence, nodal gradient recovery); 10 tests |
+| 29 | assembly | ✅ Done | 2026-04-04 | DiscreteLinearOperator: gradient (H1→H(curl)), curl_2d (H(curl)→L2), divergence (H(div)→L2) as sparse matrices; de Rham exact sequence verified; 5 tests |
+| 30 | solver | ✅ Done | 2026-04-04 | Newmark-β time integrator (average acceleration, unconditionally stable); ex10_wave_equation example (sin(πx)sin(πy), max error 8.3e-3); 1 test |
+| 31 | element | ✅ Done | 2026-04-04 | Gauss-Lobatto quadrature (n=2..5 on [-1,1]); seg_lobatto_rule, quad_lobatto_rule, hex_lobatto_rule; 7 tests |
+| 32 | examples | ✅ Done | 2026-04-04 | ex4_darcy (H(div) RT0 grad-div, MINRES); ex15_dg_amr (P1 + ZZ estimator + Dörfler marking + refinement, O(h²) convergence verified) |
+| 33a | parallel | ✅ Done | 2026-04-05 | jsmpi submodule + JsMpiBackend replacing WasmWorkerBackend stub; WASM MPI via jsmpi Web Workers |
+| 33b | parallel | ✅ Done | 2026-04-05 | DofPartition (DOF-level ownership, exclusive scan for global offsets) + ParallelFESpace (wraps serial FESpace + DOF ghost exchange); 5 tests |
+| 33c | parallel | ✅ Done | 2026-04-05 | ParVector (distributed vector, global_dot/norm, ghost exchange) + ParCsrMatrix (diag+offd split, parallel SpMV); 7 tests |
+| 33d | parallel | ✅ Done | 2026-04-05 | ParAssembler: parallel bilinear/linear form assembly with ghost-row exchange via alltoallv; parallel Dirichlet BCs; 3 tests |
+| 33e | parallel + examples | ✅ Done | 2026-04-05 | par_solve_cg + par_solve_pcg_jacobi; pex1_poisson example (2-rank PCG, 21 iters, L² error 1.5e-3); 2 tests |
+| 34 | parallel | ✅ Done | 2026-04-05 | P2 parallel spaces: DofPartition::from_dof_manager (edge DOF ownership via min-owner rule), ghost edge ID exchange, DOF permutation (dm↔partition), ParAssembler auto-permute; pex1 --p2 (L² error 5.5e-4); 7 new tests |
+| 35 | parallel | ✅ Done | 2026-04-05 | Parallel AMG: ParAmgHierarchy (local smoothed aggregation, Galerkin R*A*P), damped Jacobi smoother, par_solve_pcg_amg; AMG fewer iters than Jacobi verified; 3 tests |
+| 36 | parallel | ✅ Done | 2026-04-05 | Comm::split(color,key) sub-communicator; CommBackend::split trait method; ChannelBackend impl (Arc pointer sharing); 2 tests |
+| 37 | parallel + wasm | ✅ Done | 2026-04-05 | WASM multi-Worker + streaming mesh partition: WorkerInitMsg::from_jsmpi_env(), spawn_async()+WasmJob, MeshPartition::from_raw(), binary mesh_serde (encode/decode), partition_simplex_streaming() (rank 0 distributes sub-meshes via send/recv), extract_submesh_for_rank() refactor, WasmParSolver + jsmpi_main entry point, wasm-parallel feature; 13 new tests |
+| 38 | parallel | ✅ Done | 2026-04-05 | METIS streaming partition + pex1 CLI: extract_submesh_from_partition(elem_part) generalized extractor, partition_simplex_metis_streaming(), metis.rs refactored to shared extractor (−80 lines duplication), pex1 enhanced with --n/--ranks/--metis/--streaming flags; 3 new tests |
 
 ### Vendor submodules
 | Submodule | URL | Role |
 |-----------|-----|------|
 | `vendor/reed` | javagg/reed | libCEED analogue; bridged via `crates/ceed` |
 | `vendor/linger` | javagg/linger | Krylov solvers + AMG; drives `fem-solver` and `fem-amg` |
-| `vendor/rmetis` | javagg/rmetis | Pure-Rust METIS-compatible graph partitioner; will drive `fem-parallel` Phase 18 |
+| `vendor/rmetis` | javagg/rmetis | Pure-Rust BFS graph partitioner; drives `fem-parallel` Phase 18 |
+| `vendor/jsmpi` | javagg/jsmpi | JavaScript MPI shim for WASM Web Workers; drives `fem-parallel` Phase 33a |
 
 ---
 

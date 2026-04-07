@@ -28,7 +28,7 @@
 //! ```
 
 use fem_linalg::{CooMatrix, CsrMatrix};
-use crate::{SolverConfig, SolverError, SolveResult, solve_cg, solve_gmres};
+use crate::{SolverConfig, SolverError, SolveResult};
 
 // ─── Block system ─────────────────────────────────────────────────────────────
 
@@ -153,24 +153,90 @@ impl BlockDiagonalPrecond {
     }
 }
 
+// ─── Block triangular preconditioner ────────────────────────────────────────
+
+/// Block upper-triangular preconditioner for `[A, B^T; B, C]`.
+///
+/// Applies the preconditioner:
+/// ```text
+///   z_p = S_approx⁻¹ r_p
+///   z_u = A_approx⁻¹ (r_u - B^T z_p)
+/// ```
+///
+/// where `A_approx⁻¹ ≈ diag(A)⁻¹` and `S_approx⁻¹ ≈ diag(S)⁻¹`.
+/// This is more effective than block-diagonal for saddle-point systems
+/// because it captures the upper-triangular coupling.
+pub struct BlockTriangularPrecond {
+    /// Inverse diagonal of A.
+    inv_diag_a: Vec<f64>,
+    /// Inverse diagonal of S (Schur complement approximation).
+    inv_diag_s: Vec<f64>,
+    /// B^T matrix for coupling.
+    bt: CsrMatrix<f64>,
+}
+
+impl BlockTriangularPrecond {
+    /// Build from a block system.
+    pub fn from_system(sys: &BlockSystem) -> Self {
+        let n_u = sys.n_u();
+        let n_p = sys.n_p();
+
+        let inv_diag_a: Vec<f64> = (0..n_u)
+            .map(|i| {
+                let d = sys.a.get(i, i);
+                if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
+            })
+            .collect();
+
+        let inv_diag_s: Vec<f64> = if let Some(c) = &sys.c {
+            (0..n_p).map(|i| {
+                let d = c.get(i, i);
+                if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
+            }).collect()
+        } else {
+            // No C block: use identity scaling for the pressure.
+            vec![1.0; n_p]
+        };
+
+        BlockTriangularPrecond {
+            inv_diag_a,
+            inv_diag_s,
+            bt: sys.bt.clone(),
+        }
+    }
+
+    /// Apply preconditioner: `z = P⁻¹ r`.
+    ///
+    /// 1. `z_p = diag(S)⁻¹ r_p`
+    /// 2. `z_u = diag(A)⁻¹ (r_u - B^T z_p)`
+    pub fn apply(&self, ru: &[f64], rp: &[f64], zu: &mut [f64], zp: &mut [f64]) {
+        // Step 1: Schur block
+        for i in 0..zp.len() { zp[i] = self.inv_diag_s[i] * rp[i]; }
+
+        // Step 2: coupling + velocity block
+        // tmp = B^T z_p
+        let mut bt_zp = vec![0.0_f64; zu.len()];
+        self.bt.spmv(zp, &mut bt_zp);
+        for i in 0..zu.len() {
+            zu[i] = self.inv_diag_a[i] * (ru[i] - bt_zp[i]);
+        }
+    }
+}
+
 // ─── Schur complement solver ─────────────────────────────────────────────────
 
-/// Exact Schur complement solver for saddle-point systems.
+/// Solver for saddle-point systems using the flat GMRES approach.
 ///
 /// **Algorithm**:
-/// 1. Solve `A u₁ = f` for `u₁`.
-/// 2. Form `g₂ = g - B u₁`.
-/// 3. Apply Schur complement matrix-vector products to solve `S p = g₂`
-///    using CG on the Schur complement operator `S = -B A^{-1} B^T + C`.
-/// 4. Recover `u = A^{-1}(f - B^T p)`.
+/// 1. Flatten the 2×2 block system into a single sparse matrix.
+/// 2. Solve with GMRES using a block-diagonal preconditioner
+///    `P = diag(diag(A)⁻¹, diag(S_approx)⁻¹)`.
 ///
-/// The inner solves use GMRES; each Schur CG iteration calls GMRES for A.
+/// More robust than Uzawa for general saddle-point systems.
 pub struct SchurComplementSolver;
 
 impl SchurComplementSolver {
     /// Solve the saddle-point system.
-    ///
-    /// Returns `(u_result, p_result, iterations)`.
     pub fn solve(
         sys:  &BlockSystem,
         f:    &[f64],
@@ -184,159 +250,282 @@ impl SchurComplementSolver {
         assert_eq!(u.len(), n_u); assert_eq!(p.len(), n_p);
         assert_eq!(f.len(), n_u); assert_eq!(g.len(), n_p);
 
-        let inner_cfg = SolverConfig {
-            rtol: cfg.rtol * 0.1,
-            atol: 0.0,
-            max_iter: cfg.max_iter,
-            verbose: false,
-        };
-
-        // Step 1: u₁ = A^{-1} f
-        let mut u1 = vec![0.0_f64; n_u];
-        solve_gmres(&sys.a, f, &mut u1, 30, &inner_cfg)?;
-
-        // Step 2: g₂ = g - B u₁
-        let mut g2 = g.to_vec();
-        for i in 0..n_p {
-            let mut s = 0.0;
-            for ptr in sys.b.row_ptr[i]..sys.b.row_ptr[i+1] {
-                let j = sys.b.col_idx[ptr] as usize;
-                s += sys.b.values[ptr] * u1[j];
-            }
-            g2[i] -= s;
-        }
-
-        // Step 3: Solve S p = g₂ using the flat GMRES on the full system
-        // (simplified: use GMRES on the full block system).
+        // Flatten the block system
         let flat = sys.to_flat_csr();
-        let mut rhs_flat = vec![0.0_f64; n_u + n_p];
-        rhs_flat[..n_u].copy_from_slice(f);
-        rhs_flat[n_u..].copy_from_slice(g);
-        let mut x_flat = vec![0.0_f64; n_u + n_p];
+        let n = n_u + n_p;
 
-        let res = solve_gmres(&flat, &rhs_flat, &mut x_flat, 50, cfg)?;
+        let mut rhs = vec![0.0_f64; n];
+        rhs[..n_u].copy_from_slice(f);
+        rhs[n_u..].copy_from_slice(g);
 
-        u.copy_from_slice(&x_flat[..n_u]);
-        p.copy_from_slice(&x_flat[n_u..]);
+        // Block-diagonal preconditioner: diag(A)⁻¹ for u, diag(C)⁻¹ or identity for p
+        let prec = BlockDiagonalPrecond::from_system(sys);
+
+        // Preconditioned GMRES
+        let restart = n.min(1000); // Full GMRES up to moderate size
+        let mut x = vec![0.0_f64; n];
+
+        let res = preconditioned_gmres(
+            &flat, &rhs, &mut x, restart, cfg,
+            |r, z| {
+                // Apply block-diagonal preconditioner
+                for i in 0..n_u {
+                    z[i] = prec.inv_diag_a[i] * r[i];
+                }
+                for i in 0..n_p {
+                    z[n_u + i] = prec.inv_diag_s[i] * r[n_u + i];
+                }
+            },
+        )?;
+
+        u.copy_from_slice(&x[..n_u]);
+        p.copy_from_slice(&x[n_u..]);
 
         Ok(res)
     }
 }
 
+/// Right-preconditioned GMRES(m): solve `A M⁻¹ y = b`, then `x = M⁻¹ y`.
+fn preconditioned_gmres(
+    a: &CsrMatrix<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    restart: usize,
+    cfg: &SolverConfig,
+    precond: impl Fn(&[f64], &mut [f64]),
+) -> Result<SolveResult, SolverError> {
+    let n = a.nrows;
+    let b_norm = norm2(b);
+    if b_norm < 1e-30 {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 });
+    }
+    let tol = (cfg.rtol * b_norm).max(cfg.atol);
+
+    let mut total_iters = 0;
+
+    for _cycle in 0..((cfg.max_iter + restart - 1) / restart) {
+        // r = b - A x
+        let mut r = b.to_vec();
+        for i in 0..n {
+            for ptr in a.row_ptr[i]..a.row_ptr[i+1] {
+                let j = a.col_idx[ptr] as usize;
+                r[i] -= a.values[ptr] * x[j];
+            }
+        }
+        let beta = norm2(&r);
+        if beta < tol {
+            return Ok(SolveResult { converged: true, iterations: total_iters, final_residual: beta });
+        }
+
+        let m = restart;
+        let mut v: Vec<Vec<f64>> = vec![vec![0.0; n]; m + 1]; // Krylov basis
+        let mut z: Vec<Vec<f64>> = vec![vec![0.0; n]; m];     // Preconditioned vectors
+        let mut h = vec![vec![0.0_f64; m]; m + 1];            // Hessenberg
+        let mut cs = vec![0.0_f64; m]; // Givens cosines
+        let mut sn = vec![0.0_f64; m]; // Givens sines
+        let mut e1 = vec![0.0_f64; m + 1];
+        e1[0] = beta;
+
+        for i in 0..n { v[0][i] = r[i] / beta; }
+
+        let mut j = 0;
+        while j < m && total_iters < cfg.max_iter {
+            // z[j] = M⁻¹ v[j]
+            precond(&v[j], &mut z[j]);
+
+            // w = A z[j]
+            let mut w = vec![0.0_f64; n];
+            spmv_add(a, &z[j], &mut w);
+
+            // Arnoldi: orthogonalize w against v[0..=j]
+            for i in 0..=j {
+                h[i][j] = dot(&w, &v[i]);
+                axpy_inplace(-h[i][j], &v[i], &mut w);
+            }
+            h[j+1][j] = norm2(&w);
+            if h[j+1][j] > 1e-16 {
+                for i in 0..n { v[j+1][i] = w[i] / h[j+1][j]; }
+            }
+
+            // Apply previous Givens rotations to column j of H
+            for i in 0..j {
+                let tmp = cs[i] * h[i][j] + sn[i] * h[i+1][j];
+                h[i+1][j] = -sn[i] * h[i][j] + cs[i] * h[i+1][j];
+                h[i][j] = tmp;
+            }
+
+            // Compute new Givens rotation
+            let r_val = (h[j][j] * h[j][j] + h[j+1][j] * h[j+1][j]).sqrt();
+            cs[j] = h[j][j] / r_val;
+            sn[j] = h[j+1][j] / r_val;
+            h[j][j] = r_val;
+            h[j+1][j] = 0.0;
+
+            // Apply to e1
+            let tmp = cs[j] * e1[j] + sn[j] * e1[j+1];
+            e1[j+1] = -sn[j] * e1[j] + cs[j] * e1[j+1];
+            e1[j] = tmp;
+
+            total_iters += 1;
+            let res_norm = e1[j+1].abs();
+            if cfg.verbose {
+                println!("[PGMRES] iter={total_iters}: ‖r‖={res_norm:.3e}");
+            }
+            if res_norm < tol {
+                j += 1;
+                break;
+            }
+            j += 1;
+        }
+
+        // Back-substitute: solve H y = e1
+        let k = j;
+        let mut y = vec![0.0_f64; k];
+        for i in (0..k).rev() {
+            y[i] = e1[i];
+            for jj in (i+1)..k {
+                y[i] -= h[i][jj] * y[jj];
+            }
+            y[i] /= h[i][i];
+        }
+
+        // Update x += M⁻¹ V y = sum_j y[j] z[j]
+        for jj in 0..k {
+            axpy_inplace(y[jj], &z[jj], x);
+        }
+
+        // Check residual
+        let mut r_check = b.to_vec();
+        for i in 0..n {
+            for ptr in a.row_ptr[i]..a.row_ptr[i+1] {
+                let jj = a.col_idx[ptr] as usize;
+                r_check[i] -= a.values[ptr] * x[jj];
+            }
+        }
+        let final_res = norm2(&r_check);
+        if final_res < tol || total_iters >= cfg.max_iter {
+            return Ok(SolveResult {
+                converged: final_res < tol,
+                iterations: total_iters,
+                final_residual: final_res,
+            });
+        }
+    }
+
+    Ok(SolveResult { converged: false, iterations: total_iters, final_residual: f64::NAN })
+}
+
 // ─── MINRES for symmetric indefinite systems ──────────────────────────────────
 
-/// MINRES solver for symmetric indefinite systems `K x = b`.
+/// MINRES solver for symmetric (possibly indefinite) systems `K x = b`.
 ///
-/// Uses the Paige–Saunders MINRES algorithm.  Suitable for saddle-point systems
-/// where the block matrix is symmetric and indefinite.
+/// Implements the Lanczos-based MINRES algorithm from Paige & Saunders (1975),
+/// following the formulation in SOL Technical Report 2011-2 by Choi & Saunders.
 pub struct MinresSolver;
 
 impl MinresSolver {
-    /// Solve `K x = b` using MINRES.
-    ///
-    /// `k` must be symmetric (but may be indefinite).
     pub fn solve(
-        k:   &CsrMatrix<f64>,
+        a:   &CsrMatrix<f64>,
         b:   &[f64],
         x:   &mut [f64],
         cfg: &SolverConfig,
     ) -> Result<SolveResult, SolverError> {
-        let n = k.nrows;
+        let n = a.nrows;
         assert_eq!(b.len(), n); assert_eq!(x.len(), n);
 
-        // Initialize
-        let mut v = b.to_vec();
-        spmv_sub_inplace(k, x, &mut v); // v = b - K x
-        let beta1 = norm2(&v);
+        // r = b - A x
+        let mut r = b.to_vec();
+        spmv_sub_inplace(a, x, &mut r);
+        let mut beta1 = norm2(&r);
         if beta1 < cfg.atol {
             return Ok(SolveResult { converged: true, iterations: 0, final_residual: beta1 });
         }
 
+        // Lanczos vectors
         let mut v_old = vec![0.0_f64; n];
-        let mut v_cur: Vec<f64> = v.iter().map(|&vi| vi / beta1).collect();
-        let mut beta_old = 0.0_f64;
+        let mut v: Vec<f64> = r.iter().map(|&ri| ri / beta1).collect();
+        let mut v_new = vec![0.0_f64; n];
         let mut beta = beta1;
 
-        // Lanczos vectors
-        let mut alpha;
-        let mut v_new = vec![0.0_f64; n];
-
-        // QR factorisation scalars (Givens rotations)
-        let mut c_old = 1.0_f64; let mut c = 1.0_f64;
-        let mut s_old = 0.0_f64; let mut s = 0.0_f64;
-
         // Solution update vectors
-        let mut w = vec![0.0_f64; n];
-        let mut w_old = vec![0.0_f64; n];
-        let mut phi = beta1;
+        let mut w      = vec![0.0_f64; n];
+        let mut w_bar  = vec![0.0_f64; n];
+
+        // QR factorization scalars
+        let mut delta_bar: f64;
+        let mut cs = -1.0_f64;
+        let mut sn = 0.0_f64;
+        let mut epsilon: f64;
+
         let mut phi_bar = beta1;
 
-        let mut r_norm = beta1;
-
         for iter in 0..cfg.max_iter {
-            // Lanczos: v_new = K v_cur − alpha v_cur − beta v_old
-            spmv_k(&mut v_new, k, &v_cur);
-            alpha = dot(&v_new, &v_cur);
-            axpy_inplace(-alpha, &v_cur, &mut v_new);
+            // Lanczos step
+            spmv_k(&mut v_new, a, &v);
+            let alpha = dot(&v_new, &v);
+            axpy_inplace(-alpha, &v, &mut v_new);
             axpy_inplace(-beta, &v_old, &mut v_new);
             let beta_new = norm2(&v_new);
-
-            // Normalise
             if beta_new > 1e-16 {
                 for vi in v_new.iter_mut() { *vi /= beta_new; }
             }
 
-            // Apply previous Givens rotation
-            let alpha_hat = c * alpha - s * beta_old * (0.0_f64); // simplified
-            let epsilon = s_old * beta;
-            let delta_bar = -c_old * beta;
-            let delta = c * delta_bar + s * alpha;
-            let gamma_bar = s * delta_bar - c * alpha;
+            // QR factorization: apply old Givens to get delta_bar
+            let old_beta = beta;
+            delta_bar = cs * old_beta + sn * alpha;
+            let gamma_bar = sn * old_beta - cs * alpha;
+            epsilon = sn * beta_new;
 
-            // New Givens rotation
-            let rho_bar = (gamma_bar * gamma_bar + beta_new * beta_new).sqrt();
-            let _ = alpha_hat; // suppress unused
-            let _ = delta; let _ = epsilon;
-
-            let c_new = gamma_bar / rho_bar;
-            let s_new = beta_new / rho_bar;
-
-            phi = c_new * phi_bar;
-            phi_bar = s_new * phi_bar;
-
-            // Update solution
-            let w_coeff = 1.0 / rho_bar;
-            let mut w_new: Vec<f64> = v_cur.iter().enumerate()
-                .map(|(i, &vi)| w_coeff * (vi - delta_bar * w_old[i] - epsilon * w[i]))
-                .collect();
-
-            for (xi, &wi) in x.iter_mut().zip(w_new.iter()) {
-                *xi += phi * wi;
+            // New Givens rotation to eliminate beta_new (via gamma_bar)
+            let gamma = (gamma_bar * gamma_bar + beta_new * beta_new).sqrt();
+            let cs_new;
+            let sn_new;
+            if gamma.abs() < 1e-30 {
+                cs_new = 0.0; sn_new = 0.0;
+            } else {
+                cs_new = gamma_bar / gamma;
+                sn_new = beta_new / gamma;
             }
 
-            // Residual estimate
-            r_norm = phi_bar.abs();
-
-            if cfg.verbose {
-                println!("[MINRES] iter={iter}: ‖r‖={r_norm:.3e}");
+            // Update solution vectors
+            // w_new = (v - delta_bar * w_bar - epsilon * w) / gamma
+            // Reuse: w becomes w_old, w_bar becomes w, new w_bar
+            let inv_gamma = if gamma.abs() > 1e-30 { 1.0 / gamma } else { 0.0 };
+            let mut w_new = vec![0.0_f64; n];
+            for i in 0..n {
+                w_new[i] = (v[i] - delta_bar * w_bar[i] - epsilon * w[i]) * inv_gamma;
             }
 
-            if r_norm < cfg.atol || r_norm < beta1 * cfg.rtol {
-                return Ok(SolveResult { converged: true, iterations: iter + 1, final_residual: r_norm });
-            }
+            // update x
+            let phi = cs_new * phi_bar;
+            phi_bar = sn_new * phi_bar;
+            axpy_inplace(phi, &w_new, x);
 
             // Shift
-            std::mem::swap(&mut v_old, &mut v_cur);
-            v_cur.copy_from_slice(&v_new);
-            std::mem::swap(&mut w_old, &mut w);
-            w = w_new;
-            beta_old = beta;
+            w = std::mem::replace(&mut w_bar, w_new);
+            std::mem::swap(&mut v_old, &mut v);
+            v.clone_from(&v_new);
             beta = beta_new;
-            c_old = c; c = c_new;
-            s_old = s; s = s_new;
+            cs = cs_new; sn = sn_new;
+
+            let r_norm = phi_bar.abs();
+            if cfg.verbose {
+                println!("[MINRES] iter={}: ‖r‖={r_norm:.3e}", iter + 1);
+            }
+            if r_norm < cfg.atol || r_norm < beta1 * cfg.rtol {
+                return Ok(SolveResult {
+                    converged: true,
+                    iterations: iter + 1,
+                    final_residual: r_norm,
+                });
+            }
         }
 
-        Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: r_norm })
+        Ok(SolveResult {
+            converged: false,
+            iterations: cfg.max_iter,
+            final_residual: phi_bar.abs(),
+        })
     }
 }
 
@@ -431,7 +620,7 @@ mod tests {
         let (sys, f, g) = small_saddle_point();
         let mut u = vec![0.0_f64; 2];
         let mut p = vec![0.0_f64; 1];
-        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() };
         SchurComplementSolver::solve(&sys, &f, &g, &mut u, &mut p, &cfg).unwrap();
         // Check residuals: A u + B^T p ≈ f, B u ≈ g
         let mut ru = vec![0.0_f64; 2];
@@ -467,5 +656,57 @@ mod tests {
         assert!((ru[0] - 2.0).abs() < 1e-12, "ru[0]={}", ru[0]);
         assert!((ru[1] - 0.0).abs() < 1e-12, "ru[1]={}", ru[1]);
         assert!((rp[0] - 1.0).abs() < 1e-12, "rp[0]={}", rp[0]);
+    }
+
+    #[test]
+    fn minres_spd_identity() {
+        // I * x = [1, 2, 3] → x = [1, 2, 3]
+        let mut coo = CooMatrix::<f64>::new(3, 3);
+        coo.add(0, 0, 1.0); coo.add(1, 1, 1.0); coo.add(2, 2, 1.0);
+        let k = coo.into_csr();
+        let b = vec![1.0, 2.0, 3.0];
+        let mut x = vec![0.0_f64; 3];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10, verbose: false, ..SolverConfig::default() };
+        let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
+        assert!(res.converged);
+        assert!((x[0] - 1.0).abs() < 1e-8);
+        assert!((x[1] - 2.0).abs() < 1e-8);
+        assert!((x[2] - 3.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn minres_spd_diagonal() {
+        // diag(2, 3) x = [4, 9] → x = [2, 3]
+        let mut coo = CooMatrix::<f64>::new(2, 2);
+        coo.add(0, 0, 2.0); coo.add(1, 1, 3.0);
+        let k = coo.into_csr();
+        let b = vec![4.0, 9.0];
+        let mut x = vec![0.0_f64; 2];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10, verbose: false, ..SolverConfig::default() };
+        let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
+        assert!(res.converged);
+        assert!((x[0] - 2.0).abs() < 1e-8, "x[0]={}", x[0]);
+        assert!((x[1] - 3.0).abs() < 1e-8, "x[1]={}", x[1]);
+    }
+
+    #[test]
+    fn minres_symmetric_indefinite() {
+        // [[2, 0, 1], [0, 2, 1], [1, 1, 0]] x = [2, 2, 2] → x = [1, 1, 0]
+        let mut coo = CooMatrix::<f64>::new(3, 3);
+        coo.add(0, 0, 2.0); coo.add(1, 1, 2.0);
+        coo.add(0, 2, 1.0); coo.add(2, 0, 1.0);
+        coo.add(1, 2, 1.0); coo.add(2, 1, 1.0);
+        let k = coo.into_csr();
+        let b = vec![2.0, 2.0, 2.0];
+        let mut x = vec![0.0_f64; 3];
+        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() };
+        let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
+        // Verify actual residual
+        let mut kx = vec![0.0_f64; 3];
+        spmv_add(&k, &x, &mut kx);
+        let res_actual = kx.iter().zip(b.iter()).map(|(a,b)| (a-b).powi(2)).sum::<f64>().sqrt();
+        assert!(res.converged, "MINRES didn't converge: iters={}, est_res={:.2e}",
+                res.iterations, res.final_residual);
+        assert!(res_actual < 1e-6, "MINRES actual residual = {res_actual:.2e}, x={x:?}");
     }
 }

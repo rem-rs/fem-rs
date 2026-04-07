@@ -16,7 +16,7 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, lagrange::{TetP1, TriP1, TriP2}};
+use fem_element::{ReferenceElement, lagrange::{TetP1, TriP1, TriP2, QuadQ1, HexQ1}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -170,6 +170,7 @@ impl MixedAssembler {
             let n_elem_r = global_rows.len(); // actual element DOF count (may be n_r * dim)
             let n_elem_c = global_cols.len();
             let nodes = mesh.element_nodes(e);
+            let elem_tag = mesh.element_tag(e);
 
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
@@ -195,8 +196,8 @@ impl MixedAssembler {
                 transform_grads(&j_inv_t, &grad_ref_c, &mut grad_phys_c, n_c, dim);
                 let xp = phys_coords(x0, &jac, xi, dim);
 
-                let qp_r = QpData { n_dofs: n_elem_r, dim, weight: w, phi: &phi_r, grad_phys: &grad_phys_r, x_phys: &xp };
-                let qp_c = QpData { n_dofs: n_elem_c, dim, weight: w, phi: &phi_c, grad_phys: &grad_phys_c, x_phys: &xp };
+                let qp_r = QpData { n_dofs: n_elem_r, dim, weight: w, phi: &phi_r, grad_phys: &grad_phys_r, x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None };
+                let qp_c = QpData { n_dofs: n_elem_c, dim, weight: w, phi: &phi_c, grad_phys: &grad_phys_c, x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None };
 
                 for integ in integrators {
                     integ.add_to_element_matrix(&qp_r, &qp_c, &mut m_elem);
@@ -222,6 +223,8 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
+        (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
+        (ElementType::Hex8, 1)                           => Box::new(HexQ1),
         _ => panic!("mixed_assembler ref_elem_vol: unsupported ({elem_type:?}, order={order})"),
     }
 }

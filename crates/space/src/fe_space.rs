@@ -13,6 +13,10 @@ pub enum SpaceType {
     L2,
     /// Vector-valued H¹ space with `dim` components.
     VectorH1(u8),
+    /// H(curl) space (Nédélec edge elements).
+    HCurl,
+    /// H(div) space (Raviart-Thomas face elements).
+    HDiv,
 }
 
 /// A finite element space defined over a mesh.
@@ -47,4 +51,16 @@ pub trait FESpace: Send + Sync {
 
     /// Polynomial order of the space (e.g. 1 for P1/Q1, 2 for P2/Q2).
     fn order(&self) -> u8;
+
+    /// Orientation signs for DOFs on element `elem`.
+    ///
+    /// Returns a slice of ±1.0 values, one per local DOF.  For H¹ and L² spaces
+    /// the signs are always +1.  For H(curl) and H(div) spaces the sign encodes
+    /// whether the local entity orientation matches the global convention.
+    ///
+    /// The assembler multiplies each basis-function value by its sign to ensure
+    /// inter-element continuity of tangential (H(curl)) or normal (H(div)) traces.
+    fn element_signs(&self, _elem: u32) -> Option<&[f64]> {
+        None // default: no sign correction needed
+    }
 }

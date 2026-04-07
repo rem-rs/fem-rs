@@ -293,4 +293,100 @@ impl CommBackend for ChannelBackend {
 
         result
     }
+
+    fn split(&self, color: i32, key: i32) -> Box<dyn CommBackend> {
+        let n = self.shared.n;
+        let me = self.rank as usize;
+        let tag_split = 0x8000i32;
+
+        // Phase 1: gather (color, key) from all ranks to rank 0.
+        let my_data = [color.to_le_bytes(), key.to_le_bytes()].concat();
+        if me != 0 {
+            self.send_bytes(0, tag_split, &my_data);
+        }
+
+        let all_colors_keys: Vec<(i32, i32)>;
+        if me == 0 {
+            let mut ck = vec![(0i32, 0i32); n];
+            ck[0] = (color, key);
+            for r in 1..n {
+                let bytes = self.recv_bytes(r as Rank, tag_split);
+                let c = i32::from_le_bytes(bytes[..4].try_into().unwrap());
+                let k = i32::from_le_bytes(bytes[4..8].try_into().unwrap());
+                ck[r] = (c, k);
+            }
+            // Broadcast gathered data back.
+            let bcast_bytes: Vec<u8> = ck.iter()
+                .flat_map(|(c, k)| [c.to_le_bytes(), k.to_le_bytes()].concat())
+                .collect();
+            for r in 1..n {
+                self.send_bytes(r as Rank, tag_split + 1, &bcast_bytes);
+            }
+            all_colors_keys = ck;
+        } else {
+            let bcast_bytes = self.recv_bytes(0, tag_split + 1);
+            all_colors_keys = bcast_bytes.chunks_exact(8)
+                .map(|chunk| {
+                    let c = i32::from_le_bytes(chunk[..4].try_into().unwrap());
+                    let k = i32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                    (c, k)
+                })
+                .collect();
+        }
+
+        // Phase 2: compute sub-groups. Each rank computes the same grouping.
+        // Collect unique colors and build (color → sorted list of (key, old_rank)).
+        let mut groups: std::collections::BTreeMap<i32, Vec<(i32, usize)>>
+            = std::collections::BTreeMap::new();
+        for (old_rank, &(c, k)) in all_colors_keys.iter().enumerate() {
+            groups.entry(c).or_default().push((k, old_rank));
+        }
+        for members in groups.values_mut() {
+            members.sort_by_key(|(k, _)| *k);
+        }
+
+        // Phase 3: rank 0 creates ChannelShared for each group and distributes.
+        // The Arc<ChannelShared> must be shared among all threads in the group.
+        // Since we're in-process, rank 0 creates them and sends Arc pointers
+        // via a shared staging area in the parent ChannelShared.
+
+        // We use a simple approach: rank 0 creates all ChannelShared instances,
+        // serializes Arc pointers as raw pointers (safe because all threads are
+        // in the same process), and sends to each rank.
+        let my_color = color;
+        let my_group = &groups[&my_color];
+        let new_size = my_group.len();
+        let new_rank = my_group.iter()
+            .position(|(_, r)| *r == me)
+            .unwrap() as Rank;
+
+        if me == 0 {
+            // Create one ChannelShared per color group.
+            let mut shared_map: std::collections::BTreeMap<i32, Arc<ChannelShared>>
+                = std::collections::BTreeMap::new();
+            for (&color, members) in &groups {
+                shared_map.insert(color, ChannelShared::new(members.len()));
+            }
+
+            // Send the raw Arc pointer to each non-zero rank.
+            for (old_rank, &(c, _k)) in all_colors_keys.iter().enumerate() {
+                if old_rank == 0 { continue; }
+                let arc = &shared_map[&c];
+                let ptr = Arc::into_raw(Arc::clone(arc));
+                let ptr_bytes = (ptr as usize).to_le_bytes();
+                self.send_bytes(old_rank as Rank, tag_split + 2, &ptr_bytes);
+            }
+
+            // Rank 0's own shared.
+            let my_shared = Arc::clone(&shared_map[&my_color]);
+            Box::new(ChannelBackend::new(new_rank, my_shared))
+        } else {
+            // Receive the Arc pointer from rank 0.
+            let ptr_bytes = self.recv_bytes(0, tag_split + 2);
+            let ptr_val = usize::from_le_bytes(ptr_bytes.try_into().unwrap());
+            // SAFETY: we're in the same process, rank 0 sent a valid Arc pointer.
+            let my_shared = unsafe { Arc::from_raw(ptr_val as *const ChannelShared) };
+            Box::new(ChannelBackend::new(new_rank, my_shared))
+        }
+    }
 }

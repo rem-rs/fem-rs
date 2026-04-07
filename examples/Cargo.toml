@@ -46,6 +46,18 @@ name = "ex5_mixed_darcy"
 path = "ex5_mixed_darcy.rs"
 
 [[example]]
+name = "debug_single"
+path = "debug_single.rs"
+
+[[example]]
+name = "debug_interp"
+path = "debug_interp.rs"
+
+[[example]]
+name = "ex3_maxwell"
+path = "ex3_maxwell.rs"
+
+[[example]]
 name = "ex9_dg_advection"
 path = "ex9_dg_advection.rs"
 
@@ -54,12 +66,52 @@ name = "ex10_heat_equation"
 path = "ex10_heat_equation.rs"
 
 [[example]]
+name = "ex10_wave_equation"
+path = "ex10_wave_equation.rs"
+
+[[example]]
 name = "ex13_eigenvalue"
 path = "ex13_eigenvalue.rs"
 
 [[example]]
+name = "ex4_darcy"
+path = "ex4_darcy.rs"
+
+[[example]]
+name = "ex15_dg_amr"
+path = "ex15_dg_amr.rs"
+
+[[example]]
+name = "ex15_tet_nc_amr"
+path = "ex15_tet_nc_amr.rs"
+
+[[example]]
 name = "ex16_nonlinear_heat"
 path = "ex16_nonlinear_heat.rs"
+
+[[example]]
+name = "pex1_poisson"
+path = "pex1_poisson.rs"
+
+[[example]]
+name = "pex2_mixed_darcy"
+path = "pex2_mixed_darcy.rs"
+
+[[example]]
+name = "pex3_maxwell"
+path = "pex3_maxwell.rs"
+
+[[example]]
+name = "pex5_darcy"
+path = "pex5_darcy.rs"
+
+[[example]]
+name = "ex_stokes"
+path = "ex_stokes.rs"
+
+[[example]]
+name = "ex_navier_stokes"
+path = "ex_navier_stokes.rs"
 
 [lib]
 name = "fem_examples"

@@ -1,99 +1,51 @@
-//! Web Worker–based communication backend for `wasm32` targets.
+//! jsmpi-backed communication backend for `wasm32` targets.
 //!
-//! ## Architecture (planned)
+//! Replaces the previous SAB-based stub with real MPI-style communication
+//! via the jsmpi library, which uses Web Workers + SharedArrayBuffer.
 //!
-//! Each MPI "process" runs as an independent Web Worker loading the same WASM
-//! module.  Workers share a `SharedArrayBuffer` (SAB) arena that holds:
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │  SAB layout (allocated by the launcher, passed to each worker)  │
-//! ├──────────┬──────────┬─────────────────────────────────────────┐  │
-//! │ ctrl[0]  │ ctrl[1]  │  ring-buffer slots [rank_0 … rank_N-1]  │  │
-//! │  barrier │ msg meta │  (one slot = header + payload bytes)     │  │
-//! └──────────┴──────────┴─────────────────────────────────────────┘  │
-//! └─────────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! Workers block using `Atomics.wait()` (allowed inside dedicated workers) and
-//! signal peers with `Atomics.notify()`.  This gives semantics equivalent to
-//! MPI blocking sends/receives without any round-trip through the main thread.
-//!
-//! ## Current status
-//!
-//! This module provides a **stub** that compiles for `wasm32-unknown-unknown`
-//! but panics on any real communication call.  The actual implementation will
-//! be wired up by `fem-wasm` once:
-//!
-//! 1. The `WorkerLauncher` spawns N workers and allocates the SAB.
-//! 2. Each worker receives `(rank, size, sab_handle)` through its `onmessage`
-//!    init payload.
-//! 3. `WasmWorkerBackend::from_init_msg(rank, size, sab)` builds a live backend.
-//!
-//! Until then, `WasmWorkerBackend::single()` provides a rank-0 / size-1 stub
-//! suitable for serial WASM builds.
+//! ## Two modes
+//! - `JsMpiBackend::serial()` — rank-0/size-1 stub (same as before)
+//! - `JsMpiBackend::from_communicator(comm)` — real multi-worker backend
 
 use fem_core::Rank;
+use jsmpi::traits::{Communicator, Destination, Source};
+use jsmpi::collective::Root;
 use super::CommBackend;
 
-// ── SharedArena ───────────────────────────────────────────────────────────────
+// ── JsMpiBackend ─────────────────────────────────────────────────────────────
 
-/// Placeholder for the `SharedArrayBuffer` handle that the launcher passes to
-/// each worker.
-///
-/// In the full implementation this wraps a `js_sys::SharedArrayBuffer` and
-/// exposes typed views (`Int32Array`, `Uint8Array`) for Atomics operations.
-/// Kept as `()` until the `wasm-bindgen` integration is wired in `fem-wasm`.
-pub struct SharedArena(
-    // Future: js_sys::SharedArrayBuffer
-    (),
-);
-
-// ── WasmWorkerBackend ─────────────────────────────────────────────────────────
-
-/// Web Worker simulation of an MPI process.
+/// jsmpi-backed MPI communication backend.
 ///
 /// Construct via:
-/// * [`WasmWorkerBackend::single()`] — rank-0/size-1 serial stub (always safe).
-/// * [`WasmWorkerBackend::from_init_msg()`] — real multi-worker backend
-///   (panics until the SAB implementation is complete).
-pub struct WasmWorkerBackend {
-    rank: u32,
-    size: u32,
-    /// Shared memory arena; `None` in the serial stub path.
-    arena: Option<SharedArena>,
+/// * [`JsMpiBackend::serial()`] — rank-0/size-1 serial stub (always safe).
+/// * [`JsMpiBackend::from_communicator()`] — real multi-worker backend wrapping
+///   a jsmpi [`SimpleCommunicator`](jsmpi::SimpleCommunicator).
+pub struct JsMpiBackend {
+    rank: i32,
+    size: i32,
+    /// `None` = serial stub; `Some` = real jsmpi communicator.
+    comm: Option<jsmpi::SimpleCommunicator>,
 }
 
-impl WasmWorkerBackend {
+impl JsMpiBackend {
     /// Rank-0 / size-1 stub for serial WASM builds.
     ///
     /// All collective ops degenerate to no-ops; point-to-point ops panic.
-    pub fn single() -> Self {
-        WasmWorkerBackend { rank: 0, size: 1, arena: None }
+    pub fn serial() -> Self {
+        JsMpiBackend { rank: 0, size: 1, comm: None }
     }
 
-    /// Construct a live multi-worker backend from the init message sent by the
-    /// [`WorkerLauncher`](super::super::launcher::wasm::WorkerLauncher).
-    ///
-    /// # Parameters
-    /// * `rank`  — this worker's rank (0-based).
-    /// * `size`  — total number of workers.
-    /// * `arena` — shared `SharedArrayBuffer` arena (currently a placeholder).
-    ///
-    /// # Panics
-    /// Panics with a `todo!` until the SAB-based implementation is complete.
-    pub fn from_init_msg(rank: u32, size: u32, arena: SharedArena) -> Self {
-        WasmWorkerBackend {
-            rank,
-            size,
-            arena: Some(arena),
-        }
+    /// Construct a live multi-worker backend from a jsmpi communicator.
+    pub fn from_communicator(comm: jsmpi::SimpleCommunicator) -> Self {
+        let rank = comm.rank();
+        let size = comm.size();
+        JsMpiBackend { rank, size, comm: Some(comm) }
     }
 
-    /// `true` if this is the stub single-rank path (no real shared memory).
+    /// `true` if this is the stub single-rank path (no real communicator).
     #[inline]
     pub fn is_stub(&self) -> bool {
-        self.arena.is_none()
+        self.comm.is_none()
     }
 }
 
@@ -101,68 +53,125 @@ impl WasmWorkerBackend {
 //
 // wasm32-unknown-unknown is single-threaded; there is no concurrent access.
 // These impls are required so `Box<dyn CommBackend>` (which requires
-// `CommBackend: Send + Sync`) can hold a `WasmWorkerBackend`.
+// `CommBackend: Send + Sync`) can hold a `JsMpiBackend`.
 //
 // SAFETY: wasm32-unknown-unknown has a single-threaded execution model.
-//         No other thread can access a `WasmWorkerBackend` instance.
-unsafe impl Send for WasmWorkerBackend {}
-unsafe impl Sync for WasmWorkerBackend {}
+//         No other thread can access a `JsMpiBackend` instance.
+unsafe impl Send for JsMpiBackend {}
+unsafe impl Sync for JsMpiBackend {}
 
 // ── CommBackend impl ─────────────────────────────────────────────────────────
 
-impl CommBackend for WasmWorkerBackend {
+impl CommBackend for JsMpiBackend {
     fn rank(&self) -> Rank { self.rank as Rank }
     fn size(&self) -> usize { self.size as usize }
 
     fn barrier(&self) {
-        if self.is_stub() {
-            return; // single rank: nothing to synchronise
+        if let Some(comm) = &self.comm {
+            comm.barrier();
         }
-        // Full implementation: spin on an atomic counter in the SAB.
-        // Each worker atomically increments a shared "arrived" counter; the
-        // last arrival resets it and notifies all waiters.
-        todo!("WasmWorkerBackend::barrier — SAB+Atomics impl pending")
+        // serial stub: nothing to synchronise
     }
 
     fn allreduce_sum_f64(&self, local: f64) -> f64 {
-        if self.is_stub() { return local; }
-        // Full implementation: write local value to rank's slot in the SAB,
-        // barrier, read all slots and sum, barrier again.
-        todo!("WasmWorkerBackend::allreduce_sum_f64 — SAB impl pending")
+        if let Some(comm) = &self.comm {
+            let mut result = 0.0_f64;
+            comm.process_at_rank(0).all_reduce_sum_into(&local, &mut result);
+            result
+        } else {
+            local
+        }
     }
 
     fn allreduce_sum_i64(&self, local: i64) -> i64 {
-        if self.is_stub() { return local; }
-        todo!("WasmWorkerBackend::allreduce_sum_i64 — SAB impl pending")
-    }
-
-    fn broadcast_bytes(&self, _root: Rank, _buf: &mut Vec<u8>) {
-        if self.is_stub() { return; }
-        // Full implementation: root writes payload length + bytes into SAB,
-        // barrier, all ranks read out the data.
-        todo!("WasmWorkerBackend::broadcast_bytes — SAB impl pending")
-    }
-
-    fn send_bytes(&self, dest: Rank, _tag: i32, _data: &[u8]) {
-        if self.is_stub() {
-            panic!("WasmWorkerBackend (stub): cannot send to rank {dest}");
+        if let Some(comm) = &self.comm {
+            let mut result = 0_i64;
+            comm.process_at_rank(0).all_reduce_sum_into(&local, &mut result);
+            result
+        } else {
+            local
         }
-        // Full implementation: write header + payload into dest's ring-buffer
-        // slot in the SAB, then Atomics.notify() the destination worker.
-        todo!("WasmWorkerBackend::send_bytes — SAB impl pending")
     }
 
-    fn recv_bytes(&self, src: Rank, _tag: i32) -> Vec<u8> {
-        if self.is_stub() {
-            panic!("WasmWorkerBackend (stub): cannot receive from rank {src}");
+    fn broadcast_bytes(&self, root: Rank, buf: &mut Vec<u8>) {
+        if let Some(comm) = &self.comm {
+            comm.process_at_rank(root).broadcast_into(buf);
         }
-        // Full implementation: Atomics.wait() on this rank's ring-buffer slot
-        // until a matching message appears, then copy out the payload.
-        todo!("WasmWorkerBackend::recv_bytes — SAB impl pending")
+        // serial stub: buf already contains the right data
     }
 
-    fn alltoallv_bytes(&self, _sends: &[(Rank, Vec<u8>)]) -> Vec<(Rank, Vec<u8>)> {
-        if self.is_stub() { return Vec::new(); }
-        todo!("WasmWorkerBackend::alltoallv_bytes — SAB impl pending")
+    fn send_bytes(&self, dest: Rank, tag: i32, data: &[u8]) {
+        if let Some(comm) = &self.comm {
+            comm.process_at_rank(dest).send_with_tag(&data.to_vec(), tag);
+        } else {
+            panic!("JsMpiBackend (stub): cannot send to rank {dest}");
+        }
+    }
+
+    fn recv_bytes(&self, src: Rank, tag: i32) -> Vec<u8> {
+        if let Some(comm) = &self.comm {
+            let (data, _): (Vec<u8>, _) = comm.process_at_rank(src).receive_with_tag(tag);
+            data
+        } else {
+            panic!("JsMpiBackend (stub): cannot receive from rank {src}");
+        }
+    }
+
+    fn alltoallv_bytes(&self, sends: &[(Rank, Vec<u8>)]) -> Vec<(Rank, Vec<u8>)> {
+        let comm = match &self.comm {
+            Some(c) => c,
+            None => return Vec::new(), // serial stub
+        };
+
+        let n = comm.size() as usize;
+        let my_rank = comm.rank();
+
+        // Build send map: dest_rank -> payload
+        let mut send_map: std::collections::HashMap<i32, &[u8]> = std::collections::HashMap::new();
+        for (dest, data) in sends {
+            send_map.insert(*dest, data);
+        }
+
+        // Step 1: exchange counts via tagged send/recv.
+        const TAG_CNT: i32 = 0x4000;
+        const TAG_DATA: i32 = 0x5000;
+
+        // Send my counts to all peers
+        for r in 0..n {
+            let r = r as i32;
+            if r == my_rank { continue; }
+            let cnt = send_map.get(&r).map(|d| d.len()).unwrap_or(0) as u64;
+            comm.process_at_rank(r).send_with_tag(&cnt, TAG_CNT + my_rank);
+        }
+
+        // Receive counts from all peers
+        let mut recv_counts: Vec<usize> = vec![0; n];
+        for r in 0..n {
+            let r = r as i32;
+            if r == my_rank { continue; }
+            let (cnt, _): (u64, _) = comm.process_at_rank(r).receive_with_tag(TAG_CNT + r);
+            recv_counts[r as usize] = cnt as usize;
+        }
+
+        // Step 2: exchange data using offset-ring to avoid deadlock.
+        let mut results: Vec<(Rank, Vec<u8>)> = Vec::new();
+        for offset in 1..n {
+            let send_to = ((my_rank as usize + offset) % n) as i32;
+            let recv_from = ((my_rank as usize + n - offset) % n) as i32;
+
+            // Send if we have data for send_to
+            if let Some(&data) = send_map.get(&send_to) {
+                if !data.is_empty() {
+                    comm.process_at_rank(send_to).send_with_tag(&data.to_vec(), TAG_DATA + my_rank);
+                }
+            }
+
+            // Recv if recv_from has data for us
+            if recv_counts[recv_from as usize] > 0 {
+                let (data, _): (Vec<u8>, _) = comm.process_at_rank(recv_from).receive_with_tag(TAG_DATA + recv_from);
+                results.push((recv_from, data));
+            }
+        }
+        results
     }
 }

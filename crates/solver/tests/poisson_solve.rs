@@ -61,7 +61,7 @@ fn l2_error(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
 }
 
 fn cfg() -> SolverConfig {
-    SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 2000, verbose: false }
+    SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() }
 }
 
 #[test]
@@ -116,4 +116,60 @@ fn poisson_bicgstab() {
     let res = solve_bicgstab(&mat, &rhs, &mut x, &cfg()).unwrap();
     assert!(res.converged, "BiCGSTAB did not converge");
     assert!(l2_error(&x, &space) < 6e-3);
+}
+
+// ── Non-conforming AMR convergence test ────────────────────────────────────
+
+#[test]
+fn poisson_nc_amr_convergence() {
+    use fem_mesh::amr::{NCState, zz_estimator, dorfler_mark};
+    use fem_space::constraints::{apply_hanging_constraints, recover_hanging_values};
+    let mut mesh = SimplexMesh::<2>::unit_square_tri(2);
+    let mut nc_state = NCState::new();
+    let mut hanging_constraints = Vec::new();
+    let mut errors = Vec::new();
+
+    for level in 0..6 {
+        let space = H1Space::new(mesh.clone(), 1);
+        let n = space.n_dofs();
+
+        let diffusion = DiffusionIntegrator { kappa: 1.0 };
+        let source = DomainSourceIntegrator::new(forcing);
+        let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], 3);
+        let mut rhs = Assembler::assemble_linear(&space, &[&source], 3);
+
+        apply_hanging_constraints(&mut mat, &mut rhs, &hanging_constraints);
+
+        let bdofs = boundary_dofs(&mesh, space.dof_manager(), &[1, 2, 3, 4]);
+        apply_dirichlet(&mut mat, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+
+        let mut u = vec![0.0_f64; n];
+        let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg()).unwrap();
+        assert!(res.converged, "NC AMR level {level}: solver did not converge");
+
+        recover_hanging_values(&mut u, &hanging_constraints);
+
+        let err = l2_error(&u, &space);
+        errors.push(err);
+
+        if level < 5 {
+            let eta = zz_estimator(&mesh, &u);
+            let marked = dorfler_mark(&eta, 0.5);
+            let (new_mesh, new_c, _) = nc_state.refine(&mesh, &marked);
+            mesh = new_mesh;
+            hanging_constraints = new_c;
+        }
+    }
+
+    // Verify error decreases monotonically.
+    for i in 1..errors.len() {
+        assert!(errors[i] < errors[i - 1],
+            "L2 error should decrease: level {} err={:.4e} >= level {} err={:.4e}",
+            i, errors[i], i - 1, errors[i - 1]);
+    }
+
+    // After 5 levels of adaptive refinement starting from 2×2 mesh,
+    // the error should be significantly reduced.
+    assert!(errors.last().unwrap() < &0.05,
+        "NC AMR should achieve < 0.05 L2 error, got {:.4e}", errors.last().unwrap());
 }

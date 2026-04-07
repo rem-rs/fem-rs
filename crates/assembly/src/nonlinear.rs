@@ -107,6 +107,7 @@ impl NewtonSolver {
             atol:     0.0,
             max_iter: 1000,
             verbose:  false,
+            ..SolverConfig::default()
         };
 
         let mut r   = vec![0.0_f64; n];

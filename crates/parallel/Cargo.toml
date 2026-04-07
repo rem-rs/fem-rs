@@ -4,11 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fem-core   = { path = "../core" }
-fem-mesh   = { path = "../mesh" }
-fem-linalg = { path = "../linalg" }
-log        = { workspace = true }
-bytemuck   = { workspace = true }
+fem-core     = { path = "../core" }
+fem-mesh     = { path = "../mesh" }
+fem-linalg   = { path = "../linalg" }
+fem-space    = { path = "../space" }
+fem-assembly = { path = "../assembly" }
+fem-element  = { path = "../element" }
+fem-solver   = { path = "../solver" }
+log          = { workspace = true }
+bytemuck     = { workspace = true }
 
 # rsmpi is optional: enable the `mpi` feature to build with MPI support.
 # Without this feature the crate compiles to a single-rank serial stub
@@ -19,6 +23,9 @@ optional  = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+jsmpi = { path = "../../vendor/jsmpi" }
 
 [features]
 default = []

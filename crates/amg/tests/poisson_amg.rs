@@ -61,7 +61,7 @@ fn l2_error(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
 }
 
 fn cfg() -> SolverConfig {
-    SolverConfig { rtol: 1e-8, atol: 1e-10, max_iter: 500, verbose: false }
+    SolverConfig { rtol: 1e-8, atol: 1e-10, max_iter: 500, verbose: false, ..SolverConfig::default() }
 }
 
 #[test]

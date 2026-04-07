@@ -1,0 +1,11 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "git rev-parse": true,
+        "cargo tree": true,
+        "git submodule": true,
+        "cargo test": true,
+        "cargo metadata": true,
+        "git add": true,
+        "git commit": true
+    }
+}

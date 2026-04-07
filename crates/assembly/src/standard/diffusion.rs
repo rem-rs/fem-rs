@@ -6,28 +6,41 @@
 //! a(u, v) = ∫_Ω κ ∇u · ∇v dx
 //! ```
 
+use crate::coefficient::{CoeffCtx, ScalarCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 
 /// Bilinear integrator for the scalar diffusion operator `κ ∇u · ∇v`.
 ///
 /// For `κ = 1` this is the standard Laplacian stiffness matrix.
 ///
-/// # Example
-/// ```
-/// # use fem_assembly::standard::DiffusionIntegrator;
+/// The coefficient `κ` is generic over [`ScalarCoeff`], with `f64` as the
+/// default for full backwards compatibility:
+///
+/// ```rust,ignore
+/// // Constant (unchanged):
 /// let integ = DiffusionIntegrator { kappa: 1.0 };
+///
+/// // Spatially varying:
+/// let integ = DiffusionIntegrator { kappa: FnCoeff(|x: &[f64]| 1.0 + x[0]) };
+///
+/// // Piecewise constant per material:
+/// let integ = DiffusionIntegrator { kappa: PWConstCoeff::new([(1, 1.0), (2, 100.0)]) };
 /// ```
-pub struct DiffusionIntegrator {
+pub struct DiffusionIntegrator<C: ScalarCoeff = f64> {
     /// Scalar conductivity / diffusivity coefficient.
-    pub kappa: f64,
+    pub kappa: C,
 }
 
-impl BilinearIntegrator for DiffusionIntegrator {
-    /// `K_elem[i,j] += w · κ · (∇φᵢ · ∇φⱼ)`
+impl<C: ScalarCoeff> BilinearIntegrator for DiffusionIntegrator<C> {
+    /// `K_elem[i,j] += w · κ(x) · (∇φᵢ · ∇φⱼ)`
     fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
         let n   = qp.n_dofs;
         let d   = qp.dim;
-        let w_k = qp.weight * self.kappa;
+        let ctx = CoeffCtx::from_qp(
+            qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag,
+            Some(qp.phi), qp.elem_dofs,
+        );
+        let w_k = qp.weight * self.kappa.eval(&ctx);
 
         for i in 0..n {
             for j in 0..n {
@@ -74,6 +87,27 @@ mod tests {
         let space = H1Space::new(mesh, 1);
         let integ = DiffusionIntegrator { kappa: 1.0 };
         let mat   = Assembler::assemble_bilinear(&space, &[&integ], 2);
+        let dense = mat.to_dense();
+        let n = mat.nrows;
+        for i in 0..n {
+            for j in 0..n {
+                let diff = (dense[i * n + j] - dense[j * n + i]).abs();
+                assert!(diff < 1e-12, "K[{i},{j}] - K[{j},{i}] = {diff}");
+            }
+        }
+    }
+
+    /// DiffusionIntegrator with FnCoeff for spatially-varying kappa.
+    #[test]
+    fn spatially_varying_kappa() {
+        use crate::coefficient::FnCoeff;
+        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let space = H1Space::new(mesh, 1);
+        let integ = DiffusionIntegrator { kappa: FnCoeff(|x: &[f64]| 1.0 + x[0]) };
+        let mat   = Assembler::assemble_bilinear(&space, &[&integ], 2);
+        // Row sums should still be ~0 (∇·(κ∇c) = 0 for constant c, but only exact
+        // for constant κ; for varying κ the discrete row-sums may have small nonzero values).
+        // At least the matrix should be symmetric.
         let dense = mat.to_dense();
         let n = mat.nrows;
         for i in 0..n {

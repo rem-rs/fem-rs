@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head><title>fem-rs WASM E2E Test</title></head>
+<body>
+<script type="module">
+import init, { WasmSolver } from './pkg/fem_wasm.js';
+
+async function run() {
+  await init();
+  const results = {};
+
+  try {
+    // 1. Create solver
+    const solver = new WasmSolver(8);
+    results.n_dofs = solver.n_dofs();
+    results.n_coords = solver.node_coords().length;
+    results.n_conn = solver.connectivity().length;
+
+    // 2. Assemble and solve
+    const rhs = solver.assemble_constant_rhs(1.0);
+    const u = solver.solve(rhs);
+    results.solution_length = u.length;
+
+    // 3. Check solution quality (-Δu = 1, u=0 on boundary)
+    // Analytic max ≈ 0.0737 at centre
+    const coords = solver.node_coords();
+    let maxVal = 0;
+    let maxErr = 0;
+    for (let i = 0; i < results.n_dofs; i++) {
+      const x = coords[2*i], y = coords[2*i+1];
+      const isBoundary = x < 1e-10 || x > 1-1e-10 || y < 1e-10 || y > 1-1e-10;
+      if (isBoundary) {
+        maxErr = Math.max(maxErr, Math.abs(u[i]));
+      } else {
+        maxVal = Math.max(maxVal, u[i]);
+      }
+    }
+    results.max_interior = maxVal;
+    results.max_boundary_err = maxErr;
+    results.pass = (
+      results.n_dofs === (8+1)*(8+1) &&
+      results.solution_length === results.n_dofs &&
+      results.max_interior > 0.06 &&
+      results.max_interior < 0.09 &&
+      results.max_boundary_err < 1e-10
+    );
+  } catch (e) {
+    results.error = e.message;
+    results.pass = false;
+  }
+
+  // Signal results to Playwright
+  window.__FEM_E2E_RESULTS = results;
+  document.title = results.pass ? 'PASS' : 'FAIL';
+}
+run();
+</script>
+</body>
+</html>

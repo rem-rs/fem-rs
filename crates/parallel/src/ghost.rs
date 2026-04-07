@@ -50,6 +50,13 @@ pub struct GhostExchange {
 impl GhostExchange {
     // ── construction ─────────────────────────────────────────────────────────
 
+    /// Create a trivial (no-op) ghost exchange with no neighbours.
+    ///
+    /// Useful for serial / single-rank contexts or testing.
+    pub fn from_trivial() -> Self {
+        GhostExchange { channels: Vec::new() }
+    }
+
     /// Build the exchange pattern from a partition.
     ///
     /// When `comm.size() == 1` (serial or single-rank) this returns an empty
@@ -161,22 +168,20 @@ impl GhostExchange {
         const TAG_FWD: i32 = 0x1000;
         let my_rank = comm.rank();
 
+        // Phase 1: send all owned values to neighbours (non-blocking pushes).
         for ch in &self.channels {
-            // Send tag encodes our rank (we are the sender of owned values).
             let send_tag = TAG_FWD + my_rank;
-            // Recv tag encodes the neighbour's rank (they are the sender on
-            // their side, and they use TAG_FWD + their_rank for the same msg).
-            let recv_tag = TAG_FWD + ch.rank;
-
-            // Pack owned values destined for this neighbour.
             let send_buf: Vec<u8> = ch
                 .send_local_ids
                 .iter()
                 .flat_map(|&lid| data[lid as usize].to_le_bytes())
                 .collect();
             comm.send_bytes(ch.rank, send_tag, &send_buf);
+        }
 
-            // Receive ghost values from this neighbour.
+        // Phase 2: receive ghost values from all neighbours.
+        for ch in &self.channels {
+            let recv_tag = TAG_FWD + ch.rank;
             let recv_buf = comm.recv_bytes(ch.rank, recv_tag);
             for (j, &lid) in ch.recv_local_ids.iter().enumerate() {
                 let start = j * 8;
@@ -200,15 +205,9 @@ impl GhostExchange {
         const TAG_REV: i32 = 0x2000;
         let my_rank = comm.rank();
 
+        // Phase 1: send all ghost values back to their owners (zero locally).
         for ch in &self.channels {
-            // In reverse, we send ghost values back to the owner (ch.rank).
-            // We use TAG_REV + our rank so the owner knows it came from us.
             let send_tag = TAG_REV + my_rank;
-            // Receive contributions from the neighbour that are owed to our
-            // owned nodes.  Their tag = TAG_REV + their_rank.
-            let recv_tag = TAG_REV + ch.rank;
-
-            // Pack ghost values to send back to owner (zero them as we go).
             let send_buf: Vec<u8> = ch
                 .recv_local_ids
                 .iter()
@@ -219,8 +218,11 @@ impl GhostExchange {
                 })
                 .collect();
             comm.send_bytes(ch.rank, send_tag, &send_buf);
+        }
 
-            // Receive contributions into owned slots.
+        // Phase 2: receive contributions from all neighbours into owned slots.
+        for ch in &self.channels {
+            let recv_tag = TAG_REV + ch.rank;
             let recv_buf = comm.recv_bytes(ch.rank, recv_tag);
             for (j, &lid) in ch.send_local_ids.iter().enumerate() {
                 let start = j * 8;

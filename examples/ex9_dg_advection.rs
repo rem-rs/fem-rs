@@ -67,7 +67,7 @@ fn main() {
 
     // ─── 5. Solve with GMRES (SIP matrix is symmetric but ill-conditioned) ───
     let mut u = vec![0.0_f64; n];
-    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false };
+    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
     let res = solve_gmres(&mat, &rhs, &mut u, 50, &cfg)
         .expect("DG solve failed");
 

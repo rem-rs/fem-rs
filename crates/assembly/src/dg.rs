@@ -167,8 +167,8 @@ fn assemble_interior_face<S: FESpace>(
     quad_order: u8,
 ) {
     let dim = mesh.dim() as usize;
-    let (h_f, normal_l) = face_geom_2d(mesh, face_nodes);
-    let normal_r: Vec<f64> = normal_l.iter().map(|&v| -v).collect();
+    let (h_f, mut normal_l) = face_geom_2d(mesh, face_nodes);
+    orient_normal_outward(mesh, el, face_nodes, &mut normal_l);
 
     // Build reference elements and quadrature for the face.
     let face_elem_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
@@ -235,53 +235,52 @@ fn assemble_interior_face<S: FESpace>(
 
         let pen = sigma * kappa / h_f;
 
-        // Assemble SIP face contributions:
-        // K_{ab} += w [ -½ {κ ∇φ_a}·n·φ_b  -½ {κ ∇φ_b}·n·φ_a  + pen·φ_a·φ_b ]
+        // SIP interior face terms using a single normal n = n_L (outward from left):
+        //   -∫ {κ∇u·n}[v] ds - ∫ {κ∇v·n}[u] ds + pen ∫ [u][v] ds
+        // where [w] = w_L - w_R, {w} = (w_L + w_R)/2
+        // All gradients dotted with n_L (not n_R).
+
+        // Precompute ∇φ·n_L for all basis functions on both sides
+        let ngl: Vec<f64> = (0..n_l).map(|i| (0..dim).map(|d| gphys_l[i*dim+d] * normal_l[d]).sum::<f64>()).collect();
+        let ngr: Vec<f64> = (0..n_r).map(|i| (0..dim).map(|d| gphys_r[i*dim+d] * normal_l[d]).sum::<f64>()).collect();
+
+        // K_LL: a∈L, b∈L  → [v]=φ_bL, [u]=φ_aL, {∇u·n}=½∇φ_aL·n, {∇v·n}=½∇φ_bL·n
         for i in 0..n_l {
-            let phi_li = phi_l[i];
-            let ngrad_li: f64 = (0..dim).map(|d| gphys_l[i*dim+d] * normal_l[d]).sum::<f64>();
             for j in 0..n_l {
-                let phi_lj = phi_l[j];
-                let ngrad_lj: f64 = (0..dim).map(|d| gphys_l[j*dim+d] * normal_l[d]).sum::<f64>();
-                // Consistency: -½ {κ ∇φ_i}·n·φ_j  (from left side)
-                // Symmetry:    -½ {κ ∇φ_j}·n·φ_i
-                // Penalty:     +pen·φ_i·φ_j
                 kll[i*n_l+j] += w_f * (
-                    -0.5 * kappa * ngrad_li * phi_lj
-                    -0.5 * kappa * ngrad_lj * phi_li
-                    + pen * phi_li * phi_lj
-                );
-            }
-            for j in 0..n_r {
-                let phi_rj = phi_r[j];
-                let ngrad_rj: f64 = (0..dim).map(|d| gphys_r[j*dim+d] * normal_r[d]).sum::<f64>();
-                // Off-diagonal: left–right coupling
-                klr[i*n_r+j] += w_f * (
-                    -0.5 * kappa * ngrad_li * phi_rj
-                    -0.5 * kappa * ngrad_rj * phi_li
-                    - pen * phi_li * phi_rj
+                    -0.5 * kappa * ngl[i] * phi_l[j]
+                    -0.5 * kappa * ngl[j] * phi_l[i]
+                    + pen * phi_l[i] * phi_l[j]
                 );
             }
         }
-        for i in 0..n_r {
-            let phi_ri = phi_r[i];
-            let ngrad_ri: f64 = (0..dim).map(|d| gphys_r[i*dim+d] * normal_r[d]).sum::<f64>();
-            for j in 0..n_l {
-                let phi_lj = phi_l[j];
-                let ngrad_lj: f64 = (0..dim).map(|d| gphys_l[j*dim+d] * normal_l[d]).sum::<f64>();
-                krl[i*n_l+j] += w_f * (
-                    -0.5 * kappa * ngrad_ri * phi_lj
-                    -0.5 * kappa * ngrad_lj * phi_ri
-                    - pen * phi_ri * phi_lj
+        // K_LR: a∈L, b∈R  → [v]=-φ_bR, [u]=φ_aL, {∇u·n}=½∇φ_aL·n, {∇v·n}=½∇φ_bR·n
+        for i in 0..n_l {
+            for j in 0..n_r {
+                klr[i*n_r+j] += w_f * (
+                     0.5 * kappa * ngl[i] * phi_r[j]    // from -{∇u·n}[v], [v]=-φ_bR
+                    -0.5 * kappa * ngr[j] * phi_l[i]    // from -{∇v·n}[u], [u]=φ_aL
+                    - pen * phi_l[i] * phi_r[j]          // from [u][v] = φ_aL·(-φ_bR)
                 );
             }
+        }
+        // K_RL: a∈R, b∈L  → [v]=φ_bL, [u]=-φ_aR, {∇u·n}=½∇φ_aR·n, {∇v·n}=½∇φ_bL·n
+        for i in 0..n_r {
+            for j in 0..n_l {
+                krl[i*n_l+j] += w_f * (
+                    -0.5 * kappa * ngr[i] * phi_l[j]    // from -{∇u·n}[v], [v]=φ_bL
+                    +0.5 * kappa * ngl[j] * phi_r[i]    // from -{∇v·n}[u], [u]=-φ_aR
+                    - pen * phi_r[i] * phi_l[j]          // from [u][v] = (-φ_aR)·φ_bL
+                );
+            }
+        }
+        // K_RR: a∈R, b∈R  → [v]=-φ_bR, [u]=-φ_aR, {∇u·n}=½∇φ_aR·n, {∇v·n}=½∇φ_bR·n
+        for i in 0..n_r {
             for j in 0..n_r {
-                let phi_rj = phi_r[j];
-                let ngrad_rj: f64 = (0..dim).map(|d| gphys_r[j*dim+d] * normal_r[d]).sum::<f64>();
                 krr[i*n_r+j] += w_f * (
-                    -0.5 * kappa * ngrad_ri * phi_rj
-                    -0.5 * kappa * ngrad_rj * phi_ri
-                    + pen * phi_ri * phi_rj
+                     0.5 * kappa * ngr[i] * phi_r[j]    // from -{∇u·n}[v], [v]=-φ_bR
+                    +0.5 * kappa * ngr[j] * phi_r[i]    // from -{∇v·n}[u], [u]=-φ_aR
+                    + pen * phi_r[i] * phi_r[j]          // from [u][v] = (-φ_aR)·(-φ_bR)
                 );
             }
         }
@@ -352,7 +351,8 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
 ) {
     let dim = mesh.dim() as usize;
     let face_nodes = mesh.face_nodes(face);
-    let (h_f, normal) = face_geom_2d(mesh, face_nodes);
+    let (h_f, mut normal) = face_geom_2d(mesh, face_nodes);
+    orient_normal_outward(mesh, elem, face_nodes, &mut normal);
 
     let et = mesh.element_type(elem);
     let re = ref_elem_vol(et, order);
@@ -410,7 +410,10 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// 2-D face geometry: return (edge_length, outward_unit_normal).
+/// 2-D face geometry: return (edge_length, unit_normal).
+///
+/// The normal is the 90° CCW rotation of the edge direction.
+/// Use `orient_normal_outward` to guarantee outward orientation.
 fn face_geom_2d<M: MeshTopology>(mesh: &M, nodes: &[u32]) -> (f64, Vec<f64>) {
     let x0 = mesh.node_coords(nodes[0]);
     let x1 = mesh.node_coords(nodes[1]);
@@ -418,6 +421,39 @@ fn face_geom_2d<M: MeshTopology>(mesh: &M, nodes: &[u32]) -> (f64, Vec<f64>) {
     let dy = x1[1] - x0[1];
     let len = (dx*dx + dy*dy).sqrt();
     (len, vec![dy / len, -dx / len])
+}
+
+/// Ensure `normal` points outward from `elem` by checking against the element centroid.
+///
+/// If `dot(normal, face_midpoint - centroid) < 0`, the normal points inward → flip it.
+fn orient_normal_outward<M: MeshTopology>(
+    mesh: &M,
+    elem: u32,
+    face_nodes: &[u32],
+    normal: &mut [f64],
+) {
+    let dim = mesh.dim() as usize;
+    let enodes = mesh.element_nodes(elem);
+    let npe = enodes.len();
+    // Element centroid
+    let mut centroid = vec![0.0_f64; dim];
+    for &n in enodes {
+        let c = mesh.node_coords(n);
+        for d in 0..dim { centroid[d] += c[d]; }
+    }
+    for d in 0..dim { centroid[d] /= npe as f64; }
+    // Face midpoint
+    let mut midpoint = vec![0.0_f64; dim];
+    for &n in face_nodes {
+        let c = mesh.node_coords(n);
+        for d in 0..dim { midpoint[d] += c[d]; }
+    }
+    for d in 0..dim { midpoint[d] /= face_nodes.len() as f64; }
+    // Check orientation: outward means normal · (midpoint - centroid) > 0
+    let dot: f64 = (0..dim).map(|d| normal[d] * (midpoint[d] - centroid[d])).sum();
+    if dot < 0.0 {
+        for d in 0..dim { normal[d] = -normal[d]; }
+    }
 }
 
 /// Invert `x = x0 + J ξ` → `ξ = J^{-1}(x - x0)`.

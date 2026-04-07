@@ -142,6 +142,17 @@ impl Comm {
     ) -> Vec<(Rank, Vec<u8>)> {
         self.inner.alltoallv_bytes(sends)
     }
+
+    /// Split this communicator into sub-communicators.
+    ///
+    /// Processes with the same `color` end up in the same sub-communicator.
+    /// Within each sub-communicator, ranks are ordered by `key`.
+    ///
+    /// Returns a new `Comm` handle for the sub-communicator containing this rank.
+    pub fn split(&self, color: i32, key: i32) -> Comm {
+        let backend = self.inner.split(color, key);
+        Comm { inner: std::sync::Arc::new(backend) }
+    }
 }
 
 // ── Universe ─────────────────────────────────────────────────────────────────
@@ -188,8 +199,8 @@ impl Universe {
 
         #[cfg(target_arch = "wasm32")]
         {
-            use crate::backend::wasm::WasmWorkerBackend;
-            return Comm::from_backend(Box::new(WasmWorkerBackend::single()));
+            use crate::backend::wasm::JsMpiBackend;
+            return Comm::from_backend(Box::new(JsMpiBackend::serial()));
         }
 
         #[cfg(all(not(target_arch = "wasm32"), not(feature = "mpi")))]

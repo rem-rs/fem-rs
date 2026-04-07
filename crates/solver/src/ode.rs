@@ -239,7 +239,7 @@ impl ImplicitTimeStepper for ImplicitEuler {
         let sys = identity_minus_dt_jac(&jac, dt);
         let b: Vec<f64> = dudt.iter().map(|&v| dt * v).collect();
 
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
         let mut du = vec![0.0_f64; n];
         solve_gmres(&sys, &b, &mut du, 30, &cfg).expect("ImplicitEuler: linear solve failed");
 
@@ -279,7 +279,7 @@ impl ImplicitTimeStepper for Sdirk2 {
         let sys1 = identity_minus_dt_jac(&jac1, dt * g);
         let mut f1 = vec![0.0_f64; n];
         rhs(t + g * dt, u, &mut f1);
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
         let mut k1 = vec![0.0_f64; n];
         solve_gmres(&sys1, &f1, &mut k1, 30, &cfg).expect("SDIRK2 stage 1 solve failed");
 
@@ -341,7 +341,7 @@ impl Bdf2 {
         J: Fn(f64, &[f64]) -> CsrMatrix<f64>,
     {
         let n = u.len();
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false };
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
 
         match &state.u_prev {
             None => {
@@ -378,6 +378,153 @@ impl Bdf2 {
             }
         }
     }
+}
+
+// ─── Newmark-β (second-order ODEs) ──────────────────────────────────────────
+
+/// Newmark-β method for second-order ODEs: M ü + K u = f(t).
+///
+/// Converts the second-order system to first-order state [u, v=u̇]:
+///   u_{n+1} = uₙ + dt vₙ + dt²[(½−β) aₙ + β a_{n+1}]
+///   v_{n+1} = vₙ + dt[(1−γ) aₙ + γ a_{n+1}]
+///
+/// where aₙ = M⁻¹(fₙ − K uₙ).
+///
+/// Classic parameter choices:
+/// - β=1/4, γ=1/2: average acceleration (unconditionally stable, 2nd order)
+/// - β=0, γ=1/2: central difference (conditionally stable, 2nd order)
+/// - β=1/6, γ=1/2: linear acceleration (conditionally stable, 2nd order)
+pub struct Newmark {
+    pub beta: f64,
+    pub gamma: f64,
+}
+
+impl Default for Newmark {
+    fn default() -> Self {
+        // Average acceleration (trapezoidal rule) — unconditionally stable
+        Newmark { beta: 0.25, gamma: 0.5 }
+    }
+}
+
+/// State for the Newmark method: stores velocity and acceleration.
+pub struct NewmarkState {
+    pub vel: Vec<f64>,   // velocity v = du/dt
+    pub acc: Vec<f64>,   // acceleration a = d²u/dt²
+}
+
+impl NewmarkState {
+    pub fn new(n: usize) -> Self {
+        NewmarkState { vel: vec![0.0; n], acc: vec![0.0; n] }
+    }
+
+    /// Initialize with given velocity and compute initial acceleration from M a₀ = f₀ - K u₀.
+    pub fn init_from(vel: Vec<f64>, mass: &CsrMatrix<f64>, stiff: &CsrMatrix<f64>, u: &[f64], force: &[f64]) -> Self {
+        let n = u.len();
+        // a₀ = M⁻¹(f₀ - K u₀)
+        // Solve M a₀ = f₀ - K u₀  using CG
+        let mut ku = vec![0.0; n];
+        stiff.spmv(u, &mut ku);
+        let rhs: Vec<f64> = (0..n).map(|i| force[i] - ku[i]).collect();
+        let mut acc = vec![0.0; n];
+        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        crate::solve_cg(mass, &rhs, &mut acc, &cfg).expect("Newmark init: mass solve failed");
+        NewmarkState { vel, acc }
+    }
+}
+
+impl Newmark {
+    /// Advance one time step for M ü + K u = f(t_{n+1}).
+    ///
+    /// Arguments:
+    /// - `mass`: mass matrix M
+    /// - `stiff`: stiffness matrix K
+    /// - `force_new`: force vector f(t_{n+1})
+    /// - `dt`: time step
+    /// - `u`: displacement (updated in-place)
+    /// - `state`: Newmark state (velocity + acceleration, updated in-place)
+    /// - `bc_dofs`: Dirichlet boundary DOFs (displacement = 0)
+    pub fn step(
+        &self,
+        mass: &CsrMatrix<f64>,
+        stiff: &CsrMatrix<f64>,
+        force_new: &[f64],
+        dt: f64,
+        u: &mut [f64],
+        state: &mut NewmarkState,
+        bc_dofs: &[u32],
+    ) {
+        let n = u.len();
+        let b = self.beta;
+        let g = self.gamma;
+
+        // Predict: u_pred = u + dt*v + dt²*(0.5-β)*a
+        let mut u_pred = vec![0.0; n];
+        for i in 0..n {
+            u_pred[i] = u[i] + dt * state.vel[i] + dt * dt * (0.5 - b) * state.acc[i];
+        }
+
+        // Solve effective system: (M + β dt² K) a_{n+1} = f_{n+1} - K u_pred
+        // Build effective stiffness: S = M + β dt² K
+        let coeff = b * dt * dt;
+        let eff_stiff = build_effective_stiffness(mass, stiff, coeff);
+
+        // Build effective RHS: f_{n+1} - K * u_pred
+        let mut k_upred = vec![0.0; n];
+        stiff.spmv(&u_pred, &mut k_upred);
+        let mut rhs: Vec<f64> = (0..n).map(|i| force_new[i] - k_upred[i]).collect();
+
+        // Apply Dirichlet BCs to the effective system
+        let mut eff = eff_stiff;
+        for &d in bc_dofs {
+            let d = d as usize;
+            eff.apply_dirichlet_row_zeroing(d, 0.0, &mut rhs);
+        }
+
+        // Solve for a_{n+1}
+        let mut a_new = vec![0.0; n];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
+        crate::solve_cg(&eff, &rhs, &mut a_new, &cfg).expect("Newmark: effective system solve failed");
+
+        // Correct: u_{n+1} = u_pred + β dt² a_{n+1}
+        for i in 0..n {
+            u[i] = u_pred[i] + coeff * a_new[i];
+        }
+
+        // Update velocity: v_{n+1} = v_n + dt[(1-γ) a_n + γ a_{n+1}]
+        for i in 0..n {
+            state.vel[i] += dt * ((1.0 - g) * state.acc[i] + g * a_new[i]);
+        }
+
+        // Update acceleration
+        state.acc.copy_from_slice(&a_new);
+
+        // Zero BC DOFs
+        for &d in bc_dofs {
+            let d = d as usize;
+            u[d] = 0.0;
+            state.vel[d] = 0.0;
+            state.acc[d] = 0.0;
+        }
+    }
+}
+
+/// Build S = M + α K  as a CsrMatrix.
+fn build_effective_stiffness(mass: &CsrMatrix<f64>, stiff: &CsrMatrix<f64>, alpha: f64) -> CsrMatrix<f64> {
+    let n = mass.nrows;
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    // Add M
+    for i in 0..n {
+        for ptr in mass.row_ptr[i]..mass.row_ptr[i+1] {
+            coo.add(i, mass.col_idx[ptr] as usize, mass.values[ptr]);
+        }
+    }
+    // Add alpha*K
+    for i in 0..n {
+        for ptr in stiff.row_ptr[i]..stiff.row_ptr[i+1] {
+            coo.add(i, stiff.col_idx[ptr] as usize, alpha * stiff.values[ptr]);
+        }
+    }
+    coo.into_csr()
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -558,6 +705,37 @@ mod tests {
             t += dt_act;
         }
         assert!(u[0].abs() < 0.01, "BDF2: solution did not decay; u={:.3e}", u[0]);
+    }
+
+    #[test]
+    fn newmark_free_vibration() {
+        // 1-DOF: m*a + k*u = 0, m=1, k=ω², ω=π, u(0)=1, v(0)=0
+        // Exact: u(t) = cos(ωt)
+        let omega = std::f64::consts::PI;
+        let k = omega * omega;
+        let mut mass_coo = CooMatrix::<f64>::new(1, 1);
+        mass_coo.add(0, 0, 1.0);
+        let mass = mass_coo.into_csr();
+        let mut stiff_coo = CooMatrix::<f64>::new(1, 1);
+        stiff_coo.add(0, 0, k);
+        let stiff = stiff_coo.into_csr();
+
+        let newmark = Newmark::default(); // β=1/4, γ=1/2
+        let mut u = vec![1.0];
+        let force = vec![0.0];
+        let dt = 0.001;
+        let mut state = NewmarkState::new(1);
+        // Initial acc: a₀ = M⁻¹(-K u₀) = -ω²
+        state.acc[0] = -k;
+
+        let t_end = 1.0_f64;
+        let n_steps = (t_end / dt).round() as usize;
+        for _ in 0..n_steps {
+            newmark.step(&mass, &stiff, &force, dt, &mut u, &mut state, &[]);
+        }
+        let exact = (omega * t_end).cos();
+        let err = (u[0] - exact).abs();
+        assert!(err < 0.01, "Newmark free vibration error={err:.4e} (exact={exact:.4})");
     }
 
     /// Heat equation: du/dt = -λ u (modal decomposition of Laplacian).

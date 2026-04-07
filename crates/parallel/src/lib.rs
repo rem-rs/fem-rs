@@ -38,18 +38,37 @@
 
 pub mod backend;
 pub mod comm;
+pub mod dof_partition;
 pub mod ghost;
 pub mod launcher;
+pub mod mesh_serde;
 pub mod metis;
+pub mod par_amg;
+pub mod par_assembler;
+pub mod par_csr;
 pub mod par_mesh;
+pub mod par_mixed_assembler;
 pub mod par_simplex;
+pub mod par_solver;
+pub mod par_space;
+pub mod par_vector;
+pub mod par_vector_assembler;
 pub mod partition;
 
 // Flat re-exports for ergonomic `use fem_parallel::*`.
 pub use comm::{Comm, Universe};
+pub use dof_partition::DofPartition;
 pub use ghost::GhostExchange;
 pub use launcher::{Launcher, WorkerConfig};
-pub use metis::{MetisPartitioner, MetisOptions, partition_simplex_metis};
+pub use metis::{MetisPartitioner, MetisOptions, partition_simplex_metis, partition_simplex_metis_streaming};
+pub use par_assembler::ParAssembler;
+pub use par_amg::{ParAmgConfig, ParAmgHierarchy, par_solve_pcg_amg};
+pub use par_csr::ParCsrMatrix;
 pub use par_mesh::ParallelMesh;
-pub use par_simplex::partition_simplex;
+pub use par_mixed_assembler::ParMixedAssembler;
+pub use par_simplex::{partition_simplex, partition_simplex_streaming};
+pub use par_solver::{par_solve_cg, par_solve_pcg_jacobi, par_solve_minres};
+pub use par_space::ParallelFESpace;
+pub use par_vector::ParVector;
+pub use par_vector_assembler::ParVectorAssembler;
 pub use partition::MeshPartition;
