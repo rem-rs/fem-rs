@@ -1,14 +1,18 @@
-//! GMSH `.msh` file format version 4.1 (ASCII) reader.
+//! GMSH `.msh` file format version 4.1 (ASCII) reader **and** writer.
 //!
-//! Produces a [`SimplexMesh`] from the highest-dimension elements found in the
-//! file.  Lower-dimension elements that belong to physical groups are treated
-//! as boundary faces.
+//! **Reading** – produces a [`SimplexMesh`] from the highest-dimension
+//! elements found in the file.  Lower-dimension elements that belong to
+//! physical groups are treated as boundary faces.
+//!
+//! **Writing** – serialises a [`SimplexMesh`] (plus optional
+//! [`PhysicalGroup`] metadata) back to a valid GMSH v4.1 ASCII `.msh` file
+//! that can be opened directly in the Gmsh GUI for inspection.
 //!
 //! # Format reference
 //! <https://gmsh.info/doc/texinfo/gmsh.html#MSH-file-format>
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 
 use fem_core::{FemError, FemResult};
 use fem_mesh::{boundary::PhysicalGroup, element_type::ElementType, simplex::SimplexMesh};
