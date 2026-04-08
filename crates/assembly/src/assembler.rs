@@ -24,7 +24,10 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
-        _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
+        _ => panic!(
+            "ref_elem_vol: unsupported combination (element_type={elem_type:?}, order={order}). \
+             Supported: Tri3/Tri6 P1/P2, Tet4 P1, Quad4 Q1, Hex8 Q1"
+        ),
     }
 }
 

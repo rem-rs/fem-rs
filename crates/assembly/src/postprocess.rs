@@ -107,6 +107,101 @@ pub fn compute_element_gradients<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec
     result
 }
 
+// ─── H1 seminorm error ────────────────────────────────────────────────────
+
+/// Compute the H¹ seminorm error `‖∇u_exact − ∇u_h‖_{L²(Ω)}`.
+///
+/// Integrates `|∇u_exact − ∇u_h|²` over every element using Gaussian
+/// quadrature (not just the centroid), and returns the square root.
+///
+/// # Arguments
+/// * `space`      — finite element space (H¹, scalar)
+/// * `dofs`       — FE solution coefficient vector (length = `space.n_dofs()`)
+/// * `grad_exact` — closure mapping physical coordinates `x` to the exact
+///                  gradient vector (length = mesh dimension)
+/// * `quad_order` — quadrature accuracy order.  Use `order * 2 + 2` or higher
+///                  for P1/P2 solutions.
+///
+/// # Returns
+/// `sqrt( ∫_Ω |∇u_exact - ∇u_h|² dΩ )`
+pub fn compute_h1_error<S: FESpace>(
+    space: &S,
+    dofs: &[f64],
+    grad_exact: impl Fn(&[f64]) -> Vec<f64>,
+    quad_order: u8,
+) -> f64 {
+    let mesh = space.mesh();
+    let dim = mesh.dim() as usize;
+    let order = space.order();
+
+    let mut err2 = 0.0_f64;
+
+    for e in mesh.elem_iter() {
+        let elem_type = mesh.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+
+        let elem_dofs = space.element_dofs(e);
+        let nodes = mesh.element_nodes(e);
+
+        // ── Jacobian for this element ────────────────────────────────────
+        let (jac, det_j) = simplex_jacobian(mesh, nodes);
+        let j_inv_t = jac
+            .try_inverse()
+            .expect("degenerate element in compute_h1_error")
+            .transpose();
+
+        // Cache vertex coordinates for physical-point mapping.
+        // For a 2-D simplex: x = x0 + J * xi (J built from x1-x0, x2-x0).
+        let x0: Vec<f64> = mesh.node_coords(nodes[0]).to_vec();
+        let jac_cols: Vec<Vec<f64>> = (1..=dim)
+            .map(|k| {
+                let xk = mesh.node_coords(nodes[k]);
+                (0..dim).map(|d| xk[d] - x0[d]).collect()
+            })
+            .collect();
+
+        // ── Quadrature ───────────────────────────────────────────────────
+        let quad = ref_elem.quadrature(quad_order);
+        let mut grad_ref = vec![0.0_f64; n_ldofs * dim];
+        let mut grad_phys = vec![0.0_f64; n_ldofs * dim];
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[qi] * det_j.abs();
+
+            // Reference → physical coordinates.
+            let mut x_phys: Vec<f64> = x0.clone();
+            for k in 0..dim {
+                for d in 0..dim {
+                    x_phys[d] += jac_cols[k][d] * xi[k];
+                }
+            }
+
+            // Basis gradients in reference space, then transform to physical.
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, dim);
+
+            // FE gradient: ∇u_h = Σ_i c_i ∇φ_i(x)
+            let mut grad_h = vec![0.0_f64; dim];
+            for i in 0..n_ldofs {
+                let c = dofs[elem_dofs[i] as usize];
+                for d in 0..dim {
+                    grad_h[d] += c * grad_phys[i * dim + d];
+                }
+            }
+
+            // Exact gradient at this physical point.
+            let grad_ex = grad_exact(&x_phys);
+
+            // Accumulate ‖∇u_exact − ∇u_h‖² weighted by quadrature weight.
+            let diff2: f64 = (0..dim).map(|d| (grad_ex[d] - grad_h[d]).powi(2)).sum();
+            err2 += w * diff2;
+        }
+    }
+
+    err2.sqrt()
+}
+
 // ─── Element-wise curl (H(curl) spaces) ────────────────────────────────────
 
 /// Compute element-wise curl of an H(curl) FE solution.
@@ -407,6 +502,133 @@ mod tests {
                 d.abs() < 1e-12,
                 "elem {e}: div of zero field should be 0, got {d}"
             );
+        }
+    }
+
+    // ── H1 error tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn h1_error_linear_function() {
+        // u = 3x - 2y → ∇u = [3, -2] exactly for P1.
+        // So H1 seminorm error should be essentially machine-zero.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = H1Space::new(mesh, 1);
+        let v = space.interpolate(&|x| 3.0 * x[0] - 2.0 * x[1]);
+        let dofs = v.as_slice();
+
+        let err = compute_h1_error(&space, dofs, |_| vec![3.0, -2.0], 5);
+        assert!(
+            err < 1e-10,
+            "H1 error for linear u should be ~0, got {err:.3e}"
+        );
+    }
+
+    #[test]
+    fn h1_error_poisson_p1_convergence() {
+        // P1 Poisson: u = sin(πx)sin(πy), ∇u_exact = [π cos(πx)sin(πy), π sin(πx)cos(πy)]
+        // H1 seminorm error should converge at O(h¹) for P1 (rate ≈ 1).
+        use std::f64::consts::PI;
+        use crate::assembler::Assembler;
+        use crate::standard::{DiffusionIntegrator, DomainSourceIntegrator};
+        use fem_space::constraints::{apply_dirichlet, boundary_dofs};
+
+        let ns = [8usize, 16, 32];
+        let mut prev: Option<(f64, f64)> = None;
+
+        for &n in &ns {
+            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let space = H1Space::new(mesh, 1);
+            let ndofs = space.n_dofs();
+
+            let mut mat = Assembler::assemble_bilinear(
+                &space,
+                &[&DiffusionIntegrator { kappa: 1.0 }],
+                3,
+            );
+            let src = DomainSourceIntegrator::new(|x: &[f64]| {
+                2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
+            });
+            let mut rhs = Assembler::assemble_linear(&space, &[&src], 3);
+
+            let dm = space.dof_manager();
+            let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+            apply_dirichlet(&mut mat, &mut rhs, &bnd, &vec![0.0; bnd.len()]);
+
+            let mut u = vec![0.0_f64; ndofs];
+            fem_solver::solve_pcg_jacobi(&mat, &rhs, &mut u, &fem_solver::SolverConfig {
+                rtol: 1e-12, max_iter: 10_000, verbose: false, ..fem_solver::SolverConfig::default()
+            }).unwrap();
+
+            let err = compute_h1_error(&space, &u, |x| {
+                vec![
+                    PI * (PI * x[0]).cos() * (PI * x[1]).sin(),
+                    PI * (PI * x[0]).sin() * (PI * x[1]).cos(),
+                ]
+            }, 5);
+
+            let h = 1.0 / n as f64;
+            if let Some((e0, h0)) = prev {
+                let rate = (err / e0).ln() / (h / h0).ln();
+                assert!(
+                    rate > 0.85,
+                    "P1 H1 convergence rate = {rate:.3}, expected ≥ 0.85 (n={n})"
+                );
+            }
+            prev = Some((err, h));
+        }
+    }
+
+    #[test]
+    fn h1_error_poisson_p2_convergence() {
+        // P2 Poisson: H1 seminorm error should converge at O(h²) (rate ≈ 2).
+        use std::f64::consts::PI;
+        use crate::assembler::Assembler;
+        use crate::standard::{DiffusionIntegrator, DomainSourceIntegrator};
+        use fem_space::constraints::{apply_dirichlet, boundary_dofs};
+
+        let ns = [4usize, 8, 16];
+        let mut prev: Option<(f64, f64)> = None;
+
+        for &n in &ns {
+            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let space = H1Space::new(mesh, 2);
+            let ndofs = space.n_dofs();
+
+            let mut mat = Assembler::assemble_bilinear(
+                &space,
+                &[&DiffusionIntegrator { kappa: 1.0 }],
+                5,
+            );
+            let src = DomainSourceIntegrator::new(|x: &[f64]| {
+                2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
+            });
+            let mut rhs = Assembler::assemble_linear(&space, &[&src], 5);
+
+            let dm = space.dof_manager();
+            let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+            apply_dirichlet(&mut mat, &mut rhs, &bnd, &vec![0.0; bnd.len()]);
+
+            let mut u = vec![0.0_f64; ndofs];
+            fem_solver::solve_pcg_jacobi(&mat, &rhs, &mut u, &fem_solver::SolverConfig {
+                rtol: 1e-12, max_iter: 10_000, verbose: false, ..fem_solver::SolverConfig::default()
+            }).unwrap();
+
+            let err = compute_h1_error(&space, &u, |x| {
+                vec![
+                    PI * (PI * x[0]).cos() * (PI * x[1]).sin(),
+                    PI * (PI * x[0]).sin() * (PI * x[1]).cos(),
+                ]
+            }, 7);
+
+            let h = 1.0 / n as f64;
+            if let Some((e0, h0)) = prev {
+                let rate = (err / e0).ln() / (h / h0).ln();
+                assert!(
+                    rate > 1.8,
+                    "P2 H1 convergence rate = {rate:.3}, expected ≥ 1.8 (n={n})"
+                );
+            }
+            prev = Some((err, h));
         }
     }
 }

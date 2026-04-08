@@ -57,3 +57,4 @@ pub use interior_faces::InteriorFaceList;
 pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator};
 pub use grid_function::GridFunction;
+pub use postprocess::{compute_element_gradients, compute_h1_error, recover_gradient_nodal};

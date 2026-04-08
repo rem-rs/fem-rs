@@ -184,6 +184,82 @@ impl<T: Scalar> CsrMatrix<T> {
     }
 
     // -----------------------------------------------------------------------
+    // Matrix arithmetic
+    // -----------------------------------------------------------------------
+
+    /// Compute `self + other` (sparse matrix addition, union sparsity pattern).
+    ///
+    /// Equivalent to the free function [`spadd`].
+    pub fn add(&self, other: &CsrMatrix<T>) -> CsrMatrix<T>
+    where
+        T: std::ops::Mul<Output = T>,
+    {
+        spadd(self, other)
+    }
+
+    /// Compute `alpha * self + beta * other`.
+    ///
+    /// Both matrices must have the same dimensions.  The result has the union
+    /// of the sparsity patterns.
+    pub fn axpby(&self, alpha: T, other: &CsrMatrix<T>, beta: T) -> CsrMatrix<T>
+    where
+        T: std::ops::Mul<Output = T>,
+    {
+        assert_eq!(self.nrows, other.nrows, "axpby: row count mismatch");
+        assert_eq!(self.ncols, other.ncols, "axpby: col count mismatch");
+
+        let m = self.nrows;
+        let mut row_ptr = Vec::with_capacity(m + 1);
+        let mut col_idx = Vec::new();
+        let mut values  = Vec::new();
+
+        row_ptr.push(0);
+
+        for i in 0..m {
+            let a_start = self.row_ptr[i];
+            let a_end   = self.row_ptr[i + 1];
+            let b_start = other.row_ptr[i];
+            let b_end   = other.row_ptr[i + 1];
+
+            let mut ja = a_start;
+            let mut jb = b_start;
+
+            while ja < a_end && jb < b_end {
+                let ca = self.col_idx[ja];
+                let cb = other.col_idx[jb];
+                if ca < cb {
+                    col_idx.push(ca);
+                    values.push(alpha * self.values[ja]);
+                    ja += 1;
+                } else if ca > cb {
+                    col_idx.push(cb);
+                    values.push(beta * other.values[jb]);
+                    jb += 1;
+                } else {
+                    col_idx.push(ca);
+                    values.push(alpha * self.values[ja] + beta * other.values[jb]);
+                    ja += 1;
+                    jb += 1;
+                }
+            }
+            while ja < a_end {
+                col_idx.push(self.col_idx[ja]);
+                values.push(alpha * self.values[ja]);
+                ja += 1;
+            }
+            while jb < b_end {
+                col_idx.push(other.col_idx[jb]);
+                values.push(beta * other.values[jb]);
+                jb += 1;
+            }
+
+            row_ptr.push(col_idx.len());
+        }
+
+        CsrMatrix { nrows: m, ncols: self.ncols, row_ptr, col_idx, values }
+    }
+
+    // -----------------------------------------------------------------------
     // Transpose
     // -----------------------------------------------------------------------
 
@@ -439,5 +515,64 @@ mod tests {
         assert!((c.get(0, 1) - 3.0).abs() < 1e-14);
         assert!((c.get(1, 0) - 4.0).abs() < 1e-14);
         assert!((c.get(1, 1) - 2.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn add_method_same_as_spadd() {
+        let a = small_matrix();
+        let b = small_matrix();
+        let c_free = super::spadd(&a, &b);
+        let c_method = a.add(&b);
+        let df = c_free.to_dense();
+        let dm = c_method.to_dense();
+        assert_eq!(df.len(), dm.len());
+        for (f, m) in df.iter().zip(dm.iter()) {
+            assert!((f - m).abs() < 1e-14, "add method differs from spadd: {f} vs {m}");
+        }
+    }
+
+    #[test]
+    fn axpby_identity_alpha1_beta0() {
+        // axpby(1, b, 0) should equal a
+        let a = small_matrix();
+        let b = small_matrix();
+        let c = a.axpby(1.0, &b, 0.0);
+        let da = a.to_dense();
+        let dc = c.to_dense();
+        for (ai, ci) in da.iter().zip(dc.iter()) {
+            assert!((ai - ci).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn axpby_scaled() {
+        // axpby(2, b, 3) = 2*a + 3*b
+        let a = small_matrix();
+        let b = small_matrix();
+        let c = a.axpby(2.0, &b, 3.0);
+        // a == b here, so 2*a + 3*a = 5*a
+        let da = a.to_dense();
+        let dc = c.to_dense();
+        for (ai, ci) in da.iter().zip(dc.iter()) {
+            assert!((5.0 * ai - ci).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn axpby_different_patterns() {
+        let mut ca = CooMatrix::<f64>::new(2, 2);
+        ca.add(0, 0, 1.0);
+        let a = ca.into_csr();
+
+        let mut cb = CooMatrix::<f64>::new(2, 2);
+        cb.add(1, 1, 2.0);
+        let b = cb.into_csr();
+
+        let c = a.axpby(3.0, &b, 4.0);
+        // (0,0) = 3*1 = 3, (1,1) = 4*2 = 8
+        assert!((c.get(0, 0) - 3.0).abs() < 1e-14);
+        assert!((c.get(1, 1) - 8.0).abs() < 1e-14);
+        assert!((c.get(0, 1)).abs() < 1e-14);
+        assert!((c.get(1, 0)).abs() < 1e-14);
     }
 }
