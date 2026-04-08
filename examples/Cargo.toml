@@ -113,6 +113,22 @@ path = "ex_stokes.rs"
 name = "ex_navier_stokes"
 path = "ex_navier_stokes.rs"
 
+[[example]]
+name = "ex7_neumann_mixed_bc"
+path = "ex7_neumann_mixed_bc.rs"
+
+[[example]]
+name = "ex14_dc_current"
+path = "ex14_dc_current.rs"
+
+[[example]]
+name = "pex4_parallel_heat"
+path = "pex4_parallel_heat.rs"
+
+[[example]]
+name = "ex_convergence"
+path = "ex_convergence.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
