@@ -349,6 +349,8 @@ pub use ode::{
     ImplicitEuler, Sdirk2,
     Bdf2, Bdf2State,
     Newmark, NewmarkState,
+    GeneralizedAlpha, GeneralizedAlphaState,
+    ImexArk3,
 };
 pub mod sli;
 pub use sli::{solve_jacobi_sli, solve_gs_sli};

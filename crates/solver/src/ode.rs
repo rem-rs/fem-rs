@@ -508,6 +508,439 @@ impl Newmark {
     }
 }
 
+// ─── Generalized-α (first-order) ─────────────────────────────────────────────
+
+/// First-order generalized-α method (Jansen, Whiting & Hulbert, 2000) for the
+/// first-order system:
+///
+/// ```text
+///   M dv/dt + K v = f(t)
+/// ```
+///
+/// Parameter choice from spectral radius at infinity ρ_∞ ∈ [0, 1]:
+/// ```text
+///   α_f = 1/(1 + ρ_∞)
+///   α_m = (3 - ρ_∞) / (2(1 + ρ_∞))
+///   γ   = 0.5 + α_m - α_f
+/// ```
+///
+/// This is Palace's default transient integrator (`Solver.Transient.Type =
+/// "GeneralizedAlpha"`).  Unconditionally stable, 2nd-order accurate for
+/// ρ_∞ ∈ (0, 1].  WASM-safe (no std::thread dependency).
+///
+/// Each step solves one linear system of size n:
+/// ```text
+///   (α_m M + α_f γ dt K) Δv = -M v_f + f_f dt  (approximately)
+/// ```
+pub struct GeneralizedAlpha {
+    /// Spectral radius at ω→∞.  0 = maximum algorithmic dissipation, 1 = no dissipation.
+    pub rho_inf: f64,
+}
+
+impl Default for GeneralizedAlpha {
+    fn default() -> Self {
+        GeneralizedAlpha { rho_inf: 0.5 }
+    }
+}
+
+/// State for Generalized-α: stores the previous time-derivative (v̇_{n}).
+pub struct GeneralizedAlphaState {
+    /// dv/dt at tₙ  (acceleration / rate-of-change).
+    pub dvdt: Vec<f64>,
+}
+
+impl GeneralizedAlphaState {
+    pub fn new(n: usize) -> Self {
+        GeneralizedAlphaState { dvdt: vec![0.0; n] }
+    }
+}
+
+impl GeneralizedAlpha {
+    /// Derived parameters from ρ_∞.
+    fn params(&self) -> (f64, f64, f64) {
+        let r = self.rho_inf;
+        let alpha_f = 1.0 / (1.0 + r);
+        let alpha_m = (3.0 - r) / (2.0 * (1.0 + r));
+        let gamma   = 0.5 + alpha_m - alpha_f;
+        (alpha_f, alpha_m, gamma)
+    }
+
+    /// Advance `v` from `t` by `dt` for the system `M dv/dt + K v = f(t)`.
+    ///
+    /// Arguments:
+    /// - `mass`:    mass matrix M
+    /// - `stiff`:   stiffness matrix K
+    /// - `force_fn`:  right-hand-side f(t) → Vec<f64>
+    /// - `dt`:      time step
+    /// - `v`:       state vector (updated in-place)
+    /// - `state`:   Generalized-α state (dvdt, updated in-place)
+    /// - `bc_dofs`: Dirichlet zero boundary DOFs
+    pub fn step(
+        &self,
+        mass:     &CsrMatrix<f64>,
+        stiff:    &CsrMatrix<f64>,
+        force_fn: &dyn Fn(f64) -> Vec<f64>,
+        dt:       f64,
+        t:        f64,
+        v:        &mut [f64],
+        state:    &mut GeneralizedAlphaState,
+        bc_dofs:  &[u32],
+    ) {
+        let n = v.len();
+        let (alpha_f, alpha_m, gamma) = self.params();
+
+        // Predicted intermediate time levels
+        let t_m = t + alpha_m * dt;
+        let t_f = t + alpha_f * dt;
+
+        // Predicted v at t_f: v_f = v_n + alpha_f * gamma * dt * dvdt_n
+        // (predictor for the corrector step below)
+        let mut v_f: Vec<f64> = (0..n)
+            .map(|i| v[i] + alpha_f * gamma * dt * state.dvdt[i])
+            .collect();
+
+        // Force at t_f
+        let f_f = force_fn(t_f);
+
+        // Build system: (α_m M + α_f γ dt K) Δv̇ = f_f - K v_f - M dvdt_n * α_m/α_m
+        // Equivalent: solve for δ = dvdt_{n+1,new}
+        //   Let L = α_m M + α_f γ dt K
+        //   rhs = f_f - K v_f  (residual at intermediate state)
+        //   Then: M dvdt_n + K v_f = f_f  → residual r = f_f - M dvdt_n - K v_f ... wait
+        //
+        // Correct formulation (linearized residual):
+        //   M dvdt_{m} + K v_{f} = f_{f}
+        //   dvdt_{m} = dvdt_n + alpha_m * (dvdt_{n+1} - dvdt_n)
+        //   v_{f}    = v_n    + alpha_f * gamma * dt * dvdt_{n+1}
+        //
+        //  → (alpha_m M + alpha_f * gamma * dt * K) * dvdt_{n+1}
+        //    = f_f - M*(1-alpha_m)*dvdt_n - K*(v_n - alpha_f*gamma*dt*dvdt_n)
+        //    = f_f - M*dvdt_n + alpha_m * M * dvdt_n - K*v_n
+        //      wait, let's just expand directly:
+        //
+        //    = f_f - (1 - alpha_m) M dvdt_n - K (v_n + alpha_f(1-gamma)*dt * dvdt_n)
+        //    for gamma step-predictor at v_f with alpha_f * (1-gamma):
+        //    but simplest approach: residual at predictor v_f, dvdt_n
+
+        // v_f_pred = v_n  (predictor: v_f before correction)
+        let v_f_pred: Vec<f64> = v.to_vec();
+
+        // Compute K * v_f_pred
+        let mut kv = vec![0.0f64; n];
+        stiff.spmv(&v_f_pred, &mut kv);
+
+        // Compute M * dvdt_n
+        let mut m_dvdt = vec![0.0f64; n];
+        mass.spmv(&state.dvdt, &mut m_dvdt);
+
+        // rhs = f_f - (1-alpha_m) * M * dvdt_n - alpha_f * K * v_f_pred
+        // Actually the correct update equation after linearization:
+        // (alpha_m M + alpha_f * gamma * dt * K) * dvdt_{n+1}
+        //   = f_f - M*(1-alpha_m)*dvdt_n - K*v_n + (alpha_f * K * (alpha_f*gamma*dt*dvdt_n - 0))
+        // Simplified standard form:
+        // (alpha_m/dt * M + alpha_f * gamma * K) * (v_{n+1} - v_n)
+        //   = f_f - K * v_n - alpha_m/dt * M * (alpha_m/dt * dt * dvdt_n) ...
+        //
+        // Most readable form (from Jansen et al. eq. 17):
+        //   LHS * dvdt_{n+1} = f_f - (1-alpha_m) M dvdt_n - K v_f_pred
+        //   where v_f_pred uses dvdt_n with factor alpha_f*(1-gamma)... no.
+        //
+        // Use the compact form: solve for dvdt_{n+1} directly.
+        //   Intermediate: v_f = v_n + alpha_f * dt * [gamma * dvdt_{n+1} + (1-gamma) * dvdt_n]
+        //   Intermediate: dvdt_m = (1-alpha_m)*dvdt_n + alpha_m * dvdt_{n+1}
+        //
+        // Residual: R = f_f - M dvdt_m - K v_f = 0
+        //   = f_f - M[(1-alpha_m)dvdt_n + alpha_m * a]
+        //          - K[v_n + alpha_f*dt*(gamma*a + (1-gamma)*dvdt_n)]
+        //   where a = dvdt_{n+1}
+        //
+        // Solve for a:  (alpha_m M + alpha_f*gamma*dt K) a
+        //   = f_f - (1-alpha_m) M dvdt_n - K v_n - alpha_f*(1-gamma)*dt * K * dvdt_n
+
+        let mut rhs = vec![0.0f64; n];
+        let mut kv_n = vec![0.0f64; n];
+        stiff.spmv(v, &mut kv_n);
+        let mut k_dvdt = vec![0.0f64; n];
+        stiff.spmv(&state.dvdt, &mut k_dvdt);
+
+        for i in 0..n {
+            rhs[i] = f_f[i]
+                - (1.0 - alpha_m) * m_dvdt[i]
+                - kv_n[i]
+                - alpha_f * (1.0 - gamma) * dt * k_dvdt[i];
+        }
+
+        // Build LHS: alpha_m * M + alpha_f * gamma * dt * K
+        let lhs = build_effective_stiffness(mass, stiff, alpha_f * gamma * dt);
+        let mut lhs_bc = lhs;
+
+        // Apply Dirichlet BCs
+        for &d in bc_dofs {
+            let d = d as usize;
+            lhs_bc.apply_dirichlet_row_zeroing(d, 0.0, &mut rhs);
+            rhs[d] = 0.0;
+        }
+
+        // Solve for dvdt_{n+1}
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let mut dvdt_new = vec![0.0f64; n];
+        let mut lhs_scaled = {
+            // Need (alpha_m * M + ...) — build_effective_stiffness builds M + α K
+            // but we need alpha_m * M + alpha_f * gamma * dt * K
+            // Rebuild properly:
+            use fem_linalg::CooMatrix;
+            let mut coo = CooMatrix::<f64>::new(n, n);
+            for i in 0..mass.nrows {
+                for ptr in mass.row_ptr[i]..mass.row_ptr[i+1] {
+                    coo.add(i, mass.col_idx[ptr] as usize, alpha_m * mass.values[ptr]);
+                }
+            }
+            for i in 0..stiff.nrows {
+                for ptr in stiff.row_ptr[i]..stiff.row_ptr[i+1] {
+                    coo.add(i, stiff.col_idx[ptr] as usize, alpha_f * gamma * dt * stiff.values[ptr]);
+                }
+            }
+            coo.into_csr()
+        };
+
+        // Apply BCs to lhs_scaled
+        for &d in bc_dofs {
+            let d_usize = d as usize;
+            lhs_scaled.apply_dirichlet_row_zeroing(d_usize, 0.0, &mut rhs);
+        }
+
+        solve_gmres(&lhs_scaled, &rhs, &mut dvdt_new, 30, &cfg)
+            .expect("GeneralizedAlpha: linear solve failed");
+
+        // Correct: v_{n+1} = v_n + dt * [gamma * dvdt_{n+1} + (1-gamma) * dvdt_n]
+        for i in 0..n {
+            v[i] += dt * (gamma * dvdt_new[i] + (1.0 - gamma) * state.dvdt[i]);
+        }
+
+        // Apply Dirichlet BCs to v
+        for &d in bc_dofs {
+            let d = d as usize;
+            v[d] = 0.0;
+            dvdt_new[d] = 0.0;
+        }
+
+        state.dvdt = dvdt_new;
+        let _ = v_f; // suppress unused warning from intermediate
+    }
+}
+
+// ─── IMEX-ARK3(2)4L[2]SA ─────────────────────────────────────────────────────
+
+/// IMEX-ARK3(2)4L[2]SA integrator (Kennedy & Carpenter, 2003).
+///
+/// Integrates the split system:
+/// ```text
+///   du/dt = f_E(t, u) + f_I(t, u)
+/// ```
+/// where `f_E` is the non-stiff explicit part and `f_I` is the stiff implicit part.
+///
+/// This is the pure-Rust equivalent of Palace's ARKODE/CVODE transient path.
+/// Unconditionally stable implicit stages; adaptive step via PI controller.
+///
+/// Butcher tables: ARK3(2)4L[2]SA from Kennedy & Carpenter 2003, Table 2/3.
+/// 4 stages, 3rd-order accurate (embedded 2nd-order for error estimate).
+pub struct ImexArk3 {
+    /// Relative tolerance for step control.
+    pub rtol: f64,
+    /// Absolute tolerance.
+    pub atol: f64,
+    /// Minimum step size.
+    pub dt_min: f64,
+    /// Maximum step size.
+    pub dt_max: f64,
+}
+
+impl Default for ImexArk3 {
+    fn default() -> Self {
+        ImexArk3 { rtol: 1e-4, atol: 1e-8, dt_min: 1e-14, dt_max: 1.0 }
+    }
+}
+
+// ARK3(2)4L[2]SA implicit Butcher tableau A^I (lower triangular, diagonal = γ)
+// Kennedy & Carpenter 2003, Table 2
+const ARK_GAMMA: f64 = 1767732205903.0 / 4055673282236.0; // diagonal entry ≈ 0.4358665
+
+const ARK_AI: [[f64; 4]; 4] = [
+    [0.0, 0.0, 0.0, 0.0],
+    [ARK_GAMMA, ARK_GAMMA, 0.0, 0.0],
+    [2746238789719.0 / 10658868560708.0, -640167445237.0 / 6845629431997.0, ARK_GAMMA, 0.0],
+    [
+        1471266399579.0 / 7840856788654.0,
+        -4482444167858.0 / 7529755066697.0,
+        11266239266428.0 / 11593286722821.0,
+        ARK_GAMMA,
+    ],
+];
+
+// 3rd-order solution weights b^I (= b^E by construction of L-stable pairs)
+const ARK_BI: [f64; 4] = [
+    1471266399579.0 / 7840856788654.0,
+    -4482444167858.0 / 7529755066697.0,
+    11266239266428.0 / 11593286722821.0,
+    ARK_GAMMA,
+];
+
+// 2nd-order embedded weights b̂^I for error estimate
+const ARK_BI_HAT: [f64; 4] = [
+    2756255671327.0 / 12835298489170.0,
+    -10771552573575.0 / 22201958757719.0,
+    9247589265047.0 / 10645013368117.0,
+    2193209047091.0 / 5459859503100.0,
+];
+
+// Explicit Butcher tableau A^E (strictly lower triangular)
+// Kennedy & Carpenter 2003, Table 3
+const ARK_AE: [[f64; 4]; 4] = [
+    [0.0, 0.0, 0.0, 0.0],
+    [1767732205903.0 / 2027836641118.0, 0.0, 0.0, 0.0],
+    [5535828885825.0 / 10492691773637.0, 788022342437.0 / 10882634858940.0, 0.0, 0.0],
+    [
+        6485989280629.0 / 16251701735622.0,
+        -4246266847089.0 / 9704473918619.0,
+        10755448449292.0 / 10357097424841.0,
+        0.0,
+    ],
+];
+
+// Abscissae c (implicit; explicit uses same)
+const ARK_C: [f64; 4] = [
+    0.0,
+    1767732205903.0 / 2027836641118.0,
+    3.0 / 5.0,
+    1.0,
+];
+
+impl ImexArk3 {
+    /// Integrate from `t0` to `t_end` with initial step `dt`.
+    ///
+    /// `rhs_explicit(t, u, out)` computes the non-stiff part.
+    /// `rhs_implicit(t, u, out)` computes the stiff part.
+    /// `jac_implicit(t, u)` returns a CSR approximation to ∂f_I/∂u.
+    ///
+    /// Returns `(t_final, dt_last)`.
+    pub fn integrate<FE, FI, J>(
+        &self,
+        t0:       f64,
+        t_end:    f64,
+        u:        &mut [f64],
+        mut dt:   f64,
+        rhs_explicit: FE,
+        rhs_implicit: FI,
+        jac_implicit: J,
+    ) -> (f64, f64)
+    where
+        FE: Fn(f64, &[f64], &mut [f64]),
+        FI: Fn(f64, &[f64], &mut [f64]),
+        J:  Fn(f64, &[f64]) -> CsrMatrix<f64>,
+    {
+        let n = u.len();
+        let mut t = t0;
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+
+        let mut ki_e = vec![vec![0.0f64; n]; 4]; // explicit stage values
+        let mut ki_i = vec![vec![0.0f64; n]; 4]; // implicit stage values
+
+        while t < t_end {
+            dt = dt.min(t_end - t).max(self.dt_min);
+
+            let mut u_stage = vec![vec![0.0f64; n]; 4];
+
+            // Stage 0: k_0^E = f_E(t, u),  k_0^I = f_I(t, u) (explicit 1st stage)
+            rhs_explicit(t + ARK_C[0] * dt, u, &mut ki_e[0]);
+            rhs_implicit(t + ARK_C[0] * dt, u, &mut ki_i[0]);
+            u_stage[0] = u.to_vec();
+
+            let mut accept = false;
+            let mut err_norm = 2.0; // force at least one iteration
+
+            // Stages 1..3
+            for s in 1..4 {
+                // Explicit predictor: U_s = u + dt * Σ_{j<s} A^E_{sj} k^E_j
+                //                              + dt * Σ_{j<s} A^I_{sj} k^I_j
+                let mut u_s = u.to_vec();
+                for j in 0..s {
+                    for i in 0..n {
+                        u_s[i] += dt * ARK_AE[s][j] * ki_e[j][i];
+                        u_s[i] += dt * ARK_AI[s][j] * ki_i[j][i];
+                    }
+                }
+
+                // Implicit solve for k^I_s:
+                //   u_s_full = u_s + dt * A^I_{ss} * k^I_s
+                //   k^I_s = f_I(t + c_s dt, u_s_full)
+                //   → (I - dt * A^I_{ss} * J) k^I_s = f_I(t + c_s dt, u_s)
+                let t_s = t + ARK_C[s] * dt;
+                let aii = ARK_AI[s][s]; // diagonal = ARK_GAMMA
+                let jac_s = jac_implicit(t_s, &u_s);
+                let lhs_s = identity_minus_dt_jac(&jac_s, dt * aii);
+                let mut fi_s = vec![0.0f64; n];
+                rhs_implicit(t_s, &u_s, &mut fi_s);
+
+                let mut k_i_s = vec![0.0f64; n];
+                solve_gmres(&lhs_s, &fi_s, &mut k_i_s, 30, &cfg)
+                    .expect("ImexArk3: implicit stage solve failed");
+                ki_i[s] = k_i_s;
+
+                // Correct u_s with implicit stage
+                for i in 0..n {
+                    u_s[i] += dt * aii * ki_i[s][i];
+                }
+                u_stage[s] = u_s.clone();
+
+                // Explicit stage at corrected u_s
+                rhs_explicit(t_s, &u_s, &mut ki_e[s]);
+            }
+
+            // 3rd-order solution
+            let mut u3 = u.to_vec();
+            for s in 0..4 {
+                for i in 0..n {
+                    u3[i] += dt * ARK_BI[s] * (ki_e[s][i] + ki_i[s][i]);
+                }
+            }
+
+            // 2nd-order embedded solution for error estimate
+            let mut u2 = u.to_vec();
+            for s in 0..4 {
+                for i in 0..n {
+                    u2[i] += dt * ARK_BI_HAT[s] * (ki_e[s][i] + ki_i[s][i]);
+                }
+            }
+
+            // Error norm: ‖u3 - u2‖ / (atol + rtol * max(|u3|, |u2|))
+            err_norm = (0..n).map(|i| {
+                let e = u3[i] - u2[i];
+                let sc = self.atol + self.rtol * u[i].abs().max(u3[i].abs());
+                (e / sc).powi(2)
+            }).sum::<f64>().sqrt() / (n as f64).sqrt();
+
+            if err_norm <= 1.0 || dt <= self.dt_min {
+                // Accept step
+                u.copy_from_slice(&u3);
+                t += dt;
+                accept = true;
+            }
+
+            // PI controller for next step size
+            if err_norm > 0.0 {
+                let factor = (0.9 / err_norm).powf(1.0 / 3.0); // order p=3
+                dt *= factor.min(5.0).max(0.1);
+            } else {
+                dt *= 5.0;
+            }
+            dt = dt.min(self.dt_max).max(self.dt_min);
+
+            let _ = accept; // used implicitly via loop structure
+        }
+        (t, dt)
+    }
+}
+
 /// Build S = M + α K  as a CsrMatrix.
 fn build_effective_stiffness(mass: &CsrMatrix<f64>, stiff: &CsrMatrix<f64>, alpha: f64) -> CsrMatrix<f64> {
     let n = mass.nrows;
@@ -736,6 +1169,121 @@ mod tests {
         let exact = (omega * t_end).cos();
         let err = (u[0] - exact).abs();
         assert!(err < 0.01, "Newmark free vibration error={err:.4e} (exact={exact:.4})");
+    }
+
+    #[test]
+    fn generalized_alpha_exp_decay() {
+        // du/dt = -λ u  →  u(t) = exp(-λt).
+        // Test with GeneralizedAlpha: unconditionally stable, should converge.
+        use fem_linalg::CooMatrix;
+        let lambda = 10.0_f64;
+        let n = 1;
+        let mut m_coo = CooMatrix::<f64>::new(n, n);
+        m_coo.add(0, 0, 1.0);
+        let mass = m_coo.into_csr();
+
+        let mut k_coo = CooMatrix::<f64>::new(n, n);
+        k_coo.add(0, 0, lambda);
+        let stiff = k_coo.into_csr();
+
+        // f(t) = 0 for pure decay: M dv/dt + K v = 0
+        let force_fn = |_t: f64| vec![0.0f64];
+
+        let solver = GeneralizedAlpha::default(); // rho_inf = 0.5
+        let mut v = vec![1.0_f64];
+        let mut state = GeneralizedAlphaState::new(n);
+        // Initialize dvdt_0 = -λ v_0 = -λ (from M^{-1} * (-K v_0))
+        state.dvdt[0] = -lambda;
+
+        let dt = 0.1_f64;
+        let t_end = 1.0_f64;
+        let mut t = 0.0_f64;
+        while t < t_end - 1e-14 {
+            let h = dt.min(t_end - t);
+            solver.step(&mass, &stiff, &force_fn, h, t, &mut v, &mut state, &[]);
+            t += h;
+        }
+
+        let exact = (-lambda * t_end).exp();
+        let err = (v[0] - exact).abs();
+        assert!(err < 0.01, "GeneralizedAlpha exp decay error={err:.3e} (exact={exact:.6})");
+    }
+
+    #[test]
+    fn generalized_alpha_stiff_stable() {
+        // du/dt = -1000 u.  Explicit would need dt < 2e-3; GeneralizedAlpha is unconditionally stable.
+        use fem_linalg::CooMatrix;
+        let lambda = 1000.0_f64;
+        let n = 1;
+        let mut m_coo = CooMatrix::<f64>::new(n, n);
+        m_coo.add(0, 0, 1.0);
+        let mass = m_coo.into_csr();
+
+        let mut k_coo = CooMatrix::<f64>::new(n, n);
+        k_coo.add(0, 0, lambda);
+        let stiff = k_coo.into_csr();
+
+        let force_fn = |_t: f64| vec![0.0f64];
+
+        let solver = GeneralizedAlpha::default();
+        let mut v = vec![1.0_f64];
+        let mut state = GeneralizedAlphaState::new(n);
+        state.dvdt[0] = -lambda;
+
+        let dt = 0.1_f64; // huge step — explicit would blow up
+        let t_end = 1.0_f64;
+        let mut t = 0.0_f64;
+        while t < t_end - 1e-14 {
+            let h = dt.min(t_end - t);
+            solver.step(&mass, &stiff, &force_fn, h, t, &mut v, &mut state, &[]);
+            t += h;
+        }
+        assert!(v[0].abs() < 0.01, "GeneralizedAlpha stiff: did not decay; u={:.3e}", v[0]);
+    }
+
+    #[test]
+    fn imex_ark3_non_stiff_decay() {
+        // du/dt = -u  (f_E = 0, f_I = -u).  Exact: exp(-t).
+        // Tests that the implicit part alone integrates correctly.
+        let lambda = 1.0_f64;
+        let n = 1;
+        let f_explicit = |_t: f64, _u: &[f64], out: &mut [f64]| { out[0] = 0.0; };
+        let f_implicit = move |_t: f64, u: &[f64], out: &mut [f64]| { out[0] = -lambda * u[0]; };
+        let jac_implicit = move |_t: f64, _u: &[f64]| {
+            use fem_linalg::CooMatrix;
+            let mut coo = CooMatrix::<f64>::new(n, n);
+            coo.add(0, 0, -lambda);
+            coo.into_csr()
+        };
+
+        let solver = ImexArk3 { rtol: 1e-6, atol: 1e-8, ..Default::default() };
+        let mut u = vec![1.0_f64];
+        let (t_final, _) = solver.integrate(0.0, 1.0, &mut u, 0.1, f_explicit, f_implicit, jac_implicit);
+
+        let exact = (-lambda * t_final).exp();
+        let err = (u[0] - exact).abs();
+        assert!(err < 1e-3, "ImexArk3 decay error={err:.3e} (exact={exact:.6})");
+    }
+
+    #[test]
+    fn imex_ark3_adaptive_step() {
+        // u' = -100 u (stiff), starting dt=0.1 should adapt.  Check final value is correct.
+        let lambda = 100.0_f64;
+        let f_e = |_t: f64, _u: &[f64], out: &mut [f64]| { out[0] = 0.0; };
+        let f_i = move |_t: f64, u: &[f64], out: &mut [f64]| { out[0] = -lambda * u[0]; };
+        let jac = move |_t: f64, _u: &[f64]| {
+            use fem_linalg::CooMatrix;
+            let mut coo = CooMatrix::<f64>::new(1, 1);
+            coo.add(0, 0, -lambda);
+            coo.into_csr()
+        };
+
+        let solver = ImexArk3::default();
+        let mut u = vec![1.0_f64];
+        let (t_f, _) = solver.integrate(0.0, 0.1, &mut u, 0.01, f_e, f_i, jac);
+
+        let exact = (-lambda * t_f).exp();
+        assert!((u[0] - exact).abs() < 0.01, "ImexArk3 adaptive: u={:.4e}, exact={exact:.4e}", u[0]);
     }
 
     /// Heat equation: du/dt = -λ u (modal decomposition of Laplacian).
