@@ -35,7 +35,7 @@
 
 use crate::coefficient::{CoeffCtx, ScalarCoeff};
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, lagrange::{TetP1, TriP1, TriP2}};
+use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TriP1, TriP2, TriP3}};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
@@ -279,7 +279,9 @@ fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriP2),
+        (ElementType::Tri3, 3) => Box::new(TriP3),
         (ElementType::Tet4, 1) => Box::new(TetP1),
+        (ElementType::Tet4, 2) => Box::new(TetP2),
         _ => panic!("partial ref_elem: unsupported ({et:?}, {order})"),
     }
 }

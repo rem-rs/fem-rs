@@ -14,6 +14,7 @@
 //! | [`TriP1`] | unit triangle   | 3    |
 //! | [`TriP2`] | unit triangle   | 6    |
 //! | [`TetP1`] | unit tet        | 4    |
+//! | [`TetP2`] | unit tet        | 10   |
 //! | [`QuadQ1`]| [-1,1]²         | 4    |
 //! | [`HexQ1`] | [-1,1]³         | 8    |
 //!
@@ -36,7 +37,7 @@ pub mod nedelec;
 pub mod raviart_thomas;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
-pub use lagrange::{HexQ1, QuadQ1, SegP1, SegP2, TetP1, TriP1, TriP2, TriP3};
+pub use lagrange::{HexQ1, QuadQ1, SegP1, SegP2, TetP1, TetP2, TriP1, TriP2, TriP3};
 pub use nedelec::{TriND1, TetND1};
 pub use raviart_thomas::{TriRT0, TetRT0};
 

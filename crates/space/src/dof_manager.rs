@@ -90,13 +90,20 @@ impl DofManager {
     /// Currently supports:
     /// - Any mesh with `order = 1` (vertex DOFs), including mixed-element meshes.
     /// - 2-D triangular meshes (`Tri3`) with `order = 2` or `order = 3`.
+    /// - 3-D tetrahedral meshes (`Tet4`) with `order = 2`.
     ///
     /// # Panics
-    /// Panics if `order > 3` or if `order = 2,3` is requested on a non-triangular mesh.
+    /// Panics if `order > 3` or if `order = 2,3` is requested on an unsupported mesh type.
     pub fn new<M: MeshTopology>(mesh: &M, order: u8) -> Self {
         match order {
             1 => Self::build_p1(mesh),
-            2 => Self::build_p2(mesh),
+            2 => {
+                if mesh.dim() == 3 {
+                    Self::build_p2_tet(mesh)
+                } else {
+                    Self::build_p2(mesh)
+                }
+            }
             3 => Self::build_p3(mesh),
             _ => panic!("DofManager: order {order} not supported (max 3)"),
         }
@@ -356,6 +363,85 @@ impl DofManager {
             edge_dof_map: HashMap::new(),
             edge_dof2_map: edge2_map,
             bubble_dof_start,
+        }
+    }
+
+    // ─── P2 (3-D Tet) ─────────────────────────────────────────────────────────
+
+    fn build_p2_tet<M: MeshTopology>(mesh: &M) -> Self {
+        let n_nodes  = mesh.n_nodes();
+        let n_elems  = mesh.n_elements();
+        let dim      = mesh.dim() as usize;
+        assert_eq!(dim, 3, "build_p2_tet requires a 3-D mesh");
+
+        // DOF layout per element (10):
+        //   0,1,2,3  → vertex DOFs (node IDs)
+        //   4        → edge(n0→n1) midpoint
+        //   5        → edge(n0→n2) midpoint
+        //   6        → edge(n0→n3) midpoint
+        //   7        → edge(n1→n2) midpoint
+        //   8        → edge(n1→n3) midpoint
+        //   9        → edge(n2→n3) midpoint
+        //
+        // Edge order matches TetP2 dof_coords() ordering.
+
+        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
+        let mut next_edge_dof = n_nodes as DofId;
+
+        let dofs_per_elem = 10;
+        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
+
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            assert!(ns.len() >= 4, "TetP2 requires 4-node tetrahedra");
+            let (n0, n1, n2, n3) = (ns[0], ns[1], ns[2], ns[3]);
+
+            let base = e as usize * dofs_per_elem;
+            // Vertex DOFs
+            dofs_flat[base]     = n0;
+            dofs_flat[base + 1] = n1;
+            dofs_flat[base + 2] = n2;
+            dofs_flat[base + 3] = n3;
+
+            // Edge DOFs (6 edges of a tet)
+            let edges = [(n0, n1), (n0, n2), (n0, n3), (n1, n2), (n1, n3), (n2, n3)];
+            for (k, &(a, b)) in edges.iter().enumerate() {
+                let key = EdgeKey::new(a, b);
+                let dof = *edge_map.entry(key).or_insert_with(|| {
+                    let d = next_edge_dof;
+                    next_edge_dof += 1;
+                    d
+                });
+                dofs_flat[base + 4 + k] = dof;
+            }
+        }
+
+        let n_dofs = next_edge_dof as usize;
+
+        // Build DOF coordinates: vertices then edge midpoints.
+        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+
+        for n in 0..n_nodes as u32 {
+            let c = mesh.node_coords(n);
+            let base = n as usize * dim;
+            dof_coords[base .. base + dim].copy_from_slice(c);
+        }
+
+        for (&EdgeKey(a, b), &dof_id) in &edge_map {
+            let ca = mesh.node_coords(a);
+            let cb = mesh.node_coords(b);
+            let base = dof_id as usize * dim;
+            for d in 0..dim {
+                dof_coords[base + d] = 0.5 * (ca[d] + cb[d]);
+            }
+        }
+
+        DofManager {
+            order: 2, n_dofs, dofs_flat, dofs_per_elem,
+            elem_dof_offsets: None, dof_coords, dim,
+            n_vertex_dofs: n_nodes, edge_dof_map: edge_map,
+            edge_dof2_map: HashMap::new(),
+            bubble_dof_start: n_dofs,
         }
     }
 }

@@ -72,24 +72,31 @@ pub fn boundary_dofs(
     // This is correct for all orders — using vertex heuristics is wrong because
     // an interior edge can have both endpoints on the boundary (e.g., the short
     // diagonal of a corner triangle element in a structured mesh).
+    // In 2D: boundary face = edge (2 nodes) → 1 edge.
+    // In 3D: boundary face = triangle (3 nodes) → 3 edges.
     let mut boundary_edges: std::collections::HashSet<EdgeKey> = std::collections::HashSet::new();
     for f in 0..mesh.n_boundary_faces() as u32 {
         if tags.contains(&mesh.face_tag(f)) {
             let nodes = mesh.face_nodes(f);
-            if nodes.len() >= 2 {
+            if nodes.len() == 2 {
+                // 2D: face is a line segment
                 boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
+            } else if nodes.len() >= 3 {
+                // 3D: face is a triangle — add all 3 edges
+                boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
+                boundary_edges.insert(EdgeKey::new(nodes[1], nodes[2]));
+                boundary_edges.insert(EdgeKey::new(nodes[0], nodes[2]));
             }
         }
     }
 
-    // For P2, also include edge-midpoint DOFs on actual boundary edges.
-    if dm.order == 2 {
+    // For P2 in 2D: include edge-midpoint DOFs on actual boundary edges.
+    // Edge DOF positions in the element: (v0,v1)→dofs[3], (v1,v2)→dofs[4], (v0,v2)→dofs[5]
+    if dm.order == 2 && mesh.dim() == 2 {
         let n_elems = dm.dofs_flat.len() / dm.dofs_per_elem;
         for e in 0..n_elems as u32 {
             let dofs  = dm.element_dofs(e);
             let nodes = mesh.element_nodes(e);
-            // Vertex DOFs are at positions 0,1,2; edge DOFs at 3,4,5.
-            // Edge mapping: edge(v0→v1)=dofs[3], edge(v1→v2)=dofs[4], edge(v0→v2)=dofs[5]
             let edge_pairs = [
                 (nodes[0], nodes[1], dofs[3]),
                 (nodes[1], nodes[2], dofs[4]),
@@ -99,6 +106,17 @@ pub fn boundary_dofs(
                 if boundary_edges.contains(&EdgeKey::new(a, b)) {
                     dof_set.insert(edge_dof);
                 }
+            }
+        }
+    }
+
+    // For P2 in 3D (TetP2): use edge_dof_map to find edge midpoint DOFs.
+    // Edge DOF positions in the element: (v0,v1)→4, (v0,v2)→5, (v0,v3)→6,
+    //                                    (v1,v2)→7, (v1,v3)→8, (v2,v3)→9
+    if dm.order == 2 && mesh.dim() == 3 {
+        for (&edge_key, &dof_id) in &dm.edge_dof_map {
+            if boundary_edges.contains(&edge_key) {
+                dof_set.insert(dof_id);
             }
         }
     }

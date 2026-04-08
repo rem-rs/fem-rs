@@ -15,6 +15,7 @@ use fem_core::types::DofId;
 use fem_linalg::Vector;
 use fem_mesh::topology::MeshTopology;
 
+use crate::dof_manager::EdgeKey;
 use crate::fe_space::{FESpace, SpaceType};
 
 /// Trace of H¹ on the mesh boundary.
@@ -41,12 +42,15 @@ pub struct H1TraceSpace<M: MeshTopology> {
 }
 
 impl<M: MeshTopology> H1TraceSpace<M> {
-    /// Build an H¹ trace space of order 1 on the boundary faces of `mesh`.
+    /// Build an H¹ trace space of order 1 or 2 on the boundary faces of `mesh`.
+    ///
+    /// - P1 trace (`order = 1`): one DOF per boundary vertex.
+    /// - P2 trace (`order = 2`): one DOF per boundary vertex + one per boundary edge midpoint.
     ///
     /// # Panics
-    /// Panics if `order != 1` (P2 trace not yet implemented).
+    /// Panics if `order > 2` (P3 trace not yet implemented).
     pub fn new(mesh: M, order: u8) -> Self {
-        assert_eq!(order, 1, "H1TraceSpace: only order 1 supported for now");
+        assert!(order <= 2, "H1TraceSpace: only order 1 and 2 supported, got {order}");
         let dim = mesh.dim() as usize;
         let n_bfaces = mesh.n_boundary_faces();
 
@@ -58,7 +62,7 @@ impl<M: MeshTopology> H1TraceSpace<M> {
             }
         }
 
-        // Map mesh node → trace DOF
+        // Map mesh node → trace DOF (vertex DOFs 0..n_vertex_dofs)
         let n_nodes = mesh.n_nodes();
         let mut node_to_dof = vec![u32::MAX; n_nodes];
         let mut dof_coords = Vec::new();
@@ -69,15 +73,71 @@ impl<M: MeshTopology> H1TraceSpace<M> {
             dof_coords.extend_from_slice(&c[..dim]);
             next_dof += 1;
         }
+
+        // For P2: also assign DOFs for boundary edge midpoints.
+        // Map EdgeKey → trace DOF for edge midpoints.
+        let mut edge_to_dof: std::collections::HashMap<EdgeKey, DofId> = std::collections::HashMap::new();
+        if order == 2 {
+            // Collect all unique edges from boundary faces.
+            // In 2D: each face is an edge (2 nodes) → 1 edge.
+            // In 3D: each face is a triangle (3 nodes) → 3 edges.
+            for f in 0..n_bfaces as u32 {
+                let nodes = mesh.face_nodes(f);
+                let edges: Vec<(u32, u32)> = if nodes.len() == 2 {
+                    vec![(nodes[0], nodes[1])]
+                } else {
+                    vec![(nodes[0], nodes[1]), (nodes[1], nodes[2]), (nodes[0], nodes[2])]
+                };
+                for (a, b) in edges {
+                    let key = EdgeKey::new(a, b);
+                    edge_to_dof.entry(key).or_insert_with(|| {
+                        let d = next_dof;
+                        next_dof += 1;
+                        // Midpoint coordinates
+                        let ca = mesh.node_coords(key.0);
+                        let cb = mesh.node_coords(key.1);
+                        for d in 0..dim {
+                            dof_coords.push(0.5 * (ca[d] + cb[d]));
+                        }
+                        d
+                    });
+                }
+            }
+        }
+
         let n_dofs = next_dof as usize;
 
-        // Build per-face DOF connectivity
-        let dofs_per_face = mesh.face_nodes(0).len(); // P1: nodes per face
+        // Build per-face DOF connectivity.
+        // P1 in 2D: 2 DOFs/face; P1 in 3D: 3 DOFs/face.
+        // P2 in 2D: 3 DOFs/face (2 verts + 1 edge midpoint).
+        // P2 in 3D: 6 DOFs/face (3 verts + 3 edge midpoints).
+        let dofs_per_face = if order == 1 {
+            mesh.face_nodes(0).len()
+        } else {
+            // P2: vertices + edge midpoints per face
+            let n_verts_per_face = mesh.face_nodes(0).len();
+            let n_edges_per_face = if n_verts_per_face == 2 { 1 } else { 3 };
+            n_verts_per_face + n_edges_per_face
+        };
+
         let mut face_dofs = Vec::with_capacity(n_bfaces * dofs_per_face);
         for f in 0..n_bfaces as u32 {
             let nodes = mesh.face_nodes(f);
+            // Vertex DOFs first.
             for &n in nodes {
                 face_dofs.push(node_to_dof[n as usize]);
+            }
+            // Edge midpoint DOFs (P2 only).
+            if order == 2 {
+                let edges: Vec<(u32, u32)> = if nodes.len() == 2 {
+                    vec![(nodes[0], nodes[1])]
+                } else {
+                    vec![(nodes[0], nodes[1]), (nodes[1], nodes[2]), (nodes[0], nodes[2])]
+                };
+                for (a, b) in edges {
+                    let key = EdgeKey::new(a, b);
+                    face_dofs.push(*edge_to_dof.get(&key).expect("edge midpoint DOF not found"));
+                }
             }
         }
 
@@ -186,6 +246,29 @@ mod tests {
         // Node at (1/3, 1/3) should not be on boundary for a 3×3 mesh
         // All corner nodes should map to Some
         assert!(space.node_to_trace_dof(0).is_some(), "corner node 0 should be on boundary");
+    }
+
+    #[test]
+    fn h1_trace_p2_2d_dof_count() {
+        // n=4 mesh: boundary nodes = 16, boundary edges = 16 (perimeter edges of 4×4 grid)
+        // P2 trace DOFs = 16 + 16 = 32
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = H1TraceSpace::new(mesh, 2);
+        // 16 boundary vertices + 16 boundary edge midpoints = 32
+        assert_eq!(space.n_dofs(), 32, "P2 trace n=4: expected 32 DOFs");
+    }
+
+    #[test]
+    fn h1_trace_p2_2d_face_dofs() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let space = H1TraceSpace::new(mesh, 2);
+        for f in 0..space.n_boundary_faces() as u32 {
+            let dofs = space.face_dofs(f);
+            assert_eq!(dofs.len(), 3, "2-D P2 face should have 3 DOFs");
+            for &d in dofs {
+                assert!((d as usize) < space.n_dofs(), "P2 DOF out of range");
+            }
+        }
     }
 
     #[test]

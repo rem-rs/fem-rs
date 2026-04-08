@@ -49,7 +49,7 @@ pub struct VectorH1Space<M: MeshTopology> {
 impl<M: MeshTopology> VectorH1Space<M> {
     /// Build the `dim`-component H¹ vector space over `mesh`.
     ///
-    /// `order` is the polynomial order (1 or 2) of each scalar component.
+    /// `order` is the polynomial order (1, 2, or 3) of each scalar component.
     ///
     /// The `dim` argument must match `mesh.dim()` for physical correctness,
     /// but is accepted as a parameter to allow independent testing.
