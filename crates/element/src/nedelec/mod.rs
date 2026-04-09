@@ -16,7 +16,11 @@
 //! | [`TetND1`] | tetrahedron  | 6    | 1     |
 
 pub mod tri;
+pub mod tri_nd2;
 pub mod tet;
+pub mod tet_nd2;
 
 pub use tri::TriND1;
+pub use tri_nd2::TriND2;
 pub use tet::TetND1;
+pub use tet_nd2::TetND2;

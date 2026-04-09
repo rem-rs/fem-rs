@@ -32,8 +32,8 @@ fem-rs/
 |---------|-----|--------|-------|
 | `ex1_poisson` | −Δu = f | H¹ P1, PCG+Jacobi | O(h²) verified |
 | `ex2_elasticity` | −∇·σ = f | VectorH1 P1, PCG | Working |
-| `ex3_maxwell` | ∇×∇×E + E = f | H(curl) ND1, PCG | O(h) verified |
-| `ex4_darcy` | −∇·u = f, u = −κ∇p | H(div) RT0 + L², MINRES | Working |
+| `ex3_maxwell` | ∇×∇×E + E = f | H(curl) ND1/ND2, PCG+AMS | AMS preconditioner available |
+| `ex4_darcy` | −∇·u = f, u = −κ∇p | H(div) RT0/RT1 + L², MINRES+ADS | ADS preconditioner available |
 | `ex5_mixed_darcy` | Saddle-point Darcy/Stokes | Block PGMRES | Working |
 | `ex7_neumann_mixed_bc` | −Δu = f, mixed BCs | H¹ P1, Neumann + Dirichlet | Working |
 | `ex9_dg_advection` | −Δu = f (DG) | SIP-DG P1, GMRES | O(h²) verified |
@@ -349,15 +349,15 @@ check-all  = "check --workspace --all-features"
 
 ## Implementation Status
 
-Phase 48 complete. 500+ tests passing across the workspace.
+Phase 49 complete. 515+ tests passing across the workspace.
 
 | Crate | Status | Highlights |
 |-------|--------|------------|
 | `fem-core` | ✅ Complete | Scalar traits, FemError, NodeId/DofId, coord aliases |
 | `fem-mesh` | ✅ Complete | SimplexMesh, uniform/adaptive AMR, NCMesh (Tri3+Tet4 hanging constraints), CurvedMesh P2 isoparametric, periodic mesh, bounding box |
-| `fem-element` | ✅ Complete | Lagrange P1–P3 (Seg, Tri, Tet), Q1/Q2 (Quad), Q1 (Hex); Nédélec ND1 (Tri, Tet); Raviart-Thomas RT0 (Tri, Tet); Gauss/Lobatto/Grundmann-Moller quadrature |
+| `fem-element` | ✅ Complete | Lagrange P1–P3 (Seg, Tri, Tet), Q1/Q2 (Quad), Q1 (Hex); Nédélec ND1/ND2 (Tri, Tet); Raviart-Thomas RT0/RT1 (Tri, Tet); Gauss/Lobatto/Grundmann-Moller quadrature |
 | `fem-linalg` | ✅ Complete | CsrMatrix, CooMatrix, Vector, SparsityPattern, dense LU, BlockMatrix/BlockVector, DenseTensor |
-| `fem-space` | ✅ Complete | H1Space (P1–P3), L2Space (P0/P1), VectorH1Space, HCurlSpace (ND1), HDivSpace (RT0), H1TraceSpace (P1–P3), DOF manager, hanging-node constraints |
+| `fem-space` | ✅ Complete | H1Space (P1–P3), L2Space (P0/P1), VectorH1Space, HCurlSpace (ND1/ND2), HDivSpace (RT0/RT1), H1TraceSpace (P1–P3), DOF manager, hanging-node constraints |
 | `fem-assembly` | ✅ Complete | Scalar + vector assemblers; 15+ integrators; MixedAssembler; SIP-DG; NonlinearForm + Newton; partial assembly (matrix-free); coefficient system (PWConst, GridFunction, composition) |
 | `fem-solver` | ✅ Complete | CG/PCG+Jacobi/ILU0/ILDLt, GMRES, BiCGSTAB, IDR(s), TFQMR, FGMRES; sparse direct: LU/Cholesky/LDLᵀ; LOBPCG + KrylovSchur; MINRES; Schur complement; ODE: Euler/RK4/RK45/SDIRK-2/BDF-2/Newmark-β/Generalized-α/IMEX-ARK3 |
 | `fem-amg` | ✅ Complete | SA-AMG + RS-AMG, Chebyshev smoother, V/W/F cycles, reusable hierarchy (via linger) |

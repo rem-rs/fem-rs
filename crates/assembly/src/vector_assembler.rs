@@ -7,8 +7,8 @@
 use nalgebra::DMatrix;
 
 use fem_element::reference::VectorReferenceElement;
-use fem_element::nedelec::{TriND1, TetND1};
-use fem_element::raviart_thomas::{TriRT0, TetRT0};
+use fem_element::nedelec::{TriND1, TetND1, TriND2, TetND2};
+use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TetRT1};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -17,13 +17,17 @@ use crate::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator,
 
 // ─── Reference element factory ──────────────────────────────────────────────
 
-fn vec_ref_elem(space_type: SpaceType, dim: usize) -> Box<dyn VectorReferenceElement> {
-    match (space_type, dim) {
-        (SpaceType::HCurl, 2) => Box::new(TriND1),
-        (SpaceType::HCurl, 3) => Box::new(TetND1),
-        (SpaceType::HDiv,  2) => Box::new(TriRT0),
-        (SpaceType::HDiv,  3) => Box::new(TetRT0),
-        _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, dim={dim})"),
+fn vec_ref_elem(space_type: SpaceType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
+    match (space_type, dim, order) {
+        (SpaceType::HCurl, 2, 1) => Box::new(TriND1),
+        (SpaceType::HCurl, 2, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, 3, 1) => Box::new(TetND1),
+        (SpaceType::HCurl, 3, 2) => Box::new(TetND2),
+        (SpaceType::HDiv,  2, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv,  2, 1) => Box::new(TriRT1),
+        (SpaceType::HDiv,  3, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv,  3, 1) => Box::new(TetRT1),
+        _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, dim={dim}, order={order})"),
     }
 }
 
@@ -186,8 +190,7 @@ impl VectorAssembler {
         let n_dofs = space.n_dofs();
         let stype = space.space_type();
 
-        let ref_elem = vec_ref_elem(stype, dim);
-        let n_ldofs = ref_elem.n_dofs();
+        let ref_elem = vec_ref_elem(stype, dim, space.order());        let n_ldofs = ref_elem.n_dofs();
         let quad = ref_elem.quadrature(quad_order);
 
         let curl_dim = if dim == 2 { 1 } else { 3 }; // scalar curl in 2D, vector in 3D
@@ -286,8 +289,7 @@ impl VectorAssembler {
         let n_dofs = space.n_dofs();
         let stype = space.space_type();
 
-        let ref_elem = vec_ref_elem(stype, dim);
-        let n_ldofs = ref_elem.n_dofs();
+        let ref_elem = vec_ref_elem(stype, dim, space.order());        let n_ldofs = ref_elem.n_dofs();
         let quad = ref_elem.quadrature(quad_order);
 
         let curl_dim = if dim == 2 { 1 } else { 3 };

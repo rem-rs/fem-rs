@@ -7,6 +7,7 @@ edition = "2021"
 fem-core   = { path = "../core" }
 num-traits = { workspace = true }
 bytemuck   = { workspace = true }
+linger     = { path = "../../vendor/linger", optional = true }
 
 [dev-dependencies]
 # CooMatrix is used in CSR tests
@@ -15,6 +16,7 @@ bytemuck   = { workspace = true }
 [features]
 default  = []
 parallel = ["dep:rayon"]
+direct   = ["dep:linger"]
 
 [dependencies.rayon]
 workspace = true

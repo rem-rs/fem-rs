@@ -63,10 +63,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// Construct an H(curl) space of the given order on `mesh`.
     ///
     /// # Panics
-    /// - If `order != 1` (only ND1 is currently supported).
+    /// - If `order > 2` (only ND1 and ND2 are currently supported).
     /// - If the mesh is neither 2-D triangles nor 3-D tetrahedra.
     pub fn new(mesh: M, order: u8) -> Self {
-        assert_eq!(order, 1, "HCurlSpace: only order 1 (ND1) is supported");
+        assert!(order >= 1 && order <= 2, "HCurlSpace: only orders 1 (ND1) and 2 (ND2) are supported");
         let dim = mesh.dim() as usize;
 
         let local_edges: &[(usize, usize)] = match dim {
@@ -74,7 +74,18 @@ impl<M: MeshTopology> HCurlSpace<M> {
             3 => &TET_EDGES,
             _ => panic!("HCurlSpace: unsupported dimension {dim}"),
         };
-        let dofs_per_elem = local_edges.len();
+
+        // DOFs per element:
+        //   ND1: 1 DOF per edge only
+        //   ND2: 2 DOFs per edge + interior bubble DOFs (2 for tri, 8 for tet)
+        let dofs_per_edge = order as usize;
+        let interior_dofs_per_elem = match (order, dim) {
+            (1, _) => 0,
+            (2, 2) => 2,  // TriND2: 2 interior DOFs
+            (2, 3) => 8,  // TetND2: 8 face+interior DOFs
+            _ => panic!("unsupported"),
+        };
+        let dofs_per_elem = local_edges.len() * dofs_per_edge + interior_dofs_per_elem;
         let n_elem = mesh.n_elements();
 
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
@@ -87,17 +98,30 @@ impl<M: MeshTopology> HCurlSpace<M> {
             for &(li, lj) in local_edges {
                 let (gi, gj) = (verts[li], verts[lj]);
                 let key = EdgeKey::new(gi, gj);
-
-                let dof = *edge_to_dof.entry(key).or_insert_with(|| {
-                    let d = next_dof;
-                    next_dof += 1;
-                    d
-                });
-                dofs_flat.push(dof);
-
-                // Sign: +1 if local direction matches global (min→max).
                 let sign = if gi < gj { 1.0 } else { -1.0 };
-                signs_flat.push(sign);
+
+                if dofs_per_edge == 1 {
+                    // ND1: one DOF per edge
+                    let dof = *edge_to_dof.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=1; d });
+                    dofs_flat.push(dof);
+                    signs_flat.push(sign);
+                } else {
+                    // ND2: two DOFs per edge, stored as key → first_dof (second = first+1)
+                    let first_dof = *edge_to_dof.entry(key).or_insert_with(|| {
+                        let d = next_dof; next_dof += 2; d
+                    });
+                    dofs_flat.push(first_dof);
+                    dofs_flat.push(first_dof + 1);
+                    // Both edge DOFs share the same orientation sign.
+                    signs_flat.push(sign);
+                    signs_flat.push(sign);
+                }
+            }
+            // Interior bubble DOFs (element-local, not shared)
+            for _ in 0..interior_dofs_per_elem {
+                dofs_flat.push(next_dof);
+                next_dof += 1;
+                signs_flat.push(1.0); // interior DOFs have no sign ambiguity
             }
         }
 

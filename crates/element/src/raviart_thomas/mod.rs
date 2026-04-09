@@ -15,7 +15,11 @@
 //! | [`TetRT0`]  | tetrahedron | 4    | 0     |
 
 pub mod tri;
+pub mod tri_rt1;
 pub mod tet;
+pub mod tet_rt1;
 
 pub use tri::TriRT0;
+pub use tri_rt1::TriRT1;
 pub use tet::TetRT0;
+pub use tet_rt1::TetRT1;

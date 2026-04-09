@@ -6,10 +6,17 @@
 //! - [`solve_cg`]          — Conjugate Gradient (SPD systems)
 //! - [`solve_pcg_jacobi`]  — PCG with Jacobi preconditioner
 //! - [`solve_pcg_ilu0`]    — PCG with ILU(0) preconditioner
+//! - [`solve_pcg_ildlt`]   — PCG with ILDLᵀ preconditioner
 //! - [`solve_gmres`]       — GMRES (non-symmetric systems)
 //! - [`solve_bicgstab`]    — BiCGSTAB
 //! - [`solve_idrs`]        — IDR(s) (non-symmetric, short-recurrence)
 //! - [`solve_tfqmr`]       — TFQMR (Transpose-Free QMR)
+//!
+//! ## Auxiliary-space preconditioners (Hiptmair-Xu)
+//! - [`solve_pcg_ams`]     — PCG with AMS for H(curl) (Maxwell)
+//! - [`solve_gmres_ams`]   — GMRES with AMS for H(curl)
+//! - [`solve_pcg_ads`]     — PCG with ADS for H(div) (Darcy)
+//! - [`solve_gmres_ads`]   — GMRES with ADS for H(div)
 //!
 //! ## Direct solvers
 //! - [`solve_sparse_lu`]        — Sparse LU for general systems
@@ -23,6 +30,7 @@ use linger::{
     core::scalar::Scalar as LingerScalar,
     direct::{DirectSolver, SparseLu, SparseCholesky, SparseLdlt},
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
+    precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig, AuxSpaceSolver},
     sparse::CsrMatrix as LingerCsr,
     DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, SolverParams, VerboseLevel,
 };
@@ -441,6 +449,178 @@ pub fn solve_sparse_ldlt<T: LingerScalar>(
     solver.factor(&la).map_err(|e| SolverError::Linger(e.to_string()))?;
     solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linger(e.to_string()))?;
     Ok(lx.into_vec())
+}
+
+// ─── Auxiliary-space Maxwell Solver (AMS) ────────────────────────────────────
+
+/// Configuration for AMS (Auxiliary-space Maxwell Solver) preconditioner.
+///
+/// AMS is the Hiptmair-Xu preconditioner for H(curl) problems (Maxwell).
+/// It uses a multigrid V-cycle on the auxiliary nodal space plus
+/// a stationary correction on the edge space.
+#[derive(Debug, Clone)]
+pub struct AmsSolverConfig {
+    pub inner_cfg: SolverConfig,
+    pub ams_cfg: AmsConfig,
+}
+
+impl Default for AmsSolverConfig {
+    fn default() -> Self {
+        Self {
+            inner_cfg: SolverConfig::default(),
+            ams_cfg: AmsConfig::default(),
+        }
+    }
+}
+
+/// Solve an H(curl) system using PCG with AMS preconditioner.
+///
+/// # Arguments
+/// * `a`       — H(curl) stiffness matrix (edge DOFs)
+/// * `g`       — Discrete gradient matrix (vertices -> edges)
+/// * `b`       — right-hand side
+/// * `x`       — initial guess on entry, solution on exit
+/// * `cfg`     — solver configuration
+///
+/// # Type parameters
+/// The discrete gradient `g` is passed as a linger CsrMatrix to match internal types.
+/// Convert using `fem_to_linger_csr`.
+pub fn solve_pcg_ams<T: LingerScalar>(
+    a: &FemCsr<T>,
+    g: &LingerCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    cfg: &AmsSolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+
+    let ams = AmsPrecond::<T>::new(&la, g, cfg.ams_cfg.clone())
+        .map_err(|e| SolverError::Linger(e.to_string()))?;
+
+    let res = ConjugateGradient::<T>::default()
+        .solve(&la, Some(&ams), &lb, &mut lx, &cfg.inner_cfg.to_linger())
+        .map_err(SolverError::from)?;
+
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// Solve an H(curl) system using GMRES with AMS preconditioner.
+///
+/// Use this for non-symmetric H(curl) problems (e.g., with absorbing BCs).
+pub fn solve_gmres_ams<T: LingerScalar>(
+    a: &FemCsr<T>,
+    g: &LingerCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    cfg: &AmsSolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+
+    let ams = AmsPrecond::<T>::new(&la, g, cfg.ams_cfg.clone())
+        .map_err(|e| SolverError::Linger(e.to_string()))?;
+
+    let solver = Gmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&ams), &lb, &mut lx, &cfg.inner_cfg.to_linger())
+        .map_err(SolverError::from)?;
+
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+// ─── Auxiliary-space Divergence Solver (ADS) ─────────────────────────────────
+
+/// Configuration for ADS (Auxiliary-space Divergence Solver) preconditioner.
+///
+/// ADS is the Hiptmair-Xu preconditioner for H(div) problems (Darcy flow).
+/// It combines auxiliary-space cycles on the edge space (via curl) and
+/// nodal space (via gradient) for robust H(div) preconditioning.
+#[derive(Debug, Clone)]
+pub struct AdsSolverConfig {
+    pub inner_cfg: SolverConfig,
+    pub ads_cfg: AdsConfig,
+}
+
+impl Default for AdsSolverConfig {
+    fn default() -> Self {
+        Self {
+            inner_cfg: SolverConfig::default(),
+            ads_cfg: AdsConfig::default(),
+        }
+    }
+}
+
+/// Solve an H(div) system using PCG with ADS preconditioner.
+///
+/// # Arguments
+/// * `a`       — H(div) stiffness matrix (face DOFs)
+/// * `c`       — Discrete curl matrix (edges -> faces)
+/// * `g`       — Discrete gradient matrix (vertices -> edges)
+/// * `b`       — right-hand side
+/// * `x`       — initial guess on entry, solution on exit
+/// * `cfg`     — solver configuration
+///
+/// # Notes
+/// Both `c` and `g` should be converted to linger format using `fem_to_linger_csr`.
+pub fn solve_pcg_ads<T: LingerScalar>(
+    a: &FemCsr<T>,
+    c: &LingerCsr<T>,
+    g: &LingerCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    cfg: &AdsSolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+
+    let ads = AdsPrecond::<T>::new(&la, c, g, cfg.ads_cfg.clone())
+        .map_err(|e| SolverError::Linger(e.to_string()))?;
+
+    let res = ConjugateGradient::<T>::default()
+        .solve(&la, Some(&ads), &lb, &mut lx, &cfg.inner_cfg.to_linger())
+        .map_err(SolverError::from)?;
+
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// Solve an H(div) system using GMRES with ADS preconditioner.
+///
+/// Use this for non-symmetric H(div) problems.
+pub fn solve_gmres_ads<T: LingerScalar>(
+    a: &FemCsr<T>,
+    c: &LingerCsr<T>,
+    g: &LingerCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    cfg: &AdsSolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+
+    let ads = AdsPrecond::<T>::new(&la, c, g, cfg.ads_cfg.clone())
+        .map_err(|e| SolverError::Linger(e.to_string()))?;
+
+    let solver = Gmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&ads), &lb, &mut lx, &cfg.inner_cfg.to_linger())
+        .map_err(SolverError::from)?;
+
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
 }
 
 fn check_dims<T>(a: &FemCsr<T>, b: &[T], x: &[T]) -> Result<(), SolverError> {

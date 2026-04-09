@@ -40,6 +40,6 @@ pub mod raviart_thomas;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use lagrange::{HexQ1, QuadQ1, QuadQ2, SegP1, SegP2, SegP3, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
-pub use nedelec::{TriND1, TetND1};
-pub use raviart_thomas::{TriRT0, TetRT0};
+pub use nedelec::{TriND1, TetND1, TriND2, TetND2};
+pub use raviart_thomas::{TriRT0, TetRT0, TriRT1, TetRT1};
 

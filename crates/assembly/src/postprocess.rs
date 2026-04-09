@@ -4,8 +4,8 @@
 use nalgebra::DMatrix;
 
 use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
-use fem_element::nedelec::{TetND1, TriND1};
-use fem_element::raviart_thomas::{TetRT0, TriRT0};
+use fem_element::nedelec::{TetND1, TriND1, TetND2, TriND2};
+use fem_element::raviart_thomas::{TetRT0, TriRT0, TetRT1, TriRT1};
 use fem_element::reference::VectorReferenceElement;
 use fem_element::ReferenceElement;
 use fem_mesh::element_type::ElementType;
@@ -27,13 +27,17 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
     }
 }
 
-fn vec_ref_elem(space_type: SpaceType, dim: usize) -> Box<dyn VectorReferenceElement> {
-    match (space_type, dim) {
-        (SpaceType::HCurl, 2) => Box::new(TriND1),
-        (SpaceType::HCurl, 3) => Box::new(TetND1),
-        (SpaceType::HDiv, 2) => Box::new(TriRT0),
-        (SpaceType::HDiv, 3) => Box::new(TetRT0),
-        _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, dim={dim})"),
+fn vec_ref_elem(space_type: SpaceType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
+    match (space_type, dim, order) {
+        (SpaceType::HCurl, 2, 1) => Box::new(TriND1),
+        (SpaceType::HCurl, 2, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, 3, 1) => Box::new(TetND1),
+        (SpaceType::HCurl, 3, 2) => Box::new(TetND2),
+        (SpaceType::HDiv, 2, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv, 2, 1) => Box::new(TriRT1),
+        (SpaceType::HDiv, 3, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv, 3, 1) => Box::new(TetRT1),
+        _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, dim={dim}, order={order})"),
     }
 }
 
@@ -289,7 +293,7 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
     let dim = mesh.dim() as usize;
     let stype = space.space_type();
 
-    let ref_elem = vec_ref_elem(stype, dim);
+    let ref_elem = vec_ref_elem(stype, dim, space.order());
     let n_ldofs = ref_elem.n_dofs();
     let curl_dim = if dim == 2 { 1 } else { 3 };
 
@@ -363,7 +367,7 @@ pub fn compute_element_divergence<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<f6
     let dim = mesh.dim() as usize;
     let stype = space.space_type();
 
-    let ref_elem = vec_ref_elem(stype, dim);
+    let ref_elem = vec_ref_elem(stype, dim, space.order());
     let n_ldofs = ref_elem.n_dofs();
 
     let mut result = Vec::with_capacity(mesh.n_elements());

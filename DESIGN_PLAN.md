@@ -51,12 +51,14 @@
 | 37 | parallel + wasm | ✅ Done | 2026-04-05 | WASM multi-Worker + streaming mesh partition: WorkerInitMsg::from_jsmpi_env(), spawn_async()+WasmJob, MeshPartition::from_raw(), binary mesh_serde (encode/decode), partition_simplex_streaming() (rank 0 distributes sub-meshes via send/recv), extract_submesh_for_rank() refactor, WasmParSolver + jsmpi_main entry point, wasm-parallel feature; 13 new tests |
 | 38 | parallel | ✅ Done | 2026-04-05 | METIS streaming partition + pex1 CLI: extract_submesh_from_partition(elem_part) generalized extractor, partition_simplex_metis_streaming(), metis.rs refactored to shared extractor (−80 lines duplication), pex1 enhanced with --n/--ranks/--metis/--streaming flags; 3 new tests |
 | 48 | element+space+assembly+solver+io | ✅ Done | 2026-04-09 | linger submodule update: sparse direct solvers (SparseLu/SparseCholesky/SparseLdlt), IDR(s), TFQMR, ILDLt precond, KrylovSchur eigen, Matrix Market I/O; higher-order elements TriP3/TetP2/TetP3/QuadQ2 registered across all assemblers; H1TraceSpace P2/P3 support; Grundmann-Moller quadrature corrected via linear system solve; 8 new solver tests, 2 io tests |
+| 49 | element+space+assembly | ✅ Done | 2026-04-09 | TriND2/TetND2 (Nédélec-I order 2, 8/20 DOFs, Vandermonde inversion, linear curl verified); TriRT1/TetRT1 (Raviart-Thomas order 1, 8/15 DOFs, nodal basis verified); HCurlSpace/HDivSpace relaxed to support orders 1/2 and 0/1 (multiple DOFs per edge/face + interior bubble DOFs); VectorAssembler+postprocess factory updated to dispatch on space.order(); 15 new element tests |
+| 50 | solver+linalg | ✅ Done | 2026-04-09 | linger submodule update (rem-rs/linger): AMS (Auxiliary-space Maxwell Solver) for H(curl), ADS (Auxiliary-space Divergence Solver) for H(div), BlrMatrix/BlrBlock (Block Low-Rank compression); fem-solver: solve_pcg_ams, solve_gmres_ams, solve_pcg_ads, solve_gmres_ads; fem-linalg: re-export BlrMatrix, BlrBlock, compress_block, compress_block_adaptive under "direct" feature; reed submodule URL updated to rem-rs/reed |
 
 ### Vendor submodules
 | Submodule | URL | Role |
 |-----------|-----|------|
-| `vendor/reed` | javagg/reed | libCEED analogue; bridged via `crates/ceed` |
-| `vendor/linger` | javagg/linger | Krylov solvers + AMG; drives `fem-solver` and `fem-amg` |
+| `vendor/reed` | rem-rs/reed | libCEED analogue; bridged via `crates/ceed` |
+| `vendor/linger` | rem-rs/linger | Krylov solvers + AMG; drives `fem-solver` and `fem-amg` |
 | `vendor/rmetis` | javagg/rmetis | Pure-Rust BFS graph partitioner; drives `fem-parallel` Phase 18 |
 | `vendor/jsmpi` | javagg/jsmpi | JavaScript MPI shim for WASM Web Workers; drives `fem-parallel` Phase 33a |
 

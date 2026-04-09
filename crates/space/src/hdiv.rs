@@ -69,10 +69,10 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// Construct an H(div) space of the given order on `mesh`.
     ///
     /// # Panics
-    /// - If `order != 0` (only RT0 is currently supported).
+    /// - If `order > 1` (only RT0 and RT1 are currently supported).
     /// - If the mesh is neither 2-D triangles nor 3-D tetrahedra.
     pub fn new(mesh: M, order: u8) -> Self {
-        assert_eq!(order, 0, "HDivSpace: only order 0 (RT0) is supported");
+        assert!(order <= 1, "HDivSpace: only orders 0 (RT0) and 1 (RT1) are supported");
         let dim = mesh.dim() as usize;
         match dim {
             2 => Self::build_2d(mesh, order),
@@ -84,7 +84,10 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 2-D construction ───────────────────────────────────────────────────
 
     fn build_2d(mesh: M, order: u8) -> Self {
-        let dofs_per_elem = TRI_FACES.len(); // 3
+        // RT0: 1 DOF per edge; RT1: 2 DOFs per edge + 2 interior bubble DOFs
+        let dofs_per_face = (order as usize) + 1;
+        let interior_dofs = if order == 0 { 0 } else { 2 };
+        let dofs_per_elem = TRI_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
         let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
@@ -97,37 +100,26 @@ impl<M: MeshTopology> HDivSpace<M> {
             for (face_idx, &(li, lj)) in TRI_FACES.iter().enumerate() {
                 let (gi, gj) = (verts[li], verts[lj]);
                 let key = EdgeKey::new(gi, gj);
-
-                let dof = *edge_map.entry(key).or_insert_with(|| {
-                    let d = next_dof;
-                    next_dof += 1;
-                    d
-                });
-                dofs_flat.push(dof);
-
-                // Sign convention for RT0 in 2-D:
-                //
-                // The reference element's outward normal for face `face_idx`
-                // points away from the opposite vertex.  The global face
-                // orientation is defined by the edge traversed from the smaller
-                // to the larger vertex index.
-                //
-                // We determine the sign by checking whether the local outward
-                // normal agrees with the normal implied by the global edge
-                // direction.  For a 2-D edge, the "normal" of edge a→b is
-                // the 90° CCW rotation of (b−a).  The local outward normal
-                // points away from the opposite vertex.
-                //
-                // Short-cut: if the local edge traversal (gi→gj, where
-                // gi = verts[li], gj = verts[lj]) matches the global
-                // direction (min→max), the local outward normal and global
-                // normal agree → sign = +1.  But we also need to account for
-                // which side of the edge the opposite vertex sits on.
-                //
-                // For simplicity we use the geometric test: compute the local
-                // outward normal and compare with the global normal.
                 let sign = Self::compute_sign_2d(&mesh, verts, face_idx, gi, gj);
-                signs_flat.push(sign);
+
+                if dofs_per_face == 1 {
+                    let dof = *edge_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=1; d });
+                    dofs_flat.push(dof);
+                    signs_flat.push(sign);
+                } else {
+                    // RT1: 2 DOFs per edge (first and second normal moments)
+                    let first = *edge_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=2; d });
+                    dofs_flat.push(first);
+                    dofs_flat.push(first + 1);
+                    signs_flat.push(sign);
+                    signs_flat.push(sign);
+                }
+            }
+            // Interior bubble DOFs
+            for _ in 0..interior_dofs {
+                dofs_flat.push(next_dof);
+                next_dof += 1;
+                signs_flat.push(1.0);
             }
         }
 
@@ -186,7 +178,10 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 3-D construction ───────────────────────────────────────────────────
 
     fn build_3d(mesh: M, order: u8) -> Self {
-        let dofs_per_elem = TET_FACES.len(); // 4
+        // RT0: 1 DOF per face; RT1: 3 DOFs per face + 3 interior bubble DOFs
+        let dofs_per_face = if order == 0 { 1 } else { 3 };
+        let interior_dofs = if order == 0 { 0 } else { 3 };
+        let dofs_per_elem = TET_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
@@ -199,16 +194,21 @@ impl<M: MeshTopology> HDivSpace<M> {
             for (face_idx, &(la, lb, lc)) in TET_FACES.iter().enumerate() {
                 let (ga, gb, gc) = (verts[la], verts[lb], verts[lc]);
                 let key = FaceKey::new(ga, gb, gc);
-
-                let dof = *face_map.entry(key).or_insert_with(|| {
-                    let d = next_dof;
-                    next_dof += 1;
-                    d
-                });
-                dofs_flat.push(dof);
-
                 let sign = Self::compute_sign_3d(&mesh, verts, face_idx, &key);
-                signs_flat.push(sign);
+
+                if dofs_per_face == 1 {
+                    let dof = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=1; d });
+                    dofs_flat.push(dof);
+                    signs_flat.push(sign);
+                } else {
+                    // RT1: 3 DOFs per face
+                    let first = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=3; d });
+                    dofs_flat.push(first); dofs_flat.push(first+1); dofs_flat.push(first+2);
+                    signs_flat.push(sign); signs_flat.push(sign); signs_flat.push(sign);
+                }
+            }
+            for _ in 0..interior_dofs {
+                dofs_flat.push(next_dof); next_dof+=1; signs_flat.push(1.0);
             }
         }
 

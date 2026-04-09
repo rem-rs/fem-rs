@@ -1,9 +1,9 @@
 [submodule "vendor/reed"]
 	path = vendor/reed
-	url = https://github.com/javagg/reed.git
+	url = https://github.com/rem-rs/reed.git
 [submodule "vendor/linger"]
 	path = vendor/linger
-	url = https://github.com/javagg/linger.git
+	url = https://github.com/rem-rs/linger.git
 [submodule "vendor/jsmpi"]
 	path = vendor/jsmpi
 	url = https://github.com/jsmpi/jsmpi
