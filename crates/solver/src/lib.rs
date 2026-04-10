@@ -4,6 +4,7 @@
 //!
 //! ## Iterative solvers
 //! - [`solve_cg`]          — Conjugate Gradient (SPD systems)
+//! - [`solve_cg_operator`] — Conjugate Gradient with operator callback (backend-agnostic)
 //! - [`solve_pcg_jacobi`]  — PCG with Jacobi preconditioner
 //! - [`solve_pcg_ilu0`]    — PCG with ILU(0) preconditioner
 //! - [`solve_pcg_ildlt`]   — PCG with ILDLᵀ preconditioner
@@ -176,6 +177,100 @@ pub fn solve_cg<T: LingerScalar>(
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
+}
+
+/// Conjugate Gradient using a backend-agnostic operator callback.
+///
+/// This entrypoint is intended for matrix-free or foreign-backend operators
+/// (e.g., reed/libCEED style) that can provide `y = A*x` without exposing a
+/// concrete CSR matrix.
+///
+/// # Arguments
+/// * `nrows`, `ncols` — operator dimensions (must be square and equal to `b.len()`).
+/// * `apply`          — callback that computes `y <- A * x`.
+/// * `b`              — right-hand side.
+/// * `x`              — initial guess on entry, solution on exit.
+/// * `cfg`            — convergence parameters.
+pub fn solve_cg_operator<F>(
+    nrows: usize,
+    ncols: usize,
+    apply: F,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    F: Fn(&[f64], &mut [f64]),
+{
+    if nrows != ncols || b.len() != nrows || x.len() != ncols {
+        return Err(SolverError::DimensionMismatch {
+            rows: nrows,
+            cols: ncols,
+            rhs: b.len(),
+        });
+    }
+
+    let n = nrows;
+    let mut r = vec![0.0; n];
+    let mut p = vec![0.0; n];
+    let mut ap = vec![0.0; n];
+
+    // r0 = b - A*x0
+    apply(x, &mut ap);
+    for i in 0..n {
+        r[i] = b[i] - ap[i];
+        p[i] = r[i];
+    }
+
+    let norm_b = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
+
+    let mut rs_old = r.iter().map(|v| v * v).sum::<f64>();
+    let mut res_norm = rs_old.sqrt();
+    if res_norm <= tol {
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: res_norm,
+        });
+    }
+
+    for iter in 0..cfg.max_iter {
+        apply(&p, &mut ap);
+        let p_ap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
+        if p_ap.abs() < 1e-32 {
+            return Err(SolverError::Linger(
+                "CG operator breakdown: p^T A p is near zero".to_string(),
+            ));
+        }
+
+        let alpha = rs_old / p_ap;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+
+        let rs_new: f64 = r.iter().map(|v| v * v).sum();
+        res_norm = rs_new.sqrt();
+        if res_norm <= tol {
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter + 1,
+                final_residual: res_norm,
+            });
+        }
+
+        let beta = rs_new / rs_old;
+        for i in 0..n {
+            p[i] = r[i] + beta * p[i];
+        }
+        rs_old = rs_new;
+    }
+
+    Err(SolverError::ConvergenceFailed {
+        max_iter: cfg.max_iter,
+        residual: res_norm,
+    })
 }
 
 /// Preconditioned CG with a Jacobi (diagonal scaling) preconditioner.
