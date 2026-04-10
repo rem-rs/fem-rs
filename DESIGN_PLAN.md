@@ -71,7 +71,7 @@ Week-1 checklist:
 - [x] Support matrix documented in design plan
 - [x] 3D RT1 -> L2(P2) dimensions + commuting tests
 - [x] 3D ND2 -> RT1 commuting test
-- [ ] Add low/high-order randomized stress tests for commuting errors
+- [x] Add low/high-order randomized stress tests for commuting errors
 - [ ] Add CI grouping for high-order discrete-operator suite
 
 ### Vendor submodules

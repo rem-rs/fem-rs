@@ -1922,6 +1922,70 @@ mod tests {
         );
     }
 
+    /// Test: Curl ND2->RT1 in 3D — randomized commuting stress test.
+    #[test]
+    fn curl_3d_nd2_rt1_commuting_randomized_stress() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let hcurl = HCurlSpace::new(mesh, 2);
+        let hdiv = HDivSpace::new(mesh2, 1);
+
+        let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+
+        for seed in 0..8u64 {
+            let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let mut coeffs = [0.0f64; 9];
+            for k in 0..9 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let r = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                coeffs[k] = 2.0 * r - 1.0;
+            }
+
+            let [a, b, c0, d, e, f, g, h, i] = coeffs;
+
+            // A = (a*x*y + b*x*z + c*y*z,
+            //      d*x*y + e*x*z + f*y*z,
+            //      g*x*y + h*x*z + i*y*z)
+            let a_h = hcurl.interpolate_vector(&|x| {
+                let xx = x[0];
+                let yy = x[1];
+                let zz = x[2];
+                vec![
+                    a * xx * yy + b * xx * zz + c0 * yy * zz,
+                    d * xx * yy + e * xx * zz + f * yy * zz,
+                    g * xx * yy + h * xx * zz + i * yy * zz,
+                ]
+            });
+
+            let mut ca = vec![0.0; hdiv.n_dofs()];
+            c.spmv(a_h.as_slice(), &mut ca);
+
+            // curl(A) = (
+            //   (g-e)*x + (-f)*y + i*z,
+            //   b*x + (c-g)*y + (-h)*z,
+            //   (-a)*x + d*y + (e-c)*z
+            // )
+            let curl_interp = hdiv.interpolate_vector(&|x| {
+                let xx = x[0];
+                let yy = x[1];
+                let zz = x[2];
+                vec![
+                    (g - e) * xx - f * yy + i * zz,
+                    b * xx + (c0 - g) * yy - h * zz,
+                    -a * xx + d * yy + (e - c0) * zz,
+                ]
+            });
+
+            let max_err: f64 = (0..hdiv.n_dofs())
+                .map(|idx| (ca[idx] - curl_interp.as_slice()[idx]).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                max_err < 2e-8,
+                "ND2->RT1 randomized commuting failed (seed={seed}), max error = {max_err}"
+            );
+        }
+    }
+
     /// Test: bad order combination returns an error instead of panicking.
     ///
     /// P2 (order 2) + ND1 (order 1) are incompatible; the dispatcher should
@@ -2355,6 +2419,61 @@ mod tests {
             .map(|i| (div_f[i] - div_interp.as_slice()[i]).abs())
             .fold(0.0, f64::max);
         assert!(max_err < 1e-8, "RT1->P2 3D: divergence mismatch, max error = {max_err}");
+    }
+
+    /// Test: Divergence RT1->P2 in 3D — randomized commuting stress test.
+    #[test]
+    fn divergence_rt1_p2_3d_commuting_randomized_stress() {
+        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
+        let hdiv  = HDivSpace::new(mesh, 1);
+        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let l2    = L2Space::new(mesh2, 2);
+
+        let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
+
+        for seed in 0..8u64 {
+            let mut state = seed.wrapping_mul(11400714819323198485).wrapping_add(1);
+            let mut coeffs = [0.0f64; 9];
+            for k in 0..9 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let r = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                coeffs[k] = 2.0 * r - 1.0;
+            }
+
+            let [a, b, c, d0, e, f, g, h, i] = coeffs;
+
+            // F = (
+            //   a*x^2 + b*x*y + c*x*z,
+            //   d*y^2 + e*x*y + f*y*z,
+            //   g*z^2 + h*x*z + i*y*z
+            // )
+            let f_h = hdiv.interpolate_vector(&|x| {
+                let xx = x[0];
+                let yy = x[1];
+                let zz = x[2];
+                vec![
+                    a * xx * xx + b * xx * yy + c * xx * zz,
+                    d0 * yy * yy + e * xx * yy + f * yy * zz,
+                    g * zz * zz + h * xx * zz + i * yy * zz,
+                ]
+            });
+
+            let mut div_f = vec![0.0; l2.n_dofs()];
+            d.spmv(f_h.as_slice(), &mut div_f);
+
+            // div(F) = (2a+e+h)*x + (b+2d+i)*y + (c+f+2g)*z
+            let div_interp = l2.interpolate(&|x| {
+                (2.0 * a + e + h) * x[0] + (b + 2.0 * d0 + i) * x[1] + (c + f + 2.0 * g) * x[2]
+            });
+
+            let max_err: f64 = (0..l2.n_dofs())
+                .map(|idx| (div_f[idx] - div_interp.as_slice()[idx]).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                max_err < 2e-8,
+                "RT1->P2 3D randomized commuting failed (seed={seed}), max error = {max_err}"
+            );
+        }
     }
 
     /// Test: order-2 3D de Rham property with L2(P2) target — div(curl(u)) = 0.
