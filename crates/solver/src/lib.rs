@@ -6,6 +6,7 @@
 //! - [`solve_cg`]          — Conjugate Gradient (SPD systems)
 //! - [`solve_cg_operator`] — Conjugate Gradient with operator callback (backend-agnostic)
 //! - [`solve_gmres_operator`] — GMRES with operator callback (backend-agnostic)
+//! - [`solve_bicgstab_operator`] — BiCGSTAB with operator callback (backend-agnostic)
 //! - [`solve_pcg_jacobi`]  — PCG with Jacobi preconditioner
 //! - [`solve_pcg_ilu0`]    — PCG with ILU(0) preconditioner
 //! - [`solve_pcg_ildlt`]   — PCG with ILDLᵀ preconditioner
@@ -535,6 +536,151 @@ pub fn solve_bicgstab<T: LingerScalar>(
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
+}
+
+/// BiCGSTAB using a backend-agnostic operator callback.
+///
+/// This entrypoint is intended for matrix-free or foreign-backend operators
+/// that can provide `y = A*x` without exposing a concrete CSR matrix.
+pub fn solve_bicgstab_operator<F>(
+    nrows: usize,
+    ncols: usize,
+    apply: F,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    F: Fn(&[f64], &mut [f64]),
+{
+    if nrows != ncols || b.len() != nrows || x.len() != ncols {
+        return Err(SolverError::DimensionMismatch {
+            rows: nrows,
+            cols: ncols,
+            rhs: b.len(),
+        });
+    }
+
+    fn dot(a: &[f64], b: &[f64]) -> f64 {
+        a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    }
+    fn norm(v: &[f64]) -> f64 {
+        dot(v, v).sqrt()
+    }
+
+    let n = nrows;
+    let mut ax = vec![0.0; n];
+    apply(x, &mut ax);
+
+    let mut r = vec![0.0; n];
+    for i in 0..n {
+        r[i] = b[i] - ax[i];
+    }
+
+    let r_hat = r.clone();
+    let mut p = vec![0.0; n];
+    let mut v = vec![0.0; n];
+    let mut s = vec![0.0; n];
+    let mut t = vec![0.0; n];
+
+    let norm_b = norm(b);
+    let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
+    let mut res_norm = norm(&r);
+    if res_norm <= tol {
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: res_norm,
+        });
+    }
+
+    let mut rho_old = 1.0f64;
+    let mut alpha = 1.0f64;
+    let mut omega = 1.0f64;
+
+    for iter in 0..cfg.max_iter {
+        let rho_new = dot(&r_hat, &r);
+        if rho_new.abs() < 1e-32 {
+            return Err(SolverError::Linger(
+                "BiCGSTAB operator breakdown: rho is near zero".to_string(),
+            ));
+        }
+
+        let beta = if iter == 0 {
+            0.0
+        } else {
+            (rho_new / rho_old) * (alpha / omega)
+        };
+
+        for i in 0..n {
+            p[i] = if iter == 0 {
+                r[i]
+            } else {
+                r[i] + beta * (p[i] - omega * v[i])
+            };
+        }
+
+        apply(&p, &mut v);
+        let rhat_v = dot(&r_hat, &v);
+        if rhat_v.abs() < 1e-32 {
+            return Err(SolverError::Linger(
+                "BiCGSTAB operator breakdown: r_hat^T v is near zero".to_string(),
+            ));
+        }
+
+        alpha = rho_new / rhat_v;
+        for i in 0..n {
+            s[i] = r[i] - alpha * v[i];
+        }
+
+        let s_norm = norm(&s);
+        if s_norm <= tol {
+            for i in 0..n {
+                x[i] += alpha * p[i];
+            }
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter + 1,
+                final_residual: s_norm,
+            });
+        }
+
+        apply(&s, &mut t);
+        let tt = dot(&t, &t);
+        if tt.abs() < 1e-32 {
+            return Err(SolverError::Linger(
+                "BiCGSTAB operator breakdown: t^T t is near zero".to_string(),
+            ));
+        }
+
+        omega = dot(&t, &s) / tt;
+        if omega.abs() < 1e-32 {
+            return Err(SolverError::Linger(
+                "BiCGSTAB operator breakdown: omega is near zero".to_string(),
+            ));
+        }
+
+        for i in 0..n {
+            x[i] += alpha * p[i] + omega * s[i];
+            r[i] = s[i] - omega * t[i];
+        }
+
+        res_norm = norm(&r);
+        if res_norm <= tol {
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter + 1,
+                final_residual: res_norm,
+            });
+        }
+
+        rho_old = rho_new;
+    }
+
+    Err(SolverError::ConvergenceFailed {
+        max_iter: cfg.max_iter,
+        residual: res_norm,
+    })
 }
 
 /// Flexible GMRES — allows a variable preconditioner per iteration.
