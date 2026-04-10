@@ -1896,6 +1896,32 @@ mod tests {
         assert!(c.nrows > 0 && c.ncols > 0);
     }
 
+    /// Test: Curl ND2->RT1 in 3D — commuting property.
+    #[test]
+    fn curl_3d_nd2_rt1_commutes_with_interpolation() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let hcurl = HCurlSpace::new(mesh, 2);
+        let hdiv = HDivSpace::new(mesh2, 1);
+
+        let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+
+        // A = (x*y, y*z, z*x), so curl(A) = (-y, -z, -x).
+        let a = hcurl.interpolate_vector(&|x| vec![x[0] * x[1], x[1] * x[2], x[2] * x[0]]);
+        let mut ca = vec![0.0; hdiv.n_dofs()];
+        c.spmv(a.as_slice(), &mut ca);
+
+        let curl_interp = hdiv.interpolate_vector(&|x| vec![-x[1], -x[2], -x[0]]);
+
+        let max_err: f64 = (0..hdiv.n_dofs())
+            .map(|i| (ca[i] - curl_interp.as_slice()[i]).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_err < 1e-8,
+            "ND2->RT1 3D: curl interpolation mismatch, max error = {max_err}"
+        );
+    }
+
     /// Test: bad order combination returns an error instead of panicking.
     ///
     /// P2 (order 2) + ND1 (order 1) are incompatible; the dispatcher should

@@ -56,6 +56,24 @@
 | 51 | space+assembly | ✅ Done | 2026-04-10 | HCurlSpace 3D ND2 topology corrected to shared face DOFs (global count = 2*n_edges + 2*n_faces) with canonical face-moment interpolation; DiscreteLinearOperator::curl_3d extended to ND2->RT1 local reconstruction; strict high-order de Rham property div(curl)=0 restored and verified; new HCurl 3D ND2 and discrete_op tests added |
 | 52 | space+assembly | ✅ Done | 2026-04-10 | L2Space extended to discontinuous P2 (Tri: 6 DOFs/elem, Tet: 10 DOFs/elem); DiscreteLinearOperator extended to ND2->L2(P2) and RT1->L2(P2) in 2D/3D; added dimension + commuting + de Rham tests including 3D RT1->L2(P2) and div(curl)=0 with L2(P2) |
 
+### Week-1 High-Order Discrete-Operator Coverage (Phase 53 kickoff)
+
+| Operator | Pair | Dim | Status | Coverage |
+|----------|------|-----|--------|----------|
+| `gradient` | P2 -> ND2 | 2D | ✅ Implemented | dimensions + commuting + constant-zero |
+| `curl_2d` | ND2 -> L2(P2) | 2D | ✅ Implemented | dimensions + commuting + exact field |
+| `divergence` | RT1 -> L2(P2) | 2D | ✅ Implemented | dimensions + commuting |
+| `curl_3d` | ND2 -> RT1 | 3D | ✅ Implemented | dimensions + commuting |
+| `divergence` | RT1 -> L2(P2) | 3D | ✅ Implemented | dimensions + commuting |
+| Chain | ND2 -> RT1 -> L2(P2) | 3D | ✅ Implemented | de Rham `div(curl)=0` (random vectors) |
+
+Week-1 checklist:
+- [x] Support matrix documented in design plan
+- [x] 3D RT1 -> L2(P2) dimensions + commuting tests
+- [x] 3D ND2 -> RT1 commuting test
+- [ ] Add low/high-order randomized stress tests for commuting errors
+- [ ] Add CI grouping for high-order discrete-operator suite
+
 ### Vendor submodules
 | Submodule | URL | Role |
 |-----------|-----|------|
