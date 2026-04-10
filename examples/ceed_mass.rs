@@ -19,26 +19,19 @@
 //! - `cargo run --example ceed_mass -- --backend=reed`
 //! - `cargo run --example ceed_mass -- --backend=native`
 
-use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
+use fem_assembly::{Assembler, OperatorBackend, standard::{DiffusionIntegrator, MassIntegrator}};
 use fem_ceed::{CeedBackend, FemCeed};
 use fem_mesh::SimplexMesh;
 use fem_space::H1Space;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExampleBackend {
-    Reed,
-    Native,
-}
-
-fn parse_backend() -> ExampleBackend {
-    let mut backend = ExampleBackend::Reed;
+fn parse_backend() -> OperatorBackend {
+    let mut backend = OperatorBackend::Reed;
     for arg in std::env::args().skip(1) {
         if let Some(value) = arg.strip_prefix("--backend=") {
-            backend = match value.to_ascii_lowercase().as_str() {
-                "reed" => ExampleBackend::Reed,
-                "native" => ExampleBackend::Native,
-                other => {
-                    eprintln!("unknown backend '{other}', expected reed|native");
+            backend = match OperatorBackend::parse(value) {
+                Some(b) => b,
+                None => {
+                    eprintln!("unknown backend '{value}', expected reed|native");
                     std::process::exit(2);
                 }
             };
@@ -80,12 +73,12 @@ fn main() {
     // ── Mass operator (P1, 3-point quadrature) ────────────────────────────
 
     let (m_ones, m_xs, m_ys) = match backend {
-        ExampleBackend::Reed => (
+        OperatorBackend::Reed => (
             ceed.apply_mass_2d(&mesh, 1, 3, &ones).unwrap(),
             ceed.apply_mass_2d(&mesh, 1, 3, &xs).unwrap(),
             ceed.apply_mass_2d(&mesh, 1, 3, &ys).unwrap(),
         ),
-        ExampleBackend::Native => (
+        OperatorBackend::Native => (
             apply_mass_native(&mesh, 1, 3, &ones),
             apply_mass_native(&mesh, 1, 3, &xs),
             apply_mass_native(&mesh, 1, 3, &ys),
@@ -95,11 +88,11 @@ fn main() {
     // ── Stiffness / Laplacian operator (P1, 3-point quadrature) ──────────
 
     let (k_ones, k_xs) = match backend {
-        ExampleBackend::Reed => (
+        OperatorBackend::Reed => (
             ceed.apply_poisson_2d(&mesh, 1, 3, &ones).unwrap(),
             ceed.apply_poisson_2d(&mesh, 1, 3, &xs).unwrap(),
         ),
-        ExampleBackend::Native => (
+        OperatorBackend::Native => (
             apply_poisson_native(&mesh, 1, 3, &ones),
             apply_poisson_native(&mesh, 1, 3, &xs),
         ),
@@ -108,8 +101,8 @@ fn main() {
     // ── P1 mass with 6-point quadrature (over-integrated, result unchanged) ──
 
     let m6_ones = match backend {
-        ExampleBackend::Reed => ceed.apply_mass_2d(&mesh, 1, 6, &ones).unwrap(),
-        ExampleBackend::Native => apply_mass_native(&mesh, 1, 6, &ones),
+        OperatorBackend::Reed => ceed.apply_mass_2d(&mesh, 1, 6, &ones).unwrap(),
+        OperatorBackend::Native => apply_mass_native(&mesh, 1, 6, &ones),
     };
 
     let tol = 1e-10;
@@ -160,7 +153,7 @@ fn main() {
     let qf_6pt = dot(&ones, &m6_ones);
     check(10, (qf_6pt - quad_form).abs() < tol, &format!("1ᵀ M_6pt 1 = {qf_6pt:.12}, matches 3-pt = {quad_form:.12}"), &mut pass);
 
-    println!("backend: {:?}", backend);
+    println!("backend: {}", backend.as_str());
     if pass {
         println!("✓ all 10 checks passed");
     } else {

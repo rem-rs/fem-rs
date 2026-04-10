@@ -29,6 +29,7 @@
 //! ```
 
 pub mod assembler;
+pub mod backend;
 pub mod coefficient;
 pub mod integrator;
 pub mod standard;
@@ -44,6 +45,7 @@ pub mod postprocess;
 pub mod discrete_op;
 
 pub use assembler::{Assembler, face_dofs_p1, face_dofs_p2};
+pub use backend::OperatorBackend;
 pub use discrete_op::{DiscreteLinearOperator, DiscreteOpError};
 pub use integrator::{
     BdQpData, BilinearIntegrator, BoundaryBilinearIntegrator, BoundaryLinearIntegrator,
