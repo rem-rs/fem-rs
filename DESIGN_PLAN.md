@@ -12,7 +12,7 @@
 | 2 | mesh | ✅ Done | 2026-03-30 | SimplexMesh\<D\>, MeshTopology, unit_square_tri generator |
 | 3 | element | ✅ Done | 2026-03-31 | ReferenceElement trait; SegP1/P2, TriP1/P2, TetP1, QuadQ1, HexQ1; 26 tests |
 | 4 | linalg | ✅ Done | 2026-03-31 | CsrMatrix, CooMatrix, Vector; + SparsityPattern, dense LU; 16 tests |
-| 5 | space | ✅ Done | 2026-03-31 | H1Space(P1/P2), L2Space(P0/P1), DofManager, apply_dirichlet, boundary_dofs; 18 tests |
+| 5 | space | ✅ Done | 2026-03-31 | H1Space(P1/P2), L2Space(P0/P1/P2), DofManager, apply_dirichlet, boundary_dofs; 18 tests |
 | 6 | assembly | ✅ Done | 2026-03-31 | Assembler, BilinearIntegrator/LinearIntegrator/BoundaryLinearIntegrator; DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator, NeumannIntegrator; P1/P2 Poisson verified (rate=2.0/3.0); 12 tests |
 | 7 | solver | ✅ Done | 2026-03-31 | Backed by linger: CG, PCG+Jacobi, PCG+ILU0, GMRES, BiCGSTAB; end-to-end Poisson solve verified (all 5 solvers) |
 | 8 | amg | ✅ Done | 2026-03-31 | Backed by linger: SA-AMG + RS-AMG, AmgSolver (reusable hierarchy); AMG-CG fewer iters than CG on 64×64 mesh (38 vs 84) |
@@ -54,6 +54,7 @@
 | 49 | element+space+assembly | ✅ Done | 2026-04-09 | TriND2/TetND2 (Nédélec-I order 2, 8/20 DOFs, Vandermonde inversion, linear curl verified); TriRT1/TetRT1 (Raviart-Thomas order 1, 8/15 DOFs, nodal basis verified); HCurlSpace/HDivSpace relaxed to support orders 1/2 and 0/1 (multiple DOFs per edge/face + interior bubble DOFs); VectorAssembler+postprocess factory updated to dispatch on space.order(); 15 new element tests |
 | 50 | solver+linalg | ✅ Done | 2026-04-09 | linger submodule update (rem-rs/linger): AMS (Auxiliary-space Maxwell Solver) for H(curl), ADS (Auxiliary-space Divergence Solver) for H(div), BlrMatrix/BlrBlock (Block Low-Rank compression); fem-solver: solve_pcg_ams, solve_gmres_ams, solve_pcg_ads, solve_gmres_ads; fem-linalg: re-export BlrMatrix, BlrBlock, compress_block, compress_block_adaptive under "direct" feature; reed submodule URL updated to rem-rs/reed |
 | 51 | space+assembly | ✅ Done | 2026-04-10 | HCurlSpace 3D ND2 topology corrected to shared face DOFs (global count = 2*n_edges + 2*n_faces) with canonical face-moment interpolation; DiscreteLinearOperator::curl_3d extended to ND2->RT1 local reconstruction; strict high-order de Rham property div(curl)=0 restored and verified; new HCurl 3D ND2 and discrete_op tests added |
+| 52 | space+assembly | ✅ Done | 2026-04-10 | L2Space extended to discontinuous P2 (Tri: 6 DOFs/elem, Tet: 10 DOFs/elem); DiscreteLinearOperator extended to ND2->L2(P2) and RT1->L2(P2) in 2D/3D; added dimension + commuting + de Rham tests including 3D RT1->L2(P2) and div(curl)=0 with L2(P2) |
 
 ### Vendor submodules
 | Submodule | URL | Role |
