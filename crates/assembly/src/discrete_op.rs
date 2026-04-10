@@ -237,11 +237,20 @@ impl DiscreteLinearOperator {
 
         let mut coo = CooMatrix::<f64>::new(n_hdiv, n_hcurl);
 
-        // Build global face -> (edge0, edge1, edge2, sign0, sign1, sign2) map.
-        // Each face is visited once with consistent orientation.
+        // Build curl operator using Stokes theorem.
+        // For each face, the curl integrates to the sum of edge integrals
+        // around the face boundary.
+        //
+        // The key is that for de Rham exactness (div(curl(u)) = 0), we need
+        // the discrete curl to be the topological incidence matrix between
+        // edges and faces.
+        //
+        // For each element, we use the local face index to look up the
+        // precomputed Stokes signs. The face_sign from hdiv_space handles
+        // the orientation difference between elements sharing a face.
         for e in mesh.elem_iter() {
-            let verts = mesh.element_nodes(e);
             let hcurl_dofs = hcurl_space.element_dofs(e);
+            let hcurl_signs = hcurl_space.element_signs(e);
             let hdiv_dofs = hdiv_space.element_dofs(e);
             let hdiv_signs = hdiv_space.element_signs(e);
 
@@ -249,24 +258,24 @@ impl DiscreteLinearOperator {
                 let face_sign = hdiv_signs[face_local];
                 let face_dof = face_dof as usize;
 
-                // Get the 3 vertices of this face (local indices 0-3)
-                let (va, vb, vc) = TET_FACES[face_local];
-                let ga = verts[va] as usize;
-                let gb = verts[vb] as usize;
-                let gc = verts[vc] as usize;
+                // Get the Stokes signs for this face's boundary edges.
+                // This gives us (local_edge_idx, stokes_sign) for each of the 3 edges.
+                let edge_stokes = compute_stokes_signs_for_face(face_local);
 
-                // The 3 edges of the face, with their global vertex pairs
-                let face_edges = [
-                    (va, vb, ga, gb),  // edge 0 of face
-                    (vb, vc, gb, gc),  // edge 1 of face
-                    (vc, va, gc, ga),  // edge 2 of face
-                ];
+                for (local_edge_idx, stokes_sign) in edge_stokes {
+                    let edge_dof = hcurl_dofs[local_edge_idx] as usize;
+                    let edge_sign = hcurl_signs[local_edge_idx];
 
-                for (la, lb, ga, gb) in face_edges {
-                    let edge_local = local_edge_to_idx(la, lb);
-                    let edge_dof = hcurl_dofs[edge_local] as usize;
-                    let _ = (face_sign, ga, gb); // silence warnings for now
-                    coo.add(face_dof, edge_dof, 1.0);
+                    // The final sign is the product of:
+                    // - stokes_sign: orientation of edge in face boundary traversal
+                    // - edge_sign: orientation of DOF relative to global edge
+                    // - face_sign: orientation of face normal (already in stokes_sign for outward faces)
+                    //
+                    // For de Rham exactness, we need D*C = 0, which requires that
+                    // for each element, the sum over faces of face_sign * C[face, edge] = 0.
+                    // This is satisfied if C uses the correct topological incidence.
+                    let combined_sign = face_sign * stokes_sign * edge_sign;
+                    coo.add(face_dof, edge_dof, combined_sign);
                 }
             }
         }
@@ -582,7 +591,7 @@ mod tests {
 
     /// Test: de Rham exact sequence in 3D — div(curl(u)) = 0.
     #[test]
-    #[ignore] // TODO: curl_3d implementation incomplete
+    #[ignore] // TODO: curl_3d implementation incomplete (de Rham exactness not achieved)
     fn de_rham_div_of_curl_3d_is_zero() {
         let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
         let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
