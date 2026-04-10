@@ -41,5 +41,5 @@ pub mod context;
 pub mod qfunction;
 pub mod restriction;
 
-pub use context::{FemCeed, FemCeedError};
+pub use context::{CeedBackend, FemCeed, FemCeedError};
 pub use restriction::{mesh_to_elem_restriction, qdata_elem_restriction};

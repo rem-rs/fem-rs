@@ -24,15 +24,42 @@ use reed_cpu::basis_simplex::SimplexBasis;
 
 // ── FemCeed ───────────────────────────────────────────────────────────────────
 
+/// Execution backend for [`FemCeed`].
+///
+/// This enum is intentionally small in PR-A: it establishes a stable API
+/// surface so higher layers can choose execution backends explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CeedBackend {
+    /// reed CPU backend path (current implementation).
+    ReedCpu,
+}
+
 /// Central context for applying reed operators to fem-rs meshes.
-pub struct FemCeed;
+pub struct FemCeed {
+    backend: CeedBackend,
+}
 
 impl Default for FemCeed {
-    fn default() -> Self { FemCeed }
+    fn default() -> Self {
+        Self {
+            backend: CeedBackend::ReedCpu,
+        }
+    }
 }
 
 impl FemCeed {
-    pub fn new() -> Self { FemCeed }
+    /// Construct with the default backend (`ReedCpu`).
+    pub fn new() -> Self { Self::default() }
+
+    /// Construct with an explicit backend selection.
+    pub fn with_backend(backend: CeedBackend) -> Self {
+        Self { backend }
+    }
+
+    /// Return the selected execution backend.
+    pub fn backend(&self) -> CeedBackend {
+        self.backend
+    }
 
     // ── mass operator ─────────────────────────────────────────────────────
 

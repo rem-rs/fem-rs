@@ -15,15 +15,62 @@
 //! | 9 | P1 mass with 6-pt quadrature: area = 1.0 (over-integrated, same result) | 1.0 |
 //! |10 | 6-pt and 3-pt quadrature agree: `sum(M_6pt · 1) ≈ sum(M_3pt · 1)` | 1.0 |
 //!
-//! Run with: `cargo run --example ceed_mass`
+//! Run with:
+//! - `cargo run --example ceed_mass -- --backend=reed`
+//! - `cargo run --example ceed_mass -- --backend=native`
 
-use fem_ceed::FemCeed;
+use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
+use fem_ceed::{CeedBackend, FemCeed};
 use fem_mesh::SimplexMesh;
+use fem_space::H1Space;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExampleBackend {
+    Reed,
+    Native,
+}
+
+fn parse_backend() -> ExampleBackend {
+    let mut backend = ExampleBackend::Reed;
+    for arg in std::env::args().skip(1) {
+        if let Some(value) = arg.strip_prefix("--backend=") {
+            backend = match value.to_ascii_lowercase().as_str() {
+                "reed" => ExampleBackend::Reed,
+                "native" => ExampleBackend::Native,
+                other => {
+                    eprintln!("unknown backend '{other}', expected reed|native");
+                    std::process::exit(2);
+                }
+            };
+        }
+    }
+    backend
+}
+
+fn apply_mass_native(mesh: &SimplexMesh<2>, poly: u8, q: u8, input: &[f64]) -> Vec<f64> {
+    let space = H1Space::new(mesh.clone(), poly);
+    let mass = MassIntegrator { rho: 1.0 };
+    let m = Assembler::assemble_bilinear(&space, &[&mass], q);
+    let mut out = vec![0.0; input.len()];
+    m.spmv(input, &mut out);
+    out
+}
+
+fn apply_poisson_native(mesh: &SimplexMesh<2>, poly: u8, q: u8, input: &[f64]) -> Vec<f64> {
+    let space = H1Space::new(mesh.clone(), poly);
+    let diff = DiffusionIntegrator { kappa: 1.0 };
+    let k = Assembler::assemble_bilinear(&space, &[&diff], q);
+    let mut out = vec![0.0; input.len()];
+    k.spmv(input, &mut out);
+    out
+}
 
 fn main() {
+    let backend = parse_backend();
+
     let n = 8usize; // 8×8 grid of unit triangles
     let mesh = SimplexMesh::<2>::unit_square_tri(n);
-    let ceed = FemCeed::new();
+    let ceed = FemCeed::with_backend(CeedBackend::ReedCpu);
     let n_nodes = mesh.n_nodes();
 
     let ones: Vec<f64>    = vec![1.0; n_nodes];
@@ -32,18 +79,38 @@ fn main() {
 
     // ── Mass operator (P1, 3-point quadrature) ────────────────────────────
 
-    let m_ones = ceed.apply_mass_2d(&mesh, 1, 3, &ones).unwrap();
-    let m_xs   = ceed.apply_mass_2d(&mesh, 1, 3, &xs).unwrap();
-    let m_ys   = ceed.apply_mass_2d(&mesh, 1, 3, &ys).unwrap();
+    let (m_ones, m_xs, m_ys) = match backend {
+        ExampleBackend::Reed => (
+            ceed.apply_mass_2d(&mesh, 1, 3, &ones).unwrap(),
+            ceed.apply_mass_2d(&mesh, 1, 3, &xs).unwrap(),
+            ceed.apply_mass_2d(&mesh, 1, 3, &ys).unwrap(),
+        ),
+        ExampleBackend::Native => (
+            apply_mass_native(&mesh, 1, 3, &ones),
+            apply_mass_native(&mesh, 1, 3, &xs),
+            apply_mass_native(&mesh, 1, 3, &ys),
+        ),
+    };
 
     // ── Stiffness / Laplacian operator (P1, 3-point quadrature) ──────────
 
-    let k_ones = ceed.apply_poisson_2d(&mesh, 1, 3, &ones).unwrap();
-    let k_xs   = ceed.apply_poisson_2d(&mesh, 1, 3, &xs).unwrap();
+    let (k_ones, k_xs) = match backend {
+        ExampleBackend::Reed => (
+            ceed.apply_poisson_2d(&mesh, 1, 3, &ones).unwrap(),
+            ceed.apply_poisson_2d(&mesh, 1, 3, &xs).unwrap(),
+        ),
+        ExampleBackend::Native => (
+            apply_poisson_native(&mesh, 1, 3, &ones),
+            apply_poisson_native(&mesh, 1, 3, &xs),
+        ),
+    };
 
     // ── P1 mass with 6-point quadrature (over-integrated, result unchanged) ──
 
-    let m6_ones = ceed.apply_mass_2d(&mesh, 1, 6, &ones).unwrap();
+    let m6_ones = match backend {
+        ExampleBackend::Reed => ceed.apply_mass_2d(&mesh, 1, 6, &ones).unwrap(),
+        ExampleBackend::Native => apply_mass_native(&mesh, 1, 6, &ones),
+    };
 
     let tol = 1e-10;
     let mut pass = true;
@@ -93,6 +160,7 @@ fn main() {
     let qf_6pt = dot(&ones, &m6_ones);
     check(10, (qf_6pt - quad_form).abs() < tol, &format!("1ᵀ M_6pt 1 = {qf_6pt:.12}, matches 3-pt = {quad_form:.12}"), &mut pass);
 
+    println!("backend: {:?}", backend);
     if pass {
         println!("✓ all 10 checks passed");
     } else {
