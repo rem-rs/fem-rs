@@ -19,7 +19,7 @@
 //! - `cargo run --example ceed_mass -- --backend=reed`
 //! - `cargo run --example ceed_mass -- --backend=native`
 
-use fem_assembly::{Assembler, OperatorBackend, standard::{DiffusionIntegrator, MassIntegrator}};
+use fem_assembly::{Assembler, CsrLinearOperator, LinearOperator, OperatorBackend, standard::{DiffusionIntegrator, MassIntegrator}};
 use fem_ceed::{CeedBackend, FemCeed};
 use fem_mesh::SimplexMesh;
 use fem_space::H1Space;
@@ -44,8 +44,9 @@ fn apply_mass_native(mesh: &SimplexMesh<2>, poly: u8, q: u8, input: &[f64]) -> V
     let space = H1Space::new(mesh.clone(), poly);
     let mass = MassIntegrator { rho: 1.0 };
     let m = Assembler::assemble_bilinear(&space, &[&mass], q);
+    let op = CsrLinearOperator::new(&m);
     let mut out = vec![0.0; input.len()];
-    m.spmv(input, &mut out);
+    op.apply(input, &mut out);
     out
 }
 
@@ -53,8 +54,9 @@ fn apply_poisson_native(mesh: &SimplexMesh<2>, poly: u8, q: u8, input: &[f64]) -
     let space = H1Space::new(mesh.clone(), poly);
     let diff = DiffusionIntegrator { kappa: 1.0 };
     let k = Assembler::assemble_bilinear(&space, &[&diff], q);
+    let op = CsrLinearOperator::new(&k);
     let mut out = vec![0.0; input.len()];
-    k.spmv(input, &mut out);
+    op.apply(input, &mut out);
     out
 }
 
