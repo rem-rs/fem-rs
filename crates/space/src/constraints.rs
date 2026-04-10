@@ -727,11 +727,10 @@ pub fn identify_periodic_dof_pairs(
                 let mut best: Option<(u32, f64)> = None;
                 for (&mn, mc) in &master_nodes {
                     let dist: f64 = (0..dim).map(|i| (shifted[i] - mc[i]).powi(2)).sum::<f64>().sqrt();
-                    if dist < tol {
-                        if best.map_or(true, |(_, d)| dist < d) {
+                    if dist < tol
+                        && best.is_none_or(|(_, d)| dist < d) {
                             best = Some((mn, dist));
                         }
-                    }
                 }
 
                 if let Some((master_node, _)) = best {
@@ -885,10 +884,9 @@ pub fn apply_periodic(
 
 mod tests {
     use super::*;
-    use crate::fe_space::FESpace;
-    use crate::DofManager;
+    use fem_mesh::{SimplexMesh, NCState};
     use fem_linalg::CooMatrix;
-    use fem_mesh::{SimplexMesh, amr::NCState};
+    
 
     fn simple_system() -> (CsrMatrix<f64>, Vec<f64>) {
         let mut coo = CooMatrix::<f64>::new(3, 3);
@@ -944,6 +942,7 @@ mod tests {
     #[test]
     fn boundary_dofs_hcurl_unit_square() {
         use crate::hcurl::HCurlSpace;
+        use crate::fe_space::FESpace;
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let dofs = boundary_dofs_hcurl(space.mesh(), &space, &[1, 2, 3, 4]);
@@ -962,6 +961,7 @@ mod tests {
     #[test]
     fn boundary_dofs_hdiv_unit_square() {
         use crate::hdiv::HDivSpace;
+        use crate::fe_space::FESpace;
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let space = HDivSpace::new(mesh, 0);
         let dofs = boundary_dofs_hdiv(space.mesh(), &space, &[1, 2, 3, 4]);

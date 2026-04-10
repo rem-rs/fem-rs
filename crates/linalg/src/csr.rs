@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn spadd_with_empty() {
         let a = small_matrix();
-        let b = CsrMatrix::<f64>::new_empty(3, 3);
+        let _b = CsrMatrix::<f64>::new_empty(3, 3);
         // Need row_ptr for b to have correct length
         let b = CooMatrix::<f64>::new(3, 3).into_csr();
         let c = super::spadd(&a, &b);

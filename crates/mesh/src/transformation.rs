@@ -34,7 +34,7 @@ impl ElementTransformation {
     pub fn from_simplex_nodes<M: MeshTopology>(mesh: &M, geo_nodes: &[u32]) -> Self {
         let dim = mesh.dim() as usize;
         assert!(
-            geo_nodes.len() >= dim + 1,
+            geo_nodes.len() > dim,
             "ElementTransformation::from_simplex_nodes: need at least dim+1 nodes"
         );
 

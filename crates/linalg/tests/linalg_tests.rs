@@ -3,7 +3,7 @@
 //! Tests CooMatrix → CsrMatrix conversion, sparse matrix arithmetic,
 //! and dense Vector operations.
 
-use fem_linalg::{CooMatrix, CsrMatrix, Vector, spadd};
+use fem_linalg::{CooMatrix, Vector, spadd};
 
 // ─── CooMatrix / CsrMatrix ────────────────────────────────────────────────────
 

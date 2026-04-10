@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use fem_element::{TriND1, TriRT0, TetRT0, VectorReferenceElement};
+use fem_element::{TriND1, VectorReferenceElement};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, ElementTransformation};
 use fem_space::fe_space::FESpace;
@@ -189,7 +189,7 @@ impl DiscreteLinearOperator {
         let mut coo = CooMatrix::<f64>::new(n_l2, n_hdiv);
 
         // vol_ref: reference simplex volume (1/2 for tri, 1/6 for tet)
-        let (n_local_dofs, vol_ref, div_ref_val): (usize, f64, f64) = if dim == 2 {
+        let (n_local_dofs, _vol_ref, _div_ref_val): (usize, f64, f64) = if dim == 2 {
             (3, 0.5, 2.0)  // TriRT0: 3 DOFs, div=2
         } else {
             (4, 1.0 / 6.0, 6.0)  // TetRT0: 4 DOFs, div=6

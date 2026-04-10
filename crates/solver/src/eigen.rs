@@ -27,7 +27,6 @@ use linger::{
     KrylovSchur as LingerKrylovSchur,
     eigen::{EigenParams, EigenSolver, EigenWhich},
     sparse::CsrMatrix as LingerCsr,
-    DenseVec,
 };
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
 
@@ -163,7 +162,7 @@ pub fn lobpcg(
 
         // New X = W * C[:, 0..k] (first k Ritz vectors).
         let c = ritz_vecs.columns(0, k);
-        let x_new = &w * &c;
+        let x_new = &w * c;
         p = &w * ritz_vecs.columns(k, k.min(w.ncols() - k));
 
         x = x_new;
@@ -194,13 +193,11 @@ pub trait GeneralizedEigenSolver {
 }
 
 /// LOBPCG-based generalized eigensolver.
+#[derive(Default)]
 pub struct LobpcgSolver {
     pub cfg: LobpcgConfig,
 }
 
-impl Default for LobpcgSolver {
-    fn default() -> Self { LobpcgSolver { cfg: LobpcgConfig::default() } }
-}
 
 impl GeneralizedEigenSolver for LobpcgSolver {
     fn solve_smallest(

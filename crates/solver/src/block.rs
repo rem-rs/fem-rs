@@ -303,7 +303,7 @@ fn preconditioned_gmres(
 
     let mut total_iters = 0;
 
-    for _cycle in 0..((cfg.max_iter + restart - 1) / restart) {
+    for _cycle in 0..cfg.max_iter.div_ceil(restart) {
         // r = b - A x
         let mut r = b.to_vec();
         for i in 0..n {
@@ -436,7 +436,7 @@ impl MinresSolver {
         // r = b - A x
         let mut r = b.to_vec();
         spmv_sub_inplace(a, x, &mut r);
-        let mut beta1 = norm2(&r);
+        let beta1 = norm2(&r);
         if beta1 < cfg.atol {
             return Ok(SolveResult { converged: true, iterations: 0, final_residual: beta1 });
         }
@@ -498,7 +498,7 @@ impl MinresSolver {
 
             // update x
             let phi = cs_new * phi_bar;
-            phi_bar = sn_new * phi_bar;
+            phi_bar *= sn_new;
             axpy_inplace(phi, &w_new, x);
 
             // Shift

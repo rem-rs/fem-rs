@@ -28,7 +28,7 @@ fn gmsh_unit_square_parse() {
     for n in 0..mesh.n_nodes() as u32 {
         let c = mesh.node_coords(n);
         for &x in c {
-            assert!(x >= -1e-12 && x <= 1.0 + 1e-12, "coord out of range: {x}");
+            assert!((-1e-12..=1.0 + 1e-12).contains(&x), "coord out of range: {x}");
         }
     }
     // Check passes internal consistency

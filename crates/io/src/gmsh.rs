@@ -20,7 +20,7 @@
 //! <https://gmsh.info/doc/texinfo/gmsh.html#MSH-file-format>
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 
 use fem_core::{FemError, FemResult};
 use fem_mesh::{boundary::PhysicalGroup, element_type::ElementType, simplex::SimplexMesh};

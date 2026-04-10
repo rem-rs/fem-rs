@@ -94,10 +94,14 @@
 | `H1_TetrahedronElement` P1/P2/P3 | `TetP1`, `TetP2`, `TetP3` | ✅ |
 | `H1_QuadrilateralElement` Q1/Q2 | `QuadQ1`, `QuadQ2` | ✅ |
 | `H1_HexahedronElement` | `HexQ1` | ✅ |
-| `ND_TriangleElement` | `nedelec::TriND1` | ✅ |
-| `ND_TetrahedronElement` | `nedelec::TetND1` | ✅ |
-| `RT_TriangleElement` | `raviart_thomas::TriRT0` | ✅ |
-| `RT_TetrahedronElement` | `raviart_thomas::TetRT0` | ✅ |
+| `ND_TriangleElement` (order 1) | `nedelec::TriND1` | ✅ |
+| `ND_TriangleElement` (order 2) | `nedelec::TriND2` | ✅ |
+| `ND_TetrahedronElement` (order 1) | `nedelec::TetND1` | ✅ |
+| `ND_TetrahedronElement` (order 2) | `nedelec::TetND2` | ✅ |
+| `RT_TriangleElement` (order 0) | `raviart_thomas::TriRT0` | ✅ |
+| `RT_TriangleElement` (order 1) | `raviart_thomas::TriRT1` | ✅ |
+| `RT_TetrahedronElement` (order 0) | `raviart_thomas::TetRT0` | ✅ |
+| `RT_TetrahedronElement` (order 1) | `raviart_thomas::TetRT1` | ✅ |
 | `L2_TriangleElement` | L2Space with P0/P1 | ✅ |
 
 ### 2.2 Quadrature Rules
@@ -555,6 +559,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 46 | `mesh`+`linalg`+`solver`+`space`+`io` | Backlog: bounding_box, periodic mesh, DenseTensor, SLI, H1Trace, VTK reader, PrintLevel | ✅ |
 | 47 | `mesh`+`space` | NCMesh: Tri3/Tet4 nonconforming refine + hanging constraints + `NCState`/`NCState3D` multi-level + P2 prolongation | ✅ |
 | 48 | `element`+`space`+`assembly`+`solver`+`io` | linger update: sparse direct solvers (SparseLu/Cholesky/LDLt), IDR(s), TFQMR, ILDLt precond, KrylovSchur eigen, Matrix Market I/O; higher-order elements: TriP3, TetP2, TetP3, QuadQ2; H1TraceSpace P2/P3; Grundmann-Moller quadrature fix | ✅ |
+| 49 | `element`+`space`+`assembly` | TriND2/TetND2 (Nédélec-I order 2); TriRT1/TetRT1 (Raviart-Thomas order 1); HCurlSpace/HDivSpace multi-order support; VectorAssembler factory updated | ✅ |
 
 ---
 

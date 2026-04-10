@@ -170,8 +170,8 @@ impl ReferenceElement for TriP3 {
         // so ∂φ₀/∂ξ = 0.5*(27l1²-18l1+2)*(−1)
         //    ∂φ₀/∂η = 0.5*(27l1²-18l1+2)*(−1)
         let dphi0_dl1 = 0.5 * (27.0 * l1 * l1 - 18.0 * l1 + 2.0);
-        grads[0] = dphi0_dl1 * (-1.0);
-        grads[1] = dphi0_dl1 * (-1.0);
+        grads[0] = -dphi0_dl1;
+        grads[1] = -dphi0_dl1;
 
         // φ₁ = 0.5*l2*(3l2-1)*(3l2-2), ∂φ₁/∂l2 = 0.5*(27l2²-18l2+2)
         let dphi1_dl2 = 0.5 * (27.0 * l2 * l2 - 18.0 * l2 + 2.0);

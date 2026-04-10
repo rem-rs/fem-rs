@@ -66,7 +66,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// - If `order > 2` (only ND1 and ND2 are currently supported).
     /// - If the mesh is neither 2-D triangles nor 3-D tetrahedra.
     pub fn new(mesh: M, order: u8) -> Self {
-        assert!(order >= 1 && order <= 2, "HCurlSpace: only orders 1 (ND1) and 2 (ND2) are supported");
+        assert!((1..=2).contains(&order), "HCurlSpace: only orders 1 (ND1) and 2 (ND2) are supported");
         let dim = mesh.dim() as usize;
 
         let local_edges: &[(usize, usize)] = match dim {

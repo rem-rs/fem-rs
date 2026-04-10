@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn from_f64_roundtrip() {
-        let v = 3.14_f64;
+        let v = std::f64::consts::PI;
         assert_eq!(f64::from_f64(v), v);
         let _ = f32::from_f64(v);
     }

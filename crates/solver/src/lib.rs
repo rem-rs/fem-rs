@@ -30,7 +30,7 @@ use linger::{
     core::scalar::Scalar as LingerScalar,
     direct::{DirectSolver, SparseLu, SparseCholesky, SparseLdlt},
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
-    precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig, AuxSpaceSolver},
+    precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig},
     sparse::CsrMatrix as LingerCsr,
     DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, SolverParams, VerboseLevel,
 };
@@ -73,8 +73,10 @@ pub struct SolveResult {
 
 /// Verbosity level for iterative solvers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PrintLevel {
     /// No output.
+    #[default]
     Silent,
     /// Print summary on convergence/failure only.
     Summary,
@@ -84,9 +86,6 @@ pub enum PrintLevel {
     Debug,
 }
 
-impl Default for PrintLevel {
-    fn default() -> Self { PrintLevel::Silent }
-}
 
 /// Convergence parameters passed to every solver.
 #[derive(Debug, Clone)]
@@ -459,19 +458,12 @@ pub fn solve_sparse_ldlt<T: LingerScalar>(
 /// It uses a multigrid V-cycle on the auxiliary nodal space plus
 /// a stationary correction on the edge space.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct AmsSolverConfig {
     pub inner_cfg: SolverConfig,
     pub ams_cfg: AmsConfig,
 }
 
-impl Default for AmsSolverConfig {
-    fn default() -> Self {
-        Self {
-            inner_cfg: SolverConfig::default(),
-            ams_cfg: AmsConfig::default(),
-        }
-    }
-}
 
 /// Solve an H(curl) system using PCG with AMS preconditioner.
 ///
@@ -544,19 +536,12 @@ pub fn solve_gmres_ams<T: LingerScalar>(
 /// It combines auxiliary-space cycles on the edge space (via curl) and
 /// nodal space (via gradient) for robust H(div) preconditioning.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct AdsSolverConfig {
     pub inner_cfg: SolverConfig,
     pub ads_cfg: AdsConfig,
 }
 
-impl Default for AdsSolverConfig {
-    fn default() -> Self {
-        Self {
-            inner_cfg: SolverConfig::default(),
-            ads_cfg: AdsConfig::default(),
-        }
-    }
-}
 
 /// Solve an H(div) system using PCG with ADS preconditioner.
 ///

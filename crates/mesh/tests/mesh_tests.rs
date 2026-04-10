@@ -1,7 +1,6 @@
 //! Integration tests for the fem-mesh crate.
 
 use fem_mesh::{
-    boundary::BoundaryTag,
     element_type::ElementType,
     topology::MeshTopology,
     SimplexMesh,

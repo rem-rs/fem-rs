@@ -346,7 +346,7 @@ mod tests {
     fn area_preserved_on_unit_square() {
         // Area of unit square = 1.0.
         // Sum of |det(J)| * area_ref_triangle = sum of element areas.
-        use crate::element_type::ElementType;
+        
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let curved = CurvedMesh::from_linear(&mesh);
         let xi_centroid = vec![1.0 / 3.0, 1.0 / 3.0];
@@ -366,7 +366,7 @@ mod tests {
         // Test that map_fn is applied: project midpoints onto the unit circle.
         // Only a sanity check that projection is called.
         let mesh = SimplexMesh::<2>::unit_square_tri(2);
-        let mut map_called = std::sync::atomic::AtomicUsize::new(0);
+        let map_called = std::sync::atomic::AtomicUsize::new(0);
         let curved = CurvedMesh::elevate_to_order2(&mesh, |x: [f64; 2]| {
             map_called.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             x // identity — just checking that it's called

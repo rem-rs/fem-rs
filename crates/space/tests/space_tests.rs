@@ -199,7 +199,7 @@ fn p2_interpolate_quadratic_exact() {
 #[test]
 fn apply_dirichlet_zeros_rhs_at_boundary() {
     use fem_linalg::{CooMatrix, CsrMatrix};
-    use fem_mesh::topology::MeshTopology;
+    
 
     let n = 4;
     let mesh = SimplexMesh::<2>::unit_square_tri(n);

@@ -339,8 +339,8 @@ mod tests {
     #[test]
     fn nd2_curl_is_linear() {
         let elem = TriND2;
-        let mut curl = vec![0.0; 8];
-        let mut curl2 = vec![0.0; 8];
+        let curl = vec![0.0; 8];
+        let curl2 = vec![0.0; 8];
 
         let pts = [
             [0.1, 0.1],

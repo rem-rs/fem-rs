@@ -590,12 +590,12 @@ impl GeneralizedAlpha {
         let (alpha_f, alpha_m, gamma) = self.params();
 
         // Predicted intermediate time levels
-        let t_m = t + alpha_m * dt;
+        let _t_m = t + alpha_m * dt;
         let t_f = t + alpha_f * dt;
 
         // Predicted v at t_f: v_f = v_n + alpha_f * gamma * dt * dvdt_n
         // (predictor for the corrector step below)
-        let mut v_f: Vec<f64> = (0..n)
+        let v_f: Vec<f64> = (0..n)
             .map(|i| v[i] + alpha_f * gamma * dt * state.dvdt[i])
             .collect();
 

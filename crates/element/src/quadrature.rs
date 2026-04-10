@@ -189,7 +189,7 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
         let t3 = 0.059_715_871_789_769_81;
         let w1 = 0.125_939_180_544_827_17 / 2.0;
         let w2 = 0.132_394_152_788_506_16 / 2.0;
-        let w3 = 0.225_000_000_000_000_00 / 2.0;
+        let w3 = 0.225 / 2.0;
         QuadratureRule {
             points: vec![
                 vec![s1, s1],
@@ -206,19 +206,19 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
         // 12-point Dunavant rule (exact for degree 6)
         // Weights sum to 0.5 (area of reference triangle).
         // Source: Dunavant (1985), rule for p=6.
-        let a1 = 0.063_089_014_491_502_228_34_f64;
+        let a1 = 0.063_089_014_491_502_23_f64;
         let b1 = 1.0 - 2.0 * a1;
-        let w1 = 0.025_422_453_185_103_408_46_f64;
+        let w1 = 0.025_422_453_185_103_41_f64;
 
-        let a2 = 0.249_286_745_170_910_421_291_f64;
+        let a2 = 0.249_286_745_170_910_43_f64;
         let b2 = 1.0 - 2.0 * a2;
-        let w2 = 0.058_393_137_861_187_562_200_f64;
+        let w2 = 0.058_393_137_861_187_56_f64;
 
         // 6 asymmetric points: permutations of (r3, s3, t3) in barycentric
-        let r3 = 0.636_502_499_121_399_561_012_f64;
-        let s3 = 0.310_352_451_033_785_763_171_f64;
+        let r3 = 0.636_502_499_121_399_6_f64;
+        let s3 = 0.310_352_451_033_785_8_f64;
         let t3 = 1.0 - r3 - s3;
-        let w3 = 0.041_425_537_809_186_787_596_f64;
+        let w3 = 0.041_425_537_809_186_785_f64;
 
         // Barycentric to (xi1,xi2): lam1=1-xi1-xi2, lam2=xi1, lam3=xi2
         // Permutations of (r,s,t): all 6 orderings

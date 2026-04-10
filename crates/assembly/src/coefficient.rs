@@ -529,9 +529,9 @@ mod tests {
 
     #[test]
     fn f64_is_constant_scalar_coeff() {
-        let c: f64 = 3.14;
+        let c: f64 = std::f64::consts::PI;
         let ctx = make_ctx(&[1.0, 2.0], 1);
-        assert_eq!(c.eval(&ctx), 3.14);
+        assert_eq!(c.eval(&ctx), std::f64::consts::PI);
         assert!(c.is_constant());
     }
 

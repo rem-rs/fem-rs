@@ -159,8 +159,8 @@ impl<'a, const D: usize> VtkWriter<'a, D> {
         for i in 0..n_nodes {
             let base = i * D;
             match D {
-                2 => write!(s, "          {} {} 0\n", mesh.coords[base], mesh.coords[base+1]).unwrap(),
-                3 => write!(s, "          {} {} {}\n", mesh.coords[base], mesh.coords[base+1], mesh.coords[base+2]).unwrap(),
+                2 => writeln!(s, "          {} {} 0", mesh.coords[base], mesh.coords[base+1]).unwrap(),
+                3 => writeln!(s, "          {} {} {}", mesh.coords[base], mesh.coords[base+1], mesh.coords[base+2]).unwrap(),
                 _ => panic!("VtkWriter: unsupported dimension D={D}"),
             }
         }
