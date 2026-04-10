@@ -349,7 +349,7 @@ check-all  = "check --workspace --all-features"
 
 ## Implementation Status
 
-Phase 49 complete. 515+ tests passing across the workspace.
+Phase 51 complete. 515+ tests passing across the workspace.
 
 | Crate | Status | Highlights |
 |-------|--------|------------|
@@ -357,8 +357,8 @@ Phase 49 complete. 515+ tests passing across the workspace.
 | `fem-mesh` | ✅ Complete | SimplexMesh, uniform/adaptive AMR, NCMesh (Tri3+Tet4 hanging constraints), CurvedMesh P2 isoparametric, periodic mesh, bounding box |
 | `fem-element` | ✅ Complete | Lagrange P1–P3 (Seg, Tri, Tet), Q1/Q2 (Quad), Q1 (Hex); Nédélec ND1/ND2 (Tri, Tet); Raviart-Thomas RT0/RT1 (Tri, Tet); Gauss/Lobatto/Grundmann-Moller quadrature |
 | `fem-linalg` | ✅ Complete | CsrMatrix, CooMatrix, Vector, SparsityPattern, dense LU, BlockMatrix/BlockVector, DenseTensor |
-| `fem-space` | ✅ Complete | H1Space (P1–P3), L2Space (P0/P1), VectorH1Space, HCurlSpace (ND1/ND2), HDivSpace (RT0/RT1), H1TraceSpace (P1–P3), DOF manager, hanging-node constraints |
-| `fem-assembly` | ✅ Complete | Scalar + vector assemblers; 15+ integrators; MixedAssembler; SIP-DG; NonlinearForm + Newton; partial assembly (matrix-free); coefficient system (PWConst, GridFunction, composition) |
+| `fem-space` | ✅ Complete | H1Space (P1–P3), L2Space (P0/P1), VectorH1Space, HCurlSpace (ND1/ND2, including 3D ND2 shared face DOFs), HDivSpace (RT0/RT1), H1TraceSpace (P1–P3), DOF manager, hanging-node constraints |
+| `fem-assembly` | ✅ Complete | Scalar + vector assemblers; 15+ integrators; MixedAssembler; SIP-DG; NonlinearForm + Newton; partial assembly (matrix-free); coefficient system (PWConst, GridFunction, composition); DiscreteLinearOperator supports 3D high-order curl (ND2->RT1) with strict de Rham div(curl)=0 verification |
 | `fem-solver` | ✅ Complete | CG/PCG+Jacobi/ILU0/ILDLt, GMRES, BiCGSTAB, IDR(s), TFQMR, FGMRES; sparse direct: LU/Cholesky/LDLᵀ; LOBPCG + KrylovSchur; MINRES; Schur complement; ODE: Euler/RK4/RK45/SDIRK-2/BDF-2/Newmark-β/Generalized-α/IMEX-ARK3 |
 | `fem-amg` | ✅ Complete | SA-AMG + RS-AMG, Chebyshev smoother, V/W/F cycles, reusable hierarchy (via linger) |
 | `fem-io` | ✅ Complete | GMSH v2/v4.1 ASCII+binary reader; VTK .vtu XML writer + reader; Matrix Market .mtx reader/writer |

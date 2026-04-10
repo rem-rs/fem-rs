@@ -24,7 +24,7 @@ use fem_element::{TriND2, VectorReferenceElement};
 use fem_linalg::Vector;
 use fem_mesh::{topology::MeshTopology, ElementTransformation};
 
-use crate::dof_manager::EdgeKey;
+use crate::dof_manager::{EdgeKey, FaceKey};
 use crate::fe_space::{FESpace, SpaceType};
 
 // ─── Local edge tables ──────────────────────────────────────────────────────
@@ -36,6 +36,14 @@ const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (0, 2)];
 const TET_EDGES: [(usize, usize); 6] = [
     (0, 1), (0, 2), (0, 3),
     (1, 2), (1, 3), (2, 3),
+];
+
+/// Local face definitions for 3-D tetrahedra (TetND2 ordering).
+const TET_FACES: [(usize, usize, usize); 4] = [
+    (1, 2, 3),
+    (0, 2, 3),
+    (0, 1, 3),
+    (0, 1, 2),
 ];
 
 // ─── HCurlSpace ─────────────────────────────────────────────────────────────
@@ -56,6 +64,8 @@ pub struct HCurlSpace<M: MeshTopology> {
     dofs_per_elem: usize,
     /// Edge → global DOF map (for boundary queries and interpolation).
     edge_to_dof: HashMap<EdgeKey, DofId>,
+    /// Face -> first global DOF map for 3D ND2 (second = first + 1).
+    face_to_dof: HashMap<FaceKey, DofId>,
     /// Spatial dimension.
     dim: usize,
 }
@@ -78,18 +88,26 @@ impl<M: MeshTopology> HCurlSpace<M> {
 
         // DOFs per element:
         //   ND1: 1 DOF per edge only
-        //   ND2: 2 DOFs per edge + interior bubble DOFs (2 for tri, 8 for tet)
+        //   ND2(2D): 2 DOFs per edge + 2 interior bubble DOFs
+        //   ND2(3D): 2 DOFs per edge + 2 DOFs per face
         let dofs_per_edge = order as usize;
+        let face_dofs_per_face = match (order, dim) {
+            (2, 3) => 2,
+            _ => 0,
+        };
         let interior_dofs_per_elem = match (order, dim) {
             (1, _) => 0,
             (2, 2) => 2,  // TriND2: 2 interior DOFs
-            (2, 3) => 8,  // TetND2: 8 face+interior DOFs
+            (2, 3) => 0,  // TetND2 has no volume moments in current element definition
             _ => panic!("unsupported"),
         };
-        let dofs_per_elem = local_edges.len() * dofs_per_edge + interior_dofs_per_elem;
+        let n_local_faces = if dim == 3 { TET_FACES.len() } else { 0 };
+        let dofs_per_elem =
+            local_edges.len() * dofs_per_edge + n_local_faces * face_dofs_per_face + interior_dofs_per_elem;
         let n_elem = mesh.n_elements();
 
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
+        let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
@@ -118,6 +136,24 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     signs_flat.push(sign);
                 }
             }
+
+            // 3D ND2 face DOFs (shared globally by canonical sorted face key).
+            if face_dofs_per_face > 0 {
+                for &(la, lb, lc) in &TET_FACES {
+                    let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                    let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
+                        let d = next_dof;
+                        next_dof += 2;
+                        d
+                    });
+                    dofs_flat.push(first_dof);
+                    dofs_flat.push(first_dof + 1);
+                    // Face moments are stored in canonical (sorted-face) tangential basis.
+                    signs_flat.push(1.0);
+                    signs_flat.push(1.0);
+                }
+            }
+
             // Interior bubble DOFs (element-local, not shared)
             for _ in 0..interior_dofs_per_elem {
                 dofs_flat.push(next_dof);
@@ -134,6 +170,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
             signs_flat,
             dofs_per_elem,
             edge_to_dof,
+            face_to_dof,
             dim,
         }
     }
@@ -155,6 +192,11 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// Number of unique edges in the mesh (== `n_dofs` for ND1).
     pub fn n_edges(&self) -> usize {
         self.edge_to_dof.len()
+    }
+
+    /// Number of unique faces in 3D ND2 mode.
+    pub fn n_faces(&self) -> usize {
+        self.face_to_dof.len()
     }
 
     /// Vector-valued interpolation via the Nédélec DOF functional.
@@ -192,8 +234,8 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 result.as_slice_mut()[dof as usize] = dot;
             }
         } else {
-            // ND2: two tangential moments per edge + 2 interior bubble DOFs per element.
-            // 3-point Gauss-Legendre on [0,1] (exact for polynomials ≤ degree 5).
+            // ND2: edge moments in all dimensions, plus 2D interior or 3D face moments.
+            // 3-point Gauss-Legendre on [0,1] (exact for polynomials <= degree 5).
             let sq_3_5: f64 = (3.0_f64 / 5.0).sqrt();
             let gl_pts = [0.5 * (1.0 - sq_3_5), 0.5, 0.5 * (1.0 + sq_3_5)];
             let gl_wts = [5.0_f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
@@ -222,37 +264,78 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 r[first_dof as usize + 1] = mom1;
             }
 
-            // Step 2 — interior bubble DOFs (element-local).
-            let qr = TriND2.quadrature(4);
-            let n_elem = self.mesh.n_elements();
-            for e in 0..n_elem as u32 {
-                let dofs  = self.element_dofs(e);
-                let nodes = self.mesh.element_nodes(e);
-                let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
-                let det_j = transform.det_j().abs();
+            if self.dim == 2 {
+                // Step 2 (2D) - interior bubble DOFs (element-local).
+                let qr = TriND2.quadrature(4);
+                let n_elem = self.mesh.n_elements();
+                for e in 0..n_elem as u32 {
+                    let dofs = self.element_dofs(e);
+                    let nodes = self.mesh.element_nodes(e);
+                    let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
+                    let det_j = transform.det_j().abs();
 
-                // Bubble DOFs are always the last 2 local DOFs for TriND2.
-                let bub0 = dofs[dofs.len() - 2] as usize;
-                let bub1 = dofs[dofs.len() - 1] as usize;
+                    // Bubble DOFs are always the last 2 local DOFs for TriND2.
+                    let bub0 = dofs[dofs.len() - 2] as usize;
+                    let bub1 = dofs[dofs.len() - 1] as usize;
 
-                let x0 = self.mesh.node_coords(nodes[0]);
-                let x1 = self.mesh.node_coords(nodes[1]);
-                let x2 = self.mesh.node_coords(nodes[2]);
-                let j00 = x1[0] - x0[0]; let j10 = x1[1] - x0[1];
-                let j01 = x2[0] - x0[0]; let j11 = x2[1] - x0[1];
+                    let x0 = self.mesh.node_coords(nodes[0]);
+                    let x1 = self.mesh.node_coords(nodes[1]);
+                    let x2 = self.mesh.node_coords(nodes[2]);
+                    let j00 = x1[0] - x0[0];
+                    let j10 = x1[1] - x0[1];
+                    let j01 = x2[0] - x0[0];
+                    let j11 = x2[1] - x0[1];
 
-                let mut int_x = 0.0_f64;
-                let mut int_y = 0.0_f64;
-                for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
-                    let xp = [x0[0] + j00 * xi[0] + j01 * xi[1],
-                              x0[1] + j10 * xi[0] + j11 * xi[1]];
-                    let fval = f(&xp);
-                    int_x += w * fval[0];
-                    int_y += w * fval[1];
+                    let mut int_x = 0.0_f64;
+                    let mut int_y = 0.0_f64;
+                    for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
+                        let xp = [x0[0] + j00 * xi[0] + j01 * xi[1], x0[1] + j10 * xi[0] + j11 * xi[1]];
+                        let fval = f(&xp);
+                        int_x += w * fval[0];
+                        int_y += w * fval[1];
+                    }
+                    let r = result.as_slice_mut();
+                    r[bub0] = int_x * det_j;
+                    r[bub1] = int_y * det_j;
                 }
-                let r = result.as_slice_mut();
-                r[bub0] = int_x * det_j;
-                r[bub1] = int_y * det_j;
+            } else {
+                // Step 2 (3D) - face moments, assembled once per unique global face.
+                // DOF_f0 = int_f F.ds dA, DOF_f1 = int_f F.dt dA in canonical sorted-face basis.
+                let qr_face = TriND2.quadrature(4);
+                for (&FaceKey(a, b, c), &first_dof) in &self.face_to_dof {
+                    let pa = self.mesh.node_coords(a);
+                    let pb = self.mesh.node_coords(b);
+                    let pc = self.mesh.node_coords(c);
+
+                    let ds = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+                    let dt = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+                    let cross = [
+                        ds[1] * dt[2] - ds[2] * dt[1],
+                        ds[2] * dt[0] - ds[0] * dt[2],
+                        ds[0] * dt[1] - ds[1] * dt[0],
+                    ];
+                    let jac_area = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+
+                    let mut m0 = 0.0_f64;
+                    let mut m1 = 0.0_f64;
+                    for (xi, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
+                        let s = xi[0];
+                        let t = xi[1];
+                        let pt = [
+                            pa[0] + s * ds[0] + t * dt[0],
+                            pa[1] + s * ds[1] + t * dt[1],
+                            pa[2] + s * ds[2] + t * dt[2],
+                        ];
+                        let fv = f(&pt);
+                        let d_sigma = w * jac_area;
+                        m0 += d_sigma * (fv[0] * ds[0] + fv[1] * ds[1] + fv[2] * ds[2]);
+                        m1 += d_sigma * (fv[0] * dt[0] + fv[1] * dt[1] + fv[2] * dt[2]);
+                    }
+
+                    let r = result.as_slice_mut();
+                    r[first_dof as usize] = m0;
+                    r[first_dof as usize + 1] = m1;
+                }
             }
         }
         result
@@ -291,6 +374,7 @@ impl<M: MeshTopology> FESpace for HCurlSpace<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use fem_mesh::SimplexMesh;
 
     #[test]
@@ -362,5 +446,35 @@ mod tests {
         for &val in v.as_slice() {
             assert!(val.is_finite(), "interpolated value should be finite");
         }
+    }
+
+    #[test]
+    fn hcurl_nd2_tet_local_dof_layout() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let space = HCurlSpace::new(mesh, 2);
+
+        assert_eq!(space.element_dofs(0).len(), 20, "TetND2 should have 20 local DOFs");
+        assert_eq!(space.element_signs(0).len(), 20, "TetND2 sign array length mismatch");
+    }
+
+    #[test]
+    fn hcurl_nd2_tet_global_dof_count_matches_edges_faces() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+
+        let mut edges: HashSet<EdgeKey> = HashSet::new();
+        let mut faces: HashSet<FaceKey> = HashSet::new();
+        for e in 0..mesh.n_elements() as u32 {
+            let ns = mesh.element_nodes(e);
+            for &(i, j) in &TET_EDGES {
+                edges.insert(EdgeKey::new(ns[i], ns[j]));
+            }
+            for &(i, j, k) in &TET_FACES {
+                faces.insert(FaceKey::new(ns[i], ns[j], ns[k]));
+            }
+        }
+
+        let space = HCurlSpace::new(mesh, 2);
+        let expected = 2 * edges.len() + 2 * faces.len();
+        assert_eq!(space.n_dofs(), expected, "ND2 3D global DOF count should be 2*n_edges + 2*n_faces");
     }
 }

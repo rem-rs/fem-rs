@@ -17,6 +17,7 @@
 //! | `divergence` | H(div) RT0 | L2 (P0)   | 0     |
 //! | `divergence` | H(div) RT1 | L2 (P1)   | 1     |
 //! | `curl_3d`    | H(curl) ND1| H(div) RT0| 1     |
+//! | `curl_3d`    | H(curl) ND2| H(div) RT1| 2     |
 //!
 //! The lowest-order (P1→ND1, RT0→P0) matrices are assembled topologically
 //! (exact, no quadrature error).  Higher-order pairs (P2→ND2, RT1→P1) use
@@ -32,7 +33,7 @@
 
 use std::collections::HashSet;
 
-use fem_element::{ReferenceElement, TetRT1, TriND1, TriND2, TriRT1, VectorReferenceElement};
+use fem_element::{ReferenceElement, TetND2, TetRT1, TriND1, TriND2, TriRT1, VectorReferenceElement};
 use fem_element::lagrange::TriP2;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, ElementTransformation};
@@ -211,7 +212,6 @@ impl DiscreteLinearOperator {
         //   DOF_6^{phys}(F_phys) = ∫_{T_phys} F_x dA = |det_J| ∫_{T_ref} (J^{-T} ∇_ref φ_j)_x dξ
         //   DOF_7^{phys}(F_phys) = ∫_{T_phys} F_y dA = |det_J| ∫_{T_ref} (J^{-T} ∇_ref φ_j)_y dξ
         // These depend on J.  They are computed per element.
-        let n_nd2_local = 8usize;
         let n_p2_local  = 6usize;
         let dim = 2usize;
 
@@ -663,8 +663,15 @@ impl DiscreteLinearOperator {
         l2_space: &L2Space<M>,
     ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
         let mesh = hdiv_space.mesh();
-        let dim  = mesh.dim();
-        let n_local_dofs: usize = if dim == 2 { 3 } else { 4 };
+        let dim = mesh.dim();
+        if dim != 2 && dim != 3 {
+            return Err(DiscreteOpError::UnsupportedDimension {
+                op: "divergence",
+                dim,
+            });
+        }
+
+        let n_local_dofs = if dim == 2 { 3 } else { 4 };
 
         let n_l2   = l2_space.n_dofs();
         let n_hdiv = hdiv_space.n_dofs();
@@ -1009,26 +1016,21 @@ impl DiscreteLinearOperator {
     ///   - C[face, edge(b,c)] = +1
     ///   - C[face, edge(a,c)] = −1  (traversal goes c→a, opposite to global a→c)
     ///
+    /// For the high-order pair (ND2 -> RT1), a per-element local
+    /// reconstruction is used:
+    ///
+    /// 1. Choose 20 spanning fields of the TetND2 polynomial space.
+    /// 2. Evaluate their ND2 DOFs (`D`) and RT1 DOFs of their curls (`Y`).
+    /// 3. Solve `D^T * Z = Y^T`, where `Z = A^T`, to obtain the local map
+    ///    `A: ND2_dofs -> RT1_dofs`.
+    ///
     /// # Errors
-    /// Returns [`DiscreteOpError`] if spaces are not lowest-order (ND1 and RT0)
-    /// or if the mesh is not 3-dimensional.
+    /// Returns [`DiscreteOpError`] if orders are unsupported/incompatible or
+    /// if the mesh is not 3-dimensional.
     pub fn curl_3d<M: MeshTopology>(
         hcurl_space: &HCurlSpace<M>,
         hdiv_space: &HDivSpace<M>,
     ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
-        if hcurl_space.order() != 1 {
-            return Err(DiscreteOpError::UnsupportedHCurlOrder {
-                op: "curl_3d",
-                order: hcurl_space.order(),
-            });
-        }
-        if hdiv_space.order() != 0 {
-            return Err(DiscreteOpError::UnsupportedHDivOrder {
-                op: "curl_3d",
-                order: hdiv_space.order(),
-            });
-        }
-
         let mesh = hcurl_space.mesh();
         if mesh.dim() != 3 {
             return Err(DiscreteOpError::UnsupportedDimension {
@@ -1036,6 +1038,42 @@ impl DiscreteLinearOperator {
                 dim: mesh.dim(),
             });
         }
+
+        match hcurl_space.order() {
+            1 | 2 => {}
+            order => {
+                return Err(DiscreteOpError::UnsupportedHCurlOrder {
+                    op: "curl_3d",
+                    order,
+                })
+            }
+        }
+        match hdiv_space.order() {
+            0 | 1 => {}
+            order => {
+                return Err(DiscreteOpError::UnsupportedHDivOrder {
+                    op: "curl_3d",
+                    order,
+                })
+            }
+        }
+
+        match (hcurl_space.order(), hdiv_space.order()) {
+            (1, 0) => Self::curl_3d_nd1_rt0(hcurl_space, hdiv_space),
+            (2, 1) => Self::curl_3d_nd2_rt1(hcurl_space, hdiv_space),
+            _ => Err(DiscreteOpError::IncompatibleOrders {
+                op: "curl_3d",
+                h1_order: hcurl_space.order(),
+                hcurl_order: hdiv_space.order(),
+            }),
+        }
+    }
+
+    fn curl_3d_nd1_rt0<M: MeshTopology>(
+        hcurl_space: &HCurlSpace<M>,
+        hdiv_space: &HDivSpace<M>,
+    ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
+        let mesh = hcurl_space.mesh();
 
         let n_hdiv = hdiv_space.n_dofs();
         let n_hcurl = hcurl_space.n_dofs();
@@ -1086,6 +1124,265 @@ impl DiscreteLinearOperator {
 
                     let edge_dof = hcurl_dofs[edge_idx] as usize;
                     coo.add(face_dof, edge_dof, stokes_sign);
+                }
+            }
+        }
+
+        Ok(coo.into_csr())
+    }
+
+    fn curl_3d_nd2_rt1<M: MeshTopology>(
+        hcurl_space: &HCurlSpace<M>,
+        hdiv_space: &HDivSpace<M>,
+    ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
+        let mesh = hcurl_space.mesh();
+        let n_hdiv = hdiv_space.n_dofs();
+        let n_hcurl = hcurl_space.n_dofs();
+        let mut coo = CooMatrix::<f64>::new(n_hdiv, n_hcurl);
+
+        let nd2_elem = TetND2;
+        let n_nd2 = nd2_elem.n_dofs(); // 20
+        let rt1_elem = TetRT1;
+        let n_rt1 = rt1_elem.n_dofs(); // 15
+
+        let tet_edges: [(usize, usize); 6] = [
+            (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
+        ];
+        let tet_faces: [(usize, usize, usize); 4] = [
+            (1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2),
+        ];
+
+        // Same spanning set as TetND2 monomial implementation.
+        let eval_field = |k: usize, x: f64, y: f64, z: f64| -> [f64; 3] {
+            match k {
+                0 => [1.0, 0.0, 0.0],
+                1 => [x, 0.0, 0.0],
+                2 => [y, 0.0, 0.0],
+                3 => [z, 0.0, 0.0],
+                4 => [0.0, 1.0, 0.0],
+                5 => [0.0, x, 0.0],
+                6 => [0.0, y, 0.0],
+                7 => [0.0, z, 0.0],
+                8 => [0.0, 0.0, 1.0],
+                9 => [0.0, 0.0, x],
+                10 => [0.0, 0.0, y],
+                11 => [0.0, 0.0, z],
+                12 => [-x * y, x * x, 0.0],
+                13 => [-z * x, 0.0, x * x],
+                14 => [-y * y, x * y, 0.0],
+                15 => [0.0, -y * z, y * y],
+                16 => [-z * z, 0.0, z * x],
+                17 => [0.0, -z * z, y * z],
+                18 => [-y * z, x * z, 0.0],
+                19 => [-z * y, 0.0, x * y],
+                _ => unreachable!(),
+            }
+        };
+        let eval_curl = |k: usize, x: f64, y: f64, z: f64| -> [f64; 3] {
+            match k {
+                0 => [0.0, 0.0, 0.0],
+                1 => [0.0, 0.0, 0.0],
+                2 => [0.0, 0.0, -1.0],
+                3 => [0.0, 1.0, 0.0],
+                4 => [0.0, 0.0, 0.0],
+                5 => [0.0, 0.0, 1.0],
+                6 => [0.0, 0.0, 0.0],
+                7 => [-1.0, 0.0, 0.0],
+                8 => [0.0, 0.0, 0.0],
+                9 => [0.0, -1.0, 0.0],
+                10 => [1.0, 0.0, 0.0],
+                11 => [0.0, 0.0, 0.0],
+                12 => [0.0, 0.0, 3.0 * x],
+                13 => [0.0, -3.0 * x, 0.0],
+                14 => [0.0, 0.0, 3.0 * y],
+                15 => [3.0 * y, 0.0, 0.0],
+                16 => [0.0, -3.0 * z, 0.0],
+                17 => [3.0 * z, 0.0, 0.0],
+                18 => [-x, -y, 2.0 * z],
+                19 => [x, -2.0 * y, z],
+                _ => unreachable!(),
+            }
+        };
+
+        // 4-point Gauss-Legendre on [0,1].
+        let sq6_5 = (6.0f64 / 5.0).sqrt();
+        let ta = ((3.0 - 2.0 * sq6_5) / 7.0).sqrt();
+        let tb = ((3.0 + 2.0 * sq6_5) / 7.0).sqrt();
+        let wa = (18.0 + 30.0f64.sqrt()) / 36.0;
+        let wb = (18.0 - 30.0f64.sqrt()) / 36.0;
+        let gl_pts = [
+            0.5 * (1.0 - tb),
+            0.5 * (1.0 - ta),
+            0.5 * (1.0 + ta),
+            0.5 * (1.0 + tb),
+        ];
+        let gl_wts = [0.5 * wb, 0.5 * wa, 0.5 * wa, 0.5 * wb];
+
+        let qr_face = TriRT1.quadrature(4);
+        let qr_vol = rt1_elem.quadrature(4);
+        let mut visited_rt1 = HashSet::with_capacity(n_hdiv);
+
+        for e in mesh.elem_iter() {
+            let nodes = mesh.element_nodes(e);
+            let hcurl_dofs = hcurl_space.element_dofs(e);
+            let hdiv_dofs = hdiv_space.element_dofs(e);
+
+            let mut dmat = vec![0.0_f64; n_nd2 * n_nd2];
+            let mut ymat = vec![0.0_f64; n_rt1 * n_nd2];
+
+            let x0 = mesh.node_coords(nodes[0]);
+            let x1 = mesh.node_coords(nodes[1]);
+            let x2 = mesh.node_coords(nodes[2]);
+            let x3 = mesh.node_coords(nodes[3]);
+            let j0 = [x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]];
+            let j1 = [x2[0] - x0[0], x2[1] - x0[1], x2[2] - x0[2]];
+            let j2 = [x3[0] - x0[0], x3[1] - x0[1], x3[2] - x0[2]];
+            let det_abs = (j0[0] * (j1[1] * j2[2] - j1[2] * j2[1])
+                - j1[0] * (j0[1] * j2[2] - j0[2] * j2[1])
+                + j2[0] * (j0[1] * j1[2] - j0[2] * j1[1]))
+                .abs();
+
+            for k in 0..n_nd2 {
+                let mut dof_nd2 = vec![0.0_f64; n_nd2];
+                let mut dof_rt1 = vec![0.0_f64; n_rt1];
+
+                // ND2 edge moments (2 per edge) in global edge orientation.
+                for (edge_local, &(li, lj)) in tet_edges.iter().enumerate() {
+                    let gi = nodes[li];
+                    let gj = nodes[lj];
+                    let (ga, gb) = if gi < gj { (gi, gj) } else { (gj, gi) };
+                    let pa = mesh.node_coords(ga);
+                    let pb = mesh.node_coords(gb);
+                    let tau = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+
+                    let mut m0 = 0.0_f64;
+                    let mut m1 = 0.0_f64;
+                    for q in 0..4 {
+                        let t = gl_pts[q];
+                        let w = gl_wts[q];
+                        let pt = [
+                            pa[0] + t * tau[0],
+                            pa[1] + t * tau[1],
+                            pa[2] + t * tau[2],
+                        ];
+                        let fv = eval_field(k, pt[0], pt[1], pt[2]);
+                        let tang = fv[0] * tau[0] + fv[1] * tau[1] + fv[2] * tau[2];
+                        m0 += w * tang;
+                        m1 += w * tang * t;
+                    }
+
+                    dof_nd2[2 * edge_local] = m0;
+                    dof_nd2[2 * edge_local + 1] = m1;
+                }
+
+                // ND2 face tangential moments and RT1 face normal moments.
+                for (face_local, &(la, lb, lc)) in tet_faces.iter().enumerate() {
+                    let mut fvtx = [nodes[la], nodes[lb], nodes[lc]];
+                    fvtx.sort_unstable();
+                    let pa = mesh.node_coords(fvtx[0]);
+                    let pb = mesh.node_coords(fvtx[1]);
+                    let pc = mesh.node_coords(fvtx[2]);
+
+                    let ds = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+                    let dt = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+                    let cross = [
+                        ds[1] * dt[2] - ds[2] * dt[1],
+                        ds[2] * dt[0] - ds[0] * dt[2],
+                        ds[0] * dt[1] - ds[1] * dt[0],
+                    ];
+                    let jac_area =
+                        (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+                    let n_unit = [cross[0] / jac_area, cross[1] / jac_area, cross[2] / jac_area];
+
+                    let mut nd_t1 = 0.0_f64;
+                    let mut nd_t2 = 0.0_f64;
+                    let mut rt_m0 = 0.0_f64;
+                    let mut rt_m1 = 0.0_f64;
+                    let mut rt_m2 = 0.0_f64;
+
+                    for (xi, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
+                        let s = xi[0];
+                        let t = xi[1];
+                        let pt = [
+                            pa[0] + s * ds[0] + t * dt[0],
+                            pa[1] + s * ds[1] + t * dt[1],
+                            pa[2] + s * ds[2] + t * dt[2],
+                        ];
+
+                        let fv = eval_field(k, pt[0], pt[1], pt[2]);
+                        let cv = eval_curl(k, pt[0], pt[1], pt[2]);
+                        let d_sigma = w * jac_area;
+
+                        nd_t1 += d_sigma * (fv[0] * ds[0] + fv[1] * ds[1] + fv[2] * ds[2]);
+                        nd_t2 += d_sigma * (fv[0] * dt[0] + fv[1] * dt[1] + fv[2] * dt[2]);
+
+                        let nflux = cv[0] * n_unit[0] + cv[1] * n_unit[1] + cv[2] * n_unit[2];
+                        rt_m0 += d_sigma * nflux;
+                        rt_m1 += d_sigma * nflux * s;
+                        rt_m2 += d_sigma * nflux * t;
+                    }
+
+                    dof_nd2[12 + 2 * face_local] = nd_t1;
+                    dof_nd2[12 + 2 * face_local + 1] = nd_t2;
+
+                    dof_rt1[3 * face_local] = rt_m0;
+                    dof_rt1[3 * face_local + 1] = rt_m1;
+                    dof_rt1[3 * face_local + 2] = rt_m2;
+                }
+
+                // RT1 interior moments of curl(field).
+                let mut int_x = 0.0_f64;
+                let mut int_y = 0.0_f64;
+                let mut int_z = 0.0_f64;
+                for (xi, &w) in qr_vol.points.iter().zip(qr_vol.weights.iter()) {
+                    let pt = [
+                        x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
+                        x0[1] + j0[1] * xi[0] + j1[1] * xi[1] + j2[1] * xi[2],
+                        x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
+                    ];
+                    let cv = eval_curl(k, pt[0], pt[1], pt[2]);
+                    int_x += w * cv[0];
+                    int_y += w * cv[1];
+                    int_z += w * cv[2];
+                }
+                dof_rt1[12] = int_x * det_abs;
+                dof_rt1[13] = int_y * det_abs;
+                dof_rt1[14] = int_z * det_abs;
+
+                for i in 0..n_nd2 {
+                    dmat[i * n_nd2 + k] = dof_nd2[i];
+                }
+                for p in 0..n_rt1 {
+                    ymat[p * n_nd2 + k] = dof_rt1[p];
+                }
+            }
+
+            // Solve D^T * Z = Y^T, where Z = A^T and A maps ND2 -> RT1.
+            let mut dt = vec![0.0_f64; n_nd2 * n_nd2];
+            for i in 0..n_nd2 {
+                for j in 0..n_nd2 {
+                    dt[i * n_nd2 + j] = dmat[j * n_nd2 + i];
+                }
+            }
+            let mut yt = vec![0.0_f64; n_nd2 * n_rt1];
+            for p in 0..n_rt1 {
+                for k in 0..n_nd2 {
+                    yt[k * n_rt1 + p] = ymat[p * n_nd2 + k];
+                }
+            }
+
+            let z = solve_small(n_nd2, n_rt1, &dt, &yt); // shape 20x15 row-major
+
+            for (p_local, &global_rt1) in hdiv_dofs.iter().enumerate() {
+                let g_rt1 = global_rt1 as usize;
+                if !visited_rt1.insert(g_rt1) {
+                    continue;
+                }
+                for (i_local, &global_nd2) in hcurl_dofs.iter().enumerate() {
+                    let val = z[i_local * n_rt1 + p_local];
+                    if val.abs() > 1e-15 {
+                        coo.add(g_rt1, global_nd2 as usize, val);
+                    }
                 }
             }
         }
@@ -1363,6 +1660,39 @@ mod tests {
         }
     }
 
+    /// Test: order-2 3D de Rham property div(curl(u)) = 0 for ND2->RT1->P1.
+    #[test]
+    fn de_rham_div_of_curl_3d_is_zero_order2() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh3 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh4 = SimplexMesh::<3>::unit_cube_tet(2);
+
+        let hcurl = HCurlSpace::new(mesh, 2);
+        let hdiv = HDivSpace::new(mesh2, 1);
+        let hdiv2 = HDivSpace::new(mesh3, 1);
+        let l2 = L2Space::new(mesh4, 1);
+
+        let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+        let d = DiscreteLinearOperator::divergence(&hdiv2, &l2).unwrap();
+
+        for seed in 0..3u64 {
+            let u: Vec<f64> = (0..hcurl.n_dofs())
+                .map(|i| (((i as u64 * 1_146_959_810_393 + seed * 972_663_749) % 1000) as f64) / 500.0 - 1.0)
+                .collect();
+            let mut cu = vec![0.0f64; hdiv.n_dofs()];
+            c.spmv(&u, &mut cu);
+            let mut dcu = vec![0.0f64; l2.n_dofs()];
+            d.spmv(&cu, &mut dcu);
+
+            let max_err: f64 = dcu.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            assert!(
+                max_err < 1e-8,
+                "order-2 3D div(curl(u)) should be zero, seed={seed}, max |D*C*u| = {max_err}"
+            );
+        }
+    }
+
     /// Test: curl_3d matrix dimensions.
     #[test]
     fn curl_3d_dimensions() {
@@ -1373,6 +1703,20 @@ mod tests {
         let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
         assert_eq!(c.nrows, hdiv.n_dofs());
         assert_eq!(c.ncols, hcurl.n_dofs());
+        assert!(c.nrows > 0 && c.ncols > 0);
+    }
+
+    /// Test: Curl ND2->RT1 matrix dimensions in 3D.
+    #[test]
+    fn curl_3d_nd2_rt1_dimensions() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let hcurl = HCurlSpace::new(mesh, 2);
+        let hdiv = HDivSpace::new(mesh2, 1);
+
+        let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+        assert_eq!(c.nrows, hdiv.n_dofs(), "C nrows should equal n_rt1");
+        assert_eq!(c.ncols, hcurl.n_dofs(), "C ncols should equal n_nd2");
         assert!(c.nrows > 0 && c.ncols > 0);
     }
 
