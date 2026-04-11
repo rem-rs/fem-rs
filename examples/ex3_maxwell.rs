@@ -21,11 +21,15 @@
 //! cargo run --example ex3_maxwell -- --n 8
 //! cargo run --example ex3_maxwell -- --n 16
 //! cargo run --example ex3_maxwell -- --n 32
+//! cargo run --example ex3_maxwell -- --n 16 --solver ams
+//! cargo run --example ex3_maxwell -- --n 16 --solver jacobi
 //! ```
 
 use std::f64::consts::PI;
+use std::collections::HashSet;
 
 use fem_assembly::{
+    DiscreteLinearOperator,
     VectorAssembler,
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
@@ -33,9 +37,9 @@ use fem_assembly::{
 use fem_element::reference::VectorReferenceElement;
 use fem_element::nedelec::TriND1;
 use fem_mesh::{SimplexMesh, topology::MeshTopology};
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_solver::{AmsSolverConfig, SolverConfig, fem_to_linger_csr, solve_pcg_ams, solve_pcg_jacobi};
 use fem_space::{
-    HCurlSpace,
+    H1Space, HCurlSpace,
     fe_space::FESpace,
     constraints::{apply_dirichlet, boundary_dofs_hcurl},
 };
@@ -45,11 +49,13 @@ fn main() {
 
     println!("=== fem-rs Example 3: Maxwell cavity (curl-curl + mass) ===");
     println!("  Mesh: {}×{} subdivisions, ND1 elements", args.n, args.n);
+    println!("  Solver: {}", args.solver.as_str());
 
     // ─── 1. Create mesh and H(curl) space ───────────────────────────────────
     let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
     println!("  Nodes: {}, Elements: {}", mesh.n_nodes(), mesh.n_elems());
 
+    let h1_space = H1Space::new(mesh.clone(), 1);
     let space = HCurlSpace::new(mesh, 1);
     let n = space.n_dofs();
     println!("  Edge DOFs: {n}");
@@ -67,16 +73,52 @@ fn main() {
 
     // ─── 4. Apply n×E = 0 on all boundary edges ────────────────────────────
     let bnd = boundary_dofs_hcurl(space.mesh(), &space, &[1, 2, 3, 4]);
-    let bnd_vals = vec![0.0_f64; bnd.len()];
-    apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
 
     println!("  Boundary DOFs constrained: {}", bnd.len());
 
-    // ─── 5. Solve with PCG + Jacobi ────────────────────────────────────────
+    // ─── 5. Solve with selected preconditioner ─────────────────────────────
     let mut u = vec![0.0_f64; n];
-    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
-    let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
-        .expect("solver failed");
+    let cfg = SolverConfig {
+        rtol: 1e-10,
+        atol: 0.0,
+        max_iter: 10_000,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let res = match args.solver {
+        SolverKind::Ams => {
+            let bnd_set: HashSet<u32> = bnd.iter().copied().collect();
+            let free_dofs: Vec<usize> = (0..n as u32)
+                .filter(|d| !bnd_set.contains(d))
+                .map(|d| d as usize)
+                .collect();
+
+            let a_free = extract_submatrix(&mat, &free_dofs);
+            let b_free: Vec<f64> = free_dofs.iter().map(|&i| rhs[i]).collect();
+
+            let g = DiscreteLinearOperator::gradient(&h1_space, &space)
+                .expect("failed to assemble discrete gradient G");
+            let g_free = extract_rows(&g, &free_dofs);
+            let g_linger = fem_to_linger_csr(&g_free);
+
+            let mut u_free = vec![0.0_f64; free_dofs.len()];
+            let ams_cfg = AmsSolverConfig { inner_cfg: cfg.clone(), ..AmsSolverConfig::default() };
+            let ams_res = solve_pcg_ams(&a_free, &g_linger, &b_free, &mut u_free, &ams_cfg)
+                .expect("AMS solver failed");
+
+            for (k, &gi) in free_dofs.iter().enumerate() {
+                u[gi] = u_free[k];
+            }
+
+            ams_res
+        }
+        SolverKind::Jacobi => {
+            let bnd_vals = vec![0.0_f64; bnd.len()];
+            apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
+            solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
+                .expect("Jacobi solver failed")
+        }
+    };
 
     println!(
         "  Solve: {} iterations, residual = {:.3e}, converged = {}",
@@ -185,16 +227,90 @@ fn l2_error_hcurl(space: &HCurlSpace<SimplexMesh<2>>, uh: &[f64]) -> f64 {
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
-struct Args { n: usize }
+#[derive(Clone, Copy)]
+enum SolverKind {
+    Ams,
+    Jacobi,
+}
+
+impl SolverKind {
+    fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "jacobi" => Self::Jacobi,
+            _ => Self::Ams,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ams => "ams",
+            Self::Jacobi => "jacobi",
+        }
+    }
+}
+
+struct Args {
+    n: usize,
+    solver: SolverKind,
+}
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 16 };
+    let mut a = Args { n: 16, solver: SolverKind::Ams };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--n" => { a.n = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
+            "--solver" => {
+                let val = it.next().unwrap_or("ams".into());
+                a.solver = SolverKind::from_str(&val);
+            }
             _ => {}
         }
     }
     a
+}
+
+fn extract_submatrix(
+    mat: &fem_linalg::CsrMatrix<f64>,
+    rows_cols: &[usize],
+) -> fem_linalg::CsrMatrix<f64> {
+    use fem_linalg::CooMatrix;
+
+    let n = rows_cols.len();
+    let mut inv = vec![usize::MAX; mat.nrows];
+    for (i, &g) in rows_cols.iter().enumerate() {
+        inv[g] = i;
+    }
+
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    for (ri, &gr) in rows_cols.iter().enumerate() {
+        let row_start = mat.row_ptr[gr];
+        let row_end = mat.row_ptr[gr + 1];
+        for idx in row_start..row_end {
+            let gc = mat.col_idx[idx] as usize;
+            let ci = inv[gc];
+            if ci != usize::MAX {
+                coo.add(ri, ci, mat.values[idx]);
+            }
+        }
+    }
+
+    coo.into_csr()
+}
+
+fn extract_rows(
+    mat: &fem_linalg::CsrMatrix<f64>,
+    rows: &[usize],
+) -> fem_linalg::CsrMatrix<f64> {
+    use fem_linalg::CooMatrix;
+
+    let mut coo = CooMatrix::<f64>::new(rows.len(), mat.ncols);
+    for (ri, &gr) in rows.iter().enumerate() {
+        let row_start = mat.row_ptr[gr];
+        let row_end = mat.row_ptr[gr + 1];
+        for idx in row_start..row_end {
+            coo.add(ri, mat.col_idx[idx] as usize, mat.values[idx]);
+        }
+    }
+    coo.into_csr()
 }

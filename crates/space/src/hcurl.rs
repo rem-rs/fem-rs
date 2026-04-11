@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use fem_core::types::DofId;
 use fem_element::{TriND2, VectorReferenceElement};
 use fem_linalg::Vector;
-use fem_mesh::{topology::MeshTopology, ElementTransformation};
+use fem_mesh::{topology::MeshTopology, ElementTransformation, ElementType};
 
 use crate::dof_manager::{EdgeKey, FaceKey};
 use crate::fe_space::{FESpace, SpaceType};
@@ -32,10 +32,20 @@ use crate::fe_space::{FESpace, SpaceType};
 /// Local edge vertex pairs for 2-D triangles (TriND1 ordering).
 const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (0, 2)];
 
+/// Local edge vertex pairs for 2-D quadrilaterals (QuadND1 ordering).
+const QUAD_EDGES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+
 /// Local edge vertex pairs for 3-D tetrahedra (TetND1 ordering).
 const TET_EDGES: [(usize, usize); 6] = [
     (0, 1), (0, 2), (0, 3),
     (1, 2), (1, 3), (2, 3),
+];
+
+/// Local edge vertex pairs for 3-D hexahedra (HexND1 ordering).
+const HEX_EDGES: [(usize, usize); 12] = [
+    (0, 1), (3, 2), (4, 5), (7, 6),
+    (0, 3), (1, 2), (4, 7), (5, 6),
+    (0, 4), (1, 5), (2, 6), (3, 7),
 ];
 
 /// Local face definitions for 3-D tetrahedra (TetND2 ordering).
@@ -79,11 +89,18 @@ impl<M: MeshTopology> HCurlSpace<M> {
     pub fn new(mesh: M, order: u8) -> Self {
         assert!((1..=2).contains(&order), "HCurlSpace: only orders 1 (ND1) and 2 (ND2) are supported");
         let dim = mesh.dim() as usize;
+        let et = if mesh.n_elements() > 0 {
+            mesh.element_type(0)
+        } else {
+            panic!("HCurlSpace: empty mesh is not supported");
+        };
 
-        let local_edges: &[(usize, usize)] = match dim {
-            2 => &TRI_EDGES,
-            3 => &TET_EDGES,
-            _ => panic!("HCurlSpace: unsupported dimension {dim}"),
+        let local_edges: &[(usize, usize)] = match et {
+            ElementType::Tri3 | ElementType::Tri6 => &TRI_EDGES,
+            ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
+            ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
+            ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
+            _ => panic!("HCurlSpace: unsupported element type {et:?}"),
         };
 
         // DOFs per element:
@@ -97,11 +114,15 @@ impl<M: MeshTopology> HCurlSpace<M> {
         };
         let interior_dofs_per_elem = match (order, dim) {
             (1, _) => 0,
-            (2, 2) => 2,  // TriND2: 2 interior DOFs
-            (2, 3) => 0,  // TetND2 has no volume moments in current element definition
+            (2, 2) if matches!(et, ElementType::Tri3 | ElementType::Tri6) => 2,
+            (2, 3) if matches!(et, ElementType::Tet4 | ElementType::Tet10) => 0,
             _ => panic!("unsupported"),
         };
-        let n_local_faces = if dim == 3 { TET_FACES.len() } else { 0 };
+        let n_local_faces = if dim == 3 && matches!(et, ElementType::Tet4 | ElementType::Tet10) {
+            TET_FACES.len()
+        } else {
+            0
+        };
         let dofs_per_elem =
             local_edges.len() * dofs_per_edge + n_local_faces * face_dofs_per_face + interior_dofs_per_elem;
         let n_elem = mesh.n_elements();
@@ -446,6 +467,15 @@ mod tests {
         for &val in v.as_slice() {
             assert!(val.is_finite(), "interpolated value should be finite");
         }
+    }
+
+    #[test]
+    fn hcurl_quad_nd1_dof_count() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(4);
+        let space = HCurlSpace::new(mesh, 1);
+        // Structured n x n quad grid has 2n(n+1) unique edges.
+        assert_eq!(space.n_dofs(), 2 * 4 * 5);
+        assert_eq!(space.element_dofs(0).len(), 4);
     }
 
     #[test]

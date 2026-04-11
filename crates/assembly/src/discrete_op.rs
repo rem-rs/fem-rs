@@ -35,6 +35,7 @@
 
 use std::collections::HashSet;
 
+use fem_mesh::ElementType;
 use fem_element::{ReferenceElement, TetND2, TetRT1, TriND1, TriND2, TriRT1, VectorReferenceElement};
 use fem_element::lagrange::TriP2;
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -152,16 +153,21 @@ impl DiscreteLinearOperator {
 
         let mut coo = CooMatrix::<f64>::new(n_hcurl, n_h1);
 
-        let local_edges: &[(usize, usize)] = match mesh.dim() {
-            2 => &[(0, 1), (1, 2), (0, 2)],
-            3 => &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
-            d => return Err(DiscreteOpError::UnsupportedDimension { op: "gradient", dim: d }),
-        };
-
         let mut visited = HashSet::with_capacity(n_hcurl);
 
         for e in mesh.elem_iter() {
             let verts = mesh.element_nodes(e);
+            let local_edges: &[(usize, usize)] = match mesh.element_type(e) {
+                ElementType::Tri3 | ElementType::Tri6 => &[(0, 1), (1, 2), (0, 2)],
+                ElementType::Quad4 | ElementType::Quad8 => &[(0, 1), (1, 2), (2, 3), (3, 0)],
+                ElementType::Tet4 | ElementType::Tet10 => &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
+                ElementType::Hex8 | ElementType::Hex20 => &[
+                    (0, 1), (3, 2), (4, 5), (7, 6),
+                    (0, 3), (1, 2), (4, 7), (5, 6),
+                    (0, 4), (1, 5), (2, 6), (3, 7),
+                ],
+                _ => return Err(DiscreteOpError::UnsupportedDimension { op: "gradient", dim: mesh.dim() }),
+            };
             let h1_dofs = h1_space.element_dofs(e);
             let hcurl_dofs = hcurl_space.element_dofs(e);
 

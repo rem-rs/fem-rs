@@ -13,6 +13,7 @@
 //! ```
 //! cargo run --example pex3_maxwell
 //! cargo run --example pex3_maxwell -- --n 16 --ranks 4
+//! cargo run --example pex3_maxwell -- --n 16 --ranks 4 --solver jacobi
 //! ```
 
 use std::f64::consts::PI;
@@ -34,15 +35,39 @@ use fem_solver::SolverConfig;
 use fem_space::{HCurlSpace, fe_space::FESpace};
 use fem_space::constraints::boundary_dofs_hcurl;
 
+#[derive(Clone, Copy)]
+enum SolverKind {
+    Jacobi,
+    Ams,
+}
+
+impl SolverKind {
+    fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "ams" => Self::Ams,
+            _ => Self::Jacobi,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Jacobi => "jacobi",
+            Self::Ams => "ams",
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
     let n_workers = parse_arg(&args, "--ranks").unwrap_or(2);
     let mesh_n = parse_arg(&args, "--n").unwrap_or(16);
+    let solver = parse_solver(&args);
 
     println!("=== fem-rs pex3: Parallel Maxwell (ND1) ===");
     println!("  Workers: {n_workers}, Mesh: {mesh_n}x{mesh_n}");
+    println!("  Solver: {}", solver.as_str());
 
     let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(mesh_n));
 
@@ -88,10 +113,18 @@ fn main() {
             }
         }
 
-        // 6. Solve with parallel PCG + Jacobi.
+        // 6. Solve with selected parallel solver.
         let mut u = ParVector::zeros(&par_space);
         let cfg = SolverConfig { rtol: 1e-8, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
-        let res = par_solve_pcg_jacobi(&a_mat, &rhs, &mut u, &cfg).unwrap();
+        let res = match solver {
+            SolverKind::Jacobi => par_solve_pcg_jacobi(&a_mat, &rhs, &mut u, &cfg).unwrap(),
+            SolverKind::Ams => {
+                if rank == 0 {
+                    eprintln!("  [warn] --solver ams requested, but parallel AMS is not implemented yet; falling back to jacobi");
+                }
+                par_solve_pcg_jacobi(&a_mat, &rhs, &mut u, &cfg).unwrap()
+            }
+        };
 
         if rank == 0 {
             println!(
@@ -127,4 +160,12 @@ fn parse_arg(args: &[String], flag: &str) -> Option<usize> {
     args.iter().position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse().ok())
+}
+
+fn parse_solver(args: &[String]) -> SolverKind {
+    args.iter()
+        .position(|a| a == "--solver")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| SolverKind::from_str(s))
+        .unwrap_or(SolverKind::Jacobi)
 }

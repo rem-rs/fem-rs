@@ -7,9 +7,10 @@
 use nalgebra::DMatrix;
 
 use fem_element::reference::VectorReferenceElement;
-use fem_element::nedelec::{TriND1, TetND1, TriND2, TetND2};
+use fem_element::nedelec::{HexND1, QuadND1, TriND1, TetND1, TriND2, TetND2};
 use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TetRT1};
 use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_mesh::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::{FESpace, SpaceType};
 
@@ -17,31 +18,41 @@ use crate::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator,
 
 // ─── Reference element factory ──────────────────────────────────────────────
 
-fn vec_ref_elem(space_type: SpaceType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
-    match (space_type, dim, order) {
-        (SpaceType::HCurl, 2, 1) => Box::new(TriND1),
-        (SpaceType::HCurl, 2, 2) => Box::new(TriND2),
-        (SpaceType::HCurl, 3, 1) => Box::new(TetND1),
-        (SpaceType::HCurl, 3, 2) => Box::new(TetND2),
-        (SpaceType::HDiv,  2, 0) => Box::new(TriRT0),
-        (SpaceType::HDiv,  2, 1) => Box::new(TriRT1),
-        (SpaceType::HDiv,  3, 0) => Box::new(TetRT0),
-        (SpaceType::HDiv,  3, 1) => Box::new(TetRT1),
-        _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, dim={dim}, order={order})"),
+fn vec_ref_elem(space_type: SpaceType, elem_type: ElementType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
+    match (space_type, elem_type, dim, order) {
+        (SpaceType::HCurl, ElementType::Tri3, 2, 1) | (SpaceType::HCurl, ElementType::Tri6, 2, 1) => Box::new(TriND1),
+        (SpaceType::HCurl, ElementType::Quad4, 2, 1) | (SpaceType::HCurl, ElementType::Quad8, 2, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Tri3, 2, 2) | (SpaceType::HCurl, ElementType::Tri6, 2, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, ElementType::Tet4, 3, 1) | (SpaceType::HCurl, ElementType::Tet10, 3, 1) => Box::new(TetND1),
+        (SpaceType::HCurl, ElementType::Hex8, 3, 1) | (SpaceType::HCurl, ElementType::Hex20, 3, 1) => Box::new(HexND1),
+        (SpaceType::HCurl, ElementType::Tet4, 3, 2) | (SpaceType::HCurl, ElementType::Tet10, 3, 2) => Box::new(TetND2),
+        (SpaceType::HDiv,  ElementType::Tri3, 2, 0) | (SpaceType::HDiv, ElementType::Tri6, 2, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv,  ElementType::Tri3, 2, 1) | (SpaceType::HDiv, ElementType::Tri6, 2, 1) => Box::new(TriRT1),
+        (SpaceType::HDiv,  ElementType::Tet4, 3, 0) | (SpaceType::HDiv, ElementType::Tet10, 3, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv,  ElementType::Tet4, 3, 1) | (SpaceType::HDiv, ElementType::Tet10, 3, 1) => Box::new(TetRT1),
+        _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, elem_type={elem_type:?}, dim={dim}, order={order})"),
     }
 }
 
 // ─── Jacobian helpers (same as assembler.rs) ────────────────────────────────
 
-fn simplex_jacobian<M: MeshTopology>(
+fn element_jacobian<M: MeshTopology>(
     mesh: &M,
+    elem_type: ElementType,
     geo_nodes: &[u32],
     dim: usize,
 ) -> (DMatrix<f64>, f64) {
     let x0 = mesh.node_coords(geo_nodes[0]);
+    let col_nodes: Vec<usize> = match (elem_type, dim) {
+        (ElementType::Tri3 | ElementType::Tri6, 2) => vec![1, 2],
+        (ElementType::Quad4 | ElementType::Quad8, 2) => vec![1, 3],
+        (ElementType::Tet4 | ElementType::Tet10, 3) => vec![1, 2, 3],
+        (ElementType::Hex8 | ElementType::Hex20, 3) => vec![1, 3, 4],
+        _ => panic!("element_jacobian: unsupported element type {elem_type:?} in dim {dim}"),
+    };
     let mut j = DMatrix::<f64>::zeros(dim, dim);
     for col in 0..dim {
-        let xc = mesh.node_coords(geo_nodes[col + 1]);
+        let xc = mesh.node_coords(geo_nodes[col_nodes[col]]);
         for row in 0..dim {
             j[(row, col)] = xc[row] - x0[row];
         }
@@ -189,8 +200,10 @@ impl VectorAssembler {
         let dim = mesh.dim() as usize;
         let n_dofs = space.n_dofs();
         let stype = space.space_type();
+        let elem_type = mesh.element_type(0);
 
-        let ref_elem = vec_ref_elem(stype, dim, space.order());        let n_ldofs = ref_elem.n_dofs();
+        let ref_elem = vec_ref_elem(stype, elem_type, dim, space.order());
+        let n_ldofs = ref_elem.n_dofs();
         let quad = ref_elem.quadrature(quad_order);
 
         let curl_dim = if dim == 2 { 1 } else { 3 }; // scalar curl in 2D, vector in 3D
@@ -212,7 +225,8 @@ impl VectorAssembler {
             let nodes = mesh.element_nodes(e);
             let elem_tag = mesh.element_tag(e);
 
-            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+            let et = mesh.element_type(e);
+            let (jac, det_j) = element_jacobian(mesh, et, nodes, dim);
             let j_inv_t = jac.clone().try_inverse()
                 .expect("degenerate element — zero-area/volume")
                 .transpose();
@@ -288,8 +302,10 @@ impl VectorAssembler {
         let dim = mesh.dim() as usize;
         let n_dofs = space.n_dofs();
         let stype = space.space_type();
+        let elem_type = mesh.element_type(0);
 
-        let ref_elem = vec_ref_elem(stype, dim, space.order());        let n_ldofs = ref_elem.n_dofs();
+        let ref_elem = vec_ref_elem(stype, elem_type, dim, space.order());
+        let n_ldofs = ref_elem.n_dofs();
         let quad = ref_elem.quadrature(quad_order);
 
         let curl_dim = if dim == 2 { 1 } else { 3 };
@@ -310,7 +326,8 @@ impl VectorAssembler {
             let nodes = mesh.element_nodes(e);
             let elem_tag = mesh.element_tag(e);
 
-            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+            let et = mesh.element_type(e);
+            let (jac, det_j) = element_jacobian(mesh, et, nodes, dim);
             let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
 
             let mut f_elem = vec![0.0_f64; n_ldofs];
@@ -407,5 +424,21 @@ mod tests {
 
         let rhs = VectorAssembler::assemble_linear(&space, &[&Zero], 2);
         assert_eq!(rhs.len(), n);
+    }
+
+    #[test]
+    fn vector_assembler_hcurl_quad_matrix_size() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(4);
+        let space = HCurlSpace::new(mesh, 1);
+        let n = space.n_dofs();
+
+        struct Zero;
+        impl VectorBilinearIntegrator for Zero {
+            fn add_to_element_matrix(&self, _: &VectorQpData<'_>, _: &mut [f64]) {}
+        }
+
+        let mat = VectorAssembler::assemble_bilinear(&space, &[&Zero], 2);
+        assert_eq!(mat.nrows, n);
+        assert_eq!(mat.ncols, n);
     }
 }

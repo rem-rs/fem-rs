@@ -237,11 +237,17 @@ pub fn boundary_dofs_hcurl<M: fem_mesh::topology::MeshTopology>(
                     boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
                 }
             } else {
-                // Boundary face in 3-D is a triangle: collect its 3 edges.
-                if nodes.len() >= 3 {
+                // Boundary face in 3-D can be triangle or quad.
+                if nodes.len() == 3 {
                     boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
                     boundary_edges.insert(EdgeKey::new(nodes[1], nodes[2]));
                     boundary_edges.insert(EdgeKey::new(nodes[0], nodes[2]));
+                } else if nodes.len() >= 4 {
+                    // Use perimeter edges of the face connectivity ordering.
+                    for i in 0..nodes.len() {
+                        let j = (i + 1) % nodes.len();
+                        boundary_edges.insert(EdgeKey::new(nodes[i], nodes[j]));
+                    }
                 }
             }
         }
