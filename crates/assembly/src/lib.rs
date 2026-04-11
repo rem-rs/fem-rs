@@ -40,6 +40,7 @@ pub mod nonlinear;
 pub mod partial;
 pub mod vector_integrator;
 pub mod vector_assembler;
+pub mod vector_boundary;
 pub mod grid_function;
 pub mod postprocess;
 pub mod discrete_op;
@@ -53,6 +54,10 @@ pub use integrator::{
 };
 pub use vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};
 pub use vector_assembler::VectorAssembler;
+pub use vector_boundary::{
+    VectorBoundaryAssembler, VectorBoundaryBilinearIntegrator, VectorBoundaryLinearIntegrator,
+    VectorBdQpData, TangentialMassIntegrator,
+};
 pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator};
 pub use dg::{DgAssembler};
 pub use interior_faces::InteriorFaceList;

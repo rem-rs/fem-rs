@@ -14,6 +14,7 @@ fem-element  = { path = "../crates/element" }
 fem-space    = { path = "../crates/space" }
 fem-assembly = { path = "../crates/assembly" }
 fem-solver   = { path = "../crates/solver" }
+nalgebra     = { workspace = true }
 log          = { workspace = true }
 env_logger   = { workspace = true }
 
@@ -116,6 +117,14 @@ path = "ex_navier_stokes.rs"
 [[example]]
 name = "ex7_neumann_mixed_bc"
 path = "ex7_neumann_mixed_bc.rs"
+
+[[example]]
+name = "ex_maxwell_time"
+path = "ex_maxwell_time.rs"
+
+[[example]]
+name = "ex_maxwell_eigenvalue"
+path = "ex_maxwell_eigenvalue.rs"
 
 [[example]]
 name = "ex14_dc_current"

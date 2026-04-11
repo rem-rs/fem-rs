@@ -496,6 +496,7 @@ dependencies = [
  "fem-solver",
  "fem-space",
  "log",
+ "nalgebra 0.33.3",
 ]
 
 [[package]]
