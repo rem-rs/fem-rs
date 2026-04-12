@@ -65,6 +65,8 @@ pub struct VectorBdQpData<'a> {
     pub normal: &'a [f64],
     /// Physical coordinates of this face quadrature point, length `dim`.
     pub x_phys: &'a [f64],
+    /// Owning volume element id.
+    pub elem_id: u32,
     /// Element material / region tag.
     pub elem_tag: i32,
 }
@@ -277,6 +279,7 @@ impl VectorBoundaryAssembler {
                     phi_vec: &phys_phi,
                     normal: norm,
                     x_phys: xp,
+                    elem_id: owner_elem,
                     elem_tag: mesh.face_tag(f),
                 };
 
@@ -369,6 +372,7 @@ impl VectorBoundaryAssembler {
                     phi_vec: &phys_phi,
                     normal: norm,
                     x_phys: xp,
+                    elem_id: owner_elem,
                     elem_tag: mesh.face_tag(f),
                 };
 

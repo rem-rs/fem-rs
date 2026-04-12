@@ -18,6 +18,7 @@ pub mod transpose;
 pub mod sum;
 pub mod vector_source;
 pub mod boundary_flux;
+pub mod tangential_boundary;
 
 pub use diffusion::DiffusionIntegrator;
 pub use elasticity::ElasticityIntegrator;
@@ -35,3 +36,4 @@ pub use transpose::TransposeIntegrator;
 pub use sum::SumIntegrator;
 pub use vector_source::VectorDomainLFIntegrator;
 pub use boundary_flux::{BoundaryNormalLFIntegrator, VectorFEBoundaryFluxLFIntegrator};
+pub use tangential_boundary::TangentialTraceLFIntegrator;

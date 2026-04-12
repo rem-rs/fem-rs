@@ -14,6 +14,7 @@ fem-element  = { path = "../crates/element" }
 fem-space    = { path = "../crates/space" }
 fem-assembly = { path = "../crates/assembly" }
 fem-solver   = { path = "../crates/solver" }
+fem-amg      = { path = "../crates/amg" }
 nalgebra     = { workspace = true }
 log          = { workspace = true }
 env_logger   = { workspace = true }
@@ -57,6 +58,10 @@ path = "debug_interp.rs"
 [[example]]
 name = "ex3_maxwell"
 path = "ex3_maxwell.rs"
+
+[[example]]
+name = "ex3_hex8_maxwell"
+path = "ex3_hex8_maxwell.rs"
 
 [[example]]
 name = "ex9_dg_advection"
@@ -123,6 +128,22 @@ name = "ex_maxwell_time"
 path = "ex_maxwell_time.rs"
 
 [[example]]
+name = "ex31_maxwell"
+path = "ex31_maxwell.rs"
+
+[[example]]
+name = "ex32_impedance_maxwell"
+path = "ex32_impedance_maxwell.rs"
+
+[[example]]
+name = "ex33_tangential_drive_maxwell"
+path = "ex33_tangential_drive_maxwell.rs"
+
+[[example]]
+name = "ex34_absorbing_maxwell"
+path = "ex34_absorbing_maxwell.rs"
+
+[[example]]
 name = "ex_maxwell_eigenvalue"
 path = "ex_maxwell_eigenvalue.rs"
 
@@ -137,6 +158,54 @@ path = "pex4_parallel_heat.rs"
 [[example]]
 name = "ex_convergence"
 path = "ex_convergence.rs"
+
+[[example]]
+name = "ex_maxwell_firstorder"
+path = "ex_maxwell_firstorder.rs"
+
+[[example]]
+name = "mfem_ex3"
+path = "mfem_ex3.rs"
+
+[[example]]
+name = "mfem_ex13"
+path = "mfem_ex13.rs"
+
+[[example]]
+name = "mfem_ex22"
+path = "mfem_ex22.rs"
+
+[[example]]
+name = "mfem_ex25"
+path = "mfem_ex25.rs"
+
+[[example]]
+name = "mfem_ex31"
+path = "mfem_ex31.rs"
+
+[[example]]
+name = "mfem_ex32"
+path = "mfem_ex32.rs"
+
+[[example]]
+name = "mfem_ex34"
+path = "mfem_ex34.rs"
+
+[[example]]
+name = "mfem_volta"
+path = "mfem_volta.rs"
+
+[[example]]
+name = "mfem_tesla"
+path = "mfem_tesla.rs"
+
+[[example]]
+name = "mfem_maxwell"
+path = "mfem_maxwell.rs"
+
+[[example]]
+name = "mfem_joule"
+path = "mfem_joule.rs"
 
 [lib]
 name = "fem_examples"

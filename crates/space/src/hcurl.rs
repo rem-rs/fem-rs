@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use fem_core::types::DofId;
 use fem_element::{TriND2, VectorReferenceElement};
 use fem_linalg::Vector;
-use fem_mesh::{topology::MeshTopology, ElementTransformation};
+use fem_mesh::{topology::MeshTopology, ElementTransformation, ElementType};
 
 use crate::dof_manager::{EdgeKey, FaceKey};
 use crate::fe_space::{FESpace, SpaceType};
@@ -32,10 +32,20 @@ use crate::fe_space::{FESpace, SpaceType};
 /// Local edge vertex pairs for 2-D triangles (TriND1 ordering).
 const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (0, 2)];
 
+/// Local edge vertex pairs for 2-D quadrilaterals (QuadND1 ordering).
+const QUAD_EDGES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+
 /// Local edge vertex pairs for 3-D tetrahedra (TetND1 ordering).
 const TET_EDGES: [(usize, usize); 6] = [
     (0, 1), (0, 2), (0, 3),
     (1, 2), (1, 3), (2, 3),
+];
+
+/// Local edge vertex pairs for 3-D hexahedra (Hex8 ordering).
+const HEX_EDGES: [(usize, usize); 12] = [
+    (0, 1), (1, 2), (2, 3), (3, 0),
+    (4, 5), (5, 6), (6, 7), (7, 4),
+    (0, 4), (1, 5), (2, 6), (3, 7),
 ];
 
 /// Local face definitions for 3-D tetrahedra (TetND2 ordering).
@@ -60,7 +70,7 @@ pub struct HCurlSpace<M: MeshTopology> {
     dofs_flat: Vec<DofId>,
     /// Orientation signs (±1.0), same layout as `dofs_flat`.
     signs_flat: Vec<f64>,
-    /// Number of DOFs per element (3 for tri, 6 for tet).
+    /// Number of DOFs per element.
     dofs_per_elem: usize,
     /// Edge → global DOF map (for boundary queries and interpolation).
     edge_to_dof: HashMap<EdgeKey, DofId>,
@@ -68,6 +78,8 @@ pub struct HCurlSpace<M: MeshTopology> {
     face_to_dof: HashMap<FaceKey, DofId>,
     /// Spatial dimension.
     dim: usize,
+    /// Cell type used by this space.
+    cell_type: ElementType,
 }
 
 impl<M: MeshTopology> HCurlSpace<M> {
@@ -80,10 +92,32 @@ impl<M: MeshTopology> HCurlSpace<M> {
         assert!((1..=2).contains(&order), "HCurlSpace: only orders 1 (ND1) and 2 (ND2) are supported");
         let dim = mesh.dim() as usize;
 
-        let local_edges: &[(usize, usize)] = match dim {
-            2 => &TRI_EDGES,
-            3 => &TET_EDGES,
-            _ => panic!("HCurlSpace: unsupported dimension {dim}"),
+        assert!(mesh.n_elements() > 0, "HCurlSpace: mesh must contain at least one element");
+        let cell_type = mesh.element_type(0);
+        for e in 1..mesh.n_elements() as u32 {
+            assert_eq!(
+                mesh.element_type(e),
+                cell_type,
+                "HCurlSpace: mixed element types are not supported"
+            );
+        }
+
+        match (cell_type, order) {
+            (ElementType::Quad8, _) => {
+                panic!("HCurlSpace: quadrilateral support is currently Quad4 only")
+            }
+            (ElementType::Hex20, _) => {
+                panic!("HCurlSpace: hexahedral support is currently Hex8 only")
+            }
+            _ => {}
+        }
+
+        let local_edges: &[(usize, usize)] = match cell_type {
+            ElementType::Tri3 | ElementType::Tri6 => &TRI_EDGES,
+            ElementType::Quad4 => &QUAD_EDGES,
+            ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
+            ElementType::Hex8 => &HEX_EDGES,
+            _ => panic!("HCurlSpace: unsupported element type {cell_type:?}"),
         };
 
         // DOFs per element:
@@ -91,17 +125,22 @@ impl<M: MeshTopology> HCurlSpace<M> {
         //   ND2(2D): 2 DOFs per edge + 2 interior bubble DOFs
         //   ND2(3D): 2 DOFs per edge + 2 DOFs per face
         let dofs_per_edge = order as usize;
-        let face_dofs_per_face = match (order, dim) {
-            (2, 3) => 2,
+        let face_dofs_per_face = match (order, dim, cell_type) {
+            (2, 3, ElementType::Tet4 | ElementType::Tet10) => 2,
             _ => 0,
         };
-        let interior_dofs_per_elem = match (order, dim) {
-            (1, _) => 0,
-            (2, 2) => 2,  // TriND2: 2 interior DOFs
-            (2, 3) => 0,  // TetND2 has no volume moments in current element definition
+        let interior_dofs_per_elem = match (order, dim, cell_type) {
+            (1, _, _) => 0,
+            (2, 2, ElementType::Tri3 | ElementType::Tri6) => 2,  // TriND2: 2 interior DOFs
+            (2, 2, ElementType::Quad4) => 0,
+            (2, 3, ElementType::Tet4 | ElementType::Tet10) => 0, // TetND2 has no volume moments in current element definition
+            (2, 3, ElementType::Hex8) => 0,
             _ => panic!("unsupported"),
         };
-        let n_local_faces = if dim == 3 { TET_FACES.len() } else { 0 };
+        let n_local_faces = match cell_type {
+            ElementType::Tet4 | ElementType::Tet10 if dim == 3 => TET_FACES.len(),
+            _ => 0,
+        };
         let dofs_per_elem =
             local_edges.len() * dofs_per_edge + n_local_faces * face_dofs_per_face + interior_dofs_per_elem;
         let n_elem = mesh.n_elements();
@@ -172,6 +211,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
             edge_to_dof,
             face_to_dof,
             dim,
+            cell_type,
         }
     }
 
@@ -187,6 +227,17 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// Look up the global DOF index for a given edge (by canonical key).
     pub fn edge_dof(&self, edge: EdgeKey) -> Option<DofId> {
         self.edge_to_dof.get(&edge).copied()
+    }
+
+    /// Look up all global DOFs associated with a given edge.
+    pub fn edge_dofs(&self, edge: EdgeKey) -> Option<Vec<DofId>> {
+        self.edge_to_dof.get(&edge).map(|&first| {
+            if self.order == 1 {
+                vec![first]
+            } else {
+                vec![first, first + 1]
+            }
+        })
     }
 
     /// Number of unique edges in the mesh (== `n_dofs` for ND1).
@@ -265,38 +316,40 @@ impl<M: MeshTopology> HCurlSpace<M> {
             }
 
             if self.dim == 2 {
-                // Step 2 (2D) - interior bubble DOFs (element-local).
-                let qr = TriND2.quadrature(4);
-                let n_elem = self.mesh.n_elements();
-                for e in 0..n_elem as u32 {
-                    let dofs = self.element_dofs(e);
-                    let nodes = self.mesh.element_nodes(e);
-                    let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
-                    let det_j = transform.det_j().abs();
+                if matches!(self.cell_type, ElementType::Tri3 | ElementType::Tri6) {
+                    // TriND2 only: interior bubble DOFs (element-local).
+                    let qr = TriND2.quadrature(4);
+                    let n_elem = self.mesh.n_elements();
+                    for e in 0..n_elem as u32 {
+                        let dofs = self.element_dofs(e);
+                        let nodes = self.mesh.element_nodes(e);
+                        let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
+                        let det_j = transform.det_j().abs();
 
-                    // Bubble DOFs are always the last 2 local DOFs for TriND2.
-                    let bub0 = dofs[dofs.len() - 2] as usize;
-                    let bub1 = dofs[dofs.len() - 1] as usize;
+                        // Bubble DOFs are always the last 2 local DOFs for TriND2.
+                        let bub0 = dofs[dofs.len() - 2] as usize;
+                        let bub1 = dofs[dofs.len() - 1] as usize;
 
-                    let x0 = self.mesh.node_coords(nodes[0]);
-                    let x1 = self.mesh.node_coords(nodes[1]);
-                    let x2 = self.mesh.node_coords(nodes[2]);
-                    let j00 = x1[0] - x0[0];
-                    let j10 = x1[1] - x0[1];
-                    let j01 = x2[0] - x0[0];
-                    let j11 = x2[1] - x0[1];
+                        let x0 = self.mesh.node_coords(nodes[0]);
+                        let x1 = self.mesh.node_coords(nodes[1]);
+                        let x2 = self.mesh.node_coords(nodes[2]);
+                        let j00 = x1[0] - x0[0];
+                        let j10 = x1[1] - x0[1];
+                        let j01 = x2[0] - x0[0];
+                        let j11 = x2[1] - x0[1];
 
-                    let mut int_x = 0.0_f64;
-                    let mut int_y = 0.0_f64;
-                    for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
-                        let xp = [x0[0] + j00 * xi[0] + j01 * xi[1], x0[1] + j10 * xi[0] + j11 * xi[1]];
-                        let fval = f(&xp);
-                        int_x += w * fval[0];
-                        int_y += w * fval[1];
+                        let mut int_x = 0.0_f64;
+                        let mut int_y = 0.0_f64;
+                        for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
+                            let xp = [x0[0] + j00 * xi[0] + j01 * xi[1], x0[1] + j10 * xi[0] + j11 * xi[1]];
+                            let fval = f(&xp);
+                            int_x += w * fval[0];
+                            int_y += w * fval[1];
+                        }
+                        let r = result.as_slice_mut();
+                        r[bub0] = int_x * det_j;
+                        r[bub1] = int_y * det_j;
                     }
-                    let r = result.as_slice_mut();
-                    r[bub0] = int_x * det_j;
-                    r[bub1] = int_y * det_j;
                 }
             } else {
                 // Step 2 (3D) - face moments, assembled once per unique global face.
@@ -375,7 +428,95 @@ impl<M: MeshTopology> FESpace for HCurlSpace<M> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use fem_core::{ElemId, FaceId, NodeId};
     use fem_mesh::SimplexMesh;
+
+    #[derive(Clone)]
+    struct OneQuadMesh {
+        nodes: Vec<[f64; 2]>,
+        elem: [NodeId; 4],
+        bfaces: Vec<[NodeId; 2]>,
+        btags: Vec<i32>,
+    }
+
+    impl OneQuadMesh {
+        fn unit() -> Self {
+            Self {
+                nodes: vec![
+                    [-1.0, -1.0],
+                    [ 1.0, -1.0],
+                    [ 1.0,  1.0],
+                    [-1.0,  1.0],
+                ],
+                elem: [0, 1, 2, 3],
+                bfaces: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+                btags: vec![1, 2, 3, 4],
+            }
+        }
+    }
+
+    impl MeshTopology for OneQuadMesh {
+        fn dim(&self) -> u8 { 2 }
+        fn n_nodes(&self) -> usize { self.nodes.len() }
+        fn n_elements(&self) -> usize { 1 }
+        fn n_boundary_faces(&self) -> usize { self.bfaces.len() }
+        fn element_nodes(&self, _elem: ElemId) -> &[NodeId] { &self.elem }
+        fn element_type(&self, _elem: ElemId) -> ElementType { ElementType::Quad4 }
+        fn element_tag(&self, _elem: ElemId) -> i32 { 1 }
+        fn node_coords(&self, node: NodeId) -> &[f64] { &self.nodes[node as usize] }
+        fn face_nodes(&self, face: FaceId) -> &[NodeId] { &self.bfaces[face as usize] }
+        fn face_tag(&self, face: FaceId) -> i32 { self.btags[face as usize] }
+        fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) { (0, None) }
+    }
+
+    #[derive(Clone)]
+    struct OneHexMesh {
+        nodes: Vec<[f64; 3]>,
+        elem: [NodeId; 8],
+        bfaces: Vec<[NodeId; 4]>,
+        btags: Vec<i32>,
+    }
+
+    impl OneHexMesh {
+        fn unit() -> Self {
+            Self {
+                nodes: vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ],
+                elem: [0, 1, 2, 3, 4, 5, 6, 7],
+                bfaces: vec![
+                    [0, 1, 2, 3],
+                    [4, 5, 6, 7],
+                    [0, 1, 5, 4],
+                    [1, 2, 6, 5],
+                    [2, 3, 7, 6],
+                    [3, 0, 4, 7],
+                ],
+                btags: vec![1, 2, 3, 4, 5, 6],
+            }
+        }
+    }
+
+    impl MeshTopology for OneHexMesh {
+        fn dim(&self) -> u8 { 3 }
+        fn n_nodes(&self) -> usize { self.nodes.len() }
+        fn n_elements(&self) -> usize { 1 }
+        fn n_boundary_faces(&self) -> usize { self.bfaces.len() }
+        fn element_nodes(&self, _elem: ElemId) -> &[NodeId] { &self.elem }
+        fn element_type(&self, _elem: ElemId) -> ElementType { ElementType::Hex8 }
+        fn element_tag(&self, _elem: ElemId) -> i32 { 1 }
+        fn node_coords(&self, node: NodeId) -> &[f64] { &self.nodes[node as usize] }
+        fn face_nodes(&self, face: FaceId) -> &[NodeId] { &self.bfaces[face as usize] }
+        fn face_tag(&self, face: FaceId) -> i32 { self.btags[face as usize] }
+        fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) { (0, None) }
+    }
 
     #[test]
     fn hcurl_dof_count_tri() {
@@ -433,6 +574,52 @@ mod tests {
         let mesh = SimplexMesh::<2>::unit_square_tri(2);
         let space = HCurlSpace::new(mesh, 1);
         assert_eq!(space.space_type(), SpaceType::HCurl);
+    }
+
+    #[test]
+    fn hcurl_dof_count_quad_nd1() {
+        let mesh = OneQuadMesh::unit();
+        let space = HCurlSpace::new(mesh, 1);
+        assert_eq!(space.dofs_per_elem, 4);
+        assert_eq!(space.n_dofs(), 4);
+    }
+
+    #[test]
+    fn hcurl_dof_count_hex_nd1() {
+        let mesh = OneHexMesh::unit();
+        let space = HCurlSpace::new(mesh, 1);
+        assert_eq!(space.dofs_per_elem, 12);
+        assert_eq!(space.n_dofs(), 12);
+    }
+
+    #[test]
+    fn hcurl_dof_count_quad_nd2() {
+        let mesh = OneQuadMesh::unit();
+        let space = HCurlSpace::new(mesh, 2);
+        assert_eq!(space.dofs_per_elem, 8);
+        assert_eq!(space.n_dofs(), 8);
+    }
+
+    #[test]
+    fn hcurl_dof_count_hex_nd2() {
+        let mesh = OneHexMesh::unit();
+        let space = HCurlSpace::new(mesh, 2);
+        assert_eq!(space.dofs_per_elem, 24);
+        assert_eq!(space.n_dofs(), 24);
+    }
+
+    #[test]
+    fn hcurl_interpolate_vector_constant_quad_nd1() {
+        let mesh = OneQuadMesh::unit();
+        let space = HCurlSpace::new(mesh, 1);
+        let v = space.interpolate_vector(&|_x| vec![1.0, 0.0]);
+
+        let vals = v.as_slice();
+        assert_eq!(vals.len(), 4);
+        assert!((vals[0] - 2.0).abs() < 1e-12);
+        assert!(vals[1].abs() < 1e-12);
+        assert!((vals[2] + 2.0).abs() < 1e-12);
+        assert!(vals[3].abs() < 1e-12);
     }
 
     #[test]

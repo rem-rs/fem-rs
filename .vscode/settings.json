@@ -6,6 +6,7 @@
         "cargo test": true,
         "cargo metadata": true,
         "git add": true,
-        "git commit": true
+        "git commit": true,
+        "git -C /Users/alex/works/fem-rs": true
     }
 }

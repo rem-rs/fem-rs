@@ -1056,7 +1056,7 @@ pub mod block;
 pub mod eigen;
 pub mod ode;
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
-pub use eigen::{lobpcg, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};
+pub use eigen::{lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};
 
 #[cfg(test)]
 mod linger_integration_tests {

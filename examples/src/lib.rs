@@ -1,4 +1,4 @@
-//! Shared FEM utilities for the em_* examples.
+//! Shared FEM utilities for the em_* and Maxwell examples.
 //!
 //! Implements:
 //! - [`p1_assemble_poisson`] — P1 (linear triangle) stiffness + mass assembly
@@ -10,6 +10,14 @@
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementType, MeshTopology, SimplexMesh};
+
+pub mod maxwell;
+pub use maxwell::{
+    FirstOrderMaxwell3DSkeleton,
+    FirstOrderMaxwellOp,
+    HcurlBoundaryCondition, HcurlBoundaryConfig,
+    StaticMaxwellBuilder, StaticMaxwellProblem,
+};
 
 // ---------------------------------------------------------------------------
 // P1 (linear triangle) Poisson assembly

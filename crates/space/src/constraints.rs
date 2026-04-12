@@ -225,32 +225,30 @@ pub fn boundary_dofs_hcurl<M: fem_mesh::topology::MeshTopology>(
     use std::collections::HashSet;
 
     // Collect boundary edges from tagged boundary faces.
-    let dim = mesh.dim() as usize;
     let mut boundary_edges: HashSet<EdgeKey> = HashSet::new();
 
     for f in 0..mesh.n_boundary_faces() as u32 {
         if tags.contains(&mesh.face_tag(f)) {
             let nodes = mesh.face_nodes(f);
-            if dim == 2 {
-                // Boundary face in 2-D is an edge.
-                if nodes.len() >= 2 {
-                    boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
-                }
-            } else {
-                // Boundary face in 3-D is a triangle: collect its 3 edges.
-                if nodes.len() >= 3 {
-                    boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
-                    boundary_edges.insert(EdgeKey::new(nodes[1], nodes[2]));
-                    boundary_edges.insert(EdgeKey::new(nodes[0], nodes[2]));
+            // Treat face nodes as a polygon ring and collect consecutive edges.
+            // Works for 2D edge-faces (2 nodes), 3D triangles (3 nodes), and
+            // 3D quadrilateral faces (4 nodes).
+            if nodes.len() >= 2 {
+                for i in 0..nodes.len() {
+                    let a = nodes[i];
+                    let b = nodes[(i + 1) % nodes.len()];
+                    boundary_edges.insert(EdgeKey::new(a, b));
                 }
             }
         }
     }
 
-    let mut out: Vec<DofId> = boundary_edges
-        .iter()
-        .filter_map(|ek| space.edge_dof(*ek))
-        .collect();
+    let mut out: Vec<DofId> = Vec::new();
+    for ek in &boundary_edges {
+        if let Some(mut edofs) = space.edge_dofs(*ek) {
+            out.append(&mut edofs);
+        }
+    }
     out.sort_unstable();
     out.dedup();
     out
