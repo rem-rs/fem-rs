@@ -1,0 +1,14 @@
+[package]
+name = "fem-io-hdf5-parallel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = { workspace = true }
+hdf5 = { version = "0.8", optional = true }
+mpi = { workspace = true, optional = true }
+
+[features]
+default = []
+hdf5 = ["dep:hdf5"]
+hdf5-mpi = ["hdf5", "dep:mpi"]

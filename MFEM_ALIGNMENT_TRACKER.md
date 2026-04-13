@@ -1,6 +1,6 @@
 # fem-rs ↔ MFEM 能力对齐统一跟踪文档
 
-> 更新日期：2026-04-12  
+> 更新日期：2026-04-13  
 > 目的：将 MFEM_MAPPING 与 MAXWELL_GAPS 合并为单一跟踪入口，统一记录“全局能力对齐 + Maxwell 专项推进”。
 
 ---
@@ -34,9 +34,11 @@
 
 ### 1.2 全局剩余差距（跨模块）
 
-- 🔲 HDF5/XDMF 并行 I/O 与 restart 文件链路。
-- 🔲 hypre 绑定（可选 FFI 路线）。
+- 🔨 HDF5/XDMF 并行 I/O 与 restart 文件链路（checkpoint/restart 基线已落地；direct HDF5 hyperslab collective 仍待完成）。
+- 🔨 hypre-equivalent 路线（纯 Rust 能力轨道；高级 AIR/AMS/ADS 与分布式路径仍待完成）。
 - 🔲 Netgen/Abaqus 网格读取支持。
+- 🔨 命名属性集（baseline+）：`fem-mesh` 已提供 `NamedAttributeSet` / `NamedAttributeRegistry`，支持 mesh named queries 与 `extract_submesh_by_name(...)`，`fem-io` 已提供 GMSH `PhysicalNames` -> named registry bridge，并新增 `ex39_named_attributes` 示例打通端到端路径。
+- 🔨 几何多重网格 / LOR（Phase 58）：`GeomMGHierarchy` + `GeomMGPrecond` 基线已具备，并新增 `ex26_geom_mg` 示例用于持续回归。
 - ✅ `ElementTransformation` 统一抽象层（完成）。
   当前进展（2026-04-12）：`assembler`、`vector_assembler`、`mixed`、`vector_boundary` 的仿射 simplex 几何路径已统一切换到 `ElementTransformation`，不再在装配入口重复内联 `J/det(J)/J^{-T}/x(ξ)` 逻辑。
   验收证据（2026-04-12）：`cargo test -p fem-assembly --lib` 通过（118 passed, 0 failed, 1 ignored）。
@@ -117,7 +119,23 @@
 
 1. HDF5/XDMF 并行 I/O。
 2. restart checkpoint 链路。
-3. hypre 绑定与额外网格格式读取（Netgen/Abaqus）。
+3. hypre-equivalent（纯 Rust）能力扩展与额外网格格式读取（Netgen/Abaqus）。
+
+### 当前主线剩余项（2026-04-13）
+
+1. direct HDF5 hyperslab collective 并行写读路径（当前为 rank 分片 + root 物化基线）。
+2. 跨子项目 C2-C4：WP2-WP6（AIR/AMS/ADS、mumps、mkl、GPU、jsmpi fallback/CI 矩阵）。
+3. 低优先级 MFEM 能力族补齐（静态凝聚/杂化、分数阶、障碍问题、拓扑优化、浸没边界、DPG、surface FEM、TMOP）。
+
+### 自动验收补充（2026-04-13）
+
+- 新增 `.github/workflows/alignment-smoke.yml`：对以下能力提供 PR 自动 smoke gate：
+  1. `ComplexCoeff` / `ComplexVectorCoeff`（`fem-assembly`）
+  2. `NamedAttributeSet` / `NamedAttributeRegistry`（`fem-mesh`）
+  3. 电磁 PML-like 路径（`ex3_maxwell --pml-like`）
+  4. 各向异性吸收边界路径（`ex34_absorbing_maxwell --anisotropic`）
+  5. canonical backend-resource contract（`fem-ceed`）
+- 新增 `.github/workflows/backend-feature-matrix.yml`：对 `vendor/reed` backend contract 在 `baseline/hypre-rs/petsc-rs/mumps/mkl` feature profile 下执行矩阵化测试。
 
 ---
 

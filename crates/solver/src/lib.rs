@@ -1093,10 +1093,14 @@ pub use ode::{
     Newmark, NewmarkState,
     GeneralizedAlpha, GeneralizedAlphaState,
     ImexArk3,
+    ImexRk3,
     ImexEuler,
     ImexSsp2,
 };
-pub use lor::{LorPrecond, solve_pcg_lor, solve_gmres_lor};
+pub use lor::{
+    LorPrecond, solve_pcg_lor, solve_gmres_lor,
+    GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg,
+};
 pub mod sli;
 pub use sli::{solve_jacobi_sli, solve_gs_sli};
 

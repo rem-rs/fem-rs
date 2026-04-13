@@ -344,7 +344,7 @@ default (zero-cost for constants).
 | F-cycle | `CycleType::F` | ✅ |
 | Max levels | Max levels config | ✅ |
 | Coarse-grid direct solve | Dense LU | ✅ |
-| hypre binding | feature `amg/hypre` | 🔲 |
+| hypre-equivalent AMG path | pure-Rust implementation in `vendor/linger` (no external hypre FFI) | ✅ |
 
 ---
 
@@ -404,7 +404,7 @@ default (zero-cost for constants).
 | Abaqus `.inp` (read) | — | 🔲 Phase 9+ |
 | VTK `.vtu` legacy ASCII (write) | `write_vtk_scalar()` | ✅ |
 | VTK `.vtu` XML binary (write) | `write_vtu()` (XML ASCII) | ✅ |
-| HDF5 / XDMF (read/write) | feature `io/hdf5` | 🔲 |
+| HDF5 / XDMF (read/write) | `fem-io-hdf5-parallel` (feature-gated) | 🔨 |
 | ParaView GLVis socket | — | ❌ out of scope |
 
 ### 10.2 Solution I/O
@@ -413,7 +413,7 @@ default (zero-cost for constants).
 |---|---|---|
 | `GridFunction::Save()` | VTK point data | ✅ scalar + vector |
 | `GridFunction::Load()` | `read_vtu_point_data()` | ✅ | ASCII VTU reader |
-| Restart files | HDF5 mesh + solution | 🔲 |
+| Restart files | HDF5 checkpoint schema + restart reads | 🔨 |
 
 ---
 
@@ -580,11 +580,11 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 |------|--------|----------|
 | ~~GMSH v4.1 binary reader~~ | ✅ | ~~High~~ Done |
 | ~~GMSH v2 reader~~ | ✅ | ~~Medium~~ Done |
-| HDF5/XDMF parallel I/O | 🔲 | Medium |
+| HDF5/XDMF parallel I/O | 🔨 | Medium |
 | Netgen `.vol` reader | 🔲 | Low |
 | Abaqus `.inp` reader | 🔲 | Low |
 | `GridFunction::Load()` | ✅ | ~~Low~~ Done |
-| Restart files (checkpoint) | 🔲 | Low |
+| Restart files (checkpoint) | 🔨 | Low |
 
 ### Solvers
 | Item | Status | Priority |
@@ -592,7 +592,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | Chebyshev smoother (AMG) | ✅ | ~~Medium~~ Done |
 | SLISolver (stationary iteration) | ✅ | ~~Low~~ Done |
 | AMG F-cycle | ✅ | ~~Low~~ Done |
-| hypre binding | 🔲 | Low |
+| hypre-equivalent AMG path | ✅ (pure-Rust in `vendor/linger`) | Low |
 
 ### Spaces & Post-processing
 | Item | Status | Priority |
@@ -656,10 +656,16 @@ prioritized roadmap for continued development.
 ### Phase 43 — HDF5/XDMF Parallel I/O
 > **Priority: Medium** — needed for large-scale checkpointing
 
-- Feature-gated `io/hdf5` with `hdf5-rs` crate
-- Write: parallel mesh + solution to XDMF + HDF5
-- Read: parallel restart from checkpoint
-- Time-series output for transient problems
+- [x] 新增独立 crate：`fem-io-hdf5-parallel`（feature-gated `hdf5`）
+- [x] 写入：rank-partition checkpoint（`/steps/step_xxxxxxxx/partitions/rank_xxxxxx/*`）
+- [x] 读取：按 step / latest 的 rank-local restart 读取
+- [x] 全局场拼装：`materialize_global_field_f64()`（供可视化）
+- [x] XDMF sidecar：`write_xdmf_polyvertex_scalar_sidecar()`
+- [x] XDMF time-series：`write_xdmf_polyvertex_scalar_timeseries_sidecar()`
+- [x] 示例：`ex43_hdf5_checkpoint.rs`（无 HDF5 环境时优雅降级）
+- [x] checkpoint 完整性校验：`validate_checkpoint_layout()`
+- [~] MPI backend 已升级为 MPI 协同路径（rank 写入 + root 全局物化）；直接 HDF5 hyperslab collective 仍待完成
+- [x] 并行 mesh+field bundle checkpoint schema（`CheckpointBundleF64` + `CheckpointMeshMeta` baseline）
 
 ### Phase 44 — Navier-Stokes (Kovasznay flow) ✅
 > **Completed** — flagship nonlinear PDE example
@@ -716,11 +722,69 @@ prioritized roadmap for continued development.
 ### Backlog (Low Priority)
 | Item | Phase | Notes |
 |------|-------|-------|
-| hypre binding | TBD | Optional FFI for production AMG |
+| hypre-equivalent AMG path | pure-Rust parity track | Owned by `vendor/linger` capability roadmap |
 | Netgen / Abaqus readers | TBD | Additional mesh import formats |
 | HDF5/XDMF I/O | TBD | Large-scale checkpointing |
 | Restart files | TBD | Requires HDF5 |
 | Tet4 NC AMR example | ✅ | ~~TBD~~ Done (`ex15_tet_nc_amr`, supports `--solve`) |
+
+### Decision Log (2026-04-13)
+
+- `hypre` capability is tracked as a pure-Rust parity roadmap item (no external `hypre-ffi` dependency), owned by `vendor/linger` and consumed by `fem-rs`.
+- GPU backend is tracked as a cross-subproject roadmap item:
+   - `vendor/linger`: backend-neutral kernel interfaces and numeric primitive contracts.
+   - `vendor/reed`: GPU backend implementation and CEED-style operator/resource mapping.
+   - `vendor/jsmpi`: browser-side multi-rank transport/runtime for wasm deployments.
+- External solver delivery is coordinated across subprojects:
+   - `vendor/linger`: pure-Rust HYPRE-equivalent + PETSc-equivalent solver lifecycle; optional external backend contracts (`mumps`, `mkl`).
+   - `vendor/reed`: operator/export bridge, backend selection wiring, and `mkl` integration landing path.
+   - `vendor/jsmpi`: wasm/browser runtime constraints for distributed execution path.
+- Current `linger` gaps to track under this ownership:
+   - Distributed-memory path is still missing (`mpi` feature is placeholder in `vendor/linger/Cargo.toml`).
+   - HYPRE-equivalent advanced options (AIR, AMS/ADS) still need pure-Rust completion.
+   - PETSc-equivalent KSP/PC path still needs pure-Rust completion in `vendor/linger`.
+   - External solver backend hooks are placeholders for optional backends (`mumps`, `mkl`).
+   - AMG options are narrower than hypre BoomerAMG/AIR ecosystem (currently RS/SA + V/W/F/K-cycle baseline).
+   - GPU execution backend is missing in `linger` core (implementation track owned by `vendor/reed`).
+   - Matrix Market complex field I/O is not yet supported (`vendor/linger/src/sparse/mmio.rs`).
+
+### Cross-Subproject Improvement Plan (2026-Q2 to 2026-Q4)
+
+> Scope: coordinated delivery across `vendor/linger`, `vendor/reed`, and `vendor/jsmpi`.
+
+| Stage | Window | linger | reed | jsmpi | Exit Criteria |
+|---|---|---|---|---|---|
+| C1 Foundation | Q2 (2-4 weeks) | External solver abstraction, error adapter, feature-gated fallback | Stable operator/export bridge API to linger | Browser/wasm backend capability policy (supported vs fallback) | API boundary frozen; default build unchanged |
+| C2 External Solvers M1/M2 | Q2-Q3 | pure-Rust HYPRE-equivalent minimal BoomerAMG baseline, then AIR+AMS/ADS; `mumps` first direct path | Builder wiring for backend selection in FEM solve paths | wasm path reports deterministic fallback when native external backends unavailable | Poisson SPD integration tests pass for enabled backends |
+| C3 GPU First Usable Path | Q3 | Backend-neutral kernel interface + CPU reference kernels | GPU backend implementation + CEED-style object mapping + one end-to-end example | Browser multi-rank transport constraints documented for GPU+wasm modes | One representative solve path runs CPU/GPU with same app API |
+| C4 Portfolio Completion | Q4 | pure-Rust PETSc-equivalent KSP/PC path; CI matrix hooks | `mkl` Pardiso integration + cross-backend regression tests in FEM pipelines | Browser smoke tests and fallback matrix by feature | CI passes on feature matrix; docs and examples complete |
+
+#### Work Packages
+
+- [x] WP1: Interface freeze for cross-project backend contracts
+- [ ] WP2: pure-Rust HYPRE-equivalent AIR + AMS/ADS usable in solver builder
+- [ ] WP3: `mumps` usable with factor reuse and multi-RHS
+- [ ] WP4: GPU baseline delivery in `reed` (with `linger` backend-neutral kernel contracts)
+- [ ] WP5: `mkl` in `reed` + pure-Rust PETSc-equivalent KSP/PC in `linger` + CI feature matrix
+- [ ] WP6: `jsmpi` browser/wasm fallback and smoke-test closure
+
+WP1 kickoff artifact merged: `C1_BACKEND_CONTRACT_FREEZE.md` (v0.1).
+
+Current baseline progress (2026-04-13):
+- Added canonical backend-resource smoke coverage in `fem-ceed` for `/solver/hypre-rs`, `/solver/petsc-rs`, `/solver/mumps`, `/solver/mkl` deterministic resolution/report path.
+- Added CI gate `.github/workflows/alignment-smoke.yml` to run targeted smoke tests for:
+   - complex coefficient traits (`fem-assembly`)
+   - named attribute set baseline (`fem-mesh`)
+   - canonical backend resource contract (`fem-ceed`)
+- Added CI gate `.github/workflows/backend-feature-matrix.yml` to validate `vendor/reed` backend contract tests across feature profiles:
+   - baseline (`--no-default-features`)
+   - `hypre-rs`, `petsc-rs`, `mumps`, `mkl`
+
+#### Coordination Rules
+
+- One feature branch per stage, three subprojects use the same stage tag (`C1`/`C2`/`C3`/`C4`).
+- No app-level API churn in `fem-rs` during stages; changes are behind feature flags.
+- A stage is accepted only when all three subprojects satisfy the stage exit criteria.
 
 ---
 
@@ -733,24 +797,24 @@ prioritized roadmap for continued development.
 
 | 能力领域 | MFEM v4.9 | fem-rs | 差距等级 | 对应 Phase |
 |---|---|---|---|---|
-| 复数値 FEM | ✅ ex22/ex25/DPG | ❌ | 🔴 高 | 55 |
-| IMEX 时间积分 | ✅ ex41 | ❌ | 🔴 高 | 56 |
-| AMR 反细化 (Derefinement) | ✅ ex15 | ❌ | 🔴 高 | 57 |
-| 几何多重网格 / LOR 预条件器 | ✅ ex26 | ❌ | 🔴 高 | 58 |
-| SubMesh 子域传输 | ✅ ex34/ex35 | ❌ | 🟡 中 | 59 |
-| DG 弹性力学 | ✅ ex17 | ❌ | 🟡 中 | 60 |
-| DG 可压缩 Euler 方程 | ✅ ex18 | ❌ | 🟡 中 | 60 |
-| 辛时间积分 (Symplectic) | ✅ ex20 | ❌ | 🟡 中 | 61 |
-| 受限 H(curl) 空间 (1D/2D embedded) | ✅ ex31/ex32 | ❌ | 🟡 中 | 62 |
-| PML 完美匹配层 | ✅ ex25 | ❌（依赖复数） | 🟡 中 | 55+63 |
+| 复数値 FEM | ✅ ex22/ex25/DPG | ✅ 基线已实现（2×2 实块） | 🟡 中 | 55 |
+| IMEX 时间积分 | ✅ ex41 | ✅ 基线已实现（Euler/SSP2/RK3/ARK3） | 🟡 中 | 56 |
+| AMR 反细化 (Derefinement) | ✅ ex15 | ✅ 基线已实现（single-level rollback） | 🟡 中 | 57 |
+| 几何多重网格 / LOR 预条件器 | ✅ ex26 | 🔨 LOR + GeomMG 基线 | 🟡 中 | 58 |
+| SubMesh 子域传输 | ✅ ex34/ex35 | ✅ 基线已实现 | 🟡 中 | 59 |
+| DG 弹性力学 | ✅ ex17 | ✅ 基线已实现 | 🟡 中 | 60 |
+| DG 可压缩 Euler 方程 | ✅ ex18 | ✅ 1D 基线已实现 | 🟡 中 | 60 |
+| 辛时间积分 (Symplectic) | ✅ ex20 | ✅ 已实现 | 🟡 中 | 61 |
+| 受限 H(curl) 空间 (1D/2D embedded) | ✅ ex31/ex32 | ✅ 基线已实现 | 🟡 中 | 62 |
+| PML 完美匹配层 | ✅ ex25 | 🔨 标量+各向异性张量基线 | 🟡 中 | 55+63 |
 | 静态凝聚 / 杂化 | ✅ ex4/ex8/hybr | ❌ | 🟢 低 | TBD |
 | 分数阶 Laplacian | ✅ ex33 | ❌ | 🟢 低 | TBD |
 | 障碍问题 / 变分不等式 | ✅ ex36 | ❌ | 🟢 低 | TBD |
 | 拓扑优化 | ✅ ex37 | ❌ | 🟢 低 | TBD |
 | 截断积分 / 浸没边界 | ✅ ex38 | ❌ | 🟢 低 | TBD |
-| 命名属性集 | ✅ ex39 | ❌ | 🟢 低 | TBD |
+| 命名属性集 | ✅ ex39 | 🔨 named tag registry + mesh/submesh named selection + GMSH `PhysicalNames` bridge + `ex39_named_attributes` baseline | 🟢 低 | TBD |
 | Quad/Hex NC AMR（各向异性） | ✅ | 🔨 Tri/Tet only | 🟢 低 | TBD |
-| GPU 后端 (CUDA/HIP) | ✅ 全库加速 | ❌ CPU only | 🟢 低 | TBD |
+| GPU 后端 (CUDA/HIP) | ✅ 全库加速 | ❌ core CPU only（delegated to `vendor/linger` + `vendor/reed` + `vendor/jsmpi` 协同） | 🟢 低 | TBD |
 | DPG 完整 miniapp | ✅ | ❌ | 🟢 低 | TBD |
 | 曲面（surface）网格 FEM | ✅ ex7/ex29 | ❌ | 🟢 低 | TBD |
 | TMOP 网格质量优化 | ✅ miniapp | ❌ | 🟢 低 | TBD |
@@ -776,13 +840,13 @@ prioritized roadmap for continued development.
 其中 `K = stiffness`, `M = mass`, `C = damping`。
 
 **任务清单**：
-- [ ] `ComplexAssembler` — 同时组装实部/虚部矩阵，输出 2×2 `BlockMatrix`
-- [ ] `ComplexCoeff` / `ComplexVectorCoeff` — 复系数 trait（re/im 两路）
-- [ ] `ComplexLinearForm` — 实/虚 RHS 向量对
-- [ ] `apply_dirichlet_complex()` — 复数 Dirichlet BC 消去
-- [ ] `GMRES` on `BlockMatrix` — 复块系统求解（已有 SchurComplement 可复用）
-- [ ] `ex22_complex.rs` — 三变体验证：H¹ / H(curl) / H(div)
-- [ ] `ex25_pml.rs` — PML Maxwell 示例（需先完成复数 H(curl)）
+- [x] `ComplexAssembler` — 同时组装实部/虚部矩阵（2×2 实块系统）
+- [x] `ComplexCoeff` / `ComplexVectorCoeff` — 复系数 trait（re/im 两路，`coefficient.rs` 已提供 baseline）
+- [x] `ComplexLinearForm` — 实/虚 RHS 向量对
+- [x] `apply_dirichlet_complex()` — 复数 Dirichlet BC 消去（`ComplexSystem::apply_dirichlet`）
+- [x] `GMRES` on `BlockMatrix` — 通过 flatten 后 GMRES 路径求解
+- [x] `ex22_complex.rs` — 基线验证示例
+- [x] `ex25_pml.rs` — PML-like complex Helmholtz 基线示例
 
 ---
 
@@ -801,7 +865,7 @@ prioritized roadmap for continued development.
 - [x] `ImexOperator` trait — 分拆为 `explicit_part()` + `implicit_part()`（已在 `fem_solver::ode` 提供）
 - [x] `ImexEuler` (IMEX Euler: forward for explicit, backward for implicit)
 - [x] `ImexRK2` (IMEX-SSP-RK2 / Ascher-Ruuth-Spiteri 2-stage)
-- [ ] `ImexRK3` (IMEX EXTk-BDFk 三阶，对应 Navier miniapp 所用方案)
+- [x] `ImexRK3`（固定步长三阶基线，API: `ImexRk3` + `ImexTimeStepper::integrate_rk3`）
 - [x] `ImexTimeStepper` — 统一 driver，复用 `ImplicitTimeStepper` 接口
 - [x] `ex41_imex.rs` — advection-diffusion IMEX 示例，对比纯显式 RK45
 
@@ -832,8 +896,9 @@ LOR (Low-Order Refined) 用 P1 网格上的 BoomerAMG 预条件高阶问题。
 **两条路线**：
 
 1. **几何 h-多重网格** — 利用网格细化层次，每层使用 `AmgSolver` 作平滑器
-   - `GeomMGHierarchy` — 存储各层 mesh + FESpace + Restriction/Prolongation
-   - `GeomMGPrecond` — V-cycle 实现
+   - [x] `GeomMGHierarchy` — 存储层级矩阵 + Restriction/Prolongation（基线版）
+   - [x] `GeomMGPrecond` — V-cycle 实现（Jacobi smoother + coarse CG）
+   - [x] `ex26_geom_mg.rs` — 几何多重网格基线示例（1D nested hierarchy smoke）
 
 2. **LOR 预条件器**（更实用）
    - [x] `LorMesh::from_high_order(mesh, p)` — 构造 p 次细化的 P1 等效网格（基础版本已实现）
@@ -884,7 +949,10 @@ LOR (Low-Order Refined) 用 P1 网格上的 BoomerAMG 预条件高阶问题。
 > **Target**: MFEM ex25
 
 - [x] 复数/PML 阻尼系数 `PmlCoeff`（基础版：标量层吸收系数）
+- [x] 各向异性方向权重 + 张量接口 `PmlTensorCoeff`（对角张量基线）
 - [x] `ex25_pml.rs` — PML-like complex Helmholtz 基础示例
+- [x] `ex3_maxwell.rs --pml-like` — H(curl) 各向异性 PML-like 阻尼路径（电磁 smoke）
+- [x] `ex34_absorbing_maxwell.rs --anisotropic` — 各向异性吸收边界 Maxwell 路径（电磁 smoke 扩展）
 
 ### Phase 48 — linger Update + Higher-Order Elements ✅
 > **Completed** — sparse direct solvers, new Krylov methods, higher-order FEM

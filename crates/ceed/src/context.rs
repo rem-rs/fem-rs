@@ -32,17 +32,24 @@ use reed_cpu::basis_simplex::SimplexBasis;
 pub enum CeedBackend {
     /// reed CPU backend path (current implementation).
     ReedCpu,
+    /// reed WGPU backend path.
+    ReedGpuWgpu,
 }
 
 /// Central context for applying reed operators to fem-rs meshes.
+#[derive(Debug)]
 pub struct FemCeed {
     backend: CeedBackend,
+    effective_resource: String,
+    backend_note: String,
 }
 
 impl Default for FemCeed {
     fn default() -> Self {
         Self {
             backend: CeedBackend::ReedCpu,
+            effective_resource: "/cpu/self".to_string(),
+            backend_note: "Default FemCeed backend: reed CPU path.".to_string(),
         }
     }
 }
@@ -53,12 +60,58 @@ impl FemCeed {
 
     /// Construct with an explicit backend selection.
     pub fn with_backend(backend: CeedBackend) -> Self {
-        Self { backend }
+        match backend {
+            CeedBackend::ReedCpu => Self {
+                backend,
+                effective_resource: "/cpu/self".to_string(),
+                backend_note: "Explicit FemCeed backend selection: reed CPU path.".to_string(),
+            },
+            CeedBackend::ReedGpuWgpu => Self {
+                backend,
+                effective_resource: "/gpu/wgpu".to_string(),
+                backend_note: "Explicit FemCeed backend selection: reed WGPU path.".to_string(),
+            },
+        }
+    }
+
+    /// Construct from a canonical backend resource string.
+    ///
+    /// Examples: `/native/linger`, `/gpu/wgpu`, `/solver/mkl`, `/solver/petsc-rs`.
+    ///
+    /// Returns both the `FemCeed` context and the reed backend selection report
+    /// so callers can inspect deterministic fallback behavior.
+    pub fn from_backend_resource(
+        resource: &str,
+    ) -> Result<(Self, reed::ReedBackendSelectionReport), FemCeedError> {
+        let (_reed_ctx, report) = reed::Reed::<f64>::init_with_backend_resource(resource)?;
+        let backend = if report.effective_resource.starts_with("/gpu/wgpu") {
+            CeedBackend::ReedGpuWgpu
+        } else {
+            CeedBackend::ReedCpu
+        };
+        Ok((
+            Self {
+                backend,
+                effective_resource: report.effective_resource.clone(),
+                backend_note: report.note.clone(),
+            },
+            report,
+        ))
     }
 
     /// Return the selected execution backend.
     pub fn backend(&self) -> CeedBackend {
         self.backend
+    }
+
+    /// Return the effective reed resource after backend resolution/fallback.
+    pub fn effective_resource(&self) -> &str {
+        &self.effective_resource
+    }
+
+    /// Return backend selection note for diagnostics.
+    pub fn backend_note(&self) -> &str {
+        &self.backend_note
     }
 
     // ── mass operator ─────────────────────────────────────────────────────
@@ -265,4 +318,45 @@ fn check_input_len(input: &[f64], expected: usize) -> Result<(), FemCeedError> {
         return Err(FemCeedError::SizeMismatch { expected, got: input.len() });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_resource_solver_request_returns_report() {
+        let (ceed, report) = FemCeed::from_backend_resource("/solver/mkl")
+            .expect("backend resource init should succeed with deterministic fallback");
+        assert_eq!(ceed.backend(), CeedBackend::ReedCpu);
+        assert!(report.note.contains("mkl"));
+        assert!(ceed.backend_note().contains("mkl"));
+        assert_eq!(ceed.effective_resource(), report.effective_resource);
+    }
+
+    #[test]
+    fn backend_resource_all_canonical_solver_ids_have_deterministic_resolution() {
+        for resource in [
+            "/solver/hypre-rs",
+            "/solver/petsc-rs",
+            "/solver/mumps",
+            "/solver/mkl",
+        ] {
+            let (ceed, report) = FemCeed::from_backend_resource(resource)
+                .unwrap_or_else(|e| panic!("resource {resource} should resolve deterministically: {e:?}"));
+            assert_eq!(ceed.backend(), CeedBackend::ReedCpu);
+            assert_eq!(ceed.effective_resource(), report.effective_resource);
+            assert!(!report.note.is_empty(), "resource {resource} should produce selection note");
+        }
+    }
+
+    #[test]
+    fn backend_resource_unknown_returns_error() {
+        let err = FemCeed::from_backend_resource("/solver/unknown")
+            .expect_err("unknown backend resource should fail");
+        match err {
+            FemCeedError::Reed(_) => {}
+            _ => panic!("unexpected error variant"),
+        }
+    }
 }

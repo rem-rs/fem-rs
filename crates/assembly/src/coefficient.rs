@@ -155,6 +155,71 @@ pub trait MatrixCoeff: Send + Sync {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Complex coefficient traits (2x real channels)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Complex-valued scalar coefficient represented as `(re, im)` channels.
+pub trait ComplexCoeff: Send + Sync {
+    /// Evaluate and return `(re, im)`.
+    fn eval_complex(&self, ctx: &CoeffCtx<'_>) -> (f64, f64);
+
+    /// Whether both channels are spatially constant.
+    fn is_constant(&self) -> bool { false }
+}
+
+/// Complex-valued vector coefficient represented as `(re, im)` channels.
+pub trait ComplexVectorCoeff: Send + Sync {
+    /// Evaluate into `out_re` and `out_im` (length ≥ `ctx.dim`).
+    fn eval_complex(&self, ctx: &CoeffCtx<'_>, out_re: &mut [f64], out_im: &mut [f64]);
+}
+
+/// Constant complex scalar coefficient.
+#[derive(Debug, Clone, Copy)]
+pub struct ComplexConstCoeff {
+    pub re: f64,
+    pub im: f64,
+}
+
+impl ComplexCoeff for ComplexConstCoeff {
+    #[inline(always)]
+    fn eval_complex(&self, _ctx: &CoeffCtx<'_>) -> (f64, f64) { (self.re, self.im) }
+
+    #[inline(always)]
+    fn is_constant(&self) -> bool { true }
+}
+
+/// Adapter: `(re: ScalarCoeff, im: ScalarCoeff)` -> `ComplexCoeff`.
+pub struct ComplexFromScalars<Re, Im> {
+    pub re: Re,
+    pub im: Im,
+}
+
+impl<Re: ScalarCoeff, Im: ScalarCoeff> ComplexCoeff for ComplexFromScalars<Re, Im> {
+    #[inline]
+    fn eval_complex(&self, ctx: &CoeffCtx<'_>) -> (f64, f64) {
+        (self.re.eval(ctx), self.im.eval(ctx))
+    }
+
+    #[inline]
+    fn is_constant(&self) -> bool {
+        self.re.is_constant() && self.im.is_constant()
+    }
+}
+
+/// Adapter: `(re: VectorCoeff, im: VectorCoeff)` -> `ComplexVectorCoeff`.
+pub struct ComplexVectorFromVectors<Re, Im> {
+    pub re: Re,
+    pub im: Im,
+}
+
+impl<Re: VectorCoeff, Im: VectorCoeff> ComplexVectorCoeff for ComplexVectorFromVectors<Re, Im> {
+    fn eval_complex(&self, ctx: &CoeffCtx<'_>, out_re: &mut [f64], out_im: &mut [f64]) {
+        self.re.eval(ctx, out_re);
+        self.im.eval(ctx, out_im);
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // FnCoeff — closure-based scalar coefficient
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -208,22 +273,47 @@ pub struct PmlCoeff {
     pub thickness: f64,
     pub sigma_max: f64,
     pub power: f64,
+    pub axis_weights: Vec<f64>,
 }
 
 impl PmlCoeff {
     pub fn new(min: Vec<f64>, max: Vec<f64>, thickness: f64, sigma_max: f64) -> Self {
+        let axis_weights = vec![1.0; min.len()];
         PmlCoeff {
             min,
             max,
             thickness,
             sigma_max,
             power: 2.0,
+            axis_weights,
         }
     }
 
     pub fn with_power(mut self, power: f64) -> Self {
         self.power = power;
         self
+    }
+
+    /// Set per-axis damping weights for anisotropic PML ramps.
+    pub fn with_axis_weights(mut self, axis_weights: Vec<f64>) -> Self {
+        self.axis_weights = axis_weights;
+        self
+    }
+
+    /// Axis-local damping component `sigma_k(x)`.
+    pub fn axis_sigma(&self, x: &[f64], k: usize) -> f64 {
+        let lo = self.min[k];
+        let hi = self.max[k];
+        let t = self.thickness.max(1e-14);
+        let weight = self.axis_weights.get(k).copied().unwrap_or(1.0);
+        let s = if x[k] < lo + t {
+            ((lo + t - x[k]) / t).clamp(0.0, 1.0)
+        } else if x[k] > hi - t {
+            ((x[k] - (hi - t)) / t).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        weight * self.sigma_max * s.powf(self.power)
     }
 }
 
@@ -232,22 +322,29 @@ impl ScalarCoeff for PmlCoeff {
         let d = ctx.dim;
         let mut sigma = 0.0;
         for k in 0..d {
-            let x = ctx.x[k];
-            let lo = self.min[k];
-            let hi = self.max[k];
-            let t = self.thickness.max(1e-14);
-
-            let s = if x < lo + t {
-                ((lo + t - x) / t).clamp(0.0, 1.0)
-            } else if x > hi - t {
-                ((x - (hi - t)) / t).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            sigma += self.sigma_max * s.powf(self.power);
+            sigma += self.axis_sigma(ctx.x, k);
         }
         sigma
+    }
+}
+
+/// Baseline tensor PML profile: diagonal matrix with axis-wise damping.
+///
+/// Returns `diag(1 + sigma_0(x), ..., 1 + sigma_{d-1}(x))`.
+#[derive(Debug, Clone)]
+pub struct PmlTensorCoeff {
+    pub profile: PmlCoeff,
+}
+
+impl MatrixCoeff for PmlTensorCoeff {
+    fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
+        let d = ctx.dim;
+        for v in out.iter_mut() {
+            *v = 0.0;
+        }
+        for k in 0..d {
+            out[k * d + k] = 1.0 + self.profile.axis_sigma(ctx.x, k);
+        }
     }
 }
 
@@ -704,6 +801,31 @@ mod tests {
     }
 
     #[test]
+    fn pml_coeff_axis_weighting_is_anisotropic() {
+        let c = PmlCoeff::new(vec![0.0, 0.0], vec![1.0, 1.0], 0.2, 5.0)
+            .with_axis_weights(vec![3.0, 1.0]);
+        // Near x-layer only.
+        let sx = c.axis_sigma(&[0.95, 0.5], 0);
+        let sy = c.axis_sigma(&[0.95, 0.5], 1);
+        assert!(sx > 0.0);
+        assert!(sy == 0.0);
+    }
+
+    #[test]
+    fn pml_tensor_coeff_builds_diagonal() {
+        let c = PmlTensorCoeff {
+            profile: PmlCoeff::new(vec![0.0, 0.0], vec![1.0, 1.0], 0.2, 2.0)
+                .with_axis_weights(vec![2.0, 1.0]),
+        };
+        let ctx = make_ctx(&[0.95, 0.95], 1);
+        let mut out = [0.0; 4];
+        c.eval(&ctx, &mut out);
+        assert!(out[0] > out[3], "expected stronger x-direction damping");
+        assert_eq!(out[1], 0.0);
+        assert_eq!(out[2], 0.0);
+    }
+
+    #[test]
     fn inner_product_coeff() {
         let a = ConstantVectorCoeff(vec![1.0, 2.0]);
         let b = ConstantVectorCoeff(vec![3.0, 4.0]);
@@ -749,5 +871,42 @@ mod tests {
         let mut out = [0.0; 4];
         m.eval(&ctx, &mut out);
         assert_eq!(out, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn complex_const_coeff_eval() {
+        let c = ComplexConstCoeff { re: 2.5, im: -0.75 };
+        let ctx = make_ctx(&[0.2, 0.4], 0);
+        let (re, im) = c.eval_complex(&ctx);
+        assert!((re - 2.5).abs() < 1e-12);
+        assert!((im + 0.75).abs() < 1e-12);
+        assert!(c.is_constant());
+    }
+
+    #[test]
+    fn complex_from_scalars_eval() {
+        let c = ComplexFromScalars {
+            re: FnCoeff(|x: &[f64]| x[0] + 1.0),
+            im: FnCoeff(|x: &[f64]| x[1] - 2.0),
+        };
+        let ctx = make_ctx(&[0.3, 0.8], 0);
+        let (re, im) = c.eval_complex(&ctx);
+        assert!((re - 1.3).abs() < 1e-12);
+        assert!((im + 1.2).abs() < 1e-12);
+        assert!(!c.is_constant());
+    }
+
+    #[test]
+    fn complex_vector_from_vectors_eval() {
+        let c = ComplexVectorFromVectors {
+            re: ConstantVectorCoeff(vec![1.0, 2.0]),
+            im: ConstantVectorCoeff(vec![-3.0, 4.0]),
+        };
+        let ctx = make_ctx(&[0.1, 0.2], 0);
+        let mut out_re = [0.0; 2];
+        let mut out_im = [0.0; 2];
+        c.eval_complex(&ctx, &mut out_re, &mut out_im);
+        assert_eq!(out_re, [1.0, 2.0]);
+        assert_eq!(out_im, [-3.0, 4.0]);
     }
 }

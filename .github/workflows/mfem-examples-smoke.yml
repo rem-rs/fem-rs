@@ -1,0 +1,50 @@
+name: MFEM Examples Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - examples/**
+      - crates/**
+      - scripts/run_mfem_examples.ps1
+      - .github/workflows/mfem-examples-smoke.yml
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: mfem-examples-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [mfem, core]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run MFEM examples batch
+        shell: pwsh
+        run: |
+          if ("${{ matrix.suite }}" -eq "mfem") {
+            ./scripts/run_mfem_examples.ps1 -MfemOnly
+          } else {
+            ./scripts/run_mfem_examples.ps1 -CoreOnly
+          }

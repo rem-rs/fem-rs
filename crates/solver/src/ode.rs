@@ -186,6 +186,27 @@ impl ImexTimeStepper {
         )
     }
 
+    /// Integrate with fixed-step third-order IMEX RK3.
+    pub fn integrate_rk3<O: ImexOperator>(
+        &self,
+        op: &O,
+        t0: f64,
+        t_end: f64,
+        u: &mut [f64],
+        dt: f64,
+    ) -> f64 {
+        let solver = ImexRk3;
+        solver.integrate(
+            t0,
+            t_end,
+            u,
+            dt,
+            |t, u, out| op.explicit(t, u, out),
+            |t, u, out| op.implicit(t, u, out),
+            |t, u| op.jac_implicit(t, u),
+        )
+    }
+
     /// Integrate with adaptive third-order IMEX ARK3.
     /// Returns `(t_final, dt_last)`.
     pub fn integrate_ark3<O: ImexOperator>(
@@ -909,6 +930,71 @@ pub struct ImexArk3 {
     pub dt_min: f64,
     /// Maximum step size.
     pub dt_max: f64,
+}
+
+/// Fixed-step third-order IMEX RK3 integrator.
+///
+/// This is a convenience wrapper around [`ImexArk3`] with adaptation disabled
+/// by clamping `dt_min = dt_max = dt`.
+pub struct ImexRk3;
+
+impl ImexRk3 {
+    /// Take one fixed-size third-order IMEX step.
+    pub fn step<FE, FI, J>(
+        &self,
+        t: f64,
+        dt: f64,
+        u: &mut [f64],
+        rhs_explicit: FE,
+        rhs_implicit: FI,
+        jac_implicit: J,
+    )
+    where
+        FE: Fn(f64, &[f64], &mut [f64]),
+        FI: Fn(f64, &[f64], &mut [f64]),
+        J: Fn(f64, &[f64]) -> CsrMatrix<f64>,
+    {
+        let solver = ImexArk3 {
+            rtol: 1e-14,
+            atol: 1e-14,
+            dt_min: dt,
+            dt_max: dt,
+        };
+        let _ = solver.integrate(
+            t,
+            t + dt,
+            u,
+            dt,
+            rhs_explicit,
+            rhs_implicit,
+            jac_implicit,
+        );
+    }
+
+    /// Integrate with fixed step size `dt` to `t_end`.
+    pub fn integrate<FE, FI, J>(
+        &self,
+        t0: f64,
+        t_end: f64,
+        u: &mut [f64],
+        dt: f64,
+        rhs_explicit: FE,
+        rhs_implicit: FI,
+        jac_implicit: J,
+    ) -> f64
+    where
+        FE: Fn(f64, &[f64], &mut [f64]),
+        FI: Fn(f64, &[f64], &mut [f64]),
+        J: Fn(f64, &[f64]) -> CsrMatrix<f64>,
+    {
+        let mut t = t0;
+        while t < t_end - 1e-14 {
+            let h = dt.min(t_end - t);
+            self.step(t, h, u, &rhs_explicit, &rhs_implicit, &jac_implicit);
+            t += h;
+        }
+        t
+    }
 }
 
 impl Default for ImexArk3 {
@@ -1641,6 +1727,16 @@ mod tests {
     }
 
     #[test]
+    fn imex_driver_rk3_matches_decay() {
+        let op = SplitDecayOp { lambda: 10.0 };
+        let driver = ImexTimeStepper;
+        let mut u = vec![1.0f64];
+        let t_f = driver.integrate_rk3(&op, 0.0, 0.5, &mut u, 0.02);
+        let exact = (-10.0 * t_f).exp();
+        assert!((u[0] - exact).abs() < 2e-3, "ImexTimeStepper RK3 error too large: u={:.4e}, exact={:.4e}", u[0], exact);
+    }
+
+    #[test]
     fn imex_ark3_non_stiff_decay() {
         // du/dt = -u  (f_E = 0, f_I = -u).  Exact: exp(-t).
         // Tests that the implicit part alone integrates correctly.
@@ -1736,6 +1832,37 @@ mod tests {
         let order = (e1 / e2).log2();
 
         assert!(order > 1.7, "ImexSsp2 order too low: order={order:.2}, e1={e1:.3e}, e2={e2:.3e}");
+    }
+
+    #[test]
+    fn imex_rk3_third_order_check() {
+        // Linear split test: u' = -(a+b)u with exact exp(-(a+b)t).
+        // This avoids cancellation/noise from strongly forced stiff terms and
+        // yields a robust temporal order check.
+        let a = 0.7_f64;   // explicit part
+        let b = 4.3_f64;   // implicit part
+
+        let f_e = move |_t: f64, u: &[f64], out: &mut [f64]| { out[0] = -a * u[0]; };
+        let f_i = move |_t: f64, u: &[f64], out: &mut [f64]| { out[0] = -b * u[0]; };
+        let jac = |_t: f64, _u: &[f64]| {
+            let mut coo = CooMatrix::<f64>::new(1, 1);
+            coo.add(0, 0, -b);
+            coo.into_csr()
+        };
+
+        let exact = move |t: f64| (-(a + b) * t).exp();
+        let t_end = 1.0_f64;
+
+        let solver = ImexRk3;
+        let mut u1 = vec![1.0_f64];
+        let mut u2 = vec![1.0_f64];
+        solver.integrate(0.0, t_end, &mut u1, 0.08, f_e, f_i, jac);
+        solver.integrate(0.0, t_end, &mut u2, 0.04, f_e, f_i, jac);
+
+        let e1 = (u1[0] - exact(t_end)).abs();
+        let e2 = (u2[0] - exact(t_end)).abs();
+        let order = (e1 / e2).log2();
+        assert!(order > 2.3, "ImexRk3 order too low: order={order:.2}, e1={e1:.3e}, e2={e2:.3e}");
     }
 
     struct HarmonicOscillator {

@@ -13,6 +13,7 @@
 //! This example compares:
 //!   - IMEX Euler
 //!   - IMEX SSP2
+//!   - IMEX RK3 (fixed-step)
 //!   - IMEX ARK3 (adaptive)
 //! against a fine-step RK4 reference trajectory.
 
@@ -125,21 +126,27 @@ fn main() {
     let mut u_ssp2 = u0.clone();
     let t_s = imex_driver.integrate_ssp2(&split, 0.0, args.t_end, &mut u_ssp2, args.dt);
 
+    let mut u_rk3 = u0.clone();
+    let t_r = imex_driver.integrate_rk3(&split, 0.0, args.t_end, &mut u_rk3, args.dt);
+
     let mut u_ark3 = u0.clone();
     let ark3 = ImexArk3 { rtol: 1e-6, atol: 1e-9, dt_min: 1e-10, dt_max: args.dt, ..Default::default() };
     let (t_a, dt_last) = imex_driver.integrate_ark3(&split, 0.0, args.t_end, &mut u_ark3, args.dt, &ark3);
 
     let err_e = l2_error(&u_euler, &u_ref);
     let err_s = l2_error(&u_ssp2, &u_ref);
+    let err_r = l2_error(&u_rk3, &u_ref);
     let err_a = l2_error(&u_ark3, &u_ref);
 
-    println!("  final times: Euler={:.6}, SSP2={:.6}, ARK3={:.6} (ark dt_last={:.3e})", t_e, t_s, t_a, dt_last);
+    println!("  final times: Euler={:.6}, SSP2={:.6}, RK3={:.6}, ARK3={:.6} (ark dt_last={:.3e})", t_e, t_s, t_r, t_a, dt_last);
     println!("  ||u_euler - u_ref||_2 = {:.3e}", err_e);
     println!("  ||u_ssp2  - u_ref||_2 = {:.3e}", err_s);
+    println!("  ||u_rk3   - u_ref||_2 = {:.3e}", err_r);
     println!("  ||u_ark3  - u_ref||_2 = {:.3e}", err_a);
 
     assert!(err_e.is_finite() && err_s.is_finite() && err_a.is_finite(), "non-finite error detected");
     assert!(err_s <= err_e * 1.05, "SSP2 should not be worse than Euler by much: euler={err_e:.3e}, ssp2={err_s:.3e}");
+    assert!(err_r <= err_s * 1.05, "RK3 should be at least comparable to SSP2: rk3={err_r:.3e}, ssp2={err_s:.3e}");
 
     println!("  PASS");
 }

@@ -20,7 +20,10 @@ fn main() {
     let args = parse_args();
 
     println!("=== ex25_pml: baseline complex PML-like damping ===");
-    println!("  n={}, omega={}, pml_thickness={}, sigma_max={}", args.n, args.omega, args.thickness, args.sigma_max);
+    println!(
+        "  n={}, omega={}, pml_thickness={}, sigma_max={}, wx={}, wy={}",
+        args.n, args.omega, args.thickness, args.sigma_max, args.wx, args.wy
+    );
 
     let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
@@ -31,7 +34,8 @@ fn main() {
         vec![1.0, 1.0],
         args.thickness,
         args.sigma_max,
-    );
+    )
+    .with_axis_weights(vec![args.wx, args.wy]);
 
     let mut sys = ComplexAssembler::assemble(
         &space,
@@ -73,10 +77,12 @@ struct Args {
     omega: f64,
     thickness: f64,
     sigma_max: f64,
+    wx: f64,
+    wy: f64,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 12, omega: 2.0, thickness: 0.2, sigma_max: 1.0 };
+    let mut a = Args { n: 12, omega: 2.0, thickness: 0.2, sigma_max: 1.0, wx: 1.0, wy: 1.0 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -84,6 +90,8 @@ fn parse_args() -> Args {
             "--omega" => a.omega = it.next().unwrap_or("2.0".into()).parse().unwrap_or(2.0),
             "--pml-thickness" => a.thickness = it.next().unwrap_or("0.2".into()).parse().unwrap_or(0.2),
             "--sigma-max" => a.sigma_max = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0),
+            "--wx" => a.wx = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0),
+            "--wy" => a.wy = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0),
             _ => {}
         }
     }

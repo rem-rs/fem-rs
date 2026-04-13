@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use fem_core::{ElemId, NodeId};
 
-use crate::{ElementType, SimplexMesh};
+use crate::{ElementType, NamedAttributeRegistry, SimplexMesh};
 
 /// Submesh view extracted from a parent mesh.
 #[derive(Debug, Clone)]
@@ -140,9 +140,30 @@ pub fn extract_submesh(mesh: &SimplexMesh<2>, element_tags: &[i32]) -> SubMesh {
     }
 }
 
+/// Extract submesh by named attribute set.
+///
+/// The named set is resolved through `registry`, and its element tags are used
+/// as extraction tags.
+pub fn extract_submesh_by_name(
+    mesh: &SimplexMesh<2>,
+    registry: &NamedAttributeRegistry,
+    set_name: &str,
+) -> Result<SubMesh, fem_core::FemError> {
+    let set = registry.get(set_name).ok_or_else(|| {
+        fem_core::FemError::Mesh(format!("named attribute set not found: {set_name}"))
+    })?;
+    if set.element_tags.is_empty() {
+        return Err(fem_core::FemError::Mesh(format!(
+            "named attribute set has no element tags: {set_name}"
+        )));
+    }
+    Ok(extract_submesh(mesh, &set.element_tags))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NamedAttributeSet;
 
     #[test]
     fn extract_submesh_by_tag() {
@@ -175,5 +196,30 @@ mod tests {
             let p = pn as usize;
             assert!((back[p] - parent_vals[p]).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn extract_submesh_by_name_works() {
+        let mut m = SimplexMesh::<2>::unit_square_tri(2);
+        for (i, t) in m.elem_tags.iter_mut().enumerate() {
+            *t = if i % 2 == 0 { 4 } else { 8 };
+        }
+
+        let mut reg = NamedAttributeRegistry::new();
+        reg.insert(NamedAttributeSet::new("fluid").with_element_tags([4]));
+
+        let sub = extract_submesh_by_name(&m, &reg, "fluid").expect("submesh by name failed");
+        assert!(!sub.parent_elem_ids.is_empty());
+        assert!(sub.mesh.elem_tags.iter().all(|&t| t == 4));
+    }
+
+    #[test]
+    fn extract_submesh_by_name_missing_set_errors() {
+        let m = SimplexMesh::<2>::unit_square_tri(1);
+        let reg = NamedAttributeRegistry::new();
+        let err = extract_submesh_by_name(&m, &reg, "missing")
+            .expect_err("expected missing set error");
+        let msg = format!("{err}");
+        assert!(msg.contains("named attribute set not found"));
     }
 }

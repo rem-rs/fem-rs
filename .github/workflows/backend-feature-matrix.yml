@@ -1,0 +1,60 @@
+name: Backend Feature Matrix
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - vendor/reed/**
+      - crates/ceed/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/backend-feature-matrix.yml
+      - MFEM_MAPPING.md
+      - C1_BACKEND_CONTRACT_FREEZE.md
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: backend-feature-matrix-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reed-contract:
+    name: reed contract (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: baseline
+            args: --no-default-features
+          - profile: hypre-rs
+            args: --no-default-features --features hypre-rs
+          - profile: petsc-rs
+            args: --no-default-features --features petsc-rs
+          - profile: mumps
+            args: --no-default-features --features mumps
+          - profile: mkl
+            args: --no-default-features --features mkl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run reed backend contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} parse_backend_request_supports_canonical_paths -- --nocapture
+          cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} backend_report_defaults_to_native_cpu -- --nocapture
+          cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} backend_report_mkl_defaults_to_fallback_until_wiring -- --nocapture

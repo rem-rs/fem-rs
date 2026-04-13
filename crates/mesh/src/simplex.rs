@@ -1,5 +1,9 @@
 use fem_core::{ElemId, FaceId, FemError, FemResult, NodeId};
-use crate::{boundary::BoundaryTag, element_type::ElementType, topology::MeshTopology};
+use crate::{
+    boundary::{BoundaryTag, NamedAttributeRegistry},
+    element_type::ElementType,
+    topology::MeshTopology,
+};
 
 /// Unstructured mesh with uniform or mixed element types.
 ///
@@ -135,6 +139,64 @@ impl<const D: usize> SimplexMesh<D> {
         tags.sort_unstable();
         tags.dedup();
         tags
+    }
+
+    /// Return all element ids that carry the given material tag.
+    pub fn element_ids_with_tag(&self, tag: i32) -> Vec<ElemId> {
+        let mut out = Vec::new();
+        for e in 0..self.n_elems() {
+            if self.elem_tags[e] == tag {
+                out.push(e as ElemId);
+            }
+        }
+        out
+    }
+
+    /// Return all boundary face ids that carry the given boundary tag.
+    pub fn face_ids_with_tag(&self, tag: BoundaryTag) -> Vec<FaceId> {
+        let mut out = Vec::new();
+        for f in 0..self.n_faces() {
+            if self.face_tags[f] == tag {
+                out.push(f as FaceId);
+            }
+        }
+        out
+    }
+
+    /// Query element ids by named attribute set.
+    pub fn element_ids_for_named_set(
+        &self,
+        registry: &NamedAttributeRegistry,
+        set_name: &str,
+    ) -> FemResult<Vec<ElemId>> {
+        let set = registry.get(set_name).ok_or_else(|| {
+            FemError::Mesh(format!("named attribute set not found: {set_name}"))
+        })?;
+        let mut out = Vec::new();
+        for e in 0..self.n_elems() {
+            if set.has_element_tag(self.elem_tags[e]) {
+                out.push(e as ElemId);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Query boundary face ids by named attribute set.
+    pub fn face_ids_for_named_set(
+        &self,
+        registry: &NamedAttributeRegistry,
+        set_name: &str,
+    ) -> FemResult<Vec<FaceId>> {
+        let set = registry.get(set_name).ok_or_else(|| {
+            FemError::Mesh(format!("named attribute set not found: {set_name}"))
+        })?;
+        let mut out = Vec::new();
+        for f in 0..self.n_faces() {
+            if set.has_boundary_tag(self.face_tags[f]) {
+                out.push(f as FaceId);
+            }
+        }
+        Ok(out)
     }
 
     /// Create a periodic mesh by identifying matching node pairs on opposite
@@ -667,6 +729,7 @@ impl<const D: usize> MeshTopology for SimplexMesh<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NamedAttributeSet;
 
     #[test]
     fn unit_square_counts() {
@@ -802,5 +865,47 @@ mod tests {
         // No boundary faces should remain
         assert_eq!(pm.n_faces(), 0, "fully periodic mesh should have no boundary faces");
         assert_eq!(pm.n_elems(), m.n_elems());
+    }
+
+    #[test]
+    fn named_attribute_set_queries_elements_and_faces() {
+        let mut m = SimplexMesh::<2>::unit_square_tri(2);
+        let n = m.n_elems();
+        for i in 0..n {
+            m.elem_tags[i] = if i < n / 2 { 7 } else { 9 };
+        }
+
+        let mut reg = NamedAttributeRegistry::new();
+        reg.insert(
+            NamedAttributeSet::new("conductors")
+                .with_element_tags([7])
+                .with_boundary_tags([1, 3]),
+        );
+
+        let elems = m
+            .element_ids_for_named_set(&reg, "conductors")
+            .expect("missing named set");
+        assert!(!elems.is_empty());
+        assert!(elems.iter().all(|&e| m.elem_tags[e as usize] == 7));
+
+        let faces = m
+            .face_ids_for_named_set(&reg, "conductors")
+            .expect("missing named set");
+        assert!(!faces.is_empty());
+        assert!(faces.iter().all(|&f| {
+            let t = m.face_tags[f as usize];
+            t == 1 || t == 3
+        }));
+    }
+
+    #[test]
+    fn named_attribute_set_missing_name_errors() {
+        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let reg = NamedAttributeRegistry::new();
+        let err = m
+            .element_ids_for_named_set(&reg, "missing")
+            .expect_err("expected missing set error");
+        let msg = format!("{err}");
+        assert!(msg.contains("named attribute set not found"));
     }
 }

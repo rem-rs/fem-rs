@@ -23,7 +23,11 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 
 use fem_core::{FemError, FemResult};
-use fem_mesh::{boundary::PhysicalGroup, element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{
+    boundary::{NamedAttributeRegistry, NamedAttributeSet, PhysicalGroup},
+    element_type::ElementType,
+    simplex::SimplexMesh,
+};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -75,6 +79,56 @@ impl MshFile {
     /// Unwrap the 3-D mesh, or return an error if none was found.
     pub fn into_3d(self) -> FemResult<SimplexMesh<3>> {
         self.mesh3d.ok_or_else(|| FemError::Mesh("no 3-D elements found in .msh file".into()))
+    }
+
+    /// Build a named-attribute registry from parsed GMSH `PhysicalNames`.
+    ///
+    /// Mapping policy:
+    /// - physical groups at element dimension map to `element_tags`
+    /// - physical groups at boundary dimension map to `boundary_tags`
+    ///
+    /// For 2D meshes: element dim = 2, boundary dim = 1.
+    /// For 3D meshes: element dim = 3, boundary dim = 2.
+    /// If mesh dimensionality is unknown, falls back to max physical-group dim.
+    pub fn named_attribute_registry(&self) -> NamedAttributeRegistry {
+        let (elem_dim, bnd_dim) = if self.mesh3d.is_some() {
+            (3u8, 2u8)
+        } else if self.mesh2d.is_some() {
+            (2u8, 1u8)
+        } else {
+            let max_dim = self.physical_groups.iter().map(|g| g.dim).max().unwrap_or(0);
+            (max_dim, max_dim.saturating_sub(1))
+        };
+
+        let mut accum: std::collections::HashMap<String, (Vec<i32>, Vec<i32>)> =
+            std::collections::HashMap::new();
+
+        for g in &self.physical_groups {
+            let entry = accum
+                .entry(g.name.clone())
+                .or_insert_with(|| (Vec::new(), Vec::new()));
+            if g.dim == elem_dim {
+                entry.0.push(g.tag);
+            } else if g.dim == bnd_dim {
+                entry.1.push(g.tag);
+            }
+        }
+
+        let mut reg = NamedAttributeRegistry::new();
+        for (name, (mut elem_tags, mut bnd_tags)) in accum {
+            elem_tags.sort_unstable();
+            elem_tags.dedup();
+            bnd_tags.sort_unstable();
+            bnd_tags.dedup();
+
+            reg.insert(
+                NamedAttributeSet::new(name)
+                    .with_element_tags(elem_tags)
+                    .with_boundary_tags(bnd_tags),
+            );
+        }
+
+        reg
     }
 }
 
@@ -910,5 +964,84 @@ $EndElements
         // Check connectivity lengths
         assert_eq!(mesh.elem_nodes(0).len(), 4);
         assert_eq!(mesh.elem_nodes(1).len(), 3);
+    }
+
+    #[test]
+    fn physical_names_to_named_attribute_registry_2d() {
+        let data = r#"$MeshFormat
+2.2 0 8
+$EndMeshFormat
+$PhysicalNames
+3
+2 1 "domain"
+1 1 "bottom"
+1 3 "top"
+$EndPhysicalNames
+$Nodes
+4
+1 0 0 0
+2 1 0 0
+3 1 1 0
+4 0 1 0
+$EndNodes
+$Elements
+6
+1 1 2 1 1 1 2
+2 1 2 2 2 2 3
+3 1 2 3 3 3 4
+4 1 2 4 4 4 1
+5 2 2 1 1 1 2 3
+6 2 2 1 1 1 3 4
+$EndElements
+"#;
+
+        let msh = read_msh(data.as_bytes()).expect("failed to parse mesh with PhysicalNames");
+        let reg = msh.named_attribute_registry();
+
+        let dom = reg.get("domain").expect("missing domain set");
+        assert!(dom.has_element_tag(1));
+        assert!(!dom.has_boundary_tag(1));
+
+        let bottom = reg.get("bottom").expect("missing bottom set");
+        assert!(bottom.has_boundary_tag(1));
+        assert!(!bottom.has_element_tag(1));
+
+        let top = reg.get("top").expect("missing top set");
+        assert!(top.has_boundary_tag(3));
+    }
+
+    #[test]
+    fn physical_names_same_name_across_dims_are_merged() {
+        let data = r#"$MeshFormat
+2.2 0 8
+$EndMeshFormat
+$PhysicalNames
+2
+2 1 "wall"
+1 2 "wall"
+$EndPhysicalNames
+$Nodes
+4
+1 0 0 0
+2 1 0 0
+3 1 1 0
+4 0 1 0
+$EndNodes
+$Elements
+6
+1 1 2 1 1 1 2
+2 1 2 2 2 2 3
+3 1 2 3 3 3 4
+4 1 2 4 4 4 1
+5 2 2 1 1 1 2 3
+6 2 2 1 1 1 3 4
+$EndElements
+"#;
+
+        let msh = read_msh(data.as_bytes()).expect("failed to parse mesh with merged PhysicalNames");
+        let reg = msh.named_attribute_registry();
+        let wall = reg.get("wall").expect("missing wall set");
+        assert!(wall.has_element_tag(1));
+        assert!(wall.has_boundary_tag(2));
     }
 }

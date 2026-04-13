@@ -40,7 +40,7 @@ use fem_assembly::postprocess::compute_element_gradients;
 use fem_assembly::{coefficient::FnCoeff, standard::DiffusionIntegrator, Assembler};
 use fem_io::vtk::{DataArray, VtkWriter};
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_solver::{solve_gmres, solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     constraints::{apply_dirichlet, boundary_dofs},
     fe_space::FESpace,
@@ -101,7 +101,14 @@ fn main() {
         verbose: false,
         ..SolverConfig::default()
     };
-    let res = solve_pcg_jacobi(&mat, &rhs, &mut phi, &cfg).expect("solver failed");
+    let res = match solve_pcg_jacobi(&mat, &rhs, &mut phi, &cfg) {
+        Ok(r) => r,
+        Err(_) => {
+            // Dirichlet elimination can produce non-ideal conditioning for CG;
+            // use GMRES as a robust fallback for this mixed-BC conductivity case.
+            solve_gmres(&mat, &rhs, &mut phi, 50, &cfg).expect("solver failed")
+        }
+    };
     println!(
         "  Solve: {} iters, residual = {:.3e}, converged = {}",
         res.iterations, res.final_residual, res.converged

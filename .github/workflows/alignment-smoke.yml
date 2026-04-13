@@ -1,0 +1,62 @@
+name: Alignment Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/assembly/**
+      - crates/mesh/**
+      - crates/ceed/**
+      - examples/**
+      - .github/workflows/alignment-smoke.yml
+      - MFEM_MAPPING.md
+      - MFEM_ALIGNMENT_TRACKER.md
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: alignment-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [complex-coeff, named-attrs, named-attrs-io, electromagnetic-pml, electromagnetic-absorbing, backend-contract]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run alignment smoke tests
+        shell: pwsh
+        run: |
+          if ("${{ matrix.suite }}" -eq "complex-coeff") {
+            cargo test -p fem-assembly coefficient::tests::complex_ -- --nocapture
+          } elseif ("${{ matrix.suite }}" -eq "named-attrs") {
+            cargo test -p fem-mesh boundary::tests::named_attribute_ -- --nocapture
+          } elseif ("${{ matrix.suite }}" -eq "named-attrs-io") {
+            cargo test -p fem-io physical_names_to_named_attribute_registry_2d -- --nocapture
+            cargo test -p fem-io physical_names_same_name_across_dims_are_merged -- --nocapture
+            cargo run -p fem-examples --example ex39_named_attributes --quiet
+            cargo run -p fem-examples --example ex26_geom_mg --quiet
+          } elseif ("${{ matrix.suite }}" -eq "electromagnetic-pml") {
+            cargo run -p fem-examples --example ex3_maxwell --quiet -- --pml-like --pml-thickness 0.2 --sigma-max 2.0 --wx 1.0 --wy 1.5          } elseif ("${{ matrix.suite }}" -eq "electromagnetic-absorbing") {
+            cargo run -p fem-examples --example ex34_absorbing_maxwell --quiet -- --anisotropic --gamma-x 1.0 --gamma-y 1.5          } else {
+            cargo test -p fem-ceed backend_resource_all_canonical_solver_ids_have_deterministic_resolution -- --nocapture
+          }

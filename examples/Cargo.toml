@@ -15,6 +15,7 @@ fem-space    = { path = "../crates/space" }
 fem-assembly = { path = "../crates/assembly" }
 fem-solver   = { path = "../crates/solver" }
 fem-amg      = { path = "../crates/amg" }
+fem-io-hdf5-parallel = { path = "../crates/io_hdf5_parallel" }
 nalgebra     = { workspace = true }
 log          = { workspace = true }
 env_logger   = { workspace = true }
@@ -156,6 +157,10 @@ name = "ex34_absorbing_maxwell"
 path = "ex34_absorbing_maxwell.rs"
 
 [[example]]
+name = "ex39_named_attributes"
+path = "ex39_named_attributes.rs"
+
+[[example]]
 name = "ex_maxwell_eigenvalue"
 path = "ex_maxwell_eigenvalue.rs"
 
@@ -180,8 +185,16 @@ name = "ex25_pml"
 path = "ex25_pml.rs"
 
 [[example]]
+name = "ex26_geom_mg"
+path = "ex26_geom_mg.rs"
+
+[[example]]
 name = "ex41_imex"
 path = "ex41_imex.rs"
+
+[[example]]
+name = "ex43_hdf5_checkpoint"
+path = "ex43_hdf5_checkpoint.rs"
 
 [[example]]
 name = "ex_maxwell_firstorder"

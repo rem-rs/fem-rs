@@ -11,6 +11,7 @@ members = [
     "crates/amg",
     "crates/parallel",
     "crates/io",
+    "crates/io_hdf5_parallel",
     "crates/wasm",
     "crates/ceed",        # bridge: fem-rs ↔ reed (libCEED analogue)
     "crates/benches",
