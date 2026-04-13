@@ -16,9 +16,9 @@ members = [
     "crates/benches",
     "examples",
 ]
-# reed lives in vendor/reed as a git submodule and is its own Cargo workspace.
-# Exclude it so Cargo does not try to merge the two workspace graphs.
-exclude = ["vendor/reed", "vendor/linger", "vendor/jsmpi"]
+# reed/linger live in vendor as git submodules and are their own Cargo workspaces.
+# Exclude them so Cargo does not try to merge workspace graphs.
+exclude = ["vendor/reed", "vendor/linger"]
 
 [workspace.dependencies]
 # shared versions — reference from crates with { workspace = true }

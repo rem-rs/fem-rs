@@ -78,13 +78,72 @@ pub fn lobpcg(
     k:   usize,
     cfg: &LobpcgConfig,
 ) -> Result<EigenResult, String> {
+    lobpcg_projected(a, b, k, None, None, cfg)
+}
+
+/// Compute the `k` smallest eigenpairs of `A x = λ B x` using LOBPCG,
+/// constrained to the complement of the column space of `constraints`.
+///
+/// This is useful for Maxwell cavity problems where the discrete gradient
+/// space spans the curl-curl nullspace and must be projected out.
+pub fn lobpcg_constrained(
+    a: &CsrMatrix<f64>,
+    b: Option<&CsrMatrix<f64>>,
+    k: usize,
+    constraints: &DMatrix<f64>,
+    cfg: &LobpcgConfig,
+) -> Result<EigenResult, String> {
+    lobpcg_projected(a, b, k, Some(constraints), None, cfg)
+}
+
+/// Compute the `k` smallest eigenpairs of `A x = λ B x` using LOBPCG,
+/// constrained to the complement of the column space of `constraints`, with
+/// a user-supplied residual preconditioner.
+///
+/// The callback receives the current block residual matrix `R` (`n x k`) and
+/// should return an approximate preconditioned block `Z ≈ P^{-1} R` with the
+/// same shape.
+pub fn lobpcg_constrained_preconditioned<F>(
+    a: &CsrMatrix<f64>,
+    b: Option<&CsrMatrix<f64>>,
+    k: usize,
+    constraints: &DMatrix<f64>,
+    preconditioner: F,
+    cfg: &LobpcgConfig,
+) -> Result<EigenResult, String>
+where
+    F: Fn(&DMatrix<f64>) -> DMatrix<f64>,
+{
+    lobpcg_projected(a, b, k, Some(constraints), Some(&preconditioner), cfg)
+}
+
+fn lobpcg_projected(
+    a: &CsrMatrix<f64>,
+    b: Option<&CsrMatrix<f64>>,
+    k: usize,
+    constraints: Option<&DMatrix<f64>>,
+    preconditioner: Option<&dyn Fn(&DMatrix<f64>) -> DMatrix<f64>>,
+    cfg: &LobpcgConfig,
+) -> Result<EigenResult, String> {
     let n = a.nrows;
     assert_eq!(a.ncols, n, "A must be square");
     assert!(k >= 1 && k <= n, "k must be in [1, n]");
 
+    let constraint_basis = constraints
+        .map(|c| orthonormal_basis(c.clone(), b))
+        .unwrap_or_else(|| DMatrix::<f64>::zeros(n, 0));
+
+    if constraint_basis.ncols() + k > n {
+        return Err(format!(
+            "constraint space too large: n={}, k={}, constraints={}",
+            n,
+            k,
+            constraint_basis.ncols()
+        ));
+    }
+
     // ── 1. Initialise X with random orthonormal columns ───────────────────────
-    let mut x = random_orthonormal(n, k);
-    if let Some(bm) = b { b_orthonormalise(&mut x, bm); } else { qr_orthonormalise(&mut x); }
+    let mut x = random_feasible_orthonormal(n, k, &constraint_basis, b)?;
 
     let mut p = DMatrix::<f64>::zeros(n, k); // previous search direction (0 on first iter)
     let mut use_p = false;
@@ -113,6 +172,7 @@ pub fn lobpcg(
             let mut rj = r.column_mut(j);
             rj.axpy(-lj, &bxj, 1.0);
         }
+        project_out(&mut r, &constraint_basis, b);
 
         // ── 5. Convergence check ──────────────────────────────────────────────
         let res_norms: Vec<f64> = (0..k)
@@ -133,23 +193,45 @@ pub fn lobpcg(
             });
         }
 
-        // ── 6. Update X using local Rayleigh–Ritz in span(X, R, P) ───────────
+        // ── 6. Optional residual preconditioning Z = P^{-1} R ───────────────
+        let mut z = if let Some(pc) = preconditioner {
+            let z_try = pc(&r);
+            if z_try.nrows() != n || z_try.ncols() != k {
+                return Err(format!(
+                    "LOBPCG preconditioner returned wrong shape: got {}x{}, expected {}x{}",
+                    z_try.nrows(),
+                    z_try.ncols(),
+                    n,
+                    k
+                ));
+            }
+            z_try
+        } else {
+            r.clone()
+        };
+        project_out(&mut z, &constraint_basis, b);
+
+        // ── 7. Update X using local Rayleigh–Ritz in span(X, Z, P) ───────────
         // Build the combined basis W = [X | R | P] (skip P on first iter).
         let mut w = if use_p {
             let mut w = DMatrix::<f64>::zeros(n, 3 * k);
             w.columns_mut(0, k).copy_from(&x);
-            w.columns_mut(k, k).copy_from(&r);
+            w.columns_mut(k, k).copy_from(&z);
             w.columns_mut(2 * k, k).copy_from(&p);
             w
         } else {
             let mut w = DMatrix::<f64>::zeros(n, 2 * k);
             w.columns_mut(0, k).copy_from(&x);
-            w.columns_mut(k, k).copy_from(&r);
+            w.columns_mut(k, k).copy_from(&z);
             w
         };
 
         // Orthonormalise W.
-        if let Some(bm) = b { b_orthonormalise_cols(&mut w, bm); } else { qr_orthonormalise(&mut w); }
+        project_out(&mut w, &constraint_basis, b);
+        w = orthonormal_basis(w, b);
+        if w.ncols() < k {
+            return Err("projected LOBPCG trial space lost rank".to_string());
+        }
 
         // Small dense Rayleigh–Ritz in W.
         let aw = spmm(a, &w);
@@ -163,13 +245,24 @@ pub fn lobpcg(
         // New X = W * C[:, 0..k] (first k Ritz vectors).
         let c = ritz_vecs.columns(0, k);
         let x_new = &w * c;
-        p = &w * ritz_vecs.columns(k, k.min(w.ncols() - k));
+        p = DMatrix::<f64>::zeros(n, k);
+        let p_cols = (w.ncols() - k).min(k);
+        if p_cols > 0 {
+            let p_new = &w * ritz_vecs.columns(k, p_cols);
+            p.columns_mut(0, p_cols).copy_from(&p_new);
+        }
 
         x = x_new;
+        project_out(&mut x, &constraint_basis, b);
+        project_out(&mut p, &constraint_basis, b);
         use_p = true;
 
         // Re-orthonormalise X.
-        if let Some(bm) = b { b_orthonormalise(&mut x, bm); } else { qr_orthonormalise(&mut x); }
+        let x_basis = orthonormal_basis(x, b);
+        if x_basis.ncols() < k {
+            return Err("projected LOBPCG iterate lost rank".to_string());
+        }
+        x = x_basis.columns(0, k).into_owned();
     }
 
     Ok(EigenResult {
@@ -242,6 +335,80 @@ fn random_orthonormal(n: usize, k: usize) -> DMatrix<f64> {
     x
 }
 
+fn random_feasible_orthonormal(
+    n: usize,
+    k: usize,
+    constraints: &DMatrix<f64>,
+    b: Option<&CsrMatrix<f64>>,
+) -> Result<DMatrix<f64>, String> {
+    if constraints.ncols() == 0 {
+        return Ok(random_orthonormal(n, k));
+    }
+
+    let oversample = (k + constraints.ncols()).min(n);
+    for _ in 0..6 {
+        let mut x = random_orthonormal(n, oversample);
+        project_out(&mut x, constraints, b);
+        let basis = orthonormal_basis(x, b);
+        if basis.ncols() >= k {
+            return Ok(basis.columns(0, k).into_owned());
+        }
+    }
+
+    Err("failed to construct a feasible initial LOBPCG basis".to_string())
+}
+
+fn orthonormal_basis(x: DMatrix<f64>, b: Option<&CsrMatrix<f64>>) -> DMatrix<f64> {
+    let n = x.nrows();
+    let mut cols: Vec<DVector<f64>> = Vec::new();
+
+    for j in 0..x.ncols() {
+        let mut v = x.column(j).clone_owned();
+        for q in &cols {
+            let dot = if let Some(bm) = b {
+                let bv = b_times_vec(bm, &v);
+                q.dot(&bv)
+            } else {
+                q.dot(&v)
+            };
+            v.axpy(-dot, q, 1.0);
+        }
+
+        let norm = if let Some(bm) = b {
+            let bv = b_times_vec(bm, &v);
+            v.dot(&bv).sqrt()
+        } else {
+            v.norm()
+        };
+
+        if norm > 1e-12 {
+            v.scale_mut(1.0 / norm);
+            cols.push(v);
+        }
+    }
+
+    if cols.is_empty() {
+        DMatrix::<f64>::zeros(n, 0)
+    } else {
+        DMatrix::<f64>::from_columns(&cols)
+    }
+}
+
+fn project_out(x: &mut DMatrix<f64>, basis: &DMatrix<f64>, b: Option<&CsrMatrix<f64>>) {
+    if basis.ncols() == 0 || x.ncols() == 0 {
+        return;
+    }
+
+    let coeff = if let Some(bm) = b {
+        let bx = spmm(bm, x);
+        basis.transpose() * bx
+    } else {
+        basis.transpose() * x.clone()
+    };
+
+    *x -= basis * coeff;
+}
+
 /// Modified Gram–Schmidt orthonormalisation (in-place).
 fn qr_orthonormalise(x: &mut DMatrix<f64>) {
     let k = x.ncols();
@@ -258,30 +425,6 @@ fn qr_orthonormalise(x: &mut DMatrix<f64>) {
         let norm = x.column(j).norm();
         if norm > 1e-14 { x.column_mut(j).scale_mut(1.0 / norm); }
     }
-}
-
-/// B-orthonormalise: in-place Gram-Schmidt with B inner product.
-fn b_orthonormalise(x: &mut DMatrix<f64>, b: &CsrMatrix<f64>) {
-    let k = x.ncols();
-    for j in 0..k {
-        let xj = x.column(j).clone_owned();
-        let bxj = b_times_vec(b, &xj);
-        for i in 0..j {
-            let xi = x.column(i).clone_owned();
-            let _bxi = b_times_vec(b, &xi);
-            let dot = xi.dot(&bxj);
-            let xi2 = xi.clone();
-            x.column_mut(j).axpy(-dot, &xi2, 1.0);
-        }
-        let xj2 = x.column(j).clone_owned();
-        let bxj2 = b_times_vec(b, &xj2);
-        let norm = xj2.dot(&bxj2).sqrt();
-        if norm > 1e-14 { x.column_mut(j).scale_mut(1.0 / norm); }
-    }
-}
-
-fn b_orthonormalise_cols(x: &mut DMatrix<f64>, b: &CsrMatrix<f64>) {
-    b_orthonormalise(x, b);
 }
 
 /// B × v for sparse B and dense v.
@@ -482,5 +625,76 @@ mod tests {
         let a = laplacian_1d(n);
         let res = krylov_schur(&a, 3, Some(15)).unwrap();
         assert_eq!(res.eigenvalues.len(), 3, "should return 3 eigenvalues");
+    }
+
+    #[test]
+    fn lobpcg_constrained_skips_null_mode() {
+        let mut coo = CooMatrix::<f64>::new(4, 4);
+        coo.add(0, 0, 0.0);
+        coo.add(1, 1, 1.0);
+        coo.add(2, 2, 4.0);
+        coo.add(3, 3, 9.0);
+        let a = coo.into_csr();
+        let b = identity(4);
+        let constraints = DMatrix::<f64>::from_vec(4, 1, vec![1.0, 0.0, 0.0, 0.0]);
+        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: false };
+
+        let res = lobpcg_constrained(&a, Some(&b), 2, &constraints, &cfg).unwrap();
+
+        assert!((res.eigenvalues[0] - 1.0).abs() < 1e-6, "first constrained eigenvalue = {}", res.eigenvalues[0]);
+        assert!((res.eigenvalues[1] - 4.0).abs() < 1e-5, "second constrained eigenvalue = {}", res.eigenvalues[1]);
+        assert!(res.eigenvectors[(0, 0)].abs() < 1e-8);
+        assert!(res.eigenvectors[(0, 1)].abs() < 1e-8);
+    }
+
+    #[test]
+    fn lobpcg_constrained_preconditioned_matches_expected_modes() {
+        let mut coo = CooMatrix::<f64>::new(4, 4);
+        coo.add(0, 0, 0.0);
+        coo.add(1, 1, 1.0);
+        coo.add(2, 2, 4.0);
+        coo.add(3, 3, 9.0);
+        let a = coo.into_csr();
+        let b = identity(4);
+        let constraints = DMatrix::<f64>::from_vec(4, 1, vec![1.0, 0.0, 0.0, 0.0]);
+        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: false };
+
+        // Exact diagonal inverse on unconstrained dofs acts as an ideal block preconditioner.
+        let precond = |r: &DMatrix<f64>| {
+            let mut z = r.clone();
+            for j in 0..z.ncols() {
+                z[(0, j)] = 0.0;
+                z[(1, j)] /= 1.0;
+                z[(2, j)] /= 4.0;
+                z[(3, j)] /= 9.0;
+            }
+            z
+        };
+
+        let res = lobpcg_constrained_preconditioned(&a, Some(&b), 2, &constraints, precond, &cfg)
+            .unwrap();
+
+        assert!((res.eigenvalues[0] - 1.0).abs() < 1e-6, "first constrained eigenvalue = {}", res.eigenvalues[0]);
+        assert!((res.eigenvalues[1] - 4.0).abs() < 1e-5, "second constrained eigenvalue = {}", res.eigenvalues[1]);
+        assert!(res.eigenvectors[(0, 0)].abs() < 1e-8);
+        assert!(res.eigenvectors[(0, 1)].abs() < 1e-8);
+    }
+
+    #[test]
+    fn lobpcg_preconditioner_shape_mismatch_errors() {
+        let a = laplacian_1d(8);
+        let cfg = LobpcgConfig { max_iter: 50, tol: 1e-6, verbose: false };
+        let constraints = DMatrix::<f64>::zeros(8, 0);
+
+        let err = lobpcg_constrained_preconditioned(
+            &a,
+            None,
+            2,
+            &constraints,
+            |_r| DMatrix::<f64>::zeros(7, 2),
+            &cfg,
+        ).unwrap_err();
+
+        assert!(err.contains("wrong shape"), "unexpected error: {err}");
     }
 }

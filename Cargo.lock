@@ -485,6 +485,7 @@ name = "fem-examples"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "fem-amg",
  "fem-assembly",
  "fem-ceed",
  "fem-core",
@@ -809,6 +810,8 @@ dependencies = [
 [[package]]
 name = "jsmpi"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e46f0d826e3a14daeb8f06f01193b165d21b1efb089583fbb4081266b9bad75"
 dependencies = [
  "console_error_panic_hook",
  "console_log",

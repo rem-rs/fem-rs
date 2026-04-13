@@ -19,6 +19,7 @@
 use std::f64::consts::PI;
 use std::sync::Arc;
 
+use fem_examples::maxwell::marker_to_tags;
 use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
@@ -100,10 +101,14 @@ fn main() {
         let mut rhs = ParVectorAssembler::assemble_linear(&par_space, &[&source], 4);
 
         // 5. Apply n×E = 0 on all boundary edges.
+        // MFEM-style essential boundary marker (`ess_bdr`): all boundary attributes.
+        let bdr_attrs = [1, 2, 3, 4];
+        let ess_bdr = [1, 1, 1, 1];
+        let ess_tags = marker_to_tags(&bdr_attrs, &ess_bdr);
         let bnd = boundary_dofs_hcurl(
             par_space.local_space().mesh(),
             par_space.local_space(),
-            &[1, 2, 3, 4],
+            &ess_tags,
         );
         let dof_part = par_space.dof_partition();
         for &d in &bnd {

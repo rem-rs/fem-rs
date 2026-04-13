@@ -9,7 +9,7 @@ use nalgebra::DMatrix;
 use fem_core::types::DofId;
 use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, SegP3, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, HexQ1}};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{element_type::ElementType, topology::MeshTopology};
+use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
 use crate::integrator::{BdQpData, BoundaryBilinearIntegrator, BoundaryLinearIntegrator, BilinearIntegrator, LinearIntegrator, QpData};
@@ -51,38 +51,6 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
 /// Whether this element type has a constant (affine) Jacobian.
 fn is_affine(et: ElementType) -> bool {
     matches!(et, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Line2 | ElementType::Line3)
-}
-
-/// Build the Jacobian matrix `J[i, j] = x_{j+1}[i] − x_0[i]` for a simplex
-/// with nodes listed in `geo_nodes` (first `dim+1` nodes are the vertices).
-///
-/// Returns `(J, det J)`.
-fn simplex_jacobian<M: MeshTopology>(
-    mesh: &M,
-    geo_nodes: &[u32],
-    dim: usize,
-) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(geo_nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(geo_nodes[col + 1]);
-        for row in 0..dim {
-            j[(row, col)] = xc[row] - x0[row];
-        }
-    }
-    let det = j.determinant();
-    (j, det)
-}
-
-/// Compute physical coordinates: `x_phys = x0 + J * xi`.
-fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {
-    let mut xp = x0.to_vec();
-    for i in 0..dim {
-        for k in 0..dim {
-            xp[i] += j[(i, k)] * xi[k];
-        }
-    }
-    xp
 }
 
 /// Isoparametric Jacobian for non-affine elements (Quad4, Hex8, etc.).
@@ -195,15 +163,11 @@ impl Assembler {
 
             let affine = is_affine(elem_type);
 
-            // For affine elements, compute Jacobian once.
-            let (jac_aff, det_aff, j_inv_t_aff) = if affine {
-                let (j, d) = simplex_jacobian(mesh, nodes, dim);
-                let jit = j.clone().try_inverse()
-                    .expect("degenerate element — zero-area/volume triangle")
-                    .transpose();
-                (j, d, jit)
+            // For affine simplex elements, reuse a unified transformation object.
+            let affine_tr = if affine {
+                Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
             } else {
-                (DMatrix::zeros(dim, dim), 0.0, DMatrix::zeros(dim, dim))
+                None
             };
 
             // For non-affine, we need a geometry reference element.
@@ -218,20 +182,37 @@ impl Assembler {
             grad_ref.resize(n_ldofs * dim, 0.0);
             grad_phys.resize(n_ldofs * dim, 0.0);
 
-            let x0 = mesh.node_coords(nodes[0]);
-
             for (q, xi) in quad.points.iter().enumerate() {
-                // Compute Jacobian, det, inverse-transpose, physical coords.
-                let (w, j_inv_t_ref, xp);
                 if affine {
-                    w = quad.weights[q] * det_aff.abs();
-                    j_inv_t_ref = &j_inv_t_aff;
-                    xp = phys_coords(x0, &jac_aff, xi, dim);
+                    let tr = affine_tr.as_ref().unwrap();
+                    let w = quad.weights[q] * tr.det_j().abs();
+
+                    ref_elem.eval_basis(xi, &mut phi);
+                    ref_elem.eval_grad_basis(xi, &mut grad_ref);
+                    transform_grads(tr.jacobian_inv_t(), &grad_ref, &mut grad_phys, n_ldofs, dim);
+
+                    let xp = tr.map_to_physical(xi);
+                    let qp = QpData {
+                        n_dofs:    n_elem_dofs,
+                        dim,
+                        weight:    w,
+                        phi:       &phi,
+                        grad_phys: &grad_phys,
+                        x_phys:    &xp,
+                        elem_id:   e,
+                        elem_tag,
+                        elem_dofs: Some(&raw_dofs),
+                    };
+
+                    for integ in integrators {
+                        integ.add_to_element_matrix(&qp, &mut k_elem);
+                    }
+                    continue;
                 } else {
                     let geo = geo_elem.as_ref().unwrap();
                     let (jac_qp, det_qp, xp_qp) =
                         isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
-                    w = quad.weights[q] * det_qp.abs();
+                    let w = quad.weights[q] * det_qp.abs();
                     // We need j_inv_t to live beyond this block — store in grad_phys_buf
                     let jit = jac_qp.try_inverse()
                         .expect("degenerate quad/hex element")
@@ -256,26 +237,6 @@ impl Assembler {
                         integ.add_to_element_matrix(&qp, &mut k_elem);
                     }
                     continue;
-                };
-
-                ref_elem.eval_basis(xi, &mut phi);
-                ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                transform_grads(j_inv_t_ref, &grad_ref, &mut grad_phys, n_ldofs, dim);
-
-                let qp = QpData {
-                    n_dofs:    n_elem_dofs,
-                    dim,
-                    weight:    w,
-                    phi:       &phi,
-                    grad_phys: &grad_phys,
-                    x_phys:    &xp,
-                    elem_id:   e,
-                    elem_tag,
-                    elem_dofs: Some(&raw_dofs),
-                };
-
-                for integ in integrators {
-                    integ.add_to_element_matrix(&qp, &mut k_elem);
                 }
             }
 
@@ -319,12 +280,10 @@ impl Assembler {
 
             let affine = is_affine(elem_type);
 
-            let (jac_aff, det_aff, j_inv_t_aff) = if affine {
-                let (j, d) = simplex_jacobian(mesh, nodes, dim);
-                let jit = j.clone().try_inverse().unwrap().transpose();
-                (j, d, jit)
+            let affine_tr = if affine {
+                Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
             } else {
-                (DMatrix::zeros(dim, dim), 0.0, DMatrix::zeros(dim, dim))
+                None
             };
             let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
                 Some(ref_elem_vol(elem_type, 1))
@@ -336,16 +295,15 @@ impl Assembler {
             grad_ref.resize(n_ldofs * dim, 0.0);
             grad_phys.resize(n_ldofs * dim, 0.0);
 
-            let x0 = mesh.node_coords(nodes[0]);
-
             for (q, xi) in quad.points.iter().enumerate() {
                 let (w, xp);
                 if affine {
-                    w = quad.weights[q] * det_aff.abs();
+                    let tr = affine_tr.as_ref().unwrap();
+                    w = quad.weights[q] * tr.det_j().abs();
                     ref_elem.eval_basis(xi, &mut phi);
                     ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                    transform_grads(&j_inv_t_aff, &grad_ref, &mut grad_phys, n_ldofs, dim);
-                    xp = phys_coords(x0, &jac_aff, xi, dim);
+                    transform_grads(tr.jacobian_inv_t(), &grad_ref, &mut grad_phys, n_ldofs, dim);
+                    xp = tr.map_to_physical(xi);
                 } else {
                     let geo = geo_elem.as_ref().unwrap();
                     let (jac_qp, det_qp, xp_qp) =

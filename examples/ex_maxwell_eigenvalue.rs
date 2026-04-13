@@ -45,197 +45,147 @@
 
 use std::f64::consts::PI;
 
-use fem_assembly::{
-    VectorAssembler,
-    standard::{CurlCurlIntegrator, VectorMassIntegrator},
-};
+use fem_amg::AmgConfig;
+use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
 use fem_mesh::SimplexMesh;
+use fem_solver::{LobpcgConfig, SolverConfig};
 use fem_space::{
+    H1Space,
     HCurlSpace,
     fe_space::FESpace,
-    constraints::boundary_dofs_hcurl,
 };
 
 fn main() {
     let args = parse_args();
+    let result = solve_case(args.n, args.k);
 
-    println!("=== fem-rs: Maxwell Cavity Eigenvalue (Dense Solver) ===");
+    println!("=== fem-rs: Maxwell Cavity Eigenvalue (Constrained LOBPCG) ===");
     println!("  Mesh: {}×{}, seeking {} smallest physical eigenvalues", args.n, args.n, args.k);
+    println!("  Edge DOFs: {}", result.n_dof);
+    println!("  Free DOFs (interior edges): {}", result.n_free);
+    println!(
+        "  Solving sparse constrained generalized eigenproblem ({}×{}, nullity {})...",
+        result.n_free,
+        result.n_free,
+        result.nullity
+    );
 
+    print_result(args.n, &result);
+}
+
+struct EigenCaseResult {
+    n_dof: usize,
+    n_free: usize,
+    nullity: usize,
+    eigenvalues: Vec<f64>,
+    exact_eigs: Vec<f64>,
+    max_rel_err: f64,
+    converged: bool,
+    iterations: usize,
+}
+
+fn solve_case(n: usize, k: usize) -> EigenCaseResult {
     // ─── 1. Mesh + H(curl) space ─────────────────────────────────────────────
-    let mesh  = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
     let space = HCurlSpace::new(mesh, 1);
     let n_dof = space.n_dofs();
-    println!("  Edge DOFs: {n_dof}");
 
-    // ─── 2. Assemble K and M (full, unreduced) ───────────────────────────────
-    let k_full = VectorAssembler::assemble_bilinear(
-        &space, &[&CurlCurlIntegrator   { mu:    1.0 }], 4,
+    // MFEM-style boundary markers (`ess_bdr`): all boundary attributes are PEC.
+    let bdr_attrs = [1, 2, 3, 4];
+    let ess_bdr = [1, 1, 1, 1];
+
+    // ─── 2. Build reduced generalized eigen-system from marker semantics ────
+    let h1 = H1Space::new(SimplexMesh::<2>::unit_square_tri(n), 1);
+    let eig_system = assemble_hcurl_eigen_system_from_marker(
+        &h1,
+        &space,
+        &bdr_attrs,
+        &ess_bdr,
+        1.0,
+        1.0,
+        4,
     );
-    let m_full = VectorAssembler::assemble_bilinear(
-        &space, &[&VectorMassIntegrator { alpha: 1.0 }], 4,
-    );
+    let n_free = eig_system.hcurl_free_dofs.len();
 
-    // ─── 3. Identify free DOFs (not on PEC boundary) ─────────────────────────
-    let bnd_set: std::collections::HashSet<u32> = {
-        boundary_dofs_hcurl(space.mesh(), &space, &[1, 2, 3, 4])
-            .into_iter().collect()
+    // ─── 3. Solve constrained generalized eigenproblem ───────────────────────
+    let cfg = LobpcgConfig { max_iter: 800, tol: 1e-8, verbose: false };
+    let inner_cfg = SolverConfig {
+        rtol: 1e-2,
+        atol: 1e-12,
+        max_iter: 20,
+        verbose: false,
+        ..SolverConfig::default()
     };
-    let free_dofs: Vec<usize> = (0..n_dof as u32)
-        .filter(|d| !bnd_set.contains(d))
-        .map(|d| d as usize)
-        .collect();
-    let n_free = free_dofs.len();
-    println!("  Free DOFs (interior edges): {n_free}");
-
-    // ─── 4. Extract sub-matrices K_free and M_free ───────────────────────────
-    let (k_free, m_free) = extract_submatrix_pair(&k_full, &m_full, &free_dofs);
-
-    // ─── 5. Solve generalized eigenvalue problem K_free x = λ M_free x ──────
-    // Use a direct dense solver: convert to dense, compute M^{-1/2} K M^{-1/2},
-    // then use symmetric eigendecomposition.  Works for n ≤ ~32 (n_free ≤ ~2000).
-    println!("  Solving dense generalized eigenproblem ({n_free}×{n_free})...");
-    let all_eigs = dense_generalized_eig(&k_free, &m_free);
-
-    // ─── 6. Filter null-space eigenvalues and display ─────────────────────────
-    // The curl-curl null space (gradient fields with zero BC) has eigenvalue ≈ 0.
-    let null_threshold = 0.5; // first physical mode at ω² = π² ≈ 9.87
-    let physical_eigs: Vec<f64> = all_eigs.iter()
-        .copied()
-        .filter(|&lam| lam > null_threshold)
-        .take(args.k)
-        .collect();
-
-    let exact_eigs = {
-        // The 2D curl-curl eigenvalue problem on [0,1]² has two families of
-        // divergence-free eigenfunctions:
-        // 1) Single-component: (sin(mπy), 0) and (0, sin(nπx)), eigenvalue m²π² or n²π².
-        // 2) Stream-function: (∂ψ/∂y, -∂ψ/∂x) with ψ = sin(mπx)sin(nπy),
-        //    eigenvalue π²(m²+n²), m,n ≥ 1.
-        // Sorted with multiplicities: π², π², 2π², 4π², 4π², 5π², 5π², 8π², ...
-        let mut ev = Vec::new();
-        // Single-component modes: m²π² (two copies for x and y).
-        for m in 1_i32..=10 {
-            ev.push(PI * PI * (m * m) as f64);
-            ev.push(PI * PI * (m * m) as f64);
-        }
-        // Stream-function modes: (m²+n²)π², m,n ≥ 1.
-        for m in 1_i32..=10 {
-            for n in 1_i32..=10 {
-                ev.push(PI * PI * (m*m + n*n) as f64);
-            }
-        }
-        ev.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        // Keep duplicates — each copy represents a distinct eigenfunction.
-        ev.into_iter().take(args.k).collect::<Vec<_>>()
-    };
-
-    println!("\n  Cavity resonant frequencies (ω² = λ):");
-    println!("  {:>4}  {:>14}  {:>14}  {:>10}", "Mode", "Computed ω²", "Exact ω²", "Rel. err");
-    println!("  {}", "-".repeat(50));
+    let result = solve_hcurl_eigen_preconditioned_amg(
+        &eig_system,
+        k,
+        &cfg,
+        AmgConfig::default(),
+        &inner_cfg,
+    ).expect("preconditioned LOBPCG failed");
+    let physical_eigs = result.eigenvalues;
 
     let mut max_rel_err = 0.0_f64;
+    let exact_eigs = analytical_eigenvalues(k);
     for (i, &lam) in physical_eigs.iter().enumerate() {
         let exact = exact_eigs.get(i).copied().unwrap_or(f64::NAN);
         let rel_err = if exact.is_finite() { (lam - exact).abs() / exact } else { f64::NAN };
         if rel_err.is_finite() { max_rel_err = max_rel_err.max(rel_err); }
-        println!("  {:>4}  {:>14.6}  {:>14.6}  {:>10.3e}", i+1, lam, exact, rel_err);
     }
 
-    if physical_eigs.is_empty() {
+    EigenCaseResult {
+        n_dof,
+        n_free,
+        nullity: eig_system.constraints.ncols(),
+        eigenvalues: physical_eigs,
+        exact_eigs,
+        max_rel_err,
+        converged: result.converged,
+        iterations: result.iterations,
+    }
+}
+
+fn print_result(n: usize, result: &EigenCaseResult) {
+    println!("\n  Cavity resonant frequencies (ω² = λ):");
+    println!("  {:>4}  {:>14}  {:>14}  {:>10}", "Mode", "Computed ω²", "Exact ω²", "Rel. err");
+    println!("  {}", "-".repeat(50));
+
+    for (i, &lam) in result.eigenvalues.iter().enumerate() {
+        let exact = result.exact_eigs.get(i).copied().unwrap_or(f64::NAN);
+        let rel_err = if exact.is_finite() { (lam - exact).abs() / exact } else { f64::NAN };
+        println!("  {:>4}  {:>14.6}  {:>14.6}  {:>10.3e}", i + 1, lam, exact, rel_err);
+    }
+
+    if result.eigenvalues.is_empty() {
         println!("  (no physical eigenvalues found — try larger --n or smaller --k)");
         return;
     }
 
-    let h = 1.0 / args.n as f64;
-    println!("\n  Max relative error: {max_rel_err:.3e}  (h={h:.4e})");
+    let h = 1.0 / n as f64;
+    println!("\n  Max relative error: {:.3e}  (h={h:.4e})", result.max_rel_err);
+    println!("  Converged: {}, iterations: {}", result.converged, result.iterations);
     println!("  (Expected O(h²) convergence in ω² for ND1 elements)");
 
-    if max_rel_err < 0.15 {
+    if result.max_rel_err < 0.15 {
         println!("  ✓ Eigenvalues within 15% of exact");
     } else {
         println!("  ⚠ Use larger --n for better accuracy");
     }
 }
 
-// ─── Dense generalized eigensolver: K x = λ M x ──────────────────────────────
-//
-// Converts to dense, computes M^{-1/2} K M^{-1/2}, then symmetric eigen.
-// Returns all eigenvalues sorted ascending.
-fn dense_generalized_eig(
-    k: &fem_linalg::CsrMatrix<f64>,
-    m: &fem_linalg::CsrMatrix<f64>,
-) -> Vec<f64> {
-    use nalgebra::{DMatrix, SymmetricEigen};
-
-    let n = k.nrows;
-    let k_dense = k.to_dense();
-    let m_dense = m.to_dense();
-
-    let k_mat = DMatrix::from_row_slice(n, n, &k_dense);
-    let m_mat = DMatrix::from_row_slice(n, n, &m_dense);
-
-    // Compute M^{-1/2} via eigendecomposition of M (which is SPD).
-    let m_eig = SymmetricEigen::new(m_mat);
-    let mut m_inv_half = DMatrix::<f64>::zeros(n, n);
-    for i in 0..n {
-        let lam = m_eig.eigenvalues[i];
-        if lam > 1e-14 {
-            let col = m_eig.eigenvectors.column(i);
-            for r in 0..n {
-                for c in 0..n {
-                    m_inv_half[(r, c)] += col[r] * col[c] / lam.sqrt();
-                }
-            }
+fn analytical_eigenvalues(k: usize) -> Vec<f64> {
+    let mut ev = Vec::new();
+    for m in 1_i32..=10 {
+        ev.push(PI * PI * (m * m) as f64);
+        ev.push(PI * PI * (m * m) as f64);
+    }
+    for m in 1_i32..=10 {
+        for n in 1_i32..=10 {
+            ev.push(PI * PI * (m * m + n * n) as f64);
         }
     }
-
-    // Symmetric transform: C = M^{-1/2} K M^{-1/2}
-    let c = &m_inv_half * &k_mat * &m_inv_half;
-    let eig = SymmetricEigen::new(c);
-
-    let mut vals: Vec<f64> = eig.eigenvalues.iter().copied().collect();
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    vals
-}
-
-// ─── Extract K_free and M_free as a pair ─────────────────────────────────────
-
-fn extract_submatrix_pair(
-    k: &fem_linalg::CsrMatrix<f64>,
-    m: &fem_linalg::CsrMatrix<f64>,
-    free: &[usize],
-) -> (fem_linalg::CsrMatrix<f64>, fem_linalg::CsrMatrix<f64>) {
-    (extract_submatrix(k, free), extract_submatrix(m, free))
-}
-
-/// Extract the sub-matrix corresponding to `free` rows/columns.
-fn extract_submatrix(
-    mat:  &fem_linalg::CsrMatrix<f64>,
-    free: &[usize],
-) -> fem_linalg::CsrMatrix<f64> {
-    use fem_linalg::CooMatrix;
-
-    let nf = free.len();
-    // Inverse map: global DOF → free-DOF index (-1 if not free).
-    let mut inv = vec![usize::MAX; mat.nrows];
-    for (fi, &gi) in free.iter().enumerate() {
-        inv[gi] = fi;
-    }
-
-    let mut coo = CooMatrix::<f64>::new(nf, nf);
-    for (fi, &gi) in free.iter().enumerate() {
-        let row_start = mat.row_ptr[gi];
-        let row_end   = mat.row_ptr[gi + 1];
-        for idx in row_start..row_end {
-            let gj = mat.col_idx[idx] as usize;
-            let fj = inv[gj];
-            if fj != usize::MAX {
-                coo.add(fi, fj, mat.values[idx]);
-            }
-        }
-    }
-    coo.into_csr()
+    ev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ev.into_iter().take(k).collect()
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -253,4 +203,21 @@ fn parse_args() -> Args {
         }
     }
     a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maxwell_eigenvalue_coarse_mesh_matches_first_modes() {
+        let result = solve_case(8, 3);
+        assert!(result.converged, "LOBPCG did not converge");
+        assert_eq!(result.eigenvalues.len(), 3);
+        assert!(result.max_rel_err < 1.0e-2, "max relative error = {}", result.max_rel_err);
+        assert!(result.nullity > 0, "expected non-trivial discrete gradient nullspace");
+        assert!(result.eigenvalues[0] > 9.0 && result.eigenvalues[0] < 10.5);
+        assert!(result.eigenvalues[1] > 9.0 && result.eigenvalues[1] < 10.5);
+        assert!(result.eigenvalues[2] > 19.0 && result.eigenvalues[2] < 20.5);
+    }
 }

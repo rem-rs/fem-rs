@@ -1,48 +1,40 @@
-//! # Example 3 — Maxwell cavity  (analogous to MFEM ex3)
+//! # Example 31 — Anisotropic Maxwell problem
 //!
-//! Solves the vector curl-curl + mass problem on the unit square:
-//!
-//! ```text
-//!   ∇×(∇×E) + E = f    in Ω = [0,1]²
-//!          n×E = 0    on ∂Ω
-//! ```
-//!
-//! with the manufactured solution `E = (sin(πy), sin(πx))`.
+//! Solves the 2-D H(curl) problem
 //!
 //! ```text
-//!   curl E = π cos(πx) − π cos(πy)  (scalar in 2-D)
-//!   ∇×(curl E) = (π² sin(πy), π² sin(πx))
-//!   f = ∇×∇×E + E = ((1+π²) sin(πy), (1+π²) sin(πx))
+//!   curl curl E + Σ E = f    in Ω = [0,1]²
+//!              n×E = 0       on ∂Ω
 //! ```
 //!
-//! ## Usage
-//! ```
-//! cargo run --example ex3_maxwell
-//! cargo run --example ex3_maxwell -- --n 8
-//! cargo run --example ex3_maxwell -- --n 16
-//! cargo run --example ex3_maxwell -- --n 32
-//! ```
+//! with a constant anisotropic conductivity/permittivity tensor
+//! `Σ = diag(σ_x, σ_y)` and the manufactured solution
+//! `E = (sin(πy), sin(πx))`.
 
 use std::f64::consts::PI;
 use fem_examples::maxwell::{StaticMaxwellBuilder, l2_error_hcurl_exact};
 use fem_mesh::SimplexMesh;
 use fem_space::HCurlSpace;
 
+const SIGMA_X: f64 = 4.0;
+const SIGMA_Y: f64 = 1.5;
+
 fn main() {
     let args = parse_args();
     let result = solve_case(args.n);
 
-    println!("=== fem-rs Example 3: Maxwell cavity (curl-curl + mass) ===");
+    println!("=== fem-rs Example 31: Anisotropic Maxwell ===");
     println!("  Mesh: {}×{} subdivisions, ND1 elements", args.n, args.n);
-
-    println!("  Edge DOFs: {}", result.n_dofs);
+    println!("  DOFs: {}", result.n_dofs);
     println!("  Boundary DOFs constrained: {}", result.n_boundary_dofs);
     println!(
         "  Solve: {} iterations, residual = {:.3e}, converged = {}",
-        result.iterations, result.final_residual, result.converged
+        result.iterations,
+        result.final_residual,
+        result.converged
     );
     println!("  h = {:.4e},  L² error = {:.4e}", result.h, result.l2_error);
-    println!("  (Expected O(h) for ND1 elements)");
+    println!("  Σ = diag({SIGMA_X:.3}, {SIGMA_Y:.3})");
 }
 
 struct CaseResult {
@@ -55,26 +47,18 @@ struct CaseResult {
     l2_error: f64,
 }
 
-fn source_value(x: &[f64]) -> [f64; 2] {
-    let coeff = 1.0 + PI * PI;
-    [coeff * (PI * x[1]).sin(), coeff * (PI * x[0]).sin()]
-}
-
 fn solve_case(n: usize) -> CaseResult {
     let mesh = SimplexMesh::<2>::unit_square_tri(n);
     let space = HCurlSpace::new(mesh, 1);
 
-    // MFEM-style boundary marker (`ess_bdr`): all boundary attributes are essential.
-    let attrs = [1, 2, 3, 4];
+    let bdr_attrs = [1, 2, 3, 4];
     let ess_bdr = [1, 1, 1, 1];
-
     let problem = StaticMaxwellBuilder::new(space)
         .with_quad_order(4)
-        .with_isotropic_coeffs(1.0, 1.0)
+        .with_anisotropic_diag(1.0, SIGMA_X, SIGMA_Y)
         .with_source_fn(source_value)
-        .add_pec_zero_from_marker(&attrs, &ess_bdr)
+        .add_pec_zero_from_marker(&bdr_attrs, &ess_bdr)
         .build();
-
     let n_dofs = problem.n_dofs();
     let solved = problem.solve();
 
@@ -91,17 +75,22 @@ fn solve_case(n: usize) -> CaseResult {
     }
 }
 
-// ─── CLI ────────────────────────────────────────────────────────────────────
+fn source_value(x: &[f64]) -> [f64; 2] {
+    let fx = (PI * PI + SIGMA_X) * (PI * x[1]).sin();
+    let fy = (PI * PI + SIGMA_Y) * (PI * x[0]).sin();
+    [fx, fy]
+}
 
-struct Args { n: usize }
+struct Args {
+    n: usize,
+}
 
 fn parse_args() -> Args {
     let mut a = Args { n: 16 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--n" => { a.n = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
-            _ => {}
+        if arg.as_str() == "--n" {
+            a.n = it.next().unwrap_or("16".into()).parse().unwrap_or(16);
         }
     }
     a
@@ -112,9 +101,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ex3_mfem_marker_path_has_reasonable_error() {
+    fn anisotropic_maxwell_coarse_mesh_has_reasonable_error() {
         let result = solve_case(8);
         assert!(result.converged);
-        assert!(result.l2_error < 1.5e-1, "L2 error = {}", result.l2_error);
+        assert!(result.l2_error < 2.5e-1, "L2 error = {}", result.l2_error);
     }
 }

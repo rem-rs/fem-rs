@@ -40,7 +40,7 @@
 | 30 | solver | ✅ Done | 2026-04-04 | Newmark-β time integrator (average acceleration, unconditionally stable); ex10_wave_equation example (sin(πx)sin(πy), max error 8.3e-3); 1 test |
 | 31 | element | ✅ Done | 2026-04-04 | Gauss-Lobatto quadrature (n=2..5 on [-1,1]); seg_lobatto_rule, quad_lobatto_rule, hex_lobatto_rule; 7 tests |
 | 32 | examples | ✅ Done | 2026-04-04 | ex4_darcy (H(div) RT0 grad-div, MINRES); ex15_dg_amr (P1 + ZZ estimator + Dörfler marking + refinement, O(h²) convergence verified) |
-| 33a | parallel | ✅ Done | 2026-04-05 | jsmpi submodule + JsMpiBackend replacing WasmWorkerBackend stub; WASM MPI via jsmpi Web Workers |
+| 33a | parallel | ✅ Done | 2026-04-05 | jsmpi crates.io package + JsMpiBackend replacing WasmWorkerBackend stub; WASM MPI via jsmpi Web Workers |
 | 33b | parallel | ✅ Done | 2026-04-05 | DofPartition (DOF-level ownership, exclusive scan for global offsets) + ParallelFESpace (wraps serial FESpace + DOF ghost exchange); 5 tests |
 | 33c | parallel | ✅ Done | 2026-04-05 | ParVector (distributed vector, global_dot/norm, ghost exchange) + ParCsrMatrix (diag+offd split, parallel SpMV); 7 tests |
 | 33d | parallel | ✅ Done | 2026-04-05 | ParAssembler: parallel bilinear/linear form assembly with ghost-row exchange via alltoallv; parallel Dirichlet BCs; 3 tests |
@@ -82,7 +82,7 @@ Week-1 checklist:
 | `vendor/reed` | rem-rs/reed | libCEED analogue; bridged via `crates/ceed` |
 | `vendor/linger` | rem-rs/linger | Krylov solvers + AMG; drives `fem-solver` and `fem-amg` |
 | `vendor/rmetis` | javagg/rmetis | Pure-Rust BFS graph partitioner; drives `fem-parallel` Phase 18 |
-| `vendor/jsmpi` | javagg/jsmpi | JavaScript MPI shim for WASM Web Workers; drives `fem-parallel` Phase 33a |
+| `jsmpi` (crates.io) | crates.io/jsmpi | JavaScript MPI shim for WASM Web Workers; drives `fem-parallel` Phase 33a |
 
 ---
 

@@ -18,7 +18,7 @@
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, lagrange::{TetP1, TriP1, TriP2, QuadQ1, QuadQ2, HexQ1}};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{element_type::ElementType, topology::MeshTopology};
+use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
 use crate::integrator::QpData;
@@ -172,8 +172,8 @@ impl MixedAssembler {
             let nodes = mesh.element_nodes(e);
             let elem_tag = mesh.element_tag(e);
 
-            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
-            let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
+            let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+            let j_inv_t = tr.jacobian_inv_t().clone();
 
             let mut m_elem = vec![0.0_f64; n_elem_r * n_elem_c];
             phi_r.resize(n_r, 0.0);
@@ -183,10 +183,8 @@ impl MixedAssembler {
             grad_phys_r.resize(n_r * dim, 0.0);
             grad_phys_c.resize(n_c * dim, 0.0);
 
-            let x0 = mesh.node_coords(nodes[0]);
-
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
+                let w = quad.weights[q] * tr.det_j().abs();
 
                 ref_r.eval_basis(xi, &mut phi_r);
                 ref_c.eval_basis(xi, &mut phi_c);
@@ -194,7 +192,7 @@ impl MixedAssembler {
                 ref_c.eval_grad_basis(xi, &mut grad_ref_c);
                 transform_grads(&j_inv_t, &grad_ref_r, &mut grad_phys_r, n_r, dim);
                 transform_grads(&j_inv_t, &grad_ref_c, &mut grad_phys_c, n_c, dim);
-                let xp = phys_coords(x0, &jac, xi, dim);
+                let xp = tr.map_to_physical(xi);
 
                 let qp_r = QpData { n_dofs: n_elem_r, dim, weight: w, phi: &phi_r, grad_phys: &grad_phys_r, x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None };
                 let qp_c = QpData { n_dofs: n_elem_c, dim, weight: w, phi: &phi_c, grad_phys: &grad_phys_c, x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None };
@@ -228,25 +226,6 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
         _ => panic!("mixed_assembler ref_elem_vol: unsupported ({elem_type:?}, order={order})"),
     }
-}
-
-fn simplex_jacobian<M: MeshTopology>(mesh: &M, geo_nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(geo_nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(geo_nodes[col + 1]);
-        for row in 0..dim { j[(row, col)] = xc[row] - x0[row]; }
-    }
-    let det = j.determinant();
-    (j, det)
-}
-
-fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {
-    let mut xp = x0.to_vec();
-    for i in 0..dim {
-        for k in 0..dim { xp[i] += j[(i, k)] * xi[k]; }
-    }
-    xp
 }
 
 fn transform_grads(j_inv_t: &DMatrix<f64>, grad_ref: &[f64], grad_phys: &mut [f64], n: usize, dim: usize) {

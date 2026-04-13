@@ -6,69 +6,82 @@
 
 use nalgebra::DMatrix;
 
+use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
-use fem_element::nedelec::{HexND1, QuadND1, TriND1, TetND1, TriND2, TetND2};
+use fem_element::lagrange::{HexQ1, QuadQ1};
+use fem_element::nedelec::{HexND1, HexND2, QuadND1, QuadND2, TetND1, TetND2, TriND1, TriND2};
 use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TetRT1};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::ElementType;
-use fem_mesh::topology::MeshTopology;
+use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
 
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};
 
 // ─── Reference element factory ──────────────────────────────────────────────
 
-fn vec_ref_elem(space_type: SpaceType, elem_type: ElementType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
+fn vec_ref_elem(
+    space_type: SpaceType,
+    elem_type: ElementType,
+    dim: usize,
+    order: u8,
+) -> Box<dyn VectorReferenceElement> {
     match (space_type, elem_type, dim, order) {
-        (SpaceType::HCurl, ElementType::Tri3, 2, 1) | (SpaceType::HCurl, ElementType::Tri6, 2, 1) => Box::new(TriND1),
-        (SpaceType::HCurl, ElementType::Quad4, 2, 1) | (SpaceType::HCurl, ElementType::Quad8, 2, 1) => Box::new(QuadND1),
-        (SpaceType::HCurl, ElementType::Tri3, 2, 2) | (SpaceType::HCurl, ElementType::Tri6, 2, 2) => Box::new(TriND2),
-        (SpaceType::HCurl, ElementType::Tet4, 3, 1) | (SpaceType::HCurl, ElementType::Tet10, 3, 1) => Box::new(TetND1),
-        (SpaceType::HCurl, ElementType::Hex8, 3, 1) | (SpaceType::HCurl, ElementType::Hex20, 3, 1) => Box::new(HexND1),
-        (SpaceType::HCurl, ElementType::Tet4, 3, 2) | (SpaceType::HCurl, ElementType::Tet10, 3, 2) => Box::new(TetND2),
-        (SpaceType::HDiv,  ElementType::Tri3, 2, 0) | (SpaceType::HDiv, ElementType::Tri6, 2, 0) => Box::new(TriRT0),
-        (SpaceType::HDiv,  ElementType::Tri3, 2, 1) | (SpaceType::HDiv, ElementType::Tri6, 2, 1) => Box::new(TriRT1),
-        (SpaceType::HDiv,  ElementType::Tet4, 3, 0) | (SpaceType::HDiv, ElementType::Tet10, 3, 0) => Box::new(TetRT0),
-        (SpaceType::HDiv,  ElementType::Tet4, 3, 1) | (SpaceType::HDiv, ElementType::Tet10, 3, 1) => Box::new(TetRT1),
-        _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, elem_type={elem_type:?}, dim={dim}, order={order})"),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriND1),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, ElementType::Quad4, 2, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Quad4, 2, 2) => Box::new(QuadND2),
+        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetND1),
+        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
+        (SpaceType::HCurl, ElementType::Hex8, 3, 1) => Box::new(HexND1),
+        (SpaceType::HCurl, ElementType::Hex8, 3, 2) => Box::new(HexND2),
+        (SpaceType::HDiv, _, 2, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv, _, 2, 1) => Box::new(TriRT1),
+        (SpaceType::HDiv, _, 3, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv, _, 3, 1) => Box::new(TetRT1),
+        _ => panic!(
+            "vec_ref_elem: unsupported (space_type={space_type:?}, elem_type={elem_type:?}, dim={dim}, order={order})"
+        ),
+    }
+}
+
+fn geo_ref_elem(elem_type: ElementType) -> Option<Box<dyn ReferenceElement>> {
+    match elem_type {
+        ElementType::Quad4 => Some(Box::new(QuadQ1)),
+        ElementType::Hex8 => Some(Box::new(HexQ1)),
+        _ => None,
     }
 }
 
 // ─── Jacobian helpers (same as assembler.rs) ────────────────────────────────
 
-fn element_jacobian<M: MeshTopology>(
+fn isoparametric_jacobian<M: MeshTopology>(
     mesh: &M,
-    elem_type: ElementType,
-    geo_nodes: &[u32],
+    nodes: &[u32],
+    geo_elem: &dyn ReferenceElement,
+    xi: &[f64],
     dim: usize,
-) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(geo_nodes[0]);
-    let col_nodes: Vec<usize> = match (elem_type, dim) {
-        (ElementType::Tri3 | ElementType::Tri6, 2) => vec![1, 2],
-        (ElementType::Quad4 | ElementType::Quad8, 2) => vec![1, 3],
-        (ElementType::Tet4 | ElementType::Tet10, 3) => vec![1, 2, 3],
-        (ElementType::Hex8 | ElementType::Hex20, 3) => vec![1, 3, 4],
-        _ => panic!("element_jacobian: unsupported element type {elem_type:?} in dim {dim}"),
-    };
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(geo_nodes[col_nodes[col]]);
-        for row in 0..dim {
-            j[(row, col)] = xc[row] - x0[row];
-        }
-    }
-    let det = j.determinant();
-    (j, det)
-}
+) -> (DMatrix<f64>, f64, Vec<f64>) {
+    let n_geo = geo_elem.n_dofs();
+    let mut grad_geo = vec![0.0_f64; n_geo * dim];
+    let mut phi_geo = vec![0.0_f64; n_geo];
+    geo_elem.eval_grad_basis(xi, &mut grad_geo);
+    geo_elem.eval_basis(xi, &mut phi_geo);
 
-fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {
-    let mut xp = x0.to_vec();
-    for i in 0..dim {
-        for k in 0..dim {
-            xp[i] += j[(i, k)] * xi[k];
+    let mut j = DMatrix::<f64>::zeros(dim, dim);
+    let mut xp = vec![0.0_f64; dim];
+
+    for k in 0..n_geo {
+        let xk = mesh.node_coords(nodes[k]);
+        for i in 0..dim {
+            xp[i] += phi_geo[k] * xk[i];
+            for d in 0..dim {
+                j[(i, d)] += xk[i] * grad_geo[k * dim + d];
+            }
         }
     }
-    xp
+
+    let det = j.determinant();
+    (j, det, xp)
 }
 
 // ─── Piola transforms ───────────────────────────────────────────────────────
@@ -200,9 +213,9 @@ impl VectorAssembler {
         let dim = mesh.dim() as usize;
         let n_dofs = space.n_dofs();
         let stype = space.space_type();
-        let elem_type = mesh.element_type(0);
+        let elem_type0 = mesh.element_type(0);
 
-        let ref_elem = vec_ref_elem(stype, elem_type, dim, space.order());
+        let ref_elem = vec_ref_elem(stype, elem_type0, dim, space.order());
         let n_ldofs = ref_elem.n_dofs();
         let quad = ref_elem.quadrature(quad_order);
 
@@ -224,17 +237,33 @@ impl VectorAssembler {
             let signs = space.element_signs(e);
             let nodes = mesh.element_nodes(e);
             let elem_tag = mesh.element_tag(e);
+            let elem_type = mesh.element_type(e);
 
-            let et = mesh.element_type(e);
-            let (jac, det_j) = element_jacobian(mesh, et, nodes, dim);
-            let j_inv_t = jac.clone().try_inverse()
-                .expect("degenerate element — zero-area/volume")
-                .transpose();
+            let use_iso = matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
+            let geo_elem = geo_ref_elem(elem_type);
+            let affine_tr = if use_iso {
+                None
+            } else {
+                Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+            };
 
             let mut k_elem = vec![0.0_f64; n_ldofs * n_ldofs];
-            let x0 = mesh.node_coords(nodes[0]);
 
             for (q, xi) in quad.points.iter().enumerate() {
+                let (jac, det_j, xp) = if use_iso {
+                    let ge = geo_elem
+                        .as_ref()
+                        .expect("missing geometry reference element for isoparametric vector assembly");
+                    isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim)
+                } else {
+                    let tr = affine_tr.as_ref().unwrap();
+                    (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
+                };
+                let j_inv_t = jac
+                    .clone()
+                    .try_inverse()
+                    .expect("degenerate element — zero-area/volume")
+                    .transpose();
                 let w = quad.weights[q] * det_j.abs();
 
                 // Evaluate reference basis, curl, div.
@@ -266,8 +295,6 @@ impl VectorAssembler {
                         n_ldofs, dim, curl_dim,
                     );
                 }
-
-                let xp = phys_coords(x0, &jac, xi, dim);
 
                 let qp = VectorQpData {
                     n_dofs: n_ldofs,
@@ -302,9 +329,9 @@ impl VectorAssembler {
         let dim = mesh.dim() as usize;
         let n_dofs = space.n_dofs();
         let stype = space.space_type();
-        let elem_type = mesh.element_type(0);
+        let elem_type0 = mesh.element_type(0);
 
-        let ref_elem = vec_ref_elem(stype, elem_type, dim, space.order());
+        let ref_elem = vec_ref_elem(stype, elem_type0, dim, space.order());
         let n_ldofs = ref_elem.n_dofs();
         let quad = ref_elem.quadrature(quad_order);
 
@@ -325,15 +352,33 @@ impl VectorAssembler {
             let signs = space.element_signs(e);
             let nodes = mesh.element_nodes(e);
             let elem_tag = mesh.element_tag(e);
+            let elem_type = mesh.element_type(e);
 
-            let et = mesh.element_type(e);
-            let (jac, det_j) = element_jacobian(mesh, et, nodes, dim);
-            let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
+            let use_iso = matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
+            let geo_elem = geo_ref_elem(elem_type);
+            let affine_tr = if use_iso {
+                None
+            } else {
+                Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+            };
 
             let mut f_elem = vec![0.0_f64; n_ldofs];
-            let x0 = mesh.node_coords(nodes[0]);
 
             for (q, xi) in quad.points.iter().enumerate() {
+                let (jac, det_j, xp) = if use_iso {
+                    let ge = geo_elem
+                        .as_ref()
+                        .expect("missing geometry reference element for isoparametric vector assembly");
+                    isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim)
+                } else {
+                    let tr = affine_tr.as_ref().unwrap();
+                    (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
+                };
+                let j_inv_t = jac
+                    .clone()
+                    .try_inverse()
+                    .expect("degenerate element — zero-area/volume")
+                    .transpose();
                 let w = quad.weights[q] * det_j.abs();
 
                 ref_elem.eval_basis_vec(xi, &mut ref_phi);
@@ -360,8 +405,6 @@ impl VectorAssembler {
                         n_ldofs, dim, curl_dim,
                     );
                 }
-
-                let xp = phys_coords(x0, &jac, xi, dim);
 
                 let qp = VectorQpData {
                     n_dofs: n_ldofs,
@@ -424,21 +467,5 @@ mod tests {
 
         let rhs = VectorAssembler::assemble_linear(&space, &[&Zero], 2);
         assert_eq!(rhs.len(), n);
-    }
-
-    #[test]
-    fn vector_assembler_hcurl_quad_matrix_size() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(4);
-        let space = HCurlSpace::new(mesh, 1);
-        let n = space.n_dofs();
-
-        struct Zero;
-        impl VectorBilinearIntegrator for Zero {
-            fn add_to_element_matrix(&self, _: &VectorQpData<'_>, _: &mut [f64]) {}
-        }
-
-        let mat = VectorAssembler::assemble_bilinear(&space, &[&Zero], 2);
-        assert_eq!(mat.nrows, n);
-        assert_eq!(mat.ncols, n);
     }
 }

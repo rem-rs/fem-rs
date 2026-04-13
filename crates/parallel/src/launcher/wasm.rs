@@ -57,6 +57,7 @@
 use crate::backend::wasm::JsMpiBackend;
 use crate::comm::Comm;
 use crate::launcher::{Launcher, WorkerConfig};
+use jsmpi::topology::Communicator;
 
 // ── WorkerLauncher ────────────────────────────────────────────────────────────
 
