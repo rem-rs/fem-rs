@@ -60,7 +60,14 @@ impl MeshTopology for OneHexMesh {
     fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) { (0, None) }
 }
 
-fn main() {
+struct SolveResult {
+    n_dofs:         usize,
+    converged:      bool,
+    iterations:     usize,
+    solution_norm:  f64,
+}
+
+fn solve_hex8() -> SolveResult {
     let mesh = OneHexMesh::unit();
     let space = HCurlSpace::new(mesh, 1);
 
@@ -69,13 +76,14 @@ fn main() {
         &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }],
         4,
     );
-    let mut rhs = vec![0.0_f64; space.n_dofs()];
+    let n_dofs = space.n_dofs();
+    let mut rhs = vec![0.0_f64; n_dofs];
 
     let bnd = boundary_dofs_hcurl(space.mesh(), &space, &[1, 2, 3, 4, 5, 6]);
     let vals = vec![0.0_f64; bnd.len()];
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &vals);
 
-    let mut u = vec![0.0_f64; space.n_dofs()];
+    let mut u = vec![0.0_f64; n_dofs];
     let cfg = SolverConfig {
         rtol: 1e-10,
         atol: 0.0,
@@ -84,11 +92,49 @@ fn main() {
         ..SolverConfig::default()
     };
     let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("hex8 ex3 solve failed");
-    let norm_u = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let solution_norm = u.iter().map(|v| v * v).sum::<f64>().sqrt();
 
+    SolveResult { n_dofs, converged: res.converged, iterations: res.iterations, solution_norm }
+}
+
+fn main() {
+    let r = solve_hex8();
     println!("=== fem-rs mfem_ex3_hex8_maxwell ===");
-    println!("  DOFs: {}", space.n_dofs());
-    println!("  Converged: {} in {} iterations", res.converged, res.iterations);
-    println!("  ||u||_2 = {:.3e}", norm_u);
+    println!("  DOFs: {}", r.n_dofs);
+    println!("  Converged: {} in {} iterations", r.converged, r.iterations);
+    println!("  ||u||_2 = {:.3e}", r.solution_norm);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PEC on all six faces with zero forcing: only trivial solution E=0 exists.
+    /// The solver must converge and ||u||₂ must be essentially machine-zero.
+    #[test]
+    fn hex8_maxwell_pec_trivial_solution_is_zero() {
+        let r = solve_hex8();
+        assert!(r.converged, "PCG failed to converge for trivial PEC problem");
+        assert!(
+            r.solution_norm < 1e-12,
+            "||u||₂ should be ≈0 for zero-source/zero-BC problem, got {:.3e}",
+            r.solution_norm
+        );
+    }
+
+    /// A single ND1 Hex8 element has 12 edges, each carrying one DOF.
+    #[test]
+    fn hex8_maxwell_nd1_dof_count_is_twelve() {
+        let r = solve_hex8();
+        assert_eq!(r.n_dofs, 12, "expected 12 edge DOFs for ND1 on a single Hex8");
+    }
+
+    /// Solver must terminate in a small number of iterations for this 12-DOF problem.
+    #[test]
+    fn hex8_maxwell_solver_terminates_quickly() {
+        let r = solve_hex8();
+        assert!(r.converged);
+        assert!(r.iterations <= 50, "PCG should converge in ≤50 iterations for a 12-DOF smoke problem, used {}", r.iterations);
+    }
 }
 

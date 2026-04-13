@@ -128,4 +128,23 @@ mod tests {
         assert!(result.converged);
         assert!(result.l2_error < 1.5e-1, "L2 error = {}", result.l2_error);
     }
+
+    #[test]
+    fn tangential_drive_maxwell_h_refinement_reduces_l2_error() {
+        let coarse = solve_case(8);
+        let fine   = solve_case(16);
+        assert!(coarse.converged && fine.converged, "both solves must converge");
+        assert!(fine.l2_error < coarse.l2_error,
+            "finer mesh should have smaller L2 error: n=8: {:.3e}, n=16: {:.3e}",
+            coarse.l2_error, fine.l2_error);
+        let ratio = coarse.l2_error / fine.l2_error;
+        assert!(ratio > 1.5, "expected >1.5x error reduction on mesh doubling (ND1 O(h)), got {:.2}", ratio);
+    }
+
+    #[test]
+    fn tangential_drive_maxwell_converged_residual_is_small() {
+        let result = solve_case(16);
+        assert!(result.converged, "solver must converge at n=16");
+        assert!(result.final_residual < 1e-8, "expected residual < 1e-8 after convergence, got {:.3e}", result.final_residual);
+    }
 }

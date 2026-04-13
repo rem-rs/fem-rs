@@ -1,4 +1,4 @@
-//! # Example 7 �?Poisson with mixed Dirichlet/Neumann boundary conditions
+//! # Example 7 Poisson with mixed Dirichlet/Neumann boundary conditions
 //!
 //! Solves the scalar Poisson equation with mixed boundary conditions:
 //!
@@ -78,7 +78,7 @@ fn main() {
 
         let rate = match (prev_err, prev_h) {
             (Some(e0), Some(h0)) => format!("{:.2}", (l2 / e0).ln() / (h / h0).ln()),
-            _ => "  �?.to_string(),
+            _ => "  --".to_string(),
         };
 
         println!(
@@ -99,10 +99,10 @@ fn solve_one(n: usize, kappa: f64) -> (f64, usize, usize) {
     let space = H1Space::new(mesh, 1);
     let ndofs = space.n_dofs();
 
-    // ─── 2. Assemble stiffness K = �?κ ∇u·∇v dx ─────────────────────────────
+    // ─── 2. Assemble stiffness K = κ ∇u·∇v dx ─────────────────────────────
     let mut mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa }], 3);
 
-    // ─── 3. Assemble volume RHS �?f v dx ─────────────────────────────────────
+    // ─── 3. Assemble volume RHS f v dx ─────────────────────────────────────
     let src = DomainSourceIntegrator::new(f_rhs);
     let mut rhs = Assembler::assemble_linear(&space, &[&src], 3);
 
@@ -115,13 +115,13 @@ fn solve_one(n: usize, kappa: f64) -> (f64, usize, usize) {
     //   On right wall (x=1): outward normal = (1,0), ∂u/∂n = ∂u/∂x = (1-2x)y(1-y)|_{x=1} = -y(1-y)
     //   On top wall  (y=1): outward normal = (0,1), ∂u/∂n = ∂u/∂y = x(1-x)(1-2y)|_{y=1} = -x(1-x)
     //
-    //   The Neumann integrator computes �?g(x,n) v ds where g receives
+    //   The Neumann integrator computes g(x,n) v ds where g receives
     //   the physical coords x and the outward normal n at each face QP.
 
     let neumann_g = NeumannIntegrator::new(|x: &[f64], _n: &[f64]| {
         // κ * ∂u/∂n at (x,y):
-        //   On right (x�?): κ*(1-2x)*y*(1-y) �?the assembler calls this only for tagged faces
-        //   On top   (y�?): κ*(1-2y)*x*(1-x)
+        //   On right (x): κ*(1-2x)*y*(1-y) the assembler calls this only for tagged faces
+        //   On top   (y): κ*(1-2y)*x*(1-x)
         //   We return κ*(∂u/∂x * n_x + ∂u/∂y * n_y), but since the faces are
         //   axis-aligned and we know the normal from context, we can compute it
         //   directly. For generality we use the full gradient dotted with the
