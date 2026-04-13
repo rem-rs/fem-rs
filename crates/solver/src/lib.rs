@@ -25,13 +25,15 @@
 //! - [`solve_sparse_lu`]        — Sparse LU for general systems
 //! - [`solve_sparse_cholesky`]  — Sparse Cholesky for SPD systems
 //! - [`solve_sparse_ldlt`]      — Sparse LDLᵀ for symmetric indefinite systems
+//! - [`solve_sparse_mumps`]     — MUMPS-compatible direct path (baseline)
+//! - [`solve_sparse_mkl`]       — MKL-compatible direct path (baseline)
 //!
 //! All solvers operate on [`fem_linalg::CsrMatrix<T>`].
 
 use fem_linalg::CsrMatrix as FemCsr;
 use linger::{
     core::scalar::Scalar as LingerScalar,
-    direct::{DirectSolver, SparseLu, SparseCholesky, SparseLdlt},
+    direct::{DirectSolver, SparseLu, SparseCholesky, SparseLdlt, MumpsSolver, MklSolver},
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
     precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig},
     sparse::CsrMatrix as LingerCsr,
@@ -875,6 +877,40 @@ pub fn solve_sparse_ldlt<T: LingerScalar>(
     Ok(lx.into_vec())
 }
 
+/// MUMPS-compatible direct solver baseline.
+///
+/// Uses `linger::direct::MumpsSolver`, which currently provides a stable
+/// factor/solve/reuse API backed by native multifrontal direct solves.
+pub fn solve_sparse_mumps<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+) -> Result<Vec<T>, SolverError> {
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::zeros(b.len());
+    let mut solver = MumpsSolver::<T>::default();
+    solver.factor(&la).map_err(|e| SolverError::Linger(e.to_string()))?;
+    solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linger(e.to_string()))?;
+    Ok(lx.into_vec())
+}
+
+/// MKL-compatible direct solver baseline.
+///
+/// Uses `linger::direct::MklSolver`, which currently provides a stable
+/// factor/solve/reuse API backed by native multifrontal direct solves.
+pub fn solve_sparse_mkl<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+) -> Result<Vec<T>, SolverError> {
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::zeros(b.len());
+    let mut solver = MklSolver::<T>::default();
+    solver.factor(&la).map_err(|e| SolverError::Linger(e.to_string()))?;
+    solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linger(e.to_string()))?;
+    Ok(lx.into_vec())
+}
+
 // ─── Auxiliary-space Maxwell Solver (AMS) ────────────────────────────────────
 
 /// Configuration for AMS (Auxiliary-space Maxwell Solver) preconditioner.
@@ -1231,6 +1267,30 @@ mod tests {
         a.spmv(&x, &mut ax);
         let err: f64 = ax.iter().zip(b.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
         assert!(err < 1e-10, "LDLt residual too large: {err}");
+    }
+
+    #[test]
+    fn sparse_mumps_direct() {
+        let n = 20;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let x = solve_sparse_mumps(&a, &b).unwrap();
+        let mut ax = vec![0.0_f64; n];
+        a.spmv(&x, &mut ax);
+        let err: f64 = ax.iter().zip(b.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
+        assert!(err < 1e-10, "Mumps residual too large: {err}");
+    }
+
+    #[test]
+    fn sparse_mkl_direct() {
+        let n = 20;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let x = solve_sparse_mkl(&a, &b).unwrap();
+        let mut ax = vec![0.0_f64; n];
+        a.spmv(&x, &mut ax);
+        let err: f64 = ax.iter().zip(b.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
+        assert!(err < 1e-10, "Mkl residual too large: {err}");
     }
 
     #[test]

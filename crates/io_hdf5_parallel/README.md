@@ -12,13 +12,14 @@ This crate provides:
 - Rank-local restart reads by step or latest step
 - Layout validator for checkpoint consistency checks
 - Global field materialization for visualization
+- Global field read helpers (`read_global_field_f64`, `read_global_field_slice_f64`)
 - Minimal XDMF sidecar writers (single-step and temporal collection)
 
 ## Features
 
 - `default` (no HDF5 backend): API is available, runtime returns `Hdf5FeatureDisabled`.
 - `hdf5`: Enables real HDF5 backend via crate `hdf5`.
-- `hdf5-mpi`: Enables MPI-coordinated backend (rank writes + root global materialization).
+- `hdf5-mpi`: Enables MPI-coordinated backend (rank writes + direct hyperslab global writes, with root materialization compatibility fallback).
 
 ## Typical flow
 
@@ -31,7 +32,7 @@ This crate provides:
 Backend selection API:
 
 - `IoBackend::Partitioned` (stable baseline)
-- `IoBackend::MpiCollective` (MPI-coordinated checkpoint path; direct HDF5 hyperslab-collective path still planned)
+- `IoBackend::MpiCollective` (MPI-coordinated checkpoint path with direct HDF5 hyperslab global write path)
 
 ## Build notes for `hdf5`
 

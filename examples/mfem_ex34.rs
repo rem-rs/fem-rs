@@ -12,10 +12,7 @@
 
 use std::f64::consts::PI;
 
-use fem_examples::maxwell::{
-    StaticMaxwellBuilder,
-    l2_error_hcurl_exact,
-};
+use fem_examples::maxwell::{StaticMaxwellBuilder, l2_error_hcurl_exact};
 use fem_mesh::SimplexMesh;
 use fem_space::HCurlSpace;
 
@@ -42,9 +39,7 @@ fn main() {
         result.final_residual,
         result.converged
     );
-    if let Some(err) = result.l2_error {
-        println!("  h = {:.4e},  L² error = {:.4e}", result.h, err);
-    }
+    println!("  h = {:.4e},  L² error = {:.4e}", result.h, result.l2_error);
 }
 
 struct CaseResult {
@@ -53,7 +48,7 @@ struct CaseResult {
     final_residual: f64,
     converged: bool,
     h: f64,
-    l2_error: Option<f64>,
+    l2_error: f64,
 }
 
 fn solve_case(args: &Args) -> CaseResult {
@@ -75,9 +70,9 @@ fn solve_case(args: &Args) -> CaseResult {
             &robin_bdr,
             1.0,
             move |x, normal| {
-                let e = exact_field(x);
-                let e_tan = e[0] * normal[1] - e[1] * normal[0];
-                let gamma_norm = (gamma_x * normal[0] * normal[0] + gamma_y * normal[1] * normal[1]).sqrt();
+                let e_tan = tangential_trace(x, normal);
+                let gamma_norm =
+                    (gamma_x * normal[0] * normal[0] + gamma_y * normal[1] * normal[1]).sqrt();
                 let gamma_eff = if gamma_norm.abs() > 1e-14 {
                     (gamma_x * normal[0].powi(2) + gamma_y * normal[1].powi(2)) / gamma_norm
                 } else {
@@ -98,12 +93,7 @@ fn solve_case(args: &Args) -> CaseResult {
     let problem = builder.build();
     let n_dofs = problem.n_dofs();
     let solved = problem.solve();
-
-    let l2_error = if args.anisotropic {
-        None
-    } else {
-        Some(l2_error_hcurl_exact(&solved.space, &solved.solution, exact_field))
-    };
+    let l2_error = l2_error_hcurl_exact(&solved.space, &solved.solution, exact_field);
 
     CaseResult {
         n_dofs,
@@ -117,11 +107,11 @@ fn solve_case(args: &Args) -> CaseResult {
 
 fn source_value(x: &[f64]) -> [f64; 2] {
     let coeff = 1.0 + PI * PI;
-    [coeff * (PI * x[1]).sin(), coeff * (PI * x[0]).sin()]
+    [1.0 + coeff * (PI * x[1]).sin(), 1.0 + coeff * (PI * x[0]).sin()]
 }
 
 fn exact_field(x: &[f64]) -> [f64; 2] {
-    [(PI * x[1]).sin(), (PI * x[0]).sin()]
+    [1.0 + (PI * x[1]).sin(), 1.0 + (PI * x[0]).sin()]
 }
 
 fn curl_exact(x: &[f64]) -> f64 {
@@ -185,12 +175,11 @@ mod tests {
             gamma_y: 1.5,
         });
         assert!(result.converged);
-        let l2 = result.l2_error.expect("expected L2 error in isotropic mode");
-        assert!(l2 < 1.5e-1, "L2 error = {}", l2);
+        assert!(result.l2_error < 2.0e-1, "L2 error = {}", result.l2_error);
     }
 
     #[test]
-    fn absorbing_maxwell_anisotropic_mode_converges() {
+    fn absorbing_maxwell_anisotropic_mode_has_reasonable_error() {
         let result = solve_case(&Args {
             n: 8,
             anisotropic: true,
@@ -199,6 +188,43 @@ mod tests {
         });
         assert!(result.converged);
         assert!(result.final_residual < 1.0e-6, "residual = {}", result.final_residual);
-        assert!(result.l2_error.is_none());
+        assert!(result.l2_error < 2.5e-1, "L2 error = {}", result.l2_error);
+    }
+
+    #[test]
+    fn absorbing_maxwell_anisotropic_mode_refines_monotonically() {
+        let coarse = solve_case(&Args {
+            n: 8,
+            anisotropic: true,
+            gamma_x: 1.0,
+            gamma_y: 1.5,
+        });
+        let medium = solve_case(&Args {
+            n: 16,
+            anisotropic: true,
+            gamma_x: 1.0,
+            gamma_y: 1.5,
+        });
+        let fine = solve_case(&Args {
+            n: 32,
+            anisotropic: true,
+            gamma_x: 1.0,
+            gamma_y: 1.5,
+        });
+
+        assert!(coarse.converged && medium.converged && fine.converged);
+        assert!(
+            medium.l2_error < coarse.l2_error,
+            "expected refinement to reduce anisotropic absorbing error: coarse={} medium={}",
+            coarse.l2_error,
+            medium.l2_error
+        );
+        assert!(
+            fine.l2_error < medium.l2_error,
+            "expected refinement to reduce anisotropic absorbing error: medium={} fine={}",
+            medium.l2_error,
+            fine.l2_error
+        );
+        assert!(fine.l2_error < 1.5e-1, "fine-grid L2 error = {}", fine.l2_error);
     }
 }

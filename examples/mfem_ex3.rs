@@ -26,7 +26,9 @@
 use std::f64::consts::PI;
 use fem_examples::maxwell::{StaticMaxwellBuilder, l2_error_hcurl_exact};
 use fem_mesh::SimplexMesh;
-use fem_space::HCurlSpace;
+use fem_space::{
+    HCurlSpace,
+};
 
 fn main() {
     let args = parse_args();
@@ -57,6 +59,10 @@ fn main() {
         println!("  (Expected O(h) for ND1 elements)");
     } else {
         println!("  h = {:.4e},  L² error = n/a (PML-like/multi-material modified operator)", result.h);
+        println!(
+            "  ||u||₂ = {:.4e}, max|u| = {:.4e}",
+            result.solution_l2_norm, result.solution_max_abs
+        );
     }
 }
 
@@ -68,6 +74,8 @@ struct CaseResult {
     converged: bool,
     h: f64,
     l2_error: Option<f64>,
+    solution_l2_norm: f64,
+    solution_max_abs: f64,
 }
 
 fn source_value(x: &[f64]) -> [f64; 2] {
@@ -151,6 +159,13 @@ fn solve_case(args: &Args) -> CaseResult {
 
     let n_dofs = problem.n_dofs();
     let solved = problem.solve();
+
+    let solution_l2_norm = solved.solution.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let solution_max_abs = solved
+        .solution
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0_f64, f64::max);
     let l2_error = if args.pml_like || args.multi_material {
         None
     } else {
@@ -167,6 +182,8 @@ fn solve_case(args: &Args) -> CaseResult {
         converged: solved.solve_result.converged,
         h: 1.0 / args.n as f64,
         l2_error,
+        solution_l2_norm,
+        solution_max_abs,
     }
 }
 
@@ -264,5 +281,67 @@ mod tests {
         assert!(result.n_boundary_dofs > 0);
         assert!(result.final_residual < 1.0e-6, "residual = {}", result.final_residual);
         assert!(result.l2_error.is_none(), "multi-material mode should not compute L2 error");
+        assert!(result.solution_l2_norm.is_finite());
+        assert!(result.solution_max_abs.is_finite());
+    }
+
+    #[test]
+    fn ex3_pml_like_stronger_sigma_reduces_solution_norm() {
+        let weak = solve_case(&Args {
+            n: 8,
+            pml_like: true,
+            multi_material: false,
+            pml_thickness: 0.2,
+            sigma_max: 0.2,
+            wx: 1.0,
+            wy: 1.5,
+        });
+        let strong = solve_case(&Args {
+            n: 8,
+            pml_like: true,
+            multi_material: false,
+            pml_thickness: 0.2,
+            sigma_max: 4.0,
+            wx: 1.0,
+            wy: 1.5,
+        });
+
+        assert!(weak.converged && strong.converged);
+        assert!(
+            strong.solution_l2_norm < weak.solution_l2_norm,
+            "expected stronger PML damping to reduce ||u||2: weak={} strong={}",
+            weak.solution_l2_norm,
+            strong.solution_l2_norm
+        );
+    }
+
+    #[test]
+    fn ex3_multi_material_stronger_sigma_reduces_solution_norm() {
+        let weak = solve_case(&Args {
+            n: 8,
+            pml_like: false,
+            multi_material: true,
+            pml_thickness: 0.2,
+            sigma_max: 0.2,
+            wx: 1.0,
+            wy: 1.0,
+        });
+        let strong = solve_case(&Args {
+            n: 8,
+            pml_like: false,
+            multi_material: true,
+            pml_thickness: 0.2,
+            sigma_max: 4.0,
+            wx: 1.0,
+            wy: 1.0,
+        });
+
+        assert!(weak.converged && strong.converged);
+        assert!(
+            strong.solution_l2_norm < weak.solution_l2_norm,
+            "expected stronger multi-material damping to reduce ||u||2: weak={} strong={}",
+            weak.solution_l2_norm,
+            strong.solution_l2_norm
+        );
     }
 }

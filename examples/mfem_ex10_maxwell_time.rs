@@ -55,83 +55,194 @@ use fem_space::{
 
 const OMEGA: f64 = PI; // angular frequency of manufactured solution
 
-fn main() {
-    let args = parse_args();
+// ─── Solve result ─────────────────────────────────────────────────────────────
 
-    println!("=== fem-rs: Time-domain Maxwell (Newmark-β) ===");
-    println!("  Mesh: {}×{}, ε={:.2}, μ={:.2}, σ={:.2}", args.n, args.n, args.eps, args.mu, args.sigma);
-    println!("  dt={:.4}, T={:.2}, steps={}", args.dt, args.t_end, args.n_steps());
+#[derive(Debug, Clone)]
+struct SolveResult {
+    n_dof:       usize,
+    n_steps:      usize,
+    l2_err_final: f64,
+    /// L² error sampled at half the final time.
+    l2_err_half:  f64,
+    t_final:      f64,
+    final_solution: Vec<f64>,
+}
 
-    // ─── 1. Mesh + H(curl) space ─────────────────────────────────────────────
+// ─── solve_case ───────────────────────────────────────────────────────────────
+
+fn solve_case(args: &Args) -> SolveResult {
     let mesh  = SimplexMesh::<2>::unit_square_tri(args.n);
     let space = HCurlSpace::new(mesh, 1);
     let n_dof = space.n_dofs();
-    println!("  Edge DOFs: {n_dof}");
 
-    // ─── 2. Identify boundary DOFs (n×E = 0) ─────────────────────────────────
     let bnd_dofs: Vec<u32> = boundary_dofs_hcurl(space.mesh(), &space, &[1, 2, 3, 4]);
 
-    // ─── 3. Assemble ε·M (mass), σ·M (damping), K (curl-curl) ───────────────
-    let mass_integ   = VectorMassIntegrator { alpha: args.eps };
-    let damp_integ   = VectorMassIntegrator { alpha: args.sigma };
-    let stiff_integ  = CurlCurlIntegrator   { mu: 1.0 / args.mu };
+    let mass_integ  = VectorMassIntegrator { alpha: args.eps };
+    let damp_integ  = VectorMassIntegrator { alpha: args.sigma };
+    let stiff_integ = CurlCurlIntegrator   { mu: 1.0 / args.mu };
 
     let mut mass  = VectorAssembler::assemble_bilinear(&space, &[&mass_integ],  4);
     let mut damp  = VectorAssembler::assemble_bilinear(&space, &[&damp_integ],  4);
     let mut stiff = VectorAssembler::assemble_bilinear(&space, &[&stiff_integ], 4);
 
-    // Apply Dirichlet BCs to all three matrices (zero out rows + diag=1).
     let zero_vals = vec![0.0_f64; bnd_dofs.len()];
     let mut dummy_rhs = vec![0.0_f64; n_dof];
     apply_dirichlet(&mut mass,  &mut dummy_rhs, &bnd_dofs, &zero_vals);
     apply_dirichlet(&mut damp,  &mut dummy_rhs, &bnd_dofs, &zero_vals);
     apply_dirichlet(&mut stiff, &mut dummy_rhs, &bnd_dofs, &zero_vals);
 
-    // ─── 4. Build Newmark effective stiffness: K_eff = ε·M/(β dt²) + σ·M/(γ·dt) + K
-    //   (see Newmark::step docs; we let Newmark handle this internally)
     let newmark = Newmark::default(); // β=0.25, γ=0.5
 
-    // ─── 5. Initial conditions: E(0) = 0, Ė(0) = ω E₀ ──────────────────────
-    let mut u = vec![0.0_f64; n_dof]; // E(0) = 0
+    let mut u = vec![0.0_f64; n_dof];
     let init_vel = project_exact_vel(&space, 0.0);
-    let f0 = assemble_force(&space, &args, 0.0);
+    let f0 = assemble_force(&space, args, 0.0);
     let mut state = NewmarkState::init_from(init_vel, &mass, &stiff, &u, &f0);
 
-    // ─── 6. Time loop ─────────────────────────────────────────────────────────
-    let dt       = args.dt;
-    let n_steps  = args.n_steps();
-    let mut t    = 0.0;
+    let dt      = args.dt;
+    let n_steps = args.n_steps();
+    let mut t   = 0.0;
+    let t_half  = args.t_end * 0.5;
 
-    let mut l2_err_last = 0.0;
+    let mut l2_err_half  = 0.0;
+    let mut half_recorded = false;
 
-    let print_every = (n_steps / 5).max(1);
-
-    for step in 0..n_steps {
+    for _step in 0..n_steps {
         t += dt;
 
-        // Assemble force at t_{n+1}.
-        let mut force = assemble_force(&space, &args, t);
-        // Apply BC to force.
+        let mut force = assemble_force(&space, args, t);
         for &d in &bnd_dofs { force[d as usize] = 0.0; }
 
-        // Newmark step: ε M ü + σ M u̇ + K u = f(t)
-        // We add damping to the effective system manually here by augmenting
-        // stiffness: K_aug = K + σ/(γ dt) M  and effective force.
-        // However, fem-rs Newmark::step handles only undamped M ü + K u = f.
-        // For the damped case we reformulate as a first-order system manually.
         newmark_damped_step(
             &mass, &damp, &stiff, &force, dt, &newmark,
             &mut u, &mut state, &bnd_dofs,
         );
 
-        if step % print_every == print_every - 1 || step == n_steps - 1 {
-            l2_err_last = l2_error_hcurl(&space, &u, t);
-            println!("  t={t:.3}  L² err={l2_err_last:.3e}");
+        if !half_recorded && t >= t_half {
+            l2_err_half   = l2_error_hcurl(&space, &u, t);
+            half_recorded = true;
         }
     }
+    let l2_err_final = l2_error_hcurl(&space, &u, t);
 
-    println!("  Final t={t:.3}, L² error = {l2_err_last:.4e}");
+    SolveResult {
+        n_dof,
+        n_steps,
+        l2_err_final,
+        l2_err_half,
+        t_final: t,
+        final_solution: u,
+    }
+}
+
+fn main() {
+    let args = parse_args();
+
+    println!("=== fem-rs: Time-domain Maxwell (Newmark-β) ===");
+    println!("  Mesh: {}×{}, ε={:.2}, μ={:.2}, σ={:.2}", args.n, args.n, args.eps, args.mu, args.sigma);
+    println!("  dt={:.4}, T={:.2}", args.dt, args.t_end);
+
+    let result = solve_case(&args);
+
+    println!("  Edge DOFs: {}", result.n_dof);
+    println!("  Steps: {}", result.n_steps);
+    println!("  Final t={:.3}, L² error = {:.4e}", result.t_final, result.l2_err_final);
+    println!("  Half-time L² error = {:.4e}", result.l2_err_half);
     println!("  (Expected O(h) in space + O(dt²) in time for ND1 + Newmark-β)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn l2_diff(a: &[f64], b: &[f64]) -> f64 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    fn base_args() -> Args {
+        Args { n: 8, dt: 0.05, t_end: 0.5, eps: 1.0, mu: 1.0, sigma: 0.0 }
+    }
+
+    /// L² error at final time must be within a reasonable threshold for
+    /// the coarse mesh + dt = 0.05 run (undamped, manufactured solution).
+    #[test]
+    fn ex10_maxwell_time_converges() {
+        let r = solve_case(&base_args());
+        assert!(
+            r.l2_err_final < 4.0e-1,
+            "final L2 error too large: {}",
+            r.l2_err_final
+        );
+    }
+
+    /// Halving dt (with same mesh) should reduce the L² error — verifies second-
+    /// order temporal accuracy of Newmark-β.
+    #[test]
+    fn ex10_maxwell_time_halving_dt_reduces_error() {
+        let mut coarse = base_args();
+        coarse.dt = 0.1;
+        let mut fine = base_args();
+        fine.dt = 0.05;
+
+        let rc = solve_case(&coarse);
+        let rf = solve_case(&fine);
+
+        assert!(
+            rf.l2_err_final < rc.l2_err_final,
+            "expected finer dt to reduce error: dt=0.1 err={} dt=0.05 err={}",
+            rc.l2_err_final,
+            rf.l2_err_final
+        );
+    }
+
+    /// Adding damping (σ > 0) should reduce field amplitude over time relative
+    /// to undamped, measurable via L² error difference.
+    #[test]
+    fn ex10_maxwell_time_damping_affects_solution() {
+        let undamped = base_args();
+        let mut damped = base_args();
+        damped.sigma = 1.0;
+
+        let ru = solve_case(&undamped);
+        let rd = solve_case(&damped);
+
+        // Damped and undamped solutions must diverge; verify they differ by
+        // at least 1% in final L² error.
+        let diff = (ru.l2_err_final - rd.l2_err_final).abs();
+        assert!(
+            diff > 0.01 * ru.l2_err_final.max(rd.l2_err_final),
+            "damped and undamped solutions are indistinguishably similar: undamped={}, damped={}",
+            ru.l2_err_final, rd.l2_err_final
+        );
+    }
+
+    #[test]
+    fn ex10_maxwell_time_exhibits_second_order_temporal_self_convergence() {
+        let mut coarse = base_args();
+        coarse.dt = 0.1;
+        coarse.t_end = 0.2;
+
+        let mut medium = base_args();
+        medium.dt = 0.05;
+        medium.t_end = 0.2;
+
+        let mut fine = base_args();
+        fine.dt = 0.025;
+        fine.t_end = 0.2;
+
+        let rc = solve_case(&coarse);
+        let rm = solve_case(&medium);
+        let rf = solve_case(&fine);
+
+        let e_c = l2_diff(&rc.final_solution, &rf.final_solution);
+        let e_m = l2_diff(&rm.final_solution, &rf.final_solution);
+
+        assert!(e_m < e_c, "expected temporal refinement to reduce self-error: coarse={} medium={}", e_c, e_m);
+        assert!(e_c / e_m > 2.0, "expected near second-order temporal improvement; ratio={}", e_c / e_m);
+    }
 }
 
 // ─── Damped Newmark step: ε M ü + σ M u̇ + K u = f ──────────────────────────

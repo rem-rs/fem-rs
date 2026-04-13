@@ -106,4 +106,31 @@ mod tests {
         assert!(result.converged);
         assert!(result.l2_error < 2.5e-1, "L2 error = {}", result.l2_error);
     }
+
+    #[test]
+    fn anisotropic_maxwell_exhibits_first_order_hcurl_convergence_trend() {
+        let coarse = solve_case(8);
+        let medium = solve_case(16);
+        let fine = solve_case(32);
+
+        assert!(coarse.converged && medium.converged && fine.converged);
+
+        let order_1 = (coarse.l2_error / medium.l2_error).ln() / (coarse.h / medium.h).ln();
+        let order_2 = (medium.l2_error / fine.l2_error).ln() / (medium.h / fine.h).ln();
+
+        assert!(
+            order_1 > 0.85,
+            "coarse->medium observed order too low: order={} (errors {} -> {})",
+            order_1,
+            coarse.l2_error,
+            medium.l2_error
+        );
+        assert!(
+            order_2 > 0.85,
+            "medium->fine observed order too low: order={} (errors {} -> {})",
+            order_2,
+            medium.l2_error,
+            fine.l2_error
+        );
+    }
 }

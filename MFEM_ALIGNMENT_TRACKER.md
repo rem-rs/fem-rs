@@ -34,9 +34,17 @@
 
 ### 1.2 全局剩余差距（跨模块）
 
-- 🔨 HDF5/XDMF 并行 I/O 与 restart 文件链路（checkpoint/restart 基线已落地；direct HDF5 hyperslab collective 仍待完成）。
-- 🔨 hypre-equivalent 路线（纯 Rust 能力轨道；高级 AIR/AMS/ADS 与分布式路径仍待完成）。
-- 🔨 Netgen/Abaqus 网格读取支持（Netgen `.vol` Tet4 ASCII 读写基线已落地；Abaqus `.inp` 待实现）。
+- 🔨 HDF5/XDMF 并行 I/O 与 restart 文件链路（checkpoint/restart 基线已落地；direct HDF5 hyperslab 全局写+切片读 baseline 已落地，待 HDF5/MPI 环境端到端验收）。
+- 🔨 hypre-equivalent 路线（纯 Rust 能力轨道；`linger` 中 AMS/ADS baseline 已可用，剩余以 AIR 与分布式/高阶能力补齐为主）。
+- 🔨 Netgen/Abaqus 网格读取支持（Netgen `.vol` Tet4/Hex8 ASCII uniform/mixed 读取基线 + Abaqus `.inp` C3D4/C3D8 uniform/mixed 读取基线已落地；写出与更多 section/tag 保真待补齐）。
+- 🔨 静态凝聚基线示例（`mfem_ex8_hybridization`，代数约束消元路径）已落地；混合/杂化 FEM 内核待补齐。
+- 🔨 分数阶 Laplacian 基线示例（`mfem_ex33_fractional_laplacian`，dense spectral FE 路线）已落地；可扩展矩阵函数/extension 路线待补齐。
+- 🔨 障碍问题基线示例（`mfem_ex36_obstacle`，primal-dual active-set (PDAS) 变分不等式基线）已落地；semismooth Newton 内核待补齐。
+- 🔨 拓扑优化基线示例（`mfem_ex37_topology_optimization`，标量 SIMP + OC + density filter + Heaviside projection + chain-rule sensitivity）已落地；全弹性/伴随/复杂约束路线待补齐。
+- 🔨 截断积分 / 浸没边界基线示例（`mfem_ex38_immersed_boundary`，cut-cell subtriangulation + Nitsche-like 弱 Dirichlet（弦段近似））已落地；完整 cut-FEM/level-set 稳健几何与高阶界面积分路线待补齐。
+- 🔨 TMOP 网格质量优化基线示例（`mfem_tmop_mesh_quality`，mean-ratio 质量目标 + 内点平滑 + 回溯线搜索）已落地；完整 target-matrix TMOP 路线待补齐。
+- 🔨 surface FEM 基线示例（`mfem_surface_fem`，球面 Laplace-Beltrami：P1 曲面有限元 + icosphere 网格）已落地；开放曲面与更完整 surface pipeline 待补齐。
+- 🔨 DPG 基线示例（`mfem_dpg_poisson`，primal-DPG proxy 路线）已落地；完整 enriched test/trace unknowns 路线待补齐。
 - 🔨 命名属性集（baseline+）：`fem-mesh` 已提供 `NamedAttributeSet` / `NamedAttributeRegistry`，支持 mesh named queries 与 `extract_submesh_by_name(...)`，`fem-io` 已提供 GMSH `PhysicalNames` -> named registry bridge，并新增 `ex39_named_attributes` 示例打通端到端路径。
 - 🔨 几何多重网格 / LOR（Phase 58）：`GeomMGHierarchy` + `GeomMGPrecond` 基线已具备，并新增 `ex26_geom_mg` 示例用于持续回归。
 - ✅ `ElementTransformation` 统一抽象层（完成）。
@@ -121,13 +129,16 @@
   当前进展（2026-04-13）：已具备 rank 分片写入、root 端全局场物化与 XDMF sidecar 输出，支持 checkpoint 结构校验。
 2. ✅ restart checkpoint 链路（阶段性完成）。
   当前进展（2026-04-13）：新增“中断后重启续算与无中断基线一致”回归（`fem-io-hdf5-parallel`，`hdf5` feature）。
-3. hypre-equivalent（纯 Rust）能力扩展与额外网格格式读取（Abaqus + Netgen 非 Tet4/ASCII 扩展）。
+3. ✅ 外部 direct backend hooks baseline（阶段性完成）。
+  当前进展（2026-04-13）：`mumps` + `mkl` 均已具备可用 baseline（`linger::{MumpsSolver, MklSolver}` + `fem-solver::{solve_sparse_mumps, solve_sparse_mkl}`）；外部 FFI/distributed 路径待后续阶段。
+  验收证据（2026-04-13）：`cargo test --manifest-path vendor/linger/Cargo.toml direct_backend_mkl_solves_system`、`cargo test --manifest-path vendor/linger/Cargo.toml mkl_solver_solves_single_rhs`、`cargo test -p fem-solver sparse_mkl_direct` 通过。
+4. hypre-equivalent（纯 Rust）能力扩展与额外网格格式读取（`linger` 中 AMS/ADS baseline 已可用；AIR baseline 脚手架已落地：`CoarsenStrategy::Air` + diagonal-`A_ff` AIR restriction，并新增非对称对流扩散回归 `amg_air_gmres_nonsymmetric_convdiff_1d`；后续聚焦 parity hardening 与分布式/高阶能力；Abaqus/Netgen 扩展：混合单元、更多 section 与 tag 保真）。
 
 ### 当前主线剩余项（2026-04-13）
 
-1. direct HDF5 hyperslab collective 并行写读路径（当前为 rank 分片 + root 物化基线）。
-2. 跨子项目 C2-C4：WP2-WP6（AIR/AMS/ADS、mumps、mkl、GPU、jsmpi fallback/CI 矩阵）。
-3. 低优先级 MFEM 能力族补齐（静态凝聚/杂化、分数阶、障碍问题、拓扑优化、浸没边界、DPG、surface FEM、TMOP）。
+1. direct HDF5 hyperslab 全局写入+切片读取路径（baseline 已落地；当前环境缺少系统 HDF5 库，需在具备 HDF5/MPI 的 CI 或集群环境完成端到端验收）。
+2. 跨子项目 C2-C4：WP2 + WP4-WP6（AIR 与 AMS/ADS parity hardening、mkl 在 reed 的落地与 CI feature matrix、GPU、jsmpi fallback/CI 矩阵；WP3 mumps/mkl baseline 已完成）。
+3. 低优先级 MFEM 能力族补齐（静态凝聚/杂化内核、分数阶可扩展内核、障碍问题高阶内核、拓扑优化高保真内核、浸没边界高保真内核）。
 
 ### 自动验收补充（2026-04-13）
 

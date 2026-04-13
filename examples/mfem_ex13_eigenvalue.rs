@@ -220,4 +220,32 @@ mod tests {
         assert!(result.eigenvalues[1] > 9.0 && result.eigenvalues[1] < 10.5);
         assert!(result.eigenvalues[2] > 19.0 && result.eigenvalues[2] < 20.5);
     }
+
+    #[test]
+    fn maxwell_eigenvalue_refinement_improves_first_modes() {
+        let coarse = solve_case(8, 3);
+        let fine = solve_case(12, 3);
+
+        assert!(coarse.converged, "coarse LOBPCG did not converge");
+        assert!(fine.converged, "refined LOBPCG did not converge");
+        assert_eq!(coarse.eigenvalues.len(), 3);
+        assert_eq!(fine.eigenvalues.len(), 3);
+        assert!(coarse.max_rel_err.is_finite() && fine.max_rel_err.is_finite());
+
+        let coarse_first_err = (coarse.eigenvalues[0] - coarse.exact_eigs[0]).abs();
+        let fine_first_err = (fine.eigenvalues[0] - fine.exact_eigs[0]).abs();
+
+        assert!(
+            fine.max_rel_err < coarse.max_rel_err,
+            "expected refinement to reduce max relative eigen error: coarse={} fine={}",
+            coarse.max_rel_err,
+            fine.max_rel_err
+        );
+        assert!(
+            fine_first_err < coarse_first_err,
+            "expected refinement to improve first eigenvalue: coarse={} fine={}",
+            coarse_first_err,
+            fine_first_err
+        );
+    }
 }

@@ -46,7 +46,7 @@
 | `Mesh::GetSpaceDim()` | same as `dim()` for flat meshes | ✅ | |
 | `Mesh::UniformRefinement()` | `refine_uniform()` | ✅ | Red refinement (Tri3→4 children) |
 | `Mesh::AdaptiveRefinement()` | `refine_marked()` + ZZ estimator + Dörfler marking | ✅ | Phase 17 |
-| `Mesh::GetElementTransformation()` | `ElementTransformation` + inline Jacobian paths | 🔨 | Wrapper available for simplex; full assembler migration TBD |
+| `Mesh::GetElementTransformation()` | `ElementTransformation` | ✅ | 仿射 simplex 装配路径已统一接入 `ElementTransformation` |
 | `Mesh::GetFaceElementTransformations()` | `InteriorFaceList` | ✅ | Used by DG assembler |
 | `Mesh::GetBoundingBox()` | `SimplexMesh::bounding_box()` | ✅ | Returns `(min, max)` per axis |
 
@@ -77,7 +77,7 @@
 | `Mesh::MakePeriodic()` | `SimplexMesh::make_periodic()` | ✅ | Node merging + face removal |
 | Reading MFEM format | — | ❌ use GMSH instead |
 | Reading GMSH `.msh` v4 | `fem_io::read_msh_file()` | ✅ |
-| Reading Netgen | `fem_io::read_netgen_vol_file()` | 🔨 Phase 67 (Tet4 ASCII baseline) |
+| Reading Netgen | `fem_io::read_netgen_vol_file()` | 🔨 Phase 67 (Tet4/Hex8 ASCII 读取基线，支持 uniform + mixed；写出仍以 Tet4 baseline 为主) |
 
 ---
 
@@ -236,7 +236,7 @@ default (zero-cost for constants).
 
 | MFEM concept | fem-rs equivalent | Status |
 |---|---|---|
-| `ElementTransformation` | Jacobian `jac`, `det_j`, `jac_inv_t` | 🔨 inline in assembly |
+| `ElementTransformation` | Jacobian `jac`, `det_j`, `jac_inv_t` | ✅ |
 | `Geometry::Type` | `ElementType` enum | ✅ |
 | Sparsity pattern | `SparsityPattern` built once | ✅ |
 | Parallel assembly | Element loop → ghost DOF AllReduce | ✅ via ChannelBackend |
@@ -296,7 +296,7 @@ default (zero-cost for constants).
 | `SLISolver` | Stationary linear iteration | `solve_jacobi_sli` / `solve_gs_sli` | ✅ |
 | `NewtonSolver` | Nonlinear F(x)=0 | `NewtonSolver` | ✅ |
 | `UMFPackSolver` | Direct (SuiteSparse) | `solve_sparse_lu` / `solve_sparse_cholesky` / `solve_sparse_ldlt` | ✅ Pure-Rust sparse direct |
-| `MUMPSSolver` | Parallel direct | — | ❌ |
+| `MUMPSSolver` | Parallel direct | `solve_sparse_mumps` + `linger::MumpsSolver` | 🔨 | Native multifrontal-backed baseline; external MUMPS FFI/distributed path pending |
 
 ### 7.2 Preconditioners
 
@@ -400,8 +400,8 @@ default (zero-cost for constants).
 | GMSH `.msh` v2 ASCII (read) | `fem_io::read_msh_file()` | ✅ |
 | GMSH `.msh` v4.1 ASCII (read) | `fem_io::read_msh_file()` | ✅ |
 | GMSH `.msh` v4.1 binary (read) | `fem_io::read_msh_file()` | ✅ |
-| Netgen `.vol` (read/write) | `read_netgen_vol_file()` / `write_netgen_vol_file()` | 🔨 | Tet4 ASCII baseline |
-| Abaqus `.inp` (read) | — | 🔲 Phase 9+ |
+| Netgen `.vol` (read/write) | `read_netgen_vol_file()` / `write_netgen_vol_file()` | 🔨 | 读取：Tet4/Hex8 ASCII baseline（支持 mixed）；写出：Tet4 ASCII baseline |
+| Abaqus `.inp` (read) | `read_abaqus_inp_file()` | 🔨 | C3D4/C3D8 baseline（支持 uniform + mixed） |
 | VTK `.vtu` legacy ASCII (write) | `write_vtk_scalar()` | ✅ |
 | VTK `.vtu` XML binary (write) | `write_vtu()` (XML ASCII) | ✅ |
 | HDF5 / XDMF (read/write) | `fem-io-hdf5-parallel` (feature-gated) | 🔨 |
@@ -571,7 +571,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | Mixed element meshes (Tri+Quad, Tet+Hex) | ✅ | ~~Medium~~ Done |
 | NCMesh (non-conforming, hanging nodes) | ✅ | ~~Low~~ Done |
 | `bdr_attributes` dedup utility | ✅ | ~~Low~~ Done |
-| `ElementTransformation` type | 🔨 | Low (works inline) |
+| `ElementTransformation` type | ✅ | ~~Low~~ Done |
 | `GetBoundingBox()` | ✅ | ~~Low~~ Done |
 | Periodic mesh generation | ✅ | ~~Low~~ Done |
 
@@ -581,8 +581,8 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | ~~GMSH v4.1 binary reader~~ | ✅ | ~~High~~ Done |
 | ~~GMSH v2 reader~~ | ✅ | ~~Medium~~ Done |
 | HDF5/XDMF parallel I/O | 🔨 | Medium |
-| Netgen `.vol` reader | 🔨 (Tet4 ASCII baseline) | Low |
-| Abaqus `.inp` reader | 🔲 | Low |
+| Netgen `.vol` reader | 🔨 (Tet4/Hex8 ASCII baseline，支持 mixed；写出与更多 section 保真待补齐) | Low |
+| Abaqus `.inp` reader | 🔨 (C3D4/C3D8 baseline，支持 mixed；更多 section/tag 保真待补齐) | Low |
 | `GridFunction::Load()` | ✅ | ~~Low~~ Done |
 | Restart files (checkpoint) | 🔨 | Low |
 
@@ -664,7 +664,8 @@ prioritized roadmap for continued development.
 - [x] XDMF time-series：`write_xdmf_polyvertex_scalar_timeseries_sidecar()`
 - [x] 示例：`ex43_hdf5_checkpoint.rs`（无 HDF5 环境时优雅降级）
 - [x] checkpoint 完整性校验：`validate_checkpoint_layout()`
-- [~] MPI backend 已升级为 MPI 协同路径（rank 写入 + root 全局物化）；直接 HDF5 hyperslab collective 仍待完成
+- [x] MPI backend 已升级为 MPI 协同路径（rank 写入 + direct hyperslab 全局写入路径，保留 root 全局物化兼容兜底）
+- [x] direct hyperslab 读路径：`read_global_field_f64()` + `read_global_field_slice_f64()`（全局整场/切片读取）
 - [x] 并行 mesh+field bundle checkpoint schema（`CheckpointBundleF64` + `CheckpointMeshMeta` baseline）
 
 ### Phase 44 — Navier-Stokes (Kovasznay flow) ✅
@@ -723,7 +724,7 @@ prioritized roadmap for continued development.
 | Item | Phase | Notes |
 |------|-------|-------|
 | hypre-equivalent AMG path | pure-Rust parity track | Owned by `vendor/linger` capability roadmap |
-| Abaqus reader + Netgen format扩展 | TBD | Additional mesh import formats |
+| Abaqus/Netgen format扩展（混合单元、更多section/tag保真） | TBD | Additional mesh import formats |
 | HDF5/XDMF I/O | TBD | Large-scale checkpointing |
 | Restart files | TBD | Requires HDF5 |
 | Tet4 NC AMR example | ✅ | ~~TBD~~ Done (`ex15_tet_nc_amr`, supports `--solve`) |
@@ -741,9 +742,9 @@ prioritized roadmap for continued development.
    - `vendor/jsmpi`: wasm/browser runtime constraints for distributed execution path.
 - Current `linger` gaps to track under this ownership:
    - Distributed-memory path is still missing (`mpi` feature is placeholder in `vendor/linger/Cargo.toml`).
-   - HYPRE-equivalent advanced options (AIR, AMS/ADS) still need pure-Rust completion.
+   - HYPRE-equivalent advanced options: AMS/ADS baseline is already available in `vendor/linger`; AIR baseline strategy is landed (`CoarsenStrategy::Air` + diagonal-`A_ff` AIR restriction) with nonsymmetric regression coverage (`amg_air_gmres_nonsymmetric_convdiff_1d`), while parity hardening (especially distributed/high-scale behavior) remains pending.
    - PETSc-equivalent KSP/PC path still needs pure-Rust completion in `vendor/linger`.
-   - External solver backend hooks are placeholders for optional backends (`mumps`, `mkl`).
+   - External solver backend hooks: `mumps` 与 `mkl` 均具备可用 baseline（native multifrontal-backed, factor reuse + multi-RHS）；外部 FFI/distributed 路径仍待后续阶段落地。
    - AMG options are narrower than hypre BoomerAMG/AIR ecosystem (currently RS/SA + V/W/F/K-cycle baseline).
    - GPU execution backend is missing in `linger` core (implementation track owned by `vendor/reed`).
    - Matrix Market complex field I/O is not yet supported (`vendor/linger/src/sparse/mmio.rs`).
@@ -755,15 +756,15 @@ prioritized roadmap for continued development.
 | Stage | Window | linger | reed | jsmpi | Exit Criteria |
 |---|---|---|---|---|---|
 | C1 Foundation | Q2 (2-4 weeks) | External solver abstraction, error adapter, feature-gated fallback | Stable operator/export bridge API to linger | Browser/wasm backend capability policy (supported vs fallback) | API boundary frozen; default build unchanged |
-| C2 External Solvers M1/M2 | Q2-Q3 | pure-Rust HYPRE-equivalent minimal BoomerAMG baseline, then AIR+AMS/ADS; `mumps` first direct path | Builder wiring for backend selection in FEM solve paths | wasm path reports deterministic fallback when native external backends unavailable | Poisson SPD integration tests pass for enabled backends |
+| C2 External Solvers M1/M2 | Q2-Q3 | pure-Rust HYPRE-equivalent minimal BoomerAMG baseline, then AIR + AMS/ADS parity hardening（AMS/ADS baseline already in `linger`）; `mumps` first direct path | Builder wiring for backend selection in FEM solve paths | wasm path reports deterministic fallback when native external backends unavailable | Poisson SPD integration tests pass for enabled backends |
 | C3 GPU First Usable Path | Q3 | Backend-neutral kernel interface + CPU reference kernels | GPU backend implementation + CEED-style object mapping + one end-to-end example | Browser multi-rank transport constraints documented for GPU+wasm modes | One representative solve path runs CPU/GPU with same app API |
 | C4 Portfolio Completion | Q4 | pure-Rust PETSc-equivalent KSP/PC path; CI matrix hooks | `mkl` Pardiso integration + cross-backend regression tests in FEM pipelines | Browser smoke tests and fallback matrix by feature | CI passes on feature matrix; docs and examples complete |
 
 #### Work Packages
 
 - [x] WP1: Interface freeze for cross-project backend contracts
-- [ ] WP2: pure-Rust HYPRE-equivalent AIR + AMS/ADS usable in solver builder
-- [ ] WP3: `mumps` usable with factor reuse and multi-RHS
+- [ ] WP2: pure-Rust HYPRE-equivalent AIR + AMS/ADS parity hardening（`linger` 中 AMS/ADS baseline 已可用，AIR baseline 已落地，仍需 parity/分布式能力补齐）
+- [x] WP3: `mumps` + `mkl` usable with factor reuse and multi-RHS（baseline：`linger::{MumpsSolver, MklSolver}` + `solve_sparse_{mumps,mkl}`; external FFI/distributed path pending）
 - [ ] WP4: GPU baseline delivery in `reed` (with `linger` backend-neutral kernel contracts)
 - [ ] WP5: `mkl` in `reed` + pure-Rust PETSc-equivalent KSP/PC in `linger` + CI feature matrix
 - [ ] WP6: `jsmpi` browser/wasm fallback and smoke-test closure
@@ -805,19 +806,19 @@ Current baseline progress (2026-04-13):
 | DG 弹性力学 | ✅ ex17 | ✅ 基线已实现 | 🟡 中 | 60 |
 | DG 可压缩 Euler 方程 | ✅ ex18 | ✅ 1D 基线已实现 | 🟡 中 | 60 |
 | 辛时间积分 (Symplectic) | ✅ ex20 | ✅ 已实现 | 🟡 中 | 61 |
-| 受限 H(curl) 空间 (1D/2D embedded) | ✅ ex31/ex32 | ✅ 基线已实现 | 🟡 中 | 62 |
-| PML 完美匹配层 | ✅ ex25 | 🔨 标量+各向异性张量基线 | 🟡 中 | 55+63 |
-| 静态凝聚 / 杂化 | ✅ ex4/ex8/hybr | ❌ | 🟢 低 | TBD |
-| 分数阶 Laplacian | ✅ ex33 | ❌ | 🟢 低 | TBD |
-| 障碍问题 / 变分不等式 | ✅ ex36 | ❌ | 🟢 低 | TBD |
-| 拓扑优化 | ✅ ex37 | ❌ | 🟢 低 | TBD |
-| 截断积分 / 浸没边界 | ✅ ex38 | ❌ | 🟢 低 | TBD |
+| 受限 H(curl) 空间 (1D/2D embedded) | ✅ ex31/ex32 | ✅ 基线已实现；ex31/ex32 均已补充制造解一阶收敛回归 | 🟡 中 | 62 |
+| PML 完美匹配层 | ✅ ex25 | 🔨 标量+各向异性张量基线（ex25 已加入可量化反射指标与强度回归） | 🟡 中 | 55+63 |
+| 静态凝聚 / 杂化 | ✅ ex4/ex8/hybr | 🔨 代数静态凝聚基线（`mfem_ex8_hybridization`，基于 hanging constraints）；混合/杂化 FEM 内核待补齐 | 🟢 低 | TBD |
+| 分数阶 Laplacian | ✅ ex33 | 🔨 `mfem_ex33_fractional_laplacian` dense spectral FE 基线；可扩展有理逼近 / extension 路线待补齐 | 🟢 低 | TBD |
+| 障碍问题 / 变分不等式 | ✅ ex36 | 🔨 `mfem_ex36_obstacle` primal-dual active-set (PDAS) 基线；semismooth Newton 内核待补齐 | 🟢 低 | TBD |
+| 拓扑优化 | ✅ ex37 | 🔨 `mfem_ex37_topology_optimization` 标量 SIMP compliance 基线（density filter + Heaviside projection + chain-rule sensitivity）；全弹性/伴随/约束扩展待补齐 | 🟢 低 | TBD |
+| 截断积分 / 浸没边界 | ✅ ex38 | 🔨 `mfem_ex38_immersed_boundary` cut-cell subtriangulation + Nitsche-like 弱 Dirichlet（弦段近似）浸没边界基线；完整 cut-FEM/level-set 稳健几何与高阶界面积分待补齐 | 🟢 低 | TBD |
 | 命名属性集 | ✅ ex39 | 🔨 named tag registry + mesh/submesh named selection + GMSH `PhysicalNames` bridge + `ex39_named_attributes` baseline | 🟢 低 | TBD |
 | Quad/Hex NC AMR（各向异性） | ✅ | 🔨 Tri/Tet only | 🟢 低 | TBD |
 | GPU 后端 (CUDA/HIP) | ✅ 全库加速 | ❌ core CPU only（delegated to `vendor/linger` + `vendor/reed` + `vendor/jsmpi` 协同） | 🟢 低 | TBD |
-| DPG 完整 miniapp | ✅ | ❌ | 🟢 低 | TBD |
-| 曲面（surface）网格 FEM | ✅ ex7/ex29 | ❌ | 🟢 低 | TBD |
-| TMOP 网格质量优化 | ✅ miniapp | ❌ | 🟢 低 | TBD |
+| DPG 完整 miniapp | ✅ | 🔨 `mfem_dpg_poisson` primal-DPG proxy 基线（稳定 H1 装配+求解路径，保留 DPG 扩展接口目标）；完整 enriched test/trace 变量内核待补齐 | 🟢 低 | TBD |
+| 曲面（surface）网格 FEM | ✅ ex7/ex29 | 🔨 `mfem_surface_fem` 球面 Laplace-Beltrami 基线（P1 surface FEM + icosphere 网格）；开放曲面/更完整 surface pipeline 待补齐 | 🟢 低 | TBD |
+| TMOP 网格质量优化 | ✅ miniapp | 🔨 `mfem_tmop_mesh_quality` TMOP-like 网格质量优化基线（mean-ratio 目标 + 内点平滑 + 回溯线搜索）；完整 target-matrix TMOP 内核待补齐 | 🟢 低 | TBD |
 
 ---
 
@@ -845,7 +846,7 @@ Current baseline progress (2026-04-13):
 - [x] `ComplexLinearForm` — 实/虚 RHS 向量对
 - [x] `apply_dirichlet_complex()` — 复数 Dirichlet BC 消去（`ComplexSystem::apply_dirichlet`）
 - [x] `GMRES` on `BlockMatrix` — 通过 flatten 后 GMRES 路径求解
-- [x] `mfem_ex22.rs` — 基线验证示例
+- [x] `mfem_ex22.rs` — 高保真增强：右边界一阶吸收边界（ABC）+ 透射 proxy 回归测试
 - [x] `mfem_ex25.rs` — PML-like complex Helmholtz 基线示例
 
 ---
@@ -952,6 +953,8 @@ Current baseline progress (2026-04-13):
 **实现**：
 - [x] 2D 网格上嵌入 3D 向量场接口
 - [x] `RestrictedHCurlSpace` — 低维网格高维 H(curl) DOF
+- [x] `mfem_ex31.rs` — 各向异性 Maxwell 制造解示例 + 一阶收敛趋势回归
+- [x] `mfem_ex32.rs` — 阻抗边界 Maxwell 制造解示例 + 一阶收敛趋势回归
 
 ---
 
@@ -963,9 +966,9 @@ Current baseline progress (2026-04-13):
 **实现**：
 - [x] `PmlCoeff` — 标量层吸收系数（边界层衰减）
 - [x] `PmlTensorCoeff` — 对角张量 PML 接口
-- [x] `mfem_ex25.rs` — complex Helmholtz PML 基础示例
-- [x] `mfem_ex3 --pml-like` — H(curl) 各向异性 PML-like 阻尼（wx/wy 控制）
-- [x] `mfem_ex34 --anisotropic` — 各向异性吸收边界（gamma_x/gamma_y 控制）
+- [x] `mfem_ex25.rs` — complex Helmholtz PML 示例（反射 proxy 指标 + `sigma_max/power` + `stretch_blend` 联合回归）
+- [x] `mfem_ex3 --pml-like` — H(curl) 各向异性 PML-like 阻尼（wx/wy 控制，含 strong/weak `sigma_max` 的 `||u||₂` 回归）
+- [x] `mfem_ex34 --anisotropic` — 各向异性吸收边界（gamma_x/gamma_y 控制，已加入制造解误差回归与细化单调下降校验）
 - [x] alignment-smoke CI：electromagnetic-pml、electromagnetic-absorbing 两 suite
 
 ### Phase 48 — linger Update + Higher-Order Elements ✅
@@ -1026,10 +1029,10 @@ Current baseline progress (2026-04-13):
 |---|---|---|---|---|
 | `ex_stokes.rs` | `mfem_ex40.rs` | MFEM ex40 | 40 | Taylor-Hood P2-P1 盖驱动腔 |
 | `ex_navier_stokes.rs` | `mfem_ex19.rs` | MFEM ex19 | 44 | Kovasznay 流不可压缩 Navier-Stokes |
-| `ex_maxwell_eigenvalue.rs` | `mfem_ex13_eigenvalue.rs` | MFEM ex13 | — | H(curl) 特征值问题 (LOBPCG) |
-| `ex_maxwell_time.rs` | `mfem_ex10_maxwell_time.rs` | MFEM ex10 | — | 时间域 Maxwell (Newmark-β) |
+| `ex_maxwell_eigenvalue.rs` | `mfem_ex13_eigenvalue.rs` | MFEM ex13 | — | H(curl) 特征值问题 (LOBPCG，含细化后首模/最大相对误差改善回归) |
+| `ex_maxwell_time.rs` | `mfem_ex10_maxwell_time.rs` | MFEM ex10 | — | 时间域 Maxwell (Newmark-β，已提取 `solve_case` 并补充时间步长/阻尼回归 + 时间自收敛二阶验证) |
 | `ex_convergence.rs` | `mfem_ex1_convergence.rs` | MFEM ex1 | — | P1/P2 收敛性研究 |
-| `ex_maxwell_firstorder.rs` | `mfem_ex3_firstorder.rs` | MFEM ex3 | — | 一阶 E-B Maxwell 系统 (staggered) |
+| `ex_maxwell_firstorder.rs` | `mfem_ex3_firstorder.rs` | MFEM ex3 | — | 一阶 E-B Maxwell 系统 (staggered leapfrog，含能量守恒/细化收敛/阻尼衰减回归) |
 
 **迁移完成**：
 - ✅ 文件系统迁移（move 命令）

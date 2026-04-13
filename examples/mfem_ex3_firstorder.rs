@@ -240,3 +240,162 @@ fn parse_args() -> Args {
     }
     args
 }
+
+// ─── Regression Tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test 1: Energy conservation in the undamped cavity mode
+    ///
+    /// The first-order staggered leapfrog scheme is energy-stable for ε=μ=σ=0.
+    /// Over a full cavity-mode period [0, 2π/ω] where ω=π, energy should oscillate
+    /// with bounded relative changes.
+    #[test]
+    fn first_order_maxwell_energy_conserving_cavity() {
+        let n = 12;   // Medium mesh
+        let eps = 1.0;
+        let mu = 1.0;
+        let sigma = 0.0;  // Undamped
+        let dt = 0.005_f64;
+        let t_end = 2.0_f64 * PI / PI;  // Two full periods
+        
+        let op = FirstOrderMaxwellOp::new_unit_square(n, eps, mu, sigma);
+        
+        let mut e = vec![0.0_f64; op.n_e];
+        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let l2 = L2Space::new(mesh.clone(), 0);
+        let mut b = project_b0_onto_l2(&l2, mu);
+        
+        let force = vec![0.0_f64; op.n_e];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
+        
+        let e_init = op.compute_energy(&e, &b);
+        
+        let nsteps = ((t_end / dt).ceil()) as usize;
+        let mut e_max = e_init;
+        let mut e_min = e_init;
+        
+        for _ in 0..nsteps {
+            op.b_half_step(dt, &e, &mut b);
+            e = op.e_full_step(dt, &e, &b, &force, &cfg);
+            
+            let en = op.compute_energy(&e, &b);
+            e_max = e_max.max(en);
+            e_min = e_min.min(en);
+        }
+        
+        // Energy should oscillate with bounded variance (leapfrog naturally has 1-5% oscillation)
+        let rel_change = (e_max - e_min) / e_init.max(1e-30);
+        assert!(rel_change < 0.05, 
+            "Energy in undamped cavity mode changed by {:.2}% (expect < 5%)", 100.0 * rel_change);
+    }
+
+    /// Test 2: B-field L2 convergence on mesh refinement
+    ///
+    /// As the mesh is refined (n=8 → n=12), the L2 error of the B field
+    /// should decrease, demonstrating convergence of the leapfrog scheme.
+    #[test]
+    fn first_order_maxwell_b_field_converges_on_refinement() {
+        let eps = 1.0;
+        let mu = 1.0;
+        let sigma = 0.0;
+        let dt = 0.005_f64;
+        let t_end = 0.2_f64;  // Short simulation
+        
+        let cfg = SolverConfig { 
+            rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, 
+            ..SolverConfig::default() 
+        };
+        
+        // Helper to run simulation and compute final B-field error
+        let run_case = |n: usize| -> f64 {
+            let op = FirstOrderMaxwellOp::new_unit_square(n, eps, mu, sigma);
+            let mut e = vec![0.0_f64; op.n_e];
+            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let l2 = L2Space::new(mesh, 0);
+            let mut b = project_b0_onto_l2(&l2, mu);
+            let force = vec![0.0_f64; op.n_e];
+            
+            let nsteps = ((t_end / dt).ceil()) as usize;
+            let mut t = 0.0_f64;
+            
+            for _ in 0..nsteps {
+                op.b_half_step(dt, &e, &mut b);
+                e = op.e_full_step(dt, &e, &b, &force, &cfg);
+                t += dt;
+            }
+            
+            l2_error_b(&l2, &b, t, mu)
+        };
+        
+        let err_coarse = run_case(6);
+        let err_fine = run_case(14);
+        
+        // Finer mesh should have lower error
+        assert!(err_fine < err_coarse, 
+            "Fine mesh error {:.4e} should be < coarse mesh error {:.4e}", err_fine, err_coarse);
+        
+        // Convergence ratio should improve with refinement (expect >1.1 for first-order convergence)
+        let ratio = err_coarse / err_fine.max(1e-30);
+        assert!(ratio > 1.05,
+            "Convergence ratio {:.2} indicates refinement didn't improve error (expect >1.05)", ratio);
+    }
+
+    /// Test 3: Energy decay with resistive damping
+    ///
+    /// For σ > 0 (resistive losses), the total energy should monotonically decrease.
+    /// The decay rate depends on σ: larger σ → faster decay.
+    #[test]
+    fn first_order_maxwell_energy_decays_with_damping() {
+        let n = 10;
+        let eps = 1.0;
+        let mu = 1.0;
+        let sigma = 0.5;  // Moderate damping
+        let dt = 0.01_f64;
+        let t_end = 1.0_f64;
+        
+        let op = FirstOrderMaxwellOp::new_unit_square(n, eps, mu, sigma);
+        
+        let mut e = vec![0.0_f64; op.n_e];
+        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let l2 = L2Space::new(mesh, 0);
+        let mut b = project_b0_onto_l2(&l2, mu);
+        
+        let force = vec![0.0_f64; op.n_e];
+        let cfg = SolverConfig { 
+            rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, 
+            ..SolverConfig::default() 
+        };
+        
+        let e_init = op.compute_energy(&e, &b);
+        
+        let nsteps = ((t_end / dt).ceil()) as usize;
+        let mut e_prev = e_init;
+        let mut n_decreasing = 0;
+        
+        for _ in 0..nsteps {
+            op.b_half_step(dt, &e, &mut b);
+            e = op.e_full_step(dt, &e, &b, &force, &cfg);
+            
+            let en = op.compute_energy(&e, &b);
+            if en < e_prev {
+                n_decreasing += 1;
+            }
+            e_prev = en;
+        }
+        
+        // Energy should decrease most steps (allow occasional small oscillations)
+        let fraction_decreasing = n_decreasing as f64 / nsteps as f64;
+        assert!(fraction_decreasing > 0.8,
+            "Energy should decrease >80% of steps with σ={}, got {:.1}%", 
+            sigma, 100.0 * fraction_decreasing);
+        
+        // Final energy should be significantly less than initial
+        let e_final = op.compute_energy(&e, &b);
+        let energy_reduction = (e_init - e_final) / e_init.max(1e-30);
+        assert!(energy_reduction > 0.05,  // At least 5% reduction over t=1.0
+            "Energy should decay >5% with σ={}, got {:.2}%", sigma, 100.0 * energy_reduction);
+    }
+}

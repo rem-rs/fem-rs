@@ -1,6 +1,7 @@
 //! Integration tests for fem-io: GMSH reader and VTK writer.
 
 use fem_io::{
+    abaqus::read_abaqus_inp,
     gmsh::read_msh,
     netgen::{read_netgen_vol, write_netgen_vol},
     vtk::{DataArray, VtkWriter},
@@ -94,6 +95,51 @@ fn netgen_write_then_read_roundtrip() {
     assert_eq!(parsed.elem_tags.len(), mesh.n_elems());
     assert_eq!(parsed.n_faces(), 12, "unit cube tet(1) should expose 12 boundary triangles");
     parsed.check().unwrap();
+}
+
+#[test]
+fn netgen_mixed_tet_hex_parse() {
+    let vol_src = include_str!("fixtures/mixed_tet_hex.vol");
+    let mesh = read_netgen_vol(vol_src.as_bytes()).unwrap();
+
+    assert_eq!(mesh.n_nodes(), 8);
+    assert_eq!(mesh.n_elems(), 2);
+    assert_eq!(mesh.elem_tags, vec![1, 2]);
+    assert!(mesh.elem_types.is_some(), "elem_types should be populated for mixed mesh");
+    assert!(mesh.elem_offsets.is_some(), "elem_offsets should be populated for mixed mesh");
+    assert!(mesh.face_types.is_some(), "face_types should be populated for mixed boundary faces");
+    assert!(mesh.face_offsets.is_some(), "face_offsets should be populated for mixed boundary faces");
+    assert_eq!(mesh.n_faces(), 10, "tet(4) + hex(6) boundary faces expected in fixture");
+    mesh.check().unwrap();
+}
+
+#[test]
+fn abaqus_unit_tet_parse() {
+    let inp_src = include_str!("fixtures/unit_tet.inp");
+    let mesh = read_abaqus_inp(inp_src.as_bytes()).unwrap();
+
+    assert_eq!(mesh.n_nodes(), 4);
+    assert_eq!(mesh.n_elems(), 1);
+    assert_eq!(mesh.n_faces(), 4);
+    assert_eq!(mesh.elem_tags, vec![1]);
+    mesh.check().unwrap();
+}
+
+#[test]
+fn abaqus_mixed_element_types_parse() {
+    let inp_src = include_str!("fixtures/mixed_c3d4_c3d8.inp");
+    let mesh = read_abaqus_inp(inp_src.as_bytes())
+        .expect("mixed C3D4/C3D8 should parse in mixed-element baseline");
+
+    assert_eq!(mesh.n_nodes(), 8);
+    assert_eq!(mesh.n_elems(), 2);
+    assert_eq!(mesh.elem_tags.len(), 2);
+    assert!(mesh.elem_types.is_some(), "elem_types should be populated for mixed mesh");
+    assert!(mesh.elem_offsets.is_some(), "elem_offsets should be populated for mixed mesh");
+    assert!(mesh.face_types.is_some(), "face_types should be populated for mixed boundary faces");
+    assert!(mesh.face_offsets.is_some(), "face_offsets should be populated for mixed boundary faces");
+    assert_eq!(mesh.n_faces(), 10, "tet(4) + hex(6) boundary faces expected in fixture");
+    mesh.check().unwrap();
 }
 
 // ---------------------------------------------------------------------------

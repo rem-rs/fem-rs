@@ -1,0 +1,11 @@
+*Heading
+** Minimal Abaqus input for one C3D4 element
+*Node
+1, 0.0, 0.0, 0.0
+2, 1.0, 0.0, 0.0
+3, 0.0, 1.0, 0.0
+4, 0.0, 0.0, 1.0
+*Element, type=C3D4, elset=MAT_A
+1, 1, 2, 3, 4
+*Elset, elset=MAT_A
+1

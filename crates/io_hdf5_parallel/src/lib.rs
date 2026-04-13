@@ -172,6 +172,10 @@ pub fn write_checkpoint_step_f64_mpi_collective(
         }
 
         write_checkpoint_step_f64(file_path, cfg, step, time, fields)?;
+
+        // Try direct global-dataset hyperslab writes first.
+        // Keep the root materialization path below as compatibility fallback.
+        let _ = write_checkpoint_step_f64_hyperslab(file_path, cfg, step, time, fields);
         world.barrier();
 
         const TAG_FIELD_NAMES: i32 = 0x4A10;
@@ -222,6 +226,107 @@ pub fn write_checkpoint_step_f64_mpi_collective(
     {
         let _ = (file_path, step, time, fields);
         Err(Hdf5ParallelError::Hdf5MpiFeatureDisabled)
+    }
+}
+
+/// Write rank-local chunks directly into global field datasets via HDF5 slices.
+///
+/// Output dataset path:
+/// `/global_fields/step_XXXXXXXX/<field_name>`
+///
+/// This API is intended as the direct hyperslab write path for MPI-coordinated
+/// checkpoints. It is also safe for single-process staged writes.
+pub fn write_checkpoint_step_f64_hyperslab(
+    file_path: &str,
+    cfg: ParallelIoConfig,
+    step: u64,
+    time: f64,
+    fields: &[RankFieldF64],
+) -> Result<(), Hdf5ParallelError> {
+    cfg.validate()?;
+
+    #[cfg(feature = "hdf5")]
+    {
+        use hdf5::File;
+
+        let file = if std::path::Path::new(file_path).exists() {
+            File::open_rw(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
+        } else {
+            File::create(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
+        };
+
+        let meta = match file.group("meta") {
+            Ok(g) => g,
+            Err(_) => file.create_group("meta").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
+        };
+        upsert_attr_u64(&meta, "world_size", cfg.world_size as u64)?;
+        upsert_attr_u64(&meta, "schema_version", CHECKPOINT_SCHEMA_VERSION as u64)?;
+
+        let steps = match file.group("steps") {
+            Ok(g) => g,
+            Err(_) => file.create_group("steps").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
+        };
+        let step_name = format!("step_{:08}", step);
+        let step_group = match steps.group(&step_name) {
+            Ok(g) => g,
+            Err(_) => steps.create_group(&step_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
+        };
+        upsert_attr_u64(&step_group, "step", step)?;
+        upsert_attr_f64(&step_group, "time", time)?;
+
+        let globals = match file.group("global_fields") {
+            Ok(g) => g,
+            Err(_) => file.create_group("global_fields").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
+        };
+        let step_global = match globals.group(&step_name) {
+            Ok(g) => g,
+            Err(_) => globals.create_group(&step_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
+        };
+
+        for f in fields {
+            let gl = f.global_len as usize;
+            let start = f.global_offset as usize;
+            let end = start.saturating_add(f.values.len());
+            if end > gl {
+                return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                    "hyperslab out of bounds for {}: [{start},{end}) > global_len={gl}",
+                    f.name
+                )));
+            }
+
+            let ds = if step_global.link_exists(&f.name) {
+                let ds = step_global
+                    .dataset(&f.name)
+                    .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
+                if ds.size() != gl {
+                    return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                        "dataset size mismatch for {}: existing={}, expected={}",
+                        f.name,
+                        ds.size(),
+                        gl
+                    )));
+                }
+                ds
+            } else {
+                step_global
+                    .new_dataset::<f64>()
+                    .shape([gl])
+                    .create(f.name.as_str())
+                    .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
+            };
+
+            ds.write_slice(&f.values, start..end)
+                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
+            upsert_attr_u64(&ds, "global_len", f.global_len)?;
+        }
+
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "hdf5"))]
+    {
+        let _ = (file_path, step, time, fields);
+        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
     }
 }
 
@@ -829,6 +934,77 @@ pub fn materialize_global_field_f64(
     }
 }
 
+/// Read a full global field dataset produced under `/global_fields/step_XXXXXXXX/<field_name>`.
+pub fn read_global_field_f64(
+    file_path: &str,
+    step: u64,
+    field_name: &str,
+) -> Result<Vec<f64>, Hdf5ParallelError> {
+    #[cfg(feature = "hdf5")]
+    {
+        let file = hdf5::File::open(file_path)
+            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
+        let step_name = format!("step_{:08}", step);
+        let ds = file
+            .group("global_fields")
+            .and_then(|g| g.group(&step_name))
+            .and_then(|g| g.dataset(field_name))
+            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
+        let vals = ds
+            .read_raw::<f64>()
+            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
+        return Ok(vals);
+    }
+
+    #[cfg(not(feature = "hdf5"))]
+    {
+        let _ = (file_path, step, field_name);
+        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+    }
+}
+
+/// Read a slice from a global field dataset produced under `/global_fields/step_XXXXXXXX/<field_name>`.
+pub fn read_global_field_slice_f64(
+    file_path: &str,
+    step: u64,
+    field_name: &str,
+    global_offset: u64,
+    local_len: usize,
+) -> Result<Vec<f64>, Hdf5ParallelError> {
+    #[cfg(feature = "hdf5")]
+    {
+        let file = hdf5::File::open(file_path)
+            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
+        let step_name = format!("step_{:08}", step);
+        let ds = file
+            .group("global_fields")
+            .and_then(|g| g.group(&step_name))
+            .and_then(|g| g.dataset(field_name))
+            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
+
+        let start = global_offset as usize;
+        let end = start.saturating_add(local_len);
+        if end > ds.size() {
+            return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                "requested global slice [{start},{end}) exceeds dataset length {}",
+                ds.size()
+            )));
+        }
+
+        let vals = ds
+            .read_slice_1d::<f64, _>(start..end)
+            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
+            .to_vec();
+        return Ok(vals);
+    }
+
+    #[cfg(not(feature = "hdf5"))]
+    {
+        let _ = (file_path, step, field_name, global_offset, local_len);
+        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+    }
+}
+
 /// Write a minimal XDMF sidecar describing one scalar field at one time step.
 ///
 /// This helper intentionally emits a compact Polyvertex grid to make the
@@ -1188,5 +1364,149 @@ mod tests {
             Hdf5ParallelError::Hdf5FeatureDisabled => {}
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn hyperslab_write_without_hdf5_feature_errors() {
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+        let err = write_checkpoint_step_f64_hyperslab(
+            "dummy.h5",
+            cfg,
+            0,
+            0.0,
+            &[RankFieldF64 {
+                name: "u".into(),
+                global_offset: 0,
+                global_len: 3,
+                values: vec![1.0, 2.0, 3.0],
+            }],
+        )
+        .expect_err("expected feature disabled in default build");
+
+        match err {
+            Hdf5ParallelError::Hdf5FeatureDisabled => {}
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn read_global_field_without_hdf5_feature_errors() {
+        let err = read_global_field_f64("dummy.h5", 0, "u")
+            .expect_err("expected feature disabled in default build");
+        match err {
+            Hdf5ParallelError::Hdf5FeatureDisabled => {}
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn read_global_slice_without_hdf5_feature_errors() {
+        let err = read_global_field_slice_f64("dummy.h5", 0, "u", 0, 4)
+            .expect_err("expected feature disabled in default build");
+        match err {
+            Hdf5ParallelError::Hdf5FeatureDisabled => {}
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "hdf5"))]
+mod hyperslab_tests {
+    use super::*;
+
+    #[test]
+    fn hyperslab_staged_two_rank_write_builds_global_field() {
+        let world_size = 2usize;
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "fem_io_hdf5_hyperslab_{}_{}.h5",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("valid clock")
+                .as_nanos()
+        ));
+        let file_path = path.to_string_lossy().to_string();
+
+        let step = 7u64;
+        let global = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        for rank in 0..world_size {
+            let start = rank * 3;
+            let field = RankFieldF64 {
+                name: "u".to_string(),
+                global_offset: start as u64,
+                global_len: global.len() as u64,
+                values: global[start..start + 3].to_vec(),
+            };
+            write_checkpoint_step_f64_hyperslab(
+                &file_path,
+                ParallelIoConfig { world_size, rank },
+                step,
+                0.7,
+                &[field],
+            )
+            .expect("hyperslab staged write");
+        }
+
+        #[cfg(feature = "hdf5")]
+        {
+            let f = hdf5::File::open(&file_path).expect("open hdf5");
+            let ds = f
+                .group("global_fields")
+                .and_then(|g| g.group("step_00000007"))
+                .and_then(|g| g.dataset("u"))
+                .expect("read global hyperslab field");
+            let vals = ds.read_raw::<f64>().expect("read raw");
+            assert_eq!(vals, global);
+        }
+
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn hyperslab_global_read_and_slice_work() {
+        let world_size = 2usize;
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "fem_io_hdf5_hyperslab_read_{}_{}.h5",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("valid clock")
+                .as_nanos()
+        ));
+        let file_path = path.to_string_lossy().to_string();
+
+        let step = 3u64;
+        let global = vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0];
+        for rank in 0..world_size {
+            let start = rank * 3;
+            let field = RankFieldF64 {
+                name: "u".to_string(),
+                global_offset: start as u64,
+                global_len: global.len() as u64,
+                values: global[start..start + 3].to_vec(),
+            };
+            write_checkpoint_step_f64_hyperslab(
+                &file_path,
+                ParallelIoConfig { world_size, rank },
+                step,
+                0.3,
+                &[field],
+            )
+            .expect("hyperslab staged write");
+        }
+
+        let all = read_global_field_f64(&file_path, step, "u").expect("read global field");
+        assert_eq!(all, global);
+
+        let slice0 = read_global_field_slice_f64(&file_path, step, "u", 0, 3)
+            .expect("read first slice");
+        assert_eq!(slice0, vec![10.0, 11.0, 12.0]);
+        let slice1 = read_global_field_slice_f64(&file_path, step, "u", 3, 3)
+            .expect("read second slice");
+        assert_eq!(slice1, vec![20.0, 21.0, 22.0]);
+
+        let _ = std::fs::remove_file(&file_path);
     }
 }

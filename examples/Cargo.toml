@@ -145,6 +145,10 @@ name = "mfem_ex13_eigenvalue"
 path = "mfem_ex13_eigenvalue.rs"
 
 [[example]]
+name = "mfem_ex33_fractional_laplacian"
+path = "mfem_ex33_fractional_laplacian.rs"
+
+[[example]]
 name = "ex14_dc_current"
 path = "ex14_dc_current.rs"
 
@@ -177,8 +181,36 @@ name = "mfem_ex3"
 path = "mfem_ex3.rs"
 
 [[example]]
+name = "mfem_ex8_hybridization"
+path = "mfem_ex8_hybridization.rs"
+
+[[example]]
 name = "mfem_ex13"
 path = "mfem_ex13.rs"
+
+[[example]]
+name = "mfem_ex36_obstacle"
+path = "mfem_ex36_obstacle.rs"
+
+[[example]]
+name = "mfem_ex37_topology_optimization"
+path = "mfem_ex37_topology_optimization.rs"
+
+[[example]]
+name = "mfem_ex38_immersed_boundary"
+path = "mfem_ex38_immersed_boundary.rs"
+
+[[example]]
+name = "mfem_dpg_poisson"
+path = "mfem_dpg_poisson.rs"
+
+[[example]]
+name = "mfem_surface_fem"
+path = "mfem_surface_fem.rs"
+
+[[example]]
+name = "mfem_tmop_mesh_quality"
+path = "mfem_tmop_mesh_quality.rs"
 
 [[example]]
 name = "mfem_ex22"
