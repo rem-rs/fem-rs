@@ -194,6 +194,64 @@ impl<F: Fn(&CoeffCtx<'_>) -> f64 + Send + Sync> ScalarCoeff for CtxFnCoeff<F> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PmlCoeff — baseline PML damping profile
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Baseline scalar PML damping profile on an axis-aligned box.
+///
+/// Returns `sigma(x) >= 0` with polynomial ramp in the outer layer of width
+/// `thickness` near each box boundary.
+#[derive(Debug, Clone)]
+pub struct PmlCoeff {
+    pub min: Vec<f64>,
+    pub max: Vec<f64>,
+    pub thickness: f64,
+    pub sigma_max: f64,
+    pub power: f64,
+}
+
+impl PmlCoeff {
+    pub fn new(min: Vec<f64>, max: Vec<f64>, thickness: f64, sigma_max: f64) -> Self {
+        PmlCoeff {
+            min,
+            max,
+            thickness,
+            sigma_max,
+            power: 2.0,
+        }
+    }
+
+    pub fn with_power(mut self, power: f64) -> Self {
+        self.power = power;
+        self
+    }
+}
+
+impl ScalarCoeff for PmlCoeff {
+    fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
+        let d = ctx.dim;
+        let mut sigma = 0.0;
+        for k in 0..d {
+            let x = ctx.x[k];
+            let lo = self.min[k];
+            let hi = self.max[k];
+            let t = self.thickness.max(1e-14);
+
+            let s = if x < lo + t {
+                ((lo + t - x) / t).clamp(0.0, 1.0)
+            } else if x > hi - t {
+                ((x - (hi - t)) / t).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            sigma += self.sigma_max * s.powf(self.power);
+        }
+        sigma
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // PWConstCoeff — piecewise constant per element tag
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -629,6 +687,20 @@ mod tests {
         let c = transform(FnCoeff(|x: &[f64]| x[0]), |v| v * v);
         let ctx = make_ctx(&[3.0], 1);
         assert_eq!(c.eval(&ctx), 9.0);
+    }
+
+    #[test]
+    fn pml_coeff_zero_inside_domain_core() {
+        let c = PmlCoeff::new(vec![0.0, 0.0], vec![1.0, 1.0], 0.2, 5.0);
+        let ctx = make_ctx(&[0.5, 0.5], 1);
+        assert_eq!(c.eval(&ctx), 0.0);
+    }
+
+    #[test]
+    fn pml_coeff_positive_in_layer() {
+        let c = PmlCoeff::new(vec![0.0, 0.0], vec![1.0, 1.0], 0.2, 5.0);
+        let ctx = make_ctx(&[0.95, 0.5], 1);
+        assert!(c.eval(&ctx) > 0.0);
     }
 
     #[test]

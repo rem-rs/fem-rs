@@ -37,6 +37,8 @@ pub mod standard;
 pub mod mixed;
 pub mod interior_faces;
 pub mod dg;
+pub mod dg_elasticity;
+pub mod hyperbolic;
 pub mod nonlinear;
 pub mod partial;
 pub mod vector_integrator;
@@ -62,6 +64,8 @@ pub use vector_boundary::{
 };
 pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator};
 pub use dg::{DgAssembler};
+pub use dg_elasticity::DgElasticityAssembler;
+pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux};
 pub use interior_faces::InteriorFaceList;
 pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator};

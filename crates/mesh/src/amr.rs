@@ -165,6 +165,263 @@ pub fn refine_marked(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2>
     )
 }
 
+/// Refinement provenance for one red-refinement level.
+///
+/// Stores parent -> children mapping and parent connectivity needed by
+/// [`derefine_marked`].
+#[derive(Debug, Clone)]
+pub struct DerefineTree {
+    pub records: HashMap<ElemId, DerefineRecord>,
+    pub midpoint_map: HashMap<(NodeId, NodeId), NodeId>,
+}
+
+/// One parent refinement record.
+#[derive(Debug, Clone)]
+pub struct DerefineRecord {
+    pub parent_nodes: [NodeId; 3],
+    pub parent_tag: i32,
+    pub children: [ElemId; 4],
+}
+
+impl DerefineTree {
+    /// Return sorted parent element ids available for derefinement.
+    pub fn parents(&self) -> Vec<ElemId> {
+        let mut p: Vec<ElemId> = self.records.keys().copied().collect();
+        p.sort_unstable();
+        p
+    }
+}
+
+/// Same as [`refine_marked`], but also returns a provenance tree that enables
+/// one-level derefinement through [`derefine_marked`].
+pub fn refine_marked_with_tree(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> (SimplexMesh<2>, DerefineTree) {
+    assert!(
+        mesh.elem_type == ElementType::Tri3,
+        "refine_marked_with_tree: only Tri3 meshes are supported"
+    );
+
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+
+    let npe = 3usize;
+    let n_elems = mesh.n_elems();
+
+    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_tri() {
+            let key = edge_key(ns[a], ns[b]);
+            edge_elems.entry(key).or_default().push(e);
+        }
+    }
+
+    let mut bisect_edges: std::collections::HashSet<(NodeId, NodeId)> = Default::default();
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        let longest = longest_edge_tri(mesh, ns);
+        bisect_edges.insert(longest);
+    }
+
+    let mut elems_to_refine: std::collections::HashSet<ElemId> = marked_set.clone();
+    for &(a, b) in &bisect_edges {
+        if let Some(nbrs) = edge_elems.get(&(a, b)) {
+            for &ne in nbrs {
+                elems_to_refine.insert(ne);
+            }
+        }
+    }
+
+    let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+
+    let n_nodes_orig = mesh.n_nodes() as NodeId;
+    let mut next_node = n_nodes_orig;
+
+    for &e in &elems_to_refine {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_tri() {
+            let key = edge_key(ns[a], ns[b]);
+            midpoint_map.entry(key).or_insert_with(|| {
+                let xa = mesh.coords_of(ns[a]);
+                let xb = mesh.coords_of(ns[b]);
+                new_coords.push(0.5 * (xa[0] + xb[0]));
+                new_coords.push(0.5 * (xa[1] + xb[1]));
+                let id = next_node;
+                next_node += 1;
+                id
+            });
+        }
+    }
+
+    let mut new_conn: Vec<NodeId> = Vec::new();
+    let mut new_tags: Vec<i32> = Vec::new();
+    let mut tree_records: HashMap<ElemId, DerefineRecord> = HashMap::new();
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let tag = mesh.elem_tags[e as usize];
+
+        if elems_to_refine.contains(&e) {
+            let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2];
+            let m01 = *midpoint_map.get(&edge_key(n0, n1)).unwrap();
+            let m12 = *midpoint_map.get(&edge_key(n1, n2)).unwrap();
+            let m02 = *midpoint_map.get(&edge_key(n0, n2)).unwrap();
+
+            let c0 = (new_tags.len()) as ElemId;
+            new_conn.extend_from_slice(&[n0,  m01, m02]); new_tags.push(tag);
+            let c1 = (new_tags.len()) as ElemId;
+            new_conn.extend_from_slice(&[m01, n1,  m12]); new_tags.push(tag);
+            let c2 = (new_tags.len()) as ElemId;
+            new_conn.extend_from_slice(&[m02, m12, n2 ]); new_tags.push(tag);
+            let c3 = (new_tags.len()) as ElemId;
+            new_conn.extend_from_slice(&[m01, m12, m02]); new_tags.push(tag);
+
+            tree_records.insert(
+                e,
+                DerefineRecord {
+                    parent_nodes: [n0, n1, n2],
+                    parent_tag: tag,
+                    children: [c0, c1, c2, c3],
+                },
+            );
+        } else {
+            for k in 0..npe { new_conn.push(ns[k]); }
+            new_tags.push(tag);
+        }
+    }
+
+    let npf = 2usize;
+    let n_faces = mesh.n_faces();
+    let mut new_face_conn: Vec<NodeId> = Vec::new();
+    let mut new_face_tags: Vec<i32> = Vec::new();
+
+    for f in 0..n_faces {
+        let fn_slice = &mesh.face_conn[f * npf..(f + 1) * npf];
+        let a = fn_slice[0];
+        let b = fn_slice[1];
+        let tag = mesh.face_tags[f];
+
+        if let Some(&mid) = midpoint_map.get(&edge_key(a, b)) {
+            new_face_conn.extend_from_slice(&[a, mid]);   new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[mid, b]);   new_face_tags.push(tag);
+        } else {
+            new_face_conn.extend_from_slice(&[a, b]);
+            new_face_tags.push(tag);
+        }
+    }
+
+    let fine = SimplexMesh::uniform(
+        new_coords, new_conn, new_tags, ElementType::Tri3,
+        new_face_conn, new_face_tags, ElementType::Line2,
+    );
+
+    (fine, DerefineTree { records: tree_records, midpoint_map })
+}
+
+/// Derefine selected parent elements from a single-level [`DerefineTree`].
+///
+/// This function expects `mesh` to be the direct output of
+/// [`refine_marked_with_tree`] with no additional refinement/coarsening in
+/// between. It removes the 4 child triangles and restores the parent triangle.
+pub fn derefine_marked(mesh: &SimplexMesh<2>, tree: &DerefineTree, parents: &[ElemId]) -> SimplexMesh<2> {
+    assert!(
+        mesh.elem_type == ElementType::Tri3,
+        "derefine_marked: only Tri3 meshes are supported"
+    );
+
+    if parents.is_empty() {
+        return mesh.clone();
+    }
+
+    let mut child_drop = std::collections::HashSet::<ElemId>::new();
+    let mut restore = Vec::<DerefineRecord>::new();
+
+    for &p in parents {
+        if let Some(rec) = tree.records.get(&p) {
+            for &c in &rec.children {
+                child_drop.insert(c);
+            }
+            restore.push(rec.clone());
+        }
+    }
+
+    let mut new_conn: Vec<NodeId> = Vec::new();
+    let mut new_tags: Vec<i32> = Vec::new();
+
+    for e in 0..mesh.n_elems() as ElemId {
+        if child_drop.contains(&e) {
+            continue;
+        }
+        let ns = mesh.elem_nodes(e);
+        new_conn.extend_from_slice(&[ns[0], ns[1], ns[2]]);
+        new_tags.push(mesh.elem_tags[e as usize]);
+    }
+
+    for rec in &restore {
+        new_conn.extend_from_slice(&rec.parent_nodes);
+        new_tags.push(rec.parent_tag);
+    }
+
+    // Rebuild boundary edges from exterior edges in the new connectivity.
+    let mut edge_count: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    let mut oriented_edge: HashMap<(NodeId, NodeId), (NodeId, NodeId)> = HashMap::new();
+    for e in 0..new_tags.len() {
+        let off = 3 * e;
+        let tri = [new_conn[off], new_conn[off + 1], new_conn[off + 2]];
+        let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
+        for (a, b) in edges {
+            let k = edge_key(a, b);
+            *edge_count.entry(k).or_insert(0) += 1;
+            oriented_edge.entry(k).or_insert((a, b));
+        }
+    }
+
+    let mut old_bnd_tags = HashMap::<(NodeId, NodeId), i32>::new();
+    for f in 0..mesh.n_faces() {
+        let a = mesh.face_conn[2 * f];
+        let b = mesh.face_conn[2 * f + 1];
+        old_bnd_tags.insert(edge_key(a, b), mesh.face_tags[f]);
+    }
+
+    let mut new_face_conn: Vec<NodeId> = Vec::new();
+    let mut new_face_tags: Vec<i32> = Vec::new();
+    for (&k, &cnt) in &edge_count {
+        if cnt != 1 {
+            continue;
+        }
+        let (a, b) = oriented_edge[&k];
+        let mut tag = old_bnd_tags.get(&k).copied().unwrap_or(0);
+
+        if tag == 0 {
+            // Attempt to recover merged boundary tag from split edges (a,m) + (m,b).
+            for m in 0..mesh.n_nodes() as NodeId {
+                let k1 = edge_key(a, m);
+                let k2 = edge_key(m, b);
+                if let (Some(&t1), Some(&t2)) = (old_bnd_tags.get(&k1), old_bnd_tags.get(&k2)) {
+                    if t1 == t2 {
+                        tag = t1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if tag != 0 {
+            new_face_conn.extend_from_slice(&[a, b]);
+            new_face_tags.push(tag);
+        }
+    }
+
+    SimplexMesh::uniform(
+        mesh.coords.clone(),
+        new_conn,
+        new_tags,
+        ElementType::Tri3,
+        new_face_conn,
+        new_face_tags,
+        ElementType::Line2,
+    )
+}
+
 // ─── Hanging-node constraint ──────────────────────────────────────────────────
 
 /// A hanging-node constraint: `u[constrained] = 0.5*(u[parent_a] + u[parent_b])`.
@@ -198,6 +455,8 @@ pub struct NCState {
     /// Set of edges that currently have a midpoint (edge_key → midpoint node).
     /// Used to detect when a previous hanging node gets resolved.
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+    /// Refinement history snapshots for rollback-based derefinement.
+    history: Vec<NCState2DSnapshot>,
 }
 
 /// Accumulated state for multi-level non-conforming refinement in 3-D Tet4 meshes.
@@ -210,6 +469,25 @@ pub struct NCState3D {
     constraints: Vec<HangingNodeConstraint>,
     /// Set of edges that currently have a midpoint (edge_key -> midpoint node).
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+    /// Current hanging-face descriptors.
+    hanging_faces: Vec<HangingFaceConstraint>,
+    /// Refinement history snapshots for rollback-based derefinement.
+    history: Vec<NCState3DSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct NCState2DSnapshot {
+    mesh: SimplexMesh<2>,
+    constraints: Vec<HangingNodeConstraint>,
+    active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+}
+
+#[derive(Debug, Clone)]
+struct NCState3DSnapshot {
+    mesh: SimplexMesh<3>,
+    constraints: Vec<HangingNodeConstraint>,
+    hanging_faces: Vec<HangingFaceConstraint>,
+    active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
 }
 
 impl NCState3D {
@@ -218,12 +496,24 @@ impl NCState3D {
         Self {
             constraints: Vec::new(),
             active_midpoints: HashMap::new(),
+            hanging_faces: Vec::new(),
+            history: Vec::new(),
         }
     }
 
     /// Current hanging-node constraints (for use with `apply_hanging_constraints`).
     pub fn constraints(&self) -> &[HangingNodeConstraint] {
         &self.constraints
+    }
+
+    /// Current hanging-face descriptors.
+    pub fn hanging_faces(&self) -> &[HangingFaceConstraint] {
+        &self.hanging_faces
+    }
+
+    /// Whether one rollback derefinement step is available.
+    pub fn can_derefine(&self) -> bool {
+        !self.history.is_empty()
     }
 
     /// Perform one level of non-conforming refinement for Tet4 meshes.
@@ -239,11 +529,32 @@ impl NCState3D {
         HashMap<(NodeId, NodeId), NodeId>,
         Vec<HangingFaceConstraint>,
     ) {
+        self.history.push(NCState3DSnapshot {
+            mesh: mesh.clone(),
+            constraints: self.constraints.clone(),
+            hanging_faces: self.hanging_faces.clone(),
+            active_midpoints: self.active_midpoints.clone(),
+        });
+
         let (new_mesh, constraints, hanging_faces, midpoint_map, new_active_midpoints) =
             refine_nonconforming_3d_internal(mesh, marked, Some(&self.active_midpoints));
         self.constraints = constraints.clone();
+        self.hanging_faces = hanging_faces.clone();
         self.active_midpoints = new_active_midpoints;
         (new_mesh, constraints, midpoint_map, hanging_faces)
+    }
+
+    /// Roll back one NC refinement step.
+    ///
+    /// Returns the previous mesh and restored constraints if history exists.
+    pub fn derefine_last(
+        &mut self,
+    ) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>)> {
+        let snap = self.history.pop()?;
+        self.constraints = snap.constraints.clone();
+        self.hanging_faces = snap.hanging_faces.clone();
+        self.active_midpoints = snap.active_midpoints;
+        Some((snap.mesh, self.constraints.clone(), self.hanging_faces.clone()))
     }
 }
 
@@ -253,12 +564,18 @@ impl NCState {
         NCState {
             constraints: Vec::new(),
             active_midpoints: HashMap::new(),
+            history: Vec::new(),
         }
     }
 
     /// Current hanging-node constraints (for use with `apply_hanging_constraints`).
     pub fn constraints(&self) -> &[HangingNodeConstraint] {
         &self.constraints
+    }
+
+    /// Whether one rollback derefinement step is available.
+    pub fn can_derefine(&self) -> bool {
+        !self.history.is_empty()
     }
 
     /// Perform one level of non-conforming refinement.
@@ -281,6 +598,12 @@ impl NCState {
         if marked.is_empty() {
             return (mesh.clone(), self.constraints.clone(), HashMap::new());
         }
+
+        self.history.push(NCState2DSnapshot {
+            mesh: mesh.clone(),
+            constraints: self.constraints.clone(),
+            active_midpoints: self.active_midpoints.clone(),
+        });
 
         let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
         let n_elems = mesh.n_elems();
@@ -437,6 +760,16 @@ impl NCState {
 
         (new_mesh, self.constraints.clone(), midpoint_map)
     }
+
+    /// Roll back one NC refinement step.
+    ///
+    /// Returns the previous mesh and restored constraints if history exists.
+    pub fn derefine_last(&mut self) -> Option<(SimplexMesh<2>, Vec<HangingNodeConstraint>)> {
+        let snap = self.history.pop()?;
+        self.constraints = snap.constraints.clone();
+        self.active_midpoints = snap.active_midpoints;
+        Some((snap.mesh, self.constraints.clone()))
+    }
 }
 
 /// Prolongate (interpolate) a P1 solution vector from a coarser mesh to the
@@ -468,6 +801,19 @@ pub fn prolongate_p1(
         u_fine[mid as usize] = 0.5 * (u_coarse[a as usize] + u_coarse[b as usize]);
     }
     u_fine
+}
+
+/// Restrict a P1 solution from a fine mesh to a coarse mesh.
+///
+/// For meshes generated by `refine_*` in this module, original coarse nodes
+/// keep their ids and newly created midpoint nodes are appended. Therefore the
+/// coarse nodal values are the prefix `u_fine[..n_nodes_coarse]`.
+pub fn restrict_to_coarse_p1(u_fine: &[f64], n_nodes_coarse: usize) -> Vec<f64> {
+    assert!(
+        u_fine.len() >= n_nodes_coarse,
+        "restrict_to_coarse_p1: fine vector shorter than coarse node count"
+    );
+    u_fine[..n_nodes_coarse].to_vec()
 }
 
 // ─── Non-conforming refinement ───────────────────────────────────────────────
@@ -829,6 +1175,33 @@ pub fn dorfler_mark(eta: &[f64], theta: f64) -> Vec<ElemId> {
         marked.push(idx);
     }
     marked.sort_unstable();
+    marked
+}
+
+/// Mark low-error elements for derefinement.
+///
+/// Returns a sorted list of element indices with `eta[i] <= theta * max(eta)`.
+/// This is a conservative companion to [`dorfler_mark`]: while Dorfler picks
+/// large-error elements to refine, this selects low-error elements as potential
+/// coarsening candidates.
+///
+/// # Arguments
+/// - `eta`   — element error indicators.
+/// - `theta` — threshold in `[0, 1]`. Typical values: 0.1..0.3.
+pub fn mark_for_derefinement(eta: &[f64], theta: f64) -> Vec<ElemId> {
+    if eta.is_empty() {
+        return Vec::new();
+    }
+
+    let max_eta = eta.iter().cloned().fold(0.0_f64, f64::max);
+    let cutoff = theta.clamp(0.0, 1.0) * max_eta;
+
+    let mut marked = Vec::new();
+    for (i, &e) in eta.iter().enumerate() {
+        if e <= cutoff {
+            marked.push(i as ElemId);
+        }
+    }
     marked
 }
 
@@ -1233,6 +1606,20 @@ mod tests {
     }
 
     #[test]
+    fn derefine_mark_selects_small_error_elements() {
+        let eta = vec![1.0_f64, 0.8, 0.4, 0.2, 0.1, 0.01];
+        let marked = mark_for_derefinement(&eta, 0.2);
+        // max=1.0, cutoff=0.2 -> indices with eta<=0.2 are 3,4,5
+        assert_eq!(marked, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn derefine_mark_handles_empty() {
+        let marked = mark_for_derefinement(&[], 0.2);
+        assert!(marked.is_empty());
+    }
+
+    #[test]
     fn zz_estimator_smooth_solution() {
         // For u = x (linear), the FE solution is exact on Tri3 → ZZ error should be ≈ 0.
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
@@ -1255,6 +1642,35 @@ mod tests {
         // At minimum: 3 elements became 4*3=12, rest unchanged.
         assert!(fine.n_elems() >= n0 - 3 + 3 * 4,
             "Expected ≥{} elems, got {}", n0 - 3 + 3*4, fine.n_elems());
+    }
+
+    #[test]
+    fn refine_with_tree_then_derefine_roundtrip_elements() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let marked = vec![0u32, 1u32];
+        let (fine, tree) = refine_marked_with_tree(&mesh, &marked);
+        let coarse = derefine_marked(&fine, &tree, &marked);
+
+        assert_eq!(coarse.n_elems(), mesh.n_elems(),
+            "derefine roundtrip should recover element count");
+        assert_eq!(coarse.elem_type, mesh.elem_type);
+
+        let parents = tree.parents();
+        assert!(parents.contains(&0) && parents.contains(&1));
+    }
+
+    #[test]
+    fn prolongate_then_restrict_p1_roundtrip_on_coarse_nodes() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let n0 = mesh.n_nodes();
+        let u0: Vec<f64> = (0..n0).map(|i| i as f64).collect();
+
+        let mut nc = NCState::new();
+        let (_fine, _constraints, midpoint_map) = nc.refine(&mesh, &[0]);
+        let uf = prolongate_p1(&u0, n0 + midpoint_map.len(), &midpoint_map);
+        let ur = restrict_to_coarse_p1(&uf, n0);
+
+        assert_eq!(ur, u0, "restrict should recover coarse nodal values exactly");
     }
 
     #[test]
@@ -1503,6 +1919,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ncstate_derefine_last_rolls_back_mesh_and_constraints() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mut nc = NCState::new();
+
+        let (m1, c1, _) = nc.refine(&mesh, &[0, 1]);
+        assert!(m1.n_elems() > mesh.n_elems());
+        assert!(!c1.is_empty());
+        assert!(nc.can_derefine());
+
+        let (m0, c0) = nc.derefine_last().expect("expected rollback snapshot");
+        assert_eq!(m0.n_elems(), mesh.n_elems());
+        assert_eq!(m0.n_nodes(), mesh.n_nodes());
+        assert!(c0.is_empty(), "initial state should have no hanging constraints");
+    }
+
     // ── 3-D (Tet4) NCMesh tests ────────────────────────────────────────────
 
     #[test]
@@ -1581,5 +2013,23 @@ mod tests {
         assert!(m2.n_elems() > m1.n_elems());
         assert!(!c2.is_empty());
         m2.check().unwrap();
+    }
+
+    #[test]
+    fn ncstate3d_derefine_last_rolls_back() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc3 = NCState3D::new();
+
+        let (m1, c1, _, f1) = nc3.refine(&mesh, &[0]);
+        assert!(m1.n_elems() > mesh.n_elems());
+        assert!(!c1.is_empty());
+        assert!(!f1.is_empty());
+        assert!(nc3.can_derefine());
+
+        let (m0, c0, f0) = nc3.derefine_last().expect("expected 3D rollback snapshot");
+        assert_eq!(m0.n_elems(), mesh.n_elems());
+        assert_eq!(m0.n_nodes(), mesh.n_nodes());
+        assert!(c0.is_empty());
+        assert!(f0.is_empty());
     }
 }

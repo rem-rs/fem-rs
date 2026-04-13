@@ -61,6 +61,12 @@ jobs:
       - name: Run tests (release)
         run: cargo test --workspace --all-features --release
 
+      - name: Run example smoke tests
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo run --example ex22_complex -- --n 6 --omega 1.2 --sigma 0.05
+          cargo run --example ex41_imex -- --n 6 --dt 0.01 --T 0.1
+
   wasm:
     name: WASM Build
     runs-on: ubuntu-latest

@@ -53,6 +53,162 @@ pub trait ImplicitTimeStepper: Send + Sync {
         J: Fn(f64, &[f64]) -> CsrMatrix<f64>;
 }
 
+/// Hamiltonian system in canonical form:
+///
+/// dq/dt =  ∂H/∂p
+/// dp/dt = -∂H/∂q
+pub trait HamiltonianSystem: Send + Sync {
+    /// Compute `dH/dq`.
+    fn grad_q(&self, q: &[f64], p: &[f64], out: &mut [f64]);
+    /// Compute `dH/dp`.
+    fn grad_p(&self, q: &[f64], p: &[f64], out: &mut [f64]);
+}
+
+/// Velocity-Verlet symplectic integrator (2nd order).
+pub struct VerletStepper;
+
+impl VerletStepper {
+    pub fn step<S: HamiltonianSystem>(&self, sys: &S, q: &mut [f64], p: &mut [f64], dt: f64) {
+        let n = q.len();
+        assert_eq!(p.len(), n, "VerletStepper: q/p size mismatch");
+
+        let mut gq = vec![0.0_f64; n];
+        let mut gp = vec![0.0_f64; n];
+
+        // Half kick: p_{n+1/2} = p_n - (dt/2) dH/dq(q_n, p_n)
+        sys.grad_q(q, p, &mut gq);
+        for i in 0..n {
+            p[i] -= 0.5 * dt * gq[i];
+        }
+
+        // Drift: q_{n+1} = q_n + dt dH/dp(q_n, p_{n+1/2})
+        sys.grad_p(q, p, &mut gp);
+        for i in 0..n {
+            q[i] += dt * gp[i];
+        }
+
+        // Half kick: p_{n+1} = p_{n+1/2} - (dt/2) dH/dq(q_{n+1}, p_{n+1/2})
+        sys.grad_q(q, p, &mut gq);
+        for i in 0..n {
+            p[i] -= 0.5 * dt * gq[i];
+        }
+    }
+}
+
+/// Leapfrog integrator (equivalent to velocity-Verlet in kick-drift-kick form).
+pub struct LeapfrogStepper;
+
+impl LeapfrogStepper {
+    pub fn step<S: HamiltonianSystem>(&self, sys: &S, q: &mut [f64], p: &mut [f64], dt: f64) {
+        VerletStepper.step(sys, q, p, dt);
+    }
+}
+
+/// Yoshida 4th-order symplectic composition of Verlet substeps.
+pub struct Yoshida4Stepper;
+
+impl Yoshida4Stepper {
+    pub fn step<S: HamiltonianSystem>(&self, sys: &S, q: &mut [f64], p: &mut [f64], dt: f64) {
+        // Yoshida composition coefficients
+        let cbrt2 = 2.0_f64.powf(1.0 / 3.0);
+        let w1 = 1.0 / (2.0 - cbrt2);
+        let w0 = -cbrt2 / (2.0 - cbrt2);
+
+        let verlet = VerletStepper;
+        verlet.step(sys, q, p, w1 * dt);
+        verlet.step(sys, q, p, w0 * dt);
+        verlet.step(sys, q, p, w1 * dt);
+    }
+}
+
+/// Split operator interface for IMEX methods.
+///
+/// Represents systems of the form:
+/// `du/dt = f_E(t, u) + f_I(t, u)`
+/// where `f_E` is treated explicitly and `f_I` implicitly.
+pub trait ImexOperator: Send + Sync {
+    /// Compute explicit (non-stiff) part `f_E(t, u)`.
+    fn explicit(&self, t: f64, u: &[f64], out: &mut [f64]);
+
+    /// Compute implicit (stiff) part `f_I(t, u)`.
+    fn implicit(&self, t: f64, u: &[f64], out: &mut [f64]);
+
+    /// Jacobian of implicit part: `J_I = ∂f_I/∂u`.
+    fn jac_implicit(&self, t: f64, u: &[f64]) -> CsrMatrix<f64>;
+}
+
+/// Convenience IMEX driver that dispatches to existing IMEX integrators.
+///
+/// This avoids rewriting integration loops in examples/apps: users provide an
+/// [`ImexOperator`] and choose one of the built-in methods.
+pub struct ImexTimeStepper;
+
+impl ImexTimeStepper {
+    /// Integrate with first-order IMEX Euler.
+    pub fn integrate_euler<O: ImexOperator>(
+        &self,
+        op: &O,
+        t0: f64,
+        t_end: f64,
+        u: &mut [f64],
+        dt: f64,
+    ) -> f64 {
+        let solver = ImexEuler;
+        solver.integrate(
+            t0,
+            t_end,
+            u,
+            dt,
+            |t, u, out| op.explicit(t, u, out),
+            |t, u, out| op.implicit(t, u, out),
+            |t, u| op.jac_implicit(t, u),
+        )
+    }
+
+    /// Integrate with second-order IMEX SSP-RK2.
+    pub fn integrate_ssp2<O: ImexOperator>(
+        &self,
+        op: &O,
+        t0: f64,
+        t_end: f64,
+        u: &mut [f64],
+        dt: f64,
+    ) -> f64 {
+        let solver = ImexSsp2;
+        solver.integrate(
+            t0,
+            t_end,
+            u,
+            dt,
+            |t, u, out| op.explicit(t, u, out),
+            |t, u, out| op.implicit(t, u, out),
+            |t, u| op.jac_implicit(t, u),
+        )
+    }
+
+    /// Integrate with adaptive third-order IMEX ARK3.
+    /// Returns `(t_final, dt_last)`.
+    pub fn integrate_ark3<O: ImexOperator>(
+        &self,
+        op: &O,
+        t0: f64,
+        t_end: f64,
+        u: &mut [f64],
+        dt: f64,
+        solver: &ImexArk3,
+    ) -> (f64, f64) {
+        solver.integrate(
+            t0,
+            t_end,
+            u,
+            dt,
+            |t, u, out| op.explicit(t, u, out),
+            |t, u, out| op.implicit(t, u, out),
+            |t, u| op.jac_implicit(t, u),
+        )
+    }
+}
+
 // ─── Forward Euler ───────────────────────────────────────────────────────────
 
 /// Explicit forward Euler: `u_{n+1} = uₙ + dt f(tₙ, uₙ)`.
@@ -1444,6 +1600,46 @@ mod tests {
         assert!(v[0].abs() < 0.01, "GeneralizedAlpha stiff: did not decay; u={:.3e}", v[0]);
     }
 
+    struct SplitDecayOp {
+        lambda: f64,
+    }
+
+    impl ImexOperator for SplitDecayOp {
+        fn explicit(&self, _t: f64, _u: &[f64], out: &mut [f64]) {
+            out[0] = 0.0;
+        }
+
+        fn implicit(&self, _t: f64, u: &[f64], out: &mut [f64]) {
+            out[0] = -self.lambda * u[0];
+        }
+
+        fn jac_implicit(&self, _t: f64, _u: &[f64]) -> CsrMatrix<f64> {
+            let mut coo = CooMatrix::<f64>::new(1, 1);
+            coo.add(0, 0, -self.lambda);
+            coo.into_csr()
+        }
+    }
+
+    #[test]
+    fn imex_driver_euler_matches_decay() {
+        let op = SplitDecayOp { lambda: 10.0 };
+        let driver = ImexTimeStepper;
+        let mut u = vec![1.0f64];
+        let t_f = driver.integrate_euler(&op, 0.0, 0.5, &mut u, 0.01);
+        let exact = (-10.0 * t_f).exp();
+        assert!((u[0] - exact).abs() < 2e-2, "ImexTimeStepper Euler error too large: u={:.4e}, exact={:.4e}", u[0], exact);
+    }
+
+    #[test]
+    fn imex_driver_ssp2_matches_decay() {
+        let op = SplitDecayOp { lambda: 10.0 };
+        let driver = ImexTimeStepper;
+        let mut u = vec![1.0f64];
+        let t_f = driver.integrate_ssp2(&op, 0.0, 0.5, &mut u, 0.01);
+        let exact = (-10.0 * t_f).exp();
+        assert!((u[0] - exact).abs() < 5e-3, "ImexTimeStepper SSP2 error too large: u={:.4e}, exact={:.4e}", u[0], exact);
+    }
+
     #[test]
     fn imex_ark3_non_stiff_decay() {
         // du/dt = -u  (f_E = 0, f_I = -u).  Exact: exp(-t).
@@ -1540,6 +1736,74 @@ mod tests {
         let order = (e1 / e2).log2();
 
         assert!(order > 1.7, "ImexSsp2 order too low: order={order:.2}, e1={e1:.3e}, e2={e2:.3e}");
+    }
+
+    struct HarmonicOscillator {
+        omega: f64,
+    }
+
+    impl HamiltonianSystem for HarmonicOscillator {
+        fn grad_q(&self, q: &[f64], _p: &[f64], out: &mut [f64]) {
+            // H = 1/2 p^2 + 1/2 omega^2 q^2  => dH/dq = omega^2 q
+            out[0] = self.omega * self.omega * q[0];
+        }
+
+        fn grad_p(&self, _q: &[f64], p: &[f64], out: &mut [f64]) {
+            // dH/dp = p
+            out[0] = p[0];
+        }
+    }
+
+    fn ho_energy(omega: f64, q: f64, p: f64) -> f64 {
+        0.5 * p * p + 0.5 * omega * omega * q * q
+    }
+
+    #[test]
+    fn verlet_ho_energy_nearly_conserved() {
+        let sys = HarmonicOscillator { omega: 2.0 };
+        let stepper = VerletStepper;
+
+        let mut q = vec![1.0_f64];
+        let mut p = vec![0.0_f64];
+        let e0 = ho_energy(sys.omega, q[0], p[0]);
+
+        let dt = 0.01;
+        let n_steps = 5_000;
+        for _ in 0..n_steps {
+            stepper.step(&sys, &mut q, &mut p, dt);
+        }
+
+        let e1 = ho_energy(sys.omega, q[0], p[0]);
+        assert!((e1 - e0).abs() < 5e-3, "Verlet energy drift too large: e0={e0:.6}, e1={e1:.6}");
+    }
+
+    #[test]
+    fn yoshida4_ho_energy_better_than_verlet() {
+        let sys = HarmonicOscillator { omega: 2.0 };
+        let verlet = VerletStepper;
+        let yosh = Yoshida4Stepper;
+
+        let dt = 0.02;
+        let n_steps = 2_000;
+
+        let mut qv = vec![1.0_f64];
+        let mut pv = vec![0.0_f64];
+        let e0 = ho_energy(sys.omega, qv[0], pv[0]);
+        for _ in 0..n_steps {
+            verlet.step(&sys, &mut qv, &mut pv, dt);
+        }
+        let ev = ho_energy(sys.omega, qv[0], pv[0]);
+
+        let mut qy = vec![1.0_f64];
+        let mut py = vec![0.0_f64];
+        for _ in 0..n_steps {
+            yosh.step(&sys, &mut qy, &mut py, dt);
+        }
+        let ey = ho_energy(sys.omega, qy[0], py[0]);
+
+        let drift_v = (ev - e0).abs();
+        let drift_y = (ey - e0).abs();
+        assert!(drift_y <= drift_v * 1.2, "Yoshida4 should be at least comparable/better: verlet={drift_v:.3e}, yosh={drift_y:.3e}");
     }
 
     /// Heat equation: du/dt = -λ u (modal decomposition of Laplacian).

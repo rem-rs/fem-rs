@@ -87,8 +87,20 @@ name = "ex15_tet_nc_amr"
 path = "ex15_tet_nc_amr.rs"
 
 [[example]]
+name = "ex15_dynamic_amr"
+path = "ex15_dynamic_amr.rs"
+
+[[example]]
 name = "ex16_nonlinear_heat"
 path = "ex16_nonlinear_heat.rs"
+
+[[example]]
+name = "ex17_dg_elasticity"
+path = "ex17_dg_elasticity.rs"
+
+[[example]]
+name = "ex18_euler"
+path = "ex18_euler.rs"
 
 [[example]]
 name = "pex1_poisson"
@@ -141,6 +153,10 @@ path = "ex_convergence.rs"
 [[example]]
 name = "ex22_complex"
 path = "ex22_complex.rs"
+
+[[example]]
+name = "ex25_pml"
+path = "ex25_pml.rs"
 
 [[example]]
 name = "ex41_imex"

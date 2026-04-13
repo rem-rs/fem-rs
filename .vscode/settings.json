@@ -6,6 +6,8 @@
         "cargo test": true,
         "cargo metadata": true,
         "git add": true,
-        "git commit": true
+        "git commit": true,
+        "cargo run": true,
+        "ForEach-Object": true
     }
 }

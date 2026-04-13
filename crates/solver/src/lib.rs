@@ -1054,6 +1054,7 @@ pub fn into_result(r: linger::SolverResult) -> SolveResult {
 
 pub mod block;
 pub mod eigen;
+pub mod lor;
 pub mod ode;
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use eigen::{lobpcg, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};
@@ -1084,6 +1085,8 @@ mod linger_integration_tests {
 }
 pub use ode::{
     TimeStepper, ImplicitTimeStepper,
+    ImexOperator, ImexTimeStepper,
+    HamiltonianSystem, VerletStepper, LeapfrogStepper, Yoshida4Stepper,
     ForwardEuler, Rk4, Rk45,
     ImplicitEuler, Sdirk2,
     Bdf2, Bdf2State,
@@ -1093,6 +1096,7 @@ pub use ode::{
     ImexEuler,
     ImexSsp2,
 };
+pub use lor::{LorPrecond, solve_pcg_lor, solve_gmres_lor};
 pub mod sli;
 pub use sli::{solve_jacobi_sli, solve_gs_sli};
 
