@@ -2,6 +2,7 @@
 
 use fem_io::{
     gmsh::read_msh,
+    netgen::{read_netgen_vol, write_netgen_vol},
     vtk::{DataArray, VtkWriter},
 };
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
@@ -48,6 +49,51 @@ fn gmsh_physical_groups_populated() {
     let msh_src = include_str!("fixtures/unit_square.msh");
     let msh = read_msh(msh_src.as_bytes()).unwrap();
     assert_eq!(msh.physical_groups.len(), 5, "5 physical groups expected");
+}
+
+#[test]
+fn netgen_unit_tet_parse() {
+    let vol_src = include_str!("fixtures/unit_tet.vol");
+    let mesh = read_netgen_vol(vol_src.as_bytes()).unwrap();
+
+    assert_eq!(mesh.n_nodes(), 4, "expected 4 nodes");
+    assert_eq!(mesh.n_elems(), 1, "expected 1 tet");
+    assert_eq!(mesh.n_faces(), 4, "expected 4 boundary faces");
+    assert_eq!(mesh.elem_tags, vec![1]);
+    assert!(mesh.face_tags.iter().all(|&t| t == 1));
+    mesh.check().unwrap();
+}
+
+#[test]
+fn netgen_dimension_2_is_rejected() {
+    let src = r#"
+dimension
+2
+points
+3
+0 0 0
+1 0 0
+0 1 0
+volumeelements
+1
+1 3 1 2 3
+"#;
+    let err = read_netgen_vol(src.as_bytes()).expect_err("2D .vol should be rejected in Tet baseline");
+    assert!(format!("{err}").contains("dimension=3"));
+}
+
+#[test]
+fn netgen_write_then_read_roundtrip() {
+    let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+    let mut buf = Vec::new();
+    write_netgen_vol(&mesh, &mut buf).unwrap();
+
+    let parsed = read_netgen_vol(buf.as_slice()).unwrap();
+    assert_eq!(parsed.n_nodes(), mesh.n_nodes());
+    assert_eq!(parsed.n_elems(), mesh.n_elems());
+    assert_eq!(parsed.elem_tags.len(), mesh.n_elems());
+    assert_eq!(parsed.n_faces(), 12, "unit cube tet(1) should expose 12 boundary triangles");
+    parsed.check().unwrap();
 }
 
 // ---------------------------------------------------------------------------

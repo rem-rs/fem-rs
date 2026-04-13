@@ -1,0 +1,15 @@
+# Minimal Netgen-like ASCII .vol fixture
+
+dimension
+3
+
+points
+4
+0 0 0
+1 0 0
+0 1 0
+0 0 1
+
+volumeelements
+1
+1 4 1 2 3 4

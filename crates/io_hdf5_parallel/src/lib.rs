@@ -978,6 +978,102 @@ fn parse_step_name(name: &str) -> Option<u64> {
     name[pfx.len()..].parse::<u64>().ok()
 }
 
+#[cfg(all(test, feature = "hdf5"))]
+mod restart_tests {
+    use super::*;
+
+    fn make_rank_field_u(global: &[f64], rank: usize, world_size: usize) -> RankFieldF64 {
+        let local_len = global.len() / world_size;
+        let start = rank * local_len;
+        let end = start + local_len;
+        RankFieldF64 {
+            name: "u".to_string(),
+            global_offset: start as u64,
+            global_len: global.len() as u64,
+            values: global[start..end].to_vec(),
+        }
+    }
+
+    fn advance_state(global: &mut [f64], step: u64) {
+        for (i, v) in global.iter_mut().enumerate() {
+            *v += 0.5 * (step as f64 + 1.0) + (i as f64) * 0.01;
+        }
+    }
+
+    #[test]
+    fn checkpoint_restart_continuation_matches_uninterrupted_baseline() {
+        let world_size = 2usize;
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "fem_io_hdf5_parallel_restart_{}_{}.h5",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("valid clock")
+                .as_nanos()
+        ));
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut interrupted = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+
+        for step in 0..=2u64 {
+            advance_state(&mut interrupted, step);
+            for rank in 0..world_size {
+                let cfg = ParallelIoConfig { world_size, rank };
+                let field = make_rank_field_u(&interrupted, rank, world_size);
+                write_checkpoint_step_f64(&file_path, cfg, step, step as f64 * 0.1, &[field])
+                    .expect("write initial checkpoint step");
+            }
+        }
+
+        let mut resumed = Vec::new();
+        for rank in 0..world_size {
+            let cfg = ParallelIoConfig { world_size, rank };
+            let read = read_checkpoint_field_f64_latest(&file_path, cfg, "u")
+                .expect("read latest restart field");
+            resumed.extend_from_slice(&read.values);
+            assert_eq!(read.step, 2);
+        }
+
+        for step in 3..=4u64 {
+            advance_state(&mut resumed, step);
+            for rank in 0..world_size {
+                let cfg = ParallelIoConfig { world_size, rank };
+                let field = make_rank_field_u(&resumed, rank, world_size);
+                write_checkpoint_step_f64(&file_path, cfg, step, step as f64 * 0.1, &[field])
+                    .expect("write resumed checkpoint step");
+            }
+        }
+
+        let mut baseline = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        for step in 0..=4u64 {
+            advance_state(&mut baseline, step);
+        }
+
+        let mut latest = Vec::new();
+        for rank in 0..world_size {
+            let cfg = ParallelIoConfig { world_size, rank };
+            let read = read_checkpoint_field_f64_latest(&file_path, cfg, "u")
+                .expect("read latest final field");
+            latest.extend_from_slice(&read.values);
+            assert_eq!(read.step, 4);
+            assert!((read.time - 0.4).abs() < 1.0e-12);
+        }
+
+        assert_eq!(latest.len(), baseline.len());
+        for (a, b) in latest.iter().zip(baseline.iter()) {
+            assert!((a - b).abs() < 1.0e-12, "latest={a}, baseline={b}");
+        }
+
+        let report = validate_checkpoint_layout(&file_path, Some(world_size))
+            .expect("validate checkpoint layout");
+        assert_eq!(report.schema_version, CHECKPOINT_SCHEMA_VERSION);
+        assert_eq!(report.steps.len(), 5);
+
+        let _ = std::fs::remove_file(&file_path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

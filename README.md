@@ -46,7 +46,7 @@ fem-rs/
 | `ex16_nonlinear_heat` | −∇·(κ(u)∇u) = f | Newton + GMRES | O(h²) verified |
 | `mfem_ex1_convergence` | −Δu = f | P1/P2/P3 convergence sweep | O(h²)/O(h³)/O(h⁴) |
 | `mfem_ex40` | Stokes lid-driven cavity | Taylor-Hood P2/P1 + Schur GMRES | Verified |
-| `ex_navier_stokes` | Navier-Stokes (Kovasznay) | P2/P1 Oseen/Picard, Re=40 | Converged |
+| `mfem_ex19` | Navier-Stokes (Kovasznay) | P2/P1 Oseen/Picard, Re=40 | Converged |
 
 ### Parallel Examples
 
@@ -91,13 +91,13 @@ cargo run --example em_electrostatics
 cargo run --example em_magnetostatics_2d
 
 # P1/P2/P3 convergence comparison
-cargo run --example ex_convergence
+cargo run --example mfem_ex1_convergence
 
 # Stokes lid-driven cavity (Taylor-Hood P2/P1)
-cargo run --example ex_stokes
+cargo run --example mfem_ex40
 
 # Navier-Stokes Kovasznay flow (Re=40)
-cargo run --example ex_navier_stokes
+cargo run --example mfem_ex19
 ```
 
 ---
@@ -299,7 +299,8 @@ done
 Run the high-order convergence sweep (P1/P2/P3 on 2-D Poisson):
 
 ```bash
-cargo run --example ex_convergence
+cargo run --example mfem_ex1_convergence
+
 ```
 
 Expected rates: P1 → 2, P2 → 3, P3 → 4.

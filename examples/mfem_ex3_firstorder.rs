@@ -32,8 +32,8 @@
 //!
 //! ## Usage
 //! ```
-//! cargo run --example ex_maxwell_firstorder
-//! cargo run --example ex_maxwell_firstorder -- --n 16 --dt 0.005 --t-end 2.0
+//! cargo run --example mfem_ex3_firstorder
+//! cargo run --example mfem_ex3_firstorder -- --n 16 --dt 0.005 --t-end 2.0
 //! ```
 
 use std::f64::consts::PI;

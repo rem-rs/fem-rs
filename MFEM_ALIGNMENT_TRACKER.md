@@ -36,7 +36,7 @@
 
 - 🔨 HDF5/XDMF 并行 I/O 与 restart 文件链路（checkpoint/restart 基线已落地；direct HDF5 hyperslab collective 仍待完成）。
 - 🔨 hypre-equivalent 路线（纯 Rust 能力轨道；高级 AIR/AMS/ADS 与分布式路径仍待完成）。
-- 🔲 Netgen/Abaqus 网格读取支持。
+- 🔨 Netgen/Abaqus 网格读取支持（Netgen `.vol` Tet4 ASCII 读写基线已落地；Abaqus `.inp` 待实现）。
 - 🔨 命名属性集（baseline+）：`fem-mesh` 已提供 `NamedAttributeSet` / `NamedAttributeRegistry`，支持 mesh named queries 与 `extract_submesh_by_name(...)`，`fem-io` 已提供 GMSH `PhysicalNames` -> named registry bridge，并新增 `ex39_named_attributes` 示例打通端到端路径。
 - 🔨 几何多重网格 / LOR（Phase 58）：`GeomMGHierarchy` + `GeomMGPrecond` 基线已具备，并新增 `ex26_geom_mg` 示例用于持续回归。
 - ✅ `ElementTransformation` 统一抽象层（完成）。
@@ -111,15 +111,17 @@
 1. ✅ H(curl) partial assembly / matrix-free operator（阶段性完成）。
   当前进展（2026-04-12）：新增 `HcurlMatrixFreeOperator2D` 与 `solve_hcurl_matrix_free(...)`，以 `A x = (1/mu) C^T M_b^{-1} C x + alpha M_e x` 路线避免组装全局组合矩阵，并补齐 `apply/solve` 对装配算子的等价回归。
 2. ✅ Maxwell generalized eigenproblem 的可扩展预条件路线（LOBPCG/AMG 组合，阶段性完成）。
-  当前进展（2026-04-12）：在 `fem-solver` 增加 `lobpcg_constrained_preconditioned(...)`，并在 Maxwell 侧接入 `solve_hcurl_eigen_preconditioned_amg(...)`（AMG 残量块预条件），`ex_maxwell_eigenvalue` 默认走该路线。
+  当前进展（2026-04-12）：在 `fem-solver` 增加 `lobpcg_constrained_preconditioned(...)`，并在 Maxwell 侧接入 `solve_hcurl_eigen_preconditioned_amg(...)`（AMG 残量块预条件），`mfem_ex13_eigenvalue` 默认走该路线。
 3. ✅ 更大规模并行/规模化验证（阶段性完成）。
   当前进展（2026-04-12）：新增 `hcurl_eigen_amg_preconditioned_lobpcg_smoke` 规模化回归（`n=10`，free DOF > 200）作为大规模路径 smoke gate。
 
 ### 通用基础设施
 
-1. HDF5/XDMF 并行 I/O。
-2. restart checkpoint 链路。
-3. hypre-equivalent（纯 Rust）能力扩展与额外网格格式读取（Netgen/Abaqus）。
+1. ✅ HDF5/XDMF 并行 I/O（阶段性完成）。
+  当前进展（2026-04-13）：已具备 rank 分片写入、root 端全局场物化与 XDMF sidecar 输出，支持 checkpoint 结构校验。
+2. ✅ restart checkpoint 链路（阶段性完成）。
+  当前进展（2026-04-13）：新增“中断后重启续算与无中断基线一致”回归（`fem-io-hdf5-parallel`，`hdf5` feature）。
+3. hypre-equivalent（纯 Rust）能力扩展与额外网格格式读取（Abaqus + Netgen 非 Tet4/ASCII 扩展）。
 
 ### 当前主线剩余项（2026-04-13）
 
@@ -161,7 +163,7 @@
 
 验收证据（2026-04-12）：
 - 一阶全波 3D 回归：`cargo test -p fem-examples --lib first_order_3d_` 通过（67/67），覆盖 `first_order_3d_energy_conserved_sigma0`、`first_order_3d_sigma_dissipates_energy`、`first_order_3d_absorbing_boundary_term_dissipates_energy_without_sigma`、`first_order_3d_impedance_boundary_term_dissipates_energy_without_sigma`、`first_order_3d_solver_wrapper_time_dependent_force_matches_static_when_constant` 等。
-- 示例目标可用性：`cargo test -p fem-examples --example ex_maxwell_firstorder` 通过（目标可编译/可执行）。
+- 示例目标可用性：`cargo test -p fem-examples --example mfem_ex3_firstorder` 通过（目标可编译/可执行）。
 
 ### 4.3 元素族覆盖
 

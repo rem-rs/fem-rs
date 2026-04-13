@@ -77,7 +77,7 @@
 | `Mesh::MakePeriodic()` | `SimplexMesh::make_periodic()` | ✅ | Node merging + face removal |
 | Reading MFEM format | — | ❌ use GMSH instead |
 | Reading GMSH `.msh` v4 | `fem_io::read_msh_file()` | ✅ |
-| Reading Netgen | — | 🔲 Phase 9 |
+| Reading Netgen | `fem_io::read_netgen_vol_file()` | 🔨 Phase 67 (Tet4 ASCII baseline) |
 
 ---
 
@@ -155,7 +155,7 @@
 | H(div) | Darcy flow, mixed Poisson | ✅ |
 | L² / DG | Transport, DG methods | ✅ |
 | Vector H¹ = [H¹]ᵈ | Elasticity (displacement vector) | ✅ |
-| Taylor-Hood P2-P1 | Stokes flow | ✅ Via MixedAssembler + `ex_stokes` |
+| Taylor-Hood P2-P1 | Stokes flow | ✅ Via MixedAssembler + `mfem_ex40` |
 
 ---
 
@@ -400,7 +400,7 @@ default (zero-cost for constants).
 | GMSH `.msh` v2 ASCII (read) | `fem_io::read_msh_file()` | ✅ |
 | GMSH `.msh` v4.1 ASCII (read) | `fem_io::read_msh_file()` | ✅ |
 | GMSH `.msh` v4.1 binary (read) | `fem_io::read_msh_file()` | ✅ |
-| Netgen `.vol` (read) | — | 🔲 Phase 9+ |
+| Netgen `.vol` (read/write) | `read_netgen_vol_file()` / `write_netgen_vol_file()` | 🔨 | Tet4 ASCII baseline |
 | Abaqus `.inp` (read) | — | 🔲 Phase 9+ |
 | VTK `.vtu` legacy ASCII (write) | `write_vtk_scalar()` | ✅ |
 | VTK `.vtu` XML binary (write) | `write_vtu()` (XML ASCII) | ✅ |
@@ -581,7 +581,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | ~~GMSH v4.1 binary reader~~ | ✅ | ~~High~~ Done |
 | ~~GMSH v2 reader~~ | ✅ | ~~Medium~~ Done |
 | HDF5/XDMF parallel I/O | 🔨 | Medium |
-| Netgen `.vol` reader | 🔲 | Low |
+| Netgen `.vol` reader | 🔨 (Tet4 ASCII baseline) | Low |
 | Abaqus `.inp` reader | 🔲 | Low |
 | `GridFunction::Load()` | ✅ | ~~Low~~ Done |
 | Restart files (checkpoint) | 🔨 | Low |
@@ -598,7 +598,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | Item | Status | Priority |
 |------|--------|----------|
 | H1_Trace_FECollection | ✅ | ~~Low~~ Done |
-| Taylor-Hood P2-P1 | Stokes flow | ✅ `ex_stokes` (lid-driven cavity) |
+| Taylor-Hood P2-P1 | Stokes flow | ✅ `mfem_ex40` (lid-driven cavity) |
 | Kelly error estimator | ✅ | ~~Low~~ Done |
 | `DenseTensor` | ✅ | ~~Low~~ Done |
 | `SetSubVector` slice assignment | ✅ | ~~Low~~ Done |
@@ -639,7 +639,7 @@ prioritized roadmap for continued development.
 ### Phase 40 — Taylor-Hood P2-P1 Stokes Example ✅
 > **Completed** — demonstrates mixed FEM at production quality
 
-- ✅ `ex_stokes` example: lid-driven cavity on [0,1]²
+- ✅ `mfem_ex40` example: lid-driven cavity on [0,1]²
 - ✅ P2 velocity + P1 pressure via `MixedAssembler`
 - ✅ Block saddle-point solver (SchurComplementSolver with GMRES)
 - ✅ Verified convergence at n=8,16,32; divergence-free to solver tolerance
@@ -672,7 +672,7 @@ prioritized roadmap for continued development.
 
 - ✅ `VectorConvectionIntegrator`: `∫ (w·∇)u · v dx` for vector fields
 - ✅ Oseen linearization with Picard iteration
-- ✅ `ex_navier_stokes` example: Kovasznay flow benchmark (Re=40)
+- ✅ `mfem_ex19` example: Kovasznay flow benchmark (Re=40)
 - ✅ Taylor-Hood P2/P1 discretization (reuses Phase 40 infrastructure)
 - ✅ Converges in ~16–20 Picard iterations; velocity error decreases with h-refinement
 
@@ -723,7 +723,7 @@ prioritized roadmap for continued development.
 | Item | Phase | Notes |
 |------|-------|-------|
 | hypre-equivalent AMG path | pure-Rust parity track | Owned by `vendor/linger` capability roadmap |
-| Netgen / Abaqus readers | TBD | Additional mesh import formats |
+| Abaqus reader + Netgen format扩展 | TBD | Additional mesh import formats |
 | HDF5/XDMF I/O | TBD | Large-scale checkpointing |
 | Restart files | TBD | Requires HDF5 |
 | Tet4 NC AMR example | ✅ | ~~TBD~~ Done (`ex15_tet_nc_amr`, supports `--solve`) |

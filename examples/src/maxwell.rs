@@ -3969,7 +3969,7 @@ mod first_order_tests {
             ..SolverConfig::default()
         };
 
-        // Manufactured cavity mode used by ex_maxwell_firstorder:
+        // Manufactured cavity mode used by mfem_ex3_firstorder:
         // E(x,t) = sin(pi t) * (sin(pi y), sin(pi x))
         // B(x,t) = cos(pi t) * (cos(pi x) - cos(pi y))
         // So at t=0: E=0, B=B0; at t=1: E=0, B=-B0.
