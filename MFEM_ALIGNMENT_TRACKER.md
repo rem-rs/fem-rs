@@ -126,8 +126,8 @@
   当前进展�?026-04-13）：已具�?rank 分片写入、root 端全局场物化与 XDMF sidecar 输出，支�?checkpoint 结构校验�?
 2. �?restart checkpoint 链路（阶段性完成）�?
   当前进展�?026-04-13）：新增“中断后重启续算与无中断基线一致”回归（`fem-io-hdf5-parallel`，`hdf5` feature）�?
-3. �?外部 direct backend hooks baseline（阶段性完成）�?
-  当前进展�?026-04-13）：`mumps` + `mkl` 均已具备可用 baseline（`linger::{MumpsSolver, MklSolver}` + `fem-solver::{solve_sparse_mumps, solve_sparse_mkl}`）；外部 FFI/distributed 路径待后续阶段�?
+3. �?direct backend hooks baseline（阶段性完成）�?
+  当前进展�?026-04-13）：`mumps` 与 `mkl` 兼容入口均已具备可用 baseline（`linger::{MumpsSolver, MklSolver}` + `fem-solver::{solve_sparse_mumps, solve_sparse_mkl}`）；二者都由 linger 原生 multifrontal 实现承载，不以外部 MUMPS/MKL 依赖为目标�?
   验收证据�?026-04-13）：`cargo test --manifest-path vendor/linger/Cargo.toml direct_backend_mkl_solves_system`、`cargo test --manifest-path vendor/linger/Cargo.toml mkl_solver_solves_single_rhs`、`cargo test -p fem-solver sparse_mkl_direct` 通过�?
 4. hypre-equivalent（纯 Rust）能力扩展与额外网格格式读取（`linger` �?AMS/ADS baseline 已可用；AIR baseline 脚手架已落地：`CoarsenStrategy::Air` + diagonal-`A_ff` AIR restriction，并新增非对称对流扩散回�?`amg_air_gmres_nonsymmetric_convdiff_1d`；后续聚�?parity hardening 与分布式/高阶能力；Abaqus/Netgen 扩展：混合单元、更�?section �?tag 保真）�?
 

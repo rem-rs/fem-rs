@@ -880,7 +880,8 @@ pub fn solve_sparse_ldlt<T: LingerScalar>(
 /// MUMPS-compatible direct solver baseline.
 ///
 /// Uses `linger::direct::MumpsSolver`, which currently provides a stable
-/// factor/solve/reuse API backed by native multifrontal direct solves.
+/// factor/solve/reuse API backed by linger's native multifrontal replacement
+/// path rather than an external MUMPS dependency.
 pub fn solve_sparse_mumps<T: LingerScalar>(
     a: &FemCsr<T>,
     b: &[T],
@@ -897,7 +898,8 @@ pub fn solve_sparse_mumps<T: LingerScalar>(
 /// MKL-compatible direct solver baseline.
 ///
 /// Uses `linger::direct::MklSolver`, which currently provides a stable
-/// factor/solve/reuse API backed by native multifrontal direct solves.
+/// factor/solve/reuse API backed by linger's native multifrontal replacement
+/// path rather than an external MKL dependency.
 pub fn solve_sparse_mkl<T: LingerScalar>(
     a: &FemCsr<T>,
     b: &[T],

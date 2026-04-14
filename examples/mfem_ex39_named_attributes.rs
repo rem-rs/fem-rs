@@ -7,23 +7,10 @@
 //! 4) multi-set boundary aggregation (--merge-boundary mode)
 
 use fem_io::read_msh;
-use fem_mesh::{extract_submesh_by_name, SimplexMesh};
+use fem_mesh::{extract_submesh_by_name, NamedAttributeRegistry, SimplexMesh};
 use std::collections::HashSet;
 
-fn main() {
-    let args = parse_args();
-    println!("=== mfem_ex39_named_attributes: baseline named set workflow ===");
-    if args.merge_boundary {
-        println!("  Mode: merge-boundary (inlet + outlet aggregation)");
-    }
-    if args.intersection_region {
-        println!("  Mode: intersection-region (inlet �?outlet)");
-    }
-    if args.difference_region {
-        println!("  Mode: difference-region (inlet \\ outlet)");
-    }
-
-    let msh_text = r#"$MeshFormat
+const DEMO_MSH_TEXT: &str = r#"$MeshFormat
 2.2 0 8
 $EndMeshFormat
 $PhysicalNames
@@ -50,9 +37,27 @@ $Elements
 $EndElements
 "#;
 
-    let msh = read_msh(msh_text.as_bytes()).expect("failed to parse in-memory gmsh");
+fn load_demo_mesh() -> (SimplexMesh<2>, NamedAttributeRegistry) {
+    let msh = read_msh(DEMO_MSH_TEXT.as_bytes()).expect("failed to parse in-memory gmsh");
     let registry = msh.named_attribute_registry();
     let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D mesh");
+    (mesh, registry)
+}
+
+fn main() {
+    let args = parse_args();
+    println!("=== mfem_ex39_named_attributes: baseline named set workflow ===");
+    if args.merge_boundary {
+        println!("  Mode: merge-boundary (inlet + outlet aggregation)");
+    }
+    if args.intersection_region {
+        println!("  Mode: intersection-region (inlet intersect outlet)");
+    }
+    if args.difference_region {
+        println!("  Mode: difference-region (inlet \\ outlet)");
+    }
+
+    let (mesh, registry) = load_demo_mesh();
 
     let fluid_elems = mesh
         .element_ids_for_named_set(&registry, "fluid")
@@ -85,7 +90,7 @@ $EndElements
         let mut merged_boundary: HashSet<u32> = inlet_faces.iter().copied().collect();
         merged_boundary.extend(outlet_faces.iter().copied());
         println!(
-            "  merged boundary (inlet �?outlet): {} faces",
+            "  merged boundary (inlet union outlet): {} faces",
             merged_boundary.len()
         );
         assert_eq!(
@@ -102,7 +107,7 @@ $EndElements
             .copied()
             .collect();
         println!(
-            "  intersection (inlet �?outlet): {} faces",
+            "  intersection (inlet intersect outlet): {} faces",
             intersection.len()
         );
     }
@@ -155,46 +160,22 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_mesh::topology::MeshTopology;
 
-    #[test]
-    fn named_attributes_merge_boundary_mode() {
-        let msh_text = r#"$MeshFormat
-2.2 0 8
-$EndMeshFormat
-$PhysicalNames
-3
-2 1 "fluid"
-1 1 "inlet"
-1 3 "outlet"
-$EndPhysicalNames
-$Nodes
-4
-1 0 0 0
-2 1 0 0
-3 1 1 0
-4 0 1 0
-$EndNodes
-$Elements
-6
-1 1 2 1 1 1 2
-2 1 2 2 2 2 3
-3 1 2 3 3 3 4
-4 1 2 4 4 4 1
-5 2 2 1 1 1 2 3
-6 2 2 1 1 1 3 4
-$EndElements
-"#;
-
-        let msh = read_msh(msh_text.as_bytes()).expect("failed to parse");
-        let registry = msh.named_attribute_registry();
-        let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D mesh");
-
+    fn load_named_sets() -> (SimplexMesh<2>, NamedAttributeRegistry, Vec<u32>, Vec<u32>) {
+        let (mesh, registry) = load_demo_mesh();
         let inlet = mesh
             .face_ids_for_named_set(&registry, "inlet")
             .expect("missing inlet");
         let outlet = mesh
             .face_ids_for_named_set(&registry, "outlet")
             .expect("missing outlet");
+        (mesh, registry, inlet, outlet)
+    }
+
+    #[test]
+    fn named_attributes_merge_boundary_mode() {
+        let (_mesh, _registry, inlet, outlet) = load_named_sets();
 
         let mut merged: std::collections::HashSet<u32> = inlet.iter().copied().collect();
         merged.extend(outlet.iter().copied());
@@ -206,43 +187,7 @@ $EndElements
 
     #[test]
     fn named_attributes_intersection_mode() {
-        let msh_text = r#"$MeshFormat
-2.2 0 8
-$EndMeshFormat
-$PhysicalNames
-3
-2 1 "fluid"
-1 1 "inlet"
-1 3 "outlet"
-$EndPhysicalNames
-$Nodes
-4
-1 0 0 0
-2 1 0 0
-3 1 1 0
-4 0 1 0
-$EndNodes
-$Elements
-6
-1 1 2 1 1 1 2
-2 1 2 2 2 2 3
-3 1 2 3 3 3 4
-4 1 2 4 4 4 1
-5 2 2 1 1 1 2 3
-6 2 2 1 1 1 3 4
-$EndElements
-"#;
-
-        let msh = read_msh(msh_text.as_bytes()).expect("failed to parse");
-        let registry = msh.named_attribute_registry();
-        let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D mesh");
-
-        let inlet = mesh
-            .face_ids_for_named_set(&registry, "inlet")
-            .expect("missing inlet");
-        let outlet = mesh
-            .face_ids_for_named_set(&registry, "outlet")
-            .expect("missing outlet");
+        let (_mesh, _registry, inlet, outlet) = load_named_sets();
 
         let inlet_set: std::collections::HashSet<u32> = inlet.iter().copied().collect();
         let outlet_set: std::collections::HashSet<u32> = outlet.iter().copied().collect();
@@ -257,43 +202,7 @@ $EndElements
 
     #[test]
     fn named_attributes_difference_mode() {
-        let msh_text = r#"$MeshFormat
-2.2 0 8
-$EndMeshFormat
-$PhysicalNames
-3
-2 1 "fluid"
-1 1 "inlet"
-1 3 "outlet"
-$EndPhysicalNames
-$Nodes
-4
-1 0 0 0
-2 1 0 0
-3 1 1 0
-4 0 1 0
-$EndNodes
-$Elements
-6
-1 1 2 1 1 1 2
-2 1 2 2 2 2 3
-3 1 2 3 3 3 4
-4 1 2 4 4 4 1
-5 2 2 1 1 1 2 3
-6 2 2 1 1 1 3 4
-$EndElements
-"#;
-
-        let msh = read_msh(msh_text.as_bytes()).expect("failed to parse");
-        let registry = msh.named_attribute_registry();
-        let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D mesh");
-
-        let inlet = mesh
-            .face_ids_for_named_set(&registry, "inlet")
-            .expect("missing inlet");
-        let outlet = mesh
-            .face_ids_for_named_set(&registry, "outlet")
-            .expect("missing outlet");
+        let (_mesh, _registry, inlet, outlet) = load_named_sets();
 
         let inlet_set: std::collections::HashSet<u32> = inlet.iter().copied().collect();
         let outlet_set: std::collections::HashSet<u32> = outlet.iter().copied().collect();
@@ -304,6 +213,74 @@ $EndElements
 
         // For this mesh, inlet \ outlet = inlet (since they don't intersect)
         assert_eq!(difference.len(), inlet.len());
+    }
+
+    #[test]
+    fn named_attributes_boundary_sets_match_expected_geometry() {
+        let (mesh, _registry, inlet, outlet) = load_named_sets();
+
+        for &face in &inlet {
+            for &node in mesh.bface_nodes(face) {
+                let coords = mesh.node_coords(node);
+                assert!(coords[1].abs() < 1e-12, "expected inlet nodes on y=0, got y={}", coords[1]);
+            }
+        }
+
+        for &face in &outlet {
+            for &node in mesh.bface_nodes(face) {
+                let coords = mesh.node_coords(node);
+                assert!((coords[1] - 1.0).abs() < 1e-12, "expected outlet nodes on y=1, got y={}", coords[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn named_attributes_fluid_submesh_roundtrips_parent_nodal_field() {
+        let (mesh, registry) = load_demo_mesh();
+        let fluid_sub = extract_submesh_by_name(&mesh, &registry, "fluid")
+            .expect("submesh extraction by named set failed");
+
+        let parent_values: Vec<f64> = (0..mesh.n_nodes())
+            .map(|idx| {
+                let coords = mesh.node_coords(idx as u32);
+                coords[0] + 2.0 * coords[1]
+            })
+            .collect();
+        let sub_values = fluid_sub.transfer_from_parent(&parent_values);
+        let roundtrip = fluid_sub.transfer_to_parent(&sub_values, mesh.n_nodes());
+
+        assert_eq!(fluid_sub.mesh.n_elems(), mesh.n_elems());
+        assert_eq!(fluid_sub.parent_elem_ids.len(), mesh.n_elems());
+        assert_eq!(fluid_sub.parent_node_of_sub.len(), mesh.n_nodes());
+
+        for &parent_node in &fluid_sub.parent_node_of_sub {
+            let idx = parent_node as usize;
+            assert!(
+                (roundtrip[idx] - parent_values[idx]).abs() < 1e-12,
+                "roundtrip mismatch at parent node {}: got {} expected {}",
+                idx,
+                roundtrip[idx],
+                parent_values[idx]
+            );
+        }
+    }
+
+    #[test]
+    fn named_attributes_missing_sets_fail_cleanly() {
+        let (mesh, registry) = load_demo_mesh();
+
+        let element_err = mesh
+            .element_ids_for_named_set(&registry, "missing")
+            .expect_err("expected missing element set error");
+        let face_err = mesh
+            .face_ids_for_named_set(&registry, "missing")
+            .expect_err("expected missing face set error");
+        let submesh_err = extract_submesh_by_name(&mesh, &registry, "missing")
+            .expect_err("expected missing submesh set error");
+
+        assert!(format!("{element_err}").contains("named attribute set not found"));
+        assert!(format!("{face_err}").contains("named attribute set not found"));
+        assert!(format!("{submesh_err}").contains("named attribute set not found"));
     }
 }
 

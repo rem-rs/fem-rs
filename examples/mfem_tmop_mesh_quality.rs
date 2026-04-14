@@ -339,4 +339,95 @@ mod tests {
         assert_eq!(res.final_.inverted, 0, "final mesh should have no inverted elements");
         assert!(res.final_.min_q > 0.35, "final min quality unexpectedly low: {}", res.final_.min_q);
     }
+
+    #[test]
+    fn tmop_zero_perturbation_leaves_mesh_quality_unchanged() {
+        let res = run_tmop_baseline(&Args {
+            n: 12,
+            iters: 25,
+            omega: 0.70,
+            perturb: 0.0,
+        });
+
+        assert_eq!(res.iters_done, 0, "zero-perturbation mesh should not require smoothing steps");
+        assert!((res.final_.objective - res.initial.objective).abs() < 1.0e-14);
+        assert!((res.final_.mean_q - res.initial.mean_q).abs() < 1.0e-14);
+        assert!((res.final_.min_q - res.initial.min_q).abs() < 1.0e-14);
+        assert_eq!(res.initial.inverted, 0);
+        assert_eq!(res.final_.inverted, 0);
+    }
+
+    #[test]
+    fn tmop_more_iterations_improve_quality_further() {
+        let short = run_tmop_baseline(&Args {
+            n: 12,
+            iters: 10,
+            omega: 0.70,
+            perturb: 0.06,
+        });
+        let long = run_tmop_baseline(&Args {
+            n: 12,
+            iters: 25,
+            omega: 0.70,
+            perturb: 0.06,
+        });
+
+        assert!(short.iters_done > 0 && long.iters_done >= short.iters_done);
+        assert!(
+            long.final_.objective < short.final_.objective,
+            "more TMOP iterations should lower the objective further: short={} long={}",
+            short.final_.objective,
+            long.final_.objective
+        );
+        assert!(
+            long.final_.mean_q > short.final_.mean_q,
+            "more TMOP iterations should raise mean quality further: short={} long={}",
+            short.final_.mean_q,
+            long.final_.mean_q
+        );
+        assert!(
+            long.final_.min_q > short.final_.min_q,
+            "more TMOP iterations should raise min quality further: short={} long={}",
+            short.final_.min_q,
+            long.final_.min_q
+        );
+    }
+
+    #[test]
+    fn tmop_stronger_perturbation_is_still_recovered_without_inversion() {
+        let mild = run_tmop_baseline(&Args {
+            n: 12,
+            iters: 25,
+            omega: 0.70,
+            perturb: 0.06,
+        });
+        let strong = run_tmop_baseline(&Args {
+            n: 12,
+            iters: 25,
+            omega: 0.70,
+            perturb: 0.12,
+        });
+
+        assert_eq!(mild.final_.inverted, 0);
+        assert_eq!(strong.final_.inverted, 0);
+        assert!(
+            strong.initial.objective > mild.initial.objective,
+            "stronger perturbation should start from a worse objective: mild={} strong={}",
+            mild.initial.objective,
+            strong.initial.objective
+        );
+        assert!(
+            strong.final_.objective < strong.initial.objective,
+            "strongly perturbed mesh should still improve: initial={} final={}",
+            strong.initial.objective,
+            strong.final_.objective
+        );
+        assert!(
+            strong.final_.min_q > strong.initial.min_q,
+            "strongly perturbed mesh should improve minimum quality: initial={} final={}",
+            strong.initial.min_q,
+            strong.final_.min_q
+        );
+        assert!(strong.final_.min_q > 0.8, "recovered minimum quality unexpectedly low: {}", strong.final_.min_q);
+    }
 }

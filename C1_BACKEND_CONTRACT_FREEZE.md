@@ -21,7 +21,8 @@ Status: frozen for C1; additive-only changes allowed until C2 starts.
 Notes:
 - hypre-rs is the pure-Rust HYPRE-equivalent capability track.
 - petsc-rs is the pure-Rust PETSc-equivalent capability track.
-- mumps/mkl remain optional backend tracks (current C1 runtime falls back to native-linger).
+- mumps is a compatibility contract name resolved to native-linger direct solves, not an external MUMPS dependency.
+- mkl remains an optional external backend track (current C1 runtime falls back to native-linger).
 
 ## 3. linger Contract (source of truth)
 
@@ -66,14 +67,14 @@ reed must consume linger contract without app-level API churn:
 
 - Preserve existing resource strings and object factory behavior.
 - Add a backend-selection handoff path that can pass canonical backend IDs to linger.
-- Own integration landing paths for GPU and MKL-backed execution while honoring linger capability reports.
+- Own integration landing paths for GPU execution while honoring linger capability reports.
 - If no backend is requested, reed defaults to native-linger behavior.
 
 Minimum C1 acceptance for reed:
 
 - One integration path can request a backend ID and obtain a deterministic selection report.
 - Existing examples continue to run unchanged.
-- Ownership note: C2+ implementation of GPU and MKL tracks is reed-led; linger remains contract source-of-truth.
+- Ownership note: C2+ implementation of GPU track is reed-led; linger remains contract source-of-truth for solver compatibility contracts.
 
 ## 5. jsmpi Integration Contract
 
@@ -85,7 +86,7 @@ jsmpi must expose runtime constraints for backend selection:
 
 Minimum C1 acceptance for jsmpi:
 
-- Browser path can report fallback from petsc-rs/mumps/mkl to native-linger.
+- Browser path can report fallback from petsc-rs/mumps/mkl compatibility requests to native-linger.
 - Contract note is surfaced in logs or diagnostics output.
 
 ## 6. Compatibility Rules (C1)
