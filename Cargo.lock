@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "linger"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nalgebra 0.33.3",
  "nalgebra-sparse",
