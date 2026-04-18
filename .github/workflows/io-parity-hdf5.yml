@@ -48,19 +48,45 @@ jobs:
           set -euo pipefail
           mkdir -p output
 
+          TMP_ROOT="$(mktemp -d)"
+          cp -R crates/io_hdf5_parallel "${TMP_ROOT}/io_hdf5_parallel"
+          mkdir -p "${TMP_ROOT}/ex43_runner/src"
+          cp examples/mfem_ex43_hdf5_checkpoint.rs "${TMP_ROOT}/ex43_runner/src/main.rs"
+
+          cat > "${TMP_ROOT}/Cargo.toml" <<'EOF'
+[workspace]
+resolver = "2"
+members = ["io_hdf5_parallel", "ex43_runner"]
+
+[workspace.dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+mpi = { version = "0.8", features = ["user-operations"] }
+EOF
+
+          cat > "${TMP_ROOT}/ex43_runner/Cargo.toml" <<'EOF'
+[package]
+name = "ex43-runner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fem-io-hdf5-parallel = { path = "../io_hdf5_parallel" }
+EOF
+
           if [[ "${{ matrix.backend }}" == "partitioned" ]]; then
-            cargo test -p fem-io-hdf5-parallel -- --nocapture
-            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint ex43_rank_field_generation_matches_partition_contract -- --nocapture
-            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint ex43_checkpoint_can_restart_from_requested_step -- --nocapture
-            cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+            cargo test --manifest-path "${TMP_ROOT}/io_hdf5_parallel/Cargo.toml" -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" ex43_rank_field_generation_matches_partition_contract -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" ex43_checkpoint_can_restart_from_requested_step -- --nocapture
+            cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
               --backend partitioned \
               --restart-step 2 \
               --out-h5 output/ci_ex43_partitioned.h5 \
               --out-xdmf output/ci_ex43_partitioned.xdmf
           else
-            cargo test -p fem-io-hdf5-parallel -- --nocapture
-            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint ex43_mpi_backend_reports_feature_gate_or_succeeds -- --nocapture
-            cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+            cargo test --manifest-path "${TMP_ROOT}/io_hdf5_parallel/Cargo.toml" -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" ex43_mpi_backend_reports_feature_gate_or_succeeds -- --nocapture
+            cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
               --backend mpi \
               --restart-step 2 \
               --out-h5 output/ci_ex43_mpi.h5 \
@@ -103,10 +129,36 @@ jobs:
           set -euo pipefail
           mkdir -p output
 
+          TMP_ROOT="$(mktemp -d)"
+          cp -R crates/io_hdf5_parallel "${TMP_ROOT}/io_hdf5_parallel"
+          mkdir -p "${TMP_ROOT}/ex43_runner/src"
+          cp examples/mfem_ex43_hdf5_checkpoint.rs "${TMP_ROOT}/ex43_runner/src/main.rs"
+
+          cat > "${TMP_ROOT}/Cargo.toml" <<'EOF'
+[workspace]
+resolver = "2"
+members = ["io_hdf5_parallel", "ex43_runner"]
+
+[workspace.dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+mpi = { version = "0.8", features = ["user-operations"] }
+EOF
+
+          cat > "${TMP_ROOT}/ex43_runner/Cargo.toml" <<'EOF'
+[package]
+name = "ex43-runner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fem-io-hdf5-parallel = { path = "../io_hdf5_parallel" }
+EOF
+
           if [[ "${{ matrix.backend }}" == "partitioned" ]]; then
-            cargo test -p fem-io-hdf5-parallel -- --nocapture
-            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint -- --nocapture
-            cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+            cargo test --manifest-path "${TMP_ROOT}/io_hdf5_parallel/Cargo.toml" -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- --nocapture
+            cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
               --backend partitioned \
               --restart-step 2 \
               --out-h5 output/ci_ex43_partitioned_full.h5 \
@@ -115,7 +167,7 @@ jobs:
             failures=0
             for i in $(seq 1 20); do
               echo "[full-flaky-check] run ${i}/20"
-              if ! cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+              if ! cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
                 --backend partitioned \
                 --restart-step 2 \
                 --out-h5 output/ci_ex43_partitioned_repeat_${i}.h5 \
@@ -128,9 +180,9 @@ jobs:
               exit 1
             fi
           else
-            cargo test -p fem-io-hdf5-parallel -- --nocapture
-            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint -- --nocapture
-            cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+            cargo test --manifest-path "${TMP_ROOT}/io_hdf5_parallel/Cargo.toml" -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- --nocapture
+            cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
               --backend mpi \
               --restart-step 2 \
               --out-h5 output/ci_ex43_mpi_full.h5 \
