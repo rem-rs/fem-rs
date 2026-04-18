@@ -27,9 +27,10 @@ Scope: Start execution of Week-2 IO parity plan (PM-001).
 - This kickoff satisfies:
   - W2-1 (Add CI job for MPI + HDF5 environment)
    - W2-4 (separate smoke vs full IO test tiers)
-- Still pending to close PM-001:
-  - CI run links and report linkage for executed flaky gate
-  - explicit CI run links from successful PR/main executions
+- PM-001 closure evidence (completed):
+   - smoke run: https://github.com/rem-rs/fem-rs/actions/runs/24606857993
+   - full run: https://github.com/rem-rs/fem-rs/actions/runs/24606858418
+   - latest PR smoke re-validation: https://github.com/rem-rs/fem-rs/actions/runs/24606887939
 
 ## Local execution evidence (Actions unavailable)
 
@@ -56,10 +57,17 @@ Scope: Start execution of Week-2 IO parity plan (PM-001).
 
 ## Next execution items (Week 2)
 
-1. Run and validate first successful CI executions for both backend lanes.
-2. Fill `docs/mfem-w2-io-ci-backfill-template.md` with concrete CI artifact URLs.
-3. Mark PM-001 complete once template URLs are attached to parity matrix and tracker entries.
-4. Optional fast path: run `scripts/complete_pm001_after_ci.ps1` to backfill template and flip PM-001 status in matrix/tracker in one step.
+1. PM-001 closure path is complete (smoke/full CI evidence + matrix/tracker backfill done).
+2. Keep this workflow as the reusable gate for future IO-related PRs.
+3. Re-run full tier by `workflow_dispatch` when ex43 or IO schema changes.
+
+## CI implementation note (important)
+
+1. The repository contains private submodules (`vendor/linger`), while `IO Parity HDF5` only needs `crates/io_hdf5_parallel` + `examples/mfem_ex43_hdf5_checkpoint.rs`.
+2. To avoid checkout/build failures on runners without submodule access, the workflow now:
+   - uses checkout with `submodules: false`
+   - creates a temporary minimal workspace at runtime for PM-001 checks.
+3. This keeps PM-001 gate deterministic and independent from private submodule availability.
 
 ### Script command template (CI recovery)
 
