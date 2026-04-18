@@ -1,0 +1,146 @@
+name: IO Parity HDF5
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/io_hdf5_parallel/**
+      - examples/mfem_ex43_hdf5_checkpoint.rs
+      - .github/workflows/io-parity-hdf5.yml
+      - docs/mfem-parity-matrix-template.md
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: io-parity-hdf5-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hdf5-smoke:
+    name: HDF5 smoke (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [partitioned, mpi]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run IO parity smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+
+          if [[ "${{ matrix.backend }}" == "partitioned" ]]; then
+            cargo test -p fem-io-hdf5-parallel -- --nocapture
+            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint ex43_rank_field_generation_matches_partition_contract -- --nocapture
+            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint ex43_checkpoint_can_restart_from_requested_step -- --nocapture
+            cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+              --backend partitioned \
+              --restart-step 2 \
+              --out-h5 output/ci_ex43_partitioned.h5 \
+              --out-xdmf output/ci_ex43_partitioned.xdmf
+          else
+            cargo test -p fem-io-hdf5-parallel -- --nocapture
+            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint ex43_mpi_backend_reports_feature_gate_or_succeeds -- --nocapture
+            cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+              --backend mpi \
+              --restart-step 2 \
+              --out-h5 output/ci_ex43_mpi.h5 \
+              --out-xdmf output/ci_ex43_mpi.xdmf
+          fi
+
+      - name: Upload IO artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: io-parity-smoke-${{ matrix.backend }}
+          path: |
+            output/*.h5
+            output/*.xdmf
+
+  hdf5-full:
+    name: HDF5 full (${{ matrix.backend }})
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [partitioned, mpi]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run IO parity full checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+
+          if [[ "${{ matrix.backend }}" == "partitioned" ]]; then
+            cargo test -p fem-io-hdf5-parallel -- --nocapture
+            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint -- --nocapture
+            cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+              --backend partitioned \
+              --restart-step 2 \
+              --out-h5 output/ci_ex43_partitioned_full.h5 \
+              --out-xdmf output/ci_ex43_partitioned_full.xdmf
+
+            failures=0
+            for i in $(seq 1 20); do
+              echo "[full-flaky-check] run ${i}/20"
+              if ! cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+                --backend partitioned \
+                --restart-step 2 \
+                --out-h5 output/ci_ex43_partitioned_repeat_${i}.h5 \
+                --out-xdmf output/ci_ex43_partitioned_repeat_${i}.xdmf; then
+                failures=$((failures + 1))
+              fi
+            done
+            if [[ "$failures" -ne 0 ]]; then
+              echo "Partitioned backend flaky check failed: ${failures}/20 runs failed"
+              exit 1
+            fi
+          else
+            cargo test -p fem-io-hdf5-parallel -- --nocapture
+            cargo test -p fem-examples --example mfem_ex43_hdf5_checkpoint -- --nocapture
+            cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint -- \
+              --backend mpi \
+              --restart-step 2 \
+              --out-h5 output/ci_ex43_mpi_full.h5 \
+              --out-xdmf output/ci_ex43_mpi_full.xdmf
+
+      - name: Upload IO artifacts (full)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: io-parity-full-${{ matrix.backend }}
+          path: |
+            output/*.h5
+            output/*.xdmf
