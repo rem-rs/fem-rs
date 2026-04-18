@@ -187,6 +187,7 @@ jobs:
               --restart-step 2 \
               --out-h5 output/ci_ex43_mpi_full.h5 \
               --out-xdmf output/ci_ex43_mpi_full.xdmf
+          fi
 
       - name: Upload IO artifacts (full)
         if: always()
