@@ -14,6 +14,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_examples::template_runner::{
+    maybe_write_template_kpi_csv,
     TemplateAdaptiveSummary,
     TemplateCouplingSummary,
     print_template_adaptive_summary,
@@ -104,11 +105,12 @@ fn main() {
 
     let result = solve_em_thermal_stress_template(&args);
 
-    print_template_coupling_summary(TemplateCouplingSummary {
+    let coupling = TemplateCouplingSummary {
         steps: result.steps,
         converged_steps: result.converged_steps,
         max_coupling_iters_used: result.max_coupling_iters_used,
-    });
+    };
+    print_template_coupling_summary(coupling);
     println!("  max Joule power: {:.6e}", result.max_joule_power);
     println!("  final ||T||_2: {:.6e}", result.final_temp_norm);
     println!("  final temperature checksum: {:.8e}", result.final_temp_checksum);
@@ -118,11 +120,25 @@ fn main() {
         result.final_displacement_proxy
     );
     println!("  final stress proxy: {:.6e}", result.final_stress_proxy);
-    print_template_adaptive_summary(TemplateAdaptiveSummary {
+    let adaptive = TemplateAdaptiveSummary {
         sync_retries: result.sync_retries,
         rejected_sync_steps: result.rejected_sync_steps,
         rollback_count: result.rollback_count,
-    });
+    };
+    print_template_adaptive_summary(adaptive);
+    if let Err(e) = maybe_write_template_kpi_csv(
+        spec.template.id(),
+        coupling,
+        adaptive,
+        &[
+            ("max_joule_power", result.max_joule_power),
+            ("final_mean_temp", result.final_mean_temp),
+            ("final_displacement_proxy", result.final_displacement_proxy),
+            ("final_stress_proxy", result.final_stress_proxy),
+        ],
+    ) {
+        eprintln!("warning: failed to append template KPI CSV: {e}");
+    }
 }
 
 fn solve_em_thermal_stress_template(args: &Args) -> EmThermalStressResult {

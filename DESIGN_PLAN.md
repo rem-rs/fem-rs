@@ -368,7 +368,7 @@ pub struct AmgParams {
 ### Acceptance criteria
 - Setup + solve time for 3D Poisson (1M DOFs) < 10s on 8-core desktop
 - Convergence factor per V-cycle < 0.15 for Laplacian
-- `hypre` feature: delegate to hypre BoomerAMG when available
+- Pure-Rust AMG path remains the default and only supported route
 
 ---
 
@@ -411,7 +411,7 @@ parallel/src/
 ├── par_mesh.rs      # ParallelMesh: distribute SimplexMesh across ranks
 ├── par_linalg.rs    # ParCsrMatrix, ParVector
 ├── par_assembly.rs  # Parallel assembly loop + ghost exchange
-└── par_amg.rs       # Parallel AMG (BoomerAMG via hypre or native)
+└── par_amg.rs       # Parallel AMG (native pure-Rust path)
 ```
 
 ### Ghost DOF Communication Pattern
@@ -619,7 +619,7 @@ Complete the `fem-parallel` crate with METIS-based partitioning and distributed 
 - `partition.rs`: METIS binding via `metis-sys` crate; k-way partitioning
 - `par_mesh.rs`: `ParallelMesh` distributing `SimplexMesh` across MPI ranks
 - `par_assembly.rs`: parallel assembly loop with ghost exchange (uses existing GhostExchange)
-- `par_amg.rs`: parallel AMG — either native (aggregate across ranks) or BoomerAMG via hypre feature
+- `par_amg.rs`: parallel AMG — native aggregate path across ranks
 
 ### Acceptance criteria
 - 4-rank Poisson: solution matches serial reference (max diff < 1e-12)

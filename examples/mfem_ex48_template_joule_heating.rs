@@ -16,6 +16,8 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_examples::template_runner::{
+    maybe_write_template_kpi_csv,
+    TemplateCouplingSummary,
     TemplateAdaptiveSummary,
     print_template_adaptive_summary,
     print_template_cli_help,
@@ -102,11 +104,30 @@ fn main() {
     println!("  ||T||_2: {:.6e}", result.temp_norm);
     println!("  integrated Joule power: {:.6e}", result.joule_power);
     println!("  temperature checksum: {:.8e}", result.temp_checksum);
-    print_template_adaptive_summary(TemplateAdaptiveSummary {
+    let coupling = TemplateCouplingSummary {
+        steps: result.iterations,
+        converged_steps: if result.converged { result.iterations } else { 0 },
+        max_coupling_iters_used: result.iterations,
+    };
+    let adaptive = TemplateAdaptiveSummary {
         sync_retries: result.sync_retries,
         rejected_sync_steps: result.rejected_sync_steps,
         rollback_count: result.rollback_count,
-    });
+    };
+    print_template_adaptive_summary(adaptive);
+    if let Err(e) = maybe_write_template_kpi_csv(
+        spec.template.id(),
+        coupling,
+        adaptive,
+        &[
+            ("final_relative_change", result.final_relative_change),
+            ("sigma_effective", result.sigma_effective),
+            ("joule_power", result.joule_power),
+            ("temp_norm", result.temp_norm),
+        ],
+    ) {
+        eprintln!("warning: failed to append template KPI CSV: {e}");
+    }
 }
 
 fn solve_joule_template(args: &Args) -> JouleTemplateResult {

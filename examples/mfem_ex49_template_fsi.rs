@@ -18,6 +18,7 @@ use fem_assembly::{
     transfer_h1_p1_nonmatching_l2_projection_conservative,
 };
 use fem_examples::template_runner::{
+    maybe_write_template_kpi_csv,
     TemplateAdaptiveSummary,
     TemplateCouplingSummary,
     print_template_adaptive_summary,
@@ -105,11 +106,12 @@ fn main() {
 
     let result = solve_fsi_template(&args);
 
-    print_template_coupling_summary(TemplateCouplingSummary {
+    let coupling = TemplateCouplingSummary {
         steps: result.steps,
         converged_steps: result.converged_steps,
         max_coupling_iters_used: result.max_coupling_iters_used,
-    });
+    };
+    print_template_coupling_summary(coupling);
     println!(
         "  max transfer integral error: {:.3e}",
         result.max_transfer_abs_int_err
@@ -118,11 +120,25 @@ fn main() {
     println!("  final wall displacement: {:.6e}", result.final_wall_displacement);
     println!("  final ||p||_2: {:.6e}", result.final_pressure_norm);
     println!("  final pressure checksum: {:.8e}", result.final_pressure_checksum);
-    print_template_adaptive_summary(TemplateAdaptiveSummary {
+    let adaptive = TemplateAdaptiveSummary {
         sync_retries: result.sync_retries,
         rejected_sync_steps: result.rejected_sync_steps,
         rollback_count: result.rollback_count,
-    });
+    };
+    print_template_adaptive_summary(adaptive);
+    if let Err(e) = maybe_write_template_kpi_csv(
+        spec.template.id(),
+        coupling,
+        adaptive,
+        &[
+            ("max_transfer_abs_int_err", result.max_transfer_abs_int_err),
+            ("max_wall_displacement", result.max_wall_displacement),
+            ("final_wall_displacement", result.final_wall_displacement),
+            ("final_pressure_norm", result.final_pressure_norm),
+        ],
+    ) {
+        eprintln!("warning: failed to append template KPI CSV: {e}");
+    }
 }
 
 fn solve_fsi_template(args: &Args) -> FsiTemplateResult {

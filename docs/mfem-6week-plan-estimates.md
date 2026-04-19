@@ -58,7 +58,7 @@ Scope: Convert current "feature mostly present" status into measurable, repeatab
 ## Delivery Goals
 
 1. HDF5/XDMF checkpoint-restart parity reaches stable CI acceptance.
-2. hypre-equivalent route (AMS/ADS/AIR) moves from baseline to hardened parity behavior.
+2. Native AMG route (AMS/ADS/AIR) moves from baseline to hardened parity behavior.
 3. Netgen/Abaqus import-export reaches high-fidelity round-trip validation.
 4. A unified parity acceptance matrix becomes the release gate.
 
@@ -88,7 +88,7 @@ Week 1 subtotal: 5.0 PD
 
 Week 2 subtotal: 6.5 PD
 
-### Week 3: hypre-equivalent Hardening (AMS/ADS/AIR)
+### Week 3: Native AMG Hardening (AMS/ADS/AIR)
 
 | ID | Task | Owner Suggestion | Estimate (PD) | Output |
 |---|---|---|---:|---|

@@ -30,10 +30,6 @@ jobs:
         include:
           - profile: baseline
             args: --no-default-features
-          - profile: hypre-rs
-            args: --no-default-features --features hypre-rs
-          - profile: petsc-rs
-            args: --no-default-features --features petsc-rs
           - profile: mumps
             args: --no-default-features --features mumps
           - profile: mkl
@@ -58,4 +54,4 @@ jobs:
           set -euo pipefail
           cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} parse_backend_request_supports_canonical_paths -- --nocapture
           cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} backend_report_defaults_to_native_cpu -- --nocapture
-          cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} backend_report_mkl_defaults_to_fallback_until_wiring -- --nocapture
+          cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} backend_report_mkl_resolves_to_native_linger -- --nocapture

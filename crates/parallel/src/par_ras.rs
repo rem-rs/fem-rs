@@ -23,6 +23,63 @@ pub enum RasLocalSolverKind {
     Ilu0,
 }
 
+/// Rank-aggregated diagnostics useful for large-scale RAS runs.
+#[derive(Debug, Clone)]
+pub struct RasHpcDiagnostics {
+    pub n_ranks: usize,
+    pub global_owned_dofs: usize,
+    pub global_ghost_dofs: usize,
+    pub global_diag_nnz: usize,
+    pub global_offd_nnz: usize,
+    pub mean_owned_dofs_per_rank: f64,
+    pub mean_ghost_dofs_per_rank: f64,
+    /// Coefficient of variation (std/mean) for owned DOFs per rank.
+    pub owned_dofs_cv: f64,
+    /// Coefficient of variation (std/mean) for ghost DOFs per rank.
+    pub ghost_dofs_cv: f64,
+}
+
+/// Build an aggregated parallel-health summary for the current distributed matrix.
+pub fn summarize_ras_hpc(a: &ParCsrMatrix) -> RasHpcDiagnostics {
+    let comm = a.comm();
+    let n_ranks = comm.size();
+
+    let owned = a.n_owned as f64;
+    let ghost = a.n_ghost as f64;
+    let owned_sq = owned * owned;
+    let ghost_sq = ghost * ghost;
+
+    let sum_owned = comm.allreduce_sum_f64(owned);
+    let sum_ghost = comm.allreduce_sum_f64(ghost);
+    let sum_owned_sq = comm.allreduce_sum_f64(owned_sq);
+    let sum_ghost_sq = comm.allreduce_sum_f64(ghost_sq);
+
+    let mean_owned = sum_owned / n_ranks as f64;
+    let mean_ghost = sum_ghost / n_ranks as f64;
+    let var_owned = (sum_owned_sq / n_ranks as f64 - mean_owned * mean_owned).max(0.0);
+    let var_ghost = (sum_ghost_sq / n_ranks as f64 - mean_ghost * mean_ghost).max(0.0);
+
+    let owned_cv = if mean_owned > 1e-30 { var_owned.sqrt() / mean_owned } else { 0.0 };
+    let ghost_cv = if mean_ghost > 1e-30 { var_ghost.sqrt() / mean_ghost } else { 0.0 };
+
+    let local_diag_nnz = a.diag.values.len() as i64;
+    let local_offd_nnz = a.offd.values.len() as i64;
+    let global_diag_nnz = comm.allreduce_sum_i64(local_diag_nnz).max(0) as usize;
+    let global_offd_nnz = comm.allreduce_sum_i64(local_offd_nnz).max(0) as usize;
+
+    RasHpcDiagnostics {
+        n_ranks,
+        global_owned_dofs: sum_owned.max(0.0) as usize,
+        global_ghost_dofs: sum_ghost.max(0.0) as usize,
+        global_diag_nnz,
+        global_offd_nnz,
+        mean_owned_dofs_per_rank: mean_owned,
+        mean_ghost_dofs_per_rank: mean_ghost,
+        owned_dofs_cv: owned_cv,
+        ghost_dofs_cv: ghost_cv,
+    }
+}
+
 /// Configuration for the RAS preconditioner.
 #[derive(Debug, Clone)]
 pub struct RasConfig {
@@ -198,6 +255,20 @@ pub fn par_solve_pcg_ras(
     let n = a.n_owned;
     let precond = RasPrecond::build(a, ras_cfg)?;
 
+    if cfg.verbose && x.comm().is_root() {
+        let d = summarize_ras_hpc(a);
+        log::info!(
+            "par_pcg_ras diag: ranks={}, owned={}, ghost={}, nnz(diag/offd)={}/{}, cv(owned/ghost)={:.3}/{:.3}",
+            d.n_ranks,
+            d.global_owned_dofs,
+            d.global_ghost_dofs,
+            d.global_diag_nnz,
+            d.global_offd_nnz,
+            d.owned_dofs_cv,
+            d.ghost_dofs_cv,
+        );
+    }
+
     // r = b - A*x
     let mut r = b.clone_vec();
     let mut ax = ParVector::zeros_like(b);
@@ -282,6 +353,20 @@ pub fn par_solve_gmres_ras(
     }
 
     let precond = RasPrecond::build(a, ras_cfg)?;
+
+    if cfg.verbose && x.comm().is_root() {
+        let d = summarize_ras_hpc(a);
+        log::info!(
+            "par_gmres_ras diag: ranks={}, owned={}, ghost={}, nnz(diag/offd)={}/{}, cv(owned/ghost)={:.3}/{:.3}",
+            d.n_ranks,
+            d.global_owned_dofs,
+            d.global_ghost_dofs,
+            d.global_diag_nnz,
+            d.global_offd_nnz,
+            d.owned_dofs_cv,
+            d.ghost_dofs_cv,
+        );
+    }
     let b_norm = b.global_norm();
     if b_norm < 1e-30 {
         return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 });
@@ -459,6 +544,49 @@ mod tests {
     use fem_space::constraints::boundary_dofs;
     use fem_space::fe_space::FESpace;
     use fem_space::H1Space;
+
+    #[test]
+    fn ras_hpc_diag_serial_is_consistent() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 2);
+            let d = summarize_ras_hpc(&a_mat);
+
+            assert_eq!(d.n_ranks, 1);
+            assert!(d.global_owned_dofs > 0);
+            assert_eq!(d.owned_dofs_cv, 0.0);
+            assert!(d.global_diag_nnz > 0);
+        });
+    }
+
+    #[test]
+    fn ras_hpc_diag_two_ranks_is_finite() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 2);
+            let d = summarize_ras_hpc(&a_mat);
+
+            assert_eq!(d.n_ranks, 2);
+            assert!(d.global_owned_dofs > 0);
+            assert!(d.global_diag_nnz > 0);
+            assert!(d.owned_dofs_cv.is_finite());
+            assert!(d.ghost_dofs_cv.is_finite());
+        });
+    }
 
     #[test]
     fn par_pcg_ras_overlap_one_builds_and_gt_one_rejects() {

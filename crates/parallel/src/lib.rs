@@ -67,7 +67,10 @@ pub use par_amg::{ParAmgConfig, ParAmgHierarchy, par_solve_pcg_amg};
 pub use par_csr::ParCsrMatrix;
 pub use par_mesh::ParallelMesh;
 pub use par_mixed_assembler::ParMixedAssembler;
-pub use par_ras::{RasConfig, RasLocalSolverKind, RasPrecond, par_solve_gmres_ras, par_solve_pcg_ras};
+pub use par_ras::{
+	RasConfig, RasHpcDiagnostics, RasLocalSolverKind, RasPrecond, par_solve_gmres_ras,
+	par_solve_pcg_ras, summarize_ras_hpc,
+};
 pub use par_simplex::{partition_simplex, partition_simplex_streaming};
 pub use par_solver::{par_solve_cg, par_solve_pcg_jacobi, par_solve_minres};
 pub use par_space::ParallelFESpace;

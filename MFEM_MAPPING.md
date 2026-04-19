@@ -344,7 +344,7 @@ default (zero-cost for constants).
 | F-cycle | `CycleType::F` | �?|
 | Max levels | Max levels config | �?|
 | Coarse-grid direct solve | Dense LU | �?|
-| hypre-equivalent AMG path | pure-Rust implementation in `vendor/linger` (no external hypre FFI) | �?|
+| Native AMG path | pure-Rust implementation in `vendor/linger` | �?|
 
 ---
 
@@ -591,7 +591,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | Chebyshev smoother (AMG) | �?| ~~Medium~~ Done |
 | SLISolver (stationary iteration) | �?| ~~Low~~ Done |
 | AMG F-cycle | �?| ~~Low~~ Done |
-| hypre-equivalent AMG path | �?(pure-Rust in `vendor/linger`) | Low |
+| Native AMG path | �?(pure-Rust in `vendor/linger`) | Low |
 
 ### Spaces & Post-processing
 | Item | Status | Priority |
@@ -722,7 +722,7 @@ prioritized roadmap for continued development.
 ### Backlog (Low Priority)
 | Item | Phase | Notes |
 |------|-------|-------|
-| hypre-equivalent AMG path | pure-Rust parity track | Owned by `vendor/linger` capability roadmap |
+| Native AMG path | pure-Rust capability roadmap | Owned by `vendor/linger` |
 | Abaqus/Netgen format扩展（混合单元、更多section/tag保真�?| TBD | Additional mesh import formats |
 | HDF5/XDMF I/O | TBD | Large-scale checkpointing |
 | Restart files | TBD | Requires HDF5 |
@@ -730,21 +730,19 @@ prioritized roadmap for continued development.
 
 ### Decision Log (2026-04-13)
 
-- `hypre` capability is tracked as a pure-Rust parity roadmap item (no external `hypre-ffi` dependency), owned by `vendor/linger` and consumed by `fem-rs`.
 - GPU backend is tracked as a cross-subproject roadmap item:
    - `vendor/linger`: backend-neutral kernel interfaces and numeric primitive contracts.
    - `vendor/reed`: GPU backend implementation and CEED-style operator/resource mapping.
    - `vendor/jsmpi`: browser-side multi-rank transport/runtime for wasm deployments.
 - External solver delivery is coordinated across subprojects:
-   - `vendor/linger`: pure-Rust HYPRE-equivalent + PETSc-equivalent solver lifecycle; `mumps`/`mkl` are compatibility contracts backed by native linger direct solves.
+   - `vendor/linger`: pure-Rust native solver lifecycle; `mumps`/`mkl` are compatibility contracts backed by native linger direct solves.
    - `vendor/reed`: operator/export bridge and backend selection wiring.
    - `vendor/jsmpi`: wasm/browser runtime constraints for distributed execution path.
 - Current `linger` gaps to track under this ownership:
    - Distributed-memory path is still missing (`mpi` feature is placeholder in `vendor/linger/Cargo.toml`).
-   - HYPRE-equivalent advanced options: AMS/ADS baseline is already available in `vendor/linger`; AIR baseline strategy is landed (`CoarsenStrategy::Air` + diagonal-`A_ff` AIR restriction) with nonsymmetric regression coverage (`amg_air_gmres_nonsymmetric_convdiff_1d`), while parity hardening (especially distributed/high-scale behavior) remains pending.
-   - PETSc-equivalent KSP/PC path still needs pure-Rust completion in `vendor/linger`.
+   - Native AMG advanced options: AMS/ADS baseline is already available in `vendor/linger`; AIR baseline strategy is landed (`CoarsenStrategy::Air` + diagonal-`A_ff` AIR restriction) with nonsymmetric regression coverage (`amg_air_gmres_nonsymmetric_convdiff_1d`), while high-scale hardening remains pending.
    - Direct-compatibility hooks: `mumps` / `mkl` 均具备可用 baseline（native multifrontal-backed, factor reuse + multi-RHS）；二者均由 linger 原生直接法承载，不以外部 FFI/distributed 接入为目标。
-   - AMG options are narrower than hypre BoomerAMG/AIR ecosystem (currently RS/SA + V/W/F/K-cycle baseline).
+   - AMG options are currently RS/SA + V/W/F/K-cycle baseline, with room for high-scale robustness hardening.
    - GPU execution backend is missing in `linger` core (implementation track owned by `vendor/reed`).
    - Matrix Market complex field I/O is not yet supported (`vendor/linger/src/sparse/mmio.rs`).
 
@@ -755,30 +753,30 @@ prioritized roadmap for continued development.
 | Stage | Window | linger | reed | jsmpi | Exit Criteria |
 |---|---|---|---|---|---|
 | C1 Foundation | Q2 (2-4 weeks) | External solver abstraction, error adapter, feature-gated fallback | Stable operator/export bridge API to linger | Browser/wasm backend capability policy (supported vs fallback) | API boundary frozen; default build unchanged |
-| C2 External Solvers M1/M2 | Q2-Q3 | pure-Rust HYPRE-equivalent minimal BoomerAMG baseline, then AIR + AMS/ADS parity hardening（AMS/ADS baseline already in `linger`�? `mumps` first direct path | Builder wiring for backend selection in FEM solve paths | wasm path reports deterministic fallback when native external backends unavailable | Poisson SPD integration tests pass for enabled backends |
+| C2 Solver Hardening M1/M2 | Q2-Q3 | native AMG baseline hardening (AIR + AMS/ADS) + `mumps` direct compatibility hardening | Builder wiring for backend selection in FEM solve paths | wasm path reports deterministic fallback when native direct compatibility backends unavailable | Poisson SPD integration tests pass for enabled backends |
 | C3 GPU First Usable Path | Q3 | Backend-neutral kernel interface + CPU reference kernels | GPU backend implementation + CEED-style object mapping + one end-to-end example | Browser multi-rank transport constraints documented for GPU+wasm modes | One representative solve path runs CPU/GPU with same app API |
-| C4 Portfolio Completion | Q4 | pure-Rust PETSc-equivalent KSP/PC path; CI matrix hooks | cross-backend regression tests in FEM pipelines | Browser smoke tests and fallback matrix by feature | CI passes on feature matrix; docs and examples complete |
+| C4 Portfolio Completion | Q4 | native solver stack scale/perf hardening; CI matrix hooks | cross-backend regression tests in FEM pipelines | Browser smoke tests and fallback matrix by feature | CI passes on feature matrix; docs and examples complete |
 
 #### Work Packages
 
 - [x] WP1: Interface freeze for cross-project backend contracts
-- [ ] WP2: pure-Rust HYPRE-equivalent AIR + AMS/ADS parity hardening（`linger` �?AMS/ADS baseline 已可用，AIR baseline 已落地，仍需 parity/分布式能力补齐）
+- [ ] WP2: native AMG AIR + AMS/ADS hardening（`linger` 的 AMS/ADS 和 AIR baseline 已可用，仍需分布式/高规模能力补齐）
 - [x] WP3: `mumps` + `mkl` usable with factor reuse and multi-RHS（baseline：`linger::{MumpsSolver, MklSolver}` + `solve_sparse_{mumps,mkl}`；二者均为 linger 原生直接法的兼容入口）
 - [ ] WP4: GPU baseline delivery in `reed` (with `linger` backend-neutral kernel contracts)
-- [ ] WP5: pure-Rust PETSc-equivalent KSP/PC in `linger` + CI feature matrix
+- [ ] WP5: native solver stack CI feature matrix + scale-hardening in `linger`
 - [ ] WP6: `jsmpi` browser/wasm fallback and smoke-test closure
 
 WP1 kickoff artifact merged: `C1_BACKEND_CONTRACT_FREEZE.md` (v0.1).
 
 Current baseline progress (2026-04-13):
-- Added canonical backend-resource smoke coverage in `fem-ceed` for `/solver/hypre-rs`, `/solver/petsc-rs`, `/solver/mumps`, `/solver/mkl` deterministic resolution/report path.
+- Added canonical backend-resource smoke coverage in `fem-ceed` for `/solver/mumps`, `/solver/mkl` deterministic resolution/report path.
 - Added CI gate `.github/workflows/alignment-smoke.yml` to run targeted smoke tests for:
    - complex coefficient traits (`fem-assembly`)
    - named attribute set baseline (`fem-mesh`)
    - canonical backend resource contract (`fem-ceed`)
 - Added CI gate `.github/workflows/backend-feature-matrix.yml` to validate `vendor/reed` backend contract tests across feature profiles:
    - baseline (`--no-default-features`)
-   - `hypre-rs`, `petsc-rs`, `mumps`, `mkl`
+   - `mumps`, `mkl`
 
 #### Coordination Rules
 

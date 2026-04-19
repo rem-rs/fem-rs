@@ -1,5 +1,12 @@
 //! Shared utilities for built-in multiphysics template driver examples.
 
+use std::{
+    env,
+    fs::{File, OpenOptions},
+    io::{BufWriter, Write},
+    path::Path,
+};
+
 use fem_solver::MultiphysicsTemplateSpec;
 
 /// Standardized coupling summary reported by template drivers.
@@ -70,4 +77,76 @@ pub fn print_template_cli_help(bin: &str, options: &[(&str, &str)]) {
         println!("  {:<24} {}", flag, desc);
     }
     println!("  {:<24} {}", "-h, --help", "Show this help message and exit");
+}
+
+/// Optional KPI row written by built-in multiphysics template examples.
+///
+/// Set `FEM_TEMPLATE_KPI_CSV` to a file path to enable CSV export.
+/// Additional optional tags:
+/// - `FEM_TEMPLATE_KPI_RUN_ID`
+/// - `FEM_TEMPLATE_KPI_TAG`
+pub fn maybe_write_template_kpi_csv(
+    template_id: &str,
+    coupling: TemplateCouplingSummary,
+    adaptive: TemplateAdaptiveSummary,
+    metrics: &[(&str, f64)],
+) -> std::io::Result<()> {
+    let Some(path_value) = env::var_os("FEM_TEMPLATE_KPI_CSV") else {
+        return Ok(());
+    };
+    let path = Path::new(&path_value);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let file_exists = path.exists();
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut writer = BufWriter::new(file);
+
+    if !file_exists {
+        write_kpi_header(&mut writer)?;
+    }
+
+    let run_id = env::var("FEM_TEMPLATE_KPI_RUN_ID").unwrap_or_else(|_| "default".to_string());
+    let tag = env::var("FEM_TEMPLATE_KPI_TAG").unwrap_or_else(|_| "default".to_string());
+    write!(
+        writer,
+        "{},{},{},{},{},{},{},{},{}",
+        sanitize_csv_field(template_id),
+        sanitize_csv_field(&run_id),
+        sanitize_csv_field(&tag),
+        coupling.steps,
+        coupling.converged_steps,
+        coupling.max_coupling_iters_used,
+        adaptive.sync_retries,
+        adaptive.rejected_sync_steps,
+        adaptive.rollback_count,
+    )?;
+
+    let metrics_serialized = metrics
+        .iter()
+        .map(|(name, value)| format!("{}={:.12e}", sanitize_csv_field(name), value))
+        .collect::<Vec<_>>()
+        .join(";");
+    write!(writer, ",{}", sanitize_csv_field(&metrics_serialized))?;
+    writeln!(writer)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_kpi_header(writer: &mut BufWriter<File>) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "template_id,run_id,tag,steps,converged_steps,max_coupling_iters_used,sync_retries,rejected_sync_steps,rollback_count,metrics"
+    )
+}
+
+fn sanitize_csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }

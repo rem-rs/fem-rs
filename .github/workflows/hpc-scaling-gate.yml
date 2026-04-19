@@ -1,0 +1,197 @@
+name: HPC Scaling Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      fail_on_warn:
+        description: "Fail gate when score=warn exists"
+        required: false
+        default: "false"
+      fail_on_trend_regression:
+        description: "Fail gate when trend regression rows are detected"
+        required: false
+        default: "false"
+      baseline_path:
+        description: "Optional baseline CSV path for trend compare (defaults to docs/baselines/ras_scaling_baseline.csv)"
+        required: false
+        default: ""
+      fail_on_template_warn:
+        description: "Fail template KPI gate when warn rows exist"
+        required: false
+        default: "false"
+      fail_on_template_trend_regression:
+        description: "Fail template KPI trend compare when fail rows exist"
+        required: false
+        default: "false"
+      template_baseline_path:
+        description: "Optional baseline CSV path for template KPI trend compare (defaults to docs/baselines/template_kpi_baseline.csv)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 2 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: hpc-scaling-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scaling:
+    name: RAS scaling benchmark gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.REM_RS_SUBMODULES_TOKEN || github.token }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run scaling benchmark
+        shell: pwsh
+        env:
+          RAS_STRONG_EFF_WARN: "0.25"
+          RAS_STRONG_EFF_FAIL: "0.08"
+          RAS_WEAK_GROWTH_WARN: "12.0"
+          RAS_WEAK_GROWTH_FAIL: "22.0"
+          RAS_OWNED_CV_WARN: "0.20"
+          RAS_OWNED_CV_FAIL: "0.35"
+          RAS_GHOST_CV_WARN: "0.35"
+          RAS_GHOST_CV_FAIL: "0.55"
+        run: |
+          $env:RAS_SCALING_CSV = "output/ras_scaling.csv"
+          cargo test -p fem-parallel ras_scaling_report_pcg_ilu0_overlap1 -- --ignored --nocapture
+
+      - name: Gate and optional trend compare
+        shell: pwsh
+        run: |
+          $failOnWarn = "${{ github.event.inputs.fail_on_warn }}"
+          $failOnTrend = "${{ github.event.inputs.fail_on_trend_regression }}"
+          $baseline = "${{ github.event.inputs.baseline_path }}"
+          if ([string]::IsNullOrWhiteSpace($failOnWarn)) { $failOnWarn = "false" }
+          if ([string]::IsNullOrWhiteSpace($failOnTrend)) { $failOnTrend = "false" }
+          if ([string]::IsNullOrWhiteSpace($baseline)) { $baseline = "docs/baselines/ras_scaling_baseline.csv" }
+
+          $log = "output/hpc_gate.log"
+          New-Item -ItemType Directory -Force -Path output | Out-Null
+
+          if ($failOnWarn -eq "true" -and $failOnTrend -eq "true") {
+            ./scripts/check_ras_scaling_csv.ps1 -CsvPath output/ras_scaling.csv -BaselinePath $baseline -FailOnWarn -FailOnTrendRegression -DeltaOutPath output/ras_scaling_delta.csv | Tee-Object -FilePath $log
+          } elseif ($failOnWarn -eq "true") {
+            ./scripts/check_ras_scaling_csv.ps1 -CsvPath output/ras_scaling.csv -BaselinePath $baseline -FailOnWarn -DeltaOutPath output/ras_scaling_delta.csv | Tee-Object -FilePath $log
+          } elseif ($failOnTrend -eq "true") {
+            ./scripts/check_ras_scaling_csv.ps1 -CsvPath output/ras_scaling.csv -BaselinePath $baseline -FailOnTrendRegression -DeltaOutPath output/ras_scaling_delta.csv | Tee-Object -FilePath $log
+          } else {
+            ./scripts/check_ras_scaling_csv.ps1 -CsvPath output/ras_scaling.csv -BaselinePath $baseline -DeltaOutPath output/ras_scaling_delta.csv | Tee-Object -FilePath $log
+          }
+
+      - name: Publish gate summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summaryPath = $env:GITHUB_STEP_SUMMARY
+          $logPath = "output/hpc_gate.log"
+          if (-not (Test-Path $logPath)) {
+            "## HPC Scaling Gate`n`nNo gate log found." | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+            exit 0
+          }
+
+          $gate = Select-String -Path $logPath -Pattern '^hpc_gate_summary,' | Select-Object -Last 1
+          $trend = Select-String -Path $logPath -Pattern '^hpc_trend_summary,' | Select-Object -Last 1
+          $delta = Select-String -Path $logPath -Pattern '^hpc_trend_delta_csv,' | Select-Object -Last 1
+
+          "## HPC Scaling Gate" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          "" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          if ($gate) { "- ``$($gate.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
+          if ($trend) { "- ``$($trend.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
+          if ($delta) { "- ``$($delta.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
+
+      - name: Run multiphysics template KPI sweep
+        shell: pwsh
+        run: |
+          $log = "output/template_kpi.log"
+          ./scripts/run_template_kpi_sweep.ps1 -OutputCsv output/template_kpi.csv -RunId "gha-${{ github.run_id }}" -Tag "ci-quick" | Tee-Object -FilePath $log
+
+      - name: Gate template KPI and optional trend compare
+        shell: pwsh
+        run: |
+          $failOnWarn = "${{ github.event.inputs.fail_on_template_warn }}"
+          $failOnTrend = "${{ github.event.inputs.fail_on_template_trend_regression }}"
+          $baseline = "${{ github.event.inputs.template_baseline_path }}"
+          if ([string]::IsNullOrWhiteSpace($failOnWarn)) { $failOnWarn = "false" }
+          if ([string]::IsNullOrWhiteSpace($failOnTrend)) { $failOnTrend = "false" }
+          if ([string]::IsNullOrWhiteSpace($baseline)) { $baseline = "docs/baselines/template_kpi_baseline.csv" }
+
+          $log = "output/template_kpi_gate.log"
+          if ($failOnWarn -eq "true" -and $failOnTrend -eq "true") {
+            ./scripts/check_template_kpi_csv.ps1 -CsvPath output/template_kpi.csv -BaselinePath $baseline -FailOnWarn -FailOnTrendRegression -DeltaOutPath output/template_kpi_delta.csv | Tee-Object -FilePath $log
+          } elseif ($failOnWarn -eq "true") {
+            ./scripts/check_template_kpi_csv.ps1 -CsvPath output/template_kpi.csv -BaselinePath $baseline -FailOnWarn -DeltaOutPath output/template_kpi_delta.csv | Tee-Object -FilePath $log
+          } elseif ($failOnTrend -eq "true") {
+            ./scripts/check_template_kpi_csv.ps1 -CsvPath output/template_kpi.csv -BaselinePath $baseline -FailOnTrendRegression -DeltaOutPath output/template_kpi_delta.csv | Tee-Object -FilePath $log
+          } else {
+            ./scripts/check_template_kpi_csv.ps1 -CsvPath output/template_kpi.csv -BaselinePath $baseline -DeltaOutPath output/template_kpi_delta.csv | Tee-Object -FilePath $log
+          }
+
+      - name: Publish template KPI summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summaryPath = $env:GITHUB_STEP_SUMMARY
+          $logPath = "output/template_kpi.log"
+          $gateLogPath = "output/template_kpi_gate.log"
+          if (-not (Test-Path $logPath)) {
+            "## Multiphysics Template KPI`n`nNo template KPI log found." | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+            exit 0
+          }
+
+          $kpi = Select-String -Path $logPath -Pattern '^template_kpi_summary,' | Select-Object -Last 1
+          $gate = $null
+          $trend = $null
+          $delta = $null
+          if (Test-Path $gateLogPath) {
+            $gate = Select-String -Path $gateLogPath -Pattern '^template_kpi_gate_summary,' | Select-Object -Last 1
+            $trend = Select-String -Path $gateLogPath -Pattern '^template_kpi_trend_summary,' | Select-Object -Last 1
+            $delta = Select-String -Path $gateLogPath -Pattern '^template_kpi_delta_csv,' | Select-Object -Last 1
+          }
+          "## Multiphysics Template KPI" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          "" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          if ($kpi) { "- ``$($kpi.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
+          if ($gate) { "- ``$($gate.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
+          if ($trend) { "- ``$($trend.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
+          if ($delta) { "- ``$($delta.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
+
+      - name: Upload scaling CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ras-scaling-csv
+          path: output/ras_scaling.csv
+
+      - name: Upload scaling delta CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ras-scaling-delta-csv
+          path: output/ras_scaling_delta.csv
+
+      - name: Upload template KPI CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: template-kpi-csv
+          path: output/template_kpi.csv
+
+      - name: Upload template KPI delta CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: template-kpi-delta-csv
+          path: output/template_kpi_delta.csv
