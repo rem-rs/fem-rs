@@ -80,9 +80,21 @@ struct DemoResult {
     xdmf_text: String,
 }
 
+fn expected_rank_values(step: u64, rank: usize) -> Vec<f64> {
+    let t = 0.1 * step as f64;
+    let start = if rank == 0 { 0 } else { 4 };
+    let end = start + 4;
+    (start..end).map(|i| i as f64 + t).collect()
+}
+
+fn expected_global_values(step: u64) -> Vec<f64> {
+    (0..8).map(|i| i as f64 + 0.1 * step as f64).collect()
+}
+
 fn run_checkpoint_demo(args: &Args) -> DemoOutcome {
     let world_size = 2usize;
     let global_len = 8u64;
+    let requested_restart_step = args.restart_step.unwrap_or(2);
 
     if let Some(parent) = std::path::Path::new(&args.out_h5).parent() {
         if !parent.as_os_str().is_empty() {
@@ -173,10 +185,15 @@ fn run_checkpoint_demo(args: &Args) -> DemoOutcome {
     let xdmf_text = std::fs::read_to_string(&args.out_xdmf)
         .expect("xdmf read failed");
 
-    assert_eq!(restart.step, 2);
+    assert_eq!(restart.step, requested_restart_step);
+    assert!((restart.time - 0.1 * requested_restart_step as f64).abs() < 1.0e-12);
     assert_eq!(restart.global_offset, 4);
     assert_eq!(restart.global_len, 8);
     assert_eq!(restart.values.len(), 4);
+    assert_eq!(restart.values, expected_rank_values(requested_restart_step, 1));
+    assert_eq!(latest_rank0.values, expected_rank_values(2, 0));
+    assert_eq!(latest_rank1.values, expected_rank_values(2, 1));
+    assert_eq!(latest_global, expected_global_values(2));
 
     DemoOutcome::Completed(DemoResult {
         schema_version: report.schema_version,
@@ -277,15 +294,28 @@ mod tests {
         match run_checkpoint_demo(&args) {
             DemoOutcome::Completed(result) => {
                 assert_eq!(result.layout_steps, 3);
+                assert_eq!(result.layout_warnings, 0);
                 assert_eq!(result.restart_step, 2);
                 assert!((result.restart_time - 0.2).abs() < 1.0e-12);
                 assert_eq!(result.restart_global_offset, 4);
                 assert_eq!(result.restart_global_len, 8);
-                assert_eq!(result.restart_values, vec![4.2, 5.2, 6.2, 7.2]);
-                assert_eq!(result.latest_rank0_values, vec![0.2, 1.2, 2.2, 3.2]);
-                assert_eq!(result.latest_rank1_values, vec![4.2, 5.2, 6.2, 7.2]);
-                assert_eq!(result.latest_global_values, vec![0.2, 1.2, 2.2, 3.2, 4.2, 5.2, 6.2, 7.2]);
+                assert_eq!(result.restart_values, expected_rank_values(2, 1));
+                assert_eq!(result.latest_rank0_values, expected_rank_values(2, 0));
+                assert_eq!(result.latest_rank1_values, expected_rank_values(2, 1));
+                assert_eq!(result.latest_global_values, expected_global_values(2));
+                let stitched: Vec<f64> = result
+                    .latest_rank0_values
+                    .iter()
+                    .chain(result.latest_rank1_values.iter())
+                    .copied()
+                    .collect();
+                assert_eq!(stitched, result.latest_global_values);
                 assert!(result.xdmf_text.contains("CollectionType=\"Temporal\""));
+                assert!(result.xdmf_text.contains("Value=\"0\""));
+                assert!(result.xdmf_text.contains("Value=\"0.1\""));
+                assert!(result.xdmf_text.contains("Value=\"0.2\""));
+                assert!(result.xdmf_text.contains("/global_fields/step_00000000/u"));
+                assert!(result.xdmf_text.contains("/global_fields/step_00000001/u"));
                 assert!(result.xdmf_text.contains("/global_fields/step_00000002/u"));
             }
             DemoOutcome::Hdf5Disabled => {}
@@ -310,8 +340,12 @@ mod tests {
             DemoOutcome::Completed(result) => {
                 assert_eq!(result.restart_step, 1);
                 assert!((result.restart_time - 0.1).abs() < 1.0e-12);
-                assert_eq!(result.restart_values, vec![4.1, 5.1, 6.1, 7.1]);
-                assert_eq!(result.latest_global_values, vec![0.2, 1.2, 2.2, 3.2, 4.2, 5.2, 6.2, 7.2]);
+                assert_eq!(result.restart_global_offset, 4);
+                assert_eq!(result.restart_global_len, 8);
+                assert_eq!(result.restart_values, expected_rank_values(1, 1));
+                assert_eq!(result.latest_rank0_values, expected_rank_values(2, 0));
+                assert_eq!(result.latest_rank1_values, expected_rank_values(2, 1));
+                assert_eq!(result.latest_global_values, expected_global_values(2));
             }
             DemoOutcome::Hdf5Disabled => {}
             DemoOutcome::Hdf5MpiDisabled => panic!("partitioned backend should not report hdf5-mpi feature disabled"),
@@ -334,13 +368,36 @@ mod tests {
         match run_checkpoint_demo(&args) {
             DemoOutcome::Completed(result) => {
                 assert_eq!(result.layout_steps, 3);
+                assert_eq!(result.layout_warnings, 0);
                 assert_eq!(result.restart_values.len(), 4);
+                assert_eq!(result.latest_global_values, expected_global_values(2));
             }
             DemoOutcome::Hdf5Disabled | DemoOutcome::Hdf5MpiDisabled => {}
         }
 
         let _ = std::fs::remove_file(out_h5);
         let _ = std::fs::remove_file(out_xdmf);
+    }
+
+    #[test]
+    fn ex43_rank_field_generation_matches_partition_contract() {
+        let rank0 = make_rank_field(0, 8, 0.2);
+        let rank1 = make_rank_field(1, 8, 0.2);
+
+        assert_eq!(rank0.global_offset, 0);
+        assert_eq!(rank1.global_offset, 4);
+        assert_eq!(rank0.global_len, 8);
+        assert_eq!(rank1.global_len, 8);
+        assert_eq!(rank0.values, expected_rank_values(2, 0));
+        assert_eq!(rank1.values, expected_rank_values(2, 1));
+        assert_eq!(
+            rank0.values
+                .iter()
+                .chain(rank1.values.iter())
+                .copied()
+                .collect::<Vec<_>>(),
+            expected_global_values(2)
+        );
     }
 }
 

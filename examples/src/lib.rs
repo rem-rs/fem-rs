@@ -12,6 +12,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementType, MeshTopology, SimplexMesh};
 
 pub mod maxwell;
+pub mod template_runner;
 pub use maxwell::{
     FirstOrderMaxwell3DSkeleton,
     FirstOrderMaxwellOp,

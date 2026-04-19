@@ -56,6 +56,16 @@ pub struct NewtonConfig {
     pub max_iter: usize,
     /// Linear solver tolerance for each Jacobian solve (default 1e-10).
     pub linear_tol: f64,
+    /// Enable backtracking line-search on Newton updates.
+    pub line_search: bool,
+    /// Minimum step size in line-search.
+    pub line_search_min_alpha: f64,
+    /// Multiplicative shrink factor used during backtracking (0, 1).
+    pub line_search_shrink: f64,
+    /// Maximum number of backtracking reductions per Newton iteration.
+    pub line_search_max_backtracks: usize,
+    /// Sufficient residual decrease factor for Armijo-like acceptance.
+    pub line_search_sufficient_decrease: f64,
     /// Print residual each iteration.
     pub verbose: bool,
 }
@@ -67,6 +77,11 @@ impl Default for NewtonConfig {
             rtol:       1e-8,
             max_iter:   50,
             linear_tol: 1e-10,
+            line_search: true,
+            line_search_min_alpha: 1e-6,
+            line_search_shrink: 0.5,
+            line_search_max_backtracks: 20,
+            line_search_sufficient_decrease: 1e-4,
             verbose:    false,
         }
     }
@@ -112,6 +127,8 @@ impl NewtonSolver {
 
         let mut r   = vec![0.0_f64; n];
         let mut du  = vec![0.0_f64; n];
+        let mut u_trial = vec![0.0_f64; n];
+        let mut r_trial = vec![0.0_f64; n];
 
         // Initial residual
         form.residual(u, rhs, &mut r);
@@ -138,9 +155,44 @@ impl NewtonSolver {
             solve_gmres(&jac, &neg_r, &mut du, 30, &linear_cfg)
                 .map_err(|_| NewtonResult { converged: false, iterations: iter, final_residual: r_norm })?;
 
-            // Update: u ← u + Δu
-            for (ui, &dui) in u.iter_mut().zip(du.iter()) {
-                *ui += dui;
+            if self.cfg.line_search {
+                let mut alpha = 1.0_f64;
+                let mut accepted = false;
+                let mut best_norm = f64::INFINITY;
+                let mut best_alpha = 1.0_f64;
+
+                for _ in 0..=self.cfg.line_search_max_backtracks {
+                    for i in 0..n {
+                        u_trial[i] = u[i] + alpha * du[i];
+                    }
+                    form.residual(&u_trial, rhs, &mut r_trial);
+                    let trial_norm = norm2(&r_trial);
+                    if trial_norm < best_norm {
+                        best_norm = trial_norm;
+                        best_alpha = alpha;
+                    }
+
+                    let target = ((1.0 - self.cfg.line_search_sufficient_decrease * alpha).max(0.0)) * r_norm;
+                    if trial_norm <= target || trial_norm < r_norm {
+                        accepted = true;
+                        break;
+                    }
+
+                    if alpha <= self.cfg.line_search_min_alpha {
+                        break;
+                    }
+                    alpha *= self.cfg.line_search_shrink;
+                }
+
+                let use_alpha = if accepted { alpha } else { best_alpha };
+                for i in 0..n {
+                    u[i] += use_alpha * du[i];
+                }
+            } else {
+                // Update: u ← u + Δu
+                for (ui, &dui) in u.iter_mut().zip(du.iter()) {
+                    *ui += dui;
+                }
             }
 
             // Recompute residual

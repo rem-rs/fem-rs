@@ -1093,9 +1093,45 @@ pub fn into_result(r: linger::SolverResult) -> SolveResult {
 pub mod block;
 pub mod eigen;
 pub mod lor;
+pub mod multirate;
+pub mod multiphysics_sync;
+pub mod multiphysics;
+pub mod multiphysics_templates;
 pub mod ode;
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use eigen::{lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};
+pub use multiphysics::{
+    CoupledProblem,
+    CoupledLinearStrategy,
+    CoupledNewtonConfig,
+    CoupledNewtonResult,
+    CoupledNewtonSolver,
+    CoupledSolveError,
+};
+pub use multiphysics_sync::{
+    RelativeL2Tracker,
+    RelativeScalarTracker,
+    TemplateSyncPolicy,
+    compose_sync_error,
+    compose_weighted_sync_error,
+};
+pub use multiphysics_templates::{
+    BuiltinMultiphysicsTemplate,
+    MultiphysicsTemplateNode,
+    MultiphysicsTemplateSpec,
+    TemplateCouplingStyle,
+    TemplateRuntimeConfig,
+    builtin_template_catalog,
+    builtin_template_spec,
+};
+pub use multirate::{
+    MultiRateAdaptiveConfig,
+    MultiRateConfig,
+    MultiRateError,
+    MultiRateStats,
+    run_multirate,
+    run_multirate_adaptive,
+};
 
 #[cfg(test)]
 mod linger_integration_tests {

@@ -47,6 +47,7 @@ pub mod vector_boundary;
 pub mod grid_function;
 pub mod postprocess;
 pub mod discrete_op;
+pub mod transfer;
 
 pub use assembler::{Assembler, face_dofs_p1, face_dofs_p2};
 pub use backend::{CsrLinearOperator, LinearOperator, OperatorBackend};
@@ -71,3 +72,15 @@ pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator};
 pub use grid_function::GridFunction;
 pub use postprocess::{compute_element_gradients, compute_h1_error, compute_kelly_indicators, recover_gradient_nodal};
+pub use transfer::{
+    net_boundary_flux_h1_p1_2d,
+    transfer_h1_p1_nonmatching,
+    transfer_h1_p1_nonmatching_3d,
+    transfer_h1_p1_nonmatching_l2_projection,
+    transfer_h1_p1_nonmatching_l2_projection_3d,
+    transfer_h1_p1_nonmatching_l2_projection_conservative,
+    transfer_h1_p1_nonmatching_l2_projection_conservative_3d,
+    ConservativeTransferReport,
+    TransferError,
+    TransferStats,
+};

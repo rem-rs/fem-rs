@@ -47,13 +47,52 @@ struct SolveResult {
     solution_checksum: f64,
 }
 
+#[derive(Clone, Copy)]
+struct LineSearchOptions {
+    enabled: bool,
+    min_alpha: f64,
+    shrink: f64,
+    max_backtracks: usize,
+    sufficient_decrease: f64,
+}
+
+#[cfg(test)]
+fn default_line_search_options() -> LineSearchOptions {
+    LineSearchOptions {
+        enabled: true,
+        min_alpha: 1e-6,
+        shrink: 0.5,
+        max_backtracks: 20,
+        sufficient_decrease: 1e-4,
+    }
+}
+
 fn main() {
     let args = parse_args();
     println!("=== fem-rs Example 16: Nonlinear heat equation (Newton) ===");
     println!("  Mesh: {}×{} subdivisions, P1 elements", args.n, args.n);
     println!("  κ(u) = 1 + u²,  Newton tol = {:.0e}", args.newton_tol);
+    println!(
+        "  line-search: enabled={}, min_alpha={}, shrink={}, max_backtracks={}, c1={}",
+        args.ls_enabled,
+        args.ls_min_alpha,
+        args.ls_shrink,
+        args.ls_max_backtracks,
+        args.ls_c1,
+    );
 
-    let result = solve_case(args.n, args.newton_tol, 1.0);
+    let result = solve_case_with_ls(
+        args.n,
+        args.newton_tol,
+        1.0,
+        LineSearchOptions {
+            enabled: args.ls_enabled,
+            min_alpha: args.ls_min_alpha,
+            shrink: args.ls_shrink,
+            max_backtracks: args.ls_max_backtracks,
+            sufficient_decrease: args.ls_c1,
+        },
+    );
 
     println!("  Confirmed Newton tol = {:.0e}", result.newton_tol);
     println!("  DOFs: {}", result.n_dofs);
@@ -70,7 +109,17 @@ fn main() {
     println!("\nDone.");
 }
 
+#[cfg(test)]
 fn solve_case(n: usize, newton_tol: f64, exact_scale: f64) -> SolveResult {
+    solve_case_with_ls(n, newton_tol, exact_scale, default_line_search_options())
+}
+
+fn solve_case_with_ls(
+    n: usize,
+    newton_tol: f64,
+    exact_scale: f64,
+    ls: LineSearchOptions,
+) -> SolveResult {
     // ─── 1. Mesh and H¹ space ─────────────────────────────────────────────────
     let mesh  = SimplexMesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
@@ -121,6 +170,11 @@ fn solve_case(n: usize, newton_tol: f64, exact_scale: f64) -> SolveResult {
         rtol:       newton_tol * 1e2,
         max_iter:   50,
         linear_tol: newton_tol * 0.1,
+        line_search: ls.enabled,
+        line_search_min_alpha: ls.min_alpha,
+        line_search_shrink: ls.shrink,
+        line_search_max_backtracks: ls.max_backtracks,
+        line_search_sufficient_decrease: ls.sufficient_decrease,
         verbose:    true,
     };
     let solver = NewtonSolver::new(cfg);
@@ -164,15 +218,37 @@ fn solve_case(n: usize, newton_tol: f64, exact_scale: f64) -> SolveResult {
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
-struct Args { n: usize, newton_tol: f64 }
+struct Args {
+    n: usize,
+    newton_tol: f64,
+    ls_enabled: bool,
+    ls_min_alpha: f64,
+    ls_shrink: f64,
+    ls_max_backtracks: usize,
+    ls_c1: f64,
+}
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 16, newton_tol: 1e-10 };
+    let mut a = Args {
+        n: 16,
+        newton_tol: 1e-10,
+        ls_enabled: true,
+        ls_min_alpha: 1e-6,
+        ls_shrink: 0.5,
+        ls_max_backtracks: 20,
+        ls_c1: 1e-4,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--n"          => { a.n          = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
             "--newton-tol" => { a.newton_tol = it.next().unwrap_or("1e-10".into()).parse().unwrap_or(1e-10); }
+            "--no-line-search" => { a.ls_enabled = false; }
+            "--line-search" => { a.ls_enabled = true; }
+            "--ls-min-alpha" => { a.ls_min_alpha = it.next().unwrap_or("1e-6".into()).parse().unwrap_or(1e-6); }
+            "--ls-shrink" => { a.ls_shrink = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5); }
+            "--ls-max-backtracks" => { a.ls_max_backtracks = it.next().unwrap_or("20".into()).parse().unwrap_or(20); }
+            "--ls-c1" => { a.ls_c1 = it.next().unwrap_or("1e-4".into()).parse().unwrap_or(1e-4); }
             _ => {}
         }
     }

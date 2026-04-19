@@ -1,0 +1,199 @@
+name: IO Parity HDF5
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/io_hdf5_parallel/**
+      - examples/mfem_ex43_hdf5_checkpoint.rs
+      - .github/workflows/io-parity-hdf5.yml
+      - docs/mfem-parity-matrix-template.md
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: io-parity-hdf5-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hdf5-smoke:
+    name: HDF5 smoke (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [partitioned, mpi]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run IO parity smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+
+          TMP_ROOT="$(mktemp -d)"
+          cp -R crates/io_hdf5_parallel "${TMP_ROOT}/io_hdf5_parallel"
+          mkdir -p "${TMP_ROOT}/ex43_runner/src"
+          cp examples/mfem_ex43_hdf5_checkpoint.rs "${TMP_ROOT}/ex43_runner/src/main.rs"
+
+          cat > "${TMP_ROOT}/Cargo.toml" <<'EOF'
+          [workspace]
+          resolver = "2"
+          members = ["io_hdf5_parallel", "ex43_runner"]
+
+          [workspace.dependencies]
+          thiserror = "2"
+          serde = { version = "1", features = ["derive"] }
+          mpi = { version = "0.8", features = ["user-operations"] }
+          EOF
+
+          cat > "${TMP_ROOT}/ex43_runner/Cargo.toml" <<'EOF'
+          [package]
+          name = "ex43-runner"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          fem-io-hdf5-parallel = { path = "../io_hdf5_parallel" }
+          EOF
+
+          if [[ "${{ matrix.backend }}" == "partitioned" ]]; then
+            cargo test --manifest-path "${TMP_ROOT}/io_hdf5_parallel/Cargo.toml" -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" ex43_rank_field_generation_matches_partition_contract -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" ex43_checkpoint_can_restart_from_requested_step -- --nocapture
+            cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
+              --backend partitioned \
+              --restart-step 2 \
+              --out-h5 output/ci_ex43_partitioned.h5 \
+              --out-xdmf output/ci_ex43_partitioned.xdmf
+          else
+            cargo test --manifest-path "${TMP_ROOT}/io_hdf5_parallel/Cargo.toml" -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" ex43_mpi_backend_reports_feature_gate_or_succeeds -- --nocapture
+            cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
+              --backend mpi \
+              --restart-step 2 \
+              --out-h5 output/ci_ex43_mpi.h5 \
+              --out-xdmf output/ci_ex43_mpi.xdmf
+          fi
+
+      - name: Upload IO artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: io-parity-smoke-${{ matrix.backend }}
+          path: |
+            output/*.h5
+            output/*.xdmf
+
+  hdf5-full:
+    name: HDF5 full (${{ matrix.backend }})
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [partitioned, mpi]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run IO parity full checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+
+          TMP_ROOT="$(mktemp -d)"
+          cp -R crates/io_hdf5_parallel "${TMP_ROOT}/io_hdf5_parallel"
+          mkdir -p "${TMP_ROOT}/ex43_runner/src"
+          cp examples/mfem_ex43_hdf5_checkpoint.rs "${TMP_ROOT}/ex43_runner/src/main.rs"
+
+          cat > "${TMP_ROOT}/Cargo.toml" <<'EOF'
+          [workspace]
+          resolver = "2"
+          members = ["io_hdf5_parallel", "ex43_runner"]
+
+          [workspace.dependencies]
+          thiserror = "2"
+          serde = { version = "1", features = ["derive"] }
+          mpi = { version = "0.8", features = ["user-operations"] }
+          EOF
+
+          cat > "${TMP_ROOT}/ex43_runner/Cargo.toml" <<'EOF'
+          [package]
+          name = "ex43-runner"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          fem-io-hdf5-parallel = { path = "../io_hdf5_parallel" }
+          EOF
+
+          if [[ "${{ matrix.backend }}" == "partitioned" ]]; then
+            cargo test --manifest-path "${TMP_ROOT}/io_hdf5_parallel/Cargo.toml" -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- --nocapture
+            cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
+              --backend partitioned \
+              --restart-step 2 \
+              --out-h5 output/ci_ex43_partitioned_full.h5 \
+              --out-xdmf output/ci_ex43_partitioned_full.xdmf
+
+            failures=0
+            for i in $(seq 1 20); do
+              echo "[full-flaky-check] run ${i}/20"
+              if ! cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
+                --backend partitioned \
+                --restart-step 2 \
+                --out-h5 output/ci_ex43_partitioned_repeat_${i}.h5 \
+                --out-xdmf output/ci_ex43_partitioned_repeat_${i}.xdmf; then
+                failures=$((failures + 1))
+              fi
+            done
+            if [[ "$failures" -ne 0 ]]; then
+              echo "Partitioned backend flaky check failed: ${failures}/20 runs failed"
+              exit 1
+            fi
+          else
+            cargo test --manifest-path "${TMP_ROOT}/io_hdf5_parallel/Cargo.toml" -- --nocapture
+            cargo test --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- --nocapture
+            cargo run --manifest-path "${TMP_ROOT}/ex43_runner/Cargo.toml" -- \
+              --backend mpi \
+              --restart-step 2 \
+              --out-h5 output/ci_ex43_mpi_full.h5 \
+              --out-xdmf output/ci_ex43_mpi_full.xdmf
+          fi
+
+      - name: Upload IO artifacts (full)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: io-parity-full-${{ matrix.backend }}
+          path: |
+            output/*.h5
+            output/*.xdmf

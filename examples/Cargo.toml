@@ -119,6 +119,34 @@ name = "mfem_ex13_eigenvalue"
 path = "mfem_ex13_eigenvalue.rs"
 
 [[example]]
+name = "mfem_ex46_moving_mesh_heat"
+path = "mfem_ex46_moving_mesh_heat.rs"
+
+[[example]]
+name = "mfem_ex47_multiphysics_templates"
+path = "mfem_ex47_multiphysics_templates.rs"
+
+[[example]]
+name = "mfem_ex48_template_joule_heating"
+path = "mfem_ex48_template_joule_heating.rs"
+
+[[example]]
+name = "mfem_ex49_template_fsi"
+path = "mfem_ex49_template_fsi.rs"
+
+[[example]]
+name = "mfem_ex50_template_acoustics_structure"
+path = "mfem_ex50_template_acoustics_structure.rs"
+
+[[example]]
+name = "mfem_ex51_template_em_thermal_stress"
+path = "mfem_ex51_template_em_thermal_stress.rs"
+
+[[example]]
+name = "mfem_ex52_template_reaction_flow_thermal"
+path = "mfem_ex52_template_reaction_flow_thermal.rs"
+
+[[example]]
 name = "mfem_ex33_fractional_laplacian"
 path = "mfem_ex33_fractional_laplacian.rs"
 
@@ -141,6 +169,14 @@ path = "mfem_ex41_imex.rs"
 [[example]]
 name = "mfem_ex43_hdf5_checkpoint"
 path = "mfem_ex43_hdf5_checkpoint.rs"
+
+[[example]]
+name = "mfem_ex44_thermoelastic_coupled"
+path = "mfem_ex44_thermoelastic_coupled.rs"
+
+[[example]]
+name = "mfem_ex45_moving_mesh_ale"
+path = "mfem_ex45_moving_mesh_ale.rs"
 
 [[example]]
 name = "mfem_ex3"

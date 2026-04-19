@@ -70,12 +70,10 @@ Every crate that has conditional compilation must declare its features in Cargo.
 [features]
 default = []
 mpi     = ["dep:mpi", "fem-assembly/parallel"]
-petsc   = ["dep:petsc-rs"]           # optional PETSc binding
 
 # amg/Cargo.toml
 [features]
 default = []
-hypre   = ["dep:hypre-sys"]          # bind to hypre instead of native AMG
 suitesparse = ["dep:suitesparse-sys"]
 
 # wasm/Cargo.toml — NEVER enable mpi here
@@ -297,7 +295,7 @@ impl Assembler {
 
 ## 7. AMG Design (fem-amg)
 
-Native AMG without hypre dependency. Structure:
+Native AMG pure-Rust path. Structure:
 
 ```
 AmgSolver

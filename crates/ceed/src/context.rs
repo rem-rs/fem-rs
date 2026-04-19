@@ -76,7 +76,7 @@ impl FemCeed {
 
     /// Construct from a canonical backend resource string.
     ///
-    /// Examples: `/native/linger`, `/gpu/wgpu`, `/solver/mkl`, `/solver/petsc-rs`.
+    /// Examples: `/native/linger`, `/gpu/wgpu`, `/solver/mkl`.
     ///
     /// Returns both the `FemCeed` context and the reed backend selection report
     /// so callers can inspect deterministic fallback behavior.
@@ -336,12 +336,7 @@ mod tests {
 
     #[test]
     fn backend_resource_all_canonical_solver_ids_have_deterministic_resolution() {
-        for resource in [
-            "/solver/hypre-rs",
-            "/solver/petsc-rs",
-            "/solver/mumps",
-            "/solver/mkl",
-        ] {
+        for resource in ["/solver/mumps", "/solver/mkl"] {
             let (ceed, report) = FemCeed::from_backend_resource(resource)
                 .unwrap_or_else(|e| panic!("resource {resource} should resolve deterministically: {e:?}"));
             assert_eq!(ceed.backend(), CeedBackend::ReedCpu);

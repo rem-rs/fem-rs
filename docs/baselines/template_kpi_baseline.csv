@@ -1,0 +1,6 @@
+template_id,run_id,tag,steps,converged_steps,max_coupling_iters_used,sync_retries,rejected_sync_steps,rollback_count,metrics
+joule_heating,baseline,quick,4,0,4,0,0,0,final_relative_change=1.936142818848e-2;sigma_effective=5.012875017737e0;joule_power=5.012875017737e0;temp_norm=1.619336558127e0
+fsi,baseline,quick,4,0,4,0,0,0,max_transfer_abs_int_err=1.554312234475e-15;max_wall_displacement=1.284967395197e-2;final_wall_displacement=1.284967395197e-2;final_pressure_norm=6.881261998921e0
+acoustics_structure,baseline,quick,4,0,4,0,0,0,max_abs_interface_displacement=1.336281001325e-2;final_interface_displacement=1.336281001325e-2;final_pressure_norm=4.192748022491e0;convergence_ratio=0.000000000000e0
+electromagnetic_thermal_stress,baseline,quick,4,0,4,0,0,0,max_joule_power=8.299972639811e0;final_mean_temp=2.190671512709e-1;final_displacement_proxy=4.381343025418e-3;final_stress_proxy=4.381343025418e-1
+reaction_flow_thermal,baseline,quick,4,1,4,0,0,0,max_reaction_rate=7.999999885209e-1;final_flow_metric=1.229573619973e0;final_species_norm=5.656228160805e0;final_temperature_norm=7.449879101897e-1

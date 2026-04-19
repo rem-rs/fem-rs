@@ -57,6 +57,7 @@
 | 52 | space+assembly | ✅ Done | 2026-04-10 | L2Space extended to discontinuous P2 (Tri: 6 DOFs/elem, Tet: 10 DOFs/elem); DiscreteLinearOperator extended to ND2->L2(P2) and RT1->L2(P2) in 2D/3D; added dimension + commuting + de Rham tests including 3D RT1->L2(P2) and div(curl)=0 with L2(P2) |
 | 53 | vendor | ✅ Done | 2026-04-10 | reed submodule synchronized with upstream main: fixed `basis_h1_simplex` backend dispatch to lock backend (`Arc<Mutex<...>>`) before method call; published in rem-rs/reed and bumped fem-rs submodule pointer to commit `e9772a3` |
 | 54 | assembly+examples | ✅ Done | 2026-04-11 | **Full Maxwell completion (MFEM parity):** (a) `CurlCurlTensorIntegrator<MatrixCoeff>` + `VectorMassTensorIntegrator<MatrixCoeff>` — anisotropic μ/ε tensors; (b) `VectorBoundaryAssembler` + `TangentialMassIntegrator` — `∫_Γ γ(n×u)·(n×v) dS` for Silver-Müller ABC / impedance BC; (c) `mfem_ex10_maxwell_time.rs` — time-domain `εÜ + σU̇ + KU = J(t)` with damped Newmark-β, manufactured solution verified; (d) `mfem_ex13_eigenvalue.rs` — cavity resonance via dense generalized eigensolver on free-DOF subspace, 6 eigenvalues converge at O(h²); exact 2D curl-curl spectrum: single-component modes (m²π², mult 2) + stream-function modes ((m²+n²)π²); 5 new tests (tensor identity, boundary symmetry/PSD/empty-tag); MAXWELL_GAPS.md gap analysis document |
+| 55 | parallel | ✅ Done | 2026-04-19 | **DDM (RAS) rollout:** added `par_solve_pcg_ras` + `par_solve_gmres_ras`; local kernels `DiagJacobi` and `Ilu0`; overlap contract `{0,1}` with overlap=1 multiplicative two-stage correction; 14 regression tests covering serial + 2-rank paths; benchmark harness (`crates/parallel/tests/ras_benchmark.rs`) with optional `RAS_BENCH_CSV` export for trend tracking |
 
 ### Week-1 High-Order Discrete-Operator Coverage (Phase 53 kickoff)
 
@@ -367,7 +368,7 @@ pub struct AmgParams {
 ### Acceptance criteria
 - Setup + solve time for 3D Poisson (1M DOFs) < 10s on 8-core desktop
 - Convergence factor per V-cycle < 0.15 for Laplacian
-- `hypre` feature: delegate to hypre BoomerAMG when available
+- Pure-Rust AMG path remains the default and only supported route
 
 ---
 
@@ -410,7 +411,7 @@ parallel/src/
 ├── par_mesh.rs      # ParallelMesh: distribute SimplexMesh across ranks
 ├── par_linalg.rs    # ParCsrMatrix, ParVector
 ├── par_assembly.rs  # Parallel assembly loop + ghost exchange
-└── par_amg.rs       # Parallel AMG (BoomerAMG via hypre or native)
+└── par_amg.rs       # Parallel AMG (native pure-Rust path)
 ```
 
 ### Ghost DOF Communication Pattern
@@ -618,7 +619,7 @@ Complete the `fem-parallel` crate with METIS-based partitioning and distributed 
 - `partition.rs`: METIS binding via `metis-sys` crate; k-way partitioning
 - `par_mesh.rs`: `ParallelMesh` distributing `SimplexMesh` across MPI ranks
 - `par_assembly.rs`: parallel assembly loop with ghost exchange (uses existing GhostExchange)
-- `par_amg.rs`: parallel AMG — either native (aggregate across ranks) or BoomerAMG via hypre feature
+- `par_amg.rs`: parallel AMG — native aggregate path across ranks
 
 ### Acceptance criteria
 - 4-rank Poisson: solution matches serial reference (max diff < 1e-12)

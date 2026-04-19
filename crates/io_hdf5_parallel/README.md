@@ -17,9 +17,9 @@ This crate provides:
 
 ## Features
 
-- `default` (no HDF5 backend): API is available, runtime returns `Hdf5FeatureDisabled`.
-- `hdf5`: Enables real HDF5 backend via crate `hdf5`.
-- `hdf5-mpi`: Enables MPI-coordinated backend (rank writes + direct hyperslab global writes, with root materialization compatibility fallback).
+- `default` (pure-Rust backend): API is fully usable without native HDF5 installation.
+- `hdf5`: Enables native HDF5 backend via crate `hdf5` (optional).
+- `hdf5-mpi`: Enables MPI-coordinated native backend (rank writes + direct hyperslab global writes, with root materialization compatibility fallback).
 
 ## Typical flow
 
@@ -34,10 +34,12 @@ Backend selection API:
 - `IoBackend::Partitioned` (stable baseline)
 - `IoBackend::MpiCollective` (MPI-coordinated checkpoint path with direct HDF5 hyperslab global write path)
 
-## Build notes for `hdf5`
+## Build notes for optional `hdf5`
+
+Pure-Rust default builds do not require native HDF5. Native `hdf5` builds are optional.
 
 `hdf5-sys` requires HDF5 headers/libs. On systems without HDF5 installed,
-`cargo check --features hdf5` will fail with a missing HDF5 root error.
+`cargo check --features hdf5` may fail with a missing HDF5 root error.
 
 Set one of these before building:
 

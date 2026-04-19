@@ -11,6 +11,7 @@ fem-space    = { path = "../space" }
 fem-assembly = { path = "../assembly" }
 fem-element  = { path = "../element" }
 fem-solver   = { path = "../solver" }
+linger       = { path = "../../vendor/linger", default-features = false, features = ["rayon"] }
 log          = { workspace = true }
 bytemuck     = { workspace = true }
 

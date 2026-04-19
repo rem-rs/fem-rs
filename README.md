@@ -108,6 +108,16 @@ See [DESIGN_PLAN.md](DESIGN_PLAN.md) for the full phase-by-phase implementation 
 
 See [MFEM_MAPPING.md](MFEM_MAPPING.md) for a feature-by-feature correspondence with MFEM.
 
+See [MFEM_ALIGNMENT_TRACKER.md](MFEM_ALIGNMENT_TRACKER.md) for the unified parity tracker and priority gaps.
+
+See [docs/mfem-parity-matrix-template.md](docs/mfem-parity-matrix-template.md) for measurable parity acceptance gates.
+
+See [docs/mfem-6week-plan-estimates.md](docs/mfem-6week-plan-estimates.md) for the current 6-week execution and effort plan.
+
+See [docs/mfem-baseline-snapshot-2026-04-18.md](docs/mfem-baseline-snapshot-2026-04-18.md) for the latest command-backed baseline snapshot.
+
+See [docs/ras-ddm-status-2026-04-19.md](docs/ras-ddm-status-2026-04-19.md) for the current Domain Decomposition (RAS) implementation status, benchmark commands, and latest results.
+
 ---
 
 ## Development
@@ -151,7 +161,7 @@ Phase 52 complete. 520+ tests passing across the workspace.
 | `fem-solver` | �?Complete | CG/PCG+Jacobi/ILU0/ILDLt, GMRES, BiCGSTAB, IDR(s), TFQMR, FGMRES; sparse direct: LU/Cholesky/LDLᵀ; LOBPCG + KrylovSchur; MINRES; Schur complement; ODE: Euler/RK4/RK45/SDIRK-2/BDF-2/Newmark-β/Generalized-α/IMEX-Euler/IMEX-SSP2/IMEX-ARK3 + ImexOperator/ImexTimeStepper |
 | `fem-amg` | �?Complete | SA-AMG + RS-AMG, Chebyshev smoother, V/W/F cycles, reusable hierarchy (via linger) |
 | `fem-io` | �?Complete | GMSH v2/v4.1 ASCII+binary reader; VTK .vtu XML writer + reader; Matrix Market .mtx reader/writer |
-| `fem-parallel` | �?Complete | ChannelBackend (multi-thread), NativeMPI backend, GhostExchange, METIS k-way partitioning, streaming partition, WASM multi-Worker |
+| `fem-parallel` | �?Complete | ChannelBackend (multi-thread), NativeMPI backend, GhostExchange, METIS k-way partitioning, streaming partition, WASM multi-Worker, RAS preconditioning (PCG/GMRES, overlap 0/1, Diag/ILU0 local solves) |
 | `fem-wasm` | �?Complete | WasmSolver (unit-square P1 Poisson), multi-Worker parallel solver, wasm-bindgen JS API |
 | `fem-ceed` | �?Complete | PA operators (mass, diffusion, lumped mass), MatFreeOperator trait |
 

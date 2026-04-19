@@ -8,6 +8,7 @@
 //! - Offer a rank-partitioned file layout that is deterministic and restart-friendly.
 //! - Provide a thin API that can later be upgraded to MPI-collective I/O.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Schema version for on-disk checkpoint layout.
@@ -55,7 +56,7 @@ pub struct RankFieldReadF64 {
 }
 
 /// Optional mesh-level metadata stored alongside a checkpoint step.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointMeshMeta {
     pub dim: u8,
     pub n_vertices: u64,
@@ -119,6 +120,86 @@ pub enum Hdf5ParallelError {
 
     #[error("checkpoint metadata is missing or invalid: {0}")]
     InvalidCheckpoint(String),
+}
+
+#[cfg(not(feature = "hdf5"))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PortableCheckpointDb {
+    schema_version: u32,
+    world_size: usize,
+    rank_partitions: std::collections::BTreeMap<usize, std::collections::BTreeMap<String, Vec<f64>>>,
+    steps: std::collections::BTreeMap<u64, PortableStep>,
+}
+
+#[cfg(not(feature = "hdf5"))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PortableStep {
+    time: f64,
+    mesh_meta: Option<CheckpointMeshMeta>,
+    partitions: std::collections::BTreeMap<usize, std::collections::BTreeMap<String, PortableField>>, 
+    global_fields: std::collections::BTreeMap<String, Vec<f64>>,
+}
+
+#[cfg(not(feature = "hdf5"))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PortableField {
+    global_offset: u64,
+    global_len: u64,
+    values: Vec<f64>,
+}
+
+#[cfg(not(feature = "hdf5"))]
+fn portable_load_db(file_path: &str) -> Result<PortableCheckpointDb, Hdf5ParallelError> {
+    use std::path::Path;
+
+    if !Path::new(file_path).exists() {
+        return Ok(PortableCheckpointDb {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            ..PortableCheckpointDb::default()
+        });
+    }
+
+    let bytes = std::fs::read(file_path)
+        .map_err(|e| Hdf5ParallelError::Backend(format!("portable read failed: {e}")))?;
+    let mut db: PortableCheckpointDb = rmp_serde::from_slice(&bytes)
+        .map_err(|e| Hdf5ParallelError::Backend(format!("portable decode failed: {e}")))?;
+    if db.schema_version == 0 {
+        db.schema_version = CHECKPOINT_SCHEMA_VERSION;
+    }
+    Ok(db)
+}
+
+#[cfg(not(feature = "hdf5"))]
+fn portable_save_db(file_path: &str, db: &PortableCheckpointDb) -> Result<(), Hdf5ParallelError> {
+    if let Some(parent) = std::path::Path::new(file_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Hdf5ParallelError::Backend(format!("portable mkdir failed: {e}")))?;
+        }
+    }
+
+    let bytes = rmp_serde::to_vec_named(db)
+        .map_err(|e| Hdf5ParallelError::Backend(format!("portable encode failed: {e}")))?;
+    std::fs::write(file_path, bytes)
+        .map_err(|e| Hdf5ParallelError::Backend(format!("portable write failed: {e}")))
+}
+
+#[cfg(not(feature = "hdf5"))]
+fn portable_ensure_world_size(
+    db: &mut PortableCheckpointDb,
+    world_size: usize,
+) -> Result<(), Hdf5ParallelError> {
+    if db.world_size == 0 {
+        db.world_size = world_size;
+        return Ok(());
+    }
+    if db.world_size != world_size {
+        return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+            "world_size mismatch: file={}, requested={}",
+            db.world_size, world_size
+        )));
+    }
+    Ok(())
 }
 
 /// Backend-dispatching checkpoint writer.
@@ -224,8 +305,7 @@ pub fn write_checkpoint_step_f64_mpi_collective(
 
     #[cfg(not(feature = "hdf5-mpi"))]
     {
-        let _ = (file_path, step, time, fields);
-        Err(Hdf5ParallelError::Hdf5MpiFeatureDisabled)
+        write_checkpoint_step_f64(file_path, cfg, step, time, fields)
     }
 }
 
@@ -325,8 +405,7 @@ pub fn write_checkpoint_step_f64_hyperslab(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, step, time, fields);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        write_checkpoint_step_f64(file_path, cfg, step, time, fields)
     }
 }
 
@@ -373,7 +452,14 @@ pub fn write_checkpoint_step_bundle_f64(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = bundle;
+        if let Some(meta) = bundle.mesh_meta {
+            let mut db = portable_load_db(file_path)?;
+            portable_ensure_world_size(&mut db, cfg.world_size)?;
+            let step_entry = db.steps.entry(step).or_insert_with(PortableStep::default);
+            step_entry.time = time;
+            step_entry.mesh_meta = Some(meta);
+            portable_save_db(file_path, &db)?;
+        }
     }
 
     Ok(())
@@ -443,8 +529,14 @@ pub fn write_rank_partition_f64(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, dataset, local_values);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let mut db = portable_load_db(file_path)?;
+        portable_ensure_world_size(&mut db, cfg.world_size)?;
+        let rank_entry = db
+            .rank_partitions
+            .entry(cfg.rank)
+            .or_insert_with(std::collections::BTreeMap::new);
+        rank_entry.insert(dataset.to_string(), local_values.to_vec());
+        portable_save_db(file_path, &db)
     }
 }
 
@@ -472,8 +564,19 @@ pub fn read_rank_partition_f64(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, dataset);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let db = portable_load_db(file_path)?;
+        let vals = db
+            .rank_partitions
+            .get(&cfg.rank)
+            .and_then(|m| m.get(dataset))
+            .cloned()
+            .ok_or_else(|| {
+                Hdf5ParallelError::InvalidCheckpoint(format!(
+                    "missing portable partition rank={} dataset={}",
+                    cfg.rank, dataset
+                ))
+            })?;
+        Ok(vals)
     }
 }
 
@@ -555,8 +658,28 @@ pub fn write_checkpoint_step_f64(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, step, time, fields);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let mut db = portable_load_db(file_path)?;
+        portable_ensure_world_size(&mut db, cfg.world_size)?;
+
+        let step_entry = db.steps.entry(step).or_insert_with(PortableStep::default);
+        step_entry.time = time;
+        let rank_fields = step_entry
+            .partitions
+            .entry(cfg.rank)
+            .or_insert_with(std::collections::BTreeMap::new);
+
+        for f in fields {
+            rank_fields.insert(
+                f.name.clone(),
+                PortableField {
+                    global_offset: f.global_offset,
+                    global_len: f.global_len,
+                    values: f.values.clone(),
+                },
+            );
+        }
+
+        portable_save_db(file_path, &db)
     }
 }
 
@@ -612,8 +735,31 @@ pub fn read_checkpoint_field_f64_at_step(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, step, field_name);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let db = portable_load_db(file_path)?;
+        let step_entry = db
+            .steps
+            .get(&step)
+            .ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint(format!("missing step {step}")))?;
+        let rank_fields = step_entry.partitions.get(&cfg.rank).ok_or_else(|| {
+            Hdf5ParallelError::InvalidCheckpoint(format!(
+                "missing partition rank={} at step {}",
+                cfg.rank, step
+            ))
+        })?;
+        let field = rank_fields.get(field_name).ok_or_else(|| {
+            Hdf5ParallelError::InvalidCheckpoint(format!(
+                "missing field '{}' at step {} rank {}",
+                field_name, step, cfg.rank
+            ))
+        })?;
+
+        Ok(RankFieldReadF64 {
+            step,
+            time: step_entry.time,
+            global_offset: field.global_offset,
+            global_len: field.global_len,
+            values: field.values.clone(),
+        })
     }
 }
 
@@ -645,8 +791,14 @@ pub fn read_checkpoint_field_f64_latest(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, field_name);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let db = portable_load_db(file_path)?;
+        let step = db
+            .steps
+            .keys()
+            .copied()
+            .max()
+            .ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint("no step entries found".into()))?;
+        read_checkpoint_field_f64_at_step(file_path, cfg, step, field_name)
     }
 }
 
@@ -820,8 +972,95 @@ pub fn validate_checkpoint_layout(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, expected_world_size);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let db = portable_load_db(file_path)?;
+        if db.world_size == 0 {
+            return Err(Hdf5ParallelError::InvalidCheckpoint(
+                "portable checkpoint world_size is zero".to_string(),
+            ));
+        }
+        if let Some(exp) = expected_world_size {
+            if exp != db.world_size {
+                return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                    "world_size mismatch: file={}, expected={}",
+                    db.world_size, exp
+                )));
+            }
+        }
+
+        let mut steps: Vec<u64> = db.steps.keys().copied().collect();
+        steps.sort_unstable();
+
+        let mut step_infos = Vec::with_capacity(steps.len());
+        let mut warnings = Vec::new();
+
+        for step in steps {
+            let step_entry = db.steps.get(&step).expect("step key exists");
+            let mut field_ranges: std::collections::HashMap<String, (u64, Vec<(u64, u64)>)> =
+                std::collections::HashMap::new();
+
+            for rank in 0..db.world_size {
+                let rank_fields = step_entry.partitions.get(&rank).ok_or_else(|| {
+                    Hdf5ParallelError::InvalidCheckpoint(format!(
+                        "missing partition rank={} at step {}",
+                        rank, step
+                    ))
+                })?;
+
+                for (fname, f) in rank_fields {
+                    let end = f.global_offset.saturating_add(f.values.len() as u64);
+                    if end > f.global_len {
+                        return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                            "chunk out of bounds in step {} rank {} field {}: [{}, {}) > {}",
+                            step, rank, fname, f.global_offset, end, f.global_len
+                        )));
+                    }
+                    let entry = field_ranges
+                        .entry(fname.clone())
+                        .or_insert_with(|| (f.global_len, Vec::new()));
+                    if entry.0 != f.global_len {
+                        return Err(Hdf5ParallelError::InvalidCheckpoint(
+                            "global_len mismatch across ranks".to_string(),
+                        ));
+                    }
+                    entry.1.push((f.global_offset, end));
+                }
+            }
+
+            for (fname, (gl, mut ranges)) in field_ranges {
+                ranges.sort_unstable_by_key(|r| r.0);
+                let mut covered = 0u64;
+                let mut prev_end = 0u64;
+                for (off, end) in ranges {
+                    if off < prev_end {
+                        return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                            "overlapping chunks in step {} field {}",
+                            step, fname
+                        )));
+                    }
+                    covered = covered.saturating_add(end.saturating_sub(off));
+                    prev_end = end;
+                }
+                if covered != gl {
+                    warnings.push(format!(
+                        "incomplete coverage in step {} field {}: covered={}, global_len={}",
+                        step, fname, covered, gl
+                    ));
+                }
+            }
+
+            step_infos.push(CheckpointStepInfo {
+                step,
+                time: step_entry.time,
+                partition_count: step_entry.partitions.len(),
+            });
+        }
+
+        Ok(CheckpointValidationReport {
+            schema_version: db.schema_version,
+            world_size: db.world_size,
+            steps: step_infos,
+            warnings,
+        })
     }
 }
 
@@ -929,8 +1168,65 @@ pub fn materialize_global_field_f64(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, step, field_name);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let mut db = portable_load_db(file_path)?;
+        portable_ensure_world_size(&mut db, world_size)?;
+        let step_entry = db
+            .steps
+            .get_mut(&step)
+            .ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint(format!("missing step {step}")))?;
+
+        let mut global_len: Option<u64> = None;
+        let mut chunks: Vec<(u64, Vec<f64>)> = Vec::with_capacity(world_size);
+
+        for rank in 0..world_size {
+            let rank_fields = step_entry.partitions.get(&rank).ok_or_else(|| {
+                Hdf5ParallelError::InvalidCheckpoint(format!(
+                    "missing partition rank={} at step {}",
+                    rank, step
+                ))
+            })?;
+            let f = rank_fields.get(field_name).ok_or_else(|| {
+                Hdf5ParallelError::InvalidCheckpoint(format!(
+                    "missing field '{}' at step {} rank {}",
+                    field_name, step, rank
+                ))
+            })?;
+            if let Some(prev) = global_len {
+                if prev != f.global_len {
+                    return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                        "global_len mismatch across ranks: {} vs {}",
+                        prev, f.global_len
+                    )));
+                }
+            } else {
+                global_len = Some(f.global_len);
+            }
+            chunks.push((f.global_offset, f.values.clone()));
+        }
+
+        let gl = global_len.ok_or_else(|| {
+            Hdf5ParallelError::InvalidCheckpoint("no rank chunks found for global materialization".into())
+        })?;
+        let mut global = vec![0.0f64; gl as usize];
+        for (off, vals) in chunks {
+            let start = off as usize;
+            let end = start + vals.len();
+            if end > global.len() {
+                return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                    "partition out of bounds: [{}, {}) vs global {}",
+                    start,
+                    end,
+                    global.len()
+                )));
+            }
+            global[start..end].copy_from_slice(&vals);
+        }
+
+        step_entry
+            .global_fields
+            .insert(field_name.to_string(), global);
+        portable_save_db(file_path, &db)?;
+        Ok(gl)
     }
 }
 
@@ -958,8 +1254,21 @@ pub fn read_global_field_f64(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, step, field_name);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let db = portable_load_db(file_path)?;
+        let step_entry = db
+            .steps
+            .get(&step)
+            .ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint(format!("missing step {step}")))?;
+        step_entry
+            .global_fields
+            .get(field_name)
+            .cloned()
+            .ok_or_else(|| {
+                Hdf5ParallelError::InvalidCheckpoint(format!(
+                    "missing global field '{}' at step {}",
+                    field_name, step
+                ))
+            })
     }
 }
 
@@ -1000,8 +1309,18 @@ pub fn read_global_field_slice_f64(
 
     #[cfg(not(feature = "hdf5"))]
     {
-        let _ = (file_path, step, field_name, global_offset, local_len);
-        Err(Hdf5ParallelError::Hdf5FeatureDisabled)
+        let values = read_global_field_f64(file_path, step, field_name)?;
+        let start = global_offset as usize;
+        let end = start.saturating_add(local_len);
+        if end > values.len() {
+            return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
+                "requested global slice [{}, {}) exceeds dataset length {}",
+                start,
+                end,
+                values.len()
+            )));
+        }
+        Ok(values[start..end].to_vec())
     }
 }
 
@@ -1269,34 +1588,81 @@ mod tests {
     }
 
     #[test]
-    fn no_hdf5_feature_returns_expected_error() {
-        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
-        let err = write_checkpoint_step_f64(
-            "dummy.h5",
-            cfg,
-            0,
-            0.0,
-            &[RankFieldF64 {
-                name: "u".into(),
-                global_offset: 0,
-                global_len: 3,
-                values: vec![1.0, 2.0, 3.0],
-            }],
-        )
-        .expect_err("expected feature disabled in default build");
+    fn portable_backend_roundtrip_without_hdf5_feature() {
+        let world_size = 2usize;
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_portable_checkpoint_{}_{}.h5",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("valid clock")
+                .as_nanos()
+        ));
+        let file_path = p.to_string_lossy().to_string();
 
-        match err {
-            Hdf5ParallelError::Hdf5FeatureDisabled => {}
-            other => panic!("unexpected error: {other}"),
+        for rank in 0..world_size {
+            write_checkpoint_step_f64(
+                &file_path,
+                ParallelIoConfig { world_size, rank },
+                0,
+                0.0,
+                &[RankFieldF64 {
+                    name: "u".into(),
+                    global_offset: (rank * 2) as u64,
+                    global_len: 4,
+                    values: vec![rank as f64 + 1.0, rank as f64 + 2.0],
+                }],
+            )
+            .expect("portable step write should succeed");
         }
+
+        let gl = materialize_global_field_f64(&file_path, world_size, 0, "u")
+            .expect("portable global materialization should succeed");
+        assert_eq!(gl, 4);
+
+        let full = read_global_field_f64(&file_path, 0, "u")
+            .expect("portable global read should succeed");
+        assert_eq!(full, vec![1.0, 2.0, 2.0, 3.0]);
+
+        let s = read_global_field_slice_f64(&file_path, 0, "u", 1, 2)
+            .expect("portable global slice should succeed");
+        assert_eq!(s, vec![2.0, 2.0]);
+
+        let r = read_checkpoint_field_f64_latest(
+            &file_path,
+            ParallelIoConfig { world_size, rank: 1 },
+            "u",
+        )
+        .expect("portable latest rank read should succeed");
+        assert_eq!(r.step, 0);
+        assert_eq!(r.global_offset, 2);
+        assert_eq!(r.values, vec![2.0, 3.0]);
+
+        let report = validate_checkpoint_layout(&file_path, Some(world_size))
+            .expect("portable layout validation should succeed");
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(report.world_size, world_size);
+
+        let _ = std::fs::remove_file(file_path);
     }
 
     #[test]
-    fn mpi_backend_without_feature_reports_expected_error() {
-        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
-        let err = write_checkpoint_step_f64_with_backend(
-            "dummy.h5",
-            cfg,
+    fn mpi_backend_falls_back_to_portable_when_mpi_feature_is_absent() {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_portable_checkpoint_mpi_{}_{}.h5",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("valid clock")
+                .as_nanos()
+        ));
+        let file_path = p.to_string_lossy().to_string();
+
+        write_checkpoint_step_f64_with_backend(
+            &file_path,
+            ParallelIoConfig { world_size: 1, rank: 0 },
             0,
             0.0,
             &[RankFieldF64 {
@@ -1307,12 +1673,15 @@ mod tests {
             }],
             IoBackend::MpiCollective,
         )
-        .expect_err("expected hdf5-mpi feature disabled in default build");
+        .expect("mpi backend should fall back to portable partitioned mode");
 
-        match err {
-            Hdf5ParallelError::Hdf5MpiFeatureDisabled => {}
-            other => panic!("unexpected error: {other}"),
-        }
+        let _ = materialize_global_field_f64(&file_path, 1, 0, "u")
+            .expect("portable materialization should succeed");
+        let vals = read_global_field_f64(&file_path, 0, "u")
+            .expect("portable global read should succeed");
+        assert_eq!(vals, vec![1.0, 2.0, 3.0]);
+
+        let _ = std::fs::remove_file(file_path);
     }
 
     #[test]
@@ -1347,66 +1716,39 @@ mod tests {
     }
 
     #[test]
-    fn materialize_global_without_hdf5_feature_errors() {
-        let err = materialize_global_field_f64("dummy.h5", 2, 0, "u")
-            .expect_err("expected feature disabled in default build");
-        match err {
-            Hdf5ParallelError::Hdf5FeatureDisabled => {}
-            other => panic!("unexpected error: {other}"),
-        }
-    }
+    fn portable_hyperslab_aliases_partitioned_writer() {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_portable_checkpoint_hyperslab_{}_{}.h5",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("valid clock")
+                .as_nanos()
+        ));
+        let file_path = p.to_string_lossy().to_string();
 
-    #[test]
-    fn validate_layout_without_hdf5_feature_errors() {
-        let err = validate_checkpoint_layout("dummy.h5", Some(2))
-            .expect_err("expected feature disabled in default build");
-        match err {
-            Hdf5ParallelError::Hdf5FeatureDisabled => {}
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn hyperslab_write_without_hdf5_feature_errors() {
-        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
-        let err = write_checkpoint_step_f64_hyperslab(
-            "dummy.h5",
-            cfg,
+        write_checkpoint_step_f64_hyperslab(
+            &file_path,
+            ParallelIoConfig { world_size: 1, rank: 0 },
             0,
             0.0,
             &[RankFieldF64 {
                 name: "u".into(),
                 global_offset: 0,
                 global_len: 3,
-                values: vec![1.0, 2.0, 3.0],
+                values: vec![10.0, 20.0, 30.0],
             }],
         )
-        .expect_err("expected feature disabled in default build");
+        .expect("portable hyperslab writer should fall back to step writer");
 
-        match err {
-            Hdf5ParallelError::Hdf5FeatureDisabled => {}
-            other => panic!("unexpected error: {other}"),
-        }
-    }
+        let _ = materialize_global_field_f64(&file_path, 1, 0, "u")
+            .expect("portable materialization should succeed");
+        let vals = read_global_field_f64(&file_path, 0, "u")
+            .expect("portable global read should succeed");
+        assert_eq!(vals, vec![10.0, 20.0, 30.0]);
 
-    #[test]
-    fn read_global_field_without_hdf5_feature_errors() {
-        let err = read_global_field_f64("dummy.h5", 0, "u")
-            .expect_err("expected feature disabled in default build");
-        match err {
-            Hdf5ParallelError::Hdf5FeatureDisabled => {}
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn read_global_slice_without_hdf5_feature_errors() {
-        let err = read_global_field_slice_f64("dummy.h5", 0, "u", 0, 4)
-            .expect_err("expected feature disabled in default build");
-        match err {
-            Hdf5ParallelError::Hdf5FeatureDisabled => {}
-            other => panic!("unexpected error: {other}"),
-        }
+        let _ = std::fs::remove_file(file_path);
     }
 }
 
