@@ -45,6 +45,9 @@ struct RunResult {
     final_residual: f64,
     converged: bool,
     l2_err: f64,
+    solution_norm: f64,
+    solution_sum: f64,
+    solution_checksum: f64,
 }
 
 fn main() {
@@ -76,6 +79,7 @@ fn main() {
     println!("  Global DOFs: {}", result.global_dofs);
     println!("  PCG: {} iters, residual = {:.3e}, converged = {}", result.iterations, result.final_residual, result.converged);
     println!("  L2 error (pointwise): {:.6e}", result.l2_err);
+    println!("  ||u||_2 = {:.6e}, sum = {:.8e}, checksum = {:.8e}", result.solution_norm, result.solution_sum, result.solution_checksum);
     println!("=== Done ===");
 }
 
@@ -160,6 +164,15 @@ fn run_case(run: RunArgs) -> RunResult {
         let global_err_sq = comm.allreduce_sum_f64(local_err_sq);
         let n_global = par_space.n_global_dofs() as f64;
         let l2_err = (global_err_sq / n_global).sqrt();
+        let solution_norm = u.global_norm();
+        let solution_sum = comm.allreduce_sum_f64(u.as_slice()[..n_owned].iter().sum::<f64>());
+        let local_checksum: f64 = (0..n_owned)
+            .map(|pid| {
+                let gid = dof_part.global_dof(pid as u32) as f64 + 1.0;
+                gid * u.as_slice()[pid]
+            })
+            .sum();
+        let solution_checksum = comm.allreduce_sum_f64(local_checksum);
 
         if rank == 0 {
             *result_slot.lock().expect("mfem_pex1 result mutex poisoned") = Some(RunResult {
@@ -168,6 +181,9 @@ fn run_case(run: RunArgs) -> RunResult {
                 final_residual: res.final_residual,
                 converged: res.converged,
                 l2_err,
+                solution_norm,
+                solution_sum,
+                solution_checksum,
             });
         }
     });
@@ -190,15 +206,42 @@ fn parse_arg(args: &[String], flag: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    fn run_args(order: u8, n_workers: usize, use_metis: bool, use_streaming: bool) -> RunArgs {
+        RunArgs {
+            order,
+            n_workers,
+            mesh_n: 8,
+            use_metis,
+            use_streaming,
+        }
+    }
+
+    fn assert_matching_results(label: &str, lhs: &RunResult, rhs: &RunResult) {
+        assert!(lhs.converged && rhs.converged, "{label}: expected both runs to converge");
+        assert_eq!(lhs.global_dofs, rhs.global_dofs, "{label}: global DOF mismatch");
+        assert!(
+            (lhs.l2_err - rhs.l2_err).abs() < 1.0e-12,
+            "{label}: L2 mismatch lhs={} rhs={}",
+            lhs.l2_err,
+            rhs.l2_err
+        );
+        assert!(
+            (lhs.solution_norm - rhs.solution_norm).abs() < 1.0e-12,
+            "{label}: solution norm mismatch lhs={} rhs={}",
+            lhs.solution_norm,
+            rhs.solution_norm
+        );
+        assert!(
+            (lhs.solution_sum - rhs.solution_sum).abs() < 1.0e-12,
+            "{label}: solution sum mismatch lhs={} rhs={}",
+            lhs.solution_sum,
+            rhs.solution_sum
+        );
+    }
+
     #[test]
     fn pex1_poisson_p1_coarse_case_converges() {
-        let result = run_case(RunArgs {
-            order: 1,
-            n_workers: 2,
-            mesh_n: 8,
-            use_metis: false,
-            use_streaming: false,
-        });
+        let result = run_case(run_args(1, 2, false, false));
         assert!(result.converged);
         assert_eq!(result.global_dofs, 81);
         assert!(result.final_residual < 1.0e-8, "residual too large: {}", result.final_residual);
@@ -207,13 +250,7 @@ mod tests {
 
     #[test]
     fn pex1_poisson_p2_coarse_case_converges() {
-        let result = run_case(RunArgs {
-            order: 2,
-            n_workers: 2,
-            mesh_n: 8,
-            use_metis: false,
-            use_streaming: false,
-        });
+        let result = run_case(run_args(2, 2, false, false));
         assert!(result.converged);
         assert_eq!(result.global_dofs, 289);
         assert!(result.final_residual < 1.0e-8, "residual too large: {}", result.final_residual);
@@ -222,25 +259,58 @@ mod tests {
 
     #[test]
     fn pex1_poisson_p2_partition_is_invariant_between_two_and_four_ranks() {
-        let two = run_case(RunArgs {
-            order: 2,
-            n_workers: 2,
-            mesh_n: 8,
-            use_metis: false,
-            use_streaming: false,
-        });
-        let four = run_case(RunArgs {
-            order: 2,
-            n_workers: 4,
-            mesh_n: 8,
-            use_metis: false,
-            use_streaming: false,
-        });
-        assert!(two.converged && four.converged);
-        assert_eq!(two.global_dofs, four.global_dofs);
-        assert!((two.l2_err - four.l2_err).abs() < 1.0e-12,
-            "P2 L2 error mismatch: two={} four={}", two.l2_err, four.l2_err);
+        let two = run_case(run_args(2, 2, false, false));
+        let four = run_case(run_args(2, 4, false, false));
+        assert_matching_results("two-vs-four", &two, &four);
+        assert!((two.solution_checksum - four.solution_checksum).abs() < 1.0e-10,
+            "P2 checksum mismatch: two={} four={}", two.solution_checksum, four.solution_checksum);
         assert!((two.final_residual - four.final_residual).abs() < 1.0e-8,
             "P2 residual mismatch: two={} four={}", two.final_residual, four.final_residual);
+    }
+
+    #[test]
+    fn pex1_poisson_streaming_partition_matches_replicated_partition() {
+        let replicated = run_case(run_args(1, 2, false, false));
+        let streaming = run_case(run_args(1, 2, false, true));
+
+        assert_matching_results("replicated-vs-streaming", &replicated, &streaming);
+        assert!(
+            (replicated.solution_checksum - streaming.solution_checksum).abs() < 1.0e-10,
+            "checksum mismatch: replicated={} streaming={}",
+            replicated.solution_checksum,
+            streaming.solution_checksum
+        );
+        assert!(
+            (replicated.final_residual - streaming.final_residual).abs() < 1.0e-8,
+            "residual mismatch: replicated={} streaming={}",
+            replicated.final_residual,
+            streaming.final_residual
+        );
+    }
+
+    #[test]
+    fn pex1_poisson_metis_variants_match_contiguous_baseline() {
+        let baseline = run_case(run_args(2, 2, false, false));
+        let metis = run_case(run_args(2, 2, true, false));
+        let metis_streaming = run_case(run_args(2, 2, true, true));
+
+        assert_matching_results("baseline-vs-metis", &baseline, &metis);
+        assert_matching_results("baseline-vs-metis-streaming", &baseline, &metis_streaming);
+        assert!((metis.solution_checksum - metis_streaming.solution_checksum).abs() < 1.0e-10,
+            "METIS checksum mismatch: metis={} metis+streaming={}",
+            metis.solution_checksum,
+            metis_streaming.solution_checksum);
+        assert!(
+            (baseline.final_residual - metis.final_residual).abs() < 1.0e-8,
+            "baseline/metis residual mismatch: baseline={} metis={}",
+            baseline.final_residual,
+            metis.final_residual
+        );
+        assert!(
+            (baseline.final_residual - metis_streaming.final_residual).abs() < 1.0e-8,
+            "baseline/metis+streaming residual mismatch: baseline={} metis+streaming={}",
+            baseline.final_residual,
+            metis_streaming.final_residual
+        );
     }
 }

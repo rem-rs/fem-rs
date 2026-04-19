@@ -311,6 +311,58 @@ mod tests {
     }
 
     #[test]
+    fn ex7_mixed_bc_discrete_solution_is_kappa_invariant() {
+        let low = solve_case(16, 0.25, 1.0);
+        let unit = solve_case(16, 1.0, 1.0);
+        let high = solve_case(16, 4.0, 1.0);
+
+        assert!((low.solution_norm - unit.solution_norm).abs() < 1.0e-12,
+            "solution norm should be kappa-invariant: low={} unit={}",
+            low.solution_norm, unit.solution_norm);
+        assert!((high.solution_norm - unit.solution_norm).abs() < 1.0e-12,
+            "solution norm should be kappa-invariant: high={} unit={}",
+            high.solution_norm, unit.solution_norm);
+        assert!((low.solution_checksum - unit.solution_checksum).abs() < 1.0e-10,
+            "solution checksum should be kappa-invariant: low={} unit={}",
+            low.solution_checksum, unit.solution_checksum);
+        assert!((high.solution_checksum - unit.solution_checksum).abs() < 1.0e-10,
+            "solution checksum should be kappa-invariant: high={} unit={}",
+            high.solution_checksum, unit.solution_checksum);
+        assert!((low.l2_error - unit.l2_error).abs() < 1.0e-12,
+            "absolute L2 error should be kappa-invariant: low={} unit={}",
+            low.l2_error, unit.l2_error);
+        assert!((high.l2_error - unit.l2_error).abs() < 1.0e-12,
+            "absolute L2 error should be kappa-invariant: high={} unit={}",
+            high.l2_error, unit.l2_error);
+    }
+
+    #[test]
+    fn ex7_mixed_bc_solution_scales_linearly_with_manufactured_amplitude() {
+        let half = solve_case(16, 1.0, 0.5);
+        let unit = solve_case(16, 1.0, 1.0);
+        let double = solve_case(16, 1.0, 2.0);
+
+        assert!((unit.solution_norm / half.solution_norm - 2.0).abs() < 1.0e-12,
+            "solution norm should scale linearly: half={} unit={}",
+            half.solution_norm, unit.solution_norm);
+        assert!((double.solution_norm / unit.solution_norm - 2.0).abs() < 1.0e-12,
+            "solution norm should scale linearly: unit={} double={}",
+            unit.solution_norm, double.solution_norm);
+        assert!((unit.solution_checksum / half.solution_checksum - 2.0).abs() < 1.0e-12,
+            "solution checksum should scale linearly: half={} unit={}",
+            half.solution_checksum, unit.solution_checksum);
+        assert!((double.solution_checksum / unit.solution_checksum - 2.0).abs() < 1.0e-12,
+            "solution checksum should scale linearly: unit={} double={}",
+            unit.solution_checksum, double.solution_checksum);
+        assert!((unit.l2_error / half.l2_error - 2.0).abs() < 1.0e-12,
+            "absolute L2 error should scale linearly: half={} unit={}",
+            half.l2_error, unit.l2_error);
+        assert!((double.l2_error / unit.l2_error - 2.0).abs() < 1.0e-12,
+            "absolute L2 error should scale linearly: unit={} double={}",
+            unit.l2_error, double.l2_error);
+    }
+
+    #[test]
     fn ex7_mixed_bc_sign_reversed_solution_flips_discrete_state() {
         let positive = solve_case(16, 1.0, 1.0);
         let negative = solve_case(16, 1.0, -1.0);

@@ -13,6 +13,8 @@ pub mod boundary;
 pub mod curved;
 pub mod element_type;
 pub mod lor;
+pub mod moving_mesh;
+pub mod point_locator;
 pub mod simplex;
 pub mod submesh;
 pub mod topology;
@@ -23,6 +25,14 @@ pub use boundary::{BoundaryTag, NamedAttributeRegistry, NamedAttributeSet, Physi
 pub use curved::CurvedMesh;
 pub use element_type::ElementType;
 pub use lor::LorMesh;
+pub use moving_mesh::{
+	MeshMotionConfig,
+	all_boundary_nodes,
+	apply_node_displacement,
+	boundary_nodes_with_tags,
+	laplacian_smooth_2d,
+};
+pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPointLocator};
 pub use simplex::SimplexMesh;
 pub use submesh::{SubMesh, extract_submesh, extract_submesh_by_name};
 pub use topology::MeshTopology;

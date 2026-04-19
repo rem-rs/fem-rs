@@ -281,5 +281,56 @@ mod tests {
         assert!((result.rho_min - 1.0).abs() < 1.0e-12);
         assert!((result.rho_max - 1.0).abs() < 1.0e-12);
     }
+
+    #[test]
+    fn ex18_euler_density_error_and_span_scale_linearly_with_amplitude() {
+        let half = run_case(100, 0.2, 0.35, 1.4, NumericalFlux::Roe, 0.1);
+        let full = run_case(100, 0.2, 0.35, 1.4, NumericalFlux::Roe, 0.2);
+
+        assert!(half.mass_drift < 1.0e-12 && full.mass_drift < 1.0e-12);
+        assert!((full.rho_l2_error / half.rho_l2_error - 2.0).abs() < 5.0e-3,
+            "density error should scale linearly with amplitude: half={} full={}",
+            half.rho_l2_error, full.rho_l2_error);
+
+        let half_span = half.rho_max - half.rho_min;
+        let full_span = full.rho_max - full.rho_min;
+        assert!((full_span / half_span - 2.0).abs() < 5.0e-3,
+            "density span should scale linearly with amplitude: half={} full={}",
+            half_span, full_span);
+    }
+
+    #[test]
+    fn ex18_euler_longer_advection_accumulates_more_error_and_diffusion() {
+        let short = run_case(100, 0.1, 0.35, 1.4, NumericalFlux::Roe, 0.2);
+        let medium = run_case(100, 0.2, 0.35, 1.4, NumericalFlux::Roe, 0.2);
+        let long = run_case(100, 0.4, 0.35, 1.4, NumericalFlux::Roe, 0.2);
+
+        assert!(short.steps < medium.steps && medium.steps < long.steps,
+            "expected step counts to grow with final time: short={} medium={} long={}",
+            short.steps, medium.steps, long.steps);
+        assert!(short.rho_l2_error < medium.rho_l2_error && medium.rho_l2_error < long.rho_l2_error,
+            "density error should accumulate over longer advection: short={} medium={} long={}",
+            short.rho_l2_error, medium.rho_l2_error, long.rho_l2_error);
+
+        let short_span = short.rho_max - short.rho_min;
+        let medium_span = medium.rho_max - medium.rho_min;
+        let long_span = long.rho_max - long.rho_min;
+        assert!(short_span > medium_span && medium_span > long_span,
+            "numerical diffusion should shrink the density span over time: short={} medium={} long={}",
+            short_span, medium_span, long_span);
+    }
+
+    #[test]
+    fn ex18_euler_unit_background_velocity_keeps_density_and_momentum_checksums_equal() {
+        let roe = run_case(100, 0.2, 0.35, 1.4, NumericalFlux::Roe, 0.2);
+        let lax = run_case(100, 0.2, 0.35, 1.4, NumericalFlux::LaxFriedrichs, 0.2);
+
+        assert!((roe.density_checksum - roe.momentum_checksum).abs() < 1.0e-10,
+            "Roe density/momentum checksum mismatch: rho={} mom={}",
+            roe.density_checksum, roe.momentum_checksum);
+        assert!((lax.density_checksum - lax.momentum_checksum).abs() < 1.0e-10,
+            "Lax density/momentum checksum mismatch: rho={} mom={}",
+            lax.density_checksum, lax.momentum_checksum);
+    }
 }
 

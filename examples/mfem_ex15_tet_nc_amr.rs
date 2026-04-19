@@ -130,6 +130,16 @@ fn nodal_linear_field(mesh: &SimplexMesh<3>) -> Vec<f64> {
         .collect()
 }
 
+#[cfg(test)]
+fn nodal_affine_field(mesh: &SimplexMesh<3>, coeffs: [f64; 4]) -> Vec<f64> {
+    (0..mesh.n_nodes())
+        .map(|n| {
+            let c = mesh.coords_of(n as u32);
+            coeffs[0] * c[0] + coeffs[1] * c[1] + coeffs[2] * c[2] + coeffs[3]
+        })
+        .collect()
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn run_plumbing_case(n0: usize, levels: usize, fraction: f64) -> Vec<PlumbingLevelResult> {
     let mut mesh = SimplexMesh::<3>::unit_cube_tet(n0);
@@ -215,6 +225,41 @@ fn max_linear_error(mesh: &SimplexMesh<3>, u: &[f64]) -> f64 {
         }
     }
     max_err
+}
+
+#[cfg(test)]
+fn max_affine_error(mesh: &SimplexMesh<3>, u: &[f64], coeffs: [f64; 4]) -> f64 {
+    let mut max_err = 0.0_f64;
+    for n in 0..mesh.n_nodes() {
+        let c = mesh.coords_of(n as u32);
+        let exact = coeffs[0] * c[0] + coeffs[1] * c[1] + coeffs[2] * c[2] + coeffs[3];
+        let err = (u[n] - exact).abs();
+        if err > max_err {
+            max_err = err;
+        }
+    }
+    max_err
+}
+
+#[cfg(test)]
+fn elem_center_distance2(mesh: &SimplexMesh<3>, elem: ElemId) -> f64 {
+    let ns = mesh.elem_nodes(elem);
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+    let mut cz = 0.0;
+    for &nid in ns {
+        let c = mesh.coords_of(nid);
+        cx += c[0];
+        cy += c[1];
+        cz += c[2];
+    }
+    cx *= 0.25;
+    cy *= 0.25;
+    cz *= 0.25;
+    let dx = cx - 0.5;
+    let dy = cy - 0.5;
+    let dz = cz - 0.5;
+    dx * dx + dy * dy + dz * dz
 }
 
 fn mark_closest_to_center(mesh: &SimplexMesh<3>, fraction: f64) -> Vec<ElemId> {
@@ -428,6 +473,47 @@ mod tests {
             assert!(pair[1].n_nodes > pair[0].n_nodes, "node count should grow under refinement: prev={} next={}", pair[0].n_nodes, pair[1].n_nodes);
             assert!(pair[0].n_marked > 0, "each pre-terminal level should mark at least one element");
         }
+    }
+
+    #[test]
+    fn ex15_tet_nc_marker_is_monotone_and_selects_center_closest_elements() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let marked_low = mark_closest_to_center(&mesh, 0.10);
+        let marked_mid = mark_closest_to_center(&mesh, 0.35);
+        let marked_high = mark_closest_to_center(&mesh, 1.50);
+
+        assert!(!marked_low.is_empty(), "fraction should always mark at least one element");
+        assert!(marked_low.len() <= marked_mid.len() && marked_mid.len() <= marked_high.len(),
+            "marked counts should be monotone in fraction: low={} mid={} high={}",
+            marked_low.len(), marked_mid.len(), marked_high.len());
+        assert_eq!(marked_high.len(), mesh.n_elems(), "fraction > 1 should clamp to all elements");
+
+        let max_marked_d2 = marked_mid
+            .iter()
+            .map(|&elem| elem_center_distance2(&mesh, elem))
+            .fold(0.0_f64, f64::max);
+        let min_unmarked_d2 = (0..mesh.n_elems() as ElemId)
+            .filter(|elem| !marked_mid.contains(elem))
+            .map(|elem| elem_center_distance2(&mesh, elem))
+            .fold(f64::INFINITY, f64::min);
+        assert!(max_marked_d2 <= min_unmarked_d2 + 1.0e-14,
+            "marked set should contain the closest centroids to the center: max_marked_d2={} min_unmarked_d2={}",
+            max_marked_d2, min_unmarked_d2);
+    }
+
+    #[test]
+    fn ex15_tet_nc_prolongation_preserves_general_affine_field() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc3 = NCState3D::new();
+        let coeffs = [2.0, -3.0, 0.5, 1.25];
+        let u = nodal_affine_field(&mesh, coeffs);
+        let marked = mark_closest_to_center(&mesh, 0.30);
+
+        let (new_mesh, _constraints, midpoint_map, _hanging_faces) = nc3.refine(&mesh, &marked);
+        let new_u = prolongate_p1(&u, new_mesh.n_nodes(), &midpoint_map);
+        let max_err = max_affine_error(&new_mesh, &new_u, coeffs);
+
+        assert!(max_err < 1.0e-14, "general affine P1 field should prolong exactly, got {}", max_err);
     }
 
     #[test]
