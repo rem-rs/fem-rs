@@ -7,10 +7,12 @@ edition = "2021"
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 rmp-serde = "1"
-hdf5 = { version = "0.8", optional = true }
+rust-hdf5 = { version = "0.2", optional = true }
 mpi = { workspace = true, optional = true }
 
 [features]
 default = []
-hdf5 = ["dep:hdf5"]
+hdf5 = ["dep:rust-hdf5"]
 hdf5-mpi = ["hdf5", "dep:mpi"]
+# Alias for `hdf5-mpi` (same dependency set).
+phdf5 = ["hdf5-mpi"]

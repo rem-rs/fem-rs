@@ -6,9 +6,16 @@
 //! Design goals:
 //! - Keep the workspace buildable without HDF5 installed.
 //! - Offer a rank-partitioned file layout that is deterministic and restart-friendly.
-//! - Provide a thin API that can later be upgraded to MPI-collective I/O.
+//! - Optional **native checkpoint** (`hdf5` feature): pure-Rust [`rust_hdf5`] backend (schema v2),
+//!   no system libhdf5.
+//!
+//! [`rust_hdf5`]: https://crates.io/crates/rust-hdf5
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "hdf5")]
+mod hdf5_rust_impl;
+
 use thiserror::Error;
 
 /// Schema version for on-disk checkpoint layout.
@@ -98,8 +105,7 @@ impl ParallelIoConfig {
         Ok(())
     }
 
-    #[cfg(feature = "hdf5")]
-    fn rank_group_name(&self) -> String {
+    pub fn rank_group_name(&self) -> String {
         format!("rank_{:06}", self.rank)
     }
 }
@@ -239,10 +245,10 @@ pub fn write_checkpoint_step_f64_mpi_collective(
 
     #[cfg(feature = "hdf5-mpi")]
     {
-        use mpi::topology::SystemCommunicator;
-        use mpi::traits::{Communicator, CommunicatorCollectives};
+        use mpi::topology::SimpleCommunicator;
+        use mpi::traits::{Communicator, CommunicatorCollectives, Destination, Source};
 
-        let world = SystemCommunicator::world();
+        let world = SimpleCommunicator::world();
         let comm_rank = world.rank() as usize;
         let comm_size = world.size() as usize;
 
@@ -254,9 +260,11 @@ pub fn write_checkpoint_step_f64_mpi_collective(
 
         write_checkpoint_step_f64(file_path, cfg, step, time, fields)?;
 
-        // Try direct global-dataset hyperslab writes first.
-        // Keep the root materialization path below as compatibility fallback.
-        let _ = write_checkpoint_step_f64_hyperslab(file_path, cfg, step, time, fields);
+        #[cfg(feature = "hdf5")]
+        if hdf5_rust_impl::SUPPORTS_HYPERSLAB {
+            let _ = write_checkpoint_step_f64_hyperslab(file_path, cfg, step, time, fields);
+        }
+
         world.barrier();
 
         const TAG_FIELD_NAMES: i32 = 0x4A10;
@@ -327,80 +335,9 @@ pub fn write_checkpoint_step_f64_hyperslab(
 
     #[cfg(feature = "hdf5")]
     {
-        use hdf5::File;
-
-        let file = if std::path::Path::new(file_path).exists() {
-            File::open_rw(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-        } else {
-            File::create(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-        };
-
-        let meta = match file.group("meta") {
-            Ok(g) => g,
-            Err(_) => file.create_group("meta").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        upsert_attr_u64(&meta, "world_size", cfg.world_size as u64)?;
-        upsert_attr_u64(&meta, "schema_version", CHECKPOINT_SCHEMA_VERSION as u64)?;
-
-        let steps = match file.group("steps") {
-            Ok(g) => g,
-            Err(_) => file.create_group("steps").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        let step_name = format!("step_{:08}", step);
-        let step_group = match steps.group(&step_name) {
-            Ok(g) => g,
-            Err(_) => steps.create_group(&step_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        upsert_attr_u64(&step_group, "step", step)?;
-        upsert_attr_f64(&step_group, "time", time)?;
-
-        let globals = match file.group("global_fields") {
-            Ok(g) => g,
-            Err(_) => file.create_group("global_fields").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        let step_global = match globals.group(&step_name) {
-            Ok(g) => g,
-            Err(_) => globals.create_group(&step_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-
-        for f in fields {
-            let gl = f.global_len as usize;
-            let start = f.global_offset as usize;
-            let end = start.saturating_add(f.values.len());
-            if end > gl {
-                return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
-                    "hyperslab out of bounds for {}: [{start},{end}) > global_len={gl}",
-                    f.name
-                )));
-            }
-
-            let ds = if step_global.link_exists(&f.name) {
-                let ds = step_global
-                    .dataset(&f.name)
-                    .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-                if ds.size() != gl {
-                    return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
-                        "dataset size mismatch for {}: existing={}, expected={}",
-                        f.name,
-                        ds.size(),
-                        gl
-                    )));
-                }
-                ds
-            } else {
-                step_global
-                    .new_dataset::<f64>()
-                    .shape([gl])
-                    .create(f.name.as_str())
-                    .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-            };
-
-            ds.write_slice(&f.values, start..end)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            upsert_attr_u64(&ds, "global_len", f.global_len)?;
-        }
-
-        return Ok(());
+        return hdf5_rust_impl::write_checkpoint_step_f64_hyperslab(
+            file_path, cfg, step, time, fields,
+        );
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -426,27 +363,9 @@ pub fn write_checkpoint_step_bundle_f64(
     #[cfg(feature = "hdf5")]
     {
         if let Some(meta) = bundle.mesh_meta {
-            use hdf5::File;
-
-            let file = hdf5::File::open_rw(file_path)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            let steps = file
-                .group("steps")
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            let step_name = format!("step_{:08}", step);
-            let step_group = steps
-                .group(&step_name)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            let mesh_group = match step_group.group("mesh_meta") {
-                Ok(g) => g,
-                Err(_) => step_group
-                    .create_group("mesh_meta")
-                    .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-            };
-
-            upsert_attr_u64(&mesh_group, "dim", meta.dim as u64)?;
-            upsert_attr_u64(&mesh_group, "n_vertices", meta.n_vertices)?;
-            upsert_attr_u64(&mesh_group, "n_elements", meta.n_elements)?;
+            hdf5_rust_impl::write_checkpoint_step_bundle_f64_mesh_meta(
+                file_path, cfg, step, time, meta,
+            )?;
         }
     }
 
@@ -480,51 +399,7 @@ pub fn write_rank_partition_f64(
 
     #[cfg(feature = "hdf5")]
     {
-        use hdf5::File;
-
-        let file = if std::path::Path::new(file_path).exists() {
-            File::open_rw(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-        } else {
-            File::create(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-        };
-
-        let meta = match file.group("meta") {
-            Ok(g) => g,
-            Err(_) => file.create_group("meta").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        if let Ok(attr) = meta.attr("world_size") {
-            attr.write_scalar(&(cfg.world_size as u64))
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        } else {
-            meta.new_attr::<u64>()
-                .create("world_size")
-                .and_then(|a| a.write_scalar(&(cfg.world_size as u64)))
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        }
-
-        let parts = match file.group("partitions") {
-            Ok(g) => g,
-            Err(_) => file.create_group("partitions").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        let rank_group_name = cfg.rank_group_name();
-        let rank_group = match parts.group(&rank_group_name) {
-            Ok(g) => g,
-            Err(_) => parts.create_group(&rank_group_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-
-        if rank_group.link_exists(dataset) {
-            rank_group
-                .unlink(dataset)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        }
-
-        rank_group
-            .new_dataset_builder()
-            .with_data(local_values)
-            .create(dataset)
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-
-        return Ok(());
+        return hdf5_rust_impl::write_rank_partition_f64(file_path, dataset, local_values, cfg);
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -550,16 +425,7 @@ pub fn read_rank_partition_f64(
 
     #[cfg(feature = "hdf5")]
     {
-        use hdf5::File;
-
-        let file = File::open(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let parts = file.group("partitions").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let rank_group = parts
-            .group(&cfg.rank_group_name())
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let ds = rank_group.dataset(dataset).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let data = ds.read_raw::<f64>().map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        return Ok(data);
+        return hdf5_rust_impl::read_rank_partition_f64(file_path, dataset, cfg);
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -597,63 +463,7 @@ pub fn write_checkpoint_step_f64(
 
     #[cfg(feature = "hdf5")]
     {
-        use hdf5::File;
-
-        let file = if std::path::Path::new(file_path).exists() {
-            File::open_rw(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-        } else {
-            File::create(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-        };
-
-        let meta = match file.group("meta") {
-            Ok(g) => g,
-            Err(_) => file.create_group("meta").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        upsert_attr_u64(&meta, "world_size", cfg.world_size as u64)?;
-        upsert_attr_u64(&meta, "schema_version", CHECKPOINT_SCHEMA_VERSION as u64)?;
-
-        let steps = match file.group("steps") {
-            Ok(g) => g,
-            Err(_) => file.create_group("steps").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        let step_name = format!("step_{:08}", step);
-        let step_group = match steps.group(&step_name) {
-            Ok(g) => g,
-            Err(_) => steps.create_group(&step_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        upsert_attr_u64(&step_group, "step", step)?;
-        upsert_attr_f64(&step_group, "time", time)?;
-
-        let parts = match step_group.group("partitions") {
-            Ok(g) => g,
-            Err(_) => step_group.create_group("partitions").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        let rank_group_name = cfg.rank_group_name();
-        let rank_group = match parts.group(&rank_group_name) {
-            Ok(g) => g,
-            Err(_) => parts.create_group(&rank_group_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-
-        for f in fields {
-            if rank_group.link_exists(&f.name) {
-                rank_group
-                    .unlink(&f.name)
-                    .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            }
-            rank_group
-                .new_dataset_builder()
-                .with_data(&f.values)
-                .create(f.name.as_str())
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-
-            let ds = rank_group
-                .dataset(&f.name)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            upsert_attr_u64(&ds, "global_offset", f.global_offset)?;
-            upsert_attr_u64(&ds, "global_len", f.global_len)?;
-        }
-
-        return Ok(());
+        return hdf5_rust_impl::write_checkpoint_step_f64(file_path, cfg, step, time, fields);
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -694,43 +504,7 @@ pub fn read_checkpoint_field_f64_at_step(
 
     #[cfg(feature = "hdf5")]
     {
-        use hdf5::File;
-
-        let file = File::open(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let steps = file.group("steps").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let step_name = format!("step_{:08}", step);
-        let step_group = steps.group(&step_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-
-        let time = step_group
-            .attr("time")
-            .and_then(|a| a.read_scalar::<f64>())
-            .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing time attr: {e}")))?;
-
-        let parts = step_group.group("partitions").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let rank_group = parts
-            .group(&cfg.rank_group_name())
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let ds = rank_group
-            .dataset(field_name)
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-
-        let values = ds.read_raw::<f64>().map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let global_offset = ds
-            .attr("global_offset")
-            .and_then(|a| a.read_scalar::<u64>())
-            .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing global_offset attr: {e}")))?;
-        let global_len = ds
-            .attr("global_len")
-            .and_then(|a| a.read_scalar::<u64>())
-            .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing global_len attr: {e}")))?;
-
-        return Ok(RankFieldReadF64 {
-            step,
-            time,
-            global_offset,
-            global_len,
-            values,
-        });
+        return hdf5_rust_impl::read_checkpoint_field_f64_at_step(file_path, cfg, step, field_name);
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -773,20 +547,7 @@ pub fn read_checkpoint_field_f64_latest(
 
     #[cfg(feature = "hdf5")]
     {
-        use hdf5::File;
-
-        let file = File::open(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let steps = file.group("steps").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let mut max_step: Option<u64> = None;
-
-        for name in steps.member_names().map_err(|e| Hdf5ParallelError::Backend(e.to_string()))? {
-            if let Some(s) = parse_step_name(&name) {
-                max_step = Some(max_step.map_or(s, |m| m.max(s)));
-            }
-        }
-
-        let step = max_step.ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint("no step_* groups found".into()))?;
-        return read_checkpoint_field_f64_at_step(file_path, cfg, step, field_name);
+        return hdf5_rust_impl::read_checkpoint_field_f64_latest(file_path, cfg, field_name);
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -826,148 +587,7 @@ pub fn validate_checkpoint_layout(
 ) -> Result<CheckpointValidationReport, Hdf5ParallelError> {
     #[cfg(feature = "hdf5")]
     {
-        use hdf5::File;
-
-        let file = File::open(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let meta = file
-            .group("meta")
-            .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing /meta: {e}")))?;
-
-        let world_size = meta
-            .attr("world_size")
-            .and_then(|a| a.read_scalar::<u64>())
-            .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing world_size attr: {e}")))?
-            as usize;
-        let schema_version = meta
-            .attr("schema_version")
-            .and_then(|a| a.read_scalar::<u64>())
-            .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing schema_version attr: {e}")))?
-            as u32;
-
-        if let Some(exp) = expected_world_size {
-            if exp != world_size {
-                return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
-                    "world_size mismatch: file={world_size}, expected={exp}"
-                )));
-            }
-        }
-
-        let steps_group = file
-            .group("steps")
-            .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing /steps: {e}")))?;
-        let mut step_infos = Vec::new();
-        let mut warnings = Vec::new();
-
-        let mut step_ids = Vec::new();
-        for name in steps_group
-            .member_names()
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-        {
-            if let Some(step) = parse_step_name(&name) {
-                step_ids.push(step);
-            } else {
-                warnings.push(format!("ignored non-step group: {name}"));
-            }
-        }
-        step_ids.sort_unstable();
-
-        for step in step_ids {
-            let step_name = format!("step_{:08}", step);
-            let step_group = steps_group
-                .group(&step_name)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            let time = step_group
-                .attr("time")
-                .and_then(|a| a.read_scalar::<f64>())
-                .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing time attr in {step_name}: {e}")))?;
-            let parts = step_group
-                .group("partitions")
-                .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing partitions in {step_name}: {e}")))?;
-
-            let mut field_ranges: std::collections::HashMap<String, (u64, Vec<(u64, u64)>)> =
-                std::collections::HashMap::new();
-            let mut present_ranks = 0usize;
-            for rank in 0..world_size {
-                let rank_name = format!("rank_{:06}", rank);
-                let rank_group = parts.group(&rank_name).map_err(|e| {
-                    Hdf5ParallelError::InvalidCheckpoint(format!(
-                        "missing rank group {rank_name} in {step_name}: {e}"
-                    ))
-                })?;
-                present_ranks += 1;
-
-                for fname in rank_group
-                    .member_names()
-                    .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-                {
-                    let ds = rank_group
-                        .dataset(&fname)
-                        .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-                    let off = ds
-                        .attr("global_offset")
-                        .and_then(|a| a.read_scalar::<u64>())
-                        .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!(
-                            "missing global_offset attr in {step_name}/{rank_name}/{fname}: {e}"
-                        )))?;
-                    let gl = ds
-                        .attr("global_len")
-                        .and_then(|a| a.read_scalar::<u64>())
-                        .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!(
-                            "missing global_len attr in {step_name}/{rank_name}/{fname}: {e}"
-                        )))?;
-                    let nloc = ds.size() as u64;
-                    let end = off.saturating_add(nloc);
-                    if end > gl {
-                        return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
-                            "chunk out of bounds in {step_name}/{rank_name}/{fname}: [{off},{end}) > global_len={gl}"
-                        )));
-                    }
-
-                    let entry = field_ranges
-                        .entry(fname)
-                        .or_insert_with(|| (gl, Vec::new()));
-                    if entry.0 != gl {
-                        return Err(Hdf5ParallelError::InvalidCheckpoint(
-                            "global_len mismatch across ranks".to_string(),
-                        ));
-                    }
-                    entry.1.push((off, end));
-                }
-            }
-
-            for (fname, (gl, mut ranges)) in field_ranges {
-                ranges.sort_unstable_by_key(|r| r.0);
-                let mut covered = 0u64;
-                let mut prev_end = 0u64;
-                for (off, end) in ranges {
-                    if off < prev_end {
-                        return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
-                            "overlapping chunks in {step_name}/{fname}"
-                        )));
-                    }
-                    covered = covered.saturating_add(end.saturating_sub(off));
-                    prev_end = end;
-                }
-                if covered != gl {
-                    warnings.push(format!(
-                        "incomplete coverage in {step_name}/{fname}: covered={covered}, global_len={gl}"
-                    ));
-                }
-            }
-
-            step_infos.push(CheckpointStepInfo {
-                step,
-                time,
-                partition_count: present_ranks,
-            });
-        }
-
-        return Ok(CheckpointValidationReport {
-            schema_version,
-            world_size,
-            steps: step_infos,
-            warnings,
-        });
+        return hdf5_rust_impl::validate_checkpoint_layout(file_path, expected_world_size);
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -1082,88 +702,7 @@ pub fn materialize_global_field_f64(
 
     #[cfg(feature = "hdf5")]
     {
-        use hdf5::File;
-
-        let file = File::open_rw(file_path).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let step_name = format!("step_{:08}", step);
-        let step_group = file
-            .group("steps")
-            .and_then(|g| g.group(&step_name))
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let parts = step_group
-            .group("partitions")
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-
-        let mut global_len: Option<u64> = None;
-        let mut chunks: Vec<(u64, Vec<f64>)> = Vec::with_capacity(world_size);
-
-        for rank in 0..world_size {
-            let rank_name = format!("rank_{:06}", rank);
-            let rank_group = parts
-                .group(&rank_name)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            let ds = rank_group
-                .dataset(field_name)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            let vals = ds.read_raw::<f64>().map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-            let off = ds
-                .attr("global_offset")
-                .and_then(|a| a.read_scalar::<u64>())
-                .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing global_offset attr: {e}")))?;
-            let gl = ds
-                .attr("global_len")
-                .and_then(|a| a.read_scalar::<u64>())
-                .map_err(|e| Hdf5ParallelError::InvalidCheckpoint(format!("missing global_len attr: {e}")))?;
-
-            if let Some(prev) = global_len {
-                if prev != gl {
-                    return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
-                        "global_len mismatch across ranks: {prev} vs {gl}"
-                    )));
-                }
-            } else {
-                global_len = Some(gl);
-            }
-
-            chunks.push((off, vals));
-        }
-
-        let gl = global_len.ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint("no rank chunks found".into()))?;
-        let mut global = vec![0.0f64; gl as usize];
-
-        for (off, vals) in chunks {
-            let start = off as usize;
-            let end = start + vals.len();
-            if end > global.len() {
-                return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
-                    "partition out of bounds: [{start},{end}) vs global {}",
-                    global.len()
-                )));
-            }
-            global[start..end].copy_from_slice(&vals);
-        }
-
-        let globals = match file.group("global_fields") {
-            Ok(g) => g,
-            Err(_) => file.create_group("global_fields").map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-        let step_global = match globals.group(&step_name) {
-            Ok(g) => g,
-            Err(_) => globals.create_group(&step_name).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?,
-        };
-
-        if step_global.link_exists(field_name) {
-            step_global
-                .unlink(field_name)
-                .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        }
-        step_global
-            .new_dataset_builder()
-            .with_data(&global)
-            .create(field_name)
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-
-        return Ok(gl);
+        return hdf5_rust_impl::materialize_global_field_f64(file_path, world_size, step, field_name);
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -1238,18 +777,7 @@ pub fn read_global_field_f64(
 ) -> Result<Vec<f64>, Hdf5ParallelError> {
     #[cfg(feature = "hdf5")]
     {
-        let file = hdf5::File::open(file_path)
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let step_name = format!("step_{:08}", step);
-        let ds = file
-            .group("global_fields")
-            .and_then(|g| g.group(&step_name))
-            .and_then(|g| g.dataset(field_name))
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let vals = ds
-            .read_raw::<f64>()
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        return Ok(vals);
+        return hdf5_rust_impl::read_global_field_f64(file_path, step, field_name);
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -1282,29 +810,13 @@ pub fn read_global_field_slice_f64(
 ) -> Result<Vec<f64>, Hdf5ParallelError> {
     #[cfg(feature = "hdf5")]
     {
-        let file = hdf5::File::open(file_path)
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-        let step_name = format!("step_{:08}", step);
-        let ds = file
-            .group("global_fields")
-            .and_then(|g| g.group(&step_name))
-            .and_then(|g| g.dataset(field_name))
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?;
-
-        let start = global_offset as usize;
-        let end = start.saturating_add(local_len);
-        if end > ds.size() {
-            return Err(Hdf5ParallelError::InvalidCheckpoint(format!(
-                "requested global slice [{start},{end}) exceeds dataset length {}",
-                ds.size()
-            )));
-        }
-
-        let vals = ds
-            .read_slice_1d::<f64, _>(start..end)
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))?
-            .to_vec();
-        return Ok(vals);
+        return hdf5_rust_impl::read_global_field_slice_f64(
+            file_path,
+            step,
+            field_name,
+            global_offset,
+            local_len,
+        );
     }
 
     #[cfg(not(feature = "hdf5"))]
@@ -1432,47 +944,6 @@ pub fn write_xdmf_polyvertex_scalar_timeseries_sidecar(
     std::fs::write(xdmf_path, xml).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))
 }
 
-#[cfg(feature = "hdf5")]
-fn upsert_attr_u64<T>(obj: &T, name: &str, value: u64) -> Result<(), Hdf5ParallelError>
-where
-    T: std::ops::Deref<Target = hdf5::Location>,
-{
-    if let Ok(attr) = obj.attr(name) {
-        attr.write_scalar(&value)
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))
-    } else {
-        obj.new_attr::<u64>()
-            .create(name)
-            .and_then(|a| a.write_scalar(&value))
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))
-    }
-}
-
-#[cfg(feature = "hdf5")]
-fn upsert_attr_f64<T>(obj: &T, name: &str, value: f64) -> Result<(), Hdf5ParallelError>
-where
-    T: std::ops::Deref<Target = hdf5::Location>,
-{
-    if let Ok(attr) = obj.attr(name) {
-        attr.write_scalar(&value)
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))
-    } else {
-        obj.new_attr::<f64>()
-            .create(name)
-            .and_then(|a| a.write_scalar(&value))
-            .map_err(|e| Hdf5ParallelError::Backend(e.to_string()))
-    }
-}
-
-#[cfg(feature = "hdf5")]
-fn parse_step_name(name: &str) -> Option<u64> {
-    let pfx = "step_";
-    if !name.starts_with(pfx) {
-        return None;
-    }
-    name[pfx.len()..].parse::<u64>().ok()
-}
-
 #[cfg(all(test, feature = "hdf5"))]
 mod restart_tests {
     use super::*;
@@ -1562,7 +1033,7 @@ mod restart_tests {
 
         let report = validate_checkpoint_layout(&file_path, Some(world_size))
             .expect("validate checkpoint layout");
-        assert_eq!(report.schema_version, CHECKPOINT_SCHEMA_VERSION);
+        assert_eq!(report.schema_version, hdf5_rust_impl::SCHEMA_VERSION_RUST);
         assert_eq!(report.steps.len(), 5);
 
         let _ = std::fs::remove_file(&file_path);
@@ -1749,106 +1220,5 @@ mod tests {
         assert_eq!(vals, vec![10.0, 20.0, 30.0]);
 
         let _ = std::fs::remove_file(file_path);
-    }
-}
-
-#[cfg(all(test, feature = "hdf5"))]
-mod hyperslab_tests {
-    use super::*;
-
-    #[test]
-    fn hyperslab_staged_two_rank_write_builds_global_field() {
-        let world_size = 2usize;
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "fem_io_hdf5_hyperslab_{}_{}.h5",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("valid clock")
-                .as_nanos()
-        ));
-        let file_path = path.to_string_lossy().to_string();
-
-        let step = 7u64;
-        let global = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        for rank in 0..world_size {
-            let start = rank * 3;
-            let field = RankFieldF64 {
-                name: "u".to_string(),
-                global_offset: start as u64,
-                global_len: global.len() as u64,
-                values: global[start..start + 3].to_vec(),
-            };
-            write_checkpoint_step_f64_hyperslab(
-                &file_path,
-                ParallelIoConfig { world_size, rank },
-                step,
-                0.7,
-                &[field],
-            )
-            .expect("hyperslab staged write");
-        }
-
-        #[cfg(feature = "hdf5")]
-        {
-            let f = hdf5::File::open(&file_path).expect("open hdf5");
-            let ds = f
-                .group("global_fields")
-                .and_then(|g| g.group("step_00000007"))
-                .and_then(|g| g.dataset("u"))
-                .expect("read global hyperslab field");
-            let vals = ds.read_raw::<f64>().expect("read raw");
-            assert_eq!(vals, global);
-        }
-
-        let _ = std::fs::remove_file(&file_path);
-    }
-
-    #[test]
-    fn hyperslab_global_read_and_slice_work() {
-        let world_size = 2usize;
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "fem_io_hdf5_hyperslab_read_{}_{}.h5",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("valid clock")
-                .as_nanos()
-        ));
-        let file_path = path.to_string_lossy().to_string();
-
-        let step = 3u64;
-        let global = vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0];
-        for rank in 0..world_size {
-            let start = rank * 3;
-            let field = RankFieldF64 {
-                name: "u".to_string(),
-                global_offset: start as u64,
-                global_len: global.len() as u64,
-                values: global[start..start + 3].to_vec(),
-            };
-            write_checkpoint_step_f64_hyperslab(
-                &file_path,
-                ParallelIoConfig { world_size, rank },
-                step,
-                0.3,
-                &[field],
-            )
-            .expect("hyperslab staged write");
-        }
-
-        let all = read_global_field_f64(&file_path, step, "u").expect("read global field");
-        assert_eq!(all, global);
-
-        let slice0 = read_global_field_slice_f64(&file_path, step, "u", 0, 3)
-            .expect("read first slice");
-        assert_eq!(slice0, vec![10.0, 11.0, 12.0]);
-        let slice1 = read_global_field_slice_f64(&file_path, step, "u", 3, 3)
-            .expect("read second slice");
-        assert_eq!(slice1, vec![20.0, 21.0, 22.0]);
-
-        let _ = std::fs::remove_file(&file_path);
     }
 }
