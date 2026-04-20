@@ -43,7 +43,13 @@ impl QFunctionTrait<f64> for SimplexMassBuild2D {
     fn inputs(&self) -> &[QFunctionField] { &self.inputs }
     fn outputs(&self) -> &[QFunctionField] { &self.outputs }
 
-    fn apply(&self, q: usize, inputs: &[&[f64]], outputs: &mut [&mut [f64]]) -> ReedResult<()> {
+    fn apply(
+        &self,
+        _ctx: &[u8],
+        q: usize,
+        inputs: &[&[f64]],
+        outputs: &mut [&mut [f64]],
+    ) -> ReedResult<()> {
         if inputs.len() != 2 || outputs.len() != 1 {
             return Err(ReedError::QFunction("SimplexMassBuild2D: expects 2 inputs, 1 output".into()));
         }
@@ -95,7 +101,13 @@ impl QFunctionTrait<f64> for SimplexMassApply {
     fn inputs(&self) -> &[QFunctionField] { &self.inputs }
     fn outputs(&self) -> &[QFunctionField] { &self.outputs }
 
-    fn apply(&self, q: usize, inputs: &[&[f64]], outputs: &mut [&mut [f64]]) -> ReedResult<()> {
+    fn apply(
+        &self,
+        _ctx: &[u8],
+        q: usize,
+        inputs: &[&[f64]],
+        outputs: &mut [&mut [f64]],
+    ) -> ReedResult<()> {
         if inputs.len() != 2 || outputs.len() != 1 {
             return Err(ReedError::QFunction("SimplexMassApply: expects 2 inputs, 1 output".into()));
         }
@@ -144,7 +156,13 @@ impl QFunctionTrait<f64> for SimplexPoissonBuild2D {
     fn inputs(&self) -> &[QFunctionField] { &self.inputs }
     fn outputs(&self) -> &[QFunctionField] { &self.outputs }
 
-    fn apply(&self, q: usize, inputs: &[&[f64]], outputs: &mut [&mut [f64]]) -> ReedResult<()> {
+    fn apply(
+        &self,
+        _ctx: &[u8],
+        q: usize,
+        inputs: &[&[f64]],
+        outputs: &mut [&mut [f64]],
+    ) -> ReedResult<()> {
         if inputs.len() != 2 || outputs.len() != 1 {
             return Err(ReedError::QFunction("SimplexPoissonBuild2D: expects 2 inputs, 1 output".into()));
         }
@@ -206,7 +224,13 @@ impl QFunctionTrait<f64> for SimplexPoissonApply2D {
     fn inputs(&self) -> &[QFunctionField] { &self.inputs }
     fn outputs(&self) -> &[QFunctionField] { &self.outputs }
 
-    fn apply(&self, q: usize, inputs: &[&[f64]], outputs: &mut [&mut [f64]]) -> ReedResult<()> {
+    fn apply(
+        &self,
+        _ctx: &[u8],
+        q: usize,
+        inputs: &[&[f64]],
+        outputs: &mut [&mut [f64]],
+    ) -> ReedResult<()> {
         if inputs.len() != 2 || outputs.len() != 1 {
             return Err(ReedError::QFunction("SimplexPoissonApply2D: expects 2 inputs, 1 output".into()));
         }
