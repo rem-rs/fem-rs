@@ -303,9 +303,9 @@ mod tests {
 
     #[test]
     fn partition_simplex_serial() {
-        use crate::launcher::{Launcher, native::MpiLauncher};
+        use crate::mpi_test_env::test_world_comm;
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let comm = MpiLauncher::init().unwrap().world_comm();
+        let comm = test_world_comm();
         let pmesh = partition_simplex_metis(&mesh, &comm, &MetisOptions::default());
         assert_eq!(pmesh.global_n_elems(), mesh.n_elems());
         assert_eq!(pmesh.global_n_nodes(), mesh.n_nodes());

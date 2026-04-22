@@ -5,6 +5,13 @@
 //! ghost copies on neighbouring ranks — can be performed efficiently and
 //! repeatedly.
 //!
+//! Forward/reverse transfers use blocking P2P on [`Comm`] unless the backend is
+//! native MPI ([`Comm::is_native_mpi`]) and the `mpi` feature is enabled: then
+//! [`GhostExchange::forward_overlapping`] / [`GhostExchange::reverse_overlapping`]
+//! use non-blocking `MPI_Isend` / `MPI_Irecv` inside an `rsmpi` request scope so
+//! local work can run between posting and completion (e.g. diagonal SpMV while
+//! the halo is in flight).
+//!
 //! ## Halo update protocol
 //!
 //! 1. **Build once**: `GhostExchange::from_partition(&partition, &comm)`.
@@ -161,14 +168,40 @@ impl GhostExchange {
     /// Tag scheme: use `TAG_FWD + sender_rank` so both ends of a channel
     /// independently arrive at the same tag without coordination.
     pub fn forward(&self, comm: &Comm, data: &mut [f64]) {
+        self.forward_overlapping(comm, data, |_data| {});
+    }
+
+    /// Like [`forward`](GhostExchange::forward), but on native MPI runs
+    /// non-blocking P2P and invokes `overlap` after all sends/receives are
+    /// posted (typically diagonal / local work that does not read ghost DOFs).
+    ///
+    /// `overlap` receives the same `data` buffer so callers can overlap work
+    /// without capturing the parent [`ParVector`](crate::par_vector::ParVector).
+    pub fn forward_overlapping<F: FnOnce(&mut [f64])>(
+        &self,
+        comm: &Comm,
+        data: &mut [f64],
+        overlap: F,
+    ) {
         if self.channels.is_empty() {
-            return; // serial / single-rank
+            overlap(data);
+            return;
         }
 
+        #[cfg(all(feature = "mpi", not(target_arch = "wasm32")))]
+        if comm.is_native_mpi() {
+            mpi_forward_overlap(&self.channels, comm.rank(), data, overlap);
+            return;
+        }
+
+        overlap(data);
+        self.forward_blocking(comm, data);
+    }
+
+    fn forward_blocking(&self, comm: &Comm, data: &mut [f64]) {
         const TAG_FWD: i32 = 0x1000;
         let my_rank = comm.rank();
 
-        // Phase 1: send all owned values to neighbours (non-blocking pushes).
         for ch in &self.channels {
             let send_tag = TAG_FWD + my_rank;
             let send_buf: Vec<u8> = ch
@@ -179,7 +212,6 @@ impl GhostExchange {
             comm.send_bytes(ch.rank, send_tag, &send_buf);
         }
 
-        // Phase 2: receive ghost values from all neighbours.
         for ch in &self.channels {
             let recv_tag = TAG_FWD + ch.rank;
             let recv_buf = comm.recv_bytes(ch.rank, recv_tag);
@@ -198,14 +230,39 @@ impl GhostExchange {
     ///
     /// Tag scheme: use `TAG_REV + sender_rank` symmetrically to `forward`.
     pub fn reverse(&self, comm: &Comm, data: &mut [f64]) {
+        self.reverse_overlapping(comm, data, |_data| {});
+    }
+
+    /// Like [`reverse`](GhostExchange::reverse), with an `overlap` hook between
+    /// posting and completing non-blocking transfers on native MPI.
+    ///
+    /// On the native path, ghost slots are zeroed while building send buffers
+    /// before `overlap` runs; the callback must not rely on ghost values.
+    pub fn reverse_overlapping<F: FnOnce(&mut [f64])>(
+        &self,
+        comm: &Comm,
+        data: &mut [f64],
+        overlap: F,
+    ) {
         if self.channels.is_empty() {
+            overlap(data);
             return;
         }
 
+        #[cfg(all(feature = "mpi", not(target_arch = "wasm32")))]
+        if comm.is_native_mpi() {
+            mpi_reverse_overlap(&self.channels, comm.rank(), data, overlap);
+            return;
+        }
+
+        overlap(data);
+        self.reverse_blocking(comm, data);
+    }
+
+    fn reverse_blocking(&self, comm: &Comm, data: &mut [f64]) {
         const TAG_REV: i32 = 0x2000;
         let my_rank = comm.rank();
 
-        // Phase 1: send all ghost values back to their owners (zero locally).
         for ch in &self.channels {
             let send_tag = TAG_REV + my_rank;
             let send_buf: Vec<u8> = ch
@@ -220,7 +277,6 @@ impl GhostExchange {
             comm.send_bytes(ch.rank, send_tag, &send_buf);
         }
 
-        // Phase 2: receive contributions from all neighbours into owned slots.
         for ch in &self.channels {
             let recv_tag = TAG_REV + ch.rank;
             let recv_buf = comm.recv_bytes(ch.rank, recv_tag);
@@ -244,5 +300,160 @@ impl GhostExchange {
     /// `true` if the exchange is trivially empty (serial / single-rank).
     pub fn is_trivial(&self) -> bool {
         self.channels.is_empty()
+    }
+}
+
+// ── native MPI non-blocking (rsmpi) ───────────────────────────────────────────
+
+#[cfg(all(feature = "mpi", not(target_arch = "wasm32")))]
+fn mpi_forward_overlap<F: FnOnce(&mut [f64])>(
+    channels: &[NeighbourChannel],
+    my_rank: Rank,
+    data: &mut [f64],
+    overlap: F,
+) {
+    use ::mpi::request;
+    use ::mpi::topology::SimpleCommunicator;
+    use ::mpi::traits::{Communicator, Destination, Source};
+
+    const TAG_FWD: i32 = 0x1000;
+    let world = SimpleCommunicator::world();
+
+    // Buffers must outlive the rsmpi `LocalScope` (see `mpi::request` docs).
+    let mut recv_bufs: Vec<Vec<u8>> = channels
+        .iter()
+        .map(|ch| vec![0u8; ch.recv_local_ids.len().saturating_mul(8)])
+        .collect();
+
+    let send_bufs: Vec<Vec<u8>> = channels
+        .iter()
+        .map(|ch| {
+            ch.send_local_ids
+                .iter()
+                .flat_map(|&lid| data[lid as usize].to_le_bytes())
+                .collect()
+        })
+        .collect();
+
+    request::scope(|scope| {
+        let mut recv_reqs = Vec::with_capacity(channels.len());
+        let n_ch = channels.len();
+        debug_assert_eq!(recv_bufs.len(), n_ch);
+        let recv_ptr: *mut Vec<u8> = recv_bufs.as_mut_ptr();
+        for i in 0..n_ch {
+            let ch = &channels[i];
+            let recv_tag = TAG_FWD + ch.rank;
+            // Disjoint `&mut` into `recv_bufs`; safe because each `i` is unique.
+            let recv_buf = unsafe { &mut *recv_ptr.add(i) };
+            let req = world
+                .process_at_rank(ch.rank)
+                .immediate_receive_into_with_tag(scope, recv_buf, recv_tag);
+            recv_reqs.push(req);
+        }
+
+        let mut send_reqs = Vec::with_capacity(channels.len());
+        for (i, ch) in channels.iter().enumerate() {
+            let send_tag = TAG_FWD + my_rank;
+            let sreq = world
+                .process_at_rank(ch.rank)
+                .immediate_send_with_tag(scope, &send_bufs[i], send_tag);
+            send_reqs.push(sreq);
+        }
+
+        overlap(data);
+
+        for req in recv_reqs {
+            req.wait();
+        }
+        for req in send_reqs {
+            req.wait();
+        }
+    });
+
+    for (ch, recv_buf) in channels.iter().zip(recv_bufs.iter()) {
+        for (j, &lid) in ch.recv_local_ids.iter().enumerate() {
+            let start = j * 8;
+            data[lid as usize] = f64::from_le_bytes(
+                recv_buf[start..start + 8].try_into().unwrap(),
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "mpi", not(target_arch = "wasm32")))]
+fn mpi_reverse_overlap<F: FnOnce(&mut [f64])>(
+    channels: &[NeighbourChannel],
+    my_rank: Rank,
+    data: &mut [f64],
+    overlap: F,
+) {
+    use ::mpi::request;
+    use ::mpi::topology::SimpleCommunicator;
+    use ::mpi::traits::{Communicator, Destination, Source};
+
+    const TAG_REV: i32 = 0x2000;
+    let world = SimpleCommunicator::world();
+
+    let mut recv_bufs: Vec<Vec<u8>> = channels
+        .iter()
+        .map(|ch| vec![0u8; ch.send_local_ids.len().saturating_mul(8)])
+        .collect();
+
+    let mut send_bufs: Vec<Vec<u8>> = Vec::with_capacity(channels.len());
+    for ch in channels {
+        let send_buf: Vec<u8> = ch
+            .recv_local_ids
+            .iter()
+            .flat_map(|&lid| {
+                let val = data[lid as usize];
+                data[lid as usize] = 0.0;
+                val.to_le_bytes()
+            })
+            .collect();
+        send_bufs.push(send_buf);
+    }
+
+    request::scope(|scope| {
+        let mut recv_reqs = Vec::with_capacity(channels.len());
+        let n_ch = channels.len();
+        debug_assert_eq!(recv_bufs.len(), n_ch);
+        let recv_ptr: *mut Vec<u8> = recv_bufs.as_mut_ptr();
+        for i in 0..n_ch {
+            let ch = &channels[i];
+            let recv_tag = TAG_REV + ch.rank;
+            let recv_buf = unsafe { &mut *recv_ptr.add(i) };
+            let req = world
+                .process_at_rank(ch.rank)
+                .immediate_receive_into_with_tag(scope, recv_buf, recv_tag);
+            recv_reqs.push(req);
+        }
+
+        let mut send_reqs = Vec::with_capacity(channels.len());
+        for (i, ch) in channels.iter().enumerate() {
+            let send_tag = TAG_REV + my_rank;
+            let sreq = world
+                .process_at_rank(ch.rank)
+                .immediate_send_with_tag(scope, &send_bufs[i], send_tag);
+            send_reqs.push(sreq);
+        }
+
+        overlap(data);
+
+        for req in recv_reqs {
+            req.wait();
+        }
+        for req in send_reqs {
+            req.wait();
+        }
+    });
+
+    for (ch, recv_buf) in channels.iter().zip(recv_bufs.iter()) {
+        for (j, &lid) in ch.send_local_ids.iter().enumerate() {
+            let start = j * 8;
+            let val = f64::from_le_bytes(
+                recv_buf[start..start + 8].try_into().unwrap(),
+            );
+            data[lid as usize] += val;
+        }
     }
 }

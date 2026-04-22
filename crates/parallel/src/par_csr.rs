@@ -104,26 +104,28 @@ impl ParCsrMatrix {
 
     /// Parallel SpMV: `y = A * x`.
     ///
-    /// 1. Update ghost values in `x`.
-    /// 2. `y[owned] = diag * x[owned]`.
-    /// 3. `y[owned] += offd * x[ghost]`.
+    /// 1. Start the halo exchange for `x` and, on native MPI, overlap the
+    ///    diagonal multiply `y[owned] = diag * x[owned]` while communication is
+    ///    in flight ([`ParVector::update_ghosts_overlapping`]).
+    /// 2. Complete the halo and apply `y[owned] += offd * x[ghost]`.
+    ///
+    /// On non-native backends the diagonal multiply runs strictly before blocking
+    /// halo communication (same numerical result).
     pub fn spmv(&self, x: &mut ParVector, y: &mut ParVector) {
-        // Update ghost values in x before reading off-diagonal entries.
-        x.update_ghosts();
+        let n = self.n_owned;
+        let ng = self.n_ghost;
 
-        // y[0..n_owned] = diag * x[0..n_owned]
-        self.diag.spmv(
-            &x.data[..self.n_owned],
-            &mut y.data[..self.n_owned],
-        );
+        // Post halo for x, overlap diagonal SpMV on native MPI (non-blocking P2P).
+        x.update_ghosts_overlapping(|data| {
+            self.diag.spmv(&data[..n], &mut y.data[..n]);
+        });
 
-        // y[0..n_owned] += offd * x[n_owned..]
-        if self.n_ghost > 0 {
+        if ng > 0 {
             self.offd.spmv_add(
                 1.0,
-                &x.data[self.n_owned..self.n_owned + self.n_ghost],
+                &x.data[n..n + ng],
                 1.0,
-                &mut y.data[..self.n_owned],
+                &mut y.data[..n],
             );
         }
     }
@@ -251,10 +253,9 @@ mod tests {
             for (i, v) in x.owned_slice_mut().iter_mut().enumerate() {
                 *v = (i + 1) as f64;
             }
-            // Set ghost values by exchange.
-            x.update_ghosts();
 
             let mut y = ParVector::zeros(&par_space);
+            // `spmv` updates ghost DOFs in `x` before using the off-diagonal block.
             par_mat.spmv(&mut x, &mut y);
 
             // y[owned] should equal x[owned] (identity).

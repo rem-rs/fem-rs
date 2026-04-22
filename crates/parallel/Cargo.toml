@@ -6,9 +6,9 @@ edition = "2021"
 [dependencies]
 fem-core     = { path = "../core" }
 fem-mesh     = { path = "../mesh" }
-fem-linalg   = { path = "../linalg" }
+fem-linalg   = { path = "../linalg", features = ["parallel"] }
 fem-space    = { path = "../space" }
-fem-assembly = { path = "../assembly" }
+fem-assembly = { path = "../assembly", features = ["parallel"] }
 fem-element  = { path = "../element" }
 fem-solver   = { path = "../solver" }
 linger       = { path = "../../vendor/linger", default-features = false, features = ["rayon"] }

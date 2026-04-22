@@ -9,7 +9,6 @@ on:
       - Cargo.lock
       - crates/assembly/**
       - crates/mesh/**
-      - crates/ceed/**
       - examples/**
       - .github/workflows/alignment-smoke.yml
       - MFEM_MAPPING.md
@@ -61,5 +60,5 @@ jobs:
           } elseif ("${{ matrix.suite }}" -eq "electromagnetic-absorbing") {
             cargo run -p fem-examples --example mfem_ex34 --quiet -- --anisotropic --gamma-x 1.0 --gamma-y 1.5
           } else {
-            cargo test -p fem-ceed backend_resource_all_canonical_solver_ids_have_deterministic_resolution -- --nocapture
+            cargo test -p fem-assembly --features reed backend_resource_ -- --nocapture
           }

@@ -192,7 +192,8 @@ impl RasPrecond {
         if self.overlap == 1 {
             if let Some(a) = &self.overlap_mat {
                 let mut z_work = z.clone_vec();
-                z_work.update_ghosts();
+                // Halo exchange is performed inside `ParCsrMatrix::spmv` (with
+                // optional compute/comm overlap on native MPI).
 
                 let mut az = ParVector::zeros_like(r);
                 a.spmv(&mut z_work, &mut az);

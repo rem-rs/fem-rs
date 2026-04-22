@@ -9,6 +9,11 @@
 use fem_core::Rank;
 use super::CommBackend;
 
+#[cfg(feature = "mpi")]
+use ::mpi::point_to_point::{Destination, Source};
+#[cfg(feature = "mpi")]
+use ::mpi::traits::{Communicator, CommunicatorCollectives, Root};
+
 // ── SerialBackend ─────────────────────────────────────────────────────────────
 
 /// Single-rank backend used when the `mpi` feature is disabled.
@@ -60,7 +65,6 @@ pub struct NativeMpiBackend {
 impl NativeMpiBackend {
     /// Construct from a live `mpi::environment::Universe`.
     pub fn from_world(universe: &::mpi::environment::Universe) -> Self {
-        use ::mpi::traits::Communicator;
         let w = universe.world();
         NativeMpiBackend {
             rank: w.rank(),
@@ -71,39 +75,37 @@ impl NativeMpiBackend {
 
 #[cfg(feature = "mpi")]
 impl CommBackend for NativeMpiBackend {
+    fn is_native_mpi(&self) -> bool { true }
+
     fn rank(&self) -> Rank { self.rank }
     fn size(&self) -> usize { self.size as usize }
 
     fn barrier(&self) {
-        use ::mpi::topology::SystemCommunicator;
-        use ::mpi::traits::Communicator;
-        SystemCommunicator::world().barrier();
+        use ::mpi::topology::SimpleCommunicator;
+        SimpleCommunicator::world().barrier();
     }
 
     fn allreduce_sum_f64(&self, local: f64) -> f64 {
         use ::mpi::collective::SystemOperation;
-        use ::mpi::topology::SystemCommunicator;
-        use ::mpi::traits::CommunicatorCollectives;
+        use ::mpi::topology::SimpleCommunicator;
         let mut result = 0.0_f64;
-        SystemCommunicator::world()
+        SimpleCommunicator::world()
             .all_reduce_into(&local, &mut result, &SystemOperation::sum());
         result
     }
 
     fn allreduce_sum_i64(&self, local: i64) -> i64 {
         use ::mpi::collective::SystemOperation;
-        use ::mpi::topology::SystemCommunicator;
-        use ::mpi::traits::CommunicatorCollectives;
+        use ::mpi::topology::SimpleCommunicator;
         let mut result = 0_i64;
-        SystemCommunicator::world()
+        SimpleCommunicator::world()
             .all_reduce_into(&local, &mut result, &SystemOperation::sum());
         result
     }
 
     fn broadcast_bytes(&self, root: Rank, buf: &mut Vec<u8>) {
-        use ::mpi::topology::SystemCommunicator;
-        use ::mpi::traits::{CommunicatorCollectives, Root};
-        let world = SystemCommunicator::world();
+        use ::mpi::topology::SimpleCommunicator;
+        let world = SimpleCommunicator::world();
         let root_proc = world.process_at_rank(root);
         // Step 1: broadcast payload length so non-root ranks can allocate.
         let mut len = buf.len();
@@ -116,27 +118,24 @@ impl CommBackend for NativeMpiBackend {
     }
 
     fn send_bytes(&self, dest: Rank, tag: i32, data: &[u8]) {
-        use ::mpi::topology::SystemCommunicator;
-        use ::mpi::traits::Communicator;
-        SystemCommunicator::world()
+        use ::mpi::topology::SimpleCommunicator;
+        SimpleCommunicator::world()
             .process_at_rank(dest)
             .send_with_tag(data, tag);
     }
 
     fn recv_bytes(&self, src: Rank, tag: i32) -> Vec<u8> {
-        use ::mpi::topology::SystemCommunicator;
-        use ::mpi::traits::Communicator;
-        let (msg, _status) = SystemCommunicator::world()
+        use ::mpi::topology::SimpleCommunicator;
+        let (msg, _status) = SimpleCommunicator::world()
             .process_at_rank(src)
             .receive_vec_with_tag::<u8>(tag);
         msg
     }
 
     fn alltoallv_bytes(&self, sends: &[(Rank, Vec<u8>)]) -> Vec<(Rank, Vec<u8>)> {
-        use ::mpi::topology::SystemCommunicator;
-        use ::mpi::traits::{Communicator, CommunicatorCollectives};
+        use ::mpi::topology::SimpleCommunicator;
 
-        let world = SystemCommunicator::world();
+        let world = SimpleCommunicator::world();
         let n     = self.size as usize;
 
         // Step 1: AllToAll on message counts so each rank knows how many bytes

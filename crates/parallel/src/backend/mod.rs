@@ -97,6 +97,10 @@ pub trait CommBackend: Send + Sync {
     fn split(&self, _color: i32, _key: i32) -> Box<dyn CommBackend> {
         panic!("CommBackend::split not supported by this backend");
     }
+
+    /// `true` only for [`NativeMpiBackend`](native::NativeMpiBackend) (`mpi` feature): real `rsmpi`
+    /// transport suitable for future non-blocking ghost exchange.
+    fn is_native_mpi(&self) -> bool { false }
 }
 
 // ── platform modules ─────────────────────────────────────────────────────────

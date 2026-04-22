@@ -12,10 +12,14 @@ fem-linalg  = { path = "../linalg" }
 fem-solver  = { path = "../solver" }
 nalgebra    = { workspace = true }
 thiserror   = { workspace = true }
+reed        = { workspace = true, optional = true }
+reed-core   = { workspace = true, optional = true }
+reed-cpu    = { workspace = true, optional = true }
 
 [features]
 default  = []
 parallel = ["dep:rayon", "fem-linalg/parallel"]
+reed     = ["dep:reed", "dep:reed-core", "dep:reed-cpu"]
 
 [dependencies.rayon]
 workspace = true

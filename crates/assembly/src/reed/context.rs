@@ -76,7 +76,7 @@ impl FemCeed {
 
     /// Construct from a canonical backend resource string.
     ///
-    /// Examples: `/native/linger`, `/gpu/wgpu`, `/solver/mkl`.
+    /// Examples: `/cpu/self`, `/gpu/wgpu`.
     ///
     /// Returns both the `FemCeed` context and the reed backend selection report
     /// so callers can inspect deterministic fallback behavior.
@@ -325,23 +325,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backend_resource_solver_request_returns_report() {
-        let (ceed, report) = FemCeed::from_backend_resource("/solver/mkl")
-            .expect("backend resource init should succeed with deterministic fallback");
+    fn backend_resource_cpu_request_returns_report() {
+        let (ceed, report) = FemCeed::from_backend_resource("/cpu/self")
+            .expect("cpu backend resource init should succeed");
         assert_eq!(ceed.backend(), CeedBackend::ReedCpu);
-        assert!(report.note.contains("mkl"));
-        assert!(ceed.backend_note().contains("mkl"));
         assert_eq!(ceed.effective_resource(), report.effective_resource);
+        assert!(!ceed.backend_note().is_empty());
     }
 
     #[test]
-    fn backend_resource_all_canonical_solver_ids_have_deterministic_resolution() {
-        for resource in ["/solver/mumps", "/solver/mkl"] {
+    fn backend_resource_cpu_aliases_resolve_consistently() {
+        for resource in ["/cpu/self", "/cpu/self/ref"] {
             let (ceed, report) = FemCeed::from_backend_resource(resource)
-                .unwrap_or_else(|e| panic!("resource {resource} should resolve deterministically: {e:?}"));
+                .unwrap_or_else(|e| panic!("resource {resource} should resolve: {e:?}"));
             assert_eq!(ceed.backend(), CeedBackend::ReedCpu);
             assert_eq!(ceed.effective_resource(), report.effective_resource);
-            assert!(!report.note.is_empty(), "resource {resource} should produce selection note");
         }
     }
 

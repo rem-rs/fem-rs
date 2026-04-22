@@ -15,6 +15,10 @@ fem-solver = { path = "../solver" }
 fem-amg = { path = "../amg" }
 criterion = { workspace = true }
 
+[features]
+default = []
+parallel = ["fem-assembly/parallel", "fem-linalg/parallel"]
+
 [[bench]]
 name = "assembly"
 harness = false

@@ -5,6 +5,9 @@
 
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
+
 use fem_space::fe_space::FESpace;
 
 use crate::comm::Comm;
@@ -16,8 +19,9 @@ use crate::par_space::ParallelFESpace;
 /// Local layout: `[owned DOFs 0..n_owned) [ghost DOFs n_owned..n_owned+n_ghost)`.
 ///
 /// Ghost DOFs are read-only mirrors of values owned by other ranks.  Call
-/// [`update_ghosts`](ParVector::update_ghosts) before any operation that reads
-/// ghost values (e.g. SpMV with off-diagonal entries).
+/// [`update_ghosts`](ParVector::update_ghosts) before manually using ghost entries;
+/// [`ParCsrMatrix::spmv`](crate::par_csr::ParCsrMatrix::spmv) performs the halo
+/// update internally (with optional overlap on native MPI).
 pub struct ParVector {
     /// Local data (owned + ghost).
     pub(crate) data: Vec<f64>,
@@ -149,20 +153,43 @@ impl ParVector {
         self.dof_ghost_exchange.forward(&self.comm, &mut self.data);
     }
 
+    /// Like [`update_ghosts`](Self::update_ghosts), but runs `overlap` after halo
+    /// sends/receives are posted on native MPI so local work can run in parallel
+    /// (e.g. diagonal SpMV while the halo is in flight).
+    pub fn update_ghosts_overlapping<F: FnOnce(&mut [f64])>(&mut self, overlap: F) {
+        self.dof_ghost_exchange
+            .forward_overlapping(&self.comm, &mut self.data, overlap);
+    }
+
     /// Reverse exchange: accumulate ghost contributions back to owned slots.
     pub fn accumulate_ghosts(&mut self) {
         self.dof_ghost_exchange.reverse(&self.comm, &mut self.data);
     }
 
+    /// Like [`accumulate_ghosts`](Self::accumulate_ghosts), with an `overlap`
+    /// hook for native MPI (see [`GhostExchange::reverse_overlapping`](crate::ghost::GhostExchange::reverse_overlapping)).
+    pub fn accumulate_ghosts_overlapping<F: FnOnce(&mut [f64])>(&mut self, overlap: F) {
+        self.dof_ghost_exchange
+            .reverse_overlapping(&self.comm, &mut self.data, overlap);
+    }
+
     // -- linear algebra (global reductions) -----------------------------------
 
     /// Global dot product: `sum_owned(self[i] * other[i])` over all ranks.
+    ///
+    /// On native targets, the local owned segment may use Rayon before the MPI
+    /// `allreduce` (see [`crate::env::local_rayon_min`] / `FEM_PARALLEL_LOCAL_RAYON_MIN`).
     pub fn global_dot(&self, other: &ParVector) -> f64 {
-        let local: f64 = self.data[..self.n_owned]
-            .iter()
-            .zip(&other.data[..self.n_owned])
-            .map(|(a, b)| a * b)
-            .sum();
+        let a = &self.data[..self.n_owned];
+        let b = &other.data[..self.n_owned];
+        #[cfg(not(target_arch = "wasm32"))]
+        let local: f64 = if a.len() >= crate::env::local_rayon_min() {
+            a.par_iter().zip(b).map(|(x, y)| x * y).sum()
+        } else {
+            a.iter().zip(b).map(|(x, y)| x * y).sum()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let local: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
         self.comm.allreduce_sum_f64(local)
     }
 
@@ -175,6 +202,15 @@ impl ParVector {
 
     /// `self += alpha * x` (over full local data including ghosts).
     pub fn axpy(&mut self, alpha: f64, x: &ParVector) {
+        debug_assert_eq!(self.data.len(), x.data.len());
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.data.len() >= crate::env::local_rayon_min() {
+            self.data
+                .par_iter_mut()
+                .zip(&x.data)
+                .for_each(|(si, xi)| *si += alpha * xi);
+            return;
+        }
         for (si, xi) in self.data.iter_mut().zip(x.data.iter()) {
             *si += alpha * xi;
         }
@@ -182,6 +218,11 @@ impl ParVector {
 
     /// `self *= alpha`.
     pub fn scale(&mut self, alpha: f64) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.data.len() >= crate::env::local_rayon_min() {
+            self.data.par_iter_mut().for_each(|v| *v *= alpha);
+            return;
+        }
         for v in &mut self.data {
             *v *= alpha;
         }

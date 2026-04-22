@@ -1,6 +1,3 @@
-[submodule "vendor/reed"]
-	path = vendor/reed
-	url = https://github.com/rem-rs/reed.git
 [submodule "vendor/linger"]
 	path = vendor/linger
 	url = https://github.com/rem-rs/linger.git

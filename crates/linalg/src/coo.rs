@@ -59,6 +59,17 @@ impl<T: Scalar> CooMatrix<T> {
     /// Number of stored triplets (before deduplication).
     pub fn nnz_raw(&self) -> usize { self.vals.len() }
 
+    /// Append all triplets from `other` (must have the same dimensions).
+    ///
+    /// Used to merge thread-local COO chunks before `into_csr()`.
+    pub fn append(&mut self, mut other: Self) {
+        assert_eq!(self.nrows, other.nrows, "coo append: nrows mismatch");
+        assert_eq!(self.ncols, other.ncols, "coo append: ncols mismatch");
+        self.rows.append(&mut other.rows);
+        self.cols.append(&mut other.cols);
+        self.vals.append(&mut other.vals);
+    }
+
     /// Convert to CSR, summing duplicate entries.
     ///
     /// Sort by (row, col), then merge duplicates.
@@ -153,5 +164,17 @@ mod tests {
         let csr = coo.into_csr();
         assert!((csr.get(0, 0) - 1.0).abs() < 1e-14);
         assert!((csr.get(0, 1) + 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn append_merges_triplets() {
+        let mut a = CooMatrix::<f64>::new(2, 2);
+        a.add(0, 0, 1.0);
+        let mut b = CooMatrix::<f64>::new(2, 2);
+        b.add(1, 1, 2.0);
+        a.append(b);
+        let csr = a.into_csr();
+        assert!((csr.get(0, 0) - 1.0).abs() < 1e-14);
+        assert!((csr.get(1, 1) - 2.0).abs() < 1e-14);
     }
 }

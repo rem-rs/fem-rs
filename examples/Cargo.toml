@@ -9,7 +9,6 @@ fem-mesh     = { path = "../crates/mesh" }
 fem-linalg   = { path = "../crates/linalg" }
 fem-io       = { path = "../crates/io" }
 fem-parallel = { path = "../crates/parallel" }
-fem-ceed     = { path = "../crates/ceed" }
 fem-element  = { path = "../crates/element" }
 fem-space    = { path = "../crates/space" }
 fem-assembly = { path = "../crates/assembly" }

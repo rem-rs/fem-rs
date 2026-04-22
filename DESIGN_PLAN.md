@@ -29,7 +29,7 @@
 | 19 | mesh + space | ✅ Done | 2026-04-03 | CurvedMesh\<D\>: from_linear (P1), elevate_to_order2 (P2/Tri6) with custom map_fn; isoparametric Jacobian + reference_to_physical; area preserved; 6 tests |
 | 20 | solver | ✅ Done | 2026-04-03 | LOBPCG eigenvalue solver; GeneralizedEigenSolver trait; LobpcgSolver; handles standard + generalized A x=λBx; 1-D Laplacian eigenvalues verified; 4 tests |
 | 21 | solver + linalg | ✅ Done | 2026-04-03 | BlockSystem (2×2 saddle-point); BlockDiagonalPrecond; SchurComplementSolver (GMRES on flat system); MinresSolver; 4 tests |
-| 22 | assembly + ceed | ✅ Done | 2026-04-03 | Partial assembly (matrix-free): PAMassOperator, PADiffusionOperator (spatially varying κ), LumpedMassOperator; MatFreeOperator trait; results match assembled matrix × vector to 1e-11; 5 tests |
+| 22 | assembly + reed | ✅ Done | 2026-04-03 | Partial assembly (matrix-free): PAMassOperator, PADiffusionOperator (spatially varying κ), LumpedMassOperator; MatFreeOperator trait; results match assembled matrix × vector to 1e-11; 5 tests |
 | 23 | space | ✅ Done | 2026-04-04 | HCurlSpace (Nédélec ND1 edge DOFs, sign convention, 2D+3D) + HDivSpace (RT0 face DOFs, geometric sign computation, 2D+3D); FESpace::element_signs(); EdgeKey/FaceKey public; boundary_dofs_hcurl/hdiv; 13 tests |
 | 24 | assembly | ✅ Done | 2026-04-04 | VectorAssembler (Piola transforms + sign application); VectorQpData + VectorBilinearIntegrator/VectorLinearIntegrator traits; CurlCurlIntegrator (∫ μ curl u · curl v); VectorMassIntegrator (∫ α u·v); H(curl) assembly verified symmetric + PSD; 10 tests |
 | 25 | assembly + solver | ✅ Done | 2026-04-04 | Fix SIP-DG interior face normals (single consistent n_L + orient_normal_outward); SchurComplementSolver rewritten with right-preconditioned GMRES + block-diagonal precond; MINRES rewritten (Choi-Paige-Saunders); TriND1 Φ₂ basis orientation fix; all 8 examples passing |
@@ -77,10 +77,10 @@ Week-1 checklist:
 - [x] Add low/high-order randomized stress tests for commuting errors
 - [x] Add CI grouping for high-order discrete-operator suite (`cargo test-high-order-discrete-op`)
 
-### Vendor submodules
-| Submodule | URL | Role |
-|-----------|-----|------|
-| `vendor/reed` | rem-rs/reed | libCEED analogue; bridged via `crates/ceed` |
+### Vendor submodules & pinned deps
+| Item | URL | Role |
+|------|-----|------|
+| `rem-rs/reed` (git) | rem-rs/reed | libCEED analogue; used from `fem-assembly` with `--features reed` (workspace-pinned git deps) |
 | `vendor/linger` | rem-rs/linger | Krylov solvers + AMG; drives `fem-solver` and `fem-amg` |
 | `vendor/rmetis` | javagg/rmetis | Pure-Rust BFS graph partitioner; drives `fem-parallel` Phase 18 |
 | `jsmpi` (crates.io) | crates.io/jsmpi | JavaScript MPI shim for WASM Web Workers; drives `fem-parallel` Phase 33a |
@@ -699,19 +699,19 @@ Efficient solvers for mixed/saddle-point problems (Stokes, Darcy, incompressible
 
 ## Phase 22: Partial Assembly and Matrix-Free
 
-**Depends on**: `assembly`, `ceed` (fem-ceed / reed), Phase 3 elements
+**Depends on**: `assembly` (enable `reed` feature for rem-rs/reed-backed PA helpers), Phase 3 elements
 
 ### Goal
 High-performance high-order FEM via sum-factorization — avoids explicit matrix formation.
 
 ### Approach
-- Integrate with `fem-ceed` (reed submodule) for operator application kernels
+- Integrate with `fem-assembly` / `reed` feature (rem-rs/reed) for operator application kernels
 - `PartialAssembler`: stores quadrature-point data (D-vectors) instead of full matrix
 - Sum-factorization `apply(u, v)` for tensor-product elements (QuadQ*, HexQ*)
 
 ### Additions
 - `assembly/src/partial/`: `PADiffusionOperator`, `PAMassOperator`
-- `ceed/src/operator.rs`: bridge fem-assembly integrators → reed CeedOperator
+- `assembly/src/reed/`: bridge fem-assembly integrators → reed operators (behind `--features reed`)
 
 ### Acceptance criteria
 - PA SpMV throughput ≥ 2× explicit CSR SpMV for Q2 on 100K element mesh
@@ -755,7 +755,7 @@ Phase 19 (high-order curved meshes)     ← needs Phase 12
 Phase 20 (eigenvalue solvers: LOBPCG)   ← needs Phase 13
 Phase 21 (block solvers + Schur)        ← needs Phase 13
 
-Phase 22 (partial assembly / matrix-free)  ← needs Phase 12, ceed
+Phase 22 (partial assembly / matrix-free)  ← needs Phase 12, `fem-assembly` + `reed`
 ```
 
 ---

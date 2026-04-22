@@ -1,4 +1,82 @@
+use std::any::TypeId;
+
 use fem_core::Scalar;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+#[cfg(feature = "parallel")]
+use std::sync::OnceLock;
+
+/// Environment variable for [`spmv_parallel_min_rows`]: minimum CSR row count before
+/// Rayon parallelizes `spmv` / `spmv_add` (native `parallel` feature only).
+#[cfg(feature = "parallel")]
+pub const FEM_LINALG_SPMV_PARALLEL_MIN_ROWS: &str = "FEM_LINALG_SPMV_PARALLEL_MIN_ROWS";
+
+#[cfg(feature = "parallel")]
+const DEFAULT_SPMV_PARALLEL_MIN_ROWS: usize = 128;
+
+#[cfg(feature = "parallel")]
+static SPMV_PARALLEL_MIN_ROWS: OnceLock<usize> = OnceLock::new();
+
+/// Minimum row count before using Rayon for SpMV (avoids thread overhead on tiny systems).
+///
+/// Default `128`. Override with [`FEM_LINALG_SPMV_PARALLEL_MIN_ROWS`] (must parse to a
+/// positive integer; invalid values fall back to the default).
+#[cfg(feature = "parallel")]
+#[inline]
+pub fn spmv_parallel_min_rows() -> usize {
+    *SPMV_PARALLEL_MIN_ROWS.get_or_init(|| {
+        std::env::var(FEM_LINALG_SPMV_PARALLEL_MIN_ROWS)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_SPMV_PARALLEL_MIN_ROWS)
+    })
+}
+
+#[inline]
+fn csr_row_dot_f64(
+    row_ptr: &[usize],
+    col_idx: &[u32],
+    values: &[f64],
+    x: &[f64],
+    row: usize,
+) -> f64 {
+    let start = row_ptr[row];
+    let end = row_ptr[row + 1];
+    let mut k = start;
+    let mut sum = 0.0_f64;
+
+    let end4 = start + (end - start) / 4 * 4;
+    while k < end4 {
+        sum += values[k] * x[col_idx[k] as usize]
+            + values[k + 1] * x[col_idx[k + 1] as usize]
+            + values[k + 2] * x[col_idx[k + 2] as usize]
+            + values[k + 3] * x[col_idx[k + 3] as usize];
+        k += 4;
+    }
+    while k < end {
+        sum += values[k] * x[col_idx[k] as usize];
+        k += 1;
+    }
+    sum
+}
+
+#[inline]
+fn csr_row_dot_axpby_f64(
+    row_ptr: &[usize],
+    col_idx: &[u32],
+    values: &[f64],
+    x: &[f64],
+    row: usize,
+    alpha: f64,
+    beta: f64,
+    yi: f64,
+) -> f64 {
+    let s = csr_row_dot_f64(row_ptr, col_idx, values, x, row);
+    alpha * s + beta * yi
+}
 
 /// Compressed Sparse Row matrix.
 ///
@@ -62,6 +140,59 @@ impl<T: Scalar> CsrMatrix<T> {
     pub fn spmv(&self, x: &[T], y: &mut [T]) {
         assert_eq!(x.len(), self.ncols);
         assert_eq!(y.len(), self.nrows);
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            // SAFETY: `T` is `f64`; `CsrMatrix<T>` matches `CsrMatrix<f64>` layout.
+            let m: &CsrMatrix<f64> =
+                unsafe { &*(self as *const CsrMatrix<T> as *const CsrMatrix<f64>) };
+            let x: &[f64] = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len()) };
+            let y: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len()) };
+            #[cfg(feature = "parallel")]
+            if self.nrows >= spmv_parallel_min_rows() {
+                m.spmv_parallel_f64(x, y);
+                return;
+            }
+            m.spmv_serial_f64(x, y);
+            return;
+        }
+        #[cfg(feature = "parallel")]
+        if self.nrows >= spmv_parallel_min_rows() {
+            self.spmv_parallel(x, y);
+            return;
+        }
+        self.spmv_serial(x, y);
+    }
+
+    /// Compute `y = α A x + β y`.
+    pub fn spmv_add(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) {
+        assert_eq!(x.len(), self.ncols);
+        assert_eq!(y.len(), self.nrows);
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            // SAFETY: `T` is `f64` (same layout as below).
+            let m: &CsrMatrix<f64> =
+                unsafe { &*(self as *const CsrMatrix<T> as *const CsrMatrix<f64>) };
+            let x: &[f64] = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len()) };
+            let y: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len()) };
+            let alpha = unsafe { std::ptr::read(&alpha as *const T as *const f64) };
+            let beta = unsafe { std::ptr::read(&beta as *const T as *const f64) };
+            #[cfg(feature = "parallel")]
+            if self.nrows >= spmv_parallel_min_rows() {
+                m.spmv_add_parallel_f64(alpha, x, beta, y);
+                return;
+            }
+            m.spmv_add_serial_f64(alpha, x, beta, y);
+            return;
+        }
+        #[cfg(feature = "parallel")]
+        if self.nrows >= spmv_parallel_min_rows() {
+            self.spmv_add_parallel(alpha, x, beta, y);
+            return;
+        }
+        self.spmv_add_serial(alpha, x, beta, y);
+    }
+
+    fn spmv_serial(&self, x: &[T], y: &mut [T]) {
         for (row, yi) in y.iter_mut().enumerate() {
             let start = self.row_ptr[row];
             let end   = self.row_ptr[row + 1];
@@ -73,10 +204,7 @@ impl<T: Scalar> CsrMatrix<T> {
         }
     }
 
-    /// Compute `y = α A x + β y`.
-    pub fn spmv_add(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) {
-        assert_eq!(x.len(), self.ncols);
-        assert_eq!(y.len(), self.nrows);
+    fn spmv_add_serial(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) {
         for (row, yi) in y.iter_mut().enumerate() {
             let start = self.row_ptr[row];
             let end   = self.row_ptr[row + 1];
@@ -86,6 +214,32 @@ impl<T: Scalar> CsrMatrix<T> {
             }
             *yi = alpha * s + beta * *yi;
         }
+    }
+
+    #[cfg(feature = "parallel")]
+    fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
+        y.par_iter_mut().enumerate().for_each(|(row, yi)| {
+            let start = self.row_ptr[row];
+            let end   = self.row_ptr[row + 1];
+            let mut s = T::zero();
+            for k in start..end {
+                s += self.values[k] * x[self.col_idx[k] as usize];
+            }
+            *yi = s;
+        });
+    }
+
+    #[cfg(feature = "parallel")]
+    fn spmv_add_parallel(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) {
+        y.par_iter_mut().enumerate().for_each(|(row, yi)| {
+            let start = self.row_ptr[row];
+            let end   = self.row_ptr[row + 1];
+            let mut s = T::zero();
+            for k in start..end {
+                s += self.values[k] * x[self.col_idx[k] as usize];
+            }
+            *yi = alpha * s + beta * *yi;
+        });
     }
 
     /// Diagonal vector `d[i] = A[i,i]`.
@@ -383,6 +537,38 @@ pub fn spadd<T: Scalar>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> CsrMatrix<T> {
     }
 }
 
+impl CsrMatrix<f64> {
+    pub(super) fn spmv_serial_f64(&self, x: &[f64], y: &mut [f64]) {
+        for (row, yi) in y.iter_mut().enumerate() {
+            *yi = csr_row_dot_f64(&self.row_ptr, &self.col_idx, &self.values, x, row);
+        }
+    }
+
+    pub(super) fn spmv_add_serial_f64(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
+        for (row, yi) in y.iter_mut().enumerate() {
+            *yi = csr_row_dot_axpby_f64(
+                &self.row_ptr, &self.col_idx, &self.values, x, row, alpha, beta, *yi,
+            );
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    pub(super) fn spmv_parallel_f64(&self, x: &[f64], y: &mut [f64]) {
+        y.par_iter_mut().enumerate().for_each(|(row, yi)| {
+            *yi = csr_row_dot_f64(&self.row_ptr, &self.col_idx, &self.values, x, row);
+        });
+    }
+
+    #[cfg(feature = "parallel")]
+    pub(super) fn spmv_add_parallel_f64(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
+        y.par_iter_mut().enumerate().for_each(|(row, yi)| {
+            *yi = csr_row_dot_axpby_f64(
+                &self.row_ptr, &self.col_idx, &self.values, x, row, alpha, beta, *yi,
+            );
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +656,12 @@ mod tests {
         for k in 0..da.len() {
             assert!((da[k] - dt[k]).abs() < 1e-14);
         }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn spmv_parallel_min_rows_positive() {
+        assert!(spmv_parallel_min_rows() >= 1);
     }
 
     #[test]

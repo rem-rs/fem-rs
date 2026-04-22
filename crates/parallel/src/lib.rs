@@ -35,10 +35,22 @@
 //! let comm = launcher.world_comm();
 //! assert_eq!(comm.size(), 1);
 //! ```
+//!
+//! ## Environment variables
+//!
+//! See [`env`] — notably [`FEM_PARALLEL_LOCAL_RAYON_MIN`](env::FEM_PARALLEL_LOCAL_RAYON_MIN) for
+//! thresholds on local Rayon parallelism before MPI collectives,
+//! [`FEM_LINALG_SPMV_PARALLEL_MIN_ROWS`] for local CSR SpMV threading (`fem-linalg`, re-exported),
+//! and [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`] for local volume assembly (`fem-assembly`, re-exported).
+//!
+//! Halo exchange for [`ParCsrMatrix`](crate::par_csr::ParCsrMatrix) uses non-blocking MPI
+//! when [`Comm::is_native_mpi`](comm::Comm::is_native_mpi) is true, overlapping the diagonal
+//! SpMV with in-flight receives/sends (see [`GhostExchange::forward_overlapping`](crate::ghost::GhostExchange::forward_overlapping)).
 
 pub mod backend;
 pub mod comm;
 pub mod dof_partition;
+pub mod env;
 pub mod ghost;
 pub mod launcher;
 pub mod mesh_serde;
@@ -56,8 +68,14 @@ pub mod par_vector;
 pub mod par_vector_assembler;
 pub mod partition;
 
+#[cfg(test)]
+mod mpi_test_env;
+
 // Flat re-exports for ergonomic `use fem_parallel::*`.
 pub use comm::{Comm, Universe};
+pub use env::{local_rayon_min, FEM_PARALLEL_LOCAL_RAYON_MIN};
+pub use fem_assembly::{assembly_parallel_min_elems, FEM_ASSEMBLY_PARALLEL_MIN_ELEMS};
+pub use fem_linalg::{spmv_parallel_min_rows, FEM_LINALG_SPMV_PARALLEL_MIN_ROWS};
 pub use dof_partition::DofPartition;
 pub use ghost::GhostExchange;
 pub use launcher::{Launcher, WorkerConfig};
@@ -72,7 +90,7 @@ pub use par_ras::{
 	par_solve_pcg_ras, summarize_ras_hpc,
 };
 pub use par_simplex::{partition_simplex, partition_simplex_streaming};
-pub use par_solver::{par_solve_cg, par_solve_pcg_jacobi, par_solve_minres};
+pub use par_solver::{par_solve_cg, par_solve_gmres_jacobi, par_solve_pcg_jacobi, par_solve_minres};
 pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
 pub use par_vector_assembler::ParVectorAssembler;

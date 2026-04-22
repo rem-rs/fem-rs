@@ -325,12 +325,10 @@ fn extract_local_faces<const D: usize>(
 mod tests {
     use super::*;
     use fem_mesh::MeshTopology;
-    use crate::launcher::{Launcher, native::MpiLauncher};
+    use crate::mpi_test_env::test_world_comm;
 
     fn serial_comm() -> Comm {
-        // Use MpiLauncher which falls back to SerialBackend when `mpi` feature
-        // is not enabled.
-        MpiLauncher::init().expect("MPI already initialised").world_comm()
+        test_world_comm()
     }
 
     #[test]

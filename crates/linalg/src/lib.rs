@@ -10,6 +10,13 @@
 //! - [`dense`]    — small dense operations (LU factorisation, matmat) for coarse-grid solves
 //! - [`block`]    — `BlockMatrix` / `BlockVector` for mixed / saddle-point problems
 //!
+//! ## Feature flags
+//!
+//! - **`parallel`** — Rayon-parallel `CsrMatrix::spmv` / `spmv_add` when the row count
+//!   meets `spmv_parallel_min_rows()` (default `128`; override env
+//!   `FEM_LINALG_SPMV_PARALLEL_MIN_ROWS`). For `f64`, serial and parallel paths use a
+//!   4-way unrolled dot over each row’s nonzeros.
+//!
 //! ## Re-exports from `linger`
 //! - `BlrMatrix`, `BlrBlock` — Block Low-Rank compression for direct solvers
 
@@ -23,6 +30,8 @@ pub mod block;
 pub use coo::CooMatrix;
 pub use csr::CsrMatrix;
 pub use csr::spadd;
+#[cfg(feature = "parallel")]
+pub use csr::{spmv_parallel_min_rows, FEM_LINALG_SPMV_PARALLEL_MIN_ROWS};
 pub use sparsity::SparsityPattern;
 pub use vector::Vector;
 pub use block::{BlockMatrix, BlockVector};

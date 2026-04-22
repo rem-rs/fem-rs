@@ -27,6 +27,15 @@
 //!         2.0 * PI * PI * (PI*x[0]).sin() * (PI*x[1]).sin()
 //!     })], 3);
 //! ```
+//!
+//! ## Feature flags
+//!
+//! - **`parallel`** — Rayon-parallel volume assembly when `n_elements` meets
+//!   `assembly_parallel_min_elems()` (default `64`; override env
+//!   `FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`), and enables `fem-linalg/parallel` for
+//!   threaded SpMV on large local matrices.
+//! - **`reed`** — libCEED-style partial assembly helpers backed by the
+//!   workspace-pinned [`reed`](https://github.com/rem-rs/reed) crates (`fem_assembly::reed`).
 
 pub mod assembler;
 pub mod backend;
@@ -49,7 +58,12 @@ pub mod postprocess;
 pub mod discrete_op;
 pub mod transfer;
 
+#[cfg(feature = "reed")]
+pub mod reed;
+
 pub use assembler::{Assembler, face_dofs_p1, face_dofs_p2};
+#[cfg(feature = "parallel")]
+pub use assembler::{assembly_parallel_min_elems, FEM_ASSEMBLY_PARALLEL_MIN_ELEMS};
 pub use backend::{CsrLinearOperator, LinearOperator, OperatorBackend};
 pub use complex::{ComplexAssembler, ComplexGridFunction, ComplexLinearForm, ComplexSystem};
 pub use discrete_op::{DiscreteLinearOperator, DiscreteOpError};

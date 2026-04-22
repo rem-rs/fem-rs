@@ -5,8 +5,7 @@ on:
   pull_request:
     branches: [main, master]
     paths:
-      - vendor/reed/**
-      - crates/ceed/**
+      - crates/assembly/**
       - Cargo.toml
       - Cargo.lock
       - .github/workflows/backend-feature-matrix.yml
@@ -21,19 +20,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  reed-contract:
-    name: reed contract (${{ matrix.profile }})
+  fem-assembly-reed:
+    name: fem-assembly + reed (git dep)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - profile: baseline
-            args: --no-default-features
-          - profile: mumps
-            args: --no-default-features --features mumps
-          - profile: mkl
-            args: --no-default-features --features mkl
 
     steps:
       - name: Checkout
@@ -48,10 +37,8 @@ jobs:
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Run reed backend contract tests
+      - name: Test fem-assembly with reed feature (pinned rem-rs/reed from git)
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} parse_backend_request_supports_canonical_paths -- --nocapture
-          cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} backend_report_defaults_to_native_cpu -- --nocapture
-          cargo test --manifest-path vendor/reed/Cargo.toml ${{ matrix.args }} backend_report_mkl_resolves_to_native_linger -- --nocapture
+          cargo test -p fem-assembly --features reed

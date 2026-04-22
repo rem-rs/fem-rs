@@ -13,13 +13,12 @@ members = [
     "crates/io",
     "crates/io_hdf5_parallel",
     "crates/wasm",
-    "crates/ceed",        # bridge: fem-rs ↔ reed (libCEED analogue)
     "crates/benches",
     "examples",
 ]
-# reed/linger live in vendor as git submodules and are their own Cargo workspaces.
-# Exclude them so Cargo does not try to merge workspace graphs.
-exclude = ["vendor/reed", "vendor/linger"]
+# linger lives in vendor as a git submodule and is its own Cargo workspace.
+# Exclude it so Cargo does not try to merge workspace graphs.
+exclude = ["vendor/linger"]
 
 [workspace.dependencies]
 # shared versions — reference from crates with { workspace = true }
@@ -36,6 +35,10 @@ env_logger  = "0.11"
 mpi         = { version = "0.8", features = ["user-operations"] }
 criterion   = { version = "0.5", features = ["html_reports"] }
 jsmpi       = "0.1"
+# rem-rs/reed (libCEED-style discretization); git pin — bump `rev` when upgrading.
+reed        = { git = "https://github.com/rem-rs/reed.git", rev = "e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f", package = "reed", default-features = false }
+reed-core   = { git = "https://github.com/rem-rs/reed.git", rev = "e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f", package = "reed-core" }
+reed-cpu    = { git = "https://github.com/rem-rs/reed.git", rev = "e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f", package = "reed-cpu", default-features = false }
 
 [profile.release]
 opt-level   = 3

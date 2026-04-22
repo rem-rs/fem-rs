@@ -33,11 +33,10 @@ fem-rs/
 │   ├── parallel/           # thread/MPI backends, METIS partitioning, ghost exchange
 │   ├── io/                 # GMSH .msh v4 reader, VTK .vtu XML writer
 │   ├── wasm/               # wasm32 bindings (wasm-bindgen), Poisson solver
-│   └── ceed/               # libCEED-style partial assembly operators (via reed)
+│   └── assembly/           # classic assembly; optional `--features reed` pulls rem-rs/reed (PA / matrix-free helpers)
 ├── examples/               # 11 runnable FEM examples
 ├── vendor/
 │   ├── linger/             # Krylov solvers + AMG engine
-│   ├── reed/               # libCEED analogue (operator decomposition)
 │   └── rmetis/             # pure-Rust METIS-compatible graph partitioner
 ├── benches/
 └── tests/                      # integration tests
@@ -47,10 +46,9 @@ fem-rs/
 ```
 fem-wasm      → fem-assembly, fem-io, fem-solver
 fem-parallel  → fem-assembly, fem-linalg, fem-amg
-fem-ceed      → fem-assembly, fem-element, fem-linalg (bridges to vendor/reed)
 fem-amg       → fem-linalg (bridges to vendor/linger)
 fem-solver    → fem-linalg (bridges to vendor/linger)
-fem-assembly  → fem-element, fem-space, fem-linalg
+fem-assembly  → fem-element, fem-space, fem-linalg (optional `reed` → rem-rs/reed git workspace deps)
 fem-space     → fem-element, fem-mesh, fem-core
 fem-element   → fem-core
 fem-mesh      → fem-core

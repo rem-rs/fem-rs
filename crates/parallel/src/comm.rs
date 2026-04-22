@@ -62,6 +62,10 @@ impl Comm {
     #[inline]
     pub fn is_root(&self) -> bool { self.inner.rank() == 0 }
 
+    /// `true` when the backend is real in-process MPI (`rsmpi`), i.e. [`NativeMpiBackend`](crate::backend::native::NativeMpiBackend).
+    #[inline]
+    pub fn is_native_mpi(&self) -> bool { self.inner.is_native_mpi() }
+
     // ── synchronisation ──────────────────────────────────────────────────────
 
     /// Global barrier — blocks until every rank has called this.

@@ -14,6 +14,38 @@ use fem_space::fe_space::FESpace;
 
 use crate::integrator::{BdQpData, BoundaryBilinearIntegrator, BoundaryLinearIntegrator, BilinearIntegrator, LinearIntegrator, QpData};
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+#[cfg(feature = "parallel")]
+use std::sync::OnceLock;
+
+/// Environment variable for [`assembly_parallel_min_elems`].
+#[cfg(feature = "parallel")]
+pub const FEM_ASSEMBLY_PARALLEL_MIN_ELEMS: &str = "FEM_ASSEMBLY_PARALLEL_MIN_ELEMS";
+
+#[cfg(feature = "parallel")]
+const DEFAULT_PARALLEL_MIN_ELEMS: usize = 64;
+
+#[cfg(feature = "parallel")]
+static ASSEMBLY_PARALLEL_MIN_ELEMS: OnceLock<usize> = OnceLock::new();
+
+/// Minimum number of volume elements before using Rayon for domain assembly.
+///
+/// Default `64`. Override with [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`] (positive integer;
+/// invalid values fall back to the default).
+#[cfg(feature = "parallel")]
+#[inline]
+pub fn assembly_parallel_min_elems() -> usize {
+    *ASSEMBLY_PARALLEL_MIN_ELEMS.get_or_init(|| {
+        std::env::var(FEM_ASSEMBLY_PARALLEL_MIN_ELEMS)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_PARALLEL_MIN_ELEMS)
+    })
+}
+
 // ─── Reference element factory ───────────────────────────────────────────────
 
 /// Return the solution reference element matching `elem_type` and polynomial `order`.
@@ -110,6 +142,250 @@ fn transform_grads(
     }
 }
 
+// ─── Volume element kernels (serial; used by parallel driver via Rayon) ─────
+
+fn accumulate_volume_bilinear_element<S: FESpace>(
+    space: &S,
+    e: u32,
+    integrators: &[&dyn BilinearIntegrator],
+    quad_order: u8,
+    coo: &mut CooMatrix<f64>,
+) {
+    let mesh   = space.mesh();
+    let dim    = mesh.dim() as usize;
+    let order  = space.order();
+
+    let elem_type = mesh.element_type(e);
+    let ref_elem  = ref_elem_vol(elem_type, order);
+    let n_ldofs   = ref_elem.n_dofs();
+    let quad      = ref_elem.quadrature(quad_order);
+
+    let raw_dofs: Vec<DofId> = space.element_dofs(e).to_vec();
+    let global_dofs: Vec<usize> = raw_dofs.iter().map(|&d| d as usize).collect();
+    let n_elem_dofs = global_dofs.len();
+    let nodes = mesh.element_nodes(e);
+    let elem_tag = mesh.element_tag(e);
+
+    let affine = is_affine(elem_type);
+
+    let affine_tr = if affine {
+        Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+    } else {
+        None
+    };
+
+    let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
+        Some(ref_elem_vol(elem_type, 1))
+    } else {
+        None
+    };
+
+    let mut k_elem = vec![0.0_f64; n_elem_dofs * n_elem_dofs];
+    let mut phi       = Vec::<f64>::new();
+    let mut grad_ref  = Vec::<f64>::new();
+    let mut grad_phys = Vec::<f64>::new();
+
+    phi.resize(n_ldofs, 0.0);
+    grad_ref.resize(n_ldofs * dim, 0.0);
+    grad_phys.resize(n_ldofs * dim, 0.0);
+
+    for (q, xi) in quad.points.iter().enumerate() {
+        if affine {
+            let tr = affine_tr.as_ref().unwrap();
+            let w = quad.weights[q] * tr.det_j().abs();
+
+            ref_elem.eval_basis(xi, &mut phi);
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(tr.jacobian_inv_t(), &grad_ref, &mut grad_phys, n_ldofs, dim);
+
+            let xp = tr.map_to_physical(xi);
+            let qp = QpData {
+                n_dofs:    n_elem_dofs,
+                dim,
+                weight:    w,
+                phi:       &phi,
+                grad_phys: &grad_phys,
+                x_phys:    &xp,
+                elem_id:   e,
+                elem_tag,
+                elem_dofs: Some(&raw_dofs),
+            };
+
+            for integ in integrators {
+                integ.add_to_element_matrix(&qp, &mut k_elem);
+            }
+            continue;
+        } else {
+            let geo = geo_elem.as_ref().unwrap();
+            let (jac_qp, det_qp, xp_qp) =
+                isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
+            let w = quad.weights[q] * det_qp.abs();
+            let jit = jac_qp.try_inverse()
+                .expect("degenerate quad/hex element")
+                .transpose();
+            ref_elem.eval_basis(xi, &mut phi);
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(&jit, &grad_ref, &mut grad_phys, n_ldofs, dim);
+
+            let qp = QpData {
+                n_dofs:    n_elem_dofs,
+                dim,
+                weight:    w,
+                phi:       &phi,
+                grad_phys: &grad_phys,
+                x_phys:    &xp_qp,
+                elem_id:   e,
+                elem_tag,
+                elem_dofs: Some(&raw_dofs),
+            };
+            for integ in integrators {
+                integ.add_to_element_matrix(&qp, &mut k_elem);
+            }
+            continue;
+        }
+    }
+
+    coo.add_element_matrix(&global_dofs, &k_elem);
+}
+
+fn accumulate_volume_linear_element<S: FESpace>(
+    space: &S,
+    e: u32,
+    integrators: &[&dyn LinearIntegrator],
+    quad_order: u8,
+    rhs: &mut [f64],
+) {
+    let mesh   = space.mesh();
+    let dim    = mesh.dim() as usize;
+    let order  = space.order();
+
+    let elem_type = mesh.element_type(e);
+    let ref_elem  = ref_elem_vol(elem_type, order);
+    let n_ldofs   = ref_elem.n_dofs();
+    let quad      = ref_elem.quadrature(quad_order);
+
+    let raw_dofs: Vec<DofId> = space.element_dofs(e).to_vec();
+    let global_dofs: Vec<usize> = raw_dofs.iter().map(|&d| d as usize).collect();
+    let nodes = mesh.element_nodes(e);
+    let elem_tag = mesh.element_tag(e);
+
+    let affine = is_affine(elem_type);
+
+    let affine_tr = if affine {
+        Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+    } else {
+        None
+    };
+    let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
+        Some(ref_elem_vol(elem_type, 1))
+    } else { None };
+
+    let n_elem_dofs = global_dofs.len();
+    let mut f_elem = vec![0.0_f64; n_elem_dofs];
+    let mut phi       = Vec::<f64>::new();
+    let mut grad_ref  = Vec::<f64>::new();
+    let mut grad_phys = Vec::<f64>::new();
+
+    phi.resize(n_ldofs, 0.0);
+    grad_ref.resize(n_ldofs * dim, 0.0);
+    grad_phys.resize(n_ldofs * dim, 0.0);
+
+    for (q, xi) in quad.points.iter().enumerate() {
+        let (w, xp);
+        if affine {
+            let tr = affine_tr.as_ref().unwrap();
+            w = quad.weights[q] * tr.det_j().abs();
+            ref_elem.eval_basis(xi, &mut phi);
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(tr.jacobian_inv_t(), &grad_ref, &mut grad_phys, n_ldofs, dim);
+            xp = tr.map_to_physical(xi);
+        } else {
+            let geo = geo_elem.as_ref().unwrap();
+            let (jac_qp, det_qp, xp_qp) =
+                isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
+            w = quad.weights[q] * det_qp.abs();
+            let jit = jac_qp.try_inverse()
+                .expect("degenerate quad/hex element").transpose();
+            ref_elem.eval_basis(xi, &mut phi);
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(&jit, &grad_ref, &mut grad_phys, n_ldofs, dim);
+            xp = xp_qp;
+        }
+
+        let qp = QpData {
+            n_dofs:    n_elem_dofs,
+            dim,
+            weight:    w,
+            phi:       &phi,
+            grad_phys: &grad_phys,
+            x_phys:    &xp,
+            elem_id:   e,
+            elem_tag,
+            elem_dofs: Some(&raw_dofs),
+        };
+
+        for integ in integrators {
+            integ.add_to_element_vector(&qp, &mut f_elem);
+        }
+    }
+
+    coo_add_element_vec(&global_dofs, &f_elem, rhs);
+}
+
+#[cfg(feature = "parallel")]
+fn assemble_bilinear_volume_parallel<S: FESpace>(
+    space: &S,
+    integrators: &[&dyn BilinearIntegrator],
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let mesh = space.mesh();
+    let n_dofs = space.n_dofs();
+    let merged = mesh
+        .elem_iter()
+        .into_par_iter()
+        .map(|e| {
+            let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
+            accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut local);
+            local
+        })
+        .reduce(
+            || CooMatrix::<f64>::new(n_dofs, n_dofs),
+            |mut a, b| {
+                a.append(b);
+                a
+            },
+        );
+    merged.into_csr()
+}
+
+#[cfg(feature = "parallel")]
+fn assemble_linear_volume_parallel<S: FESpace>(
+    space: &S,
+    integrators: &[&dyn LinearIntegrator],
+    quad_order: u8,
+) -> Vec<f64> {
+    let mesh = space.mesh();
+    let n_dofs = space.n_dofs();
+    mesh.elem_iter()
+        .into_par_iter()
+        .fold(
+            || vec![0.0_f64; n_dofs],
+            |mut local, e| {
+                accumulate_volume_linear_element(space, e, integrators, quad_order, &mut local);
+                local
+            },
+        )
+        .reduce(
+            || vec![0.0_f64; n_dofs],
+            |mut a, b| {
+                for i in 0..n_dofs {
+                    a[i] += b[i];
+                }
+                a
+            },
+        )
+}
+
 // ─── Assembler ────────────────────────────────────────────────────────────────
 
 /// Stateless assembly driver.
@@ -136,113 +412,19 @@ impl Assembler {
         quad_order:  u8,
     ) -> CsrMatrix<f64> {
         let mesh   = space.mesh();
-        let dim    = mesh.dim() as usize;
         let n_dofs = space.n_dofs();
-        let order  = space.order();
 
-        // Accumulate in COO then convert to CSR.
-        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
-
-        let mut phi       = Vec::<f64>::new();
-        let mut grad_ref  = Vec::<f64>::new();
-        let mut grad_phys = Vec::<f64>::new();
-
-        for e in mesh.elem_iter() {
-            let elem_type = mesh.element_type(e);
-            let ref_elem  = ref_elem_vol(elem_type, order);
-            let n_ldofs   = ref_elem.n_dofs();
-            let quad      = ref_elem.quadrature(quad_order);
-
-            let raw_dofs: Vec<DofId> =
-                space.element_dofs(e).to_vec();
-            let global_dofs: Vec<usize> =
-                raw_dofs.iter().map(|&d| d as usize).collect();
-            let n_elem_dofs = global_dofs.len(); // may be n_ldofs * dim for vector spaces
-            let nodes = mesh.element_nodes(e);
-            let elem_tag = mesh.element_tag(e);
-
-            let affine = is_affine(elem_type);
-
-            // For affine simplex elements, reuse a unified transformation object.
-            let affine_tr = if affine {
-                Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
-            } else {
-                None
-            };
-
-            // For non-affine, we need a geometry reference element.
-            let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
-                Some(ref_elem_vol(elem_type, 1)) // Q1 geometry
-            } else {
-                None
-            };
-
-            let mut k_elem = vec![0.0_f64; n_elem_dofs * n_elem_dofs];
-            phi.resize(n_ldofs, 0.0);
-            grad_ref.resize(n_ldofs * dim, 0.0);
-            grad_phys.resize(n_ldofs * dim, 0.0);
-
-            for (q, xi) in quad.points.iter().enumerate() {
-                if affine {
-                    let tr = affine_tr.as_ref().unwrap();
-                    let w = quad.weights[q] * tr.det_j().abs();
-
-                    ref_elem.eval_basis(xi, &mut phi);
-                    ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                    transform_grads(tr.jacobian_inv_t(), &grad_ref, &mut grad_phys, n_ldofs, dim);
-
-                    let xp = tr.map_to_physical(xi);
-                    let qp = QpData {
-                        n_dofs:    n_elem_dofs,
-                        dim,
-                        weight:    w,
-                        phi:       &phi,
-                        grad_phys: &grad_phys,
-                        x_phys:    &xp,
-                        elem_id:   e,
-                        elem_tag,
-                        elem_dofs: Some(&raw_dofs),
-                    };
-
-                    for integ in integrators {
-                        integ.add_to_element_matrix(&qp, &mut k_elem);
-                    }
-                    continue;
-                } else {
-                    let geo = geo_elem.as_ref().unwrap();
-                    let (jac_qp, det_qp, xp_qp) =
-                        isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
-                    let w = quad.weights[q] * det_qp.abs();
-                    // We need j_inv_t to live beyond this block — store in grad_phys_buf
-                    let jit = jac_qp.try_inverse()
-                        .expect("degenerate quad/hex element")
-                        .transpose();
-                    // We'll use a temporary for the non-affine case.
-                    ref_elem.eval_basis(xi, &mut phi);
-                    ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                    transform_grads(&jit, &grad_ref, &mut grad_phys, n_ldofs, dim);
-
-                    let qp = QpData {
-                        n_dofs:    n_elem_dofs,
-                        dim,
-                        weight:    w,
-                        phi:       &phi,
-                        grad_phys: &grad_phys,
-                        x_phys:    &xp_qp,
-                        elem_id:   e,
-                        elem_tag,
-                        elem_dofs: Some(&raw_dofs),
-                    };
-                    for integ in integrators {
-                        integ.add_to_element_matrix(&qp, &mut k_elem);
-                    }
-                    continue;
-                }
+        #[cfg(feature = "parallel")]
+        {
+            if mesh.n_elements() >= assembly_parallel_min_elems() {
+                return assemble_bilinear_volume_parallel(space, integrators, quad_order);
             }
-
-            coo.add_element_matrix(&global_dofs, &k_elem);
         }
 
+        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+        for e in mesh.elem_iter() {
+            accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut coo);
+        }
         coo.into_csr()
     }
 
@@ -255,88 +437,19 @@ impl Assembler {
         quad_order:  u8,
     ) -> Vec<f64> {
         let mesh   = space.mesh();
-        let dim    = mesh.dim() as usize;
         let n_dofs = space.n_dofs();
-        let order  = space.order();
 
-        let mut rhs = vec![0.0_f64; n_dofs];
-
-        let mut phi       = Vec::<f64>::new();
-        let mut grad_ref  = Vec::<f64>::new();
-        let mut grad_phys = Vec::<f64>::new();
-
-        for e in mesh.elem_iter() {
-            let elem_type = mesh.element_type(e);
-            let ref_elem  = ref_elem_vol(elem_type, order);
-            let n_ldofs   = ref_elem.n_dofs();
-            let quad      = ref_elem.quadrature(quad_order);
-
-            let raw_dofs: Vec<DofId> =
-                space.element_dofs(e).to_vec();
-            let global_dofs: Vec<usize> =
-                raw_dofs.iter().map(|&d| d as usize).collect();
-            let nodes = mesh.element_nodes(e);
-            let elem_tag = mesh.element_tag(e);
-
-            let affine = is_affine(elem_type);
-
-            let affine_tr = if affine {
-                Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
-            } else {
-                None
-            };
-            let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
-                Some(ref_elem_vol(elem_type, 1))
-            } else { None };
-
-            let n_elem_dofs = global_dofs.len();
-            let mut f_elem = vec![0.0_f64; n_elem_dofs];
-            phi.resize(n_ldofs, 0.0);
-            grad_ref.resize(n_ldofs * dim, 0.0);
-            grad_phys.resize(n_ldofs * dim, 0.0);
-
-            for (q, xi) in quad.points.iter().enumerate() {
-                let (w, xp);
-                if affine {
-                    let tr = affine_tr.as_ref().unwrap();
-                    w = quad.weights[q] * tr.det_j().abs();
-                    ref_elem.eval_basis(xi, &mut phi);
-                    ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                    transform_grads(tr.jacobian_inv_t(), &grad_ref, &mut grad_phys, n_ldofs, dim);
-                    xp = tr.map_to_physical(xi);
-                } else {
-                    let geo = geo_elem.as_ref().unwrap();
-                    let (jac_qp, det_qp, xp_qp) =
-                        isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
-                    w = quad.weights[q] * det_qp.abs();
-                    let jit = jac_qp.try_inverse()
-                        .expect("degenerate quad/hex element").transpose();
-                    ref_elem.eval_basis(xi, &mut phi);
-                    ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                    transform_grads(&jit, &grad_ref, &mut grad_phys, n_ldofs, dim);
-                    xp = xp_qp;
-                }
-
-                let qp = QpData {
-                    n_dofs:    n_elem_dofs,
-                    dim,
-                    weight:    w,
-                    phi:       &phi,
-                    grad_phys: &grad_phys,
-                    x_phys:    &xp,
-                    elem_id:   e,
-                    elem_tag,
-                    elem_dofs: Some(&raw_dofs),
-                };
-
-                for integ in integrators {
-                    integ.add_to_element_vector(&qp, &mut f_elem);
-                }
+        #[cfg(feature = "parallel")]
+        {
+            if mesh.n_elements() >= assembly_parallel_min_elems() {
+                return assemble_linear_volume_parallel(space, integrators, quad_order);
             }
-
-            coo_add_element_vec(&global_dofs, &f_elem, &mut rhs);
         }
 
+        let mut rhs = vec![0.0_f64; n_dofs];
+        for e in mesh.elem_iter() {
+            accumulate_volume_linear_element(space, e, integrators, quad_order, &mut rhs);
+        }
         rhs
     }
 
@@ -635,5 +748,11 @@ mod tests {
         }
         let rhs = Assembler::assemble_linear(&space, &[&Zero], 2);
         assert_eq!(rhs.len(), n);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn assembly_parallel_min_elems_positive() {
+        assert!(assembly_parallel_min_elems() >= 1);
     }
 }

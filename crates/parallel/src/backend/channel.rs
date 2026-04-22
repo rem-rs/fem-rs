@@ -355,7 +355,6 @@ impl CommBackend for ChannelBackend {
         // in the same process), and sends to each rank.
         let my_color = color;
         let my_group = &groups[&my_color];
-        let new_size = my_group.len();
         let new_rank = my_group.iter()
             .position(|(_, r)| *r == me)
             .unwrap() as Rank;

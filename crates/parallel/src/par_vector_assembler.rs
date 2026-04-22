@@ -230,8 +230,6 @@ mod tests {
     fn par_vector_assembly_hcurl_ghost_exchange() {
         // Verify ghost exchange works correctly for edge DOF spaces.
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let serial_space = HCurlSpace::new(mesh.clone(), 1);
-        let serial_n = serial_space.n_dofs();
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {

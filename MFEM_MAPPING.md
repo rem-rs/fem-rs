@@ -530,7 +530,7 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 | 19 | `mesh`+`space` | CurvedMesh (P2 isoparametric) | �?|
 | 20 | `solver` | LOBPCG eigenvalue solver | �?|
 | 21 | `solver`+`linalg` | BlockSystem, SchurComplement, MINRES | �?|
-| 22 | `assembly`+`ceed` | Partial assembly: PA mass/diffusion, matrix-free | �?|
+| 22 | `assembly` (`reed`) | Partial assembly: PA mass/diffusion, matrix-free (rem-rs/reed) | �?|
 | 23 | `space` | HCurlSpace (Nédélec ND1), HDivSpace (RT0), element_signs | �?|
 | 24 | `assembly` | VectorAssembler, CurlCurlIntegrator, VectorMassIntegrator | �?|
 | 25 | `assembly`+`solver` | DG-SIP face normals fix, SchurComplement PGMRES, MINRES rewrite, TriND1 fix; all 8 MFEM-style examples verified | �?|
@@ -732,23 +732,23 @@ prioritized roadmap for continued development.
 
 - GPU backend is tracked as a cross-subproject roadmap item:
    - `vendor/linger`: backend-neutral kernel interfaces and numeric primitive contracts.
-   - `vendor/reed`: GPU backend implementation and CEED-style operator/resource mapping.
+   - `rem-rs/reed`: GPU backend implementation and CEED-style operator/resource mapping.
    - `vendor/jsmpi`: browser-side multi-rank transport/runtime for wasm deployments.
 - External solver delivery is coordinated across subprojects:
    - `vendor/linger`: pure-Rust native solver lifecycle; `mumps`/`mkl` are compatibility contracts backed by native linger direct solves.
-   - `vendor/reed`: operator/export bridge and backend selection wiring.
+   - `rem-rs/reed`: operator/export bridge and backend selection wiring.
    - `vendor/jsmpi`: wasm/browser runtime constraints for distributed execution path.
 - Current `linger` gaps to track under this ownership:
    - Distributed-memory path is still missing (`mpi` feature is placeholder in `vendor/linger/Cargo.toml`).
    - Native AMG advanced options: AMS/ADS baseline is already available in `vendor/linger`; AIR baseline strategy is landed (`CoarsenStrategy::Air` + diagonal-`A_ff` AIR restriction) with nonsymmetric regression coverage (`amg_air_gmres_nonsymmetric_convdiff_1d`), while high-scale hardening remains pending.
    - Direct-compatibility hooks: `mumps` / `mkl` 均具备可用 baseline（native multifrontal-backed, factor reuse + multi-RHS）；二者均由 linger 原生直接法承载，不以外部 FFI/distributed 接入为目标。
    - AMG options are currently RS/SA + V/W/F/K-cycle baseline, with room for high-scale robustness hardening.
-   - GPU execution backend is missing in `linger` core (implementation track owned by `vendor/reed`).
+   - GPU execution backend is missing in `linger` core (implementation track owned by `rem-rs/reed`).
    - Matrix Market complex field I/O is not yet supported (`vendor/linger/src/sparse/mmio.rs`).
 
 ### Cross-Subproject Improvement Plan (2026-Q2 to 2026-Q4)
 
-> Scope: coordinated delivery across `vendor/linger`, `vendor/reed`, and `vendor/jsmpi`.
+> Scope: coordinated delivery across `vendor/linger`, `rem-rs/reed`, and `vendor/jsmpi`.
 
 | Stage | Window | linger | reed | jsmpi | Exit Criteria |
 |---|---|---|---|---|---|
@@ -769,12 +769,12 @@ prioritized roadmap for continued development.
 WP1 kickoff artifact merged: `C1_BACKEND_CONTRACT_FREEZE.md` (v0.1).
 
 Current baseline progress (2026-04-13):
-- Added canonical backend-resource smoke coverage in `fem-ceed` for `/solver/mumps`, `/solver/mkl` deterministic resolution/report path.
+- Added canonical backend-resource smoke coverage in `fem-assembly` (`--features reed`) for `/solver/mumps`, `/solver/mkl` deterministic resolution/report path.
 - Added CI gate `.github/workflows/alignment-smoke.yml` to run targeted smoke tests for:
    - complex coefficient traits (`fem-assembly`)
    - named attribute set baseline (`fem-mesh`)
-   - canonical backend resource contract (`fem-ceed`)
-- Added CI gate `.github/workflows/backend-feature-matrix.yml` to validate `vendor/reed` backend contract tests across feature profiles:
+   - canonical backend resource contract (`fem-assembly` + `reed`)
+- Added CI gate `.github/workflows/backend-feature-matrix.yml` to validate `rem-rs/reed` backend contract tests across feature profiles:
    - baseline (`--no-default-features`)
    - `mumps`, `mkl`
 
@@ -812,7 +812,7 @@ Current baseline progress (2026-04-13):
 | 截断积分 / 浸没边界 | �?ex38 | 🔨 `mfem_ex38_immersed_boundary` cut-cell subtriangulation + Nitsche-like �?Dirichlet（弦段近似）浸没边界基线；完�?cut-FEM/level-set 稳健几何与高阶界面积分待补齐 | 🟢 �?| TBD |
 | 命名属性集 | �?ex39 | 🔨 named tag registry + mesh/submesh named selection + GMSH `PhysicalNames` bridge + `mfem_ex39_named_attributes` baseline | 🟢 �?| TBD |
 | Quad/Hex NC AMR（各向异性） | �?| 🔨 Tri/Tet only | 🟢 �?| TBD |
-| GPU 后端 (CUDA/HIP) | �?全库加�?| �?core CPU only（delegated to `vendor/linger` + `vendor/reed` + `vendor/jsmpi` 协同�?| 🟢 �?| TBD |
+| GPU 后端 (CUDA/HIP) | �?全库加�?| �?core CPU only（delegated to `vendor/linger` + `rem-rs/reed` + `vendor/jsmpi` 协同�?| 🟢 �?| TBD |
 
 ---
 
