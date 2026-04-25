@@ -1,3 +1,43 @@
+//! Maxwell helpers aligned with MFEM-style **examples** in this workspace (curl-curl + mass,
+//! boundary-driven H(curl), and first-order E-B time stepping).
+//!
+//! # Static H(curl): [`StaticMaxwellBuilder`], [`StaticMaxwellProblem`]
+//!
+//! - **Volume**: [`StaticMaxwellBuilder::with_isotropic_coeffs`] builds
+//!   `(1/mu) (curl E, curl v) + alpha (E,v)` with scalar `alpha`. For Helmholtz-style scaling on the
+//!   mass term, [`StaticMaxwellBuilder::with_frequency_isotropic`] sets `alpha = epsilon * omega^2`.
+//!   Anisotropic conductivity in the plane uses [`StaticMaxwellBuilder::with_anisotropic_diag`] or
+//!   [`StaticMaxwellBuilder::with_anisotropic_matrix_fn`] (`VectorMassTensorIntegrator`).
+//! - **Boundaries** ([`HcurlBoundaryConfig`], [`BoundarySelection`]): PEC as essential tangential
+//!   DOFs; Robin / impedance / absorbing / tangential drive share the tangential-mass boundary form
+//!   with different `gamma` and data callbacks. [`BoundarySelection::Marker`] selects boundary faces
+//!   by `(boundary_attributes, marker)` pairs (GMSH-style groups + per-face mask), matching the
+//!   `*_from_marker` helpers.
+//!
+//! **Examples:** `examples/mfem_ex3.rs`, `mfem_ex31.rs` through `mfem_ex34.rs`. **Evidence (unit tests
+//! in this file):**
+//!
+//! ```text
+//! cargo test -p fem-examples --lib boundary_material_frequency_matrix_regression_smoke
+//! cargo test -p fem-examples --lib builder_mixed_boundary_matches_low_level_pipeline
+//! ```
+//!
+//! # Time domain: [`FirstOrderMaxwellOp`] (2-D) and [`FirstOrderMaxwellSolver3D`] (3-D)
+//!
+//! - [`FirstOrderMaxwellOp`]: staggered leapfrog on `unit_square_tri` with tags `1` to `4` as PEC;
+//!   used by `examples/mfem_maxwell.rs` and `mfem_joule.rs`.
+//! - [`FirstOrderMaxwellSolver3D`]: owns `(E, B)`, [`FirstOrderStepConfig3D`], and solver config.
+//!   On each [`FirstOrderMaxwellSolver3D::advance_one`] / [`FirstOrderMaxwellSolver3D::advance_with_config`],
+//!   the load vector is refreshed at the **start** time of the step (`self.time`), the step is taken,
+//!   then `self.time` is incremented by `dt`. Use [`FirstOrderMaxwellSolver3D::set_force`] for a
+//!   constant RHS copy, [`FirstOrderMaxwellSolver3D::set_time_dependent_force`] for `(t, out)`,
+//!   or [`FirstOrderMaxwellSolver3D::clear_force`] for zeros.
+//!
+//! ```text
+//! cargo test -p fem-examples --lib first_order_3d_solver_wrapper_time_dependent_force_matches_static_when_constant
+//! cargo test -p fem-examples --lib first_order_3d_time_dependent_force_callback_receives_step_start_time
+//! ```
+
 use std::collections::HashSet;
 
 use fem_amg::{AmgConfig, AmgSolver};
@@ -29,10 +69,14 @@ enum StaticMaxwellVolumeModel {
     AnisotropicMatrixFn { mu: f64, sigma: Box<Matrix2Fn> },
 }
 
+/// One boundary contribution on a subset of mesh boundary tags (resolved to `face_tag` values).
 pub enum HcurlBoundaryCondition {
+    /// PEC: tangential `E` degrees of freedom on listed tags are eliminated (essential BC).
     PecZero {
         tags: Vec<i32>,
     },
+    /// General tangential Robin / impedance data: adds `γ` times a tangential-mass boundary form
+    /// plus a load from `data(x, n)` (outward unit normal `n` in physical coordinates).
     TangentialRobin {
         tags: Vec<i32>,
         gamma: f64,
@@ -40,6 +84,10 @@ pub enum HcurlBoundaryCondition {
     },
 }
 
+/// Select boundary faces either by tag list or by attribute + marker pattern.
+///
+/// For [`BoundarySelection::Marker`], `boundary_attributes[i]` is the physical boundary tag of
+/// face `i` (same order as mesh boundary iterator), and `marker[i] ∈ {0,1}` turns the face on/off.
 pub enum BoundarySelection<'a> {
     Tags(&'a [i32]),
     Marker {
@@ -48,6 +96,8 @@ pub enum BoundarySelection<'a> {
     },
 }
 
+/// Ordered list of H(curl) boundary conditions applied in [`HcurlBoundaryConfig::apply`]:
+/// tangential Robin terms first, then PEC elimination on the assembled matrix/RHS.
 #[derive(Default)]
 pub struct HcurlBoundaryConfig {
     conditions: Vec<HcurlBoundaryCondition>,
@@ -235,6 +285,9 @@ pub fn solve_hcurl_eigen_preconditioned_amg(
     )
 }
 
+/// Impedance scaling `√(ε/μ)` used by [`HcurlBoundaryConfig::add_impedance_physical_on`] and
+/// [`HcurlBoundaryConfig::add_absorbing_physical_on`] so `γ` matches a first-order absorbing layer
+/// with uniform `ε`, `μ`.
 fn boundary_admittance(epsilon: f64, mu: f64) -> f64 {
     assert!(epsilon > 0.0, "epsilon must be positive");
     assert!(mu > 0.0, "mu must be positive");
@@ -256,6 +309,10 @@ pub struct StaticMaxwellSolveOutput {
     pub boundary_report: BoundaryApplyReport,
 }
 
+/// Fluent builder for 2-D ND1 static Maxwell (curl-curl + mass) on [`SimplexMesh<2>`].
+///
+/// Prefer `add_*_on` with [`BoundarySelection`] when using markers; `add_*_from_marker` is sugar
+/// for [`BoundarySelection::Marker`]. Every `add_*` method delegates to [`HcurlBoundaryConfig`].
 pub struct StaticMaxwellBuilder {
     space: HCurlSpace<SimplexMesh<2>>,
     quad_order: u8,
@@ -866,6 +923,8 @@ impl StaticMaxwellBuilder {
         self
     }
 
+    /// Sets the mass-term coefficient to `α = ε ω²` (Helmholtz-type frequency scaling on the vector
+    /// mass) while keeping `μ` in the curl-curl integrator.
     pub fn with_frequency_isotropic(mut self, mu: f64, epsilon: f64, omega: f64) -> Self {
         let alpha = epsilon * omega * omega;
         self.volume_model = StaticMaxwellVolumeModel::Isotropic { mu, alpha };
@@ -1675,6 +1734,20 @@ mod tests {
         ]
     }
 
+    fn ex3_pec_exact_field(x: &[f64]) -> [f64; 2] {
+        let s = (PI * x[0]).sin() * (PI * x[1]).sin();
+        [s, s]
+    }
+
+    fn ex3_pec_manufactured_source(x: &[f64]) -> [f64; 2] {
+        // E = (s, s), s = sin(pi x) sin(pi y), gives tangential trace zero on all boundaries.
+        // curl curl E = (pi^2 cos(pi(x-y)), pi^2 cos(pi(x-y))).
+        let c = (PI * (x[0] - x[1])).cos();
+        let s = (PI * x[0]).sin() * (PI * x[1]).sin();
+        let rhs = PI * PI * c + s;
+        [rhs, rhs]
+    }
+
     fn mixed_robin_data(x: &[f64], n: &[f64]) -> f64 {
         let e = [
             0.4 * (PI * x[1]).sin(),
@@ -2390,6 +2463,31 @@ mod tests {
     }
 
     #[test]
+    fn mfem_ex3_manufactured_l2_error_acceptance() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(24);
+        let space = HCurlSpace::new(mesh, 1);
+        let solved = StaticMaxwellBuilder::new(space)
+            .with_quad_order(5)
+            .with_isotropic_coeffs(1.0, 1.0)
+            .with_source_fn(ex3_pec_manufactured_source)
+            .add_pec_zero(&[1, 2, 3, 4])
+            .build()
+            .solve();
+
+        assert!(solved.solve_result.converged, "mfem_ex3 acceptance solve did not converge");
+        assert!(
+            solved.boundary_report.essential_dofs > 0,
+            "mfem_ex3 acceptance expected non-empty PEC dof set"
+        );
+
+        let err_l2 = l2_error_hcurl_exact(&solved.space, &solved.solution, ex3_pec_exact_field);
+        assert!(
+            err_l2 < 0.10,
+            "mfem_ex3 manufactured L2(Hcurl) error too large: {err_l2:.3e} (target < 1.0e-1)"
+        );
+    }
+
+    #[test]
     fn free_hcurl_dofs_from_marker_matches_manual_filter() {
         let mesh = SimplexMesh::<2>::unit_square_tri(6);
         let space = HCurlSpace::new(mesh, 1);
@@ -2918,6 +3016,15 @@ mod tests {
              err_coarse={err_coarse:.3e}, err_fine={err_fine:.3e}"
         );
     }
+
+    #[test]
+    fn mfem_ex34_robin_manufactured_l2_error_acceptance() {
+        let err_l2 = solve_aniso_robin(24);
+        assert!(
+            err_l2 < 0.12,
+            "mfem_ex34-style Robin manufactured L2(Hcurl) error too large: {err_l2:.3e} (target < 1.2e-1)"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3195,8 +3302,11 @@ pub enum FirstOrderForceModel3D {
 
 /// Stateful 3-D first-order Maxwell solver wrapper.
 ///
-/// This object owns `(E, B)` state and advances it with either explicit or
-/// Crank-Nicolson strategy using an underlying `FirstOrderMaxwell3DSkeleton`.
+/// Owns `(E, B)`, the active [`FirstOrderStepConfig3D`], and a [`SolverConfig`] for mass solves.
+/// Each [`FirstOrderMaxwellSolver3D::advance_one`] call evaluates the current force model at
+/// [`FirstOrderMaxwellSolver3D::time`], applies [`FirstOrderMaxwell3DSkeleton::step_with_config`],
+/// then increments `time` by `dt`. MFEM-oriented coverage lives under `first_order_3d_*` tests in
+/// this module and in `examples/mfem_ex*` drivers that build a skeleton explicitly.
 pub struct FirstOrderMaxwellSolver3D {
     pub op: FirstOrderMaxwell3DSkeleton,
     pub e: Vec<f64>,
@@ -3241,12 +3351,16 @@ impl FirstOrderMaxwellSolver3D {
         self
     }
 
+    /// Switch to a **constant** electric load: stores a snapshot in [`FirstOrderForceModel3D::Static`].
     pub fn set_force(&mut self, force: &[f64]) {
         assert_eq!(force.len(), self.op.n_e, "set_force: force length mismatch");
         self.force.copy_from_slice(force);
         self.force_model = FirstOrderForceModel3D::Static(self.force.clone());
     }
 
+    /// General time-dependent load: `force_fn(t, out)` must write the full H(curl) RHS vector
+    /// (same layout as [`FirstOrderMaxwell3DSkeleton::step_with_config`]'s `force` argument). The
+    /// time `t` is the **start** of the current step (see [`FirstOrderMaxwellSolver3D::advance_one`]).
     pub fn set_time_dependent_force<F>(&mut self, force_fn: F)
     where
         F: Fn(f64, &mut [f64]) + Send + Sync + 'static,
@@ -3254,6 +3368,7 @@ impl FirstOrderMaxwellSolver3D {
         self.force_model = FirstOrderForceModel3D::TimeDependent(Box::new(force_fn));
     }
 
+    /// Reset to zero static load (equivalent to `set_force` of a zero vector).
     pub fn clear_force(&mut self) {
         self.force.fill(0.0);
         self.force_model = FirstOrderForceModel3D::Static(self.force.clone());
@@ -3275,6 +3390,8 @@ impl FirstOrderMaxwellSolver3D {
         self.step_cfg = step_cfg;
     }
 
+    /// One step using [`FirstOrderMaxwellSolver3D::step_cfg`]: refresh load at `time`, integrate,
+    /// then `time += dt`.
     pub fn advance_one(&mut self) {
         self.refresh_force_at_time(self.time);
         self.op.step_with_config(
@@ -3287,6 +3404,7 @@ impl FirstOrderMaxwellSolver3D {
         self.time += self.step_cfg.dt;
     }
 
+    /// Single step with an **override** time stepper config (does not update [`FirstOrderMaxwellSolver3D::step_cfg`]).
     pub fn advance_with_config(&mut self, step_cfg: FirstOrderStepConfig3D) {
         self.refresh_force_at_time(self.time);
         self.op.step_with_config(step_cfg, &mut self.e, &mut self.b, &self.force, &self.cfg);
@@ -7702,6 +7820,33 @@ mod first_order_tests {
             "time-dependent constant force should match static force for B, diff={b_diff:.3e}"
         );
         assert!((solver_static.time - solver_td.time).abs() < 1e-15);
+    }
+
+    #[test]
+    fn first_order_3d_time_dependent_force_callback_receives_step_start_time() {
+        use std::sync::{Arc, Mutex};
+
+        let op = FirstOrderMaxwell3DSkeleton::new_unit_cube(1);
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 400,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        let dt = 0.025_f64;
+        let step_cfg = FirstOrderStepConfig3D::explicit(dt);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = Arc::clone(&seen);
+        let mut solver = FirstOrderMaxwellSolver3D::new(op, cfg, step_cfg);
+        solver.set_time_dependent_force(move |t, out| {
+            seen_cb.lock().expect("times mutex").push(t);
+            out.fill(0.0);
+        });
+        solver.advance_n(4);
+        let got = seen.lock().expect("times mutex");
+        assert_eq!(&**got, &[0.0, dt, 2.0 * dt, 3.0 * dt]);
+        assert!((solver.time - 4.0 * dt).abs() < 1e-14);
     }
 
     #[test]

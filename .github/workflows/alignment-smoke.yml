@@ -50,21 +50,28 @@ jobs:
           SUITE="${{ matrix.suite }}"
           if [[ "$SUITE" == "complex-coeff" ]]; then
             # ComplexCoeff/ComplexVectorCoeff trait tests
-            cargo test -p fem-assembly --lib -- complex --nocapture
+            cargo test -p fem-assembly coefficient::tests::complex_ -- --nocapture
           elif [[ "$SUITE" == "complex-ex22" ]]; then
             # ex22 time-harmonic Helmholtz (2×2 real-block strategy)
             cargo test --example mfem_ex22 -- --nocapture
             cargo run --example mfem_ex22 --quiet -- --n 16 --omega 2.0
           elif [[ "$SUITE" == "named-attrs" ]]; then
-            cargo test -p fem-mesh --lib -- named_attribute --nocapture
+            cargo test -p fem-mesh boundary::tests::named_attribute_ -- --nocapture
+            cargo test -p fem-mesh simplex::tests::named_attribute_set_queries_elements_and_faces -- --nocapture
           elif [[ "$SUITE" == "named-attrs-io" ]]; then
-            cargo test -p fem-io --lib -- physical_names --nocapture
-            cargo run --example mfem_ex39_named_attributes --quiet
-            cargo run --example mfem_ex26_geom_mg --quiet
+            cargo test -p fem-io physical_names_to_named_attribute_registry_2d -- --nocapture
+            cargo test -p fem-io physical_names_same_name_across_dims_are_merged -- --nocapture
+            cargo run -p fem-examples --example mfem_ex39_named_attributes --quiet
+            cargo test -p fem-examples --example mfem_ex39_named_attributes named_attributes_fluid_submesh_roundtrips_parent_nodal_field -- --nocapture
+            cargo run -p fem-examples --example mfem_ex26_geom_mg --quiet
           elif [[ "$SUITE" == "electromagnetic-pml" ]]; then
-            cargo run --example mfem_ex3 --quiet -- --pml-like --pml-thickness 0.2 --sigma-max 2.0 --wx 1.0 --wy 1.5
+            cargo run -p fem-examples --example mfem_ex3 --quiet -- --pml-like --pml-thickness 0.2 --sigma-max 2.0 --wx 1.0 --wy 1.5
+            cargo test -p fem-examples --lib boundary_material_frequency_matrix_regression_smoke -- --nocapture
+            cargo test -p fem-examples --lib mfem_ex3_manufactured_l2_error_acceptance -- --nocapture
           elif [[ "$SUITE" == "electromagnetic-absorbing" ]]; then
-            cargo run --example mfem_ex34 --quiet -- --anisotropic --gamma-x 1.0 --gamma-y 1.5
+            cargo run -p fem-examples --example mfem_ex34 --quiet -- --anisotropic --gamma-x 1.0 --gamma-y 1.5
+            cargo test -p fem-examples --lib absorbing_physical_api_matches_explicit_gamma -- --nocapture
+            cargo test -p fem-examples --lib mfem_ex34_robin_manufactured_l2_error_acceptance -- --nocapture
           elif [[ "$SUITE" == "io-mixed-topology" ]]; then
             # Netgen .vol Prism6/Pyramid5 + surfaceelements round-trip
             cargo test -p fem-io --lib -- prism6 --nocapture
@@ -100,6 +107,8 @@ jobs:
             # P3: H(curl) matrix-free + AMG-preconditioned LOBPCG Maxwell eigenproblem smoke gate
             cargo test -p fem-assembly --lib -- hcurl_eigen_amg --nocapture
           else
-            # backend-contract: fem-assembly compiled with reed feature
-            cargo test -p fem-assembly --features reed --lib -- backend_resource --nocapture
+            # backend-contract: default quadrature-hint contract plus reed backend/resource surface
+            cargo test -p fem-assembly --lib h1_quad_order_hint:: -- --nocapture
+            cargo test -p fem-assembly --features reed backend_resource_ -- --nocapture
+            cargo test -p fem-assembly --features reed fem_ceed_ -- --nocapture
           fi

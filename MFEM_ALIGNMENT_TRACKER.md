@@ -336,4 +336,41 @@ Immediate kickoff checklist:
   - smoke: https://github.com/rem-rs/fem-rs/actions/runs/24606857993
   - full: https://github.com/rem-rs/fem-rs/actions/runs/24606858418
 
+### 8.2 Maxwell Gate Tightening Update (2026-04-25)
+
+To strengthen "example runs" into "example + quantitative acceptance", the
+`alignment-smoke` electromagnetic suites now include both regression and
+manufactured-solution acceptance checks.
+
+`electromagnetic-pml`:
+- `cargo run -p fem-examples --example mfem_ex3 --quiet -- --pml-like --pml-thickness 0.2 --sigma-max 2.0 --wx 1.0 --wy 1.5`
+- `cargo test -p fem-examples --lib boundary_material_frequency_matrix_regression_smoke -- --nocapture`
+- `cargo test -p fem-examples --lib mfem_ex3_manufactured_l2_error_acceptance -- --nocapture`
+
+`electromagnetic-absorbing`:
+- `cargo run -p fem-examples --example mfem_ex34 --quiet -- --anisotropic --gamma-x 1.0 --gamma-y 1.5`
+- `cargo test -p fem-examples --lib absorbing_physical_api_matches_explicit_gamma -- --nocapture`
+- `cargo test -p fem-examples --lib mfem_ex34_robin_manufactured_l2_error_acceptance -- --nocapture`
+
+Acceptance tests added in `examples/src/maxwell.rs`:
+- `mfem_ex3_manufactured_l2_error_acceptance` (PEC-compatible manufactured field)
+- `mfem_ex34_robin_manufactured_l2_error_acceptance` (anisotropic Robin manufactured field)
+
+### 8.3 Named-Attribute/IO Gate Pattern Update (2026-04-25)
+
+To mirror the Maxwell "example + regression + acceptance" pattern, named-attribute
+smoke suites now include a geometry/field-consistency acceptance check in addition
+to registry regression checks and example execution.
+
+`named-attrs`:
+- `cargo test -p fem-mesh boundary::tests::named_attribute_ -- --nocapture`
+- `cargo test -p fem-mesh simplex::tests::named_attribute_set_queries_elements_and_faces -- --nocapture`
+
+`named-attrs-io`:
+- `cargo test -p fem-io physical_names_to_named_attribute_registry_2d -- --nocapture`
+- `cargo test -p fem-io physical_names_same_name_across_dims_are_merged -- --nocapture`
+- `cargo run -p fem-examples --example mfem_ex39_named_attributes --quiet`
+- `cargo test -p fem-examples --example mfem_ex39_named_attributes named_attributes_fluid_submesh_roundtrips_parent_nodal_field -- --nocapture`
+- `cargo run -p fem-examples --example mfem_ex26_geom_mg --quiet`
+
 

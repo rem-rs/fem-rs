@@ -7,6 +7,7 @@
 //! Also provides:
 //! - [`MixedAssembler`] — rectangular assembly for mixed bilinear forms.
 //! - [`DgAssembler`] — interior-penalty DG assembly (Phase 14).
+//! - [`h1_quad_order_hint`] — map legacy quadrature hints to triangle/tet rule orders for H¹ assembly.
 //!
 //! ## Quick start
 //!
@@ -34,8 +35,16 @@
 //!   `assembly_parallel_min_elems()` (default `64`; override env
 //!   `FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`), and enables `fem-linalg/parallel` for
 //!   threaded SpMV on large local matrices.
-//! - **`reed`** — libCEED-style partial assembly helpers backed by the
-//!   workspace-pinned [`reed`](https://github.com/rem-rs/reed) crates (`fem_assembly::reed`).
+//! - **`reed`** — libCEED-style QFunctions plus coordinated FEM entry points in the `reed`
+//!   submodule (`FemCeed`, scalar H¹ `apply_mass_{2d,3d}` / `apply_poisson_{2d,3d}`, …) using the same
+//!   [`Assembler`] + [`H1Space`](fem_space::H1Space) kernels as default builds.  With this feature,
+//!   `cache_*` / `cache_h1_scalar_ops_{2d,3d}` wrappers and discrete helpers (`assemble_mass_h1_2d`,
+//!   curl pairing, …) are also **re-exported at the crate root**.  Quadrature hint mapping
+//!   (`h1_tri_quad_order`, `h1_tet_quad_order`) lives in [`h1_quad_order_hint`] for every build.
+//!   Curl CSR and
+//!   `assemble_curl_hdiv_pairing_2d_nd2_rt2` align with [`DiscreteLinearOperator`] /
+//!   [`VectorAssembler`].  Backed by the workspace-pinned [`reed`](https://github.com/rem-rs/reed)
+//!   crates.
 
 pub mod assembler;
 pub mod backend;
@@ -59,9 +68,20 @@ pub mod discrete_op;
 pub mod transfer;
 pub mod static_cond;
 pub mod iga;
+pub mod h1_quad_order_hint;
 
 #[cfg(feature = "reed")]
 pub mod reed;
+
+#[cfg(feature = "reed")]
+pub use reed::{
+    assemble_curl_hdiv_pairing_2d_nd2_rt2, assemble_mass_h1_2d, assemble_mass_h1_3d,
+    assemble_poisson_h1_2d, assemble_poisson_h1_3d, CachedH1Mass2d, CachedH1Mass3d,
+    CachedH1Poisson2d, CachedH1Poisson3d, CachedH1ScalarOps2d, CachedH1ScalarOps3d, CeedBackend,
+    FemCeed, FemCeedError,
+};
+
+pub use h1_quad_order_hint::{h1_tet_quad_order, h1_tri_quad_order};
 
 pub use assembler::{Assembler, face_dofs_p1, face_dofs_p2};
 #[cfg(feature = "parallel")]
@@ -74,7 +94,7 @@ pub use integrator::{
     LinearIntegrator, QpData,
 };
 pub use vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};
-pub use vector_assembler::VectorAssembler;
+pub use vector_assembler::{VectorAssembler, TRI_ND2_RT2_MIXED_QUAD_ORDER};
 pub use vector_boundary::{
     VectorBoundaryAssembler, VectorBoundaryBilinearIntegrator, VectorBoundaryLinearIntegrator,
     VectorBdQpData, TangentialMassIntegrator,

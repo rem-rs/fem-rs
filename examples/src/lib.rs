@@ -7,6 +7,17 @@
 //! - [`cg_solve`]            — Conjugate Gradient with Jacobi preconditioner
 //! - [`write_vtk`]           — Write scalar/vector solution to VTK Legacy ASCII
 //! - [`p1_grad_recovery`]    — Recover gradient field from nodal DOFs
+//!
+//! ## Maxwell (MFEM-oriented)
+//!
+//! See [`maxwell`] for [`StaticMaxwellBuilder`] (static curl-curl + boundaries) and
+//! [`FirstOrderMaxwellSolver3D`] (3-D first-order time stepping). Evidence-focused unit tests live
+//! in `examples/src/maxwell.rs`; run for example:
+//!
+//! ```text
+//! cargo test -p fem-examples --lib boundary_material_frequency_matrix_regression_smoke
+//! cargo test -p fem-examples --lib first_order_3d_solver_wrapper_time_dependent_force_matches_static_when_constant
+//! ```
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementType, MeshTopology, SimplexMesh};
@@ -14,10 +25,9 @@ use fem_mesh::{ElementType, MeshTopology, SimplexMesh};
 pub mod maxwell;
 pub mod template_runner;
 pub use maxwell::{
-    FirstOrderMaxwell3DSkeleton,
-    FirstOrderMaxwellOp,
-    HcurlBoundaryCondition, HcurlBoundaryConfig,
-    StaticMaxwellBuilder, StaticMaxwellProblem,
+    BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,
+    FirstOrderMaxwellSolver3D, FirstOrderStepConfig3D, FirstOrderTimeStepper3D,
+    HcurlBoundaryCondition, HcurlBoundaryConfig, StaticMaxwellBuilder, StaticMaxwellProblem,
 };
 
 // ---------------------------------------------------------------------------
