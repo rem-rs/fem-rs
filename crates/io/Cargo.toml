@@ -9,10 +9,11 @@ fem-linalg = { path = "../linalg" }
 fem-mesh   = { path = "../mesh" }
 linger     = { path = "../../vendor/linger" }
 thiserror  = { workspace = true }
+hdf5       = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 
 [features]
 default = []
-hdf5    = []   # placeholder — add hdf5 crate when binding is ready
+hdf5    = ["dep:hdf5"]

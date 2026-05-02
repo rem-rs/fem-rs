@@ -70,6 +70,10 @@ pub mod partition;
 
 #[cfg(test)]
 mod mpi_test_env;
+#[cfg(feature = "hdf5")]
+pub mod par_hdf5;
+#[cfg(feature = "hdf5")]
+pub mod checkpoint;
 
 // Flat re-exports for ergonomic `use fem_parallel::*`.
 pub use comm::{Comm, Universe};
@@ -95,3 +99,8 @@ pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
 pub use par_vector_assembler::ParVectorAssembler;
 pub use partition::MeshPartition;
+
+#[cfg(feature = "hdf5")]
+pub use par_hdf5::{par_write_mesh_and_fields, ParHdf5Options, ParallelWriteMode};
+#[cfg(feature = "hdf5")]
+pub use checkpoint::{write_checkpoint, read_checkpoint, CheckpointData};

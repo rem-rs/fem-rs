@@ -12,6 +12,7 @@ fem-assembly = { path = "../assembly", features = ["parallel"] }
 fem-element  = { path = "../element" }
 fem-solver   = { path = "../solver" }
 linger       = { path = "../../vendor/linger", default-features = false, features = ["rayon"] }
+fem-io       = { path = "../io", optional = true }
 log          = { workspace = true }
 bytemuck     = { workspace = true }
 
@@ -32,3 +33,8 @@ jsmpi = { workspace = true }
 [features]
 default = []
 mpi     = ["dep:mpi"]
+hdf5    = ["dep:fem-io", "fem-io/hdf5", "dep:hdf5"]
+
+[dependencies.hdf5]
+version = "0.8"
+optional = true

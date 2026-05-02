@@ -16,6 +16,10 @@ pub mod abaqus;
 pub mod vtk;
 pub mod vtk_reader;
 pub mod matrix_market;
+pub mod xdmf;
+
+#[cfg(feature = "hdf5")]
+pub mod hdf5;
 
 pub use gmsh::{read_msh, read_msh_file, MshFile};
 pub use netgen::{
@@ -28,3 +32,9 @@ pub use abaqus::{read_abaqus_inp, read_abaqus_inp_file};
 pub use vtk::{DataArray, VtkWriter};
 pub use vtk_reader::read_vtu_point_data;
 pub use matrix_market::{read_matrix_market, read_matrix_market_coo, write_matrix_market, MmioError};
+pub use xdmf::{write_xdmf, XdmfField, XdmfCenter};
+
+#[cfg(feature = "hdf5")]
+pub use hdf5::{
+    write_mesh_and_fields, read_mesh_and_fields, Hdf5WriteOptions,
+};
