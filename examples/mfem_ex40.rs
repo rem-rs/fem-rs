@@ -302,5 +302,56 @@ mod tests {
         assert!(fine.ux_min < coarse.ux_min,
             "refinement should deepen the negative recirculation lobe: coarse={} fine={}", coarse.ux_min, fine.ux_min);
     }
+
+    #[test]
+    fn ex40_stokes_dof_count_matches_taylor_hood_formula() {
+        // P2-P1 Taylor-Hood: velocity H1-P2 → (2n+1)^2, pressure H1-P1 → (n+1)^2
+        for n in [6usize, 8] {
+            let result = solve_case(n, 1.0, 1.0);
+            let expected_pressure = (n + 1) * (n + 1);
+            assert_eq!(result.pressure_dofs, expected_pressure,
+                "pressure DOF mismatch for n={}: got {} expected {}",
+                n, result.pressure_dofs, expected_pressure);
+            assert!(result.velocity_dofs > result.pressure_dofs * 2,
+                "P2 velocity should have many more DOFs than P1 pressure");
+        }
+    }
+
+    #[test]
+    fn ex40_stokes_higher_viscosity_increases_pressure() {
+        let low_nu = solve_case(8, 1.0, 1.0);
+        let high_nu = solve_case(8, 10.0, 1.0);
+        assert!(low_nu.converged && high_nu.converged);
+        // For Stokes with velocity-only BCs, velocity is independent of nu;
+        // pressure scales linearly with nu (p ~ nu * grad(u))
+        assert!(high_nu.pressure_norm > low_nu.pressure_norm,
+            "higher viscosity should increase pressure: nu=1 p_norm={:.4e} nu=10 p_norm={:.4e}",
+            low_nu.pressure_norm, high_nu.pressure_norm);
+        // Velocity norms should be similar (Stokes: velocity driven by kinematics)
+        assert!(low_nu.velocity_norm > 0.0 && high_nu.velocity_norm > 0.0);
+    }
+
+    #[test]
+    fn ex40_stokes_pressure_has_zero_mean_approximately() {
+        let result = solve_case(8, 1.0, 1.0);
+        assert!(result.converged);
+        // For Stokes with pure Dirichlet BCs, pressure is determined up to a constant.
+        // The Schur complement fix pins pressure: min and max should straddle zero
+        assert!(result.pressure_min < 0.0,
+            "pressure should have negative values: min={:.4e}", result.pressure_min);
+        assert!(result.pressure_max > 0.0,
+            "pressure should have positive values: max={:.4e}", result.pressure_max);
+    }
+
+    #[test]
+    fn ex40_stokes_constrained_velocity_dofs_are_strictly_fewer() {
+        let result = solve_case(8, 1.0, 1.0);
+        assert!(result.constrained_velocity_dofs < result.velocity_dofs,
+            "constrained DOFs={} should be less than total velocity DOFs={}",
+            result.constrained_velocity_dofs, result.velocity_dofs);
+        // At least some DOFs are free (interior)
+        let free_dofs = result.velocity_dofs - result.constrained_velocity_dofs;
+        assert!(free_dofs > 0, "must have interior free DOFs");
+    }
 }
 

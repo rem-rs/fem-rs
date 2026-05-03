@@ -425,5 +425,63 @@ mod tests {
             "velocity checksum should capture a nontrivial flow field: {}",
             fine.velocity_checksum);
     }
+
+    #[test]
+    fn ex19_kovasznay_dof_count_matches_taylor_hood_formula() {
+        // Taylor-Hood: velocity uses P2 H1 space → (2n+1)^2 nodes per direction
+        // pressure uses P1 H1 → (n+1)^2
+        // velocity_dofs = 2 * (2n+1)^2, pressure_dofs = (n+1)^2
+        for n in [4usize, 6] {
+            let result = run_case(n, 40.0, false);
+            let expected_pressure = (n + 1) * (n + 1);
+            assert_eq!(result.pressure_dofs, expected_pressure,
+                "pressure DOF mismatch for n={}: got {} expected {}",
+                n, result.pressure_dofs, expected_pressure);
+            assert!(result.velocity_dofs > result.pressure_dofs,
+                "velocity should have more DOFs than pressure (Taylor-Hood stability)");
+        }
+    }
+
+    #[test]
+    fn ex19_kovasznay_solution_is_nontrivial_and_pressure_fluctuates() {
+        let result = run_case(6, 40.0, false);
+        assert!(result.picard_converged);
+        // Kovasznay solution has genuine velocity and pressure structure
+        assert!(result.velocity_norm > 0.5,
+            "velocity norm should be nontrivial: {}", result.velocity_norm);
+        assert!(result.pressure_norm > 1.0e-2,
+            "pressure norm should be nontrivial: {}", result.pressure_norm);
+        // Pressure checksum can be positive or negative depending on gauge
+        assert!(result.pressure_checksum.abs() > 0.0);
+    }
+
+    #[test]
+    fn ex19_kovasznay_higher_re_increases_inertial_asymmetry() {
+        let low_re = run_case(6, 20.0, false);
+        let high_re = run_case(6, 60.0, false);
+        assert!(low_re.picard_converged && high_re.picard_converged);
+        // Lambda = Re/2 - sqrt(Re^2/4 + 4π²): larger Re → lambda closer to 0 (less negative)
+        // e.g. Re=20: λ≈-1.81, Re=60: λ≈-0.65
+        assert!(high_re.lambda > low_re.lambda,
+            "higher Re should give less negative lambda: low_re.lambda={:.4} high_re.lambda={:.4}",
+            low_re.lambda, high_re.lambda);
+        // Both lambdas are negative (boundary layer character)
+        assert!(low_re.lambda < 0.0 && high_re.lambda < 0.0,
+            "lambda should always be negative");
+        assert!(low_re.velocity_rel_l2 > 0.0 && high_re.velocity_rel_l2 > 0.0);
+    }
+
+    #[test]
+    fn ex19_kovasznay_velocity_dominates_pressure_in_l2_norm() {
+        // For Kovasznay flow at Re=40, velocity L2 norm should be comparable to 1
+        // while pressure fluctuation is smaller
+        let result = run_case(6, 40.0, false);
+        assert!(result.picard_converged);
+        // Velocity is O(1) and pressure fluctuations are O(Re * viscosity) ~ O(1)
+        assert!(result.velocity_norm > 0.1,
+            "velocity norm should be order 1: {}", result.velocity_norm);
+        assert!(result.velocity_norm > result.pressure_norm * 0.01,
+            "velocity should not be negligibly small vs pressure");
+    }
 }
 

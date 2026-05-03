@@ -233,5 +233,56 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn ex13_dof_count_matches_p1_h1_formula() {
+        // P1 H1 on n×n tri mesh: (n+1)^2 nodes
+        for n in [6usize, 8, 12] {
+            let result = solve_case(n, 3);
+            let expected = (n + 1) * (n + 1);
+            assert_eq!(result.n_dofs, expected,
+                "DOF count mismatch for n={}: got {} expected {}", n, result.n_dofs, expected);
+            assert!(result.n_free < result.n_dofs,
+                "free DOFs must be strictly less than total (boundary conditions applied)");
+        }
+    }
+
+    #[test]
+    fn ex13_eigenvalue_convergence_order_is_at_least_linear() {
+        let coarse = solve_case(8, 3);
+        let fine = solve_case(16, 3);
+        assert!(coarse.converged && fine.converged);
+        let exact = 2.0 * PI * PI;
+        let coarse_err = rel_err(coarse.eigenvalues[0], exact);
+        let fine_err = rel_err(fine.eigenvalues[0], exact);
+        // Doubling mesh should give at least 2x improvement (h^2 expected for P1)
+        assert!(fine_err < coarse_err / 2.0,
+            "expected at least linear convergence: coarse_err={:.4e} fine_err={:.4e}",
+            coarse_err, fine_err);
+    }
+
+    #[test]
+    fn ex13_second_eigenvalue_pair_satisfies_exact_ratio() {
+        // λ₂₁ = 5π², λ₁₁ = 2π², so ratio = 2.5 exactly
+        let result = solve_case(12, 3);
+        assert!(result.converged);
+        let ratio = result.eigenvalues[1] / result.eigenvalues[0];
+        assert!((ratio - 2.5).abs() < 0.05,
+            "λ₂/λ₁ should be close to 2.5 (exact ratio π²·5 / π²·2): got {:.4}", ratio);
+    }
+
+    #[test]
+    fn ex13_all_eigenvalues_are_positive() {
+        let result = solve_case(10, 5);
+        assert!(result.converged);
+        for (i, &lam) in result.eigenvalues.iter().enumerate() {
+            assert!(lam > 0.0, "eigenvalue {} should be positive: got {:.4e}", i+1, lam);
+        }
+        // Eigenvalues should be sorted in ascending order
+        for w in result.eigenvalues.windows(2) {
+            assert!(w[0] <= w[1] + 1e-10,
+                "eigenvalues should be sorted: {} > {}", w[0], w[1]);
+        }
+    }
 }
 

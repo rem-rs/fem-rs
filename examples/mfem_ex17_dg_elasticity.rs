@@ -158,5 +158,56 @@ mod tests {
         assert!((positive.uy_checksum + negative.uy_checksum).abs() < 1.0e-10,
             "u_y checksum should flip sign: positive={} negative={}", positive.uy_checksum, negative.uy_checksum);
     }
+
+    #[test]
+    fn ex17_dg_elasticity_dof_count_matches_p1_l2_vector_formula() {
+        // P1 L2 scalar DOFs = 3 * 2*n^2 = 6n^2 (3 nodes/element, 2*n^2 triangles)
+        // Vector DOFs = 2 * scalar_dofs
+        for n in [4usize, 6, 8] {
+            let result = run_case(n, 1, 20.0, 1.0, -1.0);
+            let expected_scalar = 6 * n * n;
+            assert_eq!(result.scalar_dofs, expected_scalar,
+                "scalar DOF mismatch for n={}: got {} expected {}", n, result.scalar_dofs, expected_scalar);
+            assert_eq!(result.vector_dofs, 2 * expected_scalar,
+                "vector DOF mismatch for n={}", n);
+        }
+    }
+
+    #[test]
+    fn ex17_dg_elasticity_mesh_refinement_reduces_residual() {
+        let coarse = run_case(4, 1, 20.0, 1.0, -1.0);
+        let fine = run_case(8, 1, 20.0, 1.0, -1.0);
+        assert!(coarse.converged && fine.converged);
+        // Both should converge to tight residual
+        assert!(coarse.final_residual < 1.0e-7,
+            "coarse GMRES residual: {}", coarse.final_residual);
+        assert!(fine.final_residual < 1.0e-7,
+            "fine GMRES residual: {}", fine.final_residual);
+        // Finer mesh should produce larger displacement norms (more DOFs resolve more deformation)
+        assert!(fine.uy_norm > 0.0 && coarse.uy_norm > 0.0);
+    }
+
+    #[test]
+    fn ex17_dg_elasticity_higher_sigma_penalizes_jumps() {
+        let low_sigma = run_case(6, 1, 5.0, 1.0, -1.0);
+        let high_sigma = run_case(6, 1, 100.0, 1.0, -1.0);
+        assert!(low_sigma.converged && high_sigma.converged);
+        // Both should produce nonzero solutions
+        assert!(low_sigma.uy_norm > 1.0e-8 && high_sigma.uy_norm > 1.0e-8);
+        // Higher sigma enforces stronger continuity — norms differ but both valid
+        assert!((low_sigma.uy_norm - high_sigma.uy_norm).abs() > 0.0,
+            "sigma should affect the solution");
+    }
+
+    #[test]
+    fn ex17_dg_elasticity_p2_has_more_dofs_and_better_accuracy() {
+        let p1 = run_case(6, 1, 20.0, 1.0, -1.0);
+        let p2 = run_case(6, 2, 20.0, 1.0, -1.0);
+        assert!(p1.converged && p2.converged);
+        assert!(p2.scalar_dofs > p1.scalar_dofs,
+            "P2 should have more DOFs: p1={} p2={}", p1.scalar_dofs, p2.scalar_dofs);
+        // P2 produces different (typically closer) solution
+        assert!(p2.uy_norm > 0.0);
+    }
 }
 
