@@ -8,6 +8,7 @@ fem-core   = { path = "../core" }
 num-traits = { workspace = true }
 bytemuck   = { workspace = true }
 linger     = { git = "https://github.com/rem-rs/linger.git", optional = true }
+parking_lot = "0.12"  # Thread-safe pool for COO buffers
 
 [dev-dependencies]
 # CooMatrix is used in CSR tests

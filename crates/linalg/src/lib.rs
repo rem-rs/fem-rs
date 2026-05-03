@@ -26,6 +26,7 @@ pub mod dense;
 pub mod sparsity;
 pub mod vector;
 pub mod block;
+pub mod pool;
 
 pub use coo::CooMatrix;
 pub use csr::CsrMatrix;
@@ -36,6 +37,7 @@ pub use sparsity::SparsityPattern;
 pub use vector::Vector;
 pub use block::{BlockMatrix, BlockVector};
 pub use dense::DenseTensor;
+pub use pool::{CooVectorPool, PooledCooVectors};
 
 // Re-exports from linger for Block Low-Rank compression
 #[cfg(feature = "direct")]
