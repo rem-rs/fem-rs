@@ -218,9 +218,9 @@ impl<T: Scalar> CsrMatrix<T> {
 
     #[cfg(feature = "parallel")]
     fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
-        y.par_iter_mut().enumerate().for_each(|(row, yi)| {
-            let start = self.row_ptr[row];
-            let end   = self.row_ptr[row + 1];
+        // par_windows(2) on row_ptr avoids enumerate() index tracking.
+        self.row_ptr.par_windows(2).zip(y.par_iter_mut()).for_each(|(w, yi)| {
+            let (start, end) = (w[0], w[1]);
             let mut s = T::zero();
             for k in start..end {
                 s += self.values[k] * x[self.col_idx[k] as usize];
@@ -231,9 +231,8 @@ impl<T: Scalar> CsrMatrix<T> {
 
     #[cfg(feature = "parallel")]
     fn spmv_add_parallel(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) {
-        y.par_iter_mut().enumerate().for_each(|(row, yi)| {
-            let start = self.row_ptr[row];
-            let end   = self.row_ptr[row + 1];
+        self.row_ptr.par_windows(2).zip(y.par_iter_mut()).for_each(|(w, yi)| {
+            let (start, end) = (w[0], w[1]);
             let mut s = T::zero();
             for k in start..end {
                 s += self.values[k] * x[self.col_idx[k] as usize];
@@ -262,26 +261,37 @@ impl<T: Scalar> CsrMatrix<T> {
     ///
     /// Also subtracts the column contribution from other rows to maintain
     /// symmetry (the "symmetric elimination" approach).
+    ///
+    /// For symmetric FEM matrices, exploits the fact that A[j,row] ≠ 0 only if
+    /// A[row,j] ≠ 0 — so we only visit neighbors of `row` in the sparsity graph,
+    /// reducing cost from O(n) to O(nnz_per_row). This is O(1) for sparse FEM
+    /// stiffness matrices regardless of problem size.
     pub fn apply_dirichlet_symmetric(
         &mut self,
         row: usize,
         value: T,
         rhs: &mut [T],
     ) {
-        // Subtract column `row` contributions from other rows
-        for other_row in 0..self.nrows {
-            if other_row == row { continue; }
-            let a_ij = self.get(other_row, row);
-            if a_ij == T::zero() { continue; }
-            rhs[other_row] -= a_ij * value;
-            // Zero the off-diagonal entry (other_row, row)
-            if let Some(k) = self.find_entry(other_row, row) {
-                self.values[k] = T::zero();
-            }
-        }
-        // Zero the entire row, then set diagonal
+        // For symmetric FEM matrices: A[j, row] != 0 iff A[row, j] != 0.
+        // Collect (other_row, a_ij) pairs from the row's sparsity pattern.
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
+
+        // Subtract column `row` contribution from neighboring rows (only O(nnz_row) work).
+        for k in start..end {
+            let other_row = self.col_idx[k] as usize;
+            if other_row == row { continue; }
+            // a_ij = A[other_row, row]; by symmetry equals A[row, other_row] = values[k]
+            let a_ij = self.values[k];
+            if a_ij == T::zero() { continue; }
+            rhs[other_row] -= a_ij * value;
+            // Zero A[other_row, row] via binary search in that row (CSR is sorted).
+            if let Some(pos) = self.find_entry(other_row, row) {
+                self.values[pos] = T::zero();
+            }
+        }
+
+        // Zero the entire row, then set diagonal to 1.
         for k in start..end {
             self.values[k] = T::zero();
         }
@@ -554,17 +564,46 @@ impl CsrMatrix<f64> {
 
     #[cfg(feature = "parallel")]
     pub(super) fn spmv_parallel_f64(&self, x: &[f64], y: &mut [f64]) {
-        y.par_iter_mut().enumerate().for_each(|(row, yi)| {
-            *yi = csr_row_dot_f64(&self.row_ptr, &self.col_idx, &self.values, x, row);
+        // Use par_windows(2) on row_ptr + zip to avoid enumerate overhead.
+        self.row_ptr.par_windows(2).zip(y.par_iter_mut()).for_each(|(w, yi)| {
+            let (start, end) = (w[0], w[1]);
+            let mut k = start;
+            let mut sum = 0.0_f64;
+            let end4 = start + (end - start) / 4 * 4;
+            while k < end4 {
+                sum += self.values[k]     * x[self.col_idx[k]     as usize]
+                     + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
+                     + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
+                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize];
+                k += 4;
+            }
+            while k < end {
+                sum += self.values[k] * x[self.col_idx[k] as usize];
+                k += 1;
+            }
+            *yi = sum;
         });
     }
 
     #[cfg(feature = "parallel")]
     pub(super) fn spmv_add_parallel_f64(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
-        y.par_iter_mut().enumerate().for_each(|(row, yi)| {
-            *yi = csr_row_dot_axpby_f64(
-                &self.row_ptr, &self.col_idx, &self.values, x, row, alpha, beta, *yi,
-            );
+        self.row_ptr.par_windows(2).zip(y.par_iter_mut()).for_each(|(w, yi)| {
+            let (start, end) = (w[0], w[1]);
+            let mut k = start;
+            let mut sum = 0.0_f64;
+            let end4 = start + (end - start) / 4 * 4;
+            while k < end4 {
+                sum += self.values[k]     * x[self.col_idx[k]     as usize]
+                     + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
+                     + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
+                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize];
+                k += 4;
+            }
+            while k < end {
+                sum += self.values[k] * x[self.col_idx[k] as usize];
+                k += 1;
+            }
+            *yi = alpha * sum + beta * *yi;
         });
     }
 }
