@@ -778,4 +778,46 @@ mod tests {
             "expected more heating at higher sigma: low={:.4e} high={:.4e}",
             r_low.max_joule_power, r_high.max_joule_power);
     }
+
+    /// More time steps → more accumulated Joule heating → higher temperature.
+    #[test]
+    fn ex51_more_steps_accumulates_more_heat() {
+        let mut few = base_args();
+        few.steps = 2;
+        let mut many = base_args();
+        many.steps = 8;
+
+        let r_few  = solve_em_thermal_stress_template(&few);
+        let r_many = solve_em_thermal_stress_template(&many);
+
+        assert!(r_many.final_temp_norm >= r_few.final_temp_norm,
+            "expected more steps to accumulate more heat: few={:.4e} many={:.4e}",
+            r_few.final_temp_norm, r_many.final_temp_norm);
+    }
+
+    /// Higher thermal diffusivity disperses heat faster → lower temperature norm.
+    #[test]
+    fn ex51_higher_thermal_kappa_reduces_temperature_norm() {
+        let mut low_k = base_args();
+        low_k.thermal_kappa = 0.1;
+        let mut high_k = base_args();
+        high_k.thermal_kappa = 10.0;
+
+        let r_low  = solve_em_thermal_stress_template(&low_k);
+        let r_high = solve_em_thermal_stress_template(&high_k);
+
+        assert!(r_high.final_temp_norm < r_low.final_temp_norm,
+            "expected higher kappa to reduce temperature norm: low_k={:.4e} high_k={:.4e}",
+            r_low.final_temp_norm, r_high.final_temp_norm);
+    }
+
+    /// Identical args must produce an identical temperature checksum (determinism).
+    #[test]
+    fn ex51_deterministic_checksum_across_repeated_runs() {
+        let r1 = solve_em_thermal_stress_template(&base_args());
+        let r2 = solve_em_thermal_stress_template(&base_args());
+        assert_eq!(r1.final_temp_checksum, r2.final_temp_checksum,
+            "expected deterministic checksum: run1={:.8e} run2={:.8e}",
+            r1.final_temp_checksum, r2.final_temp_checksum);
+    }
 }

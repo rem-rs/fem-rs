@@ -360,5 +360,27 @@ mod tests {
             );
         }
     }
+
+    /// All computed Maxwell eigenvalues are positive (ω² > 0).
+    #[test]
+    fn maxwell_eigenvalue_all_modes_are_positive_frequencies() {
+        let result = solve_case(8, 4);
+        assert!(result.converged, "LOBPCG did not converge");
+        for (i, &lam) in result.eigenvalues.iter().enumerate() {
+            assert!(lam > 0.0,
+                "expected positive eigenvalue at mode {}: got {}", i + 1, lam);
+        }
+    }
+
+    /// The number of returned eigenvalues equals the requested count k.
+    #[test]
+    fn maxwell_eigenvalue_output_length_matches_requested_k() {
+        for k in [2, 3, 4] {
+            let result = solve_case(10, k);
+            assert!(result.converged, "LOBPCG did not converge for k={k}");
+            assert_eq!(result.eigenvalues.len(), k,
+                "expected {k} eigenvalues, got {}", result.eigenvalues.len());
+        }
+    }
 }
 

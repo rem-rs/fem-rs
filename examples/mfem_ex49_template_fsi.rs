@@ -662,4 +662,24 @@ mod tests {
             "expected higher inlet to drive larger displacement: low={:.4e} high={:.4e}",
             r_low.max_wall_displacement, r_high.max_wall_displacement);
     }
+
+    /// Pressure checksum is identical across two runs with the same parameters (determinism).
+    #[test]
+    fn ex49_pressure_checksum_is_deterministic() {
+        let r1 = solve_fsi_template(&base_args());
+        let r2 = solve_fsi_template(&base_args());
+        assert_eq!(r1.final_pressure_checksum, r2.final_pressure_checksum,
+            "expected deterministic pressure checksum: r1={:.8e} r2={:.8e}",
+            r1.final_pressure_checksum, r2.final_pressure_checksum);
+    }
+
+    /// Near-zero inlet amplitude produces negligible wall displacement.
+    #[test]
+    fn ex49_zero_inlet_amp_gives_negligible_wall_displacement() {
+        let mut args = base_args();
+        args.inlet_amp = 0.0;
+        let r = solve_fsi_template(&args);
+        assert!(r.max_wall_displacement < 1.0e-10,
+            "expected negligible displacement for zero inlet: {:.4e}", r.max_wall_displacement);
+    }
 }

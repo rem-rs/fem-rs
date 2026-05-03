@@ -282,5 +282,27 @@ mod tests {
         assert!(format!("{face_err}").contains("named attribute set not found"));
         assert!(format!("{submesh_err}").contains("named attribute set not found"));
     }
+
+    /// The registry parsed from the demo mesh contains all three expected named sets.
+    #[test]
+    fn named_attributes_registry_contains_expected_names() {
+        let (_, registry) = load_demo_mesh();
+        let names = registry.names();
+        assert!(names.contains(&"fluid"),  "expected 'fluid' in registry: {:?}",  names);
+        assert!(names.contains(&"inlet"),  "expected 'inlet' in registry: {:?}",  names);
+        assert!(names.contains(&"outlet"), "expected 'outlet' in registry: {:?}", names);
+    }
+
+    /// The 'fluid' named set covers all elements in the demo mesh.
+    #[test]
+    fn named_attributes_fluid_elements_cover_full_mesh() {
+        let (mesh, registry) = load_demo_mesh();
+        let fluid_elems = mesh
+            .element_ids_for_named_set(&registry, "fluid")
+            .expect("missing fluid set");
+        assert_eq!(fluid_elems.len(), mesh.n_elems(),
+            "expected fluid elements to cover full mesh: got {} of {}",
+            fluid_elems.len(), mesh.n_elems());
+    }
 }
 
