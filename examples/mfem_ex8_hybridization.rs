@@ -241,4 +241,60 @@ mod tests {
             negative.solution_checksum
         );
     }
+
+    #[test]
+    fn ex8_hanging_consistency_is_scale_invariant() {
+        // The hanging-node constraint u_h = 0.5(u_a + u_b) should hold to
+        // machine precision regardless of the RHS magnitude.
+        for &scale in &[0.001f64, 1.0, 1000.0] {
+            let r = run_case(scale);
+            assert!(r.converged, "scale={}: did not converge", scale);
+            assert!(r.hanging_consistency < 1.0e-12,
+                "scale={}: hanging consistency {:.3e} exceeds tolerance", scale, r.hanging_consistency);
+        }
+    }
+
+    #[test]
+    fn ex8_free_dof_mismatch_is_scale_invariant() {
+        // The agreement between the full-system solve and the reduced-system
+        // reference should stay near machine precision at any scale.
+        for &scale in &[0.1f64, 5.0, 50.0] {
+            let r = run_case(scale);
+            assert!(r.converged, "scale={}: did not converge", scale);
+            assert!(r.free_dof_mismatch < 1.0e-10,
+                "scale={}: free_dof_mismatch {:.3e} exceeds tolerance", scale, r.free_dof_mismatch);
+        }
+    }
+
+    #[test]
+    fn ex8_large_rhs_scale_converges_and_maintains_accuracy() {
+        let large = run_case(100.0);
+        assert!(large.converged);
+        assert!(large.hanging_consistency < 1.0e-12,
+            "large-scale hanging consistency: {:.3e}", large.hanging_consistency);
+        assert!(large.free_dof_mismatch < 1.0e-10,
+            "large-scale free dof mismatch: {:.3e}", large.free_dof_mismatch);
+        // solution should be exactly 100× the unit case
+        let unit = run_case(1.0);
+        assert!((large.solution_norm / unit.solution_norm - 100.0).abs() < 1.0e-10,
+            "solution_norm ratio mismatch: {:.6}", large.solution_norm / unit.solution_norm);
+        assert!((large.solution_checksum / unit.solution_checksum - 100.0).abs() < 1.0e-10,
+            "checksum ratio mismatch: {:.6}", large.solution_checksum / unit.solution_checksum);
+    }
+
+    #[test]
+    fn ex8_fractional_scale_preserves_residual_and_consistency() {
+        let frac = run_case(0.25);
+        assert!(frac.converged);
+        assert!(frac.final_residual < 1.0e-9,
+            "fractional-scale residual too large: {:.3e}", frac.final_residual);
+        assert!(frac.hanging_consistency < 1.0e-12,
+            "fractional-scale hanging consistency: {:.3e}", frac.hanging_consistency);
+        assert!(frac.free_dof_mismatch < 1.0e-10,
+            "fractional-scale free dof mismatch: {:.3e}", frac.free_dof_mismatch);
+        // solution should be exactly 1/4 of the unit case
+        let unit = run_case(1.0);
+        assert!((frac.solution_norm / unit.solution_norm - 0.25).abs() < 1.0e-12,
+            "solution_norm ratio mismatch: {:.6}", frac.solution_norm / unit.solution_norm);
+    }
 }

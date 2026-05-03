@@ -251,5 +251,65 @@ mod tests {
             negative.solution_checksum);
         assert!((positive.l2_error - negative.l2_error).abs() < 1.0e-12);
     }
+
+    #[test]
+    fn ex9_dg_dof_count_matches_p1_l2_space_formula() {
+        // P1 DG on n×n uniform triangular mesh:
+        //   elements = 2*n^2, nodes = (n+1)^2
+        //   DOFs/element = 3 (one per vertex for P1 DG)
+        //   total DOFs = 2*n^2 * 3 = 6*n^2
+        for n in [4usize, 8, 16] {
+            let result = solve_case(n, 1, 20.0, 1.0);
+            let expected_elem = 2 * n * n;
+            let expected_dofs = 6 * n * n;
+            assert_eq!(result.n_elements, expected_elem,
+                "n={}: expected {} elements, got {}", n, expected_elem, result.n_elements);
+            assert_eq!(result.n_dofs, expected_dofs,
+                "n={}: expected {} DOFs, got {}", n, expected_dofs, result.n_dofs);
+        }
+    }
+
+    #[test]
+    fn ex9_dg_interior_face_count_is_positive_and_grows_with_mesh() {
+        let coarse = solve_case(8, 1, 20.0, 1.0);
+        let fine = solve_case(16, 1, 20.0, 1.0);
+        assert!(coarse.n_interior_faces > 0,
+            "coarse mesh should have interior faces, got 0");
+        assert!(fine.n_interior_faces > coarse.n_interior_faces,
+            "finer mesh should have more interior faces: coarse={} fine={}",
+            coarse.n_interior_faces, fine.n_interior_faces);
+        // For n×n uniform tri mesh: each element has 3 faces, minus 1 per shared edge
+        // n=8: 128 elements × 3 = 384 half-faces, boundary ≈ 4*n=32 boundary faces
+        // interior ≈ (384 - 32) / 2 = 176
+        assert_eq!(coarse.n_interior_faces, 176,
+            "n=8: expected 176 interior faces, got {}", coarse.n_interior_faces);
+    }
+
+    #[test]
+    fn ex9_dg_higher_sigma_maintains_second_order_convergence() {
+        // Larger penalty σ should not degrade convergence order
+        let coarse = solve_case(8, 1, 40.0, 1.0);
+        let medium = solve_case(16, 1, 40.0, 1.0);
+        let fine = solve_case(32, 1, 40.0, 1.0);
+        assert!(medium.l2_error < coarse.l2_error);
+        assert!(fine.l2_error < medium.l2_error);
+        assert!(convergence_rate(&coarse, &medium) > 1.9,
+            "σ=40 coarse→medium rate: {:.2}", convergence_rate(&coarse, &medium));
+        assert!(convergence_rate(&medium, &fine) > 1.9,
+            "σ=40 medium→fine rate: {:.2}", convergence_rate(&medium, &fine));
+    }
+
+    #[test]
+    fn ex9_dg_higher_order_achieves_better_accuracy() {
+        // P2 DG should be more accurate than P1 DG on same mesh
+        let p1 = solve_case(8, 1, 20.0, 1.0);
+        let p2 = solve_case(8, 2, 20.0, 1.0);
+        assert!(p2.converged && p1.converged);
+        assert!(p2.l2_error < p1.l2_error,
+            "P2 DG should outperform P1 DG: p1={:.3e} p2={:.3e}", p1.l2_error, p2.l2_error);
+        // P2 DOFs = 6 dofs/element * 2n^2 = 12n^2 (for order=2, 6 dofs/tri)
+        assert!(p2.n_dofs > p1.n_dofs,
+            "P2 should have more DOFs than P1: p1={} p2={}", p1.n_dofs, p2.n_dofs);
+    }
 }
 

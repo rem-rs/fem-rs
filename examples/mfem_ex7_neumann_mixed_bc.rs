@@ -373,5 +373,30 @@ mod tests {
             negative.solution_checksum);
         assert!((positive.l2_error - negative.l2_error).abs() < 1.0e-12);
     }
+
+    #[test]
+    fn ex7_mixed_bc_dof_count_matches_uniform_grid_formula() {
+        // Uniform n×n triangular mesh gives (n+1)^2 nodes = DOFs for P1 H1
+        for n in [4usize, 8, 16] {
+            let result = solve_case(n, 1.0, 1.0);
+            let expected = (n + 1) * (n + 1);
+            assert_eq!(result.n_nodes, expected,
+                "n={}: expected {} nodes, got {}", n, expected, result.n_nodes);
+            assert_eq!(result.n_dofs, expected,
+                "n={}: expected {} DOFs, got {}", n, expected, result.n_dofs);
+        }
+    }
+
+    #[test]
+    fn ex7_mixed_bc_fine_mesh_achieves_engineering_accuracy() {
+        // n=32: expect L2 error well below 1e-4 for this smooth manufactured solution
+        let result = solve_case(32, 1.0, 1.0);
+        assert!(result.l2_error < 1.0e-4,
+            "fine mesh (n=32) L2 error too large: {}", result.l2_error);
+        // h-convergence: n=32 should be roughly (16/32)^2 ≈ 4× more accurate than n=16
+        let coarse = solve_case(16, 1.0, 1.0);
+        let rate = coarse.l2_error / result.l2_error;
+        assert!(rate > 3.5, "expected ~4x error reduction from n=16 to n=32, got {:.2}x", rate);
+    }
 }
 
