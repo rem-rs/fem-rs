@@ -146,6 +146,10 @@ name = "mfem_ex52_template_reaction_flow_thermal"
 path = "mfem_ex52_template_reaction_flow_thermal.rs"
 
 [[example]]
+name = "mfem_ex53_3d_electrothermal"
+path = "mfem_ex53_3d_electrothermal.rs"
+
+[[example]]
 name = "mfem_ex33_fractional_laplacian"
 path = "mfem_ex33_fractional_laplacian.rs"
 

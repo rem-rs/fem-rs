@@ -26,11 +26,21 @@ use fem_space::{
     fe_space::FESpace,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SolveMethod {
+    Pdas,
+    SemismoothNewton,
+}
+
 fn main() {
     let args = parse_args();
-    let result = solve_obstacle_problem(args.n, args.load);
+    let result = solve_obstacle_problem(args.n, args.load, args.method);
 
-    println!("=== fem-rs Example 36: obstacle problem (PDAS) ===");
+    let method_label = match args.method {
+        SolveMethod::Pdas => "PDAS",
+        SolveMethod::SemismoothNewton => "Semismooth Newton",
+    };
+    println!("=== fem-rs Example 36: obstacle problem ({method_label}) ===");
     println!("  Mesh: {}x{} subdivisions, P1 elements", args.n, args.n);
     println!("  Load: {:.3}", args.load);
     println!("  Iterations: {}", result.iterations);
@@ -41,14 +51,13 @@ fn main() {
     println!("  Complementarity max|(Au-b)(u-psi)|: {:.3e}", result.complementarity);
     println!("  Unconstrained min(u-psi): {:.3e}", result.unconstrained_min_gap);
     println!("  L2 distance to obstacle: {:.3e}", result.obstacle_l2_distance);
-    println!();
-    println!("Note: primal-dual active-set is enabled; semismooth-Newton refinement is optional future work.");
 }
 
 #[derive(Debug, Clone)]
 struct Args {
     n: usize,
     load: f64,
+    method: SolveMethod,
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +73,7 @@ struct ObstacleResult {
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { n: 20, load: -5.0 };
+    let mut args = Args { n: 20, load: -5.0, method: SolveMethod::Pdas };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -74,13 +83,19 @@ fn parse_args() -> Args {
             "--load" => {
                 args.load = it.next().unwrap_or("-5.0".into()).parse().unwrap_or(-5.0);
             }
+            "--method" => {
+                args.method = match it.next().as_deref() {
+                    Some("ssn") | Some("semismooth") => SolveMethod::SemismoothNewton,
+                    _ => SolveMethod::Pdas,
+                };
+            }
             _ => {}
         }
     }
     args
 }
 
-fn solve_obstacle_problem(n: usize, load: f64) -> ObstacleResult {
+fn solve_obstacle_problem(n: usize, load: f64, method: SolveMethod) -> ObstacleResult {
     let mesh = SimplexMesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let ndofs = space.n_dofs();
@@ -104,14 +119,24 @@ fn solve_obstacle_problem(n: usize, load: f64) -> ObstacleResult {
         .map(|(u, psi)| u - psi)
         .fold(f64::INFINITY, f64::min);
 
-    let (solution, iterations, final_update) = primal_dual_active_set(
-        &mat,
-        &rhs,
-        &obstacle,
-        &boundary_mask,
-        80,
-        1e-10,
-    );
+    let (solution, iterations, final_update) = match method {
+        SolveMethod::Pdas => primal_dual_active_set(
+            &mat,
+            &rhs,
+            &obstacle,
+            &boundary_mask,
+            80,
+            1e-10,
+        ),
+        SolveMethod::SemismoothNewton => semismooth_newton(
+            &mat,
+            &rhs,
+            &obstacle,
+            &boundary_mask,
+            80,
+            1e-10,
+        ),
+    };
 
     let (min_gap, contact_dofs, min_multiplier, complementarity) =
         obstacle_kkt_metrics(&mat, &rhs, &solution, &obstacle, &boundary_mask);
@@ -313,6 +338,99 @@ fn reduced_free_system(
     (coo.into_csr(), b)
 }
 
+/// Semismooth Newton method for the obstacle problem.
+///
+/// Reformulates KKT complementarity using the `min` function:
+///   φᵢ(u) = min(uᵢ − ψᵢ,  fᵢ − [Au]ᵢ) = 0
+///
+/// Each Newton step:
+/// - Inactive DOFs (free): solve A u_new = f (standard PDE residual)
+/// - Active DOFs (contact): u_new[i] = ψ[i]   (enforce contact constraint)
+///
+/// Converges locally with quadratic rate; no requirement to wait for
+/// active-set stabilisation between steps (unlike PDAS).
+fn semismooth_newton(
+    mat: &CsrMatrix<f64>,
+    rhs: &[f64],
+    obstacle: &[f64],
+    constrained: &[bool],
+    max_iter: usize,
+    tol: f64,
+) -> (Vec<f64>, usize, f64) {
+    let n = mat.nrows;
+    // Start at the obstacle (same as PDAS) so that the active set is meaningful
+    // from the very first iteration.
+    let mut u = obstacle.to_vec();
+    for i in 0..n {
+        if constrained[i] {
+            u[i] = rhs[i];
+        }
+    }
+
+    let mut final_update = f64::INFINITY;
+
+    for iter in 0..max_iter {
+        // Compute residual Au
+        let mut au = vec![0.0_f64; n];
+        mat.spmv(&u, &mut au);
+
+        // SSN active-set criterion: same two-sided KKT check as PDAS
+        //   gap ≤ 0  (primal: at obstacle)  AND  multiplier > 0  (dual: contact force)
+        // Using this criterion makes SSN and PDAS converge to the same KKT solution;
+        // the algorithmic distinction is that SSN does NOT require the active set to
+        // stabilise between steps — it terminates as soon as the Newton step is small.
+        let mut active = vec![false; n];
+        for i in 0..n {
+            if constrained[i] {
+                active[i] = true;
+                continue;
+            }
+            let gap = u[i] - obstacle[i];
+            let multiplier = au[i] - rhs[i];
+            active[i] = gap <= 1e-10 && multiplier > 0.0;
+        }
+
+        // Build Newton step: solve for u_new directly
+        //   active dofs → u_new[i] = obstacle[i]
+        //   free dofs   → A_free * u_new_free = rhs_free (with contact rows eliminated)
+        let free: Vec<usize> = (0..n)
+            .filter(|&i| !active[i] && !constrained[i])
+            .collect();
+        let fixed: Vec<bool> = (0..n).map(|i| active[i] || constrained[i]).collect();
+
+        let mut u_new = u.clone();
+        for i in 0..n {
+            if active[i] {
+                u_new[i] = if constrained[i] { rhs[i] } else { obstacle[i] };
+            }
+        }
+
+        if !free.is_empty() {
+            let (a_ff, b_f) = reduced_free_system(mat, rhs, &free, &fixed, &u_new);
+            let u_f = solve_sparse_cholesky(&a_ff, &b_f)
+                .expect("SSN reduced solve failed");
+            for (k, &gi) in free.iter().enumerate() {
+                // enforce feasibility: solution may not go below obstacle
+                u_new[gi] = u_f[k].max(obstacle[gi]);
+            }
+        }
+
+        let mut max_update = 0.0_f64;
+        for i in 0..n {
+            max_update = max_update.max((u_new[i] - u[i]).abs());
+        }
+        final_update = max_update;
+        u = u_new;
+
+        // SSN convergence: Newton step is small (no active-set stabilisation required)
+        if max_update < tol {
+            return (u, iter + 1, final_update);
+        }
+    }
+
+    (u, max_iter, final_update)
+}
+
 fn obstacle_kkt_metrics(
     mat: &CsrMatrix<f64>,
     rhs: &[f64],
@@ -351,7 +469,7 @@ mod tests {
 
     #[test]
     fn ex36_obstacle_solution_is_feasible_and_has_contact() {
-        let result = solve_obstacle_problem(14, -5.0);
+        let result = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
         assert!(result.final_update < 1e-8, "final update too large: {}", result.final_update);
         assert!(result.min_gap >= -1e-8, "solution violated obstacle: {}", result.min_gap);
         assert!(result.min_multiplier >= -1e-6, "negative multiplier: {}", result.min_multiplier);
@@ -361,16 +479,16 @@ mod tests {
 
     #[test]
     fn ex36_obstacle_improves_on_unconstrained_solution() {
-        let result = solve_obstacle_problem(14, -5.0);
+        let result = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
         assert!(result.unconstrained_min_gap < -1e-3, "unconstrained solution should violate obstacle: {}", result.unconstrained_min_gap);
         assert!(result.min_gap >= -1e-8, "projected solution should be feasible: {}", result.min_gap);
     }
 
     #[test]
     fn ex36_stronger_downward_loads_expand_contact_set() {
-        let light = solve_obstacle_problem(14, -2.0);
-        let medium = solve_obstacle_problem(14, -5.0);
-        let strong = solve_obstacle_problem(14, -8.0);
+        let light = solve_obstacle_problem(14, -2.0, SolveMethod::Pdas);
+        let medium = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
+        let strong = solve_obstacle_problem(14, -8.0, SolveMethod::Pdas);
 
         for (label, result) in [("light", &light), ("medium", &medium), ("strong", &strong)] {
             assert!(result.min_gap >= -1e-8, "{label} load violated obstacle: {}", result.min_gap);
@@ -397,8 +515,8 @@ mod tests {
 
     #[test]
     fn ex36_upward_load_has_smaller_contact_than_downward_load() {
-        let upward = solve_obstacle_problem(14, 1.0);
-        let downward = solve_obstacle_problem(14, -5.0);
+        let upward = solve_obstacle_problem(14, 1.0, SolveMethod::Pdas);
+        let downward = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
 
         assert!(upward.min_gap >= -1e-8, "upward load violated obstacle: {}", upward.min_gap);
         assert!(upward.complementarity < 1e-6, "upward load complementarity too large: {}", upward.complementarity);
@@ -414,5 +532,51 @@ mod tests {
             upward.obstacle_l2_distance,
             downward.obstacle_l2_distance
         );
+    }
+
+    // ── Semismooth Newton tests ──────────────────────────────────────────────
+
+    #[test]
+    fn ex36_ssn_solution_is_feasible_and_has_contact() {
+        let result = solve_obstacle_problem(14, -5.0, SolveMethod::SemismoothNewton);
+        assert!(result.final_update < 1e-8, "SSN: final update too large: {}", result.final_update);
+        assert!(result.min_gap >= -1e-8, "SSN: solution violated obstacle: {}", result.min_gap);
+        assert!(result.min_multiplier >= -1e-6, "SSN: negative multiplier: {}", result.min_multiplier);
+        assert!(result.complementarity < 1e-6, "SSN: complementarity too large: {}", result.complementarity);
+        assert!(result.contact_dofs > 0, "SSN: expected a non-empty contact set");
+    }
+
+    #[test]
+    fn ex36_ssn_agrees_with_pdas() {
+        let pdas = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
+        let ssn  = solve_obstacle_problem(14, -5.0, SolveMethod::SemismoothNewton);
+
+        let l2_diff = (pdas.obstacle_l2_distance - ssn.obstacle_l2_distance).abs();
+        assert!(
+            l2_diff < 1e-6,
+            "SSN and PDAS L2 distances differ too much: pdas={} ssn={}",
+            pdas.obstacle_l2_distance, ssn.obstacle_l2_distance
+        );
+        assert_eq!(
+            pdas.contact_dofs, ssn.contact_dofs,
+            "SSN and PDAS contact sets differ: pdas={} ssn={}",
+            pdas.contact_dofs, ssn.contact_dofs
+        );
+        assert!(
+            pdas.complementarity < 1e-6 && ssn.complementarity < 1e-6,
+            "both methods should satisfy complementarity: pdas={} ssn={}",
+            pdas.complementarity, ssn.complementarity
+        );
+    }
+
+    #[test]
+    fn ex36_ssn_converges_in_few_iterations() {
+        // SSN has quadratic local convergence; should need ≤ 20 outer iterations
+        // on a moderate mesh with a well-posed load.
+        let result = solve_obstacle_problem(20, -5.0, SolveMethod::SemismoothNewton);
+        assert!(result.iterations <= 20,
+            "SSN took too many iterations: {}", result.iterations);
+        assert!(result.min_gap >= -1e-8, "SSN: obstacle violated: {}", result.min_gap);
+        assert!(result.complementarity < 1e-6, "SSN: complementarity too large: {}", result.complementarity);
     }
 }

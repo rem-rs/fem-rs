@@ -684,6 +684,101 @@ impl<const D: usize> SimplexMesh<D> {
             face_conn, face_tags, ElementType::Tri3,
         )
     }
+
+    /// Generate a uniform hexahedral mesh on the unit cube `[0,1]³`.
+    ///
+    /// Divided into `n × n × n` Hex8 elements.  Boundary face (Quad4) tag convention:
+    /// - 1: z = 0 (bottom), 2: z = 1 (top), 3: y = 0 (front),
+    /// - 4: y = 1 (back),   5: x = 0 (left), 6: x = 1 (right)
+    pub fn unit_cube_hex(n: usize) -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 3, "unit_cube_hex requires D = 3");
+        let np = n + 1;
+        let mut coords = Vec::with_capacity(np * np * np * 3);
+        for k in 0..np {
+            for j in 0..np {
+                for i in 0..np {
+                    coords.push(i as f64 / n as f64);
+                    coords.push(j as f64 / n as f64);
+                    coords.push(k as f64 / n as f64);
+                }
+            }
+        }
+
+        let nid = |i: usize, j: usize, k: usize| -> NodeId {
+            (k * np * np + j * np + i) as NodeId
+        };
+
+        let mut conn      = Vec::with_capacity(n * n * n * 8);
+        let mut elem_tags = Vec::with_capacity(n * n * n);
+
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    // Bottom face (z=k): CCW from outside (below) → (0,1,2,3)
+                    // Top face (z=k+1): CCW from outside (above) → (4,5,6,7)
+                    // Standard Hex8 layout:
+                    //   (n0, n1, n2, n3) = bottom face CCW
+                    //   (n4, n5, n6, n7) = top face, n4 above n0
+                    conn.extend_from_slice(&[
+                        nid(i,   j,   k  ), // n0
+                        nid(i+1, j,   k  ), // n1
+                        nid(i+1, j+1, k  ), // n2
+                        nid(i,   j+1, k  ), // n3
+                        nid(i,   j,   k+1), // n4
+                        nid(i+1, j,   k+1), // n5
+                        nid(i+1, j+1, k+1), // n6
+                        nid(i,   j+1, k+1), // n7
+                    ]);
+                    elem_tags.push(1i32);
+                }
+            }
+        }
+
+        // Boundary Quad4 faces on the 6 cube faces.
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+
+        macro_rules! add_quad {
+            ($a:expr, $b:expr, $c:expr, $d:expr, $tag:expr) => {
+                face_conn.push($a); face_conn.push($b);
+                face_conn.push($c); face_conn.push($d);
+                face_tags.push($tag);
+            }
+        }
+
+        for j in 0..n {
+            for i in 0..n {
+                // z = 0 bottom face (tag 1), outward normal = -z, CCW when viewed from below
+                add_quad!(nid(i,j,0), nid(i,j+1,0), nid(i+1,j+1,0), nid(i+1,j,0), 1);
+                // z = n top face (tag 2), outward normal = +z, CCW when viewed from above
+                add_quad!(nid(i,j,n), nid(i+1,j,n), nid(i+1,j+1,n), nid(i,j+1,n), 2);
+            }
+        }
+        for k in 0..n {
+            for i in 0..n {
+                // y = 0 front face (tag 3), outward normal = -y
+                add_quad!(nid(i,0,k), nid(i+1,0,k), nid(i+1,0,k+1), nid(i,0,k+1), 3);
+                // y = n back face (tag 4), outward normal = +y
+                add_quad!(nid(i,n,k), nid(i,n,k+1), nid(i+1,n,k+1), nid(i+1,n,k), 4);
+            }
+        }
+        for k in 0..n {
+            for j in 0..n {
+                // x = 0 left face (tag 5), outward normal = -x
+                add_quad!(nid(0,j,k), nid(0,j,k+1), nid(0,j+1,k+1), nid(0,j+1,k), 5);
+                // x = n right face (tag 6), outward normal = +x
+                add_quad!(nid(n,j,k), nid(n,j+1,k), nid(n,j+1,k+1), nid(n,j,k+1), 6);
+            }
+        }
+
+        SimplexMesh::uniform(
+            coords, conn, elem_tags, ElementType::Hex8,
+            face_conn, face_tags, ElementType::Quad4,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -729,4 +729,53 @@ mod tests {
         assert!(r_high.final_temp_norm > r_low.final_temp_norm);
         assert!(r_high.final_stress_proxy > r_low.final_stress_proxy);
     }
+
+    /// Zero EM drive → negligible Joule heating and negligible stress.
+    #[test]
+    fn ex51_near_zero_conductivity_gives_negligible_joule_power() {
+        // With sigma0 near zero, P ≈ σ |∇φ|² ≈ 0 regardless of drive.
+        let mut args = base_args();
+        args.sigma0 = 1.0e-8;
+        let r = solve_em_thermal_stress_template(&args);
+        assert!(r.max_joule_power < 1.0e-6,
+            "expected near-zero Joule power with near-zero sigma: {:.4e}", r.max_joule_power);
+        assert!(r.final_stress_proxy < 1.0e-6,
+            "expected near-zero stress with near-zero sigma: {:.4e}", r.final_stress_proxy);
+    }
+
+    /// Negative temperature coefficient means higher temperature → lower conductivity
+    /// → less Joule heating (stabilising feedback). Result should have lower
+    /// max Joule power than the zero-feedback case.
+    #[test]
+    fn ex51_negative_sigma_temp_coeff_stabilises_joule_heating() {
+        let mut no_feedback = base_args();
+        no_feedback.sigma_temp_coeff = 0.0;
+        let mut with_feedback = base_args();
+        with_feedback.sigma_temp_coeff = -0.5; // σ decreases with temperature
+
+        let r_none = solve_em_thermal_stress_template(&no_feedback);
+        let r_fb   = solve_em_thermal_stress_template(&with_feedback);
+
+        // Negative temperature coefficient damps Joule heating.
+        assert!(r_fb.max_joule_power <= r_none.max_joule_power * 1.01,
+            "expected stabilising feedback to not increase heating: no_fb={:.4e} fb={:.4e}",
+            r_none.max_joule_power, r_fb.max_joule_power);
+    }
+
+    /// Higher conductivity (sigma0) should yield stronger Joule heating
+    /// (P ∝ σ |∇φ|²) for the same drive amplitude.
+    #[test]
+    fn ex51_higher_conductivity_gives_more_joule_heating() {
+        let mut low = base_args();
+        low.sigma0 = 0.1;
+        let mut high = base_args();
+        high.sigma0 = 1.0;
+
+        let r_low  = solve_em_thermal_stress_template(&low);
+        let r_high = solve_em_thermal_stress_template(&high);
+
+        assert!(r_high.max_joule_power > r_low.max_joule_power,
+            "expected more heating at higher sigma: low={:.4e} high={:.4e}",
+            r_low.max_joule_power, r_high.max_joule_power);
+    }
 }

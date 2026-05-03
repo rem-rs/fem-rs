@@ -1097,9 +1097,6 @@ impl ImexArk3 {
             rhs_implicit(t + ARK_C[0] * dt, u, &mut ki_i[0]);
             u_stage[0] = u.to_vec();
 
-            let mut accept = false;
-            let mut err_norm = 2.0; // force at least one iteration
-
             // Stages 1..3
             for s in 1..4 {
                 // Explicit predictor: U_s = u + dt * Σ_{j<s} A^E_{sj} k^E_j
@@ -1155,7 +1152,7 @@ impl ImexArk3 {
             }
 
             // Error norm: ‖u3 - u2‖ / (atol + rtol * max(|u3|, |u2|))
-            err_norm = (0..n).map(|i| {
+            let err_norm = (0..n).map(|i| {
                 let e = u3[i] - u2[i];
                 let sc = self.atol + self.rtol * u[i].abs().max(u3[i].abs());
                 (e / sc).powi(2)
@@ -1165,7 +1162,6 @@ impl ImexArk3 {
                 // Accept step
                 u.copy_from_slice(&u3);
                 t += dt;
-                accept = true;
             }
 
             // PI controller for next step size
@@ -1177,7 +1173,6 @@ impl ImexArk3 {
             }
             dt = dt.min(self.dt_max).max(self.dt_min);
 
-            let _ = accept; // used implicitly via loop structure
         }
         (t, dt)
     }

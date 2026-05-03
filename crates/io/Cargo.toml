@@ -7,13 +7,13 @@ edition = "2021"
 fem-core   = { path = "../core" }
 fem-linalg = { path = "../linalg" }
 fem-mesh   = { path = "../mesh" }
-linger     = { path = "../../vendor/linger" }
+linger     = { git = "https://github.com/rem-rs/linger.git" }
 thiserror  = { workspace = true }
-hdf5       = { version = "0.8", optional = true }
+rust-hdf5  = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 
 [features]
 default = []
-hdf5    = ["dep:hdf5"]
+hdf5    = ["dep:rust-hdf5"]

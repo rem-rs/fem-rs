@@ -614,4 +614,52 @@ mod tests {
 
         assert!(r_high.max_wall_displacement > r_low.max_wall_displacement);
     }
+
+    /// Very small compliance → near-rigid wall → negligible displacement.
+    #[test]
+    fn ex49_near_rigid_wall_gives_negligible_displacement() {
+        let mut args = base_args();
+        args.compliance = 1.0e-5;
+        let r = solve_fsi_template(&args);
+        // With near-zero compliance the wall barely moves.
+        assert!(r.max_wall_displacement < 1.0e-3,
+            "expected near-zero displacement for rigid wall: {:.4e}", r.max_wall_displacement);
+    }
+
+    /// Conservative transfer through the FSI coupling loop must not drift
+    /// the fluid pressure integral.
+    #[test]
+    fn ex49_fluid_transfer_conserves_integral() {
+        let r = solve_fsi_template(&base_args());
+        assert!(r.max_transfer_abs_int_err < 1.0e-9,
+            "fluid integral drifted too much: {:.3e}", r.max_transfer_abs_int_err);
+    }
+
+    /// Most coupling iterations must converge within the step budget
+    /// (single-rate path; first step from cold start may not fully converge).
+    #[test]
+    fn ex49_all_steps_couple_to_convergence() {
+        let mut args = base_args();
+        args.use_subcycling = false;
+        args.coupling_tol = 1.0e-5;
+        let r = solve_fsi_template(&args);
+        // Allow at most 1 non-converged step (cold-start transient).
+        assert!(r.converged_steps >= r.steps.saturating_sub(1),
+            "FSI coupling failed to converge in too many steps: {}/{}", r.converged_steps, r.steps);
+    }
+
+    /// Higher inlet amplitude drives larger wall displacement.
+    #[test]
+    fn ex49_higher_inlet_amplitude_drives_larger_wall_displacement() {
+        let mut low = base_args();
+        low.inlet_amp = 0.05;
+        let mut high = base_args();
+        high.inlet_amp = 0.4;
+
+        let r_low  = solve_fsi_template(&low);
+        let r_high = solve_fsi_template(&high);
+        assert!(r_high.max_wall_displacement > r_low.max_wall_displacement,
+            "expected higher inlet to drive larger displacement: low={:.4e} high={:.4e}",
+            r_low.max_wall_displacement, r_high.max_wall_displacement);
+    }
 }

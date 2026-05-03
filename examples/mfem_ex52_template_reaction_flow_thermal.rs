@@ -867,4 +867,63 @@ mod tests {
         a.sync_retries = 0;
         let _ = solve_reaction_flow_thermal_template(&a);
     }
+
+    /// Zero reaction rate constant → no consumption, no heat release,
+    /// temperature should remain near zero after zero initial condition.
+    #[test]
+    fn ex52_zero_reaction_rate_gives_no_temperature_rise() {
+        let mut args = base_args();
+        args.reaction_k0 = 0.0;
+        args.heat_release = 1.0;
+        let r = solve_reaction_flow_thermal_template(&args);
+        assert!(r.max_reaction_rate < 1.0e-12,
+            "expected zero reaction rate: {:.4e}", r.max_reaction_rate);
+        assert!(r.final_temperature_norm < 1.0e-10,
+            "expected near-zero temperature with no reaction: {:.4e}", r.final_temperature_norm);
+    }
+
+    /// Higher heat release per unit reaction → higher final temperature norm.
+    #[test]
+    fn ex52_higher_heat_release_increases_temperature() {
+        let mut low = base_args();
+        low.heat_release = 0.5;
+        let mut high = base_args();
+        high.heat_release = 2.0;
+
+        let r_low  = solve_reaction_flow_thermal_template(&low);
+        let r_high = solve_reaction_flow_thermal_template(&high);
+        assert!(r_high.final_temperature_norm > r_low.final_temperature_norm,
+            "higher heat release should give more temperature: low={:.4e} high={:.4e}",
+            r_low.final_temperature_norm, r_high.final_temperature_norm);
+    }
+
+    /// Subcycling path should produce the same qualitative trend as single-rate:
+    /// more inlet concentration → more reaction and temperature.
+    #[test]
+    fn ex52_subcycling_path_shows_same_inlet_trend_as_single_rate() {
+        let mut single_low = base_args();
+        single_low.use_subcycling = false;
+        single_low.inlet_concentration = 0.5;
+        let mut single_high = base_args();
+        single_high.use_subcycling = false;
+        single_high.inlet_concentration = 1.5;
+
+        let mut sub_low = base_args();
+        sub_low.use_subcycling = true;
+        sub_low.inlet_concentration = 0.5;
+        let mut sub_high = base_args();
+        sub_high.use_subcycling = true;
+        sub_high.inlet_concentration = 1.5;
+
+        let rs_l = solve_reaction_flow_thermal_template(&single_low);
+        let rs_h = solve_reaction_flow_thermal_template(&single_high);
+        let rb_l = solve_reaction_flow_thermal_template(&sub_low);
+        let rb_h = solve_reaction_flow_thermal_template(&sub_high);
+
+        // Both paths: higher inlet → higher temperature.
+        assert!(rs_h.final_temperature_norm > rs_l.final_temperature_norm,
+            "single-rate: higher inlet should raise temperature");
+        assert!(rb_h.final_temperature_norm > rb_l.final_temperature_norm,
+            "subcycling: higher inlet should raise temperature");
+    }
 }

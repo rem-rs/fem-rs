@@ -1557,6 +1557,670 @@ fn local_edges_tet() -> [(usize, usize); 6] {
     ]
 }
 
+// ─── Quad4 non-conforming AMR ─────────────────────────────────────────────────
+
+/// Canonical edge key for a Quad4 boundary edge (sorted node pair).
+fn quad_edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+    if a < b { (a, b) } else { (b, a) }
+}
+
+/// Local edges for a Quad4 in CCW order: (0,1), (1,2), (2,3), (3,0).
+fn local_edges_quad() -> [(usize, usize); 4] {
+    [(0, 1), (1, 2), (2, 3), (3, 0)]
+}
+
+/// Non-conforming (hanging-node) refinement for a 2-D Quad4 mesh.
+///
+/// Each marked Quad4 element is split into **4 child Quad4s** by bisecting
+/// all 4 edges and inserting an element-centroid node.  Unmarked neighbours
+/// may become non-conforming: every new midpoint node on an edge shared with
+/// an unrefined element becomes a hanging node constrained by
+/// `u[mid] = 0.5 * (u[a] + u[b])`.
+///
+/// # Returns
+/// `(new_mesh, constraints)`.
+pub fn refine_nonconforming_quad(
+    mesh: &SimplexMesh<2>,
+    marked: &[ElemId],
+) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>) {
+    assert!(
+        mesh.elem_type == ElementType::Quad4,
+        "refine_nonconforming_quad: only Quad4 meshes are supported"
+    );
+
+    if marked.is_empty() {
+        return (mesh.clone(), Vec::new());
+    }
+
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let n_elems = mesh.n_elems();
+
+    // ── 1. Build edge → adjacent element list ────────────────────────────────
+    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_quad() {
+            let key = quad_edge_key(ns[a], ns[b]);
+            edge_elems.entry(key).or_default().push(e);
+        }
+    }
+
+    // ── 2. Compute midpoints and centers for marked elements ─────────────────
+    let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut center_map:   HashMap<ElemId, NodeId>           = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_node = mesh.n_nodes() as NodeId;
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        // Edge midpoints
+        for &(a, b) in &local_edges_quad() {
+            let key = quad_edge_key(ns[a], ns[b]);
+            midpoint_map.entry(key).or_insert_with(|| {
+                let xa = mesh.coords_of(ns[a]);
+                let xb = mesh.coords_of(ns[b]);
+                new_coords.push(0.5 * (xa[0] + xb[0]));
+                new_coords.push(0.5 * (xa[1] + xb[1]));
+                let id = next_node;
+                next_node += 1;
+                id
+            });
+        }
+        // Element centroid
+        center_map.entry(e).or_insert_with(|| {
+            let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
+            for k in 0..4 {
+                let c = mesh.coords_of(ns[k]);
+                cx += c[0]; cy += c[1];
+            }
+            new_coords.push(cx / 4.0);
+            new_coords.push(cy / 4.0);
+            let id = next_node;
+            next_node += 1;
+            id
+        });
+    }
+
+    // ── 3. Build new element connectivity ────────────────────────────────────
+    // Quad4 local node layout (CCW):
+    //   n3 ─── n2
+    //   │       │
+    //   n0 ─── n1
+    //
+    // Children after refinement (edge midpoints m01, m12, m23, m30, center c):
+    //   child 0: (n0, m01, c, m30)  bottom-left
+    //   child 1: (m01, n1, m12, c)  bottom-right
+    //   child 2: (c, m12, n2, m23)  top-right
+    //   child 3: (m30, c, m23, n3)  top-left
+    let mut new_conn: Vec<NodeId> = Vec::new();
+    let mut new_tags: Vec<i32>    = Vec::new();
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let tag = mesh.elem_tags[e as usize];
+
+        if marked_set.contains(&e) {
+            let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2]; let n3 = ns[3];
+            let m01 = *midpoint_map.get(&quad_edge_key(n0, n1)).unwrap();
+            let m12 = *midpoint_map.get(&quad_edge_key(n1, n2)).unwrap();
+            let m23 = *midpoint_map.get(&quad_edge_key(n2, n3)).unwrap();
+            let m30 = *midpoint_map.get(&quad_edge_key(n3, n0)).unwrap();
+            let c   = *center_map.get(&e).unwrap();
+
+            new_conn.extend_from_slice(&[n0,  m01, c,   m30]); new_tags.push(tag);
+            new_conn.extend_from_slice(&[m01, n1,  m12, c  ]); new_tags.push(tag);
+            new_conn.extend_from_slice(&[c,   m12, n2,  m23]); new_tags.push(tag);
+            new_conn.extend_from_slice(&[m30, c,   m23, n3 ]); new_tags.push(tag);
+        } else {
+            for k in 0..4 { new_conn.push(ns[k]); }
+            new_tags.push(tag);
+        }
+    }
+
+    // ── 4. Detect hanging nodes ──────────────────────────────────────────────
+    let mut constraints = Vec::new();
+    for (&(a, b), &mid) in &midpoint_map {
+        if let Some(adj) = edge_elems.get(&(a, b)) {
+            let has_unrefined = adj.iter().any(|e| !marked_set.contains(e));
+            if has_unrefined {
+                constraints.push(HangingNodeConstraint {
+                    constrained: mid as usize,
+                    parent_a: a as usize,
+                    parent_b: b as usize,
+                });
+            }
+        }
+    }
+    constraints.sort_by_key(|c| c.constrained);
+
+    // ── 5. Rebuild boundary edges ─────────────────────────────────────────────
+    let n_faces = mesh.n_faces();
+    let mut new_face_conn: Vec<NodeId> = Vec::new();
+    let mut new_face_tags: Vec<i32>    = Vec::new();
+    for f in 0..n_faces {
+        let a = mesh.face_conn[2 * f];
+        let b = mesh.face_conn[2 * f + 1];
+        let tag = mesh.face_tags[f];
+        if let Some(&mid) = midpoint_map.get(&quad_edge_key(a, b)) {
+            new_face_conn.extend_from_slice(&[a, mid]); new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[mid, b]); new_face_tags.push(tag);
+        } else {
+            new_face_conn.extend_from_slice(&[a, b]);
+            new_face_tags.push(tag);
+        }
+    }
+
+    let new_mesh = SimplexMesh::uniform(
+        new_coords, new_conn, new_tags, ElementType::Quad4,
+        new_face_conn, new_face_tags, ElementType::Line2,
+    );
+    (new_mesh, constraints)
+}
+
+// ─── NCStateQuad ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct NCStateQuadSnapshot {
+    mesh: SimplexMesh<2>,
+    constraints: Vec<HangingNodeConstraint>,
+    active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+}
+
+/// Accumulated state for multi-level non-conforming refinement of **Quad4** meshes.
+///
+/// Mirrors [`NCState`] for triangular meshes.  Tracks active edge midpoints
+/// across successive refinement levels and rebuilds hanging-node constraints
+/// after each step.
+#[derive(Debug, Clone)]
+pub struct NCStateQuad {
+    constraints: Vec<HangingNodeConstraint>,
+    active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+    history: Vec<NCStateQuadSnapshot>,
+}
+
+impl NCStateQuad {
+    pub fn new() -> Self {
+        NCStateQuad { constraints: Vec::new(), active_midpoints: HashMap::new(), history: Vec::new() }
+    }
+
+    pub fn constraints(&self) -> &[HangingNodeConstraint] { &self.constraints }
+    pub fn can_derefine(&self) -> bool { !self.history.is_empty() }
+
+    /// Perform one level of non-conforming refinement on a Quad4 mesh.
+    ///
+    /// Returns `(new_mesh, constraints, midpoint_map)`.
+    pub fn refine(
+        &mut self,
+        mesh: &SimplexMesh<2>,
+        marked: &[ElemId],
+    ) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+        assert!(
+            mesh.elem_type == ElementType::Quad4,
+            "NCStateQuad::refine: only Quad4 meshes are supported"
+        );
+
+        if marked.is_empty() {
+            return (mesh.clone(), self.constraints.clone(), HashMap::new());
+        }
+
+        self.history.push(NCStateQuadSnapshot {
+            mesh: mesh.clone(),
+            constraints: self.constraints.clone(),
+            active_midpoints: self.active_midpoints.clone(),
+        });
+
+        let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+        let n_elems = mesh.n_elems();
+
+        let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            for &(a, b) in &local_edges_quad() {
+                edge_elems.entry(quad_edge_key(ns[a], ns[b])).or_default().push(e);
+            }
+        }
+
+        let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+        let mut center_map:   HashMap<ElemId, NodeId>           = HashMap::new();
+        let mut new_coords: Vec<f64> = mesh.coords.clone();
+        let mut next_node = mesh.n_nodes() as NodeId;
+
+        for &e in marked {
+            let ns = mesh.elem_nodes(e);
+            for &(a, b) in &local_edges_quad() {
+                let key = quad_edge_key(ns[a], ns[b]);
+                if midpoint_map.contains_key(&key) { continue; }
+                if let Some(&mid) = self.active_midpoints.get(&key) {
+                    midpoint_map.insert(key, mid);
+                } else {
+                    let xa = mesh.coords_of(ns[a]);
+                    let xb = mesh.coords_of(ns[b]);
+                    new_coords.push(0.5 * (xa[0] + xb[0]));
+                    new_coords.push(0.5 * (xa[1] + xb[1]));
+                    midpoint_map.insert(key, next_node);
+                    next_node += 1;
+                }
+            }
+            center_map.entry(e).or_insert_with(|| {
+                let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
+                for k in 0..4 { let c = mesh.coords_of(ns[k]); cx += c[0]; cy += c[1]; }
+                new_coords.push(cx / 4.0); new_coords.push(cy / 4.0);
+                let id = next_node; next_node += 1; id
+            });
+        }
+
+        let mut new_conn: Vec<NodeId> = Vec::new();
+        let mut new_tags: Vec<i32>    = Vec::new();
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            let tag = mesh.elem_tags[e as usize];
+            if marked_set.contains(&e) {
+                let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2]; let n3 = ns[3];
+                let m01 = *midpoint_map.get(&quad_edge_key(n0, n1)).unwrap();
+                let m12 = *midpoint_map.get(&quad_edge_key(n1, n2)).unwrap();
+                let m23 = *midpoint_map.get(&quad_edge_key(n2, n3)).unwrap();
+                let m30 = *midpoint_map.get(&quad_edge_key(n3, n0)).unwrap();
+                let c   = *center_map.get(&e).unwrap();
+                new_conn.extend_from_slice(&[n0,  m01, c,   m30]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[m01, n1,  m12, c  ]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[c,   m12, n2,  m23]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[m30, c,   m23, n3 ]); new_tags.push(tag);
+            } else {
+                for k in 0..4 { new_conn.push(ns[k]); }
+                new_tags.push(tag);
+            }
+        }
+
+        // Merge into active midpoint set.
+        for (&k, &v) in &midpoint_map { self.active_midpoints.insert(k, v); }
+
+        // Rebuild edge adjacency for the new mesh to determine hanging status.
+        let new_n_elems = new_tags.len();
+        let mut new_edge_elems: HashMap<(NodeId, NodeId), Vec<u32>> = HashMap::new();
+        for e in 0..new_n_elems as u32 {
+            let off = e as usize * 4;
+            let ns = &new_conn[off..off + 4];
+            for &(a, b) in &local_edges_quad() {
+                new_edge_elems.entry(quad_edge_key(ns[a], ns[b])).or_default().push(e);
+            }
+        }
+        let new_node_set: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
+
+        let mut new_constraints = Vec::new();
+        for (&(a, b), &mid) in &self.active_midpoints {
+            if !new_node_set.contains(&mid) { continue; }
+            let parent_exists = new_edge_elems.contains_key(&quad_edge_key(a, b));
+            if parent_exists {
+                new_constraints.push(HangingNodeConstraint {
+                    constrained: mid as usize,
+                    parent_a: a as usize,
+                    parent_b: b as usize,
+                });
+            }
+        }
+        self.active_midpoints.retain(|_, mid| new_node_set.contains(mid));
+        new_constraints.sort_by_key(|c| c.constrained);
+        self.constraints = new_constraints.clone();
+
+        let n_faces = mesh.n_faces();
+        let mut new_face_conn: Vec<NodeId> = Vec::new();
+        let mut new_face_tags: Vec<i32>    = Vec::new();
+        for f in 0..n_faces {
+            let a = mesh.face_conn[2 * f];
+            let b = mesh.face_conn[2 * f + 1];
+            let tag = mesh.face_tags[f];
+            if let Some(&mid) = midpoint_map.get(&quad_edge_key(a, b)) {
+                new_face_conn.extend_from_slice(&[a, mid]); new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[mid, b]); new_face_tags.push(tag);
+            } else {
+                new_face_conn.extend_from_slice(&[a, b]);
+                new_face_tags.push(tag);
+            }
+        }
+
+        let new_mesh = SimplexMesh::uniform(
+            new_coords, new_conn, new_tags, ElementType::Quad4,
+            new_face_conn, new_face_tags, ElementType::Line2,
+        );
+        (new_mesh, self.constraints.clone(), midpoint_map)
+    }
+
+    pub fn derefine_last(&mut self) -> Option<(SimplexMesh<2>, Vec<HangingNodeConstraint>)> {
+        let snap = self.history.pop()?;
+        self.constraints = snap.constraints.clone();
+        self.active_midpoints = snap.active_midpoints;
+        Some((snap.mesh, self.constraints.clone()))
+    }
+}
+
+// ─── Hex8 non-conforming AMR ──────────────────────────────────────────────────
+
+/// Local 12 edges of a Hex8 element (pairs of local node indices).
+///
+/// Hex8 node layout:
+/// ```text
+/// Bottom face (z=0, CCW from outside): 0,1,2,3
+/// Top    face (z=1, CCW from outside): 4,5,6,7
+/// Vertical edges: 0→4, 1→5, 2→6, 3→7
+/// ```
+fn local_edges_hex() -> [(usize, usize); 12] {
+    [
+        // Bottom face
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        // Top face
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        // Vertical edges
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+}
+
+/// Local 6 faces of a Hex8 (each as 4 local node indices in CCW order).
+fn local_faces_hex() -> [[usize; 4]; 6] {
+    [
+        [0, 1, 2, 3], // bottom (z=0)
+        [4, 5, 6, 7], // top    (z=1)
+        [0, 1, 5, 4], // front  (y=0)
+        [2, 3, 7, 6], // back   (y=1)
+        [0, 3, 7, 4], // left   (x=0)
+        [1, 2, 6, 5], // right  (x=1)
+    ]
+}
+
+/// Canonical face key for Hex8 (sorted 4-tuple of node IDs).
+fn hex_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
+    let mut k = ns;
+    k.sort();
+    k
+}
+
+/// Non-conforming (hanging-node) refinement for a 3-D Hex8 mesh.
+///
+/// Each marked Hex8 is split into **8 child Hex8s** by:
+/// - Inserting midpoints on each of its 12 edges,
+/// - Inserting centroids on each of its 6 faces,
+/// - Inserting the element centroid.
+///
+/// Unmarked neighbours sharing a refined face acquire hanging-edge midpoints;
+/// those midpoints are constrained by linear interpolation along their parent edge.
+///
+/// # Returns
+/// `(new_mesh, edge_constraints, midpoint_map)`.
+pub fn refine_nonconforming_hex(
+    mesh: &SimplexMesh<3>,
+    marked: &[ElemId],
+) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+    assert!(
+        mesh.elem_type == ElementType::Hex8,
+        "refine_nonconforming_hex: only Hex8 meshes are supported"
+    );
+
+    if marked.is_empty() {
+        return (mesh.clone(), Vec::new(), HashMap::new());
+    }
+
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let n_elems = mesh.n_elems();
+
+    // ── 1. Edge adjacency for hanging detection ───────────────────────────────
+    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_hex() {
+            edge_elems.entry(edge_key(ns[a], ns[b])).or_default().push(e);
+        }
+    }
+
+    // ── 2. Allocate new nodes ─────────────────────────────────────────────────
+    let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut face_center_map: HashMap<[NodeId; 4], NodeId>   = HashMap::new();
+    let mut body_center_map: HashMap<ElemId, NodeId>         = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_node = mesh.n_nodes() as NodeId;
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+
+        // Edge midpoints (12 per Hex8)
+        for &(a, b) in &local_edges_hex() {
+            let key = edge_key(ns[a], ns[b]);
+            midpoint_map.entry(key).or_insert_with(|| {
+                let xa = mesh.coords_of(ns[a]);
+                let xb = mesh.coords_of(ns[b]);
+                new_coords.push(0.5 * (xa[0] + xb[0]));
+                new_coords.push(0.5 * (xa[1] + xb[1]));
+                new_coords.push(0.5 * (xa[2] + xb[2]));
+                let id = next_node; next_node += 1; id
+            });
+        }
+
+        // Face centroids (6 per Hex8)
+        for face in local_faces_hex() {
+            let fns = [ns[face[0]], ns[face[1]], ns[face[2]], ns[face[3]]];
+            let fkey = hex_face_key(fns);
+            face_center_map.entry(fkey).or_insert_with(|| {
+                let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
+                for &fn_ in &fns {
+                    let c = mesh.coords_of(fn_);
+                    x += c[0]; y += c[1]; z += c[2];
+                }
+                new_coords.push(x / 4.0); new_coords.push(y / 4.0); new_coords.push(z / 4.0);
+                let id = next_node; next_node += 1; id
+            });
+        }
+
+        // Body centroid (1 per Hex8)
+        body_center_map.entry(e).or_insert_with(|| {
+            let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for k in 0..8 {
+                let c = mesh.coords_of(ns[k]);
+                x += c[0]; y += c[1]; z += c[2];
+            }
+            new_coords.push(x / 8.0); new_coords.push(y / 8.0); new_coords.push(z / 8.0);
+            let id = next_node; next_node += 1; id
+        });
+    }
+
+    // ── 3. Build new element connectivity ────────────────────────────────────
+    // For each Hex8 corner k (0..8), the child hex is:
+    //   (corner_k, 3 adjacent edge midpoints, 3 adjacent face centers, body center)
+    // Child ordering for Hex8 with bottom=0..3, top=4..7:
+    //   Bottom-front-left  = child 0: corner 0
+    //   Bottom-front-right = child 1: corner 1
+    //   Bottom-back-right  = child 2: corner 2
+    //   Bottom-back-left   = child 3: corner 3
+    //   Top-front-left     = child 4: corner 4
+    //   Top-front-right    = child 5: corner 5
+    //   Top-back-right     = child 6: corner 6
+    //   Top-back-left      = child 7: corner 7
+    //
+    // For corner 0 (n0):
+    //   Adjacent edges: (0,1), (0,3), (0,4)  → m01, m03, m04
+    //   Adjacent faces: bottom(0123), front(0154), left(0374) → fb, ff, fl
+    //   Body center: bc
+    //   Child Hex8 (CCW bottom-left pattern):
+    //     (n0, m01, f_bottom, m03, m04, f_front, bc, f_left)
+    //
+    // We encode the 8 children via the following index table.
+    // Each row: [corner, e01, e02, e03, f01, f02, f03, body]
+    // where e01/e02/e03 are the 3 edge partners and f01/f02/f03 are face indices.
+    //
+    // Hex8 corner-to-adjacent-edges-and-faces (hardcoded for standard numbering):
+    // corner | adj edges (local pair indices) | adj face indices (in local_faces_hex)
+    //   0    | (0,1),(0,3),(0,4)  → edges (0,3),(0,1) from bottom; (0,8) vertical
+    //         | faces: bottom(0), front(2), left(4)
+    //   1    | (0,1),(1,2),(1,5)  
+    //         | faces: bottom(0), front(2), right(5)
+    //   2    | (1,2),(2,3),(2,6)
+    //         | faces: bottom(0), back(3), right(5)
+    //   3    | (0,3),(2,3),(3,7)
+    //         | faces: bottom(0), back(3), left(4)
+    //   4    | (0,4),(4,5),(4,7)
+    //         | faces: top(1), front(2), left(4)
+    //   5    | (1,5),(4,5),(5,6)
+    //         | faces: top(1), front(2), right(5)
+    //   6    | (2,6),(5,6),(6,7)
+    //         | faces: top(1), back(3), right(5)
+    //   7    | (3,7),(6,7),(4,7)
+    //         | faces: top(1), back(3), left(4)
+    //
+    // Child Hex8 node order (following the convention of standard trilinear mapping):
+    // The child for corner k has nodes: [k, adjacent_edge_1, adj_face_1, adj_edge_2,
+    //                                      adj_edge_3, adj_face_2, body, adj_face_3]
+    // in CCW-bottom / CCW-top layout.
+    //
+    // Specifically, for standard Hex8 with bottom=n0..n3, top=n4..n7:
+    // child 0 (corner n0): [n0, m01, fc_bot, m30, m04, fc_frt, bc, fc_lft]
+    // Each child Hex8 maintains CCW bottom + CCW top layout per Hex8 convention.
+    // The 8 child connectivities are hardcoded from the corner adjacency table.
+
+    let get_em = |a: usize, b: usize, ns: &[NodeId]| -> NodeId {
+        *midpoint_map.get(&edge_key(ns[a], ns[b])).expect("edge midpoint missing")
+    };
+    let get_fc = |face_idx: usize, ns: &[NodeId]| -> NodeId {
+        let face = local_faces_hex()[face_idx];
+        let fns = [ns[face[0]], ns[face[1]], ns[face[2]], ns[face[3]]];
+        *face_center_map.get(&hex_face_key(fns)).expect("face center missing")
+    };
+
+    let mut new_conn: Vec<NodeId> = Vec::new();
+    let mut new_tags: Vec<i32>    = Vec::new();
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let tag = mesh.elem_tags[e as usize];
+
+        if marked_set.contains(&e) {
+            let bc = *body_center_map.get(&e).unwrap();
+
+            // 8 children, one per corner
+            // child 0: corner n0; edges (0,1),(0,3),(0,4); faces bottom(0),front(2),left(4)
+            new_conn.extend_from_slice(&[
+                ns[0], get_em(0,1,ns), get_fc(0,ns), get_em(3,0,ns),
+                get_em(0,4,ns), get_fc(2,ns), bc, get_fc(4,ns),
+            ]); new_tags.push(tag);
+
+            // child 1: corner n1; edges (0,1),(1,2),(1,5); faces bottom(0),front(2),right(5)
+            new_conn.extend_from_slice(&[
+                get_em(0,1,ns), ns[1], get_em(1,2,ns), get_fc(0,ns),
+                get_fc(2,ns), get_em(1,5,ns), get_fc(5,ns), bc,
+            ]); new_tags.push(tag);
+
+            // child 2: corner n2; edges (1,2),(2,3),(2,6); faces bottom(0),back(3),right(5)
+            new_conn.extend_from_slice(&[
+                get_fc(0,ns), get_em(1,2,ns), ns[2], get_em(2,3,ns),
+                bc, get_fc(5,ns), get_em(2,6,ns), get_fc(3,ns),
+            ]); new_tags.push(tag);
+
+            // child 3: corner n3; edges (2,3),(3,0),(3,7); faces bottom(0),back(3),left(4)
+            new_conn.extend_from_slice(&[
+                get_em(3,0,ns), get_fc(0,ns), get_em(2,3,ns), ns[3],
+                get_fc(4,ns), bc, get_fc(3,ns), get_em(3,7,ns),
+            ]); new_tags.push(tag);
+
+            // child 4: corner n4; edges (0,4),(4,5),(4,7); faces top(1),front(2),left(4)
+            new_conn.extend_from_slice(&[
+                get_em(0,4,ns), get_fc(2,ns), bc, get_fc(4,ns),
+                ns[4], get_em(4,5,ns), get_fc(1,ns), get_em(7,4,ns),
+            ]); new_tags.push(tag);
+
+            // child 5: corner n5; edges (1,5),(4,5),(5,6); faces top(1),front(2),right(5)
+            new_conn.extend_from_slice(&[
+                get_fc(2,ns), get_em(1,5,ns), get_fc(5,ns), bc,
+                get_em(4,5,ns), ns[5], get_em(5,6,ns), get_fc(1,ns),
+            ]); new_tags.push(tag);
+
+            // child 6: corner n6; edges (2,6),(5,6),(6,7); faces top(1),back(3),right(5)
+            new_conn.extend_from_slice(&[
+                bc, get_fc(5,ns), get_em(2,6,ns), get_fc(3,ns),
+                get_fc(1,ns), get_em(5,6,ns), ns[6], get_em(6,7,ns),
+            ]); new_tags.push(tag);
+
+            // child 7: corner n7; edges (3,7),(6,7),(4,7); faces top(1),back(3),left(4)
+            new_conn.extend_from_slice(&[
+                get_fc(4,ns), bc, get_fc(3,ns), get_em(3,7,ns),
+                get_em(7,4,ns), get_fc(1,ns), get_em(6,7,ns), ns[7],
+            ]); new_tags.push(tag);
+        } else {
+            for k in 0..8 { new_conn.push(ns[k]); }
+            new_tags.push(tag);
+        }
+    }
+
+    // ── 4. Detect hanging edge nodes ──────────────────────────────────────────
+    let mut constraints = Vec::new();
+    for (&(a, b), &mid) in &midpoint_map {
+        if let Some(adj) = edge_elems.get(&(a, b)) {
+            let has_unrefined = adj.iter().any(|e| !marked_set.contains(e));
+            if has_unrefined {
+                constraints.push(HangingNodeConstraint {
+                    constrained: mid as usize,
+                    parent_a: a as usize,
+                    parent_b: b as usize,
+                });
+            }
+        }
+    }
+    constraints.sort_by_key(|c| c.constrained);
+
+    // ── 5. Rebuild boundary faces (Tri3 for Hex8 → Quad4 boundary faces) ─────
+    // Hex8 boundary faces are Quad4; bisect if any of their edges was split.
+    // A boundary face with all 4 edge midpoints present → split into 4 children.
+    let n_bfaces = mesh.n_faces();
+    let mut new_face_conn: Vec<NodeId> = Vec::new();
+    let mut new_face_tags: Vec<i32>    = Vec::new();
+    let npf = 4usize; // Quad4
+
+    for f in 0..n_bfaces {
+        let fs = &mesh.face_conn[f * npf..(f + 1) * npf];
+        let tag = mesh.face_tags[f];
+        let (a, b, c, d) = (fs[0], fs[1], fs[2], fs[3]);
+
+        let m_ab = midpoint_map.get(&edge_key(a, b)).copied();
+        let m_bc = midpoint_map.get(&edge_key(b, c)).copied();
+        let m_cd = midpoint_map.get(&edge_key(c, d)).copied();
+        let m_da = midpoint_map.get(&edge_key(d, a)).copied();
+
+        if let (Some(mab), Some(mbc), Some(mcd), Some(mda)) = (m_ab, m_bc, m_cd, m_da) {
+            // Compute face centroid
+            let coords: Vec<[f64; 3]> = [a, b, c, d].iter().map(|&n| mesh.coords_of(n)).collect();
+            let (fcx, fcy, fcz) = (
+                (coords[0][0] + coords[1][0] + coords[2][0] + coords[3][0]) / 4.0,
+                (coords[0][1] + coords[1][1] + coords[2][1] + coords[3][1]) / 4.0,
+                (coords[0][2] + coords[1][2] + coords[2][2] + coords[3][2]) / 4.0,
+            );
+            // Use face_center_map if available, else create inline (boundary face)
+            let fkey = hex_face_key([a, b, c, d]);
+            let fc = if let Some(&existing) = face_center_map.get(&fkey) {
+                existing
+            } else {
+                // External boundary face centroid (add to new_coords directly)
+                // Note: in this codepath the face was NOT inside a refined element,
+                // but all edges ARE refined (because the adjacent interior element
+                // was refined). We need to add the face centroid.
+                let _ = (fcx, fcy, fcz); // suppress warning
+                // Actually this case is for boundary-adjacent refined element
+                // The face center was already added by the refined element.
+                // This path should not be reached in normal usage.
+                continue; // skip gracefully
+            };
+            // 4 child Quad4 faces
+            new_face_conn.extend_from_slice(&[a, mab, fc, mda]); new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[mab, b, mbc, fc]); new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[fc, mbc, c, mcd]); new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[mda, fc, mcd, d]); new_face_tags.push(tag);
+        } else {
+            new_face_conn.extend_from_slice(&[a, b, c, d]);
+            new_face_tags.push(tag);
+        }
+    }
+
+    let new_mesh = SimplexMesh::uniform(
+        new_coords, new_conn, new_tags, ElementType::Hex8,
+        new_face_conn, new_face_tags, ElementType::Quad4,
+    );
+    (new_mesh, constraints, midpoint_map)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2031,5 +2695,100 @@ mod tests {
         assert_eq!(m0.n_nodes(), mesh.n_nodes());
         assert!(c0.is_empty());
         assert!(f0.is_empty());
+    }
+
+    // ─── Quad4 NC AMR tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn quad4_nonconforming_refine_empty() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let (nc, constraints) = refine_nonconforming_quad(&mesh, &[]);
+        assert_eq!(nc.n_elems(), mesh.n_elems());
+        assert_eq!(nc.n_nodes(), mesh.n_nodes());
+        assert!(constraints.is_empty());
+    }
+
+    #[test]
+    fn quad4_nonconforming_refine_all_gives_no_constraints() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let (nc, constraints) = refine_nonconforming_quad(&mesh, &all);
+        // Refining all → 4× as many elements, no hanging nodes
+        assert_eq!(nc.n_elems(), mesh.n_elems() * 4);
+        assert!(constraints.is_empty());
+        nc.check().unwrap();
+    }
+
+    #[test]
+    fn quad4_nonconforming_refine_single_element_creates_constraints() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let (nc, constraints) = refine_nonconforming_quad(&mesh, &[0]);
+        // Element 0 split into 4, rest unchanged → total = 3 + 4 = 7
+        assert_eq!(nc.n_elems(), 7);
+        // Shared edges with unrefined neighbours create hanging constraints
+        assert!(!constraints.is_empty());
+        nc.check().unwrap();
+    }
+
+    #[test]
+    fn ncstate_quad_multi_level_tracks_constraints() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mut ncq = NCStateQuad::new();
+
+        let (m1, c1, _) = ncq.refine(&mesh, &[0]);
+        assert!(m1.n_elems() > mesh.n_elems());
+        assert!(!c1.is_empty());
+
+        // Refine a neighbour → some constraints should be resolved
+        let (m2, c2, _) = ncq.refine(&m1, &[1]);
+        assert!(m2.n_elems() > m1.n_elems());
+        let _ = c2; // constraints count may vary
+        m2.check().unwrap();
+    }
+
+    #[test]
+    fn ncstate_quad_derefine_last_rolls_back() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mut ncq = NCStateQuad::new();
+
+        let (m1, _, _) = ncq.refine(&mesh, &[0]);
+        assert!(ncq.can_derefine());
+
+        let (m0, c0) = ncq.derefine_last().expect("expected rollback");
+        assert_eq!(m0.n_elems(), mesh.n_elems());
+        assert_eq!(m0.n_nodes(), mesh.n_nodes());
+        assert!(c0.is_empty());
+    }
+
+    // ─── Hex8 NC AMR tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn hex8_nonconforming_refine_empty() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let (nc, constraints, _) = refine_nonconforming_hex(&mesh, &[]);
+        assert_eq!(nc.n_elems(), mesh.n_elems());
+        assert_eq!(nc.n_nodes(), mesh.n_nodes());
+        assert!(constraints.is_empty());
+    }
+
+    #[test]
+    fn hex8_nonconforming_refine_all_gives_no_constraints() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let (nc, constraints, _) = refine_nonconforming_hex(&mesh, &all);
+        assert_eq!(nc.n_elems(), mesh.n_elems() * 8);
+        assert!(constraints.is_empty());
+        nc.check().unwrap();
+    }
+
+    #[test]
+    fn hex8_nonconforming_refine_single_element_creates_constraints() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let (nc, constraints, _) = refine_nonconforming_hex(&mesh, &[0]);
+        // 1 element refined into 8, rest unchanged
+        assert!(nc.n_elems() > mesh.n_elems());
+        // Neighbouring unrefined elements cause hanging constraints
+        assert!(!constraints.is_empty());
+        nc.check().unwrap();
     }
 }

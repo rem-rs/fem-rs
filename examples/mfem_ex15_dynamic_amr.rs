@@ -163,5 +163,83 @@ mod tests {
         let max_value = u2.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
         assert!(max_value < 1.0e-14, "zero field should remain zero after roundtrip, got max {}", max_value);
     }
+
+    /// Refining a mesh should strictly increase the element count.
+    #[test]
+    fn ex15_mesh_refinement_increases_element_count() {
+        let mesh0 = SimplexMesh::<2>::unit_square_tri(6);
+        let field = synthetic_field(&mesh0, 0.5, 0.5, 0.15);
+        let eta = zz_estimator(&mesh0, &field);
+        let marked = dorfler_mark(&eta, 0.7);
+
+        assert!(!marked.is_empty(), "expected non-empty refinement set");
+        
+        let (mesh1, _tree) = refine_marked_with_tree(&mesh0, &marked);
+        assert!(mesh1.n_elems() > mesh0.n_elems(),
+            "refined mesh should have more elements: {} vs {}",
+            mesh1.n_elems(), mesh0.n_elems());
+        assert!(mesh1.n_nodes() > mesh0.n_nodes(),
+            "refined mesh should have more nodes: {} vs {}",
+            mesh1.n_nodes(), mesh0.n_nodes());
+    }
+
+    /// Multiple refinement passes should further increase element count.
+    #[test]
+    fn ex15_multiple_refinement_passes_grow_mesh() {
+        let mut mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mut field = synthetic_field(&mesh, 0.5, 0.5, 0.15);
+        let mut elem_counts = vec![mesh.n_elems()];
+
+        for _ in 0..2 {
+            let eta = zz_estimator(&mesh, &field);
+            let marked = dorfler_mark(&eta, 0.6);
+            if marked.is_empty() {
+                break;
+            }
+            let (new_mesh, tree) = refine_marked_with_tree(&mesh, &marked);
+            field = prolongate_p1(&field, new_mesh.n_nodes(), &tree.midpoint_map);
+            mesh = new_mesh;
+            elem_counts.push(mesh.n_elems());
+        }
+
+        for i in 1..elem_counts.len() {
+            assert!(elem_counts[i] > elem_counts[i-1],
+                "element count should increase monotonically: {} vs {}",
+                elem_counts[i-1], elem_counts[i]);
+        }
+    }
+
+    /// Error estimator should be positive and finite everywhere.
+    #[test]
+    fn ex15_error_estimator_is_positive_finite() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let field = synthetic_field(&mesh, 0.3, 0.7, 0.1);
+        let eta = zz_estimator(&mesh, &field);
+
+        assert_eq!(eta.len(), mesh.n_elems());
+        for (i, &err) in eta.iter().enumerate() {
+            assert!(err > 0.0, "error indicator at element {} should be > 0, got {}", i, err);
+            assert!(err.is_finite(), "error indicator at element {} should be finite, got {}", i, err);
+        }
+    }
+
+    /// Stronger Dörfler marking parameter should mark more elements.
+    #[test]
+    fn ex15_dorfler_marking_is_monotone_in_threshold() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let field = synthetic_field(&mesh, 0.4, 0.6, 0.12);
+        let eta = zz_estimator(&mesh, &field);
+
+        let marked_01 = dorfler_mark(&eta, 0.1);
+        let marked_05 = dorfler_mark(&eta, 0.5);
+        let marked_09 = dorfler_mark(&eta, 0.9);
+
+        assert!(marked_01.len() <= marked_05.len(),
+            "marking with θ=0.1 should give ≤ elements than θ=0.5: {} vs {}",
+            marked_01.len(), marked_05.len());
+        assert!(marked_05.len() <= marked_09.len(),
+            "marking with θ=0.5 should give ≤ elements than θ=0.9: {} vs {}",
+            marked_05.len(), marked_09.len());
+    }
 }
 

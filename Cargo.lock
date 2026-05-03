@@ -525,8 +525,8 @@ dependencies = [
  "fem-core",
  "fem-linalg",
  "fem-mesh",
- "hdf5",
  "linger",
+ "rust-hdf5",
  "tempfile",
  "thiserror",
 ]
@@ -1000,6 +1000,7 @@ dependencies = [
 [[package]]
 name = "linger"
 version = "0.2.0"
+source = "git+https://github.com/rem-rs/linger.git#fcac6bacb6c5ebb51e0b7f6530e8e509ad87296f"
 dependencies = [
  "nalgebra 0.33.3",
  "nalgebra-sparse",
@@ -1399,7 +1400,7 @@ dependencies = [
 [[package]]
 name = "reed"
 version = "0.1.0"
-source = "git+https://github.com/rem-rs/reed.git?rev=e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f#e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f"
+source = "git+https://github.com/rem-rs/reed.git?rev=11eaaed88aaa4c9aebb3da10c8c10833824ab865#11eaaed88aaa4c9aebb3da10c8c10833824ab865"
 dependencies = [
  "reed-core",
  "reed-cpu",
@@ -1408,7 +1409,7 @@ dependencies = [
 [[package]]
 name = "reed-core"
 version = "0.1.0"
-source = "git+https://github.com/rem-rs/reed.git?rev=e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f#e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f"
+source = "git+https://github.com/rem-rs/reed.git?rev=11eaaed88aaa4c9aebb3da10c8c10833824ab865#11eaaed88aaa4c9aebb3da10c8c10833824ab865"
 dependencies = [
  "num-traits",
  "thiserror",
@@ -1417,7 +1418,7 @@ dependencies = [
 [[package]]
 name = "reed-cpu"
 version = "0.1.0"
-source = "git+https://github.com/rem-rs/reed.git?rev=e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f#e3766663c2292b2f9b4fb0bea8fd5a0186b4cd7f"
+source = "git+https://github.com/rem-rs/reed.git?rev=11eaaed88aaa4c9aebb3da10c8c10833824ab865#11eaaed88aaa4c9aebb3da10c8c10833824ab865"
 dependencies = [
  "num-traits",
  "reed-core",

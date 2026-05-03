@@ -20,7 +20,7 @@ pub mod submesh;
 pub mod topology;
 pub mod transformation;
 
-pub use amr::{refine_marked, refine_marked_with_tree, derefine_marked, DerefineTree, DerefineRecord, refine_nonconforming, refine_nonconforming_3d, refine_uniform, dorfler_mark, mark_for_derefinement, zz_estimator, kelly_estimator, prolongate_p1, restrict_to_coarse_p1, HangingNodeConstraint, HangingFaceConstraint, NCState, NCState3D};
+pub use amr::{refine_marked, refine_marked_with_tree, derefine_marked, DerefineTree, DerefineRecord, refine_nonconforming, refine_nonconforming_3d, refine_nonconforming_quad, refine_nonconforming_hex, refine_uniform, dorfler_mark, mark_for_derefinement, zz_estimator, kelly_estimator, prolongate_p1, restrict_to_coarse_p1, HangingNodeConstraint, HangingFaceConstraint, NCState, NCState3D, NCStateQuad};
 pub use boundary::{BoundaryTag, NamedAttributeRegistry, NamedAttributeSet, PhysicalGroup};
 pub use curved::CurvedMesh;
 pub use element_type::ElementType;

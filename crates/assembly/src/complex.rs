@@ -32,7 +32,7 @@
 //! let x = sys.solve_gmres(&f_re, &f_im, &cfg)?;
 //! ```
 
-use fem_linalg::{BlockMatrix, BlockVector, CooMatrix, CsrMatrix};
+use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_space::fe_space::FESpace;
 
 use crate::assembler::Assembler;
@@ -340,7 +340,7 @@ fn scale_csr(mat: &CsrMatrix<f64>, alpha: f64) -> CsrMatrix<f64> {
 }
 
 /// Zero CSR matrix with same sparsity/dimensions as `template`.
-fn zero_like(template: &CsrMatrix<f64>, n: usize) -> CsrMatrix<f64> {
+fn zero_like(_template: &CsrMatrix<f64>, n: usize) -> CsrMatrix<f64> {
     CsrMatrix {
         nrows:   n,
         ncols:   n,

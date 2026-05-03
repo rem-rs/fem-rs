@@ -7,7 +7,7 @@ edition = "2021"
 fem-core   = { path = "../core" }
 fem-linalg = { path = "../linalg" }
 nalgebra   = { workspace = true }
-linger     = { path = "../../vendor/linger", default-features = false, features = ["rayon"] }
+linger     = { git = "https://github.com/rem-rs/linger.git", default-features = false, features = ["rayon"] }
 log        = { workspace = true }
 thiserror  = { workspace = true }
 

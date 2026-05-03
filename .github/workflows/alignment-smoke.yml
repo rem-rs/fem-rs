@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [complex-coeff, named-attrs, named-attrs-io, electromagnetic-pml, electromagnetic-absorbing, backend-contract]
+        suite: [complex-coeff, complex-ex22, named-attrs, named-attrs-io, electromagnetic-pml, electromagnetic-absorbing, backend-contract]
 
     steps:
       - name: Checkout
@@ -44,21 +44,28 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run alignment smoke tests
-        shell: pwsh
+        shell: bash
         run: |
-          if ("${{ matrix.suite }}" -eq "complex-coeff") {
-            cargo test -p fem-assembly coefficient::tests::complex_ -- --nocapture
-          } elseif ("${{ matrix.suite }}" -eq "named-attrs") {
-            cargo test -p fem-mesh boundary::tests::named_attribute_ -- --nocapture
-          } elseif ("${{ matrix.suite }}" -eq "named-attrs-io") {
-            cargo test -p fem-io physical_names_to_named_attribute_registry_2d -- --nocapture
-            cargo test -p fem-io physical_names_same_name_across_dims_are_merged -- --nocapture
-            cargo run -p fem-examples --example mfem_ex39_named_attributes --quiet
-            cargo run -p fem-examples --example mfem_ex26_geom_mg --quiet
-          } elseif ("${{ matrix.suite }}" -eq "electromagnetic-pml") {
-            cargo run -p fem-examples --example mfem_ex3 --quiet -- --pml-like --pml-thickness 0.2 --sigma-max 2.0 --wx 1.0 --wy 1.5
-          } elseif ("${{ matrix.suite }}" -eq "electromagnetic-absorbing") {
-            cargo run -p fem-examples --example mfem_ex34 --quiet -- --anisotropic --gamma-x 1.0 --gamma-y 1.5
-          } else {
-            cargo test -p fem-assembly --features reed backend_resource_ -- --nocapture
-          }
+          set -euo pipefail
+          SUITE="${{ matrix.suite }}"
+          if [[ "$SUITE" == "complex-coeff" ]]; then
+            # ComplexCoeff/ComplexVectorCoeff trait tests
+            cargo test -p fem-assembly --lib -- complex --nocapture
+          elif [[ "$SUITE" == "complex-ex22" ]]; then
+            # ex22 time-harmonic Helmholtz (2×2 real-block strategy)
+            cargo test --example mfem_ex22 -- --nocapture
+            cargo run --example mfem_ex22 --quiet -- --n 16 --omega 2.0
+          elif [[ "$SUITE" == "named-attrs" ]]; then
+            cargo test -p fem-mesh --lib -- named_attribute --nocapture
+          elif [[ "$SUITE" == "named-attrs-io" ]]; then
+            cargo test -p fem-io --lib -- physical_names --nocapture
+            cargo run --example mfem_ex39_named_attributes --quiet
+            cargo run --example mfem_ex26_geom_mg --quiet
+          elif [[ "$SUITE" == "electromagnetic-pml" ]]; then
+            cargo run --example mfem_ex3 --quiet -- --pml-like --pml-thickness 0.2 --sigma-max 2.0 --wx 1.0 --wy 1.5
+          elif [[ "$SUITE" == "electromagnetic-absorbing" ]]; then
+            cargo run --example mfem_ex34 --quiet -- --anisotropic --gamma-x 1.0 --gamma-y 1.5
+          else
+            # backend-contract: fem-assembly compiled with reed feature
+            cargo test -p fem-assembly --features reed --lib -- backend_resource --nocapture
+          fi

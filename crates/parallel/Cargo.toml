@@ -11,7 +11,7 @@ fem-space    = { path = "../space" }
 fem-assembly = { path = "../assembly", features = ["parallel"] }
 fem-element  = { path = "../element" }
 fem-solver   = { path = "../solver" }
-linger       = { path = "../../vendor/linger", default-features = false, features = ["rayon"] }
+linger       = { git = "https://github.com/rem-rs/linger.git", default-features = false, features = ["rayon"] }
 fem-io       = { path = "../io", optional = true }
 log          = { workspace = true }
 bytemuck     = { workspace = true }

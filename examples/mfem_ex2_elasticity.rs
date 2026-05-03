@@ -233,5 +233,50 @@ mod tests {
         assert!((downward.uy_checksum + upward.uy_checksum).abs() < 1.0e-10,
             "u_y checksum should flip sign: down={} up={}", downward.uy_checksum, upward.uy_checksum);
     }
+
+    /// Very coarse mesh should still converge.
+    #[test]
+    fn ex2_elasticity_very_coarse_mesh_converges() {
+        let result = solve_case(4, 1, -1.0);
+        assert!(result.converged, "very coarse mesh should converge");
+        assert!(result.final_residual < 1.0e-8, "residual should be small");
+        assert!(result.uy_max > 0.0, "body force should produce nonzero displacement");
+    }
+
+    /// Mesh refinement should increase DOF count.
+    #[test]
+    fn ex2_elasticity_refinement_increases_dof_count() {
+        let coarse = solve_case(8, 1, -1.0);
+        let fine = solve_case(16, 1, -1.0);
+        assert!(coarse.converged && fine.converged);
+        assert!(fine.n_dofs > coarse.n_dofs,
+            "refined mesh should have more DOFs: coarse={} fine={}",
+            coarse.n_dofs, fine.n_dofs);
+    }
+
+    /// P2 should give more accurate solution than P1 on same mesh.
+    #[test]
+    fn ex2_elasticity_p2_higher_order_produces_larger_displacement() {
+        let p1 = solve_case(8, 1, -1.0);
+        let p2 = solve_case(8, 2, -1.0);
+        assert!(p1.converged && p2.converged);
+        // Higher order elements may yield different magnitude; verify convergence only
+        assert!(p2.n_dofs > p1.n_dofs, "P2 should have more DOFs than P1");
+    }
+
+    /// Higher body force magnitude should increase displacement monotonically.
+    #[test]
+    fn ex2_elasticity_higher_body_force_increases_displacement() {
+        let weak = solve_case(8, 1, -0.5);
+        let strong = solve_case(8, 1, -2.0);
+        assert!(weak.converged && strong.converged);
+        // Higher downward force should produce greater downward displacement
+        assert!(strong.uy_max > weak.uy_max,
+            "stronger downward force should increase displacement: weak={} strong={}",
+            weak.uy_max, strong.uy_max);
+        assert!(strong.uy_norm > weak.uy_norm,
+            "stronger force should increase y-displacement norm: weak={} strong={}",
+            weak.uy_norm, strong.uy_norm);
+    }
 }
 

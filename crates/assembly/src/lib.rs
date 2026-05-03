@@ -57,6 +57,8 @@ pub mod grid_function;
 pub mod postprocess;
 pub mod discrete_op;
 pub mod transfer;
+pub mod static_cond;
+pub mod iga;
 
 #[cfg(feature = "reed")]
 pub mod reed;
@@ -98,3 +100,4 @@ pub use transfer::{
     TransferError,
     TransferStats,
 };
+pub use static_cond::{StaticCondensation, GlobalBacksolve, condense_global};

@@ -235,5 +235,74 @@ mod tests {
         assert!(norm_rel_gap < 1.0e-12, "expected solution norm invariance under sign reversal, got {}", norm_rel_gap);
         assert!(error_rel_gap < 1.0e-12, "expected L2 error invariance under sign reversal, got {}", error_rel_gap);
     }
+
+    /// Very coarse mesh should still converge.
+    #[test]
+    fn ex1_poisson_very_coarse_mesh_converges() {
+        let result = solve_case(4, 1, 1.0);
+        assert!(result.converged, "even very coarse mesh should converge");
+        assert!(result.final_residual < 1.0e-7, "residual = {}", result.final_residual);
+    }
+
+    /// P1 convergence should be observed between n=8 and n=16.
+    #[test]
+    fn ex1_poisson_p1_shows_h_squared_convergence() {
+        let n8 = solve_case(8, 1, 1.0);
+        let n16 = solve_case(16, 1, 1.0);
+
+        assert!(n8.converged && n16.converged);
+        assert!(n16.l2_error < n8.l2_error);
+
+        // h² convergence: error ~ C·h²
+        // If h₁ = 2·h₂, then error₁ ≈ 4·error₂ (ratio ≈ 4)
+        let ratio = n8.l2_error / n16.l2_error;
+        assert!(
+            ratio > 2.5 && ratio < 5.5,
+            "P1 should show O(h²) convergence: expected ratio ~4, got {:.2}",
+            ratio
+        );
+    }
+
+    /// P2 convergence should be better than P1 on the same mesh.
+    #[test]
+    fn ex1_poisson_p2_converges_faster_than_p1() {
+        let n8_p1 = solve_case(8, 1, 1.0);
+        let n8_p2 = solve_case(8, 2, 1.0);
+
+        assert!(n8_p1.converged && n8_p2.converged);
+        // P2 should always be more accurate than P1 on same mesh
+        assert!(
+            n8_p2.l2_error < n8_p1.l2_error,
+            "P2 should be more accurate than P1 on same mesh: P1={:.3e} vs P2={:.3e}",
+            n8_p1.l2_error, n8_p2.l2_error
+        );
+
+        // P2 should show faster convergence rate
+        let n16_p1 = solve_case(16, 1, 1.0);
+        let n16_p2 = solve_case(16, 2, 1.0);
+        let ratio_p1 = n8_p1.l2_error / n16_p1.l2_error;
+        let ratio_p2 = n8_p2.l2_error / n16_p2.l2_error;
+        assert!(
+            ratio_p2 > ratio_p1,
+            "P2 should have higher convergence rate: P1 ratio={:.2} vs P2 ratio={:.2}",
+            ratio_p1, ratio_p2
+        );
+    }
+
+    /// Solution norm should scale roughly linearly with source scaling factor (superposition).
+    #[test]
+    fn ex1_poisson_solution_scales_linearly_with_source() {
+        let scale_1 = solve_case(8, 1, 1.0);
+        let scale_2 = solve_case(8, 1, 2.0);
+
+        assert!(scale_1.converged && scale_2.converged);
+        // If source f scales by 2, solution scales by 2: ||u(2f)|| ≈ 2·||u(f)||
+        let ratio = scale_2.solution_l2 / scale_1.solution_l2;
+        assert!(
+            (ratio - 2.0).abs() < 0.01,
+            "solution norm should scale linearly with source: expected ~2.0, got {:.3}",
+            ratio
+        );
+    }
 }
 

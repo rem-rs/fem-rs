@@ -7,7 +7,7 @@ edition = "2021"
 fem-core   = { path = "../core" }
 num-traits = { workspace = true }
 bytemuck   = { workspace = true }
-linger     = { path = "../../vendor/linger", optional = true }
+linger     = { git = "https://github.com/rem-rs/linger.git", optional = true }
 
 [dev-dependencies]
 # CooMatrix is used in CSR tests

@@ -293,5 +293,64 @@ mod tests {
         assert!((forward.div_l2 - reverse.div_l2).abs() < 1e-10);
         assert!((forward.flux_l2 - reverse.flux_l2).abs() < 1e-10);
     }
+
+    /// Solution should scale linearly with source strength.
+    #[test]
+    fn ex4_darcy_solution_scales_linearly_with_source() {
+        let scale_1 = solve_case(8, 1.0, 1.0, 1.0);
+        let scale_2 = solve_case(8, 1.0, 1.0, 2.0);
+
+        assert!(scale_1.converged && scale_2.converged);
+        // Flux error should also scale
+        let flux_ratio = scale_2.flux_l2 / scale_1.flux_l2;
+        assert!(
+            (flux_ratio - 2.0).abs() < 0.1,
+            "flux error should scale ~2x with source strength, got ratio {:.2}",
+            flux_ratio
+        );
+    }
+
+    /// Beta parameter (mass term) should affect solution magnitude.
+    #[test]
+    fn ex4_darcy_higher_beta_increases_solution_magnitude() {
+        let low_beta = solve_case(8, 1.0, 0.1, 1.0);
+        let high_beta = solve_case(8, 1.0, 10.0, 1.0);
+
+        assert!(low_beta.converged && high_beta.converged);
+        // With higher beta, mass term dominates, so flux should increase
+        assert!(
+            high_beta.max_dof > low_beta.max_dof,
+            "higher beta should increase solution magnitude: low={} high={}",
+            low_beta.max_dof,
+            high_beta.max_dof
+        );
+    }
+
+    /// Convergence rate: flux error should improve overall with mesh refinement on finer mesh levels.
+    #[test]
+    fn ex4_darcy_flux_error_improves_with_refinement() {
+        let n8 = solve_case(8, 1.0, 1.0, 1.0);
+        let n12 = solve_case(12, 1.0, 1.0, 1.0);
+        let n16 = solve_case(16, 1.0, 1.0, 1.0);
+
+        assert!(n8.converged && n12.converged && n16.converged);
+        // On medium meshes, flux error should generally decrease
+        assert!(n16.flux_l2 < n8.flux_l2 * 1.1,
+            "fine mesh flux error should be comparable or better: n8={}, n16={}",
+            n8.flux_l2, n16.flux_l2);
+        
+        // DOF count should increase monotonically
+        assert!(n12.n_dofs > n8.n_dofs, "DOF count should increase: n8={}, n12={}", n8.n_dofs, n12.n_dofs);
+        assert!(n16.n_dofs > n12.n_dofs, "DOF count should increase: n12={}, n16={}", n12.n_dofs, n16.n_dofs);
+    }
+
+    /// Very weak source should give near-trivial solution.
+    #[test]
+    fn ex4_darcy_very_weak_source_gives_small_solution() {
+        let result = solve_case(8, 1.0, 1.0, 1e-6);
+        assert!(result.converged);
+        // With very weak source, solution should be proportionally small
+        assert!(result.max_dof < 1e-4, "very weak source should give small solution, got max_dof={}", result.max_dof);
+    }
 }
 

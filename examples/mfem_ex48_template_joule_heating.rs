@@ -680,4 +680,37 @@ mod tests {
         a.max_coupling = 4;
         let _ = solve_joule_template(&a);
     }
+
+    /// Higher thermal conductivity kappa → faster heat diffusion →
+    /// lower steady-state temperature norm (same Joule source, more cooling).
+    #[test]
+    fn ex48_higher_kappa_gives_lower_temperature() {
+        let mut low_k = base_args();
+        low_k.kappa = 0.5;
+        let mut high_k = base_args();
+        high_k.kappa = 5.0;
+
+        let r_low  = solve_joule_template(&low_k);
+        let r_high = solve_joule_template(&high_k);
+        assert!(r_high.temp_norm < r_low.temp_norm,
+            "higher kappa should give lower temperature: kappa=0.5 -> {:.4e}, kappa=5.0 -> {:.4e}",
+            r_low.temp_norm, r_high.temp_norm);
+    }
+
+    /// Positive temperature coefficient sigma_beta: higher temperature increases
+    /// conductivity, which increases Joule power — runaway effect.
+    /// Therefore sigma_beta > 0 should yield MORE Joule power than sigma_beta = 0.
+    #[test]
+    fn ex48_positive_sigma_beta_increases_joule_power() {
+        let mut zero_fb = base_args();
+        zero_fb.sigma_beta = 0.0;
+        let mut pos_fb = base_args();
+        pos_fb.sigma_beta = 0.1;
+
+        let r_zero = solve_joule_template(&zero_fb);
+        let r_pos  = solve_joule_template(&pos_fb);
+        assert!(r_pos.joule_power >= r_zero.joule_power,
+            "positive sigma_beta should not decrease Joule power: zero={:.4e} pos={:.4e}",
+            r_zero.joule_power, r_pos.joule_power);
+    }
 }

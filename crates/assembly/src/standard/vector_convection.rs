@@ -28,7 +28,7 @@ pub struct VectorConvectionIntegrator<'a> {
     /// Global DOF vector for the convecting velocity (length = n_total_dofs).
     w_dofs: &'a [f64],
     /// Number of scalar DOFs per component in the VectorH1Space.
-    n_scalar: usize,
+    _n_scalar: usize,
 }
 
 impl<'a> VectorConvectionIntegrator<'a> {
@@ -37,7 +37,7 @@ impl<'a> VectorConvectionIntegrator<'a> {
     /// - `w_dofs` — the velocity DOF vector from the previous Picard iteration.
     /// - `n_scalar` — number of scalar DOFs per component (`VectorH1Space::n_scalar_dofs()`).
     pub fn new(w_dofs: &'a [f64], n_scalar: usize) -> Self {
-        VectorConvectionIntegrator { w_dofs, n_scalar }
+        VectorConvectionIntegrator { w_dofs, _n_scalar: n_scalar }
     }
 }
 

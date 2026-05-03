@@ -529,4 +529,33 @@ mod tests {
         a.steps = 2;
         let _ = solve_acoustics_structure_template(&a);
     }
+
+    /// Near-zero compliance (rigid structure) should give negligible interface displacement.
+    #[test]
+    fn ex50_near_rigid_structure_gives_negligible_displacement() {
+        let mut args = base_args();
+        args.structure_compliance = 1.0e-6;
+        let r = solve_acoustics_structure_template(&args);
+        assert!(r.max_abs_interface_displacement < 1.0e-4,
+            "expected near-zero displacement for rigid structure: {:.4e}",
+            r.max_abs_interface_displacement);
+    }
+
+    /// Higher drive amplitude should increase acoustic pressure and interface displacement.
+    #[test]
+    fn ex50_higher_drive_amplitude_increases_pressure_and_displacement() {
+        let mut low = base_args();
+        low.drive_amp = 0.1;
+        let mut high = base_args();
+        high.drive_amp = 0.8;
+
+        let r_low  = solve_acoustics_structure_template(&low);
+        let r_high = solve_acoustics_structure_template(&high);
+        assert!(r_high.final_pressure_norm > r_low.final_pressure_norm,
+            "higher drive should give more pressure: low={:.4e} high={:.4e}",
+            r_low.final_pressure_norm, r_high.final_pressure_norm);
+        assert!(r_high.max_abs_interface_displacement > r_low.max_abs_interface_displacement,
+            "higher drive should give more displacement: low={:.4e} high={:.4e}",
+            r_low.max_abs_interface_displacement, r_high.max_abs_interface_displacement);
+    }
 }

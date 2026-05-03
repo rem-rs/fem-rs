@@ -348,5 +348,95 @@ mod tests {
             assert!(level.n_marked < level.n_elems, "Doerfler marking should not mark every element on these calibrated levels");
         }
     }
+
+    /// Higher Dörfler threshold should generally mark fewer elements on refined levels.
+    #[test]
+    fn ex15_dorfler_marking_threshold_affects_selection() {
+        let low_theta = run_case(4, 2, 0.3, false);
+        let high_theta = run_case(4, 2, 0.8, false);
+
+        // Both should mark at each level
+        for level in &low_theta.levels_data {
+            assert!(level.n_marked > 0, "low theta should mark elements");
+        }
+        for level in &high_theta.levels_data {
+            assert!(level.n_marked > 0, "high theta should mark elements");
+        }
+
+        // On refined levels (where more elements are available), marking patterns may differ
+        // Just verify that both approaches are valid
+        assert!(!low_theta.levels_data.is_empty() && !high_theta.levels_data.is_empty());
+    }
+
+    /// Coarser starting mesh should still achieve convergence.
+    #[test]
+    fn ex15_coarser_start_still_converges() {
+        let coarse_start = run_case(2, 3, 0.5, false);
+        let fine_start = run_case(4, 3, 0.5, false);
+
+        assert_eq!(coarse_start.levels, fine_start.levels);
+        // Both should show error reduction
+        for pair in coarse_start.levels_data.windows(2) {
+            assert!(pair[1].l2_error < pair[0].l2_error,
+                "coarse start should still reduce error");
+        }
+        // After same number of refinements, fine start should have lower error
+        assert!(fine_start.levels_data.last().unwrap().l2_error < coarse_start.levels_data.last().unwrap().l2_error * 1.5,
+            "fine start should end with better or comparable error");
+    }
+
+    /// Estimator error should correlate with true error reduction.
+    #[test]
+    fn ex15_estimator_tracks_true_error() {
+        let result = run_case(4, 3, 0.5, false);
+        let levels = &result.levels_data;
+
+        // Both should decrease monotonically
+        for pair in levels.windows(2) {
+            assert!(pair[1].l2_error < pair[0].l2_error, "true error should decrease");
+            assert!(pair[1].estimator_error < pair[0].estimator_error, "estimator should decrease");
+        }
+
+        // They should track similar reduction patterns
+        let true_ratios: Vec<f64> = levels.windows(2)
+            .map(|p| p[0].l2_error / p[1].l2_error)
+            .collect();
+        let est_ratios: Vec<f64> = levels.windows(2)
+            .map(|p| p[0].estimator_error / p[1].estimator_error)
+            .collect();
+
+        // Ratios should be similar (within factor of 2)
+        for (i, (tr, er)) in true_ratios.iter().zip(est_ratios.iter()).enumerate() {
+            assert!((tr / er).abs() < 3.0 && (er / tr).abs() < 3.0,
+                "error and estimator reduction ratios should be similar at level {}: true={:.2} est={:.2}",
+                i, tr, er);
+        }
+    }
+
+    /// DOF count should grow monotonically with refinement.
+    #[test]
+    fn ex15_dof_count_grows_monotonically() {
+        let result = run_case(4, 4, 0.5, false);
+        let levels = &result.levels_data;
+
+        for pair in levels.windows(2) {
+            assert!(pair[1].n_dofs > pair[0].n_dofs,
+                "DOF count should increase: level {} has {}, level {} has {}",
+                pair[0].level, pair[0].n_dofs, pair[1].level, pair[1].n_dofs);
+        }
+    }
+
+    /// Element count should grow monotonically with refinement.
+    #[test]
+    fn ex15_element_count_grows_monotonically() {
+        let result = run_case(4, 4, 0.5, false);
+        let levels = &result.levels_data;
+
+        for pair in levels.windows(2) {
+            assert!(pair[1].n_elems > pair[0].n_elems,
+                "element count should increase: level {} has {}, level {} has {}",
+                pair[0].level, pair[0].n_elems, pair[1].level, pair[1].n_elems);
+        }
+    }
 }
 

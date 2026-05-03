@@ -1,3 +1,0 @@
-[submodule "vendor/linger"]
-	path = vendor/linger
-	url = https://github.com/rem-rs/linger.git

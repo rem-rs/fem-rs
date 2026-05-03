@@ -317,4 +317,27 @@ mod tests {
             "mesh-advection switch should alter solution for moving mesh, checksum diff={diff}"
         );
     }
+
+    /// Higher diffusivity kappa should cause faster energy decay.
+    #[test]
+    fn ex46_higher_kappa_causes_faster_decay() {
+        let low_kappa  = solve_case(10, 0.02, 0.2, 0.5, 0.0, 0.7, 15, false);
+        let high_kappa = solve_case(10, 0.02, 0.2, 2.0, 0.0, 0.7, 15, false);
+        assert!(
+            high_kappa.final_l2 < low_kappa.final_l2,
+            "higher kappa should give lower final L2: low={:.4e} high={:.4e}",
+            low_kappa.final_l2, high_kappa.final_l2
+        );
+    }
+
+    /// L2 norm must remain positive (no over-damping to exactly zero in finite steps).
+    #[test]
+    fn ex46_solution_remains_positive_and_finite() {
+        let r = solve_case(8, 0.01, 0.1, 1.0, 0.005, 0.7, 10, true);
+        assert!(r.final_l2 > 0.0, "solution collapsed to zero");
+        assert!(r.final_l2.is_finite(), "solution blew up");
+        for (i, &l2) in r.l2_history.iter().enumerate() {
+            assert!(l2.is_finite(), "L2 history NaN/inf at step {i}");
+        }
+    }
 }

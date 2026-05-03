@@ -136,10 +136,10 @@ fn face_moments(
         eval_monomials(pt[0], pt[1], pt[2], &mut mono);
         for j in 0..15 {
             let nflux = mono[j*3]*n_unit[0] + mono[j*3+1]*n_unit[1] + mono[j*3+2]*n_unit[2];
-            let dσ = w * jac_area; // area-weighted
-            v[row_start][j] += dσ * nflux;
-            v[row_start+1][j] += dσ * nflux * s;
-            v[row_start+2][j] += dσ * nflux * t;
+            let d_sigma = w * jac_area; // area-weighted
+            v[row_start][j] += d_sigma * nflux;
+            v[row_start+1][j] += d_sigma * nflux * s;
+            v[row_start+2][j] += d_sigma * nflux * t;
         }
     }
 }

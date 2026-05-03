@@ -228,5 +228,49 @@ mod tests {
         assert!((positive.p_checksum + negative.p_checksum).abs() < 1.0e-10,
             "p checksum should flip sign: positive={} negative={}", positive.p_checksum, negative.p_checksum);
     }
+
+    /// Very coarse mesh should still converge.
+    #[test]
+    fn ex5_mixed_darcy_very_coarse_mesh_converges() {
+        let result = solve_case(4, 1.0);
+        assert!(result.converged, "very coarse mesh should converge");
+        assert!(result.final_residual < 1.0e-6, "residual should be small");
+    }
+
+    /// Mesh refinement should increase DOF count.
+    #[test]
+    fn ex5_mixed_darcy_refinement_increases_dof_count() {
+        let coarse = solve_case(8, 1.0);
+        let fine = solve_case(12, 1.0);
+        assert!(coarse.converged && fine.converged);
+        assert!(fine.nu > coarse.nu, "refined mesh should have more u-DOFs");
+        assert!(fine.np > coarse.np, "refined mesh should have more p-DOFs");
+    }
+
+    /// Block residuals should be small for converged solution.
+    #[test]
+    fn ex5_mixed_darcy_block_residuals_stay_small() {
+        let result = solve_case(8, 1.0);
+        assert!(result.converged);
+        // Both u and p block residuals should be consistent with final residual
+        assert!(result.block_residual_u < 1.0e-6, "u block residual: {}", result.block_residual_u);
+        assert!(result.block_residual_p < 1.0e-6, "p block residual: {}", result.block_residual_p);
+        let total_block_res = (result.block_residual_u.powi(2) + result.block_residual_p.powi(2)).sqrt();
+        assert!(total_block_res < 1.0e-5, "total block residual: {}", total_block_res);
+    }
+
+    /// Higher forcing magnitude should increase solution norms monotonically.
+    #[test]
+    fn ex5_mixed_darcy_higher_forcing_increases_solution() {
+        let weak = solve_case(8, 0.5);
+        let strong = solve_case(8, 2.0);
+        assert!(weak.converged && strong.converged);
+        assert!(strong.u_norm > weak.u_norm,
+            "higher forcing should increase u norm: weak={} strong={}",
+            weak.u_norm, strong.u_norm);
+        assert!(strong.p_norm > weak.p_norm,
+            "higher forcing should increase p norm: weak={} strong={}",
+            weak.p_norm, strong.p_norm);
+    }
 }
 

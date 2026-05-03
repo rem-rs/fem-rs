@@ -1,27 +1,28 @@
-//! # HDF5 mesh + solution I/O
+//! # HDF5 mesh + solution I/O — pure-Rust backend (`rust-hdf5` crate)
 //!
 //! Feature-gated behind `features = ["hdf5"]`.
 //!
 //! ## File layout
 //! ```text
 //! /mesh/
-//!   dim          — scalar u32, spatial dimension
-//!   n_nodes      — scalar u64
-//!   n_elems      — scalar u64
-//!   n_faces      — scalar u64
-//!   coords       — [n_nodes × dim] f64, row-major
-//!   conn         — [n_elems × max_npe] i64, padded with -1 for mixed
-//!   conn_npe     — [n_elems] u32
-//!   elem_tags    — [n_elems] i32
-//!   elem_type    — string attr
-//!   face_conn    — [n_faces × max_npf] i64, padded with -1
-//!   face_tags    — [n_faces] i64
-//!   face_type    — string attr
+//!   dim          — scalar u64 dataset
+//!   n_nodes      — scalar u64 dataset
+//!   n_elems      — scalar u64 dataset
+//!   n_faces      — scalar u64 dataset
+//!   coords       — [n_nodes × dim] f64 dataset, row-major
+//!   conn         — [total] i64 dataset, padded with -1 for mixed
+//!   conn_npe     — [n_elems] u32 dataset
+//!   elem_tags    — [n_elems] i32 dataset
+//!   elem_type    — scalar u8 dataset (integer code)
+//!   face_conn    — [total] i64 dataset, padded with -1 for mixed
+//!   face_conn_npf — [n_faces] u32 dataset
+//!   face_tags    — [n_faces] i64 dataset
+//!   face_type    — scalar u8 dataset (integer code)
 //! /fields/<name>/
-//!   values       — [n_dofs] f64
-//!   space_type   — string attr
+//!   values       — [n_dofs] f64 dataset
+//!   space_type   — VarLenUnicode string attr on `values` dataset
 //! /metadata/
-//!   fem-rs_version — string attr
+//!   version_attr — VarLenUnicode string attr on `marker` dataset
 //! ```
 
 use std::path::Path;
@@ -29,10 +30,10 @@ use std::path::Path;
 use fem_core::NodeId;
 use fem_mesh::{BoundaryTag, ElementType, SimplexMesh};
 
-use std::str::FromStr;
-use hdf5::{
-    types::VarLenUnicode, File, H5Type, Result as H5Result,
-};
+use rust_hdf5::{H5File, H5Group, VarLenUnicode};
+
+/// Public result type for HDF5 I/O operations.
+pub type H5Result<T> = Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
 
 // ──────────────────────────────────────────────────────────────
 // Options
@@ -66,34 +67,34 @@ pub fn write_mesh_and_fields<const D: usize>(
     if options.overwrite && path.exists() {
         std::fs::remove_file(path).ok();
     }
+    let path_str = path.to_str().ok_or("non-UTF8 path")?;
 
-    let file = File::create(path)?;
-    let mg = file.create_group("mesh")?;
+    let file = H5File::create(path_str)?;
+    let root = file.root_group();
+    let mg = root.create_group("mesh")?;
 
-    // scalars
-    write_scalar(&mg, "dim", D as u32)?;
-    write_scalar(&mg, "n_nodes", mesh.n_nodes() as u64)?;
-    write_scalar(&mg, "n_elems", mesh.n_elems() as u64)?;
-    write_scalar(&mg, "n_faces", mesh.n_faces() as u64)?;
+    // scalars (stored as 1-element datasets)
+    write_scalar_u64(&mg, "dim", D as u64)?;
+    write_scalar_u64(&mg, "n_nodes", mesh.n_nodes() as u64)?;
+    write_scalar_u64(&mg, "n_elems", mesh.n_elems() as u64)?;
+    write_scalar_u64(&mg, "n_faces", mesh.n_faces() as u64)?;
+
+    // elem / face type codes
+    write_scalar_u8(&mg, "elem_type", elem_type_to_code(mesh.elem_type))?;
+    write_scalar_u8(&mg, "face_type", elem_type_to_code(mesh.face_type))?;
 
     // coordinates [n_nodes × D]
     let nn = mesh.n_nodes();
     let len = nn * D;
-    let dset = mg
-        .new_dataset::<f64>()
-        .shape((len,))
-        .create("coords")?;
-    dset.write(mesh.coords.as_slice())?;
+    let ds = mg.new_dataset::<f64>().shape(&[len]).create("coords")?;
+    ds.write_raw(mesh.coords.as_slice())?;
 
     // connectivity
     write_conn(&mg, mesh, options)?;
 
     // element tags
-    let dset = mg
-        .new_dataset::<i32>()
-        .shape((mesh.n_elems(),))
-        .create("elem_tags")?;
-    dset.write(mesh.elem_tags.as_slice())?;
+    let ds = mg.new_dataset::<i32>().shape(&[mesh.n_elems()]).create("elem_tags")?;
+    ds.write_raw(mesh.elem_tags.as_slice())?;
 
     // face connectivity
     write_face_conn(&mg, mesh, options)?;
@@ -101,57 +102,39 @@ pub fn write_mesh_and_fields<const D: usize>(
     // face tags
     let ft: Vec<i64> = mesh.face_tags.iter().map(|t| *t as i64).collect();
     if !ft.is_empty() {
-        let dset = mg
-            .new_dataset::<i64>()
-            .shape((mesh.n_faces(),))
-            .create("face_tags")?;
-        dset.write(ft.as_slice())?;
-    }
-
-    // element type as attribute (VarLenUnicode for portable read)
-    {
-        let s = VarLenUnicode::from_str(elem_type_str(mesh.elem_type)).unwrap();
-        let attr = mg.new_attr::<VarLenUnicode>().shape(()).create("elem_type")?;
-        attr.write_scalar(&s)?;
-    }
-    {
-        let s = VarLenUnicode::from_str(elem_type_str(mesh.face_type)).unwrap();
-        let attr = mg.new_attr::<VarLenUnicode>().shape(()).create("face_type")?;
-        attr.write_scalar(&s)?;
+        let ds = mg.new_dataset::<i64>().shape(&[mesh.n_faces()]).create("face_tags")?;
+        ds.write_raw(ft.as_slice())?;
     }
 
     // ── fields ──
     if !fields.is_empty() {
-        let fg = file.create_group("fields")?;
+        let fg = root.create_group("fields")?;
         for (name, values, space_type) in fields {
             let fgrp = fg.create_group(*name)?;
             let nd = values.len();
-            let dset = fgrp
+            let ds = fgrp
                 .new_dataset::<f64>()
-                .shape((nd,))
-                .chunk([(4096.min(nd)).max(1)])
-                .deflate(options.compression)
+                .shape(&[nd])
                 .create("values")?;
-            dset.write(values)?;
-            let s = VarLenUnicode::from_str(space_type).unwrap();
-            let attr = fgrp.new_attr::<VarLenUnicode>().shape(()).create("space_type")?;
-            attr.write_scalar(&s)?;
+            ds.write_raw(*values)?;
+            // space_type stored as VarLenUnicode attribute on the `values` dataset
+            let attr = ds.new_attr::<VarLenUnicode>().shape(()).create("space_type")?;
+            attr.write_string(space_type)?;
         }
     }
 
-    // metadata
-    let meta = file.create_group("metadata")?;
-    {
-        let s = VarLenUnicode::from_str(env!("CARGO_PKG_VERSION")).unwrap();
-        let attr = meta.new_attr::<VarLenUnicode>().shape(()).create("fem-rs_version")?;
-        attr.write_scalar(&s)?;
-    }
+    // metadata — store version as attr on a marker dataset
+    let meta = root.create_group("metadata")?;
+    let marker = meta.new_dataset::<u8>().shape(&[1]).create("marker")?;
+    marker.write_raw(&[0u8])?;
+    let attr = marker.new_attr::<VarLenUnicode>().shape(()).create("fem-rs_version")?;
+    attr.write_string(env!("CARGO_PKG_VERSION"))?;
 
     Ok(())
 }
 
 fn write_conn<const D: usize>(
-    mg: &hdf5::Group,
+    mg: &H5Group,
     mesh: &SimplexMesh<D>,
     _opts: &Hdf5WriteOptions,
 ) -> H5Result<()> {
@@ -190,23 +173,17 @@ fn write_conn<const D: usize>(
             (vec![npe_ref as u32; ne], p)
         };
 
-    let dset = mg
-        .new_dataset::<i64>()
-        .shape((conn_padded.len(),))
-        .create("conn")?;
-    dset.write(conn_padded.as_slice())?;
+    let ds = mg.new_dataset::<i64>().shape(&[conn_padded.len()]).create("conn")?;
+    ds.write_raw(conn_padded.as_slice())?;
 
-    let dset = mg
-        .new_dataset::<u32>()
-        .shape((ne,))
-        .create("conn_npe")?;
-    dset.write(npe_vec.as_slice())?;
+    let ds = mg.new_dataset::<u32>().shape(&[ne]).create("conn_npe")?;
+    ds.write_raw(npe_vec.as_slice())?;
 
     Ok(())
 }
 
 fn write_face_conn<const D: usize>(
-    mg: &hdf5::Group,
+    mg: &H5Group,
     mesh: &SimplexMesh<D>,
     _opts: &Hdf5WriteOptions,
 ) -> H5Result<()> {
@@ -245,17 +222,11 @@ fn write_face_conn<const D: usize>(
             (vec![npf_ref as u32; nf], p)
         };
 
-    let dset = mg
-        .new_dataset::<i64>()
-        .shape((face_padded.len(),))
-        .create("face_conn")?;
-    dset.write(face_padded.as_slice())?;
+    let ds = mg.new_dataset::<i64>().shape(&[face_padded.len()]).create("face_conn")?;
+    ds.write_raw(face_padded.as_slice())?;
 
-    let dset = mg
-        .new_dataset::<u32>()
-        .shape((nf,))
-        .create("face_conn_npf")?;
-    dset.write(npf_vec.as_slice())?;
+    let ds = mg.new_dataset::<u32>().shape(&[nf]).create("face_conn_npf")?;
+    ds.write_raw(npf_vec.as_slice())?;
 
     Ok(())
 }
@@ -267,41 +238,43 @@ fn write_face_conn<const D: usize>(
 pub fn read_mesh_and_fields<const D: usize>(
     path: impl AsRef<Path>,
 ) -> H5Result<(SimplexMesh<D>, Vec<(String, Vec<f64>, String)>)> {
-    let file = File::open(path)?;
-    let mg = file.group("mesh")?;
+    let path_str = path.as_ref().to_str().ok_or("non-UTF8 path")?;
+    let file = H5File::open(path_str)?;
+    let root = file.root_group();
 
     // dimension sanity check
-    let dim: u32 = read_scalar(&mg, "dim")?;
+    let dim = read_scalar_u64(&file, "mesh/dim")?;
     assert_eq!(dim as usize, D, "dimension mismatch");
 
-    let _n_nodes: u64 = read_scalar(&mg, "n_nodes")?;
-    let n_elems: u64 = read_scalar(&mg, "n_elems")?;
-    let n_faces: u64 = read_scalar(&mg, "n_faces")?;
+    let n_elems = read_scalar_u64(&file, "mesh/n_elems")? as usize;
+    let n_faces = read_scalar_u64(&file, "mesh/n_faces")? as usize;
 
     // coords
-    let coords: Vec<f64> = mg.dataset("coords")?.read_1d()?.to_vec();
+    let coords: Vec<f64> = file.dataset("mesh/coords")?.read_raw::<f64>()?;
 
     // element type
-    let elem_type = read_elem_type_attr(&mg, "elem_type")?;
+    let elem_type = read_elem_type_code(&file, "mesh/elem_type")?;
 
     // connectivity
-    let (conn, elem_types, elem_offsets) =
-        read_conn(&mg, n_elems as usize, elem_type)?;
+    let (conn, elem_types, elem_offsets) = read_conn(&file, "mesh", n_elems, elem_type)?;
 
     // element tags
-    let elem_tags: Vec<i32> = mg.dataset("elem_tags")?.read_1d()?.to_vec();
+    let elem_tags: Vec<i32> = file.dataset("mesh/elem_tags")?.read_raw::<i32>()?;
 
     // face type
-    let face_type = read_elem_type_attr(&mg, "face_type")?;
+    let face_type = read_elem_type_code(&file, "mesh/face_type")?;
 
     // face connectivity
     let (face_conn, face_types, face_offsets) =
-        read_face_conn(&mg, n_faces as usize, face_type)?;
+        read_face_conn(&file, "mesh", n_faces, face_type)?;
 
     // face tags
     let face_tags: Vec<BoundaryTag> = if n_faces > 0 {
-        let raw: Vec<i64> = mg.dataset("face_tags")?.read_1d()?.to_vec();
-        raw.into_iter().map(|t| t as BoundaryTag).collect()
+        file.dataset("mesh/face_tags")?
+            .read_raw::<i64>()?
+            .into_iter()
+            .map(|t| t as BoundaryTag)
+            .collect()
     } else {
         vec![]
     };
@@ -322,16 +295,13 @@ pub fn read_mesh_and_fields<const D: usize>(
 
     // fields
     let mut fields = Vec::new();
-    if let Ok(fg) = file.group("fields") {
-        for name in fg.member_names()? {
-            let fgrp = fg.group(&name)?;
-            let values: Vec<f64> = fgrp.dataset("values")?.read_1d()?.to_vec();
-            let space_type: String = {
-                let attr = fgrp.attr("space_type")?;
-                let v: VarLenUnicode = attr.as_reader().read_scalar()?;
-            let s = v.to_string();
-                s.to_string()
-            };
+    if let Ok(fg) = root.group("fields") {
+        for name in fg.group_names()? {
+            let values: Vec<f64> = file
+                .dataset(&format!("fields/{name}/values"))?
+                .read_raw::<f64>()?;
+            let ds = file.dataset(&format!("fields/{name}/values"))?;
+            let space_type = ds.attr("space_type")?.read_string()?;
             fields.push((name, values, space_type));
         }
     }
@@ -340,7 +310,8 @@ pub fn read_mesh_and_fields<const D: usize>(
 }
 
 fn read_conn(
-    mg: &hdf5::Group,
+    file: &H5File,
+    prefix: &str,
     n_elems: usize,
     default_type: ElementType,
 ) -> H5Result<(
@@ -351,8 +322,8 @@ fn read_conn(
     if n_elems == 0 {
         return Ok((vec![], None, None));
     }
-    let conn_raw: Vec<i64> = mg.dataset("conn")?.read_1d()?.to_vec();
-    let conn_npe: Vec<u32> = mg.dataset("conn_npe")?.read_1d()?.to_vec();
+    let conn_raw: Vec<i64> = file.dataset(&format!("{prefix}/conn"))?.read_raw::<i64>()?;
+    let conn_npe: Vec<u32> = file.dataset(&format!("{prefix}/conn_npe"))?.read_raw::<u32>()?;
 
     let first = conn_npe.first().copied().unwrap_or(0);
     let npe_ref = default_type.nodes_per_element() as u32;
@@ -366,8 +337,8 @@ fn read_conn(
         let mut types = Vec::with_capacity(n_elems);
         let mut offsets = Vec::with_capacity(n_elems + 1);
         offsets.push(0);
-        let dims = mg.dataset("conn")?.shape();
-        let stride = dims.get(1).copied().unwrap_or(0) as usize;
+        let dims = file.dataset(&format!("{prefix}/conn"))?.shape();
+        let stride = dims.get(1).copied().unwrap_or(0);
         for e in 0..n_elems {
             let npe = conn_npe[e] as usize;
             let base = e * stride;
@@ -382,7 +353,8 @@ fn read_conn(
 }
 
 fn read_face_conn(
-    mg: &hdf5::Group,
+    file: &H5File,
+    prefix: &str,
     n_faces: usize,
     default_type: ElementType,
 ) -> H5Result<(
@@ -393,8 +365,8 @@ fn read_face_conn(
     if n_faces == 0 {
         return Ok((vec![], None, None));
     }
-    let face_raw: Vec<i64> = mg.dataset("face_conn")?.read_1d()?.to_vec();
-    let face_npf: Vec<u32> = mg.dataset("face_conn_npf")?.read_1d()?.to_vec();
+    let face_raw: Vec<i64> = file.dataset(&format!("{prefix}/face_conn"))?.read_raw::<i64>()?;
+    let face_npf: Vec<u32> = file.dataset(&format!("{prefix}/face_conn_npf"))?.read_raw::<u32>()?;
 
     let first = face_npf.first().copied().unwrap_or(0);
     let npf_ref = default_type.nodes_per_element() as u32;
@@ -408,8 +380,8 @@ fn read_face_conn(
         let mut types = Vec::with_capacity(n_faces);
         let mut offsets = Vec::with_capacity(n_faces + 1);
         offsets.push(0);
-        let dims = mg.dataset("face_conn")?.shape();
-        let stride = dims.get(1).copied().unwrap_or(0) as usize;
+        let dims = file.dataset(&format!("{prefix}/face_conn"))?.shape();
+        let stride = dims.get(1).copied().unwrap_or(0);
         for f in 0..n_faces {
             let npf = face_npf[f] as usize;
             let base = f * stride;
@@ -427,44 +399,48 @@ fn read_face_conn(
 // Helpers
 // ──────────────────────────────────────────────────────────────
 
-fn elem_type_str(t: ElementType) -> &'static str {
+fn elem_type_to_code(t: ElementType) -> u8 {
     match t {
-        ElementType::Line2 => "Line2",
-        ElementType::Tri3   => "Tri3",
-        ElementType::Quad4  => "Quad4",
-        ElementType::Tet4   => "Tet4",
-        ElementType::Hex8   => "Hex8",
+        ElementType::Line2 => 1,
+        ElementType::Tri3  => 2,
+        ElementType::Quad4 => 3,
+        ElementType::Tet4  => 4,
+        ElementType::Hex8  => 5,
         other => panic!("unsupported element type for HDF5: {other:?}"),
     }
 }
 
-fn read_elem_type_attr(mg: &hdf5::Group, name: &str) -> H5Result<ElementType> {
-    let attr = mg.attr(name)?;
-    let v: VarLenUnicode = attr.as_reader().read_scalar()?;
-    let s = v.to_string();
-    Ok(match s.as_str() {
-        "Line2" => ElementType::Line2,
-        "Tri3"  => ElementType::Tri3,
-        "Quad4" => ElementType::Quad4,
-        "Tet4"  => ElementType::Tet4,
-        "Hex8"  => ElementType::Hex8,
-        other => panic!("unknown element type: {other}"),
-    })
+fn code_to_elem_type(code: u8) -> ElementType {
+    match code {
+        1 => ElementType::Line2,
+        2 => ElementType::Tri3,
+        3 => ElementType::Quad4,
+        4 => ElementType::Tet4,
+        5 => ElementType::Hex8,
+        other => panic!("unknown element type code: {other}"),
+    }
 }
 
-fn write_scalar<T: H5Type + Copy>(grp: &hdf5::Group, name: &str, val: T) -> H5Result<()> {
-    let dset = grp.new_dataset::<T>().shape((1,)).create(name)?;
-    dset.write(&[val])?;
+fn read_elem_type_code(file: &H5File, path: &str) -> H5Result<ElementType> {
+    let v = file.dataset(path)?.read_raw::<u8>()?;
+    Ok(code_to_elem_type(v[0]))
+}
+
+fn write_scalar_u8(grp: &H5Group, name: &str, val: u8) -> H5Result<()> {
+    let ds = grp.new_dataset::<u8>().shape(&[1]).create(name)?;
+    ds.write_raw(&[val])?;
     Ok(())
 }
 
-fn read_scalar<T: H5Type + Copy>(grp: &hdf5::Group, name: &str) -> H5Result<T> {
-    let dset = grp.dataset(name)?;
-    let data: Vec<T> = dset.as_reader().read_raw().map_err(|e| {
-        eprintln!("read_scalar({name}) failed: {e}");
-        e
-    })?;
-    Ok(data[0])
+fn write_scalar_u64(grp: &H5Group, name: &str, val: u64) -> H5Result<()> {
+    let ds = grp.new_dataset::<u64>().shape(&[1]).create(name)?;
+    ds.write_raw(&[val])?;
+    Ok(())
+}
+
+fn read_scalar_u64(file: &H5File, path: &str) -> H5Result<u64> {
+    let v = file.dataset(path)?.read_raw::<u64>()?;
+    Ok(v[0])
 }
 
 // ──────────────────────────────────────────────────────────────
