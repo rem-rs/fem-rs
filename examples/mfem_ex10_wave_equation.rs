@@ -285,5 +285,26 @@ mod tests {
         assert!(result.max_error < 1.0e-14, "expected zero max error, got {}", result.max_error);
         assert!(result.rms_error < 1.0e-14, "expected zero RMS error, got {}", result.rms_error);
     }
+
+    #[test]
+    fn ex10_wave_dof_count_matches_p1_h1_formula() {
+        for &n in &[8usize, 12usize, 16usize] {
+            let result = solve_case(n, 0.005, 0.1, 1.0, 1.0, false);
+            assert_eq!(result.n_dofs, (n + 1) * (n + 1));
+        }
+    }
+
+    #[test]
+    fn ex10_wave_zero_speed_keeps_initial_state() {
+        let result = solve_case(16, 0.005, 0.1, 0.0, 1.0, false);
+        assert!((result.exact_factor - 1.0).abs() < 1.0e-14,
+            "with c=0 exact factor should remain 1, got {}", result.exact_factor);
+        assert!(result.max_error < 1.0e-12,
+            "with c=0 solution should stay at initial state, max_error={}", result.max_error);
+        assert!(result.rms_error < 1.0e-12,
+            "with c=0 solution should stay at initial state, rms_error={}", result.rms_error);
+        assert!(result.max_amplitude > 0.5,
+            "with c=0 amplitude should remain nontrivial, got {}", result.max_amplitude);
+    }
 }
 

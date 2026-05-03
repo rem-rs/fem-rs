@@ -403,5 +403,27 @@ mod tests {
             neg_result.max_amp
         );
     }
+
+    #[test]
+    fn ex22_dof_count_matches_p1_h1_formula() {
+        for &n in &[6usize, 10usize, 14usize] {
+            let mut a = base_args();
+            a.n = n;
+            let r = solve_case(&a);
+            assert_eq!(r.n_dofs, (n + 1) * (n + 1));
+        }
+    }
+
+    #[test]
+    fn ex22_zero_left_drive_gives_near_zero_field() {
+        let mut a = base_args();
+        a.left_drive_amp = 0.0;
+        let r = solve_case(&a);
+        assert!(r.converged);
+        assert!(r.max_amp < 1.0e-12, "expected near-zero field amplitude, got {}", r.max_amp);
+        assert!(r.mean_left_amp < 1.0e-12, "left amplitude should be near zero, got {}", r.mean_left_amp);
+        assert!(r.mean_right_amp < 1.0e-12, "right amplitude should be near zero, got {}", r.mean_right_amp);
+        assert!(r.mean_interior_amp < 1.0e-12, "interior amplitude should be near zero, got {}", r.mean_interior_amp);
+    }
 }
 
