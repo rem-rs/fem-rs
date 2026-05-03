@@ -38,3 +38,8 @@ path = "amg.rs"
 name = "mesh"
 harness = false
 path = "mesh.rs"
+
+[[bench]]
+name = "micro"
+harness = false
+path = "micro.rs"

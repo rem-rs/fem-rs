@@ -66,13 +66,15 @@ fn adaptive_assembly_threshold() -> usize {
 #[cfg(feature = "parallel")]
 #[inline]
 pub fn assembly_parallel_min_elems() -> usize {
-    *ASSEMBLY_PARALLEL_MIN_ELEMS.get_or_init(|| {
+    match ASSEMBLY_PARALLEL_MIN_ELEMS.get_or_init(|| {
         std::env::var(FEM_ASSEMBLY_PARALLEL_MIN_ELEMS)
             .ok()
             .and_then(|s| s.parse().ok())
             .filter(|&n| n > 0)
-    })
-    .unwrap_or_else(adaptive_assembly_threshold)
+    }) {
+        Some(threshold) => *threshold,
+        None => adaptive_assembly_threshold(),
+    }
 }
 
 // ─── Reference element factory ───────────────────────────────────────────────
