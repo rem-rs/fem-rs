@@ -21,6 +21,8 @@ use rayon::prelude::*;
 use std::sync::OnceLock;
 
 /// Environment variable for [`assembly_parallel_min_elems`].
+/// 
+/// If set, overrides adaptive thresholding. Format: positive integer.
 #[cfg(feature = "parallel")]
 pub const FEM_ASSEMBLY_PARALLEL_MIN_ELEMS: &str = "FEM_ASSEMBLY_PARALLEL_MIN_ELEMS";
 
@@ -28,12 +30,39 @@ pub const FEM_ASSEMBLY_PARALLEL_MIN_ELEMS: &str = "FEM_ASSEMBLY_PARALLEL_MIN_ELE
 const DEFAULT_PARALLEL_MIN_ELEMS: usize = 64;
 
 #[cfg(feature = "parallel")]
-static ASSEMBLY_PARALLEL_MIN_ELEMS: OnceLock<usize> = OnceLock::new();
+static ASSEMBLY_PARALLEL_MIN_ELEMS: OnceLock<Option<usize>> = OnceLock::new();
+
+/// Compute adaptive assembly parallelization threshold based on thread count.
+/// 
+/// Returns minimum number of elements required before Rayon parallelization.
+/// Adaptive formula: `max(8, 64 >> log2(n_threads).saturating_sub(6))`
+/// 
+/// - 1-2 threads: threshold = 64 (serial-friendly, parallelize only large problems)
+/// - 4 threads:   threshold = 64 (weak parallelization)
+/// - 8 threads:   threshold = 32 (moderate parallelization)
+/// - 16 threads:  threshold = 16 (aggressive parallelization)
+/// - 32+ threads: threshold = 8  (always parallelize, minimum granularity)
+/// 
+/// Override via environment variable [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`] to disable
+/// adaptive logic and use a fixed threshold instead.
+#[cfg(feature = "parallel")]
+fn adaptive_assembly_threshold() -> usize {
+    let n_threads = rayon::current_num_threads();
+    let log_threads = (n_threads as f64).log2().ceil() as usize;
+    let shift = log_threads.saturating_sub(6);
+    let threshold = 64 >> shift;
+    threshold.max(8)
+}
 
 /// Minimum number of volume elements before using Rayon for domain assembly.
 ///
-/// Default `64`. Override with [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`] (positive integer;
-/// invalid values fall back to the default).
+/// Supports two modes:
+/// 1. **Adaptive (default)**: threshold = `max(8, 64 >> log2(n_threads).saturating_sub(6))`
+///    Automatically adjusts based on available Rayon threads.
+/// 2. **Fixed override**: set [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`] environment variable
+///    to a positive integer to use fixed threshold instead of adaptive logic.
+/// 
+/// Computed once per process (lazy static); subsequent calls are O(1).
 #[cfg(feature = "parallel")]
 #[inline]
 pub fn assembly_parallel_min_elems() -> usize {
@@ -42,8 +71,8 @@ pub fn assembly_parallel_min_elems() -> usize {
             .ok()
             .and_then(|s| s.parse().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_PARALLEL_MIN_ELEMS)
     })
+    .unwrap_or_else(adaptive_assembly_threshold)
 }
 
 // ─── Reference element factory ───────────────────────────────────────────────

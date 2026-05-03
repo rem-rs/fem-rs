@@ -1,3 +1,14 @@
+[build]
+# Enable SIMD optimizations for native targets
+# Note: wasm builds will ignore these flags (x86_64 targets only)
+rustflags = ["-C", "link-arg=-ffast-math", "-C", "inline-threshold=1000"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-feature=+avx2,+fma", "-C", "link-arg=-ffast-math", "-C", "inline-threshold=1000"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=+avx2,+fma", "-C", "link-arg=-ffast-math", "-C", "inline-threshold=1000"]
+
 [alias]
 wasm-build = "build --target wasm32-unknown-unknown -p wasm --no-default-features"
 check-all  = "check --workspace --all-features"
