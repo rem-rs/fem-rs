@@ -27,6 +27,14 @@ impl<T: Scalar> CooMatrix<T> {
         self.vals.reserve(n);
     }
 
+    /// Clear all entries without releasing allocated memory (for reuse).
+    #[inline]
+    pub fn clear(&mut self) {
+        self.rows.clear();
+        self.cols.clear();
+        self.vals.clear();
+    }
+
     /// Add a scalar contribution `val` at position `(row, col)`.
     #[inline]
     pub fn add(&mut self, row: usize, col: usize, val: T) {

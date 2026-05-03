@@ -20,6 +20,9 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 use std::sync::OnceLock;
 
+#[cfg(feature = "parallel")]
+use std::cell::RefCell;
+
 /// Environment variable for [`assembly_parallel_min_elems`].
 /// 
 /// If set, overrides adaptive thresholding. Format: positive integer.
@@ -371,14 +374,36 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
 ) -> CsrMatrix<f64> {
     let mesh = space.mesh();
     let n_dofs = space.n_dofs();
+
+    // Thread-local pool: one CooMatrix per Rayon thread, reused across fold iterations.
+    // This reduces allocations from O(n_elements) to O(n_threads).
+    thread_local! {
+        static TL_COO: RefCell<Option<CooMatrix<f64>>> = RefCell::new(None);
+    }
+
     let merged = mesh
         .elem_iter()
         .into_par_iter()
-        .map(|e| {
-            let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
-            accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut local);
-            local
-        })
+        .fold(
+            || {
+                // Acquire or create a per-thread CooMatrix.
+                TL_COO.with(|tl| {
+                    let mut slot = tl.borrow_mut();
+                    if let Some(mut coo) = slot.take() {
+                        coo.nrows = n_dofs;
+                        coo.ncols = n_dofs;
+                        coo.clear();
+                        coo
+                    } else {
+                        CooMatrix::<f64>::new(n_dofs, n_dofs)
+                    }
+                })
+            },
+            |mut local, e| {
+                accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut local);
+                local
+            },
+        )
         .reduce(
             || CooMatrix::<f64>::new(n_dofs, n_dofs),
             |mut a, b| {
