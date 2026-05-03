@@ -38,13 +38,14 @@ static ASSEMBLY_PARALLEL_MIN_ELEMS: OnceLock<Option<usize>> = OnceLock::new();
 /// Compute adaptive assembly parallelization threshold based on thread count.
 /// 
 /// Returns minimum number of elements required before Rayon parallelization.
-/// Adaptive formula: `max(8, 64 >> log2(n_threads).saturating_sub(6))`
+/// Calibrated so that parallel wins at ~8× thread count × work-per-element overhead.
 /// 
-/// - 1-2 threads: threshold = 64 (serial-friendly, parallelize only large problems)
-/// - 4 threads:   threshold = 64 (weak parallelization)
-/// - 8 threads:   threshold = 32 (moderate parallelization)
-/// - 16 threads:  threshold = 16 (aggressive parallelization)
-/// - 32+ threads: threshold = 8  (always parallelize, minimum granularity)
+/// Formula: `max(8192, 65536 >> log2(n_threads).saturating_sub(1))`
+/// 
+/// - 1-2 threads:  threshold = 65536 (essentially always serial)
+/// - 4 threads:    threshold = 32768
+/// - 8 threads:    threshold = 16384
+/// - 16+ threads:  threshold = 8192
 /// 
 /// Override via environment variable [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`] to disable
 /// adaptive logic and use a fixed threshold instead.
@@ -52,16 +53,15 @@ static ASSEMBLY_PARALLEL_MIN_ELEMS: OnceLock<Option<usize>> = OnceLock::new();
 fn adaptive_assembly_threshold() -> usize {
     let n_threads = rayon::current_num_threads();
     let log_threads = (n_threads as f64).log2().ceil() as usize;
-    let shift = log_threads.saturating_sub(6);
-    let threshold = 64 >> shift;
-    threshold.max(8)
+    let shift = log_threads.saturating_sub(1);
+    let threshold = 65536usize >> shift;
+    threshold.max(8192)
 }
 
 /// Minimum number of volume elements before using Rayon for domain assembly.
 ///
 /// Supports two modes:
-/// 1. **Adaptive (default)**: threshold = `max(8, 64 >> log2(n_threads).saturating_sub(6))`
-///    Automatically adjusts based on available Rayon threads.
+/// 1. **Adaptive (default)**: threshold calibrated by thread count (see [`adaptive_assembly_threshold`])
 /// 2. **Fixed override**: set [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`] environment variable
 ///    to a positive integer to use fixed threshold instead of adaptive logic.
 /// 
@@ -381,12 +381,10 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
         static TL_COO: RefCell<Option<CooMatrix<f64>>> = RefCell::new(None);
     }
 
-    let merged = mesh
-        .elem_iter()
+    mesh.elem_iter()
         .into_par_iter()
         .fold(
             || {
-                // Acquire or create a per-thread CooMatrix.
                 TL_COO.with(|tl| {
                     let mut slot = tl.borrow_mut();
                     if let Some(mut coo) = slot.take() {
@@ -410,8 +408,8 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
                 a.append(b);
                 a
             },
-        );
-    merged.into_csr()
+        )
+        .into_csr()
 }
 
 #[cfg(feature = "parallel")]

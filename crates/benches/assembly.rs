@@ -5,8 +5,8 @@ use fem_space::H1Space;
 
 fn bench_assembly(c: &mut Criterion) {
     let mut group = c.benchmark_group("assembly");
-
-    for n in [8, 16, 32].iter() {
+    // n=8..32: serial range; n=64..128: parallel benefit visible (~8k-32k elements)
+    for n in [8, 16, 32, 64, 128].iter() {
         group.bench_with_input(BenchmarkId::new("poisson_p1", n), n, |b, n| {
             let mesh = SimplexMesh::<2>::unit_square_tri(*n);
             let space = H1Space::new(mesh, 1);
