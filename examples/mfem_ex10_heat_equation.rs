@@ -426,5 +426,45 @@ mod tests {
             expected_decay);
         assert!(result.rms_error < 1.0e-2, "RMS error too large after correcting final-time comparison: {}", result.rms_error);
     }
+
+    #[test]
+    fn ex10_heat_higher_kappa_decays_faster() {
+        // For exact solution e^{-2π²κt}: larger κ → smaller solution norm at same T
+        let kappa1 = solve_case(8, 0.01, 0.1, 1.0, "sdirk2", 1.0);
+        let kappa2 = solve_case(8, 0.01, 0.1, 2.0, "sdirk2", 1.0);
+        assert!(kappa2.solution_norm < kappa1.solution_norm,
+            "κ=2 should decay faster: norm(κ=1)={:.4e} norm(κ=2)={:.4e}",
+            kappa1.solution_norm, kappa2.solution_norm);
+        // Exact ratio: exp(-2π²κ₂T) / exp(-2π²κ₁T) = exp(-2π²(κ₂-κ₁)T)
+        let expected_ratio = (-2.0 * PI * PI * (2.0 - 1.0) * kappa1.final_time).exp();
+        let actual_ratio = kappa2.solution_norm / kappa1.solution_norm;
+        assert!((actual_ratio - expected_ratio).abs() < 0.20 * expected_ratio,
+            "decay ratio mismatch: actual={:.4e} expected={:.4e}", actual_ratio, expected_ratio);
+    }
+
+    #[test]
+    fn ex10_heat_temporal_refinement_reduces_error() {
+        // Halving dt should reduce the temporal discretisation error
+        let coarse_dt = solve_case(8, 0.02, 0.1, 1.0, "sdirk2", 1.0);
+        let fine_dt   = solve_case(8, 0.01, 0.1, 1.0, "sdirk2", 1.0);
+        assert!(fine_dt.rms_error <= coarse_dt.rms_error,
+            "finer dt should not increase RMS error: coarse_dt={:.3e} fine_dt={:.3e}",
+            coarse_dt.rms_error, fine_dt.rms_error);
+    }
+
+    #[test]
+    fn ex10_heat_rk4_achieves_good_accuracy_with_fine_dt() {
+        // RK4 with sufficiently small dt should give small error on smooth problem
+        let result = solve_case(8, 0.001, 0.1, 1.0, "rk4", 1.0);
+        assert_eq!(result.method, "rk4");
+        // n=8 mesh: spatial error dominates; with dt=0.001 temporal error is negligible
+        assert!(result.rms_error < 8.0e-3,
+            "RK4 with dt=0.001 should be accurate: rms_error={:.3e}", result.rms_error);
+        // RK4 should not be significantly worse than sdirk2 at same spatial resolution
+        let sdirk2 = solve_case(8, 0.01, 0.1, 1.0, "sdirk2", 1.0);
+        assert!(result.rms_error <= sdirk2.rms_error * 1.5,
+            "RK4 should be comparable to sdirk2: rk4={:.3e} sdirk2={:.3e}",
+            result.rms_error, sdirk2.rms_error);
+    }
 }
 
