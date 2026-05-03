@@ -85,4 +85,56 @@ mod tests {
             assert!(titles.insert(title), "duplicate template title: {title}");
         }
     }
+
+    #[test]
+    fn ex47_coupling_style_distribution_matches_expected_profile() {
+        let cat = builtin_template_catalog();
+        let monolithic = cat
+            .iter()
+            .filter(|s| s.default_coupling_style == TemplateCouplingStyle::Monolithic)
+            .count();
+        let partitioned = cat
+            .iter()
+            .filter(|s| s.default_coupling_style == TemplateCouplingStyle::Partitioned)
+            .count();
+        let hybrid = cat
+            .iter()
+            .filter(|s| s.default_coupling_style == TemplateCouplingStyle::Hybrid)
+            .count();
+
+        assert_eq!(partitioned, 1);
+        assert_eq!(monolithic + partitioned + hybrid, cat.len());
+        assert!(hybrid >= 1);
+    }
+
+    #[test]
+    fn ex47_default_solver_and_integrator_are_non_empty() {
+        for spec in builtin_template_catalog() {
+            assert!(!spec.default_time_integrator.trim().is_empty(),
+                "{} has empty default_time_integrator", spec.template.id());
+            assert!(!spec.default_nonlinear_solver.trim().is_empty(),
+                "{} has empty default_nonlinear_solver", spec.template.id());
+        }
+    }
+
+    #[test]
+    fn ex47_coupling_edges_reference_known_fields() {
+        for spec in builtin_template_catalog() {
+            for edge in spec.coupling_edges {
+                let parts: Vec<&str> = edge.split("->").map(|s| s.trim()).collect();
+                assert!(parts.len() >= 2, "invalid edge format in {}: {edge}", spec.template.id());
+                assert!(parts.iter().all(|p| !p.is_empty()),
+                    "edge contains empty token in {}: {edge}", spec.template.id());
+            }
+        }
+    }
+
+    #[test]
+    fn ex47_template_notes_are_present_and_descriptive() {
+        for spec in builtin_template_catalog() {
+            let note = spec.notes.trim();
+            assert!(!note.is_empty(), "{} has empty notes", spec.template.id());
+            assert!(note.len() >= 20, "{} notes are too short: '{}'", spec.template.id(), note);
+        }
+    }
 }

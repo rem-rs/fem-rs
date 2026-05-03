@@ -340,4 +340,51 @@ mod tests {
             assert!(l2.is_finite(), "L2 history NaN/inf at step {i}");
         }
     }
+
+    #[test]
+    fn ex46_dof_count_matches_p1_h1_formula() {
+        for &n in &[6usize, 10usize, 14usize] {
+            let r = solve_case(n, 0.02, 0.2, 1.0, 0.0, 0.7, 15, false);
+            assert_eq!(r.n_dofs, (n + 1) * (n + 1));
+        }
+    }
+
+    #[test]
+    fn ex46_zero_final_time_keeps_initial_state() {
+        let r = solve_case(8, 0.01, 0.0, 1.0, 0.01, 0.7, 10, true);
+        assert!((r.final_time - 0.0).abs() < 1.0e-14);
+        assert_eq!(r.l2_history.len(), 1);
+        let initial_l2 = r.l2_history[0];
+        assert!((r.final_l2 - initial_l2).abs() < 1.0e-14,
+            "zero-time integration should be no-op: initial={} final={}",
+            initial_l2,
+            r.final_l2);
+    }
+
+    #[test]
+    fn ex46_smaller_dt_gives_consistent_solution() {
+        let coarse = solve_case(10, 0.02, 0.2, 1.0, 0.0, 0.7, 15, false);
+        let fine = solve_case(10, 0.01, 0.2, 1.0, 0.0, 0.7, 15, false);
+        let rel = (fine.final_l2 - coarse.final_l2).abs() / fine.final_l2.max(1.0e-300);
+        assert!(fine.final_l2 <= coarse.final_l2,
+            "smaller dt should not increase final L2 in this implicit diffusion regime: coarse={} fine={}",
+            coarse.final_l2,
+            fine.final_l2);
+        assert!(rel < 0.5,
+            "time-step refinement drift too large: coarse={} fine={} rel={}",
+            coarse.final_l2,
+            fine.final_l2,
+            rel);
+    }
+
+    #[test]
+    fn ex46_amp_zero_makes_advection_toggle_equivalent() {
+        let no_adv = solve_case(10, 0.02, 0.2, 1.0, 0.0, 0.7, 15, false);
+        let with_adv = solve_case(10, 0.02, 0.2, 1.0, 0.0, 0.7, 15, true);
+        assert!((with_adv.final_checksum - no_adv.final_checksum).abs() < 1.0e-10,
+            "with amp=0, advection toggle should be equivalent: no_adv={} with_adv={}",
+            no_adv.final_checksum,
+            with_adv.final_checksum);
+        assert!((with_adv.final_l2 - no_adv.final_l2).abs() < 1.0e-12);
+    }
 }

@@ -303,4 +303,113 @@ mod tests {
             "field norm grew unexpectedly: initial={initial_norm:.4e} final={final_norm:.4e}");
         assert!(final_norm > 0.0, "field collapsed to zero");
     }
+
+    #[test]
+    fn ex45_dof_count_matches_p1_h1_formula_for_multiple_meshes() {
+        for &n in &[6usize, 10usize, 14usize] {
+            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let space = H1Space::new(mesh, 1);
+            assert_eq!(space.n_dofs(), (n + 1) * (n + 1));
+        }
+    }
+
+    #[test]
+    fn ex45_top_boundary_nodes_are_detected_for_motion() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let top_nodes: Vec<u32> = all_boundary_nodes(&mesh)
+            .into_iter()
+            .filter(|&n| (mesh.coords_of(n)[1] - 1.0).abs() < 1.0e-12)
+            .collect();
+        assert!(!top_nodes.is_empty(), "expected non-empty top boundary node set");
+
+        let n_top = top_nodes.len();
+        let expected_min = 13usize;
+        assert!(n_top >= expected_min,
+            "top boundary should have at least n+1 nodes, got {n_top}");
+    }
+
+    #[test]
+    fn ex45_stronger_motion_still_preserves_integral_after_correction() {
+        let args = Args { n: 10, steps: 5, amp: 0.02, omega: 0.7, smooth_iters: 20 };
+
+        let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mut values = H1Space::new(mesh.clone(), 1).interpolate(&|x| {
+            (PI * x[0]).sin() * (PI * x[1]).sin()
+        });
+
+        let mut max_abs_int_err = 0.0_f64;
+        for step in 1..=args.steps {
+            let t = step as f64 / args.steps as f64;
+            let old_mesh = mesh.clone();
+            let top_nodes: Vec<u32> = all_boundary_nodes(&mesh)
+                .into_iter()
+                .filter(|&n| (mesh.coords_of(n)[1] - 1.0).abs() < 1.0e-12)
+                .collect();
+
+            let shift = args.amp * (2.0 * PI * t).sin();
+            apply_node_displacement(&mut mesh, &top_nodes, |p| {
+                [shift * (PI * p[0]).sin().powi(2), 0.0]
+            });
+
+            let fixed = all_boundary_nodes(&mesh);
+            let _ = laplacian_smooth_2d(
+                &mut mesh,
+                &fixed,
+                MeshMotionConfig {
+                    omega: args.omega,
+                    max_iters: args.smooth_iters,
+                    tol: 1.0e-12,
+                },
+            );
+
+            let src = H1Space::new(old_mesh, 1);
+            let dst = H1Space::new(mesh.clone(), 1);
+            let (v_new, _stats, report) = transfer_h1_p1_nonmatching_l2_projection_conservative(
+                &src,
+                values.as_slice(),
+                &dst,
+                1.0e-12,
+                4,
+            )
+            .expect("conservative transfer should succeed");
+            max_abs_int_err = max_abs_int_err.max(report.absolute_integral_error_after);
+            values = Vector::from_vec(v_new);
+        }
+
+        assert!(max_abs_int_err < 5.0e-10,
+            "integral correction drift too large under stronger motion: {max_abs_int_err}");
+    }
+
+    #[test]
+    fn ex45_smoothing_parameter_variation_keeps_mesh_valid() {
+        for &omega in &[0.3_f64, 0.7_f64, 0.9_f64] {
+            let mut mesh = SimplexMesh::<2>::unit_square_tri(10);
+            let top_nodes: Vec<u32> = all_boundary_nodes(&mesh)
+                .into_iter()
+                .filter(|&n| (mesh.coords_of(n)[1] - 1.0).abs() < 1.0e-12)
+                .collect();
+            apply_node_displacement(&mut mesh, &top_nodes, |p| {
+                [0.01 * (PI * p[0]).sin().powi(2), 0.0]
+            });
+            let fixed = all_boundary_nodes(&mesh);
+            let _ = laplacian_smooth_2d(
+                &mut mesh,
+                &fixed,
+                MeshMotionConfig {
+                    omega,
+                    max_iters: 25,
+                    tol: 1.0e-12,
+                },
+            );
+
+            for e in 0..mesh.n_elems() as u32 {
+                let nodes = mesh.elem_nodes(e);
+                let p0 = mesh.coords_of(nodes[0]);
+                let p1 = mesh.coords_of(nodes[1]);
+                let p2 = mesh.coords_of(nodes[2]);
+                let area = 0.5 * ((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]));
+                assert!(area > 0.0, "omega={omega}: inverted element {e}, area={area:.6e}");
+            }
+        }
+    }
 }
