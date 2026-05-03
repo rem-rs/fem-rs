@@ -1,6 +1,9 @@
 use fem_core::Scalar;
 use crate::csr::CsrMatrix;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Coordinate-format sparse matrix (accumulates (row, col, value) triples).
 ///
 /// Used during FEM assembly to collect element contributions before converting
@@ -81,64 +84,75 @@ impl<T: Scalar> CooMatrix<T> {
     /// Convert to CSR, summing duplicate entries.
     ///
     /// Sort by (row, col), then merge duplicates.
+    /// Uses packed u64 keys `(row << 32 | col)` for cache-friendly sorting.
+    /// For large matrices (≥ 16k nnz) with the `parallel` feature, uses Rayon
+    /// parallel sort for additional speedup.
     pub fn into_csr(mut self) -> CsrMatrix<T> {
         let nnz = self.vals.len();
         if nnz == 0 {
             return CsrMatrix::new_empty(self.nrows, self.ncols);
         }
 
-        // Sort by (row, col)
-        let mut idx: Vec<usize> = (0..nnz).collect();
-        idx.sort_unstable_by_key(|&i| (self.rows[i], self.cols[i]));
+        // Pack (row, col) into u64 keys for cache-friendly comparison.
+        // Building AoS (key, val) avoids the scattered access of indirect indexing.
+        let mut triplets: Vec<(u64, T)> = self.rows.iter()
+            .zip(self.cols.iter())
+            .zip(self.vals.drain(..))
+            .map(|((&r, &c), v)| (((r as u64) << 32) | c as u64, v))
+            .collect();
+        // Free source buffers early.
+        self.rows = Vec::new();
+        self.cols = Vec::new();
+
+        // Sort: use parallel sort for large inputs when rayon is available.
+        #[cfg(feature = "parallel")]
+        if nnz >= 16_384 {
+            triplets.par_sort_unstable_by_key(|&(k, _)| k);
+        } else {
+            triplets.sort_unstable_by_key(|&(k, _)| k);
+        }
+        #[cfg(not(feature = "parallel"))]
+        triplets.sort_unstable_by_key(|&(k, _)| k);
 
         let mut row_ptr = vec![0usize; self.nrows + 1];
         let mut col_idx: Vec<u32> = Vec::with_capacity(nnz);
         let mut values: Vec<T>    = Vec::with_capacity(nnz);
 
-        let mut prev: Option<(u32, u32)> = None;
+        let mut prev_key: Option<u64> = None;
 
-        for &i in &idx {
-            let r = self.rows[i] as usize;
-            let c = self.cols[i] as usize;
-            let v = self.vals[i];
+        for (key, v) in triplets {
+            let r = (key >> 32) as usize;
+            let c = (key & 0xFFFF_FFFF) as usize;
 
-            assert!(r < self.nrows, "COO row index out of bounds: row={} nrows={}", r, self.nrows);
-            assert!(c < self.ncols, "COO col index out of bounds: col={} ncols={}", c, self.ncols);
+            debug_assert!(r < self.nrows, "COO row index out of bounds: row={} nrows={}", r, self.nrows);
+            debug_assert!(c < self.ncols, "COO col index out of bounds: col={} ncols={}", c, self.ncols);
 
-            let r_u32 = r as u32;
-            let c_u32 = c as u32;
-
-            if let Some((prev_row, prev_col)) = prev {
-                if r_u32 == prev_row && c_u32 == prev_col {
+            if let Some(pk) = prev_key {
+                if key == pk {
                     *values.last_mut().unwrap() += v;
                     continue;
                 }
-
                 // Fill row_ptr for rows between the previous and current entry.
-                for rr in (prev_row as usize + 1)..=r {
+                let prev_r = (pk >> 32) as usize;
+                for rr in (prev_r + 1)..=r {
                     row_ptr[rr] = col_idx.len();
                 }
             } else {
-                // First nonzero initializes row_ptr up to its row.
                 for rr in 0..=r {
                     row_ptr[rr] = 0;
                 }
             }
 
-            col_idx.push(c_u32);
+            col_idx.push(c as u32);
             values.push(v);
-            prev = Some((r_u32, c_u32));
-        }
-        // Fill remaining rows
-        let last_row = self.rows[*idx.last().unwrap()] as usize;
-        for rr in (last_row + 1)..=(self.nrows) {
-            row_ptr[rr] = col_idx.len();
+            prev_key = Some(key);
         }
 
-        // Clear to free memory
-        self.rows.clear();
-        self.cols.clear();
-        self.vals.clear();
+        // Fill remaining rows
+        let last_r = prev_key.map_or(0, |k| (k >> 32) as usize);
+        for rr in (last_r + 1)..=(self.nrows) {
+            row_ptr[rr] = col_idx.len();
+        }
 
         CsrMatrix { nrows: self.nrows, ncols: self.ncols, row_ptr, col_idx, values }
     }
