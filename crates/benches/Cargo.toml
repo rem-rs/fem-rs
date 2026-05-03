@@ -16,7 +16,7 @@ fem-amg = { path = "../amg" }
 criterion = { workspace = true }
 
 [features]
-default = []
+default = ["parallel"]
 parallel = ["fem-assembly/parallel", "fem-linalg/parallel"]
 
 [[bench]]
