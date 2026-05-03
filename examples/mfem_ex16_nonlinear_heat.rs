@@ -313,5 +313,41 @@ mod tests {
             "zero manufactured state should give zero checksum: {}",
             result.solution_checksum);
     }
+
+    #[test]
+    fn ex16_nonlinear_heat_dof_count_matches_p1_h1_formula() {
+        for &n in &[8usize, 12usize, 16usize] {
+            let result = solve_case(n, 1e-10, 1.0);
+            assert_eq!(result.n_dofs, (n + 1) * (n + 1));
+        }
+    }
+
+    #[test]
+    fn ex16_nonlinear_heat_larger_manufactured_amplitude_increases_response() {
+        let half = solve_case(16, 1e-10, 0.5);
+        let full = solve_case(16, 1e-10, 1.0);
+        assert!(half.converged && full.converged);
+        assert!(full.solution_norm > half.solution_norm,
+            "larger manufactured amplitude should increase solution norm: half={} full={}",
+            half.solution_norm,
+            full.solution_norm);
+        assert!(full.iterations >= half.iterations,
+            "stronger nonlinearity should not require fewer Newton iterations: half={} full={}",
+            half.iterations,
+            full.iterations);
+        assert!(half.rms_error.is_finite() && full.rms_error.is_finite());
+        assert!(half.rms_error > 0.0 && full.rms_error > 0.0);
+    }
+
+    #[test]
+    fn ex16_nonlinear_heat_tighter_tolerance_reduces_final_residual() {
+        let loose = solve_case(16, 1e-8, 1.0);
+        let tight = solve_case(16, 1e-10, 1.0);
+        assert!(loose.converged && tight.converged);
+        assert!(tight.final_residual <= loose.final_residual * 1.1,
+            "tighter tolerance should not end with larger residual: loose={} tight={}",
+            loose.final_residual,
+            tight.final_residual);
+    }
 }
 

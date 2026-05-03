@@ -399,5 +399,82 @@ mod tests {
             expected_global_values(2)
         );
     }
+
+    #[test]
+    fn ex43_checkpoint_can_restart_from_initial_step_zero() {
+        let (out_h5, out_xdmf) = temp_paths("step0");
+        let args = Args {
+            out_h5: out_h5.clone(),
+            out_xdmf: out_xdmf.clone(),
+            backend: IoBackend::Partitioned,
+            restart_step: Some(0),
+        };
+
+        match run_checkpoint_demo(&args) {
+            DemoOutcome::Completed(result) => {
+                assert_eq!(result.restart_step, 0);
+                assert!((result.restart_time - 0.0).abs() < 1.0e-12);
+                assert_eq!(result.restart_values, expected_rank_values(0, 1));
+            }
+            DemoOutcome::Hdf5Disabled => {}
+            DemoOutcome::Hdf5MpiDisabled => panic!("partitioned backend should not report hdf5-mpi feature disabled"),
+        }
+
+        let _ = std::fs::remove_file(out_h5);
+        let _ = std::fs::remove_file(out_xdmf);
+    }
+
+    #[test]
+    fn ex43_expected_value_helpers_progress_linearly_in_time() {
+        let s0 = expected_global_values(0);
+        let s1 = expected_global_values(1);
+        let s2 = expected_global_values(2);
+        for i in 0..s0.len() {
+            let d01 = s1[i] - s0[i];
+            let d12 = s2[i] - s1[i];
+            assert!((d01 - 0.1).abs() < 1.0e-12, "unexpected step increment at i={i}: {d01}");
+            assert!((d12 - 0.1).abs() < 1.0e-12, "unexpected step increment at i={i}: {d12}");
+        }
+    }
+
+    #[test]
+    fn ex43_checkpoint_outputs_are_materialized_when_completed() {
+        let (out_h5, out_xdmf) = temp_paths("outputs");
+        let args = Args {
+            out_h5: out_h5.clone(),
+            out_xdmf: out_xdmf.clone(),
+            backend: IoBackend::Partitioned,
+            restart_step: None,
+        };
+
+        match run_checkpoint_demo(&args) {
+            DemoOutcome::Completed(result) => {
+                assert!(std::path::Path::new(&out_h5).exists());
+                assert!(std::path::Path::new(&out_xdmf).exists());
+                let h5_size = std::fs::metadata(&out_h5).expect("h5 metadata").len();
+                let xdmf_size = std::fs::metadata(&out_xdmf).expect("xdmf metadata").len();
+                assert!(h5_size > 0, "HDF5 output should be non-empty");
+                assert!(xdmf_size > 0, "XDMF output should be non-empty");
+                let time_marks = result.xdmf_text.matches("Value=\"").count();
+                assert!(time_marks >= 3, "expected at least 3 time marks in XDMF, got {time_marks}");
+            }
+            DemoOutcome::Hdf5Disabled => {}
+            DemoOutcome::Hdf5MpiDisabled => panic!("partitioned backend should not report hdf5-mpi feature disabled"),
+        }
+
+        let _ = std::fs::remove_file(out_h5);
+        let _ = std::fs::remove_file(out_xdmf);
+    }
+
+    #[test]
+    fn ex43_rank_value_helpers_match_global_stitching_for_each_step() {
+        for step in 0..=2u64 {
+            let stitched: Vec<f64> = expected_rank_values(step, 0)
+                .into_iter()
+                .chain(expected_rank_values(step, 1).into_iter())
+                .collect();
+            assert_eq!(stitched, expected_global_values(step));
+        }
+    }
 }
 

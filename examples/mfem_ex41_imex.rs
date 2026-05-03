@@ -417,5 +417,46 @@ mod tests {
             "ARK3 error too large under stronger diffusion: {}", result.ark3.error);
         assert!(result.ark3.dt_last.unwrap_or(result.dt) <= result.dt + 1.0e-12);
     }
+
+    #[test]
+    fn ex41_imex_dof_count_matches_p1_h1_formula() {
+        for &n in &[6usize, 8usize, 10usize] {
+            let result = solve_case(&Args { n, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3 });
+            assert_eq!(result.n_dofs, (n + 1) * (n + 1));
+        }
+    }
+
+    #[test]
+    fn ex41_imex_higher_kappa_decays_faster_in_pure_diffusion() {
+        let low_kappa = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0 });
+        let high_kappa = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 0.0, vy: 0.0 });
+        assert!(low_kappa.rk3.solution_norm > 0.0 && high_kappa.rk3.solution_norm > 0.0);
+        assert!(high_kappa.rk3.solution_norm < low_kappa.rk3.solution_norm,
+            "higher kappa should increase decay: low={} high={}",
+            low_kappa.rk3.solution_norm,
+            high_kappa.rk3.solution_norm);
+    }
+
+    #[test]
+    fn ex41_imex_zero_final_time_is_noop_for_all_methods() {
+        let result = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.0, kappa: 0.01, vx: 1.0, vy: 0.3 });
+        assert!((result.euler.final_time - 0.0).abs() < 1.0e-14);
+        assert!((result.ssp2.final_time - 0.0).abs() < 1.0e-14);
+        assert!((result.rk3.final_time - 0.0).abs() < 1.0e-14);
+        assert!((result.ark3.final_time - 0.0).abs() < 1.0e-14);
+        assert!(result.euler.error < 1.0e-14);
+        assert!(result.ssp2.error < 1.0e-14);
+        assert!(result.rk3.error < 1.0e-14);
+        assert!(result.ark3.error < 1.0e-14);
+    }
+
+    #[test]
+    fn ex41_imex_ark3_last_dt_is_positive_and_bounded() {
+        let result = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.215, kappa: 0.01, vx: 1.0, vy: 0.3 });
+        let dt_last = result.ark3.dt_last.expect("ARK3 should report last dt");
+        assert!(dt_last > 0.0, "ARK3 last dt must be positive");
+        assert!(dt_last <= result.dt + 1.0e-12,
+            "ARK3 last dt must not exceed user dt: last={} dt={}", dt_last, result.dt);
+    }
 }
 

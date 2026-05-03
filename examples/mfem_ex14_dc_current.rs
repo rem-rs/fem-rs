@@ -430,5 +430,70 @@ mod tests {
             fine.phi_rms_error);
         assert!((fine.phi_at_interface - fine.phi_interface_exact).abs() < 1.0e-10);
     }
+
+    #[test]
+    fn ex14_dc_current_equal_conductivities_give_midpoint_half_voltage() {
+        let result = solve_case(&Args {
+            n: 8,
+            sigma1: 3.0,
+            sigma2: 3.0,
+            voltage: 1.0,
+            vtk: None,
+        });
+
+        assert!(result.converged);
+        assert!((result.phi_interface_exact - 0.5).abs() < 1.0e-14);
+        assert!((result.phi_at_interface - 0.5).abs() < 1.0e-10,
+            "equal conductivities should place interface at half voltage: {}", result.phi_at_interface);
+        assert!(result.phi_rms_error < 1.0e-10);
+    }
+
+    #[test]
+    fn ex14_dc_current_scaling_both_conductivities_keeps_solution_invariant() {
+        let base = solve_case(&Args {
+            n: 8,
+            sigma1: 1.0,
+            sigma2: 10.0,
+            voltage: 1.0,
+            vtk: None,
+        });
+        let scaled = solve_case(&Args {
+            n: 8,
+            sigma1: 2.0,
+            sigma2: 20.0,
+            voltage: 1.0,
+            vtk: None,
+        });
+
+        assert!(base.converged && scaled.converged);
+        assert!((base.phi_at_interface - scaled.phi_at_interface).abs() < 1.0e-10);
+        assert!((base.phi_l2 - scaled.phi_l2).abs() < 1.0e-10);
+        assert!((base.phi_checksum - scaled.phi_checksum).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn ex14_dc_current_swapping_layer_conductivities_complements_interface_value() {
+        let left_low = solve_case(&Args {
+            n: 8,
+            sigma1: 1.0,
+            sigma2: 10.0,
+            voltage: 1.0,
+            vtk: None,
+        });
+        let left_high = solve_case(&Args {
+            n: 8,
+            sigma1: 10.0,
+            sigma2: 1.0,
+            voltage: 1.0,
+            vtk: None,
+        });
+
+        assert!(left_low.converged && left_high.converged);
+        assert!((left_low.phi_at_interface + left_high.phi_at_interface - 1.0).abs() < 1.0e-8,
+            "swapping layer conductivities should complement interface potential: low={} high={}",
+            left_low.phi_at_interface,
+            left_high.phi_at_interface);
+        assert!((left_low.phi_interface_exact + left_high.phi_interface_exact - 1.0).abs() < 1.0e-14);
+    }
 }
 
