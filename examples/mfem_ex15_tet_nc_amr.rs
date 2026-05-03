@@ -535,5 +535,39 @@ mod tests {
             assert!(pair[0].n_marked > 0, "each pre-terminal solve level should mark at least one element");
         }
     }
+
+    #[test]
+    fn ex15_tet_nc_zero_levels_returns_single_snapshot() {
+        let plumbing = run_plumbing_case(1, 0, 0.30);
+        let solve = run_solve_case(1, 0, 0.30);
+        assert_eq!(plumbing.len(), 1);
+        assert_eq!(solve.len(), 1);
+        assert_eq!(plumbing[0].level, 0);
+        assert_eq!(solve[0].level, 0);
+        assert_eq!(plumbing[0].n_marked, 0);
+        assert_eq!(solve[0].n_marked, 0);
+    }
+
+    #[test]
+    fn ex15_tet_nc_zero_fraction_still_marks_one_element_per_refinement_level() {
+        let levels = run_plumbing_case(1, 3, 0.0);
+        assert_eq!(levels.len(), 4);
+        for level in levels.iter().take(3) {
+            assert_eq!(level.n_marked, 1,
+                "fraction=0 should still mark one element at level {}", level.level);
+        }
+        assert_eq!(levels.last().map(|l| l.n_marked), Some(0));
+    }
+
+    #[test]
+    fn ex15_tet_nc_solve_mode_mesh_size_grows_monotonically() {
+        let levels = run_solve_case(1, 3, 0.30);
+        for pair in levels.windows(2) {
+            assert!(pair[1].n_elems > pair[0].n_elems,
+                "element count should increase: prev={} next={}", pair[0].n_elems, pair[1].n_elems);
+            assert!(pair[1].n_nodes > pair[0].n_nodes,
+                "node count should increase: prev={} next={}", pair[0].n_nodes, pair[1].n_nodes);
+        }
+    }
 }
 

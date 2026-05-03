@@ -558,4 +558,49 @@ mod tests {
             "higher drive should give more displacement: low={:.4e} high={:.4e}",
             r_low.max_abs_interface_displacement, r_high.max_abs_interface_displacement);
     }
+
+    #[test]
+    fn ex50_single_rate_mode_has_no_adaptive_counters() {
+        let mut a = base_args();
+        a.use_subcycling = false;
+        let r = solve_acoustics_structure_template(&a);
+        assert_eq!(r.steps, a.steps);
+        assert_eq!(r.sync_retries, 0);
+        assert_eq!(r.rejected_sync_steps, 0);
+        assert_eq!(r.rollback_count, 0);
+    }
+
+    #[test]
+    fn ex50_zero_drive_produces_negligible_pressure_and_displacement() {
+        let mut a = base_args();
+        a.drive_amp = 0.0;
+        let r = solve_acoustics_structure_template(&a);
+        assert!(r.final_pressure_norm < 1.0e-12,
+            "zero drive should produce near-zero pressure norm: {}", r.final_pressure_norm);
+        assert!(r.max_abs_interface_displacement < 1.0e-12,
+            "zero drive should produce near-zero displacement: {}", r.max_abs_interface_displacement);
+    }
+
+    #[test]
+    fn ex50_zero_drive_matches_between_subcycling_and_single_rate() {
+        let mut single = base_args();
+        single.drive_amp = 0.0;
+        single.use_subcycling = false;
+
+        let mut sub = base_args();
+        sub.drive_amp = 0.0;
+        sub.use_subcycling = true;
+
+        let r_single = solve_acoustics_structure_template(&single);
+        let r_sub = solve_acoustics_structure_template(&sub);
+
+        assert!((r_single.final_pressure_norm - r_sub.final_pressure_norm).abs() < 1.0e-12,
+            "zero-drive pressure norms should match: single={} sub={}",
+            r_single.final_pressure_norm,
+            r_sub.final_pressure_norm);
+        assert!((r_single.final_interface_displacement - r_sub.final_interface_displacement).abs() < 1.0e-12,
+            "zero-drive displacements should match: single={} sub={}",
+            r_single.final_interface_displacement,
+            r_sub.final_interface_displacement);
+    }
 }

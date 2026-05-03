@@ -713,4 +713,45 @@ mod tests {
             "positive sigma_beta should not decrease Joule power: zero={:.4e} pos={:.4e}",
             r_zero.joule_power, r_pos.joule_power);
     }
+
+    #[test]
+    fn ex48_single_rate_mode_has_no_adaptive_counters() {
+        let mut a = base_args();
+        a.use_subcycling = false;
+        let r = solve_joule_template(&a);
+        assert!(r.converged, "single-rate coupling should converge");
+        assert_eq!(r.sync_retries, 0);
+        assert_eq!(r.rejected_sync_steps, 0);
+        assert_eq!(r.rollback_count, 0);
+    }
+
+    #[test]
+    fn ex48_higher_sigma0_increases_joule_power() {
+        let mut low = base_args();
+        low.sigma0 = 2.0;
+        let mut high = base_args();
+        high.sigma0 = 8.0;
+
+        let r_low = solve_joule_template(&low);
+        let r_high = solve_joule_template(&high);
+        assert!(r_low.converged && r_high.converged);
+        assert!(r_high.joule_power > r_low.joule_power,
+            "higher sigma0 should increase Joule power: low={:.4e} high={:.4e}",
+            r_low.joule_power, r_high.joule_power);
+    }
+
+    #[test]
+    fn ex48_repeated_runs_are_deterministic_for_same_inputs() {
+        let a = base_args();
+        let r1 = solve_joule_template(&a);
+        let r2 = solve_joule_template(&a);
+        assert!((r1.temp_checksum - r2.temp_checksum).abs() < 1.0e-12,
+            "temperature checksum should be deterministic: r1={} r2={}",
+            r1.temp_checksum,
+            r2.temp_checksum);
+        assert!((r1.joule_power - r2.joule_power).abs() < 1.0e-12,
+            "joule power should be deterministic: r1={} r2={}",
+            r1.joule_power,
+            r2.joule_power);
+    }
 }
