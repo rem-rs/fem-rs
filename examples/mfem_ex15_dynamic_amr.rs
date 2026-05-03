@@ -241,5 +241,25 @@ mod tests {
             "marking with θ=0.5 should give ≤ elements than θ=0.9: {} vs {}",
             marked_05.len(), marked_09.len());
     }
+
+    /// After P1 prolongation the new nodal values must stay within the
+    /// original field's min/max range (linear interpolation is bounded).
+    #[test]
+    fn ex15_prolongated_field_range_bounded_by_original() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let field = synthetic_field(&mesh, 0.5, 0.5, 0.15);
+        let eta = zz_estimator(&mesh, &field);
+        let marked = dorfler_mark(&eta, 0.6);
+        let (new_mesh, tree) = refine_marked_with_tree(&mesh, &marked);
+        let field2 = prolongate_p1(&field, new_mesh.n_nodes(), &tree.midpoint_map);
+        let fmin = field.iter().cloned().fold(f64::INFINITY, f64::min);
+        let fmax = field.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let f2min = field2.iter().cloned().fold(f64::INFINITY, f64::min);
+        let f2max = field2.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(f2min >= fmin - 1.0e-12,
+            "prolongated field min {} underflows original min {}", f2min, fmin);
+        assert!(f2max <= fmax + 1.0e-12,
+            "prolongated field max {} overflows original max {}", f2max, fmax);
+    }
 }
 

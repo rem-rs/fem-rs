@@ -238,4 +238,15 @@ mod tests {
             norm_rel_gap
         );
     }
+
+    /// Zero tangential drive must yield a trivial (zero) solution.
+    #[test]
+    fn tangential_drive_maxwell_zero_drive_gives_trivial_solution() {
+        let result = solve_case_with_gamma_and_scale(8, DEFAULT_GAMMA, 0.0);
+        assert!(result.converged);
+        assert!(result.solution_l2 < 1.0e-14,
+            "expected zero solution norm for zero drive, got {}", result.solution_l2);
+        assert!(result.l2_error < 1.0e-14,
+            "expected zero L2 error for zero drive, got {}", result.l2_error);
+    }
 }

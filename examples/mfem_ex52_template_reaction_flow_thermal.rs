@@ -926,4 +926,14 @@ mod tests {
         assert!(rb_h.final_temperature_norm > rb_l.final_temperature_norm,
             "subcycling: higher inlet should raise temperature");
     }
+
+    /// Identical args must produce an identical temperature checksum (determinism).
+    #[test]
+    fn ex52_temperature_checksum_is_deterministic() {
+        let r1 = solve_reaction_flow_thermal_template(&base_args());
+        let r2 = solve_reaction_flow_thermal_template(&base_args());
+        assert_eq!(r1.final_temperature_checksum, r2.final_temperature_checksum,
+            "temperature checksum is not deterministic: run1={:.8e} run2={:.8e}",
+            r1.final_temperature_checksum, r2.final_temperature_checksum);
+    }
 }

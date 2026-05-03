@@ -296,4 +296,14 @@ mod tests {
             "expected zero checksum, got {}", result.solution_checksum);
         assert!(result.l2_error < 1.0e-14, "expected zero manufactured-solution error, got {}", result.l2_error);
     }
+
+    /// Identical inputs must produce an identical checksum (determinism).
+    #[test]
+    fn impedance_maxwell_solution_is_deterministic() {
+        let r1 = solve_case_with_gamma_and_scale(8, DEFAULT_GAMMA, 1.0);
+        let r2 = solve_case_with_gamma_and_scale(8, DEFAULT_GAMMA, 1.0);
+        assert_eq!(r1.solution_checksum, r2.solution_checksum,
+            "impedance Maxwell checksum is not deterministic: {} vs {}",
+            r1.solution_checksum, r2.solution_checksum);
+    }
 }

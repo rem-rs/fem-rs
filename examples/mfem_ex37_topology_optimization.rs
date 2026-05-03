@@ -873,5 +873,19 @@ mod tests {
             rich.final_compliance
         );
     }
+
+    /// Two identical runs must produce the same final compliance (determinism).
+    #[test]
+    fn ex37_scalar_topopt_compliance_is_deterministic() {
+        let args = Args {
+            n: 8, iters: 6, volfrac: 0.40, penal: 3.0, rho_min: 1.0e-3,
+            rmin: 0.22, beta: 2.5, eta: 0.5, model: TopOptModel::Scalar,
+        };
+        let r1 = run_topology_optimization(&args);
+        let r2 = run_topology_optimization(&args);
+        assert_eq!(r1.final_compliance, r2.final_compliance,
+            "topology optimization compliance is not deterministic: {} vs {}",
+            r1.final_compliance, r2.final_compliance);
+    }
 }
 

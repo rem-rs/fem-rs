@@ -579,4 +579,18 @@ mod tests {
         assert!(result.min_gap >= -1e-8, "SSN: obstacle violated: {}", result.min_gap);
         assert!(result.complementarity < 1e-6, "SSN: complementarity too large: {}", result.complementarity);
     }
+
+    /// A finer mesh must still produce a feasible solution for both solvers.
+    #[test]
+    fn ex36_finer_mesh_preserves_obstacle_feasibility() {
+        for method in [SolveMethod::Pdas, SolveMethod::SemismoothNewton] {
+            let result = solve_obstacle_problem(20, -5.0, method);
+            assert!(result.min_gap >= -1e-8,
+                "finer mesh violated obstacle: min_gap={}", result.min_gap);
+            assert!(result.complementarity < 1e-6,
+                "finer mesh complementarity too large: {}", result.complementarity);
+            assert!(result.contact_dofs > 0,
+                "finer mesh should still have non-empty contact set");
+        }
+    }
 }

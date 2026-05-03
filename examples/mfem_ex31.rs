@@ -251,4 +251,14 @@ mod tests {
             "expected zero checksum, got {}", result.solution_checksum);
         assert!(result.l2_error < 1.0e-14, "expected zero manufactured-solution error, got {}", result.l2_error);
     }
+
+    /// Identical inputs must produce an identical checksum (determinism).
+    #[test]
+    fn anisotropic_maxwell_solution_is_deterministic() {
+        let r1 = solve_case_with_sigma_and_scale(12, 4.0, 1.5, 1.0);
+        let r2 = solve_case_with_sigma_and_scale(12, 4.0, 1.5, 1.0);
+        assert_eq!(r1.solution_checksum, r2.solution_checksum,
+            "anisotropic Maxwell checksum is not deterministic: {} vs {}",
+            r1.solution_checksum, r2.solution_checksum);
+    }
 }

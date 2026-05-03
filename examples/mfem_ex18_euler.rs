@@ -332,5 +332,18 @@ mod tests {
             "Lax density/momentum checksum mismatch: rho={} mom={}",
             lax.density_checksum, lax.momentum_checksum);
     }
+
+    /// Identical inputs must produce identical density checksums (determinism).
+    #[test]
+    fn ex18_euler_density_checksum_is_deterministic() {
+        let r1 = run_case(50, 0.2, 0.35, 1.4, NumericalFlux::Roe, 0.2);
+        let r2 = run_case(50, 0.2, 0.35, 1.4, NumericalFlux::Roe, 0.2);
+        assert_eq!(r1.density_checksum, r2.density_checksum,
+            "density checksum not deterministic: run1={:.8e} run2={:.8e}",
+            r1.density_checksum, r2.density_checksum);
+        assert_eq!(r1.momentum_checksum, r2.momentum_checksum,
+            "momentum checksum not deterministic: run1={:.8e} run2={:.8e}",
+            r1.momentum_checksum, r2.momentum_checksum);
+    }
 }
 

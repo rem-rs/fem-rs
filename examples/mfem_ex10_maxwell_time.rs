@@ -352,6 +352,20 @@ mod tests {
             err_ratio
         );
     }
+
+    /// Finer spatial mesh (same dt) should reduce the final L² error.
+    #[test]
+    fn ex10_maxwell_time_finer_spatial_mesh_reduces_error() {
+        let mut coarse = base_args();
+        coarse.n = 8;
+        let mut fine = base_args();
+        fine.n = 16;
+        let rc = solve_case(&coarse);
+        let rf = solve_case(&fine);
+        assert!(rf.l2_err_final < rc.l2_err_final,
+            "finer spatial mesh should reduce L2 error: n=8={} n=16={}",
+            rc.l2_err_final, rf.l2_err_final);
+    }
     }
 
 // ─── Damped Newmark step: ε M ü + σ M u̇ + K u = f ──────────────────────────

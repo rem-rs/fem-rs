@@ -819,5 +819,22 @@ mod tests {
             strong.interface_length
         );
     }
+
+    /// Identical circle geometry must give identical area and interface-length
+    /// estimates on repeated calls (determinism).
+    #[test]
+    fn ex38_circle_embedded_results_are_deterministic() {
+        let args = Args {
+            n: 10, radius: 0.25, cx: 0.5, cy: 0.5,
+            alpha: 20.0, subdiv: 6, nitsche_gamma: 20.0,
+            level_set: None,
+        };
+        let r1 = solve_embedded_problem(&args);
+        let r2 = solve_embedded_problem(&args);
+        assert_eq!(r1.area_estimate, r2.area_estimate,
+            "area estimate is not deterministic: {} vs {}", r1.area_estimate, r2.area_estimate);
+        assert_eq!(r1.interface_length, r2.interface_length,
+            "interface length is not deterministic: {} vs {}", r1.interface_length, r2.interface_length);
+    }
 }
 

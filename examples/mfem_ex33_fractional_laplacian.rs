@@ -482,4 +482,14 @@ mod tests {
                 "sparse rational center value wrong at s={}: {:.6}", s, r.center_value);
         }
     }
+
+    /// Same inputs must yield the same solution checksum (determinism).
+    #[test]
+    fn ex33_fractional_checksum_is_deterministic() {
+        let r1 = solve_fractional_problem(8, 0.5);
+        let r2 = solve_fractional_problem(8, 0.5);
+        assert_eq!(r1.solution_checksum, r2.solution_checksum,
+            "fractional Laplacian checksum not deterministic: {} vs {}",
+            r1.solution_checksum, r2.solution_checksum);
+    }
 }

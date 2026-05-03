@@ -465,4 +465,15 @@ mod tests {
             r.iterations_amg, r.iterations_jacobi
         );
     }
+
+    /// Identical inputs must produce an identical checksum (determinism).
+    #[test]
+    fn ex26_geom_mg_solution_is_deterministic() {
+        let r1 = solve_case(15, 80, 1e-6);
+        let r2 = solve_case(15, 80, 1e-6);
+        assert!(r1.converged, "first solve must converge");
+        assert_eq!(r1.checksum, r2.checksum,
+            "geometric MG checksum is not deterministic: {} vs {}",
+            r1.checksum, r2.checksum);
+    }
 }
