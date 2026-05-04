@@ -21,8 +21,16 @@ nalgebra-sparse = "0.4"
 
 [features]
 default  = []
-gpu      = ["dep:fem-linalg-gpu"]
+gpu      = ["dep:fem-linalg-gpu", "dep:wgpu", "dep:bytemuck"]
 
 [dependencies.fem-linalg-gpu]
 path = "../linalg-gpu"
+optional = true
+
+[dependencies.wgpu]
+version = "24"
+optional = true
+
+[dependencies.bytemuck]
+workspace = true
 optional = true
