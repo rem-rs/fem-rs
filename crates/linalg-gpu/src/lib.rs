@@ -6,7 +6,7 @@ pub mod vector;
 pub mod vector_pipeline;
 
 pub use buffer::DeviceBuffer;
-pub use context::GpuContext;
+pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;
 pub use vector::GpuVector;
 
