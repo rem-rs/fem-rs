@@ -9,6 +9,7 @@ use crate::buffer::DeviceBuffer;
 ///
 /// `T` must implement `bytemuck::Pod` (typically `f32`).
 pub struct GpuVector<T: bytemuck::Pod> {
-    _buf: DeviceBuffer<T>,
+    _buf: DeviceBuffer,
     _len: usize,
+    _phantom: std::marker::PhantomData<T>,
 }

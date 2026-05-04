@@ -16,7 +16,8 @@ pub struct GpuCsrMatrix<T: bytemuck::Pod> {
     _nrows: usize,
     _ncols: usize,
     _nnz: usize,
-    _row_ptr: DeviceBuffer<u32>,
-    _col_idx: DeviceBuffer<u32>,
-    _values: DeviceBuffer<T>,
+    _row_ptr: DeviceBuffer,
+    _col_idx: DeviceBuffer,
+    _values: DeviceBuffer,
+    _phantom: std::marker::PhantomData<T>,
 }
