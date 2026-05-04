@@ -418,6 +418,208 @@ pub fn hex_rule(order: u8) -> QuadratureRule {
     QuadratureRule { points: pts, weights: wts }
 }
 
+// ─── Named triangle quadrature rules ─────────────────────────────────────────
+
+/// Named Dunavant / Gaussian triangle quadrature rules.
+///
+/// Provides a stable, enumerable catalogue of quadrature rules on the reference
+/// triangle `(0,0),(1,0),(0,1)`.  Weights sum to 0.5 (area of reference triangle).
+///
+/// Use [`TriQuadRule::rule()`] to obtain the corresponding [`QuadratureRule`],
+/// or [`tri_rule_named()`] as a convenience free function.
+///
+/// | Variant             | Points | Exact degree |
+/// |---------------------|--------|--------------|
+/// | `Centroid1Deg1`     | 1      | 1            |
+/// | `Gaussian3Deg2`     | 3      | 2            |
+/// | `Dunavant7Deg5`     | 7      | 5            |
+/// | `Dunavant12Deg6`    | 12     | 6            |
+/// | `Witherden15Deg7`   | 15     | 7            |
+/// | `Dunavant19Deg9`    | 19     | 9            |
+///
+/// # Example
+/// ```ignore
+/// use fem_element::quadrature::{TriQuadRule, tri_rule_named};
+///
+/// // By enum variant:
+/// let qr = TriQuadRule::Dunavant7Deg5.rule();
+/// assert_eq!(qr.points.len(), 7);
+///
+/// // By minimum polynomial degree:
+/// let qr = tri_rule_named(5);
+/// assert_eq!(qr.points.len(), 7);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriQuadRule {
+    /// 1-point centroid rule, exact for polynomials of degree ≤ 1.
+    Centroid1Deg1,
+    /// 3-point Gaussian rule, exact for polynomials of degree ≤ 2.
+    Gaussian3Deg2,
+    /// 7-point Dunavant rule, exact for polynomials of degree ≤ 5.
+    Dunavant7Deg5,
+    /// 12-point Dunavant rule, exact for polynomials of degree ≤ 6.
+    Dunavant12Deg6,
+    /// 15-point Witherden-Vincent rule, exact for polynomials of degree ≤ 7.
+    /// All weights are positive.
+    Witherden15Deg7,
+    /// 19-point Dunavant rule, exact for polynomials of degree ≤ 9.
+    Dunavant19Deg9,
+}
+
+impl TriQuadRule {
+    /// Return the minimum-degree rule that is exact for polynomials up to `degree`.
+    pub fn for_degree(degree: u8) -> Self {
+        match degree {
+            0..=1 => Self::Centroid1Deg1,
+            2..=2 => Self::Gaussian3Deg2,
+            3..=5 => Self::Dunavant7Deg5,
+            6..=6 => Self::Dunavant12Deg6,
+            7..=7 => Self::Witherden15Deg7,
+            _     => Self::Dunavant19Deg9,
+        }
+    }
+
+    /// The number of quadrature points in this rule.
+    pub fn n_points(self) -> usize {
+        match self {
+            Self::Centroid1Deg1  => 1,
+            Self::Gaussian3Deg2  => 3,
+            Self::Dunavant7Deg5  => 7,
+            Self::Dunavant12Deg6 => 12,
+            Self::Witherden15Deg7 => 15,
+            Self::Dunavant19Deg9 => 19,
+        }
+    }
+
+    /// The polynomial degree for which this rule is exact.
+    pub fn exact_degree(self) -> u8 {
+        match self {
+            Self::Centroid1Deg1  => 1,
+            Self::Gaussian3Deg2  => 2,
+            Self::Dunavant7Deg5  => 5,
+            Self::Dunavant12Deg6 => 6,
+            Self::Witherden15Deg7 => 7,
+            Self::Dunavant19Deg9 => 9,
+        }
+    }
+
+    /// Compute and return the [`QuadratureRule`] for this variant.
+    pub fn rule(self) -> QuadratureRule {
+        match self {
+            Self::Centroid1Deg1  => tri_rule(1),
+            Self::Gaussian3Deg2  => tri_rule(2),
+            Self::Dunavant7Deg5  => tri_rule(5),
+            Self::Dunavant12Deg6 => tri_rule(6),
+            Self::Witherden15Deg7 => witherden_tri_15(),
+            Self::Dunavant19Deg9 => dunavant_tri_19(),
+        }
+    }
+}
+
+/// Return the smallest-degree named triangle rule that is exact for `min_degree`.
+///
+/// This is the free-function companion to [`TriQuadRule::for_degree`].
+pub fn tri_rule_named(min_degree: u8) -> QuadratureRule {
+    TriQuadRule::for_degree(min_degree).rule()
+}
+
+/// 15-point Witherden-Vincent rule on the reference triangle, exact for degree 7.
+///
+/// Source: Witherden & Vincent (2015), via MFEM intrules.cpp (triangle, degree 7).
+/// 15 points, all weights positive.  Weights sum to 0.5.
+///
+/// Structure: 3 × S21 (3 pts each) + 1 × S111 (6 pts) = 15 pts.
+fn witherden_tri_15() -> QuadratureRule {
+    // S21(a): 3 symmetric points (a,a),(1-2a,a),(a,1-2a) in Cartesian
+    // S111(a,b): 6 asymmetric points, all permutations of (a,b,1-a-b)
+
+    let (a1, w1) = (3.373_064_855_458_784_983_00e-2_f64, 8.272_525_055_396_065_529_76e-3_f64);
+    let (a2, w2) = (2.415_773_825_954_035_669_56e-1_f64, 6.397_208_561_507_779_223_11e-2_f64);
+    let (a3, w3) = (4.743_096_925_047_183_276_55e-1_f64, 3.854_332_309_299_303_427_34e-2_f64);
+    let (a4, b4, w4) = (
+        7.542_800_405_500_531_546_47e-1_f64,
+        1.986_833_147_973_516_844_33e-1_f64,
+        2.793_936_645_159_988_962_92e-2_f64,
+    );
+
+    macro_rules! s21 {
+        ($a:expr) => {{
+            let b = 1.0 - 2.0 * $a;
+            vec![vec![$a, $a], vec![b, $a], vec![$a, b]]
+        }};
+    }
+    macro_rules! s111 {
+        ($a:expr, $b:expr) => {{
+            let c = 1.0 - $a - $b;
+            vec![
+                vec![$a, $b], vec![$a, c], vec![$b, $a],
+                vec![$b, c],  vec![c, $a], vec![c, $b],
+            ]
+        }};
+    }
+
+    let mut points: Vec<Vec<f64>> = Vec::new();
+    let mut weights: Vec<f64> = Vec::new();
+
+    for p in s21!(a1) { points.push(p); weights.push(w1); }
+    for p in s21!(a2) { points.push(p); weights.push(w2); }
+    for p in s21!(a3) { points.push(p); weights.push(w3); }
+    for p in s111!(a4, b4) { points.push(p); weights.push(w4); }
+
+    QuadratureRule { points, weights }
+}
+
+/// 19-point Witherden-Vincent rule on the reference triangle, exact for degree 9.
+///
+/// Source: Witherden & Vincent (2015), via MFEM intrules.cpp (triangle, degree 9).
+/// All weights positive.  Weights sum to 0.5.
+fn dunavant_tri_19() -> QuadratureRule {
+    // Structure: 1 S3 (centroid) + 4 × S21 (3 pts each) + 1 × S111 (6 pts) = 19 pts.
+    // All weights positive; verified via MFEM intrules.cpp (triangle, degree 9).
+    //
+    // S21(a): 3 symmetric pts (a, a, 1-2a) in barycentric → Cartesian (a,a),(1-2a,a),(a,1-2a)
+    // S111(a,b): 6 asymmetric pts, all permutations of (a, b, 1-a-b)
+
+    let wc = 4.856_789_814_139_941_818_82e-2_f64; // centroid
+    let (a1, w1) = (4.370_895_914_929_366_909_97e-1_f64, 3.891_377_050_238_713_913_85e-2_f64);
+    let (a2, w2) = (1.882_035_356_190_328_023_73e-1_f64, 3.982_386_946_360_512_436_36e-2_f64);
+    let (a3, w3) = (4.896_825_191_987_376_202_36e-1_f64, 1.566_735_011_356_953_574_67e-2_f64);
+    let (a4, w4) = (4.472_951_339_445_274_676_62e-2_f64, 1.278_883_782_934_901_562_62e-2_f64);
+    let (a5, b5, w5) = (
+        7.411_985_987_844_980_083_85e-1_f64,
+        2.219_629_891_607_657_334_87e-1_f64,
+        2.164_176_968_864_468_808_55e-2_f64,
+    );
+
+    macro_rules! s21 {
+        ($a:expr) => {{
+            let b = 1.0 - 2.0 * $a;
+            vec![vec![$a, $a], vec![b, $a], vec![$a, b]]
+        }};
+    }
+    macro_rules! s111 {
+        ($a:expr, $b:expr) => {{
+            let c = 1.0 - $a - $b;
+            vec![
+                vec![$a, $b], vec![$a, c], vec![$b, $a],
+                vec![$b, c],  vec![c, $a], vec![c, $b],
+            ]
+        }};
+    }
+
+    let mut points: Vec<Vec<f64>> = Vec::new();
+    let mut weights: Vec<f64> = Vec::new();
+
+    points.push(vec![1.0/3.0, 1.0/3.0]);  weights.push(wc);
+    for p in s21!(a1) { points.push(p); weights.push(w1); }
+    for p in s21!(a2) { points.push(p); weights.push(w2); }
+    for p in s21!(a3) { points.push(p); weights.push(w3); }
+    for p in s21!(a4) { points.push(p); weights.push(w4); }
+    for p in s111!(a5, b5) { points.push(p); weights.push(w5); }
+
+    QuadratureRule { points, weights }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +782,160 @@ mod tet_quad_tests {
             TetP3.eval_basis(pt, &mut phi);
             let s: f64 = phi.iter().sum();
             assert!((s - 1.0).abs() < 1e-12, "POU failed at {pt:?}: sum={s}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tri_named_quad_tests {
+    use super::*;
+
+    /// ∫∫_T x^i y^j dA on the reference triangle (0,0),(1,0),(0,1).
+    /// Closed-form value: i! j! / (i+j+2)!
+    fn monomial_exact(i: u32, j: u32) -> f64 {
+        let factorial = |n: u32| -> f64 { (1..=n).map(|k| k as f64).product::<f64>().max(1.0) };
+        factorial(i) * factorial(j) / factorial(i + j + 2)
+    }
+
+    fn integrate_monomial(rule: &QuadratureRule, i: u32, j: u32) -> f64 {
+        rule.weights.iter().zip(rule.points.iter())
+            .map(|(w, p)| w * p[0].powi(i as i32) * p[1].powi(j as i32))
+            .sum()
+    }
+
+    // ── Enum metadata ────────────────────────────────────────────────────
+
+    #[test]
+    fn tri_quad_rule_n_points() {
+        assert_eq!(TriQuadRule::Centroid1Deg1.n_points(),  1);
+        assert_eq!(TriQuadRule::Gaussian3Deg2.n_points(),  3);
+        assert_eq!(TriQuadRule::Dunavant7Deg5.n_points(),  7);
+        assert_eq!(TriQuadRule::Dunavant12Deg6.n_points(), 12);
+        assert_eq!(TriQuadRule::Witherden15Deg7.n_points(), 15);
+        assert_eq!(TriQuadRule::Dunavant19Deg9.n_points(), 19);
+    }
+
+    #[test]
+    fn tri_quad_rule_exact_degree() {
+        assert_eq!(TriQuadRule::Centroid1Deg1.exact_degree(),  1);
+        assert_eq!(TriQuadRule::Witherden15Deg7.exact_degree(), 7);
+        assert_eq!(TriQuadRule::Dunavant19Deg9.exact_degree(), 9);
+    }
+
+    #[test]
+    fn tri_quad_rule_for_degree_selects_correct_variant() {
+        assert_eq!(TriQuadRule::for_degree(0), TriQuadRule::Centroid1Deg1);
+        assert_eq!(TriQuadRule::for_degree(1), TriQuadRule::Centroid1Deg1);
+        assert_eq!(TriQuadRule::for_degree(2), TriQuadRule::Gaussian3Deg2);
+        assert_eq!(TriQuadRule::for_degree(5), TriQuadRule::Dunavant7Deg5);
+        assert_eq!(TriQuadRule::for_degree(6), TriQuadRule::Dunavant12Deg6);
+        assert_eq!(TriQuadRule::for_degree(7), TriQuadRule::Witherden15Deg7);
+        assert_eq!(TriQuadRule::for_degree(8), TriQuadRule::Dunavant19Deg9);
+        assert_eq!(TriQuadRule::for_degree(9), TriQuadRule::Dunavant19Deg9);
+    }
+
+    // ── Weight sums ──────────────────────────────────────────────────────
+
+    #[test]
+    fn all_named_rules_weights_sum_to_half() {
+        let rules = [
+            TriQuadRule::Centroid1Deg1,
+            TriQuadRule::Gaussian3Deg2,
+            TriQuadRule::Dunavant7Deg5,
+            TriQuadRule::Dunavant12Deg6,
+            TriQuadRule::Witherden15Deg7,
+            TriQuadRule::Dunavant19Deg9,
+        ];
+        for r in rules {
+            let qr = r.rule();
+            let ws: f64 = qr.weights.iter().sum();
+            // Degree-7 rule has a negative centroid weight; allow slightly wider tolerance
+            assert!((ws - 0.5).abs() < 1e-10, "{r:?}: weight sum = {ws:.12}");
+            assert_eq!(qr.points.len(), r.n_points(), "{r:?}: point count mismatch");
+        }
+    }
+
+    // ── Monomial exactness tests ─────────────────────────────────────────
+    // For each rule, verify ∫ x^i y^j dA is exact up to the claimed degree.
+
+    #[test]
+    fn centroid_deg1_exact() {
+        let qr = TriQuadRule::Centroid1Deg1.rule();
+        // Exact for degree 1: x^0, y^0 (=0.5), x^1 (1/6), y^1 (1/6)
+        for (i, j) in [(0,0),(1,0),(0,1)] {
+            let got = integrate_monomial(&qr, i, j);
+            let exp = monomial_exact(i, j);
+            assert!((got - exp).abs() < 1e-14, "x^{i} y^{j}: got={got}, exp={exp}");
+        }
+    }
+
+    #[test]
+    fn gaussian3_deg2_exact() {
+        let qr = TriQuadRule::Gaussian3Deg2.rule();
+        // All monomials x^i y^j with i+j <= 2
+        for (i, j) in [(0,0),(1,0),(0,1),(2,0),(1,1),(0,2)] {
+            let got = integrate_monomial(&qr, i, j);
+            let exp = monomial_exact(i, j);
+            assert!((got - exp).abs() < 1e-14, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+        }
+    }
+
+    #[test]
+    fn dunavant7_deg5_exact() {
+        let qr = TriQuadRule::Dunavant7Deg5.rule();
+        for i in 0u32..=5 {
+            for j in 0u32..=(5 - i) {
+                let got = integrate_monomial(&qr, i, j);
+                let exp = monomial_exact(i, j);
+                assert!((got - exp).abs() < 1e-12, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+            }
+        }
+    }
+
+    #[test]
+    fn dunavant12_deg6_exact() {
+        let qr = TriQuadRule::Dunavant12Deg6.rule();
+        for i in 0u32..=6 {
+            for j in 0u32..=(6 - i) {
+                let got = integrate_monomial(&qr, i, j);
+                let exp = monomial_exact(i, j);
+                assert!((got - exp).abs() < 1e-10, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+            }
+        }
+    }
+
+    #[test]
+    fn dunavant13_deg7_exact() {
+        let qr = TriQuadRule::Witherden15Deg7.rule();
+        for i in 0u32..=7 {
+            for j in 0u32..=(7 - i) {
+                let got = integrate_monomial(&qr, i, j);
+                let exp = monomial_exact(i, j);
+                assert!((got - exp).abs() < 1e-10, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+            }
+        }
+    }
+
+    #[test]
+    fn dunavant19_deg9_exact() {
+        let qr = TriQuadRule::Dunavant19Deg9.rule();
+        for i in 0u32..=9 {
+            for j in 0u32..=(9 - i) {
+                let got = integrate_monomial(&qr, i, j);
+                let exp = monomial_exact(i, j);
+                assert!((got - exp).abs() < 1e-9, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+            }
+        }
+    }
+
+    // ── tri_rule_named convenience wrapper ──────────────────────────────
+
+    #[test]
+    fn tri_rule_named_matches_enum() {
+        for deg in [0u8, 1, 2, 3, 5, 6, 7, 8, 9] {
+            let named = tri_rule_named(deg);
+            let via_enum = TriQuadRule::for_degree(deg).rule();
+            assert_eq!(named.points.len(), via_enum.points.len(), "deg={deg}");
         }
     }
 }
