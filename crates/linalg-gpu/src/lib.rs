@@ -8,6 +8,7 @@ pub mod vector_pipeline;
 pub use buffer::DeviceBuffer;
 pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;
+pub use spmv_pipeline::SpmvPipeline;
 pub use vector::GpuVector;
 
 #[derive(Debug, thiserror::Error)]
