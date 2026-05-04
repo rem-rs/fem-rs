@@ -39,6 +39,7 @@ pub mod lagrange;
 pub mod nedelec;
 pub mod raviart_thomas;
 pub mod nurbs;
+pub mod tri6_geom;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use quadrature::{TriQuadRule, tri_rule_named};

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fem-core   = { path = "../core" }
-nalgebra   = { workspace = true }
-thiserror  = { workspace = true }
+fem-core    = { path = "../core" }
+fem-element = { path = "../element" }
+nalgebra    = { workspace = true }
+thiserror   = { workspace = true }

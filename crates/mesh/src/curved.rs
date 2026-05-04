@@ -28,6 +28,7 @@
 //! ```
 
 use nalgebra::DMatrix;
+use fem_element::tri6_geom;
 use fem_core::NodeId;
 use crate::{element_type::ElementType, simplex::SimplexMesh};
 
@@ -181,16 +182,31 @@ impl<const D: usize> CurvedMesh<D> {
     /// Returns `(J, det(J))`.
     ///
     /// `J` is a `D×D` matrix in row-major order.
+    ///
+    /// For order-2 (Tri6) elements the geometry kernel is provided by
+    /// `fem_element::tri6_geom`.
     pub fn element_jacobian(&self, e: usize, xi: &[f64]) -> (DMatrix<f64>, f64) {
         let dim = D;
         let nodes = self.elem_geom_nodes(e);
-        let n = nodes.len();
 
-        // Evaluate geometric basis gradients at xi.
+        if self.geom_order == 2 && D == 2 {
+            // Fast path: delegate to the canonical tri6_geom kernel.
+            let mut nodes_flat = [0.0f64; 12];
+            for k in 0..6 {
+                let xk = self.node_coords(nodes[k]);
+                nodes_flat[2 * k    ] = xk[0];
+                nodes_flat[2 * k + 1] = xk[1];
+            }
+            let (j_flat, det) = tri6_geom::jacobian(&nodes_flat, xi);
+            let j = DMatrix::from_row_slice(2, 2, &j_flat);
+            return (j, det);
+        }
+
+        // General fallback for order-1 (TriP1).
+        let n = nodes.len();
         let mut grad_ref = vec![0.0_f64; n * dim];
         eval_geom_grad_basis(self.geom_order, xi, &mut grad_ref);
 
-        // J[i,j] = Σ_k x_k[i] * ∂φ_k/∂ξ_j
         let mut j = DMatrix::<f64>::zeros(dim, dim);
         for row in 0..dim {
             for col in 0..dim {
@@ -207,9 +223,25 @@ impl<const D: usize> CurvedMesh<D> {
     }
 
     /// Physical coordinates of reference point `xi` in element `e`.
+    ///
+    /// For order-2 (Tri6) elements the mapping is computed via
+    /// `fem_element::tri6_geom::ref_to_phys`.
     pub fn reference_to_physical(&self, e: usize, xi: &[f64]) -> [f64; D] {
-        let dim = D;
         let nodes = self.elem_geom_nodes(e);
+
+        if self.geom_order == 2 && D == 2 {
+            let mut nodes_flat = [0.0f64; 12];
+            for k in 0..6 {
+                let xk = self.node_coords(nodes[k]);
+                nodes_flat[2 * k    ] = xk[0];
+                nodes_flat[2 * k + 1] = xk[1];
+            }
+            let xp2 = tri6_geom::ref_to_phys(&nodes_flat, xi);
+            return std::array::from_fn(|i| xp2[i]);
+        }
+
+        // Order-1 fallback.
+        let dim = D;
         let n = nodes.len();
         let mut phi = vec![0.0_f64; n];
         eval_geom_basis(self.geom_order, xi, &mut phi);
@@ -384,5 +416,57 @@ mod tests {
             x // identity — just checking that it's called
         });
         assert!(curved.n_nodes > mesh.n_nodes());
+    }
+
+    // ─── Phase 4 cross-validation: tri6_geom kernel == CurvedMesh results ────
+
+    #[test]
+    fn tri6_geom_jacobian_agrees_with_curved_mesh() {
+        use fem_element::tri6_geom;
+
+        // Build a P2 mesh and compare element_jacobian results against tri6_geom::jacobian.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let curved = CurvedMesh::elevate_to_order2(&mesh, |x| x);
+
+        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
+        for e in 0..curved.n_elems {
+            let nodes = curved.elem_geom_nodes(e);
+            let mut nodes_flat = [0.0f64; 12];
+            for k in 0..6 {
+                let xk = curved.node_coords(nodes[k]);
+                nodes_flat[2 * k    ] = xk[0];
+                nodes_flat[2 * k + 1] = xk[1];
+            }
+            let (_, det_geom) = tri6_geom::jacobian(&nodes_flat, &xi);
+            let (_, det_curved) = curved.element_jacobian(e, &xi);
+            let err = (det_geom - det_curved).abs();
+            assert!(err < 1e-13,
+                "elem {e}: tri6_geom det={det_geom:.9e}, CurvedMesh det={det_curved:.9e}, diff={err:.2e}");
+        }
+    }
+
+    #[test]
+    fn tri6_geom_ref_to_phys_agrees_with_curved_mesh() {
+        use fem_element::tri6_geom;
+
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let curved = CurvedMesh::elevate_to_order2(&mesh, |x| x);
+
+        let xi = vec![0.2, 0.3];
+        for e in 0..curved.n_elems {
+            let nodes = curved.elem_geom_nodes(e);
+            let mut nodes_flat = [0.0f64; 12];
+            for k in 0..6 {
+                let xk = curved.node_coords(nodes[k]);
+                nodes_flat[2 * k    ] = xk[0];
+                nodes_flat[2 * k + 1] = xk[1];
+            }
+            let xp_geom   = tri6_geom::ref_to_phys(&nodes_flat, &xi);
+            let xp_curved = curved.reference_to_physical(e, &xi);
+            let err = ((xp_geom[0] - xp_curved[0]).powi(2)
+                     + (xp_geom[1] - xp_curved[1]).powi(2)).sqrt();
+            assert!(err < 1e-13,
+                "elem {e}: tri6_geom xp={xp_geom:?}, CurvedMesh xp={xp_curved:?}, dist={err:.2e}");
+        }
     }
 }
