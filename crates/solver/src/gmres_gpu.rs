@@ -6,7 +6,7 @@
 use fem_linalg::CsrMatrix;
 use fem_linalg_gpu::{
     GpuContext, GpuCsrMatrix, GpuVector,
-    SpmvPipeline, VectorOpsPipeline,
+    SpmvPipeline, VectorOpsPipeline, read_partial_reduction,
 };
 use wgpu;
 use crate::{SolverConfig, SolveResult, SolverError};
@@ -32,7 +32,7 @@ pub fn solve_gmres_gpu(
     let gpu_b = GpuVector::from_slice(ctx, b);
     let mut gpu_x = GpuVector::from_slice(ctx, x);
 
-    let b_norm = compute_norm2(ctx, &vops, &gpu_b);
+    let b_norm = vops.compute_norm2(ctx, &gpu_b);
     let tol = cfg.atol.max(cfg.rtol * b_norm);
     let n_wg = (n + 255) / 256;
     let dot_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -47,7 +47,7 @@ pub fn solve_gmres_gpu(
     for _outer in 0..cfg.max_iter / restart + 1 {
         // r = b - A*x
         let gpu_r = compute_residual(ctx, &spmv, &vops, &gpu_a, &gpu_b, &gpu_x, n);
-        let r_norm = compute_norm2(ctx, &vops, &gpu_r);
+        let r_norm = vops.compute_norm2(ctx, &gpu_r);
 
         if r_norm < tol {
             let cpu_x = gpu_x.read_to_cpu(ctx);
@@ -102,7 +102,7 @@ pub fn solve_gmres_gpu(
                 }
             }
 
-            let w_norm = compute_norm2(ctx, &vops, &gpu_w);
+            let w_norm = vops.compute_norm2(ctx, &gpu_w);
             h[(jj + 1) * restart + jj] = w_norm;
 
             // Apply previous Givens rotations to the new column of H
@@ -176,26 +176,6 @@ pub fn solve_gmres_gpu(
     Err(SolverError::ConvergenceFailed { max_iter: cfg.max_iter, residual: 0.0 })
 }
 
-// ── Helpers ──
-
-fn compute_norm2(
-    ctx: &GpuContext,
-    vops: &VectorOpsPipeline,
-    v: &GpuVector<f64>,
-) -> f64 {
-    let n_wg = (v.len() + 255) / 256;
-    let dot_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("tmp_norm"),
-        size: n_wg as u64 * 8,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    vops.encode_dot(ctx, &mut enc, v, v, &dot_buf);
-    ctx.queue.submit(Some(enc.finish()));
-    read_partial_reduction(ctx, &dot_buf, n_wg).sqrt()
-}
-
 fn compute_residual(
     ctx: &GpuContext,
     spmv: &SpmvPipeline,
@@ -223,29 +203,4 @@ fn compute_residual(
         ctx.queue.submit(Some(enc.finish()));
     }
     r
-}
-
-fn read_partial_reduction(ctx: &GpuContext, result_buf: &wgpu::Buffer, n_wg: u32) -> f64 {
-    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("reduce_staging"),
-        size: n_wg as u64 * 8,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    enc.copy_buffer_to_buffer(result_buf, 0, &staging, 0, n_wg as u64 * 8);
-    ctx.queue.submit(Some(enc.finish()));
-
-    let mapped = staging.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    mapped.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
-    ctx.device.poll(wgpu::Maintain::Wait);
-    rx.recv().unwrap().unwrap();
-
-    let view = mapped.get_mapped_range();
-    let partials: &[f64] = bytemuck::cast_slice(&view);
-    let sum: f64 = partials.iter().sum();
-    drop(view);
-    staging.unmap();
-    sum
 }

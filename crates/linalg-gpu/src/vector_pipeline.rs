@@ -244,4 +244,46 @@ impl VectorOpsPipeline {
         cpass.set_bind_group(0, &bg, &[]);
         cpass.dispatch_workgroups(n_workgroups, 1, 1);
     }
+
+    /// Compute ||v||₂ by dispatching dot(v,v) and reading back the
+    /// partial reduction. Creates a temporary result buffer internally.
+    pub fn compute_norm2<T: Scalar>(&self, ctx: &GpuContext, v: &GpuVector<T>) -> f64 {
+        let n_wg = (v.len() + 255) / 256;
+        let dot_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("norm2_tmp"),
+            size: n_wg as u64 * 8,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        self.encode_dot(ctx, &mut enc, v, v, &dot_buf);
+        ctx.queue.submit(Some(enc.finish()));
+        read_partial_reduction(ctx, &dot_buf, n_wg).sqrt()
+    }
+}
+
+/// Read back a GPU partial-reduction buffer (post dot dispatch) and sum on CPU.
+pub fn read_partial_reduction(ctx: &GpuContext, result_buf: &wgpu::Buffer, n_wg: u32) -> f64 {
+    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("reduce_staging"),
+        size: n_wg as u64 * 8,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    enc.copy_buffer_to_buffer(result_buf, 0, &staging, 0, n_wg as u64 * 8);
+    ctx.queue.submit(Some(enc.finish()));
+
+    let mapped = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    mapped.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+    ctx.device.poll(wgpu::Maintain::Wait);
+    rx.recv().unwrap().unwrap();
+
+    let view = mapped.get_mapped_range();
+    let partials: &[f64] = bytemuck::cast_slice(&view);
+    let sum: f64 = partials.iter().sum();
+    drop(view);
+    staging.unmap();
+    sum
 }

@@ -6,7 +6,7 @@
 use fem_linalg::CsrMatrix;
 use fem_linalg_gpu::{
     GpuContext, GpuCsrMatrix, GpuVector,
-    SpmvPipeline, VectorOpsPipeline,
+    SpmvPipeline, VectorOpsPipeline, read_partial_reduction,
 };
 use wgpu;
 use crate::{SolverConfig, SolveResult, SolverError};
@@ -82,7 +82,7 @@ pub fn solve_cg_gpu(
         read_partial_reduction(ctx, &dot_buf, n_wg)
     };
 
-    let b_norm = compute_norm2_gpu(ctx, &vec_pipeline, &gpu_b, &dot_buf);
+    let b_norm = vec_pipeline.compute_norm2(ctx, &gpu_b);
     let tol = cfg.atol.max(cfg.rtol * b_norm);
 
     for iter in 0..cfg.max_iter {
@@ -152,49 +152,9 @@ pub fn solve_cg_gpu(
     // Did not converge
     let cpu_x = gpu_x.read_to_cpu(ctx);
     x.copy_from_slice(&cpu_x);
-    let final_r = compute_norm2_gpu(ctx, &vec_pipeline, &gpu_r, &dot_buf);
+    let final_r = vec_pipeline.compute_norm2(ctx, &gpu_r);
     Err(SolverError::ConvergenceFailed {
         max_iter: cfg.max_iter,
         residual: final_r,
     })
-}
-
-/// Read back a partial reduction result from GPU dot product and sum on CPU.
-fn read_partial_reduction(ctx: &GpuContext, result_buf: &wgpu::Buffer, n_wg: u32) -> f64 {
-    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("reduce_staging"),
-        size: n_wg as u64 * 8,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    enc.copy_buffer_to_buffer(result_buf, 0, &staging, 0, n_wg as u64 * 8);
-    ctx.queue.submit(Some(enc.finish()));
-
-    let mapped = staging.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    mapped.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
-    ctx.device.poll(wgpu::Maintain::Wait);
-    rx.recv().unwrap().unwrap();
-
-    let view = mapped.get_mapped_range();
-    let partials: &[f64] = bytemuck::cast_slice(&view);
-    let sum: f64 = partials.iter().sum();
-    drop(view);
-    staging.unmap();
-    sum
-}
-
-fn compute_norm2_gpu(
-    ctx: &GpuContext,
-    vec_pipeline: &VectorOpsPipeline,
-    v: &GpuVector<f64>,
-    dot_buf: &wgpu::Buffer,
-) -> f64 {
-    let n_wg = (v.len() + 255) / 256;
-    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    vec_pipeline.encode_dot(ctx, &mut enc, v, v, dot_buf);
-    ctx.queue.submit(Some(enc.finish()));
-    read_partial_reduction(ctx, dot_buf, n_wg).sqrt()
 }
