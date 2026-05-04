@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [complex-coeff, complex-ex22, named-attrs, named-attrs-io, electromagnetic-pml, electromagnetic-absorbing, backend-contract]
+        suite: [complex-coeff, complex-ex22, named-attrs, named-attrs-io, electromagnetic-pml, electromagnetic-absorbing, backend-contract, io-mixed-topology, io-mesh-coords-checkpoint, quad-hex-aniso-amr, amg-stress, hcurl-maxwell-eigen]
 
     steps:
       - name: Checkout
@@ -65,6 +65,40 @@ jobs:
             cargo run --example mfem_ex3 --quiet -- --pml-like --pml-thickness 0.2 --sigma-max 2.0 --wx 1.0 --wy 1.5
           elif [[ "$SUITE" == "electromagnetic-absorbing" ]]; then
             cargo run --example mfem_ex34 --quiet -- --anisotropic --gamma-x 1.0 --gamma-y 1.5
+          elif [[ "$SUITE" == "io-mixed-topology" ]]; then
+            # Netgen .vol Prism6/Pyramid5 + surfaceelements round-trip
+            cargo test -p fem-io --lib -- prism6 --nocapture
+            cargo test -p fem-io --lib -- pyramid5 --nocapture
+            cargo test -p fem-io --lib -- surfaceelements --nocapture
+            cargo test -p fem-io --lib -- mixed_tet4_prism6 --nocapture
+            # Abaqus C3D5/C3D6 support
+            cargo test -p fem-io --lib -- c3d5 --nocapture
+            cargo test -p fem-io --lib -- c3d6 --nocapture
+            cargo test -p fem-io --lib -- mixed_c3d4_c3d6 --nocapture
+            # XDMF mixed-topology writer
+            cargo test -p fem-io --lib -- xdmf --nocapture
+          elif [[ "$SUITE" == "io-mesh-coords-checkpoint" ]]; then
+            # HDF5 checkpoint mesh coords API (write/read/latest)
+            cargo test -p fem-io-hdf5-parallel --lib -- mesh_coords --nocapture
+            # Hyperslab multi-step restart integration tests
+            cargo test -p fem-io-hdf5-parallel --lib -- hyperslab_multi_step --nocapture
+            cargo test -p fem-io-hdf5-parallel --lib -- hyperslab_restart --nocapture
+          elif [[ "$SUITE" == "quad-hex-aniso-amr" ]]; then
+            # Quad4/Hex8 anisotropic NC AMR — QuadRefineDir/HexRefineDir exported from fem-mesh
+            cargo test -p fem-mesh --lib -- quad_aniso hex_aniso --nocapture
+            # Example-level integration: ex15_dynamic_amr aniso tests
+            cargo test --example mfem_ex15_dynamic_amr -- ex15_quad_aniso ex15_hex_aniso --nocapture
+          elif [[ "$SUITE" == "amg-stress" ]]; then
+            # W3-2: Anisotropic + high-contrast AMG stress cases
+            cargo test -p fem-amg --lib -- amg_cg_anisotropic --nocapture
+            cargo test -p fem-amg --lib -- amg_cg_high_contrast --nocapture
+            # W3-3: High-Pe and reversed-advection AIR-GMRES stress cases
+            cargo test -p fem-amg --lib -- amg_air_gmres_high_peclet --nocapture
+            cargo test -p fem-amg --lib -- amg_air_gmres_reverse_advection --nocapture
+            cargo test -p fem-amg --lib -- amg_air_hierarchy_builds_for_extreme_peclet --nocapture
+          elif [[ "$SUITE" == "hcurl-maxwell-eigen" ]]; then
+            # P3: H(curl) matrix-free + AMG-preconditioned LOBPCG Maxwell eigenproblem smoke gate
+            cargo test -p fem-assembly --lib -- hcurl_eigen_amg --nocapture
           else
             # backend-contract: fem-assembly compiled with reed feature
             cargo test -p fem-assembly --features reed --lib -- backend_resource --nocapture

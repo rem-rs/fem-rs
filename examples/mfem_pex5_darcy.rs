@@ -249,4 +249,36 @@ mod tests {
             alpha1.solution_checksum,
             alpha10.solution_checksum);
     }
+
+    #[test]
+    fn pex5_darcy_coarser_mesh_has_larger_h_and_fewer_dofs() {
+        let coarse = run_case(4, 2, 1.0, 1.0, 1.0);
+        let fine = run_case(8, 2, 1.0, 1.0, 1.0);
+        assert!(coarse.converged && fine.converged);
+        assert!(coarse.h > fine.h,
+            "expected coarser mesh to have larger h: coarse={} fine={}", coarse.h, fine.h);
+        assert!(coarse.global_dofs < fine.global_dofs,
+            "expected coarser mesh to have fewer DOFs: coarse={} fine={}", coarse.global_dofs, fine.global_dofs);
+    }
+
+    #[test]
+    fn pex5_darcy_finer_mesh_has_smaller_h_and_more_dofs() {
+        let standard = run_case(8, 2, 1.0, 1.0, 1.0);
+        let fine = run_case(16, 2, 1.0, 1.0, 1.0);
+        assert!(standard.converged && fine.converged);
+        assert!(fine.h < standard.h,
+            "expected finer mesh to have smaller h: standard={} fine={}", standard.h, fine.h);
+        assert!(fine.global_dofs > standard.global_dofs,
+            "expected finer mesh to have more DOFs: standard={} fine={}", standard.global_dofs, fine.global_dofs);
+    }
+
+    #[test]
+    fn pex5_darcy_zero_source_gives_trivial_solution() {
+        let result = run_case(8, 2, 1.0, 1.0, 0.0);
+        assert!(result.converged);
+        assert!(result.rhs_norm < 1.0e-12, "rhs norm should vanish: {}", result.rhs_norm);
+        assert!(result.solution_norm < 1.0e-12, "solution norm should vanish: {}", result.solution_norm);
+        assert!(result.solution_checksum.abs() < 1.0e-12,
+            "solution checksum should vanish: {}", result.solution_checksum);
+    }
 }

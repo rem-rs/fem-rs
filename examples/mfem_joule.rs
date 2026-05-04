@@ -180,4 +180,22 @@ mod tests {
 			final_energy_gap
 		);
 	}
+
+        #[test]
+        fn joule_energy_history_is_monotone_decreasing_with_nonzero_sigma() {
+                let energies = run_with_sigma_history(0.5, 0.01, 30);
+                assert!(energies.len() == 31, "expected 31 energy snapshots (initial + 30 steps)");
+                // Energy may briefly oscillate within a step (leapfrog splitting), but the
+                // overall trend must be downward: final energy < initial energy.
+                let e0 = energies[0];
+                let e_final = *energies.last().unwrap();
+                assert!(e_final < e0,
+                    "expected final energy to be strictly less than initial: initial={} final={}",
+                    e0, e_final);
+                // Also check that no step exceeds 110% of the initial energy (no blow-up).
+                for (i, &e) in energies.iter().enumerate() {
+                        assert!(e < 1.1 * e0,
+                            "energy blow-up at step {}: e0={} ei={}", i, e0, e);
+                }
+        }
 }

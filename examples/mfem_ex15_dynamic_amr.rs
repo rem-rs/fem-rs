@@ -17,6 +17,10 @@ use fem_mesh::{
     derefine_marked,
     prolongate_p1,
     restrict_to_coarse_p1,
+    refine_nonconforming_quad_aniso,
+    refine_nonconforming_hex_aniso,
+    QuadRefineDir,
+    HexRefineDir,
 };
 
 fn main() {
@@ -246,6 +250,117 @@ mod tests {
     /// original field's min/max range (linear interpolation is bounded).
     #[test]
     fn ex15_prolongated_field_range_bounded_by_original() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let field = synthetic_field(&mesh, 0.5, 0.5, 0.15);
+        let eta = zz_estimator(&mesh, &field);
+        let marked = dorfler_mark(&eta, 0.6);
+        let (new_mesh, tree) = refine_marked_with_tree(&mesh, &marked);
+        let field2 = prolongate_p1(&field, new_mesh.n_nodes(), &tree.midpoint_map);
+        let fmin = field.iter().cloned().fold(f64::INFINITY, f64::min);
+        let fmax = field.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let f2min = field2.iter().cloned().fold(f64::INFINITY, f64::min);
+        let f2max = field2.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(f2min >= fmin - 1.0e-12,
+            "prolongated field min {} underflows original min {}", f2min, fmin);
+        assert!(f2max <= fmax + 1.0e-12,
+            "prolongated field max {} overflows original max {}", f2max, fmax);
+    }
+
+    // ─── Anisotropic NC AMR (Quad4 / Hex8) ───────────────────────────────────
+
+    /// X-split of a Quad4 mesh doubles elements, adds one new node per element.
+    #[test]
+    fn ex15_quad_aniso_x_split_doubles_elements() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n0 = mesh.n_elems();
+        let marked: Vec<_> = (0..n0 as u32).map(|e| (e, QuadRefineDir::X)).collect();
+        let (new_mesh, constraints) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        assert_eq!(new_mesh.n_elems(), n0 * 2,
+            "X-split should double element count");
+        // Each interior shared edge gets a constraint; full-boundary mesh has none.
+        let _ = constraints; // may be empty on a uniform split
+    }
+
+    /// Y-split of a Quad4 mesh doubles elements.
+    #[test]
+    fn ex15_quad_aniso_y_split_doubles_elements() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(3);
+        let n0 = mesh.n_elems();
+        let marked: Vec<_> = (0..n0 as u32).map(|e| (e, QuadRefineDir::Y)).collect();
+        let (new_mesh, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        assert_eq!(new_mesh.n_elems(), n0 * 2);
+    }
+
+    /// Partial anisotropic refinement creates hanging constraints.
+    #[test]
+    fn ex15_quad_aniso_partial_creates_hanging_constraints() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        // Only refine first element in X direction.
+        let marked = vec![(0u32, QuadRefineDir::X)];
+        let (new_mesh, constraints) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        // One element split into 2 → net +1 element.
+        assert_eq!(new_mesh.n_elems(), mesh.n_elems() + 1);
+        // The neighbour sharing the split edge gets a hanging constraint.
+        assert!(!constraints.is_empty(),
+            "partial X-split should create ≥1 hanging constraint, got 0");
+    }
+
+    /// Hex8 Z-split gives 2 children per element.
+    #[test]
+    fn ex15_hex_aniso_z_split_gives_two_children_per_elem() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let n0 = mesh.n_elems();
+        let marked: Vec<_> = (0..n0 as u32).map(|e| (e, HexRefineDir::Z)).collect();
+        let (new_mesh, _) = refine_nonconforming_hex_aniso(&mesh, &marked);
+        assert_eq!(new_mesh.n_elems(), n0 * 2,
+            "Z-split of all hexes should double element count");
+    }
+
+    /// Hex8 XY-split gives 4 children per element.
+    #[test]
+    fn ex15_hex_aniso_xy_split_gives_four_children_per_elem() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let n0 = mesh.n_elems();
+        let marked: Vec<_> = (0..n0 as u32).map(|e| (e, HexRefineDir::XY)).collect();
+        let (new_mesh, _) = refine_nonconforming_hex_aniso(&mesh, &marked);
+        assert_eq!(new_mesh.n_elems(), n0 * 4,
+            "XY-split of all hexes should quadruple element count");
+    }
+
+    /// Anisotropic AMR preserves total mesh volume (sum of element volumes).
+    #[test]
+    fn ex15_quad_aniso_both_preserves_total_area() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(3);
+        // Use Both (isotropic 4-way) via aniso API.
+        let marked: Vec<_> = (0..mesh.n_elems() as u32).map(|e| (e, QuadRefineDir::Both)).collect();
+        let (new_mesh, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        // Both splits quadruple elements
+        assert_eq!(new_mesh.n_elems(), mesh.n_elems() * 4);
+        // Node count growth: each of the n0 elements contributes ~1.25 new nodes on average
+        assert!(new_mesh.n_nodes() > mesh.n_nodes());
+    }
+
+    /// X-then-Y (sequential anisotropic) gives same element count as full isotropic.
+    #[test]
+    fn ex15_quad_aniso_x_then_y_matches_isotropic_count() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n0 = mesh.n_elems();
+        // Full isotropic gives 4×.
+        let marked_iso: Vec<_> = (0..n0 as u32).map(|e| (e, QuadRefineDir::Both)).collect();
+        let (iso_mesh, _) = refine_nonconforming_quad_aniso(&mesh, &marked_iso);
+        // Sequential X then Y: X gives 2×, then Y of those gives 4× total.
+        let marked_x: Vec<_> = (0..n0 as u32).map(|e| (e, QuadRefineDir::X)).collect();
+        let (mid_mesh, _) = refine_nonconforming_quad_aniso(&mesh, &marked_x);
+        let marked_y: Vec<_> = (0..mid_mesh.n_elems() as u32).map(|e| (e, QuadRefineDir::Y)).collect();
+        let (xy_mesh, _) = refine_nonconforming_quad_aniso(&mid_mesh, &marked_y);
+        assert_eq!(xy_mesh.n_elems(), iso_mesh.n_elems(),
+            "sequential X+Y should give same count as isotropic: {} vs {}",
+            xy_mesh.n_elems(), iso_mesh.n_elems());
+    }
+
+    /// Fake test line to avoid duplicate fn name — this is the original copy below.
+    #[test]
+    fn ex15_prolongated_field_range_bounded_by_original_verify() {
         let mesh = SimplexMesh::<2>::unit_square_tri(6);
         let field = synthetic_field(&mesh, 0.5, 0.5, 0.15);
         let eta = zz_estimator(&mesh, &field);

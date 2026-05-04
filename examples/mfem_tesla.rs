@@ -106,4 +106,35 @@ mod tests {
 			);
 		}
 	}
+
+        #[test]
+        fn tesla_finer_mesh_also_converges_with_small_residual() {
+                let (_mesh, _u, _iters, res_coarse) = solve_tesla(8);
+                let (_mesh, _u, _iters, res_fine) = solve_tesla(16);
+                assert!(res_coarse < 1e-8, "coarse PCG residual too large: {}", res_coarse);
+                assert!(res_fine < 1e-8, "fine PCG residual too large: {}", res_fine);
+        }
+
+        #[test]
+        fn tesla_negative_source_flips_solution_sign() {
+                let (_mesh, u_pos, _iters, res_pos) = solve_tesla_with_scale(12, DEFAULT_SOURCE_SCALE);
+                let (_mesh, u_neg, _iters, res_neg) = solve_tesla_with_scale(12, -DEFAULT_SOURCE_SCALE);
+                assert!(res_pos < 1e-8 && res_neg < 1e-8);
+                assert_eq!(u_pos.len(), u_neg.len());
+                for (i, (&p, &n)) in u_pos.iter().zip(&u_neg).enumerate() {
+                        assert!(
+                                (p + n).abs() < 1e-10,
+                                "expected sign flip at node {}: u_pos={} u_neg={}", i, p, n
+                        );
+                }
+        }
+
+        #[test]
+        fn tesla_solution_is_nonnegative_for_positive_source() {
+                // Zero Dirichlet BCs + non-negative source → solution ≥ 0 (maximum principle).
+                let (_mesh, u, _iters, res) = solve_tesla(12);
+                assert!(res < 1e-8, "PCG residual too large: {}", res);
+                let min_val = u.iter().cloned().fold(f64::INFINITY, f64::min);
+                assert!(min_val >= -1e-10, "expected non-negative solution for positive source, got min={}", min_val);
+        }
 }

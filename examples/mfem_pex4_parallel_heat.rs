@@ -395,4 +395,13 @@ mod tests {
         assert!((two.solution_checksum - four.solution_checksum).abs() < 1.0e-10,
             "P2 checksum mismatch: two={} four={}", two.solution_checksum, four.solution_checksum);
     }
+
+    #[test]
+    fn pex4_parallel_heat_larger_initial_scale_gives_larger_solution_norm() {
+        let small = run_case(8, 2, 1, 0.01, 0.1, 1.0, 0.5);
+        let large = run_case(8, 2, 1, 0.01, 0.1, 1.0, 2.0);
+        assert!(large.solution_norm > small.solution_norm,
+            "expected larger initial scale to produce a larger solution norm: small={} large={}",
+            small.solution_norm, large.solution_norm);
+    }
 }

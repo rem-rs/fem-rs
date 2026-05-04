@@ -313,4 +313,38 @@ mod tests {
             metis_streaming.final_residual
         );
     }
+
+    #[test]
+    fn pex1_poisson_coarser_mesh_gives_larger_l2_error() {
+        let coarse = run_case(RunArgs { order: 1, n_workers: 2, mesh_n: 4, use_metis: false, use_streaming: false });
+        let fine = run_case(run_args(1, 2, false, false)); // mesh_n=8
+        assert!(coarse.converged && fine.converged);
+        assert!(coarse.l2_err > fine.l2_err,
+            "expected coarser mesh to yield larger L2 error: coarse={} fine={}", coarse.l2_err, fine.l2_err);
+        assert!(coarse.global_dofs < fine.global_dofs,
+            "expected coarser mesh to have fewer global DOFs: coarse={} fine={}", coarse.global_dofs, fine.global_dofs);
+    }
+
+    #[test]
+    fn pex1_poisson_p1_single_worker_matches_two_workers() {
+        let one = run_case(RunArgs { order: 1, n_workers: 1, mesh_n: 8, use_metis: false, use_streaming: false });
+        let two = run_case(run_args(1, 2, false, false));
+        assert!(one.converged && two.converged);
+        assert_eq!(one.global_dofs, two.global_dofs);
+        assert!((one.l2_err - two.l2_err).abs() < 1.0e-12,
+            "single vs two workers L2 error mismatch: one={} two={}", one.l2_err, two.l2_err);
+        assert!((one.solution_norm - two.solution_norm).abs() < 1.0e-12,
+            "single vs two workers norm mismatch: one={} two={}", one.solution_norm, two.solution_norm);
+    }
+
+    #[test]
+    fn pex1_poisson_p2_finer_mesh_reduces_l2_error() {
+        let coarse = run_case(run_args(2, 2, false, false)); // mesh_n=8
+        let fine = run_case(RunArgs { order: 2, n_workers: 2, mesh_n: 16, use_metis: false, use_streaming: false });
+        assert!(coarse.converged && fine.converged);
+        assert!(fine.l2_err < coarse.l2_err,
+            "expected finer mesh to reduce L2 error: coarse={} fine={}", coarse.l2_err, fine.l2_err);
+        assert!(fine.global_dofs > coarse.global_dofs,
+            "expected finer mesh to have more DOFs: coarse={} fine={}", coarse.global_dofs, fine.global_dofs);
+    }
 }

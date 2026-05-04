@@ -38,6 +38,12 @@ use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3}};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
+use fem_mesh::ElementTransformation;
+use fem_space::fe_space::SpaceType;
+use crate::vector_assembler::{
+    apply_signs, geo_ref_elem, isoparametric_jacobian,
+    piola_hcurl_basis, piola_hcurl_curl, vec_ref_elem,
+};
 
 // ─── MatFreeOperator trait ───────────────────────────────────────────────────
 
@@ -308,6 +314,319 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
     }
 }
 
+// ─── HcurlMatrixFreeOperator ─────────────────────────────────────────────────
+
+/// Matrix-free operator for H(curl): applies `(mu_inv · K_curl + alpha · M_e) x`.
+///
+/// Element matrices are precomputed at construction time (once) and stored.
+/// Each call to `apply` iterates over elements, gathers DOFs with orientation
+/// signs, multiplies by the precomputed element matrix, and scatters back —
+/// **without forming the global sparse matrix**.
+///
+/// # Physical problem
+///
+/// Represents the weak form of `∇×(μ⁻¹ ∇×E) + α E = f`:
+/// ```text
+/// a(E, F) = μ⁻¹ ∫ (∇×E)·(∇×F) dx + α ∫ E·F dx
+/// ```
+///
+/// # Memory savings
+///
+/// Global CSR stores `O(n_edges × avg_nnz_per_row)` values; partial assembly
+/// stores `O(n_elem × n_ldofs²)`.  For TriND1 both are ~9 per element, but
+/// partial assembly also avoids the global gather/scatter at assembly time and
+/// enables streaming apply patterns.
+///
+/// # Supported element types
+///
+/// | Element | Order | DOFs/elem | Matrix size |
+/// |---------|-------|-----------|-------------|
+/// | `Tri3` (TriND1) | 1 | 3 | 3×3 |
+/// | `Tri3` (TriND2) | 2 | 8 | 8×8 |
+/// | `Tet4` (TetND1) | 1 | 6 | 6×6 |
+/// | `Tet4` (TetND2) | 2 | 20 | 20×20 |
+/// | `Quad4` (QuadND1/2) | 1/2 | 4/12 | 4×4 / 12×12 |
+/// | `Hex8` (HexND1/2) | 1/2 | 12/54 | 12×12 / 54×54 |
+pub struct HcurlMatrixFreeOperator {
+    n_dofs:        usize,
+    dofs_per_elem: usize,
+    n_elem:        usize,
+    /// Flattened global DOF indices: `elem_dofs[e * n + i]` = global DOF i of element e.
+    elem_dofs:  Vec<u32>,
+    /// Flattened element matrices with orientation signs incorporated:
+    /// `elem_mats[e * n² + i * n + j]` = sign[i] * sign[j] * K_e_unsigned[i, j].
+    elem_mats:  Vec<f64>,
+}
+
+impl HcurlMatrixFreeOperator {
+    /// Precompute element matrices for `(mu_inv · K_curl + alpha · M_e)`.
+    ///
+    /// - `space`      — H(curl) FE space.
+    /// - `mu_inv`     — scalar inverse permeability (1/μ).
+    /// - `alpha`      — scalar mass coefficient (e.g. ω² ε for frequency-domain).
+    /// - `quad_order` — quadrature order; use `order + 2` for accuracy.
+    pub fn new<S: FESpace>(space: &S, mu_inv: f64, alpha: f64, quad_order: u8) -> Self {
+        let mesh       = space.mesh();
+        let dim        = mesh.dim() as usize;
+        let n_dofs_g   = space.n_dofs();
+        let n_elem     = mesh.n_elements();
+        let stype      = space.space_type();
+        let elem_type0 = mesh.element_type(0);
+
+        assert_eq!(stype, SpaceType::HCurl,
+            "HcurlMatrixFreeOperator requires an H(curl) space");
+
+        let ref_elem       = vec_ref_elem(stype, elem_type0, dim, space.order());
+        let n              = ref_elem.n_dofs();   // DOFs per element
+        let quad           = ref_elem.quadrature(quad_order);
+        let curl_dim       = if dim == 2 { 1 } else { 3 };
+
+        let mut all_dofs  = Vec::with_capacity(n_elem * n);
+        let mut all_mats  = Vec::with_capacity(n_elem * n * n);
+
+        // Work buffers
+        let mut ref_phi  = vec![0.0_f64; n * dim];
+        let mut ref_curl = vec![0.0_f64; n * curl_dim];
+        let mut ref_div  = vec![0.0_f64; n];
+        let mut phi      = vec![0.0_f64; n * dim];
+        let mut curl     = vec![0.0_f64; n * curl_dim];
+        let mut div_buf  = vec![0.0_f64; n];
+
+        for e in mesh.elem_iter() {
+            let global_dofs = space.element_dofs(e);
+            let signs_opt   = space.element_signs(e);
+            let nodes       = mesh.element_nodes(e);
+            let elem_type   = mesh.element_type(e);
+
+            // Store DOFs and signs
+            all_dofs.extend_from_slice(global_dofs);
+            let elem_sign_slice: Vec<f64> = if let Some(s) = signs_opt {
+                s.to_vec()
+            } else {
+                vec![1.0_f64; n]
+            };
+
+            let use_iso = matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
+            let geo_elem = geo_ref_elem(elem_type);
+            let affine_tr = if use_iso {
+                None
+            } else {
+                Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+            };
+
+            let mut k_e = vec![0.0_f64; n * n];
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                let (jac, det_j, _xp) = if use_iso {
+                    let ge = geo_elem.as_ref().expect("geo_ref_elem for iso");
+                    isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim)
+                } else {
+                    let tr = affine_tr.as_ref().unwrap();
+                    (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
+                };
+
+                let j_inv_t = jac.clone().try_inverse()
+                    .expect("degenerate element in HcurlMatrixFreeOperator")
+                    .transpose();
+                let w = quad.weights[q] * det_j.abs();
+
+                ref_elem.eval_basis_vec(xi, &mut ref_phi);
+                ref_elem.eval_curl(xi, &mut ref_curl);
+                ref_elem.eval_div(xi, &mut ref_div);
+
+                piola_hcurl_basis(&j_inv_t, &ref_phi, &mut phi, n, dim);
+                piola_hcurl_curl(&jac, det_j, &ref_curl, &mut curl, n, dim);
+                div_buf[..ref_div.len()].copy_from_slice(&ref_div);
+
+                apply_signs(&elem_sign_slice, &mut phi, &mut curl, &mut div_buf, n, dim, curl_dim);
+
+                for i in 0..n {
+                    for j in 0..n {
+                        // Curl-curl contribution: mu_inv * ∫ curl(φ_i)·curl(φ_j) dx
+                        let cc: f64 = (0..curl_dim).map(|c| curl[i*curl_dim+c] * curl[j*curl_dim+c]).sum();
+                        // Vector mass contribution: alpha * ∫ φ_i·φ_j dx
+                        let mm: f64 = (0..dim).map(|c| phi[i*dim+c] * phi[j*dim+c]).sum();
+                        k_e[i * n + j] += w * (mu_inv * cc + alpha * mm);
+                    }
+                }
+            }
+
+            all_mats.extend_from_slice(&k_e);
+        }
+
+        HcurlMatrixFreeOperator {
+            n_dofs: n_dofs_g,
+            dofs_per_elem: n,
+            n_elem,
+            elem_dofs:  all_dofs,
+            elem_mats:  all_mats,
+        }
+    }
+}
+
+impl MatFreeOperator for HcurlMatrixFreeOperator {
+    fn n_dofs(&self) -> usize { self.n_dofs }
+
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        let n  = self.dofs_per_elem;
+        let n2 = n * n;
+
+        for e in 0..self.n_elem {
+            let dofs = &self.elem_dofs [e * n .. (e + 1) * n];
+            let mat  = &self.elem_mats [e * n2 .. (e + 1) * n2];
+
+            // Gather: x_e[i] = x[dofs[i]]
+            // (Signs are already incorporated into the precomputed element matrix.)
+            let x_e: Vec<f64> = (0..n).map(|i| x[dofs[i] as usize]).collect();
+
+            // z_e[i] = Σ_j K_e_signed[i,j] * x_e[j]
+            let mut z_e = vec![0.0_f64; n];
+            for i in 0..n {
+                let row = &mat[i * n .. (i + 1) * n];
+                z_e[i] = row.iter().zip(x_e.iter()).map(|(m, xe)| m * xe).sum();
+            }
+
+            // Scatter: y[dofs[i]] += z_e[i]
+            for i in 0..n {
+                y[dofs[i] as usize] += z_e[i];
+            }
+        }
+    }
+}
+
+/// Solve `(mu_inv · K_curl + alpha · M_e) x = b` using matrix-free CG.
+///
+/// Uses the `HcurlMatrixFreeOperator` to apply the operator without forming
+/// the global sparse matrix.  Suitable for large meshes where CSR assembly
+/// would exhaust memory.
+///
+/// Returns `(x, n_iters, residual_norm)`.
+pub fn solve_hcurl_matrix_free<S: FESpace>(
+    space: &S,
+    rhs: &[f64],
+    mu_inv: f64,
+    alpha: f64,
+    quad_order: u8,
+    rtol: f64,
+    max_iter: usize,
+) -> (Vec<f64>, usize, f64) {
+    let op = HcurlMatrixFreeOperator::new(space, mu_inv, alpha, quad_order);
+    let n = op.n_dofs();
+
+    let mut x = vec![0.0_f64; n];
+    let mut r = rhs.to_vec();
+    let mut p = r.clone();
+    let r0_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+
+    if r0_norm < 1e-300 {
+        return (x, 0, 0.0);
+    }
+
+    let mut rr = r.iter().map(|v| v * v).sum::<f64>();
+    let mut iters = 0;
+
+    for _ in 0..max_iter {
+        // Ap = op * p
+        let mut ap = vec![0.0_f64; n];
+        op.apply_zero(&p, &mut ap);
+
+        let pap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
+        if pap.abs() < 1e-300 { break; }
+        let alpha_cg = rr / pap;
+
+        for i in 0..n {
+            x[i] += alpha_cg * p[i];
+            r[i] -= alpha_cg * ap[i];
+        }
+
+        let rr_new: f64 = r.iter().map(|v| v * v).sum();
+        let res_norm = rr_new.sqrt();
+        iters += 1;
+
+        if res_norm < rtol * r0_norm { break; }
+
+        let beta = rr_new / rr;
+        rr = rr_new;
+        for i in 0..n { p[i] = r[i] + beta * p[i]; }
+    }
+
+    let res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt() / r0_norm;
+    (x, iters, res_norm)
+}
+
+// ─── Maxwell eigenproblem with AMG-preconditioned LOBPCG ─────────────────────
+
+/// Solve the Maxwell H(curl) generalised eigenproblem
+/// `K x = λ M x` using LOBPCG preconditioned by an AMG V-cycle.
+///
+/// The discrete gradient matrix `G` (H1 → H(curl)) is used to project out
+/// the discrete nullspace of the curl-curl operator (gradient modes).
+///
+/// # Arguments
+/// - `k_curl` — assembled curl-curl stiffness: `∫ μ⁻¹ curl u · curl v`.
+/// - `m_mass` — assembled vector mass: `∫ α u · v`.
+/// - `grad`   — discrete gradient matrix `G: H1 → H(curl)`.
+/// - `n_eigen` — number of eigenpairs to compute.
+/// - `cfg`     — LOBPCG configuration.
+///
+/// # Returns
+/// `EigenResult` with the first `n_eigen` non-zero eigenvalues (curl modes).
+pub fn solve_hcurl_eigen_preconditioned_amg(
+    k_curl:  &fem_linalg::CsrMatrix<f64>,
+    m_mass:  &fem_linalg::CsrMatrix<f64>,
+    grad:    &fem_linalg::CsrMatrix<f64>,
+    n_eigen: usize,
+    cfg:     &fem_solver::LobpcgConfig,
+) -> Result<fem_solver::EigenResult, String> {
+    use fem_solver::{SolverConfig};
+    use fem_amg::solve_amg_cg;
+    use nalgebra::DMatrix;
+
+    // Convert the discrete gradient columns to a dense constraint matrix so
+    // that LOBPCG projects out grad-modes (the curl-nullspace).
+    let n = k_curl.nrows;
+    let n_grad = grad.ncols;
+    let mut grad_dense = DMatrix::<f64>::zeros(n, n_grad);
+    for r in 0..n {
+        let start = grad.row_ptr[r];
+        let end   = grad.row_ptr[r + 1];
+        for k in start..end {
+            let c = grad.col_idx[k] as usize;
+            grad_dense[(r, c)] = grad.values[k];
+        }
+    }
+
+    // Build a regularised matrix K_reg = K_curl + reg * M_mass for AMG.
+    // (Pure K_curl is singular on the gradient modes, which makes AMG struggle.)
+    let reg = 0.1_f64;
+    let k_reg = k_curl.axpby(1.0, m_mass, reg);
+
+    // AMG preconditioner: one V-cycle per LOBPCG residual block column.
+    let amg_cfg = fem_amg::AmgConfig::default();
+    let amg_prec = move |r: &DMatrix<f64>| -> DMatrix<f64> {
+        let nrows = r.nrows();
+        let ncols = r.ncols();
+        let mut z = DMatrix::<f64>::zeros(nrows, ncols);
+        let sc = SolverConfig { max_iter: 80, rtol: 1e-3, ..SolverConfig::default() };
+        for c in 0..ncols {
+            let rhs: Vec<f64> = (0..nrows).map(|i| r[(i, c)]).collect();
+            let mut x = vec![0.0_f64; nrows];
+            let _ = solve_amg_cg(&k_reg, &rhs, &mut x, &amg_cfg, &sc);
+            for i in 0..nrows { z[(i, c)] = x[i]; }
+        }
+        z
+    };
+
+    fem_solver::lobpcg_constrained_preconditioned(
+        k_curl,
+        Some(m_mass),
+        n_eigen,
+        &grad_dense,
+        amg_prec,
+        cfg,
+    )
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -410,4 +729,192 @@ mod tests {
         let err: f64 = y_sum.iter().zip(twice.iter()).map(|(a,b)|(a-b).powi(2)).sum::<f64>().sqrt();
         assert!(err < 1e-13, "linearity check: {err:.3e}");
     }
+
+    // ── H(curl) partial assembly ──────────────────────────────────────────────
+
+    /// `HcurlMatrixFreeOperator` applied to x=1 matches the assembled sparse matrix.
+    #[test]
+    fn hcurl_mf_matches_assembled_tri_nd1() {
+        use fem_space::HCurlSpace;
+        use crate::VectorAssembler;
+        use crate::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+
+        let mesh  = fem_mesh::SimplexMesh::<2>::unit_square_tri(4);
+        let space = HCurlSpace::new(mesh, 1);
+        let n     = space.n_dofs();
+        let mu_inv = 2.0_f64;
+        let alpha  = 0.5_f64;
+
+        // Assembled sparse operator.
+        let k_asm = VectorAssembler::assemble_bilinear(
+            &space,
+            &[&CurlCurlIntegrator { mu: mu_inv },
+              &VectorMassIntegrator { alpha }],
+            3,
+        );
+
+        // Matrix-free operator.
+        let op = HcurlMatrixFreeOperator::new(&space, mu_inv, alpha, 3);
+
+        let x: Vec<f64> = (0..n).map(|i| ((i + 1) as f64) * 0.1).collect();
+        let mut y_asm = vec![0.0_f64; n];
+        let mut y_mf  = vec![0.0_f64; n];
+
+        k_asm.spmv(&x, &mut y_asm);
+        op.apply_zero(&x, &mut y_mf);
+
+        let err: f64 = y_mf.iter().zip(y_asm.iter())
+            .map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+        let ref_norm: f64 = y_asm.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(err / ref_norm.max(1e-15) < 1e-11,
+            "H(curl) mf vs assembled: rel_err = {:.3e}", err / ref_norm.max(1e-15));
+    }
+
+    /// `HcurlMatrixFreeOperator` for 3D TetND1 matches the assembled matrix.
+    #[test]
+    fn hcurl_mf_matches_assembled_tet_nd1() {
+        use fem_space::HCurlSpace;
+        use crate::VectorAssembler;
+        use crate::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+
+        let mesh  = fem_mesh::SimplexMesh::<3>::unit_cube_tet(2);
+        let space = HCurlSpace::new(mesh, 1);
+        let n     = space.n_dofs();
+        let mu_inv = 1.0_f64;
+        let alpha  = 1.0_f64;
+
+        let k_asm = VectorAssembler::assemble_bilinear(
+            &space,
+            &[&CurlCurlIntegrator { mu: mu_inv },
+              &VectorMassIntegrator { alpha }],
+            3,
+        );
+
+        let op = HcurlMatrixFreeOperator::new(&space, mu_inv, alpha, 3);
+
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) * 0.01).collect();
+        let mut y_asm = vec![0.0_f64; n];
+        let mut y_mf  = vec![0.0_f64; n];
+
+        k_asm.spmv(&x, &mut y_asm);
+        op.apply_zero(&x, &mut y_mf);
+
+        let err: f64 = y_mf.iter().zip(y_asm.iter())
+            .map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+        let ref_norm: f64 = y_asm.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let rel = err / ref_norm.max(1e-15);
+        assert!(rel < 1e-11,
+            "3D H(curl) mf vs assembled: rel_err = {:.3e}", rel);
+    }
+
+    /// `solve_hcurl_matrix_free` converges on a pure-mass problem (K_curl=0, alpha=1).
+    #[test]
+    fn solve_hcurl_matrix_free_pure_mass_converges() {
+        use fem_space::HCurlSpace;
+
+        // alpha=1, mu_inv=0: pure vector mass problem → M x = b, trivial.
+        let mesh  = fem_mesh::SimplexMesh::<2>::unit_square_tri(3);
+        let space = HCurlSpace::new(mesh, 1);
+        let n     = space.n_dofs();
+
+        // Assemble M for RHS
+        use crate::VectorAssembler;
+        use crate::standard::VectorMassIntegrator;
+        let m = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
+        let x_exact: Vec<f64> = (0..n).map(|i| ((i + 1) as f64) * 0.05).collect();
+        let mut rhs = vec![0.0_f64; n];
+        m.spmv(&x_exact, &mut rhs);
+
+        let (x_sol, iters, res) = solve_hcurl_matrix_free(&space, &rhs, 0.0, 1.0, 3, 1e-10, 1000);
+
+        assert!(res < 1e-8, "residual {res:.3e} not converged after {iters} iters");
+        let err: f64 = x_sol.iter().zip(x_exact.iter())
+            .map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+        let xnorm: f64 = x_exact.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(err / xnorm < 1e-8, "solution error {:.3e}", err / xnorm);
+    }
+
+    // ── AMG-preconditioned Maxwell eigen ──────────────────────────────────────
+
+    /// P3 smoke gate: AMG-preconditioned LOBPCG returns eigenvalues for a
+    /// small 2-D Maxwell cavity on the unit square.
+    #[test]
+    fn hcurl_eigen_amg_preconditioned_lobpcg_smoke() {
+        use fem_space::{HCurlSpace, H1Space};
+        use crate::VectorAssembler;
+        use crate::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+        use crate::discrete_op::DiscreteLinearOperator;
+        use fem_solver::LobpcgConfig;
+
+        let mesh   = fem_mesh::SimplexMesh::<2>::unit_square_tri(8);
+        let hcurl  = HCurlSpace::new(mesh.clone(), 1);
+        let h1     = H1Space::new(mesh, 1);
+
+        // Curl-curl stiffness + vector mass
+        let k_curl = VectorAssembler::assemble_bilinear(
+            &hcurl,
+            &[&CurlCurlIntegrator { mu: 1.0 }],
+            3,
+        );
+        let m_mass = VectorAssembler::assemble_bilinear(
+            &hcurl,
+            &[&VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+
+        // Discrete gradient G: H1 → H(curl)
+        let grad = DiscreteLinearOperator::gradient(&h1, &hcurl)
+            .expect("gradient matrix build failed");
+
+        let n = hcurl.n_dofs();
+        let n_grad = h1.n_dofs();
+        assert!(n > 100, "expected > 100 H(curl) DOFs for smoke gate, got {n}");
+        assert!(n_grad > 50, "expected > 50 H1 DOFs, got {n_grad}");
+
+        let cfg = LobpcgConfig { max_iter: 400, tol: 1e-4, verbose: false };
+        let result = solve_hcurl_eigen_preconditioned_amg(&k_curl, &m_mass, &grad, 4, &cfg)
+            .expect("LOBPCG failed");
+
+        assert_eq!(result.eigenvalues.len(), 4, "expected 4 eigenvalues");
+        // All eigenvalues should be finite and non-negative
+        for (i, &ev) in result.eigenvalues.iter().enumerate() {
+            assert!(ev.is_finite(), "eigenvalue[{i}] = {ev} is not finite");
+            assert!(ev >= -1e-6, "eigenvalue[{i}] = {ev:.6e} is spuriously negative");
+        }
+    }
+
+    /// Large-scale AMG-LOBPCG smoke gate (n > 200 free DOFs, k=3 modes).
+    #[test]
+    fn hcurl_eigen_amg_large_scale_smoke() {
+        use fem_space::{HCurlSpace, H1Space};
+        use crate::VectorAssembler;
+        use crate::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+        use crate::discrete_op::DiscreteLinearOperator;
+        use fem_solver::LobpcgConfig;
+
+        // n=7 → ≈168 Tri3 elements → 3D: unit_square_tri(7) gives ~98+49*2 edges
+        let mesh  = fem_mesh::SimplexMesh::<2>::unit_square_tri(8);
+        let hcurl = HCurlSpace::new(mesh.clone(), 1);
+        let h1    = H1Space::new(mesh, 1);
+
+        let k_curl = VectorAssembler::assemble_bilinear(
+            &hcurl, &[&CurlCurlIntegrator { mu: 1.0 }], 3);
+        let m_mass = VectorAssembler::assemble_bilinear(
+            &hcurl, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
+        let grad = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+
+        let n = hcurl.n_dofs();
+        assert!(n > 200, "need > 200 DOFs for large-scale smoke, got {n}");
+
+        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-4, verbose: false };
+        let result = solve_hcurl_eigen_preconditioned_amg(&k_curl, &m_mass, &grad, 3, &cfg)
+            .expect("large-scale AMG-LOBPCG failed");
+
+        assert_eq!(result.eigenvalues.len(), 3);
+        for (i, &ev) in result.eigenvalues.iter().enumerate() {
+            assert!(ev.is_finite(), "eigenvalue[{i}] = {ev} is not finite");
+            assert!(ev >= -1e-6, "eigenvalue[{i}] = {ev:.6e} is spuriously negative");
+        }
+    }
 }
+

@@ -19,8 +19,46 @@ use crate::comm::Comm;
 use crate::ghost::GhostExchange;
 use crate::par_csr::ParCsrMatrix;
 use crate::par_vector::ParVector;
+use crate::par_solver::par_solve_cg;
+use fem_solver::SolverConfig;
 
 // ── Configuration ───────────────────────────────────────────────────────────
+
+/// Smoother type for AMG V-cycle pre/post smoothing.
+///
+/// | Variant | Cost/iter | Convergence | Notes |
+/// |---------|-----------|-------------|-------|
+/// | `Jacobi` | O(nnz) | baseline | Parallel-friendly; damping ω = 2/3 |
+/// | `SymmetricGaussSeidel` | O(nnz) | ~2× better per sweep | Local forward+backward pass |
+/// | `Chebyshev` | d×O(nnz) | best per cost for SPD | Optimal polynomial in [λ_lo, λ_hi] |
+///
+/// For symmetric positive definite problems (Poisson, elasticity) `SymmetricGaussSeidel`
+/// typically halves the number of V-cycle iterations at the same or slightly
+/// higher per-iteration cost.  `Chebyshev` of degree 3 is often competitive
+/// with 2 SGS sweeps but is trivially parallel (no data dependency across rows).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SmootherType {
+    /// Damped Jacobi (ω = 2/3).  Default.
+    #[default]
+    Jacobi,
+    /// Symmetric Gauss-Seidel: one forward + one backward local sweep.
+    /// Ghost contributions are included via a prior ghost exchange but are
+    /// treated as fixed during the sweep (standard local SGS approximation).
+    SymmetricGaussSeidel,
+    /// Chebyshev polynomial smoother of given degree (1–8).
+    ///
+    /// Uses a Gershgorin upper bound for the spectral radius of `D⁻¹A`,
+    /// with the smoothing interval `[λ_max/ratio, 1.1·λ_max]`.
+    /// `ratio` defaults to 30 (typical for FEM Laplacian).
+    /// Degree 3 matches ~2–3 Jacobi sweeps at the same arithmetic cost
+    /// while reducing high-frequency error more uniformly.
+    Chebyshev {
+        /// Polynomial degree (number of SpMV calls per sweep).  Typical: 2–4.
+        degree: usize,
+        /// Low-end ratio: λ_lo = λ_max / ratio.  Default: 30.0.
+        ratio:  f64,
+    },
+}
 
 /// Configuration for the parallel AMG hierarchy.
 #[derive(Debug, Clone)]
@@ -29,12 +67,27 @@ pub struct ParAmgConfig {
     pub max_levels: usize,
     /// Coarsest level size (total global DOFs) below which we stop coarsening.
     pub coarse_size: usize,
-    /// Number of pre-smoothing Jacobi iterations.
+    /// Number of pre-smoothing iterations.
     pub n_pre_smooth: usize,
-    /// Number of post-smoothing Jacobi iterations.
+    /// Number of post-smoothing iterations.
     pub n_post_smooth: usize,
     /// Strength threshold for aggregation.
     pub strength_threshold: f64,
+    /// Smoother used for pre/post smoothing.  Default: `Jacobi`.
+    pub smoother: SmootherType,
+    /// Use smoothed prolongation (SA-AMG) instead of tentative prolongation.
+    ///
+    /// When `true`, the prolongation operator is improved by one step of
+    /// damped Jacobi smoothing: `P_smooth = (I - ω D⁻¹ A) P_tent`.
+    /// This reduces the energy of the coarse-space basis functions and
+    /// typically improves convergence by 20-40% for elliptic problems, at
+    /// the cost of one extra SpMV during setup.
+    pub smoothed_prolongation: bool,
+    /// Use CG to solve the coarsest level instead of fixed Jacobi iterations.
+    ///
+    /// CG terminates adaptively to a tight tolerance, giving a more accurate
+    /// coarse correction in (often) fewer floating-point operations.
+    pub coarse_cg: bool,
 }
 
 impl Default for ParAmgConfig {
@@ -45,6 +98,9 @@ impl Default for ParAmgConfig {
             n_pre_smooth: 2,
             n_post_smooth: 2,
             strength_threshold: 0.25,
+            smoother: SmootherType::Jacobi,
+            smoothed_prolongation: false,
+            coarse_cg: true,
         }
     }
 }
@@ -59,8 +115,10 @@ struct AmgLevel {
     p: Option<ParCsrMatrix>,
     /// Restriction operator (fine → coarse) = P^T.  `None` at the coarsest.
     r: Option<ParCsrMatrix>,
-    /// Inverse diagonal for Jacobi smoothing.
+    /// Inverse diagonal for Jacobi / Chebyshev smoothing.
     inv_diag: Vec<f64>,
+    /// Gershgorin upper bound on the spectral radius of D⁻¹A (for Chebyshev).
+    lambda_max: f64,
 }
 
 // ── ParAmgHierarchy ─────────────────────────────────────────────────────────
@@ -108,7 +166,8 @@ impl ParAmgHierarchy {
             let n_global = comm.allreduce_sum_i64(ca.n_owned as i64) as usize;
 
             if n_global <= config.coarse_size || ca.n_owned <= 1 {
-                levels.push(AmgLevel { a: ca, p: None, r: None, inv_diag });
+                let lambda_max = gershgorin_lambda_max(&ca, &inv_diag);
+            levels.push(AmgLevel { a: ca, p: None, r: None, inv_diag, lambda_max });
                 break;
             }
 
@@ -118,11 +177,21 @@ impl ParAmgHierarchy {
                 build_coarse_level(&ca, comm, config.strength_threshold)
             };
 
+            // Optionally smooth the prolongation: P_smooth = (I - ω D⁻¹ A) P_tent.
+            // This is the key step of Smoothed Aggregation (SA-AMG).
+            let p = if config.smoothed_prolongation {
+                smooth_prolongation(&ca, p, &inv_diag)
+            } else {
+                p
+            };
+
+            let lambda_max = gershgorin_lambda_max(&ca, &inv_diag);
             levels.push(AmgLevel {
                 a: ca,
                 p: Some(p),
                 r: Some(r),
                 inv_diag,
+                lambda_max,
             });
 
             current_a = Some(coarse_a);
@@ -131,7 +200,8 @@ impl ParAmgHierarchy {
         // If we hit max_levels without reaching coarse_size, push the last level.
         if let Some(ca) = current_a {
             let inv_diag = compute_inv_diag(&ca);
-            levels.push(AmgLevel { a: ca, p: None, r: None, inv_diag });
+            let lambda_max = gershgorin_lambda_max(&ca, &inv_diag);
+            levels.push(AmgLevel { a: ca, p: None, r: None, inv_diag, lambda_max });
         }
 
         ParAmgHierarchy { levels, config }
@@ -153,9 +223,20 @@ impl ParAmgHierarchy {
         let lvl = &self.levels[level];
 
         if lvl.p.is_none() {
-            // Coarsest level: solve approximately with many Jacobi iterations.
-            for _ in 0..20 {
-                jacobi_smooth(&lvl.a, x, b, &lvl.inv_diag);
+            // Coarsest level: solve with CG (adaptive) or fallback Jacobi.
+            if self.config.coarse_cg {
+                let coarse_cfg = SolverConfig {
+                    rtol: 1e-10,
+                    atol: 1e-14,
+                    max_iter: 200,
+                    ..SolverConfig::default()
+                };
+                // Best-effort: ignore convergence failure (fallback to current x).
+                let _ = par_solve_cg(&lvl.a, b, x, &coarse_cfg);
+            } else {
+                for _ in 0..20 {
+                    jacobi_smooth(&lvl.a, x, b, &lvl.inv_diag);
+                }
             }
             return;
         }
@@ -165,8 +246,22 @@ impl ParAmgHierarchy {
         let coarse_lvl = &self.levels[level + 1];
 
         // Pre-smoothing.
-        for _ in 0..self.config.n_pre_smooth {
-            jacobi_smooth(&lvl.a, x, b, &lvl.inv_diag);
+        match self.config.smoother {
+            SmootherType::Jacobi => {
+                for _ in 0..self.config.n_pre_smooth {
+                    jacobi_smooth(&lvl.a, x, b, &lvl.inv_diag);
+                }
+            }
+            SmootherType::SymmetricGaussSeidel => {
+                for _ in 0..self.config.n_pre_smooth {
+                    sgs_smooth(&lvl.a, x, b, &lvl.inv_diag);
+                }
+            }
+            SmootherType::Chebyshev { degree, ratio } => {
+                for _ in 0..self.config.n_pre_smooth {
+                    chebyshev_smooth(&lvl.a, x, b, &lvl.inv_diag, lvl.lambda_max, degree, ratio);
+                }
+            }
         }
 
         // Compute residual: res = b - A*x
@@ -194,8 +289,22 @@ impl ParAmgHierarchy {
         }
 
         // Post-smoothing.
-        for _ in 0..self.config.n_post_smooth {
-            jacobi_smooth(&lvl.a, x, b, &lvl.inv_diag);
+        match self.config.smoother {
+            SmootherType::Jacobi => {
+                for _ in 0..self.config.n_post_smooth {
+                    jacobi_smooth(&lvl.a, x, b, &lvl.inv_diag);
+                }
+            }
+            SmootherType::SymmetricGaussSeidel => {
+                for _ in 0..self.config.n_post_smooth {
+                    sgs_smooth(&lvl.a, x, b, &lvl.inv_diag);
+                }
+            }
+            SmootherType::Chebyshev { degree, ratio } => {
+                for _ in 0..self.config.n_post_smooth {
+                    chebyshev_smooth(&lvl.a, x, b, &lvl.inv_diag, lvl.lambda_max, degree, ratio);
+                }
+            }
         }
     }
 }
@@ -221,6 +330,73 @@ fn jacobi_smooth(
     for i in 0..n {
         let r_i = b.data[i] - ax.data[i];
         x.data[i] += omega * inv_diag[i] * r_i;
+    }
+}
+
+// ── Symmetric Gauss-Seidel smoother ─────────────────────────────────────────
+
+/// One local symmetric Gauss-Seidel (SGS) iteration.
+///
+/// Performs a **forward** sweep followed immediately by a **backward** sweep
+/// over the owned DOFs, using only the diagonal CSR block.  Ghost contributions
+/// to the right-hand side are folded in via a prior ghost exchange so that
+/// boundary DOFs see accurate off-rank values (treated as *fixed* during the
+/// sweep — standard local-SGS approximation for distributed memory).
+///
+/// # Convergence vs Jacobi
+/// For symmetric positive definite problems SGS eliminates roughly 2× the
+/// error per sweep compared to damped Jacobi, at the same asymptotic cost
+/// O(nnz) per sweep.
+fn sgs_smooth(
+    a: &ParCsrMatrix,
+    x: &mut ParVector,
+    b: &ParVector,
+    inv_diag: &[f64],
+) {
+    let n = a.n_owned;
+    let diag_csr = &a.diag;
+
+    // Refresh ghost values so boundary rows have accurate off-rank contributions.
+    x.update_ghosts();
+
+    // Precompute ghost contribution: rhs_corr[i] = b[i] - offd[i,:] * x_ghost
+    // This stays fixed for the entire forward+backward sweep.
+    let mut rhs = vec![0.0_f64; n];
+    for i in 0..n {
+        let mut ghost_contrib = 0.0_f64;
+        for k in a.offd.row_ptr[i]..a.offd.row_ptr[i + 1] {
+            let g = a.offd.col_idx[k] as usize;
+            let ghost_val = x.data[n + g]; // ghost slots follow owned
+            ghost_contrib += a.offd.values[k] * ghost_val;
+        }
+        rhs[i] = b.data[i] - ghost_contrib;
+    }
+
+    // ── Forward sweep ────────────────────────────────────────────────────────
+    // For each owned row i: x[i] = (rhs[i] - sum_{j≠i, owned} a[i,j]*x[j]) * inv_diag[i]
+    // Since j < i are already updated, we use the current x values in-place.
+    for i in 0..n {
+        let mut s = rhs[i];
+        for k in diag_csr.row_ptr[i]..diag_csr.row_ptr[i + 1] {
+            let j = diag_csr.col_idx[k] as usize;
+            if j != i {
+                s -= diag_csr.values[k] * x.data[j];
+            }
+        }
+        x.data[i] = s * inv_diag[i];
+    }
+
+    // ── Backward sweep ───────────────────────────────────────────────────────
+    // Same but traverse rows in reverse order.
+    for i in (0..n).rev() {
+        let mut s = rhs[i];
+        for k in diag_csr.row_ptr[i]..diag_csr.row_ptr[i + 1] {
+            let j = diag_csr.col_idx[k] as usize;
+            if j != i {
+                s -= diag_csr.values[k] * x.data[j];
+            }
+        }
+        x.data[i] = s * inv_diag[i];
     }
 }
 
@@ -613,18 +789,93 @@ fn build_coarse_level_global(
     (p_par, r_par, ac_par)
 }
 
+// ── SA-AMG prolongation smoothing ────────────────────────────────────────────
+
+/// Smooth the tentative prolongation `P_tent` by one step of damped Jacobi:
+///
+/// $$P_{\text{smooth}} = (I - \omega D^{-1} A) \, P_{\text{tent}}$$
+///
+/// where $\omega = 4/(3 \rho(D^{-1}A))$ and we approximate the spectral radius
+/// by using $\omega = 2/3$ (the standard SA-AMG choice for FEM Laplacians).
+///
+/// Only the **diagonal** CSR block of `A` participates (local rows only).
+/// The result has the same sparsity pattern extended by one hop of `A`'s
+/// connectivity, which we construct via a sparse-sparse product `A_diag * P`.
+fn smooth_prolongation(
+    a: &ParCsrMatrix,
+    p_tent: ParCsrMatrix,
+    inv_diag: &[f64],
+) -> ParCsrMatrix {
+    let omega = 2.0_f64 / 3.0;
+    let n_fine  = p_tent.n_owned;
+    let n_coarse = p_tent.diag.ncols;
+
+    // Compute A_diag * P_tent using local (serial) sparse-sparse multiply.
+    let ap = csr_multiply(&a.diag, &p_tent.diag);
+
+    // P_smooth[i, :] = P_tent[i, :] - omega * inv_diag[i] * ap[i, :]
+    // Build result as COO then convert.
+    let mut p_coo = CooMatrix::<f64>::new(n_fine, n_coarse.max(1));
+
+    // Add P_tent entries.
+    for i in 0..n_fine {
+        for k in p_tent.diag.row_ptr[i]..p_tent.diag.row_ptr[i + 1] {
+            let j = p_tent.diag.col_idx[k] as usize;
+            p_coo.add(i, j, p_tent.diag.values[k]);
+        }
+    }
+    // Subtract ω D⁻¹ A P_tent entries.
+    let scale = -omega;
+    for i in 0..n_fine {
+        let di = inv_diag[i] * scale;
+        for k in ap.row_ptr[i]..ap.row_ptr[i + 1] {
+            let j = ap.col_idx[k] as usize;
+            p_coo.add(i, j, di * ap.values[k]);
+        }
+    }
+
+    let p_local = p_coo.into_csr();
+    let trivial_ex = p_tent.ghost_exchange_arc();
+    ParCsrMatrix::from_blocks(
+        p_local,
+        CsrMatrix::new_empty(n_fine, 0),
+        n_fine, 0,
+        trivial_ex,
+        p_tent.comm().clone(),
+    )
+}
+
 // ── Local CSR SpMV ──────────────────────────────────────────────────────────
 
 /// Compute y = A * x using only the local CSR data (no ghost exchange).
 /// y is zeroed before accumulation.
 fn local_spmv(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+    let xlen = x.len();
     for i in 0..a.nrows.min(y.len()) {
-        let mut sum = 0.0;
-        for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+        let start = a.row_ptr[i];
+        let end   = a.row_ptr[i + 1];
+        let mut k = start;
+        let mut sum = 0.0_f64;
+        // 8-unroll: mirrors the hot path in CsrMatrix::spmv_serial_f64.
+        let end8 = start + (end - start) / 8 * 8;
+        while k < end8 {
+            // Bounds check hoisted: P/R operators have dense DOF ranges, so
+            // all indices are valid — debug_assert catches regressions.
+            debug_assert!((a.col_idx[k + 7] as usize) < xlen);
+            sum += a.values[k]     * x[a.col_idx[k]     as usize]
+                 + a.values[k + 1] * x[a.col_idx[k + 1] as usize]
+                 + a.values[k + 2] * x[a.col_idx[k + 2] as usize]
+                 + a.values[k + 3] * x[a.col_idx[k + 3] as usize]
+                 + a.values[k + 4] * x[a.col_idx[k + 4] as usize]
+                 + a.values[k + 5] * x[a.col_idx[k + 5] as usize]
+                 + a.values[k + 6] * x[a.col_idx[k + 6] as usize]
+                 + a.values[k + 7] * x[a.col_idx[k + 7] as usize];
+            k += 8;
+        }
+        while k < end {
             let j = a.col_idx[k] as usize;
-            if j < x.len() {
-                sum += a.values[k] * x[j];
-            }
+            if j < xlen { sum += a.values[k] * x[j]; }
+            k += 1;
         }
         y[i] = sum;
     }
@@ -637,6 +888,118 @@ fn compute_inv_diag(a: &ParCsrMatrix) -> Vec<f64> {
     diag.into_iter()
         .map(|d| if d.abs() > 1e-14 { 1.0 / d } else { 1.0 })
         .collect()
+}
+
+/// Gershgorin upper bound for the spectral radius of D⁻¹A.
+///
+/// For each row i: bound_i = Σ_j |d_i⁻¹ a_ij| = inv_diag[i] · row_1_norm(A[i,:]).
+/// Returns max_i bound_i.  This is a cheap O(nnz) estimate used to set the
+/// Chebyshev smoothing interval, so it only needs to be a safe upper bound.
+fn gershgorin_lambda_max(a: &ParCsrMatrix, inv_diag: &[f64]) -> f64 {
+    let n = a.n_owned;
+    let diag_csr = &a.diag;
+    let mut lmax = 0.0_f64;
+
+    for i in 0..n {
+        let mut row_sum = 0.0_f64;
+        for k in diag_csr.row_ptr[i]..diag_csr.row_ptr[i + 1] {
+            row_sum += diag_csr.values[k].abs();
+        }
+        // Off-diagonal block (ghost columns) contributes to the bound too.
+        for k in a.offd.row_ptr[i]..a.offd.row_ptr[i + 1] {
+            row_sum += a.offd.values[k].abs();
+        }
+        let bound_i = inv_diag[i] * row_sum;
+        if bound_i > lmax {
+            lmax = bound_i;
+        }
+    }
+
+    // Clamp to at least 1 to avoid division-by-zero on degenerate inputs.
+    lmax.max(1.0)
+}
+
+// ── Chebyshev polynomial smoother ───────────────────────────────────────────
+
+/// Degree-`degree` Chebyshev polynomial smoother for SPD systems.
+///
+/// The smoother targets eigenvalues in `[λ_lo, λ_hi]` where
+/// `λ_hi = 1.1 · lambda_max` and `λ_lo = λ_hi / ratio` (default ratio ≈ 30).
+///
+/// Each call performs `degree` SpMV operations (same cost as `degree` Jacobi
+/// iterations) but uses the optimal degree-`degree` Chebyshev polynomial to
+/// reduce all error components in the target interval, rather than a single
+/// damped update.  Degree 3 typically matches 4–5 Jacobi sweeps.
+///
+/// # Algorithm
+///
+/// Standard three-term Chebyshev recurrence on D⁻¹A (Saad §12.4):
+///
+/// ```text
+/// θ = (λ_hi + λ_lo) / 2,   δ = (λ_hi - λ_lo) / 2
+/// r  = b - A·x
+/// p  = (1/θ) · D⁻¹·r,      x += p,   ρ_prev = 1
+/// for k = 1..degree-1:
+///     r  = b - A·x
+///     ρ  = 1 / (2θ/δ − ρ_prev)
+///     p  = ρ · (2/δ · D⁻¹·r + ρ_prev · p)
+///     x += p,   ρ_prev = ρ
+/// ```
+fn chebyshev_smooth(
+    a:          &ParCsrMatrix,
+    x:          &mut ParVector,
+    b:          &ParVector,
+    inv_diag:   &[f64],
+    lambda_max: f64,
+    degree:     usize,
+    ratio:      f64,
+) {
+    let n       = a.n_owned;
+    let ratio   = if ratio < 2.0 { 30.0 } else { ratio };
+    let lam_hi  = 1.1 * lambda_max;
+    let lam_lo  = lam_hi / ratio;
+    let theta   = 0.5 * (lam_hi + lam_lo);
+    let delta   = 0.5 * (lam_hi - lam_lo);
+
+    // Workspace.
+    let mut r = vec![0.0_f64; n];
+    let mut p = vec![0.0_f64; n];
+
+    // ── Step 0 ──────────────────────────────────────────────────────────────
+    // r = b - A·x
+    {
+        let mut ax = ParVector::zeros_like(b);
+        let mut x_clone = x.clone_vec();
+        a.spmv(&mut x_clone, &mut ax);
+        for i in 0..n { r[i] = b.data[i] - ax.data[i]; }
+    }
+    // p = (1/θ) D⁻¹ r,  x += p
+    let inv_theta = 1.0 / theta;
+    for i in 0..n {
+        p[i]        = inv_theta * inv_diag[i] * r[i];
+        x.data[i]  += p[i];
+    }
+
+    let mut rho_prev = 1.0_f64;
+
+    // ── Steps 1..degree-1 ───────────────────────────────────────────────────
+    for _ in 1..degree {
+        // r = b - A·x
+        {
+            let mut ax = ParVector::zeros_like(b);
+            let mut x_clone = x.clone_vec();
+            a.spmv(&mut x_clone, &mut ax);
+            for i in 0..n { r[i] = b.data[i] - ax.data[i]; }
+        }
+
+        let rho = 1.0 / (2.0 * theta / delta - rho_prev);
+        let two_over_delta = 2.0 / delta;
+        for i in 0..n {
+            p[i]       = rho * (two_over_delta * inv_diag[i] * r[i] + rho_prev * p[i]);
+            x.data[i] += p[i];
+        }
+        rho_prev = rho;
+    }
 }
 
 fn clone_par_csr(a: &ParCsrMatrix) -> ParCsrMatrix {
@@ -672,26 +1035,13 @@ fn transpose_csr(a: &CsrMatrix<f64>) -> CsrMatrix<f64> {
 }
 
 /// Sparse matrix multiply C = A * B.
+///
+/// Delegates to [`fem_linalg::csr_spmm_parallel`] (dense row-accumulator,
+/// O(nnz_C) arithmetic) rather than the legacy COO accumulator which required
+/// an O(nnz_C log nnz_C) sort step.
+#[inline]
 fn csr_multiply(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f64> {
-    assert_eq!(a.ncols, b.nrows, "csr_multiply: dimension mismatch");
-    let mut coo = CooMatrix::<f64>::new(a.nrows, b.ncols);
-
-    for i in 0..a.nrows {
-        for ka in a.row_ptr[i]..a.row_ptr[i + 1] {
-            let k = a.col_idx[ka] as usize;
-            let a_ik = a.values[ka];
-            if a_ik == 0.0 { continue; }
-            for kb in b.row_ptr[k]..b.row_ptr[k + 1] {
-                let j = b.col_idx[kb] as usize;
-                let b_kj = b.values[kb];
-                if b_kj != 0.0 {
-                    coo.add(i, j, a_ik * b_kj);
-                }
-            }
-        }
-    }
-
-    coo.into_csr()
+    fem_linalg::csr_spmm_parallel(a, b)
 }
 
 // ── Public solver function ──────────────────────────────────────────────────
@@ -1087,6 +1437,155 @@ mod tests {
             assert!(res_amg.iterations < res_jac.iterations,
                 "AMG ({} iters) should be faster than Jacobi ({} iters)",
                 res_amg.iterations, res_jac.iterations);
+        });
+    }
+
+    #[test]
+    fn par_amg_sgs_fewer_iters_than_jacobi_smoother() {
+        // SGS smoother should need fewer V-cycles than Jacobi smoother
+        // for the same problem (Poisson with homogeneous Dirichlet BCs).
+        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 2);
+
+            let source = fem_assembly::standard::DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs {
+                let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs {
+                    a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data);
+                }
+            }
+
+            let solver_cfg = SolverConfig { rtol: 1e-8, max_iter: 5000, ..SolverConfig::default() };
+
+            // AMG + Jacobi smoother
+            let mut u_jac_smoother = ParVector::zeros(&par_space);
+            let amg_jacobi = ParAmgConfig { smoother: SmootherType::Jacobi, ..Default::default() };
+            let res_jacobi = par_solve_pcg_amg(
+                &a_mat, &rhs, &mut u_jac_smoother, &amg_jacobi, &solver_cfg,
+            ).unwrap();
+
+            // AMG + SGS smoother
+            let mut u_sgs = ParVector::zeros(&par_space);
+            let amg_sgs = ParAmgConfig { smoother: SmootherType::SymmetricGaussSeidel, ..Default::default() };
+            let res_sgs = par_solve_pcg_amg(
+                &a_mat, &rhs, &mut u_sgs, &amg_sgs, &solver_cfg,
+            ).unwrap();
+
+            assert!(res_jacobi.converged, "AMG+Jacobi didn't converge ({} iters)", res_jacobi.iterations);
+            assert!(res_sgs.converged, "AMG+SGS didn't converge ({} iters)", res_sgs.iterations);
+
+            // SGS should use fewer or equal outer PCG iterations.
+            assert!(
+                res_sgs.iterations <= res_jacobi.iterations,
+                "SGS ({} iters) should not be worse than Jacobi ({} iters)",
+                res_sgs.iterations, res_jacobi.iterations,
+            );
+
+            // Solutions should agree to high precision.
+            let diff: f64 = u_sgs.data.iter().zip(u_jac_smoother.data.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!(diff < 1e-6, "SGS and Jacobi solutions diverged: diff={diff:.2e}");
+        });
+    }
+
+    #[test]
+    fn par_amg_chebyshev_converges() {
+        // Chebyshev smoother (degree 3) should converge to the same solution
+        // as Jacobi and need no more outer PCG iterations.
+        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 2);
+
+            let source = fem_assembly::standard::DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs {
+                let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs {
+                    a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data);
+                }
+            }
+
+            let solver_cfg = SolverConfig { rtol: 1e-8, max_iter: 5000, ..SolverConfig::default() };
+
+            // AMG + Jacobi smoother (reference)
+            let mut u_jacobi = ParVector::zeros(&par_space);
+            let amg_jacobi = ParAmgConfig { smoother: SmootherType::Jacobi, ..Default::default() };
+            let res_jacobi = par_solve_pcg_amg(
+                &a_mat, &rhs, &mut u_jacobi, &amg_jacobi, &solver_cfg,
+            ).unwrap();
+
+            // AMG + Chebyshev degree-3 smoother
+            let mut u_cheby = ParVector::zeros(&par_space);
+            let amg_cheby = ParAmgConfig {
+                smoother: SmootherType::Chebyshev { degree: 3, ratio: 30.0 },
+                ..Default::default()
+            };
+            let res_cheby = par_solve_pcg_amg(
+                &a_mat, &rhs, &mut u_cheby, &amg_cheby, &solver_cfg,
+            ).unwrap();
+
+            assert!(res_jacobi.converged, "AMG+Jacobi didn't converge ({} iters)", res_jacobi.iterations);
+            assert!(res_cheby.converged,  "AMG+Chebyshev didn't converge ({} iters)", res_cheby.iterations);
+
+            // Chebyshev should match or improve on Jacobi.
+            assert!(
+                res_cheby.iterations <= res_jacobi.iterations + 2,
+                "Chebyshev ({} iters) should not be worse than Jacobi ({} iters)",
+                res_cheby.iterations, res_jacobi.iterations,
+            );
+
+            // Solutions should agree to high precision.
+            let diff: f64 = u_cheby.data.iter().zip(u_jacobi.data.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!(diff < 1e-6, "Chebyshev and Jacobi solutions diverged: diff={diff:.2e}");
+        });
+    }
+
+    #[test]
+    fn gershgorin_lambda_max_positive() {
+        // A 2×2 identity matrix as ParCsr: D⁻¹A = I, spectral radius = 1.
+        // Gershgorin bound should return ≥ 1.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 2);
+
+            let inv_diag = compute_inv_diag(&a_mat);
+            let lmax = gershgorin_lambda_max(&a_mat, &inv_diag);
+            assert!(lmax >= 1.0, "Gershgorin bound too small: {lmax}");
+            // For the standard Poisson stencil D⁻¹A has spectral radius < 10.
+            assert!(lmax < 20.0, "Gershgorin bound implausibly large: {lmax}");
         });
     }
 }

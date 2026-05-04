@@ -22,6 +22,7 @@ pub mod restricted_hcurl;
 pub mod hdiv;
 pub mod constraints;
 pub mod vector_h1;
+pub mod skeleton;
 
 pub use dof_manager::{DofManager, EdgeKey, FaceKey};
 pub use fe_space::{FESpace, SpaceType};

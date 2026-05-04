@@ -48,13 +48,18 @@ fn csr_row_dot_f64(
     let mut k = start;
     let mut sum = 0.0_f64;
 
-    let end4 = start + (end - start) / 4 * 4;
-    while k < end4 {
-        sum += values[k] * x[col_idx[k] as usize]
-            + values[k + 1] * x[col_idx[k + 1] as usize]
-            + values[k + 2] * x[col_idx[k + 2] as usize]
-            + values[k + 3] * x[col_idx[k + 3] as usize];
-        k += 4;
+    // 8-unroll: lets AVX2 (2× 256-bit FMA lanes) amortise gather-load latency.
+    let end8 = start + (end - start) / 8 * 8;
+    while k < end8 {
+        sum += values[k]     * x[col_idx[k]     as usize]
+             + values[k + 1] * x[col_idx[k + 1] as usize]
+             + values[k + 2] * x[col_idx[k + 2] as usize]
+             + values[k + 3] * x[col_idx[k + 3] as usize]
+             + values[k + 4] * x[col_idx[k + 4] as usize]
+             + values[k + 5] * x[col_idx[k + 5] as usize]
+             + values[k + 6] * x[col_idx[k + 6] as usize]
+             + values[k + 7] * x[col_idx[k + 7] as usize];
+        k += 8;
     }
     while k < end {
         sum += values[k] * x[col_idx[k] as usize];
@@ -242,7 +247,25 @@ impl<T: Scalar> CsrMatrix<T> {
     }
 
     /// Diagonal vector `d[i] = A[i,i]`.
+    /// Extract the main diagonal as a dense vector.
+    ///
+    /// Scans each row's non-zeros for the entry whose column equals the row
+    /// index.  Total cost is O(nnz).
+    ///
+    /// With the `parallel` feature and `nrows ≥ 512`, Rayon parallelises the
+    /// scan across rows, which is beneficial when the matrix is large or the
+    /// rows contain many non-zeros (e.g. high-order elements).
     pub fn diagonal(&self) -> Vec<T> {
+        #[cfg(feature = "parallel")]
+        if self.nrows >= 512 {
+            use rayon::prelude::*;
+            let mut d = vec![T::zero(); self.nrows];
+            d.par_iter_mut().enumerate().for_each(|(row, di)| {
+                *di = self.get(row, row);
+            });
+            return d;
+        }
+
         let mut d = vec![T::zero(); self.nrows];
         for row in 0..self.nrows {
             d[row] = self.get(row, row);
@@ -547,18 +570,358 @@ pub fn spadd<T: Scalar>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> CsrMatrix<T> {
     }
 }
 
+/// Parallel variant of [`spadd`] using Rayon.
+///
+/// Each output row is computed independently via sorted-merge of the two input
+/// rows.  Parallelises when `a.nrows >= 128`; falls back to serial otherwise.
+///
+/// # Panics
+///
+/// Panics if A and B have incompatible dimensions.
+#[cfg(feature = "parallel")]
+pub fn spadd_parallel<T: Scalar + Send + Sync>(
+    a: &CsrMatrix<T>,
+    b: &CsrMatrix<T>,
+) -> CsrMatrix<T> {
+    const SPADD_PARALLEL_MIN_ROWS: usize = 128;
+
+    assert_eq!(a.nrows, b.nrows, "spadd_parallel: row count mismatch");
+    assert_eq!(a.ncols, b.ncols, "spadd_parallel: col count mismatch");
+
+    if a.nrows < SPADD_PARALLEL_MIN_ROWS {
+        return spadd(a, b);
+    }
+
+    let m = a.nrows;
+
+    // Compute each row independently in parallel.
+    let rows: Vec<(Vec<u32>, Vec<T>)> = (0..m)
+        .into_par_iter()
+        .map(|i| {
+            let a_start = a.row_ptr[i];
+            let a_end   = a.row_ptr[i + 1];
+            let b_start = b.row_ptr[i];
+            let b_end   = b.row_ptr[i + 1];
+
+            let cap = (a_end - a_start) + (b_end - b_start);
+            let mut cols: Vec<u32> = Vec::with_capacity(cap);
+            let mut vals: Vec<T>   = Vec::with_capacity(cap);
+
+            let mut ja = a_start;
+            let mut jb = b_start;
+
+            while ja < a_end && jb < b_end {
+                let ca = a.col_idx[ja];
+                let cb = b.col_idx[jb];
+                if ca < cb {
+                    cols.push(ca); vals.push(a.values[ja]);
+                    ja += 1;
+                } else if ca > cb {
+                    cols.push(cb); vals.push(b.values[jb]);
+                    jb += 1;
+                } else {
+                    cols.push(ca); vals.push(a.values[ja] + b.values[jb]);
+                    ja += 1; jb += 1;
+                }
+            }
+            while ja < a_end { cols.push(a.col_idx[ja]); vals.push(a.values[ja]); ja += 1; }
+            while jb < b_end { cols.push(b.col_idx[jb]); vals.push(b.values[jb]); jb += 1; }
+
+            (cols, vals)
+        })
+        .collect();
+
+    // Assemble CSR.
+    let total_nnz: usize = rows.iter().map(|(c, _)| c.len()).sum();
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    let mut col_idx: Vec<u32> = Vec::with_capacity(total_nnz);
+    let mut values:  Vec<T>   = Vec::with_capacity(total_nnz);
+    row_ptr.push(0_usize);
+    for (cols, vals) in rows {
+        col_idx.extend_from_slice(&cols);
+        values.extend_from_slice(&vals);
+        row_ptr.push(col_idx.len());
+    }
+
+    CsrMatrix { nrows: m, ncols: a.ncols, row_ptr, col_idx, values }
+}
+///
+/// # Algorithm
+///
+/// For each output row `i`:
+/// 1. Walk nonzeros `(i, k, a_ik)` in A.
+/// 2. Walk nonzeros `(k, j, b_kj)` in B; accumulate `acc[j] += a_ik * b_kj`.
+/// 3. Track dirty columns, sort, emit, reset.
+///
+/// Complexity: `O(nnz_C)` arithmetic, `O(n_cols_B)` extra memory per row.
+///
+/// # Panics
+///
+/// Panics if A and B have incompatible dimensions.
+///
+/// # Performance vs. COO-accumulation
+///
+/// The legacy COO approach required `O(nnz_C log nnz_C)` sorting.
+/// This implementation is `O(nnz_C + m)` (dense reset) with
+/// much better cache behaviour for typical FEM matrices.
+pub fn csr_spmm(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f64> {
+    assert_eq!(a.ncols, b.nrows, "csr_spmm: dimension mismatch ({} vs {})", a.ncols, b.nrows);
+    let m = a.nrows;
+    let n = b.ncols;
+
+    // Dense accumulator + dirty-column tracker.
+    let mut acc     = vec![0.0_f64; n];
+    let mut dirty:   Vec<u32> = Vec::new();
+
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    let mut col_idx: Vec<u32> = Vec::new();
+    let mut values:  Vec<f64> = Vec::new();
+    row_ptr.push(0_usize);
+
+    for i in 0..m {
+        dirty.clear();
+
+        for ka in a.row_ptr[i]..a.row_ptr[i + 1] {
+            let k    = a.col_idx[ka] as usize;
+            let a_ik = a.values[ka];
+            if a_ik == 0.0 { continue; }
+
+            for kb in b.row_ptr[k]..b.row_ptr[k + 1] {
+                let j    = b.col_idx[kb] as usize;
+                let b_kj = b.values[kb];
+                if b_kj == 0.0 { continue; }
+                if acc[j] == 0.0 { dirty.push(j as u32); }
+                acc[j] += a_ik * b_kj;
+            }
+        }
+
+        // Sort dirty columns so the output row is stored in ascending column order.
+        dirty.sort_unstable();
+
+        for &j in &dirty {
+            let v = acc[j as usize];
+            col_idx.push(j);
+            values.push(v);
+            acc[j as usize] = 0.0; // reset for reuse
+        }
+
+        row_ptr.push(col_idx.len());
+    }
+
+    CsrMatrix { nrows: m, ncols: n, row_ptr, col_idx, values }
+}
+
+/// Parallel variant of [`csr_spmm`] using Rayon.
+///
+/// Each output row is computed independently, so rows are processed in parallel.
+/// Each Rayon task allocates its own dense accumulator (`O(n_cols_B)` per thread,
+/// amortised across the rows in its chunk).
+///
+/// Parallelises when `a.nrows >= SPMM_PARALLEL_MIN_ROWS` (default: 128).
+/// Below this threshold the serial [`csr_spmm`] is used automatically.
+#[cfg(feature = "parallel")]
+pub fn csr_spmm_parallel(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f64> {
+    const SPMM_PARALLEL_MIN_ROWS: usize = 128;
+    if a.nrows < SPMM_PARALLEL_MIN_ROWS {
+        return csr_spmm(a, b);
+    }
+
+    assert_eq!(a.ncols, b.nrows, "csr_spmm_parallel: dimension mismatch ({} vs {})", a.ncols, b.nrows);
+    let m = a.nrows;
+    let n = b.ncols;
+
+    // Compute each row independently; collect (col_indices, values) per row.
+    let rows: Vec<(Vec<u32>, Vec<f64>)> = (0..m)
+        .into_par_iter()
+        .map(|i| {
+            let mut acc: Vec<f64> = vec![0.0_f64; n];
+            let mut dirty: Vec<u32> = Vec::new();
+
+            for ka in a.row_ptr[i]..a.row_ptr[i + 1] {
+                let k    = a.col_idx[ka] as usize;
+                let a_ik = a.values[ka];
+                if a_ik == 0.0 { continue; }
+
+                for kb in b.row_ptr[k]..b.row_ptr[k + 1] {
+                    let j    = b.col_idx[kb] as usize;
+                    let b_kj = b.values[kb];
+                    if b_kj == 0.0 { continue; }
+                    if acc[j] == 0.0 { dirty.push(j as u32); }
+                    acc[j] += a_ik * b_kj;
+                }
+            }
+
+            dirty.sort_unstable();
+            let vals: Vec<f64> = dirty.iter().map(|&j| {
+                let v = acc[j as usize];
+                v
+            }).collect();
+            // The acc vec is dropped here — no explicit reset needed.
+
+            (dirty, vals)
+        })
+        .collect();
+
+    // Assemble CSR from the per-row vectors.
+    let total_nnz: usize = rows.iter().map(|(c, _)| c.len()).sum();
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    let mut col_idx: Vec<u32> = Vec::with_capacity(total_nnz);
+    let mut values:  Vec<f64> = Vec::with_capacity(total_nnz);
+    row_ptr.push(0_usize);
+    for (cols, vals) in rows {
+        col_idx.extend_from_slice(&cols);
+        values.extend_from_slice(&vals);
+        row_ptr.push(col_idx.len());
+    }
+
+    CsrMatrix { nrows: m, ncols: n, row_ptr, col_idx, values }
+}
+
 impl CsrMatrix<f64> {
     pub(super) fn spmv_serial_f64(&self, x: &[f64], y: &mut [f64]) {
-        for (row, yi) in y.iter_mut().enumerate() {
-            *yi = csr_row_dot_f64(&self.row_ptr, &self.col_idx, &self.values, x, row);
+        let nrows = y.len();
+        let mut row = 0;
+
+        // 2-row fused loop: process two consecutive rows simultaneously.
+        // Having two independent accumulators (sum0, sum1) lets the CPU
+        // pipeline FMA/load instructions for both rows, hiding gather-load
+        // latency when individual rows are short (typical for 2D FEM: 5-9 nnz).
+        while row + 1 < nrows {
+            let s0 = self.row_ptr[row];
+            let e0 = self.row_ptr[row + 1];
+            let s1 = self.row_ptr[row + 1];
+            let e1 = self.row_ptr[row + 2];
+
+            let mut sum0 = 0.0_f64;
+            let mut sum1 = 0.0_f64;
+
+            // 8-unroll for row 0
+            let e0_8 = s0 + (e0 - s0) / 8 * 8;
+            let mut k = s0;
+            while k < e0_8 {
+                sum0 += self.values[k]     * x[self.col_idx[k]     as usize]
+                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
+                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
+                      + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
+                      + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
+                      + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
+                      + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
+                      + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
+                k += 8;
+            }
+            while k < e0 {
+                sum0 += self.values[k] * x[self.col_idx[k] as usize];
+                k += 1;
+            }
+
+            // 8-unroll for row 1
+            let e1_8 = s1 + (e1 - s1) / 8 * 8;
+            k = s1;
+            while k < e1_8 {
+                sum1 += self.values[k]     * x[self.col_idx[k]     as usize]
+                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
+                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
+                      + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
+                      + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
+                      + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
+                      + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
+                      + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
+                k += 8;
+            }
+            while k < e1 {
+                sum1 += self.values[k] * x[self.col_idx[k] as usize];
+                k += 1;
+            }
+
+            y[row]     = sum0;
+            y[row + 1] = sum1;
+            row += 2;
+        }
+
+        // Handle trailing odd row (if any).
+        if row < nrows {
+            y[row] = csr_row_dot_f64(&self.row_ptr, &self.col_idx, &self.values, x, row);
         }
     }
 
     pub(super) fn spmv_add_serial_f64(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
-        for (row, yi) in y.iter_mut().enumerate() {
-            *yi = csr_row_dot_axpby_f64(
-                &self.row_ptr, &self.col_idx, &self.values, x, row, alpha, beta, *yi,
-            );
+        let nrows = y.len();
+        let mut row = 0;
+
+        // 2-row fused loop: same principle as spmv_serial_f64.
+        // alpha and beta are loop-invariant; applied after the dot-product.
+        while row + 1 < nrows {
+            let s0 = self.row_ptr[row];
+            let e0 = self.row_ptr[row + 1];
+            let s1 = self.row_ptr[row + 1];
+            let e1 = self.row_ptr[row + 2];
+
+            let mut sum0 = 0.0_f64;
+            let mut sum1 = 0.0_f64;
+
+            let e0_8 = s0 + (e0 - s0) / 8 * 8;
+            let mut k = s0;
+            while k < e0_8 {
+                sum0 += self.values[k]     * x[self.col_idx[k]     as usize]
+                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
+                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
+                      + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
+                      + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
+                      + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
+                      + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
+                      + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
+                k += 8;
+            }
+            while k < e0 {
+                sum0 += self.values[k] * x[self.col_idx[k] as usize];
+                k += 1;
+            }
+
+            let e1_8 = s1 + (e1 - s1) / 8 * 8;
+            k = s1;
+            while k < e1_8 {
+                sum1 += self.values[k]     * x[self.col_idx[k]     as usize]
+                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
+                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
+                      + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
+                      + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
+                      + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
+                      + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
+                      + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
+                k += 8;
+            }
+            while k < e1 {
+                sum1 += self.values[k] * x[self.col_idx[k] as usize];
+                k += 1;
+            }
+
+            y[row]     = alpha * sum0 + beta * y[row];
+            y[row + 1] = alpha * sum1 + beta * y[row + 1];
+            row += 2;
+        }
+
+        if row < nrows {
+            let s = self.row_ptr[row];
+            let e = self.row_ptr[row + 1];
+            let mut sum = 0.0_f64;
+            let e8 = s + (e - s) / 8 * 8;
+            let mut k = s;
+            while k < e8 {
+                sum += self.values[k]     * x[self.col_idx[k]     as usize]
+                     + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
+                     + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
+                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
+                     + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
+                     + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
+                     + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
+                     + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
+                k += 8;
+            }
+            while k < e {
+                sum += self.values[k] * x[self.col_idx[k] as usize];
+                k += 1;
+            }
+            y[row] = alpha * sum + beta * y[row];
         }
     }
 
@@ -569,13 +932,18 @@ impl CsrMatrix<f64> {
             let (start, end) = (w[0], w[1]);
             let mut k = start;
             let mut sum = 0.0_f64;
-            let end4 = start + (end - start) / 4 * 4;
-            while k < end4 {
+            // 8-unroll: lets AVX2 (2× 256-bit FMA lanes) amortise gather-load latency.
+            let end8 = start + (end - start) / 8 * 8;
+            while k < end8 {
                 sum += self.values[k]     * x[self.col_idx[k]     as usize]
                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize];
-                k += 4;
+                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
+                     + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
+                     + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
+                     + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
+                     + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
+                k += 8;
             }
             while k < end {
                 sum += self.values[k] * x[self.col_idx[k] as usize];
@@ -591,13 +959,18 @@ impl CsrMatrix<f64> {
             let (start, end) = (w[0], w[1]);
             let mut k = start;
             let mut sum = 0.0_f64;
-            let end4 = start + (end - start) / 4 * 4;
-            while k < end4 {
+            // 8-unroll: lets AVX2 (2× 256-bit FMA lanes) amortise gather-load latency.
+            let end8 = start + (end - start) / 8 * 8;
+            while k < end8 {
                 sum += self.values[k]     * x[self.col_idx[k]     as usize]
                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize];
-                k += 4;
+                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
+                     + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
+                     + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
+                     + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
+                     + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
+                k += 8;
             }
             while k < end {
                 sum += self.values[k] * x[self.col_idx[k] as usize];
@@ -805,5 +1178,120 @@ mod tests {
         assert!((c.get(1, 1) - 8.0).abs() < 1e-14);
         assert!((c.get(0, 1)).abs() < 1e-14);
         assert!((c.get(1, 0)).abs() < 1e-14);
+    }
+
+    // ── csr_spmm tests ──────────────────────────────────────────────────────
+
+    /// Helper: dense matrix multiply for small reference matrices.
+    fn dense_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+        let mut c = vec![0.0_f64; m * n];
+        for i in 0..m {
+            for p in 0..k {
+                let a_ip = a[i * k + p];
+                for j in 0..n {
+                    c[i * n + j] += a_ip * b[p * n + j];
+                }
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn spmm_identity_left() {
+        // I × A = A
+        let a = small_matrix(); // 3×3
+        let mut ci = CooMatrix::<f64>::new(3, 3);
+        ci.add(0, 0, 1.0); ci.add(1, 1, 1.0); ci.add(2, 2, 1.0);
+        let id = ci.into_csr();
+        let c = super::csr_spmm(&id, &a);
+        let da = a.to_dense();
+        let dc = c.to_dense();
+        for (ai, ci) in da.iter().zip(dc.iter()) {
+            assert!((ai - ci).abs() < 1e-14, "I×A≠A: {ai} vs {ci}");
+        }
+    }
+
+    #[test]
+    fn spmm_identity_right() {
+        // A × I = A
+        let a = small_matrix();
+        let mut ci = CooMatrix::<f64>::new(3, 3);
+        ci.add(0, 0, 1.0); ci.add(1, 1, 1.0); ci.add(2, 2, 1.0);
+        let id = ci.into_csr();
+        let c = super::csr_spmm(&a, &id);
+        let da = a.to_dense();
+        let dc = c.to_dense();
+        for (ai, ci) in da.iter().zip(dc.iter()) {
+            assert!((ai - ci).abs() < 1e-14, "A×I≠A: {ai} vs {ci}");
+        }
+    }
+
+    #[test]
+    fn spmm_square_matches_dense() {
+        // 3×3 × 3×3: compare with explicit dense multiply
+        let a = small_matrix(); // tridiag
+        let b = small_matrix();
+        let c_sparse = super::csr_spmm(&a, &b);
+
+        // Dense reference
+        let da = a.to_dense();
+        let db = b.to_dense();
+        let dc_ref = dense_matmul(&da, &db, 3, 3, 3);
+
+        let dc = c_sparse.to_dense();
+        for (r, e) in dc.iter().zip(dc_ref.iter()) {
+            assert!((r - e).abs() < 1e-13, "spmm square: {r} vs {e}");
+        }
+    }
+
+    #[test]
+    fn spmm_rectangular() {
+        // 2×3 × 3×2
+        let mut ca = CooMatrix::<f64>::new(2, 3);
+        ca.add(0, 0, 1.0); ca.add(0, 2, 2.0);
+        ca.add(1, 1, 3.0);
+        let a = ca.into_csr();
+
+        let mut cb = CooMatrix::<f64>::new(3, 2);
+        cb.add(0, 0, 4.0); cb.add(1, 1, 5.0); cb.add(2, 0, 6.0);
+        let b = cb.into_csr();
+
+        let c = super::csr_spmm(&a, &b);
+        // Row 0: [1*4 + 2*6, 0] = [16, 0]
+        // Row 1: [0, 3*5] = [0, 15]
+        assert_eq!(c.nrows, 2); assert_eq!(c.ncols, 2);
+        assert!((c.get(0, 0) - 16.0).abs() < 1e-14);
+        assert!((c.get(0, 1)).abs() < 1e-14);
+        assert!((c.get(1, 0)).abs() < 1e-14);
+        assert!((c.get(1, 1) - 15.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn spmm_squared_matrix() {
+        // A² should equal A×A, and for the tridiag [2,-1; -1,2; 0,-1,2]:
+        // verify via dense reference
+        let a = small_matrix();
+        let c_sparse = super::csr_spmm(&a, &a);
+        let da = a.to_dense();
+        let dc_ref = dense_matmul(&da, &da, 3, 3, 3);
+        let dc = c_sparse.to_dense();
+        for (r, e) in dc.iter().zip(dc_ref.iter()) {
+            assert!((r - e).abs() < 1e-13, "A²: {r} vs {e}");
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn spmm_parallel_matches_serial() {
+        // Verify parallel version gives identical result to serial.
+        let a = small_matrix();
+        let b = small_matrix();
+        let c_serial   = super::csr_spmm(&a, &b);
+        let c_parallel = super::csr_spmm_parallel(&a, &b);
+        let ds = c_serial.to_dense();
+        let dp = c_parallel.to_dense();
+        for (s, p) in ds.iter().zip(dp.iter()) {
+            assert!((s - p).abs() < 1e-14, "serial vs parallel: {s} vs {p}");
+        }
     }
 }

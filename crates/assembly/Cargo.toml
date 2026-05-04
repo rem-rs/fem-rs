@@ -10,6 +10,7 @@ fem-element = { path = "../element" }
 fem-space   = { path = "../space" }
 fem-linalg  = { path = "../linalg" }
 fem-solver  = { path = "../solver" }
+fem-amg     = { path = "../amg" }
 nalgebra    = { workspace = true }
 thiserror   = { workspace = true }
 reed        = { workspace = true, optional = true }

@@ -102,4 +102,47 @@ mod tests {
 			);
 		}
 	}
+
+        #[test]
+        fn volta_coarser_mesh_n6_also_gives_exact_linear_potential() {
+                // P1 on any mesh reproduces the linear function u=y exactly (no discretisation error).
+                let (mesh, _bcs, u, _iters, res) = solve_volta(6);
+                assert!(res < 1e-8, "PCG residual too large: {}", res);
+                for idx in 0..u.len() {
+                        let node = mesh.node_coords(idx as u32);
+                        let expected = node[1];
+                        assert!(
+                                (u[idx] - expected).abs() < 1e-8,
+                                "expected exact linear potential at node {} (n=6): got {} expected {}",
+                                idx, u[idx], expected
+                        );
+                }
+        }
+
+        #[test]
+        fn volta_l2_norm_is_mesh_independent_for_exact_linear_solution() {
+                // For the exact linear solution u=y, ||u||_2 = sqrt(1/3) regardless of mesh.
+                let (_mesh8, _bcs8, u8, _i8, res8) = solve_volta(8);
+                let (_mesh12, _bcs12, u12, _i12, res12) = solve_volta(12);
+                assert!(res8 < 1e-8 && res12 < 1e-8);
+                let norm8 = u8.iter().map(|v| v * v).sum::<f64>().sqrt() / (u8.len() as f64).sqrt();
+                let norm12 = u12.iter().map(|v| v * v).sum::<f64>().sqrt() / (u12.len() as f64).sqrt();
+                // Both norms approximate sqrt(int_0^1 y^2 dy) = 1/sqrt(3) ≈ 0.5774
+                let expected = (1.0_f64 / 3.0).sqrt();
+                assert!((norm8 - expected).abs() < 0.05,
+                    "n=8 normalised norm deviates from 1/sqrt(3): got {}", norm8);
+                assert!((norm12 - expected).abs() < 0.05,
+                    "n=12 normalised norm deviates from 1/sqrt(3): got {}", norm12);
+        }
+
+        #[test]
+        fn volta_solution_values_are_bounded_by_bc_scale() {
+                let bc_scale = 1.5;
+                let (_mesh, _bcs, u, _iters, res) = solve_volta_with_scale(12, bc_scale);
+                assert!(res < 1e-8, "PCG residual too large: {}", res);
+                for (i, &val) in u.iter().enumerate() {
+                        assert!(val >= -1e-10 && val <= bc_scale + 1e-10,
+                            "solution out of bounds at node {}: val={} bc_scale={}", i, val, bc_scale);
+                }
+        }
 }

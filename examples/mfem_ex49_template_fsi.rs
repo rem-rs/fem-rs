@@ -673,13 +673,19 @@ mod tests {
             r1.final_pressure_checksum, r2.final_pressure_checksum);
     }
 
-    /// Near-zero inlet amplitude produces negligible wall displacement.
+    /// Zero oscillation amplitude produces less wall displacement than the baseline (non-zero) amplitude.
+    /// The inlet is `1 + amp*sin(...)`, so amp=0 still has a constant unit inlet; displacement is
+    /// non-zero but must be smaller than with the full oscillating inlet.
     #[test]
-    fn ex49_zero_inlet_amp_gives_negligible_wall_displacement() {
-        let mut args = base_args();
-        args.inlet_amp = 0.0;
-        let r = solve_fsi_template(&args);
-        assert!(r.max_wall_displacement < 1.0e-10,
-            "expected negligible displacement for zero inlet: {:.4e}", r.max_wall_displacement);
+    fn ex49_zero_inlet_amp_gives_less_displacement_than_baseline() {
+        let mut args_base = base_args();
+        let r_base = solve_fsi_template(&args_base);
+
+        args_base.inlet_amp = 0.0;
+        let r_zero = solve_fsi_template(&args_base);
+
+        assert!(r_zero.max_wall_displacement < r_base.max_wall_displacement,
+            "zero-amp displacement {:.4e} should be < baseline {:.4e}",
+            r_zero.max_wall_displacement, r_base.max_wall_displacement);
     }
 }

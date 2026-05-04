@@ -77,6 +77,15 @@ pub struct CheckpointBundleF64 {
     pub fields: Vec<RankFieldF64>,
 }
 
+/// Full read result for a checkpoint bundle step.
+#[derive(Debug, Clone)]
+pub struct CheckpointBundleReadF64 {
+    pub step: u64,
+    pub time: f64,
+    pub mesh_meta: Option<CheckpointMeshMeta>,
+    pub fields: Vec<(String, RankFieldReadF64)>,
+}
+
 /// Per-step checkpoint validation summary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointStepInfo {
@@ -836,6 +845,151 @@ pub fn read_global_field_slice_f64(
     }
 }
 
+/// Read each named field for the given rank using hyperslab (slice) access.
+///
+/// This is the read-side counterpart to [`write_checkpoint_step_f64_hyperslab`].
+/// Each rank specifies its `global_offset` and `local_len`; the function reads
+/// only that rank's contiguous slice from the global field dataset stored at
+///
+/// `/global_fields/step_XXXXXXXX/<field_name>`
+///
+/// When the `hdf5` feature is enabled, this uses native HDF5 hyperslab I/O.
+/// Otherwise it falls back to reading the full global field and slicing in memory
+/// (functionally identical, slightly higher I/O overhead).
+///
+/// # Arguments
+/// * `file_path`  — Path to the checkpoint file.
+/// * `cfg`        — Parallel configuration (rank, world_size).
+/// * `step`       — Checkpoint step index.
+/// * `requests`   — Slice of `(field_name, global_offset, local_len)` tuples.
+///
+/// # Returns
+/// A `Vec<(String, Vec<f64>)>` with the local data for each requested field,
+/// in the same order as `requests`.
+pub fn read_checkpoint_step_f64_hyperslab(
+    file_path: &str,
+    cfg: ParallelIoConfig,
+    step: u64,
+    requests: &[(&str, u64, usize)],
+) -> Result<Vec<(String, Vec<f64>)>, Hdf5ParallelError> {
+    cfg.validate()?;
+
+    let mut out = Vec::with_capacity(requests.len());
+    for &(field_name, global_offset, local_len) in requests {
+        let values = read_global_field_slice_f64(file_path, step, field_name, global_offset, local_len)?;
+        out.push((field_name.to_string(), values));
+    }
+    Ok(out)
+}
+
+/// Read a full checkpoint bundle (all named fields + optional mesh meta) at a given step.
+///
+/// This is the read-side counterpart to [`write_checkpoint_step_bundle_f64`].
+/// Each element of `field_names` is read for this rank and returned as a
+/// `(name, RankFieldReadF64)` pair.
+pub fn read_checkpoint_bundle_f64(
+    file_path: &str,
+    cfg: ParallelIoConfig,
+    step: u64,
+    field_names: &[&str],
+) -> Result<CheckpointBundleReadF64, Hdf5ParallelError> {
+    cfg.validate()?;
+
+    #[cfg(not(feature = "hdf5"))]
+    {
+        let db = portable_load_db(file_path)?;
+        let step_entry = db
+            .steps
+            .get(&step)
+            .ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint(format!("missing step {step}")))?;
+        let time = step_entry.time;
+        let mesh_meta = step_entry.mesh_meta;
+        let rank_fields = step_entry.partitions.get(&cfg.rank).ok_or_else(|| {
+            Hdf5ParallelError::InvalidCheckpoint(format!(
+                "missing partition rank={} at step {}",
+                cfg.rank, step
+            ))
+        })?;
+        let mut fields = Vec::with_capacity(field_names.len());
+        for &name in field_names {
+            let f = rank_fields.get(name).ok_or_else(|| {
+                Hdf5ParallelError::InvalidCheckpoint(format!(
+                    "missing field '{name}' at step {step} rank {}",
+                    cfg.rank
+                ))
+            })?;
+            fields.push((
+                name.to_string(),
+                RankFieldReadF64 {
+                    step,
+                    time,
+                    global_offset: f.global_offset,
+                    global_len: f.global_len,
+                    values: f.values.clone(),
+                },
+            ));
+        }
+        return Ok(CheckpointBundleReadF64 { step, time, mesh_meta, fields });
+    }
+
+    #[cfg(feature = "hdf5")]
+    {
+        // Under the HDF5 feature path, delegate to the existing per-field reader.
+        let mut fields = Vec::with_capacity(field_names.len());
+        let mut time = 0.0;
+        let mut mesh_meta = None;
+        for &name in field_names {
+            let r = hdf5_rust_impl::read_checkpoint_field_f64_at_step(file_path, cfg, step, name)?;
+            time = r.time;
+            fields.push((name.to_string(), r));
+        }
+        // Mesh meta requires a dedicated read; attempt it if possible.
+        // (best-effort; errors are silently swallowed.)
+        if let Ok(db) = portable_load_db(file_path) {
+            if let Some(se) = db.steps.get(&step) {
+                mesh_meta = se.mesh_meta;
+                time = se.time;
+            }
+        }
+        return Ok(CheckpointBundleReadF64 { step, time, mesh_meta, fields });
+    }
+}
+
+/// Read the latest checkpoint bundle for the specified field names.
+pub fn read_checkpoint_bundle_f64_latest(
+    file_path: &str,
+    cfg: ParallelIoConfig,
+    field_names: &[&str],
+) -> Result<CheckpointBundleReadF64, Hdf5ParallelError> {
+    cfg.validate()?;
+
+    #[cfg(not(feature = "hdf5"))]
+    {
+        let db = portable_load_db(file_path)?;
+        let step = db
+            .steps
+            .keys()
+            .copied()
+            .max()
+            .ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint("checkpoint has no steps".into()))?;
+        return read_checkpoint_bundle_f64(file_path, cfg, step, field_names);
+    }
+
+    #[cfg(feature = "hdf5")]
+    {
+        let mut fields = Vec::with_capacity(field_names.len());
+        let mut time = 0.0;
+        let mut step = 0u64;
+        for &name in field_names {
+            let r = hdf5_rust_impl::read_checkpoint_field_f64_latest(file_path, cfg, name)?;
+            step = r.step;
+            time = r.time;
+            fields.push((name.to_string(), r));
+        }
+        return Ok(CheckpointBundleReadF64 { step, time, mesh_meta: None, fields });
+    }
+}
+
 /// Write a minimal XDMF sidecar describing one scalar field at one time step.
 ///
 /// This helper intentionally emits a compact Polyvertex grid to make the
@@ -872,6 +1026,63 @@ pub fn write_xdmf_polyvertex_scalar_sidecar(
     let _ = writeln!(&mut xml, "</Xdmf>");
 
     std::fs::write(xdmf_path, xml).map_err(|e| Hdf5ParallelError::Backend(e.to_string()))
+}
+
+/// Write flat mesh node coordinates into the checkpoint as a global field.
+///
+/// The coordinates are stored under the special dataset key `__mesh_coords__`
+/// so they survive alongside field data and can be retrieved without any
+/// per-rank information at restart.
+///
+/// `dim` is the spatial dimension (typically 3); `coords` is the flat
+/// row-major array of length `n_nodes * dim`.
+pub fn write_checkpoint_mesh_coords(
+    file_path: &str,
+    step: u64,
+    time: f64,
+    _dim: usize,
+    coords: &[f64],
+) -> Result<(), Hdf5ParallelError> {
+    if coords.is_empty() {
+        return Ok(());
+    }
+    let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+    let n = coords.len() as u64;
+    write_checkpoint_step_f64(
+        file_path,
+        cfg,
+        step,
+        time,
+        &[RankFieldF64 {
+            name: "__mesh_coords__".into(),
+            global_offset: 0,
+            global_len: n,
+            values: coords.to_vec(),
+        }],
+    )?;
+    materialize_global_field_f64(file_path, 1, step, "__mesh_coords__")?;
+    Ok(())
+}
+
+/// Read mesh node coordinates previously saved with [`write_checkpoint_mesh_coords`].
+///
+/// Returns the flat row-major coordinate array `[x0,y0,z0, x1,y1,z1, …]`.
+pub fn read_checkpoint_mesh_coords(
+    file_path: &str,
+    step: u64,
+) -> Result<Vec<f64>, Hdf5ParallelError> {
+    read_global_field_f64(file_path, step, "__mesh_coords__")
+}
+
+/// Read mesh node coordinates from the latest checkpoint step.
+///
+/// Returns `(step, flat_coords)`.
+pub fn read_checkpoint_mesh_coords_latest(
+    file_path: &str,
+) -> Result<(u64, Vec<f64>), Hdf5ParallelError> {
+    let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+    let r = read_checkpoint_field_f64_latest(file_path, cfg, "__mesh_coords__")?;
+    Ok((r.step, r.values))
 }
 
 /// Write a temporal XDMF sidecar for one scalar field across multiple steps.
@@ -1220,5 +1431,439 @@ mod tests {
         assert_eq!(vals, vec![10.0, 20.0, 30.0]);
 
         let _ = std::fs::remove_file(file_path);
+    }
+
+    // ─── read_checkpoint_step_f64_hyperslab tests ──────────────────────────
+
+    #[test]
+    fn hyperslab_read_single_rank_full_field() {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_hsr_full_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = p.to_string_lossy().to_string();
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+
+        write_checkpoint_step_f64(&path, cfg, 0, 0.0, &[RankFieldF64 {
+            name: "pressure".into(),
+            global_offset: 0,
+            global_len: 4,
+            values: vec![1.0, 2.0, 3.0, 4.0],
+        }]).unwrap();
+        let _ = materialize_global_field_f64(&path, 1, 0, "pressure").unwrap();
+
+        let result = read_checkpoint_step_f64_hyperslab(
+            &path, cfg, 0, &[("pressure", 0, 4)],
+        ).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "pressure");
+        assert_eq!(result[0].1, vec![1.0, 2.0, 3.0, 4.0]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hyperslab_read_rank_local_slice() {
+        // Simulate 2-rank setup: rank 0 owns [0..3], rank 1 owns [3..5].
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_hsr_slice_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = p.to_string_lossy().to_string();
+
+        let cfg0 = ParallelIoConfig { world_size: 2, rank: 0 };
+        let cfg1 = ParallelIoConfig { world_size: 2, rank: 1 };
+
+        write_checkpoint_step_f64(&path, cfg0, 1, 0.5, &[RankFieldF64 {
+            name: "T".into(), global_offset: 0, global_len: 5, values: vec![10.0, 11.0, 12.0],
+        }]).unwrap();
+        write_checkpoint_step_f64(&path, cfg1, 1, 0.5, &[RankFieldF64 {
+            name: "T".into(), global_offset: 3, global_len: 5, values: vec![13.0, 14.0],
+        }]).unwrap();
+        let _ = materialize_global_field_f64(&path, 2, 1, "T").unwrap();
+
+        // Rank 0 reads its slice.
+        let r0 = read_checkpoint_step_f64_hyperslab(&path, cfg0, 1, &[("T", 0, 3)]).unwrap();
+        assert_eq!(r0[0].1, vec![10.0, 11.0, 12.0]);
+
+        // Rank 1 reads its slice.
+        let r1 = read_checkpoint_step_f64_hyperslab(&path, cfg1, 1, &[("T", 3, 2)]).unwrap();
+        assert_eq!(r1[0].1, vec![13.0, 14.0]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hyperslab_read_multi_field() {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_hsr_multi_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = p.to_string_lossy().to_string();
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+
+        write_checkpoint_step_f64(&path, cfg, 2, 1.0, &[
+            RankFieldF64 { name: "u".into(), global_offset: 0, global_len: 3, values: vec![1.0, 2.0, 3.0] },
+            RankFieldF64 { name: "v".into(), global_offset: 0, global_len: 2, values: vec![5.0, 6.0] },
+        ]).unwrap();
+        let _ = materialize_global_field_f64(&path, 1, 2, "u").unwrap();
+        let _ = materialize_global_field_f64(&path, 1, 2, "v").unwrap();
+
+        let result = read_checkpoint_step_f64_hyperslab(
+            &path, cfg, 2, &[("u", 0, 3), ("v", 0, 2)],
+        ).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "u"); assert_eq!(result[0].1, vec![1.0, 2.0, 3.0]);
+        assert_eq!(result[1].0, "v"); assert_eq!(result[1].1, vec![5.0, 6.0]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hyperslab_read_out_of_bounds_returns_error() {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_hsr_oob_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = p.to_string_lossy().to_string();
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+
+        write_checkpoint_step_f64(&path, cfg, 0, 0.0, &[RankFieldF64 {
+            name: "x".into(), global_offset: 0, global_len: 3, values: vec![1.0, 2.0, 3.0],
+        }]).unwrap();
+        let _ = materialize_global_field_f64(&path, 1, 0, "x").unwrap();
+
+        // Request slice beyond dataset length.
+        let res = read_checkpoint_step_f64_hyperslab(&path, cfg, 0, &[("x", 2, 5)]);
+        assert!(res.is_err(), "out-of-bounds slice should return an error");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ─── read_checkpoint_bundle_f64 tests ────────────────────────────────────
+
+    fn make_bundle_path(tag: &str) -> String {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_bundle_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        p.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn bundle_write_then_read_single_field() {
+        let path = make_bundle_path("single");
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+
+        let bundle = CheckpointBundleF64 {
+            mesh_meta: Some(CheckpointMeshMeta { dim: 3, n_vertices: 8, n_elements: 2 }),
+            fields: vec![RankFieldF64 {
+                name: "pressure".into(),
+                global_offset: 0,
+                global_len: 4,
+                values: vec![1.0, 2.0, 3.0, 4.0],
+            }],
+        };
+        write_checkpoint_step_bundle_f64(&path, cfg, 5, 0.5, &bundle, IoBackend::Partitioned)
+            .unwrap();
+
+        let read = read_checkpoint_bundle_f64(&path, cfg, 5, &["pressure"]).unwrap();
+        assert_eq!(read.step, 5);
+        assert!((read.time - 0.5).abs() < 1e-12);
+        let (name, field) = &read.fields[0];
+        assert_eq!(name, "pressure");
+        assert_eq!(field.values, vec![1.0, 2.0, 3.0, 4.0]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bundle_read_multi_field() {
+        let path = make_bundle_path("multi");
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+
+        let bundle = CheckpointBundleF64 {
+            mesh_meta: None,
+            fields: vec![
+                RankFieldF64 { name: "u".into(), global_offset: 0, global_len: 3, values: vec![1.0, 2.0, 3.0] },
+                RankFieldF64 { name: "v".into(), global_offset: 0, global_len: 3, values: vec![4.0, 5.0, 6.0] },
+            ],
+        };
+        write_checkpoint_step_bundle_f64(&path, cfg, 0, 1.0, &bundle, IoBackend::Partitioned)
+            .unwrap();
+
+        let read = read_checkpoint_bundle_f64(&path, cfg, 0, &["u", "v"]).unwrap();
+        assert_eq!(read.fields.len(), 2);
+        let u_vals = &read.fields[0].1.values;
+        let v_vals = &read.fields[1].1.values;
+        assert_eq!(u_vals, &vec![1.0, 2.0, 3.0]);
+        assert_eq!(v_vals, &vec![4.0, 5.0, 6.0]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bundle_read_latest_step() {
+        let path = make_bundle_path("latest");
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+
+        let field = |v: f64| CheckpointBundleF64 {
+            mesh_meta: None,
+            fields: vec![RankFieldF64 { name: "q".into(), global_offset: 0, global_len: 1, values: vec![v] }],
+        };
+        write_checkpoint_step_bundle_f64(&path, cfg, 1, 0.1, &field(10.0), IoBackend::Partitioned).unwrap();
+        write_checkpoint_step_bundle_f64(&path, cfg, 3, 0.3, &field(30.0), IoBackend::Partitioned).unwrap();
+
+        let read = read_checkpoint_bundle_f64_latest(&path, cfg, &["q"]).unwrap();
+        assert_eq!(read.step, 3);
+        assert_eq!(read.fields[0].1.values, vec![30.0]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bundle_read_missing_field_returns_error() {
+        let path = make_bundle_path("err");
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+
+        let bundle = CheckpointBundleF64 {
+            mesh_meta: None,
+            fields: vec![RankFieldF64 { name: "u".into(), global_offset: 0, global_len: 2, values: vec![1.0, 2.0] }],
+        };
+        write_checkpoint_step_bundle_f64(&path, cfg, 0, 0.0, &bundle, IoBackend::Partitioned).unwrap();
+
+        let res = read_checkpoint_bundle_f64(&path, cfg, 0, &["nonexistent"]);
+        assert!(res.is_err(), "reading a missing field should return an error");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ─── mesh coords checkpoint tests ────────────────────────────────────────
+
+    fn make_coords_path(tag: &str) -> String {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_mesh_coords_{}_{}_{}.chk",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        p.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn write_then_read_mesh_coords_single_step() {
+        let path = make_coords_path("single");
+        let coords = vec![0.0, 0.0, 0.0,  1.0, 0.0, 0.0,  0.0, 1.0, 0.0];
+        write_checkpoint_mesh_coords(&path, 0, 0.0, 3, &coords)
+            .expect("write mesh coords should succeed");
+        let out = read_checkpoint_mesh_coords(&path, 0)
+            .expect("read mesh coords should succeed");
+        assert_eq!(out.len(), 9, "9 floats for 3 nodes × 3D");
+        for (a, b) in coords.iter().zip(out.iter()) {
+            assert!((a - b).abs() < 1e-14);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mesh_coords_latest_returns_last_step() {
+        let path = make_coords_path("latest");
+        let coords0 = vec![0.0, 0.0, 0.0,  1.0, 0.0, 0.0];
+        let coords1 = vec![0.0, 0.0, 0.5,  1.0, 0.0, 0.5];
+        write_checkpoint_mesh_coords(&path, 1, 0.1, 3, &coords0).unwrap();
+        write_checkpoint_mesh_coords(&path, 3, 0.3, 3, &coords1).unwrap();
+        let (step, out) = read_checkpoint_mesh_coords_latest(&path)
+            .expect("read latest mesh coords should succeed");
+        assert_eq!(step, 3);
+        for (a, b) in coords1.iter().zip(out.iter()) {
+            assert!((a - b).abs() < 1e-14);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mesh_coords_coexist_with_field_data() {
+        let path = make_coords_path("coexist");
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+        // Write field data and mesh coords at the same step.
+        write_checkpoint_step_f64(&path, cfg, 2, 0.2, &[RankFieldF64 {
+            name: "u".into(),
+            global_offset: 0,
+            global_len: 3,
+            values: vec![1.0, 2.0, 3.0],
+        }]).unwrap();
+        let coords = vec![0.0, 0.0, 0.0,  1.0, 0.0, 0.0,  0.5, 1.0, 0.0];
+        write_checkpoint_mesh_coords(&path, 2, 0.2, 3, &coords).unwrap();
+
+        // Both should be readable.
+        let field = read_checkpoint_field_f64_at_step(&path, cfg, 2, "u").unwrap();
+        assert_eq!(field.values, vec![1.0, 2.0, 3.0]);
+
+        let out = read_checkpoint_mesh_coords(&path, 2).unwrap();
+        assert_eq!(out.len(), 9);
+        for (a, b) in coords.iter().zip(out.iter()) {
+            assert!((a - b).abs() < 1e-14);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mesh_coords_missing_step_returns_error() {
+        let path = make_coords_path("missing");
+        let coords = vec![0.0, 0.0, 0.0];
+        write_checkpoint_mesh_coords(&path, 0, 0.0, 3, &coords).unwrap();
+        let res = read_checkpoint_mesh_coords(&path, 99);
+        assert!(res.is_err(), "reading coords at non-existent step should fail");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ─── multi-step hyperslab restart integration tests ─────────────────────
+
+    fn make_restart_path(tag: &str) -> String {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fem_restart_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        p.to_string_lossy().to_string()
+    }
+
+    /// Full checkpoint-restart cycle: write N steps across 2 simulated ranks,
+    /// then read back each step via hyperslab and verify data integrity.
+    #[test]
+    fn hyperslab_multi_step_restart_roundtrip() {
+        let path = make_restart_path("multistep");
+
+        // Simulated 2-rank world; rank 0 owns nodes [0..4], rank 1 owns [4..8].
+        let cfg0 = ParallelIoConfig { world_size: 2, rank: 0 };
+        let cfg1 = ParallelIoConfig { world_size: 2, rank: 1 };
+
+        let steps: u64 = 3;
+        for step in 0..steps {
+            let t = step as f64 * 0.1;
+            // Temperature field: rank 0 values = step*10 + [1..4], rank 1 = step*10 + [5..8]
+            let r0_vals: Vec<f64> = (1u64..=4).map(|i| (step * 10 + i) as f64).collect();
+            let r1_vals: Vec<f64> = (5u64..=8).map(|i| (step * 10 + i) as f64).collect();
+
+            write_checkpoint_step_f64(&path, cfg0, step, t, &[RankFieldF64 {
+                name: "T".into(), global_offset: 0, global_len: 8, values: r0_vals.clone(),
+            }]).unwrap();
+            write_checkpoint_step_f64(&path, cfg1, step, t, &[RankFieldF64 {
+                name: "T".into(), global_offset: 4, global_len: 8, values: r1_vals.clone(),
+            }]).unwrap();
+            materialize_global_field_f64(&path, 2, step, "T").unwrap();
+        }
+
+        // Restart from step 1: verify both ranks can re-read their local data.
+        let restart_step = 1u64;
+        let r0_back = read_checkpoint_step_f64_hyperslab(
+            &path, cfg0, restart_step, &[("T", 0, 4)],
+        ).unwrap();
+        let r1_back = read_checkpoint_step_f64_hyperslab(
+            &path, cfg1, restart_step, &[("T", 4, 4)],
+        ).unwrap();
+
+        // Step 1: expected values = 1*10 + [1..4] for rank 0, 1*10 + [5..8] for rank 1.
+        let expected_r0: Vec<f64> = (1u64..=4).map(|i| (10 + i) as f64).collect();
+        let expected_r1: Vec<f64> = (5u64..=8).map(|i| (10 + i) as f64).collect();
+        assert_eq!(r0_back[0].1, expected_r0, "rank 0 restart data mismatch");
+        assert_eq!(r1_back[0].1, expected_r1, "rank 1 restart data mismatch");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Verify that mesh coords checkpoint is preserved across restart steps.
+    #[test]
+    fn hyperslab_restart_with_mesh_coords_consistent() {
+        let path = make_restart_path("meshcoords");
+        let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+
+        // Write 3 steps with evolving mesh coords and field data.
+        for step in 0u64..3 {
+            let t = step as f64 * 0.25;
+            let coords: Vec<f64> = (0..6).map(|i| (step as f64 * 0.1) + i as f64).collect();
+            write_checkpoint_mesh_coords(&path, step, t, 3, &coords).unwrap();
+            write_checkpoint_step_f64(&path, cfg, step, t, &[RankFieldF64 {
+                name: "phi".into(), global_offset: 0, global_len: 2,
+                values: vec![step as f64, step as f64 * 2.0],
+            }]).unwrap();
+            materialize_global_field_f64(&path, 1, step, "phi").unwrap();
+        }
+
+        // Restart from step 2: verify coords and field both consistent.
+        let (latest_step, latest_coords) = read_checkpoint_mesh_coords_latest(&path).unwrap();
+        assert_eq!(latest_step, 2, "latest coord step should be 2");
+        let expected_coords: Vec<f64> = (0..6).map(|i| 0.2 + i as f64).collect();
+        for (a, b) in latest_coords.iter().zip(expected_coords.iter()) {
+            assert!((a - b).abs() < 1e-12, "coord mismatch: {a} != {b}");
+        }
+
+        let phi_back = read_checkpoint_step_f64_hyperslab(
+            &path, cfg, 2, &[("phi", 0, 2)],
+        ).unwrap();
+        assert_eq!(phi_back[0].1, vec![2.0, 4.0], "field data at restart step 2 mismatch");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Validate that checkpoint layout passes validation after multi-step write.
+    #[test]
+    fn hyperslab_multi_step_layout_validates() {
+        let path = make_restart_path("validate");
+        let cfg0 = ParallelIoConfig { world_size: 2, rank: 0 };
+        let cfg1 = ParallelIoConfig { world_size: 2, rank: 1 };
+
+        for step in 0u64..4 {
+            let t = step as f64 * 0.05;
+            write_checkpoint_step_f64(&path, cfg0, step, t, &[RankFieldF64 {
+                name: "u".into(), global_offset: 0, global_len: 6, values: vec![1.0, 2.0, 3.0],
+            }]).unwrap();
+            write_checkpoint_step_f64(&path, cfg1, step, t, &[RankFieldF64 {
+                name: "u".into(), global_offset: 3, global_len: 6, values: vec![4.0, 5.0, 6.0],
+            }]).unwrap();
+            materialize_global_field_f64(&path, 2, step, "u").unwrap();
+        }
+
+        let report = validate_checkpoint_layout(&path, Some(2)).unwrap();
+        assert!(report.warnings.is_empty(), "unexpected warnings: {:?}", report.warnings);
+        assert_eq!(report.steps.len(), 4);
+        assert_eq!(report.world_size, 2);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

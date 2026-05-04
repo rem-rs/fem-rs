@@ -56,6 +56,7 @@ pub mod launcher;
 pub mod mesh_serde;
 pub mod metis;
 pub mod par_amg;
+pub mod par_amr;
 pub mod par_assembler;
 pub mod par_csr;
 pub mod par_mesh;

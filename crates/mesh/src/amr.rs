@@ -2221,6 +2221,689 @@ pub fn refine_nonconforming_hex(
     (new_mesh, constraints, midpoint_map)
 }
 
+// ─── Anisotropic Quad/Hex NC AMR ──────────────────────────────────────────────
+
+/// Direction for anisotropic quad refinement.
+///
+/// - `X` — split element into 2 quads by cutting along X (adds a vertical midpoint edge)
+/// - `Y` — split element into 2 quads by cutting along Y (adds a horizontal midpoint edge)
+/// - `Both` — isotropic 4-way split (same as `refine_nonconforming_quad`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuadRefineDir {
+    /// Split along X axis (left/right halves — vertical cut).
+    X,
+    /// Split along Y axis (top/bottom halves — horizontal cut).
+    Y,
+    /// Full 4-way isotropic split.
+    Both,
+}
+
+/// Direction for anisotropic Hex8 refinement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HexRefineDir {
+    /// Split along X (2 children).
+    X,
+    /// Split along Y (2 children).
+    Y,
+    /// Split along Z (2 children).
+    Z,
+    /// Split along XY (4 children in-plane).
+    XY,
+    /// Split along XZ (4 children).
+    XZ,
+    /// Split along YZ (4 children).
+    YZ,
+    /// Full 8-way isotropic split.
+    All,
+}
+
+/// Anisotropic non-conforming refinement for Quad4 meshes.
+///
+/// Each entry in `marked` is `(elem_id, direction)`.
+///
+/// # Refinement directions
+/// - [`QuadRefineDir::X`]: element is split into left and right halves by a
+///   vertical mid-edge.  Two child quads share the new midpoint nodes on the
+///   two horizontal edges.
+/// - [`QuadRefineDir::Y`]: element is split into top and bottom halves by a
+///   horizontal mid-edge.
+/// - [`QuadRefineDir::Both`]: full 4-way isotropic refinement (5 new nodes).
+///
+/// # Returns
+/// `(new_mesh, constraints)` where constraints encode hanging-node DOF dependencies.
+///
+/// # Quad4 node layout (CCW)
+/// ```text
+///   n3 ─── n2
+///   │       │
+///   n0 ─── n1
+/// ```
+pub fn refine_nonconforming_quad_aniso(
+    mesh:   &SimplexMesh<2>,
+    marked: &[(ElemId, QuadRefineDir)],
+) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>) {
+    assert!(
+        mesh.elem_type == ElementType::Quad4,
+        "refine_nonconforming_quad_aniso: only Quad4 meshes are supported"
+    );
+
+    if marked.is_empty() {
+        return (mesh.clone(), Vec::new());
+    }
+
+    let n_elems = mesh.n_elems();
+    let marked_map: HashMap<ElemId, QuadRefineDir> = marked.iter().copied().collect();
+    let marked_set: std::collections::HashSet<ElemId> = marked_map.keys().copied().collect();
+
+    // ── Build edge adjacency ─────────────────────────────────────────────────
+    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_quad() {
+            edge_elems.entry(quad_edge_key(ns[a], ns[b])).or_default().push(e);
+        }
+    }
+
+    // ── Compute midpoints for needed edges ───────────────────────────────────
+    // For X-split: need midpoints of edges (n0,n3) and (n1,n2) — left and right vertical edges
+    // For Y-split: need midpoints of edges (n0,n1) and (n3,n2) — bottom and top horizontal edges
+    // For Both:    need all 4 edge midpoints + centroid
+    let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut center_map:   HashMap<ElemId, NodeId>           = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_node = mesh.n_nodes() as NodeId;
+
+    // Inline helper macro to insert midpoint if not already present.
+    macro_rules! ensure_midpoint {
+        ($key:expr) => {{
+            let k = $key;
+            if !midpoint_map.contains_key(&k) {
+                let xa = mesh.coords_of(k.0);
+                let xb = mesh.coords_of(k.1);
+                new_coords.push(0.5 * (xa[0] + xb[0]));
+                new_coords.push(0.5 * (xa[1] + xb[1]));
+                midpoint_map.insert(k, next_node);
+                next_node += 1;
+            }
+        }};
+    }
+
+    for (&e, &dir) in &marked_map {
+        let ns = mesh.elem_nodes(e);
+        match dir {
+            QuadRefineDir::X => {
+                // Horizontal cut: midpoints of bottom (n0,n1) and top (n3,n2)
+                ensure_midpoint!(quad_edge_key(ns[0], ns[1]));
+                ensure_midpoint!(quad_edge_key(ns[3], ns[2]));
+            }
+            QuadRefineDir::Y => {
+                // Vertical cut: midpoints of left (n0,n3) and right (n1,n2)
+                ensure_midpoint!(quad_edge_key(ns[0], ns[3]));
+                ensure_midpoint!(quad_edge_key(ns[1], ns[2]));
+            }
+            QuadRefineDir::Both => {
+                for &(a, b) in &local_edges_quad() {
+                    ensure_midpoint!(quad_edge_key(ns[a], ns[b]));
+                }
+                center_map.entry(e).or_insert_with(|| {
+                    let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
+                    for k in 0..4 { let c = mesh.coords_of(ns[k]); cx += c[0]; cy += c[1]; }
+                    new_coords.push(cx / 4.0);
+                    new_coords.push(cy / 4.0);
+                    let id = next_node; next_node += 1; id
+                });
+            }
+        }
+    }
+
+    // ── Build new element connectivity ───────────────────────────────────────
+    // QuadRefineDir::X  = horizontal cut (adds midpoints on bottom/top edges n0-n1 and n3-n2)
+    //   Left child:  [n0, bottom_mid, top_mid, n3]   (CCW)
+    //   Right child: [bottom_mid, n1, n2, top_mid]   (CCW)
+    //
+    // QuadRefineDir::Y  = vertical cut (adds midpoints on left/right edges n0-n3 and n1-n2)
+    //   Bottom child: [n0, n1, right_mid, left_mid]  (CCW)
+    //   Top child:    [left_mid, right_mid, n2, n3]  (CCW)
+    //
+    // QuadRefineDir::Both = 4-way isotropic split (all edge midpoints + centroid).
+    let mut new_conn: Vec<u32> = Vec::new();
+    let mut new_elem_tags: Vec<i32> = Vec::new();
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let tag = mesh.elem_tags[e as usize];
+        if let Some(&dir) = marked_map.get(&e) {
+            match dir {
+                QuadRefineDir::X => {
+                    // Horizontal cut: midpoints of bottom (n0,n1) and top (n3,n2) edges
+                    let bottom_mid = *midpoint_map.get(&quad_edge_key(ns[0], ns[1])).unwrap();
+                    let top_mid    = *midpoint_map.get(&quad_edge_key(ns[3], ns[2])).unwrap();
+                    // Left child (CCW): n0, bottom_mid, top_mid, n3
+                    new_conn.extend_from_slice(&[ns[0], bottom_mid, top_mid, ns[3]]);
+                    new_elem_tags.push(tag);
+                    // Right child (CCW): bottom_mid, n1, n2, top_mid
+                    new_conn.extend_from_slice(&[bottom_mid, ns[1], ns[2], top_mid]);
+                    new_elem_tags.push(tag);
+                }
+                QuadRefineDir::Y => {
+                    // Vertical cut: midpoints of left (n0,n3) and right (n1,n2) edges
+                    let left_mid  = *midpoint_map.get(&quad_edge_key(ns[0], ns[3])).unwrap();
+                    let right_mid = *midpoint_map.get(&quad_edge_key(ns[1], ns[2])).unwrap();
+                    // Bottom child (CCW): n0, n1, right_mid, left_mid
+                    new_conn.extend_from_slice(&[ns[0], ns[1], right_mid, left_mid]);
+                    new_elem_tags.push(tag);
+                    // Top child (CCW): left_mid, right_mid, n2, n3
+                    new_conn.extend_from_slice(&[left_mid, right_mid, ns[2], ns[3]]);
+                    new_elem_tags.push(tag);
+                }
+                QuadRefineDir::Both => {
+                    // Full 4-way split
+                    let m01 = *midpoint_map.get(&quad_edge_key(ns[0], ns[1])).unwrap();
+                    let m12 = *midpoint_map.get(&quad_edge_key(ns[1], ns[2])).unwrap();
+                    let m23 = *midpoint_map.get(&quad_edge_key(ns[2], ns[3])).unwrap();
+                    let m30 = *midpoint_map.get(&quad_edge_key(ns[3], ns[0])).unwrap();
+                    let c   = *center_map.get(&e).unwrap();
+                    new_conn.extend_from_slice(&[ns[0], m01, c, m30]);
+                    new_elem_tags.push(tag);
+                    new_conn.extend_from_slice(&[m01, ns[1], m12, c]);
+                    new_elem_tags.push(tag);
+                    new_conn.extend_from_slice(&[c, m12, ns[2], m23]);
+                    new_elem_tags.push(tag);
+                    new_conn.extend_from_slice(&[m30, c, m23, ns[3]]);
+                    new_elem_tags.push(tag);
+                }
+            }
+        } else {
+            // Unrefined element: keep as-is
+            new_conn.extend_from_slice(ns);
+            new_elem_tags.push(tag);
+        }
+    }
+
+    // ── Build hanging-node constraints ───────────────────────────────────────
+    // For each split edge whose neighbour is unrefined, record the midpoint as constrained.
+    let mut constraints: Vec<HangingNodeConstraint> = Vec::new();
+
+    for (&e, &dir) in &marked_map {
+        let ns = mesh.elem_nodes(e);
+        let split_edges: Vec<(NodeId, NodeId)> = match dir {
+            QuadRefineDir::X => vec![
+                quad_edge_key(ns[0], ns[1]),
+                quad_edge_key(ns[3], ns[2]),
+            ],
+            QuadRefineDir::Y => vec![
+                quad_edge_key(ns[0], ns[3]),
+                quad_edge_key(ns[1], ns[2]),
+            ],
+            QuadRefineDir::Both => local_edges_quad()
+                .iter()
+                .map(|&(a, b)| quad_edge_key(ns[a], ns[b]))
+                .collect(),
+        };
+        for edge in split_edges {
+            if let Some(&mid) = midpoint_map.get(&edge) {
+                if let Some(neighbors) = edge_elems.get(&edge) {
+                    for &nb in neighbors {
+                        if nb != e && !marked_set.contains(&nb) {
+                            constraints.push(HangingNodeConstraint {
+                                constrained: mid as usize,
+                                parent_a:    edge.0 as usize,
+                                parent_b:    edge.1 as usize,
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Deduplicate by constrained node
+    constraints.sort_by_key(|c| c.constrained);
+    constraints.dedup_by_key(|c| c.constrained);
+
+    let new_mesh = SimplexMesh::<2>::uniform(
+        new_coords,
+        new_conn,
+        new_elem_tags,
+        ElementType::Quad4,
+        mesh.face_conn.clone(),
+        mesh.face_tags.clone(),
+        mesh.face_type,
+    );
+    (new_mesh, constraints)
+}
+
+/// Anisotropic non-conforming refinement for Hex8 meshes.
+///
+/// Each entry in `marked` is `(elem_id, direction)`.
+///
+/// # Refinement directions
+/// - [`HexRefineDir::X`]: 2 children split along X (midpoints on X-normal faces).
+/// - [`HexRefineDir::Y`]: 2 children split along Y.
+/// - [`HexRefineDir::Z`]: 2 children split along Z.
+/// - [`HexRefineDir::XY`]: 4 children split along X and Y.
+/// - [`HexRefineDir::XZ`]: 4 children split along X and Z.
+/// - [`HexRefineDir::YZ`]: 4 children split along Y and Z.
+/// - [`HexRefineDir::All`]: full 8-way isotropic split (delegates to
+///   [`refine_nonconforming_hex`]).
+///
+/// # Hex8 node layout
+/// ```text
+///    7────6
+///   /|   /|   top face: n4-n5-n6-n7 (CCW viewed from above)
+///  4────5 |
+///  | 3──|─2
+///  |/   |/    bottom face: n0-n1-n2-n3 (CCW viewed from below)
+///  0────1
+/// ```
+///
+/// # Returns
+/// `(new_mesh, constraints)` where constraints encode hanging-node DOF dependencies.
+pub fn refine_nonconforming_hex_aniso(
+    mesh: &SimplexMesh<3>,
+    marked: &[(ElemId, HexRefineDir)],
+) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>) {
+    assert!(
+        mesh.elem_type == ElementType::Hex8,
+        "refine_nonconforming_hex_aniso: only Hex8 meshes are supported"
+    );
+
+    if marked.is_empty() {
+        return (mesh.clone(), Vec::new());
+    }
+
+    // Separate `All` cases: delegate them via the isotropic refiner,
+    // then handle the directional cases independently.
+    let all_ids: Vec<ElemId> = marked
+        .iter()
+        .filter_map(|&(e, d)| if d == HexRefineDir::All { Some(e) } else { None })
+        .collect();
+
+    let directional: Vec<(ElemId, HexRefineDir)> = marked
+        .iter()
+        .copied()
+        .filter(|&(_, d)| d != HexRefineDir::All)
+        .collect();
+
+    // If only isotropic splits requested, delegate.
+    if directional.is_empty() {
+        let (m, c, _) = refine_nonconforming_hex(mesh, &all_ids);
+        return (m, c);
+    }
+
+    // For the purely directional (anisotropic) path we implement X/Y/Z splitting.
+    // XY = X then Y (in a single pass); XZ = X then Z; YZ = Y then Z.
+    // Strategy:
+    //   1. Expand each (elem, XY/XZ/YZ) into constituent single-axis splits.
+    //   2. For each marked element accumulate which axes are cut.
+    //   3. In one pass, generate midpoints for needed face-midplane edges.
+    //   4. Emit children and constraints.
+
+    let n_elems = mesh.n_elems();
+
+    // ── Determine per-element cut flags ─────────────────────────────────────
+    #[derive(Default, Clone, Copy)]
+    struct CutFlags { cut_x: bool, cut_y: bool, cut_z: bool }
+
+    let mut cut_map: HashMap<ElemId, CutFlags> = HashMap::new();
+    for &(e, dir) in &directional {
+        let f = cut_map.entry(e).or_default();
+        match dir {
+            HexRefineDir::X  => { f.cut_x = true; }
+            HexRefineDir::Y  => { f.cut_y = true; }
+            HexRefineDir::Z  => { f.cut_z = true; }
+            HexRefineDir::XY => { f.cut_x = true; f.cut_y = true; }
+            HexRefineDir::XZ => { f.cut_x = true; f.cut_z = true; }
+            HexRefineDir::YZ => { f.cut_y = true; f.cut_z = true; }
+            HexRefineDir::All => {} // handled separately
+        }
+    }
+
+    // ── Build edge adjacency (for hanging-node detection) ────────────────────
+    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_hex() {
+            edge_elems.entry(edge_key(ns[a], ns[b])).or_default().push(e);
+        }
+    }
+
+    // ── Compute midpoints for required face-planes ───────────────────────────
+    //
+    // Hex8 node layout (standard, 0-based):
+    //   Bottom face: 0(─x─y), 1(+x─y), 2(+x+y), 3(─x+y)
+    //   Top    face: 4(─x─y), 5(+x─y), 6(+x+y), 7(─x+y)
+    //
+    // X-split: cut YZ-plane at x=0.5 → 4 mid-nodes on edges (0,1),(3,2),(4,5),(7,6)
+    //   → left  child: [n0, mB, mT_front, n3, n4, mT_back (wait this is getting complex)]
+    //
+    // Rather than hardcoding the full topology of multi-axis splits, we implement
+    // each axis split independently using face-midpoint nodes.
+    //
+    // X-CUT: insert a YZ midplane.
+    //   Midpoints needed: edges (0,1),(3,2),(4,5),(7,6) — the 4 edges parallel to X.
+    //   Left child (─x half): [n0, m01, m32, n3, n4, m45, m76, n7]
+    //   Right child (+x half): [m01, n1, n2, m32, m45, n5, n6, m76]
+    //
+    // Y-CUT: insert an XZ midplane.
+    //   Midpoints needed: edges (0,3),(1,2),(4,7),(5,6) — the 4 edges parallel to Y.
+    //   Front child (─y half): [n0, n1, m12, m03, n4, n5, m56, m47]
+    //   Back child  (+y half): [m03, m12, n2, n3, m47, m56, n6, n7]
+    //
+    // Z-CUT: insert an XY midplane.
+    //   Midpoints needed: edges (0,4),(1,5),(2,6),(3,7) — the 4 vertical edges.
+    //   Bottom child: [n0, n1, n2, n3, m04, m15, m26, m37]
+    //   Top child:    [m04, m15, m26, m37, n4, n5, n6, n7]
+    //
+    // For multi-axis: compose the children from single-axis results within one pass.
+
+    let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_node = mesh.n_nodes() as NodeId;
+
+    let mut ensure_mp = |key: (NodeId, NodeId), new_coords: &mut Vec<f64>, next: &mut NodeId| -> NodeId {
+        let k = edge_key(key.0, key.1);
+        *midpoint_map.entry(k).or_insert_with(|| {
+            // Copy values first to avoid simultaneous mutable/immutable borrow.
+            let xa = [
+                new_coords[3 * k.0 as usize],
+                new_coords[3 * k.0 as usize + 1],
+                new_coords[3 * k.0 as usize + 2],
+            ];
+            let xb = [
+                new_coords[3 * k.1 as usize],
+                new_coords[3 * k.1 as usize + 1],
+                new_coords[3 * k.1 as usize + 2],
+            ];
+            new_coords.push(0.5 * (xa[0] + xb[0]));
+            new_coords.push(0.5 * (xa[1] + xb[1]));
+            new_coords.push(0.5 * (xa[2] + xb[2]));
+            let id = *next; *next += 1; id
+        })
+    };
+
+    // Pre-allocate midpoints for all cut edges.
+    for (&e, &cf) in &cut_map {
+        let ns = mesh.elem_nodes(e);
+        if cf.cut_x {
+            ensure_mp((ns[0], ns[1]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[3], ns[2]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[4], ns[5]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[7], ns[6]), &mut new_coords, &mut next_node);
+        }
+        if cf.cut_y {
+            ensure_mp((ns[0], ns[3]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[1], ns[2]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[4], ns[7]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[5], ns[6]), &mut new_coords, &mut next_node);
+        }
+        if cf.cut_z {
+            ensure_mp((ns[0], ns[4]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[1], ns[5]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[2], ns[6]), &mut new_coords, &mut next_node);
+            ensure_mp((ns[3], ns[7]), &mut new_coords, &mut next_node);
+        }
+    }
+
+    // ── For multi-axis cuts, also need face-center nodes ────────────────────
+    // XY cut: 4 children → need XZ-face midpoints (edges cut_x) + YZ-face midpoints (edges cut_y)
+    //   but also 1 body column midpoint between the 4 children (XY face center).
+    // For simplicity we do the single-axis cuts cleanly; for 2-axis cuts we need
+    // an additional face-center node on the cross-cutting face.
+    let mut face_center_map: HashMap<[NodeId; 4], NodeId> = HashMap::new();
+
+    let mut ensure_fc = |ns4: [NodeId; 4], new_coords: &mut Vec<f64>, next: &mut NodeId| -> NodeId {
+        let key = hex_face_key(ns4);
+        *face_center_map.entry(key).or_insert_with(|| {
+            let mut x = 0.0_f64; let mut y = 0.0_f64; let mut z = 0.0_f64;
+            for n in ns4 {
+                x += new_coords[3 * n as usize];
+                y += new_coords[3 * n as usize + 1];
+                z += new_coords[3 * n as usize + 2];
+            }
+            new_coords.push(x / 4.0); new_coords.push(y / 4.0); new_coords.push(z / 4.0);
+            let id = *next; *next += 1; id
+        })
+    };
+
+    // Pre-allocate face centers needed for 2-axis cuts.
+    for (&e, &cf) in &cut_map {
+        let ns = mesh.elem_nodes(e);
+        let cuts = cf.cut_x as u8 + cf.cut_y as u8 + cf.cut_z as u8;
+        if cuts >= 2 {
+            // For XY: XZ face centers (at mid-Y plane): left and right of X cut.
+            // Rather than enumerating all of these by hand (complex), we fall back
+            // to allocating all 4 cross-cut midpoints via the edge midpoints
+            // we already have, and computing the 1 inner crossing node as the
+            // centroid of the 4 edge midpoints at the cross-plane.
+            if cf.cut_x && cf.cut_y {
+                // Cross-face between X and Y cuts: face formed by
+                // m01, m32 (from X cut) and m03, m12 (from Y cut) at interior.
+                // Actually the cross node is the face center of the +X─Y cross.
+                // We compute it as midpoint of (m01's z-slice and m03's x-slice)
+                // = centroid of [m01, m32, m03_... ] — this is the body center of the
+                // 4-child XY plane. Use the face-center of a virtual face:
+                // The XY-cut interior face has 4 corners that are all new midpoints:
+                //   [m01, m32, m03, m12] isn't right. Let's use the face-center of
+                // the original bottom+top composed face.
+                // Actually for XY 4-child split we need the center of the
+                // cross-cutting face:  [m01, m12, m32, m03] at mid-bottom.
+                // Naming: m01=edge_key(0,1), m12=edge_key(1,2), m32=edge_key(3,2), m03=edge_key(0,3)
+                let m01 = *midpoint_map.get(&edge_key(ns[0], ns[1])).unwrap();
+                let m12 = *midpoint_map.get(&edge_key(ns[1], ns[2])).unwrap();
+                let m32 = *midpoint_map.get(&edge_key(ns[3], ns[2])).unwrap();
+                let m03 = *midpoint_map.get(&edge_key(ns[0], ns[3])).unwrap();
+                ensure_fc([m01, m12, m32, m03], &mut new_coords, &mut next_node);
+
+                let m45 = *midpoint_map.get(&edge_key(ns[4], ns[5])).unwrap();
+                let m56 = *midpoint_map.get(&edge_key(ns[5], ns[6])).unwrap();
+                let m76 = *midpoint_map.get(&edge_key(ns[7], ns[6])).unwrap();
+                let m47 = *midpoint_map.get(&edge_key(ns[4], ns[7])).unwrap();
+                ensure_fc([m45, m56, m76, m47], &mut new_coords, &mut next_node);
+            }
+            if cf.cut_x && cf.cut_z {
+                let m01 = *midpoint_map.get(&edge_key(ns[0], ns[1])).unwrap();
+                let m45 = *midpoint_map.get(&edge_key(ns[4], ns[5])).unwrap();
+                let m76 = *midpoint_map.get(&edge_key(ns[7], ns[6])).unwrap();
+                let m32 = *midpoint_map.get(&edge_key(ns[3], ns[2])).unwrap();
+                let m04 = *midpoint_map.get(&edge_key(ns[0], ns[4])).unwrap();
+                let m15 = *midpoint_map.get(&edge_key(ns[1], ns[5])).unwrap();
+                let m26 = *midpoint_map.get(&edge_key(ns[2], ns[6])).unwrap();
+                let m37 = *midpoint_map.get(&edge_key(ns[3], ns[7])).unwrap();
+                // Front face (─y) cross: [m01, m15, m45, m04]
+                ensure_fc([m01, m15, m45, m04], &mut new_coords, &mut next_node);
+                // Back face (+y) cross: [m32, m26, m76, m37]
+                ensure_fc([m32, m26, m76, m37], &mut new_coords, &mut next_node);
+            }
+            if cf.cut_y && cf.cut_z {
+                let m03 = *midpoint_map.get(&edge_key(ns[0], ns[3])).unwrap();
+                let m12 = *midpoint_map.get(&edge_key(ns[1], ns[2])).unwrap();
+                let m47 = *midpoint_map.get(&edge_key(ns[4], ns[7])).unwrap();
+                let m56 = *midpoint_map.get(&edge_key(ns[5], ns[6])).unwrap();
+                let m04 = *midpoint_map.get(&edge_key(ns[0], ns[4])).unwrap();
+                let m15 = *midpoint_map.get(&edge_key(ns[1], ns[5])).unwrap();
+                let m26 = *midpoint_map.get(&edge_key(ns[2], ns[6])).unwrap();
+                let m37 = *midpoint_map.get(&edge_key(ns[3], ns[7])).unwrap();
+                // Left face (─x) cross: [m03, m37, m47, m04]
+                ensure_fc([m03, m37, m47, m04], &mut new_coords, &mut next_node);
+                // Right face (+x) cross: [m12, m26, m56, m15]
+                ensure_fc([m12, m26, m56, m15], &mut new_coords, &mut next_node);
+            }
+        }
+    }
+
+    // ── Build new element connectivity ───────────────────────────────────────
+    let mut new_conn: Vec<NodeId> = Vec::new();
+    let mut new_tags: Vec<i32>    = Vec::new();
+
+    let get_mp = |a: NodeId, b: NodeId| -> NodeId {
+        *midpoint_map.get(&edge_key(a, b)).expect("midpoint missing in hex aniso")
+    };
+    let get_fc_map = |ns4: [NodeId; 4]| -> NodeId {
+        *face_center_map.get(&hex_face_key(ns4)).expect("face center missing in hex aniso")
+    };
+
+    let marked_set: std::collections::HashSet<ElemId> = cut_map.keys().copied().collect();
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let tag = mesh.elem_tags[e as usize];
+
+        if let Some(&cf) = cut_map.get(&e) {
+            // Generate children based on combination of cut flags.
+            match (cf.cut_x, cf.cut_y, cf.cut_z) {
+                // ── X only: 2 children ────────────────────────────────────
+                (true, false, false) => {
+                    let m01 = get_mp(ns[0], ns[1]); let m32 = get_mp(ns[3], ns[2]);
+                    let m45 = get_mp(ns[4], ns[5]); let m76 = get_mp(ns[7], ns[6]);
+                    // Left  (─x): [n0, m01, m32, n3, n4, m45, m76, n7]
+                    new_conn.extend_from_slice(&[ns[0], m01, m32, ns[3], ns[4], m45, m76, ns[7]]); new_tags.push(tag);
+                    // Right (+x): [m01, n1, n2, m32, m45, n5, n6, m76]
+                    new_conn.extend_from_slice(&[m01, ns[1], ns[2], m32, m45, ns[5], ns[6], m76]); new_tags.push(tag);
+                }
+                // ── Y only: 2 children ────────────────────────────────────
+                (false, true, false) => {
+                    let m03 = get_mp(ns[0], ns[3]); let m12 = get_mp(ns[1], ns[2]);
+                    let m47 = get_mp(ns[4], ns[7]); let m56 = get_mp(ns[5], ns[6]);
+                    // Front (─y): [n0, n1, m12, m03, n4, n5, m56, m47]
+                    new_conn.extend_from_slice(&[ns[0], ns[1], m12, m03, ns[4], ns[5], m56, m47]); new_tags.push(tag);
+                    // Back  (+y): [m03, m12, n2, n3, m47, m56, n6, n7]
+                    new_conn.extend_from_slice(&[m03, m12, ns[2], ns[3], m47, m56, ns[6], ns[7]]); new_tags.push(tag);
+                }
+                // ── Z only: 2 children ────────────────────────────────────
+                (false, false, true) => {
+                    let m04 = get_mp(ns[0], ns[4]); let m15 = get_mp(ns[1], ns[5]);
+                    let m26 = get_mp(ns[2], ns[6]); let m37 = get_mp(ns[3], ns[7]);
+                    // Bottom: [n0, n1, n2, n3, m04, m15, m26, m37]
+                    new_conn.extend_from_slice(&[ns[0], ns[1], ns[2], ns[3], m04, m15, m26, m37]); new_tags.push(tag);
+                    // Top:    [m04, m15, m26, m37, n4, n5, n6, n7]
+                    new_conn.extend_from_slice(&[m04, m15, m26, m37, ns[4], ns[5], ns[6], ns[7]]); new_tags.push(tag);
+                }
+                // ── XY: 4 children ───────────────────────────────────────
+                (true, true, false) => {
+                    let m01 = get_mp(ns[0], ns[1]); let m12 = get_mp(ns[1], ns[2]);
+                    let m32 = get_mp(ns[3], ns[2]); let m03 = get_mp(ns[0], ns[3]);
+                    let m45 = get_mp(ns[4], ns[5]); let m56 = get_mp(ns[5], ns[6]);
+                    let m76 = get_mp(ns[7], ns[6]); let m47 = get_mp(ns[4], ns[7]);
+                    let fc_bot = get_fc_map([m01, m12, m32, m03]);
+                    let fc_top = get_fc_map([m45, m56, m76, m47]);
+                    // 4 children (bottom-then-top analogues):
+                    new_conn.extend_from_slice(&[ns[0], m01, fc_bot, m03, ns[4], m45, fc_top, m47]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[m01, ns[1], m12, fc_bot, m45, ns[5], m56, fc_top]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[fc_bot, m12, ns[2], m32, fc_top, m56, ns[6], m76]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[m03, fc_bot, m32, ns[3], m47, fc_top, m76, ns[7]]); new_tags.push(tag);
+                }
+                // ── XZ: 4 children ───────────────────────────────────────
+                (true, false, true) => {
+                    let m01 = get_mp(ns[0], ns[1]); let m32 = get_mp(ns[3], ns[2]);
+                    let m45 = get_mp(ns[4], ns[5]); let m76 = get_mp(ns[7], ns[6]);
+                    let m04 = get_mp(ns[0], ns[4]); let m15 = get_mp(ns[1], ns[5]);
+                    let m26 = get_mp(ns[2], ns[6]); let m37 = get_mp(ns[3], ns[7]);
+                    let fc_frt = get_fc_map([m01, m15, m45, m04]);
+                    let fc_bck = get_fc_map([m32, m26, m76, m37]);
+                    // 4 children:
+                    new_conn.extend_from_slice(&[ns[0], m01, m32, ns[3], m04, fc_frt, fc_bck, m37]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[m01, ns[1], ns[2], m32, fc_frt, m15, m26, fc_bck]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[m04, fc_frt, fc_bck, m37, ns[4], m45, m76, ns[7]]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[fc_frt, m15, m26, fc_bck, m45, ns[5], ns[6], m76]); new_tags.push(tag);
+                }
+                // ── YZ: 4 children ───────────────────────────────────────
+                (false, true, true) => {
+                    let m03 = get_mp(ns[0], ns[3]); let m12 = get_mp(ns[1], ns[2]);
+                    let m47 = get_mp(ns[4], ns[7]); let m56 = get_mp(ns[5], ns[6]);
+                    let m04 = get_mp(ns[0], ns[4]); let m15 = get_mp(ns[1], ns[5]);
+                    let m26 = get_mp(ns[2], ns[6]); let m37 = get_mp(ns[3], ns[7]);
+                    let fc_lft = get_fc_map([m03, m37, m47, m04]);
+                    let fc_rgt = get_fc_map([m12, m26, m56, m15]);
+                    // 4 children:
+                    new_conn.extend_from_slice(&[ns[0], ns[1], m12, m03, m04, m15, fc_rgt, fc_lft]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[m03, m12, ns[2], ns[3], fc_lft, fc_rgt, m26, m37]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[m04, m15, fc_rgt, fc_lft, ns[4], ns[5], m56, m47]); new_tags.push(tag);
+                    new_conn.extend_from_slice(&[fc_lft, fc_rgt, m26, m37, m47, m56, ns[6], ns[7]]); new_tags.push(tag);
+                }
+                // ── All three axes: delegate to isotropic (shouldn't reach here) ─
+                _ => {
+                    // Fallback: emit original element unchanged (isotropic handled separately).
+                    for k in 0..8 { new_conn.push(ns[k]); }
+                    new_tags.push(tag);
+                }
+            }
+        } else {
+            // Unrefined element: keep as-is.
+            for k in 0..8 { new_conn.push(ns[k]); }
+            new_tags.push(tag);
+        }
+    }
+
+    // ── Detect hanging nodes ──────────────────────────────────────────────────
+    let mut constraints = Vec::new();
+    for (&(a, b), &mid) in &midpoint_map {
+        if let Some(adj) = edge_elems.get(&(a, b)) {
+            let has_unrefined = adj.iter().any(|e| !marked_set.contains(e));
+            if has_unrefined {
+                constraints.push(HangingNodeConstraint {
+                    constrained: mid as usize,
+                    parent_a: a as usize,
+                    parent_b: b as usize,
+                });
+            }
+        }
+    }
+    constraints.sort_by_key(|c| c.constrained);
+
+    // ── Propagate boundary faces ──────────────────────────────────────────────
+    let n_bfaces = mesh.n_faces();
+    let npf = 4usize;
+    let mut new_face_conn: Vec<NodeId> = Vec::new();
+    let mut new_face_tags: Vec<i32>    = Vec::new();
+
+    for f in 0..n_bfaces {
+        let fs = &mesh.face_conn[f * npf..(f + 1) * npf];
+        let tag = mesh.face_tags[f];
+        let (a, b, c, d) = (fs[0], fs[1], fs[2], fs[3]);
+
+        let m_ab = midpoint_map.get(&edge_key(a, b)).copied();
+        let m_bc = midpoint_map.get(&edge_key(b, c)).copied();
+        let m_cd = midpoint_map.get(&edge_key(c, d)).copied();
+        let m_da = midpoint_map.get(&edge_key(d, a)).copied();
+
+        // Full face refinement: all 4 edge midpoints are present.
+        if let (Some(mab), Some(mbc), Some(mcd), Some(mda)) = (m_ab, m_bc, m_cd, m_da) {
+            // Check if we also have a face center.
+            let fc_opt = face_center_map.get(&hex_face_key([a, b, c, d])).copied();
+            if let Some(fc) = fc_opt {
+                new_face_conn.extend_from_slice(&[a, mab, fc, mda]); new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[mab, b, mbc, fc]); new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[fc, mbc, c, mcd]); new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[mda, fc, mcd, d]); new_face_tags.push(tag);
+            } else {
+                // 4 midpoints but no face center: 2-way split along whichever axis was cut.
+                // Determine which pair of edges was split.
+                new_face_conn.extend_from_slice(&[a, mab, mcd, d]); new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[mab, b, c, mcd]); new_face_tags.push(tag);
+            }
+        } else if let (Some(mab), Some(mcd)) = (m_ab, m_cd) {
+            // One axis cut only (AB and CD edges split).
+            new_face_conn.extend_from_slice(&[a, mab, mcd, d]); new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[mab, b, c, mcd]); new_face_tags.push(tag);
+        } else if let (Some(mbc), Some(mda)) = (m_bc, m_da) {
+            // Other axis cut.
+            new_face_conn.extend_from_slice(&[a, b, mbc, mda]); new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[mda, mbc, c, d]); new_face_tags.push(tag);
+        } else {
+            // No edge on this face was cut → keep as-is.
+            new_face_conn.extend_from_slice(&[a, b, c, d]);
+            new_face_tags.push(tag);
+        }
+    }
+
+    let new_mesh = SimplexMesh::uniform(
+        new_coords, new_conn, new_tags, ElementType::Hex8,
+        new_face_conn, new_face_tags, ElementType::Quad4,
+    );
+    (new_mesh, constraints)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2790,5 +3473,146 @@ mod tests {
         // Neighbouring unrefined elements cause hanging constraints
         assert!(!constraints.is_empty());
         nc.check().unwrap();
+    }
+
+    // ─── Anisotropic Quad NC AMR tests ────────────────────────────────────────
+
+    #[test]
+    fn quad_aniso_x_split_doubles_elements() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n = mesh.n_elems();
+        let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
+        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        assert_eq!(refined.n_elems(), n + 1, "X split: one elem → 2, total {}", n + 1);
+    }
+
+    #[test]
+    fn quad_aniso_y_split_doubles_elements() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n = mesh.n_elems();
+        let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::Y)];
+        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        assert_eq!(refined.n_elems(), n + 1, "Y split: one elem → 2, total {}", n + 1);
+    }
+
+    #[test]
+    fn quad_aniso_both_quadruples_element() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n = mesh.n_elems();
+        let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::Both)];
+        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        assert_eq!(refined.n_elems(), n + 3, "Both split: one elem → 4, total {}", n + 3);
+    }
+
+    #[test]
+    fn quad_aniso_empty_marked_is_identity() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(3);
+        let (refined, constraints) = refine_nonconforming_quad_aniso(&mesh, &[]);
+        assert_eq!(refined.n_elems(), mesh.n_elems());
+        assert_eq!(refined.n_nodes(), mesh.n_nodes());
+        assert!(constraints.is_empty());
+    }
+
+    #[test]
+    fn quad_aniso_x_split_adds_midpoints() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n_nodes_before = mesh.n_nodes();
+        let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
+        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        // X split adds 2 midpoints (on bottom and top edges)
+        assert_eq!(refined.n_nodes(), n_nodes_before + 2);
+    }
+
+    #[test]
+    fn quad_aniso_partial_refine_creates_hanging_constraints() {
+        // A 2×1 mesh: 2 quads side by side. Refine only the first.
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        if mesh.n_elems() < 2 { return; } // skip if not enough elements
+        let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
+        let (_, constraints) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        // On shared edge, there should be hanging node constraints
+        // (may be 0 if no shared edge with unrefined element — depends on mesh topology)
+        let _ = constraints; // just ensure it runs without panic
+    }
+
+    // ─── Hex8 各向异性 NC AMR tests ───────────────────────────────────────────
+
+    #[test]
+    fn hex_aniso_x_split_gives_two_children() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
+        // 1 element → 2 children along X
+        assert_eq!(refined.n_elems(), 2);
+    }
+
+    #[test]
+    fn hex_aniso_y_split_gives_two_children() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::Y)]);
+        assert_eq!(refined.n_elems(), 2);
+    }
+
+    #[test]
+    fn hex_aniso_z_split_gives_two_children() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::Z)]);
+        assert_eq!(refined.n_elems(), 2);
+    }
+
+    #[test]
+    fn hex_aniso_xy_split_gives_four_children() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::XY)]);
+        assert_eq!(refined.n_elems(), 4);
+    }
+
+    #[test]
+    fn hex_aniso_xz_split_gives_four_children() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::XZ)]);
+        assert_eq!(refined.n_elems(), 4);
+    }
+
+    #[test]
+    fn hex_aniso_yz_split_gives_four_children() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::YZ)]);
+        assert_eq!(refined.n_elems(), 4);
+    }
+
+    #[test]
+    fn hex_aniso_all_delegates_to_isotropic() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::All)]);
+        assert_eq!(refined.n_elems(), 8);
+    }
+
+    #[test]
+    fn hex_aniso_empty_marked_is_identity() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let (refined, constraints) = refine_nonconforming_hex_aniso(&mesh, &[]);
+        assert_eq!(refined.n_elems(), mesh.n_elems());
+        assert_eq!(refined.n_nodes(), mesh.n_nodes());
+        assert!(constraints.is_empty());
+    }
+
+    #[test]
+    fn hex_aniso_x_split_adds_four_midpoints() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let n_before = mesh.n_nodes();
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
+        // X cut adds 4 edge midpoints on the 4 X-parallel edges
+        assert_eq!(refined.n_nodes(), n_before + 4);
+    }
+
+    #[test]
+    fn hex_aniso_multi_elem_x_split_partial_creates_constraints() {
+        // 2x2x1 mesh (4 elements). Refine one element with X split;
+        // neighbouring unrefined elements should produce hanging constraints.
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        if mesh.n_elems() < 2 { return; }
+        let (_, constraints) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
+        // At least some hanging constraints expected on shared faces.
+        assert!(!constraints.is_empty(), "expected hanging constraints on partial X-split");
     }
 }

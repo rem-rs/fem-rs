@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use fem_amg::{AmgConfig, AmgSolver};
 use fem_assembly::{
     DiscreteLinearOperator,
+    HcurlMatrixFreeOperator, MatFreeOperator,
     TangentialMassIntegrator,
     VectorAssembler,
     VectorBoundaryAssembler,
@@ -7807,5 +7808,130 @@ mod first_order_tests {
 
         assert!(y_diff < 1e-14, "mixed hcurl->hdiv mismatch: {y_diff:.3e}");
         assert!(x_diff < 1e-14, "mixed hdiv->hcurl mismatch: {x_diff:.3e}");
+    }
+}
+
+// ── Matrix-free H(curl) solver ───────────────────────────────────────────────
+
+/// Configuration for the matrix-free H(curl) solver.
+#[derive(Debug, Clone)]
+pub struct HcurlMatrixFreeConfig {
+    /// Inverse permeability μ⁻¹ (or reluctivity).
+    pub mu_inv: f64,
+    /// Mass term coefficient α (e.g. ω²ε for frequency-domain, 0.0 for static).
+    pub alpha: f64,
+    /// Quadrature order for element matrix precomputation.
+    pub quad_order: u8,
+    /// CG relative tolerance.
+    pub rtol: f64,
+    /// Maximum CG iterations.
+    pub max_iter: usize,
+}
+
+impl Default for HcurlMatrixFreeConfig {
+    fn default() -> Self {
+        HcurlMatrixFreeConfig {
+            mu_inv: 1.0,
+            alpha: 1.0,
+            quad_order: 3,
+            rtol: 1e-10,
+            max_iter: 2000,
+        }
+    }
+}
+
+/// Solve `(μ⁻¹ K_curl + α M_e) E = f` with matrix-free PCG.
+///
+/// Uses [`HcurlMatrixFreeOperator`] to apply the operator without forming the
+/// global CSR matrix.  Suitable for large meshes or memory-constrained settings.
+///
+/// # Returns
+/// `(E, n_iters, rel_residual)`
+pub fn solve_maxwell_matrix_free<M: fem_mesh::topology::MeshTopology>(
+    space: &HCurlSpace<M>,
+    rhs: &[f64],
+    config: &HcurlMatrixFreeConfig,
+) -> (Vec<f64>, usize, f64) {
+    let op = HcurlMatrixFreeOperator::new(space, config.mu_inv, config.alpha, config.quad_order);
+    let n = op.n_dofs();
+
+    let mut x  = vec![0.0_f64; n];
+    let mut r  = rhs.to_vec();
+    let mut p  = r.clone();
+
+    let r0_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if r0_norm < 1e-300 {
+        return (x, 0, 0.0);
+    }
+
+    let mut rr = r.iter().map(|v| v * v).sum::<f64>();
+    let mut iters = 0;
+
+    for _ in 0..config.max_iter {
+        let mut ap = vec![0.0_f64; n];
+        op.apply_zero(&p, &mut ap);
+
+        let pap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
+        if pap.abs() < 1e-300 { break; }
+        let alpha_cg = rr / pap;
+
+        for i in 0..n {
+            x[i] += alpha_cg * p[i];
+            r[i] -= alpha_cg * ap[i];
+        }
+
+        let rr_new: f64 = r.iter().map(|v| v * v).sum();
+        iters += 1;
+
+        if rr_new.sqrt() < config.rtol * r0_norm { break; }
+
+        let beta = rr_new / rr;
+        rr = rr_new;
+        for i in 0..n { p[i] = r[i] + beta * p[i]; }
+    }
+
+    let res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt() / r0_norm;
+    (x, iters, res_norm)
+}
+
+#[cfg(test)]
+mod tests_maxwell_mf {
+    use super::*;
+    use fem_mesh::SimplexMesh;
+
+    /// Matrix-free solver matches assembled PCG for a 2D H(curl) problem.
+    #[test]
+    fn maxwell_mf_matches_assembled_pcg() {
+        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let space = HCurlSpace::new(mesh, 1);
+        let n     = space.n_dofs();
+
+        // RHS = M_e * 1 (arbitrary non-trivial RHS)
+        let m = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
+        let mut rhs = vec![0.0_f64; n];
+        m.spmv(&vec![1.0; n], &mut rhs);
+
+        // Solve with matrix-free
+        let cfg = HcurlMatrixFreeConfig { mu_inv: 1.0, alpha: 1.0, ..Default::default() };
+        let (x_mf, iters, res) = solve_maxwell_matrix_free(&space, &rhs, &cfg);
+        assert!(res < 1e-8, "mf residual {res:.3e} after {iters} iters");
+
+        // Solve assembled for reference using the CsrMatrix's spmv as operator
+        let k = VectorAssembler::assemble_bilinear(
+            &space,
+            &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let mut x_asm = vec![0.0_f64; n];
+        let solver_cfg = fem_solver::SolverConfig { rtol: 1e-10, max_iter: 2000, ..Default::default() };
+        let _ = fem_solver::solve_cg_operator(
+            n, n,
+            |x_in, y_out| { y_out.iter_mut().for_each(|v| *v = 0.0); k.spmv(x_in, y_out); },
+            &rhs, &mut x_asm, &solver_cfg,
+        );
+
+        let err: f64 = x_mf.iter().zip(x_asm.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+        let ref_n: f64 = x_asm.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-15);
+        assert!(err / ref_n < 1e-7, "mf vs asm diff {:.3e}", err / ref_n);
     }
 }

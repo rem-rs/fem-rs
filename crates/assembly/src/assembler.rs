@@ -178,12 +178,46 @@ fn transform_grads(
 
 // ─── Volume element kernels (serial; used by parallel driver via Rayon) ─────
 
+// ─── Element scratch buffer ───────────────────────────────────────────────────
+
+/// Per-thread reusable scratch storage for element-level assembly.
+///
+/// Allocating `k_elem`, `phi`, `grad_ref`, `grad_phys` fresh for every element
+/// is the dominant allocation pressure in the assembly loop.  This struct holds
+/// those buffers between element calls so that `Vec::resize` can reuse the
+/// existing capacity (no heap allocation when the element type is uniform across
+/// the mesh, which is the common case).
+///
+/// The serial assembler creates one `ElementScratch` before the element loop.
+/// The parallel assembler carries one inside each Rayon fold closure
+/// (one per thread), so no locking is needed.
+struct ElementScratch {
+    k_elem:    Vec<f64>,
+    f_elem:    Vec<f64>,
+    phi:       Vec<f64>,
+    grad_ref:  Vec<f64>,
+    grad_phys: Vec<f64>,
+}
+
+impl ElementScratch {
+    fn new() -> Self {
+        Self {
+            k_elem:    Vec::new(),
+            f_elem:    Vec::new(),
+            phi:       Vec::new(),
+            grad_ref:  Vec::new(),
+            grad_phys: Vec::new(),
+        }
+    }
+}
+
 fn accumulate_volume_bilinear_element<S: FESpace>(
     space: &S,
     e: u32,
     integrators: &[&dyn BilinearIntegrator],
     quad_order: u8,
     coo: &mut CooMatrix<f64>,
+    scratch: &mut ElementScratch,
 ) {
     let mesh   = space.mesh();
     let dim    = mesh.dim() as usize;
@@ -214,31 +248,31 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
         None
     };
 
-    let mut k_elem = vec![0.0_f64; n_elem_dofs * n_elem_dofs];
-    let mut phi       = Vec::<f64>::new();
-    let mut grad_ref  = Vec::<f64>::new();
-    let mut grad_phys = Vec::<f64>::new();
+    // Reuse scratch buffers: resize zeroes new entries, existing capacity is kept.
+    let k_size = n_elem_dofs * n_elem_dofs;
+    scratch.k_elem.clear();
+    scratch.k_elem.resize(k_size, 0.0);
 
-    phi.resize(n_ldofs, 0.0);
-    grad_ref.resize(n_ldofs * dim, 0.0);
-    grad_phys.resize(n_ldofs * dim, 0.0);
+    scratch.phi.resize(n_ldofs, 0.0);
+    scratch.grad_ref.resize(n_ldofs * dim, 0.0);
+    scratch.grad_phys.resize(n_ldofs * dim, 0.0);
 
     for (q, xi) in quad.points.iter().enumerate() {
         if affine {
             let tr = affine_tr.as_ref().unwrap();
             let w = quad.weights[q] * tr.det_j().abs();
 
-            ref_elem.eval_basis(xi, &mut phi);
-            ref_elem.eval_grad_basis(xi, &mut grad_ref);
-            transform_grads(tr.jacobian_inv_t(), &grad_ref, &mut grad_phys, n_ldofs, dim);
+            ref_elem.eval_basis(xi, &mut scratch.phi);
+            ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
+            transform_grads(tr.jacobian_inv_t(), &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
 
             let xp = tr.map_to_physical(xi);
             let qp = QpData {
                 n_dofs:    n_elem_dofs,
                 dim,
                 weight:    w,
-                phi:       &phi,
-                grad_phys: &grad_phys,
+                phi:       &scratch.phi,
+                grad_phys: &scratch.grad_phys,
                 x_phys:    &xp,
                 elem_id:   e,
                 elem_tag,
@@ -246,7 +280,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
             };
 
             for integ in integrators {
-                integ.add_to_element_matrix(&qp, &mut k_elem);
+                integ.add_to_element_matrix(&qp, &mut scratch.k_elem);
             }
             continue;
         } else {
@@ -257,29 +291,29 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
             let jit = jac_qp.try_inverse()
                 .expect("degenerate quad/hex element")
                 .transpose();
-            ref_elem.eval_basis(xi, &mut phi);
-            ref_elem.eval_grad_basis(xi, &mut grad_ref);
-            transform_grads(&jit, &grad_ref, &mut grad_phys, n_ldofs, dim);
+            ref_elem.eval_basis(xi, &mut scratch.phi);
+            ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
+            transform_grads(&jit, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
 
             let qp = QpData {
                 n_dofs:    n_elem_dofs,
                 dim,
                 weight:    w,
-                phi:       &phi,
-                grad_phys: &grad_phys,
+                phi:       &scratch.phi,
+                grad_phys: &scratch.grad_phys,
                 x_phys:    &xp_qp,
                 elem_id:   e,
                 elem_tag,
                 elem_dofs: Some(&raw_dofs),
             };
             for integ in integrators {
-                integ.add_to_element_matrix(&qp, &mut k_elem);
+                integ.add_to_element_matrix(&qp, &mut scratch.k_elem);
             }
             continue;
         }
     }
 
-    coo.add_element_matrix(&global_dofs, &k_elem);
+    coo.add_element_matrix(&global_dofs, &scratch.k_elem);
 }
 
 fn accumulate_volume_linear_element<S: FESpace>(
@@ -288,6 +322,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
     integrators: &[&dyn LinearIntegrator],
     quad_order: u8,
     rhs: &mut [f64],
+    scratch: &mut ElementScratch,
 ) {
     let mesh   = space.mesh();
     let dim    = mesh.dim() as usize;
@@ -315,23 +350,22 @@ fn accumulate_volume_linear_element<S: FESpace>(
     } else { None };
 
     let n_elem_dofs = global_dofs.len();
-    let mut f_elem = vec![0.0_f64; n_elem_dofs];
-    let mut phi       = Vec::<f64>::new();
-    let mut grad_ref  = Vec::<f64>::new();
-    let mut grad_phys = Vec::<f64>::new();
 
-    phi.resize(n_ldofs, 0.0);
-    grad_ref.resize(n_ldofs * dim, 0.0);
-    grad_phys.resize(n_ldofs * dim, 0.0);
+    // Reuse scratch buffers.
+    scratch.f_elem.clear();
+    scratch.f_elem.resize(n_elem_dofs, 0.0);
+    scratch.phi.resize(n_ldofs, 0.0);
+    scratch.grad_ref.resize(n_ldofs * dim, 0.0);
+    scratch.grad_phys.resize(n_ldofs * dim, 0.0);
 
     for (q, xi) in quad.points.iter().enumerate() {
         let (w, xp);
         if affine {
             let tr = affine_tr.as_ref().unwrap();
             w = quad.weights[q] * tr.det_j().abs();
-            ref_elem.eval_basis(xi, &mut phi);
-            ref_elem.eval_grad_basis(xi, &mut grad_ref);
-            transform_grads(tr.jacobian_inv_t(), &grad_ref, &mut grad_phys, n_ldofs, dim);
+            ref_elem.eval_basis(xi, &mut scratch.phi);
+            ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
+            transform_grads(tr.jacobian_inv_t(), &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
             xp = tr.map_to_physical(xi);
         } else {
             let geo = geo_elem.as_ref().unwrap();
@@ -340,9 +374,9 @@ fn accumulate_volume_linear_element<S: FESpace>(
             w = quad.weights[q] * det_qp.abs();
             let jit = jac_qp.try_inverse()
                 .expect("degenerate quad/hex element").transpose();
-            ref_elem.eval_basis(xi, &mut phi);
-            ref_elem.eval_grad_basis(xi, &mut grad_ref);
-            transform_grads(&jit, &grad_ref, &mut grad_phys, n_ldofs, dim);
+            ref_elem.eval_basis(xi, &mut scratch.phi);
+            ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
+            transform_grads(&jit, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
             xp = xp_qp;
         }
 
@@ -350,8 +384,8 @@ fn accumulate_volume_linear_element<S: FESpace>(
             n_dofs:    n_elem_dofs,
             dim,
             weight:    w,
-            phi:       &phi,
-            grad_phys: &grad_phys,
+            phi:       &scratch.phi,
+            grad_phys: &scratch.grad_phys,
             x_phys:    &xp,
             elem_id:   e,
             elem_tag,
@@ -359,11 +393,11 @@ fn accumulate_volume_linear_element<S: FESpace>(
         };
 
         for integ in integrators {
-            integ.add_to_element_vector(&qp, &mut f_elem);
+            integ.add_to_element_vector(&qp, &mut scratch.f_elem);
         }
     }
 
-    coo_add_element_vec(&global_dofs, &f_elem, rhs);
+    coo_add_element_vec(&global_dofs, &scratch.f_elem, rhs);
 }
 
 #[cfg(feature = "parallel")]
@@ -385,7 +419,7 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
         .into_par_iter()
         .fold(
             || {
-                TL_COO.with(|tl| {
+                let coo = TL_COO.with(|tl| {
                     let mut slot = tl.borrow_mut();
                     if let Some(mut coo) = slot.take() {
                         coo.nrows = n_dofs;
@@ -395,20 +429,22 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
                     } else {
                         CooMatrix::<f64>::new(n_dofs, n_dofs)
                     }
-                })
+                });
+                (coo, ElementScratch::new())
             },
-            |mut local, e| {
-                accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut local);
-                local
+            |(mut local_coo, mut scratch), e| {
+                accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut local_coo, &mut scratch);
+                (local_coo, scratch)
             },
         )
         .reduce(
-            || CooMatrix::<f64>::new(n_dofs, n_dofs),
-            |mut a, b| {
-                a.append(b);
-                a
+            || (CooMatrix::<f64>::new(n_dofs, n_dofs), ElementScratch::new()),
+            |(mut a_coo, a_scratch), (b_coo, _)| {
+                a_coo.append(b_coo);
+                (a_coo, a_scratch)
             },
         )
+        .0
         .into_csr()
 }
 
@@ -423,21 +459,22 @@ fn assemble_linear_volume_parallel<S: FESpace>(
     mesh.elem_iter()
         .into_par_iter()
         .fold(
-            || vec![0.0_f64; n_dofs],
-            |mut local, e| {
-                accumulate_volume_linear_element(space, e, integrators, quad_order, &mut local);
-                local
+            || (vec![0.0_f64; n_dofs], ElementScratch::new()),
+            |(mut local_rhs, mut scratch), e| {
+                accumulate_volume_linear_element(space, e, integrators, quad_order, &mut local_rhs, &mut scratch);
+                (local_rhs, scratch)
             },
         )
         .reduce(
-            || vec![0.0_f64; n_dofs],
-            |mut a, b| {
+            || (vec![0.0_f64; n_dofs], ElementScratch::new()),
+            |(mut a_rhs, a_scratch), (b_rhs, _)| {
                 for i in 0..n_dofs {
-                    a[i] += b[i];
+                    a_rhs[i] += b_rhs[i];
                 }
-                a
+                (a_rhs, a_scratch)
             },
         )
+        .0
 }
 
 // ─── Assembler ────────────────────────────────────────────────────────────────
@@ -476,8 +513,9 @@ impl Assembler {
         }
 
         let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+        let mut scratch = ElementScratch::new();
         for e in mesh.elem_iter() {
-            accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut coo);
+            accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut coo, &mut scratch);
         }
         coo.into_csr()
     }
@@ -501,8 +539,9 @@ impl Assembler {
         }
 
         let mut rhs = vec![0.0_f64; n_dofs];
+        let mut scratch = ElementScratch::new();
         for e in mesh.elem_iter() {
-            accumulate_volume_linear_element(space, e, integrators, quad_order, &mut rhs);
+            accumulate_volume_linear_element(space, e, integrators, quad_order, &mut rhs, &mut scratch);
         }
         rhs
     }

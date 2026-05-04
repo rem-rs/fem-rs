@@ -506,4 +506,30 @@ mod tests {
             "zero source should give trivial checksum, got {}",
             zero.solution_checksum);
     }
+
+    #[test]
+    fn pex3_maxwell_finer_mesh_gives_more_global_dofs() {
+        let coarse = solve_case(RunArgs {
+            n_workers: 2,
+            mesh_n: 8,
+            solver: SolverKind::Jacobi,
+            has_pml: false,
+            pml_thickness: 0.2,
+            sigma_max: 2.0,
+            source_scale: 1.0,
+        });
+        let fine = solve_case(RunArgs {
+            n_workers: 2,
+            mesh_n: 12,
+            solver: SolverKind::Jacobi,
+            has_pml: false,
+            pml_thickness: 0.2,
+            sigma_max: 2.0,
+            source_scale: 1.0,
+        });
+        assert!(coarse.converged && fine.converged);
+        assert!(fine.n_global_dofs > coarse.n_global_dofs,
+            "expected finer mesh to have more global DOFs: coarse={} fine={}",
+            coarse.n_global_dofs, fine.n_global_dofs);
+    }
 }

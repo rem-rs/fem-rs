@@ -13,6 +13,41 @@ use std::sync::Arc;
 use crate::comm::Comm;
 use crate::launcher::{Launcher, WorkerConfig};
 
+// ── Rayon / MPI thread-count coordination ────────────────────────────────────
+
+/// Called once after MPI init to cap Rayon threads to `physical_cpus / mpi_size`.
+///
+/// Prevents over-subscription when running multiple MPI ranks on one node.
+/// A floor of 1 thread is enforced.  Subsequent calls (from re-entrant code or
+/// tests) are silently ignored because Rayon's global pool is already set.
+///
+/// The env var `RAYON_NUM_THREADS` takes precedence when already set; Rayon
+/// reads it itself during `build_global`, so we skip our calculation in that
+/// case.
+#[cfg(all(not(target_arch = "wasm32"), feature = "mpi"))]
+fn configure_rayon_for_mpi(mpi_size: usize) {
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        // Respect explicit user override.
+        if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+            return;
+        }
+        let logical = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let per_rank = (logical / mpi_size).max(1);
+        // Silently ignore build_global errors (e.g. pool already configured in tests).
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(per_rank)
+            .build_global();
+        log::debug!(
+            "fem-parallel: MPI size={mpi_size}, logical CPUs={logical} \
+             → Rayon threads/rank={per_rank}"
+        );
+    });
+}
+
 // ── MpiLauncher ───────────────────────────────────────────────────────────────
 
 /// Initialises the MPI runtime and exposes `MPI_COMM_WORLD`.
@@ -40,7 +75,10 @@ impl Launcher for MpiLauncher {
     fn world_comm(&self) -> Comm {
         #[cfg(feature = "mpi")]
         {
+            use ::mpi::traits::Communicator;
             use crate::backend::native::NativeMpiBackend;
+            let mpi_size = self.universe.world().size() as usize;
+            configure_rayon_for_mpi(mpi_size);
             Comm::from_backend(Box::new(NativeMpiBackend::from_world(&self.universe)))
         }
         #[cfg(not(feature = "mpi"))]

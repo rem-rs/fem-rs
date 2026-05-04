@@ -85,7 +85,11 @@ pub use dg_elasticity::DgElasticityAssembler;
 pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux};
 pub use interior_faces::InteriorFaceList;
 pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
-pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator};
+pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator,
+                  HcurlMatrixFreeOperator, solve_hcurl_matrix_free,
+                  solve_hcurl_eigen_preconditioned_amg};
+#[cfg(feature = "reed")]
+pub use reed::HcurlReedOperator;
 pub use grid_function::GridFunction;
 pub use postprocess::{compute_element_gradients, compute_h1_error, compute_kelly_indicators, recover_gradient_nodal};
 pub use transfer::{

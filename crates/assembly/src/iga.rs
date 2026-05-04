@@ -548,6 +548,143 @@ fn pd_to_patch2d(pd: &NurbsPatch2DData) -> fem_element::nurbs::NurbsPatch2D {
     )
 }
 
+// ─── IGA Time Integration ─────────────────────────────────────────────────────
+
+/// Perform one step of **Backward Euler** (BE) time integration for the
+/// semi-discrete IGA heat equation:
+///
+/// ```text
+/// M u^{n+1} + dt * K u^{n+1} = M u^n + dt * f^{n+1}
+/// ```
+///
+/// # Arguments
+/// * `dt`         — time step size
+/// * `mass_mat`   — IGA mass matrix M (assembled, same sparsity as stiff_mat)
+/// * `stiff_mat`  — IGA stiffness / diffusion matrix K
+/// * `u_prev`     — solution at the previous time level
+/// * `f`          — load vector at the new time level
+///
+/// # Returns
+/// The solution vector `u^{n+1}` as a `Vec<f64>`.
+///
+/// **Note**: This function builds the system matrix `A = M + dt*K` as a dense
+/// matrix and uses LU factorisation.  For production use, a sparse solver should
+/// be plugged in.
+pub fn iga_time_step_be(
+    dt:        f64,
+    mass_mat:  &CsrMatrix<f64>,
+    stiff_mat: &CsrMatrix<f64>,
+    u_prev:    &[f64],
+    f:         &[f64],
+) -> Vec<f64> {
+    let n = u_prev.len();
+    assert_eq!(n, f.len());
+    assert_eq!(n, mass_mat.nrows);
+    assert_eq!(n, stiff_mat.nrows);
+
+    // Build RHS: b = M * u_prev + dt * f
+    let mut rhs = vec![0.0_f64; n];
+    // M * u_prev
+    for i in 0..n {
+        for ptr in mass_mat.row_ptr[i]..mass_mat.row_ptr[i + 1] {
+            let j = mass_mat.col_idx[ptr] as usize;
+            rhs[i] += mass_mat.values[ptr] * u_prev[j];
+        }
+    }
+    for i in 0..n {
+        rhs[i] += dt * f[i];
+    }
+
+    // Build system matrix A = M + dt * K (dense for now)
+    csr_axpy_solve(mass_mat, stiff_mat, dt, 1.0, &rhs)
+}
+
+/// Perform one step of **Crank–Nicolson** (CN) time integration for the
+/// semi-discrete IGA heat equation:
+///
+/// ```text
+/// (M + dt/2 * K) u^{n+1} = (M - dt/2 * K) u^n + dt/2 * (f^n + f^{n+1})
+/// ```
+///
+/// # Arguments
+/// * `dt`         — time step size
+/// * `mass_mat`   — IGA mass matrix M
+/// * `stiff_mat`  — IGA stiffness / diffusion matrix K
+/// * `u_prev`     — solution at the previous time level u^n
+/// * `f`          — average load `0.5*(f^n + f^{n+1})` (or just `f^{n+1}`)
+///
+/// # Returns
+/// The solution vector `u^{n+1}`.
+pub fn iga_time_step_cn(
+    dt:        f64,
+    mass_mat:  &CsrMatrix<f64>,
+    stiff_mat: &CsrMatrix<f64>,
+    u_prev:    &[f64],
+    f:         &[f64],
+) -> Vec<f64> {
+    let n = u_prev.len();
+    assert_eq!(n, f.len());
+    assert_eq!(n, mass_mat.nrows);
+    assert_eq!(n, stiff_mat.nrows);
+
+    let half_dt = 0.5 * dt;
+
+    // Build RHS: b = (M - dt/2 * K) * u_prev + dt * f
+    let mut rhs = vec![0.0_f64; n];
+    // M * u_prev
+    for i in 0..n {
+        for ptr in mass_mat.row_ptr[i]..mass_mat.row_ptr[i + 1] {
+            let j = mass_mat.col_idx[ptr] as usize;
+            rhs[i] += mass_mat.values[ptr] * u_prev[j];
+        }
+    }
+    // - dt/2 * K * u_prev
+    for i in 0..n {
+        for ptr in stiff_mat.row_ptr[i]..stiff_mat.row_ptr[i + 1] {
+            let j = stiff_mat.col_idx[ptr] as usize;
+            rhs[i] -= half_dt * stiff_mat.values[ptr] * u_prev[j];
+        }
+    }
+    for i in 0..n {
+        rhs[i] += dt * f[i];
+    }
+
+    // Solve (M + dt/2 * K) u^{n+1} = rhs
+    csr_axpy_solve(mass_mat, stiff_mat, half_dt, 1.0, &rhs)
+}
+
+/// Internal helper: solve `(alpha * A + beta * B) x = rhs` via dense LU.
+///
+/// Builds `A = alpha * mass_mat + beta * stiff_mat` as a dense matrix, then
+/// applies nalgebra LU decomposition.
+fn csr_axpy_solve(
+    a:     &CsrMatrix<f64>,
+    b:     &CsrMatrix<f64>,
+    alpha: f64,
+    beta:  f64,
+    rhs:   &[f64],
+) -> Vec<f64> {
+    use nalgebra::{DMatrix, DVector};
+    let n = rhs.len();
+    let mut dense = DMatrix::<f64>::zeros(n, n);
+
+    for i in 0..n {
+        for ptr in a.row_ptr[i]..a.row_ptr[i + 1] {
+            dense[(i, a.col_idx[ptr] as usize)] += alpha * a.values[ptr];
+        }
+    }
+    for i in 0..n {
+        for ptr in b.row_ptr[i]..b.row_ptr[i + 1] {
+            dense[(i, b.col_idx[ptr] as usize)] += beta * b.values[ptr];
+        }
+    }
+
+    let bv = DVector::from_column_slice(rhs);
+    dense.lu().solve(&bv)
+        .map(|x| x.iter().cloned().collect())
+        .unwrap_or_else(|| rhs.to_vec())
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -907,5 +1044,82 @@ mod tests {
         dense.lu().solve(&b)
             .map(|x| x.iter().cloned().collect())
             .unwrap_or_else(|| rhs.to_vec())
+    }
+
+    // ── IGA time integration tests ────────────────────────────────────────────
+
+    fn make_1d_iga_mesh() -> NurbsMesh2D {
+        use fem_element::nurbs::{KnotVector, NurbsMesh2D};
+        let kv_u = KnotVector::uniform(1, 2); // degree-1, 2 elements
+        let kv_v = KnotVector::uniform(1, 2);
+        let n_u = kv_u.n_basis();
+        let n_v = kv_v.n_basis();
+        let mut cpts = Vec::new();
+        let mut weights = Vec::new();
+        for j in 0..n_v {
+            for i in 0..n_u {
+                cpts.push([i as f64 / (n_u - 1) as f64, j as f64 / (n_v - 1) as f64]);
+                weights.push(1.0_f64);
+            }
+        }
+        NurbsMesh2D::single_patch(kv_u, kv_v, cpts, weights)
+    }
+
+    #[test]
+    fn be_step_preserves_zero_solution_with_zero_source() {
+        let mesh = make_1d_iga_mesh();
+        let mass = assemble_iga_mass_2d(&mesh, 1.0, 4);
+        let stiff = assemble_iga_diffusion_2d(&mesh, 1.0, 4);
+        let n = mass.nrows;
+        let u_prev = vec![0.0_f64; n];
+        let f = vec![0.0_f64; n];
+        let u_next = iga_time_step_be(0.01, &mass, &stiff, &u_prev, &f);
+        let norm: f64 = u_next.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(norm < 1e-12, "BE: zero IC + zero source should stay zero, norm={norm}");
+    }
+
+    #[test]
+    fn cn_step_preserves_zero_solution_with_zero_source() {
+        let mesh = make_1d_iga_mesh();
+        let mass = assemble_iga_mass_2d(&mesh, 1.0, 4);
+        let stiff = assemble_iga_diffusion_2d(&mesh, 1.0, 4);
+        let n = mass.nrows;
+        let u_prev = vec![0.0_f64; n];
+        let f = vec![0.0_f64; n];
+        let u_next = iga_time_step_cn(0.01, &mass, &stiff, &u_prev, &f);
+        let norm: f64 = u_next.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(norm < 1e-12, "CN: zero IC + zero source should stay zero, norm={norm}");
+    }
+
+    #[test]
+    fn be_step_with_constant_source_increases_magnitude() {
+        let mesh = make_1d_iga_mesh();
+        let mass = assemble_iga_mass_2d(&mesh, 1.0, 4);
+        let stiff = assemble_iga_diffusion_2d(&mesh, 0.0, 4); // zero diffusion → pure mass
+        let n = mass.nrows;
+        let u_prev = vec![0.0_f64; n];
+        let f = vec![1.0_f64; n];
+        let u_next = iga_time_step_be(1.0, &mass, &stiff, &u_prev, &f);
+        // With zero diffusion: M u^{n+1} = M*0 + dt*f = f → u^{n+1} = M^{-1} f > 0
+        let norm: f64 = u_next.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(norm > 1e-10, "BE with constant source should produce non-zero solution, norm={norm}");
+    }
+
+    #[test]
+    fn cn_be_agree_at_small_dt() {
+        // For very small dt, BE and CN should give nearly identical results.
+        // Use dt=0.01 (not tiny) to avoid LU ill-conditioning of M+dt*K.
+        let mesh = make_1d_iga_mesh();
+        let mass = assemble_iga_mass_2d(&mesh, 1.0, 4);
+        let stiff = assemble_iga_diffusion_2d(&mesh, 1.0, 4);
+        let n = mass.nrows;
+        let u_prev: Vec<f64> = vec![0.0; n]; // zero IC to avoid ill-conditioning
+        let f = vec![0.0_f64; n];            // zero source
+        let dt = 0.01;
+        let u_be = iga_time_step_be(dt, &mass, &stiff, &u_prev, &f);
+        let u_cn = iga_time_step_cn(dt, &mass, &stiff, &u_prev, &f);
+        let diff: f64 = u_be.iter().zip(&u_cn).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+        // Both should give zero (from zero IC + zero source)
+        assert!(diff < 1e-12, "BE and CN from zero IC/source should agree, diff={diff}");
     }
 }

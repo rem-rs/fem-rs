@@ -251,4 +251,39 @@ mod tests {
         assert!(result.solution_checksum.abs() < 1.0e-12,
             "solution checksum should vanish: {}", result.solution_checksum);
     }
+
+    #[test]
+    fn pex2_mixed_darcy_coarser_mesh_converges_with_fewer_dofs() {
+        let coarse = run_case(4, 2, 1.0);
+        let standard = run_case(8, 2, 1.0);
+        assert!(coarse.converged && standard.converged);
+        assert!(coarse.nu_global < standard.nu_global,
+            "expected coarser mesh to have fewer velocity DOFs: coarse={} standard={}", coarse.nu_global, standard.nu_global);
+        assert!(coarse.np_global < standard.np_global,
+            "expected coarser mesh to have fewer pressure DOFs: coarse={} standard={}", coarse.np_global, standard.np_global);
+    }
+
+    #[test]
+    fn pex2_mixed_darcy_larger_source_gives_larger_solution_norm() {
+        let small = run_case(8, 2, 0.5);
+        let large = run_case(8, 2, 2.0);
+        assert!(small.converged && large.converged);
+        assert!(large.solution_norm > small.solution_norm,
+            "expected larger source to give larger solution norm: small={} large={}", small.solution_norm, large.solution_norm);
+        assert!(large.solution_l1 > small.solution_l1,
+            "expected larger source to give larger L1 norm: small={} large={}", small.solution_l1, large.solution_l1);
+    }
+
+    #[test]
+    fn pex2_mixed_darcy_three_ranks_matches_two_ranks() {
+        let two = run_case(8, 2, 1.0);
+        let three = run_case(8, 3, 1.0);
+        assert!(two.converged && three.converged);
+        assert_eq!(two.nu_global, three.nu_global);
+        assert_eq!(two.np_global, three.np_global);
+        assert!((two.solution_norm - three.solution_norm).abs() < 1.0e-12,
+            "three vs two ranks norm mismatch: two={} three={}", two.solution_norm, three.solution_norm);
+        assert!((two.solution_checksum - three.solution_checksum).abs() < 1.0e-10,
+            "three vs two ranks checksum mismatch: two={} three={}", two.solution_checksum, three.solution_checksum);
+    }
 }

@@ -38,7 +38,7 @@
   当前进展：`fem-io` 新增 `hdf5` 模块（串行 HDF5 网格+场读写，GZIP 压缩）与 `xdmf` 模块（XML 元数据生成，支持串行/并行）；`fem-parallel` 新增 `par_hdf5` 模块（PerRank/Gather 两种并行写入模式）与 `checkpoint` 模块（ParVector+ParCsrMatrix 分布式 checkpoint 保存恢复）。
   验收证据：`cargo test -p fem-io --features hdf5` 全通过（18 unit + 7 integration）；`cargo check -p fem-parallel --features hdf5` 零错误。
 - 🔲 hypre 绑定（可选 FFI 路线）。
-- 🔲 Netgen/Abaqus 网格读取支持。
+- ✅ **Netgen/Abaqus 网格读取支持**（2026-05-04）。`fem-io` 新增 Prism6、Pyramid5、surfaceelements（Netgen `.vol`）及 C3D5、C3D6、mixed C3D4+C3D6（Abaqus）；XDMF 混合拓扑写入器；72 项单元+集成测试通过。`alignment-smoke` CI 套件 `io-mixed-topology` 覆盖。
 - ✅ Quad4/Hex8 非协调 AMR（Phase 67）。`refine_nonconforming_quad`、`NCStateQuad`、`refine_nonconforming_hex`、`unit_cube_hex` 已落地；12 个单元测试通过。
 - ✅ 静态凝聚 / 杂化 FEM（Phase 68）。`StaticCondensation`、`GlobalBacksolve`、`condense_global` 已落地（`fem-assembly`）；4 个单元测试通过。
 - ✅ AMG WP2 分布式跨 rank 聚合（Phase 69）。`ParAmgHierarchy::build_global()` + `build_coarse_level_global` 已落地；新增 3 个集成测试（串行收敛、双 rank 收敛、四 rank 粗化）并通过。
@@ -132,12 +132,12 @@
 
 ### P3
 
-1. H(curl) partial assembly / matrix-free operator段
-  026-04-12 `HcurlMatrixFreeOperator2D` `solve_hcurl_matrix_free(...)`以 `A x = (1/mu) C^T M_b^{-1} C x + alpha M_e x` 路线避并补齐 `apply/solve` 对子?价?
-2. Maxwell generalized eigenproblem ?可条件路线LOBPCG/AMG 段
-  026-04-12`fem-solver`  `lobpcg_constrained_preconditioned(...)`并Maxwell 侧`solve_hcurl_eigen_preconditioned_amg(...)`AMG 条件`mfem_ex13_eigenvalue` 认走该路线
-3. 大模并/模?证段
-  026-04-12 `hcurl_eigen_amg_preconditioned_lobpcg_smoke` 模??`n=10`free DOF > 200为大模路 smoke gate
+1. ✅ H(curl) partial assembly / matrix-free operator
+  2026-04-12 `HcurlMatrixFreeOperator2D` `solve_hcurl_matrix_free(...)` implemented; `apply/solve` confirmed equivalent to assembled matrix.
+2. ✅ Maxwell generalized eigenproblem AMG-preconditioned LOBPCG
+  `solve_hcurl_eigen_preconditioned_amg(...)` added to `fem-assembly`; uses regularised `K_reg = K_curl + 0.1*M_mass` for AMG; tested on `unit_square_tri(8)`.
+3. ✅ Smoke gate tests pass; CI suite `hcurl-maxwell-eigen` added
+  `hcurl_eigen_amg_preconditioned_lobpcg_smoke` + `hcurl_eigen_amg_large_scale_smoke` both pass; CI suite added to `alignment-smoke.yml` (now 13 suites).
 
 ### ?设
 
@@ -156,7 +156,23 @@
 2. 跨子项 C2-C4WP2 + WP4-WP6AIR AMS/ADS parity hardeningmkl reed ?落 CI feature matrixGPUjsmpi fallback/CI WP3 mumps/mkl baseline 已
 3. ?级 MFEM ?补齐??核?可?核?碍?核???保??核浸没边?保??核
 
-### 补?026-04-13
+### 补充 2026-05-05
+
+- ✅ **ComplexCoeff / ComplexVectorCoeff** — 已在 `crates/assembly/src/coefficient.rs` 实现（`ComplexCoeff`、`ComplexVectorCoeff`、`ComplexConstCoeff`、`ComplexFromScalars`、`ComplexVectorFromVectors`），`crates/assembly/src/complex.rs` 提供 `ComplexSystem`、`ComplexAssembler`、`NativeComplexAssembler`。
+- ✅ **mfem_ex22 时谐 Maxwell** — `examples/mfem_ex22.rs` 8 测试全部通过（Helmholtz 2×2 实块系统）。
+- ✅ **AMS parity hardening** — `crates/solver/src/lib.rs` 新增 7 个 AMS/ADS 集成测试（`ams_ads_tests` 模块）：
+  - `pcg_ams_hcurl_2d_converges`
+  - `gmres_ams_hcurl_2d_converges`
+  - `pcg_ams_solution_satisfies_ax_eq_b`
+  - `pcg_ams_iteration_count_reasonable`
+  - `pcg_ads_hdiv_3d_converges`
+  - `gmres_ads_hdiv_3d_converges`
+  - `pcg_ads_solution_satisfies_ax_eq_b`
+  全部使用真实 FE 装配（HCurlSpace/HDivSpace + DiscreteLinearOperator），76/76 通过。
+- ✅ **NamedAttributeSet / NamedAttributeRegistry**（2026-05-05）。`crates/mesh/src/boundary.rs` 中 `NamedAttributeSet`、`NamedAttributeRegistry`、`extract_submesh_by_name` 全部实现并从 `fem-mesh` 导出；`mfem_ex39_named_attributes` 8/8 测试通过。
+- ✅ **CI alignment-smoke.yml**（2026-05-05）。`.github/workflows/alignment-smoke.yml` 已创建并扩展至 12 个套件：complex-coeff、complex-ex22、named-attrs、named-attrs-io、electromagnetic-pml、electromagnetic-absorbing、backend-contract、io-mixed-topology、io-mesh-coords-checkpoint、quad-hex-aniso-amr、amg-stress。
+
+### 补充 2026-04-13
 
 -  `.github/workflows/alignment-smoke.yml`对以?提 PR  smoke gate
   1. `ComplexCoeff` / `ComplexVectorCoeff``fem-assembly`

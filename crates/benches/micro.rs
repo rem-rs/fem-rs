@@ -34,13 +34,29 @@ fn create_sparse_poisson_2d(n: usize) -> CsrMatrix<f64> {
 fn spmv_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("spmv");
     
-    for n in [32, 64, 128].iter() {
+    for n in [32, 64, 128, 256].iter() {
         let mat = black_box(create_sparse_poisson_2d(*n));
         let x = black_box(vec![1.0_f64; n * n]);
         let mut y = vec![0.0_f64; n * n];
         
         group.bench_with_input(
-            format!("poisson_{}x{}", n, n),
+            format!("serial_poisson_{}x{}", n, n),
+            n,
+            |b, _| b.iter(|| mat.spmv(&x, &mut y))
+        );
+    }
+
+    // Parallel SpMV path (Rayon): force threshold to 1 via env is not available
+    // in bench context, so we use sizes large enough to exceed the default 128-row
+    // threshold and exercise the parallel code path.
+    #[cfg(feature = "parallel")]
+    for n in [64, 128, 256].iter() {
+        let mat = black_box(create_sparse_poisson_2d(*n));
+        let x = black_box(vec![1.0_f64; n * n]);
+        let mut y = vec![0.0_f64; n * n];
+
+        group.bench_with_input(
+            format!("parallel_poisson_{}x{}", n, n),
             n,
             |b, _| b.iter(|| mat.spmv(&x, &mut y))
         );
@@ -165,7 +181,50 @@ fn triplet_sorting_benchmark(c: &mut Criterion) {
 
 criterion_group!(
     name = benches;
-    config = Criterion::default().sample_size(100);
-    targets = spmv_benchmark, assembly_coo_benchmark, coo_to_csr_benchmark, triplet_sorting_benchmark
+    config = Criterion::default().sample_size(50);
+    targets = spmv_benchmark, assembly_coo_benchmark, coo_to_csr_benchmark,
+              triplet_sorting_benchmark, spmm_benchmark
 );
 criterion_main!(benches);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SpGEMM Benchmark: csr_spmm vs. naive COO round-trip
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a tridiagonal CSR matrix of size `n×n` with bandwidth 1.
+fn tridiag_csr(n: usize) -> CsrMatrix<f64> {
+    let mut c = CooMatrix::<f64>::new(n, n);
+    for i in 0..n {
+        c.add(i, i, 2.0);
+        if i + 1 < n {
+            c.add(i, i + 1, -1.0);
+            c.add(i + 1, i, -1.0);
+        }
+    }
+    c.into_csr()
+}
+
+fn spmm_benchmark(c: &mut Criterion) {
+    use fem_linalg::csr_spmm;
+
+    let mut group = c.benchmark_group("csr_spmm");
+    group.sample_size(20);
+
+    for n in [64usize, 256, 1024, 4096].iter().copied() {
+        let a = tridiag_csr(n);
+        let b = tridiag_csr(n);
+
+        group.bench_with_input(
+            format!("spmm_tridiag_{}x{}", n, n),
+            &n,
+            |bench, _| {
+                bench.iter(|| {
+                    let c = csr_spmm(black_box(&a), black_box(&b));
+                    black_box(c)
+                })
+            },
+        );
+    }
+
+    group.finish();
+}

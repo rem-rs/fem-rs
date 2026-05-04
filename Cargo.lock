@@ -450,6 +450,7 @@ dependencies = [
 name = "fem-assembly"
 version = "0.1.0"
 dependencies = [
+ "fem-amg",
  "fem-core",
  "fem-element",
  "fem-linalg",
@@ -559,6 +560,7 @@ name = "fem-mesh"
 version = "0.1.0"
 dependencies = [
  "fem-core",
+ "fem-element",
  "nalgebra 0.33.3",
  "thiserror",
 ]

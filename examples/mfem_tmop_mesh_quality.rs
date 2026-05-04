@@ -430,4 +430,54 @@ mod tests {
         );
         assert!(strong.final_.min_q > 0.8, "recovered minimum quality unexpectedly low: {}", strong.final_.min_q);
     }
+
+    #[test]
+    fn tmop_finer_mesh_n18_also_improves_from_perturbation() {
+        let res = run_tmop_baseline(&Args {
+            n: 18,
+            iters: 25,
+            omega: 0.65,
+            perturb: 0.06,
+        });
+        assert!(res.final_.objective < res.initial.objective,
+            "finer mesh: objective should decrease: init={}, final={}",
+            res.initial.objective, res.final_.objective);
+        assert_eq!(res.final_.inverted, 0, "finer mesh should have no inverted elements");
+    }
+
+    #[test]
+    fn tmop_lower_relaxation_omega_still_improves_objective() {
+        let res = run_tmop_baseline(&Args {
+            n: 12,
+            iters: 30,
+            omega: 0.4,
+            perturb: 0.06,
+        });
+        assert!(res.final_.objective < res.initial.objective,
+            "lower omega: objective should still decrease: init={}, final={}",
+            res.initial.objective, res.final_.objective);
+        assert_eq!(res.final_.inverted, 0, "lower omega mesh should have no inverted elements");
+    }
+
+    #[test]
+    fn tmop_smaller_perturbation_starts_from_higher_initial_quality() {
+        let mild = run_tmop_baseline(&Args {
+            n: 12,
+            iters: 5,
+            omega: 0.70,
+            perturb: 0.03,
+        });
+        let strong = run_tmop_baseline(&Args {
+            n: 12,
+            iters: 5,
+            omega: 0.70,
+            perturb: 0.09,
+        });
+        assert!(mild.initial.min_q > strong.initial.min_q,
+            "expected smaller perturbation to start from higher minimum quality: mild={} strong={}",
+            mild.initial.min_q, strong.initial.min_q);
+        assert!(mild.initial.objective < strong.initial.objective,
+            "expected smaller perturbation to start from lower objective: mild={} strong={}",
+            mild.initial.objective, strong.initial.objective);
+    }
 }

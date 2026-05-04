@@ -188,4 +188,17 @@ mod tests {
 			energy_rel_gap
 		);
 	}
+
+        #[test]
+        fn maxwell_sigma0_energy_stays_bounded_above_by_initial_on_finer_dt() {
+                // With no dissipation and a symplectic integrator the total energy should
+                // remain close to its initial value.  Use a finer dt to make the bound tight.
+                let (e0, _e_final, _e_min, e_max) = energy_stats_sigma0(0.005, 80);
+                let rel_excess = (e_max - e0) / e0.max(1.0e-30);
+                assert!(
+                        rel_excess < 0.02,
+                        "energy exceeded initial by more than 2%: e0={} e_max={} rel_excess={}",
+                        e0, e_max, rel_excess
+                );
+        }
 }

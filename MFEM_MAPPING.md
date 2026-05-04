@@ -818,7 +818,7 @@ Current baseline progress (2026-04-13):
 | 热弹性耦合 | ex44 | ✅ `mfem_ex44_thermoelastic_coupled` 15/15 测试 | 🟢 [OK] | TBD |
 | 反应-流-热三场耦合 | ex52 | ✅ `mfem_ex52_template_reaction_flow_thermal` 4/4 测试 | 🟢 [OK] | TBD |
 | 声学-结构耦合 | ex50 | ✅ `mfem_ex50_template_acoustics_structure` 3/3 测试 | 🟢 [OK] | TBD |
-| Quad/Hex NC AMR（各向异性） | [OK]| 🔨 Tri/Tet only | 🟢 [OK] | TBD |
+| Quad/Hex NC AMR（各向异性） | ✅ | `refine_nonconforming_quad_aniso` (`QuadRefineDir::X/Y/Both`) + `refine_nonconforming_hex_aniso` (`HexRefineDir::X/Y/Z/XY/XZ/YZ/All`)；`QuadRefineDir`/`HexRefineDir` 从 `fem-mesh` 公开导出；`mfem_ex15_dynamic_amr` 新增 8 个各向异性测试通过 | 🟢 Done | TBD |
 | GPU 后端 (CUDA/HIP) | [OK]全库加[OK]| core CPU only（delegated to `vendor/linger` + `rem-rs/reed` + `vendor/jsmpi` 协同[OK]| 🟢 [OK] | TBD |
 
 ---

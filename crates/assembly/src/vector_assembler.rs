@@ -19,7 +19,7 @@ use crate::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator,
 
 // ─── Reference element factory ──────────────────────────────────────────────
 
-fn vec_ref_elem(
+pub(crate) fn vec_ref_elem(
     space_type: SpaceType,
     elem_type: ElementType,
     dim: usize,
@@ -44,7 +44,7 @@ fn vec_ref_elem(
     }
 }
 
-fn geo_ref_elem(elem_type: ElementType) -> Option<Box<dyn ReferenceElement>> {
+pub(crate) fn geo_ref_elem(elem_type: ElementType) -> Option<Box<dyn ReferenceElement>> {
     match elem_type {
         ElementType::Quad4 => Some(Box::new(QuadQ1)),
         ElementType::Hex8 => Some(Box::new(HexQ1)),
@@ -54,7 +54,7 @@ fn geo_ref_elem(elem_type: ElementType) -> Option<Box<dyn ReferenceElement>> {
 
 // ─── Jacobian helpers (same as assembler.rs) ────────────────────────────────
 
-fn isoparametric_jacobian<M: MeshTopology>(
+pub(crate) fn isoparametric_jacobian<M: MeshTopology>(
     mesh: &M,
     nodes: &[u32],
     geo_elem: &dyn ReferenceElement,
@@ -89,7 +89,7 @@ fn isoparametric_jacobian<M: MeshTopology>(
 /// Covariant Piola transform for H(curl): φ_phys = J^{-T} φ_ref
 ///
 /// Transforms `n_dofs` vector basis functions from reference to physical space.
-fn piola_hcurl_basis(
+pub(crate) fn piola_hcurl_basis(
     j_inv_t: &DMatrix<f64>,
     ref_vals: &[f64],    // [n_dofs × dim]
     phys_vals: &mut [f64], // [n_dofs × dim]
@@ -111,7 +111,7 @@ fn piola_hcurl_basis(
 ///
 /// - 2-D: `curl_phys[i] = curl_ref[i] / det_j` (scalar)
 /// - 3-D: `curl_phys[i] = J · curl_ref[i] / det_j` (vector)
-fn piola_hcurl_curl(
+pub(crate) fn piola_hcurl_curl(
     jac: &DMatrix<f64>,
     det_j: f64,
     ref_curl: &[f64],
@@ -174,7 +174,7 @@ fn piola_hdiv_div(
 }
 
 /// Apply DOF orientation signs to all per-DOF arrays.
-fn apply_signs(
+pub(crate) fn apply_signs(
     signs: &[f64],
     phi_vec: &mut [f64],   // [n_dofs × dim]
     curl: &mut [f64],
