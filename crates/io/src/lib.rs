@@ -22,17 +22,18 @@ pub mod xdmf;
 pub mod hdf5;
 
 pub use gmsh::{read_msh, read_msh_file, MshFile};
+pub use fem_mesh::curved::CurvedMesh;
 pub use netgen::{
 	read_netgen_vol,
 	read_netgen_vol_file,
 	write_netgen_vol,
 	write_netgen_vol_file,
 };
-pub use abaqus::{read_abaqus_inp, read_abaqus_inp_file};
+pub use abaqus::{read_abaqus_inp, read_abaqus_inp_file, read_abaqus_inp_full, read_abaqus_inp_full_file, AbaqusInpData};
 pub use vtk::{DataArray, VtkWriter};
 pub use vtk_reader::read_vtu_point_data;
 pub use matrix_market::{read_matrix_market, read_matrix_market_coo, write_matrix_market, MmioError};
-pub use xdmf::{write_xdmf, XdmfField, XdmfCenter};
+pub use xdmf::{write_xdmf, write_xdmf_mixed, xdmf_topology_code, XdmfField, XdmfCenter};
 
 #[cfg(feature = "hdf5")]
 pub use hdf5::{

@@ -56,6 +56,12 @@ pub struct CurvedMesh<const D: usize> {
     pub n_elems: usize,
     /// Total number of nodes (including mid-edge and interior nodes).
     pub n_nodes: usize,
+    /// Flat boundary face connectivity.  Length = `n_faces * nodes_per_face`.
+    pub face_conn: Vec<NodeId>,
+    /// Physical group tag per boundary face.  Length = `n_faces`.
+    pub face_tags: Vec<i32>,
+    /// Face element type (e.g. `Line2` for Tri3, `Line3` for Tri6).
+    pub face_type: ElementType,
 }
 
 impl<const D: usize> CurvedMesh<D> {
@@ -71,6 +77,9 @@ impl<const D: usize> CurvedMesh<D> {
             elem_type:  mesh.elem_type,
             n_elems:    mesh.n_elems(),
             n_nodes:    mesh.n_nodes(),
+            face_conn:  mesh.face_conn.clone(),
+            face_tags:  mesh.face_tags.clone(),
+            face_type:  mesh.face_type,
         }
     }
 
@@ -145,6 +154,9 @@ impl<const D: usize> CurvedMesh<D> {
             geom_conn,
             geom_order: 2,
             elem_type: ElementType::Tri6,
+            face_conn: mesh.face_conn.clone(),
+            face_tags: mesh.face_tags.clone(),
+            face_type: mesh.face_type,
         }
     }
 

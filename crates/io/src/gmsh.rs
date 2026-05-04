@@ -25,6 +25,7 @@ use std::io::{BufRead, BufReader, Read};
 use fem_core::{FemError, FemResult};
 use fem_mesh::{
     boundary::{NamedAttributeRegistry, NamedAttributeSet, PhysicalGroup},
+    curved::CurvedMesh,
     element_type::ElementType,
     simplex::SimplexMesh,
 };
@@ -69,6 +70,9 @@ pub struct MshFile {
     pub mesh2d: Option<SimplexMesh<2>>,
     /// The 3-D mesh (populated when highest element dimension is 3).
     pub mesh3d: Option<SimplexMesh<3>>,
+    /// Curved 2-D mesh (populated when highest element dimension is 2).
+    /// Contains full second-order geometry for Tri6 imports; order-1 for Tri3.
+    pub curved2d: Option<CurvedMesh<2>>,
 }
 
 impl MshFile {
@@ -79,6 +83,12 @@ impl MshFile {
     /// Unwrap the 3-D mesh, or return an error if none was found.
     pub fn into_3d(self) -> FemResult<SimplexMesh<3>> {
         self.mesh3d.ok_or_else(|| FemError::Mesh("no 3-D elements found in .msh file".into()))
+    }
+    /// Unwrap the curved 2-D mesh (`CurvedMesh<2>`), or return an error if none was found.
+    ///
+    /// Populated for `.msh` files with 2-D elements (Tri3 → order-1, Tri6 → order-2).
+    pub fn into_curved_2d(self) -> FemResult<CurvedMesh<2>> {
+        self.curved2d.ok_or_else(|| FemError::Mesh("no curved 2-D mesh found in .msh file".into()))
     }
 
     /// Build a named-attribute registry from parsed GMSH `PhysicalNames`.
@@ -543,17 +553,19 @@ impl MshParser {
 
         let mut mesh2d = None;
         let mut mesh3d = None;
+        let mut curved2d = None;
 
         if max_dim == 2 {
             mesh2d = Some(self.build_2d(n_nodes)?);
+            curved2d = self.build_curved_2d(n_nodes)?;
         } else if max_dim == 3 {
             mesh3d = Some(self.build_3d(n_nodes)?);
         }
 
-        Ok(MshFile { physical_groups, tag_names, mesh2d, mesh3d })
+        Ok(MshFile { physical_groups, tag_names, mesh2d, mesh3d, curved2d })
     }
 
-    fn build_2d(self, n_nodes: usize) -> FemResult<SimplexMesh<2>> {
+    fn build_2d(&self, n_nodes: usize) -> FemResult<SimplexMesh<2>> {
         let mut coords = vec![0.0f64; n_nodes * 2];
         for (i, c) in self.nodes.iter().enumerate() {
             coords[i * 2    ] = c[0];
@@ -620,7 +632,84 @@ impl MshParser {
         Ok(mesh)
     }
 
-    fn build_3d(self, n_nodes: usize) -> FemResult<SimplexMesh<3>> {
+    // =======================================================================
+    // Build curved 2-D mesh (CurvedMesh<2>)
+    // =======================================================================
+
+    fn build_curved_2d(&self, n_nodes: usize) -> FemResult<Option<CurvedMesh<2>>> {
+        let mut coords = vec![0.0f64; n_nodes * 2];
+        for (i, c) in self.nodes.iter().enumerate() {
+            coords[i * 2    ] = c[0];
+            coords[i * 2 + 1] = c[1];
+        }
+
+        let mut geom_conn: Vec<u32> = Vec::new();
+        let mut elem_type_opt: Option<ElementType> = None;
+
+        for blk in &self.elem_by_dim[2] {
+            match blk.etype {
+                ElementType::Tri3 | ElementType::Tri6 => {}
+                // Non-triangular or mixed: skip building the curved mesh.
+                _ => return Ok(None),
+            }
+            if let Some(first) = elem_type_opt {
+                if blk.etype != first {
+                    // Mixed Tri3/Tri6: skip curved mesh.
+                    return Ok(None);
+                }
+            } else {
+                elem_type_opt = Some(blk.etype);
+            }
+            geom_conn.extend_from_slice(&blk.conn);
+        }
+
+        let elem_type = match elem_type_opt {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let npe = elem_type.nodes_per_element();
+        let n_elems = geom_conn.len() / npe;
+        let geom_order: u8 = match elem_type {
+            ElementType::Tri3 => 1,
+            ElementType::Tri6 => 2,
+            _ => unreachable!(),
+        };
+
+        // Boundary faces: accept Line2 or Line3 from dim-1 blocks.
+        let face_type = match elem_type {
+            ElementType::Tri3 => ElementType::Line2,
+            ElementType::Tri6 => ElementType::Line3,
+            _ => unreachable!(),
+        };
+
+        let mut face_conn: Vec<u32> = Vec::new();
+        let mut face_tags: Vec<i32> = Vec::new();
+
+        for blk in &self.elem_by_dim[1] {
+            if matches!(blk.etype, ElementType::Line2 | ElementType::Line3) {
+                let fnpe = blk.etype.nodes_per_element();
+                let n_faces = blk.conn.len() / fnpe;
+                for i in 0..n_faces {
+                    face_conn.extend_from_slice(&blk.conn[i * fnpe..(i + 1) * fnpe]);
+                    face_tags.push(blk.phys_tag);
+                }
+            }
+        }
+
+        Ok(Some(CurvedMesh {
+            coords,
+            geom_conn,
+            geom_order,
+            elem_type,
+            n_elems,
+            n_nodes,
+            face_conn,
+            face_tags,
+            face_type,
+        }))
+    }
+
+    fn build_3d(&self, n_nodes: usize) -> FemResult<SimplexMesh<3>> {
         let mut coords = vec![0.0f64; n_nodes * 3];
         for (i, c) in self.nodes.iter().enumerate() {
             coords[i * 3    ] = c[0];
@@ -1044,4 +1133,199 @@ $EndElements
         assert!(wall.has_element_tag(1));
         assert!(wall.has_boundary_tag(2));
     }
+
+    // -----------------------------------------------------------------------
+    // Tri6 import tests (Phase 3)
+    // -----------------------------------------------------------------------
+
+    /// Gmsh v2 ASCII fixture: 1 Tri6 element (unit reference triangle) with
+    /// 3 Line3 boundary edges.
+    ///
+    /// Nodes (1-indexed):
+    ///   1 = (0,0),  2 = (1,0),  3 = (0,1)
+    ///   4 = (0.5,0) mid(1-2),  5 = (0.5,0.5) mid(2-3),  6 = (0,0.5) mid(1-3)
+    fn v2_tri6_unit_triangle() -> &'static str {
+        "$MeshFormat\n\
+         2.2 0 8\n\
+         $EndMeshFormat\n\
+         $PhysicalNames\n\
+         2\n\
+         1 1 \"boundary\"\n\
+         2 2 \"domain\"\n\
+         $EndPhysicalNames\n\
+         $Nodes\n\
+         6\n\
+         1 0.0 0.0 0.0\n\
+         2 1.0 0.0 0.0\n\
+         3 0.0 1.0 0.0\n\
+         4 0.5 0.0 0.0\n\
+         5 0.5 0.5 0.0\n\
+         6 0.0 0.5 0.0\n\
+         $EndNodes\n\
+         $Elements\n\
+         4\n\
+         1 8 2 1 1 1 4 2\n\
+         2 8 2 1 1 2 5 3\n\
+         3 8 2 1 1 3 6 1\n\
+         4 9 2 2 1 1 2 3 4 5 6\n\
+         $EndElements\n"
+    }
+
+    /// Gmsh v4.1 ASCII fixture: same unit-triangle Tri6 mesh.
+    fn v4_tri6_unit_triangle() -> &'static str {
+        "$MeshFormat\n\
+         4.1 0 8\n\
+         $EndMeshFormat\n\
+         $PhysicalNames\n\
+         2\n\
+         1 1 \"boundary\"\n\
+         2 2 \"domain\"\n\
+         $EndPhysicalNames\n\
+         $Nodes\n\
+         1 6 1 6\n\
+         0 1 0 6\n\
+         1\n2\n3\n4\n5\n6\n\
+         0.0 0.0 0.0\n\
+         1.0 0.0 0.0\n\
+         0.0 1.0 0.0\n\
+         0.5 0.0 0.0\n\
+         0.5 0.5 0.0\n\
+         0.0 0.5 0.0\n\
+         $EndNodes\n\
+         $Elements\n\
+         2 4 1 4\n\
+         1 1 8 3\n\
+         1 1 4 2\n\
+         2 2 5 3\n\
+         3 3 6 1\n\
+         2 2 9 1\n\
+         4 1 2 3 4 5 6\n\
+         $EndElements\n"
+    }
+
+    #[test]
+    fn tri6_v2_into_curved_2d_node_and_elem_count() {
+        let msh = read_msh(v2_tri6_unit_triangle().as_bytes())
+            .expect("parse v2 Tri6");
+        let cm = msh.into_curved_2d().expect("into_curved_2d");
+        assert_eq!(cm.n_nodes, 6, "6 nodes");
+        assert_eq!(cm.n_elems, 1, "1 Tri6 element");
+        assert_eq!(cm.geom_order, 2);
+        assert_eq!(cm.elem_type, ElementType::Tri6);
+    }
+
+    #[test]
+    fn tri6_v4_into_curved_2d_node_and_elem_count() {
+        let msh = read_msh(v4_tri6_unit_triangle().as_bytes())
+            .expect("parse v4 Tri6");
+        let cm = msh.into_curved_2d().expect("into_curved_2d");
+        assert_eq!(cm.n_nodes, 6, "6 nodes");
+        assert_eq!(cm.n_elems, 1, "1 Tri6 element");
+        assert_eq!(cm.geom_order, 2);
+        assert_eq!(cm.elem_type, ElementType::Tri6);
+    }
+
+    #[test]
+    fn tri6_v2_node_coordinates_correct() {
+        let msh = read_msh(v2_tri6_unit_triangle().as_bytes()).unwrap();
+        let cm = msh.into_curved_2d().unwrap();
+        // Expected (0-indexed) coordinates in import order:
+        let expected: &[[f64; 2]] = &[
+            [0.0, 0.0], [1.0, 0.0], [0.0, 1.0],
+            [0.5, 0.0], [0.5, 0.5], [0.0, 0.5],
+        ];
+        for (i, &exp) in expected.iter().enumerate() {
+            let got = cm.node_coords(i as u32);
+            assert!((got[0] - exp[0]).abs() < 1e-14,
+                "node {i} x: got {}, expected {}", got[0], exp[0]);
+            assert!((got[1] - exp[1]).abs() < 1e-14,
+                "node {i} y: got {}, expected {}", got[1], exp[1]);
+        }
+    }
+
+    #[test]
+    fn tri6_v2_jacobian_positive_at_reference_points() {
+        let cm = read_msh(v2_tri6_unit_triangle().as_bytes())
+            .unwrap()
+            .into_curved_2d()
+            .unwrap();
+        // Reference points inside the unit triangle
+        let points: &[&[f64]] = &[
+            &[1.0/3.0, 1.0/3.0],  // centroid
+            &[0.1, 0.1],
+            &[0.7, 0.2],
+            &[0.1, 0.7],
+        ];
+        for pt in points {
+            let (_, det) = cm.element_jacobian(0, pt);
+            assert!(det > 0.0,
+                "det(J) = {det:.6e} ≤ 0 at xi={pt:?}");
+        }
+    }
+
+    #[test]
+    fn tri6_v2_boundary_faces_line3() {
+        let msh = read_msh(v2_tri6_unit_triangle().as_bytes()).unwrap();
+        let cm = msh.into_curved_2d().unwrap();
+        assert_eq!(cm.face_type, ElementType::Line3,
+            "face type should be Line3 for Tri6 mesh");
+        // 3 boundary edges × 3 nodes/edge = 9
+        assert_eq!(cm.face_conn.len(), 9,
+            "3 Line3 edges → 9 node entries");
+        assert_eq!(cm.face_tags.len(), 3,
+            "3 boundary faces");
+        // All faces should carry physical tag 1 ("boundary")
+        for &t in &cm.face_tags {
+            assert_eq!(t, 1, "face tag should be 1 (boundary)");
+        }
+    }
+
+    #[test]
+    fn tri6_v2_and_v4_give_identical_curved_mesh() {
+        let cm2 = read_msh(v2_tri6_unit_triangle().as_bytes())
+            .unwrap().into_curved_2d().unwrap();
+        let cm4 = read_msh(v4_tri6_unit_triangle().as_bytes())
+            .unwrap().into_curved_2d().unwrap();
+        assert_eq!(cm2.n_nodes, cm4.n_nodes);
+        assert_eq!(cm2.n_elems, cm4.n_elems);
+        assert_eq!(cm2.geom_order, cm4.geom_order);
+        assert_eq!(cm2.elem_type, cm4.elem_type);
+        // Connectivity must match
+        assert_eq!(cm2.geom_conn, cm4.geom_conn,
+            "geom_conn mismatch between v2 and v4 import");
+        // Coordinates must match
+        for i in 0..cm2.n_nodes {
+            let c2 = cm2.node_coords(i as u32);
+            let c4 = cm4.node_coords(i as u32);
+            assert!((c2[0] - c4[0]).abs() < 1e-14);
+            assert!((c2[1] - c4[1]).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn tri6_area_from_jacobian() {
+        // Area of the unit reference triangle = 0.5.
+        // For a straight-edged Tri6, J is constant, so:
+        //   area = |det(J)| / 2  (ref-tri area = 1/2 × base × height × 1 = 1/2)
+        // Actually for a Tri6 (P2 with no curvature), J at the centroid equals
+        // the P1 Jacobian. We use a 3-point rule (centroid approx): area ≈ det(J)/2.
+        let cm = read_msh(v2_tri6_unit_triangle().as_bytes())
+            .unwrap().into_curved_2d().unwrap();
+        let (_, det) = cm.element_jacobian(0, &[1.0/3.0, 1.0/3.0]);
+        // det(J) for unit triangle = 1.0, so area = 0.5
+        assert!((det * 0.5 - 0.5).abs() < 1e-12,
+            "area = det*0.5 = {:.6e}, expected 0.5", det * 0.5);
+    }
+
+    #[test]
+    fn tri3_mesh_builds_curved_2d_order1() {
+        // Tri3 mesh should also produce a valid CurvedMesh with geom_order=1.
+        let msh = read_msh(v2_unit_square().as_bytes()).unwrap();
+        let cm = msh.into_curved_2d().unwrap();
+        assert_eq!(cm.geom_order, 1);
+        assert_eq!(cm.elem_type, ElementType::Tri3);
+        assert_eq!(cm.n_elems, 2);
+        assert_eq!(cm.n_nodes, 4);
+    }
 }
+
