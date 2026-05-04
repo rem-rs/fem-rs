@@ -1,0 +1,15 @@
+[package]
+name    = "fem-linalg-gpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fem-core   = { path = "../core" }
+bytemuck   = { workspace = true }
+wgpu       = "24"
+pollster   = "0.4"
+thiserror  = "2"
+log        = { workspace = true }
+
+[lib]
+crate-type = ["lib"]
