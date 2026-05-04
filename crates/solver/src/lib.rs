@@ -63,6 +63,11 @@ use linger::precond::{IlukPrecond, IlutPrecond};
 pub use linger::Preconditioner as LingerPreconditioner;
 use thiserror::Error;
 
+#[cfg(feature = "gpu")]
+pub mod cg_gpu;
+#[cfg(feature = "gpu")]
+pub mod gmres_gpu;
+
 // ─── Error ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]

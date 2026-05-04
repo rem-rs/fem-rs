@@ -18,3 +18,11 @@ fem-linalg   = { path = "../linalg" }
 fem-mesh     = { path = "../mesh" }
 fem-space    = { path = "../space" }
 nalgebra-sparse = "0.4"
+
+[features]
+default  = []
+gpu      = ["dep:fem-linalg-gpu"]
+
+[dependencies.fem-linalg-gpu]
+path = "../linalg-gpu"
+optional = true
