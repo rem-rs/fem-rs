@@ -1266,6 +1266,7 @@ pub fn into_result(r: linger::SolverResult) -> SolveResult {
 }
 
 pub mod block;
+pub mod block_gmres;
 pub mod eigen;
 pub mod lor;
 pub mod multirate;
@@ -1274,6 +1275,7 @@ pub mod multiphysics;
 pub mod multiphysics_templates;
 pub mod ode;
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
+pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};
 pub use multiphysics::{
     CoupledProblem,
