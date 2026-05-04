@@ -9,6 +9,7 @@
 //! - [`sparsity`] — `SparsityPattern`: non-zero structure built from DOF connectivity
 //! - [`dense`]    — small dense operations (LU factorisation, matmat) for coarse-grid solves
 //! - [`block`]    — `BlockMatrix` / `BlockVector` for mixed / saddle-point problems
+//! - [`hmatrix`]  — H-matrix infrastructure: cluster tree, bounding boxes, block cluster tree
 //!
 //! ## Feature flags
 //!
@@ -20,6 +21,7 @@
 //! ## Re-exports from `linger`
 //! - `BlrMatrix`, `BlrBlock` — Block Low-Rank compression for direct solvers
 
+pub mod complex_csr;
 pub mod coo;
 pub mod csr;
 pub mod dense;
@@ -27,12 +29,13 @@ pub mod sparsity;
 pub mod vector;
 pub mod block;
 pub mod pool;
+pub mod hmatrix;
 
 pub use coo::CooMatrix;
 pub use csr::CsrMatrix;
-pub use csr::spadd;
+pub use csr::{spadd, csr_spmm};
 #[cfg(feature = "parallel")]
-pub use csr::{spmv_parallel_min_rows, FEM_LINALG_SPMV_PARALLEL_MIN_ROWS};
+pub use csr::{csr_spmm_parallel, spadd_parallel, spmv_parallel_min_rows, FEM_LINALG_SPMV_PARALLEL_MIN_ROWS};
 pub use sparsity::SparsityPattern;
 pub use vector::Vector;
 pub use block::{BlockMatrix, BlockVector};
