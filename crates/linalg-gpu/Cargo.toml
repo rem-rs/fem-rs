@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 fem-core   = { path = "../core" }
+fem-linalg = { path = "../linalg" }
 bytemuck   = { workspace = true }
 wgpu       = "24"
 pollster   = "0.4"
