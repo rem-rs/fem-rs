@@ -11,9 +11,17 @@
 //! - [`solve_pcg_ilu0`]    — PCG with ILU(0) preconditioner
 //! - [`solve_pcg_ildlt`]   — PCG with ILDLᵀ preconditioner
 //! - [`solve_gmres`]       — GMRES (non-symmetric systems)
+//! - [`solve_gmres_jacobi`] — GMRES with Jacobi preconditioner
+//! - [`solve_gmres_ilu0`]   — GMRES with ILU(0) preconditioner
 //! - [`solve_bicgstab`]    — BiCGSTAB
 //! - [`solve_idrs`]        — IDR(s) (non-symmetric, short-recurrence)
 //! - [`solve_tfqmr`]       — TFQMR (Transpose-Free QMR)
+//! - [`solve_fgmres_ilu0`] — Flexible GMRES with ILU(0) preconditioner
+//!
+//! ## Generic preconditioner interface
+//! - [`solve_pcg_precond`]    — PCG with any type implementing [`LingerPreconditioner`]
+//! - [`solve_gmres_precond`]  — GMRES with any type implementing [`LingerPreconditioner`]
+//! - [`solve_fgmres_precond`] — FGMRES with any type implementing [`LingerPreconditioner`]
 //!
 //! ## Auxiliary-space preconditioners (Hiptmair-Xu)
 //! - [`solve_pcg_ams`]     — PCG with AMS for H(curl) (Maxwell)
@@ -37,8 +45,16 @@ use linger::{
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
     precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig},
     sparse::CsrMatrix as LingerCsr,
-    DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, SolverParams, VerboseLevel,
+    DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner,
+    SolverParams, VerboseLevel,
 };
+
+/// Re-export of linger's [`Preconditioner`] trait.
+///
+/// Implement this trait to plug any custom approximate-inverse into
+/// [`solve_pcg_precond`], [`solve_gmres_precond`], or [`solve_fgmres_precond`]
+/// without depending on the `linger` crate directly.
+pub use linger::Preconditioner as LingerPreconditioner;
 use thiserror::Error;
 
 // ─── Error ───────────────────────────────────────────────────────────────────
@@ -334,6 +350,48 @@ pub fn solve_gmres<T: LingerScalar>(
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, None, &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// GMRES with Jacobi preconditioner.
+pub fn solve_gmres_jacobi<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::Linger(e.to_string()))?;
+    let solver = Gmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// GMRES with ILU(0) preconditioner.
+pub fn solve_gmres_ilu0<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::Linger(e.to_string()))?;
+    let solver = Gmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -727,6 +785,123 @@ pub fn solve_fgmres_jacobi<T: LingerScalar>(    a: &FemCsr<T>,
     let solver = Fgmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// Flexible GMRES with ILU(0) preconditioner.
+pub fn solve_fgmres_ilu0<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::Linger(e.to_string()))?;
+    let solver = Fgmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+// ─── Generic preconditioner interface ────────────────────────────────────────
+
+/// Preconditioned CG with a user-supplied preconditioner.
+///
+/// Accepts any type implementing [`linger::Preconditioner`].
+/// Use [`LingerPreconditioner`] / [`linger::Preconditioner`] as the trait bound
+/// when building custom preconditioners.
+///
+/// # Example
+/// ```ignore
+/// use fem_solver::{solve_pcg_precond, SolverConfig};
+/// use linger::JacobiPrecond;
+/// use fem_solver::fem_to_linger_csr;
+///
+/// let la = fem_to_linger_csr(&a);
+/// let prec = JacobiPrecond::from_csr(&la).unwrap();
+/// let res = solve_pcg_precond(&a, &b, &mut x, &prec, &cfg).unwrap();
+/// ```
+pub fn solve_pcg_precond<T, P>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    precond: &P,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    T: LingerScalar,
+    P: Preconditioner<Vector = DenseVec<T>>,
+{
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let res = ConjugateGradient::<T>::default()
+        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// GMRES with a user-supplied preconditioner.
+///
+/// The preconditioner type is erased at the call-site via `&dyn Preconditioner`,
+/// so there is no per-preconditioner boilerplate.
+pub fn solve_gmres_precond<T, P>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    precond: &P,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    T: LingerScalar,
+    P: Preconditioner<Vector = DenseVec<T>>,
+{
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let res = Gmres::<T>::new(restart)
+        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// Flexible GMRES with a user-supplied (potentially variable) preconditioner.
+///
+/// Unlike standard GMRES, FGMRES tolerates preconditioners that change between
+/// iterations — inner Krylov solves, AMG V-cycles, and nonlinear operators all
+/// qualify.  With a fixed preconditioner the iterates are identical to
+/// right-preconditioned GMRES.
+pub fn solve_fgmres_precond<T, P>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    precond: &P,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    T: LingerScalar,
+    P: Preconditioner<Vector = DenseVec<T>>,
+{
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let res = Fgmres::<T>::new(restart)
+        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linger())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1194,6 +1369,21 @@ mod tests {
         coo.into_csr()
     }
 
+    /// Mildly non-symmetric 1-D convection-diffusion-like operator.
+    fn nonsymmetric_1d(n: usize) -> CsrMatrix<f64> {
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n {
+            coo.add(i, i, 3.0);
+            if i > 0 {
+                coo.add(i, i - 1, -1.2);
+            }
+            if i < n - 1 {
+                coo.add(i, i + 1, -0.4);
+            }
+        }
+        coo.into_csr()
+    }
+
     #[test]
     fn cg_laplacian() {
         let n = 50;
@@ -1231,6 +1421,33 @@ mod tests {
     }
 
     #[test]
+    fn gmres_jacobi_laplacian() {
+        let n = 50;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_gmres_jacobi(&a, &b, &mut x, 30, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "GMRES+Jacobi failed to converge");
+        assert!(res.iterations < 60, "too many iterations: {}", res.iterations);
+    }
+
+    #[test]
+    fn gmres_ilu0_nonsymmetric() {
+        let n = 60;
+        let a = nonsymmetric_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x_plain = vec![0.0_f64; n];
+        let mut x_ilu = vec![0.0_f64; n];
+        let plain = solve_gmres(&a, &b, &mut x_plain, 30, &SolverConfig::default()).unwrap();
+        let ilu = solve_gmres_ilu0(&a, &b, &mut x_ilu, 30, &SolverConfig::default()).unwrap();
+        assert!(plain.converged, "plain GMRES failed to converge");
+        assert!(ilu.converged, "GMRES+ILU0 failed to converge");
+        assert!(ilu.iterations <= plain.iterations,
+            "GMRES+ILU0 should not need more iterations: plain={} ilu={}",
+            plain.iterations, ilu.iterations);
+    }
+
+    #[test]
     fn fgmres_laplacian() {
         let n = 20;
         let a = laplacian_1d(n);
@@ -1249,6 +1466,58 @@ mod tests {
         let res = solve_fgmres_jacobi(&a, &b, &mut x, 30, &SolverConfig::default()).unwrap();
         assert!(res.converged);
         assert!(res.iterations < 60, "too many iterations: {}", res.iterations);
+    }
+
+    #[test]
+    fn fgmres_ilu0_nonsymmetric() {
+        let n = 60;
+        let a = nonsymmetric_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_fgmres_ilu0(&a, &b, &mut x, 30, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "FGMRES+ILU0 failed to converge");
+    }
+
+    // ── Generic preconditioner interface tests ────────────────────────────────
+
+    #[test]
+    fn solve_pcg_precond_jacobi() {
+        // Verify the generic PCG wrapper produces the same result as solve_pcg_jacobi.
+        let n = 50;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x1 = vec![0.0_f64; n];
+        let mut x2 = vec![0.0_f64; n];
+
+        let prec = JacobiPrecond::from_csr(&fem_to_linger_csr(&a)).unwrap();
+        let r1 = solve_pcg_precond(&a, &b, &mut x1, &prec, &SolverConfig::default()).unwrap();
+        let r2 = solve_pcg_jacobi(&a, &b, &mut x2, &SolverConfig::default()).unwrap();
+        assert!(r1.converged);
+        assert_eq!(r1.iterations, r2.iterations);
+    }
+
+    #[test]
+    fn solve_gmres_precond_ilu0() {
+        let n = 60;
+        let a = nonsymmetric_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let la = fem_to_linger_csr(&a);
+        let prec = Ilu0Precond::from_csr(&la).unwrap();
+        let res = solve_gmres_precond(&a, &b, &mut x, 30, &prec, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "generic GMRES+ILU0 failed: residual={}", res.final_residual);
+    }
+
+    #[test]
+    fn solve_fgmres_precond_ildlt() {
+        let n = 50;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let la = fem_to_linger_csr(&a);
+        let prec = IldltPrecond::from_csr(&la).unwrap();
+        let res = solve_fgmres_precond(&a, &b, &mut x, 30, &prec, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "generic FGMRES+ILDLt failed: residual={}", res.final_residual);
     }
 
     #[test]
@@ -1349,5 +1618,289 @@ mod tests {
         let mut x = vec![0.0_f64; n];
         let res = solve_gmres_ildlt(&a, &b, &mut x, 30, &SolverConfig::default()).unwrap();
         assert!(res.converged, "GMRES+ILDLt failed to converge");
+    }
+}
+
+// ─── AMS / ADS integration tests ─────────────────────────────────────────────
+
+#[cfg(test)]
+mod ams_ads_tests {
+    use super::*;
+    use fem_assembly::{DiscreteLinearOperator, VectorAssembler};
+    use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+    use fem_mesh::SimplexMesh;
+    use fem_space::{H1Space, HCurlSpace};
+    use fem_space::constraints::{apply_dirichlet, boundary_dofs_hcurl};
+    use fem_space::fe_space::FESpace;
+
+    // ── AMS: H(curl) curl-curl + mass on 2-D unit square ──────────────────────
+
+    #[test]
+    fn pcg_ams_hcurl_2d_converges() {
+        let n = 4;
+        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let h1    = H1Space::new(mesh.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh.clone(), 1);
+        let ndofs = hcurl.n_dofs();
+
+        let mut a = VectorAssembler::assemble_bilinear(
+            &hcurl,
+            &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl)
+            .expect("gradient assembly failed");
+
+        // Apply zero Dirichlet BCs symmetrically (to keep SPD for PCG).
+        let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
+        let mut rhs = vec![1.0_f64; ndofs];
+        for &dof in &bnd {
+            a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+        }
+
+        let g_linger = fem_to_linger_csr(&g_fem);
+        let cfg = AmsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 300, verbose: false, ..SolverConfig::default() },
+            ams_cfg: Default::default(),
+        };
+        let mut x = vec![0.0_f64; ndofs];
+        let res = solve_pcg_ams(&a, &g_linger, &rhs, &mut x, &cfg)
+            .expect("PCG+AMS returned error");
+        assert!(res.converged, "PCG+AMS did not converge in {} iters", res.iterations);
+        assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
+    }
+
+    #[test]
+    fn gmres_ams_hcurl_2d_converges() {
+        let n = 4;
+        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let h1    = H1Space::new(mesh.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh.clone(), 1);
+        let ndofs = hcurl.n_dofs();
+
+        let mut a = VectorAssembler::assemble_bilinear(
+            &hcurl,
+            &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl)
+            .expect("gradient assembly failed");
+
+        let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
+        let vals = vec![0.0_f64; bnd.len()];
+        let mut rhs = vec![1.0_f64; ndofs];
+        apply_dirichlet(&mut a, &mut rhs, &bnd, &vals);
+
+        let g_linger = fem_to_linger_csr(&g_fem);
+        let cfg = AmsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 300, verbose: false, ..SolverConfig::default() },
+            ams_cfg: Default::default(),
+        };
+        let mut x = vec![0.0_f64; ndofs];
+        let res = solve_gmres_ams(&a, &g_linger, &rhs, &mut x, 30, &cfg)
+            .expect("GMRES+AMS returned error");
+        assert!(res.converged, "GMRES+AMS did not converge in {} iters", res.iterations);
+        assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
+    }
+
+    #[test]
+    fn pcg_ams_solution_satisfies_ax_eq_b() {
+        let n = 4;
+        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let h1    = H1Space::new(mesh.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh.clone(), 1);
+        let ndofs = hcurl.n_dofs();
+
+        let mut a = VectorAssembler::assemble_bilinear(
+            &hcurl,
+            &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+
+        // Apply zero Dirichlet BCs symmetrically (keeps SPD for PCG+AMS)
+        let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
+        let mut rhs = vec![1.0_f64; ndofs];
+        for &dof in &bnd {
+            a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+        }
+
+        let g_linger = fem_to_linger_csr(&g_fem);
+        let cfg = AmsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 400, verbose: false, ..SolverConfig::default() },
+            ams_cfg: Default::default(),
+        };
+        let mut x = vec![0.0_f64; ndofs];
+        let res = solve_pcg_ams(&a, &g_linger, &rhs, &mut x, &cfg).unwrap();
+        assert!(res.converged);
+
+        // Verify Ax ≈ rhs
+        let mut ax = vec![0.0_f64; ndofs];
+        a.spmv(&x, &mut ax);
+        let err: f64 = ax.iter().zip(rhs.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
+        let rhs_norm: f64 = rhs.iter().map(|b| b.powi(2)).sum::<f64>().sqrt();
+        assert!(err / rhs_norm < 1e-6, "relative residual = {}", err / rhs_norm);
+    }
+
+    #[test]
+    fn pcg_ams_iteration_count_reasonable() {
+        // AMS should converge in far fewer iterations than plain CG on H(curl)
+        let n = 6;
+        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let h1    = H1Space::new(mesh.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh.clone(), 1);
+        let ndofs = hcurl.n_dofs();
+
+        let mut a = VectorAssembler::assemble_bilinear(
+            &hcurl,
+            &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+
+        // Apply zero Dirichlet BCs symmetrically (keeps SPD for PCG+AMS)
+        let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
+        let mut rhs = vec![1.0_f64; ndofs];
+        for &dof in &bnd {
+            a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+        }
+
+        let g_linger = fem_to_linger_csr(&g_fem);
+        let cfg = AmsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 200, verbose: false, ..SolverConfig::default() },
+            ams_cfg: Default::default(),
+        };
+        let mut x = vec![0.0_f64; ndofs];
+        let res = solve_pcg_ams(&a, &g_linger, &rhs, &mut x, &cfg).unwrap();
+        assert!(res.converged, "PCG+AMS did not converge");
+        // AMS should be efficient — converge in at most 100 iterations for this small problem
+        assert!(res.iterations <= 100, "PCG+AMS took {} iters (expected ≤100)", res.iterations);
+    }
+
+    // ── ADS: H(div) mass on 3-D unit cube ─────────────────────────────────────
+
+    #[test]
+    fn pcg_ads_hdiv_3d_converges() {
+        use fem_space::constraints::boundary_dofs_hdiv;
+        use fem_space::HDivSpace;
+
+        let n = 2usize;
+        let mesh3 = SimplexMesh::<3>::unit_cube_tet(n);
+        let h1    = H1Space::new(mesh3.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh3.clone(), 1);
+        let hdiv  = HDivSpace::new(mesh3.clone(), 0);
+        let ndofs_hdiv = hdiv.n_dofs();
+
+        // H(div) mass matrix (SPD)
+        let mut a_hdiv = VectorAssembler::assemble_bilinear(
+            &hdiv,
+            &[&VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+
+        // Discrete curl C: HCurl -> HDiv and gradient G: H1 -> HCurl
+        let c_fem = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv)
+            .expect("curl_3d assembly failed");
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl)
+            .expect("gradient assembly failed");
+
+        // Apply zero normal-flux BCs on all boundary faces
+        let bnd_hdiv = boundary_dofs_hdiv(hdiv.mesh(), &hdiv, &[1, 2, 3, 4, 5, 6]);
+        let vals_hdiv = vec![0.0_f64; bnd_hdiv.len()];
+        let mut rhs = vec![1.0_f64; ndofs_hdiv];
+        apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
+
+        let c_linger = fem_to_linger_csr(&c_fem);
+        let g_linger = fem_to_linger_csr(&g_fem);
+        let cfg = AdsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 400, verbose: false, ..SolverConfig::default() },
+            ads_cfg: Default::default(),
+        };
+        let mut x = vec![0.0_f64; ndofs_hdiv];
+        let res = solve_pcg_ads(&a_hdiv, &c_linger, &g_linger, &rhs, &mut x, &cfg)
+            .expect("PCG+ADS returned error");
+        assert!(res.converged, "PCG+ADS did not converge in {} iters", res.iterations);
+        assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
+    }
+
+    #[test]
+    fn gmres_ads_hdiv_3d_converges() {
+        use fem_space::constraints::boundary_dofs_hdiv;
+        use fem_space::HDivSpace;
+
+        let n = 2usize;
+        let mesh3 = SimplexMesh::<3>::unit_cube_tet(n);
+        let h1    = H1Space::new(mesh3.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh3.clone(), 1);
+        let hdiv  = HDivSpace::new(mesh3.clone(), 0);
+        let ndofs_hdiv = hdiv.n_dofs();
+
+        let mut a_hdiv = VectorAssembler::assemble_bilinear(
+            &hdiv,
+            &[&VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let c_fem = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+
+        let bnd_hdiv = boundary_dofs_hdiv(hdiv.mesh(), &hdiv, &[1, 2, 3, 4, 5, 6]);
+        let vals_hdiv = vec![0.0_f64; bnd_hdiv.len()];
+        let mut rhs = vec![1.0_f64; ndofs_hdiv];
+        apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
+
+        let c_linger = fem_to_linger_csr(&c_fem);
+        let g_linger = fem_to_linger_csr(&g_fem);
+        let cfg = AdsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 400, verbose: false, ..SolverConfig::default() },
+            ads_cfg: Default::default(),
+        };
+        let mut x = vec![0.0_f64; ndofs_hdiv];
+        let res = solve_gmres_ads(&a_hdiv, &c_linger, &g_linger, &rhs, &mut x, 30, &cfg)
+            .expect("GMRES+ADS returned error");
+        assert!(res.converged, "GMRES+ADS did not converge in {} iters", res.iterations);
+        assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
+    }
+
+    #[test]
+    fn pcg_ads_solution_satisfies_ax_eq_b() {
+        use fem_space::constraints::boundary_dofs_hdiv;
+        use fem_space::HDivSpace;
+
+        let n = 2usize;
+        let mesh3 = SimplexMesh::<3>::unit_cube_tet(n);
+        let h1    = H1Space::new(mesh3.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh3.clone(), 1);
+        let hdiv  = HDivSpace::new(mesh3.clone(), 0);
+        let ndofs_hdiv = hdiv.n_dofs();
+
+        let mut a_hdiv = VectorAssembler::assemble_bilinear(
+            &hdiv,
+            &[&VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let c_fem = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+
+        let bnd_hdiv = boundary_dofs_hdiv(hdiv.mesh(), &hdiv, &[1, 2, 3, 4, 5, 6]);
+        let vals_hdiv = vec![0.0_f64; bnd_hdiv.len()];
+        let mut rhs = vec![1.0_f64; ndofs_hdiv];
+        apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
+
+        let c_linger = fem_to_linger_csr(&c_fem);
+        let g_linger = fem_to_linger_csr(&g_fem);
+        let cfg = AdsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() },
+            ads_cfg: Default::default(),
+        };
+        let mut x = vec![0.0_f64; ndofs_hdiv];
+        let res = solve_pcg_ads(&a_hdiv, &c_linger, &g_linger, &rhs, &mut x, &cfg).unwrap();
+        assert!(res.converged);
+
+        // Verify Ax ≈ rhs
+        let mut ax = vec![0.0_f64; ndofs_hdiv];
+        a_hdiv.spmv(&x, &mut ax);
+        let err: f64 = ax.iter().zip(rhs.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
+        let rhs_norm: f64 = rhs.iter().map(|b| b.powi(2)).sum::<f64>().sqrt();
+        assert!(err / rhs_norm < 1e-6, "relative residual = {}", err / rhs_norm);
     }
 }

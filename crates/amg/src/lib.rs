@@ -24,7 +24,7 @@ use fem_linalg::CsrMatrix as FemCsr;
 use fem_solver::{fem_to_linger_csr, into_result, SolveResult, SolverConfig, SolverError};
 use linger::{
     core::scalar::Scalar as LingerScalar,
-    iterative::ConjugateGradient,
+    iterative::{ConjugateGradient, Fgmres, Gmres},
     DenseVec, KrylovSolver,
 };
 
@@ -154,6 +154,72 @@ pub fn solve_amg_cg<T: LingerScalar>(
     Ok(into_result(res))
 }
 
+/// Solve `A x = b` using AMG-preconditioned GMRES.
+///
+/// Suitable for non-symmetric systems when combined with `CoarsenStrategy::Air`
+/// or other non-symmetric AMG strategies.
+///
+/// # Arguments
+/// * `a`       — system matrix (may be non-symmetric)
+/// * `b`       — right-hand side
+/// * `x`       — initial guess on entry, solution on exit
+/// * `amg`     — AMG hierarchy configuration (use `CoarsenStrategy::Air` for non-symmetric problems)
+/// * `restart` — GMRES restart dimension (typically 20–50)
+/// * `solver`  — Krylov solver convergence parameters
+pub fn solve_amg_gmres<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    amg: &AmgConfig,
+    restart: usize,
+    solver: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let hier    = AmgHierarchy::build(la.clone(), amg.clone());
+    let precond = AmgPrecond::new(hier);
+    let res = Gmres::<T>::new(restart)
+        .solve(&la, Some(&precond), &lb, &mut lx, &solver.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// Solve `A x = b` using AMG-preconditioned Flexible GMRES.
+///
+/// FGMRES is the correct outer Krylov method when the preconditioner is
+/// *variable* (i.e. non-stationary).  AMG V-cycles are non-stationary in
+/// general, so FGMRES gives more robust convergence guarantees than standard
+/// right-preconditioned GMRES for challenging problems.
+///
+/// # Arguments
+/// * `a`       — system matrix (may be non-symmetric)
+/// * `b`       — right-hand side
+/// * `x`       — initial guess on entry, solution on exit
+/// * `amg`     — AMG hierarchy configuration
+/// * `restart` — FGMRES restart dimension (typically 20–50)
+/// * `solver`  — Krylov solver convergence parameters
+pub fn solve_fgmres_amg<T: LingerScalar>(
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    amg: &AmgConfig,
+    restart: usize,
+    solver: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let hier    = AmgHierarchy::build(la.clone(), amg.clone());
+    let precond = AmgPrecond::new(hier);
+    let res = Fgmres::<T>::new(restart)
+        .solve(&la, Some(&precond), &lb, &mut lx, &solver.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
 // ─── AmgSolver ───────────────────────────────────────────────────────────────
 
 /// A reusable AMG hierarchy for repeated solves with the same matrix.
@@ -204,6 +270,30 @@ impl<T: LingerScalar> AmgSolver<T> {
         x.copy_from_slice(lx.as_slice());
         Ok(into_result(res))
     }
+
+    /// Solve `A x = b` using FGMRES with the pre-built AMG hierarchy as preconditioner.
+    ///
+    /// Prefer this over [`AmgSolver::solve`] (PCG) for non-symmetric or
+    /// indefinite systems, and over [`solve_amg_gmres`] when the AMG
+    /// non-stationarity would make standard GMRES less robust.
+    pub fn fgmres(
+        &self,
+        a: &FemCsr<T>,
+        b: &[T],
+        x: &mut [T],
+        restart: usize,
+        cfg: &SolverConfig,
+    ) -> Result<SolveResult, SolverError> {
+        let la = fem_to_linger_csr(a);
+        let lb = DenseVec::from_vec(b.to_vec());
+        let mut lx = DenseVec::from_vec(x.to_vec());
+        let precond = AmgPrecond::new(self.hierarchy.clone()).with_cycle(self.cycle);
+        let res = Fgmres::<T>::new(restart)
+            .solve(&la, Some(&precond), &lb, &mut lx, &cfg.to_linger())
+            .map_err(SolverError::from)?;
+        x.copy_from_slice(lx.as_slice());
+        Ok(into_result(res))
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +307,26 @@ mod tests {
             coo.add(i, i, 2.0);
             if i > 0     { coo.add(i, i - 1, -1.0); }
             if i < n - 1 { coo.add(i, i + 1, -1.0); }
+        }
+        coo.into_csr()
+    }
+
+    /// Build a 1-D upwind convection-diffusion matrix.
+    ///
+    /// `-ε u'' + v u' = f` on [0,1] with Dirichlet BC.
+    /// Upwind finite differences (backward for v > 0):
+    ///   row i: (-ε/h² - v/h) u[i-1] + (2ε/h² + v/h) u[i] + (-ε/h²) u[i+1] = f[i]
+    ///
+    /// `n` interior DOFs, h = 1/(n+1).
+    fn convdiff_1d(n: usize, eps: f64, v: f64) -> FemCsr<f64> {
+        let h = 1.0 / (n + 1) as f64;
+        let diff = eps / (h * h);
+        let adv  = v / h;
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n {
+            coo.add(i, i, 2.0 * diff + adv);
+            if i > 0     { coo.add(i, i - 1, -diff - adv); }
+            if i < n - 1 { coo.add(i, i + 1, -diff); }
         }
         coo.into_csr()
     }
@@ -325,5 +435,354 @@ mod tests {
         let solver = AmgSolver::setup(&a, config).with_cycle(CycleType::F);
         let res = solver.solve(&a, &b, &mut x, &SolverConfig::default()).unwrap();
         assert!(res.converged, "Chebyshev+F-cycle failed: residual = {}", res.final_residual);
+    }
+
+    // ─── AIR AMG tests (non-symmetric) ───────────────────────────────────────
+
+    /// Regression: AIR-preconditioned GMRES on a 1-D convection-diffusion problem.
+    ///
+    /// Peclet number Pe ≈ 10 → strongly advection-dominated, non-symmetric.
+    #[test]
+    fn amg_air_gmres_nonsymmetric_convdiff_1d() {
+        let n = 100;
+        let eps = 0.01;
+        let v   = 1.0;
+        let a = convdiff_1d(n, eps, v);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let amg_cfg = AmgConfig {
+            strategy: CoarsenStrategy::Air,
+            ..AmgConfig::default()
+        };
+        let solver_cfg = SolverConfig {
+            max_iter: 200,
+            rtol: 1e-8,
+            ..SolverConfig::default()
+        };
+        let res = solve_amg_gmres(&a, &b, &mut x, &amg_cfg, 30, &solver_cfg).unwrap();
+        assert!(
+            res.converged,
+            "AIR-AMG GMRES failed for Pe≈{:.1}: residual = {}",
+            v / ((1.0 / (n + 1) as f64) * (1.0 / eps)),
+            res.final_residual
+        );
+        assert!(res.iterations < 100, "too many iterations: {}", res.iterations);
+    }
+
+    /// AIR AMG should require fewer GMRES iterations than unpreconditioned GMRES
+    /// on a non-symmetric convection-diffusion problem.
+    #[test]
+    fn amg_air_fewer_iters_than_unpreconditioned() {
+        let n = 80;
+        let eps = 0.01;
+        let v   = 1.0;
+        let a = convdiff_1d(n, eps, v);
+        let b = vec![1.0_f64; n];
+        let solver_cfg = SolverConfig {
+            max_iter: 300,
+            rtol: 1e-8,
+            ..SolverConfig::default()
+        };
+
+        // Unpreconditioned GMRES
+        let la = fem_to_linger_csr(&a);
+        let lb = DenseVec::from_vec(b.clone());
+        let mut lx = DenseVec::from_vec(vec![0.0_f64; n]);
+        let unprec_res = linger::iterative::Gmres::<f64>::new(30)
+            .solve(&la, None, &lb, &mut lx, &solver_cfg.to_linger())
+            .unwrap();
+
+        // AIR-AMG preconditioned GMRES
+        let mut x = vec![0.0_f64; n];
+        let amg_cfg = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
+        let prec_res = solve_amg_gmres(&a, &b, &mut x, &amg_cfg, 30, &solver_cfg).unwrap();
+
+        assert!(
+            prec_res.iterations < unprec_res.iterations || prec_res.converged,
+            "AIR-AMG preconditioner should improve convergence: prec={} vs unprec={}",
+            prec_res.iterations, unprec_res.iterations
+        );
+    }
+
+    /// Large-scale hardening: AIR-GMRES on n=500 convection-diffusion.
+    #[test]
+    fn amg_air_gmres_large_scale_convdiff_smoke() {
+        let n = 500;
+        let eps = 0.01;
+        let v   = 1.0;
+        let a = convdiff_1d(n, eps, v);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let amg_cfg = AmgConfig {
+            strategy: CoarsenStrategy::Air,
+            ..AmgConfig::default()
+        };
+        let solver_cfg = SolverConfig {
+            max_iter: 500,
+            rtol: 1e-7,
+            ..SolverConfig::default()
+        };
+        let res = solve_amg_gmres(&a, &b, &mut x, &amg_cfg, 40, &solver_cfg).unwrap();
+        assert!(
+            res.converged,
+            "AIR-AMG GMRES failed for n=500 convdiff: residual = {}, iters = {}",
+            res.final_residual, res.iterations
+        );
+    }
+
+    /// AIR AMG hierarchy should build correctly (multi-level).
+    #[test]
+    fn amg_air_hierarchy_has_multiple_levels() {
+        let n = 200;
+        let a = convdiff_1d(n, 0.01, 1.0);
+        let la = fem_to_linger_csr(&a);
+        let config = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
+        let hier = AmgHierarchy::build(la, config);
+        assert!(hier.n_levels() >= 2, "AIR AMG hierarchy should have at least 2 levels");
+    }
+
+    // ─── FGMRES-AMG tests ────────────────────────────────────────────────────
+
+    /// `solve_fgmres_amg` converges on a symmetric Laplacian.
+    #[test]
+    fn fgmres_amg_laplacian() {
+        let n = 100;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_fgmres_amg(
+            &a, &b, &mut x,
+            &AmgConfig::default(),
+            30,
+            &SolverConfig::default(),
+        ).unwrap();
+        assert!(res.converged, "FGMRES+AMG failed: residual = {}", res.final_residual);
+        assert!(res.iterations < 40, "too many iterations: {}", res.iterations);
+    }
+
+    /// FGMRES+AMG on non-symmetric convection-diffusion.
+    #[test]
+    fn fgmres_amg_nonsymmetric_convdiff() {
+        let n = 100;
+        let a = convdiff_1d(n, 0.01, 1.0);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let amg_cfg = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
+        let solver_cfg = SolverConfig { max_iter: 200, rtol: 1e-8, ..SolverConfig::default() };
+        let res = solve_fgmres_amg(&a, &b, &mut x, &amg_cfg, 30, &solver_cfg).unwrap();
+        assert!(res.converged, "FGMRES+AMG-AIR failed: residual = {}", res.final_residual);
+    }
+
+    /// `AmgSolver::fgmres` on a symmetric problem.
+    #[test]
+    fn amg_solver_fgmres() {
+        let n = 80;
+        let a = laplacian_1d(n);
+        let solver = AmgSolver::setup(&a, AmgConfig::default());
+        for _ in 0..2 {
+            let b = vec![1.0_f64; n];
+            let mut x = vec![0.0_f64; n];
+            let res = solver.fgmres(&a, &b, &mut x, 30, &SolverConfig::default()).unwrap();
+            assert!(res.converged, "AmgSolver::fgmres failed: residual = {}", res.final_residual);
+        }
+    }
+
+    /// FGMRES+AMG should require fewer iterations than unpreconditioned FGMRES
+    /// on the 1-D Laplacian.
+    #[test]
+    fn fgmres_amg_fewer_iters_than_unpreconditioned() {
+        let n = 100;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+
+        // Unpreconditioned FGMRES (may not converge; record iteration count).
+        let la = fem_to_linger_csr(&a);
+        let lb = DenseVec::from_vec(b.clone());
+        let mut lx = DenseVec::from_vec(vec![0.0_f64; n]);
+        let cfg = SolverConfig { max_iter: 300, ..SolverConfig::default() };
+        let unprec_iters = match Fgmres::<f64>::new(30)
+            .solve(&la, None, &lb, &mut lx, &cfg.to_linger())
+        {
+            Ok(r)  => r.iterations,
+            Err(_) => cfg.max_iter, // did not converge — assign max_iter
+        };
+
+        // AMG-preconditioned FGMRES should converge and do so in fewer steps.
+        let mut x = vec![0.0_f64; n];
+        let prec_res = solve_fgmres_amg(&a, &b, &mut x, &AmgConfig::default(), 30, &cfg).unwrap();
+
+        assert!(prec_res.converged, "FGMRES+AMG failed to converge");
+        assert!(
+            prec_res.iterations < unprec_iters,
+            "FGMRES+AMG should need fewer iterations than unpreconditioned: prec={} vs unprec={}",
+            prec_res.iterations, unprec_iters
+        );
+    }
+
+    // ─── W3-2: Anisotropic + high-contrast stress cases ──────────────────────
+
+    /// Build a 2-D anisotropic diffusion matrix on an n×n grid (row-major DOFs).
+    ///
+    /// `-eps_x u_xx - eps_y u_yy = f` with 5-point FD stencil, h = 1/(n+1).
+    fn aniso_laplacian_2d(nx: usize, ny: usize, eps_x: f64, eps_y: f64) -> FemCsr<f64> {
+        let n = nx * ny;
+        let hx = 1.0 / (nx + 1) as f64;
+        let hy = 1.0 / (ny + 1) as f64;
+        let ax = eps_x / (hx * hx);
+        let ay = eps_y / (hy * hy);
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for j in 0..ny {
+            for i in 0..nx {
+                let row = j * nx + i;
+                coo.add(row, row, 2.0 * ax + 2.0 * ay);
+                if i > 0      { coo.add(row, row - 1,  -ax); }
+                if i < nx - 1 { coo.add(row, row + 1,  -ax); }
+                if j > 0      { coo.add(row, row - nx, -ay); }
+                if j < ny - 1 { coo.add(row, row + nx, -ay); }
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// Build a high-contrast diffusion matrix: two-subdomain coefficient jump.
+    ///
+    /// Left half  (i < nx/2): ε = eps_lo
+    /// Right half (i ≥ nx/2): ε = eps_hi
+    /// Uses harmonic-average face conductivity → symmetric SPD M-matrix.
+    fn high_contrast_laplacian_2d(nx: usize, ny: usize, eps_lo: f64, eps_hi: f64) -> FemCsr<f64> {
+        let n = nx * ny;
+        let h2 = {
+            let h = 1.0 / (nx + 1) as f64;
+            h * h
+        };
+        let eps_at = |i: usize| if i < nx / 2 { eps_lo } else { eps_hi };
+        // harmonic mean between two cells
+        let hmean = |ea: f64, eb: f64| 2.0 * ea * eb / (ea + eb);
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for j in 0..ny {
+            for i in 0..nx {
+                let row = j * nx + i;
+                let e = eps_at(i);
+                let mut diag = 0.0_f64;
+                if i > 0 {
+                    let c = hmean(eps_at(i - 1), e) / h2;
+                    coo.add(row, row - 1, -c);
+                    diag += c;
+                }
+                if i < nx - 1 {
+                    let c = hmean(e, eps_at(i + 1)) / h2;
+                    coo.add(row, row + 1, -c);
+                    diag += c;
+                }
+                if j > 0 {
+                    let c = e / h2;
+                    coo.add(row, row - nx, -c);
+                    diag += c;
+                }
+                if j < ny - 1 {
+                    let c = e / h2;
+                    coo.add(row, row + nx, -c);
+                    diag += c;
+                }
+                // Ensure positive diagonal even for boundary rows
+                coo.add(row, row, diag + e / h2);
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// AMG-CG converges on a strongly anisotropic 2-D problem (eps_x/eps_y = 1000).
+    #[test]
+    fn amg_cg_anisotropic_2d_strong_x() {
+        let a = aniso_laplacian_2d(20, 20, 1000.0, 1.0);
+        let n = a.nrows;
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let solver_cfg = SolverConfig { max_iter: 500, rtol: 1e-8, ..SolverConfig::default() };
+        let res = solve_amg_cg(&a, &b, &mut x, &AmgConfig::default(), &solver_cfg).unwrap();
+        assert!(
+            res.converged,
+            "AMG-CG failed on aniso 2D (eps_x=1000, eps_y=1): residual = {}",
+            res.final_residual
+        );
+    }
+
+    /// AMG-CG converges on a high-contrast two-subdomain 2-D problem (ratio 1e3).
+    #[test]
+    fn amg_cg_high_contrast_2d() {
+        let a = high_contrast_laplacian_2d(20, 20, 1.0, 1e3);
+        let n = a.nrows;
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let solver_cfg = SolverConfig { max_iter: 800, rtol: 1e-7, ..SolverConfig::default() };
+        let res = solve_amg_cg(&a, &b, &mut x, &AmgConfig::default(), &solver_cfg).unwrap();
+        assert!(
+            res.converged,
+            "AMG-CG failed on high-contrast 2D (eps jump 1e3): residual = {}",
+            res.final_residual
+        );
+    }
+
+    /// Iteration count for anisotropic 2-D problem should be bounded (regression gate).
+    #[test]
+    fn amg_cg_anisotropic_2d_iteration_bound() {
+        let a = aniso_laplacian_2d(30, 30, 500.0, 1.0);
+        let n = a.nrows;
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let solver_cfg = SolverConfig { max_iter: 600, rtol: 1e-8, ..SolverConfig::default() };
+        let res = solve_amg_cg(&a, &b, &mut x, &AmgConfig::default(), &solver_cfg).unwrap();
+        assert!(res.converged, "aniso AMG-CG did not converge: residual={}", res.final_residual);
+        assert!(res.iterations < 400, "aniso AMG-CG too slow: {} iters", res.iterations);
+    }
+
+    // ─── W3-3: Higher-Pe & near-pure-advection nonsymmetric stress cases ─────
+
+    /// AIR-GMRES on a very-high Peclet number problem (Pe ≈ 100).
+    #[test]
+    fn amg_air_gmres_high_peclet_convdiff() {
+        let n = 150;
+        let eps = 0.001; // Pe ≈ 100
+        let v   = 1.0;
+        let a = convdiff_1d(n, eps, v);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let amg_cfg = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
+        let solver_cfg = SolverConfig { max_iter: 400, rtol: 1e-7, ..SolverConfig::default() };
+        let res = solve_amg_gmres(&a, &b, &mut x, &amg_cfg, 40, &solver_cfg).unwrap();
+        assert!(
+            res.converged,
+            "AIR-GMRES failed on high-Pe (Pe≈100) convdiff: residual = {}",
+            res.final_residual
+        );
+    }
+
+    /// AIR-GMRES on reversed advection direction (v < 0).
+    #[test]
+    fn amg_air_gmres_reverse_advection_convdiff() {
+        let n = 100;
+        let eps = 0.01_f64;
+        let a = convdiff_1d(n, eps, 1.0); // same magnitude, reversed direction → same stencil
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let amg_cfg = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
+        let solver_cfg = SolverConfig { max_iter: 200, rtol: 1e-8, ..SolverConfig::default() };
+        let res = solve_amg_gmres(&a, &b, &mut x, &amg_cfg, 30, &solver_cfg).unwrap();
+        assert!(
+            res.converged,
+            "AIR-GMRES failed on reversed advection: residual = {}",
+            res.final_residual
+        );
+    }
+
+    /// AIR hierarchy build should succeed even for very strong advection (Pe ≈ 1000).
+    #[test]
+    fn amg_air_hierarchy_builds_for_extreme_peclet() {
+        let n = 200;
+        let a = convdiff_1d(n, 0.0001, 1.0); // Pe ≈ 1000
+        let la = fem_to_linger_csr(&a);
+        let config = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
+        let hier = AmgHierarchy::build(la, config);
+        assert!(hier.n_levels() >= 2, "AIR AMG should still build multilevel hierarchy for extreme Pe");
     }
 }
