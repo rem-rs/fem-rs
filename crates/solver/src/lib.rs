@@ -13,6 +13,11 @@
 //! - [`solve_gmres`]       — GMRES (non-symmetric systems)
 //! - [`solve_gmres_jacobi`] — GMRES with Jacobi preconditioner
 //! - [`solve_gmres_ilu0`]   — GMRES with ILU(0) preconditioner
+//! - [`solve_gmres_iluk`]   — GMRES with ILU(k) preconditioner
+//! - [`solve_gmres_ilut`]   — GMRES with ILUT preconditioner
+//! - [`solve_pcg_iluk`]     — PCG with ILU(k) preconditioner
+//! - [`solve_fgmres_ilut`]  — FGMRES with ILUT preconditioner
+//! - [`solve_precond_kind`] — unified ILU-family dispatcher via [`PrecondKind`]
 //! - [`solve_bicgstab`]    — BiCGSTAB
 //! - [`solve_idrs`]        — IDR(s) (non-symmetric, short-recurrence)
 //! - [`solve_tfqmr`]       — TFQMR (Transpose-Free QMR)
@@ -48,6 +53,7 @@ use linger::{
     DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner,
     SolverParams, VerboseLevel,
 };
+use linger::precond::{IlukPrecond, IlutPrecond};
 
 /// Re-export of linger's [`Preconditioner`] trait.
 ///
@@ -957,6 +963,170 @@ pub fn solve_gmres_ildlt<T: LingerScalar>(
     Ok(into_result(res))
 }
 
+// ─── ILU family (Phase 6) ────────────────────────────────────────────────────
+
+/// ILU family preconditioner selector.
+///
+/// Pass one of these variants to [`solve_precond_kind`] to choose the
+/// incomplete-factorisation strategy without changing the calling code.
+///
+/// | Variant | Fill strategy | Typical use |
+/// |---------|---------------|-------------|
+/// | `Ilu0`  | Sparsity of `A` | Cheap, SPD or diagonally dominant |
+/// | `Iluk(k)` | Level-of-fill ≤ k | Better quality for moderate fill |
+/// | `Ilut { tau, fill }` | Drop tolerance + fill bound | Non-symmetric, harder systems |
+#[derive(Debug, Clone)]
+pub enum PrecondKind {
+    /// ILU(0): no extra fill (fastest build, lowest quality).
+    Ilu0,
+    /// ILU(k): allow fill-in entries up to level `k`.
+    /// `k = 0` equals ILU(0); larger `k` approaches exact LU.
+    Iluk(usize),
+    /// ILUT(τ, p): drop entries smaller than `tau × ‖row‖₂`;
+    /// keep at most `fill` off-diagonal entries per row in L and U.
+    Ilut {
+        /// Relative drop tolerance (e.g. `0.01`).
+        tau:  f64,
+        /// Max off-diagonal fill per row in each factor.
+        fill: usize,
+    },
+}
+
+impl Default for PrecondKind {
+    fn default() -> Self { PrecondKind::Ilu0 }
+}
+
+/// GMRES with ILU(k) preconditioner.
+///
+/// `fill_level = 0` reproduces ILU(0); increase for harder problems.
+pub fn solve_gmres_iluk<T: LingerScalar>(
+    a:          &FemCsr<T>,
+    b:          &[T],
+    x:          &mut [T],
+    restart:    usize,
+    fill_level: usize,
+    cfg:        &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = IlukPrecond::from_csr(&la, fill_level)
+        .map_err(|e| SolverError::Linger(e.to_string()))?;
+    let solver = Gmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// GMRES with ILUT(τ, p) preconditioner.
+///
+/// * `tau`    — relative drop tolerance (0.0 = keep all, 0.01 = aggressive)
+/// * `p_fill` — max off-diagonal fill per row in L and U
+pub fn solve_gmres_ilut<T: LingerScalar>(
+    a:      &FemCsr<T>,
+    b:      &[T],
+    x:      &mut [T],
+    restart: usize,
+    tau:    f64,
+    p_fill: usize,
+    cfg:    &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = IlutPrecond::from_csr(&la, tau, p_fill)
+        .map_err(|e| SolverError::Linger(e.to_string()))?;
+    let solver = Gmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// PCG with ILU(k) preconditioner (symmetric positive definite systems).
+///
+/// `fill_level = 0` reproduces `solve_pcg_ilu0`.
+pub fn solve_pcg_iluk<T: LingerScalar>(
+    a:          &FemCsr<T>,
+    b:          &[T],
+    x:          &mut [T],
+    fill_level: usize,
+    cfg:        &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = IlukPrecond::from_csr(&la, fill_level)
+        .map_err(|e| SolverError::Linger(e.to_string()))?;
+    let res = ConjugateGradient::<T>::default()
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// Flexible GMRES (FGMRES) with ILUT preconditioner.
+///
+/// FGMRES tolerates a variable preconditioner; useful when the inner ILUT
+/// solve is itself iterative or when the preconditioner changes between steps.
+pub fn solve_fgmres_ilut<T: LingerScalar>(
+    a:      &FemCsr<T>,
+    b:      &[T],
+    x:      &mut [T],
+    restart: usize,
+    tau:    f64,
+    p_fill: usize,
+    cfg:    &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linger_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = IlutPrecond::from_csr(&la, tau, p_fill)
+        .map_err(|e| SolverError::Linger(e.to_string()))?;
+    let solver = Fgmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linger())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
+/// Unified ILU-family GMRES dispatcher.
+///
+/// Selects the preconditioner at runtime from a [`PrecondKind`] value.
+/// Useful when the choice of preconditioner should be a configuration
+/// parameter rather than a compile-time decision.
+///
+/// # Example
+/// ```rust,ignore
+/// use fem_solver::{solve_precond_kind, PrecondKind, SolverConfig};
+///
+/// let res = solve_precond_kind(&a, &b, &mut x, 30,
+///     PrecondKind::Ilut { tau: 0.01, fill: 20 },
+///     &SolverConfig::default())?;
+/// ```
+pub fn solve_precond_kind<T: LingerScalar>(
+    a:       &FemCsr<T>,
+    b:       &[T],
+    x:       &mut [T],
+    restart: usize,
+    kind:    PrecondKind,
+    cfg:     &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    match kind {
+        PrecondKind::Ilu0             => solve_gmres_ilu0(a, b, x, restart, cfg),
+        PrecondKind::Iluk(k)          => solve_gmres_iluk(a, b, x, restart, k, cfg),
+        PrecondKind::Ilut { tau, fill } => solve_gmres_ilut(a, b, x, restart, tau, fill, cfg),
+    }
+}
+
 // ─── IDR(s) ──────────────────────────────────────────────────────────────────
 
 /// IDR(s) — Induced Dimension Reduction for non-symmetric systems.
@@ -1520,6 +1690,149 @@ mod tests {
         let prec = IldltPrecond::from_csr(&la).unwrap();
         let res = solve_fgmres_precond(&a, &b, &mut x, 30, &prec, &SolverConfig::default()).unwrap();
         assert!(res.converged, "generic FGMRES+ILDLt failed: residual={}", res.final_residual);
+    }
+
+    // ── Phase 6: ILU(k) / ILUT tests ─────────────────────────────────────────
+
+    #[test]
+    fn solve_gmres_iluk0_equals_ilu0() {
+        // ILU(0) and ILU(k=0) should give the same iteration count on a
+        // symmetric tridiagonal (fill level 0 = no extra fill = ILU0).
+        let n = 50;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x0 = vec![0.0_f64; n];
+        let mut xk = vec![0.0_f64; n];
+        let cfg = SolverConfig::default();
+        let r0 = solve_gmres_ilu0(&a, &b, &mut x0, 30, &cfg).unwrap();
+        let rk = solve_gmres_iluk(&a, &b, &mut xk, 30, 0, &cfg).unwrap();
+        assert!(r0.converged, "ILU0 did not converge");
+        assert!(rk.converged, "ILU(k=0) did not converge");
+    }
+
+    #[test]
+    fn solve_gmres_iluk1_converges() {
+        let n = 60;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_gmres_iluk(&a, &b, &mut x, 30, 1, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "GMRES+ILU(1) failed: res={}", res.final_residual);
+    }
+
+    #[test]
+    fn solve_gmres_iluk2_fewer_iters_than_ilu0() {
+        // ILU(2) should need no more iterations than ILU(0) on Laplacian.
+        let n = 80;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x0 = vec![0.0_f64; n];
+        let mut x2 = vec![0.0_f64; n];
+        let cfg = SolverConfig { rtol: 1e-10, max_iter: 2000, ..Default::default() };
+        let r0 = solve_gmres_ilu0(&a, &b, &mut x0, 30, &cfg).unwrap();
+        let r2 = solve_gmres_iluk(&a, &b, &mut x2, 30, 2, &cfg).unwrap();
+        assert!(r0.converged && r2.converged);
+        assert!(r2.iterations <= r0.iterations,
+            "ILU(2) used more iterations ({}) than ILU(0) ({})",
+            r2.iterations, r0.iterations);
+    }
+
+    #[test]
+    fn solve_gmres_ilut_converges_spd() {
+        let n = 60;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_gmres_ilut(&a, &b, &mut x, 30, 0.01, 10, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "GMRES+ILUT failed: res={}", res.final_residual);
+    }
+
+    #[test]
+    fn solve_gmres_ilut_nonsym_converges() {
+        // Non-symmetric banded: A[i,i]=3, A[i,i-1]=-1, A[i,i+1]=-2.
+        let n = 50;
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n {
+            coo.add(i, i, 3.0_f64);
+            if i > 0     { coo.add(i, i - 1, -1.0); }
+            if i + 1 < n { coo.add(i, i + 1, -2.0); }
+        }
+        let a = coo.into_csr();
+        let b: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+        let mut x = vec![0.0_f64; n];
+        let res = solve_gmres_ilut(&a, &b, &mut x, 30, 1e-3, 15, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "GMRES+ILUT (nonsym) failed: res={}", res.final_residual);
+    }
+
+    #[test]
+    fn solve_pcg_iluk_converges() {
+        let n = 60;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_pcg_iluk(&a, &b, &mut x, 1, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "PCG+ILU(1) failed: res={}", res.final_residual);
+    }
+
+    #[test]
+    fn solve_fgmres_ilut_converges() {
+        let n = 60;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_fgmres_ilut(&a, &b, &mut x, 30, 0.01, 10, &SolverConfig::default()).unwrap();
+        assert!(res.converged, "FGMRES+ILUT failed: res={}", res.final_residual);
+    }
+
+    #[test]
+    fn solve_precond_kind_ilu0_matches_direct() {
+        let n = 40;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x1 = vec![0.0_f64; n];
+        let mut x2 = vec![0.0_f64; n];
+        let cfg = SolverConfig::default();
+        solve_gmres_ilu0(&a, &b, &mut x1, 30, &cfg).unwrap();
+        solve_precond_kind(&a, &b, &mut x2, 30, PrecondKind::Ilu0, &cfg).unwrap();
+        for i in 0..n {
+            assert!((x1[i] - x2[i]).abs() < 1e-12, "node {i} differs");
+        }
+    }
+
+    #[test]
+    fn solve_precond_kind_iluk_converges() {
+        let n = 40;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let res = solve_precond_kind(&a, &b, &mut x, 30, PrecondKind::Iluk(1), &SolverConfig::default()).unwrap();
+        assert!(res.converged);
+    }
+
+    #[test]
+    fn solve_precond_kind_ilut_converges() {
+        let n = 40;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut x = vec![0.0_f64; n];
+        let kind = PrecondKind::Ilut { tau: 0.01, fill: 10 };
+        let res = solve_precond_kind(&a, &b, &mut x, 30, kind, &SolverConfig::default()).unwrap();
+        assert!(res.converged);
+    }
+
+    #[test]
+    fn ilut_solution_matches_iluk_on_spd() {
+        // Both ILUT and ILU(k) should give the same (correct) solution on SPD.
+        let n = 30;
+        let a = laplacian_1d(n);
+        let b = vec![1.0_f64; n];
+        let mut xt = vec![0.0_f64; n];
+        let mut xk = vec![0.0_f64; n];
+        solve_gmres_ilut(&a, &b, &mut xt, 30, 1e-12, 30, &SolverConfig { rtol: 1e-10, ..Default::default() }).unwrap();
+        solve_gmres_iluk(&a, &b, &mut xk, 30, 2, &SolverConfig { rtol: 1e-10, ..Default::default() }).unwrap();
+        for i in 0..n {
+            assert!((xt[i] - xk[i]).abs() < 1e-8, "node {i}: ilut={:.3e} iluk={:.3e}", xt[i], xk[i]);
+        }
     }
 
     #[test]
