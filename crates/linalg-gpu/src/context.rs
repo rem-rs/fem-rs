@@ -35,7 +35,7 @@ impl GpuContext {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or(crate::GpuError::NoAdapter)?;
+            .map_err(|_| crate::GpuError::NoAdapter)?;
 
         let adapter_features = adapter.features();
         let has_f64 = adapter_features.contains(wgpu::Features::SHADER_F64);
@@ -58,7 +58,6 @@ impl GpuContext {
                     },
                     ..Default::default()
                 },
-                None,
             )
             .await?;
 

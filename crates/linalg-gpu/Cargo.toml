@@ -7,7 +7,7 @@ edition = "2021"
 fem-core   = { path = "../core" }
 fem-linalg = { path = "../linalg" }
 bytemuck   = { workspace = true }
-wgpu       = "24"
+wgpu       = "27"
 pollster   = "0.4"
 thiserror  = "2"
 log        = { workspace = true }

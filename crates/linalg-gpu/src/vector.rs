@@ -67,7 +67,7 @@ impl<T: Scalar> GpuVector<T> {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             tx.send(r).ok();
         });
-        ctx.device.poll(wgpu::Maintain::Wait);
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().unwrap().unwrap();
 
         let data = slice.get_mapped_range();

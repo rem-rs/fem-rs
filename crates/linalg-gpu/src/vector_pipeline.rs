@@ -277,7 +277,7 @@ pub fn read_partial_reduction(ctx: &GpuContext, result_buf: &wgpu::Buffer, n_wg:
     let mapped = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     mapped.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
-    ctx.device.poll(wgpu::Maintain::Wait);
+    let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().unwrap().unwrap();
 
     let view = mapped.get_mapped_range();

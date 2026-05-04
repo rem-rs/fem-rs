@@ -57,7 +57,7 @@ fn dot_simple() {
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
-    gpu.device.poll(wgpu::Maintain::Wait);
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().unwrap().unwrap();
 
     let mapped = slice.get_mapped_range();
