@@ -37,6 +37,10 @@ use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
 use crate::interior_faces::InteriorFaceList;
+#[cfg(feature = "parallel")]
+use crate::assembler::assembly_parallel_min_elems;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 // ─── DgAssembler ─────────────────────────────────────────────────────────────
 
@@ -57,7 +61,7 @@ impl DgAssembler {
     /// - `kappa`      — diffusion coefficient (scalar, uniform).
     /// - `sigma`      — penalty parameter (dimensionless; use ≥ 3*(order+1)² for coercivity).
     /// - `quad_order` — polynomial order the quadrature integrates exactly.
-    pub fn assemble_sip<S: FESpace>(
+    pub fn assemble_sip<S: FESpace + Sync>(
         space:      &S,
         ifl:        &InteriorFaceList,
         kappa:      f64,
@@ -72,23 +76,110 @@ impl DgAssembler {
         let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
 
         // ── 1. Volume terms ────────────────────────────────────────────────────
-        assemble_volume(&mut coo, space, kappa, quad_order);
+        #[cfg(feature = "parallel")]
+        {
+            if mesh.n_elements() as usize >= assembly_parallel_min_elems() {
+                coo.append(assemble_dg_volume_parallel(space, kappa, quad_order));
+            } else {
+                assemble_volume(&mut coo, space, kappa, quad_order);
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            assemble_volume(&mut coo, space, kappa, quad_order);
+        }
 
         // ── 2. Interior face terms ─────────────────────────────────────────────
-        for iface in &ifl.faces {
-            assemble_interior_face(
-                &mut coo, mesh, space, iface.elem_left, iface.elem_right,
-                &iface.face_nodes, kappa, sigma, order, quad_order,
-            );
+        #[cfg(feature = "parallel")]
+        {
+            if ifl.faces.len() >= assembly_parallel_min_elems() {
+                let merged = ifl
+                    .faces
+                    .par_iter()
+                    .map(|iface| {
+                        let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
+                        assemble_interior_face(
+                            &mut local,
+                            mesh,
+                            space,
+                            iface.elem_left,
+                            iface.elem_right,
+                            &iface.face_nodes,
+                            kappa,
+                            sigma,
+                            order,
+                            quad_order,
+                        );
+                        local
+                    })
+                    .reduce(
+                        || CooMatrix::<f64>::new(n_dofs, n_dofs),
+                        |mut a, b| {
+                            a.append(b);
+                            a
+                        },
+                    );
+                coo.append(merged);
+            } else {
+                for iface in &ifl.faces {
+                    assemble_interior_face(
+                        &mut coo, mesh, space, iface.elem_left, iface.elem_right,
+                        &iface.face_nodes, kappa, sigma, order, quad_order,
+                    );
+                }
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for iface in &ifl.faces {
+                assemble_interior_face(
+                    &mut coo, mesh, space, iface.elem_left, iface.elem_right,
+                    &iface.face_nodes, kappa, sigma, order, quad_order,
+                );
+            }
         }
 
         // ── 3. Boundary face terms (Dirichlet) ─────────────────────────────────
         // Build face→element map (SimplexMesh::face_elements always returns (0,None)).
         let face_to_elem = build_face_elem_map(mesh, order);
-        for f in mesh.face_iter() {
-            if let Some(&elem) = face_to_elem.get(&f) {
+        let boundary_pairs: Vec<(u32, u32)> = mesh
+            .face_iter()
+            .filter_map(|f| face_to_elem.get(&f).copied().map(|e| (f, e)))
+            .collect();
+        #[cfg(feature = "parallel")]
+        {
+            if boundary_pairs.len() >= assembly_parallel_min_elems() {
+                let merged = boundary_pairs
+                    .par_iter()
+                    .copied()
+                    .map(|(f, elem)| {
+                        let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
+                        assemble_boundary_face_with_elem(
+                            &mut local, mesh, space, f, elem, kappa, sigma, order, quad_order,
+                        );
+                        local
+                    })
+                    .reduce(
+                        || CooMatrix::<f64>::new(n_dofs, n_dofs),
+                        |mut a, b| {
+                            a.append(b);
+                            a
+                        },
+                    );
+                coo.append(merged);
+            } else {
+                for (f, elem) in &boundary_pairs {
+                    assemble_boundary_face_with_elem(
+                        &mut coo, mesh, space, *f, *elem, kappa, sigma, order, quad_order,
+                    );
+                }
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for (f, elem) in &boundary_pairs {
                 assemble_boundary_face_with_elem(
-                    &mut coo, mesh, space, f, elem, kappa, sigma, order, quad_order,
+                    &mut coo, mesh, space, *f, *elem, kappa, sigma, order, quad_order,
                 );
             }
         }
@@ -99,11 +190,12 @@ impl DgAssembler {
 
 // ─── Volume contribution ──────────────────────────────────────────────────────
 
-fn assemble_volume<S: FESpace>(
-    coo:        &mut CooMatrix<f64>,
+fn accumulate_dg_volume_element<S: FESpace>(
     space:      &S,
+    e:          u32,
     kappa:      f64,
     quad_order: u8,
+    coo:        &mut CooMatrix<f64>,
 ) {
     let mesh  = space.mesh();
     let dim   = mesh.dim() as usize;
@@ -113,42 +205,77 @@ fn assemble_volume<S: FESpace>(
     let mut grad_ref = Vec::<f64>::new();
     let mut grad_p   = Vec::<f64>::new();
 
-    for e in mesh.elem_iter() {
-        let elem_type = mesh.element_type(e);
-        let re = ref_elem_vol(elem_type, order);
-        let n  = re.n_dofs();
-        let q  = re.quadrature(quad_order);
-        let gd = space.element_dofs(e).iter().map(|&d| d as usize).collect::<Vec<_>>();
-        let nodes = mesh.element_nodes(e);
-        let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-        let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
+    let elem_type = mesh.element_type(e);
+    let re = ref_elem_vol(elem_type, order);
+    let n  = re.n_dofs();
+    let q  = re.quadrature(quad_order);
+    let gd = space.element_dofs(e).iter().map(|&d| d as usize).collect::<Vec<_>>();
+    let nodes = mesh.element_nodes(e);
+    let (jac, det_j) = simplex_jac(mesh, nodes, dim);
+    let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
 
-        phi.resize(n, 0.0);
-        grad_ref.resize(n * dim, 0.0);
-        grad_p.resize(n * dim, 0.0);
+    phi.resize(n, 0.0);
+    grad_ref.resize(n * dim, 0.0);
+    grad_p.resize(n * dim, 0.0);
 
-        let _x0 = mesh.node_coords(nodes[0]);
-        let mut k_elem = vec![0.0_f64; n * n];
+    let mut k_elem = vec![0.0_f64; n * n];
 
-        for (qi, xi) in q.points.iter().enumerate() {
-            let w = q.weights[qi] * det_j.abs();
-            re.eval_grad_basis(xi, &mut grad_ref);
-            xform_grads(&j_inv_t, &grad_ref, &mut grad_p, n, dim);
-            for i in 0..n {
-                for j in 0..n {
-                    let mut dot = 0.0;
-                    for d in 0..dim { dot += grad_p[i*dim+d] * grad_p[j*dim+d]; }
-                    k_elem[i*n+j] += w * kappa * dot;
+    for (qi, xi) in q.points.iter().enumerate() {
+        let w = q.weights[qi] * det_j.abs();
+        re.eval_grad_basis(xi, &mut grad_ref);
+        xform_grads(&j_inv_t, &grad_ref, &mut grad_p, n, dim);
+        for i in 0..n {
+            for j in 0..n {
+                let mut dot = 0.0;
+                for d in 0..dim {
+                    dot += grad_p[i * dim + d] * grad_p[j * dim + d];
                 }
-            }
-        }
-
-        for (i, &gi) in gd.iter().enumerate() {
-            for (j, &gj) in gd.iter().enumerate() {
-                coo.add(gi, gj, k_elem[i * n + j]);
+                k_elem[i * n + j] += w * kappa * dot;
             }
         }
     }
+
+    for (i, &gi) in gd.iter().enumerate() {
+        for (j, &gj) in gd.iter().enumerate() {
+            coo.add(gi, gj, k_elem[i * n + j]);
+        }
+    }
+}
+
+fn assemble_volume<S: FESpace>(
+    coo:        &mut CooMatrix<f64>,
+    space:      &S,
+    kappa:      f64,
+    quad_order: u8,
+) {
+    let mesh = space.mesh();
+    for e in mesh.elem_iter() {
+        accumulate_dg_volume_element(space, e, kappa, quad_order, coo);
+    }
+}
+
+#[cfg(feature = "parallel")]
+fn assemble_dg_volume_parallel<S: FESpace>(
+    space:      &S,
+    kappa:      f64,
+    quad_order: u8,
+) -> CooMatrix<f64> {
+    let mesh = space.mesh();
+    let n_dofs = space.n_dofs();
+    mesh.elem_iter()
+        .into_par_iter()
+        .map(|e| {
+            let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
+            accumulate_dg_volume_element(space, e, kappa, quad_order, &mut local);
+            local
+        })
+        .reduce(
+            || CooMatrix::<f64>::new(n_dofs, n_dofs),
+            |mut a, b| {
+                a.append(b);
+                a
+            },
+        )
 }
 
 // ─── Interior face contribution ───────────────────────────────────────────────
@@ -546,6 +673,22 @@ mod tests {
         for i in 0..mat.nrows {
             let diag = mat.get(i, i);
             assert!(diag > 0.0, "diagonal[{i}] = {diag}");
+        }
+    }
+
+    #[test]
+    fn sip_matrix_symmetric_l2_p3() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let ifl = InteriorFaceList::build(&mesh);
+        let space = L2Space::new(mesh, 3);
+        let mat = DgAssembler::assemble_sip(&space, &ifl, 1.0, 40.0, 7);
+        let dense = mat.to_dense();
+        let n = mat.nrows;
+        for i in 0..n {
+            for j in 0..n {
+                let diff = (dense[i * n + j] - dense[j * n + i]).abs();
+                assert!(diff < 1e-9, "SIP K[{i},{j}]-K[{j},{i}] = {diff}");
+            }
         }
     }
 }

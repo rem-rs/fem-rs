@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use fem_core::types::DofId;
-use fem_element::{TetRT1, TriRT1, VectorReferenceElement};
+use fem_element::{quadrature::gauss_legendre_01, TetRT1, TriRT1, VectorReferenceElement};
 use fem_linalg::Vector;
 use fem_mesh::{topology::MeshTopology, ElementTransformation};
 
@@ -55,7 +55,7 @@ enum FaceDofMap {
 /// H(div) finite element space using Raviart-Thomas face elements.
 ///
 /// Constructed from a [`MeshTopology`] with triangular or tetrahedral elements.
-/// Currently supports order 0 (RT0).
+/// Supports order 0 (RT0), 1 (RT1), and on **2-D triangles only** order 2 (RT2).
 pub struct HDivSpace<M: MeshTopology> {
     mesh: M,
     order: u8,
@@ -70,11 +70,21 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// Construct an H(div) space of the given order on `mesh`.
     ///
     /// # Panics
-    /// - If `order > 1` (only RT0 and RT1 are currently supported).
+    /// - If `order > 2` in 2-D or `order > 1` in 3-D.
     /// - If the mesh is neither 2-D triangles nor 3-D tetrahedra.
     pub fn new(mesh: M, order: u8) -> Self {
-        assert!(order <= 1, "HDivSpace: only orders 0 (RT0) and 1 (RT1) are supported");
         let dim = mesh.dim() as usize;
+        match dim {
+            2 => assert!(
+                order <= 2,
+                "HDivSpace: 2-D supports orders 0 (RT0), 1 (RT1), and 2 (RT2)"
+            ),
+            3 => assert!(
+                order <= 1,
+                "HDivSpace: 3-D supports orders 0 (RT0) and 1 (RT1) only"
+            ),
+            _ => panic!("HDivSpace: unsupported dimension {dim}"),
+        }
         match dim {
             2 => Self::build_2d(mesh, order),
             3 => Self::build_3d(mesh, order),
@@ -85,9 +95,14 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 2-D construction ───────────────────────────────────────────────────
 
     fn build_2d(mesh: M, order: u8) -> Self {
-        // RT0: 1 DOF per edge; RT1: 2 DOFs per edge + 2 interior bubble DOFs
+        // RT0: 1 DOF per edge; RT1: 2 edge + 2 interior; RT2: 3 edge + 6 interior.
         let dofs_per_face = (order as usize) + 1;
-        let interior_dofs = if order == 0 { 0 } else { 2 };
+        let interior_dofs = match order {
+            0 => 0,
+            1 => 2,
+            2 => 6,
+            _ => unreachable!(),
+        };
         let dofs_per_elem = TRI_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
@@ -108,12 +123,16 @@ impl<M: MeshTopology> HDivSpace<M> {
                     dofs_flat.push(dof);
                     signs_flat.push(sign);
                 } else {
-                    // RT1: 2 DOFs per edge (first and second normal moments)
-                    let first = *edge_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=2; d });
-                    dofs_flat.push(first);
-                    dofs_flat.push(first + 1);
-                    signs_flat.push(sign);
-                    signs_flat.push(sign);
+                    let nd = dofs_per_face as u32;
+                    let first = *edge_map.entry(key).or_insert_with(|| {
+                        let d = next_dof;
+                        next_dof += nd;
+                        d
+                    });
+                    for k in 0..dofs_per_face {
+                        dofs_flat.push(first + k as u32);
+                        signs_flat.push(sign);
+                    }
                 }
             }
             // Interior bubble DOFs
@@ -311,6 +330,12 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// Computed via 3-point Gauss-Legendre on each edge and a degree-3
     /// triangle quadrature rule for the interior, giving exact results for
     /// all fields representable in RT1.
+    ///
+    /// ## RT2 (order 2, 2D only)
+    /// Three **point** normal fluxes per edge at MFEM `OpenPoints(2)` on `[0,1]`, and
+    /// six interior values matching MFEM’s `RT_TriangleElement` nodal duals: at each
+    /// interior reference point, `−(det J)(J^{-1}F)_y` then `−(det J)(J^{-1}F)_x` for
+    /// affine triangles (contravariant Piola pullback of `F` to the reference triangle).
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
         match &self.face_map {
@@ -329,7 +354,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         result.as_slice_mut()[dof as usize] =
                             fval[0] * normal[0] + fval[1] * normal[1];
                     }
-                } else {
+                } else if self.order == 1 {
                     // RT1: 2 DOFs per edge + 2 interior bubble DOFs per element.
                     // Step 1 — edge DOFs (iterated via the unique-edge map).
                     // 3-point Gauss-Legendre on [0,1] (exact for polynomials ≤ degree 5).
@@ -393,6 +418,59 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let r = result.as_slice_mut();
                         r[bub0] = int_x * det_j;
                         r[bub1] = int_y * det_j;
+                    }
+                } else {
+                    // RT2: MFEM-style nodal flux on edges + interior Piola samples (see `TriRT2`).
+                    let (bop, _) = gauss_legendre_01(3);
+                    let (iop, _) = gauss_legendre_01(2);
+
+                    for (&EdgeKey(a, b), &first_dof) in map {
+                        let pa = self.mesh.node_coords(a);
+                        let pb = self.mesh.node_coords(b);
+                        let tx = pb[0] - pa[0];
+                        let ty = pb[1] - pa[1];
+                        let normal = [-ty, tx];
+                        let r = result.as_slice_mut();
+                        for k in 0..3 {
+                            let t = bop[k];
+                            let pt = [pa[0] + t * tx, pa[1] + t * ty];
+                            let fval = f(&pt);
+                            r[first_dof as usize + k] =
+                                fval[0] * normal[0] + fval[1] * normal[1];
+                        }
+                    }
+
+                    let p = 2usize;
+                    let n_elem = self.mesh.n_elements();
+                    for e in 0..n_elem as u32 {
+                        let dofs = self.element_dofs(e);
+                        let nodes = self.mesh.element_nodes(e);
+                        let transform =
+                            ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
+                        let det_j = transform.det_j();
+                        let jit = transform.jacobian_inv_t();
+
+                        let bub_start = dofs.len() - 6;
+                        let mut interior_row = 0usize;
+                        for j in 0..p {
+                            for i in 0..(p - j) {
+                                let wsum = iop[i] + iop[j] + iop[p - 1 - i - j];
+                                let xi0 = iop[i] / wsum;
+                                let xi1 = iop[j] / wsum;
+                                let xp = transform.map_to_physical(&[xi0, xi1]);
+                                let fval = f(&xp);
+                                let f0 = fval[0];
+                                let f1 = fval[1];
+                                // `u_ref = det(J) J^{-1} u_phys` (inverse contravariant Piola).
+                                let ur0 = det_j * (jit[(0, 0)] * f0 + jit[(1, 0)] * f1);
+                                let ur1 = det_j * (jit[(0, 1)] * f0 + jit[(1, 1)] * f1);
+                                let r = result.as_slice_mut();
+                                r[dofs[bub_start + interior_row] as usize] = -ur1;
+                                interior_row += 1;
+                                r[dofs[bub_start + interior_row] as usize] = -ur0;
+                                interior_row += 1;
+                            }
+                        }
                     }
                 }
             }

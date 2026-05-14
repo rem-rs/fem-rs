@@ -400,6 +400,126 @@ fn accumulate_volume_linear_element<S: FESpace>(
     coo_add_element_vec(&global_dofs, &scratch.f_elem, rhs);
 }
 
+fn accumulate_boundary_linear_face(
+    mesh: &(dyn MeshTopology + Sync),
+    f: u32,
+    face_dofs: &(dyn Fn(u32) -> Vec<DofId> + Sync),
+    order: u8,
+    integrators: &[&dyn BoundaryLinearIntegrator],
+    quad_order: u8,
+    rhs: &mut [f64],
+) {
+    let dim = mesh.dim() as usize;
+    let fdofs: Vec<DofId> = face_dofs(f);
+    let n_fdofs = fdofs.len();
+
+    let face_type = match mesh.face_nodes(f).len() {
+        2 => ElementType::Line2,
+        3 => ElementType::Tri3,
+        _ => panic!("unsupported boundary face node count"),
+    };
+    let ref_elem = ref_elem_face(face_type, order);
+    let quad = ref_elem.quadrature(quad_order);
+
+    let face_nodes = mesh.face_nodes(f);
+    let (face_j_mag, normal) = face_jacobian_and_normal(mesh, face_nodes, dim);
+    let face_tag = mesh.face_tag(f);
+
+    let mut phi = vec![0.0_f64; n_fdofs];
+    let mut f_face = vec![0.0_f64; n_fdofs];
+    let x0 = mesh.node_coords(face_nodes[0]);
+
+    for (q, xi) in quad.points.iter().enumerate() {
+        let w = quad.weights[q] * face_j_mag;
+        ref_elem.eval_basis(xi, &mut phi);
+
+        let xp: Vec<f64> = (0..dim)
+            .map(|i| {
+                let x1 = mesh.node_coords(face_nodes[1]);
+                x0[i] + (x1[i] - x0[i]) * xi[0]
+            })
+            .collect();
+
+        let qp = BdQpData {
+            n_dofs: n_fdofs,
+            dim,
+            weight: w,
+            phi: &phi,
+            x_phys: &xp,
+            normal: &normal,
+            elem_id: 0,
+            elem_tag: face_tag,
+        };
+
+        for integ in integrators {
+            integ.add_to_face_vector(&qp, &mut f_face);
+        }
+    }
+
+    let global: Vec<usize> = fdofs.iter().map(|&d| d as usize).collect();
+    coo_add_element_vec(&global, &f_face, rhs);
+}
+
+fn accumulate_boundary_bilinear_face(
+    mesh: &(dyn MeshTopology + Sync),
+    f: u32,
+    face_dofs: &(dyn Fn(u32) -> Vec<DofId> + Sync),
+    order: u8,
+    integrators: &[&dyn BoundaryBilinearIntegrator],
+    quad_order: u8,
+    coo: &mut CooMatrix<f64>,
+) {
+    let dim = mesh.dim() as usize;
+    let fdofs: Vec<DofId> = face_dofs(f);
+    let n_fdofs = fdofs.len();
+
+    let face_type = match mesh.face_nodes(f).len() {
+        2 => ElementType::Line2,
+        3 => ElementType::Tri3,
+        _ => panic!("unsupported boundary face node count"),
+    };
+    let ref_elem = ref_elem_face(face_type, order);
+    let quad = ref_elem.quadrature(quad_order);
+
+    let face_nodes = mesh.face_nodes(f);
+    let (face_j_mag, normal) = face_jacobian_and_normal(mesh, face_nodes, dim);
+    let face_tag = mesh.face_tag(f);
+
+    let mut phi = vec![0.0_f64; n_fdofs];
+    let mut k_face = vec![0.0_f64; n_fdofs * n_fdofs];
+    let x0 = mesh.node_coords(face_nodes[0]);
+
+    for (q, xi) in quad.points.iter().enumerate() {
+        let w = quad.weights[q] * face_j_mag;
+        ref_elem.eval_basis(xi, &mut phi);
+
+        let xp: Vec<f64> = (0..dim)
+            .map(|i| {
+                let x1 = mesh.node_coords(face_nodes[1]);
+                x0[i] + (x1[i] - x0[i]) * xi[0]
+            })
+            .collect();
+
+        let qp = BdQpData {
+            n_dofs: n_fdofs,
+            dim,
+            weight: w,
+            phi: &phi,
+            x_phys: &xp,
+            normal: &normal,
+            elem_id: 0,
+            elem_tag: face_tag,
+        };
+
+        for integ in integrators {
+            integ.add_to_face_matrix(&qp, &mut k_face);
+        }
+    }
+
+    let global: Vec<usize> = fdofs.iter().map(|&d| d as usize).collect();
+    coo.add_element_matrix(&global, &k_face);
+}
+
 #[cfg(feature = "parallel")]
 fn assemble_bilinear_volume_parallel<S: FESpace>(
     space: &S,
@@ -475,6 +595,65 @@ fn assemble_linear_volume_parallel<S: FESpace>(
             },
         )
         .0
+}
+
+#[cfg(feature = "parallel")]
+fn assemble_boundary_linear_parallel(
+    n_dofs: usize,
+    mesh: &(dyn MeshTopology + Sync),
+    face_ids: &[u32],
+    face_dofs: &(dyn Fn(u32) -> Vec<DofId> + Sync),
+    order: u8,
+    integrators: &[&dyn BoundaryLinearIntegrator],
+    quad_order: u8,
+) -> Vec<f64> {
+    face_ids
+        .par_iter()
+        .copied()
+        .fold(
+            || vec![0.0_f64; n_dofs],
+            |mut local, f| {
+                accumulate_boundary_linear_face(mesh, f, face_dofs, order, integrators, quad_order, &mut local);
+                local
+            },
+        )
+        .reduce(
+            || vec![0.0_f64; n_dofs],
+            |mut a, b| {
+                for i in 0..n_dofs {
+                    a[i] += b[i];
+                }
+                a
+            },
+        )
+}
+
+#[cfg(feature = "parallel")]
+fn assemble_boundary_bilinear_parallel(
+    n_dofs: usize,
+    mesh: &(dyn MeshTopology + Sync),
+    face_ids: &[u32],
+    face_dofs: &(dyn Fn(u32) -> Vec<DofId> + Sync),
+    order: u8,
+    integrators: &[&dyn BoundaryBilinearIntegrator],
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    face_ids
+        .par_iter()
+        .copied()
+        .map(|f| {
+            let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
+            accumulate_boundary_bilinear_face(mesh, f, face_dofs, order, integrators, quad_order, &mut local);
+            local
+        })
+        .reduce(
+            || CooMatrix::<f64>::new(n_dofs, n_dofs),
+            |mut a, b| {
+                a.append(b);
+                a
+            },
+        )
+        .into_csr()
 }
 
 // ─── Assembler ────────────────────────────────────────────────────────────────
@@ -562,71 +741,37 @@ impl Assembler {
     /// on your space (see [`face_dofs_p1`] and [`face_dofs_p2`] helpers).
     pub fn assemble_boundary_linear(
         n_dofs:      usize,
-        mesh:        &dyn MeshTopology,
-        face_dofs:   &dyn Fn(u32) -> Vec<DofId>,
+        mesh:        &(dyn MeshTopology + Sync),
+        face_dofs:   &(dyn Fn(u32) -> Vec<DofId> + Sync),
         order:       u8,
         integrators: &[&dyn BoundaryLinearIntegrator],
         tags:        &[i32],
         quad_order:  u8,
     ) -> Vec<f64> {
-        let dim = mesh.dim() as usize;
-        let mut rhs = vec![0.0_f64; n_dofs];
+        let face_ids: Vec<u32> = mesh
+            .face_iter()
+            .filter(|&f| tags.contains(&mesh.face_tag(f)))
+            .collect();
 
-        for f in mesh.face_iter() {
-            if !tags.contains(&mesh.face_tag(f)) { continue; }
-
-            let fdofs: Vec<DofId> = face_dofs(f);
-            let n_fdofs = fdofs.len();
-
-            // Determine face element type from boundary face nodes count.
-            let face_type = match mesh.face_nodes(f).len() {
-                2 => ElementType::Line2,
-                3 => ElementType::Tri3,
-                _ => panic!("unsupported boundary face node count"),
-            };
-            let ref_elem = ref_elem_face(face_type, order);
-            let quad = ref_elem.quadrature(quad_order);
-
-            let face_nodes = mesh.face_nodes(f);
-
-            // Face Jacobian and normal (2-D only for now).
-            let (face_j_mag, normal) = face_jacobian_and_normal(mesh, face_nodes, dim);
-
-            let mut phi    = vec![0.0_f64; n_fdofs];
-            let mut f_face = vec![0.0_f64; n_fdofs];
-            let x0 = mesh.node_coords(face_nodes[0]);
-
-            for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * face_j_mag;
-
-                ref_elem.eval_basis(xi, &mut phi);
-
-                // Physical coordinate on face: x = x0 + (x1-x0)*t (for Line2, t = xi[0]).
-                let xp: Vec<f64> = (0..dim).map(|i| {
-                    let x1 = mesh.node_coords(face_nodes[1]);
-                    x0[i] + (x1[i] - x0[i]) * xi[0]
-                }).collect();
-
-                let qp = BdQpData {
-                    n_dofs:  n_fdofs,
-                    dim,
-                    weight:  w,
-                    phi:     &phi,
-                    x_phys:  &xp,
-                    normal:  &normal,
-                    elem_id: 0, // boundary faces: owner element not tracked yet
-                    elem_tag: mesh.face_tag(f),
-                };
-
-                for integ in integrators {
-                    integ.add_to_face_vector(&qp, &mut f_face);
-                }
+        #[cfg(feature = "parallel")]
+        {
+            if face_ids.len() >= assembly_parallel_min_elems() {
+                return assemble_boundary_linear_parallel(
+                    n_dofs,
+                    mesh,
+                    &face_ids,
+                    face_dofs,
+                    order,
+                    integrators,
+                    quad_order,
+                );
             }
-
-            let global: Vec<usize> = fdofs.iter().map(|&d| d as usize).collect();
-            coo_add_element_vec(&global, &f_face, &mut rhs);
         }
 
+        let mut rhs = vec![0.0_f64; n_dofs];
+        for f in face_ids {
+            accumulate_boundary_linear_face(mesh, f, face_dofs, order, integrators, quad_order, &mut rhs);
+        }
         rhs
     }
 
@@ -644,67 +789,37 @@ impl Assembler {
     /// * `quad_order`  — quadrature accuracy order.
     pub fn assemble_boundary_bilinear(
         n_dofs:      usize,
-        mesh:        &dyn MeshTopology,
-        face_dofs:   &dyn Fn(u32) -> Vec<DofId>,
+        mesh:        &(dyn MeshTopology + Sync),
+        face_dofs:   &(dyn Fn(u32) -> Vec<DofId> + Sync),
         order:       u8,
         integrators: &[&dyn BoundaryBilinearIntegrator],
         tags:        &[i32],
         quad_order:  u8,
     ) -> CsrMatrix<f64> {
-        let dim = mesh.dim() as usize;
-        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+        let face_ids: Vec<u32> = mesh
+            .face_iter()
+            .filter(|&f| tags.contains(&mesh.face_tag(f)))
+            .collect();
 
-        for f in mesh.face_iter() {
-            if !tags.contains(&mesh.face_tag(f)) { continue; }
-
-            let fdofs: Vec<DofId> = face_dofs(f);
-            let n_fdofs = fdofs.len();
-
-            let face_type = match mesh.face_nodes(f).len() {
-                2 => ElementType::Line2,
-                3 => ElementType::Tri3,
-                _ => panic!("unsupported boundary face node count"),
-            };
-            let ref_elem = ref_elem_face(face_type, order);
-            let quad = ref_elem.quadrature(quad_order);
-
-            let face_nodes = mesh.face_nodes(f);
-            let (face_j_mag, normal) = face_jacobian_and_normal(mesh, face_nodes, dim);
-
-            let mut phi    = vec![0.0_f64; n_fdofs];
-            let mut k_face = vec![0.0_f64; n_fdofs * n_fdofs];
-            let x0 = mesh.node_coords(face_nodes[0]);
-
-            for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * face_j_mag;
-
-                ref_elem.eval_basis(xi, &mut phi);
-
-                let xp: Vec<f64> = (0..dim).map(|i| {
-                    let x1 = mesh.node_coords(face_nodes[1]);
-                    x0[i] + (x1[i] - x0[i]) * xi[0]
-                }).collect();
-
-                let qp = BdQpData {
-                    n_dofs:  n_fdofs,
-                    dim,
-                    weight:  w,
-                    phi:     &phi,
-                    x_phys:  &xp,
-                    normal:  &normal,
-                    elem_id: 0,
-                    elem_tag: mesh.face_tag(f),
-                };
-
-                for integ in integrators {
-                    integ.add_to_face_matrix(&qp, &mut k_face);
-                }
+        #[cfg(feature = "parallel")]
+        {
+            if face_ids.len() >= assembly_parallel_min_elems() {
+                return assemble_boundary_bilinear_parallel(
+                    n_dofs,
+                    mesh,
+                    &face_ids,
+                    face_dofs,
+                    order,
+                    integrators,
+                    quad_order,
+                );
             }
-
-            let global: Vec<usize> = fdofs.iter().map(|&d| d as usize).collect();
-            coo.add_element_matrix(&global, &k_face);
         }
 
+        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+        for f in face_ids {
+            accumulate_boundary_bilinear_face(mesh, f, face_dofs, order, integrators, quad_order, &mut coo);
+        }
         coo.into_csr()
     }
 }

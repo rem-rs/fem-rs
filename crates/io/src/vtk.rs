@@ -40,6 +40,7 @@ fn vtk_cell_type(et: ElementType) -> u8 {
         ElementType::Tri3     =>  5,
         ElementType::Tri6     =>  22,
         ElementType::Quad4    =>  9,
+        ElementType::Quad9    => 28, // VTK_BIQUADRATIC_QUAD
         ElementType::Quad8    =>  23,
         ElementType::Tet4     => 10,
         ElementType::Tet10    => 24,

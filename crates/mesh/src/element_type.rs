@@ -19,6 +19,10 @@ pub enum ElementType {
     Quad4,
     /// 8-node serendipity quadrilateral.
     Quad8,
+    /// 9-node biquadratic tensor-product quadrilateral (Q2, full tensor).
+    ///
+    /// Used e.g. by single-patch IGA with degree `(p,q)=(2,2)`.
+    Quad9,
     /// 4-node linear tetrahedron.
     Tet4,
     /// 10-node quadratic tetrahedron.
@@ -44,6 +48,7 @@ impl ElementType {
             Self::Tri6      =>  6,
             Self::Quad4     =>  4,
             Self::Quad8     =>  8,
+            Self::Quad9     =>  9,
             Self::Tet4      =>  4,
             Self::Tet10     => 10,
             Self::Hex8      =>  8,
@@ -59,7 +64,7 @@ impl ElementType {
             Self::Point1                        => 0,
             Self::Line2 | Self::Line3           => 1,
             Self::Tri3  | Self::Tri6
-          | Self::Quad4 | Self::Quad8           => 2,
+          | Self::Quad4 | Self::Quad8 | Self::Quad9 => 2,
             Self::Tet4  | Self::Tet10
           | Self::Hex8  | Self::Hex20
           | Self::Prism6 | Self::Pyramid5       => 3,
@@ -93,7 +98,7 @@ impl ElementType {
     pub const fn boundary_type(self) -> Option<Self> {
         match self {
             Self::Tri3  | Self::Tri6  => Some(Self::Line2),
-            Self::Quad4 | Self::Quad8 => Some(Self::Line2),
+            Self::Quad4 | Self::Quad8 | Self::Quad9 => Some(Self::Line3),
             Self::Tet4  | Self::Tet10 => Some(Self::Tri3),
             Self::Hex8  | Self::Hex20 => Some(Self::Quad4),
             Self::Prism6              => Some(Self::Tri3),

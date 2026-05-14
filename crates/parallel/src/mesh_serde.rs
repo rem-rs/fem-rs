@@ -16,6 +16,17 @@
 //! [node_owner    : i32 × (n_owned + n_ghost)]
 //! [global_elem_ids : u32 × n_local_elems]
 //! ```
+//!
+//! **Wire format v2** (`wire_format = 2`): optional tail after `global_elem_ids`
+//! for mixed volume / mixed boundary topology (prism, pyramid, tet+hex, …):
+//!
+//! ```text
+//! [flags : u32]  // bit0 = elem_offsets+elem_types present; bit1 = face_offsets+face_types
+//! [elem_offsets : u32 × (n_elems+1)]  // if bit0
+//! [elem_types   : u32 × n_elems]     // if bit0
+//! [face_offsets : u32 × (n_faces+1)] // if bit1
+//! [face_types   : u32 × n_faces]     // if bit1
+//! ```
 
 use fem_core::{ElemId, NodeId, Rank};
 use fem_mesh::{ElementType, SimplexMesh};
@@ -39,6 +50,7 @@ fn element_type_to_u32(et: ElementType) -> u32 {
         ElementType::Hex20    => 10,
         ElementType::Prism6   => 11,
         ElementType::Pyramid5 => 12,
+        ElementType::Quad9    => 13,
     }
 }
 
@@ -57,6 +69,7 @@ fn u32_to_element_type(v: u32) -> Result<ElementType, String> {
         10 => Ok(ElementType::Hex20),
         11 => Ok(ElementType::Prism6),
         12 => Ok(ElementType::Pyramid5),
+        13 => Ok(ElementType::Quad9),
          _ => Err(format!("unknown ElementType discriminant: {v}")),
     }
 }
@@ -78,8 +91,8 @@ struct SubMeshHeader {
     n_owned_nodes: u32,
     n_ghost_nodes: u32,
     n_local_elems: u32,
-    /// Reserved for future use / alignment padding.
-    _pad0:         u32,
+    /// `0` = legacy payload only; `2` = mixed-topology extension follows (see module doc).
+    wire_format:   u32,
     _pad1:         u32,
     _pad2:         u32,
 }
@@ -98,6 +111,25 @@ pub fn encode_submesh<const D: usize>(
     let n_elems = mesh.n_elems();
     let n_faces = mesh.n_faces();
 
+    let mut mix_flags: u32 = 0;
+    let mut ext_tail: usize = 0;
+    if mesh.elem_offsets.is_some() {
+        debug_assert_eq!(mesh.elem_offsets.as_ref().unwrap().len(), n_elems + 1);
+        debug_assert_eq!(mesh.elem_types.as_ref().map(|t| t.len()), Some(n_elems));
+        mix_flags |= 1;
+        ext_tail += (n_elems + 1) * 4 + n_elems * 4;
+    }
+    if mesh.face_offsets.is_some() {
+        debug_assert_eq!(mesh.face_offsets.as_ref().unwrap().len(), n_faces + 1);
+        debug_assert_eq!(mesh.face_types.as_ref().map(|t| t.len()), Some(n_faces));
+        mix_flags |= 2;
+        ext_tail += (n_faces + 1) * 4 + n_faces * 4;
+    }
+    let wire_format: u32 = if mix_flags != 0 { 2 } else { 0 };
+    if mix_flags != 0 {
+        ext_tail += 4; // mix_flags word
+    }
+
     let header = SubMeshHeader {
         dim:           D as u32,
         n_nodes:       n_nodes as u32,
@@ -110,7 +142,7 @@ pub fn encode_submesh<const D: usize>(
         n_owned_nodes: partition.n_owned_nodes as u32,
         n_ghost_nodes: partition.n_ghost_nodes as u32,
         n_local_elems: partition.n_local_elems as u32,
-        _pad0: 0,
+        wire_format,
         _pad1: 0,
         _pad2: 0,
     };
@@ -124,7 +156,8 @@ pub fn encode_submesh<const D: usize>(
         + mesh.face_tags.len() * 4
         + partition.global_node_ids.len() * 4
         + partition.node_owner.len() * 4
-        + partition.global_elem_ids.len() * 4;
+        + partition.global_elem_ids.len() * 4
+        + ext_tail;
 
     let mut buf = Vec::with_capacity(total);
 
@@ -159,6 +192,30 @@ pub fn encode_submesh<const D: usize>(
 
     // partition: global_elem_ids
     buf.extend_from_slice(bytemuck::cast_slice::<ElemId, u8>(&partition.global_elem_ids));
+
+    if wire_format == 2 {
+        buf.extend_from_slice(&mix_flags.to_le_bytes());
+        if mix_flags & 1 != 0 {
+            let eo = mesh.elem_offsets.as_ref().unwrap();
+            let et = mesh.elem_types.as_ref().unwrap();
+            for &x in eo {
+                buf.extend_from_slice(&(x as u32).to_le_bytes());
+            }
+            for t in et {
+                buf.extend_from_slice(&element_type_to_u32(*t).to_le_bytes());
+            }
+        }
+        if mix_flags & 2 != 0 {
+            let fo = mesh.face_offsets.as_ref().unwrap();
+            let ft = mesh.face_types.as_ref().unwrap();
+            for &x in fo {
+                buf.extend_from_slice(&(x as u32).to_le_bytes());
+            }
+            for t in ft {
+                buf.extend_from_slice(&element_type_to_u32(*t).to_le_bytes());
+            }
+        }
+    }
 
     debug_assert_eq!(buf.len(), total);
     buf
@@ -207,10 +264,51 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(SimplexMesh<D>, Mes
     let node_owner = read_i32_vec(buf, &mut offset, total_part_nodes)?;
     let global_elem_ids = read_u32_vec(buf, &mut offset, n_local_elems)?;
 
-    let mesh = SimplexMesh::uniform(
+    let mut mesh = SimplexMesh::uniform(
         coords, conn, elem_tags, elem_type,
         face_conn, face_tags, face_type,
     );
+
+    match header.wire_format {
+        0 => {}
+        2 => {
+            let mix_flags = read_u32_at(buf, &mut offset)?;
+            if mix_flags & 1 != 0 {
+                let mut eo = Vec::with_capacity(n_elems + 1);
+                for _ in 0..=n_elems {
+                    eo.push(read_u32_at(buf, &mut offset)? as usize);
+                }
+                let mut et = Vec::with_capacity(n_elems);
+                for _ in 0..n_elems {
+                    et.push(u32_to_element_type(read_u32_at(buf, &mut offset)?)?);
+                }
+                mesh.elem_offsets = Some(eo);
+                mesh.elem_types = Some(et);
+            }
+            if mix_flags & 2 != 0 {
+                let mut fo = Vec::with_capacity(n_faces + 1);
+                for _ in 0..=n_faces {
+                    fo.push(read_u32_at(buf, &mut offset)? as usize);
+                }
+                let mut ft = Vec::with_capacity(n_faces);
+                for _ in 0..n_faces {
+                    ft.push(u32_to_element_type(read_u32_at(buf, &mut offset)?)?);
+                }
+                mesh.face_offsets = Some(fo);
+                mesh.face_types = Some(ft);
+            }
+        }
+        other => {
+            return Err(format!("unsupported submesh wire_format: {other}"));
+        }
+    }
+
+    if offset != buf.len() {
+        return Err(format!(
+            "submesh buffer size mismatch: consumed {offset} bytes, buffer length {}",
+            buf.len()
+        ));
+    }
 
     let partition = MeshPartition::from_raw(
         n_owned,
@@ -224,6 +322,17 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(SimplexMesh<D>, Mes
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+#[inline]
+fn read_u32_at(buf: &[u8], offset: &mut usize) -> Result<u32, String> {
+    let end = *offset + 4;
+    if end > buf.len() {
+        return Err(format!("buffer underflow at u32 read: need {end}, have {}", buf.len()));
+    }
+    let v = u32::from_le_bytes(buf[*offset..end].try_into().unwrap());
+    *offset = end;
+    Ok(v)
+}
 
 fn read_f64_vec(buf: &[u8], offset: &mut usize, count: usize) -> Result<Vec<f64>, String> {
     let byte_len = count * 8;
@@ -266,7 +375,7 @@ fn read_i32_vec(buf: &[u8], offset: &mut usize, count: usize) -> Result<Vec<i32>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::{ElementType, SimplexMesh};
 
     #[test]
     fn round_trip_serial_mesh() {
@@ -283,6 +392,10 @@ mod tests {
         assert_eq!(mesh.face_conn, mesh2.face_conn);
         assert_eq!(mesh.face_tags, mesh2.face_tags);
         assert_eq!(mesh.face_type, mesh2.face_type);
+        assert_eq!(mesh.elem_offsets, mesh2.elem_offsets);
+        assert_eq!(mesh.elem_types, mesh2.elem_types);
+        assert_eq!(mesh.face_offsets, mesh2.face_offsets);
+        assert_eq!(mesh.face_types, mesh2.face_types);
 
         assert_eq!(partition.n_owned_nodes, part2.n_owned_nodes);
         assert_eq!(partition.n_ghost_nodes, part2.n_ghost_nodes);
@@ -357,5 +470,64 @@ mod tests {
         assert_eq!(mesh.conn, mesh2.conn);
         assert_eq!(mesh.elem_type, mesh2.elem_type);
         assert_eq!(partition.n_owned_nodes, part2.n_owned_nodes);
+    }
+
+    /// Single `Prism6` with mixed Tri3 + Quad4 boundary (cylinder-like extrusion).
+    fn unit_prism_mixed_boundary() -> SimplexMesh<3> {
+        let coords: Vec<f64> = vec![
+            0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+            1.0, 0.0, 1.0,
+            0.0, 1.0, 1.0,
+        ];
+        let conn = vec![0u32, 1, 2, 3, 4, 5];
+        let elem_tags = vec![1i32];
+        let face_conn: Vec<u32> = vec![
+            0, 1, 2,
+            3, 4, 5,
+            0, 1, 4, 3,
+            1, 2, 5, 4,
+            2, 0, 3, 5,
+        ];
+        let face_tags = vec![1i32, 2, 3, 3, 3];
+        let face_types = vec![
+            ElementType::Tri3,
+            ElementType::Tri3,
+            ElementType::Quad4,
+            ElementType::Quad4,
+            ElementType::Quad4,
+        ];
+        let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
+        let mut m = SimplexMesh::uniform(
+            coords,
+            conn,
+            elem_tags,
+            ElementType::Prism6,
+            face_conn,
+            face_tags,
+            ElementType::Tri3,
+        );
+        m.face_types = Some(face_types);
+        m.face_offsets = Some(face_offsets);
+        m
+    }
+
+    #[test]
+    fn round_trip_prism_mixed_boundary() {
+        let mesh = unit_prism_mixed_boundary();
+        mesh.check().expect("fixture mesh");
+        let partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
+
+        let buf = encode_submesh(&mesh, &partition);
+        let (mesh2, _) = decode_submesh::<3>(&buf).expect("decode failed");
+
+        assert_eq!(mesh.n_faces(), 5, "fixture: 2 triangles + 3 quads");
+        assert_eq!(mesh2.n_faces(), mesh.n_faces());
+        assert_eq!(mesh2.face_offsets, mesh.face_offsets);
+        assert_eq!(mesh2.face_types, mesh.face_types);
+        assert_eq!(mesh.face_conn, mesh2.face_conn);
+        mesh2.check().expect("decoded mesh");
     }
 }

@@ -130,7 +130,7 @@
 | `ND_FECollection(p)` | H(curl): Nédélec tangential | `HCurlSpace` | [OK]|
 | `RT_FECollection(p)` | H(div): Raviart-Thomas normal | `HDivSpace` | [OK]|
 | `H1_Trace_FECollection` | H½: traces of H¹ on faces | `H1TraceSpace` | [OK]| P1–P3 boundary trace |
-| `NURBS_FECollection` | NURBS isogeometric | `KnotVector`, `BSplineBasis1D`, `NurbsPatch2D`, `NurbsPatch3D`, `NurbsMesh2D/3D` (`fem_element::nurbs`) | [OK] Phase 70 (basis + physical mapping + global IGA assembly verified) |
+| `NURBS_FECollection` | NURBS isogeometric | `KnotVector`, `BSplineBasis1D`, `NurbsPatch2D`, `NurbsPatch3D`, `NurbsMesh2D/3D` (`fem_element::nurbs`); IGA bridge work also exists in `fem_element::iga` / `fem-assembly` | [OK] Phase 70 (basis + physical mapping + global IGA assembly verified); single-patch IGA helpers and physical-coordinate 1D/2D mass/Poisson-style assembly are available, while generic `FESpace` dispatch, multi-patch, and trimming remain incomplete |
 
 ### 3.2 Finite Element Space (DOF management)
 

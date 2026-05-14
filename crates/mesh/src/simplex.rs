@@ -73,6 +73,26 @@ impl<const D: usize> SimplexMesh<D> {
         }
     }
 
+    /// Geometric type of volume element `e` (mixed meshes: `elem_types`).
+    #[inline]
+    pub fn element_type_at(&self, e: ElemId) -> ElementType {
+        if let Some(ref types) = self.elem_types {
+            types[e as usize]
+        } else {
+            self.elem_type
+        }
+    }
+
+    /// Geometric type of boundary face `f` (mixed boundaries: `face_types`).
+    #[inline]
+    pub fn face_type_at(&self, f: FaceId) -> ElementType {
+        if let Some(ref types) = self.face_types {
+            types[f as usize]
+        } else {
+            self.face_type
+        }
+    }
+
     /// Coordinates of node `n` as a `[f64; D]` array.
     #[inline]
     pub fn coords_of(&self, n: NodeId) -> [f64; D] {
@@ -797,11 +817,7 @@ impl<const D: usize> MeshTopology for SimplexMesh<D> {
     fn element_nodes(&self, elem: ElemId) -> &[NodeId] { self.elem_nodes(elem) }
 
     fn element_type(&self, elem: ElemId) -> ElementType {
-        if let Some(ref types) = self.elem_types {
-            types[elem as usize]
-        } else {
-            self.elem_type
-        }
+        self.element_type_at(elem)
     }
 
     fn element_tag(&self, elem: ElemId) -> i32 { self.elem_tags[elem as usize] }

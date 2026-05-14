@@ -2,6 +2,10 @@
 //!
 //! This module introduces a stable backend enum used by higher layers to
 //! choose between classic assembled operators and reed-backed operator paths.
+//!
+//! **Native CSR:** operators built by [`crate::Assembler`], [`crate::iga_assembler`], etc.,
+//! return [`CsrMatrix<f64>`](fem_linalg::CsrMatrix), which implements [`LinearOperator`]
+//! directly; or wrap with [`CsrLinearOperator`] for explicit lifetime sharing with solvers.
 
 use fem_linalg::CsrMatrix;
 

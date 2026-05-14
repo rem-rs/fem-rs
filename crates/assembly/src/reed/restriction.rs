@@ -4,6 +4,10 @@
 //! operator decomposition `Eᵀ Bᵀ D B E`.  It maps a local DOF vector to
 //! per-element DOF arrays and back.
 //!
+//! For **assembled** global H¹ mass / Poisson CSR on the same mesh (no `E B` pipeline), use
+//! [`crate::reed::FemCeed`] instead; restrictions here pair with [`super::qfunction`] for PA-style
+//! workflows.
+//!
 //! ## Mapping
 //!
 //! For a mesh with `n_elems` elements and `npe` nodes per element, the

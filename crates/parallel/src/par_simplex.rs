@@ -10,6 +10,10 @@
 //! * Boundary faces: assigned to the rank that owns the minimum-index node of
 //!   the face (unique and consistent across ranks).
 //!
+//! Mixed **volume** connectivity (`elem_offsets` / `elem_types`) and mixed **boundary**
+//! faces (`face_offsets` / `face_types`) from the global mesh are preserved on each
+//! rank’s local sub-mesh (needed for prism/pyramid-dominated 3D meshes).
+//!
 //! ## Single-rank fast path
 //!
 //! When `comm.size() == 1` the full mesh is wrapped as-is with
@@ -26,7 +30,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use fem_core::{FaceId, NodeId, Rank};
-use fem_mesh::SimplexMesh;
+use fem_mesh::{ElementType, SimplexMesh};
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
 use crate::mesh_serde;
@@ -223,26 +227,37 @@ pub(crate) fn extract_submesh_from_partition<const D: usize>(
     }
 
     // 6. Build local connectivity with remapped node IDs (owned + ghost elements).
-    let npe = mesh.elem_type.nodes_per_element(); // assumes uniform mesh for parallel
     let all_local_elems = local_elem_gids.len() + ghost_elem_gids.len();
-    let mut local_conn = Vec::with_capacity(all_local_elems * npe);
+    let mixed_vol = mesh.elem_offsets.is_some();
+    let npe_hint = if mixed_vol { 8 } else { mesh.elem_type.nodes_per_element() };
+    let mut local_conn = Vec::with_capacity(all_local_elems.saturating_mul(npe_hint));
     let mut local_elem_tags = Vec::with_capacity(all_local_elems);
+    let mut local_elem_types = if mixed_vol { Some(Vec::new()) } else { None };
+    let mut local_elem_offsets = if mixed_vol { Some(vec![0usize]) } else { None };
     for &ge in local_elem_gids.iter().chain(ghost_elem_gids.iter()) {
         for &gn in mesh.elem_nodes(ge) {
             local_conn.push(g2l[&gn]);
         }
         local_elem_tags.push(mesh.elem_tags[ge as usize]);
+        if mixed_vol {
+            local_elem_types.as_mut().unwrap().push(mesh.element_type_at(ge));
+            local_elem_offsets.as_mut().unwrap().push(local_conn.len());
+        }
     }
 
     // 7. Assign boundary faces to this rank.
-    let (local_face_conn, local_face_tags) =
+    let (local_face_conn, local_face_tags, local_face_types, local_face_offsets) =
         extract_local_faces(mesh, &g2l, &node_owners, target_rank);
 
     // 8. Assemble the local sub-mesh.
-    let local_mesh = SimplexMesh::uniform(
+    let mut local_mesh = SimplexMesh::uniform(
         local_coords, local_conn, local_elem_tags, mesh.elem_type,
         local_face_conn, local_face_tags, mesh.face_type,
     );
+    local_mesh.elem_types = local_elem_types;
+    local_mesh.elem_offsets = local_elem_offsets;
+    local_mesh.face_types = local_face_types;
+    local_mesh.face_offsets = local_face_offsets;
 
     let partition = MeshPartition::from_partitioner(
         &owned_global,
@@ -291,10 +306,18 @@ fn extract_local_faces<const D: usize>(
     g2l: &HashMap<NodeId, u32>,
     node_owners: &[Rank],
     local_rank: Rank,
-) -> (Vec<NodeId>, Vec<i32>) {
+) -> (
+    Vec<NodeId>,
+    Vec<i32>,
+    Option<Vec<ElementType>>,
+    Option<Vec<usize>>,
+) {
     let n_bfaces = mesh.n_faces();
     let mut face_conn = Vec::new();
     let mut face_tags = Vec::new();
+    let mixed_bnd = mesh.face_offsets.is_some();
+    let mut face_types_loc = if mixed_bnd { Some(Vec::new()) } else { None };
+    let mut face_offsets_loc = if mixed_bnd { Some(vec![0usize]) } else { None };
 
     for f in 0..n_bfaces as u32 {
         let bnodes = mesh.bface_nodes(f as FaceId);
@@ -310,13 +333,22 @@ fn extract_local_faces<const D: usize>(
             continue;
         }
 
+        if mixed_bnd {
+            face_types_loc
+                .as_mut()
+                .expect("face_types")
+                .push(mesh.face_type_at(f as FaceId));
+        }
         for &gn in bnodes {
             face_conn.push(g2l[&gn]);
         }
         face_tags.push(mesh.face_tags[f as usize]);
+        if let Some(ref mut off) = face_offsets_loc {
+            off.push(face_conn.len());
+        }
     }
 
-    (face_conn, face_tags)
+    (face_conn, face_tags, face_types_loc, face_offsets_loc)
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────
@@ -446,5 +478,59 @@ mod tests {
         let comm = serial_comm();
         let pmesh = partition_simplex(&mesh, &comm);
         pmesh.local_mesh().check().expect("local mesh check failed");
+    }
+
+    /// `Prism6` with Tri3 caps + Quad4 sides — must keep `face_offsets` through extraction.
+    fn unit_prism_mixed_boundary() -> SimplexMesh<3> {
+        let coords: Vec<f64> = vec![
+            0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+            1.0, 0.0, 1.0,
+            0.0, 1.0, 1.0,
+        ];
+        let conn = vec![0u32, 1, 2, 3, 4, 5];
+        let elem_tags = vec![1i32];
+        let face_conn: Vec<u32> = vec![
+            0, 1, 2,
+            3, 4, 5,
+            0, 1, 4, 3,
+            1, 2, 5, 4,
+            2, 0, 3, 5,
+        ];
+        let face_tags = vec![1i32, 2, 3, 3, 3];
+        let face_types = vec![
+            ElementType::Tri3,
+            ElementType::Tri3,
+            ElementType::Quad4,
+            ElementType::Quad4,
+            ElementType::Quad4,
+        ];
+        let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
+        let mut m = SimplexMesh::uniform(
+            coords,
+            conn,
+            elem_tags,
+            ElementType::Prism6,
+            face_conn,
+            face_tags,
+            ElementType::Tri3,
+        );
+        m.face_types = Some(face_types);
+        m.face_offsets = Some(face_offsets);
+        m
+    }
+
+    #[test]
+    fn extract_submesh_preserves_mixed_prism_boundary() {
+        let mesh = unit_prism_mixed_boundary();
+        mesh.check().expect("fixture");
+        let elem_part = vec![0 as Rank; mesh.n_elems()];
+        let (local, _) = extract_submesh_from_partition(&mesh, 0, &elem_part);
+        assert_eq!(local.n_faces(), 5);
+        assert!(local.face_offsets.is_some());
+        assert_eq!(local.face_offsets.as_ref().unwrap().len(), 6);
+        local.check().expect("local mesh");
     }
 }

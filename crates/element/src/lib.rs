@@ -14,6 +14,7 @@
 //! | [`SegP3`] | [0,1]           | 4    |
 //! | [`TriP1`] | unit triangle   | 3    |
 //! | [`TriP2`] | unit triangle   | 6    |
+//! | [`TriP3`] | unit triangle   | 10   |
 //! | [`TetP1`] | unit tet        | 4    |
 //! | [`TetP2`] | unit tet        | 10   |
 //! | [`TetP3`] | unit tet        | 20   |
@@ -40,12 +41,13 @@ pub mod nedelec;
 pub mod raviart_thomas;
 pub mod nurbs;
 pub mod tri6_geom;
+pub mod iga;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use quadrature::{TriQuadRule, tri_rule_named};
 pub use lagrange::{HexQ1, QuadQ1, QuadQ2, SegP1, SegP2, SegP3, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
 pub use nedelec::{TriND1, QuadND1, QuadND2, HexND1, HexND2, TetND1, TriND2, TetND2};
-pub use raviart_thomas::{TriRT0, TetRT0, TriRT1, TetRT1};
+pub use raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1};
 pub use nurbs::{KnotVector, BSplineBasis1D, NurbsPatch2D, NurbsPatch3D,
                 NurbsMesh2D, NurbsMesh3D, greville_abscissae};
 

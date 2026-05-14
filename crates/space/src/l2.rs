@@ -3,6 +3,7 @@
 //! Each element has independent DOFs — no continuity across element boundaries.
 
 use fem_core::types::DofId;
+use fem_element::{ReferenceElement, TetP3, TriP3};
 use fem_linalg::Vector;
 use fem_mesh::topology::MeshTopology;
 
@@ -15,6 +16,11 @@ use crate::fe_space::{FESpace, SpaceType};
 ///   DOFs are numbered element-by-element.
 /// - **P2** (`order = 2`): discontinuous quadratic DOFs per element
 ///   (Tri: 6 DOFs, Tet: 10 DOFs), with no inter-element sharing.
+/// - **P3** (`order = 3`): discontinuous cubic on **Tri3** / **Tet4** (10 / 20 DOFs
+///   per element), using [`TriP3`]/[`TetP3`] reference nodes mapped affinely to each cell.
+///
+/// [`TriP3`]: fem_element::TriP3
+/// [`TetP3`]: fem_element::TetP3
 pub struct L2Space<M: MeshTopology> {
     mesh:          M,
     order:         u8,
@@ -29,12 +35,13 @@ pub struct L2Space<M: MeshTopology> {
 impl<M: MeshTopology> L2Space<M> {
     /// Build the L² space of given order over `mesh`.
     ///
-    /// Orders supported: 0 (P0), 1 (P1 discontinuous), and 2 (P2 discontinuous).
+    /// Orders supported: 0 (P0), 1 (P1 discontinuous), 2 (P2 discontinuous), and
+    /// 3 (P3 discontinuous on Tri3 / Tet4 only).
     ///
     /// # Panics
-    /// Panics if `order > 2`.
+    /// Panics if `order > 3`, or if `order == 3` on an unsupported mesh type.
     pub fn new(mesh: M, order: u8) -> Self {
-        assert!(order <= 2, "L2Space: order {order} not supported (max 2)");
+        assert!(order <= 3, "L2Space: order {order} not supported (max 3)");
         let dim = mesh.dim() as usize;
         let n_elems = mesh.n_elements();
 
@@ -148,6 +155,76 @@ impl<M: MeshTopology> L2Space<M> {
                     dof_coords,
                 }
             }
+            3 => {
+                // P3 on affine Tri3 / Tet4: DOF locations = linear map of reference TriP3/TetP3 nodes.
+                let npe0 = mesh.element_nodes(0).len();
+                let ref_tri = TriP3.dof_coords();
+                let ref_tet = TetP3.dof_coords();
+                let dofs_per_elem = match (dim, npe0) {
+                    (2, 3) => ref_tri.len(),
+                    (3, 4) => ref_tet.len(),
+                    _ => panic!(
+                        "L2Space P3 currently supports Tri3 (2D) and Tet4 (3D), got dim={dim}, npe={npe0}"
+                    ),
+                };
+
+                let n_dofs = n_elems * dofs_per_elem;
+                let elem_dofs: Vec<DofId> = (0..n_dofs as DofId).collect();
+                let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+
+                for e in 0..n_elems as u32 {
+                    let nodes = mesh.element_nodes(e);
+                    let base_dof = e as usize * dofs_per_elem;
+
+                    if dim == 2 {
+                        let (n0, n1, n2) = (nodes[0], nodes[1], nodes[2]);
+                        let p0 = mesh.node_coords(n0);
+                        let p1 = mesh.node_coords(n1);
+                        let p2 = mesh.node_coords(n2);
+                        for (i, rc) in ref_tri.iter().enumerate() {
+                            let xi = rc[0];
+                            let eta = rc[1];
+                            let base = (base_dof + i) * 2;
+                            dof_coords[base] = p0[0] + xi * (p1[0] - p0[0]) + eta * (p2[0] - p0[0]);
+                            dof_coords[base + 1] =
+                                p0[1] + xi * (p1[1] - p0[1]) + eta * (p2[1] - p0[1]);
+                        }
+                    } else {
+                        let (n0, n1, n2, n3) = (nodes[0], nodes[1], nodes[2], nodes[3]);
+                        let p0 = mesh.node_coords(n0);
+                        let p1 = mesh.node_coords(n1);
+                        let p2 = mesh.node_coords(n2);
+                        let p3 = mesh.node_coords(n3);
+                        for (i, rc) in ref_tet.iter().enumerate() {
+                            let xi = rc[0];
+                            let eta = rc[1];
+                            let zeta = rc[2];
+                            let base = (base_dof + i) * 3;
+                            dof_coords[base] = p0[0]
+                                + xi * (p1[0] - p0[0])
+                                + eta * (p2[0] - p0[0])
+                                + zeta * (p3[0] - p0[0]);
+                            dof_coords[base + 1] = p0[1]
+                                + xi * (p1[1] - p0[1])
+                                + eta * (p2[1] - p0[1])
+                                + zeta * (p3[1] - p0[1]);
+                            dof_coords[base + 2] = p0[2]
+                                + xi * (p1[2] - p0[2])
+                                + eta * (p2[2] - p0[2])
+                                + zeta * (p3[2] - p0[2]);
+                        }
+                    }
+                }
+
+                L2Space {
+                    mesh,
+                    order,
+                    elem_dofs,
+                    dofs_per_elem,
+                    n_dofs,
+                    dof_coords,
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -241,5 +318,23 @@ mod tests {
         let space = L2Space::new(mesh, 2);
         assert_eq!(space.n_dofs(), n_elems * 10);
         assert_eq!(space.element_dofs(0).len(), 10);
+    }
+
+    #[test]
+    fn l2_p3_tri_n_dofs_equals_n_elems_times_10() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let n_elems = mesh.n_elements();
+        let space = L2Space::new(mesh, 3);
+        assert_eq!(space.n_dofs(), n_elems * 10);
+        assert_eq!(space.element_dofs(0).len(), 10);
+    }
+
+    #[test]
+    fn l2_p3_tet_n_dofs_equals_n_elems_times_20() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let n_elems = mesh.n_elements();
+        let space = L2Space::new(mesh, 3);
+        assert_eq!(space.n_dofs(), n_elems * 20);
+        assert_eq!(space.element_dofs(0).len(), 20);
     }
 }

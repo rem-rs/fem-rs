@@ -46,6 +46,12 @@ use fem_mesh::ElementTransformation;
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::{FESpace, SpaceType};
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+#[cfg(feature = "parallel")]
+use crate::assembler::assembly_parallel_min_elems;
+
 // ─── Quadrature-point data ───────────────────────────────────────────────────
 
 /// Data available to H(curl) boundary integrators at each face quadrature point.
@@ -198,8 +204,8 @@ impl VectorBoundaryAssembler {
         quad_order:  u8,
     ) -> CsrMatrix<f64>
     where
-        S: FESpace,
-        S::Mesh: MeshTopology,
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
     {
         let mesh    = space.mesh();
         let dim     = mesh.dim() as usize;
@@ -209,87 +215,26 @@ impl VectorBoundaryAssembler {
             "VectorBoundaryAssembler: only H(curl) spaces are supported"
         );
 
-        // Volume reference element (to evaluate basis on face QPs).
-        let vol_elem = vec_ref_elem_hcurl(dim, space.order());
-        let n_ldofs  = vol_elem.n_dofs();
+        let face_ids: Vec<u32> = mesh
+            .face_iter()
+            .filter(|&f| tags.contains(&mesh.face_tag(f)))
+            .collect();
 
-        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
-
-        let mut ref_phi  = vec![0.0_f64; n_ldofs * dim];
-        let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
-
-        for f in mesh.face_iter() {
-            if !tags.contains(&mesh.face_tag(f)) { continue; }
-
-            let face_nodes = mesh.face_nodes(f);
-
-            // Find the owning element for this boundary face and compute Jacobian.
-            let owner_elem = match find_owner_element(mesh, face_nodes) {
-                Some(e) => e,
-                None    => continue, // orphan face — skip
-            };
-
-            let elem_nodes = mesh.element_nodes(owner_elem);
-            let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
-            let j_inv_t = tr.jacobian_inv_t().clone();
-
-            // DOFs and signs for the owner element.
-            let global_dofs: Vec<usize> = space
-                .element_dofs(owner_elem)
-                .iter()
-                .map(|&d| d as usize)
-                .collect();
-            let signs_opt = space.element_signs(owner_elem);
-
-            // Face quadrature on the boundary face (in face parameter space).
-            let (face_qp_phys, face_weights, face_normals) =
-                face_quadrature(mesh, face_nodes, dim, quad_order);
-
-            let mut k_face = vec![0.0_f64; n_ldofs * n_ldofs];
-
-            for q in 0..face_qp_phys.len() / dim {
-                let xp   = &face_qp_phys[q * dim..(q + 1) * dim];
-                let w    = face_weights[q];
-                let norm = &face_normals[q * dim..(q + 1) * dim];
-
-                // Map physical face QP to reference coordinates.
-                let xi_ref = phys_to_ref(mesh, elem_nodes, xp, dim);
-
-                // Evaluate volume basis at reference point.
-                vol_elem.eval_basis_vec(&xi_ref, &mut ref_phi);
-
-                // Covariant Piola transform.
-                piola_hcurl_basis(&j_inv_t, &ref_phi, &mut phys_phi, n_ldofs, dim);
-
-                // Apply DOF orientation signs.
-                if let Some(s) = signs_opt {
-                    for i in 0..n_ldofs {
-                        for c in 0..dim {
-                            phys_phi[i * dim + c] *= s[i];
-                        }
-                    }
-                }
-
-                let qp_data = VectorBdQpData {
-                    n_dofs: n_ldofs,
+        #[cfg(feature = "parallel")]
+        {
+            if face_ids.len() >= assembly_parallel_min_elems() {
+                return assemble_boundary_bilinear_parallel(
+                    space,
+                    integrators,
+                    quad_order,
+                    &face_ids,
+                    n_dofs,
                     dim,
-                    weight: w,
-                    phi_vec: &phys_phi,
-                    normal: norm,
-                    x_phys: xp,
-                    elem_id: owner_elem,
-                    elem_tag: mesh.face_tag(f),
-                };
-
-                for integ in integrators {
-                    integ.add_to_face_matrix(&qp_data, &mut k_face);
-                }
+                );
             }
-
-            coo.add_element_matrix(&global_dofs, &k_face);
         }
 
-        coo.into_csr()
+        assemble_boundary_bilinear_serial(space, integrators, quad_order, &face_ids, n_dofs, dim)
     }
 
     /// Assemble a boundary linear form over tagged boundary faces.
@@ -302,8 +247,8 @@ impl VectorBoundaryAssembler {
         quad_order:  u8,
     ) -> Vec<f64>
     where
-        S: FESpace,
-        S::Mesh: MeshTopology,
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
     {
         let mesh   = space.mesh();
         let dim    = mesh.dim() as usize;
@@ -313,79 +258,300 @@ impl VectorBoundaryAssembler {
             "VectorBoundaryAssembler: only H(curl) spaces are supported"
         );
 
-        let vol_elem = vec_ref_elem_hcurl(dim, space.order());
-        let n_ldofs  = vol_elem.n_dofs();
+        let face_ids: Vec<u32> = mesh
+            .face_iter()
+            .filter(|&f| tags.contains(&mesh.face_tag(f)))
+            .collect();
 
-        let mut rhs = vec![0.0_f64; n_dofs];
-        let mut ref_phi  = vec![0.0_f64; n_ldofs * dim];
-        let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
-
-        for f in mesh.face_iter() {
-            if !tags.contains(&mesh.face_tag(f)) { continue; }
-
-            let face_nodes = mesh.face_nodes(f);
-            let owner_elem = match find_owner_element(mesh, face_nodes) {
-                Some(e) => e,
-                None    => continue,
-            };
-
-            let elem_nodes = mesh.element_nodes(owner_elem);
-            let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
-            let j_inv_t = tr.jacobian_inv_t().clone();
-
-            let global_dofs: Vec<usize> = space
-                .element_dofs(owner_elem)
-                .iter()
-                .map(|&d| d as usize)
-                .collect();
-            let signs_opt = space.element_signs(owner_elem);
-
-            let (face_qp_phys, face_weights, face_normals) =
-                face_quadrature(mesh, face_nodes, dim, quad_order);
-
-            let mut f_face = vec![0.0_f64; n_ldofs];
-
-            for q in 0..face_qp_phys.len() / dim {
-                let xp   = &face_qp_phys[q * dim..(q + 1) * dim];
-                let w    = face_weights[q];
-                let norm = &face_normals[q * dim..(q + 1) * dim];
-
-                let xi_ref = phys_to_ref(mesh, elem_nodes, xp, dim);
-                vol_elem.eval_basis_vec(&xi_ref, &mut ref_phi);
-
-                piola_hcurl_basis(&j_inv_t, &ref_phi, &mut phys_phi, n_ldofs, dim);
-
-                if let Some(s) = signs_opt {
-                    for i in 0..n_ldofs {
-                        for c in 0..dim {
-                            phys_phi[i * dim + c] *= s[i];
-                        }
-                    }
-                }
-
-                let qp_data = VectorBdQpData {
-                    n_dofs: n_ldofs,
+        #[cfg(feature = "parallel")]
+        {
+            if face_ids.len() >= assembly_parallel_min_elems() {
+                return assemble_boundary_linear_parallel(
+                    space,
+                    integrators,
+                    quad_order,
+                    &face_ids,
+                    n_dofs,
                     dim,
-                    weight: w,
-                    phi_vec: &phys_phi,
-                    normal: norm,
-                    x_phys: xp,
-                    elem_id: owner_elem,
-                    elem_tag: mesh.face_tag(f),
-                };
-
-                for integ in integrators {
-                    integ.add_to_face_vector(&qp_data, &mut f_face);
-                }
+                );
             }
+        }
 
+        assemble_boundary_linear_serial(space, integrators, quad_order, &face_ids, n_dofs, dim)
+    }
+}
+
+fn assemble_boundary_bilinear_serial<S: FESpace>(
+    space: &S,
+    integrators: &[&dyn VectorBoundaryBilinearIntegrator],
+    quad_order: u8,
+    face_ids: &[u32],
+    n_dofs: usize,
+    dim: usize,
+) -> CsrMatrix<f64>
+where
+    S::Mesh: MeshTopology,
+{
+    let vol_elem = vec_ref_elem_hcurl(dim, space.order());
+    let n_ldofs = vol_elem.n_dofs();
+    let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+    let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
+    let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
+
+    for &f in face_ids {
+        if let Some((global_dofs, k_face)) =
+            assemble_face_bilinear_contrib(space, &*vol_elem, n_ldofs, dim, f, integrators, quad_order, &mut ref_phi, &mut phys_phi)
+        {
+            coo.add_element_matrix(&global_dofs, &k_face);
+        }
+    }
+    coo.into_csr()
+}
+
+fn assemble_boundary_linear_serial<S: FESpace>(
+    space: &S,
+    integrators: &[&dyn VectorBoundaryLinearIntegrator],
+    quad_order: u8,
+    face_ids: &[u32],
+    n_dofs: usize,
+    dim: usize,
+) -> Vec<f64>
+where
+    S::Mesh: MeshTopology,
+{
+    let vol_elem = vec_ref_elem_hcurl(dim, space.order());
+    let n_ldofs = vol_elem.n_dofs();
+    let mut rhs = vec![0.0_f64; n_dofs];
+    let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
+    let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
+
+    for &f in face_ids {
+        if let Some((global_dofs, f_face)) =
+            assemble_face_linear_contrib(space, &*vol_elem, n_ldofs, dim, f, integrators, quad_order, &mut ref_phi, &mut phys_phi)
+        {
             for (&d, &v) in global_dofs.iter().zip(f_face.iter()) {
                 rhs[d] += v;
             }
         }
-
-        rhs
     }
+    rhs
+}
+
+#[cfg(feature = "parallel")]
+fn assemble_boundary_bilinear_parallel<S: FESpace + Sync>(
+    space: &S,
+    integrators: &[&dyn VectorBoundaryBilinearIntegrator],
+    quad_order: u8,
+    face_ids: &[u32],
+    n_dofs: usize,
+    dim: usize,
+) -> CsrMatrix<f64>
+where
+    S::Mesh: MeshTopology + Sync,
+{
+    face_ids
+        .par_iter()
+        .copied()
+        .filter_map(|f| {
+            let vol_elem = vec_ref_elem_hcurl(dim, space.order());
+            let n_ldofs = vol_elem.n_dofs();
+            let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
+            let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
+            assemble_face_bilinear_contrib(
+                space,
+                &*vol_elem,
+                n_ldofs,
+                dim,
+                f,
+                integrators,
+                quad_order,
+                &mut ref_phi,
+                &mut phys_phi,
+            )
+        })
+        .map(|(global_dofs, k_face)| {
+            let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
+            local.add_element_matrix(&global_dofs, &k_face);
+            local
+        })
+        .reduce(
+            || CooMatrix::<f64>::new(n_dofs, n_dofs),
+            |mut a, b| {
+                a.append(b);
+                a
+            },
+        )
+        .into_csr()
+}
+
+#[cfg(feature = "parallel")]
+fn assemble_boundary_linear_parallel<S: FESpace + Sync>(
+    space: &S,
+    integrators: &[&dyn VectorBoundaryLinearIntegrator],
+    quad_order: u8,
+    face_ids: &[u32],
+    n_dofs: usize,
+    dim: usize,
+) -> Vec<f64>
+where
+    S::Mesh: MeshTopology + Sync,
+{
+    face_ids
+        .par_iter()
+        .copied()
+        .filter_map(|f| {
+            let vol_elem = vec_ref_elem_hcurl(dim, space.order());
+            let n_ldofs = vol_elem.n_dofs();
+            let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
+            let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
+            assemble_face_linear_contrib(
+                space,
+                &*vol_elem,
+                n_ldofs,
+                dim,
+                f,
+                integrators,
+                quad_order,
+                &mut ref_phi,
+                &mut phys_phi,
+            )
+        })
+        .fold(
+            || vec![0.0_f64; n_dofs],
+            |mut local, (global_dofs, f_face)| {
+                for (&d, &v) in global_dofs.iter().zip(f_face.iter()) {
+                    local[d] += v;
+                }
+                local
+            },
+        )
+        .reduce(
+            || vec![0.0_f64; n_dofs],
+            |mut a, b| {
+                for i in 0..n_dofs {
+                    a[i] += b[i];
+                }
+                a
+            },
+        )
+}
+
+fn assemble_face_bilinear_contrib<S: FESpace>(
+    space: &S,
+    vol_elem: &dyn VectorReferenceElement,
+    n_ldofs: usize,
+    dim: usize,
+    f: u32,
+    integrators: &[&dyn VectorBoundaryBilinearIntegrator],
+    quad_order: u8,
+    ref_phi: &mut [f64],
+    phys_phi: &mut [f64],
+) -> Option<(Vec<usize>, Vec<f64>)>
+where
+    S::Mesh: MeshTopology,
+{
+    let mesh = space.mesh();
+    let face_nodes = mesh.face_nodes(f);
+    let owner_elem = find_owner_element(mesh, face_nodes)?;
+    let elem_nodes = mesh.element_nodes(owner_elem);
+    let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
+    let j_inv_t = tr.jacobian_inv_t().clone();
+    let global_dofs: Vec<usize> = space
+        .element_dofs(owner_elem)
+        .iter()
+        .map(|&d| d as usize)
+        .collect();
+    let signs_opt = space.element_signs(owner_elem);
+    let (face_qp_phys, face_weights, face_normals) = face_quadrature(mesh, face_nodes, dim, quad_order);
+    let mut k_face = vec![0.0_f64; n_ldofs * n_ldofs];
+    for q in 0..face_qp_phys.len() / dim {
+        let xp = &face_qp_phys[q * dim..(q + 1) * dim];
+        let w = face_weights[q];
+        let norm = &face_normals[q * dim..(q + 1) * dim];
+        let xi_ref = phys_to_ref(mesh, elem_nodes, xp, dim);
+        vol_elem.eval_basis_vec(&xi_ref, ref_phi);
+        piola_hcurl_basis(&j_inv_t, ref_phi, phys_phi, n_ldofs, dim);
+        if let Some(s) = signs_opt {
+            for i in 0..n_ldofs {
+                for c in 0..dim {
+                    phys_phi[i * dim + c] *= s[i];
+                }
+            }
+        }
+        let qp_data = VectorBdQpData {
+            n_dofs: n_ldofs,
+            dim,
+            weight: w,
+            phi_vec: phys_phi,
+            normal: norm,
+            x_phys: xp,
+            elem_id: owner_elem,
+            elem_tag: mesh.face_tag(f),
+        };
+        for integ in integrators {
+            integ.add_to_face_matrix(&qp_data, &mut k_face);
+        }
+    }
+    Some((global_dofs, k_face))
+}
+
+fn assemble_face_linear_contrib<S: FESpace>(
+    space: &S,
+    vol_elem: &dyn VectorReferenceElement,
+    n_ldofs: usize,
+    dim: usize,
+    f: u32,
+    integrators: &[&dyn VectorBoundaryLinearIntegrator],
+    quad_order: u8,
+    ref_phi: &mut [f64],
+    phys_phi: &mut [f64],
+) -> Option<(Vec<usize>, Vec<f64>)>
+where
+    S::Mesh: MeshTopology,
+{
+    let mesh = space.mesh();
+    let face_nodes = mesh.face_nodes(f);
+    let owner_elem = find_owner_element(mesh, face_nodes)?;
+    let elem_nodes = mesh.element_nodes(owner_elem);
+    let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
+    let j_inv_t = tr.jacobian_inv_t().clone();
+    let global_dofs: Vec<usize> = space
+        .element_dofs(owner_elem)
+        .iter()
+        .map(|&d| d as usize)
+        .collect();
+    let signs_opt = space.element_signs(owner_elem);
+    let (face_qp_phys, face_weights, face_normals) = face_quadrature(mesh, face_nodes, dim, quad_order);
+    let mut f_face = vec![0.0_f64; n_ldofs];
+    for q in 0..face_qp_phys.len() / dim {
+        let xp = &face_qp_phys[q * dim..(q + 1) * dim];
+        let w = face_weights[q];
+        let norm = &face_normals[q * dim..(q + 1) * dim];
+        let xi_ref = phys_to_ref(mesh, elem_nodes, xp, dim);
+        vol_elem.eval_basis_vec(&xi_ref, ref_phi);
+        piola_hcurl_basis(&j_inv_t, ref_phi, phys_phi, n_ldofs, dim);
+        if let Some(s) = signs_opt {
+            for i in 0..n_ldofs {
+                for c in 0..dim {
+                    phys_phi[i * dim + c] *= s[i];
+                }
+            }
+        }
+        let qp_data = VectorBdQpData {
+            n_dofs: n_ldofs,
+            dim,
+            weight: w,
+            phi_vec: phys_phi,
+            normal: norm,
+            x_phys: xp,
+            elem_id: owner_elem,
+            elem_tag: mesh.face_tag(f),
+        };
+        for integ in integrators {
+            integ.add_to_face_vector(&qp_data, &mut f_face);
+        }
+    }
+    Some((global_dofs, f_face))
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

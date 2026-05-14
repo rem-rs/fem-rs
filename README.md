@@ -75,6 +75,8 @@ with MFEM examples.
 | `mfem_pex4_parallel_heat` | Parallel heat equation | Parallel SDIRK-2 |
 | `mfem_pex5_darcy` | Parallel Darcy | H(div) × L², saddle-point |
 
+**Real MPI (multi-process):** the `mfem_pex*` targets use [`ThreadLauncher`](crates/parallel/src/launcher/native.rs) (in-process “ranks”) so they run without installing MPI. For **OS processes** (`mpiexec` / `mpirun`), build your binary with `fem-parallel`’s `mpi` feature, call [`MpiLauncher`](crates/parallel/src/launcher/native.rs) in each process, and keep the launcher alive for the lifetime of [`Comm`](crates/parallel/src/comm.rs). Partition → [`GhostExchange`](crates/parallel/src/ghost.rs) → [`ParAssembler`](crates/parallel/src/par_assembler.rs) / [`ParCsrMatrix`](crates/parallel/src/par_csr.rs) is unchanged; see the **“MPI (multi-process) scenarios”** section in `cargo doc -p fem-parallel`. Parallel HDF5 checkpoints use `fem-io-hdf5-parallel` with the `hdf5-mpi` feature (`io_hdf5_mpi` on examples).
+
 Dependency order (each crate depends only on crates listed above it):
 `core �?mesh/linalg/element �?space �?assembly �?solver/amg �?parallel/io/wasm`
 

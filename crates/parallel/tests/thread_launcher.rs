@@ -8,14 +8,122 @@ use std::sync::{Arc, Mutex};
 
 use fem_parallel::{
     launcher::native::ThreadLauncher,
-    metis::{MetisOptions, partition_simplex_metis_streaming},
+    metis::{MetisOptions, partition_simplex_metis, partition_simplex_metis_streaming},
     par_simplex::{partition_simplex, partition_simplex_streaming},
     GhostExchange,
     WorkerConfig,
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::{ElementType, SimplexMesh};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// One `Prism6` with Tri3 caps + Quad4 sides (mixed `face_offsets`).
+fn unit_prism_mixed_boundary() -> SimplexMesh<3> {
+    let coords: Vec<f64> = vec![
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+        1.0, 0.0, 1.0,
+        0.0, 1.0, 1.0,
+    ];
+    let conn = vec![0u32, 1, 2, 3, 4, 5];
+    let elem_tags = vec![1i32];
+    let face_conn: Vec<u32> = vec![
+        0, 1, 2,
+        3, 4, 5,
+        0, 1, 4, 3,
+        1, 2, 5, 4,
+        2, 0, 3, 5,
+    ];
+    let face_tags = vec![1i32, 2, 3, 3, 3];
+    let face_types = vec![
+        ElementType::Tri3,
+        ElementType::Tri3,
+        ElementType::Quad4,
+        ElementType::Quad4,
+        ElementType::Quad4,
+    ];
+    let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
+    let mut m = SimplexMesh::uniform(
+        coords,
+        conn,
+        elem_tags,
+        ElementType::Prism6,
+        face_conn,
+        face_tags,
+        ElementType::Tri3,
+    );
+    m.face_types = Some(face_types);
+    m.face_offsets = Some(face_offsets);
+    m
+}
+
+/// Two disjoint prisms (12 nodes, 2 elems, 10 boundary faces, mixed offsets).
+fn two_disjoint_prisms_mixed_boundary() -> SimplexMesh<3> {
+    let o = 6u32;
+    let coords: Vec<f64> = vec![
+        // prism 0
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+        1.0, 0.0, 1.0,
+        0.0, 1.0, 1.0,
+        // prism 1 (translated in +x)
+        3.0, 0.0, 0.0,
+        4.0, 0.0, 0.0,
+        3.0, 1.0, 0.0,
+        3.0, 0.0, 1.0,
+        4.0, 0.0, 1.0,
+        3.0, 1.0, 1.0,
+    ];
+    let conn: Vec<u32> = vec![0, 1, 2, 3, 4, 5, o, o + 1, o + 2, o + 3, o + 4, o + 5];
+    let elem_tags = vec![1i32, 1];
+    let mut face_conn: Vec<u32> = vec![
+        0, 1, 2,
+        3, 4, 5,
+        0, 1, 4, 3,
+        1, 2, 5, 4,
+        2, 0, 3, 5,
+    ];
+    // second prism faces (node ids +6)
+    face_conn.extend_from_slice(&[
+        o, o + 1, o + 2,
+        o + 3, o + 4, o + 5,
+        o, o + 1, o + 4, o + 3,
+        o + 1, o + 2, o + 5, o + 4,
+        o + 2, o, o + 3, o + 5,
+    ]);
+    let face_types: Vec<ElementType> = vec![
+        ElementType::Tri3,
+        ElementType::Tri3,
+        ElementType::Quad4,
+        ElementType::Quad4,
+        ElementType::Quad4,
+        ElementType::Tri3,
+        ElementType::Tri3,
+        ElementType::Quad4,
+        ElementType::Quad4,
+        ElementType::Quad4,
+    ];
+    let face_tags = vec![1, 2, 3, 3, 3, 1, 2, 3, 3, 3];
+    let face_offsets: Vec<usize> = vec![
+        0, 3, 6, 10, 14, 18, 21, 24, 28, 32, 36,
+    ];
+    let mut m = SimplexMesh::uniform(
+        coords,
+        conn,
+        elem_tags,
+        ElementType::Prism6,
+        face_conn,
+        face_tags,
+        ElementType::Tri3,
+    );
+    m.face_types = Some(face_types);
+    m.face_offsets = Some(face_offsets);
+    m
+}
 
 fn launcher(n: usize) -> ThreadLauncher {
     ThreadLauncher::new(WorkerConfig::new(n))
@@ -445,6 +553,65 @@ fn streaming_4_ranks() {
     assert_eq!(r, vec![0, 1, 2, 3]);
 }
 
+#[test]
+fn streaming_prism_mixed_boundary_single_rank() {
+    let mesh = Arc::new(unit_prism_mixed_boundary());
+    mesh.check().expect("fixture prism");
+    launcher(1).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
+        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+            .expect("streaming partition failed");
+        assert_eq!(pmesh.global_n_nodes(), mesh.n_nodes());
+        assert_eq!(pmesh.global_n_elems(), mesh.n_elems());
+        let local = pmesh.local_mesh();
+        local.check().expect("local mesh");
+        assert_eq!(local.n_faces(), 5, "prism has 5 boundary faces");
+        assert!(local.face_offsets.is_some(), "mixed boundary must round-trip");
+    });
+}
+
+#[test]
+fn streaming_two_prisms_matches_replicated_2_ranks() {
+    let mesh = Arc::new(two_disjoint_prisms_mixed_boundary());
+    mesh.check().expect("fixture two prisms");
+    let mesh2 = Arc::clone(&mesh);
+
+    let replicated = Arc::new(Mutex::new(Vec::new()));
+    let rep = Arc::clone(&replicated);
+    let mesh_ref = Arc::clone(&mesh);
+    launcher(2).launch(move |comm| {
+        let pmesh = partition_simplex(&mesh_ref, &comm);
+        rep.lock().unwrap().push((
+            comm.rank(),
+            pmesh.n_owned_nodes(),
+            pmesh.n_ghost_nodes(),
+            pmesh.local_mesh().n_faces(),
+        ));
+    });
+
+    let streaming = Arc::new(Mutex::new(Vec::new()));
+    let stm = Arc::clone(&streaming);
+    launcher(2).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh2) } else { None };
+        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+            .expect("streaming partition failed");
+        stm.lock().unwrap().push((
+            comm.rank(),
+            pmesh.n_owned_nodes(),
+            pmesh.n_ghost_nodes(),
+            pmesh.local_mesh().n_faces(),
+        ));
+    });
+
+    let mut a = replicated.lock().unwrap().clone();
+    let mut b = streaming.lock().unwrap().clone();
+    a.sort_by_key(|t| t.0);
+    b.sort_by_key(|t| t.0);
+    assert_eq!(a, b, "replicated vs streaming: per-rank nodes/ghosts/local faces");
+    let sum_faces: usize = a.iter().map(|t| t.3).sum();
+    assert_eq!(sum_faces, 10, "each prism contributes 5 boundary faces");
+}
+
 // ── METIS streaming partition ───────────────────────────────────────────────
 
 #[test]
@@ -518,4 +685,51 @@ fn metis_streaming_ghost_exchange() {
             );
         }
     });
+}
+
+#[test]
+fn metis_streaming_two_disjoint_prisms_matches_replicated_2_ranks() {
+    let mesh = Arc::new(two_disjoint_prisms_mixed_boundary());
+    mesh.check().expect("fixture two prisms");
+    let mesh2 = Arc::clone(&mesh);
+    let opts_rep = MetisOptions::default();
+    let opts_stm = MetisOptions::default();
+
+    let replicated = Arc::new(Mutex::new(Vec::new()));
+    let rep = Arc::clone(&replicated);
+    let mesh_ref = Arc::clone(&mesh);
+    launcher(2).launch(move |comm| {
+        let pmesh = partition_simplex_metis(&mesh_ref, &comm, &opts_rep);
+        rep.lock().unwrap().push((
+            comm.rank(),
+            pmesh.n_owned_nodes(),
+            pmesh.n_ghost_nodes(),
+            pmesh.local_mesh().n_faces(),
+        ));
+    });
+
+    let streaming = Arc::new(Mutex::new(Vec::new()));
+    let stm = Arc::clone(&streaming);
+    launcher(2).launch(move |comm| {
+        let mesh_opt = if comm.is_root() { Some(&*mesh2) } else { None };
+        let pmesh = partition_simplex_metis_streaming(mesh_opt, &comm, &opts_stm)
+            .expect("METIS streaming partition failed");
+        stm.lock().unwrap().push((
+            comm.rank(),
+            pmesh.n_owned_nodes(),
+            pmesh.n_ghost_nodes(),
+            pmesh.local_mesh().n_faces(),
+        ));
+    });
+
+    let mut a = replicated.lock().unwrap().clone();
+    let mut b = streaming.lock().unwrap().clone();
+    a.sort_by_key(|t| t.0);
+    b.sort_by_key(|t| t.0);
+    assert_eq!(
+        a, b,
+        "METIS replicated vs streaming: per-rank nodes/ghosts/local faces"
+    );
+    let sum_faces: usize = a.iter().map(|t| t.3).sum();
+    assert_eq!(sum_faces, 10, "each prism contributes 5 boundary faces");
 }

@@ -8,7 +8,7 @@
 //! |----------|---------|---------|
 //! | [`FEM_PARALLEL_LOCAL_RAYON_MIN`] | `4096` | Minimum length (owned DOFs for reductions, or full local length for `axpy`/`scale`) before Rayon is used for local CPU work on native targets. Set to `1` to force Rayon everywhere (not recommended for tiny vectors). |
 //! | [`FEM_LINALG_SPMV_PARALLEL_MIN_ROWS`](crate::FEM_LINALG_SPMV_PARALLEL_MIN_ROWS) | `128` | Minimum CSR row count before Rayon parallelizes local `CsrMatrix::spmv` / `spmv_add` inside [`ParCsrMatrix`](crate::par_csr::ParCsrMatrix) blocks. Defined in `fem-linalg`, re-exported at the crate root. |
-//! | [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`](crate::FEM_ASSEMBLY_PARALLEL_MIN_ELEMS) | `64` | Minimum volume element count on a rank before Rayon parallelizes [`Assembler`](fem_assembly::Assembler) volume bilinear/linear assembly. Defined in `fem-assembly` (enabled by this crate), re-exported at the crate root. |
+//! | [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`](crate::FEM_ASSEMBLY_PARALLEL_MIN_ELEMS) | `64` | Minimum volume element count on a rank before Rayon parallelizes local volume assembly ([`Assembler`](fem_assembly::Assembler), [`VectorAssembler`](fem_assembly::VectorAssembler), [`MixedAssembler`](fem_assembly::MixedAssembler), DG). Defined in `fem-assembly` (enabled by this crate), re-exported at the crate root. |
 
 use std::sync::OnceLock;
 

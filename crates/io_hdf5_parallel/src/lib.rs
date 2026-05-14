@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "hdf5")]
 mod hdf5_rust_impl;
 
+#[cfg(feature = "hdf5")]
+pub(crate) use hdf5_rust_impl::parse_step_name;
+
 use thiserror::Error;
 
 /// Schema version for on-disk checkpoint layout.
@@ -117,6 +120,41 @@ impl ParallelIoConfig {
     pub fn rank_group_name(&self) -> String {
         format!("rank_{:06}", self.rank)
     }
+}
+
+/// True when the active MPI communicator matches `cfg` (size and this rank's id).
+#[cfg(feature = "hdf5-mpi")]
+fn mpi_rank_matches_parallel_cfg(cfg: &ParallelIoConfig) -> bool {
+    use mpi::topology::SimpleCommunicator;
+    use mpi::traits::Communicator;
+    let world = SimpleCommunicator::world();
+    world.size() as usize == cfg.world_size && world.rank() as usize == cfg.rank
+}
+
+/// Serialize a side effect across MPI ranks (required for `rust_hdf5`: one writer at a time per file).
+#[cfg(feature = "hdf5-mpi")]
+fn mpi_ordered_each_rank<F>(expected_world: usize, mut on_turn: F) -> Result<(), Hdf5ParallelError>
+where
+    F: FnMut(usize) -> Result<(), Hdf5ParallelError>,
+{
+    use mpi::topology::SimpleCommunicator;
+    use mpi::traits::{Communicator, CommunicatorCollectives};
+
+    let world = SimpleCommunicator::world();
+    if world.size() as usize != expected_world {
+        return Err(Hdf5ParallelError::InvalidConfig(
+            "MPI world size does not match expected_world for ordered HDF5 access",
+        ));
+    }
+    let rank = world.rank() as usize;
+    for turn in 0..expected_world {
+        world.barrier();
+        if rank == turn {
+            on_turn(turn)?;
+        }
+        world.barrier();
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -240,7 +278,9 @@ pub fn write_checkpoint_step_f64_with_backend(
 /// MPI-enabled checkpoint writer.
 ///
 /// In `hdf5-mpi` builds this performs MPI-coordinated checkpoint staging:
-/// each rank writes its partition, then rank 0 materializes global fields for
+/// each rank writes its partition (serialized per rank when the `hdf5` backend
+/// is active, because [`rust_hdf5`](https://crates.io/crates/rust-hdf5) is not
+/// multi-writer-safe on one file), then rank 0 materializes global fields for
 /// the step. If the live MPI communicator does not match `cfg`, the function
 /// safely falls back to partitioned mode.
 pub fn write_checkpoint_step_f64_mpi_collective(
@@ -263,16 +303,17 @@ pub fn write_checkpoint_step_f64_mpi_collective(
 
         // If caller config does not match active communicator, degrade to
         // deterministic partitioned write rather than failing unexpectedly.
-        if comm_size != cfg.world_size || comm_rank != cfg.rank {
+        if !mpi_rank_matches_parallel_cfg(&cfg) {
             return write_checkpoint_step_f64(file_path, cfg, step, time, fields);
         }
 
-        write_checkpoint_step_f64(file_path, cfg, step, time, fields)?;
-
-        #[cfg(feature = "hdf5")]
-        if hdf5_rust_impl::SUPPORTS_HYPERSLAB {
-            let _ = write_checkpoint_step_f64_hyperslab(file_path, cfg, step, time, fields);
-        }
+        // `hdf5-mpi` implies `hdf5`; serialize rust-hdf5 file access across ranks.
+        mpi_ordered_each_rank(cfg.world_size, |turn| {
+            if cfg.rank == turn {
+                write_checkpoint_step_f64(file_path, cfg, step, time, fields)?;
+            }
+            Ok(())
+        })?;
 
         world.barrier();
 
@@ -372,9 +413,29 @@ pub fn write_checkpoint_step_bundle_f64(
     #[cfg(feature = "hdf5")]
     {
         if let Some(meta) = bundle.mesh_meta {
-            hdf5_rust_impl::write_checkpoint_step_bundle_f64_mesh_meta(
-                file_path, cfg, step, time, meta,
-            )?;
+            #[cfg(feature = "hdf5-mpi")]
+            {
+                if backend == IoBackend::MpiCollective && mpi_rank_matches_parallel_cfg(&cfg) {
+                    mpi_ordered_each_rank(cfg.world_size, |turn| {
+                        if cfg.rank == turn {
+                            hdf5_rust_impl::write_checkpoint_step_bundle_f64_mesh_meta(
+                                file_path, cfg, step, time, meta,
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                } else {
+                    hdf5_rust_impl::write_checkpoint_step_bundle_f64_mesh_meta(
+                        file_path, cfg, step, time, meta,
+                    )?;
+                }
+            }
+            #[cfg(not(feature = "hdf5-mpi"))]
+            {
+                hdf5_rust_impl::write_checkpoint_step_bundle_f64_mesh_meta(
+                    file_path, cfg, step, time, meta,
+                )?;
+            }
         }
     }
 

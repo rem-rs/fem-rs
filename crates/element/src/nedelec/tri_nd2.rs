@@ -178,6 +178,15 @@ fn eval_monomial_curls(x: f64, y: f64, curls: &mut [f64; 8]) {
 /// - DOFs 6–7: interior bubble moments
 pub struct TriND2;
 
+impl TriND2 {
+    /// Coefficient matrix `C[i][j]` on the reference triangle with
+    /// `Φ_i(ξ,η) = Σ_j C[i][j] · m_j(ξ,η)` for the eight monomial vectors `m_j`.
+    #[inline]
+    pub fn monomial_coeff_matrix() -> &'static [[f64; 8]; 8] {
+        coeff()
+    }
+}
+
 impl VectorReferenceElement for TriND2 {
     fn dim(&self)    -> u8    { 2 }
     fn order(&self)  -> u8    { 2 }

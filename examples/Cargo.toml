@@ -3,6 +3,12 @@ name    = "fem-examples"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Convenience aliases for checkpoint I/O (mfem_ex43_hdf5_checkpoint, parity scripts).
+io_hdf5 = ["fem-io-hdf5-parallel/hdf5"]
+io_hdf5_mpi = ["fem-io-hdf5-parallel/hdf5-mpi"]
+
 [dependencies]
 fem-core     = { path = "../crates/core" }
 fem-mesh     = { path = "../crates/mesh" }
@@ -22,6 +28,14 @@ env_logger   = { workspace = true }
 [[example]]
 name = "mfem_ex1_poisson"
 path = "mfem_ex1_poisson.rs"
+
+[[example]]
+name = "mfem_ex_iga_poisson_1d"
+path = "mfem_ex_iga_poisson_1d.rs"
+
+[[example]]
+name = "mfem_ex_iga_poisson_2d_patch"
+path = "mfem_ex_iga_poisson_2d_patch.rs"
 
 [[example]]
 name = "mfem_ex2_elasticity"

@@ -5,6 +5,9 @@
 //!
 //! `rust_hdf5` writers cannot reopen existing datasets by name, so multi-rank incremental
 //! hyperslab writes to a shared global dataset are **not supported**; see [`SUPPORTS_HYPERSLAB`].
+//! For MPI jobs, the crate’s `hdf5-mpi` path serializes per-rank file opens (see
+//! `write_checkpoint_step_f64_mpi_collective`); do not call these writers concurrently from
+//! multiple OS processes on the same path without that coordination.
 
 use std::path::Path;
 
@@ -29,7 +32,7 @@ fn ic(s: impl ToString) -> Hdf5ParallelError {
     Hdf5ParallelError::InvalidCheckpoint(s.to_string())
 }
 
-fn parse_step_name(name: &str) -> Option<u64> {
+pub(crate) fn parse_step_name(name: &str) -> Option<u64> {
     let pfx = "step_";
     if !name.starts_with(pfx) {
         return None;

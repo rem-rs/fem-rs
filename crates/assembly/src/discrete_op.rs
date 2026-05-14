@@ -18,8 +18,10 @@
 //! | `divergence` | H(div) RT0 | L2 (P0)   | 0     |
 //! | `divergence` | H(div) RT1 | L2 (P1)   | 1     |
 //! | `divergence` | H(div) RT1 | L2 (P2)   | 1     |
+//! | `divergence` | H(div) RT2 | L2 (P2)   | 2     |
 //! | `curl_3d`    | H(curl) ND1| H(div) RT0| 1     |
 //! | `curl_3d`    | H(curl) ND2| H(div) RT1| 2     |
+//! | `curl_2d_hdiv` | H(curl) ND2| H(div) RT2| 2 (2D) |
 //!
 //! The lowest-order (P1→ND1, RT0→P0) matrices are assembled topologically
 //! (exact, no quadrature error).  Higher-order pairs (P2→ND2, RT1→P1) use
@@ -36,10 +38,14 @@
 use std::collections::HashSet;
 
 use fem_mesh::ElementType;
-use fem_element::{ReferenceElement, TetND2, TetRT1, TriND1, TriND2, TriRT1, VectorReferenceElement};
+use fem_element::{
+    quadrature::gauss_legendre_01, ReferenceElement, TetND2, TetRT1, TriND1, TriND2, TriRT1,
+    TriRT2, VectorReferenceElement,
+};
 use fem_element::lagrange::TriP2;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, ElementTransformation};
+use nalgebra::DMatrix;
 use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space};
 
@@ -57,7 +63,7 @@ pub enum DiscreteOpError {
     UnsupportedHCurlOrder { op: &'static str, order: u8 },
 
     /// The H(div) space has an unsupported polynomial order.
-    #[error("{op}: H(div) space must be order 0 (RT0) or 1 (RT1), got order {order}")]
+    #[error("{op}: H(div) space must be order 0 (RT0), 1 (RT1), or 2 (RT2, 2D only), got order {order}")]
     UnsupportedHDivOrder { op: &'static str, order: u8 },
 
     /// The L2 space has an unsupported polynomial order.
@@ -71,6 +77,118 @@ pub enum DiscreteOpError {
     /// The space orders are incompatible with each other.
     #[error("{op}: incompatible space orders — H1 order {h1_order} requires H(curl) order {h1_order}, got {hcurl_order}")]
     IncompatibleOrders { op: &'static str, h1_order: u8, hcurl_order: u8 },
+}
+
+/// Local RT2 Vandermonde and P2-sampled divergences for the RT2→P2 reconstruction on an
+/// affine triangle (`dmat[i,k] = DOF_i^{RT2}(Φ_k^{ref})`, `ymat[p,k] = div(Φ_k)(x_p)/det_j`).
+fn rt2_triangle_dmat_ymat_div_p2<M: MeshTopology>(
+    mesh: &M,
+    nodes: &[u32],
+    j00: f64,
+    j01: f64,
+    j10: f64,
+    j11: f64,
+    det_j: f64,
+    jit: &DMatrix<f64>,
+    bop: &[f64],
+    iop: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    const N_RT2: usize = 15;
+    const N_L2: usize = 6;
+    let n_rt2 = N_RT2;
+    let n_l2_local = N_L2;
+    let tri_faces = [(1usize, 2usize), (0usize, 2usize), (0usize, 1usize)];
+
+    let x0 = mesh.node_coords(nodes[0]);
+    let x1 = mesh.node_coords(nodes[1]);
+    let x2 = mesh.node_coords(nodes[2]);
+
+    let mut dmat = vec![0.0_f64; n_rt2 * n_rt2];
+    let mut ymat = vec![0.0_f64; n_l2_local * n_rt2];
+    let mut prim = [[0.0_f64; 2]; N_RT2];
+    let mut div_prim = [0.0_f64; N_RT2];
+
+    for k in 0..n_rt2 {
+        let mut dof_k = [0.0_f64; N_RT2];
+
+        for (edge_local, &(li, lj)) in tri_faces.iter().enumerate() {
+            let va = nodes[li];
+            let vb = nodes[lj];
+            let (a, b) = if va < vb { (va, vb) } else { (vb, va) };
+            let pa = mesh.node_coords(a);
+            let pb = mesh.node_coords(b);
+            let tx = pb[0] - pa[0];
+            let ty = pb[1] - pa[1];
+            let nx = -ty;
+            let ny = tx;
+            for q in 0..3 {
+                let t = bop[q];
+                let xp = pa[0] + t * tx;
+                let yp = pa[1] + t * ty;
+                let xix = xp - x0[0];
+                let xiy = yp - x0[1];
+                let inv_det = 1.0 / det_j;
+                let xi0 = inv_det * (j11 * xix - j01 * xiy);
+                let xi1 = inv_det * (-j10 * xix + j00 * xiy);
+
+                TriRT2::mfem_primitives_and_divs(xi0, xi1, &mut prim, &mut div_prim);
+                let urx = prim[k][0];
+                let ury = prim[k][1];
+                let upx = (j00 * urx + j01 * ury) / det_j;
+                let upy = (j10 * urx + j11 * ury) / det_j;
+                let flux = upx * nx + upy * ny;
+                dof_k[3 * edge_local + q] = flux;
+            }
+        }
+
+        let pdeg = 2usize;
+        let mut row = 9usize;
+        for jj in 0..pdeg {
+            for ii in 0..(pdeg - jj) {
+                let wsum = iop[ii] + iop[jj] + iop[pdeg - 1 - ii - jj];
+                let xr = iop[ii] / wsum;
+                let yr = iop[jj] / wsum;
+                TriRT2::mfem_primitives_and_divs(xr, yr, &mut prim, &mut div_prim);
+                let urx = prim[k][0];
+                let ury = prim[k][1];
+                let upx = (j00 * urx + j01 * ury) / det_j;
+                let upy = (j10 * urx + j11 * ury) / det_j;
+                let f0 = upx;
+                let f1 = upy;
+                let ur0 = det_j * (jit[(0, 0)] * f0 + jit[(1, 0)] * f1);
+                let ur1 = det_j * (jit[(0, 1)] * f0 + jit[(1, 1)] * f1);
+                dof_k[row] = -ur1;
+                row += 1;
+                dof_k[row] = -ur0;
+                row += 1;
+            }
+        }
+        debug_assert_eq!(row, N_RT2);
+
+        for i in 0..n_rt2 {
+            dmat[i * n_rt2 + k] = dof_k[i];
+        }
+
+        let sample_pts = [
+            [x0[0], x0[1]],
+            [x1[0], x1[1]],
+            [x2[0], x2[1]],
+            [0.5 * (x0[0] + x1[0]), 0.5 * (x0[1] + x1[1])],
+            [0.5 * (x1[0] + x2[0]), 0.5 * (x1[1] + x2[1])],
+            [0.5 * (x0[0] + x2[0]), 0.5 * (x0[1] + x2[1])],
+        ];
+        for p in 0..n_l2_local {
+            let yp0 = sample_pts[p][0] - x0[0];
+            let yp1 = sample_pts[p][1] - x0[1];
+            let inv_det = 1.0 / det_j;
+            let xi0 = inv_det * (j11 * yp0 - j01 * yp1);
+            let xi1 = inv_det * (-j10 * yp0 + j00 * yp1);
+            TriRT2::mfem_primitives_and_divs(xi0, xi1, &mut prim, &mut div_prim);
+            ymat[p * n_rt2 + k] = div_prim[k] / det_j;
+        }
+    }
+
+    (dmat, ymat)
 }
 
 // ---- Operator struct -------------------------------------------------------
@@ -159,7 +277,9 @@ impl DiscreteLinearOperator {
             let verts = mesh.element_nodes(e);
             let local_edges: &[(usize, usize)] = match mesh.element_type(e) {
                 ElementType::Tri3 | ElementType::Tri6 => &[(0, 1), (1, 2), (0, 2)],
-                ElementType::Quad4 | ElementType::Quad8 => &[(0, 1), (1, 2), (2, 3), (3, 0)],
+                ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
+                    &[(0, 1), (1, 2), (2, 3), (3, 0)]
+                }
                 ElementType::Tet4 | ElementType::Tet10 => &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
                 ElementType::Hex8 | ElementType::Hex20 => &[
                     (0, 1), (3, 2), (4, 5), (7, 6),
@@ -772,6 +892,51 @@ impl DiscreteLinearOperator {
         Ok(coo.into_csr())
     }
 
+    /// Build the discrete curl matrix C: H(curl) → H(div) on **2D triangles** (ND2 → RT2).
+    ///
+    /// Implemented by [`crate::vector_assembler::VectorAssembler::assemble_curl_hdiv_pairing_2d_nd2_rt2`]:
+    /// same affine map, quadrature weight `w_{\mathrm{ref}}|det J|`, and Piola maps as
+    /// [`crate::vector_assembler::VectorAssembler::assemble_bilinear`] on simplices.  The
+    /// local block is
+    /// \[
+    ///   B_{ij} = \int_T \Psi_i^{RT2} \cdot (\Phi_{j,y}^{ND2},\,-\Phi_{j,x}^{ND2}) \,\mathrm{d}x
+    /// \]
+    /// (covariant `Φ`, contravariant `Ψ`).  Element matrices are **added** into CSR for shared
+    /// RT2 DOFs like [`Self::divergence`] RT2→P2.  ND2 columns omit [`HCurlSpace::element_signs`]
+    /// (same as [`Self::curl_2d_nd2_p2`]).
+    ///
+    /// **De Rham:** tests bound `C*G` on smooth potentials. Composing with [`Self::divergence`]
+    /// RT2→P2, random-stress checks still give `max|D*C*u|` on the order of `1e1` on refined
+    /// `unit_square` meshes (this quadrature `C` and the RT2→P2 reconstruction `D` are not a
+    /// commuting pair in max norm); the mixed volume form remains the documented `C`.
+    ///
+    /// # Errors
+    /// Returns [`DiscreteOpError`] if the mesh is not 2-D or orders are not `(2, 2)`.
+    pub fn curl_2d_hdiv<M: MeshTopology>(
+        hcurl_space: &HCurlSpace<M>,
+        hdiv_space: &HDivSpace<M>,
+    ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
+        let mesh = hcurl_space.mesh();
+        if mesh.dim() != 2 {
+            return Err(DiscreteOpError::UnsupportedDimension {
+                op: "curl_2d_hdiv",
+                dim: mesh.dim(),
+            });
+        }
+        if hcurl_space.order() != 2 || hdiv_space.order() != 2 {
+            return Err(DiscreteOpError::IncompatibleOrders {
+                op: "curl_2d_hdiv",
+                h1_order: hcurl_space.order(),
+                hcurl_order: hdiv_space.order(),
+            });
+        }
+        Ok(crate::vector_assembler::VectorAssembler::assemble_curl_hdiv_pairing_2d_nd2_rt2(
+            hcurl_space,
+            hdiv_space,
+            crate::vector_assembler::TRI_ND2_RT2_MIXED_QUAD_ORDER,
+        ))
+    }
+
     /// Build the discrete divergence matrix D: H(div) -> L2.
     ///
     /// ## Order 0 — topological assembly (RT0 → P0)
@@ -781,8 +946,13 @@ impl DiscreteLinearOperator {
     ///
     /// ## Order 1 — numerical assembly (RT1 → P1/P2)
     ///
-    /// `D[l2_dof_i, hdiv_dof_j] = DOF_i^{P1}(div Ψ_j)`, computed via
+    /// `D[l2_dof_i, hdiv_dof_j] = DOF_i^{L2}(div Ψ_j)`, computed via
     /// numerical integration on the reference element and scatter-assembled.
+    ///
+    /// ## Order 2 — 2D triangles only (RT2 → P2)
+    ///
+    /// Same local reconstruction idea as RT1→P2, using fifteen Piola pullbacks
+    /// of the MFEM RT2 reference primitives and the MFEM-style nodal `H(div)` DOFs.
     ///
     /// # Errors
     /// Returns [`DiscreteOpError`] if the space orders are unsupported or
@@ -795,15 +965,18 @@ impl DiscreteLinearOperator {
         let l2_order   = l2_space.order();
 
         match hdiv_order {
-            0 | 1 => {}
+            0 | 1 | 2 => {}
             o => return Err(DiscreteOpError::UnsupportedHDivOrder { op: "divergence", order: o }),
         }
         match l2_order {
             0 | 1 | 2 => {}
             o => return Err(DiscreteOpError::UnsupportedL2Order { op: "divergence", order: o }),
         }
-        // RT0 -> P0 and RT1 -> P1/P2.
-        if !((hdiv_order == 0 && l2_order == 0) || (hdiv_order == 1 && (l2_order == 1 || l2_order == 2))) {
+        // RT0→P0, RT1→P1/P2, RT2→P2 (2D).
+        if !((hdiv_order == 0 && l2_order == 0)
+            || (hdiv_order == 1 && (l2_order == 1 || l2_order == 2))
+            || (hdiv_order == 2 && l2_order == 2))
+        {
             return Err(DiscreteOpError::IncompatibleOrders {
                 op: "divergence",
                 h1_order: hdiv_order,
@@ -814,6 +987,7 @@ impl DiscreteLinearOperator {
         match (hdiv_order, l2_order) {
             (0, 0) => Self::divergence_rt0_p0(hdiv_space, l2_space),
             (1, 1) | (1, 2) => Self::divergence_rt1_p1(hdiv_space, l2_space),
+            (2, 2) => Self::divergence_rt2_p2(hdiv_space, l2_space),
             _ => unreachable!(),
         }
     }
@@ -1177,6 +1351,86 @@ impl DiscreteLinearOperator {
                         if val.abs() > 1e-15 {
                             coo.add(global_p as usize, global_rt1 as usize, val);
                         }
+                    }
+                }
+            }
+        }
+
+        Ok(coo.into_csr())
+    }
+
+    // ── RT2 → P2 (2D triangles) ───────────────────────────────────────────────
+
+    fn divergence_rt2_p2<M: MeshTopology>(
+        hdiv_space: &HDivSpace<M>,
+        l2_space: &L2Space<M>,
+    ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
+        let mesh = hdiv_space.mesh();
+        if mesh.dim() != 2 {
+            return Err(DiscreteOpError::UnsupportedDimension {
+                op: "divergence (RT2→P2)",
+                dim: mesh.dim(),
+            });
+        }
+
+        const N_RT2: usize = 15;
+
+        let n_rt2 = N_RT2;
+        let n_l2 = l2_space.n_dofs();
+        let n_hdiv = hdiv_space.n_dofs();
+        let mut coo = CooMatrix::new(n_l2, n_hdiv);
+
+        let (bop, _) = gauss_legendre_01(3);
+        let (iop, _) = gauss_legendre_01(2);
+
+        for e in mesh.elem_iter() {
+            let hdiv_dofs = hdiv_space.element_dofs(e);
+            let l2_dofs = l2_space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+
+            let n_l2_local = l2_dofs.len();
+            if n_l2_local != 6 {
+                return Err(DiscreteOpError::IncompatibleOrders {
+                    op: "divergence (RT2→P2)",
+                    h1_order: 2,
+                    hcurl_order: l2_space.order(),
+                });
+            }
+
+            let x0 = mesh.node_coords(nodes[0]);
+            let x1 = mesh.node_coords(nodes[1]);
+            let x2 = mesh.node_coords(nodes[2]);
+            let j00 = x1[0] - x0[0];
+            let j10 = x1[1] - x0[1];
+            let j01 = x2[0] - x0[0];
+            let j11 = x2[1] - x0[1];
+            let det_j = j00 * j11 - j01 * j10;
+
+            let transform = ElementTransformation::from_simplex_nodes(mesh, nodes);
+            let jit = transform.jacobian_inv_t();
+
+            let (dmat, ymat) =
+                rt2_triangle_dmat_ymat_div_p2(mesh, nodes, j00, j01, j10, j11, det_j, &jit, &bop, &iop);
+
+            let mut dt = vec![0.0_f64; n_rt2 * n_rt2];
+            for i in 0..n_rt2 {
+                for j in 0..n_rt2 {
+                    dt[i * n_rt2 + j] = dmat[j * n_rt2 + i];
+                }
+            }
+            let mut yt = vec![0.0_f64; n_rt2 * n_l2_local];
+            for p in 0..n_l2_local {
+                for kk in 0..n_rt2 {
+                    yt[kk * n_l2_local + p] = ymat[p * n_rt2 + kk];
+                }
+            }
+
+            let z = solve_small(n_rt2, n_l2_local, &dt, &yt);
+            for (p_local, &global_p) in l2_dofs.iter().enumerate() {
+                for (i_local, &global_rt2) in hdiv_dofs.iter().enumerate() {
+                    let val = z[i_local * n_l2_local + p_local];
+                    if val.abs() > 1e-15 {
+                        coo.add(global_p as usize, global_rt2 as usize, val);
                     }
                 }
             }
@@ -2322,6 +2576,141 @@ mod tests {
         assert!(
             max_err < 1e-8,
             "RT1->P2: div(x^2,y^2) should be 2x+2y, max error = {max_err}"
+        );
+    }
+
+    /// Test: divergence supports RT2→L2(P2) on 2D meshes (matrix shape).
+    #[test]
+    fn divergence_rt2_p2_dimensions() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let hdiv = HDivSpace::new(mesh, 2);
+        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
+        let l2 = L2Space::new(mesh2, 2);
+
+        let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
+        assert_eq!(d.nrows, l2.n_dofs());
+        assert_eq!(d.ncols, hdiv.n_dofs());
+        assert!(d.nrows > 0 && d.ncols > 0);
+    }
+
+    /// Test: Divergence RT2→P2 — commuting diagram for a linear field (exact in RT2 / P2).
+    #[test]
+    fn divergence_rt2_p2_commutes_with_interpolation() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let hdiv = HDivSpace::new(mesh, 2);
+        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let l2 = L2Space::new(mesh2, 2);
+
+        // F = (x, y), div F = 2 (constant — exact in RT2 and P2).
+        let f = hdiv.interpolate_vector(&|x| vec![x[0], x[1]]);
+
+        let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
+        let mut div_f = vec![0.0; l2.n_dofs()];
+        d.spmv(f.as_slice(), &mut div_f);
+
+        let div_interp = l2.interpolate(&|_x| 2.0);
+        let max_err: f64 = (0..l2.n_dofs())
+            .map(|i| (div_f[i] - div_interp.as_slice()[i]).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_err < 1e-7,
+            "RT2→P2: div(x,y) should be 2, max error = {max_err}"
+        );
+    }
+
+    /// Test: Divergence RT2→P2 — divergence-free field gives zero.
+    #[test]
+    fn divergence_rt2_p2_div_free_field_is_zero() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let hdiv = HDivSpace::new(mesh, 2);
+        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let l2 = L2Space::new(mesh2, 2);
+
+        let f = hdiv.interpolate_vector(&|x| vec![-x[1], x[0]]);
+        let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
+        let mut div_f = vec![0.0; l2.n_dofs()];
+        d.spmv(f.as_slice(), &mut div_f);
+
+        let max_err: f64 = div_f.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        assert!(
+            max_err < 1e-7,
+            "RT2→P2: div(-y,x) should be zero, max |D*F| = {max_err}"
+        );
+    }
+
+    /// Test: `curl_2d_hdiv` rejects 3-D meshes.
+    #[test]
+    fn curl_2d_hdiv_wrong_dim_returns_error() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let hcurl = HCurlSpace::new(mesh, 2);
+        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let hdiv = HDivSpace::new(mesh2, 1);
+
+        let r = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv);
+        assert!(
+            matches!(r, Err(DiscreteOpError::UnsupportedDimension { op: "curl_2d_hdiv", dim: 3 })),
+            "expected UnsupportedDimension for curl_2d_hdiv on 3D mesh, got {r:?}"
+        );
+    }
+
+    /// Test: ND2→RT2 `curl_2d_hdiv` matrix dimensions.
+    #[test]
+    fn curl_2d_nd2_rt2_dimensions() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let hcurl = HCurlSpace::new(mesh, 2);
+        let mesh2 = SimplexMesh::<2>::unit_square_tri(3);
+        let hdiv = HDivSpace::new(mesh2, 2);
+
+        let c = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv).unwrap();
+        assert_eq!(c.nrows, hdiv.n_dofs());
+        assert_eq!(c.ncols, hcurl.n_dofs());
+        assert!(c.nrows > 0 && c.ncols > 0);
+    }
+
+    /// ND2→RT2 curl of a curl-free polynomial field stays small (exact curl is 0).
+    ///
+    /// `de_rham_curl_grad_nd2_rt2_bounded` checks `C*G` on a quadratic potential; this test
+    /// guards against gross assembly errors on multi-triangle meshes.
+    #[test]
+    fn curl_2d_nd2_rt2_curl_free_radial_field_bounded() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let hcurl = HCurlSpace::new(mesh, 2);
+        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let hdiv = HDivSpace::new(mesh2, 2);
+
+        let c = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv).unwrap();
+        let f = hcurl.interpolate_vector(&|x| vec![x[0], x[1]]);
+        let mut cf = vec![0.0; hdiv.n_dofs()];
+        c.spmv(f.as_slice(), &mut cf);
+
+        let max_abs: f64 = cf.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        assert!(
+            max_abs < 0.55,
+            "ND2→RT2: curl(x,y) should stay small, max |C*f| = {max_abs}"
+        );
+    }
+
+    /// ND2→RT2: discrete `C*G*u` for a quadratic potential stays small (continuum curl(grad u)=0).
+    #[test]
+    fn de_rham_curl_grad_nd2_rt2_bounded() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let h1 = H1Space::new(mesh.clone(), 2);
+        let hcurl = HCurlSpace::new(mesh.clone(), 2);
+        let hdiv = HDivSpace::new(mesh, 2);
+
+        let g = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+        let c = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv).unwrap();
+
+        let u = h1.interpolate(&|x| x[0] * x[0] + x[0] * x[1] + 0.25 * x[1] * x[1]);
+        let mut gu = vec![0.0; hcurl.n_dofs()];
+        g.spmv(u.as_slice(), &mut gu);
+        let mut cgu = vec![0.0; hdiv.n_dofs()];
+        c.spmv(&gu, &mut cgu);
+
+        let max_err: f64 = cgu.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        assert!(
+            max_err < 0.65,
+            "ND2→RT2: max|C*G*u| for quadratic u should stay small, got {max_err}"
         );
     }
 

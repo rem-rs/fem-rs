@@ -4,6 +4,24 @@
 //! [`LinearIntegrator`], and standard integrators (diffusion, mass, source,
 //! Neumann, elasticity).
 //!
+//! - **IGA FESpace:** for [`IgaFESpace1D`](fem_space::IgaFESpace1D) / [`IgaFESpace2D`](fem_space::IgaFESpace2D),
+//!   use [`Assembler::assemble_bilinear_iga_1d`](Assembler::assemble_bilinear_iga_1d) /
+//!   [`Assembler::assemble_bilinear_iga_2d`](Assembler::assemble_bilinear_iga_2d) (or [`iga_assembler`](iga_assembler) directly),
+//!   not the generic [`Assembler::assemble_bilinear`](Assembler::assemble_bilinear) loop.
+//!   1D physical L² and Laplacian w.r.t. an isogeometric map `x(u) = Σ c_i R_i` are
+//!   [`assemble_bilinear_mass_iga_1d_physical`](iga_assembler::assemble_bilinear_mass_iga_1d_physical) /
+//!   [`assemble_bilinear_diffusion_iga_1d_physical`](iga_assembler::assemble_bilinear_diffusion_iga_1d_physical)
+//!   (or [`Assembler::assemble_bilinear_iga_1d_mass_physical`](Assembler::assemble_bilinear_iga_1d_mass_physical) / [`assemble_bilinear_iga_1d_physical`](Assembler::assemble_bilinear_iga_1d_physical));
+//!   Parametric 1D / 2D Helmholtz: [`assemble_bilinear_helmholtz_iga_1d`](iga_assembler::assemble_bilinear_helmholtz_iga_1d) /
+//!   [`assemble_bilinear_helmholtz_iga_2d`](iga_assembler::assemble_bilinear_helmholtz_iga_2d);
+//!   Physical 1D: [`assemble_bilinear_helmholtz_iga_1d_physical`](iga_assembler::assemble_bilinear_helmholtz_iga_1d_physical) /
+//!   [`Assembler::assemble_bilinear_iga_1d_helmholtz_physical`](Assembler::assemble_bilinear_iga_1d_helmholtz_physical);
+//!   [`Assembler::assemble_bilinear_iga_1d_helmholtz`](Assembler::assemble_bilinear_iga_1d_helmholtz) and
+//!   [`Assembler::assemble_bilinear_iga_2d_helmholtz`](Assembler::assemble_bilinear_iga_2d_helmholtz) are thin wrappers;
+//!   `assemble_bilinear_iga_1d/2d` fuses a single diffusion + single mass item into one pass.
+//!   1D parametric stiffness and mass in `u` remain [`assemble_bilinear_diffusion_iga_1d`](iga_assembler::assemble_bilinear_diffusion_iga_1d) /
+//!   [`assemble_bilinear_mass_iga_1d`](iga_assembler::assemble_bilinear_mass_iga_1d).
+//!
 //! Also provides:
 //! - [`MixedAssembler`] — rectangular assembly for mixed bilinear forms.
 //! - [`DgAssembler`] — interior-penalty DG assembly (Phase 14).
@@ -31,10 +49,11 @@
 //!
 //! ## Feature flags
 //!
-//! - **`parallel`** — Rayon-parallel volume assembly when `n_elements` meets
-//!   `assembly_parallel_min_elems()` (default `64`; override env
-//!   `FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`), and enables `fem-linalg/parallel` for
-//!   threaded SpMV on large local matrices.
+//! - **`parallel`** — Rayon-parallel **volume** assembly for [`Assembler`],
+//!   [`VectorAssembler`], [`MixedAssembler`], and DG volume / face loops when
+//!   counts meet `assembly_parallel_min_elems()` (default `64`; env
+//!   `FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`), plus `fem-linalg/parallel` for threaded
+//!   SpMV on large local matrices.
 //! - **`reed`** — libCEED-style QFunctions plus coordinated FEM entry points in the `reed`
 //!   submodule (`FemCeed`, scalar H¹ `apply_mass_{2d,3d}` / `apply_poisson_{2d,3d}`, …) using the same
 //!   [`Assembler`] + [`H1Space`](fem_space::H1Space) kernels as default builds.  With this feature,
@@ -63,6 +82,8 @@ pub mod vector_integrator;
 pub mod vector_assembler;
 pub mod vector_boundary;
 pub mod grid_function;
+pub mod iga_assembler;
+mod assembler_iga_fespace;
 pub mod postprocess;
 pub mod discrete_op;
 pub mod transfer;
@@ -111,6 +132,15 @@ pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMa
 #[cfg(feature = "reed")]
 pub use reed::HcurlReedOperator;
 pub use grid_function::GridFunction;
+pub use iga_assembler::{
+    assemble_bilinear_diffusion_iga_1d, assemble_bilinear_diffusion_iga_1d_physical,
+    assemble_bilinear_helmholtz_iga_1d, assemble_bilinear_helmholtz_iga_1d_physical,
+    assemble_bilinear_mass_iga_1d, assemble_bilinear_mass_iga_1d_physical,
+    assemble_linear_source_iga_1d, assemble_linear_source_iga_1d_physical,
+    assemble_bilinear_diffusion_iga_2d, assemble_bilinear_helmholtz_iga_2d,
+    assemble_bilinear_mass_iga_2d, assemble_linear_source_iga_2d,
+};
+pub use assembler_iga_fespace::{Iga1dBilinearItem, Iga2dBilinearItem};
 pub use postprocess::{compute_element_gradients, compute_h1_error, compute_kelly_indicators, recover_gradient_nodal};
 pub use transfer::{
     net_boundary_flux_h1_p1_2d,

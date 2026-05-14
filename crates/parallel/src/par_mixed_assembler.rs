@@ -33,7 +33,8 @@ impl ParMixedAssembler {
         integrators: &[&dyn MixedBilinearIntegrator],
         quad_order: u8,
     ) -> CsrMatrix<f64> {
-        // Serial mixed assembly on local mesh.
+        // Local mixed assembly (Rayon volume loop when `fem-assembly/parallel` and
+        // `n_elements >= FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`).
         let local_mat = MixedAssembler::assemble_bilinear(
             row_par_space.local_space(),
             col_par_space.local_space(),

@@ -18,6 +18,12 @@
 //!
 //! The `partition_simplex_metis` convenience function wraps this into a
 //! [`ParallelMesh`] for use in the parallel pipeline.
+//!
+//! The dual graph treats two volume elements as neighbours if they share a **full**
+//! facet: Tri3 / Quad4 in 2D; Tri3 / Quad4 (and pyramid/prism/hex facets) in 3D.
+//! Supported vertex counts per element: **3** (2D tri), **4** (2D quad or 3D tet),
+//! **5** (pyramid), **6** (prism), **8** (hex). Other types yield an **empty**
+//! local facet list (no dual edges — partition degrades to per-component BFS).
 
 use std::collections::HashMap;
 
@@ -152,6 +158,11 @@ fn build_dual_graph<const D: usize>(mesh: &SimplexMesh<D>) -> (Vec<i32>, Vec<i32
     (xadj, adjncy)
 }
 
+/// Facets (edges in 2D, triangles/quads in 3D) used for the element **dual graph**:
+/// two elements are adjacent iff they share a full facet with identical node set.
+///
+/// Node ordering matches common GMSH / VTK linear elements (wedge = Prism6,
+/// hexahedron = Hex8, pyramid = Pyramid5).
 fn local_faces_of_elem<const D: usize>(nodes: &[NodeId]) -> Vec<Vec<NodeId>> {
     match (nodes.len(), D) {
         (3, 2) => vec![
@@ -159,11 +170,42 @@ fn local_faces_of_elem<const D: usize>(nodes: &[NodeId]) -> Vec<Vec<NodeId>> {
             vec![nodes[1], nodes[2]],
             vec![nodes[0], nodes[2]],
         ],
+        (4, 2) => vec![
+            vec![nodes[0], nodes[1]],
+            vec![nodes[1], nodes[2]],
+            vec![nodes[2], nodes[3]],
+            vec![nodes[3], nodes[0]],
+        ],
         (4, 3) => vec![
             vec![nodes[1], nodes[2], nodes[3]],
             vec![nodes[0], nodes[2], nodes[3]],
             vec![nodes[0], nodes[1], nodes[3]],
             vec![nodes[0], nodes[1], nodes[2]],
+        ],
+        // Pyramid5: quad base + 4 triangles (apex last).
+        (5, 3) => vec![
+            vec![nodes[0], nodes[1], nodes[2], nodes[3]],
+            vec![nodes[0], nodes[1], nodes[4]],
+            vec![nodes[1], nodes[2], nodes[4]],
+            vec![nodes[2], nodes[3], nodes[4]],
+            vec![nodes[3], nodes[0], nodes[4]],
+        ],
+        // Prism6 (wedge): triangles n0–n2 and n3–n5; three quads.
+        (6, 3) => vec![
+            vec![nodes[0], nodes[1], nodes[2]],
+            vec![nodes[3], nodes[4], nodes[5]],
+            vec![nodes[0], nodes[1], nodes[4], nodes[3]],
+            vec![nodes[1], nodes[2], nodes[5], nodes[4]],
+            vec![nodes[2], nodes[0], nodes[3], nodes[5]],
+        ],
+        // Hex8: standard “tensor” corner order (bottom z⁻, top z⁺).
+        (8, 3) => vec![
+            vec![nodes[0], nodes[1], nodes[2], nodes[3]],
+            vec![nodes[4], nodes[5], nodes[6], nodes[7]],
+            vec![nodes[0], nodes[1], nodes[5], nodes[4]],
+            vec![nodes[2], nodes[3], nodes[7], nodes[6]],
+            vec![nodes[0], nodes[3], nodes[7], nodes[4]],
+            vec![nodes[1], nodes[2], nodes[6], nodes[5]],
         ],
         _ => vec![],
     }
@@ -261,7 +303,33 @@ pub fn partition_simplex_metis_streaming<const D: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::{ElementType, SimplexMesh};
+
+    /// Two prisms sharing one triangular facet `[3,4,5]` (9 nodes, 2 elements).
+    fn two_prisms_sharing_triangle() -> SimplexMesh<3> {
+        let coords = vec![0.0_f64; 9 * 3];
+        let conn = vec![
+            0u32, 1, 2, 3, 4, 5,
+            3, 4, 5, 6, 7, 8,
+        ];
+        SimplexMesh::uniform(
+            coords,
+            conn,
+            vec![1, 1],
+            ElementType::Prism6,
+            vec![],
+            vec![],
+            ElementType::Tri3,
+        )
+    }
+
+    #[test]
+    fn dual_graph_prism_pair_sharing_triangle_has_one_edge() {
+        let mesh = two_prisms_sharing_triangle();
+        let (_xadj, adjncy) = build_dual_graph(&mesh);
+        // Undirected edge stored twice in CSR adjacency.
+        assert_eq!(adjncy.len(), 2, "expected exactly one dual edge between prisms");
+    }
 
     #[test]
     fn partition_covers_all_elements() {

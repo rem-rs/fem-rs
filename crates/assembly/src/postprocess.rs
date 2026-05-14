@@ -5,7 +5,7 @@ use nalgebra::DMatrix;
 
 use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
 use fem_element::nedelec::{TetND1, TriND1, TetND2, TriND2};
-use fem_element::raviart_thomas::{TetRT0, TriRT0, TetRT1, TriRT1};
+use fem_element::raviart_thomas::{TetRT0, TriRT0, TetRT1, TriRT1, TriRT2};
 use fem_element::reference::VectorReferenceElement;
 use fem_element::ReferenceElement;
 use fem_mesh::element_type::ElementType;
@@ -35,6 +35,7 @@ fn vec_ref_elem(space_type: SpaceType, dim: usize, order: u8) -> Box<dyn VectorR
         (SpaceType::HCurl, 3, 2) => Box::new(TetND2),
         (SpaceType::HDiv, 2, 0) => Box::new(TriRT0),
         (SpaceType::HDiv, 2, 1) => Box::new(TriRT1),
+        (SpaceType::HDiv, 2, 2) => Box::new(TriRT2),
         (SpaceType::HDiv, 3, 0) => Box::new(TetRT0),
         (SpaceType::HDiv, 3, 1) => Box::new(TetRT1),
         _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, dim={dim}, order={order})"),

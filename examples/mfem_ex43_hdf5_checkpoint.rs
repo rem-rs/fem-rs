@@ -41,7 +41,7 @@ fn main() {
             println!("  backend=partitioned");
             println!("  restart_step={}", args.restart_step.map_or("latest".into(), |s| s.to_string()));
             println!("  HDF5 backend disabled (build without feature `hdf5`)");
-            println!("  To enable real checkpoint I/O: cargo run --example mfem_ex43_hdf5_checkpoint --features fem-io-hdf5-parallel/hdf5");
+            println!("  To enable real checkpoint I/O: cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint --features io_hdf5");
             println!("  PASS (API fallback verified)");
         }
         DemoOutcome::Hdf5MpiDisabled => {
@@ -50,7 +50,7 @@ fn main() {
             println!("  backend=mpi");
             println!("  restart_step={}", args.restart_step.map_or("latest".into(), |s| s.to_string()));
             println!("  MPI HDF5 backend disabled (build without feature `hdf5-mpi`)");
-            println!("  Use partitioned mode or enable: cargo run --example mfem_ex43_hdf5_checkpoint --features fem-io-hdf5-parallel/hdf5-mpi -- --backend mpi");
+            println!("  Use partitioned mode or enable: cargo run -p fem-examples --example mfem_ex43_hdf5_checkpoint --features io_hdf5_mpi -- --backend mpi");
             println!("  PASS (MPI backend fallback verified)");
         }
     }
