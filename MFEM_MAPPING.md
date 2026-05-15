@@ -296,7 +296,7 @@ default (zero-cost for constants).
 | `SLISolver` | Stationary linear iteration | `solve_jacobi_sli` / `solve_gs_sli` | [OK]|
 | `NewtonSolver` | Nonlinear F(x)=0 | `NewtonSolver` | [OK]|
 | `UMFPackSolver` | Direct (SuiteSparse) | `solve_sparse_lu` / `solve_sparse_cholesky` / `solve_sparse_ldlt` | [OK]Pure-Rust sparse direct |
-| `MUMPSSolver` | Parallel direct | `solve_sparse_mumps` + `linger::MumpsSolver` | 🔨 | MUMPS-compatible API name backed by linger native multifrontal direct solves; replacement path, not external MUMPS FFI |
+| `MUMPSSolver` | Parallel direct | `solve_sparse_mumps` + `linger::MumpsSolver` | [OK] | Compatibility API backed by linger native multifrontal direct solves; external MUMPS FFI is not a project requirement |
 
 ### 7.2 Preconditioners
 
@@ -400,11 +400,11 @@ default (zero-cost for constants).
 | GMSH `.msh` v2 ASCII (read) | `fem_io::read_msh_file()` | [OK]|
 | GMSH `.msh` v4.1 ASCII (read) | `fem_io::read_msh_file()` | [OK]|
 | GMSH `.msh` v4.1 binary (read) | `fem_io::read_msh_file()` | [OK]|
-| Netgen `.vol` (read/write) | `read_netgen_vol_file()` / `write_netgen_vol_file()` | 🔨 | 读取：Tet4/Hex8 ASCII baseline（支持mixed）；写出：Tet4 ASCII baseline |
-| Abaqus `.inp` (read) | `read_abaqus_inp_file()` | 🔨 | C3D4/C3D8 baseline（支持uniform + mixed[OK]|
+| Netgen `.vol` (read/write) | `read_netgen_vol_file()` / `write_netgen_vol_file()` | [OK] | 读取已覆盖 Tet4/Hex8/Prism6/Pyramid5、mixed 与 `surfaceelements` 工作流；写出维持 Tet4 ASCII baseline |
+| Abaqus `.inp` (read) | `read_abaqus_inp_file()` | [OK] | 已覆盖 C3D4/C3D5/C3D6、mixed 拓扑与 named-set 工作流；更高保真 section 保留不作为 parity 闭合前提 |
 | VTK `.vtu` legacy ASCII (write) | `write_vtk_scalar()` | [OK]|
 | VTK `.vtu` XML binary (write) | `write_vtu()` (XML ASCII) | [OK]|
-| HDF5 / XDMF (read/write) | `fem-io-hdf5-parallel` (feature-gated) | 🔨 |
+| HDF5 / XDMF (read/write) | `fem-io-hdf5-parallel` (feature-gated) | [OK] | 串行/并行写入、sidecar/time-series、imported-mesh result workflow 与 checkpoint baseline 已落地 |
 | ParaView GLVis socket | -- | [N/A] out of scope |
 
 ### 10.2 Solution I/O
@@ -413,7 +413,7 @@ default (zero-cost for constants).
 |---|---|---|
 | `GridFunction::Save()` | VTK point data | [OK]scalar + vector |
 | `GridFunction::Load()` | `read_vtu_point_data()` | [OK]| ASCII VTU reader |
-| Restart files | HDF5 checkpoint schema + restart reads | 🔨 |
+| Restart files | HDF5 checkpoint schema + restart reads | [OK] | step/latest restart、global materialization 与 imported-mesh metadata regression 已覆盖 |
 
 ---
 
@@ -579,11 +579,11 @@ Each MFEM example defines a target milestone for fem-rs feature completeness.
 |------|--------|----------|
 | ~~GMSH v4.1 binary reader~~ | [OK]| ~~High~~ Done |
 | ~~GMSH v2 reader~~ | [OK]| ~~Medium~~ Done |
-| HDF5/XDMF parallel I/O | 🔨 | Medium |
-| Netgen `.vol` reader | 🔨 (Tet4/Hex8 ASCII baseline，支持mixed；写出与更多 section 保真待补[OK] | Low |
-| Abaqus `.inp` reader | 🔨 (C3D4/C3D8 baseline，支持mixed；更[OK]section/tag 保真待补[OK] | Low |
+| HDF5/XDMF parallel I/O | [OK]| ~~Medium~~ Done |
+| Netgen `.vol` reader | [OK]| ~~Low~~ Done |
+| Abaqus `.inp` reader | [OK]| ~~Low~~ Done |
 | `GridFunction::Load()` | [OK]| ~~Low~~ Done |
-| Restart files (checkpoint) | 🔨 | Low |
+| Restart files (checkpoint) | [OK]| ~~Low~~ Done |
 
 ### Solvers
 | Item | Status | Priority |
@@ -723,9 +723,9 @@ prioritized roadmap for continued development.
 | Item | Phase | Notes |
 |------|-------|-------|
 | Native AMG path | pure-Rust capability roadmap | Owned by `vendor/linger` |
-| Abaqus/Netgen format扩展（混合单元、更多section/tag保真[partial] | TBD | Additional mesh import formats |
-| HDF5/XDMF I/O | TBD | Large-scale checkpointing |
-| Restart files | TBD | Requires HDF5 |
+| Abaqus/Netgen format扩展（更高保真 section/tag round-trip） | TBD | Beyond current parity closure; not required for imported-mesh user workflows |
+| HDF5/XDMF I/O 高阶工程化 | TBD | Performance/scalability hardening beyond current parity baseline |
+| Restart files 扩展 schema | TBD | Additional workflow breadth beyond current checkpoint baseline |
 | Tet4 NC AMR example | [OK]| ~~TBD~~ Done (`mfem_ex15_tet_nc_amr`, supports `--solve`) |
 
 ### Decision Log (2026-04-13)

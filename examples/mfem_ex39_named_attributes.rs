@@ -8,6 +8,7 @@
 //! 5) named-set driven scalar solve on an imported-style Gmsh mesh (--solve-poisson)
 //! 6) Abaqus named node/element set import to solve + VTK workflow (--abaqus-demo/--abaqus)
 //! 7) Netgen boundary-tag import to VTK workflow (--netgen-demo/--netgen)
+//! 8) unified imported-workflow entry surface via --import-format/--input
 
 use fem_assembly::{
     Assembler,
@@ -18,13 +19,33 @@ use fem_core::FemResult;
 use fem_io::{
     abaqus::{AbaqusInpData, read_abaqus_inp_full, read_abaqus_inp_full_file},
     netgen::{read_netgen_vol, read_netgen_vol_file},
-    read_msh,
+    read_msh, read_msh_file,
+    FIELD_BOUNDARY_MASK,
+    vtk_abaqus_solution_fields,
+    vtk_imported_mask_fields,
+    vtk_named_attribute_solution_fields,
+    vtk_named_boundary_fields,
     vtk::{DataArray, VtkWriter},
 };
 use fem_mesh::{extract_submesh_by_name, topology::MeshTopology, NamedAttributeRegistry, SimplexMesh};
 use fem_solver::{SolverConfig, solve_gmres};
 use fem_space::{H1Space, constraints::apply_dirichlet, fe_space::FESpace};
 use std::collections::{BTreeMap, HashSet};
+
+#[cfg(test)]
+use fem_io::{
+    FIELD_DRIVE_MASK,
+    FIELD_FIXED_MASK,
+    FIELD_FLUID_ID,
+    FIELD_INLET_MASK,
+    FIELD_KAPPA,
+    FIELD_LINER_ID,
+    FIELD_MATERIAL_ID,
+    FIELD_MERGED_BOUNDARY_MASK,
+    FIELD_OUTLET_MASK,
+    FIELD_SOLUTION,
+    FIELD_SOURCE_STRENGTH,
+};
 
 const DEMO_MSH_TEXT: &str = r#"$MeshFormat
 2.2 0 8
@@ -154,6 +175,13 @@ fn load_solver_demo_mesh() -> (SimplexMesh<2>, NamedAttributeRegistry) {
     let msh = read_msh(SOLVER_MSH_TEXT.as_bytes()).expect("failed to parse solve demo gmsh");
     let registry = msh.named_attribute_registry();
     let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D solve demo mesh");
+    (mesh, registry)
+}
+
+fn load_gmsh_file_mesh(path: impl AsRef<std::path::Path>) -> (SimplexMesh<2>, NamedAttributeRegistry) {
+    let msh = read_msh_file(path).expect("failed to read Gmsh mesh file");
+    let registry = msh.named_attribute_registry();
+    let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D mesh");
     (mesh, registry)
 }
 
@@ -377,22 +405,18 @@ fn write_named_attribute_vtk(
     path: impl AsRef<std::path::Path>,
     include_merged_boundary: bool,
 ) -> FemResult<()> {
-    let inlet_mask = nodal_mask_for_boundary_set(mesh, registry, "inlet");
-    let outlet_mask = nodal_mask_for_boundary_set(mesh, registry, "outlet");
-    let fluid_id = cell_mask_for_named_region(mesh, registry, "fluid");
-
-    let mut point_data = vec![
-        DataArray::scalars("inlet_mask", inlet_mask),
-        DataArray::scalars("outlet_mask", outlet_mask),
-    ];
-    if include_merged_boundary {
-        point_data.push(DataArray::scalars("merged_boundary_mask", merged_boundary_mask(mesh, registry)));
-    }
+    let merged = include_merged_boundary.then(|| merged_boundary_mask(mesh, registry));
+    let (point_data, cell_data) = vtk_named_boundary_fields(
+        nodal_mask_for_boundary_set(mesh, registry, "inlet"),
+        nodal_mask_for_boundary_set(mesh, registry, "outlet"),
+        merged,
+        cell_mask_for_named_region(mesh, registry, "fluid"),
+    );
     write_vtk_with_fields(
         mesh,
         path,
         point_data,
-        vec![DataArray::scalars("fluid_id", fluid_id)],
+        cell_data,
     )
 }
 
@@ -405,23 +429,18 @@ fn write_named_attribute_solution_vtk(
     path: impl AsRef<std::path::Path>,
     include_merged_boundary: bool,
 ) -> FemResult<()> {
-    let mut point_data = vec![
-        DataArray::scalars("u", solution),
-        DataArray::scalars("inlet_mask", nodal_mask_for_boundary_set(mesh, registry, "inlet")),
-        DataArray::scalars("outlet_mask", nodal_mask_for_boundary_set(mesh, registry, "outlet")),
-    ];
-    if include_merged_boundary {
-        point_data.push(DataArray::scalars("merged_boundary_mask", merged_boundary_mask(mesh, registry)));
-    }
-    let mut cell_data = vec![
-        DataArray::scalars("material_id", material_id_field(mesh)),
-        DataArray::scalars("kappa", cell_values_from_tags(mesh, material_kappa, 1.0)),
-        DataArray::scalars("source_strength", cell_values_from_named_regions(mesh, registry, region_sources)),
-        DataArray::scalars("fluid_id", cell_mask_for_named_region(mesh, registry, "fluid")),
-    ];
-    if let Some(liner_id) = maybe_cell_mask_for_named_region(mesh, registry, "liner") {
-        cell_data.push(DataArray::scalars("liner_id", liner_id));
-    }
+    let merged = include_merged_boundary.then(|| merged_boundary_mask(mesh, registry));
+    let (point_data, cell_data) = vtk_named_attribute_solution_fields(
+        solution,
+        nodal_mask_for_boundary_set(mesh, registry, "inlet"),
+        nodal_mask_for_boundary_set(mesh, registry, "outlet"),
+        merged,
+        material_id_field(mesh),
+        cell_values_from_tags(mesh, material_kappa, 1.0),
+        cell_values_from_named_regions(mesh, registry, region_sources),
+        cell_mask_for_named_region(mesh, registry, "fluid"),
+        maybe_cell_mask_for_named_region(mesh, registry, "liner"),
+    );
     write_vtk_with_fields(mesh, path, point_data, cell_data)
 }
 
@@ -434,15 +453,17 @@ fn write_abaqus_solution_vtk(
 ) -> FemResult<()> {
     let fixed_nodes = data.node_sets.get(fixed_set).expect("missing fixed node set");
     let drive_nodes = data.node_sets.get(drive_set).expect("missing drive node set");
+    let (point_data, cell_data) = vtk_abaqus_solution_fields(
+        solution,
+        point_mask_from_node_ids(&data.mesh, fixed_nodes),
+        point_mask_from_node_ids(&data.mesh, drive_nodes),
+        material_id_field(&data.mesh),
+    );
     write_vtk_with_fields(
         &data.mesh,
         path,
-        vec![
-            DataArray::scalars("u", solution),
-            DataArray::scalars("fixed_mask", point_mask_from_node_ids(&data.mesh, fixed_nodes)),
-            DataArray::scalars("drive_mask", point_mask_from_node_ids(&data.mesh, drive_nodes)),
-        ],
-        vec![DataArray::scalars("material_id", material_id_field(&data.mesh))],
+        point_data,
+        cell_data,
     )
 }
 
@@ -451,16 +472,50 @@ fn write_netgen_boundary_vtk(
     boundary_tag: i32,
     path: impl AsRef<std::path::Path>,
 ) -> FemResult<()> {
+    let (point_data, cell_data) = vtk_imported_mask_fields(
+        FIELD_BOUNDARY_MASK,
+        point_mask_for_boundary_tag(mesh, boundary_tag),
+        material_id_field(mesh),
+    );
     write_vtk_with_fields(
         mesh,
         path,
-        vec![DataArray::scalars("boundary_mask", point_mask_for_boundary_tag(mesh, boundary_tag))],
-        vec![DataArray::scalars("material_id", material_id_field(mesh))],
+        point_data,
+        cell_data,
     )
 }
 
+fn print_workflow_banner(title: &str) {
+    println!("=== mfem_ex39_named_attributes: {title} ===");
+}
+
+fn print_solver_summary<const D: usize>(result: &DiffusionSolveResult<D>) {
+    println!(
+        "  solve: {} iterations, residual = {:.3e}, converged = {}",
+        result.iterations,
+        result.final_residual,
+        result.converged
+    );
+}
+
+fn print_vtk_status(path: Option<&str>, hint: &str) {
+    if let Some(path) = path {
+        println!("  VTK written to: {path}");
+    } else {
+        println!("  (Pass --vtk output.vtu to {hint})");
+    }
+}
+
+#[cfg(test)]
+fn assert_vtk_has_field(vtk: &str, field_name: &str) {
+    assert!(
+        vtk.contains(&format!(r#"Name="{}""#, field_name)),
+        "expected VTK field {field_name} in output"
+    );
+}
+
 fn run_named_attribute_workflow(args: &Args) {
-    println!("=== mfem_ex39_named_attributes: named set workflow ===");
+    print_workflow_banner("named set workflow");
     if args.merge_boundary {
         println!("  Mode: merge-boundary (inlet + outlet aggregation)");
     }
@@ -474,7 +529,9 @@ fn run_named_attribute_workflow(args: &Args) {
         println!("  Mode: solve-poisson (u=1 on inlet, u=0 on outlet, named materials + region source)");
     }
 
-    let (mesh, registry) = if args.solve_poisson {
+    let (mesh, registry) = if let Some(ref path) = args.gmsh_input() {
+        load_gmsh_file_mesh(path)
+    } else if args.solve_poisson {
         load_solver_demo_mesh()
     } else {
         load_demo_mesh()
@@ -564,12 +621,7 @@ fn run_named_attribute_workflow(args: &Args) {
             PWConstCoeff::new(material_kappa).with_default(1.0),
             rhs,
         );
-        println!(
-            "  solve: {} iterations, residual = {:.3e}, converged = {}",
-            result.iterations,
-            result.final_residual,
-            result.converged
-        );
+        print_solver_summary(&result);
         println!("  materials: fluid kappa=10.0, liner kappa=1.0");
         println!("  sources: fluid q=2.0, liner q=0.0");
 
@@ -584,23 +636,21 @@ fn run_named_attribute_workflow(args: &Args) {
                 args.merge_boundary,
             )
             .expect("named-attribute solve VTK export failed");
-            println!("  VTK written to: {path}");
-        } else {
-            println!("  (Pass --vtk output.vtu to write solution + named-set masks)");
         }
+        print_vtk_status(args.vtk.as_deref(), "write solution + named-set masks");
     } else if let Some(ref path) = args.vtk {
         write_named_attribute_vtk(&mesh, &registry, path, args.merge_boundary)
             .expect("named-attribute VTK export failed");
-        println!("  VTK written to: {path}");
+        print_vtk_status(args.vtk.as_deref(), "write named-attribute masks");
     } else {
-        println!("  (Pass --vtk output.vtu to write named-attribute masks)");
+        print_vtk_status(None, "write named-attribute masks");
     }
 
     println!("  PASS");
 }
 
 fn run_abaqus_workflow(args: &Args) {
-    let data = if let Some(ref path) = args.abaqus {
+    let data = if let Some(ref path) = args.abaqus_input() {
         read_abaqus_inp_full_file(path).expect("failed to read Abaqus input file")
     } else {
         load_abaqus_demo_data()
@@ -610,7 +660,7 @@ fn run_abaqus_workflow(args: &Args) {
     let drive_nodes = data.node_sets.get(&args.drive_set).expect("missing drive node set");
     let mat_a = data.elem_sets.get("MAT_A");
 
-    println!("=== mfem_ex39_named_attributes: Abaqus imported workflow ===");
+    print_workflow_banner("Abaqus imported workflow");
     println!(
         "  mesh: n_nodes={}, n_elems={}, fixed nodes={}, drive nodes={}",
         data.mesh.n_nodes(),
@@ -625,26 +675,19 @@ fn run_abaqus_workflow(args: &Args) {
     let mut dirichlet: Vec<(u32, f64)> = fixed_nodes.iter().map(|&node| (node, 0.0)).collect();
     dirichlet.extend(drive_nodes.iter().map(|&node| (node, args.drive_value)));
     let result = solve_diffusion_p1(data.mesh.clone(), &dirichlet, 1.0, vec![0.0; data.mesh.n_nodes()]);
-    println!(
-        "  solve: {} iterations, residual = {:.3e}, converged = {}",
-        result.iterations,
-        result.final_residual,
-        result.converged
-    );
+    print_solver_summary(&result);
 
     if let Some(ref path) = args.vtk {
         write_abaqus_solution_vtk(&data, &args.fixed_set, &args.drive_set, result.solution, path)
             .expect("Abaqus workflow VTK export failed");
-        println!("  VTK written to: {path}");
-    } else {
-        println!("  (Pass --vtk output.vtu to write imported-set solution fields)");
     }
+    print_vtk_status(args.vtk.as_deref(), "write imported-set solution fields");
 
     println!("  PASS");
 }
 
 fn run_netgen_workflow(args: &Args) {
-    let mesh = if let Some(ref path) = args.netgen {
+    let mesh = if let Some(ref path) = args.netgen_input() {
         read_netgen_vol_file(path).expect("failed to read Netgen volume mesh")
     } else {
         load_netgen_demo_mesh()
@@ -653,7 +696,7 @@ fn run_netgen_workflow(args: &Args) {
     let mask = point_mask_for_boundary_tag(&mesh, args.boundary_tag);
     let covered_nodes = mask.iter().filter(|&&value| value > 0.0).count();
 
-    println!("=== mfem_ex39_named_attributes: Netgen imported workflow ===");
+    print_workflow_banner("Netgen imported workflow");
     println!(
         "  mesh: n_nodes={}, n_elems={}, n_faces={}, selected boundary tag={}, covered nodes={}",
         mesh.n_nodes(),
@@ -666,23 +709,26 @@ fn run_netgen_workflow(args: &Args) {
     if let Some(ref path) = args.vtk {
         write_netgen_boundary_vtk(&mesh, args.boundary_tag, path)
             .expect("Netgen workflow VTK export failed");
-        println!("  VTK written to: {path}");
-    } else {
-        println!("  (Pass --vtk output.vtu to write boundary-tag masks)");
     }
+    print_vtk_status(args.vtk.as_deref(), "write boundary-tag masks");
 
     println!("  PASS");
 }
 
 fn main() {
     let args = parse_args();
-    if args.abaqus_demo || args.abaqus.is_some() {
-        run_abaqus_workflow(&args);
-    } else if args.netgen_demo || args.netgen.is_some() {
-        run_netgen_workflow(&args);
-    } else {
-        run_named_attribute_workflow(&args);
+    match args.selected_import_format() {
+        ImportFormat::Gmsh => run_named_attribute_workflow(&args),
+        ImportFormat::Abaqus => run_abaqus_workflow(&args),
+        ImportFormat::Netgen => run_netgen_workflow(&args),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportFormat {
+    Gmsh,
+    Abaqus,
+    Netgen,
 }
 
 struct Args {
@@ -690,6 +736,8 @@ struct Args {
     intersection_region: bool,
     difference_region: bool,
     solve_poisson: bool,
+    import_format: Option<ImportFormat>,
+    input: Option<String>,
     abaqus_demo: bool,
     abaqus: Option<String>,
     fixed_set: String,
@@ -701,12 +749,60 @@ struct Args {
     vtk: Option<String>,
 }
 
+impl Args {
+    fn selected_import_format(&self) -> ImportFormat {
+        self.import_format
+            .or_else(|| {
+                if self.abaqus_demo || self.abaqus.is_some() {
+                    Some(ImportFormat::Abaqus)
+                } else if self.netgen_demo || self.netgen.is_some() {
+                    Some(ImportFormat::Netgen)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(ImportFormat::Gmsh)
+    }
+
+    fn gmsh_input(&self) -> Option<&str> {
+        match self.selected_import_format() {
+            ImportFormat::Gmsh => self.input.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn abaqus_input(&self) -> Option<&str> {
+        if self.selected_import_format() == ImportFormat::Abaqus {
+            self.input.as_deref().or(self.abaqus.as_deref())
+        } else {
+            self.abaqus.as_deref()
+        }
+    }
+
+    fn netgen_input(&self) -> Option<&str> {
+        if self.selected_import_format() == ImportFormat::Netgen {
+            self.input.as_deref().or(self.netgen.as_deref())
+        } else {
+            self.netgen.as_deref()
+        }
+    }
+}
+
 fn parse_args() -> Args {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from<I>(iter: I) -> Args
+where
+    I: IntoIterator<Item = String>,
+{
     let mut args = Args {
         merge_boundary: false,
         intersection_region: false,
         difference_region: false,
         solve_poisson: false,
+        import_format: None,
+        input: None,
         abaqus_demo: false,
         abaqus: None,
         fixed_set: "FIXED".to_string(),
@@ -717,13 +813,25 @@ fn parse_args() -> Args {
         boundary_tag: 5,
         vtk: None,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = iter.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--merge-boundary" => { args.merge_boundary = true; }
             "--intersection-region" => { args.intersection_region = true; }
             "--difference-region" => { args.difference_region = true; }
             "--solve-poisson" => { args.solve_poisson = true; }
+            "--import-format" => {
+                let format = it.next().expect("expected format after --import-format");
+                args.import_format = Some(match format.as_str() {
+                    "gmsh" => ImportFormat::Gmsh,
+                    "abaqus" => ImportFormat::Abaqus,
+                    "netgen" => ImportFormat::Netgen,
+                    _ => panic!("invalid --import-format: {format}"),
+                });
+            }
+            "--input" => {
+                args.input = Some(it.next().expect("expected input path after --input"));
+            }
             "--abaqus-demo" => { args.abaqus_demo = true; }
             "--abaqus" => {
                 args.abaqus = Some(it.next().expect("expected input path after --abaqus"));
@@ -927,10 +1035,10 @@ mod tests {
         let vtk = std::fs::read_to_string(&out).expect("read named-attribute VTK output");
         let _ = std::fs::remove_file(&out);
 
-        assert!(vtk.contains(r#"Name="inlet_mask""#));
-        assert!(vtk.contains(r#"Name="outlet_mask""#));
-        assert!(vtk.contains(r#"Name="merged_boundary_mask""#));
-        assert!(vtk.contains(r#"Name="fluid_id""#));
+        assert_vtk_has_field(&vtk, FIELD_INLET_MASK);
+        assert_vtk_has_field(&vtk, FIELD_OUTLET_MASK);
+        assert_vtk_has_field(&vtk, FIELD_MERGED_BOUNDARY_MASK);
+        assert_vtk_has_field(&vtk, FIELD_FLUID_ID);
     }
 
     #[test]
@@ -977,7 +1085,6 @@ mod tests {
         assert!(!free_values.is_empty(), "solver mesh should expose unconstrained nodes");
         assert!(free_values.iter().any(|&value| value > 0.0 && value < 1.0));
         assert!(result.solution[4] > no_source.solution[4], "fluid-only source should raise the interface node value: with source={} without source={}", result.solution[4], no_source.solution[4]);
-
         let out = unique_temp_vtk_path("mfem_ex39_named_solve");
         write_named_attribute_solution_vtk(
             &result.mesh,
@@ -992,12 +1099,59 @@ mod tests {
         let vtk = std::fs::read_to_string(&out).expect("read named material solve VTK");
         let _ = std::fs::remove_file(&out);
 
-        assert!(vtk.contains(r#"Name="u""#));
-        assert!(vtk.contains(r#"Name="material_id""#));
-        assert!(vtk.contains(r#"Name="kappa""#));
-        assert!(vtk.contains(r#"Name="source_strength""#));
-        assert!(vtk.contains(r#"Name="fluid_id""#));
-        assert!(vtk.contains(r#"Name="liner_id""#));
+        assert_vtk_has_field(&vtk, FIELD_SOLUTION);
+        assert_vtk_has_field(&vtk, FIELD_MATERIAL_ID);
+        assert_vtk_has_field(&vtk, FIELD_KAPPA);
+        assert_vtk_has_field(&vtk, FIELD_SOURCE_STRENGTH);
+        assert_vtk_has_field(&vtk, FIELD_FLUID_ID);
+        assert_vtk_has_field(&vtk, FIELD_LINER_ID);
+    }
+
+    #[test]
+    fn parse_args_supports_unified_import_surface_for_abaqus() {
+        let args = parse_args_from([
+            "--import-format".to_string(),
+            "abaqus".to_string(),
+            "--input".to_string(),
+            "fixture.inp".to_string(),
+            "--drive-set".to_string(),
+            "LOAD".to_string(),
+        ]);
+
+        assert_eq!(args.selected_import_format(), ImportFormat::Abaqus);
+        assert_eq!(args.abaqus_input(), Some("fixture.inp"));
+        assert_eq!(args.drive_set, "LOAD");
+    }
+
+    #[test]
+    fn parse_args_supports_unified_import_surface_for_netgen() {
+        let args = parse_args_from([
+            "--import-format".to_string(),
+            "netgen".to_string(),
+            "--input".to_string(),
+            "fixture.vol".to_string(),
+            "--boundary-tag".to_string(),
+            "7".to_string(),
+        ]);
+
+        assert_eq!(args.selected_import_format(), ImportFormat::Netgen);
+        assert_eq!(args.netgen_input(), Some("fixture.vol"));
+        assert_eq!(args.boundary_tag, 7);
+    }
+
+    #[test]
+    fn parse_args_supports_unified_import_surface_for_gmsh() {
+        let args = parse_args_from([
+            "--import-format".to_string(),
+            "gmsh".to_string(),
+            "--input".to_string(),
+            "fixture.msh".to_string(),
+            "--solve-poisson".to_string(),
+        ]);
+
+        assert_eq!(args.selected_import_format(), ImportFormat::Gmsh);
+        assert_eq!(args.gmsh_input(), Some("fixture.msh"));
+        assert!(args.solve_poisson);
     }
 
     #[test]
@@ -1024,10 +1178,10 @@ mod tests {
         let vtk = std::fs::read_to_string(&out).expect("read Abaqus VTK output");
         let _ = std::fs::remove_file(&out);
 
-        assert!(vtk.contains(r#"Name="u""#));
-        assert!(vtk.contains(r#"Name="fixed_mask""#));
-        assert!(vtk.contains(r#"Name="drive_mask""#));
-        assert!(vtk.contains(r#"Name="material_id""#));
+        assert_vtk_has_field(&vtk, FIELD_SOLUTION);
+        assert_vtk_has_field(&vtk, FIELD_FIXED_MASK);
+        assert_vtk_has_field(&vtk, FIELD_DRIVE_MASK);
+        assert_vtk_has_field(&vtk, FIELD_MATERIAL_ID);
     }
 
     #[test]
@@ -1041,8 +1195,8 @@ mod tests {
         let vtk = std::fs::read_to_string(&out).expect("read Netgen VTK output");
         let _ = std::fs::remove_file(&out);
 
-        assert!(vtk.contains(r#"Name="boundary_mask""#));
-        assert!(vtk.contains(r#"Name="material_id""#));
+        assert_vtk_has_field(&vtk, FIELD_BOUNDARY_MASK);
+        assert_vtk_has_field(&vtk, FIELD_MATERIAL_ID);
     }
 
     #[test]
@@ -1063,10 +1217,10 @@ mod tests {
         let vtk = std::fs::read_to_string(&out).expect("read Abaqus file workflow VTK");
         let _ = std::fs::remove_file(&out);
 
-        assert!(vtk.contains(r#"Name="u""#));
-        assert!(vtk.contains(r#"Name="fixed_mask""#));
-        assert!(vtk.contains(r#"Name="drive_mask""#));
-        assert!(vtk.contains(r#"Name="material_id""#));
+        assert_vtk_has_field(&vtk, FIELD_SOLUTION);
+        assert_vtk_has_field(&vtk, FIELD_FIXED_MASK);
+        assert_vtk_has_field(&vtk, FIELD_DRIVE_MASK);
+        assert_vtk_has_field(&vtk, FIELD_MATERIAL_ID);
     }
 
     #[test]
@@ -1078,8 +1232,8 @@ mod tests {
         let vtk = std::fs::read_to_string(&out).expect("read Netgen file workflow VTK");
         let _ = std::fs::remove_file(&out);
 
-        assert!(vtk.contains(r#"Name="boundary_mask""#));
-        assert!(vtk.contains(r#"Name="material_id""#));
+        assert_vtk_has_field(&vtk, FIELD_BOUNDARY_MASK);
+        assert_vtk_has_field(&vtk, FIELD_MATERIAL_ID);
     }
 }
 

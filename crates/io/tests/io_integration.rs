@@ -5,6 +5,9 @@ use fem_io::{
     gmsh::read_msh,
     netgen::{read_netgen_vol, write_netgen_vol},
     vtk::{DataArray, VtkWriter},
+    FIELD_MATERIAL_ID,
+    FIELD_TEMPERATURE,
+    vtk_nodal_workflow_fields,
 };
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
 
@@ -14,10 +17,32 @@ use fem_io::{
     read_mesh_and_fields,
     write_mesh_and_fields,
     write_xdmf,
+    vtk_abaqus_solution_fields,
+    vtk_imported_mask_fields,
+    vtk_named_boundary_fields,
+    vtk_named_attribute_solution_fields,
+    xdmf_abaqus_solution_fields,
+    xdmf_imported_mask_workflow_fields,
+    xdmf_named_boundary_fields,
+    xdmf_named_attribute_solution_fields,
+    xdmf_nodal_workflow_fields,
+    DATASET_ELEM_TAGS,
+    FIELD_BOUNDARY_MASK,
+    FIELD_DRIVE_MASK,
+    FIELD_FIXED_MASK,
+    FIELD_FLUID_ID,
+    FIELD_INLET_MASK,
+    FIELD_KAPPA,
+    FIELD_LINER_ID,
+    FIELD_SOLUTION,
+    FIELD_MERGED_BOUNDARY_MASK,
+    FIELD_OUTLET_MASK,
+    FIELD_SOURCE_STRENGTH,
     Hdf5WriteOptions,
-    XdmfCenter,
-    XdmfField,
 };
+
+#[cfg(feature = "hdf5")]
+use fem_mesh::NamedAttributeRegistry;
 
 fn gmsh_v2_tri6_unit_triangle() -> &'static str {
     "$MeshFormat\n\
@@ -44,6 +69,161 @@ fn gmsh_v2_tri6_unit_triangle() -> &'static str {
      3 8 2 1 1 3 6 1\n\
      4 9 2 2 1 1 2 3 4 5 6\n\
      $EndElements\n"
+}
+
+#[cfg(feature = "hdf5")]
+fn gmsh_named_attribute_solver_square() -> &'static str {
+    "$MeshFormat\n\
+    2.2 0 8\n\
+    $EndMeshFormat\n\
+    $PhysicalNames\n\
+    4\n\
+    2 1 \"fluid\"\n\
+    2 2 \"liner\"\n\
+    1 4 \"inlet\"\n\
+    1 2 \"outlet\"\n\
+    $EndPhysicalNames\n\
+    $Nodes\n\
+    9\n\
+    1 0 0 0\n\
+    2 0.5 0 0\n\
+    3 1 0 0\n\
+    4 0 0.5 0\n\
+    5 0.5 0.5 0\n\
+    6 1 0.5 0\n\
+    7 0 1 0\n\
+    8 0.5 1 0\n\
+    9 1 1 0\n\
+    $EndNodes\n\
+    $Elements\n\
+    16\n\
+    1 1 2 1 1 1 2\n\
+    2 1 2 1 1 2 3\n\
+    3 1 2 2 2 3 6\n\
+    4 1 2 2 2 6 9\n\
+    5 1 2 3 3 9 8\n\
+    6 1 2 3 3 8 7\n\
+    7 1 2 4 4 7 4\n\
+    8 1 2 4 4 4 1\n\
+    9 2 2 1 1 1 2 5\n\
+    10 2 2 1 1 1 5 4\n\
+    11 2 2 2 2 2 3 6\n\
+    12 2 2 2 2 2 6 5\n\
+    13 2 2 1 1 4 5 8\n\
+    14 2 2 1 1 4 8 7\n\
+    15 2 2 2 2 5 6 9\n\
+    16 2 2 2 2 5 9 8\n\
+    $EndElements\n"
+}
+
+fn vtk_xml_with_fields<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    point_data: Vec<DataArray>,
+    cell_data: Vec<DataArray>,
+) -> String {
+    let mut writer = VtkWriter::new(mesh);
+    for field in point_data {
+        writer.add_point_data(field);
+    }
+    for field in cell_data {
+        writer.add_cell_data(field);
+    }
+
+    let mut buf = Vec::<u8>::new();
+    writer.write(&mut buf).expect("write vtu");
+    String::from_utf8(buf).expect("utf8 vtk xml")
+}
+
+#[cfg(feature = "hdf5")]
+fn point_mask_from_node_ids<const D: usize>(mesh: &SimplexMesh<D>, node_ids: &[u32]) -> Vec<f64> {
+    let mut mask = vec![0.0; mesh.n_nodes()];
+    for &node in node_ids {
+        mask[node as usize] = 1.0;
+    }
+    mask
+}
+
+#[cfg(feature = "hdf5")]
+fn unique_nodes_for_named_boundary_set(
+    mesh: &SimplexMesh<2>,
+    registry: &NamedAttributeRegistry,
+    name: &str,
+) -> Vec<u32> {
+    let faces = mesh
+        .face_ids_for_named_set(registry, name)
+        .expect("missing named boundary set");
+    let mut nodes = std::collections::BTreeSet::new();
+    for face in faces {
+        for &node in mesh.bface_nodes(face) {
+            nodes.insert(node);
+        }
+    }
+    nodes.into_iter().collect()
+}
+
+#[cfg(feature = "hdf5")]
+fn nodal_mask_for_boundary_set(
+    mesh: &SimplexMesh<2>,
+    registry: &NamedAttributeRegistry,
+    name: &str,
+) -> Vec<f64> {
+    point_mask_from_node_ids(mesh, &unique_nodes_for_named_boundary_set(mesh, registry, name))
+}
+
+#[cfg(feature = "hdf5")]
+fn cell_mask_for_named_region(
+    mesh: &SimplexMesh<2>,
+    registry: &NamedAttributeRegistry,
+    name: &str,
+) -> Vec<f64> {
+    let elems = mesh
+        .element_ids_for_named_set(registry, name)
+        .expect("missing named region set");
+    let mut mask = vec![0.0; mesh.n_elems()];
+    for elem in elems {
+        mask[elem as usize] = 1.0;
+    }
+    mask
+}
+
+#[cfg(feature = "hdf5")]
+fn merged_boundary_mask(mesh: &SimplexMesh<2>, registry: &NamedAttributeRegistry) -> Vec<f64> {
+    nodal_mask_for_boundary_set(mesh, registry, "inlet")
+        .into_iter()
+        .zip(nodal_mask_for_boundary_set(mesh, registry, "outlet"))
+        .map(|(inlet, outlet)| if inlet > 0.0 || outlet > 0.0 { 1.0 } else { 0.0 })
+        .collect()
+}
+
+#[cfg(feature = "hdf5")]
+fn cell_values_from_tags<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    values_by_tag: &[(i32, f64)],
+    default: f64,
+) -> Vec<f64> {
+    let by_tag: std::collections::BTreeMap<i32, f64> = values_by_tag.iter().copied().collect();
+    mesh.elem_tags
+        .iter()
+        .map(|tag| by_tag.get(tag).copied().unwrap_or(default))
+        .collect()
+}
+
+#[cfg(feature = "hdf5")]
+fn cell_values_from_named_regions(
+    mesh: &SimplexMesh<2>,
+    registry: &NamedAttributeRegistry,
+    values_by_name: &[(&str, f64)],
+) -> Vec<f64> {
+    let mut out = vec![0.0; mesh.n_elems()];
+    for &(name, value) in values_by_name {
+        let elems = mesh
+            .element_ids_for_named_set(registry, name)
+            .unwrap_or_else(|_| panic!("missing named region set: {name}"));
+        for elem in elems {
+            out[elem as usize] = value;
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -119,16 +299,12 @@ fn gmsh_tri6_named_attributes_and_vtk_result_workflow() {
         .collect();
     let material_id = vec![mesh.elem_tags[0] as f64];
 
-    let mut writer = VtkWriter::new(mesh);
-    writer.add_point_data(DataArray::scalars("temperature", temp));
-    writer.add_cell_data(DataArray::scalars("material_id", material_id));
+    let (point_data, cell_data) = vtk_nodal_workflow_fields(FIELD_TEMPERATURE, temp, material_id);
 
-    let mut buf = Vec::<u8>::new();
-    writer.write(&mut buf).expect("write vtu");
-    let xml = String::from_utf8(buf).expect("utf8 vtk xml");
+    let xml = vtk_xml_with_fields(mesh, point_data, cell_data);
 
-    assert!(xml.contains(r#"Name="temperature""#), "point result field should be exported");
-    assert!(xml.contains(r#"Name="material_id""#), "cell material field should be exported");
+    assert!(xml.contains(&format!(r#"Name="{}""#, FIELD_TEMPERATURE)), "point result field should be exported");
+    assert!(xml.contains(&format!(r#"Name="{}""#, FIELD_MATERIAL_ID)), "cell material field should be exported");
     assert!(xml.contains("NumberOfPoints=\"6\""), "linearized Tri6 working mesh should export 6 nodes");
     assert!(xml.contains("NumberOfCells=\"1\""), "single imported domain element should export one cell");
 }
@@ -151,7 +327,7 @@ fn hdf5_xdmf_imported_mesh_preserves_tags_and_result_metadata_workflow() {
     let h5_path = tmp.path().join("imported_mesh_workflow.h5");
     let xmf_path = tmp.path().join("imported_mesh_workflow.xmf");
 
-    let fields = [("temperature", temperature.as_slice(), "H1")];
+    let fields = [(FIELD_TEMPERATURE, temperature.as_slice(), "H1")];
     write_mesh_and_fields(&h5_path, &mesh, &fields, &Hdf5WriteOptions::default())
         .expect("write mesh + fields to hdf5");
 
@@ -159,7 +335,7 @@ fn hdf5_xdmf_imported_mesh_preserves_tags_and_result_metadata_workflow() {
     assert_eq!(mesh2.elem_tags, mesh.elem_tags, "material tags should round-trip through HDF5");
     assert_eq!(mesh2.face_tags, mesh.face_tags, "boundary tags should round-trip through HDF5");
     assert_eq!(fields2.len(), 1, "one nodal result field should round-trip");
-    assert_eq!(fields2[0].0, "temperature");
+    assert_eq!(fields2[0].0, FIELD_TEMPERATURE);
     assert_eq!(fields2[0].1, temperature);
     assert_eq!(fields2[0].2, "H1");
 
@@ -172,37 +348,207 @@ fn hdf5_xdmf_imported_mesh_preserves_tags_and_result_metadata_workflow() {
         &[mesh.n_nodes()],
         &[mesh.n_elems()],
         &h5_path_text,
-        &[
-            XdmfField {
-                name: "temperature".into(),
-                hdf5_path: h5_path_text.clone(),
-                dataset_path: "/fields/temperature/values".into(),
-                center: XdmfCenter::Node,
-            },
-            XdmfField {
-                name: "material_id".into(),
-                hdf5_path: h5_path_text.clone(),
-                dataset_path: "/mesh/elem_tags".into(),
-                center: XdmfCenter::Cell,
-            },
-        ],
+        &xdmf_nodal_workflow_fields(FIELD_TEMPERATURE, &h5_path_text),
     )
     .expect("write xdmf sidecar");
 
     let xmf = std::fs::read_to_string(&xmf_path).expect("read xdmf sidecar");
-    assert!(xmf.contains(r#"Name="temperature""#), "XDMF should expose nodal result field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_TEMPERATURE)), "XDMF should expose nodal result field");
     assert!(xmf.contains(r#"Center="Node""#), "nodal field should be node-centered");
     assert!(xmf.contains("/fields/temperature/values"), "XDMF should point to the HDF5 temperature dataset");
-    assert!(xmf.contains(r#"Name="material_id""#), "XDMF should expose cell material field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_MATERIAL_ID)), "XDMF should expose cell material field");
     assert!(xmf.contains(r#"Center="Cell""#), "material field should be cell-centered");
-    assert!(xmf.contains("/mesh/elem_tags"), "XDMF should point to the HDF5 material-tag dataset");
+    assert!(xmf.contains(DATASET_ELEM_TAGS), "XDMF should point to the HDF5 material-tag dataset");
+}
+
+#[cfg(feature = "hdf5")]
+#[test]
+fn named_attribute_solution_export_workflow() {
+    let msh = read_msh(gmsh_named_attribute_solver_square().as_bytes()).expect("parse named-attribute solver fixture");
+    let registry = msh.named_attribute_registry();
+    let mesh = msh.into_2d().expect("extract 2D named-attribute mesh");
+
+    let solution: Vec<f64> = (0..mesh.n_nodes())
+        .map(|i| mesh.node_coords(i as u32)[1])
+        .collect();
+    let inlet_mask = nodal_mask_for_boundary_set(&mesh, &registry, "inlet");
+    let outlet_mask = nodal_mask_for_boundary_set(&mesh, &registry, "outlet");
+    let merged_mask = merged_boundary_mask(&mesh, &registry);
+    let material_id: Vec<f64> = mesh.elem_tags.iter().map(|&tag| tag as f64).collect();
+    let kappa = cell_values_from_tags(&mesh, &[(1, 10.0), (2, 1.0)], 1.0);
+    let source_strength = cell_values_from_named_regions(&mesh, &registry, &[("fluid", 2.0), ("liner", 0.0)]);
+    let fluid_id = cell_mask_for_named_region(&mesh, &registry, "fluid");
+    let liner_id = cell_mask_for_named_region(&mesh, &registry, "liner");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let h5_path = tmp.path().join("named_attribute_solution_workflow.h5");
+    let xmf_path = tmp.path().join("named_attribute_solution_workflow.xmf");
+
+    let fields = [
+        (FIELD_SOLUTION, solution.as_slice(), "H1"),
+        (FIELD_INLET_MASK, inlet_mask.as_slice(), "H1"),
+        (FIELD_OUTLET_MASK, outlet_mask.as_slice(), "H1"),
+        (FIELD_MERGED_BOUNDARY_MASK, merged_mask.as_slice(), "H1"),
+        (FIELD_KAPPA, kappa.as_slice(), "L2"),
+        (FIELD_SOURCE_STRENGTH, source_strength.as_slice(), "L2"),
+        (FIELD_FLUID_ID, fluid_id.as_slice(), "L2"),
+        (FIELD_LINER_ID, liner_id.as_slice(), "L2"),
+    ];
+    write_mesh_and_fields(&h5_path, &mesh, &fields, &Hdf5WriteOptions::default())
+        .expect("write named-attribute mesh + fields to hdf5");
+
+    let (mesh2, fields2) = read_mesh_and_fields::<2>(&h5_path).expect("read named-attribute mesh + fields from hdf5");
+    assert_eq!(mesh2.elem_tags, mesh.elem_tags, "material tags should round-trip through HDF5");
+    assert_eq!(mesh2.face_tags, mesh.face_tags, "boundary tags should round-trip through HDF5");
+    assert_eq!(fields2.len(), 8);
+    let fields_by_name: std::collections::HashMap<_, _> = fields2
+        .into_iter()
+        .map(|(name, values, space)| (name, (values, space)))
+        .collect();
+    assert_eq!(fields_by_name.get(FIELD_SOLUTION), Some(&(solution.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_INLET_MASK), Some(&(inlet_mask.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_OUTLET_MASK), Some(&(outlet_mask.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_MERGED_BOUNDARY_MASK), Some(&(merged_mask.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_KAPPA), Some(&(kappa.clone(), "L2".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_SOURCE_STRENGTH), Some(&(source_strength.clone(), "L2".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_FLUID_ID), Some(&(fluid_id.clone(), "L2".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_LINER_ID), Some(&(liner_id.clone(), "L2".to_string())));
+
+    let (point_data, cell_data) = vtk_named_attribute_solution_fields(
+        solution.clone(),
+        inlet_mask.clone(),
+        outlet_mask.clone(),
+        Some(merged_mask.clone()),
+        material_id,
+        kappa.clone(),
+        source_strength.clone(),
+        fluid_id.clone(),
+        Some(liner_id.clone()),
+    );
+    let vtk = vtk_xml_with_fields(&mesh, point_data, cell_data);
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_SOLUTION)), "VTK should expose the nodal solution field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_INLET_MASK)), "VTK should expose the inlet mask field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_OUTLET_MASK)), "VTK should expose the outlet mask field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_MERGED_BOUNDARY_MASK)), "VTK should expose the merged boundary field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_MATERIAL_ID)), "VTK should expose the material field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_KAPPA)), "VTK should expose the material coefficient field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_SOURCE_STRENGTH)), "VTK should expose the source field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_FLUID_ID)), "VTK should expose the fluid mask field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_LINER_ID)), "VTK should expose the liner mask field");
+
+    let h5_path_text = h5_path.to_string_lossy().to_string();
+    write_xdmf(
+        &xmf_path,
+        1,
+        mesh.elem_type,
+        2,
+        &[mesh.n_nodes()],
+        &[mesh.n_elems()],
+        &h5_path_text,
+        &xdmf_named_attribute_solution_fields(&h5_path_text, true, true),
+    )
+    .expect("write named-attribute xdmf sidecar");
+
+    let xmf = std::fs::read_to_string(&xmf_path).expect("read named-attribute xdmf sidecar");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_SOLUTION)), "XDMF should expose the nodal solution field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_INLET_MASK)), "XDMF should expose the inlet mask field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_OUTLET_MASK)), "XDMF should expose the outlet mask field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_MERGED_BOUNDARY_MASK)), "XDMF should expose the merged boundary field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_MATERIAL_ID)), "XDMF should expose the material field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_KAPPA)), "XDMF should expose the material coefficient field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_SOURCE_STRENGTH)), "XDMF should expose the source field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_FLUID_ID)), "XDMF should expose the fluid mask field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_LINER_ID)), "XDMF should expose the liner mask field");
+    assert!(xmf.contains("/fields/u/values"), "XDMF should point to the solution dataset");
+    assert!(xmf.contains("/fields/inlet_mask/values"), "XDMF should point to the inlet-mask dataset");
+    assert!(xmf.contains("/fields/outlet_mask/values"), "XDMF should point to the outlet-mask dataset");
+    assert!(xmf.contains("/fields/merged_boundary_mask/values"), "XDMF should point to the merged-boundary dataset");
+    assert!(xmf.contains("/fields/kappa/values"), "XDMF should point to the kappa dataset");
+    assert!(xmf.contains("/fields/source_strength/values"), "XDMF should point to the source dataset");
+    assert!(xmf.contains("/fields/fluid_id/values"), "XDMF should point to the fluid-mask dataset");
+    assert!(xmf.contains("/fields/liner_id/values"), "XDMF should point to the liner-mask dataset");
+    assert!(xmf.contains(DATASET_ELEM_TAGS), "XDMF should point to the material tag dataset");
+}
+
+#[cfg(feature = "hdf5")]
+#[test]
+fn named_boundary_export_workflow() {
+    let msh = read_msh(gmsh_named_attribute_solver_square().as_bytes()).expect("parse named-boundary fixture");
+    let registry = msh.named_attribute_registry();
+    let mesh = msh.into_2d().expect("extract 2D named-boundary mesh");
+
+    let inlet_mask = nodal_mask_for_boundary_set(&mesh, &registry, "inlet");
+    let outlet_mask = nodal_mask_for_boundary_set(&mesh, &registry, "outlet");
+    let merged_mask = merged_boundary_mask(&mesh, &registry);
+    let fluid_id = cell_mask_for_named_region(&mesh, &registry, "fluid");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let h5_path = tmp.path().join("named_boundary_workflow.h5");
+    let xmf_path = tmp.path().join("named_boundary_workflow.xmf");
+
+    let fields = [
+        (FIELD_INLET_MASK, inlet_mask.as_slice(), "H1"),
+        (FIELD_OUTLET_MASK, outlet_mask.as_slice(), "H1"),
+        (FIELD_MERGED_BOUNDARY_MASK, merged_mask.as_slice(), "H1"),
+        (FIELD_FLUID_ID, fluid_id.as_slice(), "L2"),
+    ];
+    write_mesh_and_fields(&h5_path, &mesh, &fields, &Hdf5WriteOptions::default())
+        .expect("write named-boundary mesh + fields to hdf5");
+
+    let (mesh2, fields2) = read_mesh_and_fields::<2>(&h5_path).expect("read named-boundary mesh + fields from hdf5");
+    assert_eq!(mesh2.elem_tags, mesh.elem_tags, "material tags should round-trip through HDF5");
+    assert_eq!(mesh2.face_tags, mesh.face_tags, "boundary tags should round-trip through HDF5");
+    assert_eq!(fields2.len(), 4);
+    let fields_by_name: std::collections::HashMap<_, _> = fields2
+        .into_iter()
+        .map(|(name, values, space)| (name, (values, space)))
+        .collect();
+    assert_eq!(fields_by_name.get(FIELD_INLET_MASK), Some(&(inlet_mask.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_OUTLET_MASK), Some(&(outlet_mask.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_MERGED_BOUNDARY_MASK), Some(&(merged_mask.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_FLUID_ID), Some(&(fluid_id.clone(), "L2".to_string())));
+
+    let (point_data, cell_data) = vtk_named_boundary_fields(
+        inlet_mask.clone(),
+        outlet_mask.clone(),
+        Some(merged_mask.clone()),
+        fluid_id.clone(),
+    );
+    let vtk = vtk_xml_with_fields(&mesh, point_data, cell_data);
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_INLET_MASK)), "VTK should expose the inlet mask field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_OUTLET_MASK)), "VTK should expose the outlet mask field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_MERGED_BOUNDARY_MASK)), "VTK should expose the merged boundary field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_FLUID_ID)), "VTK should expose the fluid mask field");
+
+    let h5_path_text = h5_path.to_string_lossy().to_string();
+    write_xdmf(
+        &xmf_path,
+        1,
+        mesh.elem_type,
+        2,
+        &[mesh.n_nodes()],
+        &[mesh.n_elems()],
+        &h5_path_text,
+        &xdmf_named_boundary_fields(&h5_path_text, true),
+    )
+    .expect("write named-boundary xdmf sidecar");
+
+    let xmf = std::fs::read_to_string(&xmf_path).expect("read named-boundary xdmf sidecar");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_INLET_MASK)), "XDMF should expose the inlet mask field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_OUTLET_MASK)), "XDMF should expose the outlet mask field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_MERGED_BOUNDARY_MASK)), "XDMF should expose the merged boundary field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_FLUID_ID)), "XDMF should expose the fluid mask field");
+    assert!(xmf.contains("/fields/inlet_mask/values"), "XDMF should point to the inlet-mask dataset");
+    assert!(xmf.contains("/fields/outlet_mask/values"), "XDMF should point to the outlet-mask dataset");
+    assert!(xmf.contains("/fields/merged_boundary_mask/values"), "XDMF should point to the merged-boundary dataset");
+    assert!(xmf.contains("/fields/fluid_id/values"), "XDMF should point to the fluid-mask dataset");
 }
 
 #[cfg(feature = "hdf5")]
 #[test]
 fn abaqus_named_sets_and_result_export_workflow() {
     let inp = r#"*Heading
-** Abaqus user-closure fixture with one material set and one boundary node set
+** Abaqus user-closure fixture with one material set and boundary node sets
 *Node
 1, 0.0, 0.0, 0.0
 2, 1.0, 0.0, 0.0
@@ -212,12 +558,16 @@ fn abaqus_named_sets_and_result_export_workflow() {
 1, 1, 2, 3, 4
 *Nset, nset=FIXED
 1, 2, 3
+*Nset, nset=DRIVE
+4
 "#;
 
     let data = read_abaqus_inp_full(inp.as_bytes()).expect("parse abaqus full input");
     let fixed = data.node_sets.get("FIXED").expect("missing FIXED node set");
+    let drive = data.node_sets.get("DRIVE").expect("missing DRIVE node set");
     let mat_a = data.elem_sets.get("MAT_A").expect("missing MAT_A element set");
     assert_eq!(fixed, &vec![0, 1, 2], "FIXED node set should preserve 0-based node indices");
+    assert_eq!(drive, &vec![3], "DRIVE node set should preserve 0-based node indices");
     assert_eq!(mat_a, &vec![0], "MAT_A should contain the single tetrahedron");
 
     let mesh = &data.mesh;
@@ -227,22 +577,47 @@ fn abaqus_named_sets_and_result_export_workflow() {
     for &node in fixed {
         fixed_mask[node as usize] = 1.0;
     }
+    let mut drive_mask = vec![0.0; mesh.n_nodes()];
+    for &node in drive {
+        drive_mask[node as usize] = 1.0;
+    }
+    let solution = drive_mask.clone();
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let h5_path = tmp.path().join("abaqus_user_workflow.h5");
     let xmf_path = tmp.path().join("abaqus_user_workflow.xmf");
 
-    let fields = [("fixed_mask", fixed_mask.as_slice(), "H1")];
+    let fields = [
+        (FIELD_SOLUTION, solution.as_slice(), "H1"),
+        (FIELD_FIXED_MASK, fixed_mask.as_slice(), "H1"),
+        (FIELD_DRIVE_MASK, drive_mask.as_slice(), "H1"),
+    ];
     write_mesh_and_fields(&h5_path, mesh, &fields, &Hdf5WriteOptions::default())
         .expect("write abaqus mesh + fields to hdf5");
 
     let (mesh2, fields2) = read_mesh_and_fields::<3>(&h5_path).expect("read abaqus mesh + fields from hdf5");
     assert_eq!(mesh2.elem_tags, mesh.elem_tags, "material tags should round-trip through HDF5");
     assert_eq!(mesh2.face_tags, mesh.face_tags, "reconstructed boundary tags should round-trip through HDF5");
-    assert_eq!(fields2.len(), 1);
-    assert_eq!(fields2[0].0, "fixed_mask");
-    assert_eq!(fields2[0].1, fixed_mask);
-    assert_eq!(fields2[0].2, "H1");
+    assert_eq!(fields2.len(), 3);
+    let fields_by_name: std::collections::HashMap<_, _> = fields2
+        .into_iter()
+        .map(|(name, values, space)| (name, (values, space)))
+        .collect();
+    assert_eq!(fields_by_name.get(FIELD_SOLUTION), Some(&(solution.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_FIXED_MASK), Some(&(fixed_mask.clone(), "H1".to_string())));
+    assert_eq!(fields_by_name.get(FIELD_DRIVE_MASK), Some(&(drive_mask.clone(), "H1".to_string())));
+
+    let (point_data, cell_data) = vtk_abaqus_solution_fields(
+        drive_mask.clone(),
+        fixed_mask.clone(),
+        drive_mask.clone(),
+        mesh.elem_tags.iter().map(|&tag| tag as f64).collect(),
+    );
+    let vtk = vtk_xml_with_fields(mesh, point_data, cell_data);
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_SOLUTION)), "VTK should expose the nodal solution field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_FIXED_MASK)), "VTK should expose the boundary-config node mask");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_DRIVE_MASK)), "VTK should expose the drive node mask");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_MATERIAL_ID)), "VTK should expose the material cell field");
 
     let h5_path_text = h5_path.to_string_lossy().to_string();
     write_xdmf(
@@ -253,28 +628,19 @@ fn abaqus_named_sets_and_result_export_workflow() {
         &[mesh.n_nodes()],
         &[mesh.n_elems()],
         &h5_path_text,
-        &[
-            XdmfField {
-                name: "fixed_mask".into(),
-                hdf5_path: h5_path_text.clone(),
-                dataset_path: "/fields/fixed_mask/values".into(),
-                center: XdmfCenter::Node,
-            },
-            XdmfField {
-                name: "material_id".into(),
-                hdf5_path: h5_path_text.clone(),
-                dataset_path: "/mesh/elem_tags".into(),
-                center: XdmfCenter::Cell,
-            },
-        ],
+        &xdmf_abaqus_solution_fields(&h5_path_text),
     )
     .expect("write abaqus xdmf sidecar");
 
     let xmf = std::fs::read_to_string(&xmf_path).expect("read abaqus xdmf sidecar");
-    assert!(xmf.contains(r#"Name="fixed_mask""#), "XDMF should expose the boundary-config node mask");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_SOLUTION)), "XDMF should expose the nodal solution field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_FIXED_MASK)), "XDMF should expose the boundary-config node mask");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_DRIVE_MASK)), "XDMF should expose the drive node mask");
+    assert!(xmf.contains("/fields/u/values"), "XDMF should point to the solution dataset");
     assert!(xmf.contains("/fields/fixed_mask/values"), "XDMF should point to the node-mask dataset");
-    assert!(xmf.contains(r#"Name="material_id""#), "XDMF should expose the material cell field");
-    assert!(xmf.contains("/mesh/elem_tags"), "XDMF should point to the element-tag dataset");
+    assert!(xmf.contains("/fields/drive_mask/values"), "XDMF should point to the drive-mask dataset");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_MATERIAL_ID)), "XDMF should expose the material cell field");
+    assert!(xmf.contains(DATASET_ELEM_TAGS), "XDMF should point to the element-tag dataset");
 }
 
 #[cfg(feature = "hdf5")]
@@ -321,7 +687,7 @@ surfaceelements
     let h5_path = tmp.path().join("netgen_surfaceelements_workflow.h5");
     let xmf_path = tmp.path().join("netgen_surfaceelements_workflow.xmf");
 
-    let fields = [("boundary_mask", boundary_mask.as_slice(), "H1")];
+    let fields = [(FIELD_BOUNDARY_MASK, boundary_mask.as_slice(), "H1")];
     write_mesh_and_fields(&h5_path, &mesh, &fields, &Hdf5WriteOptions::default())
         .expect("write netgen workflow mesh + fields to hdf5");
 
@@ -329,9 +695,18 @@ surfaceelements
     assert_eq!(mesh2.elem_tags, mesh.elem_tags, "material tags should round-trip through HDF5");
     assert_eq!(mesh2.face_tags, mesh.face_tags, "surface boundary tags should round-trip through HDF5");
     assert_eq!(fields2.len(), 1);
-    assert_eq!(fields2[0].0, "boundary_mask");
+    assert_eq!(fields2[0].0, FIELD_BOUNDARY_MASK);
     assert_eq!(fields2[0].1, boundary_mask);
     assert_eq!(fields2[0].2, "H1");
+
+    let (point_data, cell_data) = vtk_imported_mask_fields(
+        FIELD_BOUNDARY_MASK,
+        boundary_mask.clone(),
+        mesh.elem_tags.iter().map(|&tag| tag as f64).collect(),
+    );
+    let vtk = vtk_xml_with_fields(&mesh, point_data, cell_data);
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_BOUNDARY_MASK)), "VTK should expose the boundary mask field");
+    assert!(vtk.contains(&format!(r#"Name="{}""#, FIELD_MATERIAL_ID)), "VTK should expose the material cell field");
 
     let h5_path_text = h5_path.to_string_lossy().to_string();
     write_xdmf(
@@ -342,27 +717,14 @@ surfaceelements
         &[mesh.n_nodes()],
         &[mesh.n_elems()],
         &h5_path_text,
-        &[
-            XdmfField {
-                name: "boundary_mask".into(),
-                hdf5_path: h5_path_text.clone(),
-                dataset_path: "/fields/boundary_mask/values".into(),
-                center: XdmfCenter::Node,
-            },
-            XdmfField {
-                name: "material_id".into(),
-                hdf5_path: h5_path_text.clone(),
-                dataset_path: "/mesh/elem_tags".into(),
-                center: XdmfCenter::Cell,
-            },
-        ],
+        &xdmf_imported_mask_workflow_fields(FIELD_BOUNDARY_MASK, &h5_path_text),
     )
     .expect("write netgen workflow xdmf sidecar");
 
     let xmf = std::fs::read_to_string(&xmf_path).expect("read netgen workflow xdmf sidecar");
-    assert!(xmf.contains(r#"Name="boundary_mask""#), "XDMF should expose the boundary mask field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_BOUNDARY_MASK)), "XDMF should expose the boundary mask field");
     assert!(xmf.contains("/fields/boundary_mask/values"), "XDMF should point to the boundary mask dataset");
-    assert!(xmf.contains(r#"Name="material_id""#), "XDMF should expose the material cell field");
+    assert!(xmf.contains(&format!(r#"Name="{}""#, FIELD_MATERIAL_ID)), "XDMF should expose the material cell field");
     assert!(xmf.contains("/mesh/elem_tags"), "XDMF should point to the material tag dataset");
 }
 

@@ -37,7 +37,8 @@
 - ✅ HDF5/XDMF 并行 I/O 与 restart 文件链路（Phase 55, 2026-05-02）。
   当前进展：`fem-io` 新增 `hdf5` 模块（串行 HDF5 网格+场读写，GZIP 压缩）与 `xdmf` 模块（XML 元数据生成，支持串行/并行）；`fem-parallel` 新增 `par_hdf5` 模块（PerRank/Gather 两种并行写入模式）与 `checkpoint` 模块（ParVector+ParCsrMatrix 分布式 checkpoint 保存恢复）。
   验收证据：`cargo test -p fem-io --features hdf5` 全通过（18 unit + 7 integration）；`cargo check -p fem-parallel --features hdf5` 零错误。
-- 🔲 hypre 绑定（可选 FFI 路线）。
+- ✅ 外部 solver 兼容 API 口径已收口（2026-05-15）。
+  `hypre` / `mumps` / `mkl` 在本项目中不作为外部 FFI 绑定交付目标；对齐目标是维持 MFEM 对应能力与兼容 API 语义，其中 AMG/AMS/ADS 与 direct-solver 入口均由 native `linger` 路线承载。
 - ✅ **Netgen/Abaqus 网格读取支持**（2026-05-04）。`fem-io` 新增 Prism6、Pyramid5、surfaceelements（Netgen `.vol`）及 C3D5、C3D6、mixed C3D4+C3D6（Abaqus）；XDMF 混合拓扑写入器；72 项单元+集成测试通过。`alignment-smoke` CI 套件 `io-mixed-topology` 覆盖。
 - ✅ Quad4/Hex8 非协调 AMR（Phase 67）。`refine_nonconforming_quad`、`NCStateQuad`、`refine_nonconforming_hex`、`unit_cube_hex` 已落地；12 个单元测试通过。
 - ✅ 静态凝聚 / 杂化 FEM（Phase 68）。`StaticCondensation`、`GlobalBacksolve`、`condense_global` 已落地（`fem-assembly`）；4 个单元测试通过。
@@ -263,6 +264,22 @@
 ## 7.  MFEM ?踪Beyond-MFEM
 > ?记? MFEM 对齐项??对齐项?工??避被误类为 parity 工?>
 > ?已?· ? · ? ?
+
+### 7.0 Post-Parity operating rule (2026-05-15)
+
+- Parity track is now treated as a maintenance track: bug fixes, regression hardening, evidence backfill, and claim-preserving documentation only.
+- New product, workflow, and multiphysics growth should be tracked as Beyond-MFEM expansion work, not as reopened MFEM gaps.
+- External solver names such as `hypre`, `mumps`, and `mkl` remain compatibility/API correspondences rather than required external FFI deliverables.
+- The authoritative roadmap for post-parity prioritization is `docs/post-parity-expansion-roadmap-2026-05-15.md`.
+
+### 7.0.1 Active expansion batch
+
+| ID | Track | Priority | Title | Anchor | Status |
+|---|---|---|---|---|---|
+| EXP-001 | E1 | P0 | Imported mesh workflow consolidation | `examples/mfem_ex39_named_attributes.rs` | Active |
+| EXP-002 | E1 | P0 | Unified export/checkpoint user closure | `crates/io/tests/io_integration.rs` | Active |
+| EXP-003 | E2 | P1 | Template workflow conventions | `examples/mfem_ex44_thermoelastic_coupled.rs` | Planned |
+
 ### 7.1 ?台账已落
 | ID | ??| ?| ?| 代码位置 | ?| 责| ?|
 |---|---|---|---|---|---|---|---|
@@ -296,6 +313,13 @@
 9. `cargo test -p fem-assembly transfer::tests::boundary_flux_metric_is_consistent_for_exact_linear_transfer`
 10. `cargo test -p fem-assembly transfer::tests::conservative_projection_3d_matches_global_integral`
 11. `cargo test -p fem-examples --example mfem_ex44_thermoelastic_coupled`
+
+### 7.5 Post-parity update rule
+
+1. Keep `MFEM_MAPPING.md` and parity sections in this tracker limited to MFEM correspondence claims.
+2. Record new workflow and productization work under Beyond-MFEM or the post-parity roadmap.
+3. Every expansion item must name its closed-core dependency chain and carry executable regression coverage.
+4. Do not reopen parity rows for scale hardening, richer round-trip fidelity, or workflow productization once the agreed parity baseline is met.
 
 ---
 
