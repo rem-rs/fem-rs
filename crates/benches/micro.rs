@@ -6,7 +6,23 @@
 //! - Sorting: triplet sorting for COO→CSR conversion
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use fem_linalg::{CooMatrix, CsrMatrix, Vector};
+use fem_linalg::{CooMatrix, CsrMatrix};
+use std::time::Duration;
+
+fn quick_bench_mode() -> bool {
+    matches!(std::env::var("FEM_BENCH_QUICK").ok().as_deref(), Some("1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn micro_criterion_config() -> Criterion {
+    if quick_bench_mode() {
+        Criterion::default()
+            .sample_size(10)
+            .warm_up_time(Duration::from_millis(100))
+            .measurement_time(Duration::from_millis(250))
+    } else {
+        Criterion::default().sample_size(50)
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SpMV Micro-Benchmark
@@ -33,8 +49,10 @@ fn create_sparse_poisson_2d(n: usize) -> CsrMatrix<f64> {
 
 fn spmv_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("spmv");
+    let serial_sizes: &[usize] = if quick_bench_mode() { &[64, 128, 256, 512] } else { &[32, 64, 128, 256, 512] };
+    let parallel_sizes: &[usize] = if quick_bench_mode() { &[128, 256, 512] } else { &[64, 128, 256, 512] };
     
-    for n in [32, 64, 128, 256].iter() {
+    for n in serial_sizes.iter() {
         let mat = black_box(create_sparse_poisson_2d(*n));
         let x = black_box(vec![1.0_f64; n * n]);
         let mut y = vec![0.0_f64; n * n];
@@ -50,7 +68,7 @@ fn spmv_benchmark(c: &mut Criterion) {
     // in bench context, so we use sizes large enough to exceed the default 128-row
     // threshold and exercise the parallel code path.
     #[cfg(feature = "parallel")]
-    for n in [64, 128, 256].iter() {
+    for n in parallel_sizes.iter() {
         let mat = black_box(create_sparse_poisson_2d(*n));
         let x = black_box(vec![1.0_f64; n * n]);
         let mut y = vec![0.0_f64; n * n];
@@ -181,7 +199,7 @@ fn triplet_sorting_benchmark(c: &mut Criterion) {
 
 criterion_group!(
     name = benches;
-    config = Criterion::default().sample_size(50);
+    config = micro_criterion_config();
     targets = spmv_benchmark, assembly_coo_benchmark, coo_to_csr_benchmark,
               triplet_sorting_benchmark, spmm_benchmark
 );

@@ -51,9 +51,10 @@
 //!
 //! - **`parallel`** — Rayon-parallel **volume** assembly for [`Assembler`],
 //!   [`VectorAssembler`], [`MixedAssembler`], and DG volume / face loops when
-//!   counts meet `assembly_parallel_min_elems()` (default `64`; env
-//!   `FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`), plus `fem-linalg/parallel` for threaded
-//!   SpMV on large local matrices.
+//!   counts meet `assembly_parallel_min_elems()` (adaptive default: `64` on a
+//!   single worker down to `8` on 8+ workers; env
+//!   `FEM_ASSEMBLY_PARALLEL_MIN_ELEMS` forces a fixed threshold), plus
+//!   `fem-linalg/parallel` for threaded SpMV on large local matrices.
 //! - **`reed`** — libCEED-style QFunctions plus coordinated FEM entry points in the `reed`
 //!   submodule (`FemCeed`, scalar H¹ `apply_mass_{2d,3d}` / `apply_poisson_{2d,3d}`, …) using the same
 //!   [`Assembler`] + [`H1Space`](fem_space::H1Space) kernels as default builds.  With this feature,

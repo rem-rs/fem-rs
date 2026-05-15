@@ -33,29 +33,37 @@ pub const FEM_ASSEMBLY_PARALLEL_MIN_ELEMS: &str = "FEM_ASSEMBLY_PARALLEL_MIN_ELE
 const DEFAULT_PARALLEL_MIN_ELEMS: usize = 64;
 
 #[cfg(feature = "parallel")]
+const MIN_PARALLEL_MIN_ELEMS: usize = 8;
+
+#[cfg(feature = "parallel")]
 static ASSEMBLY_PARALLEL_MIN_ELEMS: OnceLock<Option<usize>> = OnceLock::new();
 
 /// Compute adaptive assembly parallelization threshold based on thread count.
 /// 
-/// Returns minimum number of elements required before Rayon parallelization.
-/// Calibrated so that parallel wins at ~8× thread count × work-per-element overhead.
+/// Returns the minimum number of elements required before Rayon parallelization.
+/// The default policy keeps the historical serial threshold for small machines,
+/// but scales it down as more worker threads are available so medium meshes can
+/// actually enter the parallel path.
 /// 
-/// Formula: `max(8192, 65536 >> log2(n_threads).saturating_sub(1))`
+/// Formula: `max(8, 64 >> floor(log2(n_threads)))`
 /// 
-/// - 1-2 threads:  threshold = 65536 (essentially always serial)
-/// - 4 threads:    threshold = 32768
-/// - 8 threads:    threshold = 16384
-/// - 16+ threads:  threshold = 8192
+/// - 1 thread:     threshold = 64
+/// - 2-3 threads:  threshold = 32
+/// - 4-7 threads:  threshold = 16
+/// - 8+ threads:   threshold = 8
 /// 
 /// Override via environment variable [`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`] to disable
 /// adaptive logic and use a fixed threshold instead.
 #[cfg(feature = "parallel")]
+fn adaptive_assembly_threshold_for_threads(n_threads: usize) -> usize {
+    let threads = n_threads.max(1);
+    let log_threads = threads.ilog2() as usize;
+    (DEFAULT_PARALLEL_MIN_ELEMS >> log_threads).max(MIN_PARALLEL_MIN_ELEMS)
+}
+
+#[cfg(feature = "parallel")]
 fn adaptive_assembly_threshold() -> usize {
-    let n_threads = rayon::current_num_threads();
-    let log_threads = (n_threads as f64).log2().ceil() as usize;
-    let shift = log_threads.saturating_sub(1);
-    let threshold = 65536usize >> shift;
-    threshold.max(8192)
+    adaptive_assembly_threshold_for_threads(rayon::current_num_threads())
 }
 
 /// Minimum number of volume elements before using Rayon for domain assembly.
@@ -962,5 +970,16 @@ mod tests {
     #[test]
     fn assembly_parallel_min_elems_positive() {
         assert!(assembly_parallel_min_elems() >= 1);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn adaptive_threshold_scales_with_threads() {
+        assert_eq!(adaptive_assembly_threshold_for_threads(1), 64);
+        assert_eq!(adaptive_assembly_threshold_for_threads(2), 32);
+        assert_eq!(adaptive_assembly_threshold_for_threads(3), 32);
+        assert_eq!(adaptive_assembly_threshold_for_threads(4), 16);
+        assert_eq!(adaptive_assembly_threshold_for_threads(8), 8);
+        assert_eq!(adaptive_assembly_threshold_for_threads(32), 8);
     }
 }

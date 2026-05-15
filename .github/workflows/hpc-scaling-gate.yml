@@ -27,6 +27,10 @@ on:
         description: "Optional baseline CSV path for template KPI trend compare (defaults to docs/baselines/template_kpi_baseline.csv)"
         required: false
         default: ""
+      fail_on_spmv_parallel_warn:
+        description: "Fail SpMV micro benchmark when parallel-vs-serial compare reports warn rows"
+        required: false
+        default: "false"
   schedule:
     - cron: "0 2 * * 1"
 
@@ -120,6 +124,18 @@ jobs:
           $log = "output/template_kpi.log"
           ./scripts/run_template_kpi_sweep.ps1 -OutputCsv output/template_kpi.csv -RunId "gha-${{ github.run_id }}" -Tag "ci-quick" | Tee-Object -FilePath $log
 
+      - name: Run SpMV micro benchmark summary
+        shell: pwsh
+        run: |
+          $log = "output/spmv_micro.log"
+          $failOnWarn = "${{ github.event.inputs.fail_on_spmv_parallel_warn }}"
+          if ([string]::IsNullOrWhiteSpace($failOnWarn)) { $failOnWarn = "false" }
+          if ($failOnWarn -eq "true") {
+            ./scripts/run_spmv_parallel_bench.ps1 -Quick -Threads 8 -OutputCsv output/spmv_micro.csv -FailOnParallelWarn | Tee-Object -FilePath $log
+          } else {
+            ./scripts/run_spmv_parallel_bench.ps1 -Quick -Threads 8 -OutputCsv output/spmv_micro.csv | Tee-Object -FilePath $log
+          }
+
       - name: Gate template KPI and optional trend compare
         shell: pwsh
         run: |
@@ -169,6 +185,29 @@ jobs:
           if ($trend) { "- ``$($trend.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
           if ($delta) { "- ``$($delta.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append }
 
+      - name: Publish SpMV micro benchmark summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summaryPath = $env:GITHUB_STEP_SUMMARY
+          $logPath = "output/spmv_micro.log"
+          "## SpMV Micro Benchmark" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          "" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          if (-not (Test-Path $logPath)) {
+            "No SpMV micro benchmark log found." | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+            exit 0
+          }
+          $summary = Select-String -Path $logPath -Pattern '^spmv_bench_summary,' | Select-Object -Last 1
+          $pairSummary = Select-String -Path $logPath -Pattern '^spmv_parallel_vs_serial_summary,' | Select-Object -Last 1
+          if ($summary) {
+            "- ``$($summary.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          } else {
+            "- No summary line found in output/spmv_micro.log" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          }
+          if ($pairSummary) {
+            "- ``$($pairSummary.Line)``" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          }
+
       - name: Upload scaling CSV artifact
         uses: actions/upload-artifact@v4
         with:
@@ -195,3 +234,10 @@ jobs:
         with:
           name: template-kpi-delta-csv
           path: output/template_kpi_delta.csv
+
+      - name: Upload SpMV micro CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spmv-micro-csv
+          path: output/spmv_micro.csv

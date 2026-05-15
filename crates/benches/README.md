@@ -13,6 +13,7 @@ cargo bench -p fem-benches --bench assembly
 cargo bench -p fem-benches --bench solver
 cargo bench -p fem-benches --bench amg
 cargo bench -p fem-benches --bench mesh
+cargo bench -p fem-benches --bench micro
 
 # Compare serial vs parallel assembly paths
 cargo bench -p fem-benches --bench assembly
@@ -24,6 +25,7 @@ pwsh scripts/run_assembly_parallel_bench.ps1 -CompileOnly
 pwsh scripts/run_assembly_parallel_bench.ps1 -Threads 8 -ExportStamp 2026-04-25-parallel-pass1
 pwsh scripts/run_assembly_parallel_bench.ps1 -Mode parallel -Filter assembly_dg_faces
 pwsh scripts/run_assembly_parallel_bench.ps1 -Mode serial -Filter tangential_mass_nd1
+pwsh scripts/run_spmv_parallel_bench.ps1 -Quick
 
 # Run benchmarks without saving results (for quick testing)
 cargo bench -p fem-benches -- --test
@@ -48,6 +50,11 @@ cargo bench -p fem-benches -- --test
 ### Mesh (`mesh.rs`)
 - Mesh generation (2D/3D)
 - Uniform refinement
+
+### Micro (`micro.rs`)
+- SpMV micro-benchmarks for serial and parallel Poisson stencils
+- COO accumulation, COO→CSR conversion, triplet sorting
+- Quick CI-oriented mode via `FEM_BENCH_QUICK=1`
 
 ## Output
 

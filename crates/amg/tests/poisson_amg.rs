@@ -6,14 +6,15 @@
 
 use std::f64::consts::PI;
 
-use fem_amg::{AmgConfig, AmgSolver, solve_amg_cg};
+use fem_amg::{AmgConfig, AmgSolver, CoarsenStrategy, solve_amg_cg, solve_amg_gmres, solve_fgmres_amg};
 use fem_assembly::{
     Assembler,
-    standard::{DiffusionIntegrator, DomainSourceIntegrator},
+    coefficient::ConstantVectorCoeff,
+    standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_element::{ReferenceElement, lagrange::TriP1};
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
-use fem_solver::SolverConfig;
+use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{
     H1Space,
     fe_space::FESpace,
@@ -29,6 +30,21 @@ fn build_system(n: usize) -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<Simp
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let source    = DomainSourceIntegrator::new(forcing);
     let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], 3);
+    let mut rhs = Assembler::assemble_linear(&space, &[&source], 3);
+    let bdofs  = boundary_dofs(&mesh, space.dof_manager(), &[1, 2, 3, 4]);
+    apply_dirichlet(&mut mat, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+    (mat, rhs, space)
+}
+
+fn build_nonsym_system(n: usize) -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<SimplexMesh<2>>) {
+    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+    let space = H1Space::new(mesh.clone(), 1);
+    let diffusion = DiffusionIntegrator { kappa: 1.0 };
+    let convection = ConvectionIntegrator {
+        velocity: ConstantVectorCoeff(vec![1.0, 0.25]),
+    };
+    let source = DomainSourceIntegrator::new(forcing);
+    let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion, &convection], 3);
     let mut rhs = Assembler::assemble_linear(&space, &[&source], 3);
     let bdofs  = boundary_dofs(&mesh, space.dof_manager(), &[1, 2, 3, 4]);
     apply_dirichlet(&mut mat, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
@@ -112,4 +128,59 @@ fn amg_fewer_iters_than_cg_large() {
     println!("n={n}: CG iters={}, AMG-CG iters={}", res_cg.iterations, res_amg.iterations);
     assert!(res_amg.iterations < res_cg.iterations,
         "AMG-CG ({}) should need fewer iters than CG ({})", res_amg.iterations, res_cg.iterations);
+}
+
+fn air_cfg() -> AmgConfig {
+    AmgConfig {
+        strategy: CoarsenStrategy::Air,
+        ..AmgConfig::default()
+    }
+}
+
+#[test]
+fn amg_gmres_convection_diffusion_converges() {
+    let (mat, rhs, _space) = build_nonsym_system(12);
+    let n = mat.nrows;
+    let mut x = vec![0.0_f64; n];
+
+    let res = solve_amg_gmres(&mat, &rhs, &mut x, &air_cfg(), 30, &cfg()).unwrap();
+    assert!(res.converged, "AMG-GMRES did not converge on convection-diffusion system");
+
+    let mut x_ref = vec![0.0_f64; n];
+    let res_ref = solve_gmres(&mat, &rhs, &mut x_ref, 30, &cfg()).unwrap();
+    assert!(res_ref.converged, "reference GMRES did not converge");
+
+    let max_diff = x_ref.iter().zip(x.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+    assert!(max_diff < 1e-7, "AMG-GMRES solution mismatch vs GMRES reference: {max_diff}");
+}
+
+#[test]
+fn fgmres_amg_convection_diffusion_converges() {
+    let (mat, rhs, _space) = build_nonsym_system(12);
+    let n = mat.nrows;
+    let mut x = vec![0.0_f64; n];
+
+    let res = solve_fgmres_amg(&mat, &rhs, &mut x, &air_cfg(), 30, &cfg()).unwrap();
+    assert!(res.converged, "FGMRES-AMG did not converge on convection-diffusion system");
+
+    let mut x_ref = vec![0.0_f64; n];
+    let res_ref = solve_gmres(&mat, &rhs, &mut x_ref, 30, &cfg()).unwrap();
+    assert!(res_ref.converged, "reference GMRES did not converge");
+
+    let max_diff = x_ref.iter().zip(x.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+    assert!(max_diff < 1e-7, "FGMRES-AMG solution mismatch vs GMRES reference: {max_diff}");
+}
+
+#[test]
+fn amg_solver_fgmres_convection_diffusion_reuse() {
+    let (mat, rhs, _space) = build_nonsym_system(12);
+    let solver = AmgSolver::setup(&mat, air_cfg());
+    assert!(solver.n_levels() >= 2, "AIR AMG hierarchy must have at least 2 levels");
+
+    for _ in 0..2 {
+        let n = mat.nrows;
+        let mut x = vec![0.0_f64; n];
+        let res = solver.fgmres(&mat, &rhs, &mut x, 30, &cfg()).unwrap();
+        assert!(res.converged, "reused AmgSolver::fgmres did not converge");
+    }
 }

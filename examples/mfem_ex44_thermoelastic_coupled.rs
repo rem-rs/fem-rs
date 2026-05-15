@@ -1679,6 +1679,47 @@ mod tests {
     }
 
     #[test]
+    fn ex44_steady_schur_strategy_matches_gmres_coupled_response() {
+        let gmres = solve_steady_case(
+            8,
+            1,
+            0.2,
+            0.1,
+            0.25,
+            0.10,
+            1.0,
+            CoupledLinearStrategy::Gmres,
+            default_line_search_options(),
+        );
+        let schur = solve_steady_case(
+            8,
+            1,
+            0.2,
+            0.1,
+            0.25,
+            0.10,
+            1.0,
+            CoupledLinearStrategy::BlockSchur2x2,
+            default_line_search_options(),
+        );
+
+        assert!(gmres.converged && schur.converged);
+        assert!(schur.final_residual < 1.0e-8, "Schur residual too large: {}", schur.final_residual);
+        assert!(schur.t_norm > 1.0e-6, "Schur thermal field should be non-trivial: {}", schur.t_norm);
+        assert!(schur.uy_norm > 1.0e-8, "Schur y-displacement should be non-trivial: {}", schur.uy_norm);
+
+        let rel_t = ((schur.t_norm - gmres.t_norm) / gmres.t_norm.max(1e-12)).abs();
+        let rel_uy = ((schur.uy_norm - gmres.uy_norm) / gmres.uy_norm.max(1e-12)).abs();
+        let rel_t_checksum = ((schur.t_checksum - gmres.t_checksum) / gmres.t_checksum.abs().max(1e-12)).abs();
+        let rel_uy_checksum = ((schur.uy_checksum - gmres.uy_checksum) / gmres.uy_checksum.abs().max(1e-12)).abs();
+
+        assert!(rel_t < 1e-8, "Schur thermal norm drift vs GMRES too large: {rel_t}");
+        assert!(rel_uy < 1e-8, "Schur uy norm drift vs GMRES too large: {rel_uy}");
+        assert!(rel_t_checksum < 1e-8, "Schur thermal checksum drift vs GMRES too large: {rel_t_checksum}");
+        assert!(rel_uy_checksum < 1e-8, "Schur uy checksum drift vs GMRES too large: {rel_uy_checksum}");
+    }
+
+    #[test]
     fn ex44_zero_coupling_keeps_mechanics_near_zero() {
         let r = solve_steady_case(8, 1, 0.0, 0.0, 0.25, 0.10, 1.0, CoupledLinearStrategy::Gmres, default_line_search_options());
         assert!(r.converged);

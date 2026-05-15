@@ -170,6 +170,7 @@
   - `pcg_ads_solution_satisfies_ax_eq_b`
   全部使用真实 FE 装配（HCurlSpace/HDivSpace + DiscreteLinearOperator），76/76 通过。
 - ✅ **NamedAttributeSet / NamedAttributeRegistry**（2026-05-05）。`crates/mesh/src/boundary.rs` 中 `NamedAttributeSet`、`NamedAttributeRegistry`、`extract_submesh_by_name` 全部实现并从 `fem-mesh` 导出；`mfem_ex39_named_attributes` 8/8 测试通过。
+- ✅ **Tri6 user-closure IO regression**（2026-05-15）。`crates/io/tests/io_integration.rs` 新增 `gmsh_tri6_named_attributes_and_vtk_result_workflow`，用单个 Gmsh v2 Tri6 fixture 端到端验证 `read_msh -> into_curved_2d` 高阶几何链路、`named_attribute_registry()` 的材料/边界命名保留、以及基于工作网格的 VTK 结果导出（point result + cell material field）；同时已接入 `.github/workflows/alignment-smoke.yml` 的 `named-attrs-io` suite。
 - ✅ **CI alignment-smoke.yml**（2026-05-05）。`.github/workflows/alignment-smoke.yml` 已创建并扩展至 12 个套件：complex-coeff、complex-ex22、named-attrs、named-attrs-io、electromagnetic-pml、electromagnetic-absorbing、backend-contract、io-mixed-topology、io-mesh-coords-checkpoint、quad-hex-aniso-amr、amg-stress。
 
 ### 补充 2026-04-13

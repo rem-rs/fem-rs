@@ -17,12 +17,38 @@ pub const FEM_LINALG_SPMV_PARALLEL_MIN_ROWS: &str = "FEM_LINALG_SPMV_PARALLEL_MI
 const DEFAULT_SPMV_PARALLEL_MIN_ROWS: usize = 128;
 
 #[cfg(feature = "parallel")]
+const MIN_SPMV_PARALLEL_MIN_ROWS: usize = 16;
+
+#[cfg(feature = "parallel")]
 static SPMV_PARALLEL_MIN_ROWS: OnceLock<usize> = OnceLock::new();
+
+#[cfg(feature = "parallel")]
+#[inline]
+fn spmv_parallel_row_chunk_size(nrows: usize) -> usize {
+    let threads = rayon::current_num_threads().max(1);
+    let target_chunks = threads * 4;
+    (nrows / target_chunks).max(32)
+}
 
 /// Minimum row count before using Rayon for SpMV (avoids thread overhead on tiny systems).
 ///
-/// Default `128`. Override with [`FEM_LINALG_SPMV_PARALLEL_MIN_ROWS`] (must parse to a
-/// positive integer; invalid values fall back to the default).
+/// By default this scales down with available worker threads so medium matrices
+/// can enter the parallel path without requiring manual tuning:
+///
+/// - 1 thread: `128`
+/// - 2-3 threads: `64`
+/// - 4-7 threads: `32`
+/// - 8+ threads: `16`
+///
+/// Override with [`FEM_LINALG_SPMV_PARALLEL_MIN_ROWS`] (must parse to a
+/// positive integer; invalid values fall back to the adaptive default).
+#[cfg(feature = "parallel")]
+fn adaptive_spmv_parallel_min_rows_for_threads(n_threads: usize) -> usize {
+    let threads = n_threads.max(1);
+    let log_threads = threads.ilog2() as usize;
+    (DEFAULT_SPMV_PARALLEL_MIN_ROWS >> log_threads).max(MIN_SPMV_PARALLEL_MIN_ROWS)
+}
+
 #[cfg(feature = "parallel")]
 #[inline]
 pub fn spmv_parallel_min_rows() -> usize {
@@ -31,24 +57,21 @@ pub fn spmv_parallel_min_rows() -> usize {
             .ok()
             .and_then(|s| s.parse().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_SPMV_PARALLEL_MIN_ROWS)
+            .unwrap_or_else(|| adaptive_spmv_parallel_min_rows_for_threads(rayon::current_num_threads()))
     })
 }
 
 #[inline]
-fn csr_row_dot_f64(
-    row_ptr: &[usize],
+fn csr_row_segment_dot_f64(
     col_idx: &[u32],
     values: &[f64],
     x: &[f64],
-    row: usize,
+    start: usize,
+    end: usize,
 ) -> f64 {
-    let start = row_ptr[row];
-    let end = row_ptr[row + 1];
     let mut k = start;
     let mut sum = 0.0_f64;
 
-    // 8-unroll: lets AVX2 (2× 256-bit FMA lanes) amortise gather-load latency.
     let end8 = start + (end - start) / 8 * 8;
     while k < end8 {
         sum += values[k]     * x[col_idx[k]     as usize]
@@ -66,6 +89,19 @@ fn csr_row_dot_f64(
         k += 1;
     }
     sum
+}
+
+#[inline]
+fn csr_row_dot_f64(
+    row_ptr: &[usize],
+    col_idx: &[u32],
+    values: &[f64],
+    x: &[f64],
+    row: usize,
+) -> f64 {
+    let start = row_ptr[row];
+    let end = row_ptr[row + 1];
+    csr_row_segment_dot_f64(col_idx, values, x, start, end)
 }
 
 #[inline]
@@ -791,47 +827,8 @@ impl CsrMatrix<f64> {
             let e0 = self.row_ptr[row + 1];
             let s1 = self.row_ptr[row + 1];
             let e1 = self.row_ptr[row + 2];
-
-            let mut sum0 = 0.0_f64;
-            let mut sum1 = 0.0_f64;
-
-            // 8-unroll for row 0
-            let e0_8 = s0 + (e0 - s0) / 8 * 8;
-            let mut k = s0;
-            while k < e0_8 {
-                sum0 += self.values[k]     * x[self.col_idx[k]     as usize]
-                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
-                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                      + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
-                      + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
-                      + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
-                      + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
-                      + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
-                k += 8;
-            }
-            while k < e0 {
-                sum0 += self.values[k] * x[self.col_idx[k] as usize];
-                k += 1;
-            }
-
-            // 8-unroll for row 1
-            let e1_8 = s1 + (e1 - s1) / 8 * 8;
-            k = s1;
-            while k < e1_8 {
-                sum1 += self.values[k]     * x[self.col_idx[k]     as usize]
-                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
-                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                      + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
-                      + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
-                      + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
-                      + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
-                      + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
-                k += 8;
-            }
-            while k < e1 {
-                sum1 += self.values[k] * x[self.col_idx[k] as usize];
-                k += 1;
-            }
+            let sum0 = csr_row_segment_dot_f64(&self.col_idx, &self.values, x, s0, e0);
+            let sum1 = csr_row_segment_dot_f64(&self.col_idx, &self.values, x, s1, e1);
 
             y[row]     = sum0;
             y[row + 1] = sum1;
@@ -855,45 +852,8 @@ impl CsrMatrix<f64> {
             let e0 = self.row_ptr[row + 1];
             let s1 = self.row_ptr[row + 1];
             let e1 = self.row_ptr[row + 2];
-
-            let mut sum0 = 0.0_f64;
-            let mut sum1 = 0.0_f64;
-
-            let e0_8 = s0 + (e0 - s0) / 8 * 8;
-            let mut k = s0;
-            while k < e0_8 {
-                sum0 += self.values[k]     * x[self.col_idx[k]     as usize]
-                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
-                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                      + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
-                      + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
-                      + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
-                      + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
-                      + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
-                k += 8;
-            }
-            while k < e0 {
-                sum0 += self.values[k] * x[self.col_idx[k] as usize];
-                k += 1;
-            }
-
-            let e1_8 = s1 + (e1 - s1) / 8 * 8;
-            k = s1;
-            while k < e1_8 {
-                sum1 += self.values[k]     * x[self.col_idx[k]     as usize]
-                      + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
-                      + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                      + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
-                      + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
-                      + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
-                      + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
-                      + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
-                k += 8;
-            }
-            while k < e1 {
-                sum1 += self.values[k] * x[self.col_idx[k] as usize];
-                k += 1;
-            }
+            let sum0 = csr_row_segment_dot_f64(&self.col_idx, &self.values, x, s0, e0);
+            let sum1 = csr_row_segment_dot_f64(&self.col_idx, &self.values, x, s1, e1);
 
             y[row]     = alpha * sum0 + beta * y[row];
             y[row + 1] = alpha * sum1 + beta * y[row + 1];
@@ -901,82 +861,31 @@ impl CsrMatrix<f64> {
         }
 
         if row < nrows {
-            let s = self.row_ptr[row];
-            let e = self.row_ptr[row + 1];
-            let mut sum = 0.0_f64;
-            let e8 = s + (e - s) / 8 * 8;
-            let mut k = s;
-            while k < e8 {
-                sum += self.values[k]     * x[self.col_idx[k]     as usize]
-                     + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
-                     + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
-                     + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
-                     + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
-                     + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
-                     + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
-                k += 8;
-            }
-            while k < e {
-                sum += self.values[k] * x[self.col_idx[k] as usize];
-                k += 1;
-            }
-            y[row] = alpha * sum + beta * y[row];
+            y[row] = csr_row_dot_axpby_f64(&self.row_ptr, &self.col_idx, &self.values, x, row, alpha, beta, y[row]);
         }
     }
 
     #[cfg(feature = "parallel")]
     pub(super) fn spmv_parallel_f64(&self, x: &[f64], y: &mut [f64]) {
-        // Use par_windows(2) on row_ptr + zip to avoid enumerate overhead.
-        self.row_ptr.par_windows(2).zip(y.par_iter_mut()).for_each(|(w, yi)| {
-            let (start, end) = (w[0], w[1]);
-            let mut k = start;
-            let mut sum = 0.0_f64;
-            // 8-unroll: lets AVX2 (2× 256-bit FMA lanes) amortise gather-load latency.
-            let end8 = start + (end - start) / 8 * 8;
-            while k < end8 {
-                sum += self.values[k]     * x[self.col_idx[k]     as usize]
-                     + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
-                     + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
-                     + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
-                     + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
-                     + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
-                     + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
-                k += 8;
+        let chunk_size = spmv_parallel_row_chunk_size(self.nrows);
+        y.par_chunks_mut(chunk_size).enumerate().for_each(|(chunk_idx, y_chunk)| {
+            let row_start = chunk_idx * chunk_size;
+            for (offset, yi) in y_chunk.iter_mut().enumerate() {
+                let row = row_start + offset;
+                *yi = csr_row_dot_f64(&self.row_ptr, &self.col_idx, &self.values, x, row);
             }
-            while k < end {
-                sum += self.values[k] * x[self.col_idx[k] as usize];
-                k += 1;
-            }
-            *yi = sum;
         });
     }
 
     #[cfg(feature = "parallel")]
     pub(super) fn spmv_add_parallel_f64(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
-        self.row_ptr.par_windows(2).zip(y.par_iter_mut()).for_each(|(w, yi)| {
-            let (start, end) = (w[0], w[1]);
-            let mut k = start;
-            let mut sum = 0.0_f64;
-            // 8-unroll: lets AVX2 (2× 256-bit FMA lanes) amortise gather-load latency.
-            let end8 = start + (end - start) / 8 * 8;
-            while k < end8 {
-                sum += self.values[k]     * x[self.col_idx[k]     as usize]
-                     + self.values[k + 1] * x[self.col_idx[k + 1] as usize]
-                     + self.values[k + 2] * x[self.col_idx[k + 2] as usize]
-                     + self.values[k + 3] * x[self.col_idx[k + 3] as usize]
-                     + self.values[k + 4] * x[self.col_idx[k + 4] as usize]
-                     + self.values[k + 5] * x[self.col_idx[k + 5] as usize]
-                     + self.values[k + 6] * x[self.col_idx[k + 6] as usize]
-                     + self.values[k + 7] * x[self.col_idx[k + 7] as usize];
-                k += 8;
+        let chunk_size = spmv_parallel_row_chunk_size(self.nrows);
+        y.par_chunks_mut(chunk_size).enumerate().for_each(|(chunk_idx, y_chunk)| {
+            let row_start = chunk_idx * chunk_size;
+            for (offset, yi) in y_chunk.iter_mut().enumerate() {
+                let row = row_start + offset;
+                *yi = csr_row_dot_axpby_f64(&self.row_ptr, &self.col_idx, &self.values, x, row, alpha, beta, *yi);
             }
-            while k < end {
-                sum += self.values[k] * x[self.col_idx[k] as usize];
-                k += 1;
-            }
-            *yi = alpha * sum + beta * *yi;
         });
     }
 }
@@ -1074,6 +983,24 @@ mod tests {
     #[test]
     fn spmv_parallel_min_rows_positive() {
         assert!(spmv_parallel_min_rows() >= 1);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn adaptive_spmv_threshold_scales_with_threads() {
+        assert_eq!(adaptive_spmv_parallel_min_rows_for_threads(1), 128);
+        assert_eq!(adaptive_spmv_parallel_min_rows_for_threads(2), 64);
+        assert_eq!(adaptive_spmv_parallel_min_rows_for_threads(3), 64);
+        assert_eq!(adaptive_spmv_parallel_min_rows_for_threads(4), 32);
+        assert_eq!(adaptive_spmv_parallel_min_rows_for_threads(8), 16);
+        assert_eq!(adaptive_spmv_parallel_min_rows_for_threads(32), 16);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn spmv_parallel_chunk_size_is_positive() {
+        assert!(spmv_parallel_row_chunk_size(64) >= 1);
+        assert!(spmv_parallel_row_chunk_size(4096) >= 32);
     }
 
     #[test]

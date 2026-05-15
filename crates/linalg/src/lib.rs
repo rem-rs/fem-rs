@@ -14,9 +14,10 @@
 //! ## Feature flags
 //!
 //! - **`parallel`** — Rayon-parallel `CsrMatrix::spmv` / `spmv_add` when the row count
-//!   meets `spmv_parallel_min_rows()` (default `128`; override env
-//!   `FEM_LINALG_SPMV_PARALLEL_MIN_ROWS`). For `f64`, serial and parallel paths use a
-//!   4-way unrolled dot over each row’s nonzeros.
+//!   meets `spmv_parallel_min_rows()` (adaptive default: `128` on a single worker
+//!   down to `16` on 8+ workers; override env
+//!   `FEM_LINALG_SPMV_PARALLEL_MIN_ROWS`). For `f64`, serial and parallel paths use an
+//!   8-way unrolled dot over each row’s nonzeros.
 //!
 //! ## Re-exports from `linger`
 //! - `BlrMatrix`, `BlrBlock` — Block Low-Rank compression for direct solvers

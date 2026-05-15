@@ -10,7 +10,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
-use fem_solver::{solve_bicgstab, solve_cg, solve_gmres, solve_pcg_ilu0, solve_pcg_jacobi, SolverConfig};
+use fem_solver::{solve_bicgstab, solve_cg, solve_gmres, solve_gmres_ilu0, solve_pcg_ilu0, solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space,
     fe_space::FESpace,
@@ -105,6 +105,16 @@ fn poisson_gmres() {
     let mut x = vec![0.0_f64; n];
     let res = solve_gmres(&mat, &rhs, &mut x, 30, &cfg()).unwrap();
     assert!(res.converged, "GMRES did not converge");
+    assert!(l2_error(&x, &space) < 6e-3);
+}
+
+#[test]
+fn poisson_gmres_ilu0() {
+    let (mat, rhs, space) = build_poisson_system();
+    let n = mat.nrows;
+    let mut x = vec![0.0_f64; n];
+    let res = solve_gmres_ilu0(&mat, &rhs, &mut x, 30, &cfg()).unwrap();
+    assert!(res.converged, "GMRES-ILU0 did not converge");
     assert!(l2_error(&x, &space) < 6e-3);
 }
 

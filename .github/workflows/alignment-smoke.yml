@@ -7,8 +7,11 @@ on:
     paths:
       - Cargo.toml
       - Cargo.lock
+      - crates/amg/**
       - crates/assembly/**
+      - crates/linalg/**
       - crates/mesh/**
+      - crates/solver/**
       - examples/**
       - .github/workflows/alignment-smoke.yml
       - MFEM_MAPPING.md
@@ -28,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [complex-coeff, complex-ex22, named-attrs, named-attrs-io, electromagnetic-pml, electromagnetic-absorbing, backend-contract, io-mixed-topology, io-mesh-coords-checkpoint, quad-hex-aniso-amr, amg-stress, hcurl-maxwell-eigen]
+        suite: [complex-coeff, complex-ex22, named-attrs, named-attrs-io, electromagnetic-pml, electromagnetic-absorbing, backend-contract, io-mixed-topology, io-mesh-coords-checkpoint, quad-hex-aniso-amr, amg-stress, amg-integration, hcurl-maxwell-eigen, parallel-kernels, solver-precond, solver-block, solver-schur, multiphysics-coupling, multiphysics-3d, multiphysics-em-thermal, multiphysics-reactive, multiphysics-acoustics, multiphysics-joule, multiphysics-fsi]
 
     steps:
       - name: Checkout
@@ -61,6 +64,7 @@ jobs:
           elif [[ "$SUITE" == "named-attrs-io" ]]; then
             cargo test -p fem-io physical_names_to_named_attribute_registry_2d -- --nocapture
             cargo test -p fem-io physical_names_same_name_across_dims_are_merged -- --nocapture
+            cargo test -p fem-io --test io_integration gmsh_tri6_named_attributes_and_vtk_result_workflow -- --nocapture
             cargo run -p fem-examples --example mfem_ex39_named_attributes --quiet
             cargo test -p fem-examples --example mfem_ex39_named_attributes named_attributes_fluid_submesh_roundtrips_parent_nodal_field -- --nocapture
             cargo run -p fem-examples --example mfem_ex26_geom_mg --quiet
@@ -103,9 +107,101 @@ jobs:
             cargo test -p fem-amg --lib -- amg_air_gmres_high_peclet --nocapture
             cargo test -p fem-amg --lib -- amg_air_gmres_reverse_advection --nocapture
             cargo test -p fem-amg --lib -- amg_air_hierarchy_builds_for_extreme_peclet --nocapture
+          elif [[ "$SUITE" == "amg-integration" ]]; then
+            # P1: end-to-end 2D convection-diffusion AMG workflow regression coverage.
+            cargo test -p fem-amg --test poisson_amg amg_gmres_convection_diffusion_converges -- --nocapture
+            cargo test -p fem-amg --test poisson_amg fgmres_amg_convection_diffusion_converges -- --nocapture
+            cargo test -p fem-amg --test poisson_amg amg_solver_fgmres_convection_diffusion_reuse -- --nocapture
           elif [[ "$SUITE" == "hcurl-maxwell-eigen" ]]; then
             # P3: H(curl) matrix-free + AMG-preconditioned LOBPCG Maxwell eigenproblem smoke gate
             cargo test -p fem-assembly --lib -- hcurl_eigen_amg --nocapture
+          elif [[ "$SUITE" == "parallel-kernels" ]]; then
+            # P0: adaptive parallel thresholds for assembly + SpMV should remain wired and testable.
+            cargo test -p fem-assembly --lib --features parallel adaptive_threshold_scales_with_threads -- --nocapture
+            cargo test -p fem-linalg --lib --features parallel adaptive_spmv_threshold_scales_with_threads -- --nocapture
+            cargo test -p fem-linalg --lib --features parallel spmv_parallel_min_rows_positive -- --nocapture
+          elif [[ "$SUITE" == "solver-precond" ]]; then
+            # P1: nonsymmetric convection-diffusion solver matrix for GMRES/FGMRES + ILU-family and dispatcher paths.
+            cargo test -p fem-solver --test operator_gmres gmres_ilu0_converges_on_convection_diffusion -- --nocapture
+            cargo test -p fem-solver --test operator_gmres gmres_iluk_converges_on_convection_diffusion -- --nocapture
+            cargo test -p fem-solver --test operator_gmres gmres_ilut_converges_on_convection_diffusion -- --nocapture
+            cargo test -p fem-solver --test operator_gmres fgmres_ilu0_converges_on_convection_diffusion -- --nocapture
+            cargo test -p fem-solver --test operator_gmres fgmres_ilut_converges_on_convection_diffusion -- --nocapture
+            cargo test -p fem-solver --test operator_gmres precond_kind_ilu0_converges_on_convection_diffusion -- --nocapture
+            cargo test -p fem-solver --test operator_gmres precond_kind_iluk_converges_on_convection_diffusion -- --nocapture
+            cargo test -p fem-solver --test operator_gmres precond_kind_ilut_converges_on_convection_diffusion -- --nocapture
+          elif [[ "$SUITE" == "solver-block" ]]; then
+            # P1: Block-GMRES multi-RHS workflow on assembled FE systems.
+            cargo test -p fem-solver --test block_gmres block_gmres_matches_individual_gmres_on_convection_diffusion_rhs_pair -- --nocapture
+            cargo test -p fem-examples --lib block_gmres_example_multi_rhs_matches_individual_gmres -- --nocapture
+          elif [[ "$SUITE" == "solver-schur" ]]; then
+            # P1: example-level block/Schur workflows for mixed Darcy, Stokes, and coupled thermoelastic systems.
+            cargo test -p fem-examples --example mfem_ex5_mixed_darcy ex5_mixed_darcy_coarse_case_converges_with_small_block_residual -- --nocapture
+            cargo test -p fem-examples --example mfem_ex40 ex40_stokes_coarse_case_converges_with_recirculation -- --nocapture
+            cargo test -p fem-examples --example mfem_ex44_thermoelastic_coupled ex44_steady_schur_strategy_matches_gmres_coupled_response -- --nocapture
+          elif [[ "$SUITE" == "multiphysics-coupling" ]]; then
+            # P1/P2: nonmatching thermoelastic coupling workflows should remain stable and in-scale.
+            cargo test -p fem-examples --example mfem_ex44_thermoelastic_coupled ex44_nonmatching_steady_runs_and_stays_in_scale -- --nocapture
+            cargo test -p fem-examples --example mfem_ex44_thermoelastic_coupled ex44_nonmatching_transient_imex_runs_and_stays_in_scale -- --nocapture
+            cargo test -p fem-examples --example mfem_ex44_thermoelastic_coupled ex44_nonmatching_transient_split_runs_and_stays_in_scale -- --nocapture
+            cargo test -p fem-examples --example mfem_ex44_thermoelastic_coupled ex44_transient_split_and_imex_are_consistent_scale -- --nocapture
+          elif [[ "$SUITE" == "multiphysics-3d" ]]; then
+            # P1/P2: representative 3D electrothermal coupling workflow should remain convergent and physically scaled.
+            cargo test -p fem-examples --example mfem_ex53_3d_electrothermal ex53_3d_electrothermal_converges_and_is_finite -- --nocapture
+            cargo test -p fem-examples --example mfem_ex53_3d_electrothermal ex53_dof_count_matches_p1_nodes -- --nocapture
+            cargo test -p fem-examples --example mfem_ex53_3d_electrothermal ex53_joule_power_scales_quadratically_with_voltage -- --nocapture
+            cargo test -p fem-examples --example mfem_ex53_3d_electrothermal ex53_higher_kappa_gives_lower_temperature -- --nocapture
+            cargo test -p fem-examples --example mfem_ex53_3d_electrothermal ex53_near_zero_sigma_gives_negligible_joule_power -- --nocapture
+            cargo test -p fem-examples --example mfem_ex53_3d_electrothermal ex53_positive_sigma_beta_increases_joule_power -- --nocapture
+            cargo test -p fem-examples --example mfem_ex53_3d_electrothermal ex53_mesh_refinement_increases_dof_and_elem_count -- --nocapture
+            cargo test -p fem-examples --example mfem_ex53_3d_electrothermal ex53_phi_norm_scales_linearly_with_voltage -- --nocapture
+          elif [[ "$SUITE" == "multiphysics-em-thermal" ]]; then
+            # P1/P2: EM-thermal-stress template should stay coupled and obey thermal monotonicity.
+            cargo test -p fem-examples --example mfem_ex51_template_em_thermal_stress ex51_em_thermal_stress_template_runs_and_heats -- --nocapture
+            cargo test -p fem-examples --example mfem_ex51_template_em_thermal_stress ex51_higher_drive_increases_heating_and_stress -- --nocapture
+            cargo test -p fem-examples --example mfem_ex51_template_em_thermal_stress ex51_near_zero_conductivity_gives_negligible_joule_power -- --nocapture
+            cargo test -p fem-examples --example mfem_ex51_template_em_thermal_stress ex51_higher_thermal_kappa_reduces_temperature_norm -- --nocapture
+            cargo test -p fem-examples --example mfem_ex51_template_em_thermal_stress ex51_negative_sigma_temp_coeff_stabilises_joule_heating -- --nocapture
+            cargo test -p fem-examples --example mfem_ex51_template_em_thermal_stress ex51_higher_conductivity_gives_more_joule_heating -- --nocapture
+            cargo test -p fem-examples --example mfem_ex51_template_em_thermal_stress ex51_more_steps_accumulates_more_heat -- --nocapture
+            cargo test -p fem-examples --example mfem_ex51_template_em_thermal_stress ex51_deterministic_checksum_across_repeated_runs -- --nocapture
+          elif [[ "$SUITE" == "multiphysics-reactive" ]]; then
+            # P1/P2: reaction-flow-thermal template should react, heat, and respect zero-reaction limits.
+            cargo test -p fem-examples --example mfem_ex52_template_reaction_flow_thermal ex52_reaction_flow_thermal_template_runs_and_reacts -- --nocapture
+            cargo test -p fem-examples --example mfem_ex52_template_reaction_flow_thermal ex52_higher_inlet_concentration_increases_reaction_and_temperature -- --nocapture
+            cargo test -p fem-examples --example mfem_ex52_template_reaction_flow_thermal ex52_weighted_sync_error_path_runs -- --nocapture
+            cargo test -p fem-examples --example mfem_ex52_template_reaction_flow_thermal ex52_zero_reaction_rate_gives_no_temperature_rise -- --nocapture
+            cargo test -p fem-examples --example mfem_ex52_template_reaction_flow_thermal ex52_higher_heat_release_increases_temperature -- --nocapture
+            cargo test -p fem-examples --example mfem_ex52_template_reaction_flow_thermal ex52_subcycling_path_shows_same_inlet_trend_as_single_rate -- --nocapture
+            cargo test -p fem-examples --example mfem_ex52_template_reaction_flow_thermal ex52_temperature_checksum_is_deterministic -- --nocapture
+          elif [[ "$SUITE" == "multiphysics-acoustics" ]]; then
+            # P1/P2: acoustics-structure template should stay coupled and preserve zero-drive consistency.
+            cargo test -p fem-examples --example mfem_ex50_template_acoustics_structure ex50_acoustics_structure_template_runs_and_couples -- --nocapture
+            cargo test -p fem-examples --example mfem_ex50_template_acoustics_structure ex50_higher_compliance_increases_interface_displacement -- --nocapture
+            cargo test -p fem-examples --example mfem_ex50_template_acoustics_structure ex50_near_rigid_structure_gives_negligible_displacement -- --nocapture
+            cargo test -p fem-examples --example mfem_ex50_template_acoustics_structure ex50_zero_drive_matches_between_subcycling_and_single_rate -- --nocapture
+            cargo test -p fem-examples --example mfem_ex50_template_acoustics_structure ex50_higher_drive_amplitude_increases_pressure_and_displacement -- --nocapture
+            cargo test -p fem-examples --example mfem_ex50_template_acoustics_structure ex50_single_rate_mode_has_no_adaptive_counters -- --nocapture
+            cargo test -p fem-examples --example mfem_ex50_template_acoustics_structure ex50_zero_drive_produces_negligible_pressure_and_displacement -- --nocapture
+          elif [[ "$SUITE" == "multiphysics-joule" ]]; then
+            # P1/P2: Joule-heating template should converge and obey thermal/electrical monotonicity.
+            cargo test -p fem-examples --example mfem_ex48_template_joule_heating ex48_joule_template_converges_and_produces_positive_thermal_state -- --nocapture
+            cargo test -p fem-examples --example mfem_ex48_template_joule_heating ex48_higher_voltage_increases_joule_power_and_temperature -- --nocapture
+            cargo test -p fem-examples --example mfem_ex48_template_joule_heating ex48_higher_kappa_gives_lower_temperature -- --nocapture
+            cargo test -p fem-examples --example mfem_ex48_template_joule_heating ex48_positive_sigma_beta_increases_joule_power -- --nocapture
+            cargo test -p fem-examples --example mfem_ex48_template_joule_heating ex48_single_rate_mode_has_no_adaptive_counters -- --nocapture
+            cargo test -p fem-examples --example mfem_ex48_template_joule_heating ex48_higher_sigma0_increases_joule_power -- --nocapture
+            cargo test -p fem-examples --example mfem_ex48_template_joule_heating ex48_repeated_runs_are_deterministic_for_same_inputs -- --nocapture
+          elif [[ "$SUITE" == "multiphysics-fsi" ]]; then
+            # P1/P2: FSI template should couple, conserve transfer, and react monotonically to stronger forcing.
+            cargo test -p fem-examples --example mfem_ex49_template_fsi ex49_fsi_template_runs_and_couples_motion -- --nocapture
+            cargo test -p fem-examples --example mfem_ex49_template_fsi ex49_higher_compliance_gives_larger_wall_displacement -- --nocapture
+            cargo test -p fem-examples --example mfem_ex49_template_fsi ex49_fluid_transfer_conserves_integral -- --nocapture
+            cargo test -p fem-examples --example mfem_ex49_template_fsi ex49_all_steps_couple_to_convergence -- --nocapture
+            cargo test -p fem-examples --example mfem_ex49_template_fsi ex49_higher_inlet_amplitude_drives_larger_wall_displacement -- --nocapture
+            cargo test -p fem-examples --example mfem_ex49_template_fsi ex49_pressure_checksum_is_deterministic -- --nocapture
+            cargo test -p fem-examples --example mfem_ex49_template_fsi ex49_near_rigid_wall_gives_negligible_displacement -- --nocapture
+            cargo test -p fem-examples --example mfem_ex49_template_fsi ex49_zero_inlet_amp_gives_less_displacement_than_baseline -- --nocapture
           else
             # backend-contract: default quadrature-hint contract plus reed backend/resource surface
             cargo test -p fem-assembly --lib h1_quad_order_hint:: -- --nocapture

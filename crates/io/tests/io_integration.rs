@@ -8,6 +8,33 @@ use fem_io::{
 };
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
 
+fn gmsh_v2_tri6_unit_triangle() -> &'static str {
+    "$MeshFormat\n\
+     2.2 0 8\n\
+     $EndMeshFormat\n\
+     $PhysicalNames\n\
+     2\n\
+     1 1 \"boundary\"\n\
+     2 2 \"domain\"\n\
+     $EndPhysicalNames\n\
+     $Nodes\n\
+     6\n\
+     1 0.0 0.0 0.0\n\
+     2 1.0 0.0 0.0\n\
+     3 0.0 1.0 0.0\n\
+     4 0.5 0.0 0.0\n\
+     5 0.5 0.5 0.0\n\
+     6 0.0 0.5 0.0\n\
+     $EndNodes\n\
+     $Elements\n\
+     4\n\
+     1 8 2 1 1 1 4 2\n\
+     2 8 2 1 1 2 5 3\n\
+     3 8 2 1 1 3 6 1\n\
+     4 9 2 2 1 1 2 3 4 5 6\n\
+     $EndElements\n"
+}
+
 // ---------------------------------------------------------------------------
 // GMSH reader tests
 // ---------------------------------------------------------------------------
@@ -50,6 +77,49 @@ fn gmsh_physical_groups_populated() {
     let msh_src = include_str!("fixtures/unit_square.msh");
     let msh = read_msh(msh_src.as_bytes()).unwrap();
     assert_eq!(msh.physical_groups.len(), 5, "5 physical groups expected");
+}
+
+#[test]
+fn gmsh_tri6_named_attributes_and_vtk_result_workflow() {
+    let msh = read_msh(gmsh_v2_tri6_unit_triangle().as_bytes()).expect("parse Tri6 fixture");
+
+    let named = msh.named_attribute_registry();
+    let domain = named.get("domain").expect("missing domain attribute set");
+    let boundary = named.get("boundary").expect("missing boundary attribute set");
+    assert!(domain.has_element_tag(2), "domain should map to element tag 2");
+    assert!(boundary.has_boundary_tag(1), "boundary should map to boundary tag 1");
+
+    let curved = msh.curved2d.as_ref().expect("missing curved Tri6 mesh");
+    assert_eq!(curved.geom_order, 2, "Tri6 import should produce order-2 geometry");
+    assert_eq!(curved.n_nodes, 6, "Tri6 curved mesh should keep all 6 geometry nodes");
+    assert_eq!(curved.face_tags, vec![1, 1, 1], "Line3 boundary tags should be preserved");
+
+    let mesh = msh.mesh2d.as_ref().expect("missing working 2D mesh");
+    assert_eq!(mesh.elem_tags, vec![2], "volume material tag should be preserved");
+    assert_eq!(mesh.face_tags, vec![1, 1, 1], "boundary tags should be preserved on linear mesh");
+
+    let temp: Vec<f64> = (0..mesh.n_nodes())
+        .map(|i| {
+            let coords = mesh.node_coords(i as u32);
+            let x = coords[0];
+            let y = coords[1];
+            x + 2.0 * y
+        })
+        .collect();
+    let material_id = vec![mesh.elem_tags[0] as f64];
+
+    let mut writer = VtkWriter::new(mesh);
+    writer.add_point_data(DataArray::scalars("temperature", temp));
+    writer.add_cell_data(DataArray::scalars("material_id", material_id));
+
+    let mut buf = Vec::<u8>::new();
+    writer.write(&mut buf).expect("write vtu");
+    let xml = String::from_utf8(buf).expect("utf8 vtk xml");
+
+    assert!(xml.contains(r#"Name="temperature""#), "point result field should be exported");
+    assert!(xml.contains(r#"Name="material_id""#), "cell material field should be exported");
+    assert!(xml.contains("NumberOfPoints=\"6\""), "linearized Tri6 working mesh should export 6 nodes");
+    assert!(xml.contains("NumberOfCells=\"1\""), "single imported domain element should export one cell");
 }
 
 #[test]
