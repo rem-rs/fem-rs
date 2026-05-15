@@ -65,8 +65,18 @@ jobs:
             cargo test -p fem-io physical_names_to_named_attribute_registry_2d -- --nocapture
             cargo test -p fem-io physical_names_same_name_across_dims_are_merged -- --nocapture
             cargo test -p fem-io --test io_integration gmsh_tri6_named_attributes_and_vtk_result_workflow -- --nocapture
+            cargo test -p fem-io --features hdf5 --test io_integration abaqus_named_sets_and_result_export_workflow -- --nocapture
             cargo run -p fem-examples --example mfem_ex39_named_attributes --quiet
+            cargo run -p fem-examples --example mfem_ex39_named_attributes --quiet -- --solve-poisson --merge-boundary
+            cargo run -p fem-examples --example mfem_ex39_named_attributes --quiet -- --abaqus examples/meshes/named_sets_tet.inp --fixed-set FIXED --drive-set DRIVE --drive-value 1.0
+            cargo run -p fem-examples --example mfem_ex39_named_attributes --quiet -- --netgen examples/meshes/surface_tags_tet.vol --boundary-tag 5
             cargo test -p fem-examples --example mfem_ex39_named_attributes named_attributes_fluid_submesh_roundtrips_parent_nodal_field -- --nocapture
+            cargo test -p fem-examples --example mfem_ex39_named_attributes named_attributes_poisson_solve_respects_named_boundary_values -- --nocapture
+            cargo test -p fem-examples --example mfem_ex39_named_attributes named_attributes_vtk_export_writes_boundary_and_material_fields -- --nocapture
+            cargo test -p fem-examples --example mfem_ex39_named_attributes abaqus_named_sets_drive_example_solution_and_vtk_fields -- --nocapture
+            cargo test -p fem-examples --example mfem_ex39_named_attributes netgen_boundary_tag_example_exports_mask_field -- --nocapture
+            cargo test -p fem-examples --example mfem_ex39_named_attributes abaqus_file_fixture_workflow_exports_fields -- --nocapture
+            cargo test -p fem-examples --example mfem_ex39_named_attributes netgen_file_fixture_workflow_exports_fields -- --nocapture
             cargo run -p fem-examples --example mfem_ex26_geom_mg --quiet
           elif [[ "$SUITE" == "electromagnetic-pml" ]]; then
             cargo run -p fem-examples --example mfem_ex3 --quiet -- --pml-like --pml-thickness 0.2 --sigma-max 2.0 --wx 1.0 --wy 1.5
@@ -89,6 +99,9 @@ jobs:
             # XDMF mixed-topology writer
             cargo test -p fem-io --lib -- xdmf --nocapture
           elif [[ "$SUITE" == "io-mesh-coords-checkpoint" ]]; then
+            # Serial HDF5 + XDMF imported-mesh result workflow should preserve tags and expose node/cell fields.
+            cargo test -p fem-io --features hdf5 --test io_integration hdf5_xdmf_imported_mesh_preserves_tags_and_result_metadata_workflow -- --nocapture
+            cargo test -p fem-io --features hdf5 --test io_integration netgen_surfaceelements_boundary_mask_and_result_export_workflow -- --nocapture
             # HDF5 checkpoint mesh coords API (write/read/latest)
             cargo test -p fem-io-hdf5-parallel --lib -- mesh_coords --nocapture
             # Hyperslab multi-step restart integration tests
