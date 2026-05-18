@@ -30,4 +30,20 @@ impl PyCsrMatrix {
     pub fn nnz(&self) -> usize {
         self.inner.nnz()
     }
+
+    /// Returns a tuple ``(data, indices, indptr, shape)`` suitable for
+    /// constructing ``scipy.sparse.csr_matrix`` in Python:
+    ///
+    /// ```python
+    /// data, indices, indptr, shape = csr.to_scipy()
+    /// A = scipy.sparse.csr_matrix((data, indices, indptr), shape=shape)
+    /// ```
+    pub fn to_scipy(&self) -> PyResult<(Vec<f64>, Vec<u32>, Vec<usize>, (usize, usize))> {
+        Ok((
+            self.inner.values.clone(),
+            self.inner.col_idx.clone(),
+            self.inner.row_ptr.clone(),
+            (self.inner.nrows, self.inner.ncols),
+        ))
+    }
 }
