@@ -64,6 +64,7 @@ impl PyConstantLoad {
 /// Returns:
 ///     CsrMatrix
 #[pyfunction]
+#[pyo3(name = "assemble_bilinear")]
 pub fn py_assemble_bilinear(
     space: &PyH1Space,
     integrators: &Bound<'_, PyList>,
@@ -126,6 +127,7 @@ pub fn py_assemble_bilinear(
 /// Returns:
 ///     list[float] — RHS vector
 #[pyfunction]
+#[pyo3(name = "assemble_linear")]
 pub fn py_assemble_linear(
     space: &PyH1Space,
     source: &PyConstantLoad,
@@ -158,6 +160,7 @@ pub fn py_assemble_linear(
 ///
 /// Modifies the matrix and RHS in-place.
 #[pyfunction]
+#[pyo3(name = "apply_dirichlet")]
 pub fn py_apply_dirichlet(
     mat: &mut PyCsrMatrix,
     rhs: &Bound<'_, PyArray1<f64>>,

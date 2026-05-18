@@ -37,6 +37,7 @@ impl From<SolveResult> for PySolveResult {
 /// Returns:
 ///     SolveResult
 #[pyfunction]
+#[pyo3(name = "solve_cg")]
 #[pyo3(signature = (mat, b, x, tol=None, max_iter=None))]
 pub fn py_solve_cg(
     mat: &PyCsrMatrix,
@@ -78,6 +79,7 @@ pub fn py_solve_cg(
 /// Returns:
 ///     SolveResult
 #[pyfunction]
+#[pyo3(name = "solve_gmres")]
 #[pyo3(signature = (mat, b, x, restart=None, tol=None, max_iter=None))]
 pub fn py_solve_gmres(
     mat: &PyCsrMatrix,
@@ -116,6 +118,7 @@ pub fn py_solve_gmres(
 /// Returns:
 ///     ndarray — solution vector
 #[pyfunction]
+#[pyo3(name = "solve_sparse_lu")]
 pub fn py_solve_sparse_lu<'py>(
     py: Python<'py>,
     mat: &PyCsrMatrix,
