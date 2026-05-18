@@ -1,0 +1,18 @@
+[package]
+name = "fem-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py311"] }
+numpy = "0.23"
+fem-core = { path = "../core" }
+fem-mesh = { path = "../mesh" }
+fem-space = { path = "../space" }
+fem-element = { path = "../element" }
+fem-assembly = { path = "../assembly" }
+fem-linalg = { path = "../linalg" }
+fem-solver = { path = "../solver" }

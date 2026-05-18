@@ -14,6 +14,7 @@ members = [
     "crates/io",
     "crates/io_hdf5_parallel",
     "crates/wasm",
+    "crates/python",
     "crates/benches",
     "examples",
 ]
