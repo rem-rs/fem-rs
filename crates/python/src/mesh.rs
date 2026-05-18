@@ -4,6 +4,10 @@ use fem_mesh::SimplexMesh;
 use fem_mesh::boundary_nodes_with_tags;
 
 /// Unstructured simplex mesh in 2-D or 3-D.
+///
+/// Construct via the static methods:
+///   ``fem.Mesh.unit_square_tri(n)``  — 2-D triangle mesh
+///   ``fem.Mesh.unit_cube_tet(n)``    — 3-D tetrahedral mesh
 #[pyclass(name = "Mesh")]
 pub struct PyMesh {
     pub(crate) inner_2d: Option<SimplexMesh<2>>,
@@ -13,35 +17,62 @@ pub struct PyMesh {
 
 #[pymethods]
 impl PyMesh {
+    /// Direct construction is disabled; use one of the static factory methods.
+    #[new]
+    pub fn new() -> PyResult<Self> {
+        Err(PyValueError::new_err(
+            "Mesh cannot be constructed directly. Use Mesh.unit_square_tri(n) or Mesh.unit_cube_tet(n)."
+        ))
+    }
+
     /// Create a 2-D unit-square mesh of `n×n` subdivisions (each quad → 2 triangles).
+    ///
+    /// `n` must be ≥ 1.
     #[staticmethod]
     pub fn unit_square_tri(n: usize) -> PyResult<Self> {
+        if n == 0 {
+            return Err(PyValueError::new_err(
+                "unit_square_tri: n must be ≥ 1"
+            ));
+        }
         let mesh = SimplexMesh::<2>::unit_square_tri(n);
         Ok(PyMesh { inner_2d: Some(mesh), inner_3d: None, dim: 2 })
     }
 
     /// Create a 3-D unit-cube mesh of `n×n×n` tetrahedra.
+    ///
+    /// `n` must be ≥ 1.
     #[staticmethod]
     pub fn unit_cube_tet(n: usize) -> PyResult<Self> {
+        if n == 0 {
+            return Err(PyValueError::new_err(
+                "unit_cube_tet: n must be ≥ 1"
+            ));
+        }
         let mesh = SimplexMesh::<3>::unit_cube_tet(n);
         Ok(PyMesh { inner_2d: None, inner_3d: Some(mesh), dim: 3 })
     }
 
+    /// Spatial dimension (2 or 3).
+    pub fn dim(&self) -> u8 {
+        self.dim
+    }
+
     /// Number of nodes (vertices).
-    pub fn n_nodes(&self) -> usize {
+    pub fn n_nodes(&self) -> PyResult<usize> {
         match self.dim {
-            2 => self.inner_2d.as_ref().unwrap().n_nodes(),
-            3 => self.inner_3d.as_ref().unwrap().n_nodes(),
-            _ => unreachable!(),
+            2 => Ok(self.inner_2d.as_ref().unwrap().n_nodes()),
+            3 => Ok(self.inner_3d.as_ref().unwrap().n_nodes()),
+            _ => Err(PyValueError::new_err("invalid mesh state")),
         }
     }
 
     /// Number of elements (cells).
-    pub fn n_elements(&self) -> usize {
+    pub fn n_elements(&self) -> PyResult<usize> {
         match self.dim {
-            2 => self.inner_2d.as_ref().unwrap().n_elems(),
-            3 => self.inner_3d.as_ref().unwrap().n_elems(),
-            _ => unreachable!(),
+            2 => Ok(self.inner_2d.as_ref().unwrap().n_elems()),
+            3 => Ok(self.inner_3d.as_ref().unwrap().n_elems()),
+            _ => Err(PyValueError::new_err("invalid mesh state")),
         }
     }
 
@@ -56,9 +87,10 @@ impl PyMesh {
                 let nodes = boundary_nodes_with_tags(mesh, &tags);
                 Ok(nodes)
             }
-            _ => Err(PyValueError::new_err(
+            3 => Err(PyValueError::new_err(
                 "boundary_nodes is only supported for 2-D meshes"
             )),
+            _ => Err(PyValueError::new_err("invalid mesh state")),
         }
     }
 }
