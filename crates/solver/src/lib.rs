@@ -1449,6 +1449,8 @@ pub mod multiphysics_sync;
 pub mod multiphysics;
 pub mod multiphysics_templates;
 pub mod ode;
+pub mod butcher;
+pub mod adaptive;
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};
@@ -1522,6 +1524,20 @@ pub use ode::{
     ImexRk3,
     ImexEuler,
     ImexSsp2,
+};
+pub use butcher::{
+    ButcherTableau, ImexTableau,
+    forward_euler_tableau, backward_euler_tableau,
+    explicit_midpoint_tableau, heun_tableau,
+    rk4_tableau, dopri5_tableau, fehlberg12_tableau, bs32_tableau, ck54_tableau,
+    implicit_midpoint_tableau,
+    sdirk2_tableau, sdirk3_tableau, sdirk4_tableau,
+    imex_euler_tableau, imex_ssp2_tableau, ark3_tableau, ark5_tableau,
+    wrms_error, pi_step_controller, i_step_controller,
+};
+pub use adaptive::{
+    AdaptiveConfig, IntegratorStats, StepperState,
+    integrate_adaptive, explicit_adaptive_step,
 };
 pub use lor::{
     LorPrecond, solve_pcg_lor, solve_gmres_lor,
