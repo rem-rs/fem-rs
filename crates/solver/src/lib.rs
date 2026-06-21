@@ -1542,6 +1542,7 @@ pub use adaptive::{
 };
 pub use bdf::{
     NordsieckState, BdfIntegrator, BdfConfig, BdfStats,
+    NewtonConfig,
 };
 pub use lor::{
     LorPrecond, solve_pcg_lor, solve_gmres_lor,

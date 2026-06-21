@@ -134,7 +134,7 @@ impl NordsieckState {
 pub struct BdfIntegrator;
 
 impl BdfIntegrator {
-    /// Take a single BDF step with the current order and step size.
+    /// Take a single BDF step using Newton iteration for the correction.
     ///
     /// On success, updates `state.z` in-place.
     /// Returns the estimated local truncation error (WRMS norm).
@@ -143,6 +143,7 @@ impl BdfIntegrator {
         t: f64,
         rhs: &F,
         jac_fn: &J,
+        newton: &NewtonConfig,
         atol: f64,
         rtol: f64,
     ) -> Result<f64, String>
@@ -154,9 +155,10 @@ impl BdfIntegrator {
         let dt = state.dt;
         let n = state.n_vars();
         let alpha_k = BDF_ALPHA[k];
+        let tnp1 = t + dt;
 
         // ── 1. Predict: ẑ[i] = Σⱼ P[i][j] · z[j] ──────────────────────────
-        let mut zp: Vec<Vec<f64>> = (0..=k).map(|i| {
+        let zp_pred: Vec<Vec<f64>> = (0..=k).map(|i| {
             let mut val = vec![0.0; n];
             for j in i..=k {
                 let c = pascal_coeff(k, i, j);
@@ -167,36 +169,73 @@ impl BdfIntegrator {
             val
         }).collect();
 
-        // ── 2. Evaluate f(t+h, ẑ₀) ───────────────────────────────────────
-        let tnp1 = t + dt;
-        let mut fnp1 = vec![0.0; n];
-        rhs(tnp1, &zp[0], &mut fnp1);
-        let jac = jac_fn(tnp1, &zp[0]);
+        // ── 2. Newton correction on δ ──────────────────────────────────────
+        // Solve G(δ) = δ - h·α·f(t+h, ẑ₀ + δ) + ẑ₁ = 0
+        // with Newton: (I - h·α·J) Δδ = -G(δ)
+        let z0_pred = &zp_pred[0];
+        let z1_curr = &zp_pred[1];
 
-        // ── 3. Correct: solve (I - h·αₖ·J) · δ = h·f - ẑ₁ ───────────────
-        let mut rhs_vec = vec![0.0; n];
-        for d in 0..n {
-            rhs_vec[d] = dt * fnp1[d] - zp[1][d];
+        let mut delta = vec![0.0; n];
+        let mut y = z0_pred.to_vec();          // y = ẑ₀ + δ
+        let mut jac = None;
+        let mut converged = false;
+
+        for iter in 0..newton.max_iter {
+            let mut fy = vec![0.0; n];
+            rhs(tnp1, &y, &mut fy);
+
+            // Compute F(δ) = δ - h*α*f(y) + ẑ₁
+            let mut norm_f = 0.0;
+            for i in 0..n {
+                let val = delta[i] - dt * alpha_k * fy[i] + z1_curr[i];
+                let scale = newton.atol + newton.rtol * y[i].abs().max(1e-15);
+                norm_f += (val / scale).powi(2);
+            }
+            norm_f = (norm_f / n as f64).sqrt();
+
+            if norm_f <= 1.0 {
+                converged = true;
+                break;
+            }
+
+            // Build or reuse Jacobian
+            if newton.reassemble_jac || iter == 0 {
+                jac = Some(jac_fn(tnp1, &y));
+            }
+
+            // Solve (I - h*α*J) Δδ = -F(δ) = -δ + h*α*f(y) - ẑ₁
+            let mut rhs_lin = vec![0.0; n];
+            for i in 0..n {
+                rhs_lin[i] = -delta[i] + dt * alpha_k * fy[i] - z1_curr[i];
+            }
+            let jac = jac.as_ref().unwrap();
+            let sys = build_identity_minus_dt_jac_scaled(jac, 1.0, dt * alpha_k);
+            let mut ddelta = vec![0.0; n];
+            let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+            solve_gmres(&sys, &rhs_lin, &mut ddelta, 30, &cfg)
+                .map_err(|e| format!("Newton-GMRES BDF{k} failed: {e}"))?;
+
+            for i in 0..n {
+                delta[i] += ddelta[i];
+                y[i] = z0_pred[i] + delta[i];
+            }
         }
 
-        let sys = build_identity_minus_dt_jac_scaled(&jac, 1.0, dt * alpha_k);
-        let mut delta = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
-        solve_gmres(&sys, &rhs_vec, &mut delta, 30, &cfg)
-            .map_err(|e| format!("BDF{k} linear solve failed: {e}"))?;
+        if !converged {
+            return Err(format!("BDF{k} Newton did not converge in {} iterations", newton.max_iter));
+        }
 
-        // ── 4. Update Nordsieck: z⁺ = ẑ + l·δ ────────────────────────────
+        // ── 3. Update Nordsieck: z⁺ = ẑ + l·δ ────────────────────────────
+        let mut zp_new = zp_pred;
         for i in 0..=k {
             let li = L_COEFFS[k][i];
             if li.abs() > 0.0 {
-                for d in 0..n { zp[i][d] += li * delta[d]; }
+                for d in 0..n { zp_new[i][d] += li * delta[d]; }
             }
         }
-        state.z = zp;
+        state.z = zp_new;
 
-        // ── 5. Error estimation ────────────────────────────────────────────
-        // The error is approximated by the last component of the correction,
-        // scaled by the error weight.
+        // ── 4. Error estimation (uses outer tolerances for step control) ────
         let err_comp = ERROR_WEIGHTS[k][k];
         if err_comp.abs() > 0.0 {
             let y_err: Vec<f64> = (0..n).map(|d| err_comp * delta[d]).collect();
@@ -236,7 +275,7 @@ impl BdfIntegrator {
             // Save Nordsieck state before attempting step (for rollback)
             let saved_z = state.z.clone();
 
-            let result = Self::step(state, t, rhs, jac_fn, config.atol, config.rtol);
+            let result = Self::step(state, t, rhs, jac_fn, &config.newton, config.atol, config.rtol);
             match result {
                 Ok(err) => {
                     if err <= 1.0 {
@@ -319,6 +358,29 @@ impl BdfIntegrator {
     }
 }
 
+// ─── NewtonConfig ─────────────────────────────────────────────────────────────
+
+/// Configuration for nonlinear Newton iteration within each implicit step.
+pub struct NewtonConfig {
+    pub atol: f64,
+    pub rtol: f64,
+    pub max_iter: u32,
+    /// If true, reassemble the Jacobian at every Newton iteration.
+    /// If false, reuse the Jacobian from the first iteration (modified Newton).
+    pub reassemble_jac: bool,
+}
+
+impl Default for NewtonConfig {
+    fn default() -> Self {
+        NewtonConfig {
+            atol: 1e-10,
+            rtol: 1e-8,
+            max_iter: 10,
+            reassemble_jac: true,
+        }
+    }
+}
+
 // ─── BdfConfig ───────────────────────────────────────────────────────────────
 
 /// Configuration for adaptive BDF integration.
@@ -329,6 +391,7 @@ pub struct BdfConfig {
     pub dt_max: f64,
     pub max_steps: u64,
     pub max_order: usize,
+    pub newton: NewtonConfig,
 }
 
 impl Default for BdfConfig {
@@ -340,6 +403,7 @@ impl Default for BdfConfig {
             dt_max: 1.0,
             max_steps: 1_000_000,
             max_order: 6,
+            newton: NewtonConfig::default(),
         }
     }
 }
@@ -353,13 +417,20 @@ pub struct BdfStats {
     pub n_rejected: u64,
     pub n_rhs_eval: u64,
     pub n_jac_eval: u64,
+    pub n_newton_iter: u64,
+    pub n_linear_solves: u64,
     pub final_dt: f64,
     pub last_error: Option<String>,
 }
 
 impl BdfStats {
     pub fn new() -> Self {
-        BdfStats { n_steps: 0, n_accepted: 0, n_rejected: 0, n_rhs_eval: 0, n_jac_eval: 0, final_dt: 0.0, last_error: None }
+        BdfStats {
+            n_steps: 0, n_accepted: 0, n_rejected: 0,
+            n_rhs_eval: 0, n_jac_eval: 0,
+            n_newton_iter: 0, n_linear_solves: 0,
+            final_dt: 0.0, last_error: None,
+        }
     }
 }
 
@@ -401,7 +472,8 @@ mod tests {
     fn bdf1_matches_implicit_euler() {
         let y0 = vec![1.0];
         let mut state = NordsieckState::new(0.0, &y0, 0.1, &decay_rhs);
-        let _ = BdfIntegrator::step(&mut state, 0.0, &decay_rhs, &decay_jac, 1e-6, 1e-3);
+        let newton = NewtonConfig::default();
+        let _ = BdfIntegrator::step(&mut state, 0.0, &decay_rhs, &decay_jac, &newton, 1e-6, 1e-3);
         let exact = (-0.1_f64).exp();
         assert!((state.y()[0] - exact).abs() < 0.01,
             "BDF1 decay: u={}, exact={}", state.y()[0], exact);
@@ -433,6 +505,7 @@ mod tests {
         let config = BdfConfig {
             atol: 1e-3, rtol: 1e-2,
             dt_min: 1e-10, dt_max: 0.5, max_order: 6, max_steps: 100000,
+            newton: NewtonConfig::default(),
         };
         let (_y_final, stats) = BdfIntegrator::integrate(
             &mut state, &decay_rhs, &decay_jac,
@@ -455,7 +528,8 @@ mod tests {
     fn bdf_rejects_when_dt_too_large() {
         let y0 = vec![1.0];
         let mut state = NordsieckState::new(0.0, &y0, 1.0, &decay_rhs);
-        let result = BdfIntegrator::step(&mut state, 0.0, &decay_rhs, &decay_jac, 1e-12, 1e-12);
+        let newton = NewtonConfig { atol: 1e-12, rtol: 1e-12, max_iter: 2, reassemble_jac: true };
+        let result = BdfIntegrator::step(&mut state, 0.0, &decay_rhs, &decay_jac, &newton, 1e-12, 1e-12);
         // With a really tight tolerance and large dt, it should reject
         // (or at least not panic)
         let _ = result;
@@ -546,6 +620,7 @@ mod tests {
         let config = BdfConfig {
             atol: 1e-4, rtol: 1e-3,
             dt_min: 1e-15, dt_max: 1e-5, max_steps: 1000000, max_order: 2,
+            newton: NewtonConfig { atol: 1e-4, rtol: 1e-3, ..NewtonConfig::default() },
         };
         let (y_final, stats) = BdfIntegrator::integrate(
             &mut state, &stiff_rhs, &stiff_jac,
@@ -556,5 +631,40 @@ mod tests {
             y_final[0] < exact * 10.0,
             "BDF stiff: u={}, exact={}", y_final[0], exact);
         let _ = stats;
+    }
+
+    // ─── Newton iteration for nonlinear ODE ────────────────────────────────
+
+    fn nonlinear_rhs(_t: f64, u: &[f64], dudt: &mut [f64]) {
+        dudt[0] = -u[0] * u[0]; // du/dt = -u², exact: u = 1/(1+t)
+    }
+    fn nonlinear_jac(_t: f64, u: &[f64]) -> CsrMatrix<f64> {
+        let mut coo = CooMatrix::<f64>::new(1, 1);
+        coo.add(0, 0, -2.0 * u[0]);
+        coo.into_csr()
+    }
+
+    #[test]
+    fn bdf_newton_converges() {
+        let y0 = vec![1.0];
+        let mut state = NordsieckState::new(0.0, &y0, 0.2, &nonlinear_rhs);
+        let newton = NewtonConfig { atol: 1e-14, rtol: 1e-12, max_iter: 5, reassemble_jac: true };
+        let result = BdfIntegrator::step(&mut state, 0.0, &nonlinear_rhs, &nonlinear_jac, &newton, 1e-6, 1e-3);
+        assert!(result.is_ok(), "Newton should converge for du/dt = -u²");
+        let exact = 1.0 / (1.0 + 0.2);
+        assert!((state.y()[0] - exact).abs() < 0.05,
+            "BDF1 nonlinear: u={}, exact={}", state.y()[0], exact);
+    }
+
+    #[test]
+    fn bdf_modified_newton_converges() {
+        let y0 = vec![1.0];
+        let mut state = NordsieckState::new(0.0, &y0, 0.1, &nonlinear_rhs);
+        let newton = NewtonConfig { atol: 1e-10, rtol: 1e-8, max_iter: 10, reassemble_jac: false };
+        let result = BdfIntegrator::step(&mut state, 0.0, &nonlinear_rhs, &nonlinear_jac, &newton, 1e-6, 1e-3);
+        assert!(result.is_ok(), "Modified Newton should also converge");
+        let exact = 1.0 / (1.0 + 0.1);
+        assert!((state.y()[0] - exact).abs() < 0.02,
+            "Modified Newton: u={}, exact={}", state.y()[0], exact);
     }
 }
