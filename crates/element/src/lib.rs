@@ -42,6 +42,7 @@ pub mod raviart_thomas;
 pub mod nurbs;
 pub mod tri6_geom;
 pub mod iga;
+pub mod basis_cache;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use quadrature::{TriQuadRule, tri_rule_named};
