@@ -20,12 +20,10 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 // ─── BDF coefficients ────────────────────────────────────────────────────────
 
 /// αₖ = sum_{j=1}^{k} 1/j — the BDF coefficient for order k.
-const BDF_ALPHA: [f64; 7] = [0.0, 1.0, 3.0/2.0, 11.0/6.0, 25.0/12.0, 137.0/60.0, 49.0/20.0];
+pub(crate) const BDF_ALPHA: [f64; 7] = [0.0, 1.0, 3.0/2.0, 11.0/6.0, 25.0/12.0, 137.0/60.0, 49.0/20.0];
 
 /// `l[i]` = Nordsieck correction coefficients for order k.
-/// Indexed as `L[k][i]` for i = 0..=k.
-/// Derived from: l₀ = 1, lᵢ = (1/(i!·αₖ))·(dⁱ/dζⁱ)[Πⱼ₌₁ᵏ (ζ + cⱼ)] evaluated at ζ = 1.
-const L_COEFFS: [[f64; 7]; 7] = [
+pub(crate) const L_COEFFS: [[f64; 7]; 7] = [
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  // k=0 (unused)
     [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     [1.0, 2.0/3.0, 1.0/3.0, 0.0, 0.0, 0.0, 0.0],
@@ -37,7 +35,7 @@ const L_COEFFS: [[f64; 7]; 7] = [
 
 /// Error weighting coefficients for order selection.
 /// `e_est[k][i]` = contribution of each Nordsieck component to the truncation error.
-const ERROR_WEIGHTS: [[f64; 7]; 7] = [
+pub(crate) const ERROR_WEIGHTS: [[f64; 7]; 7] = [
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     [0.0, 0.0, 1.0/3.0, 0.0, 0.0, 0.0, 0.0],
@@ -49,7 +47,7 @@ const ERROR_WEIGHTS: [[f64; 7]; 7] = [
 
 /// Pascal triangle matrix coefficients for Nordsieck prediction.
 /// `P[k][i][j]` for i,j = 0..=k: ẑ[i] = Σⱼ C(j,i) · z[j] where C is the Pascal matrix.
-fn pascal_coeff(_k: usize, i: usize, j: usize) -> f64 {
+pub(crate) fn pascal_coeff(_k: usize, i: usize, j: usize) -> f64 {
     if j < i { return 0.0; }
     // binomial(j, i)
     let mut c = 1.0;
@@ -435,7 +433,7 @@ impl BdfStats {
 }
 
 /// Build the matrix `s·I − α·J` where J is a CSR matrix and I is the identity.
-fn build_identity_minus_dt_jac_scaled(jac: &CsrMatrix<f64>, s: f64, alpha: f64) -> CsrMatrix<f64> {
+pub(crate) fn build_identity_minus_dt_jac_scaled(jac: &CsrMatrix<f64>, s: f64, alpha: f64) -> CsrMatrix<f64> {
     let n = jac.nrows;
     let mut coo = CooMatrix::<f64>::new(n, n);
     for i in 0..n { coo.add(i, i, s); }

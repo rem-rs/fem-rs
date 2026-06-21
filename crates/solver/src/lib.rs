@@ -1452,6 +1452,7 @@ pub mod ode;
 pub mod butcher;
 pub mod adaptive;
 pub mod bdf;
+pub mod dae;
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};
@@ -1543,6 +1544,10 @@ pub use adaptive::{
 pub use bdf::{
     NordsieckState, BdfIntegrator, BdfConfig, BdfStats,
     NewtonConfig,
+};
+pub use dae::{
+    DaeState, DaeIntegrator, DaeConfig, DaeNewtonConfig,
+    dae_consistent_initialization,
 };
 pub use lor::{
     LorPrecond, solve_pcg_lor, solve_gmres_lor,
