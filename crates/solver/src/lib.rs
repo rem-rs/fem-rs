@@ -1563,7 +1563,12 @@ pub use lor::{
     GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg,
 };
 pub mod sli;
+pub mod stokes_precond;
 pub use sli::{solve_jacobi_sli, solve_gs_sli};
+pub use stokes_precond::{
+    StokesPrecond,
+    build_pressure_mass, build_bfbt_schur,
+};
 
 #[cfg(test)]
 mod tests {
