@@ -90,6 +90,7 @@ pub mod discrete_op;
 pub mod transfer;
 pub mod static_cond;
 pub mod iga;
+pub mod error_estimate;
 pub mod h1_quad_order_hint;
 
 #[cfg(feature = "reed")]
