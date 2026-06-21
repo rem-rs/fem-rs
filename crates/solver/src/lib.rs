@@ -1451,6 +1451,7 @@ pub mod multiphysics_templates;
 pub mod ode;
 pub mod butcher;
 pub mod adaptive;
+pub mod bdf;
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};
@@ -1538,6 +1539,9 @@ pub use butcher::{
 pub use adaptive::{
     AdaptiveConfig, IntegratorStats, StepperState,
     integrate_adaptive, explicit_adaptive_step,
+};
+pub use bdf::{
+    NordsieckState, BdfIntegrator, BdfConfig, BdfStats,
 };
 pub use lor::{
     LorPrecond, solve_pcg_lor, solve_gmres_lor,
