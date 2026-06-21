@@ -17,6 +17,7 @@ use nalgebra::DMatrix;
 use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
 use fem_element::lagrange::{HexQ1, QuadQ1};
+use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_element::nedelec::{HexND1, HexND2, QuadND1, QuadND2, TetND1, TetND2, TriND1, TriND2};
 use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -59,11 +60,38 @@ pub(crate) fn vec_ref_elem(
 }
 
 pub(crate) fn geo_ref_elem(elem_type: ElementType) -> Option<Box<dyn ReferenceElement>> {
+    // Legacy path for Quad4/Hex8 with geom_order=1 (used by reed/partial assembly).
     match elem_type {
         ElementType::Quad4 => Some(Box::new(QuadQ1)),
         ElementType::Hex8 => Some(Box::new(HexQ1)),
         _ => None,
     }
+}
+
+/// Build geometry reference element using the mesh's geometric order.
+///
+/// Returns `Some` for non-affine elements (Quad/Hex with P1, or any element
+/// with `geom_order > 1`). Returns `None` for affine P1 simplex.
+pub(crate) fn geo_ref_elem_from_mesh(
+    mesh: &dyn MeshTopology,
+    e: u32,
+) -> Option<Box<dyn ReferenceElement>> {
+    use fem_mesh::element_type::ElementType;
+    let et = mesh.element_type(e);
+    let g = mesh.geom_order();
+    let is_quad_hex = matches!(et,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+        | ElementType::Hex8 | ElementType::Hex20);
+    if g == 1 && !is_quad_hex { return None; }
+    let order = if g > 1 { g } else { 1 };
+    let ft = match et {
+        ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
+        ElementType::Tet4 | ElementType::Tet10 => FactoryElemType::Tet,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => FactoryElemType::Quad,
+        ElementType::Hex8 | ElementType::Hex20 => FactoryElemType::Hex,
+        _ => return None,
+    };
+    Some(factory_ref_elem(ft, order))
 }
 
 // ─── Jacobian helpers (same as assembler.rs) ────────────────────────────────
@@ -228,8 +256,9 @@ fn accumulate_vector_bilinear_element<S: FESpace>(
     let signs = space.element_signs(e);
     let nodes = mesh.element_nodes(e);
     let elem_tag = mesh.element_tag(e);
-    let use_iso = matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
-    let geo_elem = geo_ref_elem(elem_type);
+    let use_iso = !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2)
+        || mesh.geom_order() > 1;
+    let geo_elem = geo_ref_elem_from_mesh(mesh, e);
     let affine_tr = if use_iso {
         None
     } else {
@@ -330,8 +359,9 @@ fn accumulate_vector_linear_element<S: FESpace>(
     let signs = space.element_signs(e);
     let nodes = mesh.element_nodes(e);
     let elem_tag = mesh.element_tag(e);
-    let use_iso = matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
-    let geo_elem = geo_ref_elem(elem_type);
+    let use_iso = !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2)
+        || mesh.geom_order() > 1;
+    let geo_elem = geo_ref_elem_from_mesh(mesh, e);
     let affine_tr = if use_iso {
         None
     } else {

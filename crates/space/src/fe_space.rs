@@ -50,7 +50,16 @@ pub trait FESpace: Send + Sync {
     fn space_type(&self) -> SpaceType;
 
     /// Polynomial order of the space (e.g. 1 for P1/Q1, 2 for P2/Q2).
+    /// For variable-order spaces, returns the maximum order.
     fn order(&self) -> u8;
+
+    /// Polynomial order for element `elem`.
+    /// For uniform-order spaces, returns `self.order()`. For variable-order
+    /// spaces, returns the per-element order.
+    fn element_order(&self, elem: u32) -> u8 {
+        let _ = elem;
+        self.order()
+    }
 
     /// Orientation signs for DOFs on element `elem`.
     ///

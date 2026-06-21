@@ -56,4 +56,15 @@ pub trait MeshTopology: Send + Sync {
     fn face_iter(&self) -> std::ops::Range<u32> {
         0..self.n_boundary_faces() as u32
     }
+
+    /// Geometric polynomial order used for the isoparametric mapping.
+    ///
+    /// Returns 1 for standard (affine) meshes.  Curved / isoparametric meshes
+    /// return their geometric order (2 for P2, 3 for P3, …).
+    ///
+    /// The assembler uses this to decide whether to use the affine Jacobian
+    /// fast path or the full isoparametric Jacobian.
+    fn geom_order(&self) -> u8 {
+        1
+    }
 }

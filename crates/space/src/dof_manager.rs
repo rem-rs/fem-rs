@@ -16,7 +16,7 @@ use fem_mesh::topology::MeshTopology;
 // ─── EdgeKey ─────────────────────────────────────────────────────────────────
 
 /// A canonical (sorted) edge key for deduplication.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EdgeKey(pub NodeId, pub NodeId);
 
 impl EdgeKey {
@@ -28,7 +28,7 @@ impl EdgeKey {
 // ─── FaceKey ─────────────────────────────────────────────────────────────────
 
 /// A canonical (sorted) triangular face key for deduplication.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FaceKey(pub NodeId, pub NodeId, pub NodeId);
 
 impl FaceKey {
@@ -52,6 +52,7 @@ impl FaceKey {
 ///
 /// DOF ordering within an element follows the factory convention:
 /// vertices first, then edge DOFs, then face DOFs (3D), then volume DOFs.
+#[derive(Clone)]
 pub struct DofManager {
     /// Polynomial order.
     pub order: u8,
@@ -86,6 +87,9 @@ pub struct DofManager {
     pub bubble_dof_start: usize,
     /// Number of volume-interior DOFs per element (for p ≥ 4 in 3D, p ≥ 3 in 2D).
     pub n_volume_dofs: usize,
+    /// Per-element polynomial orders for variable-order p-refinement.
+    /// `None` for uniform-order DofManagers, `Some(orders)` for variable order.
+    pub elem_orders: Option<Vec<u8>>,
 }
 
 impl DofManager {
@@ -185,6 +189,7 @@ impl DofManager {
             face_pk_map: HashMap::new(),
             bubble_dof_start: n_nodes,
             n_volume_dofs: 0,
+            elem_orders: None,
         }
     }
 
@@ -259,6 +264,7 @@ impl DofManager {
             face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
+            elem_orders: None,
         }
     }
 
@@ -354,6 +360,7 @@ impl DofManager {
             face_pk_map: HashMap::new(),
             bubble_dof_start: n_nodes + n_edge_dofs,
             n_volume_dofs: 0,
+            elem_orders: None,
         }
     }
 
@@ -489,6 +496,7 @@ impl DofManager {
             face_pk_map: HashMap::new(),
             bubble_dof_start,
             n_volume_dofs: 0,
+            elem_orders: None,
         }
     }
 
@@ -644,6 +652,7 @@ impl DofManager {
             face_pk_map: HashMap::new(),
             bubble_dof_start,
             n_volume_dofs: 0,
+            elem_orders: None,
         }
     }
 
@@ -726,6 +735,7 @@ impl DofManager {
             face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
+            elem_orders: None,
         }
     }
 
@@ -920,16 +930,13 @@ impl DofManager {
             }
         }
 
-        // Face DOF coordinates (3D): approximate using face centroid for now.
-        // For higher accuracy, this should use a proper parameterization of the face.
-        // Here we use a simple centroid approximation for all face DOFs.
-        if dim == 3 && p >= 3 {
-            // Build a face-node lookup map to get the three face nodes.
+        // 3D face DOF coordinates: barycentric interpolation from 3 face vertices.
+        if dim == 3 && !face_pk_map.is_empty() {
+            // Build face→node mapping from element connectivity.
             let mut face_nodes_map: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
             for e in 0..n_elems as u32 {
                 let ns = mesh.element_nodes(e);
-                let (n0, n1, n2, n3) = (ns[0], ns[1], ns[2], ns[3]);
-                for &(a, b, c) in &[(n0, n1, n2), (n0, n1, n3), (n0, n2, n3), (n1, n2, n3)] {
+                for &(a, b, c) in &[(ns[0],ns[1],ns[2]),(ns[0],ns[1],ns[3]),(ns[0],ns[2],ns[3]),(ns[1],ns[2],ns[3])] {
                     face_nodes_map.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
                 }
             }
@@ -938,21 +945,17 @@ impl DofManager {
                 let ca = mesh.node_coords(nodes[0]);
                 let cb = mesh.node_coords(nodes[1]);
                 let cc = mesh.node_coords(nodes[2]);
+                let n_face_dofs = dofs.len();
                 for (k, &dof_id) in dofs.iter().enumerate() {
                     let base = dof_id as usize * dim;
-                    // Simple interpolation: the interior of the face
-                    // For simplicity, we spread the DOFs along the face.
-                    // More accurate would be to use the factory's face node coordinates.
-                    let n_face_dofs = dofs.len();
                     if n_face_dofs == 1 {
-                        for d in 0..dim {
+                        for d in 0..3 {
                             dof_coords[base + d] = (ca[d] + cb[d] + cc[d]) / 3.0;
                         }
                     } else {
-                        // Distribute DOFs within the face in a simple pattern.
-                        // For better quality, use the full parameterization from the factory.
+                        // Distribute DOFs along the face using barycentric-like spacing.
                         let t = (k + 1) as f64 / (n_face_dofs + 1) as f64;
-                        for d in 0..dim {
+                        for d in 0..3 {
                             dof_coords[base + d] = (1.0 - t) * ca[d] + t * (cb[d] + cc[d]) / 2.0;
                         }
                     }
@@ -960,22 +963,38 @@ impl DofManager {
             }
         }
 
-        // Volume interior DOF coordinates: element centroid.
+        // Volume/bubble DOF coordinates: use factory reference element for accuracy.
         if volume_dofs_per > 0 {
+            use fem_element::lagrange::factory::{ref_elem, ElemType};
+            let ft = if dim == 2 { ElemType::Tri } else { ElemType::Tet };
+            let factory = ref_elem(ft, order as u8);
+            let ref_coords = factory.dof_coords();
+            // Volume DOFs in factory are the LAST volume_dofs_per entries.
+            let vol_factory_start = dofs_per_elem - volume_dofs_per;
             let vol_start = n_nodes + edge_pk_map.len() * edge_dofs_per;
-            let mut vol_idx = 0;
             for e in 0..n_elems as u32 {
                 let ns = mesh.element_nodes(e);
-                for _ in 0..volume_dofs_per {
-                    let dof_id = vol_start + vol_idx;
+                // Vertex coordinates for barycentric interpolation
+                let c0 = mesh.node_coords(ns[0]);
+                let c1 = mesh.node_coords(ns[1]);
+                let c2 = if dim == 2 { mesh.node_coords(ns[2]) } else { mesh.node_coords(ns[2]) };
+                let c3 = if dim >= 3 { mesh.node_coords(ns[3]) } else { &[] };
+                for k in 0..volume_dofs_per {
+                    let dof_id = vol_start + e as usize * volume_dofs_per + k;
                     let base = dof_id * dim;
-                    let n_verts = ns.len();
-                    for d in 0..dim {
-                        dof_coords[base + d] = ns.iter()
-                            .map(|&n| mesh.node_coords(n)[d])
-                            .sum::<f64>() / n_verts as f64;
+                    let rc = &ref_coords[vol_factory_start + k];
+                    if dim == 2 {
+                        let lam0 = 1.0 - rc[0] - rc[1];
+                        for d in 0..2 {
+                            dof_coords[base + d] = lam0 * c0[d] + rc[0] * c1[d] + rc[1] * c2[d];
+                        }
+                    } else {
+                        let lam0 = 1.0 - rc[0] - rc[1] - rc[2];
+                        for d in 0..3 {
+                            dof_coords[base + d] = lam0 * c0[d] + rc[0] * c1[d]
+                                + rc[1] * c2[d] + rc[2] * c3[d];
+                        }
                     }
-                    vol_idx += 1;
                 }
             }
         }
@@ -990,7 +1009,15 @@ impl DofManager {
             face_pk_map,
             bubble_dof_start: n_dofs,
             n_volume_dofs: volume_dofs_per,
+            elem_orders: None,
         }
+    }
+
+    /// Return the polynomial order for element `elem`.
+    /// For uniform-order DofManagers, returns `self.order`.
+    /// For variable-order DofManagers, returns the per-element order.
+    pub fn element_order(&self, elem: ElemId) -> u8 {
+        self.elem_orders.as_ref().map_or(self.order, |orders| orders[elem as usize])
     }
 }
 

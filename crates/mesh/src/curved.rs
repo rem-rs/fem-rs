@@ -114,7 +114,10 @@ impl<const D: usize> CurvedMesh<D> {
                 }
                 ids
             });
-            if a == key.0 { nodes.clone() } else { nodes.iter().copied().rev().collect() }
+            // Geometry nodes MUST follow factory DOF order (t increasing from key.0 to key.1).
+            // Reversing would swap edge DOF indices, causing Jacobian errors at p >= 3.
+            // All elements sharing this edge get nodes in the same (canonical) order.
+            nodes.clone()
         }
 
         let n_elems = mesh.n_elems();
@@ -179,26 +182,60 @@ impl<const D: usize> CurvedMesh<D> {
                     }
                     pos += p - 1;
                 }
-                // Face interior (for p ≥ 3) and volume interior (for p ≥ 4)
-                // For now, use simple approximation for face/volume interpolation
-                let n_face_total = if p >= 3 { 4 * (p - 1) * (p - 2) / 2 } else { 0 };
+                // Face interior nodes (for p ≥ 3)
+                // Match factory ordering: Face(0,1,2), Face(0,1,3), Face(0,2,3), Face(1,2,3)
+                // each with (p-1)(p-2)/2 nodes in triangular pattern (k=1..p-2, i/j=1..p-1-k)
+                let _face_dofs_per = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
                 let mut face_pos = 4 + 6 * (p - 1);
-                for _ in 0..n_face_total {
-                    // Simple centroid-based interpolation for face nodes
-                    let x = map_fn([0.0; D]);
-                    new_coords.extend_from_slice(&x);
-                    geom_conn[off + face_pos] = next_node;
-                    next_node += 1;
-                    face_pos += 1;
+                for face_idx in 0..4 {
+                    for k in 1..=p.saturating_sub(2) {
+                        let max_ij = p - 1 - k;
+                        for ij in 1..=max_ij {
+                            let (xi, eta, zeta): (f64, f64, f64) = match face_idx {
+                                0 => (ij as f64 / p as f64, k as f64 / p as f64, 0.0),       // face(0,1,2) z=0
+                                1 => (ij as f64 / p as f64, 0.0, k as f64 / p as f64),       // face(0,1,3) y=0
+                                2 => (0.0, ij as f64 / p as f64, k as f64 / p as f64),       // face(0,2,3) x=0
+                                _ => (1.0 - (ij + k) as f64 / p as f64, ij as f64 / p as f64, k as f64 / p as f64), // face(1,2,3)
+                            };
+                            let mut x = [0.0; D];
+                            for d in 0..D {
+                                x[d] = (1.0 - xi - eta - zeta) * mesh.coords_of(ns[0])[d]
+                                     + xi * mesh.coords_of(ns[1])[d]
+                                     + eta * mesh.coords_of(ns[2])[d]
+                                     + zeta * mesh.coords_of(ns[3])[d];
+                            }
+                            x = map_fn(x);
+                            new_coords.extend_from_slice(&x);
+                            geom_conn[off + face_pos] = next_node;
+                            next_node += 1;
+                            face_pos += 1;
+                        }
+                    }
                 }
+                // Volume interior nodes (for p ≥ 4)
+                // Match factory ordering: k=1..p-3, j=1..p-2-k, i=1..p-1-j-k
                 if p >= 4 {
                     let n_vol = (p - 1) * (p - 2) * (p - 3) / 6;
-                    for _ in 0..n_vol {
-                        let x = map_fn([0.0; D]);
-                        new_coords.extend_from_slice(&x);
-                        geom_conn[off + face_pos] = next_node;
-                        next_node += 1;
-                        face_pos += 1;
+                    for k in 1..=(p - 3) {
+                        for j in 1..=(p - 2 - k) {
+                            for i in 1..=(p - 1 - j - k) {
+                                let xi = i as f64 / p as f64;
+                                let eta = j as f64 / p as f64;
+                                let zeta = k as f64 / p as f64;
+                                let mut x = [0.0; D];
+                                for d in 0..D {
+                                    x[d] = (1.0 - xi - eta - zeta) * mesh.coords_of(ns[0])[d]
+                                         + xi * mesh.coords_of(ns[1])[d]
+                                         + eta * mesh.coords_of(ns[2])[d]
+                                         + zeta * mesh.coords_of(ns[3])[d];
+                                }
+                                x = map_fn(x);
+                                new_coords.extend_from_slice(&x);
+                                geom_conn[off + face_pos] = next_node;
+                                next_node += 1;
+                                face_pos += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -247,23 +284,51 @@ impl<const D: usize> CurvedMesh<D> {
     }
 
     /// Compute the isoparametric Jacobian `J = ∂F/∂ξ` at reference point `xi`.
+    ///
+    /// Uses factory DOF reference coordinates to compute physical node positions
+    /// via barycentric interpolation from the element vertices, bypassing the
+    /// `geom_conn` node ordering. This ensures correct Jacobians even when
+    /// edge nodes are stored in a different order (due to edge key reversal).
     pub fn element_jacobian(&self, e: usize, xi: &[f64]) -> (DMatrix<f64>, f64) {
         let dim = D;
         let n = self.nodes_per_elem;
-        let nodes = self.elem_geom_nodes(e);
 
         let mut grad_ref = vec![0.0_f64; n * dim];
         self.eval_geom_grad_basis(xi, &mut grad_ref);
 
+        // Get factory DOF reference coordinates (always in factory order)
+        use fem_element::lagrange::factory::{ref_elem, ElemType};
+        let et = mesh_elem_type_to_factory_type(self.elem_type);
+        let factory = ref_elem(et, self.geom_order);
+        let ref_coords = factory.dof_coords();
+
+        // Vertex coordinates (first n_vert entries of geom_conn are vertices)
+        let nodes = self.elem_geom_nodes(e);
+        let verts: Vec<[f64; D]> = (0..=dim).map(|i| self.node_coords_arr(nodes[i])).collect();
+
+        // Compute Jacobian using node positions in factory DOF order
         let mut j = DMatrix::<f64>::zeros(dim, dim);
-        for row in 0..dim {
-            for col in 0..dim {
-                let mut s = 0.0;
-                for k in 0..n {
-                    let xk = self.node_coords_arr(nodes[k]);
-                    s += xk[row] * grad_ref[k * dim + col];
+        for k in 0..n {
+            let rc = &ref_coords[k];
+            let mut xk = [0.0_f64; D];
+            if dim == 2 {
+                for d in 0..2 {
+                    xk[d] = (1.0 - rc[0] - rc[1]) * verts[0][d]
+                          + rc[0] * verts[1][d]
+                          + rc[1] * verts[2][d];
                 }
-                j[(row, col)] = s;
+            } else {
+                for d in 0..3 {
+                    xk[d] = (1.0 - rc[0] - rc[1] - rc[2]) * verts[0][d]
+                          + rc[0] * verts[1][d]
+                          + rc[1] * verts[2][d]
+                          + rc[2] * verts[3][d];
+                }
+            }
+            for row in 0..dim {
+                for col in 0..dim {
+                    j[(row, col)] += xk[row] * grad_ref[k * dim + col];
+                }
             }
         }
         let det = j.determinant();
@@ -285,7 +350,7 @@ impl<const D: usize> CurvedMesh<D> {
     }
 
     /// Evaluate geometric basis functions at `xi` using the factory.
-    fn eval_geom_basis(&self, xi: &[f64], phi: &mut [f64]) {
+    pub(crate) fn eval_geom_basis(&self, xi: &[f64], phi: &mut [f64]) {
         use fem_element::lagrange::factory::{ref_elem, ElemType};
         let et = mesh_elem_type_to_factory_type(self.elem_type);
         let elem = ref_elem(et, self.geom_order);
@@ -293,10 +358,13 @@ impl<const D: usize> CurvedMesh<D> {
     }
 
     /// Evaluate geometric basis function gradients at `xi` using the factory.
-    fn eval_geom_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+    pub(crate) fn eval_geom_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
         use fem_element::lagrange::factory::{ref_elem, ElemType};
         let et = mesh_elem_type_to_factory_type(self.elem_type);
         let elem = ref_elem(et, self.geom_order);
+        // Check capacity
+        assert!(grads.len() >= self.nodes_per_elem * D,
+            "grads len {} < nodes_per_elem {} * D {}", grads.len(), self.nodes_per_elem, D);
         elem.eval_grad_basis(xi, grads);
     }
 }
@@ -359,6 +427,8 @@ impl<const D: usize> MeshTopology for CurvedMesh<D> {
         // Only boundary faces are stored.
         (0, None)
     }
+
+    fn geom_order(&self) -> u8 { self.geom_order }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -451,6 +521,50 @@ mod tests {
             let (_, det_lin) = lin.element_jacobian(e, &xi);
             let (_, det_p2) = p2.element_jacobian(e, &xi);
             assert!((det_lin - det_p2).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn p3_tet_jacobian_matches_p1() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let lin = CurvedMesh::from_linear(&mesh);
+        let p3 = CurvedMesh::elevate_to_order(&mesh, 3, |x| x);
+        let xi = vec![0.25, 0.25, 0.25];
+        for e in 0..mesh.n_elems() {
+            let (_, det_lin) = lin.element_jacobian(e, &xi);
+            let (_, det_p3) = p3.element_jacobian(e, &xi);
+            assert!((det_lin - det_p3).abs() < 1e-12,
+                "elem {e}: P1={det_lin:.6e}, P3={det_p3:.6e}");
+        }
+    }
+
+
+
+    #[test]
+    fn p3_jacobian_matches_p1_on_flat_mesh() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let lin = CurvedMesh::from_linear(&mesh);
+        let p3 = CurvedMesh::elevate_to_order(&mesh, 3, |x| x);
+        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
+        for e in 0..mesh.n_elems() {
+            let (_, det_lin) = lin.element_jacobian(e, &xi);
+            let (_, det_p3) = p3.element_jacobian(e, &xi);
+            assert!((det_lin - det_p3).abs() < 1e-12,
+                "elem {e}: P1={det_lin:.6e}, P3={det_p3:.6e}");
+        }
+    }
+
+    #[test]
+    fn p4_jacobian_matches_p1_on_flat_mesh() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let lin = CurvedMesh::from_linear(&mesh);
+        let p4 = CurvedMesh::elevate_to_order(&mesh, 4, |x| x);
+        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
+        for e in 0..mesh.n_elems() {
+            let (_, det_lin) = lin.element_jacobian(e, &xi);
+            let (_, det_p4) = p4.element_jacobian(e, &xi);
+            assert!((det_lin - det_p4).abs() < 1e-12,
+                "elem {e}: P1={det_lin:.6e}, P4={det_p4:.6e}");
         }
     }
 }

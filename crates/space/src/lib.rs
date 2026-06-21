@@ -23,6 +23,7 @@ pub mod hdiv;
 pub mod constraints;
 pub mod iga;
 pub mod iga_fe_space;
+pub mod p_refine;
 pub mod vector_h1;
 pub mod skeleton;
 

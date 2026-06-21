@@ -78,6 +78,7 @@ pub mod dg;
 pub mod dg_elasticity;
 pub mod hyperbolic;
 pub mod nonlinear;
+pub mod nonlinear_hyperelasticity;
 pub mod partial;
 pub mod vector_integrator;
 pub mod vector_assembler;
@@ -90,6 +91,8 @@ pub mod discrete_op;
 pub mod transfer;
 pub mod static_cond;
 pub mod iga;
+pub mod dg_advection;
+pub mod dg_cdr;
 pub mod error_estimate;
 pub mod h1_quad_order_hint;
 
@@ -124,10 +127,13 @@ pub use vector_boundary::{
 };
 pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator};
 pub use dg::{DgAssembler};
+pub use dg_advection::{DGAdvectionIntegrator, DgAdvectionRhs, DgFaceIntegrator, DgFaceQpData, assemble_dg_interior_faces, assemble_advection_boundary};
+pub use dg_cdr::DgCdrSystem;
 pub use dg_elasticity::DgElasticityAssembler;
 pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux};
 pub use interior_faces::InteriorFaceList;
 pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
+pub use nonlinear_hyperelasticity::HyperelasticityForm;
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator,
                   HcurlMatrixFreeOperator, solve_hcurl_matrix_free,
                   solve_hcurl_eigen_preconditioned_amg};

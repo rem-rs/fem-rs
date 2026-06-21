@@ -8,6 +8,7 @@ use nalgebra::DMatrix;
 
 use fem_core::types::DofId;
 use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, SegP3, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, HexQ1}};
+use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -122,9 +123,42 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
 
 // ─── Jacobian helpers ─────────────────────────────────────────────────────────
 
+/// Convert a mesh `ElementType` to the factory's `ElemType`.
+fn mesh_type_to_factory(et: ElementType) -> FactoryElemType {
+    match et {
+        ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
+        ElementType::Tet4 | ElementType::Tet10 => FactoryElemType::Tet,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => FactoryElemType::Quad,
+        ElementType::Hex8 | ElementType::Hex20 => FactoryElemType::Hex,
+        ElementType::Line2 | ElementType::Line3 => FactoryElemType::Seg,
+        _ => panic!("mesh_type_to_factory: unsupported element type {et:?}"),
+    }
+}
+
+/// Build the geometry reference element for isoparametric Jacobians.
+///
+/// Returns `Some` for non-affine elements (Quad/Hex with P1, or any element
+/// with `geom_order > 1`), `None` for affine P1 simplex elements.
+fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElement>> {
+    let et = mesh.element_type(e);
+    let g = mesh.geom_order();
+    let is_quad_hex = matches!(et,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+        | ElementType::Hex8 | ElementType::Hex20);
+    if g == 1 && !is_quad_hex { return None; } // affine P1 simplex
+    let order = if g > 1 { g } else { 1 };
+    let ft = mesh_type_to_factory(et);
+    Some(factory_ref_elem(ft, order))
+}
+
 /// Whether this element type has a constant (affine) Jacobian.
-fn is_affine(et: ElementType) -> bool {
-    matches!(et, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Line2 | ElementType::Line3)
+///
+/// Affine if P1 simplex geometry (`geom_order == 1` and non-tensor-product).
+/// Non-affine for curved simplex elements (geom_order > 1) and all tensor-product
+/// elements (Quad/Hex) which use isoparametric mapping.
+fn is_affine(et: ElementType, geom_order: u8) -> bool {
+    if geom_order > 1 { return false; }
+    matches!(et, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2)
 }
 
 /// Isoparametric Jacobian for non-affine elements (Quad4, Hex8, etc.).
@@ -229,7 +263,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
 ) {
     let mesh   = space.mesh();
     let dim    = mesh.dim() as usize;
-    let order  = space.order();
+    let order  = space.element_order(e);
 
     let elem_type = mesh.element_type(e);
     let ref_elem  = ref_elem_vol(elem_type, order);
@@ -242,16 +276,12 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let nodes = mesh.element_nodes(e);
     let elem_tag = mesh.element_tag(e);
 
-    let affine = is_affine(elem_type);
+    let g_order = mesh.geom_order();
+    let affine = is_affine(elem_type, g_order);
+    let geo_elem = geo_ref_elem(mesh, e);
 
     let affine_tr = if affine {
         Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
-    } else {
-        None
-    };
-
-    let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
-        Some(ref_elem_vol(elem_type, 1))
     } else {
         None
     };
@@ -334,7 +364,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
 ) {
     let mesh   = space.mesh();
     let dim    = mesh.dim() as usize;
-    let order  = space.order();
+    let order  = space.element_order(e);
 
     let elem_type = mesh.element_type(e);
     let ref_elem  = ref_elem_vol(elem_type, order);
@@ -346,16 +376,15 @@ fn accumulate_volume_linear_element<S: FESpace>(
     let nodes = mesh.element_nodes(e);
     let elem_tag = mesh.element_tag(e);
 
-    let affine = is_affine(elem_type);
+    let g_order = mesh.geom_order();
+    let affine = is_affine(elem_type, g_order);
+    let geo_elem = geo_ref_elem(mesh, e);
 
     let affine_tr = if affine {
         Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
     } else {
         None
     };
-    let geo_elem: Option<Box<dyn ReferenceElement>> = if !affine {
-        Some(ref_elem_vol(elem_type, 1))
-    } else { None };
 
     let n_elem_dofs = global_dofs.len();
 

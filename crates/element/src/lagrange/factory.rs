@@ -22,44 +22,6 @@
 use crate::quadrature::{seg_rule, tri_rule, tet_rule, quad_rule, hex_rule};
 use crate::reference::{QuadratureRule, ReferenceElement};
 
-// ─── Helpers: monomial enumeration ────────────────────────────────────────────
-
-fn monomial_exponents(dim: usize, p: usize) -> Vec<Vec<usize>> {
-    let mut exps = Vec::new();
-    let mut stack: Vec<(usize, usize, Vec<usize>)> = Vec::new();
-    for total in (0..=p).rev() {
-        stack.push((total, dim, Vec::new()));
-    }
-    while let Some((total, remaining, mut current)) = stack.pop() {
-        if remaining == 1 {
-            current.push(total);
-            exps.push(current);
-        } else {
-            for k in (0..=total).rev() {
-                let mut v = current.clone();
-                v.push(k);
-                stack.push((total - k, remaining - 1, v));
-            }
-        }
-    }
-    exps
-}
-
-/// Evaluate a monomial `x₁^a₁ · x₂^a₂ · …` at point `x`.
-fn eval_monomial(exponents: &[usize], x: &[f64]) -> f64 {
-    exponents.iter().zip(x.iter()).map(|(&a, &xi)| xi.powi(a as i32)).product()
-}
-
-fn eval_monomial_deriv(exponents: &[usize], x: &[f64], k: usize) -> f64 {
-    let ak = exponents[k];
-    if ak == 0 { return 0.0; }
-    let mut val = ak as f64;
-    for (j, (&aj, &xj)) in exponents.iter().zip(x.iter()).enumerate() {
-        val *= if j == k { xj.powi((ak - 1) as i32) } else { xj.powi(aj as i32) };
-    }
-    val
-}
-
 // ─── Helpers: equispaced nodes ────────────────────────────────────────────────
 
 fn equispaced_nodes_1d(p: usize) -> Vec<f64> {
@@ -131,89 +93,7 @@ fn equispaced_nodes_tet(p: usize) -> Vec<[f64; 3]> {
     nodes
 }
 
-// ─── Helpers: Vandermonde precomputation ──────────────────────────────────────
-
-fn precompute_lagrange_coeffs(nodes: &[Vec<f64>], dim: usize, order: usize) -> Vec<f64> {
-    let n_dofs = nodes.len();
-    let monos = monomial_exponents(dim, order);
-    let n_mono = monos.len();
-    debug_assert_eq!(n_dofs, n_mono);
-
-    // Build Vandermonde matrix V[i,j] = monomial_j(node_i)
-    let mut vander = vec![0.0_f64; n_dofs * n_mono];
-    for (i, node) in nodes.iter().enumerate() {
-        for (j, exps) in monos.iter().enumerate() {
-            vander[i * n_mono + j] = eval_monomial(exps, node);
-        }
-    }
-
-    // Solve V^T * C = I using LU with partial pivoting
-    // This gives C^T such that C^T * V = I, i.e., each row of C^T is a Lagrange polynomial
-    let mut lu = vander;
-    let mut pivots = vec![0usize; n_dofs];
-    for col in 0..n_dofs {
-        let mut max_val = lu[col * n_mono + col].abs();
-        let mut max_row = col;
-        for row in (col + 1)..n_dofs {
-            let val = lu[row * n_mono + col].abs();
-            if val > max_val { max_val = val; max_row = row; }
-        }
-        pivots[col] = max_row;
-        if max_row != col {
-            for j in 0..n_mono { lu.swap(col * n_mono + j, max_row * n_mono + j); }
-        }
-        let pivot = lu[col * n_mono + col];
-        debug_assert!(pivot.abs() > 1e-15, "Singular Vandermonde at col {col}");
-        for row in (col + 1)..n_dofs {
-            let factor = lu[row * n_mono + col] / pivot;
-            lu[row * n_mono + col] = factor;
-            for j in (col + 1)..n_mono { lu[row * n_mono + j] -= factor * lu[col * n_mono + j]; }
-        }
-    }
-
-    let mut coeffs = vec![0.0_f64; n_dofs * n_mono];
-    for basis in 0..n_dofs {
-        let mut rhs = vec![0.0_f64; n_dofs];
-        rhs[basis] = 1.0;
-        for i in 0..n_dofs {
-            let piv = pivots[i];
-            if piv != i { rhs.swap(i, piv); }
-        }
-        for i in 1..n_dofs {
-            for j in 0..i { rhs[i] -= lu[i * n_mono + j] * rhs[j]; }
-        }
-        for i in (0..n_dofs).rev() {
-            for j in (i + 1)..n_dofs { rhs[i] -= lu[i * n_mono + j] * rhs[j]; }
-            rhs[i] /= lu[i * n_mono + i];
-        }
-        for j in 0..n_dofs { coeffs[basis * n_mono + j] = rhs[j]; }
-    }
-    coeffs
-}
-
-fn eval_basis_from_coeffs(coeffs: &[f64], monos: &[Vec<usize>], x: &[f64], values: &mut [f64]) {
-    let n_dofs = values.len();
-    let n_mono = monos.len();
-    let mut mono_vals = vec![0.0_f64; n_mono];
-    for (j, exps) in monos.iter().enumerate() { mono_vals[j] = eval_monomial(exps, x); }
-    for i in 0..n_dofs {
-        let row = &coeffs[i * n_mono..(i + 1) * n_mono];
-        values[i] = row.iter().zip(mono_vals.iter()).map(|(c, m)| c * m).sum();
-    }
-}
-
-fn eval_grad_basis_from_coeffs(coeffs: &[f64], monos: &[Vec<usize>], x: &[f64], dim: usize, grads: &mut [f64]) {
-    let n_dofs = grads.len() / dim;
-    let n_mono = monos.len();
-    for d in 0..dim {
-        let mut mono_ders = vec![0.0_f64; n_mono];
-        for (j, exps) in monos.iter().enumerate() { mono_ders[j] = eval_monomial_deriv(exps, x, d); }
-        for i in 0..n_dofs {
-            let row = &coeffs[i * n_mono..(i + 1) * n_mono];
-            grads[i * dim + d] = row.iter().zip(mono_ders.iter()).map(|(c, m)| c * m).sum();
-        }
-    }
-}
+// ─── 1D Lagrange helpers (direct formula, no Vandermonde) ──────────────────────
 
 // ─── SegPk ───────────────────────────────────────────────────────────────────
 
@@ -222,18 +102,12 @@ fn eval_grad_basis_from_coeffs(coeffs: &[f64], monos: &[Vec<usize>], x: &[f64], 
 /// DOF ordering: ξ = 0, 1/p, 2/p, …, 1 (equispaced, vertices first).
 pub struct SegPk {
     order: usize,
-    coeffs: Vec<f64>,
-    monos: Vec<Vec<usize>>,
 }
 
 impl SegPk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be ≥ 1");
-        let nodes = equispaced_nodes_1d(p);
-        let node_vecs: Vec<Vec<f64>> = nodes.iter().map(|&x| vec![x]).collect();
-        let monos = monomial_exponents(1, p);
-        let coeffs = precompute_lagrange_coeffs(&node_vecs, 1, p);
-        Self { order: p, coeffs, monos }
+        Self { order: p }
     }
 }
 
@@ -242,10 +116,18 @@ impl ReferenceElement for SegPk {
     fn order(&self) -> u8 { self.order as u8 }
     fn n_dofs(&self) -> usize { self.order + 1 }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        eval_basis_from_coeffs(&self.coeffs, &self.monos, xi, values);
+        let p = self.order;
+        let t = p as f64 * xi[0];
+        for dof_idx in 0..=p {
+            values[dof_idx] = lagrange_val(dof_idx, p, t);
+        }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        eval_grad_basis_from_coeffs(&self.coeffs, &self.monos, xi, 1, grads);
+        let p = self.order;
+        let t = p as f64 * xi[0];
+        for dof_idx in 0..=p {
+            grads[dof_idx] = p as f64 * lagrange_deriv(dof_idx, p, t);
+        }
     }
     fn quadrature(&self, order: u8) -> QuadratureRule { seg_rule(order) }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
@@ -253,25 +135,98 @@ impl ReferenceElement for SegPk {
     }
 }
 
+// ─── 1D Lagrange helpers (direct formula, no Vandermonde) ──────────────────────
+
+/// Evaluate the standard degree-p Lagrange polynomial through integer nodes
+/// {0, 1, ..., p}: l_n(t) = Π_{m≠n} (t-m)/(n-m).
+/// Used by SegPk (1D elements) where the standard Lagrange basis is correct.
+fn lagrange_val(n: usize, p: usize, t: f64) -> f64 {
+    let mut val = 1.0;
+    let tn = n as f64;
+    for m in 0..=p {
+        if m != n {
+            val *= (t - m as f64) / (tn - m as f64);
+        }
+    }
+    val
+}
+
+/// Derivative of the standard degree-p Lagrange polynomial l_n'(t).
+fn lagrange_deriv(n: usize, p: usize, t: f64) -> f64 {
+    let mut sum = 0.0;
+    let tn = n as f64;
+    for k in 0..=p {
+        if k != n {
+            let mut term = 1.0;
+            let tk = k as f64;
+            for m in 0..=p {
+                if m != n && m != k {
+                    term *= (t - m as f64) / (tn - m as f64);
+                }
+            }
+            sum += term / (tn - tk);
+        }
+    }
+    sum
+}
+
+/// Rising-factorial basis L_n(t) = Π_{a=0}^{n-1} (t - a) / (n - a), with L_0(t) = 1.
+/// This is the correct building block for simplex Lagrange elements, NOT the
+/// standard Lagrange polynomial through integer nodes.
+fn rising_val(n: usize, t: f64) -> f64 {
+    if n == 0 { return 1.0; }
+    let mut val = 1.0;
+    for a in 0..n {
+        val *= (t - a as f64) / (n as f64 - a as f64);
+    }
+    val
+}
+
+/// Derivative of the rising-factorial basis L_n'(t).
+/// L_n(t) = Π_{a=0}^{n-1} (t-a)/(n-a), so
+/// L_n'(t) = Σ_{b=0}^{n-1} 1/(n-b) · Π_{a≠b} (t-a)/(n-a)
+fn rising_deriv(n: usize, t: f64) -> f64 {
+    if n == 0 { return 0.0; }
+    let nf = n as f64;
+    let mut sum = 0.0;
+    for b in 0..n {
+        let mut term = 1.0;
+        for a in 0..n {
+            if a != b {
+                term *= (t - a as f64) / (nf - a as f64);
+            }
+        }
+        sum += term / (nf - b as f64);
+    }
+    sum
+}
+
 // ─── TriPk ───────────────────────────────────────────────────────────────────
 
 /// Arbitrary-order Lagrange element on the reference triangle `(0,0),(1,0),(0,1)` —
 /// `(p+1)(p+2)/2` DOFs.
+///
+/// Uses the direct barycentric Lagrange formula (stable for any order) instead
+/// of a Vandermonde-based coefficient approach (which becomes ill-conditioned
+/// at p ≥ 3 for simplex elements).
 pub struct TriPk {
     order: usize,
     nodes: Vec<[f64; 2]>,
-    coeffs: Vec<f64>,
-    monos: Vec<Vec<usize>>,
+    ijk: Vec<(usize, usize, usize)>,
 }
 
 impl TriPk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be ≥ 1");
         let nodes = equispaced_nodes_tri(p);
-        let node_vecs: Vec<Vec<f64>> = nodes.iter().map(|n| vec![n[0], n[1]]).collect();
-        let monos = monomial_exponents(2, p);
-        let coeffs = precompute_lagrange_coeffs(&node_vecs, 2, p);
-        Self { order: p, nodes, coeffs, monos }
+        let ijk: Vec<(usize, usize, usize)> = nodes.iter()
+            .map(|n| {
+                let i = (n[0] * p as f64).round() as usize;
+                let j = (n[1] * p as f64).round() as usize;
+                (i, j, p - i - j)
+            })
+            .collect();
+        Self { order: p, nodes, ijk }
     }
 }
 
@@ -280,10 +235,35 @@ impl ReferenceElement for TriPk {
     fn order(&self) -> u8 { self.order as u8 }
     fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 2) / 2 }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        eval_basis_from_coeffs(&self.coeffs, &self.monos, xi, values);
+        let p = self.order;
+        let pf = p as f64;
+        let t0 = pf * xi[0];
+        let t1 = pf * xi[1];
+        let t2 = pf * (1.0 - xi[0] - xi[1]);
+        for (dof_idx, &(i, j, k)) in self.ijk.iter().enumerate() {
+            values[dof_idx] = rising_val(i, t0)
+                            * rising_val(j, t1)
+                            * rising_val(k, t2);
+        }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        eval_grad_basis_from_coeffs(&self.coeffs, &self.monos, xi, 2, grads);
+        let p = self.order;
+        let pf = p as f64;
+        let t0 = pf * xi[0];
+        let t1 = pf * xi[1];
+        let t2 = pf * (1.0 - xi[0] - xi[1]);
+        for (dof_idx, &(i, j, k)) in self.ijk.iter().enumerate() {
+            let vi = rising_val(i, t0);
+            let vj = rising_val(j, t1);
+            let vk = rising_val(k, t2);
+            let di = rising_deriv(i, t0);
+            let dj = rising_deriv(j, t1);
+            let dk = rising_deriv(k, t2);
+            // ∂φ/∂ξ = p·(di·vj·vk - vi·vj·dk)
+            grads[dof_idx * 2]     = pf * (di * vj * vk - vi * vj * dk);
+            // ∂φ/∂η = p·(vi·dj·vk - vi·vj·dk)
+            grads[dof_idx * 2 + 1] = pf * (vi * dj * vk - vi * vj * dk);
+        }
     }
     fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
@@ -295,21 +275,28 @@ impl ReferenceElement for TriPk {
 
 /// Arbitrary-order Lagrange element on the reference tetrahedron —
 /// `(p+1)(p+2)(p+3)/6` DOFs.
+///
+/// Uses the direct barycentric Lagrange formula (stable for any order) instead
+/// of a Vandermonde-based coefficient approach.
 pub struct TetPk {
     order: usize,
     nodes: Vec<[f64; 3]>,
-    coeffs: Vec<f64>,
-    monos: Vec<Vec<usize>>,
+    ijkl: Vec<(usize, usize, usize, usize)>,
 }
 
 impl TetPk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be ≥ 1");
         let nodes = equispaced_nodes_tet(p);
-        let node_vecs: Vec<Vec<f64>> = nodes.iter().map(|n| vec![n[0], n[1], n[2]]).collect();
-        let monos = monomial_exponents(3, p);
-        let coeffs = precompute_lagrange_coeffs(&node_vecs, 3, p);
-        Self { order: p, nodes, coeffs, monos }
+        let ijkl: Vec<(usize, usize, usize, usize)> = nodes.iter()
+            .map(|n| {
+                let i = (n[0] * p as f64).round() as usize;
+                let j = (n[1] * p as f64).round() as usize;
+                let k = (n[2] * p as f64).round() as usize;
+                (i, j, k, p - i - j - k)
+            })
+            .collect();
+        Self { order: p, nodes, ijkl }
     }
 }
 
@@ -318,10 +305,39 @@ impl ReferenceElement for TetPk {
     fn order(&self) -> u8 { self.order as u8 }
     fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 2) * (self.order + 3) / 6 }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        eval_basis_from_coeffs(&self.coeffs, &self.monos, xi, values);
+        let p = self.order;
+        let pf = p as f64;
+        let t0 = pf * xi[0];
+        let t1 = pf * xi[1];
+        let t2 = pf * xi[2];
+        let t3 = pf * (1.0 - xi[0] - xi[1] - xi[2]);
+        for (dof_idx, &(i, j, k, l)) in self.ijkl.iter().enumerate() {
+            values[dof_idx] = rising_val(i, t0)
+                            * rising_val(j, t1)
+                            * rising_val(k, t2)
+                            * rising_val(l, t3);
+        }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        eval_grad_basis_from_coeffs(&self.coeffs, &self.monos, xi, 3, grads);
+        let p = self.order;
+        let pf = p as f64;
+        let t0 = pf * xi[0];
+        let t1 = pf * xi[1];
+        let t2 = pf * xi[2];
+        let t3 = pf * (1.0 - xi[0] - xi[1] - xi[2]);
+        for (dof_idx, &(i, j, k, l)) in self.ijkl.iter().enumerate() {
+            let vi = rising_val(i, t0);
+            let vj = rising_val(j, t1);
+            let vk = rising_val(k, t2);
+            let vl = rising_val(l, t3);
+            let di = rising_deriv(i, t0);
+            let dj = rising_deriv(j, t1);
+            let dk = rising_deriv(k, t2);
+            let dl = rising_deriv(l, t3);
+            grads[dof_idx * 3]     = pf * (di * vj * vk * vl - vi * vj * vk * dl);
+            grads[dof_idx * 3 + 1] = pf * (vi * dj * vk * vl - vi * vj * vk * dl);
+            grads[dof_idx * 3 + 2] = pf * (vi * vj * dk * vl - vi * vj * vk * dl);
+        }
     }
     fn quadrature(&self, order: u8) -> QuadratureRule { tet_rule(order) }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
@@ -769,16 +785,19 @@ mod tests {
     #[test] fn seg_pk_nodal_interp() { for p in 1..=5 { check_nodal_interp(&SegPk::new(p)); } }
 
     // ── TriPk ─────────────────────────────────────────────────────────────
-    // Note: Individual tests pass for all orders. Running multiple Vandermonde-heavy
-    // tests sequentially may overflow the Windows debug-mode test thread stack.
-    // The gradient correctness is verified by gradient_fd (finite difference check).
+    // Note: gradient_fd tests p=1..=5 (direct Lagrange formula, no Vandermonde).
+    // grad_zero uses &dyn ReferenceElement trait object which may overflow
+    // Windows debug stack when called in a loop; tested at single order.
+    // p=5 passes gradient_fd with 1e-5 tolerance on all DOFs.
 
     #[test] fn tri_pk_pou() { check_pou(&TriPk::new(3)); }
+    #[test] fn tri_pk_grad_zero() { check_grad_zero(&TriPk::new(3)); }
     #[test] fn tri_pk_nodal_interp() { check_nodal_interp(&TriPk::new(3)); }
 
     // ── TetPk ─────────────────────────────────────────────────────────────
 
     #[test] fn tet_pk_pou() { check_pou(&TetPk::new(3)); }
+    #[test] fn tet_pk_grad_zero() { check_grad_zero(&TetPk::new(3)); }
     #[test] fn tet_pk_nodal_interp() { check_nodal_interp(&TetPk::new(3)); }
     #[test] fn tet_pk_n_dofs() { for p in 1..=8 { assert_eq!(TetPk::new(p).n_dofs(), (p+1)*(p+2)*(p+3)/6); } }
 
@@ -913,7 +932,7 @@ mod tests {
     #[test]
     fn tri_pk_gradient_fd() {
         let h = 1e-7;
-        for p in 1..=3 {
+        for p in 1..=5 {
             let elem = TriPk::new(p);
             let n = elem.n_dofs();
             let (mut vc, mut vx, mut vy, mut grads) = (vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*2]);
@@ -925,8 +944,8 @@ mod tests {
                 for i in 0..n {
                     let fd_x = (vx[i] - vc[i]) / h;
                     let fd_y = (vy[i] - vc[i]) / h;
-                    assert!((grads[i*2] - fd_x).abs() < 1e-5, "p={p} ({x},{y}) i={i} gx");
-                    assert!((grads[i*2+1] - fd_y).abs() < 1e-5, "p={p} ({x},{y}) i={i} gy");
+                    assert!((grads[i*2] - fd_x).abs() < 1e-5, "p={p} ({x},{y}) i={i} gx: analytic={} fd={}", grads[i*2], fd_x);
+                    assert!((grads[i*2+1] - fd_y).abs() < 1e-5, "p={p} ({x},{y}) i={i} gy: analytic={} fd={}", grads[i*2+1], fd_y);
                 }
             }
         }
@@ -935,7 +954,7 @@ mod tests {
     #[test]
     fn tet_pk_gradient_fd() {
         let h = 1e-7;
-        for p in 1..=3 {
+        for p in 1..=5 {
             let elem = TetPk::new(p);
             let n = elem.n_dofs();
             let (mut vc, mut vx, mut vy, mut vz, mut grads) = (
