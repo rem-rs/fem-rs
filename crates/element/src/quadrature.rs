@@ -140,6 +140,304 @@ pub fn hex_lobatto_rule(order: u8) -> QuadratureRule {
     QuadratureRule { points: pts, weights: wts }
 }
 
+// ─── Arbitrary-order Gauss-Legendre on [-1,1] ────────────────────────────────
+
+/// Compute Gauss-Legendre points and weights on `[-1, 1]` for arbitrary `n` points.
+///
+/// Uses Newton's method on the Legendre polynomial P_n(x) with O'Donnell's
+/// initial guesses for the roots. Returns (points, weights) where weights sum to 2.
+pub fn gauss_legendre_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
+    if n == 0 {
+        panic!("gauss_legendre_arbitrary: n must be >= 1");
+    }
+    if n <= 4 {
+        return gauss_legendre_1d(n);
+    }
+
+    let n_f = n as f64;
+    let mut pts = vec![0.0f64; n];
+    let mut wts = vec![0.0f64; n];
+
+    // Initial guesses using O'Donnell's formula
+    for i in 0..n {
+        let i_f = i as f64;
+        pts[i] = (std::f64::consts::PI * (4.0 * i_f + 3.0) / (4.0 * n_f + 2.0)).cos();
+    }
+
+    // Newton iteration
+    let tol = 1e-15;
+    let max_iter = 100;
+    for _ in 0..max_iter {
+        let mut converged = true;
+        for i in 0..n {
+            let x = pts[i];
+            // Evaluate P_n(x) and P_{n-1}(x) using recurrence
+            let (pn, pn1) = legendre_poly(n, x);
+            // Derivative: P'_n(x) = n/(1-x²) * (P_{n-1}(x) - x*P_n(x))
+            let dpn = if (1.0 - x * x).abs() < 1e-30 {
+                // Near endpoints, use l'Hopital or direct formula
+                0.5 * n as f64 * (n as f64 + 1.0)
+            } else {
+                n as f64 / (1.0 - x * x) * (pn1 - x * pn)
+            };
+            let dx = -pn / dpn;
+            pts[i] += dx;
+            if dx.abs() > tol {
+                converged = false;
+            }
+        }
+        if converged {
+            break;
+        }
+    }
+
+    // Compute weights: w_i = 2 / (1 - x_i²) * [P'_n(x_i)]²
+    for i in 0..n {
+        let x = pts[i];
+        let (pn, _pn1) = legendre_poly(n, x);
+        let dpn = if (1.0 - x * x).abs() < 1e-30 {
+            0.5 * n as f64 * (n as f64 + 1.0)
+        } else {
+            n as f64 / (1.0 - x * x) * (legendre_poly(n - 1, x).0 - x * pn)
+        };
+        // For the weight formula, we need P_{n-1}(x) properly
+        // Standard formula: w_i = 2 / ((1 - x_i²) * [P'_n(x_i)]²)
+        // But P'_n(x) = n/(1-x²) * (P_{n-1}(x) - x*P_n(x))
+        // Since P_n(x_i) = 0 at roots: P'_n(x_i) = n*P_{n-1}(x_i)/(1-x_i²)
+        // So w_i = 2*(1-x_i²) / (n² * P_{n-1}(x_i)²)
+        let pn1 = legendre_poly(n - 1, x).0;
+        wts[i] = 2.0 * (1.0 - x * x) / (n_f * n_f * pn1 * pn1);
+    }
+
+    // Sort by point location for consistency
+    let mut pairs: Vec<(f64, f64)> = pts.into_iter().zip(wts.into_iter()).collect();
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (pts_sorted, wts_sorted): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
+
+    (pts_sorted, wts_sorted)
+}
+
+/// Evaluate Legendre polynomial P_n(x) and P_{n-1}(x) using recurrence.
+fn legendre_poly(n: usize, x: f64) -> (f64, f64) {
+    if n == 0 {
+        return (1.0, 0.0); // P_0 = 1, no P_{-1}
+    }
+    if n == 1 {
+        return (x, 1.0); // P_1 = x, P_0 = 1
+    }
+    let mut pn1 = 1.0f64; // P_0
+    let mut pn = x;         // P_1
+    for k in 2..=n {
+        let k_f = k as f64;
+        let pn_next = ((2.0 * k_f - 1.0) * x * pn - (k_f - 1.0) * pn1) / k_f;
+        pn1 = pn;
+        pn = pn_next;
+    }
+    (pn, pn1)
+}
+
+/// Gauss-Legendre rule on `[0, 1]` with arbitrary `n` points.
+///
+/// Weights sum to 1.
+pub fn gauss_legendre_01_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
+    let (xs, ws) = gauss_legendre_arbitrary(n);
+    let pts = xs.iter().map(|x| 0.5 * (x + 1.0)).collect();
+    let wts = ws.iter().map(|w| 0.5 * w).collect();
+    (pts, wts)
+}
+
+/// Gauss-Lobatto-Legendre points and weights on `[-1, 1]` for arbitrary `n` points (n >= 2).
+///
+/// Uses the eigenvalue approach: the interior points are roots of P'_{n-1}(x).
+/// Includes the endpoints ±1. Exact for polynomials up to degree 2n-3.
+pub fn gauss_lobatto_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
+    if n < 2 {
+        panic!("gauss_lobatto_arbitrary: n must be >= 2");
+    }
+    if n <= 5 {
+        return gauss_lobatto_1d(n);
+    }
+
+    let n_f = n as f64;
+    let n_int = n - 2; // number of interior points
+
+    // Interior points are roots of P'_{n-1}(x)
+    // We find them by Newton's method on d/dx[P_{n-1}(x)]
+    let mut pts = vec![0.0f64; n];
+    pts[0] = -1.0;
+    pts[n - 1] = 1.0;
+    let mut wts = vec![0.0f64; n];
+
+    // Initial guesses for interior points: Chebyshev-like distribution
+    for i in 0..n_int {
+        let i_f = i as f64;
+        pts[i + 1] = -(std::f64::consts::PI * (i_f + 1.0) / (n_f - 1.0)).cos();
+    }
+
+    // Newton iteration on P'_{n-1}(x)
+    let tol = 1e-15;
+    let max_iter = 100;
+    let nm1 = n - 1;
+    for _ in 0..max_iter {
+        let mut converged = true;
+        for i in 0..n_int {
+            let x = pts[i + 1];
+            // P_{n-1}(x) and its derivative
+            let (pn, pn1) = legendre_poly(nm1, x);
+            // Second derivative: P''_{n-1}(x) = n/(1-x²) * (x*P'_{n-1}(x) - P_{n-2}(x))
+            // But we can use: P''_{n-1}(x) = (2x*P'_{n-1}(x) - n*(n-1)*P_{n-1}(x)) / (1-x²) ... hmm
+            // Simpler: use the recurrence for derivatives
+            // d/dx[P_{n-1}(x)] = (n-1)/(1-x²) * (P_{n-2}(x) - x*P_{n-1}(x))
+            let dpn = if (1.0 - x * x).abs() < 1e-30 {
+                0.5 * (nm1) as f64 * (nm1 as f64 + 1.0)
+            } else {
+                (nm1 as f64) / (1.0 - x * x) * (pn1 - x * pn)
+            };
+            // Newton: we want roots of P'_{n-1}, so we need the derivative of P'_{n-1}
+            // d/dx[P'_{n-1}(x)] = P''_{n-1}(x)
+            // Using recurrence: P''_n(x) = n/(1-x²) * (x*P'_n(x) - P'_{n-1}(x)) ... hmm
+            // Better: use the fact that (1-x²)P''_n - 2xP'_n + n(n+1)P_n = 0
+            // So P''_n = (2xP'_n - n(n+1)P_n) / (1-x²)
+            let nm1_f = nm1 as f64;
+            let ddpn = if (1.0 - x * x).abs() < 1e-30 {
+                // At endpoints, limit is complex; skip (we don't iterate there)
+                0.0
+            } else {
+                (2.0 * x * dpn - nm1_f * (nm1_f + 1.0) * pn) / (1.0 - x * x)
+            };
+            if ddpn.abs() < 1e-30 {
+                continue;
+            }
+            let dx = -dpn / ddpn;
+            pts[i + 1] += dx;
+            if dx.abs() > tol {
+                converged = false;
+            }
+        }
+        if converged {
+            break;
+        }
+    }
+
+    // Weights for Lobatto: w_i = 2 / (n*(n-1) * [P_{n-1}(x_i)]²)
+    for i in 0..n {
+        let x = pts[i];
+        let pn = legendre_poly(nm1, x).0;
+        wts[i] = 2.0 / (n_f * (n_f - 1.0) * pn * pn);
+    }
+
+    // Sort by point location
+    let mut pairs: Vec<(f64, f64)> = pts.into_iter().zip(wts.into_iter()).collect();
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (pts_sorted, wts_sorted): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
+
+    (pts_sorted, wts_sorted)
+}
+
+/// Gauss-Lobatto rule on `[0, 1]` with arbitrary `n` points (n >= 2).
+///
+/// Weights sum to 1. Points include the endpoints 0 and 1.
+pub fn gauss_lobatto_01_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
+    let (xs, ws) = gauss_lobatto_arbitrary(n);
+    let pts = xs.iter().map(|x| 0.5 * (x + 1.0)).collect();
+    let wts = ws.iter().map(|w| 0.5 * w).collect();
+    (pts, wts)
+}
+
+/// Quadrature rule on the reference segment `[0,1]` for arbitrary order.
+///
+/// Uses `n` Gauss-Legendre points; exact for polynomials up to degree `2n-1`.
+/// Weights sum to 1 (length of the reference segment).
+pub fn seg_rule_arbitrary(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 2) / 2).max(1);
+    let (pts, wts) = gauss_legendre_01_arbitrary(n);
+    QuadratureRule {
+        points:  pts.into_iter().map(|x| vec![x]).collect(),
+        weights: wts,
+    }
+}
+
+/// Gauss-Lobatto quadrature rule on the reference segment `[0, 1]` for arbitrary order.
+pub fn seg_lobatto_rule_arbitrary(order: u8) -> QuadratureRule {
+    // n points integrates degree 2n-3 exactly; need 2n-3 >= order => n >= (order+3)/2
+    let n = ((order as usize + 4) / 2).max(2);
+    let (pts, wts) = gauss_lobatto_01_arbitrary(n);
+    QuadratureRule {
+        points: pts.into_iter().map(|x| vec![x]).collect(),
+        weights: wts,
+    }
+}
+
+/// Tensor-product Gauss-Legendre rule on the reference quad `[-1,1]²` for arbitrary order.
+///
+/// Uses `n×n` Gauss points; exact for polynomials of degree ≤ `2n-1` in each variable.
+/// Weights sum to 4 (area of reference quad).
+pub fn quad_rule_arbitrary(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 2) / 2).max(1);
+    let (xs, ws) = gauss_legendre_arbitrary(n);
+    let mut pts = Vec::with_capacity(n * n);
+    let mut wts = Vec::with_capacity(n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            pts.push(vec![*xi, *xj]);
+            wts.push(wi * wj);
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
+/// Tensor-product Gauss-Legendre rule on the reference hex `[-1,1]³` for arbitrary order.
+///
+/// Uses `n×n×n` Gauss points; exact for polynomials of degree ≤ `2n-1` in each variable.
+/// Weights sum to 8 (volume of reference hex).
+pub fn hex_rule_arbitrary(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 2) / 2).max(1);
+    let (xs, ws) = gauss_legendre_arbitrary(n);
+    let mut pts = Vec::with_capacity(n * n * n);
+    let mut wts = Vec::with_capacity(n * n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            for (xk, wk) in xs.iter().zip(ws.iter()) {
+                pts.push(vec![*xi, *xj, *xk]);
+                wts.push(wi * wj * wk);
+            }
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
+/// Tensor-product Gauss-Lobatto rule on the reference quad `[-1,1]²` for arbitrary order.
+pub fn quad_lobatto_rule_arbitrary(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 4) / 2).max(2);
+    let (xs, ws) = gauss_lobatto_arbitrary(n);
+    let mut pts = Vec::with_capacity(n * n);
+    let mut wts = Vec::with_capacity(n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            pts.push(vec![*xi, *xj]);
+            wts.push(wi * wj);
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
+/// Tensor-product Gauss-Lobatto rule on the reference hex `[-1,1]³` for arbitrary order.
+pub fn hex_lobatto_rule_arbitrary(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 4) / 2).max(2);
+    let (xs, ws) = gauss_lobatto_arbitrary(n);
+    let mut pts = Vec::with_capacity(n * n * n);
+    let mut wts = Vec::with_capacity(n * n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            for (xk, wk) in xs.iter().zip(ws.iter()) {
+                pts.push(vec![*xi, *xj, *xk]);
+                wts.push(wi * wj * wk);
+            }
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
 // ─── Segment [0,1] ────────────────────────────────────────────────────────────
 
 /// Quadrature rule on the reference segment `[0,1]`.
@@ -202,46 +500,13 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
             ],
             weights: vec![w1, w1, w1, w2, w2, w2, w3],
         }
+    } else if order <= 7 {
+        // Use the named Witherden/Dunavant rules for degree 6-7
+        TriQuadRule::for_degree(order).rule()
     } else {
-        // 12-point Dunavant rule (exact for degree 6)
-        // Weights sum to 0.5 (area of reference triangle).
-        // Source: Dunavant (1985), rule for p=6.
-        let a1 = 0.063_089_014_491_502_23_f64;
-        let b1 = 1.0 - 2.0 * a1;
-        let w1 = 0.025_422_453_185_103_41_f64;
-
-        let a2 = 0.249_286_745_170_910_43_f64;
-        let b2 = 1.0 - 2.0 * a2;
-        let w2 = 0.058_393_137_861_187_56_f64;
-
-        // 6 asymmetric points: permutations of (r3, s3, t3) in barycentric
-        let r3 = 0.636_502_499_121_399_6_f64;
-        let s3 = 0.310_352_451_033_785_8_f64;
-        let t3 = 1.0 - r3 - s3;
-        let w3 = 0.041_425_537_809_186_785_f64;
-
-        // Barycentric to (xi1,xi2): lam1=1-xi1-xi2, lam2=xi1, lam3=xi2
-        // Permutations of (r,s,t): all 6 orderings
-        QuadratureRule {
-            points: vec![
-                // 3 symmetric points of type (a1, a1) and (b1, a1) and (a1, b1)
-                vec![a1, a1],
-                vec![b1, a1],
-                vec![a1, b1],
-                // 3 symmetric points of type (a2, a2) and (b2, a2) and (a2, b2)
-                vec![a2, a2],
-                vec![b2, a2],
-                vec![a2, b2],
-                // 6 asymmetric points (all permutations of (r3, s3, t3))
-                vec![s3, t3],
-                vec![r3, t3],
-                vec![t3, r3],
-                vec![s3, r3],
-                vec![r3, s3],
-                vec![t3, s3],
-            ],
-            weights: vec![w1, w1, w1, w2, w2, w2, w3, w3, w3, w3, w3, w3],
-        }
+        // Use generalized Grundmann-Moller for higher orders
+        let s = ((order as u32) + 1) / 2;
+        grundmann_moller_simplex(2, s)
     }
 }
 
@@ -279,9 +544,13 @@ pub fn tet_rule(order: u8) -> QuadratureRule {
     } else if order <= 5 {
         // 10-point Grundmann-Moller rule, s=2 (exact degree 5)
         grundmann_moller_tet(2)
-    } else {
+    } else if order <= 7 {
         // 20-point Grundmann-Moller rule, s=3 (exact degree 7)
         grundmann_moller_tet(3)
+    } else {
+        // Use generalized Grundmann-Moller for higher orders
+        let s = ((order as u32) + 1) / 2;
+        grundmann_moller_simplex(3, s)
     }
 }
 
@@ -403,8 +672,8 @@ pub fn quad_rule(order: u8) -> QuadratureRule {
 /// Uses `n×n×n` Gauss points; exact for polynomials of degree ≤ `2n-1` in each variable.
 /// Weights sum to 8 (volume of reference hex).
 pub fn hex_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 2) / 2).max(1).min(4);
-    let (xs, ws) = gauss_legendre_1d(n);
+    let n = ((order as usize + 2) / 2).max(1);
+    let (xs, ws) = if n <= 4 { gauss_legendre_1d(n) } else { gauss_legendre_arbitrary(n) };
     let mut pts = Vec::with_capacity(n * n * n);
     let mut wts = Vec::with_capacity(n * n * n);
     for (xi, wi) in xs.iter().zip(ws.iter()) {
@@ -416,6 +685,140 @@ pub fn hex_rule(order: u8) -> QuadratureRule {
         }
     }
     QuadratureRule { points: pts, weights: wts }
+}
+
+// ─── Arbitrary-order triangle quadrature ─────────────────────────────────────
+
+/// Quadrature rule on the reference triangle `(0,0),(1,0),(0,1)` for arbitrary order.
+///
+/// Uses Grundmann-Moller rules which work for any polynomial degree.
+/// Weights sum to 0.5 (area of reference triangle).
+pub fn tri_rule_arbitrary(order: u8) -> QuadratureRule {
+    if order <= 1 {
+        // 1-point centroid rule (exact for degree 1)
+        QuadratureRule {
+            points:  vec![vec![1.0 / 3.0, 1.0 / 3.0]],
+            weights: vec![0.5],
+        }
+    } else if order <= 3 {
+        // 3-point rule (exact for degree 2)
+        let a = 1.0 / 6.0;
+        let b = 2.0 / 3.0;
+        QuadratureRule {
+            points:  vec![vec![a, a], vec![b, a], vec![a, b]],
+            weights: vec![a, a, a],
+        }
+    } else if order <= 5 {
+        // 7-point Dunavant rule (exact for degree 5)
+        tri_rule(5)
+    } else {
+        // Use generalized Grundmann-Moller for 2D simplex
+        // s = (order - 1) / 2 gives exact degree 2s+1
+        let s = ((order as u32).saturating_sub(1)) / 2;
+        grundmann_moller_simplex(2, s)
+    }
+}
+
+/// Generalized Grundmann-Moller quadrature rule for the unit simplex in `d` dimensions.
+///
+/// The unit simplex in `d` dimensions is defined by:
+/// - 1D: [0,1]
+/// - 2D: {(x,y) : x≥0, y≥0, x+y≤1} (reference triangle)
+/// - 3D: {(x,y,z) : x≥0, y≥0, z≥0, x+y+z≤1} (reference tetrahedron)
+///
+/// Index `s` gives a rule exact for degree `2s+1`.
+/// Weights sum to 1/d! (volume of the unit simplex).
+fn grundmann_moller_simplex(d: u32, s: u32) -> QuadratureRule {
+    // Generate point sets for each level i = 0..=s.
+    let levels: Vec<Vec<Vec<f64>>> = (0..=s).map(|i| {
+        let si = s - i;
+        let m = (2 * si + d + 1) as f64;
+        simplex_points(si, d + 1).iter().map(|coords| {
+            let bary: Vec<f64> = coords.iter().map(|&j| (2.0 * j as f64 + 1.0) / m).collect();
+            // Convert from barycentric to Cartesian: drop first barycentric coordinate
+            bary[1..].to_vec()
+        }).collect()
+    }).collect();
+
+    // For each level i, all points share the same weight w_i.
+    // Compute sum of x₁^{2k} over all points at level i.
+    let n = (s + 1) as usize;
+    let level_sums: Vec<Vec<f64>> = (0..n).map(|i| {
+        (0..n).map(|k| {
+            levels[i].iter().map(|p| p[0].powi((2 * k) as i32)).sum::<f64>()
+        }).collect()
+    }).collect();
+
+    // Exact integrals of x^{2k} over the unit simplex in d dimensions:
+    // (2k)! / (2k+d)!
+    let exact: Vec<f64> = (0..n).map(|k| {
+        let k2 = (2 * k) as u32;
+        fact_f64(k2) / fact_f64(k2 + d)
+    }).collect();
+
+    // Solve the (s+1)×(s+1) linear system for per-level weights.
+    let mut mat: Vec<Vec<f64>> = (0..n).map(|k| {
+        let mut row: Vec<f64> = (0..n).map(|i| level_sums[i][k]).collect();
+        row.push(exact[k]);
+        row
+    }).collect();
+    for col in 0..n {
+        let piv = (col..n).max_by(|&a, &b|
+            mat[a][col].abs().partial_cmp(&mat[b][col].abs()).unwrap()
+        ).unwrap();
+        mat.swap(col, piv);
+        let scale = mat[col][col];
+        for j in col..=n { mat[col][j] /= scale; }
+        for row in 0..n {
+            if row != col {
+                let f = mat[row][col];
+                for j in col..=n { mat[row][j] -= f * mat[col][j]; }
+            }
+        }
+    }
+    let ws_per_level: Vec<f64> = (0..n).map(|i| mat[i][n]).collect();
+
+    // Assemble the rule.
+    let mut pts: Vec<Vec<f64>> = Vec::new();
+    let mut wts: Vec<f64> = Vec::new();
+    for (i, level) in levels.iter().enumerate() {
+        for pt in level {
+            pts.push(pt.clone());
+            wts.push(ws_per_level[i]);
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
+/// Quadrature rule on the reference tetrahedron `(0,0,0),(1,0,0),(0,1,0),(0,0,1)` for arbitrary order.
+///
+/// Uses Grundmann-Moller rules which work for any polynomial degree.
+/// Weights sum to 1/6 (volume of reference tet).
+pub fn tet_rule_arbitrary(order: u8) -> QuadratureRule {
+    if order <= 1 {
+        // 1-point centroid (exact degree 1)
+        QuadratureRule {
+            points:  vec![vec![0.25, 0.25, 0.25]],
+            weights: vec![1.0 / 6.0],
+        }
+    } else if order <= 2 {
+        // 4-point rule (exact for degree 2)
+        let a = 0.138_196_601_125_010_5;
+        let b = 0.585_410_196_624_968_5;
+        QuadratureRule {
+            points: vec![
+                vec![a, a, a],
+                vec![b, a, a],
+                vec![a, b, a],
+                vec![a, a, b],
+            ],
+            weights: vec![1.0 / 24.0; 4],
+        }
+    } else {
+        // Use generalized Grundmann-Moller for 3D simplex
+        let s = ((order as u32).saturating_sub(1)) / 2;
+        grundmann_moller_simplex(3, s)
+    }
 }
 
 // ─── Named triangle quadrature rules ─────────────────────────────────────────
