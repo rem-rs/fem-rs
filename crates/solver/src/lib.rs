@@ -1451,6 +1451,7 @@ pub mod multiphysics_templates;
 pub mod ode;
 pub mod butcher;
 pub mod adaptive;
+pub mod adjoint;
 pub mod bdf;
 pub mod dae;
 pub mod events;
@@ -1541,6 +1542,9 @@ pub use butcher::{
 pub use adaptive::{
     AdaptiveConfig, IntegratorStats, StepperState,
     integrate_adaptive, explicit_adaptive_step,
+};
+pub use adjoint::{
+    AdjointProblem, adjoint_sensitivity,
 };
 pub use bdf::{
     NordsieckState, BdfIntegrator, BdfConfig, BdfStats,
