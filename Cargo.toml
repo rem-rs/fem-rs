@@ -16,6 +16,7 @@ members = [
     "crates/wasm",
     "crates/python",
     "crates/benches",
+    "crates/rmetis",
     "examples",
 ]
 

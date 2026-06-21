@@ -1,0 +1,9 @@
+[package]
+name        = "fem-rmetis"
+version     = "0.1.0"
+edition     = "2021"
+description = "Pure-Rust mesh graph partitioning for FEM (dual-graph builder + BFS k-way)."
+
+[dependencies]
+fem-core = { path = "../core" }
+fem-mesh = { path = "../mesh" }

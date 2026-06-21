@@ -1,9 +1,7 @@
-//! METIS-based mesh partitioning.
+//! Mesh partitioning using [`fem_rmetis`].
 //!
-//! [`MetisPartitioner`] builds a **dual graph** from the element connectivity
-//! (elements are vertices, shared faces/edges are graph edges), then partitions
-//! the mesh.  Currently uses a greedy graph-coloring fallback (no external
-//! METIS dependency); the API is compatible with a future rmetis backend.
+//! Wraps the dual-graph builder and partitioner from `fem-rmetis` into the
+//! parallel mesh pipeline ([`ParallelMesh`] + [`extract_submesh_from_partition`]).
 //!
 //! # Usage
 //! ```rust,ignore
@@ -13,28 +11,16 @@
 //! let mesh = SimplexMesh::<2>::unit_square_tri(16);
 //! let opt  = MetisOptions::default();
 //! let parts = MetisPartitioner::partition_mesh(&mesh, 4, &opt).unwrap();
-//! // parts[e] = rank that owns element e (0..nparts)
 //! ```
-//!
-//! The `partition_simplex_metis` convenience function wraps this into a
-//! [`ParallelMesh`] for use in the parallel pipeline.
-//!
-//! The dual graph treats two volume elements as neighbours if they share a **full**
-//! facet: Tri3 / Quad4 in 2D; Tri3 / Quad4 (and pyramid/prism/hex facets) in 3D.
-//! Supported vertex counts per element: **3** (2D tri), **4** (2D quad or 3D tet),
-//! **5** (pyramid), **6** (prism), **8** (hex). Other types yield an **empty**
-//! local facet list (no dual edges — partition degrades to per-component BFS).
 
-use std::collections::HashMap;
-
-use fem_core::{ElemId, NodeId, Rank};
+use fem_core::Rank;
 use fem_mesh::SimplexMesh;
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
 use crate::mesh_serde;
 use crate::par_simplex::{extract_submesh_from_partition, STREAM_TAG_BASE};
 
-// ─── Options ──────────────────────────────────────────────────────────────────
+// ─── Options ─────────────────────────────────────────────────────────────────
 
 /// Options for the METIS partitioner.
 #[derive(Debug, Clone, Default)]
@@ -45,10 +31,7 @@ pub struct MetisOptions {
 
 // ─── MetisPartitioner ─────────────────────────────────────────────────────────
 
-/// Mesh partitioner using a greedy graph-bisection heuristic.
-///
-/// This provides balanced partitions without an external METIS dependency.
-/// For production use with large meshes, link against METIS via a feature flag.
+/// Mesh partitioner backed by [`fem_rmetis`].
 pub struct MetisPartitioner;
 
 impl MetisPartitioner {
@@ -62,18 +45,9 @@ impl MetisPartitioner {
         opts:   &MetisOptions,
     ) -> Result<Vec<Rank>, String> {
         assert!(nparts >= 1, "nparts must be ≥ 1");
-        let n_elems = mesh.n_elems();
-        assert!(n_elems > 0, "mesh has no elements");
+        assert!(mesh.n_elems() > 0, "mesh has no elements");
 
-        if nparts == 1 {
-            return Ok(vec![0; n_elems]);
-        }
-
-        // Build dual graph
-        let (xadj, adjncy) = build_dual_graph(mesh);
-
-        // Greedy BFS-based k-way partitioning
-        let partition = bfs_kway_partition(n_elems, &xadj, &adjncy, nparts);
+        let partition = fem_rmetis::partition_mesh(mesh, nparts);
 
         if opts.verbose {
             let mut counts = vec![0usize; nparts];
@@ -85,139 +59,9 @@ impl MetisPartitioner {
     }
 }
 
-// ─── BFS k-way partitioner ────────────────────────────────────────────────────
-
-/// Simple BFS-based k-way partitioner.
-///
-/// Grows k regions simultaneously from seed elements placed uniformly.
-fn bfs_kway_partition(n: usize, xadj: &[i32], adjncy: &[i32], k: usize) -> Vec<Rank> {
-    const UNSET: Rank = -1;
-    let mut part = vec![UNSET; n];
-    let mut queue: std::collections::VecDeque<usize> = Default::default();
-
-    // Place k seeds spaced evenly
-    for p in 0..k {
-        let seed = (p * n) / k;
-        if part[seed] == UNSET {
-            part[seed] = p as Rank;
-            queue.push_back(seed);
-        }
-    }
-
-    // BFS flood-fill
-    while let Some(e) = queue.pop_front() {
-        let owner = part[e];
-        for j in xadj[e] as usize..xadj[e + 1] as usize {
-            let nb = adjncy[j] as usize;
-            if part[nb] == UNSET {
-                part[nb] = owner;
-                queue.push_back(nb);
-            }
-        }
-    }
-
-    // Assign any remaining unvisited elements (disconnected components)
-    for i in 0..n {
-        if part[i] == UNSET {
-            part[i] = (i % k) as Rank;
-        }
-    }
-
-    part
-}
-
-// ─── Dual graph builder ───────────────────────────────────────────────────────
-
-fn build_dual_graph<const D: usize>(mesh: &SimplexMesh<D>) -> (Vec<i32>, Vec<i32>) {
-    let n_elems = mesh.n_elems();
-
-    let mut face_map: HashMap<Vec<NodeId>, Vec<ElemId>> = HashMap::new();
-    for e in 0..n_elems as ElemId {
-        let nodes = mesh.elem_nodes(e);
-        for lf in local_faces_of_elem::<D>(nodes) {
-            let mut key = lf;
-            key.sort_unstable();
-            face_map.entry(key).or_default().push(e);
-        }
-    }
-
-    let mut adj: Vec<Vec<ElemId>> = vec![Vec::new(); n_elems];
-    for (_key, elems) in &face_map {
-        if elems.len() == 2 {
-            adj[elems[0] as usize].push(elems[1]);
-            adj[elems[1] as usize].push(elems[0]);
-        }
-    }
-
-    let mut xadj = vec![0_i32; n_elems + 1];
-    let mut adjncy = Vec::<i32>::new();
-    for (e, nbrs) in adj.iter().enumerate() {
-        xadj[e + 1] = xadj[e] + nbrs.len() as i32;
-        adjncy.extend(nbrs.iter().map(|&n| n as i32));
-    }
-    (xadj, adjncy)
-}
-
-/// Facets (edges in 2D, triangles/quads in 3D) used for the element **dual graph**:
-/// two elements are adjacent iff they share a full facet with identical node set.
-///
-/// Node ordering matches common GMSH / VTK linear elements (wedge = Prism6,
-/// hexahedron = Hex8, pyramid = Pyramid5).
-fn local_faces_of_elem<const D: usize>(nodes: &[NodeId]) -> Vec<Vec<NodeId>> {
-    match (nodes.len(), D) {
-        (3, 2) => vec![
-            vec![nodes[0], nodes[1]],
-            vec![nodes[1], nodes[2]],
-            vec![nodes[0], nodes[2]],
-        ],
-        (4, 2) => vec![
-            vec![nodes[0], nodes[1]],
-            vec![nodes[1], nodes[2]],
-            vec![nodes[2], nodes[3]],
-            vec![nodes[3], nodes[0]],
-        ],
-        (4, 3) => vec![
-            vec![nodes[1], nodes[2], nodes[3]],
-            vec![nodes[0], nodes[2], nodes[3]],
-            vec![nodes[0], nodes[1], nodes[3]],
-            vec![nodes[0], nodes[1], nodes[2]],
-        ],
-        // Pyramid5: quad base + 4 triangles (apex last).
-        (5, 3) => vec![
-            vec![nodes[0], nodes[1], nodes[2], nodes[3]],
-            vec![nodes[0], nodes[1], nodes[4]],
-            vec![nodes[1], nodes[2], nodes[4]],
-            vec![nodes[2], nodes[3], nodes[4]],
-            vec![nodes[3], nodes[0], nodes[4]],
-        ],
-        // Prism6 (wedge): triangles n0–n2 and n3–n5; three quads.
-        (6, 3) => vec![
-            vec![nodes[0], nodes[1], nodes[2]],
-            vec![nodes[3], nodes[4], nodes[5]],
-            vec![nodes[0], nodes[1], nodes[4], nodes[3]],
-            vec![nodes[1], nodes[2], nodes[5], nodes[4]],
-            vec![nodes[2], nodes[0], nodes[3], nodes[5]],
-        ],
-        // Hex8: standard “tensor” corner order (bottom z⁻, top z⁺).
-        (8, 3) => vec![
-            vec![nodes[0], nodes[1], nodes[2], nodes[3]],
-            vec![nodes[4], nodes[5], nodes[6], nodes[7]],
-            vec![nodes[0], nodes[1], nodes[5], nodes[4]],
-            vec![nodes[2], nodes[3], nodes[7], nodes[6]],
-            vec![nodes[0], nodes[3], nodes[7], nodes[4]],
-            vec![nodes[1], nodes[2], nodes[6], nodes[5]],
-        ],
-        _ => vec![],
-    }
-}
-
 // ─── partition_simplex_metis ──────────────────────────────────────────────────
 
 /// Distribute `mesh` across `comm.size()` ranks using k-way partitioning.
-///
-/// **Note**: every rank must hold the full serial mesh.  For a
-/// memory-efficient alternative where only rank 0 holds the mesh, use
-/// [`partition_simplex_metis_streaming`].
 pub fn partition_simplex_metis<const D: usize>(
     mesh: &SimplexMesh<D>,
     comm: &Comm,
@@ -242,21 +86,9 @@ pub fn partition_simplex_metis<const D: usize>(
     ParallelMesh::new(local_mesh, comm.clone(), partition)
 }
 
-// ─── partition_simplex_metis_streaming ────────────────────────────────────────
+// ─── partition_simplex_metis_streaming ─────────────────────────────────────────
 
-/// Streaming METIS partition: only rank 0 holds the full mesh.
-///
-/// Rank 0 runs the METIS graph partitioner, then sends each rank's sub-mesh
-/// via point-to-point messages.  Other ranks receive their sub-mesh without
-/// ever loading the full mesh.
-///
-/// # Arguments
-/// * `mesh` — `Some(&full_mesh)` on rank 0, `None` on other ranks.
-/// * `comm` — communicator spanning all ranks.
-/// * `opts` — METIS options (verbose flag, etc.).
-///
-/// # Errors
-/// Returns `Err` if partitioning or mesh decode fails.
+/// Streaming partition: only rank 0 holds the full mesh.
 pub fn partition_simplex_metis_streaming<const D: usize>(
     mesh: Option<&SimplexMesh<D>>,
     comm: &Comm,
@@ -272,11 +104,8 @@ pub fn partition_simplex_metis_streaming<const D: usize>(
 
     if comm.is_root() {
         let m = mesh.ok_or("rank 0 must provide the mesh")?;
+        let elem_part = MetisPartitioner::partition_mesh(m, size, opts)?;
 
-        let elem_part = MetisPartitioner::partition_mesh(m, size, opts)
-            .map_err(|e| e.to_string())?;
-
-        // Send sub-meshes to ranks 1..N-1.
         for target in 1..size as Rank {
             let (sub_mesh, sub_part) = extract_submesh_from_partition(
                 m, target, &elem_part,
@@ -285,10 +114,7 @@ pub fn partition_simplex_metis_streaming<const D: usize>(
             comm.send_bytes(target, STREAM_TAG_BASE + target, &encoded);
         }
 
-        // Extract rank 0's own sub-mesh.
-        let (local_mesh, partition) = extract_submesh_from_partition(
-            m, 0, &elem_part,
-        );
+        let (local_mesh, partition) = extract_submesh_from_partition(m, 0, &elem_part);
         Ok(ParallelMesh::new(local_mesh, comm.clone(), partition))
     } else {
         let local_rank = comm.rank();
@@ -298,50 +124,20 @@ pub fn partition_simplex_metis_streaming<const D: usize>(
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use fem_mesh::{ElementType, SimplexMesh};
 
-    /// Two prisms sharing one triangular facet `[3,4,5]` (9 nodes, 2 elements).
-    fn two_prisms_sharing_triangle() -> SimplexMesh<3> {
-        let coords = vec![0.0_f64; 9 * 3];
-        let conn = vec![
-            0u32, 1, 2, 3, 4, 5,
-            3, 4, 5, 6, 7, 8,
-        ];
-        SimplexMesh::uniform(
-            coords,
-            conn,
-            vec![1, 1],
-            ElementType::Prism6,
-            vec![],
-            vec![],
-            ElementType::Tri3,
-        )
-    }
-
-    #[test]
-    fn dual_graph_prism_pair_sharing_triangle_has_one_edge() {
-        let mesh = two_prisms_sharing_triangle();
-        let (_xadj, adjncy) = build_dual_graph(&mesh);
-        // Undirected edge stored twice in CSR adjacency.
-        assert_eq!(adjncy.len(), 2, "expected exactly one dual edge between prisms");
-    }
-
     #[test]
     fn partition_covers_all_elements() {
         let mesh = SimplexMesh::<2>::unit_square_tri(8);
         let n_elems = mesh.n_elems();
-        let nparts = 4;
-        let parts = MetisPartitioner::partition_mesh(&mesh, nparts, &MetisOptions::default())
-            .unwrap();
+        let parts = MetisPartitioner::partition_mesh(&mesh, 4, &MetisOptions::default()).unwrap();
         assert_eq!(parts.len(), n_elems);
-        for &p in &parts {
-            assert!((p as usize) < nparts, "partition out of range: {p}");
-        }
+        assert!(parts.iter().all(|&p| (p as usize) < 4));
     }
 
     #[test]
@@ -349,24 +145,20 @@ mod tests {
         let mesh = SimplexMesh::<2>::unit_square_tri(8);
         let n_elems = mesh.n_elems();
         let nparts = 4;
-        let parts = MetisPartitioner::partition_mesh(&mesh, nparts, &MetisOptions::default())
-            .unwrap();
+        let parts = MetisPartitioner::partition_mesh(&mesh, nparts, &MetisOptions::default()).unwrap();
         let mut counts = vec![0usize; nparts];
         for &p in &parts { counts[p as usize] += 1; }
         let ideal = n_elems as f64 / nparts as f64;
-        for (i, &c) in counts.iter().enumerate() {
-            let imbalance = (c as f64 - ideal).abs() / ideal;
-            assert!(imbalance < 0.6, "part {i}: count={c}, ideal={ideal:.1}, imbalance={imbalance:.2}");
+        for &c in &counts {
+            assert!((c as f64 - ideal).abs() / ideal < 0.6);
         }
     }
 
     #[test]
     fn partition_single_part_is_identity() {
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let n = mesh.n_elems();
         let parts = MetisPartitioner::partition_mesh(&mesh, 1, &MetisOptions::default()).unwrap();
         assert!(parts.iter().all(|&p| p == 0));
-        assert_eq!(parts.len(), n);
     }
 
     #[test]
