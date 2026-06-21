@@ -439,7 +439,7 @@ impl DgAdvectionRhs {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+pub(crate) fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriP2),
@@ -461,7 +461,7 @@ fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     }
 }
 
-fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
+pub(crate) fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
     let x0 = mesh.node_coords(nodes[0]);
     let mut j = DMatrix::<f64>::zeros(dim, dim);
     for col in 0..dim {
@@ -482,7 +482,7 @@ fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f6
     xi
 }
 
-fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
+pub(crate) fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
     for i in 0..n {
         for j in 0..dim {
             let mut s = 0.0;

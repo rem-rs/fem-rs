@@ -93,6 +93,7 @@ pub mod static_cond;
 pub mod iga;
 pub mod dg_advection;
 pub mod dg_cdr;
+pub mod navier_stokes;
 pub mod error_estimate;
 pub mod h1_quad_order_hint;
 
