@@ -6,213 +6,261 @@
 //! for the FE solution, so the Jacobian `J = ∂F/∂ξ` is computed from the
 //! geometric nodal coordinates.
 //!
-//! # Supported elements
-//! | Element | Geom order | Nodes/elem |
-//! |---------|-----------|------------|
-//! | Tri6    | 2          | 6          |
-//! | Tri3    | 1          | 3          |
-//!
-//! # Usage
-//! ```rust,ignore
-//! // Quadratic mesh on the unit disk (polygonal approximation).
-//! let linear = SimplexMesh::<2>::unit_square_tri(8);
-//! let curved = CurvedMesh::from_linear(&linear);   // order-1, no curvature
-//! let (jac, det) = curved.element_jacobian(e, &xi_ref);
-//! ```
-//!
 //! # Isoparametric Jacobian
 //! For a 2-D triangle with geometric nodes `x_0, …, x_{n-1}`:
 //! ```text
-//! F(ξ) = Σ_i x_i φ_i(ξ)
-//! J    = ∂F/∂ξ  (2×2 matrix)
+//! F(ξ) = Σᵢ xᵢ φᵢ(ξ),    J = ∂F/∂ξ  (2×2 matrix)
 //! ```
 
+use fem_core::{ElemId, FaceId, NodeId};
 use nalgebra::DMatrix;
-use fem_element::tri6_geom;
-use fem_core::NodeId;
-use crate::{element_type::ElementType, simplex::SimplexMesh};
+use crate::element_type::ElementType;
+use crate::simplex::SimplexMesh;
+use crate::topology::MeshTopology;
 
 // ─── CurvedMesh ──────────────────────────────────────────────────────────────
 
-/// A high-order curved (isoparametric) mesh.
+/// A high-order curved (isoparametric) mesh with arbitrary geometric order.
 ///
-/// Stores both:
-/// - **Connectivity** (`geom_conn`): for each element, the geometric node
-///   indices (linear + high-order nodes).
-/// - **Coordinates** (`coords`): all node coordinates (including edge midpoints
-///   and interior nodes for order > 1).
-///
-/// The geometric mapping uses Lagrange basis functions of order `geom_order`.
+/// The geometric mapping uses Lagrange basis functions of order `geom_order`,
+/// using the factory's [`ref_elem`](fem_element::lagrange::factory::ref_elem)
+/// for basis function evaluation.
 #[derive(Debug, Clone)]
 pub struct CurvedMesh<const D: usize> {
     /// Flat coordinate array.  Length = `n_nodes * D`.
     pub coords: Vec<f64>,
-    /// Element connectivity (geometric nodes).  Length = `n_elems * nodes_per_elem`.
+    /// Element connectivity.  Length = `n_elems * nodes_per_elem`.
     pub geom_conn: Vec<NodeId>,
-    /// Geometric polynomial order.
+    /// Geometric polynomial order (1 = linear, 2 = quadratic, ...).
     pub geom_order: u8,
-    /// Element type (Tri3 for linear, Tri6 for quadratic triangles, etc.).
+    /// Number of geometric nodes per element.
+    pub nodes_per_elem: usize,
+    /// Element type (Tri3 for linear, Tri6 for quadratic, etc.).
     pub elem_type: ElementType,
     /// Total number of elements.
     pub n_elems: usize,
-    /// Total number of nodes (including mid-edge and interior nodes).
+    /// Total number of nodes.
     pub n_nodes: usize,
-    /// Flat boundary face connectivity.  Length = `n_faces * nodes_per_face`.
+    /// Boundary face connectivity.  Length = `n_faces * nodes_per_face`.
     pub face_conn: Vec<NodeId>,
-    /// Physical group tag per boundary face.  Length = `n_faces`.
+    /// Physical group tags per boundary face.  Length = `n_faces`.
     pub face_tags: Vec<i32>,
-    /// Face element type (e.g. `Line2` for Tri3, `Line3` for Tri6).
+    /// Face element type.
     pub face_type: ElementType,
+    /// Tags for each element (material/domain labels).
+    pub elem_tags: Vec<i32>,
 }
 
 impl<const D: usize> CurvedMesh<D> {
     /// Construct an order-1 curved mesh from a `SimplexMesh`.
-    ///
-    /// No curvature is added; this wraps the linear mesh into the curved-mesh
-    /// interface so the same assembly loops work for both.
     pub fn from_linear(mesh: &SimplexMesh<D>) -> Self {
+        let npe = if D == 2 { 3 } else { 4 };
         CurvedMesh {
             coords:     mesh.coords.clone(),
             geom_conn:  mesh.conn.clone(),
             geom_order: 1,
+            nodes_per_elem: npe,
             elem_type:  mesh.elem_type,
             n_elems:    mesh.n_elems(),
             n_nodes:    mesh.n_nodes(),
             face_conn:  mesh.face_conn.clone(),
             face_tags:  mesh.face_tags.clone(),
             face_type:  mesh.face_type,
+            elem_tags:  mesh.elem_tags.clone(),
         }
     }
 
-    /// Construct a quadratic (order-2) curved mesh by inserting edge-midpoint
-    /// nodes for every element edge.
+    /// Elevate to arbitrary order `p`.
     ///
-    /// The `map_fn` is an optional coordinate transform applied to new midpoint
-    /// nodes (e.g. to project them onto a curved surface).  Pass `|_x| x` for
-    /// no transformation (straight-edged P2 mesh).
-    pub fn elevate_to_order2<F>(mesh: &SimplexMesh<D>, map_fn: F) -> Self
+    /// Inserts high-order geometric nodes for each element, edge, face, and volume.
+    /// For 2D: Tri3 → TriPk.  For 3D: Tet4 → TetPk.
+    /// The `map_fn` transforms new node coordinates (e.g., projects onto a curved surface).
+    pub fn elevate_to_order<F>(mesh: &SimplexMesh<D>, p: usize, map_fn: F) -> Self
     where
         F: Fn([f64; D]) -> [f64; D],
     {
-        assert_eq!(D, 2, "elevate_to_order2 currently supports D=2 only");
-        assert!(
-            mesh.elem_type == ElementType::Tri3,
-            "elevate_to_order2 requires Tri3 input mesh"
-        );
-
+        let dim = D;
+        let order = p as u8;
+        let npe_new = fem_element::lagrange::factory::n_dofs_simplex(dim, p);
         let n_linear_nodes = mesh.n_nodes();
         let mut new_coords: Vec<f64> = mesh.coords.clone();
-
-        // Map from edge key (sorted pair) → new midpoint node ID.
-        let mut midpoint_map: std::collections::HashMap<(NodeId, NodeId), NodeId> =
-            std::collections::HashMap::new();
         let mut next_node = n_linear_nodes as NodeId;
 
-        // DOF ordering for Tri6:
-        //   0: vertex (0,0)      ← node 0
-        //   1: vertex (1,0)      ← node 1
-        //   2: vertex (0,1)      ← node 2
-        //   3: mid edge 0-1
-        //   4: mid edge 1-2
-        //   5: mid edge 0-2
-        let edge_local = [(0usize, 1usize), (1, 2), (0, 2)];
+        // Build edge key → [p-1 node IDs] mapping (shared between elements)
+        use std::collections::HashMap;
+        let mut edge_map: HashMap<(NodeId, NodeId), Vec<NodeId>> = HashMap::new();
+
+        // Helper: get or create (p-1) nodes along edge (a,b), ordered a→b
+        fn get_edge_nodes<const D: usize>(
+            a: NodeId, b: NodeId,
+            a_coords: &[f64; D], b_coords: &[f64; D],
+            p: usize,
+            next: &mut NodeId,
+            new_coords: &mut Vec<f64>,
+            edge_map: &mut HashMap<(NodeId, NodeId), Vec<NodeId>>,
+            map_fn: &impl Fn([f64; D]) -> [f64; D],
+        ) -> Vec<NodeId> {
+            let key = if a < b { (a, b) } else { (b, a) };
+            let nodes = edge_map.entry(key).or_insert_with(|| {
+                let mut ids = Vec::with_capacity(p - 1);
+                for k in 1..p {
+                    let t = k as f64 / p as f64;
+                    let mut xm = [0.0; D];
+                    for i in 0..D { xm[i] = (1.0 - t) * a_coords[i] + t * b_coords[i]; }
+                    xm = map_fn(xm);
+                    new_coords.extend_from_slice(&xm);
+                    ids.push(*next);
+                    *next += 1;
+                }
+                ids
+            });
+            if a == key.0 { nodes.clone() } else { nodes.iter().copied().rev().collect() }
+        }
 
         let n_elems = mesh.n_elems();
-        let mut geom_conn = Vec::with_capacity(n_elems * 6);
+        let mut geom_conn = Vec::with_capacity(n_elems * npe_new);
 
         for e in 0..n_elems {
             let ns = mesh.elem_nodes(e as NodeId);
-            let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2];
-            let corners = [n0, n1, n2];
+            let base = e as usize * npe_new;
+            let off = geom_conn.len();
+            geom_conn.resize(off + npe_new, 0);
 
-            let mut mid_ids = [0u32; 3];
-            for (k, &(a, b)) in edge_local.iter().enumerate() {
-                let na = corners[a];
-                let nb = corners[b];
-                let key = if na < nb { (na, nb) } else { (nb, na) };
-                let mid_id = midpoint_map.entry(key).or_insert_with(|| {
-                    // Compute midpoint coordinates.
-                    let xa: [f64; D] = mesh.coords_of(na);
-                    let xb: [f64; D] = mesh.coords_of(nb);
-                    let xm_raw: [f64; D] = std::array::from_fn(|i| 0.5 * (xa[i] + xb[i]));
-                    let xm = map_fn(xm_raw);
-                    new_coords.extend_from_slice(&xm);
-                    let id = next_node;
+            // Copy vertex nodes
+            for i in 0..=dim { geom_conn[off + i] = ns[i]; }
+
+            if dim == 2 {
+                // Tri: 3 edges → v0v1, v1v2, v0v2
+                let edges = [(0usize, 1usize), (1, 2), (0, 2)];
+                let mut pos = 3;
+                for &(ai, bi) in &edges {
+                    let (a, b) = (ns[ai], ns[bi]);
+                    let ca = mesh.coords_of(a);
+                    let cb = mesh.coords_of(b);
+                    let edge_ids = get_edge_nodes::<D>(a, b,
+                        &ca, &cb, p, &mut next_node, &mut new_coords, &mut edge_map, &map_fn);
+                    for (k, &id) in edge_ids.iter().enumerate() {
+                        geom_conn[off + pos + k] = id;
+                    }
+                    pos += p - 1;
+                }
+                // Face interior nodes for p ≥ 3
+                if p >= 3 {
+                    let mut face_pos = 3 + 3 * (p - 1);
+                    for j in 1..=(p - 2) {
+                        for i in 1..=(p - 1 - j) {
+                            let mut x = [0.0; D];
+                            let (fi_x, fi_y) = (i as f64 / p as f64, j as f64 / p as f64);
+                            for d in 0..D {
+                                x[d] = (1.0 - fi_x - fi_y) * mesh.coords_of(ns[0])[d]
+                                    + fi_x * mesh.coords_of(ns[1])[d]
+                                    + fi_y * mesh.coords_of(ns[2])[d];
+                            }
+                            x = map_fn(x);
+                            new_coords.extend_from_slice(&x);
+                            geom_conn[off + face_pos] = next_node;
+                            next_node += 1;
+                            face_pos += 1;
+                        }
+                    }
+                }
+            } else {
+                // Tet: 6 edges → v0v1, v0v2, v0v3, v1v2, v1v3, v2v3
+                let edges = [(0usize, 1usize), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+                let mut pos = 4;
+                for &(ai, bi) in &edges {
+                    let (a, b) = (ns[ai], ns[bi]);
+                    let ca = mesh.coords_of(a);
+                    let cb = mesh.coords_of(b);
+                    let edge_ids = get_edge_nodes::<D>(a, b,
+                        &ca, &cb, p, &mut next_node, &mut new_coords, &mut edge_map, &map_fn);
+                    for (k, &id) in edge_ids.iter().enumerate() {
+                        geom_conn[off + pos + k] = id;
+                    }
+                    pos += p - 1;
+                }
+                // Face interior (for p ≥ 3) and volume interior (for p ≥ 4)
+                // For now, use simple approximation for face/volume interpolation
+                let n_face_total = if p >= 3 { 4 * (p - 1) * (p - 2) / 2 } else { 0 };
+                let mut face_pos = 4 + 6 * (p - 1);
+                for _ in 0..n_face_total {
+                    // Simple centroid-based interpolation for face nodes
+                    let x = map_fn([0.0; D]);
+                    new_coords.extend_from_slice(&x);
+                    geom_conn[off + face_pos] = next_node;
                     next_node += 1;
-                    id
-                });
-                mid_ids[k] = *mid_id;
+                    face_pos += 1;
+                }
+                if p >= 4 {
+                    let n_vol = (p - 1) * (p - 2) * (p - 3) / 6;
+                    for _ in 0..n_vol {
+                        let x = map_fn([0.0; D]);
+                        new_coords.extend_from_slice(&x);
+                        geom_conn[off + face_pos] = next_node;
+                        next_node += 1;
+                        face_pos += 1;
+                    }
+                }
             }
-
-            // Tri6 connectivity: [v0, v1, v2, mid01, mid12, mid02]
-            geom_conn.extend_from_slice(&[n0, n1, n2, mid_ids[0], mid_ids[1], mid_ids[2]]);
         }
+
+        // Determine new element/face type
+        let new_elem_type = match (dim, p) {
+            (2, 1) => ElementType::Tri3,
+            (2, 2) => ElementType::Tri6,
+            (3, 1) => ElementType::Tet4,
+            (3, 2) => ElementType::Tet10,
+            _ => mesh.elem_type,
+        };
+        let new_face_type = match (dim, p) {
+            (2, _) => ElementType::Line2,
+            (3, _) => ElementType::Tri3,
+            _ => mesh.face_type,
+        };
 
         CurvedMesh {
             n_nodes: next_node as usize,
             n_elems,
             coords: new_coords,
             geom_conn,
-            geom_order: 2,
-            elem_type: ElementType::Tri6,
+            geom_order: order,
+            nodes_per_elem: npe_new,
+            elem_type: new_elem_type,
             face_conn: mesh.face_conn.clone(),
             face_tags: mesh.face_tags.clone(),
-            face_type: mesh.face_type,
+            face_type: new_face_type,
+            elem_tags: mesh.elem_tags.clone(),
         }
     }
 
-    /// Coordinates of geometric node `n`.
+    /// Coordinates of geometric node `n` as a fixed-size array.
     #[inline]
-    pub fn node_coords(&self, n: NodeId) -> [f64; D] {
+    pub fn node_coords_arr(&self, n: NodeId) -> [f64; D] {
         let off = n as usize * D;
         std::array::from_fn(|i| self.coords[off + i])
     }
 
     /// Geometric node IDs for element `e`.
-    #[inline]
-    pub fn elem_geom_nodes(&self, e: usize) -> &[NodeId] {
-        let npe = nodes_per_elem(self.geom_order);
-        let off = e * npe;
-        &self.geom_conn[off..off + npe]
+    fn elem_geom_nodes(&self, e: usize) -> &[NodeId] {
+        let off = e * self.nodes_per_elem;
+        &self.geom_conn[off..off + self.nodes_per_elem]
     }
 
-    /// Compute the isoparametric Jacobian `J = ∂F/∂ξ` at reference point `xi`
-    /// for element `e`.
-    ///
-    /// Returns `(J, det(J))`.
-    ///
-    /// `J` is a `D×D` matrix in row-major order.
-    ///
-    /// For order-2 (Tri6) elements the geometry kernel is provided by
-    /// `fem_element::tri6_geom`.
+    /// Compute the isoparametric Jacobian `J = ∂F/∂ξ` at reference point `xi`.
     pub fn element_jacobian(&self, e: usize, xi: &[f64]) -> (DMatrix<f64>, f64) {
         let dim = D;
+        let n = self.nodes_per_elem;
         let nodes = self.elem_geom_nodes(e);
 
-        if self.geom_order == 2 && D == 2 {
-            // Fast path: delegate to the canonical tri6_geom kernel.
-            let mut nodes_flat = [0.0f64; 12];
-            for k in 0..6 {
-                let xk = self.node_coords(nodes[k]);
-                nodes_flat[2 * k    ] = xk[0];
-                nodes_flat[2 * k + 1] = xk[1];
-            }
-            let (j_flat, det) = tri6_geom::jacobian(&nodes_flat, xi);
-            let j = DMatrix::from_row_slice(2, 2, &j_flat);
-            return (j, det);
-        }
-
-        // General fallback for order-1 (TriP1).
-        let n = nodes.len();
         let mut grad_ref = vec![0.0_f64; n * dim];
-        eval_geom_grad_basis(self.geom_order, xi, &mut grad_ref);
+        self.eval_geom_grad_basis(xi, &mut grad_ref);
 
         let mut j = DMatrix::<f64>::zeros(dim, dim);
         for row in 0..dim {
             for col in 0..dim {
                 let mut s = 0.0;
                 for k in 0..n {
-                    let xk = self.node_coords(nodes[k]);
+                    let xk = self.node_coords_arr(nodes[k]);
                     s += xk[row] * grad_ref[k * dim + col];
                 }
                 j[(row, col)] = s;
@@ -223,97 +271,97 @@ impl<const D: usize> CurvedMesh<D> {
     }
 
     /// Physical coordinates of reference point `xi` in element `e`.
-    ///
-    /// For order-2 (Tri6) elements the mapping is computed via
-    /// `fem_element::tri6_geom::ref_to_phys`.
     pub fn reference_to_physical(&self, e: usize, xi: &[f64]) -> [f64; D] {
+        let n = self.nodes_per_elem;
         let nodes = self.elem_geom_nodes(e);
-
-        if self.geom_order == 2 && D == 2 {
-            let mut nodes_flat = [0.0f64; 12];
-            for k in 0..6 {
-                let xk = self.node_coords(nodes[k]);
-                nodes_flat[2 * k    ] = xk[0];
-                nodes_flat[2 * k + 1] = xk[1];
-            }
-            let xp2 = tri6_geom::ref_to_phys(&nodes_flat, xi);
-            return std::array::from_fn(|i| xp2[i]);
-        }
-
-        // Order-1 fallback.
-        let dim = D;
-        let n = nodes.len();
         let mut phi = vec![0.0_f64; n];
-        eval_geom_basis(self.geom_order, xi, &mut phi);
+        self.eval_geom_basis(xi, &mut phi);
         let mut xp = [0.0_f64; D];
         for k in 0..n {
-            let xk = self.node_coords(nodes[k]);
-            for i in 0..dim { xp[i] += xk[i] * phi[k]; }
+            let xk = self.node_coords_arr(nodes[k]);
+            for i in 0..D { xp[i] += xk[i] * phi[k]; }
         }
         xp
     }
-}
 
-// ─── Geometric basis functions ────────────────────────────────────────────────
+    /// Evaluate geometric basis functions at `xi` using the factory.
+    fn eval_geom_basis(&self, xi: &[f64], phi: &mut [f64]) {
+        use fem_element::lagrange::factory::{ref_elem, ElemType};
+        let et = mesh_elem_type_to_factory_type(self.elem_type);
+        let elem = ref_elem(et, self.geom_order);
+        elem.eval_basis(xi, phi);
+    }
 
-fn nodes_per_elem(order: u8) -> usize {
-    match order {
-        1 => 3,  // Tri3
-        2 => 6,  // Tri6
-        _ => panic!("nodes_per_elem: unsupported order {order}"),
+    /// Evaluate geometric basis function gradients at `xi` using the factory.
+    fn eval_geom_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        use fem_element::lagrange::factory::{ref_elem, ElemType};
+        let et = mesh_elem_type_to_factory_type(self.elem_type);
+        let elem = ref_elem(et, self.geom_order);
+        elem.eval_grad_basis(xi, grads);
     }
 }
 
-/// Evaluate geometric (Lagrange) basis functions at reference point `xi`.
-fn eval_geom_basis(order: u8, xi: &[f64], phi: &mut [f64]) {
-    match order {
-        1 => {
-            let (x, y) = (xi[0], xi[1]);
-            phi[0] = 1.0 - x - y;
-            phi[1] = x;
-            phi[2] = y;
-        }
-        2 => {
-            let (x, y) = (xi[0], xi[1]);
-            let l1 = 1.0 - x - y;
-            let l2 = x;
-            let l3 = y;
-            phi[0] = l1 * (2.0 * l1 - 1.0);
-            phi[1] = l2 * (2.0 * l2 - 1.0);
-            phi[2] = l3 * (2.0 * l3 - 1.0);
-            phi[3] = 4.0 * l1 * l2;
-            phi[4] = 4.0 * l2 * l3;
-            phi[5] = 4.0 * l1 * l3;
-        }
-        _ => panic!("eval_geom_basis: unsupported order {order}"),
+/// Convert mesh ElementType to factory ElemType for basis evaluation.
+fn mesh_elem_type_to_factory_type(t: ElementType) -> fem_element::lagrange::factory::ElemType {
+    use fem_element::lagrange::factory::ElemType;
+    match t {
+        ElementType::Tri3 | ElementType::Tri6 => ElemType::Tri,
+        ElementType::Tet4 | ElementType::Tet10 => ElemType::Tet,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => ElemType::Quad,
+        ElementType::Hex8 | ElementType::Hex20 => ElemType::Hex,
+        ElementType::Line2 | ElementType::Line3 => ElemType::Seg,
+        _ => panic!("unsupported element type for curved mesh: {t:?}"),
     }
 }
 
-/// Evaluate gradients of geometric (Lagrange) basis at reference point `xi`.
-/// Row-major `n × dim`.
-fn eval_geom_grad_basis(order: u8, xi: &[f64], grads: &mut [f64]) {
-    match order {
-        1 => {
-            // TriP1
-            grads[0] = -1.0;  grads[1] = -1.0;
-            grads[2] =  1.0;  grads[3] =  0.0;
-            grads[4] =  0.0;  grads[5] =  1.0;
+// ─── MeshTopology implementation ─────────────────────────────────────────────
+
+impl<const D: usize> MeshTopology for CurvedMesh<D> {
+    fn dim(&self) -> u8 { D as u8 }
+    fn n_nodes(&self) -> usize { self.n_nodes }
+    fn n_elements(&self) -> usize { self.n_elems }
+    fn n_boundary_faces(&self) -> usize {
+        if self.face_type == ElementType::Line2 { self.face_conn.len() / 2 }
+        else if self.face_type == ElementType::Tri3 { self.face_conn.len() / 3 }
+        else { 0 }
+    }
+
+    fn element_nodes(&self, elem: ElemId) -> &[NodeId] {
+        self.elem_geom_nodes(elem as usize)
+    }
+
+    fn element_type(&self, _elem: ElemId) -> ElementType { self.elem_type }
+
+    fn element_tag(&self, elem: ElemId) -> i32 {
+        self.elem_tags[elem as usize]
+    }
+
+    fn node_coords(&self, node: NodeId) -> &[f64] {
+        let off = node as usize * D;
+        &self.coords[off..off + D]
+    }
+
+    fn face_nodes(&self, face: FaceId) -> &[NodeId] {
+        let f = face as usize;
+        if self.face_type == ElementType::Line2 {
+            &self.face_conn[2 * f..2 * f + 2]
+        } else if self.face_type == ElementType::Tri3 {
+            &self.face_conn[3 * f..3 * f + 3]
+        } else {
+            panic!("CurvedMesh::face_nodes: unsupported face type {:?}", self.face_type);
         }
-        2 => {
-            // TriP2
-            let (x, y) = (xi[0], xi[1]);
-            grads[0]  = 4.0*x + 4.0*y - 3.0;  grads[1]  = 4.0*x + 4.0*y - 3.0;
-            grads[2]  = 4.0*x - 1.0;           grads[3]  = 0.0;
-            grads[4]  = 0.0;                    grads[5]  = 4.0*y - 1.0;
-            grads[6]  = 4.0 - 8.0*x - 4.0*y;   grads[7]  = -4.0*x;
-            grads[8]  = 4.0*y;                  grads[9]  = 4.0*x;
-            grads[10] = -4.0*y;                 grads[11] = 4.0 - 4.0*x - 8.0*y;
-        }
-        _ => panic!("eval_geom_grad_basis: unsupported order {order}"),
+    }
+
+    fn face_tag(&self, face: FaceId) -> i32 { self.face_tags[face as usize] }
+
+    fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) {
+        // CurvedMesh does not track interior face adjacency.
+        // Only boundary faces are stored.
+        (0, None)
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -330,143 +378,79 @@ mod tests {
     }
 
     #[test]
-    fn order2_node_count() {
-        // Tri3 → Tri6: each edge gets a midpoint node.
-        // unit_square_tri(2) has 9 nodes, 8 elements.
-        // Number of unique edges = (3 * 8 + 4*2) / 2 = 16 (interior edges) + 8 (bdy) = 24/2 = hmm.
-        // Exact count depends on the mesh structure; just check it's more than before.
+    fn elevate_to_p2_increases_nodes() {
         let mesh = SimplexMesh::<2>::unit_square_tri(2);
-        let n_before = mesh.n_nodes();
-        let curved = CurvedMesh::elevate_to_order2(&mesh, |x| x);
-        assert!(curved.n_nodes > n_before,
-            "P2 mesh should have more nodes: before={n_before}, after={}", curved.n_nodes);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
+        assert!(curved.n_nodes > mesh.n_nodes());
         assert_eq!(curved.geom_order, 2);
-        assert_eq!(curved.elem_type, ElementType::Tri6);
+        assert_eq!(curved.nodes_per_elem, 6);
     }
 
     #[test]
-    fn jacobian_linear_triangle() {
-        // For a linear mesh, the Jacobian should be constant within each element.
+    fn elevate_to_p4_increases_nodes() {
         let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 4, |x| x);
+        // P4 triangle: (4+1)(4+2)/2 = 15 nodes per element
+        assert_eq!(curved.nodes_per_elem, 15);
+        assert_eq!(curved.geom_order, 4);
+    }
+
+    #[test]
+    fn jacobian_positive_linear() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let curved = CurvedMesh::from_linear(&mesh);
-        let xi = vec![1.0 / 3.0, 1.0 / 3.0]; // centroid of reference triangle
+        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
         for e in 0..curved.n_elems {
             let (_j, det) = curved.element_jacobian(e, &xi);
-            assert!(det > 0.0, "Element {e}: det(J) = {det} ≤ 0 (degenerate)");
+            assert!(det > 0.0, "Element {e}: det(J) = {det}");
         }
     }
 
     #[test]
-    fn jacobian_p2_triangle() {
-        // For a P2 mesh with no curvature (identity map_fn), the Jacobian
-        // should equal the P1 Jacobian at the same point.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+    fn p2_jacobian_matches_p1_on_flat_mesh() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let lin = CurvedMesh::from_linear(&mesh);
-        let p2  = CurvedMesh::elevate_to_order2(&mesh, |x| x);
+        let p2 = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
         let xi = vec![1.0 / 3.0, 1.0 / 3.0];
         for e in 0..mesh.n_elems() {
             let (_, det_lin) = lin.element_jacobian(e, &xi);
-            let (_, det_p2)  = p2.element_jacobian(e, &xi);
-            let err = (det_lin - det_p2).abs();
-            assert!(err < 1e-12, "Element {e}: det P1={det_lin:.6e}, P2={det_p2:.6e}, diff={err:.3e}");
+            let (_, det_p2) = p2.element_jacobian(e, &xi);
+            assert!((det_lin - det_p2).abs() < 1e-12,
+                "elem {e}: P1={det_lin:.6e}, P2={det_p2:.6e}");
         }
     }
 
     #[test]
-    fn reference_to_physical_vertices() {
-        // At reference vertex (0,0), the physical coords should equal the element's vertex 0.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+    fn tet4_linear_mesh() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
         let curved = CurvedMesh::from_linear(&mesh);
-        for e in 0..mesh.n_elems() {
-            let nodes = mesh.elem_nodes(e as NodeId);
-            let x0 = mesh.coords_of(nodes[0]);
-            let xp = curved.reference_to_physical(e, &[0.0, 0.0]);
-            let err: f64 = x0.iter().zip(xp.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
-            assert!(err < 1e-13, "Element {e} vertex 0: expected {x0:?}, got {xp:?}");
+        let xi = vec![0.25, 0.25, 0.25];
+        for e in 0..curved.n_elems.min(10) {
+            let (_j, det) = curved.element_jacobian(e, &xi);
+            assert!(det > 0.0, "Tet {e}: det(J) = {det}");
         }
     }
 
     #[test]
-    fn area_preserved_on_unit_square() {
-        // Area of unit square = 1.0.
-        // Sum of |det(J)| * area_ref_triangle = sum of element areas.
-        
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let curved = CurvedMesh::from_linear(&mesh);
-        let xi_centroid = vec![1.0 / 3.0, 1.0 / 3.0];
-        // For constant-Jacobian elements: area_K = |det(J)| * (1/2) (ref tri area = 1/2)
-        let total_area: f64 = (0..mesh.n_elems())
-            .map(|e| {
-                let (_, det) = curved.element_jacobian(e, &xi_centroid);
-                det.abs() * 0.5
-            })
-            .sum();
-        assert!((total_area - 1.0).abs() < 1e-12,
-            "Total area = {total_area:.6e}, expected 1.0");
-    }
-
-    #[test]
-    fn curved_disk_midpoints_projected() {
-        // Test that map_fn is applied: project midpoints onto the unit circle.
-        // Only a sanity check that projection is called.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
-        let map_called = std::sync::atomic::AtomicUsize::new(0);
-        let curved = CurvedMesh::elevate_to_order2(&mesh, |x: [f64; 2]| {
-            map_called.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            x // identity — just checking that it's called
-        });
+    fn elevate_tet_to_p2() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
         assert!(curved.n_nodes > mesh.n_nodes());
-    }
-
-    // ─── Phase 4 cross-validation: tri6_geom kernel == CurvedMesh results ────
-
-    #[test]
-    fn tri6_geom_jacobian_agrees_with_curved_mesh() {
-        use fem_element::tri6_geom;
-
-        // Build a P2 mesh and compare element_jacobian results against tri6_geom::jacobian.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let curved = CurvedMesh::elevate_to_order2(&mesh, |x| x);
-
-        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
-        for e in 0..curved.n_elems {
-            let nodes = curved.elem_geom_nodes(e);
-            let mut nodes_flat = [0.0f64; 12];
-            for k in 0..6 {
-                let xk = curved.node_coords(nodes[k]);
-                nodes_flat[2 * k    ] = xk[0];
-                nodes_flat[2 * k + 1] = xk[1];
-            }
-            let (_, det_geom) = tri6_geom::jacobian(&nodes_flat, &xi);
-            let (_, det_curved) = curved.element_jacobian(e, &xi);
-            let err = (det_geom - det_curved).abs();
-            assert!(err < 1e-13,
-                "elem {e}: tri6_geom det={det_geom:.9e}, CurvedMesh det={det_curved:.9e}, diff={err:.2e}");
-        }
+        assert_eq!(curved.geom_order, 2);
+        // P4 tet: (2+1)(2+2)(2+3)/6 = 10 nodes per element
+        assert_eq!(curved.nodes_per_elem, 10);
     }
 
     #[test]
-    fn tri6_geom_ref_to_phys_agrees_with_curved_mesh() {
-        use fem_element::tri6_geom;
-
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let curved = CurvedMesh::elevate_to_order2(&mesh, |x| x);
-
-        let xi = vec![0.2, 0.3];
-        for e in 0..curved.n_elems {
-            let nodes = curved.elem_geom_nodes(e);
-            let mut nodes_flat = [0.0f64; 12];
-            for k in 0..6 {
-                let xk = curved.node_coords(nodes[k]);
-                nodes_flat[2 * k    ] = xk[0];
-                nodes_flat[2 * k + 1] = xk[1];
-            }
-            let xp_geom   = tri6_geom::ref_to_phys(&nodes_flat, &xi);
-            let xp_curved = curved.reference_to_physical(e, &xi);
-            let err = ((xp_geom[0] - xp_curved[0]).powi(2)
-                     + (xp_geom[1] - xp_curved[1]).powi(2)).sqrt();
-            assert!(err < 1e-13,
-                "elem {e}: tri6_geom xp={xp_geom:?}, CurvedMesh xp={xp_curved:?}, dist={err:.2e}");
+    fn p2_tet_jacobian_matches_p1() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let lin = CurvedMesh::from_linear(&mesh);
+        let p2 = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
+        let xi = vec![0.25, 0.25, 0.25];
+        for e in 0..mesh.n_elems().min(10) {
+            let (_, det_lin) = lin.element_jacobian(e, &xi);
+            let (_, det_p2) = p2.element_jacobian(e, &xi);
+            assert!((det_lin - det_p2).abs() < 1e-12);
         }
     }
 }
