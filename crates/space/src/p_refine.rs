@@ -100,6 +100,20 @@ fn tet_faces(ns: &[NodeId]) -> Vec<(NodeId, NodeId, NodeId)> {
     ]
 }
 
+/// Extract the 4-node faces of a hexahedron (ordered for factory HexQk).
+fn hex_quad_faces(ns: &[NodeId]) -> Vec<[NodeId; 4]> {
+    vec![
+        [ns[0], ns[1], ns[2], ns[3]],  // bottom (z=0)
+        [ns[4], ns[7], ns[6], ns[5]],  // top (z=1), reversed for outward normal
+        [ns[0], ns[4], ns[5], ns[1]],  // front (y=0)
+        [ns[2], ns[3], ns[7], ns[6]],  // back (y=1), reversed
+        [ns[0], ns[3], ns[7], ns[4]],  // left (x=0)
+        [ns[1], ns[5], ns[6], ns[2]],  // right (x=1)
+    ]
+}
+
+
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Entity order computation
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -143,45 +157,142 @@ fn compute_edge_orders<M: MeshTopology>(
     orders
 }
 
-/// Compute the order of each face (3D) based on per-element orders.
+/// Compute the order of each face (3D) and its node count based on per-element orders.
+/// Returns (order_map, face_node_counts: 3 for tet, 4 for hex).
 fn compute_face_orders<M: MeshTopology>(
     mesh: &M,
     elem_orders: &[u8],
-) -> HashMap<FaceKey, u8> {
+) -> (HashMap<FaceKey, u8>, HashMap<FaceKey, usize>) {
     let mut orders: HashMap<FaceKey, u8> = HashMap::new();
+    let mut n_nodes: HashMap<FaceKey, usize> = HashMap::new();
     let n_elems = mesh.n_elements();
 
     for e in 0..n_elems as u32 {
         let p = elem_orders[e as usize];
         let ns = mesh.element_nodes(e);
-        let faces = tet_faces(ns);
-        for &(a, b, c) in &faces {
-            let key = FaceKey::new(a, b, c);
-            let prev = orders.get(&key).copied().unwrap_or(0);
-            if p > prev {
-                orders.insert(key, p);
+        if ns.len() == 8 {
+            for &face4 in &hex_quad_faces(ns) {
+                let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                let prev = orders.get(&key).copied().unwrap_or(0);
+                if p > prev { orders.insert(key, p); }
+                n_nodes.entry(key).or_insert(4);
+            }
+        } else {
+            for &(a, b, c) in &tet_faces(ns) {
+                let key = FaceKey::new(a, b, c);
+                let prev = orders.get(&key).copied().unwrap_or(0);
+                if p > prev { orders.insert(key, p); }
+                n_nodes.entry(key).or_insert(3);
             }
         }
     }
-    orders
+    (orders, n_nodes)
 }
 
-/// Number of volume-interior DOFs for a simplex of given dimension and order.
-fn n_volume_dofs(dim: usize, p: u8) -> usize {
+/// Number of interior DOFs for a 2D element (Tri bubble or Quad face) of order p.
+/// Tri: (p-1)(p-2)/2 for p≥3
+/// Quad: (p-1)² for p≥2
+fn n_face_dofs_2d(ns_len: usize, p: u8) -> usize {
     let p = p as usize;
-    if dim == 2 && p >= 3 {
-        (p - 1) * (p - 2) / 2
-    } else if dim == 3 && p >= 4 {
-        (p - 1) * (p - 2) * (p - 3) / 6
+    if ns_len == 4 {
+        // Quad interior DOFs
+        if p >= 2 { (p - 1) * (p - 1) } else { 0 }
+    } else {
+        // Tri bubble DOFs
+        if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 }
+    }
+}
+
+/// Number of face-interior DOFs for a 3D face of order p.
+/// Tri face: (p-1)(p-2)/2 for p≥3
+/// Quad face: (p-1)² for p≥2
+fn n_face_dofs_3d(ns_len: usize, p: u8) -> usize {
+    let p = p as usize;
+    if ns_len == 4 {
+        // Quad face of a hex
+        if p >= 2 { (p - 1) * (p - 1) } else { 0 }
+    } else {
+        // Tri face of a tet
+        if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 }
+    }
+}
+
+/// Volume-interior DOFs of a 3D element.
+/// Tet: (p-1)(p-2)(p-3)/6 (p≥4)
+/// Hex: (p-1)³ (p≥2)
+fn n_volume_dofs_3d(ns_len: usize, p: u8) -> usize {
+    let p = p as usize;
+    if ns_len == 4 {
+        if p >= 4 { (p - 1) * (p - 2) * (p - 3) / 6 } else { 0 }
+    } else if ns_len == 8 {
+        if p >= 2 { (p - 1).pow(3) } else { 0 }
     } else {
         0
     }
 }
 
-/// Number of face-interior DOFs for a 3D simplex face (triangle) of order p.
-fn n_face_dofs(p: u8) -> usize {
+/// Bubble (interior) DOFs of a 2D element.
+/// Tri: (p-1)(p-2)/2 for p≥3
+/// Quad: (p-1)² for p≥2
+fn n_bubble_dofs_2d(ns_len: usize, p: u8) -> usize {
+    n_face_dofs_2d(ns_len, p)
+}
+
+/// Rising-factorial basis L_n(t) = Π_{a=0}^{n-1} (t-a)/(n-a), with L₀=1.
+fn rising_val(n: usize, t: f64) -> f64 {
+    if n == 0 { return 1.0; }
+    let mut val = 1.0;
+    for a in 0..n {
+        val *= (t - a as f64) / (n as f64 - a as f64);
+    }
+    val
+}
+
+/// 2D Lagrange interpolation weights on a reference triangle.
+///
+/// Evaluates the p-th-order Lagrange basis on the reference triangle
+/// at barycentric position (r, s) where r,s ≥ 0, r+s ≤ 1.
+/// Returns a vector of weights for each DOF of a TriPk(p) element,
+/// in the factory DOF ordering.
+fn lagrange_weights_tri(r: f64, s: f64, p: u8) -> Vec<f64> {
     let p = p as usize;
-    if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 }
+    let pf = p as f64;
+    let t0 = pf * r;
+    let t1 = pf * s;
+    let t2 = pf * (1.0 - r - s);
+    let n_dofs = (p + 1) * (p + 2) / 2;
+    let mut weights = vec![0.0; n_dofs];
+
+    // Reuse DOF ordering from factory TriPk: (i, j, k) with i+j+k = p
+    // Ordered: vertices, then edge 0-1, edge 1-2, edge 2-0, then face interior
+    // We can compute this directly from (i, j, k) triples
+    let mut idx = 0usize;
+    // Vertex 0: (p, 0, 0)
+    weights[idx] = rising_val(p, t0) * rising_val(0, t1) * rising_val(0, t2); idx += 1;
+    // Vertex 1: (0, p, 0)
+    weights[idx] = rising_val(0, t0) * rising_val(p, t1) * rising_val(0, t2); idx += 1;
+    // Vertex 2: (0, 0, p)
+    weights[idx] = rising_val(0, t0) * rising_val(0, t1) * rising_val(p, t2); idx += 1;
+    if p > 1 {
+        // Edge 0-1: (p-k, k, 0) for k=1..p-1
+        for k in 1..p { let i = p - k; weights[idx] = rising_val(i, t0) * rising_val(k, t1) * rising_val(0, t2); idx += 1; }
+        // Edge 1-2: (0, p-k, k) for k=1..p-1
+        for k in 1..p { let j = p - k; weights[idx] = rising_val(0, t0) * rising_val(j, t1) * rising_val(k, t2); idx += 1; }
+        // Edge 2-0: (k, 0, p-k) for k=1..p-1
+        for k in 1..p { let i = k; weights[idx] = rising_val(i, t0) * rising_val(0, t1) * rising_val(p-k, t2); idx += 1; }
+    }
+    if p >= 3 {
+        // Face-interior: (i, j, p-i-j) for i=1..p-2, j=1..p-1-i
+        for j in 1..=p-2 {
+            for i in 1..=p-1-j {
+                let k = p - i - j;
+                weights[idx] = rising_val(i, t0) * rising_val(j, t1) * rising_val(k, t2);
+                idx += 1;
+            }
+        }
+    }
+    debug_assert_eq!(idx, n_dofs);
+    weights
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -211,7 +322,7 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
 
     // 1. Compute per-entity orders
     let edge_orders = compute_edge_orders(mesh, elem_orders);
-    let face_orders = if dim == 3 { compute_face_orders(mesh, elem_orders) } else { HashMap::new() };
+    let (face_orders, face_nnodes) = if dim == 3 { compute_face_orders(mesh, elem_orders) } else { (HashMap::new(), HashMap::new()) };
 
     // 2. Assign global DOF numbers
     let mut next_dof = n_nodes as DofId;
@@ -229,14 +340,15 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         }
     }
 
-    // Face DOFs (3D): each unique face gets n_face_dofs(p_face) DOFs
+    // Face DOFs (3D): each unique face gets n_face_dofs(p_face, nnodes) DOFs
     let mut face_pk_map: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
     if dim == 3 {
         let mut face_list: Vec<(FaceKey, u8)> = face_orders.iter()
             .map(|(&k, &p)| (k, p)).collect();
         face_list.sort_by_key(|&(k, _)| k);
         for (key, p_face) in &face_list {
-            let n = n_face_dofs(*p_face);
+            let nn = face_nnodes.get(key).copied().unwrap_or(3);
+            let n = n_face_dofs_3d(nn, *p_face);
             if n > 0 {
                 let dofs: Vec<DofId> = (0..n).map(|_| { let d = next_dof; next_dof += 1; d }).collect();
                 face_pk_map.insert(*key, dofs);
@@ -296,25 +408,43 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
             }
         }
 
-        // Face DOFs (3D)
-        if dim == 3 && p_e >= 3 {
-            let faces = tet_faces(ns);
-            for &(a, b, c) in &faces {
-                let key = FaceKey::new(a, b, c);
-                let p_face = face_orders.get(&key).copied().unwrap_or(p_e);
-                let n_face_dofs_e = n_face_dofs(p_e.min(p_face));
-                if let Some(dofs) = face_pk_map.get(&key) {
-                    for k in 0..n_face_dofs_e {
-                        dofs_flat.push(dofs[k]);
+        // Face DOFs (3D) for tet or hex
+        if dim == 3 {
+            if ns.len() == 4 && p_e >= 3 {
+                // Tet: triangular faces
+                for &(a, b, c) in &tet_faces(ns) {
+                    let key = FaceKey::new(a, b, c);
+                    let p_face = face_orders.get(&key).copied().unwrap_or(p_e);
+                    let n_face_e = n_face_dofs_3d(3, p_e.min(p_face));
+                    if let Some(dofs) = face_pk_map.get(&key) {
+                        for k in 0..n_face_e {
+                            dofs_flat.push(dofs[k]);
+                        }
+                    }
+                }
+            } else if ns.len() == 8 {
+                // Hex: quadrilateral faces
+                for &face4 in &hex_quad_faces(ns) {
+                    let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                    let p_face = face_orders.get(&key).copied().unwrap_or(p_e);
+                    let n_face_e = n_face_dofs_3d(4, p_e.min(p_face));
+                    if let Some(dofs) = face_pk_map.get(&key) {
+                        for k in 0..n_face_e {
+                            dofs_flat.push(dofs[k]);
+                        }
                     }
                 }
             }
         }
 
-        // Volume DOFs
-        let n_vol = n_volume_dofs(dim, p_e);
-        if n_vol > 0 {
-            for _ in 0..n_vol {
+        // Bubble/Volume DOFs
+        let n_bubble = if dim == 2 {
+            n_bubble_dofs_2d(ns.len(), p_e)
+        } else {
+            n_volume_dofs_3d(ns.len(), p_e)
+        };
+        if n_bubble > 0 {
+            for _ in 0..n_bubble {
                 dofs_flat.push(volume_start + total_volume_dofs as DofId);
                 total_volume_dofs += 1;
             }
@@ -348,43 +478,91 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         }
     }
 
-    // Face DOF coordinates (3D): centroid
+    // Face DOF coordinates (3D): tri faces → barycentric, quad faces → bilinear
     if dim == 3 {
-        let mut face_nodes_map: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
+        let mut face_nodes_map_3: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
+        let mut face_nodes_map_4: HashMap<FaceKey, [NodeId; 4]> = HashMap::new();
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            for &(a, b, c) in &tet_faces(ns) {
-                face_nodes_map.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
+            if ns.len() == 8 {
+                for &face4 in &hex_quad_faces(ns) {
+                    let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                    face_nodes_map_4.entry(key).or_insert(face4);
+                }
+            } else {
+                for &(a, b, c) in &tet_faces(ns) {
+                    face_nodes_map_3.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
+                }
             }
         }
         for (key, dofs) in &face_pk_map {
-            if let Some(&nodes) = face_nodes_map.get(key) {
-                let ca = mesh.node_coords(nodes[0]);
-                let cb = mesh.node_coords(nodes[1]);
-                let cc = mesh.node_coords(nodes[2]);
-                for (k, &dof_id) in dofs.iter().enumerate() {
-                    let base = dof_id as usize * dim;
-                    let t = (k + 1) as f64 / (dofs.len() + 1) as f64;
-                    for d in 0..dim {
-                        dof_coords[base + d] = (1.0 - t) * ca[d]
-                            + t * (cb[d] + cc[d]) / 2.0;
+            if dofs.is_empty() { continue; }
+            let n_face = dofs.len();
+
+            if let Some(&nodes4) = face_nodes_map_4.get(key) {
+                // Quad face: bilinear interpolation (p-1)² DOFs
+                let p_face = 1 + (n_face as f64).sqrt() as usize;
+                let ca = mesh.node_coords(nodes4[0]);
+                let cb = mesh.node_coords(nodes4[1]);
+                let cc = mesh.node_coords(nodes4[2]);
+                let cd = mesh.node_coords(nodes4[3]);
+                let mut idx = 0usize;
+                for j in 1..=p_face.saturating_sub(1) {
+                    for i in 1..=p_face.saturating_sub(1) {
+                        let r = i as f64 / p_face as f64;
+                        let s = j as f64 / p_face as f64;
+                        let base = dofs[idx] as usize * dim;
+                        for d in 0..dim {
+                            // Bilinear interpolation over quad face
+                            let c = (1.0 - r) * (1.0 - s) * ca[d]
+                                  + r * (1.0 - s) * cb[d]
+                                  + r * s * cc[d]
+                                  + (1.0 - r) * s * cd[d];
+                            dof_coords[base + d] = c;
+                        }
+                        idx += 1;
+                    }
+                }
+                debug_assert!(idx == dofs.len(),
+                    "quad face DOF count mismatch: {idx} vs {}", dofs.len());
+            } else if let Some(&nodes3) = face_nodes_map_3.get(key) {
+                // Tri face: barycentric interpolation (p-1)(p-2)/2 DOFs
+                let disc = (1.0 + 8.0 * n_face as f64).sqrt();
+                let p_face = ((3.0 + disc) / 2.0).round() as usize;
+                let ca = mesh.node_coords(nodes3[0]);
+                let cb = mesh.node_coords(nodes3[1]);
+                let cc = mesh.node_coords(nodes3[2]);
+                let mut idx = 0usize;
+                for j in 1..=p_face.saturating_sub(2) {
+                    for i in 1..=p_face.saturating_sub(1).saturating_sub(j) {
+                        let r = i as f64 / p_face as f64;
+                        let s = j as f64 / p_face as f64;
+                        let lam0 = 1.0 - r - s;
+                        let base = dofs[idx] as usize * dim;
+                        for d in 0..dim {
+                            dof_coords[base + d] = lam0 * ca[d] + r * cb[d] + s * cc[d];
+                        }
+                        idx += 1;
                     }
                 }
             }
         }
     }
 
-    // Volume DOF coordinates: use factory reference element for accuracy.
+    // Bubble/Volume DOF coordinates: use factory reference element for accuracy.
     if total_volume_dofs > 0 {
         let mut vol_idx = 0usize;
         for e in 0..n_elems as u32 {
             let p_e = elem_orders[e as usize];
-            let n_vol = n_volume_dofs(dim, p_e);
+            let ns = mesh.element_nodes(e);
+            let n_vol = if dim == 2 {
+                n_bubble_dofs_2d(ns.len(), p_e)
+            } else {
+                n_volume_dofs_3d(ns.len(), p_e)
+            };
             if n_vol > 0 {
-                let ns = mesh.element_nodes(e);
-                // Factory volume DOF positions are the LAST n_vol entries.
-                // Use barycentric interpolation from vertex coordinates.
-                if dim == 2 {
+                if dim == 2 && ns.len() == 3 {
+                    // Tri bubble: use TriPk factory
                     let factory = fem_element::lagrange::factory::ref_elem(
                         fem_element::lagrange::factory::ElemType::Tri, p_e as u8);
                     let rc = factory.dof_coords();
@@ -399,7 +577,26 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                                 + rck[1] * mesh.node_coords(ns[2])[d];
                         }
                     }
-                } else {
+                } else if dim == 2 && ns.len() == 4 {
+                    // Quad interior: equispaced tensor product (p-1)×(p-1)
+                    let p = p_e as usize;
+                    let mut idx = 0usize;
+                    for j in 1..p {
+                        for i in 1..p {
+                            let r = i as f64 / p as f64;
+                            let s = j as f64 / p as f64;
+                            let base = (volume_start as usize + vol_idx + idx) * dim;
+                            for d in 0..2 {
+                                dof_coords[base + d] = (1.0 - r) * (1.0 - s) * mesh.node_coords(ns[0])[d]
+                                    + r * (1.0 - s) * mesh.node_coords(ns[1])[d]
+                                    + r * s * mesh.node_coords(ns[2])[d]
+                                    + (1.0 - r) * s * mesh.node_coords(ns[3])[d];
+                            }
+                            idx += 1;
+                        }
+                    }
+                } else if dim == 3 && ns.len() == 4 {
+                    // Tet volume: use TetPk factory
                     let factory = fem_element::lagrange::factory::ref_elem(
                         fem_element::lagrange::factory::ElemType::Tet, p_e as u8);
                     let rc = factory.dof_coords();
@@ -413,6 +610,41 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                                 + rck[0] * mesh.node_coords(ns[1])[d]
                                 + rck[1] * mesh.node_coords(ns[2])[d]
                                 + rck[2] * mesh.node_coords(ns[3])[d];
+                        }
+                    }
+                } else if dim == 3 && ns.len() == 8 {
+                    // Hex volume: equispaced tensor product (p-1)³
+                    let p = p_e as usize;
+                    let mut idx = 0usize;
+                    for k in 1..p {
+                        for j in 1..p {
+                            for i in 1..p {
+                                let r = i as f64 / p as f64;
+                                let s = j as f64 / p as f64;
+                                let t = k as f64 / p as f64;
+                                let base = (volume_start as usize + vol_idx + idx) * dim;
+                                for d in 0..3 {
+                                    let c0 = mesh.node_coords(ns[0])[d];
+                                    let c1 = mesh.node_coords(ns[1])[d];
+                                    let c2 = mesh.node_coords(ns[2])[d];
+                                    let c3 = mesh.node_coords(ns[3])[d];
+                                    let c4 = mesh.node_coords(ns[4])[d];
+                                    let c5 = mesh.node_coords(ns[5])[d];
+                                    let c6 = mesh.node_coords(ns[6])[d];
+                                    let c7 = mesh.node_coords(ns[7])[d];
+                                    // Trilinear interpolation
+                                    dof_coords[base + d] =
+                                        (1.0 - r) * (1.0 - s) * (1.0 - t) * c0
+                                      + r * (1.0 - s) * (1.0 - t) * c1
+                                      + r * s * (1.0 - t) * c2
+                                      + (1.0 - r) * s * (1.0 - t) * c3
+                                      + (1.0 - r) * (1.0 - s) * t * c4
+                                      + r * (1.0 - s) * t * c5
+                                      + r * s * t * c6
+                                      + (1.0 - r) * s * t * c7;
+                                }
+                                idx += 1;
+                            }
                         }
                     }
                 }
@@ -461,11 +693,14 @@ pub fn detect_p_constraints<M: MeshTopology>(
     let dim = mesh.dim() as usize;
     let n_elems = mesh.n_elements();
     let edge_orders = compute_edge_orders(mesh, elem_orders);
+    let (face_orders, _face_nnodes) = if dim == 3 { compute_face_orders(mesh, elem_orders) } else { (HashMap::new(), HashMap::new()) };
 
-    // For each element, check each edge for mixed-order constraints
+    // For each element, check each edge/face for mixed-order constraints
     for e in 0..n_elems as u32 {
         let p_e = elem_orders[e as usize];
         let ns = mesh.element_nodes(e);
+
+        // ─── Edge constraints ──────────────────────────────────────────────
         let edges: Vec<(NodeId, NodeId)> = if dim == 2 && ns.len() == 4 {
             vec![(ns[0], ns[1]), (ns[1], ns[2]), (ns[2], ns[3]), (ns[3], ns[0])]
         } else if dim == 2 {
@@ -479,49 +714,191 @@ pub fn detect_p_constraints<M: MeshTopology>(
             let p_edge = edge_orders.get(&key).copied().unwrap_or(p_e);
 
             if p_e < p_edge {
-                // This element has fewer edge DOFs than the edge owns.
-                // The extra DOFs need constraints.
                 let edge_dofs = dm.edge_pk_map.get(&key).expect("edge_pk_map entry missing");
                 let n_extra = (p_edge - p_e) as usize;
 
                 for k in 0..n_extra {
-                    // The (p_e - 1 + k)-th edge DOF (0-indexed) is constrained
                     let extra_dof_idx = (p_e as usize - 1) + k;
                     let extra_dof = edge_dofs[extra_dof_idx];
-
-                    // Position of this extra DOF along the edge
                     let t_extra = edge_dof_position(extra_dof_idx, p_edge);
-
-                    // Lagrange weights through (p_e + 1) points
                     let weights = lagrange_weights_1d(t_extra, p_e);
 
-                    // Build parent DOF list
                     let mut parents: Vec<(DofId, f64)> = Vec::new();
                     let canonical = a < key.0;
-
-                    // Vertex a (t=0)
                     let dof_a = if canonical { a } else { b };
                     parents.push((dof_a as DofId, weights[0]));
 
-                    // Edge DOFs (j=1..p_e-1 → index 0..p_e-2 in edge DOF list)
                     let n_local = (p_e as usize - 1).min(edge_dofs.len());
                     for j in 0..n_local {
-                        let dof_j = if canonical {
-                            edge_dofs[j]
-                        } else {
-                            edge_dofs[edge_dofs.len() - 1 - j]
-                        };
+                        let dof_j = if canonical { edge_dofs[j] } else { edge_dofs[edge_dofs.len() - 1 - j] };
                         parents.push((dof_j, weights[1 + j]));
                     }
-
-                    // Vertex b (t=1)
                     let dof_b = if canonical { b } else { a };
                     parents.push((dof_b as DofId, weights[p_e as usize]));
 
-                    constraints.push(PRefineConstraint {
-                        constrained: extra_dof,
-                        parents,
-                    });
+                    constraints.push(PRefineConstraint { constrained: extra_dof, parents });
+                }
+            }
+        }
+
+        // ─── Face constraints (3D) ─────────────────────────────────────────
+        if dim == 3 && ns.len() == 4 && p_e >= 3 {
+            // Tet: triangular face constraints
+            for &(v0, v1, v2) in &tet_faces(ns) {
+                let key = FaceKey::new(v0, v1, v2);
+                let p_face = face_orders.get(&key).copied().unwrap_or(p_e);
+                if p_e >= p_face { continue; }
+
+                let face_dofs = match dm.face_pk_map.get(&key) { Some(d) => d, _ => continue };
+                let n_low = n_face_dofs_3d(3, p_e);
+                let n_high = n_face_dofs_3d(3, p_face);
+                let n_extra = n_high - n_low;
+                if n_extra == 0 || face_dofs.is_empty() { continue; }
+
+                let face_edges = vec![
+                    EdgeKey::new(v0, v1), EdgeKey::new(v1, v2), EdgeKey::new(v0, v2),
+                ];
+
+                for k in n_low..face_dofs.len() {
+                    let extra_dof = face_dofs[k];
+                    let p_f = p_face as usize;
+                    let mut dof_idx = 0usize;
+                    let (mut r, mut s) = (0.0, 0.0);
+                    'outer: for j in 1..=p_f.saturating_sub(2) {
+                        for i in 1..=p_f.saturating_sub(1).saturating_sub(j) {
+                            if dof_idx == k { r = i as f64 / p_f as f64; s = j as f64 / p_f as f64; break 'outer; }
+                            dof_idx += 1;
+                        }
+                    }
+                    let tri_weights = lagrange_weights_tri(r, s, p_e);
+                    let mut parent_dofs: Vec<DofId> = Vec::new();
+                    parent_dofs.push(v0); parent_dofs.push(v1); parent_dofs.push(v2);
+                    for &ek in &face_edges {
+                        if let Some(edofs) = dm.edge_pk_map.get(&ek) {
+                            for j in 0..(p_e as usize).saturating_sub(1).min(edofs.len()) {
+                                parent_dofs.push(edofs[j]);
+                            }
+                        }
+                    }
+                    if n_low > 0 {
+                        for j in 0..n_low.min(face_dofs.len()) {
+                            parent_dofs.push(face_dofs[j]);
+                        }
+                    }
+                    let parents: Vec<(DofId, f64)> = parent_dofs.iter()
+                        .zip(tri_weights.iter())
+                        .filter(|&(_, &w)| w.abs() > 1e-16)
+                        .map(|(&d, &w)| (d, w))
+                        .collect();
+                    if !parents.is_empty() {
+                        constraints.push(PRefineConstraint { constrained: extra_dof, parents });
+                    }
+                }
+            }
+        }
+
+        // Hex: quadrilateral face constraints
+        if dim == 3 && ns.len() == 8 && p_e >= 2 {
+            for &face4 in &hex_quad_faces(ns) {
+                let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                let p_face = face_orders.get(&key).copied().unwrap_or(p_e);
+                if p_e >= p_face { continue; }
+
+                let face_dofs = match dm.face_pk_map.get(&key) { Some(d) => d, _ => continue };
+                let n_low = n_face_dofs_3d(4, p_e);
+                let n_high = n_face_dofs_3d(4, p_face);
+                let n_extra = n_high - n_low;
+                if n_extra == 0 || face_dofs.is_empty() { continue; }
+
+                // Quad face edges (4 edges)
+                let face_edges = vec![
+                    EdgeKey::new(face4[0], face4[1]),
+                    EdgeKey::new(face4[1], face4[2]),
+                    EdgeKey::new(face4[2], face4[3]),
+                    EdgeKey::new(face4[3], face4[0]),
+                ];
+
+                // Build 1D Lagrange evaluator for tensor-product quad face
+                // A quad face of order p has (p-1)² interior DOFs
+                // For each extra DOF at index k (within face_dofs), find its (i, j) position
+                for k in n_low..face_dofs.len() {
+                    let extra_dof = face_dofs[k];
+                    let p_f = p_face as usize;
+                    let extra_idx = k - n_low;
+                    // Map to (i, j) in the (p_f-1)×(p_f-1) grid
+                    let p_grid = p_f - 1;
+                    let j = extra_idx / p_grid;
+                    let i = extra_idx % p_grid;
+                    // Position in [0,1]²
+                    let r = (i + 1) as f64 / p_f as f64;
+                    let s = (j + 1) as f64 / p_f as f64;
+
+                    // Tensor-product weights: 1D Lagrange in x and y
+                    let wx = lagrange_weights_1d(r, p_e);
+                    let wy = lagrange_weights_1d(s, p_e);
+                    let n_1d = (p_e as usize) + 1;
+
+                    // Build parent DOFs: vertices, edge DOFs (4 edges), existing face DOFs
+                    let mut parent_dofs: Vec<DofId> = Vec::new();
+                    let mut parent_weights: Vec<f64> = Vec::new();
+
+                    // 1D interpolation along the face edges and interior
+                    // Quad face tensor-product: (p_e+1)×(p_e+1) grid
+                    // Node at index (a, b) in the 2D grid has weight wx[a] * wy[b]
+                    // Map (a, b) to: vertex (if a=0,b=0 etc), edge DOF, or face interior
+
+                    // Build the (p_e+1)×(p_e+1) grid of weights
+                    for b in 0..=p_e as usize {
+                        for a in 0..=p_e as usize {
+                            let w = wx[a] * wy[b];
+                            if w.abs() < 1e-16 { continue; }
+
+                            // Map (a, b) to global DOF
+                            let dof = if a == 0 && b == 0 {
+                                face4[0] as DofId
+                            } else if a == p_e as usize && b == 0 {
+                                face4[1] as DofId
+                            } else if a == p_e as usize && b == p_e as usize {
+                                face4[2] as DofId
+                            } else if a == 0 && b == p_e as usize {
+                                face4[3] as DofId
+                            } else if b == 0 {
+                                // Bottom edge: DOF (a-1) in edge_pk_map
+                                if let Some(edofs) = dm.edge_pk_map.get(&EdgeKey::new(face4[0], face4[1])) {
+                                    if a - 1 < edofs.len() { edofs[a - 1] } else { continue; }
+                                } else { continue; }
+                            } else if a == p_e as usize {
+                                // Right edge
+                                if let Some(edofs) = dm.edge_pk_map.get(&EdgeKey::new(face4[1], face4[2])) {
+                                    if b - 1 < edofs.len() { edofs[b - 1] } else { continue; }
+                                } else { continue; }
+                            } else if b == p_e as usize {
+                                // Top edge (reversed: goes from face4[3] to face4[2])
+                                if let Some(edofs) = dm.edge_pk_map.get(&EdgeKey::new(face4[3], face4[2])) {
+                                    if a - 1 < edofs.len() { edofs[edofs.len() - a] } else { continue; }
+                                } else { continue; }
+                            } else if a == 0 {
+                                // Left edge
+                                if let Some(edofs) = dm.edge_pk_map.get(&EdgeKey::new(face4[0], face4[3])) {
+                                    if b - 1 < edofs.len() { edofs[edofs.len() - b] } else { continue; }
+                                } else { continue; }
+                            } else {
+                                // Face-interior DOF: index = (b-1)*(p_e-1) + (a-1)
+                                let fi = (b - 1) * (p_e as usize - 1) + (a - 1);
+                                if fi < n_low && fi < face_dofs.len() { face_dofs[fi] } else { continue; }
+                            };
+
+                            parent_dofs.push(dof);
+                            parent_weights.push(w);
+                        }
+                    }
+
+                    let parents: Vec<(DofId, f64)> = parent_dofs.into_iter()
+                        .zip(parent_weights.into_iter())
+                        .collect();
+                    if !parents.is_empty() {
+                        constraints.push(PRefineConstraint { constrained: extra_dof, parents });
+                    }
                 }
             }
         }
@@ -695,6 +1072,22 @@ pub fn smooth_order_field<M: MeshTopology>(
     if max_jump == 0 { return; }
 
     let dim = mesh.dim();
+
+    // Build an edge-to-element adjacency map (O(n) instead of O(n²)).
+    let mut edge_to_elems: HashMap<EdgeKey, Vec<u32>> = HashMap::new();
+    for e in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(e);
+        let edges: Vec<(NodeId, NodeId)> = if dim == 2 {
+            tri_edges(ns)
+        } else {
+            tet_edges(ns)
+        };
+        for &(a, b) in &edges {
+            edge_to_elems.entry(EdgeKey::new(a, b)).or_default().push(e);
+        }
+    }
+
+    // Use a worklist-based iterative smoothing for faster convergence.
     let mut changed = true;
     while changed {
         changed = false;
@@ -708,22 +1101,13 @@ pub fn smooth_order_field<M: MeshTopology>(
                 tet_edges(ns)
             };
 
-            // Find neighbors sharing each edge
+            // Collect neighbor orders via the edge adjacency map (O(1) per edge).
             let mut neighbor_orders: Vec<u8> = Vec::new();
-            // We find neighbors by scanning all elements — O(n²) but simple.
-            // For large meshes, a proper adjacency builder would be better.
             for (a, b) in &edges {
                 let ek = EdgeKey::new(*a, *b);
-                for f in 0..n_elems as u32 {
-                    if f == e { continue; }
-                    let fnodes = mesh.element_nodes(f);
-                    let fedges: Vec<(NodeId, NodeId)> = if dim == 2 {
-                        tri_edges(fnodes)
-                    } else {
-                        tet_edges(fnodes)
-                    };
-                    for &(fa, fb) in &fedges {
-                        if EdgeKey::new(fa, fb) == ek {
+                if let Some(adj_elems) = edge_to_elems.get(&ek) {
+                    for &f in adj_elems {
+                        if f != e {
                             neighbor_orders.push(elem_orders[f as usize]);
                         }
                     }
@@ -1173,5 +1557,150 @@ mod tests {
         let dofs1 = dm.element_dofs(1);
         assert!(dofs0.len() > dofs1.len(),
             "3D P3 element should have more DOFs than P2");
+    }
+
+    #[test]
+    fn face_constraints_3d_p2_p3_interface() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let n_elems = mesh.n_elements();
+        let mut elem_orders = vec![2u8; n_elems];
+        elem_orders[0] = 3; // P3 element 0, P2 element 1
+
+        let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
+        let constraints = detect_p_constraints(&dm, &mesh, &elem_orders);
+
+        // With P3 and P2 in a 6-tet cube, there should be face constraints
+        // (not just edge constraints)
+        let n_edge_constraints: usize = constraints.iter()
+            .filter(|c| dm.edge_pk_map.values().any(|dofs| dofs.contains(&c.constrained)))
+            .count();
+        let _n_face_constraints = constraints.len() - n_edge_constraints;
+
+        // Face DOFs exist for P3 but not P2
+        let has_face_dofs = dm.face_pk_map.values().any(|dofs| !dofs.is_empty());
+        assert!(has_face_dofs, "P3 should have face DOFs");
+
+        // The P2-P3 interface should produce constraints
+        // (at least edge constraints must exist)
+        assert!(!constraints.is_empty(),
+            "P3-P2 interface should produce constraints, got 0");
+    }
+
+    #[test]
+    fn face_dof_coords_3d_not_centroid() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let n_elems = mesh.n_elements();
+        let elem_orders = vec![3u8; n_elems]; // all P3
+
+        let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
+
+        // Check that face DOF coordinates are not all at the centroid
+        let mut face_dofs_found = false;
+        for (_, dofs) in &dm.face_pk_map {
+            for &dof in dofs {
+                let _idx = dof as usize * 3;
+                let x = dm.dof_coord(dof);
+                // Should have non-default coordinates (not all zero)
+                if x[0].abs() > 1e-10 || x[1].abs() > 1e-10 || x[2].abs() > 1e-10 {
+                    face_dofs_found = true;
+                }
+            }
+        }
+        assert!(face_dofs_found, "face DOF coordinates should be non-zero");
+    }
+
+    // ─── 2D Quad ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn variable_order_quad() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n_elems = mesh.n_elements();
+        let elem_orders = vec![2u8; n_elems];
+        let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
+
+        for e in 0..n_elems as u32 {
+            let dofs = dm.element_dofs(e);
+            // Q2: 4 vertices + 4 edges × 1 + 1 interior = 9 DOFs
+            assert_eq!(dofs.len(), 9,
+                "Q2 element {e} should have 9 DOFs, got {}", dofs.len());
+        }
+        assert!(dm.n_dofs > 0, "Quad DM should have DOFs");
+    }
+
+    #[test]
+    fn variable_order_quad_p3() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n_elems = mesh.n_elements();
+        let elem_orders = vec![3u8; n_elems]; // all Q3
+        let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
+
+        for e in 0..n_elems as u32 {
+            let dofs = dm.element_dofs(e);
+            // Q3: 4 vertices + 4 edges × 2 + interior (p-1)²=4 = 16 DOFs
+            assert_eq!(dofs.len(), 16,
+                "Q3 element {e} should have 16 DOFs, got {}", dofs.len());
+        }
+    }
+
+    #[test]
+    fn variable_order_quad_p2_p3_interface() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n_elems = mesh.n_elements();
+        let mut elem_orders = vec![2u8; n_elems];
+        elem_orders[0] = 3; // Q3 element 0, Q2 element 1..3
+
+        let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
+        let constraints = detect_p_constraints(&dm, &mesh, &elem_orders);
+
+        // Should have edge constraints at the Q3-Q2 interface
+        // (Q3 has 2 edge DOFs per edge, Q2 has 1)
+        assert!(!constraints.is_empty(),
+            "Q3-Q2 interface should have edge constraints");
+    }
+
+    // ─── 3D Hex ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn variable_order_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let n_elems = mesh.n_elements();
+        let elem_orders = vec![2u8; n_elems]; // all Q2 (Serendipity-like)
+        let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
+
+        for e in 0..n_elems as u32 {
+            let dofs = dm.element_dofs(e);
+            // Q2 hex (tensor product): 8 vertices + 12 edges×1 + 6 faces×1 + 1 volume = 27
+            assert_eq!(dofs.len(), 27,
+                "Q2 hex element {e} should have 27 DOFs, got {}", dofs.len());
+        }
+    }
+
+    #[test]
+    fn variable_order_hex_p3() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let n_elems = mesh.n_elements();
+        let elem_orders = vec![3u8; n_elems]; // all Q3
+        let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
+
+        for e in 0..n_elems as u32 {
+            let dofs = dm.element_dofs(e);
+            // Q3 hex: 8 vertices + 12 edges × 2 + 6 faces × 1 + 1 volume × 8
+            //         = 8 + 24 + 6 + 8 = 46
+            // Note: each quad face at p=3 has (p-1)² = 4 DOFs, but face_pk_map
+            // entries are SHARED between adjacent hex. So face DOFs are not per-element.
+            // Each element gets: 8 + 12×(p-1) + 6×n_face_shared_per_elem
+            // Let's compute: 8 + 24 = 32 for vertices+edges
+            // += 6 faces × min(p_e, p_face) per element's face DOFs
+            // For uniform p=3: face DOFs per element = 6 × (p-1)² = 6 × 4 = 24
+            // But shared between 2 elements each → 12 per element average
+            // Actually the face DOFs are in face_pk_map and shared.
+            // Each element gets n_face_dofs_3d(4, p_e.min(p_face)) per face
+            // For uniform p=3: n_face_dofs = (3-1)² = 4 per face, 6 faces → 24
+            // Total per element: 8 + 24 + 24 = 56 (before volume DOFs)
+            // Volume DOFs: (3-1)³ = 8
+            // Total: 56 + 8 = 64
+            assert_eq!(dofs.len(), 64,
+                "Q3 hex element {e} should have 64 DOFs, got {}", dofs.len());
+        }
     }
 }

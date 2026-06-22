@@ -94,8 +94,17 @@ pub mod iga;
 pub mod dg_advection;
 pub mod dg_cdr;
 pub mod navier_stokes;
+pub use navier_stokes::{
+    assemble_convection_matrix, assemble_divergence_matrix,
+    assemble_oseen_block, assemble_pressure_mass,
+    solve_oseen_step, solve_ns_picard,
+    assemble_ale_convection_matrix, assemble_ale_oseen_block,
+};
 pub mod error_estimate;
 pub mod h1_quad_order_hint;
+pub mod phasefield;
+pub mod fsi;
+pub mod thermoelastic;
 
 #[cfg(feature = "reed")]
 pub mod reed;
@@ -162,5 +171,22 @@ pub use transfer::{
     ConservativeTransferReport,
     TransferError,
     TransferStats,
+};
+pub use phasefield::{
+    assemble_degraded_stiffness, assemble_phase_field_system,
+    build_elem_dof_cache, compute_elastic_energy, update_history_field,
+    miehe_split_2d, MieheSplit2d,
+    assemble_miehe_stiffness_and_force, compute_psi_plus,
+};
+pub use fsi::{
+    assemble_mesh_stiffness, solve_mesh_movement_laplacian,
+    fsi_interface_faces, fsi_interface_nodes,
+    nodal_displacement_to_dofs,
+    assemble_fluid_traction_to_struct,
+    FsiConfig, FsiReport, fsi_couple_step, fsi_partitioned_solve,
+};
+pub use thermoelastic::{
+    assemble_thermal_expansion_rhs, assemble_heat_system,
+    solve_thermoelastic_staggered,
 };
 pub use static_cond::{StaticCondensation, GlobalBacksolve, condense_global};

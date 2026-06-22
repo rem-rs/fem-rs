@@ -43,8 +43,11 @@ pub fn apply_dirichlet(
 
 /// Identify which DOFs lie on boundary faces with the given tag(s).
 ///
-/// Returns sorted global DOF indices for all boundary nodes (and, for P2,
-/// edge-midpoint DOFs) that lie on boundary faces whose tag is in `tags`.
+/// Returns sorted global DOF indices for all boundary nodes (and, for any
+/// order, edge and face DOFs) that lie on boundary faces whose tag is in `tags`.
+///
+/// Uses `edge_pk_map` and `face_pk_map` from DofManager, which support
+/// arbitrary polynomial orders (no per-order hardcoded branches).
 ///
 /// # Arguments
 /// * `mesh`  — mesh providing boundary face data
@@ -56,153 +59,57 @@ pub fn boundary_dofs(
     tags: &[i32],
 ) -> Vec<DofId> {
     use std::collections::HashSet;
-    let mut node_set: HashSet<DofId> = HashSet::new();
+    let mut dof_set: HashSet<DofId> = HashSet::new();
 
-    for f in 0..mesh.n_boundary_faces() as u32 {
-        if tags.contains(&mesh.face_tag(f)) {
-            for &node in mesh.face_nodes(f) {
-                node_set.insert(node as DofId);
-            }
-        }
-    }
-
-    let mut dof_set: HashSet<DofId> = node_set.clone();
-
-    // Build a set of actual boundary edges from boundary face connectivity.
-    // This is correct for all orders — using vertex heuristics is wrong because
-    // an interior edge can have both endpoints on the boundary (e.g., the short
-    // diagonal of a corner triangle element in a structured mesh).
+    // Collect boundary edge keys from boundary faces.
     // In 2D: boundary face = edge (2 nodes) → 1 edge.
-    // In 3D: boundary face = triangle (3 nodes) → 3 edges.
-    let mut boundary_edges: std::collections::HashSet<EdgeKey> = std::collections::HashSet::new();
+    // In 3D: boundary face = triangle (3+ nodes) → edges + potentially face-interior.
+    let mut boundary_edges: HashSet<EdgeKey> = HashSet::new();
+    let mut boundary_faces_3d: HashSet<FaceKey> = HashSet::new();
+
     for f in 0..mesh.n_boundary_faces() as u32 {
         if tags.contains(&mesh.face_tag(f)) {
             let nodes = mesh.face_nodes(f);
-            if nodes.len() == 2 {
-                // 2D: face is a line segment
-                boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
-            } else if nodes.len() >= 3 {
-                // 3D: face is a triangle — add all 3 edges
-                boundary_edges.insert(EdgeKey::new(nodes[0], nodes[1]));
-                boundary_edges.insert(EdgeKey::new(nodes[1], nodes[2]));
-                boundary_edges.insert(EdgeKey::new(nodes[0], nodes[2]));
+            // Vertex DOFs: all boundary face nodes
+            for &node in nodes {
+                dof_set.insert(node as DofId);
+            }
+            // Edge keys from face boundary
+            for i in 0..nodes.len() {
+                let a = nodes[i];
+                let b = nodes[(i + 1) % nodes.len()];
+                boundary_edges.insert(EdgeKey::new(a, b));
+            }
+            // 3D face key
+            if nodes.len() >= 3 {
+                boundary_faces_3d.insert(FaceKey::new(nodes[0], nodes[1], nodes[2]));
             }
         }
     }
 
-    // For P2 in 2D: include edge-midpoint DOFs on actual boundary edges.
-    // Triangle P2 (6 DOFs): edge(v0,v1)→dofs[3], edge(v1,v2)→dofs[4], edge(v0,v2)→dofs[5]
-    // Quad Q2 (9 DOFs): edge(v0,v1)→dofs[4], edge(v1,v2)→dofs[5], edge(v2,v3)→dofs[6], edge(v3,v0)→dofs[7]
-    if dm.order == 2 && mesh.dim() == 2 {
-        let n_elems = dm.dofs_flat.len() / dm.dofs_per_elem;
-        if dm.dofs_per_elem == 6 {
-            // Triangle P2
-            for e in 0..n_elems as u32 {
-                let dofs  = dm.element_dofs(e);
-                let nodes = mesh.element_nodes(e);
-                let edge_pairs = [
-                    (nodes[0], nodes[1], dofs[3]),
-                    (nodes[1], nodes[2], dofs[4]),
-                    (nodes[0], nodes[2], dofs[5]),
-                ];
-                for (a, b, edge_dof) in edge_pairs {
-                    if boundary_edges.contains(&EdgeKey::new(a, b)) {
-                        dof_set.insert(edge_dof);
-                    }
-                }
+    // Edge DOFs: look up each boundary edge in edge_pk_map (arbitrary order).
+    for ek in &boundary_edges {
+        if let Some(edge_dofs) = dm.edge_pk_map.get(ek) {
+            for &dof in edge_dofs {
+                dof_set.insert(dof);
             }
-        } else if dm.dofs_per_elem == 9 {
-            // Quad Q2: 4 corners + 4 edge midpoints + 1 interior
-            for e in 0..n_elems as u32 {
-                let dofs  = dm.element_dofs(e);
-                let nodes = mesh.element_nodes(e);
-                // Edge midpoints at positions 4-7; interior DOF at 8 is never on boundary.
-                let edge_pairs = [
-                    (nodes[0], nodes[1], dofs[4]),  // bottom
-                    (nodes[1], nodes[2], dofs[5]),  // right
-                    (nodes[2], nodes[3], dofs[6]),  // top
-                    (nodes[3], nodes[0], dofs[7]),  // left
-                ];
-                for (a, b, edge_dof) in edge_pairs {
-                    if boundary_edges.contains(&EdgeKey::new(a, b)) {
-                        dof_set.insert(edge_dof);
-                    }
-                }
-                // Interior DOF (dofs[8]) is always inside the element, never on boundary.
-            }
+        }
+        // Also check legacy edge_dof_map (P2) and edge_dof2_map (P3) for backward compat
+        if let Some(&dof) = dm.edge_dof_map.get(ek) {
+            dof_set.insert(dof);
+        }
+        if let Some(&[d0, d1]) = dm.edge_dof2_map.get(ek) {
+            dof_set.insert(d0);
+            dof_set.insert(d1);
         }
     }
 
-    // For P2 in 3D (TetP2): use edge_dof_map to find edge midpoint DOFs.
-    // Edge DOF positions in the element: (v0,v1)→4, (v0,v2)→5, (v0,v3)→6,
-    //                                    (v1,v2)→7, (v1,v3)→8, (v2,v3)→9
-    if dm.order == 2 && mesh.dim() == 3 {
-        for (&edge_key, &dof_id) in &dm.edge_dof_map {
-            if boundary_edges.contains(&edge_key) {
-                dof_set.insert(dof_id);
-            }
-        }
-    }
-
-    // For P3, include the two edge interior DOFs (at 1/3 and 2/3) on actual boundary edges.
-    // DOF layout per element: verts 0,1,2; edge(v0→v1) at 3,4; edge(v1→v2) at 5,6; edge(v0→v2) at 7,8.
-    if dm.order == 3 && mesh.dim() == 2 {
-        let n_elems = dm.dofs_flat.len() / dm.dofs_per_elem;
-        for e in 0..n_elems as u32 {
-            let dofs  = dm.element_dofs(e);
-            let nodes = mesh.element_nodes(e);
-            let edge_pairs = [
-                (nodes[0], nodes[1], dofs[3], dofs[4]),
-                (nodes[1], nodes[2], dofs[5], dofs[6]),
-                (nodes[0], nodes[2], dofs[7], dofs[8]),
-            ];
-            for (a, b, edge_dof0, edge_dof1) in edge_pairs {
-                if boundary_edges.contains(&EdgeKey::new(a, b)) {
-                    dof_set.insert(edge_dof0);
-                    dof_set.insert(edge_dof1);
-                }
-            }
-        }
-        // Note: bubble DOFs (position 9) are always interior — never boundary.
-    }
-
-    // For TetP3 (3D P3): use edge_dof2_map for edge interior DOFs.
-    // Face DOFs (positions 16-19) are always interior — no face DOFs are on the boundary.
-    if dm.order == 3 && mesh.dim() == 3 {
-        for (&edge_key, &[d0, d1]) in &dm.edge_dof2_map {
-            if boundary_edges.contains(&edge_key) {
-                dof_set.insert(d0);
-                dof_set.insert(d1);
-            }
-        }
-        // Note: TetP3 face DOFs (16-19) are interior to faces, but they ARE on the boundary surface.
-        // Unlike 2D bubble DOFs (interior to elements), 3D face DOFs lie on the boundary faces.
-        // Include face DOFs that belong to boundary faces.
-        let mut boundary_faces: std::collections::HashSet<FaceKey> = std::collections::HashSet::new();
-        for f in 0..mesh.n_boundary_faces() as u32 {
-            if tags.contains(&mesh.face_tag(f)) {
-                let ns = mesh.face_nodes(f);
-                if ns.len() >= 3 {
-                    boundary_faces.insert(FaceKey::new(ns[0], ns[1], ns[2]));
-                }
-            }
-        }
-        // Iterate elements to find face DOFs on boundary faces.
-        let n_elems = dm.dofs_flat.len() / dm.dofs_per_elem;
-        for e in 0..n_elems as u32 {
-            let dofs  = dm.element_dofs(e);
-            let nodes = mesh.element_nodes(e);
-            if nodes.len() < 4 { continue; }
-            let (n0, n1, n2, n3) = (nodes[0], nodes[1], nodes[2], nodes[3]);
-            let faces = [
-                (FaceKey::new(n0,n1,n2), dofs[16]),
-                (FaceKey::new(n0,n1,n3), dofs[17]),
-                (FaceKey::new(n0,n2,n3), dofs[18]),
-                (FaceKey::new(n1,n2,n3), dofs[19]),
-            ];
-            for (fkey, face_dof) in faces {
-                if boundary_faces.contains(&fkey) {
-                    dof_set.insert(face_dof);
+    // Face-interior DOFs on boundary faces (3D, arbitrary order).
+    if mesh.dim() == 3 {
+        for fk in &boundary_faces_3d {
+            if let Some(face_dofs) = dm.face_pk_map.get(fk) {
+                for &dof in face_dofs {
+                    dof_set.insert(dof);
                 }
             }
         }

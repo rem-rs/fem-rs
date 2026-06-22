@@ -451,7 +451,7 @@ pub(crate) fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceEleme
     }
 }
 
-fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+pub(crate) fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Line2, 1) => Box::new(SegP1),
         (ElementType::Line2, 2) => Box::new(SegP2),
@@ -472,7 +472,7 @@ pub(crate) fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) 
     (j, det)
 }
 
-fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
+pub(crate) fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
     let j_inv = jac.clone().try_inverse().expect("degenerate element in phys_to_ref");
     let dx: Vec<f64> = (0..dim).map(|i| xp[i] - x0[i]).collect();
     let mut xi = vec![0.0_f64; dim];
@@ -519,7 +519,7 @@ fn orient_normal_outward<M: MeshTopology>(
     }
 }
 
-fn find_face_elem<M: MeshTopology>(mesh: &M, _face_id: u32, face_nodes: &[u32]) -> u32 {
+pub(crate) fn find_face_elem<M: MeshTopology>(mesh: &M, _face_id: u32, face_nodes: &[u32]) -> u32 {
     // Build a sorted key and scan elements
     let mut fkey: Vec<u32> = face_nodes.to_vec();
     fkey.sort_unstable();
