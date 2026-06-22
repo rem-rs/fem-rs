@@ -119,8 +119,8 @@ impl<M: MeshTopology> HDivSpace<M> {
                 "HDivSpace: Tri RT supports orders 0, 1, 2"
             ),
             (2, ElementType::Quad4) => assert!(
-                order == 0,
-                "HDivSpace: Quad RT supports order 0 only"
+                order <= 1,
+                "HDivSpace: Quad RT supports orders 0 and 1"
             ),
             (3, ElementType::Tet4 | ElementType::Tet10) => assert!(
                 order <= 2,
@@ -345,8 +345,9 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 2-D quadrilateral construction ───────────────────────────────────
 
     fn build_2d_quad(mesh: M, order: u8) -> Self {
-        debug_assert_eq!(order, 0, "QuadRT0: order must be 0");
-        let dofs_per_elem = QUAD_FACES.len();
+        let dofs_per_edge = (order as usize) + 1; // 1 for RT0, 2 for RT1
+        let interior_dofs = if order == 0 { 0 } else { 4 };
+        let dofs_per_elem = QUAD_FACES.len() * dofs_per_edge + interior_dofs;
         let n_elem = mesh.n_elements();
 
         let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
@@ -360,9 +361,29 @@ impl<M: MeshTopology> HDivSpace<M> {
                 let (gi, gj) = (verts[li], verts[lj]);
                 let key = EdgeKey::new(gi, gj);
                 let sign = Self::compute_sign_2d_quad(&mesh, verts, li, gi, gj);
-                let dof = *edge_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
-                dofs_flat.push(dof);
-                signs_flat.push(sign);
+
+                if dofs_per_edge == 1 {
+                    let dof = *edge_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
+                    dofs_flat.push(dof);
+                    signs_flat.push(sign);
+                } else {
+                    let nd = dofs_per_edge as u32;
+                    let first = *edge_map.entry(key).or_insert_with(|| {
+                        let d = next_dof;
+                        next_dof += nd;
+                        d
+                    });
+                    for k in 0..dofs_per_edge {
+                        dofs_flat.push(first + k as u32);
+                        signs_flat.push(sign);
+                    }
+                }
+            }
+            // Interior bubble DOFs (QuadRT1: ∫ Φ_x, ∫ ξ·Φ_x, ∫ Φ_y, ∫ η·Φ_y)
+            for _ in 0..interior_dofs {
+                dofs_flat.push(next_dof);
+                next_dof += 1;
+                signs_flat.push(1.0);
             }
         }
 
@@ -561,9 +582,8 @@ impl<M: MeshTopology> HDivSpace<M> {
                             fval[0] * normal[0] + fval[1] * normal[1];
                     }
                 } else if self.order == 1 {
-                    // RT1: 2 DOFs per edge + 2 interior bubble DOFs per element.
-                    // Step 1 — edge DOFs (iterated via the unique-edge map).
-                    // 3-point Gauss-Legendre on [0,1] (exact for polynomials ≤ degree 5).
+                    // RT1: 2 DOFs per edge + interior bubble DOFs.
+                    // Edge DOFs (same for Tri and Quad).
                     let sq_3_5: f64 = (3.0_f64 / 5.0).sqrt();
                     let gl_pts = [0.5 * (1.0 - sq_3_5), 0.5, 0.5 * (1.0 + sq_3_5)];
                     let gl_wts = [5.0_f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
@@ -571,7 +591,6 @@ impl<M: MeshTopology> HDivSpace<M> {
                     for (&EdgeKey(a, b), &first_dof) in map {
                         let pa = self.mesh.node_coords(a);
                         let pb = self.mesh.node_coords(b);
-                        // Global normal (unnormalized, len = edge length).
                         let tx = pb[0] - pa[0];
                         let ty = pb[1] - pa[1];
                         let normal = [-ty, tx];
@@ -592,38 +611,100 @@ impl<M: MeshTopology> HDivSpace<M> {
                         r[first_dof as usize + 1] = mom1;
                     }
 
-                    // Step 2 — interior bubble DOFs (element-local, not in edge map).
-                    // Use a degree-3 triangle quadrature rule.
-                    let qr = TriRT1.quadrature(4);
+                    // Interior bubble DOFs depend on element type.
                     let n_elem = self.mesh.n_elements();
-                    for e in 0..n_elem as u32 {
-                        let dofs  = self.element_dofs(e);
-                        let nodes = self.mesh.element_nodes(e);
-                        let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
-                        let det_j = transform.det_j().abs();
+                    if self.elem_type == ElementType::Quad4 {
+                        // QuadRT1: 4 interior DOFs per element:
+                        //   DOF 8: ∫ Φ_x dA, DOF 9: ∫ ξ·Φ_x dA
+                        //   DOF 10: ∫ Φ_y dA, DOF 11: ∫ η·Φ_y dA
+                        // on reference [-1,1]², mapped via Piola transform.
+                        use fem_element::quadrature::quad_rule;
+                        let qr = quad_rule(4);
+                        let jac_ref = 4.0; // area of [-1,1]²
+                        for e in 0..n_elem as u32 {
+                            let dofs = self.element_dofs(e);
+                            let nodes = self.mesh.element_nodes(e);
+                            let x0 = self.mesh.node_coords(nodes[0]);
+                            let x1 = self.mesh.node_coords(nodes[1]);
+                            let x2 = self.mesh.node_coords(nodes[2]);
+                            let x3 = self.mesh.node_coords(nodes[3]);
+                            // Bilinear map: for affine quad, J is constant.
+                            let j00 = 0.5 * (x1[0] - x0[0] + x2[0] - x3[0]);
+                            let j01 = 0.5 * (x3[0] - x0[0] + x2[0] - x1[0]);
+                            let j10 = 0.5 * (x1[1] - x0[1] + x2[1] - x3[1]);
+                            let j11 = 0.5 * (x3[1] - x0[1] + x2[1] - x1[1]);
+                            let det_j = (j00 * j11 - j01 * j10).abs();
+                            // Piola: u_phys(x) = (1/det_J) * J * u_ref(ξ)
+                            // So interior moments: ∫ u_phys_x dx = ∫ u_ref_x dξ  (Piola preserves flux)
+                            let bub_x  = dofs[8] as usize;
+                            let bub_xx = dofs[9] as usize;
+                            let bub_y  = dofs[10] as usize;
+                            let bub_yy = dofs[11] as usize;
 
-                        let bub0 = dofs[6] as usize;
-                        let bub1 = dofs[7] as usize;
-
-                        // x_phys = x0 + J * xi
-                        let x0 = self.mesh.node_coords(nodes[0]);
-                        let x1 = self.mesh.node_coords(nodes[1]);
-                        let x2 = self.mesh.node_coords(nodes[2]);
-                        let j00 = x1[0] - x0[0]; let j10 = x1[1] - x0[1];
-                        let j01 = x2[0] - x0[0]; let j11 = x2[1] - x0[1];
-
-                        let mut int_x = 0.0_f64;
-                        let mut int_y = 0.0_f64;
-                        for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
-                            let xp = [x0[0] + j00 * xi[0] + j01 * xi[1],
-                                      x0[1] + j10 * xi[0] + j11 * xi[1]];
-                            let fval = f(&xp);
-                            int_x += w * fval[0];
-                            int_y += w * fval[1];
+                            let mut int_x  = 0.0_f64;
+                            let mut int_xx = 0.0_f64;
+                            let mut int_y  = 0.0_f64;
+                            let mut int_yy = 0.0_f64;
+                            for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
+                                let xi0 = xi[0];
+                                let xi1 = xi[1];
+                                // Physical coords via bilinear map
+                                let xp = [
+                                    x0[0] + (x1[0]-x0[0])*(xi0+1.0)/2.0 + (x3[0]-x0[0])*(xi1+1.0)/2.0
+                                        + (x2[0]-x1[0]-x3[0]+x0[0])*(xi0+1.0)*(xi1+1.0)/4.0,
+                                    x0[1] + (x1[1]-x0[1])*(xi0+1.0)/2.0 + (x3[1]-x0[1])*(xi1+1.0)/2.0
+                                        + (x2[1]-x1[1]-x3[1]+x0[1])*(xi0+1.0)*(xi1+1.0)/4.0,
+                                ];
+                                let fval = f(&xp);
+                                // Reference moments with Piola push-forward.
+                                // For affine quad, ∫_phys F · v dx = ∫_ref (J^{-1} F) · v_ref det_J dξ
+                                // = ∫_ref F_phys · (1/det_J J v_ref) det_J = ∫_ref (J^{-1} F) · v_ref det_J dξ
+                                // Interior DOFs in ref coords: ∫ F_x_ref, ∫ ξ F_x_ref, ∫ F_y_ref, ∫ η F_y_ref
+                                let f_ref_x = fval[0] * j11 / det_j - fval[1] * j01 / det_j;
+                                let f_ref_y = fval[1] * j00 / det_j - fval[0] * j10 / det_j;
+                                let w_j = w * jac_ref;
+                                int_x  += w_j * f_ref_x;
+                                int_xx += w_j * xi0 * f_ref_x;
+                                int_y  += w_j * f_ref_y;
+                                int_yy += w_j * xi1 * f_ref_y;
+                            }
+                            let r = result.as_slice_mut();
+                            r[bub_x]  = int_x  * det_j;
+                            r[bub_xx] = int_xx * det_j;
+                            r[bub_y]  = int_y  * det_j;
+                            r[bub_yy] = int_yy * det_j;
                         }
-                        let r = result.as_slice_mut();
-                        r[bub0] = int_x * det_j;
-                        r[bub1] = int_y * det_j;
+                    } else {
+                        // TriRT1: 2 interior bubble DOFs per element.
+                        let qr = TriRT1.quadrature(4);
+                        for e in 0..n_elem as u32 {
+                            let dofs  = self.element_dofs(e);
+                            let nodes = self.mesh.element_nodes(e);
+                            let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
+                            let det_j = transform.det_j().abs();
+
+                            let bub0 = dofs[6] as usize;
+                            let bub1 = dofs[7] as usize;
+
+                            let x0 = self.mesh.node_coords(nodes[0]);
+                            let x1 = self.mesh.node_coords(nodes[1]);
+                            let x2 = self.mesh.node_coords(nodes[2]);
+                            let j00 = x1[0] - x0[0]; let j10 = x1[1] - x0[1];
+                            let j01 = x2[0] - x0[0]; let j11 = x2[1] - x0[1];
+
+                            let mut int_x = 0.0_f64;
+                            let mut int_y = 0.0_f64;
+                            for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
+                                let xp = [x0[0] + j00 * xi[0] + j01 * xi[1],
+                                          x0[1] + j10 * xi[0] + j11 * xi[1]];
+                                let fval = f(&xp);
+                                int_x += w * fval[0];
+                                int_y += w * fval[1];
+                            }
+                            let r = result.as_slice_mut();
+                            r[bub0] = int_x * det_j;
+                            r[bub1] = int_y * det_j;
+                        }
                     }
                 } else {
                     // RT2: MFEM-style nodal flux on edges + interior Piola samples (see `TriRT2`).

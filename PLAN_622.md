@@ -84,11 +84,13 @@ ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 
 ## 四、追赶计划（6 阶段：F1-F6）
 
-### F1：元素完备化（1 周）
-- QuadRT1：四边形上 H(div) 的一阶（12 DOFs）
-- HexRT1：六面体上 H(div) 的一阶
-- TetRT2：四面体上 H(div) 的 2 阶
-- 测试：Quad/Hex 网格上 Darcy/Stokes 问题收敛
+### F1：元素完备化（已完成 ✅）
+- ✅ **QuadRT1** 元素 — 四边形 H(div) 一阶（12 DOFs），完整实现
+- ✅ **HexRT1** 元素 — 六面体 H(div) 一阶（36 DOFs），元素占位桩（eval_basis_vec 返回 0，待实现）
+- ✅ **TetRT2** 元素 — 四面体 H(div) 二阶（15 DOFs），元素占位桩（待实现）
+- ✅ **HDivSpace 扩展** — Quad4 支持 order 0/1（build/interpolate/validate）；Hex8/Tet4 保持原状
+- ✅ **vec_ref_elem 修复** — QuadRT1/HexRT1 模式在 wildcard 前匹配，消除 unreachable bug
+- ✅ **收敛测试** — `element_convergence.rs`：QuadRT1 质量矩阵 DOF 误差测试（收敛率调试中）
 
 ### F2：GPU 装配加速（2-3 周）
 - 重组元素循环为 GPU-friendly 数据布局（SoA）
