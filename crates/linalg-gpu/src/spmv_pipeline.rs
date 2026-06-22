@@ -1,36 +1,47 @@
 // crates/linalg-gpu/src/spmv_pipeline.rs
+use std::any::TypeId;
 use std::borrow::Cow;
 use fem_core::Scalar;
-use wgpu::util::DeviceExt;
 use crate::{GpuContext, GpuCsrMatrix, GpuVector};
 
-/// SpMV parameter uniform layout: alpha (f64), beta (f64), nrows (u32), _pad (u32)
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct SpmvParams {
+struct SpmvParamsF64 {
     alpha: f64,
     beta: f64,
     nrows: u32,
     _pad: u32,
 }
 
-/// Pre-compiled SpMV compute pipeline.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SpmvParamsF32 {
+    alpha: f32,
+    beta: f32,
+    nrows: u32,
+    _pad: u32,
+}
+
+/// Pre-compiled SpMV compute pipelines for supported scalar widths.
 pub struct SpmvPipeline {
-    pipeline: wgpu::ComputePipeline,
+    pipeline_f64: Option<wgpu::ComputePipeline>,
+    pipeline_f32: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    params_buffer_f64: Option<wgpu::Buffer>,
+    params_buffer_f32: wgpu::Buffer,
 }
 
 impl SpmvPipeline {
     pub fn new(device: &wgpu::Device, native_f64: bool) -> Self {
-        let shader_source = if native_f64 {
-            Cow::Borrowed(include_str!("spmv.wgsl"))
-        } else {
-            panic!("f64 emulation path not yet implemented");
-        };
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("spmv_shader"),
-            source: wgpu::ShaderSource::Wgsl(shader_source),
+        let shader_f32 = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("spmv_shader_f32"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("spmv_f32.wgsl"))),
+        });
+        let shader_f64 = native_f64.then(|| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("spmv_shader_f64"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("spmv.wgsl"))),
+            })
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -105,16 +116,46 @@ impl SpmvPipeline {
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("spmv_pipeline"),
+        let pipeline_f32 = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("spmv_pipeline_f32"),
             layout: Some(&pipeline_layout),
-            module: &shader,
+            module: &shader_f32,
             entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });
+        let pipeline_f64 = shader_f64.as_ref().map(|shader| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("spmv_pipeline_f64"),
+                layout: Some(&pipeline_layout),
+                module: shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        });
+        let params_buffer_f32 = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("spmv_params_f32"),
+            size: std::mem::size_of::<SpmvParamsF32>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let params_buffer_f64 = native_f64.then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("spmv_params_f64"),
+                size: std::mem::size_of::<SpmvParamsF64>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
 
-        Self { pipeline, bind_group_layout }
+        Self {
+            pipeline_f64,
+            pipeline_f32,
+            bind_group_layout,
+            params_buffer_f64,
+            params_buffer_f32,
+        }
     }
 
     /// Encode an SpMV dispatch: `y = alpha * A * x + beta * y`.
@@ -128,23 +169,37 @@ impl SpmvPipeline {
         beta: f64,
         y: &GpuVector<T>,
     ) {
-        let params = SpmvParams {
-            alpha,
-            beta,
-            nrows: mat.nrows,
-            _pad: 0,
+        let (pipeline, params_binding) = if TypeId::of::<T>() == TypeId::of::<f64>() {
+            let params = SpmvParamsF64 { alpha, beta, nrows: mat.nrows, _pad: 0 };
+            let params_buffer = self
+                .params_buffer_f64
+                .as_ref()
+                .expect("f64 SpMV requested on adapter without SHADER_F64 support");
+            ctx.queue.write_buffer(params_buffer, 0, bytemuck::bytes_of(&params));
+            (
+                self.pipeline_f64
+                    .as_ref()
+                    .expect("f64 SpMV requested on adapter without SHADER_F64 support"),
+                params_buffer.as_entire_binding(),
+            )
+        } else if TypeId::of::<T>() == TypeId::of::<f32>() {
+            let params = SpmvParamsF32 {
+                alpha: alpha as f32,
+                beta: beta as f32,
+                nrows: mat.nrows,
+                _pad: 0,
+            };
+            ctx.queue.write_buffer(&self.params_buffer_f32, 0, bytemuck::bytes_of(&params));
+            (&self.pipeline_f32, self.params_buffer_f32.as_entire_binding())
+        } else {
+            panic!("unsupported scalar type for SpMV pipeline");
         };
-        let uniform_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("spmv_params"),
-            contents: bytemuck::bytes_of(&params),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
 
         let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("spmv_bind_group"),
             layout: &self.bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: params_binding },
                 wgpu::BindGroupEntry { binding: 1, resource: mat.row_ptr_buffer().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: mat.col_idx_buffer().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: mat.values_buffer().as_entire_binding() },
@@ -154,15 +209,13 @@ impl SpmvPipeline {
         });
 
         let workgroup_count = (mat.nrows + 255) / 256;
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("spmv_pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(workgroup_count, 1, 1);
-        }
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("spmv_pass"),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(pipeline);
+        cpass.set_bind_group(0, &bind_group, &[]);
+        cpass.dispatch_workgroups(workgroup_count, 1, 1);
     }
 
     /// Compute `y = A * x` (convenience shorthand that creates a command encoder, dispatches, and submits).

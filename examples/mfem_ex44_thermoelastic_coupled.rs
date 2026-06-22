@@ -6,9 +6,19 @@
 //!    thermomechanical source) rather than ad-hoc algebraic mappings.
 //! 2. A transient partitioned split time-stepping path.
 //! 3. Selectable linear strategy for monolithic Newton (`gmres` / `schur2x2`).
+//!
+//! Workflow entry points:
+//! - `--export-vtk-prefix <prefix>` writes `<prefix>_mechanics.vtu` and
+//!   `<prefix>_thermal.vtu` for the final state.
+//! - `--checkpoint <path>` / `--restart <path>` use the lightweight text
+//!   checkpoint format for transient split restart.
+//! - `--checkpoint-h5 <path>` / `--restart-h5 <path>` use the shared
+//!   `fem-io-hdf5-parallel` checkpoint format; when built with `--features
+//!   io_hdf5`, checkpoint sidecars for `ux`, `uy`, and `temp` are also emitted.
 
 use std::f64::consts::PI;
 use std::fs;
+use std::io;
 use std::time::Instant;
 
 use fem_assembly::{
@@ -25,9 +35,32 @@ use fem_assembly::{
         MassIntegrator,
     },
 };
+use fem_examples::checkpoint_text::{ensure_parent_dir, format_vec_f64, parse_vec_f64};
+use fem_examples::workflow_cli::{assert_single_restart_source, WorkflowCliOptions};
+use fem_examples::template_runner::{
+    TemplateAdaptiveSummary,
+    TemplateCouplingSummary,
+    maybe_write_template_kpi_csv,
+    print_template_adaptive_summary,
+    print_template_coupling_summary,
+    print_template_header,
+};
+use fem_examples::hdf5_checkpoint::vector_rank_field_f64;
+#[cfg(feature = "io_hdf5")]
+use fem_examples::hdf5_checkpoint::{checkpoint_sidecar_path, write_scalar_checkpoint_xdmf_sidecars};
+use fem_io_hdf5_parallel::{
+    CheckpointBundleF64,
+    ParallelIoConfig,
+    read_checkpoint_fields_f64_latest,
+    validate_checkpoint_layout,
+    write_checkpoint_step_bundle_f64,
+    IoBackend,
+};
+use fem_io::vtk::{DataArray, VtkWriter};
 use fem_linalg::{BlockMatrix, BlockVector, CooMatrix, CsrMatrix};
 use fem_mesh::SimplexMesh;
 use fem_solver::{
+    BuiltinMultiphysicsTemplate,
     solve_gmres,
     solve_pcg_jacobi,
     CoupledLinearStrategy,
@@ -38,6 +71,7 @@ use fem_solver::{
     ImexOperator,
     ImexTimeStepper,
     SolverConfig,
+    builtin_template_spec,
 };
 use fem_space::{
     H1Space,
@@ -235,6 +269,8 @@ struct SolveResult {
     t_norm: f64,
     uy_checksum: f64,
     t_checksum: f64,
+    u: Vec<f64>,
+    temp: Vec<f64>,
 }
 
 struct TransientResult {
@@ -249,6 +285,15 @@ struct TransientResult {
     t_checksum: f64,
     elapsed_ms: f64,
     avg_linear_iters_per_step: Option<f64>,
+    u: Vec<f64>,
+    temp: Vec<f64>,
+}
+
+struct TransientCheckpointState {
+    completed_steps: usize,
+    dt: f64,
+    u: Vec<f64>,
+    temp: Vec<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -259,15 +304,25 @@ enum ImexMethod {
 
 fn main() {
     let args = parse_args();
-    println!("=== fem-rs Example 44: thermoelastic coupled solve ===");
-    println!("  Mesh: {}x{} subdivisions, P{}", args.n, args.n, args.order);
-    println!(
-        "  Coupling: alpha_th={}, beta_diss={}, velocity=({}, {})",
+    let spec = builtin_template_spec(BuiltinMultiphysicsTemplate::ThermoelasticCoupled);
+    let config_line = format!(
+        "n={}, order={}, alpha_th={}, beta_diss={}, vx={}, vy={}, transient={}, compare_methods={}, imex={}, imex_method={}, steps={}, dt={}, linear_strategy={}, nonmatching_transfer={}",
+        args.n,
+        args.order,
         args.alpha,
         args.beta,
         args.vx,
-        args.vy
+        args.vy,
+        args.transient,
+        args.compare_methods,
+        args.imex,
+        args.imex_method,
+        args.steps,
+        args.dt,
+        args.linear_strategy,
+        args.nonmatching_transfer,
     );
+    print_template_header("Example 44: thermoelastic coupled solve", spec, &config_line);
     if args.nonmatching_transfer {
         println!(
             "  Nonmatching transfer: enabled, thermal mesh {}x{}, shift=({}, {})",
@@ -292,6 +347,13 @@ fn main() {
         };
 
         let result = if args.imex {
+            assert_single_restart_source(&WorkflowCliOptions {
+                checkpoint: args.checkpoint.clone(),
+                checkpoint_h5: args.checkpoint_h5.clone(),
+                restart: args.restart.clone(),
+                restart_h5: args.restart_h5.clone(),
+                export_vtk_prefix: args.export_vtk_prefix.clone(),
+            });
             solve_transient_imex_auto(
                 args.n,
                 args.order,
@@ -306,6 +368,20 @@ fn main() {
                 nm,
             )
         } else {
+            let restart_state = args
+                .restart
+                .as_deref()
+                .map(read_transient_checkpoint)
+                .transpose()
+                .unwrap_or_else(|e| panic!("failed to read restart state: {e}"))
+                .or_else(|| {
+                    args.restart_h5
+                        .as_deref()
+                        .map(read_transient_hdf5_checkpoint)
+                        .transpose()
+                        .unwrap_or_else(|e| panic!("failed to read HDF5 restart state: {e}"))
+                });
+
             solve_transient_split_auto(
                 args.n,
                 args.order,
@@ -317,6 +393,7 @@ fn main() {
                 args.steps,
                 1.0,
                 nm,
+                restart_state.as_ref(),
             )
         };
         let mode = if args.imex {
@@ -332,6 +409,61 @@ fn main() {
         match result.avg_linear_iters_per_step {
             Some(v) => println!("  avg_linear_iters_per_step={:.3}", v),
             None => println!("  avg_linear_iters_per_step=n/a"),
+        }
+        let coupling = transient_template_coupling_summary(&result);
+        print_template_coupling_summary(coupling);
+        let adaptive = TemplateAdaptiveSummary {
+            sync_retries: 0,
+            rejected_sync_steps: 0,
+            rollback_count: 0,
+        };
+        print_template_adaptive_summary(adaptive);
+        if !args.compare_methods {
+            if let Err(e) = maybe_write_template_kpi_csv(
+                spec.template.id(),
+                coupling,
+                adaptive,
+                &transient_template_metrics(&result),
+            ) {
+                eprintln!("warning: failed to append template KPI CSV: {e}");
+            }
+        }
+        if let Some(path) = &args.checkpoint {
+            let checkpoint = TransientCheckpointState {
+                completed_steps: result.steps,
+                dt: result.dt,
+                u: result.u.clone(),
+                temp: result.temp.clone(),
+            };
+            if let Err(e) = write_transient_checkpoint(path, &checkpoint) {
+                eprintln!("warning: failed to write checkpoint: {e}");
+            } else {
+                println!("  checkpoint written: {path}");
+            }
+        }
+        if let Some(path) = &args.checkpoint_h5 {
+            let checkpoint = TransientCheckpointState {
+                completed_steps: result.steps,
+                dt: result.dt,
+                u: result.u.clone(),
+                temp: result.temp.clone(),
+            };
+            if let Err(e) = write_transient_hdf5_checkpoint(path, &checkpoint) {
+                eprintln!("warning: failed to write HDF5 checkpoint: {e}");
+            } else {
+                println!("  HDF5 checkpoint written: {path}");
+                #[cfg(feature = "io_hdf5")]
+                if let Err(e) = write_transient_hdf5_xdmf_sidecars(path, &checkpoint) {
+                    eprintln!("warning: failed to write checkpoint XDMF sidecars: {e}");
+                }
+            }
+        }
+        if let Some(prefix) = &args.export_vtk_prefix {
+            if let Err(e) = write_ex44_vtk_exports(prefix, &args, &result.u, &result.temp) {
+                eprintln!("warning: failed to write VTK exports: {e}");
+            } else {
+                println!("  VTK exports written: {}_mechanics.vtu, {}_thermal.vtu", prefix, prefix);
+            }
         }
     } else {
         let strategy = if args.linear_strategy == "schur" {
@@ -378,7 +510,69 @@ fn main() {
         );
         println!("  ||u_x||={:.4e}, ||u_y||={:.4e}, ||T||={:.4e}", result.ux_norm, result.uy_norm, result.t_norm);
         println!("  checksum(u_y)={:.8e}, checksum(T)={:.8e}", result.uy_checksum, result.t_checksum);
+        let coupling = steady_template_coupling_summary(&result);
+        print_template_coupling_summary(coupling);
+        let adaptive = TemplateAdaptiveSummary {
+            sync_retries: 0,
+            rejected_sync_steps: 0,
+            rollback_count: 0,
+        };
+        print_template_adaptive_summary(adaptive);
+        if let Err(e) = maybe_write_template_kpi_csv(
+            spec.template.id(),
+            coupling,
+            adaptive,
+            &steady_template_metrics(&result),
+        ) {
+            eprintln!("warning: failed to append template KPI CSV: {e}");
+        }
+        if let Some(prefix) = &args.export_vtk_prefix {
+            if let Err(e) = write_ex44_vtk_exports(prefix, &args, &result.u, &result.temp) {
+                eprintln!("warning: failed to write VTK exports: {e}");
+            } else {
+                println!("  VTK exports written: {}_mechanics.vtu, {}_thermal.vtu", prefix, prefix);
+            }
+        }
     }
+}
+
+fn transient_template_coupling_summary(result: &TransientResult) -> TemplateCouplingSummary {
+    TemplateCouplingSummary {
+        steps: result.steps,
+        converged_steps: result.steps,
+        max_coupling_iters_used: 1,
+    }
+}
+
+fn steady_template_coupling_summary(result: &SolveResult) -> TemplateCouplingSummary {
+    TemplateCouplingSummary {
+        steps: 1,
+        converged_steps: usize::from(result.converged),
+        max_coupling_iters_used: result.iterations.max(1),
+    }
+}
+
+fn transient_template_metrics(result: &TransientResult) -> [(&'static str, f64); 5] {
+    [
+        ("ux_norm", result.ux_norm),
+        ("uy_norm", result.uy_norm),
+        ("temperature_norm", result.t_norm),
+        ("uy_checksum", result.uy_checksum),
+        (
+            "avg_linear_iters_per_step",
+            result.avg_linear_iters_per_step.unwrap_or(0.0),
+        ),
+    ]
+}
+
+fn steady_template_metrics(result: &SolveResult) -> [(&'static str, f64); 5] {
+    [
+        ("ux_norm", result.ux_norm),
+        ("uy_norm", result.uy_norm),
+        ("temperature_norm", result.t_norm),
+        ("uy_checksum", result.uy_checksum),
+        ("newton_residual", result.final_residual),
+    ]
 }
 
 fn solve_transient_split_auto(
@@ -392,6 +586,7 @@ fn solve_transient_split_auto(
     steps: usize,
     thermal_source_scale: f64,
     nonmatching: Option<NonmatchingConfig>,
+    restart: Option<&TransientCheckpointState>,
 ) -> TransientResult {
     if let Some(cfg) = nonmatching {
         solve_transient_case_nonmatching(
@@ -407,6 +602,7 @@ fn solve_transient_split_auto(
             thermal_source_scale,
             cfg.shift_x,
             cfg.shift_y,
+            restart,
         )
     } else {
         solve_transient_case(
@@ -419,6 +615,7 @@ fn solve_transient_split_auto(
             dt,
             steps,
             thermal_source_scale,
+            restart,
         )
     }
 }
@@ -546,6 +743,7 @@ fn solve_steady_case_nonmatching(
         thermal_source_scale,
         shift_x,
         shift_y,
+        None,
     );
 
     SolveResult {
@@ -559,6 +757,8 @@ fn solve_steady_case_nonmatching(
         t_norm: approx.t_norm,
         uy_checksum: approx.uy_checksum,
         t_checksum: approx.t_checksum,
+        u: approx.u,
+        temp: approx.temp,
     }
 }
 
@@ -572,6 +772,7 @@ fn solve_transient_case(
     dt: f64,
     steps: usize,
     thermal_source_scale: f64,
+    restart: Option<&TransientCheckpointState>,
 ) -> TransientResult {
     let t0 = Instant::now();
     let model = build_model(n, order, alpha_th, beta_diss, vx, vy, thermal_source_scale);
@@ -594,11 +795,15 @@ fn solve_transient_case(
         ..SolverConfig::default()
     };
 
-    let mut u = vec![0.0_f64; model.n_u];
-    let mut temp = vec![0.0_f64; model.n_t];
+    let (mut u, mut temp, start_step) = initialize_transient_state(
+        model.n_u,
+        model.n_t,
+        dt,
+        restart,
+    );
     let mut linear_iters_sum = 0usize;
 
-    for _ in 0..steps {
+    for _ in start_step..steps {
         // Thermal split step.
         let mut rhs_t_step = vec![0.0_f64; model.n_t];
         model.m_tt.spmv(&temp, &mut rhs_t_step);
@@ -648,7 +853,11 @@ fn solve_transient_case(
         uy_checksum: checksum(uy),
         t_checksum: checksum(&temp),
         elapsed_ms: t0.elapsed().as_secs_f64() * 1.0e3,
-        avg_linear_iters_per_step: Some(linear_iters_sum as f64 / (2.0 * steps as f64).max(1.0)),
+        avg_linear_iters_per_step: Some(
+            linear_iters_sum as f64 / (2.0 * (steps.saturating_sub(start_step)) as f64).max(1.0)
+        ),
+        u,
+        temp,
     }
 }
 
@@ -665,6 +874,7 @@ fn solve_transient_case_nonmatching(
     thermal_source_scale: f64,
     shift_x: f64,
     shift_y: f64,
+    restart: Option<&TransientCheckpointState>,
 ) -> TransientResult {
     let t0 = Instant::now();
 
@@ -747,11 +957,15 @@ fn solve_transient_case_nonmatching(
         ..SolverConfig::default()
     };
 
-    let mut u = vec![0.0_f64; n_u_dofs];
-    let mut temp_t = vec![0.0_f64; n_t];
+    let (mut u, mut temp_t, start_step) = initialize_transient_state(
+        n_u_dofs,
+        n_t,
+        dt,
+        restart,
+    );
     let mut linear_iters_sum = 0usize;
 
-    for _ in 0..steps {
+    for _ in start_step..steps {
         let mut rhs_t_step = vec![0.0_f64; n_t];
         m_tt.spmv(&temp_t, &mut rhs_t_step);
         for v in &mut rhs_t_step {
@@ -816,7 +1030,11 @@ fn solve_transient_case_nonmatching(
         uy_checksum: checksum(uy),
         t_checksum: checksum(&temp_t),
         elapsed_ms: t0.elapsed().as_secs_f64() * 1.0e3,
-        avg_linear_iters_per_step: Some(linear_iters_sum as f64 / (2.0 * steps as f64).max(1.0)),
+        avg_linear_iters_per_step: Some(
+            linear_iters_sum as f64 / (2.0 * (steps.saturating_sub(start_step)) as f64).max(1.0)
+        ),
+        u,
+        temp: temp_t,
     }
 }
 
@@ -871,6 +1089,8 @@ fn solve_transient_imex_case(
         t_checksum: checksum(temp),
         elapsed_ms: t0.elapsed().as_secs_f64() * 1.0e3,
         avg_linear_iters_per_step: None,
+        u: state[..model.n_u].to_vec(),
+        temp: temp.to_vec(),
     }
 }
 
@@ -901,6 +1121,7 @@ fn solve_transient_imex_auto(
             thermal_source_scale,
             cfg.shift_x,
             cfg.shift_y,
+            None,
         );
         // Keep IMEX entry-point behavior for nonmatching workflows while the
         // fully monolithic cross-mesh Jacobian path is being developed.
@@ -957,6 +1178,7 @@ fn run_transient_comparison(args: &Args) {
             args.steps,
             1.0,
             nm,
+            None,
         );
         let ssp2 = solve_transient_imex_auto(
             args.n,
@@ -1028,6 +1250,7 @@ fn run_transient_comparison(args: &Args) {
                 dt,
                 steps,
                 1.0,
+                None,
             );
             let split = if args.nonmatching_transfer {
                 solve_transient_split_auto(
@@ -1045,6 +1268,7 @@ fn run_transient_comparison(args: &Args) {
                         shift_x: args.thermal_shift_x,
                         shift_y: args.thermal_shift_y,
                     }),
+                    None,
                 )
             } else {
                 split
@@ -1249,6 +1473,30 @@ fn parse_f64_list(s: &str) -> Vec<f64> {
         .collect()
 }
 
+fn initialize_transient_state(
+    n_u: usize,
+    n_t: usize,
+    dt: f64,
+    restart: Option<&TransientCheckpointState>,
+) -> (Vec<f64>, Vec<f64>, usize) {
+    let Some(restart) = restart else {
+        return (vec![0.0_f64; n_u], vec![0.0_f64; n_t], 0);
+    };
+
+    assert_eq!(restart.u.len(), n_u, "restart state has unexpected mechanics DOF count");
+    assert_eq!(restart.temp.len(), n_t, "restart state has unexpected thermal DOF count");
+    assert!(
+        (restart.dt - dt).abs() < 1.0e-12,
+        "restart dt ({}) does not match requested dt ({dt})",
+        restart.dt
+    );
+    (
+        restart.u.clone(),
+        restart.temp.clone(),
+        restart.completed_steps,
+    )
+}
+
 fn parse_usize_list(s: &str) -> Vec<usize> {
     s.split(',')
         .map(str::trim)
@@ -1395,7 +1643,167 @@ fn state_to_result_steady(
         t_norm: l2_norm(temp),
         uy_checksum: checksum(uy),
         t_checksum: checksum(temp),
+        u: u.to_vec(),
+        temp: temp.to_vec(),
     }
+}
+
+fn write_ex44_vtk_exports(prefix: &str, args: &Args, u: &[f64], temp: &[f64]) -> Result<(), String> {
+    let mechanics_mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mechanics_path = format!("{prefix}_mechanics.vtu");
+    ensure_parent_dir(&mechanics_path).map_err(|e| e.to_string())?;
+    let mut mechanics_writer = VtkWriter::new(&mechanics_mesh);
+    mechanics_writer.add_point_data(DataArray::vectors("displacement", 2, u.to_vec()));
+    if temp.len() == mechanics_mesh.n_nodes() {
+        mechanics_writer.add_point_data(DataArray::scalars("temperature", temp.to_vec()));
+    }
+    mechanics_writer
+        .write_file(&mechanics_path)
+        .map_err(|e| e.to_string())?;
+
+    let mut thermal_mesh = SimplexMesh::<2>::unit_square_tri(if args.nonmatching_transfer {
+        args.thermal_n
+    } else {
+        args.n
+    });
+    if args.nonmatching_transfer {
+        for i in 0..thermal_mesh.n_nodes() {
+            thermal_mesh.coords[2 * i] += args.thermal_shift_x;
+            thermal_mesh.coords[2 * i + 1] += args.thermal_shift_y;
+        }
+    }
+    let thermal_path = format!("{prefix}_thermal.vtu");
+    ensure_parent_dir(&thermal_path).map_err(|e| e.to_string())?;
+    let mut thermal_writer = VtkWriter::new(&thermal_mesh);
+    thermal_writer.add_point_data(DataArray::scalars("temperature", temp.to_vec()));
+    thermal_writer
+        .write_file(&thermal_path)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn write_transient_checkpoint(path: &str, state: &TransientCheckpointState) -> io::Result<()> {
+    ensure_parent_dir(path)?;
+    let content = format!(
+        "format=ex44_transient_split_v1\ncompleted_steps={}\ndt={:.17e}\nu={}\ntemp={}\n",
+        state.completed_steps,
+        state.dt,
+        format_vec_f64(&state.u),
+        format_vec_f64(&state.temp),
+    );
+    fs::write(path, content)
+}
+
+fn write_transient_hdf5_checkpoint(
+    path: &str,
+    state: &TransientCheckpointState,
+) -> Result<(), String> {
+    ensure_parent_dir(path).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(path);
+
+    let n_scalar_u = state.u.len() / 2;
+    let ux = state.u[..n_scalar_u].to_vec();
+    let uy = state.u[n_scalar_u..].to_vec();
+    let bundle = CheckpointBundleF64 {
+        mesh_meta: None,
+        fields: vec![
+            vector_rank_field_f64("u", state.u.clone()),
+            vector_rank_field_f64("ux", ux),
+            vector_rank_field_f64("uy", uy),
+            vector_rank_field_f64("temp", state.temp.clone()),
+        ],
+    };
+    let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+    let step = state.completed_steps as u64;
+    let time = state.completed_steps as f64 * state.dt;
+    write_checkpoint_step_bundle_f64(path, cfg, step, time, &bundle, IoBackend::Partitioned)
+        .map_err(|e| e.to_string())?;
+    validate_checkpoint_layout(path, Some(1)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn read_transient_hdf5_checkpoint(path: &str) -> Result<TransientCheckpointState, String> {
+    let fields = read_checkpoint_fields_f64_latest(
+        path,
+        ParallelIoConfig { world_size: 1, rank: 0 },
+        &["u", "temp"],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut completed_steps = None;
+    let mut dt = None;
+    let mut u = None;
+    let mut temp = None;
+
+    for (name, field) in fields {
+        completed_steps = Some(field.step as usize);
+        dt = Some(if field.step == 0 {
+            0.0
+        } else {
+            field.time / field.step as f64
+        });
+        match name.as_str() {
+            "u" => u = Some(field.values),
+            "temp" => temp = Some(field.values),
+            _ => {}
+        }
+    }
+
+    Ok(TransientCheckpointState {
+        completed_steps: completed_steps.ok_or_else(|| "missing checkpoint step".to_string())?,
+        dt: dt.ok_or_else(|| "missing checkpoint dt".to_string())?,
+        u: u.ok_or_else(|| "missing u field".to_string())?,
+        temp: temp.ok_or_else(|| "missing temp field".to_string())?,
+    })
+}
+
+#[cfg(feature = "io_hdf5")]
+fn write_transient_hdf5_xdmf_sidecars(
+    h5_path: &str,
+    state: &TransientCheckpointState,
+) -> Result<(), String> {
+    let step = state.completed_steps as u64;
+    let time = state.completed_steps as f64 * state.dt;
+    write_scalar_checkpoint_xdmf_sidecars(h5_path, step, time, &["ux", "uy", "temp"])
+}
+
+fn read_transient_checkpoint(path: &str) -> io::Result<TransientCheckpointState> {
+    let content = fs::read_to_string(path)?;
+    let mut format = None;
+    let mut completed_steps = None;
+    let mut dt = None;
+    let mut u = None;
+    let mut temp = None;
+
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "format" => format = Some(value.trim().to_string()),
+            "completed_steps" => completed_steps = value.trim().parse::<usize>().ok(),
+            "dt" => dt = value.trim().parse::<f64>().ok(),
+            "u" => u = Some(parse_checkpoint_values(value.trim())),
+            "temp" => temp = Some(parse_checkpoint_values(value.trim())),
+            _ => {}
+        }
+    }
+
+    if format.as_deref() != Some("ex44_transient_split_v1") {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported checkpoint format"));
+    }
+
+    Ok(TransientCheckpointState {
+        completed_steps: completed_steps.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing completed_steps"))?,
+        dt: dt.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing dt"))?,
+        u: u.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing u field"))?,
+        temp: temp.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing temp field"))?,
+    })
+}
+
+fn parse_checkpoint_values(value: &str) -> Vec<f64> {
+    parse_vec_f64(value)
+        .unwrap_or_else(|e| panic!("invalid checkpoint scalar list '{value}': {e}"))
 }
 
 fn scale_csr(a: &CsrMatrix<f64>, s: f64) -> CsrMatrix<f64> {
@@ -1511,6 +1919,11 @@ struct Args {
     ls_shrink: f64,
     ls_max_backtracks: usize,
     ls_c1: f64,
+    export_vtk_prefix: Option<String>,
+    checkpoint: Option<String>,
+    restart: Option<String>,
+    checkpoint_h5: Option<String>,
+    restart_h5: Option<String>,
 }
 
 impl Args {
@@ -1526,6 +1939,13 @@ impl Args {
 }
 
 fn parse_args() -> Args {
+    parse_args_impl(std::env::args())
+}
+
+fn parse_args_impl<I>(iter: I) -> Args
+where
+    I: IntoIterator<Item = String>,
+{
     let mut a = Args {
         n: 8,
         order: 1,
@@ -1552,8 +1972,14 @@ fn parse_args() -> Args {
         ls_shrink: 0.5,
         ls_max_backtracks: 20,
         ls_c1: 1e-4,
+        export_vtk_prefix: None,
+        checkpoint: None,
+        restart: None,
+        checkpoint_h5: None,
+        restart_h5: None,
     };
-    let mut it = std::env::args().skip(1);
+    let mut workflow = WorkflowCliOptions::default();
+    let mut it = iter.into_iter().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--n" => {
@@ -1641,9 +2067,46 @@ fn parse_args() -> Args {
             "--ls-c1" => {
                 a.ls_c1 = it.next().unwrap_or("1e-4".into()).parse().unwrap_or(1e-4);
             }
+            "--export-vtk-prefix" => {
+                workflow.try_assign(arg.as_str(), Some(
+                    it.next()
+                        .unwrap_or("output/ex44_thermoelastic".into())
+                ));
+            }
+            "--checkpoint" => {
+                workflow.try_assign(arg.as_str(), Some(
+                    it.next()
+                        .unwrap_or("output/ex44_thermoelastic.chk".into())
+                ));
+            }
+            "--checkpoint-h5" => {
+                workflow.try_assign(arg.as_str(), Some(
+                    it.next()
+                        .unwrap_or("output/ex44_thermoelastic.h5".into())
+                ));
+            }
+            "--restart" => {
+                workflow.try_assign(arg.as_str(), Some(
+                    it.next()
+                        .unwrap_or("output/ex44_thermoelastic.chk".into())
+                ));
+                a.transient = true;
+            }
+            "--restart-h5" => {
+                workflow.try_assign(arg.as_str(), Some(
+                    it.next()
+                        .unwrap_or("output/ex44_thermoelastic.h5".into())
+                ));
+                a.transient = true;
+            }
             _ => {}
         }
     }
+    a.export_vtk_prefix = workflow.export_vtk_prefix;
+    a.checkpoint = workflow.checkpoint;
+    a.checkpoint_h5 = workflow.checkpoint_h5;
+    a.restart = workflow.restart;
+    a.restart_h5 = workflow.restart_h5;
     if a.thermal_n == 0 {
         a.thermal_n = a.n;
     }
@@ -1661,6 +2124,9 @@ fn parse_imex_method(s: &str) -> ImexMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static KPI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn ex44_steady_gmres_converges_with_physical_coupling() {
@@ -1730,8 +2196,8 @@ mod tests {
 
     #[test]
     fn ex44_transient_split_responds_to_coupling() {
-        let weak = solve_transient_split_auto(8, 1, 0.02, 0.0, 0.25, 0.10, 0.05, 8, 1.0, None);
-        let strong = solve_transient_split_auto(8, 1, 0.2, 0.0, 0.25, 0.10, 0.05, 8, 1.0, None);
+        let weak = solve_transient_split_auto(8, 1, 0.02, 0.0, 0.25, 0.10, 0.05, 8, 1.0, None, None);
+        let strong = solve_transient_split_auto(8, 1, 0.2, 0.0, 0.25, 0.10, 0.05, 8, 1.0, None, None);
         assert!(strong.uy_norm > weak.uy_norm * 2.0,
             "stronger alpha should increase y-displacement: weak={} strong={}",
             weak.uy_norm,
@@ -1771,7 +2237,7 @@ mod tests {
 
     #[test]
     fn ex44_transient_split_and_imex_are_consistent_scale() {
-        let split = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 8, 1.0, None);
+        let split = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 8, 1.0, None, None);
         let imex = solve_transient_imex_case(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 8, 1.0, ImexMethod::Ssp2);
 
         assert!(split.t_norm > 1.0e-6 && imex.t_norm > 1.0e-6);
@@ -1786,7 +2252,7 @@ mod tests {
 
     #[test]
     fn ex44_transient_comparison_metrics_are_finite() {
-        let split = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 8, 1.0, None);
+        let split = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 8, 1.0, None, None);
         let ssp2 = solve_transient_imex_case(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 8, 1.0, ImexMethod::Ssp2);
 
         assert!(split.elapsed_ms.is_finite() && split.elapsed_ms >= 0.0);
@@ -1799,7 +2265,7 @@ mod tests {
 
     #[test]
     fn ex44_comparison_csv_has_header_and_three_rows() {
-        let split = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 3, 1.0, None);
+        let split = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 3, 1.0, None, None);
         let ssp2 = solve_transient_imex_case(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 3, 1.0, ImexMethod::Ssp2);
         let ark3 = solve_transient_imex_case(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 3, 1.0, ImexMethod::Ark3);
 
@@ -1816,13 +2282,13 @@ mod tests {
     fn ex44_sweep_csv_has_case_and_expected_rows() {
         let c1 = ComparisonCase {
             case_id: "dt=0.010000_steps=4".to_string(),
-            split: solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.01, 4, 1.0, None),
+            split: solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.01, 4, 1.0, None, None),
             ssp2: solve_transient_imex_case(8, 1, 0.2, 0.1, 0.25, 0.10, 0.01, 4, 1.0, ImexMethod::Ssp2),
             ark3: solve_transient_imex_case(8, 1, 0.2, 0.1, 0.25, 0.10, 0.01, 4, 1.0, ImexMethod::Ark3),
         };
         let c2 = ComparisonCase {
             case_id: "dt=0.020000_steps=8".to_string(),
-            split: solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.02, 8, 1.0, None),
+            split: solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.02, 8, 1.0, None, None),
             ssp2: solve_transient_imex_case(8, 1, 0.2, 0.1, 0.25, 0.10, 0.02, 8, 1.0, ImexMethod::Ssp2),
             ark3: solve_transient_imex_case(8, 1, 0.2, 0.1, 0.25, 0.10, 0.02, 8, 1.0, ImexMethod::Ark3),
         };
@@ -1836,6 +2302,200 @@ mod tests {
     }
 
     #[test]
+    fn ex44_template_kpi_csv_row_uses_thermoelastic_contract() {
+        let _guard = KPI_ENV_LOCK.lock().unwrap();
+        let result = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 4, 1.0, None, None);
+        let temp_path = std::env::temp_dir().join(format!(
+            "ex44_template_kpi_{}.csv",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&temp_path);
+        std::env::set_var("FEM_TEMPLATE_KPI_CSV", &temp_path);
+        std::env::set_var("FEM_TEMPLATE_KPI_RUN_ID", "test");
+        std::env::set_var("FEM_TEMPLATE_KPI_TAG", "unit");
+
+        let coupling = transient_template_coupling_summary(&result);
+        let adaptive = TemplateAdaptiveSummary {
+            sync_retries: 0,
+            rejected_sync_steps: 0,
+            rollback_count: 0,
+        };
+        maybe_write_template_kpi_csv(
+            builtin_template_spec(BuiltinMultiphysicsTemplate::ThermoelasticCoupled)
+                .template
+                .id(),
+            coupling,
+            adaptive,
+            &transient_template_metrics(&result),
+        )
+        .unwrap();
+
+        let csv = fs::read_to_string(&temp_path).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 2, "expected header + single KPI row");
+        assert!(lines[0].starts_with("template_id,run_id,tag,steps"));
+        assert!(lines[1].contains("thermoelastic_coupled,test,unit,4,4,1,0,0,0"));
+        assert!(lines[1].contains("ux_norm="));
+        assert!(lines[1].contains("temperature_norm="));
+
+        std::env::remove_var("FEM_TEMPLATE_KPI_CSV");
+        std::env::remove_var("FEM_TEMPLATE_KPI_RUN_ID");
+        std::env::remove_var("FEM_TEMPLATE_KPI_TAG");
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn ex44_transient_checkpoint_roundtrip_restarts_split_consistently() {
+        let _guard = KPI_ENV_LOCK.lock().unwrap();
+        let full = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 6, 1.0, None, None);
+        let partial = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 3, 1.0, None, None);
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "ex44_restart_{}.chk",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&temp_path);
+
+        let checkpoint = TransientCheckpointState {
+            completed_steps: partial.steps,
+            dt: partial.dt,
+            u: partial.u.clone(),
+            temp: partial.temp.clone(),
+        };
+        write_transient_checkpoint(temp_path.to_str().unwrap(), &checkpoint).unwrap();
+        let loaded = read_transient_checkpoint(temp_path.to_str().unwrap()).unwrap();
+        let resumed = solve_transient_split_auto(
+            8,
+            1,
+            0.2,
+            0.1,
+            0.25,
+            0.10,
+            0.05,
+            6,
+            1.0,
+            None,
+            Some(&loaded),
+        );
+
+        assert!((full.ux_norm - resumed.ux_norm).abs() < 1.0e-10);
+        assert!((full.uy_norm - resumed.uy_norm).abs() < 1.0e-10);
+        assert!((full.t_norm - resumed.t_norm).abs() < 1.0e-10);
+        assert!((full.uy_checksum - resumed.uy_checksum).abs() < 1.0e-10);
+        assert!((full.t_checksum - resumed.t_checksum).abs() < 1.0e-10);
+
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn ex44_hdf5_checkpoint_roundtrip_restarts_split_consistently() {
+        let _guard = KPI_ENV_LOCK.lock().unwrap();
+        let full = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 6, 1.0, None, None);
+        let partial = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 3, 1.0, None, None);
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "ex44_restart_{}.h5",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&temp_path);
+
+        let checkpoint = TransientCheckpointState {
+            completed_steps: partial.steps,
+            dt: partial.dt,
+            u: partial.u.clone(),
+            temp: partial.temp.clone(),
+        };
+        write_transient_hdf5_checkpoint(temp_path.to_str().unwrap(), &checkpoint).unwrap();
+        let loaded = read_transient_hdf5_checkpoint(temp_path.to_str().unwrap()).unwrap();
+        let resumed = solve_transient_split_auto(
+            8,
+            1,
+            0.2,
+            0.1,
+            0.25,
+            0.10,
+            0.05,
+            6,
+            1.0,
+            None,
+            Some(&loaded),
+        );
+
+        assert!((full.ux_norm - resumed.ux_norm).abs() < 1.0e-10);
+        assert!((full.uy_norm - resumed.uy_norm).abs() < 1.0e-10);
+        assert!((full.t_norm - resumed.t_norm).abs() < 1.0e-10);
+        assert!((full.uy_checksum - resumed.uy_checksum).abs() < 1.0e-10);
+        assert!((full.t_checksum - resumed.t_checksum).abs() < 1.0e-10);
+
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    #[cfg(feature = "io_hdf5")]
+    #[test]
+    fn ex44_hdf5_checkpoint_writes_xdmf_sidecars() {
+        let _guard = KPI_ENV_LOCK.lock().unwrap();
+        let result = solve_transient_split_auto(4, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 2, 1.0, None, None);
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "ex44_sidecar_{}.h5",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&temp_path);
+
+        let checkpoint = TransientCheckpointState {
+            completed_steps: result.steps,
+            dt: result.dt,
+            u: result.u.clone(),
+            temp: result.temp.clone(),
+        };
+        let h5_path = temp_path.to_string_lossy().to_string();
+        write_transient_hdf5_checkpoint(&h5_path, &checkpoint).unwrap();
+        write_transient_hdf5_xdmf_sidecars(&h5_path, &checkpoint).unwrap();
+
+        for field in ["ux", "uy", "temp"] {
+            let sidecar = checkpoint_sidecar_path(&h5_path, field).unwrap();
+            let xml = fs::read_to_string(&sidecar).unwrap();
+            assert!(xml.contains(field), "sidecar missing field name {field}");
+            assert!(xml.contains("checkpoint_step_"), "sidecar missing time-step grid for {field}");
+            let _ = fs::remove_file(&sidecar);
+        }
+
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn ex44_vtk_export_writes_mechanics_and_thermal_files() {
+        let _guard = KPI_ENV_LOCK.lock().unwrap();
+        let result = solve_transient_split_auto(4, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 2, 1.0, None, None);
+        let prefix = std::env::temp_dir().join(format!(
+            "ex44_vtk_{}",
+            std::process::id()
+        ));
+        let prefix_str = prefix.to_string_lossy().to_string();
+        let mechanics = format!("{}_mechanics.vtu", prefix_str);
+        let thermal = format!("{}_thermal.vtu", prefix_str);
+        let _ = fs::remove_file(&mechanics);
+        let _ = fs::remove_file(&thermal);
+
+        let args = parse_args_from(&["--transient", "--n", "4", "--export-vtk-prefix", &prefix_str]);
+        write_ex44_vtk_exports(&prefix_str, &args, &result.u, &result.temp).unwrap();
+
+        let mech_xml = fs::read_to_string(&mechanics).unwrap();
+        let therm_xml = fs::read_to_string(&thermal).unwrap();
+        assert!(mech_xml.contains("displacement"));
+        assert!(therm_xml.contains("temperature"));
+
+        let _ = fs::remove_file(&mechanics);
+        let _ = fs::remove_file(&thermal);
+    }
+
+    fn parse_args_from(extra: &[&str]) -> Args {
+        let mut argv = vec!["mfem_ex44".to_string()];
+        argv.extend(extra.iter().map(|s| (*s).to_string()));
+        parse_args_impl(argv.into_iter())
+    }
+
+    #[test]
     fn ex44_parse_sweep_lists() {
         let dts = parse_f64_list("0.01, 0.02,0.05");
         let steps = parse_usize_list("4, 8,16");
@@ -1846,7 +2506,7 @@ mod tests {
 
     #[test]
     fn ex44_nonmatching_transient_split_runs_and_stays_in_scale() {
-        let matching = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 4, 1.0, None);
+        let matching = solve_transient_split_auto(8, 1, 0.2, 0.1, 0.25, 0.10, 0.05, 4, 1.0, None, None);
         let nonmatching = solve_transient_split_auto(
             8,
             1,
@@ -1862,6 +2522,7 @@ mod tests {
                 shift_x: 0.02,
                 shift_y: 0.00,
             }),
+            None,
         );
 
         assert!(nonmatching.uy_norm > 1.0e-8);

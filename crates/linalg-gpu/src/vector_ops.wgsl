@@ -25,17 +25,20 @@ struct DotParams {
     _pad2: u32,
 }
 
-@group(1) @binding(0) var<uniform> dot_params: DotParams;
-@group(1) @binding(1) var<storage, read> dot_a: array<f64>;
-@group(1) @binding(2) var<storage, read> dot_b: array<f64>;
-@group(1) @binding(3) var<storage, read_write> dot_result: array<f64>;
+@group(0) @binding(0) var<uniform> dot_params: DotParams;
+@group(0) @binding(1) var<storage, read> dot_a: array<f64>;
+@group(0) @binding(2) var<storage, read> dot_b: array<f64>;
+@group(0) @binding(3) var<storage, read_write> dot_result: array<f64>;
 
 var<workgroup> wg_dot: array<f64, 256>;
 
 @compute @workgroup_size(256)
-fn dot_main(@builtin(local_invocation_id) lid: u32,
-            @builtin(global_invocation_id) gid: u32,
-            @builtin(num_workgroups) num_groups: u32) {
+fn dot_main(@builtin(local_invocation_id) lid3: vec3<u32>,
+        @builtin(global_invocation_id) gid3: vec3<u32>,
+        @builtin(num_workgroups) num_groups3: vec3<u32>) {
+    let lid = lid3.x;
+    let gid = gid3.x;
+    let num_groups = num_groups3.x;
     var acc: f64 = 0.0;
     let stride = num_groups * 256u;
     var i = gid;

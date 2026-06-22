@@ -102,11 +102,16 @@ function RelDelta([double]$Current, [double]$Baseline) {
 }
 
 $expectedTemplates = @(
+    "thermoelastic_coupled",
+    "electrothermal_3d",
     "joule_heating",
     "fsi",
+    "moving_mesh_ale",
+    "moving_mesh_heat",
     "acoustics_structure",
     "electromagnetic_thermal_stress",
-    "reaction_flow_thermal"
+    "reaction_flow_thermal",
+    "immersed_boundary"
 )
 
 $_csvResolved = Resolve-ExistingPath $CsvPath

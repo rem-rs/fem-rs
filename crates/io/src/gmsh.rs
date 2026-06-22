@@ -696,6 +696,7 @@ impl MshParser {
             }
         }
 
+        let nodes_per_elem = elem_type.nodes_per_element();
         Ok(Some(CurvedMesh {
             coords,
             geom_conn,
@@ -703,9 +704,11 @@ impl MshParser {
             elem_type,
             n_elems,
             n_nodes,
+            nodes_per_elem,
             face_conn,
             face_tags,
             face_type,
+            elem_tags: vec![0; n_elems],
         }))
     }
 

@@ -18,6 +18,8 @@
 //! | [`TetRT0`]  | tetrahedron | 4    | 0     |
 //! | [`TetRT1`]  | tetrahedron | 15   | 1     |
 //! | [`HexRT0`]  | hexahedron  | 6    | 0     |
+//! | [`HexRT1`]  | hexahedron  | 36   | 1     |
+//! | [`TetRT2`]  | tetrahedron | 15   | 2     |
 
 pub mod tri;
 pub mod tri_rt1;
@@ -26,7 +28,9 @@ pub mod quad_rt0;
 pub mod quad_rt1;
 pub mod tet;
 pub mod tet_rt1;
+pub mod tet_rt2;
 pub mod hex_rt0;
+pub mod hex_rt1;
 
 pub use tri::TriRT0;
 pub use tri_rt1::TriRT1;
@@ -35,4 +39,6 @@ pub use quad_rt0::QuadRT0;
 pub use quad_rt1::QuadRT1;
 pub use tet::TetRT0;
 pub use tet_rt1::TetRT1;
+pub use tet_rt2::TetRT2;
 pub use hex_rt0::HexRT0;
+pub use hex_rt1::HexRT1;

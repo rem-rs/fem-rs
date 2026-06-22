@@ -10,12 +10,14 @@ use std::f64::consts::PI;
 use fem_assembly::{Assembler, standard::DiffusionIntegrator};
 use fem_examples::template_runner::{
     maybe_write_template_kpi_csv,
+    PartitionedMultirateCliOptions,
     TemplateAdaptiveSummary,
     TemplateCouplingSummary,
     print_template_adaptive_summary,
     print_template_cli_help,
     print_template_coupling_summary,
     print_template_header,
+    push_partitioned_multirate_cli_help,
 };
 use fem_mesh::SimplexMesh;
 use fem_solver::{
@@ -378,6 +380,18 @@ fn parse_args() -> Args {
         sync_retries: 2,
         max_coupling: 12,
     };
+    let mut common = PartitionedMultirateCliOptions {
+        n: a.n,
+        steps: a.steps,
+        dt: a.dt,
+        fast_dt: a.fast_dt,
+        fast_dt_min: a.fast_dt_min,
+        use_subcycling: a.use_subcycling,
+        coupling_tol: a.coupling_tol,
+        sync_error_tol: a.sync_error_tol,
+        sync_retries: a.sync_retries,
+        max_coupling: a.max_coupling,
+    };
 
     let args_vec: Vec<String> = std::env::args().collect();
     let bin = args_vec
@@ -385,61 +399,39 @@ fn parse_args() -> Args {
         .map(std::string::String::as_str)
         .unwrap_or("mfem_ex50_template_acoustics_structure");
     if args_vec.iter().any(|arg| arg == "--help" || arg == "-h") {
+        let mut help_options = vec![];
+        push_partitioned_multirate_cli_help(
+            &mut help_options,
+            "Mesh resolution (default: 14)",
+            "Number of slow synchronization steps (default: 12)",
+            "Slow-step size (default: 0.05)",
+            "Fast subcycling step size (default: 0.01)",
+            "Adaptive sync acceptance tolerance (default: 1.0)",
+        );
+        help_options.extend([
+            ("--drive-amp <float>", "Acoustic drive amplitude (default: 1.0)"),
+            (
+                "--structure-compliance <float>",
+                "Interface compliance coefficient (default: 0.03)",
+            ),
+            (
+                "--relax <float>",
+                "Displacement relaxation in [0.1, 1.0] (default: 0.7)",
+            ),
+        ]);
         print_template_cli_help(
             bin,
-            &[
-                ("--n <int>", "Mesh resolution (default: 14)"),
-                ("--steps <int>", "Number of slow synchronization steps (default: 12)"),
-                ("--dt <float>", "Slow-step size (default: 0.05)"),
-                (
-                    "--fast-dt <float>",
-                    "Fast subcycling step size (default: 0.01)",
-                ),
-                (
-                    "--fast-dt-min <float>",
-                    "Minimum fast subcycling step during retries (default: 1e-3)",
-                ),
-                ("--subcycling", "Enable multirate subcycling (default)"),
-                ("--no-subcycling", "Disable subcycling and use single-rate loop"),
-                ("--drive-amp <float>", "Acoustic drive amplitude (default: 1.0)"),
-                (
-                    "--structure-compliance <float>",
-                    "Interface compliance coefficient (default: 0.03)",
-                ),
-                ("--relax <float>", "Displacement relaxation in [0.1, 1.0] (default: 0.7)"),
-                (
-                    "--coupling-tol <float>",
-                    "Coupling convergence tolerance (default: 1e-7)",
-                ),
-                (
-                    "--sync-error-tol <float>",
-                    "Adaptive sync acceptance tolerance (default: 1.0)",
-                ),
-                (
-                    "--sync-retries <int>",
-                    "Max adaptive retry count at each sync point (default: 2)",
-                ),
-                (
-                    "--max-coupling <int>",
-                    "Maximum coupling iterations per slow step (default: 12)",
-                ),
-            ],
+            &help_options,
         );
         std::process::exit(0);
     }
 
     let mut it = args_vec.into_iter().skip(1);
     while let Some(arg) = it.next() {
+        if common.try_parse_arg(arg.as_str(), &mut it) {
+            continue;
+        }
         match arg.as_str() {
-            "--n" => a.n = it.next().unwrap_or("14".into()).parse().unwrap_or(14),
-            "--steps" => a.steps = it.next().unwrap_or("12".into()).parse().unwrap_or(12),
-            "--dt" => a.dt = it.next().unwrap_or("0.05".into()).parse().unwrap_or(0.05),
-            "--fast-dt" => a.fast_dt = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
-            "--fast-dt-min" => {
-                a.fast_dt_min = it.next().unwrap_or("1e-3".into()).parse().unwrap_or(1.0e-3)
-            }
-            "--subcycling" => a.use_subcycling = true,
-            "--no-subcycling" => a.use_subcycling = false,
             "--drive-amp" => {
                 a.drive_amp = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0)
             }
@@ -448,27 +440,21 @@ fn parse_args() -> Args {
                     it.next().unwrap_or("0.03".into()).parse().unwrap_or(0.03)
             }
             "--relax" => a.relax = it.next().unwrap_or("0.7".into()).parse().unwrap_or(0.7),
-            "--coupling-tol" => {
-                a.coupling_tol = it.next().unwrap_or("1e-7".into()).parse().unwrap_or(1.0e-7)
-            }
-            "--sync-error-tol" => {
-                a.sync_error_tol = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0)
-            }
-            "--sync-retries" => {
-                a.sync_retries = it.next().unwrap_or("2".into()).parse().unwrap_or(2)
-            }
-            "--max-coupling" => {
-                a.max_coupling = it.next().unwrap_or("12".into()).parse().unwrap_or(12)
-            }
             _ => {}
         }
     }
 
-    a.steps = a.steps.max(1);
-    a.fast_dt = a.fast_dt.max(1.0e-12);
-    a.fast_dt_min = a.fast_dt_min.max(1.0e-12).min(a.fast_dt);
-    a.sync_error_tol = a.sync_error_tol.max(0.0);
-    a.max_coupling = a.max_coupling.max(1);
+    common.apply_limits();
+    a.n = common.n;
+    a.steps = common.steps;
+    a.dt = common.dt;
+    a.fast_dt = common.fast_dt;
+    a.fast_dt_min = common.fast_dt_min;
+    a.use_subcycling = common.use_subcycling;
+    a.coupling_tol = common.coupling_tol;
+    a.sync_error_tol = common.sync_error_tol;
+    a.sync_retries = common.sync_retries;
+    a.max_coupling = common.max_coupling;
     a.relax = a.relax.clamp(0.1, 1.0);
     a
 }

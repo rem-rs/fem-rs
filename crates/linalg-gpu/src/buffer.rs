@@ -50,6 +50,20 @@ impl DeviceBuffer {
         }
     }
 
+    /// Create from a byte slice and provision a reusable staging buffer.
+    pub fn from_bytes_with_staging<T: bytemuck::Pod>(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[T],
+        usage: wgpu::BufferUsages,
+        label: &str,
+    ) -> Self {
+        let size = (data.len() * std::mem::size_of::<T>()) as u64;
+        let buffer = Self::with_staging(device, size, usage, label);
+        queue.write_buffer(buffer.buffer(), 0, bytemuck::cast_slice(data));
+        buffer
+    }
+
     /// Create with a staging buffer for CPU readback.
     pub fn with_staging(device: &wgpu::Device, size: u64, usage: wgpu::BufferUsages, label: &str) -> Self {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -110,7 +124,7 @@ mod tests {
                 .await
                 .expect("need a wgpu adapter");
             adapter
-                .request_device(&wgpu::DeviceDescriptor::default(), None)
+                .request_device(&wgpu::DeviceDescriptor::default())
                 .await
                 .expect("need a wgpu device")
         })

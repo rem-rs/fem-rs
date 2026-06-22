@@ -106,7 +106,7 @@ fn verify_reader_meta(file: &H5File, cfg: ParallelIoConfig) -> Result<(), Hdf5Pa
         )));
     }
     let sv = read_scalar_u64_dataset(file, "meta/schema_version")?;
-    if sv != SCHEMA_VERSION_RUST {
+    if sv != u64::from(SCHEMA_VERSION_RUST) {
         return Err(ic(format!(
             "unsupported schema_version in rust-hdf5 backend: file={sv}, expected {SCHEMA_VERSION_RUST}"
         )));
@@ -118,8 +118,7 @@ fn init_new_checkpoint(file: &H5File, cfg: ParallelIoConfig) -> Result<(), Hdf5P
     let root = root_group(file);
     let meta = ensure_child_group(&root, "meta")?;
     write_scalar_u64_ds(&meta, "world_size", cfg.world_size as u64)?;
-    write_scalar_u64_ds(&meta, "schema_version", SCHEMA_VERSION_RUST)?;
-    let _ = ensure_child_group(&root, "steps")?;
+    write_scalar_u64_ds(&meta, "schema_version", u64::from(SCHEMA_VERSION_RUST))?;
     Ok(())
 }
 

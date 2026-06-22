@@ -158,6 +158,7 @@ fn build_mixed_mesh() -> SimplexMesh<2> {
         elem_offsets: Some(elem_offsets),
         face_types: None,
         face_offsets: None,
+        face_to_elem: None,
     }
 }
 

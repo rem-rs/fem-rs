@@ -35,12 +35,17 @@ mod tests {
     #[test]
     fn ex47_template_catalog_is_stable() {
         let cat = builtin_template_catalog();
-        assert_eq!(cat.len(), 5);
-        assert_eq!(cat[0].template, BuiltinMultiphysicsTemplate::JouleHeating);
-        assert_eq!(cat[1].template, BuiltinMultiphysicsTemplate::FluidStructureInteraction);
-        assert_eq!(cat[2].template, BuiltinMultiphysicsTemplate::AcousticsStructure);
-        assert_eq!(cat[3].template, BuiltinMultiphysicsTemplate::ElectromagneticThermalStress);
-        assert_eq!(cat[4].template, BuiltinMultiphysicsTemplate::ReactionFlowThermal);
+        assert_eq!(cat.len(), 10);
+        assert_eq!(cat[0].template, BuiltinMultiphysicsTemplate::ThermoelasticCoupled);
+        assert_eq!(cat[1].template, BuiltinMultiphysicsTemplate::Electrothermal3D);
+        assert_eq!(cat[2].template, BuiltinMultiphysicsTemplate::JouleHeating);
+        assert_eq!(cat[3].template, BuiltinMultiphysicsTemplate::FluidStructureInteraction);
+        assert_eq!(cat[4].template, BuiltinMultiphysicsTemplate::MovingMeshAle);
+        assert_eq!(cat[5].template, BuiltinMultiphysicsTemplate::MovingMeshHeat);
+        assert_eq!(cat[6].template, BuiltinMultiphysicsTemplate::AcousticsStructure);
+        assert_eq!(cat[7].template, BuiltinMultiphysicsTemplate::ElectromagneticThermalStress);
+        assert_eq!(cat[8].template, BuiltinMultiphysicsTemplate::ReactionFlowThermal);
+        assert_eq!(cat[9].template, BuiltinMultiphysicsTemplate::ImmersedBoundary);
     }
 
     /// Every template must declare at least 2 field nodes and at least 1 coupling edge.

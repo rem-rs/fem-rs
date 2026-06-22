@@ -1004,14 +1004,8 @@ pub fn read_checkpoint_bundle_f64(
             time = r.time;
             fields.push((name.to_string(), r));
         }
-        // Mesh meta requires a dedicated read; attempt it if possible.
-        // (best-effort; errors are silently swallowed.)
-        if let Ok(db) = portable_load_db(file_path) {
-            if let Some(se) = db.steps.get(&step) {
-                mesh_meta = se.mesh_meta;
-                time = se.time;
-            }
-        }
+        // Mesh metadata is not currently materialized on the HDF5 feature path.
+        // Preserve the per-field read result and leave mesh_meta as None.
         return Ok(CheckpointBundleReadF64 { step, time, mesh_meta, fields });
     }
 }

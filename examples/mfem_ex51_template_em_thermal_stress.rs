@@ -15,12 +15,14 @@ use fem_assembly::{
 };
 use fem_examples::template_runner::{
     maybe_write_template_kpi_csv,
+    PartitionedMultirateCliOptions,
     TemplateAdaptiveSummary,
     TemplateCouplingSummary,
     print_template_adaptive_summary,
     print_template_cli_help,
     print_template_coupling_summary,
     print_template_header,
+    push_partitioned_multirate_cli_help,
 };
 use fem_mesh::{SimplexMesh, topology::MeshTopology};
 use fem_solver::{
@@ -541,6 +543,18 @@ fn parse_args() -> Args {
         sync_retries: 2,
         fast_dt_min: 1.0e-3,
     };
+    let mut common = PartitionedMultirateCliOptions {
+        n: a.n,
+        steps: a.steps,
+        dt: a.dt,
+        fast_dt: a.fast_dt,
+        fast_dt_min: a.fast_dt_min,
+        use_subcycling: a.use_subcycling,
+        coupling_tol: a.coupling_tol,
+        sync_error_tol: a.sync_error_tol,
+        sync_retries: a.sync_retries,
+        max_coupling: a.max_coupling,
+    };
 
     let args_vec: Vec<String> = std::env::args().collect();
     let bin = args_vec
@@ -548,77 +562,55 @@ fn parse_args() -> Args {
         .map(std::string::String::as_str)
         .unwrap_or("mfem_ex51_template_em_thermal_stress");
     if args_vec.iter().any(|arg| arg == "--help" || arg == "-h") {
+        let mut help_options = vec![];
+        push_partitioned_multirate_cli_help(
+            &mut help_options,
+            "Mesh resolution (default: 12)",
+            "Number of slow synchronization steps (default: 8)",
+            "Slow-step size (default: 0.05)",
+            "Fast subcycling step size (default: 0.01)",
+            "Adaptive sync acceptance tolerance (default: 1.0)",
+        );
+        help_options.extend([
+            ("--drive-amp <float>", "Electrical drive amplitude (default: 0.3)"),
+            ("--sigma0 <float>", "Reference conductivity (default: 5.0)"),
+            (
+                "--sigma-temp <float>",
+                "Conductivity temperature coefficient (default: 0.02)",
+            ),
+            (
+                "--mech-feedback <float>",
+                "Mechanical feedback factor (default: 0.1)",
+            ),
+            ("--kappa <float>", "Thermal diffusivity (default: 1.0)"),
+            (
+                "--alpha-thermal <float>",
+                "Thermal expansion coefficient (default: 0.02)",
+            ),
+            ("--young <float>", "Young's modulus proxy (default: 100.0)"),
+            ("--relax <float>", "Relaxation factor in [0.1, 1.0] (default: 0.7)"),
+            (
+                "--w-residual <float>",
+                "Weight for EM-thermal residual sync component (default: 1.0)",
+            ),
+            (
+                "--w-joule-source <float>",
+                "Weight for Joule-source relative-change sync component (default: 1.0)",
+            ),
+        ]);
         print_template_cli_help(
             bin,
-            &[
-                ("--n <int>", "Mesh resolution (default: 12)"),
-                ("--steps <int>", "Number of slow synchronization steps (default: 8)"),
-                ("--dt <float>", "Slow-step size (default: 0.05)"),
-                (
-                    "--fast-dt <float>",
-                    "Fast subcycling step size (default: 0.01)",
-                ),
-                ("--subcycling", "Enable multirate subcycling (default)"),
-                ("--no-subcycling", "Disable subcycling and use single-rate loop"),
-                ("--drive-amp <float>", "Electrical drive amplitude (default: 0.3)"),
-                ("--sigma0 <float>", "Reference conductivity (default: 5.0)"),
-                (
-                    "--sigma-temp <float>",
-                    "Conductivity temperature coefficient (default: 0.02)",
-                ),
-                (
-                    "--mech-feedback <float>",
-                    "Mechanical feedback factor (default: 0.1)",
-                ),
-                ("--kappa <float>", "Thermal diffusivity (default: 1.0)"),
-                (
-                    "--alpha-thermal <float>",
-                    "Thermal expansion coefficient (default: 0.02)",
-                ),
-                ("--young <float>", "Young's modulus proxy (default: 100.0)"),
-                ("--relax <float>", "Relaxation factor in [0.1, 1.0] (default: 0.7)"),
-                (
-                    "--coupling-tol <float>",
-                    "Coupling convergence tolerance (default: 1e-7)",
-                ),
-                (
-                    "--sync-error-tol <float>",
-                    "Adaptive sync acceptance tolerance (default: 1.0)",
-                ),
-                (
-                    "--w-residual <float>",
-                    "Weight for EM-thermal residual sync component (default: 1.0)",
-                ),
-                (
-                    "--w-joule-source <float>",
-                    "Weight for Joule-source relative-change sync component (default: 1.0)",
-                ),
-                (
-                    "--max-coupling <int>",
-                    "Maximum coupling iterations per slow step (default: 12)",
-                ),
-                (
-                    "--sync-retries <int>",
-                    "Max adaptive retry count at each sync point (default: 2)",
-                ),
-                (
-                    "--fast-dt-min <float>",
-                    "Minimum fast subcycling step during retries (default: 1e-3)",
-                ),
-            ],
+            &help_options,
         );
         std::process::exit(0);
     }
 
     let mut it = args_vec.into_iter().skip(1);
     while let Some(arg) = it.next() {
+        if common.try_parse_arg(arg.as_str(), &mut it) {
+            continue;
+        }
         match arg.as_str() {
-            "--n" => a.n = it.next().unwrap_or("12".into()).parse().unwrap_or(12),
-            "--steps" => a.steps = it.next().unwrap_or("8".into()).parse().unwrap_or(8),
-            "--dt" => a.dt = it.next().unwrap_or("0.05".into()).parse().unwrap_or(0.05),
-            "--fast-dt" => a.fast_dt = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
-            "--subcycling" => a.use_subcycling = true,
-            "--no-subcycling" => a.use_subcycling = false,
             "--drive-amp" => {
                 a.drive_amp = it.next().unwrap_or("0.3".into()).parse().unwrap_or(0.3)
             }
@@ -639,38 +631,29 @@ fn parse_args() -> Args {
                 a.young_modulus = it.next().unwrap_or("100.0".into()).parse().unwrap_or(100.0)
             }
             "--relax" => a.relax = it.next().unwrap_or("0.7".into()).parse().unwrap_or(0.7),
-            "--coupling-tol" => {
-                a.coupling_tol = it.next().unwrap_or("1e-7".into()).parse().unwrap_or(1.0e-7)
-            }
-            "--sync-error-tol" => {
-                a.sync_error_tol = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0)
-            }
             "--w-residual" => {
                 a.w_residual = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0)
             }
             "--w-joule-source" => {
                 a.w_joule_source = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0)
             }
-            "--max-coupling" => {
-                a.max_coupling = it.next().unwrap_or("12".into()).parse().unwrap_or(12)
-            }
-            "--sync-retries" => {
-                a.sync_retries = it.next().unwrap_or("2".into()).parse().unwrap_or(2)
-            }
-            "--fast-dt-min" => {
-                a.fast_dt_min = it.next().unwrap_or("1e-3".into()).parse().unwrap_or(1.0e-3)
-            }
             _ => {}
         }
     }
 
-    a.steps = a.steps.max(1);
-    a.fast_dt = a.fast_dt.max(1.0e-12);
-    a.fast_dt_min = a.fast_dt_min.max(1.0e-12).min(a.fast_dt);
-    a.sync_error_tol = a.sync_error_tol.max(0.0);
+    common.apply_limits();
+    a.n = common.n;
+    a.steps = common.steps;
+    a.dt = common.dt;
+    a.fast_dt = common.fast_dt;
+    a.fast_dt_min = common.fast_dt_min;
+    a.use_subcycling = common.use_subcycling;
+    a.coupling_tol = common.coupling_tol;
+    a.sync_error_tol = common.sync_error_tol;
+    a.sync_retries = common.sync_retries;
+    a.max_coupling = common.max_coupling;
     a.w_residual = a.w_residual.max(0.0);
     a.w_joule_source = a.w_joule_source.max(0.0);
-    a.max_coupling = a.max_coupling.max(1);
     a.relax = a.relax.clamp(0.1, 1.0);
     a
 }

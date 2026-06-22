@@ -50,7 +50,7 @@ pub use lagrange::{HexQ1, QuadQ1, QuadQ2, SegP1, SegP2, SegP3, TetP1, TetP2, Tet
                    LagrangeSegment, LagrangeTriangle, LagrangeTetrahedron, LagrangeQuad, LagrangeHex,
                    SegPk, TriPk, TetPk, QuadQk, HexQk, ref_elem, ElemType};
 pub use nedelec::{TriND1, QuadND1, QuadND2, HexND1, HexND2, TetND1, TriND2, TetND2};
-pub use raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, QuadRT0, HexRT0, QuadRT1};
+pub use raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, QuadRT0, HexRT0, HexRT1, QuadRT1};
 pub use nurbs::{KnotVector, BSplineBasis1D, NurbsPatch2D, NurbsPatch3D,
                 NurbsMesh2D, NurbsMesh3D, greville_abscissae};
 

@@ -1,57 +1,58 @@
 // crates/linalg-gpu/tests/vector_ops_test.rs
+use fem_core::Scalar;
 use fem_linalg_gpu::{GpuContext, GpuVector, VectorOpsPipeline};
 
 fn ctx() -> GpuContext {
     GpuContext::new_sync().expect("gpu context")
 }
 
-#[test]
-fn axpy_simple() {
-    let gpu = ctx();
-    let pipeline = VectorOpsPipeline::new(&gpu.device, gpu.features.native_f64);
-
-    let x = GpuVector::from_slice(&gpu, &[1.0f64, 2.0, 3.0]);
-    let y = GpuVector::from_slice(&gpu, &[4.0f64, 5.0, 6.0]);
-
-    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    // y = 2*x + 0.5*y = [2+2, 4+2.5, 6+3] = [4, 6.5, 9]
-    pipeline.encode_axpy(&gpu, &mut encoder, 2.0, &x, 0.5, &y);
-    gpu.queue.submit(Some(encoder.finish()));
-
-    let result = y.read_to_cpu(&gpu);
-    assert!((result[0] - 4.0).abs() < 1e-14);
-    assert!((result[1] - 6.5).abs() < 1e-14);
-    assert!((result[2] - 9.0).abs() < 1e-14);
+fn assert_close<T: Scalar>(actual: T, expected: T, tol: f64, label: &str) {
+    let diff = (actual - expected).abs();
+    assert!(diff < T::from_f64(tol), "{label}: actual={actual} expected={expected} diff={diff}");
 }
 
-#[test]
-fn dot_simple() {
-    let gpu = ctx();
+fn run_axpy_simple<T: Scalar>(gpu: &GpuContext, tol: f64) {
     let pipeline = VectorOpsPipeline::new(&gpu.device, gpu.features.native_f64);
 
-    let a = GpuVector::from_slice(&gpu, &[1.0f64, 2.0, 3.0]);
-    let b = GpuVector::from_slice(&gpu, &[4.0f64, 5.0, 6.0]);
+    let x = GpuVector::from_slice(gpu, &[T::from_f64(1.0), T::from_f64(2.0), T::from_f64(3.0)]);
+    let y = GpuVector::from_slice(gpu, &[T::from_f64(4.0), T::from_f64(5.0), T::from_f64(6.0)]);
+
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    pipeline.encode_axpy(gpu, &mut encoder, 2.0, &x, 0.5, &y);
+    gpu.queue.submit(Some(encoder.finish()));
+
+    let result = y.read_to_cpu(gpu);
+    assert_close(result[0], T::from_f64(4.0), tol, "axpy[0]");
+    assert_close(result[1], T::from_f64(6.5), tol, "axpy[1]");
+    assert_close(result[2], T::from_f64(9.0), tol, "axpy[2]");
+}
+
+fn run_dot_simple<T: Scalar>(gpu: &GpuContext, tol: f64) {
+    let pipeline = VectorOpsPipeline::new(&gpu.device, gpu.features.native_f64);
+
+    let a = GpuVector::from_slice(gpu, &[T::from_f64(1.0), T::from_f64(2.0), T::from_f64(3.0)]);
+    let b = GpuVector::from_slice(gpu, &[T::from_f64(4.0), T::from_f64(5.0), T::from_f64(6.0)]);
     let n_wg = (a.len() + 255) / 256;
+    let elem_size = std::mem::size_of::<T>() as u64;
     let result_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("dot_result"),
-        size: n_wg as u64 * 8,
+        size: n_wg as u64 * elem_size,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    pipeline.encode_dot(&gpu, &mut encoder, &a, &b, &result_buf);
+    pipeline.encode_dot(gpu, &mut encoder, &a, &b, &result_buf);
     gpu.queue.submit(Some(encoder.finish()));
 
-    // Read back the partial reduction result and sum on CPU
     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("dot_staging"),
-        size: n_wg as u64 * 8,
+        size: n_wg as u64 * elem_size,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    encoder.copy_buffer_to_buffer(&result_buf, 0, &staging, 0, n_wg as u64 * 8);
+    encoder.copy_buffer_to_buffer(&result_buf, 0, &staging, 0, n_wg as u64 * elem_size);
     gpu.queue.submit(Some(encoder.finish()));
 
     let slice = staging.slice(..);
@@ -61,12 +62,30 @@ fn dot_simple() {
     rx.recv().unwrap().unwrap();
 
     let mapped = slice.get_mapped_range();
-    let partials: &[f64] = bytemuck::cast_slice(&mapped);
-    let dot: f64 = partials.iter().sum();
+    let partials: &[T] = bytemuck::cast_slice(&mapped);
+    let dot = partials.iter().copied().fold(T::zero(), |acc, value| acc + value);
     drop(mapped);
-    let _ = slice;
     staging.unmap();
 
-    let expected = 1.0*4.0 + 2.0*5.0 + 3.0*6.0; // = 4+10+18 = 32
-    assert!((dot - expected).abs() < 1e-13, "dot={dot} expected={expected}");
+    assert_close(dot, T::from_f64(32.0), tol, "dot");
+}
+
+#[test]
+fn axpy_simple() {
+    let gpu = ctx();
+    if gpu.features.native_f64 {
+        run_axpy_simple::<f64>(&gpu, 1e-14);
+    } else {
+        run_axpy_simple::<f32>(&gpu, 1e-5);
+    }
+}
+
+#[test]
+fn dot_simple() {
+    let gpu = ctx();
+    if gpu.features.native_f64 {
+        run_dot_simple::<f64>(&gpu, 1e-13);
+    } else {
+        run_dot_simple::<f32>(&gpu, 1e-4);
+    }
 }

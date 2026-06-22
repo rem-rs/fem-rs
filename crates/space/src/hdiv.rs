@@ -123,12 +123,12 @@ impl<M: MeshTopology> HDivSpace<M> {
                 "HDivSpace: Quad RT supports order 0 only"
             ),
             (3, ElementType::Tet4 | ElementType::Tet10) => assert!(
-                order <= 1,
-                "HDivSpace: Tet RT supports orders 0 and 1"
+                order <= 2,
+                "HDivSpace: Tet RT supports orders 0, 1, and 2"
             ),
             (3, ElementType::Hex8) => assert!(
-                order == 0,
-                "HDivSpace: Hex RT supports order 0 only"
+                order <= 1,
+                "HDivSpace: Hex RT supports orders 0 and 1"
             ),
             _ => panic!(
                 "HDivSpace: unsupported (dim={dim}, elem_type={elem_type:?})"
@@ -140,7 +140,7 @@ impl<M: MeshTopology> HDivSpace<M> {
         match (mesh.dim(), &elem_type) {
             (2, ElementType::Tri3 | ElementType::Tri6) => Self::build_2d_tri(mesh, order),
             (2, ElementType::Quad4) => Self::build_2d_quad(mesh, order),
-            (3, ElementType::Tet4 | ElementType::Tet10) => Self::build_3d_tet(mesh, order),
+            (3, ElementType::Tet4 | ElementType::Tet10) => Self::build_3d_tet(mesh, order, elem_type),
             (3, ElementType::Hex8) => Self::build_3d_hex(mesh, order),
             _ => panic!("HDivSpace::build: unsupported (elem_type={elem_type:?})"),
         }
@@ -252,7 +252,7 @@ impl<M: MeshTopology> HDivSpace<M> {
 
     // ─── 3-D tetrahedron construction ──────────────────────────────────────
 
-    fn build_3d_tet(mesh: M, order: u8) -> Self {
+    fn build_3d_tet(mesh: M, order: u8, elem_type: ElementType) -> Self {
         // RT0: 1 DOF per face; RT1: 3 DOFs per face + 3 interior bubble DOFs
         let dofs_per_face = if order == 0 { 1 } else { 3 };
         let interior_dofs = if order == 0 { 0 } else { 3 };

@@ -229,6 +229,7 @@ fn build_sen_mesh(n: usize) -> SimplexMesh<2> {
         elem_offsets: None,
         face_types: None,
         face_offsets: None,
+        face_to_elem: None,
     }
 }
 

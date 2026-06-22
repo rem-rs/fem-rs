@@ -11,24 +11,105 @@
 //!   - `Halfspace` – ψ(x) = n · x − d    (active: ψ < 0)
 //! Edge crossings are found via linear interpolation of ψ, and the outward
 //! normal at the interface is ∇ψ / ‖∇ψ‖.
+//!
+//! Optional workflow hooks:
+//! - `--checkpoint <path>` / `--restart <path>` save and reload a lightweight
+//!   text bundle containing the geometry configuration, solved field, and
+//!   reported metrics.
+//! - `--checkpoint-h5 <path>` / `--restart-h5 <path>` use the shared
+//!   `fem-io-hdf5-parallel` checkpoint format; when built with `--features
+//!   io_hdf5`, an `embedded_solution` XDMF sidecar is also emitted.
+//! - `--export-vtk-prefix <prefix>` writes the final embedded scalar field as
+//!   `<prefix>_embedded_solution.vtu`.
 
-use std::f64::consts::PI;
+use std::{
+    fs,
+    io,
+};
 
+use fem_examples::checkpoint_text::{ensure_parent_dir, format_vec_f64, parse_vec_f64};
+use fem_examples::template_runner::{
+    TemplateAdaptiveSummary,
+    TemplateCouplingSummary,
+    maybe_write_template_kpi_csv,
+    print_template_adaptive_summary,
+    print_template_coupling_summary,
+    print_template_header,
+};
+use fem_examples::hdf5_checkpoint::{scalar_rank_field_f64, vector_rank_field_f64};
+use fem_examples::workflow_cli::{assert_single_restart_source, WorkflowCliOptions};
+#[cfg(feature = "io_hdf5")]
+use fem_examples::hdf5_checkpoint::{checkpoint_sidecar_path, write_scalar_checkpoint_xdmf_sidecars};
+use fem_io_hdf5_parallel::{
+    CheckpointBundleF64,
+    IoBackend,
+    ParallelIoConfig,
+    read_checkpoint_fields_f64_latest,
+    validate_checkpoint_layout,
+    write_checkpoint_step_bundle_f64,
+};
+use fem_io::vtk::{DataArray, VtkWriter};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
-use fem_solver::solve_sparse_cholesky;
+use fem_solver::{BuiltinMultiphysicsTemplate, builtin_template_spec, solve_sparse_cholesky};
 use fem_space::{constraints::apply_dirichlet, fe_space::FESpace, H1Space};
 
 fn main() {
-    let args = parse_args();
-    let result = solve_embedded_problem(&args);
-
-    println!("=== fem-rs Example 38: immersed boundary baseline ===");
-    println!("  Mesh: {}x{} subdivisions, P1 elements", args.n, args.n);
-    println!(
-        "  Circle center: ({:.3}, {:.3}), radius = {:.3}",
-        args.cx, args.cy, args.radius
+    let cli = parse_args();
+    assert_single_restart_source(&WorkflowCliOptions {
+        checkpoint: cli.checkpoint.clone(),
+        checkpoint_h5: cli.checkpoint_h5.clone(),
+        restart: cli.restart.clone(),
+        restart_h5: cli.restart_h5.clone(),
+        export_vtk_prefix: cli.export_vtk_prefix.clone(),
+    });
+    let restart_state = cli
+        .restart
+        .as_deref()
+        .map(read_embedded_checkpoint)
+        .transpose()
+        .unwrap_or_else(|e| panic!("failed to read restart state: {e}"))
+        .or_else(|| {
+            cli.restart_h5
+                .as_deref()
+                .map(read_embedded_hdf5_checkpoint)
+                .transpose()
+                .unwrap_or_else(|e| panic!("failed to read HDF5 restart state: {e}"))
+        });
+    let args = restart_state
+        .as_ref()
+        .map(|state| state.args.clone())
+        .unwrap_or_else(|| cli.sim.clone());
+    let spec = builtin_template_spec(BuiltinMultiphysicsTemplate::ImmersedBoundary);
+    let config_line = format!(
+        "n={}, shape={}, subdiv={}, alpha={}, gamma={}",
+        args.n,
+        level_set_name(&args),
+        args.subdiv,
+        args.alpha,
+        args.nitsche_gamma
     );
+    print_template_header("Example 38: immersed boundary baseline", spec, &config_line);
+    let result = restart_state
+        .as_ref()
+        .map(|state| state.result.clone())
+        .unwrap_or_else(|| solve_embedded_problem(&args));
+    let coupling = TemplateCouplingSummary {
+        steps: 1,
+        converged_steps: 1,
+        max_coupling_iters_used: 1,
+    };
+    let adaptive = TemplateAdaptiveSummary {
+        sync_retries: 0,
+        rejected_sync_steps: 0,
+        rollback_count: 0,
+    };
+
+    if let Some(path) = &cli.restart {
+        println!("  restart loaded: {path}");
+    }
+    println!("  Mesh: {}x{} subdivisions, P1 elements", args.n, args.n);
+    print_geometry_summary(&args);
     println!("  Subtriangulation per cut cell: {}", args.subdiv);
     println!("  Nitsche gamma: {:.3}", args.nitsche_gamma);
     println!("  Active DOFs: {}", result.active_dofs);
@@ -39,8 +120,94 @@ fn main() {
     println!("  Embedded L2 error:      {:.3e}", result.l2_error);
     println!("  Interface L2 error:     {:.3e}", result.boundary_l2_error);
     println!("  Value range on active set: [{:.6}, {:.6}]", result.min_u, result.max_u);
+    print_template_coupling_summary(coupling);
+    print_template_adaptive_summary(adaptive);
+    if let Err(e) = maybe_write_template_kpi_csv(
+        spec.template.id(),
+        coupling,
+        adaptive,
+        &[
+            ("area_rel_error", result.area_rel_error),
+            ("l2_error", result.l2_error),
+            ("boundary_l2_error", result.boundary_l2_error),
+            ("interface_length", result.interface_length),
+        ],
+    ) {
+        eprintln!("warning: failed to append template KPI CSV: {e}");
+    }
+
+    if let Some(path) = &cli.checkpoint {
+        let checkpoint = EmbeddedCheckpointState {
+            args: args.clone(),
+            result: result.clone(),
+        };
+        if let Err(e) = write_embedded_checkpoint(path, &checkpoint) {
+            eprintln!("warning: failed to write checkpoint: {e}");
+        } else {
+            println!("  checkpoint written: {path}");
+        }
+    }
+
+    if let Some(path) = &cli.checkpoint_h5 {
+        let checkpoint = EmbeddedCheckpointState {
+            args: args.clone(),
+            result: result.clone(),
+        };
+        if let Err(e) = write_embedded_hdf5_checkpoint(path, &checkpoint) {
+            eprintln!("warning: failed to write HDF5 checkpoint: {e}");
+        } else {
+            println!("  HDF5 checkpoint written: {path}");
+            #[cfg(feature = "io_hdf5")]
+            if let Err(e) = write_embedded_hdf5_xdmf_sidecars(path, &checkpoint) {
+                eprintln!("warning: failed to write checkpoint XDMF sidecars: {e}");
+            }
+        }
+    }
+
+    if let Some(prefix) = &cli.export_vtk_prefix {
+        if let Err(e) = write_ex38_vtk_export(prefix, &result.mesh, &result.values) {
+            eprintln!("warning: failed to write VTK export: {e}");
+        } else {
+            println!("  VTK export written: {prefix}_embedded_solution.vtu");
+        }
+    }
+
     println!();
     println!("Note: cut-cell baseline now includes a Nitsche-like weak immersed boundary treatment.");
+}
+
+fn level_set_name(args: &Args) -> &'static str {
+    match args.level_set {
+        Some(LevelSetShape::Halfspace { .. }) => "halfspace",
+        _ => "circle",
+    }
+}
+
+fn print_geometry_summary(args: &Args) {
+    match &args.level_set {
+        Some(LevelSetShape::Halfspace { normal, offset }) => {
+            println!(
+                "  Halfspace normal: ({:.3}, {:.3}), offset = {:.3}",
+                normal[0], normal[1], offset
+            );
+        }
+        _ => {
+            println!(
+                "  Circle center: ({:.3}, {:.3}), radius = {:.3}",
+                args.cx, args.cy, args.radius
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CliArgs {
+    sim: Args,
+    checkpoint: Option<String>,
+    checkpoint_h5: Option<String>,
+    restart: Option<String>,
+    restart_h5: Option<String>,
+    export_vtk_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +234,14 @@ struct EmbeddedResult {
     boundary_l2_error: f64,
     min_u: f64,
     max_u: f64,
+    values: Vec<f64>,
+    mesh: SimplexMesh<2>,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddedCheckpointState {
+    args: Args,
+    result: EmbeddedResult,
 }
 
 #[derive(Debug, Clone)]
@@ -174,8 +349,8 @@ fn edge_ls_intersections(
     }
 }
 
-fn parse_args() -> Args {
-    let mut args = Args {
+fn parse_args() -> CliArgs {
+    let mut sim = Args {
         n: 18,
         radius: 0.30,
         cx: 0.5,
@@ -185,20 +360,24 @@ fn parse_args() -> Args {
         nitsche_gamma: 20.0,
         level_set: None,
     };
+    let mut workflow = WorkflowCliOptions::default();
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
+        if workflow.try_parse_arg(arg.as_str(), &mut it) {
+            continue;
+        }
         match arg.as_str() {
-            "--n" => args.n = it.next().unwrap_or("18".into()).parse().unwrap_or(18),
-            "--radius" => args.radius = it.next().unwrap_or("0.30".into()).parse().unwrap_or(0.30),
-            "--cx" => args.cx = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
-            "--cy" => args.cy = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
-            "--alpha" => args.alpha = it.next().unwrap_or("20.0".into()).parse().unwrap_or(20.0),
-            "--subdiv" => args.subdiv = it.next().unwrap_or("8".into()).parse().unwrap_or(8),
+            "--n" => sim.n = it.next().unwrap_or("18".into()).parse().unwrap_or(18),
+            "--radius" => sim.radius = it.next().unwrap_or("0.30".into()).parse().unwrap_or(0.30),
+            "--cx" => sim.cx = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
+            "--cy" => sim.cy = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
+            "--alpha" => sim.alpha = it.next().unwrap_or("20.0".into()).parse().unwrap_or(20.0),
+            "--subdiv" => sim.subdiv = it.next().unwrap_or("8".into()).parse().unwrap_or(8),
             "--nitsche-gamma" => {
-                args.nitsche_gamma = it.next().unwrap_or("20.0".into()).parse().unwrap_or(20.0)
+                sim.nitsche_gamma = it.next().unwrap_or("20.0".into()).parse().unwrap_or(20.0)
             }
             "--level-set" => {
-                args.level_set = match it.next().as_deref() {
+                sim.level_set = match it.next().as_deref() {
                     Some("halfspace") => Some(LevelSetShape::Halfspace {
                         normal: [0.0, 1.0],
                         offset: 0.5,
@@ -209,16 +388,23 @@ fn parse_args() -> Args {
             _ => {}
         }
     }
-    args.radius = args.radius.clamp(0.05, 0.45);
-    args.alpha = args.alpha.max(1.0e-6);
-    args.subdiv = args.subdiv.max(1);
-    args.nitsche_gamma = args.nitsche_gamma.max(1.0e-6);
-    args
+    sim.radius = sim.radius.clamp(0.05, 0.45);
+    sim.alpha = sim.alpha.max(1.0e-6);
+    sim.subdiv = sim.subdiv.max(1);
+    sim.nitsche_gamma = sim.nitsche_gamma.max(1.0e-6);
+    CliArgs {
+        sim,
+        checkpoint: workflow.checkpoint,
+        checkpoint_h5: workflow.checkpoint_h5,
+        restart: workflow.restart,
+        restart_h5: workflow.restart_h5,
+        export_vtk_prefix: workflow.export_vtk_prefix,
+    }
 }
 
 fn solve_embedded_problem(args: &Args) -> EmbeddedResult {
     let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
-    let space = H1Space::new(mesh, 1);
+    let space = H1Space::new(mesh.clone(), 1);
     let ls = args.level_set.clone().unwrap_or_else(|| {
         LevelSetShape::Circle(Circle {
             cx: args.cx,
@@ -284,7 +470,307 @@ fn solve_embedded_problem(args: &Args) -> EmbeddedResult {
         boundary_l2_error,
         min_u,
         max_u,
+        values: solution,
+        mesh,
     }
+}
+
+fn write_ex38_vtk_export(prefix: &str, mesh: &SimplexMesh<2>, values: &[f64]) -> Result<(), String> {
+    let path = format!("{prefix}_embedded_solution.vtu");
+    ensure_parent_dir(&path).map_err(|e| e.to_string())?;
+    let mut writer = VtkWriter::new(mesh);
+    writer.add_point_data(DataArray::scalars("embedded_solution", values.to_vec()));
+    writer.write_file(&path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn write_embedded_checkpoint(path: &str, state: &EmbeddedCheckpointState) -> io::Result<()> {
+    ensure_parent_dir(path)?;
+    let values = format_vec_f64(&state.result.values);
+    let content = format!(
+        "format=ex38_immersed_boundary_v1\nlevel_set={}\nn={}\nradius={:.17e}\ncx={:.17e}\ncy={:.17e}\nalpha={:.17e}\nsubdiv={}\nnitsche_gamma={:.17e}\nactive_dofs={}\narea_estimate={:.17e}\narea_exact={:.17e}\narea_rel_error={:.17e}\ninterface_length={:.17e}\nl2_error={:.17e}\nboundary_l2_error={:.17e}\nmin_u={:.17e}\nmax_u={:.17e}\nvalues={}\n",
+        level_set_name(&state.args),
+        state.args.n,
+        state.args.radius,
+        state.args.cx,
+        state.args.cy,
+        state.args.alpha,
+        state.args.subdiv,
+        state.args.nitsche_gamma,
+        state.result.active_dofs,
+        state.result.area_estimate,
+        state.result.area_exact,
+        state.result.area_rel_error,
+        state.result.interface_length,
+        state.result.l2_error,
+        state.result.boundary_l2_error,
+        state.result.min_u,
+        state.result.max_u,
+        values,
+    );
+    fs::write(path, content)
+}
+
+fn read_embedded_checkpoint(path: &str) -> Result<EmbeddedCheckpointState, String> {
+    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut format = None;
+    let mut level_set = None;
+    let mut n = None;
+    let mut radius = None;
+    let mut cx = None;
+    let mut cy = None;
+    let mut alpha = None;
+    let mut subdiv = None;
+    let mut nitsche_gamma = None;
+    let mut active_dofs = None;
+    let mut area_estimate = None;
+    let mut area_exact = None;
+    let mut area_rel_error = None;
+    let mut interface_length = None;
+    let mut l2_error = None;
+    let mut boundary_l2_error = None;
+    let mut min_u = None;
+    let mut max_u = None;
+    let mut values = None;
+
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "format" => format = Some(value.to_string()),
+            "level_set" => level_set = Some(value.to_string()),
+            "n" => n = value.parse::<usize>().ok(),
+            "radius" => radius = value.parse::<f64>().ok(),
+            "cx" => cx = value.parse::<f64>().ok(),
+            "cy" => cy = value.parse::<f64>().ok(),
+            "alpha" => alpha = value.parse::<f64>().ok(),
+            "subdiv" => subdiv = value.parse::<usize>().ok(),
+            "nitsche_gamma" => nitsche_gamma = value.parse::<f64>().ok(),
+            "active_dofs" => active_dofs = value.parse::<usize>().ok(),
+            "area_estimate" => area_estimate = value.parse::<f64>().ok(),
+            "area_exact" => area_exact = value.parse::<f64>().ok(),
+            "area_rel_error" => area_rel_error = value.parse::<f64>().ok(),
+            "interface_length" => interface_length = value.parse::<f64>().ok(),
+            "l2_error" => l2_error = value.parse::<f64>().ok(),
+            "boundary_l2_error" => boundary_l2_error = value.parse::<f64>().ok(),
+            "min_u" => min_u = value.parse::<f64>().ok(),
+            "max_u" => max_u = value.parse::<f64>().ok(),
+            "values" => values = Some(parse_vec_f64(value)?),
+            _ => {}
+        }
+    }
+
+    if format.as_deref() != Some("ex38_immersed_boundary_v1") {
+        return Err("unsupported checkpoint format".into());
+    }
+
+    let args = Args {
+        n: n.ok_or_else(|| "missing n".to_string())?,
+        radius: radius.ok_or_else(|| "missing radius".to_string())?,
+        cx: cx.ok_or_else(|| "missing cx".to_string())?,
+        cy: cy.ok_or_else(|| "missing cy".to_string())?,
+        alpha: alpha.ok_or_else(|| "missing alpha".to_string())?,
+        subdiv: subdiv.ok_or_else(|| "missing subdiv".to_string())?,
+        nitsche_gamma: nitsche_gamma.ok_or_else(|| "missing nitsche_gamma".to_string())?,
+        level_set: match level_set.as_deref() {
+            Some("halfspace") => Some(LevelSetShape::Halfspace {
+                normal: [0.0, 1.0],
+                offset: 0.5,
+            }),
+            _ => None,
+        },
+    };
+    let values = values.ok_or_else(|| "missing values".to_string())?;
+    let expected_dofs = (args.n + 1) * (args.n + 1);
+    if values.len() != expected_dofs {
+        return Err(format!(
+            "checkpoint values length ({}) does not match expected dofs ({expected_dofs})",
+            values.len()
+        ));
+    }
+
+    Ok(EmbeddedCheckpointState {
+        result: EmbeddedResult {
+            active_dofs: active_dofs.ok_or_else(|| "missing active_dofs".to_string())?,
+            area_estimate: area_estimate.ok_or_else(|| "missing area_estimate".to_string())?,
+            area_exact: area_exact.ok_or_else(|| "missing area_exact".to_string())?,
+            area_rel_error: area_rel_error.ok_or_else(|| "missing area_rel_error".to_string())?,
+            interface_length: interface_length.ok_or_else(|| "missing interface_length".to_string())?,
+            l2_error: l2_error.ok_or_else(|| "missing l2_error".to_string())?,
+            boundary_l2_error: boundary_l2_error.ok_or_else(|| "missing boundary_l2_error".to_string())?,
+            min_u: min_u.ok_or_else(|| "missing min_u".to_string())?,
+            max_u: max_u.ok_or_else(|| "missing max_u".to_string())?,
+            values,
+            mesh: SimplexMesh::<2>::unit_square_tri(args.n),
+        },
+        args,
+    })
+}
+
+fn write_embedded_hdf5_checkpoint(path: &str, state: &EmbeddedCheckpointState) -> Result<(), String> {
+    ensure_parent_dir(path).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(path);
+
+    let bundle = CheckpointBundleF64 {
+        mesh_meta: None,
+        fields: vec![
+            scalar_rank_field_f64("level_set_code", level_set_code(&state.args) as f64),
+            scalar_rank_field_f64("n", state.args.n as f64),
+            scalar_rank_field_f64("radius", state.args.radius),
+            scalar_rank_field_f64("cx", state.args.cx),
+            scalar_rank_field_f64("cy", state.args.cy),
+            scalar_rank_field_f64("alpha", state.args.alpha),
+            scalar_rank_field_f64("subdiv", state.args.subdiv as f64),
+            scalar_rank_field_f64("nitsche_gamma", state.args.nitsche_gamma),
+            scalar_rank_field_f64("active_dofs", state.result.active_dofs as f64),
+            scalar_rank_field_f64("area_estimate", state.result.area_estimate),
+            scalar_rank_field_f64("area_exact", state.result.area_exact),
+            scalar_rank_field_f64("area_rel_error", state.result.area_rel_error),
+            scalar_rank_field_f64("interface_length", state.result.interface_length),
+            scalar_rank_field_f64("l2_error", state.result.l2_error),
+            scalar_rank_field_f64("boundary_l2_error", state.result.boundary_l2_error),
+            scalar_rank_field_f64("min_u", state.result.min_u),
+            scalar_rank_field_f64("max_u", state.result.max_u),
+            vector_rank_field_f64("embedded_solution", state.result.values.clone()),
+        ],
+    };
+    let cfg = ParallelIoConfig { world_size: 1, rank: 0 };
+    write_checkpoint_step_bundle_f64(path, cfg, 1, 1.0, &bundle, IoBackend::Partitioned)
+        .map_err(|e| e.to_string())?;
+    validate_checkpoint_layout(path, Some(1)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn read_embedded_hdf5_checkpoint(path: &str) -> Result<EmbeddedCheckpointState, String> {
+    let fields = read_checkpoint_fields_f64_latest(
+        path,
+        ParallelIoConfig { world_size: 1, rank: 0 },
+        &[
+            "level_set_code",
+            "n",
+            "radius",
+            "cx",
+            "cy",
+            "alpha",
+            "subdiv",
+            "nitsche_gamma",
+            "active_dofs",
+            "area_estimate",
+            "area_exact",
+            "area_rel_error",
+            "interface_length",
+            "l2_error",
+            "boundary_l2_error",
+            "min_u",
+            "max_u",
+            "embedded_solution",
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut level_set_code_value = None;
+    let mut n = None;
+    let mut radius = None;
+    let mut cx = None;
+    let mut cy = None;
+    let mut alpha = None;
+    let mut subdiv = None;
+    let mut nitsche_gamma = None;
+    let mut active_dofs = None;
+    let mut area_estimate = None;
+    let mut area_exact = None;
+    let mut area_rel_error = None;
+    let mut interface_length = None;
+    let mut l2_error = None;
+    let mut boundary_l2_error = None;
+    let mut min_u = None;
+    let mut max_u = None;
+    let mut values = None;
+
+    for (name, field) in fields {
+        match name.as_str() {
+            "level_set_code" => level_set_code_value = field.values.first().copied(),
+            "n" => n = field.values.first().map(|v| *v as usize),
+            "radius" => radius = field.values.first().copied(),
+            "cx" => cx = field.values.first().copied(),
+            "cy" => cy = field.values.first().copied(),
+            "alpha" => alpha = field.values.first().copied(),
+            "subdiv" => subdiv = field.values.first().map(|v| *v as usize),
+            "nitsche_gamma" => nitsche_gamma = field.values.first().copied(),
+            "active_dofs" => active_dofs = field.values.first().map(|v| *v as usize),
+            "area_estimate" => area_estimate = field.values.first().copied(),
+            "area_exact" => area_exact = field.values.first().copied(),
+            "area_rel_error" => area_rel_error = field.values.first().copied(),
+            "interface_length" => interface_length = field.values.first().copied(),
+            "l2_error" => l2_error = field.values.first().copied(),
+            "boundary_l2_error" => boundary_l2_error = field.values.first().copied(),
+            "min_u" => min_u = field.values.first().copied(),
+            "max_u" => max_u = field.values.first().copied(),
+            "embedded_solution" => values = Some(field.values),
+            _ => {}
+        }
+    }
+
+    let n = n.ok_or_else(|| "missing n".to_string())?;
+    let args = Args {
+        n,
+        radius: radius.ok_or_else(|| "missing radius".to_string())?,
+        cx: cx.ok_or_else(|| "missing cx".to_string())?,
+        cy: cy.ok_or_else(|| "missing cy".to_string())?,
+        alpha: alpha.ok_or_else(|| "missing alpha".to_string())?,
+        subdiv: subdiv.ok_or_else(|| "missing subdiv".to_string())?,
+        nitsche_gamma: nitsche_gamma.ok_or_else(|| "missing nitsche_gamma".to_string())?,
+        level_set: decode_level_set(level_set_code_value.ok_or_else(|| "missing level_set_code".to_string())?),
+    };
+    let values = values.ok_or_else(|| "missing embedded_solution".to_string())?;
+    let expected_dofs = (n + 1) * (n + 1);
+    if values.len() != expected_dofs {
+        return Err(format!(
+            "checkpoint values length ({}) does not match expected dofs ({expected_dofs})",
+            values.len()
+        ));
+    }
+
+    Ok(EmbeddedCheckpointState {
+        args,
+        result: EmbeddedResult {
+            active_dofs: active_dofs.ok_or_else(|| "missing active_dofs".to_string())?,
+            area_estimate: area_estimate.ok_or_else(|| "missing area_estimate".to_string())?,
+            area_exact: area_exact.ok_or_else(|| "missing area_exact".to_string())?,
+            area_rel_error: area_rel_error.ok_or_else(|| "missing area_rel_error".to_string())?,
+            interface_length: interface_length.ok_or_else(|| "missing interface_length".to_string())?,
+            l2_error: l2_error.ok_or_else(|| "missing l2_error".to_string())?,
+            boundary_l2_error: boundary_l2_error.ok_or_else(|| "missing boundary_l2_error".to_string())?,
+            min_u: min_u.ok_or_else(|| "missing min_u".to_string())?,
+            max_u: max_u.ok_or_else(|| "missing max_u".to_string())?,
+            values,
+            mesh: SimplexMesh::<2>::unit_square_tri(n),
+        },
+    })
+}
+
+fn level_set_code(args: &Args) -> usize {
+    match args.level_set {
+        Some(LevelSetShape::Halfspace { .. }) => 1,
+        _ => 0,
+    }
+}
+
+fn decode_level_set(code: f64) -> Option<LevelSetShape> {
+    if code.round() as usize == 1 {
+        Some(LevelSetShape::Halfspace {
+            normal: [0.0, 1.0],
+            offset: 0.5,
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "io_hdf5")]
+fn write_embedded_hdf5_xdmf_sidecars(h5_path: &str, state: &EmbeddedCheckpointState) -> Result<(), String> {
+    write_scalar_checkpoint_xdmf_sidecars(h5_path, 1, state.result.area_estimate, &["embedded_solution"])
 }
 
 fn assemble_embedded_system(
@@ -513,76 +999,12 @@ fn map_to_phys(x0: [f64; 2], x1: [f64; 2], x2: [f64; 2], xi: [f64; 2]) -> [f64; 
     ]
 }
 
-fn inside_circle(x: [f64; 2], circle: &Circle) -> bool {
-    let dx = x[0] - circle.cx;
-    let dy = x[1] - circle.cy;
-    dx * dx + dy * dy <= circle.radius * circle.radius
-}
-
 fn barycentric_shape(x: [f64; 2], x0: [f64; 2], x1: [f64; 2], x2: [f64; 2]) -> [f64; 3] {
     let det = (x1[0] - x0[0]) * (x2[1] - x0[1]) - (x1[1] - x0[1]) * (x2[0] - x0[0]);
     let l1 = ((x1[0] - x[0]) * (x2[1] - x[1]) - (x1[1] - x[1]) * (x2[0] - x[0])) / det;
     let l2 = ((x2[0] - x[0]) * (x0[1] - x[1]) - (x2[1] - x[1]) * (x0[0] - x[0])) / det;
     let l3 = 1.0 - l1 - l2;
     [l1, l2, l3]
-}
-
-fn circle_outward_normal(x: [f64; 2], circle: &Circle) -> [f64; 2] {
-    let dx = x[0] - circle.cx;
-    let dy = x[1] - circle.cy;
-    let inv = 1.0 / (dx * dx + dy * dy).sqrt().max(1.0e-14);
-    [dx * inv, dy * inv]
-}
-
-fn triangle_circle_chord(
-    x0: [f64; 2],
-    x1: [f64; 2],
-    x2: [f64; 2],
-    circle: &Circle,
-) -> Option<([f64; 2], f64)> {
-    let mut pts = Vec::<[f64; 2]>::new();
-    edge_circle_intersections(x0, x1, circle, &mut pts);
-    edge_circle_intersections(x1, x2, circle, &mut pts);
-    edge_circle_intersections(x2, x0, circle, &mut pts);
-    dedup_points(&mut pts, 1.0e-10);
-
-    if pts.len() < 2 {
-        return None;
-    }
-    let p0 = pts[0];
-    let p1 = pts[1];
-    let dx = p1[0] - p0[0];
-    let dy = p1[1] - p0[1];
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1.0e-12 {
-        return None;
-    }
-    let mid = [(p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5];
-    Some((mid, len))
-}
-
-fn edge_circle_intersections(a: [f64; 2], b: [f64; 2], circle: &Circle, out: &mut Vec<[f64; 2]>) {
-    let vx = b[0] - a[0];
-    let vy = b[1] - a[1];
-    let ax = a[0] - circle.cx;
-    let ay = a[1] - circle.cy;
-    let aa = vx * vx + vy * vy;
-    let bb = 2.0 * (ax * vx + ay * vy);
-    let cc = ax * ax + ay * ay - circle.radius * circle.radius;
-
-    let disc = bb * bb - 4.0 * aa * cc;
-    if disc < 0.0 {
-        return;
-    }
-    let sdisc = disc.sqrt();
-    let t1 = (-bb - sdisc) / (2.0 * aa);
-    let t2 = (-bb + sdisc) / (2.0 * aa);
-
-    for t in [t1, t2] {
-        if (-1.0e-12..=1.0 + 1.0e-12).contains(&t) {
-            out.push([a[0] + t * vx, a[1] + t * vy]);
-        }
-    }
 }
 
 fn dedup_points(pts: &mut Vec<[f64; 2]>, eps: f64) {
@@ -607,6 +1029,25 @@ fn to_point(x: &[f64]) -> [f64; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, sync::Mutex};
+
+    static KPI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temp_output_path(tag: &str, ext: &str) -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "ex38_{}_{}_{}.{}",
+                tag,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("valid clock")
+                    .as_nanos(),
+                ext
+            ))
+            .to_string_lossy()
+            .to_string()
+    }
 
     #[test]
     fn ex38_embedded_area_is_reasonable() {
@@ -835,6 +1276,191 @@ mod tests {
             "area estimate is not deterministic: {} vs {}", r1.area_estimate, r2.area_estimate);
         assert_eq!(r1.interface_length, r2.interface_length,
             "interface length is not deterministic: {} vs {}", r1.interface_length, r2.interface_length);
+    }
+
+    #[test]
+    fn ex38_text_checkpoint_roundtrip_preserves_solution_and_metrics() {
+        let args = Args {
+            n: 16,
+            radius: 0.30,
+            cx: 0.5,
+            cy: 0.5,
+            alpha: 20.0,
+            subdiv: 8,
+            nitsche_gamma: 20.0,
+            level_set: Some(LevelSetShape::Halfspace {
+                normal: [0.0, 1.0],
+                offset: 0.5,
+            }),
+        };
+        let result = solve_embedded_problem(&args);
+        let path = temp_output_path("checkpoint", "txt");
+        let state = EmbeddedCheckpointState {
+            args: args.clone(),
+            result: result.clone(),
+        };
+
+        write_embedded_checkpoint(&path, &state).unwrap();
+        let restored = read_embedded_checkpoint(&path).unwrap();
+
+        assert_eq!(restored.args.n, args.n);
+        assert_eq!(level_set_name(&restored.args), "halfspace");
+        assert_eq!(restored.result.values.len(), result.values.len());
+        assert_eq!(restored.result.values, result.values);
+        assert!((restored.result.area_rel_error - result.area_rel_error).abs() < 1.0e-15);
+        assert!((restored.result.l2_error - result.l2_error).abs() < 1.0e-15);
+        assert!((restored.result.interface_length - result.interface_length).abs() < 1.0e-15);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ex38_vtk_export_writes_embedded_solution_file() {
+        let args = Args {
+            n: 12,
+            radius: 0.28,
+            cx: 0.5,
+            cy: 0.5,
+            alpha: 20.0,
+            subdiv: 6,
+            nitsche_gamma: 20.0,
+            level_set: None,
+        };
+        let result = solve_embedded_problem(&args);
+        let prefix = temp_output_path("vtk", "out");
+        let vtk_path = format!("{prefix}_embedded_solution.vtu");
+
+        write_ex38_vtk_export(&prefix, &result.mesh, &result.values).unwrap();
+
+        let vtk = fs::read_to_string(&vtk_path).unwrap();
+        assert!(vtk.contains("embedded_solution"));
+
+        let _ = fs::remove_file(vtk_path);
+    }
+
+    #[test]
+    fn ex38_hdf5_checkpoint_roundtrip_preserves_solution_and_metrics() {
+        let args = Args {
+            n: 16,
+            radius: 0.30,
+            cx: 0.5,
+            cy: 0.5,
+            alpha: 20.0,
+            subdiv: 8,
+            nitsche_gamma: 20.0,
+            level_set: None,
+        };
+        let result = solve_embedded_problem(&args);
+        let path = temp_output_path("checkpoint_h5", "h5");
+        let state = EmbeddedCheckpointState {
+            args: args.clone(),
+            result: result.clone(),
+        };
+
+        write_embedded_hdf5_checkpoint(&path, &state).unwrap();
+        let restored = read_embedded_hdf5_checkpoint(&path).unwrap();
+
+        assert_eq!(restored.args.n, args.n);
+        assert_eq!(level_set_name(&restored.args), "circle");
+        assert_eq!(restored.result.values, result.values);
+        assert!((restored.result.area_rel_error - result.area_rel_error).abs() < 1.0e-15);
+        assert!((restored.result.boundary_l2_error - result.boundary_l2_error).abs() < 1.0e-15);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(feature = "io_hdf5")]
+    #[test]
+    fn ex38_hdf5_checkpoint_writes_xdmf_sidecar() {
+        let args = Args {
+            n: 16,
+            radius: 0.30,
+            cx: 0.5,
+            cy: 0.5,
+            alpha: 20.0,
+            subdiv: 8,
+            nitsche_gamma: 20.0,
+            level_set: None,
+        };
+        let result = solve_embedded_problem(&args);
+        let h5_path = temp_output_path("checkpoint_sidecar", "h5");
+        let state = EmbeddedCheckpointState {
+            args,
+            result,
+        };
+
+        write_embedded_hdf5_checkpoint(&h5_path, &state).unwrap();
+        write_embedded_hdf5_xdmf_sidecars(&h5_path, &state).unwrap();
+
+        let sidecar = checkpoint_sidecar_path(&h5_path, "embedded_solution").unwrap();
+        let xdmf = fs::read_to_string(&sidecar).unwrap();
+        assert!(xdmf.contains("embedded_solution"));
+        assert!(xdmf.contains("CollectionType=\"Temporal\""));
+
+        let _ = fs::remove_file(h5_path);
+        let _ = fs::remove_file(sidecar);
+    }
+
+    #[test]
+    fn ex38_template_kpi_csv_row_uses_immersed_boundary_contract() {
+        let _guard = KPI_ENV_LOCK.lock().unwrap();
+        let args = Args {
+            n: 16,
+            radius: 0.30,
+            cx: 0.5,
+            cy: 0.5,
+            alpha: 20.0,
+            subdiv: 8,
+            nitsche_gamma: 20.0,
+            level_set: None,
+        };
+        let result = solve_embedded_problem(&args);
+        let temp_path = std::env::temp_dir().join(format!(
+            "ex38_template_kpi_{}.csv",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&temp_path);
+
+        std::env::set_var("FEM_TEMPLATE_KPI_CSV", &temp_path);
+        std::env::set_var("FEM_TEMPLATE_KPI_RUN_ID", "test");
+        std::env::set_var("FEM_TEMPLATE_KPI_TAG", "unit");
+
+        let coupling = TemplateCouplingSummary {
+            steps: 1,
+            converged_steps: 1,
+            max_coupling_iters_used: 1,
+        };
+        let adaptive = TemplateAdaptiveSummary {
+            sync_retries: 0,
+            rejected_sync_steps: 0,
+            rollback_count: 0,
+        };
+        maybe_write_template_kpi_csv(
+            builtin_template_spec(BuiltinMultiphysicsTemplate::ImmersedBoundary)
+                .template
+                .id(),
+            coupling,
+            adaptive,
+            &[
+                ("area_rel_error", result.area_rel_error),
+                ("l2_error", result.l2_error),
+                ("boundary_l2_error", result.boundary_l2_error),
+                ("interface_length", result.interface_length),
+            ],
+        )
+        .unwrap();
+
+        let csv = fs::read_to_string(&temp_path).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("immersed_boundary,test,unit"));
+        assert!(lines[1].contains("area_rel_error="));
+        assert!(lines[1].contains("boundary_l2_error="));
+
+        std::env::remove_var("FEM_TEMPLATE_KPI_CSV");
+        std::env::remove_var("FEM_TEMPLATE_KPI_RUN_ID");
+        std::env::remove_var("FEM_TEMPLATE_KPI_TAG");
+        let _ = fs::remove_file(&temp_path);
     }
 }
 

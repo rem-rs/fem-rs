@@ -259,6 +259,10 @@ path = "mfem_maxwell.rs"
 name = "mfem_joule"
 path = "mfem_joule.rs"
 
+[[example]]
+name = "mfem_phasefield_fracture"
+path = "mfem_phasefield_fracture.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"

@@ -10,44 +10,69 @@ use std::fmt;
 /// Built-in multiphysics templates planned for first-class support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinMultiphysicsTemplate {
+    /// Thermoelastic coupling.
+    ThermoelasticCoupled,
+    /// 3-D electrothermal coupling.
+    Electrothermal3D,
     /// Electric + thermal coupling (Joule heating).
     JouleHeating,
     /// Fluid-structure interaction.
     FluidStructureInteraction,
+    /// Quasi-ALE moving mesh with conservative transfer.
+    MovingMeshAle,
+    /// Moving-mesh transient heat (quasi-ALE).
+    MovingMeshHeat,
     /// Acoustics-structure interaction.
     AcousticsStructure,
     /// Electromagnetic + thermal + mechanics coupling.
     ElectromagneticThermalStress,
     /// Reaction engineering (chemistry + flow + thermal).
     ReactionFlowThermal,
+    /// Cut-cell immersed boundary with embedded geometry coupling.
+    ImmersedBoundary,
 }
 
 impl BuiltinMultiphysicsTemplate {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 10] = [
+        Self::ThermoelasticCoupled,
+        Self::Electrothermal3D,
         Self::JouleHeating,
         Self::FluidStructureInteraction,
+        Self::MovingMeshAle,
+        Self::MovingMeshHeat,
         Self::AcousticsStructure,
         Self::ElectromagneticThermalStress,
         Self::ReactionFlowThermal,
+        Self::ImmersedBoundary,
     ];
 
     pub fn id(self) -> &'static str {
         match self {
+            Self::ThermoelasticCoupled => "thermoelastic_coupled",
+            Self::Electrothermal3D => "electrothermal_3d",
             Self::JouleHeating => "joule_heating",
             Self::FluidStructureInteraction => "fsi",
+            Self::MovingMeshAle => "moving_mesh_ale",
+            Self::MovingMeshHeat => "moving_mesh_heat",
             Self::AcousticsStructure => "acoustics_structure",
             Self::ElectromagneticThermalStress => "electromagnetic_thermal_stress",
             Self::ReactionFlowThermal => "reaction_flow_thermal",
+            Self::ImmersedBoundary => "immersed_boundary",
         }
     }
 
     pub fn title(self) -> &'static str {
         match self {
+            Self::ThermoelasticCoupled => "Thermoelastic Coupling",
+            Self::Electrothermal3D => "3-D Electrothermal Coupling",
             Self::JouleHeating => "Electric - Thermal (Joule Heating)",
             Self::FluidStructureInteraction => "Fluid - Structure (FSI)",
+            Self::MovingMeshAle => "Moving-Mesh ALE Transfer",
+            Self::MovingMeshHeat => "Moving-Mesh Heat (Quasi-ALE)",
             Self::AcousticsStructure => "Acoustics - Structure",
             Self::ElectromagneticThermalStress => "Magnetic - Thermal - Structural Stress",
             Self::ReactionFlowThermal => "Chemistry - Flow - Thermal (Reaction Engineering)",
+            Self::ImmersedBoundary => "Immersed Boundary",
         }
     }
 }
@@ -126,6 +151,32 @@ pub trait MultiphysicsTemplateNode: Send + Sync {
     }
 }
 
+const THERMOELASTIC_COUPLED_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
+    template: BuiltinMultiphysicsTemplate::ThermoelasticCoupled,
+    field_nodes: &["structural_displacement", "temperature"],
+    coupling_edges: &[
+        "temperature -> thermal_expansion -> structural_load",
+        "structural_dissipation -> thermal_source -> temperature",
+    ],
+    default_coupling_style: TemplateCouplingStyle::Hybrid,
+    default_time_integrator: "steady_newton_or_imex_split",
+    default_nonlinear_solver: "coupled_newton_or_partitioned_split",
+    notes: "Supports steady monolithic thermoelastic solves plus transient split and IMEX workflow variants.",
+};
+
+const ELECTROTHERMAL_3D_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
+    template: BuiltinMultiphysicsTemplate::Electrothermal3D,
+    field_nodes: &["electric_potential", "temperature"],
+    coupling_edges: &[
+        "electric_potential -> joule_source -> temperature",
+        "temperature -> conductivity_update -> electric_potential",
+    ],
+    default_coupling_style: TemplateCouplingStyle::Hybrid,
+    default_time_integrator: "fixed_point_steady_or_pseudo_transient",
+    default_nonlinear_solver: "relaxed_picard",
+    notes: "Provides a practical tetrahedral electrothermal workflow with temperature-dependent conductivity and Joule heating feedback.",
+};
+
 const JOULE_HEATING_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
     template: BuiltinMultiphysicsTemplate::JouleHeating,
     field_nodes: &["electric_potential", "temperature"],
@@ -151,6 +202,32 @@ const FSI_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
     default_time_integrator: "generalized_alpha_or_bdf2",
     default_nonlinear_solver: "partitioned_picard_or_coupled_newton",
     notes: "Supports moving-boundary ALE workflows with optional monolithic upgrades.",
+};
+
+const MOVING_MESH_ALE_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
+    template: BuiltinMultiphysicsTemplate::MovingMeshAle,
+    field_nodes: &["mesh_motion", "transported_scalar"],
+    coupling_edges: &[
+        "mesh_motion -> conservative_transfer -> transported_scalar",
+        "mesh_motion -> smoothing_update -> mesh_quality",
+    ],
+    default_coupling_style: TemplateCouplingStyle::Hybrid,
+    default_time_integrator: "prescribed_motion_transfer_loop",
+    default_nonlinear_solver: "explicit_mesh_update_plus_projection",
+    notes: "Covers quasi-ALE moving-mesh transfer workflows that emphasize mesh validity and conservative scalar transport.",
+};
+
+const MOVING_MESH_HEAT_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
+    template: BuiltinMultiphysicsTemplate::MovingMeshHeat,
+    field_nodes: &["mesh_motion", "temperature"],
+    coupling_edges: &[
+        "mesh_motion -> conservative_transfer -> temperature",
+        "mesh_motion -> ale_convection_velocity -> temperature",
+    ],
+    default_coupling_style: TemplateCouplingStyle::Hybrid,
+    default_time_integrator: "implicit_euler_on_deforming_mesh",
+    default_nonlinear_solver: "partitioned_ale_update_plus_linear_heat_solve",
+    notes: "Tracks quasi-ALE moving-mesh heat workflows with conservative field transfer across mesh updates.",
 };
 
 const ACOUSTICS_STRUCTURE_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
@@ -198,14 +275,32 @@ const REACTION_FLOW_THERMAL_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplat
     notes: "Captures reactive transport with thermal and flow feedback.",
 };
 
+const IMMERSED_BOUNDARY_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
+    template: BuiltinMultiphysicsTemplate::ImmersedBoundary,
+    field_nodes: &["embedded_geometry", "embedded_solution"],
+    coupling_edges: &[
+        "embedded_geometry -> cut_cell_quadrature -> embedded_solution",
+        "embedded_geometry -> nitsche_boundary_terms -> embedded_solution",
+    ],
+    default_coupling_style: TemplateCouplingStyle::Monolithic,
+    default_time_integrator: "steady_cut_cell_solve",
+    default_nonlinear_solver: "direct_or_cg_with_nitsche_bc",
+    notes: "Represents immersed-boundary cut-cell workflows where level-set geometry drives quadrature, active-set assembly, and weak boundary enforcement.",
+};
+
 /// Return the built-in template specification by template key.
 pub fn builtin_template_spec(t: BuiltinMultiphysicsTemplate) -> &'static MultiphysicsTemplateSpec {
     match t {
+        BuiltinMultiphysicsTemplate::ThermoelasticCoupled => &THERMOELASTIC_COUPLED_SPEC,
+        BuiltinMultiphysicsTemplate::Electrothermal3D => &ELECTROTHERMAL_3D_SPEC,
         BuiltinMultiphysicsTemplate::JouleHeating => &JOULE_HEATING_SPEC,
         BuiltinMultiphysicsTemplate::FluidStructureInteraction => &FSI_SPEC,
+        BuiltinMultiphysicsTemplate::MovingMeshAle => &MOVING_MESH_ALE_SPEC,
+        BuiltinMultiphysicsTemplate::MovingMeshHeat => &MOVING_MESH_HEAT_SPEC,
         BuiltinMultiphysicsTemplate::AcousticsStructure => &ACOUSTICS_STRUCTURE_SPEC,
         BuiltinMultiphysicsTemplate::ElectromagneticThermalStress => &EM_THERMAL_STRESS_SPEC,
         BuiltinMultiphysicsTemplate::ReactionFlowThermal => &REACTION_FLOW_THERMAL_SPEC,
+        BuiltinMultiphysicsTemplate::ImmersedBoundary => &IMMERSED_BOUNDARY_SPEC,
     }
 }
 
@@ -224,13 +319,18 @@ mod tests {
     #[test]
     fn builtin_template_catalog_contains_expected_templates() {
         let cat = builtin_template_catalog();
-        assert_eq!(cat.len(), 5);
+        assert_eq!(cat.len(), 10);
         let ids: Vec<&str> = cat.iter().map(|s| s.template.id()).collect();
+        assert!(ids.contains(&"thermoelastic_coupled"));
+        assert!(ids.contains(&"electrothermal_3d"));
         assert!(ids.contains(&"joule_heating"));
         assert!(ids.contains(&"fsi"));
+        assert!(ids.contains(&"moving_mesh_ale"));
+        assert!(ids.contains(&"moving_mesh_heat"));
         assert!(ids.contains(&"acoustics_structure"));
         assert!(ids.contains(&"electromagnetic_thermal_stress"));
         assert!(ids.contains(&"reaction_flow_thermal"));
+        assert!(ids.contains(&"immersed_boundary"));
     }
 
     #[test]

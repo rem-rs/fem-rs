@@ -11,9 +11,11 @@ fem-element = { path = "../element" }
 fem-space = { path = "../space" }
 fem-assembly = { path = "../assembly" }
 fem-linalg = { path = "../linalg" }
-fem-solver = { path = "../solver" }
+fem-linalg-gpu = { path = "../linalg-gpu" }
+fem-solver = { path = "../solver", features = ["gpu"] }
 fem-amg = { path = "../amg" }
 criterion = { workspace = true }
+wgpu = "27"
 
 [features]
 default = ["parallel"]
@@ -43,3 +45,8 @@ path = "mesh.rs"
 name = "micro"
 harness = false
 path = "micro.rs"
+
+[[bench]]
+name = "gpu_micro"
+harness = false
+path = "gpu_micro.rs"

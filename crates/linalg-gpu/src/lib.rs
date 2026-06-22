@@ -10,7 +10,11 @@ pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;
 pub use spmv_pipeline::SpmvPipeline;
 pub use vector::GpuVector;
-pub use vector_pipeline::{VectorOpsPipeline, read_partial_reduction};
+pub use vector_pipeline::{
+    VectorOpsPipeline,
+    read_partial_reduction,
+    read_partial_reduction_staged,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {

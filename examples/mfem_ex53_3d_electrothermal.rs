@@ -49,8 +49,21 @@ use fem_assembly::{
     postprocess::compute_element_gradients,
     standard::DiffusionIntegrator,
 };
+use fem_examples::template_runner::{
+    TemplateAdaptiveSummary,
+    TemplateCouplingSummary,
+    maybe_write_template_kpi_csv,
+    print_template_adaptive_summary,
+    print_template_coupling_summary,
+    print_template_header,
+};
 use fem_mesh::{SimplexMesh, topology::MeshTopology};
-use fem_solver::{SolverConfig, solve_pcg_jacobi};
+use fem_solver::{
+    BuiltinMultiphysicsTemplate,
+    SolverConfig,
+    builtin_template_spec,
+    solve_pcg_jacobi,
+};
 use fem_space::{
     H1Space,
     constraints::{apply_dirichlet, boundary_dofs},
@@ -282,12 +295,19 @@ fn l2_norm(v: &[f64]) -> f64 {
 
 fn main() {
     let args = parse_args();
-    println!("=== fem-rs Example 53: 3-D Electrothermal Coupling ===");
-    println!(
-        "  n={}, V={}, σ₀={}, σ_β={}, κ={}, max_coupling={}, tol={:.1e}",
-        args.n, args.voltage, args.sigma0, args.sigma_beta, args.kappa,
-        args.max_coupling, args.tol
+    let spec = builtin_template_spec(BuiltinMultiphysicsTemplate::Electrothermal3D);
+    let config_line = format!(
+        "n={}, voltage={}, sigma0={}, sigma_beta={}, kappa={}, relax={}, max_coupling={}, tol={:.1e}",
+        args.n,
+        args.voltage,
+        args.sigma0,
+        args.sigma_beta,
+        args.kappa,
+        args.relax,
+        args.max_coupling,
+        args.tol,
     );
+    print_template_header("Example 53: 3-D electrothermal coupling", spec, &config_line);
 
     let r = solve_3d_electrothermal(&args);
 
@@ -299,6 +319,32 @@ fn main() {
     println!("  ||T||₂ = {:.6e}", r.temp_norm);
     println!("  T_max  = {:.6e}", r.temp_max);
     println!("  Joule  = {:.6e}", r.joule_power);
+    let coupling = TemplateCouplingSummary {
+        steps: r.iterations,
+        converged_steps: if r.converged { r.iterations } else { 0 },
+        max_coupling_iters_used: r.iterations,
+    };
+    print_template_coupling_summary(coupling);
+    let adaptive = TemplateAdaptiveSummary {
+        sync_retries: 0,
+        rejected_sync_steps: 0,
+        rollback_count: 0,
+    };
+    print_template_adaptive_summary(adaptive);
+    if let Err(e) = maybe_write_template_kpi_csv(
+        spec.template.id(),
+        coupling,
+        adaptive,
+        &[
+            ("final_relative_change", r.final_relative_change),
+            ("sigma_effective", r.sigma_effective),
+            ("temp_norm", r.temp_norm),
+            ("joule_power", r.joule_power),
+            ("temp_max", r.temp_max),
+        ],
+    ) {
+        eprintln!("warning: failed to append template KPI CSV: {e}");
+    }
 }
 
 fn parse_args() -> Args {
@@ -327,6 +373,10 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::Mutex;
+
+    static KPI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn base_args() -> Args {
         Args {
@@ -442,5 +492,58 @@ mod tests {
             (ratio - expected).abs() < 0.01,
             "||φ||₂ should scale linearly with voltage: got {ratio:.4}, expected ~{expected:.4}"
         );
+    }
+
+    #[test]
+    fn ex53_template_kpi_csv_row_uses_electrothermal_contract() {
+        let _guard = KPI_ENV_LOCK.lock().unwrap();
+        let result = solve_3d_electrothermal(&base_args());
+        let temp_path = std::env::temp_dir().join(format!(
+            "ex53_template_kpi_{}.csv",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&temp_path);
+
+        std::env::set_var("FEM_TEMPLATE_KPI_CSV", &temp_path);
+        std::env::set_var("FEM_TEMPLATE_KPI_RUN_ID", "test");
+        std::env::set_var("FEM_TEMPLATE_KPI_TAG", "unit");
+
+        let coupling = TemplateCouplingSummary {
+            steps: result.iterations,
+            converged_steps: if result.converged { result.iterations } else { 0 },
+            max_coupling_iters_used: result.iterations,
+        };
+        let adaptive = TemplateAdaptiveSummary {
+            sync_retries: 0,
+            rejected_sync_steps: 0,
+            rollback_count: 0,
+        };
+        maybe_write_template_kpi_csv(
+            builtin_template_spec(BuiltinMultiphysicsTemplate::Electrothermal3D)
+                .template
+                .id(),
+            coupling,
+            adaptive,
+            &[
+                ("final_relative_change", result.final_relative_change),
+                ("sigma_effective", result.sigma_effective),
+                ("temp_norm", result.temp_norm),
+                ("joule_power", result.joule_power),
+                ("temp_max", result.temp_max),
+            ],
+        )
+        .unwrap();
+
+        let csv = fs::read_to_string(&temp_path).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("electrothermal_3d,test,unit"));
+        assert!(lines[1].contains("final_relative_change="));
+        assert!(lines[1].contains("temp_max="));
+
+        std::env::remove_var("FEM_TEMPLATE_KPI_CSV");
+        std::env::remove_var("FEM_TEMPLATE_KPI_RUN_ID");
+        std::env::remove_var("FEM_TEMPLATE_KPI_TAG");
+        let _ = fs::remove_file(&temp_path);
     }
 }

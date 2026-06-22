@@ -79,6 +79,147 @@ pub fn print_template_cli_help(bin: &str, options: &[(&str, &str)]) {
     println!("  {:<24} {}", "-h, --help", "Show this help message and exit");
 }
 
+/// Append common multirate partitioned-template CLI help entries.
+pub fn push_partitioned_multirate_cli_help(
+    options: &mut Vec<(&'static str, &'static str)>,
+    n_desc: &'static str,
+    steps_desc: &'static str,
+    dt_desc: &'static str,
+    fast_dt_desc: &'static str,
+    sync_error_desc: &'static str,
+) {
+    options.extend([
+        ("--n <int>", n_desc),
+        ("--steps <int>", steps_desc),
+        ("--dt <float>", dt_desc),
+        ("--fast-dt <float>", fast_dt_desc),
+        ("--subcycling", "Enable multirate subcycling (default)"),
+        ("--no-subcycling", "Disable subcycling and use single-rate loop"),
+        (
+            "--coupling-tol <float>",
+            "Coupling convergence tolerance (default: 1e-7)",
+        ),
+        ("--sync-error-tol <float>", sync_error_desc),
+        (
+            "--sync-retries <int>",
+            "Max adaptive retry count at each sync point (default: 2)",
+        ),
+        (
+            "--max-coupling <int>",
+            "Maximum coupling iterations per slow step (default: 12)",
+        ),
+        (
+            "--fast-dt-min <float>",
+            "Minimum fast subcycling step during retries (default: 1e-3)",
+        ),
+    ]);
+}
+
+#[derive(Clone, Debug)]
+pub struct PartitionedMultirateCliOptions {
+    pub n: usize,
+    pub steps: usize,
+    pub dt: f64,
+    pub fast_dt: f64,
+    pub fast_dt_min: f64,
+    pub use_subcycling: bool,
+    pub coupling_tol: f64,
+    pub sync_error_tol: f64,
+    pub sync_retries: usize,
+    pub max_coupling: usize,
+}
+
+impl PartitionedMultirateCliOptions {
+    pub fn try_parse_arg<I>(&mut self, arg: &str, it: &mut I) -> bool
+    where
+        I: Iterator<Item = String>,
+    {
+        match arg {
+            "--n" => {
+                self.n = it.next().unwrap_or_else(|| self.n.to_string()).parse().unwrap_or(self.n);
+                true
+            }
+            "--steps" => {
+                self.steps = it
+                    .next()
+                    .unwrap_or_else(|| self.steps.to_string())
+                    .parse()
+                    .unwrap_or(self.steps);
+                true
+            }
+            "--dt" => {
+                self.dt = it.next().unwrap_or_else(|| self.dt.to_string()).parse().unwrap_or(self.dt);
+                true
+            }
+            "--fast-dt" => {
+                self.fast_dt = it
+                    .next()
+                    .unwrap_or_else(|| self.fast_dt.to_string())
+                    .parse()
+                    .unwrap_or(self.fast_dt);
+                true
+            }
+            "--fast-dt-min" => {
+                self.fast_dt_min = it
+                    .next()
+                    .unwrap_or_else(|| self.fast_dt_min.to_string())
+                    .parse()
+                    .unwrap_or(self.fast_dt_min);
+                true
+            }
+            "--subcycling" => {
+                self.use_subcycling = true;
+                true
+            }
+            "--no-subcycling" => {
+                self.use_subcycling = false;
+                true
+            }
+            "--coupling-tol" => {
+                self.coupling_tol = it
+                    .next()
+                    .unwrap_or_else(|| self.coupling_tol.to_string())
+                    .parse()
+                    .unwrap_or(self.coupling_tol);
+                true
+            }
+            "--sync-error-tol" => {
+                self.sync_error_tol = it
+                    .next()
+                    .unwrap_or_else(|| self.sync_error_tol.to_string())
+                    .parse()
+                    .unwrap_or(self.sync_error_tol);
+                true
+            }
+            "--sync-retries" => {
+                self.sync_retries = it
+                    .next()
+                    .unwrap_or_else(|| self.sync_retries.to_string())
+                    .parse()
+                    .unwrap_or(self.sync_retries);
+                true
+            }
+            "--max-coupling" => {
+                self.max_coupling = it
+                    .next()
+                    .unwrap_or_else(|| self.max_coupling.to_string())
+                    .parse()
+                    .unwrap_or(self.max_coupling);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn apply_limits(&mut self) {
+        self.steps = self.steps.max(1);
+        self.fast_dt = self.fast_dt.max(1.0e-12);
+        self.fast_dt_min = self.fast_dt_min.max(1.0e-12).min(self.fast_dt);
+        self.sync_error_tol = self.sync_error_tol.max(0.0);
+        self.max_coupling = self.max_coupling.max(1);
+    }
+}
+
 /// Optional KPI row written by built-in multiphysics template examples.
 ///
 /// Set `FEM_TEMPLATE_KPI_CSV` to a file path to enable CSV export.

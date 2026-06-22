@@ -22,8 +22,11 @@
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementType, MeshTopology, SimplexMesh};
 
+pub mod checkpoint_text;
+pub mod hdf5_checkpoint;
 pub mod maxwell;
 pub mod template_runner;
+pub mod workflow_cli;
 pub use maxwell::{
     BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,
     FirstOrderMaxwellSolver3D, FirstOrderStepConfig3D, FirstOrderTimeStepper3D,
