@@ -116,10 +116,10 @@ fn tri_data(k: usize) -> &'static TriRTkData {
             let piv = row[c][c]; assert!(piv.abs() > 1e-14, "TriRTk({k}) singular at col {c}");
             let ip = 1.0 / piv; for j in c..n + mt { row[c][j] *= ip; }
             for rr in 0..n { if rr != c { let f = row[rr][c]; for j in c..n + mt { row[rr][j] -= f * row[c][j]; } } }
-            sel.push(c);
+            sel.push(cp[c]);
         }
         let mut coeff = vec![0.0; n * n];
-        for i in 0..n { for j in 0..n { coeff[i * n + j] = row[i][mt + sel[j]]; } }
+        for i in 0..n { for j in 0..n { coeff[i * n + j] = row[i][mt + j]; } }
         TriRTkData { coeff, n, monomap: sel }
     })
 }
