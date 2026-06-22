@@ -264,6 +264,10 @@ name = "mfem_ex28_sliding_elasticity"
 path = "mfem_ex28_sliding_elasticity.rs"
 
 [[example]]
+name = "mfem_ex29_curved_poisson"
+path = "mfem_ex29_curved_poisson.rs"
+
+[[example]]
 name = "mfem_ex20_wgpu_poisson"
 path = "mfem_ex20_wgpu_poisson.rs"
 

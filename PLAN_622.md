@@ -64,7 +64,7 @@ ex23 — 波动方程（已有 ex10_wave + GeneralizedAlpha/Newmark）
 ex24 — 混合空间离散算子（已有 DiscreteLinearOperator）
 ex27 — 混合 BC Laplace（已有 ex7 + ex9）
 **ex28** — 弹性滑动约束（已补全 `mfem_ex28_sliding_elasticity.rs`）
-ex29 — 曲面 PDE（待补）
+**ex29** — 曲面 Poisson（已补全 `mfem_ex29_curved_poisson.rs`）
 ex30 — 数据振荡自适应（已有 ex15 AMR）
 ex35, ex42 — 不存在（404）
 
