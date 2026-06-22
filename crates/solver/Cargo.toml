@@ -16,6 +16,7 @@ fem-assembly = { path = "../assembly" }
 fem-element  = { path = "../element" }
 fem-linalg   = { path = "../linalg" }
 fem-mesh     = { path = "../mesh" }
+fem-parallel = { path = "../parallel" }
 fem-space    = { path = "../space" }
 nalgebra-sparse = "0.4"
 

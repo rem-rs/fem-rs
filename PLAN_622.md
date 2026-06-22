@@ -98,11 +98,11 @@ ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 - ✅ **Assembler::assemble_bilinear_gpu** — 装配器 GPU 入口（`gpu` feature gate）
 - ✅ **GPU 装配 benchmark** — `assembly.rs` 加入 `bench_assembly_gpu`、`assembly_gpu_vs_cpu` 对比组
 
-### F3：Hypre/生态互操作（1-2 周）
-- 利用 linger 已有 `hypre-rs` feature，补齐 FFI 绑定
-- 实现 `HypreParMatrix` ↔ `ParCsrMatrix` 双向转换
-- `HypreSolver` wrapper（BoomerAMG + 其他 hypre 求解器）
-- 测试：Poisson/弹性 hypre vs linger 一致性
+### F3：Hypre/生态互操作（已完成 ✅）
+- ✅ **HypreBoomerAMG** — BoomerAMG 配置 + AmgPrecond 包装器
+- ✅ **HypreParMatrix** — 串行矩阵 Hypre 风格包装（first_row/last_row/global_nrows）
+- ✅ **hypre_solve_pcg / hypre_solve_gmres** — HYPRE 风格 BoomerAMG 预条件求解器
+- ✅ **一致性测试** — Poisson 2D: hypre(BoomerAMG+PCG) 结果与 native CG 一致 (max|diff| < 1e-6)
 
 ### F4：NURBS 修整与 mortaring（已完成 ✅）
 - ✅ **TrimPolygon** — 矩形/圆 ray-casting inside/outside 测试
