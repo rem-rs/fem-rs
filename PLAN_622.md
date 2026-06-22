@@ -1,204 +1,157 @@
-# PLAN 622 — fem-rs 功能差距补全计划
+# fem-rs 功能评估与超越计划
 
-> 2026-06-22 · 基于源码实际状态，不依赖过时文档
+> 2026-06-22 · 纯代码级评估，基于 `main` 最新状态
 
-## 背景
+## 一、当前状态总览
 
-截至 2026-06-22，fem-rs 在标准连续 FEM 管线上已高度完整：
-Poisson → 弹性 → Maxwell → Darcy → Stokes → Navier-Stokes → 多物理场。
-但通过代码审查发现以下实质性差距需要补全。
+### 已对齐 MFEM 的完整能力
 
-## 差距总览
+| 领域 | 覆盖 |
+|------|------|
+| **元素** | Lagrange P1-3 (Seg/Tri/Tet) + Q1-2 (Quad) + Q1 (Hex) + Pk/Qk 工厂；Nedelec ND1-2 (Tri/Quad/Tet/Hex)；RT0 (Tri/Quad) + RT1 (Tri/Tet) + RT2 (Tri) |
+| **FE 空间** | H1, L2, VectorH1, HCurl, RestrictedHCurl, HDiv, H1Trace, IGA(1D/2D) |
+| **装配积分器** | Diffusion, Mass, Convection, VectorMass, CurlCurl, DivDiv, VectorDiffusion, Elasticity, GradDiv, BoundaryMass, Transpose, Sum, Source, Neumann, VectorSource, VectorBoundaryFlux, TangentialBoundary |
+| **高级装配** | DG-SIP/advection/CDR/elasticity, Nonlinear(Newton/hyperelastic), Mixed, Complex(2×2块), Navier-Stokes, 相场, FSI, 热弹性, 静态凝聚, DPG, 接触 |
+| **Krylov 求解器** | CG, PCG, GMRES, FGMRES, BiCGSTAB, IDR(s), TFQMR, MINRES |
+| **预条件器** | Jacobi, ILU(0/k/UT), ILDLt, AMS, ADS, AMG(RS/SA, V/W/F), RAS, Schur/Block/Stokes(BFBT), LOR, 几何 h-MG, **p-MG/FMG**, 混合精度(f32)预条件器 |
+| **直接解法** | LU, Cholesky, LDLt, MUMPS/MKL 兼容 |
+| **特征值** | LOBPCG, KrylovSchur, 广义特征值 |
+| **ODE/时间** | ForwardEuler, RK4/45, ImplicitEuler, SDIRK2-4, BDF2, Newmark-β, Generalized-α, IMEX(Euler/SSP2/ARK3), 辛(Verlet/Yoshida4), DAE, multi-rate, adaptive, events, **SDC** |
+| **并行** | MPI/Thread/WASM 三后端, METIS, ghost exchange, ParCSR/ParVector/ParAMG, RAS, 分布式 checkpoint |
+| **I/O** | GMSH v2/v4(ASCII+binary), Netgen, Abaqus(named sets), VTK(R/W), Matrix Market, HDF5/XDMF(串行+并行 checkpoint) |
+| **网格** | AMR(ZZ/Kelly/Dörfler), NCMesh(Tri/Tet/Quad/Hex), CurvedMesh(P2 iso), periodic, bounding box, face_elements, SubMesh |
+| **后处理** | GridFunction, L2/L1/H1/W1 error, element grad/curl/div, DiscreteLinearOperator, ProjectCoefficient(L2 投影) |
+| **高级功能** | TMOP(shape/size/L2 度量 + 梯度下降), IGA 多片 C0 合并, ROM/POD(SVD), 接触(Signorini 罚函数) |
 
-| 编号 | 功能 | 状态 | 优先级 |
-|------|------|------|--------|
-| A1 | Quad/Hex H(div) 元素 | 缺失 | P0 |
-| A2 | ProjectCoefficient (L2 投影) | 缺失 | P0 |
-| A3 | Face neighbor 查询 | 缺失 | P1 |
-| B1 | DPG 方法框架 | 缺失 | P1 |
-| C1 | GPU 加速装配 | 缺失 | P1 |
-| C2 | 混合精度 (f32) | 缺失 | P2 |
-| C3 | p-multigrid / FMG | 缺失 | P2 |
-| D1 | TMOP 完整 target-matrix | 部分 | P1 |
-| D2 | NURBS multi-patch / trimming | 部分 | P2 |
-| D3 | ROM / POD 降阶模型 | 缺失 | P2 |
-| E1 | 接触力学 | 缺失 | P2 |
-| E2 | SDC 时间积分 | 缺失 | P3 |
-| E3 | L1 / W1 误差范数 | 缺失 | P3 |
+### 已完成 MFEM 示例
 
----
-
-## Phase A: 基础元素与空间补全 (P0)
-
-### A1 — Quad/Hex Raviart-Thomas 元素
-
-**现状**: `fem-element::raviart_thomas` 仅有 TriRT0/TriRT1/TriRT2/TetRT0/TetRT1，
-Quad 和 Hex 上完全不存在 H(div) 元素。
-
-**影响**: 无法在 Quad 网格上用混合方法求解 Darcy/Stokes，这是混合 FEM 在
-四边形网格上的基础需求。
-
-**工作**:
-1. `crates/element/src/raviart_thomas/quad_rt0.rs` — QuadRT0 (4 DOFs, 4 faces)
-2. `crates/element/src/raviart_thomas/quad_rt1.rs` — QuadRT1 (12 DOFs)
-3. `crates/element/src/raviart_thomas/hex_rt0.rs` — HexRT0 (6 DOFs, 6 faces)
-4. 注册 DOF 符号约定（normal-flux moment per face）并与 Tri/Tet 保持一致
-5. 更新 `VectorAssembler` 和 `HDivSpace` 以支持 Quad/Hex RT 元素
-6. 新增测试：Quad/Hex RT0 精度、DOF 方向一致性
-7. 更新 `mfem_ex4_darcy` 支持 Quad mesh 路径
-
-**验收**: `cargo test -p fem-element --lib raviart_thomas` 通过，
-Quad4 网格上 Darcy 问题收敛
-
-### A2 — ProjectCoefficient (L2 投影到 GridFunction)
-
-**现状**: `FESpace::interpolate(f)` 是节点插值（f 在 DOF 坐标处求值），
-而 MFEM 的 `GridFunction::ProjectCoefficient` 是求解质量矩阵线性系统
-`M x = b` 做 L2 投影，两者数学上不等价。
-
-**影响**: 无法将连续系数函数精确投影到有限元空间（混合方法、后处理等场景必需）。
-
-**工作**:
-1. `crates/assembly/src/grid_function.rs` 新增 `GridFunction::project_coefficient()`
-2. 实现 `assemble_l2_projection_rhs(space, coeff)` — ∫ φ_i f dx
-3. 复用已有 `MassIntegrator` 组装质量矩阵
-4. 用 PCG 求解 `M x = b`
-5. 新增测试：常数/线性函数的 L2 投影精度验证
-6. 与 `interpolate` 做对比测试，验证 L2 投影的优越性
-
-**验收**: 常数投影误差为 0，线性投影误差随 h 以 O(h²) 收敛
-
-### A3 — Face Neighbor 查询
-
-**现状**: `MeshTopology` 缺少面邻居查询接口，仅有 `face_nodes()` 和 `face_tag()`，
-无法按面查询相邻元素。
-
-**工作**:
-1. `crates/mesh/src/topology.rs` 新增 `face_neighbors(face_id) -> (ElemId, Option<ElemId>)`
-2. 分内部面（返回两个相邻元素）和边界面（返回一个元素）
-3. 预计算 `face_elements` 映射（在网格构造时建立）
-
-**验收**: `cargo test -p fem-mesh --lib topology` 通过
+ex1, ex2, ex3, ex4, ex5, ex7, ex8, ex9, ex10(heat/wave/maxwell), ex13, ex14, ex15(dg/dynamic/tet_nc), ex16, ex17, ex18, ex19, ex22, ex25, ex26, ex31, ex32, ex33(frac/tang), ex34, ex36, ex37, ex38, ex39, ex40, ex41, ex43, ex44, ex45, ex46, ex47, ex48, ex49, ex50, ex51, ex52, ex53 + pex1-5 + EM 专项(mf_maxwell/tesla/volta/joule) + IGA(1D/2D)
 
 ---
 
-## Phase B: 方法论补全 (P1)
+## 二、残余差距（仍在 MFEM 之后的功能）
 
-### B1 — DPG 方法框架
+### 元素/空间层
 
-**现状**: 代码中零存在。DPG 是近年来重要的 FEM 方法论分支，用于构建
-天生稳定的离散格式（特别适合对流占优问题）。
+| 项目 | 影响 | 工作量 |
+|------|------|--------|
+| QuadRT1/HexRT1 (高阶 H(div) 在四边形/六面体上) | Darcy/Stokes/混合方法在四边形网格上 | 中 |
+| QuadND3/HexND3 (高阶 H(curl)) | 高精度 Maxwell | 小 |
+| Tetrahedral RT2 (3D H(div) order 2) | 3D Darcy/Stokes 高阶 | 中 |
 
-**工作**:
-1. `crates/assembly/src/dpg.rs` — DPG 基础框架
-2. Trial space / Test space 分离机制（DPG 中 test space 为间断空间）
-3. Enriched test space 构造 (p+Δp)
-4. Optimal test functions 计算（需局部 Riesz 表示）
-5. DPG 装配流程：element-wise 求解局部问题 → 组装 global stiffness
-6. 新增 `mfem_ex23_dpg` 示例（对流-扩散 DPG）
+### 工程基础设施
 
-**验收**: 1D/2D 对流扩散 DPG 解稳定收敛，无数值震荡
+| 项目 | 影响 | 工作量 |
+|------|------|--------|
+| **GPU 加速装配** （非 SpMV，完整元素循环） | 大规模求解性能 | 大 |
+| **CUDA/HIP 后端** | 与 HPC 生态系统集成 | 大 |
+| **Hypre FFI 互操作** | 与现有 MFEM/hypre 生态对接 | 中（已具备 `hypre-rs` feature 支架） |
 
----
+### 专项功能
 
-## Phase C: 工程基础设施 (P1-P2)
+| 项目 | 影响 | 工作量 |
+|------|------|--------|
+| NURBS trimming | CAD 直接到仿真的完整桥接 | 大 |
+| Mortar 方法 | 非协调网格耦合 | 中 |
+| 随机 FEM / 不确定性量化 | 可靠性工程 | 中 |
+| GLVis socket | 实时可视化 | 小 |
+| Conduit/Blueprint | 原位可视化 | 中 |
 
-### C1 — GPU 加速装配
+### 缺失 MFEM 示例
 
-**现状**: GPU 仅用于 wgpu SpMV（`fem-linalg-gpu`），元素装配全部走 CPU。
-
-**工作**:
-1. 将装配流程重组为 GPU-friendly 的数据布局（SoA, coalesced access）
-2. 实现 GPU 上的 Jacobian/积分求值（根据元素类型）
-3. 实现 GPU 上的 COO 累加
-4. 集成到 `Assembler`，提供 `assemble_bilinear_gpu()` 入口
-5. 新增 GPU 装配 benchmark
-
-### C2 — 混合精度支持
-
-**现状**: 所有 FEM 路径硬编码 `f64`，`Scalar` trait 定义了 `f32` 但从未使用。
-
-**工作**:
-1. 将 `Assembler`、`H1Space`、solver 等泛型化支持 `Scalar`
-2. 为 f32 路径添加数值稳定性保障
-3. 新增 f32 vs f64 对比 benchmark
-4. Python bindings 支持 f32/f64 选择
-
-### C3 — p-Multigrid / FMG
-
-**现状**: 仅有 h-multigrid 和 LOR 预条件器。无 p-multigrid 和 FMG。
-
-**工作**:
-1. 利用已有 `p_refine` 模块构建层级间 prolongation/restriction
-2. 实现 V-cycle p-multigrid (层间: high-p → low-p → high-p)
-3. 实现 FMG (nested iteration, coarse → fine)
-4. 新增 `mfem_ex26` 的 p-multigrid 变体
+ex0, ex6, ex11, ex12, ex20, ex21, ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 
 ---
 
-## Phase D: 高级功能 (P1-P2)
+## 三、已超过 MFEM 的差异化优势
 
-### D1 — TMOP 完整 target-matrix 核
-
-**现状**: `mfem_tmop_mesh_quality.rs` 明确标注 "full target-matrix TMOP kernels are still pending"
-
-**工作**:
-1. 实现 TMOP target-matrix 构造（ideal shape/size/alignment）
-2. 实现 shape/size/barrier 等标准 TMOP 度量
-3. 牛顿法优化 interior nodes
-4. 新增 2D/3D 完整 TMOP 示例
-
-### D2 — NURBS multi-patch / trimming
-
-**现状**: 单 patch 1D/2D IGA 已实现
-
-**工作**:
-1. Multi-patch 界面 C0 连续性约束
-2. Trimming curve 集成
-3. 全局 IGA 装配支持 multi-patch
-4. 新增 multi-patch 示例
-
-### D3 — ROM / POD 降阶模型
-
-**现状**: 零存在
-
-**工作**:
-1. POD (Proper Orthogonal Decomposition) 快照方法
-2. Galerkin ROM 投影
-3. 离线/在线分离
-4. 新增 ROM 示例
+| 能力 | fem-rs | MFEM |
+|------|--------|------|
+| **WASM 浏览器支持** | 完整（WasmSolver + multi-Worker 并行 + E2E 测试） | 实验性 emscripten |
+| **Rust 内存/线程安全** | 编译时保证，零未定义行为 | C++ 运行时依赖开发者 |
+| **纯 Rust 工具链** | 无系统 C/C++ 编译器依赖 | 需要 C++17 编译器和库 |
+| **Wgpu GPU** | 跨平台(Vulkan/Metal/DX12/WASM) SpMV | 仅 CUDA/HIP/OMP |
+| **p-多重网格 / FMG** | 完整实现 | 无此类 |
+| **SDC 时间积分** | 完整实现 | 无 |
+| **混合精度预条件器** | f32 预条件 + f64 求解 | 无 |
+| **ROM/POD** | SVD 基 + Galerkin 投影 | ROM 模块有限 |
+| **DPG 方法** | 1D 对流扩散稳定 DPG | ex23 示例 |
+| **接触力学** | Signorini 罚函数 + Newton | 示例较少 |
+| **Python 绑定** | PyO3 + maturin, 零拷贝 | 需编译 SWIG 绑定 |
 
 ---
 
-## Phase E: 专项功能 (P2-P3)
+## 四、追赶计划（6 阶段：F1-F6）
 
-### E1 — 接触力学
-- Signorini 边界条件
-- 罚函数法 / Lagrange 乘子法
-- Hertz 接触验证
+### F1：元素完备化（1 周）
+- QuadRT1：四边形上 H(div) 的一阶（12 DOFs）
+- HexRT1：六面体上 H(div) 的一阶
+- TetRT2：四面体上 H(div) 的 2 阶
+- 测试：Quad/Hex 网格上 Darcy/Stokes 问题收敛
 
-### E2 — SDC 时间积分
-- Spectral Deferred Correction 框架
-- Gauss-Lobatto 节点配置
+### F2：GPU 装配加速（2-3 周）
+- 重组元素循环为 GPU-friendly 数据布局（SoA）
+- 在 wgpu 上实现 Jacobian + 积分 + COO 累加
+- `Assembler::assemble_bilinear_gpu()` 入口
+- GPU 装配 benchmark vs CPU
 
-### E3 — L1 / W1 误差范数
-- `GridFunction::compute_l1_error`
-- `GridFunction::compute_w1_error`
+### F3：Hypre/生态互操作（1-2 周）
+- 利用 linger 已有 `hypre-rs` feature，补齐 FFI 绑定
+- 实现 `HypreParMatrix` ↔ `ParCsrMatrix` 双向转换
+- `HypreSolver` wrapper（BoomerAMG + 其他 hypre 求解器）
+- 测试：Poisson/弹性 hypre vs linger 一致性
+
+### F4：NURBS 修整与 mortaring（2-3 周）
+- Trim curve 定义和相交检测
+- 裁剪单元的积分点生成
+- Mortar 接口：patch 间弱耦合（不需要几何精确匹配）
+- 测试：裁剪圆柱/圆环 + 强弱耦合验证
+
+### F5：生态系统补全（1-2 周）
+- GLVis socket 连接（实时可视化）
+- Conduit/Blueprint 写入（原位可视化/VisIt 集成）
+- 随机场生成 + 蒙特卡洛 wrapper
+- ex0/ex6/ex11/ex12/ex20/ex21 示例补全
+
+### F6：质量与工程化（持续）
+- CI 增强：覆盖所有示例
+- 性能 benchmark 套件
+- API 文档完善
+- Rust API 准则合规审查
 
 ---
 
-## 执行顺序
+## 五、超越计划（3 阶段：X1-X3）
+
+### X1：WASM 云原生 FEM（1-2 月）
+- Web Worker 多 rank 并行求解（已有基础）
+- 浏览器端可视化 + 交互式参数调节
+- 云端部署：fem-rs 作为 Serverless 函数
+- **价值**：无安装的 FEM 求解，教育/轻量工程分析
+
+### X2：Rust 原生 GPU FEM 全栈（2-3 月）
+- wgpu 上的完整 FEM 装配 + 求解管线
+- 单二进制跨平台 GPU：Vulkan/Metal/DX12/WASM
+- 对比：MFEM 需要 CUDA/HIP/OMP 三套后端
+- **价值**：消除 GPU 平台锁定
+
+### X3：Python 优先接口（1-2 月）
+- 扩展 Python 绑定覆盖所有 crate
+- NumPy/SciPy 互操作（零拷贝 CSR/向量）
+- Jupyter notebook 集成
+- Matplotlib 可视化 pipeline
+- **价值**：降低使用门槛，进入 Python 科学计算生态
+
+---
+
+## 六、实施顺序建议
 
 ```
-Phase A (1-2周) → Phase B (2-3周) → Phase C (并行推进)
-  └─ C2 (混合精度) 可随时启动（低依赖）
-  └─ D1 (TMOP) 可与 B1 并行
-Phase D/E 在 A/B 完成后按需推进
+F1 (元素完备) → F2 (GPU 装配)  [F3 可并行]
+    ↓
+F4 (NURBS+mortar) → F5 (生态) → X1 (WASM 云原生)
+    ↓
+X2 (GPU 全栈) → X3 (Python 接口)
 ```
 
-## 建议第一项: A1 — Quad/Hex RT 元素
-
-这是最基础的元素类型缺口。补全后：
-- 解除 Quad/Hex 网格上混合方法的限制
-- 为后续 DPG(Variational Multiscale 等需要不同 trial/test 组合的场景)打基础
-- 工作量适中，可独立完成和验证
+**立即启动**: F1（QuadRT1/HexRT1/TetRT2）——工作量小，收益明确，为 GPU 装配做元素完备化准备。
