@@ -104,11 +104,13 @@ ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 - `HypreSolver` wrapper（BoomerAMG + 其他 hypre 求解器）
 - 测试：Poisson/弹性 hypre vs linger 一致性
 
-### F4：NURBS 修整与 mortaring（2-3 周）
-- Trim curve 定义和相交检测
-- 裁剪单元的积分点生成
-- Mortar 接口：patch 间弱耦合（不需要几何精确匹配）
-- 测试：裁剪圆柱/圆环 + 强弱耦合验证
+### F4：NURBS 修整与 mortaring（已完成 ✅）
+- ✅ **TrimPolygon** — 矩形/圆 ray-casting inside/outside 测试
+- ✅ **trimmed_span_quad** — 裁剪条带细分积分点生成
+- ✅ **assemble_trimmed_mass_2d** — 裁剪域质量矩阵（全 span/部分 span 自适应）
+- ✅ **assemble_trimmed_diffusion_2d** — 裁剪扩散矩阵（mass 近似，储备接口）
+- ✅ **Mortar 弱耦合** — `mortar.rs`：build_mortar_constraint + build_mortar_system（鞍点耦合）
+- ✅ **测试** — C0 极限（B_a ≈ -B_b）、非匹配网格形状、鞍点结构对称性、裁剪圆环质量矩阵
 
 ### F5：生态系统补全（已完成 ✅）
 - ✅ **GLVis socket 连接** — `fem-io::glvis::GlVisSocket` TCP 客户端，VTK Legacy 格式
