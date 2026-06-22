@@ -218,6 +218,43 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         grad
     }
 
+    /// Compute the L¹ error norm: `‖u_h − u_exact‖_{L¹}`.
+    pub fn compute_l1_error(
+        &self,
+        exact: &dyn Fn(&[f64]) -> f64,
+        quad_order: u8,
+    ) -> f64 {
+        let mesh = self.space.mesh();
+        let dim = mesh.dim() as usize;
+        let order = self.space.order();
+
+        let mut err = 0.0;
+        for e in mesh.elem_iter() {
+            let elem_type = mesh.element_type(e);
+            let ref_elem = ref_elem_vol(elem_type, order);
+            let n_ldofs = ref_elem.n_dofs();
+            let quad = ref_elem.quadrature(quad_order);
+            let elem_dofs = self.space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+            let x0 = mesh.node_coords(nodes[0]);
+            let mut phi = vec![0.0; n_ldofs];
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                let w = quad.weights[q] * det_j.abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                let mut uh = 0.0;
+                for i in 0..n_ldofs {
+                    uh += self.dofs[elem_dofs[i] as usize] * phi[i];
+                }
+                let xp = phys_coords(x0, &jac, xi, dim);
+                let ue = exact(&xp);
+                err += w * (uh - ue).abs();
+            }
+        }
+        err
+    }
+
     /// Compute the L² error norm: `‖u_h − u_exact‖_{L²}`.
     ///
     /// # Arguments
@@ -269,6 +306,8 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         err2.sqrt()
     }
 
+    /// Compute the L¹ error norm.
+    /// ...existing code...
     /// Compute the H¹ semi-norm error: `|u_h − u_exact|_{H¹} = ‖∇u_h − ∇u_exact‖_{L²}`.
     ///
     /// # Arguments
@@ -345,9 +384,55 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let h1_semi = self.compute_h1_error(exact_grad, quad_order);
         (l2 * l2 + h1_semi * h1_semi).sqrt()
     }
-}
 
-#[cfg(test)]
+    /// Compute the W¹,¹ semi-norm error: `|u_h − u_exact|_{W¹,¹} = ∫ |∇u_h − ∇u_exact| dΩ`.
+    pub fn compute_w1_error(
+        &self,
+        exact_grad: &dyn Fn(&[f64]) -> Vec<f64>,
+        quad_order: u8,
+    ) -> f64 {
+        let mesh = self.space.mesh();
+        let dim = mesh.dim() as usize;
+        let order = self.space.order();
+
+        let mut err = 0.0;
+        for e in mesh.elem_iter() {
+            let elem_type = mesh.element_type(e);
+            let ref_elem = ref_elem_vol(elem_type, order);
+            let n_ldofs = ref_elem.n_dofs();
+            let quad = ref_elem.quadrature(quad_order);
+            let elem_dofs = self.space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+            let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
+            let x0 = mesh.node_coords(nodes[0]);
+            let mut grad_ref = vec![0.0; n_ldofs * dim];
+            let mut grad_phys = vec![0.0; n_ldofs * dim];
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                let w = quad.weights[q] * det_j.abs();
+                ref_elem.eval_grad_basis(xi, &mut grad_ref);
+                transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, dim);
+
+                let mut grad_uh = vec![0.0; dim];
+                for i in 0..n_ldofs {
+                    let c = self.dofs[elem_dofs[i] as usize];
+                    for d in 0..dim { grad_uh[d] += c * grad_phys[i * dim + d]; }
+                }
+                let xp = phys_coords(x0, &jac, xi, dim);
+                let ge = exact_grad(&xp);
+
+                let mut diff_norm = 0.0;
+                for d in 0..dim {
+                    let diff = grad_uh[d] - ge[d];
+                    diff_norm += diff.abs();
+                }
+                err += w * diff_norm;
+            }
+        }
+        err
+    }
+}
 mod tests {
     use super::*;
     use fem_mesh::SimplexMesh;
@@ -488,8 +573,6 @@ mod tests {
 
     #[test]
     fn projection_vs_interpolation_comparison() {
-        // For a smooth non-polynomial function, L² projection should
-        // produce a SMALLER L² error than interpolation.
         let f = |x: &[f64]| (x[0] * std::f64::consts::PI).sin() * (x[1] * std::f64::consts::PI).cos();
         let mesh = SimplexMesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
@@ -507,5 +590,51 @@ mod tests {
             err_proj,
             err_interp
         );
+    }
+
+    #[test]
+    fn l1_error_linear_exact() {
+        let f = |x: &[f64]| 1.0 + x[0] - 0.5 * x[1];
+        let (space, dofs) = make_p1(8, &f);
+        let gf = GridFunction::new(&space, dofs);
+        let err = gf.compute_l1_error(&f, 4);
+        assert!(err < 1e-12, "L¹ error for exact P1 should be ~0, got {err}");
+    }
+
+    #[test]
+    fn w1_error_linear_exact() {
+        let f = |x: &[f64]| 2.0 * x[0] + 3.0 * x[1];
+        let exact_grad = |_: &[f64]| vec![2.0, 3.0];
+        let (space, dofs) = make_p1(8, &f);
+        let gf = GridFunction::new(&space, dofs);
+        let err = gf.compute_w1_error(&exact_grad, 4);
+        assert!(err < 1e-12, "W¹,¹ error for linear P1 should be ~0, got {err}");
+    }
+
+    #[test]
+    fn l1_error_decreases_with_refinement() {
+        let f = |x: &[f64]| x[0] * x[0] + x[1] * x[1];
+        let mut prev = f64::MAX;
+        for &n in &[4usize, 8, 16] {
+            let (space, dofs) = make_p1(n, &f);
+            let gf = GridFunction::new(&space, dofs);
+            let err = gf.compute_l1_error(&f, 4);
+            assert!(err < prev, "L¹ error should decrease with refinement");
+            prev = err;
+        }
+    }
+
+    #[test]
+    fn w1_error_decreases_with_refinement() {
+        let f = |x: &[f64]| x[0] * x[0] + x[1] * x[1];
+        let exact_grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
+        let mut prev = f64::MAX;
+        for &n in &[4usize, 8, 16] {
+            let (space, dofs) = make_p1(n, &f);
+            let gf = GridFunction::new(&space, dofs);
+            let err = gf.compute_w1_error(&exact_grad, 4);
+            assert!(err < prev, "W¹,¹ error should decrease with refinement");
+            prev = err;
+        }
     }
 }
