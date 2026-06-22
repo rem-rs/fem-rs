@@ -161,3 +161,111 @@ fn tri_p1_integrates_constant_exactly() {
     }).sum();
     assert!((area - 0.5).abs() < 1e-13, "∫1 dΩ = {area:.6e}, expected 0.5");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Property-Based Tests (proptest)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use proptest::prelude::*;
+
+/// Random point within the reference triangle: (ξ, η) with ξ,η ≥ 0 and ξ+η ≤ 1.
+fn ref_tri_coord() -> impl Strategy<Value = [f64; 2]> {
+    (0.0f64..=1.0, 0.0f64..=1.0)
+        .prop_filter("outside triangle", |&(xi, eta)| xi + eta <= 1.0)
+        .prop_map(|(xi, eta)| [xi, eta])
+}
+
+/// Random point within the reference square: [-1, 1]².
+fn ref_quad_coord() -> impl Strategy<Value = [f64; 2]> {
+    (-1.0f64..=1.0, -1.0f64..=1.0).prop_map(|(xi, eta)| [xi, eta])
+}
+
+/// Random point within the reference tetrahedron: ξ,η,ζ ≥ 0, ξ+η+ζ ≤ 1.
+fn ref_tet_coord() -> impl Strategy<Value = [f64; 3]> {
+    (0.0f64..=1.0, 0.0f64..=1.0, 0.0f64..=1.0)
+        .prop_filter("outside tet", |&(xi, eta, zeta)| {
+            xi + eta + zeta <= 1.0
+        })
+        .prop_map(|(xi, eta, zeta)| [xi, eta, zeta])
+}
+
+// ─── Partition of unity at random points ────────────────────────────────────
+
+proptest! {
+    #[test]
+    fn prop_tri_p1_pou(xi in ref_tri_coord()) {
+        let re = TriP1;
+        let n = re.n_dofs();
+        let mut phi = vec![0.0; n];
+        re.eval_basis(&xi, &mut phi);
+        let sum: f64 = phi.iter().sum();
+        prop_assert!((sum - 1.0).abs() < 1e-12,
+            "partition of unity violated: sum={sum:.6e}, xi={xi:?}");
+    }
+
+    #[test]
+    fn prop_tri_p2_pou(xi in ref_tri_coord()) {
+        let re = TriP2;
+        let n = re.n_dofs();
+        let mut phi = vec![0.0; n];
+        re.eval_basis(&xi, &mut phi);
+        let sum: f64 = phi.iter().sum();
+        prop_assert!((sum - 1.0).abs() < 1e-12,
+            "partition of unity violated: sum={sum:.6e}, xi={xi:?}");
+    }
+
+    #[test]
+    fn prop_quad_q1_pou(xi in ref_quad_coord()) {
+        let re = QuadQ1;
+        let n = re.n_dofs();
+        let mut phi = vec![0.0; n];
+        re.eval_basis(&xi, &mut phi);
+        let sum: f64 = phi.iter().sum();
+        prop_assert!((sum - 1.0).abs() < 1e-12,
+            "partition of unity violated: sum={sum:.6e}, xi={xi:?}");
+    }
+
+    #[test]
+    fn prop_tet_p1_pou(xi in ref_tet_coord()) {
+        let re = TetP1;
+        let n = re.n_dofs();
+        let mut phi = vec![0.0; n];
+        re.eval_basis(&xi, &mut phi);
+        let sum: f64 = phi.iter().sum();
+        prop_assert!((sum - 1.0).abs() < 1e-12,
+            "partition of unity violated: sum={sum:.6e}, xi={xi:?}");
+    }
+}
+
+// ─── Gradient sum = zero ──────────────────────────────────────────────────
+
+proptest! {
+    #[test]
+    fn prop_gradient_sum_is_zero(xi in ref_tri_coord()) {
+        let re = TriP1;
+        let n = re.n_dofs();
+        let mut grad = vec![0.0; n * 2];
+        re.eval_grad_basis(&xi, &mut grad);
+        let sum_dxi: f64 = (0..n).map(|i| grad[i * 2]).sum();
+        let sum_deta: f64 = (0..n).map(|i| grad[i * 2 + 1]).sum();
+        prop_assert!(sum_dxi.abs() < 1e-12,
+            "Σ ∂φ_i/∂ξ = {sum_dxi:.6e} ≠ 0 at xi={xi:?}");
+        prop_assert!(sum_deta.abs() < 1e-12,
+            "Σ ∂φ_i/∂η = {sum_deta:.6e} ≠ 0 at xi={xi:?}");
+    }
+}
+
+// ─── Quadrature positivity ────────────────────────────────────────────────
+
+proptest! {
+    #[test]
+    fn prop_quadrature_weights_positive(order in 1u8..=5u8) {
+        for re in [&TriP1 as &dyn ReferenceElement, &QuadQ1 as &dyn ReferenceElement] {
+            let quad = re.quadrature(order);
+            for (i, &w) in quad.weights.iter().enumerate() {
+                prop_assert!(w > 0.0,
+                    "quadrature order {order}: negative weight w[{i}] = {w:.3e}");
+            }
+        }
+    }
+}
