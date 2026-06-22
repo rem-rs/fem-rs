@@ -1443,6 +1443,7 @@ pub fn into_result(r: linger::SolverResult) -> SolveResult {
 pub mod block;
 pub mod block_gmres;
 pub mod eigen;
+pub mod hypre;
 pub mod lor;
 pub mod p_multigrid;
 pub mod multirate;
@@ -1560,6 +1561,10 @@ pub use dae::{
 pub use events::{
     EventFunction, EventInfo,
     integrate_with_events,
+};
+pub use hypre::{
+    HypreBoomerAMG, HypreParMatrix, HyprePrecond,
+    hypre_solve_pcg, hypre_solve_gmres,
 };
 pub use lor::{
     LorPrecond, solve_pcg_lor, solve_gmres_lor,
