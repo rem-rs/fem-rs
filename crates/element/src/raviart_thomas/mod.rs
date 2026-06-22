@@ -30,6 +30,7 @@ pub mod quad_rt1;
 pub mod tet;
 pub mod tet_rt1;
 pub mod tet_rt2;
+pub mod tet_rtk;
 pub mod hex_rt0;
 pub mod hex_rt1;
 
@@ -42,5 +43,6 @@ pub use quad_rt1::QuadRT1;
 pub use tet::TetRT0;
 pub use tet_rt1::TetRT1;
 pub use tet_rt2::TetRT2;
+pub use tet_rtk::TetRTk;
 pub use hex_rt0::HexRT0;
 pub use hex_rt1::HexRT1;
