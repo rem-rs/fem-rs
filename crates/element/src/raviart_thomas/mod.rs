@@ -34,6 +34,7 @@ pub mod tet_rt2;
 pub mod tet_rtk;
 pub mod hex_rt0;
 pub mod hex_rt1;
+pub mod hex_rtk;
 
 pub use tri::TriRT0;
 pub use tri_rt1::TriRT1;
@@ -48,3 +49,4 @@ pub use tet_rt2::TetRT2;
 pub use tet_rtk::TetRTk;
 pub use hex_rt0::HexRT0;
 pub use hex_rt1::HexRT1;
+pub use hex_rtk::HexRTk;
