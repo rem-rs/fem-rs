@@ -295,6 +295,10 @@ path = "mfem_joule.rs"
 name = "mfem_phasefield_fracture"
 path = "mfem_phasefield_fracture.rs"
 
+[[example]]
+name = "mfem_vec_ref_elem"
+path = "mfem_vec_ref_elem.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
