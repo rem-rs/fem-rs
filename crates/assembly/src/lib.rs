@@ -150,6 +150,7 @@ pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMa
 #[cfg(feature = "reed")]
 pub use reed::HcurlReedOperator;
 pub use grid_function::GridFunction;
+pub use grid_function::project_coefficient;
 pub use iga_assembler::{
     assemble_bilinear_diffusion_iga_1d, assemble_bilinear_diffusion_iga_1d_physical,
     assemble_bilinear_helmholtz_iga_1d, assemble_bilinear_helmholtz_iga_1d_physical,

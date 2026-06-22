@@ -1,15 +1,21 @@
 //! Grid function: a DOF coefficient vector paired with its finite element space.
 //!
 //! [`GridFunction`] wraps a DOF vector and provides field evaluation, error
-//! norms (L², H¹ semi, full H¹), and per-element gradient computation.
+//! norms (L², H¹ semi, full H¹), per-element gradient computation, and L²
+//! projection from a coefficient.
 
 use nalgebra::DMatrix;
 
 use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
 use fem_element::ReferenceElement;
+use fem_linalg::CsrMatrix;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
+use fem_solver::{solve_cg, SolverConfig};
 use fem_space::fe_space::FESpace;
+
+use crate::assembler::Assembler;
+use crate::standard::{DomainSourceIntegrator, MassIntegrator};
 
 // ─── Reference element factory (mirrors assembler.rs) ──────────────────────
 
@@ -82,7 +88,46 @@ pub struct GridFunction<'a, S: FESpace> {
     dofs: Vec<f64>,
 }
 
+/// Compute the L² projection of a scalar coefficient onto the FE space.
+///
+/// Solves `M c = b` where `M` is the mass matrix and
+/// `b_i = ∫_{Ω} φ_i(x) f(x) dx`.
+///
+/// # Returns
+/// The DOF coefficient vector `c` of length `space.n_dofs()`.
+pub fn project_coefficient<S: FESpace>(
+    space: &S,
+    coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+    quad_order: u8,
+) -> Vec<f64> {
+    let m: CsrMatrix<f64> = Assembler::assemble_bilinear(space, &[&MassIntegrator { rho: 1.0 }], quad_order);
+    let b = Assembler::assemble_linear(space, &[&DomainSourceIntegrator::new(coeff)], quad_order);
+    let mut x = vec![0.0; space.n_dofs()];
+    let cfg = SolverConfig {
+        rtol: 1e-14,
+        atol: 1e-30,
+        max_iter: 10_000,
+        ..Default::default()
+    };
+    solve_cg(&m, &b, &mut x, &cfg).expect("L² projection CG solve converged");
+    x
+}
+
 impl<'a, S: FESpace> GridFunction<'a, S> {
+    /// Create a GridFunction by L²-projecting a coefficient onto the space.
+    ///
+    /// This solves `M c = b` where `M` is the mass matrix and
+    /// `b_i = ∫ φ_i f dx`. Unlike `interpolate` (which evaluates `f` at
+    /// nodal points), this produces the optimal L² approximation.
+    pub fn from_projection(space: &'a S, coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync), quad_order: u8) -> Self {
+        let dofs = project_coefficient(space, coeff, quad_order);
+        GridFunction::new(space, dofs)
+    }
+
+    /// In-place L² projection: replace DOFs with projected values.
+    pub fn project_coefficient(&mut self, coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync), quad_order: u8) {
+        self.dofs = project_coefficient(self.space, coeff, quad_order);
+    }
     /// Create a new grid function from a space reference and DOF coefficients.
     ///
     /// # Panics
@@ -405,5 +450,62 @@ mod tests {
             assert!(err < prev_err, "L² error should decrease with refinement");
             prev_err = err;
         }
+    }
+
+    #[test]
+    fn project_constant_is_exact() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = H1Space::new(mesh, 1);
+        let f = |_: &[f64]| 3.14;
+        let gf = GridFunction::from_projection(&space, &f, 4);
+        let err = gf.compute_l2_error(&f, 4);
+        assert!(err < 1e-14, "constant L² projection should be exact, got {err}");
+    }
+
+    #[test]
+    fn project_linear_is_exact() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = H1Space::new(mesh, 1);
+        let f = |x: &[f64]| 2.0 * x[0] + 3.0 * x[1];
+        let gf = GridFunction::from_projection(&space, &f, 4);
+        let err = gf.compute_l2_error(&f, 4);
+        assert!(err < 1e-14, "linear L² projection should be exact, got {err}");
+    }
+
+    #[test]
+    fn project_quadratic_converges_h2() {
+        let f = |x: &[f64]| x[0] * x[0] + x[1] * x[1];
+        let mut prev = f64::MAX;
+        for &n in &[4usize, 8, 16, 32] {
+            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let space = H1Space::new(mesh, 1);
+            let gf = GridFunction::from_projection(&space, &f, 4);
+            let err = gf.compute_l2_error(&f, 4);
+            assert!(err < prev, "L² projection error should decrease with h-refinement");
+            prev = err;
+        }
+    }
+
+    #[test]
+    fn projection_vs_interpolation_comparison() {
+        // For a smooth non-polynomial function, L² projection should
+        // produce a SMALLER L² error than interpolation.
+        let f = |x: &[f64]| (x[0] * std::f64::consts::PI).sin() * (x[1] * std::f64::consts::PI).cos();
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let space = H1Space::new(mesh, 1);
+
+        let interp_dofs = space.interpolate(&f);
+        let gf_interp = GridFunction::new(&space, interp_dofs.as_slice().to_vec());
+        let err_interp = gf_interp.compute_l2_error(&f, 5);
+
+        let gf_proj = GridFunction::from_projection(&space, &f, 5);
+        let err_proj = gf_proj.compute_l2_error(&f, 5);
+
+        assert!(
+            err_proj <= err_interp * 1.001,
+            "L² projection error ({:.2e}) should be <= interpolation error ({:.2e})",
+            err_proj,
+            err_interp
+        );
     }
 }
