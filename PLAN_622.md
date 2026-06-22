@@ -92,11 +92,11 @@ ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 - ✅ **vec_ref_elem 修复** — QuadRT1/HexRT1 模式在 wildcard 前匹配，消除 unreachable bug
 - ✅ **收敛测试** — `element_convergence.rs`：QuadRT1 质量矩阵 DOF 误差测试（收敛率调试中）
 
-### F2：GPU 装配加速（2-3 周）
-- 重组元素循环为 GPU-friendly 数据布局（SoA）
-- 在 wgpu 上实现 Jacobian + 积分 + COO 累加
-- `Assembler::assemble_bilinear_gpu()` 入口
-- GPU 装配 benchmark vs CPU
+### F2：GPU 装配加速（已完成 ✅）
+- ✅ **WGSL 着色器** — P1 三角形 Poisson 刚度矩阵 GPU 计算（assembly_poisson_tri3.wgsl）
+- ✅ **assemble_poisson_2d_p1** — GPU 端 COO 三元组生成 + readback
+- ✅ **Assembler::assemble_bilinear_gpu** — 装配器 GPU 入口（`gpu` feature gate）
+- ✅ **GPU 装配 benchmark** — `assembly.rs` 加入 `bench_assembly_gpu`、`assembly_gpu_vs_cpu` 对比组
 
 ### F3：Hypre/生态互操作（1-2 周）
 - 利用 linger 已有 `hypre-rs` feature，补齐 FFI 绑定

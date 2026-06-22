@@ -859,6 +859,59 @@ impl Assembler {
         }
         coo.into_csr()
     }
+
+    /// Assemble a P1 triangle Poisson stiffness matrix on the GPU via wgpu.
+    ///
+    /// Only supports `DiffusionIntegrator { kappa: 1.0 }` on P1 triangle meshes.
+    /// Requires the `gpu` feature.
+    #[cfg(feature = "gpu")]
+    pub fn assemble_bilinear_gpu<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn BilinearIntegrator],
+    ) -> Result<CsrMatrix<f64>, String> {
+        use fem_linalg_gpu::GpuContext;
+        use fem_mesh::element_type::ElementType;
+
+        // Validate: P1 triangles only
+        let mesh = space.mesh();
+        let dim = mesh.dim();
+        if dim != 2 { return Err("GPU assembly requires 2-D mesh".into()); }
+        let etype = mesh.element_type(0);
+        if etype != ElementType::Tri3 { return Err("GPU assembly requires P1 triangles (Tri3)".into()); }
+        if space.order() != 1 { return Err("GPU assembly requires order 1 (P1)".into()); }
+        if integrators.len() != 1 { return Err("GPU assembly requires exactly 1 integrator".into()); }
+
+        let n_elem = mesh.n_elements();
+        let n_dofs = space.n_dofs();
+
+        // Pack element node coordinates and DOF indices
+        let mut elem_nodes_f32 = Vec::with_capacity(n_elem * 6);
+        let mut elem_dofs_u32 = Vec::with_capacity(n_elem * 3);
+
+        for e in 0..n_elem as u32 {
+            let nodes = mesh.element_nodes(e);
+            let dofs: Vec<u32> = space.element_dofs(e).iter().map(|&d| d as u32).collect();
+            for &n in &[nodes[0], nodes[1], nodes[2]] {
+                let c = mesh.node_coords(n);
+                elem_nodes_f32.push(c[0] as f32);
+                elem_nodes_f32.push(c[1] as f32);
+            }
+            elem_dofs_u32.extend_from_slice(&dofs[..3]);
+        }
+
+        let gpu = GpuContext::new_sync()
+            .map_err(|e| format!("GpuContext init: {e}"))?;
+
+        let coo_triplets =
+            fem_linalg_gpu::assemble_poisson_2d_p1(&gpu, &elem_nodes_f32, &elem_dofs_u32, n_elem);
+
+        // Convert GPU f32 COO triplets → CsrMatrix<f64>
+        let mut coo = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
+        for (r, c, v) in coo_triplets {
+            coo.add(r as usize, c as usize, v as f64);
+        }
+        Ok(coo.into_csr())
+    }
 }
 
 // ─── Face Jacobian and normal (2-D) ──────────────────────────────────────────

@@ -4,11 +4,10 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_mesh::SimplexMesh;
-use fem_space::{H1Space, HCurlSpace, L2Space};
+use fem_space::{H1Space, HCurlSpace, L2Space, fe_space::FESpace};
 
 fn bench_assembly(c: &mut Criterion) {
     let mut group = c.benchmark_group("assembly");
-    // n=8..32: serial range; n=64..128: parallel benefit visible (~8k-32k elements)
     for n in [8, 16, 32, 64, 128].iter() {
         group.bench_with_input(BenchmarkId::new("poisson_p1", n), n, |b, n| {
             let mesh = SimplexMesh::<2>::unit_square_tri(*n);
@@ -23,7 +22,6 @@ fn bench_assembly(c: &mut Criterion) {
             });
         });
     }
-
     group.finish();
 
     let mut vb_group = c.benchmark_group("assembly_hcurl_boundary");
@@ -56,5 +54,62 @@ fn bench_assembly(c: &mut Criterion) {
     dg_group.finish();
 }
 
+#[cfg(feature = "gpu")]
+fn bench_assembly_gpu(c: &mut Criterion) {
+    use fem_assembly::standard::DiffusionIntegrator;
+    use fem_assembly::Assembler;
+    use fem_mesh::SimplexMesh;
+    use fem_space::{H1Space, fe_space::FESpace};
+
+    // GPU assembly needs a real GPU — skip if GpuContext fails
+    let Ok(gpu) = fem_linalg_gpu::GpuContext::new_sync() else { return; };
+
+    let mut group = c.benchmark_group("assembly_gpu");
+    for n in [32, 64, 128, 256].iter() {
+        group.bench_with_input(BenchmarkId::new("poisson_p1_gpu", n), n, |b, n| {
+            let mesh = SimplexMesh::<2>::unit_square_tri(*n);
+            let space = H1Space::new(mesh, 1);
+            let diffusion = DiffusionIntegrator { kappa: 1.0 };
+
+            b.iter(|| {
+                let mat = Assembler::assemble_bilinear_gpu(&space, &[&diffusion])
+                    .expect("GPU assembly failed");
+                black_box(mat);
+            });
+        });
+    }
+    group.finish();
+
+    // Compare with CPU for largest size
+    let mut cmp = c.benchmark_group("assembly_gpu_vs_cpu");
+    for n in [64, 128].iter() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(*n);
+        let space = H1Space::new(mesh, 1);
+        let diffusion = DiffusionIntegrator { kappa: 1.0 };
+
+        cmp.bench_with_input(BenchmarkId::new("cpu", n), n, |b, _| {
+            b.iter(|| {
+                let mat = Assembler::assemble_bilinear(&space, &[&diffusion], 2);
+                black_box(mat);
+            });
+        });
+        cmp.bench_with_input(BenchmarkId::new("gpu", n), n, |b, _| {
+            b.iter(|| {
+                let mat = Assembler::assemble_bilinear_gpu(&space, &[&diffusion])
+                    .expect("GPU assembly failed");
+                black_box(mat);
+            });
+        });
+    }
+    cmp.finish();
+}
+
+#[cfg(feature = "gpu")]
+criterion_group!(benches_gpu, bench_assembly_gpu);
+
 criterion_group!(benches, bench_assembly);
+
+#[cfg(feature = "gpu")]
+criterion_main!(benches, benches_gpu);
+#[cfg(not(feature = "gpu"))]
 criterion_main!(benches);
