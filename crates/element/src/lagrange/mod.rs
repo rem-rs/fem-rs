@@ -17,5 +17,6 @@ pub use hex::{HexQ1, HexQ2, HexQ3};
 pub use prism::PrismPk;
 pub use pyramid::PyramidPk;
 pub use factory::{SegPk, TriPk, TetPk, QuadQk, HexQk, ref_elem, ElemType,
+                  VecFamily, vec_ref_elem,
                   LagrangeSegment, LagrangeTriangle, LagrangeTetrahedron,
                   LagrangeQuad, LagrangeHex, LagrangePrism, LagrangePyramid};

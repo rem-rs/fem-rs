@@ -20,7 +20,7 @@
 //! 4. Volume interior DOFs (for each element)
 
 use crate::quadrature::{seg_rule, tri_rule, tet_rule, quad_rule, hex_rule};
-use crate::reference::{QuadratureRule, ReferenceElement};
+use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 use super::prism::PrismPk;
 use super::pyramid::PyramidPk;
 
@@ -735,6 +735,26 @@ pub fn n_dofs_simplex(dim: usize, order: usize) -> usize {
     let mut num = 1usize;
     for i in 1..=dim { num = num * (order + i) / i; }
     num
+}
+
+/// Family of vector-valued reference elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VecFamily { Nedelec, RaviartThomas }
+
+/// Create a vector-valued reference element by family, type, and order.
+pub fn vec_ref_elem(family: VecFamily, etype: ElemType, order: u8) -> Box<dyn VectorReferenceElement> {
+    let p = order as usize;
+    match (family, etype) {
+        (VecFamily::Nedelec, ElemType::Tri) => Box::new(crate::nedelec::TriNDk::new(p)),
+        (VecFamily::Nedelec, ElemType::Quad) => Box::new(crate::nedelec::QuadNDk::new(p)),
+        (VecFamily::Nedelec, ElemType::Tet) => Box::new(crate::nedelec::TetNDk::new(p)),
+        (VecFamily::Nedelec, ElemType::Hex) => Box::new(crate::nedelec::HexNDk::new(p)),
+        (VecFamily::RaviartThomas, ElemType::Tri) => Box::new(crate::raviart_thomas::TriRTk::new(p)),
+        (VecFamily::RaviartThomas, ElemType::Quad) => Box::new(crate::raviart_thomas::QuadRTk::new(p)),
+        (VecFamily::RaviartThomas, ElemType::Tet) => Box::new(crate::raviart_thomas::TetRTk::new(p)),
+        (VecFamily::RaviartThomas, ElemType::Hex) => Box::new(crate::raviart_thomas::HexRTk::new(p)),
+        _ => panic!("vec_ref_elem: unsupported (family={family:?}, type={etype:?})"),
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

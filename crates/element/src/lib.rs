@@ -49,7 +49,8 @@ pub use quadrature::{TriQuadRule, tri_rule_named};
 pub use lagrange::{HexQ1, HexQ2, HexQ3, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadP1, QuadP2, QuadP3, QuadP4, SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, TetP1, TetP2, TetP3, TetP4, TetP5, TetP6, TriP1, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8, TriP9, TriP10,
                    LagrangeSegment, LagrangeTriangle, LagrangeTetrahedron, LagrangeQuad, LagrangeHex,
                    LagrangePrism, LagrangePyramid,
-                   SegPk, TriPk, TetPk, QuadQk, HexQk, PrismPk, PyramidPk, ref_elem, ElemType};
+                   SegPk, TriPk, TetPk, QuadQk, HexQk, PrismPk, PyramidPk, ref_elem, ElemType,
+                   VecFamily, vec_ref_elem};
 pub use nedelec::{TriND1, TriND2, TriNDk, QuadND1, QuadND2, QuadNDk, HexND1, HexND2, HexNDk, TetND1, TetND2, TetNDk};
 pub use raviart_thomas::{TriRT0, TriRTk, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, TetRTk, QuadRT0, QuadRTk, HexRT0, HexRTk, QuadRT1, HexRT1};
 pub use nurbs::{KnotVector, BSplineBasis1D, NurbsPatch2D, NurbsPatch3D,
