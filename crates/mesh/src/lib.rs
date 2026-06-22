@@ -17,6 +17,7 @@ pub mod moving_mesh;
 pub mod point_locator;
 pub mod simplex;
 pub mod submesh;
+pub mod tmop;
 pub mod topology;
 pub mod transformation;
 
