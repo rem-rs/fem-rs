@@ -24,6 +24,7 @@
 pub mod tri;
 pub mod tri_rt1;
 pub mod tri_rt2;
+pub mod tri_rtk;
 pub mod quad_rt0;
 pub mod quad_rt1;
 pub mod tet;
@@ -35,6 +36,7 @@ pub mod hex_rt1;
 pub use tri::TriRT0;
 pub use tri_rt1::TriRT1;
 pub use tri_rt2::TriRT2;
+pub use tri_rtk::TriRTk;
 pub use quad_rt0::QuadRT0;
 pub use quad_rt1::QuadRT1;
 pub use tet::TetRT0;
