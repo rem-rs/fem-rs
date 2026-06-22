@@ -19,7 +19,7 @@ use fem_element::reference::VectorReferenceElement;
 use fem_element::lagrange::{HexQ1, QuadQ1};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_element::nedelec::{HexND1, HexND2, QuadND1, QuadND2, TetND1, TetND2, TriND1, TriND2};
-use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1};
+use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, QuadRT0, HexRT0};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -48,10 +48,17 @@ pub(crate) fn vec_ref_elem(
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
         (SpaceType::HCurl, ElementType::Hex8, 3, 1) => Box::new(HexND1),
         (SpaceType::HCurl, ElementType::Hex8, 3, 2) => Box::new(HexND2),
-        (SpaceType::HDiv, _, 2, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv, ElementType::Quad4, 2, 0) => Box::new(QuadRT0),
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriRT1),
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriRT2),
+        (SpaceType::HDiv, ElementType::Hex8, 3, 0) => Box::new(HexRT0),
+        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetRT1),
+        (SpaceType::HDiv, _, 2, 0) => Box::new(QuadRT0),
         (SpaceType::HDiv, _, 2, 1) => Box::new(TriRT1),
         (SpaceType::HDiv, _, 2, 2) => Box::new(TriRT2),
-        (SpaceType::HDiv, _, 3, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv, _, 3, 0) => Box::new(HexRT0),
         (SpaceType::HDiv, _, 3, 1) => Box::new(TetRT1),
         _ => panic!(
             "vec_ref_elem: unsupported (space_type={space_type:?}, elem_type={elem_type:?}, dim={dim}, order={order})"

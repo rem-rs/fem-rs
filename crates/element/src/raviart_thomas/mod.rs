@@ -12,16 +12,25 @@
 //! | Type        | Domain      | DOFs | Order |
 //! |-------------|-------------|------|-------|
 //! | [`TriRT0`]  | triangle    | 3    | 0     |
+//! | [`TriRT1`]  | triangle    | 8    | 1     |
+//! | [`TriRT2`]  | triangle    | 15   | 2     |
+//! | [`QuadRT0`] | quadrilateral | 4  | 0     |
 //! | [`TetRT0`]  | tetrahedron | 4    | 0     |
+//! | [`TetRT1`]  | tetrahedron | 15   | 1     |
+//! | [`HexRT0`]  | hexahedron  | 6    | 0     |
 
 pub mod tri;
 pub mod tri_rt1;
 pub mod tri_rt2;
+pub mod quad_rt0;
 pub mod tet;
 pub mod tet_rt1;
+pub mod hex_rt0;
 
 pub use tri::TriRT0;
 pub use tri_rt1::TriRT1;
 pub use tri_rt2::TriRT2;
+pub use quad_rt0::QuadRT0;
 pub use tet::TetRT0;
 pub use tet_rt1::TetRT1;
+pub use hex_rt0::HexRT0;

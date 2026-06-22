@@ -2,13 +2,15 @@
 //!
 //! ## DOF association
 //!
-//! Each DOF corresponds to a unique mesh face (edge in 2-D, triangular face
-//! in 3-D).  The DOF functional is the normal flux integral:
+//! Each DOF corresponds to a unique mesh face (edge in 2-D, face in 3-D).
+//! The DOF functional is the normal flux integral:
 //! `DOF_f(u) = ∫_f u · n̂ ds`.
 //!
 //! For lowest-order Raviart-Thomas (RT0):
 //! - **2-D triangles**: 3 face (= edge) DOFs per element, `n_dofs = n_unique_edges`
+//! - **2-D quadrilaterals**: 4 face DOFs per element, `n_dofs = n_unique_edges`
 //! - **3-D tetrahedra**: 4 face DOFs per element, `n_dofs = n_unique_faces`
+//! - **3-D hexahedra**: 6 face DOFs per element, `n_dofs = n_unique_faces`
 //!
 //! ## Sign convention
 //!
@@ -22,7 +24,7 @@ use std::collections::HashMap;
 use fem_core::types::DofId;
 use fem_element::{quadrature::gauss_legendre_01, TetRT1, TriRT1, VectorReferenceElement};
 use fem_linalg::Vector;
-use fem_mesh::{topology::MeshTopology, ElementTransformation};
+use fem_mesh::{element_type::ElementType, topology::MeshTopology, ElementTransformation};
 
 use crate::dof_manager::{EdgeKey, FaceKey};
 use crate::fe_space::{FESpace, SpaceType};
@@ -33,6 +35,10 @@ use crate::fe_space::{FESpace, SpaceType};
 /// Face `i` is the edge opposite vertex `i`.
 const TRI_FACES: [(usize, usize); 3] = [(1, 2), (0, 2), (0, 1)];
 
+/// Local face definitions for 2-D quads (QuadRT0 ordering, CCW).
+/// Face `i` is edge `(i, (i+1)%4)` of the quad.
+const QUAD_FACES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+
 /// Local face definitions for 3-D tetrahedra (TetRT0 ordering).
 /// Face `i` is the triangle opposite vertex `i`.
 const TET_FACES: [(usize, usize, usize); 4] = [
@@ -42,19 +48,34 @@ const TET_FACES: [(usize, usize, usize); 4] = [
     (0, 1, 2), // opposite v₃
 ];
 
+/// Local face definitions for 3-D hexahedra (HexRT0 ordering).
+/// Convention: (z=-1, z=1, y=-1, y=1, x=-1, x=1).
+/// Each face is a 4-sided quadrilateral (vᵢ,vⱼ,vₖ,vₗ).
+const HEX_FACES: [[usize; 4]; 6] = [
+    [0, 1, 2, 3], // z=-1 (bottom)
+    [4, 5, 6, 7], // z= 1 (top)
+    [0, 1, 5, 4], // y=-1 (near)
+    [2, 3, 7, 6], // y= 1 (far)
+    [0, 3, 7, 4], // x=-1 (left)
+    [1, 2, 6, 5], // x= 1 (right)
+];
+
 // ─── Face DOF map ───────────────────────────────────────────────────────────
 
-/// Unified face-to-DOF lookup: edges in 2-D, triangular faces in 3-D.
+/// Unified face-to-DOF lookup: edges in 2-D, triangular/quad faces in 3-D.
 enum FaceDofMap {
     Edges(HashMap<EdgeKey, DofId>),
     Faces(HashMap<FaceKey, DofId>),
+    QuadEdges(HashMap<EdgeKey, DofId>),
+    HexFaces(HashMap<FaceKey, DofId>),
 }
 
 // ─── HDivSpace ──────────────────────────────────────────────────────────────
 
 /// H(div) finite element space using Raviart-Thomas face elements.
 ///
-/// Constructed from a [`MeshTopology`] with triangular or tetrahedral elements.
+/// Constructed from a [`MeshTopology`] with triangular, quadrilateral,
+/// tetrahedral, or hexahedral elements.
 /// Supports order 0 (RT0), 1 (RT1), and on **2-D triangles only** order 2 (RT2).
 pub struct HDivSpace<M: MeshTopology> {
     mesh: M,
@@ -64,37 +85,70 @@ pub struct HDivSpace<M: MeshTopology> {
     signs_flat: Vec<f64>,
     dofs_per_elem: usize,
     face_map: FaceDofMap,
+    /// Cached element type for dispatch.
+    elem_type: ElementType,
 }
 
 impl<M: MeshTopology> HDivSpace<M> {
     /// Construct an H(div) space of the given order on `mesh`.
     ///
+    /// # Supported combinations
+    /// | Mesh type | Order | Element | DOFs/elem |
+    /// |-----------|-------|---------|-----------|
+    /// | Tri3/Tri6 | 0 | TriRT0 | 3 |
+    /// | Tri3/Tri6 | 1 | TriRT1 | 8 |
+    /// | Tri3/Tri6 | 2 | TriRT2 | 15 |
+    /// | Quad4     | 0 | QuadRT0 | 4 |
+    /// | Tet4/Tet10 | 0 | TetRT0 | 4 |
+    /// | Tet4/Tet10 | 1 | TetRT1 | 15 |
+    /// | Hex8      | 0 | HexRT0 | 6 |
+    ///
     /// # Panics
-    /// - If `order > 2` in 2-D or `order > 1` in 3-D.
-    /// - If the mesh is neither 2-D triangles nor 3-D tetrahedra.
+    /// - If the element type is not supported.
     pub fn new(mesh: M, order: u8) -> Self {
         let dim = mesh.dim() as usize;
-        match dim {
-            2 => assert!(
+        let elem_type = mesh.element_type(0);
+        Self::validate_order(dim, &elem_type, order);
+        Self::build(mesh, order, elem_type)
+    }
+
+    fn validate_order(dim: usize, elem_type: &ElementType, order: u8) {
+        match (dim, elem_type) {
+            (2, ElementType::Tri3 | ElementType::Tri6) => assert!(
                 order <= 2,
-                "HDivSpace: 2-D supports orders 0 (RT0), 1 (RT1), and 2 (RT2)"
+                "HDivSpace: Tri RT supports orders 0, 1, 2"
             ),
-            3 => assert!(
+            (2, ElementType::Quad4) => assert!(
+                order == 0,
+                "HDivSpace: Quad RT supports order 0 only"
+            ),
+            (3, ElementType::Tet4 | ElementType::Tet10) => assert!(
                 order <= 1,
-                "HDivSpace: 3-D supports orders 0 (RT0) and 1 (RT1) only"
+                "HDivSpace: Tet RT supports orders 0 and 1"
             ),
-            _ => panic!("HDivSpace: unsupported dimension {dim}"),
-        }
-        match dim {
-            2 => Self::build_2d(mesh, order),
-            3 => Self::build_3d(mesh, order),
-            _ => panic!("HDivSpace: unsupported dimension {dim}"),
+            (3, ElementType::Hex8) => assert!(
+                order == 0,
+                "HDivSpace: Hex RT supports order 0 only"
+            ),
+            _ => panic!(
+                "HDivSpace: unsupported (dim={dim}, elem_type={elem_type:?})"
+            ),
         }
     }
 
-    // ─── 2-D construction ───────────────────────────────────────────────────
+    fn build(mesh: M, order: u8, elem_type: ElementType) -> Self {
+        match (mesh.dim(), &elem_type) {
+            (2, ElementType::Tri3 | ElementType::Tri6) => Self::build_2d_tri(mesh, order),
+            (2, ElementType::Quad4) => Self::build_2d_quad(mesh, order),
+            (3, ElementType::Tet4 | ElementType::Tet10) => Self::build_3d_tet(mesh, order),
+            (3, ElementType::Hex8) => Self::build_3d_hex(mesh, order),
+            _ => panic!("HDivSpace::build: unsupported (elem_type={elem_type:?})"),
+        }
+    }
 
-    fn build_2d(mesh: M, order: u8) -> Self {
+    // ─── 2-D triangle construction ──────────────────────────────────────────
+
+    fn build_2d_tri(mesh: M, order: u8) -> Self {
         // RT0: 1 DOF per edge; RT1: 2 edge + 2 interior; RT2: 3 edge + 6 interior.
         let dofs_per_face = (order as usize) + 1;
         let interior_dofs = match order {
@@ -116,7 +170,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             for (face_idx, &(li, lj)) in TRI_FACES.iter().enumerate() {
                 let (gi, gj) = (verts[li], verts[lj]);
                 let key = EdgeKey::new(gi, gj);
-                let sign = Self::compute_sign_2d(&mesh, verts, face_idx, gi, gj);
+                let sign = Self::compute_sign_2d_tri(&mesh, verts, face_idx, gi, gj);
 
                 if dofs_per_face == 1 {
                     let dof = *edge_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=1; d });
@@ -151,15 +205,16 @@ impl<M: MeshTopology> HDivSpace<M> {
             signs_flat,
             dofs_per_elem,
             face_map: FaceDofMap::Edges(edge_map),
+            elem_type: ElementType::Tri3,
         }
     }
 
-    /// Compute the orientation sign for a 2-D face (edge).
+    /// Compute the orientation sign for a 2-D face (edge) on triangles.
     ///
     /// Global edge normal is the 90° CCW rotation of (p_max − p_min).
     /// Local outward normal points away from the opposite vertex.
     /// Sign = +1 if they agree, −1 otherwise.
-    fn compute_sign_2d(mesh: &M, verts: &[u32], face_idx: usize, gi: u32, gj: u32) -> f64 {
+    fn compute_sign_2d_tri(mesh: &M, verts: &[u32], face_idx: usize, gi: u32, gj: u32) -> f64 {
         let pa = mesh.node_coords(gi);
         let pb = mesh.node_coords(gj);
         // Edge tangent gi→gj
@@ -195,9 +250,9 @@ impl<M: MeshTopology> HDivSpace<M> {
         global_flip * outward_flip
     }
 
-    // ─── 3-D construction ───────────────────────────────────────────────────
+    // ─── 3-D tetrahedron construction ──────────────────────────────────────
 
-    fn build_3d(mesh: M, order: u8) -> Self {
+    fn build_3d_tet(mesh: M, order: u8) -> Self {
         // RT0: 1 DOF per face; RT1: 3 DOFs per face + 3 interior bubble DOFs
         let dofs_per_face = if order == 0 { 1 } else { 3 };
         let interior_dofs = if order == 0 { 0 } else { 3 };
@@ -214,7 +269,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             for (face_idx, &(la, lb, lc)) in TET_FACES.iter().enumerate() {
                 let (ga, gb, gc) = (verts[la], verts[lb], verts[lc]);
                 let key = FaceKey::new(ga, gb, gc);
-                let sign = Self::compute_sign_3d(&mesh, verts, face_idx, &key);
+                let sign = Self::compute_sign_3d_tet(&mesh, verts, face_idx, &key);
 
                 if dofs_per_face == 1 {
                     let dof = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=1; d });
@@ -240,6 +295,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             signs_flat,
             dofs_per_elem,
             face_map: FaceDofMap::Faces(face_map),
+            elem_type: ElementType::Tet4,
         }
     }
 
@@ -248,7 +304,7 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// The global face normal is defined by the cross product of edges
     /// of the sorted vertex triple.  The local outward normal points
     /// away from the opposite vertex.  Sign = +1 if they agree.
-    fn compute_sign_3d(mesh: &M, verts: &[u32], face_idx: usize, key: &FaceKey) -> f64 {
+    fn compute_sign_3d_tet(mesh: &M, verts: &[u32], face_idx: usize, key: &FaceKey) -> f64 {
         let p0 = mesh.node_coords(key.0);
         let p1 = mesh.node_coords(key.1);
         let p2 = mesh.node_coords(key.2);
@@ -286,6 +342,156 @@ impl<M: MeshTopology> HDivSpace<M> {
         if dot > 0.0 { 1.0 } else { -1.0 }
     }
 
+    // ─── 2-D quadrilateral construction ───────────────────────────────────
+
+    fn build_2d_quad(mesh: M, order: u8) -> Self {
+        debug_assert_eq!(order, 0, "QuadRT0: order must be 0");
+        let dofs_per_elem = QUAD_FACES.len();
+        let n_elem = mesh.n_elements();
+
+        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
+        let mut next_dof: DofId = 0;
+        let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+        let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for &(li, lj) in &QUAD_FACES {
+                let (gi, gj) = (verts[li], verts[lj]);
+                let key = EdgeKey::new(gi, gj);
+                let sign = Self::compute_sign_2d_quad(&mesh, verts, li, gi, gj);
+                let dof = *edge_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
+                dofs_flat.push(dof);
+                signs_flat.push(sign);
+            }
+        }
+
+        HDivSpace {
+            mesh,
+            order,
+            n_dofs: next_dof as usize,
+            dofs_flat,
+            signs_flat,
+            dofs_per_elem,
+            face_map: FaceDofMap::QuadEdges(edge_map),
+            elem_type: ElementType::Quad4,
+        }
+    }
+
+    /// Compute the orientation sign for a 2-D face (edge) on quads.
+    /// Global edge normal points outward from the element centroid.
+    /// Sign = +1 if the canonical (gi→gj) normal agrees with outward.
+    fn compute_sign_2d_quad(mesh: &M, verts: &[u32], li: usize, gi: u32, gj: u32) -> f64 {
+        let pa = mesh.node_coords(gi);
+        let pb = mesh.node_coords(gj);
+        let tx = pb[0] - pa[0];
+        let ty = pb[1] - pa[1];
+        // Normal to edge gi→gj (90° CCW): (−ty, tx)
+        let nx = -ty;
+        let ny = tx;
+
+        // Element centroid for outward check.
+        let mut cx = 0.0; let mut cy = 0.0;
+        for &v in verts {
+            let p = mesh.node_coords(v);
+            cx += p[0]; cy += p[1];
+        }
+        cx /= verts.len() as f64;
+        cy /= verts.len() as f64;
+
+        // Edge midpoint
+        let mx = 0.5 * (pa[0] + pb[0]);
+        let my = 0.5 * (pa[1] + pb[1]);
+        // outward = midpoint → centroid (or negative of centroid → midpoint)
+        let outward_x = cx - mx;
+        let outward_y = cy - my;
+        let dot = nx * outward_x + ny * outward_y;
+
+        let global_flip = if gi < gj { 1.0 } else { -1.0 };
+        let outward_flip = if dot > 0.0 { 1.0 } else { -1.0 };
+        global_flip * outward_flip
+    }
+
+    // ─── 3-D hexahedron construction ───────────────────────────────────────
+
+    fn build_3d_hex(mesh: M, order: u8) -> Self {
+        debug_assert_eq!(order, 0, "HexRT0: order must be 0");
+        let dofs_per_elem = HEX_FACES.len();
+        let n_elem = mesh.n_elements();
+
+        let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut next_dof: DofId = 0;
+        let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+        let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for face_verts in &HEX_FACES {
+                // Sorted 4-vertex key for face lookup.
+                let (a, b, c, d) = (
+                    verts[face_verts[0]],
+                    verts[face_verts[1]],
+                    verts[face_verts[2]],
+                    verts[face_verts[3]],
+                );
+                // Use the first 3 vertices to form a canonical triple key.
+                let key = FaceKey::new(a, b, c);
+
+                let sign = Self::compute_sign_3d_hex(&mesh, verts, a, b, c, d);
+                let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
+                dofs_flat.push(dof);
+                signs_flat.push(sign);
+            }
+        }
+
+        HDivSpace {
+            mesh,
+            order,
+            n_dofs: next_dof as usize,
+            dofs_flat,
+            signs_flat,
+            dofs_per_elem,
+            face_map: FaceDofMap::HexFaces(face_map),
+            elem_type: ElementType::Hex8,
+        }
+    }
+
+    /// Compute the orientation sign for a 3-D hex face (quadrilateral).
+    fn compute_sign_3d_hex(mesh: &M, verts: &[u32], a: u32, b: u32, c: u32, d: u32) -> f64 {
+        let pa = mesh.node_coords(a);
+        let pb = mesh.node_coords(b);
+        let pc = mesh.node_coords(c);
+        let pd = mesh.node_coords(d);
+
+        // Face centroid
+        let cx_f = (pa[0] + pb[0] + pc[0] + pd[0]) / 4.0;
+        let cy_f = (pa[1] + pb[1] + pc[1] + pd[1]) / 4.0;
+        let cz_f = (pa[2] + pb[2] + pc[2] + pd[2]) / 4.0;
+
+        // Element centroid
+        let mut cx_e = 0.0; let mut cy_e = 0.0; let mut cz_e = 0.0;
+        for &v in verts {
+            let p = mesh.node_coords(v);
+            cx_e += p[0]; cy_e += p[1]; cz_e += p[2];
+        }
+        let nv = verts.len() as f64;
+        cx_e /= nv; cy_e /= nv; cz_e /= nv;
+
+        // Face normal via first triangle (a,b,c)
+        let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+        let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+        let n_global = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+
+        // outward = face_centroid → element_centroid
+        let outward = [cx_e - cx_f, cy_e - cy_f, cz_e - cz_f];
+        let dot = n_global[0] * outward[0] + n_global[1] * outward[1] + n_global[2] * outward[2];
+        if dot > 0.0 { 1.0 } else { -1.0 }
+    }
+
     // ─── Public API ─────────────────────────────────────────────────────────
 
     /// Orientation signs (±1.0) for the DOFs on element `elem`.
@@ -297,16 +503,16 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// Look up the global DOF for a 2-D face (edge).
     pub fn edge_face_dof(&self, edge: EdgeKey) -> Option<DofId> {
         match &self.face_map {
-            FaceDofMap::Edges(map) => map.get(&edge).copied(),
-            FaceDofMap::Faces(_) => None,
+            FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => map.get(&edge).copied(),
+            FaceDofMap::Faces(_) | FaceDofMap::HexFaces(_) => None,
         }
     }
 
-    /// Look up the global DOF for a 3-D face (triangle).
+    /// Look up the global DOF for a 3-D face (triangle/quad).
     pub fn tri_face_dof(&self, face: FaceKey) -> Option<DofId> {
         match &self.face_map {
-            FaceDofMap::Faces(map) => map.get(&face).copied(),
-            FaceDofMap::Edges(_) => None,
+            FaceDofMap::Faces(map) | FaceDofMap::HexFaces(map) => map.get(&face).copied(),
+            FaceDofMap::Edges(_) | FaceDofMap::QuadEdges(_) => None,
         }
     }
 
@@ -339,7 +545,7 @@ impl<M: MeshTopology> HDivSpace<M> {
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
         match &self.face_map {
-            FaceDofMap::Edges(map) => {
+            FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => {
                 if self.order == 0 {
                     // RT0: 1 DOF per edge — zero-th normal moment via midpoint rule.
                     for (&EdgeKey(a, b), &dof) in map {
@@ -474,7 +680,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                     }
                 }
             }
-            FaceDofMap::Faces(map) => {
+            FaceDofMap::Faces(map) | FaceDofMap::HexFaces(map) => {
                 if self.order == 0 {
                     // 3-D RT0: one flux DOF per face (midpoint rule).
                     for (&FaceKey(a, b, c), &dof) in map {
