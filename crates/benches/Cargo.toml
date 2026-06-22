@@ -5,9 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
+fem-element = { path = "../element" }
 fem-core = { path = "../core" }
 fem-mesh = { path = "../mesh" }
-fem-element = { path = "../element" }
 fem-space = { path = "../space" }
 fem-assembly = { path = "../assembly" }
 fem-linalg = { path = "../linalg" }
@@ -50,3 +50,8 @@ path = "micro.rs"
 name = "gpu_micro"
 harness = false
 path = "gpu_micro.rs"
+
+[[bench]]
+name = "solver_comparison"
+harness = false
+path = "solver_comparison.rs"

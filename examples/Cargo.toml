@@ -6,6 +6,8 @@ io_hdf5_mpi = ["fem-io-hdf5-parallel/hdf5-mpi"]
 
 [package]
 name    = "fem-examples"
+version = "0.1.0"
+edition = "2021"
 
 [dependencies]
 fem-core     = { path = "../crates/core" }

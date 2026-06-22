@@ -39,7 +39,11 @@ $coreExamples = @(
     "mfem_ex15_dg_amr",
     "mfem_ex15_tet_nc_amr",
     "mfem_ex16_nonlinear_heat",
-    "mfem_ex26_geom_mg"
+    "mfem_ex26_geom_mg",
+    "mfem_ex0_mesh_intro",
+    "mfem_ex11_p_multigrid",
+    "mfem_ex12_solver_comparison",
+    "mfem_mc_random_field"
 )
 
 $runList = @()

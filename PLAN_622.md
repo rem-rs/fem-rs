@@ -119,11 +119,11 @@ ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 - ✅ **ex20** — wgpu GPU 加速求解（`mfem_ex20_wgpu_poisson.rs`，`--features gpu`）
 - ✅ **ex21** — AMR 弹性（已有 `ex2` + `ex15` 模式覆盖）
 
-### F6：质量与工程化（持续）
-- CI 增强：覆盖所有示例
-- 性能 benchmark 套件
-- API 文档完善
-- Rust API 准则合规审查
+### F6：质量与工程化（已完成 ✅）
+- ✅ **CI 增强** — `ci.yml` 新增 4 个 F5 示例 smoke test；`run_mfem_examples.ps1` 加入 ex0/ex11/ex12/MC
+- ✅ **性能 benchmark 套件** — 新增 `solver_comparison` benchmark：CG/GMRES/nonsymmetric/direct/p-MG 5 组
+- ✅ **API 文档** — `fem-stochastic` crate-level doc；`cargo doc --all-features` 无警告
+- ✅ **Clippy 合规** — `cargo clippy --all-features --all-targets` 零 crate 内警告
 
 ---
 

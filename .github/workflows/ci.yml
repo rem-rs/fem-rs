@@ -68,6 +68,10 @@ jobs:
         run: |
           cargo run --example mfem_ex22 -- --n 6 --omega 1.2 --sigma 0.05
           cargo run --example mfem_ex41_imex -- --n 6 --dt 0.01 --T 0.1
+          cargo run --example mfem_ex0_mesh_intro -- --n 4 --order 1
+          cargo run --example mfem_ex11_p_multigrid -- --n 8 --pmax 2
+          cargo run --example mfem_ex12_solver_comparison -- --n 6
+          cargo run --example mfem_mc_random_field -- --n 6 --kl-modes 2 --samples 4
 
   wasm:
     name: WASM Build
