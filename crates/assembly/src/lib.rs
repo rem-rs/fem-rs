@@ -92,6 +92,7 @@ pub mod discrete_op;
 pub mod transfer;
 pub mod static_cond;
 pub mod iga;
+pub mod iga_trim;
 pub mod dg_advection;
 pub mod dpg;
 pub mod dg_cdr;
