@@ -174,6 +174,7 @@ fn mixed_mesh_elem_type_accessor() {
         elem_offsets: Some(elem_offsets),
         face_types: None,
         face_offsets: None,
+        face_to_elem: None,
     };
 
     assert!(mesh.is_mixed());
@@ -181,4 +182,49 @@ fn mixed_mesh_elem_type_accessor() {
     assert_eq!(mesh.element_type(0), ElementType::Quad4);
     assert_eq!(mesh.element_type(1), ElementType::Tri3);
     assert_eq!(mesh.element_type(2), ElementType::Tri3);
+}
+
+// ─── Face-to-element mapping ──────────────────────────────────────────────────
+
+#[test]
+fn face_elements_after_build_all_boundary_faces_have_owner() {
+    let mut mesh = SimplexMesh::<2>::unit_square_tri(4);
+    mesh.build_face_to_elem();
+
+    let f2e = mesh.face_to_elem.as_ref().expect("face_to_elem should be built");
+    assert_eq!(f2e.len(), mesh.n_boundary_faces());
+    for (bf, &owner) in f2e.iter().enumerate() {
+        assert!(
+            owner < mesh.n_elements() as u32,
+            "boundary face {bf} should have an owned element, got {owner}"
+        );
+        let (elem, neighbor) = mesh.face_elements(bf as u32);
+        assert_eq!(elem, owner, "face_elements returned wrong owner for face {bf}");
+        assert!(neighbor.is_none(), "boundary face {bf} should have no neighbor");
+    }
+}
+
+#[test]
+fn face_elements_3d_cube_each_boundary_face_has_owner() {
+    let mut mesh = SimplexMesh::<3>::unit_cube_tet(2);
+    mesh.build_face_to_elem();
+
+    let f2e = mesh.face_to_elem.as_ref().expect("face_to_elem should be built");
+    assert_eq!(f2e.len(), mesh.n_boundary_faces());
+    for (bf, &owner) in f2e.iter().enumerate() {
+        assert!(
+            owner < mesh.n_elements() as u32,
+            "3-D boundary face {bf} should have an owner, got {owner}"
+        );
+        let (elem, neighbor) = mesh.face_elements(bf as u32);
+        assert_eq!(elem, owner);
+        assert!(neighbor.is_none());
+    }
+}
+
+#[test]
+fn face_elements_not_built_returns_zero() {
+    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let (elem, _neighbor) = mesh.face_elements(0);
+    assert_eq!(elem, 0, "before build_face_to_elem, should return (0, None)");
 }

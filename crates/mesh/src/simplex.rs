@@ -5,6 +5,42 @@ use crate::{
     topology::MeshTopology,
 };
 
+/// Local face vertex tables for each element type.
+fn local_face_verts(dim: usize, elem_type: ElementType) -> Vec<Vec<usize>> {
+    match (dim, elem_type) {
+        // Triangle faces (edges opposite each vertex)
+        (2, ElementType::Tri3 | ElementType::Tri6) => vec![
+            vec![1, 2], // opposite v₀
+            vec![0, 2], // opposite v₁
+            vec![0, 1], // opposite v₂
+        ],
+        // Quad faces (edges in CCW order)
+        (2, ElementType::Quad4) => vec![
+            vec![0, 1], // bottom
+            vec![1, 2], // right
+            vec![2, 3], // top
+            vec![3, 0], // left
+        ],
+        // Tet faces (triangles opposite each vertex)
+        (3, ElementType::Tet4 | ElementType::Tet10) => vec![
+            vec![1, 2, 3], // opposite v₀
+            vec![0, 2, 3], // opposite v₁
+            vec![0, 1, 3], // opposite v₂
+            vec![0, 1, 2], // opposite v₃
+        ],
+        // Hex faces
+        (3, ElementType::Hex8 | ElementType::Hex20) => vec![
+            vec![0, 1, 2, 3], // z=-1 (bottom)
+            vec![4, 5, 6, 7], // z= 1 (top)
+            vec![0, 1, 5, 4], // y=-1 (near)
+            vec![2, 3, 7, 6], // y= 1 (far)
+            vec![0, 3, 7, 4], // x=-1 (left)
+            vec![1, 2, 6, 5], // x= 1 (right)
+        ],
+        _ => vec![],
+    }
+}
+
 /// Unstructured mesh with uniform or mixed element types.
 ///
 /// When all elements share the same type, `elem_type` determines the
@@ -47,6 +83,10 @@ pub struct SimplexMesh<const D: usize> {
     pub face_types: Option<Vec<ElementType>>,
     /// CSR-like start offsets into `face_conn`.  Length = `n_faces + 1`.
     pub face_offsets: Option<Vec<usize>>,
+
+    /// For boundary face `f`, the element that owns it.
+    /// `None` until built (lazy construction via [`build_face_to_elem`]).
+    pub face_to_elem: Option<Vec<ElemId>>,
 }
 
 impl<const D: usize> SimplexMesh<D> {
@@ -383,7 +423,57 @@ impl<const D: usize> SimplexMesh<D> {
         SimplexMesh {
             coords, conn, elem_tags, elem_type, face_conn, face_tags, face_type,
             elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
+            face_to_elem: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Face-to-element mapping
+    // -----------------------------------------------------------------------
+
+    /// Build the mapping from boundary face → owning element.
+    ///
+    /// This iterates over all elements, extracts each element's faces, and
+    /// records which element owns each boundary face.
+    pub fn build_face_to_elem(&mut self) {
+        let n_boundary = self.n_faces();
+        let mut bface_to_elem = vec![ElemId::MAX; n_boundary];
+
+        // Build element-face-to-boundary-face mapping.
+        // For each element, for each of its faces, check if that face
+        // corresponds to a boundary face.
+        let n_elem = self.n_elems();
+        for e in 0..n_elem {
+            let verts = self.element_nodes(e as ElemId);
+            let dim = D;
+            let local_faces = local_face_verts(dim, self.element_type(e as ElemId));
+            for fv in &local_faces {
+                // Face vertex set as a sorted slice of node indices.
+                let mut face_set: Vec<u32> = fv.iter().map(|&i| verts[i]).collect();
+                face_set.sort_unstable();
+
+                // Find the corresponding boundary face.
+                for bf in 0..n_boundary {
+                    let bfv = self.bface_nodes(bf as FaceId);
+                    if self.matches_face(bfv, &face_set) {
+                        bface_to_elem[bf] = e as ElemId;
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.face_to_elem = Some(bface_to_elem);
+    }
+
+    /// Check if a boundary face's vertex set matches a sorted face set.
+    fn matches_face(&self, bf_verts: &[NodeId], sorted_set: &[u32]) -> bool {
+        if bf_verts.len() != sorted_set.len() {
+            return false;
+        }
+        let mut bf_sorted: Vec<u32> = bf_verts.iter().copied().collect();
+        bf_sorted.sort_unstable();
+        bf_sorted == sorted_set
     }
 
     // -----------------------------------------------------------------------
@@ -831,9 +921,17 @@ impl<const D: usize> MeshTopology for SimplexMesh<D> {
 
     fn face_tag(&self, face: FaceId) -> i32 { self.face_tags[face as usize] }
 
-    fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) {
-        // Boundary-only face tracking; interior adjacency not built here.
-        (0, None)
+    fn face_elements(&self, face: FaceId) -> (ElemId, Option<ElemId>) {
+        if let Some(ref f2e) = self.face_to_elem {
+            let e = f2e[face as usize];
+            if e != ElemId::MAX {
+                (e, None)
+            } else {
+                (0, None)
+            }
+        } else {
+            (0, None)
+        }
     }
 }
 

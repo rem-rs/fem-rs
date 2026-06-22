@@ -331,6 +331,7 @@ impl InpParser {
             elem_offsets: if mixed { Some(elem_offsets) } else { None },
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
+            face_to_elem: None,
         })
     }
 
