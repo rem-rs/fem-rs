@@ -552,6 +552,7 @@ dependencies = [
  "fem-core",
  "fem-element",
  "fem-linalg",
+ "fem-linalg-gpu",
  "fem-mesh",
  "fem-solver",
  "fem-space",
@@ -561,6 +562,7 @@ dependencies = [
  "reed-core",
  "reed-cpu",
  "thiserror 2.0.18",
+ "wgpu",
 ]
 
 [[package]]
@@ -601,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "fem-examples"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "env_logger",
@@ -738,6 +740,7 @@ dependencies = [
  "fem-linalg",
  "fem-linalg-gpu",
  "fem-mesh",
+ "fem-parallel",
  "fem-space",
  "linger",
  "log",
