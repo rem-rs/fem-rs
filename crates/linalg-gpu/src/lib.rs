@@ -1,3 +1,4 @@
+pub mod assembly;
 pub mod buffer;
 pub mod context;
 pub mod csr;
