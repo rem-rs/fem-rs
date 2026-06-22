@@ -17,6 +17,7 @@
 
 pub mod tri;
 pub mod tri_nd2;
+pub mod tri_ndk;
 pub mod quad;
 pub mod quad_nd2;
 pub mod hex;
@@ -26,6 +27,7 @@ pub mod tet_nd2;
 
 pub use tri::TriND1;
 pub use tri_nd2::TriND2;
+pub use tri_ndk::TriNDk;
 pub use quad::QuadND1;
 pub use quad_nd2::QuadND2;
 pub use hex::HexND1;
