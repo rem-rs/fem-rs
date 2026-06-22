@@ -88,7 +88,6 @@ Dependency order (each crate depends only on crates listed above it):
 ```bash
 git clone <repo>
 cd fem-rs
-git submodule update --init --recursive
 
 # build + test everything
 cargo test --workspace
@@ -104,28 +103,9 @@ cargo run --example mfem_ex19
 
 ## Architecture Reference
 
-See [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) for:
-- Complete trait interface definitions (`MeshTopology`, `ReferenceElement`, `FESpace`, `LinearSolver`, ...)
-- Assembly pipeline (8-step reference -> physical coordinate transformation)
-- AMG hierarchy design
-- MPI parallel mesh and parallel CSR matrix specs
-- WASM target rules and JS API
+See [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) for trait interfaces, assembly pipeline, AMG design, and MPI/WASM specs.
 
-See [DESIGN_PLAN.md](DESIGN_PLAN.md) for the full phase-by-phase implementation log.
-
-See [MFEM_MAPPING.md](MFEM_MAPPING.md) for a feature-by-feature correspondence with MFEM.
-
-See [MFEM_ALIGNMENT_TRACKER.md](MFEM_ALIGNMENT_TRACKER.md) for the unified parity tracker and priority gaps.
-
-See [docs/post-parity-expansion-roadmap-2026-05-15.md](docs/post-parity-expansion-roadmap-2026-05-15.md) for the post-parity execution model, expansion priorities, and first Beyond-MFEM batch.
-
-See [docs/mfem-parity-matrix-template.md](docs/mfem-parity-matrix-template.md) for measurable parity acceptance gates.
-
-See [docs/mfem-6week-plan-estimates.md](docs/mfem-6week-plan-estimates.md) for the current 6-week execution and effort plan.
-
-See [docs/mfem-baseline-snapshot-2026-04-18.md](docs/mfem-baseline-snapshot-2026-04-18.md) for the latest command-backed baseline snapshot.
-
-See [docs/ras-ddm-status-2026-04-19.md](docs/ras-ddm-status-2026-04-19.md) for the current Domain Decomposition (RAS) implementation status, benchmark commands, and latest results.
+See [PLAN_622.md](PLAN_622.md) for the current development roadmap and gap closure plan.
 
 ---
 
@@ -157,21 +137,25 @@ check-all  = "check --workspace --all-features"
 
 ## Implementation Status
 
-Core MFEM parity is largely closed for mesh/space/assembly/solver/AMG/parallel
-workflows. Remaining work is primarily engineering hardening and higher-fidelity
-workflow expansion, not external solver FFI delivery.
+Core FEM pipeline (Poisson → Elasticity → Maxwell → Darcy → Stokes → Navier-Stokes →
+multi-physics coupling) is complete for simplex meshes.
+
+Known gaps tracked in [PLAN_622.md](PLAN_622.md):
+- Quad/Hex H(div) elements missing
+- DPG method framework missing
+- No GPU-accelerated assembly (only SpMV)
+- TMOP at baseline only (full target-matrix pending)
 
 | Crate | Status | Highlights |
 |-------|--------|------------|
-| `fem-core` | ✅ Complete | Scalar traits, FemError, NodeId/DofId, coord aliases |
-| `fem-mesh` | ✅ Complete | SimplexMesh, uniform/adaptive AMR, NCMesh (Tri3+Tet4 hanging constraints), CurvedMesh P2 isoparametric, periodic mesh, bounding box |
-| `fem-element` | ✅ Complete | Lagrange P1–P3 (Seg, Tri, Tet), Q1/Q2 (Quad), Q1 (Hex); Nédélec ND1/ND2 (Tri, Tet); Raviart-Thomas RT0/RT1 (Tri, Tet); Gauss/Lobatto/Grundmann-Moller quadrature |
-| `fem-linalg` | ✅ Complete | CsrMatrix, CooMatrix, Vector, SparsityPattern, dense LU, BlockMatrix/BlockVector, DenseTensor |
-| `fem-space` | ✅ Complete | H1Space (P1–P3), L2Space (P0/P1/P2), VectorH1Space, HCurlSpace (ND1/ND2, including 3D ND2 shared face DOFs), HDivSpace (RT0/RT1), H1TraceSpace (P1–P3), DOF manager, hanging-node constraints |
-| `fem-assembly` | ✅ Complete | Scalar + vector assemblers; 15+ integrators; MixedAssembler; SIP-DG; NonlinearForm + Newton; partial assembly (matrix-free); coefficient system (PWConst, GridFunction, composition); DiscreteLinearOperator supports ND2->L2(P2), RT1->L2(P2), and 3D high-order curl (ND2->RT1) with strict de Rham verification; optional `reed` helpers available |
-| `fem-solver` | ✅ Complete | CG/PCG+Jacobi/ILU0/ILDLt, GMRES, BiCGSTAB, IDR(s), TFQMR, FGMRES; sparse direct: LU/Cholesky/LDLᵀ; LOBPCG + KrylovSchur; MINRES; Schur complement; ODE: Euler/RK4/RK45/SDIRK-2/BDF-2/Newmark-β/Generalized-α/IMEX-ARK3; `mumps`/`mkl` compatibility APIs are backed by native linger direct solves |
-| `fem-amg` | ✅ Complete | SA-AMG + RS-AMG, Chebyshev smoother, V/W/F cycles, reusable hierarchy (via linger) |
-| `fem-io` | ✅ Complete | GMSH v2/v4.1 ASCII+binary reader; Netgen/Abaqus imported-mesh workflows; VTK .vtu XML writer + reader; Matrix Market .mtx reader/writer; HDF5/XDMF result export and checkpoint/restart workflows |
-| `fem-parallel` | ✅ Complete | ChannelBackend (multi-thread), NativeMPI backend, GhostExchange, METIS k-way partitioning, streaming partition, WASM multi-Worker, distributed checkpoint plumbing |
-| `fem-wasm` | ✅ Complete | WasmSolver (unit-square P1 Poisson), multi-Worker parallel solver, wasm-bindgen JS API |
-| `fem-ceed` | ✅ Complete | PA operators (mass, diffusion, lumped mass), MatFreeOperator trait |
+| `fem-core` | ✅ | Scalar traits, FemError, NodeId/DofId, coord aliases |
+| `fem-mesh` | ✅ | SimplexMesh, AMR, NCMesh (Tri3/Tet4/Quad4/Hex8), CurvedMesh P2, periodic |
+| `fem-element` | ✅ | Lagrange P1–P3 (Seg/Tri/Tet/Quad/Hex + Pk/Qk), Nédélec ND1/ND2 (Tri/Quad/Tet/Hex), RT0/RT1/RT2 (Tri), RT0/RT1 (Tet), NURBS/IGA basis |
+| `fem-linalg` | ✅ | CsrMatrix, CooMatrix, Vector, BlockMatrix, DenseTensor |
+| `fem-space` | ✅ | H1, L2, VectorH1, HCurl, HDiv, H1Trace, IGA spaces, p-refinement |
+| `fem-assembly` | ✅ | Bilinear/linear/mixed/DG/nonlinear/partial assembly, complex systems, Navier-Stokes, phasefield, FSI, thermoelastic, static condensation, de Rham discrete ops |
+| `fem-solver` | ✅ | CG/GMRES/BiCGSTAB/IDR(s)/TFQMR/FGMRES, AMS/ADS, sparse direct, LOBPCG/KrylovSchur, ODE (RK/IMEX/BDF/symplectic), DAE, multi-rate, adjoint, coupled Newton |
+| `fem-amg` | ✅ | SA-AMG, RS-AMG, Chebyshev smoother, V/W/F cycles |
+| `fem-io` | ✅ | GMSH v2/v4, Netgen, Abaqus, VTK, Matrix Market, HDF5/XDMF |
+| `fem-parallel` | ✅ | MPI/Thread/WASM backends, METIS, ghost exchange, ParCSR, ParAMG, RAS, checkpoint |
+| `fem-wasm` | ✅ | Browser Poisson solver, multi-Worker parallel |
