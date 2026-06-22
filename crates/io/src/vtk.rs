@@ -40,14 +40,17 @@ fn vtk_cell_type(et: ElementType) -> u8 {
         ElementType::Tri3     =>  5,
         ElementType::Tri6     =>  22,
         ElementType::Quad4    =>  9,
-        ElementType::Quad9    => 28, // VTK_BIQUADRATIC_QUAD
+        ElementType::Quad9    => 28,
         ElementType::Quad8    =>  23,
         ElementType::Tet4     => 10,
         ElementType::Tet10    => 24,
         ElementType::Hex8     => 12,
         ElementType::Hex20    => 25,
         ElementType::Prism6   => 13,
+        ElementType::Prism15  => 26,
+        ElementType::Prism18  => 32,
         ElementType::Pyramid5 => 14,
+        ElementType::Pyramid13 => 27,
         ElementType::Point1   =>  1,
     }
 }

@@ -20,8 +20,6 @@ pub enum ElementType {
     /// 8-node serendipity quadrilateral.
     Quad8,
     /// 9-node biquadratic tensor-product quadrilateral (Q2, full tensor).
-    ///
-    /// Used e.g. by single-patch IGA with degree `(p,q)=(2,2)`.
     Quad9,
     /// 4-node linear tetrahedron.
     Tet4,
@@ -33,8 +31,14 @@ pub enum ElementType {
     Hex20,
     /// 6-node linear triangular prism.
     Prism6,
+    /// 15-node quadratic (complete) triangular prism.
+    Prism15,
+    /// 18-node quadratic (serendipity) triangular prism.
+    Prism18,
     /// 5-node linear pyramid.
     Pyramid5,
+    /// 13-node quadratic pyramid.
+    Pyramid13,
 }
 
 impl ElementType {
@@ -54,7 +58,10 @@ impl ElementType {
             Self::Hex8      =>  8,
             Self::Hex20     => 20,
             Self::Prism6    =>  6,
+            Self::Prism15   => 15,
+            Self::Prism18   => 18,
             Self::Pyramid5  =>  5,
+            Self::Pyramid13 => 13,
         }
     }
 
@@ -67,7 +74,8 @@ impl ElementType {
           | Self::Quad4 | Self::Quad8 | Self::Quad9 => 2,
             Self::Tet4  | Self::Tet10
           | Self::Hex8  | Self::Hex20
-          | Self::Prism6 | Self::Pyramid5       => 3,
+          | Self::Prism6 | Self::Prism15 | Self::Prism18
+          | Self::Pyramid5 | Self::Pyramid13       => 3,
         }
     }
 
@@ -87,7 +95,9 @@ impl ElementType {
              9 => Some(Self::Tri6),
             11 => Some(Self::Tet10),
             15 => Some(Self::Point1),
+            16 => Some(Self::Prism15),
             17 => Some(Self::Hex20),
+            19 => Some(Self::Pyramid13),
             _  => None,
         }
     }
@@ -101,7 +111,8 @@ impl ElementType {
             Self::Quad4 | Self::Quad8 | Self::Quad9 => Some(Self::Line3),
             Self::Tet4  | Self::Tet10 => Some(Self::Tri3),
             Self::Hex8  | Self::Hex20 => Some(Self::Quad4),
-            Self::Prism6              => Some(Self::Tri3),
+            Self::Prism6 | Self::Prism15 | Self::Prism18 => Some(Self::Tri3),
+            Self::Pyramid5 | Self::Pyramid13 => Some(Self::Tri3),
             Self::Line2 | Self::Line3 => Some(Self::Point1),
             _                         => None,
         }

@@ -21,6 +21,8 @@
 
 use crate::quadrature::{seg_rule, tri_rule, tet_rule, quad_rule, hex_rule};
 use crate::reference::{QuadratureRule, ReferenceElement};
+use super::prism::PrismPk;
+use super::pyramid::PyramidPk;
 
 // ─── Helpers: equispaced nodes ────────────────────────────────────────────────
 
@@ -140,7 +142,7 @@ impl ReferenceElement for SegPk {
 /// Evaluate the standard degree-p Lagrange polynomial through integer nodes
 /// {0, 1, ..., p}: l_n(t) = Π_{m≠n} (t-m)/(n-m).
 /// Used by SegPk (1D elements) where the standard Lagrange basis is correct.
-fn lagrange_val(n: usize, p: usize, t: f64) -> f64 {
+pub fn lagrange_val(n: usize, p: usize, t: f64) -> f64 {
     let mut val = 1.0;
     let tn = n as f64;
     for m in 0..=p {
@@ -152,7 +154,7 @@ fn lagrange_val(n: usize, p: usize, t: f64) -> f64 {
 }
 
 /// Derivative of the standard degree-p Lagrange polynomial l_n'(t).
-fn lagrange_deriv(n: usize, p: usize, t: f64) -> f64 {
+pub fn lagrange_deriv(n: usize, p: usize, t: f64) -> f64 {
     let mut sum = 0.0;
     let tn = n as f64;
     for k in 0..=p {
@@ -173,7 +175,7 @@ fn lagrange_deriv(n: usize, p: usize, t: f64) -> f64 {
 /// Rising-factorial basis L_n(t) = Π_{a=0}^{n-1} (t - a) / (n - a), with L_0(t) = 1.
 /// This is the correct building block for simplex Lagrange elements, NOT the
 /// standard Lagrange polynomial through integer nodes.
-fn rising_val(n: usize, t: f64) -> f64 {
+pub fn rising_val(n: usize, t: f64) -> f64 {
     if n == 0 { return 1.0; }
     let mut val = 1.0;
     for a in 0..n {
@@ -185,7 +187,7 @@ fn rising_val(n: usize, t: f64) -> f64 {
 /// Derivative of the rising-factorial basis L_n'(t).
 /// L_n(t) = Π_{a=0}^{n-1} (t-a)/(n-a), so
 /// L_n'(t) = Σ_{b=0}^{n-1} 1/(n-b) · Π_{a≠b} (t-a)/(n-a)
-fn rising_deriv(n: usize, t: f64) -> f64 {
+pub fn rising_deriv(n: usize, t: f64) -> f64 {
     if n == 0 { return 0.0; }
     let nf = n as f64;
     let mut sum = 0.0;
@@ -705,16 +707,18 @@ impl ReferenceElement for HexQk {
 
 /// Element type identifier for the factory function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ElemType { Seg, Tri, Tet, Quad, Hex }
+pub enum ElemType { Seg, Tri, Tet, Quad, Hex, Prism, Pyramid }
 
 /// Create a reference element of the given type and order.
 pub fn ref_elem(etype: ElemType, order: u8) -> Box<dyn ReferenceElement> {
     match etype {
-        ElemType::Seg  => Box::new(SegPk::new(order as usize)),
-        ElemType::Tri  => Box::new(TriPk::new(order as usize)),
-        ElemType::Tet  => Box::new(TetPk::new(order as usize)),
-        ElemType::Quad => Box::new(QuadQk::new(order as usize)),
-        ElemType::Hex  => Box::new(HexQk::new(order as usize)),
+        ElemType::Seg     => Box::new(SegPk::new(order as usize)),
+        ElemType::Tri     => Box::new(TriPk::new(order as usize)),
+        ElemType::Tet     => Box::new(TetPk::new(order as usize)),
+        ElemType::Quad    => Box::new(QuadQk::new(order as usize)),
+        ElemType::Hex     => Box::new(HexQk::new(order as usize)),
+        ElemType::Prism   => Box::new(PrismPk::new(order as usize)),
+        ElemType::Pyramid => Box::new(PyramidPk::new(order as usize)),
     }
 }
 
@@ -723,6 +727,8 @@ pub type LagrangeTriangle = TriPk;
 pub type LagrangeTetrahedron = TetPk;
 pub type LagrangeQuad = QuadQk;
 pub type LagrangeHex = HexQk;
+pub type LagrangePrism = PrismPk;
+pub type LagrangePyramid = PyramidPk;
 
 /// Number of DOFs for a simplex element of given dimension and order.
 pub fn n_dofs_simplex(dim: usize, order: usize) -> usize {
@@ -894,6 +900,10 @@ mod tests {
         assert_eq!(ref_elem(ElemType::Tet, 3).n_dofs(), 20);
         assert_eq!(ref_elem(ElemType::Quad, 5).n_dofs(), 36);
         assert_eq!(ref_elem(ElemType::Hex, 3).n_dofs(), 64);
+        assert_eq!(ref_elem(ElemType::Prism, 1).n_dofs(), 6);
+        assert_eq!(ref_elem(ElemType::Prism, 2).n_dofs(), 18);
+        assert_eq!(ref_elem(ElemType::Pyramid, 1).n_dofs(), 5);
+        assert_eq!(ref_elem(ElemType::Pyramid, 2).n_dofs(), 14);
     }
 
     #[test]
@@ -973,6 +983,97 @@ mod tests {
                     assert!((grads[i*3] - fd_x).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gx");
                     assert!((grads[i*3+1] - fd_y).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gy");
                     assert!((grads[i*3+2] - fd_z).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gz");
+                }
+            }
+        }
+    }
+
+    // ── PrismPk ────────────────────────────────────────────────────────────
+
+    #[test] fn prism_pk_pou() { check_pou(&PrismPk::new(2)); }
+    #[test] fn prism_pk_grad_zero() { check_grad_zero(&PrismPk::new(2)); }
+    #[test] fn prism_pk_nodal_interp() { check_nodal_interp(&PrismPk::new(2)); }
+    #[test] fn prism_pk_n_dofs() {
+        for p in 1..=5 {
+            let n_tri = (p+1)*(p+2)/2;
+            assert_eq!(PrismPk::new(p).n_dofs(), (p+1)*n_tri);
+        }
+    }
+
+    #[test]
+    fn prism_pk_gradient_fd() {
+        let h = 1e-7;
+        for p in 1..=3 {
+            let elem = PrismPk::new(p);
+            let n = elem.n_dofs();
+            let (mut vc, mut vx, mut vy, mut vz, mut grads) = (
+                vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*3]
+            );
+            let test_pts: &[[f64; 3]] = if p == 1 {
+                &[[0.3, 0.2, 0.1]]
+            } else {
+                &[[0.2, 0.3, 0.15], [0.5, 0.1, 0.25]]
+            };
+            for pt in test_pts {
+                let (x, y, z) = (pt[0], pt[1], pt[2]);
+                if y + z > 0.95 { continue; }
+                elem.eval_basis(&[x, y, z], &mut vc);
+                elem.eval_basis(&[x+h, y, z], &mut vx);
+                elem.eval_basis(&[x, y+h, z], &mut vy);
+                elem.eval_basis(&[x, y, z+h], &mut vz);
+                elem.eval_grad_basis(&[x, y, z], &mut grads);
+                for i in 0..n {
+                    let fd_x = (vx[i] - vc[i]) / h;
+                    let fd_y = (vy[i] - vc[i]) / h;
+                    let fd_z = (vz[i] - vc[i]) / h;
+                    assert!((grads[i*3] - fd_x).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gx");
+                    assert!((grads[i*3+1] - fd_y).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gy");
+                    assert!((grads[i*3+2] - fd_z).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gz");
+                }
+            }
+        }
+    }
+
+    // ── PyramidPk ──────────────────────────────────────────────────────────
+
+    #[test] fn pyramid_pk_pou() { check_pou(&PyramidPk::new(2)); }
+    #[test] fn pyramid_pk_grad_zero() { check_grad_zero(&PyramidPk::new(2)); }
+    #[test] fn pyramid_pk_nodal_interp() { check_nodal_interp(&PyramidPk::new(2)); }
+    #[test] fn pyramid_pk_n_dofs() {
+        assert_eq!(PyramidPk::new(1).n_dofs(), 5);
+        assert_eq!(PyramidPk::new(2).n_dofs(), 14);
+        assert_eq!(PyramidPk::new(3).n_dofs(), 30);
+    }
+
+    #[test]
+    fn pyramid_pk_gradient_fd() {
+        let h = 1e-7;
+        for p in 1..=3 {
+            let elem = PyramidPk::new(p);
+            let n = elem.n_dofs();
+            let (mut vc, mut vx, mut vy, mut vz, mut grads) = (
+                vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*3]
+            );
+            let test_pts: &[[f64; 3]] = if p == 1 {
+                &[[0.1, 0.1, 0.1]]
+            } else {
+                &[[0.15, 0.15, 0.1], [0.08, 0.08, 0.2]]
+            };
+            for pt in test_pts {
+                let (x, y, z) = (pt[0], pt[1], pt[2]);
+                if x + z > 0.8 || y + z > 0.8 { continue; }
+                elem.eval_basis(&[x, y, z], &mut vc);
+                elem.eval_basis(&[x+h, y, z], &mut vx);
+                elem.eval_basis(&[x, y+h, z], &mut vy);
+                elem.eval_basis(&[x, y, z+h], &mut vz);
+                elem.eval_grad_basis(&[x, y, z], &mut grads);
+                for i in 0..n {
+                    let fd_x = (vx[i] - vc[i]) / h;
+                    let fd_y = (vy[i] - vc[i]) / h;
+                    let fd_z = (vz[i] - vc[i]) / h;
+                    assert!((grads[i*3] - fd_x).abs() < 1e-4, "p={p} ({x},{y},{z}) i={i} gx");
+                    assert!((grads[i*3+1] - fd_y).abs() < 1e-4, "p={p} ({x},{y},{z}) i={i} gy");
+                    assert!((grads[i*3+2] - fd_z).abs() < 4e-4, "p={p} ({x},{y},{z}) i={i} gz");
                 }
             }
         }

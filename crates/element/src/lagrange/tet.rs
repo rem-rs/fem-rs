@@ -137,20 +137,98 @@ impl ReferenceElement for TetP2 {
     fn quadrature(&self, order: u8) -> QuadratureRule { tet_rule(order) }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        let t = 1.0 / 3.0; let t2 = 2.0 / 3.0;
         vec![
-            vec![0.0, 0.0, 0.0],
-            vec![1.0, 0.0, 0.0],
-            vec![0.0, 1.0, 0.0],
-            vec![0.0, 0.0, 1.0],
-            vec![0.5, 0.0, 0.0],
-            vec![0.0, 0.5, 0.0],
-            vec![0.0, 0.0, 0.5],
-            vec![0.5, 0.5, 0.0],
-            vec![0.5, 0.0, 0.5],
-            vec![0.0, 0.5, 0.5],
+            vec![0.0,0.0,0.0], vec![1.0,0.0,0.0], vec![0.0,1.0,0.0], vec![0.0,0.0,1.0],
+            vec![t,0.0,0.0], vec![t2,0.0,0.0],
+            vec![0.0,t,0.0], vec![0.0,t2,0.0],
+            vec![0.0,0.0,t], vec![0.0,0.0,t2],
+            vec![t2,t,0.0], vec![t,t2,0.0],
+            vec![t2,0.0,t], vec![t,0.0,t2],
+            vec![0.0,t2,t], vec![0.0,t,t2],
+            vec![t,t,0.0], vec![t,0.0,t], vec![0.0,t,t],
+            vec![t,t,t],
         ]
     }
 }
+
+// ─── Pk (fixed-order) — using rising-factorial basis ─────────────────────────
+
+use std::sync::OnceLock;
+
+/// Generate IJKL indices for tet order p, in the same order as TetPk factory.
+fn tet_ijkl(p: usize) -> Vec<(usize, usize, usize, usize)> {
+    let mut v = Vec::with_capacity((p+1)*(p+2)*(p+3)/6);
+    v.push((0,0,0,p)); v.push((p,0,0,0)); v.push((0,p,0,0)); v.push((0,0,p,0));
+    if p == 1 { return v; }
+    for k in 1..p { v.push((k,0,0,p-k)); }
+    for k in 1..p { v.push((0,k,0,p-k)); }
+    for k in 1..p { v.push((0,0,k,p-k)); }
+    for k in 1..p { v.push((p-k,k,0,0)); }
+    for k in 1..p { v.push((p-k,0,k,0)); }
+    for k in 1..p { v.push((0,p-k,k,0)); }
+    for j in 1..=p.saturating_sub(2) { for i in 1..=p-1-j { v.push((i,j,0,p-i-j)); }}
+    for k in 1..=p.saturating_sub(2) { for i in 1..=p-1-k { v.push((i,0,k,p-i-k)); }}
+    for k in 1..=p.saturating_sub(2) { for j in 1..=p-1-k { v.push((0,j,k,p-j-k)); }}
+    for k in 1..=p.saturating_sub(2) { for j in 1..=p-1-k { v.push((p-j-k,j,k,0)); }}
+    for k in 1..=p.saturating_sub(3) { for j in 1..=p-2-k { for i in 1..=p-1-j-k { v.push((i,j,k,p-i-j-k)); }}}
+    debug_assert_eq!(v.len(), (p+1)*(p+2)*(p+3)/6);
+    v
+}
+
+fn rising_val(n: usize, t: f64) -> f64 {
+    if n == 0 { return 1.0; } let mut val = 1.0;
+    for a in 0..n { val *= (t - a as f64) / (n as f64 - a as f64); } val
+}
+fn rising_deriv(n: usize, t: f64) -> f64 {
+    if n == 0 { return 0.0; } let nf = n as f64; let mut sum = 0.0;
+    for b in 0..n { let mut term = 1.0; for a in 0..n { if a != b { term *= (t - a as f64) / (nf - a as f64); }} sum += term / (nf - b as f64); } sum
+}
+
+macro_rules! impl_tet_pk_fixed {
+    ($name:ident, $p:literal) => {
+        impl ReferenceElement for $name {
+            fn dim(&self) -> u8 { 3 }
+            fn order(&self) -> u8 { $p }
+            fn n_dofs(&self) -> usize { ($p as usize + 1) * ($p as usize + 2) * ($p as usize + 3) / 6 }
+            fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+                static IJKL: OnceLock<Vec<(usize,usize,usize,usize)>> = OnceLock::new();
+                let ijkl = IJKL.get_or_init(|| tet_ijkl($p));
+                let pf = $p as f64; let t0=pf*xi[0]; let t1=pf*xi[1]; let t2=pf*xi[2]; let t3=pf*(1.0-xi[0]-xi[1]-xi[2]);
+                for (i,&(a,b,c,d)) in ijkl.iter().enumerate() { values[i]=rising_val(a,t0)*rising_val(b,t1)*rising_val(c,t2)*rising_val(d,t3); }
+            }
+            fn eval_grad_basis(&self, xi:&[f64], grads:&mut[f64]) {
+                static IJKL: OnceLock<Vec<(usize,usize,usize,usize)>> = OnceLock::new();
+                let ijkl = IJKL.get_or_init(|| tet_ijkl($p));
+                let pf=$p as f64; let t0=pf*xi[0]; let t1=pf*xi[1]; let t2=pf*xi[2]; let t3=pf*(1.0-xi[0]-xi[1]-xi[2]);
+                for (i,&(a,b,c,d)) in ijkl.iter().enumerate() {
+                    let (va,vb,vc,vd)=(rising_val(a,t0),rising_val(b,t1),rising_val(c,t2),rising_val(d,t3));
+                    grads[i*3]=pf*(rising_deriv(a,t0)*vb*vc*vd - va*vb*vc*rising_deriv(d,t3));
+                    grads[i*3+1]=pf*(va*rising_deriv(b,t1)*vc*vd - va*vb*vc*rising_deriv(d,t3));
+                    grads[i*3+2]=pf*(va*vb*rising_deriv(c,t2)*vd - va*vb*vc*rising_deriv(d,t3));
+                }
+            }
+            fn quadrature(&self, o: u8) -> QuadratureRule { tet_rule(o) }
+            fn dof_coords(&self) -> Vec<Vec<f64>> {
+                static IJKL: OnceLock<Vec<(usize,usize,usize,usize)>> = OnceLock::new();
+                let ijkl = IJKL.get_or_init(|| tet_ijkl($p));
+                let pf = $p as f64; ijkl.iter().map(|&(a,b,c,_)| vec![a as f64/pf, b as f64/pf, c as f64/pf]).collect()
+            }
+        }
+    };
+}
+
+/// Quartic Lagrange element on the reference tetrahedron — 35 DOFs.
+pub struct TetP4;
+impl_tet_pk_fixed!(TetP4, 4);
+
+/// Quintic Lagrange element on the reference tetrahedron — 56 DOFs.
+pub struct TetP5;
+impl_tet_pk_fixed!(TetP5, 5);
+
+/// Sextic Lagrange element on the reference tetrahedron — 84 DOFs.
+pub struct TetP6;
+impl_tet_pk_fixed!(TetP6, 6);
 
 // ─── P3 ───────────────────────────────────────────────────────────────────────
 
@@ -549,4 +627,55 @@ mod tests {
             for j in 0..20 { if j != *di { assert!(phi[j].abs() < 1e-11, "face dof {di}: phi[{j}]={}", phi[j]); } }
         }
     }
+
+    // ── TetP4 ─────────────────────────────────────────────────────────────
+
+    #[test] fn tet_p4_pou() { check_pou(&TetP4); }
+    #[test] fn tet_p4_grad_zero() { check_grad_zero(&TetP4); }
+    #[test] fn tet_p4_n_dofs() { assert_eq!(TetP4.n_dofs(), 35); }
+
+    #[test]
+    fn tet_p4_nodal_interp() {
+        let coords = TetP4.dof_coords(); let n = 35; let mut phi = vec![0.0; n];
+        for (i,c) in coords.iter().enumerate() { TetP4.eval_basis(&[c[0],c[1],c[2]], &mut phi);
+            for j in 0..n { assert!((phi[j]-if i==j{1.0}else{0.0}).abs()<1e-11); }
+        }
+    }
+
+    #[test]
+    fn tet_p4_matches_tet_pk() { use crate::lagrange::factory::TetPk; assert_eq!(TetPk::new(4).n_dofs(), 35); }
+
+    // ── TetP5 ─────────────────────────────────────────────────────────────
+
+    #[test] fn tet_p5_pou() { check_pou(&TetP5); }
+    #[test] fn tet_p5_grad_zero() { check_grad_zero(&TetP5); }
+    #[test] fn tet_p5_n_dofs() { assert_eq!(TetP5.n_dofs(), 56); }
+
+    #[test]
+    fn tet_p5_nodal_interp() {
+        let coords = TetP5.dof_coords(); let n = 56; let mut phi = vec![0.0; n];
+        for (i,c) in coords.iter().enumerate() { TetP5.eval_basis(&[c[0],c[1],c[2]], &mut phi);
+            for j in 0..n { assert!((phi[j]-if i==j{1.0}else{0.0}).abs()<1e-11); }
+        }
+    }
+
+    #[test]
+    fn tet_p5_matches_tet_pk() { use crate::lagrange::factory::TetPk; assert_eq!(TetPk::new(5).n_dofs(), 56); }
+
+    // ── TetP6 ─────────────────────────────────────────────────────────────
+
+    #[test] fn tet_p6_pou() { check_pou(&TetP6); }
+    #[test] fn tet_p6_grad_zero() { check_grad_zero(&TetP6); }
+    #[test] fn tet_p6_n_dofs() { assert_eq!(TetP6.n_dofs(), 84); }
+
+    #[test]
+    fn tet_p6_nodal_interp() {
+        let coords = TetP6.dof_coords(); let n = 84; let mut phi = vec![0.0; n];
+        for (i,c) in coords.iter().enumerate() { TetP6.eval_basis(&[c[0],c[1],c[2]], &mut phi);
+            for j in 0..n { assert!((phi[j]-if i==j{1.0}else{0.0}).abs()<1e-11); }
+        }
+    }
+
+    #[test]
+    fn tet_p6_matches_tet_pk() { use crate::lagrange::factory::TetPk; assert_eq!(TetPk::new(6).n_dofs(), 84); }
 }

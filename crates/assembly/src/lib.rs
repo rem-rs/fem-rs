@@ -73,6 +73,7 @@ pub mod coefficient;
 pub mod complex;
 pub mod integrator;
 pub mod standard;
+pub mod block_assembler;
 pub mod mixed;
 pub mod interior_faces;
 pub mod dg;
@@ -140,6 +141,9 @@ pub use vector_boundary::{
     VectorBdQpData, TangentialMassIntegrator,
 };
 pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator};
+pub use block_assembler::{
+    assemble_mixed_block, assemble_diagonal_block, assemble_system_2x2,
+};
 pub use dg::{DgAssembler};
 pub use dpg::{
     solve_dpg_convection_diffusion_1d,

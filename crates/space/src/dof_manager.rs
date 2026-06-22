@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use fem_core::types::{DofId, ElemId, NodeId};
 use fem_mesh::topology::MeshTopology;
+use fem_element::ReferenceElement;
 
 // ─── EdgeKey ─────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,18 @@ impl FaceKey {
         let mut v = [a, b, c];
         v.sort_unstable();
         FaceKey(v[0], v[1], v[2])
+    }
+}
+
+/// A canonical (sorted) quadrilateral face key for deduplication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QuadFaceKey(pub NodeId, pub NodeId, pub NodeId, pub NodeId);
+
+impl QuadFaceKey {
+    pub fn new(a: NodeId, b: NodeId, c: NodeId, d: NodeId) -> Self {
+        let mut v = [a, b, c, d];
+        v.sort_unstable();
+        QuadFaceKey(v[0], v[1], v[2], v[3])
     }
 }
 
@@ -80,9 +93,12 @@ pub struct DofManager {
     /// Each canonical edge key maps to (p-1) DOFs, ordered from near-first-vertex
     /// to near-second-vertex.
     pub edge_pk_map: HashMap<EdgeKey, Vec<DofId>>,
-    /// Face-to-N-DOFs mapping for 3D general order p.
+    /// Face-to-N-DOFs mapping for 3D general order p (triangular faces).
     /// For p ≥ 3, each canonical face key maps to (p-1)(p-2)/2 DOFs.
     pub face_pk_map: HashMap<FaceKey, Vec<DofId>>,
+    /// Quadrilateral-face-to-N-DOFs mapping for 3D general order p.
+    /// For p ≥ 3, each canonical quad face key maps to (p-1)² DOFs.
+    pub quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>>,
     /// Index at which bubble DOFs start (P3 only). Equal to `n_dofs` for P1/P2.
     pub bubble_dof_start: usize,
     /// Number of volume-interior DOFs per element (for p ≥ 4 in 3D, p ≥ 3 in 2D).
@@ -108,7 +124,16 @@ impl DofManager {
             1 => Self::build_p1(mesh),
             2 => {
                 if mesh.dim() == 3 {
-                    Self::build_p2_tet(mesh)
+                    if mesh.n_elements() > 0 {
+                        let npe = mesh.element_nodes(0).len();
+                        match npe {
+                            6 => Self::build_p2_prism(mesh),
+                            5 => Self::build_p2_pyramid(mesh),
+                            _ => Self::build_p2_tet(mesh),
+                        }
+                    } else {
+                        Self::build_p2_tet(mesh)
+                    }
                 } else if mesh.n_elements() > 0
                     && mesh.element_nodes(0).len() == 4
                     && mesh.dim() == 2
@@ -118,7 +143,14 @@ impl DofManager {
                     Self::build_p2(mesh)
                 }
             }
-            3 => Self::build_p3(mesh),
+            3 => {
+                if mesh.dim() == 3 && mesh.n_elements() > 0 {
+                    let npe = mesh.element_nodes(0).len();
+                    if npe == 6 { return Self::build_p3_prism(mesh); }
+                    if npe == 5 { return Self::build_p3_pyramid(mesh); }
+                }
+                Self::build_p3(mesh)
+            }
             _ => {
                 // General arbitrary-order path for p >= 4
                 Self::build_pk(mesh, order)
@@ -187,6 +219,7 @@ impl DofManager {
             edge_dof2_map: HashMap::new(),
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_nodes,
             n_volume_dofs: 0,
             elem_orders: None,
@@ -262,6 +295,7 @@ impl DofManager {
             edge_dof2_map: HashMap::new(),
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
             elem_orders: None,
@@ -358,6 +392,7 @@ impl DofManager {
             edge_dof2_map: HashMap::new(),
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_nodes + n_edge_dofs,
             n_volume_dofs: 0,
             elem_orders: None,
@@ -494,6 +529,7 @@ impl DofManager {
             edge_dof2_map: edge2_map,
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
             bubble_dof_start,
             n_volume_dofs: 0,
             elem_orders: None,
@@ -650,6 +686,7 @@ impl DofManager {
             edge_dof2_map: edge2_map,
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
             bubble_dof_start,
             n_volume_dofs: 0,
             elem_orders: None,
@@ -733,18 +770,314 @@ impl DofManager {
             edge_dof2_map: HashMap::new(),
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
             elem_orders: None,
         }
     }
 
+    // ─── P2 (3-D Prism6) ──────────────────────────────────────────────────────
+
+    fn build_p2_prism<M: MeshTopology>(mesh: &M) -> Self {
+        let n_nodes = mesh.n_nodes();
+        let n_elems = mesh.n_elements();
+        let dim = mesh.dim() as usize;
+        assert_eq!(dim, 3, "build_p2_prism requires a 3-D mesh");
+
+        let dofs_per_elem = 18;
+        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
+        let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut next_dof = n_nodes as DofId;
+        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
+
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            assert!(ns.len() >= 6, "build_p2_prism requires 6-node prisms");
+            let (n0,n1,n2,n3,n4,n5) = (ns[0],ns[1],ns[2],ns[3],ns[4],ns[5]);
+            let base = e as usize * dofs_per_elem;
+
+            dofs_flat[base]=n0; dofs_flat[base+1]=n1; dofs_flat[base+2]=n2;
+            dofs_flat[base+3]=n3; dofs_flat[base+4]=n4; dofs_flat[base+5]=n5;
+
+            let edges = [(n0,n1),(n1,n2),(n0,n2),(n3,n4),(n4,n5),(n3,n5),(n0,n3),(n1,n4),(n2,n5)];
+            for (k, &(a,b)) in edges.iter().enumerate() {
+                let key = EdgeKey::new(a,b);
+                let dof = *edge_map.entry(key).or_insert_with(||{let d=next_dof;next_dof+=1;d});
+                dofs_flat[base+6+k]=dof;
+            }
+
+            for (k, &(a,b,c)) in [(n0,n1,n2),(n3,n4,n5)].iter().enumerate() {
+                let key = FaceKey::new(a,b,c);
+                let dof = *face_map.entry(key).or_insert_with(||{let d=next_dof;next_dof+=1;d});
+                dofs_flat[base+14+k]=dof;
+            }
+        }
+
+        let n_dofs = next_dof as usize;
+        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+        for n in 0..n_nodes as u32 { let c=mesh.node_coords(n); let b=n as usize*dim; dof_coords[b..b+dim].copy_from_slice(c); }
+        for (&EdgeKey(a,b),&dof_id) in &edge_map {
+            let ca=mesh.node_coords(a); let cb=mesh.node_coords(b);
+            let b=dof_id as usize*dim; for d in 0..dim { dof_coords[b+d]=0.5*(ca[d]+cb[d]); }
+        }
+        for (&FaceKey(a,b,c),&dof_id) in &face_map {
+            let off=dof_id as usize*dim; for d in 0..dim { dof_coords[off+d]=(mesh.node_coords(a)[d]+mesh.node_coords(b)[d]+mesh.node_coords(c)[d])/3.0; }
+        }
+
+        DofManager {
+            order:2, n_dofs, dofs_flat, dofs_per_elem,
+            elem_dof_offsets:None, dof_coords, dim,
+            n_vertex_dofs:n_nodes,
+            edge_dof_map:edge_map, edge_dof2_map:HashMap::new(),
+            edge_pk_map:HashMap::new(), face_pk_map:HashMap::new(),
+            quad_face_pk_map:HashMap::new(),
+            bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
+        }
+    }
+
+    // ─── P2 (3-D Pyramid5) ─────────────────────────────────────────────────────
+
+    fn build_p2_pyramid<M: MeshTopology>(mesh: &M) -> Self {
+        let n_nodes = mesh.n_nodes();
+        let n_elems = mesh.n_elements();
+        let dim = mesh.dim() as usize;
+        assert_eq!(dim, 3, "build_p2_pyramid requires a 3-D mesh");
+
+        let dofs_per_elem = 14;
+        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
+        let mut next_dof = n_nodes as DofId;
+        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
+
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            assert!(ns.len() >= 5, "build_p2_pyramid requires 5-node pyramids");
+            let (n0,n1,n2,n3,n4)=(ns[0],ns[1],ns[2],ns[3],ns[4]);
+            let base = e as usize * dofs_per_elem;
+
+            dofs_flat[base]=n0; dofs_flat[base+1]=n1; dofs_flat[base+2]=n2;
+            dofs_flat[base+3]=n3; dofs_flat[base+4]=n4;
+
+            let edges = [(n0,n1),(n1,n2),(n2,n3),(n3,n0),(n0,n4),(n1,n4),(n2,n4),(n3,n4)];
+            for (k, &(a,b)) in edges.iter().enumerate() {
+                let key = EdgeKey::new(a,b);
+                let dof = *edge_map.entry(key).or_insert_with(||{let d=next_dof;next_dof+=1;d});
+                dofs_flat[base+5+k]=dof;
+            }
+            dofs_flat[base+13]=next_dof; next_dof+=1;
+        }
+
+        let n_dofs = next_dof as usize;
+        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+        for n in 0..n_nodes as u32 { let c=mesh.node_coords(n); let b=n as usize*dim; dof_coords[b..b+dim].copy_from_slice(c); }
+        for (&EdgeKey(a,b),&dof_id) in &edge_map {
+            let ca=mesh.node_coords(a); let cb=mesh.node_coords(b);
+            let b=dof_id as usize*dim; for d in 0..dim { dof_coords[b+d]=0.5*(ca[d]+cb[d]); }
+        }
+        for e in 0..n_elems as u32 {
+            let ns=mesh.element_nodes(e);
+            let quad_centroid_dof=e as usize*dofs_per_elem+13;
+            let dof_id=dofs_flat[quad_centroid_dof] as usize;
+            let b=dof_id*dim; for d in 0..dim {
+                dof_coords[b+d]=ns[..4].iter().map(|&n|mesh.node_coords(n)[d]).sum::<f64>()/4.0;
+            }
+        }
+
+        DofManager {
+            order:2, n_dofs, dofs_flat, dofs_per_elem,
+            elem_dof_offsets:None, dof_coords, dim,
+            n_vertex_dofs:n_nodes,
+            edge_dof_map:edge_map, edge_dof2_map:HashMap::new(),
+            edge_pk_map:HashMap::new(), face_pk_map:HashMap::new(),
+            quad_face_pk_map:HashMap::new(),
+            bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
+        }
+    }
+
+    // ─── P3 (3-D Prism6) — 40 DOFs per element ────────────────────────────────
+
+    fn build_p3_prism<M: MeshTopology>(mesh: &M) -> Self {
+        let dim=3usize; let n_nodes=mesh.n_nodes(); let n_elems=mesh.n_elements();
+        let dofs_per_elem=40;
+        let mut edge2_map:HashMap<EdgeKey,[DofId;2]>=HashMap::new();
+        let mut face_map:HashMap<FaceKey,DofId>=HashMap::new();
+        let mut qface_map:HashMap<QuadFaceKey,Vec<DofId>>=HashMap::new();
+        let mut next_dof=n_nodes as DofId;
+        let mut dofs_flat=vec![0u32;n_elems*dofs_per_elem];
+
+        for e in 0..n_elems as u32 {
+            let ns=mesh.element_nodes(e);
+            let (n0,n1,n2,n3,n4,n5)=(ns[0],ns[1],ns[2],ns[3],ns[4],ns[5]);
+            let base=e as usize*40;
+
+            // Layer 0 (bottom): TriP3 DOFs 0..9
+            dofs_flat[base]=n0; dofs_flat[base+1]=n1; dofs_flat[base+2]=n2;
+            for (k,&(a,b)) in [(n0,n1),(n1,n2),(n0,n2)].iter().enumerate() {
+                let key=EdgeKey::new(a,b);
+                let pair = *edge2_map.entry(key).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
+                let (d0,d1)=if a==key.0{(pair[0],pair[1])}else{(pair[1],pair[0])};
+                dofs_flat[base+3+2*k]=d0; dofs_flat[base+4+2*k]=d1;
+            }
+            let fk=FaceKey::new(n0,n1,n2);
+            dofs_flat[base+9]=*face_map.entry(fk).or_insert_with(||{let d=next_dof;next_dof+=1;d});
+
+            // Layer 1 (ξ=1/3): DOFs 10..19
+            for (k,&(a,b)) in [(n0,n3),(n1,n4),(n2,n5)].iter().enumerate() {
+                let key=EdgeKey::new(a,b);
+                let pair = *edge2_map.entry(key).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
+                let (d0,_)=if a==key.0{(pair[0],pair[1])}else{(pair[1],pair[0])};
+                dofs_flat[base+10+k]=d0;
+            }
+            for (k,&(a,b,c,d)) in [(n0,n1,n4,n3),(n1,n2,n5,n4),(n2,n0,n3,n5)].iter().enumerate() {
+                let qk=QuadFaceKey::new(a,b,c,d);
+                let dofs=qface_map.entry(qk).or_insert_with(||{(0..4).map(|_|{let d=next_dof;next_dof+=1;d}).collect()});
+                dofs_flat[base+13+k]=dofs[0];
+            }
+            dofs_flat[base+19]=next_dof; next_dof+=1;
+
+            // Layer 2 (ξ=2/3): DOFs 20..29
+            for (k,&(a,b)) in [(n0,n3),(n1,n4),(n2,n5)].iter().enumerate() {
+                let key=EdgeKey::new(a,b);
+                let pair=*edge2_map.get(&key).unwrap();
+                let (_,d1)=if a==key.0{(pair[0],pair[1])}else{(pair[1],pair[0])};
+                dofs_flat[base+20+k]=d1;
+            }
+            for (k,&(a,b,c,d)) in [(n0,n1,n4,n3),(n1,n2,n5,n4),(n2,n0,n3,n5)].iter().enumerate() {
+                let qk=QuadFaceKey::new(a,b,c,d);
+                let dofs=qface_map.get(&qk).unwrap();
+                dofs_flat[base+23+k]=dofs[2];
+            }
+            dofs_flat[base+29]=next_dof; next_dof+=1;
+
+            // Layer 3 (top): DOFs 30..39
+            dofs_flat[base+30]=n3; dofs_flat[base+31]=n4; dofs_flat[base+32]=n5;
+            for (k,&(a,b)) in [(n3,n4),(n4,n5),(n3,n5)].iter().enumerate() {
+                let key=EdgeKey::new(a,b);
+                let pair=*edge2_map.entry(key).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
+                let (d0,d1)=if a==key.0{(pair[0],pair[1])}else{(pair[1],pair[0])};
+                dofs_flat[base+33+2*k]=d0; dofs_flat[base+34+2*k]=d1;
+            }
+            let fk2=FaceKey::new(n3,n4,n5);
+            dofs_flat[base+39]=*face_map.entry(fk2).or_insert_with(||{let d=next_dof;next_dof+=1;d});
+        }
+
+        let n_dofs=next_dof as usize;
+        let mut dof_coords=vec![0.0_f64;n_dofs*dim];
+        for n in 0..n_nodes as u32{let c=mesh.node_coords(n);let b=n as usize*dim;dof_coords[b..b+dim].copy_from_slice(c);}
+        for(&EdgeKey(a,b),&[d0,d1])in&edge2_map{let ca=mesh.node_coords(a);let cb=mesh.node_coords(b);
+            let b0=d0 as usize*dim;let b1=d1 as usize*dim;for d in 0..dim{dof_coords[b0+d]=(2.0*ca[d]+cb[d])/3.0;dof_coords[b1+d]=(ca[d]+2.0*cb[d])/3.0;}}
+        for(&FaceKey(a,b,c),&dof_id)in&face_map{let off=dof_id as usize*dim;for d in 0..dim{dof_coords[off+d]=(mesh.node_coords(a)[d]+mesh.node_coords(b)[d]+mesh.node_coords(c)[d])/3.0;}}
+        for(key,dofs)in&qface_map{let n4=[key.0,key.1,key.2,key.3];let c4=[0,1,2,3].map(|i|mesh.node_coords(n4[i]));
+            for ix in 0..2{for iy in 0..2{let dof_id=dofs[iy*2+ix];let b=dof_id as usize*dim;
+                let tx=(ix+1)as f64/3.0;let ty=(iy+1)as f64/3.0;
+                for d in 0..dim{dof_coords[b+d]=(1.0-tx)*(1.0-ty)*c4[0][d]+tx*(1.0-ty)*c4[1][d]+tx*ty*c4[2][d]+(1.0-tx)*ty*c4[3][d];}}}
+        }
+        for e in 0..n_elems as u32{let ns=mesh.element_nodes(e);let base=e as usize*40;
+            let c5=[0,1,2,3,4,5].map(|i|mesh.node_coords(ns[i]));
+            for vi in 0..2{let dof_id=dofs_flat[base+19+10*vi]as usize;let xi=(vi+1)as f64/3.0;let b=dof_id*dim;
+                for d in 0..dim{let bottom=(c5[0][d]+c5[1][d]+c5[2][d])/3.0;let top=(c5[3][d]+c5[4][d]+c5[5][d])/3.0;
+                    dof_coords[b+d]=(1.0-xi)*bottom+xi*top;}}}
+
+        DofManager{order:3,n_dofs,dofs_flat,dofs_per_elem,
+            elem_dof_offsets:None,dof_coords,dim,
+            n_vertex_dofs:n_nodes,
+            edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map,
+            edge_pk_map:HashMap::new(),face_pk_map:HashMap::new(),
+            quad_face_pk_map:qface_map,
+            bubble_dof_start:n_dofs,n_volume_dofs:2,elem_orders:None,}
+    }
+
+    // ─── P3 (3-D Pyramid5) — 30 DOFs per element ──────────────────────────────
+
+    fn build_p3_pyramid<M: MeshTopology>(mesh: &M) -> Self {
+        let dim=3usize; let n_nodes=mesh.n_nodes(); let n_elems=mesh.n_elements();
+        let dofs_per_elem=30;
+        let mut edge2_map:HashMap<EdgeKey,[DofId;2]>=HashMap::new();
+        let mut qface_map:HashMap<QuadFaceKey,Vec<DofId>>=HashMap::new();
+        let mut next_dof=n_nodes as DofId;
+        let mut dofs_flat=vec![0u32;n_elems*dofs_per_elem];
+
+        for e in 0..n_elems as u32 {
+            let ns=mesh.element_nodes(e);
+            let (n0,n1,n2,n3,n4)=(ns[0],ns[1],ns[2],ns[3],ns[4]);
+            let base=e as usize*dofs_per_elem;
+
+            // Use PyramidPk ref element coordinates to map each DOF position
+            let pyr_ref=fem_element::lagrange::PyramidPk::new(3);
+            let rc=pyr_ref.dof_coords();
+
+            for ref_i in 0..30 {
+                let x=rc[ref_i][0];let y=rc[ref_i][1];let z=rc[ref_i][2];
+                let eps=1e-12;
+                let on_z0=z.abs()<eps;let on_z1=(z-1.0).abs()<eps;
+                let on_x0=x.abs()<eps;let on_x1=(x-1.0+z).abs()<eps;
+                let on_y0=y.abs()<eps;let on_y1=(y-1.0+z).abs()<eps;
+                let nb=[on_z0,on_z1,on_x0,on_x1,on_y0,on_y1].iter().filter(|&&b|b).count();
+
+                dofs_flat[base+ref_i] = if nb>=3&&on_z1{n4}
+                else if nb>=3{match(on_x0,on_y0){(true,true)=>n0,(false,true)=>n1,(false,false)=>n2,_=>n3}}
+                else if nb==2&&on_z0{
+                    let ek=if on_x0{EdgeKey::new(n3,n0)}else if on_x1{EdgeKey::new(n1,n2)}
+                           else if on_y0{EdgeKey::new(n0,n1)}else{EdgeKey::new(n2,n3)};
+                    let p2=*edge2_map.entry(ek).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
+                    let local=(x*3.0).round()as usize;
+                    if local==0{p2[0]}else{p2[1]}
+                }else if nb==2{
+                    let ek=EdgeKey::new(n4,if on_x0&&on_y0{n0}else if on_x1&&on_y0{n1}else if on_x1&&on_y1{n2}else{n3});
+                    let p2=*edge2_map.entry(ek).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
+                    let local=(z*3.0).round()as usize;
+                    if local==0{p2[0]}else{p2[1]}
+                }else if nb==1&&on_z0{
+                    let qk=QuadFaceKey::new(n0,n1,n2,n3);
+                    let dofs=qface_map.entry(qk).or_insert_with(||{(0..4).map(|_|{let d=next_dof;next_dof+=1;d}).collect()});
+                    let ix=((x*3.0).round()as usize).saturating_sub(1);
+                    let iy=((y*3.0).round()as usize).saturating_sub(1);
+                    dofs[iy.min(1)*2+ix.min(1)]
+                }else{
+                    let d=next_dof;next_dof+=1;d
+                };
+            }
+        }
+
+        let n_dofs=next_dof as usize;
+        let mut dof_coords=vec![0.0_f64;n_dofs*dim];
+        for n in 0..n_nodes as u32{let c=mesh.node_coords(n);let b=n as usize*dim;dof_coords[b..b+dim].copy_from_slice(c);}
+        for(&EdgeKey(a,b),&[d0,d1])in&edge2_map{let ca=mesh.node_coords(a);let cb=mesh.node_coords(b);
+            let b0=d0 as usize*dim;let b1=d1 as usize*dim;for d in 0..dim{dof_coords[b0+d]=(2.0*ca[d]+cb[d])/3.0;dof_coords[b1+d]=(ca[d]+2.0*cb[d])/3.0;}}
+        for(key,dofs)in&qface_map{let n4=[key.0,key.1,key.2,key.3];let c4=[0,1,2,3].map(|i|mesh.node_coords(n4[i]));
+            for ix in 0..2{for iy in 0..2{let dof_id=dofs[iy*2+ix];let b=dof_id as usize*dim;
+                let tx=(ix+1)as f64/3.0;let ty=(iy+1)as f64/3.0;
+                for d in 0..dim{dof_coords[b+d]=(1.0-tx)*(1.0-ty)*c4[0][d]+tx*(1.0-ty)*c4[1][d]+tx*ty*c4[2][d]+(1.0-tx)*ty*c4[3][d];}}}
+        }
+
+        DofManager{order:3,n_dofs,dofs_flat,dofs_per_elem,
+            elem_dof_offsets:None,dof_coords,dim,
+            n_vertex_dofs:n_nodes,
+            edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map,
+            edge_pk_map:HashMap::new(),face_pk_map:HashMap::new(),
+            quad_face_pk_map:qface_map,
+            bubble_dof_start:n_dofs,n_volume_dofs:0,elem_orders:None,}
+    }
+
     // ─── Pk (arbitrary order) ─────────────────────────────────────────────────
     //
     // Builds a general-order Lagrange DOF manager for 2D triangle and 3D tetrahedron
     // meshes. The DOF ordering per element matches TriPk / TetPk from the factory.
+    // For prism/pyramid, dispatches to specialized builders.
 
     fn build_pk<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        let dim = mesh.dim() as usize;
+        let p = order as usize;
+        // Prism/pyramid dispatch for general order
+        if dim == 3 && mesh.n_elements() > 0 {
+            let npe = mesh.element_nodes(0).len();
+            if npe == 6 || npe == 5 {
+                if order > 3 {
+                    panic!("build_pk: P{order} for prism/pyramid not yet supported; use P3 or lower");
+                }
+                return if npe == 6 { Self::build_p3_prism(mesh) } else { Self::build_p3_pyramid(mesh) };
+            }
+        }
         let p = order as usize;
         let dim = mesh.dim() as usize;
         let n_nodes = mesh.n_nodes();
@@ -770,6 +1103,7 @@ impl DofManager {
 
         let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
         let mut face_pk_map: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
+        let quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>> = HashMap::new();
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
@@ -1007,6 +1341,7 @@ impl DofManager {
             edge_dof2_map: HashMap::new(),
             edge_pk_map,
             face_pk_map,
+            quad_face_pk_map,
             bubble_dof_start: n_dofs,
             n_volume_dofs: volume_dofs_per,
             elem_orders: None,
@@ -1318,5 +1653,75 @@ mod tests {
             assert_eq!(&dofs[..4], nodes, "elem {e}: first 4 PK DOFs must be vertex node IDs");
         }
         assert!(!dm.edge_pk_map.is_empty(), "P4 tet should have non-empty edge_pk_map");
+    }
+
+    // ─── Prism6 P2 tests ──────────────────────────────────────────────────────
+
+    fn make_prism_mesh() -> SimplexMesh<3> {
+        use fem_mesh::element_type::ElementType;
+        SimplexMesh::<3>::uniform(
+            vec![
+                0.,0.,0., 1.,0.,0., 0.,1.,0.,
+                0.,0.,1., 1.,0.,1., 0.,1.,1.,
+                0.,0.,2., 1.,0.,2., 0.,1.,2.,
+            ],
+            vec![0,1,2,3,4,5, 3,4,5,6,7,8],
+            vec![1,1], ElementType::Prism6, vec![], vec![], ElementType::Tri3,
+        )
+    }
+
+    #[test] fn prism_p1_basic() {
+        let m=make_prism_mesh(); let dm=DofManager::new(&m,1);
+        assert_eq!(dm.n_dofs,m.n_nodes());
+        for e in 0..m.n_elements() as u32{assert_eq!(dm.element_dofs(e),m.element_nodes(e));}
+    }
+
+    #[test] fn prism_p2_basic() {
+        let m=make_prism_mesh(); let dm=DofManager::new(&m,2);
+        assert_eq!(dm.dofs_per_elem,18); assert!(dm.n_dofs>m.n_nodes());
+        for e in 0..m.n_elements() as u32{assert_eq!(&dm.element_dofs(e)[..6],m.element_nodes(e));}
+        let d0=dm.element_dofs(0); let d1=dm.element_dofs(1);
+        let shared:Vec<_>=d0[6..15].iter().filter(|d|d1[6..15].contains(d)).collect();
+        assert!(!shared.is_empty(),"P2 prism adjacent should share edge DOFs");
+    }
+
+    #[test] fn prism_p3_basic() {
+        let m=make_prism_mesh(); let dm=DofManager::new(&m,3);
+        assert_eq!(dm.dofs_per_elem,40);
+        assert!(dm.n_dofs>DofManager::new(&m,2).n_dofs);
+        // Vertices first in each layer
+        for e in 0..m.n_elements() as u32{
+            let d=dm.element_dofs(e); let n=m.element_nodes(e);
+            assert_eq!(d[0],n[0]); assert_eq!(d[1],n[1]); assert_eq!(d[2],n[2]);
+            assert_eq!(d[30],n[3]); assert_eq!(d[31],n[4]); assert_eq!(d[32],n[5]);
+        }
+    }
+
+    // ─── Pyramid5 P2 tests ────────────────────────────────────────────────────
+
+    fn make_pyramid_mesh() -> SimplexMesh<3> {
+        use fem_mesh::element_type::ElementType;
+        SimplexMesh::<3>::uniform(
+            vec![0.,0.,0., 1.,0.,0., 1.,1.,0., 0.,1.,0., 0.5,0.5,1., 0.,0.,1.],
+            vec![0,1,2,3,4, 3,0,4,5],
+            vec![1,1], ElementType::Pyramid5, vec![], vec![], ElementType::Tri3,
+        )
+    }
+
+    #[test] fn pyramid_p1_basic() {
+        let m=make_pyramid_mesh(); let dm=DofManager::new(&m,1);
+        assert_eq!(dm.n_dofs,m.n_nodes());
+    }
+
+    #[test] fn pyramid_p2_basic() {
+        let m=make_pyramid_mesh(); let dm=DofManager::new(&m,2);
+        assert_eq!(dm.dofs_per_elem,14); assert!(dm.n_dofs>m.n_nodes());
+        for e in 0..m.n_elements() as u32{assert_eq!(&dm.element_dofs(e)[..5],m.element_nodes(e));}
+    }
+
+    #[test] fn pyramid_p3_basic() {
+        let m=make_pyramid_mesh(); let dm=DofManager::new(&m,3);
+        assert_eq!(dm.dofs_per_elem,30);
+        assert!(dm.n_dofs>DofManager::new(&m,2).n_dofs);
     }
 }

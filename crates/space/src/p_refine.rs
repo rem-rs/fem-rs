@@ -666,6 +666,7 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         edge_dof2_map: HashMap::new(),
         edge_pk_map,
         face_pk_map,
+        quad_face_pk_map: HashMap::new(),
         bubble_dof_start: n_dofs,
         n_volume_dofs: 0, // not meaningful for variable order
         elem_orders: Some(elem_orders.to_vec()),

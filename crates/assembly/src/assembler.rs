@@ -7,7 +7,10 @@
 use nalgebra::DMatrix;
 
 use fem_core::types::DofId;
-use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, SegP3, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, HexQ1}};
+use fem_element::{
+    ReferenceElement, PrismPk, PyramidPk,
+    lagrange::{SegP1, SegP2, SegP3, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, HexQ1},
+};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
@@ -94,18 +97,20 @@ pub fn assembly_parallel_min_elems() -> usize {
 /// Return the solution reference element matching `elem_type` and polynomial `order`.
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
-        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
+        (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Tet4, 2)                           => Box::new(TetP2),
         (ElementType::Tet4, 3)                           => Box::new(TetP3),
         (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
         (ElementType::Quad4, 2)                          => Box::new(QuadQ2),
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => Box::new(PrismPk::new(order as usize)),
+        (ElementType::Pyramid5 | ElementType::Pyramid13, _) => Box::new(PyramidPk::new(order as usize)),
         _ => panic!(
             "ref_elem_vol: unsupported combination (element_type={elem_type:?}, order={order}). \
-             Supported: Tri3/Tri6 P1/P2/P3, Tet4 P1/P2/P3, Quad4 Q1/Q2, Hex8 Q1"
+             Try using a different polynomial order or a simplex mesh."
         ),
     }
 }
@@ -117,6 +122,10 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
         (ElementType::Line2, 2) => Box::new(SegP2),
         (ElementType::Line2, 3) => Box::new(SegP3),
         (ElementType::Tri3,  1) => Box::new(TriP1),
+        (ElementType::Tri3,  2) => Box::new(TriP2),
+        (ElementType::Tri3,  3) => Box::new(TriP3),
+        (ElementType::Quad4, 1) => Box::new(QuadQ1),
+        (ElementType::Quad4, 2) => Box::new(QuadQ2),
         _ => panic!("ref_elem_face: unsupported (element_type={face_elem_type:?}, order={order})"),
     }
 }
@@ -131,7 +140,9 @@ fn mesh_type_to_factory(et: ElementType) -> FactoryElemType {
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => FactoryElemType::Quad,
         ElementType::Hex8 | ElementType::Hex20 => FactoryElemType::Hex,
         ElementType::Line2 | ElementType::Line3 => FactoryElemType::Seg,
-        _ => panic!("mesh_type_to_factory: unsupported element type {et:?}"),
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => FactoryElemType::Prism,
+        ElementType::Pyramid5 | ElementType::Pyramid13 => FactoryElemType::Pyramid,
+        _ => panic!("mesh_type_to_factory: unsupported ElementType {et:?}"),
     }
 }
 
@@ -144,7 +155,9 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
     let g = mesh.geom_order();
     let is_quad_hex = matches!(et,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
-        | ElementType::Hex8 | ElementType::Hex20);
+        | ElementType::Hex8 | ElementType::Hex20
+        | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
+        | ElementType::Pyramid5 | ElementType::Pyramid13);
     if g == 1 && !is_quad_hex { return None; } // affine P1 simplex
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);
@@ -160,8 +173,6 @@ fn is_affine(et: ElementType, geom_order: u8) -> bool {
     if geom_order > 1 { return false; }
     matches!(et, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2)
 }
-
-/// Isoparametric Jacobian for non-affine elements (Quad4, Hex8, etc.).
 ///
 /// `J_{ij}(ξ) = Σ_k x_k[i] · ∂φ_k/∂ξ_j`
 ///

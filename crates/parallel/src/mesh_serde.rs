@@ -51,6 +51,9 @@ fn element_type_to_u32(et: ElementType) -> u32 {
         ElementType::Prism6   => 11,
         ElementType::Pyramid5 => 12,
         ElementType::Quad9    => 13,
+        ElementType::Prism15  => 14,
+        ElementType::Prism18  => 15,
+        ElementType::Pyramid13 => 16,
     }
 }
 
@@ -70,7 +73,10 @@ fn u32_to_element_type(v: u32) -> Result<ElementType, String> {
         11 => Ok(ElementType::Prism6),
         12 => Ok(ElementType::Pyramid5),
         13 => Ok(ElementType::Quad9),
-         _ => Err(format!("unknown ElementType discriminant: {v}")),
+        14 => Ok(ElementType::Prism15),
+        15 => Ok(ElementType::Prism18),
+        16 => Ok(ElementType::Pyramid13),
+        _ => Err(format!("unknown ElementType discriminant: {v}")),
     }
 }
 

@@ -46,9 +46,10 @@ pub mod basis_cache;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use quadrature::{TriQuadRule, tri_rule_named};
-pub use lagrange::{HexQ1, QuadQ1, QuadQ2, SegP1, SegP2, SegP3, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3,
+pub use lagrange::{HexQ1, HexQ2, HexQ3, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadP1, QuadP2, QuadP3, QuadP4, SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, TetP1, TetP2, TetP3, TetP4, TetP5, TetP6, TriP1, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8, TriP9, TriP10,
                    LagrangeSegment, LagrangeTriangle, LagrangeTetrahedron, LagrangeQuad, LagrangeHex,
-                   SegPk, TriPk, TetPk, QuadQk, HexQk, ref_elem, ElemType};
+                   LagrangePrism, LagrangePyramid,
+                   SegPk, TriPk, TetPk, QuadQk, HexQk, PrismPk, PyramidPk, ref_elem, ElemType};
 pub use nedelec::{TriND1, QuadND1, QuadND2, HexND1, HexND2, TetND1, TriND2, TetND2};
 pub use raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, QuadRT0, HexRT0, HexRT1, QuadRT1};
 pub use nurbs::{KnotVector, BSplineBasis1D, NurbsPatch2D, NurbsPatch3D,

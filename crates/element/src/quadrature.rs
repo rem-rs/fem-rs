@@ -1023,6 +1023,66 @@ fn dunavant_tri_19() -> QuadratureRule {
     QuadratureRule { points, weights }
 }
 
+// ─── Prism ─────────────────────────────────────────────────────────────────────
+
+/// Tensor product of triangle × segment quadrature rule on the reference prism.
+///
+/// Reference prism: (ξ, η, ζ) where (η, ζ) ∈ unit triangle (0,0),(1,0),(0,1)
+/// and ξ ∈ [0,1] (extrusion direction).
+/// Volume = 0.5 (triangle area) × 1 (segment length) = 0.5.
+///
+/// Rule: `tri_rule(order)` × `seg_rule(order)` tensor product.
+/// Weights sum to 0.5.
+pub fn prism_rule(order: u8) -> QuadratureRule {
+    let tri = tri_rule_arbitrary(order);
+    let seg = seg_rule(order);
+    let nt = tri.points.len();
+    let ns = seg.points.len();
+    let mut pts = Vec::with_capacity(nt * ns);
+    let mut wts = Vec::with_capacity(nt * ns);
+    for t in 0..nt {
+        for s in 0..ns {
+            pts.push(vec![seg.points[s][0], tri.points[t][0], tri.points[t][1]]);
+            wts.push(tri.weights[t] * seg.weights[s]);
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
+// ─── Pyramid ───────────────────────────────────────────────────────────────────
+
+/// Quadrature rule on the reference pyramid using the Duffy transform.
+///
+/// Reference pyramid: vertices (0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1).
+/// Domain: x ∈ [0, 1-z], y ∈ [0, 1-z], z ∈ [0,1].
+/// Volume = 1/3.
+///
+/// Uses tensor-product Gauss rule on the unit cube [0,1]³, mapped via
+/// Duffy transform: (x,y,z) = (r(1-t), s(1-t), t) with Jacobian (1-t)².
+/// Weights sum to 1/3.
+pub fn pyramid_rule(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 2) / 2).max(1).min(4);
+    let (xs, ws) = gauss_legendre_1d(n);
+    let mut pts = Vec::with_capacity(n * n * n);
+    let mut wts = Vec::with_capacity(n * n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        let r = 0.5 * (xi + 1.0);
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            let s = 0.5 * (xj + 1.0);
+            for (xk, wk) in xs.iter().zip(ws.iter()) {
+                let t = 0.5 * (xk + 1.0);
+                let jac = (1.0 - t) * (1.0 - t);
+                let x = r * (1.0 - t);
+                let y = s * (1.0 - t);
+                let z = t;
+                pts.push(vec![x, y, z]);
+                wts.push(wi * wj * wk * 0.125 * jac);
+            }
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1141,6 +1201,48 @@ mod tests {
             let r = hex_lobatto_rule(order);
             assert!((weight_sum(&r) - 8.0).abs() < 1e-12, "order={order}");
         }
+    }
+
+    #[test]
+    fn prism_weights_sum_to_half() {
+        for order in [1u8, 2, 3, 5] {
+            let r = prism_rule(order);
+            let s: f64 = r.weights.iter().sum();
+            assert!((s - 0.5).abs() < 1e-12, "order={order}: sum={s}");
+        }
+    }
+
+    #[test]
+    fn prism_integrate_constant() {
+        let r = prism_rule(3);
+        let val: f64 = r.weights.iter().sum();
+        assert!((val - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pyramid_weights_sum_to_third() {
+        for order in [1u8, 2, 3, 5] {
+            let r = pyramid_rule(order);
+            let s: f64 = r.weights.iter().sum();
+            assert!((s - 1.0 / 3.0).abs() < 1e-12, "order={order}: sum={s}");
+        }
+    }
+
+    #[test]
+    fn pyramid_integrate_constant() {
+        let r = pyramid_rule(3);
+        let val: f64 = r.weights.iter().sum();
+        assert!((val - 1.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pyramid_integrate_z() {
+        // ∫_pyramid z dV = ∫₀¹ z·(1-z)² dz = 1/12
+        let r = pyramid_rule(5);
+        let val: f64 = r.weights.iter().zip(r.points.iter())
+            .map(|(w, p)| w * p[2])
+            .sum();
+        assert!((val - 1.0 / 12.0).abs() < 1e-10, "got {val}");
     }
 
     #[test]

@@ -206,3 +206,65 @@ mod tests {
         assert!((phi[3] - 1.0).abs() < 1e-13, "phi3(2/3)={}", phi[3]);
     }
 }
+
+// ─── P4/P5/P6 — using factory SegPk ─────────────────────────────────────────
+
+macro_rules! seg_fixed {
+    ($name:ident, $p:literal) => {
+        impl ReferenceElement for $name {
+            fn dim(&self) -> u8 { 1 }
+            fn order(&self) -> u8 { $p }
+            fn n_dofs(&self) -> usize { $p as usize + 1 }
+            fn eval_basis(&self, xi:&[f64], v:&mut[f64]) {
+                use crate::lagrange::factory::{lagrange_val as lv, lagrange_deriv as _ld};
+                let t=$p as f64*xi[0]; for i in 0..=$p as usize { v[i]=lv(i,$p as usize,t); }
+            }
+            fn eval_grad_basis(&self, xi:&[f64], g:&mut[f64]) {
+                use crate::lagrange::factory::{lagrange_val as _lv, lagrange_deriv as ld};
+                let t=$p as f64*xi[0]; let p=$p as f64;
+                for i in 0..=$p as usize { g[i]=p*ld(i,$p as usize,t); }
+            }
+            fn quadrature(&self, o: u8) -> QuadratureRule { seg_rule(o) }
+            fn dof_coords(&self) -> Vec<Vec<f64>> {
+                (0..=$p as usize).map(|i| vec![i as f64/$p as f64]).collect()
+            }
+        }
+    };
+}
+
+/// Quartic Lagrange on [0,1] — 5 DOFs.
+pub struct SegP4;
+seg_fixed!(SegP4, 4);
+
+/// Quintic Lagrange on [0,1] — 6 DOFs.
+pub struct SegP5;
+seg_fixed!(SegP5, 5);
+
+/// Sextic Lagrange on [0,1] — 7 DOFs.
+pub struct SegP6;
+seg_fixed!(SegP6, 6);
+
+#[cfg(test)]
+mod tests_p4 {
+    use super::*;
+    fn check_pou(e: &dyn ReferenceElement) { let r=e.quadrature(4); let mut p=vec![0.0;e.n_dofs()];
+        for pt in &r.points { e.eval_basis(pt,&mut p); assert!((p.iter().sum::<f64>()-1.0).abs()<1e-13); } }
+    fn check_grad(e: &dyn ReferenceElement) { let r=e.quadrature(4); let n=e.n_dofs(); let mut g=vec![0.0;n];
+        for pt in &r.points { e.eval_grad_basis(pt,&mut g);
+            assert!(g.iter().sum::<f64>().abs()<1e-13); }}
+    #[test] fn seg_p4_pou() { check_pou(&SegP4); }
+    #[test] fn seg_p5_pou() { check_pou(&SegP5); }
+    #[test] fn seg_p6_pou() { check_pou(&SegP6); }
+    #[test] fn seg_p4_grad() { check_grad(&SegP4); }
+    #[test] fn seg_p5_grad() { check_grad(&SegP5); }
+    #[test] fn seg_p6_grad() { check_grad(&SegP6); }
+    #[test] fn seg_p4_nodal() { let c=SegP4.dof_coords(); let mut p=vec![0.0;5];
+        for (i,coord) in c.iter().enumerate() { SegP4.eval_basis(&[coord[0]],&mut p);
+            for j in 0..5 { assert!((p[j]-if i==j{1.0}else{0.0}).abs()<1e-13); }}}
+    #[test] fn seg_p5_nodal() { let c=SegP5.dof_coords(); let mut p=vec![0.0;6];
+        for (i,coord) in c.iter().enumerate() { SegP5.eval_basis(&[coord[0]],&mut p);
+            for j in 0..6 { assert!((p[j]-if i==j{1.0}else{0.0}).abs()<1e-13); }}}
+    #[test] fn seg_p6_nodal() { let c=SegP6.dof_coords(); let mut p=vec![0.0;7];
+        for (i,coord) in c.iter().enumerate() { SegP6.eval_basis(&[coord[0]],&mut p);
+            for j in 0..7 { assert!((p[j]-if i==j{1.0}else{0.0}).abs()<1e-13); }}}
+}
