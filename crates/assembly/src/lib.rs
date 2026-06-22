@@ -68,6 +68,7 @@
 
 pub mod assembler;
 pub mod backend;
+pub mod contact;
 pub mod coefficient;
 pub mod complex;
 pub mod integrator;
