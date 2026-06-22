@@ -1451,6 +1451,7 @@ pub mod multiphysics;
 pub mod multiphysics_templates;
 pub mod ode;
 pub mod rom;
+pub mod sdc;
 pub mod butcher;
 pub mod adaptive;
 pub mod adjoint;
@@ -1583,6 +1584,9 @@ pub use mixed_precision::{
 pub use rom::{
     Snapshots, PodBasis,
     project_system, reconstruct, relative_error,
+};
+pub use sdc::{
+    SdcConfig, SdcIntegrator,
 };
 
 #[cfg(test)]
