@@ -1450,6 +1450,7 @@ pub mod multiphysics_sync;
 pub mod multiphysics;
 pub mod multiphysics_templates;
 pub mod ode;
+pub mod rom;
 pub mod butcher;
 pub mod adaptive;
 pub mod adjoint;
@@ -1578,6 +1579,10 @@ pub use mixed_precision::{
     convert_csr_f64_to_f32, convert_csr_f32_to_f64,
     MixedPrecisionPrecond,
     solve_pcg_mixed, solve_cg_f32, solve_gmres_f32,
+};
+pub use rom::{
+    Snapshots, PodBasis,
+    project_system, reconstruct, relative_error,
 };
 
 #[cfg(test)]
