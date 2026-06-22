@@ -1444,6 +1444,7 @@ pub mod block;
 pub mod block_gmres;
 pub mod eigen;
 pub mod lor;
+pub mod p_multigrid;
 pub mod multirate;
 pub mod multiphysics_sync;
 pub mod multiphysics;
@@ -1561,6 +1562,9 @@ pub use events::{
 pub use lor::{
     LorPrecond, solve_pcg_lor, solve_gmres_lor,
     GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg,
+};
+pub use p_multigrid::{
+    PmgHierarchy, PmgPrecond, solve_vcycle_pmg, fmg_solve, build_pmg_hierarchy_1d_laplacian,
 };
 pub mod sli;
 pub mod stokes_precond;
