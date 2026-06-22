@@ -17,6 +17,7 @@ pub mod vtk;
 pub mod vtk_reader;
 pub mod matrix_market;
 pub mod xdmf;
+pub mod glvis;
 pub mod imported_workflow;
 
 #[cfg(feature = "hdf5")]

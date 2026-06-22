@@ -17,6 +17,7 @@ members = [
     "crates/python",
     "crates/benches",
     "crates/rmetis",
+    "crates/stochastic",
     "examples",
 ]
 

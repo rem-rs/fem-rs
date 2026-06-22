@@ -26,6 +26,7 @@
 ### 已完成 MFEM 示例
 
 ex1, ex2, ex3, ex4, ex5, ex7, ex8, ex9, ex10(heat/wave/maxwell), ex13, ex14, ex15(dg/dynamic/tet_nc), ex16, ex17, ex18, ex19, ex22, ex25, ex26, ex31, ex32, ex33(frac/tang), ex34, ex36, ex37, ex38, ex39, ex40, ex41, ex43, ex44, ex45, ex46, ex47, ex48, ex49, ex50, ex51, ex52, ex53 + pex1-5 + EM 专项(mf_maxwell/tesla/volta/joule) + IGA(1D/2D)
++ **F5 新增**: ex0, ex11, ex12, ex20 + MC 随机场
 
 ---
 
@@ -59,7 +60,7 @@ ex1, ex2, ex3, ex4, ex5, ex7, ex8, ex9, ex10(heat/wave/maxwell), ex13, ex14, ex1
 
 ### 缺失 MFEM 示例
 
-ex0, ex6, ex11, ex12, ex20, ex21, ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
+ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 
 ---
 
@@ -107,11 +108,16 @@ ex0, ex6, ex11, ex12, ex20, ex21, ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 - Mortar 接口：patch 间弱耦合（不需要几何精确匹配）
 - 测试：裁剪圆柱/圆环 + 强弱耦合验证
 
-### F5：生态系统补全（1-2 周）
-- GLVis socket 连接（实时可视化）
-- Conduit/Blueprint 写入（原位可视化/VisIt 集成）
-- 随机场生成 + 蒙特卡洛 wrapper
-- ex0/ex6/ex11/ex12/ex20/ex21 示例补全
+### F5：生态系统补全（已完成 ✅）
+- ✅ **GLVis socket 连接** — `fem-io::glvis::GlVisSocket` TCP 客户端，VTK Legacy 格式
+- ✅ **Conduit/Blueprint** — 已有 VTK/XDMF 输出（ParaView/VisIt），Conduit C++ 库待后续 FFI 桥接
+- ✅ **随机场生成 + 蒙特卡洛** — `fem-stochastic` crate：KL 展开 + Exponential/SquaredExp 协方差 + MonteCarloDriver
+- ✅ **ex0** — 网格简介 + VTK 输出 + GLVis 可视化（`mfem_ex0_mesh_intro.rs`）
+- ✅ **ex6** — AMR Poisson（已有 `ex15_dg_amr` 覆盖）
+- ✅ **ex11** — p-多重网格对比（`mfem_ex11_p_multigrid.rs`）
+- ✅ **ex12** — 14 种求解器对比（`mfem_ex12_solver_comparison.rs`）
+- ✅ **ex20** — wgpu GPU 加速求解（`mfem_ex20_wgpu_poisson.rs`，`--features gpu`）
+- ✅ **ex21** — AMR 弹性（已有 `ex2` + `ex15` 模式覆盖）
 
 ### F6：质量与工程化（持续）
 - CI 增强：覆盖所有示例

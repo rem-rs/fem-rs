@@ -1,13 +1,11 @@
-[package]
-name    = "fem-examples"
-version = "0.1.0"
-edition = "2021"
-
 [features]
 default = []
-# Convenience aliases for checkpoint I/O (mfem_ex43_hdf5_checkpoint, parity scripts).
+gpu = ["fem-solver/gpu", "fem-linalg-gpu", "wgpu", "bytemuck"]
 io_hdf5 = ["fem-io-hdf5-parallel/hdf5"]
 io_hdf5_mpi = ["fem-io-hdf5-parallel/hdf5-mpi"]
+
+[package]
+name    = "fem-examples"
 
 [dependencies]
 fem-core     = { path = "../crates/core" }
@@ -20,7 +18,11 @@ fem-space    = { path = "../crates/space" }
 fem-assembly = { path = "../crates/assembly" }
 fem-solver   = { path = "../crates/solver" }
 fem-amg      = { path = "../crates/amg" }
+fem-stochastic = { path = "../crates/stochastic" }
 fem-io-hdf5-parallel = { path = "../crates/io_hdf5_parallel" }
+fem-linalg-gpu = { path = "../crates/linalg-gpu", optional = true }
+wgpu           = { version = "27", optional = true }
+bytemuck       = { workspace = true, optional = true }
 nalgebra     = { workspace = true }
 log          = { workspace = true }
 env_logger   = { workspace = true }
@@ -238,6 +240,26 @@ path = "mfem_ex32.rs"
 [[example]]
 name = "mfem_ex34"
 path = "mfem_ex34.rs"
+
+[[example]]
+name = "mfem_ex0_mesh_intro"
+path = "mfem_ex0_mesh_intro.rs"
+
+[[example]]
+name = "mfem_ex12_solver_comparison"
+path = "mfem_ex12_solver_comparison.rs"
+
+[[example]]
+name = "mfem_ex11_p_multigrid"
+path = "mfem_ex11_p_multigrid.rs"
+
+[[example]]
+name = "mfem_mc_random_field"
+path = "mfem_mc_random_field.rs"
+
+[[example]]
+name = "mfem_ex20_wgpu_poisson"
+path = "mfem_ex20_wgpu_poisson.rs"
 
 [[example]]
 name = "mfem_tmop_mesh_quality"
