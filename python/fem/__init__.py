@@ -1,6 +1,9 @@
 from fem._core import (
     Mesh,
     H1Space,
+    L2Space,
+    VectorH1Space,
+    HCurlSpace,
     StiffnessIntegrator,
     MassIntegrator,
     ConstantLoad,
@@ -10,14 +13,18 @@ from fem._core import (
     assemble_linear,
     apply_dirichlet,
     solve_cg,
+    solve_pcg_jacobi,
     solve_gmres,
+    solve_bicgstab,
     solve_sparse_lu,
+    solve_sparse_cholesky,
 )
 
 __all__ = [
-    "Mesh", "H1Space",
+    "Mesh", "H1Space", "L2Space", "VectorH1Space", "HCurlSpace",
     "StiffnessIntegrator", "MassIntegrator", "ConstantLoad",
     "CsrMatrix", "SolveResult",
     "assemble_bilinear", "assemble_linear", "apply_dirichlet",
-    "solve_cg", "solve_gmres", "solve_sparse_lu",
+    "solve_cg", "solve_pcg_jacobi", "solve_gmres", "solve_bicgstab",
+    "solve_sparse_lu", "solve_sparse_cholesky",
 ]

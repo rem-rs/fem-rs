@@ -178,6 +178,53 @@ impl WasmSolver {
     pub fn connectivity(&self) -> Vec<u32> {
         self.mesh.conn.clone()
     }
+
+    /// Export the solution as a VTK legacy string for browser visualization.
+    ///
+    /// The returned string can be:
+    /// - Rendered with `vtk.js` or `ParaViewWeb` in the browser
+    /// - Sent to a GLVis socket for real-time display
+    /// - Saved as a `.vtk` file for later viewing
+    #[cfg_attr(feature = "wasm", wasm_bindgen)]
+    pub fn export_vtk(&self, u: &[f64], field_name: &str) -> String {
+        let nn = self.mesh.n_nodes();
+        let ne = self.mesh.n_elems();
+        let coords = &self.coords;
+        let conn = &self.mesh.conn;
+        let mut out = String::new();
+
+        use std::fmt::Write;
+        writeln!(&mut out, "# vtk DataFile Version 3.0").ok();
+        writeln!(&mut out, "fem-rs WasmSolver").ok();
+        writeln!(&mut out, "ASCII").ok();
+        writeln!(&mut out, "DATASET UNSTRUCTURED_GRID").ok();
+        writeln!(&mut out, "POINTS {} float", nn).ok();
+        for i in 0..nn {
+            writeln!(&mut out, "{} {} 0.0", coords[2*i], coords[2*i+1]).ok();
+        }
+        writeln!(&mut out, "CELLS {} {}", ne, ne * 4).ok();
+        for e in 0..ne {
+            writeln!(&mut out, "3 {} {} {}", conn[3*e], conn[3*e+1], conn[3*e+2]).ok();
+        }
+        writeln!(&mut out, "CELL_TYPES {}", ne).ok();
+        for _ in 0..ne {
+            writeln!(&mut out, "5").ok(); // VTK_TRIANGLE
+        }
+        writeln!(&mut out, "POINT_DATA {}", nn).ok();
+        writeln!(&mut out, "SCALARS {} float 1", field_name).ok();
+        writeln!(&mut out, "LOOKUP_TABLE default").ok();
+        for i in 0..nn {
+            writeln!(&mut out, "{:.10e}", u[i]).ok();
+        }
+        out
+    }
+
+    /// Convenience: assemble RHS for f(x,y)=c, solve, return solution.
+    #[cfg_attr(feature = "wasm", wasm_bindgen)]
+    pub fn solve_poisson(&self, source_value: f64) -> Result<Vec<f64>, String> {
+        let rhs = self.assemble_constant_rhs(source_value);
+        self.solve(&rhs)
+    }
 }
 
 // ── native unit tests (no wasm-bindgen required) ──────────────────────────────

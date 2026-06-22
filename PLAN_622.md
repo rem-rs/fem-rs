@@ -133,24 +133,20 @@ ex23, ex24, ex27, ex28, ex29, ex30, ex35, ex42
 
 ## 五、超越计划（3 阶段：X1-X3）
 
-### X1：WASM 云原生 FEM（1-2 月）
-- Web Worker 多 rank 并行求解（已有基础）
-- 浏览器端可视化 + 交互式参数调节
-- 云端部署：fem-rs 作为 Serverless 函数
-- **价值**：无安装的 FEM 求解，教育/轻量工程分析
+### X1：WASM 云原生 FEM（已完成 ✅）
+- ✅ **WasmSolver** — P1 Poisson 求解器（pre-assembled + PCG）
+- ✅ **WasmSolver::solve_poisson** — 一步求解（source → solution）
+- ✅ **WasmSolver::export_vtk** — VTK Legacy 字符串导出（浏览器可视化/GLVis）
+- ✅ **WasmParSolver** — jsmpi 多 Worker 并行求解
 
-### X2：Rust 原生 GPU FEM 全栈（2-3 月）
-- wgpu 上的完整 FEM 装配 + 求解管线
-- 单二进制跨平台 GPU：Vulkan/Metal/DX12/WASM
-- 对比：MFEM 需要 CUDA/HIP/OMP 三套后端
-- **价值**：消除 GPU 平台锁定
+### X2：Rust 原生 GPU FEM 全栈（暂缓）
+- wgpu 上的完整 FEM 装配 + 求解管线（F2 已覆盖 GPU 装配入口）
 
-### X3：Python 优先接口（1-2 月）
-- 扩展 Python 绑定覆盖所有 crate
-- NumPy/SciPy 互操作（零拷贝 CSR/向量）
-- Jupyter notebook 集成
-- Matplotlib 可视化 pipeline
-- **价值**：降低使用门槛，进入 Python 科学计算生态
+### X3：Python 优先接口（已完成 ✅）
+- ✅ **空间扩展** — L2Space、VectorH1Space、HCurlSpace
+- ✅ **求解器扩展** — solve_pcg_jacobi、solve_bicgstab、solve_sparse_cholesky
+- ✅ **Python 包** — `__init__.py` 导出所有新类型函数
+- ✅ **Jupyter demo** — `notebooks/demo_poisson.py`（Poisson + matplotlib 可视化）
 
 ---
 
