@@ -135,7 +135,7 @@ fn dominant_eigenpairs(
     let k = k.min(n);
     let mut evals = Vec::with_capacity(k);
     let mut evecs = Vec::with_capacity(k);
-    let mut residual = mat.clone();
+    let mut residual = mat.to_vec();
 
     for _mode in 0..k {
         // Power iteration on the residual matrix

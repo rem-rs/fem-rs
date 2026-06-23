@@ -678,6 +678,12 @@ impl DofManager {
             }
         }
 
+        // Convert face_map (FaceKey -> DofId) into face_pk_map (FaceKey -> Vec<DofId>)
+        // so that boundary_dofs() can find face-interior DOFs on boundary faces.
+        let face_pk_map: HashMap<FaceKey, Vec<DofId>> = face_map.into_iter()
+            .map(|(k, d)| (k, vec![d]))
+            .collect();
+
         DofManager {
             order: 3, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
@@ -685,7 +691,7 @@ impl DofManager {
             edge_dof_map: HashMap::new(),
             edge_dof2_map: edge2_map,
             edge_pk_map: HashMap::new(),
-            face_pk_map: HashMap::new(),
+            face_pk_map,
             quad_face_pk_map: HashMap::new(),
             bubble_dof_start,
             n_volume_dofs: 0,

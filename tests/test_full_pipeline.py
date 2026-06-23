@@ -166,3 +166,130 @@ def test_cg_gmres_consistent():
 
     diff = np.max(np.abs(x_cg - x_gmres))
     assert diff < 1e-6, f"CG/GMRES differ: {diff}"
+
+
+# ─── Additional solver bindings ─────────────────────────────────────────
+
+def test_solve_pcg_jacobi():
+    """PCG with Jacobi preconditioner should converge."""
+    mesh = fem.Mesh.unit_square_tri(6)
+    V = fem.H1Space(mesh, order=1)
+
+    A = fem.assemble_bilinear(V, [fem.StiffnessIntegrator()])
+    b_vec = fem.assemble_linear(V, fem.ConstantLoad(1.0))
+    b = np.array(b_vec, dtype=np.float64)
+
+    boundary = mesh.boundary_nodes([1, 2, 3, 4])
+    fem.apply_dirichlet(A, b, boundary)
+
+    x = np.zeros(V.n_dofs(), dtype=np.float64)
+    result = fem.solve_pcg_jacobi(A, b, x, tol=1e-8)
+    assert result.converged, f"PCG-Jacobi failed: res={result.final_residual}"
+
+
+def test_solve_bicgstab():
+    """BiCGSTAB should converge on SPD Poisson."""
+    mesh = fem.Mesh.unit_square_tri(6)
+    V = fem.H1Space(mesh, order=1)
+
+    A = fem.assemble_bilinear(V, [fem.StiffnessIntegrator()])
+    b_vec = fem.assemble_linear(V, fem.ConstantLoad(1.0))
+    b = np.array(b_vec, dtype=np.float64)
+
+    boundary = mesh.boundary_nodes([1, 2, 3, 4])
+    fem.apply_dirichlet(A, b, boundary)
+
+    x = np.zeros(V.n_dofs(), dtype=np.float64)
+    result = fem.solve_bicgstab(A, b, x, tol=1e-8)
+    assert result.converged, f"BiCGSTAB failed: res={result.final_residual}"
+
+
+def test_solve_sparse_cholesky():
+    """Sparse Cholesky should run and produce finite solution."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V = fem.H1Space(mesh, order=1)
+
+    A = fem.assemble_bilinear(V, [fem.StiffnessIntegrator()])
+    b_vec = fem.assemble_linear(V, fem.ConstantLoad(1.0))
+    b = np.array(b_vec, dtype=np.float64)
+
+    boundary = mesh.boundary_nodes([1, 2, 3, 4])
+    fem.apply_dirichlet(A, b, boundary)
+
+    x = fem.solve_sparse_cholesky(A, b)
+    assert len(x) == V.n_dofs()
+    assert np.all(np.isfinite(x))
+
+
+# ─── Additional spaces ──────────────────────────────────────────────────
+
+def test_l2_space_basic():
+    """L2 space: DOF count equals n_elements for P0."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V = fem.L2Space(mesh, order=0)
+    assert V.n_dofs() == mesh.n_elements()
+
+
+def test_l2_space_p1():
+    """L2 P1 space has more DOFs than P0."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V0 = fem.L2Space(mesh, order=0)
+    V1 = fem.L2Space(mesh, order=1)
+    assert V1.n_dofs() > V0.n_dofs()
+
+
+def test_vector_h1_space():
+    """VectorH1 space: DOFs = 2 × H1 DOFs."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V_h1 = fem.H1Space(mesh, order=1)
+    V_v = fem.VectorH1Space(mesh, order=1)
+    assert V_v.n_dofs() == 2 * V_h1.n_dofs()
+
+
+def test_hcurl_space():
+    """HCurl space (ND1) basic properties."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V = fem.HCurlSpace(mesh, order=1)
+    assert V.n_dofs() > 0
+    assert V.dim() == 2
+
+
+# ─── 3-D Poisson (small) ─────────────────────────────────────────────────
+
+def test_3d_poisson():
+    """Assemble and solve Poisson on a small 3-D mesh."""
+    mesh = fem.Mesh.unit_cube_tet(2)
+    V = fem.H1Space(mesh, order=1)
+    A = fem.assemble_bilinear(V, [fem.StiffnessIntegrator()])
+    b = fem.assemble_linear(V, fem.ConstantLoad(1.0))
+    assert A.nrows() == V.n_dofs()
+
+
+# ─── Solver consistency across methods ───────────────────────────────────
+
+def test_all_iterative_solvers_converge():
+    """All iterative solvers converge to a residual below tolerance on a tiny problem."""
+    mesh = fem.Mesh.unit_square_tri(3)
+    V = fem.H1Space(mesh, order=1)
+
+    A = fem.assemble_bilinear(V, [fem.StiffnessIntegrator()])
+    b_vec = fem.assemble_linear(V, fem.ConstantLoad(1.0))
+    b = np.array(b_vec, dtype=np.float64)
+    boundary = mesh.boundary_nodes([1, 2, 3, 4])
+    fem.apply_dirichlet(A, b, boundary)
+
+    x = np.zeros(V.n_dofs(), dtype=np.float64)
+    r = fem.solve_cg(A, b, x, tol=1e-8)
+    assert r.converged
+
+    x[:] = 0.0
+    r = fem.solve_gmres(A, b, x, restart=30, tol=1e-8)
+    assert r.converged
+
+    x[:] = 0.0
+    r = fem.solve_bicgstab(A, b, x, tol=1e-8)
+    assert r.converged
+
+    x[:] = 0.0
+    r = fem.solve_pcg_jacobi(A, b, x, tol=1e-8)
+    assert r.converged

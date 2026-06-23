@@ -154,20 +154,22 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate code coverage
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --exclude fem-wasm --exclude fem-io-hdf5-parallel --exclude fem-linalg-gpu
+        env:
+          CARGO_TERM_COLOR: always
 
       - name: Check coverage thresholds
         uses: irongut/CodeCoverageSummary@v1.3.0
         with:
           filename: lcov.info
           badge: true
-          fail_below_min: false
+          fail_below_min: true
           format: markdown
           hide_branch_rate: false
           hide_complexity: false
           indicators: true
           output: both
-          thresholds: '40 60'
+          thresholds: '70 50'
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

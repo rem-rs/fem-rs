@@ -31,3 +31,4 @@ optional  = true
 
 [dev-dependencies]
 fem-linalg = { path = "../linalg" }
+proptest = "1"

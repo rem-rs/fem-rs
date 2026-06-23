@@ -543,13 +543,13 @@ fn poisson_tet_p2_l2_error() {
 }
 
 /// TetP2 convergence rate ≥ 2.5 (theory: O(h³)).
-/// NOTE: This test requires n=8 3D mesh which is slow; mark as #[ignore] for CI.
+/// Uses CG-ILU0 instead of dense LU for the n=6 mesh to keep runtime acceptable.
 #[test]
-#[ignore]
 fn poisson_tet_p2_convergence_rate() {
     let err4 = solve_poisson_3d(4, 2);
-    let err8 = solve_poisson_3d(8, 2);
-    let rate = (err4 / err8).log2();
+    let err6 = solve_poisson_3d(6, 2);
+    let h_ratio = 6.0_f64 / 4.0_f64;
+    let rate = (err4 / err6).ln() / h_ratio.ln();
     println!("TetP2 convergence rate = {rate:.2}");
     assert!(rate > 2.5, "TetP2 convergence rate {rate:.2} < 2.5");
 }
@@ -563,13 +563,12 @@ fn poisson_tet_p3_l2_error() {
 }
 
 /// TetP3 convergence rate ≥ 3.5 (theory: O(h⁴)).
-/// NOTE: n=8 3D mesh with P3 is slow in debug mode; mark as #[ignore] for CI.
 #[test]
-#[ignore]
 fn poisson_tet_p3_convergence_rate() {
+    let err3 = solve_poisson_3d(3, 3);
     let err4 = solve_poisson_3d(4, 3);
-    let err8 = solve_poisson_3d(8, 3);
-    let rate = (err4 / err8).log2();
+    let h_ratio = 4.0_f64 / 3.0_f64;
+    let rate = (err3 / err4).ln() / h_ratio.ln();
     println!("TetP3 convergence rate = {rate:.2}");
     assert!(rate > 3.5, "TetP3 convergence rate {rate:.2} < 3.5");
 }

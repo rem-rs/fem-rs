@@ -557,6 +557,7 @@ dependencies = [
  "fem-solver",
  "fem-space",
  "nalgebra 0.33.3",
+ "proptest",
  "rayon",
  "reed",
  "reed-core",
@@ -659,6 +660,7 @@ dependencies = [
  "linger",
  "num-traits",
  "parking_lot 0.12.5",
+ "proptest",
  "rayon",
 ]
 

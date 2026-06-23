@@ -1399,3 +1399,186 @@ fn brinkman_stokes_limit() {
 // causing A_u ≈ κ·h² which degrades the saddle-point condition number with
 // refinement. The full Brinkman with ν=1, κ=1 (test `brinkman_p2p1_convergence`)
 // already covers the coupled Stokes-Darcy physics that T3.2 aimed to verify.
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// H¹-seminorm convergence, Helmholtz — scalar
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn helmholtz_p1_h1_seminorm_convergence() {
+    // P1: L² = O(h²), H¹ = O(h)
+    let ns = [4usize, 8, 16];
+    let results: Vec<(f64, f64)> = ns.iter().map(|&n| solve_helmholtz_h1(n, 1)).collect();
+    let l2_errs: Vec<f64> = results.iter().map(|r| r.0).collect();
+    let h1_errs: Vec<f64> = results.iter().map(|r| r.1).collect();
+    let l2_rates = convergence_rate(&l2_errs, &ns);
+    let h1_rates = convergence_rate(&h1_errs, &ns);
+    eprintln!("Helmholtz P1 L²: {:?}, rates: {:?}", l2_errs, l2_rates);
+    eprintln!("Helmholtz P1 H¹: {:?}, rates: {:?}", h1_errs, h1_rates);
+    assert!(l2_rates[0] > 1.7, "P1 L² rate {:.2} < 1.7", l2_rates[0]);
+    assert!(h1_rates[0] > 0.9, "P1 H¹ rate {:.2} < 0.9", h1_rates[0]);
+    assert!(h1_rates[1] > 0.9, "P1 H¹ rate {:.2} < 0.9", h1_rates[1]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// H¹-seminorm convergence, Elasticity — VectorH1
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn h1_error_elasticity(uh: &[f64], space: &VectorH1Space<SimplexMesh<2>>) -> f64 {
+    let mesh = space.mesh();
+    let order = space.order();
+    let ref_elem: &dyn ReferenceElement = if order == 1 { &TriP1 } else { &TriP2 };
+    let q_order = if order > 1 { 5u8 } else { 4u8 };
+    let quad = ref_elem.quadrature(q_order);
+    let n_ldofs = ref_elem.n_dofs();
+    let dim = 2;
+    let mut phi = vec![0.0; n_ldofs];
+    let mut grad_ref = vec![0.0; n_ldofs * dim];
+    let mut grad_phys = vec![0.0; n_ldofs * dim];
+    let mut err_sq = 0.0;
+
+    for e in mesh.elem_iter() {
+        let nodes = mesh.element_nodes(e);
+        let dofs = space.element_dofs(e);
+
+        let x0 = mesh.node_coords(nodes[0]);
+        let x1 = mesh.node_coords(nodes[1]);
+        let x2 = mesh.node_coords(nodes[2]);
+        let det_j = ((x1[0] - x0[0]) * (x2[1] - x0[1])
+                   - (x2[0] - x0[0]) * (x1[1] - x0[1])).abs();
+        let jac = DMatrix::from_row_slice(2, 2, &[
+            x1[0] - x0[0], x2[0] - x0[0],
+            x1[1] - x0[1], x2[1] - x0[1],
+        ]);
+        let j_inv_t = jac.try_inverse().unwrap().transpose();
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[q] * det_j;
+            ref_elem.eval_basis(xi, &mut phi);
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            for i in 0..n_ldofs {
+                let mut gx = 0.0_f64;
+                let mut gy = 0.0_f64;
+                for c in 0..dim {
+                    gx += j_inv_t[(0, c)] * grad_ref[i * dim + c];
+                    gy += j_inv_t[(1, c)] * grad_ref[i * dim + c];
+                }
+                grad_phys[i * 2] = gx;
+                grad_phys[i * 2 + 1] = gy;
+            }
+
+            // Both components have same gradient as Helmholtz exact
+            let xp = [
+                x0[0] + (x1[0] - x0[0]) * xi[0] + (x2[0] - x0[0]) * xi[1],
+                x0[1] + (x1[1] - x0[1]) * xi[0] + (x2[1] - x0[1]) * xi[1],
+            ];
+            let due_dx = PI * (PI * xp[0]).cos() * (PI * xp[1]).sin();
+            let due_dy = PI * (PI * xp[0]).sin() * (PI * xp[1]).cos();
+
+            // Component x
+            let mut duh_x_dx = 0.0_f64;
+            let mut duh_x_dy = 0.0_f64;
+            // Component y
+            let mut duh_y_dx = 0.0_f64;
+            let mut duh_y_dy = 0.0_f64;
+
+            for k in 0..n_ldofs {
+                let d_x = dofs[2 * k] as usize;
+                let d_y = dofs[2 * k + 1] as usize;
+                let gx = grad_phys[k * 2];
+                let gy = grad_phys[k * 2 + 1];
+                duh_x_dx += uh[d_x] * gx;
+                duh_x_dy += uh[d_x] * gy;
+                duh_y_dx += uh[d_y] * gx;
+                duh_y_dy += uh[d_y] * gy;
+            }
+
+            let ex = (duh_x_dx - due_dx).powi(2) + (duh_x_dy - due_dy).powi(2);
+            let ey = (duh_y_dx - due_dx).powi(2) + (duh_y_dy - due_dy).powi(2);
+            err_sq += w * (ex + ey);
+        }
+    }
+    err_sq.sqrt()
+}
+
+fn solve_elasticity_2d_h1(n: usize, order: u8) -> (f64, f64) {
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let space = VectorH1Space::new(mesh.clone(), order, 2);
+    let n_scalar = space.n_scalar_dofs();
+
+    let elast = ElasticityIntegrator { lambda: 1.0, mu: 1.0 };
+    let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 2 * order + 1);
+
+    let mut rhs = vec![0.0; space.n_dofs()];
+    let ref_elem: &dyn ReferenceElement = if order == 1 { &TriP1 } else { &TriP2 };
+    let quad = ref_elem.quadrature(2 * order + 1);
+    let n_ldofs = ref_elem.n_dofs();
+    let mut phi = vec![0.0; n_ldofs];
+    for e in mesh.elem_iter() {
+        let nodes = mesh.element_nodes(e);
+        let dofs = space.element_dofs(e);
+        let x0 = mesh.node_coords(nodes[0]);
+        let x1 = mesh.node_coords(nodes[1]);
+        let x2 = mesh.node_coords(nodes[2]);
+        let det_j = ((x1[0] - x0[0]) * (x2[1] - x0[1])
+                   - (x2[0] - x0[0]) * (x1[1] - x0[1])).abs();
+        for (q, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[q] * det_j;
+            ref_elem.eval_basis(xi, &mut phi);
+            let xp = [
+                x0[0] + (x1[0] - x0[0]) * xi[0] + (x2[0] - x0[0]) * xi[1],
+                x0[1] + (x1[1] - x0[1]) * xi[0] + (x2[1] - x0[1]) * xi[1],
+            ];
+            let f = f_elasticity(&xp);
+            for k in 0..n_ldofs {
+                rhs[dofs[2 * k] as usize]     += w * f[0] * phi[k];
+                rhs[dofs[2 * k + 1] as usize] += w * f[1] * phi[k];
+            }
+        }
+    }
+
+    let dm = space.scalar_dof_manager();
+    let bdofs_scalar = boundary_dofs(&mesh, dm, &[1, 2, 3, 4]);
+    let mut bdofs = Vec::new();
+    let mut bvals = Vec::new();
+    for &d in &bdofs_scalar {
+        bdofs.push(d);
+        bdofs.push(d + n_scalar as u32);
+        bvals.push(0.0);
+        bvals.push(0.0);
+    }
+    apply_dirichlet(&mut mat, &mut rhs, &bdofs, &bvals);
+
+    let uh = dense_solve(&mat, &rhs);
+    let l2 = l2_error_elasticity(&uh, &space);
+    let h1 = h1_error_elasticity(&uh, &space);
+    (l2, h1)
+}
+
+#[test]
+fn elasticity_p1_h1_seminorm_convergence() {
+    // P1: L² = O(h²), H¹ = O(h)
+    let ns = [4usize, 8, 16];
+    let results: Vec<(f64, f64)> = ns.iter().map(|&n| solve_elasticity_2d_h1(n, 1)).collect();
+    let l2_errs: Vec<f64> = results.iter().map(|r| r.0).collect();
+    let h1_errs: Vec<f64> = results.iter().map(|r| r.1).collect();
+    let l2_rates = convergence_rate(&l2_errs, &ns);
+    let h1_rates = convergence_rate(&h1_errs, &ns);
+    eprintln!("Elasticity P1 L²: {:?}, rates: {:?}", l2_errs, l2_rates);
+    eprintln!("Elasticity P1 H¹: {:?}, rates: {:?}", h1_errs, h1_rates);
+    assert!(l2_rates[0] > 1.7, "P1 L² rate {:.2} < 1.7", l2_rates[0]);
+    assert!(h1_rates[0] > 0.9, "P1 H¹ rate {:.2} < 0.9", h1_rates[0]);
+    assert!(h1_rates[1] > 0.9, "P1 H¹ rate {:.2} < 0.9", h1_rates[1]);
+}
+
+#[test]
+fn helmholtz_p2_h1_rate_tightened() {
+    // Stricter check: P2 should achieve L²≈O(h³), H¹≈O(h²)
+    let ns = [2usize, 3, 4];
+    let results: Vec<(f64, f64)> = ns.iter().map(|&n| solve_helmholtz_h1(n, 2)).collect();
+    let l2_rates = convergence_rate(&results.iter().map(|r| r.0).collect::<Vec<_>>(), &ns);
+    let h1_rates = convergence_rate(&results.iter().map(|r| r.1).collect::<Vec<_>>(), &ns);
+    eprintln!("Helmholtz P2 (tightened) L² rates: {:?}, H¹ rates: {:?}", l2_rates, h1_rates);
+    assert!(h1_rates[0] > 1.5, "P2 H¹ rate {:.2} < 1.5", h1_rates[0]);
+    assert!(h1_rates[1] > 1.5, "P2 H¹ rate {:.2} < 1.5", h1_rates[1]);
+}

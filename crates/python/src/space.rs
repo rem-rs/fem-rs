@@ -104,13 +104,13 @@ impl PyVectorH1Space {
                 let m = mesh.inner_2d.as_ref().ok_or_else(||
                     PyValueError::new_err("VectorH1Space: mesh is not 2-D")
                 )?.clone();
-                Ok(PyVectorH1Space { inner_2d: Some(VectorH1Space::new(m, order)), inner_3d: None, dim: 2 })
+                Ok(PyVectorH1Space { inner_2d: Some(VectorH1Space::new(m, order, 2)), inner_3d: None, dim: 2 })
             }
             3 => {
                 let m = mesh.inner_3d.as_ref().ok_or_else(||
                     PyValueError::new_err("VectorH1Space: mesh is not 3-D")
                 )?.clone();
-                Ok(PyVectorH1Space { inner_2d: None, inner_3d: Some(VectorH1Space::new(m, order)), dim: 3 })
+                Ok(PyVectorH1Space { inner_2d: None, inner_3d: Some(VectorH1Space::new(m, order, 3)), dim: 3 })
             }
             _ => Err(PyValueError::new_err("VectorH1Space: unsupported mesh dimension")),
         }
