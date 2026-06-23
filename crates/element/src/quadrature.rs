@@ -500,9 +500,37 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
             ],
             weights: vec![w1, w1, w1, w2, w2, w2, w3],
         }
+    } else if order <= 6 {
+        // 12-point Dunavant rule (exact for degree 6)
+        let a = 0.063_089_014_491_502_228;
+        let a1 = 1.0 - 2.0 * a;
+        let b = 0.249_286_745_170_910_42;
+        let b1 = 1.0 - 2.0 * b;
+        let c = 0.053_145_049_844_816_947;
+        let d = 0.310_352_451_033_784_41;
+        let e = 1.0 - c - d;
+        let wa = 0.050_844_906_370_206_817 / 2.0;
+        let wb = 0.116_786_275_726_379_37 / 2.0;
+        let wc = 0.082_851_075_618_373_575 / 2.0;
+        QuadratureRule {
+            points: vec![
+                // Type 0: permutations of (a, a, 1-2a)
+                vec![a, a1], vec![a1, a], vec![a, a],
+                // Type 1: permutations of (b, b, 1-2b)
+                vec![b, b1], vec![b1, b], vec![b, b],
+                // Type 2: 6 permutations of (c, d, e)
+                vec![d, e], vec![e, d], vec![c, e],
+                vec![e, c], vec![c, d], vec![d, c],
+            ],
+            weights: vec![
+                wa, wa, wa,
+                wb, wb, wb,
+                wc, wc, wc, wc, wc, wc,
+            ],
+        }
     } else if order <= 7 {
-        // Use the named Witherden/Dunavant rules for degree 6-7
-        TriQuadRule::for_degree(order).rule()
+        // 15-point Witherden-Vincent rule (exact for degree 7)
+        witherden_tri_15()
     } else {
         // Use generalized Grundmann-Moller for higher orders
         let s = ((order as u32) + 1) / 2;
@@ -912,7 +940,7 @@ impl TriQuadRule {
             Self::Centroid1Deg1  => tri_rule(1),
             Self::Gaussian3Deg2  => tri_rule(2),
             Self::Dunavant7Deg5  => tri_rule(5),
-            Self::Dunavant12Deg6 => tri_rule(6),
+            Self::Dunavant12Deg6 => dunavant_tri_12(),
             Self::Witherden15Deg7 => witherden_tri_15(),
             Self::Dunavant19Deg9 => dunavant_tri_19(),
         }
@@ -924,6 +952,47 @@ impl TriQuadRule {
 /// This is the free-function companion to [`TriQuadRule::for_degree`].
 pub fn tri_rule_named(min_degree: u8) -> QuadratureRule {
     TriQuadRule::for_degree(min_degree).rule()
+}
+
+/// 12-point Dunavant rule on the reference triangle, exact for degree 6.
+///
+/// Source: Dunavant (1985), via MFEM intrules.cpp (triangle, degree 6).
+/// 12 points, all weights positive.  Weights sum to 0.5.
+///
+/// Structure: 2 × S21 (3 pts each) + 1 × S111 (6 pts) = 12 pts.
+fn dunavant_tri_12() -> QuadratureRule {
+    let (a1, w1) = (0.063_089_014_491_502_228_f64, 0.025_422_453_185_103_408_f64);
+    let (a2, w2) = (0.249_286_745_170_910_42_f64, 0.058_393_137_863_189_685_f64);
+    let (a3, b3, w3) = (
+        0.053_145_049_844_816_947_f64,
+        0.310_352_451_033_784_41_f64,
+        0.041_425_537_809_186_787_f64,
+    );
+
+    macro_rules! s21 {
+        ($a:expr) => {{
+            let b = 1.0 - 2.0 * $a;
+            vec![vec![$a, $a], vec![b, $a], vec![$a, b]]
+        }};
+    }
+    macro_rules! s111 {
+        ($a:expr, $b:expr) => {{
+            let c = 1.0 - $a - $b;
+            vec![
+                vec![$a, $b], vec![$a, c], vec![$b, $a],
+                vec![$b, c],  vec![c, $a], vec![c, $b],
+            ]
+        }};
+    }
+
+    let mut points: Vec<Vec<f64>> = Vec::new();
+    let mut weights: Vec<f64> = Vec::new();
+
+    for p in s21!(a1) { points.push(p); weights.push(w1); }
+    for p in s21!(a2) { points.push(p); weights.push(w2); }
+    for p in s111!(a3, b3) { points.push(p); weights.push(w3); }
+
+    QuadratureRule { points, weights }
 }
 
 /// 15-point Witherden-Vincent rule on the reference triangle, exact for degree 7.
