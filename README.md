@@ -40,30 +40,39 @@ with MFEM examples.
 |---------|-----|--------|-------|
 | `mfem_ex1_poisson` | −Δu = f | H¹ P1, PCG+Jacobi | O(h²) verified |
 | `mfem_ex2_elasticity` | −∇·σ = f | VectorH1 P1, PCG | Working |
-| `mfem_ex3` | ∇×∇×E + E = f | H(curl) ND1/ND2, PCG+AMS | AMS preconditioner available |
+| `mfem_ex3_maxwell_cavity` | ∇×∇×E + E = f | H(curl) ND1/ND2, PCG+AMS | AMS preconditioner available |
 | `mfem_ex4_darcy` | −∇·u = f, u = −κ∇p | H(div) RT0/RT1 + L², MINRES+ADS | ADS preconditioner available |
 | `mfem_ex5_mixed_darcy` | Saddle-point Darcy/Stokes | Block PGMRES | Working |
 | `mfem_ex7_neumann_mixed_bc` | −Δu = f, mixed BCs | H¹ P1, Neumann + Dirichlet | Working |
 | `mfem_ex9_dg_advection` | −Δu = f (DG) | SIP-DG P1, GMRES | O(h²) verified |
 | `mfem_ex10_heat_equation` | ∂u/∂t - Δu = 0 | SDIRK-2 + PCG | Working |
 | `mfem_ex10_wave_equation` | ∂²u/∂t² - Δu = 0 | Newmark-β + PCG | Working |
-| `mfem_ex13` | Kx = λMx | LOBPCG | 1-D Laplacian eigenvalues verified |
+| `mfem_ex13_laplacian_eigen` | Kx = λMx (Laplacian) | LOBPCG | 1-D Laplacian eigenvalues verified |
+| `mfem_ex13_eigenvalue` | Kx = λMx (Maxwell cavity) | LOBPCG | Cavity resonance verified |
 | `mfem_ex14_dc_current` | −∇·(σ∇φ) = 0 | H¹ P1, DC current distribution | Working |
 | `mfem_ex15_dg_amr` | −Δu = f (AMR+DG) | P1 + ZZ estimator + Dörfler | O(h²) with refinement |
 | `mfem_ex15_tet_nc_amr` | 3-D NC AMR | Tet4 NC refinement + hanging face constraints | Working |
 | `mfem_ex16_nonlinear_heat` | −∇·(κ(u)∇u) = f | Newton + GMRES | O(h²) verified |
-| `mfem_ex40` | Stokes lid-driven cavity | Taylor-Hood P2/P1 + Schur GMRES | Verified |
-| `mfem_ex19` | Navier-Stokes (Kovasznay) | P2/P1 Oseen/Picard, Re=40 | Converged |
+| `mfem_ex19_navier_stokes` | Navier-Stokes (Kovasznay) | P2/P1 Oseen/Picard, Re=40 | Converged |
+| `mfem_ex22_complex_helmholtz` | Complex time-harmonic Helmholtz | Block 2×2 system | Working |
+| `mfem_ex23_wave_equation` | ∂²u/∂t² = c²∇²u | Newmark-β / RK4 | Both schemes |
+| `mfem_ex24_discrete_ops` | Mixed discrete operators | ∇/∇×/∇· via DiscreteLinearOperator | Gradient/Curl/Div |
+| `mfem_ex25_pml_helmholtz` | PML-like damped Helmholtz | Complex damping layer | Working |
+| `mfem_ex27_robin_bc` | −Δu = 0, Robin/Neumann/Dirichlet | H¹ P1, mixed BCs | All 4 BC types |
+| `mfem_ex31_anisotropic_maxwell` | Anisotropic H(curl) problem | ND1/ND2, PCG+AMS | Working |
+| `mfem_ex32_impedance_maxwell` | H(curl) with impedance BC | ND1, impedance boundary | Working |
+| `mfem_ex34_absorbing_maxwell` | H(curl) absorbing BC | ND1, first-order ABC | Working |
+| `mfem_ex40_stokes` | Stokes lid-driven cavity | Taylor-Hood P2/P1 + Schur GMRES | Verified |
 
 ### Parallel Examples
 
 | Example | Problem | Notes |
 |---------|---------|-------|
-| `mfem_pex1_poisson` | Parallel Poisson (P1/P2) | PCG+AMG, contiguous/METIS/streaming |
+| `mfem_pex1_parallel_poisson` | Parallel Poisson (P1/P2) | PCG+AMG, contiguous/METIS/streaming |
 | `mfem_pex2_mixed_darcy` | Parallel mixed Poisson | H(div) × L², block GMRES |
-| `mfem_pex3_maxwell` | Parallel Maxwell | H(curl) ND1, PCG |
+| `mfem_pex3_maxwell_cavity` | Parallel Maxwell | H(curl) ND1, PCG |
 | `mfem_pex4_parallel_heat` | Parallel heat equation | Parallel SDIRK-2 |
-| `mfem_pex5_darcy` | Parallel Darcy | H(div) × L², saddle-point |
+| `mfem_pex5_hdiv_darcy` | Parallel Darcy | H(div) × L², saddle-point |
 
 **Real MPI (multi-process):** the `mfem_pex*` targets use [`ThreadLauncher`](crates/parallel/src/launcher/native.rs) (in-process “ranks”) so they run without installing MPI. For **OS processes** (`mpiexec` / `mpirun`), build your binary with `fem-parallel`’s `mpi` feature, call [`MpiLauncher`](crates/parallel/src/launcher/native.rs) in each process, and keep the launcher alive for the lifetime of [`Comm`](crates/parallel/src/comm.rs). Partition → [`GhostExchange`](crates/parallel/src/ghost.rs) → [`ParAssembler`](crates/parallel/src/par_assembler.rs) / [`ParCsrMatrix`](crates/parallel/src/par_csr.rs) is unchanged; see the **“MPI (multi-process) scenarios”** section in `cargo doc -p fem-parallel`. Parallel HDF5 checkpoints use `fem-io-hdf5-parallel` with the `hdf5-mpi` feature (`io_hdf5_mpi` on examples).
 
@@ -93,10 +102,10 @@ cd fem-rs
 cargo test --workspace
 
 # Stokes lid-driven cavity (Taylor-Hood P2/P1)
-cargo run --example mfem_ex40
+cargo run --example mfem_ex40_stokes
 
 # Navier-Stokes Kovasznay flow (Re=40)
-cargo run --example mfem_ex19
+cargo run --example mfem_ex19_navier_stokes
 ```
 
 ---

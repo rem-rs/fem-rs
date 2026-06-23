@@ -60,13 +60,13 @@ ex1, ex2, ex3, ex4, ex5, ex7, ex8, ex9, ex10(heat/wave/maxwell), ex13, ex14, ex1
 
 ### 缺失 MFEM 示例
 
-ex23 — 波动方程（已有 ex10_wave + GeneralizedAlpha/Newmark）
-ex24 — 混合空间离散算子（已有 DiscreteLinearOperator）
-ex27 — 混合 BC Laplace（已有 ex7 + ex9）
+**ex23** — 波动方程（已补全 `mfem_ex23_wave_equation.rs`）
+**ex24** — 混合离散算子（已补全 `mfem_ex24_discrete_ops.rs`）
+**ex27** — Robin 混合 BC（已补全 `mfem_ex27_robin_bc.rs`）
 **ex28** — 弹性滑动约束（已补全 `mfem_ex28_sliding_elasticity.rs`）
 **ex29** — 曲面 Poisson（已补全 `mfem_ex29_curved_poisson.rs`）
-ex30 — 数据振荡自适应（已有 ex15 AMR）
-ex35, ex42 — 不存在（404）
+ex30 — 数据振荡自适应（已有 ex15 AMR 覆盖）
+ex35, ex42 — MFEM 官方不存在（404）
 
 ---
 
