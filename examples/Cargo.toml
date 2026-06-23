@@ -64,6 +64,18 @@ name = "mfem_ex10_wave_equation"
 path = "mfem_ex10_wave_equation.rs"
 
 [[example]]
+name = "mfem_ex23_wave_equation"
+path = "mfem_ex23_wave_equation.rs"
+
+[[example]]
+name = "mfem_ex24_discrete_ops"
+path = "mfem_ex24_discrete_ops.rs"
+
+[[example]]
+name = "mfem_ex27_robin_bc"
+path = "mfem_ex27_robin_bc.rs"
+
+[[example]]
 name = "mfem_ex4_darcy"
 path = "mfem_ex4_darcy.rs"
 
@@ -92,28 +104,28 @@ name = "mfem_ex16_nonlinear_heat"
 path = "mfem_ex16_nonlinear_heat.rs"
 
 [[example]]
-name = "mfem_pex1_poisson"
-path = "mfem_pex1_poisson.rs"
+name = "mfem_pex1_parallel_poisson"
+path = "mfem_pex1_parallel_poisson.rs"
 
 [[example]]
 name = "mfem_pex2_mixed_darcy"
 path = "mfem_pex2_mixed_darcy.rs"
 
 [[example]]
-name = "mfem_pex3_maxwell"
-path = "mfem_pex3_maxwell.rs"
+name = "mfem_pex3_maxwell_cavity"
+path = "mfem_pex3_maxwell_cavity.rs"
 
 [[example]]
-name = "mfem_pex5_darcy"
-path = "mfem_pex5_darcy.rs"
+name = "mfem_pex5_hdiv_darcy"
+path = "mfem_pex5_hdiv_darcy.rs"
 
 [[example]]
-name = "mfem_ex40"
-path = "mfem_ex40.rs"
+name = "mfem_ex40_stokes"
+path = "mfem_ex40_stokes.rs"
 
 [[example]]
-name = "mfem_ex19"
-path = "mfem_ex19.rs"
+name = "mfem_ex19_navier_stokes"
+path = "mfem_ex19_navier_stokes.rs"
 
 [[example]]
 name = "mfem_ex7_neumann_mixed_bc"
@@ -200,16 +212,16 @@ name = "mfem_ex45_moving_mesh_ale"
 path = "mfem_ex45_moving_mesh_ale.rs"
 
 [[example]]
-name = "mfem_ex3"
-path = "mfem_ex3.rs"
+name = "mfem_ex3_maxwell_cavity"
+path = "mfem_ex3_maxwell_cavity.rs"
 
 [[example]]
 name = "mfem_ex8_hybridization"
 path = "mfem_ex8_hybridization.rs"
 
 [[example]]
-name = "mfem_ex13"
-path = "mfem_ex13.rs"
+name = "mfem_ex13_laplacian_eigen"
+path = "mfem_ex13_laplacian_eigen.rs"
 
 [[example]]
 name = "mfem_ex36_obstacle"
@@ -224,24 +236,24 @@ name = "mfem_ex38_immersed_boundary"
 path = "mfem_ex38_immersed_boundary.rs"
 
 [[example]]
-name = "mfem_ex22"
-path = "mfem_ex22.rs"
+name = "mfem_ex22_complex_helmholtz"
+path = "mfem_ex22_complex_helmholtz.rs"
 
 [[example]]
-name = "mfem_ex25"
-path = "mfem_ex25.rs"
+name = "mfem_ex25_pml_helmholtz"
+path = "mfem_ex25_pml_helmholtz.rs"
 
 [[example]]
-name = "mfem_ex31"
-path = "mfem_ex31.rs"
+name = "mfem_ex31_anisotropic_maxwell"
+path = "mfem_ex31_anisotropic_maxwell.rs"
 
 [[example]]
-name = "mfem_ex32"
-path = "mfem_ex32.rs"
+name = "mfem_ex32_impedance_maxwell"
+path = "mfem_ex32_impedance_maxwell.rs"
 
 [[example]]
-name = "mfem_ex34"
-path = "mfem_ex34.rs"
+name = "mfem_ex34_absorbing_maxwell"
+path = "mfem_ex34_absorbing_maxwell.rs"
 
 [[example]]
 name = "mfem_ex0_mesh_intro"

@@ -36,7 +36,7 @@ impl BilinearIntegrator for AnisotropicDiffusion {
         let w = qp.weight;
         let dim = qp.dim;
         let x = qp.x_phys;
-        let grad = qp.grad;
+        let grad = qp.grad_phys;
         let s00 = 1.0 + 0.5 * x[0];
         let s01 = 0.3 * x[0] * x[1];
         let s11 = 1.0 + 0.5 * x[1];
@@ -90,7 +90,7 @@ fn main() {
                 let n = qp.n_dofs;
                 let w = qp.weight;
                 let dim = qp.dim;
-                let grad = qp.grad;
+                let grad = qp.grad_phys;
                 for i in 0..n {
                     for j in 0..n {
                         let val = (grad[i*dim] * grad[j*dim] + grad[i*dim+1]*grad[j*dim+1]) * w;
