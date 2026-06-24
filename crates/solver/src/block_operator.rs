@@ -510,7 +510,8 @@ mod tests {
         bm2.set(0, 0, coo.into_csr());
 
         let sum = SumBlockOp::new(Box::new(BlockOpMatrix::new(bm1)), Box::new(BlockOpMatrix::new(bm2)));
-        let x = BlockVector::new(vec![1]);
+        let mut x = BlockVector::new(vec![1]);
+        x.block_mut(0)[0] = 1.0;
         let mut y = BlockVector::new(vec![1]);
         sum.apply(&x, &mut y);
         assert!((y.block(0)[0] - 5.0).abs() < 1e-12);
