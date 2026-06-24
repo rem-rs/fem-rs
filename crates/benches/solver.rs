@@ -422,6 +422,69 @@ fn bench_gmres_arnoldi_only_fixed_iters(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_cg_2d_poisson(c: &mut Criterion) {
+    let Ok(gpu) = GpuContext::new_sync() else {
+        return;
+    };
+    let sizes: &[usize] = if quick_bench_mode() { &[16, 32] } else { &[16, 32, 64, 96] };
+    let mut group = c.benchmark_group("cg_2d_poisson");
+
+    let cfg = SolverConfig {
+        rtol: 1e-8,
+        atol: 0.0,
+        max_iter: 5000,
+        verbose: false,
+        print_level: PrintLevel::Silent,
+    };
+
+    for &n in sizes {
+        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let space = H1Space::new(mesh, 1u8);
+        let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
+        let n_dofs = space.n_dofs();
+        let rhs = vec![1.0f64; n_dofs];
+        let dofs = n_dofs;
+
+        // CPU CG
+        group.bench_with_input(BenchmarkId::new(format!("cpu_f64_{dofs}dof"), n), &n, |b, _| {
+            b.iter(|| {
+                let mut x = vec![0.0f64; dofs];
+                let r = solve_cg(&mat, &rhs, &mut x, &cfg);
+                let _ = black_box(r.expect("CPU CG should converge"));
+            });
+        });
+
+        // GPU CG
+        if gpu.features.native_f64 {
+            group.bench_with_input(BenchmarkId::new(format!("gpu_f64_{dofs}dof"), n), &n, |b, _| {
+                b.iter(|| {
+                    let mut x = vec![0.0f64; dofs];
+                    let r = solve_cg_gpu(&gpu, &mat, &rhs, &mut x, &cfg);
+                    let _ = black_box(r.expect("GPU CG should converge"));
+                });
+            });
+        } else {
+            // f32 GPU fallback
+            let mat_f32: CsrMatrix<f32> = CsrMatrix {
+                nrows: mat.nrows, ncols: mat.ncols,
+                row_ptr: mat.row_ptr.clone(),
+                col_idx: mat.col_idx.clone(),
+                values: mat.values.iter().map(|&v| v as f32).collect(),
+            };
+            let rhs_f32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
+            group.bench_with_input(BenchmarkId::new(format!("gpu_f32_{dofs}dof"), n), &n, |b, _| {
+                b.iter(|| {
+                    let mut x = vec![0.0f32; dofs];
+                    let r = solve_cg_gpu_f32(&gpu, &mat_f32, &rhs_f32, &mut x, &cfg);
+                    let _ = black_box(r.expect("GPU CG f32 should converge"));
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 fn bench_gmres_spmv_only_fixed_iters(c: &mut Criterion) {
     let Ok(gpu) = GpuContext::new_sync() else {
         return;
@@ -466,7 +529,7 @@ fn bench_gmres_spmv_only_fixed_iters(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = solver_criterion_config();
-    targets = bench_pcg, bench_cg_cpu_gpu, bench_cg_gpu_setup, bench_cg_fixed_iters, bench_gmres_gpu_compare, bench_gmres_gpu_setup, bench_gmres_fixed_iters, bench_gmres_arnoldi_only_fixed_iters, bench_gmres_spmv_only_fixed_iters
+    targets = bench_pcg, bench_cg_cpu_gpu, bench_cg_2d_poisson, bench_cg_gpu_setup, bench_cg_fixed_iters, bench_gmres_gpu_compare, bench_gmres_gpu_setup, bench_gmres_fixed_iters, bench_gmres_arnoldi_only_fixed_iters, bench_gmres_spmv_only_fixed_iters
 }
 criterion_main!(benches);
 

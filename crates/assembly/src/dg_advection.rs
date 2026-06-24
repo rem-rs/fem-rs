@@ -492,7 +492,7 @@ pub(crate) fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usi
     }
 }
 
-fn orient_normal_outward<M: MeshTopology>(
+pub(crate) fn orient_normal_outward<M: MeshTopology>(
     mesh: &M,
     elem: u32,
     face_nodes: &[u32],

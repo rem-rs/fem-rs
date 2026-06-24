@@ -12,6 +12,14 @@ struct GpuElementInput {
     _pad: u32,
 }
 
+/// GPU-side element input for Tri3 elasticity (3 nodes × 2 interleaved DOFs).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuElementInputElasticTri3 {
+    nodes: [f32; 6],
+    dofs: [u32; 6],
+}
+
 /// GPU-side element input for a P2 triangle (6 nodes, 12 coords + 6 DOFs).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -392,6 +400,167 @@ pub fn assemble_mass_3d_hex8(
         64,
         include_str!("assembly_mass_hex8.wgsl"),
     )
+}
+
+/// Assemble 2D linear elasticity stiffness matrix on the GPU for P1 triangles.
+///
+/// Uses constant-strain triangle (CST) with single-point quadrature.
+/// Interleaved DOF layout: [u_x0, u_y0, u_x1, u_y1, u_x2, u_y2].
+/// `lambda` and `mu` are the Lamé parameters.
+pub fn assemble_elasticity_2d_tri3(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    lambda: f32,
+    mu: f32,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 6);
+    assert_eq!(elem_dofs.len(), n_elem * 6);
+
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 6;
+        let db = e * 6;
+        let mut nodes = [0.0f32; 6];
+        nodes.copy_from_slice(&elem_nodes[nb..nb+6]);
+        inputs.push(GpuElementInputElasticTri3 {
+            nodes,
+            dofs: [
+                elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2],
+                elem_dofs[db+3], elem_dofs[db+4], elem_dofs[db+5],
+            ],
+        });
+    }
+
+    let device = &gpu.device;
+    let queue = &gpu.queue;
+
+    let elem_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu_assemble_elasticity_elements"),
+        contents: bytemuck::cast_slice(&inputs),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let entries_per_elem = 36;
+    let triplet_byte_len = (n_elem * entries_per_elem * size_of::<GpuCooTriplet>()) as u64;
+    let coo_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu_assemble_elasticity_coo"),
+        size: triplet_byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu_assemble_elasticity_staging"),
+        size: triplet_byte_len,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Params: [n_elements (u32), lambda (f32), mu (f32)]
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct ElasticityParams {
+        n_elems: u32,
+        lambda: f32,
+        mu: f32,
+    }
+    let params = ElasticityParams { n_elems: n_elem as u32, lambda, mu };
+    let param_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu_assemble_elasticity_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("gpu_assemble_elasticity_shader"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+            include_str!("assembly_elasticity_tri3.wgsl"),
+        )),
+    });
+
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("gpu_assemble_elasticity_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false, min_binding_size: None,
+                }, count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false, min_binding_size: None,
+                }, count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false, min_binding_size: None,
+                }, count: None,
+            },
+        ],
+    });
+
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu_assemble_elasticity_bg"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: elem_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: coo_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: param_buffer.as_entire_binding() },
+        ],
+    });
+
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("gpu_assemble_elasticity_pl"),
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("gpu_assemble_elasticity_pipeline"),
+        layout: Some(&pl),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu_assemble_elasticity_enc"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu_assemble_elasticity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        let wg = ((n_elem as u32) + 63) / 64;
+        pass.dispatch_workgroups(wg, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&coo_buffer, 0, &staging, 0, triplet_byte_len);
+    queue.submit(Some(encoder.finish()));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let slice = staging.slice(..);
+    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv().unwrap().unwrap();
+
+    let data = slice.get_mapped_range();
+    let triplets: &[GpuCooTriplet] = bytemuck::cast_slice(&data);
+    let mut result: Vec<(u32, u32, f32)> = Vec::with_capacity(n_elem * entries_per_elem);
+    result.extend(triplets.iter().map(|t| (t.row, t.col, t.val)));
+    drop(data);
+    drop(staging);
+    result
 }
 
 /// Assemble 2D mass matrix on the GPU for P1 triangles.

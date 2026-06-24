@@ -2,6 +2,7 @@ pub mod assembly;
 pub mod buffer;
 pub mod context;
 pub mod csr;
+pub mod direct;
 pub mod spmv_pipeline;
 pub mod vector;
 pub mod vector_pipeline;
@@ -16,10 +17,12 @@ pub use assembly::{
     assemble_mass_2d_tri3,
     assemble_mass_2d_quad4,
     assemble_mass_3d_tet4,
+    assemble_elasticity_2d_tri3,
 };
 pub use buffer::DeviceBuffer;
 pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;
+pub use direct::{solve_dense_gpu, GpuDenseMatrix};
 pub use spmv_pipeline::SpmvPipeline;
 pub use vector::GpuVector;
 pub use vector_pipeline::{
