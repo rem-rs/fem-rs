@@ -98,6 +98,8 @@ pub mod mortar;
 pub mod dg_advection;
 pub mod dpg;
 pub mod dpg_2d;
+pub mod dpg_3d;
+pub mod dg_euler_2d;
 pub mod dg_cdr;
 pub mod navier_stokes;
 pub use navier_stokes::{
@@ -111,6 +113,10 @@ pub mod h1_quad_order_hint;
 pub mod phasefield;
 pub mod fsi;
 pub mod thermoelastic;
+pub mod hdg;
+pub mod hdg_stokes;
+pub mod hdg_elasticity;
+pub mod hdg_maxwell;
 
 #[cfg(feature = "reed")]
 pub mod reed;
@@ -151,6 +157,7 @@ pub use dpg::{
     solve_galerkin_convection_diffusion_1d,
 };
 pub use dpg_2d::solve_dpg_poisson_2d;
+pub use dpg_3d::solve_dpg_poisson_3d;
 pub use dg_advection::{DGAdvectionIntegrator, DgAdvectionRhs, DgFaceIntegrator, DgFaceQpData, assemble_dg_interior_faces, assemble_advection_boundary};
 pub use dg_cdr::DgCdrSystem;
 pub use dg_elasticity::DgElasticityAssembler;

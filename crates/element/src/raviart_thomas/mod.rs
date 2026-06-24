@@ -35,6 +35,8 @@ pub mod tet_rtk;
 pub mod hex_rt0;
 pub mod hex_rt1;
 pub mod hex_rtk;
+pub mod prism;
+pub mod pyramid;
 
 pub use tri::TriRT0;
 pub use tri_rt1::TriRT1;
@@ -50,3 +52,5 @@ pub use tet_rtk::TetRTk;
 pub use hex_rt0::HexRT0;
 pub use hex_rt1::HexRT1;
 pub use hex_rtk::HexRTk;
+pub use prism::PrismRT0;
+pub use pyramid::PyraRT0;

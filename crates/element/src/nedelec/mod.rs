@@ -27,6 +27,8 @@ pub mod hex_ndk;
 pub mod tet;
 pub mod tet_nd2;
 pub mod tet_ndk;
+pub mod prism;
+pub mod pyramid;
 
 pub use tri::TriND1;
 pub use tri_nd2::TriND2;
@@ -40,3 +42,5 @@ pub use hex_ndk::HexNDk;
 pub use tet::TetND1;
 pub use tet_nd2::TetND2;
 pub use tet_ndk::TetNDk;
+pub use prism::PrismND1;
+pub use pyramid::PyraND1;

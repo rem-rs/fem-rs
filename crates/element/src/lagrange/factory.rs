@@ -749,10 +749,14 @@ pub fn vec_ref_elem(family: VecFamily, etype: ElemType, order: u8) -> Box<dyn Ve
         (VecFamily::Nedelec, ElemType::Quad) => Box::new(crate::nedelec::QuadNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Tet) => Box::new(crate::nedelec::TetNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Hex) => Box::new(crate::nedelec::HexNDk::new(p)),
+        (VecFamily::Nedelec, ElemType::Prism) => Box::new(crate::nedelec::PrismND1),
+        (VecFamily::Nedelec, ElemType::Pyramid) => Box::new(crate::nedelec::PyraND1),
         (VecFamily::RaviartThomas, ElemType::Tri) => Box::new(crate::raviart_thomas::TriRTk::new(p)),
         (VecFamily::RaviartThomas, ElemType::Quad) => Box::new(crate::raviart_thomas::QuadRTk::new(p)),
         (VecFamily::RaviartThomas, ElemType::Tet) => Box::new(crate::raviart_thomas::TetRTk::new(p)),
         (VecFamily::RaviartThomas, ElemType::Hex) => Box::new(crate::raviart_thomas::HexRTk::new(p)),
+        (VecFamily::RaviartThomas, ElemType::Prism) => Box::new(crate::raviart_thomas::PrismRT0),
+        (VecFamily::RaviartThomas, ElemType::Pyramid) => Box::new(crate::raviart_thomas::PyraRT0),
         _ => panic!("vec_ref_elem: unsupported (family={family:?}, type={etype:?})"),
     }
 }
