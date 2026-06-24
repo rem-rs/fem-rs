@@ -1,4 +1,8 @@
 pub mod assembly;
+pub mod backend;
+pub mod backend_wgpu;
+#[cfg(feature = "cuda")]
+pub mod backend_cuda;
 pub mod buffer;
 pub mod context;
 pub mod csr;

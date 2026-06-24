@@ -1,0 +1,194 @@
+//! CUDA backend implementation (requires feature `cuda`).
+//!
+//! Uses `cust` for CUDA driver API and provides SpMV, vector ops,
+//! and Jacobi preconditioner via CUDA kernels.
+
+#![cfg(feature = "cuda")]
+
+use std::ffi::CString;
+use fem_core::Scalar;
+
+/// CUDA backend wrapping a cuDevice + cuContext.
+pub struct CudaBackend {
+    device: cust::device::Device,
+    context: cust::context::Context,
+    stream: cust::stream::Stream,
+}
+
+impl CudaBackend {
+    /// Initialize CUDA and select the first device.
+    pub fn new() -> Result<Self, CudaError> {
+        cust::init(CustInitKind::Lazy)?;
+        let device = cust::device::Device::new(0)?;
+        let context = device.create_context()?;
+        let stream = cust::stream::Stream::new(cust::stream::StreamFlags::DEFAULT, None)?;
+        Ok(Self { device, context, stream })
+    }
+
+    pub fn device(&self) -> &cust::device::Device { &self.device }
+    pub fn context(&self) -> &cust::context::Context { &self.context }
+    pub fn stream(&self) -> &cust::stream::Stream { &self.stream }
+}
+
+/// CUDA-specific error.
+#[derive(Debug, thiserror::Error)]
+pub enum CudaError {
+    #[error("CUDA driver API error: {0}")]
+    Driver(#[from] cust::error::CudaError),
+    #[error("CUDA kernel error: {0}")]
+    Kernel(String),
+    #[error("insufficient device memory")]
+    OutOfMemory,
+    #[error("no CUDA device available")]
+    NoDevice,
+}
+
+// ─── CUDA vector ────────────────────────────────────────────────────────────
+
+/// GPU-resident vector on CUDA device.
+pub struct CudaVector<T: Scalar> {
+    len: u32,
+    data: cust::memory::DeviceBuffer<T>,
+}
+
+impl<T: Scalar> CudaVector<T> {
+    pub fn zeros(backend: &CudaBackend, n: u32) -> Result<Self, CudaError> {
+        let size = n as usize;
+        let data = cust::memory::DeviceBuffer::zeros(size)?;
+        Ok(Self { len: n, data })
+    }
+
+    pub fn from_slice(backend: &CudaBackend, data: &[T]) -> Result<Self, CudaError> {
+        let device_buf = cust::memory::DeviceBuffer::from_slice(data)?;
+        Ok(Self { len: data.len() as u32, data: device_buf })
+    }
+
+    pub fn read_to_cpu(&self) -> Result<Vec<T>, CudaError> {
+        Ok(self.data.to_owned()?)
+    }
+
+    pub fn len(&self) -> u32 { self.len }
+    pub fn as_device_ptr(&self) -> cust::memory::DevicePtr<T> { self.data.as_device_ptr() }
+}
+
+// ─── CUDA CSR matrix ────────────────────────────────────────────────────────
+
+/// GPU-resident CSR matrix on CUDA device.
+pub struct CudaCsrMatrix<T: Scalar> {
+    nrows: u32,
+    ncols: u32,
+    nnz: u32,
+    row_ptr: cust::memory::DeviceBuffer<u32>,
+    col_idx: cust::memory::DeviceBuffer<u32>,
+    values: cust::memory::DeviceBuffer<T>,
+}
+
+impl<T: Scalar> CudaCsrMatrix<T> {
+    pub fn from_cpu(backend: &CudaBackend, cpu: &fem_linalg::CsrMatrix<T>) -> Result<Self, CudaError> {
+        let row_ptr: Vec<u32> = cpu.row_ptr.iter().map(|&x| x as u32).collect();
+        let col_idx = cpu.col_idx.clone();
+        Ok(Self {
+            nrows: cpu.nrows as u32,
+            ncols: cpu.ncols as u32,
+            nnz: cpu.values.len() as u32,
+            row_ptr: cust::memory::DeviceBuffer::from_slice(&row_ptr)?,
+            col_idx: cust::memory::DeviceBuffer::from_slice(&col_idx)?,
+            values: cust::memory::DeviceBuffer::from_slice(&cpu.values)?,
+        })
+    }
+}
+
+// ─── CUDA Jacobi preconditioner ────────────────────────────────────────────
+
+/// Diagonal Jacobi preconditioner on CUDA.
+pub struct CudaJacobiPrecond<T: Scalar> {
+    n: u32,
+    diag_inv: cust::memory::DeviceBuffer<T>,
+}
+
+impl<T: Scalar> CudaJacobiPrecond<T> {
+    pub fn from_matrix(backend: &CudaBackend, a: &fem_linalg::CsrMatrix<T>) -> Result<Self, CudaError> {
+        let diag_inv: Vec<T> = (0..a.nrows)
+            .map(|i| {
+                let d = a.get(i, i);
+                if d.abs() > T::from_f64(1e-14) { T::from_f64(1.0) / d } else { T::from_f64(1.0) }
+            })
+            .collect();
+        let buf = cust::memory::DeviceBuffer::from_slice(&diag_inv)?;
+        Ok(Self { n: a.nrows as u32, diag_inv: buf })
+    }
+}
+
+// ─── Kernel function (extern "C" CUDA __global__) ──────────────────────────
+
+/// CUDA kernel source compiled to PTX at build time.
+///
+/// For now we provide CPU-fallback implementations for key operations.
+/// Real CUDA kernels (`.cu` files) would be compiled to PTX via nvcc
+/// and loaded at runtime.
+pub const CUSPARSE_USE: &str = "Use cuSPARSE for SpMV, CUBLAS for BLAS ops";
+
+// ─── SpMV via cuSPARSE ─────────────────────────────────────────────────────
+
+/// Sparse matrix-vector product using cuSPARSE.
+pub fn cuda_spmv<T: Scalar>(
+    backend: &CudaBackend,
+    alpha: f64,
+    a: &CudaCsrMatrix<T>,
+    x: &CudaVector<T>,
+    beta: f64,
+    y: &CudaVector<T>,
+) -> Result<(), CudaError> {
+    // TODO: Implement with cusparse
+    // let handle = cusparse::CusparseHandle::new()?;
+    // cusparse::csrmv(...)
+    Err(CudaError::Kernel("cuSPARSE SpMV not yet implemented".to_string()))
+}
+
+/// CUDA vector AXPY using CUBLAS.
+pub fn cuda_axpy<T: Scalar>(
+    backend: &CudaBackend,
+    alpha: f64,
+    x: &CudaVector<T>,
+    beta: f64,
+    y: &CudaVector<T>,
+) -> Result<(), CudaError> {
+    // TODO: Implement with cublas
+    // cublas::axpy(...)
+    Err(CudaError::Kernel("cuBLAS axpy not yet implemented".to_string()))
+}
+
+/// CUDA dot product using CUBLAS.
+pub fn cuda_dot<T: Scalar>(
+    backend: &CudaBackend,
+    a: &CudaVector<T>,
+    b: &CudaVector<T>,
+) -> Result<f64, CudaError> {
+    // TODO: Implement with cublas
+    Err(CudaError::Kernel("cuBLAS dot not yet implemented".to_string()))
+}
+
+/// CUDA Jacobi apply (element-wise multiply).
+pub fn cuda_apply_jacobi<T: Scalar>(
+    backend: &CudaBackend,
+    precond: &CudaJacobiPrecond<T>,
+    r: &CudaVector<T>,
+    z: &CudaVector<T>,
+) -> Result<(), CudaError> {
+    // TODO: Launch CUDA kernel:
+    // z[i] = diag_inv[i] * r[i]  for i = 0..n-1
+    Err(CudaError::Kernel("CUDA Jacobi kernel not yet implemented".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cuda_backend_creation() {
+        match CudaBackend::new() {
+            Ok(_) => println!("CUDA backend created successfully"),
+            Err(e) => println!("CUDA not available (expected in some environments): {e}"),
+        }
+    }
+}

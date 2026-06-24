@@ -11,6 +11,11 @@ wgpu       = "27"
 pollster   = "0.4"
 thiserror  = "2"
 log        = { workspace = true }
+cust       = { version = "0.3", optional = true }
+
+[features]
+default = []
+cuda    = ["dep:cust"]
 
 [lib]
 crate-type = ["lib"]
