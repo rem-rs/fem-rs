@@ -871,9 +871,11 @@ impl Assembler {
         coo.into_csr()
     }
 
-    /// Assemble a P1 triangle Poisson stiffness matrix on the GPU via wgpu.
+    /// Assemble a bilinear form stiffness matrix on the GPU via wgpu.
     ///
-    /// Only supports `DiffusionIntegrator { kappa: 1.0 }` on P1 triangle meshes.
+    /// Supports:
+    /// - `DiffusionIntegrator` on P1 Tri3, P2 Tri6, Q1 Quad4 (2D)
+    /// - `DiffusionIntegrator` on P1 Tet4 (3D)
     /// Requires the `gpu` feature.
     #[cfg(feature = "gpu")]
     pub fn assemble_bilinear_gpu<S: FESpace>(
@@ -883,40 +885,52 @@ impl Assembler {
         use fem_linalg_gpu::GpuContext;
         use fem_mesh::element_type::ElementType;
 
-        // Validate: P1 triangles only
+        if integrators.len() != 1 { return Err("GPU assembly requires exactly 1 integrator".into()); }
+
         let mesh = space.mesh();
         let dim = mesh.dim();
-        if dim != 2 { return Err("GPU assembly requires 2-D mesh".into()); }
         let etype = mesh.element_type(0);
-        if etype != ElementType::Tri3 { return Err("GPU assembly requires P1 triangles (Tri3)".into()); }
-        if space.order() != 1 { return Err("GPU assembly requires order 1 (P1)".into()); }
-        if integrators.len() != 1 { return Err("GPU assembly requires exactly 1 integrator".into()); }
+        let order = space.order();
+
+        // Determine element type and dispatch
+        let (npe, npe_coords, dofs_per_elem, assemble_fn): (
+            usize, usize, usize,
+            fn(&GpuContext, &[f32], &[u32], usize) -> Vec<(u32, u32, f32)>,
+        ) = match (dim, &etype, order) {
+            (2, ElementType::Tri3, 1) => (3, 6, 3, fem_linalg_gpu::assemble_poisson_2d_p1),
+            (2, ElementType::Tri6, 2) => (6, 12, 6, fem_linalg_gpu::assemble_poisson_2d_p2),
+            (2, ElementType::Quad4, 1) => (4, 8, 4, fem_linalg_gpu::assemble_poisson_2d_q1),
+            (3, ElementType::Tet4 | ElementType::Tet10, 1) => (4, 12, 4, fem_linalg_gpu::assemble_poisson_3d_p1),
+            (3, ElementType::Hex8 | ElementType::Hex20, 1) => (8, 24, 8, fem_linalg_gpu::assemble_poisson_3d_hex8),
+            _ => return Err(format!(
+                "GPU assembly: unsupported (dim={dim}, type={etype:?}, order={order})"
+            )),
+        };
 
         let n_elem = mesh.n_elements();
         let n_dofs = space.n_dofs();
 
-        // Pack element node coordinates and DOF indices
-        let mut elem_nodes_f32 = Vec::with_capacity(n_elem * 6);
-        let mut elem_dofs_u32 = Vec::with_capacity(n_elem * 3);
+        let mut elem_nodes_f32 = Vec::with_capacity(n_elem * npe_coords);
+        let mut elem_dofs_u32 = Vec::with_capacity(n_elem * dofs_per_elem);
 
         for e in 0..n_elem as u32 {
             let nodes = mesh.element_nodes(e);
             let dofs: Vec<u32> = space.element_dofs(e).iter().map(|&d| d as u32).collect();
-            for &n in &[nodes[0], nodes[1], nodes[2]] {
-                let c = mesh.node_coords(n);
-                elem_nodes_f32.push(c[0] as f32);
-                elem_nodes_f32.push(c[1] as f32);
+            for kn in 0..npe {
+                let c = mesh.node_coords(nodes[kn]);
+            for d in 0..dim as usize {
+                    elem_nodes_f32.push(c[d] as f32);
+                }
             }
-            elem_dofs_u32.extend_from_slice(&dofs[..3]);
+            elem_dofs_u32.extend_from_slice(&dofs[..dofs_per_elem]);
         }
 
         let gpu = GpuContext::new_sync()
             .map_err(|e| format!("GpuContext init: {e}"))?;
 
         let coo_triplets =
-            fem_linalg_gpu::assemble_poisson_2d_p1(&gpu, &elem_nodes_f32, &elem_dofs_u32, n_elem);
+            assemble_fn(&gpu, &elem_nodes_f32, &elem_dofs_u32, n_elem);
 
-        // Convert GPU f32 COO triplets → CsrMatrix<f64>
         let mut coo = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
         for (r, c, v) in coo_triplets {
             coo.add(r as usize, c as usize, v as f64);

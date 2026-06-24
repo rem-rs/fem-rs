@@ -560,8 +560,10 @@ fn vec_ref_elem_hcurl(dim: usize, order: u8) -> Box<dyn VectorReferenceElement> 
     match (dim, order) {
         (2, 1) => Box::new(TriND1),
         (2, 2) => Box::new(TriND2),
+        (2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
         (3, 1) => Box::new(TetND1),
         (3, 2) => Box::new(TetND2),
+        (3, o) if o >= 3 => Box::new(fem_element::nedelec::TetNDk::new(o as usize)),
         _ => panic!("VectorBoundaryAssembler: unsupported (dim={dim}, order={order})"),
     }
 }

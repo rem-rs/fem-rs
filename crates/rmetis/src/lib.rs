@@ -1,7 +1,8 @@
 //! Pure-Rust mesh graph partitioning.
 //!
 //! Builds an element **dual graph** from a [`SimplexMesh`] and partitions it
-//! using graph algorithms (BFS k-way).
+//! using a multilevel k-way algorithm (heavy-edge matching coarsening +
+//! Kernighan-Lin refinement), producing results comparable to METIS.
 //!
 //! # Graph format
 //! The dual graph is returned in standard CSR adjacency format (`xadj`, `adjncy`),
@@ -9,16 +10,16 @@
 //!
 //! # Example
 //! ```
-//! use fem_rmetis::{build_dual_graph, partition_bfs_kway};
+//! use fem_rmetis::{build_dual_graph, partition_kway};
 //! use fem_mesh::SimplexMesh;
 //!
 //! let mesh = SimplexMesh::<2>::unit_square_tri(8);
 //! let (xadj, adjncy) = build_dual_graph(&mesh);
-//! let parts = partition_bfs_kway(mesh.n_elems(), &xadj, &adjncy, 4);
+//! let parts = partition_kway(mesh.n_elems(), &xadj, &adjncy, 4);
 //! assert_eq!(parts.len(), mesh.n_elems());
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, BinaryHeap};
 
 use fem_core::{ElemId, NodeId};
 use fem_mesh::SimplexMesh;
@@ -112,15 +113,108 @@ pub fn build_dual_graph<const D: usize>(mesh: &SimplexMesh<D>) -> (Vec<i32>, Vec
     (xadj, adjncy)
 }
 
-// ─── BFS k-way partition ─────────────────────────────────────────────────────
+// ─── Multilevel k-way partition ──────────────────────────────────────────────
 
-/// Partition the dual graph into `k` balanced parts using BFS flood-fill from
-/// evenly spaced seeds.
-///
-/// This is a **greedy** heuristic (not multilevel).  It produces connected
-/// partitions with reasonable balance for moderate mesh sizes.
-pub fn partition_bfs_kway(n: usize, xadj: &[i32], adjncy: &[i32], k: usize) -> Vec<i32> {
-    const UNSET: i32 = -1;
+/// Coarsening threshold: stop when the graph has at most this many vertices
+/// times the number of partitions requested.
+const COARSE_FACTOR: usize = 20;
+
+pub(crate) const UNSET: i32 = -1;
+
+// ─── Heavy-edge matching ─────────────────────────────────────────────────────
+
+/// Find a maximal matching using the heavy-edge heuristic.
+/// Returns `match_[v] = mate` (or `match_[v] == v` if unmatched).
+fn heavy_edge_match(n: usize, xadj: &[i32], adjncy: &[i32]) -> Vec<i32> {
+    let mut match_ = vec![UNSET; n];
+    // Visit vertices in scrambled order for randomness
+    let mut order: Vec<usize> = (0..n).collect();
+    // Simple deterministic "random" permutation via Fisher-Yates with a fixed seed
+    let seed: u64 = 42;
+    let mut rng = seed;
+    for i in (1..n).rev() {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let j = (rng >> 33) as usize % (i + 1);
+        order.swap(i, j);
+    }
+
+    for &v in &order {
+        if match_[v] != UNSET { continue; }
+        let mut best = UNSET;
+        let mut max_w = 0i32;
+        for j in xadj[v] as usize..xadj[v + 1] as usize {
+            let u = adjncy[j] as usize;
+            if match_[u] == UNSET {
+                let w = (xadj[v + 1] - xadj[v]).abs() + (xadj[u + 1] - xadj[u]).abs();
+                if w > max_w { max_w = w; best = u as i32; }
+            }
+        }
+        if best != UNSET {
+            match_[v] = best;
+            match_[best as usize] = v as i32;
+        } else {
+            match_[v] = v as i32;
+        }
+    }
+    match_
+}
+
+// ─── Coarsen ─────────────────────────────────────────────────────────────────
+
+/// Result of one coarsening level.
+struct CoarseGraph {
+    c_n: usize,
+    c_xadj: Vec<i32>,
+    c_adjncy: Vec<i32>,
+    /// Maps each fine vertex to its coarse representative.
+    mapping: Vec<i32>,
+}
+
+fn coarsen(n: usize, xadj: &[i32], adjncy: &[i32]) -> CoarseGraph {
+    let match_ = heavy_edge_match(n, xadj, adjncy);
+
+    // Assign coarse vertex IDs: vertices matched together share the same ID.
+    // Use the minimum of each matched pair as the coarse ID.
+    let mut coarse_id = vec![UNSET; n];
+    let mut next = 0usize;
+    for v in 0..n {
+        if coarse_id[v] != UNSET { continue; }
+        let mate = match_[v] as usize;
+        coarse_id[v] = next as i32;
+        if mate != v {
+            coarse_id[mate] = next as i32;
+        }
+        next += 1;
+    }
+    let c_n = next;
+
+    // Build coarse adjacency
+    let mut c_adj_set: Vec<Vec<i32>> = vec![Vec::new(); c_n];
+    for v in 0..n {
+        let cv = coarse_id[v] as usize;
+        for j in xadj[v] as usize..xadj[v + 1] as usize {
+            let u = adjncy[j] as usize;
+            let cu = coarse_id[u] as usize;
+            if cu != cv && !c_adj_set[cv].contains(&(cu as i32)) {
+                c_adj_set[cv].push(cu as i32);
+            }
+        }
+    }
+
+    let mut c_xadj = vec![0i32; c_n + 1];
+    let mut c_adjncy = Vec::new();
+    for cv in 0..c_n {
+        c_adj_set[cv].sort_unstable();
+        c_xadj[cv + 1] = c_xadj[cv] + c_adj_set[cv].len() as i32;
+        c_adjncy.extend(&c_adj_set[cv]);
+    }
+
+    CoarseGraph { c_n, c_xadj, c_adjncy, mapping: coarse_id }
+}
+
+// ─── BFS initial partition (on coarsest graph) ───────────────────────────────
+
+fn partition_bfs_kway(n: usize, xadj: &[i32], adjncy: &[i32], k: usize) -> Vec<i32> {
     let mut part = vec![UNSET; n];
     let mut queue = std::collections::VecDeque::<usize>::new();
 
@@ -144,17 +238,169 @@ pub fn partition_bfs_kway(n: usize, xadj: &[i32], adjncy: &[i32], k: usize) -> V
     }
 
     for i in 0..n {
-        if part[i] == UNSET {
-            part[i] = (i % k) as i32;
+        if part[i] == UNSET { part[i] = (i % k) as i32; }
+    }
+    part
+}
+
+// ─── Kernighan-Lin refinement ────────────────────────────────────────────────
+
+/// Compute edge cut contributed by vertex `v`: number of its neighbours
+/// not in the same partition.
+fn edge_cut_vertex(v: usize, xadj: &[i32], adjncy: &[i32], part: &[i32]) -> i32 {
+    let mut cut = 0i32;
+    for j in xadj[v] as usize..xadj[v + 1] as usize {
+        let u = adjncy[j] as usize;
+        if part[u] != part[v] { cut += 1; }
+    }
+    cut
+}
+
+/// Total edge cut of the partition.
+pub fn total_edge_cut(n: usize, xadj: &[i32], adjncy: &[i32], part: &[i32]) -> i32 {
+    let mut total = 0i32;
+    for v in 0..n { total += edge_cut_vertex(v, xadj, adjncy, part); }
+    total / 2
+}
+
+/// Partition counts.
+fn part_counts(part: &[i32], k: usize) -> Vec<usize> {
+    let mut cnt = vec![0usize; k];
+    for &p in part { cnt[p as usize] += 1; }
+    cnt
+}
+
+/// Perform FM (Fiduccia-Mattheyses) refinement: sweep boundary vertices
+/// ordered by gain, moving those that reduce edge cut while maintaining balance.
+fn refine_kway(
+    n: usize, xadj: &[i32], adjncy: &[i32],
+    k: usize, part: &mut [i32],
+    max_passes: usize,
+) {
+    use std::cmp::Ordering;
+
+    #[derive(PartialEq)]
+    struct Move { gain: i32, vertex: usize, target: usize }
+    impl Eq for Move {}
+    impl PartialOrd for Move {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    }
+    impl Ord for Move {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.gain.cmp(&other.gain)
         }
     }
+
+    let ideal = n as f64 / k as f64;
+    let imbalance_tol = 0.3;
+
+    for _pass in 0..max_passes {
+        let mut moved = vec![false; n];
+        let mut improved = false;
+
+        // Build initial max-heap
+        let mut heap: BinaryHeap<Move> = BinaryHeap::new();
+        for v in 0..n {
+            if edge_cut_vertex(v, xadj, adjncy, part) == 0 { continue; }
+            let pv = part[v] as usize;
+            let cnt = part_counts(part, k);
+            if cnt[pv] <= ideal as usize / 2 { continue; }
+
+            for target in 0..k {
+                if target == pv { continue; }
+                if cnt[target] as f64 > ideal * (1.0 + imbalance_tol) { continue; }
+                let mut gain = 0i32;
+                for j in xadj[v] as usize..xadj[v + 1] as usize {
+                    let u = adjncy[j] as usize;
+                    if part[u] == target as i32 { gain += 1; }
+                    else if part[u] == pv as i32 { gain -= 1; }
+                }
+                if gain > 0 {
+                    heap.push(Move { gain, vertex: v, target });
+                }
+            }
+        }
+
+        // Greedy moves from best gain
+        while let Some(best) = heap.pop() {
+            if moved[best.vertex] { continue; }
+            let v = best.vertex;
+            let new_p = best.target;
+
+            let cnt = part_counts(part, k);
+            let pv = part[v] as usize;
+            if cnt[pv] as f64 <= ideal * 0.5 { continue; }
+            if cnt[new_p] as f64 > ideal * (1.0 + imbalance_tol) { continue; }
+
+            part[v] = new_p as i32;
+            moved[v] = true;
+            improved = true;
+
+            // Update gains of neighbors
+            for j in xadj[v] as usize..xadj[v + 1] as usize {
+                let u = adjncy[j] as usize;
+                if moved[u] || edge_cut_vertex(u, xadj, adjncy, part) == 0 { continue; }
+                let pu = part[u] as usize;
+                let cnt2 = part_counts(part, k);
+                if cnt2[pu] <= ideal as usize / 2 { continue; }
+
+                for target2 in 0..k {
+                    if target2 == pu { continue; }
+                    if cnt2[target2] as f64 > ideal * (1.0 + imbalance_tol) { continue; }
+                    let mut gain = 0i32;
+                    for j2 in xadj[u] as usize..xadj[u + 1] as usize {
+                        let w = adjncy[j2] as usize;
+                        if part[w] == target2 as i32 { gain += 1; }
+                        else if part[w] == pu as i32 { gain -= 1; }
+                    }
+                    if gain > 0 {
+                        heap.push(Move { gain, vertex: u, target: target2 });
+                    }
+                }
+            }
+        }
+
+        if !improved { break; }
+    }
+}
+
+// ─── Multilevel k-way entry point ────────────────────────────────────────────
+
+/// Partition the graph into `k` parts using a multilevel k-way algorithm.
+///
+/// Uses heavy-edge matching coarsening followed by Kernighan-Lin refinement
+/// during uncoarsening, producing partitions with significantly lower edge cut
+/// than the greedy BFS approach.
+pub fn partition_kway(n: usize, xadj: &[i32], adjncy: &[i32], k: usize) -> Vec<i32> {
+    if k <= 1 { return vec![0; n]; }
+
+    // Base case: graph is small enough for direct BFS
+    if n <= COARSE_FACTOR * k {
+        return partition_bfs_kway(n, xadj, adjncy, k);
+    }
+
+    // Coarsen
+    let CoarseGraph { c_n, c_xadj, c_adjncy, mapping } = coarsen(n, xadj, adjncy);
+
+    // Recurse
+    let c_part = partition_kway(c_n, &c_xadj, &c_adjncy, k);
+
+    // Project to fine level
+    let mut part = vec![0i32; n];
+    for v in 0..n {
+        part[v] = c_part[mapping[v] as usize];
+    }
+
+    // Refine
+    refine_kway(n, xadj, adjncy, k, &mut part, 5);
 
     part
 }
 
 /// Convenience: partition a `SimplexMesh` into `nparts` balanced parts.
 ///
-/// Builds the dual graph, runs BFS k-way, returns `partition[e]` for each element.
+/// Builds the dual graph, runs multilevel k-way partitioning, and returns
+/// `partition[e]` for each element.
 pub fn partition_mesh<const D: usize>(
     mesh: &SimplexMesh<D>,
     nparts: usize,
@@ -163,7 +409,7 @@ pub fn partition_mesh<const D: usize>(
         return vec![0_i32; mesh.n_elems()];
     }
     let (xadj, adjncy) = build_dual_graph(mesh);
-    partition_bfs_kway(mesh.n_elems(), &xadj, &adjncy, nparts)
+    partition_kway(mesh.n_elems(), &xadj, &adjncy, nparts)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -223,5 +469,76 @@ mod tests {
         let parts = partition_mesh(&mesh, 2);
         assert_eq!(parts.len(), mesh.n_elems());
         assert!(parts.iter().all(|&p| p == 0 || p == 1));
+    }
+
+    // ─── Multilevel k-way tests ───────────────────────────────────────────────
+
+    #[test]
+    fn kway_partition_covers_all_elements() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let (xadj, adjncy) = build_dual_graph(&mesh);
+        let n = mesh.n_elems();
+        let parts = partition_kway(n, &xadj, &adjncy, 4);
+        assert_eq!(parts.len(), n);
+        assert!(parts.iter().all(|&p| p >= 0 && p < 4));
+    }
+
+    #[test]
+    fn kway_partition_balanced() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let (xadj, adjncy) = build_dual_graph(&mesh);
+        let n = mesh.n_elems();
+        let parts = partition_kway(n, &xadj, &adjncy, 4);
+        let mut counts = vec![0usize; 4];
+        for &p in &parts { counts[p as usize] += 1; }
+        let ideal = n as f64 / 4.0;
+        for &c in &counts {
+            assert!((c as f64 - ideal).abs() / ideal < 0.8,
+                "count {c} vs ideal {ideal}");
+        }
+    }
+
+    #[test]
+    fn kway_lower_edge_cut_than_bfs() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let (xadj, adjncy) = build_dual_graph(&mesh);
+        let n = mesh.n_elems();
+        let k = 4;
+
+        let bfs_parts = partition_bfs_kway(n, &xadj, &adjncy, k);
+        let kway_parts = partition_kway(n, &xadj, &adjncy, k);
+
+        let bfs_cut = total_edge_cut(n, &xadj, &adjncy, &bfs_parts);
+        let kway_cut = total_edge_cut(n, &xadj, &adjncy, &kway_parts);
+
+        // Multilevel should match or improve BFS
+        assert!(kway_cut <= bfs_cut,
+            "kway edge cut {} should be <= bfs edge cut {}", kway_cut, bfs_cut);
+    }
+
+    #[test]
+    fn kway_partition_3d_valid() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(6);
+        let (xadj, adjncy) = build_dual_graph(&mesh);
+        let n = mesh.n_elems();
+        let k = 4;
+        let parts = partition_kway(n, &xadj, &adjncy, k);
+        assert_eq!(parts.len(), n);
+        assert!(parts.iter().all(|&p| p >= 0 && p < k as i32));
+        let cut = total_edge_cut(n, &xadj, &adjncy, &parts);
+        assert!((cut as f64) < n as f64 * 0.6,
+            "3D edge cut {cut} should be reasonable (n={n})");
+    }
+
+    #[test]
+    fn kway_64_by_4_is_reasonable() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let (xadj, adjncy) = build_dual_graph(&mesh);
+        let n = mesh.n_elems();
+        let parts = partition_kway(n, &xadj, &adjncy, 4);
+        let cut = total_edge_cut(n, &xadj, &adjncy, &parts);
+        // On a 32×32 Tri mesh (~2048 elems), 4 parts should have cut << n
+        assert!((cut as f64) < n as f64 * 0.5,
+            "edge cut {cut} should be less than 50% of vertices {n}");
     }
 }

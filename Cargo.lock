@@ -774,6 +774,7 @@ dependencies = [
  "fem-mesh",
  "fem-solver",
  "fem-space",
+ "nalgebra 0.33.3",
  "rand 0.8.6",
  "rand_distr",
 ]

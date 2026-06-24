@@ -19,7 +19,7 @@
 //! | [`TetRT1`]  | tetrahedron | 15   | 1     |
 //! | [`HexRT0`]  | hexahedron  | 6    | 0     |
 //! | [`HexRT1`]  | hexahedron  | 36   | 1     |
-//! | [`TetRT2`]  | tetrahedron | 15   | 2     |
+//! | [`TetRT2`]  | tetrahedron | 36   | 2     |
 
 pub mod tri;
 pub mod tri_rt1;

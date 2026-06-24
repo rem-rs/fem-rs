@@ -31,8 +31,10 @@ fn vec_ref_elem(space_type: SpaceType, dim: usize, order: u8) -> Box<dyn VectorR
     match (space_type, dim, order) {
         (SpaceType::HCurl, 2, 1) => Box::new(TriND1),
         (SpaceType::HCurl, 2, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, 2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
         (SpaceType::HCurl, 3, 1) => Box::new(TetND1),
         (SpaceType::HCurl, 3, 2) => Box::new(TetND2),
+        (SpaceType::HCurl, 3, o) if o >= 3 => Box::new(fem_element::nedelec::TetNDk::new(o as usize)),
         (SpaceType::HDiv, 2, 0) => Box::new(TriRT0),
         (SpaceType::HDiv, 2, 1) => Box::new(TriRT1),
         (SpaceType::HDiv, 2, 2) => Box::new(TriRT2),

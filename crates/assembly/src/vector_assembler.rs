@@ -18,7 +18,7 @@ use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
 use fem_element::lagrange::{HexQ1, QuadQ1};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
-use fem_element::nedelec::{HexND1, HexND2, QuadND1, QuadND2, TetND1, TetND2, TriND1, TriND2};
+use fem_element::nedelec::{HexND1, HexND2, HexNDk, QuadND1, QuadND2, QuadNDk, TetND1, TetND2, TetNDk, TriND1, TriND2};
 use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, QuadRT0, HexRT0, QuadRT1, HexRT1};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
@@ -42,12 +42,16 @@ pub(crate) fn vec_ref_elem(
     match (space_type, elem_type, dim, order) {
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriND1),
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
         (SpaceType::HCurl, ElementType::Quad4, 2, 1) => Box::new(QuadND1),
         (SpaceType::HCurl, ElementType::Quad4, 2, 2) => Box::new(QuadND2),
+        (SpaceType::HCurl, ElementType::Quad4, 2, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetND1),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
+        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, o) if o >= 3 => Box::new(TetNDk::new(o as usize)),
         (SpaceType::HCurl, ElementType::Hex8, 3, 1) => Box::new(HexND1),
         (SpaceType::HCurl, ElementType::Hex8, 3, 2) => Box::new(HexND2),
+        (SpaceType::HCurl, ElementType::Hex8, 3, o) if o >= 3 => Box::new(HexNDk::new(o as usize)),
         (SpaceType::HDiv, ElementType::Quad4, 2, 0) => Box::new(QuadRT0),
         (SpaceType::HDiv, ElementType::Quad4, 2, 1) => Box::new(QuadRT1),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 0) => Box::new(TriRT0),

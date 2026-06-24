@@ -3,14 +3,20 @@
 //! Provides [`par_refine_marked`] for distributed non-conforming refinement and
 //! [`par_repartition`] for load-rebalancing after refinement.
 
-use fem_mesh::{SimplexMesh, amr::NCState, topology::MeshTopology};
-use fem_core::types::ElemId;
+use std::collections::{HashMap, BTreeMap};
+
+use fem_mesh::{SimplexMesh, amr::NCState, topology::MeshTopology, boundary::BoundaryTag};
+use fem_core::types::{ElemId, NodeId};
 
 use crate::{
     par_mesh::ParallelMesh,
     partition::MeshPartition,
     ghost::GhostExchange,
+    mesh_serde::{encode_submesh, decode_submesh},
+    par_simplex::{partition_simplex_streaming, STREAM_TAG_BASE},
 };
+
+const REPART_TAG_BASE: i32 = 0x3800;
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 
@@ -18,12 +24,16 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParAmrError {
     RefinementError(String),
+    RepartitionError(String),
+    SerializationError(String),
 }
 
 impl std::fmt::Display for ParAmrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RefinementError(s) => write!(f, "Refinement error: {s}"),
+            Self::RepartitionError(s) => write!(f, "Repartition error: {s}"),
+            Self::SerializationError(s) => write!(f, "Serialization error: {s}"),
         }
     }
 }
@@ -74,11 +84,204 @@ pub fn par_refine_marked(
 
 // ─── par_repartition ──────────────────────────────────────────────────────────
 
-/// Re-distribute elements across MPI ranks after refinement (no-op for single rank).
+fn merge_submeshes(
+    meshes: &[SimplexMesh<2>],
+    partitions: &[MeshPartition],
+) -> Result<SimplexMesh<2>, ParAmrError> {
+    // Collect unique global nodes: global_id → coords
+    let mut global_nodes: BTreeMap<NodeId, [f64; 2]> = BTreeMap::new();
+    // Collect all elements keyed by global element ID
+    let mut global_elems: BTreeMap<ElemId, (Vec<NodeId>, i32)> = BTreeMap::new();
+    // Collect all boundary faces (deduplicated by node set)
+    let mut global_faces: Vec<(Vec<NodeId>, BoundaryTag)> = Vec::new();
+
+    for (mesh, part) in meshes.iter().zip(partitions.iter()) {
+        let gn = &part.global_node_ids;
+        // Nodes
+        for local_id in 0..mesh.n_nodes() {
+            let gid = gn[local_id];
+            let cx = mesh.node_coords(local_id as u32);
+            global_nodes.entry(gid).or_insert_with(|| [cx[0], cx[1]]);
+        }
+        // Elements
+        for le in 0..mesh.n_elems() {
+            let ge = part.global_elem_ids[le];
+            let local_conn = mesh.element_nodes(le as u32);
+            let global_conn: Vec<NodeId> = local_conn.iter().map(|&n| gn[n as usize]).collect();
+            global_elems.entry(ge).or_insert((global_conn, mesh.elem_tags[le]));
+        }
+        // Boundary faces
+        let n_faces = mesh.face_conn.len() / 3; // Tri face = 2 nodes, but in 2D boundary faces are edges
+        // Actually for SimplexMesh<2>, face_conn stores edge vertex pairs
+        // face_conn is flat: each face has face_type.nodes_per_element() entries
+        let f_npe = mesh.face_type.nodes_per_element();
+        if f_npe > 0 && n_faces > 0 {
+            let nf = mesh.face_conn.len() / f_npe;
+            for fi in 0..nf {
+                let global_fv: Vec<NodeId> = (0..f_npe)
+                    .map(|k| gn[mesh.face_conn[fi * f_npe + k] as usize])
+                    .collect();
+                let tag = mesh.face_tags.get(fi).copied().unwrap_or(0);
+                global_faces.push((global_fv, tag));
+            }
+        }
+    }
+
+    if global_nodes.is_empty() || global_elems.is_empty() {
+        return Err(ParAmrError::RepartitionError(
+            "merge_submeshes: no nodes or elements".into(),
+        ));
+    }
+
+    // Build new local index mapping: sorted global ID → 0..n_global_nodes
+    let new_id: HashMap<NodeId, NodeId> = global_nodes
+        .keys()
+        .enumerate()
+        .map(|(i, &gid)| (gid, i as NodeId))
+        .collect();
+
+    let n_glob_nodes = global_nodes.len();
+    let mut coords = Vec::with_capacity(n_glob_nodes * 2);
+    for (_gid, xy) in &global_nodes {
+        coords.push(xy[0]);
+        coords.push(xy[1]);
+    }
+
+    let n_glob_elems = global_elems.len();
+    let (elem_type, npe) = if n_glob_elems > 0 {
+        let first_conn = &global_elems.values().next().unwrap().0;
+        let npe = first_conn.len();
+        (if npe == 3 { fem_mesh::ElementType::Tri3 } else { fem_mesh::ElementType::Tri6 }, npe)
+    } else {
+        return Err(ParAmrError::RepartitionError("no elements to merge".into()));
+    };
+
+    let mut conn = Vec::with_capacity(n_glob_elems * npe);
+    let mut elem_tags = Vec::with_capacity(n_glob_elems);
+    for (_ge, (global_conn, tag)) in &global_elems {
+        for &gn_id in global_conn {
+            conn.push(new_id[&gn_id]);
+        }
+        elem_tags.push(*tag);
+    }
+
+    // Boundary faces
+    let face_type = fem_mesh::ElementType::Line2;
+    let f_npe = 2usize;
+    let mut face_conn = Vec::with_capacity(global_faces.len() * f_npe);
+    let mut face_tags = Vec::with_capacity(global_faces.len());
+    for (fv, tag) in &global_faces {
+        for &gn_id in fv {
+            face_conn.push(new_id[&gn_id]);
+        }
+        face_tags.push(*tag);
+    }
+
+    Ok(SimplexMesh {
+        coords,
+        conn,
+        elem_tags,
+        elem_type,
+        face_conn,
+        face_tags,
+        face_type,
+        elem_types: None,
+        elem_offsets: None,
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+    })
+}
+
+/// Re-distribute elements across MPI ranks after refinement.
+///
+/// Gathers all sub-meshes to rank 0, merges them into a single global mesh,
+/// and redistributes via [`partition_simplex_streaming`].
 pub fn par_repartition(
     par_mesh: ParallelMesh<SimplexMesh<2>>,
 ) -> Result<ParallelMesh<SimplexMesh<2>>, ParAmrError> {
-    Ok(par_mesh) // single-rank or METIS not wired yet
+    let comm = par_mesh.comm().clone();
+    let size = comm.size();
+    let rank = comm.rank();
+
+    if size == 1 {
+        return Ok(par_mesh);
+    }
+
+    let local_mesh = par_mesh.local_mesh().clone();
+    let partition = par_mesh.partition().clone();
+
+    if rank == 0 {
+        // Collect all sub-meshes
+        let mut meshes = vec![local_mesh];
+        let mut parts = vec![partition];
+
+        for src in 1..size as i32 {
+            let buf = comm.recv_bytes(src, REPART_TAG_BASE + src);
+            let (sub_mesh, sub_part) = decode_submesh::<2>(&buf)
+                .map_err(|e| ParAmrError::SerializationError(e))?;
+            meshes.push(sub_mesh);
+            parts.push(sub_part);
+        }
+
+        let global_mesh = merge_submeshes(&meshes, &parts)?;
+
+        // Redistribute using the streaming partitioner
+        partition_simplex_streaming(Some(&global_mesh), &comm)
+            .map_err(|e| ParAmrError::RepartitionError(e))
+    } else {
+        // Send our mesh to rank 0
+        let encoded = encode_submesh(&local_mesh, &partition);
+        comm.send_bytes(0, REPART_TAG_BASE + rank, &encoded);
+
+        // Receive new partition from rank 0
+        let buf = comm.recv_bytes(0, STREAM_TAG_BASE + rank);
+        let (new_mesh, new_part) = decode_submesh::<2>(&buf)
+            .map_err(|e| ParAmrError::SerializationError(e))?;
+        Ok(ParallelMesh::new(new_mesh, comm.clone(), new_part))
+    }
+}
+
+// ─── ParNCMesh ────────────────────────────────────────────────────────────────
+
+/// Parallel non-conforming mesh: wraps [`ParallelMesh`], [`NCState`], and
+/// supports distributed AMR cycles with repartitioning.
+pub struct ParNCMesh {
+    pub par_mesh: ParallelMesh<SimplexMesh<2>>,
+    pub nc_state: NCState,
+}
+
+impl ParNCMesh {
+    /// Create a new `ParNCMesh` from an already-partitioned mesh.
+    pub fn new(par_mesh: ParallelMesh<SimplexMesh<2>>, nc_state: NCState) -> Self {
+        ParNCMesh { par_mesh, nc_state }
+    }
+
+    /// Refine marked elements on this rank, then repartition for load balance.
+    pub fn refine_and_rebalance(
+        &mut self,
+        marked: &[ElemId],
+        solution: Option<&[f64]>,
+    ) -> Result<Vec<f64>, ParAmrError> {
+        let ParRefinedMesh { par_mesh, nc_state, solution, .. } =
+            par_refine_marked(&self.par_mesh, std::mem::replace(&mut self.nc_state, NCState::new()), marked, solution)?;
+
+        let rebalanced = par_repartition(par_mesh)?;
+
+        self.par_mesh = rebalanced;
+        self.nc_state = nc_state;
+        Ok(solution)
+    }
+
+    /// Access the underlying parallel mesh.
+    pub fn par_mesh(&self) -> &ParallelMesh<SimplexMesh<2>> {
+        &self.par_mesh
+    }
+
+    /// Access the non-conforming state.
+    pub fn nc_state(&self) -> &NCState {
+        &self.nc_state
+    }
 }
 
 // ─── Solution prolongation ────────────────────────────────────────────────────
@@ -130,11 +333,9 @@ pub fn prolongate_p1(
 mod tests {
     use super::*;
     use fem_mesh::{SimplexMesh, amr::NCState};
-    use crate::{par_mesh::ParallelMesh, partition::MeshPartition};
+    use crate::{par_mesh::ParallelMesh, partition::MeshPartition, backend::native::SerialBackend, comm::Comm};
 
     fn make_serial_par_mesh(n: usize) -> (ParallelMesh<SimplexMesh<2>>, NCState) {
-        use crate::backend::native::SerialBackend;
-        use crate::comm::Comm;
         let mesh = SimplexMesh::<2>::unit_square_tri(n);
         let partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elements());
         let comm = Comm::from_backend(Box::new(SerialBackend));
@@ -193,10 +394,24 @@ mod tests {
     }
 
     #[test]
-    fn par_repartition_no_op() {
+    fn par_repartition_preserves_elements_single_rank() {
         let (par_mesh, _) = make_serial_par_mesh(4);
         let n = par_mesh.local_mesh().n_elements();
         let result = par_repartition(par_mesh).unwrap();
         assert_eq!(result.local_mesh().n_elements(), n);
+    }
+
+    #[test]
+    fn merge_submeshes_round_trip() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let part = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
+        let merged = merge_submeshes(&[mesh.clone()], &[part]).unwrap();
+        assert_eq!(merged.n_elems(), mesh.n_elems());
+        assert_eq!(merged.n_nodes(), mesh.n_nodes());
+        for le in 0..mesh.n_elems() as u32 {
+            let orig: Vec<_> = mesh.element_nodes(le).iter().copied().collect();
+            let merged_conn: Vec<_> = merged.element_nodes(le).iter().copied().collect();
+            assert_eq!(orig, merged_conn, "elem {le} connectivity mismatch");
+        }
     }
 }

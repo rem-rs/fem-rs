@@ -6,6 +6,17 @@ pub mod spmv_pipeline;
 pub mod vector;
 pub mod vector_pipeline;
 
+pub use assembly::{
+    assemble_poisson_2d_p1,
+    assemble_poisson_2d_p2,
+    assemble_poisson_2d_q1,
+    assemble_poisson_3d_p1,
+    assemble_poisson_3d_hex8,
+    assemble_mass_3d_hex8,
+    assemble_mass_2d_tri3,
+    assemble_mass_2d_quad4,
+    assemble_mass_3d_tet4,
+};
 pub use buffer::DeviceBuffer;
 pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;

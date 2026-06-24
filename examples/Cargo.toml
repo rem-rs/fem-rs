@@ -288,6 +288,10 @@ name = "mfem_tmop_mesh_quality"
 path = "mfem_tmop_mesh_quality.rs"
 
 [[example]]
+name = "tmop_hex8_optimise"
+path = "tmop_hex8_optimise.rs"
+
+[[example]]
 name = "mfem_volta"
 path = "mfem_volta.rs"
 

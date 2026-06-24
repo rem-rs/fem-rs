@@ -1,6 +1,8 @@
 use fem_stochastic::{
     Covariance1D, ExponentialCovariance1D, SquaredExponentialCovariance1D,
     KarhunenLoeveExpansion1D, RandomField,
+    Covariance2D, ExponentialCovariance2D, SquaredExponentialCovariance2D,
+    KarhunenLoeveExpansion2D, RandomField2D,
     MonteCarloConfig, run_monte_carlo,
 };
 
@@ -168,6 +170,131 @@ fn mc_mean_recovery_with_known_distribution() {
     let z = (result.mean - 5.0).abs() / result.std_err;
     // |z-score| < 3 is a reasonable sanity (99.7% under normal)
     assert!(z < 3.5, "z-score too large: {z:.2}, mean={:.4e}, std_err={:.4e}", result.mean, result.std_err);
+}
+
+// ─── KL + MC integration ─────────────────────────────────────────────────
+
+// ─── 2D random fields ──────────────────────────────────────────────────────
+
+#[test]
+fn covariance2d_exponential_is_symmetric() {
+    let cov = ExponentialCovariance2D { sigma2: 0.5, length: 0.4 };
+    let a = cov.cov(&[0.2, 0.3], &[0.7, 0.1]);
+    let b = cov.cov(&[0.7, 0.1], &[0.2, 0.3]);
+    assert!((a - b).abs() < 1e-15, "2D exponential covariance should be symmetric");
+}
+
+#[test]
+fn covariance2d_squared_exponential_is_symmetric() {
+    let cov = SquaredExponentialCovariance2D { sigma2: 0.5, length: 0.4 };
+    let a = cov.cov(&[0.2, 0.3], &[0.7, 0.1]);
+    let b = cov.cov(&[0.7, 0.1], &[0.2, 0.3]);
+    assert!((a - b).abs() < 1e-15, "2D sq-exp covariance should be symmetric");
+}
+
+#[test]
+fn kl2d_keeps_requested_modes() {
+    let cov = ExponentialCovariance2D { sigma2: 0.25, length: 0.5 };
+    let kl = KarhunenLoeveExpansion2D::new(12, 12, 4, 0.0, &cov);
+    assert_eq!(kl.n_modes(), 4, "should keep exactly 4 modes");
+}
+
+#[test]
+fn kl2d_empirical_variance_matches_specified() {
+    // Build a 2D KL with small correlation length so many modes are retained.
+    let cov = ExponentialCovariance2D { sigma2: 1.0, length: 0.5 };
+    let nx = 10;
+    let ny = 10;
+    let n_modes = 16;
+    let kl = KarhunenLoeveExpansion2D::new(nx, ny, n_modes, 0.0, &cov);
+
+    // Evaluation points: the full grid
+    let mut points = Vec::with_capacity(nx * ny);
+    for iy in 0..ny {
+        for ix in 0..nx {
+            points.push([ix as f64 / (nx - 1) as f64, iy as f64 / (ny - 1) as f64]);
+        }
+    }
+
+    let n_samples = 5000;
+    let mut sum = vec![0.0_f64; points.len()];
+    let mut sum2 = vec![0.0_f64; points.len()];
+
+    for _ in 0..n_samples {
+        let f = kl.realisation(&points, &mut rand::thread_rng());
+        for (i, v) in f.iter().enumerate() {
+            sum[i] += v;
+            sum2[i] += v * v;
+        }
+    }
+
+    // Empirical variance at the centre of the domain
+    let centre_idx = (ny / 2) * nx + (nx / 2);
+    let mean = sum[centre_idx] / n_samples as f64;
+    let var = sum2[centre_idx] / n_samples as f64 - mean * mean;
+
+    // With σ²=1 and 16 modes retained, captured variance should be ≥70%.
+    assert!(
+        var > 0.70 && var < 1.05,
+        "empirical variance at centre = {var:.4e}, expected near 1.0"
+    );
+}
+
+#[test]
+fn kl2d_realisation_runs_at_arbitrary_points() {
+    let cov = SquaredExponentialCovariance2D { sigma2: 0.25, length: 0.3 };
+    let kl = KarhunenLoeveExpansion2D::new(8, 8, 4, 1.0, &cov);
+
+    // Evaluate at points NOT on the original grid
+    let points = vec![[0.15, 0.25], [0.55, 0.75], [0.90, 0.10]];
+    let mut rng = rand::thread_rng();
+    let field = kl.realisation(&points, &mut rng);
+
+    assert_eq!(field.len(), 3, "should return one value per point");
+    for v in &field {
+        assert!(v.is_finite(), "all field values should be finite");
+    }
+}
+
+#[test]
+fn kl2d_empirical_mean_matches_specified() {
+    let cov = ExponentialCovariance2D { sigma2: 0.01, length: 0.5 };
+    let kl = KarhunenLoeveExpansion2D::new(8, 8, 8, 5.0, &cov);
+
+    let points = vec![[0.25, 0.25], [0.50, 0.50], [0.75, 0.75]];
+    let n_samples = 2000;
+    let mut mean = vec![0.0_f64; points.len()];
+
+    for _ in 0..n_samples {
+        let f = kl.realisation(&points, &mut rand::thread_rng());
+        for (i, v) in f.iter().enumerate() {
+            mean[i] += v;
+        }
+    }
+    for acc in &mut mean { *acc /= n_samples as f64; }
+
+    for (i, &m) in mean.iter().enumerate() {
+        assert!((m - 5.0).abs() < 0.05, "mean at point {i} = {m:.4e}, expected ~5.0");
+    }
+}
+
+#[test]
+fn kl2d_mc_integration_runs_without_error() {
+    let cov = ExponentialCovariance2D { sigma2: 0.25, length: 0.5 };
+    let kl = KarhunenLoeveExpansion2D::new(8, 8, 3, 0.0, &cov);
+
+    let result = run_monte_carlo(&MonteCarloConfig { n_samples: 20, report_every: 0 },
+        |_i, rng| {
+            let pts: Vec<[f64; 2]> = (0..8).flat_map(|iy| {
+                (0..8).map(move |ix| [ix as f64 / 7.0, iy as f64 / 7.0])
+            }).collect();
+            kl.realisation(&pts, rng).iter().sum::<f64>()
+        });
+
+    assert_eq!(result.n_samples, 20);
+    assert!(result.mean.is_finite());
+    assert!(result.variance.is_finite());
+    assert!(result.std_err.is_finite());
 }
 
 // ─── KL + MC integration ─────────────────────────────────────────────────

@@ -133,7 +133,7 @@ fn lagrange_1d(p: usize, xi: f64) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// Solve a small dense linear system via Gaussian elimination (in-place).
-fn solve_dense(n: usize, a: &mut [f64], b: &mut [f64]) {
+pub(crate) fn solve_dense(n: usize, a: &mut [f64], b: &mut [f64]) {
     // Forward elimination with partial pivoting
     for col in 0..n {
         // Find pivot

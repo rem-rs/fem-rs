@@ -1130,7 +1130,8 @@ pub fn prism_rule(order: u8) -> QuadratureRule {
 /// Duffy transform: (x,y,z) = (r(1-t), s(1-t), t) with Jacobian (1-t)².
 /// Weights sum to 1/3.
 pub fn pyramid_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 2) / 2).max(1).min(4);
+    // Minimum n=2 to integrate the quadratic Jacobian (1-t)² correctly.
+    let n = ((order as usize + 2) / 2).max(2).min(4);
     let (xs, ws) = gauss_legendre_1d(n);
     let mut pts = Vec::with_capacity(n * n * n);
     let mut wts = Vec::with_capacity(n * n * n);

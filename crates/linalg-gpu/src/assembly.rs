@@ -12,6 +12,46 @@ struct GpuElementInput {
     _pad: u32,
 }
 
+/// GPU-side element input for a P2 triangle (6 nodes, 12 coords + 6 DOFs).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuElementInputTri6 {
+    nodes: [f32; 12],
+    dofs: [u32; 6],
+    _pad0: u32,
+    _pad1: u32,
+}
+
+/// GPU-side element input for a Q1 quadrilateral (4 nodes, 8 coords + 4 DOFs).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuElementInputQuad4 {
+    nodes: [f32; 8],
+    dofs: [u32; 4],
+}
+
+/// GPU-side element input for a TET4 tetrahedron (4 nodes, 12 coords + 4 DOFs).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuElementInputTet4 {
+    nodes: [f32; 12],
+    dofs: [u32; 4],
+    _pad0: u32,
+    _pad1: u32,
+}
+
+/// GPU-side element input for a Hex8 hexahedron (8 nodes, 24 coords + 8 DOFs).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuElementInputHex8 {
+    nodes: [f32; 24],
+    dofs: [u32; 8],
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
+}
+
 /// GPU-side COO triplet.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -21,66 +61,37 @@ struct GpuCooTriplet {
     val: f32,
 }
 
-/// Assemble 2D Poisson stiffness matrix on the GPU for P1 triangles.
-///
-/// `elem_nodes`: flat f32 array [x0,y0,x1,y1,x2,y2] per element
-/// `elem_dofs`: flat u32 array [dof0,dof1,dof2] per element  
-/// `n_elem`: number of triangular elements
-/// `n_dofs`: global DOF count
-///
-/// Returns a Vec of (row, col, value) COO triplets.
-pub fn assemble_poisson_2d_p1(
+fn run_assembly_shader(
     gpu: &GpuContext,
-    elem_nodes: &[f32],
-    elem_dofs: &[u32],
+    elem_bytes: &[u8],
     n_elem: usize,
+    entries_per_elem: usize,
+    shader_wgsl: &str,
 ) -> Vec<(u32, u32, f32)> {
-    assert_eq!(elem_nodes.len(), n_elem * 6);
-    assert_eq!(elem_dofs.len(), n_elem * 3);
-
-    // Pack element input data
-    let mut inputs = Vec::with_capacity(n_elem);
-    for e in 0..n_elem {
-        let nb = e * 6;
-        let db = e * 3;
-        inputs.push(GpuElementInput {
-            nodes: [
-                elem_nodes[nb], elem_nodes[nb+1], elem_nodes[nb+2],
-                elem_nodes[nb+3], elem_nodes[nb+4], elem_nodes[nb+5],
-            ],
-            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2]],
-            _pad: 0,
-        });
-    }
-
     let device = &gpu.device;
     let queue = &gpu.queue;
 
-    // Element input buffer
     let elem_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("gpu_assemble_elements"),
-        contents: bytemuck::cast_slice(&inputs),
+        contents: &elem_bytes,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
-    // COO output buffer (9 entries per element, one workgroup per element)
-    let coo_byte_len = (n_elem * 9 * size_of::<GpuCooTriplet>()) as u64;
+    let triplet_byte_len = (n_elem * entries_per_elem * size_of::<GpuCooTriplet>()) as u64;
     let coo_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("gpu_assemble_coo"),
-        size: coo_byte_len,
+        size: triplet_byte_len,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
-    // Staging for readback
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("gpu_assemble_staging"),
-        size: coo_byte_len,
+        size: triplet_byte_len,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
-    // Uniform parameters
     let params = [n_elem as u32, 0u32, 0u32, 0u32];
     let param_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("gpu_assemble_params"),
@@ -88,15 +99,11 @@ pub fn assemble_poisson_2d_p1(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    // Shader
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("gpu_assemble_poisson_tri3"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
-            include_str!("assembly_poisson_tri3.wgsl"),
-        )),
+        label: Some("gpu_assemble_shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_wgsl)),
     });
 
-    // Bind group layout
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("gpu_assemble_bgl"),
         entries: &[
@@ -134,7 +141,6 @@ pub fn assemble_poisson_2d_p1(
         ],
     });
 
-    // Pipeline
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("gpu_assemble_pl"),
         bind_group_layouts: &[&bgl],
@@ -150,7 +156,6 @@ pub fn assemble_poisson_2d_p1(
         cache: None,
     });
 
-    // Dispatch
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("gpu_assemble_enc"),
     });
@@ -164,10 +169,9 @@ pub fn assemble_poisson_2d_p1(
         let wg = ((n_elem as u32) + 63) / 64;
         pass.dispatch_workgroups(wg, 1, 1);
     }
-    encoder.copy_buffer_to_buffer(&coo_buffer, 0, &staging, 0, coo_byte_len);
+    encoder.copy_buffer_to_buffer(&coo_buffer, 0, &staging, 0, triplet_byte_len);
     queue.submit(Some(encoder.finish()));
 
-    // Readback
     let (tx, rx) = std::sync::mpsc::channel();
     let slice = staging.slice(..);
     slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
@@ -176,7 +180,7 @@ pub fn assemble_poisson_2d_p1(
 
     let data = slice.get_mapped_range();
     let triplets: &[GpuCooTriplet] = bytemuck::cast_slice(&data);
-    let mut result: Vec<(u32, u32, f32)> = Vec::with_capacity(n_elem * 9);
+    let mut result: Vec<(u32, u32, f32)> = Vec::with_capacity(n_elem * entries_per_elem);
     for t in triplets {
         if t.val != 0.0 {
             result.push((t.row, t.col, t.val));
@@ -185,4 +189,268 @@ pub fn assemble_poisson_2d_p1(
     drop(data);
     drop(staging);
     result
+}
+
+/// Assemble 2D Poisson stiffness matrix on the GPU for P1 triangles.
+pub fn assemble_poisson_2d_p1(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 6);
+    assert_eq!(elem_dofs.len(), n_elem * 3);
+
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 6;
+        let db = e * 3;
+        inputs.push(GpuElementInput {
+            nodes: [
+                elem_nodes[nb], elem_nodes[nb+1], elem_nodes[nb+2],
+                elem_nodes[nb+3], elem_nodes[nb+4], elem_nodes[nb+5],
+            ],
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2]],
+            _pad: 0,
+        });
+    }
+
+    run_assembly_shader(
+        gpu,
+        bytemuck::cast_slice(&inputs),
+        n_elem,
+        9,
+        include_str!("assembly_poisson_tri3.wgsl"),
+    )
+}
+
+/// Assemble 2D Poisson stiffness matrix on the GPU for P2 triangles (6-node).
+pub fn assemble_poisson_2d_p2(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 12);
+    assert_eq!(elem_dofs.len(), n_elem * 6);
+
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 12;
+        let db = e * 6;
+        let mut nodes = [0.0f32; 12];
+        nodes.copy_from_slice(&elem_nodes[nb..nb+12]);
+        inputs.push(GpuElementInputTri6 {
+            nodes,
+            dofs: [
+                elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2],
+                elem_dofs[db+3], elem_dofs[db+4], elem_dofs[db+5],
+            ],
+            _pad0: 0,
+            _pad1: 0,
+        });
+    }
+
+    run_assembly_shader(
+        gpu,
+        bytemuck::cast_slice(&inputs),
+        n_elem,
+        36,
+        include_str!("assembly_poisson_tri6.wgsl"),
+    )
+}
+
+/// Assemble 2D Poisson stiffness matrix on the GPU for Q1 quadrilaterals.
+pub fn assemble_poisson_2d_q1(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 8);
+    assert_eq!(elem_dofs.len(), n_elem * 4);
+
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 8;
+        let db = e * 4;
+        let mut nodes = [0.0f32; 8];
+        nodes.copy_from_slice(&elem_nodes[nb..nb+8]);
+        inputs.push(GpuElementInputQuad4 {
+            nodes,
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3]],
+        });
+    }
+
+    run_assembly_shader(
+        gpu,
+        bytemuck::cast_slice(&inputs),
+        n_elem,
+        16,
+        include_str!("assembly_poisson_quad4.wgsl"),
+    )
+}
+
+/// Assemble 3D Poisson stiffness matrix on the GPU for TET4 tetrahedra.
+pub fn assemble_poisson_3d_p1(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 12);
+    assert_eq!(elem_dofs.len(), n_elem * 4);
+
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 12;
+        let db = e * 4;
+        let mut nodes = [0.0f32; 12];
+        nodes.copy_from_slice(&elem_nodes[nb..nb+12]);
+        inputs.push(GpuElementInputTet4 {
+            nodes,
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3]],
+            _pad0: 0,
+            _pad1: 0,
+        });
+    }
+
+    run_assembly_shader(
+        gpu,
+        bytemuck::cast_slice(&inputs),
+        n_elem,
+        16,
+        include_str!("assembly_poisson_tet4.wgsl"),
+    )
+}
+
+/// Assemble 3D Poisson stiffness matrix on the GPU for Hex8 hexahedra.
+pub fn assemble_poisson_3d_hex8(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 24);
+    assert_eq!(elem_dofs.len(), n_elem * 8);
+
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 24;
+        let db = e * 8;
+        let mut nodes = [0.0f32; 24];
+        nodes.copy_from_slice(&elem_nodes[nb..nb+24]);
+        inputs.push(GpuElementInputHex8 {
+            nodes,
+            dofs: [
+                elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3],
+                elem_dofs[db+4], elem_dofs[db+5], elem_dofs[db+6], elem_dofs[db+7],
+            ],
+            _pad0: 0, _pad1: 0, _pad2: 0, _pad3: 0,
+        });
+    }
+
+    run_assembly_shader(
+        gpu,
+        bytemuck::cast_slice(&inputs),
+        n_elem,
+        64,
+        include_str!("assembly_poisson_hex8.wgsl"),
+    )
+}
+
+/// Assemble 3D Hex8 mass matrix on the GPU.
+pub fn assemble_mass_3d_hex8(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 24);
+    assert_eq!(elem_dofs.len(), n_elem * 8);
+
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 24;
+        let db = e * 8;
+        let mut nodes = [0.0f32; 24];
+        nodes.copy_from_slice(&elem_nodes[nb..nb+24]);
+        inputs.push(GpuElementInputHex8 {
+            nodes,
+            dofs: [
+                elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3],
+                elem_dofs[db+4], elem_dofs[db+5], elem_dofs[db+6], elem_dofs[db+7],
+            ],
+            _pad0: 0, _pad1: 0, _pad2: 0, _pad3: 0,
+        });
+    }
+
+    run_assembly_shader(
+        gpu,
+        bytemuck::cast_slice(&inputs),
+        n_elem,
+        64,
+        include_str!("assembly_mass_hex8.wgsl"),
+    )
+}
+
+/// Assemble 2D mass matrix on the GPU for P1 triangles.
+pub fn assemble_mass_2d_tri3(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 6);
+    assert_eq!(elem_dofs.len(), n_elem * 3);
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 6; let db = e * 3;
+        inputs.push(GpuElementInput { nodes: [
+            elem_nodes[nb], elem_nodes[nb+1], elem_nodes[nb+2],
+            elem_nodes[nb+3], elem_nodes[nb+4], elem_nodes[nb+5],
+        ], dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2]], _pad: 0 });
+    }
+    run_assembly_shader(gpu, bytemuck::cast_slice(&inputs), n_elem, 9, include_str!("assembly_mass_tri3.wgsl"))
+}
+
+/// Assemble 2D mass matrix on the GPU for Q1 quadrilaterals.
+pub fn assemble_mass_2d_quad4(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 8);
+    assert_eq!(elem_dofs.len(), n_elem * 4);
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 8; let db = e * 4;
+        let mut nodes = [0.0f32; 8];
+        nodes.copy_from_slice(&elem_nodes[nb..nb+8]);
+        inputs.push(GpuElementInputQuad4 { nodes,
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3]] });
+    }
+    run_assembly_shader(gpu, bytemuck::cast_slice(&inputs), n_elem, 16, include_str!("assembly_mass_quad4.wgsl"))
+}
+
+/// Assemble 3D mass matrix on the GPU for TET4 tetrahedra.
+pub fn assemble_mass_3d_tet4(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 12);
+    assert_eq!(elem_dofs.len(), n_elem * 4);
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 12; let db = e * 4;
+        let mut nodes = [0.0f32; 12];
+        nodes.copy_from_slice(&elem_nodes[nb..nb+12]);
+        inputs.push(GpuElementInputTet4 { nodes,
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3]],
+            _pad0: 0, _pad1: 0 });
+    }
+    run_assembly_shader(gpu, bytemuck::cast_slice(&inputs), n_elem, 16, include_str!("assembly_mass_tet4.wgsl"))
 }
