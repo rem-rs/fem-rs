@@ -423,14 +423,17 @@ impl<M: MeshTopology> HDivSpace<M> {
         // Edge midpoint
         let mx = 0.5 * (pa[0] + pb[0]);
         let my = 0.5 * (pa[1] + pb[1]);
-        // outward = midpoint → centroid (or negative of centroid → midpoint)
-        let outward_x = cx - mx;
-        let outward_y = cy - my;
+        // outward = midpoint → centroid points INTO the element;
+        // outward = centroid → midpoint (mx-cx) points OUTWARD.
+        let outward_x = mx - cx;
+        let outward_y = my - cy;
         let dot = nx * outward_x + ny * outward_y;
 
-        let global_flip = if gi < gj { 1.0 } else { -1.0 };
-        let outward_flip = if dot > 0.0 { 1.0 } else { -1.0 };
-        global_flip * outward_flip
+        // `normal = [-ty, tx]` is the 90° CCW rotation of edge a→b.
+        // For a CCW element this always points INWARD.
+        // outward_flip = -1 when the CCW normal disagrees with outward.
+        // global_flip is not needed: the CCW normal is independent of edge orientation.
+        if dot > 0.0 { 1.0 } else { -1.0 }
     }
 
     // ─── 3-D hexahedron construction ───────────────────────────────────────
