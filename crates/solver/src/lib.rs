@@ -1442,6 +1442,7 @@ pub fn into_result(r: linger::SolverResult) -> SolveResult {
 
 pub mod block;
 pub mod block_gmres;
+pub mod block_operator;
 pub mod eigen;
 pub mod hypre;
 pub mod lor;
@@ -1459,6 +1460,20 @@ pub mod adjoint;
 pub mod bdf;
 pub mod dae;
 pub mod events;
+pub use block_operator::{
+    BlockOperator,
+    BlockOpMatrix,
+    SumBlockOp,
+    MultiphysicsOperator,
+    BlockNonlinearForm,
+    BlockSolver,
+    BlockDiagonalPrecondN,
+    BlockTriangularPrecondN,
+    build_jacobi_block_solvers,
+    extract_upper_coupling,
+    solve_block_precond_gmres,
+    right_preconditioned_gmres,
+};
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur};

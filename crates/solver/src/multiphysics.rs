@@ -35,13 +35,16 @@ pub trait CoupledProblem: Send + Sync {
 }
 
 /// Newton convergence and linearization parameters for monolithic coupling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CoupledLinearStrategy {
     /// Flatten block Jacobian and solve with GMRES.
     #[default]
     Gmres,
     /// For 2x2 systems, solve using `BlockSystem + SchurComplementSolver`.
     BlockSchur2x2,
+    /// Flatten + GMRES with a block-diagonal preconditioner (configured by the
+    /// optional `block_precond_solvers` field on `CoupledNewtonConfig`).
+    BlockDiagonalGmres,
 }
 
 /// Newton convergence and linearization parameters for monolithic coupling.
@@ -274,6 +277,12 @@ impl CoupledNewtonSolver {
                 dx[..n0].copy_from_slice(&u);
                 dx[n0..n0 + n1].copy_from_slice(&p);
                 Ok((dx, lin))
+            }
+            CoupledLinearStrategy::BlockDiagonalGmres => {
+                return Err(CoupledSolveError::InvalidLayout(
+                    "BlockDiagonalGmres: use solve_block_precond_gmres directly; \
+                     see fem_solver::block_operator::solve_block_precond_gmres".to_string(),
+                ));
             }
         }
     }
