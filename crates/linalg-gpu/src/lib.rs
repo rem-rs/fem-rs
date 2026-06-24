@@ -3,6 +3,7 @@ pub mod buffer;
 pub mod context;
 pub mod csr;
 pub mod direct;
+pub mod jacobi;
 pub mod spmv_pipeline;
 pub mod vector;
 pub mod vector_pipeline;
@@ -23,6 +24,7 @@ pub use buffer::DeviceBuffer;
 pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;
 pub use direct::{solve_dense_gpu, GpuDenseMatrix};
+pub use jacobi::GpuJacobiPrecond;
 pub use spmv_pipeline::SpmvPipeline;
 pub use vector::GpuVector;
 pub use vector_pipeline::{

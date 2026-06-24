@@ -6,7 +6,7 @@
 use fem_core::Scalar;
 use fem_linalg::CsrMatrix;
 use fem_linalg_gpu::{
-    DeviceBuffer, GpuContext, GpuCsrMatrix, GpuVector,
+    DeviceBuffer, GpuContext, GpuCsrMatrix, GpuJacobiPrecond, GpuVector,
     SpmvPipeline, VectorOpsPipeline,
 };
 use wgpu;
@@ -274,4 +274,130 @@ fn solve_cg_gpu_prepared<T: Scalar>(
         max_iter: total_iterations,
         residual: final_r,
     })
+}
+
+// ─── PCG (Jacobi-preconditioned CG) ──────────────────────────────────────────
+
+/// GPU-resident PCG workspace with Jacobi preconditioner.
+pub struct PcgGpuWorkspace<T: Scalar> {
+    n: u32,
+    spmv: SpmvPipeline,
+    vops: VectorOpsPipeline,
+    precond: GpuJacobiPrecond<T>,
+    gpu_a: GpuCsrMatrix<T>,
+    gpu_b: GpuVector<T>,
+    gpu_x: GpuVector<T>,
+    gpu_r: GpuVector<T>,
+    gpu_z: GpuVector<T>,
+    gpu_p: GpuVector<T>,
+    gpu_ap: GpuVector<T>,
+    dot_buf: DeviceBuffer,
+    b_norm: f64,
+}
+
+impl<T: Scalar> PcgGpuWorkspace<T> {
+    pub fn new(ctx: &GpuContext, a: &CsrMatrix<T>, b: &[T]) -> Self {
+        let n = a.nrows as u32;
+        let spmv = SpmvPipeline::new(&ctx.device, ctx.features.native_f64);
+        let vops = VectorOpsPipeline::new(&ctx.device, ctx.features.native_f64);
+        let precond = GpuJacobiPrecond::from_matrix(ctx, a);
+        let gpu_a = GpuCsrMatrix::from_cpu(ctx, a);
+        let gpu_b = GpuVector::from_slice(ctx, b);
+        let gpu_x = GpuVector::zeros(ctx, n);
+        let gpu_r = GpuVector::zeros(ctx, n);
+        let gpu_z = GpuVector::zeros(ctx, n);
+        let gpu_p = GpuVector::zeros(ctx, n);
+        let gpu_ap = GpuVector::zeros(ctx, n);
+        let n_wg = (n + 255) / 256;
+        let dot_buf = DeviceBuffer::with_staging(&ctx.device,
+            n_wg as u64 * std::mem::size_of::<T>() as u64,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, "pcg_dot");
+        let b_norm = vops.compute_norm2(ctx, &gpu_b);
+        Self { n, spmv, vops, precond, gpu_a, gpu_b, gpu_x, gpu_r, gpu_z, gpu_p, gpu_ap, dot_buf, b_norm }
+    }
+
+    /// Solve with Jacobi-preconditioned CG. Batches operations per iteration.
+    pub fn solve(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig) -> Result<SolveResult, SolverError> {
+        assert_eq!(x.len() as u32, self.n);
+        self.gpu_x.write_from_slice(ctx, x);
+
+        let tol = cfg.atol.max(cfg.rtol * self.b_norm);
+        // r = b - A*x (batched)
+        {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            self.spmv.encode_spmv(ctx, &mut enc, 1.0, &self.gpu_a, &self.gpu_x, 0.0, &self.gpu_ap);
+            self.vops.encode_axpy(ctx, &mut enc, 1.0, &self.gpu_b, 0.0, &self.gpu_r);
+            self.vops.encode_axpy(ctx, &mut enc, -1.0, &self.gpu_ap, 1.0, &self.gpu_r);
+            ctx.queue.submit(Some(enc.finish()));
+        }
+        // z = M^{-1} r
+        {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            self.precond.encode_apply(ctx, &mut enc, &self.gpu_r, &self.gpu_z);
+            ctx.queue.submit(Some(enc.finish()));
+        }
+        // p = z
+        {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            self.vops.encode_axpy(ctx, &mut enc, 1.0, &self.gpu_z, 0.0, &self.gpu_p);
+            ctx.queue.submit(Some(enc.finish()));
+        }
+
+        let mut rz = self.vops.dispatch_dot_readback(ctx, &self.gpu_r, &self.gpu_z, &self.dot_buf);
+
+        for iter in 0..cfg.max_iter {
+            if rz < tol * tol * (1.0 + 1e-30) {
+                let cpu_x = self.gpu_x.read_to_cpu(ctx);
+                x.copy_from_slice(&cpu_x);
+                return Ok(SolveResult { converged: true, iterations: iter, final_residual: rz.sqrt() });
+            }
+            // Ap = A * p
+            {
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                self.spmv.encode_spmv(ctx, &mut enc, 1.0, &self.gpu_a, &self.gpu_p, 0.0, &self.gpu_ap);
+                ctx.queue.submit(Some(enc.finish()));
+            }
+            let pap = self.vops.dispatch_dot_readback(ctx, &self.gpu_p, &self.gpu_ap, &self.dot_buf);
+            let alpha = if pap.abs() > 1e-30 { rz / pap } else { 0.0 };
+
+            // x += α p, r -= α Ap  (batched)
+            {
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                self.vops.encode_axpy(ctx, &mut enc, alpha, &self.gpu_p, 1.0, &self.gpu_x);
+                self.vops.encode_axpy(ctx, &mut enc, -alpha, &self.gpu_ap, 1.0, &self.gpu_r);
+                ctx.queue.submit(Some(enc.finish()));
+            }
+            // z = M^{-1} r
+            {
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                self.precond.encode_apply(ctx, &mut enc, &self.gpu_r, &self.gpu_z);
+                ctx.queue.submit(Some(enc.finish()));
+            }
+            let rz_new = self.vops.dispatch_dot_readback(ctx, &self.gpu_r, &self.gpu_z, &self.dot_buf);
+            let beta = rz_new / rz;
+            rz = rz_new;
+
+            // p = z + β p
+            {
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                self.vops.encode_axpy(ctx, &mut enc, 1.0, &self.gpu_z, beta, &self.gpu_p);
+                ctx.queue.submit(Some(enc.finish()));
+            }
+        }
+
+        let cpu_x = self.gpu_x.read_to_cpu(ctx);
+        x.copy_from_slice(&cpu_x);
+        let final_r = self.vops.compute_norm2(ctx, &self.gpu_r);
+        Err(SolverError::ConvergenceFailed { max_iter: cfg.max_iter, residual: final_r })
+    }
+}
+
+/// Solve A x = b on GPU with Jacobi-preconditioned CG.
+pub fn solve_pcg_gpu(ctx: &GpuContext, a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], cfg: &SolverConfig) -> Result<SolveResult, SolverError> {
+    PcgGpuWorkspace::<f64>::new(ctx, a, b).solve(ctx, x, cfg)
+}
+
+/// Solve A x = b on GPU with f32 storage and Jacobi-preconditioned CG.
+pub fn solve_pcg_gpu_f32(ctx: &GpuContext, a: &CsrMatrix<f32>, b: &[f32], x: &mut [f32], cfg: &SolverConfig) -> Result<SolveResult, SolverError> {
+    PcgGpuWorkspace::<f32>::new(ctx, a, b).solve(ctx, x, cfg)
 }

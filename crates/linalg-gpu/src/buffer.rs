@@ -66,14 +66,16 @@ impl DeviceBuffer {
 
     /// Create with a staging buffer for CPU readback.
     pub fn with_staging(device: &wgpu::Device, size: u64, usage: wgpu::BufferUsages, label: &str) -> Self {
+        let buf_label = format!("{label}_buffer");
+        let stag_label = format!("{label}_staging");
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(format!("{label}_buffer").as_str()),
+            label: Some(&buf_label),
             size,
             usage,
             mapped_at_creation: false,
         });
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(format!("{label}_staging").as_str()),
+            label: Some(&stag_label),
             size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
