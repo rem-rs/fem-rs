@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
 use crate::context::GpuContext;
+use crate::csr::GpuCsrMatrix;
 
 /// GPU-side element input for a P1 triangle.
 #[repr(C)]
@@ -199,7 +200,59 @@ fn run_assembly_shader(
     result
 }
 
-/// Assemble 2D Poisson stiffness matrix on the GPU for P1 triangles.
+fn triplets_to_gpu_csr_f64(
+    gpu: &GpuContext,
+    triplets: Vec<(u32, u32, f32)>,
+    n: usize,
+) -> GpuCsrMatrix<f64> {
+    use fem_linalg::CooMatrix;
+    let mut coo = CooMatrix::new(n, n);
+    for (r, c, v) in triplets {
+        if v != 0.0 {
+            coo.add(r as usize, c as usize, v as f64);
+        }
+    }
+    let cpu_csr = coo.into_csr();
+    GpuCsrMatrix::from_cpu(gpu, &cpu_csr)
+}
+
+/// Assemble 2D Poisson stiffness matrix on GPU, returning a GPU-resident f64 CSR.
+pub fn assemble_poisson_2d_p1_gpu(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    n_dofs: usize,
+) -> GpuCsrMatrix<f64> {
+    let triplets = assemble_poisson_2d_p1(gpu, elem_nodes, elem_dofs, n_elem);
+    triplets_to_gpu_csr_f64(gpu, triplets, n_dofs)
+}
+
+/// Assemble 2D mass matrix on GPU, returning a GPU-resident f64 CSR.
+pub fn assemble_mass_2d_tri3_gpu(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    n_dofs: usize,
+) -> GpuCsrMatrix<f64> {
+    let triplets = assemble_mass_2d_tri3(gpu, elem_nodes, elem_dofs, n_elem);
+    triplets_to_gpu_csr_f64(gpu, triplets, n_dofs)
+}
+
+/// Assemble 2D elasticity stiffness matrix on GPU, returning a GPU-resident f64 CSR.
+pub fn assemble_elasticity_2d_tri3_gpu(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    n_dofs: usize,
+    lambda: f32,
+    mu: f32,
+) -> GpuCsrMatrix<f64> {
+    let triplets = assemble_elasticity_2d_tri3(gpu, elem_nodes, elem_dofs, n_elem, lambda, mu);
+    triplets_to_gpu_csr_f64(gpu, triplets, n_dofs)
+}
 pub fn assemble_poisson_2d_p1(
     gpu: &GpuContext,
     elem_nodes: &[f32],

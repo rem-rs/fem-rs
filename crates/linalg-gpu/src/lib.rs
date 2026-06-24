@@ -19,6 +19,9 @@ pub use assembly::{
     assemble_mass_2d_quad4,
     assemble_mass_3d_tet4,
     assemble_elasticity_2d_tri3,
+    assemble_poisson_2d_p1_gpu,
+    assemble_mass_2d_tri3_gpu,
+    assemble_elasticity_2d_tri3_gpu,
 };
 pub use buffer::DeviceBuffer;
 pub use context::{GpuContext, GpuFeatures};
