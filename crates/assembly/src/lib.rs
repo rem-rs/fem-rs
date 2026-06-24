@@ -96,10 +96,12 @@ pub mod iga;
 pub mod iga_trim;
 pub mod mortar;
 pub mod dg_advection;
+pub mod dg_framework;
 pub mod dpg;
 pub mod dpg_2d;
 pub mod dpg_3d;
 pub mod dg_euler_2d;
+pub mod dg_euler_3d;
 pub mod dg_cdr;
 pub mod navier_stokes;
 pub use navier_stokes::{
@@ -160,6 +162,10 @@ pub use dpg_2d::solve_dpg_poisson_2d;
 pub use dpg_3d::solve_dpg_poisson_3d;
 pub use dg_advection::{DGAdvectionIntegrator, DgAdvectionRhs, DgFaceIntegrator, DgFaceQpData, assemble_dg_interior_faces, assemble_advection_boundary};
 pub use dg_cdr::DgCdrSystem;
+pub use dg_framework::{
+    DgNumericalFlux, DgAdvection2D, DgDiffusion2D, DgAdvectionDiffusion2D,
+    dg_energy,
+};
 pub use dg_elasticity::DgElasticityAssembler;
 pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux};
 pub use interior_faces::InteriorFaceList;
