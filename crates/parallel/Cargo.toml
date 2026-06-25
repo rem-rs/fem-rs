@@ -12,7 +12,7 @@ fem-assembly = { path = "../assembly", features = ["parallel"] }
 fem-element  = { path = "../element" }
 fem-solver   = { path = "../solver" }
 fem-rmetis   = { path = "../rmetis" }
-linger       = { git = "https://github.com/rem-rs/linger.git", default-features = false, features = ["rayon"] }
+linlvo       = { git = "https://github.com/rem-rs/linlvo.git", default-features = false, features = ["rayon"] }
 fem-io       = { path = "../io", optional = true }
 log          = { workspace = true }
 bytemuck     = { workspace = true }

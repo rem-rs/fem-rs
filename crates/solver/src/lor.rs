@@ -6,7 +6,7 @@
 
 use crate::{solve_gmres, solve_pcg_jacobi, SolveResult, SolverConfig, SolverError};
 use fem_linalg::CsrMatrix;
-use linger::Scalar as LingerScalar;
+use linlvo::Scalar as LingerScalar;
 
 /// LOR preconditioner configuration.
 #[derive(Debug, Clone)]
