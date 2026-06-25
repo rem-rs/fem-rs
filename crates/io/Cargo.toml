@@ -7,7 +7,7 @@ edition = "2021"
 fem-core   = { path = "../core" }
 fem-linalg = { path = "../linalg" }
 fem-mesh   = { path = "../mesh" }
-linger     = { git = "https://github.com/rem-rs/linger.git" }
+linlvo     = { git = "https://github.com/rem-rs/linlvo.git" }
 thiserror  = { workspace = true }
 rust-hdf5  = { version = "0.2", optional = true }
 

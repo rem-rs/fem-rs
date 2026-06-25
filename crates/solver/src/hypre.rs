@@ -1,20 +1,20 @@
-//! HYPRE-compatible solver interfaces backed by native `linger` implementations.
+//! HYPRE-compatible solver interfaces backed by native `linlvo` implementations.
 //!
 //! Provides MFEM/HYPRE-style naming conventions for BoomerAMG, AMS, ADS,
-//! and ParCSR matrix operations. All backends are pure-Rust via `linger`;
+//! and ParCSR matrix operations. All backends are pure-Rust via `linlvo`;
 //! no external HYPRE installation is required.
 //!
 //! # Naming convention
 //!
 //! | fem_solver::hypre type | MFEM/HYPRE equivalent | Backend |
 //! |------------------------|----------------------|---------|
-//! | `HypreBoomerAMG` | `HypreBoomerAMG` | linger `AmgPrecond` |
+//! | `HypreBoomerAMG` | `HypreBoomerAMG` | linlvo `AmgPrecond` |
 //! | `HypreParMatrix` | `HypreParMatrix` | fem-linalg `CsrMatrix` |
-//! | `hypre_solve_pcg` | `HyprePCG` (PCG + BoomerAMG) | linger |
-//! | `hypre_solve_gmres` | `HypreGMRES` (GMRES + BoomerAMG) | linger |
+//! | `hypre_solve_pcg` | `HyprePCG` (PCG + BoomerAMG) | linlvo |
+//! | `hypre_solve_gmres` | `HypreGMRES` (GMRES + BoomerAMG) | linlvo |
 
 use fem_linalg::CsrMatrix;
-use linger::amg::{AmgConfig, AmgHierarchy, AmgPrecond, CoarsenStrategy, SmootherType};
+use linlvo::amg::{AmgConfig, AmgHierarchy, AmgPrecond, CoarsenStrategy, SmootherType};
 
 /// HYPRE-compatible configuration for BoomerAMG.
 ///
@@ -67,7 +67,7 @@ impl HyprePrecond {
             ..Default::default()
         };
 
-        let la = fem_to_linger(a);
+        let la = fem_to_linlvo(a);
         let hier = AmgHierarchy::build(la, amg_cfg);
         HyprePrecond { amg: AmgPrecond::new(hier) }
     }
@@ -142,9 +142,9 @@ pub fn hypre_solve_gmres(
     })
 }
 
-/// Convert fem-linalg CSR to linger CSR.
-fn fem_to_linger(a: &CsrMatrix<f64>) -> linger::sparse::CsrMatrix<f64> {
-    linger::sparse::CsrMatrix::from_raw(
+/// Convert fem-linalg CSR to linlvo CSR.
+fn fem_to_linlvo(a: &CsrMatrix<f64>) -> linlvo::sparse::CsrMatrix<f64> {
+    linlvo::sparse::CsrMatrix::from_raw(
         a.nrows,
         a.ncols,
         a.row_ptr.clone(),
@@ -153,8 +153,8 @@ fn fem_to_linger(a: &CsrMatrix<f64>) -> linger::sparse::CsrMatrix<f64> {
     )
 }
 
-impl linger::core::preconditioner::Preconditioner for HyprePrecond {
-    type Vector = linger::core::vector::DenseVec<f64>;
+impl linlvo::core::preconditioner::Preconditioner for HyprePrecond {
+    type Vector = linlvo::core::vector::DenseVec<f64>;
 
     fn apply_precond(&self, x: &Self::Vector, y: &mut Self::Vector) {
         self.amg.apply_precond(x, y)
