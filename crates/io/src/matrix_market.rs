@@ -1,4 +1,4 @@
-//! Matrix Market (.mtx) file I/O �?thin wrapper around linlvo's mmio module.
+﻿//! Matrix Market (.mtx) file I/O �?thin wrapper around linlvo's mmio module.
 //!
 //! Supports reading/writing sparse matrices in the standard Matrix Market
 //! coordinate format used by SuiteSparse and NIST.
@@ -25,15 +25,15 @@ use std::path::Path;
 use fem_linalg::complex_csr::{ComplexCoo, ComplexCsr};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use linlvo::sparse::{
-    CooMatrix as LingerCoo, CsrMatrix as LingerCsr,
-    read_matrix_market as Linger_read, write_matrix_market as Linger_write,
+    CooMatrix as linlvoCoo, CsrMatrix as linlvoCsr,
+    read_matrix_market as linlvo_read, write_matrix_market as linlvo_write,
 };
 
 pub use linlvo::MmioError;
 
 // ─── Conversion helpers ───────────────────────────────────────────────────────
 
-fn Linger_csr_to_fem(lc: LingerCsr<f64>) -> CsrMatrix<f64> {
+fn linlvo_csr_to_fem(lc: linlvoCsr<f64>) -> CsrMatrix<f64> {
     CsrMatrix {
         nrows:   lc.nrows(),
         ncols:   lc.ncols(),
@@ -43,8 +43,8 @@ fn Linger_csr_to_fem(lc: LingerCsr<f64>) -> CsrMatrix<f64> {
     }
 }
 
-fn fem_csr_to_Linger(a: &CsrMatrix<f64>) -> LingerCsr<f64> {
-    LingerCsr::from_raw(
+fn fem_csr_to_linlvo(a: &CsrMatrix<f64>) -> linlvoCsr<f64> {
+    linlvoCsr::from_raw(
         a.nrows,
         a.ncols,
         a.row_ptr.clone(),
@@ -59,16 +59,16 @@ fn fem_csr_to_Linger(a: &CsrMatrix<f64>) -> LingerCsr<f64> {
 ///
 /// Supports `real general`, `real symmetric`, `integer general`, and `pattern` variants.
 pub fn read_matrix_market<P: AsRef<Path>>(path: P) -> Result<CsrMatrix<f64>, MmioError> {
-    let lc: LingerCsr<f64> = Linger_read(path)?;
-    Ok(Linger_csr_to_fem(lc))
+    let lc: linlvoCsr<f64> = linlvo_read(path)?;
+    Ok(linlvo_csr_to_fem(lc))
 }
 
 /// Read a Matrix Market `.mtx` file into a `CooMatrix<f64>`.
 ///
 /// Preserves duplicate entries as separate (row, col, val) triplets.
 pub fn read_matrix_market_coo<P: AsRef<Path>>(path: P) -> Result<CooMatrix<f64>, MmioError> {
-    use linlvo::sparse::read_matrix_market_coo as Linger_read_coo;
-    let lc: LingerCoo<f64> = Linger_read_coo(path)?;
+    use linlvo::sparse::read_matrix_market_coo as linlvo_read_coo;
+    let lc: linlvoCoo<f64> = linlvo_read_coo(path)?;
     let mut coo = CooMatrix::<f64>::new(lc.nrows(), lc.ncols());
     for ((r, c), v) in lc.row_indices().iter().zip(lc.col_indices()).zip(lc.values()) {
         coo.add(*r, *c, *v);
@@ -80,8 +80,8 @@ pub fn read_matrix_market_coo<P: AsRef<Path>>(path: P) -> Result<CooMatrix<f64>,
 ///
 /// Writes in `%%MatrixMarket matrix coordinate real general` format.
 pub fn write_matrix_market<P: AsRef<Path>>(path: P, a: &CsrMatrix<f64>) -> Result<(), MmioError> {
-    let lc = fem_csr_to_Linger(a);
-    Linger_write(path, &lc)
+    let lc = fem_csr_to_linlvo(a);
+    linlvo_write(path, &lc)
 }
 
 // ─── Complex Matrix Market I/O ────────────────────────────────────────────────

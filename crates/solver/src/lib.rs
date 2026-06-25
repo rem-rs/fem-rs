@@ -1,55 +1,55 @@
-//! # fem-solver
+﻿//! # fem-solver
 //!
 //! Iterative and direct linear solvers backed by [`linlvo`].
 //!
 //! ## Iterative solvers
-//! - [`solve_cg`]          �?Conjugate Gradient (SPD systems)
-//! - [`solve_cg_operator`] �?Conjugate Gradient with operator callback (backend-agnostic)
-//! - [`solve_gmres_operator`] �?GMRES with operator callback (backend-agnostic)
-//! - [`solve_bicgstab_operator`] �?BiCGSTAB with operator callback (backend-agnostic)
-//! - [`solve_pcg_jacobi`]  �?PCG with Jacobi preconditioner
-//! - [`solve_pcg_ilu0`]    �?PCG with ILU(0) preconditioner
-//! - [`solve_pcg_ildlt`]   �?PCG with ILDLᵀ preconditioner
-//! - [`solve_gmres`]       �?GMRES (non-symmetric systems)
-//! - [`solve_gmres_jacobi`] �?GMRES with Jacobi preconditioner
-//! - [`solve_gmres_ilu0`]   �?GMRES with ILU(0) preconditioner
-//! - [`solve_gmres_iluk`]   �?GMRES with ILU(k) preconditioner
-//! - [`solve_gmres_ilut`]   �?GMRES with ILUT preconditioner
-//! - [`solve_pcg_iluk`]     �?PCG with ILU(k) preconditioner
-//! - [`solve_fgmres_ilut`]  �?FGMRES with ILUT preconditioner
-//! - [`solve_precond_kind`] �?unified ILU-family dispatcher via [`PrecondKind`]
-//! - [`solve_bicgstab`]    �?BiCGSTAB
-//! - [`solve_idrs`]        �?IDR(s) (non-symmetric, short-recurrence)
-//! - [`solve_tfqmr`]       �?TFQMR (Transpose-Free QMR)
-//! - [`solve_fgmres_ilu0`] �?Flexible GMRES with ILU(0) preconditioner
+//! - [`solve_cg`]          �?Conjugate Gradient (SPD systems)
+//! - [`solve_cg_operator`] �?Conjugate Gradient with operator callback (backend-agnostic)
+//! - [`solve_gmres_operator`] �?GMRES with operator callback (backend-agnostic)
+//! - [`solve_bicgstab_operator`] �?BiCGSTAB with operator callback (backend-agnostic)
+//! - [`solve_pcg_jacobi`]  �?PCG with Jacobi preconditioner
+//! - [`solve_pcg_ilu0`]    �?PCG with ILU(0) preconditioner
+//! - [`solve_pcg_ildlt`]   �?PCG with ILDLᵀ preconditioner
+//! - [`solve_gmres`]       �?GMRES (non-symmetric systems)
+//! - [`solve_gmres_jacobi`] �?GMRES with Jacobi preconditioner
+//! - [`solve_gmres_ilu0`]   �?GMRES with ILU(0) preconditioner
+//! - [`solve_gmres_iluk`]   �?GMRES with ILU(k) preconditioner
+//! - [`solve_gmres_ilut`]   �?GMRES with ILUT preconditioner
+//! - [`solve_pcg_iluk`]     �?PCG with ILU(k) preconditioner
+//! - [`solve_fgmres_ilut`]  �?FGMRES with ILUT preconditioner
+//! - [`solve_precond_kind`] �?unified ILU-family dispatcher via [`PrecondKind`]
+//! - [`solve_bicgstab`]    �?BiCGSTAB
+//! - [`solve_idrs`]        �?IDR(s) (non-symmetric, short-recurrence)
+//! - [`solve_tfqmr`]       �?TFQMR (Transpose-Free QMR)
+//! - [`solve_fgmres_ilu0`] �?Flexible GMRES with ILU(0) preconditioner
 //!
 //! ## Generic preconditioner interface
-//! - [`solve_pcg_precond`]    �?PCG with any type implementing [`LingerPreconditioner`]
-//! - [`solve_gmres_precond`]  �?GMRES with any type implementing [`LingerPreconditioner`]
-//! - [`solve_fgmres_precond`] �?FGMRES with any type implementing [`LingerPreconditioner`]
+//! - [`solve_pcg_precond`]    �?PCG with any type implementing [`linlvoPreconditioner`]
+//! - [`solve_gmres_precond`]  �?GMRES with any type implementing [`linlvoPreconditioner`]
+//! - [`solve_fgmres_precond`] �?FGMRES with any type implementing [`linlvoPreconditioner`]
 //!
 //! ## Auxiliary-space preconditioners (Hiptmair-Xu)
-//! - [`solve_pcg_ams`]     �?PCG with AMS for H(curl) (Maxwell)
-//! - [`solve_gmres_ams`]   �?GMRES with AMS for H(curl)
-//! - [`solve_pcg_ads`]     �?PCG with ADS for H(div) (Darcy)
-//! - [`solve_gmres_ads`]   �?GMRES with ADS for H(div)
+//! - [`solve_pcg_ams`]     �?PCG with AMS for H(curl) (Maxwell)
+//! - [`solve_gmres_ams`]   �?GMRES with AMS for H(curl)
+//! - [`solve_pcg_ads`]     �?PCG with ADS for H(div) (Darcy)
+//! - [`solve_gmres_ads`]   �?GMRES with ADS for H(div)
 //!
 //! ## Direct solvers
-//! - [`solve_sparse_lu`]        �?Sparse LU for general systems
-//! - [`solve_sparse_cholesky`]  �?Sparse Cholesky for SPD systems
-//! - [`solve_sparse_ldlt`]      �?Sparse LDLᵀ for symmetric indefinite systems
-//! - [`solve_sparse_mumps`]     �?MUMPS-compatible direct path (baseline)
-//! - [`solve_sparse_mkl`]       �?MKL-compatible direct path (baseline)
+//! - [`solve_sparse_lu`]        �?Sparse LU for general systems
+//! - [`solve_sparse_cholesky`]  �?Sparse Cholesky for SPD systems
+//! - [`solve_sparse_ldlt`]      �?Sparse LDLᵀ for symmetric indefinite systems
+//! - [`solve_sparse_mumps`]     �?MUMPS-compatible direct path (baseline)
+//! - [`solve_sparse_mkl`]       �?MKL-compatible direct path (baseline)
 //!
 //! All solvers operate on [`fem_linalg::CsrMatrix<T>`].
 
 use fem_linalg::CsrMatrix as FemCsr;
 use linlvo::{
-    core::scalar::Scalar as LingerScalar,
+    core::scalar::Scalar as linlvoScalar,
     direct::{DirectSolver, SparseLu, SparseCholesky, SparseLdlt, MumpsSolver, MklSolver},
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
     precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig},
-    sparse::CsrMatrix as LingerCsr,
+    sparse::CsrMatrix as linlvoCsr,
     DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner,
     SolverParams, VerboseLevel,
 };
@@ -60,7 +60,7 @@ use linlvo::precond::{IlukPrecond, IlutPrecond};
 /// Implement this trait to plug any custom approximate-inverse into
 /// [`solve_pcg_precond`], [`solve_gmres_precond`], or [`solve_fgmres_precond`]
 /// without depending on the `linlvo` crate directly.
-pub use linlvo::Preconditioner as LingerPreconditioner;
+pub use linlvo::Preconditioner as linlvoPreconditioner;
 use thiserror::Error;
 
 #[cfg(feature = "gpu")]
@@ -122,7 +122,7 @@ pub enum PrintLevel {
 /// Convergence parameters passed to every solver.
 #[derive(Debug, Clone)]
 pub struct SolverConfig {
-    /// Relative tolerance (converge when ‖r�?‖b�?< rtol).
+    /// Relative tolerance (converge when ‖r�?‖b�?< rtol).
     pub rtol: f64,
     /// Absolute tolerance.
     pub atol: f64,
@@ -141,7 +141,7 @@ impl Default for SolverConfig {
 }
 
 impl SolverConfig {
-    pub fn to_Linger(&self) -> SolverParams {
+    pub fn to_linlvo(&self) -> SolverParams {
         let level = match self.effective_print_level() {
             PrintLevel::Silent => VerboseLevel::Silent,
             PrintLevel::Summary => VerboseLevel::Summary,
@@ -174,8 +174,8 @@ impl SolverConfig {
 ///
 /// The only structural difference is that fem-rs stores column indices as
 /// `u32` while linlvo uses `usize`.
-pub fn fem_to_Linger_csr<T: LingerScalar>(a: &FemCsr<T>) -> LingerCsr<T> {
-    LingerCsr::from_raw(
+pub fn fem_to_linlvo_csr<T: linlvoScalar>(a: &FemCsr<T>) -> linlvoCsr<T> {
+    linlvoCsr::from_raw(
         a.nrows,
         a.ncols,
         a.row_ptr.clone(),
@@ -186,25 +186,25 @@ pub fn fem_to_Linger_csr<T: LingerScalar>(a: &FemCsr<T>) -> LingerCsr<T> {
 
 // ─── Solvers ─────────────────────────────────────────────────────────────────
 
-/// Conjugate Gradient �?for symmetric positive definite systems.
+/// Conjugate Gradient �?for symmetric positive definite systems.
 ///
 /// # Arguments
-/// * `a`   �?system matrix (fem-rs CSR)
-/// * `b`   �?right-hand side
-/// * `x`   �?initial guess on entry, solution on exit
-/// * `cfg` �?convergence parameters
-pub fn solve_cg<T: LingerScalar>(
+/// * `a`   �?system matrix (fem-rs CSR)
+/// * `b`   �?right-hand side
+/// * `x`   �?initial guess on entry, solution on exit
+/// * `cfg` �?convergence parameters
+pub fn solve_cg<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, None, &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, None, &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -217,11 +217,11 @@ pub fn solve_cg<T: LingerScalar>(
 /// concrete CSR matrix.
 ///
 /// # Arguments
-/// * `nrows`, `ncols` �?operator dimensions (must be square and equal to `b.len()`).
-/// * `apply`          �?callback that computes `y <- A * x`.
-/// * `b`              �?right-hand side.
-/// * `x`              �?initial guess on entry, solution on exit.
-/// * `cfg`            �?convergence parameters.
+/// * `nrows`, `ncols` �?operator dimensions (must be square and equal to `b.len()`).
+/// * `apply`          �?callback that computes `y <- A * x`.
+/// * `b`              �?right-hand side.
+/// * `x`              �?initial guess on entry, solution on exit.
+/// * `cfg`            �?convergence parameters.
 pub fn solve_cg_operator<F>(
     nrows: usize,
     ncols: usize,
@@ -305,19 +305,19 @@ where
 }
 
 /// Preconditioned CG with a Jacobi (diagonal scaling) preconditioner.
-pub fn solve_pcg_jacobi<T: LingerScalar>(
+pub fn solve_pcg_jacobi<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -326,28 +326,28 @@ pub fn solve_pcg_jacobi<T: LingerScalar>(
 /// Preconditioned CG with an ILU(0) preconditioner.
 ///
 /// Requires the matrix to have a factorisation-compatible sparsity pattern.
-pub fn solve_pcg_ilu0<T: LingerScalar>(
+pub fn solve_pcg_ilu0<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
 }
 
-/// GMRES �?for general (possibly non-symmetric) systems.
+/// GMRES �?for general (possibly non-symmetric) systems.
 ///
 /// `restart` controls the Krylov subspace dimension before restart (default 30).
-pub fn solve_gmres<T: LingerScalar>(
+pub fn solve_gmres<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -355,19 +355,19 @@ pub fn solve_gmres<T: LingerScalar>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let solver = Gmres::<T>::new(restart);
     let res = solver
-        .solve(&la, None, &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, None, &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
 }
 
 /// GMRES with Jacobi preconditioner.
-pub fn solve_gmres_jacobi<T: LingerScalar>(
+pub fn solve_gmres_jacobi<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -375,20 +375,20 @@ pub fn solve_gmres_jacobi<T: LingerScalar>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
 }
 
 /// GMRES with ILU(0) preconditioner.
-pub fn solve_gmres_ilu0<T: LingerScalar>(
+pub fn solve_gmres_ilu0<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -396,13 +396,13 @@ pub fn solve_gmres_ilu0<T: LingerScalar>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -591,19 +591,19 @@ where
     })
 }
 
-/// BiCGSTAB �?for non-symmetric systems; often faster than GMRES per iteration.
-pub fn solve_bicgstab<T: LingerScalar>(
+/// BiCGSTAB �?for non-symmetric systems; often faster than GMRES per iteration.
+pub fn solve_bicgstab<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = BiCgStab::<T>::default()
-        .solve(&la, None, &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, None, &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -754,7 +754,7 @@ where
     })
 }
 
-/// Flexible GMRES �?allows a variable preconditioner per iteration.
+/// Flexible GMRES �?allows a variable preconditioner per iteration.
 ///
 /// Unlike standard GMRES, the preconditioner may change at each Krylov step
 /// (e.g. inner Krylov solve, AMG V-cycle, or any nonlinear operator).
@@ -762,7 +762,7 @@ where
 /// right-preconditioned GMRES.
 ///
 /// `restart` controls the Krylov subspace dimension before restart (default 30).
-pub fn solve_fgmres<T: LingerScalar>(
+pub fn solve_fgmres<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -770,39 +770,39 @@ pub fn solve_fgmres<T: LingerScalar>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let solver = Fgmres::<T>::new(restart);
     let res = solver
-        .solve(&la, None, &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, None, &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
 }
 
 /// Flexible GMRES with Jacobi preconditioner.
-pub fn solve_fgmres_jacobi<T: LingerScalar>(    a: &FemCsr<T>,
+pub fn solve_fgmres_jacobi<T: linlvoScalar>(    a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
     restart: usize,
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
     let solver = Fgmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
 }
 
 /// Flexible GMRES with ILU(0) preconditioner.
-pub fn solve_fgmres_ilu0<T: LingerScalar>(
+pub fn solve_fgmres_ilu0<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -810,13 +810,13 @@ pub fn solve_fgmres_ilu0<T: LingerScalar>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
     let solver = Fgmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -827,16 +827,16 @@ pub fn solve_fgmres_ilu0<T: LingerScalar>(
 /// Preconditioned CG with a user-supplied preconditioner.
 ///
 /// Accepts any type implementing [`linlvo::Preconditioner`].
-/// Use [`LingerPreconditioner`] / [`linlvo::Preconditioner`] as the trait bound
+/// Use [`linlvoPreconditioner`] / [`linlvo::Preconditioner`] as the trait bound
 /// when building custom preconditioners.
 ///
 /// # Example
 /// ```ignore
 /// use fem_solver::{solve_pcg_precond, SolverConfig};
 /// use linlvo::JacobiPrecond;
-/// use fem_solver::fem_to_Linger_csr;
+/// use fem_solver::fem_to_linlvo_csr;
 ///
-/// let la = fem_to_Linger_csr(&a);
+/// let la = fem_to_linlvo_csr(&a);
 /// let prec = JacobiPrecond::from_csr(&la).unwrap();
 /// let res = solve_pcg_precond(&a, &b, &mut x, &prec, &cfg).unwrap();
 /// ```
@@ -848,15 +848,15 @@ pub fn solve_pcg_precond<T, P>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError>
 where
-    T: LingerScalar,
+    T: linlvoScalar,
     P: Preconditioner<Vector = DenseVec<T>>,
 {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -875,15 +875,15 @@ pub fn solve_gmres_precond<T, P>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError>
 where
-    T: LingerScalar,
+    T: linlvoScalar,
     P: Preconditioner<Vector = DenseVec<T>>,
 {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = Gmres::<T>::new(restart)
-        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -892,7 +892,7 @@ where
 /// Flexible GMRES with a user-supplied (potentially variable) preconditioner.
 ///
 /// Unlike standard GMRES, FGMRES tolerates preconditioners that change between
-/// iterations �?inner Krylov solves, AMG V-cycles, and nonlinear operators all
+/// iterations �?inner Krylov solves, AMG V-cycles, and nonlinear operators all
 /// qualify.  With a fixed preconditioner the iterates are identical to
 /// right-preconditioned GMRES.
 pub fn solve_fgmres_precond<T, P>(
@@ -904,15 +904,15 @@ pub fn solve_fgmres_precond<T, P>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError>
 where
-    T: LingerScalar,
+    T: linlvoScalar,
     P: Preconditioner<Vector = DenseVec<T>>,
 {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = Fgmres::<T>::new(restart)
-        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -927,19 +927,19 @@ where
 /// Best for symmetric positive-definite systems where ILU(0) may struggle.
 /// ILDLt is more robust than ILU(0) for nearly-singular or ill-conditioned
 /// symmetric matrices (e.g., Poisson with extreme aspect ratios).
-pub fn solve_pcg_ildlt<T: LingerScalar>(
+pub fn solve_pcg_ildlt<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IldltPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -948,7 +948,7 @@ pub fn solve_pcg_ildlt<T: LingerScalar>(
 /// GMRES with incomplete LDLᵀ preconditioner for symmetric indefinite systems.
 ///
 /// Ideal for saddle-point problems (Stokes, Maxwell) where Cholesky/ILU fail.
-pub fn solve_gmres_ildlt<T: LingerScalar>(
+pub fn solve_gmres_ildlt<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -956,13 +956,13 @@ pub fn solve_gmres_ildlt<T: LingerScalar>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IldltPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -978,7 +978,7 @@ pub fn solve_gmres_ildlt<T: LingerScalar>(
 /// | Variant | Fill strategy | Typical use |
 /// |---------|---------------|-------------|
 /// | `Ilu0`  | Sparsity of `A` | Cheap, SPD or diagonally dominant |
-/// | `Iluk(k)` | Level-of-fill �?k | Better quality for moderate fill |
+/// | `Iluk(k)` | Level-of-fill �?k | Better quality for moderate fill |
 /// | `Ilut { tau, fill }` | Drop tolerance + fill bound | Non-symmetric, harder systems |
 #[derive(Debug, Clone)]
 pub enum PrecondKind {
@@ -1004,7 +1004,7 @@ impl Default for PrecondKind {
 /// GMRES with ILU(k) preconditioner.
 ///
 /// `fill_level = 0` reproduces ILU(0); increase for harder problems.
-pub fn solve_gmres_iluk<T: LingerScalar>(
+pub fn solve_gmres_iluk<T: linlvoScalar>(
     a:          &FemCsr<T>,
     b:          &[T],
     x:          &mut [T],
@@ -1013,14 +1013,14 @@ pub fn solve_gmres_iluk<T: LingerScalar>(
     cfg:        &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IlukPrecond::from_csr(&la, fill_level)
         .map_err(|e| SolverError::linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1028,9 +1028,9 @@ pub fn solve_gmres_iluk<T: LingerScalar>(
 
 /// GMRES with ILUT(τ, p) preconditioner.
 ///
-/// * `tau`    �?relative drop tolerance (0.0 = keep all, 0.01 = aggressive)
-/// * `p_fill` �?max off-diagonal fill per row in L and U
-pub fn solve_gmres_ilut<T: LingerScalar>(
+/// * `tau`    �?relative drop tolerance (0.0 = keep all, 0.01 = aggressive)
+/// * `p_fill` �?max off-diagonal fill per row in L and U
+pub fn solve_gmres_ilut<T: linlvoScalar>(
     a:      &FemCsr<T>,
     b:      &[T],
     x:      &mut [T],
@@ -1040,14 +1040,14 @@ pub fn solve_gmres_ilut<T: LingerScalar>(
     cfg:    &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IlutPrecond::from_csr(&la, tau, p_fill)
         .map_err(|e| SolverError::linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1056,7 +1056,7 @@ pub fn solve_gmres_ilut<T: LingerScalar>(
 /// PCG with ILU(k) preconditioner (symmetric positive definite systems).
 ///
 /// `fill_level = 0` reproduces `solve_pcg_ilu0`.
-pub fn solve_pcg_iluk<T: LingerScalar>(
+pub fn solve_pcg_iluk<T: linlvoScalar>(
     a:          &FemCsr<T>,
     b:          &[T],
     x:          &mut [T],
@@ -1064,13 +1064,13 @@ pub fn solve_pcg_iluk<T: LingerScalar>(
     cfg:        &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IlukPrecond::from_csr(&la, fill_level)
         .map_err(|e| SolverError::linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1080,7 +1080,7 @@ pub fn solve_pcg_iluk<T: LingerScalar>(
 ///
 /// FGMRES tolerates a variable preconditioner; useful when the inner ILUT
 /// solve is itself iterative or when the preconditioner changes between steps.
-pub fn solve_fgmres_ilut<T: LingerScalar>(
+pub fn solve_fgmres_ilut<T: linlvoScalar>(
     a:      &FemCsr<T>,
     b:      &[T],
     x:      &mut [T],
@@ -1090,14 +1090,14 @@ pub fn solve_fgmres_ilut<T: LingerScalar>(
     cfg:    &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IlutPrecond::from_csr(&la, tau, p_fill)
         .map_err(|e| SolverError::linlvo(e.to_string()))?;
     let solver = Fgmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1117,7 +1117,7 @@ pub fn solve_fgmres_ilut<T: LingerScalar>(
 ///     PrecondKind::Ilut { tau: 0.01, fill: 20 },
 ///     &SolverConfig::default())?;
 /// ```
-pub fn solve_precond_kind<T: LingerScalar>(
+pub fn solve_precond_kind<T: linlvoScalar>(
     a:       &FemCsr<T>,
     b:       &[T],
     x:       &mut [T],
@@ -1134,11 +1134,11 @@ pub fn solve_precond_kind<T: LingerScalar>(
 
 // ─── IDR(s) ──────────────────────────────────────────────────────────────────
 
-/// IDR(s) �?Induced Dimension Reduction for non-symmetric systems.
+/// IDR(s) �?Induced Dimension Reduction for non-symmetric systems.
 ///
 /// Short-recurrence method; s=4 is a good default.  Typically fewer matvecs
 /// than BiCGSTAB for difficult non-symmetric problems.
-pub fn solve_idrs<T: LingerScalar>(
+pub fn solve_idrs<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -1146,33 +1146,33 @@ pub fn solve_idrs<T: LingerScalar>(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let solver = Idrs::<T>::new(s);
     let res = solver
-        .solve(&la, None, &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, None, &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
 }
 
-/// TFQMR �?Transpose-Free Quasi-Minimal Residual for non-symmetric systems.
+/// TFQMR �?Transpose-Free Quasi-Minimal Residual for non-symmetric systems.
 ///
 /// Does not require the transpose of A; converges smoothly on problems where
 /// BiCGSTAB may stagnate.
-pub fn solve_tfqmr<T: LingerScalar>(
+pub fn solve_tfqmr<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = Tfqmr::<T>::default()
-        .solve(&la, None, &lb, &mut lx, &cfg.to_Linger())
+        .solve(&la, None, &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1184,11 +1184,11 @@ pub fn solve_tfqmr<T: LingerScalar>(
 ///
 /// Exact solve (up to floating-point precision).  Use for small-to-medium
 /// problems or as a reference/preconditioner.
-pub fn solve_sparse_lu<T: LingerScalar>(
+pub fn solve_sparse_lu<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
 ) -> Result<Vec<T>, SolverError> {
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = SparseLu::<T>::default();
@@ -1200,11 +1200,11 @@ pub fn solve_sparse_lu<T: LingerScalar>(
 /// Sparse Cholesky direct solver for symmetric positive-definite systems.
 ///
 /// About 2× faster than LU for SPD matrices.
-pub fn solve_sparse_cholesky<T: LingerScalar>(
+pub fn solve_sparse_cholesky<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
 ) -> Result<Vec<T>, SolverError> {
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = SparseCholesky::<T>::default();
@@ -1214,11 +1214,11 @@ pub fn solve_sparse_cholesky<T: LingerScalar>(
 }
 
 /// Sparse LDLᵀ direct solver for symmetric indefinite systems (Stokes, Maxwell saddle-point).
-pub fn solve_sparse_ldlt<T: LingerScalar>(
+pub fn solve_sparse_ldlt<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
 ) -> Result<Vec<T>, SolverError> {
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = SparseLdlt::<T>::default();
@@ -1232,11 +1232,11 @@ pub fn solve_sparse_ldlt<T: LingerScalar>(
 /// Uses `linlvo::direct::MumpsSolver`, which currently provides a stable
 /// factor/solve/reuse API backed by linlvo's native multifrontal replacement
 /// path rather than an external MUMPS dependency.
-pub fn solve_sparse_mumps<T: LingerScalar>(
+pub fn solve_sparse_mumps<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
 ) -> Result<Vec<T>, SolverError> {
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = MumpsSolver::<T>::default();
@@ -1250,11 +1250,11 @@ pub fn solve_sparse_mumps<T: LingerScalar>(
 /// Uses `linlvo::direct::MklSolver`, which currently provides a stable
 /// factor/solve/reuse API backed by linlvo's native multifrontal replacement
 /// path rather than an external MKL dependency.
-pub fn solve_sparse_mkl<T: LingerScalar>(
+pub fn solve_sparse_mkl<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
 ) -> Result<Vec<T>, SolverError> {
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = MklSolver::<T>::default();
@@ -1281,24 +1281,24 @@ pub struct AmsSolverConfig {
 /// Solve an H(curl) system using PCG with AMS preconditioner.
 ///
 /// # Arguments
-/// * `a`       �?H(curl) stiffness matrix (edge DOFs)
-/// * `g`       �?Discrete gradient matrix (vertices -> edges)
-/// * `b`       �?right-hand side
-/// * `x`       �?initial guess on entry, solution on exit
-/// * `cfg`     �?solver configuration
+/// * `a`       �?H(curl) stiffness matrix (edge DOFs)
+/// * `g`       �?Discrete gradient matrix (vertices -> edges)
+/// * `b`       �?right-hand side
+/// * `x`       �?initial guess on entry, solution on exit
+/// * `cfg`     �?solver configuration
 ///
 /// # Type parameters
 /// The discrete gradient `g` is passed as a linlvo CsrMatrix to match internal types.
-/// Convert using `fem_to_Linger_csr`.
-pub fn solve_pcg_ams<T: LingerScalar>(
+/// Convert using `fem_to_linlvo_csr`.
+pub fn solve_pcg_ams<T: linlvoScalar>(
     a: &FemCsr<T>,
-    g: &LingerCsr<T>,
+    g: &linlvoCsr<T>,
     b: &[T],
     x: &mut [T],
     cfg: &AmsSolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
 
@@ -1306,7 +1306,7 @@ pub fn solve_pcg_ams<T: LingerScalar>(
         .map_err(|e| SolverError::linlvo(e.to_string()))?;
 
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&ams), &lb, &mut lx, &cfg.inner_cfg.to_Linger())
+        .solve(&la, Some(&ams), &lb, &mut lx, &cfg.inner_cfg.to_linlvo())
         .map_err(SolverError::from)?;
 
     x.copy_from_slice(lx.as_slice());
@@ -1316,16 +1316,16 @@ pub fn solve_pcg_ams<T: LingerScalar>(
 /// Solve an H(curl) system using GMRES with AMS preconditioner.
 ///
 /// Use this for non-symmetric H(curl) problems (e.g., with absorbing BCs).
-pub fn solve_gmres_ams<T: LingerScalar>(
+pub fn solve_gmres_ams<T: linlvoScalar>(
     a: &FemCsr<T>,
-    g: &LingerCsr<T>,
+    g: &linlvoCsr<T>,
     b: &[T],
     x: &mut [T],
     restart: usize,
     cfg: &AmsSolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
 
@@ -1334,7 +1334,7 @@ pub fn solve_gmres_ams<T: LingerScalar>(
 
     let solver = Gmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&ams), &lb, &mut lx, &cfg.inner_cfg.to_Linger())
+        .solve(&la, Some(&ams), &lb, &mut lx, &cfg.inner_cfg.to_linlvo())
         .map_err(SolverError::from)?;
 
     x.copy_from_slice(lx.as_slice());
@@ -1359,25 +1359,25 @@ pub struct AdsSolverConfig {
 /// Solve an H(div) system using PCG with ADS preconditioner.
 ///
 /// # Arguments
-/// * `a`       �?H(div) stiffness matrix (face DOFs)
-/// * `c`       �?Discrete curl matrix (edges -> faces)
-/// * `g`       �?Discrete gradient matrix (vertices -> edges)
-/// * `b`       �?right-hand side
-/// * `x`       �?initial guess on entry, solution on exit
-/// * `cfg`     �?solver configuration
+/// * `a`       �?H(div) stiffness matrix (face DOFs)
+/// * `c`       �?Discrete curl matrix (edges -> faces)
+/// * `g`       �?Discrete gradient matrix (vertices -> edges)
+/// * `b`       �?right-hand side
+/// * `x`       �?initial guess on entry, solution on exit
+/// * `cfg`     �?solver configuration
 ///
 /// # Notes
-/// Both `c` and `g` should be converted to linlvo format using `fem_to_Linger_csr`.
-pub fn solve_pcg_ads<T: LingerScalar>(
+/// Both `c` and `g` should be converted to linlvo format using `fem_to_linlvo_csr`.
+pub fn solve_pcg_ads<T: linlvoScalar>(
     a: &FemCsr<T>,
-    c: &LingerCsr<T>,
-    g: &LingerCsr<T>,
+    c: &linlvoCsr<T>,
+    g: &linlvoCsr<T>,
     b: &[T],
     x: &mut [T],
     cfg: &AdsSolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
 
@@ -1385,7 +1385,7 @@ pub fn solve_pcg_ads<T: LingerScalar>(
         .map_err(|e| SolverError::linlvo(e.to_string()))?;
 
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&ads), &lb, &mut lx, &cfg.inner_cfg.to_Linger())
+        .solve(&la, Some(&ads), &lb, &mut lx, &cfg.inner_cfg.to_linlvo())
         .map_err(SolverError::from)?;
 
     x.copy_from_slice(lx.as_slice());
@@ -1395,17 +1395,17 @@ pub fn solve_pcg_ads<T: LingerScalar>(
 /// Solve an H(div) system using GMRES with ADS preconditioner.
 ///
 /// Use this for non-symmetric H(div) problems.
-pub fn solve_gmres_ads<T: LingerScalar>(
+pub fn solve_gmres_ads<T: linlvoScalar>(
     a: &FemCsr<T>,
-    c: &LingerCsr<T>,
-    g: &LingerCsr<T>,
+    c: &linlvoCsr<T>,
+    g: &linlvoCsr<T>,
     b: &[T],
     x: &mut [T],
     restart: usize,
     cfg: &AdsSolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
 
@@ -1414,7 +1414,7 @@ pub fn solve_gmres_ads<T: LingerScalar>(
 
     let solver = Gmres::<T>::new(restart);
     let res = solver
-        .solve(&la, Some(&ads), &lb, &mut lx, &cfg.inner_cfg.to_Linger())
+        .solve(&la, Some(&ads), &lb, &mut lx, &cfg.inner_cfg.to_linlvo())
         .map_err(SolverError::from)?;
 
     x.copy_from_slice(lx.as_slice());
@@ -1511,7 +1511,7 @@ pub use multirate::{
 };
 
 #[cfg(test)]
-mod Linger_integration_tests {
+mod linlvo_integration_tests {
     use linlvo::{DenseVec, LinearOperator};
     use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix as NaCsr};
 
@@ -1648,7 +1648,7 @@ mod tests {
         let mut x = vec![0.0_f64; n];
         let res = solve_cg(&a, &b, &mut x, &SolverConfig::default()).unwrap();
         assert!(res.converged, "CG failed to converge");
-        // verify Ax �?b
+        // verify Ax �?b
         let mut ax = vec![0.0_f64; n];
         a.spmv(&x, &mut ax);
         let err: f64 = ax.iter().zip(b.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
@@ -1745,7 +1745,7 @@ mod tests {
         let mut x1 = vec![0.0_f64; n];
         let mut x2 = vec![0.0_f64; n];
 
-        let prec = JacobiPrecond::from_csr(&fem_to_Linger_csr(&a)).unwrap();
+        let prec = JacobiPrecond::from_csr(&fem_to_linlvo_csr(&a)).unwrap();
         let r1 = solve_pcg_precond(&a, &b, &mut x1, &prec, &SolverConfig::default()).unwrap();
         let r2 = solve_pcg_jacobi(&a, &b, &mut x2, &SolverConfig::default()).unwrap();
         assert!(r1.converged);
@@ -1758,7 +1758,7 @@ mod tests {
         let a = nonsymmetric_1d(n);
         let b = vec![1.0_f64; n];
         let mut x = vec![0.0_f64; n];
-        let la = fem_to_Linger_csr(&a);
+        let la = fem_to_linlvo_csr(&a);
         let prec = Ilu0Precond::from_csr(&la).unwrap();
         let res = solve_gmres_precond(&a, &b, &mut x, 30, &prec, &SolverConfig::default()).unwrap();
         assert!(res.converged, "generic GMRES+ILU0 failed: residual={}", res.final_residual);
@@ -1770,7 +1770,7 @@ mod tests {
         let a = laplacian_1d(n);
         let b = vec![1.0_f64; n];
         let mut x = vec![0.0_f64; n];
-        let la = fem_to_Linger_csr(&a);
+        let la = fem_to_linlvo_csr(&a);
         let prec = IldltPrecond::from_csr(&la).unwrap();
         let res = solve_fgmres_precond(&a, &b, &mut x, 30, &prec, &SolverConfig::default()).unwrap();
         assert!(res.converged, "generic FGMRES+ILDLt failed: residual={}", res.final_residual);
@@ -1945,7 +1945,7 @@ mod tests {
         let a = laplacian_1d(n);
         let b = vec![1.0_f64; n];
         let x = solve_sparse_lu(&a, &b).unwrap();
-        // verify Ax �?b
+        // verify Ax �?b
         let mut ax = vec![0.0_f64; n];
         a.spmv(&x, &mut ax);
         let err: f64 = ax.iter().zip(b.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
@@ -2057,13 +2057,13 @@ mod ams_ads_tests {
             a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
         }
 
-        let g_Linger = fem_to_Linger_csr(&g_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 300, verbose: false, ..SolverConfig::default() },
             ams_cfg: Default::default(),
         };
         let mut x = vec![0.0_f64; ndofs];
-        let res = solve_pcg_ams(&a, &g_Linger, &rhs, &mut x, &cfg)
+        let res = solve_pcg_ams(&a, &g_linlvo, &rhs, &mut x, &cfg)
             .expect("PCG+AMS returned error");
         assert!(res.converged, "PCG+AMS did not converge in {} iters", res.iterations);
         assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
@@ -2090,13 +2090,13 @@ mod ams_ads_tests {
         let mut rhs = vec![1.0_f64; ndofs];
         apply_dirichlet(&mut a, &mut rhs, &bnd, &vals);
 
-        let g_Linger = fem_to_Linger_csr(&g_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 300, verbose: false, ..SolverConfig::default() },
             ams_cfg: Default::default(),
         };
         let mut x = vec![0.0_f64; ndofs];
-        let res = solve_gmres_ams(&a, &g_Linger, &rhs, &mut x, 30, &cfg)
+        let res = solve_gmres_ams(&a, &g_linlvo, &rhs, &mut x, 30, &cfg)
             .expect("GMRES+AMS returned error");
         assert!(res.converged, "GMRES+AMS did not converge in {} iters", res.iterations);
         assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
@@ -2124,16 +2124,16 @@ mod ams_ads_tests {
             a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
         }
 
-        let g_Linger = fem_to_Linger_csr(&g_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 400, verbose: false, ..SolverConfig::default() },
             ams_cfg: Default::default(),
         };
         let mut x = vec![0.0_f64; ndofs];
-        let res = solve_pcg_ams(&a, &g_Linger, &rhs, &mut x, &cfg).unwrap();
+        let res = solve_pcg_ams(&a, &g_linlvo, &rhs, &mut x, &cfg).unwrap();
         assert!(res.converged);
 
-        // Verify Ax �?rhs
+        // Verify Ax �?rhs
         let mut ax = vec![0.0_f64; ndofs];
         a.spmv(&x, &mut ax);
         let err: f64 = ax.iter().zip(rhs.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
@@ -2164,16 +2164,16 @@ mod ams_ads_tests {
             a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
         }
 
-        let g_Linger = fem_to_Linger_csr(&g_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 200, verbose: false, ..SolverConfig::default() },
             ams_cfg: Default::default(),
         };
         let mut x = vec![0.0_f64; ndofs];
-        let res = solve_pcg_ams(&a, &g_Linger, &rhs, &mut x, &cfg).unwrap();
+        let res = solve_pcg_ams(&a, &g_linlvo, &rhs, &mut x, &cfg).unwrap();
         assert!(res.converged, "PCG+AMS did not converge");
-        // AMS should be efficient �?converge in at most 100 iterations for this small problem
-        assert!(res.iterations <= 100, "PCG+AMS took {} iters (expected �?00)", res.iterations);
+        // AMS should be efficient �?converge in at most 100 iterations for this small problem
+        assert!(res.iterations <= 100, "PCG+AMS took {} iters (expected �?00)", res.iterations);
     }
 
     // ── ADS: H(div) mass on 3-D unit cube ─────────────────────────────────────
@@ -2209,14 +2209,14 @@ mod ams_ads_tests {
         let mut rhs = vec![1.0_f64; ndofs_hdiv];
         apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
 
-        let c_Linger = fem_to_Linger_csr(&c_fem);
-        let g_Linger = fem_to_Linger_csr(&g_fem);
+        let c_linlvo = fem_to_linlvo_csr(&c_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AdsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 400, verbose: false, ..SolverConfig::default() },
             ads_cfg: Default::default(),
         };
         let mut x = vec![0.0_f64; ndofs_hdiv];
-        let res = solve_pcg_ads(&a_hdiv, &c_Linger, &g_Linger, &rhs, &mut x, &cfg)
+        let res = solve_pcg_ads(&a_hdiv, &c_linlvo, &g_linlvo, &rhs, &mut x, &cfg)
             .expect("PCG+ADS returned error");
         assert!(res.converged, "PCG+ADS did not converge in {} iters", res.iterations);
         assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
@@ -2247,14 +2247,14 @@ mod ams_ads_tests {
         let mut rhs = vec![1.0_f64; ndofs_hdiv];
         apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
 
-        let c_Linger = fem_to_Linger_csr(&c_fem);
-        let g_Linger = fem_to_Linger_csr(&g_fem);
+        let c_linlvo = fem_to_linlvo_csr(&c_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AdsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 400, verbose: false, ..SolverConfig::default() },
             ads_cfg: Default::default(),
         };
         let mut x = vec![0.0_f64; ndofs_hdiv];
-        let res = solve_gmres_ads(&a_hdiv, &c_Linger, &g_Linger, &rhs, &mut x, 30, &cfg)
+        let res = solve_gmres_ads(&a_hdiv, &c_linlvo, &g_linlvo, &rhs, &mut x, 30, &cfg)
             .expect("GMRES+ADS returned error");
         assert!(res.converged, "GMRES+ADS did not converge in {} iters", res.iterations);
         assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
@@ -2285,17 +2285,17 @@ mod ams_ads_tests {
         let mut rhs = vec![1.0_f64; ndofs_hdiv];
         apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
 
-        let c_Linger = fem_to_Linger_csr(&c_fem);
-        let g_Linger = fem_to_Linger_csr(&g_fem);
+        let c_linlvo = fem_to_linlvo_csr(&c_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AdsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() },
             ads_cfg: Default::default(),
         };
         let mut x = vec![0.0_f64; ndofs_hdiv];
-        let res = solve_pcg_ads(&a_hdiv, &c_Linger, &g_Linger, &rhs, &mut x, &cfg).unwrap();
+        let res = solve_pcg_ads(&a_hdiv, &c_linlvo, &g_linlvo, &rhs, &mut x, &cfg).unwrap();
         assert!(res.converged);
 
-        // Verify Ax �?rhs
+        // Verify Ax �?rhs
         let mut ax = vec![0.0_f64; ndofs_hdiv];
         a_hdiv.spmv(&x, &mut ax);
         let err: f64 = ax.iter().zip(rhs.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();

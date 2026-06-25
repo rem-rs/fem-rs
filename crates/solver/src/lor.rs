@@ -1,4 +1,4 @@
-//! LOR (Low-Order Refined) preconditioner helpers.
+﻿//! LOR (Low-Order Refined) preconditioner helpers.
 //!
 //! This is a lightweight entry point for LOR-backed solves. The current
 //! implementation delegates to Jacobi-preconditioned CG while preserving an
@@ -6,7 +6,7 @@
 
 use crate::{solve_gmres, solve_pcg_jacobi, SolveResult, SolverConfig, SolverError};
 use fem_linalg::CsrMatrix;
-use linlvo::Scalar as LingerScalar;
+use linlvo::Scalar as linlvoScalar;
 
 /// LOR preconditioner configuration.
 #[derive(Debug, Clone)]
@@ -31,7 +31,7 @@ impl LorPrecond {
 ///
 /// Current backend: PCG + Jacobi preconditioner. The `lor` argument is kept
 /// for API stability and future backend selection.
-pub fn solve_pcg_lor<T: LingerScalar>(
+pub fn solve_pcg_lor<T: linlvoScalar>(
     a: &CsrMatrix<T>,
     b: &[T],
     x: &mut [T],
@@ -45,7 +45,7 @@ pub fn solve_pcg_lor<T: LingerScalar>(
 ///
 /// Current backend: vanilla GMRES. The `lor` argument is kept for API
 /// compatibility and future backend selection.
-pub fn solve_gmres_lor<T: LingerScalar>(
+pub fn solve_gmres_lor<T: linlvoScalar>(
     a: &CsrMatrix<T>,
     b: &[T],
     x: &mut [T],
