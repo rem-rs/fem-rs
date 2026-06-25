@@ -7,7 +7,7 @@ edition = "2021"
 fem-core   = { path = "../core" }
 num-traits = { workspace = true }
 bytemuck   = { workspace = true }
-linger     = { git = "https://github.com/rem-rs/linger.git", optional = true }
+linlvo     = { git = "https://github.com/rem-rs/linlvo.git", optional = true }
 parking_lot = "0.12"  # Thread-safe pool for COO buffers
 
 [dev-dependencies]
@@ -17,7 +17,7 @@ proptest = "1"
 [features]
 default  = []
 parallel = ["dep:rayon"]
-direct   = ["dep:linger"]
+direct   = ["dep:linlvo"]
 
 [dependencies.rayon]
 workspace = true

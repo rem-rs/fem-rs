@@ -6,7 +6,7 @@
 //! integration path is stable while overlap/local-solver kernels evolve.
 
 use fem_solver::{SolveResult, SolverConfig, SolverError};
-use linger::{DenseVec, Ilu0Precond, Preconditioner as _};
+use linlvo::{DenseVec, Ilu0Precond, Preconditioner as _};
 
 use crate::par_csr::ParCsrMatrix;
 use crate::par_vector::ParVector;
@@ -142,12 +142,12 @@ impl RasPrecond {
     /// Build a reusable RAS preconditioner from a distributed matrix.
     pub fn build(a: &ParCsrMatrix, cfg: &RasConfig) -> Result<Self, SolverError> {
         if cfg.overlap > 1 {
-            return Err(SolverError::Linger(
+            return Err(SolverError::linlvo(
                 format!("RAS currently supports overlap in {{0,1}}, got {}", cfg.overlap),
             ));
         }
         if !cfg.omega.is_finite() || cfg.omega <= 0.0 {
-            return Err(SolverError::Linger(
+            return Err(SolverError::linlvo(
                 format!("RAS omega must be finite and > 0, got {}", cfg.omega),
             ));
         }
@@ -162,7 +162,7 @@ impl RasPrecond {
                 RasKernel::DiagJacobi { inv_diag }
             }
             RasLocalSolverKind::Ilu0 => {
-                let local = fem_solver::fem_to_linger_csr(&a.diag);
+                let local = fem_solver::fem_to_Linger_csr(&a.diag);
                 let ilu = Ilu0Precond::from_csr(&local).map_err(SolverError::from)?;
                 RasKernel::Ilu0 { ilu }
             }
@@ -350,7 +350,7 @@ pub fn par_solve_gmres_ras(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     if restart == 0 {
-        return Err(SolverError::Linger("GMRES restart must be > 0".to_string()));
+        return Err(SolverError::linlvo("GMRES restart must be > 0".to_string()));
     }
 
     let precond = RasPrecond::build(a, ras_cfg)?;
@@ -489,7 +489,7 @@ pub fn par_solve_gmres_ras(
             }
             let diag = h[i][i];
             if diag.abs() < 1e-30 {
-                return Err(SolverError::Linger(
+                return Err(SolverError::linlvo(
                     "par_gmres_ras breakdown: near-singular Hessenberg diagonal".to_string(),
                 ));
             }
