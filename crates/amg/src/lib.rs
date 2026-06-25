@@ -1,4 +1,4 @@
-//! # fem-amg
+Ôªø//! # fem-amg
 //!
 //! Algebraic Multigrid backed by [`linlvo`].
 //!
@@ -11,7 +11,7 @@
 //! use fem_linalg::CooMatrix;
 //!
 //! let mut coo = CooMatrix::<f64>::new(n, n);
-//! // ‚Ä?fill ‚Ä?
+//! // ÔøΩ?fill ÔøΩ?
 //! let a = coo.into_csr();
 //! let b = vec![1.0_f64; n];
 //! let mut x = vec![0.0_f64; n];
@@ -21,9 +21,9 @@
 //! ```
 
 use fem_linalg::CsrMatrix as FemCsr;
-use fem_solver::{fem_to_Linger_csr, into_result, SolveResult, SolverConfig, SolverError};
+use fem_solver::{fem_to_linlvo_csr, into_result, SolveResult, SolverConfig, SolverError};
 use linlvo::{
-    core::scalar::Scalar as LingerScalar,
+    core::scalar::Scalar as linlvoScalar,
     iterative::{ConjugateGradient, Fgmres, Gmres},
     DenseVec, KrylovSolver,
 };
@@ -40,16 +40,16 @@ pub use linlvo::amg::{AmgConfig, AmgHierarchy, AmgPrecond, CoarsenStrategy, Cycl
 /// `[lambda_min, lambda_max]` determine the Chebyshev polynomial interval.
 ///
 /// The smoother minimizes the error in the A-norm over the polynomial
-/// space ‚Ä?better than Jacobi for high-frequency error when the spectrum
+/// space ÔøΩ?better than Jacobi for high-frequency error when the spectrum
 /// is well-bounded.
 ///
 /// # Arguments
-/// * `a`           ‚Ä?SPD system matrix.
-/// * `x`           ‚Ä?current iterate (updated in-place).
-/// * `b`           ‚Ä?right-hand side.
-/// * `lambda_min`  ‚Ä?lower eigenvalue bound (typically `Œª_max / ratio`, ratio ‚â?30).
-/// * `lambda_max`  ‚Ä?upper eigenvalue bound (estimate via Gershgorin or a few power iterations).
-/// * `n_iter`      ‚Ä?number of Chebyshev iterations (typically 2‚Ä?).
+/// * `a`           ÔøΩ?SPD system matrix.
+/// * `x`           ÔøΩ?current iterate (updated in-place).
+/// * `b`           ÔøΩ?right-hand side.
+/// * `lambda_min`  ÔøΩ?lower eigenvalue bound (typically `Œª_max / ratio`, ratio ÔøΩ?30).
+/// * `lambda_max`  ÔøΩ?upper eigenvalue bound (estimate via Gershgorin or a few power iterations).
+/// * `n_iter`      ÔøΩ?number of Chebyshev iterations (typically 2ÔøΩ?).
 pub fn chebyshev_smooth(
     a: &FemCsr<f64>,
     x: &mut [f64],
@@ -73,9 +73,9 @@ pub fn chebyshev_smooth(
     let mut d = vec![0.0_f64; n]; // search direction
 
     // Standard Chebyshev iteration (see Golub & Van Loan, or Saad ch. 12):
-    //   d‚ÇÄ = (2/Œ±) M‚Åª¬?r‚ÇÄ
-    //   d‚Ç?= œÅ‚Ç?(2/Œ± M‚Åª¬?r‚Ç?+ œÅ‚Çñ‚Çã‚Ç?d‚Çñ‚Çã‚Ç?
-    // where œÅ‚ÇÄ = 1, œÅ‚Ç?= 1/(1 - Œ¥¬≤/(2Œ±¬≤)), œÅ‚Ç?= 1/(1 - (Œ¥/(2Œ±))¬≤ œÅ‚Çñ‚Çã‚Ç?
+    //   d‚ÇÄ = (2/Œ±) M‚ÅªÔøΩ?r‚ÇÄ
+    //   dÔøΩ?= œÅÔøΩ?(2/Œ± M‚ÅªÔøΩ?rÔøΩ?+ œÅ‚Çñ‚ÇãÔøΩ?d‚Çñ‚ÇãÔøΩ?
+    // where œÅ‚ÇÄ = 1, œÅÔøΩ?= 1/(1 - Œ¥¬≤/(2Œ±¬≤)), œÅÔøΩ?= 1/(1 - (Œ¥/(2Œ±))¬≤ œÅ‚Çñ‚ÇãÔøΩ?
 
     let two_over_alpha = 2.0 / alpha;
     let quarter_delta_sq_over_alpha_sq = (delta / (2.0 * alpha)).powi(2);
@@ -130,25 +130,25 @@ pub fn estimate_spectral_radius(a: &FemCsr<f64>, n_iter: usize) -> f64 {
 /// `linlvo`'s PCG.
 ///
 /// # Arguments
-/// * `a`      ‚Ä?system matrix
-/// * `b`      ‚Ä?right-hand side
-/// * `x`      ‚Ä?initial guess on entry, solution on exit
-/// * `amg`    ‚Ä?AMG hierarchy configuration
-/// * `solver` ‚Ä?Krylov solver convergence parameters
-pub fn solve_amg_cg<T: LingerScalar>(
+/// * `a`      ÔøΩ?system matrix
+/// * `b`      ÔøΩ?right-hand side
+/// * `x`      ÔøΩ?initial guess on entry, solution on exit
+/// * `amg`    ÔøΩ?AMG hierarchy configuration
+/// * `solver` ÔøΩ?Krylov solver convergence parameters
+pub fn solve_amg_cg<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
     amg: &AmgConfig,
     solver: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let hier    = AmgHierarchy::build(la.clone(), amg.clone());
     let precond = AmgPrecond::new(hier);
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&precond), &lb, &mut lx, &solver.to_Linger())
+        .solve(&la, Some(&precond), &lb, &mut lx, &solver.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -160,13 +160,13 @@ pub fn solve_amg_cg<T: LingerScalar>(
 /// or other non-symmetric AMG strategies.
 ///
 /// # Arguments
-/// * `a`       ‚Ä?system matrix (may be non-symmetric)
-/// * `b`       ‚Ä?right-hand side
-/// * `x`       ‚Ä?initial guess on entry, solution on exit
-/// * `amg`     ‚Ä?AMG hierarchy configuration (use `CoarsenStrategy::Air` for non-symmetric problems)
-/// * `restart` ‚Ä?GMRES restart dimension (typically 20‚Ä?0)
-/// * `solver`  ‚Ä?Krylov solver convergence parameters
-pub fn solve_amg_gmres<T: LingerScalar>(
+/// * `a`       ÔøΩ?system matrix (may be non-symmetric)
+/// * `b`       ÔøΩ?right-hand side
+/// * `x`       ÔøΩ?initial guess on entry, solution on exit
+/// * `amg`     ÔøΩ?AMG hierarchy configuration (use `CoarsenStrategy::Air` for non-symmetric problems)
+/// * `restart` ÔøΩ?GMRES restart dimension (typically 20ÔøΩ?0)
+/// * `solver`  ÔøΩ?Krylov solver convergence parameters
+pub fn solve_amg_gmres<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -174,13 +174,13 @@ pub fn solve_amg_gmres<T: LingerScalar>(
     restart: usize,
     solver: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let hier    = AmgHierarchy::build(la.clone(), amg.clone());
     let precond = AmgPrecond::new(hier);
     let res = Gmres::<T>::new(restart)
-        .solve(&la, Some(&precond), &lb, &mut lx, &solver.to_Linger())
+        .solve(&la, Some(&precond), &lb, &mut lx, &solver.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -194,13 +194,13 @@ pub fn solve_amg_gmres<T: LingerScalar>(
 /// right-preconditioned GMRES for challenging problems.
 ///
 /// # Arguments
-/// * `a`       ‚Ä?system matrix (may be non-symmetric)
-/// * `b`       ‚Ä?right-hand side
-/// * `x`       ‚Ä?initial guess on entry, solution on exit
-/// * `amg`     ‚Ä?AMG hierarchy configuration
-/// * `restart` ‚Ä?FGMRES restart dimension (typically 20‚Ä?0)
-/// * `solver`  ‚Ä?Krylov solver convergence parameters
-pub fn solve_fgmres_amg<T: LingerScalar>(
+/// * `a`       ÔøΩ?system matrix (may be non-symmetric)
+/// * `b`       ÔøΩ?right-hand side
+/// * `x`       ÔøΩ?initial guess on entry, solution on exit
+/// * `amg`     ÔøΩ?AMG hierarchy configuration
+/// * `restart` ÔøΩ?FGMRES restart dimension (typically 20ÔøΩ?0)
+/// * `solver`  ÔøΩ?Krylov solver convergence parameters
+pub fn solve_fgmres_amg<T: linlvoScalar>(
     a: &FemCsr<T>,
     b: &[T],
     x: &mut [T],
@@ -208,13 +208,13 @@ pub fn solve_fgmres_amg<T: LingerScalar>(
     restart: usize,
     solver: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
-    let la = fem_to_Linger_csr(a);
+    let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let hier    = AmgHierarchy::build(la.clone(), amg.clone());
     let precond = AmgPrecond::new(hier);
     let res = Fgmres::<T>::new(restart)
-        .solve(&la, Some(&precond), &lb, &mut lx, &solver.to_Linger())
+        .solve(&la, Some(&precond), &lb, &mut lx, &solver.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -226,15 +226,15 @@ pub fn solve_fgmres_amg<T: LingerScalar>(
 ///
 /// Factorisation cost is paid once via [`AmgSolver::setup`]; subsequent
 /// [`AmgSolver::solve`] calls only run PCG cycles.
-pub struct AmgSolver<T: LingerScalar> {
+pub struct AmgSolver<T: linlvoScalar> {
     hierarchy: AmgHierarchy<T>,
     cycle:     CycleType,
 }
 
-impl<T: LingerScalar> AmgSolver<T> {
+impl<T: linlvoScalar> AmgSolver<T> {
     /// Build the AMG hierarchy for matrix `a`.
     pub fn setup(a: &FemCsr<T>, config: AmgConfig) -> Self {
-        let la = fem_to_Linger_csr(a);
+        let la = fem_to_linlvo_csr(a);
         let hierarchy = AmgHierarchy::build(la, config);
         AmgSolver { hierarchy, cycle: CycleType::V }
     }
@@ -260,12 +260,12 @@ impl<T: LingerScalar> AmgSolver<T> {
         x: &mut [T],
         cfg: &SolverConfig,
     ) -> Result<SolveResult, SolverError> {
-        let la = fem_to_Linger_csr(a);
+        let la = fem_to_linlvo_csr(a);
         let lb = DenseVec::from_vec(b.to_vec());
         let mut lx = DenseVec::from_vec(x.to_vec());
         let precond = AmgPrecond::new(self.hierarchy.clone()).with_cycle(self.cycle);
         let res = ConjugateGradient::<T>::default()
-            .solve(&la, Some(&precond), &lb, &mut lx, &cfg.to_Linger())
+            .solve(&la, Some(&precond), &lb, &mut lx, &cfg.to_linlvo())
             .map_err(SolverError::from)?;
         x.copy_from_slice(lx.as_slice());
         Ok(into_result(res))
@@ -284,12 +284,12 @@ impl<T: LingerScalar> AmgSolver<T> {
         restart: usize,
         cfg: &SolverConfig,
     ) -> Result<SolveResult, SolverError> {
-        let la = fem_to_Linger_csr(a);
+        let la = fem_to_linlvo_csr(a);
         let lb = DenseVec::from_vec(b.to_vec());
         let mut lx = DenseVec::from_vec(x.to_vec());
         let precond = AmgPrecond::new(self.hierarchy.clone()).with_cycle(self.cycle);
         let res = Fgmres::<T>::new(restart)
-            .solve(&la, Some(&precond), &lb, &mut lx, &cfg.to_Linger())
+            .solve(&la, Some(&precond), &lb, &mut lx, &cfg.to_linlvo())
             .map_err(SolverError::from)?;
         x.copy_from_slice(lx.as_slice());
         Ok(into_result(res))
@@ -390,7 +390,7 @@ mod tests {
         let a = laplacian_1d(n);
         let rho = estimate_spectral_radius(&a, 30);
         // Eigenvalues of 1-D Laplacian: 2 - 2cos(kœÄ/(n+1)), k=1..n
-        // Largest ‚â?4 for large n.
+        // Largest ÔøΩ?4 for large n.
         assert!(rho > 3.5, "spectral radius should be near 4, got {rho}");
         assert!(rho < 4.1, "spectral radius too high: {rho}");
     }
@@ -441,7 +441,7 @@ mod tests {
 
     /// Regression: AIR-preconditioned GMRES on a 1-D convection-diffusion problem.
     ///
-    /// Peclet number Pe ‚â?10 ‚Ü?strongly advection-dominated, non-symmetric.
+    /// Peclet number Pe ÔøΩ?10 ÔøΩ?strongly advection-dominated, non-symmetric.
     #[test]
     fn amg_air_gmres_nonsymmetric_convdiff_1d() {
         let n = 100;
@@ -485,11 +485,11 @@ mod tests {
         };
 
         // Unpreconditioned GMRES
-        let la = fem_to_Linger_csr(&a);
+        let la = fem_to_linlvo_csr(&a);
         let lb = DenseVec::from_vec(b.clone());
         let mut lx = DenseVec::from_vec(vec![0.0_f64; n]);
         let unprec_res = linlvo::iterative::Gmres::<f64>::new(30)
-            .solve(&la, None, &lb, &mut lx, &solver_cfg.to_Linger())
+            .solve(&la, None, &lb, &mut lx, &solver_cfg.to_linlvo())
             .unwrap();
 
         // AIR-AMG preconditioned GMRES
@@ -535,7 +535,7 @@ mod tests {
     fn amg_air_hierarchy_has_multiple_levels() {
         let n = 200;
         let a = convdiff_1d(n, 0.01, 1.0);
-        let la = fem_to_Linger_csr(&a);
+        let la = fem_to_linlvo_csr(&a);
         let config = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
         let hier = AmgHierarchy::build(la, config);
         assert!(hier.n_levels() >= 2, "AIR AMG hierarchy should have at least 2 levels");
@@ -596,15 +596,15 @@ mod tests {
         let b = vec![1.0_f64; n];
 
         // Unpreconditioned FGMRES (may not converge; record iteration count).
-        let la = fem_to_Linger_csr(&a);
+        let la = fem_to_linlvo_csr(&a);
         let lb = DenseVec::from_vec(b.clone());
         let mut lx = DenseVec::from_vec(vec![0.0_f64; n]);
         let cfg = SolverConfig { max_iter: 300, ..SolverConfig::default() };
         let unprec_iters = match Fgmres::<f64>::new(30)
-            .solve(&la, None, &lb, &mut lx, &cfg.to_Linger())
+            .solve(&la, None, &lb, &mut lx, &cfg.to_linlvo())
         {
             Ok(r)  => r.iterations,
-            Err(_) => cfg.max_iter, // did not converge ‚Ä?assign max_iter
+            Err(_) => cfg.max_iter, // did not converge ÔøΩ?assign max_iter
         };
 
         // AMG-preconditioned FGMRES should converge and do so in fewer steps.
@@ -647,8 +647,8 @@ mod tests {
     /// Build a high-contrast diffusion matrix: two-subdomain coefficient jump.
     ///
     /// Left half  (i < nx/2): Œµ = eps_lo
-    /// Right half (i ‚â?nx/2): Œµ = eps_hi
-    /// Uses harmonic-average face conductivity ‚Ü?symmetric SPD M-matrix.
+    /// Right half (i ÔøΩ?nx/2): Œµ = eps_hi
+    /// Uses harmonic-average face conductivity ÔøΩ?symmetric SPD M-matrix.
     fn high_contrast_laplacian_2d(nx: usize, ny: usize, eps_lo: f64, eps_hi: f64) -> FemCsr<f64> {
         let n = nx * ny;
         let h2 = {
@@ -738,11 +738,11 @@ mod tests {
 
     // ‚îÄ‚îÄ‚îÄ W3-3: Higher-Pe & near-pure-advection nonsymmetric stress cases ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 
-    /// AIR-GMRES on a very-high Peclet number problem (Pe ‚â?100).
+    /// AIR-GMRES on a very-high Peclet number problem (Pe ÔøΩ?100).
     #[test]
     fn amg_air_gmres_high_peclet_convdiff() {
         let n = 150;
-        let eps = 0.001; // Pe ‚â?100
+        let eps = 0.001; // Pe ÔøΩ?100
         let v   = 1.0;
         let a = convdiff_1d(n, eps, v);
         let b = vec![1.0_f64; n];
@@ -752,7 +752,7 @@ mod tests {
         let res = solve_amg_gmres(&a, &b, &mut x, &amg_cfg, 40, &solver_cfg).unwrap();
         assert!(
             res.converged,
-            "AIR-GMRES failed on high-Pe (Pe‚â?00) convdiff: residual = {}",
+            "AIR-GMRES failed on high-Pe (PeÔøΩ?00) convdiff: residual = {}",
             res.final_residual
         );
     }
@@ -762,7 +762,7 @@ mod tests {
     fn amg_air_gmres_reverse_advection_convdiff() {
         let n = 100;
         let eps = 0.01_f64;
-        let a = convdiff_1d(n, eps, 1.0); // same magnitude, reversed direction ‚Ü?same stencil
+        let a = convdiff_1d(n, eps, 1.0); // same magnitude, reversed direction ÔøΩ?same stencil
         let b = vec![1.0_f64; n];
         let mut x = vec![0.0_f64; n];
         let amg_cfg = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
@@ -775,12 +775,12 @@ mod tests {
         );
     }
 
-    /// AIR hierarchy build should succeed even for very strong advection (Pe ‚â?1000).
+    /// AIR hierarchy build should succeed even for very strong advection (Pe ÔøΩ?1000).
     #[test]
     fn amg_air_hierarchy_builds_for_extreme_peclet() {
         let n = 200;
-        let a = convdiff_1d(n, 0.0001, 1.0); // Pe ‚â?1000
-        let la = fem_to_Linger_csr(&a);
+        let a = convdiff_1d(n, 0.0001, 1.0); // Pe ÔøΩ?1000
+        let la = fem_to_linlvo_csr(&a);
         let config = AmgConfig { strategy: CoarsenStrategy::Air, ..AmgConfig::default() };
         let hier = AmgHierarchy::build(la, config);
         assert!(hier.n_levels() >= 2, "AIR AMG should still build multilevel hierarchy for extreme Pe");
