@@ -19,7 +19,7 @@ fn tet_int(a: usize, b: usize, c: usize) -> f64 {
 }
 
 fn tet_data(k: usize) -> &'static TetNDkData {
-    static CACHE: [OnceLock<TetNDkData>; 6] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static CACHE: [OnceLock<TetNDkData>; 9] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     CACHE[k - 1].get_or_init(|| {
         let n = k * (k + 2) * (k + 3) / 2;
         struct M { c: usize, a: usize, b: usize, d: usize }

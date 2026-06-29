@@ -1213,6 +1213,22 @@ pub fn refine_uniform(mesh: &SimplexMesh<2>) -> SimplexMesh<2> {
     refine_marked(mesh, &all)
 }
 
+/// Uniformly refine all elements in a 3-D mesh (Tet4 → 8 tets, Hex8 → 8 hexes).
+pub fn refine_uniform_3d(mesh: &SimplexMesh<3>) -> SimplexMesh<3> {
+    let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+    match mesh.elem_type {
+        ElementType::Tet4 | ElementType::Tet10 => {
+            let (m, _, _) = refine_nonconforming_3d(mesh, &all);
+            m
+        }
+        ElementType::Hex8 | ElementType::Hex20 => {
+            let (m, _, _) = refine_nonconforming_hex(mesh, &all);
+            m
+        }
+        _ => panic!("refine_uniform_3d: unsupported {:?}", mesh.elem_type),
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Local edge index pairs for Tri3.
@@ -2451,7 +2467,24 @@ pub fn refine_nonconforming_quad_aniso(
                                 parent_b:    edge.1 as usize,
                             });
                             break;
-                        }
+    #[test]
+    fn tet4_uniform_3d_creates_eight_tets() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        assert_eq!(mesh.n_elems(), 6);
+        let fine = refine_uniform_3d(&mesh);
+        assert_eq!(fine.n_elems(), 48, "6 tet parents × 8 = 48");
+        assert!(fine.n_nodes() > mesh.n_nodes());
+    }
+
+    #[test]
+    fn hex8_uniform_3d_creates_eight_hexes() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        assert_eq!(mesh.n_elems(), 1);
+        let fine = refine_uniform_3d(&mesh);
+        assert_eq!(fine.n_elems(), 8, "1 hex parent × 8 = 8");
+        assert!(fine.n_nodes() > mesh.n_nodes());
+    }
+}
                     }
                 }
             }
@@ -3614,5 +3647,23 @@ mod tests {
         let (_, constraints) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
         // At least some hanging constraints expected on shared faces.
         assert!(!constraints.is_empty(), "expected hanging constraints on partial X-split");
+    }
+
+    #[test]
+    fn tet4_uniform_3d_creates_eight_tets() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        assert_eq!(mesh.n_elems(), 6);
+        let fine = refine_uniform_3d(&mesh);
+        assert_eq!(fine.n_elems(), 48, "6 tet parents × 8 = 48");
+        assert!(fine.n_nodes() > mesh.n_nodes());
+    }
+
+    #[test]
+    fn hex8_uniform_3d_creates_eight_hexes() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        assert_eq!(mesh.n_elems(), 1);
+        let fine = refine_uniform_3d(&mesh);
+        assert_eq!(fine.n_elems(), 8, "1 hex parent × 8 = 8");
+        assert!(fine.n_nodes() > mesh.n_nodes());
     }
 }

@@ -1,3 +1,5 @@
+> **DEPRECATED — 2026-06-29.** 本文件可能已过时。改进方向、验收标准、优先级见 `docs/IMPROVEMENT_PLAN.md` 及配套 `docs/IMPROVEMENT_PLAN_ACCEPTANCE.md`。
+
 # fem-rs Technical Specification & Programming Guidelines
 > Version: 0.1.0 | Target: AI Agent Reference Document
 

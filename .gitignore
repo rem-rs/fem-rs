@@ -17,6 +17,8 @@ output/
 # Temporary files
 *.tmp
 *.bak
+*.log
+*.txt
 ~$*
 
 # OS files

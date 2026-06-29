@@ -100,21 +100,11 @@ impl<M: MeshTopology> HCurlSpace<M> {
             );
         }
 
-        match (cell_type, order) {
-            (ElementType::Quad8, _) => {
-                panic!("HCurlSpace: quadrilateral support is currently Quad4 only")
-            }
-            (ElementType::Hex20, _) => {
-                panic!("HCurlSpace: hexahedral support is currently Hex8 only")
-            }
-            _ => {}
-        }
-
         let local_edges: &[(usize, usize)] = match cell_type {
             ElementType::Tri3 | ElementType::Tri6 => &TRI_EDGES,
-            ElementType::Quad4 => &QUAD_EDGES,
+            ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
             ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
-            ElementType::Hex8 => &HEX_EDGES,
+            ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
             _ => panic!("HCurlSpace: unsupported element type {cell_type:?}"),
         };
 

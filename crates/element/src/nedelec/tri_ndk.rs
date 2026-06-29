@@ -55,7 +55,8 @@ fn monomial_component_y(a: usize, b: usize, x: f64, y: f64) -> f64 {
 }
 
 fn tri_data(k: usize) -> &'static TriNDkData {
-    static CACHE: [OnceLock<TriNDkData>; 6] = [
+    static CACHE: [OnceLock<TriNDkData>; 9] = [
+        OnceLock::new(), OnceLock::new(), OnceLock::new(),
         OnceLock::new(), OnceLock::new(), OnceLock::new(),
         OnceLock::new(), OnceLock::new(), OnceLock::new(),
     ];

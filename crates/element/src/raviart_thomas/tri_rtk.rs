@@ -16,7 +16,7 @@ fn beta_int(a: usize, b: usize) -> f64 {
 }
 
 fn tri_data(k: usize) -> &'static TriRTkData {
-    static CACHE: [OnceLock<TriRTkData>; 6] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static CACHE: [OnceLock<TriRTkData>; 9] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     CACHE[k].get_or_init(|| {
         let n = (k + 1) * (k + 3);
         // Enumerate monomials: comp=0,1 for P_k + bubble

@@ -10,7 +10,7 @@ fn i2(a: usize, b: usize) -> f64 { i1(a) * i1(b) }
 fn i3(a: usize, b: usize, c: usize) -> f64 { i1(a) * i1(b) * i1(c) }
 
 fn hex_data(k: usize) -> &'static HexRTkData {
-    static CACHE: [OnceLock<HexRTkData>; 6] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static CACHE: [OnceLock<HexRTkData>; 9] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     CACHE[k].get_or_init(|| {
         let n = 3 * (k + 1) * (k + 1) * (k + 2);
         let nx = (k + 2) * (k + 1) * (k + 1);
@@ -175,15 +175,74 @@ impl VectorReferenceElement for HexRTk {
         }
     }
 
-    fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {
-        for v in curl_vals.iter_mut() { *v = 0.0; }
+    fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
+        let k = self.order; let d = hex_data(k); let n = d.n;
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let nx = (k + 2) * (k + 1) * (k + 1);
+        let ny = (k + 1) * (k + 2) * (k + 1);
+        let nz = (k + 1) * (k + 1) * (k + 2);
+        let mt = nx + ny + nz;
+        let mut cm = vec![0.0; mt * 3];
+        let mut idx = 0;
+        // X-directed: m = (x^a y^b z^c, 0, 0), curl = (0, -c x^a y^b z^(c-1), b x^a y^(b-1) z^c)
+        for a in 0..=k + 1 { for b in 0..=k { for c in 0..=k {
+            let v = x.powi(a as i32) * y.powi(b as i32) * z.powi(c as i32);
+            cm[idx * 3] = 0.0;
+            cm[idx * 3 + 1] = if c > 0 { -(c as f64) * x.powi(a as i32) * y.powi(b as i32) * z.powi((c - 1) as i32) } else { 0.0 };
+            cm[idx * 3 + 2] = if b > 0 { (b as f64) * x.powi(a as i32) * y.powi((b - 1) as i32) * z.powi(c as i32) } else { 0.0 };
+            idx += 1;
+        }}}
+        // Y-directed: m = (0, x^a y^b z^c, 0), curl = (c x^a y^b z^(c-1), 0, -a x^(a-1) y^b z^c)
+        for a in 0..=k { for b in 0..=k + 1 { for c in 0..=k {
+            let v = x.powi(a as i32) * y.powi(b as i32) * z.powi(c as i32);
+            cm[idx * 3] = if c > 0 { (c as f64) * x.powi(a as i32) * y.powi(b as i32) * z.powi((c - 1) as i32) } else { 0.0 };
+            cm[idx * 3 + 1] = 0.0;
+            cm[idx * 3 + 2] = if a > 0 { -(a as f64) * x.powi((a - 1) as i32) * y.powi(b as i32) * z.powi(c as i32) } else { 0.0 };
+            idx += 1;
+        }}}
+        // Z-directed: m = (0, 0, x^a y^b z^c), curl = (-b x^a y^(b-1) z^c, a x^(a-1) y^b z^c, 0)
+        for a in 0..=k { for b in 0..=k { for c in 0..=k + 1 {
+            let v = x.powi(a as i32) * y.powi(b as i32) * z.powi(c as i32);
+            cm[idx * 3] = if b > 0 { -(b as f64) * x.powi(a as i32) * y.powi((b - 1) as i32) * z.powi(c as i32) } else { 0.0 };
+            cm[idx * 3 + 1] = if a > 0 { (a as f64) * x.powi((a - 1) as i32) * y.powi(b as i32) * z.powi(c as i32) } else { 0.0 };
+            cm[idx * 3 + 2] = 0.0;
+            idx += 1;
+        }}}
+        for i in 0..n {
+            let (mut cx, mut cy, mut cz) = (0.0, 0.0, 0.0);
+            for (ji, &s) in d.monomap.iter().enumerate() {
+                let c = d.coeff[i * n + ji];
+                cx += c * cm[s * 3]; cy += c * cm[s * 3 + 1]; cz += c * cm[s * 3 + 2];
+            }
+            curl_vals[i * 3] = cx; curl_vals[i * 3 + 1] = cy; curl_vals[i * 3 + 2] = cz;
+        }
     }
 
     fn quadrature(&self, order: u8) -> crate::reference::QuadratureRule {
         crate::quadrature::hex_rule(order)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        (0..self.n_dofs()).map(|_| vec![0.0, 0.0, 0.0]).collect()
+        let k = self.order;
+        let n = self.n_dofs();
+        let mut c = Vec::with_capacity(n);
+        // Face DOFs: (k+1) per face × 6 faces = 6(k+1)
+        let gl = |i: usize| -> f64 { -1.0 + 2.0 * i as f64 / k as f64 };
+        for &(sx, sy, sz, ax, ay, az) in &[
+            (-1.0, 0.0, 0.0, 1, 2, 3),  // -x
+            ( 1.0, 0.0, 0.0, 1, 2, 3),  // +x
+            (0.0, -1.0, 0.0, 0, 1, 2),  // -y
+            (0.0,  1.0, 0.0, 0, 1, 2),  // +y
+            (0.0, 0.0, -1.0, 0, 1, 2),  // -z
+            (0.0, 0.0,  1.0, 0, 1, 2),  // +z
+        ] {
+            for _ in 0..=k { c.push(vec![sx, sy, sz]); }
+        }
+        // Interior DOFs (k >= 1): 3k(k+1)
+        let step = 1.0 / (k + 2) as f64;
+        for _ in 0..(n - 6 * (k + 1)) {
+            c.push(vec![0.0, 0.0, 0.0]);
+        }
+        c
     }
 }
 

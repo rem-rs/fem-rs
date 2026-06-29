@@ -77,6 +77,7 @@ enum FaceDofMap {
 /// Constructed from a [`MeshTopology`] with triangular, quadrilateral,
 /// tetrahedral, or hexahedral elements.
 /// Supports order 0 (RT0), 1 (RT1), and on **2-D triangles only** order 2 (RT2).
+/// Hex: orders 0 (RT0, 6 DOFs/elem) and 1 (RT1, 36 DOFs/elem).
 pub struct HDivSpace<M: MeshTopology> {
     mesh: M,
     order: u8,
@@ -439,8 +440,9 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 3-D hexahedron construction ───────────────────────────────────────
 
     fn build_3d_hex(mesh: M, order: u8) -> Self {
-        debug_assert_eq!(order, 0, "HexRT0: order must be 0");
-        let dofs_per_elem = HEX_FACES.len();
+        let dofs_per_face = (order as usize + 1) * (order as usize + 1);
+        let interior_dofs = if order == 0 { 0 } else { 3 * order as usize * (order as usize + 1) * (order as usize + 1) };
+        let dofs_per_elem = HEX_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
@@ -451,20 +453,37 @@ impl<M: MeshTopology> HDivSpace<M> {
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
             for face_verts in &HEX_FACES {
-                // Sorted 4-vertex key for face lookup.
                 let (a, b, c, d) = (
                     verts[face_verts[0]],
                     verts[face_verts[1]],
                     verts[face_verts[2]],
                     verts[face_verts[3]],
                 );
-                // Use the first 3 vertices to form a canonical triple key.
                 let key = FaceKey::new(a, b, c);
-
                 let sign = Self::compute_sign_3d_hex(&mesh, verts, a, b, c, d);
-                let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
-                dofs_flat.push(dof);
-                signs_flat.push(sign);
+
+                if dofs_per_face == 1 {
+                    let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
+                    dofs_flat.push(dof);
+                    signs_flat.push(sign);
+                } else {
+                    let nd = dofs_per_face as u32;
+                    let first = *face_map.entry(key).or_insert_with(|| {
+                        let d = next_dof;
+                        next_dof += nd;
+                        d
+                    });
+                    for k in 0..dofs_per_face {
+                        dofs_flat.push(first + k as u32);
+                        signs_flat.push(sign);
+                    }
+                }
+            }
+            // Interior bubble DOFs
+            for _ in 0..interior_dofs {
+                dofs_flat.push(next_dof);
+                next_dof += 1;
+                signs_flat.push(1.0);
             }
         }
 

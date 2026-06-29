@@ -585,7 +585,7 @@ dependencies = [
  "fem-mesh",
  "fem-solver",
  "fem-space",
- "linger",
+ "linlvo",
  "log",
  "thiserror 2.0.18",
 ]
@@ -680,7 +680,7 @@ dependencies = [
  "fem-core",
  "fem-linalg",
  "fem-mesh",
- "linger",
+ "linlvo",
  "rust-hdf5",
  "tempfile",
  "thiserror 2.0.18",
@@ -703,7 +703,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "fem-core",
- "linger",
+ "linlvo",
  "num-traits",
  "parking_lot 0.12.5",
  "proptest",
@@ -750,7 +750,7 @@ dependencies = [
  "fem-space",
  "hdf5",
  "jsmpi",
- "linger",
+ "linlvo",
  "log",
  "mpi",
  "rayon",
@@ -792,7 +792,7 @@ dependencies = [
  "fem-mesh",
  "fem-parallel",
  "fem-space",
- "linger",
+ "linlvo",
  "log",
  "nalgebra 0.33.3",
  "nalgebra-sparse",
@@ -1452,12 +1452,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
-name = "linger"
+name = "linlvo"
 version = "0.2.0"
-source = "git+https://github.com/rem-rs/linger.git#fcac6bacb6c5ebb51e0b7f6530e8e509ad87296f"
+source = "git+https://github.com/rem-rs/linlvo.git#5278b035511a6a79e3d9203e683ea5caf50fc44b"
 dependencies = [
  "nalgebra 0.33.3",
- "nalgebra-sparse",
  "num-complex",
  "num-traits",
  "rayon",

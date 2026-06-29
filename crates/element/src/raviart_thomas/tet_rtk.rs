@@ -36,7 +36,7 @@ fn decode_bub(j: usize) -> (usize, usize, usize, usize) {
 }
 
 fn tet_data(k: usize) -> &'static TetRTkData {
-    static CACHE: [OnceLock<TetRTkData>; 6] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static CACHE: [OnceLock<TetRTkData>; 9] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     CACHE[k].get_or_init(|| {
         let n = (k + 1) * (k + 2) * (k + 4) / 2;
         let n3 = (k + 1) * (k + 2) * (k + 3) / 2; // [P_k]³ count

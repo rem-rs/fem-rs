@@ -16,7 +16,7 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, lagrange::{TetP1, TriP1, TriP2, QuadQ1, QuadQ2, HexQ1}};
+use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, HexQ1, HexQ2, HexQ3}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -179,15 +179,42 @@ impl MixedAssembler {
 
 // ─── Jacobian / transform helpers (duplicated from assembler.rs) ──────────────
 
+/// Constant P0 reference element: 1 DOF, constant basis = 1.0, zero gradient.
+struct P0;
+
+impl ReferenceElement for P0 {
+    fn dim(&self) -> u8 { unreachable!("P0 dim depends on context") }
+    fn order(&self) -> u8 { 0 }
+    fn n_dofs(&self) -> usize { 1 }
+    fn eval_basis(&self, _xi: &[f64], values: &mut [f64]) { values[0] = 1.0; }
+    fn eval_grad_basis(&self, _xi: &[f64], grads: &mut [f64]) { for g in grads { *g = 0.0; } }
+    fn quadrature(&self, _order: u8) -> fem_element::QuadratureRule {
+        unreachable!("P0 quadrature: use the paired element")
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.0; 3]] }
+}
+
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
-        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
-        (ElementType::Tet4, 1)                           => Box::new(TetP1),
-        (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
-        (ElementType::Quad4, 2)                          => Box::new(QuadQ2),
-        (ElementType::Hex8, 1)                           => Box::new(HexQ1),
-        _ => panic!("mixed_assembler ref_elem_vol: unsupported ({elem_type:?}, order={order})"),
+        (ElementType::Tri3 | ElementType::Tri6, 0) |
+        (ElementType::Tet4 | ElementType::Tet10, 0) |
+        (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 0) |
+        (ElementType::Hex8 | ElementType::Hex20, 0) => Box::new(P0),
+        (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
+        (ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetP1),
+        (ElementType::Tet4 | ElementType::Tet10, 2) => Box::new(TetP2),
+        (ElementType::Tet4 | ElementType::Tet10, 3) => Box::new(TetP3),
+        (ElementType::Quad4, 1) => Box::new(QuadQ1),
+        (ElementType::Quad4, 2) => Box::new(QuadQ2),
+        (ElementType::Quad4, 3) => Box::new(QuadQ3),
+        (ElementType::Hex8, 1) => Box::new(HexQ1),
+        (ElementType::Hex8, 2) => Box::new(HexQ2),
+        (ElementType::Hex8, 3) => Box::new(HexQ3),
+        _ => panic!("mixed_assembler ref_elem_vol: unsupported ({elem_type:?}, order={order}). \
+                     HDiv and HCurl spaces not yet supported in MixedAssembler; \
+                     use manual COO assembly for HDiv×L² or HCurl×H¹ mixed systems."),
     }
 }
 
@@ -230,7 +257,8 @@ fn accumulate_mixed_volume_element<SR, SC>(
     let n_r = ref_r.n_dofs();
     let n_c = ref_c.n_dofs();
 
-    let quad = ref_r.quadrature(quad_order);
+    // Use the higher-order element for quadrature (P0 has no meaningful quadrature).
+    let quad = if order_r >= order_c { ref_r.quadrature(quad_order) } else { ref_c.quadrature(quad_order) };
 
     let global_rows: Vec<usize> = row_space.element_dofs(e).iter().map(|&d| d as usize).collect();
     let global_cols: Vec<usize> = col_space.element_dofs(e).iter().map(|&d| d as usize).collect();

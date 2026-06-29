@@ -27,7 +27,7 @@ fn gl_1d(n: usize) -> (Vec<f64>, Vec<f64>) {
 }
 
 fn quad_data(k: usize) -> &'static QuadRTkData {
-    static CACHE: [OnceLock<QuadRTkData>; 6] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static CACHE: [OnceLock<QuadRTkData>; 9] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     CACHE[k].get_or_init(|| {
         let n = 2 * (k + 1) * (k + 2);
         let nx = (k + 2) * (k + 1); // x-comp monomials: degree k+1 in x, k in y

@@ -1,3 +1,6 @@
+> **DEPRECATED — 2026-06-29.** 本文件已被源码事实核查结果取代。改进方向、验收标准、优先级见 `docs/IMPROVEMENT_PLAN.md` 及配套 `docs/IMPROVEMENT_PLAN_ACCEPTANCE.md`。
+> 保留仅用于参考，不可作为功能评估依据。
+
 # fem-rs 功能评估与超越计划
 
 > 2026-06-22 · 纯代码级评估，基于 `main` 最新状态

@@ -10,12 +10,17 @@
 //! - [`vtk_reader`]     — VTK `.vtu` XML reader (point data arrays)
 //! - [`matrix_market`]  — Matrix Market `.mtx` reader/writer
 
+//! - [`mfem`]           — MFEM `.mesh` format v1.0/v1.2 reader
+//! - [`gmsh_writer`]    — GMSH v2.2 ASCII writer
+
 pub mod gmsh;
+pub mod gmsh_writer;
 pub mod netgen;
 pub mod abaqus;
 pub mod vtk;
 pub mod vtk_reader;
 pub mod matrix_market;
+pub mod mfem;
 pub mod xdmf;
 pub mod glvis;
 pub mod imported_workflow;
