@@ -91,6 +91,8 @@ mod assembler_iga_fespace;
 pub mod postprocess;
 pub mod discrete_op;
 pub mod transfer;
+/// High-level Form abstractions (BilinearForm / LinearForm).
+pub mod form;
 pub mod static_cond;
 pub mod iga;
 pub mod iga_trim;
@@ -220,3 +222,4 @@ pub use thermoelastic::{
     solve_thermoelastic_staggered,
 };
 pub use static_cond::{StaticCondensation, GlobalBacksolve, condense_global};
+pub use form::{BilinearForm, LinearForm, VectorBilinearForm, VectorLinearForm};
