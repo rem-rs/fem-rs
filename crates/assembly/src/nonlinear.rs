@@ -216,6 +216,331 @@ fn norm2(v: &[f64]) -> f64 {
     v.iter().map(|&x| x * x).sum::<f64>().sqrt()
 }
 
+// ─── JFNK (Jacobian-Free Newton-Krylov) ────────────────────────────────────
+
+/// Configuration for the JFNK solver.
+#[derive(Debug, Clone)]
+pub struct JfNKConfig {
+    pub atol: f64,
+    pub rtol: f64,
+    pub max_iter: usize,
+    pub gmres_restart: usize,
+    pub gmres_max_iter: usize,
+    /// Finite-difference step for Jacobian-vector products (relative to ‖v‖).
+    pub eps: f64,
+    pub verbose: bool,
+}
+
+impl Default for JfNKConfig {
+    fn default() -> Self {
+        Self {
+            atol: 1e-10, rtol: 1e-8, max_iter: 50,
+            gmres_restart: 30, gmres_max_iter: 300,
+            eps: 1e-7, verbose: false,
+        }
+    }
+}
+
+/// Jacobian-Free Newton-Krylov solver.
+///
+/// Uses GMRES with finite-difference Jacobian-vector products
+/// `J(u)·v ≈ (F(u+εv) − F(u))/ε`, eliminating the need to assemble the Jacobian.
+pub struct JfNKSolver {
+    cfg: JfNKConfig,
+}
+
+impl JfNKSolver {
+    pub fn new(cfg: JfNKConfig) -> Self { Self { cfg } }
+
+    /// Solve `F(u) = 0` without forming the Jacobian matrix.
+    pub fn solve(
+        &self,
+        form: &dyn NonlinearForm,
+        rhs: &[f64],
+        u: &mut [f64],
+    ) -> Result<NewtonResult, NewtonResult> {
+        let n = form.n_dofs();
+        let mut r = vec![0.0; n];
+        let mut du = vec![0.0; n];
+        let mut u_trial = vec![0.0; n];
+        let mut r_trial = vec![0.0; n];
+
+        form.residual(u, rhs, &mut r);
+        let r0 = norm2(&r);
+        let mut r_norm = r0;
+
+        if self.cfg.verbose { println!("[JFNK] iter=0 ‖F‖={r0:.3e}"); }
+        if r0 < self.cfg.atol {
+            return Ok(NewtonResult { converged: true, iterations: 0, final_residual: r0 });
+        }
+
+        for iter in 0..self.cfg.max_iter {
+            // GMRES solve: J·du = -r, using matrix-free Jv products
+            let neg_r: Vec<f64> = r.iter().map(|&v| -v).collect();
+            du.fill(0.0);
+            self.solve_gmres_jfnk(form, u, &neg_r, &mut du, rhs);
+
+            // Line search
+            let mut alpha = 1.0;
+            let mut best_norm = r_norm;
+            for _ in 0..20 {
+                for i in 0..n { u_trial[i] = u[i] + alpha * du[i]; }
+                form.residual(&u_trial, rhs, &mut r_trial);
+                let tn = norm2(&r_trial);
+                if tn < best_norm { best_norm = tn; }
+                if tn < r_norm * (1.0 - 1e-4 * alpha) { break; }
+                alpha *= 0.5;
+                if alpha < 1e-8 { break; }
+            }
+            for i in 0..n { u[i] += alpha * du[i]; }
+
+            form.residual(u, rhs, &mut r);
+            r_norm = norm2(&r);
+            if self.cfg.verbose { println!("[JFNK] iter={} ‖F‖={r_norm:.3e} α={alpha:.4}", iter+1); }
+
+            if r_norm < self.cfg.atol || r_norm < r0 * self.cfg.rtol {
+                return Ok(NewtonResult { converged: true, iterations: iter+1, final_residual: r_norm });
+            }
+        }
+        Err(NewtonResult { converged: false, iterations: self.cfg.max_iter, final_residual: r_norm })
+    }
+
+    /// Solve `J(u)·x = b` using GMRES with matrix-free Jacobian-vector products.
+    fn solve_gmres_jfnk(&self, form: &dyn NonlinearForm, u: &[f64], b: &[f64], x: &mut [f64], rhs: &[f64]) {
+        let n = u.len();
+        let eps = self.cfg.eps;
+        let restart = self.cfg.gmres_restart.min(n);
+        let max_mv = self.cfg.gmres_max_iter;
+
+        // Evaluate F(u) once (used in all Jv products)
+        let mut fu = vec![0.0; n];
+        form.residual(u, rhs, &mut fu);
+
+        // Matrix-vector product operator: v → J(u)·v ≈ (F(u+εv) - F(u))/ε
+        let jv = |v: &[f64], w: &mut [f64]| {
+            let eps_v = eps / (norm2(v) + 1e-30).max(1e-14);
+            let mut up = u.to_vec();
+            for i in 0..n { up[i] += eps_v * v[i]; }
+            let mut fp = vec![0.0; n];
+            form.residual(&up, rhs, &mut fp);
+            for i in 0..n { w[i] = (fp[i] - fu[i]) / eps_v; }
+        };
+
+        // Simple GMRES implementation
+        let mut v = vec![vec![0.0; n]; restart + 1];
+        let mut h = vec![vec![0.0; restart + 1]; restart];
+        let mut g = vec![0.0; restart + 1];
+        let mut y = vec![0.0; restart];
+        let mut cs = vec![0.0; restart];
+        let mut sn = vec![0.0; restart];
+
+        // Initial residual r0 = b - J·x = b (since x = 0)
+        let mut r = b.to_vec();
+        let beta = norm2(&r);
+        if beta < 1e-30 { return; }
+        for i in 0..n { v[0][i] = r[i] / beta; }
+        g[0] = beta;
+
+        let mut iters = 0;
+        'outer: for _iter in 0..max_mv / restart {
+            for k in 0..restart {
+                let (vk_left, vk_right) = v.split_at_mut(k + 1);
+                jv(&vk_left[k], &mut vk_right[0]);
+                for j in 0..=k {
+                    h[k][j] = dot(&vk_right[0], &vk_left[j]);
+                    for i in 0..n { vk_right[0][i] -= h[k][j] * vk_left[j][i]; }
+                }
+                h[k][k + 1] = norm2(&vk_right[0]);
+                if h[k][k + 1] > 1e-30 {
+                    for i in 0..n { vk_right[0][i] /= h[k][k + 1]; }
+                }
+
+                // Apply Givens rotation
+                for j in 0..k {
+                    let tmp = cs[j] * h[k][j] + sn[j] * h[k][j + 1];
+                    h[k][j + 1] = -sn[j] * h[k][j] + cs[j] * h[k][j + 1];
+                    h[k][j] = tmp;
+                }
+                let mut nu = (h[k][k] * h[k][k] + h[k][k + 1] * h[k][k + 1]).sqrt();
+                if nu < 1e-30 { continue; }
+                cs[k] = h[k][k] / nu;
+                sn[k] = h[k][k + 1] / nu;
+                h[k][k] = nu;
+                h[k][k + 1] = 0.0;
+                g[k + 1] = -sn[k] * g[k];
+                g[k] = cs[k] * g[k];
+
+                iters += 1;
+                if g[k + 1].abs() < self.cfg.atol.max(1e-12) { break 'outer; }
+            }
+        }
+
+        // Back-substitute
+        for i in (0..restart).rev() {
+            let mut s = g[i];
+            for j in i + 1..restart { s -= h[j][i] * y[j]; }
+            y[i] = s / h[i][i];
+        }
+        for i in 0..n { for j in 0..restart { x[i] += y[j] * v[j][i]; } }
+    }
+}
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+// ─── Anderson acceleration ──────────────────────────────────────────────────
+
+/// Configuration for Anderson acceleration (fixed-point mixing).
+#[derive(Debug, Clone)]
+pub struct AndersonConfig {
+    /// Number of past residuals to store (history depth).
+    pub m: usize,
+    /// Mixing parameter β: u_new = u - β·F(u) (before Anderson mixing).
+    pub beta: f64,
+    /// Maximum iterations.
+    pub max_iter: usize,
+    /// Absolute tolerance on ‖F(u)‖.
+    pub atol: f64,
+    /// Relative tolerance.
+    pub rtol: f64,
+    /// Regularization for the least-squares solve.
+    pub lambda: f64,
+    pub verbose: bool,
+}
+
+impl Default for AndersonConfig {
+    fn default() -> Self {
+        Self { m: 5, beta: 1.0, max_iter: 200, atol: 1e-10, rtol: 1e-8, lambda: 1e-8, verbose: false }
+    }
+}
+
+/// Anderson-accelerated fixed-point solver.
+///
+/// For `F(u) = 0`, uses Anderson mixing to accelerate convergence:
+/// ```text
+/// u_{k+1} = u_k - β·F(u_k)  (Picard step), then
+///          = weighted combination of last m iterates to minimize residual.
+/// ```
+pub struct AndersonAccelerator {
+    cfg: AndersonConfig,
+}
+
+impl AndersonAccelerator {
+    pub fn new(cfg: AndersonConfig) -> Self { Self { cfg } }
+
+    /// Solve `F(u) = 0` using Anderson-accelerated fixed-point iteration.
+    pub fn solve(
+        &self,
+        form: &dyn NonlinearForm,
+        rhs: &[f64],
+        u: &mut [f64],
+    ) -> Result<NewtonResult, NewtonResult> {
+        let n = form.n_dofs();
+        let m = self.cfg.m;
+        let beta = self.cfg.beta;
+        let mut r = vec![0.0; n];
+        let mut r_hist: Vec<Vec<f64>> = Vec::with_capacity(m);
+        let mut u_hist: Vec<Vec<f64>> = Vec::with_capacity(m);
+
+        form.residual(u, rhs, &mut r);
+        let r0 = norm2(&r);
+        let mut r_norm = r0;
+        if self.cfg.verbose { println!("[Anderson] iter=0 ‖F‖={r0:.3e}"); }
+        if r0 < self.cfg.atol {
+            return Ok(NewtonResult { converged: true, iterations: 0, final_residual: r0 });
+        }
+
+        for iter in 0..self.cfg.max_iter {
+            // Picard step: u_new = u - β·F(u)
+            let mut u_new = u.to_vec();
+            for i in 0..n { u_new[i] -= beta * r[i]; }
+
+            // Store history
+            r_hist.push(r.clone());
+            u_hist.push(u_new.clone());
+            if r_hist.len() > m { r_hist.remove(0); u_hist.remove(0); }
+            let k = r_hist.len();
+
+            if k > 1 {
+                // Solve least-squares: min_γ ‖F_k - Σ_{j<k} γ_j·(F_k - F_j)‖
+                // where F_k is the latest residual.
+                let n_row = n;
+                let n_col = k - 1;
+                if n_col > 0 {
+                    // Build the matrix A_ij = (F_k - F_j)_i and RHS b_i = (F_k)_i
+                    // Solve A·γ = b via normal equations with regularization
+                    let mut ata = vec![0.0; n_col * n_col];
+                    let mut atb = vec![0.0; n_col];
+                    for i in 0..n_row {
+                        let fk = r_hist[k - 1][i];
+                        for j in 0..n_col {
+                            let fj = r_hist[j][i];
+                            atb[j] += (fk - fj) * fk;
+                            for l in 0..n_col {
+                                let fl = r_hist[l][i];
+                                ata[j * n_col + l] += (fk - fj) * (fk - fl);
+                            }
+                        }
+                    }
+                    // Regularize
+                    for j in 0..n_col { ata[j * n_col + j] += self.cfg.lambda; }
+                    // Solve (dense, Cramer's rule for small systems)
+                    let gamma = if n_col == 1 {
+                        vec![atb[0] / ata[0].max(1e-30)]
+                    } else {
+                        solve_2x2(&ata, &atb, n_col)
+                    };
+                    // Anderson update: u = Σ γ_j·u_j (last residual weight from constraint Σγ_j = 1)
+                    let mut gamma_sum = 0.0;
+                    for j in 0..n_col { gamma_sum += gamma[j]; }
+                    for i in 0..n {
+                        u_new[i] = 0.0;
+                        for j in 0..n_col {
+                            u_new[i] += gamma[j] * u_hist[j][i];
+                        }
+                        u_new[i] += (1.0 - gamma_sum) * u_hist[k - 1][i];
+                    }
+                }
+            }
+
+            u.copy_from_slice(&u_new);
+            form.residual(u, rhs, &mut r);
+            r_norm = norm2(&r);
+            if self.cfg.verbose { println!("[Anderson] iter={} ‖F‖={r_norm:.3e}", iter + 1); }
+            if r_norm < self.cfg.atol || r_norm < r0 * self.cfg.rtol {
+                return Ok(NewtonResult { converged: true, iterations: iter + 1, final_residual: r_norm });
+            }
+        }
+        Err(NewtonResult { converged: false, iterations: self.cfg.max_iter, final_residual: r_norm })
+    }
+}
+
+fn solve_2x2(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    if n == 1 { return vec![b[0] / a[0].max(1e-30)]; }
+    // Gaussian elimination for general n×n (n small)
+    let mut x = b.to_vec();
+    let mut aa = a.to_vec();
+    for c in 0..n {
+        let mut piv = c;
+        for r in c + 1..n { if aa[r * n + c].abs() > aa[piv * n + c].abs() { piv = r; } }
+        for j in c..n { aa.swap(c * n + j, piv * n + j); }
+        x.swap(c, piv);
+        let pv = aa[c * n + c];
+        if pv.abs() < 1e-30 { continue; }
+        for j in c..n { aa[c * n + j] /= pv; }
+        x[c] /= pv;
+        for r in 0..n {
+            if r != c {
+                let f = aa[r * n + c];
+                for j in c..n { aa[r * n + j] -= f * aa[c * n + j]; }
+                x[r] -= f * x[c];
+            }
+        }
+    }
+    x
+}
+
 // ─── NonlinearDiffusionForm ───────────────────────────────────────────────────
 
 use nalgebra::DMatrix;
