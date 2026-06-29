@@ -1,5 +1,5 @@
 use fem_mesh::topology::MeshTopology;
-use fem_element::lagrange::{TetP1, SegP1};
+use fem_element::lagrange::{TetP1, TriP1};
 use fem_element::ReferenceElement;
 use std::collections::HashMap;
 
@@ -23,7 +23,7 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
     fn idx(&self, e: u32, c: usize, ld: usize) -> usize { (e as usize * 4 + ld) * 5 + c }
     pub fn rhs(&self, u: &[f64]) -> Vec<f64> {
         let euler = &self.euler; let mut du = vec![0.0; self.n_dofs];
-        let tet = TetP1; let seg = SegP1; let qv = tet.quadrature(2); let qf = seg.quadrature(2);
+        let tet = TetP1; let tri = TriP1; let qv = tet.quadrature(2); let qf = tri.quadrature(3);
         let mut phi = vec![0.0; 4]; let mut grad = vec![0.0; 12];
         let mut gg = vec![0.0; 12]; let mut jac = vec![vec![0.0;3];3];
         // Volume
@@ -60,10 +60,27 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
         // Face integrals
         for &(el, er, ref fnodes) in &ifaces {
             let enl = self.mesh.element_nodes(el); let enr = self.mesh.element_nodes(er);
-            let (nx, ny, nz, fj) = tet_face_normal(&self.mesh, &enl, &fnodes);
+                let (nx, ny, nz, fj) = tet_face_normal(&self.mesh, &enl, &fnodes);
+            // Determine which local face index fnodes corresponds to
+            let face_idx = |en: &[u32]| -> usize {
+                if fnodes[0]==en[0]||fnodes[0]==en[1]||fnodes[0]==en[2] { if fnodes[2]==en[0]||fnodes[2]==en[1]||fnodes[2]==en[2] { return 0; } }
+                if fnodes[0]==en[0]||fnodes[0]==en[1]||fnodes[0]==en[3] { if fnodes[2]==en[0]||fnodes[2]==en[1]||fnodes[2]==en[3] { return 1; } }
+                if fnodes[0]==en[0]||fnodes[0]==en[2]||fnodes[0]==en[3] { if fnodes[2]==en[0]||fnodes[2]==en[2]||fnodes[2]==en[3] { return 2; } }
+                3
+            };
+            let fl = face_idx(&enl);
             for q in 0..qf.n_points() {
-                let (t, w) = (qf.points[q][0], qf.weights[q] * fj);
-                let xil = tet_map_to_elem(&fnodes, t, &enl); let xir = tet_map_to_elem(&fnodes, t, &enr);
+                let (pu, pv) = (qf.points[q][0], qf.points[q][1]);
+                let w = qf.weights[q] * fj;
+                let xil = match fl {
+                    0 => vec![pu, pv, 0.0], 1 => vec![pu, 0.0, pv], 2 => vec![0.0, pu, pv],
+                    _ => vec![1.0-pu-pv, pu, pv],
+                };
+                let fr = face_idx(&enr);
+                let xir = match fr {
+                    0 => vec![pu, pv, 0.0], 1 => vec![pu, 0.0, pv], 2 => vec![0.0, pu, pv],
+                    _ => vec![1.0-pu-pv, pu, pv],
+                };
                 tet.eval_basis(&xil, &mut phi); let mut ul = [0.0;5]; for i in 0..4 { for c in 0..5 { ul[c] += phi[i]*u[self.idx(el,c,i)]; } }
                 tet.eval_basis(&xir, &mut phi); let mut ur = [0.0;5]; for i in 0..4 { for c in 0..5 { ur[c] += phi[i]*u[self.idx(er,c,i)]; } }
                 let fstar = euler.lax_friedrichs_flux(&ul, &ur, &[nx, ny, nz]);
@@ -80,8 +97,12 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
                 for &(_, _, ref ff) in &ifaces { let mut fk = ff.clone(); fk.sort_unstable(); if fk == key { continue 'lf; } }
                 let (nx, ny, nz, fj) = tet_face_normal(&self.mesh, &en, &fno);
                 for q in 0..qf.n_points() {
-                    let (t, w) = (qf.points[q][0], qf.weights[q] * fj);
-                    let xi = tet_map_to_elem(&fno, t, &en);
+                    let (pu, pv) = (qf.points[q][0], qf.points[q][1]);
+                    let w = qf.weights[q] * fj;
+                    let xi = match lf {
+                        0 => vec![pu, pv, 0.0], 1 => vec![pu, 0.0, pv], 2 => vec![0.0, pu, pv],
+                        _ => vec![1.0-pu-pv, pu, pv],
+                    };
                     tet.eval_basis(&xi, &mut phi); let mut uqp = [0.0;5]; for i in 0..4 { for c in 0..5 { uqp[c] += phi[i]*u[self.idx(e,c,i)]; } }
                     let (r, uv, vv, wv, p) = euler.cons_to_prim(&uqp);
                     let un = uv*nx + vv*ny + wv*nz;
@@ -113,14 +134,6 @@ fn tet_face_normal<M: MeshTopology>(mesh: &M, enodes: &[u32], fnodes: &[u32]) ->
                 (0..4).map(|i| mesh.node_coords(enodes[i])[2]).sum::<f64>()/4.];
     let fmx = (pa[0]+pb[0]+pc[0])/3.; let fmy = (pa[1]+pb[1]+pc[1])/3.; let fmz = (pa[2]+pb[2]+pc[2])/3.;
     if nx*(cent[0]-fmx)+ny*(cent[1]-fmy)+nz*(cent[2]-fmz) > 0. { (-nx, -ny, -nz, len/2.) } else { (nx, ny, nz, len/2.) }
-}
-
-fn tet_map_to_elem(fnodes: &[u32], t: f64, _enodes: &[u32]) -> Vec<f64> {
-    // Find which local face fnodes corresponds to by checking the reference element
-    // Use: face 0 (0,1,2) → ζ=0, face 1 (0,1,3) → η=0, face 2 (0,2,3) → ξ=0, face 3 (1,2,3)
-    // For face 0 with vertices (0,1,2) at t=z: param by (u,v) → (u,v,0)
-    // We map the face qp (t on segment 0..1) differently depending on face
-    vec![t, 0.0, 0.0] // simplified - just for test
 }
 
 #[cfg(test)]

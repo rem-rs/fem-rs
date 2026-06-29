@@ -1207,13 +1207,16 @@ pub fn mark_for_derefinement(eta: &[f64], theta: f64) -> Vec<ElemId> {
 
 // ─── Uniform refinement ───────────────────────────────────────────────────────
 
-/// Uniformly refine all elements of the mesh (red refinement for Tri3).
+/// Uniformly refine all elements of a 2-D mesh (Tri3 → 4 Tri3).
 pub fn refine_uniform(mesh: &SimplexMesh<2>) -> SimplexMesh<2> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     refine_marked(mesh, &all)
 }
 
-/// Uniformly refine all elements in a 3-D mesh (Tet4 → 8 tets, Hex8 → 8 hexes).
+/// Uniformly refine all elements of a 3-D mesh, dispatching to the appropriate
+/// refinement path.
+///
+/// Tet4 → 8 Tet4, Hex8 → 8 Hex8, Prism6 → error.
 pub fn refine_uniform_3d(mesh: &SimplexMesh<3>) -> SimplexMesh<3> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     match mesh.elem_type {
@@ -1224,6 +1227,9 @@ pub fn refine_uniform_3d(mesh: &SimplexMesh<3>) -> SimplexMesh<3> {
         ElementType::Hex8 | ElementType::Hex20 => {
             let (m, _, _) = refine_nonconforming_hex(mesh, &all);
             m
+        }
+        ElementType::Prism6 => {
+            panic!("refine_uniform_3d: Prism6 uniform refinement not yet implemented");
         }
         _ => panic!("refine_uniform_3d: unsupported {:?}", mesh.elem_type),
     }

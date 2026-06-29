@@ -13,6 +13,8 @@ pub enum NumericalFlux {
     LaxFriedrichs,
     /// Roe approximate Riemann flux with a small entropy fix.
     Roe,
+    /// Harten-Lax-van Leer contact wave restoration.
+    HLLC,
 }
 
 // ─── HyperbolicConservationLaw trait ────────────────────────────────────────
@@ -53,6 +55,11 @@ pub trait HyperbolicConservationLaw {
         let a = self.max_speed(ql).max(self.max_speed(qr));
         let nv = Self::N_EQ;
         (0..nv).map(|i| 0.5 * (fl[i] + fr[i]) - 0.5 * a * (qr[i] - ql[i])).collect()
+    }
+
+    /// HLLC numerical flux (default: falls back to HLL).
+    fn hllc_flux(&self, ql: &[f64], qr: &[f64], n: &[f64]) -> Vec<f64> {
+        self.hll_flux(ql, qr, n)
     }
 }
 
@@ -104,6 +111,38 @@ impl HyperbolicConservationLaw for EulerConservationLaw {
         let a = (self.gamma * p / r).sqrt();
         (u*u + v*v + w*w).sqrt() + a
     }
+
+    /// HLLC Riemann flux for 3-D Euler equations.
+    fn hllc_flux(&self, ql: &[f64], qr: &[f64], n: &[f64]) -> Vec<f64> {
+        let fl = self.flux_n(ql, n);
+        let fr = self.flux_n(qr, n);
+        let (rl, ul, vl, wl, pl) = self.cons_to_prim(&[ql[0], ql[1], ql[2], ql[3], ql[4]]);
+        let (rr, ur, vr, wr, pr) = self.cons_to_prim(&[qr[0], qr[1], qr[2], qr[3], qr[4]]);
+        let unl = ul*n[0] + vl*n[1] + wl*n[2];
+        let unr = ur*n[0] + vr*n[1] + wr*n[2];
+        let al = (self.gamma*pl/rl).sqrt();
+        let ar = (self.gamma*pr/rr).sqrt();
+        let sl = (unl - al).min(unr - ar);
+        let sr = (unl + al).max(unr + ar);
+        if sl >= 0.0 { return fl; }
+        if sr <= 0.0 { return fr; }
+        let sm = (rr*unr*(sr-unr) - rl*unl*(sl-unl) + pl - pr)
+               / ((rr*(sr-unr) - rl*(sl-unl)).max(1e-14));
+        let star_state = |q: &[f64], r: f64, u: f64, v: f64, w: f64, un: f64, p: f64, sk: f64| -> [f64; 5] {
+            let fac = r*(sk-un)/(sk-sm);
+            let ek = q[4];
+            [fac, fac*(n[0]*sm + u - n[0]*un), fac*(n[1]*sm + v - n[1]*un),
+             fac*(n[2]*sm + w - n[2]*un),
+             fac*(ek/r + (sm-un)*(sm + p/(r*(sk-un))))]
+        };
+        if sm >= 0.0 {
+            let qst = star_state(ql, rl, ul, vl, wl, unl, pl, sl);
+            (0..5).map(|i| fl[i] + sl*(qst[i] - ql[i])).collect()
+        } else {
+            let qst = star_state(qr, rr, ur, vr, wr, unr, pr, sr);
+            (0..5).map(|i| fr[i] + sr*(qst[i] - qr[i])).collect()
+        }
+    }
 }
 
 // ─── Slope limiter ──────────────────────────────────────────────────────────
@@ -117,6 +156,65 @@ pub fn minmod(a: f64, b: f64, c: f64) -> f64 {
         a.max(b).max(c)
     } else {
         0.0
+    }
+}
+
+/// Barth-Jespersen slope limiter for scalar DG(P1) fields on unstructured meshes.
+///
+/// For each element e, computes the unlimited nodal values `u_i` and the element
+/// mean `u_bar_e`.  The element is limited if any nodal value falls outside the
+/// range `[u_min, u_max]` defined by the maximum/minimum of neighboring element means.
+/// The limiter coefficient α is the smallest fraction that brings all nodal values
+/// into the allowable range.
+///
+/// # Arguments
+/// - `u_sol` — flattened solution: `[elem0_dof0, elem0_dof1, ..., elemN_dof3]`
+/// - `n_elems` — number of elements
+/// - `dofs_per_elem` — DOFs per element (4 for TetP1, 3 for TriP1)
+/// - `neighbors` — for each element, slice of neighboring element indices
+pub fn limiter_barth_jespersen(
+    u_sol: &mut [f64],
+    n_elems: usize,
+    dofs_per_elem: usize,
+    elem_conn: &[u32],
+    face_elems: &[(u32, Option<u32>)],
+) {
+    let n_dofs = n_elems * dofs_per_elem;
+    assert!(u_sol.len() >= n_dofs);
+    let mut u_bar = vec![0.0; n_elems];
+    for e in 0..n_elems {
+        let mut s = 0.0;
+        for v in 0..dofs_per_elem { s += u_sol[e * dofs_per_elem + v]; }
+        u_bar[e] = s / dofs_per_elem as f64;
+    }
+    // Build neighbor list for each element
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n_elems];
+    for &(l, r) in face_elems {
+        let le = l as usize;
+        adj[le].push(r.map_or(!0, |r| r as usize));
+        if let Some(re) = r { adj[re as usize].push(le); }
+    }
+    // Remove invalid (!0) entries
+    for a in adj.iter_mut() { a.retain(|&n| n < n_elems); }
+    for e in 0..n_elems {
+        let u_min = adj[e].iter().map(|&nb| u_bar[nb]).fold(f64::MAX, f64::min).min(u_bar[e]);
+        let u_max = adj[e].iter().map(|&nb| u_bar[nb]).fold(f64::NEG_INFINITY, f64::max).max(u_bar[e]);
+        let mut alpha = 1.0;
+        for v in 0..dofs_per_elem {
+            let val = u_sol[e * dofs_per_elem + v];
+            let dev = val - u_bar[e];
+            if dev.abs() < 1e-14 { continue; }
+            if dev > 0.0 {
+                let lim = ((u_max - u_bar[e]) / dev).min(1.0);
+                if lim < alpha { alpha = lim; }
+            } else {
+                let lim = ((u_min - u_bar[e]) / dev).min(1.0);
+                if lim < alpha { alpha = lim; }
+            }
+        }
+        for v in 0..dofs_per_elem {
+            u_sol[e * dofs_per_elem + v] = u_bar[e] + alpha * (u_sol[e * dofs_per_elem + v] - u_bar[e]);
+        }
     }
 }
 
@@ -188,7 +286,7 @@ impl HyperbolicFormIntegrator {
         let (rho, u, p) = self.cons_to_prim(q); let a = (self.gamma * p / rho).sqrt(); u.abs() + a
     }
     pub fn numerical_flux_1d(&self, ql: &[f64; 3], qr: &[f64; 3]) -> [f64; 3] {
-        match self.flux { NumericalFlux::LaxFriedrichs => self.lax_friedrichs_flux(ql, qr), NumericalFlux::Roe => self.roe_flux(ql, qr), }
+        match self.flux { NumericalFlux::LaxFriedrichs => self.lax_friedrichs_flux(ql, qr), NumericalFlux::Roe => self.roe_flux(ql, qr), NumericalFlux::HLLC => self.lax_friedrichs_flux(ql, qr), }
     }
     fn lax_friedrichs_flux(&self, ql: &[f64; 3], qr: &[f64; 3]) -> [f64; 3] {
         let fl = self.physical_flux_1d(ql); let fr = self.physical_flux_1d(qr);

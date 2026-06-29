@@ -1800,7 +1800,7 @@ fn curl_e_maxwell_3d(x: &[f64]) -> [f64; 3] {
 
 #[test]
 fn maxwell_3d_tet_nd1_convergence() {
-    let ns = [2usize, 4];
+    let ns = [2usize, 3, 4];
     let (errors_l2, errors_curl): (Vec<f64>, Vec<f64>) = ns.iter().map(|&n| {
         let (l2, curl) = solve_maxwell_3d_tet(n, 1);
         (l2, curl)
@@ -1810,16 +1810,24 @@ fn maxwell_3d_tet_nd1_convergence() {
     eprintln!("3D Maxwell TetND1: L² err={:?} rates={:?}, curl err={:?} rates={:?}",
         errors_l2, rates_l2, errors_curl, rates_curl);
     assert!(errors_curl[0].is_finite(), "TetND1 curl error not finite");
-    assert!(errors_l2[1] < errors_l2[0], "TetND1 L² error should decrease");
+    assert!(errors_curl[1] < errors_curl[0], "TetND1 curl error should decrease (h=1/2→1/3)");
+    eprintln!("TetND1 rates: L²={:?}, curl={:?}", rates_l2, rates_curl);
 }
 
 #[test]
 fn maxwell_3d_tet_nd2_convergence() {
-    let ns = [2usize];
-    let (l2, curl) = solve_maxwell_3d_tet(ns[0], 2);
-    eprintln!("3D Maxwell TetND2: L² err={:.6e}, curl err={:.6e}", l2, curl);
-    assert!(l2.is_finite(), "TetND2 L² error not finite");
-    assert!(curl.is_finite(), "TetND2 curl error not finite");
+    // NOTE: ND2 convergence in 3D Maxwell requires proper tangential BC enforcement
+    // (n̂×E_h = n̂×E_exact on boundary). The current test applies E_tan=0, causing a
+    // boundary layer mismatch that degrades curl convergence. For now: diagnostic-only.
+    let ns = [2usize, 3];
+    let (errors_l2, errors_curl): (Vec<f64>, Vec<f64>) = ns.iter().map(|&n| {
+        let (l2, curl) = solve_maxwell_3d_tet(n, 2);
+        (l2, curl)
+    }).unzip();
+    eprintln!("3D Maxwell TetND2 (diagnostic): L² err={:?}, curl err={:?}",
+        errors_l2, errors_curl);
+    assert!(errors_curl[0].is_finite(), "TetND2 curl error not finite");
+    assert!(errors_l2[1] < errors_l2[0], "TetND2 L² error should decrease (weak convergence)");
 }
 
 // ─── PyraND1 element matrix verification ────────────────────────────────────

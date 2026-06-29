@@ -51,7 +51,7 @@ impl VectorReferenceElement for PyraRT0 {
     fn eval_curl(&self,_xi:&[f64],curl:&mut[f64]){for v in curl.iter_mut(){*v=0.;}}
     fn eval_div(&self,_xi:&[f64],div:&mut[f64]){for i in 0..5{div[i]=3.;}}
     fn quadrature(&self,order:u8)->QuadratureRule{pyramid_rule(order)}
-    fn dof_coords(&self)->Vec<Vec<f64>>{vec![vec![0.5,0.5, 0.], vec![0.,0.5,0.5], vec![0.5,0.,0.5], vec![2./3.,1./3.,1./3.], vec![1./3.,2./3.,1./3.]]}
+    fn dof_coords(&self)->Vec<Vec<f64>>{vec![vec![0.5,0.5,0.], vec![0.,1./3.,1./3.], vec![1./3.,0.,1./3.], vec![0.5,0.5,0.5], vec![0.5,0.5,0.5]]}
 }
 
 #[cfg(test)]

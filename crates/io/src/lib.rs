@@ -13,10 +13,12 @@
 //! - [`mfem`]           — MFEM `.mesh` format v1.0/v1.2 reader
 //! - [`gmsh_writer`]    — GMSH v2.2 ASCII writer
 //! - [`pvd`]            — ParaView `.pvd` collection writer
+//! - [`pvtu_writer`]    — ParaView `.pvtu` parallel piece collection writer
 
 pub mod gmsh;
 pub mod gmsh_writer;
 pub mod pvd;
+pub mod pvtu_writer;
 pub mod netgen;
 pub mod abaqus;
 pub mod vtk;
@@ -32,7 +34,9 @@ pub mod stl_obj;
 pub mod hdf5;
 
 pub use gmsh::{read_msh, read_msh_file, MshFile};
+pub use gmsh_writer::{write_msh, write_msh_file};
 pub use fem_mesh::curved::CurvedMesh;
+pub use pvtu_writer::{PvtuCollection, write_pvtu};
 pub use netgen::{
 	read_netgen_vol,
 	read_netgen_vol_file,

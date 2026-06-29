@@ -250,8 +250,25 @@ impl VectorReferenceElement for TetRTk {
         crate::quadrature::tet_rule(order)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        let k = self.order;
         let n = self.n_dofs();
-        (0..n).map(|_| vec![0.25, 0.25, 0.25]).collect()
+        let face_dofs_per_face = (k + 1) * (k + 2) / 2;
+        let interior_dofs = k * (k + 1) * (k + 2) / 2;
+        let mut c = Vec::with_capacity(n);
+        // Face 0: x+y+z=1, centroid (1/3, 1/3, 1/3)
+        for _ in 0..face_dofs_per_face { c.push(vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]); }
+        // Face 1: x=0, centroid (0, 1/3, 1/3)
+        for _ in 0..face_dofs_per_face { c.push(vec![0.0, 1.0 / 3.0, 1.0 / 3.0]); }
+        // Face 2: y=0, centroid (1/3, 0, 1/3)
+        for _ in 0..face_dofs_per_face { c.push(vec![1.0 / 3.0, 0.0, 1.0 / 3.0]); }
+        // Face 3: z=0, centroid (1/3, 1/3, 0)
+        for _ in 0..face_dofs_per_face { c.push(vec![1.0 / 3.0, 1.0 / 3.0, 0.0]); }
+        // Interior DOFs: scattered inside
+        for i in 0..interior_dofs {
+            let t = (i as f64 + 0.5) / interior_dofs as f64;
+            c.push(vec![0.25 + 0.12 * (t * std::f64::consts::PI).cos(), 0.25 + 0.12 * (t * std::f64::consts::PI * 1.3).sin(), 0.25 + 0.12 * (t * std::f64::consts::PI * 0.7).cos()]);
+        }
+        c
     }
 }
 

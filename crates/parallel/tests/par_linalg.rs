@@ -211,3 +211,34 @@ fn par_mms_p2_two_ranks() {
         if comm.is_root() { eprintln!("P2 2-rank MMS OK: {} iters", res.iterations); }
     });
 }
+
+#[test]
+fn par_mms_p1_four_ranks_matches_two_ranks() {
+    use std::f64::consts::PI;
+    let src_fn = |x: &[f64]| 2.0*PI*PI*(PI*x[0]).sin()*(PI*x[1]).sin();
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    launcher(4).launch(move |comm| {
+        let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(12));
+        let pm = partition_simplex(&mesh, &comm);
+        let ls = H1Space::new(pm.local_mesh().clone(), 1);
+        let ps = ParallelFESpace::new(ls, &pm, comm.clone());
+        let diff = DiffusionIntegrator { kappa: 1.0 };
+        let mut a = ParAssembler::assemble_bilinear(&ps, &[&diff], 3);
+        let src = DomainSourceIntegrator::new(&src_fn);
+        let mut rhs = ParAssembler::assemble_linear(&ps, &[&src], 3);
+        let dp = ps.dof_partition();
+        for &d in &boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &[1,2,3,4]) {
+            let pid = dp.permute_dof(d) as usize;
+            if pid < dp.n_owned_dofs { a.apply_dirichlet_par(pid, 0.0, &mut rhs); }
+        }
+        let mut u = ParVector::zeros_from_space(&ps);
+        let cfg = SolverConfig { rtol: 1e-10, max_iter: 5000, verbose: false, ..SolverConfig::default() };
+        let res = fem_parallel::par_solve_cg(&a, &rhs, &mut u, &cfg).unwrap();
+        assert!(res.converged, "P1 4-rank MMS CG not converged");
+        r.lock().unwrap().push(res.converged);
+    });
+    let all = results.lock().unwrap();
+    assert_eq!(all.len(), 4, "all 4 ranks must report");
+    assert!(all.iter().all(|&c| c), "all ranks must converge");
+}

@@ -128,8 +128,8 @@ impl<M: MeshTopology> HDivSpace<M> {
                 "HDivSpace: Tet RT supports orders 0, 1, and 2"
             ),
             (3, ElementType::Hex8) => assert!(
-                order <= 1,
-                "HDivSpace: Hex RT supports orders 0 and 1"
+                order <= 2,
+                "HDivSpace: Hex RT supports orders 0, 1, and 2"
             ),
             _ => panic!(
                 "HDivSpace: unsupported (dim={dim}, elem_type={elem_type:?})"

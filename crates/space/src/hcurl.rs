@@ -97,7 +97,7 @@ pub struct HCurlSpace<M: MeshTopology> {
 impl<M: MeshTopology> HCurlSpace<M> {
     /// Construct an H(curl) space of the given order on `mesh`.
     ///
-    /// Supports ND1 (order 1) and NDk (order k >= 2) for Tri3, Quad4, Tet4, Hex8.
+    /// Supports ND1 (order 1) and NDk (order k >= 2) for Tri3/Tri6, Quad4/Quad8, Tet4/Tet10, Hex8/Hex20.
     pub fn new(mesh: M, order: u8) -> Self {
         assert!(order >= 1, "HCurlSpace: order must be >= 1");
         let dim = mesh.dim() as usize;

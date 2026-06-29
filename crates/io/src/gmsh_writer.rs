@@ -28,8 +28,8 @@ fn elem_type_code(et: ElementType) -> Option<u32> {
     })
 }
 
-/// Write a `SimplexMesh<3>` as GMSH v2.2 ASCII.
-pub fn write_msh<W: Write>(mesh: &SimplexMesh<3>, writer: &mut W) -> FemResult<()> {
+/// Write a mesh as GMSH v2.2 ASCII.
+pub fn write_msh<W: Write, const D: usize>(mesh: &SimplexMesh<D>, writer: &mut W) -> FemResult<()> {
     writeln!(writer, "$MeshFormat")?;
     writeln!(writer, "2.2 0 8")?;
     writeln!(writer, "$EndMeshFormat")?;
@@ -39,7 +39,13 @@ pub fn write_msh<W: Write>(mesh: &SimplexMesh<3>, writer: &mut W) -> FemResult<(
     writeln!(writer, "{n_nodes}")?;
     for i in 0..n_nodes {
         let c = mesh.node_coords(i as u32);
-        writeln!(writer, "{} {} {} {}", i + 1, c[0], c[1], c[2])?;
+        if D == 1 {
+            writeln!(writer, "{} {} 0.0 0.0", i + 1, c[0])?;
+        } else if D == 2 {
+            writeln!(writer, "{} {} {} 0.0", i + 1, c[0], c[1])?;
+        } else {
+            writeln!(writer, "{} {} {} {}", i + 1, c[0], c[1], c[2])?;
+        }
     }
     writeln!(writer, "$EndNodes")?;
 
@@ -77,7 +83,7 @@ pub fn write_msh<W: Write>(mesh: &SimplexMesh<3>, writer: &mut W) -> FemResult<(
 }
 
 /// Write to a GMSH file.
-pub fn write_msh_file(mesh: &SimplexMesh<3>, path: impl AsRef<std::path::Path>) -> FemResult<()> {
+pub fn write_msh_file<const D: usize>(mesh: &SimplexMesh<D>, path: impl AsRef<std::path::Path>) -> FemResult<()> {
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     write_msh(mesh, &mut f)
 }
@@ -93,6 +99,18 @@ mod tests {
         write_msh(&mesh, &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.starts_with("$MeshFormat\n2.2"));
+        assert!(out.contains("$Nodes\n"));
+        assert!(out.contains("$Elements\n"));
+        assert!(out.contains("$EndElements"));
+    }
+
+    #[test]
+    fn roundtrip_square_2d() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mut buf = Vec::new();
+        write_msh(&mesh, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.starts_with("$MeshFormat"));
         assert!(out.contains("$Nodes\n"));
         assert!(out.contains("$Elements\n"));
         assert!(out.contains("$EndElements"));
