@@ -9,7 +9,8 @@
 use thiserror::Error;
 
 use fem_element::{ReferenceElement, TetP1, TriP1};
-use fem_linalg::CooMatrix;
+use fem_element::lagrange::factory::{ref_elem, ElemType};
+use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, SimplexMesh, TetPointLocator, TriPointLocator};
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{fe_space::FESpace, H1Space};
@@ -708,6 +709,67 @@ pub fn transfer_h1_p1_nonmatching_l2_projection_conservative_3d(
     Ok((target_values, stats, report))
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Prolongation matrix (coarse → fine H¹ for h-refinement)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build an H¹ prolongation matrix from `coarse` to `fine` (2-D tri).
+pub fn build_prolongation_h1(
+    coarse: &H1Space<SimplexMesh<2>>,
+    fine: &H1Space<SimplexMesh<2>>,
+    tol: f64,
+) -> (CsrMatrix<f64>, TransferStats) {
+    let cmesh = coarse.mesh();
+    let n_coarse = coarse.n_dofs();
+    let n_fine = fine.n_dofs();
+    let fdm = fine.dof_manager();
+    let fcoords = &fdm.dof_coords;
+    let mut coo = CooMatrix::new(n_fine, n_coarse);
+    let mut loc = 0usize;
+    let mut xtra = 0usize;
+    let pl = TriPointLocator::new(cmesh);
+    for fi in 0..n_fine {
+        let x = &fcoords[fi * 2..fi * 2 + 2];
+        if let Some(lp) = pl.locate(x, tol) {
+            let ns = cmesh.elem_nodes(lp.elem);
+            for k in 0..3 {
+                let w = lp.barycentric[k];
+                if w.abs() > 1e-15 { coo.add(fi, ns[k] as usize, w); }
+            }
+            loc += 1;
+        } else { xtra += 1; }
+    }
+    (coo.into_csr(), TransferStats { located_count: loc, extrapolated_count: xtra })
+}
+
+/// Build an H¹ prolongation matrix from `coarse` to `fine` (3-D tet).
+pub fn build_prolongation_h1_3d(
+    coarse: &H1Space<SimplexMesh<3>>,
+    fine: &H1Space<SimplexMesh<3>>,
+    tol: f64,
+) -> (CsrMatrix<f64>, TransferStats) {
+    let cmesh = coarse.mesh();
+    let n_coarse = coarse.n_dofs();
+    let n_fine = fine.n_dofs();
+    let fdm = fine.dof_manager();
+    let mut coo = CooMatrix::new(n_fine, n_coarse);
+    let mut loc = 0usize;
+    let mut xtra = 0usize;
+    let pl = TetPointLocator::new(cmesh);
+    for fi in 0..n_fine {
+        let x = &fdm.dof_coords[fi * 3..fi * 3 + 3];
+        if let Some(lp) = pl.locate(x, tol) {
+            let ns = cmesh.elem_nodes(lp.elem);
+            for k in 0..4 {
+                let w = lp.barycentric[k];
+                if w.abs() > 1e-15 { coo.add(fi, ns[k] as usize, w); }
+            }
+            loc += 1;
+        } else { xtra += 1; }
+    }
+    (coo.into_csr(), TransferStats { located_count: loc, extrapolated_count: xtra })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,5 +1010,35 @@ mod tests {
             report.absolute_integral_error_after
                 <= report.absolute_integral_error_before + 1e-14
         );
+    }
+
+    #[test]
+    fn prolongation_h1_p1_2d() {
+        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let coarse = H1Space::new(coarse_mesh, 1);
+        let fine_mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let fine = H1Space::new(fine_mesh, 1);
+        let (p, stats) = super::build_prolongation_h1(&coarse, &fine, 0.1);
+        assert_eq!(p.nrows, fine.n_dofs());
+        assert_eq!(p.ncols, coarse.n_dofs());
+        assert!(stats.located_count > 0, "no DOFs located (located={}, extrapolated={})",
+            stats.located_count, stats.extrapolated_count);
+        eprintln!("prolongation: fine DOFs={}, coarse DOFs={}, located={}, extrapolated={}, nnz={}",
+            fine.n_dofs(), coarse.n_dofs(), stats.located_count, stats.extrapolated_count, p.nnz());
+        // Prolong a linear field: u(x,y) = 1 + 2x + 3y
+        let coarse_vals = coarse.interpolate(&|x| 1.0 + 2.0 * x[0] + 3.0 * x[1]);
+        // Convert to Vec<f64>
+        let coarse_slice: Vec<f64> = coarse_vals.as_slice().to_vec();
+        let mut fine_vals = vec![0.0; fine.n_dofs()];
+        p.spmv(&coarse_slice, &mut fine_vals);
+        // Check against exact interpolation on fine mesh
+        let exact = fine.interpolate(&|x| 1.0 + 2.0 * x[0] + 3.0 * x[1]);
+        let mut err_sq = 0.0;
+        for i in 0..fine.n_dofs() {
+            let d = fine_vals[i] - exact.as_slice()[i];
+            err_sq += d * d;
+        }
+        let err = (err_sq / (fine.n_dofs() as f64)).sqrt();
+        assert!(err < 1e-12, "P1 prolongation RMS error {:.2e} >= 1e-12", err);
     }
 }
