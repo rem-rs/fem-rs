@@ -1,4 +1,4 @@
-﻿//! # fem-amg
+//! # fem-amg
 //!
 //! Algebraic Multigrid backed by [`linlvo`].
 //!
@@ -21,9 +21,10 @@
 //! ```
 
 use fem_linalg::CsrMatrix as FemCsr;
-use fem_solver::{fem_to_linlvo_csr, into_result, SolveResult, SolverConfig, SolverError};
+use fem_linalg::{fem_to_linlvo_csr, into_result, SolveResult, SolverConfig, SolverError};
 use linlvo::{
     core::scalar::Scalar as linlvoScalar,
+    core::preconditioner::Preconditioner,
     iterative::{ConjugateGradient, Fgmres, Gmres},
     DenseVec, KrylovSolver,
 };
@@ -242,6 +243,18 @@ impl<T: linlvoScalar> AmgSolver<T> {
     /// Switch to W-cycle (more expensive but sometimes faster convergence).
     pub fn with_cycle(mut self, cycle: CycleType) -> Self {
         self.cycle = cycle; self
+    }
+
+    /// Apply the AMG V-cycle as a preconditioner: `z = M^{-1} r`.
+    ///
+    /// This is useful for wrapping AMG as a preconditioner in outer solvers
+    /// (e.g., on GPU where only the V-cycle runs on CPU).
+    pub fn precond_apply(&self, r: &[T]) -> Vec<T> {
+        let precond = linlvo::amg::AmgPrecond::new(self.hierarchy.clone()).with_cycle(self.cycle);
+        let x_dv = linlvo::DenseVec::from_vec(r.to_vec());
+        let mut y_dv = linlvo::DenseVec::from_vec(vec![T::zero(); r.len()]);
+        precond.apply_precond(&x_dv, &mut y_dv);
+        y_dv.as_slice().to_vec()
     }
 
     /// Number of levels in the AMG hierarchy.

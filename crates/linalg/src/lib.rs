@@ -1,4 +1,4 @@
-﻿//! # fem-linalg
+//! # fem-linalg
 //!
 //! Sparse and dense linear algebra for fem-rs.
 //!
@@ -32,6 +32,9 @@ pub mod block;
 pub mod pool;
 pub mod hmatrix;
 
+#[cfg(feature = "direct")]
+pub mod solver_types;
+
 pub use coo::CooMatrix;
 pub use csr::CsrMatrix;
 pub use csr::{spadd, csr_spmm};
@@ -47,3 +50,6 @@ pub use pool::{CooVectorPool, PooledCooVectors};
 #[cfg(feature = "direct")]
 #[doc(inline)]
 pub use linlvo::direct::{BlrBlock, BlrMatrix, compress_block, compress_block_adaptive};
+
+#[cfg(feature = "direct")]
+pub use solver_types::{SolverConfig, SolverError, SolveResult, PrintLevel, fem_to_linlvo_csr, into_result};

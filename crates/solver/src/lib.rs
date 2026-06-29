@@ -1,4 +1,4 @@
-﻿//! # fem-solver
+//! # fem-solver
 //!
 //! Iterative and direct linear solvers backed by [`linlvo`].
 //!
@@ -68,121 +68,9 @@ pub mod cg_gpu;
 #[cfg(feature = "gpu")]
 pub mod gmres_gpu;
 
-// ─── Error ───────────────────────────────────────────────────────────────────
+// ─── Re-export solver types from fem-linalg ───────────────────────────────────
 
-#[derive(Debug, Error)]
-pub enum SolverError {
-    #[error("solver did not converge in {max_iter} iterations (residual = {residual:.3e})")]
-    ConvergenceFailed { max_iter: usize, residual: f64 },
-    #[error("dimension mismatch: matrix is {rows}×{cols}, rhs has length {rhs}")]
-    DimensionMismatch { rows: usize, cols: usize, rhs: usize },
-    #[error("linlvo error: {0}")]
-    linlvo(String),
-}
-
-impl From<linlvo::SolverError> for SolverError {
-    fn from(e: linlvo::SolverError) -> Self {
-        match e {
-            linlvo::SolverError::ConvergenceFailed { max_iter, residual } => {
-                SolverError::ConvergenceFailed { max_iter, residual }
-            }
-            other => SolverError::linlvo(other.to_string()),
-        }
-    }
-}
-
-// ─── Result ──────────────────────────────────────────────────────────────────
-
-/// Outcome returned by every solver in this crate.
-#[derive(Debug, Clone)]
-pub struct SolveResult {
-    pub converged:      bool,
-    pub iterations:     usize,
-    pub final_residual: f64,
-}
-
-// ─── Parameters ──────────────────────────────────────────────────────────────
-
-/// Verbosity level for iterative solvers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
-pub enum PrintLevel {
-    /// No output.
-    #[default]
-    Silent,
-    /// Print summary on convergence/failure only.
-    Summary,
-    /// Print residual at each iteration.
-    Iterations,
-    /// Print residual at each iteration plus extra diagnostics.
-    Debug,
-}
-
-
-/// Convergence parameters passed to every solver.
-#[derive(Debug, Clone)]
-pub struct SolverConfig {
-    /// Relative tolerance (converge when ‖r�?‖b�?< rtol).
-    pub rtol: f64,
-    /// Absolute tolerance.
-    pub atol: f64,
-    /// Maximum number of iterations.
-    pub max_iter: usize,
-    /// Print residual each iteration when `true`.
-    pub verbose: bool,
-    /// Structured verbosity level (overrides `verbose` when not Silent).
-    pub print_level: PrintLevel,
-}
-
-impl Default for SolverConfig {
-    fn default() -> Self {
-        SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 1_000, verbose: false, print_level: PrintLevel::Silent }
-    }
-}
-
-impl SolverConfig {
-    pub fn to_linlvo(&self) -> SolverParams {
-        let level = match self.effective_print_level() {
-            PrintLevel::Silent => VerboseLevel::Silent,
-            PrintLevel::Summary => VerboseLevel::Summary,
-            _ => VerboseLevel::Iterations,
-        };
-        SolverParams {
-            rtol:           self.rtol,
-            atol:           self.atol,
-            max_iter:       self.max_iter,
-            verbose:        level,
-            check_interval: 10,
-        }
-    }
-
-    /// Effective print level: uses `print_level` if set, falls back to `verbose`.
-    pub fn effective_print_level(&self) -> PrintLevel {
-        if self.print_level != PrintLevel::Silent {
-            self.print_level
-        } else if self.verbose {
-            PrintLevel::Iterations
-        } else {
-            PrintLevel::Silent
-        }
-    }
-}
-
-// ─── Type conversion ─────────────────────────────────────────────────────────
-
-/// Convert a `fem_linalg::CsrMatrix<T>` to a `linlvo::sparse::CsrMatrix<T>`.
-///
-/// The only structural difference is that fem-rs stores column indices as
-/// `u32` while linlvo uses `usize`.
-pub fn fem_to_linlvo_csr<T: linlvoScalar>(a: &FemCsr<T>) -> linlvoCsr<T> {
-    linlvoCsr::from_raw(
-        a.nrows,
-        a.ncols,
-        a.row_ptr.clone(),
-        a.col_idx.iter().map(|&c| c as usize).collect(),
-        a.values.clone(),
-    )
-}
+pub use fem_linalg::{SolverConfig, SolverError, SolveResult, PrintLevel, fem_to_linlvo_csr, into_result};
 
 // ─── Solvers ─────────────────────────────────────────────────────────────────
 
@@ -270,7 +158,7 @@ where
         apply(&p, &mut ap);
         let p_ap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
         if p_ap.abs() < 1e-32 {
-            return Err(SolverError::linlvo(
+            return Err(SolverError::Linlvo(
                 "CG operator breakdown: p^T A p is near zero".to_string(),
             ));
         }
@@ -315,7 +203,7 @@ pub fn solve_pcg_jacobi<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
@@ -336,7 +224,7 @@ pub fn solve_pcg_ilu0<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
@@ -378,7 +266,7 @@ pub fn solve_gmres_jacobi<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -399,7 +287,7 @@ pub fn solve_gmres_ilu0<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -432,7 +320,7 @@ where
         });
     }
     if restart == 0 {
-        return Err(SolverError::linlvo("GMRES restart must be > 0".to_string()));
+        return Err(SolverError::Linlvo("GMRES restart must be > 0".to_string()));
     }
 
     fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -557,7 +445,7 @@ where
             }
             let diag = h[i][i];
             if diag.abs() < 1e-32 {
-                return Err(SolverError::linlvo(
+                return Err(SolverError::Linlvo(
                     "GMRES operator breakdown: near-singular Hessenberg diagonal".to_string(),
                 ));
             }
@@ -672,7 +560,7 @@ where
     for iter in 0..cfg.max_iter {
         let rho_new = dot(&r_hat, &r);
         if rho_new.abs() < 1e-32 {
-            return Err(SolverError::linlvo(
+            return Err(SolverError::Linlvo(
                 "BiCGSTAB operator breakdown: rho is near zero".to_string(),
             ));
         }
@@ -694,7 +582,7 @@ where
         apply(&p, &mut v);
         let rhat_v = dot(&r_hat, &v);
         if rhat_v.abs() < 1e-32 {
-            return Err(SolverError::linlvo(
+            return Err(SolverError::Linlvo(
                 "BiCGSTAB operator breakdown: r_hat^T v is near zero".to_string(),
             ));
         }
@@ -719,14 +607,14 @@ where
         apply(&s, &mut t);
         let tt = dot(&t, &t);
         if tt.abs() < 1e-32 {
-            return Err(SolverError::linlvo(
+            return Err(SolverError::Linlvo(
                 "BiCGSTAB operator breakdown: t^T t is near zero".to_string(),
             ));
         }
 
         omega = dot(&t, &s) / tt;
         if omega.abs() < 1e-32 {
-            return Err(SolverError::linlvo(
+            return Err(SolverError::Linlvo(
                 "BiCGSTAB operator breakdown: omega is near zero".to_string(),
             ));
         }
@@ -792,7 +680,7 @@ pub fn solve_fgmres_jacobi<T: linlvoScalar>(    a: &FemCsr<T>,
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    let prec = JacobiPrecond::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Fgmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -813,7 +701,7 @@ pub fn solve_fgmres_ilu0<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    let prec = Ilu0Precond::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Fgmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -937,7 +825,7 @@ pub fn solve_pcg_ildlt<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = IldltPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    let prec = IldltPrecond::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
@@ -959,7 +847,7 @@ pub fn solve_gmres_ildlt<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = IldltPrecond::from_csr(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    let prec = IldltPrecond::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -1017,7 +905,7 @@ pub fn solve_gmres_iluk<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IlukPrecond::from_csr(&la, fill_level)
-        .map_err(|e| SolverError::linlvo(e.to_string()))?;
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -1044,7 +932,7 @@ pub fn solve_gmres_ilut<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IlutPrecond::from_csr(&la, tau, p_fill)
-        .map_err(|e| SolverError::linlvo(e.to_string()))?;
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -1068,7 +956,7 @@ pub fn solve_pcg_iluk<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IlukPrecond::from_csr(&la, fill_level)
-        .map_err(|e| SolverError::linlvo(e.to_string()))?;
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
@@ -1094,7 +982,7 @@ pub fn solve_fgmres_ilut<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = IlutPrecond::from_csr(&la, tau, p_fill)
-        .map_err(|e| SolverError::linlvo(e.to_string()))?;
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Fgmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -1192,8 +1080,8 @@ pub fn solve_sparse_lu<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = SparseLu::<T>::default();
-    solver.factor(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
-    solver.solve(&lb, &mut lx).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    solver.factor(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     Ok(lx.into_vec())
 }
 
@@ -1208,8 +1096,8 @@ pub fn solve_sparse_cholesky<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = SparseCholesky::<T>::default();
-    solver.factor(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
-    solver.solve(&lb, &mut lx).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    solver.factor(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     Ok(lx.into_vec())
 }
 
@@ -1222,8 +1110,8 @@ pub fn solve_sparse_ldlt<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = SparseLdlt::<T>::default();
-    solver.factor(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
-    solver.solve(&lb, &mut lx).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    solver.factor(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     Ok(lx.into_vec())
 }
 
@@ -1240,8 +1128,8 @@ pub fn solve_sparse_mumps<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = MumpsSolver::<T>::default();
-    solver.factor(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
-    solver.solve(&lb, &mut lx).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    solver.factor(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     Ok(lx.into_vec())
 }
 
@@ -1258,8 +1146,8 @@ pub fn solve_sparse_mkl<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::zeros(b.len());
     let mut solver = MklSolver::<T>::default();
-    solver.factor(&la).map_err(|e| SolverError::linlvo(e.to_string()))?;
-    solver.solve(&lb, &mut lx).map_err(|e| SolverError::linlvo(e.to_string()))?;
+    solver.factor(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     Ok(lx.into_vec())
 }
 
@@ -1303,7 +1191,7 @@ pub fn solve_pcg_ams<T: linlvoScalar>(
     let mut lx = DenseVec::from_vec(x.to_vec());
 
     let ams = AmsPrecond::<T>::new(&la, g, cfg.ams_cfg.clone())
-        .map_err(|e| SolverError::linlvo(e.to_string()))?;
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
 
     let res = ConjugateGradient::<T>::default()
         .solve(&la, Some(&ams), &lb, &mut lx, &cfg.inner_cfg.to_linlvo())
@@ -1330,7 +1218,7 @@ pub fn solve_gmres_ams<T: linlvoScalar>(
     let mut lx = DenseVec::from_vec(x.to_vec());
 
     let ams = AmsPrecond::<T>::new(&la, g, cfg.ams_cfg.clone())
-        .map_err(|e| SolverError::linlvo(e.to_string()))?;
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
 
     let solver = Gmres::<T>::new(restart);
     let res = solver
@@ -1382,7 +1270,7 @@ pub fn solve_pcg_ads<T: linlvoScalar>(
     let mut lx = DenseVec::from_vec(x.to_vec());
 
     let ads = AdsPrecond::<T>::new(&la, c, g, cfg.ads_cfg.clone())
-        .map_err(|e| SolverError::linlvo(e.to_string()))?;
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
 
     let res = ConjugateGradient::<T>::default()
         .solve(&la, Some(&ads), &lb, &mut lx, &cfg.inner_cfg.to_linlvo())
@@ -1410,7 +1298,7 @@ pub fn solve_gmres_ads<T: linlvoScalar>(
     let mut lx = DenseVec::from_vec(x.to_vec());
 
     let ads = AdsPrecond::<T>::new(&la, c, g, cfg.ads_cfg.clone())
-        .map_err(|e| SolverError::linlvo(e.to_string()))?;
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
 
     let solver = Gmres::<T>::new(restart);
     let res = solver
@@ -1432,13 +1320,6 @@ fn check_dims<T>(a: &FemCsr<T>, b: &[T], x: &[T]) -> Result<(), SolverError> {
     Ok(())
 }
 
-pub fn into_result(r: linlvo::SolverResult) -> SolveResult {
-    SolveResult {
-        converged:      r.converged,
-        iterations:     r.iterations,
-        final_residual: r.final_residual,
-    }
-}
 
 pub mod block;
 pub mod block_gmres;

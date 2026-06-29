@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 fem-core   = { path = "../core" }
 fem-linalg = { path = "../linalg" }
+fem-amg    = { path = "../amg", optional = true }
 bytemuck   = { workspace = true }
 wgpu       = "27"
 pollster   = "0.4"
@@ -16,6 +17,7 @@ cust       = { version = "0.3", optional = true }
 [features]
 default = []
 cuda    = ["dep:cust"]
+amg     = ["dep:fem-amg"]
 
 [lib]
 crate-type = ["lib"]

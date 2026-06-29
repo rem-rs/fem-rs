@@ -1,4 +1,6 @@
 pub mod assembly;
+#[cfg(feature = "amg")]
+pub mod amg_precond;
 pub mod backend;
 pub mod backend_wgpu;
 #[cfg(feature = "cuda")]
@@ -32,6 +34,8 @@ pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;
 pub use direct::{solve_dense_gpu, GpuDenseMatrix};
 pub use jacobi::GpuJacobiPrecond;
+#[cfg(feature = "amg")]
+pub use amg_precond::GpuAmgPrecond;
 pub use spmv_pipeline::SpmvPipeline;
 pub use vector::GpuVector;
 pub use vector_pipeline::{
