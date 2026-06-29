@@ -12,9 +12,11 @@
 
 //! - [`mfem`]           — MFEM `.mesh` format v1.0/v1.2 reader
 //! - [`gmsh_writer`]    — GMSH v2.2 ASCII writer
+//! - [`pvd`]            — ParaView `.pvd` collection writer
 
 pub mod gmsh;
 pub mod gmsh_writer;
+pub mod pvd;
 pub mod netgen;
 pub mod abaqus;
 pub mod vtk;
@@ -38,7 +40,7 @@ pub use netgen::{
 };
 pub use abaqus::{read_abaqus_inp, read_abaqus_inp_file, read_abaqus_inp_full, read_abaqus_inp_full_file, AbaqusInpData};
 pub use vtk::{DataArray, VtkWriter};
-pub use vtk_reader::read_vtu_point_data;
+pub use vtk_reader::{read_vtu, read_vtu_mesh, read_vtu_str, VtuData};
 pub use matrix_market::{read_matrix_market, read_matrix_market_coo, write_matrix_market, MmioError};
 pub use xdmf::{write_xdmf, write_xdmf_mixed, xdmf_topology_code, XdmfField, XdmfCenter};
 pub use imported_workflow::{
