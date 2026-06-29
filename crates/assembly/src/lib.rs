@@ -69,6 +69,7 @@
 pub mod assembler;
 pub mod backend;
 pub mod bc;
+pub mod cahn_allen;
 pub mod contact;
 pub mod coefficient;
 pub mod complex;
