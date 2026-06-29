@@ -43,6 +43,7 @@ pub mod lagrange;
 pub mod nedelec;
 pub mod raviart_thomas;
 pub mod brezzi_douglas_marini;
+pub mod crouzeix_raviart;
 pub mod nurbs;
 pub mod tri6_geom;
 pub mod iga;
