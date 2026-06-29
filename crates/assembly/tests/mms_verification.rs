@@ -1775,3 +1775,39 @@ fn maxwell_3d_tet_nd2_convergence() {
     eprintln!("3D Maxwell TetND2 errors: {:?}", errors);
     assert!(errors[0].is_finite(), "TetND2 error not finite");
 }
+
+// ─── PyraND1 element matrix verification ────────────────────────────────────
+
+#[test]
+fn pyrand1_element_matrix_symmetric() {
+    use fem_element::VectorReferenceElement;
+    let ref_elem = fem_element::lagrange::factory::vec_ref_elem(
+        fem_element::lagrange::factory::VecFamily::Nedelec,
+        fem_element::lagrange::factory::ElemType::Pyramid,
+        1u8,
+    );
+    assert_eq!(ref_elem.n_dofs(), 8);
+    let n = 8;
+    let mut vals = vec![0.0; n * 3];
+    let mut curls = vec![0.0; n * 3];
+    let mut ke = vec![0.0_f64; n * n];
+    let quad = ref_elem.quadrature(3);
+    for (q, xi) in quad.points.iter().enumerate() {
+        let w = quad.weights[q];
+        ref_elem.eval_basis_vec(xi, &mut vals);
+        ref_elem.eval_curl(xi, &mut curls);
+        for i in 0..n { for j in 0..n {
+            let cc = (0..3).map(|d| curls[i*3+d] * curls[j*3+d]).sum::<f64>();
+            let mm = (0..3).map(|d| vals[i*3+d] * vals[j*3+d]).sum::<f64>();
+            ke[i * n + j] += w * (cc + mm);
+        }}
+    }
+    for i in 0..n { for j in 0..n {
+        assert!((ke[i * n + j] - ke[j * n + i]).abs() < 1e-12,
+            "PyraND1 elem matrix not symmetric at ({i},{j}): diff={}",
+            (ke[i*n+j] - ke[j*n+i]).abs());
+    }}
+    for i in 0..n {
+        assert!(ke[i * n + i] > 0.0, "PyraND1 diag {i} = {:.6e}", ke[i * n + i]);
+    }
+}
