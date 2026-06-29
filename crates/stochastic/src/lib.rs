@@ -32,6 +32,7 @@
 
 pub mod random_field;
 pub mod monte_carlo;
+pub mod polynomial_chaos;
 
 pub use random_field::{
     RandomField, KarhunenLoeveExpansion1D,
