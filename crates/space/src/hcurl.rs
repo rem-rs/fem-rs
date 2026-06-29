@@ -123,6 +123,8 @@ impl<M: MeshTopology> HCurlSpace<M> {
             (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => k * (k - 1),
             (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => 2 * k * (k - 1),
             (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => k * (k - 1) * (k - 2) / 2,
+            // Hex NDk (k≥2): face DOFs (12k(k-1)) + interior (3k(k-1)²), element-local for now
+            (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => 12 * k * (k - 1) + 3 * k * (k - 1) * (k - 1),
             _ => 0,
         };
         let n_local_faces = match cell_type {
@@ -594,8 +596,8 @@ mod tests {
     fn hcurl_dof_count_hex_nd2() {
         let mesh = OneHexMesh::unit();
         let space = HCurlSpace::new(mesh, 2);
-        assert_eq!(space.dofs_per_elem, 24);
-        assert_eq!(space.n_dofs(), 24);
+        assert_eq!(space.dofs_per_elem, 54, "HexND2: 24 edge + 30 face/interior");
+        assert_eq!(space.n_dofs(), 54);
     }
 
     #[test]
@@ -669,8 +671,8 @@ mod tests {
     fn hcurl_nd3_hex_dof_count() {
         let mesh = OneHexMesh::unit();
         let space = HCurlSpace::new(mesh, 3);
-        assert_eq!(space.dofs_per_elem, 36, "HexND3: 12 edges x 3");
-        assert_eq!(space.n_dofs(), 36);
+        assert_eq!(space.dofs_per_elem, 144, "HexND3: 36 edge + 108 face/interior");
+        assert_eq!(space.n_dofs(), 144);
     }
 
     #[test]
@@ -691,8 +693,8 @@ mod tests {
     fn hcurl_nd4_hex_dof_count() {
         let mesh = OneHexMesh::unit();
         let space = HCurlSpace::new(mesh, 4);
-        assert_eq!(space.dofs_per_elem, 48, "HexND4: 12 edges x 4");
-        assert_eq!(space.n_dofs(), 48);
+        assert_eq!(space.dofs_per_elem, 300, "HexND4: 48 edge + 252 face/interior");
+        assert_eq!(space.n_dofs(), 300);
     }
 
     #[test]
