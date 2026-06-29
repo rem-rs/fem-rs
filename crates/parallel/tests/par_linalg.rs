@@ -155,3 +155,59 @@ fn ras_pcg_converges_on_2_ranks() {
     assert_eq!(all.len(), 2);
     assert!(all.iter().all(|(_, c, _)| *c), "All ranks must converge");
 }
+
+// ── 5. Par MMS ──────────────────────────────────────────────────────────────
+
+#[test]
+fn par_mms_p1_two_ranks() {
+    use std::f64::consts::PI;
+    let src_fn = |x: &[f64]| 2.0*PI*PI*(PI*x[0]).sin()*(PI*x[1]).sin();
+    launcher(2).launch(move |comm| {
+        let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+        let pm = partition_simplex(&mesh, &comm);
+        let ls = H1Space::new(pm.local_mesh().clone(), 1);
+        let ps = ParallelFESpace::new(ls, &pm, comm.clone());
+        let diff = DiffusionIntegrator { kappa: 1.0 };
+        let mut a = ParAssembler::assemble_bilinear(&ps, &[&diff], 3);
+        let src = DomainSourceIntegrator::new(&src_fn);
+        let mut rhs = ParAssembler::assemble_linear(&ps, &[&src], 3);
+        let dp = ps.dof_partition();
+        for &d in &boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &[1,2,3,4]) {
+            let pid = dp.permute_dof(d) as usize;
+            if pid < dp.n_owned_dofs { a.apply_dirichlet_par(pid, 0.0, &mut rhs); }
+        }
+        let mut u = ParVector::zeros_from_space(&ps);
+        let cfg = SolverConfig { rtol: 1e-10, max_iter: 5000, verbose: false, ..SolverConfig::default() };
+        let res = fem_parallel::par_solve_cg(&a, &rhs, &mut u, &cfg).unwrap();
+        assert!(res.converged, "P1 2-rank MMS CG not converged");
+        if comm.is_root() { eprintln!("P1 2-rank MMS OK: {} iters", res.iterations); }
+    });
+}
+
+#[test]
+fn par_mms_p2_two_ranks() {
+    use std::f64::consts::PI;
+    let src_fn = |x: &[f64]| 2.0*PI*PI*(PI*x[0]).sin()*(PI*x[1]).sin();
+    launcher(2).launch(move |comm| {
+        let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+        let pm = partition_simplex(&mesh, &comm);
+        let lm = pm.local_mesh().clone();
+        let ls = H1Space::new(lm.clone(), 2);
+        let dm = fem_space::dof_manager::DofManager::new(&lm, 2);
+        let ps = ParallelFESpace::new_with_dof_manager(ls, &pm, &dm, comm.clone());
+        let diff = DiffusionIntegrator { kappa: 1.0 };
+        let mut a = ParAssembler::assemble_bilinear(&ps, &[&diff], 4);
+        let src = DomainSourceIntegrator::new(&src_fn);
+        let mut rhs = ParAssembler::assemble_linear(&ps, &[&src], 5);
+        let dp = ps.dof_partition();
+        for &d in &boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &[1,2,3,4]) {
+            let pid = dp.permute_dof(d) as usize;
+            if pid < dp.n_owned_dofs { a.apply_dirichlet_par(pid, 0.0, &mut rhs); }
+        }
+        let mut u = ParVector::zeros_from_space(&ps);
+        let cfg = SolverConfig { rtol: 1e-10, max_iter: 5000, verbose: false, ..SolverConfig::default() };
+        let res = fem_parallel::par_solve_cg(&a, &rhs, &mut u, &cfg).unwrap();
+        assert!(res.converged, "P2 2-rank MMS CG not converged");
+        if comm.is_root() { eprintln!("P2 2-rank MMS OK: {} iters", res.iterations); }
+    });
+}
