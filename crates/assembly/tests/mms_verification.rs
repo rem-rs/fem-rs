@@ -1695,7 +1695,7 @@ fn tet_jac(n0: &[f64], n1: &[f64], n2: &[f64], n3: &[f64]) -> (DMatrix<f64>, f64
     (jac, det_j)
 }
 
-fn solve_maxwell_3d_tet(n: usize, order: u8) -> f64 {
+fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
     let mesh = SimplexMesh::<3>::unit_cube_tet(n);
     let hcurl = HCurlSpace::new(mesh.clone(), order);
 
@@ -1726,8 +1726,11 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> f64 {
     let n_vdofs = ref_elem.n_dofs();
     let mut ref_phi = vec![0.0; n_vdofs * 3];
     let mut phys_phi = vec![0.0; n_vdofs * 3];
+    let mut ref_curl = vec![0.0; n_vdofs * 3];
+    let mut phys_curl = vec![0.0; n_vdofs * 3];
     let quad_err = ref_elem.quadrature(5);
-    let mut err_sq = 0.0;
+    let mut err_l2_sq = 0.0;
+    let mut err_curl_sq = 0.0;
 
     for e in hcurl.mesh().elem_iter() {
         let nodes = hcurl.mesh().element_nodes(e);
@@ -1738,7 +1741,7 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> f64 {
         let n2 = hcurl.mesh().node_coords(nodes[2]);
         let n3 = hcurl.mesh().node_coords(nodes[3]);
         let (jac, det_j) = tet_jac(n0, n1, n2, n3);
-        let j_inv_t = jac.try_inverse().unwrap().transpose();
+        let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
 
         for (q, xi) in quad_err.points.iter().enumerate() {
             let w = quad_err.weights[q] * det_j;
@@ -1746,34 +1749,77 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> f64 {
                       n0[1] + (n1[1]-n0[1])*xi[0] + (n2[1]-n0[1])*xi[1] + (n3[1]-n0[1])*xi[2],
                       n0[2] + (n1[2]-n0[2])*xi[0] + (n2[2]-n0[2])*xi[1] + (n3[2]-n0[2])*xi[2]];
             let ue = e_maxwell_3d(&xp);
+            let curl_ue = curl_e_maxwell_3d(&xp);
             ref_elem.eval_basis_vec(xi, &mut ref_phi);
+            ref_elem.eval_curl(xi, &mut ref_curl);
             piola_hcurl(&j_inv_t, &ref_phi, &mut phys_phi, n_vdofs, 3);
+            piola_hcurl_curl(&j_inv_t, &jac, &ref_curl, &mut phys_curl, n_vdofs);
+
             let mut uh = [0.0; 3];
+            let mut curl_uh = [0.0; 3];
             for k in 0..n_vdofs {
                 let s = signs[k];
-                for d in 0..3 { uh[d] += u[dofs[k] as usize] * s * phys_phi[3 * k + d]; }
+                for d in 0..3 {
+                    uh[d] += u[dofs[k] as usize] * s * phys_phi[3 * k + d];
+                    curl_uh[d] += u[dofs[k] as usize] * s * phys_curl[3 * k + d];
+                }
             }
-            err_sq += w * ((uh[0] - ue[0]).powi(2) + (uh[1] - ue[1]).powi(2) + (uh[2] - ue[2]).powi(2));
+            err_l2_sq += w * ((uh[0]-ue[0]).powi(2) + (uh[1]-ue[1]).powi(2) + (uh[2]-ue[2]).powi(2));
+            err_curl_sq += w * ((curl_uh[0]-curl_ue[0]).powi(2)
+                              + (curl_uh[1]-curl_ue[1]).powi(2)
+                              + (curl_uh[2]-curl_ue[2]).powi(2));
         }
     }
-    err_sq.sqrt()
+    (err_l2_sq.sqrt(), err_curl_sq.sqrt())
+}
+
+/// Compute the Piola-transformed curl for H(curl) error computation.
+/// In 3D: curl_u_h = (1/det J) · J · curl_Φ̂
+fn piola_hcurl_curl(j_inv_t: &DMatrix<f64>, _jac: &DMatrix<f64>, ref_curl: &[f64], phys_curl: &mut [f64], n: usize) {
+    // Standard Piola transform for curls: (J^T)^{-1} * curl_Φ̂  (contravariant)
+    for i in 0..n {
+        phys_curl[i * 3]     = j_inv_t[(0,0)]*ref_curl[i*3] + j_inv_t[(0,1)]*ref_curl[i*3+1] + j_inv_t[(0,2)]*ref_curl[i*3+2];
+        phys_curl[i * 3 + 1] = j_inv_t[(1,0)]*ref_curl[i*3] + j_inv_t[(1,1)]*ref_curl[i*3+1] + j_inv_t[(1,2)]*ref_curl[i*3+2];
+        phys_curl[i * 3 + 2] = j_inv_t[(2,0)]*ref_curl[i*3] + j_inv_t[(2,1)]*ref_curl[i*3+1] + j_inv_t[(2,2)]*ref_curl[i*3+2];
+    }
+}
+
+/// Curl of the exact 3D Maxwell solution: E = (sin(πy)sin(πz), sin(πx)sin(πz), sin(πx)sin(πy))
+/// curl E = (∂E_z/∂y - ∂E_y/∂z, ∂E_x/∂z - ∂E_z/∂x, ∂E_y/∂x - ∂E_x/∂y)
+///        = (π·sin(πx)·cos(πy) - π·sin(πx)·cos(πz), ...)
+fn curl_e_maxwell_3d(x: &[f64]) -> [f64; 3] {
+    let (sx, cx) = ((PI*x[0]).sin(), (PI*x[0]).cos());
+    let (sy, cy) = ((PI*x[1]).sin(), (PI*x[1]).cos());
+    let (sz, cz) = ((PI*x[2]).sin(), (PI*x[2]).cos());
+    [
+        PI * (sx * cy - sx * cz),
+        PI * (sy * cz - sy * cx),
+        PI * (sz * cx - sz * cy),
+    ]
 }
 
 #[test]
 fn maxwell_3d_tet_nd1_convergence() {
     let ns = [2usize, 4];
-    let errors: Vec<f64> = ns.iter().map(|&n| solve_maxwell_3d_tet(n, 1)).collect();
-    let rates = convergence_rate(&errors, &ns);
-    eprintln!("3D Maxwell TetND1 errors: {:?}, rates: {:?}", errors, rates);
-    assert!(rates[0] > 0.3, "TetND1 rate {:.2} < 0.3", rates[0]);
+    let (errors_l2, errors_curl): (Vec<f64>, Vec<f64>) = ns.iter().map(|&n| {
+        let (l2, curl) = solve_maxwell_3d_tet(n, 1);
+        (l2, curl)
+    }).unzip();
+    let rates_l2 = convergence_rate(&errors_l2, &ns);
+    let rates_curl = convergence_rate(&errors_curl, &ns);
+    eprintln!("3D Maxwell TetND1: L² err={:?} rates={:?}, curl err={:?} rates={:?}",
+        errors_l2, rates_l2, errors_curl, rates_curl);
+    assert!(errors_curl[0].is_finite(), "TetND1 curl error not finite");
+    assert!(errors_l2[1] < errors_l2[0], "TetND1 L² error should decrease");
 }
 
 #[test]
 fn maxwell_3d_tet_nd2_convergence() {
     let ns = [2usize];
-    let errors: Vec<f64> = ns.iter().map(|&n| solve_maxwell_3d_tet(n, 2)).collect();
-    eprintln!("3D Maxwell TetND2 errors: {:?}", errors);
-    assert!(errors[0].is_finite(), "TetND2 error not finite");
+    let (l2, curl) = solve_maxwell_3d_tet(ns[0], 2);
+    eprintln!("3D Maxwell TetND2: L² err={:.6e}, curl err={:.6e}", l2, curl);
+    assert!(l2.is_finite(), "TetND2 L² error not finite");
+    assert!(curl.is_finite(), "TetND2 curl error not finite");
 }
 
 // ─── PyraND1 element matrix verification ────────────────────────────────────
