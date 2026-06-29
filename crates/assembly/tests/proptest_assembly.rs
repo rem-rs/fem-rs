@@ -64,7 +64,7 @@ proptest! {
     fn elasticity_symmetric_across_meshes(n in (2usize..=5).prop_map(|x| x)) {
         let mesh = SimplexMesh::<2>::unit_square_tri(n);
         let space = VectorH1Space::new(mesh, 1, 2);
-        let e = Assembler::assemble_bilinear(&space, &[&ElasticityIntegrator { lambda: 1.0, mu: 1.0 }], 3);
+        let e = Assembler::assemble_bilinear(&space, &[&ElasticityIntegrator::new(1.0, 1.0)], 3);
         check_symmetric(&e);
     }
 }

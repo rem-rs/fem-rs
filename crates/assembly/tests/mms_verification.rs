@@ -170,7 +170,7 @@ fn solve_elasticity_2d(n: usize, order: u8) -> f64 {
     let n_scalar = space.n_scalar_dofs();
 
     // Stiffness: use built-in ElasticityIntegrator + Assembler
-    let elast = ElasticityIntegrator { lambda: 1.0, mu: 1.0 };
+    let elast = ElasticityIntegrator::new(1.0, 1.0);
     let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 2 * order + 1);
 
     // RHS: manually assemble vector body force
@@ -238,7 +238,7 @@ fn elasticity_patch_test_linear_p1() {
     let space = VectorH1Space::new(mesh.clone(), 1, 2);
     let n_scalar = space.n_scalar_dofs();
 
-    let elast = ElasticityIntegrator { lambda: 1.0, mu: 1.0 };
+    let elast = ElasticityIntegrator::new(1.0, 1.0);
     let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 2);
     let mut rhs = vec![0.0; space.n_dofs()];
 
@@ -1506,7 +1506,7 @@ fn solve_elasticity_2d_h1(n: usize, order: u8) -> (f64, f64) {
     let space = VectorH1Space::new(mesh.clone(), order, 2);
     let n_scalar = space.n_scalar_dofs();
 
-    let elast = ElasticityIntegrator { lambda: 1.0, mu: 1.0 };
+    let elast = ElasticityIntegrator::new(1.0, 1.0);
     let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 2 * order + 1);
 
     let mut rhs = vec![0.0; space.n_dofs()];

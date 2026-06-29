@@ -164,7 +164,7 @@ pub fn solve_thermoelastic_staggered<M: MeshTopology + Clone>(
 
     // 2. Assemble elasticity matrix
     let mut k_u = Assembler::assemble_bilinear(
-        &disp_space, &[&ElasticityIntegrator { lambda, mu }], quad_order,
+        &disp_space, &[&ElasticityIntegrator::new(lambda, mu)], quad_order,
     );
 
     // 3. Compute thermal expansion RHS
