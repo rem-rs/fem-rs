@@ -226,6 +226,29 @@ fn boundary_face_outward_normal_2d(mesh: &SimplexMesh<2>, face: u32) -> ([f64; 2
 }
 
 /// Compute net boundary flux \int_{dOmega} grad(u)·n ds for 2D H1 P1 field.
+// ── Generic GetProlongation ──────────────────────────────────────────────────
+
+/// Build H1 prolongation matrix P where fine = P * coarse.
+///
+/// Works for H1 spaces on SimplexMesh<2> (TriP1/TriP2) and SimplexMesh<3> (TetP1).
+/// Each fine DOF coordinate is located in the coarse mesh and interpolated
+/// via barycentric weights.
+pub fn get_prolongation_h1(
+    coarse_space: &H1Space<SimplexMesh<2>>,
+    fine_space: &H1Space<SimplexMesh<2>>,
+    tol: f64,
+) -> (CsrMatrix<f64>, TransferStats) {
+    build_prolongation_h1(coarse_space, fine_space, tol)
+}
+
+pub fn get_prolongation_h1_3d(
+    coarse_space: &H1Space<SimplexMesh<3>>,
+    fine_space: &H1Space<SimplexMesh<3>>,
+    tol: f64,
+) -> (CsrMatrix<f64>, TransferStats) {
+    build_prolongation_h1_3d(coarse_space, fine_space, tol)
+}
+
 pub fn net_boundary_flux_h1_p1_2d(
     space: &H1Space<SimplexMesh<2>>,
     values: &[f64],

@@ -196,6 +196,10 @@ pub use iga_assembler::{
 pub use assembler_iga_fespace::{Iga1dBilinearItem, Iga2dBilinearItem};
 pub use postprocess::{compute_element_gradients, compute_h1_error, compute_kelly_indicators, recover_gradient_nodal};
 pub use transfer::{
+    build_prolongation_h1,
+    build_prolongation_h1_3d,
+    get_prolongation_h1,
+    get_prolongation_h1_3d,
     net_boundary_flux_h1_p1_2d,
     transfer_h1_p1_nonmatching,
     transfer_h1_p1_nonmatching_3d,
