@@ -112,6 +112,7 @@ pub mod comm;
 pub mod dof_partition;
 pub mod env;
 pub mod ghost;
+pub mod gpu_mpi;
 pub mod launcher;
 pub mod mesh_serde;
 pub mod metis;
