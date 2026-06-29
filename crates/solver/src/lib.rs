@@ -1393,26 +1393,24 @@ pub use multirate::{
 
 #[cfg(test)]
 mod linlvo_integration_tests {
-    use linlvo::{DenseVec, LinearOperator};
-    use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix as NaCsr};
+    use fem_linalg::CsrMatrix;
 
     #[test]
     fn nalgebra_csr_linear_operator_spmv() {
         // 2x2 matrix: [2 1; 0 3]
-        let mut coo = CooMatrix::<f64>::new(2, 2);
-        coo.push(0, 0, 2.0);
-        coo.push(0, 1, 1.0);
-        coo.push(1, 1, 3.0);
-        let a: NaCsr<f64> = NaCsr::from(&coo);
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(2, 2);
+        coo.add(0, 0, 2.0);
+        coo.add(0, 1, 1.0);
+        coo.add(1, 1, 3.0);
+        let a: CsrMatrix<f64> = coo.into_csr();
 
-        let x = DenseVec::from_vec(vec![1.0, 2.0]);
-        let mut y = DenseVec::zeros(2);
+        let x = vec![1.0, 2.0];
+        let mut y = vec![0.0; 2];
 
-        a.apply(&x, &mut y);
+        a.spmv(&x, &mut y);
 
-        let ys = y.as_slice();
-        assert!((ys[0] - 4.0).abs() < 1e-12);
-        assert!((ys[1] - 6.0).abs() < 1e-12);
+        assert!((y[0] - 4.0).abs() < 1e-12);
+        assert!((y[1] - 6.0).abs() < 1e-12);
     }
 }
 pub use ode::{
@@ -2182,5 +2180,41 @@ mod ams_ads_tests {
         let err: f64 = ax.iter().zip(rhs.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
         let rhs_norm: f64 = rhs.iter().map(|b| b.powi(2)).sum::<f64>().sqrt();
         assert!(err / rhs_norm < 1e-6, "relative residual = {}", err / rhs_norm);
+    }
+
+    #[test]
+    fn pcg_ams_p1_nd2_converges() {
+        // AMS with H^1 order 1 + H(curl) order 2 (ND2).
+        // Tests that gradient() works with mismatched orders (h1=1, hcurl=2).
+        let n = 4;
+        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let h1    = H1Space::new(mesh.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh.clone(), 2); // ND2
+        let ndofs = hcurl.n_dofs();
+
+        let mut a = VectorAssembler::assemble_bilinear(
+            &hcurl,
+            &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl)
+            .expect("gradient P1->ND2 should succeed");
+
+        let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
+        let mut rhs = vec![1.0_f64; ndofs];
+        for &dof in &bnd {
+            a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+        }
+
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
+        let cfg = AmsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() },
+            ams_cfg: Default::default(),
+        };
+        let mut x = vec![0.0_f64; ndofs];
+        let res = solve_pcg_ams(&a, &g_linlvo, &rhs, &mut x, &cfg)
+            .expect("PCG+AMS (P1+ND2) returned error");
+        assert!(res.converged, "PCG+AMS (P1+ND2) did not converge in {} iters", res.iterations);
+        assert!(res.final_residual < 1e-6, "residual = {}", res.final_residual);
     }
 }

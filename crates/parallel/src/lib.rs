@@ -128,6 +128,8 @@ pub mod par_space;
 pub mod par_vector;
 pub mod par_vector_assembler;
 pub mod partition;
+pub mod rcb;
+pub mod sfc;
 pub mod shared_entities;
 
 #[cfg(test)]

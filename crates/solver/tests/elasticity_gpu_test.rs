@@ -54,7 +54,7 @@ fn elasticity_gpu_matches_cpu() {
     let gpu_mat = gpu_coo.into_csr();
 
     // CPU assembly
-    let cpu_integ = ElasticityIntegrator { lambda: lambda as f64, mu: mu as f64 };
+    let cpu_integ = ElasticityIntegrator::new(lambda as f64, mu as f64);
     let cpu_mat = Assembler::assemble_bilinear(&space, &[&cpu_integ], 3);
 
     assert_eq!(gpu_mat.nrows, cpu_mat.nrows);

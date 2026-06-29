@@ -10,17 +10,15 @@
 //! cargo run --example mfem_mc_random_field --release -- --n 16 --samples 200
 //! ```
 
-use std::f64::consts::PI;
-
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::{SimplexMesh, MeshTopology};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_stochastic::{
     Covariance1D, ExponentialCovariance1D, KarhunenLoeveExpansion1D,
-    MonteCarloConfig, run_monte_carlo,
+    RandomField, MonteCarloConfig, run_monte_carlo,
 };
 use fem_space::{
     H1Space, fe_space::FESpace,
@@ -82,7 +80,7 @@ fn main() {
         // For this simple demo, we use a single DiffusionIntegrator and scale
         // with the average κ. A more accurate approach would use Nitsche or
         // element-wise assembly.
-        let kappa_mean: f64 = log_kappa.iter().map(|lk| lk.exp()).sum::<f64>() / log_kappa.len() as f64;
+        let kappa_mean: f64 = log_kappa.iter().map(|&lk| lk.exp()).sum::<f64>() / log_kappa.len() as f64;
 
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: kappa_mean }], quad);
 

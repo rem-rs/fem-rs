@@ -239,23 +239,17 @@ impl DiscreteLinearOperator {
             1 | 2 => {}
             o => return Err(DiscreteOpError::UnsupportedH1Order(o)),
         }
+        // H1 order 1 works with any HCurl order ≥ 1 (topological edge-vertex incidence).
+        if h1_order == 1 {
+            if hcurl_order < 1 {
+                return Err(DiscreteOpError::UnsupportedHCurlOrder { op: "gradient", order: hcurl_order });
+            }
+            return Self::gradient_p1_nd1(h1_space, hcurl_space);
+        }
+        // h1_order == 2
         match hcurl_order {
-            1 | 2 => {}
-            o => return Err(DiscreteOpError::UnsupportedHCurlOrder { op: "gradient", order: o }),
-        }
-        // H1 order k requires H(curl) order k.
-        if h1_order != hcurl_order {
-            return Err(DiscreteOpError::IncompatibleOrders {
-                op: "gradient",
-                h1_order,
-                hcurl_order,
-            });
-        }
-
-        match h1_order {
-            1 => Self::gradient_p1_nd1(h1_space, hcurl_space),
             2 => Self::gradient_p2_nd2(h1_space, hcurl_space),
-            _ => unreachable!(),
+            o => Err(DiscreteOpError::UnsupportedHCurlOrder { op: "gradient", order: o }),
         }
     }
 
@@ -2248,20 +2242,18 @@ mod tests {
 
     /// Test: bad order combination returns an error instead of panicking.
     ///
-    /// P2 (order 2) + ND1 (order 1) are incompatible; the dispatcher should
-    /// return `IncompatibleOrders` rather than panicking or silently producing
-    /// wrong results.
+    /// H1 P2 (order 2) + ND1 (order 1): ND1 is unsupported for H1 order 2.
     #[test]
     fn gradient_bad_order_returns_error() {
         let mesh = SimplexMesh::<2>::unit_square_tri(2);
         let h1 = H1Space::new(mesh, 2); // P2
         let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
-        let hcurl = HCurlSpace::new(mesh2, 1); // ND1 — mismatch with P2
+        let hcurl = HCurlSpace::new(mesh2, 1); // ND1
 
         let result = DiscreteLinearOperator::gradient(&h1, &hcurl);
         assert!(
-            matches!(result, Err(DiscreteOpError::IncompatibleOrders { .. })),
-            "expected IncompatibleOrders for P2+ND1, got {:?}", result
+            matches!(result, Err(DiscreteOpError::UnsupportedHCurlOrder { .. })),
+            "expected UnsupportedHCurlOrder for P2+ND1, got {:?}", result
         );
     }
 
@@ -2505,18 +2497,18 @@ mod tests {
         assert!(max_err < 1e-8, "ND2->P2: curl(x^2,xy) should be y, max error = {max_err}");
     }
 
-    /// Test: Gradient P2→ND2 — incompatible orders return an error.
+    /// Gradient P2→ND1: unsupported HCurl order returns error.
     #[test]
     fn gradient_incompatible_orders_returns_error() {
         let mesh  = SimplexMesh::<2>::unit_square_tri(2);
-        let h1    = H1Space::new(mesh, 1);  // P1
+        let h1    = H1Space::new(mesh, 2); // P2
         let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
-        let hcurl = HCurlSpace::new(mesh2, 2); // ND2 — mismatch
+        let hcurl = HCurlSpace::new(mesh2, 1); // ND1
 
         let result = DiscreteLinearOperator::gradient(&h1, &hcurl);
         assert!(
-            matches!(result, Err(DiscreteOpError::IncompatibleOrders { .. })),
-            "expected IncompatibleOrders, got {:?}", result
+            matches!(result, Err(DiscreteOpError::UnsupportedHCurlOrder { .. })),
+            "expected UnsupportedHCurlOrder for P2+ND1, got {:?}", result
         );
     }
 
