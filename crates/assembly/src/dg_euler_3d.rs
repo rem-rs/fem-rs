@@ -3,6 +3,10 @@ use fem_element::lagrange::{TetP1, TriP1};
 use fem_element::ReferenceElement;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EulerFluxKind { LaxFriedrichs, Roe, Hllc }
+impl Default for EulerFluxKind { fn default() -> Self { EulerFluxKind::LaxFriedrichs } }
+
 pub struct Euler3D { pub gamma: f64 }
 impl Default for Euler3D { fn default() -> Self { Self { gamma: 1.4 } } }
 impl Euler3D {
@@ -15,11 +19,58 @@ impl Euler3D {
     pub fn max_speed(&self,q:&[f64;5])->f64{let(r,u,v,w,p)=self.cons_to_prim(q);let a=(self.gamma*p/r).sqrt();(u*u+v*v+w*w).sqrt()+a}
     pub fn lax_friedrichs_flux(&self,ql:&[f64;5],qr:&[f64;5],n:&[f64;3])->[f64;5]{let fl=self.flux_n(ql,n);let fr=self.flux_n(qr,n);let a=self.max_speed(ql).max(self.max_speed(qr));[0.5*(fl[0]+fr[0])-0.5*a*(qr[0]-ql[0]),0.5*(fl[1]+fr[1])-0.5*a*(qr[1]-ql[1]),0.5*(fl[2]+fr[2])-0.5*a*(qr[2]-ql[2]),0.5*(fl[3]+fr[3])-0.5*a*(qr[3]-ql[3]),0.5*(fl[4]+fr[4])-0.5*a*(qr[4]-ql[4])]}
     pub fn roe_flux(&self,ql:&[f64;5],qr:&[f64;5],n:&[f64;3])->[f64;5]{self.lax_friedrichs_flux(ql,qr,n)}
+
+    pub fn hllc_flux(&self, ql: &[f64; 5], qr: &[f64; 5], n: &[f64; 3]) -> [f64; 5] {
+        let fl = self.flux_n(ql, n);
+        let fr = self.flux_n(qr, n);
+        let (rl, ul, vl, wl, pl) = self.cons_to_prim(ql);
+        let (rr, ur, vr, wr, pr) = self.cons_to_prim(qr);
+        let unl = ul*n[0] + vl*n[1] + wl*n[2];
+        let unr = ur*n[0] + vr*n[1] + wr*n[2];
+        let al = (self.gamma*pl/rl).sqrt();
+        let ar = (self.gamma*pr/rr).sqrt();
+        let sl = (unl - al).min(unr - ar);
+        let sr = (unl + al).max(unr + ar);
+        if sl >= 0.0 { return fl; }
+        if sr <= 0.0 { return fr; }
+        let raw = rr*(sr-unr) - rl*(sl-unl);
+        let denom = if raw.abs() < 1e-14 { 1e-14_f64.copysign(raw) } else { raw };
+        let sm = (rr*unr*(sr-unr) - rl*unl*(sl-unl) + pl - pr) / denom;
+        let star = |q: &[f64;5], r: f64, u: f64, v: f64, w: f64, un: f64, p: f64, sk: f64| -> [f64;5] {
+            let dsm = sk - sm;
+            let safe = if dsm.abs() < 1e-14 { 1e-14_f64.copysign(dsm) } else { dsm };
+            let fac = r * (sk - un) / safe;
+            let ek = q[4];
+            [
+                fac,
+                fac*(n[0]*sm + u - n[0]*un),
+                fac*(n[1]*sm + v - n[1]*un),
+                fac*(n[2]*sm + w - n[2]*un),
+                fac*(ek/r + (sm-un)*(sm + p/(r*(sk-un)))),
+            ]
+        };
+        if sm >= 0.0 {
+            let qst = star(ql, rl, ul, vl, wl, unl, pl, sl);
+            [fl[0]+sl*(qst[0]-ql[0]), fl[1]+sl*(qst[1]-ql[1]), fl[2]+sl*(qst[2]-ql[2]), fl[3]+sl*(qst[3]-ql[3]), fl[4]+sl*(qst[4]-ql[4])]
+        } else {
+            let qst = star(qr, rr, ur, vr, wr, unr, pr, sr);
+            [fr[0]+sr*(qst[0]-qr[0]), fr[1]+sr*(qst[1]-qr[1]), fr[2]+sr*(qst[2]-qr[2]), fr[3]+sr*(qst[3]-qr[3]), fr[4]+sr*(qst[4]-qr[4])]
+        }
+    }
+
+    pub fn numerical_flux(&self, kind: EulerFluxKind, ql: &[f64;5], qr: &[f64;5], n: &[f64;3]) -> [f64;5] {
+        match kind {
+            EulerFluxKind::LaxFriedrichs => self.lax_friedrichs_flux(ql, qr, n),
+            EulerFluxKind::Roe => self.roe_flux(ql, qr, n),
+            EulerFluxKind::Hllc => self.hllc_flux(ql, qr, n),
+        }
+    }
 }
 
-pub struct DgEuler3D<M: MeshTopology + Send + Sync> { mesh: M, euler: Euler3D, n_elems: usize, n_dofs: usize }
+pub struct DgEuler3D<M: MeshTopology + Send + Sync> { mesh: M, euler: Euler3D, n_elems: usize, n_dofs: usize, pub flux_kind: EulerFluxKind }
 impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
-    pub fn new(mesh: M) -> Self { let n = mesh.n_elements(); Self { mesh, euler: Euler3D::default(), n_elems: n, n_dofs: n * 4 * 5 } }
+    pub fn new(mesh: M) -> Self { let n = mesh.n_elements(); Self { mesh, euler: Euler3D::default(), n_elems: n, n_dofs: n * 4 * 5, flux_kind: EulerFluxKind::LaxFriedrichs } }
+    pub fn with_flux(mut self, kind: EulerFluxKind) -> Self { self.flux_kind = kind; self }
     fn idx(&self, e: u32, c: usize, ld: usize) -> usize { (e as usize * 4 + ld) * 5 + c }
     pub fn rhs(&self, u: &[f64]) -> Vec<f64> {
         let euler = &self.euler; let mut du = vec![0.0; self.n_dofs];
@@ -83,7 +134,7 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
                 };
                 tet.eval_basis(&xil, &mut phi); let mut ul = [0.0;5]; for i in 0..4 { for c in 0..5 { ul[c] += phi[i]*u[self.idx(el,c,i)]; } }
                 tet.eval_basis(&xir, &mut phi); let mut ur = [0.0;5]; for i in 0..4 { for c in 0..5 { ur[c] += phi[i]*u[self.idx(er,c,i)]; } }
-                let fstar = euler.lax_friedrichs_flux(&ul, &ur, &[nx, ny, nz]);
+                let fstar = euler.numerical_flux(self.flux_kind, &ul, &ur, &[nx, ny, nz]);
                 tet.eval_basis(&xil, &mut phi); for i in 0..4 { for c in 0..5 { du[self.idx(el,c,i)] -= w*phi[i]*fstar[c]; } }
                 tet.eval_basis(&xir, &mut phi); for i in 0..4 { for c in 0..5 { du[self.idx(er,c,i)] += w*phi[i]*fstar[c]; } }
             }
@@ -107,7 +158,7 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
                     let (r, uv, vv, wv, p) = euler.cons_to_prim(&uqp);
                     let un = uv*nx + vv*ny + wv*nz;
                     let qref = euler.prim_to_cons(r, uv-2.*un*nx, vv-2.*un*ny, wv-2.*un*nz, p);
-                    let fstar = euler.lax_friedrichs_flux(&uqp, &qref, &[nx, ny, nz]);
+                    let fstar = euler.numerical_flux(self.flux_kind, &uqp, &qref, &[nx, ny, nz]);
                     for i in 0..4 { for c in 0..5 { du[self.idx(e,c,i)] -= w*phi[i]*fstar[c]; } }
                 }
             }
@@ -147,5 +198,53 @@ mod tests {
         for e in 0..dg.n_elems as u32 { for i in 0..4 { let c = euler.prim_to_cons(1.0, 0.5, 0.0, 0.0, 1.0); for v in 0..5 { u[dg.idx(e,v,i)] = c[v]; } } }
         let du = dg.rhs(&u);
         for v in &du { assert!(v.is_finite(), "non-finite RHS"); }
+    }
+
+    #[test]
+    fn hllc_consistent_at_uniform_state() {
+        let e = Euler3D::default();
+        let q = e.prim_to_cons(1.0, 0.3, 0.2, 0.1, 1.0);
+        let n = [1.0_f64, 0.0, 0.0];
+        let f_hllc = e.hllc_flux(&q, &q, &n);
+        let f_lf = e.lax_friedrichs_flux(&q, &q, &n);
+        let f_phy = e.flux_n(&q, &n);
+        for i in 0..5 {
+            assert!((f_hllc[i] - f_phy[i]).abs() < 1e-10, "HLLC consistency violated at i={i}: {:?} vs {:?}", f_hllc[i], f_phy[i]);
+            assert!((f_lf[i]  - f_phy[i]).abs() < 1e-10, "LF consistency violated at i={i}");
+        }
+    }
+
+    #[test]
+    fn hllc_sod_shock_returns_finite() {
+        // Sod tube initial states (1D, n = x-axis).
+        let e = Euler3D::default();
+        let ql = e.prim_to_cons(1.0,   0.0, 0.0, 0.0, 1.0);
+        let qr = e.prim_to_cons(0.125, 0.0, 0.0, 0.0, 0.1);
+        let n = [1.0_f64, 0.0, 0.0];
+        let f_hllc = e.hllc_flux(&ql, &qr, &n);
+        let f_lf   = e.lax_friedrichs_flux(&ql, &qr, &n);
+        for i in 0..5 {
+            assert!(f_hllc[i].is_finite(), "HLLC Sod flux non-finite at i={i}");
+            assert!(f_lf[i].is_finite(),   "LF Sod flux non-finite at i={i}");
+        }
+        // HLLC should differ from LF on a strong discontinuity (sanity).
+        let diff: f64 = (0..5).map(|i| (f_hllc[i] - f_lf[i]).abs()).sum();
+        assert!(diff > 1e-3, "HLLC should differ from LF on a shock; got diff={diff:.3e}");
+    }
+
+    #[test]
+    fn dg_euler_3d_with_hllc_runs() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let dg = DgEuler3D::new(mesh).with_flux(EulerFluxKind::Hllc);
+        let euler = Euler3D::default();
+        let mut u = vec![0.0; dg.n_dofs];
+        for e in 0..dg.n_elems as u32 {
+            for i in 0..4 {
+                let c = euler.prim_to_cons(1.0, 0.2, 0.1, 0.0, 1.0);
+                for v in 0..5 { u[dg.idx(e,v,i)] = c[v]; }
+            }
+        }
+        let du = dg.rhs(&u);
+        for v in &du { assert!(v.is_finite(), "HLLC DG RHS non-finite"); }
     }
 }
