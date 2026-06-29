@@ -26,6 +26,37 @@ impl EdgeKey {
     }
 }
 
+// ─── Pk helper: edge DOFs ────────────────────────────────────────────────────
+
+/// Get or create `n_dofs` edge DOFs for a canonical edge.
+/// Returns DOFs in order from `a`→`b` (reversed if the call arguments are reversed).
+fn get_edge_dofs_pk(
+    a: NodeId, b: NodeId,
+    next: &mut DofId,
+    map: &mut HashMap<EdgeKey, Vec<DofId>>,
+    n_dofs: usize,
+) -> Vec<DofId> {
+    let key = EdgeKey::new(a, b);
+    let dofs = map.entry(key).or_insert_with(|| {
+        (0..n_dofs).map(|_| { let d = *next; *next += 1; d }).collect()
+    });
+    if a == key.0 { dofs.clone() } else { let mut r = dofs.clone(); r.reverse(); r }
+}
+
+/// Get or create `n_dofs` face DOFs for a canonical triangular face.
+fn get_face_dofs_pk(
+    a: NodeId, b: NodeId, c: NodeId,
+    next: &mut DofId,
+    map: &mut HashMap<FaceKey, Vec<DofId>>,
+    n_dofs: usize,
+) -> Vec<DofId> {
+    let key = FaceKey::new(a, b, c);
+    let dofs = map.entry(key).or_insert_with(|| {
+        (0..n_dofs).map(|_| { let d = *next; *next += 1; d }).collect()
+    });
+    dofs.clone()
+}
+
 // ─── FaceKey ─────────────────────────────────────────────────────────────────
 
 /// A canonical (sorted) triangular face key for deduplication.
@@ -149,10 +180,21 @@ impl DofManager {
                     if npe == 6 { return Self::build_p3_prism(mesh); }
                     if npe == 5 { return Self::build_p3_pyramid(mesh); }
                 }
+                // Quad Q3 / Hex Q3 via general pk path
+                if mesh.n_elements() > 0 {
+                    let npe = mesh.element_nodes(0).len();
+                    if npe == 4 && mesh.dim() == 2 { return Self::build_pk_quad(mesh, order); }
+                    if npe == 8 && mesh.dim() == 3 { return Self::build_pk_hex(mesh, order); }
+                }
                 Self::build_p3(mesh)
             }
             _ => {
                 // General arbitrary-order path for p >= 4
+                if mesh.n_elements() > 0 {
+                    let npe = mesh.element_nodes(0).len();
+                    if npe == 4 && mesh.dim() == 2 { return Self::build_pk_quad(mesh, order); }
+                    if npe == 8 && mesh.dim() == 3 { return Self::build_pk_hex(mesh, order); }
+                }
                 Self::build_pk(mesh, order)
             }
         }
@@ -1065,6 +1107,198 @@ impl DofManager {
             bubble_dof_start:n_dofs,n_volume_dofs:0,elem_orders:None,}
     }
 
+    // ─── Pk for 2-D Quad (tensor-product Qk) ──────────────────────────────────
+    //
+    // DOF ordering per element (matching QuadQk):
+    //   [0..3] = vertices in CCW order
+    //   [4..4+(p-1)*4) = edge DOFs: bottom, right, top, left, (p-1) per edge
+    //   remaining = interior DOFs in tensor-product (p-1)×(p-1) layout
+
+    fn build_pk_quad<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        let p = order as usize;
+        assert!(p >= 3, "build_pk_quad: order must be >= 3");
+        let dim = 2usize;
+        let n_nodes = mesh.n_nodes();
+        let n_elems = mesh.n_elements();
+        let edge_dofs_per = p - 1;
+        let interior_dofs_per = (p - 1) * (p - 1);
+        let n_verts = 4;
+        let n_edges = 4;
+        let dofs_per_elem = n_verts + n_edges * edge_dofs_per + interior_dofs_per;
+        let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
+        let mut next_dof = n_nodes as DofId;
+        let mut dofs_flat = vec![0u32; n_elems as usize * dofs_per_elem];
+
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            assert!(ns.len() >= 4);
+            let base = e as usize * dofs_per_elem;
+            dofs_flat[base] = ns[0]; dofs_flat[base + 1] = ns[1];
+            dofs_flat[base + 2] = ns[2]; dofs_flat[base + 3] = ns[3];
+            let edges = [(ns[0], ns[1]), (ns[1], ns[2]), (ns[2], ns[3]), (ns[3], ns[0])];
+            let mut off = 4;
+            for &(a, b) in &edges {
+                let ed = get_edge_dofs_pk(a, b, &mut next_dof, &mut edge_pk_map, edge_dofs_per);
+                for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
+                off += edge_dofs_per;
+            }
+            for _ in 0..interior_dofs_per {
+                dofs_flat[base + off] = next_dof; next_dof += 1; off += 1;
+            }
+        }
+
+        let n_dofs = next_dof as usize;
+        let mut dof_coords = vec![0.0; n_dofs * dim];
+        for n in 0..n_nodes as u32 {
+            let c = mesh.node_coords(n);
+            let base = n as usize * dim;
+            dof_coords[base..base + dim].copy_from_slice(c);
+        }
+        for (&EdgeKey(a, b), dofs) in &edge_pk_map {
+            let ca = mesh.node_coords(a); let cb = mesh.node_coords(b);
+            for (k, &did) in dofs.iter().enumerate() {
+                let t = (k + 1) as f64 / (edge_dofs_per + 1) as f64;
+                let base = did as usize * dim;
+                for d in 0..dim { dof_coords[base + d] = (1.0 - t) * ca[d] + t * cb[d]; }
+            }
+        }
+        // Interior DOFs: tensor-product coordinates using reference element
+        if interior_dofs_per > 0 {
+            use fem_element::lagrange::factory::{ref_elem, ElemType};
+            let factory = ref_elem(ElemType::Quad, order);
+            let ref_coords = factory.dof_coords();
+            let int_start = n_verts + edge_pk_map.len() * edge_dofs_per;
+            for e in 0..n_elems as u32 {
+                let ns = mesh.element_nodes(e);
+                for k in 0..interior_dofs_per {
+                    let did = (int_start + e as usize * interior_dofs_per + k) as u32;
+                    let rc = &ref_coords[n_verts + n_edges * edge_dofs_per + k];
+                    let c0 = mesh.node_coords(ns[0]); let c1 = mesh.node_coords(ns[1]);
+                    let c2 = mesh.node_coords(ns[2]); let c3 = mesh.node_coords(ns[3]);
+                    let u = rc[0]; let v = rc[1];
+                    let base = did as usize * dim;
+                    for d in 0..dim {
+                        dof_coords[base + d] = (1.0-u)*(1.0-v)*c0[d] + u*(1.0-v)*c1[d]
+                            + u*v*c2[d] + (1.0-u)*v*c3[d];
+                    }
+                }
+            }
+        }
+
+        DofManager {
+            order, n_dofs, dofs_flat, dofs_per_elem, elem_dof_offsets: None, dof_coords, dim,
+            n_vertex_dofs: n_nodes,
+            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), edge_pk_map,
+            face_pk_map: HashMap::new(), quad_face_pk_map: HashMap::new(),
+            bubble_dof_start: n_dofs, n_volume_dofs: 0, elem_orders: None,
+        }
+    }
+
+    // ─── Pk for 3-D Hex (tensor-product Qk) ───────────────────────────────────
+
+    fn build_pk_hex<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        let p = order as usize;
+        assert!(p >= 3, "build_pk_hex: order must be >= 3");
+        let dim = 3usize;
+        let n_nodes = mesh.n_nodes();
+        let n_elems = mesh.n_elements();
+        let edge_dofs_per = p - 1;
+        let face_dofs_per = (p - 1) * (p - 1);
+        let volume_dofs_per = (p - 1) * (p - 1) * (p - 1);
+        let n_verts = 8;
+        let n_edges = 12;
+        let n_faces = 6;
+        let dofs_per_elem = n_verts + n_edges * edge_dofs_per + n_faces * face_dofs_per + volume_dofs_per;
+        let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
+        let mut quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>> = HashMap::new();
+        let mut next_dof = n_nodes as DofId;
+        let mut dofs_flat = vec![0u32; n_elems as usize * dofs_per_elem];
+
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            assert!(ns.len() >= 8);
+            let base = e as usize * dofs_per_elem;
+            for i in 0..8 { dofs_flat[base + i] = ns[i]; }
+            let edges: [(usize, usize); 12] = [
+                (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
+            let mut off = 8;
+            for &(la, lb) in &edges {
+                let ed = get_edge_dofs_pk(ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
+                for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
+                off += edge_dofs_per;
+            }
+            let quad_faces: [(usize, usize, usize, usize); 6] = [
+                (0,1,2,3),(4,5,6,7),(0,1,5,4),(2,3,7,6),(0,3,7,4),(1,2,6,5)];
+            for &(la, lb, lc, ld) in &quad_faces {
+                let key = QuadFaceKey::new(ns[la], ns[lb], ns[lc], ns[ld]);
+                let fd = quad_face_pk_map.entry(key).or_insert_with(|| {
+                    (0..face_dofs_per).map(|_| { let d = next_dof; next_dof += 1; d }).collect()
+                });
+                for (k, &d) in fd.iter().enumerate() { dofs_flat[base + off + k] = d; }
+                off += face_dofs_per;
+            }
+            for _ in 0..volume_dofs_per {
+                dofs_flat[base + off] = next_dof; next_dof += 1; off += 1;
+            }
+        }
+
+        let n_dofs = next_dof as usize;
+        let mut dof_coords = vec![0.0; n_dofs * dim];
+        for n in 0..n_nodes as u32 {
+            let c = mesh.node_coords(n);
+            let base = n as usize * dim;
+            dof_coords[base..base + dim].copy_from_slice(c);
+        }
+        for (&EdgeKey(a, b), dofs) in &edge_pk_map {
+            let ca = mesh.node_coords(a); let cb = mesh.node_coords(b);
+            for (k, &did) in dofs.iter().enumerate() {
+                let t = (k + 1) as f64 / (edge_dofs_per + 1) as f64;
+                let base = did as usize * dim;
+                for d in 0..dim { dof_coords[base + d] = (1.0 - t) * ca[d] + t * cb[d]; }
+            }
+        }
+        // Face + volume DOF coords from factory ref element (trilinear interpolation)
+        if p >= 3 {
+            use fem_element::lagrange::factory::{ref_elem, ElemType};
+            let factory = ref_elem(ElemType::Hex, order);
+            let ref_coords = factory.dof_coords();
+            let face_vol_start = n_verts + edge_pk_map.len() * edge_dofs_per;
+            for e in 0..n_elems as u32 {
+                let ns = mesh.element_nodes(e);
+                let c = [
+                    mesh.node_coords(ns[0]), mesh.node_coords(ns[1]),
+                    mesh.node_coords(ns[2]), mesh.node_coords(ns[3]),
+                    mesh.node_coords(ns[4]), mesh.node_coords(ns[5]),
+                    mesh.node_coords(ns[6]), mesh.node_coords(ns[7]),
+                ];
+                for k in 0..(n_faces * face_dofs_per + volume_dofs_per) {
+                    let did = (face_vol_start + e as usize * (n_faces * face_dofs_per + volume_dofs_per) + k) as u32;
+                    let ri = n_verts + n_edges * edge_dofs_per + k;
+                    let rc = &ref_coords[ri];
+                    let (ex, ey, ez) = (rc[0], rc[1], rc[2]);
+                    let mut xp = [0.0; 3];
+                    for i in 0..8 {
+                        let nx = if (i & 1) != 0 { (1.0 + ex) / 2.0 } else { (1.0 - ex) / 2.0 };
+                        let ny = if (i & 2) != 0 { (1.0 + ey) / 2.0 } else { (1.0 - ey) / 2.0 };
+                        let nz = if (i & 4) != 0 { (1.0 + ez) / 2.0 } else { (1.0 - ez) / 2.0 };
+                        let ni = nx * ny * nz;
+                        for d in 0..3 { xp[d] += ni * c[i][d]; }
+                    }
+                    let base = did as usize * dim;
+                    dof_coords[base..base + 3].copy_from_slice(&xp);
+                }
+            }
+        }
+
+        DofManager {
+            order, n_dofs, dofs_flat, dofs_per_elem, elem_dof_offsets: None, dof_coords, dim,
+            n_vertex_dofs: n_nodes,
+            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), edge_pk_map,
+            face_pk_map: HashMap::new(), quad_face_pk_map,
+            bubble_dof_start: n_dofs, n_volume_dofs: 0, elem_orders: None,
+        }
+    }
+
     // ─── Pk (arbitrary order) ─────────────────────────────────────────────────
     //
     // Builds a general-order Lagrange DOF manager for 2D triangle and 3D tetrahedron
@@ -1084,8 +1318,6 @@ impl DofManager {
                 return if npe == 6 { Self::build_p3_prism(mesh) } else { Self::build_p3_pyramid(mesh) };
             }
         }
-        let p = order as usize;
-        let dim = mesh.dim() as usize;
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
 
@@ -1096,7 +1328,7 @@ impl DofManager {
         let edge_dofs_per = if p >= 2 { p - 1 } else { 0 };
         let face_dofs_per = if dim == 3 && p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
         let volume_dofs_per = if dim == 2 && p >= 3 {
-            (p - 1) * (p - 2) / 2 // 2D bubble DOFs (face interior of triangle)
+            (p - 1) * (p - 2) / 2
         } else if dim == 3 && p >= 4 {
             (p - 1) * (p - 2) * (p - 3) / 6
         } else { 0 };
@@ -1112,44 +1344,6 @@ impl DofManager {
         let quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>> = HashMap::new();
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
-
-        // Helper: get (p-1) edge DOFs in local a→b order.
-        fn get_edge_dofs_pk(
-            a: NodeId, b: NodeId,
-            next: &mut DofId,
-            map: &mut HashMap<EdgeKey, Vec<DofId>>,
-            n_dofs: usize,
-        ) -> Vec<DofId> {
-            let key = EdgeKey::new(a, b);
-            let dofs = map.entry(key).or_insert_with(|| {
-                let v: Vec<DofId> = (0..n_dofs).map(|_| { let d = *next; *next += 1; d }).collect();
-                v
-            });
-            if a == key.0 {
-                dofs.clone()
-            } else {
-                let mut rev = dofs.clone();
-                rev.reverse();
-                rev
-            }
-        }
-
-        // Helper: get face DOFs in local node order for 3D tet faces.
-        // Placeholder: returns the canonical DOFs; the ordering is fixed for now.
-        fn get_face_dofs_pk(
-            _a: NodeId, _b: NodeId, _c: NodeId,
-            next: &mut DofId,
-            map: &mut HashMap<FaceKey, Vec<DofId>>,
-            n_dofs: usize,
-        ) -> Vec<DofId> {
-            // Canonical face ordering — we just return the DOF list as stored.
-            let key = FaceKey::new(_a, _b, _c);
-            let dofs = map.entry(key).or_insert_with(|| {
-                let v: Vec<DofId> = (0..n_dofs).map(|_| { let d = *next; *next += 1; d }).collect();
-                v
-            });
-            dofs.clone()
-        }
 
         if dim == 2 {
             // ── 2-D triangles ────────────────────────────────────────────────
