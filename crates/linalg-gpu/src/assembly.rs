@@ -676,3 +676,209 @@ pub fn assemble_mass_3d_tet4(
     }
     run_assembly_shader(gpu, bytemuck::cast_slice(&inputs), n_elem, 16, include_str!("assembly_mass_tet4.wgsl"))
 }
+
+// ─── Tet4 elasticity assembly ─────────────────────────────────────────────
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuElementInputElasticTet4 {
+    nodes: [f32; 12],
+    dofs: [u32; 12],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ElasticityParams {
+    n_elems: u32,
+    lambda: f32,
+    mu: f32,
+}
+
+fn run_elasticity_shader(
+    gpu: &GpuContext,
+    elem_bytes: &[u8],
+    n_elem: usize,
+    entries_per_elem: usize,
+    lambda: f32,
+    mu: f32,
+    shader_wgsl: &str,
+) -> Vec<(u32, u32, f32)> {
+    let device = &gpu.device;
+    let queue = &gpu.queue;
+
+    let elem_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu_elasticity_elements"),
+        contents: &elem_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let triplet_byte_len = (n_elem * entries_per_elem * size_of::<GpuCooTriplet>()) as u64;
+    let coo_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu_elasticity_coo"), size: triplet_byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu_elasticity_staging"), size: triplet_byte_len,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let params = ElasticityParams { n_elems: n_elem as u32, lambda, mu };
+    let param_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu_elasticity_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("gpu_elasticity_shader"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(shader_wgsl)),
+    });
+
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("gpu_elasticity_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false, min_binding_size: None,
+                }, count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false, min_binding_size: None,
+                }, count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false, min_binding_size: None,
+                }, count: None,
+            },
+        ],
+    });
+
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu_elasticity_bg"), layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: elem_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: coo_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: param_buffer.as_entire_binding() },
+        ],
+    });
+
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("gpu_elasticity_pl"), bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("gpu_elasticity_pipeline"), layout: Some(&pl),
+        module: &shader, entry_point: Some("main"),
+        compilation_options: Default::default(), cache: None,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpu_elasticity_enc") });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gpu_elasticity_pass"), timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline); pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups(((n_elem as u32) + 63) / 64, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&coo_buffer, 0, &staging, 0, triplet_byte_len);
+    queue.submit(Some(encoder.finish()));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let slice = staging.slice(..);
+    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv().unwrap().unwrap();
+
+    let data = slice.get_mapped_range();
+    let triplets: &[GpuCooTriplet] = bytemuck::cast_slice(&data);
+    let mut result: Vec<(u32, u32, f32)> = Vec::with_capacity(n_elem * entries_per_elem);
+    result.extend(triplets.iter().map(|t| (t.row, t.col, t.val)));
+    drop(data); drop(staging);
+    result
+}
+
+/// Assemble 3D Tet4 elasticity stiffness matrix on GPU (constant strain tetrahedron).
+pub fn assemble_elasticity_3d_tet4(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    lambda: f32,
+    mu: f32,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 12);
+    assert_eq!(elem_dofs.len(), n_elem * 12);
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 12; let db = e * 12;
+        let mut nodes = [0.0f32; 12]; nodes.copy_from_slice(&elem_nodes[nb..nb+12]);
+        inputs.push(GpuElementInputElasticTet4 { nodes,
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3],
+                   elem_dofs[db+4], elem_dofs[db+5], elem_dofs[db+6], elem_dofs[db+7],
+                   elem_dofs[db+8], elem_dofs[db+9], elem_dofs[db+10], elem_dofs[db+11]] });
+    }
+    run_elasticity_shader(gpu, bytemuck::cast_slice(&inputs), n_elem, 144, lambda, mu,
+        include_str!("assembly_elasticity_tet4.wgsl"))
+}
+
+/// Return GpuCsrMatrix<f64> from Tet4 GPU elasticity.
+pub fn assemble_elasticity_3d_tet4_gpu(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    n_dofs: usize,
+    lambda: f32,
+    mu: f32,
+) -> GpuCsrMatrix<f64> {
+    let triplets = assemble_elasticity_3d_tet4(gpu, elem_nodes, elem_dofs, n_elem, lambda, mu);
+    triplets_to_gpu_csr_f64(gpu, triplets, n_dofs)
+}
+
+/// Assemble 3D Hex8 elasticity stiffness matrix on GPU (8-point Gauss quadrature).
+pub fn assemble_elasticity_3d_hex8(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    lambda: f32,
+    mu: f32,
+) -> Vec<(u32, u32, f32)> {
+    assert_eq!(elem_nodes.len(), n_elem * 24);
+    assert_eq!(elem_dofs.len(), n_elem * 24);
+    // Build raw bytes manually since the struct needs 24 nodes + 24 dofs
+    let bytes_per_elem = 24 * 4 + 24 * 4; // f32[24] + u32[24]
+    let mut raw = Vec::<u8>::with_capacity(n_elem * bytes_per_elem);
+    for e in 0..n_elem {
+        let nb = e * 24; let db = e * 24;
+        raw.extend_from_slice(bytemuck::cast_slice(&elem_nodes[nb..nb+24]));
+        raw.extend_from_slice(bytemuck::cast_slice(&elem_dofs[db..db+24]));
+    }
+    run_elasticity_shader(gpu, &raw, n_elem, 576, lambda, mu,
+        include_str!("assembly_elasticity_hex8.wgsl"))
+}
+
+/// Return GpuCsrMatrix<f64> from Hex8 GPU elasticity.
+pub fn assemble_elasticity_3d_hex8_gpu(
+    gpu: &GpuContext,
+    elem_nodes: &[f32],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    n_dofs: usize,
+    lambda: f32,
+    mu: f32,
+) -> GpuCsrMatrix<f64> {
+    let triplets = assemble_elasticity_3d_hex8(gpu, elem_nodes, elem_dofs, n_elem, lambda, mu);
+    triplets_to_gpu_csr_f64(gpu, triplets, n_dofs)
+}
