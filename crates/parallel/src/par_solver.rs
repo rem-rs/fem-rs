@@ -740,6 +740,123 @@ pub fn par_solve_idrs(
     Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: tr.global_norm() / b_norm })
 }
 
+// ── 7. TFQMR (Transpose-Free QMR) ──────────────────────────────────────────────
+
+/// Parallel TFQMR (Transpose-Free Quasi-Minimal Residual) solver.
+///
+/// A short-recurrence Krylov method for non-symmetric systems (Freund 1993).
+/// Requires 2 matvecs per outer step.  No preconditioner in this entry point.
+pub fn par_solve_tfqmr(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    let n = a.n_owned;
+    let b_norm = b.global_norm();
+    if b_norm < 1e-30 { return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 }); }
+    let atol = cfg.atol.max(1e-30);
+    let rtol = cfg.rtol.max(1e-30);
+
+    // Initial residual r = b - A*x
+    let mut r = b.clone_vec();
+    let mut ax = ParVector::zeros_like(b);
+    a.spmv(x, &mut ax);
+    sub_assign_owned(&mut r.data, &b.data, &ax.data, n);
+    let norm_r0 = r.global_norm();
+    if norm_r0 <= atol || norm_r0 <= rtol * b_norm {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: norm_r0 / b_norm });
+    }
+
+    let r_shadow = r.clone_vec();
+    let mut y = r.clone_vec();
+    let mut u = ParVector::zeros_like(b);
+    a.spmv(&mut y, &mut u);
+    let mut v = u.clone_vec();
+    let mut w = r.clone_vec();
+    let mut d = ParVector::zeros_like(b);
+
+    let mut tau = norm_r0;
+    let mut theta = 0.0;
+    let mut eta = 0.0;
+    let mut rho = r_shadow.global_dot(&r);
+
+    let mut iters = 0;
+    for k in 0..cfg.max_iter {
+        let sigma = r_shadow.global_dot(&v);
+        if sigma.abs() < 1e-30 { break; }
+        let alpha = rho / sigma;
+
+        // y_half = y - alpha * v
+        let mut y_half = y.clone_vec();
+        y_half.axpy(-alpha, &v);
+
+        // ay_half = A * y_half  (matvec 1)
+        let mut ay_half = ParVector::zeros_like(b);
+        a.spmv(&mut y_half, &mut ay_half);
+
+        // ── Half-step a (odd m = 2k+1) ──
+        w.axpy(-alpha, &u);
+        let coeff_a = if alpha.abs() < 1e-30 { 0.0 } else { theta * theta * eta / alpha };
+        // d = y_half + coeff_a * d
+        d.scale(coeff_a); d.axpy(1.0, &y_half);
+        let w_norm = w.global_norm();
+        theta = w_norm / tau;
+        let ca = 1.0 / (1.0 + theta * theta).sqrt();
+        tau *= theta * ca;
+        eta = ca * ca * alpha;
+        x.axpy(eta, &d);
+
+        iters += 1;
+        let est_a = tau * ((2 * k + 1) as f64).sqrt();
+        let rel_a = est_a / b_norm;
+        if rel_a <= rtol || est_a <= atol {
+            return Ok(SolveResult { converged: true, iterations: iters, final_residual: rel_a });
+        }
+        if iters >= cfg.max_iter { break; }
+
+        // ── Half-step b (even m = 2k+2) ──
+        w.axpy(-alpha, &ay_half);
+        let coeff_b = if alpha.abs() < 1e-30 { 0.0 } else { theta * theta * eta / alpha };
+        // d = ay_half + coeff_b * d
+        d.scale(coeff_b); d.axpy(1.0, &ay_half);
+        let w_norm = w.global_norm();
+        theta = w_norm / tau;
+        let cb = 1.0 / (1.0 + theta * theta).sqrt();
+        tau *= theta * cb;
+        eta = cb * cb * alpha;
+        x.axpy(eta, &d);
+
+        iters += 1;
+        let est_b = tau * ((2 * k + 2) as f64).sqrt();
+        let rel_b = est_b / b_norm;
+        if rel_b <= rtol || est_b <= atol {
+            return Ok(SolveResult { converged: true, iterations: iters, final_residual: rel_b });
+        }
+        if iters >= cfg.max_iter { break; }
+
+        // ── Update for next outer step ──
+        let rho_new = r_shadow.global_dot(&w);
+        if rho.abs() < 1e-30 { break; }
+        let beta = rho_new / rho;
+        rho = rho_new;
+
+        // y = w + beta * y_half
+        y.copy_from(&w);
+        y.axpy(beta, &y_half);
+        // u = A * y  (matvec 2)
+        a.spmv(&mut y, &mut u);
+        // v = u + beta * ay_half + beta^2 * v  (using temp for v_old)
+        let mut v_new = u.clone_vec();
+        v_new.axpy(beta, &ay_half);
+        v_new.axpy(beta * beta, &v);
+        v.copy_from(&v_new);
+    }
+
+    // Exact final residual
+    a.spmv(x, &mut ax);
+    sub_assign_owned(&mut r.data, &b.data, &ax.data, n);
+    let final_res = r.global_norm() / b_norm;
+    Ok(SolveResult { converged: false, iterations: iters, final_residual: final_res })
+}
+
 pub fn par_solve_fgmres_jacobi(
     a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector, restart: usize, cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
@@ -1076,6 +1193,32 @@ mod tests {
             let cfg = SolverConfig { rtol: 1e-8, max_iter: 500, ..SolverConfig::default() };
             let res = par_solve_bicgstab(&a_mat, &rhs, &mut u, &cfg).unwrap();
             assert!(res.converged, "BiCGStab did not converge");
+        });
+    }
+
+    // ── TFQMR (two ranks) ──────────────────────────────────────────────────
+
+    #[test]
+    fn par_tfqmr_poisson_two_ranks() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 3);
+            let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs { let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs { a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data); } }
+            let mut u = ParVector::zeros(&par_space);
+            let cfg = SolverConfig { rtol: 1e-8, max_iter: 1000, ..SolverConfig::default() };
+            let res = par_solve_tfqmr(&a_mat, &rhs, &mut u, &cfg).unwrap();
+            assert!(res.converged, "TFQMR did not converge: iters={}, res={:.3e}",
+                res.iterations, res.final_residual);
         });
     }
 
