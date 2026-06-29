@@ -708,6 +708,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "proptest",
  "rayon",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -716,6 +717,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cust",
+ "fem-amg",
  "fem-core",
  "fem-linalg",
  "log",

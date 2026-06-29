@@ -135,6 +135,15 @@ impl VectorReferenceElement for QuadNDk {
         for j in 0..p { c.push(vec![1.0, nodes[j]]); }
         for j in 0..p { c.push(vec![nodes[j], 1.0]); }
         for j in 0..p { c.push(vec![-1.0, nodes[j]]); }
+        // Interior x-comp: l_j(x)·(1-y²)·y^i at bubble-interior points
+        if p >= 2 {
+            let bp = |i:usize| -> f64 { -1.0 + 2.0*(i as f64+0.5)/(p as f64) };
+            for i in 0..=(p-2) { let v = bp(i);
+                for j in 0..p { c.push(vec![nodes[j], v]); } }
+            // Interior y-comp: (1-x²)·x^i·l_j(y) at bubble-interior points
+            for i in 0..=(p-2) { let v = bp(i);
+                for j in 0..p { c.push(vec![v, nodes[j]]); } }
+        }
         while c.len() < n { c.push(vec![0.0, 0.0]); }
         c
     }

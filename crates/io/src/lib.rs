@@ -26,6 +26,7 @@ pub mod mfem;
 pub mod xdmf;
 pub mod glvis;
 pub mod imported_workflow;
+pub mod stl_obj;
 
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
@@ -43,6 +44,7 @@ pub use vtk::{DataArray, VtkWriter};
 pub use vtk_reader::{read_vtu, read_vtu_mesh, read_vtu_str, VtuData};
 pub use matrix_market::{read_matrix_market, read_matrix_market_coo, write_matrix_market, MmioError};
 pub use xdmf::{write_xdmf, write_xdmf_mixed, xdmf_topology_code, XdmfField, XdmfCenter};
+pub use stl_obj::{read_stl, read_stl_file, read_obj, read_obj_file};
 pub use imported_workflow::{
 	DATASET_ELEM_TAGS,
 	hdf5_field_values_path,

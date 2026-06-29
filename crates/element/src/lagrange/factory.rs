@@ -763,7 +763,7 @@ pub fn n_dofs_simplex(dim: usize, order: usize) -> usize {
 
 /// Family of vector-valued reference elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VecFamily { Nedelec, RaviartThomas }
+pub enum VecFamily { Nedelec, RaviartThomas, BrezziDouglasMarini }
 
 /// Create a vector-valued reference element by family, type, and order.
 pub fn vec_ref_elem(family: VecFamily, etype: ElemType, order: u8) -> Box<dyn VectorReferenceElement> {
@@ -781,6 +781,8 @@ pub fn vec_ref_elem(family: VecFamily, etype: ElemType, order: u8) -> Box<dyn Ve
         (VecFamily::RaviartThomas, ElemType::Hex) => Box::new(crate::raviart_thomas::HexRTk::new(p)),
         (VecFamily::RaviartThomas, ElemType::Prism) => Box::new(crate::raviart_thomas::PrismRT0),
         (VecFamily::RaviartThomas, ElemType::Pyramid) => Box::new(crate::raviart_thomas::PyraRT0),
+        (VecFamily::BrezziDouglasMarini, ElemType::Tri) => Box::new(crate::brezzi_douglas_marini::TriBDMk::new(p)),
+        (VecFamily::BrezziDouglasMarini, ElemType::Tet) => Box::new(crate::brezzi_douglas_marini::TetBDMk::new(p)),
         _ => panic!("vec_ref_elem: unsupported (family={family:?}, type={etype:?})"),
     }
 }
