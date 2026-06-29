@@ -29,7 +29,7 @@ use fem_assembly::{
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
     lagrange::{TriP1, TriP2},
-    nedelec::{TriND1, TriND2, HexNDk},
+    nedelec::{TriND1, TriND2, HexNDk, TetND1, TetND2},
     raviart_thomas::{TriRT0, TriRT1},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -1679,4 +1679,100 @@ fn maxwell_3d_hex_nd2_convergence() {
     let errors: Vec<f64> = ns.iter().map(|&n| solve_maxwell_3d_hex_nd2(n)).collect();
     eprintln!("3D Maxwell HexND2 errors: {:?}", errors);
     for &e in &errors { assert!(e.is_finite(), "error not finite"); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3D Maxwell — H(curl) Tet ND1 + ND2
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn tet_jac(n0: &[f64], n1: &[f64], n2: &[f64], n3: &[f64]) -> (DMatrix<f64>, f64) {
+    let mut jac = DMatrix::zeros(3, 3);
+    for r in 0..3 {
+        jac[(r, 0)] = n1[r] - n0[r];
+        jac[(r, 1)] = n2[r] - n0[r];
+        jac[(r, 2)] = n3[r] - n0[r];
+    }
+    let det_j = jac.determinant().abs();
+    (jac, det_j)
+}
+
+fn solve_maxwell_3d_tet(n: usize, order: u8) -> f64 {
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let hcurl = HCurlSpace::new(mesh.clone(), order);
+
+    let curl_curl = CurlCurlIntegrator { mu: 1.0 };
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let mat = VectorAssembler::assemble_bilinear(
+        &hcurl, &[&curl_curl as &dyn VectorBilinearIntegrator, &mass], 5);
+
+    let src = VectorDomainLFIntegrator {
+        f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
+            let fv = f_maxwell_3d(x);
+            out[0] = fv[0]; out[1] = fv[1]; out[2] = fv[2];
+        })),
+    };
+    let mut rhs = VectorAssembler::assemble_linear(&hcurl, &[&src], 5);
+
+    let bdofs = boundary_dofs_hcurl(&mesh, &hcurl, &[1, 2, 3, 4, 5, 6]);
+    let mut mat_mut = mat;
+    apply_dirichlet(&mut mat_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+
+    let u = dense_solve(&mat_mut, &rhs);
+
+    let ref_elem: Box<dyn VectorReferenceElement> = match order {
+        1 => Box::new(TetND1),
+        2 => Box::new(TetND2),
+        _ => panic!("unsupported order {order}"),
+    };
+    let n_vdofs = ref_elem.n_dofs();
+    let mut ref_phi = vec![0.0; n_vdofs * 3];
+    let mut phys_phi = vec![0.0; n_vdofs * 3];
+    let quad_err = ref_elem.quadrature(5);
+    let mut err_sq = 0.0;
+
+    for e in hcurl.mesh().elem_iter() {
+        let nodes = hcurl.mesh().element_nodes(e);
+        let dofs = hcurl.element_dofs(e);
+        let signs = hcurl.element_signs(e);
+        let n0 = hcurl.mesh().node_coords(nodes[0]);
+        let n1 = hcurl.mesh().node_coords(nodes[1]);
+        let n2 = hcurl.mesh().node_coords(nodes[2]);
+        let n3 = hcurl.mesh().node_coords(nodes[3]);
+        let (jac, det_j) = tet_jac(n0, n1, n2, n3);
+        let j_inv_t = jac.try_inverse().unwrap().transpose();
+
+        for (q, xi) in quad_err.points.iter().enumerate() {
+            let w = quad_err.weights[q] * det_j;
+            let xp = [n0[0] + (n1[0]-n0[0])*xi[0] + (n2[0]-n0[0])*xi[1] + (n3[0]-n0[0])*xi[2],
+                      n0[1] + (n1[1]-n0[1])*xi[0] + (n2[1]-n0[1])*xi[1] + (n3[1]-n0[1])*xi[2],
+                      n0[2] + (n1[2]-n0[2])*xi[0] + (n2[2]-n0[2])*xi[1] + (n3[2]-n0[2])*xi[2]];
+            let ue = e_maxwell_3d(&xp);
+            ref_elem.eval_basis_vec(xi, &mut ref_phi);
+            piola_hcurl(&j_inv_t, &ref_phi, &mut phys_phi, n_vdofs, 3);
+            let mut uh = [0.0; 3];
+            for k in 0..n_vdofs {
+                let s = signs[k];
+                for d in 0..3 { uh[d] += u[dofs[k] as usize] * s * phys_phi[3 * k + d]; }
+            }
+            err_sq += w * ((uh[0] - ue[0]).powi(2) + (uh[1] - ue[1]).powi(2) + (uh[2] - ue[2]).powi(2));
+        }
+    }
+    err_sq.sqrt()
+}
+
+#[test]
+fn maxwell_3d_tet_nd1_convergence() {
+    let ns = [2usize, 4];
+    let errors: Vec<f64> = ns.iter().map(|&n| solve_maxwell_3d_tet(n, 1)).collect();
+    let rates = convergence_rate(&errors, &ns);
+    eprintln!("3D Maxwell TetND1 errors: {:?}, rates: {:?}", errors, rates);
+    assert!(rates[0] > 0.3, "TetND1 rate {:.2} < 0.3", rates[0]);
+}
+
+#[test]
+fn maxwell_3d_tet_nd2_convergence() {
+    let ns = [2usize];
+    let errors: Vec<f64> = ns.iter().map(|&n| solve_maxwell_3d_tet(n, 2)).collect();
+    eprintln!("3D Maxwell TetND2 errors: {:?}", errors);
+    assert!(errors[0].is_finite(), "TetND2 error not finite");
 }
