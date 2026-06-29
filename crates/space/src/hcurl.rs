@@ -121,6 +121,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
         };
         let interior_dofs_per_elem = match (dim, cell_type) {
             (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => k * (k - 1),
+            (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => 2 * k * (k - 1),
             (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => k * (k - 1) * (k - 2) / 2,
             _ => 0,
         };
@@ -585,8 +586,8 @@ mod tests {
     fn hcurl_dof_count_quad_nd2() {
         let mesh = OneQuadMesh::unit();
         let space = HCurlSpace::new(mesh, 2);
-        assert_eq!(space.dofs_per_elem, 8);
-        assert_eq!(space.n_dofs(), 8);
+        assert_eq!(space.dofs_per_elem, 12, "QuadND2: 8 edge + 4 interior");
+        assert_eq!(space.n_dofs(), 12);
     }
 
     #[test]
@@ -660,8 +661,8 @@ mod tests {
     fn hcurl_nd3_quad_dof_count() {
         let mesh = OneQuadMesh::unit();
         let space = HCurlSpace::new(mesh, 3);
-        assert_eq!(space.dofs_per_elem, 12, "QuadND3: 4 edges x 3");
-        assert_eq!(space.n_dofs(), 12);
+        assert_eq!(space.dofs_per_elem, 24, "QuadND3: 12 edge + 12 interior");
+        assert_eq!(space.n_dofs(), 24);
     }
 
     #[test]
@@ -699,7 +700,7 @@ mod tests {
         let mesh = OneQuadMesh::unit();
         let space = HCurlSpace::new(mesh, 3);
         let v = space.interpolate_vector(&|_x| vec![1.0, 0.0]);
-        assert_eq!(v.as_slice().len(), 12);
+        assert_eq!(v.as_slice().len(), 24, "QuadND3: 24 DOFs");
         for &val in v.as_slice() { assert!(val.is_finite()); }
     }
 }
