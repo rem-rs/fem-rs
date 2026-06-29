@@ -169,7 +169,7 @@ pub use dg_framework::{
     dg_energy,
 };
 pub use dg_elasticity::DgElasticityAssembler;
-pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux};
+pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux, HyperbolicConservationLaw, EulerConservationLaw, minmod, limiter_minmod_tet_p1};
 pub use interior_faces::InteriorFaceList;
 pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
 pub use nonlinear_hyperelasticity::HyperelasticityForm;
