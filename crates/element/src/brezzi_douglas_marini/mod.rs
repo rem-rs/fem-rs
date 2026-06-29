@@ -1,4 +1,6 @@
-pub mod tri_bdmk;
+pub mod quad_bdmk;
 pub mod tet_bdmk;
-pub use tri_bdmk::TriBDMk;
+pub mod tri_bdmk;
+pub use quad_bdmk::QuadBDMk;
 pub use tet_bdmk::TetBDMk;
+pub use tri_bdmk::TriBDMk;

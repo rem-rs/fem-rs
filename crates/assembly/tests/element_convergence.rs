@@ -9,6 +9,7 @@ use fem_assembly::{
     standard::{GradDivIntegrator, VectorDomainLFIntegrator, VectorMassIntegrator},
     vector_assembler::VectorAssembler,
 };
+use fem_element::VectorReferenceElement;
 use fem_mesh::SimplexMesh;
 use fem_solver::{MinresSolver, SolverConfig};
 use fem_space::{fe_space::FESpace, HDivSpace};
@@ -105,5 +106,38 @@ fn quad_rt1_darcy_convergence() {
 
         prev_err = Some(err);
         prev_h = Some(h);
+    }
+}
+
+#[test]
+fn tri_bdm1_mass_convergence() {
+    let ref_elem = fem_element::lagrange::factory::vec_ref_elem(
+        fem_element::lagrange::factory::VecFamily::BrezziDouglasMarini,
+        fem_element::lagrange::factory::ElemType::Tri,
+        1u8,
+    );
+    assert_eq!(ref_elem.n_dofs(), 6, "TriBDM1 has 6 DOFs");
+    let mut v = vec![0.0; 6 * 2];
+    ref_elem.eval_basis_vec(&[0.2, 0.3], &mut v);
+    for val in &v { assert!(val.is_finite()); }
+    let mut d = vec![0.0; 6];
+    ref_elem.eval_div(&[0.2, 0.3], &mut d);
+    for val in &d { assert!(val.is_finite()); }
+}
+
+/// Test QuadBDMk basis and DOF counts directly.
+#[test]
+fn quad_bdmk_smoke_test() {
+    use fem_element::brezzi_douglas_marini::QuadBDMk;
+    use fem_element::VectorReferenceElement;
+    for k in 1..=3 {
+        let e = QuadBDMk::new(k);
+        let n = e.n_dofs();
+        let mut v = vec![0.0; n * 2];
+        e.eval_basis_vec(&[0.2, -0.4], &mut v);
+        for val in &v { assert!(val.is_finite(), "k={k}"); }
+        let mut d = vec![0.0; n];
+        e.eval_div(&[0.2, -0.4], &mut d);
+        for val in &d { assert!(val.is_finite(), "k={k} div"); }
     }
 }

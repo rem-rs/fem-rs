@@ -782,6 +782,7 @@ pub fn vec_ref_elem(family: VecFamily, etype: ElemType, order: u8) -> Box<dyn Ve
         (VecFamily::RaviartThomas, ElemType::Prism) => Box::new(crate::raviart_thomas::PrismRT0),
         (VecFamily::RaviartThomas, ElemType::Pyramid) => Box::new(crate::raviart_thomas::PyraRT0),
         (VecFamily::BrezziDouglasMarini, ElemType::Tri) => Box::new(crate::brezzi_douglas_marini::TriBDMk::new(p)),
+        (VecFamily::BrezziDouglasMarini, ElemType::Quad) => Box::new(crate::brezzi_douglas_marini::QuadBDMk::new(p)),
         (VecFamily::BrezziDouglasMarini, ElemType::Tet) => Box::new(crate::brezzi_douglas_marini::TetBDMk::new(p)),
         _ => panic!("vec_ref_elem: unsupported (family={family:?}, type={etype:?})"),
     }
