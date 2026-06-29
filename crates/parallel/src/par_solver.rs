@@ -355,7 +355,7 @@ pub fn par_solve_gmres_jacobi(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     if restart == 0 {
-        return Err(SolverError::Linger("GMRES restart must be > 0".to_string()));
+        return Err(SolverError::Linlvo("GMRES restart must be > 0".to_string()));
     }
 
     let n = a.n_owned;
@@ -483,7 +483,7 @@ pub fn par_solve_gmres_jacobi(
             }
             let diag_h = h[i][i];
             if diag_h.abs() < 1e-30 {
-                return Err(SolverError::Linger(
+                return Err(SolverError::Linlvo(
                     "par_gmres_jacobi breakdown: near-singular Hessenberg diagonal".to_string(),
                 ));
             }

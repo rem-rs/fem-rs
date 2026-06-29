@@ -1,4 +1,4 @@
-﻿//! Parallel Restricted Additive Schwarz (RAS) preconditioning scaffolding.
+//! Parallel Restricted Additive Schwarz (RAS) preconditioning scaffolding.
 //!
 //! This module introduces a DDM-oriented preconditioner entrypoint for
 //! parallel Krylov solvers.  The first implementation intentionally keeps the
@@ -142,12 +142,12 @@ impl RasPrecond {
     /// Build a reusable RAS preconditioner from a distributed matrix.
     pub fn build(a: &ParCsrMatrix, cfg: &RasConfig) -> Result<Self, SolverError> {
         if cfg.overlap > 1 {
-            return Err(SolverError::linlvo(
+            return Err(SolverError::Linlvo(
                 format!("RAS currently supports overlap in {{0,1}}, got {}", cfg.overlap),
             ));
         }
         if !cfg.omega.is_finite() || cfg.omega <= 0.0 {
-            return Err(SolverError::linlvo(
+            return Err(SolverError::Linlvo(
                 format!("RAS omega must be finite and > 0, got {}", cfg.omega),
             ));
         }
@@ -350,7 +350,7 @@ pub fn par_solve_gmres_ras(
     cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     if restart == 0 {
-        return Err(SolverError::linlvo("GMRES restart must be > 0".to_string()));
+        return Err(SolverError::Linlvo("GMRES restart must be > 0".to_string()));
     }
 
     let precond = RasPrecond::build(a, ras_cfg)?;
@@ -489,7 +489,7 @@ pub fn par_solve_gmres_ras(
             }
             let diag = h[i][i];
             if diag.abs() < 1e-30 {
-                return Err(SolverError::linlvo(
+                return Err(SolverError::Linlvo(
                     "par_gmres_ras breakdown: near-singular Hessenberg diagonal".to_string(),
                 ));
             }

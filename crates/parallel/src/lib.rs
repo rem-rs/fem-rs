@@ -128,6 +128,7 @@ pub mod par_space;
 pub mod par_vector;
 pub mod par_vector_assembler;
 pub mod partition;
+pub mod shared_entities;
 
 #[cfg(test)]
 mod mpi_test_env;
@@ -160,6 +161,7 @@ pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
 pub use par_vector_assembler::ParVectorAssembler;
 pub use partition::MeshPartition;
+pub use shared_entities::{SharedEntities, SharedEntity};
 
 #[cfg(feature = "hdf5")]
 pub use par_hdf5::{par_write_mesh_and_fields, ParHdf5Options, ParallelWriteMode};
