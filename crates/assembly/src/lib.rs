@@ -96,6 +96,7 @@ pub mod iga;
 pub mod iga_trim;
 pub mod mortar;
 pub mod dg_advection;
+pub mod face_assembly;
 pub mod dg_framework;
 pub mod dpg;
 pub mod dpg_2d;
@@ -161,6 +162,7 @@ pub use dpg::{
 pub use dpg_2d::solve_dpg_poisson_2d;
 pub use dpg_3d::solve_dpg_poisson_3d;
 pub use dg_advection::{DGAdvectionIntegrator, DgAdvectionRhs, DgFaceIntegrator, DgFaceQpData, assemble_dg_interior_faces, assemble_advection_boundary};
+pub use face_assembly::{FaceIntegrator, FaceQpData, assemble_interior_faces, assemble_boundary_faces};
 pub use dg_cdr::DgCdrSystem;
 pub use dg_framework::{
     DgNumericalFlux, DgAdvection2D, DgDiffusion2D, DgAdvectionDiffusion2D,
