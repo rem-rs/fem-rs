@@ -1,4 +1,4 @@
-﻿//! HYPRE-compatible solver interfaces backed by native `linlvo` implementations.
+//! HYPRE-compatible solver interfaces backed by native `linlvo` implementations.
 //!
 //! Provides MFEM/HYPRE-style naming conventions for BoomerAMG, AMS, ADS,
 //! and ParCSR matrix operations. All backends are pure-Rust via `linlvo`;
@@ -77,7 +77,12 @@ impl HyprePrecond {
 ///
 /// In MFEM/HYPRE this is a distributed parallel matrix (diag + offd blocks).
 /// Here it wraps a [`CsrMatrix<f64>`] with parallel partitioning metadata.
+///
+/// **Deprecated**: use [`fem_parallel::ParCsrMatrix`] for true distributed storage,
+/// or `fem_linalg::CsrMatrix` for serial storage.  This type is kept for
+/// backward compatibility with MFEM-style code.
 #[derive(Debug, Clone)]
+#[deprecated(since = "0.2.0", note = "use fem_parallel::ParCsrMatrix or fem_linalg::CsrMatrix directly")]
 pub struct HypreParMatrix {
     /// Local CSR matrix.
     pub diag: CsrMatrix<f64>,
@@ -105,6 +110,10 @@ impl HypreParMatrix {
 /// Solve `A x = b` with PCG + BoomerAMG preconditioner (HYPRE-style).
 ///
 /// Equivalent to MFEM's `HyprePCG` with `BoomerAMG` as the preconditioner.
+///
+/// **Deprecated**: use `fem_parallel::par_solve_pcg_amg` for distributed systems,
+/// or `fem_solver::solve_pcg_precond` with a custom preconditioner for serial systems.
+#[deprecated(since = "0.2.0", note = "use fem_solver::solve_pcg_precond with AmgPrecond, or fem_parallel::par_solve_pcg_amg for distributed")]
 pub fn hypre_solve_pcg(
     a: &CsrMatrix<f64>,
     b: &[f64],
@@ -124,6 +133,10 @@ pub fn hypre_solve_pcg(
 }
 
 /// Solve `A x = b` with GMRES + BoomerAMG preconditioner (HYPRE-style).
+///
+/// **Deprecated**: use `fem_solver::solve_gmres_precond` with `AmgPrecond`,
+/// or `fem_parallel::par_solve_gmres_amg` for distributed systems.
+#[deprecated(since = "0.2.0", note = "use fem_solver::solve_gmres_precond with AmgPrecond")]
 pub fn hypre_solve_gmres(
     a: &CsrMatrix<f64>,
     b: &[f64],
@@ -162,6 +175,7 @@ impl linlvo::core::preconditioner::Preconditioner for HyprePrecond {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use fem_linalg::CooMatrix;

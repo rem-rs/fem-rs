@@ -132,6 +132,7 @@ pub mod partition;
 pub mod rcb;
 pub mod sfc;
 pub mod shared_entities;
+pub mod par_mesh_builder;
 
 #[cfg(test)]
 mod mpi_test_env;
