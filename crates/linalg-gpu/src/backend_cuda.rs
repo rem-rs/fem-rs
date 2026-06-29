@@ -7,6 +7,7 @@
 
 use std::ffi::CString;
 use fem_core::Scalar;
+use crate::backend::{GpuBackend, GpuDeviceBuffer, GpuVector as GpuVectorTrait, GpuSparseMatrix};
 
 /// CUDA backend wrapping a cuDevice + cuContext.
 pub struct CudaBackend {
@@ -178,6 +179,93 @@ pub fn cuda_apply_jacobi<T: Scalar>(
     // TODO: Launch CUDA kernel:
     // z[i] = diag_inv[i] * r[i]  for i = 0..n-1
     Err(CudaError::Kernel("CUDA Jacobi kernel not yet implemented".to_string()))
+}
+
+// ─── GpuDeviceBuffer impl ──────────────────────────────────────────────────
+
+impl GpuDeviceBuffer for cust::memory::DeviceBox<u8> {
+    fn size(&self) -> u64 { 0 }
+    fn as_ptr(&self) -> *const u8 { self.as_ref() as *const _ as *const u8 }
+}
+
+// ─── GpuVector impl ────────────────────────────────────────────────────────
+
+impl<T: Scalar> GpuVectorTrait for CudaVector<T> {
+    type T = T;
+    fn len(&self) -> u32 { self.len }
+    fn as_device_ptr(&self) -> *const u8 { self.data.as_device_ptr() as *const _ as *const u8 }
+}
+
+// ─── GpuSparseMatrix impl ──────────────────────────────────────────────────
+
+impl<T: Scalar> GpuSparseMatrix for CudaCsrMatrix<T> {
+    type T = T;
+    fn nrows(&self) -> u32 { self.nrows }
+    fn nnz(&self) -> u32 { self.nnz }
+    fn row_ptr_dev(&self) -> *const u8 { self.row_ptr.as_device_ptr() as *const _ as *const u8 }
+    fn col_idx_dev(&self) -> *const u8 { self.col_idx.as_device_ptr() as *const _ as *const u8 }
+    fn values_dev(&self) -> *const u8 { self.values.as_device_ptr() as *const _ as *const u8 }
+}
+
+// ─── GpuBackend impl ───────────────────────────────────────────────────────
+
+impl GpuBackend for CudaBackend {
+    type Buffer = cust::memory::DeviceBox<u8>;
+    type Vector = CudaVector<f64>;     // Fixed to f64 for simplicity; solver uses f64
+    type SparseMatrix = CudaCsrMatrix<f64>;
+
+    fn alloc(&self, size: u64, _label: &str) -> Self::Buffer {
+        cust::memory::device_box(0u8).unwrap() // simplified
+    }
+
+    fn upload<T: bytemuck::Pod>(&self, _dst: &Self::Buffer, _offset: u64, _data: &[T]) {}
+    fn download<T: bytemuck::Pod>(&self, _src: &Self::Buffer, _offset: u64, _dst: &mut [T]) {}
+
+    fn create_vector<T2: bytemuck::Pod>(&self, n: u32) -> Self::Vector {
+        CudaVector::zeros(self, n).unwrap()
+    }
+
+    fn create_sparse_matrix<T2: bytemuck::Pod + Scalar>(
+        &self, _nrows: u32, _ncols: u32, _row_ptr: &[usize], _col_idx: &[u32], _values: &[T2],
+    ) -> Self::SparseMatrix {
+        unimplemented!("CUDA sparse matrix creation: use CudaCsrMatrix::from_cpu")
+    }
+
+    fn spmv<T2: Scalar>(&self, _alpha: f64, _a: &Self::SparseMatrix, _x: &Self::Vector,
+                         _beta: f64, _y: &Self::Vector) {
+        unimplemented!("CUDA SpMV: use cuda_spmv with cuSPARSE")
+    }
+
+    fn axpy<T2: Scalar>(&self, _alpha: f64, _x: &Self::Vector, _beta: f64, _y: &Self::Vector) {
+        unimplemented!("CUDA axpy: use cuda_axpy with cuBLAS")
+    }
+
+    fn dot<T2: Scalar>(&self, _a: &Self::Vector, _b: &Self::Vector) -> f64 {
+        unimplemented!("CUDA dot: use cuda_dot with cuBLAS")
+    }
+
+    fn norm2<T2: Scalar>(&self, v: &Self::Vector) -> f64 {
+        self.dot(v, v).sqrt()
+    }
+
+    fn apply_jacobi<T2: Scalar>(&self, _diag_inv: &Self::Buffer, _r: &Self::Vector,
+                                 _z: &Self::Vector, _n: u32) {
+        unimplemented!("CUDA Jacobi: use cuda_apply_jacobi")
+    }
+
+    fn copy_vector<T2: Scalar>(&self, _dst: &Self::Vector, _src: &Self::Vector) {
+        unimplemented!("CUDA copy")
+    }
+
+    fn read_vector<T2: bytemuck::Pod>(&self, _v: &Self::Vector) -> Vec<T2> {
+        unimplemented!("CUDA read")
+    }
+
+    fn write_vector<T2: bytemuck::Pod>(&self, _v: &Self::Vector, _data: &[T2]) {
+        unimplemented!("CUDA write")
+    }
+
+    fn synchronize(&self) {}
 }
 
 #[cfg(test)]
