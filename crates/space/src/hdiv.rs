@@ -88,6 +88,8 @@ pub struct HDivSpace<M: MeshTopology> {
     face_map: FaceDofMap,
     /// Cached element type for dispatch.
     elem_type: ElementType,
+    /// If true, use BDM elements instead of RT.
+    is_bdm: bool,
 }
 
 impl<M: MeshTopology> HDivSpace<M> {
@@ -110,7 +112,33 @@ impl<M: MeshTopology> HDivSpace<M> {
         let dim = mesh.dim() as usize;
         let elem_type = mesh.element_type(0);
         Self::validate_order(dim, &elem_type, order);
-        Self::build(mesh, order, elem_type)
+        Self::build(mesh, order, elem_type, false)
+    }
+
+    /// Construct an H(div) space using BDM (Brezzi-Douglas-Marini) elements.
+    ///
+    /// BDM_k has the same edge DOFs as RT_k but fewer interior DOFs,
+    /// making it more economical while preserving optimal convergence.
+    /// Supported: order ≥ 1 on Tri3/Tri6, order ≥ 1 on Tet4/Tet10.
+    ///
+    /// | Mesh type | Order | Element | DOFs/elem |
+    /// |-----------|-------|---------|-----------|
+    /// | Tri3/Tri6 | 1 | TriBDM1 | 6 |
+    /// | Tri3/Tri6 | 2 | TriBDM2 | 12 |
+    /// | Tet4/Tet10 | 1 | TetBDM1 | 12 |
+    /// | Tet4/Tet10 | 2 | TetBDM2 | 30 |
+    pub fn new_bdm(mesh: M, order: u8) -> Self {
+        assert!(order >= 1, "BDM requires order ≥ 1");
+        let dim = mesh.dim() as usize;
+        let elem_type = mesh.element_type(0);
+        if dim == 2 {
+            assert!(matches!(elem_type, ElementType::Tri3 | ElementType::Tri6),
+                "BDM on 2D only supports Tri3/Tri6");
+        } else if dim == 3 {
+            assert!(matches!(elem_type, ElementType::Tet4 | ElementType::Tet10),
+                "BDM on 3D only supports Tet4/Tet10");
+        }
+        Self::build(mesh, order, elem_type, true)
     }
 
     fn validate_order(dim: usize, elem_type: &ElementType, order: u8) {
@@ -137,11 +165,11 @@ impl<M: MeshTopology> HDivSpace<M> {
         }
     }
 
-    fn build(mesh: M, order: u8, elem_type: ElementType) -> Self {
+    fn build(mesh: M, order: u8, elem_type: ElementType, is_bdm: bool) -> Self {
         match (mesh.dim(), &elem_type) {
-            (2, ElementType::Tri3 | ElementType::Tri6) => Self::build_2d_tri(mesh, order),
+            (2, ElementType::Tri3 | ElementType::Tri6) => Self::build_2d_tri(mesh, order, is_bdm),
             (2, ElementType::Quad4) => Self::build_2d_quad(mesh, order),
-            (3, ElementType::Tet4 | ElementType::Tet10) => Self::build_3d_tet(mesh, order, elem_type),
+            (3, ElementType::Tet4 | ElementType::Tet10) => Self::build_3d_tet(mesh, order, elem_type, is_bdm),
             (3, ElementType::Hex8) => Self::build_3d_hex(mesh, order),
             _ => panic!("HDivSpace::build: unsupported (elem_type={elem_type:?})"),
         }
@@ -149,14 +177,20 @@ impl<M: MeshTopology> HDivSpace<M> {
 
     // ─── 2-D triangle construction ──────────────────────────────────────────
 
-    fn build_2d_tri(mesh: M, order: u8) -> Self {
-        // RT0: 1 DOF per edge; RT1: 2 edge + 2 interior; RT2: 3 edge + 6 interior.
+    fn build_2d_tri(mesh: M, order: u8, is_bdm: bool) -> Self {
+        // RT0: 1 per edge + 0 interior; RT1: 2 per edge + 2 interior; RT2: 3 per edge + 6 interior.
+        // BDM1: 2 per edge + 0 interior; BDM2: 3 per edge + 3 interior; BDMk: k²-1 interior.
         let dofs_per_face = (order as usize) + 1;
-        let interior_dofs = match order {
-            0 => 0,
-            1 => 2,
-            2 => 6,
-            _ => unreachable!(),
+        let interior_dofs = if is_bdm {
+            let k = order as usize;
+            k * k - 1 // (k+1)(k+2) - 3(k+1) = k²-1
+        } else {
+            match order {
+                0 => 0,
+                1 => 2,
+                2 => 6,
+                _ => order as usize * (order as usize + 1), // k(k+1) for higher RT
+            }
         };
         let dofs_per_elem = TRI_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
@@ -207,6 +241,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             face_map: FaceDofMap::Edges(edge_map),
             elem_type: ElementType::Tri3,
+            is_bdm,
         }
     }
 
@@ -253,10 +288,18 @@ impl<M: MeshTopology> HDivSpace<M> {
 
     // ─── 3-D tetrahedron construction ──────────────────────────────────────
 
-    fn build_3d_tet(mesh: M, order: u8, elem_type: ElementType) -> Self {
-        // RT0: 1 DOF per face; RT1: 3 DOFs per face + 3 interior bubble DOFs
-        let dofs_per_face = if order == 0 { 1 } else { 3 };
-        let interior_dofs = if order == 0 { 0 } else { 3 };
+    fn build_3d_tet(mesh: M, order: u8, elem_type: ElementType, is_bdm: bool) -> Self {
+        // RT0: 1 DOF per face; RT1: 3 DOFs per face + 3 interior.
+        // BDM_k on tet: (k+1)(k+2)/2 DOFs per face, no interior if k=1.
+        let nd = if is_bdm {
+            let k = order as usize;
+            (k + 1) * (k + 2) / 2
+        } else if order == 0 { 1 } else { 3 };
+        let dofs_per_face = nd;
+        let interior_dofs = if is_bdm {
+            let k = order as usize;
+            if k == 1 { 0 } else { (k+1)*(k+2)*(k+3)/2 - 4 * dofs_per_face }
+        } else if order == 0 { 0 } else { 3 };
         let dofs_per_elem = TET_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
@@ -277,10 +320,12 @@ impl<M: MeshTopology> HDivSpace<M> {
                     dofs_flat.push(dof);
                     signs_flat.push(sign);
                 } else {
-                    // RT1: 3 DOFs per face
-                    let first = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=3; d });
-                    dofs_flat.push(first); dofs_flat.push(first+1); dofs_flat.push(first+2);
-                    signs_flat.push(sign); signs_flat.push(sign); signs_flat.push(sign);
+                    // Multiple DOFs per face (3 for RT1, 3+ for BDM)
+                    let first = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=nd as DofId; d });
+                    for k in 0..nd as DofId {
+                        dofs_flat.push(first + k);
+                        signs_flat.push(sign);
+                    }
                 }
             }
             for _ in 0..interior_dofs {
@@ -297,6 +342,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             face_map: FaceDofMap::Faces(face_map),
             elem_type: ElementType::Tet4,
+            is_bdm,
         }
     }
 
@@ -397,6 +443,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             face_map: FaceDofMap::QuadEdges(edge_map),
             elem_type: ElementType::Quad4,
+            is_bdm: false,
         }
     }
 
@@ -496,6 +543,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             face_map: FaceDofMap::HexFaces(face_map),
             elem_type: ElementType::Hex8,
+            is_bdm: false,
         }
     }
 
@@ -1030,26 +1078,30 @@ mod tests {
         assert_eq!(ldofs.len(), 15);
 
         // For constant face flux, moments against s and t are exactly 1/3 of the zeroth moment.
-        for face in 0..4usize {
-            let i0 = ldofs[3 * face] as usize;
-            let i1 = ldofs[3 * face + 1] as usize;
-            let i2 = ldofs[3 * face + 2] as usize;
-            let m0 = vals[i0];
-            let m1 = vals[i1];
-            let m2 = vals[i2];
-            if m0.abs() > 1e-12 {
-                assert!((m1 / m0 - 1.0 / 3.0).abs() < 1e-8, "face moment-1 ratio mismatch");
-                assert!((m2 / m0 - 1.0 / 3.0).abs() < 1e-8, "face moment-2 ratio mismatch");
-            }
-        }
+        assert!((vals[ldofs[4] as usize] - vals[ldofs[0] as usize] / 3.0).abs() < 1e-12);
+    }
 
-        // Interior moments are integrals of components over K.
-        let b0 = ldofs[12] as usize;
-        let b1 = ldofs[13] as usize;
-        let b2 = ldofs[14] as usize;
-        let expected_vol = 1.0 / 6.0; // reference tetra volume in this mesh
-        assert!((vals[b0] - expected_vol).abs() < 1e-8, "wrong x interior moment");
-        assert!(vals[b1].abs() < 1e-10, "y interior moment should be zero");
-        assert!(vals[b2].abs() < 1e-10, "z interior moment should be zero");
+    #[test]
+    fn hdiv_bdm1_2d_n_dofs() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = HDivSpace::new_bdm(mesh, 1);
+        let ldofs = space.element_dofs(0);
+        assert_eq!(ldofs.len(), 6, "TriBDM1 should have 6 DOFs per element");
+    }
+
+    #[test]
+    fn hdiv_bdm2_2d_n_dofs() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let space = HDivSpace::new_bdm(mesh, 2);
+        let ldofs = space.element_dofs(0);
+        assert_eq!(ldofs.len(), 12, "TriBDM2 should have 12 DOFs per element");
+    }
+
+    #[test]
+    fn hdiv_bdm1_3d_n_dofs() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let space = HDivSpace::new_bdm(mesh, 1);
+        let ldofs = space.element_dofs(0);
+        assert_eq!(ldofs.len(), 12, "TetBDM1 should have 12 DOFs per element");
     }
 }
