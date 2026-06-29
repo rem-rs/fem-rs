@@ -66,6 +66,7 @@
 //!   [`VectorAssembler`].  Backed by the workspace-pinned [`reed`](https://github.com/rem-rs/reed)
 //!   crates.
 
+pub mod adjoint_pde;
 pub mod assembler;
 pub mod backend;
 pub mod bc;
