@@ -203,6 +203,84 @@ pub fn relative_error(u_full: &[f64], u_reduced: &[f64]) -> f64 {
     (diff / norm.max(1e-30)).sqrt()
 }
 
+// ─── DEIM (Discrete Empirical Interpolation Method) ─────────────────────────
+
+/// Greedy DEIM index selection from the POD basis.
+///
+/// Returns `r` interpolation indices (rows) such that `U(P^T U)^{-1}`
+/// is well-conditioned for interpolating nonlinear functions.
+///
+/// Implements Algorithm 1 from Chaturantabut & Sorensen (2010).
+pub fn deim_greedy(modes: &DMatrix<f64>, r: usize) -> Vec<usize> {
+    let n = modes.nrows();
+    let r_eff = r.min(modes.ncols());
+    let mut indices = Vec::with_capacity(r_eff);
+
+    // Step 1: first index = argmax of first mode
+    let v1 = modes.column(0);
+    let (idx0, _) = v1.argmax();
+    indices.push(idx0);
+
+    for i in 1..r_eff {
+        let vi = modes.column(i);
+        // Extract the submatrix V_{prev} at selected indices
+        let m = indices.len();
+        let v_sub = DMatrix::from_fn(m, m, |row, col| modes[(indices[row], col)]);
+        let b_sub = DVector::from_fn(m, |row, _| modes[(indices[row], i)]);
+
+        // Solve V_sub · c = b_sub
+        let c = match v_sub.lu().solve(&b_sub) {
+            Some(c) => c,
+            None => break,
+        };
+
+        // r = v_i - V_prev · c
+        let mut residual = vi.into_owned();
+        for j in 0..m {
+            for k in 0..n {
+                residual[k] -= c[j] * modes[(k, j)];
+            }
+        }
+
+        // Next index = argmax of |residual|
+        let (next_idx, _) = residual.argmax();
+        if !indices.contains(&next_idx) {
+            indices.push(next_idx);
+        } else {
+            // All remaining entries are zero; stop early.
+            break;
+        }
+    }
+    indices
+}
+
+/// Interpolate a vector onto the DEIM subspace.
+///
+/// `u_deim = U (P^T U)^{-1} P^T u`, where `P` selects `indices` rows.
+pub fn deim_interpolate(
+    u: &DVector<f64>,
+    modes: &DMatrix<f64>,  // POD modes (n × m)
+    indices: &[usize],
+) -> Vec<f64> {
+    let m = indices.len();
+    // P^T U: m × m matrix from selected rows
+    let mut pt_u = DMatrix::zeros(m, m);
+    for i in 0..m {
+        for j in 0..m {
+            pt_u[(i, j)] = modes[(indices[i], j)];
+        }
+    }
+    // P^T u: m-vector
+    let pt_u_vec = DVector::from_fn(m, |i, _| u[indices[i]]);
+
+    // Solve (P^T U) c = P^T u for c
+    let c = pt_u.lu().solve(&pt_u_vec)
+        .expect("DEIM interpolation matrix should be invertible");
+
+    // u_deim = U · c
+    (modes * c).data.as_vec().clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +418,67 @@ mod tests {
         let cum = pod.cumulative_energy();
         for i in 1..cum.len() {
             assert!(cum[i] >= cum[i - 1], "energy should be monotonic: {cum:?}");
+        }
+    }
+
+    // ── POD error bound ───────────────────────────────────────────────────────
+
+    #[test]
+    fn pod_projection_error_bounded_by_truncated_singular_values() {
+        // For a matrix of snapshots S = U Σ V^T, the Frobenius-norm error
+        // of the rank-r truncated SVD is ‖S - S_r‖_F = sqrt(σ_{r+1}² + ...).
+        // When projecting a snapshot onto the POD basis, the error should be
+        // bounded by the next singular value.
+        let n = 24;
+        let mut snaps = Snapshots::new(n);
+        for k in 1..=8 {
+            let u = solve_laplacian_1d(n, k as f64);
+            snaps.add_snapshot(&u);
+        }
+
+        let pod = PodBasis::compute(&snaps, 6).expect("POD basis");
+        let sv = &pod.singular_values;
+        // Project each snapshot onto the first 4 modes and measure error.
+        let r = 4;
+        let v4 = pod.modes.columns(0, r).into_owned();
+        for snap_idx in 0..snaps.n_snapshots() {
+            let s = DVector::from_vec(snaps.snapshot(snap_idx).to_vec());
+            let coeff = v4.transpose() * &s; // V^T s
+            let s_proj = &v4 * coeff; // V V^T s
+            let err = (&s - s_proj).norm();
+            // Bound: error ≤ sqrt(σ_5² + σ_6²) (tail energy)
+            let tail_sq: f64 = sv.iter().skip(r).map(|&s| s * s).sum();
+            assert!(err * err <= tail_sq + 1e-10,
+                "snap {snap_idx}: proj err² {:.3e} > tail {:.3e}", err * err, tail_sq);
+        }
+    }
+
+    // ─── DEIM ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn deim_interpolation_error_decreases_with_modes() {
+        let n = 32;
+        let mut snaps = Snapshots::new(n);
+        for k in 0..10 {
+            let u = solve_laplacian_1d(n, (k + 1) as f64);
+            snaps.add_snapshot(&u);
+        }
+        let pod = PodBasis::compute(&snaps, 8).expect("POD basis");
+        let deim_indices = deim_greedy(&pod.modes, 8);
+        assert_eq!(deim_indices.len(), 8);
+
+        // For each snapshot, measure DEIM reconstruction error as function of #modes
+        let snap = DVector::from_vec(snaps.snapshot(0).to_vec());
+        let mut prev_err = 1.0;
+        for m in 1..=6 {
+            let indices: Vec<usize> = deim_indices.iter().take(m).copied().collect();
+            let v_m = pod.modes.columns(0, m).into_owned();
+            let u_deim = deim_interpolate(&snap, &v_m, &indices);
+            let err = (&snap - DVector::from_vec(u_deim)).norm() / snap.norm();
+            // Error should decrease with more modes
+            assert!(err < prev_err + 1e-6,
+                "DEIM error at m={m}: {err:.3e} >= prev {prev_err:.3e}");
+            prev_err = err;
         }
     }
 }
