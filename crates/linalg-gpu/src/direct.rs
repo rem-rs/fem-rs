@@ -147,4 +147,54 @@ mod tests {
             assert!((xi - expected).abs() < 1e-12, "expected {expected}, got {xi}");
         }
     }
+
+    #[test]
+    fn gpu_dense_solve_matches_cpu_poisson_2d() {
+        // Build a 2D Poisson-like SPD matrix (57 × 57 for 8×8 grid P1).
+        // Solve on both CPU and GPU, verify relative difference < 1e-10.
+        use fem_linalg::dense::{lu_factor, lu_solve};
+
+        // Build 2D Laplacian on 8×8 grid (57 DOFs after boundary elimination)
+        let nx: usize = 8; let ny: usize = 8;
+        let n = (nx - 1) * (ny - 1);
+        let mut a = vec![0.0_f64; n * n];
+        let mut rhs = vec![1.0_f64; n];
+
+        for j in 0..ny - 1 {
+            for i in 0..nx - 1 {
+                let row = j * (nx - 1) + i;
+                a[row * n + row] = 4.0;
+                if i > 0 { a[row * n + row - 1] = -1.0; }
+                if i < nx - 2 { a[row * n + row + 1] = -1.0; }
+                if j > 0 { a[row * n + row - (nx - 1)] = -1.0; }
+                if j < ny - 2 { a[row * n + row + (nx - 1)] = -1.0; }
+            }
+        }
+
+        // CPU solve
+        let mut cpu_a = a.clone();
+        let mut cpu_x = rhs.clone();
+        let mut piv = vec![0usize; n];
+        lu_factor(&mut cpu_a, n, &mut piv).expect("LU factor");
+        lu_solve(&cpu_a, n, &piv, &mut cpu_x);
+
+        // GPU solve
+        let gpu = ctx();
+        let a_buf = DeviceBuffer::with_staging(
+            &gpu.device, (n * n) as u64 * 8,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            "mms_a",
+        );
+        gpu.queue.write_buffer(a_buf.buffer(), 0, bytemuck::cast_slice(&a));
+        let mut b_gpu = GpuVector::from_slice(&gpu, &rhs);
+        solve_dense_gpu(&gpu, &a_buf, &mut b_gpu, n as u32).expect("GPU dense solve");
+        let gpu_x = b_gpu.read_to_cpu(&gpu);
+
+        // Compare
+        let max_diff: f64 = cpu_x.iter().zip(gpu_x.iter())
+            .map(|(c, g)| (c - g).abs()).reduce(f64::max).unwrap_or(0.0);
+        let norm: f64 = cpu_x.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-30);
+        let rel_diff = max_diff / norm;
+        assert!(rel_diff < 1e-10, "GPU vs CPU relative diff = {:.3e} (max_diff={:.3e})", rel_diff, max_diff);
+    }
 }
