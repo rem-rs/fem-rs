@@ -159,6 +159,7 @@ fn build_mixed_mesh() -> SimplexMesh<2> {
         face_types: None,
         face_offsets: None,
         face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
     }
 }
 

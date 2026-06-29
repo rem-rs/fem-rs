@@ -24,7 +24,7 @@ use fem_element::{quadrature::gauss_legendre_01, VectorReferenceElement};
 use fem_linalg::Vector;
 use fem_mesh::{topology::MeshTopology, ElementTransformation, ElementType};
 
-use crate::dof_manager::{EdgeKey, FaceKey};
+use crate::dof_manager::{EdgeKey, FaceKey, QuadFaceKey};
 use crate::fe_space::{FESpace, SpaceType};
 
 // ─── Local edge tables ──────────────────────────────────────────────────────
@@ -56,6 +56,16 @@ const TET_FACES: [(usize, usize, usize); 4] = [
     (0, 1, 2),
 ];
 
+/// Local quad-face definitions for 3-D hexahedra (Quad4 face ordering).
+const HEX_QUAD_FACES: [(usize, usize, usize, usize); 6] = [
+    (0, 1, 2, 3), // z=-1 (bottom)
+    (4, 5, 6, 7), // z= 1 (top)
+    (0, 1, 5, 4), // y=-1 (front)
+    (2, 3, 7, 6), // y= 1 (back)
+    (0, 3, 7, 4), // x=-1 (left)
+    (1, 2, 6, 5), // x= 1 (right)
+];
+
 // ─── HCurlSpace ─────────────────────────────────────────────────────────────
 
 /// H(curl) finite element space using Nédélec edge elements.
@@ -74,8 +84,10 @@ pub struct HCurlSpace<M: MeshTopology> {
     dofs_per_elem: usize,
     /// Edge → global DOF map (for boundary queries and interpolation).
     edge_to_dof: HashMap<EdgeKey, DofId>,
-    /// Face -> first global DOF map for 3D ND2 (second = first + 1).
+    /// Face → first global DOF map for 3D ND2 (second = first + 1).
     face_to_dof: HashMap<FaceKey, DofId>,
+    /// Quad-face → first global DOF for hex NDk (2k(k-1) DOFs per face).
+    quad_face_to_dof: HashMap<QuadFaceKey, DofId>,
     /// Spatial dimension.
     dim: usize,
     /// Cell type used by this space.
@@ -117,18 +129,20 @@ impl<M: MeshTopology> HCurlSpace<M> {
         let dofs_per_edge = k;
         let face_dofs_per_face = match (dim, cell_type) {
             (3, ElementType::Tet4 | ElementType::Tet10) if k >= 2 => k * (k - 1),
+            (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => 2 * k * (k - 1),
             _ => 0,
         };
         let interior_dofs_per_elem = match (dim, cell_type) {
             (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => k * (k - 1),
             (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => 2 * k * (k - 1),
             (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => k * (k - 1) * (k - 2) / 2,
-            // Hex NDk (k≥2): face DOFs (12k(k-1)) + interior (3k(k-1)²), element-local for now
-            (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => 12 * k * (k - 1) + 3 * k * (k - 1) * (k - 1),
+            // Hex NDk (k≥2): pure interior bubbles only (face DOFs handled separately)
+            (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => 3 * k * (k - 1) * (k - 1),
             _ => 0,
         };
         let n_local_faces = match cell_type {
             ElementType::Tet4 | ElementType::Tet10 if dim == 3 => TET_FACES.len(),
+            ElementType::Hex8 | ElementType::Hex20 if dim == 3 => HEX_QUAD_FACES.len(),
             _ => 0,
         };
         let dofs_per_elem =
@@ -137,6 +151,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
 
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut quad_face_to_dof: HashMap<QuadFaceKey, DofId> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
@@ -160,11 +175,26 @@ impl<M: MeshTopology> HCurlSpace<M> {
             }
 
             // 3D Tet NDk face DOFs (k >= 2, shared globally by canonical sorted face key).
-            if face_dofs_per_face > 0 {
+            if face_dofs_per_face > 0 && (cell_type == ElementType::Tet4 || cell_type == ElementType::Tet10) {
                 let ndf = face_dofs_per_face as u32;
                 for &(la, lb, lc) in &TET_FACES {
                     let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
                     let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
+                        let d = next_dof; next_dof += ndf; d
+                    });
+                    for m in 0..ndf as usize {
+                        dofs_flat.push(first_dof + m as u32);
+                        signs_flat.push(1.0);
+                    }
+                }
+            }
+
+            // Hex NDk quad-face DOFs (shared globally by canonical sorted face key).
+            if k >= 2 && dim == 3 && (cell_type == ElementType::Hex8 || cell_type == ElementType::Hex20) {
+                let ndf = face_dofs_per_face as u32;
+                for &(la, lb, lc, ld) in &HEX_QUAD_FACES {
+                    let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                    let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
                         let d = next_dof; next_dof += ndf; d
                     });
                     for m in 0..ndf as usize {
@@ -191,10 +221,14 @@ impl<M: MeshTopology> HCurlSpace<M> {
             dofs_per_elem,
             edge_to_dof,
             face_to_dof,
+            quad_face_to_dof,
             dim,
             cell_type,
         }
     }
+
+    /// Return the polynomial order of this space.
+    pub fn order(&self) -> u8 { self.order }
 
     /// Orientation signs (±1.0) for the DOFs on element `elem`.
     ///
@@ -225,6 +259,20 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// Number of unique faces in 3D ND2 mode.
     pub fn n_faces(&self) -> usize {
         self.face_to_dof.len()
+    }
+
+    /// Number of unique quad faces for hex NDk.
+    pub fn n_quad_faces(&self) -> usize {
+        self.quad_face_to_dof.len()
+    }
+
+    /// Look up all global DOFs associated with a quad face (hex NDk, k≥2).
+    pub fn quad_face_dofs(&self, key: QuadFaceKey) -> Option<Vec<DofId>> {
+        if self.order < 2 { return None; }
+        let ndf = 2 * self.order as DofId * (self.order as DofId - 1);
+        self.quad_face_to_dof.get(&key).map(|&first| {
+            (0..ndf).map(|m| first + m).collect()
+        })
     }
 
     /// Vector-valued interpolation via the Nédélec DOF functional.

@@ -12,7 +12,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::amr::{HangingNodeConstraint, HangingFaceConstraint};
 use fem_mesh::topology::MeshTopology;
 
-use crate::dof_manager::{DofManager, EdgeKey, FaceKey};
+use crate::dof_manager::{DofManager, EdgeKey, FaceKey, QuadFaceKey};
 use crate::hcurl::HCurlSpace;
 use crate::hdiv::HDivSpace;
 
@@ -156,6 +156,22 @@ pub fn boundary_dofs_hcurl<M: fem_mesh::topology::MeshTopology>(
             out.append(&mut edofs);
         }
     }
+
+    // Collect hex face DOFs on tagged boundary faces (3D quad faces).
+    if mesh.dim() == 3 && space.order() >= 2 {
+        for f in 0..mesh.n_boundary_faces() as u32 {
+            if tags.contains(&mesh.face_tag(f)) {
+                let nodes = mesh.face_nodes(f);
+                if nodes.len() == 4 {
+                    let key = QuadFaceKey::new(nodes[0], nodes[1], nodes[2], nodes[3]);
+                    if let Some(mut fdofs) = space.quad_face_dofs(key) {
+                        out.append(&mut fdofs);
+                    }
+                }
+            }
+        }
+    }
+
     out.sort_unstable();
     out.dedup();
     out
