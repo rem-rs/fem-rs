@@ -168,6 +168,49 @@ impl<const D: usize> SimplexMesh<D> {
         std::array::from_fn(|i| self.coords[off + i])
     }
 
+    // ─── Geometric transforms ────────────────────────────────────────────────
+
+    /// Apply a coordinate transform `f` to every mesh node.
+    /// The closure receives `[x, y]` (2-D) or `[x, y, z]` (3-D) and returns
+    /// the transformed coordinate array.
+    pub fn transform(&mut self, mut f: impl FnMut([f64; D]) -> [f64; D]) {
+        for n in 0..self.n_nodes() {
+            let out = f(self.coords_of(n as NodeId));
+            let off = n * D;
+            self.coords[off..off + D].copy_from_slice(&out);
+        }
+    }
+
+    /// Translate all nodes by vector `t`.
+    pub fn translate(&mut self, t: [f64; D]) {
+        self.transform(|p| std::array::from_fn(|i| p[i] + t[i]));
+    }
+
+    /// Uniformly scale all node coordinates about the origin.
+    pub fn scale(&mut self, s: f64) {
+        self.transform(|p| std::array::from_fn(|i| p[i] * s));
+    }
+
+    /// Apply a 3×3 rotation matrix to all nodes (3-D only, panics for D ≠ 3).
+    pub fn rotate_3d(&mut self, rot: &[[f64; 3]; 3]) {
+        assert_eq!(D, 3, "rotate_3d requires dim=3");
+        self.transform(|p| {
+            let mut q = [0.0; D];
+            for i in 0..3 { for j in 0..3 { q[i] += rot[i][j] * p[j]; } }
+            q
+        });
+    }
+
+    /// Apply a 2×2 rotation matrix to all nodes (2-D only, panics for D ≠ 2).
+    pub fn rotate_2d(&mut self, rot: &[[f64; 2]; 2]) {
+        assert_eq!(D, 2, "rotate_2d requires dim=2");
+        self.transform(|p| {
+            let mut q = [0.0; D];
+            for i in 0..2 { for j in 0..2 { q[i] += rot[i][j] * p[j]; } }
+            q
+        });
+    }
+
     /// Node indices of volume element `e`.
     #[inline]
     pub fn elem_nodes(&self, e: ElemId) -> &[NodeId] {
@@ -407,6 +450,100 @@ impl<const D: usize> SimplexMesh<D> {
         }
 
         Ok(SimplexMesh::uniform(
+            new_coords,
+            new_conn,
+            self.elem_tags.clone(),
+            self.elem_type,
+            new_face_conn,
+            new_face_tags,
+            self.face_type,
+        ))
+    }
+
+    /// Make a periodic mesh with affine (rotation + translation) matching.
+    ///
+    /// Each pair `(tag_a, tag_b, rot, trans)` identifies boundary faces that should
+    /// be identified: a node on `tag_b` at position `x_b` is matched to a node on
+    /// `tag_a` at position `x_a` if `x_b ≈ rot · x_a + trans`.
+    ///
+    /// `rot` is a flat `Vec<f64>` of length `D*D` (row-major: `result[i] = Σ rot[i*D + j] * x[j]`).
+    pub fn make_periodic_affine(
+        &self,
+        pairs: &[(BoundaryTag, BoundaryTag, Vec<f64>, [f64; D])],
+        tol: f64,
+    ) -> FemResult<Self> {
+        let mut tag_nodes = std::collections::HashMap::<BoundaryTag, Vec<NodeId>>::new();
+        let n_faces = self.n_faces();
+        for f in 0..n_faces as FaceId {
+            let tag = self.face_tags[f as usize];
+            let ns = self.bface_nodes(f);
+            for &n in ns { tag_nodes.entry(tag).or_default().push(n); }
+        }
+        for list in tag_nodes.values_mut() { list.sort_unstable(); list.dedup(); }
+
+        let mut remap = vec![u32::MAX; self.n_nodes()];
+        for (i, r) in remap.iter_mut().enumerate() { *r = i as u32; }
+        let mut periodic_tags = std::collections::HashSet::new();
+
+        for &(tag_a, tag_b, ref rot, ref trans) in pairs {
+            periodic_tags.insert(tag_a);
+            periodic_tags.insert(tag_b);
+            let nodes_a = tag_nodes.get(&tag_a).ok_or_else(|| {
+                FemError::Mesh(format!("periodic: tag_a={tag_a} not found"))
+            })?;
+            let nodes_b = tag_nodes.get(&tag_b).ok_or_else(|| {
+                FemError::Mesh(format!("periodic: tag_b={tag_b} not found"))
+            })?;
+            for &nb in nodes_b {
+                let cb = self.coords_of(nb);
+                let mut matched = false;
+                for &na in nodes_a {
+                    let ca = self.coords_of(na);
+                    let mut xform = [0.0; D];
+                    for i in 0..D { for j in 0..D { xform[i] += rot[i * D + j] * ca[j]; } }
+                    for i in 0..D { xform[i] += trans[i]; }
+                    let mut dist2 = 0.0;
+                    for d in 0..D { let d2 = cb[d] - xform[d]; dist2 += d2 * d2; }
+                    if dist2.sqrt() < tol {
+                        remap[nb as usize] = na;
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    return Err(FemError::Mesh(format!(
+                        "periodic: no match for node {nb} on tag_b={tag_b}"
+                    )));
+                }
+            }
+        }
+        let mut new_id = vec![u32::MAX; self.n_nodes()];
+        let mut new_coords = Vec::new();
+        let mut next = 0u32;
+        for i in 0..self.n_nodes() {
+            if remap[i] == i as u32 {
+                new_id[i] = next;
+                let off = i * D;
+                new_coords.extend_from_slice(&self.coords[off..off + D]);
+                next += 1;
+            }
+        }
+        for i in 0..self.n_nodes() {
+            if remap[i] != i as u32 {
+                new_id[i] = new_id[remap[i] as usize];
+            }
+        }
+        let new_conn: Vec<NodeId> = self.conn.iter().map(|&n| new_id[n as usize]).collect();
+        let mut new_face_conn = Vec::new();
+        let mut new_face_tags = Vec::new();
+        for f in 0..n_faces as FaceId {
+            let tag = self.face_tags[f as usize];
+            if periodic_tags.contains(&tag) { continue; }
+            let ns = self.bface_nodes(f);
+            for &n in ns { new_face_conn.push(new_id[n as usize]); }
+            new_face_tags.push(tag);
+        }
+        Ok(SimplexMesh::<D>::uniform(
             new_coords,
             new_conn,
             self.elem_tags.clone(),
