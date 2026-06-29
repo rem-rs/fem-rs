@@ -28,6 +28,8 @@ pub use assembly::{
     assemble_poisson_2d_p1_gpu,
     assemble_mass_2d_tri3_gpu,
     assemble_elasticity_2d_tri3_gpu,
+    assemble_poisson_2d_p1_f64,
+    triplets_f64_to_gpu_csr,
 };
 pub use buffer::DeviceBuffer;
 pub use context::{GpuContext, GpuFeatures};
