@@ -1,4 +1,4 @@
-//! HYPRE-compatible solver interfaces backed by native `linlvo` implementations.
+﻿//! HYPRE-compatible solver interfaces backed by native `linlvo` implementations.
 //!
 //! Provides MFEM/HYPRE-style naming conventions for BoomerAMG, AMS, ADS,
 //! and ParCSR matrix operations. All backends are pure-Rust via `linlvo`;

@@ -1,4 +1,4 @@
-//! Parallel Restricted Additive Schwarz (RAS) preconditioning scaffolding.
+﻿//! Parallel Restricted Additive Schwarz (RAS) preconditioning scaffolding.
 //!
 //! This module introduces a DDM-oriented preconditioner entrypoint for
 //! parallel Krylov solvers.  The first implementation intentionally keeps the
@@ -162,7 +162,7 @@ impl RasPrecond {
                 RasKernel::DiagJacobi { inv_diag }
             }
             RasLocalSolverKind::Ilu0 => {
-                let local = fem_solver::fem_to_Linger_csr(&a.diag);
+                let local = fem_solver::fem_to_linlvo_csr(&a.diag);
                 let ilu = Ilu0Precond::from_csr(&local).map_err(SolverError::from)?;
                 RasKernel::Ilu0 { ilu }
             }

@@ -1,4 +1,4 @@
-//! Eigenvalue solvers: LOBPCG and generalized eigenvalue problems.
+﻿//! Eigenvalue solvers: LOBPCG and generalized eigenvalue problems.
 //!
 //! # Algorithms
 //!
@@ -19,14 +19,14 @@
 //!
 //! // Find 3 smallest eigenpairs of K x = λ M x
 //! let (eigenvalues, eigenvectors) = lobpcg(&k, Some(&m), 3, &LobpcgConfig::default()).unwrap();
-//! println!("λ�?= {:.6}", eigenvalues[0]);
+//! println!("λ�?= {:.6}", eigenvalues[0]);
 //! ```
 
 use fem_linalg::CsrMatrix;
 use linlvo::{
-    KrylovSchur as LingerKrylovSchur,
+    KrylovSchur as linlvoKrylovSchur,
     eigen::{EigenParams, EigenSolver, EigenWhich},
-    sparse::CsrMatrix as LingerCsr,
+    sparse::CsrMatrix as linlvoCsr,
 };
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
 
@@ -37,7 +37,7 @@ use nalgebra::{DMatrix, DVector, SymmetricEigen};
 pub struct LobpcgConfig {
     /// Maximum number of iterations (default 300).
     pub max_iter: usize,
-    /// Convergence tolerance on residual `‖Ax �?λBx�?/ λ` (default 1e-8).
+    /// Convergence tolerance on residual `‖Ax �?λBx�?/ λ` (default 1e-8).
     pub tol: f64,
     /// Print convergence information when true.
     pub verbose: bool,
@@ -65,10 +65,10 @@ pub struct EigenResult {
 /// Compute the `k` smallest eigenpairs of `A x = λ B x` using LOBPCG.
 ///
 /// # Arguments
-/// - `a`   �?symmetric (SPD) stiffness matrix.
-/// - `b`   �?optional mass matrix (SPD); pass `None` for standard `A x = λ x`.
-/// - `k`   �?number of eigenpairs to compute (block size).
-/// - `cfg` �?solver configuration.
+/// - `a`   �?symmetric (SPD) stiffness matrix.
+/// - `b`   �?optional mass matrix (SPD); pass `None` for standard `A x = λ x`.
+/// - `k`   �?number of eigenpairs to compute (block size).
+/// - `cfg` �?solver configuration.
 ///
 /// # Returns
 /// `EigenResult` with eigenvalues sorted ascending and corresponding eigenvectors.
@@ -101,7 +101,7 @@ pub fn lobpcg_constrained(
 /// a user-supplied residual preconditioner.
 ///
 /// The callback receives the current block residual matrix `R` (`n x k`) and
-/// should return an approximate preconditioned block `Z �?P^{-1} R` with the
+/// should return an approximate preconditioned block `Z �?P^{-1} R` with the
 /// same shape.
 pub fn lobpcg_constrained_preconditioned<F>(
     a: &CsrMatrix<f64>,
@@ -157,7 +157,7 @@ fn lobpcg_projected(
 
         // ── 3. Rayleigh quotients ─────────────────────────────────────────────
         // Solve small dense problem in span(X, AX-λBX, P):
-        // XᵀAX / XᵀBX = Rayleigh matrix �?dense eigenproblem.
+        // XᵀAX / XᵀBX = Rayleigh matrix �?dense eigenproblem.
         let xtax = x.transpose() * &ax;
         let xtbx = x.transpose() * &bx;
 
@@ -488,25 +488,25 @@ fn small_generalized_eig(a: &DMatrix<f64>, b: &DMatrix<f64>, _k: usize) -> (Vec<
 
 // ─── KrylovSchur ─────────────────────────────────────────────────────────────
 
-/// Krylov-Schur eigenvalue solver �?robust thick-restart for large sparse problems.
+/// Krylov-Schur eigenvalue solver �?robust thick-restart for large sparse problems.
 ///
 /// Computes the `k` algebraically smallest eigenvalues of `A x = λ x`.
 /// Works for symmetric and non-symmetric operators.
 ///
 /// # Parameters
-/// * `a`   �?system matrix (fem-rs CSR, must be square)
-/// * `k`   �?number of eigenvalue/vector pairs to compute
-/// * `ncv` �?Krylov space size (default: `k + 20`); must satisfy `k < ncv �?n`
+/// * `a`   �?system matrix (fem-rs CSR, must be square)
+/// * `k`   �?number of eigenvalue/vector pairs to compute
+/// * `ncv` �?Krylov space size (default: `k + 20`); must satisfy `k < ncv �?n`
 pub fn krylov_schur(
     a: &CsrMatrix<f64>,
     k: usize,
     ncv: Option<usize>,
 ) -> Result<EigenResult, String> {
     let n = a.nrows;
-    let la = _fem_to_Linger_csr(a);
+    let la = _fem_to_linlvo_csr(a);
     let solver = match ncv {
-        Some(m) => LingerKrylovSchur::new(m),
-        None    => LingerKrylovSchur::default(),
+        Some(m) => linlvoKrylovSchur::new(m),
+        None    => linlvoKrylovSchur::default(),
     };
     let params = EigenParams::<f64>::new(k, EigenWhich::LargestAlgebraic);
     let res = solver.solve(&la, &params).map_err(|e| e.to_string())?;
@@ -518,8 +518,8 @@ pub fn krylov_schur(
     Ok(EigenResult { eigenvalues: res.eigenvalues, eigenvectors: evecs, converged: res.converged > 0, iterations: res.iterations })
 }
 
-fn _fem_to_Linger_csr(a: &CsrMatrix<f64>) -> LingerCsr<f64> {
-    LingerCsr::from_raw(
+fn _fem_to_linlvo_csr(a: &CsrMatrix<f64>) -> linlvoCsr<f64> {
+    linlvoCsr::from_raw(
         a.nrows,
         a.ncols,
         a.row_ptr.clone(),
@@ -556,14 +556,14 @@ mod tests {
     #[test]
     fn lobpcg_smallest_eigenvalue_laplacian() {
         // Smallest eigenvalue of tridiagonal laplacian of size n:
-        // λ_1 = 2 - 2cos(π/(n+1)) �?(π/(n+1))² for large n.
+        // λ_1 = 2 - 2cos(π/(n+1)) �?(π/(n+1))² for large n.
         let n = 20;
         let a = laplacian_1d(n);
         let cfg = LobpcgConfig { max_iter: 300, tol: 1e-6, verbose: false };
         let res = lobpcg(&a, None, 1, &cfg).unwrap();
         let exact = 2.0 - 2.0 * (std::f64::consts::PI / (n as f64 + 1.0)).cos();
         let err = (res.eigenvalues[0] - exact).abs();
-        assert!(err < 1e-4, "λ�?{:.6}, exact={exact:.6}, err={err:.2e}", res.eigenvalues[0]);
+        assert!(err < 1e-4, "λ�?{:.6}, exact={exact:.6}, err={err:.2e}", res.eigenvalues[0]);
     }
 
     #[test]
@@ -598,7 +598,7 @@ mod tests {
         let err0 = (res.eigenvalues[0] - 1.0).abs();
         let err1 = (res.eigenvalues[1] - 2.0).abs();
         assert!(err0 < 1e-4, "λ₀={:.6e}, expected 1.0, err={err0:.2e}", res.eigenvalues[0]);
-        assert!(err1 < 1e-4, "λ�?{:.6e}, expected 2.0, err={err1:.2e}", res.eigenvalues[1]);
+        assert!(err1 < 1e-4, "λ�?{:.6e}, expected 2.0, err={err1:.2e}", res.eigenvalues[1]);
     }
 
     #[test]
@@ -607,7 +607,7 @@ mod tests {
         let a = laplacian_1d(n);
         let cfg = LobpcgConfig { max_iter: 500, tol: 1e-6, verbose: false };
         let res = lobpcg(&a, None, 3, &cfg).unwrap();
-        // X^T X should be �?I_k.
+        // X^T X should be �?I_k.
         let xtx = res.eigenvectors.transpose() * &res.eigenvectors;
         for i in 0..3 {
             for j in 0..3 {
