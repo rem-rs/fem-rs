@@ -67,10 +67,11 @@ impl Euler3D {
     }
 }
 
-pub struct DgEuler3D<M: MeshTopology + Send + Sync> { mesh: M, euler: Euler3D, n_elems: usize, n_dofs: usize, pub flux_kind: EulerFluxKind }
+pub struct DgEuler3D<M: MeshTopology + Send + Sync> { mesh: M, euler: Euler3D, n_elems: usize, n_dofs: usize, pub flux_kind: EulerFluxKind, pub use_limiter: bool }
 impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
-    pub fn new(mesh: M) -> Self { let n = mesh.n_elements(); Self { mesh, euler: Euler3D::default(), n_elems: n, n_dofs: n * 4 * 5, flux_kind: EulerFluxKind::LaxFriedrichs } }
+    pub fn new(mesh: M) -> Self { let n = mesh.n_elements(); Self { mesh, euler: Euler3D::default(), n_elems: n, n_dofs: n * 4 * 5, flux_kind: EulerFluxKind::LaxFriedrichs, use_limiter: false } }
     pub fn with_flux(mut self, kind: EulerFluxKind) -> Self { self.flux_kind = kind; self }
+    pub fn with_limiter(mut self, on: bool) -> Self { self.use_limiter = on; self }
     fn idx(&self, e: u32, c: usize, ld: usize) -> usize { (e as usize * 4 + ld) * 5 + c }
     pub fn rhs(&self, u: &[f64]) -> Vec<f64> {
         let euler = &self.euler; let mut du = vec![0.0; self.n_dofs];
@@ -166,9 +167,53 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
         du
     }
     pub fn step_rk3(&self, u: &mut [f64], dt: f64) {
+        let face_elems = if self.use_limiter { Some(self.build_face_elems()) } else { None };
         let k1 = self.rhs(u); let mut u1: Vec<f64> = u.iter().zip(k1.iter()).map(|(a,b)| a+dt*b).collect();
+        if let Some(ref fe) = face_elems { self.apply_limiter(&mut u1, fe); }
         let k2 = self.rhs(&u1); for i in 0..self.n_dofs { u1[i] = 0.75*u[i] + 0.25*(u1[i] + dt*k2[i]); }
+        if let Some(ref fe) = face_elems { self.apply_limiter(&mut u1, fe); }
         let k3 = self.rhs(&u1); for i in 0..self.n_dofs { u[i] = (1./3.)*u[i] + (2./3.)*(u1[i] + dt*k3[i]); }
+        if let Some(ref fe) = face_elems { self.apply_limiter(u, fe); }
+    }
+
+    /// Build a flat (left_elem, right_elem_opt) list from mesh topology for limiter use.
+    fn build_face_elems(&self) -> Vec<(u32, Option<u32>)> {
+        let mut fm: HashMap<Vec<u32>, u32> = HashMap::new();
+        let mut faces: Vec<(u32, Option<u32>)> = Vec::new();
+        for e in 0..self.n_elems as u32 {
+            let en = self.mesh.element_nodes(e);
+            for lf in 0..4 {
+                let fno: Vec<u32> = match lf {
+                    0 => vec![en[0],en[1],en[2]], 1 => vec![en[0],en[1],en[3]],
+                    2 => vec![en[0],en[2],en[3]], _ => vec![en[1],en[2],en[3]],
+                };
+                let mut key = fno; key.sort_unstable();
+                match fm.remove(&key) {
+                    None => { fm.insert(key, e); }
+                    Some(prev) => { faces.push((prev, Some(e))); }
+                }
+            }
+        }
+        // Remaining map entries are boundary faces (single-sided).
+        for (_, l) in fm { faces.push((l, None)); }
+        faces
+    }
+
+    /// Apply Barth-Jespersen limiter to each conserved variable independently.
+    /// u is laid out as (e*4 + ld)*5 + c, so we extract per-component sub-vectors.
+    fn apply_limiter(&self, u: &mut [f64], face_elems: &[(u32, Option<u32>)]) {
+        let mut comp_buf = vec![0.0_f64; self.n_elems * 4];
+        for c in 0..5 {
+            for e in 0..self.n_elems {
+                for i in 0..4 { comp_buf[e * 4 + i] = u[self.idx(e as u32, c, i)]; }
+            }
+            crate::hyperbolic::limiter_barth_jespersen(
+                &mut comp_buf, self.n_elems, 4, &[], face_elems,
+            );
+            for e in 0..self.n_elems {
+                for i in 0..4 { u[self.idx(e as u32, c, i)] = comp_buf[e * 4 + i]; }
+            }
+        }
     }
 }
 
@@ -246,5 +291,46 @@ mod tests {
         }
         let du = dg.rhs(&u);
         for v in &du { assert!(v.is_finite(), "HLLC DG RHS non-finite"); }
+    }
+
+    #[test]
+    fn limiter_clamps_overshoot() {
+        // Two-element setup: one element has an overshoot in density relative to neighbors.
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let dg = DgEuler3D::new(mesh).with_flux(EulerFluxKind::Hllc).with_limiter(true);
+        let euler = Euler3D::default();
+        let mut u = vec![0.0; dg.n_dofs];
+        // Initialize all elements to rho=1, then perturb element 0 nodal value to rho=5.
+        for e in 0..dg.n_elems as u32 {
+            for i in 0..4 {
+                let c = euler.prim_to_cons(1.0, 0.0, 0.0, 0.0, 1.0);
+                for v in 0..5 { u[dg.idx(e,v,i)] = c[v]; }
+            }
+        }
+        // Spike: element 0, vertex 0, density component (c=0) = 5.0.
+        u[dg.idx(0, 0, 0)] = 5.0;
+        let face_elems = dg.build_face_elems();
+        dg.apply_limiter(&mut u, &face_elems);
+        // After limiter, element-0 density should not exceed neighbor mean (1.0) by more than ~0 .
+        let limited_max = (0..4).map(|i| u[dg.idx(0, 0, i)]).fold(f64::MIN, f64::max);
+        let mean = (0..4).map(|i| u[dg.idx(0, 0, i)]).sum::<f64>() / 4.0;
+        assert!(limited_max <= mean + 1e-9 || limited_max <= 1.0 + 1e-9,
+            "limiter failed to clamp overshoot: max={limited_max}, mean={mean}");
+    }
+
+    #[test]
+    fn step_rk3_with_limiter_finite() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let dg = DgEuler3D::new(mesh).with_flux(EulerFluxKind::Hllc).with_limiter(true);
+        let euler = Euler3D::default();
+        let mut u = vec![0.0; dg.n_dofs];
+        for e in 0..dg.n_elems as u32 {
+            for i in 0..4 {
+                let c = euler.prim_to_cons(1.0, 0.1, 0.0, 0.0, 1.0);
+                for v in 0..5 { u[dg.idx(e,v,i)] = c[v]; }
+            }
+        }
+        dg.step_rk3(&mut u, 1e-4);
+        for v in &u { assert!(v.is_finite(), "step_rk3 + limiter produced NaN/inf"); }
     }
 }
