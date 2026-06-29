@@ -1,9 +1,11 @@
-use fem_core::{ElemId, FaceId, FemError, FemResult, NodeId};
+use fem_core::{EdgeId, ElemId, FaceId, FemError, FemResult, NodeId};
 use crate::{
     boundary::{BoundaryTag, NamedAttributeRegistry},
     element_type::ElementType,
     topology::MeshTopology,
 };
+
+const _MAX_EDGE: u32 = ElemId::MAX;
 
 /// Local face vertex tables for each element type.
 fn local_face_verts(dim: usize, elem_type: ElementType) -> Vec<Vec<usize>> {
@@ -36,6 +38,23 @@ fn local_face_verts(dim: usize, elem_type: ElementType) -> Vec<Vec<usize>> {
             vec![2, 3, 7, 6], // y= 1 (far)
             vec![0, 3, 7, 4], // x=-1 (left)
             vec![1, 2, 6, 5], // x= 1 (right)
+        ],
+        _ => vec![],
+    }
+}
+
+/// Local edge vertex pairs (sorted globally, not local index order) for each element type.
+/// Returns flat `Vec<(local_node_a, local_node_b)>` for each element.
+fn local_element_edges(dim: usize, elem_type: ElementType) -> Vec<[usize; 2]> {
+    match (dim, elem_type) {
+        (2, ElementType::Tri3 | ElementType::Tri6) => vec![[0, 1], [1, 2], [0, 2]],
+        (2, ElementType::Quad4) => vec![[0, 1], [1, 2], [2, 3], [0, 3]],
+        (3, ElementType::Tet4 | ElementType::Tet10) => vec![
+            [0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3],
+        ],
+        (3, ElementType::Hex8 | ElementType::Hex20) => vec![
+            [0, 1], [0, 3], [0, 4], [1, 2], [1, 5], [2, 3],
+            [2, 6], [3, 7], [4, 5], [4, 7], [5, 6], [6, 7],
         ],
         _ => vec![],
     }
@@ -87,6 +106,15 @@ pub struct SimplexMesh<const D: usize> {
     /// For boundary face `f`, the element that owns it.
     /// `None` until built (lazy construction via [`build_face_to_elem`]).
     pub face_to_elem: Option<Vec<ElemId>>,
+
+    // ─── Edge-level data (lazy) ──────────────────────────────────────────────
+
+    /// Flat array of edge node pairs: `[a0, b0, a1, b1, …]`.
+    /// Built by [`build_edge_connectivity`].
+    pub edge_conn: Vec<NodeId>,
+    /// CSR-like: `edge_to_elem[2*eid]` = first element, `[2*eid+1]` = second or `ElemId::MAX`.
+    /// Built by [`build_edge_connectivity`].
+    pub edge_to_elem: Vec<ElemId>,
 }
 
 impl<const D: usize> SimplexMesh<D> {
@@ -424,6 +452,7 @@ impl<const D: usize> SimplexMesh<D> {
             coords, conn, elem_tags, elem_type, face_conn, face_tags, face_type,
             elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
             face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
         }
     }
 
@@ -464,6 +493,48 @@ impl<const D: usize> SimplexMesh<D> {
         }
 
         self.face_to_elem = Some(bface_to_elem);
+    }
+
+    // ─── Edge connectivity ───────────────────────────────────────────────────
+
+    /// Build the unique edge list and edge→element mapping.
+    ///
+    /// After calling this, `n_edges() > 0` and `edge_nodes()` / `edge_elements()`
+    /// are available.  Idempotent: calling twice is a no-op.
+    pub fn build_edge_connectivity(&mut self) {
+        if !self.edge_to_elem.is_empty() { return; }
+        let dim = D;
+        let n_elem = self.n_elems();
+        let mut edge_map: std::collections::HashMap<[NodeId; 2], (EdgeId, ElemId, ElemId)> =
+            std::collections::HashMap::new();
+        let mut next_eid = 0u32;
+
+        for e in 0..n_elem {
+            let verts = self.element_nodes(e as ElemId);
+            let local_edges = local_element_edges(dim, self.element_type(e as ElemId));
+            for &[la, lb] in &local_edges {
+                let a = verts[la]; let b = verts[lb];
+                let key = if a < b { [a, b] } else { [b, a] };
+                let entry = edge_map.entry(key).or_insert((next_eid, e as ElemId, _MAX_EDGE));
+                if entry.1 != e as ElemId && entry.2 == _MAX_EDGE {
+                    entry.2 = e as ElemId;
+                } else if entry.1 == _MAX_EDGE {
+                    entry.1 = e as ElemId;
+                }
+                if entry.0 == next_eid { next_eid += 1; }
+            }
+        }
+
+        let n = edge_map.len();
+        let mut conn = Vec::with_capacity(n * 2);
+        let mut e2e = vec![_MAX_EDGE; n * 2];
+        for (&key, &(eid, e1, e2)) in &edge_map {
+            let i = eid as usize;
+            conn.push(key[0]); conn.push(key[1]);
+            e2e[2 * i] = e1; e2e[2 * i + 1] = e2;
+        }
+        self.edge_conn = conn;
+        self.edge_to_elem = e2e;
     }
 
     /// Check if a boundary face's vertex set matches a sorted face set.
@@ -933,6 +1004,26 @@ impl<const D: usize> MeshTopology for SimplexMesh<D> {
             (0, None)
         }
     }
+
+    fn n_edges(&self) -> usize { self.edge_conn.len() / 2 }
+
+    fn edge_nodes(&self, eid: EdgeId) -> &[NodeId] {
+        let i = eid as usize * 2;
+        &self.edge_conn[i..i + 2]
+    }
+
+    fn edge_elements(&self, eid: EdgeId) -> (ElemId, Option<ElemId>) {
+        let i = eid as usize * 2;
+        let e1 = self.edge_to_elem[i];
+        let e2 = self.edge_to_elem[i + 1];
+        if e2 == _MAX_EDGE {
+            (e1, None)
+        } else {
+            (e1, Some(e2))
+        }
+    }
+
+    fn edge_iter(&self) -> std::ops::Range<u32> { 0..self.n_edges() as u32 }
 }
 
 #[cfg(test)]

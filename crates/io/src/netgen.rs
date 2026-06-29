@@ -286,6 +286,7 @@ impl VolParser {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
         })
     }
 }
@@ -394,7 +395,7 @@ fn build_boundary_faces_mixed(
 /// Parse one `surfaceelements` data line.
 ///
 /// Supports two formats:
-/// - `<bc_tag> <type_code: 3|4> n1 n2 [n3 n4]`  — explicit type code (our writer output)
+/// - `<bc_tag> <type_code: 3|4> n1 n2 [n3 n4]`  �?explicit type code (our writer output)
 /// - Flexible fallback: last 4 or last 3 valid node IDs inferred as Quad4 / Tri3.
 fn parse_surface_element_line(
     line: &str,
@@ -632,7 +633,7 @@ volumeelements
         let mesh = read_netgen_vol(two_tet4_vol_str().as_bytes()).unwrap();
         assert_eq!(mesh.n_elems(), 2);
         // The shared face should not be in the boundary.
-        // Two tets sharing one face → 4+4-2 = 6 boundary faces.
+        // Two tets sharing one face �?4+4-2 = 6 boundary faces.
         assert_eq!(mesh.face_tags.len(), 6);
     }
 
@@ -829,7 +830,7 @@ volumeelements
     fn mixed_tet4_prism6_shared_face_removed() {
         // A Tet4 and a Prism6 sharing one Tri3 face.
         // Tet4: nodes 1-4 (bottom tet), Prism6: nodes 1-6 sharing face [1,2,3] with the tet.
-        // Tet4 face [0,1,2] == Prism6 bottom face [0,1,2] → shared, removed.
+        // Tet4 face [0,1,2] == Prism6 bottom face [0,1,2] �?shared, removed.
         let s = "\
 dimension
 3

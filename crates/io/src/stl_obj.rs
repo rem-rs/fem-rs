@@ -132,6 +132,7 @@ pub fn read_obj<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
                 off
             }),
             face_types: None, face_offsets: None, face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
         });
     } else {
         let n_tri = tri_conn.len() / 3;

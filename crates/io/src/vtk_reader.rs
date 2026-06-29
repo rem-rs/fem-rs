@@ -98,6 +98,7 @@ fn parse_vtu(xml: &str) -> FemResult<VtuData> {
         face_types: None,
         face_offsets: None,
         face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
     };
 
     let point_data = parse_point_data_array(piece, "<PointData>", "</PointData>")?;

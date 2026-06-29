@@ -14,5 +14,8 @@ pub type DofId = u32;
 /// Index of a mesh face (edge in 2-D, face in 3-D).
 pub type FaceId = u32;
 
+/// Index of a mesh edge (1-D entity bounded by 2 vertices).
+pub type EdgeId = u32;
+
 /// Rank of an MPI process.
 pub type Rank = i32;

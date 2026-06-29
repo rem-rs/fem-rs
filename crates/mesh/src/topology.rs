@@ -1,4 +1,4 @@
-use fem_core::{ElemId, FaceId, NodeId};
+use fem_core::{EdgeId, ElemId, FaceId, NodeId};
 use crate::element_type::ElementType;
 
 /// Minimal mesh interface required by fem-rs for assembly and DOF management.
@@ -46,6 +46,41 @@ pub trait MeshTopology: Send + Sync {
     /// Returns `(interior_elem, None)` for mesh boundary faces,
     /// or `(elem_a, Some(elem_b))` for interior faces (when tracked).
     fn face_elements(&self, face: FaceId) -> (ElemId, Option<ElemId>);
+
+    // ─── Edge-level queries ──────────────────────────────────────────────────
+
+    /// Total number of unique edges in the mesh.
+    ///
+    /// Returns 0 by default (implementations must build the edge map).
+    fn n_edges(&self) -> usize { 0 }
+
+    /// Flat slice of node indices belonging to edge `eid` (length = 2).
+    ///
+    /// Default panics — implement when `n_edges() > 0`.
+    fn edge_nodes(&self, _eid: EdgeId) -> &[NodeId] {
+        panic!("edge_nodes() not implemented");
+    }
+
+    /// Element(s) sharing edge `eid`.
+    ///
+    /// Returns `(elem, None)` for boundary edges, `(elem_a, Some(elem_b))` for
+    /// interior edges.  Default panics — implement when `n_edges() > 0`.
+    fn edge_elements(&self, _eid: EdgeId) -> (ElemId, Option<ElemId>) {
+        panic!("edge_elements() not implemented");
+    }
+
+    /// Iterator over all edge indices.
+    fn edge_iter(&self) -> std::ops::Range<u32> {
+        0..self.n_edges() as u32
+    }
+
+    // ─── Face orientation ───────────────────────────────────────────────────
+
+    /// Orientation of a boundary face with respect to a canonical reference.
+    ///
+    /// Returns `0` by default (identity).  Specific element types may return
+    /// a rotation index (0, 1, 2, …) or flip flag.
+    fn face_orientation(&self, _face: FaceId) -> u8 { 0 }
 
     /// Iterator over all element indices.
     fn elem_iter(&self) -> std::ops::Range<u32> {

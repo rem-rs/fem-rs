@@ -18,4 +18,4 @@ pub mod types;
 pub use error::{FemError, FemResult};
 pub use point::{Coord2, Coord3, Mat2x2, Mat3x3, Vec2, Vec3};
 pub use scalar::Scalar;
-pub use types::{DofId, ElemId, FaceId, NodeId, Rank};
+pub use types::{DofId, EdgeId, ElemId, FaceId, NodeId, Rank};

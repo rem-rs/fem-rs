@@ -137,6 +137,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                 face_types: face_types_opt.clone(),
                 face_offsets: None,
                 face_to_elem: None,
+                edge_conn: vec![], edge_to_elem: vec![],
             };
             Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
         } else {
@@ -151,9 +152,10 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             elem_types: if uniform_type.is_some() { None } else { Some(elem_types) },
             elem_offsets: None,
             face_types: face_types_opt,
-            face_offsets: None,
-            face_to_elem: None,
-        };
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    };
         Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
     }
 }

@@ -175,6 +175,7 @@ fn mixed_mesh_elem_type_accessor() {
         face_types: None,
         face_offsets: None,
         face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
     };
 
     assert!(mesh.is_mixed());

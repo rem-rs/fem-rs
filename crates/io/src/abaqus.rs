@@ -332,6 +332,7 @@ impl InpParser {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
         })
     }
 
