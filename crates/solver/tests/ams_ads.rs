@@ -218,7 +218,10 @@ fn ads_darcy_3d_h_independent() {
 // ─── Complex AMS: time-harmonic Maxwell 2D ─────────────────────────────────
 
 use fem_linalg::complex_csr::ComplexCsr;
-use fem_solver::complex_ams::{solve_gmres_ams_complex, solve_bicgstab_ams_complex};
+use fem_solver::complex_ams::{
+    solve_gmres_ams_complex, solve_bicgstab_ams_complex,
+    solve_gmres_ads_complex, solve_bicgstab_ads_complex,
+};
 
 /// Build a complex H(curl) system `(K + M) + i·(ω·M)` on a 2D mesh,
 /// apply tangential Dirichlet BCs, and return `(A_complex, G_linlvo, rhs_re, rhs_im)`.
@@ -346,5 +349,105 @@ fn complex_ams_2d_bicgstab() {
     ).expect("Complex AMS BiCGSTAB should converge");
 
     eprintln!("Complex AMS BiCGSTAB 2D: {iters} iters, res={res:.2e}");
+    assert!(iters < 400, "BiCGSTAB too many iterations: {iters}");
+}
+
+// ─── Complex ADS: H(div) Darcy 3D ─────────────────────────────────────────
+
+/// Build a complex H(div) system `M + i·(ω·M)` on a 3D mesh,
+/// apply normal-component Dirichlet BCs, and return
+/// `(A_complex, C_linlvo, G_linlvo, rhs_re, rhs_im)`.
+fn build_complex_darcy_3d(
+    n: usize, omega: f64,
+) -> (ComplexCsr, linlvo::sparse::CsrMatrix<f64>, linlvo::sparse::CsrMatrix<f64>,
+      Vec<f64>, Vec<f64>) {
+    use std::f64::consts::PI;
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let hdiv = HDivSpace::new(mesh.clone(), 0); // RT0
+    let h1 = H1Space::new(mesh.clone(), 1);
+    let hcurl = HCurlSpace::new(mesh.clone(), 1);
+    let n_dofs = hdiv.n_dofs();
+
+    // Assemble H(div) mass matrix (real part)
+    let m_csr = VectorAssembler::assemble_bilinear(&hdiv, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
+
+    // Build A_re = M (SPD) and A_im = ω·M via COO.
+    let mut coo_re = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
+    let mut coo_im = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
+    for i in 0..n_dofs {
+        for ptr in m_csr.row_ptr[i]..m_csr.row_ptr[i+1] {
+            let j = m_csr.col_idx[ptr] as usize;
+            let m_val = m_csr.values[ptr];
+            coo_re.add(i, j, m_val);
+            coo_im.add(i, j, omega * m_val);
+        }
+    }
+    let k_re: fem_linalg::CsrMatrix<f64> = coo_re.into_csr();
+    let k_im: fem_linalg::CsrMatrix<f64> = coo_im.into_csr();
+    let a_complex = ComplexCsr::from_re_im(&k_re, &k_im);
+
+    // Discrete curl C: H(curl)(ND1) → H(div)(RT0)
+    let c_fem = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+    let c_linlvo = fem_to_linlvo_csr(&c_fem);
+
+    // Gradient G: H1(P1) → H(curl)(ND1)
+    let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+    let g_linlvo = fem_to_linlvo_csr(&g_fem);
+
+    // RHS from sinusoidal source
+    let mut rhs_re = VectorAssembler::assemble_linear(&hdiv, &[
+        &VectorDomainLFIntegrator {
+            f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
+                let sx = (PI*x[0]).sin(); let sy = (PI*x[1]).sin(); let sz = (PI*x[2]).sin();
+                out[0] = sx; out[1] = sy; out[2] = sz;
+            })),
+        },
+    ], 3);
+    let mut rhs_im = vec![0.0; n_dofs];
+
+    // Dirichlet: normal component = 0 on all 6 faces
+    let bdofs = fem_space::constraints::boundary_dofs_hdiv(&mesh, &hdiv, &[1, 2, 3, 4, 5, 6]);
+    let mut a_mut = a_complex;
+    for &dof in &bdofs {
+        a_mut.apply_dirichlet_row(dof as usize, 0.0, 0.0, &mut rhs_re, &mut rhs_im);
+    }
+
+    (a_mut, c_linlvo, g_linlvo, rhs_re, rhs_im)
+}
+
+#[test]
+fn complex_ads_3d_converges() {
+    let omega = 1.0;
+    let (a, c, g, b_re, b_im) = build_complex_darcy_3d(2, omega);
+    let n = a.nrows;
+    let mut x_re = vec![0.0; n];
+    let mut x_im = vec![0.0; n];
+
+    let cfg = linlvo::precond::AdsConfig::hpc_default();
+    let (iters, res) = solve_gmres_ads_complex(
+        &a, &c, &g, &b_re, &b_im, &mut x_re, &mut x_im,
+        1e-6, 500, 50, cfg,
+    ).expect("Complex ADS GMRES should converge");
+
+    eprintln!("Complex ADS 3D (2×2×2): converged in {iters} iters, res={res:.2e}");
+    assert!(iters < 300, "too many iterations: {iters}");
+    assert!(iters > 0, "solver should perform at least 1 iteration");
+}
+
+#[test]
+fn complex_ads_3d_bicgstab() {
+    let omega = 2.0;
+    let (a, c, g, b_re, b_im) = build_complex_darcy_3d(2, omega);
+    let n = a.nrows;
+    let mut x_re = vec![0.0; n];
+    let mut x_im = vec![0.0; n];
+
+    let cfg = linlvo::precond::AdsConfig::hpc_default();
+    let (iters, res) = solve_bicgstab_ads_complex(
+        &a, &c, &g, &b_re, &b_im, &mut x_re, &mut x_im,
+        1e-6, 500, cfg,
+    ).expect("Complex ADS BiCGSTAB should converge");
+
+    eprintln!("Complex ADS BiCGSTAB 3D: {iters} iters, res={res:.2e}");
     assert!(iters < 400, "BiCGSTAB too many iterations: {iters}");
 }
