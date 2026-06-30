@@ -74,6 +74,8 @@ pub mod cahn_allen;
 pub mod contact;
 pub mod coefficient;
 pub mod complex;
+pub mod crystal_plasticity;
+pub mod damage;
 pub mod integrator;
 pub mod standard;
 pub mod block_assembler;
