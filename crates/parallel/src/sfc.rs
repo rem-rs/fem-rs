@@ -330,4 +330,38 @@ mod tests {
             assert_eq!(c, i as u64, "Hilbert 2D bijection broken at {i}");
         }
     }
+
+    #[test]
+    fn morton_2d_balanced_partition() {
+        // Verify that Morton partitioning produces roughly balanced partitions
+        // (within 20% of ideal for a uniform mesh).
+        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let n_elems = mesh.n_elems();
+        for &n_parts in &[2, 4, 8] {
+            let parts = partition_morton(&mesh, n_parts, None);
+            let ideal = n_elems / n_parts;
+            let counts: Vec<usize> = (0..n_parts).map(|r| parts.iter().filter(|&&p| p == r as i32).count()).collect();
+            let max_cnt = *counts.iter().max().unwrap();
+            let min_cnt = *counts.iter().min().unwrap();
+            let imbalance = (max_cnt - min_cnt) as f64 / ideal as f64;
+            eprintln!("Morton {n_parts}-way: min={min_cnt}, max={max_cnt}, ideal={ideal}, imbalance={imbalance:.3}");
+            assert!(imbalance < 0.25, "Morton {n_parts}-way imbalance too high: {imbalance:.3}");
+        }
+    }
+
+    #[test]
+    fn hilbert_2d_balanced_partition() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let n_elems = mesh.n_elems();
+        for &n_parts in &[2, 4, 8] {
+            let parts = partition_hilbert(&mesh, n_parts, None);
+            let ideal = n_elems / n_parts;
+            let counts: Vec<usize> = (0..n_parts).map(|r| parts.iter().filter(|&&p| p == r as i32).count()).collect();
+            let max_cnt = *counts.iter().max().unwrap();
+            let min_cnt = *counts.iter().min().unwrap();
+            let imbalance = (max_cnt - min_cnt) as f64 / ideal as f64;
+            eprintln!("Hilbert {n_parts}-way: min={min_cnt}, max={max_cnt}, ideal={ideal}, imbalance={imbalance:.3}");
+            assert!(imbalance < 0.25, "Hilbert {n_parts}-way imbalance too high: {imbalance:.3}");
+        }
+    }
 }

@@ -255,9 +255,9 @@ pub fn par_repartition(
 ///
 /// This is a **single-pass diffusive** scheme.  Full balance may require
 /// multiple passes (call in a loop until imbalance < threshold).
-pub fn sfc_rebalance_ring(
-    par_mesh: ParallelMesh<SimplexMesh<2>>,
-) -> Result<ParallelMesh<SimplexMesh<2>>, ParAmrError> {
+pub fn sfc_rebalance_ring<const D: usize>(
+    par_mesh: ParallelMesh<SimplexMesh<D>>,
+) -> Result<ParallelMesh<SimplexMesh<D>>, ParAmrError> {
     let comm = par_mesh.comm().clone();
     let size = comm.size();
     let rank = comm.rank();
@@ -317,7 +317,7 @@ pub fn sfc_rebalance_ring(
     // Encode send submesh (with minimal partition info)
     let send_part = crate::partition::MeshPartition::new_serial(
         send_mesh.n_nodes(), send_mesh.n_elems());
-    let encoded_send = crate::mesh_serde::encode_submesh::<2>(&send_mesh, &send_part);
+    let encoded_send = crate::mesh_serde::encode_submesh::<D>(&send_mesh, &send_part);
 
     // Buffered send/recv to avoid deadlock on ring
     // Even ranks send first, odd ranks recv first (standard MPI pattern)
@@ -341,7 +341,7 @@ pub fn sfc_rebalance_ring(
 
     // 5. Merge received elements into local mesh
     let final_mesh = if let Some(buf) = recv_buf {
-        let (recv_mesh, _recv_part) = crate::mesh_serde::decode_submesh::<2>(&buf)
+        let (recv_mesh, _recv_part) = crate::mesh_serde::decode_submesh::<D>(&buf)
             .map_err(|e| ParAmrError::SerializationError(e))?;
         merge_two_meshes(&keep_mesh, &recv_mesh)
     } else {
