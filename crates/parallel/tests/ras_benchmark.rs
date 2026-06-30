@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_mesh::SimplexMesh;
 use fem_parallel::{
-    par_solve_gmres_ras, par_solve_pcg_ras, partition_simplex, summarize_ras_hpc,
-    ParAssembler, ParallelFESpace, RasConfig, RasLocalSolverKind,
+    par_solve_gmres_ras, par_solve_pcg_ras, partition_simplex,
+    summarize_ras_hpc, ParAssembler, ParallelFESpace, RasConfig, RasLocalSolverKind,
 };
+use fem_parallel::par_ras::{par_solve_gmres_schur, SchurPrecond};
 use fem_parallel::launcher::{native::ThreadLauncher, WorkerConfig};
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
@@ -565,5 +566,87 @@ fn ras_scaling_report_pcg_ilu0_overlap1() {
 
     for r in &rows {
         assert!(r.final_residual <= 1e-6, "residual too high in scaling row");
+    }
+}
+
+#[test]
+#[ignore = "benchmark-style scaling test; run explicitly"]
+fn schur_scaling_report_gmres() {
+    let ranks_list = [1usize, 2, 4];
+    let mesh_n = 16usize;
+
+    let mut rows: Vec<ScalingRow> = Vec::new();
+
+    for &ranks in &ranks_list {
+        let mesh = SimplexMesh::<2>::unit_square_tri(mesh_n);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(ranks));
+        let out: Arc<Mutex<Option<ScalingRow>>> = Arc::new(Mutex::new(None));
+        let out_shared = Arc::clone(&out);
+
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 2);
+            let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs {
+                let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs {
+                    a_mat.apply_dirichlet_row(lid, 0.0, rhs.as_slice_mut());
+                }
+            }
+
+            let n_owned = par_space.dof_partition().n_owned_dofs;
+            let n_iface = (n_owned * 2 / 5).max(1).min(n_owned - 1);
+            let mut iface_mask = vec![false; n_owned];
+            for i in n_owned - n_iface..n_owned { iface_mask[i] = true; }
+
+            let schur = SchurPrecond::build(&a_mat, &iface_mask)
+                .expect("Schur build failed");
+
+            let cfg = SolverConfig { rtol: 1e-6, max_iter: 500, ..SolverConfig::default() };
+            let mut u = fem_parallel::ParVector::zeros(&par_space);
+            let t0 = Instant::now();
+            let res = par_solve_gmres_schur(&a_mat, &schur, &rhs, &mut u, 30, &cfg)
+                .unwrap_or_else(|e| panic!("schur gmres failed: {}", e));
+            let dt = t0.elapsed().as_secs_f64() * 1e3;
+            let hpc = summarize_ras_hpc(&a_mat);
+
+            assert!(res.final_residual <= 1e-5, "Schur residual too high on rank {}: {:.3e}", comm.rank(), res.final_residual);
+
+            if comm.is_root() {
+                let row = ScalingRow {
+                    mode: "schur",
+                    ranks,
+                    mesh_n,
+                    dofs: hpc.global_owned_dofs,
+                    iterations: res.iterations,
+                    final_residual: res.final_residual,
+                    time_ms: dt,
+                    owned: hpc.global_owned_dofs,
+                    ghost: hpc.global_ghost_dofs,
+                    nnz_diag: hpc.global_diag_nnz,
+                    nnz_offd: hpc.global_offd_nnz,
+                    owned_cv: hpc.owned_dofs_cv,
+                    ghost_cv: hpc.ghost_dofs_cv,
+                };
+                *out_shared.lock().expect("schur output mutex poisoned") = Some(row);
+            }
+        });
+
+        let row = out.lock().unwrap().take().expect("schur scaling row not produced");
+        rows.push(row);
+    }
+
+    println!("\n=== Schur-GMRES Scaling (mesh_n=16, P1) ===");
+    println!("ranks,dofs,iterations,final_residual,time_ms");
+    for r in &rows {
+        println!("{},{},{},{:.3e},{:.3}", r.ranks, r.dofs, r.iterations, r.final_residual, r.time_ms);
     }
 }
