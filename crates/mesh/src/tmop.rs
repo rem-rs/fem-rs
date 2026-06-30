@@ -35,6 +35,8 @@ pub enum TmopMetric {
     /// Barrier: `μ = 1/det(T) − 1` for det(T) > 0. Approaches +∞ as
     /// det(T) → 0⁺, preventing element inversion.
     BarrierDet,
+    /// Squared Frobenius distance from identity: `μ = ∣T − I∣²`.
+    FrobeniusDiff,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -142,6 +144,16 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
             for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = -sign / (a * a) * adj_t[(i, j)]; }}
             let mut dmu_da = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { for k in 0..2 { dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)]; }}}
+            TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
+        }
+        TmopMetric::FrobeniusDiff => {
+            let ti = t - Matrix2::identity();
+            let value = ti.iter().map(|v| v * v).sum();
+            let mut dmu_dt = 2.0 * ti;
+            let mut dmu_da = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { for k in 0..2 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
             TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
         }
     }
@@ -288,6 +300,20 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
             let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
             let mut dmu_dt = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { dmu_dt[(i, j)] = -sign / (a * a) * adj_t[(i, j)]; }}
+            let mut dmu_da = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { for k in 0..3 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric3d {
+                value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)], dmu_da[(0,2)]],
+                               [dmu_da[(1,0)], dmu_da[(1,1)], dmu_da[(1,2)]],
+                               [dmu_da[(2,0)], dmu_da[(2,1)], dmu_da[(2,2)]]],
+            }
+        }
+        TmopMetric::FrobeniusDiff => {
+            let ti = t - Matrix3::identity();
+            let value = ti.iter().map(|v| v * v).sum();
+            let dmu_dt = 2.0 * ti;
             let mut dmu_da = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { for k in 0..3 {
                 dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
