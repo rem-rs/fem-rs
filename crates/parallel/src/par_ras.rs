@@ -638,22 +638,32 @@ impl SchurPrecond {
         let local_ii = fem_solver::fem_to_linlvo_csr(&a_ii);
         let mut solver = linlvo::direct::MultifrontalLu::<f64>::default();
         solver.factorize(&local_ii).map_err(|e| SolverError::Linlvo(e.to_string()))?;
-        let ii_diag = a_ii.diagonal();
+        // Compute Schur complement diagonal using MultifrontalLu solves:
+        // S_ii = A_GG[i,i] - A_GI[i,:] * A_II^{-1} * A_IG[:,i]
         let mut schur_diag = vec![0.0_f64; n_interface];
         for i in 0..n_interface {
-            for k in a_gg.row_ptr[i]..a_gg.row_ptr[i + 1] { if a_gg.col_idx[k] as usize == i { schur_diag[i] += a_gg.values[k]; } }
-            let mut sc = 0.0_f64;
-            for k in a_gi.row_ptr[i]..a_gi.row_ptr[i + 1] {
-                let ic = a_gi.col_idx[k] as usize;
-                let giv = a_gi.values[k];
-                for k2 in a_ig.row_ptr[ic]..a_ig.row_ptr[ic + 1] {
-                    if a_ig.col_idx[k2] as usize == i {
-                        let d = if ic < ii_diag.len() && ii_diag[ic].abs() > 1e-30 { 1.0 / ii_diag[ic] } else { 0.0 };
-                        sc += giv * d * a_ig.values[k2];
+            for k in a_gg.row_ptr[i]..a_gg.row_ptr[i + 1] {
+                if a_gg.col_idx[k] as usize == i { schur_diag[i] = a_gg.values[k]; break; }
+            }
+            // Build RHS = A_IG[:,i] for A_II^{-1} solve
+            let mut rhs_vec = vec![0.0_f64; n_interior];
+            for ir in 0..n_interior {
+                for k in a_ig.row_ptr[ir]..a_ig.row_ptr[ir + 1] {
+                    if a_ig.col_idx[k] as usize == i {
+                        rhs_vec[ir] = a_ig.values[k];
+                        break;
                     }
                 }
             }
-            schur_diag[i] -= sc;
+            let rhs_dv = DenseVec::from_vec(rhs_vec);
+            let mut sol = DenseVec::zeros(n_interior);
+            if solver.solve(&rhs_dv, &mut sol).is_ok() {
+                let mut corr = 0.0_f64;
+                for k in a_gi.row_ptr[i]..a_gi.row_ptr[i + 1] {
+                    corr += a_gi.values[k] * sol[a_gi.col_idx[k] as usize];
+                }
+                schur_diag[i] -= corr;
+            }
         }
         let sdi: Vec<f64> = schur_diag.iter().map(|&d| if d.abs() > 1e-30 { 1.0 / d } else { 1.0 }).collect();
         Ok(SchurPrecond { solver, a_ig, a_gi, a_gg, schur_diag_inv: sdi, n_interior, n_interface, omega: 1.0 })
@@ -1418,5 +1428,62 @@ mod tests {
             );
             assert!(res.final_residual <= 1e-7);
         });
+    }
+
+    // ─── Schur complement preconditioner tests ────────────────────────────────
+
+    fn test_schur_precond_build_and_solve(comm: &crate::comm::Comm) {
+        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let pmesh = partition_simplex(&mesh, comm);
+        let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+        let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+        let diff = DiffusionIntegrator { kappa: 1.0 };
+        let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 2);
+        let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+        let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+
+        let dm = par_space.local_space().dof_manager();
+        let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+        for &d in &bc_dofs {
+            let lid = d as usize;
+            if lid < par_space.dof_partition().n_owned_dofs {
+                a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data);
+            }
+        }
+
+        // Mark last 40% of owned DOFs as interface (boundary DOFs were interior),
+        // so we have both interior and interface DOFs.
+        let n_owned = par_space.dof_partition().n_owned_dofs;
+        if n_owned < 3 { return; }
+        let n_iface = (n_owned * 2 / 5).max(1).min(n_owned - 1);
+        let mut interface_mask = vec![false; n_owned];
+        for i in n_owned - n_iface..n_owned { interface_mask[i] = true; }
+
+        let schur = SchurPrecond::build(&a_mat, &interface_mask);
+        assert!(schur.is_ok(), "SchurPrecond::build failed: {:?}", schur.err());
+        let schur = schur.unwrap();
+        assert_eq!(schur.n_interface, n_iface);
+        assert_eq!(schur.n_interior, n_owned - n_iface);
+
+        let mut u = crate::par_vector::ParVector::zeros(&par_space);
+        let s_cfg = SolverConfig { rtol: 1e-6, max_iter: 500, ..SolverConfig::default() };
+        let res = par_solve_gmres_schur(&a_mat, &schur, &rhs, &mut u, 30, &s_cfg);
+        assert!(res.is_ok(), "par_solve_gmres_schur failed: {:?}", res.err());
+        let res = res.unwrap();
+        eprintln!("rank {}: Schur-GMRES converged={}, iters={}, res={:.3e}",
+            comm.rank(), res.converged, res.iterations, res.final_residual);
+    }
+
+    #[test]
+    fn schur_precond_builds_and_solves_serial() {
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+        launcher.launch(move |comm| test_schur_precond_build_and_solve(&comm));
+    }
+
+    #[test]
+    fn schur_precond_builds_and_solves_two_ranks() {
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| test_schur_precond_build_and_solve(&comm));
     }
 }
