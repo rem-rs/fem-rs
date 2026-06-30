@@ -31,8 +31,13 @@
 //! let mut u = solver.solve(&form, &rhs, &mut u).unwrap();
 //! ```
 
+use std::sync::Mutex;
+
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
+use fem_element::{
+    ReferenceElement,
+    lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3},
+};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -118,7 +123,8 @@ pub struct J2PlasticityForm<M: MeshTopology> {
     dirichlet: Vec<(usize, f64)>,
     quad_order: u8,
     /// Per-element, per-QP state: `(ε^p_xx, ε^p_yy, ε^p_zz, γ^p_xy, γ^p_yz, γ^p_zx, α)`.
-    state: Vec<Vec<f64>>,
+    /// Wrapped in `Mutex` because `NonlinearForm` only grants `&self`.
+    state: Mutex<Vec<Vec<f64>>>,
     elems: Vec<u32>,   // element IDs (for state indexing)
     qp_offsets: Vec<usize>, // cumulative per-element QP count
 }
@@ -138,13 +144,17 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
         }
         let total_qp = qp_offsets.last().copied().unwrap_or(0);
         // 7 state variables per QP: 6 ε^p + α
-        let state = vec![vec![0.0_f64; 7]; total_qp];
+        let state = Mutex::new(vec![vec![0.0_f64; 7]; total_qp]);
         Self { space, cfg, dirichlet, quad_order, state, elems, qp_offsets }
     }
 
     /// Reset all internal variables to zero (for a fresh analysis).
     pub fn reset_state(&mut self) {
-        for s in self.state.iter_mut() { s.fill(0.0); }
+        // Access inner Vec<Vec<f64>> directly (no locking needed for &mut self).
+        let inner = &mut *self.state.get_mut().unwrap();
+        for s in inner.iter_mut() {
+            for i in 0..s.len() { s[i] = 0.0; }
+        }
     }
 
     /// Access internal variables for a given element and quadrature point.
@@ -236,8 +246,8 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
         for v in f_vec.iter_mut() { *v = -*v; }
         let wants_residual = want_residual;
 
-        // Re-initialise state (incremental formulation stores current increment)
-        let mut new_state = vec![vec![0.0_f64; 7]; self.qp_offsets.last().copied().unwrap_or(0)];
+        // Borrow state for read/write (Mutex interior mutability)
+        let mut state = self.state.lock().unwrap();
 
         for (el, e) in self.elems.iter().enumerate() {
             let elem_type = mesh.element_type(*e);
@@ -245,7 +255,7 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
             let n_ldofs = ref_elem.n_dofs();
             let n_vec = n_ldofs * dim;
             let quad = ref_elem.quadrature(self.quad_order);
-            let qp_start = self.qp_offsets[el];
+            let _qp_start = self.qp_offsets[el];
 
             let elem_dofs: Vec<usize> = self.space.element_dofs(*e).iter()
                 .map(|&d| d as usize).collect();
@@ -270,10 +280,10 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                 // Total strain at QP
                 let eps = Self::strain_at_qp(&u_elem, &gphys, dim, n_ldofs);
 
-                // Old plastic state
+                // Old plastic state (read via RefCell)
                 let old_idx = self.qp_state_idx(el, q);
-                let eps_p_old = &self.state[old_idx][..6];
-                let alpha_old = self.state[old_idx][6];
+                let eps_p_old: Vec<f64> = state[old_idx][..6].to_vec();
+                let alpha_old = state[old_idx][6];
 
                 // Elastic predictor
                 let mut eps_e_trial = vec![0.0; n_comp];
@@ -334,12 +344,12 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                     alpha_old
                 };
 
-                // Store new state
-                new_state[old_idx][..6].copy_from_slice(&eps_p_old);
+                // Store updated state (via Mutex interior mutability)
+                state[old_idx][..6].copy_from_slice(&eps_p_old);
                 if f_trial > 0.0 {
-                    for i in 0..n_comp { new_state[old_idx][i] += dgamma * s_trial[i] / (s_norm + 1e-30); }
+                    for i in 0..n_comp { state[old_idx][i] += dgamma * s_trial[i] / (s_norm + 1e-30); }
                 }
-                new_state[old_idx][6] = new_alpha;
+                state[old_idx][6] = new_alpha;
 
                 // Assemble residual contribution into f_vec
                 for k in 0..n_ldofs {
@@ -352,7 +362,6 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                                 s += sigma[sig_idx] * gphys[k * dim + j];
                             } else {
                                 // Shear: ε_ij is at γ component
-                                let g_idx = if dim == 2 { 2 } else { 3 + (i + j - 1) % 3 };
                                 if i == 0 && j == 1 || i == 1 && j == 0 {
                                     s += sigma[if dim == 2 {2} else {3}] * gphys[k * dim + j];
                                 } else if i == 1 && j == 2 || i == 2 && j == 1 {
@@ -395,9 +404,7 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
             coo.add_element_matrix(&elem_dofs, &k_elem);
         }
 
-        // Update mutable state (this is a hack; real impl needs &mut self)
-        // For now, skip state update since form is borrowed immutably by NonlinearForm trait.
-        // In production, use `RefCell` or pass `&mut self` through separate path.
+        // State is already updated in-place via Mutex above.
 
         let mut mat = coo.into_csr();
         let mut dir_rhs = if wants_residual { f_vec } else { vec![0.0; n_dofs] };
@@ -413,8 +420,6 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
 
 /// Deviatoric projection tensor in Voigt form, entry `(i, j)`.
 fn dev_proj_ij(i: usize, j: usize, dim: usize) -> f64 {
-    let n = if dim == 2 { 3 } else { 6 };
-    let val = if i == j { 1.0 } else { 0.0 };
     let delta_ij = |a: usize, b: usize| if a == b { 1.0 } else { 0.0 };
     // δ_ij - (1/3)·δ_i·δ_j where δ_i = 1 if i < dim else 0
     let d1 = if i < dim { 1.0 } else { 0.0 };
@@ -474,7 +479,8 @@ pub struct FiniteStrainPlasticity<M: MeshTopology> {
     dirichlet: Vec<(usize, f64)>,
     quad_order: u8,
     /// Per-element, per-QP state: `(E^p_xx, E^p_yy, E^p_zz, Γ^p_xy, Γ^p_yz, Γ^p_zx, α)`.
-    state: Vec<Vec<f64>>,
+    /// Wrapped in `Mutex` because `NonlinearForm` only grants `&self`.
+    state: Mutex<Vec<Vec<f64>>>,
     elems: Vec<u32>,
     qp_offsets: Vec<usize>,
 }
@@ -484,8 +490,8 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
     pub fn new(
         space: VectorH1Space<M>,
         cfg: PlasticConfig,
-        dirichlet: Vec<(usize, f64)>,
-        quad_order: u8,
+    dirichlet: Vec<(usize, f64)>,  // TODO: apply Dirichlet BCs in assemble_jacobian
+    quad_order: u8,
     ) -> Self {
         let mesh = space.mesh();
         let mut qp_offsets = vec![0usize];
@@ -498,12 +504,15 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
             elems.push(e);
         }
         let total_qp = qp_offsets.last().copied().unwrap_or(0);
-        let state = vec![vec![0.0_f64; 7]; total_qp];
+        let state = Mutex::new(vec![vec![0.0_f64; 7]; total_qp]);
         FiniteStrainPlasticity { space, cfg, dirichlet, quad_order, state, elems, qp_offsets }
     }
 
     pub fn reset_state(&mut self) {
-        for s in self.state.iter_mut() { s.fill(0.0); }
+        let inner = &mut *self.state.get_mut().unwrap();
+        for s in inner.iter_mut() {
+            for i in 0..s.len() { s[i] = 0.0; }
+        }
     }
 
     fn qp_state_idx(&self, elem_local: usize, qp: usize) -> usize {
@@ -548,6 +557,7 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
     /// Green–Lagrange strain / 2nd Piola–Kirchhoff stress pairing.
     /// For the total Lagrangian formulation, the small-strain elasticity tensor
     /// is used directly because S = C : E in the material frame.
+    #[allow(dead_code)]
     fn elastic_stiffness_finite(_dim: usize) -> DMatrix<f64> {
         // The caller uses the same `elastic_stiffness` from PlasticConfig
         // (it returns the small-strain C, which IS the correct material
@@ -591,7 +601,8 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
             c
         };
 
-        let mut new_state = vec![vec![0.0_f64; 7]; self.qp_offsets.last().copied().unwrap_or(0)];
+        // Borrow state for read/write (Mutex interior mutability)
+        let mut state = self.state.lock().unwrap();
 
         for (el, &e) in self.elems.iter().enumerate() {
             let elem_type = mesh.element_type(e);
@@ -600,9 +611,9 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
             let n_vec = n_ldofs * dim;
             let quad = ref_elem.quadrature(self.quad_order);
             let nqp = quad.weights.len();
-            let qp_start = self.qp_offsets[el];
+            let _qp_start = self.qp_offsets[el];
 
-            // Shape function gradients in physical coords (n_ldofs × dim)
+                // Shape function gradients in physical coords (n_ldofs × dim)
             let mut gphys = vec![0.0_f64; n_vec * dim];
 
             for q in 0..nqp {
@@ -656,11 +667,11 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                 let e_strain = Self::green_lagrange(&f);
                 let mut e_strain_prev = vec![0.0; n_comp];
                 let si = self.qp_state_idx(el, q);
-                let alpha_prev = self.state[si][6];
+                let alpha_prev = state[si][6];
 
                 // Previous plastic strain (offset 0..n_comp)
                 for c in 0..n_comp {
-                    e_strain_prev[c] = self.state[si][c];
+                    e_strain_prev[c] = state[si][c];
                 }
 
                 // ── Elastic trial strain ──
@@ -718,8 +729,8 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                     if is_2d { s_ep[2] = s_new[2]; }
                     else { for i in 3..6 { s_ep[i] = s_new[i]; } }
 
-                    // Consistent tangent (material part)
-                    let beta = 2.0 * mu * (1.0 - 2.0 * mu * dgamma / eta_norm.max(1e-300));
+                    // Consistent tangent (material part) — beta reserved for fully consistent tangent
+                    let _beta = 2.0 * mu * (1.0 - 2.0 * mu * dgamma / eta_norm.max(1e-300));
                     let dbeta = if dgamma > 1e-30 {
                         let t1 = 2.0 * mu / (eta_norm.max(1e-300));
                         t1 * (1.0 - 2.0 * mu * dgamma / eta_norm.max(1e-300))
@@ -735,7 +746,7 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                             c_ep_mat[(i, j)] -= 2.0 * mu * dgamma / eta_norm.max(1e-300)
                                 * if is_2d {
                                     if i < 2 && j < 2 {
-                                        (if i == j { 2.0/3.0 } else { -1.0/3.0 })
+                                        if i == j { 2.0/3.0 } else { -1.0/3.0 }
                                     } else if i == 2 && j == 2 { 0.5 }
                                     else { 0.0 }
                                 } else {
@@ -748,17 +759,17 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                     c_ep = c_ep_mat;
                 }
 
-                // ── Store updated state ──
+                // ── Store updated state (via RefCell) ──
                 for c in 0..n_comp {
-                    new_state[si][c] = e_strain_prev[c] + (if yield_val > 1e-12 {
+                    state[si][c] = e_strain_prev[c] + (if yield_val > 1e-12 {
                         // Plastic increment from return mapping
                         let factor = if dgamma > 0.0 { 3.0 * dgamma / (2.0 * eta_norm.max(1e-300)) } else { 0.0 };
                         s_dev[c] * factor
                     } else {
-                        e_trial[c] - e_trial[c]  // pure elastic → no plastic inc
+                        0.0  // pure elastic → no plastic inc
                     });
                 }
-                new_state[si][6] = alpha_new;
+                state[si][6] = alpha_new;
 
                 // ── Residual and tangent assembly ──
                 let w = quad.weights[q] * det_j.abs();
@@ -768,37 +779,56 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                 // virtual strain operator δE = B·δu.
                 // B_IJK = ½(F_ik · ∂N_K/∂X_j + F_jk · ∂N_K/∂X_i) for each node K
 
+                // ── Helper closure: B-matrix entry B[node, disp_comp, voigt_comp] ──
+                let b_entry = |node: usize, d: usize, comp: usize| -> f64 {
+                    let (i, j) = if is_2d {
+                        match comp { 0 => (0,0), 1 => (1,1), _ => (0,1) }
+                    } else {
+                        match comp { 0 => (0,0), 1 => (1,1), 2 => (2,2), 3 => (0,1), 4 => (1,2), 5 => (0,2), _ => (0,0) }
+                    };
+                    if i == j {
+                        // Diagonal: δE_ii = F_di · ∂N/∂X_i
+                        f[(d, i)] * gphys[node * dim + i]
+                    } else {
+                        // Shear: δE_ij = ½(F_di·∂N/∂X_j + F_dj·∂N/∂X_i)
+                        0.5 * (f[(d, i)] * gphys[node * dim + j]
+                             + f[(d, j)] * gphys[node * dim + i])
+                    }
+                };
+
                 // ── Material tangent: K_mat += Bᵀ · C_ep · B · w ──
                 for ki in 0..n_ldofs {
-                    for kj in 0..n_ldofs {
-                        // B(I, ki, comp) for each component in Voigt order
-                        let mut bik = vec![0.0; n_comp];
-                        let mut bjk = vec![0.0; n_comp];
+                    // Precompute B-row for node ki: b_ki[d][comp]
+                    let mut b_ki = vec![vec![0.0; n_comp]; dim];
+                    for d in 0..dim {
                         for comp in 0..n_comp {
-                            let (i, j) = if is_2d {
-                                match comp { 0 => (0,0), 1 => (1,1), _ => (0,1) }
-                            } else {
-                                match comp { 0 => (0,0), 1 => (1,1), 2 => (2,2), 3 => (0,1), 4 => (1,2), 5 => (0,2), _ => (0,0) }
-                            };
-                            // Compute shear components of B matrix entries
-                            let mut bv_ik = 0.0_f64;
-                            let mut bv_jk = 0.0_f64;
+                            b_ki[d][comp] = b_entry(ki, d, comp);
                         }
-
-                        let mut k_val = 0.0;
-                        for p in 0..n_comp {
-                            for q in 0..n_comp {
-                                k_val += bik[p] * c_ep[(p, q)] * bjk[q];
+                    }
+                    for kj in 0..n_ldofs {
+                        // Precompute B-row for node kj
+                        let mut b_kj = vec![vec![0.0; n_comp]; dim];
+                        for d in 0..dim {
+                            for comp in 0..n_comp {
+                                b_kj[d][comp] = b_entry(kj, d, comp);
                             }
                         }
-                        k_val *= w;
-
-                        if k_val.abs() > 1e-30 {
-                            let nodes = mesh.element_nodes(e);
-                            let row_base = nodes[ki] as usize * dim;
-                            let col_base = nodes[kj] as usize * dim;
-                            for d in 0..dim {
-                                coo.add(row_base + d, col_base + d, k_val);
+                        // Full Voigt coupling: K_mat[ki*dim+d_row, kj*dim+d_col]
+                        for d_row in 0..dim {
+                            let row_base = nodes[ki] as usize * dim + d_row;
+                            for d_col in 0..dim {
+                                let mut k_val = 0.0;
+                                for p in 0..n_comp {
+                                    let bp = b_ki[d_row][p];
+                                    if bp == 0.0 { continue; }
+                                    for q in 0..n_comp {
+                                        k_val += bp * c_ep[(p, q)] * b_kj[d_col][q];
+                                    }
+                                }
+                                k_val *= w;
+                                if k_val.abs() > 1e-30 {
+                                    coo.add(row_base, nodes[kj] as usize * dim + d_col, k_val);
+                                }
                             }
                         }
                     }
@@ -876,10 +906,7 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
             }
         }
 
-        // Store updated state
-        // (In a real implementation, this would use &mut self; here we use
-        //  interior mutability or a separate state-update call.)
-        // For now, the state update is skipped in the immutable form.
+        // State is already updated in-place via Mutex above.
 
         (f_vec, coo.into_csr())
     }
@@ -978,5 +1005,149 @@ mod tests {
             }
         }
         assert!(sum > 0.0, "tangent matrix should be non-zero");
+    }
+
+    // ── J2 state evolution tests ──────────────────────────────────────────
+
+    /// Apply a uniform tensile strain large enough to trigger plasticity,
+    /// then verify that the internal state (α) has evolved.
+    /// We apply u_x(x,y) = 0.1·x on a unit square so ε_xx = 0.1.
+    #[test]
+    fn j2_state_evolution_plastic_step() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let cfg = PlasticConfig::j2(2e5, 0.3, 50.0, 1e3); // low yield → plastic
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+
+        // Build a displacement field: u = (0.1·x, 0)
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.1 * x;
+        }
+
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+
+        // After assembly, check that state has been updated
+        let state = form.state.lock().unwrap();
+        let any_plastic = state.iter().any(|qp| qp[6] > 1e-12);
+        assert!(any_plastic, "Plastic step should produce non-zero α in at least one QP");
+    }
+
+    #[test]
+    fn j2_elastic_step_state_unchanged() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let cfg = PlasticConfig::j2(2e5, 0.3, 1e8, 0.0); // very high yield → elastic
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+
+        // Small displacement that stays elastic: u = (0.0, 0.0)
+        let u = vec![0.0; n];
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+
+        let state = form.state.lock().unwrap();
+        let total_alpha: f64 = state.iter().map(|qp| qp[6]).sum();
+        assert!(total_alpha < 1e-30, "Elastic step: α should remain zero, got {total_alpha:.3e}");
+    }
+
+    // ── Finite-strain plasticity tests ─────────────────────────────────────
+
+    #[test]
+    fn finite_strain_zero_displacement_zero_residual() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let cfg = PlasticConfig::j2(2e5, 0.3, 1e8, 0.0); // elastic
+        let form = FiniteStrainPlasticity::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let u = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        let rhs = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        let norm: f64 = r.iter().map(|v| v.abs()).sum();
+        assert!(norm < 1e-12, "zero u → zero residual, got {norm:.3e}");
+    }
+
+    #[test]
+    fn finite_strain_tangent_nonzero() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let cfg = PlasticConfig::j2(2e5, 0.3, 1e8, 0.0);
+        let form = FiniteStrainPlasticity::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let u = vec![0.0; n];
+        let jac = form.jacobian(&u);
+        let mut sum = 0.0;
+        for i in 0..n.min(10) {
+            for j in 0..n.min(10) {
+                sum += jac.get(i, j).abs();
+            }
+        }
+        assert!(sum > 0.0, "finite-strain tangent should be non-zero");
+    }
+
+    #[test]
+    fn finite_strain_plastic_step_updates_state() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let cfg = PlasticConfig::j2(2e5, 0.3, 50.0, 1e3); // low yield
+        let form = FiniteStrainPlasticity::new(space, cfg, vec![], 2);
+
+        // Apply tensile displacement u = (0.2·x, 0)
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.2 * x;
+        }
+
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+
+        let state = form.state.lock().unwrap();
+        let any_plastic = state.iter().any(|qp| qp[6] > 1e-12);
+        assert!(any_plastic, "Plastic step should produce non-zero α");
+    }
+
+    #[test]
+    fn finite_strain_state_persistence_across_calls() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let cfg = PlasticConfig::j2(2e5, 0.3, 50.0, 5e2);
+        let form = FiniteStrainPlasticity::new(space, cfg, vec![], 2);
+
+        // First call: plastic step
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.15 * x;
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+
+        // Snapshot α after first call
+        let alpha_after_first: Vec<f64> = form.state.lock().unwrap()
+            .iter().map(|qp| qp[6]).collect();
+        let any_plastic_first = alpha_after_first.iter().any(|&a| a > 1e-12);
+        assert!(any_plastic_first, "α should be > 0 after plastic step");
+
+        // Second call with same displacement: state should NOT decrease
+        // (α is montononic in J2 plasticity)
+        form.residual(&u, &rhs, &mut r);
+        let alpha_after_second: Vec<f64> = form.state.lock().unwrap()
+            .iter().map(|qp| qp[6]).collect();
+
+        for (i, (&a1, &a2)) in alpha_after_first.iter().zip(alpha_after_second.iter()).enumerate() {
+            assert!(a2 >= a1 - 1e-14,
+                "α should be monotonic non-decreasing: QP {i}: {a1} → {a2}");
+        }
     }
 }
