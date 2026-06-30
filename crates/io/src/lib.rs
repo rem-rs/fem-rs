@@ -27,6 +27,7 @@ pub mod matrix_market;
 pub mod mfem;
 pub mod xdmf;
 pub mod glvis;
+pub mod cgns_exodus;
 pub mod imported_workflow;
 pub mod stl_obj;
 
@@ -90,6 +91,8 @@ pub use imported_workflow::{
 	xdmf_nodal_workflow_fields,
 	xdmf_nodal_scalar_field,
 };
+
+pub use cgns_exodus::{read_exodus, read_exodus_hdf5, read_cgns};
 
 #[cfg(feature = "hdf5")]
 pub use hdf5::{
