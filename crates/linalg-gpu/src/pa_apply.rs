@@ -186,6 +186,66 @@ pub fn gpu_pa_apply_hex_q3(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32]
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Hex Q4 WGSL shader (125 nodes, 5x5x5 Gauss)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const HEX_Q4_WGSL: &str = r#"
+struct PD{array<f32>}struct ED{array<u32>}struct XV{array<f32>}struct ER{array<f32>}
+@group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
+@group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
+const GP:array<f32,5>=array(-0.9061798459386640,-0.5384693101056831,0.0,0.5384693101056831,0.9061798459386640);
+const GW:array<f32,5>=array(0.2369268850561891,0.4786286704993665,0.5688888888888889,0.4786286704993665,0.2369268850561891);
+fn bary5(t:f32,i:u32)->f32{
+ let n=array<f32,5>(-1.0,-0.5,0.0,0.5,1.0);
+ var r=1.0;for(var j=0u;j<5u;j++){if(j!=i){r*=(t-n[j])/(n[i]-n[j]);}}
+ return r;
+}
+fn dary5(t:f32,i:u32)->f32{
+ let n=array<f32,5>(-1.0,-0.5,0.0,0.5,1.0);
+ var r=0.0;for(var m=0u;m<5u;m++){if(m==i){continue;}var term=1.0/(n[i]-n[m]);
+ for(var j=0u;j<5u;j++){if(j!=i&&j!=m){term*=(t-n[j])/(n[i]-n[j]);}}
+ r+=term;}
+ return r;
+}
+fn q4ixyz(n:u32)->(u32,u32,u32){(n%5u,(n/5u)%5u,n/25u)}
+@compute@workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id)gid:vec3<u32>){
+let e=gid.x;var xe:array<f32,125>;for(var i=0u;i<125u;i++){xe[i]=xv.vals[ed.dofs[e*125u+i]];}
+var ye:array<f32,125>;for(var i=0u;i<125u;i++){ye[i]=0.0;}
+for(var qz=0u;qz<5u;qz++){for(var qy=0u;qy<5u;qy++){for(var qx=0u;qx<5u;qx++){
+let qi=qz*25u+qy*5u+qx;let off=(e*125u+qi)*11u;
+let(j00,j01,j02)=(pd.data[off],pd.data[off+1u],pd.data[off+2u]);
+let(j10,j11,j12)=(pd.data[off+3u],pd.data[off+4u],pd.data[off+5u]);
+let(j20,j21,j22)=(pd.data[off+6u],pd.data[off+7u],pd.data[off+8u]);
+let sc=GW[qx]*GW[qy]*GW[qz]*pd.data[off+9u]*pd.data[off+10u];
+let(b0,b1,b2,b3,b4)=(bary5(GP[qx],0u),bary5(GP[qx],1u),bary5(GP[qx],2u),bary5(GP[qx],3u),bary5(GP[qx],4u));
+let(d0,d1,d2,d3,d4)=(dary5(GP[qx],0u),dary5(GP[qx],1u),dary5(GP[qx],2u),dary5(GP[qx],3u),dary5(GP[qx],4u));
+let(by0,by1,by2,by3,by4)=(bary5(GP[qy],0u),bary5(GP[qy],1u),bary5(GP[qy],2u),bary5(GP[qy],3u),bary5(GP[qy],4u));
+let(dy0,dy1,dy2,dy3,dy4)=(dary5(GP[qy],0u),dary5(GP[qy],1u),dary5(GP[qy],2u),dary5(GP[qy],3u),dary5(GP[qy],4u));
+let(bz0,bz1,bz2,bz3,bz4)=(bary5(GP[qz],0u),bary5(GP[qz],1u),bary5(GP[qz],2u),bary5(GP[qz],3u),bary5(GP[qz],4u));
+let(dz0,dz1,dz2,dz3,dz4)=(dary5(GP[qz],0u),dary5(GP[qz],1u),dary5(GP[qz],2u),dary5(GP[qz],3u),dary5(GP[qz],4u));
+let bx=array<f32,5>(b0,b1,b2,b3,b4);let dx=array<f32,5>(d0,d1,d2,d3,d4);
+let by=array<f32,5>(by0,by1,by2,by3,by4);let dy=array<f32,5>(dy0,dy1,dy2,dy3,dy4);
+let bz=array<f32,5>(bz0,bz1,bz2,bz3,bz4);let dz=array<f32,5>(dz0,dz1,dz2,dz3,dz4);
+
+var fl:array<f32,3>=array(0.0,0.0,0.0);
+for(var j=0u;j<125u;j++){let(a,b,c)=q4ixyz(j);
+let g0=dx[a]*by[b]*bz[c];let g1=bx[a]*dy[b]*bz[c];let g2=bx[a]*by[b]*dz[c];
+let(pg0,pg1,pg2)=(j00*g0+j01*g1+j02*g2,j10*g0+j11*g1+j12*g2,j20*g0+j21*g1+j22*g2);
+fl[0]+=pg0*xe[j];fl[1]+=pg1*xe[j];fl[2]+=pg2*xe[j];}
+for(var i=0u;i<125u;i++){let(a,b,c)=q4ixyz(i);
+let g0=dx[a]*by[b]*bz[c];let g1=bx[a]*dy[b]*bz[c];let g2=bx[a]*by[b]*dz[c];
+let(pg0,pg1,pg2)=(j00*g0+j01*g1+j02*g2,j10*g0+j11*g1+j12*g2,j20*g0+j21*g1+j22*g2);
+ye[i]+=sc*(pg0*fl[0]+pg1*fl[1]+pg2*fl[2]);}
+}}}
+for(var i=0u;i<125u;i++){er.vals[e*125u+i]=ye[i];}}
+"#;
+
+pub fn gpu_pa_apply_hex_q4(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
+    run_pa_shader(gpu, HEX_Q4_WGSL, pa, dofs, x, y, 125, 125);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Shared host-side runner
 // ═══════════════════════════════════════════════════════════════════════════════
 
