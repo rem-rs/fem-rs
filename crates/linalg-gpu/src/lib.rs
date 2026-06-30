@@ -1,4 +1,5 @@
 pub mod assembly;
+pub mod pa_apply;
 #[cfg(feature = "amg")]
 pub mod amg_precond;
 pub mod backend;
