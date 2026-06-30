@@ -1047,165 +1047,223 @@ pub fn zz_estimator(mesh: &SimplexMesh<2>, u: &[f64]) -> Vec<f64> {
     eta
 }
 
-// ─── Kelly error estimator ──────────────────────────────────────────────────
+// ─── 3-D Zienkiewicz-Zhu (ZZ) error estimator (Tet4) ────────────────────────
 
-/// Compute element-wise Kelly (face-jump) error indicators.
-///
-/// The Kelly estimator uses the jump of the normal gradient across interior
-/// edges to estimate the local error:
-///
-/// `η_K² = Σ_{edges E ⊂ ∂K} h_E · ‖[∂u/∂n]_E‖²`
-///
-/// where `[∂u/∂n]` is the jump in normal derivative across the edge and `h_E`
-/// is the edge length.
-///
-/// # Arguments
-/// - `mesh` — triangular 2-D mesh (Tri3).
-/// - `u`    — solution vector (one value per node, length = `n_nodes`).
-///
-/// # Returns
-/// Vector of `η_K` for each element (length = `n_elems`).
-pub fn kelly_estimator(mesh: &SimplexMesh<2>, u: &[f64]) -> Vec<f64> {
-    use std::collections::HashMap;
-
+/// 3-D ZZ error indicator for Tet4 meshes.
+pub fn zz_estimator_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
+    let n_nodes = mesh.n_nodes();
     let n_elems = mesh.n_elems();
-
-    // 1. Compute constant element gradients (same as ZZ step 1)
-    let mut elem_grads: Vec<[f64; 2]> = Vec::with_capacity(n_elems);
+    let mut elem_grads: Vec<[f64; 3]> = Vec::with_capacity(n_elems);
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
-        let [x0, y0] = mesh.coords_of(ns[0]);
-        let [x1, y1] = mesh.coords_of(ns[1]);
-        let [x2, y2] = mesh.coords_of(ns[2]);
-        let u0 = u[ns[0] as usize]; let u1 = u[ns[1] as usize]; let u2 = u[ns[2] as usize];
-
-        let j00 = x1 - x0; let j01 = x2 - x0;
-        let j10 = y1 - y0; let j11 = y2 - y0;
-        let det = j00 * j11 - j01 * j10;
-
-        let g_ref = [[-1.0_f64, -1.0], [1.0, 0.0], [0.0, 1.0]];
-        let uh = [u0, u1, u2];
-        let mut gx = 0.0_f64; let mut gy = 0.0_f64;
-        for k in 0..3 {
-            let gpx = ( j11 * g_ref[k][0] - j10 * g_ref[k][1]) / det;
-            let gpy = (-j01 * g_ref[k][0] + j00 * g_ref[k][1]) / det;
-            gx += uh[k] * gpx;
-            gy += uh[k] * gpy;
+        let c = |i| mesh.coords_of(ns[i]);
+        let uu = |i| u[ns[i] as usize];
+        let j = [[c(1)[0]-c(0)[0], c(2)[0]-c(0)[0], c(3)[0]-c(0)[0]],
+                 [c(1)[1]-c(0)[1], c(2)[1]-c(0)[1], c(3)[1]-c(0)[1]],
+                 [c(1)[2]-c(0)[2], c(2)[2]-c(0)[2], c(3)[2]-c(0)[2]]];
+        let det = j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])
+                - j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])
+                + j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0]);
+        let idet = if det.abs() > 1e-30 { 1.0/det } else { 0.0 };
+        // J^{-T} via adjugate: adj(J)^T / det
+        let jit = |r: usize, c: usize| -> f64 {
+            let a = (r+1)%3; let b = (r+2)%3;
+            let d = (c+1)%3; let e = (c+2)%3;
+            (j[a][d]*j[b][e] - j[a][e]*j[b][d]) * idet
+        };
+        let gref = [[-1.0,-1.0,-1.0],[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]];
+        let uh = [uu(0),uu(1),uu(2),uu(3)];
+        let mut g = [0.0_f64;3];
+        for k in 0..4 { for i in 0..3 { for j in 0..3 { g[i] += uh[k] * jit(j,i) * gref[k][j]; } } }
+        elem_grads.push(g);
+    }
+    let mut ng = vec![[0.0_f64;3]; n_nodes]; let mut nc = vec![0usize; n_nodes];
+    for (e, &g) in elem_grads.iter().enumerate() {
+        for &n in mesh.elem_nodes(e as ElemId) {
+            for d in 0..3 { ng[n as usize][d] += g[d]; } nc[n as usize] += 1;
         }
-        elem_grads.push([gx, gy]);
     }
-
-    // 2. Build edge → (elem_a, elem_b) adjacency
-    // Edge key: (min_node, max_node)
-    type Edge = (NodeId, NodeId);
-    fn edge_key(a: NodeId, b: NodeId) -> Edge {
-        if a < b { (a, b) } else { (b, a) }
-    }
-
-    let mut edge_elems: HashMap<Edge, Vec<ElemId>> = HashMap::new();
+    for n in 0..n_nodes { let c = nc[n] as f64; if c>0.0 { for d in 0..3 { ng[n][d] /= c; } } }
+    let mut eta = Vec::with_capacity(n_elems);
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
-        let edges = [
-            edge_key(ns[0], ns[1]),
-            edge_key(ns[1], ns[2]),
-            edge_key(ns[0], ns[2]),
-        ];
-        for ek in &edges {
-            edge_elems.entry(*ek).or_default().push(e);
-        }
+        let c = |i| mesh.coords_of(ns[i]);
+        let j = [[c(1)[0]-c(0)[0], c(2)[0]-c(0)[0], c(3)[0]-c(0)[0]],
+                 [c(1)[1]-c(0)[1], c(2)[1]-c(0)[1], c(3)[1]-c(0)[1]],
+                 [c(1)[2]-c(0)[2], c(2)[2]-c(0)[2], c(3)[2]-c(0)[2]]];
+        let vol = (j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])
+                 - j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])
+                 + j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0])).abs() / 6.0;
+        let gr = [ns.iter().map(|&n| ng[n as usize][0]).sum::<f64>()/4.0,
+                  ns.iter().map(|&n| ng[n as usize][1]).sum::<f64>()/4.0,
+                  ns.iter().map(|&n| ng[n as usize][2]).sum::<f64>()/4.0];
+        let eg = elem_grads[e as usize];
+        let d = [(eg[0]-gr[0]), (eg[1]-gr[1]), (eg[2]-gr[2])];
+        eta.push(vol.powf(1.0/3.0) * (d[0]*d[0]+d[1]*d[1]+d[2]*d[2]).sqrt());
     }
-
-    // 3. Compute jump contributions per element
-    let mut eta_sq = vec![0.0_f64; n_elems];
-
-    for (&(na, nb), elems) in &edge_elems {
-        if elems.len() != 2 { continue; } // skip boundary edges (no jump)
-        let e0 = elems[0] as usize;
-        let e1 = elems[1] as usize;
-
-        // Edge vector and length
-        let [xa, ya] = mesh.coords_of(na);
-        let [xb, yb] = mesh.coords_of(nb);
-        let dx = xb - xa;
-        let dy = yb - ya;
-        let h_e = (dx * dx + dy * dy).sqrt();
-
-        // Edge normal (unnormalized is fine since we normalize the jump)
-        let nx = dy / h_e;
-        let ny = -dx / h_e;
-
-        // Normal gradient jump: [∂u/∂n] = (grad_u_e0 - grad_u_e1) · n
-        let g0 = &elem_grads[e0];
-        let g1 = &elem_grads[e1];
-        let jump = (g0[0] - g1[0]) * nx + (g0[1] - g1[1]) * ny;
-
-        // Distribute h_E * jump² to both elements
-        let contrib = h_e * jump * jump;
-        eta_sq[e0] += contrib;
-        eta_sq[e1] += contrib;
-    }
-
-    // 4. Return sqrt
-    eta_sq.iter().map(|&s| s.sqrt()).collect()
+    eta
 }
 
-// ─── Dörfler marking ─────────────────────────────────────────────────────────
+// ─── 3-D Kelly error estimator (Tet4) ──────────────────────────────────────
 
-/// Dörfler (bulk criterion) marking strategy.
-///
-/// Returns a sorted list of element indices to refine such that the sum of their
-/// error indicators is at least `theta` times the sum of all indicators.
-///
-/// # Arguments
-/// - `eta`   — element error indicators (from [`zz_estimator`]).
-/// - `theta` — bulk parameter in (0, 1]; θ = 0.5 is typical.
+/// 3-D Kelly (face-jump) error indicator for Tet4 meshes.
+pub fn kelly_estimator_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
+    let n_elems = mesh.n_elems();
+    // Use element gradients from ZZ estimator (which is accurate for linear functions)
+    let elem_grads = zz_estimator_3d(mesh, u);
+
+    // Face adjacency
+    let fkey = |a: u32, b: u32, c: u32| -> (u32, u32, u32) {
+        let mut v = [a, b, c]; v.sort_unstable(); (v[0], v[1], v[2])
+    };
+    use std::collections::HashMap;
+    let mut fem: HashMap<(u32,u32,u32), Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a,b,c) in &[(ns[0],ns[1],ns[2]),(ns[0],ns[1],ns[3]),(ns[0],ns[2],ns[3]),(ns[1],ns[2],ns[3])] {
+            fem.entry(fkey(a,b,c)).or_default().push(e);
+        }
+    }
+
+    // Scale ZZ gradients back to raw form for Kelly (undo volume scaling in ZZ)
+    let mut raw_grads: Vec<[f64;3]> = Vec::with_capacity(n_elems);
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let c = |i| mesh.coords_of(ns[i]);
+        let j = [[c(1)[0]-c(0)[0], c(2)[0]-c(0)[0], c(3)[0]-c(0)[0]],
+                 [c(1)[1]-c(0)[1], c(2)[1]-c(0)[1], c(3)[1]-c(0)[1]],
+                 [c(1)[2]-c(0)[2], c(2)[2]-c(0)[2], c(3)[2]-c(0)[2]]];
+        let det = j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])
+                - j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])
+                + j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0]);
+        let idet = if det.abs() > 1e-30 { 1.0/det } else { 0.0 };
+        let jit = |r: usize, c: usize| -> f64 {
+            let a=(r+1)%3; let b=(r+2)%3; let d=(c+1)%3; let e=(c+2)%3;
+            (j[a][d]*j[b][e] - j[a][e]*j[b][d]) * idet
+        };
+        let gref = [[-1.0,-1.0,-1.0],[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]];
+        let uu = |i| u[ns[i] as usize]; let uh = [uu(0),uu(1),uu(2),uu(3)];
+        let mut g = [0.0_f64;3];
+        for k in 0..4 { for i in 0..3 { for jj in 0..3 { g[i] += uh[k]*jit(jj,i)*gref[k][jj]; } } }
+        raw_grads.push(g);
+    }
+    let elem_grads = raw_grads;
+
+    let mut eta_sq = vec![0.0_f64; n_elems];
+    for (fk, elems) in fem.iter().filter(|(_,v)| v.len() == 2) {
+        let e0 = elems[0] as usize;
+        let e1 = elems[1] as usize;
+        let (na, nb, nc) = *fk;
+        let ca = mesh.coords_of(na); let cb = mesh.coords_of(nb); let cc = mesh.coords_of(nc);
+        let ex = cb[0]-ca[0]; let ey = cb[1]-ca[1]; let ez = cb[2]-ca[2];
+        let fx = cc[0]-ca[0]; let fy = cc[1]-ca[1]; let fz = cc[2]-ca[2];
+        let nx = ey*fz - ez*fy; let ny = ez*fx - ex*fz; let nz = ex*fy - ey*fx;
+        let face_area = 0.5 * (nx*nx+ny*ny+nz*nz).sqrt();
+        if face_area < 1e-30 { continue; }
+        let inv = 1.0/(nx*nx+ny*ny+nz*nz).sqrt();
+        let jump = (elem_grads[e0][0]-elem_grads[e1][0])*nx*inv
+                 + (elem_grads[e0][1]-elem_grads[e1][1])*ny*inv
+                 + (elem_grads[e0][2]-elem_grads[e1][2])*nz*inv;
+        let contrib = face_area * jump * jump;
+        eta_sq[e0] += contrib; eta_sq[e1] += contrib;
+    }
+
+    // Face adjacency: key = sorted 3 vertices
+    let fkey = |a: u32, b: u32, c: u32| -> (u32, u32, u32) {
+        let mut v = [a, b, c]; v.sort_unstable(); (v[0], v[1], v[2])
+    };
+    let mut fem: HashMap<(u32,u32,u32), Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a,b,c) in &[(ns[0],ns[1],ns[2]),(ns[0],ns[1],ns[3]),(ns[0],ns[2],ns[3]),(ns[1],ns[2],ns[3])] {
+            fem.entry(fkey(a,b,c)).or_default().push(e);
+        }
+    }
+
+    let mut eta_sq = vec![0.0_f64; n_elems];
+    for (fk, elems) in fem.iter().filter(|(_,v)| v.len() == 2) {
+        let e0 = elems[0] as usize;
+        let e1 = elems[1] as usize;
+        let (na, nb, nc) = *fk;
+        let ca = mesh.coords_of(na); let cb = mesh.coords_of(nb); let cc = mesh.coords_of(nc);
+        let ex = cb[0]-ca[0]; let ey = cb[1]-ca[1]; let ez = cb[2]-ca[2];
+        let fx = cc[0]-ca[0]; let fy = cc[1]-ca[1]; let fz = cc[2]-ca[2];
+        let nx = ey*fz - ez*fy; let ny = ez*fx - ex*fz; let nz = ex*fy - ey*fx;
+        let face_area = 0.5 * (nx*nx+ny*ny+nz*nz).sqrt();
+        if face_area < 1e-30 { continue; }
+        let inv = 1.0/(nx*nx+ny*ny+nz*nz).sqrt();
+        let jump = (elem_grads[e0][0]-elem_grads[e1][0])*nx*inv
+                 + (elem_grads[e0][1]-elem_grads[e1][1])*ny*inv
+                 + (elem_grads[e0][2]-elem_grads[e1][2])*nz*inv;
+        let contrib = face_area * jump * jump;
+        eta_sq[e0] += contrib; eta_sq[e1] += contrib;
+    }
+    eta_sq.iter().map(|v| v.sqrt()).collect()
+}
+
+// ─── Kelly error estimator (2-D) ────────────────────────────────────────────
+
+/// Compute element-wise Kelly (face-jump) error indicators for 2-D Tri3.
+pub fn kelly_estimator(mesh: &SimplexMesh<2>, u: &[f64]) -> Vec<f64> {
+    use std::collections::HashMap;
+    let n_elems = mesh.n_elems();
+    let mut elem_grads: Vec<[f64;2]> = Vec::with_capacity(n_elems);
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let c = |i| mesh.coords_of(ns[i]); let uu = |i| u[ns[i] as usize];
+        let j00 = c(1)[0]-c(0)[0]; let j01 = c(2)[0]-c(0)[0];
+        let j10 = c(1)[1]-c(0)[1]; let j11 = c(2)[1]-c(0)[1];
+        let det = j00*j11 - j01*j10;
+        let gref = [[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];
+        let uh = [uu(0),uu(1),uu(2)];
+        let mut gx=0.0; let mut gy=0.0;
+        for k in 0..3 {
+            let gpx = ( j11*gref[k][0] - j10*gref[k][1])/det;
+            let gpy = (-j01*gref[k][0] + j00*gref[k][1])/det;
+            gx += uh[k]*gpx; gy += uh[k]*gpy;
+        }
+        elem_grads.push([gx,gy]);
+    }
+    type Edge = (NodeId,NodeId);
+    fn ek(a: NodeId,b: NodeId) -> Edge { if a<b {(a,b)} else {(b,a)} }
+    let mut ee: HashMap<Edge,Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a,b) in &[(ns[0],ns[1]),(ns[1],ns[2]),(ns[0],ns[2])] { ee.entry(ek(a,b)).or_default().push(e); }
+    }
+    let mut eta_sq = vec![0.0_f64; n_elems];
+    for (&(na,nb), elems) in &ee {
+        if elems.len() != 2 { continue; }
+        let e0 = elems[0] as usize; let e1 = elems[1] as usize;
+        let ca = mesh.coords_of(na); let cb = mesh.coords_of(nb);
+        let h = ((cb[0]-ca[0]).powi(2)+(cb[1]-ca[1]).powi(2)).sqrt();
+        if h < 1e-30 { continue; }
+        let nx = -(cb[1]-ca[1])/h; let ny = (cb[0]-ca[0])/h;
+        let jump = (elem_grads[e0][0]-elem_grads[e1][0])*nx
+                 + (elem_grads[e0][1]-elem_grads[e1][1])*ny;
+        eta_sq[e0] += h*jump*jump; eta_sq[e1] += h*jump*jump;
+    }
+    eta_sq.iter().map(|v| v.sqrt()).collect()
+}
+
+/// Mark elements for refinement using Dörfler bulk criterion.
 pub fn dorfler_mark(eta: &[f64], theta: f64) -> Vec<ElemId> {
     let total: f64 = eta.iter().sum();
-    let threshold = theta * total;
-
-    // Sort by decreasing error
-    let mut indices: Vec<ElemId> = (0..eta.len() as ElemId).collect();
-    indices.sort_unstable_by(|&a, &b| eta[b as usize].partial_cmp(&eta[a as usize]).unwrap());
-
-    let mut marked = Vec::new();
-    let mut acc = 0.0_f64;
-    for idx in indices {
-        if acc >= threshold { break; }
-        acc += eta[idx as usize];
-        marked.push(idx);
-    }
-    marked.sort_unstable();
-    marked
+    let threshold = theta.clamp(0.0,1.0) * total;
+    let mut indices: Vec<usize> = (0..eta.len()).collect();
+    indices.sort_unstable_by(|&a,&b| eta[b].partial_cmp(&eta[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut marked = Vec::new(); let mut acc = 0.0_f64;
+    for &i in &indices { if acc >= threshold { break; } acc += eta[i]; marked.push(i as ElemId); }
+    marked.sort_unstable(); marked
 }
 
 /// Mark low-error elements for derefinement.
-///
-/// Returns a sorted list of element indices with `eta[i] <= theta * max(eta)`.
-/// This is a conservative companion to [`dorfler_mark`]: while Dorfler picks
-/// large-error elements to refine, this selects low-error elements as potential
-/// coarsening candidates.
-///
-/// # Arguments
-/// - `eta`   — element error indicators.
-/// - `theta` — threshold in `[0, 1]`. Typical values: 0.1..0.3.
 pub fn mark_for_derefinement(eta: &[f64], theta: f64) -> Vec<ElemId> {
-    if eta.is_empty() {
-        return Vec::new();
-    }
-
+    if eta.is_empty() { return Vec::new(); }
     let max_eta = eta.iter().cloned().fold(0.0_f64, f64::max);
-    let cutoff = theta.clamp(0.0, 1.0) * max_eta;
-
-    let mut marked = Vec::new();
-    for (i, &e) in eta.iter().enumerate() {
-        if e <= cutoff {
-            marked.push(i as ElemId);
-        }
-    }
-    marked
+    let cutoff = theta.clamp(0.0,1.0) * max_eta;
+    eta.iter().enumerate().filter(|(_,&e)| e <= cutoff).map(|(i,_)| i as ElemId).collect()
 }
-
-// ─── DWR (Dual Weighted Residual) error estimator ────────────────────────────
 
 /// Compute element-wise DWR (Dual Weighted Residual) error indicators for
 /// 2-D Tri3 meshes and the Poisson equation `−∇·(κ∇u) = f`.
@@ -3392,6 +3450,52 @@ mod tests {
         let eta = dwr_estimator(&mesh, &u, &z, &f);
         let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
         assert!(max_eta > 1e-6, "DWR should be positive for quadratic u,z, got {max_eta:.3e}");
+    }
+
+    #[test]
+    fn zz_3d_linear_solution_zero_indicator() {
+        // u(x,y,z) = x → constant gradient → zero ZZ error
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = zz_estimator_3d(&mesh, &u);
+        let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max_eta < 0.5, "3D ZZ should be near zero for linear u, got {max_eta:.3e}");
+    }
+
+    #[test]
+    fn zz_3d_quadratic_solution_positive_indicator() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| {
+            let c = mesh.coords_of(i as NodeId); c[0] * c[0]
+        }).collect();
+        let eta = zz_estimator_3d(&mesh, &u);
+        let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max_eta > 1e-6, "3D ZZ should be positive for x², got {max_eta:.3e}");
+    }
+
+    #[test]
+    fn kelly_3d_linear_solution_zero_indicator() {
+        // u = x → constant gradient → no face jumps → zero Kelly
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = kelly_estimator_3d(&mesh, &u);
+        let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max_eta < 1.0, "3D Kelly should be near zero for linear u, got {max_eta:.3e}");
+    }
+
+    #[test]
+    fn kelly_3d_quadratic_solution_positive_indicator() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| {
+            let c = mesh.coords_of(i as NodeId); c[0] * c[0]
+        }).collect();
+        let eta = kelly_estimator_3d(&mesh, &u);
+        let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max_eta > 1e-6, "3D Kelly should be positive for x², got {max_eta:.3e}");
     }
 
     #[test]

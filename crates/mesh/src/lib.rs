@@ -23,7 +23,8 @@ pub mod topology;
 pub mod transformation;
 pub mod step_iges;
 
-pub use amr::{refine_marked, refine_marked_with_tree, derefine_marked, DerefineTree, DerefineRecord, refine_nonconforming, refine_nonconforming_3d, refine_nonconforming_quad, refine_nonconforming_hex, refine_nonconforming_quad_aniso, refine_nonconforming_hex_aniso, QuadRefineDir, HexRefineDir, refine_uniform, refine_uniform_3d, dorfler_mark, mark_for_derefinement, mark_for_p_refinement, p_refine_tri3_to_tri6, p_prolongate_p1_to_p2, zz_estimator, kelly_estimator, dwr_estimator, prolongate_p1, restrict_to_coarse_p1, HangingNodeConstraint, HangingFaceConstraint, NCState, NCState3D, NCStateQuad};
+pub use amr::{refine_marked, refine_marked_with_tree, derefine_marked, DerefineTree, DerefineRecord, refine_nonconforming, refine_nonconforming_3d, refine_nonconforming_quad, refine_nonconforming_hex, refine_nonconforming_quad_aniso, refine_nonconforming_hex_aniso, QuadRefineDir, HexRefineDir, refine_uniform, refine_uniform_3d, zz_estimator, kelly_estimator, zz_estimator_3d, kelly_estimator_3d, dwr_estimator, prolongate_p1, restrict_to_coarse_p1, HangingNodeConstraint, HangingFaceConstraint, NCState, NCState3D, NCStateQuad};
+pub use amr::{dorfler_mark, mark_for_derefinement, mark_for_p_refinement, p_refine_tri3_to_tri6, p_prolongate_p1_to_p2};
 pub use boundary::{BoundaryTag, NamedAttributeRegistry, NamedAttributeSet, PhysicalGroup};
 pub use cad::{CadShape, CadModel, AnalyticSurface, FacetedCadSurface, NurbsCadSurface2D, ProjectionConfig, project_boundary_to_cad, project_elevated_node};
 pub use curved::{CurvedMesh, JacobianCache, CurvedElementTransformation, refine_curved_2d, refine_curved_3d, refine_curved_2d_nc, refine_curved_3d_nc};
