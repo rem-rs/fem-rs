@@ -1290,7 +1290,10 @@ impl DiscreteLinearOperator {
                         dof_k[3 * face_local + 2] = m2;
                     }
 
-                    // Interior moments.
+                    // Interior moments with contravariant Piola pullback.
+                    // ∫_Ω F_i dV = ∫_ref (detJ * J^{-1} * F_phys)_i dξ
+                    // For an affine tet, detJ and J^{-1} are constant, so we
+                    // accumulate the unweighted sums and transform at the end.
                     let mut int_x = 0.0_f64;
                     let mut int_y = 0.0_f64;
                     let mut int_z = 0.0_f64;
@@ -1305,9 +1308,16 @@ impl DiscreteLinearOperator {
                         int_y += w * fv[1];
                         int_z += w * fv[2];
                     }
-                    dof_k[12] = int_x * det_j;
-                    dof_k[13] = int_y * det_j;
-                    dof_k[14] = int_z * det_j;
+                    // J = [j0 j1 j2] (columns are ∂x/∂ξ, ∂x/∂η, ∂x/∂ζ)
+                    let jac = nalgebra::Matrix3::new(
+                        j0[0], j1[0], j2[0],
+                        j0[1], j1[1], j2[1],
+                        j0[2], j1[2], j2[2],
+                    );
+                    let j_inv_t = jac.try_inverse().expect("singular Jacobian in divergence_rt1_p1").transpose();
+                    dof_k[12] = det_j * (j_inv_t[(0,0)] * int_x + j_inv_t[(1,0)] * int_y + j_inv_t[(2,0)] * int_z);
+                    dof_k[13] = det_j * (j_inv_t[(0,1)] * int_x + j_inv_t[(1,1)] * int_y + j_inv_t[(2,1)] * int_z);
+                    dof_k[14] = det_j * (j_inv_t[(0,2)] * int_x + j_inv_t[(1,2)] * int_y + j_inv_t[(2,2)] * int_z);
 
                     for i in 0..n_rt1 {
                         dmat[i * n_rt1 + k] = dof_k[i];
@@ -1764,7 +1774,7 @@ impl DiscreteLinearOperator {
                     dof_rt1[3 * face_local + 2] = rt_m2;
                 }
 
-                // RT1 interior moments of curl(field).
+                // RT1 interior moments of curl(field) with contravariant Piola pullback.
                 let mut int_x = 0.0_f64;
                 let mut int_y = 0.0_f64;
                 let mut int_z = 0.0_f64;
@@ -1779,9 +1789,15 @@ impl DiscreteLinearOperator {
                     int_y += w * cv[1];
                     int_z += w * cv[2];
                 }
-                dof_rt1[12] = int_x * det_abs;
-                dof_rt1[13] = int_y * det_abs;
-                dof_rt1[14] = int_z * det_abs;
+                let jac = nalgebra::Matrix3::new(
+                    j0[0], j1[0], j2[0],
+                    j0[1], j1[1], j2[1],
+                    j0[2], j1[2], j2[2],
+                );
+                let j_inv_t = jac.try_inverse().expect("singular Jacobian in curl_3d_nd2_rt1").transpose();
+                dof_rt1[12] = det_abs * (j_inv_t[(0,0)] * int_x + j_inv_t[(1,0)] * int_y + j_inv_t[(2,0)] * int_z);
+                dof_rt1[13] = det_abs * (j_inv_t[(0,1)] * int_x + j_inv_t[(1,1)] * int_y + j_inv_t[(2,1)] * int_z);
+                dof_rt1[14] = det_abs * (j_inv_t[(0,2)] * int_x + j_inv_t[(1,2)] * int_y + j_inv_t[(2,2)] * int_z);
 
                 for i in 0..n_nd2 {
                     dmat[i * n_nd2 + k] = dof_nd2[i];
@@ -2120,11 +2136,10 @@ mod tests {
             d.spmv(&cu, &mut dcu);
 
             let max_err: f64 = dcu.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        assert!(
-            max_err < 0.15,
-
-            "ND2->RT2 3D: curl interpolation mismatch, max error = {max_err}"
-        );
+            assert!(
+                max_err < 1e-8,
+                "order-2 3D de Rham div(curl(u)) ≠ 0, seed={seed}, max |D*C*u| = {max_err}"
+            );
         }
     }
 
@@ -2176,7 +2191,7 @@ mod tests {
             .map(|i| (ca[i] - curl_interp.as_slice()[i]).abs())
             .fold(0.0, f64::max);
         assert!(
-            max_err < 0.15,
+            max_err < 0.025,
             "ND2->RT1 3D: curl interpolation mismatch, max error = {max_err}"
         );
     }
@@ -2239,7 +2254,7 @@ mod tests {
                 .map(|idx| (ca[idx] - curl_interp.as_slice()[idx]).abs())
                 .fold(0.0, f64::max);
             assert!(
-                max_err < 0.2,
+                max_err < 0.025,
                 "ND2->RT1 randomized commuting failed (seed={seed}), max error = {max_err}"
             );
         }
@@ -2787,11 +2802,7 @@ mod tests {
             .map(|i| (div_f[i] - div_interp.as_slice()[i]).abs())
             .fold(0.0, f64::max);
 
-        // The 3D divergence operator has known numerical limitations.
-        // Divergence of a linear field F=(x,y,z) should produce div(F)=3.
-        // Until the Piola mapping and face moment integration is fully
-        // corrected for 3D, accept a relaxed tolerance.
-        assert!(max_err < 5e2, "RT1->P1 3D: divergence mismatch too large, max error = {max_err}");
+        assert!(max_err < 1e-8, "RT1->P1 3D: divergence mismatch too large, max error = {max_err}");
     }
 
     /// Test: Divergence RT1->P2 in 3D — dimensions are correct.
@@ -2826,7 +2837,7 @@ mod tests {
         let max_err: f64 = (0..l2.n_dofs())
             .map(|i| (div_f[i] - div_interp.as_slice()[i]).abs())
             .fold(0.0, f64::max);
-        assert!(max_err < 5e2, "RT1->P2 3D: divergence mismatch, max error = {max_err}");
+        assert!(max_err < 1e-8, "RT1->P2 3D: divergence mismatch, max error = {max_err}");
     }
 
     /// Test: Divergence RT1->P2 in 3D — randomized commuting stress test.
@@ -2878,7 +2889,7 @@ mod tests {
                 .map(|idx| (div_f[idx] - div_interp.as_slice()[idx]).abs())
                 .fold(0.0, f64::max);
             assert!(
-                max_err < 5e2,
+                max_err < 15.0,
                 "RT1->P2 3D randomized commuting failed (seed={seed}), max error = {max_err}"
             );
         }
