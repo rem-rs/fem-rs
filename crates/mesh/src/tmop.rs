@@ -39,6 +39,8 @@ pub enum TmopMetric {
     FrobeniusDiff,
     /// Absolute volume deviation: `μ = ∣det(T) − 1∣`.
     AreaDeviation,
+    /// 3-D Winslow: `μ = ∣T∣³ / det(T)`. For 2-D this equals SizeShape.
+    Winslow3D,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -164,6 +166,20 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
             let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
             let mut dmu_dt = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = sign * adj_t[(i, j)]; }}
+            let mut dmu_da = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { for k in 0..2 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
+        }
+        // Winslow3D for 2D falls back to SizeShape (same formula).
+        TmopMetric::Winslow3D => {
+            let det_t_abs = det_t.abs().max(1e-30);
+            let value = ft2 / det_t_abs;
+            let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let mut dmu_dt = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = (2.0 * t[(i, j)] * det_t_abs - ft2 * sign * 0.5 * adj_t[(i, j)]) / (det_t_abs * det_t_abs); }}
             let mut dmu_da = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { for k in 0..2 {
                 dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
@@ -344,6 +360,24 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
             let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
             let mut dmu_dt = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { dmu_dt[(i, j)] = sign * adj_t[(i, j)]; }}
+            let mut dmu_da = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { for k in 0..3 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric3d {
+                value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)], dmu_da[(0,2)]],
+                               [dmu_da[(1,0)], dmu_da[(1,1)], dmu_da[(1,2)]],
+                               [dmu_da[(2,0)], dmu_da[(2,1)], dmu_da[(2,2)]]],
+            }
+        }
+        TmopMetric::Winslow3D => {
+            let det_t_abs = det_t.abs().max(1e-30);
+            let value = ft2 * ft2.sqrt() / det_t_abs; // = |T|³ / det(T)
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let mut dmu_dt = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 {
+                dmu_dt[(i, j)] = (4.0 * t[(i, j)] * ft2.sqrt() * det_t_abs - ft2 * ft2.sqrt() * adj_t[(i, j)]) / (det_t_abs * det_t_abs);
+            }}
             let mut dmu_da = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { for k in 0..3 {
                 dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
