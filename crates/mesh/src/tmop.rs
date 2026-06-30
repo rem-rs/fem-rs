@@ -37,6 +37,8 @@ pub enum TmopMetric {
     BarrierDet,
     /// Squared Frobenius distance from identity: `μ = ∣T − I∣²`.
     FrobeniusDiff,
+    /// Absolute volume deviation: `μ = ∣det(T) − 1∣`.
+    AreaDeviation,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -149,7 +151,19 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
         TmopMetric::FrobeniusDiff => {
             let ti = t - Matrix2::identity();
             let value = ti.iter().map(|v| v * v).sum();
-            let mut dmu_dt = 2.0 * ti;
+            let dmu_dt = 2.0 * ti;
+            let mut dmu_da = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { for k in 0..2 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
+        }
+        TmopMetric::AreaDeviation => {
+            let value = (det_t - 1.0).abs();
+            let sign = if det_t >= 1.0 { 1.0 } else { -1.0 };
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let mut dmu_dt = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = sign * adj_t[(i, j)]; }}
             let mut dmu_da = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { for k in 0..2 {
                 dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
@@ -314,6 +328,22 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
             let ti = t - Matrix3::identity();
             let value = ti.iter().map(|v| v * v).sum();
             let dmu_dt = 2.0 * ti;
+            let mut dmu_da = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { for k in 0..3 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric3d {
+                value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)], dmu_da[(0,2)]],
+                               [dmu_da[(1,0)], dmu_da[(1,1)], dmu_da[(1,2)]],
+                               [dmu_da[(2,0)], dmu_da[(2,1)], dmu_da[(2,2)]]],
+            }
+        }
+        TmopMetric::AreaDeviation => {
+            let value = (det_t - 1.0).abs();
+            let sign = if det_t >= 1.0 { 1.0 } else { -1.0 };
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let mut dmu_dt = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { dmu_dt[(i, j)] = sign * adj_t[(i, j)]; }}
             let mut dmu_da = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { for k in 0..3 {
                 dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
