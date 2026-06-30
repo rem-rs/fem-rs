@@ -72,6 +72,7 @@ pub mod backend;
 pub mod bc;
 pub mod cahn_allen;
 pub mod contact;
+pub mod contact_mortar;
 pub mod coefficient;
 pub mod complex;
 pub mod crystal_plasticity;
