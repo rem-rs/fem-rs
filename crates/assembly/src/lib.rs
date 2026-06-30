@@ -129,6 +129,8 @@ pub mod hdg_stokes;
 pub mod hdg_elasticity;
 pub mod hdg_maxwell;
 
+pub mod pa;
+
 #[cfg(feature = "reed")]
 pub mod reed;
 
