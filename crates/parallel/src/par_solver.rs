@@ -8,7 +8,6 @@
 use rayon::prelude::*;
 
 use fem_solver::{SolveResult, SolverConfig, SolverError};
-use fem_linalg::CsrMatrix;
 
 use crate::par_csr::ParCsrMatrix;
 use crate::par_vector::ParVector;
@@ -969,37 +968,232 @@ pub fn par_solve_pcg_ilu0(
 
 // ── 9. Distributed direct solve ─────────────────────────────────────────────
 
-/// Solve Ax = b via distributed direct LU.
+/// Solve Ax = b via distributed direct LU with full gather to rank 0.
 ///
-/// Gathers the parallel system to rank 0, performs sparse LU factorization,
-/// solves, and broadcasts the solution back to all ranks.
+/// Each rank sends its local matrix rows (diag + off-diagonal blocks) and RHS
+/// to rank 0, which assembles the global system, performs sparse LU
+/// factorization, and broadcasts the solution back to all ranks.
+///
+/// # Arguments
+/// * `a`               — parallel CSR matrix
+/// * `b`               — parallel RHS vector
+/// * `x`               — output solution vector (written on all ranks)
+/// * `global_dof_ids`  — mapping `local_dof_id -> global_dof_id` from
+///                        `DofPartition::global_dof_ids`; length `n_owned + n_ghost`
 ///
 /// This is suitable for small-to-moderate problems (up to ~1e5 DOFs) where
-/// iterative solver convergence is unreliable (e.g., indefinite saddle-point
-/// systems).  For larger problems, use iterative methods with MPI.
+/// iterative solver convergence is unreliable.
+///
+/// # Panics
+/// Panics if the serial LU solve fails.
 pub fn par_direct_solve(
     a: &ParCsrMatrix,
     b: &ParVector,
     x: &mut ParVector,
+    global_dof_ids: &[u32],
 ) -> Result<SolveResult, SolverError> {
-    let comm = &a.dof_ghost_exchange; // not the right field; need comm from params
-    // For now, provide a CPU fallback that uses the serial sparse LU.
-    // In production, this would gather to rank 0 via MPI_Gatherv for
-    // row_ptr/col_idx/values and rhs, then use fem_solver::solve_sparse_lu.
-    use fem_linalg::CooMatrix;
+    let comm = a.comm();
+    let n_ranks = comm.size();
+    let rank = comm.rank();
     let n_owned = a.n_owned;
-    let n_total = a.n_owned; // approximation
+    let n_ghost = a.n_ghost;
 
-    // Simply solve the local diagonal block (serial sparse LU) as a
-    // Schwarz-type approximation.  Full distributed direct requires
-    // matrix gathering via MPI.
-    let local_a = &a.diag;
-    let local_b: Vec<f64> = b.data[..n_owned].to_vec();
-    let mut local_x = vec![0.0; n_owned];
-    let res = fem_solver::solve_sparse_lu(local_a, &local_b, &mut local_x)
-        .map_err(|e| SolverError::Linlvo(format!("distributed direct solve: {e}")))?;
-    for i in 0..n_owned { x.data[i] = local_x[i]; }
-    Ok(SolveResult { converged: true, iterations: 1, final_residual: 0.0 })
+    // ── Step 1: Each rank serialises its local matrix as COO triplets ──────
+    // with global (row, col) indices, plus its owned RHS segment.
+    //
+    // Triplet format on wire: flat [global_row, global_col, value] interleaved.
+    // We build triplets from diag + offd blocks with global indexing.
+
+    let offset = if global_dof_ids.is_empty() {
+        0
+    } else {
+        // The offset is the first owned DOF's global ID.
+        global_dof_ids[0]
+    };
+
+    // Owned RHS segment
+    let local_rhs: Vec<f64> = b.owned_slice().to_vec();
+
+    // Build COO triplets from diag block: (offset+i, offset+j, val)
+    let mut triplets: Vec<(u32, u32, f64)> = Vec::new();
+    for i in 0..n_owned {
+        let gr = offset + i as u32;
+        for k in a.diag.row_ptr[i]..a.diag.row_ptr[i + 1] {
+            let lc = a.diag.col_idx[k] as usize;
+            let val = a.diag.values[k];
+            if val.abs() >= 1e-30 {
+                triplets.push((gr, offset + lc as u32, val));
+            }
+        }
+    }
+
+    // Offdiagonal block: column j maps to local ghost n_owned + j
+    if n_ghost > 0 {
+        for i in 0..n_owned {
+            let gr = offset + i as u32;
+            for k in a.offd.row_ptr[i]..a.offd.row_ptr[i + 1] {
+                let gj = a.offd.col_idx[k] as usize; // ghost local index
+                let val = a.offd.values[k];
+                if val.abs() >= 1e-30 {
+                    // Map ghost index to global DOF via global_dof_ids
+                    let gc = global_dof_ids[n_owned + gj];
+                    triplets.push((gr, gc, val));
+                }
+            }
+        }
+    }
+
+    // ── Step 2: Gather all data to rank 0 ──────────────────────────────────
+    // First, allgather each rank's triplet count and RHS length via send to rank 0.
+    let n_triplets = triplets.len();
+    let n_rhs = local_rhs.len();
+
+    let mut all_n_triplets = vec![0usize; n_ranks];
+    let mut all_n_rhs = vec![0usize; n_ranks];
+
+    if rank == 0 {
+        all_n_triplets[0] = n_triplets;
+        all_n_rhs[0] = n_rhs;
+        for src in 1..n_ranks {
+            let buf = comm.recv_bytes(src as i32, 0x7000);
+            let nt = usize::from_le_bytes(buf[..8].try_into().unwrap());
+            let nr = usize::from_le_bytes(buf[8..16].try_into().unwrap());
+            all_n_triplets[src] = nt;
+            all_n_rhs[src] = nr;
+        }
+    } else {
+        let mut buf = Vec::with_capacity(16);
+        buf.extend_from_slice(&n_triplets.to_le_bytes());
+        buf.extend_from_slice(&n_rhs.to_le_bytes());
+        comm.send_bytes(0, 0x7000, &buf);
+    }
+
+    // Barrier to ensure all size info is received before the payload.
+    comm.barrier();
+
+    // Compute total sizes
+    let total_triplets: usize = all_n_triplets.iter().sum();
+    let total_rhs: usize = all_n_rhs.iter().sum();
+
+    // ── Step 3: Send/recv actual data ──────────────────────────────────────
+    // Serialise triplets: flat [row_u32, col_u32, val_f64] × n_triplets.
+    let triplet_bytes: Vec<u8> = triplets
+        .iter()
+        .flat_map(|&(r, c, v)| {
+            let mut b = Vec::with_capacity(16);
+            b.extend_from_slice(&r.to_le_bytes());
+            b.extend_from_slice(&c.to_le_bytes());
+            b.extend_from_slice(&v.to_le_bytes());
+            b
+        })
+        .collect();
+
+    let rhs_bytes: Vec<u8> = local_rhs
+        .iter()
+        .flat_map(|&v| v.to_le_bytes().to_vec())
+        .collect();
+
+    // Gather triplets to rank 0
+    let all_triplets: Vec<u8>;
+    let all_rhs_bytes: Vec<u8>;
+
+    if rank == 0 {
+        let mut combined_t = Vec::with_capacity(total_triplets * 16);
+        combined_t.extend_from_slice(&triplet_bytes);
+        for src in 1..n_ranks {
+            let chunk = comm.recv_bytes(src as i32, 0x7001);
+            combined_t.extend_from_slice(&chunk);
+        }
+        all_triplets = combined_t;
+
+        let mut combined_r = Vec::with_capacity(total_rhs * 8);
+        combined_r.extend_from_slice(&rhs_bytes);
+        for src in 1..n_ranks {
+            let chunk = comm.recv_bytes(src as i32, 0x7002);
+            combined_r.extend_from_slice(&chunk);
+        }
+        all_rhs_bytes = combined_r;
+    } else {
+        comm.send_bytes(0, 0x7001, &triplet_bytes);
+        comm.send_bytes(0, 0x7002, &rhs_bytes);
+        all_triplets = Vec::new();
+        all_rhs_bytes = Vec::new();
+    }
+
+    // ── Step 4: Rank 0 builds global matrix and solves ─────────────────────
+        let global_n = total_rhs; // total owned DOFs across all ranks
+
+    let global_x: Vec<f64> = if rank == 0 {
+        // Deserialise triplets into a COO matrix
+        let n_triplet_values = all_triplets.len() / 16;
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(global_n, global_n);
+        for chunk in all_triplets.chunks_exact(16) {
+            let r = u32::from_le_bytes(chunk[..4].try_into().unwrap()) as usize;
+            let c = u32::from_le_bytes(chunk[4..8].try_into().unwrap()) as usize;
+            let v = f64::from_le_bytes(chunk[8..16].try_into().unwrap());
+            if v.abs() >= 1e-30 {
+                coo.add(r, c, v);
+            }
+        }
+
+        // Build global RHS
+        let mut global_rhs = vec![0.0_f64; global_n];
+        let mut rhs_offset = 0usize;
+        for src in 0..n_ranks {
+            let n_src = all_n_rhs[src];
+            for j in 0..n_src {
+                let start = (rhs_offset + j) * 8;
+                let val = f64::from_le_bytes(
+                    all_rhs_bytes[start..start + 8].try_into().unwrap()
+                );
+                // Assign to the correct global position: the offset of rank src
+                let dof_pos = if src == 0 { 0 } else {
+                    all_n_rhs[..src].iter().sum()
+                };
+                global_rhs[dof_pos + j] = val;
+            }
+            rhs_offset += n_src;
+        }
+
+        // Convert to CSR and solve
+        let global_mat: fem_linalg::CsrMatrix<f64> = coo.into_csr();
+
+        let sol = fem_solver::solve_sparse_lu(&global_mat, &global_rhs)
+            .map_err(|e| SolverError::Linlvo(format!("distributed direct solve: {e}")))?;
+        sol
+    } else {
+        Vec::new()
+    };
+
+    // ── Step 5: Broadcast solution from rank 0 to all ranks ────────────────
+    comm.barrier();
+    let mut sol_bytes = if rank == 0 {
+        let mut bytes = Vec::with_capacity(global_n * 8);
+        for &v in &global_x {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes
+    } else {
+        vec![0u8; global_n * 8]
+    };
+    comm.broadcast_bytes(0, &mut sol_bytes);
+
+    // Deserialise solution on all ranks
+    let global_solution: Vec<f64> = sol_bytes
+        .chunks_exact(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    // Copy owned portion into output vector
+    for i in 0..n_owned {
+        x.data[i] = global_solution[offset as usize + i];
+    }
+
+    Ok(SolveResult {
+        converged: true,
+        iterations: 1,
+        final_residual: 0.0,
+    })
 }
 
 #[cfg(test)]

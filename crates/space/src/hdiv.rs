@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 
 use fem_core::types::DofId;
-use fem_element::{quadrature::gauss_legendre_01, TetRT1, TriRT1, VectorReferenceElement};
+use fem_element::{quadrature::gauss_legendre_01, TriRT1, VectorReferenceElement};
 use fem_linalg::Vector;
 use fem_mesh::{element_type::ElementType, topology::MeshTopology, ElementTransformation};
 
@@ -289,17 +289,20 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 3-D tetrahedron construction ──────────────────────────────────────
 
     fn build_3d_tet(mesh: M, order: u8, elem_type: ElementType, is_bdm: bool) -> Self {
-        // RT0: 1 DOF per face; RT1: 3 DOFs per face + 3 interior.
+        // RT0: 1 DOF per face, 0 interior → 4 DOFs/elem
+        // RT1: 3 DOFs per face, 3 interior → 15 DOFs/elem
+        // RT2: 6 DOFs per face, 12 interior → 36 DOFs/elem
         // BDM_k on tet: (k+1)(k+2)/2 DOFs per face, no interior if k=1.
-        let nd = if is_bdm {
-            let k = order as usize;
-            (k + 1) * (k + 2) / 2
-        } else if order == 0 { 1 } else { 3 };
-        let dofs_per_face = nd;
-        let interior_dofs = if is_bdm {
-            let k = order as usize;
-            if k == 1 { 0 } else { (k+1)*(k+2)*(k+3)/2 - 4 * dofs_per_face }
-        } else if order == 0 { 0 } else { 3 };
+        let k = order as usize;
+        let (dofs_per_face, interior_dofs) = if is_bdm {
+            let f = (k + 1) * (k + 2) / 2;
+            let total = (k + 1) * (k + 2) * (k + 3) / 2;
+            (f, total.saturating_sub(4 * f))
+        } else {
+            let f = (k + 1) * (k + 2) / 2; // (k+1)(k+2)/2 DOFs per face for RTk
+            let interior = k * (k + 1) * (k + 2) / 2; // k(k+1)(k+2)/2 interior DOFs for RTk
+            (f, interior)
+        };
         let dofs_per_elem = TET_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
@@ -321,8 +324,8 @@ impl<M: MeshTopology> HDivSpace<M> {
                     signs_flat.push(sign);
                 } else {
                     // Multiple DOFs per face (3 for RT1, 3+ for BDM)
-                    let first = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=nd as DofId; d });
-                    for k in 0..nd as DofId {
+                    let first = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=dofs_per_face as DofId; d });
+                    for k in 0..dofs_per_face as DofId {
                         dofs_flat.push(first + k);
                         signs_flat.push(sign);
                     }
@@ -856,10 +859,15 @@ impl<M: MeshTopology> HDivSpace<M> {
                         result.as_slice_mut()[dof as usize] = dot;
                     }
                 } else {
-                    // 3-D RT1: 3 face moments per global face + 3 interior moments per element.
+                    // 3-D RTk (k ≥ 1): (k+1)(k+2)/2 face moments per face
+                    // + k(k+1)(k+2)/2 interior moments per element.
+                    let k = self.order as usize;
+                    let nf = (k + 1) * (k + 2) / 2; // face DOFs per face
+                    let n_int = k * (k + 1) * (k + 2) / 2; // interior DOFs per element
 
                     // Step 1 — face moments, assembled once per unique global face.
-                    let qr_face = TriRT1.quadrature(4);
+                    // Quadrature degree 2*(k+1) is sufficient (uf is deg k, moments up to deg k).
+                    let qr_face = fem_element::quadrature::tri_rule(2 * (k + 1) as u8);
                     for (&FaceKey(a, b, c), &first_dof) in map {
                         let pa = self.mesh.node_coords(a);
                         let pb = self.mesh.node_coords(b);
@@ -875,9 +883,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let jac_area = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
                         let n_unit = [cross[0] / jac_area, cross[1] / jac_area, cross[2] / jac_area];
 
-                        let mut m0 = 0.0_f64;
-                        let mut m1 = 0.0_f64;
-                        let mut m2 = 0.0_f64;
+                        let mut moments = vec![0.0_f64; nf];
                         for (xi, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
                             let s = xi[0];
                             let t = xi[1];
@@ -889,29 +895,33 @@ impl<M: MeshTopology> HDivSpace<M> {
                             let fv = f(&pt);
                             let nflux = fv[0] * n_unit[0] + fv[1] * n_unit[1] + fv[2] * n_unit[2];
                             let d_sigma = w * jac_area;
-                            m0 += d_sigma * nflux;
-                            m1 += d_sigma * nflux * s;
-                            m2 += d_sigma * nflux * t;
+                            let mut idx = 0usize;
+                            for p in 0..=k {
+                                for q in 0..=(k - p) {
+                                    moments[idx] += d_sigma * nflux * s.powi(p as i32) * t.powi(q as i32);
+                                    idx += 1;
+                                }
+                            }
                         }
 
                         let r = result.as_slice_mut();
-                        r[first_dof as usize] = m0;
-                        r[first_dof as usize + 1] = m1;
-                        r[first_dof as usize + 2] = m2;
+                        for m in 0..nf {
+                            r[first_dof as usize + m] = moments[m];
+                        }
                     }
 
-                    // Step 2 — element-local interior moments (last 3 local DOFs).
-                    let qr_vol = TetRT1.quadrature(4);
+                    // Step 2 — element-local interior moments.
+                    // RTk interior: ∫ u · w dV for w ∈ [P_{k-1}]³.
+                    // For affine elements this simplifies to detJ · ∫ (J⁻¹·u_phys) · w_ref dξ.
+                    // We compute the monomial moments against 1, ξ, η, ζ (for k=2) per component.
+                    let qr_vol = fem_element::quadrature::tet_rule(2 * (k + 1) as u8);
                     let n_elem = self.mesh.n_elements();
                     for e in 0..n_elem as u32 {
                         let dofs = self.element_dofs(e);
                         let nodes = self.mesh.element_nodes(e);
                         let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
-                        let det_j = transform.det_j().abs();
-
-                        let b0 = dofs[dofs.len() - 3] as usize;
-                        let b1 = dofs[dofs.len() - 2] as usize;
-                        let b2 = dofs[dofs.len() - 1] as usize;
+                        let det_j = transform.det_j();
+                        let j_inv_t = transform.jacobian_inv_t();
 
                         let x0 = self.mesh.node_coords(nodes[0]);
                         let x1 = self.mesh.node_coords(nodes[1]);
@@ -921,9 +931,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let j1 = [x2[0] - x0[0], x2[1] - x0[1], x2[2] - x0[2]];
                         let j2 = [x3[0] - x0[0], x3[1] - x0[1], x3[2] - x0[2]];
 
-                        let mut int_x = 0.0_f64;
-                        let mut int_y = 0.0_f64;
-                        let mut int_z = 0.0_f64;
+                        let mut interior = vec![0.0_f64; n_int];
                         for (xi, &w) in qr_vol.points.iter().zip(qr_vol.weights.iter()) {
                             let pt = [
                                 x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
@@ -931,15 +939,50 @@ impl<M: MeshTopology> HDivSpace<M> {
                                 x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
                             ];
                             let fv = f(&pt);
-                            int_x += w * fv[0];
-                            int_y += w * fv[1];
-                            int_z += w * fv[2];
+                            // Piola contravariant pullback: u_ref = detJ · J⁻¹ · u_phys
+                            let u_ref_0 = det_j * (j_inv_t[(0, 0)] * fv[0]
+                                                  + j_inv_t[(1, 0)] * fv[1]
+                                                  + j_inv_t[(2, 0)] * fv[2]);
+                            let u_ref_1 = det_j * (j_inv_t[(0, 1)] * fv[0]
+                                                  + j_inv_t[(1, 1)] * fv[1]
+                                                  + j_inv_t[(2, 1)] * fv[2]);
+                            let u_ref_2 = det_j * (j_inv_t[(0, 2)] * fv[0]
+                                                  + j_inv_t[(1, 2)] * fv[1]
+                                                  + j_inv_t[(2, 2)] * fv[2]);
+
+                            // monomials for W in [P_{k-1}]³
+                            // component 0 with monomials ξ^a η^b ζ^c, a+b+c ≤ k-1
+                            let mut idx = 0usize;
+                            let mons = {
+                                let mut m = Vec::new();
+                                let km1 = k.saturating_sub(1);
+                                for a in 0..=km1 {
+                                    for b in 0..=(km1 - a) {
+                                        for c in 0..=(km1 - a - b) {
+                                            m.push(xi[0].powi(a as i32)
+                                                 * xi[1].powi(b as i32)
+                                                 * xi[2].powi(c as i32));
+                                        }
+                                    }
+                                }
+                                m
+                            };
+                            for mm in &mons {
+                                interior[idx] += w * u_ref_0 * mm; idx += 1;
+                            }
+                            for mm in &mons {
+                                interior[idx] += w * u_ref_1 * mm; idx += 1;
+                            }
+                            for mm in &mons {
+                                interior[idx] += w * u_ref_2 * mm; idx += 1;
+                            }
                         }
 
+                        let interior_start = dofs.len() - n_int;
                         let r = result.as_slice_mut();
-                        r[b0] = int_x * det_j;
-                        r[b1] = int_y * det_j;
-                        r[b2] = int_z * det_j;
+                        for m in 0..n_int {
+                            r[dofs[interior_start + m] as usize] = interior[m];
+                        }
                     }
                 }
             }

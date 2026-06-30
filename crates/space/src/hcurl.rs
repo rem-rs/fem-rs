@@ -266,6 +266,12 @@ impl<M: MeshTopology> HCurlSpace<M> {
         self.quad_face_to_dof.len()
     }
 
+    /// Look up the first global DOF for a triangular face (Tet NDk, k≥2).
+    /// Returns `None` for ND1 or if the face is not found.
+    pub fn face_dof(&self, face: FaceKey) -> Option<DofId> {
+        self.face_to_dof.get(&face).copied()
+    }
+
     /// Look up all global DOFs associated with a quad face (hex NDk, k≥2).
     pub fn quad_face_dofs(&self, key: QuadFaceKey) -> Option<Vec<DofId>> {
         if self.order < 2 { return None; }

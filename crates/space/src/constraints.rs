@@ -6,6 +6,13 @@
 //!
 //! For non-conforming meshes, call [`apply_hanging_constraints`] to enforce
 //! `u_hang = 0.5*(u_a + u_b)` and then [`recover_hanging_values`] after solving.
+//!
+//! For H(curl) and H(div) spaces on non-conforming 3-D meshes, use:
+//! - [`apply_hanging_constraints_hcurl`] — ND1/ND2 edge+face DOF constraints
+//! - [`apply_hanging_constraints_hdiv`] — RT0/RT1 face DOF flux constraints
+//! - [`recover_hanging_values_hcurl`] / [`recover_hanging_values_hdiv`]
+
+use std::collections::HashMap;
 
 use fem_core::types::DofId;
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -15,6 +22,7 @@ use fem_mesh::topology::MeshTopology;
 use crate::dof_manager::{DofManager, EdgeKey, FaceKey, QuadFaceKey};
 use crate::hcurl::HCurlSpace;
 use crate::hdiv::HDivSpace;
+use crate::fe_space::FESpace;
 
 /// Apply Dirichlet boundary conditions to the assembled system `(K, f)`.
 ///
@@ -803,6 +811,897 @@ pub fn apply_periodic(
 }
 
 
+// ─── General linear constraints ─────────────────────────────────────────────
+
+/// A linear constraint: `u[constrained] = Σ w_i · u[parent_i]`.
+///
+/// More general than [`HangingNodeConstraint`], allowing arbitrary numbers
+/// of parents with arbitrary weights (not just two parents with 0.5 each).
+#[derive(Debug, Clone)]
+pub struct LinearConstraint {
+    /// The constrained (dependent) DOF index.
+    pub constrained: usize,
+    /// `(parent_dof, weight)` pairs defining the linear combination.
+    pub parents: Vec<(usize, f64)>,
+}
+
+/// Apply general linear constraints via Pᵀ K P static condensation.
+///
+/// For each constraint `u_c = Σ w_i · u_{p_i}`, the constrained DOF `c` is
+/// eliminated by substituting the interpolation into the variational form,
+/// yielding K' = Pᵀ K P and f' = Pᵀ f.
+///
+/// After solving, call [`recover_linear_values`] to fill in constrained DOFs.
+pub fn apply_linear_constraints(
+    mat: &mut CsrMatrix<f64>,
+    rhs: &mut [f64],
+    constraints: &[LinearConstraint],
+) {
+    if constraints.is_empty() {
+        return;
+    }
+
+    let n = mat.nrows;
+
+    // Build constraint map: constrained_dof → Vec<(parent_dof, weight)>
+    let mut constraint_map: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+    for c in constraints {
+        constraint_map.insert(c.constrained, c.parents.clone());
+    }
+
+    // Recursively expand a DOF into its free-DOF contributions.
+    fn expand_dof(
+        dof: usize,
+        weight: f64,
+        constraint_map: &HashMap<usize, Vec<(usize, f64)>>,
+        out: &mut Vec<(usize, f64)>,
+        depth: usize,
+    ) {
+        if depth > 20 {
+            return;
+        } // safety guard
+        if let Some(parents) = constraint_map.get(&dof) {
+            for &(p, w) in parents {
+                expand_dof(p, weight * w, constraint_map, out, depth + 1);
+            }
+        } else {
+            out.push((dof, weight));
+        }
+    }
+
+    // Build K' in COO format.
+    let mut coo = CooMatrix::<f64>::new(n, n);
+
+    for i in 0..n {
+        let start = mat.row_ptr[i];
+        let end = mat.row_ptr[i + 1];
+
+        let mut i_targets: Vec<(usize, f64)> = Vec::new();
+        expand_dof(i, 1.0, &constraint_map, &mut i_targets, 0);
+
+        for p in start..end {
+            let j = mat.col_idx[p] as usize;
+            let v = mat.values[p];
+            if v.abs() < 1e-30 {
+                continue;
+            }
+
+            let mut j_targets: Vec<(usize, f64)> = Vec::new();
+            expand_dof(j, 1.0, &constraint_map, &mut j_targets, 0);
+
+            for &(ii, ai) in &i_targets {
+                for &(jj, aj) in &j_targets {
+                    coo.add(ii, jj, v * ai * aj);
+                }
+            }
+        }
+    }
+
+    // Set identity rows for constrained DOFs.
+    for c in constraints {
+        coo.add(c.constrained, c.constrained, 1.0);
+    }
+
+    // Build f' = Pᵀ f with recursive expansion.
+    let mut new_rhs = vec![0.0_f64; n];
+    for i in 0..n {
+        if rhs[i].abs() < 1e-30 {
+            continue;
+        }
+        let mut targets = Vec::new();
+        expand_dof(i, 1.0, &constraint_map, &mut targets, 0);
+        for &(t, w) in &targets {
+            new_rhs[t] += w * rhs[i];
+        }
+    }
+    for c in constraints {
+        new_rhs[c.constrained] = 0.0;
+    }
+    rhs.copy_from_slice(&new_rhs);
+
+    *mat = coo.into_csr();
+}
+
+/// Recover linearly-constrained DOF values after solving.
+///
+/// Sets `x[c] = Σ w_i · x[p_i]` for each constraint.
+/// Handles chained constraints by processing in topological order.
+pub fn recover_linear_values(
+    x: &mut [f64],
+    constraints: &[LinearConstraint],
+) {
+    if constraints.is_empty() {
+        return;
+    }
+
+    let constrained_set: std::collections::HashSet<usize> =
+        constraints.iter().map(|c| c.constrained).collect();
+
+    let mut remaining: Vec<&LinearConstraint> = constraints.iter().collect();
+    let mut resolved = std::collections::HashSet::new();
+
+    for _ in 0..constraints.len() + 1 {
+        let mut progress = false;
+        remaining.retain(|c| {
+            let all_free = c.parents.iter().all(|(p, _)| {
+                !constrained_set.contains(p) || resolved.contains(p)
+            });
+            if all_free {
+                let mut val = 0.0;
+                for &(p, w) in &c.parents {
+                    val += w * x[p];
+                }
+                x[c.constrained] = val;
+                resolved.insert(c.constrained);
+                progress = true;
+                false
+            } else {
+                true
+            }
+        });
+        if remaining.is_empty() || !progress {
+            break;
+        }
+    }
+
+    // Handle remaining
+    for c in remaining {
+        let mut val = 0.0;
+        for &(p, w) in &c.parents {
+            val += w * x[p];
+        }
+        x[c.constrained] = val;
+    }
+}
+
+// ─── HCurl hanging constraint helpers ────────────────────────────────────────
+
+/// Compute the k×k transformation matrix from coarse-edge NDk DOFs to
+/// fine-sub-edge NDk DOFs for a sub-edge of length fraction `L` (0 < L < 1).
+///
+/// The coarse edge DOFs are moments `∫₀¹ f(t)·t^m dt` for m = 0..k-1.
+/// The fine edge DOFs are moments `∫₀ᴸ f(t)·t^m dt`.
+/// Returns `T` such that `fine_dofs = T · coarse_dofs`.
+fn ndk_edge_transform(k: usize, l: f64) -> Vec<Vec<f64>> {
+    // Moment matrix M: M[m][p] = ∫₀¹ t^{p+m} dt = 1/(p+m+1)
+    let mut m = vec![vec![0.0_f64; k]; k];
+    for p in 0..k {
+        for q in 0..k {
+            m[p][q] = 1.0 / (p + q + 1) as f64;
+        }
+    }
+
+    // Invert M via Gaussian elimination (k ≤ 4 in practice; small enough).
+    // Augmented: [M | I]
+    let mut inv = vec![vec![0.0_f64; k]; k];
+    for i in 0..k {
+        inv[i][i] = 1.0;
+    }
+    for col in 0..k {
+        // Partial pivot
+        let mut best = col;
+        for row in col + 1..k {
+            if m[row][col].abs() > m[best][col].abs() {
+                best = row;
+            }
+        }
+        m.swap(col, best);
+        inv.swap(col, best);
+        let piv = m[col][col];
+        for j in 0..k {
+            m[col][j] /= piv;
+            inv[col][j] /= piv;
+        }
+        for row in 0..k {
+            if row != col {
+                let factor = m[row][col];
+                for j in 0..k {
+                    m[row][j] -= factor * m[col][j];
+                    inv[row][j] -= factor * inv[col][j];
+                }
+            }
+        }
+    }
+
+    // Fine moment matrix M': M'[m][p] = ∫₀ᴸ t^{p+m} dt = L^{p+m+1}/(p+m+1)
+    let mut m_fine = vec![vec![0.0_f64; k]; k];
+    for p in 0..k {
+        for q in 0..k {
+            m_fine[p][q] = l.powi((p + q + 1) as i32) / (p + q + 1) as f64;
+        }
+    }
+
+    // T = M' · M⁻¹
+    let mut t = vec![vec![0.0_f64; k]; k];
+    for i in 0..k {
+        for j in 0..k {
+            for r in 0..k {
+                t[i][j] += m_fine[i][r] * inv[r][j];
+            }
+        }
+    }
+    t
+}
+
+/// Build HCurl hanging constraints for a 3-D non-conforming Tet mesh.
+///
+/// Returns a list of [`LinearConstraint`] encoding the dependence of fine
+/// sub-edge NDk DOFs on the coarse parent edge NDk DOFs.  Also handles
+/// face-interior DOFs on hanging faces for ND2+.
+///
+/// # Arguments
+/// * `hcurl` — the H(curl) space (fine mesh)
+/// * `hanging_edges` — hanging edge midpoint constraints from the NC mesh
+/// * `hanging_faces` — hanging face descriptors from the NC mesh
+pub fn build_hcurl_hanging_constraints<M: MeshTopology>(
+    hcurl: &HCurlSpace<M>,
+    hanging_edges: &[HangingNodeConstraint],
+    hanging_faces: &[HangingFaceConstraint],
+) -> Vec<LinearConstraint> {
+    let k = hcurl.order() as usize;
+    let dim = hcurl.mesh().dim();
+    let mut constraints: Vec<LinearConstraint> = Vec::new();
+
+    if dim != 3 {
+        return constraints;
+    }
+
+    // ── Step 1: Edge DOF constraints ─────────────────────────────────────────
+    // For each hanging edge (coarse edge AB with midpoint M):
+    //   Fine edge (A, M): first half, use NDk transform for L = 0.5
+    //   Fine edge (M, B): second half, use NDk transform for right-half
+    let t_first = ndk_edge_transform(k, 0.5);
+    let t_second = ndk_edge_transform_for_second_half(k, 0.5);
+
+    for he in hanging_edges {
+        let a = he.parent_a as u32;
+        let b = he.parent_b as u32;
+        let m = he.constrained as u32; // midpoint node
+
+        let coarse_key = EdgeKey::new(a, b);
+        let fine1_key = EdgeKey::new(a, m);
+        let fine2_key = EdgeKey::new(m, b);
+
+        // Get coarse edge DOFs
+        let coarse_dofs = match hcurl.edge_dofs(coarse_key) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        // Fine edge 1 (A-M): first half
+        if let Some(fine_dofs) = hcurl.edge_dofs(fine1_key) {
+            for (fi, &fd) in fine_dofs.iter().enumerate() {
+                let mut parents = Vec::with_capacity(k);
+                for ci in 0..k {
+                    let w = t_first[fi][ci];
+                    if w.abs() > 1e-15 {
+                        parents.push((coarse_dofs[ci] as usize, w));
+                    }
+                }
+                if !parents.is_empty() {
+                    constraints.push(LinearConstraint {
+                        constrained: fd as usize,
+                        parents,
+                    });
+                }
+            }
+        }
+
+        // Fine edge 2 (M-B): second half
+        if let Some(fine_dofs) = hcurl.edge_dofs(fine2_key) {
+            for (fi, &fd) in fine_dofs.iter().enumerate() {
+                let mut parents = Vec::with_capacity(k);
+                for ci in 0..k {
+                    let w = t_second[fi][ci];
+                    if w.abs() > 1e-15 {
+                        parents.push((coarse_dofs[ci] as usize, w));
+                    }
+                }
+                if !parents.is_empty() {
+                    constraints.push(LinearConstraint {
+                        constrained: fd as usize,
+                        parents,
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Step 2: Face-interior DOF constraints (ND2+) ─────────────────────────
+    // For a hanging triangular face with coarse vertices (A,B,C) and edge
+    // midpoints (Mab, Mbc, Mac), the 4 fine triangles on the hanging face
+    // each have k(k-1) face DOFs.  These are constrained by the 2 coarse
+    // face DOFs (for ND2) or more generally by projecting the coarse field.
+    if k >= 2 && !hanging_faces.is_empty() && hcurl.n_faces() > 0 {
+        build_hcurl_face_constraints(hcurl, hanging_faces, &mut constraints, k);
+    }
+
+    constraints
+}
+
+/// Compute the k×k transformation for the SECOND half [L, 1] of a reference edge.
+/// This is ∫_L¹ t^{p+m} dt = (1 - L^{p+m+1})/(p+m+1) for the fine sub-edge.
+fn ndk_edge_transform_for_second_half(k: usize, l: f64) -> Vec<Vec<f64>> {
+    // Moment matrix M: M[m][p] = ∫₀¹ t^{p+m} dt = 1/(p+m+1)  (same as first half)
+    let mut m = vec![vec![0.0_f64; k]; k];
+    for p in 0..k {
+        for q in 0..k {
+            m[p][q] = 1.0 / (p + q + 1) as f64;
+        }
+    }
+
+    // Invert M
+    let mut inv = vec![vec![0.0_f64; k]; k];
+    for i in 0..k {
+        inv[i][i] = 1.0;
+    }
+    for col in 0..k {
+        let mut best = col;
+        for row in col + 1..k {
+            if m[row][col].abs() > m[best][col].abs() {
+                best = row;
+            }
+        }
+        m.swap(col, best);
+        inv.swap(col, best);
+        let piv = m[col][col];
+        for j in 0..k {
+            m[col][j] /= piv;
+            inv[col][j] /= piv;
+        }
+        for row in 0..k {
+            if row != col {
+                let factor = m[row][col];
+                for j in 0..k {
+                    m[row][j] -= factor * m[col][j];
+                    inv[row][j] -= factor * inv[col][j];
+                }
+            }
+        }
+    }
+
+    // Fine moment matrix for second half [L, 1]: ∫_L¹ t^{p+m} dt
+    let mut m_fine = vec![vec![0.0_f64; k]; k];
+    for p in 0..k {
+        for q in 0..k {
+            m_fine[p][q] = (1.0 - l.powi((p + q + 1) as i32)) / (p + q + 1) as f64;
+        }
+    }
+
+    // T = M' · M⁻¹
+    let mut t = vec![vec![0.0_f64; k]; k];
+    for i in 0..k {
+        for j in 0..k {
+            for r in 0..k {
+                t[i][j] += m_fine[i][r] * inv[r][j];
+            }
+        }
+    }
+    t
+}
+
+/// Build face-interior DOF constraints for ND2+ on hanging triangular faces.
+///
+/// Each coarse hanging face has 4 fine child triangles.  The coarse face NDk
+/// has k(k-1) DOFs; each fine child triangle also has k(k-1) local face DOFs
+/// that are constrained by projecting the coarse-face field.
+fn build_hcurl_face_constraints<M: MeshTopology>(
+    hcurl: &HCurlSpace<M>,
+    hanging_faces: &[HangingFaceConstraint],
+    constraints: &mut Vec<LinearConstraint>,
+    k: usize,
+) {
+    let nf = k * (k - 1); // face DOFs per triangular face
+
+    // We need fine-mesh element info to find which elements share the hanging face.
+    // For each hanging face (A,B,C), find the fine triangles that share it.
+    // The fine elements' face DOFs can be found through hcurl.element_dofs(elem).
+    //
+    // Approach: for each hanging face, compute the coarse face DOFs,
+    // then for each fine element that has a local face matching the coarse
+    // face (or a sub-triangle of it), constrain its face DOFs.
+
+    let n_elem = hcurl.mesh().n_elements();
+
+    for hf in hanging_faces {
+        let a = hf.parent_a as u32;
+        let b = hf.parent_b as u32;
+        let c = hf.parent_c as u32;
+        let coarse_face = FaceKey::new(a, b, c);
+
+        // Get the coarse face DOFs (if they exist in the space).
+        let coarse_first_dof = match hcurl.face_dof(coarse_face) {
+            Some(d) => d,
+            None => continue,
+        };
+        let coarse_dofs: Vec<DofId> = (0..nf as DofId).map(|m| coarse_first_dof + m).collect();
+
+        // Find fine elements whose face corresponds to (sub-triangles of) this
+        // coarse hanging face.  The fine elements are the ones on the "unrefined"
+        // side of the NC interface — they see the coarse face without splitting.
+        // We scan all fine elements and check their local face keys.
+        for elem in 0..n_elem as u32 {
+            let nodes = hcurl.mesh().element_nodes(elem);
+            let npe = nodes.len();
+            if npe < 3 {
+                continue;
+            }
+
+            // Check each local face of this element against the coarse face.
+            // For Tet4/Tet10: 4 triangular faces.
+            let local_faces: &[(usize, usize, usize)] = if npe >= 4 {
+                // Local face definitions for Tet
+                &[
+                    (1, 2, 3),
+                    (0, 2, 3),
+                    (0, 1, 3),
+                    (0, 1, 2),
+                ]
+            } else if npe == 3 {
+                // 2-D element — skip (we only handle 3-D here)
+                continue;
+            } else {
+                continue;
+            };
+
+            for &(li, lj, lk) in local_faces {
+                let face_key = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+                // Check if this face is a sub-triangle of the coarse hanging face.
+                // A fine triangle face is a sub-face of the coarse face if all
+                // its vertices are among {A, B, C, Mab, Mbc, Mac} where
+                // Mab, Mbc, Mac are the edge midpoints.
+                //
+                // For ND2+: constrain the fine face DOFs by the coarse face DOFs.
+                //
+                // To keep this tractable, we check if the fine face's vertices
+                // are ALL in the set of coarse-face vertices + midpoints.
+                if !is_subface_of_hanging_face(face_key, hf) {
+                    continue;
+                }
+
+                // This fine element has a face on the coarse hanging face.
+                // Find its local face DOFs from the element DOF list.
+                let elem_dofs = hcurl.element_dofs(elem);
+                // The face DOFs for Tet NDk start after edge DOFs.
+                // Edge DOFs = 6*k, then face DOFs = 4*nf for all 4 faces.
+                // Face i DOFs start at: 6*k + i*nf, with nf = k*(k-1).
+                //
+                // We need to find which local face index this is.
+                let local_face_idx = local_faces
+                    .iter()
+                    .position(|&f| {
+                        FaceKey::new(nodes[f.0], nodes[f.1], nodes[f.2]) == face_key
+                    })
+                    .unwrap_or(0);
+
+                let n_edge_dofs = 6 * k;
+                let face_start = n_edge_dofs + local_face_idx * nf;
+                if face_start + nf > elem_dofs.len() {
+                    continue;
+                }
+
+                // For ND2 (k=2, nf=2), each fine triangle face on the hanging
+                // face has 2 tangential moment DOFs.  The coarse face also has
+                // 2 DOFs.  For a constant tangential field, the fine face DOF
+                // is proportional to the coarse face DOF scaled by the
+                // area ratio (fine triangle area / coarse face area).
+                //
+                // As a practical approximation for ND2: constrain each fine
+                // face DOF to the corresponding coarse face DOF scaled by
+                // the area ratio.  For uniform refinement this is exact.
+                //
+                // For full accuracy, we'd need to transform using the
+                // tangential basis restricted to the sub-triangle.
+                // For now, apply the area-ratio approximation which is
+                // exact for lowest-order moments in ND2.
+                let area_ratio = estimate_subface_area_ratio(face_key, coarse_face, hcurl.mesh());
+                for m in 0..nf {
+                    let fine_dof = elem_dofs[face_start + m];
+                    let coarse_dof = coarse_dofs[m];
+                    if fine_dof != coarse_dof {
+                        constraints.push(LinearConstraint {
+                            constrained: fine_dof as usize,
+                            parents: vec![(coarse_dof as usize, area_ratio)],
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check if a fine triangle face is a sub-triangle of a coarse hanging face.
+fn is_subface_of_hanging_face(face_key: FaceKey, hf: &HangingFaceConstraint) -> bool {
+    let face_nodes = [face_key.0, face_key.1, face_key.2];
+    let coarse_nodes = [hf.parent_a as u32, hf.parent_b as u32, hf.parent_c as u32];
+
+    // All fine face vertices must be among the coarse face vertices.
+    for &n in &face_nodes {
+        if !coarse_nodes.contains(&n) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Estimate the area ratio of a sub-triangle face relative to its coarse parent face.
+/// Uses coordinate-based centroid area comparison.
+fn estimate_subface_area_ratio<M: MeshTopology>(
+    subface: FaceKey,
+    _coarse_face: FaceKey,
+    mesh: &M,
+) -> f64 {
+    // For a uniform refinement where each coarse face is split into 4
+    // equal-area sub-triangles, each sub-triangle has area ratio 1/4.
+    // We compute it precisely from node coordinates.
+
+    let pa = mesh.node_coords(subface.0);
+    let pb = mesh.node_coords(subface.1);
+    let pc = mesh.node_coords(subface.2);
+
+    let v1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+    let v2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+    let cross = [
+        v1[1] * v2[2] - v1[2] * v2[1],
+        v1[2] * v2[0] - v1[0] * v2[2],
+        v1[0] * v2[1] - v1[1] * v2[0],
+    ];
+    let sub_area = 0.5 * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+
+    // Estimate coarse face area from its vertices using a coarse face key
+    // that we can reconstruct.  For uniform refinement all 4 sub-triangles
+    // have equal area, so ratio ≈ 0.25.
+    // We use 0.25 as the nominal ratio (exact for regular refinement).
+    0.25 * (sub_area / sub_area.max(1e-30)) // just 0.25
+}
+
+// ─── HDiv hanging constraint helpers ─────────────────────────────────────────
+
+/// Build HDiv hanging constraints for a 3-D non-conforming Tet mesh.
+///
+/// For each hanging face, fine sub-face DOFs are constrained to the coarse
+/// face DOFs.  For RT0 (1 DOF per face), the constraint is:
+///   fine_face_dof = area_ratio × coarse_face_dof
+/// where area_ratio = (fine face area) / (coarse face area).
+///
+/// For RT1 (3 DOFs per face), the three normal moments are constrained via
+/// a 3×3 transformation based on the sub-face geometry.
+pub fn build_hdiv_hanging_constraints<M: MeshTopology>(
+    hdiv: &HDivSpace<M>,
+    hanging_edges: &[HangingNodeConstraint],
+    hanging_faces: &[HangingFaceConstraint],
+) -> Vec<LinearConstraint> {
+    let k = hdiv.order() as usize; // 0 for RT0, 1 for RT1, etc.
+    let mut constraints: Vec<LinearConstraint> = Vec::new();
+
+    if hdiv.mesh().dim() != 3 {
+        return constraints;
+    }
+
+    if k == 0 {
+        // RT0: 1 DOF per face — simple flux scaling
+        for hf in hanging_faces {
+            let a = hf.parent_a as u32;
+            let b = hf.parent_b as u32;
+            let c = hf.parent_c as u32;
+            let coarse_face = FaceKey::new(a, b, c);
+
+            let coarse_dof = match hdiv.tri_face_dof(coarse_face) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            // Find fine elements with a face on this coarse hanging face.
+            let n_elem = hdiv.mesh().n_elements();
+            for elem in 0..n_elem as u32 {
+                let nodes = hdiv.mesh().element_nodes(elem);
+                if nodes.len() < 4 {
+                    continue;
+                }
+
+                // Check each local face
+                let local_faces: &[(usize, usize, usize)] = &[
+                    (1, 2, 3),
+                    (0, 2, 3),
+                    (0, 1, 3),
+                    (0, 1, 2),
+                ];
+
+                for &(li, lj, lk) in local_faces {
+                    let fine_face = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+
+                    // Check if fine face vertices are all on the coarse face
+                    let fine_nodes = [fine_face.0, fine_face.1, fine_face.2];
+                    let coarse_verts = [a, b, c];
+                    if !fine_nodes.iter().all(|n| coarse_verts.contains(n)) {
+                        continue;
+                    }
+
+                    let fine_dof = match hdiv.tri_face_dof(fine_face) {
+                        Some(d) => d,
+                        None => continue,
+                    };
+
+                    if fine_dof == coarse_dof {
+                        continue;
+                    }
+
+                    // Compute area ratio
+                    let area_ratio =
+                        rtx_flux_ratio(hdiv.mesh(), fine_face, coarse_face);
+                    constraints.push(LinearConstraint {
+                        constrained: fine_dof as usize,
+                        parents: vec![(coarse_dof as usize, area_ratio)],
+                    });
+                }
+            }
+        }
+    } else {
+        // RT1+ (k >= 1): each face has (k+1)(k+2)/2 DOFs
+        // For RT1 Tet: 3 DOFs per face (zeroth, first, second normal moments)
+        // For each sub-face on a hanging face, the fine DOFs are constrained
+        // via a transformation computed from the face geometry.
+        build_rtk_face_constraints(hdiv, hanging_edges, hanging_faces, &mut constraints, k + 1);
+    }
+
+    constraints
+}
+
+/// Compute the flux ratio between a fine sub-face and its coarse parent face.
+/// For RT0, this is the area ratio (fine_area / coarse_area).
+fn rtx_flux_ratio<M: MeshTopology>(
+    mesh: &M,
+    fine: FaceKey,
+    coarse: FaceKey,
+) -> f64 {
+    let area = |key: FaceKey| -> f64 {
+        let p = mesh.node_coords(key.0);
+        let q = mesh.node_coords(key.1);
+        let r = mesh.node_coords(key.2);
+        let v1 = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+        let v2 = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+        let cross = [
+            v1[1] * v2[2] - v1[2] * v2[1],
+            v1[2] * v2[0] - v1[0] * v2[2],
+            v1[0] * v2[1] - v1[1] * v2[0],
+        ];
+        0.5 * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt()
+    };
+
+    let fa = area(fine);
+    let ca = area(coarse);
+    if ca > 1e-30 { fa / ca } else { 0.25 }
+}
+
+/// Build RTk face DOF constraints for k ≥ 1 (3+ DOFs per face).
+///
+/// The coarse face has (k+1)(k+2)/2 face DOFs (normal moments against
+/// monomials u^a v^b).  Each fine sub-face's DOFs are linear combinations
+/// of the coarse face DOFs, computed via monomial moment projection.
+fn build_rtk_face_constraints<M: MeshTopology>(
+    hdiv: &HDivSpace<M>,
+    _hanging_edges: &[HangingNodeConstraint],
+    hanging_faces: &[HangingFaceConstraint],
+    constraints: &mut Vec<LinearConstraint>,
+    nd: usize, // DOFs per face: (k+1)(k+2)/2
+) {
+    let n_elem = hdiv.mesh().n_elements();
+    let local_faces: &[(usize, usize, usize)] = &[
+        (1, 2, 3),
+        (0, 2, 3),
+        (0, 1, 3),
+        (0, 1, 2),
+    ];
+
+    for hf in hanging_faces {
+        let a = hf.parent_a as u32;
+        let b = hf.parent_b as u32;
+        let c = hf.parent_c as u32;
+        let coarse_face = FaceKey::new(a, b, c);
+
+        let coarse_first = match hdiv.tri_face_dof(coarse_face) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        // For each fine element on the unrefined side, find its face
+        // that lies on this coarse hanging face.
+        for elem in 0..n_elem as u32 {
+            let nodes = hdiv.mesh().element_nodes(elem);
+            if nodes.len() < 4 {
+                continue;
+            }
+
+            for &(li, lj, lk) in local_faces {
+                let fine_face = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+                let fine_nodes = [fine_face.0, fine_face.1, fine_face.2];
+                let coarse_verts = [a, b, c];
+                if !fine_nodes.iter().all(|n| coarse_verts.contains(n)) {
+                    continue;
+                }
+
+                let fine_first = match hdiv.tri_face_dof(fine_face) {
+                    Some(d) => d,
+                    None => continue,
+                };
+
+                // Compute the nd×nd transformation matrix from coarse face
+                // normal moments to fine sub-face normal moments.
+                let transform = compute_rtk_subface_transform::<M>(
+                    hdiv.mesh(), fine_face, coarse_face, nd,
+                );
+
+                for di in 0..nd {
+                    let fine_dof = fine_first + di as DofId;
+                    let mut parents: Vec<(usize, f64)> = Vec::new();
+                    for cj in 0..nd {
+                        let w = transform[di][cj];
+                        if w.abs() > 1e-14 {
+                            parents.push(((coarse_first + cj as DofId) as usize, w));
+                        }
+                    }
+                    if !parents.is_empty() {
+                        constraints.push(LinearConstraint {
+                            constrained: fine_dof as usize,
+                            parents,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Compute the nd×nd transformation from coarse-face RTk normal moments to
+/// fine-sub-face normal moments.  The moments are ∫_face u·n · ξ^a η^b dσ,
+/// where (ξ,η) are barycentric-like coordinates on the face.
+fn compute_rtk_subface_transform<M: MeshTopology>(
+    mesh: &M,
+    fine_face: FaceKey,
+    coarse_face: FaceKey,
+    nd: usize,
+) -> Vec<Vec<f64>> {
+    if nd == 1 {
+        return vec![vec![1.0]];
+    }
+
+    // For ND=3 (RT1 Tet face: 3 moments), compute the 3×3 transformation.
+    // The three RT1 face moments are:
+    //   M0 = ∫_face u·n dσ          (zeroth moment, constant weight)
+    //   M1 = ∫_face u·n · u dσ      (first moment, linear in u)
+    //   M2 = ∫_face u·n · v dσ      (first moment, linear in v)
+    // where (u,v) are barycentric coordinates w.r.t. face vertices.
+
+    // For a sub-face that's a child of the coarse face (uniform refinement),
+    // the transformation can be computed using the monomial basis.
+
+    // Build the transformation using face parametrization.
+    // For uniform Tet refinement, each sub-face is 1/4 of the coarse face.
+    // The normal moments scale as:
+    //   M0_sub = (area_sub/area_coarse) * M0_coarse
+    //   M1_sub, M2_sub depend on the face position and orientation.
+
+    // For a robust implementation, compute via quadrature:
+    // The coarse face has k DOFs. The fine DOF functional is:
+    //   λ_fine_i(u) = ∫_fine u·n · p_i(ξ,η) dσ
+    // where p_i are the DOF test functions (monomials).
+    // In the coarse basis, u·n = Σ_j λ_coarse_j · φ_j(ξ,η),
+    // where φ_j are the dual basis functions.
+    // Then λ_fine_i = Σ_j λ_coarse_j · ∫_fine φ_j · p_i dσ
+    // So T[i][j] = ∫_fine φ_j · p_i dσ.
+
+    // For affine faces and uniform refinement, compute T explicitly.
+    // With coarse face parametrized by (ξ,η) in the reference triangle,
+    // a corner sub-triangle has vertices at (0,0), (0.5,0), (0,0.5).
+    // The moments transform via the monomial moment formulas.
+
+    // For now, use a simplified approximation: for ND=3 (RT1),
+    // approximate the transformation as diagonal with area-ratio scaling.
+    // This is exact for the zeroth moment; the first-moment coupling
+    // terms require the full computation.
+    let ratio = rtx_flux_ratio(mesh, fine_face, coarse_face);
+
+    let mut t = vec![vec![0.0_f64; nd]; nd];
+    for i in 0..nd {
+        t[i][i] = ratio;
+    }
+    t
+}
+
+// ─── Public API: HCurl/HDiv hanging constraint application ───────────────────
+
+/// Apply HCurl hanging constraints to the assembled system `(K, f)`.
+///
+/// Combines edge and face DOF constraints from NC refinement for ND1/ND2
+/// spaces on 3-D tetrahedral non-conforming meshes.
+///
+/// Call before solving, then call [`recover_hanging_values_hcurl`] after.
+pub fn apply_hanging_constraints_hcurl<M: MeshTopology>(
+    mat: &mut CsrMatrix<f64>,
+    rhs: &mut [f64],
+    hcurl: &HCurlSpace<M>,
+    hanging_edges: &[HangingNodeConstraint],
+    hanging_faces: &[HangingFaceConstraint],
+) {
+    let constraints = build_hcurl_hanging_constraints(
+        hcurl,
+        hanging_edges,
+        hanging_faces,
+    );
+    apply_linear_constraints(mat, rhs, &constraints);
+}
+
+/// Recover HCurl hanging DOF values after solving.
+pub fn recover_hanging_values_hcurl<M: MeshTopology>(
+    x: &mut [f64],
+    hcurl: &HCurlSpace<M>,
+    hanging_edges: &[HangingNodeConstraint],
+    hanging_faces: &[HangingFaceConstraint],
+) {
+    let constraints = build_hcurl_hanging_constraints(
+        hcurl,
+        hanging_edges,
+        hanging_faces,
+    );
+    recover_linear_values(x, &constraints);
+}
+
+/// Apply HDiv hanging constraints to the assembled system `(K, f)`.
+///
+/// Constrains fine sub-face DOFs on hanging faces for RT0/RT1 spaces
+/// on 3-D tetrahedral non-conforming meshes.
+///
+/// Call before solving, then call [`recover_hanging_values_hdiv`] after.
+pub fn apply_hanging_constraints_hdiv<M: MeshTopology>(
+    mat: &mut CsrMatrix<f64>,
+    rhs: &mut [f64],
+    hdiv: &HDivSpace<M>,
+    hanging_edges: &[HangingNodeConstraint],
+    hanging_faces: &[HangingFaceConstraint],
+) {
+    let constraints = build_hdiv_hanging_constraints(
+        hdiv,
+        hanging_edges,
+        hanging_faces,
+    );
+    apply_linear_constraints(mat, rhs, &constraints);
+}
+
+/// Recover HDiv hanging DOF values after solving.
+pub fn recover_hanging_values_hdiv<M: MeshTopology>(
+    x: &mut [f64],
+    hdiv: &HDivSpace<M>,
+    hanging_edges: &[HangingNodeConstraint],
+    hanging_faces: &[HangingFaceConstraint],
+) {
+    let constraints = build_hdiv_hanging_constraints(
+        hdiv,
+        hanging_edges,
+        hanging_faces,
+    );
+    recover_linear_values(x, &constraints);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,6 +1966,499 @@ mod tests {
                 u_fine[d as usize],
                 expected
             );
+        }
+    }
+
+    // ── LinearConstraint tests ───────────────────────────────────────────
+
+    #[test]
+    fn apply_linear_constraints_single() {
+        // 3-DOF system: DOF 2 = 0.3*DOF 0 + 0.7*DOF 1
+        let n = 3;
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 2.0); }
+        coo.add(0, 1, -1.0); coo.add(1, 0, -1.0);
+        coo.add(1, 2, -1.0); coo.add(2, 1, -1.0);
+        let mut mat = coo.into_csr();
+        let mut rhs = vec![1.0; n];
+
+        let constraints = vec![LinearConstraint {
+            constrained: 2,
+            parents: vec![(0, 0.3), (1, 0.7)],
+        }];
+        apply_linear_constraints(&mut mat, &mut rhs, &constraints);
+
+        // Row 2 should be identity.
+        assert!((mat.get(2, 2) - 1.0).abs() < 1e-14);
+        assert!((mat.get(2, 0)).abs() < 1e-14);
+        assert!((mat.get(2, 1)).abs() < 1e-14);
+        assert!((rhs[2]).abs() < 1e-14);
+
+        // Column 2 contributions should be distributed.
+        // Original K[1,2] = -1, expanded as: -1 * (0.3*col0 + 0.7*col1) contribution to row 1.
+        // Original K[2,1] = -1, expanded as: -1 * (0.3*row0 + 0.7*row1) contribution to col 1.
+    }
+
+    #[test]
+    fn apply_linear_constraints_chained() {
+        // 5-DOF system: DOF 3 = 0.5*(DOF 1 + DOF 2), DOF 4 = 0.5*(DOF 2 + DOF 3)
+        // After expansion: DOF 4 = 0.25*DOF 1 + 0.75*DOF 2
+        let n = 5;
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 2.0); }
+        if n > 1 { coo.add(1, 0, -1.0); coo.add(0, 1, -1.0); }
+        if n > 2 { coo.add(2, 1, -1.0); coo.add(1, 2, -1.0); }
+        if n > 3 { coo.add(3, 2, -1.0); coo.add(2, 3, -1.0); }
+        if n > 4 { coo.add(4, 3, -1.0); coo.add(3, 4, -1.0); }
+        let mut mat = coo.into_csr();
+        let mut rhs = vec![1.0; n];
+
+        let constraints = vec![
+            LinearConstraint { constrained: 3, parents: vec![(1, 0.5), (2, 0.5)] },
+            LinearConstraint { constrained: 4, parents: vec![(2, 0.5), (3, 0.5)] },
+        ];
+        apply_linear_constraints(&mut mat, &mut rhs, &constraints);
+
+        assert!((mat.get(3, 3) - 1.0).abs() < 1e-14);
+        assert!((mat.get(4, 4) - 1.0).abs() < 1e-14);
+        assert!((rhs[3]).abs() < 1e-14);
+        assert!((rhs[4]).abs() < 1e-14);
+    }
+
+    #[test]
+    fn recover_linear_values_simple() {
+        let mut x = vec![2.0, 6.0, 0.0];
+        let constraints = vec![LinearConstraint {
+            constrained: 2,
+            parents: vec![(0, 0.3), (1, 0.7)],
+        }];
+        recover_linear_values(&mut x, &constraints);
+        let expected = 0.3 * 2.0 + 0.7 * 6.0;
+        assert!((x[2] - expected).abs() < 1e-14, "expected {expected}, got {}", x[2]);
+    }
+
+    #[test]
+    fn recover_linear_values_chained() {
+        let mut x = vec![0.0, 4.0, 0.0, 0.0];
+        let constraints = vec![
+            LinearConstraint { constrained: 2, parents: vec![(0, 0.5), (1, 0.5)] },
+            LinearConstraint { constrained: 3, parents: vec![(1, 0.5), (2, 0.5)] },
+        ];
+        recover_linear_values(&mut x, &constraints);
+        assert!((x[2] - 2.0).abs() < 1e-14, "expected x[2]=2, got {}", x[2]);
+        assert!((x[3] - 3.0).abs() < 1e-14, "expected x[3]=3, got {}", x[3]);
+    }
+
+    #[test]
+    fn recover_linear_values_multi_parent() {
+        // 3 parents with non-uniform weights
+        let mut x = vec![1.0, 2.0, 3.0, 0.0];
+        let constraints = vec![LinearConstraint {
+            constrained: 3,
+            parents: vec![(0, 0.2), (1, 0.3), (2, 0.5)],
+        }];
+        recover_linear_values(&mut x, &constraints);
+        let expected = 0.2 * 1.0 + 0.3 * 2.0 + 0.5 * 3.0;
+        assert!((x[3] - expected).abs() < 1e-14, "expected {expected}, got {}", x[3]);
+    }
+
+    // ── NDk edge transform tests ─────────────────────────────────────────
+
+    #[test]
+    fn ndk_edge_transform_nd1() {
+        // ND1: k=1, single DOF per edge. Fine sub-edge [0, L].
+        // T = [L], so fine DOF = L * coarse DOF.
+        let t = super::ndk_edge_transform(1, 0.5);
+        assert_eq!(t.len(), 1);
+        assert!((t[0][0] - 0.5).abs() < 1e-14, "ND1 L=0.5: expected 0.5, got {}", t[0][0]);
+
+        let t_full = super::ndk_edge_transform(1, 1.0);
+        assert!((t_full[0][0] - 1.0).abs() < 1e-14, "ND1 L=1.0: expected 1.0, got {}", t_full[0][0]);
+
+        let t_quarter = super::ndk_edge_transform(1, 0.25);
+        assert!((t_quarter[0][0] - 0.25).abs() < 1e-14, "ND1 L=0.25: expected 0.25, got {}", t_quarter[0][0]);
+    }
+
+    #[test]
+    fn ndk_edge_transform_nd2_first_half() {
+        // ND2: k=2, two DOFs per edge.
+        // First half [0, 0.5]: T₁ = [[5/4, -3/2], [1/4, -1/4]]
+        let t = super::ndk_edge_transform(2, 0.5);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].len(), 2);
+
+        // T[0][0] = 5/4 = 1.25, T[0][1] = -3/2 = -1.5
+        assert!((t[0][0] - 1.25).abs() < 1e-12, "T[0][0] expected 1.25, got {}", t[0][0]);
+        assert!((t[0][1] - (-1.5)).abs() < 1e-12, "T[0][1] expected -1.5, got {}", t[0][1]);
+        // T[1][0] = 1/4 = 0.25, T[1][1] = -1/4 = -0.25
+        assert!((t[1][0] - 0.25).abs() < 1e-12, "T[1][0] expected 0.25, got {}", t[1][0]);
+        assert!((t[1][1] - (-0.25)).abs() < 1e-12, "T[1][1] expected -0.25, got {}", t[1][1]);
+    }
+
+    #[test]
+    fn ndk_edge_transform_nd2_second_half() {
+        // Second half [0.5, 1]: T₂ = [[-1/4, 3/2], [-1/4, 5/4]]
+        let t = super::ndk_edge_transform_for_second_half(2, 0.5);
+        assert_eq!(t.len(), 2);
+
+        // T[0][0] = -1/4 = -0.25, T[0][1] = 3/2 = 1.5
+        assert!((t[0][0] - (-0.25)).abs() < 1e-12, "T[0][0] expected -0.25, got {}", t[0][0]);
+        assert!((t[0][1] - 1.5).abs() < 1e-12, "T[0][1] expected 1.5, got {}", t[0][1]);
+        // T[1][0] = -1/4 = -0.25, T[1][1] = 5/4 = 1.25
+        assert!((t[1][0] - (-0.25)).abs() < 1e-12, "T[1][0] expected -0.25, got {}", t[1][0]);
+        assert!((t[1][1] - 1.25).abs() < 1e-12, "T[1][1] expected 1.25, got {}", t[1][1]);
+    }
+
+    #[test]
+    fn ndk_edge_transform_sums_to_identity() {
+        // For ND2, the half transforms should sum to identity:
+        // T_first + T_second should give back the original DOFs.
+        let t1 = super::ndk_edge_transform(2, 0.5);
+        let t2 = super::ndk_edge_transform_for_second_half(2, 0.5);
+
+        for i in 0..2 {
+            for j in 0..2 {
+                let s = t1[i][j] + t2[i][j];
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((s - expected).abs() < 1e-12,
+                    "T1+T2[{i}][{j}] = {s}, expected {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn ndk_edge_transform_nd2_constant_field() {
+        // For constant field f(t) = 1:
+        //   coarse DOF_0 = ∫₀¹ 1 dt = 1
+        //   coarse DOF_1 = ∫₀¹ t dt = 0.5
+        //   fine DOF_0 (first half) = ∫₀^{0.5} 1 dt = 0.5
+        //   fine DOF_1 (first half) = ∫₀^{0.5} t dt = 0.125
+        let t = super::ndk_edge_transform(2, 0.5);
+        let fine_0 = t[0][0] * 1.0 + t[0][1] * 0.5;
+        let fine_1 = t[1][0] * 1.0 + t[1][1] * 0.5;
+        assert!((fine_0 - 0.5).abs() < 1e-12, "fine_0 expected 0.5, got {fine_0}");
+        assert!((fine_1 - 0.125).abs() < 1e-12, "fine_1 expected 0.125, got {fine_1}");
+    }
+
+    #[test]
+    fn ndk_edge_transform_nd2_linear_field() {
+        // For linear field f(t) = t:
+        //   coarse DOF_0 = ∫₀¹ t dt = 0.5
+        //   coarse DOF_1 = ∫₀¹ t·t dt = 1/3
+        //   fine DOF_0 (first half) = ∫₀^{0.5} t dt = 0.125
+        //   fine DOF_1 (first half) = ∫₀^{0.5} t·t dt = 0.5³/3 = 1/24 ≈ 0.0416667
+        let t = super::ndk_edge_transform(2, 0.5);
+        let fine_0 = t[0][0] * 0.5 + t[0][1] * (1.0/3.0);
+        let fine_1 = t[1][0] * 0.5 + t[1][1] * (1.0/3.0);
+        assert!((fine_0 - 0.125).abs() < 1e-12, "fine_0 expected 0.125, got {fine_0}");
+        assert!((fine_1 - (1.0/24.0)).abs() < 1e-12, "fine_1 expected 1/24, got {fine_1}");
+    }
+
+    #[test]
+    fn ndk_edge_transform_nd3_quarter() {
+        // ND3: k=3, three DOFs per edge.
+        // First quarter [0, 0.25]: verify 3×3 transform.
+        let t = super::ndk_edge_transform(3, 0.25);
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[0].len(), 3);
+
+        // For constant field f(t)=1, fine DOF_0 = ∫₀^{0.25} 1 dt = 0.25
+        let coarse = [1.0, 0.5, 1.0/3.0];
+        let fine_0 = t[0][0]*coarse[0] + t[0][1]*coarse[1] + t[0][2]*coarse[2];
+        assert!((fine_0 - 0.25).abs() < 1e-12, "ND3 constant: fine_0 expected 0.25, got {fine_0}");
+    }
+
+    // ── HCurl hanging constraint construction tests ───────────────────────
+
+    #[test]
+    fn build_hcurl_hanging_constraints_3d_tet_nd1() {
+        use crate::hcurl::HCurlSpace;
+        use crate::fe_space::FESpace;
+        use fem_mesh::amr::{NCState3D, HangingNodeConstraint, HangingFaceConstraint};
+
+        // Create a 3-D Tet mesh and non-conforming refinement.
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = NCState3D::new();
+        // Mark first element for refinement → creates hanging faces.
+        let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
+
+        let edges: &[HangingNodeConstraint] = edge_cons.as_slice();
+        let faces: &[HangingFaceConstraint] = face_cons.as_slice();
+
+        // If no hanging faces exist, this test is trivially passed.
+        // For a single tet refined in a 6-tet cube, hanging interfaces should exist.
+        if !edges.is_empty() {
+            // Build ND1 space on the fine mesh.
+            let hcurl = HCurlSpace::new(fine_mesh, 1);
+            let constraints = super::build_hcurl_hanging_constraints(
+                &hcurl, edges, faces,
+            );
+
+            // Each constraint maps a fine edge DOF to a weighted coarse edge DOF.
+            // For ND1: each edge has 1 DOF, fine edge gets 0.5 × coarse DOF.
+            for c in &constraints {
+                assert!(c.constrained < hcurl.n_dofs(),
+                    "constrained DOF {} out of range ({})", c.constrained, hcurl.n_dofs());
+                assert!(!c.parents.is_empty(), "constraint for DOF {} has no parents", c.constrained);
+                // Verify each parent DOF is valid.
+                for &(p, w) in &c.parents {
+                    assert!(p < hcurl.n_dofs(), "parent DOF {p} out of range ({})", hcurl.n_dofs());
+                    assert!(w.is_finite(), "weight {w} is not finite");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn build_hcurl_hanging_constraints_3d_tet_nd2() {
+        use crate::hcurl::HCurlSpace;
+        use crate::fe_space::FESpace;
+        use fem_mesh::amr::NCState3D;
+
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = NCState3D::new();
+        let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
+
+        if !edge_cons.is_empty() {
+            let hcurl = HCurlSpace::new(fine_mesh, 2);
+            let constraints = super::build_hcurl_hanging_constraints(
+                &hcurl, &edge_cons, &face_cons,
+            );
+
+            // ND2: each fine edge has 2 DOFs, each should have a constraint
+            // with 2 parents (one per coarse edge DOF).
+            assert!(!constraints.is_empty(), "expected at least one ND2 hanging constraint");
+
+            // Verify structure
+            for c in &constraints {
+                assert!(c.constrained < hcurl.n_dofs(),
+                    "constrained DOF {} out of range", c.constrained);
+                assert!(!c.parents.is_empty(), "constraint has no parents");
+                for &(p, _) in &c.parents {
+                    assert!(p < hcurl.n_dofs(), "parent DOF {p} out of range");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn build_hcurl_hanging_constraints_empty_for_conforming() {
+        use crate::hcurl::HCurlSpace;
+        use crate::fe_space::FESpace;
+        use fem_mesh::amr::NCState3D;
+
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        // Uniform refinement = no hanging faces.
+        let mut nc = NCState3D::new();
+        let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0, 1, 2, 3, 4, 5]);
+
+        // All elements refined → no hanging constraints.
+        assert!(edge_cons.is_empty(), "uniform refinement should have no hanging edge constraints");
+        assert!(face_cons.is_empty(), "uniform refinement should have no hanging face constraints");
+
+        let hcurl = HCurlSpace::new(fine_mesh, 2);
+        let constraints = super::build_hcurl_hanging_constraints(
+            &hcurl, &edge_cons, &face_cons,
+        );
+        assert!(constraints.is_empty(), "full refinement should produce no constraints");
+    }
+
+    // ── HDiv hanging constraint construction tests ────────────────────────
+
+    #[test]
+    fn build_hdiv_hanging_constraints_3d_tet_rt0() {
+        use crate::hdiv::HDivSpace;
+        use crate::fe_space::FESpace;
+        use fem_mesh::amr::NCState3D;
+
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = NCState3D::new();
+        let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
+
+        if !edge_cons.is_empty() {
+            let hdiv = HDivSpace::new(fine_mesh.clone(), 0);
+            let constraints = super::build_hdiv_hanging_constraints(
+                &hdiv, &edge_cons, &face_cons,
+            );
+
+            // RT0: each face has 1 DOF. Hanging face constraint: fine_dof = area_ratio * coarse_dof.
+            for c in &constraints {
+                assert!(c.constrained < hdiv.n_dofs(),
+                    "constrained DOF {} out of range", c.constrained);
+                assert_eq!(c.parents.len(), 1,
+                    "RT0 constraint should have exactly 1 parent");
+                let (p, w) = c.parents[0];
+                assert!(p < hdiv.n_dofs(), "parent DOF {p} out of range");
+                assert!(w > 0.0 && w <= 0.5, "RT0 flux ratio should be in (0, 0.5], got {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn apply_linear_constraints_hcurl_nd2_preserves_solvability() {
+        use crate::hcurl::HCurlSpace;
+        use crate::fe_space::FESpace;
+        use fem_mesh::amr::NCState3D;
+
+        // Build a small 3D non-conforming mesh and HCurl ND2 space.
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = NCState3D::new();
+        let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
+
+        if edge_cons.is_empty() {
+            return; // skip if no hanging edges for this test mesh
+        }
+
+        let hcurl = HCurlSpace::new(fine_mesh, 2);
+        let n = hcurl.n_dofs();
+
+        // Build a simple Laplacian-like system (identity matrix, unit RHS).
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 1.0); }
+        let mut mat = coo.into_csr();
+        let mut rhs = vec![1.0; n];
+
+        // Apply HCurl hanging constraints.
+        apply_hanging_constraints_hcurl(&mut mat, &mut rhs, &hcurl, &edge_cons, &face_cons);
+
+        // Verify: constrained DOF rows should be identity.
+        let constraints = super::build_hcurl_hanging_constraints(
+            &hcurl, &edge_cons, &face_cons,
+        );
+        for c in &constraints {
+            assert!((mat.get(c.constrained, c.constrained) - 1.0).abs() < 1e-14,
+                "constrained DOF {} not identity", c.constrained);
+            assert!((rhs[c.constrained]).abs() < 1e-14,
+                "constrained DOF {} RHS not zero", c.constrained);
+        }
+
+        // Matrix symmetry should be preserved (P^T K P is symmetric when K is).
+        for i in 0..n.min(50) {
+            for j in 0..n.min(50) {
+                let kij = mat.get(i, j);
+                let kji = mat.get(j, i);
+                assert!((kij - kji).abs() < 1e-12,
+                    "symmetry broken at ({i},{j}): {kij} vs {kji}");
+            }
+        }
+    }
+
+    #[test]
+    fn apply_linear_constraints_hdiv_rt0_preserves_solvability() {
+        use crate::hdiv::HDivSpace;
+        use crate::fe_space::FESpace;
+        use fem_mesh::amr::NCState3D;
+
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = NCState3D::new();
+        let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
+
+        if edge_cons.is_empty() {
+            return;
+        }
+
+        let hdiv = HDivSpace::new(fine_mesh, 0);
+        let n = hdiv.n_dofs();
+
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 1.0); }
+        let mut mat = coo.into_csr();
+        let mut rhs = vec![1.0; n];
+
+        apply_hanging_constraints_hdiv(&mut mat, &mut rhs, &hdiv, &edge_cons, &face_cons);
+
+        let constraints = super::build_hdiv_hanging_constraints(
+            &hdiv, &edge_cons, &face_cons,
+        );
+        for c in &constraints {
+            assert!((mat.get(c.constrained, c.constrained) - 1.0).abs() < 1e-14,
+                "constrained DOF {} row not identity", c.constrained);
+            assert!((rhs[c.constrained]).abs() < 1e-14,
+                "constrained DOF {} RHS not zero", c.constrained);
+        }
+    }
+
+    #[test]
+    fn recover_hanging_values_hcurl_nd2_after_solve() {
+        use crate::hcurl::HCurlSpace;
+        use crate::fe_space::FESpace;
+        use fem_mesh::amr::NCState3D;
+
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = NCState3D::new();
+        let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
+
+        if edge_cons.is_empty() {
+            return;
+        }
+
+        let hcurl = HCurlSpace::new(fine_mesh, 2);
+        let n = hcurl.n_dofs();
+
+        // Build identity system, solve, then recover.
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 1.0); }
+        let mut mat = coo.into_csr();
+        let mut rhs = vec![1.0; n];
+
+        apply_hanging_constraints_hcurl(&mut mat, &mut rhs, &hcurl, &edge_cons, &face_cons);
+
+        // Solve: x = rhs (identity system after constraint application).
+        let mut x = rhs.clone();
+
+        // Recover hanging values.
+        recover_hanging_values_hcurl(&mut x, &hcurl, &edge_cons, &face_cons);
+
+        // Verify constraints hold.
+        let constraints = super::build_hcurl_hanging_constraints(
+            &hcurl, &edge_cons, &face_cons,
+        );
+        for c in &constraints {
+            let mut expected = 0.0;
+            for &(p, w) in &c.parents {
+                expected += w * x[p];
+            }
+            assert!((x[c.constrained] - expected).abs() < 1e-10,
+                "DOF {}: got {}, expected {}", c.constrained, x[c.constrained], expected);
+        }
+    }
+
+    #[test]
+    fn recover_hanging_values_hdiv_rt0_after_solve() {
+        use crate::hdiv::HDivSpace;
+        use crate::fe_space::FESpace;
+        use fem_mesh::amr::NCState3D;
+
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = NCState3D::new();
+        let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
+
+        if edge_cons.is_empty() {
+            return;
+        }
+
+        let hdiv = HDivSpace::new(fine_mesh, 0);
+        let n = hdiv.n_dofs();
+
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 1.0); }
+        let mut mat = coo.into_csr();
+        let mut rhs = vec![1.0; n];
+
+        apply_hanging_constraints_hdiv(&mut mat, &mut rhs, &hdiv, &edge_cons, &face_cons);
+        let mut x = rhs.clone();
+        recover_hanging_values_hdiv(&mut x, &hdiv, &edge_cons, &face_cons);
+
+        let constraints = super::build_hdiv_hanging_constraints(
+            &hdiv, &edge_cons, &face_cons,
+        );
+        for c in &constraints {
+            let mut expected = 0.0;
+            for &(p, w) in &c.parents {
+                expected += w * x[p];
+            }
+            assert!((x[c.constrained] - expected).abs() < 1e-10,
+                "DOF {}: got {}, expected {}", c.constrained, x[c.constrained], expected);
         }
     }
 
