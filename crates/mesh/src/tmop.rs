@@ -31,6 +31,12 @@ pub enum TmopMetric {
     Shape,
     /// Combined size+shape: `μ = ∣T∣² / det(T)^{2/d}`.
     SizeShape,
+    /// Signed element volume: `μ = det(T)`. Negative values indicate inversion.
+    /// Only ∂μ/∂A is used (value not needed for optimisation targets).
+    Volume,
+    /// Condition-number-like: `μ = ∣T∣² / (d · det(T)^{2/d})`.
+    /// Measures element quality relative to target, with barrier at det→0.
+    Condition,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -95,6 +101,31 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
             }}}
             TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
         }
+        TmopMetric::Volume => {
+            let value = det_t;
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let mut dmu_da = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { for k in 0..2 {
+                dmu_da[(i, j)] += adj_t[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
+        }
+        TmopMetric::Condition => {
+            let abs_det = det_t.abs().max(1e-30);
+            let value = ft2 / (d as f64 * abs_det);
+            let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let denom = d as f64 * det_t * abs_det;
+            let mut dmu_dt = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 {
+                dmu_dt[(i, j)] = (2.0 * t[(i, j)] * abs_det - ft2 * 0.5 * sign * adj_t[(i, j)]) / denom;
+            }}
+            let mut dmu_da = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { for k in 0..2 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
+        }
     }
 }
 
@@ -148,20 +179,61 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
         }
         TmopMetric::Shape | TmopMetric::SizeShape => {
             let det_t_abs = det_t.abs().max(1e-30);
-            let p = 2.0 / d as f64;
-            let det_power = det_t_abs.powf(p);
+            let p = 1.0 / d as f64;
+            let exponent = if *metric == TmopMetric::Shape { 1.0 } else { p };
+            let det_power = det_t_abs.powf(exponent);
             let value = if *metric == TmopMetric::Shape {
                 ft2 / det_power - d as f64
             } else {
                 ft2 / det_power
             };
 
-            // D = det(T)^p,  ∂D/∂T = p·D·T^{-T}
             let t_inv_t = t.try_inverse().map(|m| m.transpose()).unwrap_or(Matrix3::identity());
             let mut dmu_dt = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 {
-                let ddenom_dt = p * det_power * t_inv_t[(i, j)];
+                let ddenom_dt = exponent * det_power * t_inv_t[(i, j)];
                 dmu_dt[(i, j)] = 2.0 * t[(i, j)] / det_power - ft2 * ddenom_dt / (det_power * det_power);
+            }}
+            let mut dmu_da = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { for k in 0..3 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric3d {
+                value,
+                dmu_da: [
+                    [dmu_da[(0,0)], dmu_da[(0,1)], dmu_da[(0,2)]],
+                    [dmu_da[(1,0)], dmu_da[(1,1)], dmu_da[(1,2)]],
+                    [dmu_da[(2,0)], dmu_da[(2,1)], dmu_da[(2,2)]],
+                ],
+            }
+        }
+        TmopMetric::Volume => {
+            let value = det_t;
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let mut dmu_da = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { for k in 0..3 {
+                dmu_da[(i, j)] += adj_t[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric3d {
+                value,
+                dmu_da: [
+                    [dmu_da[(0,0)], dmu_da[(0,1)], dmu_da[(0,2)]],
+                    [dmu_da[(1,0)], dmu_da[(1,1)], dmu_da[(1,2)]],
+                    [dmu_da[(2,0)], dmu_da[(2,1)], dmu_da[(2,2)]],
+                ],
+            }
+        }
+        TmopMetric::Condition => {
+            let abs_det = det_t.abs().max(1e-30);
+            let value = ft2 / (d as f64 * abs_det.powf(2.0 / d as f64));
+            let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
+            let t_inv_t = t.try_inverse().map(|inv| inv.transpose()).unwrap_or(Matrix3::identity());
+            let mut dmu_dt = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 {
+                let ddet_dt = det_t * t_inv_t[(i, j)];
+                let ddet_pow = (2.0 / d as f64) * abs_det.powf(2.0 / d as f64 - 1.0) * sign * ddet_dt;
+                dmu_dt[(i, j)] = (2.0 * t[(i, j)] * abs_det.powf(2.0 / d as f64) - ft2 * ddet_pow)
+                    / (d as f64 * abs_det.powf(4.0 / d as f64));
             }}
             let mut dmu_da = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { for k in 0..3 {
@@ -178,6 +250,8 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
         }
     }
 }
+
+/// Result of evaluating a TMOP metric on a 3-D element.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 2-D objective
