@@ -203,6 +203,45 @@ pub fn relative_error(u_full: &[f64], u_reduced: &[f64]) -> f64 {
     (diff / norm.max(1e-30)).sqrt()
 }
 
+/// Full online ROM pipeline: given a `PodBasis` and the projected affine
+/// decompositions, evaluate at parameter `μ`, solve the reduced system,
+/// and reconstruct the full-order solution.
+///
+/// # Arguments
+/// * `pod` — POD basis (modes matrix `V`, size `n×r`)
+/// * `affine_op_proj` — projected operator components `Vᵀ·A_q·V` (each `r×r`)
+/// * `affine_rhs_proj` — projected RHS components `Vᵀ·b_q` (each `r`-vector)
+/// * `mu` — parameter vector
+///
+/// # Returns
+/// `(u_r, u_full)` where `u_r` is the reduced coefficients and `u_full` is
+/// the reconstructed full-order solution.
+pub fn online_solve(
+    pod: &PodBasis,
+    affine_op_proj: &AffineDecomposition<DMatrix<f64>>,
+    affine_rhs_proj: &AffineDecomposition<DVector<f64>>,
+    mu: &[f64],
+) -> Result<(DVector<f64>, Vec<f64>), String> {
+    let r = pod.r;
+    // Assemble reduced system: A_r(μ) = Σ θ_q(μ) · A_q_proj
+    let mut a_r = DMatrix::zeros(r, r);
+    let mut b_r = DVector::zeros(r);
+    for i in 0..affine_op_proj.n_terms() {
+        let theta = affine_op_proj.coeffs[i](mu);
+        if theta.abs() < 1e-300 { continue; }
+        a_r += theta * &affine_op_proj.components[i];
+    }
+    for i in 0..affine_rhs_proj.n_terms() {
+        let theta = affine_rhs_proj.coeffs[i](mu);
+        if theta.abs() < 1e-300 { continue; }
+        b_r += theta * &affine_rhs_proj.components[i];
+    }
+    let u_r = a_r.lu().solve(&b_r)
+        .ok_or_else(|| "reduced system solve failed".to_string())?;
+    let u_full = reconstruct(pod, u_r.as_slice());
+    Ok((u_r, u_full))
+}
+
 // ─── EIM (Empirical Interpolation Method) ───────────────────────────────────
 
 /// EIM basis: greedy-selected basis vectors and interpolation points for
@@ -398,6 +437,17 @@ impl<T> AffineDecomposition<T> {
     pub fn n_terms(&self) -> usize { self.components.len() }
 }
 
+impl AffineDecomposition<Vec<f64>> {
+    /// Project the RHS affine components onto a POD basis: `b_q_r = Vᵀ · b_q`.
+    pub fn project_rhs(&self, pod: &PodBasis) -> AffineDecomposition<DVector<f64>> {
+        let projected: Vec<DVector<f64>> = self.components.iter().map(|b| {
+            let b_vec = DVector::from_vec(b.clone());
+            pod.modes.transpose() * b_vec
+        }).collect();
+        AffineDecomposition { components: projected, coeffs: self.coeffs.clone() }
+    }
+}
+
 impl AffineDecomposition<CsrMatrix<f64>> {
     /// Evaluate the operator at parameter `μ`: `A(μ) = Σ θ_q(μ) · A_q`.
     pub fn evaluate(&self, mu: &[f64]) -> CsrMatrix<f64> {
@@ -481,25 +531,37 @@ impl ErrorEstimator {
 
     /// Efficient residual bound using pre-computed affine-reduced quantities.
     ///
-    /// For an affinely-decomposed operator `A(μ) = Σ θ_q A_q`, the squared
-    /// residual norm decomposes as a sum over pairs (q, q'):
-    ///   ‖r(μ)‖² = Σ_q Σ_q' θ_q(μ)·θ_q'(μ)·C_{qq'}
-    /// where C_{qq'} = r_qᵀ·r_q' are pre-computed (offline) using
-    ///   r_q = b_q - A_q·(V·u_r)  (component-wise).
-    /// This is O(Q²·r³) online instead of O(n²).
+    /// Computes the squared norm of the reduced-space residual:
+    ///   r_q(μ) = b_q_proj - A_q_proj · u_r   (for each affine component q)
+    ///   ‖r_eff(μ)‖² = ‖Σ_q θ_q(μ) · r_q(μ)‖²
+    ///
+    /// where b_q_proj = Vᵀ·b_q and A_q_proj = Vᵀ·A_q·V are the projected
+    /// affine components.  The online cost is O(Q·r²) per parameter instead
+    /// of O(n²) for the full residual.
     pub fn efficient_residual_sq(
-        _reduced_solution: &[f64],
-        _pod: &PodBasis,
-        _affine_rhs: &AffineDecomposition<Vec<f64>>,
-        _affine_op: &AffineDecomposition<CsrMatrix<f64>>,
-        _mu: &[f64],
+        reduced_solution: &[f64],
+        pod: &PodBasis,
+        affine_rhs: &AffineDecomposition<DVector<f64>>,
+        affine_op: &AffineDecomposition<DMatrix<f64>>,
+        mu: &[f64],
     ) -> f64 {
-        // Placeholder: full implementation requires the offline-computed
-        // residual component matrices C_{qq'}, built as:
-        //   r_q = b_q - A_q·V·(VᵀA_qV)^{-1}·Vᵀb_q  (for each q)
-        //   C_{qq'} = r_qᵀ·r_q'
-        // Online: ‖r(μ)‖² = Σ_q Σ_q' θ_q(μ)·θ_q'(μ)·C_{qq'}
-        0.0
+        let r = pod.r;
+        let u = DVector::from_vec(reduced_solution.to_vec());
+        let q = affine_op.n_terms().min(affine_rhs.n_terms());
+        if q == 0 { return 0.0; }
+
+        // Accumulate residual in reduced space: r_red = Σ_q θ_q · (b_q_proj - A_q_proj · u_r)
+        let mut r_red = DVector::zeros(r);
+        for i in 0..q {
+            let theta = affine_rhs.coeffs[i](mu);
+            if theta.abs() < 1e-300 { continue; }
+            let b_q = &affine_rhs.components[i];
+            let a_q = &affine_op.components[i];
+            let mut r_q = b_q.clone();
+            r_q -= a_q * &u;  // r_q = b_q_proj - A_q_proj · u_r
+            r_red += theta * r_q;
+        }
+        r_red.norm_squared()
     }
 }
 
@@ -882,5 +944,105 @@ mod tests {
         let res = ErrorEstimator::relative_residual(&a, &b, u_r.as_slice(), &pod);
         assert!(res.is_finite(), "residual should be finite, got {res}");
         assert!(res >= 0.0, "residual should be non-negative, got {res}");
+    }
+
+    // ─── End-to-end ROM test with parametric FEM ──────────────────────────
+
+    #[test]
+    fn rom_parametric_diffusion_end_to_end() {
+        use fem_assembly::standard::DiffusionIntegrator;
+        use fem_assembly::coefficient::FnCoeff;
+        use fem_mesh::SimplexMesh;
+        use fem_space::H1Space;
+        use fem_space::fe_space::FESpace;
+        use fem_space::constraints::boundary_dofs;
+        use fem_assembly::Assembler;
+        use crate::solve_cg;
+
+        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let space = H1Space::new(mesh.clone(), 1);
+        let dm = fem_space::DofManager::new(&mesh, 1);
+
+        // Dirichlet BC: u=0 on all boundaries
+        let bdofs: Vec<usize> = boundary_dofs(&mesh, &dm, &[1, 2, 3, 4]).iter()
+            .map(|&d| d as usize).collect();
+
+        let a1_raw = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
+        let a2_raw = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator {
+            kappa: FnCoeff(Box::new(|x: &[f64]| x[0])),
+        }], 3);
+        let mut b_raw = Assembler::assemble_linear(&space, &[
+            &fem_assembly::standard::DomainSourceIntegrator::new(|_| 1.0)
+        ], 3);
+
+        let n = space.n_dofs();
+        // Save copies for later use before any moves
+        let a1_copy = a1_raw.clone();
+        let a2_copy = a2_raw.clone();
+        let b_copy = b_raw.clone();
+
+        // Build BC-applied copies for snapshot solves
+        let assemble_am = |m1: f64, m2: f64| -> (fem_linalg::CsrMatrix<f64>, Vec<f64>) {
+            let mut coo = fem_linalg::CooMatrix::<f64>::new(n, n);
+            for row in 0..n {
+                for k in a1_copy.row_ptr[row]..a1_copy.row_ptr[row+1] {
+                    coo.add(row, a1_copy.col_idx[k] as usize,
+                        m1 * a1_copy.values[k] + m2 * a2_copy.values[k]);
+                }
+            }
+            let mut m: fem_linalg::CsrMatrix<f64> = coo.into_csr();
+            let mut r = b_copy.clone();
+            for &d in &bdofs { if d < m.nrows { m.apply_dirichlet_row_zeroing(d, 0.0, &mut r); } }
+            (m, r)
+        };
+
+        let mut snaps = Snapshots::new(n);
+        let params = [(1.0, 0.0), (0.0, 1.0), (2.0, 1.0), (1.0, 2.0),
+                      (3.0, 1.0), (1.0, 3.0), (0.5, 0.5), (2.0, 2.0)];
+        for &(m1, m2) in &params {
+            let (mut am, r_mu) = assemble_am(m1, m2);
+            let mut u = vec![0.0; n];
+            solve_cg(&am, &r_mu, &mut u, &SolverConfig { rtol: 1e-10, ..Default::default() })
+                .expect("CG solve during snapshot");
+            snaps.add_snapshot(&u);
+        }
+
+        let r = 4;
+        let pod = PodBasis::compute(&snaps, r).expect("POD basis");
+        assert_eq!(pod.n_modes(), r);
+
+        // Save references for full-solve comparison
+        let aff_op = AffineDecomposition::new(
+            vec![a1_raw, a2_raw],
+            vec![|mu: &[f64]| mu[0], |mu: &[f64]| mu[1]],
+        );
+        let aff_rhs = AffineDecomposition::new(
+            vec![b_raw],
+            vec![|_: &[f64]| 1.0],
+        );
+
+        let op_proj = aff_op.project(&pod);
+        let rhs_proj = aff_rhs.project_rhs(&pod);
+
+        let mu_new = [1.5, 1.5];
+        let (u_r, u_full) = online_solve(&pod, &op_proj, &rhs_proj, &mu_new)
+            .expect("online solve");
+        assert_eq!(u_r.len(), r);
+        assert_eq!(u_full.len(), n);
+
+        // Full solve at same parameter for error comparison
+        let (mut a_full, r_full) = assemble_am(mu_new[0], mu_new[1]);
+        let mut x_full = vec![0.0; n];
+        solve_cg(&a_full, &r_full, &mut x_full, &SolverConfig { rtol: 1e-10, ..Default::default() })
+            .expect("CG solve for reference");
+
+        let err = relative_error(&x_full, &u_full);
+        eprintln!("ROM end-to-end: n={n}, r={r}, rel_error={err:.3e}");
+        assert!(err < 0.5, "ROM error should be reasonable, got {err:.3e}");
+
+        let res_sq = ErrorEstimator::efficient_residual_sq(
+            u_r.as_slice(), &pod, &rhs_proj, &op_proj, &mu_new);
+        assert!(res_sq.is_finite(), "efficient residual_sq should be finite, got {res_sq}");
+        assert!(res_sq >= 0.0);
     }
 }
