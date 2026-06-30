@@ -8,7 +8,7 @@
 //! The HDF5-based path requires the `hdf5` feature.
 
 use fem_core::{FemError, FemResult};
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::simplex::SimplexMesh;
 
 /// Read an Exodus II file — currently returns a descriptive error.
 /// Use `read_exodus_hdf5` (requires `hdf5` feature) or convert to

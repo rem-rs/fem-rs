@@ -32,7 +32,7 @@
 //! - Demkowicz & Gopalakrishnan, "A class of discontinuous Petrov–Galerkin
 //!   methods" (2010), Comput. Methods Appl. Mech. Engrg.
 
-use fem_linalg::{CooMatrix, CsrMatrix, Vector};
+use fem_linalg::CooMatrix;
 
 /// Gauss-Legendre quadrature on [0,1] (up to 5 points).
 fn gauss_legendre_01(n: usize) -> (Vec<f64>, Vec<f64>) {
@@ -211,7 +211,7 @@ pub fn solve_dpg_convection_diffusion_1d(
     for e in 0..n_elem {
         let x0 = e as f64 * h;
         let x1 = (e + 1) as f64 * h;
-        let xm = 0.5 * (x0 + x1);
+        let _xm = 0.5 * (x0 + x1);
         let jac = h / 2.0; // mapping from reference [0,1] to [x0,x1]
 
         // Trial DOFs: vertex i and i+1 (global indices)
@@ -239,7 +239,7 @@ pub fn solve_dpg_convection_diffusion_1d(
             // Accumulate test-space inner products
             for i in 0..n_test {
                 for j in 0..n_test {
-                    let v = (psi[i] * psi[j] + dpsi[i] * dpsi[j] / (jac * jac)) * w;
+                    let _v = (psi[i] * psi[j] + dpsi[i] * dpsi[j] / (jac * jac)) * w;
                     // H1 inner product on physical element:
                     // ∫ (v*w + v'*w') = ∫ (v*w) + ∫ (v'*w')
                     // v' = dphi/dx = dphi/dxi * dxi/dx = dphi/dxi / jac
@@ -250,8 +250,8 @@ pub fn solve_dpg_convection_diffusion_1d(
                 // Convection-diffusion bilinear form B(ψ_j_test, φ_i)
                 // B(u, v) = ε ∫ u'v' + b ∫ u'v
                 for j in 0..trial_dofs.len() {
-                    let d_phi_j = dphi[j] / jac; // physical derivative
-                    let phi_j = phi[j];
+                    let _d_phi_j = dphi[j] / jac; // physical derivative
+                    let _phi_j = phi[j];
                     b_mat[i * trial_dofs.len() + j] +=
                         epsilon * dphi[j] / jac * dpsi[i] / jac * w
                         + b * dphi[j] / jac * psi[i] * w;
@@ -349,7 +349,7 @@ pub fn solve_galerkin_convection_diffusion_1d(
 
     for e in 0..n_elem {
         let x0 = e as f64 * h;
-        let x1 = (e + 1) as f64 * h;
+        let _x1 = (e + 1) as f64 * h;
         let jac = h / 2.0;
         let trial_dofs = [e, e + 1];
 
@@ -462,7 +462,7 @@ mod tests {
             let c1 = (1.0 - (-1.0f64).exp()).recip(); // 1/(1-e^{-1})
             let c2 = -c1;
             let p1 = -x * x * x / 6.0 + x * x / 2.0 - x;
-            let p2 = x;
+            let _p2 = x;
             p1 + c1 * (1.0 - (-x).exp()) + c2 * x
         };
 

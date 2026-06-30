@@ -52,7 +52,7 @@ fn main() {
         report_every: if args.samples >= 20 { args.samples / 10 } else { 0 },
     };
 
-    let result = run_monte_carlo(&config, |sample_idx, rng| {
+    let result = run_monte_carlo(&config, |_sample_idx, rng| {
         // Generate random field at element centroids
         let elem_centroids: Vec<[f64; 1]> = (0..space.mesh().n_elements())
             .map(|e| {

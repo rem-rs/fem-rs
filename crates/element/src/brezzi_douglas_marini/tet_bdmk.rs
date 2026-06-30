@@ -62,7 +62,7 @@ fn tet_data(k: usize) -> &'static TetBDMkData {
             for (j, &(am, bm, cm, comp)) in mc.iter().enumerate() {
                 v[di][j] = if comp == 0 && am == 0 { -tri_int(bm + a, cm + b) } else { 0.0 };
             }
-            for (j, &(am, bm, cm)) in mb.iter().enumerate() {
+            for (j, &(_am, _bm, _cm)) in mb.iter().enumerate() {
                 let jj = mc.len() + j;
                 // bubble: x·(x^a y^b z^c). At x=0: 0.
                 v[di][jj] = 0.0;
@@ -75,7 +75,7 @@ fn tet_data(k: usize) -> &'static TetBDMkData {
             for (j, &(am, bm, cm, comp)) in mc.iter().enumerate() {
                 v[di][j] = if comp == 1 && bm == 0 { -tri_int(am + a, cm + b) } else { 0.0 };
             }
-            for (j, &(am, bm, cm)) in mb.iter().enumerate() {
+            for (j, &(_am, _bm, _cm)) in mb.iter().enumerate() {
                 v[di][mc.len() + j] = 0.0;
             }
             di += 1;
@@ -86,7 +86,7 @@ fn tet_data(k: usize) -> &'static TetBDMkData {
             for (j, &(am, bm, cm, comp)) in mc.iter().enumerate() {
                 v[di][j] = if comp == 2 && cm == 0 { -tri_int(am + a, bm + b) } else { 0.0 };
             }
-            for (j, &(am, bm, cm)) in mb.iter().enumerate() {
+            for (j, &(_am, _bm, _cm)) in mb.iter().enumerate() {
                 v[di][mc.len() + j] = 0.0;
             }
             di += 1;

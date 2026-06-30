@@ -66,16 +66,15 @@ fn tet_data(k: usize) -> &'static TetNDkData {
             // Tangents for each face: t1 = ∂/∂u, t2 = ∂/∂v
             let face_map: [(fn(f64,f64)->f64, fn(f64,f64)->f64, fn(f64,f64)->f64,
                             f64,f64,f64, f64,f64,f64); 4] = [
-                (|u,v| 1.0-u-v, |u,v| u, |u,v| v, -1.0,1.0,0.0, -1.0,0.0,1.0),
-                (|_,_| 0.0, |u,v| u, |u,v| v, 0.0,1.0,0.0, 0.0,0.0,1.0),
-                (|u,v| u, |_,_| 0.0, |u,v| v, 1.0,0.0,0.0, 0.0,0.0,1.0),
-                (|u,v| u, |u,v| v, |_,_| 0.0, 1.0,0.0,0.0, 0.0,1.0,0.0),
+                (|u,v| 1.0-u-v, |u,_v| u, |_u,v| v, -1.0,1.0,0.0, -1.0,0.0,1.0),
+                (|_,_| 0.0,     |u,_v| u, |_u,v| v,  0.0,1.0,0.0,  0.0,0.0,1.0),
+                (|u,_v| u,      |_,_| 0.0, |_u,v| v, 1.0,0.0,0.0,  0.0,0.0,1.0),
+                (|u,_v| u,      |_u,v| v, |_,_| 0.0, 1.0,0.0,0.0,  0.0,1.0,0.0),
             ];
             let qr = crate::quadrature::tri_rule_arbitrary((2 * k) as u8);
             for fi in 0..4 {
                 let (xf, yf, zf, t1x, t1y, t1z, t2x, t2y, t2z) = face_map[fi];
                 let tans = [(t1x, t1y, t1z), (t2x, t2y, t2z)];
-                let mut face_deg = 0usize;
                 for deg in 0..=(k - 2) {
                     for ix in 0..=deg {
                         let iy = deg - ix;
@@ -92,7 +91,6 @@ fn tet_data(k: usize) -> &'static TetNDkData {
                                 v[di][j] = sum;
                             }
                             di += 1;
-                            face_deg += 1;
                         }
                     }
                 }

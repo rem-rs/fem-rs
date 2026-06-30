@@ -146,6 +146,7 @@ mod tests {
     use super::*;
     use fem_linalg::{CooMatrix, CsrMatrix};
 
+    #[allow(dead_code)]
     fn laplacian_1d(n: usize) -> CsrMatrix<f64> {
         let mut coo = CooMatrix::<f64>::new(n, n);
         for i in 0..n {

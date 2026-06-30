@@ -6,10 +6,9 @@ use std::f64::consts::PI;
 
 use fem_assembly::{
     coefficient::FnVectorCoeff,
-    standard::{GradDivIntegrator, VectorDomainLFIntegrator, VectorMassIntegrator},
+    standard::{VectorDomainLFIntegrator, VectorMassIntegrator},
     vector_assembler::VectorAssembler,
 };
-use fem_element::VectorReferenceElement;
 use fem_mesh::SimplexMesh;
 use fem_solver::{MinresSolver, SolverConfig};
 use fem_space::{fe_space::FESpace, HDivSpace};
@@ -25,6 +24,7 @@ fn exact_flux(x: &[f64], _scale: f64) -> [f64; 2] {
 /// Compute L² DOF error: norm of (uh - interpolated_exact) in DOF space.
 /// Since H(div) DOFs are normal-flux moments, the DOF space L² norm
 /// is mesh-dependent so we normalize by sqrt(n_dofs).
+#[allow(dead_code)]
 fn dof_error(space: &HDivSpace<SimplexMesh<2>>, uh: &[f64]) -> f64 {
     let n = space.n_dofs();
     let norm2: f64 = uh.iter().map(|&v| v * v).sum();
@@ -40,7 +40,7 @@ fn quad_rt0_mass_test() {
     // Just assembles and solves — verifies the basic path works
     let mat = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
     let source = VectorDomainLFIntegrator {
-        f: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+        f: FnVectorCoeff(|_x: &[f64], out: &mut [f64]| {
             out[0] = 1.0; out[1] = 0.0;
         }),
     };

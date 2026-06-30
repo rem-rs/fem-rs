@@ -490,7 +490,7 @@ pub fn solve_gmres_complex(
                          (s_i * g_j.0 - s_r * g_j.1) / g_j_norm.max(1e-300) * g_j_norm);
             // Correct formulas:
             g[j]     = (cos_j * g_j_norm, 0.0);
-            let g_j1 = g_j_norm * (s_r * s_r + s_i * s_i).sqrt();
+            let _g_j1 = g_j_norm * (s_r * s_r + s_i * s_i).sqrt();
             let s_norm = (s_r * s_r + s_i * s_i).sqrt();
             g[j + 1] = (-s_norm * g_j_norm, 0.0);
 

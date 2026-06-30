@@ -129,7 +129,7 @@ mod tests {
             let n = pmesh.n_total_nodes();
             let mut data: Vec<f64> = (0..n).map(|i| i as f64).collect();
             let saved = data.clone();
-            let sum_before: f64 = data.iter().sum();
+            let _sum_before: f64 = data.iter().sum();
             let overlap = ex.begin_forward(&comm, &mut data, None);
             // The overlap guard borrows data mutably. Compute before/after.
             drop(overlap);

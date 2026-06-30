@@ -14,7 +14,7 @@
 //! | `hypre_solve_gmres` | `HypreGMRES` (GMRES + BoomerAMG) | linlvo |
 
 use fem_linalg::CsrMatrix;
-use linlvo::amg::{AmgConfig, AmgHierarchy, AmgPrecond, CoarsenStrategy, SmootherType};
+use linlvo::amg::{AmgConfig, AmgHierarchy, AmgPrecond, SmootherType};
 
 /// HYPRE-compatible configuration for BoomerAMG.
 ///
@@ -94,6 +94,7 @@ pub struct HypreParMatrix {
     pub global_nrows: usize,
 }
 
+#[allow(deprecated)]
 impl HypreParMatrix {
     /// Wrap a CSR matrix as a single-process "parallel" matrix.
     pub fn from_serial(a: CsrMatrix<f64>) -> Self {

@@ -195,7 +195,8 @@ pub fn gauss_legendre_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
     for i in 0..n {
         let x = pts[i];
         let (pn, _pn1) = legendre_poly(n, x);
-        let dpn = if (1.0 - x * x).abs() < 1e-30 {
+        // P'_n(x_i); kept for documentation / future use of the standard formula.
+        let _dpn = if (1.0 - x * x).abs() < 1e-30 {
             0.5 * n as f64 * (n as f64 + 1.0)
         } else {
             n as f64 / (1.0 - x * x) * (legendre_poly(n - 1, x).0 - x * pn)

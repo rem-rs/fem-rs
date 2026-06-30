@@ -150,7 +150,7 @@ pub fn partition_simplex_metis_streaming<const D: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::{ElementType, SimplexMesh};
+    use fem_mesh::SimplexMesh;
 
     #[test]
     fn partition_covers_all_elements() {

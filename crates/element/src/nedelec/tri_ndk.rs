@@ -17,6 +17,7 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 struct TriNDkData {
     coeff: Vec<f64>,       // [n×n] row-major, C[i][j] for Φ_i = Σ_j C[i][j]·m_j
     n: usize,              // dimension = k(k+2)
+    #[allow(dead_code)]
     order: usize,
     monomap: Vec<usize>,   // selected monomial indices (length n)
 }
@@ -46,10 +47,12 @@ fn area_integral(ix: usize, iy: usize) -> f64 {
     num / den
 }
 
+#[allow(dead_code)]
 fn monomial_component_x(a: usize, b: usize, x: f64, y: f64) -> f64 {
     x.powi(a as i32) * y.powi(b as i32)
 }
 
+#[allow(dead_code)]
 fn monomial_component_y(a: usize, b: usize, x: f64, y: f64) -> f64 {
     x.powi(a as i32) * y.powi(b as i32)
 }
@@ -289,7 +292,6 @@ impl VectorReferenceElement for TriNDk {
         let d = tri_data(k);
         let x = xi[0]; let y = xi[1];
         let n = d.n;
-        let m_total = (k + 1) * (k + 2);
 
         // Compute curl of each selected monomial entry
         let mut curl_mono = vec![0.0_f64; d.monomap.len()];

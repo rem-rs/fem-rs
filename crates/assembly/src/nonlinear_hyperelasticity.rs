@@ -20,6 +20,8 @@
 //!                   - (λ·ln(J) - μ)·(F⁻¹)ᴶᵢ·(F⁻¹)ᴵⱼ
 //! ```
 
+#![allow(non_snake_case)]
+
 use nalgebra::DMatrix;
 
 use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};

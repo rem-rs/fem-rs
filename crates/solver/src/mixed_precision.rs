@@ -60,7 +60,7 @@ impl MixedPrecisionPrecond {
     pub fn apply(&self, b: &[f64], x: &mut [f64], omega: f64, sweeps: usize) {
         let n = x.len();
         let mut x_f32 = vec![0.0f32; n];
-        let mut b_f32: Vec<f32> = b.iter().map(|&v| v as f32).collect();
+        let b_f32: Vec<f32> = b.iter().map(|&v| v as f32).collect();
         let omega_f32 = omega as f32;
 
         for _ in 0..sweeps {

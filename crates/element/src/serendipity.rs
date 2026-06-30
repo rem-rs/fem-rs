@@ -31,11 +31,11 @@ impl QuadSerendipityPk {
 impl ReferenceElement for QuadSerendipityPk {
     fn dim(&self) -> u8 { 2 } fn order(&self) -> u8 { self.p as u8 } fn n_dofs(&self) -> usize { 4*self.p }
     fn eval_basis(&self, xi:&[f64], vals:&mut[f64]) {
-        let n=self.n_dofs(); let (x,y)=(xi[0],xi[1]);
+        let n=self.n_dofs();
         for i in 0..n { let mut s=0.; for j in 0..n { let (mi,mj)=self.mi[j]; s+=self.co[i*n+j]*pow(xi[0]+1.,mi)*pow(xi[1]+1.,mj); } vals[i]=s; }
     }
     fn eval_grad_basis(&self, xi:&[f64], grads:&mut[f64]) {
-        let n=self.n_dofs(); let (x,y)=(xi[0],xi[1]); let u=x+1.; let v=y+1.;
+        let n=self.n_dofs(); let u=xi[0]+1.; let v=xi[1]+1.;
         for i in 0..n { let mut sx=0.; let mut sy=0.;
             for j in 0..n { let (mi,mj)=self.mi[j]; let mx=if mi==0{0.}else{mi as f64*pow(u,mi-1)*pow(v,mj)}; let my=if mj==0{0.}else{mj as f64*pow(u,mi)*pow(v,mj-1)}; sx+=self.co[i*n+j]*mx; sy+=self.co[i*n+j]*my; }
             grads[i*2]=sx; grads[i*2+1]=sy;

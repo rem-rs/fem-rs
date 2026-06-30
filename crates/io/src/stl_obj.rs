@@ -84,7 +84,7 @@ pub fn read_obj<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
     let mut vertices: Vec<[f64; 3]> = Vec::new();
     let mut tri_conn = Vec::new();
     let mut quad_conn = Vec::new();
-    let mut mixed = false;
+    let mut _mixed = false;
     for line in BufReader::new(reader).lines() {
         let line = line?;
         let t = line.trim();
@@ -104,7 +104,7 @@ pub fn read_obj<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
                 tri_conn.extend_from_slice(&idxs);
             } else if idxs.len() == 4 {
                 quad_conn.extend_from_slice(&idxs);
-                mixed = true;
+                _mixed = true;
             }
         }
     }

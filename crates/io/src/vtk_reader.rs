@@ -43,7 +43,7 @@ fn parse_vtu(xml: &str) -> FemResult<VtuData> {
     let points_xml = extract_section(piece, "<Points>", "</Points>")
         .ok_or_else(|| FemError::Mesh("VTU: missing <Points>".into()))?;
     let coords = parse_data_array_f64(points_xml, None)?;
-    let n_nodes = coords.len() / 3;
+    let _n_nodes = coords.len() / 3;
 
     // Cells
     let cells_xml = extract_section(piece, "<Cells>", "</Cells>")
@@ -56,7 +56,7 @@ fn parse_vtu(xml: &str) -> FemResult<VtuData> {
     // Decompose connectivity & element types
     let mut elem_conn: Vec<Vec<u32>> = Vec::with_capacity(n_elems);
     let mut elem_types: Vec<ElementType> = Vec::with_capacity(n_elems);
-    let mut elem_tags: Vec<i32> = vec![1; n_elems];
+    let elem_tags: Vec<i32> = vec![1; n_elems];
     let mut ci = 0usize;
     for e in 0..n_elems {
         let off = offsets[e];
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn roundtrip_tet_mesh() {
         let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let mut w = VtkWriter::new(&mesh);
+        let w = VtkWriter::new(&mesh);
         let mut buf = Vec::new();
         w.write(&mut buf).unwrap();
         let xml = String::from_utf8(buf).unwrap();
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn roundtrip_hex_mesh() {
         let mesh = SimplexMesh::<3>::unit_cube_hex(2);
-        let mut w = VtkWriter::new(&mesh);
+        let w = VtkWriter::new(&mesh);
         let mut buf = Vec::new();
         w.write(&mut buf).unwrap();
         let xml = String::from_utf8(buf).unwrap();

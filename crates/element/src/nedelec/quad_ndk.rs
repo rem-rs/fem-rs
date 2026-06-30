@@ -37,7 +37,7 @@ impl VectorReferenceElement for QuadNDk {
     fn n_dofs(&self) -> usize { 2 * self.order * (self.order + 1) }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
-        let p = self.order; let n = self.n_dofs(); let nodes = self.nodes();
+        let p = self.order; let nodes = self.nodes();
         let x = xi[0]; let y = xi[1];
         values.fill(0.0);
 
@@ -76,14 +76,14 @@ impl VectorReferenceElement for QuadNDk {
     }
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
-        let p = self.order; let n = self.n_dofs(); let nodes = self.nodes();
+        let p = self.order; let nodes = self.nodes();
         let x = xi[0]; let y = xi[1];
         curl_vals.fill(0.0);
 
         // Edge curls
         for j in 0..p {
             let lx = lag(&nodes, j, x); let ly = lag(&nodes, j, y);
-            let dlx = lag_deriv(&nodes, j, x); let dly = lag_deriv(&nodes, j, y);
+            let _dlx = lag_deriv(&nodes, j, x); let _dly = lag_deriv(&nodes, j, y);
             let dhy = hat_d(y, -1.0); let dhx = hat_d(x, 1.0);
             let dhy2 = hat_d(y, 1.0); let dhx2 = hat_d(x, -1.0);
             // e0: Φ=(lx·hat(y,-1), 0) → curl = -lx · dhy

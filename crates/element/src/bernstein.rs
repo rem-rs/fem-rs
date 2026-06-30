@@ -9,7 +9,9 @@ use crate::quadrature::seg_rule;
 use crate::reference::{QuadratureRule, ReferenceElement};
 
 /// Precomputed binomial coefficients: binom[n][k] = C(n,k) for n ≤ MAX_DEG.
+#[allow(dead_code)]
 const MAX_DEG: usize = 15;
+#[allow(dead_code)]
 static BINOM: [[f64; MAX_DEG + 1]; MAX_DEG + 1] = {
     let mut b = [[0.0; MAX_DEG + 1]; MAX_DEG + 1];
     let mut n = 0;
@@ -127,6 +129,7 @@ pub fn bernstein_ders_2d(p: usize, xi: f64, eta: f64) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// Compute the binomial coefficient C(n,k) as f64.
+#[allow(dead_code)]
 fn binom(n: usize, k: usize) -> f64 {
     if k > n || k > MAX_DEG || n > MAX_DEG { return 0.0; }
     BINOM[n][k]
@@ -378,7 +381,7 @@ mod tests {
         let h = 1e-8;
         let elem = BernsteinQuadPk::new(2);
         let n = elem.n_dofs();
-        let mut v = vec![0.0; n];
+        let _v = vec![0.0; n];
         let mut g = vec![0.0; n * 2];
         let pts = [-0.5, 0.0, 0.5];
         for &xi in &pts {

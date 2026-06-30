@@ -35,10 +35,10 @@ impl ReferenceElement for BernsteinTriPk {
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (x, y) = (xi[0], xi[1]); let z = 1.0 - x - y; let p = self.p;
+        let (x, y) = (xi[0], xi[1]); let z = 1.0 - x - y;
         for (idx, &(i, j, k)) in self.ijk.iter().enumerate() {
             let c = multinomial3(i, j, k);
-            let b = c * x.powi(i as i32) * y.powi(j as i32) * z.powi(k as i32);
+            let _b = c * x.powi(i as i32) * y.powi(j as i32) * z.powi(k as i32);
             let dx = if i > 0 { i as f64 * c * x.powi(i as i32 - 1) * y.powi(j as i32) * z.powi(k as i32)
                       - (if k > 0 { k as f64 * c * x.powi(i as i32) * y.powi(j as i32) * z.powi(k as i32 - 1) } else { 0.0 }) }
                      else { -(if k > 0 { k as f64 * c * x.powi(i as i32) * y.powi(j as i32) * z.powi(k as i32 - 1) } else { 0.0 }) };
@@ -90,7 +90,7 @@ impl ReferenceElement for BernsteinTetPk {
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (x, y, z) = (xi[0], xi[1], xi[2]); let w = 1.0 - x - y - z; let p = self.p;
+        let (x, y, z) = (xi[0], xi[1], xi[2]); let w = 1.0 - x - y - z;
         for (idx, &(i, j, k, l)) in self.ijkl.iter().enumerate() {
             let c = multinomial4(i, j, k, l);
             let xi = if i > 0 { x.powi(i as i32 - 1) } else { 0.0 }; let xi1 = if i > 0 { x.powi(i as i32) } else { 1.0 };

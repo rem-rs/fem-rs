@@ -3,6 +3,8 @@
 //! Uses P1 vector (6 DOFs per triangle) bulk element, P1 skeleton trace.
 //! dim = 2, Tri3 mesh.
 
+#![allow(non_snake_case)]
+
 use fem_linalg::CooMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::SolverConfig;
@@ -212,7 +214,7 @@ where
                 }
 
                 // τ∫φ·ψ_λ on ∂K (B matrix)
-                if let Some(loff) = face_off[lf_idx] {
+                if let Some(_loff) = face_off[lf_idx] {
                     let base = lf_idx * sk_dpe;
                     for a in 0..dim {
                         for i in 0..dim + 1 {
@@ -549,7 +551,7 @@ mod tests {
     #[test]
     fn hdg_elasticity_2d_finite() {
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let source = |x: &[f64]| vec![0.0, 0.0];
+        let source = |_: &[f64]| vec![0.0, 0.0];
         let result = solve_hdg_elasticity(mesh, source, 1.0, 1.0);
         for &v in &result.u {
             assert!(v.is_finite());

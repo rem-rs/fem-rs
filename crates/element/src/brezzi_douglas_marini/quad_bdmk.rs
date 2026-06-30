@@ -6,7 +6,7 @@
 
 use crate::VectorReferenceElement;
 
-struct QuadBDMkData { k: usize, n: usize, n_interior: usize }
+struct QuadBDMkData { k: usize, n: usize, #[allow(dead_code)] n_interior: usize }
 
 static CACHE: [std::sync::OnceLock<QuadBDMkData>; 9] = [
     std::sync::OnceLock::new(), std::sync::OnceLock::new(), std::sync::OnceLock::new(),

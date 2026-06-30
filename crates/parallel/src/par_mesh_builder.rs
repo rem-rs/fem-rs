@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use fem_core::{Rank, NodeId};
 use fem_mesh::SimplexMesh;
 use fem_mesh::element_type::ElementType;
-use fem_mesh::topology::MeshTopology;
 use crate::comm::Comm;
 use crate::partition::MeshPartition;
 use crate::par_mesh::ParallelMesh;
@@ -142,6 +141,7 @@ mod tests {
     use super::*;
     use fem_core::ElemId;
     use fem_mesh::SimplexMesh;
+    use fem_mesh::topology::MeshTopology;
     use crate::mpi_test_env::test_world_comm;
     use crate::par_simplex::partition_simplex;
 

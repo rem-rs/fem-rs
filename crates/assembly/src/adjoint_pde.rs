@@ -16,7 +16,7 @@
 //!
 //! The gradient is verified against finite differences to machine precision.
 
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CsrMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{SolverConfig, solve_cg};
 
@@ -112,7 +112,7 @@ pub fn optimize_poisson_control<M: MeshTopology + Clone + Send + Sync>(
     let mut grad_norms = Vec::new();
     let mut costs = Vec::new();
 
-    for iter in 0..max_iter {
+    for _iter in 0..max_iter {
         let grad = ctrl.gradient(&c, f, u_d, bnd_dofs);
         let g_norm: f64 = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
         grad_norms.push(g_norm);
@@ -197,7 +197,7 @@ mod tests {
         let u_d = vec![0.0; n];
         let ctrl = PoissonControl::new(mesh, order, 1e-4, quad);
 
-        let (c_opt, grad_norms, costs) = optimize_poisson_control(&ctrl, &f, &u_d, &bnd_dofs, 50, 1e-8);
+        let (_c_opt, grad_norms, costs) = optimize_poisson_control(&ctrl, &f, &u_d, &bnd_dofs, 50, 1e-8);
         assert!(grad_norms.len() >= 2, "at least 2 iterations");
         assert!(grad_norms.last().unwrap() < grad_norms.first().unwrap(),
             "gradient norm should decrease");

@@ -14,6 +14,7 @@
 //!
 //! # Sensitivity
 //! `dJ/du₀ = λ(0)`
+#![allow(non_snake_case)]
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 
@@ -61,8 +62,8 @@ pub fn adjoint_sensitivity(
     t_end: f64,
     u0: &[f64],
     dt: f64,
-    atol: f64,
-    rtol: f64,
+    _atol: f64,
+    _rtol: f64,
 ) -> (Vec<f64>, Vec<f64>, f64) {
     let n = problem.n_states();
     let mut checkpoints: Vec<Checkpoint> = Vec::new();
@@ -102,7 +103,7 @@ pub fn adjoint_sensitivity(
     // ── Backward pass: solve adjoint equation ────────────────────────────
     // dλ/dt = -A(t)ᵀ · λ - ∂g/∂u, λ(T) = ∂h/∂u(u(T))
     let mut lam = problem.terminal_gradient(&u);
-    let mut t = t_end;
+    let mut _t = t_end;
 
     // Backward Euler for the adjoint (stable backward in time)
     for i in (1..checkpoints.len()).rev() {
@@ -163,7 +164,7 @@ pub fn adjoint_sensitivity(
             }
         }
 
-        t = cp_prev.t;
+        _t = cp_prev.t;
     }
 
     (u, lam, total_cost)

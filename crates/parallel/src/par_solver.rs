@@ -1477,7 +1477,7 @@ pub fn par_direct_solve(
 
     let global_x: Vec<f64> = if rank == 0 {
         // Deserialise triplets into a COO matrix
-        let n_triplet_values = all_triplets.len() / 16;
+        let _n_triplet_values = all_triplets.len() / 16;
         let mut coo = fem_linalg::CooMatrix::<f64>::new(global_n, global_n);
         for chunk in all_triplets.chunks_exact(16) {
             let r = u32::from_le_bytes(chunk[..4].try_into().unwrap()) as usize;

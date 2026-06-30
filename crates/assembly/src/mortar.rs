@@ -38,7 +38,7 @@ fn edge_dofs_2d(nu: usize, nv: usize, edge: usize) -> Vec<usize> {
 }
 
 /// Parametric point `[u,v]` on a patch corresponding to edge parameter `t ∈ [0,1]`.
-fn edge_uv(nu: usize, nv: usize, edge: usize, t: f64) -> [f64; 2] {
+fn edge_uv(_nu: usize, _nv: usize, edge: usize, t: f64) -> [f64; 2] {
     match edge {
         0 => [t, 0.0],
         1 => [1.0, t],

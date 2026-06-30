@@ -158,7 +158,7 @@ mod tests {
         let nx: usize = 8; let ny: usize = 8;
         let n = (nx - 1) * (ny - 1);
         let mut a = vec![0.0_f64; n * n];
-        let mut rhs = vec![1.0_f64; n];
+        let rhs = vec![1.0_f64; n];
 
         for j in 0..ny - 1 {
             for i in 0..nx - 1 {

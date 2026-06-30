@@ -433,8 +433,9 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         err
     }
 }
+#[cfg(test)]
 mod tests {
-    use super::*;
+    
     use fem_mesh::SimplexMesh;
     use fem_space::{H1Space, fe_space::FESpace};
 

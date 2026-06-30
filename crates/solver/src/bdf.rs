@@ -73,6 +73,7 @@ pub struct NordsieckState {
     /// Current step size.
     pub dt: f64,
     /// Last Nordsieck step (for error estimation).
+    #[allow(dead_code)]
     nordsieck_history: Option<Vec<Vec<f64>>>,
 }
 

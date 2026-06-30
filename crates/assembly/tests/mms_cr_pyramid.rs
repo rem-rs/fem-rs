@@ -73,7 +73,6 @@ fn cr1_projection_convergence() {
 
 #[test]
 fn pyrand1_element_matrix_symmetry_and_positivity() {
-    use fem_element::VectorReferenceElement;
     use fem_element::lagrange::factory::{vec_ref_elem, VecFamily, ElemType};
     let ref_elem = vec_ref_elem(VecFamily::Nedelec, ElemType::Pyramid, 1u8);
     assert_eq!(ref_elem.n_dofs(), 8);

@@ -18,8 +18,7 @@
 //! - 2-D: [`tmop_metric_2d`], [`TmopObjective2d`], [`tmop_optimise_2d`] for Tri3 meshes.
 //! - 3-D: [`tmop_metric_3d`], [`TmopObjectiveTetra`], [`tmop_optimise_tetra`] for Tet4 meshes.
 
-use std::collections::HashSet;
-use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
+use nalgebra::{Matrix2, Matrix3};
 use crate::{SimplexMesh, topology::MeshTopology};
 
 /// Available TMOP quality metrics.
@@ -189,6 +188,7 @@ pub struct TmopObjective2d {
     n_nodes: usize,
     coords: Vec<f64>,
     conn: Vec<u32>,
+    #[allow(dead_code)]
     elem_tags: Option<Vec<i32>>,
     free_nodes: Vec<usize>,
     targets: Vec<Matrix2<f64>>,

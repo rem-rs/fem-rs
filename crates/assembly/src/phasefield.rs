@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
@@ -656,7 +658,7 @@ pub fn assemble_miehe_stiffness_and_force<M: MeshTopology>(
             for ki in 0..n_nodes_u {
                 for ai in 0..dim {
                     let row = ki * dim + ai;
-                    let div_i = grad_phys_u[ki * dim + ai];
+                    let _div_i = grad_phys_u[ki * dim + ai];
                     let mut eps_i = vec![0.0; dim * dim];
                     for a in 0..dim {
                         for b in 0..dim {

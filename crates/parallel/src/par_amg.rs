@@ -1301,7 +1301,7 @@ mod tests {
 
             // Manual PCG loop using the WP2 hierarchy as preconditioner.
             let solver_cfg = SolverConfig { rtol: 1e-8, max_iter: 200, ..SolverConfig::default() };
-            let n = a_mat.n_owned;
+            let _n = a_mat.n_owned;
             let b_norm = rhs.global_norm();
 
             let mut x = ParVector::zeros_like(&rhs);

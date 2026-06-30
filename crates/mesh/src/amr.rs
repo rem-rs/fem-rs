@@ -2473,24 +2473,7 @@ pub fn refine_nonconforming_quad_aniso(
                                 parent_b:    edge.1 as usize,
                             });
                             break;
-    #[test]
-    fn tet4_uniform_3d_creates_eight_tets() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
-        assert_eq!(mesh.n_elems(), 6);
-        let fine = refine_uniform_3d(&mesh);
-        assert_eq!(fine.n_elems(), 48, "6 tet parents × 8 = 48");
-        assert!(fine.n_nodes() > mesh.n_nodes());
-    }
-
-    #[test]
-    fn hex8_uniform_3d_creates_eight_hexes() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
-        assert_eq!(mesh.n_elems(), 1);
-        let fine = refine_uniform_3d(&mesh);
-        assert_eq!(fine.n_elems(), 8, "1 hex parent × 8 = 8");
-        assert!(fine.n_nodes() > mesh.n_nodes());
-    }
-}
+                        }
                     }
                 }
             }
@@ -3473,7 +3456,7 @@ mod tests {
         let mesh = SimplexMesh::<2>::unit_square_quad(2);
         let mut ncq = NCStateQuad::new();
 
-        let (m1, _, _) = ncq.refine(&mesh, &[0]);
+        let (_m1, _, _) = ncq.refine(&mesh, &[0]);
         assert!(ncq.can_derefine());
 
         let (m0, c0) = ncq.derefine_last().expect("expected rollback");

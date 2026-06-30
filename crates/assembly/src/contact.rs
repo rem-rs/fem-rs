@@ -30,7 +30,7 @@
 //! ```
 
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{topology::MeshTopology, element_type::ElementType};
+use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
 /// Contact configuration.
@@ -174,7 +174,7 @@ where
     let n = stiffness.nrows;
     let mut u = vec![0.0; n];
 
-    for iter in 0..max_iter {
+    for _iter in 0..max_iter {
         let (f_contact, k_contact) = assemble_contact_2d(space, cfg, &u);
 
         // Residual: R(u) = A*u + f_contact(u) - b
@@ -192,7 +192,7 @@ where
         }
 
         // Tangent matrix: A + K_contact
-        let mut jac = stiffness.add(&k_contact);
+        let jac = stiffness.add(&k_contact);
 
         // Solve J * du = -R
         let mut du = vec![0.0; n];

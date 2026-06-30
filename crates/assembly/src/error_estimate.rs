@@ -137,7 +137,6 @@ mod tests {
     use super::*;
     use fem_mesh::SimplexMesh;
     use fem_space::H1Space;
-    use fem_linalg::Vector;
 
     #[test] fn zz_linear_exact() {
         let m = SimplexMesh::<2>::unit_square_tri(4);

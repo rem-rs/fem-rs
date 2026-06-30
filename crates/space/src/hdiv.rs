@@ -89,6 +89,7 @@ pub struct HDivSpace<M: MeshTopology> {
     /// Cached element type for dispatch.
     elem_type: ElementType,
     /// If true, use BDM elements instead of RT.
+    #[allow(dead_code)]
     is_bdm: bool,
 }
 
@@ -288,7 +289,7 @@ impl<M: MeshTopology> HDivSpace<M> {
 
     // ─── 3-D tetrahedron construction ──────────────────────────────────────
 
-    fn build_3d_tet(mesh: M, order: u8, elem_type: ElementType, is_bdm: bool) -> Self {
+    fn build_3d_tet(mesh: M, order: u8, _elem_type: ElementType, is_bdm: bool) -> Self {
         // RT0: 1 DOF per face, 0 interior → 4 DOFs/elem
         // RT1: 3 DOFs per face, 3 interior → 15 DOFs/elem
         // RT2: 6 DOFs per face, 12 interior → 36 DOFs/elem
@@ -453,7 +454,7 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// Compute the orientation sign for a 2-D face (edge) on quads.
     /// Global edge normal points outward from the element centroid.
     /// Sign = +1 if the canonical (gi→gj) normal agrees with outward.
-    fn compute_sign_2d_quad(mesh: &M, verts: &[u32], li: usize, gi: u32, gj: u32) -> f64 {
+    fn compute_sign_2d_quad(mesh: &M, verts: &[u32], _li: usize, gi: u32, gj: u32) -> f64 {
         let pa = mesh.node_coords(gi);
         let pb = mesh.node_coords(gj);
         let tx = pb[0] - pa[0];

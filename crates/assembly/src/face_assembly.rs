@@ -10,9 +10,8 @@
 //!   at face quadrature points and delegating to any [`FaceIntegrator`].
 //! - [`assemble_boundary_faces`] loops over mesh boundary faces (one-sided).
 
-use nalgebra::DMatrix;
 use fem_core::types::{DofId, ElemId};
-use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
+use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
 use fem_linalg::CooMatrix;
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -127,7 +126,7 @@ pub fn assemble_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: FaceInteg
 ) {
     let dim = mesh.dim() as usize;
     let order = space.order();
-    let n_dofs = space.n_dofs();
+    let _n_dofs = space.n_dofs();
 
     // Get reference element once; assume uniform element type.
     let elem_type = mesh.element_type(0);

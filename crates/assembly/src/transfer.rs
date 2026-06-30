@@ -15,7 +15,6 @@ use thiserror::Error;
 
 use fem_core::types::DofId;
 use fem_element::{ReferenceElement, TetP1, TriP1};
-use fem_element::lagrange::factory::{ref_elem, ElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, SimplexMesh, TetPointLocator, TriPointLocator};
 use fem_solver::{solve_cg, SolverConfig};
@@ -830,7 +829,7 @@ pub fn build_prolongation_hcurl<M: MeshTopology>(
     let n_fine = fine.n_dofs();
     let mut coo = CooMatrix::new(n_fine, n_coarse);
     let mut loc = 0usize;
-    let mut xtra = 0usize;
+    let xtra = 0usize;
 
     // Local edge definitions for simplices
     let local_edges: &[(usize, usize)] = match (dim, cell_type) {
@@ -941,7 +940,7 @@ pub fn build_prolongation_hcurl<M: MeshTopology>(
                             else { None };
                 if let Some(ok) = other {
                     // Check if 'other' is one of the coarse edge endpoints
-                    if (c0 == ok || c1 == ok) {
+                    if c0 == ok || c1 == ok {
                         let coarse_ek = EdgeKey::new(c0, c1);
                         let small = coarse_ek.0;  // parameterization: small → large
                         // First half if the fine edge contains 'small'
@@ -1055,8 +1054,8 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
     let n_fine = fine.n_dofs();
     let mut coo = CooMatrix::new(n_fine, n_coarse);
     let mut loc = 0usize;
-    let mut xtra = 0usize;
-    let cell_type = coarse.mesh().element_type(0);
+    let xtra = 0usize;
+    let _cell_type = coarse.mesh().element_type(0);
 
     // Local edge/face definitions for simplices
     let local_edges_2d: &[(usize, usize)] = &[(0, 1), (1, 2), (0, 2)];

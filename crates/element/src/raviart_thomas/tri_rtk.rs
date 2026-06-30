@@ -33,8 +33,7 @@ fn tri_data(k: usize) -> &'static TriRTkData {
         // Edge 0: hypotenuse (1-t,t), normal (1,1)/√2, length √2 → ∫(Φ_x+Φ_y)dt
         for p in 0..=k {
             // P_k entries
-            for (j, &(a, b, comp)) in mc.iter().enumerate() {
-                let val = if comp == 0 { beta_int(a, b + p) } else { beta_int(a, b + p) };
+            for (j, &(a, b, _comp)) in mc.iter().enumerate() {
                 // Φ_x + Φ_y: both comps contribute x^a y^b · t^p
                 v[di][j] = beta_int(a, b + p);
             }
@@ -56,7 +55,7 @@ fn tri_data(k: usize) -> &'static TriRTkData {
                 let val = if comp == 0 && a == 0 { -1.0 / (b + p + 1) as f64 } else { 0.0 };
                 v[di][j] = val;
             }
-            for (j, &(a, b)) in mb.iter().enumerate() {
+            for (j, &(_a, _b)) in mb.iter().enumerate() {
                 let jj = mc.len() + j;
                 // Φ·n = -x^(a+1)y^b. At (0,t): -(0)^(a+1)·t^b = 0.
                 v[di][jj] = 0.0;
@@ -72,7 +71,7 @@ fn tri_data(k: usize) -> &'static TriRTkData {
                 let val = if comp == 1 && b == 0 { -1.0 / (a + p + 1) as f64 } else { 0.0 };
                 v[di][j] = val;
             }
-            for (j, &(a, b)) in mb.iter().enumerate() {
+            for (j, &(_a, _b)) in mb.iter().enumerate() {
                 let jj = mc.len() + j;
                 // Φ·n = -x^a y^(b+1). At (t,0): -t^a·0^(b+1) = 0.
                 v[di][jj] = 0.0;
@@ -211,7 +210,7 @@ impl VectorReferenceElement for TriRTk {
         }
         // Interior: k(k+1) DOFs at barycentric coords
         let remaining = n - c.len();
-        for i in 0..remaining {
+        for _ in 0..remaining {
             c.push(vec![1.0 / 3.0, 1.0 / 3.0]);
         }
         c

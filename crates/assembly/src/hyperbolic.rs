@@ -176,7 +176,7 @@ pub fn limiter_barth_jespersen(
     u_sol: &mut [f64],
     n_elems: usize,
     dofs_per_elem: usize,
-    elem_conn: &[u32],
+    _elem_conn: &[u32],
     face_elems: &[(u32, Option<u32>)],
 ) {
     let n_dofs = n_elems * dofs_per_elem;

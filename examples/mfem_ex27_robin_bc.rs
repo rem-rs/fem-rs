@@ -4,7 +4,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator, NeumannIntegrator, BoundaryMassIntegrator},
 };
-use fem_element::{ReferenceElement, lagrange::TriP1};
+use fem_element::ReferenceElement;
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{

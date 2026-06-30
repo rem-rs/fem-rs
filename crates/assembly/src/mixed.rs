@@ -249,7 +249,7 @@ where
         let nodes = mesh.element_nodes(e);
         let elem_tag = mesh.element_tag(e);
         let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let j_inv_t = tr.jacobian_inv_t().clone();
+        let _j_inv_t = tr.jacobian_inv_t().clone();
 
         let n_elem_r = global_rows.len();
         let n_elem_c = global_cols.len();

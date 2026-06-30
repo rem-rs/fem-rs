@@ -42,6 +42,7 @@ pub struct SkeletonSpace<M: MeshTopology> {
     /// Total number of skeleton DOFs.
     n_dofs: usize,
     /// Whether boundary faces are included.
+    #[allow(dead_code)]
     include_boundary: bool,
     /// Number of mesh faces (interior + boundary).
     n_faces: usize,
@@ -61,7 +62,7 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
         assert!(order <= 1, "SkeletonSpace: only P0 and P1 supported, got order={order}");
 
         let n_bfaces = mesh.n_boundary_faces();
-        let n_faces  = n_bfaces; // MeshTopology only exposes boundary faces directly;
+        let _n_faces  = n_bfaces; // MeshTopology only exposes boundary faces directly;
         // for interior faces we need element connectivity.
         // We build a list of all *unique* faces from element connectivity below.
 

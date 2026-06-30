@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use fem_core::types::DofId;
-use fem_element::{quadrature::gauss_legendre_01, VectorReferenceElement};
+use fem_element::quadrature::gauss_legendre_01;
 use fem_linalg::Vector;
 use fem_mesh::{topology::MeshTopology, ElementTransformation, ElementType};
 

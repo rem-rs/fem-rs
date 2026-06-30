@@ -335,13 +335,13 @@ impl JfNKSolver {
         let mut sn = vec![0.0; restart];
 
         // Initial residual r0 = b - J·x = b (since x = 0)
-        let mut r = b.to_vec();
+        let r = b.to_vec();
         let beta = norm2(&r);
         if beta < 1e-30 { return; }
         for i in 0..n { v[0][i] = r[i] / beta; }
         g[0] = beta;
 
-        let mut iters = 0;
+        let mut _iters = 0;
         'outer: for _iter in 0..max_mv / restart {
             for k in 0..restart {
                 let (vk_left, vk_right) = v.split_at_mut(k + 1);
@@ -361,7 +361,7 @@ impl JfNKSolver {
                     h[k][j + 1] = -sn[j] * h[k][j] + cs[j] * h[k][j + 1];
                     h[k][j] = tmp;
                 }
-                let mut nu = (h[k][k] * h[k][k] + h[k][k + 1] * h[k][k + 1]).sqrt();
+                let nu = (h[k][k] * h[k][k] + h[k][k + 1] * h[k][k + 1]).sqrt();
                 if nu < 1e-30 { continue; }
                 cs[k] = h[k][k] / nu;
                 sn[k] = h[k][k + 1] / nu;
@@ -370,7 +370,7 @@ impl JfNKSolver {
                 g[k + 1] = -sn[k] * g[k];
                 g[k] = cs[k] * g[k];
 
-                iters += 1;
+                _iters += 1;
                 if g[k + 1].abs() < self.cfg.atol.max(1e-12) { break 'outer; }
             }
         }

@@ -10,7 +10,6 @@
 //! where κ(x,ω) = exp(G(x,ω)) is a log-normal random field with
 //! Gaussian random field G having covariance C(x,y).
 
-use nalgebra::{DMatrix, DVector};
 
 /// Evaluate the n-th Hermite polynomial H_n(x) (physicists' convention).
 ///
@@ -53,6 +52,7 @@ pub fn hermite_all(p: usize, x: f64) -> Vec<f64> {
 /// Can be computed via combinatorial formula or precomputed tables.
 /// For the Galerkin projection, we need the expectation of products
 /// of basis functions where the coefficient field is expanded.
+#[allow(dead_code)]
 fn hermite_triple_product(i: usize, j: usize, k: usize) -> f64 {
     // E[H_i H_j H_k] = 0 unless i+j+k is even and |i-j| ≤ k ≤ i+j
     if (i + j + k) % 2 != 0 { return 0.0; }
@@ -153,7 +153,7 @@ pub fn solve_stochastic_elliptic_1d(
     mu: f64,            // log-mean of κ
     sigma: f64,         // log-std of κ
 ) -> (Vec<f64>, Vec<f64>) {
-    use fem_linalg::{CooMatrix, CsrMatrix};
+    use fem_linalg::CooMatrix;
     use fem_solver::solve_cg;
     use fem_solver::SolverConfig;
     let n_dofs = n_elems + 1;

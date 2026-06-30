@@ -2248,7 +2248,7 @@ mod tests {
     #[test]
     fn build_hcurl_hanging_constraints_empty_for_conforming() {
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
+        
         use fem_mesh::amr::NCState3D;
 
         let mesh = SimplexMesh::<3>::unit_cube_tet(1);

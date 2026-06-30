@@ -417,8 +417,8 @@ fn solve_maxwell_2d(n: usize) -> f64 {
     apply_dirichlet(&mut mat_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
 
     // For small verification meshes, use dense solve instead of AMS
-    let n_dof = hcurl.n_dofs();
-    let mut x = dense_solve(&mat_mut, &rhs);
+    let _n_dof = hcurl.n_dofs();
+    let x = dense_solve(&mat_mut, &rhs);
 
     // L2 error
     let mut err_sq = 0.0;
@@ -1205,6 +1205,7 @@ fn f_stokes_only(x: &[f64]) -> [f64; 2] {
     [coeff * sx * sy + PI * cx * sy, coeff * sx * sy + PI * sx * cy]
 }
 
+#[allow(dead_code)]
 fn f_darcy_only(x: &[f64]) -> [f64; 2] {
     let sx = (PI * x[0]).sin(); let cx = (PI * x[0]).cos();
     let sy = (PI * x[1]).sin(); let cy = (PI * x[1]).cos();
@@ -1835,6 +1836,7 @@ fn maxwell_3d_tet_nd2_convergence() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Piola transform for hexahedral Jacobian (diagonal).
+#[allow(dead_code)]
 fn hex_piola_3d(jac: &[f64; 3], ref_vals: &[f64], phys_vals: &mut [f64], n_dofs: usize) {
     // For a regular hex: J = diag(hx, hy, hz) = diag(1/n, 1/n, 1/n)
     // J^{-T} = diag(1/hx, 1/hy, 1/hz)
@@ -1846,6 +1848,7 @@ fn hex_piola_3d(jac: &[f64; 3], ref_vals: &[f64], phys_vals: &mut [f64], n_dofs:
     }
 }
 
+#[allow(dead_code)]
 fn hex_curl_piola_3d(jac: &[f64; 3], ref_curl: &[f64], phys_curl: &mut [f64], n_dofs: usize) {
     // curl transform: curl(phi)_phys = J * curl(phi)_ref / det(J)
     let det = jac[0] * jac[1] * jac[2];
@@ -1879,7 +1882,6 @@ fn maxwell_3d_hex_nd1_convergence() {
 
 #[test]
 fn pyrand1_element_matrix_symmetric() {
-    use fem_element::VectorReferenceElement;
     let ref_elem = fem_element::lagrange::factory::vec_ref_elem(
         fem_element::lagrange::factory::VecFamily::Nedelec,
         fem_element::lagrange::factory::ElemType::Pyramid,

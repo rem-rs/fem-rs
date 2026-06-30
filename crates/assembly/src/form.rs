@@ -17,8 +17,7 @@
 //! ```
 
 use fem_linalg::CsrMatrix;
-use fem_mesh::topology::MeshTopology;
-use fem_space::fe_space::{FESpace, SpaceType};
+use fem_space::fe_space::FESpace;
 
 use crate::assembler::Assembler;
 use crate::integrator::{BilinearIntegrator, LinearIntegrator};

@@ -1,6 +1,8 @@
 //! HDG for time-harmonic Maxwell: curl(curl(E)) - k²E = f on Tri3 meshes.
 //! Note: This uses a simplified H¹-based formulation. Full H(curl) HDG
 //! requires proper Nedelec basis for edge DOFs, implemented in future work.
+#![allow(non_snake_case)]
+
 use fem_linalg::CooMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::SolverConfig;
@@ -11,11 +13,11 @@ pub fn solve_hdg_maxwell<M, F>(mesh: M, source: F, k: f64) -> Vec<f64> where
     M: MeshTopology + Clone + Send + Sync,
     F: Fn(&[f64]) -> Vec<f64> + Send + Sync,
 {
-    let dim = 2; let n_elems = mesh.n_elements(); let tau = 1.0;
+    let _dim = 2; let n_elems = mesh.n_elements(); let tau = 1.0;
     let tri = TriP1; let seg = SegP1;
     let qr_vol = tri.quadrature(2); let qr_face = seg.quadrature(2);
     let n_qp_face = qr_face.n_points();
-    let n_ldofs = 3; let sk_dpe = 1; // 1 DOF per edge (tangential)
+    let _n_ldofs = 3; let _sk_dpe = 1; // 1 DOF per edge (tangential)
 
     use std::collections::HashMap;
     let mut face_map: HashMap<Vec<u32>, (Vec<u32>, bool)> = HashMap::new();
@@ -35,11 +37,11 @@ pub fn solve_hdg_maxwell<M, F>(mesh: M, source: F, k: f64) -> Vec<f64> where
     { let mut nxt=0; for(i,(_,int))in face_list.iter().enumerate(){if*int{lam_off[i]=Some(nxt);nxt+=1;}} }
 
     let mut sk_coo=CooMatrix::new(n_lambda,n_lambda); let mut sk_rhs=vec![0.;n_lambda];
-    let mut phi=vec![0.;3]; let mut grad=vec![0.;6]; let mut psi=vec![0.;2];
+    let mut phi=vec![0.;3]; let mut grad=vec![0.;6]; let _psi=vec![0.;2];
 
     for e in 0..n_elems as u32 {
         let en = mesh.element_nodes(e);
-        let lf_list = vec![vec![0u32,1], vec![1,2], vec![0,2]]; let n_lf=3;
+        let lf_list = vec![vec![0u32,1], vec![1,2], vec![0,2]]; let _n_lf=3;
         let mut face_off=Vec::new();
         for f in &lf_list {
             let mut k:Vec<u32>=f.iter().map(|&x|en[x as usize]).collect(); k.sort_unstable();
@@ -73,7 +75,7 @@ pub fn solve_hdg_maxwell<M, F>(mesh: M, source: F, k: f64) -> Vec<f64> where
                 let wf=fw*fj;
                 for i in 0..3{for j in 0..3{A[i*3+j]+=tau*wf*phi[i]*phi[j];}}
                 if face_off[lf_idx].is_some(){
-                    let(base_idx,_)=(lf_idx,0);
+                    let(_base_idx,_)=(lf_idx,0);
                     for i in 0..3{B[i*3+lf_idx]+=tau*wf*phi[i];}
                 }
             }

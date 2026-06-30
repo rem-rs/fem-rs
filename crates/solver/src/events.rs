@@ -84,7 +84,7 @@ where
     let mut u = u0.to_vec();
     let mut t = t_start;
     let mut dt = dt_initial.max(config.dt_min).min(config.dt_max);
-    let mut prev_err = 0.0;
+    let mut _prev_err = 0.0;
     let mut events_fired: Vec<EventInfo> = Vec::new();
     let n = u.len();
 
@@ -175,7 +175,7 @@ where
                 if let Some(event) = earliest {
                     if event.terminal {
                         u = event.y_event.clone();
-                        t = event.t_event;
+                        let _ = event.t_event; // terminal: t no longer advances
                         events_fired.push(event);
                         break;
                     } else {
@@ -188,11 +188,11 @@ where
             t += dt_step;
             dt = i_step_controller(dt_step, err.max(1e-15), order);
             dt = dt.max(config.dt_min).min(config.dt_max);
-            prev_err = err;
+            _prev_err = err;
         } else {
             dt = i_step_controller(dt_step, err, order);
             dt = dt.max(config.dt_min);
-            prev_err = err;
+            _prev_err = err;
         }
     }
 

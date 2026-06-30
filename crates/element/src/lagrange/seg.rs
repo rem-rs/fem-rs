@@ -216,11 +216,11 @@ macro_rules! seg_fixed {
             fn order(&self) -> u8 { $p }
             fn n_dofs(&self) -> usize { $p as usize + 1 }
             fn eval_basis(&self, xi:&[f64], v:&mut[f64]) {
-                use crate::lagrange::factory::{lagrange_val as lv, lagrange_deriv as _ld};
+                use crate::lagrange::factory::lagrange_val as lv;
                 let t=$p as f64*xi[0]; for i in 0..=$p as usize { v[i]=lv(i,$p as usize,t); }
             }
             fn eval_grad_basis(&self, xi:&[f64], g:&mut[f64]) {
-                use crate::lagrange::factory::{lagrange_val as _lv, lagrange_deriv as ld};
+                use crate::lagrange::factory::lagrange_deriv as ld;
                 let t=$p as f64*xi[0]; let p=$p as f64;
                 for i in 0..=$p as usize { g[i]=p*ld(i,$p as usize,t); }
             }

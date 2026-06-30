@@ -165,7 +165,7 @@ pub fn read_mfem_file(path: impl AsRef<std::path::Path>) -> FemResult<MfemFile> 
     read_mfem(std::fs::File::open(path)?)
 }
 
-fn skip_comment(mut line: &str) -> &str {
+fn skip_comment(line: &str) -> &str {
     loop {
         let trimmed = line.trim();
         if trimmed.starts_with('#') || trimmed.is_empty() { return ""; }

@@ -51,7 +51,6 @@ use linlvo::{
     precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig},
     sparse::CsrMatrix as linlvoCsr,
     DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner,
-    SolverParams, VerboseLevel,
 };
 use linlvo::precond::{IlukPrecond, IlutPrecond};
 
@@ -61,7 +60,6 @@ use linlvo::precond::{IlukPrecond, IlutPrecond};
 /// [`solve_pcg_precond`], [`solve_gmres_precond`], or [`solve_fgmres_precond`]
 /// without depending on the `linlvo` crate directly.
 pub use linlvo::Preconditioner as linlvoPreconditioner;
-use thiserror::Error;
 
 #[cfg(feature = "gpu")]
 pub mod cg_gpu;
@@ -1456,8 +1454,10 @@ pub use events::{
     EventFunction, EventInfo,
     integrate_with_events,
 };
+pub use hypre::HypreBoomerAMG;
+#[allow(deprecated)]
 pub use hypre::{
-    HypreBoomerAMG, HypreParMatrix, HyprePrecond,
+    HypreParMatrix, HyprePrecond,
     hypre_solve_pcg, hypre_solve_gmres,
 };
 pub use lor::{

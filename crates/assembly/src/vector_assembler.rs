@@ -18,7 +18,7 @@ use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
 use fem_element::lagrange::{HexQ1, QuadQ1};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
-use fem_element::nedelec::{HexND1, HexND2, HexNDk, QuadND1, QuadND2, QuadNDk, TetND1, TetND2, TetNDk, TriND1, TriND2};
+use fem_element::nedelec::{HexNDk, QuadND1, QuadND2, QuadNDk, TetND1, TetND2, TetNDk, TriND1, TriND2};
 use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, QuadRT0, HexRT0, QuadRT1, HexRT1};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};

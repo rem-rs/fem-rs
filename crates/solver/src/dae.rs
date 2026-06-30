@@ -7,9 +7,11 @@
 //!
 //! where `ẑ₀` is the Nordsieck prediction and `αₖ` is the BDF coefficient.
 
+#![allow(non_snake_case)]
+
 use crate::butcher::wrms_error;
-use crate::bdf::{NordsieckState, BdfStats, BdfConfig};
-use crate::bdf::{build_identity_minus_dt_jac_scaled, BDF_ALPHA, L_COEFFS, ERROR_WEIGHTS, pascal_coeff};
+use crate::bdf::BdfStats;
+use crate::bdf::{BDF_ALPHA, L_COEFFS, ERROR_WEIGHTS, pascal_coeff};
 use crate::{solve_gmres, SolverConfig};
 use fem_linalg::{CooMatrix, CsrMatrix};
 
@@ -84,7 +86,7 @@ impl DaeIntegrator {
         }).collect();
 
         let y_pred = &zp_pred[0];
-        let yp_recon: Vec<f64> = (0..n).map(|d| beta * (y_pred[d] - y_pred[d])).collect();
+        let _yp_recon: Vec<f64> = (0..n).map(|d| beta * (y_pred[d] - y_pred[d])).collect();
         // At prediction, the reconstructed y' = (y_pred - ẑ₀) / (h·αₖ) = 0
         // since y_pred = ẑ₀. So yp_recon = 0 initially.
 
@@ -93,7 +95,7 @@ impl DaeIntegrator {
         let mut y = y_pred.to_vec();
         let mut converged = false;
 
-        for iter in 0..newton.max_iter {
+        for _iter in 0..newton.max_iter {
             // Reconstruct y' = (y - ẑ₀) * β
             // and correct residual: G = F(t+h, y, yp) + ẑ₁ * β
             let yp: Vec<f64> = (0..n).map(|d| (y[d] - zp_pred[0][d]) * beta).collect();

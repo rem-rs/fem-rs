@@ -54,7 +54,7 @@ where
         3 => Box::new(TriPk::new(bo as usize)),
         _ => unreachable!(),
     };
-    let dofs_per_sk_face = if skeleton_order == 0 { 1 } else if dim == 2 { (skeleton_order as usize + 1) } else { (skeleton_order as usize + 1) * (skeleton_order as usize + 2) / 2 };
+    let dofs_per_sk_face = if skeleton_order == 0 { 1 } else if dim == 2 { skeleton_order as usize + 1 } else { (skeleton_order as usize + 1) * (skeleton_order as usize + 2) / 2 };
 
     let quad_order = 2 * bulk_order;
     let quad_vol = ref_elem.quadrature(quad_order);

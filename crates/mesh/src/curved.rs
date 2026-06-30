@@ -1,15 +1,15 @@
 //! High-order curved mesh with isoparametric geometry mapping.
 //!
-//! A `CurvedMesh<D>` stores a **geometric order** ≥ 1 and the corresponding
-//! higher-order (quadratic, cubic, …) node coordinates.  The isoparametric
-//! mapping `F_K: K̂ → K` is defined by the same Lagrange shape functions used
+//! A `CurvedMesh<D>` stores a **geometric order** �?1 and the corresponding
+//! higher-order (quadratic, cubic, �? node coordinates.  The isoparametric
+//! mapping `F_K: K̂ �?K` is defined by the same Lagrange shape functions used
 //! for the FE solution, so the Jacobian `J = ∂F/∂ξ` is computed from the
 //! geometric nodal coordinates.
 //!
 //! # Isoparametric Jacobian
-//! For a 2-D triangle with geometric nodes `x_0, …, x_{n-1}`:
+//! For a 2-D triangle with geometric nodes `x_0, �? x_{n-1}`:
 //! ```text
-//! F(ξ) = Σᵢ xᵢ φᵢ(ξ),    J = ∂F/∂ξ  (2×2 matrix)
+//! F(ξ) = Σ�?x�?φ�?ξ),    J = ∂F/∂�? (2×2 matrix)
 //! ```
 
 use fem_core::{ElemId, FaceId, NodeId};
@@ -73,7 +73,7 @@ impl<const D: usize> CurvedMesh<D> {
     /// Elevate to arbitrary order `p`.
     ///
     /// Inserts high-order geometric nodes for each element, edge, face, and volume.
-    /// For 2D: Tri3 → TriPk.  For 3D: Tet4 → TetPk.
+    /// For 2D: Tri3 �?TriPk.  For 3D: Tet4 �?TetPk.
     /// The `map_fn` transforms new node coordinates (e.g., projects onto a curved surface).
     pub fn elevate_to_order<F>(mesh: &SimplexMesh<D>, p: usize, map_fn: F) -> Self
     where
@@ -86,7 +86,7 @@ impl<const D: usize> CurvedMesh<D> {
         let mut new_coords: Vec<f64> = mesh.coords.clone();
         let mut next_node = n_linear_nodes as NodeId;
 
-        // Build edge key → [p-1 node IDs] mapping (shared between elements)
+        // Build edge key �?[p-1 node IDs] mapping (shared between elements)
         use std::collections::HashMap;
         let mut edge_map: HashMap<(NodeId, NodeId), Vec<NodeId>> = HashMap::new();
 
@@ -125,7 +125,7 @@ impl<const D: usize> CurvedMesh<D> {
 
         for e in 0..n_elems {
             let ns = mesh.elem_nodes(e as NodeId);
-            let base = e as usize * npe_new;
+            let _base = e as usize * npe_new;
             let off = geom_conn.len();
             geom_conn.resize(off + npe_new, 0);
 
@@ -133,7 +133,7 @@ impl<const D: usize> CurvedMesh<D> {
             for i in 0..=dim { geom_conn[off + i] = ns[i]; }
 
             if dim == 2 {
-                // Tri: 3 edges → v0v1, v1v2, v0v2
+                // Tri: 3 edges �?v0v1, v1v2, v0v2
                 let edges = [(0usize, 1usize), (1, 2), (0, 2)];
                 let mut pos = 3;
                 for &(ai, bi) in &edges {
@@ -147,7 +147,7 @@ impl<const D: usize> CurvedMesh<D> {
                     }
                     pos += p - 1;
                 }
-                // Face interior nodes for p ≥ 3
+                // Face interior nodes for p �?3
                 if p >= 3 {
                     let mut face_pos = 3 + 3 * (p - 1);
                     for j in 1..=(p - 2) {
@@ -168,7 +168,7 @@ impl<const D: usize> CurvedMesh<D> {
                     }
                 }
             } else {
-                // Tet: 6 edges → v0v1, v0v2, v0v3, v1v2, v1v3, v2v3
+                // Tet: 6 edges �?v0v1, v0v2, v0v3, v1v2, v1v3, v2v3
                 let edges = [(0usize, 1usize), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
                 let mut pos = 4;
                 for &(ai, bi) in &edges {
@@ -182,7 +182,7 @@ impl<const D: usize> CurvedMesh<D> {
                     }
                     pos += p - 1;
                 }
-                // Face interior nodes (for p ≥ 3)
+                // Face interior nodes (for p �?3)
                 // Match factory ordering: Face(0,1,2), Face(0,1,3), Face(0,2,3), Face(1,2,3)
                 // each with (p-1)(p-2)/2 nodes in triangular pattern (k=1..p-2, i/j=1..p-1-k)
                 let _face_dofs_per = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
@@ -212,10 +212,10 @@ impl<const D: usize> CurvedMesh<D> {
                         }
                     }
                 }
-                // Volume interior nodes (for p ≥ 4)
+                // Volume interior nodes (for p �?4)
                 // Match factory ordering: k=1..p-3, j=1..p-2-k, i=1..p-1-j-k
                 if p >= 4 {
-                    let n_vol = (p - 1) * (p - 2) * (p - 3) / 6;
+                    let _n_vol = (p - 1) * (p - 2) * (p - 3) / 6;
                     for k in 1..=(p - 3) {
                         for j in 1..=(p - 2 - k) {
                             for i in 1..=(p - 1 - j - k) {
@@ -297,7 +297,7 @@ impl<const D: usize> CurvedMesh<D> {
         self.eval_geom_grad_basis(xi, &mut grad_ref);
 
         // Get factory DOF reference coordinates (always in factory order)
-        use fem_element::lagrange::factory::{ref_elem, ElemType};
+        use fem_element::lagrange::factory::ref_elem;
         let et = mesh_elem_type_to_factory_type(self.elem_type);
         let factory = ref_elem(et, self.geom_order);
         let ref_coords = factory.dof_coords();
@@ -351,7 +351,7 @@ impl<const D: usize> CurvedMesh<D> {
 
     /// Evaluate geometric basis functions at `xi` using the factory.
     pub(crate) fn eval_geom_basis(&self, xi: &[f64], phi: &mut [f64]) {
-        use fem_element::lagrange::factory::{ref_elem, ElemType};
+        use fem_element::lagrange::factory::ref_elem;
         let et = mesh_elem_type_to_factory_type(self.elem_type);
         let elem = ref_elem(et, self.geom_order);
         elem.eval_basis(xi, phi);
@@ -359,7 +359,7 @@ impl<const D: usize> CurvedMesh<D> {
 
     /// Evaluate geometric basis function gradients at `xi` using the factory.
     pub(crate) fn eval_geom_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        use fem_element::lagrange::factory::{ref_elem, ElemType};
+        use fem_element::lagrange::factory::ref_elem;
         let et = mesh_elem_type_to_factory_type(self.elem_type);
         let elem = ref_elem(et, self.geom_order);
         // Check capacity

@@ -334,6 +334,7 @@ pub struct IgaMultiPatchMesh2D {
     /// All elements across all patches (global DOF indices).
     global_connectivity: Vec<Vec<DofId>>,
     /// Per-patch element ranges: (start_idx, end_idx).
+    #[allow(dead_code)]
     patch_elem_ranges: Vec<(usize, usize)>,
     element_type: ElementType,
     n_nodes: usize,

@@ -60,7 +60,7 @@ fn bench_mass_cg(n: usize, label: &str) {
     let mesh = SimplexMesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
-    let mut rhs = vec![1.0; space.n_dofs()];
+    let rhs = vec![1.0; space.n_dofs()];
     let mut x = vec![0.0; space.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-8, max_iter: 10000, verbose: false, ..SolverConfig::default() };
     let start = Instant::now();
@@ -76,7 +76,7 @@ fn bench_convdiff_gmres_ilut(n: usize, label: &str) {
     let diff = DiffusionIntegrator { kappa: 0.01 };
     let conv = ConvectionIntegrator { velocity: ConstantVectorCoeff(vec![1.0, 0.0]) };
     let mat = Assembler::assemble_bilinear(&space, &[&diff, &conv], 3);
-    let f = |x: &[f64]| 1.0;
+    let f = |_: &[f64]| 1.0;
     let mut rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(f)], 3);
 
     let mut mat = mat;

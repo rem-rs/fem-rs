@@ -67,9 +67,9 @@ impl SharedEntities {
     ///
     /// This is a topological derivation: it does not require additional
     /// all‑to‑all communication.  Call after [`from_partition`].
-    pub fn build_edges_faces<M: MeshTopology>(&mut self, mesh: &M, partition: &MeshPartition, comm_rank: Rank) {
+    pub fn build_edges_faces<M: MeshTopology>(&mut self, _mesh: &M, partition: &MeshPartition, _comm_rank: Rank) {
         let owned_end = partition.n_owned_nodes;
-        let is_owned = |lid: usize| -> bool { lid < owned_end };
+        let _is_owned = |lid: usize| -> bool { lid < owned_end };
 
         let n_edges = 0;
         let _ = n_edges;

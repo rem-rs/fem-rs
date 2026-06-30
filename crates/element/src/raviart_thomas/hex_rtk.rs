@@ -28,7 +28,7 @@ fn hex_data(k: usize) -> &'static HexRTkData {
         }}
         // Face +x: ∫ Φ_x(1,y,z)·y^a z^b dA
         for a in 0..=k { for b in 0..=k {
-            for j in 0..nx { let am = j / ((k+1)*(k+1)); let r = j % ((k+1)*(k+1));
+            for j in 0..nx { let r = j % ((k+1)*(k+1));
                 v[di][j] = 1.0 * i2(r/(k+1)+a, r%(k+1)+b); }
             for j in nx..mt { v[di][j] = 0.0; } di += 1;
         }}
@@ -186,7 +186,6 @@ impl VectorReferenceElement for HexRTk {
         let mut idx = 0;
         // X-directed: m = (x^a y^b z^c, 0, 0), curl = (0, -c x^a y^b z^(c-1), b x^a y^(b-1) z^c)
         for a in 0..=k + 1 { for b in 0..=k { for c in 0..=k {
-            let v = x.powi(a as i32) * y.powi(b as i32) * z.powi(c as i32);
             cm[idx * 3] = 0.0;
             cm[idx * 3 + 1] = if c > 0 { -(c as f64) * x.powi(a as i32) * y.powi(b as i32) * z.powi((c - 1) as i32) } else { 0.0 };
             cm[idx * 3 + 2] = if b > 0 { (b as f64) * x.powi(a as i32) * y.powi((b - 1) as i32) * z.powi(c as i32) } else { 0.0 };
@@ -194,7 +193,6 @@ impl VectorReferenceElement for HexRTk {
         }}}
         // Y-directed: m = (0, x^a y^b z^c, 0), curl = (c x^a y^b z^(c-1), 0, -a x^(a-1) y^b z^c)
         for a in 0..=k { for b in 0..=k + 1 { for c in 0..=k {
-            let v = x.powi(a as i32) * y.powi(b as i32) * z.powi(c as i32);
             cm[idx * 3] = if c > 0 { (c as f64) * x.powi(a as i32) * y.powi(b as i32) * z.powi((c - 1) as i32) } else { 0.0 };
             cm[idx * 3 + 1] = 0.0;
             cm[idx * 3 + 2] = if a > 0 { -(a as f64) * x.powi((a - 1) as i32) * y.powi(b as i32) * z.powi(c as i32) } else { 0.0 };
@@ -202,7 +200,6 @@ impl VectorReferenceElement for HexRTk {
         }}}
         // Z-directed: m = (0, 0, x^a y^b z^c), curl = (-b x^a y^(b-1) z^c, a x^(a-1) y^b z^c, 0)
         for a in 0..=k { for b in 0..=k { for c in 0..=k + 1 {
-            let v = x.powi(a as i32) * y.powi(b as i32) * z.powi(c as i32);
             cm[idx * 3] = if b > 0 { -(b as f64) * x.powi(a as i32) * y.powi((b - 1) as i32) * z.powi(c as i32) } else { 0.0 };
             cm[idx * 3 + 1] = if a > 0 { (a as f64) * x.powi((a - 1) as i32) * y.powi(b as i32) * z.powi(c as i32) } else { 0.0 };
             cm[idx * 3 + 2] = 0.0;
@@ -226,8 +223,8 @@ impl VectorReferenceElement for HexRTk {
         let n = self.n_dofs();
         let mut c = Vec::with_capacity(n);
         // Face DOFs: (k+1) per face × 6 faces = 6(k+1)
-        let gl = |i: usize| -> f64 { -1.0 + 2.0 * i as f64 / k as f64 };
-        for &(sx, sy, sz, ax, ay, az) in &[
+        let _gl = |i: usize| -> f64 { -1.0 + 2.0 * i as f64 / k as f64 };
+        for &(sx, sy, sz, _ax, _ay, _az) in &[
             (-1.0, 0.0, 0.0, 1, 2, 3),  // -x
             ( 1.0, 0.0, 0.0, 1, 2, 3),  // +x
             (0.0, -1.0, 0.0, 0, 1, 2),  // -y
@@ -238,7 +235,7 @@ impl VectorReferenceElement for HexRTk {
             for _ in 0..=k { c.push(vec![sx, sy, sz]); }
         }
         // Interior DOFs (k >= 1): 3k(k+1)
-        let step = 1.0 / (k + 2) as f64;
+        let _step = 1.0 / (k + 2) as f64;
         for _ in 0..(n - 6 * (k + 1)) {
             c.push(vec![0.0, 0.0, 0.0]);
         }

@@ -67,6 +67,7 @@ pub fn build_bfbt_schur(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f64
 pub struct StokesPrecond {
     a: CsrMatrix<f64>,
     bt: CsrMatrix<f64>,
+    #[allow(dead_code)]
     b: CsrMatrix<f64>,
     mp: CsrMatrix<f64>,
     inv_diag_a: Vec<f64>,

@@ -34,7 +34,7 @@
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_linalg::complex_csr::{ComplexCoo, ComplexCsr, solve_gmres_complex};
-use fem_mesh::{ElementTransformation, topology::MeshTopology};
+use fem_mesh::ElementTransformation;
 use fem_space::fe_space::FESpace;
 
 use crate::assembler::Assembler;
@@ -561,9 +561,9 @@ impl NativeComplexAssembler {
 
             // Reference element — choose by type and polynomial order
             let ref_elem: Box<dyn ReferenceElement> = match (etype, order) {
-                (ElementType::Tri3, 1) | (ElementType::Tri3, _) => Box::new(TriP1),
-                (ElementType::Tri6, _) | (ElementType::Tri3, 2) => Box::new(TriP2),
-                (ElementType::Tet4, 1) | (ElementType::Tet4, _) => Box::new(TetP1),
+                (ElementType::Tri6, _) => Box::new(TriP2),
+                (ElementType::Tri3, _) => Box::new(TriP1),
+                (ElementType::Tet4, _) => Box::new(TetP1),
                 (ElementType::Quad4, _) => Box::new(QuadQ1),
                 _ => Box::new(TriP1),
             };

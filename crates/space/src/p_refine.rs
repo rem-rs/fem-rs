@@ -812,7 +812,7 @@ pub fn detect_p_constraints<M: MeshTopology>(
                 if n_extra == 0 || face_dofs.is_empty() { continue; }
 
                 // Quad face edges (4 edges)
-                let face_edges = vec![
+                let _face_edges = vec![
                     EdgeKey::new(face4[0], face4[1]),
                     EdgeKey::new(face4[1], face4[2]),
                     EdgeKey::new(face4[2], face4[3]),
@@ -837,7 +837,7 @@ pub fn detect_p_constraints<M: MeshTopology>(
                     // Tensor-product weights: 1D Lagrange in x and y
                     let wx = lagrange_weights_1d(r, p_e);
                     let wy = lagrange_weights_1d(s, p_e);
-                    let n_1d = (p_e as usize) + 1;
+                    let _n_1d = (p_e as usize) + 1;
 
                     // Build parent DOFs: vertices, edge DOFs (4 edges), existing face DOFs
                     let mut parent_dofs: Vec<DofId> = Vec::new();

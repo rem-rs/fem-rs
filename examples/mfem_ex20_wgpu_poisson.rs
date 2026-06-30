@@ -12,19 +12,10 @@
 //! Requires a GPU with wgpu support. The `gpu` feature enables wgpu
 //! dependencies and the GPU solver backends.
 
-use std::f64::consts::PI;
 
-use fem_assembly::{
-    Assembler,
-    standard::{DiffusionIntegrator, DomainSourceIntegrator},
-};
-use fem_linalg::CsrMatrix;
-use fem_mesh::SimplexMesh;
-use fem_solver::SolverConfig;
-use fem_space::{
-    H1Space, fe_space::FESpace,
-    constraints::{apply_dirichlet, boundary_dofs},
-};
+
+#[cfg(feature = "gpu")]
+use fem_space::fe_space::FESpace;
 
 #[cfg(feature = "gpu")]
 fn main() {
@@ -108,6 +99,7 @@ fn main() {
     println!("  Build with: cargo run --example mfem_ex20_wgpu_poisson --features gpu --release");
 }
 
+#[cfg(feature = "gpu")]
 fn csr_f64_to_f32(src: &CsrMatrix<f64>) -> CsrMatrix<f32> {
     CsrMatrix {
         nrows: src.nrows,
@@ -118,6 +110,7 @@ fn csr_f64_to_f32(src: &CsrMatrix<f64>) -> CsrMatrix<f32> {
     }
 }
 
+#[cfg(feature = "gpu")]
 fn l2_error_p1<S: fem_space::fe_space::FESpace>(
     space: &S,
     uh: &[f64],
@@ -153,8 +146,10 @@ fn l2_error_p1<S: fem_space::fe_space::FESpace>(
     err2.sqrt()
 }
 
+#[cfg(feature = "gpu")]
 struct Args { n: usize }
 
+#[cfg(feature = "gpu")]
 fn parse_args() -> Args {
     let mut a = Args { n: 32 };
     let mut it = std::env::args().skip(1);

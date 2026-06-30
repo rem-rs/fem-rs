@@ -2,6 +2,8 @@
 //!
 //! P1 velocity (discontinuous), P0 pressure, P1 skeleton trace for velocity.
 
+#![allow(non_snake_case)]
+
 use fem_linalg::CooMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::SolverConfig;
@@ -36,7 +38,7 @@ where
 
     // P1 skeleton: each edge/face vertex has dim velocity DOFs
     let sk_dpe = if dim == 2 { 2 * dim } else { 3 * dim };
-    let n_lambda = n_elems * 0; // computed from face list below
+    let _n_lambda = n_elems * 0; // computed from face list below
 
     let ref_elem: Box<dyn fem_element::ReferenceElement> = match dim {
         2 => Box::new(TriP1), 3 => Box::new(TetP1), _ => unreachable!()
@@ -173,7 +175,7 @@ where
             for a in 0..dim {
                 for i in 0..dim+1 {
                     let div_contrib = gp[i*dim + a];
-                    C[(i*dim+a)] -= vol * div_contrib; // C[0][i*a] as flat idx
+                    C[i*dim+a] -= vol * div_contrib; // C[0][i*a] as flat idx
                 }
             }
             // f_u += ∫ f·φ
@@ -199,7 +201,7 @@ where
                     A[(i*dim+a)*nu + (j*dim+a)] += tau * wf * phi[i] * phi[j];
                 } } }
 
-                if let Some(loff) = off {
+                if let Some(_loff) = off {
                     let lf_idx = lf_list.iter().position(|x| x==lf).unwrap();
                     let base = lf_idx * sk_dpe;
                     for v in 0..dim {
@@ -310,7 +312,7 @@ where
         }
 
         // Recompute element matrices... (simplified: just rebuild from scratch)
-        let nu = u_dpe; let np = p_dpe; let n_tot = nu + np;
+        let nu = u_dpe; let np = p_dpe; let _n_tot = nu + np;
         let mut A = vec![0.0; nu*nu]; let mut C = vec![0.0; nu]; let mut f_u = vec![0.0; nu]; let mut B = vec![0.0; nu*ns];
         let qr_vol2 = ref_elem.quadrature(2);
 
@@ -425,7 +427,7 @@ mod tests {
     #[test]
     fn hdg_stokes_2d_finite() {
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let source = |x: &[f64]| vec![0.0, 0.0];
+        let source = |_: &[f64]| vec![0.0, 0.0];
         let result = solve_hdg_stokes(mesh, source, 1.0);
         for &v in &result.u { assert!(v.is_finite()); }
         for &v in &result.p { assert!(v.is_finite()); }
