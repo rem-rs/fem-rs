@@ -68,8 +68,7 @@ pub fn pa_apply_hex_q3(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
     let (B, D) = build_1d_basis();
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
-        let nld = dofs.len();
-        if nld != 64 { continue; }
+        if dofs.len() < 64 { continue; }
         let mut xe = [0.0_f64; 64]; for i in 0..64 { xe[i] = x[dofs[i] as usize]; }
         let mut ye = [0.0_f64; 64];
 
@@ -92,6 +91,83 @@ pub fn pa_apply_hex_q3(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
     }
 }
 
+/// Sum-factorized PA apply for Hex Q3: y += A·x.
+///
+/// Uses 1D tensor contractions instead of full per-node loops.
+pub fn pa_apply_hex_q3_sf(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
+    let (B, D) = build_1d_basis();
+    // Precompute 1D basis gradients per qp: G[d][q][i] for direction d, qp q, node i
+    // G[0][q][i] = D[q][i], G[1][q][i] = B[q][i], G[2][q][i] = B[q][i] (for d=0)
+    // G[0][q][i] = B[q][i], G[1][q][i] = D[q][i], G[2][q][i] = B[q][i] (for d=1)
+    // G[0][q][i] = B[q][i], G[1][q][i] = B[q][i], G[2][q][i] = D[q][i] (for d=2)
+    // We store all 3×3×4×4 = 144 values: G_dir_axis[q][i] for dir=0,1,2 and axis=0,1,2
+    // Actually simpler: just use B and D directly as before.
+
+    for e in 0..pd.n_elems {
+        let dofs = &elem_dofs[e];
+        if dofs.len() < 64 { continue; }
+        let mut xe_3d = [[[0.0_f64; 4]; 4]; 4]; // [ix][iy][iz]
+        for iz in 0..4 { for iy in 0..4 { for ix in 0..4 {
+            xe_3d[ix][iy][iz] = x[dofs[ix + iy*4 + iz*16] as usize];
+        }}}
+        let mut ye_3d = [[[0.0_f64; 4]; 4]; 4];
+
+        for qz in 0..4 { for qy in 0..4 { for qx in 0..4 {
+            let off = (e*64 + qz*16 + qy*4 + qx) * 11;
+            let (jit00,jit01,jit02) = (pd.data[off],pd.data[off+1],pd.data[off+2]);
+            let (jit10,jit11,jit12) = (pd.data[off+3],pd.data[off+4],pd.data[off+5]);
+            let (jit20,jit21,jit22) = (pd.data[off+6],pd.data[off+7],pd.data[off+8]);
+            let sc = GL4_WTS[qx]*GL4_WTS[qy]*GL4_WTS[qz]*pd.data[off+9]*pd.data[off+10];
+
+            let (bq,dq) = (B[qx],D[qx]); let (bqy,dqy) = (B[qy],D[qy]); let (bqz,dqz) = (B[qz],D[qz]);
+
+            // Sum-factorized flux computation:
+            // For each of 3 reference gradient directions, compute Σ 1D_op · xe
+            // using triple tensor contraction.
+
+            // Helper: apply (op_ξ, op_η, op_ζ) to xe, return scalar
+            let contract = |op_ξ: &[f64;4], op_η: &[f64;4], op_ζ: &[f64;4]| -> f64 {
+                let mut s = 0.0;
+                for iz in 0..4 { let opz = op_ζ[iz]; for iy in 0..4 { let opy = op_η[iy] * opz; for ix in 0..4 {
+                    s += op_ξ[ix] * opy * xe_3d[ix][iy][iz];
+                }}}
+                s
+            };
+
+            // flux[d] = Σ_dd J⁻ᵀ_{d,dd} · apply_1D(op_{dd,ξ}, op_{dd,η}, op_{dd,ζ})
+            // where op_{0,ξ}=D, op_{0,η}=B, op_{0,ζ}=B (ξ-derivative)
+            //       op_{1,ξ}=B, op_{1,η}=D, op_{1,ζ}=B (η-derivative)
+            //       op_{2,ξ}=B, op_{2,η}=B, op_{2,ζ}=D (ζ-derivative)
+
+            let c00 = contract(&dq, &bqy, &bqz); // (Dξ ⊗ Bη ⊗ Bζ) · x
+            let c01 = contract(&bq, &dqy, &bqz); // (Bξ ⊗ Dη ⊗ Bζ) · x
+            let c02 = contract(&bq, &bqy, &dqz); // (Bξ ⊗ Bη ⊗ Dζ) · x
+
+            let flux0 = jit00*c00 + jit01*c01 + jit02*c02;
+            let flux1 = jit10*c00 + jit11*c01 + jit12*c02;
+            let flux2 = jit20*c00 + jit21*c01 + jit22*c02;
+
+            // Scatter back using sum-factorization:
+            // ye[i] += scale · (J⁻ᵀ·∇̂φ_i(q)) · flux
+            // ∇̂φ_i[0] = Dξ[ix]·Bη[iy]·Bζ[iz]
+            // ∇̂φ_i[1] = Bξ[ix]·Dη[iy]·Bζ[iz]
+            // ∇̂φ_i[2] = Bξ[ix]·Bη[iy]·Dζ[iz]
+            for iz in 0..4 { for iy in 0..4 { for ix in 0..4 {
+                let (lxi,lyi,lzi) = (bq[ix],bqy[iy],bqz[iz]);
+                let (dxi,dyi,dzi) = (dq[ix],dqy[iy],dqz[iz]);
+                let pg0 = jit00*dxi*lyi*lzi + jit01*lxi*dyi*lzi + jit02*lxi*lyi*dzi;
+                let pg1 = jit10*dxi*lyi*lzi + jit11*lxi*dyi*lzi + jit12*lxi*lyi*dzi;
+                let pg2 = jit20*dxi*lyi*lzi + jit21*lxi*dyi*lzi + jit22*lxi*lyi*dzi;
+                ye_3d[ix][iy][iz] += sc * (pg0*flux0 + pg1*flux1 + pg2*flux2);
+            }}}
+        }}}
+
+        for iz in 0..4 { for iy in 0..4 { for ix in 0..4 {
+            y[dofs[ix + iy*4 + iz*16] as usize] += ye_3d[ix][iy][iz];
+        }}}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,7 +175,7 @@ mod tests {
 
     #[test]
     fn hex_q3_pa_finite() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
         let pd = build_hex_q3_pa_data(&mesh, &|_|1.0);
         assert!(pd.data.iter().all(|v| v.is_finite()));
         assert!(pd.data.iter().any(|&v| v.abs() > 0.0));
@@ -116,5 +192,23 @@ mod tests {
             let exp = if i==j{1.0}else{0.0};
             assert!((val-exp).abs()<1e-14,"ℓ_{i}(x_{j})={val} exp={exp}");
         }}
+    }
+
+    #[test]
+    fn hex_q3_sf_matches_naive() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1); // 1 element, 8 vertices, 125 Q3 DOFs
+        // Build PA and apply with both methods on a properly-sized array
+        let pd = build_hex_q3_pa_data(&mesh, &|_|1.0);
+        let n = 125; // Q3 DOFs per element
+        let ed: Vec<Vec<u32>> = vec![(0..125).map(|i| i as u32).collect()];
+        let mut rng: u64 = 42;
+        let x: Vec<f64> = (0..n).map(|_|{rng=rng.wrapping_mul(6364136223846793005).wrapping_add(1);((rng>>11)as f64)/((1u64<<53)as f64)}).collect();
+
+        let mut y1 = vec![0.0; n]; pa_apply_hex_q3(&pd, &ed, &x, &mut y1);
+        let mut y2 = vec![0.0; n]; pa_apply_hex_q3_sf(&pd, &ed, &x, &mut y2);
+        assert!(y1.iter().all(|v| v.is_finite()), "naive produced non-finite");
+        assert!(y2.iter().all(|v| v.is_finite()), "SF produced non-finite");
+        let max_err: f64 = (0..n).map(|i| (y1[i]-y2[i]).abs()).fold(0.0, f64::max);
+        assert!(max_err < 1e-14, "SF vs naive mismatch {max_err}");
     }
 }

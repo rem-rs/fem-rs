@@ -18,4 +18,4 @@ pub mod types;
 pub use hex_q1::pa_apply_hex_q1;
 pub use quad_q1::pa_apply_quad_q1;
 pub use q2::{pa_apply_hex_q2, pa_apply_quad_q2};
-pub use q3::pa_apply_hex_q3;
+pub use q3::{pa_apply_hex_q3, pa_apply_hex_q3_sf};
