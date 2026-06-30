@@ -49,6 +49,10 @@ struct NeighbourChannel {
 /// Construct via [`GhostExchange::from_partition`]; then call
 /// [`forward`](GhostExchange::forward) or [`reverse`](GhostExchange::reverse)
 /// once per solve step.
+///
+/// For **element-level** data exchange (stresses, fluxes, cell-centred fields),
+/// construct via [`GhostExchange::from_element_ghosts`] which builds channels
+/// from a list of `(local_elem_id, owner_rank)` pairs.
 #[derive(Debug, Clone)]
 pub struct GhostExchange {
     channels: Vec<NeighbourChannel>,
@@ -155,6 +159,47 @@ impl GhostExchange {
             })
             .collect();
 
+        GhostExchange { channels }
+    }
+
+    /// Build a ghost exchange for **element-level** data from a list of
+    /// `(local_elem_id, owning_rank)` pairs.
+    ///
+    /// Each entry associates a local element with its owning rank.  The total
+    /// number of local elements is `n_owned + n_ghost`.  Ghost elements are
+    /// those whose `owning_rank != local_rank`.
+    ///
+    /// # Example
+    /// ```
+    /// use fem_parallel::ghost::GhostExchange;
+    /// let comm = fem_parallel::Comm::new(vec![0]);
+    /// let local_rank = 0i32;
+    /// // elem_owners[i] = (local_id, owner_rank)
+    /// let elem_owners = vec![(0u32, 0i32), (1u32, 0i32), (2u32, 1i32)];
+    /// let exchange = GhostExchange::from_element_ghosts(&elem_owners, &comm);
+    /// assert!(!exchange.is_trivial()); // rank 1 shares element 2
+    /// ```
+    pub fn from_element_ghosts(element_owners: &[(u32, Rank)], comm: &Comm) -> Self {
+        let local_rank = comm.rank();
+        let mut send_map: HashMap<Rank, Vec<u32>> = HashMap::new();
+        let mut recv_slots: HashMap<Rank, Vec<u32>> = HashMap::new();
+        for &(local_id, owner) in element_owners {
+            if owner == local_rank { continue; }
+            // This ghost element's owner needs our data
+            recv_slots.entry(owner).or_default().push(local_id);
+            // We need the owner's data (the owner "shares" with us)
+            send_map.entry(owner).or_default().push(local_id);
+        }
+        let all_neighbors: HashSet<Rank> = send_map.keys().chain(recv_slots.keys()).copied().collect();
+        let channels: Vec<NeighbourChannel> = {
+            let mut v: Vec<Rank> = all_neighbors.iter().copied().collect();
+            v.sort_unstable();
+            v
+        }.into_iter().map(|neighbor| NeighbourChannel {
+            rank: neighbor,
+            send_local_ids: send_map.remove(&neighbor).unwrap_or_default(),
+            recv_local_ids: recv_slots.remove(&neighbor).unwrap_or_default(),
+        }).collect();
         GhostExchange { channels }
     }
 
@@ -455,5 +500,42 @@ fn mpi_reverse_overlap<F: FnOnce(&mut [f64])>(
             );
             data[lid as usize] += val;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mpi_test_env::test_world_comm;
+
+    #[test]
+    fn element_ghost_basic_forward_reverse() {
+        // This test needs 2 ranks; we only test the serial case here.
+        // For multi-rank, use ThreadLauncher (see thread_launcher.rs).
+        let comm = test_world_comm();
+        if comm.size() >= 2 {
+            let rank = comm.rank();
+            let owners = match rank {
+                0 => vec![(0u32, 0i32), (1u32, 0i32), (2u32, 1i32)],
+                _ => vec![(0u32, 1i32), (1u32, 1i32), (2u32, 0i32)],
+            };
+            let ex = GhostExchange::from_element_ghosts(&owners, &comm);
+            let mut data: Vec<f64> = match rank { 0 => vec![10.0, 20.0, 30.0], _ => vec![100.0, 200.0, 300.0] };
+            ex.forward(&comm, &mut data);
+            if rank == 1 { assert!((data[2] - 30.0).abs() < 1e-10); }
+        }
+    }
+
+    #[test]
+    fn element_ghost_serial_no_neighbors() {
+        let comm = test_world_comm();
+        if comm.size() > 1 { return; }
+        let owners = vec![(0u32, 0i32), (1u32, 0i32)];
+        let ex = GhostExchange::from_element_ghosts(&owners, &comm);
+        assert!(ex.is_trivial());
+        let mut data = vec![1.0, 2.0];
+        ex.forward(&comm, &mut data);
+        assert!((data[0] - 1.0).abs() < 1e-10);
+        assert!((data[1] - 2.0).abs() < 1e-10);
     }
 }
