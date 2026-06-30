@@ -55,3 +55,8 @@ path = "gpu_micro.rs"
 name = "solver_comparison"
 harness = false
 path = "solver_comparison.rs"
+
+[[bench]]
+name = "mfem_parity"
+harness = false
+path = "mfem_parity.rs"
