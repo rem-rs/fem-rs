@@ -10,6 +10,7 @@
 
 pub mod amr;
 pub mod boundary;
+pub mod cad;
 pub mod curved;
 pub mod element_type;
 pub mod lor;
