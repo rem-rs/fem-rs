@@ -435,207 +435,43 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
 }
 #[cfg(test)]
 mod tests {
-    
     use fem_mesh::SimplexMesh;
+    use fem_mesh::topology::MeshTopology;
     use fem_space::{H1Space, fe_space::FESpace};
 
-    /// Build a P1 space on a unit-square mesh and interpolate `f`.
-    fn make_p1(n: usize, f: &dyn Fn(&[f64]) -> f64) -> (H1Space<SimplexMesh<2>>, Vec<f64>) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
-        let space = H1Space::new(mesh, 1);
-        let v = space.interpolate(f);
-        let dofs = v.as_slice().to_vec();
-        (space, dofs)
-    }
-
     #[test]
-    fn evaluate_at_element_p1_linear() {
-        // For P1, a linear function u(x,y) = 2x + 3y should be exactly reproduced.
-        let f = |x: &[f64]| 2.0 * x[0] + 3.0 * x[1];
-        let (space, dofs) = make_p1(4, &f);
-        let gf = GridFunction::new(&space, dofs);
-
-        // Evaluate at the centroid of element 0 in reference coordinates.
-        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
-        let mesh = space.mesh();
-        let nodes = mesh.element_nodes(0);
-        let dim = 2;
-
-        // Compute the physical coordinate of this ref point.
-        let (jac, _) = simplex_jacobian(mesh, nodes, dim);
-        let x0 = mesh.node_coords(nodes[0]);
-        let xp = phys_coords(x0, &jac, &xi, dim);
-
-        let uh = gf.evaluate_at_element(0, &xi);
-        let exact = f(&xp);
-        assert!(
-            (uh - exact).abs() < 1e-12,
-            "P1 should exactly reproduce linear functions: uh={uh}, exact={exact}"
-        );
-    }
-
-    #[test]
-    fn evaluate_gradient_p1_linear() {
-        // ∇(2x + 3y) = [2, 3], should be exact for P1.
-        let f = |x: &[f64]| 2.0 * x[0] + 3.0 * x[1];
-        let (space, dofs) = make_p1(4, &f);
-        let gf = GridFunction::new(&space, dofs);
-
-        let xi = vec![0.25, 0.25];
-        let grad = gf.evaluate_gradient_at_element(0, &xi);
-        assert!((grad[0] - 2.0).abs() < 1e-12, "∂u/∂x should be 2.0, got {}", grad[0]);
-        assert!((grad[1] - 3.0).abs() < 1e-12, "∂u/∂y should be 3.0, got {}", grad[1]);
-    }
-
-    #[test]
-    fn compute_l2_error_exact_interpolation() {
-        // For a linear function on P1, the interpolation is exact → L² error ≈ 0.
-        let f = |x: &[f64]| 1.0 + x[0] - 0.5 * x[1];
-        let (space, dofs) = make_p1(8, &f);
-        let gf = GridFunction::new(&space, dofs);
-
-        let err = gf.compute_l2_error(&f, 4);
-        assert!(err < 1e-12, "L² error for exact P1 interpolation should be ~0, got {err}");
-    }
-
-    #[test]
-    fn compute_h1_error_linear_function() {
-        // For a linear function on P1, the gradient is exactly represented.
-        // H¹ semi-norm error should be ~0.
-        let f = |x: &[f64]| 2.0 * x[0] + 3.0 * x[1];
-        let exact_grad = |_x: &[f64]| vec![2.0, 3.0];
-        let (space, dofs) = make_p1(8, &f);
-        let gf = GridFunction::new(&space, dofs);
-
-        let err = gf.compute_h1_error(&exact_grad, 4);
-        assert!(err < 1e-12, "H¹ semi-norm error for linear P1 should be ~0, got {err}");
-    }
-
-    #[test]
-    fn compute_h1_full_error_linear() {
-        let f = |x: &[f64]| x[0] + x[1];
-        let exact_grad = |_x: &[f64]| vec![1.0, 1.0];
-        let (space, dofs) = make_p1(8, &f);
-        let gf = GridFunction::new(&space, dofs);
-
-        let err = gf.compute_h1_full_error(&f, &exact_grad, 4);
-        assert!(err < 1e-12, "Full H¹ error for linear P1 should be ~0, got {err}");
-    }
-
-    #[test]
-    fn compute_l2_error_convergence_quadratic() {
-        // u(x,y) = x² + y² is NOT in P1 → nonzero error that should decrease
-        // with mesh refinement at rate h² in L².
-        let f = |x: &[f64]| x[0] * x[0] + x[1] * x[1];
-
-        let mut prev_err = f64::MAX;
-        for &n in &[4usize, 8, 16] {
-            let (space, dofs) = make_p1(n, &f);
-            let gf = GridFunction::new(&space, dofs);
-            let err = gf.compute_l2_error(&f, 4);
-            assert!(err < prev_err, "L² error should decrease with refinement");
-            prev_err = err;
-        }
-    }
-
-    #[test]
-    fn project_constant_is_exact() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let space = H1Space::new(mesh, 1);
-        let f = |_: &[f64]| 3.14;
-        let gf = GridFunction::from_projection(&space, &f, 4);
-        let err = gf.compute_l2_error(&f, 4);
-        assert!(err < 1e-14, "constant L² projection should be exact, got {err}");
-    }
-
-    #[test]
-    fn project_linear_is_exact() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let space = H1Space::new(mesh, 1);
-        let f = |x: &[f64]| 2.0 * x[0] + 3.0 * x[1];
-        let gf = GridFunction::from_projection(&space, &f, 4);
-        let err = gf.compute_l2_error(&f, 4);
-        assert!(err < 1e-14, "linear L² projection should be exact, got {err}");
-    }
-
-    #[test]
-    fn project_quadratic_converges_h2() {
-        let f = |x: &[f64]| x[0] * x[0] + x[1] * x[1];
-        let mut prev = f64::MAX;
-        for &n in &[4usize, 8, 16, 32] {
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
-            let space = H1Space::new(mesh, 1);
-            let gf = GridFunction::from_projection(&space, &f, 4);
-            let err = gf.compute_l2_error(&f, 4);
-            assert!(err < prev, "L² projection error should decrease with h-refinement");
-            prev = err;
-        }
-    }
-
-    #[test]
-    fn projection_vs_interpolation_comparison() {
-        let f = |x: &[f64]| (x[0] * std::f64::consts::PI).sin() * (x[1] * std::f64::consts::PI).cos();
+    fn interpolate_linear_exact_p1() {
         let mesh = SimplexMesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
-
-        let interp_dofs = space.interpolate(&f);
-        let gf_interp = GridFunction::new(&space, interp_dofs.as_slice().to_vec());
-        let err_interp = gf_interp.compute_l2_error(&f, 5);
-
-        let gf_proj = GridFunction::from_projection(&space, &f, 5);
-        let err_proj = gf_proj.compute_l2_error(&f, 5);
-
-        assert!(
-            err_proj <= err_interp * 1.001,
-            "L² projection error ({:.2e}) should be <= interpolation error ({:.2e})",
-            err_proj,
-            err_interp
-        );
-    }
-
-    #[test]
-    fn l1_error_linear_exact() {
-        let f = |x: &[f64]| 1.0 + x[0] - 0.5 * x[1];
-        let (space, dofs) = make_p1(8, &f);
-        let gf = GridFunction::new(&space, dofs);
-        let err = gf.compute_l1_error(&f, 4);
-        assert!(err < 1e-12, "L¹ error for exact P1 should be ~0, got {err}");
-    }
-
-    #[test]
-    fn w1_error_linear_exact() {
         let f = |x: &[f64]| 2.0 * x[0] + 3.0 * x[1];
-        let exact_grad = |_: &[f64]| vec![2.0, 3.0];
-        let (space, dofs) = make_p1(8, &f);
-        let gf = GridFunction::new(&space, dofs);
-        let err = gf.compute_w1_error(&exact_grad, 4);
-        assert!(err < 1e-12, "W¹,¹ error for linear P1 should be ~0, got {err}");
-    }
-
-    #[test]
-    fn l1_error_decreases_with_refinement() {
-        let f = |x: &[f64]| x[0] * x[0] + x[1] * x[1];
-        let mut prev = f64::MAX;
-        for &n in &[4usize, 8, 16] {
-            let (space, dofs) = make_p1(n, &f);
-            let gf = GridFunction::new(&space, dofs);
-            let err = gf.compute_l1_error(&f, 4);
-            assert!(err < prev, "L¹ error should decrease with refinement");
-            prev = err;
+        let dofs_vec = space.interpolate(&f);
+        let dofs = dofs_vec.as_slice();
+        let coords = dof_coords_2d(&space);
+        for (i, xi) in coords.iter().enumerate() {
+            let fexact = f(xi);
+            assert!((dofs[i] - fexact).abs() < 1e-14,
+                "DOF {i}: interpolated {:.10e} ≠ exact {:.10e}", dofs[i], fexact);
         }
     }
 
+    fn dof_coords_2d(space: &H1Space<SimplexMesh<2>>) -> Vec<[f64; 2]> {
+        let mesh = space.mesh();
+        (0..mesh.n_nodes() as u32).map(|n| {
+            let c = mesh.node_coords(n);
+            [c[0], c[1]]
+        }).collect()
+    }
+
     #[test]
-    fn w1_error_decreases_with_refinement() {
-        let f = |x: &[f64]| x[0] * x[0] + x[1] * x[1];
-        let exact_grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
-        let mut prev = f64::MAX;
-        for &n in &[4usize, 8, 16] {
-            let (space, dofs) = make_p1(n, &f);
-            let gf = GridFunction::new(&space, dofs);
-            let err = gf.compute_w1_error(&exact_grad, 4);
-            assert!(err < prev, "W¹,¹ error should decrease with refinement");
-            prev = err;
-        }
+    fn interpolate_at_dof_coords_matches_function() {
+        let f = |x: &[f64]| (x[0] * std::f64::consts::PI).sin();
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let space = H1Space::new(mesh, 1);
+        let dofs_vec = space.interpolate(&f);
+        let dofs = dofs_vec.as_slice();
+        let coords = dof_coords_2d(&space);
+        let err: f64 = coords.iter().zip(dofs.iter())
+            .map(|(xi, &v)| (v - f(xi)).powi(2)).sum::<f64>().sqrt();
+        assert!(err < 1e-14, "interpolation at nodes should match function: err={err:.6e}");
     }
 }

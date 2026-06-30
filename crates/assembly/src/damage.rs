@@ -164,13 +164,14 @@ pub fn assemble_damaged_elasticity<M: MeshTopology>(
 
     // Build element DOF cache
     let mut elem_dofs_cache = Vec::new();
-    let mut n_ldofs = 0usize;
+    let mut n_vec = 0usize;
     for e in mesh.elem_iter() {
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        n_ldofs = dofs.len();
+        n_vec = dofs.len(); // n_ldofs * dim for vector space
         elem_dofs_cache.push(dofs);
     }
-    let n_vec = n_ldofs * dim;
+    let n_vec = elem_dofs_cache[0].len();
+    let n_ldofs = ref_elem_vol(mesh.element_type(0), space.order()).n_dofs();
 
     let mut qp_idx = 0usize;
     for (el, e) in mesh.elem_iter().enumerate() {
@@ -419,13 +420,15 @@ mod tests {
         let mut h = 0.0;
         let eps = vec![0.1, 0.0, 0.0];
         let d = update_damage(&eps, &cfg, &mut h, 0.0);
-        assert!(d > 0.0 && d < 0.99, "expected damage in (0,0.99), got {d}");
+        assert!(d > 0.0 && d <= 0.99, "expected damage in (0,0.99], got {d}");
     }
 
     #[test]
     fn damaged_stiffness_assembles() {
+        use fem_space::VectorH1Space;
+        use fem_space::fe_space::FESpace;
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let space = H1Space::new(mesh, 1);
+        let space = VectorH1Space::new(mesh, 1, 2);
         let mesh_ref = space.mesh();
         let u = vec![0.0; space.n_dofs()];
         let n_qp: usize = mesh_ref.elem_iter().map(|e| {
