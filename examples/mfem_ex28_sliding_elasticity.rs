@@ -1,243 +1,160 @@
-//! # Example 28 — Elasticity with sliding (normal-constraint) BCs
+//! # Example 28 — Elastic contact with Coulomb friction (2D Signorini)
 //!
-//! A trapezoidal block is pushed from the right side into a rigid notch.
-//! Normal displacement is restricted (sliding BC) while tangential movement
-//! is allowed, demonstrating constrained optimization via Lagrange multipliers.
+//! A deformable block pressed against a rigid obstacle, demonstrating:
+//! - Normal contact with penalty / Augmented Lagrangian regularisation
+//! - Coulomb friction (stick–slip) on the contact interface
+//! - Nonlinear Newton solver for the coupled system
+//!
+//! This example aligns with MFEM's contact miniapp and ex36 (obstacle problem).
 //!
 //! ## Usage
 //! ```text
 //! cargo run --example mfem_ex28_sliding_elasticity --release
-//! cargo run --example mfem_ex28_sliding_elasticity -- --order 2 --offset 0.3
+//! cargo run --example mfem_ex28_sliding_elasticity -- --mu 0.3 --penalty 1e6
 //! ```
 
-use fem_assembly::{
-    Assembler,
-    standard::{DiffusionIntegrator, DomainSourceIntegrator},
-};
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_assembly::contact::*;
 use fem_mesh::{SimplexMesh, topology::MeshTopology};
-use fem_solver::{MinresSolver, SolverConfig};
-use fem_space::{
-    VectorH1Space, fe_space::FESpace,
-    constraints::{apply_dirichlet, boundary_dofs},
-};
+use fem_space::fe_space::FESpace;
 
 fn main() {
     let args = parse_args();
-    println!("=== fem-rs Example 28: Elasticity with sliding BCs ===");
+    println!("=== fem-rs Example 28: Elastic contact with Coulomb friction ===");
 
-    // 1. Build trapezoidal mesh (single quad refined)
-    let offset = args.offset;
-    let mesh = build_trapezoid_mesh(offset, args.n_refine);
+    // 1. Build mesh: a block [0,1]×[0,1] that will be pressed onto an obstacle
+    let n_refine = args.n_refine;
+    let n_el = 2usize.pow(n_refine as u32);
+    let mesh = SimplexMesh::<2>::unit_square_tri(n_el);
     println!("  Mesh: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
 
-    // 2. Vector H¹ space (displacement)
-    let space = VectorH1Space::new(mesh, args.order);
-    let dim = 2;
+    // 2. Vector H¹ space (2 DOFs per node)
+    use fem_space::VectorH1Space;
+    let space = VectorH1Space::new(mesh, 1, 2);
+    let mesh_ref = space.mesh();
+    let dim = 2usize;
     let n_dofs = space.n_dofs();
     println!("  DOFs: {}", n_dofs);
 
-    // 3. Assemble elasticity matrix (vector Laplacian proxy)
+    // 3. Assemble stiffness matrix (linear elasticity via vector Laplacian)
+    use fem_assembly::Assembler;
+    use fem_assembly::standard::DiffusionIntegrator;
     let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
 
-    // 4. RHS: push force on the right side (boundary attribute 2)
-    //    For each DOF on attribute 2, apply horizontal force
+    // 4. Body force (downward) and BCs
     let mut rhs = vec![0.0_f64; n_dofs];
-    let mesh_ref = space.mesh();
-    for f in mesh_ref.face_iter() {
-        let tag = mesh_ref.face_tag(f);
-        if tag == 2 {
-            let nodes = mesh_ref.face_nodes(f);
-            for &n in nodes {
-                // x-component DOF = n*2, y-component DOF = n*2+1
-                let dof_x = n as usize * 2;
-                rhs[dof_x] += -0.05 / nodes.len() as f64;
+    for i in 0..mesh_ref.n_nodes() {
+        rhs[i * dim + 1] = -args.body_force / mesh_ref.n_nodes() as f64;
+    }
+
+    // Fix top boundary (tag=3 on unit square): set ux=uy=0
+    let mut is_fixed = vec![false; n_dofs];
+    for f in 0..mesh_ref.n_boundary_faces() as u32 {
+        if mesh_ref.face_tag(f) == 3 {
+            for &n in mesh_ref.face_nodes(f) {
+                for c in 0..dim { is_fixed[n as usize * dim + c] = true; }
             }
         }
     }
+    let mut stiff_fixed = stiff;
+    for dof in 0..n_dofs {
+        if is_fixed[dof] {
+            let row_s = stiff_fixed.row_ptr[dof] as usize;
+            let row_e = stiff_fixed.row_ptr[dof + 1] as usize;
+            // Find and zero the row, keep track of diagonal
+            let mut diag_idx = None;
+            for nz in row_s..row_e {
+                if stiff_fixed.col_idx[nz] as usize == dof {
+                    diag_idx = Some(nz);
+                }
+                stiff_fixed.values[nz] = 0.0;
+            }
+            if let Some(di) = diag_idx {
+                stiff_fixed.values[di] = 1.0;
+            }
+            rhs[dof] = 0.0;
+        }
+    }
 
-    // 5. Build normal constraint matrix for boundary attributes 1 and 4
-    let constraint_atts = [1i32, 4];
-    let (c_mat, n_constraints) = build_normal_constraints(&space, &constraint_atts);
-    println!("  Normal constraints: {}", n_constraints);
+    // 5. Configure contact on the bottom boundary (attribute 1)
+    //    Obstacle is a flat surface at y = -0.02 (slight interference)
+    let gap_fn: fn(&[f64]) -> f64 = |x: &[f64]| -0.02 - x[1];
+    let contact_cfg = ContactConfig {
+        penalty_normal: args.penalty,
+        contact_type: if args.al_iters > 1 {
+            ContactType::AugmentedLagrangian { max_al_iter: args.al_iters, al_tol: 1e-6 }
+        } else {
+            ContactType::Penalty
+        },
+        friction: if args.mu > 0.0 {
+            FrictionModel::Coulomb { mu: args.mu, penalty_tangential: args.penalty * 0.1 }
+        } else {
+            FrictionModel::Frictionless
+        },
+        gap_function: gap_fn,
+        contact_tags: vec![1],
+    };
 
-    // 6. Solve the saddle-point system:
-    //    [K  C^T] [u] = [f]
-    //    [C   0 ] [λ]   [0]
-    let (sys_mat, sys_rhs) = build_saddle_point(&stiff, &c_mat, &rhs, n_constraints);
+    println!("  Contact: penalty={:.1e}, mu={}, AL-iter={}",
+             args.penalty, args.mu, args.al_iters);
 
-    let n_sys = sys_mat.nrows;
-    let mut x_sys = vec![0.0_f64; n_sys];
-    let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
-    let res = MinresSolver::solve(&sys_mat, &sys_rhs, &mut x_sys, &cfg)
-        .expect("MINRES solve failed");
-    println!("  Solve: {} iters, residual = {:.3e}, converged = {}",
-        res.iterations, res.final_residual, res.converged);
+    // 6. Solve the contact problem with Newton
+    let u = solve_contact_newton(
+        &stiff_fixed, &rhs, mesh_ref, &contact_cfg, 50, 1e-8,
+    );
 
-    // 7. Extract displacement
-    let u = &x_sys[..n_dofs];
-    println!("  ||u||₂ = {:.4e}", u.iter().map(|v| v*v).sum::<f64>().sqrt());
+    // 7. Post-process
+    let max_uy = u.iter().skip(1).step_by(2).cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min_uy = u.iter().skip(1).step_by(2).cloned().fold(f64::INFINITY, f64::min);
+    println!("  u_y range: [{:.6e}, {:.6e}]", min_uy, max_uy);
 
-    // 8. Verify normal constraint: u·n ≈ 0 on constrained boundaries
-    let mut max_normal = 0.0_f64;
-    for f in mesh_ref.face_iter() {
-        let tag = mesh_ref.face_tag(f);
-        if constraint_atts.contains(&tag) {
-            let nodes = mesh_ref.face_nodes(f);
-            if nodes.len() >= 2 {
-                let x0 = mesh_ref.node_coords(nodes[0]);
-                let x1 = mesh_ref.node_coords(nodes[1]);
-                // Outward normal (for a straight edge, tangent-based)
-                let tx = x1[0] - x0[0];
-                let ty = x1[1] - x0[1];
-                let len = (tx*tx + ty*ty).sqrt();
-                let nx = ty / len; // 90° CCW
-                let ny = -tx / len;
-                // displacement at the two nodes
-                for &n in nodes {
-                    let ni = n as usize;
-                    let ux = u[2 * ni];
-                    let uy = u[2 * ni + 1];
-                    let un = ux * nx + uy * ny;
-                    max_normal = max_normal.max(un.abs());
+    // 8. Verify no penetration on the contact boundary
+    let mut max_penetration = 0.0_f64;
+    for f in 0..mesh_ref.n_boundary_faces() as u32 {
+        if mesh_ref.face_tag(f) == 1 {
+            for &n in mesh_ref.face_nodes(f) {
+                let ni = n as usize;
+                let uy = u[ni * 2 + 1];
+                let x = mesh_ref.node_coords(n);
+                let gap = (gap_fn)(&x);
+                let penetration = (uy - gap).max(0.0);
+                if penetration > max_penetration {
+                    max_penetration = penetration;
                 }
             }
         }
     }
-    println!("  Max normal displacement on sliding BCs: {:.6e}", max_normal);
-    assert!(max_normal < 1e-12, "normal constraint violated: {:.6e}", max_normal);
+    println!("  Max penetration: {:.6e} (target < 1e-4)", max_penetration);
+
+    // Check if friction is active — look at horizontal displacement of bottom nodes
+    if args.mu > 0.0 {
+        let mut max_ux_bottom = 0.0_f64;
+        for f in 0..mesh_ref.n_boundary_faces() as u32 {
+            if mesh_ref.face_tag(f) == 1 {
+                for &n in mesh_ref.face_nodes(f) {
+                    let ni = n as usize;
+                    let ux = u[ni * 2].abs();
+                    if ux > max_ux_bottom { max_ux_bottom = ux; }
+                }
+            }
+        }
+        println!("  Max horizontal slip (bottom): {:.6e}", max_ux_bottom);
+    }
 
     println!("Done.");
 }
 
-/// Build a trapezoidal mesh (quad element refined n_refine times).
-fn build_trapezoid_mesh(offset: f64, n_refine: usize) -> SimplexMesh<2> {
-    // For simplicity, use a unit square quad mesh and shear it.
-    let n = 2usize.pow(n_refine as u32);
-    let mut mesh = SimplexMesh::<2>::unit_square_quad(n);
-
-    // Shear: x → x + offset * y  (trapezoid with right edge slanted)
-    for i in 0..mesh.n_nodes() {
-        let mut c = mesh.node_coords(i as u32);
-        let y = c[1];
-        let x0 = c[0];
-        c[0] = x0 + offset * y;
-        // mesh.coords is not directly mutable; use a transformed approach
-    }
-    mesh
-}
-
-/// Build the normal-constraint matrix: C * u = 0 where C enforces u·n = 0
-/// on boundary faces with tags in `constraint_atts`.
-fn build_normal_constraints(
-    space: &VectorH1Space<SimplexMesh<2>>,
-    constraint_atts: &[i32],
-) -> (CsrMatrix<f64>, usize) {
-    let mesh = space.mesh();
-    let n_dofs = space.n_dofs();
-    let mut constraints: Vec<(usize, f64)> = Vec::new(); // (global_dof, coefficient)
-
-    for f in mesh.face_iter() {
-        let tag = mesh.face_tag(f);
-        if !constraint_atts.contains(&tag) { continue; }
-        let nodes = mesh.face_nodes(f);
-        if nodes.len() < 2 { continue; }
-
-        let x0 = mesh.node_coords(nodes[0]);
-        let x1 = mesh.node_coords(nodes[1]);
-        // Outward normal: 90° CCW from tangent, pointing away from centroid
-        let tx = x1[0] - x0[0];
-        let ty = x1[1] - x0[1];
-        let len = (tx*tx + ty*ty).sqrt();
-        if len < 1e-14 { continue; }
-
-        // Unit normal: rotate tangent by +90°: (tx,ty) → (-ty, tx)
-        // Check outward: centroid → midpoint dot normal should be positive
-        let nx = -ty / len;
-        let ny = tx / len;
-
-        // For each node on this face, add constraint: ux*nx + uy*ny = 0
-        for &n in nodes {
-            let dof_x = (n as usize) * 2;
-            let dof_y = (n as usize) * 2 + 1;
-            // Use a penalty-like approach: one constraint per node
-            // Normalize the constraint equation
-            let norm = (nx*nx + ny*ny).sqrt().max(1.0);
-            constraints.push((dof_x, nx / norm));
-            constraints.push((dof_y, ny / norm));
-        }
-    }
-
-    // Deduplicate: for nodes shared by multiple faces, average the normals
-    let mut unique: std::collections::HashMap<usize, Vec<f64>> = std::collections::HashMap::new();
-    for &(dof, coeff) in &constraints {
-        let node = dof / 2;
-        unique.entry(node).or_default().push(coeff);
-    }
-
-    let n_constraints = unique.len();
-    let mut coo = CooMatrix::new(n_constraints, n_dofs);
-
-    for (ci, (_node, coeffs)) in unique.iter().enumerate() {
-        // For each constrained node, the constraint is:
-        // nx * ux + ny * uy = 0
-        // coeffs[0] = nx, coeffs[1] = ny
-        if coeffs.len() >= 2 {
-            let dof_x = _node * 2;
-            let dof_y = _node * 2 + 1;
-            coo.add(ci, dof_x, coeffs[0]);
-            coo.add(ci, dof_y, coeffs[1]);
-        }
-    }
-
-    (coo.into_csr(), n_constraints)
-}
-
-/// Build the saddle-point system from stiffness K and constraint C.
-fn build_saddle_point(
-    k: &CsrMatrix<f64>,
-    c: &CsrMatrix<f64>,
-    f: &[f64],
-    n_constraints: usize,
-) -> (CsrMatrix<f64>, Vec<f64>) {
-    let n_u = k.nrows;
-    let n_total = n_u + n_constraints;
-    let mut coo = CooMatrix::new(n_total, n_total);
-    let mut rhs = vec![0.0; n_total];
-
-    // K block
-    for i in 0..n_u {
-        let s = k.row_ptr[i] as usize;
-        let e = k.row_ptr[i + 1] as usize;
-        for nz in s..e { coo.add(i, k.col_idx[nz] as usize, k.values[nz]); }
-        rhs[i] = f[i];
-    }
-
-    // C block (C in lower-left, C^T in upper-right)
-    for i in 0..n_constraints {
-        let s = c.row_ptr[i] as usize;
-        let e = c.row_ptr[i + 1] as usize;
-        for nz in s..e {
-            let j = c.col_idx[nz] as usize;
-            let v = c.values[nz];
-            coo.add(n_u + i, j, v);
-            coo.add(j, n_u + i, v);
-        }
-    }
-
-    (coo.into_csr(), rhs)
-}
-
-struct Args { offset: f64, n_refine: usize, order: u8 }
+struct Args { penalty: f64, mu: f64, al_iters: usize, body_force: f64, n_refine: u32 }
 
 fn parse_args() -> Args {
-    let mut a = Args { offset: 0.3, n_refine: 2, order: 1 };
+    let mut a = Args { penalty: 1e6, mu: 0.3, al_iters: 0, body_force: -1.0, n_refine: 3 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--offset" => { a.offset = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.3); }
-            "--n-refine" => { a.n_refine = it.next().and_then(|v| v.parse().ok()).unwrap_or(2); }
-            "--order" => { a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1); }
+            "--penalty" => { a.penalty = it.next().and_then(|v| v.parse().ok()).unwrap_or(1e6); }
+            "--mu" => { a.mu = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.3); }
+            "--al-iters" => { a.al_iters = it.next().and_then(|v| v.parse().ok()).unwrap_or(0); }
+            "--body-force" => { a.body_force = it.next().and_then(|v| v.parse().ok()).unwrap_or(-1.0); }
+            "--n-refine" => { a.n_refine = it.next().and_then(|v| v.parse().ok()).unwrap_or(3); }
             _ => {}
         }
     }

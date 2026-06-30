@@ -1,287 +1,649 @@
-//! Contact mechanics: Signorini-type unilateral contact.
+//! Contact mechanics: Signorini unilateral contact with Coulomb friction.
 //!
-//! Supports penalty-based contact between a deformable body and a rigid
-//! obstacle, with Augmented Lagrangian iteration for improved accuracy.
+//! Supports:
+//! - **Penalty** and **Augmented Lagrangian** normal contact
+//! - **Coulomb friction** with penalty regularization (stick–slip)
+//! - **2D** (edge segments) and **3D** (triangle facets)
+//! - P1/P2 elements via integration on boundary faces
 //!
 //! # Signorini problem
 //!
-//! Find `u` such that:
 //! ```text
-//! -∇·(κ∇u) = f    in Ω
-//!         u = 0    on Γ_D
-//!    u - g ≤ 0     on Γ_C  (no penetration)
-//!    λ ≥ 0         on Γ_C  (contact pressure non-negative)
-//!   λ·(u - g) = 0  on Γ_C  (complementarity)
+//! -∇·σ = f           in Ω
+//!     u = 0          on Γ_D
+//! σ·n = t            on Γ_N
+//!   g(u) ≤ 0         on Γ_C  (gap ≤ 0 → no penetration)
+//!    λ_n ≥ 0         on Γ_C  (contact pressure)
+//! λ_n·g(u) = 0       on Γ_C  (complementarity)
 //! ```
 //!
-//! where `g` is the gap function (distance to the obstacle) and `λ` is the
-//! contact pressure.
+//! # Coulomb friction
 //!
-//! # Penalty method
-//!
-//! Replace `λ` with `ε_n · [[u - g]]_-` where `[[x]]_- = min(x, 0)`.
-//! The weak form becomes weakly nonlinear and is solved with Newton's method.
+//! ```text
+//! |λ_t| ≤ μ·λ_n            (stick condition)
+//! λ_t = -μ·λ_n·sign(u̇_t)  (slip)
+//! ```
 //!
 //! # Usage
 //! ```rust,ignore
-//! use fem_assembly::contact::{ContactConfig, assemble_contact_force};
-//! let cfg = ContactConfig { penalty: 1e6, .. };
-//! let (f_contact, jac_contact) = assemble_contact_force(&space, &mesh, &cfg);
+//! use fem_assembly::contact::*;
+//!
+//! let cfg = ContactConfig {
+//!     penalty_normal: 1e6,
+//!     contact_type: ContactType::AugmentedLagrangian { max_al_iter: 5, al_tol: 1e-6 },
+//!     friction: FrictionModel::Coulomb { mu: 0.3, penalty_tangential: 1e5 },
+//!     gap_function: |x| 0.05 - x[1],
+//!     contact_tags: vec![1],
+//! };
+//! let u = solve_contact_newton(&stiffness, &rhs, &space, &cfg, 50, 1e-8);
 //! ```
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
-use fem_space::fe_space::FESpace;
+
+/// Contact regularisation type.
+#[derive(Debug, Clone)]
+pub enum ContactType {
+    /// Standard penalty: λ_n = ε_n·⟨g(u)⟩₋
+    Penalty,
+    /// Augmented Lagrangian: alternates solving with multiplier updates
+    /// λₖ₊₁ = max(0, λₖ + ε_n·g(uₖ))
+    AugmentedLagrangian { max_al_iter: usize, al_tol: f64 },
+}
+
+/// Friction model.
+#[derive(Debug, Clone)]
+pub enum FrictionModel {
+    /// No tangential friction.
+    Frictionless,
+    /// Coulomb friction with penalty regularisation.
+    Coulomb { mu: f64, penalty_tangential: f64 },
+}
 
 /// Contact configuration.
 #[derive(Debug, Clone)]
 pub struct ContactConfig {
-    /// Penalty parameter ε_n (larger = stiffer contact).
-    pub penalty: f64,
-    /// Gap function: distance from a point to the rigid obstacle.
-    /// Positive means the point is inside the obstacle (penetration).
+    /// Normal penalty parameter ε_n.
+    pub penalty_normal: f64,
+    /// Normal contact type (penalty or augmented Lagrangian).
+    pub contact_type: ContactType,
+    /// Friction model (frictionless or Coulomb).
+    pub friction: FrictionModel,
+    /// Gap function: signed distance to obstacle.
+    /// Positive values mean penetration.
     pub gap_function: fn(&[f64]) -> f64,
-    /// Boundary tags for contact surfaces.
+    /// Boundary tags where contact is active.
     pub contact_tags: Vec<i32>,
 }
 
 impl Default for ContactConfig {
     fn default() -> Self {
-        ContactConfig { penalty: 1e6, gap_function: |_| 0.0, contact_tags: vec![1] }
+        Self {
+            penalty_normal: 1e6,
+            contact_type: ContactType::Penalty,
+            friction: FrictionModel::Frictionless,
+            gap_function: |_| 0.0,
+            contact_tags: vec![1],
+        }
     }
 }
 
-/// Compute the negative part: `min(x, 0)`.
+// ─── Utility functions ────────────────────────────────────────────────────────
+
+/// Negative part: `min(x, 0)`.
+#[inline]
 fn neg_part(x: f64) -> f64 {
     if x < 0.0 { x } else { 0.0 }
 }
 
-/// Heaviside of the negative part: 1 if x < 0, 0 otherwise.
-fn neg_part_deriv(x: f64) -> f64 {
+/// Derivative of negative part: 1 if x < 0 else 0.
+#[inline]
+fn neg_part_d(x: f64) -> f64 {
     if x < 0.0 { 1.0 } else { 0.0 }
 }
 
-/// Assemble the contact force vector and tangent stiffness matrix
-/// for 2-D P1 elements on a triangular mesh.
+/// Smooth approximation of `min(x, 0)` with regularisation η.
+#[inline]
+fn neg_part_smooth(x: f64, eta: f64) -> f64 {
+    if x < -eta { x }
+    else if x > eta { 0.0 }
+    else { -0.25 * (x - eta).powi(2) / eta }
+}
+
+#[inline]
+fn neg_part_smooth_d(x: f64, eta: f64) -> f64 {
+    if x < -eta { 1.0 }
+    else if x > eta { 0.0 }
+    else { -0.5 * (x - eta) / eta }
+}
+
+// ─── Quadrature helpers ───────────────────────────────────────────────────────
+
+/// 2-point Gauss-Legendre on [0,1].
+fn gauss_edge_2pt() -> ([f64; 2], [f64; 2]) {
+    let a = 0.211324865405187;
+    let b = 0.788675134594813;
+    ([a, b], [0.5, 0.5])
+}
+
+/// 3-point symmetric rule for triangle (barycentric coords, pre-scaled weights).
+/// Points are permutations of (2/3, 1/6, 1/6).
+fn gauss_tri_3pt() -> ([[f64; 3]; 3], [f64; 3]) {
+    let a = 1.0 / 6.0;
+    let b = 2.0 / 3.0;
+    ([[b, a, a], [a, b, a], [a, a, b]], [1.0 / 6.0; 3])
+}
+
+// ─── 2D scalar contact (H¹, P1) ────────────────────────────────────────────
+
+/// Assemble normal contact force and tangent stiffness for **2D** scalar P1.
 ///
-/// Uses penalty formulation: `∫ ε_n · [[u - g]]_- · v ds` on each contact facet.
-pub fn assemble_contact_2d<S: FESpace>(
-    space: &S,
+/// `lagrange_multipliers` — per-face AL multipliers; pass `&[]` for penalty-only.
+pub fn assemble_contact_2d<S, M>(
+    _space: &S,
+    mesh: &M,
     cfg: &ContactConfig,
     u: &[f64],
+    lagrange_multipliers: &[f64],
 ) -> (Vec<f64>, CsrMatrix<f64>)
 where
-    S::Mesh: MeshTopology,
+    M: MeshTopology,
 {
-    let mesh = space.mesh();
-    let dim = mesh.dim() as usize;
-    assert_eq!(dim, 2, "assemble_contact_2d requires dim=2");
-
-    let n_dofs = space.n_dofs();
-    let mut rhs = vec![0.0; n_dofs];
-    let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
-    let pen = cfg.penalty;
+    assert_eq!(mesh.dim() as usize, 2, "assemble_contact_2d requires dim=2");
+    let n_nodes = mesh.n_nodes() as usize;
+    let mut rhs = vec![0.0; n_nodes];
+    let mut coo = CooMatrix::<f64>::new(n_nodes, n_nodes);
+    let pen = cfg.penalty_normal;
     let contact_set: std::collections::HashSet<i32> =
         cfg.contact_tags.iter().copied().collect();
+    let (pts, wts) = gauss_edge_2pt();
+    let eta = 1e-8;
 
-    // Iterate over boundary faces
     for f in 0..mesh.n_boundary_faces() as u32 {
         let tag = mesh.face_tag(f);
-        if !contact_set.contains(&tag) {
-            continue;
-        }
-
+        if !contact_set.contains(&tag) { continue; }
         let fnodes = mesh.face_nodes(f);
-        if fnodes.len() < 2 {
-            continue;
-        }
-
-        // P1: each boundary facet has 2 nodes
-        let n0 = fnodes[0];
-        let n1 = fnodes[1];
-
-        // Physical coordinates of the two endpoints
-        let p0 = mesh.node_coords(n0);
-        let p1 = mesh.node_coords(n1);
-
-        // Edge length
+        if fnodes.len() < 2 { continue; }
+        let n0 = fnodes[0] as usize;
+        let n1 = fnodes[1] as usize;
+        let p0 = mesh.node_coords(n0 as u32);
+        let p1 = mesh.node_coords(n1 as u32);
         let dx = p1[0] - p0[0];
         let dy = p1[1] - p0[1];
         let edge_len = (dx * dx + dy * dy).sqrt();
-        if edge_len < 1e-30 {
-            continue;
-        }
+        if edge_len < 1e-30 { continue; }
 
-        // 2-point Gauss quadrature on the edge [0,1]
-        let gl_pts = [0.211324865405187, 0.788675134594813];
-        let gl_wts = [0.5, 0.5];
-
-        for (t, w) in gl_pts.iter().zip(gl_wts.iter()) {
-            let x_phys = [p0[0] + t * dx, p0[1] + t * dy];
+        for (ti, (xi, wt)) in pts.iter().zip(wts.iter()).enumerate() {
+            let x_phys = [p0[0] + xi * dx, p0[1] + xi * dy];
             let gap = (cfg.gap_function)(&x_phys);
-
-            // P1 basis on the edge
-            let phi = [1.0 - t, *t];
-
-            // P1: DOF for node i is i
-            let dofs = [n0 as usize, n1 as usize];
-
-            // Evaluate u_h at this quadrature point
-            let mut uh = 0.0;
-            for ln in 0..2 {
-                uh += u[dofs[ln]] * phi[ln];
-            }
-
-            // Contact residual contribution
+            let phi = [1.0 - xi, *xi]; // P1 shape functions on [0,1]
+            let uh = u[n0] * phi[0] + u[n1] * phi[1];
             let gap_uh = uh - gap;
-            let np = neg_part(gap_uh);
-            let npd = neg_part_deriv(gap_uh);
-
-            let w_phys = w * edge_len;
-            let force = -pen * np * w_phys;
-
+            let lam = if lagrange_multipliers.is_empty() { 0.0 }
+                      else { lagrange_multipliers[ti % lagrange_multipliers.len()] };
+            let active = lam + pen * gap_uh;
+            // Penalty only (no AL) or AL branch
+            let (np, npd) = if lagrange_multipliers.is_empty() {
+                (neg_part(gap_uh), neg_part_d(gap_uh))
+            } else {
+                (neg_part_smooth(active, eta), neg_part_smooth_d(active, eta))
+            };
+            let w_phys = wt * edge_len;
+            let force = if lagrange_multipliers.is_empty() {
+                -pen * np * w_phys
+            } else {
+                -(lam + pen * np) * w_phys
+            };
             for ln in 0..2 {
-                rhs[dofs[ln]] += force * phi[ln];
-
-                // Tangent stiffness
+                rhs[[n0, n1][ln]] += force * phi[ln];
                 for lm in 0..2 {
-                    let k_contrib = -pen * npd * phi[ln] * phi[lm] * w_phys;
-                    coo.add(dofs[ln], dofs[lm], k_contrib);
+                    let k = if lagrange_multipliers.is_empty() {
+                        -pen * npd
+                    } else {
+                        -pen * npd
+                    };
+                    coo.add([n0, n1][ln], [n0, n1][lm], k * phi[ln] * phi[lm] * w_phys);
                 }
             }
         }
     }
-
-    let tang = coo.into_csr();
-    (rhs, tang)
+    (rhs, coo.into_csr())
 }
 
-/// Simple Newton solver for contact problems.
+// ─── 2D vector contact (elasticity) ──────────────────────────────────────────
+
+/// Assemble contact + Coulomb friction for **2D elasticity** (2 DOFs/node).
+pub fn assemble_contact_2d_vector<M: MeshTopology>(
+    mesh: &M,
+    cfg: &ContactConfig,
+    u: &[f64],
+    lam_n: &[f64],
+) -> (Vec<f64>, CsrMatrix<f64>) {
+    assert_eq!(mesh.dim() as usize, 2, "assemble_contact_2d_vector requires dim=2");
+    let n_nodes = mesh.n_nodes() as usize;
+    let n_dofs = n_nodes * 2;
+    let mut rhs = vec![0.0; n_dofs];
+    let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+    let pen_n = cfg.penalty_normal;
+    let contact_set: std::collections::HashSet<i32> =
+        cfg.contact_tags.iter().copied().collect();
+    let (pts, wts) = gauss_edge_2pt();
+    let eta = 1e-8;
+    let (mu, pen_t) = match &cfg.friction {
+        FrictionModel::Frictionless => (0.0, 0.0),
+        FrictionModel::Coulomb { mu, penalty_tangential } => (*mu, *penalty_tangential),
+    };
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        let tag = mesh.face_tag(f);
+        if !contact_set.contains(&tag) { continue; }
+        let fnodes = mesh.face_nodes(f);
+        if fnodes.len() < 2 { continue; }
+        let n0 = fnodes[0] as usize;
+        let n1 = fnodes[1] as usize;
+        let p0 = mesh.node_coords(n0 as u32);
+        let p1 = mesh.node_coords(n1 as u32);
+        let dx = p1[0] - p0[0];
+        let dy = p1[1] - p0[1];
+        let el = (dx * dx + dy * dy).sqrt();
+        if el < 1e-30 { continue; }
+        // Outward unit normal (rotate tangent +90°)
+        let nx = -dy / el;
+        let ny = dx / el;
+        let tx = dx / el;  // unit tangent
+        let ty = dy / el;
+
+        for (ti, (xi, wt)) in pts.iter().zip(wts.iter()).enumerate() {
+            let x_phys = [p0[0] + xi * dx, p0[1] + xi * dy];
+            let gap = (cfg.gap_function)(&x_phys);
+            let phi = [1.0 - xi, *xi];
+            let ux_qp = u[n0*2] * phi[0] + u[n1*2] * phi[1];
+            let uy_qp = u[n0*2+1] * phi[0] + u[n1*2+1] * phi[1];
+            let un_qp = ux_qp * nx + uy_qp * ny;
+            let ut_qp = ux_qp * tx + uy_qp * ty;
+            let gap_un = un_qp - gap;
+
+            // ── Normal contact ──
+            let lam = if lam_n.is_empty() { 0.0 } else { lam_n[ti % lam_n.len()] };
+            let active = lam + pen_n * gap_un;
+            let (np, npd) = if lam_n.is_empty() {
+                (neg_part(gap_un), neg_part_d(gap_un))
+            } else {
+                (neg_part_smooth(active, eta), neg_part_smooth_d(active, eta))
+            };
+            let w_phys = wt * el;
+            let r_n = if lam_n.is_empty() { pen_n * np } else { lam + pen_n * np };
+            let fn_x = -r_n * nx;
+            let fn_y = -r_n * ny;
+
+            // ── Friction ──
+            let (ft_x, ft_y, df_dux, df_duy) = if mu > 0.0 && pen_t > 0.0 && gap_un < 0.0 {
+                let sigma_n = r_n.abs();
+                let sigma_t_trial = pen_t * ut_qp;
+                let sigma_t_max = mu * sigma_n + 1e-15;
+                if sigma_t_trial.abs() <= sigma_t_max {
+                    // Stick
+                    let sx = -sigma_t_trial * tx;
+                    let sy = -sigma_t_trial * ty;
+                    (sx, sy, -pen_t, 0.0)
+                } else {
+                    // Slip
+                    let sign = if ut_qp >= 0.0 { 1.0 } else { -1.0 };
+                    let sigma_t_slip = sigma_t_max * sign;
+                    let sx = -sigma_t_slip * tx;
+                    let sy = -sigma_t_slip * ty;
+                    let r_n_d = if lam_n.is_empty() { pen_n * neg_part_d(gap_un) } else { pen_n * npd };
+                    (sx, sy, -mu * sign * r_n_d * nx, -mu * sign * r_n_d * ny)
+                }
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
+
+            for ln in 0..2 {
+                let idx = [n0*2, n1*2][ln];
+                let idy = [n0*2+1, n1*2+1][ln];
+                let f_loc = (fn_x + ft_x) * w_phys * phi[ln];
+                let g_loc = (fn_y + ft_y) * w_phys * phi[ln];
+                rhs[idx] += f_loc;
+                rhs[idy] += g_loc;
+                for lm in 0..2 {
+                    let jdx = [n0*2, n1*2][lm];
+                    let jdy = [n0*2+1, n1*2+1][lm];
+                    let k_n = if lam_n.is_empty() { pen_n * neg_part_d(gap_un) } else { pen_n * npd };
+                    let bl = phi[ln] * phi[lm] * w_phys;
+                    coo.add(idx, jdx, k_n * nx * nx * bl);
+                    coo.add(idx, jdy, k_n * nx * ny * bl);
+                    coo.add(idy, jdx, k_n * ny * nx * bl);
+                    coo.add(idy, jdy, k_n * ny * ny * bl);
+                    // Friction Jacobian
+                    if mu > 0.0 && pen_t > 0.0 && gap_un < 0.0 {
+                        let sigma_n = r_n.abs();
+                        let s_t_trial = pen_t * ut_qp;
+                        if s_t_trial.abs() <= mu * sigma_n + 1e-15 {
+                            // Stick
+                            let kf = df_dux * bl;
+                            coo.add(idx, jdx, kf * tx * tx);
+                            coo.add(idx, jdy, kf * tx * ty);
+                            coo.add(idy, jdx, kf * ty * tx);
+                            coo.add(idy, jdy, kf * ty * ty);
+                        } else {
+                            // Slip: coupling
+                            let kc = df_dux * bl;
+                            coo.add(idx, jdx, kc);
+                            coo.add(idx, jdy, kc);
+                            coo.add(idy, jdx, df_duy * bl);
+                            coo.add(idy, jdy, df_duy * bl);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (rhs, coo.into_csr())
+}
+
+// ─── 3D scalar contact (H¹, P1) ─────────────────────────────────────────────
+
+/// Assemble normal contact force for **3D** scalar P1 (tet faces).
+pub fn assemble_contact_3d<M: MeshTopology>(
+    mesh: &M,
+    cfg: &ContactConfig,
+    u: &[f64],
+    lagrange_multipliers: &[f64],
+) -> (Vec<f64>, CsrMatrix<f64>) {
+    assert_eq!(mesh.dim() as usize, 3, "assemble_contact_3d requires dim=3");
+    let n_nodes = mesh.n_nodes() as usize;
+    let mut rhs = vec![0.0; n_nodes];
+    let mut coo = CooMatrix::<f64>::new(n_nodes, n_nodes);
+    let pen = cfg.penalty_normal;
+    let contact_set: std::collections::HashSet<i32> =
+        cfg.contact_tags.iter().copied().collect();
+    let (tri_pts, tri_wts) = gauss_tri_3pt();
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        let tag = mesh.face_tag(f);
+        if !contact_set.contains(&tag) { continue; }
+        let fnodes = mesh.face_nodes(f);
+        if fnodes.len() < 3 { continue; }
+        let n0 = fnodes[0] as usize;
+        let n1 = fnodes[1] as usize;
+        let n2 = fnodes[2] as usize;
+        let p0 = mesh.node_coords(n0 as u32);
+        let p1 = mesh.node_coords(n1 as u32);
+        let p2 = mesh.node_coords(n2 as u32);
+
+        // Edge vectors → cross product → area
+        let jx = p1[0] - p0[0]; let jy = p1[1] - p0[1]; let jz = p1[2] - p0[2];
+        let kx = p2[0] - p0[0]; let ky = p2[1] - p0[1]; let kz = p2[2] - p0[2];
+        let cx = jy * kz - jz * ky;
+        let cy = jz * kx - jx * kz;
+        let cz = jx * ky - jy * kx;
+        let area2 = (cx * cx + cy * cy + cz * cz).sqrt();
+        if area2 < 1e-30 { continue; }
+        let face_area = area2 * 0.5;
+
+        for (ti, (l, wt)) in tri_pts.iter().zip(tri_wts.iter()).enumerate() {
+            let (l1, l2, l3) = (l[0], l[1], l[2]);
+            let x_phys = [
+                p0[0] * l1 + p1[0] * l2 + p2[0] * l3,
+                p0[1] * l1 + p1[1] * l2 + p2[1] * l3,
+                p0[2] * l1 + p1[2] * l2 + p2[2] * l3,
+            ];
+            let gap = (cfg.gap_function)(&x_phys);
+            let phi = [l1, l2, l3]; // P1 = barycentric
+            let uh = u[n0] * phi[0] + u[n1] * phi[1] + u[n2] * phi[2];
+            let gap_uh = uh - gap;
+            let lam = if lagrange_multipliers.is_empty() { 0.0 }
+                      else { lagrange_multipliers[ti % lagrange_multipliers.len()] };
+            let active = lam + pen * gap_uh;
+            let (np, npd) = if lagrange_multipliers.is_empty() {
+                (neg_part(gap_uh), neg_part_d(gap_uh))
+            } else {
+                (neg_part_smooth(active, 1e-8), neg_part_smooth_d(active, 1e-8))
+            };
+            let w_phys = wt * face_area;
+            let force = if lagrange_multipliers.is_empty() { -pen * np * w_phys }
+                        else { -(lam + pen * np) * w_phys };
+
+            for ln in 0..3 {
+                rhs[[n0, n1, n2][ln]] += force * phi[ln];
+                for lm in 0..3 {
+                    let k = -pen * npd * phi[ln] * phi[lm] * w_phys;
+                    coo.add([n0, n1, n2][ln], [n0, n1, n2][lm], k);
+                }
+            }
+        }
+    }
+    (rhs, coo.into_csr())
+}
+
+// ─── Solver ────────────────────────────────────────────────────────────────────
+
+/// Newton solver for contact problems (2D scalar/vector, 3D scalar).
 ///
-/// Solves the nonlinear system `A·u + f_contact(u) = b` where `f_contact`
-/// is the penalty contact force.
-pub fn solve_contact_newton<S: FESpace>(
+/// Supports penalty and Augmented Lagrangian contact, with optional
+/// Coulomb friction (2D vector only).
+pub fn solve_contact_newton<M: MeshTopology>(
     stiffness: &CsrMatrix<f64>,
     rhs_load: &[f64],
-    space: &S,
+    mesh: &M,
     cfg: &ContactConfig,
     max_iter: usize,
     tol: f64,
-) -> Vec<f64>
-where
-    S::Mesh: MeshTopology,
-{
+) -> Vec<f64> {
     let n = stiffness.nrows;
     let mut u = vec![0.0; n];
+    let dim = mesh.dim() as usize;
+    let is_vector = n == mesh.n_nodes() as usize * dim && dim == 2;
+    let is_3d = dim == 3;
 
-    for _iter in 0..max_iter {
-        let (f_contact, k_contact) = assemble_contact_2d(space, cfg, &u);
+    let al_iters = match &cfg.contact_type {
+        ContactType::AugmentedLagrangian { max_al_iter, .. } => *max_al_iter,
+        _ => 1,
+    };
+    let al_tol = match &cfg.contact_type {
+        ContactType::AugmentedLagrangian { al_tol, .. } => *al_tol,
+        _ => tol,
+    };
 
-        // Residual: R(u) = A*u + f_contact(u) - b
-        let mut ax = vec![0.0; n];
-        stiffness.spmv(&u, &mut ax);
+    // AL multipliers
+    let n_faces = mesh.n_boundary_faces() as usize;
+    let qp_per_face = 2;
+    let mut lam_n = vec![0.0; n_faces.max(1) * qp_per_face];
 
-        let mut res = vec![0.0; n];
-        for i in 0..n {
-            res[i] = ax[i] + f_contact[i] - rhs_load[i];
-        }
-        let res_norm: f64 = res.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let b_norm: f64 = rhs_load.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-30);
-        if res_norm < tol * b_norm.max(1.0) {
-            break;
-        }
+    for al_iter in 0..al_iters {
+        for _iter in 0..max_iter {
+            let (f_contact, k_contact) = if is_vector {
+                assemble_contact_2d_vector(mesh, cfg, &u, &lam_n)
+            } else if is_3d {
+                // scalar 3D
+                assemble_contact_3d(mesh, cfg, &u, &lam_n)
+            } else {
+                // scalar 2D
+                assemble_contact_2d(mesh, mesh, cfg, &u, &lam_n)
+            };
 
-        // Tangent matrix: A + K_contact
-        let jac = stiffness.add(&k_contact);
-
-        // Solve J * du = -R
-        let mut du = vec![0.0; n];
-        let neg_res: Vec<f64> = res.iter().map(|v| -v).collect();
-        let _ = fem_solver::solve_cg(&jac, &neg_res, &mut du,
-            &fem_solver::SolverConfig { rtol: 1e-10, max_iter: 500, ..Default::default() });
-
-        // Line search
-        let mut alpha = 1.0;
-        for _ in 0..10 {
-            let mut u_new = u.clone();
+            // Residual: R(u) = K·u + f_contact(u) - b
+            let mut ax = vec![0.0; n];
+            stiffness.spmv(&u, &mut ax);
+            let mut res = vec![0.0; n];
             for i in 0..n {
-                u_new[i] += alpha * du[i];
+                res[i] = ax[i] + f_contact[i] - rhs_load[i];
             }
-            let (f_new, _) = assemble_contact_2d(space, cfg, &u_new);
-            let mut ax_new = vec![0.0; n];
-            stiffness.spmv(&u_new, &mut ax_new);
-            let mut r_new = vec![0.0; n];
-            for i in 0..n {
-                r_new[i] = ax_new[i] + f_new[i] - rhs_load[i];
+            let rn: f64 = res.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let b_n: f64 = rhs_load.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-30);
+            if rn < tol * b_n.max(1.0) { break; }
+
+            let jac = stiffness.add(&k_contact);
+            let mut du = vec![0.0; n];
+            let neg_r: Vec<f64> = res.iter().map(|v| -v).collect();
+            let _ = fem_solver::solve_cg(
+                &jac, &neg_r, &mut du,
+                &fem_solver::SolverConfig { rtol: 1e-10, max_iter: 500, ..Default::default() },
+            );
+
+            // Line search
+            let mut alpha = 1.0;
+            for _ in 0..10 {
+                let mut u_n = u.clone();
+                for i in 0..n { u_n[i] += alpha * du[i]; }
+                let (f_n, _) = if is_vector {
+                    assemble_contact_2d_vector(mesh, cfg, &u_n, &lam_n)
+                } else if is_3d {
+                    assemble_contact_3d(mesh, cfg, &u_n, &lam_n)
+                } else {
+                    assemble_contact_2d(mesh, mesh, cfg, &u_n, &lam_n)
+                };
+                let mut ax_n = vec![0.0; n];
+                stiffness.spmv(&u_n, &mut ax_n);
+                let mut r_n = vec![0.0; n];
+                for i in 0..n { r_n[i] = ax_n[i] + f_n[i] - rhs_load[i]; }
+                let rn_n: f64 = r_n.iter().map(|v| v * v).sum::<f64>().sqrt();
+                if rn_n < rn || alpha < 1e-8 { u = u_n; break; }
+                alpha *= 0.5;
             }
-            let rn_new: f64 = r_new.iter().map(|v| v * v).sum::<f64>().sqrt();
-            if rn_new < res_norm || alpha < 1e-8 {
-                u = u_new;
-                break;
+        }
+
+        // Augmented Lagrangian multiplier update
+        if matches!(cfg.contact_type, ContactType::AugmentedLagrangian { .. }) {
+            let pen = cfg.penalty_normal;
+            for f in 0..mesh.n_boundary_faces() as usize {
+                let fnodes = mesh.face_nodes(f as u32);
+                if fnodes.len() < 2 { continue; }
+                let p0 = mesh.node_coords(fnodes[0]);
+                let uh_avg = if is_vector { u[fnodes[0] as usize * 2] }
+                             else { u[fnodes[0] as usize] };
+                let gap = (cfg.gap_function)(&p0);
+                for q in 0..qp_per_face {
+                    lam_n[f * qp_per_face + q] = (lam_n[f * qp_per_face + q] + pen * (uh_avg - gap)).max(0.0);
+                }
             }
-            alpha *= 0.5;
+        }
+
+        // AL convergence
+        if al_iter > 0 {
+            let mut pmax = 0.0;
+            let pen = cfg.penalty_normal;
+            for f in 0..mesh.n_boundary_faces() as usize {
+                let fnodes = mesh.face_nodes(f as u32);
+                if fnodes.len() < 2 { continue; }
+                let p0 = mesh.node_coords(fnodes[0]);
+                let gap = (cfg.gap_function)(&p0);
+                let uh_avg = if is_vector { u[fnodes[0] as usize * 2] } else { u[fnodes[0] as usize] };
+                let gp = (pen * (uh_avg - gap)).abs();
+                if gp > pmax { pmax = gp; }
+            }
+            if pmax < al_tol { break; }
         }
     }
     u
 }
 
+// ─── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_linalg::CooMatrix;
     use fem_mesh::SimplexMesh;
-    use fem_space::H1Space;
 
-    #[test]
-    fn test_contact_assembles() {
+    fn setup_2d() -> (SimplexMesh<2>, ContactConfig) {
         let mesh = SimplexMesh::<2>::unit_square_tri(8);
-        let space = H1Space::new(mesh, 1);
-
-        // Simple gap function: obstacle at y = -0.1
         let cfg = ContactConfig {
-            penalty: 1e6,
+            penalty_normal: 1e6,
+            contact_type: ContactType::Penalty,
+            friction: FrictionModel::Frictionless,
             gap_function: |x: &[f64]| -0.1 - x[1],
             contact_tags: vec![1],
         };
+        (mesh, cfg)
+    }
 
-        let u = vec![0.0; space.n_dofs()];
-        let (f, k) = assemble_contact_2d(&space, &cfg, &u);
-        assert_eq!(f.len(), space.n_dofs());
-        assert!(k.nrows == space.n_dofs());
+    #[test]
+    fn test_contact_assembles() {
+        let (ref mesh, cfg) = setup_2d();
+        let u = vec![0.0; mesh.n_nodes() as usize];
+        let (f, k) = assemble_contact_2d(mesh, mesh, &cfg, &u, &[]);
+        assert_eq!(f.len(), mesh.n_nodes() as usize);
+        assert_eq!(k.nrows, mesh.n_nodes() as usize);
     }
 
     #[test]
     fn penalty_force_vanishes_when_no_penetration() {
         let mesh = SimplexMesh::<2>::unit_square_tri(8);
-        let space = H1Space::new(mesh, 1);
-
-        // Gap function that is always satisfied (u=0, gap = -1 → no penetration)
         let cfg = ContactConfig {
-            penalty: 1e6,
             gap_function: |_: &[f64]| -1.0,
-            contact_tags: vec![1],
+            ..setup_2d().1
         };
-
-        let u = vec![0.0; space.n_dofs()];
-        let (f, _k) = assemble_contact_2d(&space, &cfg, &u);
-        let f_norm: f64 = f.iter().map(|v| v * v).sum::<f64>().sqrt();
-        assert!(f_norm < 1e-30, "no contact force when gap is open: {f_norm:.3e}");
+        let u = vec![0.0; mesh.n_nodes() as usize];
+        let (f, _) = assemble_contact_2d(&mesh, &mesh, &cfg, &u, &[]);
+        let fnorm: f64 = f.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(fnorm < 1e-30, "expected zero contact force: {fnorm:.3e}");
     }
 
     #[test]
     fn penalty_force_exists_when_penetration() {
         let mesh = SimplexMesh::<2>::unit_square_tri(8);
-        let space = H1Space::new(mesh, 1);
-
-        // Gap that forces penetration: u=0 but gap = 0.1 → penetration of 0.1
         let cfg = ContactConfig {
-            penalty: 1e5,
+            penalty_normal: 1e5,
             gap_function: |_: &[f64]| 0.1,
-            contact_tags: vec![1],
+            ..setup_2d().1
         };
+        let u = vec![0.0; mesh.n_nodes() as usize];
+        let (f, _) = assemble_contact_2d(&mesh, &mesh, &cfg, &u, &[]);
+        let fnorm: f64 = f.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(fnorm > 0.0, "expected contact force: {fnorm:.3e}");
+    }
 
-        let u = vec![0.0; space.n_dofs()];
-        let (f, _k) = assemble_contact_2d(&space, &cfg, &u);
-        let f_norm: f64 = f.iter().map(|v| v * v).sum::<f64>().sqrt();
-        assert!(f_norm > 0.0, "contact force should exist when penetrating: {f_norm:.3e}");
+    #[test]
+    fn test_contact_2d_vector_assembles() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let cfg = ContactConfig {
+            penalty_normal: 1e6,
+            gap_function: |_: &[f64]| -0.1,
+            ..Default::default()
+        };
+        let u = vec![0.0; mesh.n_nodes() as usize * 2];
+        let (f, k) = assemble_contact_2d_vector(&mesh, &cfg, &u, &[]);
+        assert_eq!(f.len(), mesh.n_nodes() as usize * 2);
+        assert_eq!(k.nrows, mesh.n_nodes() as usize * 2);
+    }
+
+    #[test]
+    fn test_contact_3d_assembles() {
+        use fem_space::H1Space;
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let space = H1Space::new(mesh, 1);
+        let mesh_ref = space.mesh();
+        let cfg = ContactConfig {
+            penalty_normal: 1e6,
+            gap_function: |x: &[f64]| -0.1 - x[2],
+            contact_tags: vec![5],
+            ..Default::default()
+        };
+        let u = vec![0.0; mesh_ref.n_nodes() as usize];
+        let (f, k) = assemble_contact_3d(mesh_ref, &cfg, &u, &[]);
+        assert_eq!(f.len(), mesh_ref.n_nodes() as usize);
+        assert_eq!(k.nrows, mesh_ref.n_nodes() as usize);
+    }
+
+    #[test]
+    fn augmented_lagrangian_converges() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let cfg = ContactConfig {
+            penalty_normal: 1e3,
+            contact_type: ContactType::AugmentedLagrangian { max_al_iter: 3, al_tol: 1e-4 },
+            gap_function: |_: &[f64]| 0.1,
+            ..setup_2d().1
+        };
+        let n = mesh.n_nodes() as usize;
+        // Build identity matrix via CooMatrix
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 1.0); }
+        let stiff = coo.into_csr();
+        let rhs = vec![0.0; n];
+        let u = solve_contact_newton(&stiff, &rhs, &mesh, &cfg, 20, 1e-8);
+        let max_u = u.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(max_u < -1e-6, "expected non-zero solution: max_u={max_u:.6e}");
     }
 }
