@@ -283,6 +283,24 @@ impl TmopObjective2d {
         TmopObjective2d { n_nodes, coords, conn: mesh.conn.clone(), elem_tags: None, free_nodes, targets }
     }
 
+    /// Replace the per-element target Jacobians (default: identity).
+    pub fn with_targets(&mut self, targets: Vec<Matrix2<f64>>) {
+        assert_eq!(targets.len(), self.targets.len());
+        self.targets = targets;
+    }
+
+    /// Target Jacobian for an **ideal equilateral triangle** with unit edge length.
+    /// Reference: [(0,0), (1,0), (0.5, √3/2)] → J = [[1, 0.5], [0, √3/2]].
+    pub fn ideal_equilateral_target() -> Matrix2<f64> {
+        Matrix2::new(1.0, 0.5, 0.0, 3.0_f64.sqrt() * 0.5)
+    }
+
+    /// Set all targets to the ideal equilateral shape.
+    pub fn set_ideal_equilateral(&mut self) {
+        let ideal = Self::ideal_equilateral_target();
+        for t in self.targets.iter_mut() { *t = ideal; }
+    }
+
     pub fn n_free(&self) -> usize { self.free_nodes.len() }
 
     pub fn get_x(&self) -> Vec<f64> {
@@ -401,6 +419,26 @@ impl TmopObjectiveTetra {
         let free_nodes: Vec<usize> = (0..n_nodes).filter(|&i| !on_boundary[i]).collect();
         let targets = vec![Matrix3::identity(); n_elem];
         TmopObjectiveTetra { n_nodes, coords, conn: mesh.conn.clone(), free_nodes, targets }
+    }
+
+    /// Replace the per-element target Jacobians (default: identity).
+    pub fn with_targets(&mut self, targets: Vec<Matrix3<f64>>) {
+        assert_eq!(targets.len(), self.targets.len());
+        self.targets = targets;
+    }
+
+    /// Target Jacobian for an **ideal regular tetrahedron** (unit edge).
+    /// Reference: [(0,0,0), (1,0,0), (0.5, √3/2, 0), (0.5, √3/6, √(2/3))].
+    pub fn ideal_regular_target() -> Matrix3<f64> {
+        let s32 = (3.0_f64).sqrt() * 0.5;
+        let s6 = (2.0_f64 / 3.0_f64).sqrt();
+        Matrix3::new(1.0, 0.5, 0.5, 0.0, s32, (3.0_f64).sqrt() / 6.0, 0.0, 0.0, s6)
+    }
+
+    /// Set all targets to the ideal regular tetrahedron shape.
+    pub fn set_ideal_regular(&mut self) {
+        let ideal = Self::ideal_regular_target();
+        for t in self.targets.iter_mut() { *t = ideal; }
     }
 
     pub fn n_free(&self) -> usize { self.free_nodes.len() }
@@ -1114,5 +1152,29 @@ mod tests {
 
     fn min_hex_quality(mesh: &SimplexMesh<3>) -> f64 {
         (0..mesh.n_elems() as u32).map(|e| hex_scaled_jacobian(mesh, e)).fold(f64::INFINITY, f64::min)
+    }
+
+    #[test]
+    fn tmop_target_ideal_equilateral() {
+        let t = TmopObjective2d::ideal_equilateral_target();
+        let det = t.determinant();
+        assert!((det - 3.0_f64.sqrt() * 0.5).abs() < 1e-12, "equilateral area = sqrt(3)/2, got {det}");
+    }
+
+    #[test]
+    fn tmop_target_regular_tetrahedron() {
+        let t = TmopObjectiveTetra::ideal_regular_target();
+        let det = t.determinant();
+        let vol = det.abs() / 6.0;
+        assert!((vol - (2.0_f64.sqrt() / 12.0)).abs() < 1e-12, "reg tet vol = sqrt(2)/12, got {vol}");
+    }
+
+    #[test]
+    fn tmop_2d_improves_with_ideal_target() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mut obj = TmopObjective2d::new(&mesh);
+        obj.set_ideal_equilateral();
+        let result = tmop_optimise_2d(&mesh, &TmopMetric::Shape, 30, 0.05);
+        assert!(result.iter().all(|&v| v.is_finite()), "non-finite after optimisation");
     }
 }
