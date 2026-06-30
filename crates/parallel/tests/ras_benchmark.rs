@@ -405,8 +405,8 @@ fn ras_benchmark_report_two_ranks() {
 #[ignore = "benchmark-style scaling test; run explicitly"]
 fn ras_scaling_report_pcg_ilu0_overlap1() {
     let ranks_list = [1usize, 2, 4, 8];
-    let strong_mesh_n = 256usize;    // ~66K DOF
-    let weak_base_mesh_n = 128usize; // ~16K DOF per rank
+    let strong_mesh_n = 1000usize;  // ~1M DOF
+    let weak_base_mesh_n = 500usize; // ~250K DOF per rank
 
     let mut rows: Vec<ScalingRow> = Vec::new();
 
