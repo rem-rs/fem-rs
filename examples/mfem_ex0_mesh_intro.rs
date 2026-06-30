@@ -86,7 +86,7 @@ fn main() {
     if args.glvis {
         match fem_io::glvis::GlVisSocket::connect("localhost", 19916) {
             Ok(mut vis) => {
-                vis.send_solution(space.mesh(), &u, "u").ok();
+                vis.send_solution_2d(space.mesh(), &u, "u").ok();
                 println!("  Sent to GLVis (localhost:19916)");
             }
             Err(e) => println!("  GLVis not available: {}", e),
