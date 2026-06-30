@@ -1585,50 +1585,71 @@ fn compute_rtk_subface_transform<M: MeshTopology>(
     coarse_face: FaceKey,
     nd: usize,
 ) -> Vec<Vec<f64>> {
-    if nd == 1 {
-        return vec![vec![1.0]];
-    }
+    if nd == 1 { return vec![vec![1.0]]; }
 
-    // For ND=3 (RT1 Tet face: 3 moments), compute the 3×3 transformation.
-    // The three RT1 face moments are:
-    //   M0 = ∫_face u·n dσ          (zeroth moment, constant weight)
-    //   M1 = ∫_face u·n · u dσ      (first moment, linear in u)
-    //   M2 = ∫_face u·n · v dσ      (first moment, linear in v)
-    // where (u,v) are barycentric coordinates w.r.t. face vertices.
+    // Quadrature-based transformation T[i][j] = ∫_fine φ_j · p_i dσ
+    let ca = mesh.node_coords(coarse_face.0);
+    let cb = mesh.node_coords(coarse_face.1);
+    let cc = mesh.node_coords(coarse_face.2);
+    let fa = mesh.node_coords(fine_face.0);
+    let fb = mesh.node_coords(fine_face.1);
+    let fc = mesh.node_coords(fine_face.2);
 
-    // For a sub-face that's a child of the coarse face (uniform refinement),
-    // the transformation can be computed using the monomial basis.
+    // 7-point triangle quadrature (degree 5)
+    let q = [(1./3.,1./3.,0.225),(0.05971587,0.47014206,0.13239415),
+             (0.47014206,0.05971587,0.13239415),(0.47014206,0.47014206,0.13239415),
+             (0.79742699,0.10128651,0.12593918),(0.10128651,0.79742699,0.12593918),
+             (0.10128651,0.10128651,0.12593918)];
 
-    // Build the transformation using face parametrization.
-    // For uniform Tet refinement, each sub-face is 1/4 of the coarse face.
-    // The normal moments scale as:
-    //   M0_sub = (area_sub/area_coarse) * M0_coarse
-    //   M1_sub, M2_sub depend on the face position and orientation.
+    let monomial = |r: f64, s: f64, i: usize| -> f64 {
+        match i { 0 => 1.0, 1 => r, 2 => s, 3 => r*r, 4 => r*s, 5 => s*s, _ => 0.0 }
+    };
 
-    // For a robust implementation, compute via quadrature:
-    // The coarse face has k DOFs. The fine DOF functional is:
-    //   λ_fine_i(u) = ∫_fine u·n · p_i(ξ,η) dσ
-    // where p_i are the DOF test functions (monomials).
-    // In the coarse basis, u·n = Σ_j λ_coarse_j · φ_j(ξ,η),
-    // where φ_j are the dual basis functions.
-    // Then λ_fine_i = Σ_j λ_coarse_j · ∫_fine φ_j · p_i dσ
-    // So T[i][j] = ∫_fine φ_j · p_i dσ.
+    // Map physical point to coarse-face ref coords via least-squares
+    let d1 = [cb[0]-ca[0], cb[1]-ca[1], cb[2]-ca[2]];
+    let d2 = [cc[0]-ca[0], cc[1]-ca[1], cc[2]-ca[2]];
+    let j00 = d1[0]*d1[0]+d1[1]*d1[1]+d1[2]*d1[2];
+    let j01 = d1[0]*d2[0]+d1[1]*d2[1]+d1[2]*d2[2];
+    let j11 = d2[0]*d2[0]+d2[1]*d2[1]+d2[2]*d2[2];
+    let det_j = j00*j11 - j01*j01;
 
-    // For affine faces and uniform refinement, compute T explicitly.
-    // With coarse face parametrized by (ξ,η) in the reference triangle,
-    // a corner sub-triangle has vertices at (0,0), (0.5,0), (0,0.5).
-    // The moments transform via the monomial moment formulas.
-
-    // For now, use a simplified approximation: for ND=3 (RT1),
-    // approximate the transformation as diagonal with area-ratio scaling.
-    // This is exact for the zeroth moment; the first-moment coupling
-    // terms require the full computation.
-    let ratio = rtx_flux_ratio(mesh, fine_face, coarse_face);
+    let coarse_normal = [
+        d1[1]*d2[2]-d1[2]*d2[1], d1[2]*d2[0]-d1[0]*d2[2], d1[0]*d2[1]-d1[1]*d2[0]];
+    let cn_len = (coarse_normal[0]*coarse_normal[0]+coarse_normal[1]*coarse_normal[1]
+                +coarse_normal[2]*coarse_normal[2]).sqrt().max(1e-300);
 
     let mut t = vec![vec![0.0_f64; nd]; nd];
-    for i in 0..nd {
-        t[i][i] = ratio;
+    for &(r, s, w) in &q {
+        let px = fa[0] + r*(fb[0]-fa[0]) + s*(fc[0]-fa[0]);
+        let py = fa[1] + r*(fb[1]-fa[1]) + s*(fc[1]-fa[1]);
+        let pz = fa[2] + r*(fb[2]-fa[2]) + s*(fc[2]-fa[2]);
+        let p0 = [px-ca[0], py-ca[1], pz-ca[2]];
+        let rhs_r = d1[0]*p0[0]+d1[1]*p0[1]+d1[2]*p0[2];
+        let rhs_s = d2[0]*p0[0]+d2[1]*p0[1]+d2[2]*p0[2];
+        let (rc, sc) = if det_j.abs() > 1e-30 {
+            ((j11*rhs_r - j01*rhs_s)/det_j, (j00*rhs_s - j01*rhs_r)/det_j)
+        } else { (0.0, 0.0) };
+
+        let tr = [fb[0]-fa[0], fb[1]-fa[1], fb[2]-fa[2]];
+        let ts = [fc[0]-fa[0], fc[1]-fa[1], fc[2]-fa[2]];
+        let fnx = tr[1]*ts[2]-tr[2]*ts[1]; let fny = tr[2]*ts[0]-tr[0]*ts[2]; let fnz = tr[0]*ts[1]-tr[1]*ts[0];
+        let d_sigma = (fnx*fnx+fny*fny+fnz*fnz).sqrt() * w;
+
+        for i in 0..nd {
+            let pi = monomial(r, s, i);
+            for j in 0..nd { t[i][j] += monomial(rc, sc, j) * pi * d_sigma; }
+        }
     }
+
+    // Normalize row 0 by coarse area
+    let coarse_area = 0.5 * cn_len;
+    for j in 0..nd { t[0][j] /= coarse_area; }
+
+    // Rescale row 0 to exact area ratio
+    let area_ratio = rtx_flux_ratio(mesh, fine_face, coarse_face);
+    let row0_sum: f64 = (0..nd).map(|j| t[0][j]).sum();
+    if row0_sum.abs() > 1e-30 { let s = area_ratio / row0_sum; for j in 0..nd { t[0][j] *= s; } }
+
     t
 }
 
@@ -2523,5 +2544,81 @@ mod tests {
             (x[4] - 2.0).abs() < 1e-10,
             "second constraint: x[4]={}, expected 2", x[4]
         );
+    }
+
+    // ─── RT1/RT2 hanging constraint tests ─────────────────────────────────
+
+    #[test]
+    fn build_hdiv_hanging_constraints_3d_tet_rt1() {
+        let mesh = fem_mesh::SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = fem_mesh::amr::NCState3D::new();
+        let (fm, ec, _, fc) = nc.refine(&mesh, &[0]);
+        if ec.is_empty() { return; }
+        let h = crate::hdiv::HDivSpace::new(fm.clone(), 1);
+        let cs = build_hdiv_hanging_constraints(&h, &ec, &fc);
+        assert!(!cs.is_empty(), "expected RT1 constraints");
+        for c in &cs {
+            assert!(c.constrained < h.n_dofs(), "DOF {} out", c.constrained);
+            assert!(!c.parents.is_empty());
+            for &(p, w) in &c.parents { assert!(p < h.n_dofs()); assert!(w.is_finite()); }
+        }
+    }
+
+    #[test]
+    fn build_hdiv_hanging_constraints_3d_tet_rt2() {
+        let mesh = fem_mesh::SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = fem_mesh::amr::NCState3D::new();
+        let (fm, ec, _, fc) = nc.refine(&mesh, &[0]);
+        if ec.is_empty() { return; }
+        let h = crate::hdiv::HDivSpace::new(fm.clone(), 2);
+        let cs = build_hdiv_hanging_constraints(&h, &ec, &fc);
+        assert!(!cs.is_empty(), "expected RT2 constraints");
+        for c in &cs {
+            assert!(c.constrained < h.n_dofs(), "DOF {} out", c.constrained);
+            assert!(!c.parents.is_empty());
+            for &(p, w) in &c.parents { assert!(p < h.n_dofs()); assert!(w.is_finite()); }
+        }
+    }
+
+    #[test]
+    fn recover_hanging_values_hdiv_rt1_after_solve() {
+        let mesh = fem_mesh::SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = fem_mesh::amr::NCState3D::new();
+        let (fm, ec, _, fc) = nc.refine(&mesh, &[0]);
+        if ec.is_empty() { return; }
+        let h = crate::hdiv::HDivSpace::new(fm, 1);
+        let n = h.n_dofs();
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 1.0); }
+        let mut m = coo.into_csr(); let mut rhs = vec![1.0; n];
+        apply_hanging_constraints_hdiv(&mut m, &mut rhs, &h, &ec, &fc);
+        let mut x = rhs.clone();
+        recover_hanging_values_hdiv(&mut x, &h, &ec, &fc);
+        for c in build_hdiv_hanging_constraints(&h, &ec, &fc) {
+            let exp = c.parents.iter().map(|&(p, w)| w * x[p]).sum::<f64>();
+            assert!((x[c.constrained] - exp).abs() < 1e-10,
+                "DOF {}: {} != {}", c.constrained, x[c.constrained], exp);
+        }
+    }
+
+    #[test]
+    fn recover_hanging_values_hcurl_nd2_face_dofs() {
+        let mesh = fem_mesh::SimplexMesh::<3>::unit_cube_tet(1);
+        let mut nc = fem_mesh::amr::NCState3D::new();
+        let (fm, ec, _, fc) = nc.refine(&mesh, &[0]);
+        if ec.is_empty() { return; }
+        let h = crate::hcurl::HCurlSpace::new(fm, 2);
+        let n = h.n_dofs();
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(n, n);
+        for i in 0..n { coo.add(i, i, 1.0); }
+        let mut m = coo.into_csr(); let mut rhs = vec![1.0; n];
+        apply_hanging_constraints_hcurl(&mut m, &mut rhs, &h, &ec, &fc);
+        let mut x = rhs.clone();
+        recover_hanging_values_hcurl(&mut x, &h, &ec, &fc);
+        for c in build_hcurl_hanging_constraints(&h, &ec, &fc) {
+            let exp = c.parents.iter().map(|&(p, w)| w * x[p]).sum::<f64>();
+            assert!((x[c.constrained] - exp).abs() < 1e-10,
+                "ND2 DOF {}: {} != {}", c.constrained, x[c.constrained], exp);
+        }
     }
 }
