@@ -1,99 +1,252 @@
-//! Compressible Neo-Hookean hyperelasticity.
+//! Finite-strain hyperelasticity with multiple material models.
 //!
-//! Implements [`NonlinearForm`] for finite-strain hyperelasticity using the
-//! Newton–Raphson method.
+//! Implements [`NonlinearForm`] for:
+//! - **Neo-Hookean** (compressible)
+//! - **Mooney–Rivlin** (incompressible + bulk penalty)
+//! - **Ogden** (N=1,2,3)
 //!
-//! ## Strain energy density
+//! All models support 2D/3D via `VectorH1Space` and use the
+//! Newton–Raphson solver with Armijo line-search from [`NewtonSolver`].
+//!
+//! ## Strain energy densities
+//!
+//! ### Neo-Hookean (compressible, implemented)
 //! ```text
-//! ψ(F) = μ/2 (tr(C) - dim) - μ·ln(J) + λ/2·(ln(J))²
-//! ```
-//! where `F = I + ∇u`, `C = FᵀF`, `J = det(F)`.
-//!
-//! ## 1st Piola–Kirchhoff stress
-//! ```text
-//! P(F) = μ·F + (λ·ln(J) - μ)·F⁻ᵀ
+//! ψ = μ/2·(tr(C)-3) - μ·ln(J) + λ/2·(ln(J))²
 //! ```
 //!
-//! ## Tangent modulus (consistent linearisation)
+//! ### Mooney–Rivlin
 //! ```text
-//! ∂P_{iI}/∂F_{jJ} = μ·δᵢⱼ·δᴵᴶ + λ·(F⁻¹)ᴵₖ·(F⁻¹)ᴶₖ·δᵢⱼ
-//!                   - (λ·ln(J) - μ)·(F⁻¹)ᴶᵢ·(F⁻¹)ᴵⱼ
+//! ψ = C10·(I₁-3) + C01·(I₂-3) + K/2·(J-1)²
 //! ```
+//!
+//! ### Ogden (N-term)
+//! ```text
+//! ψ = Σ_{p=1}^N μ_p/α_p·(λ₁^{α_p}+λ₂^{α_p}+λ₃^{α_p}-3) + K/2·(J-1)²
+//! ```
+//!
+//! where `C = FᵀF`, `I₁ = tr(C)`, `I₂ = ½((tr(C))² - tr(C²))`, `J = det(F)`.
 
 #![allow(non_snake_case)]
 
 use nalgebra::DMatrix;
+use nalgebra::linalg::SVD;
 
-use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
+use fem_element::{
+    ReferenceElement,
+    lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3},
+};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 use fem_space::vector_h1::VectorH1Space;
 
-use crate::nonlinear::NonlinearForm;
+use crate::nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
 
-// ─── HyperelasticityForm ─────────────────────────────────────────────────────
+/// Hyperelastic material model.
+#[derive(Debug, Clone)]
+pub enum HyperelasticModel {
+    /// Compressible Neo-Hookean: `μ/2·(I₁-3) - μ·ln(J) + λ/2·(ln(J))²`.
+    NeoHookean { mu: f64, lambda: f64 },
+    /// Mooney–Rivlin: `C10·(I₁-3) + C01·(I₂-3) + K/2·(J-1)²`.
+    MooneyRivlin { c10: f64, c01: f64, bulk_modulus: f64 },
+    /// N-term Ogden: `Σ μ_p/α_p·(λ₁^α+λ₂^α+λ₃^α-3) + K/2·(J-1)²`.
+    Ogden { params: Vec<(f64, f64)>, bulk_modulus: f64 },
+}
 
-/// Compressible Neo-Hookean hyperelasticity form.
-///
-/// Implements [`NonlinearForm`] for finite-strain elasticity using
-/// `VectorH1Space` (interleaved DOFs: `[u0_x, u0_y, u1_x, u1_y, ...]`).
+impl HyperelasticModel {
+    /// PK1 stress and consistent tangent for the model.
+    fn pk1_and_tangent(&self, f: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
+        match self {
+            HyperelasticModel::NeoHookean { mu, lambda } => {
+                neo_hookean_pk1_tangent(f, *mu, *lambda)
+            }
+            HyperelasticModel::MooneyRivlin { c10, c01, bulk_modulus } => {
+                mooney_rivlin_pk1_tangent(f, *c10, *c01, *bulk_modulus)
+            }
+            HyperelasticModel::Ogden { params, bulk_modulus } => {
+                ogden_pk1_tangent(f, params, *bulk_modulus)
+            }
+        }
+    }
+}
+
+// ─── Neo-Hookean (existing) ──────────────────────────────────────────────────
+
+fn neo_hookean_pk1_tangent(f: &DMatrix<f64>, mu: f64, lambda: f64) -> (DMatrix<f64>, DMatrix<f64>) {
+    let dim = f.nrows();
+    let jac = f.determinant();
+    let inv_f = f.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(dim, dim));
+    let inv_f_t = inv_f.transpose();
+    let ln_j = jac.ln();
+
+    let mut p = DMatrix::zeros(dim, dim);
+    for i in 0..dim {
+        for I in 0..dim {
+            p[(i, I)] = mu * f[(i, I)] + (lambda * ln_j - mu) * inv_f_t[(i, I)];
+        }
+    }
+
+    let n = dim * dim;
+    let mut ct = DMatrix::zeros(n, n);
+    let pre = lambda * ln_j - mu;
+    for i in 0..dim { for I in 0..dim {
+        let row = i * dim + I;
+        for j in 0..dim { for J in 0..dim {
+            let col = j * dim + J;
+            let mut val = 0.0;
+            if i == j && I == J { val += mu; }
+            if i == j {
+                let mut sum = 0.0;
+                for k in 0..dim { sum += inv_f[(I, k)] * inv_f[(J, k)]; }
+                val += lambda * sum;
+            }
+            val -= pre * inv_f[(J, i)] * inv_f[(I, j)];
+            ct[(row, col)] = val;
+        }}
+    }}
+    (p, ct)
+}
+
+// ─── Mooney–Rivlin ───────────────────────────────────────────────────────────
+
+fn mooney_rivlin_pk1_tangent(f: &DMatrix<f64>, c10: f64, c01: f64, K: f64) -> (DMatrix<f64>, DMatrix<f64>) {
+    let dim = f.nrows();
+    let jac = f.determinant();
+    let inv_f = f.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(dim, dim));
+    let inv_f_t = inv_f.transpose();
+
+    // Right Cauchy-Green: C = F^T·F
+    let c = f.transpose() * f;
+    // I₁ = tr(C), I₂ = ½(tr(C)² - tr(C²))
+    let i1 = c.trace();
+    let c2 = &c * &c;
+    #[allow(unused_variables)]
+    let i2 = 0.5 * (i1 * i1 - c2.trace());
+
+    // PK2: S = 2·[(C10 + C01·I₁)·I - C01·C] + K·J·(J-1)·C⁻¹
+    let mut s = DMatrix::zeros(dim, dim);
+    let pk2_pre = 2.0 * (c10 + c01 * i1);
+    let c_inv = inv_f * inv_f_t; // C⁻¹ = F⁻¹·F⁻ᵀ
+    for i in 0..dim {
+        for j in 0..dim {
+            let hat = if i == j { 1.0 } else { 0.0 };
+            s[(i, j)] = pk2_pre * hat - 2.0 * c01 * c[(i, j)] + K * jac * (jac - 1.0) * c_inv[(i, j)];
+        }
+    }
+
+    // Push forward to PK1: P = F·S
+    let p = f * &s;
+
+    // Consistent tangent in PK1 form (Voigt-like dim²×dim²)
+    // ∂P_{iI}/∂F_{jJ} ≈ δ_{ij}·S_{IJ} + F_{iK}·C_{KILJ}^{tan}·F_{jL} + δ_{ij}·K·J·(2J-1)·(F⁻¹)ˢ_{IJ}
+    // For brevity, use numerical tangent via central differences for now.
+    // This is a placeholder — a full analytical tangent is several hundred lines.
+    // See MFEM's `HyperelasticOperator::ComputeGradient` for the analytical version.
+    let ct = numerical_tangent(f, &|ft| {
+        let (p, _) = mooney_rivlin_pk1_tangent(ft, c10, c01, K);
+        p
+    });
+    (p, ct)
+}
+
+// ─── Ogden ───────────────────────────────────────────────────────────────────
+
+fn ogden_pk1_tangent(f: &DMatrix<f64>, params: &[(f64, f64)], K: f64) -> (DMatrix<f64>, DMatrix<f64>) {
+    let dim = f.nrows();
+    let jac = f.determinant();
+    let inv_f_t = f.clone().try_inverse().map(|m| m.transpose()).unwrap_or_else(|| DMatrix::identity(dim, dim));
+
+    // Principal stretches via SVD of F
+    let svd = SVD::new(f.clone(), true, true);
+    let u_mat = svd.u.expect("SVD u failed");
+    let v_t_mat = svd.v_t.expect("SVD v_t failed");
+    let mut lam = vec![1.0_f64; dim];
+    for i in 0..dim { lam[i] = svd.singular_values[i]; }
+
+    // PK2 in spectral basis
+    let mut s = DMatrix::zeros(dim, dim);
+    let v_mat = v_t_mat.transpose(); // V
+
+    for i in 0..dim {
+        for I in 0..dim {
+            let mut val = 0.0;
+            for a in 0..dim {
+                if lam[a].abs() < 1e-30 { continue; }
+                let mut dW_dlam = 0.0;
+                for (mu_p, alpha_p) in params {
+                    dW_dlam += mu_p * lam[a].powf(alpha_p - 1.0);
+                }
+                dW_dlam += K * (jac - 1.0) * jac / lam[a];
+
+                let uia = u_mat[(i, a)];
+                let vIa = v_mat[(I, a)];
+                val += dW_dlam / lam[a] * uia * vIa;
+            }
+            s[(i, I)] = val;
+        }
+    }
+
+    // PK1: P = F·S   (in spectral basis PK2 already includes F push-forward)
+    // Actually S above is already PK1-like since we computed Σ (dW/dλ)·n⊗N
+    // Let's be explicit: P = Σ (1/λ)·(dW/dλ)·n⊗N = the above
+    let p = s.clone();
+
+    // Numerical tangent (simplified; full analytical is very involved)
+    let ct = numerical_tangent(f, &|ft| {
+        let (p, _) = ogden_pk1_tangent(ft, params, K);
+        p
+    });
+
+    (p, ct)
+}
+
+// ─── Numerical tangent (fallback for non-analytical models) ──────────────────
+
+fn numerical_tangent(f: &DMatrix<f64>, pk1_fn: &dyn Fn(&DMatrix<f64>) -> DMatrix<f64>) -> DMatrix<f64> {
+    let dim = f.nrows();
+    let n = dim * dim;
+    let mut ct = DMatrix::zeros(n, n);
+    let eps = 1e-8;
+    let p0 = pk1_fn(f);
+
+    for j in 0..dim {
+        for J in 0..dim {
+            let mut f_pert = f.clone();
+            f_pert[(j, J)] += eps;
+            let p_pert = pk1_fn(&f_pert);
+            for i in 0..dim {
+                for I in 0..dim {
+                    let row = i * dim + I;
+                    let col = j * dim + J;
+                    ct[(row, col)] = (p_pert[(i, I)] - p0[(i, I)]) / eps;
+                }
+            }
+        }
+    }
+    ct
+}
+
+// ─── HyperelasticityForm (refactored to use HyperelasticModel) ───────────────
+
+/// Finite-strain hyperelasticity form with selectable material model.
 pub struct HyperelasticityForm<M: MeshTopology> {
     space: VectorH1Space<M>,
-    /// First Lamé parameter.
-    pub lambda: f64,
-    /// Second Lamé parameter (shear modulus).
-    pub mu: f64,
-    /// Dirichlet BC: `(global_dof, value)` pairs.
+    pub model: HyperelasticModel,
     pub dirichlet: Vec<(usize, f64)>,
-    /// Quadrature order for assembly.
     pub quad_order: u8,
 }
 
 impl<M: MeshTopology> HyperelasticityForm<M> {
-    pub fn new(space: VectorH1Space<M>, lambda: f64, mu: f64,
+    pub fn new(space: VectorH1Space<M>, model: HyperelasticModel,
                dirichlet: Vec<(usize, f64)>, quad_order: u8) -> Self {
-        Self { space, lambda, mu, dirichlet, quad_order }
+        Self { space, model, dirichlet, quad_order }
     }
 
-    fn pk1_and_tangent(&self, f: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
-        let dim = f.nrows();
-        let jac = f.determinant();
-        let inv_f = f.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(dim, dim));
-        let inv_f_t = inv_f.transpose();
-        let ln_j = jac.ln();
-
-        let mut p = DMatrix::zeros(dim, dim);
-        for i in 0..dim {
-            for I in 0..dim {
-                p[(i, I)] = self.mu * f[(i, I)]
-                    + (self.lambda * ln_j - self.mu) * inv_f_t[(i, I)];
-            }
-        }
-
-        let n = dim * dim;
-        let mut ct = DMatrix::zeros(n, n);
-        let pre = self.lambda * ln_j - self.mu;
-        for i in 0..dim {
-            for I in 0..dim {
-                let row = i * dim + I;
-                for j in 0..dim {
-                    for J in 0..dim {
-                        let col = j * dim + J;
-                        let mut val = 0.0;
-                        if i == j && I == J { val += self.mu; }
-                        if i == j {
-                            let mut sum = 0.0;
-                            for k in 0..dim { sum += inv_f[(I, k)] * inv_f[(J, k)]; }
-                            val += self.lambda * sum;
-                        }
-                        val -= pre * inv_f[(J, i)] * inv_f[(I, j)];
-                        ct[(row, col)] = val;
-                    }
-                }
-            }
-        }
-        (p, ct)
+    /// Run Newton–Raphson with line search to solve `F(u) = 0`.
+    pub fn solve(&self, rhs: &[f64], u: &mut [f64],
+                 config: &NewtonConfig) -> Result<NewtonResult, NewtonResult> {
+        NewtonSolver::new(config.clone()).solve(self, rhs, u)
     }
 }
 
@@ -144,7 +297,7 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
                 }
                 let mut f_mat = DMatrix::identity(dim, dim);
                 f_mat += &du;
-                let (p, _ct) = self.pk1_and_tangent(&f_mat);
+                let (p, _ct) = self.model.pk1_and_tangent(&f_mat);
 
                 for k in 0..n_ldofs {
                     for i in 0..dim {
@@ -205,7 +358,7 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
                 }
                 let mut f_mat = DMatrix::identity(dim, dim);
                 f_mat += &du;
-                let (_p, ct) = self.pk1_and_tangent(&f_mat);
+                let (_p, ct) = self.model.pk1_and_tangent(&f_mat);
 
                 for k in 0..n_ldofs {
                     for i in 0..dim {
@@ -238,7 +391,7 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
     }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
@@ -281,27 +434,26 @@ mod tests {
     use fem_mesh::SimplexMesh;
     use fem_space::vector_h1::VectorH1Space;
 
-
-    // F = I → P = 0 → residual = 0
     #[test]
-    fn zero_displacement_zero_residual() {
+    fn zero_displacement_zero_residual_neo() {
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
-        let form = HyperelasticityForm::new(space, 1.0, 0.3, vec![], 2);
+        let model = HyperelasticModel::NeoHookean { mu: 0.3, lambda: 1.0 };
+        let form = HyperelasticityForm::new(space, model, vec![], 2);
         let mut r = vec![0.0_f64; n];
         form.residual(&vec![0.0; n], &vec![0.0; n], &mut r);
         let norm: f64 = r.iter().map(|x| x.abs()).sum();
         assert!(norm < 1e-12, "Zero displacement should give zero residual, got {norm}");
     }
 
-    // Tangent matrix non-zero
     #[test]
-    fn tangent_matrix_nonzero() {
+    fn tangent_matrix_nonzero_neo() {
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
-        let form = HyperelasticityForm::new(space, 1.0, 0.3, vec![], 2);
+        let model = HyperelasticModel::NeoHookean { mu: 0.3, lambda: 1.0 };
+        let form = HyperelasticityForm::new(space, model, vec![], 2);
         let jac = form.jacobian(&vec![0.0; n]);
         let mut sum = 0.0;
         for i in 0..n.min(10) {
@@ -312,5 +464,32 @@ mod tests {
         assert!(sum > 0.0, "Tangent matrix should have non-zero entries");
     }
 
+    #[test]
+    fn mooney_rivlin_tangent_nonzero() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let model = HyperelasticModel::MooneyRivlin { c10: 0.3, c01: 0.1, bulk_modulus: 1e3 };
+        let form = HyperelasticityForm::new(space, model, vec![], 2);
+        let jac = form.jacobian(&vec![0.0; n]);
+        let mut sum = 0.0;
+        for i in 0..n.min(10) { for j in 0..n.min(10) { sum += jac.get(i, j).abs(); } }
+        assert!(sum > 0.0, "MR tangent should be non-zero");
+    }
 
+    #[test]
+    fn ogden_tangent_nonzero() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let model = HyperelasticModel::Ogden {
+            params: vec![(6.0e5, 1.3), (-1.0e5, 2.0)],
+            bulk_modulus: 1e3,
+        };
+        let form = HyperelasticityForm::new(space, model, vec![], 2);
+        let jac = form.jacobian(&vec![0.0; n]);
+        let mut sum = 0.0;
+        for i in 0..n.min(10) { for j in 0..n.min(10) { sum += jac.get(i, j).abs(); } }
+        assert!(sum > 0.0, "Ogden tangent should be non-zero");
+    }
 }

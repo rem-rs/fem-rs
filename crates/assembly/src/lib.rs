@@ -84,6 +84,7 @@ pub mod dg_elasticity;
 pub mod hyperbolic;
 pub mod nonlinear;
 pub mod nonlinear_hyperelasticity;
+pub mod plasticity;
 pub mod partial;
 pub mod vector_integrator;
 pub mod vector_assembler;
