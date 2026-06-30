@@ -542,6 +542,28 @@ pub fn tmop_optimise_2d(mesh: &SimplexMesh<2>, metric: &TmopMetric, max_iter: us
     obj.coords().to_vec()
 }
 
+/// TMOP optimisation followed by CAD surface projection.
+///
+/// Runs `tmop_optimise_*` then projects displaced boundary nodes onto
+/// the CAD surfaces specified in `config`.  This is the standard pipeline
+/// for CAD-aware mesh optimisation: improve element quality via TMOP
+/// while keeping the boundary on the intended geometry.
+pub fn tmop_optimise_2d_with_cad(
+    mesh: &SimplexMesh<2>,
+    metric: &TmopMetric,
+    max_iter: usize,
+    step_size: f64,
+    config: &crate::cad::ProjectionConfig,
+) -> SimplexMesh<2> {
+    let new_coords = tmop_optimise_2d(mesh, metric, max_iter, step_size);
+    let opt_mesh = SimplexMesh::uniform(
+        new_coords, mesh.conn.clone(), mesh.elem_tags.clone(),
+        mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
+        mesh.face_type,
+    );
+    crate::cad::project_boundary_to_cad(&opt_mesh, config, 1)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 3-D Tetra objective
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -716,6 +738,23 @@ pub fn tmop_optimise_tetra(mesh: &SimplexMesh<3>, metric: &TmopMetric, max_iter:
     }
     obj.set_x(&x);
     obj.coords().to_vec()
+}
+
+/// TMOP optimisation for tetrahedral meshes with CAD projection.
+pub fn tmop_optimise_tetra_with_cad(
+    mesh: &SimplexMesh<3>,
+    metric: &TmopMetric,
+    max_iter: usize,
+    step_size: f64,
+    config: &crate::cad::ProjectionConfig,
+) -> SimplexMesh<3> {
+    let new_coords = tmop_optimise_tetra(mesh, metric, max_iter, step_size);
+    let opt_mesh = SimplexMesh::uniform(
+        new_coords, mesh.conn.clone(), mesh.elem_tags.clone(),
+        mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
+        mesh.face_type,
+    );
+    crate::cad::project_boundary_to_cad(&opt_mesh, config, 1)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -925,6 +964,23 @@ pub fn tmop_optimise_hex(mesh: &SimplexMesh<3>, metric: &TmopMetric, max_iter: u
     }
     obj.set_x(&x);
     obj.coords().to_vec()
+}
+
+/// TMOP optimisation for hexahedral meshes with CAD projection.
+pub fn tmop_optimise_hex_with_cad(
+    mesh: &SimplexMesh<3>,
+    metric: &TmopMetric,
+    max_iter: usize,
+    step_size: f64,
+    config: &crate::cad::ProjectionConfig,
+) -> SimplexMesh<3> {
+    let new_coords = tmop_optimise_hex(mesh, metric, max_iter, step_size);
+    let opt_mesh = SimplexMesh::uniform(
+        new_coords, mesh.conn.clone(), mesh.elem_tags.clone(),
+        mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
+        mesh.face_type,
+    );
+    crate::cad::project_boundary_to_cad(&opt_mesh, config, 1)
 }
 
 #[cfg(test)]
