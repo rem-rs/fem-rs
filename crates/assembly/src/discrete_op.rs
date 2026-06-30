@@ -21,7 +21,7 @@
 //! | `divergence` | H(div) RT2 | L2 (P2)   | 2     |
 //! | `curl_3d`    | H(curl) ND1| H(div) RT0| 1     |
 //! | `curl_3d`    | H(curl) ND2| H(div) RT1| 2     |
-//! | `curl_2d_hdiv` | H(curl) ND2| H(div) RT2| 2 (2D) |
+//! | `curl_2d_hdiv` | H(curl) ND1/ND2 | H(div) RT0/RT2 | 2 (2D) |
 //!
 //! The lowest-order (P1→ND1, RT0→P0) matrices are assembled topologically
 //! (exact, no quadrature error).  Higher-order pairs (P2→ND2, RT1→P1) use
@@ -917,18 +917,22 @@ impl DiscreteLinearOperator {
                 dim: mesh.dim(),
             });
         }
-        if hcurl_space.order() != 2 || hdiv_space.order() != 2 {
-            return Err(DiscreteOpError::IncompatibleOrders {
+        let hcurl_order = hcurl_space.order();
+        let hdiv_order = hdiv_space.order();
+        match (hcurl_order, hdiv_order) {
+            (1, 0) => Ok(crate::vector_assembler::VectorAssembler::assemble_curl_hdiv_pairing_2d_nd1_rt0(
+                hcurl_space, hdiv_space, 3,
+            )),
+            (2, 2) => Ok(crate::vector_assembler::VectorAssembler::assemble_curl_hdiv_pairing_2d_nd2_rt2(
+                hcurl_space, hdiv_space,
+                crate::vector_assembler::TRI_ND2_RT2_MIXED_QUAD_ORDER,
+            )),
+            _ => Err(DiscreteOpError::IncompatibleOrders {
                 op: "curl_2d_hdiv",
-                h1_order: hcurl_space.order(),
-                hcurl_order: hdiv_space.order(),
-            });
+                h1_order: hcurl_order,
+                hcurl_order: hdiv_order,
+            }),
         }
-        Ok(crate::vector_assembler::VectorAssembler::assemble_curl_hdiv_pairing_2d_nd2_rt2(
-            hcurl_space,
-            hdiv_space,
-            crate::vector_assembler::TRI_ND2_RT2_MIXED_QUAD_ORDER,
-        ))
     }
 
     /// Build the discrete divergence matrix D: H(div) -> L2.
@@ -2643,6 +2647,18 @@ mod tests {
             matches!(r, Err(DiscreteOpError::UnsupportedDimension { op: "curl_2d_hdiv", dim: 3 })),
             "expected UnsupportedDimension for curl_2d_hdiv on 3D mesh, got {r:?}"
         );
+    }
+
+    /// Test: ND1→RT0 `curl_2d_hdiv` matrix dimensions.
+    #[test]
+    fn curl_2d_nd1_rt0_dimensions() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let hcurl = HCurlSpace::new(mesh.clone(), 1);
+        let hdiv = HDivSpace::new(mesh, 0);
+        let c = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv).unwrap();
+        assert_eq!(c.nrows, hdiv.n_dofs(), "nrows should match HDiv DOFs");
+        assert_eq!(c.ncols, hcurl.n_dofs(), "ncols should match HCurl DOFs");
+        assert!(c.nnz() > 0, "curl matrix should be non-empty");
     }
 
     /// Test: ND2→RT2 `curl_2d_hdiv` matrix dimensions.

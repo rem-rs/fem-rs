@@ -594,7 +594,85 @@ impl VectorAssembler {
                 }
             }
         }
+        coo.into_csr()
+    }
 
+    /// Assemble the 2-D curl pairing matrix C: HCurl(ND1) → HDiv(RT0).
+    ///
+    /// C[i, j] = ∫_Ω Φ_i^{RT0} · curl(Φ_j^{ND1}) dΩ
+    ///         = ∫_Ω (J·Φ_i^{RT}/det(J)) · (R·Φ_j^{ND}) dΩ
+    ///
+    /// where R is the 90° rotation (wx, wy) = (py, -px).
+    ///
+    /// Returns an `n_hdiv × n_hcurl` CSR matrix.
+    pub fn assemble_curl_hdiv_pairing_2d_nd1_rt0<M: MeshTopology>(
+        hcurl_space: &HCurlSpace<M>,
+        hdiv_space: &HDivSpace<M>,
+        quad_order: u8,
+    ) -> CsrMatrix<f64> {
+        use fem_element::nedelec::TriND1;
+        use fem_element::raviart_thomas::TriRT0;
+        use fem_element::VectorReferenceElement;
+
+        let mesh = hcurl_space.mesh();
+        let dim = 2usize;
+        let n_hcurl = hcurl_space.n_dofs();
+        let n_hdiv = hdiv_space.n_dofs();
+        let nd1 = TriND1;
+        let rt0 = TriRT0;
+        let n_nd1 = nd1.n_dofs();  // 3
+        let n_rt0 = rt0.n_dofs();  // 3
+
+        let quad = nd1.quadrature(quad_order);
+        let mut coo = CooMatrix::new(n_hdiv, n_hcurl);
+
+        let mut ref_nd = vec![0.0_f64; n_nd1 * dim];
+        let mut ref_rt = vec![0.0_f64; n_rt0 * dim];
+        let mut phys_nd = vec![0.0_f64; n_nd1 * dim];
+        let mut phys_rt = vec![0.0_f64; n_rt0 * dim];
+
+        for e in mesh.elem_iter() {
+            let nodes = mesh.element_nodes(e);
+            let hcurl_dofs: Vec<usize> = hcurl_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let hdiv_dofs: Vec<usize> = hdiv_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+
+            let affine_tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+            let mut loc = vec![0.0_f64; n_rt0 * n_nd1];
+
+            for (xi, w_ref) in quad.points.iter().zip(quad.weights.iter()) {
+                let jac = affine_tr.jacobian();
+                let det_j = affine_tr.det_j();
+                let j_inv_t = affine_tr.jacobian_inv_t();
+                let w = *w_ref * det_j.abs();
+
+                nd1.eval_basis_vec(xi, &mut ref_nd);
+                rt0.eval_basis_vec(xi, &mut ref_rt);
+
+                piola_hcurl_basis(&j_inv_t, &ref_nd, &mut phys_nd, n_nd1, dim);
+                piola_hdiv_basis(&jac, det_j, &ref_rt, &mut phys_rt, n_rt0, dim);
+
+                for j in 0..n_nd1 {
+                    let px = phys_nd[j * dim];
+                    let py = phys_nd[j * dim + 1];
+                    let wx = py;
+                    let wy = -px;
+                    for i in 0..n_rt0 {
+                        let sx = phys_rt[i * dim];
+                        let sy = phys_rt[i * dim + 1];
+                        loc[i * n_nd1 + j] += w * (sx * wx + sy * wy);
+                    }
+                }
+            }
+
+            for i in 0..n_rt0 {
+                for j in 0..n_nd1 {
+                    let val = loc[i * n_nd1 + j];
+                    if val.abs() > 1e-15 {
+                        coo.add(hdiv_dofs[i], hcurl_dofs[j], val);
+                    }
+                }
+            }
+        }
         coo.into_csr()
     }
 
