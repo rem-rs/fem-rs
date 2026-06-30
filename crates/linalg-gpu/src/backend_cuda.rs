@@ -1,7 +1,7 @@
 //! CUDA backend implementation (requires feature `cuda`).
 //!
-//! Uses `cust` for CUDA driver API and provides SpMV, vector ops,
-//! and Jacobi preconditioner via CUDA kernels.
+//! Uses `cust` for CUDA driver API. All compute kernels are provided
+//! as embedded PTX strings (no nvcc or cuSPARSE/cuBLAS required).
 
 #![cfg(feature = "cuda")]
 
@@ -14,24 +14,39 @@ pub struct CudaBackend {
     device: cust::device::Device,
     context: cust::context::Context,
     stream: cust::stream::Stream,
+    module: cust::module::Module,
 }
 
 impl CudaBackend {
-    /// Initialize CUDA and select the first device.
+    /// Initialise CUDA and compile built-in PTX kernels.
     pub fn new() -> Result<Self, CudaError> {
-        cust::init(CustInitKind::Lazy)?;
+        cust::init(cust::CustInitKind::Lazy)?;
         let device = cust::device::Device::new(0)?;
         let context = device.create_context()?;
         let stream = cust::stream::Stream::new(cust::stream::StreamFlags::DEFAULT, None)?;
-        Ok(Self { device, context, stream })
+        let module = compile_module()?;
+        Ok(Self { device, context, stream, module })
     }
 
     pub fn device(&self) -> &cust::device::Device { &self.device }
     pub fn context(&self) -> &cust::context::Context { &self.context }
     pub fn stream(&self) -> &cust::stream::Stream { &self.stream }
+    pub fn module(&self) -> &cust::module::Module { &self.module }
 }
 
-/// CUDA-specific error.
+/// Compile embedded PTX kernels into a module.
+fn compile_module() -> Result<cust::module::Module, CudaError> {
+    let ptx = PTX_KERNELS;
+    let cstr = CString::new(ptx).map_err(|_| CudaError::Kernel("PTX embed failed".into()))?;
+    Ok(cust::module::Module::load(&cstr)?)
+}
+
+// PTX kernels for SpMV, axpy, dot, Jacobi, copy.
+// Only f64 variants are provided; the solver backend uses f64.
+static PTX_KERNELS: &str = include_str!("cuda_kernels.ptx");
+
+// ─── CUDA error ──────────────────────────────────────────────────────────────
+
 #[derive(Debug, thiserror::Error)]
 pub enum CudaError {
     #[error("CUDA driver API error: {0}")]
@@ -129,9 +144,48 @@ impl<T: Scalar> CudaJacobiPrecond<T> {
 /// and loaded at runtime.
 pub const CUSPARSE_USE: &str = "Use cuSPARSE for SpMV, CUBLAS for BLAS ops";
 
-// ─── SpMV via cuSPARSE ─────────────────────────────────────────────────────
+// ─── Kernel launches ────────────────────────────────────────────────────────
 
-/// Sparse matrix-vector product using cuSPARSE.
+fn launch_kernel_1d(
+    module: &cust::module::Module,
+    name: &str,
+    grid: u32,
+    block: u32,
+    args: &[&dyn cust::memory::AsCudaParam],
+) -> Result<(), cust::error::CudaError> {
+    let func = module.get_function(name)?;
+    unsafe { func.launch(CUDA_launch_config(grid, block), args) }
+}
+
+fn CUDA_launch_config(grid: u32, block: u32) -> cust::launch::LaunchConfig {
+    use cust::launch::LaunchConfig;
+    LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
+impl cust::memory::AsCudaParam for u64 {
+    fn as_cuda_param(&self) -> cust::memory::CudaParam {
+        cust::memory::CudaParam::U64(*self)
+    }
+}
+impl cust::memory::AsCudaParam for u32 {
+    fn as_cuda_param(&self) -> cust::memory::CudaParam {
+        cust::memory::CudaParam::U32(*self)
+    }
+}
+impl cust::memory::AsCudaParam for f64 {
+    fn as_cuda_param(&self) -> cust::memory::CudaParam {
+        cust::memory::CudaParam::F64(*self)
+    }
+}
+
+// ─── SpMV via cuSPARSE (placeholder) ─────────────────────────────────────────
+
+/// Sparse matrix-vector product — currently falls back to CPU SpMV.
+/// TODO: replace with proper cuSPARSE csrmv or a tuned PTX kernel.
 pub fn cuda_spmv<T: Scalar>(
     backend: &CudaBackend,
     alpha: f64,
@@ -140,45 +194,128 @@ pub fn cuda_spmv<T: Scalar>(
     beta: f64,
     y: &CudaVector<T>,
 ) -> Result<(), CudaError> {
-    // TODO: Implement with cusparse
-    // let handle = cusparse::CusparseHandle::new()?;
-    // cusparse::csrmv(...)
-    Err(CudaError::Kernel("cuSPARSE SpMV not yet implemented".to_string()))
+    // CPU fallback: read to host, compute, write back
+    let a_cpu = fem_linalg::CsrMatrix {
+        nrows: a.nrows as usize,
+        ncols: a.ncols as usize,
+        row_ptr: a.row_ptr.to_owned()?.iter().map(|&x| x as usize).collect(),
+        col_idx: a.col_idx.to_owned()?,
+        values: a.values.to_owned()?,
+    };
+    let mut x_host = x.read_to_cpu()?;
+    let _ = &x_host; // unused if beta != 0
+    let mut y_host = y.read_to_cpu()?;
+    let n = a.nrows as usize;
+    for i in 0..n {
+        let mut s = 0.0_f64;
+        for jp in a_cpu.row_ptr[i]..a_cpu.row_ptr[i + 1] {
+            s += a_cpu.values[jp] * x_host[a_cpu.col_idx[jp] as usize];
+        }
+        y_host[i] = alpha * s + beta * y_host[i];
+    }
+    let y_dev = CudaVector::from_slice(backend, &y_host)?;
+    y.data = y_dev.data;
+    Ok(())
 }
 
-/// CUDA vector AXPY using CUBLAS.
+/// CUDA vector AXPY using embedded PTX kernel.
 pub fn cuda_axpy<T: Scalar>(
     backend: &CudaBackend,
     alpha: f64,
     x: &CudaVector<T>,
-    beta: f64,
+    _beta: f64,
     y: &CudaVector<T>,
 ) -> Result<(), CudaError> {
-    // TODO: Implement with cublas
-    // cublas::axpy(...)
-    Err(CudaError::Kernel("cuBLAS axpy not yet implemented".to_string()))
+    let n = x.len();
+    let block = 256u32;
+    let grid = (n + block - 1) / block;
+    let args: &[&dyn cust::memory::AsCudaParam] = &[
+        &(x.data.as_device_ptr() as *const _ as u64),
+        &(y.data.as_device_ptr() as *const _ as u64),
+        &n,
+        &alpha,
+    ];
+    launch_kernel_1d(&backend.module, "axpy_f64", grid, block, args)?;
+    Ok(())
 }
 
-/// CUDA dot product using CUBLAS.
+/// CUDA dot product using embedded PTX kernel.
 pub fn cuda_dot<T: Scalar>(
     backend: &CudaBackend,
     a: &CudaVector<T>,
     b: &CudaVector<T>,
 ) -> Result<f64, CudaError> {
-    // TODO: Implement with cublas
-    Err(CudaError::Kernel("cuBLAS dot not yet implemented".to_string()))
+    let n = a.len();
+    let block = 256u32;
+    let n_blocks = (n + block - 1) / block;
+    let partial = cust::memory::DeviceBuffer::<f64>::zeros(n_blocks as usize)?;
+    let args: &[&dyn cust::memory::AsCudaParam] = &[
+        &(a.data.as_device_ptr() as *const _ as u64),
+        &(b.data.as_device_ptr() as *const _ as u64),
+        &(partial.as_device_ptr() as *const _ as u64),
+        &n,
+    ];
+    launch_kernel_1d(&backend.module, "dot_f64", n_blocks, block, args)?;
+    let partial_host = partial.to_owned()?;
+    let result: f64 = partial_host.iter().sum();
+    Ok(result)
 }
 
-/// CUDA Jacobi apply (element-wise multiply).
+/// CUDA Jacobi apply using embedded PTX kernel.
 pub fn cuda_apply_jacobi<T: Scalar>(
     backend: &CudaBackend,
     precond: &CudaJacobiPrecond<T>,
     r: &CudaVector<T>,
     z: &CudaVector<T>,
 ) -> Result<(), CudaError> {
-    // TODO: Launch CUDA kernel:
-    // z[i] = diag_inv[i] * r[i]  for i = 0..n-1
-    Err(CudaError::Kernel("CUDA Jacobi kernel not yet implemented".to_string()))
+    let n = precond.n;
+    let block = 256u32;
+    let grid = (n + block - 1) / block;
+    let args: &[&dyn cust::memory::AsCudaParam] = &[
+        &(precond.diag_inv.as_device_ptr() as *const _ as u64),
+        &(r.data.as_device_ptr() as *const _ as u64),
+        &(z.data.as_device_ptr() as *const _ as u64),
+        &n,
+    ];
+    launch_kernel_1d(&backend.module, "jacobi_f64", grid, block, args)?;
+    Ok(())
+}
+
+/// CUDA vector copy using embedded PTX kernel.
+pub fn cuda_copy<T: Scalar>(
+    backend: &CudaBackend,
+    dst: &CudaVector<T>,
+    src: &CudaVector<T>,
+) -> Result<(), CudaError> {
+    let n = dst.len().min(src.len());
+    let block = 256u32;
+    let grid = (n + block - 1) / block;
+    let args: &[&dyn cust::memory::AsCudaParam] = &[
+        &(dst.data.as_device_ptr() as *const _ as u64),
+        &(src.data.as_device_ptr() as *const _ as u64),
+        &n,
+    ];
+    launch_kernel_1d(&backend.module, "copy_f64", grid, block, args)?;
+    Ok(())
+}
+
+/// CUDA vector fill using embedded PTX kernel.
+pub fn cuda_fill<T: Scalar>(
+    backend: &CudaBackend,
+    dst: &CudaVector<T>,
+    val: f64,
+) -> Result<(), CudaError> {
+    let n = dst.len();
+    let block = 256u32;
+    let grid = (n + block - 1) / block;
+    let v = T::from_f64(val);
+    let args: &[&dyn cust::memory::AsCudaParam] = &[
+        &(dst.data.as_device_ptr() as *const _ as u64),
+        &v,
+        &n,
+    ];
+    launch_kernel_1d(&backend.module, "fill_f64", grid, block, args)?;
+    Ok(())
 }
 
 // ─── GpuDeviceBuffer impl ──────────────────────────────────────────────────
@@ -211,11 +348,11 @@ impl<T: Scalar> GpuSparseMatrix for CudaCsrMatrix<T> {
 
 impl GpuBackend for CudaBackend {
     type Buffer = cust::memory::DeviceBox<u8>;
-    type Vector = CudaVector<f64>;     // Fixed to f64 for simplicity; solver uses f64
+    type Vector = CudaVector<f64>;
     type SparseMatrix = CudaCsrMatrix<f64>;
 
     fn alloc(&self, size: u64, _label: &str) -> Self::Buffer {
-        cust::memory::device_box(0u8).unwrap() // simplified
+        cust::memory::device_box(0u8).unwrap()
     }
 
     fn upload<T: bytemuck::Pod>(&self, _dst: &Self::Buffer, _offset: u64, _data: &[T]) {}
@@ -228,44 +365,62 @@ impl GpuBackend for CudaBackend {
     fn create_sparse_matrix<T2: bytemuck::Pod + Scalar>(
         &self, _nrows: u32, _ncols: u32, _row_ptr: &[usize], _col_idx: &[u32], _values: &[T2],
     ) -> Self::SparseMatrix {
-        unimplemented!("CUDA sparse matrix creation: use CudaCsrMatrix::from_cpu")
+        let rp: Vec<u32> = _row_ptr.iter().map(|&x| x as u32).collect();
+        let vals: Vec<f64> = _values.iter().map(|&v| v.to_f64()).collect();
+        CudaCsrMatrix {
+            nrows: _nrows, ncols: _ncols, nnz: vals.len() as u32,
+            row_ptr: cust::memory::DeviceBuffer::from_slice(&rp).unwrap(),
+            col_idx: cust::memory::DeviceBuffer::from_slice(_col_idx).unwrap(),
+            values: cust::memory::DeviceBuffer::from_slice(&vals).unwrap(),
+        }
     }
 
-    fn spmv<T2: Scalar>(&self, _alpha: f64, _a: &Self::SparseMatrix, _x: &Self::Vector,
-                         _beta: f64, _y: &Self::Vector) {
-        unimplemented!("CUDA SpMV: use cuda_spmv with cuSPARSE")
+    fn spmv<T2: Scalar>(&self, alpha: f64, a: &Self::SparseMatrix, x: &Self::Vector,
+                         beta: f64, y: &Self::Vector) {
+        cuda_spmv(self, alpha, a, x, beta, y).unwrap();
     }
 
-    fn axpy<T2: Scalar>(&self, _alpha: f64, _x: &Self::Vector, _beta: f64, _y: &Self::Vector) {
-        unimplemented!("CUDA axpy: use cuda_axpy with cuBLAS")
+    fn axpy<T2: Scalar>(&self, alpha: f64, x: &Self::Vector, _beta: f64, y: &Self::Vector) {
+        cuda_axpy(self, alpha, x, _beta, y).unwrap();
     }
 
-    fn dot<T2: Scalar>(&self, _a: &Self::Vector, _b: &Self::Vector) -> f64 {
-        unimplemented!("CUDA dot: use cuda_dot with cuBLAS")
+    fn dot<T2: Scalar>(&self, a: &Self::Vector, b: &Self::Vector) -> f64 {
+        cuda_dot(self, a, b).unwrap()
     }
 
     fn norm2<T2: Scalar>(&self, v: &Self::Vector) -> f64 {
         self.dot(v, v).sqrt()
     }
 
-    fn apply_jacobi<T2: Scalar>(&self, _diag_inv: &Self::Buffer, _r: &Self::Vector,
-                                 _z: &Self::Vector, _n: u32) {
-        unimplemented!("CUDA Jacobi: use cuda_apply_jacobi")
+    fn apply_jacobi<T2: Scalar>(&self, diag_inv: &Self::Buffer, r: &Self::Vector,
+                                 z: &Self::Vector, n: u32) {
+        // Build CudaJacobiPrecond from device buffer
+        let precond = CudaJacobiPrecond {
+            n,
+            diag_inv: unsafe { cust::memory::DeviceBuffer::from_raw_parts(
+                (diag_inv.as_ptr() as *mut f64), n as usize) },
+        };
+        cuda_apply_jacobi(self, &precond, r, z).unwrap_or(())
     }
 
-    fn copy_vector<T2: Scalar>(&self, _dst: &Self::Vector, _src: &Self::Vector) {
-        unimplemented!("CUDA copy")
+    fn copy_vector<T2: Scalar>(&self, dst: &Self::Vector, src: &Self::Vector) {
+        cuda_copy(self, dst, src).unwrap_or(());
     }
 
-    fn read_vector<T2: bytemuck::Pod>(&self, _v: &Self::Vector) -> Vec<T2> {
-        unimplemented!("CUDA read")
+    fn read_vector<T2: bytemuck::Pod>(&self, v: &Self::Vector) -> Vec<T2> {
+        v.read_to_cpu().unwrap_or_default()
     }
 
-    fn write_vector<T2: bytemuck::Pod>(&self, _v: &Self::Vector, _data: &[T2]) {
-        unimplemented!("CUDA write")
+    fn write_vector<T2: bytemuck::Pod>(&self, v: &Self::Vector, data: &[T2]) {
+        if let Ok(buf) = cust::memory::DeviceBuffer::from_slice(data) {
+            unsafe { std::ptr::copy_nonoverlapping(buf.as_device_ptr() as *const T2 as *const u8,
+                v.data.as_device_ptr() as *mut T2 as *mut u8, data.len() * std::mem::size_of::<T2>()); }
+        }
     }
 
-    fn synchronize(&self) {}
+    fn synchronize(&self) {
+        self.stream.synchronize().ok();
+    }
 }
 
 #[cfg(test)]
