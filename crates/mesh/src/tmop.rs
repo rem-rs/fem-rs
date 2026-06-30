@@ -83,8 +83,7 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
         }
         TmopMetric::Shape | TmopMetric::SizeShape => {
             let det_t_abs = det_t.abs().max(1e-30);
-            let p = 1.0 / d as f64;     // 1/2 for Shape (denom=det), 1/d for SizeShape (denom=det^{1/d})
-            let exponent = if *metric == TmopMetric::Shape { 1.0 } else { p };
+            let exponent = 2.0 / d as f64;     // 2/d: 1 for 2D, 2/3 for 3D. Both Shape and SizeShape need det^{2/d}
             let det_power = det_t_abs.powf(exponent);
             let value = if *metric == TmopMetric::Shape {
                 ft2 / det_power - d as f64
@@ -107,7 +106,7 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
         }
         TmopMetric::Volume => {
             let value = det_t;
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let adj_t: Matrix2<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
             let mut dmu_da = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { for k in 0..2 {
                 dmu_da[(i, j)] += adj_t[(i, k)] * winv[(j, k)];
@@ -118,7 +117,7 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
             let abs_det = det_t.abs().max(1e-30);
             let value = ft2 / (d as f64 * abs_det);
             let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let adj_t: Matrix2<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
             let denom = d as f64 * det_t * abs_det;
             let mut dmu_dt = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 {
@@ -132,7 +131,7 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
         }
         TmopMetric::DeformedDet => {
             let value = (det_t - 1.0) * (det_t - 1.0);
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let adj_t: Matrix2<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
             let mut dmu_dt = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = 2.0 * (det_t - 1.0) * adj_t[(i, j)]; }}
             let mut dmu_da = Matrix2::zeros();
@@ -142,7 +141,7 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
         TmopMetric::BarrierDet => {
             let a = det_t.abs().max(1e-30);
             let value = 1.0 / a - 1.0;
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let adj_t: Matrix2<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
             let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
             let mut dmu_dt = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = -sign / (a * a) * adj_t[(i, j)]; }}
@@ -151,7 +150,7 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
             TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
         }
         TmopMetric::FrobeniusDiff => {
-            let ti = t - Matrix2::identity();
+            let ti: Matrix2<f64> = t - Matrix2::identity();
             let value = ti.iter().map(|v| v * v).sum();
             let dmu_dt = 2.0 * ti;
             let mut dmu_da = Matrix2::zeros();
@@ -163,7 +162,7 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
         TmopMetric::AreaDeviation => {
             let value = (det_t - 1.0).abs();
             let sign = if det_t >= 1.0 { 1.0 } else { -1.0 };
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let adj_t: Matrix2<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
             let mut dmu_dt = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = sign * adj_t[(i, j)]; }}
             let mut dmu_da = Matrix2::zeros();
@@ -177,7 +176,7 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
             let det_t_abs = det_t.abs().max(1e-30);
             let value = ft2 / det_t_abs;
             let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let adj_t: Matrix2<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
             let mut dmu_dt = Matrix2::zeros();
             for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = (2.0 * t[(i, j)] * det_t_abs - ft2 * sign * 0.5 * adj_t[(i, j)]) / (det_t_abs * det_t_abs); }}
             let mut dmu_da = Matrix2::zeros();
@@ -239,8 +238,7 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
         }
         TmopMetric::Shape | TmopMetric::SizeShape => {
             let det_t_abs = det_t.abs().max(1e-30);
-            let p = 1.0 / d as f64;
-            let exponent = if *metric == TmopMetric::Shape { 1.0 } else { p };
+            let exponent = 2.0 / d as f64;     // 2/d: 1 for 2D, 2/3 for 3D
             let det_power = det_t_abs.powf(exponent);
             let value = if *metric == TmopMetric::Shape {
                 ft2 / det_power - d as f64
@@ -269,7 +267,7 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
         }
         TmopMetric::Volume => {
             let value = det_t;
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let adj_t: Matrix3<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
             let mut dmu_da = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { for k in 0..3 {
                 dmu_da[(i, j)] += adj_t[(i, k)] * winv[(j, k)];
@@ -310,7 +308,7 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
         }
         TmopMetric::DeformedDet => {
             let value = (det_t - 1.0) * (det_t - 1.0);
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let adj_t: Matrix3<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
             let mut dmu_dt = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { dmu_dt[(i, j)] = 2.0 * (det_t - 1.0) * adj_t[(i, j)]; }}
             let mut dmu_da = Matrix3::zeros();
@@ -326,7 +324,7 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
         TmopMetric::BarrierDet => {
             let a = det_t.abs().max(1e-30);
             let value = 1.0 / a - 1.0;
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let adj_t: Matrix3<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
             let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
             let mut dmu_dt = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { dmu_dt[(i, j)] = -sign / (a * a) * adj_t[(i, j)]; }}
@@ -341,7 +339,7 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
             }
         }
         TmopMetric::FrobeniusDiff => {
-            let ti = t - Matrix3::identity();
+            let ti: Matrix3<f64> = t - Matrix3::identity();
             let value = ti.iter().map(|v| v * v).sum();
             let dmu_dt = 2.0 * ti;
             let mut dmu_da = Matrix3::zeros();
@@ -357,7 +355,7 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
         TmopMetric::AreaDeviation => {
             let value = (det_t - 1.0).abs();
             let sign = if det_t >= 1.0 { 1.0 } else { -1.0 };
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let adj_t: Matrix3<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
             let mut dmu_dt = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 { dmu_dt[(i, j)] = sign * adj_t[(i, j)]; }}
             let mut dmu_da = Matrix3::zeros();
@@ -373,7 +371,7 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
         TmopMetric::Winslow3D => {
             let det_t_abs = det_t.abs().max(1e-30);
             let value = ft2 * ft2.sqrt() / det_t_abs; // = |T|³ / det(T)
-            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let adj_t: Matrix3<f64> = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
             let mut dmu_dt = Matrix3::zeros();
             for i in 0..3 { for j in 0..3 {
                 dmu_dt[(i, j)] = (4.0 * t[(i, j)] * ft2.sqrt() * det_t_abs - ft2 * ft2.sqrt() * adj_t[(i, j)]) / (det_t_abs * det_t_abs);
@@ -409,12 +407,24 @@ pub struct TmopObjective2d {
 }
 
 impl TmopObjective2d {
+    /// Build from a 2-D Tri3 mesh. By default all boundary nodes are fixed.
     pub fn new(mesh: &SimplexMesh<2>) -> Self {
+        Self::from_mesh_with_free_tags(mesh, &[])
+    }
+
+    /// Build with specified boundary face tags whose nodes may move freely.
+    ///
+    /// Nodes on boundary faces with tags in `free_tags` are **not** frozen,
+    /// allowing them to slide along the boundary during optimisation.
+    /// All other boundary nodes remain fixed.
+    pub fn from_mesh_with_free_tags(mesh: &SimplexMesh<2>, free_tags: &[i32]) -> Self {
         let n_nodes = mesh.n_nodes();
         let coords = mesh.coords.clone();
         let n_elem = mesh.n_elems();
         let mut on_boundary = vec![false; n_nodes];
         for f in 0..mesh.n_boundary_faces() as u32 {
+            let tag = mesh.face_tag(f);
+            if free_tags.contains(&tag) { continue; }
             let nodes = mesh.bface_nodes(f);
             for &n in nodes { on_boundary[n as usize] = true; }
         }
@@ -546,13 +556,20 @@ pub struct TmopObjectiveTetra {
 }
 
 impl TmopObjectiveTetra {
-    /// Build from a tetrahedral mesh. Boundary nodes are fixed.
+    /// Build from a tetrahedral mesh. By default all boundary nodes are fixed.
     pub fn new(mesh: &SimplexMesh<3>) -> Self {
+        Self::from_mesh_with_free_tags(mesh, &[])
+    }
+
+    /// Build with specified boundary face tags whose nodes may move freely.
+    pub fn from_mesh_with_free_tags(mesh: &SimplexMesh<3>, free_tags: &[i32]) -> Self {
         let n_nodes = mesh.n_nodes();
         let coords = mesh.coords.clone();
         let n_elem = mesh.n_elems();
         let mut on_boundary = vec![false; n_nodes];
         for f in 0..mesh.n_boundary_faces() as u32 {
+            let tag = mesh.face_tag(f);
+            if free_tags.contains(&tag) { continue; }
             let nodes = mesh.bface_nodes(f);
             for &n in nodes { on_boundary[n as usize] = true; }
         }
@@ -748,12 +765,20 @@ pub struct TmopObjectiveHex {
 }
 
 impl TmopObjectiveHex {
+    /// Build from a hexahedral mesh. By default all boundary nodes are fixed.
     pub fn new(mesh: &SimplexMesh<3>) -> Self {
+        Self::from_mesh_with_free_tags(mesh, &[])
+    }
+
+    /// Build with specified boundary face tags whose nodes may move freely.
+    pub fn from_mesh_with_free_tags(mesh: &SimplexMesh<3>, free_tags: &[i32]) -> Self {
         let n_nodes = mesh.n_nodes();
         let coords = mesh.coords.clone();
         let n_elem = mesh.n_elems();
         let mut on_boundary = vec![false; n_nodes];
         for f in 0..mesh.n_boundary_faces() as u32 {
+            let tag = mesh.face_tag(f);
+            if free_tags.contains(&tag) { continue; }
             let nodes = mesh.bface_nodes(f);
             for &n in nodes { on_boundary[n as usize] = true; }
         }
@@ -1348,5 +1373,33 @@ mod tests {
         let w = Matrix3::identity();
         let res = tmop_metric_3d(&a, &w, &TmopMetric::DeformedDet);
         assert!(res.value.abs() < 1e-12, "3D DeformedDet(I) = 0, got {}", res.value);
+    }
+
+    #[test]
+    fn tmop_2d_free_tags_releases_boundary_nodes() {
+        // unit_square_tri uses face tags {1,2,3,4} for the four sides.
+        // With free_tags=[1,2,3,4], ALL nodes should be free.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let obj_all_free = TmopObjective2d::from_mesh_with_free_tags(&mesh, &[1, 2, 3, 4]);
+        assert_eq!(obj_all_free.n_free(), mesh.n_nodes(),
+            "with all boundary tags free, all {} nodes should be free, got {}",
+            mesh.n_nodes(), obj_all_free.n_free());
+
+        // With free_tags=[], same as new() — boundary nodes should be fixed.
+        let obj_all_fixed = TmopObjective2d::from_mesh_with_free_tags(&mesh, &[]);
+        assert_eq!(obj_all_fixed.n_free(), TmopObjective2d::new(&mesh).n_free(),
+            "empty free_tags should match new()");
+
+        // With free_tags=[] the free count must be less than total nodes.
+        assert!(obj_all_fixed.n_free() < mesh.n_nodes(),
+            "a clamped mesh should have fewer free nodes than total nodes");
+    }
+
+    #[test]
+    fn tmop_hex_free_tags_releases_boundary_nodes() {
+        let mesh = crate::SimplexMesh::<3>::unit_cube_tet(3);
+        let obj_all_free = TmopObjectiveTetra::from_mesh_with_free_tags(&mesh, &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(obj_all_free.n_free(), mesh.n_nodes(),
+            "with all boundary tags free, all nodes should be free");
     }
 }
