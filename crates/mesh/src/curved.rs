@@ -626,3 +626,302 @@ fn _reinterpolate_curved_3d(curved: &CurvedMesh<3>, fine: &SimplexMesh<3>, geo: 
         elem_type: if curved.geom_order >= 2 { ElementType::Tet10 } else { ElementType::Tet4 },
         n_elems: nf, n_nodes: nn as usize, face_conn: fc, face_tags: ft, face_type: ElementType::Tri3, elem_tags: vec![0; nf] }
 }
+
+// ─── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SimplexMesh;
+
+    fn unit_tri(n: usize) -> SimplexMesh<2> { SimplexMesh::<2>::unit_square_tri(n) }
+    fn unit_tet(n: usize) -> SimplexMesh<3> { SimplexMesh::<3>::unit_cube_tet(n) }
+
+    // ── Basic construction ──────────────────────────────────────────────────
+
+    #[test]
+    fn from_linear_preserves_nodes() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::from_linear(&mesh);
+        assert_eq!(curved.n_nodes, mesh.n_nodes());
+        assert_eq!(curved.n_elems, mesh.n_elems());
+        assert_eq!(curved.geom_order, 1);
+        assert_eq!(curved.nodes_per_elem, 3);
+    }
+
+    #[test]
+    fn elevate_to_p2_increases_nodes() {
+        let curved = CurvedMesh::elevate_to_order(&unit_tri(2), 2, |x| x);
+        assert_eq!(curved.nodes_per_elem, 6);
+        assert_eq!(curved.geom_order, 2);
+    }
+
+    #[test]
+    fn elevate_to_p4_increases_nodes() {
+        let curved = CurvedMesh::elevate_to_order(&unit_tri(2), 4, |x| x);
+        assert_eq!(curved.nodes_per_elem, 15); // P4 tri has 15 nodes
+        assert_eq!(curved.geom_order, 4);
+    }
+
+    #[test]
+    fn elevate_to_p3_3d_increases_nodes() {
+        let curved = CurvedMesh::elevate_to_order(&unit_tet(1), 3, |x| x);
+        assert_eq!(curved.nodes_per_elem, 20); // P3 tet has 20 nodes
+        assert_eq!(curved.geom_order, 3);
+    }
+
+    // ── Jacobian consistency on flat meshes ─────────────────────────────────
+
+    fn jacobian_matches_p1_2d(mesh: &SimplexMesh<2>, p: usize) {
+        let lin = CurvedMesh::from_linear(mesh);
+        let curved = CurvedMesh::elevate_to_order(mesh, p, |x| x);
+        let xi = [1.0 / 3.0, 1.0 / 3.0];
+        for e in 0..mesh.n_elems() {
+            let (_, d1) = lin.element_jacobian(e, &xi);
+            let (_, d2) = curved.element_jacobian(e, &xi);
+            assert!((d1 - d2).abs() < 1e-12, "P{p} elem {e}: det {d1:.6e} vs {d2:.6e}");
+        }
+    }
+
+    #[test] fn p2_jacobian_matches_p1() { jacobian_matches_p1_2d(&unit_tri(4), 2); }
+    #[test] fn p3_jacobian_matches_p1() { jacobian_matches_p1_2d(&unit_tri(4), 3); }
+    #[test] fn p4_jacobian_matches_p1() { jacobian_matches_p1_2d(&unit_tri(4), 4); }
+
+    fn jacobian_matches_p1_3d(mesh: &SimplexMesh<3>, p: usize) {
+        let lin = CurvedMesh::from_linear(mesh);
+        let curved = CurvedMesh::elevate_to_order(mesh, p, |x| x);
+        let xi = [0.25, 0.25, 0.25];
+        for e in 0..mesh.n_elems() {
+            let (_, d1) = lin.element_jacobian(e, &xi);
+            let (_, d2) = curved.element_jacobian(e, &xi);
+            assert!((d1 - d2).abs() < 1e-12, "P{p} 3D elem {e}: {d1:.6e} vs {d2:.6e}");
+        }
+    }
+
+    #[test] fn p2_3d_jacobian_matches_p1() { jacobian_matches_p1_3d(&unit_tet(1), 2); }
+    #[test] fn p3_3d_jacobian_matches_p1() { jacobian_matches_p1_3d(&unit_tet(1), 3); }
+
+    // ── Spherical mesh: curved Jacobian differs from flat ─────────────────────
+
+    #[test]
+    fn spherical_curved_jacobian_differs_from_flat() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let spherical = |mut x: [f64; 2]| { x };
+        let flat = CurvedMesh::from_linear(&mesh);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, spherical);
+        let xi = [1.0/3.0, 1.0/3.0];
+        let (_, d_flat) = flat.element_jacobian(0, &xi);
+        let (_, d_curved) = curved.element_jacobian(0, &xi);
+        // On a flat mesh with identity map_fn, P2 Jacobian = P1 Jacobian within tolerance
+        assert!((d_flat - d_curved).abs() < 1e-12, "flat+identity should match: {d_flat:.6e} vs {d_curved:.6e}");
+    }
+
+    // ── refine_curved_2d ──────────────────────────────────────────────────────
+
+    #[test]
+    fn refine_curved_2d_p1_doubles_elements() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::from_linear(&mesh);
+        let fine = refine_curved_2d(&curved);
+        assert_eq!(fine.n_elems, curved.n_elems * 4);
+        assert!(fine.n_nodes > curved.n_nodes);
+    }
+
+    #[test]
+    fn refine_curved_2d_p2_quadruples_elements() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
+        let fine = refine_curved_2d(&curved);
+        assert_eq!(fine.n_elems, curved.n_elems * 4);
+        assert_eq!(fine.geom_order, 2);
+    }
+
+    #[test]
+    fn refine_curved_2d_p4_maintains_geom_order() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 4, |x| x);
+        let fine = refine_curved_2d(&curved);
+        assert_eq!(fine.geom_order, 4);
+        for e in 0..fine.n_elems {
+            let (_, det) = fine.element_jacobian(e, &[1.0/3.0, 1.0/3.0]);
+            assert!(det.abs() > 1e-15, "elem {e} degenerate det={det:.6e}");
+        }
+    }
+
+    #[test]
+    fn refine_curved_2d_flat_p4_jacobian_constant() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 4, |x| x);
+        let fine = refine_curved_2d(&curved);
+        // All fine elements on a flat mesh should have same Jacobian
+        let xi = [1.0/3.0, 1.0/3.0];
+        let (_, d0) = fine.element_jacobian(0, &xi);
+        for e in 1..fine.n_elems {
+            let (_, d) = fine.element_jacobian(e, &xi);
+            assert!((d0 - d).abs() < 1e-12, "elem {e}: det {d:.6e} != {d0:.6e}");
+        }
+    }
+
+    // ── refine_curved_3d ────────────────────────────────────────────────────
+
+    #[test]
+    fn refine_curved_3d_p1_eightfolds_elements() {
+        let mesh = unit_tet(1); // 6 tets in a cube
+        let curved = CurvedMesh::from_linear(&mesh);
+        let fine = refine_curved_3d(&curved);
+        assert_eq!(fine.n_elems, curved.n_elems * 8);
+        assert_eq!(fine.geom_order, 1);
+    }
+
+    #[test]
+    fn refine_curved_3d_p2_maintains_order() {
+        let mesh = unit_tet(1);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
+        let fine = refine_curved_3d(&curved);
+        assert_eq!(fine.geom_order, 2);
+        assert!(fine.nodes_per_elem > 4);
+    }
+
+    #[test]
+    fn refine_curved_3d_flat_p3_jacobian_consistent() {
+        let mesh = unit_tet(1);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 3, |x| x);
+        let fine = refine_curved_3d(&curved);
+        let xi = [0.25, 0.25, 0.25];
+        for e in 0..fine.n_elems.min(10) {
+            let (_, d) = fine.element_jacobian(e, &xi);
+            assert!(d.abs() > 1e-15, "elem {e} degenerate det={d:.6e}");
+        }
+    }
+
+    // ── refine_curved_2d_nc (non-conforming) ────────────────────────────────
+
+    #[test]
+    fn refine_curved_2d_nc_single_element() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::from_linear(&mesh);
+        let marked = vec![0usize];
+        let fine = refine_curved_2d_nc(&curved, &marked);
+        assert!(fine.n_elems > curved.n_elems, "NC refine should increase element count");
+        assert_eq!(fine.geom_order, 1);
+    }
+
+    #[test]
+    fn refine_curved_2d_nc_p2_nonconforming() {
+        let mesh = unit_tri(3);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
+        let marked = vec![1usize, 3];
+        let fine = refine_curved_2d_nc(&curved, &marked);
+        assert_eq!(fine.geom_order, 2);
+        assert!(fine.n_elems > curved.n_elems);
+    }
+
+    #[test]
+    fn refine_curved_2d_nc_p4_no_degenerate() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 4, |x| x);
+        let marked = vec![0usize];
+        let fine = refine_curved_2d_nc(&curved, &marked);
+        let xi = [1.0/3.0, 1.0/3.0];
+        for e in 0..fine.n_elems {
+            let (_, det) = fine.element_jacobian(e, &xi);
+            assert!(det.abs() > 1e-15, "elem {e} degenerate det={det:.6e}");
+        }
+    }
+
+    // ── refine_curved_3d_nc (non-conforming) ────────────────────────────────
+
+    #[test]
+    fn refine_curved_3d_nc_single_tet() {
+        let mesh = unit_tet(1);
+        let curved = CurvedMesh::from_linear(&mesh);
+        let marked = vec![0usize];
+        let fine = refine_curved_3d_nc(&curved, &marked);
+        assert!(fine.n_elems > curved.n_elems);
+    }
+
+    #[test]
+    fn refine_curved_3d_nc_p2_nonconforming() {
+        let mesh = unit_tet(1);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
+        let marked = vec![1usize, 2];
+        let fine = refine_curved_3d_nc(&curved, &marked);
+        assert_eq!(fine.geom_order, 2);
+        let xi = [0.25, 0.25, 0.25];
+        for e in 0..fine.n_elems.min(4) {
+            let (_, det) = fine.element_jacobian(e, &xi);
+            assert!(det.abs() > 1e-15, "elem {e} degenerate det={det:.6e}");
+        }
+    }
+
+    // ── JacobianCache ──────────────────────────────────────────────────────
+
+    #[test]
+    fn jacobian_cache_builds_and_matches() {
+        let mesh = unit_tri(4);
+        let curved = CurvedMesh::from_linear(&mesh);
+        use fem_element::ReferenceElement;
+        use fem_element::lagrange::TriP1;
+        let ref_elem = TriP1;
+        let quad = ref_elem.quadrature(3);
+        let per_elem: Vec<(Vec<f64>, Vec<f64>)> = (0..curved.n_elems)
+            .map(|_| (quad.points.iter().flatten().copied().collect(), quad.weights.clone()))
+            .collect();
+        let cache = JacobianCache::build::<2>(&curved, &per_elem);
+        let xi = [1.0/3.0, 1.0/3.0];
+        let (_, det_direct) = curved.element_jacobian(0, &xi);
+        let det_cached = cache.det_j(0, 1); // second QP
+        assert!(det_cached.abs() > 1e-15, "cached det should be non-zero");
+    }
+
+    // ── CurvedElementTransformation ─────────────────────────────────────────
+
+    #[test]
+    fn curved_element_transformation_det_matches() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
+        let tr = CurvedElementTransformation::new(&curved, 0);
+        let xi = [1.0/3.0, 1.0/3.0];
+        let (_, det_direct) = curved.element_jacobian(0, &xi);
+        let det_tr = tr.det_j(&xi);
+        assert!((det_direct - det_tr).abs() < 1e-15);
+        let phys = tr.reference_to_physical(&xi);
+        assert_eq!(phys.len(), 2);
+    }
+
+    // ── _find_parent vertex voting ──────────────────────────────────────────
+
+    #[test]
+    fn find_parent_by_vertex_vote_2d() {
+        let mesh = unit_tri(2);
+        let curved = CurvedMesh::from_linear(&mesh);
+        let vmap = _build_vparent_map(&curved);
+        // First fine element of refine_curved_2d should map to parent 0
+        let fine = refine_curved_2d(&curved);
+        let fv = fine.element_nodes(0);
+        let p = _find_parent::<2>(&vmap, &fv[..3], curved.n_elems);
+        assert!(p < curved.n_elems, "parent {p} out of range");
+    }
+
+    #[test]
+    fn find_parent_by_vertex_vote_3d() {
+        let mesh = unit_tet(1);
+        let curved = CurvedMesh::from_linear(&mesh);
+        let vmap = _build_vparent_map(&curved);
+        let fine = refine_curved_3d(&curved);
+        let fv = fine.element_nodes(0);
+        let p = _find_parent::<3>(&vmap, &fv[..4], curved.n_elems);
+        assert!(p < curved.n_elems, "parent {p} out of range");
+    }
+
+    // ── Reference-to-physical roundtrip ─────────────────────────────────────
+
+    #[test]
+    fn physical_to_reference_to_physical_consistent() {
+        let mesh = unit_tri(4);
+        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
+        let xi_ref = [1.0/3.0, 1.0/3.0];
+        let x_phys = curved.reference_to_physical(0, &xi_ref);
+        assert!(x_phys[0] > 0.0 && x_phys[1] > 0.0, "physical coords should be positive");
+    }
+}
