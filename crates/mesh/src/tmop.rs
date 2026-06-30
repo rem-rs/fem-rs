@@ -24,19 +24,17 @@ use crate::{SimplexMesh, topology::MeshTopology};
 /// Available TMOP quality metrics.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TmopMetric {
-    /// Frobenius-squared norm of T: `μ = ∣T∣² = tr(T^T T)`.
-    /// Minimising this tends toward the target shape.
     L2,
-    /// Shape metric (size-independent): `μ = ∣T∣² / det(T)^{2/d} - d`.
     Shape,
-    /// Combined size+shape: `μ = ∣T∣² / det(T)^{2/d}`.
     SizeShape,
-    /// Signed element volume: `μ = det(T)`. Negative values indicate inversion.
-    /// Only ∂μ/∂A is used (value not needed for optimisation targets).
     Volume,
-    /// Condition-number-like: `μ = ∣T∣² / (d · det(T)^{2/d})`.
-    /// Measures element quality relative to target, with barrier at det→0.
     Condition,
+    /// Deformed determinant: `μ = (det(T) - 1)²`. Drives element
+    /// volume toward the target value (det(T) = 1 when T = I).
+    DeformedDet,
+    /// Barrier: `μ = 1/det(T) − 1` for det(T) > 0. Approaches +∞ as
+    /// det(T) → 0⁺, preventing element inversion.
+    BarrierDet,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -124,6 +122,26 @@ pub fn tmop_metric_2d(a: &Matrix2<f64>, w: &Matrix2<f64>, metric: &TmopMetric) -
             for i in 0..2 { for j in 0..2 { for k in 0..2 {
                 dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
             }}}
+            TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
+        }
+        TmopMetric::DeformedDet => {
+            let value = (det_t - 1.0) * (det_t - 1.0);
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let mut dmu_dt = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = 2.0 * (det_t - 1.0) * adj_t[(i, j)]; }}
+            let mut dmu_da = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { for k in 0..2 { dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)]; }}}
+            TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
+        }
+        TmopMetric::BarrierDet => {
+            let a = det_t.abs().max(1e-30);
+            let value = 1.0 / a - 1.0;
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix2::identity());
+            let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
+            let mut dmu_dt = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { dmu_dt[(i, j)] = -sign / (a * a) * adj_t[(i, j)]; }}
+            let mut dmu_da = Matrix2::zeros();
+            for i in 0..2 { for j in 0..2 { for k in 0..2 { dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)]; }}}
             TmopElementMetric2d { value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)]], [dmu_da[(1,0)], dmu_da[(1,1)]]] }
         }
     }
@@ -246,6 +264,38 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
                     [dmu_da[(1,0)], dmu_da[(1,1)], dmu_da[(1,2)]],
                     [dmu_da[(2,0)], dmu_da[(2,1)], dmu_da[(2,2)]],
                 ],
+            }
+        }
+        TmopMetric::DeformedDet => {
+            let value = (det_t - 1.0) * (det_t - 1.0);
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let mut dmu_dt = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { dmu_dt[(i, j)] = 2.0 * (det_t - 1.0) * adj_t[(i, j)]; }}
+            let mut dmu_da = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { for k in 0..3 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric3d {
+                value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)], dmu_da[(0,2)]],
+                               [dmu_da[(1,0)], dmu_da[(1,1)], dmu_da[(1,2)]],
+                               [dmu_da[(2,0)], dmu_da[(2,1)], dmu_da[(2,2)]]],
+            }
+        }
+        TmopMetric::BarrierDet => {
+            let a = det_t.abs().max(1e-30);
+            let value = 1.0 / a - 1.0;
+            let adj_t = t.try_inverse().map(|inv| det_t * inv.transpose()).unwrap_or(Matrix3::identity());
+            let sign = if det_t >= 0.0 { 1.0 } else { -1.0 };
+            let mut dmu_dt = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { dmu_dt[(i, j)] = -sign / (a * a) * adj_t[(i, j)]; }}
+            let mut dmu_da = Matrix3::zeros();
+            for i in 0..3 { for j in 0..3 { for k in 0..3 {
+                dmu_da[(i, j)] += dmu_dt[(i, k)] * winv[(j, k)];
+            }}}
+            TmopElementMetric3d {
+                value, dmu_da: [[dmu_da[(0,0)], dmu_da[(0,1)], dmu_da[(0,2)]],
+                               [dmu_da[(1,0)], dmu_da[(1,1)], dmu_da[(1,2)]],
+                               [dmu_da[(2,0)], dmu_da[(2,1)], dmu_da[(2,2)]]],
             }
         }
     }
@@ -1176,5 +1226,37 @@ mod tests {
         obj.set_ideal_equilateral();
         let result = tmop_optimise_2d(&mesh, &TmopMetric::Shape, 30, 0.05);
         assert!(result.iter().all(|&v| v.is_finite()), "non-finite after optimisation");
+    }
+
+    #[test]
+    fn tmop_deformed_det_2d() {
+        let a = Matrix2::identity();
+        let w = Matrix2::identity();
+        let res = tmop_metric_2d(&a, &w, &TmopMetric::DeformedDet);
+        assert!(res.value.abs() < 1e-12, "DeformedDet(I) = 0, got {}", res.value);
+        // A = 2I → det=4, T=2I, det(T)=4 → value = (4-1)² = 9
+        let a2 = Matrix2::from_diagonal(&nalgebra::Vector2::new(2.0, 2.0));
+        let res2 = tmop_metric_2d(&a2, &w, &TmopMetric::DeformedDet);
+        assert!((res2.value - 9.0).abs() < 1e-12, "DeformedDet(2I) = 9, got {}", res2.value);
+    }
+
+    #[test]
+    fn tmop_barrier_det_2d() {
+        let a = Matrix2::identity();
+        let w = Matrix2::identity();
+        let res = tmop_metric_2d(&a, &w, &TmopMetric::BarrierDet);
+        assert!((res.value - 0.0).abs() < 1e-12, "BarrierDet(I) = 1/1-1 = 0, got {}", res.value);
+        // Very small det → large value
+        let a_small = Matrix2::new(0.1, 0.0, 0.0, 0.1);
+        let res_small = tmop_metric_2d(&a_small, &w, &TmopMetric::BarrierDet);
+        assert!(res_small.value > 0.0, "BarrierDet(small) should be positive, got {}", res_small.value);
+    }
+
+    #[test]
+    fn tmop_deformed_det_3d() {
+        let a = Matrix3::identity();
+        let w = Matrix3::identity();
+        let res = tmop_metric_3d(&a, &w, &TmopMetric::DeformedDet);
+        assert!(res.value.abs() < 1e-12, "3D DeformedDet(I) = 0, got {}", res.value);
     }
 }
