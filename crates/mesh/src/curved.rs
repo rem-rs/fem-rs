@@ -1,16 +1,10 @@
-//! High-order curved mesh with isoparametric geometry mapping.
+//! High-order curved mesh with isoparametric geometry mapping and Jacobian caching.
 //!
-//! A `CurvedMesh<D>` stores a **geometric order** �?1 and the corresponding
-//! higher-order (quadratic, cubic, �? node coordinates.  The isoparametric
-//! mapping `F_K: K̂ �?K` is defined by the same Lagrange shape functions used
-//! for the FE solution, so the Jacobian `J = ∂F/∂ξ` is computed from the
-//! geometric nodal coordinates.
-//!
-//! # Isoparametric Jacobian
-//! For a 2-D triangle with geometric nodes `x_0, �? x_{n-1}`:
-//! ```text
-//! F(ξ) = Σ�?x�?φ�?ξ),    J = ∂F/∂�? (2×2 matrix)
-//! ```
+//! Provides:
+//! - [`CurvedMesh`] — arbitrary-order isoparametric mesh
+//! - [`JacobianCache`] — precomputed `(J, detJ, J⁻ᵀ)` for all `(elem, qp)` pairs
+//! - [`CurvedElementTransformation`] — isoparametric transformation for assembly
+//! - [`refine_curved`] / [`refine_curved_3d`] — curved AMR with geometric node interpolation
 
 use fem_core::{ElemId, FaceId, NodeId};
 use nalgebra::DMatrix;
@@ -429,6 +423,176 @@ impl<const D: usize> MeshTopology for CurvedMesh<D> {
     }
 
     fn geom_order(&self) -> u8 { self.geom_order }
+}
+
+// ─── JacobianCache ────────────────────────────────────────────────────────────
+
+/// Precomputed Jacobian data for all (element, quadrature-point) pairs.
+///
+/// Eliminates repeated `element_jacobian()` calls during assembly.
+pub struct JacobianCache {
+    /// Flat layout per QP: `[J_00, …, det_J, JIT_00, …]`.
+    data: Vec<f64>,
+    n_qp_per_elem: usize,
+    dim: usize,
+    stride: usize,
+}
+
+impl JacobianCache {
+    /// Build from a `CurvedMesh` and a reference element's quadrature rule.
+    pub fn build<const D: usize>(
+        mesh: &CurvedMesh<D>,
+        quad: &[(Vec<f64>, Vec<f64>)],  // (points, weights) per elem
+    ) -> Self {
+        let n_qp = quad[0].1.len();
+        let n_elems = mesh.n_elems;
+        let dim = D;
+        let stride = dim * dim + 1 + dim * dim;
+        let mut data = vec![0.0_f64; n_elems * n_qp * stride];
+
+        for e in 0..n_elems {
+            let pts = &quad[e].0;
+            for q in 0..n_qp {
+                let xi = &pts[q * dim .. (q + 1) * dim];
+                let (jac, det) = mesh.element_jacobian(e, xi);
+                let base = (e * n_qp + q) * stride;
+                for i in 0..dim { for j in 0..dim { data[base + i * dim + j] = jac[(i, j)]; }}
+                let off = dim * dim;
+                data[base + off] = det;
+                let jit = jac.try_inverse().map(|m| m.transpose()).unwrap_or_else(|| DMatrix::identity(dim, dim));
+                let off2 = dim * dim + 1;
+                for i in 0..dim { for j in 0..dim { data[base + off2 + i * dim + j] = jit[(i, j)]; }}
+            }
+        }
+        Self { data, n_qp_per_elem: n_qp, dim, stride }
+    }
+
+    /// Jacobian determinant at `(elem, qp)`.
+    pub fn det_j(&self, elem: usize, qp: usize) -> f64 {
+        let base = (elem * self.n_qp_per_elem + qp) * self.stride;
+        self.data[base + self.dim * self.dim]
+    }
+
+    /// J⁻ᵀ at `(elem, qp)`.
+    pub fn jacobian_inv_t(&self, elem: usize, qp: usize) -> Vec<f64> {
+        let base = (elem * self.n_qp_per_elem + qp) * self.stride;
+        let off = self.dim * self.dim + 1;
+        (0..self.dim * self.dim).map(|i| self.data[base + off + i]).collect()
+    }
+}
+
+// ─── CurvedElementTransformation ──────────────────────────────────────────────
+
+/// Isoparametric element transformation for curved meshes.
+pub struct CurvedElementTransformation<'a, const D: usize> {
+    mesh: &'a CurvedMesh<D>,
+    elem: usize,
+}
+
+impl<'a, const D: usize> CurvedElementTransformation<'a, D> {
+    pub fn new(mesh: &'a CurvedMesh<D>, elem: usize) -> Self { Self { mesh, elem } }
+
+    /// Jacobian determinant at reference point xi.
+    pub fn det_j(&self, xi: &[f64]) -> f64 { self.mesh.element_jacobian(self.elem, xi).1 }
+
+    /// J⁻ᵀ at reference point xi (row-major flat).
+    pub fn jacobian_inv_t(&self, xi: &[f64]) -> Vec<f64> {
+        let (jac, _) = self.mesh.element_jacobian(self.elem, xi);
+        let jit = jac.try_inverse().map(|m| m.transpose()).unwrap_or_else(|| DMatrix::identity(D, D));
+        (0..D * D).map(|k| jit.data.as_slice()[k]).collect()
+    }
+
+    /// Reference → physical coordinates.
+    pub fn reference_to_physical(&self, xi: &[f64]) -> [f64; D] {
+        self.mesh.reference_to_physical(self.elem, xi)
+    }
+}
+
+// ─── Curved AMR refinement ────────────────────────────────────────────────────
+
+/// Refine a curved 2D Tri mesh uniformly via parent isoparametric interpolation.
+pub fn refine_curved_2d(curved: &CurvedMesh<2>) -> CurvedMesh<2> {
+    let geo = fem_element::lagrange::factory::ref_elem(
+        fem_element::lagrange::factory::ElemType::Tri, curved.geom_order);
+    let npe = geo.n_dofs();
+
+    let n_elems_parent = curved.n_elems;
+    let linear_parent = SimplexMesh::<2> {
+        coords: curved.coords.clone(),
+        conn: curved.geom_conn.chunks(curved.nodes_per_elem)
+            .flat_map(|c| c[..3].to_vec()).collect(),
+        elem_type: ElementType::Tri3,
+        face_conn: curved.face_conn.clone(),
+        face_tags: curved.face_tags.clone(),
+        face_type: ElementType::Line2,
+        elem_tags: curved.elem_tags.clone(),
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    };
+    let fine_linear = crate::amr::refine_uniform(&linear_parent);
+    let n_elems_fine2 = fine_linear.n_elems();
+    let mut new_conn2 = Vec::with_capacity(n_elems_fine2 * npe);
+    let mut next_node = fine_linear.n_nodes() as NodeId;
+    let mut new_coords2 = fine_linear.coords.clone();
+
+    let dof_coords = geo.dof_coords();
+    for fine_e in 0..n_elems_fine2 {
+        let fnodes = fine_linear.elem_nodes(fine_e as u32);
+        let _off = new_conn2.len();
+        for i in 0..3 { new_conn2.push(fnodes[i]); }
+        for i in 3..npe {
+            let xi_ref = &dof_coords[i];
+            // Find parent by checking which parent contains the first vertex
+            let fine_v0 = fnodes[0] as usize;
+            // Find which parent element has this node as a vertex
+            let mut parent_e = 0usize;
+            'outer: for p in 0..n_elems_parent {
+                for v in 0..3 {
+                    if curved.geom_conn[p * curved.nodes_per_elem + v] == fine_v0 as NodeId {
+                        parent_e = p; break 'outer;
+                    }
+                }
+            }
+            let x = curved.reference_to_physical(parent_e, xi_ref);
+            for d in 0..2 { new_coords2.push(x[d]); }
+            new_conn2.push(next_node);
+            next_node += 1;
+        }
+    }
+
+    let nfp = 2;
+    let n_faces = fine_linear.n_boundary_faces();
+    let mut new_fc = Vec::with_capacity(n_faces * nfp);
+    let mut new_ft = Vec::with_capacity(n_faces);
+    for f in 0..n_faces as u32 {
+        for &n in fine_linear.face_nodes(f) { new_fc.push(n); }
+        new_ft.push(fine_linear.face_tag(f));
+    }
+
+    CurvedMesh {
+        coords: new_coords2,
+        geom_conn: new_conn2,
+        geom_order: curved.geom_order,
+        nodes_per_elem: npe,
+        elem_type: elem_type_for_order(curved.geom_order, 2),
+        n_elems: n_elems_fine2,
+        n_nodes: next_node as usize,
+        face_conn: new_fc,
+        face_tags: new_ft,
+        face_type: ElementType::Line2,
+        elem_tags: vec![0; n_elems_fine2],
+    }
+}
+
+/// Element type for given geometric order.
+fn elem_type_for_order(order: u8, dim: usize) -> ElementType {
+    match (dim, order) {
+        (2, 2) => ElementType::Tri6,
+        (3, 2) => ElementType::Tet10,
+        _ => if dim == 2 { ElementType::Tri3 } else { ElementType::Tet4 },
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

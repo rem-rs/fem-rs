@@ -19,7 +19,6 @@
 //! let curved = project_boundary_to_cad(&mesh, &config, 2)?;
 //! ```
 
-use nalgebra::{Matrix2, Vector2, Vector3};
 use std::f64::consts::PI;
 
 use crate::topology::MeshTopology;
@@ -137,14 +136,14 @@ impl CadModel for AnalyticSurface {
                  center[1] + radius * theta.sin(),
                  center[2] + v * height]
             },
-            Self::Torus { center, major_radius: R, minor_radius: r } => {
+            Self::Torus { center, major_radius: r_major, minor_radius: r_minor } => {
                 let theta = u * 2.0 * PI;
                 let phi = v * 2.0 * PI;
                 let ct = theta.cos(); let st = theta.sin();
                 let cp = phi.cos(); let sp = phi.sin();
-                [center[0] + (R + r * cp) * ct,
-                 center[1] + (R + r * cp) * st,
-                 center[2] + r * sp]
+                [center[0] + (r_major + r_minor * cp) * ct,
+                 center[1] + (r_major + r_minor * cp) * st,
+                 center[2] + r_minor * sp]
             },
             Self::Cone { center, radius, height } => {
                 let theta = u * 2.0 * PI;
@@ -493,10 +492,10 @@ impl ProjectionConfig {
 ///
 /// Returns a new `SimplexMesh` with curved (projected) boundary nodes.
 /// Interior nodes are left unchanged.
-pub fn project_boundary_to_cad<const D: usize>(
+    pub fn project_boundary_to_cad<const D: usize>(
     mesh: &SimplexMesh<D>,
     config: &ProjectionConfig,
-    geom_order: u8,
+    _geom_order: u8,
 ) -> SimplexMesh<D> {
     // Build a lookup: tag → surface
     use std::collections::HashMap;
@@ -513,7 +512,7 @@ pub fn project_boundary_to_cad<const D: usize>(
                 if projected_nodes.contains(&n) { continue; }
                 projected_nodes.insert(n);
                 let c = mesh.node_coords(n);
-                let mut pt = [c[0], c[1], if D == 3 { c[2] } else { 0.0 }];
+                let pt = [c[0], c[1], if D == 3 { c[2] } else { 0.0 }];
                 let (u, v, _) = surface.project(&pt);
                 let proj = surface.eval(u, v);
                 for i in 0..D { new_coords[n as usize * D + i] = proj[i]; }
