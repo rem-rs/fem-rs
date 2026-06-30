@@ -42,13 +42,40 @@ use crate::mesh_serde;
 /// Returns a [`ParallelMesh`] whose local sub-mesh contains only the elements
 /// and nodes (owned + ghost) assigned to the calling rank.
 ///
-/// **Note**: every rank must hold the full serial mesh.  For a
-/// memory-efficient alternative where only rank 0 holds the mesh, use
-/// [`partition_simplex_streaming`].
+/// ## Multi-rank behaviour
+///
+/// Rank 0 partitions the mesh and sends each rank's sub-mesh via point-to-point
+/// messages.  Other ranks receive their sub-mesh without ever loading the full
+/// mesh (streaming approach).  This is memory-efficient: rank 0 holds the full
+/// mesh; other ranks hold only their local portion.
+///
+/// For the **replicate-then-extract** fallback (all ranks hold the full mesh),
+/// use [`partition_simplex_replicated`].
 ///
 /// # Panics
 /// Panics if the mesh has zero elements.
 pub fn partition_simplex<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    comm: &Comm,
+) -> ParallelMesh<SimplexMesh<D>> {
+    if comm.size() == 1 {
+        let n = mesh.n_elems();
+        assert!(n > 0, "partition_simplex: mesh has no elements");
+        let partition = MeshPartition::new_serial(mesh.n_nodes(), n);
+        return ParallelMesh::new(mesh.clone(), comm.clone(), partition);
+    }
+    // Multi-rank: use streaming path (rank 0 partitions, sends sub-meshes).
+    // Non-root ranks receive their portion without loading the full mesh.
+    partition_simplex_streaming(Some(mesh), comm)
+        .expect("partition_simplex streaming failed")
+}
+
+/// Replicated-then-extract partitioner (all ranks hold the full mesh).
+///
+/// This is the **fallback** for environments where point-to-point messaging
+/// is unavailable (e.g., WASM Workers with limited channels).  On native
+/// platforms, [`partition_simplex`] uses streaming by default.
+pub fn partition_simplex_replicated<const D: usize>(
     mesh: &SimplexMesh<D>,
     comm: &Comm,
 ) -> ParallelMesh<SimplexMesh<D>> {

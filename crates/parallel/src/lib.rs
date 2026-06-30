@@ -159,7 +159,7 @@ pub use par_ras::{
 	RasConfig, RasHpcDiagnostics, RasLocalSolverKind, RasPrecond, par_solve_gmres_ras,
 	par_solve_pcg_ras, summarize_ras_hpc,
 };
-pub use par_simplex::{partition_simplex, partition_simplex_streaming};
+pub use par_simplex::{partition_simplex, partition_simplex_replicated, partition_simplex_streaming};
 pub use par_solver::{par_solve_cg, par_solve_gmres_jacobi, par_solve_pcg_jacobi, par_solve_minres};
 pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
