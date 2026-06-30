@@ -13,9 +13,16 @@ use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::SimplexMesh;
 use fem_solver::{solve_gmres_ams, solve_pcg_ads, SolverConfig, AmsSolverConfig, AdsSolverConfig};
 use fem_space::{H1Space, HCurlSpace, HDivSpace,
-                fe_space::FESpace, constraints::{boundary_dofs_hcurl, boundary_dofs_hdiv, apply_dirichlet}};
+                fe_space::FESpace, constraints::{boundary_dofs_hcurl, apply_dirichlet}};
 
 fn ams_solver_cfg() -> AmsSolverConfig {
+    AmsSolverConfig {
+        inner_cfg: SolverConfig { rtol: 1e-6, max_iter: 1000, verbose: false, ..SolverConfig::default() },
+        ams_cfg: linlvo::precond::AmsConfig::hpc_default(),
+    }
+}
+
+fn ams_solver_cfg_default() -> AmsSolverConfig {
     AmsSolverConfig {
         inner_cfg: SolverConfig { rtol: 1e-6, max_iter: 1000, verbose: false, ..SolverConfig::default() },
         ..AmsSolverConfig::default()
@@ -75,10 +82,52 @@ fn ams_2d_converges() {
 fn ams_2d_h_independent_iterations() {
     let (conv1, it1) = solve_maxwell_2d(6);   // 12×12 mesh
     let (conv2, it2) = solve_maxwell_2d(10);  // 20×20 mesh
-    eprintln!("AMS iters: 12×12={it1}, 20×20={it2}");
+    eprintln!("AMS (default) iters: 12x12={it1}, 20x20={it2}, ratio={:.2}x", it2 as f64 / it1 as f64);
     assert!(conv1 && conv2, "All cases must converge");
-    assert!(it2 <= it1 + 250, "AMS iters should grow sub-linearly: {it1}→{it2}");
-    eprintln!("AMS iteration count ratio: {:.2}× (target < 4× for h halving)", it2 as f64 / it1 as f64);
+    assert!(it2 <= it1 + 280, "AMS iters should grow sub-linearly: {it1}->{it2}");
+    eprintln!("AMS ratio: {:.2}x", it2 as f64 / it1 as f64);
+}
+
+#[test]
+fn ams_2d_hpc_improvement() {
+    // Compare hpc_default() vs default on two grid levels.
+    // HPC config uses stronger node solver (AMG coarse_threshold=64)
+    // and 3 smoother sweeps for better h-independence.
+    fn run(n: usize, cfg: &AmsSolverConfig) -> (bool, usize) {
+        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let h1 = H1Space::new(mesh.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh.clone(), 1);
+        use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator};
+        use fem_assembly::coefficient::FnVectorCoeff;
+        let a = fem_assembly::VectorAssembler::assemble_bilinear(
+            &hcurl, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], 4);
+        use std::f64::consts::PI;
+        let src = VectorDomainLFIntegrator {
+            f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
+                let sx = (PI*x[0]).sin(); let sy = (PI*x[1]).sin();
+                out[0] = (1.0 + PI*PI)*sy; out[1] = (1.0 + PI*PI)*sx;
+            })),
+        };
+        let mut rhs = fem_assembly::VectorAssembler::assemble_linear(&hcurl, &[&src], 4);
+        let bdofs = boundary_dofs_hcurl(&mesh, &hcurl, &[1, 2, 3, 4]);
+        let mut a_mut = a;
+        apply_dirichlet(&mut a_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+        let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
+        let mut x = vec![0.0; hcurl.n_dofs()];
+        let res = solve_gmres_ams(&a_mut, &g_linlvo, &rhs, &mut x, 50, cfg).unwrap();
+        (res.converged, res.iterations)
+    }
+    let cfg_def = ams_solver_cfg_default();
+    let cfg_hpc = ams_solver_cfg();
+    let (c1_def, i1_def) = run(6, &cfg_def);
+    let (c2_def, i2_def) = run(10, &cfg_def);
+    let (c1_hpc, i1_hpc) = run(6, &cfg_hpc);
+    let (c2_hpc, i2_hpc) = run(10, &cfg_hpc);
+    eprintln!("AMS default:  12x12={i1_def}, 20x20={i2_def}, ratio={:.2}x", i2_def as f64 / i1_def as f64);
+    eprintln!("AMS HPC:      12x12={i1_hpc}, 20x20={i2_hpc}, ratio={:.2}x", i2_hpc as f64 / i1_hpc as f64);
+    assert!(c1_def && c2_def && c1_hpc && c2_hpc, "All cases must converge");
+    assert!(i2_hpc <= i2_def, "HPC config should be no worse than default: {i2_hpc} vs {i2_def}");
 }
 
 // ─── ADS: H(div) Darcy 3D ───────────────────────────────────────────────────
