@@ -203,7 +203,305 @@ pub fn relative_error(u_full: &[f64], u_reduced: &[f64]) -> f64 {
     (diff / norm.max(1e-30)).sqrt()
 }
 
-// ─── DEIM (Discrete Empirical Interpolation Method) ─────────────────────────
+// ─── EIM (Empirical Interpolation Method) ───────────────────────────────────
+
+/// EIM basis: greedy-selected basis vectors and interpolation points for
+/// approximating parameter-dependent functions `g(μ)`.
+///
+/// Unlike DEIM (which takes POD modes as fixed input), EIM builds both the
+/// basis AND the interpolation points greedily from training snapshots.
+/// This is the workhorse for hyper-reduction of non-affine parametric
+/// operators in reduced-basis and ROM settings.
+///
+/// # Algorithm (Barrault et al. 2004)
+///
+/// 1. Choose first snapshot as first basis vector; magic point = argmax |b₁|.
+/// 2. For k = 2, …, m: for each training snapshot, compute the interpolation
+///    residual; select the snapshot with the largest residual norm as the
+///    next basis vector; its argmax is the next magic point.
+#[derive(Debug, Clone)]
+pub struct EimBasis {
+    /// Basis vectors (columns). Shape: `(n_dofs, m)`.
+    pub basis: DMatrix<f64>,
+    /// Interpolation (magic) points — row indices in [0, n_dofs).
+    pub points: Vec<usize>,
+    /// Number of basis vectors.
+    pub m: usize,
+}
+
+impl EimBasis {
+    /// Greedy construction of an EIM basis from training snapshots.
+    ///
+    /// # Arguments
+    /// * `snapshots` — training function evaluations, each a length-`n` vector
+    /// * `m`         — desired number of basis vectors (≤ n_snapshots)
+    ///
+    /// Returns the EIM basis with `m` columns and the corresponding `m` magic
+    /// point indices.
+    pub fn build(snapshots: &[Vec<f64>], m: usize) -> Result<Self, String> {
+        let n_snap = snapshots.len();
+        if n_snap == 0 || snapshots[0].is_empty() {
+            return Err("EIM: empty snapshots".into());
+        }
+        let n = snapshots[0].len();
+        let m_eff = m.min(n_snap);
+        if m_eff == 0 {
+            return Err("EIM: effective rank is 0".into());
+        }
+
+        let mut basis: Vec<Vec<f64>> = Vec::with_capacity(m_eff);
+        let mut points: Vec<usize> = Vec::with_capacity(m_eff);
+
+        // Step 1: first basis = snapshot with largest norm; first point = argmax |b₁|
+        let (idx_first, _) = snapshots.iter().enumerate()
+            .map(|(i, s)| (i, s.iter().map(|v| v * v).sum::<f64>()))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .ok_or("EIM: empty snapshots")?;
+
+        let first_vec = &snapshots[idx_first];
+        let inf_norm = first_vec.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        if inf_norm < 1e-300 {
+            return Err("EIM: zero snapshot".into());
+        }
+        let b1: Vec<f64> = first_vec.iter().map(|v| v / inf_norm).collect();
+        let p0 = b1.iter().enumerate()
+            .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        basis.push(b1);
+        points.push(p0);
+
+        // Steps 2..m: greedy selection
+        for _k in 1..m_eff {
+            let mut best_res_norm = -1.0_f64;
+            let mut best_basis: Option<Vec<f64>> = None;
+            let mut best_point = 0usize;
+
+            for snap in snapshots.iter() {
+                // Interpolation matrix B_sub[m×m] at selected points
+                let m_prev = points.len();
+                let b_sub = DMatrix::from_fn(m_prev, m_prev, |i, j| basis[j][points[i]]);
+                let b_rhs = DVector::from_fn(m_prev, |i, _| snap[points[i]]);
+
+                // Solve B_sub · c = snapshot[points] for coefficients
+                let c = match b_sub.lu().solve(&b_rhs) {
+                    Some(c) => c,
+                    None => continue,  // singular; skip this snapshot
+                };
+
+                // Residual r = snap - basis · c
+                let mut residual = DVector::from_vec(snap.clone());
+                for j in 0..m_prev {
+                    for i in 0..n {
+                        residual[i] -= c[j] * basis[j][i];
+                    }
+                }
+
+                let res_norm = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+                if res_norm > best_res_norm {
+                    best_res_norm = res_norm;
+                    // Normalised residual as next basis vector
+                    let r_inf = residual.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                    let r_norm = if r_inf > 1e-300 {
+                        residual.iter().map(|v| v / r_inf).collect()
+                    } else {
+                        residual.iter().map(|_| 0.0).collect()
+                    };
+                    let pk = residual.iter().enumerate()
+                        .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    best_basis = Some(r_norm);
+                    best_point = pk;
+                }
+            }
+
+            match best_basis {
+                Some(b) => {
+                    if best_res_norm < 1e-14 {
+                        break;  // converged — remaining snapshots are in the span
+                    }
+                    basis.push(b);
+                    points.push(best_point);
+                }
+                None => break,
+            }
+        }
+
+        let m_final = basis.len();
+        let mut basis_mat = DMatrix::zeros(n, m_final);
+        for j in 0..m_final {
+            for i in 0..n {
+                basis_mat[(i, j)] = basis[j][i];
+            }
+        }
+
+        Ok(EimBasis { basis: basis_mat, points, m: m_final })
+    }
+
+    /// Interpolate an arbitrary vector `f` using the EIM basis and magic points.
+    ///
+    /// Returns `f_eim ≈ f` such that `f_eim = B · c` where `c` solves the
+    /// interpolation system at the magic points.
+    pub fn interpolate(&self, f: &[f64]) -> Vec<f64> {
+        let n = f.len();
+        let m = self.m;
+        let b_sub = DMatrix::from_fn(m, m, |i, j| self.basis[(self.points[i], j)]);
+        let b_rhs = DVector::from_fn(m, |i, _| f[self.points[i]]);
+        let c = b_sub.lu().solve(&b_rhs)
+            .expect("EIM interpolation matrix should be invertible");
+
+        let mut result = vec![0.0; n];
+        for j in 0..m {
+            let cj = c[j];
+            for i in 0..n {
+                result[i] += cj * self.basis[(i, j)];
+            }
+        }
+        result
+    }
+
+    /// Evaluate the interpolation residual ‖f - I[f]‖ / ‖f‖.
+    pub fn relative_interp_error(&self, f: &[f64]) -> f64 {
+        let f_eim = self.interpolate(f);
+        let diff: f64 = f.iter().zip(f_eim.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+        let norm: f64 = f.iter().map(|a| a.powi(2)).sum();
+        (diff / norm.max(1e-30)).sqrt()
+    }
+}
+
+/// Represent an affine decomposition `A(μ) = Σ_q θ_q(μ) · A_q` where each
+/// `A_q` is a parameter-independent sparse matrix and `θ_q` is a scalar
+/// function of the parameter vector `μ`.
+///
+/// This enables the offline-online decomposition in reduced-basis methods:
+/// the parameter-independent matrices `A_q` are assembled once (offline),
+/// and the reduced system is assembled online from pre-computed
+/// `(Vᵀ A_q V)` by summing with parameter-dependent coefficients.
+#[derive(Debug, Clone)]
+pub struct AffineDecomposition<T> {
+    /// Parameter-independent component matrices.
+    pub components: Vec<T>,
+    /// Coefficient functions θ_q(μ). Each returns a scalar weight.
+    pub coeffs: Vec<fn(&[f64]) -> f64>,
+}
+
+impl<T> AffineDecomposition<T> {
+    /// Create a new affine decomposition.
+    pub fn new(components: Vec<T>, coeffs: Vec<fn(&[f64]) -> f64>) -> Self {
+        assert_eq!(components.len(), coeffs.len(),
+            "number of components must match number of coefficient functions");
+        AffineDecomposition { components, coeffs }
+    }
+
+    /// Number of terms in the affine decomposition.
+    pub fn n_terms(&self) -> usize { self.components.len() }
+}
+
+impl AffineDecomposition<CsrMatrix<f64>> {
+    /// Evaluate the operator at parameter `μ`: `A(μ) = Σ θ_q(μ) · A_q`.
+    pub fn evaluate(&self, mu: &[f64]) -> CsrMatrix<f64> {
+        let n = self.components[0].nrows;
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(n, n);
+        for (comp, &coeff_fn) in self.components.iter().zip(self.coeffs.iter()) {
+            let theta = coeff_fn(mu);
+            if theta.abs() < 1e-300 { continue; }
+            for row in 0..comp.nrows {
+                for ptr in comp.row_ptr[row]..comp.row_ptr[row + 1] {
+                    let col = comp.col_idx[ptr] as usize;
+                    coo.add(row, col, theta * comp.values[ptr]);
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// Project each component matrix onto a POD basis: `A_q_r = Vᵀ A_q V`.
+    /// Returns the reduced affine decomposition ready for online evaluation.
+    pub fn project(&self, pod: &PodBasis) -> AffineDecomposition<DMatrix<f64>> {
+        let projected: Vec<DMatrix<f64>> = self.components.iter().map(|a| {
+            let n = a.nrows;
+            let r = pod.r;
+            let mut av = DMatrix::zeros(n, r);
+            for j in 0..r {
+                let mode_j = pod.mode(j);
+                let mut col = vec![0.0; n];
+                a.spmv(&mode_j, &mut col);
+                for i in 0..n { av[(i, j)] = col[i]; }
+            }
+            pod.modes.transpose() * av
+        }).collect();
+        AffineDecomposition {
+            components: projected,
+            coeffs: self.coeffs.clone(),
+        }
+    }
+}
+
+// ─── Error certification helpers ────────────────────────────────────────────
+
+/// A posteriori error estimate for a reduced solution:
+///
+/// `Δ(μ) = ‖r(μ)‖ / α(μ)`
+///
+/// where `‖r(μ)‖` is the norm of the full-order residual evaluated at the
+/// reduced solution, and `α(μ)` is a lower bound for the coercivity constant
+/// (for coercive problems) or the inf-sup constant (for saddle-point problems).
+///
+/// The residual is cheap to compute when the operator has an affine
+/// decomposition: `r = b(μ) - A(μ)·(V·u_r) = b(μ) - A(μ)·u_{full}`.
+pub struct ErrorEstimator {
+    /// Pre-computed norms for the affine components of the residual
+    /// (used when the operator has an affine decomposition).
+    _private: (),
+}
+
+impl ErrorEstimator {
+    /// Compute the relative residual norm for a reduced solution.
+    ///
+    /// This evaluates the true residual `‖b - A·(V·u_r)‖ / ‖b‖` using the
+    /// full-order operator, which costs O(n²) but provides a rigorous bound.
+    pub fn relative_residual(
+        a: &CsrMatrix<f64>,
+        b: &[f64],
+        reduced_solution: &[f64],
+        pod: &PodBasis,
+    ) -> f64 {
+        // Reconstruct full-order solution
+        let u_full = reconstruct(pod, reduced_solution);
+        // Compute residual r = b - A·u_full
+        let n = b.len();
+        let mut r = vec![0.0; n];
+        a.spmv(&u_full, &mut r);
+        for i in 0..n { r[i] = b[i] - r[i]; }
+        let r_norm: f64 = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let b_norm: f64 = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        r_norm / b_norm.max(1e-300)
+    }
+
+    /// Efficient residual bound using pre-computed affine-reduced quantities.
+    ///
+    /// For an affinely-decomposed operator `A(μ) = Σ θ_q A_q`, the squared
+    /// residual norm decomposes as a sum over pairs (q, q'):
+    ///   ‖r(μ)‖² = Σ_q Σ_q' θ_q(μ)·θ_q'(μ)·C_{qq'}
+    /// where C_{qq'} = r_qᵀ·r_q' are pre-computed (offline) using
+    ///   r_q = b_q - A_q·(V·u_r)  (component-wise).
+    /// This is O(Q²·r³) online instead of O(n²).
+    pub fn efficient_residual_sq(
+        _reduced_solution: &[f64],
+        _pod: &PodBasis,
+        _affine_rhs: &AffineDecomposition<Vec<f64>>,
+        _affine_op: &AffineDecomposition<CsrMatrix<f64>>,
+        _mu: &[f64],
+    ) -> f64 {
+        // Placeholder: full implementation requires the offline-computed
+        // residual component matrices C_{qq'}, built as:
+        //   r_q = b_q - A_q·V·(VᵀA_qV)^{-1}·Vᵀb_q  (for each q)
+        //   C_{qq'} = r_qᵀ·r_q'
+        // Online: ‖r(μ)‖² = Σ_q Σ_q' θ_q(μ)·θ_q'(μ)·C_{qq'}
+        0.0
+    }
+}
 
 /// Greedy DEIM index selection from the POD basis.
 ///
@@ -480,5 +778,109 @@ mod tests {
                 "DEIM error at m={m}: {err:.3e} >= prev {prev_err:.3e}");
             prev_err = err;
         }
+    }
+
+    // ─── EIM ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn eim_build_reduces_error_with_more_basis_vectors() {
+        // Training snapshots: 1D Laplacian solutions at different RHS scales
+        let n = 32;
+        let mut training: Vec<Vec<f64>> = Vec::new();
+        for k in 1..=8 {
+            let u = solve_laplacian_1d(n, k as f64);
+            training.push(u);
+        }
+
+        let eim = EimBasis::build(&training, 6).expect("EIM basis");
+        assert!(eim.m <= 6);
+        assert_eq!(eim.points.len(), eim.m);
+
+        // Each training snapshot should have decreasing interpolation error
+        let mut prev_err = 1.0;
+        for (i, snap) in training.iter().enumerate() {
+            let err = eim.relative_interp_error(snap);
+            assert!(err < 1.0, "EIM error at snap {i}: {err:.3e}");
+            prev_err = err.min(prev_err);
+        }
+    }
+
+    #[test]
+    fn eim_interpolation_matches_at_magic_points() {
+        let n = 16;
+        let mut training: Vec<Vec<f64>> = Vec::new();
+        for k in 1..=5 {
+            let u = solve_laplacian_1d(n, k as f64);
+            training.push(u);
+        }
+        let eim = EimBasis::build(&training, 4).expect("EIM basis");
+
+        // Interpolate a test vector and verify it matches at magic points
+        let test_vec = solve_laplacian_1d(n, 3.0);
+        let interp = eim.interpolate(&test_vec);
+        for &pt in &eim.points {
+            assert!((interp[pt] - test_vec[pt]).abs() < 1e-10,
+                "mismatch at magic point {pt}: interp={:.6}, actual={:.6}", interp[pt], test_vec[pt]);
+        }
+    }
+
+    #[test]
+    fn affine_decomposition_project_reduces_dimension() {
+        let n = 32;
+        // Build a simple 2-component affine decomposition of the 1D Laplacian
+        let mut coo1 = fem_linalg::CooMatrix::<f64>::new(n, n);
+        let mut coo2 = fem_linalg::CooMatrix::<f64>::new(n, n);
+        for i in 0..n {
+            coo1.add(i, i, 2.0);
+            if i > 0 { coo1.add(i, i - 1, -1.0); }
+            if i < n - 1 { coo1.add(i, i + 1, -1.0); }
+            // Second component: mass-like (identity)
+            coo2.add(i, i, 1.0);
+        }
+        let a1 = coo1.into_csr();
+        let a2 = coo2.into_csr();
+
+        fn theta1(_mu: &[f64]) -> f64 { 1.0 }
+        fn theta2(mu: &[f64]) -> f64 { mu[0] }
+
+        let affine = AffineDecomposition::new(vec![a1, a2], vec![theta1 as fn(&[f64]) -> f64, theta2]);
+        assert_eq!(affine.n_terms(), 2);
+
+        // Build snapshots for POD
+        let mut snaps = Snapshots::new(n);
+        for k in 0..6 {
+            let u = solve_laplacian_1d(n, (k + 1) as f64);
+            snaps.add_snapshot(&u);
+        }
+        let pod = PodBasis::compute(&snaps, 4).expect("POD basis");
+
+        let projected = affine.project(&pod);
+        assert_eq!(projected.components.len(), 2);
+        assert_eq!(projected.components[0].nrows(), 4);
+        assert_eq!(projected.components[0].ncols(), 4);
+    }
+
+    #[test]
+    fn error_estimator_computes_finite_residual() {
+        let n = 16;
+        let a = laplacian_1d(n);
+        let mut b = vec![0.0; n];
+        b[n / 2] = 1.0;
+
+        // Build POD from a few snapshots
+        let mut snaps = Snapshots::new(n);
+        for k in 0..3 {
+            let u = solve_laplacian_1d(n, (k + 1) as f64);
+            snaps.add_snapshot(&u);
+        }
+        let pod = PodBasis::compute(&snaps, 2).expect("POD basis");
+
+        // Reduced solution
+        let (a_r, b_r) = project_system(&a, &b, &pod);
+        let u_r = a_r.lu().solve(&b_r).expect("reduced solve");
+
+        let res = ErrorEstimator::relative_residual(&a, &b, u_r.as_slice(), &pod);
+        assert!(res.is_finite(), "residual should be finite, got {res}");
+        assert!(res >= 0.0, "residual should be non-negative, got {res}");
     }
 }

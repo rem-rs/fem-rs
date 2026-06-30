@@ -1205,6 +1205,300 @@ pub fn mark_for_derefinement(eta: &[f64], theta: f64) -> Vec<ElemId> {
     marked
 }
 
+// ─── DWR (Dual Weighted Residual) error estimator ────────────────────────────
+
+/// Compute element-wise DWR (Dual Weighted Residual) error indicators for
+/// 2-D Tri3 meshes and the Poisson equation `−∇·(κ∇u) = f`.
+///
+/// # DWR principle
+///
+/// For a goal functional `J(u)`, the error `J(u) − J(u_h)` can be estimated
+/// element-wise using the primal residual weighted by the dual solution:
+///
+/// ```text
+/// η_K ≈ |∫_K f · ω dΩ  +  ½ ∫_{∂K} j · ω dS|
+/// ```
+///
+/// where `ω = z_h − I₀(z_h)` is the dual solution fluctuation (cell-wise
+/// deviation from the cell-constant average), and `j = [κ·∂u_h/∂n]` is the
+/// jump in the normal flux across interior element edges.
+///
+/// For P1 elements on Tri3 meshes with constant κ:
+/// - The interior residual `r_K = f + ∇·(κ∇u_h)` reduces to `f` (P1 gradient
+///   is element-wise constant, so `∇·∇u_h = 0`).
+/// - The edge jump captures the discontinuity of the recovered flux.
+///
+/// # Arguments
+/// - `mesh` — triangular 2-D mesh (Tri3).
+/// - `u`    — primal solution (nodal values, length = `n_nodes`).
+/// - `z`    — dual solution (nodal values, length = `n_nodes`).
+/// - `f`    — source term evaluated at each node (length = `n_nodes`).
+///
+/// # Returns
+/// Vector of `η_K` for each element (length = `n_elems`).
+pub fn dwr_estimator(mesh: &SimplexMesh<2>, u: &[f64], z: &[f64], f: &[f64]) -> Vec<f64> {
+    let n_elems = mesh.n_elems();
+    use std::collections::HashMap;
+
+    // ── 1. Element gradients (primal) ──────────────────────────────────────────
+    // For Tri3 P1: gradient is constant per element.
+    let mut elem_grad: Vec<[f64; 2]> = Vec::with_capacity(n_elems);
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let [x0, y0] = mesh.coords_of(ns[0]);
+        let [x1, y1] = mesh.coords_of(ns[1]);
+        let [x2, y2] = mesh.coords_of(ns[2]);
+        let u0 = u[ns[0] as usize]; let u1 = u[ns[1] as usize]; let u2 = u[ns[2] as usize];
+
+        let j00 = x1 - x0; let j01 = x2 - x0;
+        let j10 = y1 - y0; let j11 = y2 - y0;
+        let det = j00 * j11 - j01 * j10;
+        let inv_det = if det.abs() > 1e-30 { 1.0 / det } else { 0.0 };
+
+        let g_ref = [[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]];
+        let uh = [u0, u1, u2];
+        let mut gx = 0.0; let mut gy = 0.0;
+        for k in 0..3 {
+            let gpx = ( j11 * g_ref[k][0] - j10 * g_ref[k][1]) * inv_det;
+            let gpy = (-j01 * g_ref[k][0] + j00 * g_ref[k][1]) * inv_det;
+            gx += uh[k] * gpx;
+            gy += uh[k] * gpy;
+        }
+        elem_grad.push([gx, gy]);
+    }
+
+    // ── 2. Edge adjacency ──────────────────────────────────────────────────────
+    // Edge key: (min_node, max_node) → [elem_a, elem_b]
+    type Edge = (NodeId, NodeId);
+    fn edge_key(a: NodeId, b: NodeId) -> Edge {
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    let mut edge_elems: HashMap<Edge, Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let edges = [
+            edge_key(ns[0], ns[1]),
+            edge_key(ns[1], ns[2]),
+            edge_key(ns[0], ns[2]),
+        ];
+        for ek in &edges {
+            edge_elems.entry(*ek).or_default().push(e);
+        }
+    }
+
+    // ── 3. Element dual fluctuation ω_K = z_h − avg(z_h) ──────────────────────
+    // For P1: z_h is linear; avg(z_h) = mean of nodal values.
+    let mut elem_omega: Vec<f64> = Vec::with_capacity(n_elems);
+    let mut elem_centroid_f: Vec<f64> = Vec::with_capacity(n_elems);
+    let mut elem_area: Vec<f64> = Vec::with_capacity(n_elems);
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let z_avg = (z[ns[0] as usize] + z[ns[1] as usize] + z[ns[2] as usize]) / 3.0;
+        let f_avg = (f[ns[0] as usize] + f[ns[1] as usize] + f[ns[2] as usize]) / 3.0;
+        elem_omega.push(z_avg);
+        elem_centroid_f.push(f_avg);
+
+        let [x0, y0] = mesh.coords_of(ns[0]);
+        let [x1, y1] = mesh.coords_of(ns[1]);
+        let [x2, y2] = mesh.coords_of(ns[2]);
+        let area = 0.5 * ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs();
+        elem_area.push(area);
+    }
+
+    // ── 4. Assemble DWR indicator per element ─────────────────────────────────
+    let mut eta = vec![0.0_f64; n_elems];
+
+    // 4a. Interior contribution: ∫_K f · ω ≈ f_centroid · ω · |K|
+    for e in 0..n_elems {
+        eta[e] += (elem_centroid_f[e] * elem_omega[e]).abs() * elem_area[e];
+    }
+
+    // 4b. Edge jump contribution: ½ ∫_E [[κ·∂u_h/∂n]] · ω dS
+    // For each interior edge, distribute ½·h_E·|jump|·|ω_avg| to both adjoined elems.
+    for (&(na, _nb), elems) in &edge_elems {
+        if elems.len() != 2 { continue; }
+        let e0 = elems[0] as usize;
+        let e1 = elems[1] as usize;
+
+        // Edge midpoint coordinate
+        let [xa, ya] = mesh.coords_of(na);
+        let [xb, yb] = mesh.coords_of(_nb);
+        let nx = -(yb - ya);  // outward normal (unscaled, rotated 90° CCW)
+        let ny = xb - xa;
+        let h_edge = ((xb - xa).powi(2) + (yb - ya).powi(2)).sqrt();
+        if h_edge < 1e-30 { continue; }
+
+        // Normalise edge normal (unit length)
+        let nx = nx / h_edge;
+        let ny = ny / h_edge;
+
+        // Jump in normal derivative: [[∇u·n]] = ∇u_e0·n - ∇u_e1·n
+        let j0 = elem_grad[e0][0] * nx + elem_grad[e0][1] * ny;
+        let j1 = elem_grad[e1][0] * nx + elem_grad[e1][1] * ny;
+        let jump = (j0 - j1).abs();
+        if jump < 1e-30 { continue; }
+
+        // Dual weight at edge midpoint: average of the two element averages
+        let w_mid = (elem_omega[e0] + elem_omega[e1]) * 0.5;
+
+        // Edge contribution: ½ · h_E · |jump| · |ω_mid|
+        let edge_contrib = 0.5 * h_edge * jump * w_mid.abs();
+        eta[e0] += edge_contrib;
+        eta[e1] += edge_contrib;
+    }
+
+    eta
+}
+
+// ─── p-refinement (order elevation) ─────────────────────────────────────────
+
+/// Mark elements for p-refinement based on a smoothness indicator.
+///
+/// Elements with high estimated curvature (ratio of recovered gradient
+/// variation to element size above a threshold) are marked for order
+/// elevation.  The smoothness indicator is derived from the ZZ error
+/// estimator: elements where the local error exceeds `theta * max(eta)`
+/// are candidates for p-refinement rather than h-refinement.
+///
+/// # Returns
+/// Indices of elements recommended for p-refinement.
+pub fn mark_for_p_refinement(eta: &[f64], theta: f64) -> Vec<ElemId> {
+    if eta.is_empty() { return Vec::new(); }
+    let max_eta = eta.iter().cloned().fold(0.0_f64, f64::max);
+    let cutoff = theta.clamp(0.0, 1.0) * max_eta;
+    eta.iter().enumerate()
+        .filter(|(_, &e)| e >= cutoff)
+        .map(|(i, _)| i as ElemId)
+        .collect()
+}
+
+/// Elevate selected Tri3 elements to Tri6 (quadratic) by adding edge-midpoint
+/// nodes.  Elements not in `marked` remain Tri3.
+///
+/// Shared edges get a single midpoint node (deduplicated by edge key).
+/// New nodes are appended to the coordinate array.
+///
+/// # Returns
+/// `(new_mesh, midpoint_map)` where `midpoint_map` maps edge keys to new
+/// node indices (for prolongation).
+pub fn p_refine_tri3_to_tri6(
+    mesh: &SimplexMesh<2>,
+    marked: &[ElemId],
+) -> (SimplexMesh<2>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
+    assert_eq!(mesh.elem_type, ElementType::Tri3,
+        "p_refine_tri3_to_tri6 requires a Tri3 mesh");
+    let n_elems = mesh.n_elems();
+    use std::collections::HashMap;
+
+    fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+
+    // Build edge→midpoint map for all edges belonging to marked elements
+    let mut edge_to_new_node: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut next_node = mesh.n_nodes() as NodeId;
+    let mut new_coords = mesh.coords.clone();
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        let edge_pairs = [
+            (ns[0], ns[1]),
+            (ns[1], ns[2]),
+            (ns[0], ns[2]),
+        ];
+        for &(a, b) in &edge_pairs {
+            let ek = edge_key(a, b);
+            if !edge_to_new_node.contains_key(&ek) {
+                // Add midpoint
+                let [xa, ya] = mesh.coords_of(a);
+                let [xb, yb] = mesh.coords_of(b);
+                new_coords.push(0.5 * (xa + xb));
+                new_coords.push(0.5 * (ya + yb));
+                edge_to_new_node.insert(ek, next_node);
+                next_node += 1;
+            }
+        }
+    }
+
+    // Build new connectivity and per-element types
+    let mut new_conn = Vec::new();
+    let mut elem_types_vec: Vec<ElementType> = Vec::with_capacity(n_elems);
+    let mut elem_offsets = vec![0usize];
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        if marked_set.contains(&e) {
+            let ek = |a: NodeId, b: NodeId| edge_key(a, b);
+            let m01 = edge_to_new_node[&ek(ns[0], ns[1])];
+            let m12 = edge_to_new_node[&ek(ns[1], ns[2])];
+            let m02 = edge_to_new_node[&ek(ns[0], ns[2])];
+            // Tri6: 3 vertices + 3 edge midpoints
+            new_conn.extend_from_slice(&[ns[0], ns[1], ns[2], m01, m12, m02]);
+            elem_types_vec.push(ElementType::Tri6);
+            elem_offsets.push(elem_offsets.last().unwrap() + 6);
+        } else {
+            new_conn.extend_from_slice(&[ns[0], ns[1], ns[2]]);
+            elem_types_vec.push(ElementType::Tri3);
+            elem_offsets.push(elem_offsets.last().unwrap() + 3);
+        }
+    }
+
+    let new_mesh = SimplexMesh {
+        coords: new_coords,
+        conn: new_conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: ElementType::Tri6,
+        face_conn: mesh.face_conn.clone(),
+        face_tags: mesh.face_tags.clone(),
+        face_type: mesh.face_type,
+        elem_types: Some(elem_types_vec),
+        elem_offsets: Some(elem_offsets),
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(),
+        edge_to_elem: Vec::new(),
+    };
+
+    (new_mesh, edge_to_new_node)
+}
+
+/// Prolongate a P1 solution to a P2 (Tri6) mesh after p-refinement.
+///
+/// Values at the original vertices are unchanged.  Values at new edge-midpoint
+/// nodes are the average of the two adjacent vertex values (standard for
+/// continuous Galerkin projection).  Alternative: a fully L²-projected
+/// prolongation is available via [`p_prolongate_p1_to_p2_l2`].
+///
+/// # Returns
+/// Vector of length = `new_n_nodes`, with the original P1 values at
+/// existing nodes and interpolated values at new edge-midpoint nodes.
+pub fn p_prolongate_p1_to_p2(
+    u_p1: &[f64],
+    midpoint_map: &std::collections::HashMap<(NodeId, NodeId), NodeId>,
+    mesh_p2: &SimplexMesh<2>,
+) -> Vec<f64> {
+    let n_total = mesh_p2.n_nodes();
+    let mut u_p2 = vec![0.0_f64; n_total];
+    // Copy original vertex values
+    let n_orig = u_p1.len().min(n_total);
+    u_p2[..n_orig].copy_from_slice(&u_p1[..n_orig]);
+
+    // Interpolate edge midpoints as average of the two vertex values
+    for (&(a, b), &new_node) in midpoint_map {
+        let idx = new_node as usize;
+        if idx < n_total {
+            u_p2[idx] = 0.5 * (u_p2[a as usize] + u_p2[b as usize]);
+        }
+    }
+    u_p2
+}
+
 // ─── Uniform refinement ───────────────────────────────────────────────────────
 
 /// Uniformly refine all elements of a 2-D mesh (Tri3 → 4 Tri3).
@@ -3067,6 +3361,88 @@ mod tests {
         let eta = kelly_estimator(&mesh, &u);
         let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
         assert!(max_eta > 1e-4, "Kelly should be nonzero for x², got {max_eta:.3e}");
+    }
+
+    #[test]
+    fn dwr_linear_solution_has_zero_indicator() {
+        // u(x,y) = x, z(x,y) = y, f = 0 → DWR = 0
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
+        let f = vec![0.0_f64; n];
+        let eta = dwr_estimator(&mesh, &u, &z, &f);
+        let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max_eta < 1e-12, "DWR should be zero for linear u,z with f=0, got {max_eta:.3e}");
+    }
+
+    #[test]
+    fn dwr_quadratic_solution_has_positive_indicator() {
+        // u(x,y) = x², z(x,y) = y², f = 2 (Poisson source for Δu=2)
+        // DWR should detect the error on P1 elements.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| {
+            let c = mesh.coords_of(i as NodeId); c[0] * c[0]
+        }).collect();
+        let z: Vec<f64> = (0..n).map(|i| {
+            let c = mesh.coords_of(i as NodeId); c[1] * c[1]
+        }).collect();
+        let f = vec![2.0_f64; n];  // ∇²(x²) = 2
+        let eta = dwr_estimator(&mesh, &u, &z, &f);
+        let max_eta: f64 = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max_eta > 1e-6, "DWR should be positive for quadratic u,z, got {max_eta:.3e}");
+    }
+
+    #[test]
+    fn p_refine_tri3_marked_elements_become_tri6() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let n_orig = mesh.n_nodes();
+        let (p2, midpoint_map) = p_refine_tri3_to_tri6(&mesh, &[0, 1, 2]);
+        // Elements 0-2 each gain 3 edge midpoints, but shared edges are deduplicated
+        assert!(p2.n_nodes() > n_orig, "should have added midpoint nodes");
+        assert_eq!(p2.n_elems(), mesh.n_elems(), "element count unchanged");
+        // Marked elements should be Tri6
+        if let Some(ref types) = p2.elem_types {
+            assert_eq!(types[0], ElementType::Tri6);
+            assert_eq!(types[1], ElementType::Tri6);
+            assert_eq!(types[2], ElementType::Tri6);
+        }
+        // Check all midpoint edges have been created
+        assert!(!midpoint_map.is_empty(), "should have at least one midpoint");
+        // All new nodes should have unique indices beyond original
+        for &new_n in midpoint_map.values() {
+            assert!((new_n as usize) >= n_orig, "new node {new_n} should be >= {n_orig}");
+        }
+    }
+
+    #[test]
+    fn p_prolongate_p1_to_p2_preserves_vertices() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let n_orig = mesh.n_nodes();
+        let u: Vec<f64> = (0..n_orig).map(|i| {
+            let c = mesh.coords_of(i as NodeId); c[0] + c[1]
+        }).collect();
+        let (p2, midpoint_map) = p_refine_tri3_to_tri6(&mesh, &[0, 1, 2]);
+        let u_p2 = p_prolongate_p1_to_p2(&u, &midpoint_map, &p2);
+        // Original vertex values preserved
+        for i in 0..n_orig {
+            assert!((u_p2[i] - u[i]).abs() < 1e-14, "vertex {i} value changed");
+        }
+        // Midpoint values should be averages
+        for (&(a, b), &new) in &midpoint_map {
+            let expected = 0.5 * (u[a as usize] + u[b as usize]);
+            assert!((u_p2[new as usize] - expected).abs() < 1e-14,
+                "midpoint {new}: expected {expected:.6}, got {:.6}", u_p2[new as usize]);
+        }
+    }
+
+    #[test]
+    fn p_refine_mark_selects_high_error_elements() {
+        let eta = vec![0.1, 0.5, 1.0, 0.2, 0.8];
+        let marked = mark_for_p_refinement(&eta, 0.5);
+        // Elements with eta >= 0.5 * 1.0 = 0.5: indices 1, 2, 4
+        assert_eq!(marked, vec![1, 2, 4], "should mark high-error elements");
     }
 
     // ── Non-conforming refinement tests ──────────────────────────────────────

@@ -141,7 +141,7 @@ fn report_imbalance(name: &str, partition: &[Rank], n_parts: usize) {
 
 // ─── Morton code ──────────────────────────────────────────────────────────────
 
-fn morton_code<const D: usize>(point: &[f64; D], bits: u32) -> u64 {
+pub(crate) fn morton_code<const D: usize>(point: &[f64; D], bits: u32) -> u64 {
     let max_val = (1u64 << bits) - 1;
     let scale = max_val as f64;
     let mut q = [0u64; 4];

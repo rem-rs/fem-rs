@@ -30,6 +30,7 @@
 //! println!("Mean = {:.4e}, StdErr = {:.4e}", result.mean, result.std_err);
 //! ```
 
+pub mod mlmc;
 pub mod random_field;
 pub mod monte_carlo;
 pub mod polynomial_chaos;

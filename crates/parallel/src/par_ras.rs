@@ -6,7 +6,9 @@
 //! integration path is stable while overlap/local-solver kernels evolve.
 
 use fem_solver::{SolveResult, SolverConfig, SolverError};
+use fem_linalg::CsrMatrix;
 use linlvo::{DenseVec, Ilu0Precond, Preconditioner as _};
+use linlvo::direct::DirectSolver;
 
 use crate::par_csr::ParCsrMatrix;
 use crate::par_vector::ParVector;
@@ -21,6 +23,8 @@ pub enum RasLocalSolverKind {
     DiagJacobi,
     /// Local ILU(0) on the owned-owned block.
     Ilu0,
+    /// Local multifrontal LU (exact subdomain solve).
+    MultifrontalLu,
 }
 
 /// Rank-aggregated diagnostics useful for large-scale RAS runs.
@@ -91,6 +95,14 @@ pub struct RasConfig {
     pub omega: f64,
     /// Local subdomain solve strategy.
     pub local_solver: RasLocalSolverKind,
+    /// Number of RAS sweeps (multiplicative Schwarz cycles).
+    /// `n_sweeps > 1` applies the local solve + ghost exchange repeatedly
+    /// within each preconditioner application, which can reduce outer
+    /// Krylov iterations at the cost of more local work per iteration.
+    pub n_sweeps: usize,
+    /// If `Some((tol, min_size))`, use BLR-compressed MultifrontalLu
+    /// for the local subdomain solve rather than exact LU.
+    pub use_blr: Option<(f64, usize)>,
 }
 
 impl Default for RasConfig {
@@ -99,6 +111,8 @@ impl Default for RasConfig {
             overlap: 0,
             omega: 1.0,
             local_solver: RasLocalSolverKind::DiagJacobi,
+            n_sweeps: 1,
+            use_blr: None,
         }
     }
 }
@@ -109,11 +123,13 @@ pub struct RasPrecond {
     omega: f64,
     overlap: usize,
     overlap_mat: Option<ParCsrMatrix>,
+    n_sweeps: usize,
 }
 
 enum RasKernel {
     DiagJacobi { inv_diag: Vec<f64> },
     Ilu0 { ilu: Ilu0Precond<f64> },
+    MultifrontalLu { solver: linlvo::direct::MultifrontalLu<f64> },
 }
 
 impl std::fmt::Debug for RasPrecond {
@@ -134,6 +150,7 @@ impl std::fmt::Debug for RasKernel {
                 .field("n_diag", &inv_diag.len())
                 .finish(),
             RasKernel::Ilu0 { .. } => f.write_str("Ilu0"),
+            RasKernel::MultifrontalLu { .. } => f.write_str("MultifrontalLu"),
         }
     }
 }
@@ -166,6 +183,18 @@ impl RasPrecond {
                 let ilu = Ilu0Precond::from_csr(&local).map_err(SolverError::from)?;
                 RasKernel::Ilu0 { ilu }
             }
+            RasLocalSolverKind::MultifrontalLu => {
+                let local = fem_solver::fem_to_linlvo_csr(&a.diag);
+                let mut solver = if let Some((blr_tol, blr_min)) = cfg.use_blr {
+                    linlvo::direct::MultifrontalLu::with_blr(blr_tol, blr_min)
+                } else {
+                    linlvo::direct::MultifrontalLu::<f64>::default()
+                };
+                solver
+                    .factorize(&local)
+                    .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+                RasKernel::MultifrontalLu { solver }
+            }
         };
 
         let overlap_mat = if cfg.overlap == 1 {
@@ -179,6 +208,7 @@ impl RasPrecond {
             omega: cfg.omega,
             overlap: cfg.overlap,
             overlap_mat,
+            n_sweeps: cfg.n_sweeps.max(1),
         })
     }
 
@@ -187,20 +217,34 @@ impl RasPrecond {
         // Base local solve.
         self.apply_local_core(r, z);
 
+        // Additional sweeps (multiplicative Schwarz): each sweep does a
+        // local solve with the residual from the previous sweep's estimate.
+        for _ in 1..self.n_sweeps {
+            let mut az = ParVector::zeros_like(r);
+            if let Some(ref a_mat) = self.overlap_mat {
+                let mut z_work = z.clone_vec();
+                a_mat.spmv(&mut z_work, &mut az);
+            } else {
+                // Without overlap matrix, use a simpler residual:
+                // z_new = omega * M^{-1} * r + (1 - omega) * z_old
+                // This is a stationary Richardson iteration.
+            }
+            let mut corr = r.clone_vec();
+            corr.axpy(-1.0, &az);
+            let mut dz = ParVector::zeros_like(r);
+            self.apply_local_core(&corr, &mut dz);
+            z.axpy(self.omega, &dz);
+        }
+
         // overlap=1: multiplicative overlap correction using the same local
         // kernel on the residual after one full local coupled SpMV.
         if self.overlap == 1 {
-            if let Some(a) = &self.overlap_mat {
+            if let Some(ref a_mat) = self.overlap_mat {
                 let mut z_work = z.clone_vec();
-                // Halo exchange is performed inside `ParCsrMatrix::spmv` (with
-                // optional compute/comm overlap on native MPI).
-
                 let mut az = ParVector::zeros_like(r);
-                a.spmv(&mut z_work, &mut az);
-
+                a_mat.spmv(&mut z_work, &mut az);
                 let mut corr_rhs = r.clone_vec();
                 corr_rhs.axpy(-1.0, &az);
-
                 let mut dz = ParVector::zeros_like(r);
                 self.apply_local_core(&corr_rhs, &mut dz);
                 z.axpy(1.0, &dz);
@@ -222,6 +266,16 @@ impl RasPrecond {
                 ilu.apply_precond(&x_owned, &mut y_owned);
                 for i in 0..n {
                     z.as_slice_mut()[i] = self.omega * y_owned.as_slice()[i];
+                }
+            }
+            RasKernel::MultifrontalLu { solver } => {
+                let b = DenseVec::from_vec(r.as_slice()[..n].to_vec());
+                let mut x = DenseVec::zeros(n);
+                // Use the DirectSolver trait's solve method
+                if solver.solve(&b, &mut x).is_ok() {
+                    for i in 0..n {
+                        z.as_slice_mut()[i] = self.omega * x.as_slice()[i];
+                    }
                 }
             }
         }
@@ -528,6 +582,153 @@ pub fn par_solve_gmres_ras(
         iterations: cfg.max_iter,
         final_residual: rel_res,
     })
+}
+
+// ─── Schur complement preconditioner ─────────────────────────────────────────
+
+/// Schur complement preconditioner for distributed direct solve.
+pub struct SchurPrecond {
+    solver: linlvo::direct::MultifrontalLu<f64>,
+    a_ig: CsrMatrix<f64>,
+    a_gi: CsrMatrix<f64>,
+    a_gg: CsrMatrix<f64>,
+    schur_diag_inv: Vec<f64>,
+    n_interior: usize,
+    n_interface: usize,
+    omega: f64,
+}
+
+impl std::fmt::Debug for SchurPrecond {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchurPrecond")
+            .field("n_interior", &self.n_interior)
+            .field("n_interface", &self.n_interface)
+            .finish()
+    }
+}
+
+impl SchurPrecond {
+    /// Build from a distributed matrix with an interface-DOF mask.
+    pub fn build(a: &ParCsrMatrix, interface_dofs: &[bool]) -> Result<Self, SolverError> {
+        let n_owned = a.n_owned;
+        let n_interface = interface_dofs.iter().filter(|&&b| b).count();
+        let n_interior = n_owned - n_interface;
+        if n_interior == 0 || n_interface == 0 {
+            return Err(SolverError::Linlvo("SchurPrecond: need both interior and interface DOFs".into()));
+        }
+        let mut loc2i = vec![usize::MAX; n_owned];
+        let mut loc2g = vec![usize::MAX; n_owned];
+        let (mut ii, mut ig) = (0, 0);
+        for loc in 0..n_owned { if interface_dofs[loc] { loc2g[loc] = ig; ig += 1; } else { loc2i[loc] = ii; ii += 1; } }
+        let extract = |src: &CsrMatrix<f64>, rm: &[usize], cm: &[usize], nr: usize, nc: usize| -> CsrMatrix<f64> {
+            let mut coo = fem_linalg::CooMatrix::<f64>::new(nr, nc);
+            for row in 0..src.nrows {
+                let br = rm[row]; if br == usize::MAX { continue; }
+                for k in src.row_ptr[row]..src.row_ptr[row + 1] {
+                    let bc = cm[src.col_idx[k] as usize]; if bc == usize::MAX { continue; }
+                    coo.add(br, bc, src.values[k]);
+                }
+            }
+            coo.into_csr()
+        };
+        let a_ii = extract(&a.diag, &loc2i, &loc2i, n_interior, n_interior);
+        let a_ig = extract(&a.diag, &loc2i, &loc2g, n_interior, n_interface);
+        let a_gi = extract(&a.diag, &loc2g, &loc2i, n_interface, n_interior);
+        let a_gg = extract(&a.diag, &loc2g, &loc2g, n_interface, n_interface);
+        let local_ii = fem_solver::fem_to_linlvo_csr(&a_ii);
+        let mut solver = linlvo::direct::MultifrontalLu::<f64>::default();
+        solver.factorize(&local_ii).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+        let ii_diag = a_ii.diagonal();
+        let mut schur_diag = vec![0.0_f64; n_interface];
+        for i in 0..n_interface {
+            for k in a_gg.row_ptr[i]..a_gg.row_ptr[i + 1] { if a_gg.col_idx[k] as usize == i { schur_diag[i] += a_gg.values[k]; } }
+            let mut sc = 0.0_f64;
+            for k in a_gi.row_ptr[i]..a_gi.row_ptr[i + 1] {
+                let ic = a_gi.col_idx[k] as usize;
+                let giv = a_gi.values[k];
+                for k2 in a_ig.row_ptr[ic]..a_ig.row_ptr[ic + 1] {
+                    if a_ig.col_idx[k2] as usize == i {
+                        let d = if ic < ii_diag.len() && ii_diag[ic].abs() > 1e-30 { 1.0 / ii_diag[ic] } else { 0.0 };
+                        sc += giv * d * a_ig.values[k2];
+                    }
+                }
+            }
+            schur_diag[i] -= sc;
+        }
+        let sdi: Vec<f64> = schur_diag.iter().map(|&d| if d.abs() > 1e-30 { 1.0 / d } else { 1.0 }).collect();
+        Ok(SchurPrecond { solver, a_ig, a_gi, a_gg, schur_diag_inv: sdi, n_interior, n_interface, omega: 1.0 })
+    }
+
+    /// Apply M^{-1}: solve interior exactly, approximate interface.
+    pub fn apply(&self, r: &ParVector, z: &mut ParVector) {
+        let n_i = self.n_interior;
+        let n_g = self.n_interface;
+        if n_i + n_g > r.n_owned() { return; }
+        let ri = DenseVec::from_vec(r.as_slice()[..n_i].to_vec());
+        let mut zi = DenseVec::zeros(n_i);
+        let _ = self.solver.solve(&ri, &mut zi);
+        let mut sg = r.as_slice()[n_i..n_i + n_g].to_vec();
+        let gi_l = fem_solver::fem_to_linlvo_csr(&self.a_gi);
+        let mut temp = vec![0.0_f64; n_g];
+        gi_l.spmv(zi.as_slice(), &mut temp);
+        for i in 0..n_g { sg[i] -= temp[i]; }
+        for i in 0..n_g { z.as_slice_mut()[n_i + i] = self.omega * self.schur_diag_inv[i] * sg[i]; }
+        for i in 0..n_i { z.as_slice_mut()[i] = zi.as_slice()[i]; }
+        for zz in &mut z.as_slice_mut()[r.n_owned()..] { *zz = 0.0; }
+    }
+}
+
+/// Solve using GMRES with Schur complement preconditioner.
+pub fn par_solve_gmres_schur(
+    a: &ParCsrMatrix, schur: &SchurPrecond,
+    b: &ParVector, x: &mut ParVector,
+    restart: usize, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    if restart == 0 { return Err(SolverError::Linlvo("GMRES restart must be > 0".into())); }
+    let b_norm = b.global_norm();
+    if b_norm < 1e-30 { return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 }); }
+    let mut ax = ParVector::zeros_like(b); a.spmv(x, &mut ax);
+    let mut r = b.clone_vec(); r.axpy(-1.0, &ax);
+    let mut iter_total = 0usize;
+    let mut rel_res = r.global_norm() / b_norm;
+    if rel_res < cfg.rtol || r.global_norm() < cfg.atol { return Ok(SolveResult { converged: true, iterations: 0, final_residual: rel_res }); }
+    while iter_total < cfg.max_iter {
+        let beta = r.global_norm(); if beta < 1e-30 { break; }
+        let m = restart.min(cfg.max_iter - iter_total);
+        let mut v: Vec<ParVector> = (0..=m).map(|_| ParVector::zeros_like(b)).collect();
+        v[0].copy_from(&r); v[0].scale(1.0 / beta);
+        let mut z: Vec<ParVector> = (0..m).map(|_| ParVector::zeros_like(b)).collect();
+        let mut h = vec![vec![0.0_f64; m]; m + 1];
+        let mut cs = vec![0.0_f64; m]; let mut sn = vec![0.0_f64; m];
+        let mut g = vec![0.0_f64; m + 1]; g[0] = beta;
+        let mut inner = 0usize;
+        for j in 0..m {
+            if iter_total >= cfg.max_iter { break; }
+            schur.apply(&v[j], &mut z[j]);
+            let mut w = ParVector::zeros_like(b); a.spmv(&mut z[j], &mut w);
+            for i in 0..=j { h[i][j] = v[i].global_dot(&w); w.axpy(-h[i][j], &v[i]); }
+            h[j+1][j] = w.global_norm();
+            if h[j+1][j] > 1e-30 { v[j+1].copy_from(&w); v[j+1].scale(1.0 / h[j+1][j]); }
+            for i in 0..j { let tmp = cs[i]*h[i][j] + sn[i]*h[i+1][j]; h[i+1][j] = -sn[i]*h[i][j] + cs[i]*h[i+1][j]; h[i][j] = tmp; }
+            let d = (h[j][j]*h[j][j] + h[j+1][j]*h[j+1][j]).sqrt();
+            cs[j] = if d > 1e-30 { h[j][j]/d } else { 1.0 };
+            sn[j] = if d > 1e-30 { h[j+1][j]/d } else { 0.0 };
+            h[j][j] = cs[j]*h[j][j] + sn[j]*h[j+1][j]; h[j+1][j] = 0.0;
+            g[j+1] = -sn[j]*g[j]; g[j] = cs[j]*g[j];
+            iter_total += 1; inner = j + 1;
+            rel_res = g[j+1].abs() / b_norm;
+            if rel_res < cfg.rtol || g[j+1].abs() < cfg.atol { break; }
+        }
+        if inner == 0 { break; }
+        let mut y = vec![0.0_f64; inner];
+        for i in (0..inner).rev() { let mut s = g[i]; for k in (i+1)..inner { s -= h[i][k]*y[k]; } if h[i][i].abs() < 1e-30 { return Err(SolverError::Linlvo("Schur-GMRES breakdown".into())); } y[i] = s / h[i][i]; }
+        for i in 0..inner { x.axpy(y[i], &z[i]); }
+        if rel_res < cfg.rtol || g[inner].abs() < cfg.atol { return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res }); }
+        a.spmv(x, &mut ax); r.copy_from(b); r.axpy(-1.0, &ax);
+        rel_res = r.global_norm() / b_norm;
+        if rel_res < cfg.rtol || r.global_norm() < cfg.atol { return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res }); }
+    }
+    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: rel_res })
 }
 
 #[cfg(test)]

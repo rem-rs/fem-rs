@@ -1396,10 +1396,31 @@ mod tests {
     }
 
     #[test]
-    fn tmop_hex_free_tags_releases_boundary_nodes() {
+    fn tmop_tetra_free_tags_releases_boundary_nodes() {
         let mesh = crate::SimplexMesh::<3>::unit_cube_tet(3);
         let obj_all_free = TmopObjectiveTetra::from_mesh_with_free_tags(&mesh, &[1, 2, 3, 4, 5, 6]);
         assert_eq!(obj_all_free.n_free(), mesh.n_nodes(),
             "with all boundary tags free, all nodes should be free");
+
+        let obj_all_fixed = TmopObjectiveTetra::from_mesh_with_free_tags(&mesh, &[]);
+        assert_eq!(obj_all_fixed.n_free(), TmopObjectiveTetra::new(&mesh).n_free(),
+            "empty free_tags should match new()");
+        assert!(obj_all_fixed.n_free() < mesh.n_nodes(),
+            "a clamped tetra mesh should have fewer free nodes than total nodes");
+    }
+
+    #[test]
+    fn tmop_hex_free_tags_releases_boundary_nodes() {
+        // unit_cube_hex uses face tags {1,2,3,4,5,6} for its six faces.
+        let mesh = crate::SimplexMesh::<3>::unit_cube_hex(3);
+        let obj_all_free = TmopObjectiveHex::from_mesh_with_free_tags(&mesh, &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(obj_all_free.n_free(), mesh.n_nodes(),
+            "with all boundary tags free, all nodes should be free");
+
+        let obj_all_fixed = TmopObjectiveHex::from_mesh_with_free_tags(&mesh, &[]);
+        assert_eq!(obj_all_fixed.n_free(), TmopObjectiveHex::new(&mesh).n_free(),
+            "empty free_tags should match new()");
+        assert!(obj_all_fixed.n_free() < mesh.n_nodes(),
+            "a clamped hex mesh should have fewer free nodes than total nodes");
     }
 }

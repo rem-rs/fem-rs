@@ -243,46 +243,260 @@ pub fn par_repartition(
     }
 }
 
-// ─── ParNCMesh ────────────────────────────────────────────────────────────────
+/// Rebalance elements via SFC ordering + MPI ring exchange.
+///
+/// Unlike [`par_repartition`] (gather to rank 0), this does a **neighbour
+/// exchange** on a ring topology: each rank keeps its SFC-lowest elements
+/// up to the target count and sends the excess to the next rank.
+///
+/// Target per rank is `n_global / size`.  When a rank's local count exceeds
+/// the target, the excess is sent clockwise.  When it is below target, it
+/// receives from the anti-clockwise neighbour.
+///
+/// This is a **single-pass diffusive** scheme.  Full balance may require
+/// multiple passes (call in a loop until imbalance < threshold).
+pub fn sfc_rebalance_ring(
+    par_mesh: ParallelMesh<SimplexMesh<2>>,
+) -> Result<ParallelMesh<SimplexMesh<2>>, ParAmrError> {
+    let comm = par_mesh.comm().clone();
+    let size = comm.size();
+    let rank = comm.rank();
 
-/// Parallel non-conforming mesh: wraps [`ParallelMesh`], [`NCState`], and
-/// supports distributed AMR cycles with repartitioning.
-pub struct ParNCMesh {
-    pub par_mesh: ParallelMesh<SimplexMesh<2>>,
-    pub nc_state: NCState,
+    if size <= 1 {
+        return Ok(par_mesh);
+    }
+
+    let local_mesh = par_mesh.local_mesh().clone();
+    let n_local = local_mesh.n_elems();
+    let _partition = par_mesh.partition().clone();
+
+    // 1. Compute global element count via broadcast from rank 0
+    let mut n_global = n_local;
+    if rank == 0 {
+        for src in 1..size as i32 {
+            let buf = comm.recv_bytes(src, REPART_TAG_BASE + 1000 + src);
+            let count_bytes: [u8; 8] = buf[..8].try_into().unwrap();
+            n_global += usize::from_le_bytes(count_bytes);
+        }
+        for dst in 1..size as i32 {
+            comm.send_bytes(dst, REPART_TAG_BASE + 2000 + dst, &n_global.to_le_bytes());
+        }
+    } else {
+        comm.send_bytes(0, REPART_TAG_BASE + 1000 + rank, &n_local.to_le_bytes());
+        let buf = comm.recv_bytes(0, REPART_TAG_BASE + 2000 + rank);
+        let count_bytes: [u8; 8] = buf[..8].try_into().unwrap();
+        n_global = usize::from_le_bytes(count_bytes);
+    }
+
+    let target = n_global / size;
+    let _excess = n_global % size;
+    let size_i32 = size as i32;
+
+    if n_global == 0 {
+        return Ok(par_mesh);
+    }
+
+    // 2. SFC plan: keep target elements with lowest Morton keys
+    let (keep_idx, send_idx) = sfc_rebalance_plan(&local_mesh, target.min(n_local));
+
+    // 3. Build send submesh from excess elements
+    let n_send = send_idx.len();
+    let n_keep = keep_idx.len();
+
+    if n_send == 0 && n_keep == n_local {
+        return Ok(par_mesh);
+    }
+
+    let keep_mesh = extract_submesh_elements(&local_mesh, &keep_idx);
+    let send_mesh = extract_submesh_elements(&local_mesh, &send_idx);
+
+    // 4. Ring exchange: send to next rank, receive from previous
+    let next_rank = (rank + 1) % size_i32;
+    let prev_rank = if rank == 0 { size_i32 - 1 } else { rank - 1 };
+
+    // Encode send submesh (with minimal partition info)
+    let send_part = crate::partition::MeshPartition::new_serial(
+        send_mesh.n_nodes(), send_mesh.n_elems());
+    let encoded_send = crate::mesh_serde::encode_submesh::<2>(&send_mesh, &send_part);
+
+    // Buffered send/recv to avoid deadlock on ring
+    // Even ranks send first, odd ranks recv first (standard MPI pattern)
+    let recv_buf = if (rank % 2) == 0 {
+        comm.send_bytes(next_rank, REPART_TAG_BASE + 3000 + rank, &encoded_send);
+        if n_send < n_local || size > 2 {
+            // Expect data from prev rank if we're not the only sender
+            Some(comm.recv_bytes(prev_rank, REPART_TAG_BASE + 3000 + prev_rank))
+        } else {
+            None
+        }
+    } else {
+        let buf = if n_send < n_local || size > 2 {
+            Some(comm.recv_bytes(prev_rank, REPART_TAG_BASE + 3000 + prev_rank))
+        } else {
+            None
+        };
+        comm.send_bytes(next_rank, REPART_TAG_BASE + 3000 + rank, &encoded_send);
+        buf
+    };
+
+    // 5. Merge received elements into local mesh
+    let final_mesh = if let Some(buf) = recv_buf {
+        let (recv_mesh, _recv_part) = crate::mesh_serde::decode_submesh::<2>(&buf)
+            .map_err(|e| ParAmrError::SerializationError(e))?;
+        merge_two_meshes(&keep_mesh, &recv_mesh)
+    } else {
+        keep_mesh
+    };
+
+    let new_part = crate::partition::MeshPartition::new_serial(
+        final_mesh.n_nodes(), final_mesh.n_elems());
+    Ok(ParallelMesh::new(final_mesh, comm, new_part))
 }
 
-impl ParNCMesh {
-    /// Create a new `ParNCMesh` from an already-partitioned mesh.
-    pub fn new(par_mesh: ParallelMesh<SimplexMesh<2>>, nc_state: NCState) -> Self {
-        ParNCMesh { par_mesh, nc_state }
+// ─── SFC rebalancing ──────────────────────────────────────────────────────────
+
+/// Compute a diffusive load-balancing plan based on SFC ordering.
+///
+/// Returns a list of elements to send to each neighbour rank.  The caller
+/// should then use the existing [`par_repartition`] machinery to perform
+/// the actual element exchange.
+///
+/// Step 1: sort local elements by Morton (Z-order) curve key of their centroid.
+/// Step 2: keep the first `target` elements and mark the rest as send candidates.
+/// Step 3: send candidates go to the next rank in the ring.
+///
+/// This is a **one-step diffusive** scheme: each rank talks only to its
+/// clockwise neighbour.  Full balance is reached after O(P) ring passes.
+pub fn sfc_rebalance_plan<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    target: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let n_local = mesh.n_elems();
+    if n_local <= target {
+        return ((0..n_local).collect(), Vec::new());
     }
 
-    /// Refine marked elements on this rank, then repartition for load balance.
-    pub fn refine_and_rebalance(
-        &mut self,
-        marked: &[ElemId],
-        solution: Option<&[f64]>,
-    ) -> Result<Vec<f64>, ParAmrError> {
-        let ParRefinedMesh { par_mesh, nc_state, solution, .. } =
-            par_refine_marked(&self.par_mesh, std::mem::replace(&mut self.nc_state, NCState::new()), marked, solution)?;
+    // Compute SFC keys
+    let centroids = compute_centroids_simple(mesh);
+    let opts = crate::sfc::SfcOptions::default();
+    let keys: Vec<u64> = centroids.iter()
+        .map(|c| crate::sfc::morton_code::<D>(c, opts.bits_per_coord))
+        .collect();
 
-        let rebalanced = par_repartition(par_mesh)?;
+    // Sort by SFC key
+    let mut indices: Vec<usize> = (0..n_local).collect();
+    indices.sort_by_key(|&i| keys[i]);
 
-        self.par_mesh = rebalanced;
-        self.nc_state = nc_state;
-        Ok(solution)
+    let keep: Vec<usize> = indices.iter().take(target).copied().collect();
+    let send: Vec<usize> = indices.iter().skip(target).copied().collect();
+    (keep, send)
+}
+
+/// Extract a subset of elements from a mesh into a new mesh.
+fn extract_submesh_elements<const D: usize>(
+    mesh: &SimplexMesh<D>,
+    elem_indices: &[usize],
+) -> SimplexMesh<D> {
+    use std::collections::HashMap;
+    let n = elem_indices.len();
+    let mut new_conn = Vec::new();
+    let mut new_tags = Vec::with_capacity(n);
+    let mut node_map: HashMap<u32, u32> = HashMap::new();
+    let mut new_coords = Vec::new();
+
+    let mut next_node = 0u32;
+    for &ei in elem_indices {
+        let e = ei as u32;
+        let nodes = mesh.element_nodes(e);
+        let mut local_nodes = Vec::with_capacity(nodes.len());
+        for &n in nodes {
+            let new_n = *node_map.entry(n).or_insert_with(|| {
+                let idx = next_node;
+                next_node += 1;
+                let c = mesh.node_coords(n);
+                new_coords.extend_from_slice(&c[..D]);
+                idx
+            });
+            local_nodes.push(new_n);
+        }
+        new_conn.extend_from_slice(&local_nodes);
+        new_tags.push(mesh.elem_tags[e as usize]);
     }
 
-    /// Access the underlying parallel mesh.
-    pub fn par_mesh(&self) -> &ParallelMesh<SimplexMesh<2>> {
-        &self.par_mesh
+    // Create a minimal mesh with the subset
+    // (face data is not transferred; caller regenerates if needed)
+    let new_mesh = SimplexMesh {
+        coords: new_coords,
+        conn: new_conn,
+        elem_tags: new_tags,
+        elem_type: mesh.elem_type,
+        face_conn: Vec::new(),
+        face_tags: Vec::new(),
+        face_type: mesh.face_type,
+        elem_types: mesh.elem_types.clone(),
+        elem_offsets: mesh.elem_offsets.clone(),
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(),
+        edge_to_elem: Vec::new(),
+    };
+    new_mesh
+}
+
+/// Merge two meshes (concatenate nodes and elements).
+fn merge_two_meshes<const D: usize>(
+    mesh_a: &SimplexMesh<D>,
+    mesh_b: &SimplexMesh<D>,
+) -> SimplexMesh<D> {
+    let n_a_nodes = mesh_a.n_nodes();
+    let mut coords = mesh_a.coords.clone();
+    coords.extend_from_slice(&mesh_b.coords);
+
+    let mut conn = mesh_a.conn.clone();
+    let offset = n_a_nodes as u32;
+    for &n in &mesh_b.conn {
+        conn.push(n + offset);
     }
 
-    /// Access the non-conforming state.
-    pub fn nc_state(&self) -> &NCState {
-        &self.nc_state
+    let mut elem_tags = mesh_a.elem_tags.clone();
+    elem_tags.extend_from_slice(&mesh_b.elem_tags);
+
+    SimplexMesh {
+        coords,
+        conn,
+        elem_tags,
+        elem_type: mesh_a.elem_type,
+        face_conn: mesh_a.face_conn.clone(),
+        face_tags: mesh_a.face_tags.clone(),
+        face_type: mesh_a.face_type,
+        elem_types: None,
+        elem_offsets: None,
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(),
+        edge_to_elem: Vec::new(),
     }
+}
+
+/// Compute element centroids (simplified, for D=2 and D=3).
+fn compute_centroids_simple<const D: usize>(mesh: &SimplexMesh<D>) -> Vec<[f64; D]> {
+    let n_elems = mesh.n_elems();
+    let mut centroids = Vec::with_capacity(n_elems);
+    for e in 0..n_elems as u32 {
+        let nodes = mesh.element_nodes(e);
+        let npe = nodes.len();
+        let mut c = [0.0_f64; D];
+        for &n in nodes {
+            let nc = mesh.node_coords(n);
+            for d in 0..D { c[d] += nc[d]; }
+        }
+        let inv = 1.0 / npe as f64;
+        for d in 0..D { c[d] *= inv; }
+        centroids.push(c);
+    }
+    centroids
 }
 
 // ─── Solution prolongation ────────────────────────────────────────────────────
@@ -414,5 +628,90 @@ mod tests {
             let merged_conn: Vec<_> = merged.element_nodes(le).iter().copied().collect();
             assert_eq!(orig, merged_conn, "elem {le} connectivity mismatch");
         }
+    }
+
+    // ─── SFC rebalancing tests ───────────────────────────────────────────────
+
+    #[test]
+    fn sfc_rebalance_plan_under_target_keeps_all() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4); // 32 elements
+        let n = mesh.n_elems();
+        let (keep, send) = sfc_rebalance_plan(&mesh, n + 10);
+        assert_eq!(keep.len(), n, "should keep all when target exceeds local count");
+        assert!(send.is_empty(), "should send nothing when under target");
+    }
+
+    #[test]
+    fn sfc_rebalance_plan_over_target_sends_excess() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4); // 32 elements
+        let n = mesh.n_elems();
+        let target = n / 2;
+        let (keep, send) = sfc_rebalance_plan(&mesh, target);
+        assert_eq!(keep.len(), target, "should keep exactly target elements");
+        assert_eq!(send.len(), n - target, "should send remaining elements");
+    }
+
+    #[test]
+    fn sfc_rebalance_plan_elements_are_disjoint() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let n = mesh.n_elems();
+        let target = n / 2;
+        let (keep, send) = sfc_rebalance_plan(&mesh, target);
+        let mut all: Vec<usize> = keep.iter().chain(send.iter()).copied().collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), n, "keep + send should cover all elements without overlap");
+        assert!(all.iter().all(|&i| i < n), "all indices should be in range");
+    }
+
+    #[test]
+    fn extract_submesh_elements_preserves_connectivity() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3); // 18 elements
+        let indices: Vec<usize> = (0..3).collect(); // first 3 elements
+        let sub = extract_submesh_elements(&mesh, &indices);
+        assert_eq!(sub.n_elems(), 3, "should have 3 elements");
+        for (si, &mi) in indices.iter().enumerate() {
+            let orig_nodes: Vec<u32> = mesh.element_nodes(mi as u32).iter().copied().collect();
+            let sub_nodes: Vec<u32> = sub.element_nodes(si as u32).iter().copied().collect();
+            assert_eq!(sub_nodes.len(), orig_nodes.len(), "elem {si} should have same npe");
+        }
+    }
+
+    #[test]
+    fn merge_two_meshes_concatenates() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let n = mesh.n_elems();
+        let mid = n / 2;
+        let left: Vec<usize> = (0..mid).collect();
+        let right: Vec<usize> = (mid..n).collect();
+        let mesh_a = extract_submesh_elements(&mesh, &left);
+        let mesh_b = extract_submesh_elements(&mesh, &right);
+        let merged = merge_two_meshes(&mesh_a, &mesh_b);
+        assert_eq!(merged.n_elems(), n, "merged should have same total elements");
+    }
+
+    #[test]
+    fn compute_centroids_simple_2d_triangle() {
+        // A known triangle: (0,0), (1,0), (0,1) → centroid at (1/3, 1/3)
+        let mesh = SimplexMesh::<2> {
+            coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            conn: vec![0, 1, 2],
+            elem_tags: vec![0],
+            elem_type: fem_mesh::ElementType::Tri3,
+            face_conn: Vec::new(),
+            face_tags: Vec::new(),
+            face_type: fem_mesh::ElementType::Line2,
+            elem_types: None,
+            elem_offsets: None,
+            face_types: None,
+            face_offsets: None,
+            face_to_elem: None,
+            edge_conn: Vec::new(),
+            edge_to_elem: Vec::new(),
+        };
+        let centroids = compute_centroids_simple(&mesh);
+        assert_eq!(centroids.len(), 1);
+        assert!((centroids[0][0] - 1.0 / 3.0).abs() < 1e-14, "centroid x={}", centroids[0][0]);
+        assert!((centroids[0][1] - 1.0 / 3.0).abs() < 1e-14, "centroid y={}", centroids[0][1]);
     }
 }

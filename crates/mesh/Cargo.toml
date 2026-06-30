@@ -8,3 +8,6 @@ fem-core    = { path = "../core" }
 fem-element = { path = "../element" }
 nalgebra    = { workspace = true }
 thiserror   = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

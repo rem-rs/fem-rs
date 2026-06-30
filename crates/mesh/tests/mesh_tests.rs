@@ -1,10 +1,6 @@
 //! Integration tests for the fem-mesh crate.
 
-use fem_mesh::{
-    element_type::ElementType,
-    topology::MeshTopology,
-    SimplexMesh,
-};
+use fem_mesh::{element_type::ElementType, topology::MeshTopology, SimplexMesh};
 
 // ─── Unit-square mesh topology ────────────────────────────────────────────────
 
@@ -123,10 +119,26 @@ fn unit_square_tri_boundary_tag_physical_location() {
         for &nd in nodes {
             let c = mesh.node_coords(nd);
             match tag {
-                1 => assert!(c[1].abs() < 1e-12, "tag 1 face {f} node {nd}: y={} ≠ 0", c[1]),
-                2 => assert!((c[0] - 1.0).abs() < 1e-12, "tag 2 face {f} node {nd}: x={} ≠ 1", c[0]),
-                3 => assert!((c[1] - 1.0).abs() < 1e-12, "tag 3 face {f} node {nd}: y={} ≠ 1", c[1]),
-                4 => assert!(c[0].abs() < 1e-12, "tag 4 face {f} node {nd}: x={} ≠ 0", c[0]),
+                1 => assert!(
+                    c[1].abs() < 1e-12,
+                    "tag 1 face {f} node {nd}: y={} ≠ 0",
+                    c[1]
+                ),
+                2 => assert!(
+                    (c[0] - 1.0).abs() < 1e-12,
+                    "tag 2 face {f} node {nd}: x={} ≠ 1",
+                    c[0]
+                ),
+                3 => assert!(
+                    (c[1] - 1.0).abs() < 1e-12,
+                    "tag 3 face {f} node {nd}: y={} ≠ 1",
+                    c[1]
+                ),
+                4 => assert!(
+                    c[0].abs() < 1e-12,
+                    "tag 4 face {f} node {nd}: x={} ≠ 0",
+                    c[0]
+                ),
                 _ => panic!("unexpected boundary tag {tag}"),
             }
         }
@@ -138,10 +150,16 @@ fn unit_square_tri_node_coords_in_unit_square() {
     let mesh = SimplexMesh::<2>::unit_square_tri(8);
     for n in 0..mesh.n_nodes() as u32 {
         let c = mesh.node_coords(n);
-        assert!(c[0] >= -1e-12 && c[0] <= 1.0 + 1e-12,
-            "node {n}: x={} not in [0,1]", c[0]);
-        assert!(c[1] >= -1e-12 && c[1] <= 1.0 + 1e-12,
-            "node {n}: y={} not in [0,1]", c[1]);
+        assert!(
+            c[0] >= -1e-12 && c[0] <= 1.0 + 1e-12,
+            "node {n}: x={} not in [0,1]",
+            c[0]
+        );
+        assert!(
+            c[1] >= -1e-12 && c[1] <= 1.0 + 1e-12,
+            "node {n}: y={} not in [0,1]",
+            c[1]
+        );
     }
 }
 
@@ -149,7 +167,8 @@ fn unit_square_tri_node_coords_in_unit_square() {
 fn unit_square_tri_check_passes() {
     // mesh.check() should return Ok for a well-formed mesh
     let mesh = SimplexMesh::<2>::unit_square_tri(4);
-    mesh.check().expect("mesh.check() should pass for unit_square_tri");
+    mesh.check()
+        .expect("mesh.check() should pass for unit_square_tri");
 }
 
 // ─── Mixed mesh ───────────────────────────────────────────────────────────────
@@ -157,7 +176,9 @@ fn unit_square_tri_check_passes() {
 #[test]
 fn mixed_mesh_elem_type_accessor() {
     // Build a tiny 2-element mixed mesh (Quad4 + Tri3) and verify element_type.
-    let coords = vec![0.0f64, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 1.0, 1.0, 1.0];
+    let coords = vec![
+        0.0f64, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+    ];
     let conn: Vec<u32> = vec![0, 1, 4, 3, 1, 2, 5, 1, 5, 4];
     let elem_offsets = vec![0usize, 4, 7, 10];
     let elem_types = vec![ElementType::Quad4, ElementType::Tri3, ElementType::Tri3];
@@ -175,7 +196,8 @@ fn mixed_mesh_elem_type_accessor() {
         face_types: None,
         face_offsets: None,
         face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
+        edge_conn: vec![],
+        edge_to_elem: vec![],
     };
 
     assert!(mesh.is_mixed());
@@ -192,7 +214,10 @@ fn face_elements_after_build_all_boundary_faces_have_owner() {
     let mut mesh = SimplexMesh::<2>::unit_square_tri(4);
     mesh.build_face_to_elem();
 
-    let f2e = mesh.face_to_elem.as_ref().expect("face_to_elem should be built");
+    let f2e = mesh
+        .face_to_elem
+        .as_ref()
+        .expect("face_to_elem should be built");
     assert_eq!(f2e.len(), mesh.n_boundary_faces());
     for (bf, &owner) in f2e.iter().enumerate() {
         assert!(
@@ -200,8 +225,14 @@ fn face_elements_after_build_all_boundary_faces_have_owner() {
             "boundary face {bf} should have an owned element, got {owner}"
         );
         let (elem, neighbor) = mesh.face_elements(bf as u32);
-        assert_eq!(elem, owner, "face_elements returned wrong owner for face {bf}");
-        assert!(neighbor.is_none(), "boundary face {bf} should have no neighbor");
+        assert_eq!(
+            elem, owner,
+            "face_elements returned wrong owner for face {bf}"
+        );
+        assert!(
+            neighbor.is_none(),
+            "boundary face {bf} should have no neighbor"
+        );
     }
 }
 
@@ -210,7 +241,10 @@ fn face_elements_3d_cube_each_boundary_face_has_owner() {
     let mut mesh = SimplexMesh::<3>::unit_cube_tet(2);
     mesh.build_face_to_elem();
 
-    let f2e = mesh.face_to_elem.as_ref().expect("face_to_elem should be built");
+    let f2e = mesh
+        .face_to_elem
+        .as_ref()
+        .expect("face_to_elem should be built");
     assert_eq!(f2e.len(), mesh.n_boundary_faces());
     for (bf, &owner) in f2e.iter().enumerate() {
         assert!(
@@ -227,5 +261,8 @@ fn face_elements_3d_cube_each_boundary_face_has_owner() {
 fn face_elements_not_built_returns_zero() {
     let mesh = SimplexMesh::<2>::unit_square_tri(4);
     let (elem, _neighbor) = mesh.face_elements(0);
-    assert_eq!(elem, 0, "before build_face_to_elem, should return (0, None)");
+    assert_eq!(
+        elem, 0,
+        "before build_face_to_elem, should return (0, None)"
+    );
 }

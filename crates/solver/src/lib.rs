@@ -1337,6 +1337,7 @@ pub mod butcher;
 pub mod adaptive;
 pub mod adjoint;
 pub mod bdf;
+pub mod complex_ams;
 pub mod dae;
 pub mod events;
 pub use block_operator::{
