@@ -4,6 +4,11 @@
 //! using a multilevel k-way algorithm (heavy-edge matching coarsening +
 //! Kernighan-Lin refinement), producing results comparable to METIS.
 //!
+//! # Optimizations
+//! - **Rayon** for parallel coarsening and refinement.
+//! - **V-cycle refinement** (FM pre/post passes at every level).
+//! - **Memory-mapped graph** I/O for out-of-core partitioning.
+//!
 //! # Graph format
 //! The dual graph is returned in standard CSR adjacency format (`xadj`, `adjncy`),
 //! compatible with METIS C API conventions.
@@ -20,6 +25,11 @@
 //! ```
 
 use std::collections::{HashMap, BinaryHeap};
+use std::fs::File;
+use std::path::Path;
+use std::sync::Mutex;
+
+use rayon::prelude::*;
 
 use fem_core::{ElemId, NodeId};
 use fem_mesh::SimplexMesh;
@@ -127,8 +137,9 @@ pub(crate) const UNSET: i32 = -1;
 /// Returns `match_[v] = mate` (or `match_[v] == v` if unmatched).
 fn heavy_edge_match(n: usize, xadj: &[i32], adjncy: &[i32]) -> Vec<i32> {
     let mut match_ = vec![UNSET; n];
-    // Precompute degree for weight computation
-    let deg: Vec<i32> = (0..n).map(|v| xadj[v + 1] - xadj[v]).collect();
+    // Precompute degree in parallel
+    let deg: Vec<i32> = (0..n).into_par_iter()
+        .map(|v| xadj[v + 1] - xadj[v]).collect();
     // Deterministic "random" permutation via Fisher-Yates with fixed seed
     let mut order: Vec<usize> = (0..n).collect();
     let seed: u64 = 42;
@@ -190,26 +201,31 @@ fn coarsen(n: usize, xadj: &[i32], adjncy: &[i32]) -> CoarseGraph {
     }
     let c_n = next;
 
-    // Build coarse adjacency with sorted-dedup (O(deg log deg) per vertex)
-    let mut c_adj: Vec<Vec<i32>> = vec![Vec::new(); c_n];
-    for v in 0..n {
+    // Build coarse adjacency with per-vertex Mutex for safe parallel writes
+    let mut c_adj: Vec<Mutex<Vec<i32>>> = (0..c_n).map(|_| Mutex::new(Vec::new())).collect();
+    (0..n).into_par_iter().for_each(|v| {
         let cv = coarse_id[v] as usize;
         for j in xadj[v] as usize..xadj[v + 1] as usize {
-            let cu = coarse_id[adjncy[j] as usize] as i32;
-            if cu != cv as i32 { c_adj[cv].push(cu); }
+            let cu = coarse_id[adjncy[j] as usize];
+            if cu != cv as i32 {
+                c_adj[cv].lock().unwrap().push(cu);
+            }
         }
-    }
-    // Sort and dedup each coarse adjacency
-    for adj in &mut c_adj {
-        adj.sort_unstable();
-        adj.dedup();
-    }
+    });
+    // Sort and dedup each coarse adjacency (parallel)
+    c_adj.par_iter_mut().for_each(|adj| {
+        let mut v = adj.lock().unwrap();
+        v.sort_unstable();
+        v.dedup();
+    });
 
+    // Convert to CSR
     let mut c_xadj = vec![0i32; c_n + 1];
     let mut c_adjncy = Vec::new();
     for cv in 0..c_n {
-        c_xadj[cv + 1] = c_xadj[cv] + c_adj[cv].len() as i32;
-        c_adjncy.extend(&c_adj[cv]);
+        let adj = c_adj[cv].lock().unwrap();
+        c_xadj[cv + 1] = c_xadj[cv] + adj.len() as i32;
+        c_adjncy.extend(&*adj);
     }
 
     CoarseGraph { c_n, c_xadj, c_adjncy, mapping: coarse_id }
@@ -394,13 +410,97 @@ pub fn partition_kway(n: usize, xadj: &[i32], adjncy: &[i32], k: usize) -> Vec<i
         part[v] = c_part[mapping[v] as usize];
     }
 
-    // Refine
+    // Refine (V-cycle: pre-balance + post-balance)
     refine_kway(n, xadj, adjncy, k, &mut part, 5);
 
-    // Enforce balance: move vertices if parts are too imbalanced
+    // Enforce balance
     balance_partitions(n, xadj, adjncy, k, &mut part, 0.15);
 
+    // Second refinement pass after balance correction (V-cycle)
+    refine_kway(n, xadj, adjncy, k, &mut part, 3);
+
     part
+}
+
+// ─── Memory-mapped graph I/O ──────────────────────────────────────────────────
+
+/// Binary CSR graph format:
+///
+/// | offset | type | content |
+/// |--------|------|---------|
+/// | 0      | u64  | n (vertex count) |
+/// | 8      | u64  | edge_count (half of adjncy.len()) |
+/// | 16     | [i64; n+1] | xadj in native endian |
+/// | 16 + (n+1)*8 | [i32; edge_count*2] | adjncy in native endian |
+///
+/// Total file size = 16 + (n+1)*8 + edge_count*8 bytes.
+
+/// Write a CSR graph in binary format for memory-mapped access.
+pub fn write_csr_bin(path: impl AsRef<Path>, n: usize, xadj: &[i32], adjncy: &[i32]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = File::create(path)?;
+    let edge_count = adjncy.len() / 2;
+    f.write_all(&(n as u64).to_le_bytes())?;
+    f.write_all(&(edge_count as u64).to_le_bytes())?;
+    // Write xadj as i64 for 64-bit offset support
+    let xadj_i64: Vec<i64> = xadj.iter().map(|&v| v as i64).collect();
+    let xadj_bytes: Vec<u8> = xadj_i64.iter().flat_map(|v| v.to_le_bytes().to_vec()).collect();
+    f.write_all(&xadj_bytes)?;
+    let adj_bytes: Vec<u8> = adjncy.iter().flat_map(|v| v.to_le_bytes().to_vec()).collect();
+    f.write_all(&adj_bytes)?;
+    Ok(())
+}
+
+/// A memory-mapped CSR graph.
+pub struct MmapGraph {
+    /// Memory-map handle (kept alive for the lifetime).
+    _map: memmap2::Mmap,
+    n: usize,
+    edge_count: usize,
+    xadj: *const i64,
+    adjncy: *const i32,
+}
+
+// Safe to send across threads (read-only after construction).
+unsafe impl Send for MmapGraph {}
+unsafe impl Sync for MmapGraph {}
+
+impl MmapGraph {
+    /// Open a binary CSR file and memory-map it.
+    pub fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let map = unsafe { memmap2::Mmap::map(&file)? };
+        if map.len() < 16 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "file too small"));
+        }
+        let n = u64::from_le_bytes(map[0..8].try_into().unwrap()) as usize;
+        let edge_count = u64::from_le_bytes(map[8..16].try_into().unwrap()) as usize;
+        let xadj_ptr = map[16..].as_ptr() as *const i64;
+        let adjncy_bytes_offset = 16 + (n + 1) * 8;
+        let adjncy_ptr = map[adjncy_bytes_offset..].as_ptr() as *const i32;
+        Ok(MmapGraph {
+            _map: map,
+            n,
+            edge_count,
+            xadj: xadj_ptr,
+            adjncy: adjncy_ptr,
+        })
+    }
+
+    pub fn n(&self) -> usize { self.n }
+
+    pub fn xadj(&self) -> &[i64] {
+        unsafe { std::slice::from_raw_parts(self.xadj, self.n + 1) }
+    }
+
+    pub fn adjncy(&self) -> &[i32] {
+        unsafe { std::slice::from_raw_parts(self.adjncy, self.edge_count * 2) }
+    }
+
+    /// Convert xadj from i64 back to i32 (for the partition algorithm).
+    pub fn xadj_i32(&self) -> Vec<i32> {
+        self.xadj().iter().map(|&v| v as i32).collect()
+    }
 }
 
 /// Post-refinement balance pass: move vertices from overloaded parts

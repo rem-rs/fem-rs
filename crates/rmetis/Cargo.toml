@@ -7,3 +7,5 @@ description = "Pure-Rust mesh graph partitioning for FEM (dual-graph builder + B
 [dependencies]
 fem-core = { path = "../core" }
 fem-mesh = { path = "../mesh" }
+rayon = "1"
+memmap2 = "0.9"
