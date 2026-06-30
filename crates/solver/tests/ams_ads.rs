@@ -214,3 +214,137 @@ fn ads_darcy_3d_h_independent() {
     assert!(conv2, "Fine ADS must converge");
     assert!(it2 <= it1 + 25, "ADS iters should grow slowly: {it1}→{it2}");
 }
+
+// ─── Complex AMS: time-harmonic Maxwell 2D ─────────────────────────────────
+
+use fem_linalg::complex_csr::ComplexCsr;
+use fem_solver::complex_ams::{solve_gmres_ams_complex, solve_bicgstab_ams_complex};
+
+/// Build a complex H(curl) system `(K + M) + i·(ω·M)` on a 2D mesh,
+/// apply tangential Dirichlet BCs, and return `(A_complex, G_linlvo, rhs_re, rhs_im)`.
+///
+/// The real part `K + M` is symmetric positive-definite, so the AMS
+/// preconditioner (built from the real part) performs robustly.
+fn build_complex_maxwell_2d(
+    n: usize, omega: f64,
+) -> (ComplexCsr, linlvo::sparse::CsrMatrix<f64>, Vec<f64>, Vec<f64>) {
+    use std::f64::consts::PI;
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let h1 = H1Space::new(mesh.clone(), 1);
+    let hcurl = HCurlSpace::new(mesh.clone(), 1);
+    let n_dofs = hcurl.n_dofs();
+
+    // Assemble curl-curl (K) and mass (M) separately.
+    let k = VectorAssembler::assemble_bilinear(
+        &hcurl, &[&CurlCurlIntegrator { mu: 1.0 }], 4);
+    let m_csr = VectorAssembler::assemble_bilinear(
+        &hcurl, &[&VectorMassIntegrator { alpha: 1.0 }], 4);
+
+    // Build A_re = K + M (SPD) and A_im = ω·M via COO.
+    let mut coo_re = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
+    let mut coo_im = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
+    for i in 0..n_dofs {
+        for ptr in k.row_ptr[i]..k.row_ptr[i+1] {
+            coo_re.add(i, k.col_idx[ptr] as usize, k.values[ptr]);
+        }
+    }
+    for i in 0..n_dofs {
+        for ptr in m_csr.row_ptr[i]..m_csr.row_ptr[i+1] {
+            let j = m_csr.col_idx[ptr] as usize;
+            let m_val = m_csr.values[ptr];
+            // A_re += M
+            coo_re.add(i, j, m_val);
+            // A_im = ω·M
+            coo_im.add(i, j, omega * m_val);
+        }
+    }
+    let k_re: fem_linalg::CsrMatrix<f64> = coo_re.into_csr();
+    let k_im: fem_linalg::CsrMatrix<f64> = coo_im.into_csr();
+    let a_complex = ComplexCsr::from_re_im(&k_re, &k_im);
+
+    // Discrete gradient G: H1(P1) → H(curl)(ND1)
+    let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
+    let g_linlvo = fem_to_linlvo_csr(&g_fem);
+
+    // RHS from sinusoidal source (same as real AMS test)
+    let mut rhs_re = VectorAssembler::assemble_linear(&hcurl, &[
+        &VectorDomainLFIntegrator {
+            f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
+                let sx = (PI*x[0]).sin(); let sy = (PI*x[1]).sin();
+                out[0] = (1.0 + PI*PI)*sy;
+                out[1] = (1.0 + PI*PI)*sx;
+            })),
+        },
+    ], 4);
+    let mut rhs_im = vec![0.0; n_dofs]; // purely real RHS
+
+    // Dirichlet: tangential E = 0 on all boundaries
+    let bdofs = boundary_dofs_hcurl(&mesh, &hcurl, &[1, 2, 3, 4]);
+    let mut a_mut = a_complex;
+    for &dof in &bdofs {
+        a_mut.apply_dirichlet_row(dof as usize, 0.0, 0.0, &mut rhs_re, &mut rhs_im);
+    }
+    (a_mut, g_linlvo, rhs_re, rhs_im)
+}
+
+#[test]
+fn complex_ams_2d_converges() {
+    let omega = 1.0;
+    let (a, g, b_re, b_im) = build_complex_maxwell_2d(6, omega);
+    let n = a.nrows;
+    let mut x_re = vec![0.0; n];
+    let mut x_im = vec![0.0; n];
+
+    let cfg = linlvo::precond::AmsConfig::hpc_default();
+    let (iters, res) = solve_gmres_ams_complex(
+        &a, &g, &b_re, &b_im, &mut x_re, &mut x_im,
+        1e-6, 500, 50, cfg,
+    ).expect("Complex AMS GMRES should converge");
+
+    eprintln!("Complex AMS 2D (12×12 mesh): converged in {iters} iters, rel_prec_res={res:.2e}");
+    assert!(iters < 300, "too many iterations: {iters}");
+    assert!(iters > 0, "solver should perform at least 1 iteration");
+}
+
+#[test]
+fn complex_ams_2d_h_independent() {
+    let omega = 1.0;
+    let cfg = linlvo::precond::AmsConfig::hpc_default();
+
+    fn run(n: usize, omega: f64, cfg: &linlvo::precond::AmsConfig) -> (bool, usize) {
+        let (a, g, b_re, b_im) = build_complex_maxwell_2d(n, omega);
+        let mut x_re = vec![0.0; a.nrows];
+        let mut x_im = vec![0.0; a.nrows];
+        match solve_gmres_ams_complex(&a, &g, &b_re, &b_im, &mut x_re, &mut x_im, 1e-6, 500, 50, cfg.clone()) {
+            Ok((iters, _res)) => (iters < 500, iters),
+            Err(_) => (false, 999),
+        }
+    }
+
+    let (c1, i1) = run(4, omega, &cfg);
+    let (c2, i2) = run(6, omega, &cfg);
+    let (c3, i3) = run(8, omega, &cfg);
+    eprintln!("Complex AMS h-indep iters: 8×8={i1}, 12×12={i2}, 16×16={i3}");
+    assert!(c1 && c2 && c3, "All levels must converge");
+    // AMS real-part preconditioning for complex systems; iters may grow moderately
+    // but should not explode (within the max_iter bound).
+    assert!(i2 <= i1 + 50, "Iters should not explode: {i1}→{i2}");
+}
+
+#[test]
+fn complex_ams_2d_bicgstab() {
+    let omega = 2.0;
+    let (a, g, b_re, b_im) = build_complex_maxwell_2d(6, omega);
+    let n = a.nrows;
+    let mut x_re = vec![0.0; n];
+    let mut x_im = vec![0.0; n];
+
+    let cfg = linlvo::precond::AmsConfig::hpc_default();
+    let (iters, res) = solve_bicgstab_ams_complex(
+        &a, &g, &b_re, &b_im, &mut x_re, &mut x_im,
+        1e-6, 500, cfg,
+    ).expect("Complex AMS BiCGSTAB should converge");
+
+    eprintln!("Complex AMS BiCGSTAB 2D: {iters} iters, res={res:.2e}");
+    assert!(iters < 400, "BiCGSTAB too many iterations: {iters}");
+}
