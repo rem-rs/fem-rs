@@ -13,36 +13,45 @@ cargo bench -p fem-benches --bench mfem_parity
 
 ## 基线数据
 
-### Poisson 2D H¹ P1 — PCG + Jacobi preconditioner
+### Poisson 2D H¹ P1 — Assembly + PCG + Jacobi
 
-| DOF     | h       | Assembly (ms) | Solve (ms) | Total (ms) | Date       |
-|---------|---------|---------------|------------|------------|------------|
-| (待采集) |         |               |            |            |            |
+| DOF | Assembly+Solve (ms) | Date |
+|-----|-------------------|------|
+| 25 | 0.11 | 2026-06-30 |
+| 81 | 0.43 | 2026-06-30 |
+| 289 | 58.1 | 2026-06-30 |
+| 625 | 131.0 | 2026-06-30 |
 
-### Elasticity 2D VectorH¹ P1 — PCG + Jacobi
+### Elasticity 2D VectorH¹ P1 — Assembly only
 
-| DOF     | Assembly (ms) | Solve (ms) | Total (ms) | Date       |
-|---------|---------------|------------|------------|------------|
-| (待采集) |               |            |            |            |
+| DOF | Assembly (µs) | Date |
+|-----|--------------|------|
+| 50 | 113 | 2026-06-30 |
+| 162 | 262 | 2026-06-30 |
+| 578 | 658 | 2026-06-30 |
 
-### Maxwell 2D HCurl ND1 — PCG + Jacobi
+### Maxwell 2D HCurl ND1 — Assembly only
 
-| DOF     | Assembly (ms) | Solve (ms) | Total (ms) | Date       |
-|---------|---------------|------------|------------|------------|
-| (待采集) |               |            |            |            |
+| DOF | Assembly (µs) | Date |
+|-----|--------------|------|
+| 56 | 75.8 | 2026-06-30 |
+| 208 | 222 | 2026-06-30 |
+| 800 | 945 | 2026-06-30 |
 
-### Stokes 2D Mixed HDiv×L² — MINRES
+### Stokes 2D Mixed VectorH¹ P2 × H¹ P1 — Assembly only
 
-| DOF     | Assembly (ms) | Solve (ms) | Total (ms) | Date       |
-|---------|---------------|------------|------------|------------|
-| (待采集) |               |            |            |            |
+| Velocity DOF | Pressure DOF | Assembly (µs) | Date |
+|-------------|--------------|--------------|------|
+| 98 | 16 | 312 | 2026-06-30 |
+| 338 | 49 | 674 | 2026-06-30 |
+| 722 | 100 | 1060 | 2026-06-30 |
 
 ## 硬件环境
 
-| 项目       | 值           |
-|-----------|--------------|
-| CPU       | (待记录)      |
-| 核心/线程  |              |
-| RAM       |              |
-| OS        |              |
-| Rust      | (待记录)      |
+| 项目 | 值 |
+|-----|-----|
+| CPU | Intel(R) Core(TM) Ultra 9 285K |
+| 核心/线程 | 24C24T |
+| RAM | 64 GB |
+| OS | Windows 11 |
+| Rust | stable (channel) |
