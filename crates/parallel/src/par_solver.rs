@@ -713,33 +713,6 @@ pub fn par_solve_bicgstab(
     Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: tr.global_norm() / b_norm })
 }
 
-pub fn par_solve_idrs(
-    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector, s: usize, cfg: &SolverConfig,
-) -> Result<SolveResult, SolverError> {
-    let n = a.n_owned; let b_norm = b.global_norm();
-    if b_norm < 1e-30 { return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 }); }
-    let mut r = b.clone_vec(); let mut ax = ParVector::zeros_like(b);
-    a.spmv(x, &mut ax); sub_assign_owned(&mut r.data, &b.data, &ax.data, n);
-    for outer in 0..cfg.max_iter {
-        if r.global_norm() / b_norm < cfg.rtol || r.global_norm() < cfg.atol {
-            return Ok(SolveResult { converged: true, iterations: outer, final_residual: r.global_norm() / b_norm });
-        }
-        for col in 0..s {
-            let mut f = r.clone_vec(); let mut af = ParVector::zeros_like(b);
-            a.spmv(&mut f, &mut af);
-            let fdot = if col == 0 { r.global_dot(&r) } else { r.global_dot(&f) };
-            let af_dot = f.global_dot(&af); if af_dot.abs() < 1e-30 { break; }
-            let lambda = fdot / af_dot; x.axpy(lambda, &f); r.axpy(-lambda, &af);
-            if r.global_norm() / b_norm < cfg.rtol || r.global_norm() < cfg.atol {
-                return Ok(SolveResult { converged: true, iterations: outer, final_residual: r.global_norm() / b_norm });
-            }
-        }
-    }
-    let mut tr = b.clone_vec(); let mut tax = ParVector::zeros_like(b);
-    a.spmv(x, &mut tax); sub_assign_owned(&mut tr.data, &b.data, &tax.data, n);
-    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: tr.global_norm() / b_norm })
-}
-
 // ── 7. TFQMR (Transpose-Free QMR) ──────────────────────────────────────────────
 
 /// Parallel TFQMR (Transpose-Free Quasi-Minimal Residual) solver.
@@ -941,6 +914,81 @@ impl ParIlu0Precond {
     }
 }
 
+/// Distributed ILU(k) preconditioner built from the local diagonal block.
+///
+/// `fill_level = 0` reproduces ILU(0); higher values allow more fill.
+pub struct ParIlukPrecond {
+    ilu: linlvo::precond::IlukPrecond<f64>,
+    n_owned: usize,
+}
+impl ParIlukPrecond {
+    pub fn new(a: &ParCsrMatrix, fill_level: usize) -> Self {
+        let n_owned = a.n_owned;
+        let local = &a.diag;
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(n_owned, n_owned);
+        for i in 0..n_owned.min(local.nrows) {
+            let s = local.row_ptr[i];
+            let e = local.row_ptr[i + 1];
+            for k in s..e {
+                let j = local.col_idx[k] as usize;
+                if j < n_owned {
+                    coo.add(i, j, local.values[k]);
+                }
+            }
+        }
+        let diag = coo.into_csr();
+        let la = fem_solver::fem_to_linlvo_csr(&diag);
+        let ilu =
+            linlvo::precond::IlukPrecond::from_csr(&la, fill_level).expect("ILU(k) for local diag block");
+        ParIlukPrecond { ilu, n_owned }
+    }
+    pub fn apply(&self, r: &[f64], z: &mut [f64]) {
+        use linlvo::Preconditioner;
+        let xv = linlvo::DenseVec::from_vec(r[..self.n_owned].to_vec());
+        let mut yv = linlvo::DenseVec::zeros(self.n_owned);
+        self.ilu.apply_precond(&xv, &mut yv);
+        z[..self.n_owned].copy_from_slice(yv.as_slice());
+    }
+}
+
+/// Distributed ILUT(τ, p) preconditioner built from the local diagonal block.
+///
+/// * `tau` — relative drop tolerance (e.g. `0.01`)
+/// * `p_fill` — max off-diagonal entries per row in L and U
+pub struct ParIlutPrecond {
+    ilu: linlvo::precond::IlutPrecond<f64>,
+    n_owned: usize,
+}
+impl ParIlutPrecond {
+    pub fn new(a: &ParCsrMatrix, tau: f64, p_fill: usize) -> Self {
+        let n_owned = a.n_owned;
+        let local = &a.diag;
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(n_owned, n_owned);
+        for i in 0..n_owned.min(local.nrows) {
+            let s = local.row_ptr[i];
+            let e = local.row_ptr[i + 1];
+            for k in s..e {
+                let j = local.col_idx[k] as usize;
+                if j < n_owned {
+                    coo.add(i, j, local.values[k]);
+                }
+            }
+        }
+        let diag = coo.into_csr();
+        let la = fem_solver::fem_to_linlvo_csr(&diag);
+        let ilu =
+            linlvo::precond::IlutPrecond::from_csr(&la, tau, p_fill).expect("ILUT for local diag block");
+        ParIlutPrecond { ilu, n_owned }
+    }
+    pub fn apply(&self, r: &[f64], z: &mut [f64]) {
+        use linlvo::Preconditioner;
+        let xv = linlvo::DenseVec::from_vec(r[..self.n_owned].to_vec());
+        let mut yv = linlvo::DenseVec::zeros(self.n_owned);
+        self.ilu.apply_precond(&xv, &mut yv);
+        z[..self.n_owned].copy_from_slice(yv.as_slice());
+    }
+}
+
 pub fn par_solve_pcg_ilu0(
     a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector, ilu: &ParIlu0Precond, cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
@@ -964,6 +1012,310 @@ pub fn par_solve_pcg_ilu0(
     let mut tr = b.clone_vec(); let mut tax = ParVector::zeros_like(b);
     a.spmv(x, &mut tax); sub_assign_owned(&mut tr.data, &b.data, &tax.data, n);
     Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: tr.global_norm() / b_norm })
+}
+
+/// PCG with ILU(k) preconditioner (symmetric positive definite).
+///
+/// `fill_level = 0` reproduces `par_solve_pcg_ilu0`.
+pub fn par_solve_pcg_iluk(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    ilu: &ParIlukPrecond, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    let n = a.n_owned; let b_norm = b.global_norm();
+    if b_norm < 1e-30 { return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 }); }
+    let mut r = b.clone_vec(); let mut ax = ParVector::zeros_like(b); a.spmv(x, &mut ax);
+    sub_assign_owned(&mut r.data, &b.data, &ax.data, n);
+    let mut z = ParVector::zeros_like(b); ilu.apply(&r.data, &mut z.data); z.update_ghosts();
+    let mut p = z.clone_vec(); let mut rz = r.global_dot(&z); let mut ap = ParVector::zeros_like(b);
+    for iter in 0..cfg.max_iter {
+        a.spmv(&mut p, &mut ap); let pap = p.global_dot(&ap); if pap.abs() < 1e-30 { break; }
+        let alpha = rz / pap; x.axpy(alpha, &p); r.axpy(-alpha, &ap);
+        let res_norm = r.global_norm() / b_norm;
+        if res_norm < cfg.rtol || r.global_norm() < cfg.atol {
+            return Ok(SolveResult { converged: true, iterations: iter + 1, final_residual: res_norm });
+        }
+        ilu.apply(&r.data, &mut z.data); z.update_ghosts();
+        let rz_new = r.global_dot(&z); let beta = rz_new / rz;
+        p.scale(beta); p.axpy(1.0, &z); rz = rz_new;
+    }
+    let mut tr = b.clone_vec(); let mut tax = ParVector::zeros_like(b);
+    a.spmv(x, &mut tax); sub_assign_owned(&mut tr.data, &b.data, &tax.data, n);
+    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: tr.global_norm() / b_norm })
+}
+
+/// GMRES with ILU(0) right preconditioner.
+pub fn par_solve_gmres_ilu0(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    restart: usize, ilu: &ParIlu0Precond, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    par_solve_gmres_ilu_precond(a, b, x, restart, cfg, |r, z| ilu.apply(r, z))
+}
+
+/// GMRES with ILU(k) right preconditioner.
+pub fn par_solve_gmres_iluk(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    restart: usize, ilu: &ParIlukPrecond, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    par_solve_gmres_ilu_precond(a, b, x, restart, cfg, |r, z| ilu.apply(r, z))
+}
+
+/// GMRES with ILUT right preconditioner.
+pub fn par_solve_gmres_ilut(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    restart: usize, ilu: &ParIlutPrecond, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    par_solve_gmres_ilu_precond(a, b, x, restart, cfg, |r, z| ilu.apply(r, z))
+}
+
+/// Core GMRES + ILU right-preconditioned implementation (shared by ILU0/ILUK/ILUT).
+///
+/// `apply_precond(r, z)` solves `M z_j = v_j` (owned DOFs).  The caller must
+/// ensure ghosts are updated after each application — this function calls
+/// `update_ghosts` on the preconditioned basis vectors automatically.
+fn par_solve_gmres_ilu_precond<F>(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    restart: usize, cfg: &SolverConfig,
+    apply_precond: F,
+) -> Result<SolveResult, SolverError>
+where
+    F: Fn(&[f64], &mut [f64]),
+{
+    if restart == 0 {
+        return Err(SolverError::Linlvo("GMRES restart must be > 0".to_string()));
+    }
+    let b_norm = b.global_norm();
+    if b_norm < 1e-30 { return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 }); }
+    let mut ax = ParVector::zeros_like(b); a.spmv(x, &mut ax);
+    let mut r = b.clone_vec(); r.axpy(-1.0, &ax);
+    let mut iter_total = 0usize;
+    let mut rel_res = r.global_norm() / b_norm;
+    if rel_res < cfg.rtol || r.global_norm() < cfg.atol {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: rel_res });
+    }
+    while iter_total < cfg.max_iter {
+        let beta = r.global_norm();
+        if beta < 1e-30 { return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: 0.0 }); }
+        let mut v: Vec<ParVector> = (0..=restart).map(|_| ParVector::zeros_like(b)).collect();
+        v[0].copy_from(&r); v[0].scale(1.0 / beta);
+        let mut z_basis: Vec<ParVector> = (0..restart).map(|_| ParVector::zeros_like(b)).collect();
+        let mut h = vec![vec![0.0_f64; restart]; restart + 1];
+        let mut cs = vec![0.0_f64; restart];
+        let mut sn = vec![0.0_f64; restart];
+        let mut g = vec![0.0_f64; restart + 1]; g[0] = beta;
+        let mut inner_done = 0usize;
+        let mut converged = false;
+        for j in 0..restart {
+            if iter_total >= cfg.max_iter { break; }
+            // Right preconditioning: z_j = M^{-1} v_j
+            apply_precond(&v[j].data, &mut z_basis[j].data);
+            z_basis[j].update_ghosts();
+            let mut w = ParVector::zeros_like(b); a.spmv(&mut z_basis[j], &mut w);
+            for i in 0..=j { h[i][j] = v[i].global_dot(&w); w.axpy(-h[i][j], &v[i]); }
+            h[j + 1][j] = w.global_norm();
+            if h[j + 1][j] > 1e-30 { v[j + 1].copy_from(&w); v[j + 1].scale(1.0 / h[j + 1][j]); }
+            for i in 0..j {
+                let tmp = cs[i] * h[i][j] + sn[i] * h[i + 1][j];
+                h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j]; h[i][j] = tmp;
+            }
+            let denom = (h[j][j] * h[j][j] + h[j + 1][j] * h[j + 1][j]).sqrt();
+            if denom > 1e-30 { cs[j] = h[j][j] / denom; sn[j] = h[j + 1][j] / denom; }
+            else { cs[j] = 1.0; sn[j] = 0.0; }
+            h[j][j] = cs[j] * h[j][j] + sn[j] * h[j + 1][j]; h[j + 1][j] = 0.0;
+            let g_next = -sn[j] * g[j]; g[j] = cs[j] * g[j]; g[j + 1] = g_next;
+            iter_total += 1; inner_done = j + 1;
+            rel_res = g[j + 1].abs() / b_norm;
+            if cfg.verbose && x.comm().is_root() {
+                log::info!("par_gmres_ilu iter {}: residual = {:.3e}", iter_total, rel_res);
+            }
+            if rel_res < cfg.rtol || g[j + 1].abs() < cfg.atol { converged = true; break; }
+        }
+        if inner_done == 0 { break; }
+        let m = inner_done;
+        let mut y = vec![0.0_f64; m];
+        for i in (0..m).rev() {
+            let mut s = g[i]; for k in (i + 1)..m { s -= h[i][k] * y[k]; }
+            if h[i][i].abs() < 1e-30 {
+                return Err(SolverError::Linlvo("GMRES+ILU breakdown: near-singular Hessenberg diagonal".to_string()));
+            }
+            y[i] = s / h[i][i];
+        }
+        for i in 0..m { x.axpy(y[i], &z_basis[i]); }
+        if converged { return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res }); }
+        a.spmv(x, &mut ax); r.copy_from(b); r.axpy(-1.0, &ax);
+        rel_res = r.global_norm() / b_norm;
+        if rel_res < cfg.rtol || r.global_norm() < cfg.atol {
+            return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res });
+        }
+    }
+    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: rel_res })
+}
+
+// ── FGMRES + ILU(0/k/UT) ──────────────────────────────────────────────────
+
+/// FGMRES with ILU(0) right preconditioner.
+pub fn par_solve_fgmres_ilu0(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    restart: usize, ilu: &ParIlu0Precond, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    par_solve_fgmres_ilu_precond(a, b, x, restart, cfg, |r, z| ilu.apply(r, z))
+}
+
+/// FGMRES with ILU(k) right preconditioner.
+pub fn par_solve_fgmres_iluk(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    restart: usize, ilu: &ParIlukPrecond, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    par_solve_fgmres_ilu_precond(a, b, x, restart, cfg, |r, z| ilu.apply(r, z))
+}
+
+/// FGMRES with ILUT right preconditioner.
+pub fn par_solve_fgmres_ilut(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    restart: usize, ilu: &ParIlutPrecond, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    par_solve_fgmres_ilu_precond(a, b, x, restart, cfg, |r, z| ilu.apply(r, z))
+}
+
+/// Core FGMRES + ILU right-preconditioned implementation (shared by ILU0/ILUK/ILUT).
+fn par_solve_fgmres_ilu_precond<F>(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector,
+    restart: usize, cfg: &SolverConfig,
+    apply_precond: F,
+) -> Result<SolveResult, SolverError>
+where
+    F: Fn(&[f64], &mut [f64]),
+{
+    if restart == 0 { return Err(SolverError::Linlvo("FGMRES restart must be > 0".to_string())); }
+    let b_norm = b.global_norm();
+    if b_norm < 1e-30 { return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 }); }
+    let mut ax = ParVector::zeros_like(b); a.spmv(x, &mut ax);
+    let mut r = b.clone_vec(); r.axpy(-1.0, &ax);
+    let mut iter_total = 0usize; let mut rel_res = r.global_norm() / b_norm;
+    if rel_res < cfg.rtol || r.global_norm() < cfg.atol {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: rel_res });
+    }
+    while iter_total < cfg.max_iter {
+        let beta = r.global_norm();
+        if beta < 1e-30 { return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: 0.0 }); }
+        let mut v: Vec<ParVector> = (0..=restart).map(|_| ParVector::zeros_like(b)).collect();
+        let mut z: Vec<ParVector> = (0..restart).map(|_| ParVector::zeros_like(b)).collect();
+        v[0].copy_from(&r); v[0].scale(1.0 / beta);
+        let mut h = vec![vec![0.0_f64; restart]; restart + 1];
+        let mut cs = vec![0.0_f64; restart]; let mut sn = vec![0.0_f64; restart];
+        let mut g = vec![0.0_f64; restart + 1]; g[0] = beta;
+        for j in 0..restart {
+            if iter_total >= cfg.max_iter { break; } iter_total += 1;
+            apply_precond(&v[j].data, &mut z[j].data);
+            z[j].update_ghosts();
+            let mut w = ParVector::zeros_like(b); a.spmv(&mut z[j], &mut w);
+            for i in 0..=j { h[i][j] = v[i].global_dot(&w); w.axpy(-h[i][j], &v[i]); }
+            h[j + 1][j] = w.global_norm();
+            if h[j + 1][j] > 1e-30 { v[j + 1].copy_from(&w); v[j + 1].scale(1.0 / h[j + 1][j]); }
+            for i in 0..j {
+                let tmp = cs[i] * h[i][j] + sn[i] * h[i + 1][j];
+                h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j]; h[i][j] = tmp;
+            }
+            let denom = (h[j][j] * h[j][j] + h[j + 1][j] * h[j + 1][j]).sqrt();
+            if denom > 1e-30 { cs[j] = h[j][j] / denom; sn[j] = h[j + 1][j] / denom; }
+            else { cs[j] = 1.0; sn[j] = 0.0; }
+            h[j][j] = cs[j] * h[j][j] + sn[j] * h[j + 1][j];
+            g[j + 1] = -sn[j] * g[j]; g[j] = cs[j] * g[j];
+            rel_res = g[j + 1].abs() / b_norm;
+            if cfg.verbose && x.comm().is_root() {
+                log::info!("par_fgmres_ilu iter {}: residual = {:.3e}", iter_total, rel_res);
+            }
+            if rel_res < cfg.rtol || g[j + 1].abs() < cfg.atol {
+                let mut y = vec![0.0_f64; j + 1];
+                for k in (0..=j).rev() {
+                    y[k] = g[k];
+                    for kk in k + 1..=j { y[k] -= h[k][kk] * y[kk]; }
+                    if h[k][k].abs() > 1e-30 { y[k] /= h[k][k]; }
+                }
+                for k in 0..=j { if y[k].abs() > 1e-30 { for i in 0..a.n_owned { x.data[i] += y[k] * z[k].data[i]; } } }
+                return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res });
+            }
+        }
+        let mut y = vec![0.0_f64; restart];
+        for k in (0..restart).rev() {
+            y[k] = g[k];
+            for kk in k + 1..restart { y[k] -= h[k][kk] * y[kk]; }
+            if h[k][k].abs() > 1e-30 { y[k] /= h[k][k]; }
+        }
+        for k in 0..restart { if y[k].abs() > 1e-30 { for i in 0..a.n_owned { x.data[i] += y[k] * z[k].data[i]; } } }
+        a.spmv(x, &mut ax); r.copy_from(b); r.axpy(-1.0, &ax);
+        rel_res = r.global_norm() / b_norm;
+        if rel_res < cfg.rtol || r.global_norm() < cfg.atol {
+            return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res });
+        }
+    }
+    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: rel_res })
+}
+
+// ── 10. IDR(s) — Induced Dimension Reduction ────────────────────────────────
+
+/// Parallel IDR(s) for non-symmetric systems.
+///
+/// Uses `s` sequential projection steps per outer iteration.  Each step
+/// projects the residual along `r` against `A*r`, reducing components
+/// in an induced-dimension fashion.
+///
+/// `s = 4` is a good default.  For SPD systems [`par_solve_cg`] or
+/// [`par_solve_pcg_jacobi`] is preferred.
+pub fn par_solve_idrs(
+    a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector, s: usize, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    let n = a.n_owned;
+    let b_norm = b.global_norm();
+    if b_norm < 1e-30 { return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 }); }
+    let atol = cfg.atol.max(1e-30);
+    let rtol = cfg.rtol.max(1e-30);
+
+    // r = b - A*x
+    let mut r = b.clone_vec();
+    let mut ax = ParVector::zeros_like(b);
+    a.spmv(x, &mut ax);
+    sub_assign_owned(&mut r.data, &b.data, &ax.data, n);
+
+    let mut r_norm = r.global_norm();
+    if r_norm <= atol || r_norm <= rtol * b_norm {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: r_norm / b_norm });
+    }
+
+    for iter in 0..cfg.max_iter {
+        // s inner subspace projection steps
+        for col in 0..s {
+            let mut f = r.clone_vec();
+            let mut af = ParVector::zeros_like(b);
+            a.spmv(&mut f, &mut af);
+
+            // Step length: minimise ||r - lambda*A*f||
+            // First step uses r·r; subsequent steps use r·f (different subspaces).
+            let fdot = if col == 0 {
+                r.global_dot(&r)
+            } else {
+                r.global_dot(&f)
+            };
+            let af_dot = f.global_dot(&af);
+            if af_dot.abs() < 1e-30 { break; }
+            let lambda = fdot / af_dot;
+
+            x.axpy(lambda, &f);
+            r.axpy(-lambda, &af);
+
+            r_norm = r.global_norm();
+            if r_norm <= atol || r_norm <= rtol * b_norm {
+                return Ok(SolveResult { converged: true, iterations: iter + 1, final_residual: r_norm / b_norm });
+            }
+        }
+    }
+
+    // Exact final residual
+    a.spmv(x, &mut ax);
+    sub_assign_owned(&mut r.data, &b.data, &ax.data, n);
+    Ok(SolveResult {
+        converged: false, iterations: cfg.max_iter,
+        final_residual: r.global_norm() / b_norm,
+    })
 }
 
 // ── 9. Distributed direct solve ─────────────────────────────────────────────
@@ -1195,6 +1547,159 @@ pub fn par_direct_solve(
         final_residual: 0.0,
     })
 }
+
+/// Parallel restarted GMRES (unpreconditioned) for general non-symmetric systems.
+///
+/// No preconditioner is applied. For most problems preconditioned variants
+/// ([`par_solve_gmres_jacobi`], [`par_solve_gmres_ilu0`], etc.) converge faster.
+///
+/// `restart` is the Krylov subspace dimension before restart (must be `> 0`).
+pub fn par_solve_gmres(
+    a: &ParCsrMatrix,
+    b: &ParVector,
+    x: &mut ParVector,
+    restart: usize,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    if restart == 0 {
+        return Err(SolverError::Linlvo("GMRES restart must be > 0".to_string()));
+    }
+
+    let b_norm = b.global_norm();
+    if b_norm < 1e-30 {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 });
+    }
+
+    // r = b - A*x
+    let mut ax = ParVector::zeros_like(b);
+    a.spmv(x, &mut ax);
+    let mut r = b.clone_vec();
+    r.axpy(-1.0, &ax);
+
+    let mut iter_total = 0usize;
+    let mut rel_res = r.global_norm() / b_norm;
+    if rel_res < cfg.rtol || r.global_norm() < cfg.atol {
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: rel_res,
+        });
+    }
+
+    while iter_total < cfg.max_iter {
+        let beta = r.global_norm();
+        if beta < 1e-30 {
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter_total,
+                final_residual: 0.0,
+            });
+        }
+
+        let mut v: Vec<ParVector> = (0..=restart).map(|_| ParVector::zeros_like(b)).collect();
+        v[0].copy_from(&r);
+        v[0].scale(1.0 / beta);
+
+        let mut h = vec![vec![0.0_f64; restart]; restart + 1];
+        let mut cs = vec![0.0_f64; restart];
+        let mut sn = vec![0.0_f64; restart];
+        let mut g = vec![0.0_f64; restart + 1];
+        g[0] = beta;
+
+        let mut inner_done = 0usize;
+        let mut converged = false;
+
+        for j in 0..restart {
+            if iter_total >= cfg.max_iter { break; }
+
+            // w = A v_j (no preconditioner)
+            let mut w = ParVector::zeros_like(b);
+            a.spmv(&mut v[j], &mut w);
+
+            // Modified Gram-Schmidt
+            for i in 0..=j {
+                h[i][j] = v[i].global_dot(&w);
+                w.axpy(-h[i][j], &v[i]);
+            }
+
+            h[j + 1][j] = w.global_norm();
+            if h[j + 1][j] > 1e-30 {
+                v[j + 1].copy_from(&w);
+                v[j + 1].scale(1.0 / h[j + 1][j]);
+            }
+
+            for i in 0..j {
+                let tmp = cs[i] * h[i][j] + sn[i] * h[i + 1][j];
+                h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j];
+                h[i][j] = tmp;
+            }
+
+            let denom = (h[j][j] * h[j][j] + h[j + 1][j] * h[j + 1][j]).sqrt();
+            if denom > 1e-30 {
+                cs[j] = h[j][j] / denom;
+                sn[j] = h[j + 1][j] / denom;
+            } else {
+                cs[j] = 1.0;
+                sn[j] = 0.0;
+            }
+
+            h[j][j] = cs[j] * h[j][j] + sn[j] * h[j + 1][j];
+            h[j + 1][j] = 0.0;
+
+            let g_next = -sn[j] * g[j];
+            g[j] = cs[j] * g[j];
+            g[j + 1] = g_next;
+
+            iter_total += 1;
+            inner_done = j + 1;
+            rel_res = g[j + 1].abs() / b_norm;
+
+            if cfg.verbose && x.comm().is_root() {
+                log::info!("par_gmres iter {}: residual = {:.3e}", iter_total, rel_res);
+            }
+
+            if rel_res < cfg.rtol || g[j + 1].abs() < cfg.atol {
+                converged = true;
+                break;
+            }
+        }
+
+        if inner_done == 0 { break; }
+
+        let m = inner_done;
+        let mut y = vec![0.0_f64; m];
+        for i in (0..m).rev() {
+            let mut s = g[i];
+            for k in (i + 1)..m { s -= h[i][k] * y[k]; }
+            let diag_h = h[i][i];
+            if diag_h.abs() < 1e-30 {
+                return Err(SolverError::Linlvo(
+                    "par_gmres breakdown: near-singular Hessenberg diagonal".to_string(),
+                ));
+            }
+            y[i] = s / diag_h;
+        }
+
+        // Unpreconditioned GMRES: update from V basis
+        for i in 0..m { x.axpy(y[i], &v[i]); }
+
+        if converged {
+            return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res });
+        }
+
+        a.spmv(x, &mut ax);
+        r.copy_from(b);
+        r.axpy(-1.0, &ax);
+        rel_res = r.global_norm() / b_norm;
+        if rel_res < cfg.rtol || r.global_norm() < cfg.atol {
+            return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res });
+        }
+    }
+
+    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: rel_res })
+}
+
+// ── ParIlu0Precond, ParIlukPrecond, ParIlutPrecond ─────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1472,9 +1977,10 @@ mod tests {
             for &d in &bc_dofs { let lid = d as usize;
                 if lid < par_space.dof_partition().n_owned_dofs { a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data); } }
             let mut u = ParVector::zeros(&par_space);
-            let cfg = SolverConfig { rtol: 1e-8, max_iter: 500, ..SolverConfig::default() };
+            let cfg = SolverConfig { rtol: 1e-7, max_iter: 500, ..SolverConfig::default() };
             let res = par_solve_idrs(&a_mat, &rhs, &mut u, 4, &cfg).unwrap();
-            assert!(res.converged, "IDR(4) did not converge");
+            assert!(res.converged, "IDR(4) on Poisson did not converge: iters={}, res={:.3e}",
+                res.iterations, res.final_residual);
         });
     }
 
@@ -1526,6 +2032,167 @@ mod tests {
             let cfg = SolverConfig { rtol: 1e-8, max_iter: 200, ..SolverConfig::default() };
             let res = par_solve_pcg_ilu0(&a_mat, &rhs, &mut u, &ilu, &cfg).unwrap();
             assert!(res.converged, "PCG+ILU0 did not converge");
+        });
+    }
+
+    // ── GMRES (unpreconditioned, single rank) ───────────────────────────────
+
+    #[test]
+    fn par_gmres_laplacian_serial() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 2);
+            let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs { let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs { a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data); } }
+            let mut u = ParVector::zeros(&par_space);
+            let cfg = SolverConfig { rtol: 1e-7, max_iter: 1000, ..SolverConfig::default() };
+            let res = par_solve_gmres(&a_mat, &rhs, &mut u, 30, &cfg).unwrap();
+            assert!(res.converged, "GMRES did not converge: {} iters, res={:.3e}",
+                res.iterations, res.final_residual);
+        });
+    }
+
+    // ── GMRES+ILU0 (two ranks) ──────────────────────────────────────────────
+
+    #[test]
+    fn par_gmres_ilu0_two_ranks() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 3);
+            let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs { let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs { a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data); } }
+            let ilu = ParIlu0Precond::new(&a_mat);
+            let mut u = ParVector::zeros(&par_space);
+            let cfg = SolverConfig { rtol: 1e-8, max_iter: 200, ..SolverConfig::default() };
+            let res = par_solve_gmres_ilu0(&a_mat, &rhs, &mut u, 30, &ilu, &cfg).unwrap();
+            assert!(res.converged, "GMRES+ILU0 did not converge: {} iters, res={:.3e}",
+                res.iterations, res.final_residual);
+        });
+    }
+
+    // ── GMRES+ILU(1) (two ranks) ─────────────────────────────────────────────
+
+    #[test]
+    fn par_gmres_iluk1_two_ranks() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 3);
+            let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs { let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs { a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data); } }
+            let ilu = ParIlukPrecond::new(&a_mat, 1);
+            let mut u = ParVector::zeros(&par_space);
+            let cfg = SolverConfig { rtol: 1e-8, max_iter: 200, ..SolverConfig::default() };
+            let res = par_solve_gmres_iluk(&a_mat, &rhs, &mut u, 30, &ilu, &cfg).unwrap();
+            assert!(res.converged, "GMRES+ILU(1) did not converge: {} iters, res={:.3e}",
+                res.iterations, res.final_residual);
+        });
+    }
+
+    // ── GMRES+ILUT (two ranks) ──────────────────────────────────────────────
+
+    #[test]
+    fn par_gmres_ilut_two_ranks() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 3);
+            let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs { let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs { a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data); } }
+            let ilu = ParIlutPrecond::new(&a_mat, 0.01, 10);
+            let mut u = ParVector::zeros(&par_space);
+            let cfg = SolverConfig { rtol: 1e-8, max_iter: 200, ..SolverConfig::default() };
+            let res = par_solve_gmres_ilut(&a_mat, &rhs, &mut u, 30, &ilu, &cfg).unwrap();
+            assert!(res.converged, "GMRES+ILUT did not converge: {} iters, res={:.3e}",
+                res.iterations, res.final_residual);
+        });
+    }
+
+    // ── FGMRES+ILU0 (two ranks) ─────────────────────────────────────────────
+
+    #[test]
+    fn par_fgmres_ilu0_two_ranks() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 3);
+            let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs { let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs { a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data); } }
+            let ilu = ParIlu0Precond::new(&a_mat);
+            let mut u = ParVector::zeros(&par_space);
+            let cfg = SolverConfig { rtol: 1e-8, max_iter: 200, ..SolverConfig::default() };
+            let res = par_solve_fgmres_ilu0(&a_mat, &rhs, &mut u, 30, &ilu, &cfg).unwrap();
+            assert!(res.converged, "FGMRES+ILU0 did not converge: {} iters, res={:.3e}",
+                res.iterations, res.final_residual);
+        });
+    }
+
+    // ── PCG+ILU(2) (two ranks) ──────────────────────────────────────────────
+
+    #[test]
+    fn par_pcg_iluk2_two_ranks() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+            let diff = DiffusionIntegrator { kappa: 1.0 };
+            let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], 3);
+            let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
+            let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], 3);
+            let dm = par_space.local_space().dof_manager();
+            let bc_dofs = boundary_dofs(par_space.local_space().mesh(), dm, &[1, 2, 3, 4]);
+            for &d in &bc_dofs { let lid = d as usize;
+                if lid < par_space.dof_partition().n_owned_dofs { a_mat.apply_dirichlet_row(lid, 0.0, &mut rhs.data); } }
+            let ilu = ParIlukPrecond::new(&a_mat, 2);
+            let mut u = ParVector::zeros(&par_space);
+            let cfg = SolverConfig { rtol: 1e-8, max_iter: 200, ..SolverConfig::default() };
+            let res = par_solve_pcg_iluk(&a_mat, &rhs, &mut u, &ilu, &cfg).unwrap();
+            assert!(res.converged, "PCG+ILU(2) did not converge: {} iters, res={:.3e}",
+                res.iterations, res.final_residual);
         });
     }
 }

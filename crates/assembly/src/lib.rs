@@ -198,8 +198,12 @@ pub use postprocess::{compute_element_gradients, compute_h1_error, compute_kelly
 pub use transfer::{
     build_prolongation_h1,
     build_prolongation_h1_3d,
+    build_prolongation_hcurl,
+    build_prolongation_hdiv,
     get_prolongation_h1,
     get_prolongation_h1_3d,
+    get_prolongation_hcurl,
+    get_prolongation_hdiv,
     net_boundary_flux_h1_p1_2d,
     transfer_h1_p1_nonmatching,
     transfer_h1_p1_nonmatching_3d,

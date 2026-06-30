@@ -982,7 +982,11 @@ pub fn recover_linear_values(
 /// The coarse edge DOFs are moments `∫₀¹ f(t)·t^m dt` for m = 0..k-1.
 /// The fine edge DOFs are moments `∫₀ᴸ f(t)·t^m dt`.
 /// Returns `T` such that `fine_dofs = T · coarse_dofs`.
-fn ndk_edge_transform(k: usize, l: f64) -> Vec<Vec<f64>> {
+/// Compute the k×k edge moment transformation matrix for a sub-edge [0, L].
+///
+/// Maps coarse NDk edge moments (defined on [0, 1]) to fine sub-edge moments
+/// (defined on [0, L]).
+pub fn ndk_edge_transform(k: usize, l: f64) -> Vec<Vec<f64>> {
     // Moment matrix M: M[m][p] = ∫₀¹ t^{p+m} dt = 1/(p+m+1)
     let mut m = vec![vec![0.0_f64; k]; k];
     for p in 0..k {
@@ -1141,7 +1145,7 @@ pub fn build_hcurl_hanging_constraints<M: MeshTopology>(
 
 /// Compute the k×k transformation for the SECOND half [L, 1] of a reference edge.
 /// This is ∫_L¹ t^{p+m} dt = (1 - L^{p+m+1})/(p+m+1) for the fine sub-edge.
-fn ndk_edge_transform_for_second_half(k: usize, l: f64) -> Vec<Vec<f64>> {
+pub fn ndk_edge_transform_for_second_half(k: usize, l: f64) -> Vec<Vec<f64>> {
     // Moment matrix M: M[m][p] = ∫₀¹ t^{p+m} dt = 1/(p+m+1)  (same as first half)
     let mut m = vec![vec![0.0_f64; k]; k];
     for p in 0..k {

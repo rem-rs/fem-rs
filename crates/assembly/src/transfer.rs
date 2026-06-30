@@ -5,15 +5,26 @@
 //! - order: P1 only
 //! - transfer type: nodal interpolation on target nodes by locating each target
 //!   node in source mesh and evaluating source P1 field with barycentric weights
+//!
+//! HCurl/HDiv prolongation operators are in [`build_prolongation_hcurl`] /
+//! [`build_prolongation_hdiv`].
+
+use std::collections::{HashMap, HashSet};
 
 use thiserror::Error;
 
+use fem_core::types::DofId;
 use fem_element::{ReferenceElement, TetP1, TriP1};
 use fem_element::lagrange::factory::{ref_elem, ElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, SimplexMesh, TetPointLocator, TriPointLocator};
 use fem_solver::{solve_cg, SolverConfig};
-use fem_space::{fe_space::FESpace, H1Space};
+use fem_space::{
+    fe_space::FESpace,
+    dof_manager::{EdgeKey, FaceKey},
+    constraints::{ndk_edge_transform, ndk_edge_transform_for_second_half},
+    H1Space, HCurlSpace, HDivSpace,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TransferStats {
@@ -793,6 +804,426 @@ pub fn build_prolongation_h1_3d(
     (coo.into_csr(), TransferStats { located_count: loc, extrapolated_count: xtra })
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HCurl (Nédélec) prolongation for h-refinement
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build HCurl prolongation matrix for h-refinement on 2-D/3-D simplex meshes.
+///
+/// Maps coarse HCurl DOFs to fine HCurl DOFs using:
+/// - Identity for fine edges that exist in the coarse mesh
+/// - NDk edge-moment transform for fine sub-edges of coarse edges
+/// - Face-moment transform for fine sub-faces of coarse faces (3-D, k≥2)
+///
+/// `coarse` and `fine` must share the same polynomial order `k`.
+///
+/// **Note:** edge-and-face-connectivity is inferred from the HCurl space's
+/// internal maps, not from `mesh.edge_nodes()` (which may be unavailable).
+pub fn build_prolongation_hcurl<M: MeshTopology>(
+    coarse: &HCurlSpace<M>,
+    fine: &HCurlSpace<M>,
+) -> (CsrMatrix<f64>, TransferStats) {
+    let k = coarse.order() as usize;
+    let dim = coarse.mesh().dim();
+    let cell_type = coarse.mesh().element_type(0);
+    let n_coarse = coarse.n_dofs();
+    let n_fine = fine.n_dofs();
+    let mut coo = CooMatrix::new(n_fine, n_coarse);
+    let mut loc = 0usize;
+    let mut xtra = 0usize;
+
+    // Local edge definitions for simplices
+    let local_edges: &[(usize, usize)] = match (dim, cell_type) {
+        (2, _) => &[(0, 1), (1, 2), (0, 2)],  // TRI_EDGES
+        (3, _) => &[(0, 1), (1, 2), (0, 2), (0, 3), (1, 3), (2, 3)], // TET_EDGES
+        _ => return (coo.into_csr(), TransferStats { located_count: 0, extrapolated_count: 0 }),
+    };
+
+    // 1. Build coarse edge→DOF map from element-local edges
+    let mut coarse_edge_dofs: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
+    for e in 0..coarse.mesh().n_elements() as u32 {
+        let nodes = coarse.mesh().element_nodes(e);
+        for &(li, lj) in local_edges {
+            let ek = EdgeKey::new(nodes[li], nodes[lj]);
+            if let Some(dofs) = coarse.edge_dofs(ek) {
+                coarse_edge_dofs.entry(ek).or_insert_with(|| dofs);
+            }
+        }
+    }
+
+    // 1b. Build coarse face→DOF map (3-D only, k≥2)
+    let mut coarse_face_dofs: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
+    if dim == 3 && k >= 2 {
+        let local_faces: &[(usize, usize, usize)] = if cell_type == fem_mesh::element_type::ElementType::Tet4 {
+            &[(1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2)]
+        } else {
+            &[(1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2)]
+        };
+        for elem in 0..coarse.mesh().n_elements() as u32 {
+            let nodes = coarse.mesh().element_nodes(elem);
+            for &(li, lj, lk) in local_faces {
+                let fk = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+                if let Some(first) = coarse.face_dof(fk) {
+                    let nf = k * (k - 1);
+                    let dofs: Vec<DofId> = (0..nf as DofId).map(|m| first + m).collect();
+                    coarse_face_dofs.entry(fk).or_insert_with(|| dofs);
+                }
+            }
+        }
+    }
+
+    // 2. Build midpoint map: for each coarse element edge, find fine node at midpoint
+    let mut midpoint_map: HashMap<(u32, u32), u32> = HashMap::new();
+    let fine_n_nodes = fine.mesh().n_nodes() as u32;
+    let fine_coords: Vec<f64> = (0..fine_n_nodes)
+        .flat_map(|n| fine.mesh().node_coords(n).to_vec())
+        .collect();
+    let dim_f = dim as usize;
+    for e in 0..coarse.mesh().n_elements() as u32 {
+        let nodes = coarse.mesh().element_nodes(e);
+        for &(li, lj) in local_edges {
+            let a = nodes[li];
+            let b = nodes[lj];
+            if midpoint_map.contains_key(&(a, b)) { continue; }
+            let ca = coarse.mesh().node_coords(a);
+            let cb = coarse.mesh().node_coords(b);
+            let mx = 0.5 * (ca[0] + cb[0]);
+            let my = if dim_f >= 2 { 0.5 * (ca[1] + cb[1]) } else { 0.0 };
+            let mz = if dim_f >= 3 { 0.5 * (ca[2] + cb[2]) } else { 0.0 };
+            let mut best = None;
+            let mut best_d2 = 1e-10;
+            for n in 0..fine_n_nodes {
+                let off = n as usize * dim_f;
+                let dx = fine_coords[off] - mx;
+                let dy = if dim_f >= 2 { fine_coords[off + 1] - my } else { 0.0 };
+                let dz = if dim_f >= 3 { fine_coords[off + 2] - mz } else { 0.0 };
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 < best_d2 && d2 < 1e-6 {
+                    best_d2 = d2;
+                    best = Some(n);
+                }
+            }
+            if let Some(mid) = best {
+                midpoint_map.insert((a, b), mid);
+                midpoint_map.insert((b, a), mid);
+            }
+        }
+    }
+
+    // 3. Process FINE edges — iterate fine elements to discover all fine edges
+    for e in 0..fine.mesh().n_elements() as u32 {
+        let nodes = fine.mesh().element_nodes(e);
+        for &(li, lj) in local_edges {
+            let ek = EdgeKey::new(nodes[li], nodes[lj]);
+
+            // Case A: fine edge IS a coarse edge → identity
+            if let Some(coarse_dofs) = coarse_edge_dofs.get(&ek) {
+                if let Some(fine_dofs) = fine.edge_dofs(ek) {
+                    for (&fd, &cd) in fine_dofs.iter().zip(coarse_dofs.iter()) {
+                        coo.add(fd as usize, cd as usize, 1.0);
+                    }
+                    loc += k;
+                }
+                continue;
+            }
+
+            // Case B: find if this fine edge is a sub-edge of a coarse edge
+            // via midpoint map.
+            // When a coarse edge (a,b) has midpoint m, fine edge (i,j) is a
+            // sub-edge if one vertex is m and the other is a or b.
+            // The "first half" (containing the smaller endpoint) uses
+            // ndk_edge_transform(k, 0.5); the "second half" uses
+            // ndk_edge_transform_for_second_half(k, 0.5).
+            let mut found_parent = None;
+            for (&(c0, c1), &mid) in &midpoint_map {
+                let other = if mid == nodes[li] { Some(nodes[lj]) }
+                            else if mid == nodes[lj] { Some(nodes[li]) }
+                            else { None };
+                if let Some(ok) = other {
+                    // Check if 'other' is one of the coarse edge endpoints
+                    if (c0 == ok || c1 == ok) {
+                        let coarse_ek = EdgeKey::new(c0, c1);
+                        let small = coarse_ek.0;  // parameterization: small → large
+                        // First half if the fine edge contains 'small'
+                        let is_first = nodes[li] == small || nodes[lj] == small;
+                        found_parent = Some((c0, c1, is_first));
+                        break;
+                    }
+                }
+            }
+
+            if let Some((pa, pb, is_first)) = found_parent {
+                let coarse_key = EdgeKey::new(pa, pb);
+                if let Some(coarse_dofs) = coarse_edge_dofs.get(&coarse_key) {
+                    let transform = if is_first {
+                        ndk_edge_transform(k, 0.5)
+                    } else {
+                        ndk_edge_transform_for_second_half(k, 0.5)
+                    };
+                    if let Some(fine_dofs) = fine.edge_dofs(ek) {
+                        for (fi, &fd) in fine_dofs.iter().enumerate() {
+                            for ci in 0..k {
+                                let w = transform[fi][ci];
+                                if w.abs() > 1e-15 {
+                                    coo.add(fd as usize, coarse_dofs[ci] as usize, w);
+                                }
+                            }
+                        }
+                        loc += k;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Process fine face DOFs (3-D, k≥2)
+    if dim == 3 && k >= 2 {
+        let nf = k * (k - 1);
+        let local_faces: &[(usize, usize, usize)] = &[
+            (1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2),
+        ];
+        for elem in 0..fine.mesh().n_elements() as u32 {
+            let nodes = fine.mesh().element_nodes(elem);
+            for &(li, lj, lk) in local_faces {
+                let fk = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+                if let Some(coarse_dofs) = coarse_face_dofs.get(&fk) {
+                    if let Some(first) = fine.face_dof(fk) {
+                        for m in 0..nf {
+                            coo.add((first + m as DofId) as usize, coarse_dofs[m] as usize, 1.0);
+                        }
+                        loc += nf;
+                    }
+                } else {
+                    // Sub-face of a coarse face
+                    let v: HashSet<u32> = [nodes[li], nodes[lj], nodes[lk]].iter().copied().collect();
+                    for (&cfk, coarse_dofs) in &coarse_face_dofs {
+                        let mut extended = HashSet::new();
+                        extended.insert(cfk.0); extended.insert(cfk.1); extended.insert(cfk.2);
+                        if let Some(&m) = midpoint_map.get(&(cfk.0, cfk.1)) { extended.insert(m); }
+                        if let Some(&m) = midpoint_map.get(&(cfk.1, cfk.2)) { extended.insert(m); }
+                        if let Some(&m) = midpoint_map.get(&(cfk.0, cfk.2)) { extended.insert(m); }
+                        if v.is_subset(&extended) {
+                            if let Some(first) = fine.face_dof(fk) {
+                                for m in 0..nf {
+                                    coo.add((first + m as DofId) as usize, coarse_dofs[m] as usize, 0.25);
+                                }
+                                loc += nf;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (coo.into_csr(), TransferStats { located_count: loc, extrapolated_count: xtra })
+}
+
+/// Convenience wrapper: build HCurl prolongation.
+pub fn get_prolongation_hcurl<M: MeshTopology>(
+    coarse: &HCurlSpace<M>,
+    fine: &HCurlSpace<M>,
+) -> (CsrMatrix<f64>, TransferStats) {
+    build_prolongation_hcurl(coarse, fine)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HDiv (Raviart-Thomas) prolongation for h-refinement
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Number of face DOFs per face for HDiv on simplices.
+fn hdiv_face_dofs_per_face(dim: u8, order: u8) -> usize {
+    let k = order as usize;
+    if dim == 2 { k + 1 } else { (k + 1) * (k + 2) / 2 }
+}
+
+/// Build HDiv prolongation matrix for h-refinement on 2-D/3-D simplex meshes.
+///
+/// Uses `edge_face_dof` (2-D) / `tri_face_dof` (3-D) to map coarse face DOFs
+/// to fine sub-face DOFs.  For RT0 sub-faces the mapping is the area ratio
+/// (0.5 in 2-D, 0.25 in 3-D for uniform refinement).  For higher orders the
+/// same ratio is applied per face DOF as an approximation.
+pub fn build_prolongation_hdiv<M: MeshTopology>(
+    coarse: &HDivSpace<M>,
+    fine: &HDivSpace<M>,
+) -> (CsrMatrix<f64>, TransferStats) {
+    let dim = coarse.mesh().dim();
+    let order = coarse.order();
+    let dpf = hdiv_face_dofs_per_face(dim, order); // DOFs per face
+    let n_coarse = coarse.n_dofs();
+    let n_fine = fine.n_dofs();
+    let mut coo = CooMatrix::new(n_fine, n_coarse);
+    let mut loc = 0usize;
+    let mut xtra = 0usize;
+    let cell_type = coarse.mesh().element_type(0);
+
+    // Local edge/face definitions for simplices
+    let local_edges_2d: &[(usize, usize)] = &[(0, 1), (1, 2), (0, 2)];
+    let local_faces_3d: &[(usize, usize, usize)] = &[
+        (1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2),
+    ];
+
+    // 1. Build coarse face DOF map from element-local edges/faces
+    let mut coarse_face_map_2d: HashMap<EdgeKey, DofId> = HashMap::new();
+    let mut coarse_face_map_3d: HashMap<FaceKey, DofId> = HashMap::new();
+
+    if dim == 2 {
+        for e in 0..coarse.mesh().n_elements() as u32 {
+            let nodes = coarse.mesh().element_nodes(e);
+            for &(li, lj) in local_edges_2d {
+                let ek = EdgeKey::new(nodes[li], nodes[lj]);
+                if let Some(dof) = coarse.edge_face_dof(ek) {
+                    coarse_face_map_2d.entry(ek).or_insert(dof);
+                }
+            }
+        }
+    } else {
+        for elem in 0..coarse.mesh().n_elements() as u32 {
+            let nodes = coarse.mesh().element_nodes(elem);
+            for &(li, lj, lk) in local_faces_3d {
+                let fk = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+                if let Some(dof) = coarse.tri_face_dof(fk) {
+                    coarse_face_map_3d.entry(fk).or_insert(dof);
+                }
+            }
+        }
+    }
+
+    // 2. Build midpoint map from coarse elements
+    let fine_n_nodes = fine.mesh().n_nodes() as u32;
+    let fine_coords: Vec<f64> = (0..fine_n_nodes)
+        .flat_map(|n| fine.mesh().node_coords(n).to_vec())
+        .collect();
+    let dim_f = dim as usize;
+    let mut midpoint_map: HashMap<(u32, u32), u32> = HashMap::new();
+    for e in 0..coarse.mesh().n_elements() as u32 {
+        let nodes = coarse.mesh().element_nodes(e);
+        let edge_list: &[(usize, usize)] = if dim == 2 { local_edges_2d } else {
+            // TET edges
+            &[(0, 1), (1, 2), (0, 2), (0, 3), (1, 3), (2, 3)]
+        };
+        for &(li, lj) in edge_list {
+            let a = nodes[li];
+            let b = nodes[lj];
+            if midpoint_map.contains_key(&(a, b)) { continue; }
+            let ca = coarse.mesh().node_coords(a);
+            let cb = coarse.mesh().node_coords(b);
+            let mx = 0.5 * (ca[0] + cb[0]);
+            let my = if dim_f >= 2 { 0.5 * (ca[1] + cb[1]) } else { 0.0 };
+            let mz = if dim_f >= 3 { 0.5 * (ca[2] + cb[2]) } else { 0.0 };
+            let mut best = None;
+            let mut best_d2 = 1e-10;
+            for n in 0..fine_n_nodes {
+                let off = n as usize * dim_f;
+                let dx = fine_coords[off] - mx;
+                let dy = if dim_f >= 2 { fine_coords[off + 1] - my } else { 0.0 };
+                let dz = if dim_f >= 3 { fine_coords[off + 2] - mz } else { 0.0 };
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 < best_d2 && d2 < 1e-6 {
+                    best_d2 = d2;
+                    best = Some(n);
+                }
+            }
+            if let Some(mid) = best {
+                midpoint_map.insert((a, b), mid);
+                midpoint_map.insert((b, a), mid);
+            }
+        }
+    }
+
+    // Helper: given a first DOF and dpf, add identity or scaled entries
+    let add_face_dofs = |coo: &mut CooMatrix<f64>, coarse_first: DofId, fine_first: DofId, scale: f64| {
+        for m in 0..dpf {
+            coo.add(
+                (fine_first + m as DofId) as usize,
+                (coarse_first + m as DofId) as usize,
+                scale,
+            );
+        }
+    };
+
+    // 3. Process fine faces via element-local edges/faces
+    if dim == 2 {
+        for e in 0..fine.mesh().n_elements() as u32 {
+            let nodes = fine.mesh().element_nodes(e);
+            for &(li, lj) in local_edges_2d {
+                let ek = EdgeKey::new(nodes[li], nodes[lj]);
+
+                if let Some(&coarse_first) = coarse_face_map_2d.get(&ek) {
+                    if let Some(fine_first) = fine.edge_face_dof(ek) {
+                        add_face_dofs(&mut coo, coarse_first, fine_first, 1.0);
+                        loc += dpf;
+                    }
+                    continue;
+                }
+
+                // Sub-edge of a coarse edge
+                let mut parent = None;
+                for (&(c0, c1), &mid) in &midpoint_map {
+                    if mid == nodes[li] && (c0 == nodes[lj] || c1 == nodes[lj]) {
+                        parent = Some((c0, c1)); break;
+                    }
+                    if mid == nodes[lj] && (c0 == nodes[li] || c1 == nodes[li]) {
+                        parent = Some((c0, c1)); break;
+                    }
+                }
+                if let Some((pa, pb)) = parent {
+                    let ck = EdgeKey::new(pa, pb);
+                    if let Some(&coarse_first) = coarse_face_map_2d.get(&ck) {
+                        if let Some(fine_first) = fine.edge_face_dof(ek) {
+                            add_face_dofs(&mut coo, coarse_first, fine_first, 0.5);
+                            loc += dpf;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for elem in 0..fine.mesh().n_elements() as u32 {
+            let nodes = fine.mesh().element_nodes(elem);
+            for &(li, lj, lk) in local_faces_3d {
+                let fk = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+
+                if let Some(&coarse_first) = coarse_face_map_3d.get(&fk) {
+                    if let Some(fine_first) = fine.tri_face_dof(fk) {
+                        add_face_dofs(&mut coo, coarse_first, fine_first, 1.0);
+                        loc += dpf;
+                    }
+                    continue;
+                }
+
+                // Sub-face of a coarse face: area ratio ≈ 1/4 for uniform ref
+                let v: HashSet<u32> = [nodes[li], nodes[lj], nodes[lk]].iter().copied().collect();
+                for (&cfk, &coarse_first) in &coarse_face_map_3d {
+                    let mut extended = HashSet::new();
+                    extended.insert(cfk.0); extended.insert(cfk.1); extended.insert(cfk.2);
+                    if let Some(&m) = midpoint_map.get(&(cfk.0, cfk.1)) { extended.insert(m); }
+                    if let Some(&m) = midpoint_map.get(&(cfk.1, cfk.2)) { extended.insert(m); }
+                    if let Some(&m) = midpoint_map.get(&(cfk.0, cfk.2)) { extended.insert(m); }
+                    if v.is_subset(&extended) {
+                        if let Some(fine_first) = fine.tri_face_dof(fk) {
+                            add_face_dofs(&mut coo, coarse_first, fine_first, 0.25);
+                            loc += dpf;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    (coo.into_csr(), TransferStats { located_count: loc, extrapolated_count: xtra })
+}
+
+/// Convenience wrapper: build HDiv prolongation.
+pub fn get_prolongation_hdiv<M: MeshTopology>(
+    coarse: &HDivSpace<M>,
+    fine: &HDivSpace<M>,
+) -> (CsrMatrix<f64>, TransferStats) {
+    build_prolongation_hdiv(coarse, fine)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1063,5 +1494,76 @@ mod tests {
         }
         let err = (err_sq / (fine.n_dofs() as f64)).sqrt();
         assert!(err < 1e-12, "P1 prolongation RMS error {:.2e} >= 1e-12", err);
+    }
+
+    // ── HCurl prolongation tests ────────────────────────────────────────────
+
+    #[test]
+    fn prolongation_hcurl_nd1_2d() {
+        use fem_mesh::amr::refine_uniform;
+        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let fine_mesh = refine_uniform(&coarse_mesh);
+        let coarse = HCurlSpace::new(coarse_mesh, 1);
+        let fine = HCurlSpace::new(fine_mesh, 1);
+        let (p, stats) = super::build_prolongation_hcurl(&coarse, &fine);
+        assert_eq!(p.nrows, fine.n_dofs());
+        assert_eq!(p.ncols, coarse.n_dofs());
+        assert!(stats.located_count > 0,
+            "HCurl ND1 prolongation: no DOFs located (located={})", stats.located_count);
+        eprintln!("HCurl ND1 prolongation: fine DOFs={}, coarse DOFs={}, located={}, nnz={}",
+            fine.n_dofs(), coarse.n_dofs(), stats.located_count, p.nnz());
+        // Verify the prolongation is non-trivial
+        assert!(p.nnz() > coarse.n_dofs(), "should have more fine entries than coarse DOFs");
+    }
+
+    #[test]
+    fn prolongation_hcurl_nd2_2d() {
+        use fem_mesh::amr::refine_uniform;
+        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let fine_mesh = refine_uniform(&coarse_mesh);
+        let coarse = HCurlSpace::new(coarse_mesh, 2);
+        let fine = HCurlSpace::new(fine_mesh, 2);
+        let (p, _stats) = super::build_prolongation_hcurl(&coarse, &fine);
+        assert_eq!(p.nrows, fine.n_dofs());
+        assert_eq!(p.ncols, coarse.n_dofs());
+        eprintln!("HCurl ND2 prolongation: fine DOFs={}, coarse DOFs={}, nnz={}",
+            fine.n_dofs(), coarse.n_dofs(), p.nnz());
+        assert!(p.nnz() > coarse.n_dofs(), "ND2 should have fill-in from edge transforms");
+    }
+
+    // ── HDiv prolongation tests ─────────────────────────────────────────────
+
+    #[test]
+    fn prolongation_hdiv_rt0_2d() {
+        use fem_mesh::amr::refine_uniform;
+        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let fine_mesh = refine_uniform(&coarse_mesh);
+        let coarse = HDivSpace::new(coarse_mesh, 0);
+        let fine = HDivSpace::new(fine_mesh, 0);
+        let (p, stats) = super::build_prolongation_hdiv(&coarse, &fine);
+        eprintln!("HDiv RT0 prolongation: fine DOFs={}, coarse DOFs={}, located={}, nnz={}",
+            fine.n_dofs(), coarse.n_dofs(), stats.located_count, p.nnz());
+        assert_eq!(p.nrows, fine.n_dofs());
+        assert_eq!(p.ncols, coarse.n_dofs());
+        assert!(stats.located_count > 0,
+            "HDiv RT0 prolongation: no DOFs located");
+        assert!(stats.located_count >= coarse.n_dofs(),
+            "should locate at least all coarse edge DOFs");
+    }
+
+    #[test]
+    fn prolongation_hdiv_rt1_2d() {
+        use fem_mesh::amr::refine_uniform;
+        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let fine_mesh = refine_uniform(&coarse_mesh);
+        let coarse = HDivSpace::new(coarse_mesh, 1);
+        let fine = HDivSpace::new(fine_mesh, 1);
+        let (p, stats) = super::build_prolongation_hdiv(&coarse, &fine);
+        eprintln!("HDiv RT1 prolongation: fine DOFs={}, coarse DOFs={}, located={}, nnz={}",
+            fine.n_dofs(), coarse.n_dofs(), stats.located_count, p.nnz());
+        assert_eq!(p.nrows, fine.n_dofs());
+        assert_eq!(p.ncols, coarse.n_dofs());
+        assert!(stats.located_count > 0,
+            "HDiv RT1 prolongation: no DOFs located");
     }
 }
