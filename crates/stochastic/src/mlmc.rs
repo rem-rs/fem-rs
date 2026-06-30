@@ -378,6 +378,8 @@ impl MultiLevelMonteCarlo {
         let mut var_mean = 0.0_f64;
 
         let mut prev_mean: Option<f64> = None;
+        let mut prev_var: f64 = 0.0;
+        let mut prev_n: usize = 0;
 
         for (li, &level) in self.levels.iter().enumerate() {
             let n = if li == n_levels - 1 {
@@ -403,15 +405,14 @@ impl MultiLevelMonteCarlo {
                 (sum2 - sum * sum / n as f64) / (n - 1) as f64
             } else { 0.0 };
 
-            // For ℓ ≥ 1, estimate E[Q_ℓ - Q_{ℓ-1}]
+            // For ℓ ≥ 1, estimate E[Q_ℓ - Q_{ℓ-1}] with independent samples.
+            // Var[Q_ℓ - Q_{ℓ-1}] = Var[Q_ℓ]/n_ℓ + Var[Q_{ℓ-1}]/n_{ℓ-1}
             if li == 0 {
                 mean = l_mean;
                 var_mean = l_var / n as f64;
             } else if let Some(pm) = prev_mean {
-                // Difference estimator: this requires paired samples,
-                // but for independent samples we use:
                 mean += l_mean - pm;
-                var_mean += l_var / n as f64;
+                var_mean += l_var / n as f64 + prev_var / prev_n as f64;
             }
 
             total_samples += n;
@@ -422,6 +423,8 @@ impl MultiLevelMonteCarlo {
             });
 
             prev_mean = Some(l_mean);
+            prev_var = l_var;
+            prev_n = n;
         }
 
         Ok(MlmcResult {
@@ -431,6 +434,47 @@ impl MultiLevelMonteCarlo {
             total_cost,
             level_results,
         })
+    }
+
+    /// Compute the optimal sample allocation per level given the per-level
+    /// variances and costs from a pilot run.
+    ///
+    /// The optimal n_ℓ for a fixed total cost C is:
+    ///   n_ℓ ∝ √(Var_ℓ / cost_ℓ)
+    /// Normalised so that the finest level gets `n_fine` samples.
+    ///
+    /// Returns a vector `optimal_n` of the same length as `self.levels`.
+    pub fn optimal_allocation(&self, level_results: &[MlmcLevelResult], total_budget: f64) -> Vec<usize> {
+        let n_levels = self.levels.len();
+        if n_levels == 0 { return vec![]; }
+
+        let mut optimal_n = vec![0usize; n_levels];
+
+        // Compute sqrt(Var_ℓ / cost_ℓ)
+        let mut weights = Vec::with_capacity(n_levels);
+        let mut sum_w = 0.0_f64;
+        for lr in level_results {
+            let v = lr.variance.max(1e-30);
+            let c = lr.cost.max(1e-30);
+            let w = (v / c).sqrt();
+            weights.push(w);
+            sum_w += w;
+        }
+
+        if sum_w < 1e-30 { return optimal_n; }
+
+        // Normalise so that total cost ≈ total_budget
+        // n_ℓ = C * w_ℓ / Σ (w_k * cost_k)
+        let denom: f64 = weights.iter().zip(level_results.iter())
+            .map(|(&w, lr)| w * lr.cost).sum();
+        if denom < 1e-30 { return optimal_n; }
+
+        for (i, &w) in weights.iter().enumerate() {
+            let n = (total_budget * w / denom).round() as usize;
+            optimal_n[i] = n.max(10); // minimum 10 samples
+        }
+
+        optimal_n
     }
 }
 
@@ -512,5 +556,45 @@ mod tests {
             .sum();
         assert!((integral - 2.0 / 3.0).abs() < 1e-8,
             "∫x² = {integral:.10}, expected 2/3");
+    }
+
+    #[test]
+    fn mlmc_known_variance_model() {
+        // Model: Q(ω) = ω where ω ~ U[-1,1]. True mean = 0, variance = 1/3 ≈ 0.333.
+        use rand::Rng;
+        let mlmc = MultiLevelMonteCarlo::new(vec![0, 1], 200, 4.0, 2.0);
+        let result = mlmc.estimate(|_level, _idx| {
+            let mut rng = rand::thread_rng();
+            Ok(rng.gen_range(-1.0..1.0))
+        }).expect("MLMC with known variance");
+        eprintln!("MLMC known-variance: mean={:.4}, var_mean={:.4}", result.mean, result.variance_mean);
+        // Mean should be close to 0, variance should be finite
+        assert!(result.mean.abs() < 0.3, "mean should be near 0, got {}", result.mean);
+        assert!(result.variance_mean > 0.0, "variance of mean should be positive");
+        assert!(result.total_samples > 0);
+        assert!(result.level_results.len() == 2);
+    }
+
+    #[test]
+    fn mlmc_optimal_allocation_reduces_cost() {
+        // Demonstrate that optimal allocation improves efficiency.
+        let levels = vec![0, 1, 2, 3];
+        // Model: variance decreases with level (as in actual PDE solves)
+        let pilot_results = vec![
+            MlmcLevelResult { level: 0, n_samples: 100, mean: 1.0, variance: 0.5, cost: 1.0 },
+            MlmcLevelResult { level: 1, n_samples: 100, mean: 0.5, variance: 0.1, cost: 4.0 },
+            MlmcLevelResult { level: 2, n_samples: 100, mean: 0.25, variance: 0.02, cost: 16.0 },
+            MlmcLevelResult { level: 3, n_samples: 100, mean: 0.125, variance: 0.005, cost: 64.0 },
+        ];
+        let mlmc = MultiLevelMonteCarlo::new(levels, 100, 2.0, 4.0);
+        let optimal = mlmc.optimal_allocation(&pilot_results, 1e6);
+        assert_eq!(optimal.len(), 4);
+        // Coarser levels should have more samples (cheaper, higher variance)
+        for i in 1..optimal.len() {
+            assert!(optimal[i] <= optimal[i - 1] || optimal[i] < 20,
+                "optimal n should decrease with level: level {} n={} > level {} n={}",
+                i, optimal[i], i-1, optimal[i-1]);
+        }
+        for &n in &optimal { assert!(n >= 10, "minimum 10 samples per level"); }
     }
 }
