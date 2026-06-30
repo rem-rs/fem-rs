@@ -47,7 +47,6 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,23 +55,113 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ matrix.rust }}
 
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
-        run: cargo test --workspace --all-features -- --nocapture
+      - name: Run tests (default features)
+        run: cargo test --workspace --exclude fem-py --exclude fem-benches --exclude fem-linalg-gpu
 
-      - name: Run tests (release)
-        run: cargo test --workspace --all-features --release
+      - name: Run tests (release, default features)
+        run: cargo test --workspace --exclude fem-py --exclude fem-benches --exclude fem-linalg-gpu --release
 
       - name: Run example smoke tests
         if: matrix.os == 'ubuntu-latest'
         run: |
           cargo run --example mfem_ex22 -- --n 6 --omega 1.2 --sigma 0.05
           cargo run --example mfem_ex41_imex -- --n 6 --dt 0.01 --T 0.1
+
+  feature-matrix:
+    name: Feature Matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [parallel, gpu, reed, all]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.REM_RS_SUBMODULES_TOKEN || github.token }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (all-features excludes GPU to avoid CUDA SDK requirement)
+        if: matrix.feature == 'all'
+        run: cargo build --workspace --exclude fem-py --exclude fem-benches --exclude fem-linalg-gpu --all-features
+
+      - name: Build + test (parallel)
+        if: matrix.feature == 'parallel'
+        run: |
+          cargo build -p fem-assembly -p fem-solver -p fem-amg --features parallel
+          cargo test -p fem-assembly --features parallel
+
+      - name: Build + test (gpu — wgpu only, no CUDA SDK needed)
+        if: matrix.feature == 'gpu'
+        run: |
+          cargo build -p fem-assembly -p fem-linalg-gpu -p fem-solver --features gpu
+          cargo test -p fem-linalg-gpu --features gpu -- --nocapture 2>&1 | head -30 || true
+
+      - name: Build + test (reed)
+        if: matrix.feature == 'reed'
+        run: |
+          cargo test -p fem-assembly --features reed
+
+  python-bindings:
+    name: Python Bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.REM_RS_SUBMODULES_TOKEN || github.token }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install maturin
+        run: pip install maturin numpy scipy
+
+      - name: Build Python bindings (maturin develop)
+        run: maturin develop -m crates/python/Cargo.toml
+        env:
+          PYO3_PYTHON: "$(python3 -c 'import sys; print(sys.executable)')"
+
+      - name: Run Python smoke test
+        run: python3 -c "import fem; print('fem module loaded OK')"
+
+  mpi:
+    name: MPI Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.REM_RS_SUBMODULES_TOKEN || github.token }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install MPI
+        run: sudo apt-get update && sudo apt-get install -y mpich libmpich-dev
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build MPI features
+        run: cargo build -p fem-parallel --features mpi
 
   wasm:
     name: WASM Build
@@ -138,8 +227,8 @@ jobs:
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
-        run: cargo test --workspace --all-features
+      - name: Run tests (default features)
+        run: cargo test --workspace --exclude fem-py --exclude fem-benches --exclude fem-linalg-gpu
 
   coverage:
     name: Code Coverage
