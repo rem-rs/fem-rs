@@ -115,37 +115,31 @@ fn mooney_rivlin_pk1_tangent(f: &DMatrix<f64>, c10: f64, c01: f64, K: f64) -> (D
     let jac = f.determinant();
     let inv_f = f.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(dim, dim));
     let inv_f_t = inv_f.transpose();
-
-    // Right Cauchy-Green: C = F^T·F
     let c = f.transpose() * f;
-    // I₁ = tr(C), I₂ = ½(tr(C)² - tr(C²))
     let i1 = c.trace();
-    let c2 = &c * &c;
-    #[allow(unused_variables)]
-    let i2 = 0.5 * (i1 * i1 - c2.trace());
-
-    // PK2: S = 2·[(C10 + C01·I₁)·I - C01·C] + K·J·(J-1)·C⁻¹
-    let mut s = DMatrix::zeros(dim, dim);
+    // PK1 via push-forward of PK2
+    let mut s_pk2 = DMatrix::zeros(dim, dim);
     let pk2_pre = 2.0 * (c10 + c01 * i1);
-    let c_inv = inv_f * inv_f_t; // C⁻¹ = F⁻¹·F⁻ᵀ
-    for i in 0..dim {
-        for j in 0..dim {
-            let hat = if i == j { 1.0 } else { 0.0 };
-            s[(i, j)] = pk2_pre * hat - 2.0 * c01 * c[(i, j)] + K * jac * (jac - 1.0) * c_inv[(i, j)];
-        }
-    }
-
-    // Push forward to PK1: P = F·S
-    let p = f * &s;
-
-    // Consistent tangent in PK1 form (Voigt-like dim²×dim²)
-    // ∂P_{iI}/∂F_{jJ} ≈ δ_{ij}·S_{IJ} + F_{iK}·C_{KILJ}^{tan}·F_{jL} + δ_{ij}·K·J·(2J-1)·(F⁻¹)ˢ_{IJ}
-    // For brevity, use numerical tangent via central differences for now.
-    // This is a placeholder — a full analytical tangent is several hundred lines.
-    // See MFEM's `HyperelasticOperator::ComputeGradient` for the analytical version.
+    let c_inv = inv_f * inv_f_t;
+    for i in 0..dim { for j in 0..dim {
+        let hat = if i == j { 1.0 } else { 0.0 };
+        s_pk2[(i, j)] = pk2_pre * hat - 2.0 * c01 * c[(i, j)] + K * jac * (jac - 1.0) * c_inv[(i, j)];
+    }}
+    let p = f * &s_pk2;
+    // Numerical tangent via central differences
     let ct = numerical_tangent(f, &|ft| {
-        let (p, _) = mooney_rivlin_pk1_tangent(ft, c10, c01, K);
-        p
+        let j = ft.determinant();
+        let i = ft.transpose();
+        let ci = ft.transpose() * ft;
+        let i1t = ci.trace();
+        let ci_inv = ft.clone().try_inverse().map(|mi| { let mt = mi.transpose(); mi * mt }).unwrap_or_else(|| DMatrix::identity(dim, dim));
+        let mut s2 = DMatrix::zeros(dim, dim);
+        let pre = 2.0 * (c10 + c01 * i1t);
+        for ii in 0..dim { for jj in 0..dim {
+            let h = if ii == jj { 1.0 } else { 0.0 };
+            s2[(ii, jj)] = pre * h - 2.0 * c01 * ci[(ii, jj)] + K * j * (j - 1.0) * ci_inv[(ii, jj)];
+        }}
+        ft * &s2
     });
     (p, ct)
 }
@@ -187,18 +181,43 @@ fn ogden_pk1_tangent(f: &DMatrix<f64>, params: &[(f64, f64)], K: f64) -> (DMatri
         }
     }
 
-    // PK1: P = F·S   (in spectral basis PK2 already includes F push-forward)
-    // Actually S above is already PK1-like since we computed Σ (dW/dλ)·n⊗N
-    // Let's be explicit: P = Σ (1/λ)·(dW/dλ)·n⊗N = the above
+    // PK1: P = Σ (1/λ)·(dW/dλ)·n⊗N — computed via the spectral formula
     let p = s.clone();
 
-    // Numerical tangent (simplified; full analytical is very involved)
+    // Numerical tangent via central differences
     let ct = numerical_tangent(f, &|ft| {
-        let (p, _) = ogden_pk1_tangent(ft, params, K);
-        p
+        ogden_pk1_only(ft, params, K)
     });
 
     (p, ct)
+}
+
+/// Ogden PK1 stress only (no tangent) — for numerical differentiation.
+fn ogden_pk1_only(f: &DMatrix<f64>, params: &[(f64, f64)], K: f64) -> DMatrix<f64> {
+    let dim = f.nrows();
+    let jac = f.determinant();
+    let svd = SVD::new(f.clone(), true, true);
+    let u_mat = svd.u.expect("SVD u failed");
+    let v_t_mat = svd.v_t.expect("SVD v_t failed");
+    let mut lam = vec![1.0_f64; dim];
+    for i in 0..dim { lam[i] = svd.singular_values[i]; }
+    let v_mat = v_t_mat.transpose();
+
+    let mut p = DMatrix::zeros(dim, dim);
+    for i in 0..dim { for I in 0..dim {
+        let mut val = 0.0;
+        for a in 0..dim {
+            if lam[a].abs() < 1e-30 { continue; }
+            let mut dW_dlam = 0.0;
+            for (mu_p, alpha_p) in params {
+                dW_dlam += mu_p * lam[a].powf(alpha_p - 1.0);
+            }
+            dW_dlam += K * (jac - 1.0) * jac / lam[a];
+            val += dW_dlam / lam[a] * u_mat[(i, a)] * v_mat[(I, a)];
+        }
+        p[(i, I)] = val;
+    }}
+    p
 }
 
 // ─── Numerical tangent (fallback for non-analytical models) ──────────────────
