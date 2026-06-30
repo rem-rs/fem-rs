@@ -127,9 +127,10 @@ pub(crate) const UNSET: i32 = -1;
 /// Returns `match_[v] = mate` (or `match_[v] == v` if unmatched).
 fn heavy_edge_match(n: usize, xadj: &[i32], adjncy: &[i32]) -> Vec<i32> {
     let mut match_ = vec![UNSET; n];
-    // Visit vertices in scrambled order for randomness
+    // Precompute degree for weight computation
+    let deg: Vec<i32> = (0..n).map(|v| xadj[v + 1] - xadj[v]).collect();
+    // Deterministic "random" permutation via Fisher-Yates with fixed seed
     let mut order: Vec<usize> = (0..n).collect();
-    // Simple deterministic "random" permutation via Fisher-Yates with a fixed seed
     let seed: u64 = 42;
     let mut rng = seed;
     for i in (1..n).rev() {
@@ -142,10 +143,11 @@ fn heavy_edge_match(n: usize, xadj: &[i32], adjncy: &[i32]) -> Vec<i32> {
         if match_[v] != UNSET { continue; }
         let mut best = UNSET;
         let mut max_w = 0i32;
+        let dv = deg[v];
         for j in xadj[v] as usize..xadj[v + 1] as usize {
             let u = adjncy[j] as usize;
             if match_[u] == UNSET {
-                let w = (xadj[v + 1] - xadj[v]).abs() + (xadj[u + 1] - xadj[u]).abs();
+                let w = dv + deg[u];
                 if w > max_w { max_w = w; best = u as i32; }
             }
         }
@@ -188,25 +190,26 @@ fn coarsen(n: usize, xadj: &[i32], adjncy: &[i32]) -> CoarseGraph {
     }
     let c_n = next;
 
-    // Build coarse adjacency
-    let mut c_adj_set: Vec<Vec<i32>> = vec![Vec::new(); c_n];
+    // Build coarse adjacency with sorted-dedup (O(deg log deg) per vertex)
+    let mut c_adj: Vec<Vec<i32>> = vec![Vec::new(); c_n];
     for v in 0..n {
         let cv = coarse_id[v] as usize;
         for j in xadj[v] as usize..xadj[v + 1] as usize {
-            let u = adjncy[j] as usize;
-            let cu = coarse_id[u] as usize;
-            if cu != cv && !c_adj_set[cv].contains(&(cu as i32)) {
-                c_adj_set[cv].push(cu as i32);
-            }
+            let cu = coarse_id[adjncy[j] as usize] as i32;
+            if cu != cv as i32 { c_adj[cv].push(cu); }
         }
+    }
+    // Sort and dedup each coarse adjacency
+    for adj in &mut c_adj {
+        adj.sort_unstable();
+        adj.dedup();
     }
 
     let mut c_xadj = vec![0i32; c_n + 1];
     let mut c_adjncy = Vec::new();
     for cv in 0..c_n {
-        c_adj_set[cv].sort_unstable();
-        c_xadj[cv + 1] = c_xadj[cv] + c_adj_set[cv].len() as i32;
-        c_adjncy.extend(&c_adj_set[cv]);
+        c_xadj[cv + 1] = c_xadj[cv] + c_adj[cv].len() as i32;
+        c_adjncy.extend(&c_adj[cv]);
     }
 
     CoarseGraph { c_n, c_xadj, c_adjncy, mapping: coarse_id }
@@ -394,7 +397,60 @@ pub fn partition_kway(n: usize, xadj: &[i32], adjncy: &[i32], k: usize) -> Vec<i
     // Refine
     refine_kway(n, xadj, adjncy, k, &mut part, 5);
 
+    // Enforce balance: move vertices if parts are too imbalanced
+    balance_partitions(n, xadj, adjncy, k, &mut part, 0.15);
+
     part
+}
+
+/// Post-refinement balance pass: move vertices from overloaded parts
+/// to underloaded parts with minimal edge-cut increase.
+fn balance_partitions(
+    n: usize, xadj: &[i32], adjncy: &[i32],
+    k: usize, part: &mut [i32], tol: f64,
+) {
+    let ideal = n as f64 / k as f64;
+    let max_per_part = (ideal * (1.0 + tol)).ceil() as usize;
+    let mut improved = true;
+    while improved {
+        improved = false;
+        let cnt = part_counts(part, k);
+        // Find most overloaded part
+        let overloaded: Vec<usize> = (0..k).filter(|&p| cnt[p] > max_per_part).collect();
+        if overloaded.is_empty() { break; }
+        for &src in &overloaded {
+            if cnt[src] <= max_per_part { continue; }
+            // Find best vertex to move out of src
+            let mut best_gain = i32::MIN;
+            let mut best_v = usize::MAX;
+            let mut best_dst = usize::MAX;
+            for v in 0..n {
+                if part[v] != src as i32 { continue; }
+                let mut my_cut = 0i32;
+                for j in xadj[v] as usize..xadj[v + 1] as usize {
+                    if part[adjncy[j] as usize] != src as i32 { my_cut += 1; }
+                }
+                if my_cut <= 0 { continue; } // only move vertices on boundary
+                for dst in 0..k {
+                    if dst == src { continue; }
+                    if cnt[dst] >= max_per_part { continue; }
+                    let mut gain = 0i32;
+                    for j in xadj[v] as usize..xadj[v + 1] as usize {
+                        let u = adjncy[j] as usize;
+                        if part[u] == dst as i32 { gain += 1; }
+                        else if part[u] == src as i32 { gain -= 1; }
+                    }
+                    if gain > best_gain || (gain == best_gain && cnt[src] > cnt[dst]) {
+                        best_gain = gain; best_v = v; best_dst = dst;
+                    }
+                }
+            }
+            if best_v != usize::MAX {
+                part[best_v] = best_dst as i32;
+                improved = true;
+            }
+        }
+    }
 }
 
 /// Convenience: partition a `SimplexMesh` into `nparts` balanced parts.
