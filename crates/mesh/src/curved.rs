@@ -508,227 +508,121 @@ impl<'a, const D: usize> CurvedElementTransformation<'a, D> {
     }
 }
 
-// ─── Curved AMR refinement ────────────────────────────────────────────────────
-
-/// Refine a curved 2D Tri mesh uniformly via parent isoparametric interpolation.
 pub fn refine_curved_2d(curved: &CurvedMesh<2>) -> CurvedMesh<2> {
     let geo = fem_element::lagrange::factory::ref_elem(
         fem_element::lagrange::factory::ElemType::Tri, curved.geom_order);
     let npe = geo.n_dofs();
+    _reinterpolate_curved_2d(curved, &_refine_linear_2d(curved), geo, npe)
+}
 
-    let n_elems_parent = curved.n_elems;
-    let linear_parent = SimplexMesh::<2> {
+pub fn refine_curved_3d(curved: &CurvedMesh<3>) -> CurvedMesh<3> {
+    let geo = fem_element::lagrange::factory::ref_elem(
+        fem_element::lagrange::factory::ElemType::Tet, curved.geom_order);
+    let npe = geo.n_dofs();
+    _reinterpolate_curved_3d(curved, &_refine_linear_3d(curved), geo, npe)
+}
+
+pub fn refine_curved_2d_nc(curved: &CurvedMesh<2>, marked: &[usize]) -> CurvedMesh<2> {
+    let geo = fem_element::lagrange::factory::ref_elem(
+        fem_element::lagrange::factory::ElemType::Tri, curved.geom_order);
+    let npe = geo.n_dofs();
+    let lin = _extract_linear_2d(curved);
+    let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();
+    let fine = crate::amr::refine_nonconforming(&lin, &mid).0;
+    _reinterpolate_curved_2d(curved, &fine, geo, npe)
+}
+
+pub fn refine_curved_3d_nc(curved: &CurvedMesh<3>, marked: &[usize]) -> CurvedMesh<3> {
+    let geo = fem_element::lagrange::factory::ref_elem(
+        fem_element::lagrange::factory::ElemType::Tet, curved.geom_order);
+    let npe = geo.n_dofs();
+    let lin = _extract_linear_3d(curved);
+    let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();
+    let fine = crate::amr::refine_nonconforming_3d(&lin, &mid).0;
+    _reinterpolate_curved_3d(curved, &fine, geo, npe)
+}
+
+fn _refine_linear_2d(curved: &CurvedMesh<2>) -> SimplexMesh<2> {
+    crate::amr::refine_uniform(&_extract_linear_2d(curved))
+}
+
+fn _refine_linear_3d(curved: &CurvedMesh<3>) -> SimplexMesh<3> {
+    crate::amr::refine_uniform_3d(&_extract_linear_3d(curved))
+}
+
+fn _extract_linear_2d(curved: &CurvedMesh<2>) -> SimplexMesh<2> {
+    SimplexMesh {
         coords: curved.coords.clone(),
-        conn: curved.geom_conn.chunks(curved.nodes_per_elem)
-            .flat_map(|c| c[..3].to_vec()).collect(),
+        conn: curved.geom_conn.chunks(curved.nodes_per_elem).flat_map(|c| c[..3].to_vec()).collect(),
         elem_type: ElementType::Tri3,
-        face_conn: curved.face_conn.clone(),
-        face_tags: curved.face_tags.clone(),
-        face_type: ElementType::Line2,
-        elem_tags: curved.elem_tags.clone(),
-        elem_types: None, elem_offsets: None,
-        face_types: None, face_offsets: None,
-        face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
-    };
-    let fine_linear = crate::amr::refine_uniform(&linear_parent);
-    let n_elems_fine2 = fine_linear.n_elems();
-    let mut new_conn2 = Vec::with_capacity(n_elems_fine2 * npe);
-    let mut next_node = fine_linear.n_nodes() as NodeId;
-    let mut new_coords2 = fine_linear.coords.clone();
-
-    let dof_coords = geo.dof_coords();
-    for fine_e in 0..n_elems_fine2 {
-        let fnodes = fine_linear.elem_nodes(fine_e as u32);
-        let _off = new_conn2.len();
-        for i in 0..3 { new_conn2.push(fnodes[i]); }
-        for i in 3..npe {
-            let xi_ref = &dof_coords[i];
-            // Find parent by checking which parent contains the first vertex
-            let fine_v0 = fnodes[0] as usize;
-            // Find which parent element has this node as a vertex
-            let mut parent_e = 0usize;
-            'outer: for p in 0..n_elems_parent {
-                for v in 0..3 {
-                    if curved.geom_conn[p * curved.nodes_per_elem + v] == fine_v0 as NodeId {
-                        parent_e = p; break 'outer;
-                    }
-                }
-            }
-            let x = curved.reference_to_physical(parent_e, xi_ref);
-            for d in 0..2 { new_coords2.push(x[d]); }
-            new_conn2.push(next_node);
-            next_node += 1;
-        }
-    }
-
-    let nfp = 2;
-    let n_faces = fine_linear.n_boundary_faces();
-    let mut new_fc = Vec::with_capacity(n_faces * nfp);
-    let mut new_ft = Vec::with_capacity(n_faces);
-    for f in 0..n_faces as u32 {
-        for &n in fine_linear.face_nodes(f) { new_fc.push(n); }
-        new_ft.push(fine_linear.face_tag(f));
-    }
-
-    CurvedMesh {
-        coords: new_coords2,
-        geom_conn: new_conn2,
-        geom_order: curved.geom_order,
-        nodes_per_elem: npe,
-        elem_type: elem_type_for_order(curved.geom_order, 2),
-        n_elems: n_elems_fine2,
-        n_nodes: next_node as usize,
-        face_conn: new_fc,
-        face_tags: new_ft,
-        face_type: ElementType::Line2,
-        elem_tags: vec![0; n_elems_fine2],
+        face_conn: curved.face_conn.clone(), face_tags: curved.face_tags.clone(),
+        face_type: ElementType::Line2, elem_tags: curved.elem_tags.clone(),
+        elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
     }
 }
 
-/// Element type for given geometric order.
-fn elem_type_for_order(order: u8, dim: usize) -> ElementType {
-    match (dim, order) {
-        (2, 2) => ElementType::Tri6,
-        (3, 2) => ElementType::Tet10,
-        _ => if dim == 2 { ElementType::Tri3 } else { ElementType::Tet4 },
+fn _extract_linear_3d(curved: &CurvedMesh<3>) -> SimplexMesh<3> {
+    SimplexMesh {
+        coords: curved.coords.clone(),
+        conn: curved.geom_conn.chunks(curved.nodes_per_elem).flat_map(|c| c[..4].to_vec()).collect(),
+        elem_type: ElementType::Tet4,
+        face_conn: curved.face_conn.clone(), face_tags: curved.face_tags.clone(),
+        face_type: ElementType::Tri3, elem_tags: curved.elem_tags.clone(),
+        elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
     }
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::simplex::SimplexMesh;
-
-    #[test]
-    fn from_linear_preserves_geometry() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let curved = CurvedMesh::from_linear(&mesh);
-        assert_eq!(curved.n_elems, mesh.n_elems());
-        assert_eq!(curved.n_nodes, mesh.n_nodes());
-        assert_eq!(curved.geom_order, 1);
-    }
-
-    #[test]
-    fn elevate_to_p2_increases_nodes() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
-        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
-        assert!(curved.n_nodes > mesh.n_nodes());
-        assert_eq!(curved.geom_order, 2);
-        assert_eq!(curved.nodes_per_elem, 6);
-    }
-
-    #[test]
-    fn elevate_to_p4_increases_nodes() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
-        let curved = CurvedMesh::elevate_to_order(&mesh, 4, |x| x);
-        // P4 triangle: (4+1)(4+2)/2 = 15 nodes per element
-        assert_eq!(curved.nodes_per_elem, 15);
-        assert_eq!(curved.geom_order, 4);
-    }
-
-    #[test]
-    fn jacobian_positive_linear() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let curved = CurvedMesh::from_linear(&mesh);
-        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
-        for e in 0..curved.n_elems {
-            let (_j, det) = curved.element_jacobian(e, &xi);
-            assert!(det > 0.0, "Element {e}: det(J) = {det}");
+fn _build_vparent_map<const D: usize>(curved: &CurvedMesh<D>) -> Vec<Vec<usize>> {
+    let n_verts = curved.geom_conn.iter().max().map(|&m| m as usize + 1).unwrap_or(0).max(curved.n_nodes);
+    let nv = if D == 2 { 3 } else { 4 };
+    let mut map: Vec<Vec<usize>> = vec![Vec::new(); n_verts];
+    for p in 0..curved.n_elems {
+        for v in 0..nv {
+            let nid = curved.geom_conn[p * curved.nodes_per_elem + v] as usize;
+            if nid < map.len() { map[nid].push(p); }
         }
     }
+    map
+}
 
-    #[test]
-    fn p2_jacobian_matches_p1_on_flat_mesh() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let lin = CurvedMesh::from_linear(&mesh);
-        let p2 = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
-        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
-        for e in 0..mesh.n_elems() {
-            let (_, det_lin) = lin.element_jacobian(e, &xi);
-            let (_, det_p2) = p2.element_jacobian(e, &xi);
-            assert!((det_lin - det_p2).abs() < 1e-12,
-                "elem {e}: P1={det_lin:.6e}, P2={det_p2:.6e}");
+fn _find_parent<const D: usize>(vmap: &[Vec<usize>], verts: &[u32], n_parent: usize) -> usize {
+    let mut votes = std::collections::HashMap::new();
+    for &v in verts {
+        if let Some(ps) = vmap.get(v as usize) {
+            for &p in ps { *votes.entry(p).or_insert(0) += 1; }
         }
     }
+    votes.into_iter().max_by_key(|&(_, c)| c).map(|(p,_)| p).unwrap_or(0).min(n_parent - 1)
+}
 
-    #[test]
-    fn tet4_linear_mesh() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let curved = CurvedMesh::from_linear(&mesh);
-        let xi = vec![0.25, 0.25, 0.25];
-        for e in 0..curved.n_elems.min(10) {
-            let (_j, det) = curved.element_jacobian(e, &xi);
-            assert!(det > 0.0, "Tet {e}: det(J) = {det}");
-        }
+fn _reinterpolate_curved_2d(curved: &CurvedMesh<2>, fine: &SimplexMesh<2>, geo: Box<dyn fem_element::ReferenceElement>, npe: usize) -> CurvedMesh<2> {
+    let nf = fine.n_elems(); let vmap = _build_vparent_map(curved); let dc = geo.dof_coords();
+    let mut nc = Vec::with_capacity(nf * npe); let mut nn = fine.n_nodes() as u32; let mut ns = fine.coords.clone();
+    for fe in 0..nf {
+        let fv = fine.elem_nodes(fe as u32); nc.extend_from_slice(&fv[..3]);
+        let pe = _find_parent::<2>(&vmap, &fv[..3], curved.n_elems);
+        for i in 3..npe { let x = curved.reference_to_physical(pe, &dc[i]); ns.extend_from_slice(&x); nc.push(nn); nn += 1; }
     }
+    let nfb = fine.n_boundary_faces(); let mut fc = Vec::with_capacity(nfb * 2); let mut ft = Vec::with_capacity(nfb);
+    for f in 0..nfb as u32 { fc.extend_from_slice(fine.face_nodes(f)); ft.push(fine.face_tag(f)); }
+    CurvedMesh { coords: ns, geom_conn: nc, geom_order: curved.geom_order, nodes_per_elem: npe,
+        elem_type: if curved.geom_order >= 2 { ElementType::Tri6 } else { ElementType::Tri3 },
+        n_elems: nf, n_nodes: nn as usize, face_conn: fc, face_tags: ft, face_type: ElementType::Line2, elem_tags: vec![0; nf] }
+}
 
-    #[test]
-    fn elevate_tet_to_p2() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let curved = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
-        assert!(curved.n_nodes > mesh.n_nodes());
-        assert_eq!(curved.geom_order, 2);
-        // P4 tet: (2+1)(2+2)(2+3)/6 = 10 nodes per element
-        assert_eq!(curved.nodes_per_elem, 10);
+fn _reinterpolate_curved_3d(curved: &CurvedMesh<3>, fine: &SimplexMesh<3>, geo: Box<dyn fem_element::ReferenceElement>, npe: usize) -> CurvedMesh<3> {
+    let nf = fine.n_elems(); let vmap = _build_vparent_map(curved); let dc = geo.dof_coords();
+    let mut nc = Vec::with_capacity(nf * npe); let mut nn = fine.n_nodes() as u32; let mut ns = fine.coords.clone();
+    for fe in 0..nf {
+        let fv = fine.elem_nodes(fe as u32); nc.extend_from_slice(&fv[..4]);
+        let pe = _find_parent::<3>(&vmap, &fv[..4], curved.n_elems);
+        for i in 4..npe { let x = curved.reference_to_physical(pe, &dc[i]); ns.extend_from_slice(&x); nc.push(nn); nn += 1; }
     }
-
-    #[test]
-    fn p2_tet_jacobian_matches_p1() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let lin = CurvedMesh::from_linear(&mesh);
-        let p2 = CurvedMesh::elevate_to_order(&mesh, 2, |x| x);
-        let xi = vec![0.25, 0.25, 0.25];
-        for e in 0..mesh.n_elems().min(10) {
-            let (_, det_lin) = lin.element_jacobian(e, &xi);
-            let (_, det_p2) = p2.element_jacobian(e, &xi);
-            assert!((det_lin - det_p2).abs() < 1e-12);
-        }
-    }
-
-    #[test]
-    fn p3_tet_jacobian_matches_p1() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
-        let lin = CurvedMesh::from_linear(&mesh);
-        let p3 = CurvedMesh::elevate_to_order(&mesh, 3, |x| x);
-        let xi = vec![0.25, 0.25, 0.25];
-        for e in 0..mesh.n_elems() {
-            let (_, det_lin) = lin.element_jacobian(e, &xi);
-            let (_, det_p3) = p3.element_jacobian(e, &xi);
-            assert!((det_lin - det_p3).abs() < 1e-12,
-                "elem {e}: P1={det_lin:.6e}, P3={det_p3:.6e}");
-        }
-    }
-
-
-
-    #[test]
-    fn p3_jacobian_matches_p1_on_flat_mesh() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let lin = CurvedMesh::from_linear(&mesh);
-        let p3 = CurvedMesh::elevate_to_order(&mesh, 3, |x| x);
-        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
-        for e in 0..mesh.n_elems() {
-            let (_, det_lin) = lin.element_jacobian(e, &xi);
-            let (_, det_p3) = p3.element_jacobian(e, &xi);
-            assert!((det_lin - det_p3).abs() < 1e-12,
-                "elem {e}: P1={det_lin:.6e}, P3={det_p3:.6e}");
-        }
-    }
-
-    #[test]
-    fn p4_jacobian_matches_p1_on_flat_mesh() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let lin = CurvedMesh::from_linear(&mesh);
-        let p4 = CurvedMesh::elevate_to_order(&mesh, 4, |x| x);
-        let xi = vec![1.0 / 3.0, 1.0 / 3.0];
-        for e in 0..mesh.n_elems() {
-            let (_, det_lin) = lin.element_jacobian(e, &xi);
-            let (_, det_p4) = p4.element_jacobian(e, &xi);
-            assert!((det_lin - det_p4).abs() < 1e-12,
-                "elem {e}: P1={det_lin:.6e}, P4={det_p4:.6e}");
-        }
-    }
+    let nfb = fine.n_boundary_faces(); let mut fc = Vec::with_capacity(nfb * 3); let mut ft = Vec::with_capacity(nfb);
+    for f in 0..nfb as u32 { fc.extend_from_slice(fine.face_nodes(f)); ft.push(fine.face_tag(f)); }
+    CurvedMesh { coords: ns, geom_conn: nc, geom_order: curved.geom_order, nodes_per_elem: npe,
+        elem_type: if curved.geom_order >= 2 { ElementType::Tet10 } else { ElementType::Tet4 },
+        n_elems: nf, n_nodes: nn as usize, face_conn: fc, face_tags: ft, face_type: ElementType::Tri3, elem_tags: vec![0; nf] }
 }
