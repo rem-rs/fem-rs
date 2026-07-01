@@ -1308,6 +1308,24 @@ impl DiscreteLinearOperator {
                         int_y += w * fv[1];
                         int_z += w * fv[2];
                     }
+                    // Interior moments with contravariant Piola pullback.
+                    // ∫_Ω F_i dV = ∫_ref (detJ * J^{-1} * F_phys)_i dξ
+                    // For an affine tet, detJ and J^{-1} are constant, so we
+                    // accumulate the unweighted sums and transform at the end.
+                    let mut int_x = 0.0_f64;
+                    let mut int_y = 0.0_f64;
+                    let mut int_z = 0.0_f64;
+                    for (xi, &w) in qr_vol.points.iter().zip(qr_vol.weights.iter()) {
+                        let pt = [
+                            x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
+                            x0[1] + j0[1] * xi[0] + j1[1] * xi[1] + j2[1] * xi[2],
+                            x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
+                        ];
+                        let fv = eval_field(k, pt[0], pt[1], pt[2]);
+                        int_x += w * fv[0];
+                        int_y += w * fv[1];
+                        int_z += w * fv[2];
+                    }
                     // J = [j0 j1 j2] (columns are ∂x/∂ξ, ∂x/∂η, ∂x/∂ζ)
                     let jac = nalgebra::Matrix3::new(
                         j0[0], j1[0], j2[0],
@@ -2190,10 +2208,10 @@ mod tests {
         let max_err: f64 = (0..hdiv.n_dofs())
             .map(|i| (ca[i] - curl_interp.as_slice()[i]).abs())
             .fold(0.0, f64::max);
-        assert!(
-            max_err < 0.025,
-            "ND2->RT1 3D: curl interpolation mismatch, max error = {max_err}"
-        );
+            assert!(
+                max_err < 0.025,
+                "ND2->RT1 3D: curl interpolation mismatch, max error = {max_err}"
+            );
     }
 
     /// Test: Curl ND2->RT1 in 3D — randomized commuting stress test.
