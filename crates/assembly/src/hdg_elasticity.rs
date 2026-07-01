@@ -1,14 +1,18 @@
 //! HDG for linear elasticity: −μΔu − (λ+μ)∇(∇·u) = f.
 //!
-//! Uses P1 vector (6 DOFs per triangle) bulk element, P1 skeleton trace.
-//! dim = 2, Tri3 mesh.
+//! Supports P1 (6 DOFs/tri) and P2 (12 DOFs/tri) with Pk skeleton trace.
 
 #![allow(non_snake_case)]
 
 use fem_linalg::CooMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::SolverConfig;
-use fem_element::lagrange::{TriP1, SegP1};
+use fem_element::lagrange::{TriPk, SegPk};
+use fem_element::ReferenceElement;
+
+fn npe(dim: usize, k: usize) -> usize {
+    match dim { 1 => k+1, 2 => (k+1)*(k+2)/2, _ => unreachable!() }
+}
 
 #[derive(Debug)]
 pub struct HdgElasticityResult {
@@ -16,11 +20,20 @@ pub struct HdgElasticityResult {
     pub lambda: Vec<f64>,
 }
 
+/// Solve HDG elasticity with P1 (backward compat).
 pub fn solve_hdg_elasticity<M, F>(
-    mesh: M,
-    source: F,
-    mu: f64,
-    lambda: f64,
+    mesh: M, source: F, mu: f64, lambda: f64,
+) -> HdgElasticityResult
+where
+    M: MeshTopology + Clone + Send + Sync,
+    F: Fn(&[f64]) -> Vec<f64> + Send + Sync,
+{
+    solve_hdg_elasticity_order(mesh, source, mu, lambda, 1)
+}
+
+/// Solve HDG elasticity with configurable velocity order (1=P1, 2=P2).
+pub fn solve_hdg_elasticity_order<M, F>(
+    mesh: M, source: F, mu: f64, lambda: f64, vel_order: u8,
 ) -> HdgElasticityResult
 where
     M: MeshTopology + Clone + Send + Sync,
@@ -29,22 +42,22 @@ where
     let dim = mesh.dim() as usize;
     assert_eq!(dim, 2, "HDG elasticity currently supports 2D only");
     let n_elems = mesh.n_elements();
-    let tau = 2.0 * mu; // stabilization parameter
+    let tau = 2.0 * mu;
+    let vo = vel_order as usize;
 
-    // P1 velocity: 3 DOFs × dim = 6 per element
-    let u_dpe = (dim + 1) * dim;
+    let n_vel_b = npe(dim, vo);       // scalar DOFs per velocity component
+    let u_dpe = n_vel_b * dim;         // 6 for P1, 12 for P2
     let n_u = n_elems * u_dpe;
+    let sk_dpe = npe(1, vo) * dim;    // (vo+1)*dim skeleton DOFs per edge
+    let n_sk_b = npe(1, vo);           // scalar skeleton DOFs per edge
 
-    // P1 skeleton: each edge has 2 vertices, each with dim velocity DOFs
-    let sk_dpe = 2 * dim; // 4 in 2D
-
-    let ref_elem: Box<dyn fem_element::ReferenceElement> = Box::new(TriP1);
-    let geo_elem: Box<dyn fem_element::ReferenceElement> = Box::new(TriP1);
+    let ref_elem: Box<dyn ReferenceElement> = Box::new(TriPk::new(vo));
+    let geo_elem: Box<dyn ReferenceElement> = Box::new(TriPk::new(1));
     let geo_n = geo_elem.n_dofs();
-    let face_ref: Box<dyn fem_element::ReferenceElement> = Box::new(SegP1);
-    let n_qp_face = face_ref.quadrature(2).n_points();
-    let qr_face = face_ref.quadrature(2);
-    let qr_vol = ref_elem.quadrature(2);
+    let face_ref: Box<dyn ReferenceElement> = Box::new(SegPk::new(vo));
+    let qr_vol = ref_elem.quadrature((2 * vo) as u8);
+    let qr_face = face_ref.quadrature((2 * vo) as u8);
+    let n_qp_face = qr_face.n_points();
 
     // Build face list
     use std::collections::HashMap;
@@ -79,9 +92,9 @@ where
 
     let mut sk_coo = CooMatrix::new(n_lambda, n_lambda);
     let mut sk_rhs = vec![0.0; n_lambda];
-    let mut phi = vec![0.0; dim + 1];
-    let mut grad = vec![0.0; (dim + 1) * dim];
-    let mut psi = vec![0.0; dim]; // P1 face basis (2 nodes × 2D)
+    let mut phi = vec![0.0; n_vel_b];
+    let mut grad = vec![0.0; n_vel_b * dim];
+    let mut psi = vec![0.0; n_sk_b]; // P1 face basis (2 nodes × 2D)
 
     for e in 0..n_elems as u32 {
         let en = mesh.element_nodes(e);
@@ -130,14 +143,14 @@ where
             let id = 1.0 / det_j;
 
             // Physical gradients
-            let mut gp = vec![0.0; (dim + 1) * dim];
+            let mut gp = vec![0.0; (n_vel_b) * dim];
             let (j00, j01, j10, j11) = (
                 jac[1][1] * id,
                 -jac[0][1] * id,
                 -jac[1][0] * id,
                 jac[0][0] * id,
             );
-            for i in 0..dim + 1 {
+            for i in 0..n_vel_b {
                 gp[i * dim] = j00 * grad[i * dim] + j01 * grad[i * dim + 1];
                 gp[i * dim + 1] = j10 * grad[i * dim] + j11 * grad[i * dim + 1];
             }
@@ -156,8 +169,8 @@ where
 
             // A += μ∫∇u·∇w (component-wise: δ_ab Σ_c ∂φ_i/∂x_c · ∂φ_j/∂x_c)
             for a in 0..dim {
-                for i in 0..dim + 1 {
-                    for j in 0..dim + 1 {
+                for i in 0..n_vel_b {
+                    for j in 0..n_vel_b {
                         let mut d = 0.0;
                         for b in 0..dim {
                             d += gp[i * dim + b] * gp[j * dim + b];
@@ -170,9 +183,9 @@ where
             // A += (λ+μ)∫(∇·u)(∇·w) (grad-div coupling)
             // (∇·u) = Σ_c ∂u_c/∂x_c, (∇·w) = Σ_c ∂w_c/∂x_c
             for a in 0..dim {
-                for i in 0..dim + 1 {
+                for i in 0..n_vel_b {
                     for b in 0..dim {
-                        for j in 0..dim + 1 {
+                        for j in 0..n_vel_b {
                             A[(i * dim + a) * nu + (j * dim + b)] +=
                                 (lambda + mu) * vol * gp[i * dim + a] * gp[j * dim + b];
                         }
@@ -182,7 +195,7 @@ where
 
             // f_u += ∫ f·φ
             for a in 0..dim {
-                for i in 0..dim + 1 {
+                for i in 0..n_vel_b {
                     f_u[i * dim + a] += vol * phi[i] * fv[a];
                 }
             }
@@ -206,8 +219,8 @@ where
 
                 // τ∫φ·φ on ∂K
                 for a in 0..dim {
-                    for i in 0..dim + 1 {
-                        for j in 0..dim + 1 {
+                    for i in 0..n_vel_b {
+                        for j in 0..n_vel_b {
                             A[(i * dim + a) * nu + (j * dim + a)] += tau * wf * phi[i] * phi[j];
                         }
                     }
@@ -217,7 +230,7 @@ where
                 if let Some(_loff) = face_off[lf_idx] {
                     let base = lf_idx * sk_dpe;
                     for a in 0..dim {
-                        for i in 0..dim + 1 {
+                        for i in 0..n_vel_b {
                             let dof_row = i * dim + a;
                             for ld in 0..dim {
                                 // ψ has dim entries: ψ[ld] at vertex ld of the face
@@ -362,8 +375,8 @@ where
             let (j00, j01, j10, j11) = (
                 jac[1][1] * id, -jac[0][1] * id, -jac[1][0] * id, jac[0][0] * id,
             );
-            let mut gp = vec![0.0; (dim + 1) * dim];
-            for i in 0..dim + 1 {
+            let mut gp = vec![0.0; (n_vel_b) * dim];
+            for i in 0..n_vel_b {
                 gp[i * dim] = j00 * grad[i * dim] + j01 * grad[i * dim + 1];
                 gp[i * dim + 1] = j10 * grad[i * dim] + j11 * grad[i * dim + 1];
             }
@@ -380,8 +393,8 @@ where
             let fv = source(&xp);
 
             for a in 0..dim {
-                for i in 0..dim + 1 {
-                    for j in 0..dim + 1 {
+                for i in 0..n_vel_b {
+                    for j in 0..n_vel_b {
                         let mut d = 0.0;
                         for b in 0..dim {
                             d += gp[i * dim + b] * gp[j * dim + b];
@@ -391,9 +404,9 @@ where
                 }
             }
             for a in 0..dim {
-                for i in 0..dim + 1 {
+                for i in 0..n_vel_b {
                     for b in 0..dim {
-                        for j in 0..dim + 1 {
+                        for j in 0..n_vel_b {
                             A[(i * dim + a) * nu + (j * dim + b)] +=
                                 (lambda + mu) * vol * gp[i * dim + a] * gp[j * dim + b];
                         }
@@ -401,7 +414,7 @@ where
                 }
             }
             for a in 0..dim {
-                for i in 0..dim + 1 {
+                for i in 0..n_vel_b {
                     f_u[i * dim + a] += vol * phi[i] * fv[a];
                 }
             }
@@ -423,8 +436,8 @@ where
                 let wf = fw * fj;
 
                 for a in 0..dim {
-                    for i in 0..dim + 1 {
-                        for j in 0..dim + 1 {
+                    for i in 0..n_vel_b {
+                        for j in 0..n_vel_b {
                             A[(i * dim + a) * nu + (j * dim + a)] += tau * wf * phi[i] * phi[j];
                         }
                     }
@@ -433,9 +446,9 @@ where
                 if let Some(_) = face_off[lf_idx] {
                     let base = lf_idx * sk_dpe;
                     for a in 0..dim {
-                        for i in 0..dim + 1 {
+                        for i in 0..n_vel_b {
                             let dof_row = i * dim + a;
-                            for ld in 0..dim {
+                            for ld in 0..n_sk_b {
                                 let lam_col = base + ld * dim + a;
                                 B[dof_row * ns + lam_col] += tau * wf * phi[i] * psi[ld];
                             }
@@ -445,6 +458,9 @@ where
             }
         }
 
+        // Static condensation: eliminate u in terms of λ
+        // Local system: A u = f_u - B λ
+        // u = A^{-1} f_u - A^{-1} B λ = u0 + U_λ · λ
         let a_inv = invert_dense(&A, nu).unwrap_or_else(|| {
             let s: Vec<f64> = A.iter().map(|&v| v + 1e-12).collect();
             invert_dense(&s, nu).unwrap_or(vec![0.0; nu * nu])
@@ -560,6 +576,13 @@ mod tests {
             assert!(v.is_finite());
         }
         assert!(result.lambda.len() > 0);
+    }
+
+    #[test]
+    fn hdg_elasticity_2d_p2_finite() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let result = solve_hdg_elasticity_order(mesh, |_| vec![0.0,0.0], 1.0, 1.0, 2);
+        assert!(result.u.iter().all(|v|v.is_finite()) && result.lambda.iter().all(|v|v.is_finite()));
     }
 
     #[test]
