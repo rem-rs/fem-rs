@@ -113,6 +113,7 @@ pub mod dpg_3d;
 pub mod dg_euler_2d;
 pub mod dg_euler_3d;
 pub mod dg_cdr;
+pub mod dg_ldg;
 pub mod navier_stokes;
 pub use navier_stokes::{
     assemble_convection_matrix, assemble_divergence_matrix,
@@ -131,6 +132,10 @@ pub mod hdg_elasticity;
 pub mod hdg_maxwell;
 
 pub mod pa;
+pub mod surface;
+pub mod xfem;
+pub mod xfem_level_set;
+pub mod xfem_integrators;
 
 #[cfg(feature = "reed")]
 pub mod reed;

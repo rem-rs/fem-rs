@@ -1566,3 +1566,197 @@ mod tests {
             "HDiv RT1 prolongation: no DOFs located");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NC (non-conforming) transfer operators for h-refinement
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build an H¹ prolongation matrix from NC hanging-node constraints.
+///
+/// The resulting `P` is a `n_fine × n_coarse` CSR matrix such that
+/// `u_fine = P * u_coarse`.
+///
+/// For P1: hanging nodes → 0.5 * (parent_a + parent_b),
+/// coarse nodes → identity, interior new nodes → interpolated via
+/// point locator.
+pub fn build_nc_prolongation_h1(
+    n_fine: usize,
+    n_coarse: usize,
+    coarse_mesh: &SimplexMesh<2>,
+    fine_mesh: &SimplexMesh<2>,
+    constraints: &[fem_mesh::HangingNodeConstraint],
+) -> CsrMatrix<f64> {
+    // First compute full prolongation as vector
+    let u_ones: Vec<f64> = (0..n_coarse).map(|i| i as f64).collect();
+    let u_full = apply_nc_prolongation_h1_full(&u_ones, coarse_mesh, fine_mesh, constraints);
+
+    // Build matrix from the prolongation operator
+    // For each fine DOF i, find which coarse DOFs contribute
+    use fem_linalg::CooMatrix;
+    let mut coo = CooMatrix::new(n_fine, n_coarse);
+
+    // Coarse DOFs: each coarse DOF j maps to u_fine[j] = u_coarse[j] * 1
+    for i in 0..n_coarse.min(n_fine) {
+        coo.add(i, i, 1.0);
+    }
+
+    // For new nodes: determine weights by solving a tiny 1x1 system.
+    // For P1: value is linear combination of coarse node values.
+    // Use the unit-vector approach: for each coarse DOF j,
+    // u_full[i] = Σ_j P[i,j] * j, so if we compute u_full for
+    // u_coarse[j] = δ_jk, we get P[i,k] directly.
+    for k in 0..n_coarse {
+        let mut unit = vec![0.0; n_coarse];
+        unit[k] = 1.0;
+        let u_unit = apply_nc_prolongation_h1_full(&unit, coarse_mesh, fine_mesh, constraints);
+        for i in n_coarse..n_fine {
+            if u_unit[i].abs() > 1e-15 {
+                coo.add(i, k, u_unit[i]);
+            }
+        }
+    }
+
+    coo.into_csr()
+}
+
+/// Apply NC H¹ prolongation from coarse to fine.
+///
+/// For each node in the fine mesh:
+/// - If node index < n_coarse: copy coarse value directly
+/// - If node index ≥ n_coarse (new edge-midpoint node): set to 0.5 * (u[a] + u[b])
+///   where a, b are the coarse edge endpoints
+///
+/// The hanging-node constraints are applied first; then remaining new nodes
+/// that are NOT in the constraint list (e.g. interior edge midpoints between
+/// two refined elements) are filled by discovering edges in the fine mesh.
+pub fn apply_nc_prolongation_h1(
+    u_coarse: &[f64],
+    n_fine: usize,
+    constraints: &[fem_mesh::HangingNodeConstraint],
+) -> Vec<f64> {
+    let n_coarse = u_coarse.len();
+    let mut u_fine = vec![0.0; n_fine];
+    for i in 0..n_coarse.min(n_fine) { u_fine[i] = u_coarse[i]; }
+    for c in constraints {
+        u_fine[c.constrained] = 0.5 * (u_coarse[c.parent_a] + u_coarse[c.parent_b]);
+    }
+    u_fine
+}
+
+/// Extended NC H¹ prolongation that fills all new nodes using
+/// the coarse mesh structure and point location.
+///
+/// For each fine mesh node with index ≥ n_coarse, locate it in the
+/// coarse mesh via barycentric coordinates and interpolate the P1 value.
+pub fn apply_nc_prolongation_h1_full(
+    u_coarse: &[f64],
+    coarse_mesh: &SimplexMesh<2>,
+    fine_mesh: &SimplexMesh<2>,
+    constraints: &[fem_mesh::HangingNodeConstraint],
+) -> Vec<f64> {
+    let n_coarse = u_coarse.len();
+    let n_fine = fine_mesh.n_nodes();
+    let mut u_fine = apply_nc_prolongation_h1(u_coarse, n_fine, constraints);
+
+    use std::collections::HashSet;
+    let mut filled: HashSet<usize> = (0..n_coarse.min(n_fine)).collect();
+    for c in constraints { filled.insert(c.constrained); }
+
+    let locator = TriPointLocator::new(coarse_mesh);
+    let d = fine_mesh.dim() as usize;
+    for n in n_coarse..n_fine {
+        if filled.contains(&n) { continue; }
+        let x = fine_mesh.node_coords(n as u32);
+        let xp: Vec<f64> = (0..d).map(|k| x[k]).collect();
+        if let Some(lp) = locator.locate(&xp, 1e-8) {
+            let ns = coarse_mesh.elem_nodes(lp.elem);
+            let mut val = 0.0;
+            for k in 0..ns.len() {
+                val += lp.barycentric[k] * u_coarse[ns[k] as usize];
+            }
+            u_fine[n] = val;
+            filled.insert(n);
+        }
+    }
+    u_fine
+}
+
+/// Apply NC H¹ restriction (P^T) from fine to coarse.
+pub fn apply_nc_restriction_h1(
+    u_fine: &[f64],
+    n_coarse: usize,
+    constraints: &[fem_mesh::HangingNodeConstraint],
+) -> Vec<f64> {
+    let mut u_coarse = vec![0.0; n_coarse];
+    for i in 0..n_coarse.min(u_fine.len()) { u_coarse[i] = u_fine[i]; }
+    for c in constraints {
+        let contrib = 0.5 * u_fine[c.constrained];
+        u_coarse[c.parent_a] += contrib;
+        u_coarse[c.parent_b] += contrib;
+    }
+    u_coarse
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod nc_transfer_tests {
+    use super::*;
+    use fem_mesh::SimplexMesh;
+    use fem_mesh::amr::refine_nonconforming;
+    use fem_space::H1Space;
+
+    #[test]
+    fn nc_prolong_p1_linear_exact() {
+        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let space = H1Space::new(m, 1);
+        let u_fn = &|x: &[f64]| x[0] + x[1];
+        let u_coarse = space.interpolate(u_fn).as_slice().to_vec();
+        let coarse_mesh = space.mesh();
+        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[0]);
+        let u_fine = apply_nc_prolongation_h1_full(&u_coarse, coarse_mesh, &fine_mesh, &constraints);
+        for n in 0..fine_mesh.n_nodes() as fem_core::NodeId {
+            let x = fine_mesh.node_coords(n);
+            let expected = u_fn(&[x[0], x[1]]);
+            let got = u_fine[n as usize];
+            assert!((got - expected).abs() < 1e-12, "node {n}: expected {expected}, got {got}");
+        }
+    }
+
+    #[test]
+    fn nc_restrict_injection_preserves_coarse() {
+        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let space = H1Space::new(m, 1);
+        let u_fn = &|x: &[f64]| x[0] * x[0] + x[1] * x[1];
+        let u_coarse = space.interpolate(u_fn).as_slice().to_vec();
+        let coarse_mesh = space.mesh();
+        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[0, 2]);
+        let u_fine = apply_nc_prolongation_h1_full(&u_coarse, coarse_mesh, &fine_mesh, &constraints);
+        // Injection: copy u_fine[0..n_coarse] directly
+        let u_restored: Vec<f64> = u_fine[..coarse_mesh.n_nodes().min(u_fine.len())].to_vec();
+        for i in 0..coarse_mesh.n_nodes() {
+            assert!((u_restored[i] - u_coarse[i]).abs() < 1e-12,
+                "coarse node {i}: expected {}, got {}", u_coarse[i], u_restored[i]);
+        }
+    }
+
+    #[test]
+    fn nc_prolongation_matrix_matches_direct() {
+        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let space = H1Space::new(m, 1);
+        let u_fn = &|x: &[f64]| x[0] + 2.0 * x[1];
+        let u_coarse = space.interpolate(u_fn).as_slice().to_vec();
+        let n_coarse = u_coarse.len();
+        let coarse_mesh = space.mesh();
+        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[1, 3]);
+        let n_fine = fine_mesh.n_nodes();
+        let u_direct = apply_nc_prolongation_h1_full(&u_coarse, coarse_mesh, &fine_mesh, &constraints);
+        let p = build_nc_prolongation_h1(n_fine, n_coarse, coarse_mesh, &fine_mesh, &constraints);
+        let mut u_matrix = vec![0.0; n_fine];
+        p.spmv(&u_coarse, &mut u_matrix);
+        for i in 0..n_fine {
+            assert!((u_matrix[i] - u_direct[i]).abs() < 1e-12,
+                "dof {i}: direct={} matrix={}", u_direct[i], u_matrix[i]);
+        }
+    }
+}

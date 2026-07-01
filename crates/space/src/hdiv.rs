@@ -694,7 +694,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         // on reference [-1,1]², mapped via Piola transform.
                         use fem_element::quadrature::quad_rule;
                         let qr = quad_rule(4);
-                        let jac_ref = 4.0; // area of [-1,1]²
+                        let _jac_ref = 4.0; // area of [-1,1]² (kept for documentation)
                         for e in 0..n_elem as u32 {
                             let dofs = self.element_dofs(e);
                             let nodes = self.mesh.element_nodes(e);
@@ -736,11 +736,11 @@ impl<M: MeshTopology> HDivSpace<M> {
                                 // Interior DOFs in ref coords: ∫ F_x_ref, ∫ ξ F_x_ref, ∫ F_y_ref, ∫ η F_y_ref
                                 let f_ref_x = fval[0] * j11 / det_j - fval[1] * j01 / det_j;
                                 let f_ref_y = fval[1] * j00 / det_j - fval[0] * j10 / det_j;
-                                let w_j = w * jac_ref;
-                                int_x  += w_j * f_ref_x;
-                                int_xx += w_j * xi0 * f_ref_x;
-                                int_y  += w_j * f_ref_y;
-                                int_yy += w_j * xi1 * f_ref_y;
+                                let w_ref = w; // weights already sum to area of [-1,1]² (=4)
+                                int_x  += w_ref * f_ref_x;
+                                int_xx += w_ref * xi0 * f_ref_x;
+                                int_y  += w_ref * f_ref_y;
+                                int_yy += w_ref * xi1 * f_ref_y;
                             }
                             let r = result.as_slice_mut();
                             r[bub_x]  = int_x  * det_j;
