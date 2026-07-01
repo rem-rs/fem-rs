@@ -12,6 +12,7 @@ use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_assembly::Assembler;
 use fem_solver::solve_cg;
 use fem_solver::SolverConfig;
+use fem_space::constraints::boundary_dofs;
 
 fn cpu_matrix(label: &str, n: usize, integrator: &dyn fem_assembly::BilinearIntegrator, quad: u8) -> CsrMatrix<f64> {
     let mesh = SimplexMesh::<2>::unit_square_tri(n);
@@ -317,4 +318,68 @@ fn gpu_vs_cpu_elasticity_tet4_f64() {
     }
     eprintln!("Elasticity Tet4 f64: max_rel={:.3e}", max_rel);
     assert!(max_rel < 1e-10_f64, "Tet4 Elasticity mismatch: {:.3e}", max_rel);
+}
+
+// ─── End-to-end: GPU assembly → GPU solve vs CPU assembly → CPU solve ───────
+
+#[test]
+#[ignore]
+fn e2e_gpu_assemble_solve_poisson_2d() {
+    let n = 8;
+    // ── CPU path ───────────────────────────────────────────────────────────
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let space = H1Space::new(mesh.clone(), 1);
+    let dm = fem_space::DofManager::new(&mesh, 1);
+    let a_cpu = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
+    let f = |x: &[f64]| 2.0 * std::f64::consts::PI.powi(2)
+        * (std::f64::consts::PI * x[0]).sin() * (std::f64::consts::PI * x[1]).sin();
+    let mut rhs_cpu = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(f)], 3);
+    let bdofs: Vec<usize> = boundary_dofs(&mesh, &dm, &[1, 2, 3, 4]).iter()
+        .map(|&d| d as usize).collect();
+    let mut a_cpu_mut = a_cpu;
+    fem_space::constraints::apply_dirichlet(&mut a_cpu_mut, &mut rhs_cpu, &bdofs.iter().map(|&d| d as u32).collect::<Vec<_>>(), &vec![0.0; bdofs.len()]);
+    let mut u_cpu = vec![0.0; space.n_dofs()];
+    solve_cg(&a_cpu_mut, &rhs_cpu, &mut u_cpu, &SolverConfig { rtol: 1e-8, ..Default::default() })
+        .expect("CPU CG solve");
+
+    // ── GPU path ───────────────────────────────────────────────────────────
+    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
+
+    // 1. GPU assembly via f64 shader
+    let mesh_g = SimplexMesh::<2>::unit_square_tri(n);
+    let space_g = H1Space::new(mesh_g, 1);
+    let (elem_nodes, elem_dofs, n_elem) = extract_tri3_p1(&space_g);
+
+    use fem_linalg_gpu::assembly::assemble_poisson_2d_p1_f64;
+    let triplets = assemble_poisson_2d_p1_f64(&gpu, &elem_nodes, &elem_dofs, n_elem);
+
+    let n_dofs = space_g.n_dofs() as u32;
+    let mut coo_gpu = fem_linalg::CooMatrix::new(n_dofs as usize, n_dofs as usize);
+    for &(r, c, v) in &triplets { if v != 0.0 { coo_gpu.add(r as usize, c as usize, v); } }
+    let csr_gpu: CsrMatrix<f64> = coo_gpu.into_csr();
+
+    // Apply Dirichlet BCs
+    let mut a_bc = csr_gpu;
+    let mut rhs_gpu = vec![0.0; n_dofs as usize];
+    for &d in &bdofs { a_bc.apply_dirichlet_row_zeroing(d, 0.0, &mut rhs_gpu); rhs_gpu[d] = 0.0; }
+
+    use fem_linalg_gpu::{GpuVector, GpuCsrMatrix, SpmvPipeline, VectorOpsPipeline, solve_cg_gpu};
+    let spmv = SpmvPipeline::new(&gpu.device, true);
+    let vops = VectorOpsPipeline::new(&gpu.device, true);
+    let gpu_mat_bc = GpuCsrMatrix::<f64>::from_cpu(&gpu, &a_bc);
+    let b_gpu = GpuVector::<f64>::from_slice(&gpu, &rhs_gpu);
+    let mut x_gpu = GpuVector::<f64>::zeros(&gpu, n_dofs);
+
+    let result = solve_cg_gpu::<f64>(&gpu, &spmv, &vops, &gpu_mat_bc, &b_gpu, &mut x_gpu, 1e-8, 2000);
+    assert!(result.is_ok(), "GPU CG solve failed: {:?}", result.err());
+    let u_gpu = x_gpu.read_to_cpu(&gpu);
+
+    // ── Compare ────────────────────────────────────────────────────────────
+    let diff_norm: f64 = u_cpu.iter().zip(u_gpu.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+    let ref_norm: f64 = u_cpu.iter().map(|a| a.powi(2)).sum();
+    let err = (diff_norm / ref_norm.max(1e-300)).sqrt();
+    eprintln!("E2E Poisson 2D f64: CPU DOF={}, GPU DOF={}, rel_error={:.3e}",
+        u_cpu.len(), u_gpu.len(), err);
+    assert!(err < 1e-6, "E2E GPU vs CPU solution mismatch: {:.3e}", err);
 }
