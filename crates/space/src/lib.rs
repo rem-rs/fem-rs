@@ -28,10 +28,12 @@ pub mod vector_h1;
 pub mod skeleton;
 pub mod block_fe_space;
 pub mod trace_spaces;
+pub mod cr_space;
 
 pub use dof_manager::{DofManager, EdgeKey, FaceKey};
 pub use fe_space::{FESpace, SpaceType};
 pub use h1::H1Space;
+pub use cr_space::CRSpace;
 pub use h1_trace::H1TraceSpace;
 pub use l2::L2Space;
 pub use hcurl::HCurlSpace;
