@@ -21,3 +21,10 @@ amg     = ["dep:fem-amg"]
 
 [lib]
 crate-type = ["lib"]
+
+[dev-dependencies]
+fem-mesh     = { path = "../mesh" }
+fem-space    = { path = "../space" }
+fem-assembly = { path = "../assembly" }
+fem-solver   = { path = "../solver" }
+fem-element  = { path = "../element" }

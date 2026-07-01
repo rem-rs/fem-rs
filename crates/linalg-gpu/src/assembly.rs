@@ -88,6 +88,14 @@ struct GpuElementInputF64Tri3 {
     _pad: u32,
 }
 
+/// f64 GPU-side element input for P1 triangle elasticity (3 nodes × 2 DOFs).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuElementInputF64Tri3Elastic {
+    nodes: [f64; 6],
+    dofs: [u32; 6],
+}
+
 fn run_assembly_shader(
     gpu: &GpuContext,
     elem_bytes: &[u8],
@@ -336,6 +344,85 @@ fn run_assembly_shader_f64(
     result
 }
 
+/// Dispatch an f64 assembly shader with custom uniform parameters.
+fn run_assembly_shader_f64_with_params(
+    gpu: &GpuContext,
+    elem_bytes: &[u8],
+    n_elem: usize,
+    entries_per_elem: usize,
+    shader_wgsl: &str,
+    param_bytes: &[u8],
+) -> Vec<(u32, u32, f64)> {
+    assert!(gpu.features.native_f64, "SHADER_F64 required");
+    let device = &gpu.device; let queue = &gpu.queue;
+    let eb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu_f64p_elems"), contents: elem_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+    let tbl = (n_elem * entries_per_elem * size_of::<GpuCooTripletF64>()) as u64;
+    let cb = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu_f64p_coo"), size: tbl,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let sb = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu_f64p_staging"), size: tbl,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let pb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("gpu_f64p_params"), contents: param_bytes,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("gpu_f64p_shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_wgsl)),
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("gpu_f64p_bgl"), entries: &[
+            wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+        ],
+    });
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gpu_f64p_bg"), layout: &bgl, entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: eb.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: cb.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: pb.as_entire_binding() },
+        ],
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("gpu_f64p_pl"), bind_group_layouts: &[&bgl], push_constant_ranges: &[],
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("gpu_f64p_pipeline"), layout: Some(&pl),
+        module: &shader, entry_point: Some("main"),
+        compilation_options: Default::default(), cache: None,
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpu_f64p_enc") });
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpu_f64p_pass"), timestamp_writes: None });
+        pass.set_pipeline(&pipeline); pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups(((n_elem as u32) + 63) / 64, 1, 1);
+    }
+    enc.copy_buffer_to_buffer(&cb, 0, &sb, 0, tbl);
+    queue.submit(Some(enc.finish()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let slice = sb.slice(..);
+    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv().unwrap().unwrap();
+    let data = slice.get_mapped_range();
+    let triplets: &[GpuCooTripletF64] = bytemuck::cast_slice(&data);
+    let mut result = Vec::with_capacity(n_elem * entries_per_elem);
+    for t in triplets { if t.val != 0.0 { result.push((t.row, t.col, t.val)); } }
+    drop(data); drop(sb); result
+}
+
 /// Assemble 2D Poisson P1 on GPU using true f64 WGSL shader.
 /// Requires `gpu.features.native_f64` for SHADER_F64 support.
 /// Returns f64 COO triplets for direct conversion to GpuCsrMatrix<f64>.
@@ -366,6 +453,66 @@ pub fn assemble_poisson_2d_p1_f64(
 
     let bytes = bytemuck::cast_slice(&inputs);
     run_assembly_shader_f64(gpu, bytes, n_elem, 9, include_str!("assembly_poisson_tri3_f64.wgsl"))
+}
+
+/// Assemble 2D mass matrix on GPU using f64 (requires SHADER_F64).
+pub fn assemble_mass_2d_tri3_f64(
+    gpu: &GpuContext,
+    elem_nodes: &[f64],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f64)> {
+    assert!(gpu.features.native_f64, "f64 GPU assembly requires SHADER_F64");
+    assert_eq!(elem_nodes.len(), n_elem * 6);
+    assert_eq!(elem_dofs.len(), n_elem * 3);
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 6; let db = e * 3;
+        inputs.push(GpuElementInputF64Tri3 {
+            nodes: [elem_nodes[nb], elem_nodes[nb+1], elem_nodes[nb+2],
+                    elem_nodes[nb+3], elem_nodes[nb+4], elem_nodes[nb+5]],
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2]],
+            _pad: 0,
+        });
+    }
+    let bytes = bytemuck::cast_slice(&inputs);
+    run_assembly_shader_f64(gpu, bytes, n_elem, 9, include_str!("assembly_mass_tri3_f64.wgsl"))
+}
+
+/// Assemble 2D elasticity stiffness matrix on GPU using f64 (requires SHADER_F64).
+pub fn assemble_elasticity_2d_tri3_f64(
+    gpu: &GpuContext,
+    elem_nodes: &[f64],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    lambda: f64,
+    mu: f64,
+) -> Vec<(u32, u32, f64)> {
+    assert!(gpu.features.native_f64, "f64 GPU assembly requires SHADER_F64");
+    assert_eq!(elem_nodes.len(), n_elem * 6);
+    assert_eq!(elem_dofs.len(), n_elem * 6);
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 6; let db = e * 6;
+        inputs.push(GpuElementInputF64Tri3Elastic {
+            nodes: [elem_nodes[nb], elem_nodes[nb+1], elem_nodes[nb+2],
+                    elem_nodes[nb+3], elem_nodes[nb+4], elem_nodes[nb+5]],
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2],
+                   elem_dofs[db+3], elem_dofs[db+4], elem_dofs[db+5]],
+        });
+    }
+    // Pack params: [n_elems(u32), pad(u32), lambda(f64), mu(f64)] = 24 bytes
+    let p32 = n_elem as u32;
+    let param_bytes: Vec<u8> = p32.to_le_bytes().into_iter()
+        .chain(0u32.to_le_bytes())  // padding
+        .chain(lambda.to_le_bytes())
+        .chain(mu.to_le_bytes())
+        .collect();
+    run_assembly_shader_f64_with_params(
+        gpu, bytemuck::cast_slice(&inputs), n_elem, 36,
+        include_str!("assembly_elasticity_tri3_f64.wgsl"),
+        &param_bytes,
+    )
 }
 
 fn triplets_to_gpu_csr_f64(
