@@ -5,7 +5,8 @@
 //!
 //! Built via Vandermonde from monomials + face-average DOFs with Gauss quadrature.
 
-use crate::reference::{QuadratureRule, VectorReferenceElement};
+use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
+use crate::quadrature;
 
 const EDGE_GEOM: [([f64; 2], [f64; 2]); 4] = [
     ([-1.0, -1.0], [1.0, -1.0]),  // bottom
@@ -100,6 +101,28 @@ impl QuadQ1Rot {
             grads[i*2]   = c[i][0]*dm[0][0] + c[i][1]*dm[1][0] + c[i][2]*dm[2][0] + c[i][3]*dm[3][0];
             grads[i*2+1] = c[i][0]*dm[0][1] + c[i][1]*dm[1][1] + c[i][2]*dm[2][1] + c[i][3]*dm[3][1];
         }
+    }
+}
+
+/// Scalar Q1_rot reference element on [-1,1]² (4 edge-average DOFs).
+pub struct Q1RotRef;
+impl ReferenceElement for Q1RotRef {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { 1 }
+    fn n_dofs(&self) -> usize { 4 }
+    fn eval_basis(&self, xi: &[f64], vals: &mut [f64]) { QuadQ1Rot::eval_basis(xi, vals); }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) { QuadQ1Rot::eval_grad_basis(xi, grads); }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        let o = (order as usize).max(3);
+        let (x1d, w1d) = crate::quadrature::gauss_legendre_arbitrary(o);
+        let nq = x1d.len();
+        let mut pts = Vec::with_capacity(nq * nq);
+        let mut wts = Vec::with_capacity(nq * nq);
+        for i in 0..nq { for j in 0..nq { pts.push(vec![x1d[i], x1d[j]]); wts.push(w1d[i] * w1d[j]); }}
+        QuadratureRule { points: pts, weights: wts }
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![vec![0.0, -1.0], vec![1.0, 0.0], vec![0.0, 1.0], vec![-1.0, 0.0]]
     }
 }
 

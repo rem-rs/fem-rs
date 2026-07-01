@@ -63,7 +63,8 @@ pub use lagrange::{HexQ1, HexQ2, HexQ3, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadP1, 
 pub use nedelec::{TriND1, TriND2, TriNDk, QuadND1, QuadND2, QuadNDk, HexND1, HexND2, HexNDk, TetND1, TetND2, TetNDk, PrismND1, PrismNDk, PyraND1, PyraNDk};
 pub use raviart_thomas::{TriRT0, TriRTk, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, TetRTk, QuadRT0, QuadRTk, HexRT0, HexRTk, QuadRT1, HexRT1, PrismRT0, PrismRTk, PyraRT0, PyraRTk};
 pub use brezzi_douglas_marini::{QuadBDMk, TriBDMk, TetBDMk, HexBDMk};
-pub use nonconforming::{QuadQ1Rot, QuadQ1RotVec};
+pub use nonconforming::{QuadQ1Rot, QuadQ1RotVec, Q1RotRef};
+pub use crouzeix_raviart::{CrouzeixRaviart1, CrouzeixRaviartVec1, CrTri1, CrTri2, CrTet1, CrTet2, cr1_basis, cr1_grad, cr1_tet_basis, cr1_tet_grad, cr2_tri_basis, cr2_tri_grad, cr2_tet_basis, cr2_tet_grad};
 pub use nurbs::{KnotVector, BSplineBasis1D, NurbsPatch2D, NurbsPatch3D,
                 NurbsMesh2D, NurbsMesh3D, greville_abscissae};
 

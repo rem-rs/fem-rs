@@ -6,7 +6,8 @@
 //!
 //! DOFs are face-average integrals; higher order uses Vandermonde.
 
-use crate::VectorReferenceElement;
+use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
+use crate::quadrature;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TriCR1 (backward compat)
@@ -14,6 +15,20 @@ use crate::VectorReferenceElement;
 
 pub struct CrouzeixRaviart1 { _priv: () }
 impl CrouzeixRaviart1 { pub fn new() -> Self { CrouzeixRaviart1 { _priv: () } } }
+
+/// CR1 scalar reference element on the reference triangle (3 edge-midpoint DOFs).
+pub struct CrTri1;
+impl ReferenceElement for CrTri1 {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { 1 }
+    fn n_dofs(&self) -> usize { 3 }
+    fn eval_basis(&self, xi: &[f64], vals: &mut [f64]) { cr1_basis(xi, vals); }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) { cr1_grad(xi, grads); }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quadrature::tri_rule(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![vec![0.5,0.0], vec![0.5,0.5], vec![0.0,0.5]]
+    }
+}
 
 pub fn cr1_basis(xi: &[f64], vals: &mut [f64]) {
     vals[0] = 1.0 - 2.0 * xi[1];
@@ -71,6 +86,25 @@ fn normal_eq(c: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
     coeff
 }
 
+fn direct_invert(v: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
+    let mut a = v.to_vec();
+    let mut inv = vec![vec![0.0_f64; n]; n];
+    for i in 0..n { inv[i][i] = 1.0; }
+    for col in 0..n {
+        let mut mr = col; let mut mv = a[col][col].abs();
+        for r in (col+1)..n { let x = a[r][col].abs(); if x > mv { mv = x; mr = r; }}
+        if mv < 1e-30 { continue; }
+        a.swap(col, mr); inv.swap(col, mr);
+        let ip = 1.0 / a[col][col];
+        for j in 0..n { a[col][j] *= ip; inv[col][j] *= ip; }
+        for r in 0..n { if r == col { continue; } let f = a[r][col];
+            for j in 0..n { a[r][j] -= f * a[col][j]; inv[r][j] -= f * inv[col][j]; }}
+    }
+    let mut coeff = Vec::with_capacity(n * m);
+    for i in 0..n { for j in 0..n { coeff.push(inv[j][i]); }}
+    coeff
+}
+
 fn gl4() -> ([f64; 4], [f64; 4]) {
     ([0.0694318442029737, 0.3300094782075719, 0.6699905217924281, 0.9305681557970263],
      [0.1739274225687269, 0.3260725774312731, 0.3260725774312731, 0.1739274225687269])
@@ -79,7 +113,7 @@ fn gl4() -> ([f64; 4], [f64; 4]) {
 fn tri_quad6() -> ([[f64; 2]; 6], [f64; 6]) {
     let p = [[1.0/6.0, 1.0/6.0], [2.0/3.0, 1.0/6.0], [1.0/6.0, 2.0/3.0],
              [0.2, 0.2], [0.6, 0.2], [0.2, 0.6]];
-    let w = [1.0/12.0; 6]; (p, w)  // sum = 1/2 (area of reference triangle)  
+    let w = [1.0/12.0; 6]; (p, w)
 }
 
 fn mono2d(k: usize) -> Vec<(usize, usize)> {
@@ -153,6 +187,42 @@ pub fn cr2_tri_basis(xi: &[f64], vals: &mut [f64]) {
     }
 }
 
+/// Gradient of the 6 TriCR2 basis functions at `xi`.
+///
+/// Output layout: `grads[6×2]` row-major: `grads[i*2+d]` = ∂φ_i/∂x_d.
+pub fn cr2_tri_grad(xi: &[f64], grads: &mut [f64]) {
+    let (coeff, m, monos) = cr2_tri_cache();
+    let (x, y) = (xi[0], xi[1]);
+    for i in 0..6 {
+        let (mut gx, mut gy) = (0.0_f64, 0.0_f64);
+        for (j, (a, b)) in monos.iter().enumerate() {
+            let c = coeff[i * m + j];
+            let (sa, sb) = (*a as i32, *b as i32);
+            gx += if sa > 0 { c * sa as f64 * x.powi(sa-1) * y.powi(sb) } else { 0.0 };
+            gy += if sb > 0 { c * sb as f64 * x.powi(sa) * y.powi(sb-1) } else { 0.0 };
+        }
+        grads[i*2] = gx;
+        grads[i*2+1] = gy;
+    }
+}
+
+/// CR2 scalar reference element on the reference triangle (6 edge-moment DOFs).
+///
+/// Basis functions are defined via Vandermonde: DOFs are face-average and
+/// edge-linear-moment integrals.
+pub struct CrTri2;
+impl ReferenceElement for CrTri2 {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { 2 }
+    fn n_dofs(&self) -> usize { 6 }
+    fn eval_basis(&self, xi: &[f64], vals: &mut [f64]) { cr2_tri_basis(xi, vals); }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) { cr2_tri_grad(xi, grads); }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quadrature::tri_rule(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![vec![0.5,0.0], vec![0.5,0.0], vec![0.5,0.5], vec![0.5,0.5], vec![0.0,0.5], vec![0.0,0.5]]
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // TetCR1 — scalar, 4 DOFs (1 per face, face-average)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -202,25 +272,6 @@ fn tet_cr1_build() -> (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
     (direct_invert(&v, n, m), m, monos)
 }
 
-fn direct_invert(v: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
-    let mut a = v.to_vec();
-    let mut inv = vec![vec![0.0_f64; n]; n];
-    for i in 0..n { inv[i][i] = 1.0; }
-    for col in 0..n {
-        let mut mr = col; let mut mv = a[col][col].abs();
-        for r in (col+1)..n { let x = a[r][col].abs(); if x > mv { mv = x; mr = r; }}
-        if mv < 1e-30 { continue; }
-        a.swap(col, mr); inv.swap(col, mr);
-        let ip = 1.0 / a[col][col];
-        for j in 0..n { a[col][j] *= ip; inv[col][j] *= ip; }
-        for r in 0..n { if r == col { continue; } let f = a[r][col];
-            for j in 0..n { a[r][j] -= f * a[col][j]; inv[r][j] -= f * inv[col][j]; }}
-    }
-    let mut coeff = Vec::with_capacity(n * m);
-    for i in 0..n { for j in 0..n { coeff.push(inv[j][i]); }}
-    coeff
-}
-
 fn tet_cr1_cache() -> &'static (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
     use std::sync::OnceLock;
     static C: OnceLock<(Vec<f64>, usize, Vec<(usize, usize, usize)>)> = OnceLock::new();
@@ -242,18 +293,31 @@ pub fn cr1_tet_basis(xi: &[f64], vals: &mut [f64]) {
 ///
 /// Output layout: `grads[3*i + d]` = ∂φ_i / ∂x_d.
 pub fn cr1_tet_grad(xi: &[f64], grads: &mut [f64]) {
-    let monos = mono3d(1);
     let (coeff, m, _) = tet_cr1_cache();
-    // monomial gradients at xi:
-    // mon0 = 1     → ∂=0
-    // mon1 = x     → (1,0,0)
-    // mon2 = y     → (0,1,0)
-    // mon3 = z     → (0,0,1)
     for i in 0..4 {
         let off = i * m;
-        grads[3*i]   = coeff[off + 1];         // φ_i = c0 + c1*x + c2*y + c3*z
+        grads[3*i]   = coeff[off + 1];
         grads[3*i+1] = coeff[off + 2];
         grads[3*i+2] = coeff[off + 3];
+    }
+}
+
+/// CR1 scalar reference element on the reference tetrahedron (4 face-average DOFs).
+pub struct CrTet1;
+impl ReferenceElement for CrTet1 {
+    fn dim(&self) -> u8 { 3 }
+    fn order(&self) -> u8 { 1 }
+    fn n_dofs(&self) -> usize { 4 }
+    fn eval_basis(&self, xi: &[f64], vals: &mut [f64]) { cr1_tet_basis(xi, vals); }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) { cr1_tet_grad(xi, grads); }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quadrature::tet_rule(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![
+            vec![1.0/3.0, 1.0/3.0, 1.0/3.0], // face 0 centroid (opposite v0)
+            vec![0.0,      1.0/3.0, 1.0/3.0], // face 1 centroid (opposite v1)
+            vec![1.0/3.0, 0.0,      1.0/3.0], // face 2 centroid (opposite v2)
+            vec![1.0/3.0, 1.0/3.0, 0.0     ], // face 3 centroid (opposite v3)
+        ]
     }
 }
 
@@ -360,11 +424,10 @@ pub fn cr2_tet_basis(xi: &[f64], vals: &mut [f64]) {
 pub fn cr2_tet_grad(xi: &[f64], grads: &mut [f64]) {
     let (coeff, m, monos) = tet_cr2_cache();
     // Precompute monomial gradient values at xi
-    let mut dm = vec![(0.0_f64, 0.0_f64, 0.0_f64); *m];
+        let mut dm = vec![(0.0_f64, 0.0_f64, 0.0_f64); *m];
     for (j, (a, b, c)) in monos.iter().enumerate() {
         let (sa, sb, sc) = (*a as i32, *b as i32, *c as i32);
         let x = xi[0]; let y = xi[1]; let z = xi[2];
-        let base = x.powi(sa) * y.powi(sb) * z.powi(sc);
         dm[j] = (
             if sa > 0 { sa as f64 * x.powi(sa-1) * y.powi(sb) * z.powi(sc) } else { 0.0 },
             if sb > 0 { sb as f64 * x.powi(sa) * y.powi(sb-1) * z.powi(sc) } else { 0.0 },
@@ -383,6 +446,32 @@ pub fn cr2_tet_grad(xi: &[f64], grads: &mut [f64]) {
         grads[3*i]   = gx;
         grads[3*i+1] = gy;
         grads[3*i+2] = gz;
+    }
+}
+
+/// CR2 scalar reference element on the reference tetrahedron (10 DOFs:
+/// 4 face-average + 6 edge-linear-moment).
+pub struct CrTet2;
+impl ReferenceElement for CrTet2 {
+    fn dim(&self) -> u8 { 3 }
+    fn order(&self) -> u8 { 2 }
+    fn n_dofs(&self) -> usize { 10 }
+    fn eval_basis(&self, xi: &[f64], vals: &mut [f64]) { cr2_tet_basis(xi, vals); }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) { cr2_tet_grad(xi, grads); }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quadrature::tet_rule(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![
+            vec![1.0/3.0,1.0/3.0,1.0/3.0], // face 0 centroid
+            vec![0.0,     1.0/3.0,1.0/3.0], // face 1 centroid
+            vec![1.0/3.0,0.0,     1.0/3.0], // face 2 centroid
+            vec![1.0/3.0,1.0/3.0,0.0     ], // face 3 centroid
+            vec![0.5,0.0,0.0], // edge 0 midpoint
+            vec![0.0,0.5,0.0], // edge 1 midpoint
+            vec![0.0,0.0,0.5], // edge 2 midpoint
+            vec![0.5,0.5,0.0], // edge 3 midpoint
+            vec![0.5,0.0,0.5], // edge 4 midpoint
+            vec![0.0,0.5,0.5], // edge 5 midpoint
+        ]
     }
 }
 
