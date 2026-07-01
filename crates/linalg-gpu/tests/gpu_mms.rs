@@ -169,3 +169,152 @@ fn extract_tri3_p1(space: &H1Space<SimplexMesh<2>>) -> (Vec<f64>, Vec<u32>, usiz
     }
     (elem_nodes, elem_dofs, n_elem)
 }
+
+/// Extract Tet4 P1 element data: node coords (12 per element) + DOF ids (4 per element).
+fn extract_tet4_p1(space: &H1Space<SimplexMesh<3>>) -> (Vec<f64>, Vec<u32>, usize) {
+    let mesh = space.mesh();
+    let n_elem = mesh.n_elems();
+    let mut elem_nodes = Vec::with_capacity(n_elem * 12);
+    let mut elem_dofs = Vec::with_capacity(n_elem * 4);
+    for e in 0..n_elem as u32 {
+        let ns = mesh.element_nodes(e);
+        for ni in ns.iter() {
+            let c = mesh.node_coords(*ni);
+            elem_nodes.push(c[0]); elem_nodes.push(c[1]); elem_nodes.push(c[2]);
+        }
+        let dofs = space.element_dofs(e);
+        for i in 0..dofs.len() { elem_dofs.push(dofs[i]); }
+    }
+    (elem_nodes, elem_dofs, n_elem)
+}
+
+// ─── Tet4 3D tests ─────────────────────────────────────────────────────────
+
+#[test]
+#[ignore]
+fn gpu_vs_cpu_poisson_tet4_f64() {
+    let n = 4;
+    use fem_mesh::SimplexMesh;
+    use fem_space::H1Space;
+    use fem_assembly::standard::DiffusionIntegrator;
+    use fem_assembly::Assembler;
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = H1Space::new(mesh, 1);
+    let cpu = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
+    eprintln!("CPU Poisson Tet4: {} DOF", space.n_dofs());
+
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = H1Space::new(mesh, 1);
+    let (elem_nodes, elem_dofs, n_elem) = extract_tet4_p1(&space);
+
+    use fem_linalg_gpu::assembly::assemble_poisson_3d_tet4_f64;
+    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
+
+    let triplets = assemble_poisson_3d_tet4_f64(&gpu, &elem_nodes, &elem_dofs, n_elem);
+    let mut coo = fem_linalg::CooMatrix::new(cpu.nrows, cpu.ncols);
+    for &(r,c,v) in &triplets { coo.add(r as usize, c as usize, v); }
+    let gpu_mat: fem_linalg::CsrMatrix<f64> = coo.into_csr();
+
+    let mut max_rel = 0.0_f64;
+    for i in 0..cpu.nrows.min(gpu_mat.nrows) {
+        for k in cpu.row_ptr[i]..cpu.row_ptr[i+1] {
+            let j = cpu.col_idx[k] as usize;
+            let diff = (cpu.values[k] - gpu_mat.get(i, j)).abs();
+            let rel = diff / cpu.values[k].abs().max(1.0_f64);
+            max_rel = max_rel.max(rel);
+        }
+    }
+    eprintln!("Poisson Tet4 f64: max_rel={:.3e}", max_rel);
+    assert!(max_rel < 1e-12_f64, "Tet4 Poisson mismatch: {:.3e}", max_rel);
+}
+
+#[test]
+#[ignore]
+fn gpu_vs_cpu_mass_tet4_f64() {
+    let n = 4;
+    use fem_mesh::SimplexMesh;
+    use fem_space::H1Space;
+    use fem_assembly::standard::MassIntegrator;
+    use fem_assembly::Assembler;
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = H1Space::new(mesh, 1);
+    let cpu = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
+    eprintln!("CPU Mass Tet4: {} DOF", space.n_dofs());
+
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = H1Space::new(mesh, 1);
+    let (elem_nodes, elem_dofs, n_elem) = extract_tet4_p1(&space);
+
+    use fem_linalg_gpu::assembly::assemble_mass_3d_tet4_f64;
+    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
+
+    let triplets = assemble_mass_3d_tet4_f64(&gpu, &elem_nodes, &elem_dofs, n_elem);
+    let mut coo = fem_linalg::CooMatrix::new(cpu.nrows, cpu.ncols);
+    for &(r,c,v) in &triplets { coo.add(r as usize, c as usize, v); }
+    let gpu_mat: fem_linalg::CsrMatrix<f64> = coo.into_csr();
+
+    let mut max_rel = 0.0_f64;
+    for i in 0..cpu.nrows.min(gpu_mat.nrows) {
+        for k in cpu.row_ptr[i]..cpu.row_ptr[i+1] {
+            let j = cpu.col_idx[k] as usize;
+            let diff = (cpu.values[k] - gpu_mat.get(i, j)).abs();
+            let rel = diff / cpu.values[k].abs().max(1.0_f64);
+            max_rel = max_rel.max(rel);
+        }
+    }
+    eprintln!("Mass Tet4 f64: max_rel={:.3e}", max_rel);
+    assert!(max_rel < 1e-12_f64, "Tet4 Mass mismatch: {:.3e}", max_rel);
+}
+
+#[test]
+#[ignore]
+fn gpu_vs_cpu_elasticity_tet4_f64() {
+    let n = 3;
+    use fem_mesh::SimplexMesh;
+    use fem_space::vector_h1::VectorH1Space;
+    use fem_assembly::standard::VectorDiffusionIntegrator;
+    use fem_assembly::Assembler;
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = VectorH1Space::new(mesh, 1, 3);
+    let cpu = Assembler::assemble_bilinear(&space, &[&VectorDiffusionIntegrator { kappa: 1.0 }], 3);
+    let n_dofs = cpu.nrows;
+    eprintln!("CPU Elasticity Tet4: {} DOF", n_dofs);
+
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = VectorH1Space::new(mesh, 1, 3);
+    let n_elem = space.mesh().n_elems();
+    let mut elem_nodes = Vec::with_capacity(n_elem * 12);
+    let mut elem_dofs = Vec::with_capacity(n_elem * 12);
+    for e in 0..n_elem as u32 {
+        let ns = space.mesh().element_nodes(e);
+        for ni in ns.iter() {
+            let c = space.mesh().node_coords(*ni);
+            elem_nodes.push(c[0]); elem_nodes.push(c[1]); elem_nodes.push(c[2]);
+        }
+        let dofs = space.element_dofs(e);
+        for i in 0..dofs.len() { elem_dofs.push(dofs[i]); }
+    }
+
+    use fem_linalg_gpu::assembly::assemble_elasticity_3d_tet4_f64;
+    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
+
+    let triplets = assemble_elasticity_3d_tet4_f64(&gpu, &elem_nodes, &elem_dofs, n_elem, 1.0, 1.0);
+    let mut coo = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
+    for &(r,c,v) in &triplets { coo.add(r as usize, c as usize, v); }
+    let gpu_mat: fem_linalg::CsrMatrix<f64> = coo.into_csr();
+
+    let mut max_rel = 0.0_f64;
+    for i in 0..cpu.nrows.min(gpu_mat.nrows) {
+        for k in cpu.row_ptr[i]..cpu.row_ptr[i+1] {
+            let j = cpu.col_idx[k] as usize;
+            let diff = (cpu.values[k] - gpu_mat.get(i, j)).abs();
+            let rel = diff / cpu.values[k].abs().max(1.0_f64);
+            max_rel = max_rel.max(rel);
+        }
+    }
+    eprintln!("Elasticity Tet4 f64: max_rel={:.3e}", max_rel);
+    assert!(max_rel < 1e-10_f64, "Tet4 Elasticity mismatch: {:.3e}", max_rel);
+}
