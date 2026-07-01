@@ -126,6 +126,113 @@ fn f_elasticity(x: &[f64]) -> [f64; 2] {
     [s - c, s - c]
 }
 
+// ─── 3-D elasticity MMS ─────────────────────────────────────────────────────
+// u = (sin(πx)sin(πy)sin(πz), 0, 0)  with λ=μ=1
+fn u_elasticity_3d(x: &[f64]) -> [f64; 3] {
+    let p = (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin();
+    [p, 0.0, 0.0]
+}
+
+fn f_elasticity_3d(x: &[f64]) -> [f64; 3] {
+    let sx = (PI * x[0]).sin(); let cx = (PI * x[0]).cos();
+    let sy = (PI * x[1]).sin(); let cy = (PI * x[1]).cos();
+    let sz = (PI * x[2]).sin(); let cz = (PI * x[2]).cos();
+    let u1 = sx * sy * sz;
+    // f₁ = -(λ+2μ)·∂²u₁/∂x² - μ·(∂²u₁/∂y² + ∂²u₁/∂z²)  for λ=μ=1:
+    //   = -3·u1_xx - 1·(u1_yy + u1_zz) = (3π²+π²+π²)·u1 = 5π²·u1
+    let f1 = 5.0 * PI * PI * u1;
+    // f₂ = -(λ+μ)·∂²u₁/∂x∂y = -2·π²·cx·cy·sz
+    let f2 = -2.0 * PI * PI * cx * cy * sz;
+    // f₃ = -(λ+μ)·∂²u₁/∂x∂z = -2·π²·cx·sy·cz
+    let f3 = -2.0 * PI * PI * cx * sy * cz;
+    [f1, f2, f3]
+}
+
+fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
+    use fem_element::lagrange::{TetP1, TetP2};
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = VectorH1Space::new(mesh.clone(), order, 3);
+    let n_scalar = space.n_scalar_dofs();
+
+    let elast = ElasticityIntegrator::new(1.0, 1.0);
+    let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 2 * order + 1);
+
+    let mut rhs = vec![0.0; space.n_dofs()];
+    let ref_elem: &dyn ReferenceElement = if order == 1 { &TetP1 } else { &TetP2 };
+    let quad = ref_elem.quadrature(2 * order + 1);
+    let n_ldofs = ref_elem.n_dofs();
+    let mut phi = vec![0.0; n_ldofs];
+
+    for e in mesh.elem_iter() {
+        let nodes = mesh.element_nodes(e);
+        let dofs = space.element_dofs(e);
+        let x0 = mesh.node_coords(nodes[0]); let x1 = mesh.node_coords(nodes[1]);
+        let x2 = mesh.node_coords(nodes[2]); let x3 = mesh.node_coords(nodes[3]);
+        let j = [[x1[0]-x0[0], x2[0]-x0[0], x3[0]-x0[0]],
+                 [x1[1]-x0[1], x2[1]-x0[1], x3[1]-x0[1]],
+                 [x1[2]-x0[2], x2[2]-x0[2], x3[2]-x0[2]]];
+        let det_j = j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])
+                  - j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])
+                  + j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0]);
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[q] * det_j.abs();
+            ref_elem.eval_basis(xi, &mut phi);
+            let xp = [
+                x0[0] + j[0][0]*xi[0] + j[0][1]*xi[1] + j[0][2]*xi[2],
+                x0[1] + j[1][0]*xi[0] + j[1][1]*xi[1] + j[1][2]*xi[2],
+                x0[2] + j[2][0]*xi[0] + j[2][1]*xi[1] + j[2][2]*xi[2],
+            ];
+            let f = f_elasticity_3d(&xp);
+            for k in 0..n_ldofs {
+                for d in 0..3 { rhs[dofs[3*k + d] as usize] += w * f[d] * phi[k]; }
+            }
+        }
+    }
+
+    let dm = space.scalar_dof_manager();
+    let bdofs_scalar = boundary_dofs(&mesh, dm, &[1, 2, 3, 4, 5, 6]);
+    let mut bdofs = Vec::new(); let mut bvals = Vec::new();
+    for &d in &bdofs_scalar {
+        for c in 0..3 { bdofs.push(d + c * n_scalar as u32); bvals.push(0.0); }
+    }
+    apply_dirichlet(&mut mat, &mut rhs, &bdofs, &bvals);
+
+    let uh = dense_solve(&mat, &rhs);
+
+    // L² error
+    let ref_elem_q: &dyn ReferenceElement = if order == 1 { &TetP1 } else { &TetP2 };
+    let quad_q = ref_elem_q.quadrature(2 * order + 2);
+    let mut err_sq = 0.0;
+    for e in mesh.elem_iter() {
+        let nodes = mesh.element_nodes(e);
+        let dofs = space.element_dofs(e);
+        let x0 = mesh.node_coords(nodes[0]); let x1 = mesh.node_coords(nodes[1]);
+        let x2 = mesh.node_coords(nodes[2]); let x3 = mesh.node_coords(nodes[3]);
+        let j = [[x1[0]-x0[0], x2[0]-x0[0], x3[0]-x0[0]],
+                 [x1[1]-x0[1], x2[1]-x0[1], x3[1]-x0[1]],
+                 [x1[2]-x0[2], x2[2]-x0[2], x3[2]-x0[2]]];
+        let det_j = j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])
+                  - j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])
+                  + j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0]);
+
+        for (q, xi) in quad_q.points.iter().enumerate() {
+            let w = quad_q.weights[q] * det_j.abs();
+            ref_elem_q.eval_basis(xi, &mut phi);
+            let xp = [
+                x0[0] + j[0][0]*xi[0] + j[0][1]*xi[1] + j[0][2]*xi[2],
+                x0[1] + j[1][0]*xi[0] + j[1][1]*xi[1] + j[1][2]*xi[2],
+                x0[2] + j[2][0]*xi[0] + j[2][1]*xi[1] + j[2][2]*xi[2],
+            ];
+            let ue = u_elasticity_3d(&xp);
+            let mut uh_v = [0.0; 3];
+            for k in 0..n_ldofs { for d in 0..3 { uh_v[d] += uh[dofs[3*k+d] as usize] * phi[k]; } }
+            for d in 0..3 { err_sq += w * (uh_v[d] - ue[d]).powi(2); }
+        }
+    }
+    err_sq.sqrt()
+}
+
 fn l2_error_elasticity(uh: &[f64], space: &VectorH1Space<SimplexMesh<2>>) -> f64 {
     let mesh = space.mesh();
     let order = space.order();
@@ -700,6 +807,24 @@ fn elasticity_2d_p2_convergence() {
     eprintln!("Elasticity P2 errors: {:?}, rates: {:?}", errors, rates);
     assert!(rates[0] > 2.5, "Elasticity P2 rate[0] {:.2} < 2.5 (expected ~3)", rates[0]);
     assert!(rates[1] > 2.5, "Elasticity P2 rate[1] {:.2} < 2.5 (expected ~3)", rates[1]);
+}
+
+#[test]
+fn elasticity_3d_p1_convergence() {
+    let ns = [4usize, 8];
+    let errors: Vec<f64> = ns.iter().map(|&n| solve_elasticity_3d(n, 1)).collect();
+    let rates = convergence_rate(&errors, &ns);
+    eprintln!("3D Elasticity P1 errors: {:?}, rates: {:?}", errors, rates);
+    assert!(rates[0] > 1.7, "3D Elasticity P1 rate {:.2} < 1.7", rates[0]);
+}
+
+#[test]
+fn elasticity_3d_p2_convergence() {
+    let ns = [2usize, 4];
+    let errors: Vec<f64> = ns.iter().map(|&n| solve_elasticity_3d(n, 2)).collect();
+    let rates = convergence_rate(&errors, &ns);
+    eprintln!("3D Elasticity P2 errors: {:?}, rates: {:?}", errors, rates);
+    assert!(rates[0] > 2.5, "3D Elasticity P2 rate {:.2} < 2.5 (expected ~3)", rates[0]);
 }
 
 // ─── Helmholtz H¹-seminorm ─────────────────────────────────────────────────
