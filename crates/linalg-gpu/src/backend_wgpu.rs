@@ -31,6 +31,8 @@ impl WgpuBackend {
     pub fn spmv_pipeline(&self) -> &SpmvPipeline { &self.spmv }
     pub fn vops_pipeline(&self) -> &VectorOpsPipeline { &self.vops }
     pub fn features(&self) -> &crate::GpuFeatures { &self.ctx.features }
+    pub fn native_f64(&self) -> bool { self.ctx.features.native_f64 }
+    pub fn ctx(&self) -> &GpuContext { &self.ctx }
 }
 
 /// Compute `y = A * x` using the wgpu SpMV pipeline.

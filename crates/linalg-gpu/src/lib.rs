@@ -1,5 +1,6 @@
 pub mod assembly;
 pub mod pa_apply;
+pub mod cg;
 #[cfg(feature = "amg")]
 pub mod amg_precond;
 pub mod backend;
@@ -37,6 +38,7 @@ pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;
 pub use direct::{solve_dense_gpu, GpuDenseMatrix};
 pub use jacobi::GpuJacobiPrecond;
+pub use cg::solve_cg_gpu;
 #[cfg(feature = "amg")]
 pub use amg_precond::GpuAmgPrecond;
 pub use spmv_pipeline::SpmvPipeline;
