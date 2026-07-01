@@ -694,11 +694,12 @@ fn darcy_2d_rt1_projection_convergence() {
 
 #[test]
 fn elasticity_2d_p2_convergence() {
-    let ns = [2usize, 4];
+    let ns = [4usize, 8, 16];
     let errors: Vec<f64> = ns.iter().map(|&n| solve_elasticity_2d(n, 2)).collect();
     let rates = convergence_rate(&errors, &ns);
     eprintln!("Elasticity P2 errors: {:?}, rates: {:?}", errors, rates);
-    assert!(rates[0] > 1.5, "Elasticity P2 rate {:.2} < 1.5", rates[0]);
+    assert!(rates[0] > 2.5, "Elasticity P2 rate[0] {:.2} < 2.5 (expected ~3)", rates[0]);
+    assert!(rates[1] > 2.5, "Elasticity P2 rate[1] {:.2} < 2.5 (expected ~3)", rates[1]);
 }
 
 // ─── Helmholtz H¹-seminorm ─────────────────────────────────────────────────
