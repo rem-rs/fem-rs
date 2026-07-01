@@ -17,7 +17,8 @@
 use nalgebra::DMatrix;
 
 use fem_core::types::{DofId, ElemId};
-use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
+use fem_element::{ReferenceElement, CrTri1, CrTri2, CrTet1, CrTet2, Q1RotRef,
+    lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -448,6 +449,28 @@ pub(crate) fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceEleme
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
         _ => panic!("dg_adv ref_elem_vol: unsupported ({et:?}, {order})"),
+    }
+}
+
+/// Return a Crouzeix-Raviart reference element by type and order.
+///
+/// # Panics
+/// Panics if the requested CR element is not implemented.
+pub fn ref_elem_cr(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    match (et, order) {
+        (ElementType::Tri3, 1) => Box::new(fem_element::CrTri1),
+        (ElementType::Tri3, 2) => Box::new(fem_element::CrTri2),
+        (ElementType::Tet4, 1) => Box::new(fem_element::CrTet1),
+        (ElementType::Tet4, 2) => Box::new(fem_element::CrTet2),
+        _ => panic!("ref_elem_cr: unsupported ({et:?}, order={order})"),
+    }
+}
+
+/// Return a Q1_rot (Rannacher-Turek) reference element for Quad4.
+pub fn ref_elem_q1rot(et: ElementType) -> Box<dyn ReferenceElement> {
+    match et {
+        ElementType::Quad4 => Box::new(fem_element::Q1RotRef),
+        _ => panic!("ref_elem_q1rot: unsupported {et:?}"),
     }
 }
 

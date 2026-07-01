@@ -180,7 +180,7 @@ pub use dpg::{
 };
 pub use dpg_2d::solve_dpg_poisson_2d;
 pub use dpg_3d::solve_dpg_poisson_3d;
-pub use dg_advection::{DGAdvectionIntegrator, DgAdvectionRhs, DgFaceIntegrator, DgFaceQpData, assemble_dg_interior_faces, assemble_advection_boundary};
+pub use dg_advection::{DGAdvectionIntegrator, DgAdvectionRhs, DgFaceIntegrator, DgFaceQpData, assemble_dg_interior_faces, assemble_advection_boundary, ref_elem_cr, ref_elem_q1rot};
 pub use face_assembly::{FaceIntegrator, FaceQpData, assemble_interior_faces, assemble_boundary_faces};
 pub use dg_cdr::DgCdrSystem;
 pub use dg_framework::{
