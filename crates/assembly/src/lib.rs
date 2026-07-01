@@ -128,6 +128,7 @@ pub mod fsi;
 pub mod thermoelastic;
 pub mod hdg;
 pub mod hdg_stokes;
+pub mod cr_stokes;
 pub mod hdg_elasticity;
 pub mod hdg_maxwell;
 
