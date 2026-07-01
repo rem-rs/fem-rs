@@ -152,6 +152,77 @@ mod tests {
     use super::*;
     use fem_mesh::SimplexMesh;
     use fem_space::FESpace;
+    use fem_element::ReferenceElement;
+    use fem_element::crouzeix_raviart::cr1_basis;
+
+    fn convergence_rate(errors: &[f64], ns: &[usize]) -> Vec<f64> {
+        (0..errors.len() - 1)
+            .map(|i| (errors[i] / errors[i + 1]).ln()
+                  / (ns[i + 1] as f64 / ns[i] as f64).ln())
+            .collect()
+    }
+
+    /// Solve Poiseuille flow on an n×n grid and return L² velocity error.
+    fn poiseuille_error(n: usize) -> f64 {
+        let nu = 1.0;
+        let m = SimplexMesh::<2>::unit_square_tri(n);
+        let nn = m.n_nodes();
+        let f: Vec<f64> = (0..nn).flat_map(|_| vec![8.0*nu, 0.0]).collect();
+
+        let cr = CRSpace::new(m.clone(), 1);
+        use std::collections::HashMap;
+        let mut key_eid: HashMap<(NodeId,NodeId), usize> = HashMap::new();
+        for e in m.elem_iter() {
+            let n = m.element_nodes(e);
+            for li in 0..3 {
+                let (a,b)=[(n[0],n[1]),(n[1],n[2]),(n[2],n[0])][li];
+                let k=if a<b{(a,b)}else{(b,a)};
+                key_eid.entry(k).or_insert(cr.element_dofs(e)[li] as usize);
+            }
+        }
+        // No-slip top/bottom
+        let mut bdry = Vec::new();
+        for f in 0..m.n_faces() {
+            let a=m.face_conn[2*f]; let b=m.face_conn[2*f+1];
+            let (ya,yb)=(m.coords_of(a)[1],m.coords_of(b)[1]);
+            if (ya.abs()<1e-12&&yb.abs()<1e-12)||((ya-1.0).abs()<1e-12&&(yb-1.0).abs()<1e-12) {
+                let k=if a<b{(a,b)}else{(b,a)};
+                if let Some(&eid)=key_eid.get(&k){bdry.push(eid*2);bdry.push(eid*2+1);}
+            }
+        }
+        let r=solve_cr_stokes(&m,&f,nu,&bdry);
+
+        // L² velocity error: evaluate at edge midpoints
+        let ref_v = ref_elem_cr(ElementType::Tri3, 1);
+        let quad = ref_v.quadrature(4);
+        let mut err_sq = 0.0;
+        for e in m.elem_iter() {
+            let ns = m.element_nodes(e);
+            let x0 = m.coords_of(ns[0]); let x1 = m.coords_of(ns[1]); let x2 = m.coords_of(ns[2]);
+            let det_j = ((x1[0]-x0[0])*(x2[1]-x0[1]) - (x2[0]-x0[0])*(x1[1]-x0[1])).abs();
+            let dofs_v: Vec<usize> = (0..3).flat_map(|li| {
+                let eid = cr.element_dofs(e)[li] as usize;
+                vec![eid*2, eid*2+1]
+            }).collect();
+
+            let mut phi = [0.0_f64; 3];
+            for (q, xi) in quad.points.iter().enumerate() {
+                let w = quad.weights[q] * det_j;
+                cr1_basis(xi, &mut phi);
+                let x = x0[0]+(x1[0]-x0[0])*xi[0]+(x2[0]-x0[0])*xi[1];
+                let y = x0[1]+(x1[1]-x0[1])*xi[0]+(x2[1]-x0[1])*xi[1];
+                let ux_exact = 4.0*y*(1.0-y);
+                let uy_exact = 0.0;
+                let mut ux_h = 0.0; let mut uy_h = 0.0;
+                for li in 0..3 {
+                    ux_h += r.u[dofs_v[li*2]] * phi[li];
+                    uy_h += r.u[dofs_v[li*2+1]] * phi[li];
+                }
+                err_sq += w * ((ux_h-ux_exact).powi(2) + (uy_h-uy_exact).powi(2));
+            }
+        }
+        err_sq.sqrt()
+    }
 
     #[test]
     fn cr_stokes_fully_pinned_solves() {
@@ -208,5 +279,15 @@ mod tests {
         assert!(r.u.iter().all(|v|v.is_finite()));
         let max_vx=r.u.iter().step_by(2).fold(0.0_f64,|a,&b|a.max(b));
         assert!(max_vx>0.2,"max vx={max_vx}");
+    }
+
+    #[test]
+    fn cr_stokes_poiseuille_convergence() {
+        let ns = [4usize, 8, 16];
+        let errors: Vec<f64> = ns.iter().map(|&n| poiseuille_error(n)).collect();
+        let rates = convergence_rate(&errors, &ns);
+        eprintln!("CR/P1 Poiseuille L2-vel errors: {:?}, rates: {:?}", errors, rates);
+        assert!(rates[0] > 1.8, "L2-vel rate {:.2} < 1.8 (expected ~2)", rates[0]);
+        assert!(rates[1] > 1.8, "L2-vel rate {:.2} < 1.8 (expected ~2)", rates[1]);
     }
 }
