@@ -38,7 +38,7 @@ pub use context::{GpuContext, GpuFeatures};
 pub use csr::GpuCsrMatrix;
 pub use direct::{solve_dense_gpu, GpuDenseMatrix};
 pub use jacobi::GpuJacobiPrecond;
-pub use cg::solve_cg_gpu;
+pub use cg::{solve_cg_gpu, solve_pcg_jacobi_gpu};
 #[cfg(feature = "amg")]
 pub use amg_precond::GpuAmgPrecond;
 pub use spmv_pipeline::SpmvPipeline;
