@@ -159,22 +159,23 @@ mod tests {
         }
     }
 
-    #[test] fn q1rot_nodal_at_edge_midpoints() {
-        // Q1_rot DOFs are edge averages → check Φ_i has unit integral on edge i.
+    #[test] fn q1rot_edge_avg_delta() {
+        // Q1_rot DOFs are edge averages: ∫_edge_j φ_i dt / len_j = δ_ij.
         let (gp, gw) = gauss4();
         let mut phi = [0.0_f64; 4];
         for (ei, &(s, e)) in EDGE_GEOM.iter().enumerate() {
             let dx = e[0] - s[0]; let dy = e[1] - s[1];
             let len = (dx*dx + dy*dy).sqrt();
+            let mut avg = [0.0_f64; 4];
             for (&t, &w) in gp.iter().zip(gw.iter()) {
                 let pt = [s[0] + t*dx, s[1] + t*dy];
                 QuadQ1Rot::eval_basis(&pt, &mut phi);
-                for i in 0..4 {
-                    let exp = if i == ei { 1.0 } else { 0.0 };
-                    // Use edge average: sum(w * phi[i] * len) / len = sum(w * phi[i])
-                    let avg = phi[i] * w * len;
-                    // check unit average only for the correct DOF
-                }
+                for i in 0..4 { avg[i] += w * phi[i] * len; }
+            }
+            for i in 0..4 {
+                let expected = if i == ei { 1.0 } else { 0.0 };
+                assert!((avg[i] / len - expected).abs() < 1e-12,
+                    "edge {ei} DOF {i}: avg={}", avg[i] / len);
             }
         }
     }
