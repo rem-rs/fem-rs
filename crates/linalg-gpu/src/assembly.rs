@@ -114,6 +114,14 @@ struct GpuElementInputF64Tet4Elastic {
     dofs: [u32; 12],
 }
 
+/// f64 GPU-side element input for Hex8 (8 nodes, 24 coords + 8 DOFs).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuElementInputF64Hex8 {
+    nodes: [f64; 24],
+    dofs: [u32; 8],
+}
+
 fn run_assembly_shader(
     gpu: &GpuContext,
     elem_bytes: &[u8],
@@ -1311,4 +1319,78 @@ pub fn assemble_elasticity_3d_hex8_gpu(
 ) -> GpuCsrMatrix<f64> {
     let triplets = assemble_elasticity_3d_hex8(gpu, elem_nodes, elem_dofs, n_elem, lambda, mu);
     triplets_to_gpu_csr_f64(gpu, triplets, n_dofs)
+}
+
+/// Hex8 3D Poisson stiffness, f64 GPU (requires SHADER_F64).
+pub fn assemble_poisson_3d_hex8_f64(
+    gpu: &GpuContext,
+    elem_nodes: &[f64],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f64)> {
+    assert!(gpu.features.native_f64, "SHADER_F64 required");
+    assert_eq!(elem_nodes.len(), n_elem * 24);
+    assert_eq!(elem_dofs.len(), n_elem * 8);
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 24; let db = e * 8;
+        let mut n = [0.0_f64; 24]; n.copy_from_slice(&elem_nodes[nb..nb+24]);
+        inputs.push(GpuElementInputF64Hex8 { nodes: n,
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3],
+                   elem_dofs[db+4], elem_dofs[db+5], elem_dofs[db+6], elem_dofs[db+7]] });
+    }
+    run_assembly_shader_f64(gpu, bytemuck::cast_slice(&inputs), n_elem, 64,
+        include_str!("assembly_poisson_hex8_f64.wgsl"))
+}
+
+/// Hex8 3D mass matrix, f64 GPU (requires SHADER_F64).
+pub fn assemble_mass_3d_hex8_f64(
+    gpu: &GpuContext,
+    elem_nodes: &[f64],
+    elem_dofs: &[u32],
+    n_elem: usize,
+) -> Vec<(u32, u32, f64)> {
+    assert!(gpu.features.native_f64, "SHADER_F64 required");
+    assert_eq!(elem_nodes.len(), n_elem * 24);
+    assert_eq!(elem_dofs.len(), n_elem * 8);
+    let mut inputs = Vec::with_capacity(n_elem);
+    for e in 0..n_elem {
+        let nb = e * 24; let db = e * 8;
+        let mut n = [0.0_f64; 24]; n.copy_from_slice(&elem_nodes[nb..nb+24]);
+        inputs.push(GpuElementInputF64Hex8 { nodes: n,
+            dofs: [elem_dofs[db], elem_dofs[db+1], elem_dofs[db+2], elem_dofs[db+3],
+                   elem_dofs[db+4], elem_dofs[db+5], elem_dofs[db+6], elem_dofs[db+7]] });
+    }
+    run_assembly_shader_f64(gpu, bytemuck::cast_slice(&inputs), n_elem, 64,
+        include_str!("assembly_mass_hex8_f64.wgsl"))
+}
+
+/// Hex8 3D elasticity stiffness, f64 GPU (requires SHADER_F64).
+pub fn assemble_elasticity_3d_hex8_f64(
+    gpu: &GpuContext,
+    elem_nodes: &[f64],
+    elem_dofs: &[u32],
+    n_elem: usize,
+    lambda: f64,
+    mu: f64,
+) -> Vec<(u32, u32, f64)> {
+    assert!(gpu.features.native_f64, "SHADER_F64 required");
+    assert_eq!(elem_nodes.len(), n_elem * 24);
+    assert_eq!(elem_dofs.len(), n_elem * 24);
+    // Build raw bytes: f64[24] nodes + u32[24] DOFs per element
+    let bytes_per_elem = 24 * 8 + 24 * 4; // f64 + u32
+    let mut raw = Vec::<u8>::with_capacity(n_elem * bytes_per_elem);
+    for e in 0..n_elem {
+        let nb = e * 24; let db = e * 24;
+        raw.extend_from_slice(bytemuck::cast_slice(&elem_nodes[nb..nb+24]));
+        raw.extend_from_slice(bytemuck::cast_slice(&elem_dofs[db..db+24]));
+    }
+    let p32 = n_elem as u32;
+    let param_bytes: Vec<u8> = p32.to_le_bytes().into_iter()
+        .chain(0u32.to_le_bytes())
+        .chain(lambda.to_le_bytes())
+        .chain(mu.to_le_bytes())
+        .collect();
+    run_assembly_shader_f64_with_params(gpu, &raw, n_elem, 576,
+        include_str!("assembly_elasticity_hex8_f64.wgsl"), &param_bytes)
 }
