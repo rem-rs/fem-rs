@@ -136,6 +136,8 @@ pub mod surface;
 pub mod xfem;
 pub mod xfem_level_set;
 pub mod xfem_integrators;
+pub mod wg_poisson;
+pub mod vem_poisson;
 
 #[cfg(feature = "reed")]
 pub mod reed;

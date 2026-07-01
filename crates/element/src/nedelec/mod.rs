@@ -42,5 +42,5 @@ pub use hex_ndk::HexNDk;
 pub use tet::TetND1;
 pub use tet_nd2::TetND2;
 pub use tet_ndk::TetNDk;
-pub use prism::PrismND1;
-pub use pyramid::PyraND1;
+pub use prism::{PrismND1, PrismNDk};
+pub use pyramid::{PyraND1, PyraNDk};

@@ -34,13 +34,14 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cad::{AnalyticSurface, CadShape};
-use crate::NurbsCadSurface2D;
+
 
 // ─── STEP physical file parser ─────────────────────────────────────────────────
 
 /// A single STEP entity.
 #[derive(Debug, Clone)]
 struct StepEntity {
+    #[allow(dead_code)]
     id: usize,
     type_name: String,
     params: String,
@@ -102,6 +103,7 @@ fn resolve_ref<'a>(param: &str, entities: &'a HashMap<usize, StepEntity>) -> Opt
 }
 
 /// Extract string literals from a parameter string.
+#[allow(dead_code)]
 fn extract_string(param: &str) -> Option<String> {
     let p = param.trim();
     if p.starts_with('\'') {
@@ -113,6 +115,7 @@ fn extract_string(param: &str) -> Option<String> {
 }
 
 /// Extract a single f64 from a parameter.
+#[allow(dead_code)]
 fn extract_f64(param: &str) -> Option<f64> {
     param.trim().parse::<f64>().ok()
 }

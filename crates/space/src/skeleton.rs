@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use fem_core::types::DofId;
 use fem_linalg::Vector;
+use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 
 use crate::fe_space::{FESpace, SpaceType};
@@ -49,33 +50,61 @@ pub struct SkeletonSpace<M: MeshTopology> {
 }
 
 impl<M: MeshTopology + Clone> SkeletonSpace<M> {
-    /// Build a P0 or P1 skeleton space.
+    /// Build a P0, P1, or P2 skeleton space.
     ///
     /// # Arguments
     /// * `mesh`              — the underlying mesh (must implement `MeshTopology`)
-    /// * `order`             — polynomial order on each face (0 or 1)
+    /// * `order`             — polynomial order on each face (0, 1, or 2)
     /// * `include_boundary`  — whether to include boundary faces as skeleton DOFs
     ///
     /// # Panics
-    /// Panics if `order > 1`.
+    /// Panics if `order > 2` or if the mesh has mixed face types (e.g., Prism6).
+    /// P2 support is limited to uniform Tet4/Hex8 meshes (all faces same type).
     pub fn new(mesh: M, order: u8, include_boundary: bool) -> Self {
-        assert!(order <= 1, "SkeletonSpace: only P0 and P1 supported, got order={order}");
+        assert!(order <= 2, "SkeletonSpace: P0, P1, and P2 supported, got order={order}");
 
         let n_bfaces = mesh.n_boundary_faces();
-        let _n_faces  = n_bfaces; // MeshTopology only exposes boundary faces directly;
-        // for interior faces we need element connectivity.
-        // We build a list of all *unique* faces from element connectivity below.
-
+        let _n_faces  = n_bfaces;
         let dim = mesh.dim();
+
+        // Determine face element type from the mesh face type.
+        // For P2, we need the DOF count per face: tri → (p+1)(p+2)/2, quad → (p+1)².
+        let face_et = if dim == 2 {
+            // 2D faces are edges (Line2/Line3).
+            ElementType::Line2
+        } else {
+            // Determine 3D face type from volume element type.
+            let et = mesh.element_type(0);
+            match et {
+                ElementType::Tet4 | ElementType::Tet10 | ElementType::Prism6 => ElementType::Tri3,
+                ElementType::Hex8 | ElementType::Hex20 | ElementType::Pyramid5 => ElementType::Quad4,
+                _ => panic!("SkeletonSpace: unsupported element type {et:?}"),
+            }
+        };
         let nodes_per_face = match dim {
             1 => 1usize,
-            2 => 2usize, // edge
-            3 => 3usize, // triangle face (Tet4 mesh)
+            2 => 2usize,
+            3 => match face_et {
+                    ElementType::Tri3 => 3,
+                    ElementType::Quad4 => 4,
+                    _ => panic!("SkeletonSpace: unsupported face type {face_et:?}"),
+                },
             _ => panic!("SkeletonSpace: unsupported dimension {dim}"),
         };
         let dofs_per_face = match order {
             0 => 1,
             1 => nodes_per_face,
+            2 => {
+                match dim {
+                    2 => 3,                 // edge: p+1 = 3 DOFs for P2
+                    3 => match face_et {
+                        ElementType::Tri3 => 6,  // tri: (p+1)(p+2)/2 = 6
+                        ElementType::Quad4 => 9, // quad: (p+1)² = 9
+                        _ => unreachable!(),
+                    },
+                    _ => unreachable!(),
+                }
+            }
             _ => unreachable!(),
         };
 
@@ -140,6 +169,14 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                 1 => {
                     // One DOF per face vertex, independent per face
                     for (k, _node) in nodes.iter().enumerate().take(dofs_per_face) {
+                        face_dofs[base + k] = next_dof as DofId;
+                        next_dof += 1;
+                    }
+                }
+                2 => {
+                    // P2: dofs_per_face independent DOFs per face
+                    // (6 for tri, 9 for quad, 3 for edge)
+                    for k in 0..dofs_per_face {
                         face_dofs[base + k] = next_dof as DofId;
                         next_dof += 1;
                     }
@@ -330,5 +367,36 @@ mod tests {
         let sk = SkeletonSpace::new(mesh, 0, true);
         assert_eq!(sk.dofs_per_face, 1);
         assert!(sk.n_dofs() > 0);
+    }
+
+    #[test]
+    fn p2_skeleton_3d_tet() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let sk = SkeletonSpace::new(mesh, 2, true);
+        // P2 tri face: 6 DOFs (3 vertices + 3 edge midpoints)
+        assert_eq!(sk.dofs_per_face, 6, "P2 tri face should have 6 DOFs");
+        let n_faces = sk.n_skeleton_faces();
+        // 6-tet mesh of unit cube: 4 boundary faces × 6 boundary + interior ≈ 10 faces.
+        // Each has 6 DOFs.
+        assert!(sk.n_dofs() > 6 * n_faces / 2,
+            "P2 skeleton should have approx 6 DOFs per tri face");
+    }
+
+    #[test]
+    fn p2_skeleton_3d_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let sk = SkeletonSpace::new(mesh, 2, true);
+        // P2 quad face: 9 DOFs (4 vertices + 4 edge midpoints + 1 face center)
+        assert_eq!(sk.dofs_per_face, 9, "P2 quad face should have 9 DOFs");
+        assert!(sk.n_dofs() > 0);
+    }
+
+    #[test]
+    fn p2_skeleton_has_more_dofs_than_p1() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let sk1 = SkeletonSpace::new(mesh.clone(), 1, true);
+        let sk2 = SkeletonSpace::new(mesh, 2, true);
+        assert!(sk2.n_dofs() > sk1.n_dofs(),
+            "P2 n_dofs={} should exceed P1 n_dofs={}", sk2.n_dofs(), sk1.n_dofs());
     }
 }

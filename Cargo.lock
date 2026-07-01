@@ -718,8 +718,13 @@ dependencies = [
  "bytemuck",
  "cust",
  "fem-amg",
+ "fem-assembly",
  "fem-core",
+ "fem-element",
  "fem-linalg",
+ "fem-mesh",
+ "fem-solver",
+ "fem-space",
  "log",
  "pollster",
  "thiserror 2.0.18",
@@ -733,6 +738,7 @@ dependencies = [
  "fem-core",
  "fem-element",
  "nalgebra 0.33.3",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

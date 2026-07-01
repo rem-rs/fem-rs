@@ -3,6 +3,37 @@ use fem_element::lagrange::{TetP1, TriP1};
 use fem_element::ReferenceElement;
 use std::collections::HashMap;
 
+/// Build a right-handed orthonormal frame `(n, t1, t2)` given a unit `n`.
+///
+/// Uses the "hughes-moeller" trick: pick the smallest component of `n` and
+/// zero it out to build a robust reference direction. Returns `(t1, t2)`.
+fn orthonormal_tangents(n: &[f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let (ax, ay, az) = (n[0].abs(), n[1].abs(), n[2].abs());
+    let ref_dir = if ax <= ay && ax <= az {
+        [1.0, 0.0, 0.0]
+    } else if ay <= ax && ay <= az {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    // t1 = normalize(n × ref)
+    let mut t1 = [
+        n[1] * ref_dir[2] - n[2] * ref_dir[1],
+        n[2] * ref_dir[0] - n[0] * ref_dir[2],
+        n[0] * ref_dir[1] - n[1] * ref_dir[0],
+    ];
+    let l1 = (t1[0]*t1[0] + t1[1]*t1[1] + t1[2]*t1[2]).sqrt().max(1e-14);
+    t1[0] /= l1; t1[1] /= l1; t1[2] /= l1;
+    // t2 = n × t1
+    let t2 = [
+        n[1] * t1[2] - n[2] * t1[1],
+        n[2] * t1[0] - n[0] * t1[2],
+        n[0] * t1[1] - n[1] * t1[0],
+    ];
+    (t1, t2)
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EulerFluxKind { LaxFriedrichs, Roe, Hllc }
 impl Default for EulerFluxKind { fn default() -> Self { EulerFluxKind::LaxFriedrichs } }
@@ -18,7 +49,93 @@ impl Euler3D {
     pub fn flux_n(&self,q:&[f64;5],n:&[f64;3])->[f64;5]{let fx=self.flux_x(q);let fy=self.flux_y(q);let fz=self.flux_z(q);[fx[0]*n[0]+fy[0]*n[1]+fz[0]*n[2],fx[1]*n[0]+fy[1]*n[1]+fz[1]*n[2],fx[2]*n[0]+fy[2]*n[1]+fz[2]*n[2],fx[3]*n[0]+fy[3]*n[1]+fz[3]*n[2],fx[4]*n[0]+fy[4]*n[1]+fz[4]*n[2]]}
     pub fn max_speed(&self,q:&[f64;5])->f64{let(r,u,v,w,p)=self.cons_to_prim(q);let a=(self.gamma*p/r).sqrt();(u*u+v*v+w*w).sqrt()+a}
     pub fn lax_friedrichs_flux(&self,ql:&[f64;5],qr:&[f64;5],n:&[f64;3])->[f64;5]{let fl=self.flux_n(ql,n);let fr=self.flux_n(qr,n);let a=self.max_speed(ql).max(self.max_speed(qr));[0.5*(fl[0]+fr[0])-0.5*a*(qr[0]-ql[0]),0.5*(fl[1]+fr[1])-0.5*a*(qr[1]-ql[1]),0.5*(fl[2]+fr[2])-0.5*a*(qr[2]-ql[2]),0.5*(fl[3]+fr[3])-0.5*a*(qr[3]-ql[3]),0.5*(fl[4]+fr[4])-0.5*a*(qr[4]-ql[4])]}
-    pub fn roe_flux(&self,ql:&[f64;5],qr:&[f64;5],n:&[f64;3])->[f64;5]{self.lax_friedrichs_flux(ql,qr,n)}
+    /// Roe-Pike numerical flux in direction n = (nx, ny, nz).
+    ///
+    /// Standard Roe flux with Harten-Hyman entropy fix on acoustic waves.
+    /// Reference: Toro §11, LeVeque §15.3.
+    pub fn roe_flux(&self, ql: &[f64; 5], qr: &[f64; 5], n: &[f64; 3]) -> [f64; 5] {
+        let g = self.gamma;
+        let (nx, ny, nz) = (n[0], n[1], n[2]);
+
+        // Primitive states + enthalpies.
+        let (rl, ul, vl, wl, pl) = self.cons_to_prim(ql);
+        let (rr, ur, vr, wr, pr) = self.cons_to_prim(qr);
+        let hl = (ql[4] + pl) / rl;
+        let hr = (qr[4] + pr) / rr;
+
+        // Roe averages.
+        let srl = rl.sqrt();
+        let srr = rr.sqrt();
+        let inv_sum = 1.0 / (srl + srr);
+        let u_h = (srl * ul + srr * ur) * inv_sum;
+        let v_h = (srl * vl + srr * vr) * inv_sum;
+        let w_h = (srl * wl + srr * wr) * inv_sum;
+        let h_h = (srl * hl + srr * hr) * inv_sum;
+        let q2  = u_h * u_h + v_h * v_h + w_h * w_h;
+        let a2  = ((g - 1.0) * (h_h - 0.5 * q2)).max(1e-14);
+        let a_h = a2.sqrt();
+
+        let vn_h = u_h * nx + v_h * ny + w_h * nz;
+        let lam1 = vn_h - a_h;
+        let lam2 = vn_h;
+        let lam3 = vn_h + a_h;
+
+        let vnl = ul * nx + vl * ny + wl * nz;
+        let vnr = ur * nx + vr * ny + wr * nz;
+        let al = (g * pl / rl).sqrt();
+        let ar = (g * pr / rr).sqrt();
+
+        let fix = |lam: f64, ll: f64, lr: f64| -> f64 {
+            let delta = (lr - ll).max(0.0);
+            if lam.abs() < 0.5 * delta && delta > 1e-14 {
+                0.5 * (lam * lam / delta + delta)
+            } else { lam.abs() }
+        };
+        let abs_l1 = fix(lam1, vnl - al, vnr - ar);
+        let abs_l2 = lam2.abs();
+        let abs_l3 = fix(lam3, vnl + al, vnr + ar);
+
+        // Jumps in primitive/normal decomposition.
+        let dr = rr - rl;
+        let du = ur - ul;
+        let dv = vr - vl;
+        let dw = wr - wl;
+        let dp = pr - pl;
+        let dvn = du * nx + dv * ny + dw * nz;
+        let r_h = srl * srr;
+
+        // Wave strengths.
+        let alpha1 = 0.5 * (dp - r_h * a_h * dvn) / a2;
+        let alpha2 = dr - dp / a2;
+        let alpha3 = 0.5 * (dp + r_h * a_h * dvn) / a2;
+
+        // Two tangent directions orthogonal to n.
+        // Build a stable orthonormal frame.
+        let (t1, t2) = orthonormal_tangents(n);
+        let dvt1 = du * t1[0] + dv * t1[1] + dw * t1[2];
+        let dvt2 = du * t2[0] + dv * t2[1] + dw * t2[2];
+        let alpha_s1 = r_h * dvt1;
+        let alpha_s2 = r_h * dvt2;
+
+        // Eigenvectors.
+        let k1 = [1.0, u_h - a_h * nx, v_h - a_h * ny, w_h - a_h * nz, h_h - a_h * vn_h];
+        let k_dens = [1.0, u_h, v_h, w_h, 0.5 * q2];
+        let k_s1 = [0.0, t1[0], t1[1], t1[2], u_h * t1[0] + v_h * t1[1] + w_h * t1[2]];
+        let k_s2 = [0.0, t2[0], t2[1], t2[2], u_h * t2[0] + v_h * t2[1] + w_h * t2[2]];
+        let k3 = [1.0, u_h + a_h * nx, v_h + a_h * ny, w_h + a_h * nz, h_h + a_h * vn_h];
+
+        let fl = self.flux_n(ql, n);
+        let fr = self.flux_n(qr, n);
+
+        let mut f = [0.0_f64; 5];
+        for i in 0..5 {
+            let diss = abs_l1 * alpha1 * k1[i]
+                     + abs_l2 * (alpha2 * k_dens[i] + alpha_s1 * k_s1[i] + alpha_s2 * k_s2[i])
+                     + abs_l3 * alpha3 * k3[i];
+            f[i] = 0.5 * (fl[i] + fr[i]) - 0.5 * diss;
+        }
+        f
+    }
 
     pub fn hllc_flux(&self, ql: &[f64; 5], qr: &[f64; 5], n: &[f64; 3]) -> [f64; 5] {
         let fl = self.flux_n(ql, n);
@@ -332,5 +449,34 @@ mod tests {
         }
         dg.step_rk3(&mut u, 1e-4);
         for v in &u { assert!(v.is_finite(), "step_rk3 + limiter produced NaN/inf"); }
+    }
+
+    // ── Roe 3D regression tests (Phase 0.2 fix) ────────────────────────────
+
+    #[test]
+    fn roe_3d_consistent_on_uniform_state() {
+        let e = Euler3D::default();
+        let q = e.prim_to_cons(1.2, 0.4, -0.2, 0.1, 1.5);
+        let n = [1.0 / 3.0_f64.sqrt(); 3];
+        let f_roe = e.roe_flux(&q, &q, &n);
+        let f_phy = e.flux_n(&q, &n);
+        for i in 0..5 {
+            assert!((f_roe[i] - f_phy[i]).abs() < 1e-10,
+                "Roe(U,U) must equal F_phys(U) in 3D: comp {i}: roe={} phys={}",
+                f_roe[i], f_phy[i]);
+        }
+    }
+
+    #[test]
+    fn roe_3d_differs_from_lax_friedrichs_on_shock() {
+        let e = Euler3D::default();
+        let ql = e.prim_to_cons(1.0,   0.0, 0.0, 0.0, 1.0);
+        let qr = e.prim_to_cons(0.125, 0.0, 0.0, 0.0, 0.1);
+        let n = [1.0_f64, 0.0, 0.0];
+        let f_roe = e.roe_flux(&ql, &qr, &n);
+        let f_lf  = e.lax_friedrichs_flux(&ql, &qr, &n);
+        let diff: f64 = (0..5).map(|i| (f_roe[i] - f_lf[i]).abs()).sum();
+        assert!(diff > 1e-6,
+            "3D Roe must differ from Lax-Friedrichs on shock; stub regression? diff={diff:.3e}");
     }
 }

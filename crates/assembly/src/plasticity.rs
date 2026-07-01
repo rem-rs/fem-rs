@@ -47,6 +47,32 @@ use crate::nonlinear::NonlinearForm;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
+/// Plasticity model family selector.
+///
+/// Determines which yield surface and return-mapping algorithm the assembly
+/// loop dispatches to. Historically, `J2PlasticityForm` always executed the
+/// J2 radial return even when `PlasticConfig::drucker_prager(...)` had built
+/// the cone coefficients — resulting in silent misuse. Selecting an explicit
+/// model closes that gap.
+///
+/// - `J2`: von Mises with linear isotropic hardening (radial return).
+/// - `DruckerPrager`: pressure-sensitive cone with apex return (Simo &
+///   Hughes §7.5). Currently associated flow (ψ = φ); non-associated
+///   left for Phase 3E.
+/// - `CamClay`, `Viscoplastic`: reserved for Phase 3E; assembly will
+///   `unimplemented!` for now to prevent silent misuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlasticModel {
+    /// J2 (von Mises) — pressure-independent yield.
+    J2,
+    /// Drucker–Prager — pressure-sensitive cone.
+    DruckerPrager,
+    /// Modified Cam-Clay — reserved for Phase 3E.
+    CamClay,
+    /// Perzyna / Duvaut-Lions viscoplasticity — reserved for Phase 3E.
+    Viscoplastic,
+}
+
 /// Plasticity material parameters.
 #[derive(Debug, Clone)]
 pub struct PlasticConfig {
@@ -62,6 +88,8 @@ pub struct PlasticConfig {
     pub friction_angle: f64,
     /// Drucker–Prager: dilation angle ψ in radians (ψ=φ → associated).
     pub dilation_angle: f64,
+    /// Which yield surface / return-mapping to execute.
+    pub model: PlasticModel,
 }
 
 impl PlasticConfig {
@@ -70,6 +98,7 @@ impl PlasticConfig {
         Self {
             E, nu, yield_stress: sigma_y, hardening_modulus: H,
             friction_angle: 0.0, dilation_angle: 0.0,
+            model: PlasticModel::J2,
         }
     }
 
@@ -80,6 +109,7 @@ impl PlasticConfig {
             E, nu, yield_stress: cohesion, hardening_modulus: H,
             friction_angle: friction_angle_deg.to_radians(),
             dilation_angle: friction_angle_deg.to_radians(),
+            model: PlasticModel::DruckerPrager,
         }
     }
 
@@ -307,38 +337,115 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                 let s_norm = (s_trial.iter().map(|v| v*v).sum::<f64>()).sqrt();
                 let sqrt23 = (2.0_f64 / 3.0_f64).sqrt();
                 let K_old = sigma_y + H * alpha_old;
-                let f_trial = s_norm - sqrt23 * K_old;
+
+                // Yield-function evaluation depends on model.
+                let f_trial: f64 = match self.cfg.model {
+                    PlasticModel::J2 => s_norm - sqrt23 * K_old,
+                    PlasticModel::DruckerPrager => {
+                        let alpha_dp = self.cfg.dp_alpha();
+                        let k_dp = self.cfg.dp_k();
+                        let i1 = if dim == 2 { sigma_trial[0] + sigma_trial[1] }
+                                 else       { sigma_trial[0] + sigma_trial[1] + sigma_trial[2] };
+                        // f_DP = α·I₁ + ‖s‖ − k·(c + H·α_p)
+                        alpha_dp * i1 + s_norm - k_dp * K_old
+                    }
+                    PlasticModel::CamClay | PlasticModel::Viscoplastic => {
+                        unimplemented!("PlasticModel::{:?} return-mapping not implemented; \
+                                        see Phase 3E in .mimocode/plans/1782894432824-happy-island.md",
+                                       self.cfg.model)
+                    }
+                };
 
                 // Return mapping
                 let mut sigma = sigma_trial.clone();
                 let mut D_ep = c_e.clone();
                 let mut dgamma = 0.0;
                 let new_alpha = if f_trial > 0.0 {
-                    // Plastic step: radial return
                     let two_mu = 2.0 * mu;
-                    dgamma = (s_norm - sqrt23 * K_old) / (two_mu + (2.0/3.0)*H);
-                    let factor = 1.0 - two_mu * dgamma / (s_norm + 1e-30);
-                    for i in 0..n_comp { s_trial[i] *= factor; }
-                    for i in 0..dim { sigma[i] = s_trial[i] + p_trial; }
-                    if dim == 2 { sigma[2] = s_trial[2]; }
-                    else { sigma[3] = s_trial[3]; sigma[4] = s_trial[4]; sigma[5] = s_trial[5]; }
+                    match self.cfg.model {
+                        PlasticModel::J2 => {
+                            // J2 radial return
+                            dgamma = (s_norm - sqrt23 * K_old) / (two_mu + (2.0/3.0)*H);
+                            let factor = 1.0 - two_mu * dgamma / (s_norm + 1e-30);
+                            for i in 0..n_comp { s_trial[i] *= factor; }
+                            for i in 0..dim { sigma[i] = s_trial[i] + p_trial; }
+                            if dim == 2 { sigma[2] = s_trial[2]; }
+                            else { sigma[3] = s_trial[3]; sigma[4] = s_trial[4]; sigma[5] = s_trial[5]; }
 
-                    // Consistent tangent (algorithmic)
-                let beta = two_mu * dgamma / (s_norm + 1e-30);
-                let theta = 1.0 / (1.0 + (2.0/3.0)*H / two_mu) - (1.0 - beta);
-                // Build n⊗n deviatoric projection (common to 2D/3D)
-                let nn_dim = n_comp;
-                let mut nn = DMatrix::zeros(nn_dim, nn_dim);
-                for ii in 0..nn_dim { for jj in 0..nn_dim {
-                    nn[(ii, jj)] = s_trial[ii] * s_trial[jj] / (s_norm * s_norm + 1e-60);
-                }}
-                for i in 0..n_comp {
-                    for j in 0..n_comp {
-                        D_ep[(i,j)] = c_e[(i,j)]
-                            - two_mu * (beta * dev_proj_ij(i, j, dim) - theta * nn[(i,j)]);
+                            // Consistent tangent (algorithmic)
+                            let beta = two_mu * dgamma / (s_norm + 1e-30);
+                            let theta = 1.0 / (1.0 + (2.0/3.0)*H / two_mu) - (1.0 - beta);
+                            let nn_dim = n_comp;
+                            let mut nn = DMatrix::zeros(nn_dim, nn_dim);
+                            for ii in 0..nn_dim { for jj in 0..nn_dim {
+                                nn[(ii, jj)] = s_trial[ii] * s_trial[jj] / (s_norm * s_norm + 1e-60);
+                            }}
+                            for i in 0..n_comp {
+                                for j in 0..n_comp {
+                                    D_ep[(i,j)] = c_e[(i,j)]
+                                        - two_mu * (beta * dev_proj_ij(i, j, dim) - theta * nn[(i,j)]);
+                                }
+                            }
+                            alpha_old + dgamma * sqrt23
+                        }
+                        PlasticModel::DruckerPrager => {
+                            // Drucker-Prager cone return with apex fallback
+                            // Simo & Hughes (1998) §7.5 associated flow (ψ = φ).
+                            let alpha_dp = self.cfg.dp_alpha();
+                            let k_dp = self.cfg.dp_k();
+                            let K_bulk = self.cfg.bulk();
+                            // Cone denominator: 2μ + 9K·α² + H·k² (see eq. 7.5.14)
+                            let denom_cone = two_mu + 9.0 * K_bulk * alpha_dp * alpha_dp
+                                             + H * k_dp * k_dp;
+                            dgamma = f_trial / denom_cone;
+                            // Provisional cone update
+                            let factor = 1.0 - two_mu * dgamma / (s_norm + 1e-30);
+                            let mut s_new = s_trial.clone();
+                            for i in 0..n_comp { s_new[i] *= factor; }
+                            let mut p_new = p_trial - 3.0 * K_bulk * alpha_dp * dgamma;
+
+                            let s_new_norm = (s_new.iter().map(|v| v*v).sum::<f64>()).sqrt();
+                            // Apex check: if factor < 0 the cone tip is crossed;
+                            // project onto apex (pure hydrostatic state).
+                            if factor < 0.0 || s_new_norm < 1e-14 {
+                                // Apex return: p = k·(c + H·α)/(3α) once tip reached.
+                                let sigma_y_updated = sigma_y + H * alpha_old;
+                                p_new = k_dp * sigma_y_updated / (3.0 * alpha_dp);
+                                for i in 0..n_comp { s_new[i] = 0.0; }
+                            }
+                            for i in 0..n_comp { s_trial[i] = s_new[i]; }
+                            for i in 0..dim { sigma[i] = s_new[i] + p_new; }
+                            if dim == 2 { sigma[2] = s_new[2]; }
+                            else { sigma[3] = s_new[3]; sigma[4] = s_new[4]; sigma[5] = s_new[5]; }
+
+                            // Continuum (elastic-plastic) tangent for DP — quadratic
+                            // Newton convergence would need the full consistent tangent
+                            // (Simo & Hughes eq. 7.5.29); tracked for Phase 3E.6.
+                            let denom = two_mu + 9.0 * K_bulk * alpha_dp * alpha_dp + H * k_dp * k_dp;
+                            let inv_snorm = 1.0 / (s_norm + 1e-30);
+                            let nn_dim = n_comp;
+                            let mut nn = DMatrix::zeros(nn_dim, nn_dim);
+                            for ii in 0..nn_dim { for jj in 0..nn_dim {
+                                nn[(ii, jj)] = s_trial[ii] * s_trial[jj] * inv_snorm * inv_snorm;
+                            }}
+                            for i in 0..n_comp {
+                                for j in 0..n_comp {
+                                    // D_ep = C_e − (C_e·m)⊗(C_e·n) / (H_p + n·C_e·m)
+                                    // where n = df/dσ = α·δ + s/‖s‖, m = ψ variant.
+                                    // Simplified elastic-plastic tangent for now.
+                                    let dev = dev_proj_ij(i, j, dim);
+                                    D_ep[(i,j)] = c_e[(i,j)]
+                                        - two_mu * two_mu * dev / denom
+                                        - 9.0 * K_bulk * K_bulk * alpha_dp * alpha_dp / denom
+                                              * (if i < dim && j < dim { 1.0 } else { 0.0 })
+                                        - two_mu * nn[(i,j)] * two_mu / denom;
+                                }
+                            }
+                            // α_p accumulates via the deviatoric part.
+                            alpha_old + dgamma * sqrt23
+                        }
+                        _ => unreachable!(),
                     }
-                }
-                    alpha_old + dgamma * sqrt23
                 } else {
                     // Elastic step: no update
                     alpha_old
@@ -1149,5 +1256,93 @@ mod tests {
             assert!(a2 >= a1 - 1e-14,
                 "α should be monotonic non-decreasing: QP {i}: {a1} → {a2}");
         }
+    }
+
+    // ── Drucker–Prager dispatch regression test (Phase 0.1 fix) ────────────
+
+    /// Verifies that `PlasticConfig::drucker_prager(...)` actually selects
+    /// the DP return-mapping path, not silently degrading to J2.
+    ///
+    /// Setup: apply a hydrostatic-heavy strain field. In J2, hydrostatic
+    /// stress does NOT contribute to yielding (deviatoric only), so a purely
+    /// dilational strain never triggers plasticity. In DP, `f = α·I₁ + ‖s‖ − k·c`
+    /// includes the volumetric term α·I₁, so a large positive I₁ WILL trigger
+    /// plasticity if the cohesion is low enough. If the model silently ran J2,
+    /// no plastic evolution would occur.
+    #[test]
+    fn drucker_prager_dispatches_to_dp_branch_not_j2() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+
+        // Low cohesion + realistic friction angle → hydrostatic tension yields.
+        let cfg = PlasticConfig::drucker_prager(2e5, 0.3, 10.0, 30.0, 0.0);
+        assert_eq!(cfg.model, PlasticModel::DruckerPrager,
+            "constructor must set model = DruckerPrager");
+        assert!(cfg.dp_alpha() > 0.0, "DP α must be positive for φ=30°");
+
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+
+        // Apply purely dilational strain: u = (0.05·x, 0.05·y)
+        // → ε_xx = ε_yy = 0.05, γ_xy = 0. Deviatoric part is ZERO;
+        //   J2 will never yield, DP will yield due to α·I₁ term.
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let c = form.space.mesh().node_coords(i as u32);
+            let (x, y) = (c[0], c[1]);
+            u[i * 2]     = 0.05 * x;
+            u[i * 2 + 1] = 0.05 * y;
+        }
+
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+
+        let any_plastic = form.state.lock().unwrap()
+            .iter().any(|qp| qp[6] > 1e-12);
+        assert!(any_plastic,
+            "DP path must yield under hydrostatic tension (α·I₁ term). \
+             If J2 ran silently, α would remain zero everywhere.");
+    }
+
+    /// Compare J2 vs DP with identical dev-heavy loading (both should yield);
+    /// they must produce DIFFERENT internal-variable evolution because DP
+    /// includes the volumetric term while J2 does not.
+    #[test]
+    fn drucker_prager_and_j2_diverge_under_dev_heavy_load() {
+        let mesh1 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = mesh1.clone();
+        let space1 = VectorH1Space::new(mesh1, 1, 2);
+        let space2 = VectorH1Space::new(mesh2, 1, 2);
+        let n = space1.n_dofs();
+
+        let cfg_j2 = PlasticConfig::j2(2e5, 0.3, 50.0, 1e3);
+        let cfg_dp = PlasticConfig::drucker_prager(2e5, 0.3, 50.0, 30.0, 1e3);
+        let form_j2 = J2PlasticityForm::new(space1, cfg_j2, vec![], 2);
+        let form_dp = J2PlasticityForm::new(space2, cfg_dp, vec![], 2);
+
+        // Deviatoric-dominant load: u = (0.1·x, -0.1·y) → ε_xx = 0.1, ε_yy = -0.1
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let c = form_j2.space.mesh().node_coords(i as u32);
+            let (x, y) = (c[0], c[1]);
+            u[i * 2]     =  0.1 * x;
+            u[i * 2 + 1] = -0.1 * y;
+        }
+        let rhs = vec![0.0; n];
+        let mut r1 = vec![0.0; n];
+        let mut r2 = vec![0.0; n];
+        form_j2.residual(&u, &rhs, &mut r1);
+        form_dp.residual(&u, &rhs, &mut r2);
+
+        let a_j2: f64 = form_j2.state.lock().unwrap().iter().map(|qp| qp[6]).sum();
+        let a_dp: f64 = form_dp.state.lock().unwrap().iter().map(|qp| qp[6]).sum();
+
+        // Both must yield.
+        assert!(a_j2 > 1e-8, "J2 must produce plastic strain under dev load");
+        assert!(a_dp > 1e-8, "DP must produce plastic strain under dev load");
+        // They MUST differ (different yield surfaces).
+        assert!((a_j2 - a_dp).abs() > 1e-6,
+            "J2 and DP must produce different plastic strain: J2={a_j2:.6e}, DP={a_dp:.6e}");
     }
 }

@@ -52,5 +52,5 @@ pub use tet_rtk::TetRTk;
 pub use hex_rt0::HexRT0;
 pub use hex_rt1::HexRT1;
 pub use hex_rtk::HexRTk;
-pub use prism::PrismRT0;
-pub use pyramid::PyraRT0;
+pub use prism::{PrismRT0, PrismRTk};
+pub use pyramid::{PyraRT0, PyraRTk};

@@ -265,11 +265,11 @@ mod tests {
     }
 
     #[test]
-    fn pyramid_pou() { for p in 1..=3 { check_pou(&PyramidPk::new(p)); } }
+    fn pyramid_pou() { for p in 1..=4 { check_pou(&PyramidPk::new(p)); } }
     #[test]
-    fn pyramid_grad_zero() { for p in 1..=3 { check_grad_zero(&PyramidPk::new(p)); } }
+    fn pyramid_grad_zero() { for p in 1..=4 { check_grad_zero(&PyramidPk::new(p)); } }
     #[test]
-    fn pyramid_nodal_interp() { for p in 1..=3 { check_nodal_interp(&PyramidPk::new(p)); } }
+    fn pyramid_nodal_interp() { for p in 1..=4 { check_nodal_interp(&PyramidPk::new(p)); } }
     #[test]
     fn pyramid_n_dofs() {
         assert_eq!(PyramidPk::new(1).n_dofs(), 5);
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn pyramid_pk_gradient_fd() {
         let h = 1e-7;
-        for p in 1..=3 {
+        for p in 1..=4 {
             let elem = PyramidPk::new(p);
             let n = elem.n_dofs();
             let (mut vc, mut vx, mut vy, mut vz, mut grads) = (

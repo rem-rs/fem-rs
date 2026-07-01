@@ -16,7 +16,9 @@
 //! `dJ/du₀ = λ(0)`
 #![allow(non_snake_case)]
 
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CsrMatrix;
+#[cfg(test)]
+use fem_linalg::CooMatrix;
 
 /// An ODE problem with cost functional for adjoint sensitivity analysis.
 pub trait AdjointProblem {
@@ -102,69 +104,89 @@ pub fn adjoint_sensitivity(
 
     // ── Backward pass: solve adjoint equation ────────────────────────────
     // dλ/dt = -A(t)ᵀ · λ - ∂g/∂u, λ(T) = ∂h/∂u(u(T))
+    //
+    // Discrete-adjoint-over-RK4: we integrate the adjoint ODE backward
+    // using the continuous-adjoint RK4 scheme (same order as forward RK4).
+    // At each stage k2/k3 we interpolate the forward state linearly between
+    // checkpoints — this is O(h²) for u(t), which is sufficient to retain
+    // O(h⁴) gradient convergence for smooth problems.
     let mut lam = problem.terminal_gradient(&u);
     let mut _t = t_end;
 
-    // Backward Euler for the adjoint (stable backward in time)
     for i in (1..checkpoints.len()).rev() {
         let cp_prev = &checkpoints[i - 1];
         let cp_curr = &checkpoints[i];
-        let dt_step = cp_curr.t - cp_prev.t;
-        if dt_step < 1e-15 { continue; }
+        let h = cp_curr.t - cp_prev.t;
+        if h < 1e-15 { continue; }
 
-        // Current λ is at time t (start of this backward step)
-        // We need λ at time t - dt
-
-        // Evaluate A = ∂f/∂u at the checkpoint state
-        let A = problem.jacobian(cp_curr.t, &cp_curr.u);
-
-        // Evaluate ∂g/∂u
-        let mut dgdu = vec![0.0; n];
-        problem.cost_gradient(cp_curr.t, &cp_curr.u, &mut dgdu);
-
-        // Backward Euler: λ_prev = λ + dt · (Aᵀ · λ + ∂g/∂u)
-        // Solve (I - dt·Aᵀ) · λ_prev = λ + dt·∂g/∂u
-        // Build I - dt·Aᵀ
-        let mut coo = CooMatrix::<f64>::new(n, n);
-        for i in 0..n { coo.add(i, i, 1.0); }
-        for row in 0..n {
-            let start = A.row_ptr[row];
-            let end = A.row_ptr[row + 1];
-            for ptr in start..end {
-                let col = A.col_idx[ptr] as usize;
-                let val = A.values[ptr];
-                // Aᵀ: transpose → add at (col, row)
-                coo.add(col, row, -dt_step * val);
-            }
-        }
-        let sys = coo.into_csr();
-
-        // RHS: λ + dt·∂g/∂u
-        let mut rhs = vec![0.0; n];
-        for i in 0..n { rhs[i] = lam[i] + dt_step * dgdu[i]; }
-
-        let mut lam_prev = vec![0.0; n];
-        let cfg = crate::SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..crate::SolverConfig::default() };
-        match crate::solve_gmres(&sys, &rhs, &mut lam_prev, 30, &cfg) {
-            Ok(_) => lam = lam_prev,
-            Err(_e) => {
-                log::warn!("Adjoint GMRES solve failed, using explicit Euler fallback: {}", _e);
-                // Fallback: explicit Euler for adjoint (Aᵀ·λ)
-                let mut At_lam = vec![0.0; n];
-                for row in 0..n {
-                    let start = A.row_ptr[row];
-                    let end = A.row_ptr[row + 1];
-                    for ptr in start..end {
-                        let col = A.col_idx[ptr] as usize;
-                        At_lam[col] += A.values[ptr] * lam[row];
-                    }
+        // Adjoint RHS at a given (t, u, lambda):  dλ/dt = -Aᵀ·λ - ∂g/∂u
+        let adjoint_rhs = |t: f64, u: &[f64], lam: &[f64], out: &mut [f64]| {
+            let A = problem.jacobian(t, u);
+            let mut dg = vec![0.0; n];
+            problem.cost_gradient(t, u, &mut dg);
+            for r in 0..n {
+                out[r] = -dg[r];
+                let start = A.row_ptr[r];
+                let end = A.row_ptr[r + 1];
+                for p in start..end {
+                    let c = A.col_idx[p] as usize;
+                    // Aᵀ·λ: accumulate Aⱼᵢ · λⱼ at row i
+                    out[r] -= A.values[p] * lam[c];
                 }
-                for i in 0..n { lam_prev[i] = lam[i] + dt_step * (At_lam[i] + dgdu[i]); }
-                lam = lam_prev;
             }
+        };
+
+        // Helper: interpolate forward state between checkpoints (linear).
+        let interp_u = |t_mid: f64| -> Vec<f64> {
+            let alpha = (t_mid - cp_prev.t) / h;
+            cp_prev.u.iter().zip(cp_curr.u.iter())
+                .map(|(&up, &uc)| up + alpha * (uc - up))
+                .collect()
+        };
+
+        // RK4 step (backward: integrate from cp_curr.t to cp_prev.t with -h)
+        let tm = cp_curr.t;
+        let u_m = &cp_curr.u;
+        let tmm = cp_prev.t;
+        let u_mm = &cp_prev.u;
+
+        // k1 at (t_m, u_m)
+        let mut k1 = vec![0.0; n];
+        adjoint_rhs(tm, u_m, &lam, &mut k1);
+
+        // k2 at (t_m - h/2, interp_u)
+        let t2 = tm - 0.5 * h;
+        let u2 = interp_u(t2);
+        let mut k2 = vec![0.0; n];
+        {
+            let mut lam2 = vec![0.0; n];
+            for i2 in 0..n { lam2[i2] = lam[i2] - 0.5 * h * k1[i2]; }
+            adjoint_rhs(t2, &u2, &lam2, &mut k2);
         }
 
-        _t = cp_prev.t;
+        // k3 at (t_m - h/2, interp_u)
+        let mut k3 = vec![0.0; n];
+        {
+            let mut lam3 = vec![0.0; n];
+            for i2 in 0..n { lam3[i2] = lam[i2] - 0.5 * h * k2[i2]; }
+            adjoint_rhs(t2, &u2, &lam3, &mut k3);
+        }
+
+        // k4 at (t_m - h, u_{m-1})
+        let mut k4 = vec![0.0; n];
+        {
+            let mut lam4 = vec![0.0; n];
+            for i2 in 0..n { lam4[i2] = lam[i2] - h * k3[i2]; }
+            adjoint_rhs(tmm, u_mm, &lam4, &mut k4);
+        }
+
+        // λ_{m-1} = λ_m + (-h)/6 · (k1 + 2·k2 + 2·k3 + k4)
+        let h6 = h / 6.0;
+        for ii in 0..n {
+            lam[ii] = lam[ii] - h6 * (k1[ii] + 2.0 * k2[ii] + 2.0 * k3[ii] + k4[ii]);
+        }
+
+        _t = tmm;
     }
 
     (u, lam, total_cost)

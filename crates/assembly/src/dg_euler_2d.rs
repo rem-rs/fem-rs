@@ -48,9 +48,102 @@ impl Euler2D {
         (u*u + v*v).sqrt() + a
     }
 
-    /// Roe-Pike numerical flux in direction n (delegates to LF for now)
+    /// Roe-Pike numerical flux in direction n = (nx, ny).
+    ///
+    /// Standard Roe flux with **Harten-Hyman entropy fix**: if a wave speed
+    /// straddles zero, replace |λ| with the smoother value
+    /// `(λ_L² + λ_R²) / (λ_R − λ_L)` on the transonic branch. This
+    /// eliminates the well-known Roe entropy-glitch across sonic points.
+    ///
+    /// Reference: LeVeque §15.3, Toro §11.
     pub fn roe_flux(&self, ql: &[f64; 4], qr: &[f64; 4], n: &[f64; 2]) -> [f64; 4] {
-        self.lax_friedrichs_flux(ql, qr, n)
+        let g = self.gamma;
+        let (nx, ny) = (n[0], n[1]);
+
+        // Primitive states.
+        let (rl, ul, vl, pl) = self.cons_to_prim(ql);
+        let (rr, ur, vr, pr) = self.cons_to_prim(qr);
+        let hl = (ql[3] + pl) / rl;
+        let hr = (qr[3] + pr) / rr;
+
+        // Roe averages.
+        let srl = rl.sqrt();
+        let srr = rr.sqrt();
+        let inv_sum = 1.0 / (srl + srr);
+        let u_h = (srl * ul + srr * ur) * inv_sum;
+        let v_h = (srl * vl + srr * vr) * inv_sum;
+        let h_h = (srl * hl + srr * hr) * inv_sum;
+        let q2  = u_h * u_h + v_h * v_h;
+        let a2  = ((g - 1.0) * (h_h - 0.5 * q2)).max(1e-14);
+        let a_h = a2.sqrt();
+
+        // Normal/tangential Roe-averaged velocities.
+        let vn_h = u_h * nx + v_h * ny;
+        // Wave speeds.
+        let lam1 = vn_h - a_h;
+        let lam2 = vn_h;
+        let lam3 = vn_h + a_h;
+
+        // Left/right normal velocities for entropy fix.
+        let vnl = ul * nx + vl * ny;
+        let vnr = ur * nx + vr * ny;
+        let al = (g * pl / rl).sqrt();
+        let ar = (g * pr / rr).sqrt();
+
+        // Harten-Hyman entropy fix. delta = max(0, λ_R − λ_L) per acoustic wave.
+        let fix = |lam: f64, ll: f64, lr: f64| -> f64 {
+            let delta = (lr - ll).max(0.0);
+            if lam.abs() < 0.5 * delta && delta > 1e-14 {
+                0.5 * (lam * lam / delta + delta)
+            } else {
+                lam.abs()
+            }
+        };
+        let abs_l1 = fix(lam1, vnl - al, vnr - ar);
+        let abs_l2 = lam2.abs();
+        let abs_l3 = fix(lam3, vnl + al, vnr + ar);
+
+        // Jumps.
+        let dr = rr - rl;
+        let du = ur - ul;
+        let dv = vr - vl;
+        let dp = pr - pl;
+        let dvn = du * nx + dv * ny;
+
+        // Wave strengths (α_k coefficients) — use Roe-averaged density.
+        let r_h = srl * srr;
+        let alpha1 = 0.5 * (dp - r_h * a_h * dvn) / a2;
+        let alpha2 = dr - dp / a2;
+        let alpha3 = 0.5 * (dp + r_h * a_h * dvn) / a2;
+
+        // Right eigenvectors K_k in conservative variables.
+        // K_1 = (1, u - a·nx, v - a·ny, H - a·vn)
+        // K_2 (density-only) = (1, u, v, ½q²) — combined with shear (contact) waves
+        // K_3 = (1, u + a·nx, v + a·ny, H + a·vn)
+        // Additionally, shear jumps carry a tangential-velocity wave with speed λ_2.
+        let tx = -ny;
+        let ty =  nx;
+        let dvt = du * tx + dv * ty;
+        // Shear (contact) wave strength for tangential velocity.
+        let alpha_shear = r_h * dvt;
+
+        let k1 = [1.0, u_h - a_h * nx, v_h - a_h * ny, h_h - a_h * vn_h];
+        let k2_dens = [1.0, u_h, v_h, 0.5 * q2];
+        let k2_shear = [0.0, tx, ty, u_h * tx + v_h * ty];
+        let k3 = [1.0, u_h + a_h * nx, v_h + a_h * ny, h_h + a_h * vn_h];
+
+        // Central flux average.
+        let fl = self.flux_n(ql, n);
+        let fr = self.flux_n(qr, n);
+
+        let mut f = [0.0_f64; 4];
+        for i in 0..4 {
+            let diss = abs_l1 * alpha1 * k1[i]
+                     + abs_l2 * (alpha2 * k2_dens[i] + alpha_shear * k2_shear[i])
+                     + abs_l3 * alpha3 * k3[i];
+            f[i] = 0.5 * (fl[i] + fr[i]) - 0.5 * diss;
+        }
+        f
     }
 
     /// Local Lax-Friedrichs (Rusanov) flux
@@ -366,5 +459,52 @@ mod tests {
         let u = dg.project_initial(&|_x, _y| (1.0, 0.5, 0.0, 1.0));
         let du = dg.rhs(&u);
         for v in &du { assert!(v.is_finite(), "non-finite RHS"); }
+    }
+
+    // ── Roe flux regression tests (Phase 0.2 fix) ─────────────────────────
+
+    /// Consistency: F(U, U, n) = F_phys(U, n).
+    #[test]
+    fn roe_flux_consistent_on_uniform_state() {
+        let euler = Euler2D::default();
+        let q = euler.prim_to_cons(1.0, 0.5, -0.3, 1.2);
+        let n = [1.0_f64 / 2.0_f64.sqrt(), 1.0_f64 / 2.0_f64.sqrt()];
+        let f_roe = euler.roe_flux(&q, &q, &n);
+        let f_phys = euler.flux_n(&q, &n);
+        for i in 0..4 {
+            assert!((f_roe[i] - f_phys[i]).abs() < 1e-12,
+                "Roe(U,U) must equal F(U): comp {i}: roe={} phys={}", f_roe[i], f_phys[i]);
+        }
+    }
+
+    /// Roe MUST differ from Lax-Friedrichs on a genuine Riemann problem —
+    /// otherwise the earlier stub (roe → LF) is still active.
+    #[test]
+    fn roe_flux_differs_from_lax_friedrichs() {
+        let euler = Euler2D::default();
+        // 1-D Sod-like shock along x direction.
+        let ql = euler.prim_to_cons(1.0, 0.0, 0.0, 1.0);
+        let qr = euler.prim_to_cons(0.125, 0.0, 0.0, 0.1);
+        let n = [1.0_f64, 0.0];
+        let f_roe = euler.roe_flux(&ql, &qr, &n);
+        let f_lf  = euler.lax_friedrichs_flux(&ql, &qr, &n);
+        let diff: f64 = (0..4).map(|i| (f_roe[i] - f_lf[i]).abs()).sum();
+        assert!(diff > 1e-6,
+            "Roe and Lax-Friedrichs must produce different fluxes on a shock; \
+             stub regression? ‖diff‖ = {diff:.3e}");
+    }
+
+    /// Roe with entropy fix must remain finite through a sonic point.
+    #[test]
+    fn roe_flux_transonic_entropy_fix_finite() {
+        let euler = Euler2D::default();
+        // Transonic rarefaction (left state supersonic, right subsonic).
+        let ql = euler.prim_to_cons(3.0, 0.9,  0.0, 3.0);
+        let qr = euler.prim_to_cons(1.0, 0.1,  0.0, 1.0);
+        let n = [1.0_f64, 0.0];
+        let f = euler.roe_flux(&ql, &qr, &n);
+        for &v in &f {
+            assert!(v.is_finite(), "Roe flux must be finite through sonic point: {v}");
+        }
     }
 }

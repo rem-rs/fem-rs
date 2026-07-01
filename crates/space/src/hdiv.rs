@@ -54,10 +54,30 @@ const TET_FACES: [(usize, usize, usize); 4] = [
 const HEX_FACES: [[usize; 4]; 6] = [
     [0, 1, 2, 3], // z=-1 (bottom)
     [4, 5, 6, 7], // z= 1 (top)
-    [0, 1, 5, 4], // y=-1 (near)
-    [2, 3, 7, 6], // y= 1 (far)
+    [0, 1, 5, 4], // y=-1 (front)
+    [2, 3, 7, 6], // y= 1 (back)
     [0, 3, 7, 4], // x=-1 (left)
     [1, 2, 6, 5], // x= 1 (right)
+];
+
+/// Prism faces: 2 tri + 3 quad; ordered for RT DOF mapping.
+/// Each entry: list of local vertex indices on the face.
+/// Tri faces use all 3; quad faces use the first 3 for FaceKey + the 4th for volume.
+const PRISM_FACES: [[usize; 4]; 5] = [
+    [0, 1, 2, 2],    // bottom (tri, repeat for padding)
+    [3, 4, 5, 5],    // top (tri, repeat for padding)
+    [0, 1, 4, 3],    // quad 0 (front)
+    [1, 2, 5, 4],    // quad 1 (right)
+    [0, 2, 5, 3],    // quad 2 (left)
+];
+
+/// Pyramid faces: 4 tri + 1 quad; ordered for RT DOF mapping.
+const PYRAMID_FACES: [[usize; 4]; 5] = [
+    [0, 1, 4, 4],    // tri face (apex)
+    [1, 2, 4, 4],    // tri face (apex)
+    [2, 3, 4, 4],    // tri face (apex)
+    [3, 0, 4, 4],    // tri face (apex)
+    [0, 1, 2, 3],    // base quad
 ];
 
 // ─── Face DOF map ───────────────────────────────────────────────────────────
@@ -160,6 +180,14 @@ impl<M: MeshTopology> HDivSpace<M> {
                 order <= 2,
                 "HDivSpace: Hex RT supports orders 0, 1, and 2"
             ),
+            (3, ElementType::Prism6) => assert!(
+                order <= 1,
+                "HDivSpace: Prism RTk supports orders 0 and 1 (higher orders pending Phase 1B.4)"
+            ),
+            (3, ElementType::Pyramid5) => assert!(
+                order <= 1,
+                "HDivSpace: Pyramid RTk supports orders 0 and 1 (higher orders pending Phase 1B.4)"
+            ),
             _ => panic!(
                 "HDivSpace: unsupported (dim={dim}, elem_type={elem_type:?})"
             ),
@@ -172,6 +200,8 @@ impl<M: MeshTopology> HDivSpace<M> {
             (2, ElementType::Quad4) => Self::build_2d_quad(mesh, order),
             (3, ElementType::Tet4 | ElementType::Tet10) => Self::build_3d_tet(mesh, order, elem_type, is_bdm),
             (3, ElementType::Hex8) => Self::build_3d_hex(mesh, order),
+            (3, ElementType::Prism6) => Self::build_3d_prism(mesh, order),
+            (3, ElementType::Pyramid5) => Self::build_3d_pyramid(mesh, order),
             _ => panic!("HDivSpace::build: unsupported (elem_type={elem_type:?})"),
         }
     }
@@ -547,6 +577,116 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             face_map: FaceDofMap::HexFaces(face_map),
             elem_type: ElementType::Hex8,
+            is_bdm: false,
+        }
+    }
+
+    // ─── 3-D prism construction (RT0/RT1) ────────────────────────────────
+
+    fn build_3d_prism(mesh: M, order: u8) -> Self {
+        let dofs_per_face = (order as usize) + 1;
+        let interior_dofs = 0; // RT0/RT1 for prism has no interior DOFs
+        let dofs_per_elem = PRISM_FACES.len() * dofs_per_face + interior_dofs;
+        let n_elem = mesh.n_elements();
+
+        let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut next_dof: DofId = 0;
+        let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+        let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for face_verts in &PRISM_FACES {
+                let a = verts[face_verts[0]];
+                let b = verts[face_verts[1]];
+                let c = verts[face_verts[2]];
+                let key = FaceKey::new(a, b, c);
+                if dofs_per_face == 1 {
+                    let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
+                    dofs_flat.push(dof);
+                    signs_flat.push(1.0);
+                } else {
+                    let nd = dofs_per_face as u32;
+                    let first = *face_map.entry(key).or_insert_with(|| {
+                        let d = next_dof; next_dof += nd; d
+                    });
+                    for k in 0..dofs_per_face {
+                        dofs_flat.push(first + k as u32);
+                        signs_flat.push(1.0);
+                    }
+                }
+            }
+            for _ in 0..interior_dofs {
+                dofs_flat.push(next_dof);
+                next_dof += 1;
+                signs_flat.push(1.0);
+            }
+        }
+
+        HDivSpace {
+            mesh,
+            order,
+            n_dofs: next_dof as usize,
+            dofs_flat,
+            signs_flat,
+            dofs_per_elem,
+            face_map: FaceDofMap::HexFaces(face_map),
+            elem_type: ElementType::Prism6,
+            is_bdm: false,
+        }
+    }
+
+    // ─── 3-D pyramid construction (RT0/RT1) ──────────────────────────────
+
+    fn build_3d_pyramid(mesh: M, order: u8) -> Self {
+        let dofs_per_face = (order as usize) + 1;
+        let interior_dofs = 0;
+        let dofs_per_elem = PYRAMID_FACES.len() * dofs_per_face + interior_dofs;
+        let n_elem = mesh.n_elements();
+
+        let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut next_dof: DofId = 0;
+        let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+        let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for face_verts in &PYRAMID_FACES {
+                let a = verts[face_verts[0]];
+                let b = verts[face_verts[1]];
+                let c = verts[face_verts[2]];
+                let key = FaceKey::new(a, b, c);
+                if dofs_per_face == 1 {
+                    let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
+                    dofs_flat.push(dof);
+                    signs_flat.push(1.0);
+                } else {
+                    let nd = dofs_per_face as u32;
+                    let first = *face_map.entry(key).or_insert_with(|| {
+                        let d = next_dof; next_dof += nd; d
+                    });
+                    for k in 0..dofs_per_face {
+                        dofs_flat.push(first + k as u32);
+                        signs_flat.push(1.0);
+                    }
+                }
+            }
+            for _ in 0..interior_dofs {
+                dofs_flat.push(next_dof);
+                next_dof += 1;
+                signs_flat.push(1.0);
+            }
+        }
+
+        HDivSpace {
+            mesh,
+            order,
+            n_dofs: next_dof as usize,
+            dofs_flat,
+            signs_flat,
+            dofs_per_elem,
+            face_map: FaceDofMap::HexFaces(face_map),
+            elem_type: ElementType::Pyramid5,
             is_bdm: false,
         }
     }

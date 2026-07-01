@@ -1,6 +1,19 @@
-//! HDG for time-harmonic Maxwell: curl(curl(E)) - k²E = f on Tri3 meshes.
-//! Note: This uses a simplified H¹-based formulation. Full H(curl) HDG
-//! requires proper Nedelec basis for edge DOFs, implemented in future work.
+//! HDG for time-harmonic Maxwell: curl(curl(E)) - k^2 E = f on Tri3 meshes.
+//!
+//! ## WARNING — Spurious mode issue (Phase 0.5 hotfix)
+//!
+//! The current implementation uses a **simplified H1-based formulation**:
+//! shape functions are piecewise-linear nodal (TriP1 + SegP1), NOT
+//! curl-conforming Nedelec basis (HCurl). For low wavenumbers `k` on
+//! coarse meshes this can give usable results. For `k >= pi / h` the
+//! discrete curl operator fails to suppress spurious eigenvalues — the
+//! well-known "spurious mode" of nodal elements for Maxwell.
+//!
+//! The proper fix (ND1 volume basis + tangential trace on faces) is
+//! tracked as Phase 3C.4 in the MFEM parity plan. Until then, a runtime
+//! warning is printed when `k` exceeds a conservative threshold.
+//!
+//! Reference: Bossavit, "Computational Electromagnetism" (1998), §2.1-2.4.
 #![allow(non_snake_case)]
 
 use fem_linalg::CooMatrix;
@@ -9,10 +22,38 @@ use fem_solver::SolverConfig;
 use fem_element::lagrange::{TriP1, SegP1};
 use fem_element::ReferenceElement;
 
+/// Estimate minimum edge length in the mesh (for spurious-mode warning).
+fn estimate_hmin<M: MeshTopology>(mesh: &M) -> f64 {
+    let dim = mesh.dim() as usize;
+    let mut h = f64::INFINITY;
+    for e in mesh.elem_iter() {
+        let ns = mesh.element_nodes(e);
+        for i in 0..ns.len() {
+            for j in (i + 1)..ns.len() {
+                let ci = mesh.node_coords(ns[i]);
+                let cj = mesh.node_coords(ns[j]);
+                let d = (0..dim).map(|d| (ci[d] - cj[d]).powi(2)).sum::<f64>().sqrt();
+                if d < h { h = d; }
+            }
+        }
+    }
+    h
+}
+
 pub fn solve_hdg_maxwell<M, F>(mesh: M, source: F, k: f64) -> Vec<f64> where
     M: MeshTopology + Clone + Send + Sync,
     F: Fn(&[f64]) -> Vec<f64> + Send + Sync,
 {
+    // Phase 0.5 spurious-mode warning: H1 basis not curl-conforming.
+    let h_min = estimate_hmin(&mesh);
+    if k * h_min > 1.0 {
+        eprintln!(
+            "WARNING solve_hdg_maxwell: k*h_min = {:.3} > 1 may excite spurious \
+             modes. This H1-based formulation is NOT curl-conforming; use HCurl \
+             basis (Phase 3C.4).",
+            k * h_min,
+        );
+    }
     let _dim = 2; let n_elems = mesh.n_elements(); let tau = 1.0;
     let tri = TriP1; let seg = SegP1;
     let qr_vol = tri.quadrature(2); let qr_face = seg.quadrature(2);

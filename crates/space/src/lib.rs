@@ -27,6 +27,7 @@ pub mod p_refine;
 pub mod vector_h1;
 pub mod skeleton;
 pub mod block_fe_space;
+pub mod trace_spaces;
 
 pub use dof_manager::{DofManager, EdgeKey, FaceKey};
 pub use fe_space::{FESpace, SpaceType};
@@ -41,4 +42,5 @@ pub use vector_h1::VectorH1Space;
 pub use constraints::{apply_dirichlet, apply_hanging_constraints, apply_hanging_face_constraints, recover_hanging_values, recover_hanging_face_values, prolongate_p2_hanging, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv, identify_periodic_dof_pairs, apply_periodic};
 pub use iga::{IgaBoundary2D, IgaSpace1D, IgaSpace2D};
 pub use block_fe_space::BlockFESpace;
+pub use trace_spaces::{HCurlTraceSpace, HDivTraceSpace};
 

@@ -48,6 +48,19 @@ const HEX_EDGES: [(usize, usize); 12] = [
     (0, 4), (1, 5), (2, 6), (3, 7),
 ];
 
+/// Local edge vertex pairs for prism (Prism6 ordering).
+const PRISM_EDGES: [(usize, usize); 9] = [
+    (0, 1), (1, 2), (0, 2), // bottom triangle
+    (3, 4), (4, 5), (3, 5), // top triangle
+    (0, 3), (1, 4), (2, 5), // vertical
+];
+
+/// Local edge vertex pairs for pyramid (Pyramid5 ordering).
+const PYRAMID_EDGES: [(usize, usize); 8] = [
+    (0, 1), (1, 2), (2, 3), (3, 0), // base quad
+    (0, 4), (1, 4), (2, 4), (3, 4), // apex edges
+];
+
 /// Local face definitions for 3-D tetrahedra (TetND2 ordering).
 const TET_FACES: [(usize, usize, usize); 4] = [
     (1, 2, 3),
@@ -64,6 +77,32 @@ const HEX_QUAD_FACES: [(usize, usize, usize, usize); 6] = [
     (2, 3, 7, 6), // y= 1 (back)
     (0, 3, 7, 4), // x=-1 (left)
     (1, 2, 6, 5), // x= 1 (right)
+];
+
+/// Local triangular faces for prism (Prism6 ordering): bottom + top.
+const PRISM_TRI_FACES: [(usize, usize, usize); 2] = [
+    (0, 1, 2),
+    (3, 4, 5),
+];
+
+/// Local quad faces for prism (Prism6 ordering).
+const PRISM_QUAD_FACES: [(usize, usize, usize, usize); 3] = [
+    (0, 1, 4, 3),
+    (1, 2, 5, 4),
+    (0, 2, 5, 3),
+];
+
+/// Local triangular faces for pyramid (Pyramid5 ordering): 4 apex triangles.
+const PYRAMID_TRI_FACES: [(usize, usize, usize); 4] = [
+    (0, 1, 4),
+    (1, 2, 4),
+    (2, 3, 4),
+    (3, 0, 4),
+];
+
+/// Local base quad face for pyramid.
+const PYRAMID_QUAD_FACE: [(usize, usize, usize, usize); 1] = [
+    (0, 1, 2, 3),
 ];
 
 // ─── HCurlSpace ─────────────────────────────────────────────────────────────
@@ -117,6 +156,8 @@ impl<M: MeshTopology> HCurlSpace<M> {
             ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
             ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
             ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
+            ElementType::Prism6 => &PRISM_EDGES,
+            ElementType::Pyramid5 => &PYRAMID_EDGES,
             _ => panic!("HCurlSpace: unsupported element type {cell_type:?}"),
         };
 
@@ -130,19 +171,27 @@ impl<M: MeshTopology> HCurlSpace<M> {
         let face_dofs_per_face = match (dim, cell_type) {
             (3, ElementType::Tet4 | ElementType::Tet10) if k >= 2 => k * (k - 1),
             (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => 2 * k * (k - 1),
+            (3, ElementType::Prism6) if k >= 2 => k * (k - 1), // tri face
+            (3, ElementType::Pyramid5) if k >= 2 => k * (k - 1), // tri face
             _ => 0,
         };
         let interior_dofs_per_elem = match (dim, cell_type) {
             (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => k * (k - 1),
             (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => 2 * k * (k - 1),
             (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => k * (k - 1) * (k - 2) / 2,
-            // Hex NDk (k≥2): pure interior bubbles only (face DOFs handled separately)
+            // Hex NDk (k>=2): pure interior bubbles only (face DOFs handled separately)
             (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => 3 * k * (k - 1) * (k - 1),
+            // Prism: quad face DOFs handled in n_local_faces (quad type),
+            // tri face DOFs in face_dofs_per_face, interior = signed count.
+            (3, ElementType::Prism6) if k >= 2 => k * (k - 1) * (k - 1),
+            (3, ElementType::Pyramid5) if k >= 2 => k * (k - 1) * (k - 1),
             _ => 0,
         };
         let n_local_faces = match cell_type {
             ElementType::Tet4 | ElementType::Tet10 if dim == 3 => TET_FACES.len(),
             ElementType::Hex8 | ElementType::Hex20 if dim == 3 => HEX_QUAD_FACES.len(),
+            ElementType::Prism6 if dim == 3 => PRISM_TRI_FACES.len() + PRISM_QUAD_FACES.len(),
+            ElementType::Pyramid5 if dim == 3 => PYRAMID_TRI_FACES.len() + PYRAMID_QUAD_FACE.len(),
             _ => 0,
         };
         let dofs_per_elem =
@@ -198,6 +247,59 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         let d = next_dof; next_dof += ndf; d
                     });
                     for m in 0..ndf as usize {
+                        dofs_flat.push(first_dof + m as u32);
+                        signs_flat.push(1.0);
+                    }
+                }
+            }
+
+            // Prism NDk face DOFs (k>=2): 2 tri faces + 3 quad faces.
+            if k >= 2 && cell_type == ElementType::Prism6 {
+                let ndf = face_dofs_per_face as u32;
+                for &(la, lb, lc) in &PRISM_TRI_FACES {
+                    let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                    let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
+                        let d = next_dof; next_dof += ndf; d
+                    });
+                    for m in 0..ndf as usize {
+                        dofs_flat.push(first_dof + m as u32);
+                        signs_flat.push(1.0);
+                    }
+                }
+                // Quad faces: use quad_face_to_dof (2 * k * (k-1) DOFs per quad face).
+                let ndf_quad = (2 * k * (k - 1)) as u32;
+                for &(la, lb, lc, ld) in &PRISM_QUAD_FACES {
+                    let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                    let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
+                        let d = next_dof; next_dof += ndf_quad; d
+                    });
+                    for m in 0..ndf_quad as usize {
+                        dofs_flat.push(first_dof + m as u32);
+                        signs_flat.push(1.0);
+                    }
+                }
+            }
+
+            // Pyramid NDk face DOFs (k>=2): 4 tri faces + 1 quad face.
+            if k >= 2 && cell_type == ElementType::Pyramid5 {
+                let ndf = face_dofs_per_face as u32;
+                for &(la, lb, lc) in &PYRAMID_TRI_FACES {
+                    let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                    let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
+                        let d = next_dof; next_dof += ndf; d
+                    });
+                    for m in 0..ndf as usize {
+                        dofs_flat.push(first_dof + m as u32);
+                        signs_flat.push(1.0);
+                    }
+                }
+                let ndf_quad = (2 * k * (k - 1)) as u32;
+                for &(la, lb, lc, ld) in &PYRAMID_QUAD_FACE {
+                    let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                    let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
+                        let d = next_dof; next_dof += ndf_quad; d
+                    });
+                    for m in 0..ndf_quad as usize {
                         dofs_flat.push(first_dof + m as u32);
                         signs_flat.push(1.0);
                     }

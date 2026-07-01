@@ -44,6 +44,7 @@ pub mod nedelec;
 pub mod raviart_thomas;
 pub mod brezzi_douglas_marini;
 pub mod crouzeix_raviart;
+pub mod nonconforming;
 pub mod nurbs;
 pub mod tri6_geom;
 pub mod iga;
@@ -59,9 +60,10 @@ pub use lagrange::{HexQ1, HexQ2, HexQ3, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadP1, 
                    LagrangePrism, LagrangePyramid,
                    SegPk, TriPk, TetPk, QuadQk, HexQk, PrismPk, PyramidPk, ref_elem, ElemType,
                    VecFamily, vec_ref_elem};
-pub use nedelec::{TriND1, TriND2, TriNDk, QuadND1, QuadND2, QuadNDk, HexND1, HexND2, HexNDk, TetND1, TetND2, TetNDk, PrismND1, PyraND1};
-pub use raviart_thomas::{TriRT0, TriRTk, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, TetRTk, QuadRT0, QuadRTk, HexRT0, HexRTk, QuadRT1, HexRT1, PrismRT0, PyraRT0};
-pub use brezzi_douglas_marini::{QuadBDMk, TriBDMk, TetBDMk};
+pub use nedelec::{TriND1, TriND2, TriNDk, QuadND1, QuadND2, QuadNDk, HexND1, HexND2, HexNDk, TetND1, TetND2, TetNDk, PrismND1, PrismNDk, PyraND1, PyraNDk};
+pub use raviart_thomas::{TriRT0, TriRTk, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, TetRTk, QuadRT0, QuadRTk, HexRT0, HexRTk, QuadRT1, HexRT1, PrismRT0, PrismRTk, PyraRT0, PyraRTk};
+pub use brezzi_douglas_marini::{QuadBDMk, TriBDMk, TetBDMk, HexBDMk};
+pub use nonconforming::{QuadQ1Rot, QuadQ1RotVec};
 pub use nurbs::{KnotVector, BSplineBasis1D, NurbsPatch2D, NurbsPatch3D,
                 NurbsMesh2D, NurbsMesh3D, greville_abscissae};
 
