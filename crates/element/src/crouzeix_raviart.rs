@@ -134,6 +134,20 @@ fn e3(m: &(usize, usize, usize), x: f64, y: f64, z: f64) -> f64 {
     x.powi(m.0 as i32) * y.powi(m.1 as i32) * z.powi(m.2 as i32)
 }
 
+/// Shifted Legendre polynomial P_n on [0,1]: P₀=1, P₁=2t-1, P₂=6t²-6t+1
+fn legendre(n: usize, t: f64) -> f64 {
+    match n {
+        0 => 1.0,
+        1 => 2.0*t - 1.0,
+        2 => 6.0*t*t - 6.0*t + 1.0,
+        _ => { let p0=1.0;let p1=2.0*t-1.0; let (_, r) = (1..n).fold((p0,p1),|(p0,p1),_|(p1,((2.0*n as f64+1.0)*p1-n as f64*p0)/(n as f64+1.0))); r }
+    }
+}
+/// Evaluate 3-D Legendre product L_a(x)·L_b(y)·L_c(z) where L_n is shifted Legendre.
+fn e3_legendre(m: &(usize, usize, usize), x: f64, y: f64, z: f64) -> f64 {
+    legendre(m.0, x) * legendre(m.1, y) * legendre(m.2, z)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // TriCR2 — scalar, 6 DOFs (2 per edge, moments ∫f·1 and ∫f·(2t-1))
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -337,7 +351,10 @@ const TET_EDGES: [[[f64; 3]; 2]; 6] = [
 
 fn tet_cr2_build() -> (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
     let n = 10;  // 4 face + 6 edge DOFs
-    let monos = mono3d(2);  // P₂ in 3D: 10 monomials
+    // Use Legendre product basis {L_a(x)·L_b(y)·L_c(z)} for a+b+c ≤ 2.
+    // Legendre polynomials on [0,1] have range [-1,1], much better conditioned
+    // than monomials [0,1] range for the Vandermonde.
+    let monos = mono3d(2);  // same index structure, different evaluation
     let m = monos.len();
     let mut v = vec![vec![0.0_f64; m]; n];
 
@@ -368,7 +385,7 @@ fn tet_cr2_build() -> (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
                 let x = a[0] + pt[0]*u1[0] + pt[1]*u2[0];
                 let y = a[1] + pt[0]*u1[1] + pt[1]*u2[1];
                 let z = a[2] + pt[0]*u1[2] + pt[1]*u2[2];
-                sum += w * e3(mon, x, y, z) * 2.0 * area;
+                sum += w * e3_legendre(mon, x, y, z) * 2.0 * area;
             }
             v[row][j] = sum / area.max(1e-30);
         }
@@ -388,15 +405,15 @@ fn tet_cr2_build() -> (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
                 let y = s[1] + t * dy;
                 let z = s[2] + t * dz;
                 let poly = 2.0 * t - 1.0;  // linear moment
-                sum += w * e3(mon, x, y, z) * poly * len;
+                sum += w * e3_legendre(mon, x, y, z) * poly * len;
             }
             v[row][j] = sum / len.max(1e-30);
         }
         row += 1;
     }
 
-    // TetCR2 uses normal_eq for better conditioning (10×10 with mixed DOF types)
-    // Solve V * C^T = I via normal_eq.
+    // TetCR2: solve V · C^T = I via normal_eq (least-squares on square = regular inverse).
+    // Legendre product basis improves conditioning vs monomials.
     (normal_eq(&v, n, m), m, monos)
 }
 
@@ -410,11 +427,25 @@ fn tet_cr2_cache() -> &'static (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
 pub fn cr2_tet_basis(xi: &[f64], vals: &mut [f64]) {
     let (coeff, m, monos) = tet_cr2_cache();
     let mut mv = vec![0.0_f64; *m];
-    for (j, mon) in monos.iter().enumerate() { mv[j] = e3(mon, xi[0], xi[1], xi[2]); }
+    for (j, mon) in monos.iter().enumerate() { mv[j] = e3_legendre(mon, xi[0], xi[1], xi[2]); }
     for i in 0..10 {
         let mut s = 0.0;
         for j in 0..*m { s += coeff[i * m + j] * mv[j]; }
         vals[i] = s;
+    }
+}
+
+/// Gradient of shifted Legendre L_n'(t): L₀'=0, L₁'=2, L₂'=12t-6
+fn legendre_deriv(n: usize, t: f64) -> f64 {
+    match n {
+        0 => 0.0,
+        1 => 2.0,
+        2 => 12.0*t - 6.0,
+        _ => {
+            // Use recurrence: L_n'(t) = (2n-1)·L_{n-1}(t) + L_{n-2}'(t)
+            // More stable to use the direct formula for small n
+            n as f64 * (2.0*t - 1.0) * legendre(n, t) - n as f64 * legendre(n-1, t) / (2.0*t - 1.0 + 1e-30)
+        }
     }
 }
 
@@ -423,15 +454,14 @@ pub fn cr2_tet_basis(xi: &[f64], vals: &mut [f64]) {
 /// Output: flattened `[∂φ0/∂x, ∂φ0/∂y, ∂φ0/∂z,  ∂φ1/∂x, …]`.
 pub fn cr2_tet_grad(xi: &[f64], grads: &mut [f64]) {
     let (coeff, m, monos) = tet_cr2_cache();
-    // Precompute monomial gradient values at xi
-        let mut dm = vec![(0.0_f64, 0.0_f64, 0.0_f64); *m];
+    // Legendre product gradient: ∂/∂x[L_a(x)·L_b(y)·L_c(z)] = L_a'(x)·L_b(y)·L_c(z)
+    let x=xi[0];let y=xi[1];let z=xi[2];
+    let mut dm = vec![(0.0_f64, 0.0_f64, 0.0_f64); *m];
     for (j, (a, b, c)) in monos.iter().enumerate() {
-        let (sa, sb, sc) = (*a as i32, *b as i32, *c as i32);
-        let x = xi[0]; let y = xi[1]; let z = xi[2];
         dm[j] = (
-            if sa > 0 { sa as f64 * x.powi(sa-1) * y.powi(sb) * z.powi(sc) } else { 0.0 },
-            if sb > 0 { sb as f64 * x.powi(sa) * y.powi(sb-1) * z.powi(sc) } else { 0.0 },
-            if sc > 0 { sc as f64 * x.powi(sa) * y.powi(sb) * z.powi(sc-1) } else { 0.0 },
+            legendre_deriv(*a, x) * legendre(*b, y) * legendre(*c, z),
+            legendre(*a, x) * legendre_deriv(*b, y) * legendre(*c, z),
+            legendre(*a, x) * legendre(*b, y) * legendre_deriv(*c, z),
         );
     }
     for i in 0..10 {
