@@ -29,6 +29,8 @@ pub enum ElementType {
     Hex8,
     /// 20-node serendipity hexahedron.
     Hex20,
+    /// 27-node full quadratic hexahedron (Q2, with face and body centers).
+    Hex27,
     /// 6-node linear triangular prism.
     Prism6,
     /// 15-node quadratic (complete) triangular prism.
@@ -59,6 +61,7 @@ impl ElementType {
             Self::Tet10     => 10,
             Self::Hex8      =>  8,
             Self::Hex20     => 20,
+            Self::Hex27     => 27,
             Self::Prism6    =>  6,
             Self::Prism15   => 15,
             Self::Prism18   => 18,
@@ -77,7 +80,7 @@ impl ElementType {
           | Self::Quad4 | Self::Quad8 | Self::Quad9
           | Self::Polygon                             => 2,
             Self::Tet4  | Self::Tet10
-          | Self::Hex8  | Self::Hex20
+          | Self::Hex8  | Self::Hex20 | Self::Hex27
           | Self::Prism6 | Self::Prism15 | Self::Prism18
           |             Self::Pyramid5 | Self::Pyramid13 |
             Self::Polygon                       => 3,
@@ -101,8 +104,9 @@ impl ElementType {
             11 => Some(Self::Tet10),
             15 => Some(Self::Point1),
             16 => Some(Self::Prism15),
-            17 => Some(Self::Hex20),
-            19 => Some(Self::Pyramid13),
+             17 => Some(Self::Hex20),
+             12 => Some(Self::Hex27),
+             19 => Some(Self::Pyramid13),
             _  => None,
         }
     }
@@ -115,7 +119,7 @@ impl ElementType {
             Self::Tri3  | Self::Tri6  => Some(Self::Line2),
             Self::Quad4 | Self::Quad8 | Self::Quad9 => Some(Self::Line3),
             Self::Tet4  | Self::Tet10 => Some(Self::Tri3),
-            Self::Hex8  | Self::Hex20 => Some(Self::Quad4),
+            Self::Hex8  | Self::Hex20 | Self::Hex27 => Some(Self::Quad4),
             Self::Prism6 | Self::Prism15 | Self::Prism18 => Some(Self::Tri3),
             Self::Pyramid5 | Self::Pyramid13 => Some(Self::Tri3),
             Self::Line2 | Self::Line3 => Some(Self::Point1),

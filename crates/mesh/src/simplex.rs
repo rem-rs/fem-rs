@@ -31,7 +31,7 @@ fn local_face_verts(dim: usize, elem_type: ElementType) -> Vec<Vec<usize>> {
             vec![0, 1, 2], // opposite v₃
         ],
         // Hex faces
-        (3, ElementType::Hex8 | ElementType::Hex20) => vec![
+        (3, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) => vec![
             vec![0, 1, 2, 3], // z=-1 (bottom)
             vec![4, 5, 6, 7], // z= 1 (top)
             vec![0, 1, 5, 4], // y=-1 (near)
@@ -52,7 +52,7 @@ fn local_element_edges(dim: usize, elem_type: ElementType) -> Vec<[usize; 2]> {
         (3, ElementType::Tet4 | ElementType::Tet10) => vec![
             [0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3],
         ],
-        (3, ElementType::Hex8 | ElementType::Hex20) => vec![
+        (3, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) => vec![
             [0, 1], [0, 3], [0, 4], [1, 2], [1, 5], [2, 3],
             [2, 6], [3, 7], [4, 5], [4, 7], [5, 6], [6, 7],
         ],
