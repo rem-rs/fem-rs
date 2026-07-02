@@ -110,6 +110,7 @@ pub mod dg_framework;
 pub mod dpg;
 pub mod dpg_2d;
 pub mod dpg_3d;
+pub mod dpg_framework;
 pub mod dg_euler_2d;
 pub mod dg_euler_3d;
 pub mod dg_cdr;
