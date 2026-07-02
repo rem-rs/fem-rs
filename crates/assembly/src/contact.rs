@@ -417,6 +417,68 @@ pub fn assemble_contact_3d<M: MeshTopology>(
     (rhs, coo.into_csr())
 }
 
+// ─── 3D vector contact (elasticity, ux/uy/uz) ────────────────────────────
+
+pub fn assemble_contact_3d_vector<M: MeshTopology>(
+    mesh: &M, cfg: &ContactConfig, u: &[f64], lagrange_multipliers: &[f64],
+) -> (Vec<f64>, CsrMatrix<f64>) {
+    assert_eq!(mesh.dim() as usize, 3, "requires dim=3");
+    let n_nodes = mesh.n_nodes() as usize; let n_dofs = n_nodes * 3;
+    let mut rhs = vec![0.0; n_dofs]; let mut coo = CooMatrix::new(n_dofs, n_dofs);
+    let pen_n = cfg.penalty_normal;
+    let (pen_t, mu) = match &cfg.friction {
+        FrictionModel::Frictionless => (0.0, 0.0),
+        FrictionModel::Coulomb { mu, penalty_tangential } => (*penalty_tangential, *mu),
+    };
+    let cs: std::collections::HashSet<i32> = cfg.contact_tags.iter().copied().collect();
+    let (tri_pts, tri_wts) = gauss_tri_3pt();
+    let has_lam = !lagrange_multipliers.is_empty();
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        let tag = mesh.face_tag(f); if !cs.contains(&tag) { continue; }
+        let fnodes = mesh.face_nodes(f); if fnodes.len() < 3 { continue; }
+        let n = [fnodes[0] as usize, fnodes[1] as usize, fnodes[2] as usize];
+        let p = [mesh.node_coords(fnodes[0]), mesh.node_coords(fnodes[1]), mesh.node_coords(fnodes[2])];
+        let e1=[p[1][0]-p[0][0],p[1][1]-p[0][1],p[1][2]-p[0][2]]; let e2=[p[2][0]-p[0][0],p[2][1]-p[0][1],p[2][2]-p[0][2]];
+        let nx=e1[1]*e2[2]-e1[2]*e2[1];let ny=e1[2]*e2[0]-e1[0]*e2[2];let nz=e1[0]*e2[1]-e1[1]*e2[0];
+        let al=(nx*nx+ny*ny+nz*nz).sqrt().max(1e-30); let fa=al*0.5; let nu=[nx/al,ny/al,nz/al];
+        let ad=[nu[0].abs(),nu[1].abs(),nu[2].abs()];
+        let rd=if ad[0]<=ad[1]&&ad[0]<=ad[2]{[1.,0.,0.]}else if ad[1]<=ad[2]{[0.,1.,0.]}else{[0.,0.,1.]};
+        let tx=nu[1]*rd[2]-nu[2]*rd[1];let ty=nu[2]*rd[0]-nu[0]*rd[2];let tz=nu[0]*rd[1]-nu[1]*rd[0];
+        let tl=(tx*tx+ty*ty+tz*tz).sqrt().max(1e-30); let t1=[tx/tl,ty/tl,tz/tl];
+        let t2=[nu[1]*t1[2]-nu[2]*t1[1],nu[2]*t1[0]-nu[0]*t1[2],nu[0]*t1[1]-nu[1]*t1[0]];
+
+        for (ti,(l,wt)) in tri_pts.iter().zip(tri_wts.iter()).enumerate() {
+            let(l1,l2,l3)=(l[0],l[1],l[2]); let phi=[l1,l2,l3];
+            let xp=[p[0][0]*l1+p[1][0]*l2+p[2][0]*l3,p[0][1]*l1+p[1][1]*l2+p[2][1]*l3,p[0][2]*l1+p[1][2]*l2+p[2][2]*l3];
+            let wp=wt*fa; let ux=u[n[0]*3]*phi[0]+u[n[1]*3]*phi[1]+u[n[2]*3]*phi[2];
+            let uy=u[n[0]*3+1]*phi[0]+u[n[1]*3+1]*phi[1]+u[n[2]*3+1]*phi[2];
+            let uz=u[n[0]*3+2]*phi[0]+u[n[1]*3+2]*phi[1]+u[n[2]*3+2]*phi[2];
+            let un=ux*nu[0]+uy*nu[1]+uz*nu[2]; let ut1v=ux*t1[0]+uy*t1[1]+uz*t1[2]; let ut2v=ux*t2[0]+uy*t2[1]+uz*t2[2];
+            let gap=(cfg.gap_function)(&xp); let gun=un-gap;
+            let lam=if has_lam{lagrange_multipliers[ti%lagrange_multipliers.len()]}else{0.0};
+            let act=lam+pen_n*gun; let(np,npd)=if!has_lam{(neg_part(gun),neg_part_d(gun))}else{(neg_part_smooth(act,1e-8),neg_part_smooth_d(act,1e-8))};
+            let fv=if!has_lam{-pen_n*np*wp}else{-(lam+pen_n*np)*wp};
+            for ln in 0..3{let dx=n[ln]*3;let dy=n[ln]*3+1;let dz=n[ln]*3+2;
+                rhs[dx]+=fv*nu[0]*phi[ln];rhs[dy]+=fv*nu[1]*phi[ln];rhs[dz]+=fv*nu[2]*phi[ln];
+                for lm in 0..3{let k=-pen_n*npd*phi[ln]*phi[lm]*wp;let jx=n[lm]*3;let jy=n[lm]*3+1;let jz=n[lm]*3+2;
+                    coo.add(dx,jx,k*nu[0]*nu[0]);coo.add(dx,jy,k*nu[0]*nu[1]);coo.add(dx,jz,k*nu[0]*nu[2]);
+                    coo.add(dy,jx,k*nu[1]*nu[0]);coo.add(dy,jy,k*nu[1]*nu[1]);coo.add(dy,jz,k*nu[1]*nu[2]);
+                    coo.add(dz,jx,k*nu[2]*nu[0]);coo.add(dz,jy,k*nu[2]*nu[1]);coo.add(dz,jz,k*nu[2]*nu[2]);}}
+            if pen_t>0.0&&mu>0.0{let sn=(-fv/wp).max(0.0);let s1=pen_t*ut1v;let s2=pen_t*ut2v;let sm=(s1*s1+s2*s2).sqrt().max(1e-30);
+                if sm<=mu*sn+1e-15{let ks=pen_t*wp;for ln in 0..3{let dx=n[ln]*3;let dy=n[ln]*3+1;let dz=n[ln]*3+2;
+                    rhs[dx]-=s1*t1[0]*phi[ln]+s2*t2[0]*phi[ln];rhs[dy]-=s1*t1[1]*phi[ln]+s2*t2[1]*phi[ln];rhs[dz]-=s1*t1[2]*phi[ln]+s2*t2[2]*phi[ln];
+                    for lm in 0..3{let b=ks*phi[ln]*phi[lm];let jx=n[lm]*3;let jy=n[lm]*3+1;let jz=n[lm]*3+2;
+                        coo.add(dx,jx,b*(t1[0]*t1[0]+t2[0]*t2[0]));coo.add(dx,jy,b*(t1[0]*t1[1]+t2[0]*t2[1]));coo.add(dx,jz,b*(t1[0]*t1[2]+t2[0]*t2[2]));
+                        coo.add(dy,jx,b*(t1[1]*t1[0]+t2[1]*t2[0]));coo.add(dy,jy,b*(t1[1]*t1[1]+t2[1]*t2[1]));coo.add(dy,jz,b*(t1[1]*t1[2]+t2[1]*t2[2]));
+                        coo.add(dz,jx,b*(t1[2]*t1[0]+t2[2]*t2[0]));coo.add(dz,jy,b*(t1[2]*t1[1]+t2[2]*t2[1]));coo.add(dz,jz,b*(t1[2]*t1[2]+t2[2]*t2[2]));}}
+                }else{let sc=mu*sn/sm;for ln in 0..3{let dx=n[ln]*3;let dy=n[ln]*3+1;let dz=n[ln]*3+2;
+                    rhs[dx]-=(sc*s1*t1[0]+sc*s2*t2[0])*phi[ln];rhs[dy]-=(sc*s1*t1[1]+sc*s2*t2[1])*phi[ln];rhs[dz]-=(sc*s1*t1[2]+sc*s2*t2[2])*phi[ln];}}}
+        }
+    }
+    (rhs, coo.into_csr())
+}
+
 // ─── Solver ────────────────────────────────────────────────────────────────────
 
 /// Newton solver for contact problems (2D scalar/vector, 3D scalar).
@@ -435,7 +497,8 @@ pub fn solve_contact_newton<M: MeshTopology>(
     let mut u = vec![0.0; n];
     let dim = mesh.dim() as usize;
     let is_vector = n == mesh.n_nodes() as usize * dim && dim == 2;
-    let is_3d = dim == 3;
+    let is_3d_scalar = dim == 3 && n == mesh.n_nodes() as usize;
+    let is_3d_vector = dim == 3 && n == mesh.n_nodes() as usize * 3;
 
     let al_iters = match &cfg.contact_type {
         ContactType::AugmentedLagrangian { max_al_iter, .. } => *max_al_iter,
@@ -455,11 +518,11 @@ pub fn solve_contact_newton<M: MeshTopology>(
         for _iter in 0..max_iter {
             let (f_contact, k_contact) = if is_vector {
                 assemble_contact_2d_vector(mesh, cfg, &u, &lam_n)
-            } else if is_3d {
-                // scalar 3D
+            } else if is_3d_vector {
+                assemble_contact_3d_vector(mesh, cfg, &u, &lam_n)
+            } else if is_3d_scalar {
                 assemble_contact_3d(mesh, cfg, &u, &lam_n)
             } else {
-                // scalar 2D
                 assemble_contact_2d(mesh, mesh, cfg, &u, &lam_n)
             };
 
@@ -489,7 +552,9 @@ pub fn solve_contact_newton<M: MeshTopology>(
                 for i in 0..n { u_n[i] += alpha * du[i]; }
                 let (f_n, _) = if is_vector {
                     assemble_contact_2d_vector(mesh, cfg, &u_n, &lam_n)
-                } else if is_3d {
+                } else if is_3d_vector {
+                    assemble_contact_3d_vector(mesh, cfg, &u_n, &lam_n)
+                } else if is_3d_scalar {
                     assemble_contact_3d(mesh, cfg, &u_n, &lam_n)
                 } else {
                     assemble_contact_2d(mesh, mesh, cfg, &u_n, &lam_n)
@@ -649,5 +714,21 @@ mod tests {
         let fn_al: f64 = f_al.iter().map(|v| v * v).sum::<f64>().sqrt();
         assert!(fn_pen > 0.0, "penalty force should be non-zero");
         assert!(fn_al > 0.0, "AL force should be non-zero");
+    }
+
+    #[test]
+    fn contact_3d_vector_assembly_finite() {
+        let mesh = fem_mesh::SimplexMesh::<3>::unit_cube_tet(2);
+        let cfg = ContactConfig {
+            penalty_normal: 1e6,
+            contact_type: ContactType::Penalty,
+            friction: FrictionModel::Frictionless,
+            gap_function: |x| 0.1 - x[1],
+            contact_tags: vec![2], // top face y=1 has tag 2
+        };
+        let u = vec![0.0; mesh.n_nodes() * 3];
+        let (f, k) = assemble_contact_3d_vector(&mesh, &cfg, &u, &[]);
+        assert!(f.iter().all(|v| v.is_finite()), "3D vector contact RHS non-finite");
+        assert!(k.nrows > 0, "3D vector contact matrix empty");
     }
 }
