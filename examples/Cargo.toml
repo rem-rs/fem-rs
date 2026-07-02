@@ -245,6 +245,10 @@ name = "wg_stokes_cavity"
 path = "wg_stokes_cavity.rs"
 
 [[example]]
+name = "vem_poisson_polygonal"
+path = "vem_poisson_polygonal.rs"
+
+[[example]]
 name = "mfem_vec_ref_elem"
 path = "mfem_vec_ref_elem.rs"
 
