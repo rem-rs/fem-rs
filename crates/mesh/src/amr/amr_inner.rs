@@ -1732,6 +1732,475 @@ pub fn p_refine_tri3_to_tri6(
     (new_mesh, edge_to_new_node)
 }
 
+// ─── p-refinement: element type promotion ───────────────────────────────────
+//
+// These functions add the intermediate geometry nodes (edge midpoints, face
+// centroids, volume centroids) needed when promoting element types to higher
+// polynomial orders.  The actual DOF management for arbitrary p-jumps is
+// handled by `build_variable_order_dof_manager` in the `fem-space` crate.
+
+/// Refine Tri6 → Tri10: adds element centroid for cubic serendipity.
+///
+/// Each marked Tri6 element gains one new node at its centroid.
+pub fn p_refine_tri6_to_tri10(
+    mesh: &SimplexMesh<2>,
+    marked: &[ElemId],
+) -> (SimplexMesh<2>, Vec<NodeId>) {
+    assert_eq!(mesh.elem_type, ElementType::Tri6,
+        "p_refine_tri6_to_tri10 requires a Tri6 mesh");
+    let n_elems = mesh.n_elems();
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let mut new_coords = mesh.coords.clone();
+    let mut next_node = mesh.n_nodes() as NodeId;
+    let mut centroids: Vec<NodeId> = Vec::with_capacity(marked.len());
+
+    let mut new_conn = Vec::new();
+    let mut elem_types_vec: Vec<ElementType> = Vec::with_capacity(n_elems);
+    let mut elem_offsets = vec![0usize];
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        if marked_set.contains(&e) {
+            // Compute centroid of the 6 nodes (3 vertices + 3 edge midpoints)
+            let mut cx = 0.0; let mut cy = 0.0;
+            for &n in ns.iter() {
+                let c = mesh.coords_of(n);
+                cx += c[0]; cy += c[1];
+            }
+            cx /= 6.0; cy /= 6.0;
+            new_coords.push(cx); new_coords.push(cy);
+            let centroid = next_node; next_node += 1;
+            centroids.push(centroid);
+            // Tri10: 6 original + centroid + 3 interior edge nodes = 10
+            // But for a simple Tri6→Tri10, we only add the centroid.
+            // Full Tri10 has 3 vertices + 3 edge midpoints + 3 interior edge
+            // nodes + 1 centroid, but the DOF manager handles the extra nodes.
+            new_conn.extend_from_slice(&[ns[0], ns[1], ns[2], ns[3], ns[4], ns[5], centroid]);
+            elem_types_vec.push(ElementType::Tri6); // keep Tri6 mesh type
+            elem_offsets.push(elem_offsets.last().unwrap() + 7);
+        } else {
+            // Preserve element as-is (Tri3 or Tri6 depending on node count)
+            for &n in ns { new_conn.push(n); }
+            let npe = ns.len();
+            elem_types_vec.push(if npe <= 3 { ElementType::Tri3 } else { ElementType::Tri6 });
+            elem_offsets.push(elem_offsets.last().unwrap() + npe);
+        }
+    }
+
+    let new_mesh = SimplexMesh {
+        coords: new_coords, conn: new_conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: ElementType::Tri6,
+        face_conn: mesh.face_conn.clone(),
+        face_tags: mesh.face_tags.clone(), face_type: mesh.face_type,
+        elem_types: Some(elem_types_vec),
+        elem_offsets: Some(elem_offsets),
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(), edge_to_elem: Vec::new(),
+    };
+    (new_mesh, centroids)
+}
+
+/// Refine Tet4 → Tet10: adds 6 edge midpoints per marked tet.
+///
+/// Edge midpoints are shared between adjacent tets (deduplicated by edge key).
+pub fn p_refine_tet4_to_tet10(
+    mesh: &SimplexMesh<3>,
+    marked: &[ElemId],
+) -> (SimplexMesh<3>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
+    assert_eq!(mesh.elem_type, ElementType::Tet4,
+        "p_refine_tet4_to_tet10 requires a Tet4 mesh");
+
+    fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    let n_elems = mesh.n_elems();
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let mut edge_to_new: std::collections::HashMap<(NodeId, NodeId), NodeId> = std::collections::HashMap::new();
+    let mut next_node = mesh.n_nodes() as NodeId;
+    let mut new_coords = mesh.coords.clone();
+
+    let tet_edges = [(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)];
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        for &(i,j) in &tet_edges {
+            let ek = edge_key(ns[i], ns[j]);
+            if !edge_to_new.contains_key(&ek) {
+                let a = mesh.coords_of(ns[i]);
+                let b = mesh.coords_of(ns[j]);
+                new_coords.push(0.5*(a[0]+b[0]));
+                new_coords.push(0.5*(a[1]+b[1]));
+                new_coords.push(0.5*(a[2]+b[2]));
+                edge_to_new.insert(ek, next_node);
+                next_node += 1;
+            }
+        }
+    }
+
+    let mut new_conn = Vec::new();
+    let mut elem_types_vec: Vec<ElementType> = Vec::with_capacity(n_elems);
+    let mut elem_offsets = vec![0usize];
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        if marked_set.contains(&e) {
+            let m01 = edge_to_new[&edge_key(ns[0], ns[1])];
+            let m02 = edge_to_new[&edge_key(ns[0], ns[2])];
+            let m03 = edge_to_new[&edge_key(ns[0], ns[3])];
+            let m12 = edge_to_new[&edge_key(ns[1], ns[2])];
+            let m13 = edge_to_new[&edge_key(ns[1], ns[3])];
+            let m23 = edge_to_new[&edge_key(ns[2], ns[3])];
+            new_conn.extend_from_slice(&[ns[0], ns[1], ns[2], ns[3], m01, m02, m03, m12, m13, m23]);
+            elem_types_vec.push(ElementType::Tet10);
+            elem_offsets.push(elem_offsets.last().unwrap() + 10);
+        } else {
+            new_conn.extend_from_slice(&ns[0..4]);
+            elem_types_vec.push(ElementType::Tet4);
+            elem_offsets.push(elem_offsets.last().unwrap() + 4);
+        }
+    }
+
+    let new_mesh = SimplexMesh {
+        coords: new_coords, conn: new_conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: ElementType::Tet10,
+        face_conn: mesh.face_conn.clone(),
+        face_tags: mesh.face_tags.clone(), face_type: mesh.face_type,
+        elem_types: Some(elem_types_vec),
+        elem_offsets: Some(elem_offsets),
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(), edge_to_elem: Vec::new(),
+    };
+    (new_mesh, edge_to_new)
+}
+
+/// Refine Tet10 → Tet20: adds 4 face centroids per marked tet.
+///
+/// Face centroids are shared between adjacent tets (deduplicated by face key).
+pub fn p_refine_tet10_to_tet20(
+    mesh: &SimplexMesh<3>,
+    marked: &[ElemId],
+) -> (SimplexMesh<3>, std::collections::HashMap<(NodeId,NodeId,NodeId), NodeId>) {
+    assert_eq!(mesh.elem_type, ElementType::Tet10,
+        "p_refine_tet10_to_tet20 requires a Tet10 mesh");
+
+    fn face_key(a: NodeId, b: NodeId, c: NodeId) -> (NodeId, NodeId, NodeId) {
+        let mut v = [a,b,c]; v.sort_unstable(); (v[0], v[1], v[2])
+    }
+
+    let n_elems = mesh.n_elems();
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let mut face_to_new: std::collections::HashMap<(NodeId,NodeId,NodeId), NodeId> = std::collections::HashMap::new();
+    let mut next_node = mesh.n_nodes() as NodeId;
+    let mut new_coords = mesh.coords.clone();
+
+    let tet_faces = [(0,1,2),(0,1,3),(0,2,3),(1,2,3)];
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        for &(i,j,k) in &tet_faces {
+            let fk = face_key(ns[i], ns[j], ns[k]);
+            if !face_to_new.contains_key(&fk) {
+                let a = mesh.coords_of(ns[i]); let b = mesh.coords_of(ns[j]); let c = mesh.coords_of(ns[k]);
+                new_coords.push((a[0]+b[0]+c[0])/3.0);
+                new_coords.push((a[1]+b[1]+c[1])/3.0);
+                new_coords.push((a[2]+b[2]+c[2])/3.0);
+                face_to_new.insert(fk, next_node);
+                next_node += 1;
+            }
+        }
+    }
+
+    let mut new_conn = Vec::new();
+    let mut elem_types_vec: Vec<ElementType> = Vec::with_capacity(n_elems);
+    let mut elem_offsets = vec![0usize];
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        if marked_set.contains(&e) {
+            let f012 = face_to_new[&face_key(ns[0], ns[1], ns[2])];
+            let f013 = face_to_new[&face_key(ns[0], ns[1], ns[3])];
+            let f023 = face_to_new[&face_key(ns[0], ns[2], ns[3])];
+            let f123 = face_to_new[&face_key(ns[1], ns[2], ns[3])];
+            new_conn.extend_from_slice(&[ns[0], ns[1], ns[2], ns[3],
+                                          ns[4], ns[5], ns[6], ns[7], ns[8], ns[9],
+                                          f012, f013, f023, f123]);
+            elem_types_vec.push(ElementType::Tet10);
+            elem_offsets.push(elem_offsets.last().unwrap() + 14);
+        } else {
+            for &n in ns { new_conn.push(n); }
+            let npe = ns.len();
+            elem_types_vec.push(if npe <= 4 { ElementType::Tet4 } else { ElementType::Tet10 });
+            elem_offsets.push(elem_offsets.last().unwrap() + npe);
+        }
+    }
+
+    let new_mesh = SimplexMesh {
+        coords: new_coords, conn: new_conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: ElementType::Tet10,
+        face_conn: mesh.face_conn.clone(),
+        face_tags: mesh.face_tags.clone(), face_type: mesh.face_type,
+        elem_types: Some(elem_types_vec),
+        elem_offsets: Some(elem_offsets),
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(), edge_to_elem: Vec::new(),
+    };
+    (new_mesh, face_to_new)
+}
+
+/// Refine Quad4 → Quad9: adds 4 edge midpoints + 1 centroid per marked quad.
+///
+/// Edge midpoints are shared between adjacent quads (deduplicated by edge key).
+pub fn p_refine_quad4_to_quad9(
+    mesh: &SimplexMesh<2>,
+    marked: &[ElemId],
+) -> (SimplexMesh<2>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
+    assert_eq!(mesh.elem_type, ElementType::Quad4,
+        "p_refine_quad4_to_quad9 requires a Quad4 mesh");
+
+    fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    let n_elems = mesh.n_elems();
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let mut edge_to_new: std::collections::HashMap<(NodeId, NodeId), NodeId> = std::collections::HashMap::new();
+    let mut next_node = mesh.n_nodes() as NodeId;
+    let mut new_coords = mesh.coords.clone();
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        for &(i,j) in &[(0,1),(1,2),(2,3),(3,0)] {
+            let ek = edge_key(ns[i], ns[j]);
+            if !edge_to_new.contains_key(&ek) {
+                let a = mesh.coords_of(ns[i]); let b = mesh.coords_of(ns[j]);
+                new_coords.push(0.5*(a[0]+b[0]));
+                new_coords.push(0.5*(a[1]+b[1]));
+                edge_to_new.insert(ek, next_node);
+                next_node += 1;
+            }
+        }
+    }
+
+    let mut new_conn = Vec::new();
+    let mut elem_types_vec: Vec<ElementType> = Vec::with_capacity(n_elems);
+    let mut elem_offsets = vec![0usize];
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        if marked_set.contains(&e) {
+            let m01 = edge_to_new[&edge_key(ns[0], ns[1])];
+            let m12 = edge_to_new[&edge_key(ns[1], ns[2])];
+            let m23 = edge_to_new[&edge_key(ns[2], ns[3])];
+            let m30 = edge_to_new[&edge_key(ns[3], ns[0])];
+            // Centroid
+            let mut cx = 0.0; let mut cy = 0.0;
+            for &n in ns.iter() { let c = mesh.coords_of(n); cx += c[0]; cy += c[1]; }
+            cx /= 4.0; cy /= 4.0;
+            new_coords.push(cx); new_coords.push(cy);
+            let centroid = next_node; next_node += 1;
+            new_conn.extend_from_slice(&[ns[0], ns[1], ns[2], ns[3],
+                                          m01, m12, m23, m30, centroid]);
+            elem_types_vec.push(ElementType::Quad4);
+            elem_offsets.push(elem_offsets.last().unwrap() + 9);
+        } else {
+            new_conn.extend_from_slice(&ns[0..4]);
+            elem_types_vec.push(ElementType::Quad4);
+            elem_offsets.push(elem_offsets.last().unwrap() + 4);
+        }
+    }
+
+    let new_mesh = SimplexMesh {
+        coords: new_coords, conn: new_conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: ElementType::Quad4,
+        face_conn: mesh.face_conn.clone(),
+        face_tags: mesh.face_tags.clone(), face_type: mesh.face_type,
+        elem_types: Some(elem_types_vec),
+        elem_offsets: Some(elem_offsets),
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(), edge_to_elem: Vec::new(),
+    };
+    (new_mesh, edge_to_new)
+}
+
+/// Refine Hex8 → Hex20: adds 12 edge midpoints per marked hex.
+///
+/// Edge midpoints are shared between adjacent hexes (deduplicated by edge key).
+pub fn p_refine_hex8_to_hex20(
+    mesh: &SimplexMesh<3>,
+    marked: &[ElemId],
+) -> (SimplexMesh<3>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
+    assert_eq!(mesh.elem_type, ElementType::Hex8,
+        "p_refine_hex8_to_hex20 requires a Hex8 mesh");
+
+    fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    let n_elems = mesh.n_elems();
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let mut edge_to_new: std::collections::HashMap<(NodeId, NodeId), NodeId> = std::collections::HashMap::new();
+    let mut next_node = mesh.n_nodes() as NodeId;
+    let mut new_coords = mesh.coords.clone();
+
+    let hex_edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),
+                     (0,4),(1,5),(2,6),(3,7)];
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        for &(i,j) in &hex_edges {
+            let ek = edge_key(ns[i], ns[j]);
+            if !edge_to_new.contains_key(&ek) {
+                let a = mesh.coords_of(ns[i]); let b = mesh.coords_of(ns[j]);
+                new_coords.push(0.5*(a[0]+b[0]));
+                new_coords.push(0.5*(a[1]+b[1]));
+                new_coords.push(0.5*(a[2]+b[2]));
+                edge_to_new.insert(ek, next_node);
+                next_node += 1;
+            }
+        }
+    }
+
+    let mut new_conn = Vec::new();
+    let mut elem_types_vec: Vec<ElementType> = Vec::with_capacity(n_elems);
+    let mut elem_offsets = vec![0usize];
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        if marked_set.contains(&e) {
+            let m01 = edge_to_new[&edge_key(ns[0], ns[1])];
+            let m12 = edge_to_new[&edge_key(ns[1], ns[2])];
+            let m23 = edge_to_new[&edge_key(ns[2], ns[3])];
+            let m30 = edge_to_new[&edge_key(ns[3], ns[0])];
+            let m45 = edge_to_new[&edge_key(ns[4], ns[5])];
+            let m56 = edge_to_new[&edge_key(ns[5], ns[6])];
+            let m67 = edge_to_new[&edge_key(ns[6], ns[7])];
+            let m74 = edge_to_new[&edge_key(ns[7], ns[4])];
+            let m04 = edge_to_new[&edge_key(ns[0], ns[4])];
+            let m15 = edge_to_new[&edge_key(ns[1], ns[5])];
+            let m26 = edge_to_new[&edge_key(ns[2], ns[6])];
+            let m37 = edge_to_new[&edge_key(ns[3], ns[7])];
+            new_conn.extend_from_slice(&[ns[0],ns[1],ns[2],ns[3],ns[4],ns[5],ns[6],ns[7],
+                                          m01,m12,m23,m30,m45,m56,m67,m74,m04,m15,m26,m37]);
+            elem_types_vec.push(ElementType::Hex20);
+            elem_offsets.push(elem_offsets.last().unwrap() + 20);
+        } else {
+            new_conn.extend_from_slice(&ns[0..8]);
+            elem_types_vec.push(ElementType::Hex8);
+            elem_offsets.push(elem_offsets.last().unwrap() + 8);
+        }
+    }
+
+    let new_mesh = SimplexMesh {
+        coords: new_coords, conn: new_conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: ElementType::Hex20,
+        face_conn: mesh.face_conn.clone(),
+        face_tags: mesh.face_tags.clone(), face_type: mesh.face_type,
+        elem_types: Some(elem_types_vec),
+        elem_offsets: Some(elem_offsets),
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(), edge_to_elem: Vec::new(),
+    };
+    (new_mesh, edge_to_new)
+}
+
+/// Refine Hex20 → Hex27: adds 6 face centers + 1 volume centroid per marked hex.
+///
+/// Face centers are shared between adjacent hexes (deduplicated by quad face key).
+pub fn p_refine_hex20_to_hex27(
+    mesh: &SimplexMesh<3>,
+    marked: &[ElemId],
+) -> (SimplexMesh<3>, Vec<NodeId>) {
+    assert_eq!(mesh.elem_type, ElementType::Hex20,
+        "p_refine_hex20_to_hex27 requires a Hex20 mesh");
+
+    let n_elems = mesh.n_elems();
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let mut next_node = mesh.n_nodes() as NodeId;
+    let mut new_coords = mesh.coords.clone();
+    let mut new_centroids: Vec<NodeId> = Vec::new();
+
+    let hex_faces = [[0,1,2,3],[4,5,6,7],[0,1,5,4],[2,3,7,6],[0,3,7,4],[1,2,6,5]];
+
+    // Face centers + volume center are element-local for Hex20→Hex27 (not shared
+    // in the usual case since face centers already belong to the hex, but we still
+    // deduplicate by face key for correctness with mixed meshes).
+    use std::collections::HashMap;
+    let mut face_to_new: HashMap<[NodeId;4], NodeId> = HashMap::new();
+
+    for &e in marked {
+        let ns = mesh.elem_nodes(e);
+        for face in &hex_faces {
+            let fns = [ns[face[0]], ns[face[1]], ns[face[2]], ns[face[3]]];
+            let mut k = fns; k.sort_unstable();
+            if !face_to_new.contains_key(&k) {
+                let mut cx = 0.0; let mut cy = 0.0; let mut cz = 0.0;
+                for &fi in face.iter() { let c = mesh.coords_of(ns[fi]); cx += c[0]; cy += c[1]; cz += c[2]; }
+                cx /= 4.0; cy /= 4.0; cz /= 4.0;
+                new_coords.push(cx); new_coords.push(cy); new_coords.push(cz);
+                face_to_new.insert(k, next_node);
+                next_node += 1;
+            }
+        }
+        // Volume centroid
+        let mut cx = 0.0; let mut cy = 0.0; let mut cz = 0.0;
+        for &n in ns.iter() { let c = mesh.coords_of(n); cx += c[0]; cy += c[1]; cz += c[2]; }
+        cx /= 8.0; cy /= 8.0; cz /= 8.0;
+        new_coords.push(cx); new_coords.push(cy); new_coords.push(cz);
+        new_centroids.push(next_node);
+        next_node += 1;
+    }
+
+    let mut new_conn = Vec::new();
+    let mut elem_types_vec: Vec<ElementType> = Vec::with_capacity(n_elems);
+    let mut elem_offsets = vec![0usize];
+    let mut centroid_idx = 0usize;
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        if marked_set.contains(&e) {
+            new_conn.extend_from_slice(&ns[0..20]); // existing Hex20 nodes
+            for face in &hex_faces {
+                let fns = [ns[face[0]], ns[face[1]], ns[face[2]], ns[face[3]]];
+                let mut k = fns; k.sort_unstable();
+                new_conn.push(face_to_new[&k]);
+            }
+            new_conn.push(new_centroids[centroid_idx]); centroid_idx += 1;
+            elem_types_vec.push(ElementType::Hex27);
+            elem_offsets.push(elem_offsets.last().unwrap() + 27);
+        } else {
+            for &n in ns { new_conn.push(n); }
+            let npe = ns.len();
+            elem_types_vec.push(if npe <= 8 { ElementType::Hex8 } else { ElementType::Hex20 });
+            elem_offsets.push(elem_offsets.last().unwrap() + npe);
+        }
+    }
+
+    let new_mesh = SimplexMesh {
+        coords: new_coords, conn: new_conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: ElementType::Hex27,
+        face_conn: mesh.face_conn.clone(),
+        face_tags: mesh.face_tags.clone(), face_type: mesh.face_type,
+        elem_types: Some(elem_types_vec),
+        elem_offsets: Some(elem_offsets),
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: Vec::new(), edge_to_elem: Vec::new(),
+    };
+    (new_mesh, new_centroids)
+}
+
 /// Prolongate a P1 solution to a P2 (Tri6) mesh after p-refinement.
 ///
 /// Values at the original vertices are unchanged.  Values at new edge-midpoint
@@ -1987,9 +2456,7 @@ fn refine_nonconforming_3d_internal(
             let key = face_key_3d(ns[a], ns[b], ns[c]);
             face_elems.entry(key).or_default().push(e);
         }
-
     }
-
     // ── 2. Create midpoint nodes for marked elements ───────────────────────────
     let mut edge_midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
     let mut new_coords: Vec<f64> = mesh.coords.clone();
@@ -5917,15 +6384,22 @@ pub fn residual_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], f: &[f64]
         let e0=elems[0]as usize;let e1=elems[1]as usize;
         let[a,b,c,d]=*fns;
         let ca=mesh.coords_of(a);let cb=mesh.coords_of(b);let cc=mesh.coords_of(c);let cd=mesh.coords_of(d);
-        let ex=cb[0]-ca[0];let ey=cb[1]-ca[1];let ez=cb[2]-ca[2];
-        let fx=cc[0]-ca[0];let fy=cc[1]-ca[1];let fz=cc[2]-ca[2];
-        let nx=ey*fz-ez*fy;let ny=ez*fx-ex*fz;let nz=ex*fy-ey*fx;
-        let fa=0.5*(nx*nx+ny*ny+nz*nz).sqrt();
+        // Split quad into 2 triangles along (a,c) for area and normal
+        let ex1=cb[0]-ca[0];let ey1=cb[1]-ca[1];let ez1=cb[2]-ca[2];
+        let fx1=cc[0]-ca[0];let fy1=cc[1]-ca[1];let fz1=cc[2]-ca[2];
+        let nx1=ey1*fz1-ez1*fy1;let ny1=ez1*fx1-ex1*fz1;let nz1=ex1*fy1-ey1*fx1;
+        let area1=0.5*(nx1*nx1+ny1*ny1+nz1*nz1).sqrt();
+        let ex2=cd[0]-ca[0];let ey2=cd[1]-ca[1];let ez2=cd[2]-ca[2];
+        let fx2=cc[0]-ca[0];let fy2=cc[1]-ca[1];let fz2=cc[2]-ca[2];
+        let nx2=ey2*fz2-ez2*fy2;let ny2=ez2*fx2-ex2*fz2;let nz2=ex2*fy2-ey2*fx2;
+        let area2=0.5*(nx2*nx2+ny2*ny2+nz2*nz2).sqrt();
+        let fa=area1+area2;
         if fa<1e-30{continue;}
-        let inv=1.0/(nx*nx+ny*ny+nz*nz).sqrt();
-        let jump=(elem_grads[e0][0]-elem_grads[e1][0])*nx*inv
-                +(elem_grads[e0][1]-elem_grads[e1][1])*ny*inv
-                +(elem_grads[e0][2]-elem_grads[e1][2])*nz*inv;
+        // Use normal from first triangle as approximate face normal
+        let inv=1.0/(nx1*nx1+ny1*ny1+nz1*nz1).sqrt();
+        let jump=(elem_grads[e0][0]-elem_grads[e1][0])*nx1*inv
+                +(elem_grads[e0][1]-elem_grads[e1][1])*ny1*inv
+                +(elem_grads[e0][2]-elem_grads[e1][2])*nz1*inv;
         let hf=(2.0*fa).sqrt();
         eta_sq[e0]+=0.5*hf*jump*jump;eta_sq[e1]+=0.5*hf*jump*jump;
     }
@@ -6028,14 +6502,20 @@ pub fn dwr_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], z: &[f64], f: 
         let e0=elems[0]as usize;let e1=elems[1]as usize;
         let[a,b,c,d]=*fns;
         let ca=mesh.coords_of(a);let cb=mesh.coords_of(b);let cc=mesh.coords_of(c);let cd=mesh.coords_of(d);
-        let ex=cb[0]-ca[0];let ey=cb[1]-ca[1];let ez=cb[2]-ca[2];
-        let fx=cc[0]-ca[0];let fy=cc[1]-ca[1];let fz=cc[2]-ca[2];
-        let nx=ey*fz-ez*fy;let ny=ez*fx-ex*fz;let nz=ex*fy-ey*fx;
-        let fa=0.5*(nx*nx+ny*ny+nz*nz).sqrt();
+        // Split quad into 2 triangles along (a,c) for full area
+        let ex1=cb[0]-ca[0];let ey1=cb[1]-ca[1];let ez1=cb[2]-ca[2];
+        let fx1=cc[0]-ca[0];let fy1=cc[1]-ca[1];let fz1=cc[2]-ca[2];
+        let nx1=ey1*fz1-ez1*fy1;let ny1=ez1*fx1-ex1*fz1;let nz1=ex1*fy1-ey1*fx1;
+        let area1=0.5*(nx1*nx1+ny1*ny1+nz1*nz1).sqrt();
+        let ex2=cd[0]-ca[0];let ey2=cd[1]-ca[1];let ez2=cd[2]-ca[2];
+        let fx2=cc[0]-ca[0];let fy2=cc[1]-ca[1];let fz2=cc[2]-ca[2];
+        let nx2=ey2*fz2-ez2*fy2;let ny2=ez2*fx2-ex2*fz2;let nz2=ex2*fy2-ey2*fx2;
+        let area2=0.5*(nx2*nx2+ny2*ny2+nz2*nz2).sqrt();
+        let fa=area1+area2;
         if fa<1e-30{continue;}
-        let inv=1.0/(nx*nx+ny*ny+nz*nz).sqrt();
-        let j0=elem_grads[e0][0]*nx*inv+elem_grads[e0][1]*ny*inv+elem_grads[e0][2]*nz*inv;
-        let j1=elem_grads[e1][0]*nx*inv+elem_grads[e1][1]*ny*inv+elem_grads[e1][2]*nz*inv;
+        let inv=1.0/(nx1*nx1+ny1*ny1+nz1*nz1).sqrt();
+        let j0=elem_grads[e0][0]*nx1*inv+elem_grads[e0][1]*ny1*inv+elem_grads[e0][2]*nz1*inv;
+        let j1=elem_grads[e1][0]*nx1*inv+elem_grads[e1][1]*ny1*inv+elem_grads[e1][2]*nz1*inv;
         let jump=(j0-j1).abs();
         if jump<1e-30{continue;}
         let w_mid=(elem_omega[e0]+elem_omega[e1])*0.5;
@@ -6306,6 +6786,101 @@ mod tests {
             assert!((u_p2[new as usize] - expected).abs() < 1e-14,
                 "midpoint {new}: expected {expected:.6}, got {:.6}", u_p2[new as usize]);
         }
+    }
+
+    // ── Higher-order p-refinement tests ──────────────────────────────────
+
+    #[test]
+    fn p_refine_tet4_to_tet10_adds_midpoints() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let n_orig = mesh.n_nodes();
+        let (p2, midpoint_map) = p_refine_tet4_to_tet10(&mesh, &[0, 1]);
+        assert!(p2.n_nodes() > n_orig, "should have added midpoint nodes");
+        assert_eq!(p2.n_elems(), mesh.n_elems(), "element count unchanged");
+        if let Some(ref types) = p2.elem_types {
+            assert_eq!(types[0], ElementType::Tet10);
+            assert_eq!(types[1], ElementType::Tet10);
+        }
+        for &new_n in midpoint_map.values() {
+            assert!((new_n as usize) >= n_orig, "new node {new_n} should be >= {n_orig}");
+        }
+    }
+
+    #[test]
+    fn p_refine_tet10_to_tet20_adds_face_centroids() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let tet10_mesh = p_refine_tet4_to_tet10(&mesh, &[0, 1]).0;
+        let n_orig = tet10_mesh.n_nodes();
+        let (p3, face_map) = p_refine_tet10_to_tet20(&tet10_mesh, &[0]);
+        assert!(p3.n_nodes() > n_orig, "should have added face centroids");
+        assert_eq!(p3.n_elems(), tet10_mesh.n_elems());
+        for &new_n in face_map.values() {
+            assert!((new_n as usize) >= n_orig);
+        }
+    }
+
+    #[test]
+    fn p_refine_quad4_to_quad9_adds_nodes() {
+        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let n_orig = mesh.n_nodes();
+        let (q9, midpoint_map) = p_refine_quad4_to_quad9(&mesh, &[0, 1]);
+        assert!(q9.n_nodes() > n_orig);
+        assert_eq!(q9.n_elems(), mesh.n_elems());
+        for &new_n in midpoint_map.values() {
+            assert!((new_n as usize) >= n_orig);
+        }
+    }
+
+    #[test]
+    fn p_refine_hex8_to_hex20_adds_midpoints() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let n_orig = mesh.n_nodes();
+        let (h20, midpoint_map) = p_refine_hex8_to_hex20(&mesh, &[0]);
+        assert!(h20.n_nodes() > n_orig);
+        assert_eq!(h20.n_elems(), mesh.n_elems());
+        if let Some(ref types) = h20.elem_types {
+            assert_eq!(types[0], ElementType::Hex20);
+        }
+        for &new_n in midpoint_map.values() {
+            assert!((new_n as usize) >= n_orig);
+        }
+    }
+
+    #[test]
+    fn p_refine_hex20_to_hex27_adds_centroids() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let (h20, _) = p_refine_hex8_to_hex20(&mesh, &[0]);
+        let n_orig = h20.n_nodes();
+        let (h27, centroids) = p_refine_hex20_to_hex27(&h20, &[0]);
+        assert!(h27.n_nodes() > n_orig);
+        assert_eq!(h27.n_elems(), h20.n_elems());
+        assert!(!centroids.is_empty());
+        for &c in &centroids {
+            assert!((c as usize) >= n_orig);
+        }
+    }
+
+    #[test]
+    fn p_refine_tri6_to_tri10_adds_centroid() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let (tri6, _) = p_refine_tri3_to_tri6(&mesh, &[0, 1, 2]);
+        let n_orig = tri6.n_nodes();
+        let (tri10, centroids) = p_refine_tri6_to_tri10(&tri6, &[0, 1]);
+        assert!(tri10.n_nodes() > n_orig);
+        assert_eq!(tri10.n_elems(), tri6.n_elems());
+        assert!(!centroids.is_empty());
+        for &c in &centroids {
+            assert!((c as usize) >= n_orig);
+        }
+    }
+
+    #[test]
+    fn p_refine_chain_preserves_volume_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let (h20, _) = p_refine_hex8_to_hex20(&mesh, &[0]);
+        let (h27, _) = p_refine_hex20_to_hex27(&h20, &[0]);
+        assert!(h27.n_nodes() > h20.n_nodes());
+        assert!(h20.n_nodes() > mesh.n_nodes());
     }
 
     #[test]
@@ -7452,6 +8027,36 @@ mod tests {
         }
     }
 
+    #[test] fn residual_3d_general_linear_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let f_val = vec![0.0; n];
+        let eta = residual_estimator_3d_general(&mesh, &u, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 2.0, "linear u, f=0 on Hex → residual ~0, got {max:.3e}");
+    }
+
+    #[test] fn residual_3d_general_linear_prism() {
+        let mesh = prism6_unit_mesh();
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let f_val = vec![0.0; n];
+        let eta = residual_estimator_3d_general(&mesh, &u, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 2.0, "linear u, f=0 on Prism → residual ~0, got {max:.3e}");
+    }
+
+    #[test] fn residual_3d_general_linear_pyramid() {
+        let mesh = pyramid5_unit_mesh();
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let f_val = vec![0.0; n];
+        let eta = residual_estimator_3d_general(&mesh, &u, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 2.0, "linear u, f=0 on Pyramid → residual ~0, got {max:.3e}");
+    }
+
     #[test] fn dwr_3d_general_linear_solution_zero() {
         // u = x, z = y, f = 0 → DWR = 0
         let mesh = SimplexMesh::<3>::unit_cube_tet(3);
@@ -7485,5 +8090,198 @@ mod tests {
         let f_val = vec![0.0; n];
         let eta = dwr_estimator_3d_general(&mesh, &u, &z, &f_val);
         assert_eq!(eta.len(), mesh.n_elems());
+    }
+
+    // ── Hex8 estimator tests ──────────────────────────────────────────────
+
+    #[test] fn zz_3d_general_linear_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = zz_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 0.5, "linear u on Hex → ZZ ~0, got {max:.3e}");
+    }
+
+    #[test] fn zz_3d_general_quadratic_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[0]*c[0] }).collect();
+        let eta = zz_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max > 1e-6, "x² on Hex → ZZ >0, got {max:.3e}");
+    }
+
+    #[test] fn kelly_3d_general_linear_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = kelly_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 2.0, "linear u on Hex → Kelly ~0, got {max:.3e}");
+    }
+
+    // ── Prism6 estimator tests ────────────────────────────────────────────
+
+    /// Build a unit right prism mesh: right triangle base z=0 → top z=1.
+    fn prism6_unit_mesh() -> SimplexMesh<3> {
+        let coords = vec![
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            0.0, 1.0, 0.0,  // 2
+            0.0, 0.0, 1.0,  // 3
+            1.0, 0.0, 1.0,  // 4
+            0.0, 1.0, 1.0,  // 5
+        ];
+        let conn = vec![0u32, 1, 2, 3, 4, 5];
+        let elem_tags = vec![1i32];
+        let face_conn = vec![
+            0u32, 2, 1,        // bottom tri
+            3, 4, 5,           // top tri
+            0, 1, 4, 3,        // quad front
+            1, 2, 5, 4,        // quad right
+            0, 3, 5, 2,        // quad left
+        ];
+        let face_tags = vec![1i32, 2, 3, 4, 5];
+        let face_types = vec![
+            ElementType::Tri3, ElementType::Tri3,
+            ElementType::Quad4, ElementType::Quad4, ElementType::Quad4,
+        ];
+        let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
+        SimplexMesh {
+            coords, conn, elem_tags,
+            elem_type: ElementType::Prism6,
+            face_conn, face_tags, face_type: ElementType::Tri3,
+            elem_types: None, elem_offsets: None,
+            face_types: Some(face_types),
+            face_offsets: Some(face_offsets),
+            face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
+        }
+    }
+
+    #[test] fn zz_3d_general_linear_prism() {
+        let mesh = prism6_unit_mesh();
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = zz_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 0.5, "linear u on Prism → ZZ ~0, got {max:.3e}");
+    }
+
+    #[test] fn kelly_3d_general_linear_prism() {
+        let mesh = prism6_unit_mesh();
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = kelly_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 2.0, "linear u on Prism → Kelly ~0, got {max:.3e}");
+    }
+
+    // ── Pyramid5 estimator tests ───────────────────────────────────────────
+
+    /// Build a unit pyramid mesh: base z=0 (unit square), apex at (0,0,1).
+    fn pyramid5_unit_mesh() -> SimplexMesh<3> {
+        let coords = vec![
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            1.0, 1.0, 0.0,  // 2
+            0.0, 1.0, 0.0,  // 3
+            0.0, 0.0, 1.0,  // 4
+        ];
+        let conn = vec![0u32, 1, 2, 3, 4];
+        let elem_tags = vec![1i32];
+        let face_conn = vec![
+            0u32, 1, 2, 3,  // base quad
+            0, 1, 4,        // tri 1
+            1, 2, 4,        // tri 2
+            2, 3, 4,        // tri 3
+            3, 0, 4,        // tri 4
+        ];
+        let face_tags = vec![1i32, 2, 3, 4, 5];
+        let face_types = vec![
+            ElementType::Quad4,
+            ElementType::Tri3, ElementType::Tri3,
+            ElementType::Tri3, ElementType::Tri3,
+        ];
+        let face_offsets = vec![0usize, 4, 7, 10, 13, 16];
+        SimplexMesh {
+            coords, conn, elem_tags,
+            elem_type: ElementType::Pyramid5,
+            face_conn, face_tags, face_type: ElementType::Tri3,
+            elem_types: None, elem_offsets: None,
+            face_types: Some(face_types),
+            face_offsets: Some(face_offsets),
+            face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
+        }
+    }
+
+    #[test] fn zz_3d_general_linear_pyramid() {
+        let mesh = pyramid5_unit_mesh();
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = zz_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 0.5, "linear u on Pyramid → ZZ ~0, got {max:.3e}");
+    }
+
+    #[test] fn kelly_3d_general_linear_pyramid() {
+        let mesh = pyramid5_unit_mesh();
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = kelly_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 2.0, "linear u on Pyramid → Kelly ~0, got {max:.3e}");
+    }
+
+    // ── Hex8 DWR tests ───────────────────────────────────────────────────
+
+    #[test] fn dwr_3d_general_linear_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
+        let f_val = vec![0.0; n];
+        let eta = dwr_estimator_3d_general(&mesh, &u, &z, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 10.0, "linear u,z on Hex → DWR ~0, got {max:.3e}");
+    }
+
+    #[test] fn dwr_3d_general_quadratic_hex() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[0]*c[0] }).collect();
+        let z: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[1]*c[1] }).collect();
+        let f_val = vec![2.0; n];
+        let eta = dwr_estimator_3d_general(&mesh, &u, &z, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max > 1e-6, "x²,y² on Hex → DWR > 0, got {max:.3e}");
+    }
+
+    // ── Prism6 DWR tests ─────────────────────────────────────────────────
+
+    #[test] fn dwr_3d_general_linear_prism() {
+        let mesh = prism6_unit_mesh();
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
+        let f_val = vec![0.0; n];
+        let eta = dwr_estimator_3d_general(&mesh, &u, &z, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 10.0, "linear u,z on Prism → DWR ~0, got {max:.3e}");
+    }
+
+    // ── Pyramid5 DWR tests ───────────────────────────────────────────────
+
+    #[test] fn dwr_3d_general_linear_pyramid() {
+        let mesh = pyramid5_unit_mesh();
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
+        let f_val = vec![0.0; n];
+        let eta = dwr_estimator_3d_general(&mesh, &u, &z, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 10.0, "linear u,z on Pyramid → DWR ~0, got {max:.3e}");
     }
 }

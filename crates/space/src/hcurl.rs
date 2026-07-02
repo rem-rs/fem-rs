@@ -70,7 +70,7 @@ const TET_FACES: [(usize, usize, usize); 4] = [
 ];
 
 /// Local quad-face definitions for 3-D hexahedra (Quad4 face ordering).
-const HEX_QUAD_FACES: [(usize, usize, usize, usize); 6] = [
+pub(crate) const HEX_QUAD_FACES: [(usize, usize, usize, usize); 6] = [
     (0, 1, 2, 3), // z=-1 (bottom)
     (4, 5, 6, 7), // z= 1 (top)
     (0, 1, 5, 4), // y=-1 (front)
@@ -86,7 +86,7 @@ const PRISM_TRI_FACES: [(usize, usize, usize); 2] = [
 ];
 
 /// Local quad faces for prism (Prism6 ordering).
-const PRISM_QUAD_FACES: [(usize, usize, usize, usize); 3] = [
+pub(crate) const PRISM_QUAD_FACES: [(usize, usize, usize, usize); 3] = [
     (0, 1, 4, 3),
     (1, 2, 5, 4),
     (0, 2, 5, 3),
@@ -101,7 +101,7 @@ const PYRAMID_TRI_FACES: [(usize, usize, usize); 4] = [
 ];
 
 /// Local base quad face for pyramid.
-const PYRAMID_QUAD_FACE: [(usize, usize, usize, usize); 1] = [
+pub(crate) const PYRAMID_QUAD_FACE: [(usize, usize, usize, usize); 1] = [
     (0, 1, 2, 3),
 ];
 
