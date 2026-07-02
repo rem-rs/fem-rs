@@ -103,9 +103,10 @@ mod tests {
     fn vem_space_interpolate_linear() {
         let mesh = PolyMesh::unit_square_quad(2, 2);
         let space = VEMSpace::new(mesh);
+        let mesh_ref = space.mesh();
         let v = space.interpolate(&|x| x[0] + 2.0 * x[1]);
         for i in 0..space.n_dofs() {
-            let c = mesh.node_coords(i as u32);
+            let c = mesh_ref.node_coords(i as u32);
             let expected = c[0] + 2.0 * c[1];
             assert!((v.as_slice()[i] - expected).abs() < 1e-14);
         }
