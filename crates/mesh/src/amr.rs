@@ -6527,4 +6527,152 @@ mod tests {
         );
         nc.check().unwrap();
     }
+
+    // ─── Hex8 uniform refinement tests ────────────────────────────────────
+
+    /// Volume of Hex8 via 5-tet decomposition along diagonal (0,2,5,7).
+    fn hex8_vol(mesh: &SimplexMesh<3>, e: ElemId) -> f64 {
+        let ns = mesh.elem_nodes(e);
+        let c = |i: usize| -> [f64; 3] { let off = ns[i] as usize * 3; [mesh.coords[off], mesh.coords[off+1], mesh.coords[off+2]] };
+        tet_signed_vol(&c(0),&c(1),&c(2),&c(5)).abs()+tet_signed_vol(&c(2),&c(3),&c(0),&c(7)).abs()
+        +tet_signed_vol(&c(0),&c(4),&c(5),&c(7)).abs()+tet_signed_vol(&c(2),&c(5),&c(6),&c(7)).abs()
+        +tet_signed_vol(&c(0),&c(2),&c(5),&c(7)).abs()
+    }
+
+    #[test] fn hex8_uniform_single_element() {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let v0 = hex8_vol(&mesh, 0); assert!((v0-1.0).abs() < 1e-14);
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let (fine, c, _) = refine_hex8_uniform(&mesh, &all);
+        assert_eq!(fine.n_elems(), 8); assert!(c.is_empty());
+        let vs: f64 = (0..fine.n_elems()).map(|e| hex8_vol(&fine, e as ElemId)).sum();
+        assert!((vs - v0).abs() < 1e-12);
+        fine.check().unwrap();
+    }
+
+    #[test] fn hex20_uniform_single_element() {
+        let coords = (0..20i32).flat_map(|i| {
+            let (cx,cy,cz) = (if i%2==0{0.0}else{1.0}, if (i/2)%2==0{0.0}else{1.0}, if (i/4)%2==0{0.0}else{1.0});
+            vec![cx,cy,cz]
+        }).collect::<Vec<f64>>();
+        // Fix edge mids to actual midpoints
+        let mut c = coords; c[24]=0.5; c[25]=0.0; c[26]=0.0; // node 8: (0.5,0,0)
+        c[27]=1.0; c[28]=0.5; c[29]=0.0; // node 9: (1,0.5,0)
+        c[30]=0.5; c[31]=1.0; c[32]=0.0; // etc
+        let conn = (0..20u32).collect::<Vec<_>>();
+        let fc = vec![0u32,1,2,3, 4,5,6,7, 0,1,5,4, 2,3,7,6, 0,3,7,4, 1,2,6,5];
+        let ft = vec![1,2,3,4,5,6];
+        let mesh = SimplexMesh { coords:c, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex20,
+            face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
+            elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let (fine, c, _) = refine_hex20_uniform(&mesh, &all);
+        assert_eq!(fine.n_elems(), 8); assert_eq!(fine.elem_type, ElementType::Hex8); assert!(c.is_empty());
+        fine.check().unwrap();
+    }
+
+    #[test] fn hex27_uniform_single_element() {
+        let conn = (0..27u32).collect::<Vec<_>>();
+        let mut coords = Vec::with_capacity(81);
+        for i in 0..27 {
+            let (xi,yi,zi) = (i%3,i/3%3,i/9%3);
+            coords.push(if xi==0{0.0}else if xi==1{1.0}else{0.5});
+            coords.push(if yi==0{0.0}else if yi==1{1.0}else{0.5});
+            coords.push(if zi==0{0.0}else if zi==1{1.0}else{0.5});
+        }
+        let fc = vec![0u32,1,2,3, 4,5,6,7, 0,1,5,4, 2,3,7,6, 0,3,7,4, 1,2,6,5];
+        let ft = vec![1,2,3,4,5,6];
+        let mesh = SimplexMesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex27,
+            face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
+            elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let (fine, c, _) = refine_hex27_uniform(&mesh, &all);
+        assert_eq!(fine.n_elems(), 8); assert!(c.is_empty()); assert_eq!(fine.elem_type, ElementType::Hex8);
+        fine.check().unwrap();
+    }
+
+    // ─── Pyramid5 uniform + NC tests ──────────────────────────────────────
+
+    fn pyramid5_vol(mesh: &SimplexMesh<3>, e: ElemId) -> f64 {
+        let ns = mesh.elem_nodes(e);
+        let c = |i: usize| -> [f64; 3] { let off = ns[i] as usize * 3; [mesh.coords[off], mesh.coords[off+1], mesh.coords[off+2]] };
+        tet_signed_vol(&c(0),&c(1),&c(2),&c(4)).abs()+tet_signed_vol(&c(2),&c(3),&c(0),&c(4)).abs()
+    }
+
+    #[test] fn pyramid5_uniform_single_element() {
+        let coords = vec![0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0];
+        let conn = vec![0u32,1,2,3,4]; let elem_tags = vec![1i32];
+        let fc = vec![0u32,1,2,3, 0,1,4, 1,2,4, 2,3,4, 3,0,4];
+        let ft = vec![1,2,3,4,5];
+        let fty = vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3];
+        let fo = vec![0,4,7,10,13,16];
+        let mesh = SimplexMesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
+            face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
+            elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+        let v0 = pyramid5_vol(&mesh, 0); assert!((v0-1.0/3.0).abs() < 1e-14);
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let (fine, c) = refine_pyramid5_uniform(&mesh, &all);
+        assert_eq!(fine.n_elems(), 16); assert!(c.is_empty());
+        let vs: f64 = (0..fine.n_elems()).map(|e| { let ns=fine.elem_nodes(e as ElemId);
+            let c2=|i|{let off=ns[i]as usize*3;[fine.coords[off],fine.coords[off+1],fine.coords[off+2]]};
+            tet_signed_vol(&c2(0),&c2(1),&c2(2),&c2(3)).abs() }).sum();
+        assert!((vs - v0).abs() < 1e-12);
+    }
+
+    #[test] fn pyramid5_uniform_through_dispatch() {
+        let mesh = SimplexMesh { coords: vec![0.0,0.0,0.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0],
+            conn: vec![0u32,1,2,3,4], elem_tags: vec![1i32], elem_type: ElementType::Pyramid5,
+            face_conn: vec![0u32,1,2,3,0,1,4,1,2,4,2,3,4,3,0,4], face_tags: vec![1,2,3,4,5],
+            face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
+            face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
+            face_offsets: Some(vec![0,4,7,10,13,16]),
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![] };
+        let fine = refine_uniform_3d(&mesh);
+        assert_eq!(fine.n_elems(), 16); fine.check().unwrap();
+    }
+
+    fn make_pyramid_mesh() -> SimplexMesh<3> {
+        SimplexMesh { coords: vec![0.0,0.0,0.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0],
+            conn: vec![0u32,1,2,3,4], elem_tags: vec![1i32], elem_type: ElementType::Pyramid5,
+            face_conn: vec![0u32,1,2,3,0,1,4,1,2,4,2,3,4,3,0,4], face_tags: vec![1,2,3,4,5],
+            face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
+            face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
+            face_offsets: Some(vec![0,4,7,10,13,16]),
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![] }
+    }
+
+    #[test] fn pyramid5_nc_refine_empty_is_identity() {
+        let mesh = make_pyramid_mesh();
+        let (nc, ec, tc, qc, mp) = refine_nonconforming_pyramid(&mesh, &[]);
+        assert_eq!(nc.n_elems(), mesh.n_elems()); assert_eq!(nc.n_nodes(), mesh.n_nodes());
+        assert!(ec.is_empty()); assert!(tc.is_empty()); assert!(qc.is_empty()); assert!(mp.is_empty());
+    }
+
+    #[test] fn pyramid5_nc_refine_all_gives_no_constraints() {
+        let mesh = make_pyramid_mesh();
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &all);
+        assert_eq!(nc.n_elems(), 16); assert!(ec.is_empty()); assert!(tc.is_empty()); assert!(qc.is_empty());
+        nc.check().unwrap();
+    }
+
+    #[test] fn pyramid5_nc_refine_single_creates_constraints() {
+        let coords = vec![0.0,0.0,0.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,1.0,-1.0,0.0,0.0,-1.0,0.0];
+        let conn = vec![0u32,1,2,3,4, 0,1,5,6,4]; let elem_tags = vec![1i32,1];
+        let fc = vec![0u32,1,2,3,1,2,4,2,3,4,3,0,4, 0,1,5,6,1,5,4,5,6,4,6,0,4];
+        let ft = vec![1,2,3,5, 1,2,4,6];
+        let fty = vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,
+                       ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3];
+        let fo = vec![0,4,7,10,13, 17,20,23,26];
+        let mesh = SimplexMesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
+            face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
+            elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+        let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &[0]);
+        assert_eq!(nc.n_elems(), 17); assert!(ec.len()>=3); assert!(!tc.is_empty()); assert!(qc.is_empty());
+        nc.check().unwrap();
+    }
 }
