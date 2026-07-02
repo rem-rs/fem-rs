@@ -1767,7 +1767,8 @@ pub fn refine_uniform(mesh: &SimplexMesh<2>) -> SimplexMesh<2> {
 /// Uniformly refine all elements of a 3-D mesh, dispatching to the appropriate
 /// refinement path.
 ///
-/// Tet4 → 8 Tet4, Hex8 → 8 Hex8, Prism6 → 8 Prism6, Pyramid5 → not supported.
+/// Tet4 → 8 Tet4, Hex8 → 8 Hex8, Hex20 → 8 Hex8, Hex27 → 8 Hex8,
+/// Prism6 → 8 Prism6, Pyramid5 → 16 Tet4.
 pub fn refine_uniform_3d(mesh: &SimplexMesh<3>) -> SimplexMesh<3> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     match mesh.elem_type {
@@ -1775,12 +1776,40 @@ pub fn refine_uniform_3d(mesh: &SimplexMesh<3>) -> SimplexMesh<3> {
             let (m, _, _) = refine_nonconforming_3d(mesh, &all);
             m
         }
-        ElementType::Hex8 | ElementType::Hex20 => {
+        ElementType::Hex8 => {
             let (m, _, _, _) = refine_nonconforming_hex(mesh, &all);
+            m
+        }
+        ElementType::Hex20 | ElementType::Hex27 => {
+            // Quadratic hex: extract corners, refine as Hex8
+            let n_elems = mesh.n_elems();
+            let npe = mesh.elem_type.nodes_per_element();
+            let mut hex8_conn = Vec::with_capacity(n_elems * 8);
+            for e in 0..n_elems {
+                let off = e * npe;
+                hex8_conn.extend_from_slice(&mesh.conn[off..off + 8]);
+            }
+            let hex8_mesh = SimplexMesh {
+                coords: mesh.coords.clone(),
+                conn: hex8_conn,
+                elem_tags: mesh.elem_tags.clone(),
+                elem_type: ElementType::Hex8,
+                face_conn: mesh.face_conn.clone(),
+                face_tags: mesh.face_tags.clone(),
+                face_type: mesh.face_type,
+                elem_types: None, elem_offsets: None,
+                face_types: None, face_offsets: None,
+                face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+            };
+            let (m, _, _, _) = refine_nonconforming_hex(&hex8_mesh, &all);
             m
         }
         ElementType::Prism6 => {
             let (m, _, _) = refine_prism6_uniform(mesh, &all);
+            m
+        }
+        ElementType::Pyramid5 => {
+            let (m, _) = refine_pyramid5_uniform(mesh, &all);
             m
         }
         _ => panic!("refine_uniform_3d: unsupported {:?}", mesh.elem_type),
@@ -2862,15 +2891,14 @@ pub fn refine_nonconforming_hex(
             let fc = if let Some(&existing) = face_center_map.get(&fkey) {
                 existing
             } else {
-                // External boundary face centroid (add to new_coords directly)
-                // Note: in this codepath the face was NOT inside a refined element,
-                // but all edges ARE refined (because the adjacent interior element
-                // was refined). We need to add the face centroid.
-                let _ = (fcx, fcy, fcz); // suppress warning
-                // Actually this case is for boundary-adjacent refined element
-                // The face center was already added by the refined element.
-                // This path should not be reached in normal usage.
-                continue; // skip gracefully
+                // Boundary face of an unrefined element whose edges were split
+                // by a refined neighbor — create face center inline.
+                let fc_id = next_node;
+                next_node += 1;
+                new_coords.push(fcx);
+                new_coords.push(fcy);
+                new_coords.push(fcz);
+                fc_id
             };
             // 4 child Quad4 faces
             new_face_conn.extend_from_slice(&[a, mab, fc, mda]); new_face_tags.push(tag);
@@ -3172,15 +3200,8 @@ pub struct HangingQuadFaceConstraint {
 
 /// Non-conforming (hanging-node) refinement for a 3-D Prism6 mesh.
 ///
-/// Each marked Prism6 is split into **8 child Prism6s** by:
-/// - Inserting midpoints on each of its 9 edges,
-/// - Inserting centroids on its 2 triangular faces,
-/// - Inserting diagonal-crossing centroids on its 3 quadrilateral faces,
-/// - Inserting the element centroid.
-///
-/// Unmarked neighbours sharing a refined face acquire hanging-edge midpoints
-/// on edges and hanging face-centre nodes on quadrilateral faces.
-///
+/// Each marked Prism6 is split into **8 child Prism6s** ...
+/// ...
 /// # Returns
 /// `(new_mesh, edge_constraints, tri_face_constraints, quad_face_constraints, midpoint_map)`.
 pub fn refine_nonconforming_prism(
@@ -3193,13 +3214,31 @@ pub fn refine_nonconforming_prism(
     Vec<HangingQuadFaceConstraint>,
     HashMap<(NodeId, NodeId), NodeId>,
 ) {
+    let (m, ec, tc, qc, mm, _) = refine_nonconforming_prism_internal(mesh, marked, None);
+    (m, ec, tc, qc, mm)
+}
+
+fn refine_nonconforming_prism_internal(
+    mesh: &SimplexMesh<3>,
+    marked: &[ElemId],
+    active_midpoints: Option<&HashMap<(NodeId, NodeId), NodeId>>,
+) -> (
+    SimplexMesh<3>,
+    Vec<HangingNodeConstraint>,
+    Vec<HangingFaceConstraint>,
+    Vec<HangingQuadFaceConstraint>,
+    HashMap<(NodeId, NodeId), NodeId>,
+    HashMap<(NodeId, NodeId), NodeId>,
+) {
     assert!(
         mesh.elem_type == ElementType::Prism6,
-        "refine_nonconforming_prism: only Prism6 meshes are supported"
+        "refine_nonconforming_prism_internal: only Prism6 meshes are supported"
     );
 
     if marked.is_empty() {
-        return (mesh.clone(), Vec::new(), Vec::new(), Vec::new(), HashMap::new());
+        let mut active_mp = HashMap::new();
+        if let Some(prev) = active_midpoints { active_mp = prev.clone(); }
+        return (mesh.clone(), Vec::new(), Vec::new(), Vec::new(), HashMap::new(), active_mp);
     }
 
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
@@ -3495,11 +3534,20 @@ pub fn refine_nonconforming_prism(
         }
     }
 
+    // ── 7. Build new active midpoint set for multi-level tracking ──────
+    let mut new_active_midpoints = std::collections::HashMap::new();
+    if let Some(prev) = active_midpoints {
+        for (&k, &v) in prev { new_active_midpoints.insert(k, v); }
+    }
+    for (&k, &v) in &midpoint_map { new_active_midpoints.insert(k, v); }
+    let new_node_set: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
+    new_active_midpoints.retain(|_, mid| new_node_set.contains(mid));
+
     let new_mesh = SimplexMesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Prism6,
         new_face_conn, new_face_tags, mesh.face_type,
     );
-    (new_mesh, edge_constraints, tri_face_constraints, quad_face_constraints, midpoint_map)
+    (new_mesh, edge_constraints, tri_face_constraints, quad_face_constraints, midpoint_map, new_active_midpoints)
 }
 
 // ─── Anisotropic Quad/Hex NC AMR ──────────────────────────────────────────────
@@ -4267,6 +4315,90 @@ impl NCStateHex {
     }
 }
 
+// ─── NCStatePrism (multi-level Prism6 NC tracking) ───────────────────────────
+
+#[derive(Debug, Clone)]
+struct NCStatePrismSnapshot {
+    mesh: SimplexMesh<3>,
+    constraints: Vec<HangingNodeConstraint>,
+    tri_face_constraints: Vec<HangingFaceConstraint>,
+    quad_face_constraints: Vec<HangingQuadFaceConstraint>,
+    active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+}
+
+/// Accumulated state for multi-level non-conforming refinement of Prism6 meshes.
+///
+/// Tracks active edge midpoints across successive refinement levels and rebuilds
+/// hanging-node and hanging-face constraints after each step.
+#[derive(Debug, Clone)]
+pub struct NCStatePrism {
+    constraints: Vec<HangingNodeConstraint>,
+    tri_face_constraints: Vec<HangingFaceConstraint>,
+    quad_face_constraints: Vec<HangingQuadFaceConstraint>,
+    active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+    history: Vec<NCStatePrismSnapshot>,
+}
+
+impl NCStatePrism {
+    pub fn new() -> Self {
+        Self {
+            constraints: Vec::new(),
+            tri_face_constraints: Vec::new(),
+            quad_face_constraints: Vec::new(),
+            active_midpoints: HashMap::new(),
+            history: Vec::new(),
+        }
+    }
+
+    pub fn constraints(&self) -> &[HangingNodeConstraint] { &self.constraints }
+    pub fn tri_face_constraints(&self) -> &[HangingFaceConstraint] { &self.tri_face_constraints }
+    pub fn quad_face_constraints(&self) -> &[HangingQuadFaceConstraint] { &self.quad_face_constraints }
+    pub fn can_derefine(&self) -> bool { !self.history.is_empty() }
+
+    /// Perform one level of non-conforming refinement for Prism6.
+    ///
+    /// Returns `(new_mesh, edge_constraints, tri_face_constraints, quad_face_constraints, midpoint_map)`.
+    pub fn refine(
+        &mut self,
+        mesh: &SimplexMesh<3>,
+        marked: &[ElemId],
+    ) -> (
+        SimplexMesh<3>,
+        Vec<HangingNodeConstraint>,
+        Vec<HangingFaceConstraint>,
+        Vec<HangingQuadFaceConstraint>,
+        HashMap<(NodeId, NodeId), NodeId>,
+    ) {
+        self.history.push(NCStatePrismSnapshot {
+            mesh: mesh.clone(),
+            constraints: self.constraints.clone(),
+            tri_face_constraints: self.tri_face_constraints.clone(),
+            quad_face_constraints: self.quad_face_constraints.clone(),
+            active_midpoints: self.active_midpoints.clone(),
+        });
+
+        let (new_mesh, edge_c, tri_c, quad_c, midpoint_map, new_active_midpoints) =
+            refine_nonconforming_prism_internal(mesh, marked, Some(&self.active_midpoints));
+        self.constraints = edge_c.clone();
+        self.tri_face_constraints = tri_c.clone();
+        self.quad_face_constraints = quad_c.clone();
+        self.active_midpoints = new_active_midpoints;
+        (new_mesh, edge_c, tri_c, quad_c, midpoint_map)
+    }
+
+    /// Roll back one NC refinement step.
+    pub fn derefine_last(
+        &mut self,
+    ) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>)> {
+        let snap = self.history.pop()?;
+        self.constraints = snap.constraints;
+        self.tri_face_constraints = snap.tri_face_constraints;
+        self.quad_face_constraints = snap.quad_face_constraints;
+        self.active_midpoints = snap.active_midpoints;
+        Some((snap.mesh, self.constraints.clone(), self.tri_face_constraints.clone(), self.quad_face_constraints.clone()))
+    }
+}
+
 /// Internal Hex8 refinement with active-set tracking for multi-level NC.
 ///
 /// Parameters `active_midpoints` and `active_face_centers` carry forward
@@ -4945,7 +5077,324 @@ pub fn refine_nonconforming_tet_aniso(
     (new_mesh, constraints)
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// ─── Pyramid5 topology ────────────────────────────────────────────────────────
+
+/// Local 8 edges of a Pyramid5 element.
+#[allow(dead_code)]
+fn local_edges_pyramid() -> [(usize, usize); 8] {
+    [(0, 1), (1, 2), (2, 3), (3, 0), (0, 4), (1, 4), (2, 4), (3, 4)]
+}
+#[allow(dead_code)]
+fn local_faces_pyramid_quad() -> [[usize; 4]; 1] { [[0, 1, 2, 3]] }
+#[allow(dead_code)]
+fn local_faces_pyramid_tri() -> [(usize, usize, usize); 4] {
+    [(0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)]
+}
+
+// ─── Pyramid5 uniform refinement ──────────────────────────────────────────────
+
+/// Uniformly refine Pyramid5 → 16 Tet4 (split along diagonal (0,2), each tet → 8).
+pub fn refine_pyramid5_uniform(
+    mesh: &SimplexMesh<3>,
+    marked: &[ElemId],
+) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>) {
+    let (m, c, _, _, _, _) = refine_nonconforming_pyramid_internal(mesh, marked, None);
+    (m, c)
+}
+
+// ─── Pyramid5 non-conforming refinement ─────────────────────────────────────
+
+/// Non-conforming refinement for Pyramid5 → 16 Tet4 children.
+pub fn refine_nonconforming_pyramid(
+    mesh: &SimplexMesh<3>,
+    marked: &[ElemId],
+) -> (
+    SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>,
+    Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>,
+) {
+    let (m, ec, tc, qc, mm, _) = refine_nonconforming_pyramid_internal(mesh, marked, None);
+    (m, ec, tc, qc, mm)
+}
+
+fn refine_nonconforming_pyramid_internal(
+    mesh: &SimplexMesh<3>, marked: &[ElemId],
+    active_midpoints: Option<&HashMap<(NodeId, NodeId), NodeId>>,
+) -> (
+    SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>,
+    Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>,
+    HashMap<(NodeId, NodeId), NodeId>,
+) {
+    assert!(mesh.elem_type == ElementType::Pyramid5, "refine_nonconforming_pyramid: only Pyramid5");
+    if marked.is_empty() {
+        let mut am = HashMap::new();
+        if let Some(p) = active_midpoints { am = p.clone(); }
+        return (mesh.clone(), Vec::new(), Vec::new(), Vec::new(), HashMap::new(), am);
+    }
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let n_elems = mesh.n_elems();
+    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    let mut tri_face_elems: HashMap<(NodeId, NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    let mut quad_face_elems: HashMap<[NodeId; 4], Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_pyramid() { edge_elems.entry(edge_key(ns[a], ns[b])).or_default().push(e); }
+        edge_elems.entry(edge_key(ns[0], ns[2])).or_default().push(e);
+        for (a, b, c) in local_faces_pyramid_tri() { tri_face_elems.entry(face_key_3d(ns[a], ns[b], ns[c])).or_default().push(e); }
+        let qf = local_faces_pyramid_quad()[0];
+        quad_face_elems.entry(quad_face_key([ns[qf[0]], ns[qf[1]], ns[qf[2]], ns[qf[3]]])).or_default().push(e);
+    }
+    let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut quad_face_center_map: HashMap<[NodeId; 4], NodeId> = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_node = mesh.n_nodes() as NodeId;
+    for &e in &marked_set {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_pyramid() {
+            let key = edge_key(ns[a], ns[b]);
+            midpoint_map.entry(key).or_insert_with(|| {
+                if let Some(p) = active_midpoints.and_then(|m| m.get(&key)) { return *p; }
+                let xa = mesh.coords_of(ns[a]); let xb = mesh.coords_of(ns[b]);
+                new_coords.push(0.5*(xa[0]+xb[0])); new_coords.push(0.5*(xa[1]+xb[1])); new_coords.push(0.5*(xa[2]+xb[2]));
+                let id = next_node; next_node += 1; id
+            });
+        }
+        let dk = edge_key(ns[0], ns[2]);
+        midpoint_map.entry(dk).or_insert_with(|| {
+            if let Some(p) = active_midpoints.and_then(|m| m.get(&dk)) { return *p; }
+            let x0 = mesh.coords_of(ns[0]); let x2 = mesh.coords_of(ns[2]);
+            new_coords.push(0.5*(x0[0]+x2[0])); new_coords.push(0.5*(x0[1]+x2[1])); new_coords.push(0.5*(x0[2]+x2[2]));
+            let id = next_node; next_node += 1; id
+        });
+        let qf = local_faces_pyramid_quad()[0];
+        let fns = [ns[qf[0]], ns[qf[1]], ns[qf[2]], ns[qf[3]]];
+        quad_face_center_map.entry(quad_face_key(fns)).or_insert_with(|| {
+            let (mut x, mut y, mut z) = (0.0,0.0,0.0);
+            for &fn_ in &fns { let c = mesh.coords_of(fn_); x+=c[0]; y+=c[1]; z+=c[2]; }
+            new_coords.push(x/4.0); new_coords.push(y/4.0); new_coords.push(z/4.0);
+            let id = next_node; next_node += 1; id
+        });
+    }
+    let get_em = |a: usize, b: usize, ns: &[NodeId]| -> NodeId {
+        *midpoint_map.get(&edge_key(ns[a], ns[b])).expect("em")
+    };
+    let mut new_conn = Vec::new(); let mut new_tags = Vec::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e); let tag = mesh.elem_tags[e as usize];
+        if marked_set.contains(&e) {
+            let t0_m01=get_em(0,1,ns);let t0_m02=get_em(0,2,ns);let t0_m04=get_em(0,4,ns);
+            let t0_m12=get_em(1,2,ns);let t0_m14=get_em(1,4,ns);let t0_m24=get_em(2,4,ns);
+            new_conn.extend_from_slice(&[ns[0],t0_m01,t0_m02,t0_m04]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[ns[1],t0_m12,t0_m01,t0_m14]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[ns[2],t0_m02,t0_m12,t0_m24]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[ns[4],t0_m04,t0_m14,t0_m24]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[t0_m01,t0_m02,t0_m04,t0_m24]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[t0_m01,t0_m02,t0_m12,t0_m24]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[t0_m01,t0_m12,t0_m14,t0_m24]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[t0_m01,t0_m04,t0_m14,t0_m24]);new_tags.push(tag);
+            let t1_m23=get_em(2,3,ns);let t1_m02=get_em(2,0,ns);let t1_m24=get_em(2,4,ns);
+            let t1_m03=get_em(3,0,ns);let t1_m34=get_em(3,4,ns);let t1_m04=get_em(0,4,ns);
+            new_conn.extend_from_slice(&[ns[2],t1_m23,t1_m02,t1_m24]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[ns[3],t1_m23,t1_m03,t1_m34]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[ns[0],t1_m02,t1_m03,t1_m04]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[ns[4],t1_m24,t1_m34,t1_m04]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[t1_m23,t1_m02,t1_m24,t1_m04]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[t1_m23,t1_m02,t1_m03,t1_m04]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[t1_m23,t1_m03,t1_m34,t1_m04]);new_tags.push(tag);
+            new_conn.extend_from_slice(&[t1_m23,t1_m24,t1_m34,t1_m04]);new_tags.push(tag);
+        } else { for k in 0..5 { new_conn.push(ns[k]); } new_tags.push(tag); }
+    }
+    // edge constraints
+    let mut ec = Vec::new();
+    for (&(a,b),&mid) in &midpoint_map {
+        if let Some(adj) = edge_elems.get(&(a,b)) {
+            if adj.iter().any(|e|!marked_set.contains(e)) { ec.push(HangingNodeConstraint{constrained:mid as usize,parent_a:a as usize,parent_b:b as usize}); }
+        }
+    }
+    ec.sort_by_key(|c|c.constrained); ec.dedup_by_key(|c|c.constrained);
+    // tri face constraints
+    let mut tc = Vec::new();
+    for (key, adj) in &tri_face_elems {
+        if adj.len()!=2 { continue; }
+        if adj.iter().filter(|&&e|marked_set.contains(&e)).count()!=1 { continue; }
+        let (a,b,c)=*key;
+        if let(Some(&mab),Some(&mbc),Some(&mac))=(midpoint_map.get(&edge_key(a,b)),midpoint_map.get(&edge_key(b,c)),midpoint_map.get(&edge_key(a,c))) {
+            ec.push(HangingNodeConstraint{constrained:mab as usize,parent_a:a as usize,parent_b:b as usize});
+            ec.push(HangingNodeConstraint{constrained:mbc as usize,parent_a:b as usize,parent_b:c as usize});
+            ec.push(HangingNodeConstraint{constrained:mac as usize,parent_a:a as usize,parent_b:c as usize});
+            tc.push(HangingFaceConstraint{constrained:mab as usize,parent_a:a as usize,parent_b:b as usize,parent_c:c as usize});
+        }
+    }
+    ec.sort_by_key(|c|c.constrained); ec.dedup_by_key(|c|c.constrained);
+    tc.sort_by_key(|c|(c.parent_a,c.parent_b,c.parent_c)); tc.dedup_by_key(|c|(c.parent_a,c.parent_b,c.parent_c));
+    // quad face constraints
+    let mut qc = Vec::new();
+    for (fns, adj) in &quad_face_elems {
+        if adj.len()!=2 { continue; }
+        if adj.iter().filter(|&&e|marked_set.contains(&e)).count()!=1 { continue; }
+        let re = adj.iter().find(|&&e|marked_set.contains(&e)).unwrap();
+        let ns = mesh.elem_nodes(*re);
+        let qf = local_faces_pyramid_quad()[0];
+        let fn4 = [ns[qf[0]],ns[qf[1]],ns[qf[2]],ns[qf[3]]];
+        if quad_face_key(fn4)!=*fns { continue; }
+        let [a,b,c,d] = fn4;
+        if let(Some(mab),Some(mbc),Some(mcd),Some(mda))=(midpoint_map.get(&edge_key(a,b)).copied(),midpoint_map.get(&edge_key(b,c)).copied(),midpoint_map.get(&edge_key(c,d)).copied(),midpoint_map.get(&edge_key(d,a)).copied()) {
+            if let Some(&fc) = quad_face_center_map.get(fns) {
+                ec.push(HangingNodeConstraint{constrained:mab as usize,parent_a:a as usize,parent_b:b as usize});
+                ec.push(HangingNodeConstraint{constrained:mbc as usize,parent_a:b as usize,parent_b:c as usize});
+                ec.push(HangingNodeConstraint{constrained:mcd as usize,parent_a:c as usize,parent_b:d as usize});
+                ec.push(HangingNodeConstraint{constrained:mda as usize,parent_a:d as usize,parent_b:a as usize});
+                qc.push(HangingQuadFaceConstraint{constrained:fc as usize,parent_a:a as usize,parent_b:b as usize,parent_c:c as usize,parent_d:d as usize});
+            }
+        }
+    }
+    ec.sort_by_key(|c|c.constrained); ec.dedup_by_key(|c|c.constrained);
+    qc.sort_by_key(|c|(c.parent_a,c.parent_b,c.parent_c,c.parent_d)); qc.dedup_by_key(|c|(c.parent_a,c.parent_b,c.parent_c,c.parent_d));
+    // rebuild boundary faces
+    let nbf = mesh.n_faces(); let mut nfc = Vec::new(); let mut nft = Vec::new();
+    for f in 0..nbf {
+        let tag = mesh.face_tags[f]; let fs = mesh.bface_nodes(f as FaceId);
+        match fs.len() {
+            3 => { let (a,b,c)=(fs[0],fs[1],fs[2]);
+                let ma=midpoint_map.get(&edge_key(a,b)).copied();let mb=midpoint_map.get(&edge_key(b,c)).copied();let mc=midpoint_map.get(&edge_key(c,a)).copied();
+                if let(Some(mab),Some(mbc),Some(mca))=(ma,mb,mc) { nfc.extend_from_slice(&[a,mab,mca]);nft.push(tag);nfc.extend_from_slice(&[mab,b,mbc]);nft.push(tag);nfc.extend_from_slice(&[mca,mbc,c]);nft.push(tag);nfc.extend_from_slice(&[mab,mbc,mca]);nft.push(tag); }
+                else { nfc.extend_from_slice(&[a,b,c]);nft.push(tag); }
+            }
+            4 => { let (a,b,c,d)=(fs[0],fs[1],fs[2],fs[3]);
+                let ma=midpoint_map.get(&edge_key(a,b)).copied();let mb=midpoint_map.get(&edge_key(b,c)).copied();let mc=midpoint_map.get(&edge_key(c,d)).copied();let md=midpoint_map.get(&edge_key(d,a)).copied();
+                if let(Some(mab),Some(mbc),Some(mcd),Some(mda))=(ma,mb,mc,md) {
+                    let fk = quad_face_key([a,b,c,d]);
+                    if let Some(&fc) = quad_face_center_map.get(&fk) { nfc.extend_from_slice(&[a,mab,fc,mda]);nft.push(tag);nfc.extend_from_slice(&[mab,b,mbc,fc]);nft.push(tag);nfc.extend_from_slice(&[fc,mbc,c,mcd]);nft.push(tag);nfc.extend_from_slice(&[mda,fc,mcd,d]);nft.push(tag); }
+                    else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
+                } else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
+            }
+            _ => { for &n in fs { nfc.push(n); } nft.push(tag); }
+        }
+    }
+    let mut nam = std::collections::HashMap::new();
+    if let Some(p) = active_midpoints { for (&k,&v) in p { nam.insert(k,v); } }
+    for (&k,&v) in &midpoint_map { nam.insert(k,v); }
+    let nns: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
+    nam.retain(|_,mid| nns.contains(mid));
+    let nm = SimplexMesh::uniform(new_coords,new_conn,new_tags,ElementType::Tet4,nfc,nft,mesh.face_type);
+    (nm, ec, tc, qc, midpoint_map, nam)
+}
+
+// ─── NCStatePyramid (multi-level Pyramid5 NC tracking) ────────────────────────
+
+#[derive(Debug, Clone)]
+struct NCStatePyramidSnapshot {
+    mesh: SimplexMesh<3>, constraints: Vec<HangingNodeConstraint>,
+    tri_face_constraints: Vec<HangingFaceConstraint>, quad_face_constraints: Vec<HangingQuadFaceConstraint>,
+    active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NCStatePyramid {
+    constraints: Vec<HangingNodeConstraint>, tri_face_constraints: Vec<HangingFaceConstraint>,
+    quad_face_constraints: Vec<HangingQuadFaceConstraint>,
+    active_midpoints: HashMap<(NodeId, NodeId), NodeId>, history: Vec<NCStatePyramidSnapshot>,
+}
+
+impl NCStatePyramid {
+    pub fn new() -> Self {
+        Self { constraints: Vec::new(), tri_face_constraints: Vec::new(), quad_face_constraints: Vec::new(),
+            active_midpoints: HashMap::new(), history: Vec::new() }
+    }
+    pub fn constraints(&self) -> &[HangingNodeConstraint] { &self.constraints }
+    pub fn tri_face_constraints(&self) -> &[HangingFaceConstraint] { &self.tri_face_constraints }
+    pub fn quad_face_constraints(&self) -> &[HangingQuadFaceConstraint] { &self.quad_face_constraints }
+    pub fn can_derefine(&self) -> bool { !self.history.is_empty() }
+    pub fn refine(&mut self, mesh: &SimplexMesh<3>, marked: &[ElemId]) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+        self.history.push(NCStatePyramidSnapshot { mesh: mesh.clone(), constraints: self.constraints.clone(), tri_face_constraints: self.tri_face_constraints.clone(), quad_face_constraints: self.quad_face_constraints.clone(), active_midpoints: self.active_midpoints.clone() });
+        let (nm, ec, tc, qc, mm, nam) = refine_nonconforming_pyramid_internal(mesh, marked, Some(&self.active_midpoints));
+        self.constraints = ec.clone(); self.tri_face_constraints = tc.clone(); self.quad_face_constraints = qc.clone(); self.active_midpoints = nam;
+        (nm, ec, tc, qc, mm)
+    }
+    pub fn derefine_last(&mut self) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>)> {
+        let snap = self.history.pop()?;
+        self.constraints = snap.constraints; self.tri_face_constraints = snap.tri_face_constraints; self.quad_face_constraints = snap.quad_face_constraints; self.active_midpoints = snap.active_midpoints;
+        Some((snap.mesh, self.constraints.clone(), self.tri_face_constraints.clone(), self.quad_face_constraints.clone()))
+    }
+}
+
+// ─── Hex8 uniform refinement ─────────────────────────────────────────────────
+
+/// Uniformly refine Hex8 → 8 Hex8 children using edge midpoints, face centroids, body centroid.
+pub fn refine_hex8_uniform(
+    mesh: &SimplexMesh<3>, marked: &[ElemId],
+) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+    assert!(mesh.elem_type == ElementType::Hex8, "refine_hex8_uniform: only Hex8");
+    if marked.is_empty() { return (mesh.clone(), Vec::new(), HashMap::new()); }
+    let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    let n_elems = mesh.n_elems();
+    let mut edge_elems: HashMap<(NodeId,NodeId),Vec<ElemId>> = HashMap::new();
+    for e in 0..n_elems as ElemId { let ns = mesh.elem_nodes(e); for &(a,b) in &local_edges_hex() { edge_elems.entry(edge_key(ns[a],ns[b])).or_default().push(e); } }
+    let mut mm: HashMap<(NodeId,NodeId),NodeId> = HashMap::new();
+    let mut fcm: HashMap<[NodeId;4],NodeId> = HashMap::new();
+    let mut bcm: HashMap<ElemId,NodeId> = HashMap::new();
+    let mut nc = mesh.coords.clone(); let mut nn = mesh.n_nodes() as NodeId;
+    for &e in &marked_set {
+        let ns = mesh.elem_nodes(e);
+        for &(a,b) in &local_edges_hex() { let k=edge_key(ns[a],ns[b]); mm.entry(k).or_insert_with(||{let xa=mesh.coords_of(ns[a]);let xb=mesh.coords_of(ns[b]);nc.push(0.5*(xa[0]+xb[0]));nc.push(0.5*(xa[1]+xb[1]));nc.push(0.5*(xa[2]+xb[2]));let id=nn;nn+=1;id}); }
+        for face in local_faces_hex() { let fns=[ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]]; let fk=hex_face_key(fns); fcm.entry(fk).or_insert_with(||{let(mut x,mut y,mut z)=(0.0,0.0,0.0);for&fn_ in &fns{let c=mesh.coords_of(fn_);x+=c[0];y+=c[1];z+=c[2];}nc.push(x/4.0);nc.push(y/4.0);nc.push(z/4.0);let id=nn;nn+=1;id}); }
+        bcm.entry(e).or_insert_with(||{let(mut x,mut y,mut z)=(0.0,0.0,0.0);for k in 0..8{let c=mesh.coords_of(ns[k]);x+=c[0];y+=c[1];z+=c[2];}nc.push(x/8.0);nc.push(y/8.0);nc.push(z/8.0);let id=nn;nn+=1;id});
+    }
+    let ge=|a:usize,b:usize,ns:&[NodeId]|->NodeId{*mm.get(&edge_key(ns[a],ns[b])).expect("em")};
+    let gf=|fi:usize,ns:&[NodeId]|->NodeId{let f=local_faces_hex()[fi];*fcm.get(&hex_face_key([ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]])).expect("fc")};
+    let mut ncn=Vec::new();let mut nt=Vec::new();
+    for e in 0..n_elems as ElemId {
+        let ns=mesh.elem_nodes(e);let tag=mesh.elem_tags[e as usize];
+        if marked_set.contains(&e) { let bc=*bcm.get(&e).unwrap();
+            ncn.extend_from_slice(&[ns[0],ge(0,1,ns),gf(0,ns),ge(3,0,ns),ge(0,4,ns),gf(2,ns),bc,gf(4,ns)]);nt.push(tag);
+            ncn.extend_from_slice(&[ge(0,1,ns),ns[1],ge(1,2,ns),gf(0,ns),gf(2,ns),ge(1,5,ns),gf(5,ns),bc]);nt.push(tag);
+            ncn.extend_from_slice(&[gf(0,ns),ge(1,2,ns),ns[2],ge(2,3,ns),bc,gf(5,ns),ge(2,6,ns),gf(3,ns)]);nt.push(tag);
+            ncn.extend_from_slice(&[ge(3,0,ns),gf(0,ns),ge(2,3,ns),ns[3],gf(4,ns),bc,gf(3,ns),ge(3,7,ns)]);nt.push(tag);
+            ncn.extend_from_slice(&[ge(0,4,ns),gf(2,ns),bc,gf(4,ns),ns[4],ge(4,5,ns),gf(1,ns),ge(7,4,ns)]);nt.push(tag);
+            ncn.extend_from_slice(&[gf(2,ns),ge(1,5,ns),gf(5,ns),bc,ge(4,5,ns),ns[5],ge(5,6,ns),gf(1,ns)]);nt.push(tag);
+            ncn.extend_from_slice(&[bc,gf(5,ns),ge(2,6,ns),gf(3,ns),gf(1,ns),ge(5,6,ns),ns[6],ge(6,7,ns)]);nt.push(tag);
+            ncn.extend_from_slice(&[gf(4,ns),bc,gf(3,ns),ge(3,7,ns),ge(7,4,ns),gf(1,ns),ge(6,7,ns),ns[7]]);nt.push(tag);
+        } else { for k in 0..8 { ncn.push(ns[k]); } nt.push(tag); }
+    }
+    let mut c = Vec::new();
+    for (&(a,b),&mid) in &mm { if let Some(adj)=edge_elems.get(&(a,b)) { if adj.iter().any(|e|!marked_set.contains(e)) { c.push(HangingNodeConstraint{constrained:mid as usize,parent_a:a as usize,parent_b:b as usize}); } } }
+    c.sort_by_key(|c|c.constrained);
+    // boundary faces
+    let nbf=mesh.n_faces();let mut nfc=Vec::new();let mut nft=Vec::new();
+    for f in 0..nbf { let fs=&mesh.face_conn[f*4..(f+1)*4];let tag=mesh.face_tags[f];let(a,b,c,d)=(fs[0],fs[1],fs[2],fs[3]);
+        let ma=mm.get(&edge_key(a,b)).copied();let mb=mm.get(&edge_key(b,c)).copied();let mc=mm.get(&edge_key(c,d)).copied();let md=mm.get(&edge_key(d,a)).copied();
+        if let(Some(mab),Some(mbc),Some(mcd),Some(mda))=(ma,mb,mc,md) {
+            let fk=hex_face_key([a,b,c,d]);
+            if let Some(&fc)=fcm.get(&fk) { nfc.extend_from_slice(&[a,mab,fc,mda]);nft.push(tag);nfc.extend_from_slice(&[mab,b,mbc,fc]);nft.push(tag);nfc.extend_from_slice(&[fc,mbc,c,mcd]);nft.push(tag);nfc.extend_from_slice(&[mda,fc,mcd,d]);nft.push(tag); }
+            else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
+        } else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
+    }
+    let nm=SimplexMesh::uniform(nc,ncn,nt,ElementType::Hex8,nfc,nft,ElementType::Quad4);
+    (nm,c,mm)
+}
+
+// ─── Hex20 / Hex27 uniform refinement ────────────────────────────────────────
+
+/// Uniformly refine Hex20 → 8 Hex8 children by extracting the 8 corner nodes.
+pub fn refine_hex20_uniform(mesh: &SimplexMesh<3>, marked: &[ElemId]) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
+    let (m,c,mm) = refine_hex27_uniform_inner(mesh, marked, 20);
+    (m,c,mm)
+}
+
+/// Uniformly refine Hex27 → 8 Hex8 children by extracting the 8 corner nodes.
+pub fn refine_hex27_uniform(mesh: &SimplexMesh<3>, marked: &[ElemId]) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
+    let (m,c,mm) = refine_hex27_uniform_inner(mesh, marked, 27);
+    (m,c,mm)
+}
+
+fn refine_hex27_uniform_inner(mesh: &SimplexMesh<3>, marked: &[ElemId], npe: usize) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
+    assert!(mesh.elem_type == ElementType::Hex20 || mesh.elem_type == ElementType::Hex27, "refine_hex27_uniform_inner: only Hex20/Hex27");
+    if marked.is_empty() { return (mesh.clone(), Vec::new(), HashMap::new()); }
+    let n_elems = mesh.n_elems();
+    let mut hex8_conn = Vec::with_capacity(n_elems * 8);
+    for e in 0..n_elems { let off = e * npe; hex8_conn.extend_from_slice(&mesh.conn[off..off+8]); }
+    let hex8_mesh = SimplexMesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![] };
+    refine_hex8_uniform(&hex8_mesh, marked)
+}
 
 #[cfg(test)]
 mod tests {
