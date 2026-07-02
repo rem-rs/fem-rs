@@ -138,6 +138,7 @@ pub mod xfem;
 pub mod xfem_level_set;
 pub mod xfem_integrators;
 pub mod wg_poisson;
+pub mod wg_stokes;
 pub mod vem_poisson;
 
 #[cfg(feature = "reed")]
