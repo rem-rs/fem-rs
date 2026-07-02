@@ -238,7 +238,7 @@ path = "plasticity_j2_bar.rs"
 
 [[example]]
 name = "allen_cahn_evolution"
-path = "cahn_hilliard_spinodal.rs"
+path = "allen_cahn_evolution.rs"
 
 [[example]]
 name = "wg_stokes_cavity"
@@ -275,6 +275,18 @@ path = "xfem_crack_propagation.rs"
 [[example]]
 name = "contact_active_set_3d"
 path = "contact_active_set_3d.rs"
+
+[[example]]
+name = "cahn_hilliard_spinodal"
+path = "cahn_hilliard_spinodal.rs"
+
+[[example]]
+name = "plasticity_dp_slope"
+path = "plasticity_dp_slope.rs"
+
+[[example]]
+name = "mesh_quality_tmop"
+path = "mesh_quality_tmop.rs"
 
 [[example]]
 name = "mfem_vec_ref_elem"
