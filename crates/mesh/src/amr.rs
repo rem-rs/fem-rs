@@ -5829,6 +5829,103 @@ fn zz_gradients_and_volumes_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> (Vec<[f64;3]
     (g, v)
 }
 
+// ─── Generalized 3-D residual error estimator ────────────────────────────────
+
+/// Element-wise residual error indicator for 3-D meshes of any type.
+///
+/// ```text
+/// η_K² = h_K² · ‖f‖²_L²(K)  +  ½ Σ_{F⊂∂K} h_F · ‖[[∇u_h·n]]‖²_L²(F)
+/// ```
+///
+/// For P1 elements the interior residual ∇·(κ∇u_h) vanishes element-wise,
+/// reducing the formula to the face-jump estimator weighted by h_F.
+///
+/// Supports Tet4, Hex8, Prism6, Pyramid5.
+pub fn residual_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], f: &[f64]) -> Vec<f64> {
+    let n_elems = mesh.n_elems();
+    let npe = mesh.elem_type.nodes_per_element();
+
+    let (elem_grads, elem_vols) = zz_gradients_and_volumes_3d(mesh, u);
+
+    // Face adjacency
+    use std::collections::HashMap;
+    let mut tri_faces: HashMap<(u32,u32,u32), Vec<ElemId>> = HashMap::new();
+    let mut quad_faces: HashMap<[u32;4], Vec<ElemId>> = HashMap::new();
+
+    match mesh.elem_type {
+        ElementType::Tet4 => {
+            for e in 0..n_elems as ElemId { let ns=mesh.elem_nodes(e);
+                for &(a,b,c) in &[(ns[0],ns[1],ns[2]),(ns[0],ns[1],ns[3]),(ns[0],ns[2],ns[3]),(ns[1],ns[2],ns[3])] {
+                    let mut v=[a,b,c];v.sort_unstable();tri_faces.entry((v[0],v[1],v[2])).or_default().push(e);}}
+        }
+        ElementType::Hex8 => {
+            for e in 0..n_elems as ElemId { let ns=mesh.elem_nodes(e);
+                for face in local_faces_hex() { let fns=[ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]];
+                    let mut k=fns;k.sort_unstable();quad_faces.entry(k).or_default().push(e);}}
+        }
+        ElementType::Prism6 => {
+            for e in 0..n_elems as ElemId { let ns=mesh.elem_nodes(e);
+                for (a,b,c) in local_faces_prism_tri() {let mut v=[ns[a],ns[b],ns[c]];v.sort_unstable();tri_faces.entry((v[0],v[1],v[2])).or_default().push(e);}
+                for face in local_faces_prism_quad() {let fns=[ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]];let mut k=fns;k.sort_unstable();quad_faces.entry(k).or_default().push(e);}}
+        }
+        ElementType::Pyramid5 => {
+            for e in 0..n_elems as ElemId { let ns=mesh.elem_nodes(e);
+                for (a,b,c) in local_faces_pyramid_tri() {let mut v=[ns[a],ns[b],ns[c]];v.sort_unstable();tri_faces.entry((v[0],v[1],v[2])).or_default().push(e);}
+                let qf=local_faces_pyramid_quad()[0];let fns=[ns[qf[0]],ns[qf[1]],ns[qf[2]],ns[qf[3]]];let mut k=fns;k.sort_unstable();quad_faces.entry(k).or_default().push(e);}
+        }
+        _ => panic!("residual_estimator_3d_general: unsupported {:?}", mesh.elem_type),
+    }
+
+    let mut eta_sq = vec![0.0_f64; n_elems];
+
+    // Interior residual: h_K² * |K| * f_avg²
+    for e in 0..n_elems {
+        let ns = mesh.elem_nodes(e as ElemId);
+        let favg: f64 = ns.iter().map(|&n| f[n as usize]).sum::<f64>() / ns.len() as f64;
+        let h2 = elem_vols[e].powf(2.0 / 3.0);
+        eta_sq[e] += h2 * elem_vols[e] * favg * favg;
+    }
+
+    // Triangular face jumps
+    for (&(na,nb,nc), elems) in &tri_faces {
+        if elems.len() != 2 { continue; }
+        let e0=elems[0]as usize;let e1=elems[1]as usize;
+        let ca=mesh.coords_of(na);let cb=mesh.coords_of(nb);let cc=mesh.coords_of(nc);
+        let ex=cb[0]-ca[0];let ey=cb[1]-ca[1];let ez=cb[2]-ca[2];
+        let fx=cc[0]-ca[0];let fy=cc[1]-ca[1];let fz=cc[2]-ca[2];
+        let nx=ey*fz-ez*fy;let ny=ez*fx-ex*fz;let nz=ex*fy-ey*fx;
+        let fa=0.5*(nx*nx+ny*ny+nz*nz).sqrt();
+        if fa<1e-30{continue;}
+        let inv=1.0/(nx*nx+ny*ny+nz*nz).sqrt();
+        let jump=(elem_grads[e0][0]-elem_grads[e1][0])*nx*inv
+                +(elem_grads[e0][1]-elem_grads[e1][1])*ny*inv
+                +(elem_grads[e0][2]-elem_grads[e1][2])*nz*inv;
+        let hf=(2.0*fa).sqrt();
+        eta_sq[e0]+=0.5*hf*jump*jump;eta_sq[e1]+=0.5*hf*jump*jump;
+    }
+
+    // Quadrilateral face jumps
+    for (fns, elems) in &quad_faces {
+        if elems.len()!=2{continue;}
+        let e0=elems[0]as usize;let e1=elems[1]as usize;
+        let[a,b,c,d]=*fns;
+        let ca=mesh.coords_of(a);let cb=mesh.coords_of(b);let cc=mesh.coords_of(c);let cd=mesh.coords_of(d);
+        let ex=cb[0]-ca[0];let ey=cb[1]-ca[1];let ez=cb[2]-ca[2];
+        let fx=cc[0]-ca[0];let fy=cc[1]-ca[1];let fz=cc[2]-ca[2];
+        let nx=ey*fz-ez*fy;let ny=ez*fx-ex*fz;let nz=ex*fy-ey*fx;
+        let fa=0.5*(nx*nx+ny*ny+nz*nz).sqrt();
+        if fa<1e-30{continue;}
+        let inv=1.0/(nx*nx+ny*ny+nz*nz).sqrt();
+        let jump=(elem_grads[e0][0]-elem_grads[e1][0])*nx*inv
+                +(elem_grads[e0][1]-elem_grads[e1][1])*ny*inv
+                +(elem_grads[e0][2]-elem_grads[e1][2])*nz*inv;
+        let hf=(2.0*fa).sqrt();
+        eta_sq[e0]+=0.5*hf*jump*jump;eta_sq[e1]+=0.5*hf*jump*jump;
+    }
+
+    eta_sq.iter().map(|v| v.sqrt()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7208,6 +7305,29 @@ mod tests {
         assert_eq!(eta_orig.len(), eta_gen.len());
         for i in 0..eta_orig.len() {
             assert!((eta_orig[i]-eta_gen[i]).abs() < 1e-12, "ZZ mismatch at elem {i}: {} vs {}", eta_orig[i], eta_gen[i]);
+        }
+    }
+
+    #[test] fn residual_3d_general_linear_tet() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let f_val = vec![0.0; n];
+        let eta = residual_estimator_3d_general(&mesh, &u, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 2.0, "linear u, f=0 → residual ~0, got {max:.3e}");
+    }
+
+    #[test] fn residual_3d_general_matches_original_tet() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let f_val = vec![1.0; n]; // constant source
+        let eta_orig = residual_estimator_3d(&mesh, &u, &f_val);
+        let eta_gen = residual_estimator_3d_general(&mesh, &u, &f_val);
+        assert_eq!(eta_orig.len(), eta_gen.len());
+        for i in 0..eta_orig.len() {
+            assert!((eta_orig[i]-eta_gen[i]).abs() < 1e-12, "residual mismatch at elem {i}: {} vs {}", eta_orig[i], eta_gen[i]);
         }
     }
 }
