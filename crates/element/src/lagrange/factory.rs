@@ -227,6 +227,22 @@ pub fn rising_deriv(n: usize, t: f64) -> f64 {
     sum
 }
 
+/// Second derivative of the rising-factorial basis L_n''(t).
+/// L_n''(t) = L_n(t) * [(Σ 1/(t-a))² - Σ 1/(t-a)²]
+pub fn rising_hess(n: usize, t: f64) -> f64 {
+    if n == 0 { return 0.0; }
+    let ln = rising_val(n, t);
+    let nf = n as f64;
+    let mut s1 = 0.0; // Σ 1/(t-a)
+    let mut s2 = 0.0; // Σ 1/(t-a)²
+    for a in 0..n {
+        let inv = 1.0 / (t - a as f64);
+        s1 += inv;
+        s2 += inv * inv;
+    }
+    ln * (s1 * s1 - s2)
+}
+
 // ─── TriPk ───────────────────────────────────────────────────────────────────
 
 /// Arbitrary-order Lagrange element on the reference triangle `(0,0),(1,0),(0,1)` —
@@ -289,6 +305,25 @@ impl ReferenceElement for TriPk {
             grads[dof_idx * 2]     = pf * (di * vj * vk - vi * vj * dk);
             // ∂φ/∂η = p·(vi·dj·vk - vi·vj·dk)
             grads[dof_idx * 2 + 1] = pf * (vi * dj * vk - vi * vj * dk);
+        }
+    }
+    fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
+        let p = self.order;
+        let pf = p as f64;
+        let pf2 = pf * pf;
+        let t0 = pf * xi[0];
+        let t1 = pf * xi[1];
+        let t2 = pf * (1.0 - xi[0] - xi[1]);
+        for (dof_idx, &(i, j, k)) in self.ijk.iter().enumerate() {
+            let vi  = rising_val(i, t0);   let vj  = rising_val(j, t1);   let vk  = rising_val(k, t2);
+            let di  = rising_deriv(i, t0);  let dj  = rising_deriv(j, t1);  let dk  = rising_deriv(k, t2);
+            let hii = rising_hess(i, t0);  let hjj = rising_hess(j, t1);  let hkk = rising_hess(k, t2);
+            let base = dof_idx * 4;
+            // ∂²φ/∂ξ², ∂²φ/∂ξ∂η, ∂²φ/∂η∂ξ, ∂²φ/∂η²
+            hess[base]     = pf2 * (hii * vj * vk - 2.0 * di * vj * dk + vi * vj * hkk);
+            hess[base + 1] = pf2 * (di * dj * vk - di * vj * dk - vi * dj * dk + vi * vj * hkk);
+            hess[base + 2] = hess[base + 1];
+            hess[base + 3] = pf2 * (vi * hjj * vk - 2.0 * vi * dj * dk + vi * vj * hkk);
         }
     }
     fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
@@ -365,6 +400,36 @@ impl ReferenceElement for TetPk {
             grads[dof_idx * 3 + 2] = pf * (vi * vj * dk * vl - vi * vj * vk * dl);
         }
     }
+    fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
+        let p = self.order;
+        let pf = p as f64;
+        let pf2 = pf * pf;
+        let t0 = pf * xi[0];
+        let t1 = pf * xi[1];
+        let t2 = pf * xi[2];
+        let t3 = pf * (1.0 - xi[0] - xi[1] - xi[2]);
+        for (dof_idx, &(i, j, k, l)) in self.ijkl.iter().enumerate() {
+            let vi  = rising_val(i, t0);  let vj  = rising_val(j, t1);
+            let vk  = rising_val(k, t2);  let vl  = rising_val(l, t3);
+            let di  = rising_deriv(i, t0); let dj  = rising_deriv(j, t1);
+            let dk  = rising_deriv(k, t2); let dl  = rising_deriv(l, t3);
+            let hii = rising_hess(i, t0); let hjj = rising_hess(j, t1);
+            let hkk = rising_hess(k, t2); let hll = rising_hess(l, t3);
+            let base = dof_idx * 9;
+            // d²φ/dξ², d²φ/dξdη, d²φ/dξdζ
+            hess[base]     = pf2 * (hii*vj*vk*vl - 2.0*di*vj*vk*dl + vi*vj*vk*hll);
+            hess[base + 1] = pf2 * (di*dj*vk*vl - di*vj*vk*dl - vi*dj*vk*dl + vi*vj*vk*hll);
+            hess[base + 2] = pf2 * (di*vj*dk*vl - di*vj*vk*dl - vi*vj*dk*dl + vi*vj*vk*hll);
+            // d²φ/dηdξ, d²φ/dη², d²φ/dηdζ
+            hess[base + 3] = hess[base + 1];
+            hess[base + 4] = pf2 * (vi*hjj*vk*vl - 2.0*vi*dj*vk*dl + vi*vj*vk*hll);
+            hess[base + 5] = pf2 * (vi*dj*dk*vl - vi*dj*vk*dl - vi*vj*dk*dl + vi*vj*vk*hll);
+            // d²φ/dζdξ, d²φ/dζdη, d²φ/dζ²
+            hess[base + 6] = hess[base + 2];
+            hess[base + 7] = hess[base + 5];
+            hess[base + 8] = pf2 * (vi*vj*hkk*vl - 2.0*vi*vj*dk*dl + vi*vj*vk*hll);
+        }
+    }
     fn quadrature(&self, order: u8) -> QuadratureRule { tet_rule(order) }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.nodes.iter().map(|c| vec![c[0], c[1], c[2]]).collect()
@@ -433,6 +498,26 @@ impl QuadQk {
             if d.abs() > 1e-30 { ders[i] -= vals[i] / d; }
         }
         (vals, ders)
+    }
+
+    /// Evaluate ALL 1D Lagrange values, derivatives, and second derivatives at x.
+    fn lagrange_1d_fast_h(&self, x: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let vals = self.lagrange_1d_fast(x);
+        let n = self.nodes_1d.len();
+        let mut ders = vec![0.0_f64; n];
+        let mut hess = vec![0.0_f64; n];
+        let mut s = 0.0_f64; let mut t = 0.0_f64;
+        for &xj in &self.nodes_1d {
+            let inv = 1.0 / (x - xj);
+            s += inv; t += inv * inv;
+        }
+        for i in 0..n {
+            let inv_i = 1.0 / (x - self.nodes_1d[i]);
+            let si = s - inv_i;
+            ders[i] = vals[i] * si;
+            hess[i] = vals[i] * (si * si - t + inv_i * inv_i);
+        }
+        (vals, ders, hess)
     }
 
     fn node_to_dof(&self, ix: usize, iy: usize) -> usize {
@@ -505,6 +590,21 @@ impl ReferenceElement for QuadQk {
             }
         }
     }
+    fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
+        let (lx, dlx, hlx) = self.lagrange_1d_fast_h(xi[0]);
+        let (ly, dly, hly) = self.lagrange_1d_fast_h(xi[1]);
+        let p = self.order;
+        for iy in 0..=p {
+            for ix in 0..=p {
+                let dof = self.node_to_dof(ix, iy);
+                let base = dof * 4;
+                hess[base]     = hlx[ix] * ly[iy];           // ∂²/∂ξ²
+                hess[base + 1] = dlx[ix] * dly[iy];          // ∂²/∂ξ∂η
+                hess[base + 2] = hess[base + 1];              // ∂²/∂η∂ξ
+                hess[base + 3] = lx[ix]  * hly[iy];          // ∂²/∂η²
+            }
+        }
+    }
     fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule(order) }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.all_dof_coords().iter().map(|c| c.to_vec()).collect()
@@ -565,6 +665,28 @@ impl HexQk {
             ders[i] = if d.abs() > 1e-30 { vals[i] * (sum_inv - 1.0 / d) } else { 0.0 };
         }
         (vals, ders)
+    }
+
+    /// Evaluate ALL 1D Lagrange values, derivatives, AND second derivatives at x.
+    fn lagrange_1d_fast_h(&self, x: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let vals = self.lagrange_1d_fast(x);
+        let n = self.nodes_1d.len();
+        let mut ders = vec![0.0_f64; n];
+        let mut hess = vec![0.0_f64; n];
+        let mut s = 0.0_f64; let mut t = 0.0_f64;
+        for &xj in &self.nodes_1d {
+            let inv = 1.0 / (x - xj);
+            s += inv; t += inv * inv;
+        }
+        for i in 0..n {
+            let inv_i = 1.0 / (x - self.nodes_1d[i]);
+            let si = if (x - self.nodes_1d[i]).abs() > 1e-30 { s - inv_i } else { 0.0 };
+            ders[i] = vals[i] * si;
+            hess[i] = if (x - self.nodes_1d[i]).abs() > 1e-30 {
+                vals[i] * (si * si - t + inv_i * inv_i)
+            } else { 0.0 };
+        }
+        (vals, ders, hess)
     }
 
     fn node_to_dof(&self, ix: usize, iy: usize, iz: usize) -> usize {
@@ -741,6 +863,29 @@ impl ReferenceElement for HexQk {
                     grads[dof * 3]     = dlx[ix] * ly[iy]  * lz[iz];
                     grads[dof * 3 + 1] = lx[ix]  * dly[iy] * lz[iz];
                     grads[dof * 3 + 2] = lx[ix]  * ly[iy]  * dlz[iz];
+                }
+            }
+        }
+    }
+    fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
+        let (lx, dlx, hlx) = self.lagrange_1d_fast_h(xi[0]);
+        let (ly, dly, hly) = self.lagrange_1d_fast_h(xi[1]);
+        let (lz, dlz, hlz) = self.lagrange_1d_fast_h(xi[2]);
+        let p = self.order;
+        for iz in 0..=p {
+            for iy in 0..=p {
+                for ix in 0..=p {
+                    let dof = self.node_to_dof(ix, iy, iz);
+                    let b = dof * 9;
+                    hess[b]     = hlx[ix] * ly[iy]  * lz[iz];   // ξξ
+                    hess[b + 1] = dlx[ix] * dly[iy] * lz[iz];   // ξη
+                    hess[b + 2] = dlx[ix] * ly[iy]  * dlz[iz];  // ξζ
+                    hess[b + 3] = hess[b + 1];                   // ηξ
+                    hess[b + 4] = lx[ix]  * hly[iy] * lz[iz];   // ηη
+                    hess[b + 5] = lx[ix]  * dly[iy] * dlz[iz];  // ηζ
+                    hess[b + 6] = hess[b + 2];                   // ζξ
+                    hess[b + 7] = hess[b + 5];                   // ζη
+                    hess[b + 8] = lx[ix]  * ly[iy]  * hlz[iz];  // ζζ
                 }
             }
         }
