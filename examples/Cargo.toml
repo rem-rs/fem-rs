@@ -237,6 +237,10 @@ name = "plasticity_j2_bar"
 path = "plasticity_j2_bar.rs"
 
 [[example]]
+name = "allen_cahn_evolution"
+path = "cahn_hilliard_spinodal.rs"
+
+[[example]]
 name = "mfem_vec_ref_elem"
 path = "mfem_vec_ref_elem.rs"
 
