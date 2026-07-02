@@ -390,4 +390,10 @@ mod tests {
         let r = solve_hdg_stokes_order(m, |_| vec![0.0,0.0,0.0], 1.0, 2, 1);
         assert!(r.u.iter().all(|v|v.is_finite()) && r.p.iter().all(|v|v.is_finite()));
     }
+
+    #[test] fn hdg_stokes_2d_p3p2() {
+        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let r = solve_hdg_stokes_order(m, |_| vec![0.0,0.0], 1.0, 3, 2);
+        assert!(r.u.iter().all(|v|v.is_finite()) && r.p.iter().all(|v|v.is_finite()));
+    }
 }
