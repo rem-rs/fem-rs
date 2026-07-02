@@ -5526,6 +5526,309 @@ fn refine_hex27_uniform_inner(mesh: &SimplexMesh<3>, marked: &[ElemId], npe: usi
     refine_hex8_uniform(&hex8_mesh, marked)
 }
 
+// ─── Generalized 3-D ZZ error estimator ──────────────────────────────────────
+
+/// Element-wise ZZ estimator for 3-D meshes of any linear element type.
+///
+/// Computes the gradient recovery-based error indicator:
+/// η_K = ‖∇u_h|_K − G(u_h)|_K‖ · |K|^{1/3}
+/// where G is the nodal-averaged recovered gradient.
+///
+/// Supports Tet4, Hex8, Prism6, Pyramid5.
+pub fn zz_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
+    let n_nodes = mesh.n_nodes();
+    let n_elems = mesh.n_elems();
+    let dim = 3usize;
+
+    // Compute constant element gradient at centroid via reference basis.
+    let mut elem_grads: Vec<[f64;3]> = Vec::with_capacity(n_elems);
+    let mut elem_vols: Vec<f64> = Vec::with_capacity(n_elems);
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let npe = ns.len();
+        let c = |i| mesh.coords_of(ns[i]);
+
+        // Element Jacobian at reference center and volume
+        let (jac, vol) = match npe {
+            4 => { // Tet4: ref center (1/4,1/4,1/4)
+                let j = [[c(1)[0]-c(0)[0],c(2)[0]-c(0)[0],c(3)[0]-c(0)[0]],
+                         [c(1)[1]-c(0)[1],c(2)[1]-c(0)[1],c(3)[1]-c(0)[1]],
+                         [c(1)[2]-c(0)[2],c(2)[2]-c(0)[2],c(3)[2]-c(0)[2]]];
+                let d = j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])-j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])+j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0]);
+                (j, d.abs()/6.0)
+            }
+            8 => { // Hex8: ref center (0,0,0) on [-1,1]³
+                let j = [[0.125*( -c(0)[0]+c(1)[0]+c(2)[0]-c(3)[0]-c(4)[0]+c(5)[0]+c(6)[0]-c(7)[0]),
+                          0.125*( -c(0)[0]-c(1)[0]+c(2)[0]+c(3)[0]-c(4)[0]-c(5)[0]+c(6)[0]+c(7)[0]),
+                          0.125*( -c(0)[0]-c(1)[0]-c(2)[0]-c(3)[0]+c(4)[0]+c(5)[0]+c(6)[0]+c(7)[0])],
+                         [0.125*( -c(0)[1]+c(1)[1]+c(2)[1]-c(3)[1]-c(4)[1]+c(5)[1]+c(6)[1]-c(7)[1]),
+                          0.125*( -c(0)[1]-c(1)[1]+c(2)[1]+c(3)[1]-c(4)[1]-c(5)[1]+c(6)[1]+c(7)[1]),
+                          0.125*( -c(0)[1]-c(1)[1]-c(2)[1]-c(3)[1]+c(4)[1]+c(5)[1]+c(6)[1]+c(7)[1])],
+                         [0.125*( -c(0)[2]+c(1)[2]+c(2)[2]-c(3)[2]-c(4)[2]+c(5)[2]+c(6)[2]-c(7)[2]),
+                          0.125*( -c(0)[2]-c(1)[2]+c(2)[2]+c(3)[2]-c(4)[2]-c(5)[2]+c(6)[2]+c(7)[2]),
+                          0.125*( -c(0)[2]-c(1)[2]-c(2)[2]-c(3)[2]+c(4)[2]+c(5)[2]+c(6)[2]+c(7)[2])]];
+                let d = j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])-j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])+j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0]);
+                (j, d.abs())
+            }
+            6 => { // Prism6: ref center (1/3,1/3,0) on triangle×segment
+                let j = [[ (c(1)[0]-c(0)[0])/2.0, (c(2)[0]-c(0)[0])/2.0, (c(3)[0]-c(0)[0])/2.0],
+                         [ (c(1)[1]-c(0)[1])/2.0, (c(2)[1]-c(0)[1])/2.0, (c(3)[1]-c(0)[1])/2.0],
+                         [ (c(1)[2]-c(0)[2])/2.0, (c(2)[2]-c(0)[2])/2.0, (c(3)[2]-c(0)[2])/2.0]];
+                let d = j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])-j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])+j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0]);
+                (j, d.abs()/2.0)
+            }
+            5 => { // Pyramid5: ref center (0,0,0.5) (collapsed hex)
+                let v = |i| c(i);
+                // Decompose into 2 tets along (0,2) for volume
+                let t1 = (v(0),v(1),v(2),v(4)); let t2 = (v(2),v(3),v(0),v(4));
+                let d1 = |a:[f64;3],b:[f64;3],c:[f64;3],d:[f64;3]| -> f64 {
+                    (b[0]-a[0])*(c[1]-a[1])*(d[2]-a[2])+(b[1]-a[1])*(c[2]-a[2])*(d[0]-a[0])+(b[2]-a[2])*(c[0]-a[0])*(d[1]-a[1])
+                    -(b[2]-a[2])*(c[1]-a[1])*(d[0]-a[0])-(b[1]-a[1])*(c[0]-a[0])*(d[2]-a[2])-(b[0]-a[0])*(c[2]-a[2])*(d[1]-a[1])
+                };
+                let vol = (d1(t1.0,t1.1,t1.2,t1.3).abs()+d1(t2.0,t2.1,t2.2,t2.3).abs())/6.0;
+                // Jacobian at reference center (approx using centroid of tet decomposition)
+                let j = [[c(1)[0]-c(0)[0],c(2)[0]-c(0)[0],c(4)[0]-c(0)[0]],
+                         [c(1)[1]-c(0)[1],c(2)[1]-c(0)[1],c(4)[1]-c(0)[1]],
+                         [c(1)[2]-c(0)[2],c(2)[2]-c(0)[2],c(4)[2]-c(0)[2]]];
+                (j, vol)
+            }
+            _ => panic!("zz_estimator_3d_general: unsupported npe={}", npe),
+        };
+
+        let det = jac[0][0]*(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])
+                - jac[0][1]*(jac[1][0]*jac[2][2]-jac[1][2]*jac[2][0])
+                + jac[0][2]*(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0]);
+        let idet = if det.abs() > 1e-30 { 1.0/det } else { 0.0 };
+        let jit = |r: usize, c: usize| -> f64 {
+            let a=(r+1)%3;let b=(r+2)%3;let d=(c+1)%3;let e=(c+2)%3;
+            (jac[a][d]*jac[b][e]-jac[a][e]*jac[b][d])*idet
+        };
+
+        // Reference gradients at centroid for each element type
+        let gref: Vec<[f64;3]> = match npe {
+            4 => vec![[-1.0,-1.0,-1.0],[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],
+            8 => vec![[-0.125,-0.125,-0.125],[0.125,-0.125,-0.125],[0.125,0.125,-0.125],[-0.125,0.125,-0.125],
+                      [-0.125,-0.125,0.125],[0.125,-0.125,0.125],[0.125,0.125,0.125],[-0.125,0.125,0.125]],
+            6 => vec![[-0.5,0.0,0.0],[0.5,0.0,0.0],[0.0,0.5,0.0],
+                      [-0.5,0.0,0.5],[0.5,0.0,0.5],[0.0,0.5,0.5]],
+            5 => vec![[-1.0,-1.0,-1.0],[1.0,0.0,0.0],[0.0,1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,1.0]],
+            _ => unreachable!(),
+        };
+
+        let uh: Vec<f64> = ns.iter().map(|&n| u[n as usize]).collect();
+        let mut g = [0.0_f64;3];
+        for k in 0..npe {
+            for i in 0..3 {
+                for j in 0..3 {
+                    g[i] += uh[k] * jit(j,i) * gref[k][j];
+                }
+            }
+        }
+        elem_grads.push(g);
+        elem_vols.push(vol);
+    }
+
+    // Nodal gradient recovery via averaging
+    let mut ng = vec![[0.0_f64;3]; n_nodes];
+    let mut nc = vec![0usize; n_nodes];
+    for (e, &g) in elem_grads.iter().enumerate() {
+        for &n in mesh.elem_nodes(e as ElemId) {
+            for d in 0..3 { ng[n as usize][d] += g[d]; }
+            nc[n as usize] += 1;
+        }
+    }
+    for n in 0..n_nodes {
+        let c = nc[n] as f64;
+        if c > 0.0 { for d in 0..3 { ng[n][d] /= c; } }
+    }
+
+    // Element error indicator
+    let mut eta = Vec::with_capacity(n_elems);
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let gr = [ns.iter().map(|&n| ng[n as usize][0]).sum::<f64>() / ns.len() as f64,
+                  ns.iter().map(|&n| ng[n as usize][1]).sum::<f64>() / ns.len() as f64,
+                  ns.iter().map(|&n| ng[n as usize][2]).sum::<f64>() / ns.len() as f64];
+        let eg = elem_grads[e as usize];
+        let d = [eg[0]-gr[0], eg[1]-gr[1], eg[2]-gr[2]];
+        eta.push(elem_vols[e as usize].powf(1.0/3.0) * (d[0]*d[0]+d[1]*d[1]+d[2]*d[2]).sqrt());
+    }
+    eta
+}
+
+// ─── Generalized 3-D Kelly error estimator ───────────────────────────────────
+
+/// Element-wise Kelly (face-jump) estimator for 3-D meshes.
+///
+/// η_K² = ½ Σ_{F⊂∂K} h_F · ‖[[∇u_h · n]]‖²_L²(F)
+///
+/// Supports Tet4, Hex8, Prism6, Pyramid5.
+pub fn kelly_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
+    let n_elems = mesh.n_elems();
+    let npe = mesh.elem_type.nodes_per_element();
+
+    // Compute element gradients and volumes (same as ZZ)
+    let (elem_grads, _) = zz_gradients_and_volumes_3d(mesh, u);
+
+    // Build face adjacency — use tri-key for tri faces, quad-key for quad faces
+    use std::collections::HashMap;
+    let mut tri_face_elems: HashMap<(u32,u32,u32), Vec<ElemId>> = HashMap::new();
+    let mut quad_face_elems: HashMap<[u32;4], Vec<ElemId>> = HashMap::new();
+
+    match mesh.elem_type {
+        ElementType::Tet4 => {
+            for e in 0..n_elems as ElemId {
+                let ns = mesh.elem_nodes(e);
+                for &(a,b,c) in &[(ns[0],ns[1],ns[2]),(ns[0],ns[1],ns[3]),(ns[0],ns[2],ns[3]),(ns[1],ns[2],ns[3])] {
+                    let mut v = [a,b,c]; v.sort_unstable();
+                    tri_face_elems.entry((v[0],v[1],v[2])).or_default().push(e);
+                }
+            }
+        }
+        ElementType::Hex8 => {
+            for e in 0..n_elems as ElemId {
+                let ns = mesh.elem_nodes(e);
+                for face in local_faces_hex() {
+                    let fns = [ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]];
+                    let mut k = fns; k.sort_unstable();
+                    quad_face_elems.entry(k).or_default().push(e);
+                }
+            }
+        }
+        ElementType::Prism6 => {
+            for e in 0..n_elems as ElemId {
+                let ns = mesh.elem_nodes(e);
+                for (a,b,c) in local_faces_prism_tri() {
+                    let mut v = [ns[a],ns[b],ns[c]]; v.sort_unstable();
+                    tri_face_elems.entry((v[0],v[1],v[2])).or_default().push(e);
+                }
+                for face in local_faces_prism_quad() {
+                    let fns = [ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]];
+                    let mut k = fns; k.sort_unstable();
+                    quad_face_elems.entry(k).or_default().push(e);
+                }
+            }
+        }
+        ElementType::Pyramid5 => {
+            for e in 0..n_elems as ElemId {
+                let ns = mesh.elem_nodes(e);
+                for (a,b,c) in local_faces_pyramid_tri() {
+                    let mut v = [ns[a],ns[b],ns[c]]; v.sort_unstable();
+                    tri_face_elems.entry((v[0],v[1],v[2])).or_default().push(e);
+                }
+                let qf = local_faces_pyramid_quad()[0];
+                let fns = [ns[qf[0]],ns[qf[1]],ns[qf[2]],ns[qf[3]]];
+                let mut k = fns; k.sort_unstable();
+                quad_face_elems.entry(k).or_default().push(e);
+            }
+        }
+        _ => panic!("kelly_estimator_3d_general: unsupported {:?}", mesh.elem_type),
+    }
+
+    let mut eta_sq = vec![0.0_f64; n_elems];
+
+    // Triangular face jumps
+    for (&(na,nb,nc), elems) in &tri_face_elems {
+        if elems.len() != 2 { continue; }
+        let e0 = elems[0] as usize; let e1 = elems[1] as usize;
+        let ca=mesh.coords_of(na);let cb=mesh.coords_of(nb);let cc=mesh.coords_of(nc);
+        let ex=cb[0]-ca[0];let ey=cb[1]-ca[1];let ez=cb[2]-ca[2];
+        let fx=cc[0]-ca[0];let fy=cc[1]-ca[1];let fz=cc[2]-ca[2];
+        let nx=ey*fz-ez*fy;let ny=ez*fx-ex*fz;let nz=ex*fy-ey*fx;
+        let fa=0.5*(nx*nx+ny*ny+nz*nz).sqrt();
+        if fa < 1e-30 { continue; }
+        let inv=1.0/(nx*nx+ny*ny+nz*nz).sqrt();
+        let jump=(elem_grads[e0][0]-elem_grads[e1][0])*nx*inv
+                +(elem_grads[e0][1]-elem_grads[e1][1])*ny*inv
+                +(elem_grads[e0][2]-elem_grads[e1][2])*nz*inv;
+        let hf=(2.0*fa).sqrt();
+        let contrib=0.5*hf*jump*jump;
+        eta_sq[e0]+=contrib; eta_sq[e1]+=contrib;
+    }
+
+    // Quadrilateral face jumps
+    for (fns, elems) in &quad_face_elems {
+        if elems.len() != 2 { continue; }
+        let e0 = elems[0] as usize; let e1 = elems[1] as usize;
+        let [a,b,c,d] = *fns;
+        let ca=mesh.coords_of(a);let cb=mesh.coords_of(b);let cc=mesh.coords_of(c);let cd=mesh.coords_of(d);
+        // Split quad into 2 triangles along diagonal (a,c) for normal computation
+        let ex1=cb[0]-ca[0];let ey1=cb[1]-ca[1];let ez1=cb[2]-ca[2];
+        let fx1=cc[0]-ca[0];let fy1=cc[1]-ca[1];let fz1=cc[2]-ca[2];
+        let nx1=ey1*fz1-ez1*fy1;let ny1=ez1*fx1-ex1*fz1;let nz1=ex1*fy1-ey1*fx1;
+        let area1=0.5*(nx1*nx1+ny1*ny1+nz1*nz1).sqrt();
+        let ex2=cd[0]-ca[0];let ey2=cd[1]-ca[1];let ez2=cd[2]-ca[2];
+        let fx2=cc[0]-ca[0];let fy2=cc[1]-ca[1];let fz2=cc[2]-ca[2];
+        let nx2=ey2*fz2-ez2*fy2;let ny2=ez2*fx2-ex2*fz2;let nz2=ex2*fy2-ey2*fx2;
+        let area2=0.5*(nx2*nx2+ny2*ny2+nz2*nz2).sqrt();
+        let fa=area1+area2;
+        if fa < 1e-30 { continue; }
+        // Use normal from first triangle as approximate face normal
+        let inv=1.0/(nx1*nx1+ny1*ny1+nz1*nz1).sqrt();
+        let jump=(elem_grads[e0][0]-elem_grads[e1][0])*nx1*inv
+                +(elem_grads[e0][1]-elem_grads[e1][1])*ny1*inv
+                +(elem_grads[e0][2]-elem_grads[e1][2])*nz1*inv;
+        let hf=(2.0*fa).sqrt();
+        let contrib=0.5*hf*jump*jump;
+        eta_sq[e0]+=contrib; eta_sq[e1]+=contrib;
+    }
+
+    eta_sq.iter().map(|v| v.sqrt()).collect()
+}
+
+/// Compute element gradients and volumes for the generalized 3-D estimators.
+fn zz_gradients_and_volumes_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> (Vec<[f64;3]>, Vec<f64>) {
+    let n_elems = mesh.n_elems();
+    let mut g = Vec::with_capacity(n_elems);
+    let mut v = Vec::with_capacity(n_elems);
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e); let npe = ns.len();
+        let c = |i| mesh.coords_of(ns[i]);
+        let j = match npe {
+            4 => [[c(1)[0]-c(0)[0],c(2)[0]-c(0)[0],c(3)[0]-c(0)[0]],
+                  [c(1)[1]-c(0)[1],c(2)[1]-c(0)[1],c(3)[1]-c(0)[1]],
+                  [c(1)[2]-c(0)[2],c(2)[2]-c(0)[2],c(3)[2]-c(0)[2]]],
+            8 => [[0.125*(-c(0)[0]+c(1)[0]+c(2)[0]-c(3)[0]-c(4)[0]+c(5)[0]+c(6)[0]-c(7)[0]),
+                   0.125*(-c(0)[0]-c(1)[0]+c(2)[0]+c(3)[0]-c(4)[0]-c(5)[0]+c(6)[0]+c(7)[0]),
+                   0.125*(-c(0)[0]-c(1)[0]-c(2)[0]-c(3)[0]+c(4)[0]+c(5)[0]+c(6)[0]+c(7)[0])],
+                  [0.125*(-c(0)[1]+c(1)[1]+c(2)[1]-c(3)[1]-c(4)[1]+c(5)[1]+c(6)[1]-c(7)[1]),
+                   0.125*(-c(0)[1]-c(1)[1]+c(2)[1]+c(3)[1]-c(4)[1]-c(5)[1]+c(6)[1]+c(7)[1]),
+                   0.125*(-c(0)[1]-c(1)[1]-c(2)[1]-c(3)[1]+c(4)[1]+c(5)[1]+c(6)[1]+c(7)[1])],
+                  [0.125*(-c(0)[2]+c(1)[2]+c(2)[2]-c(3)[2]-c(4)[2]+c(5)[2]+c(6)[2]-c(7)[2]),
+                   0.125*(-c(0)[2]-c(1)[2]+c(2)[2]+c(3)[2]-c(4)[2]-c(5)[2]+c(6)[2]+c(7)[2]),
+                   0.125*(-c(0)[2]-c(1)[2]-c(2)[2]-c(3)[2]+c(4)[2]+c(5)[2]+c(6)[2]+c(7)[2])]],
+            6 => [[(c(1)[0]-c(0)[0])/2.0,(c(2)[0]-c(0)[0])/2.0,(c(3)[0]-c(0)[0])/2.0],
+                  [(c(1)[1]-c(0)[1])/2.0,(c(2)[1]-c(0)[1])/2.0,(c(3)[1]-c(0)[1])/2.0],
+                  [(c(1)[2]-c(0)[2])/2.0,(c(2)[2]-c(0)[2])/2.0,(c(3)[2]-c(0)[2])/2.0]],
+            5 => [[c(1)[0]-c(0)[0],c(2)[0]-c(0)[0],c(4)[0]-c(0)[0]],
+                  [c(1)[1]-c(0)[1],c(2)[1]-c(0)[1],c(4)[1]-c(0)[1]],
+                  [c(1)[2]-c(0)[2],c(2)[2]-c(0)[2],c(4)[2]-c(0)[2]]],
+            _ => panic!("zz_gradients_and_volumes_3d: unsupported npe={}", npe),
+        };
+        let idet = { let d=j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])-j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])+j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0]); if d.abs()>1e-30{1.0/d}else{0.0} };
+        let jit=|r:usize,c:usize|->f64{let a=(r+1)%3;let b=(r+2)%3;let d=(c+1)%3;let e=(c+2)%3;(j[a][d]*j[b][e]-j[a][e]*j[b][d])*idet};
+        let gref:Vec<[f64;3]>=match npe{
+            4=>vec![[-1.0,-1.0,-1.0],[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],
+            8=>vec![[-0.125,-0.125,-0.125],[0.125,-0.125,-0.125],[0.125,0.125,-0.125],[-0.125,0.125,-0.125],[-0.125,-0.125,0.125],[0.125,-0.125,0.125],[0.125,0.125,0.125],[-0.125,0.125,0.125]],
+            6=>vec![[-0.5,0.0,0.0],[0.5,0.0,0.0],[0.0,0.5,0.0],[-0.5,0.0,0.5],[0.5,0.0,0.5],[0.0,0.5,0.5]],
+            5=>vec![[-1.0,-1.0,-1.0],[1.0,0.0,0.0],[0.0,1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,1.0]],
+            _=>unreachable!()};
+        let uh:Vec<f64>=ns.iter().map(|&n|u[n as usize]).collect();
+        let mut grad=[0.0_f64;3];
+        for k in 0..npe{for i in 0..3{for j in 0..3{grad[i]+=uh[k]*jit(j,i)*gref[k][j];}}}
+        g.push(grad);
+        let vol=match npe{
+            4=>(j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])-j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])+j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0])).abs()/6.0,
+            8=>(j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])-j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])+j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0])).abs(),
+            6=>(j[0][0]*(j[1][1]*j[2][2]-j[1][2]*j[2][1])-j[0][1]*(j[1][0]*j[2][2]-j[1][2]*j[2][0])+j[0][2]*(j[1][0]*j[2][1]-j[1][1]*j[2][0])).abs()/2.0,
+            5=>{let v=|i|c(i);let d=|a:[f64;3],b:[f64;3],c:[f64;3],d:[f64;3]|->f64{(b[0]-a[0])*(c[1]-a[1])*(d[2]-a[2])+(b[1]-a[1])*(c[2]-a[2])*(d[0]-a[0])+(b[2]-a[2])*(c[0]-a[0])*(d[1]-a[1])-(b[2]-a[2])*(c[1]-a[1])*(d[0]-a[0])-(b[1]-a[1])*(c[0]-a[0])*(d[2]-a[2])-(b[0]-a[0])*(c[2]-a[2])*(d[1]-a[1])};(d(v(0),v(1),v(2),v(4)).abs()+d(v(2),v(3),v(0),v(4)).abs())/6.0}
+            ,_=>unreachable!()};
+        v.push(vol);
+    }
+    (g, v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6865,5 +7168,46 @@ mod tests {
         let mesh = make_pyramid_mesh();
         let (refined, c) = refine_nonconforming_pyramid_aniso(&mesh, &[]);
         assert_eq!(refined.n_elems(), mesh.n_elems()); assert!(c.is_empty());
+    }
+
+    // ─── Generalized 3-D estimator tests ─────────────────────────────────
+
+    #[test] fn zz_3d_general_linear_tet() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = zz_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 0.5, "linear u → ZZ ~0, got {max:.3e}");
+    }
+
+    #[test] fn zz_3d_general_quadratic_tet() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[0]*c[0] }).collect();
+        let eta = zz_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max > 1e-6, "x² → ZZ >0, got {max:.3e}");
+    }
+
+    #[test] fn kelly_3d_general_linear_tet() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta = kelly_estimator_3d_general(&mesh, &u);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 2.0, "linear u → Kelly ~0, got {max:.3e}");
+    }
+
+    #[test] fn zz_3d_general_matches_original_tet() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let eta_orig = zz_estimator_3d(&mesh, &u);
+        let eta_gen = zz_estimator_3d_general(&mesh, &u);
+        assert_eq!(eta_orig.len(), eta_gen.len());
+        for i in 0..eta_orig.len() {
+            assert!((eta_orig[i]-eta_gen[i]).abs() < 1e-12, "ZZ mismatch at elem {i}: {} vs {}", eta_orig[i], eta_gen[i]);
+        }
     }
 }
