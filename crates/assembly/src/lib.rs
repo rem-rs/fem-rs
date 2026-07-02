@@ -81,6 +81,7 @@ pub mod integrator;
 pub mod standard;
 pub mod block_assembler;
 pub mod mixed;
+pub mod hdg_framework;
 pub mod interior_faces;
 pub mod dg;
 pub mod dg_elasticity;
