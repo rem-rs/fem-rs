@@ -249,6 +249,10 @@ name = "vem_poisson_polygonal"
 path = "vem_poisson_polygonal.rs"
 
 [[example]]
+name = "dpg_poisson_2d"
+path = "dpg_poisson_2d.rs"
+
+[[example]]
 name = "mfem_vec_ref_elem"
 path = "mfem_vec_ref_elem.rs"
 
