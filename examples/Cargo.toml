@@ -233,6 +233,10 @@ name = "multiphysics_coupled_newton"
 path = "multiphysics_coupled_newton.rs"
 
 [[example]]
+name = "plasticity_j2_bar"
+path = "plasticity_j2_bar.rs"
+
+[[example]]
 name = "mfem_vec_ref_elem"
 path = "mfem_vec_ref_elem.rs"
 
