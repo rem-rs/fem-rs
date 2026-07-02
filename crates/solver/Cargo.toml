@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 fem-core   = { path = "../core" }
 fem-linalg = { path = "../linalg", features = ["direct"] }
+fem-mesh   = { path = "../mesh" }
 nalgebra   = { workspace = true }
 linlvo     = { git = "https://github.com/rem-rs/linlvo.git", default-features = false, features = ["rayon"] }
 log        = { workspace = true }

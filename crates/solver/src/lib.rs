@@ -1471,6 +1471,7 @@ pub use p_multigrid::{
 pub mod mixed_precision;
 pub mod sli;
 pub mod stokes_precond;
+pub mod active_set;
 pub use sli::{solve_jacobi_sli, solve_gs_sli};
 pub use stokes_precond::{
     StokesPrecond,
