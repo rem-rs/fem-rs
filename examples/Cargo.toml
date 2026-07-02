@@ -169,6 +169,18 @@ name = "mfem_ex13_eigenvalue"
 path = "mfem_ex13_eigenvalue.rs"
 
 [[example]]
+name = "mfem_ex12_elastic_eigen"
+path = "mfem_ex12_elastic_eigen.rs"
+
+[[example]]
+name = "mfem_ex14_dg_poisson"
+path = "mfem_ex14_dg_poisson.rs"
+
+[[example]]
+name = "mfem_ex21_amr_elasticity"
+path = "mfem_ex21_amr_elasticity.rs"
+
+[[example]]
 name = "mfem_ex46_moving_mesh_heat"
 path = "mfem_ex46_moving_mesh_heat.rs"
 
