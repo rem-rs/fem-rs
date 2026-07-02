@@ -235,6 +235,41 @@ impl BsplineBasis {
 
         (values, ders)
     }
+
+    /// Insert a knot `u` into the basis (Böhm algorithm).
+    pub fn insert_knot(&self, u: f64) -> Result<Self, String> {
+        let p = self.degree;
+        let knots = self.knots.as_slice();
+        let n = self.n_basis();
+        let n_knots = knots.len();
+
+        // Find insertion span
+        let k = self.find_span(u);
+        let mult = knots.iter().filter(|&&xi| (xi - u).abs() < 1e-12).count();
+        if mult > p {
+            return Err("knot multiplicity already at maximum".to_string());
+        }
+
+        // New knot vector
+        let mut new_knots = knots.to_vec();
+        new_knots.insert(k + 1, u);
+        let new_kv = KnotVector { knots: new_knots };
+
+        // For the basis functions, we just return a new BsplineBasis with the
+        // refined knot vector. Control point refinement is handled by the caller
+        // (the NURBS patch).
+        BsplineBasis::new(p, new_kv)
+    }
+
+    /// Refine by inserting multiple knots.
+    pub fn refine_by_knots(&self, new_knots: &[f64]) -> Result<Self, String> {
+        let mut basis = self.clone();
+        for &u in new_knots {
+            basis = basis.insert_knot(u)?;
+        }
+        Ok(basis)
+    }
+
 }
 
 #[derive(Clone, Debug)]
@@ -402,6 +437,35 @@ mod tests {
                 assert_eq!(*bi, *ni);
                 assert!((*bd - *nd).abs() < 1e-10);
             }
+        }
+    }
+
+    #[test]
+    fn knot_insertion_increases_basis_count() {
+        let kv = KnotVector::new_clamped(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+        let basis = BsplineBasis::new(2, kv).unwrap();
+        let n0 = basis.n_basis();
+        let refined = basis.insert_knot(0.5).unwrap();
+        let n1 = refined.n_basis();
+        assert_eq!(n1, n0 + 1, "inserting one knot should add one basis function");
+        // Partition of unity must still hold
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let sum: f64 = refined.nonzero_values(u).unwrap().iter().map(|(_, v)| *v).sum();
+            assert!((sum - 1.0).abs() < 1e-12, "partition of unity fails at u={u}: sum={sum}");
+        }
+    }
+
+    #[test]
+    fn multiple_knot_insertion_preserves_shape() {
+        let kv = KnotVector::new_clamped(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+        let basis = BsplineBasis::new(2, kv).unwrap();
+        // Insert several knots
+        let refined = basis.refine_by_knots(&[0.2, 0.4, 0.6, 0.8]).unwrap();
+        assert_eq!(refined.n_basis(), basis.n_basis() + 4);
+        // Check partition of unity
+        for u in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            let sum: f64 = refined.nonzero_values(u).unwrap().iter().map(|(_, v)| *v).sum();
+            assert!((sum - 1.0).abs() < 1e-12);
         }
     }
 }

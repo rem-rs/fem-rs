@@ -655,4 +655,27 @@ mod tests {
         assert_eq!(mp.ncols, pres_space.n_dofs());
         assert!(mp.nnz() > 0);
     }
+
+    /// Verify Picard converges for Stokes (zero initial guess → stress-free BCs).
+    #[test]
+    fn ns_picard_converges_for_stokes() {
+        let n = 6;
+        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let vel_space = VectorH1Space::new(mesh.clone(), 2, 2);
+        let pres_space = H1Space::new(mesh.clone(), 1);
+
+        let f_vel = vec![0.0; vel_space.n_dofs()];
+        let f_pres = vec![0.0; pres_space.n_dofs()];
+        let u_init = vec![0.0; vel_space.n_dofs()];
+        let p_init = vec![0.0; pres_space.n_dofs()];
+
+        let (_u, _p, iters) = solve_ns_picard(
+            &vel_space, &pres_space, 1.0,
+            &f_vel, &f_pres, &u_init, &p_init,
+            3, 1e-8, 10,
+        );
+        // For Stokes with u=0 initial guess, 1 Picard iteration = Stokes solve
+        assert!(iters > 0, "Picard should take at least 1 iteration");
+        assert!(iters <= 5, "Picard should converge quickly for Stokes");
+    }
 }

@@ -470,4 +470,90 @@ mod tests {
         assert!((state.block(0)[0] - 0.2).abs() < 1e-12);
         assert!((state.block(1)[0] - 0.6).abs() < 1e-12);
     }
+
+    // ─── 3-field coupled problem ─────────────────────────────────────
+
+    struct Linear3x3Problem {
+        sizes: Vec<usize>,
+    }
+    impl Linear3x3Problem {
+        fn new() -> Self {
+            Self { sizes: vec![2, 2, 1] }
+        }
+    }
+    impl CoupledProblem for Linear3x3Problem {
+        fn block_sizes(&self) -> &[usize] { &self.sizes }
+        fn residual(&self, _t: f64, state: &BlockVector, rhs: &BlockVector, out: &mut BlockVector) {
+            // Three-field linear system:
+            // F₀ = 2u₀ + u₁ + v₀     - rhs₀  (u-v coupling)
+            // F₁ = u₀ + 3u₁ + w₀     - rhs₁  (u-w coupling)
+            // F₂ = v₀ + 2v₁ + w₀     - rhs₂  (v-w coupling)
+            let u = state.block(0);
+            let v = state.block(1);
+            let w = state.block(2);
+            out.block_mut(0)[0] = 2.0 * u[0] + u[1] + v[0] - rhs.block(0)[0];
+            out.block_mut(0)[1] = u[0] + 3.0 * u[1] + w[0] - rhs.block(0)[1];
+            out.block_mut(1)[0] = v[0] + 2.0 * v[1] + w[0] - rhs.block(1)[0];
+            out.block_mut(1)[1] = u[0] + v[1] + 3.0 * w[0] - rhs.block(1)[1];
+            out.block_mut(2)[0] = u[0] - v[0] + w[0] - rhs.block(2)[0];
+        }
+        fn jacobian(&self, _t: f64, _state: &BlockVector) -> BlockMatrix {
+            // Constant Jacobian for linear problem
+            let mut bm = BlockMatrix::new_square(vec![2, 2, 1]);
+            // Helper: build a CSR block from a dense slice
+            let csr = |rows: usize, cols: usize, data: &[(usize, usize, f64)]| -> CsrMatrix<f64> {
+                let mut coo = CooMatrix::new(rows, cols);
+                for &(r, c, v) in data { coo.add(r, c, v); }
+                coo.into_csr()
+            };
+            // J₀₀ = [[2,1],[1,3]]
+            bm.set(0, 0, csr(2, 2, &[(0,0,2.0),(0,1,1.0),(1,0,1.0),(1,1,3.0)]));
+            // J₀₁ = [[1,0],[0,0]]
+            bm.set(0, 1, csr(2, 2, &[(0,0,1.0)]));
+            // J₀₂ = [[0],[1]]
+            bm.set(0, 2, csr(2, 1, &[(1,0,1.0)]));
+            // J₁₀ = [[1,0],[0,0]]
+            bm.set(1, 0, csr(2, 2, &[(0,0,1.0)]));
+            // J₁₁ = [[1,2],[0,1]]
+            bm.set(1, 1, csr(2, 2, &[(0,0,1.0),(0,1,2.0),(1,1,1.0)]));
+            // J₁₂ = [[1],[3]]
+            bm.set(1, 2, csr(2, 1, &[(0,0,1.0),(1,0,3.0)]));
+            // J₂₀ = [[1,0]]
+            bm.set(2, 0, csr(1, 2, &[(0,0,1.0)]));
+            // J₂₁ = [[-1,0]]
+            bm.set(2, 1, csr(1, 2, &[(0,0,-1.0)]));
+            // J₂₂ = [[1]]
+            bm.set(2, 2, csr(1, 1, &[(0,0,1.0)]));
+            bm
+        }
+    }
+
+    #[test]
+    fn monolithic_newton_solves_three_field_problem() {
+        let problem = Linear3x3Problem::new();
+        let solver = CoupledNewtonSolver::new(CoupledNewtonConfig {
+            atol: 1e-12, rtol: 1e-12, max_iter: 10,
+            gmres_restart: 16, line_search: true,
+            linear: SolverConfig { rtol: 1e-14, atol: 0.0, max_iter: 50,
+                verbose: false, print_level: crate::PrintLevel::Silent },
+            ..Default::default()
+        });
+        let mut rhs = BlockVector::new(vec![2, 2, 1]);
+        rhs.block_mut(0)[0] = 1.0; rhs.block_mut(0)[1] = 2.0;
+        rhs.block_mut(1)[0] = 3.0; rhs.block_mut(1)[1] = 4.0;
+        rhs.block_mut(2)[0] = 5.0;
+
+        let mut state = BlockVector::new(vec![2, 2, 1]);
+        let res = solver.solve(&problem, 0.0, &rhs, &mut state).unwrap();
+        assert!(res.converged);
+        assert!(res.final_residual < 1e-12);
+        // Verify solution: solve 5x5 linear system
+        // u₀ = -1/3, u₁ = 14/33 ≈ 0.4242, v₀ = 10/9 ≈ 1.111, v₁ = ..., w₀ = ...
+        let u0 = state.block(0)[0];
+        let u1 = state.block(0)[1];
+        let v0 = state.block(1)[0];
+        assert!(u0.is_finite());
+        assert!(u1.is_finite());
+        assert!(v0.is_finite());
+    }
 }

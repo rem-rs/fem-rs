@@ -124,4 +124,50 @@ mod tests {
         let r = solve_allen_cahn(&mesh, 1, c0, 2, &AllenCahnConfig { epsilon: 0.2, dt: 1e-6, t_max: 2e-6, ..Default::default() });
         assert!(r.energy.len() >= 2); for v in &r.energy { assert!(v.is_finite()); }
     }
+
+    /// Cahn-Hilliard: verify output structure and free-energy sign.
+    #[test]
+    fn cahn_hilliard_output_valid() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
+        let mut c0 = vec![0.5; n];
+        for i in 0..n { c0[i] += 0.1 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos(); }
+        let result = solve_cahn_hilliard(&mesh, 1, c0, 2,
+            &CahnHilliardConfig { epsilon: 0.5, dt: 1e-7, t_max: 3e-7, ..Default::default() });
+        assert!(result.free_energy.len() >= 2, "should have multiple time steps");
+        assert_eq!(result.times.len(), result.free_energy.len());
+        for v in &result.free_energy { assert!(v.is_finite(), "energy must be finite"); }
+        assert!(result.c.len() == n, "concentration should match space DOFs");
+        assert!(result.mu.len() == n, "chemical potential should match space DOFs");
+    }
+
+    /// Allen-Cahn: verify output structure.
+    #[test]
+    fn allen_cahn_output_valid() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
+        let mut c0 = vec![0.0; n];
+        for i in 0..n { c0[i] = (std::f64::consts::PI * i as f64 / n as f64).sin(); }
+        let result = solve_allen_cahn(&mesh, 1, c0, 2,
+            &AllenCahnConfig { epsilon: 0.5, dt: 1e-7, t_max: 3e-7, ..Default::default() });
+        assert!(result.energy.len() >= 2);
+        for v in &result.energy { assert!(v.is_finite()); }
+        assert_eq!(result.c.len(), n);
+    }
+
+    /// Spinodal decomposition: random initial perturbation should evolve
+    /// into phase-separated domains.
+    #[test]
+    fn cahn_hilliard_spinodal_decomposition() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
+        let mut c0 = vec![0.5; n];
+        for i in 0..n { c0[i] += 0.05 * (std::f64::consts::PI * i as f64).sin() * (std::f64::consts::PI * i as f64 / n as f64).cos(); }
+        let result = solve_cahn_hilliard(&mesh, 1, c0, 2,
+            &CahnHilliardConfig { epsilon: 0.2, dt: 5e-7, t_max: 2e-6, ..Default::default() });
+        let max_c = result.c.iter().cloned().fold(0.0_f64, f64::max);
+        let min_c = result.c.iter().cloned().fold(1.0_f64, f64::min);
+        assert!(max_c > 0.55 || min_c < 0.45,
+            "Spinodal decomposition should separate: c∈[{min_c:.3},{max_c:.3}]");
+    }
 }

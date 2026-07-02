@@ -399,6 +399,69 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
     }
 }
 
+// ─── Lattice rotation (texture update) ─────────────────────────────────
+
+/// Compute the antisymmetric Schmid tensor: Aⁱⱼ = ½(sᵢ·mⱼ − sⱼ·mᵢ).
+fn spin_tensor(ss: &SlipSystem) -> DMatrix<f64> {
+    let mut a = DMatrix::zeros(3, 3);
+    for i in 0..3 { for j in 0..3 {
+        a[(i,j)] = 0.5 * (ss.s[i] * ss.m[j] - ss.s[j] * ss.m[i]);
+    }}
+    a
+}
+
+/// Update the crystal orientation due to plastic spin.
+///
+/// Given the total velocity gradient `L = ∇u` and the slip increments
+/// `dgamma` per slip system, compute the lattice rotation increment
+/// and update the orientation matrix.
+///
+/// Returns the new orientation matrix.
+pub fn update_lattice_rotation(
+    orientation: &DMatrix<f64>,
+    grad_u: &DMatrix<f64>,
+    dgamma: &[f64],
+    slip_systems: &[SlipSystem],
+) -> DMatrix<f64> {
+    // Total spin: W = (L - Lᵀ)/2
+    let lt = grad_u.transpose();
+    let w_total = (grad_u - &lt) * 0.5;
+
+    // Plastic spin: W^p = Σ_α γ̇_α · Aⁱ
+    let mut wp = DMatrix::zeros(3, 3);
+    for (i, ss) in slip_systems.iter().enumerate() {
+        let a = spin_tensor(ss);
+        for r in 0..3 { for c in 0..3 {
+            wp[(r,c)] += dgamma[i] * a[(r,c)];
+        }}
+    }
+
+    // Elastic spin: W^e = W - W^p
+    let we = &w_total - &wp;
+
+    // Rotation increment: ΔR = exp(W^e·Δt) ≈ I + W^e (small rotation approx)
+    // For small elastic rotations (typical in metal plasticity), use the
+    // linearized update: R_new = (I + W^e·Δt) · R_old
+    // Normalize to ensure orthogonality.
+    let mut r_new = &we + &DMatrix::identity(3, 3);
+    r_new = &r_new * orientation;
+
+    // Re-orthogonalize via polar decomposition (simplified: Gram-Schmidt)
+    for i in 0..3 {
+        let mut col = r_new.column(i).into_owned();
+        let norm = (col[0]*col[0] + col[1]*col[1] + col[2]*col[2]).sqrt();
+        if norm > 1e-30 { for j in 0..3 { col[j] /= norm; } }
+        // Orthogonalize against previous columns
+        for j in 0..i {
+            let dot = col[0]*r_new[(0,j)] + col[1]*r_new[(1,j)] + col[2]*r_new[(2,j)];
+            for k in 0..3 { col[k] -= dot * r_new[(k,j)]; }
+        }
+        let norm2 = (col[0]*col[0] + col[1]*col[1] + col[2]*col[2]).sqrt();
+        if norm2 > 1e-30 { for j in 0..3 { r_new[(j,i)] = col[j] / norm2; } }
+    }
+    r_new
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -433,5 +496,54 @@ mod tests {
         let s = CrystalState::new(5);
         assert_eq!(s.g.len(), 5);
         assert_eq!(s.g[0].len(), 12);
+    }
+
+    #[test]
+    fn spin_tensor_antisymmetric() {
+        let sys = fcc_slip_systems();
+        let a = spin_tensor(&sys[0]);
+        for i in 0..3 { for j in 0..3 {
+            assert!((a[(i,j)] + a[(j,i)]).abs() < 1e-15, "Spin tensor not antisymmetric");
+        }}
+    }
+
+    #[test]
+    fn lattice_rotation_preserves_orthogonality() {
+        let sys = fcc_slip_systems();
+        let orientation = DMatrix::identity(3, 3);
+        // Simple shear deformation gradient
+        let grad_u = DMatrix::from_row_slice(3, 3, &[
+            0.0, 0.1, 0.0,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+        ]);
+        let dgamma = vec![0.01; 12]; // equal slip on all systems
+        let r_new = update_lattice_rotation(&orientation, &grad_u, &dgamma, &sys);
+        // Check orthogonality: R·Rᵀ ≈ I
+        let rrt = &r_new * r_new.transpose();
+        for i in 0..3 { for j in 0..3 {
+            let expected = if i == j { 1.0 } else { 0.0 };
+            assert!((rrt[(i,j)] - expected).abs() < 1e-12,
+                "Lattice rotation not orthogonal: (R·Rᵀ)[{i},{j}] = {}", rrt[(i,j)]);
+        }}
+        // Determinant should be 1 (proper rotation)
+        let det = r_new[(0,0)]*(r_new[(1,1)]*r_new[(2,2)]-r_new[(1,2)]*r_new[(2,1)])
+                - r_new[(0,1)]*(r_new[(1,0)]*r_new[(2,2)]-r_new[(1,2)]*r_new[(2,0)])
+                + r_new[(0,2)]*(r_new[(1,0)]*r_new[(2,1)]-r_new[(1,1)]*r_new[(2,0)]);
+        assert!((det - 1.0).abs() < 1e-12, "Lattice rotation determinant should be 1, got {det}");
+    }
+
+    #[test]
+    fn lattice_rotation_identity_for_no_slip() {
+        let sys = fcc_slip_systems();
+        let orientation = DMatrix::identity(3, 3);
+        let grad_u = DMatrix::zeros(3, 3);
+        let dgamma = vec![0.0; 12]; // no slip
+        let r_new = update_lattice_rotation(&orientation, &grad_u, &dgamma, &sys);
+        for i in 0..3 { for j in 0..3 {
+            let expected = if i == j { 1.0 } else { 0.0 };
+            assert!((r_new[(i,j)] - expected).abs() < 1e-15,
+                "No slip should give identity rotation");
+        }}
     }
 }

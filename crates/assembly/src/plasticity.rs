@@ -67,8 +67,12 @@ pub enum PlasticModel {
     J2,
     /// Drucker–Prager — pressure-sensitive cone.
     DruckerPrager,
-    /// Modified Cam-Clay — reserved for Phase 3E.
+    /// Modified Cam-Clay — volumetric hardening in p–q space.
     CamClay,
+    /// Mohr–Coulomb — pressure-sensitive with Lode-angle dependence.
+    MohrCoulomb,
+    /// Hoek–Brown — empirical rock-failure criterion (generalized form).
+    HoekBrown,
     /// Perzyna / Duvaut-Lions viscoplasticity — reserved for Phase 3E.
     Viscoplastic,
 }
@@ -90,6 +94,41 @@ pub struct PlasticConfig {
     pub dilation_angle: f64,
     /// Which yield surface / return-mapping to execute.
     pub model: PlasticModel,
+    // ── Lemaitre damage‑plasticity coupling ───────────────────────────
+    /// Damage coupling enabled (requires `damage_S > 0`).
+    pub damage_S: f64,
+    /// Threshold plastic strain for damage initiation (Lemaitre Ḋ = ⟨Y/S⟩·ṗ).
+    pub damage_p_D: f64,
+    /// Critical damage (caps D to avoid zero stiffness).
+    pub damage_D_c: f64,
+    // ── Viscoplasticity (Perzyna / Duvaut–Lions) ──────────────────────
+    /// Viscosity η (0 → rate‑independent).  Used as η/Δt in Perzyna.
+    pub viscosity: f64,
+    // ── Kinematic hardening (Armstrong–Frederick) ──────────────────────
+    /// Kinematic hardening modulus C (0 → pure isotropic).
+    pub kinematic_modulus: f64,
+    /// AF recall / saturation term γ (0 → linear Prager kinematic).
+    pub kinematic_recall: f64,
+    // ── Cam-Clay parameters ─────────────────────────────────────────────
+    /// Critical state line slope M (≈ 6·sin(φ)/(3 − sin(φ)) for triaxial compression).
+    pub m: f64,
+    /// Initial preconsolidation pressure p_c0 (> 0).
+    pub p_c0: f64,
+    /// Compression index λ (slope of normal compression line in e−ln p space).
+    pub lambda_index: f64,
+    /// Swelling/recompression index κ.
+    pub kappa_index: f64,
+    /// Initial void ratio e₀.
+    pub void_ratio: f64,
+    // ── Hoek–Brown parameters ───────────────────────────────────────────
+    /// Uniaxial compressive strength σ_ci of intact rock.
+    pub hb_ci: f64,
+    /// Hoek–Brown constant m (m_i for intact rock, m_b for rock mass).
+    pub hb_m: f64,
+    /// Hoek–Brown constant s (1.0 for intact rock, < 1 for rock mass).
+    pub hb_s: f64,
+    /// Hoek–Brown exponent a (0.5 for intact rock, computed from GSI for rock mass).
+    pub hb_a: f64,
 }
 
 impl PlasticConfig {
@@ -99,17 +138,119 @@ impl PlasticConfig {
             E, nu, yield_stress: sigma_y, hardening_modulus: H,
             friction_angle: 0.0, dilation_angle: 0.0,
             model: PlasticModel::J2,
+            viscosity: 0.0, kinematic_modulus: 0.0, kinematic_recall: 0.0,
+            damage_S: 0.0, damage_p_D: 0.0, damage_D_c: 0.99,
+            m: 0.0, p_c0: 0.0, lambda_index: 0.0, kappa_index: 0.0, void_ratio: 0.0,
+            hb_ci: 0.0, hb_m: 0.0, hb_s: 0.0, hb_a: 0.0,
+        }
+    }
+
+    /// J2 with Armstrong–Frederick kinematic hardening (C > 0) + isotropic.
+    pub fn j2_kinematic(E: f64, nu: f64, sigma_y: f64, H: f64, C: f64, gamma: f64) -> Self {
+        Self {
+            E, nu, yield_stress: sigma_y, hardening_modulus: H,
+            friction_angle: 0.0, dilation_angle: 0.0,
+            model: PlasticModel::J2,
+            viscosity: 0.0, kinematic_modulus: C, kinematic_recall: gamma,
+            damage_S: 0.0, damage_p_D: 0.0, damage_D_c: 0.99,
+            m: 0.0, p_c0: 0.0, lambda_index: 0.0, kappa_index: 0.0, void_ratio: 0.0,
+            hb_ci: 0.0, hb_m: 0.0, hb_s: 0.0, hb_a: 0.0,
+        }
+    }
+
+    /// Perzyna J2 viscoplasticity with linear isotropic hardening.
+    /// `eta` = viscosity (≥ 0); `dt` is passed to the form at assembly time.
+    pub fn j2_viscoplastic(E: f64, nu: f64, sigma_y: f64, H: f64, eta: f64) -> Self {
+        Self {
+            E, nu, yield_stress: sigma_y, hardening_modulus: H,
+            friction_angle: 0.0, dilation_angle: 0.0,
+            model: PlasticModel::J2,
+            viscosity: eta, kinematic_modulus: 0.0, kinematic_recall: 0.0,
+            damage_S: 0.0, damage_p_D: 0.0, damage_D_c: 0.99,
+            m: 0.0, p_c0: 0.0, lambda_index: 0.0, kappa_index: 0.0, void_ratio: 0.0,
+            hb_ci: 0.0, hb_m: 0.0, hb_s: 0.0, hb_a: 0.0,
+        }
+    }
+
+    /// J2 plasticity coupled with Lemaitre isotropic damage.
+    ///
+    /// `S` = damage strength, `p_D` = threshold accumulated plastic strain
+    /// for damage initiation.
+    pub fn j2_damage(E: f64, nu: f64, sigma_y: f64, H: f64, S: f64, p_D: f64) -> Self {
+        Self {
+            E, nu, yield_stress: sigma_y, hardening_modulus: H,
+            friction_angle: 0.0, dilation_angle: 0.0,
+            model: PlasticModel::J2,
+            viscosity: 0.0, kinematic_modulus: 0.0, kinematic_recall: 0.0,
+            damage_S: S, damage_p_D: p_D, damage_D_c: 0.99,
+            m: 0.0, p_c0: 0.0, lambda_index: 0.0, kappa_index: 0.0, void_ratio: 0.0,
+            hb_ci: 0.0, hb_m: 0.0, hb_s: 0.0, hb_a: 0.0,
         }
     }
 
     /// Drucker–Prager with associated flow (ψ = φ).
     pub fn drucker_prager(E: f64, nu: f64, cohesion: f64,
                           friction_angle_deg: f64, H: f64) -> Self {
+        Self::drucker_prager_general(E, nu, cohesion, friction_angle_deg, friction_angle_deg, H)
+    }
+
+    /// Drucker–Prager with independent dilation angle (ψ ≤ φ for non‑associated flow).
+    pub fn drucker_prager_general(E: f64, nu: f64, cohesion: f64,
+                                  friction_angle_deg: f64, dilation_angle_deg: f64, H: f64) -> Self {
         Self {
             E, nu, yield_stress: cohesion, hardening_modulus: H,
             friction_angle: friction_angle_deg.to_radians(),
-            dilation_angle: friction_angle_deg.to_radians(),
+            dilation_angle: dilation_angle_deg.to_radians(),
             model: PlasticModel::DruckerPrager,
+            viscosity: 0.0, kinematic_modulus: 0.0, kinematic_recall: 0.0,
+            damage_S: 0.0, damage_p_D: 0.0, damage_D_c: 0.99,
+            m: 0.0, p_c0: 0.0, lambda_index: 0.0, kappa_index: 0.0, void_ratio: 0.0,
+            hb_ci: 0.0, hb_m: 0.0, hb_s: 0.0, hb_a: 0.0,
+        }
+    }
+
+    /// Modified Cam–Clay with isotropic volumetric hardening.
+    pub fn cam_clay(E: f64, nu: f64, m: f64, p_c0: f64,
+                    lambda_idx: f64, kappa_idx: f64, void_ratio: f64) -> Self {
+        Self {
+            E, nu, yield_stress: 0.0, hardening_modulus: 0.0,
+            friction_angle: 0.0, dilation_angle: 0.0,
+            model: PlasticModel::CamClay,
+            viscosity: 0.0, kinematic_modulus: 0.0, kinematic_recall: 0.0,
+            damage_S: 0.0, damage_p_D: 0.0, damage_D_c: 0.99,
+            m, p_c0, lambda_index: lambda_idx, kappa_index: kappa_idx, void_ratio,
+            hb_ci: 0.0, hb_m: 0.0, hb_s: 0.0, hb_a: 0.0,
+        }
+    }
+
+    /// Mohr–Coulomb with non-associated flow (ψ ≤ φ).
+    pub fn mohr_coulomb(E: f64, nu: f64, cohesion: f64,
+                        friction_angle_deg: f64, dilation_angle_deg: f64, H: f64) -> Self {
+        Self {
+            E, nu, yield_stress: cohesion, hardening_modulus: H,
+            friction_angle: friction_angle_deg.to_radians(),
+            dilation_angle: dilation_angle_deg.to_radians(),
+            model: PlasticModel::MohrCoulomb,
+            viscosity: 0.0, kinematic_modulus: 0.0, kinematic_recall: 0.0,
+            damage_S: 0.0, damage_p_D: 0.0, damage_D_c: 0.99,
+            m: 0.0, p_c0: 0.0, lambda_index: 0.0, kappa_index: 0.0, void_ratio: 0.0,
+            hb_ci: 0.0, hb_m: 0.0, hb_s: 0.0, hb_a: 0.0,
+        }
+    }
+
+    /// Hoek–Brown (generalized) for rock mass.
+    ///
+    /// `ci` = σ_ci (UCS), `hb_m` = m_b (rock-mass constant),
+    /// `hb_s` = s, `hb_a` = a exponent.
+    pub fn hoek_brown(E: f64, nu: f64, ci: f64, hb_m: f64, hb_s: f64, hb_a: f64) -> Self {
+        Self {
+            E, nu, yield_stress: 0.0, hardening_modulus: 0.0,
+            friction_angle: 0.0, dilation_angle: 0.0,
+            model: PlasticModel::HoekBrown,
+            viscosity: 0.0, kinematic_modulus: 0.0, kinematic_recall: 0.0,
+            damage_S: 0.0, damage_p_D: 0.0, damage_D_c: 0.99,
+            m: 0.0, p_c0: 0.0, lambda_index: 0.0, kappa_index: 0.0, void_ratio: 0.0,
+            hb_ci: ci, hb_m, hb_s, hb_a,
         }
     }
 
@@ -128,16 +269,28 @@ impl PlasticConfig {
         self.E / (3.0 * (1.0 - 2.0 * self.nu))
     }
 
-    /// Drucker–Prager α factor.
+    /// Drucker–Prager α factor (from friction angle φ, for yield function).
     pub fn dp_alpha(&self) -> f64 {
         let sinφ = self.friction_angle.sin();
         2.0 * sinφ / (3.0_f64.sqrt() * (3.0 - sinφ))
     }
 
-    /// Drucker–Prager k factor.
+    /// Drucker–Prager k factor (from friction angle φ, for yield function).
     pub fn dp_k(&self) -> f64 {
         let sinφ = self.friction_angle.sin();
         6.0 * self.friction_angle.cos() / (3.0_f64.sqrt() * (3.0 - sinφ))
+    }
+
+    /// Drucker–Prager α factor from dilation angle ψ (for plastic potential).
+    pub fn dp_alpha_psi(&self) -> f64 {
+        let sinψ = self.dilation_angle.sin();
+        2.0 * sinψ / (3.0_f64.sqrt() * (3.0 - sinψ))
+    }
+
+    /// Drucker–Prager k factor from dilation angle ψ (for plastic potential).
+    pub fn dp_k_psi(&self) -> f64 {
+        let sinψ = self.dilation_angle.sin();
+        6.0 * self.dilation_angle.cos() / (3.0_f64.sqrt() * (3.0 - sinψ))
     }
 }
 
@@ -152,16 +305,24 @@ pub struct J2PlasticityForm<M: MeshTopology> {
     cfg: PlasticConfig,
     dirichlet: Vec<(usize, f64)>,
     quad_order: u8,
-    /// Per-element, per-QP state: `(ε^p_xx, ε^p_yy, ε^p_zz, γ^p_xy, γ^p_yz, γ^p_zx, α)`.
+    dt: f64,  // time step for rate‑dependent (viscoplastic) integration
+    /// Per-element, per-QP state: 13 values (6 ε^p + 1 α_iso + 6 α_back).
     /// Wrapped in `Mutex` because `NonlinearForm` only grants `&self`.
     state: Mutex<Vec<Vec<f64>>>,
-    elems: Vec<u32>,   // element IDs (for state indexing)
-    qp_offsets: Vec<usize>, // cumulative per-element QP count
+    elems: Vec<u32>,
+    qp_offsets: Vec<usize>,
 }
 
 impl<M: MeshTopology> J2PlasticityForm<M> {
     pub fn new(space: VectorH1Space<M>, cfg: PlasticConfig,
                dirichlet: Vec<(usize, f64)>, quad_order: u8) -> Self {
+        Self::with_dt(space, cfg, dirichlet, quad_order, 0.0)
+    }
+
+    /// Like `new` but with an explicit time step `dt` for rate‑dependent
+    /// (viscoplastic) integration.  Pass `dt = 0` (default) for rate‑independent.
+    pub fn with_dt(space: VectorH1Space<M>, cfg: PlasticConfig,
+                   dirichlet: Vec<(usize, f64)>, quad_order: u8, dt: f64) -> Self {
         let mesh = space.mesh();
         let mut qp_offsets = vec![0usize];
         let mut elems = Vec::new();
@@ -173,9 +334,9 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
             elems.push(e);
         }
         let total_qp = qp_offsets.last().copied().unwrap_or(0);
-        // 7 state variables per QP: 6 ε^p + α
-        let state = Mutex::new(vec![vec![0.0_f64; 7]; total_qp]);
-        Self { space, cfg, dirichlet, quad_order, state, elems, qp_offsets }
+        // 14 state variables per QP: 6 ε^p + 1 α_iso + 6 α_back + 1 D
+        let state = Mutex::new(vec![vec![0.0_f64; 14]; total_qp]);
+        Self { space, cfg, dirichlet, quad_order, dt, state, elems, qp_offsets }
     }
 
     /// Reset all internal variables to zero (for a fresh analysis).
@@ -310,10 +471,12 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                 // Total strain at QP
                 let eps = Self::strain_at_qp(&u_elem, &gphys, dim, n_ldofs);
 
-                // Old plastic state (read via RefCell)
+                // Old plastic state
                 let old_idx = self.qp_state_idx(el, q);
                 let eps_p_old: Vec<f64> = state[old_idx][..6].to_vec();
                 let alpha_old = state[old_idx][6];
+                let alpha_back_old: Vec<f64> = state[old_idx][7..13].to_vec();
+                let d_old = state[old_idx][13];
 
                 // Elastic predictor
                 let mut eps_e_trial = vec![0.0; n_comp];
@@ -334,25 +497,49 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                 if dim == 2 { s_trial[2] = sigma_trial[2]; }
                 else { s_trial[3] = sigma_trial[3]; s_trial[4] = sigma_trial[4]; s_trial[5] = sigma_trial[5]; }
 
+                // Relative stress η = s - α_back (for kinematic hardening)
+                let C_k = self.cfg.kinematic_modulus;
+                let gam_k = self.cfg.kinematic_recall;
+                let mut eta_trial = vec![0.0; n_comp];
+                for i in 0..n_comp { eta_trial[i] = s_trial[i] - alpha_back_old[i]; }
+                let eta_norm = (eta_trial.iter().map(|v| v*v).sum::<f64>()).sqrt();
                 let s_norm = (s_trial.iter().map(|v| v*v).sum::<f64>()).sqrt();
                 let sqrt23 = (2.0_f64 / 3.0_f64).sqrt();
                 let K_old = sigma_y + H * alpha_old;
 
                 // Yield-function evaluation depends on model.
                 let f_trial: f64 = match self.cfg.model {
-                    PlasticModel::J2 => s_norm - sqrt23 * K_old,
+                    PlasticModel::J2 => eta_norm - sqrt23 * K_old,
                     PlasticModel::DruckerPrager => {
                         let alpha_dp = self.cfg.dp_alpha();
                         let k_dp = self.cfg.dp_k();
                         let i1 = if dim == 2 { sigma_trial[0] + sigma_trial[1] }
                                  else       { sigma_trial[0] + sigma_trial[1] + sigma_trial[2] };
-                        // f_DP = α·I₁ + ‖s‖ − k·(c + H·α_p)
                         alpha_dp * i1 + s_norm - k_dp * K_old
                     }
-                    PlasticModel::CamClay | PlasticModel::Viscoplastic => {
-                        unimplemented!("PlasticModel::{:?} return-mapping not implemented; \
-                                        see Phase 3E in .mimocode/plans/1782894432824-happy-island.md",
-                                       self.cfg.model)
+                    PlasticModel::MohrCoulomb => {
+                        let prin = principal_stresses(&sigma_trial, dim);
+                        mohr_coulomb_yield(&prin, sigma_y,
+                            self.cfg.friction_angle.sin(), self.cfg.friction_angle.cos())
+                    }
+                    PlasticModel::HoekBrown => {
+                        let prin = principal_stresses(&sigma_trial, dim);
+                        hoek_brown_yield(&prin, self.cfg.hb_ci, self.cfg.hb_m,
+                            self.cfg.hb_s, self.cfg.hb_a)
+                    }
+                    PlasticModel::CamClay => {
+                        let p_trial = if dim == 2 { (sigma_trial[0] + sigma_trial[1]) / 3.0 }
+                                      else { (sigma_trial[0] + sigma_trial[1] + sigma_trial[2]) / 3.0 };
+                        let q_trial_sq = (3.0/2.0) * s_norm * s_norm;
+                        let pc_old = if alpha_old > 0.0 {
+                            // Recover pc from accumulated state (stored as α = ln(pc/pc0)·(λ-κ)/(1+e₀))
+                            self.cfg.p_c0 * (alpha_old * (1.0 + self.cfg.void_ratio)
+                                / (self.cfg.lambda_index - self.cfg.kappa_index + 1e-30)).exp()
+                        } else { self.cfg.p_c0 };
+                        cam_clay_yield(p_trial, q_trial_sq.sqrt(), pc_old, self.cfg.m)
+                    }
+                    PlasticModel::Viscoplastic => {
+                        unimplemented!("PlasticModel::{:?} return-mapping not implemented; see Phase 3E", self.cfg.model)
                     }
                 };
 
@@ -364,53 +551,86 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                     let two_mu = 2.0 * mu;
                     match self.cfg.model {
                         PlasticModel::J2 => {
-                            // J2 radial return
-                            dgamma = (s_norm - sqrt23 * K_old) / (two_mu + (2.0/3.0)*H);
-                            let factor = 1.0 - two_mu * dgamma / (s_norm + 1e-30);
-                            for i in 0..n_comp { s_trial[i] *= factor; }
-                            for i in 0..dim { sigma[i] = s_trial[i] + p_trial; }
-                            if dim == 2 { sigma[2] = s_trial[2]; }
-                            else { sigma[3] = s_trial[3]; sigma[4] = s_trial[4]; sigma[5] = s_trial[5]; }
-
-                            // Consistent tangent (algorithmic)
-                            let beta = two_mu * dgamma / (s_norm + 1e-30);
-                            let theta = 1.0 / (1.0 + (2.0/3.0)*H / two_mu) - (1.0 - beta);
-                            let nn_dim = n_comp;
-                            let mut nn = DMatrix::zeros(nn_dim, nn_dim);
-                            for ii in 0..nn_dim { for jj in 0..nn_dim {
-                                nn[(ii, jj)] = s_trial[ii] * s_trial[jj] / (s_norm * s_norm + 1e-60);
+                            // Radial return with Armstrong–Frederick kinematic hardening
+                            // and Perzyna viscoplasticity.
+                            // η = s - α_back  (relative stress).
+                            let eta_dot_n = if eta_norm > 1e-30 {
+                                (0..n_comp).map(|i| alpha_back_old[i] * eta_trial[i]).sum::<f64>()
+                                    / eta_norm
+                            } else { 0.0 };
+                            // Perzyna overstress: add η/Δt to denominator
+                            let visc_term = if self.dt > 1e-30 {
+                                self.cfg.viscosity / self.dt
+                            } else { 0.0 };
+                            let denom_kin = two_mu + (2.0/3.0)*H
+                                + (2.0/3.0)*C_k - gam_k * eta_dot_n + visc_term;
+                            let dgamma_inv = if denom_kin > 1e-30 { 1.0 / denom_kin } else { 0.0 };
+                            dgamma = f_trial * dgamma_inv;
+                            // Radial return on η
+                            let factor = 1.0 - two_mu * dgamma / (eta_norm.max(1e-30));
+                            let mut eta_new = vec![0.0; n_comp];
+                            for i in 0..n_comp { eta_new[i] = eta_trial[i] * factor; }
+                            // Back stress update (Armstrong–Frederick)
+                            let n_eta = if eta_norm > 1e-30 {
+                                let inv = 1.0 / eta_norm;
+                                (0..n_comp).map(|i| eta_trial[i] * inv).collect::<Vec<f64>>()
+                            } else { vec![0.0; n_comp] };
+                            let ab_denom = 1.0 + gam_k * dgamma;
+                            let mut alpha_new = vec![0.0; n_comp];
+                            for i in 0..n_comp {
+                                alpha_new[i] = (alpha_back_old[i]
+                                    + (2.0/3.0)*C_k * dgamma * n_eta[i]) / ab_denom;
+                            }
+                            // Reconstruct σ = η + α + p·I
+                            for i in 0..dim { sigma[i] = eta_new[i] + alpha_new[i] + p_trial; }
+                            if dim == 2 { sigma[2] = eta_new[2] + alpha_new[2]; }
+                            else {
+                                sigma[3] = eta_new[3] + alpha_new[3];
+                                sigma[4] = eta_new[4] + alpha_new[4];
+                                sigma[5] = eta_new[5] + alpha_new[5];
+                            }
+                            // Consistent tangent (continuum approx with kinematic)
+                            let beta = two_mu * dgamma / (eta_norm.max(1e-30));
+                            let hard_mod = (2.0/3.0)*H + (2.0/3.0)*C_k - gam_k * eta_dot_n;
+                            let theta_mod = 1.0 / (1.0 + hard_mod / two_mu) - (1.0 - beta);
+                            let mut nn = DMatrix::zeros(n_comp, n_comp);
+                            for ii in 0..n_comp { for jj in 0..n_comp {
+                                nn[(ii, jj)] = n_eta[ii] * n_eta[jj];
                             }}
                             for i in 0..n_comp {
                                 for j in 0..n_comp {
                                     D_ep[(i,j)] = c_e[(i,j)]
-                                        - two_mu * (beta * dev_proj_ij(i, j, dim) - theta * nn[(i,j)]);
+                                        - two_mu * (beta * dev_proj_ij(i, j, dim) - theta_mod * nn[(i,j)]);
                                 }
                             }
                             alpha_old + dgamma * sqrt23
                         }
                         PlasticModel::DruckerPrager => {
-                            // Drucker-Prager cone return with apex fallback
-                            // Simo & Hughes (1998) §7.5 associated flow (ψ = φ).
-                            let alpha_dp = self.cfg.dp_alpha();
-                            let k_dp = self.cfg.dp_k();
+                            // Drucker–Prager return with non‑associated flow (ψ ≤ φ).
+                            // Yield  function f uses friction angle φ  → α_f, k_f
+                            // Plastic potential g uses dilation angle ψ → α_g, k_g
+                            // When ψ = φ the classical associated (Simo & Hughes §7.5) case is recovered.
+                            let alpha_f = self.cfg.dp_alpha();       // from φ
+                            let k_f = self.cfg.dp_k();
+                            let alpha_g = self.cfg.dp_alpha_psi();   // from ψ
+                            let k_g = self.cfg.dp_k_psi();
                             let K_bulk = self.cfg.bulk();
-                            // Cone denominator: 2μ + 9K·α² + H·k² (see eq. 7.5.14)
-                            let denom_cone = two_mu + 9.0 * K_bulk * alpha_dp * alpha_dp
-                                             + H * k_dp * k_dp;
+                            // Cone denominator: 2μ + 9K·α_f·α_g + H·k_f·k_g
+                            let denom_cone = two_mu + 9.0 * K_bulk * alpha_f * alpha_g
+                                             + H * k_f * k_g;
                             dgamma = f_trial / denom_cone;
-                            // Provisional cone update
                             let factor = 1.0 - two_mu * dgamma / (s_norm + 1e-30);
                             let mut s_new = s_trial.clone();
                             for i in 0..n_comp { s_new[i] *= factor; }
-                            let mut p_new = p_trial - 3.0 * K_bulk * alpha_dp * dgamma;
+                            // Volumetric update uses α from the POTENTIAL (ψ)
+                            let mut p_new = p_trial - 3.0 * K_bulk * alpha_g * dgamma;
 
                             let s_new_norm = (s_new.iter().map(|v| v*v).sum::<f64>()).sqrt();
-                            // Apex check: if factor < 0 the cone tip is crossed;
-                            // project onto apex (pure hydrostatic state).
                             if factor < 0.0 || s_new_norm < 1e-14 {
-                                // Apex return: p = k·(c + H·α)/(3α) once tip reached.
+                                // Apex return: project to hydrostatic state.
+                                // The apex p coordinate is determined by f = 0 with s = 0.
                                 let sigma_y_updated = sigma_y + H * alpha_old;
-                                p_new = k_dp * sigma_y_updated / (3.0 * alpha_dp);
+                                p_new = k_f * sigma_y_updated / (3.0 * alpha_f);
                                 for i in 0..n_comp { s_new[i] = 0.0; }
                             }
                             for i in 0..n_comp { s_trial[i] = s_new[i]; }
@@ -418,10 +638,8 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                             if dim == 2 { sigma[2] = s_new[2]; }
                             else { sigma[3] = s_new[3]; sigma[4] = s_new[4]; sigma[5] = s_new[5]; }
 
-                            // Continuum (elastic-plastic) tangent for DP — quadratic
-                            // Newton convergence would need the full consistent tangent
-                            // (Simo & Hughes eq. 7.5.29); tracked for Phase 3E.6.
-                            let denom = two_mu + 9.0 * K_bulk * alpha_dp * alpha_dp + H * k_dp * k_dp;
+                            // Elastic‑plastic tangent (continuum, unsymmetric for non‑associated flow).
+                            let denom = two_mu + 9.0 * K_bulk * alpha_f * alpha_g + H * k_f * k_g;
                             let inv_snorm = 1.0 / (s_norm + 1e-30);
                             let nn_dim = n_comp;
                             let mut nn = DMatrix::zeros(nn_dim, nn_dim);
@@ -430,19 +648,81 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                             }}
                             for i in 0..n_comp {
                                 for j in 0..n_comp {
-                                    // D_ep = C_e − (C_e·m)⊗(C_e·n) / (H_p + n·C_e·m)
-                                    // where n = df/dσ = α·δ + s/‖s‖, m = ψ variant.
-                                    // Simplified elastic-plastic tangent for now.
                                     let dev = dev_proj_ij(i, j, dim);
                                     D_ep[(i,j)] = c_e[(i,j)]
                                         - two_mu * two_mu * dev / denom
-                                        - 9.0 * K_bulk * K_bulk * alpha_dp * alpha_dp / denom
+                                        - 9.0 * K_bulk * K_bulk * alpha_f * alpha_g / denom
                                               * (if i < dim && j < dim { 1.0 } else { 0.0 })
-                                        - two_mu * nn[(i,j)] * two_mu / denom;
+                                        - two_mu * two_mu * nn[(i,j)] / denom;
                                 }
                             }
-                            // α_p accumulates via the deviatoric part.
                             alpha_old + dgamma * sqrt23
+                        }
+                        PlasticModel::MohrCoulomb => {
+                            let sin_phi = self.cfg.friction_angle.sin();
+                            let cos_phi = self.cfg.friction_angle.cos();
+                            let sin_psi = self.cfg.dilation_angle.sin();
+                            let (sigma_new, dg) = mc_return_mapping(
+                                &sigma_trial, dim, sigma_y, sin_phi, cos_phi, sin_psi);
+                            sigma.copy_from_slice(&sigma_new);
+                            dgamma = dg;
+                            // Continuum elasto-plastic tangent via principal directions
+                            let eigvecs = principal_directions(&sigma_trial, dim);
+                            let n_f_prin: [f64; 3] = [1.0 + sin_phi, 0.0, -(1.0 - sin_phi)];
+                            let n_g_prin: [f64; 3] = [1.0 + sin_psi, 0.0, -(1.0 - sin_psi)];
+                            let r_f = flow_voigt(&n_f_prin, &eigvecs, dim);
+                            let r_g = flow_voigt(&n_g_prin, &eigvecs, dim);
+                            D_ep = tangent_elasto_plastic(&c_e, &r_f, &r_g, n_comp, H);
+                            alpha_old + dgamma * sqrt23
+                        }
+                        PlasticModel::HoekBrown => {
+                            let (sigma_new, dg) = hb_return_mapping(
+                                &sigma_trial, dim,
+                                self.cfg.hb_ci, self.cfg.hb_m, self.cfg.hb_s, self.cfg.hb_a);
+                            sigma.copy_from_slice(&sigma_new);
+                            dgamma = dg;
+                            // HB is associated: use same gradient for yield and flow.
+                            let prin = principal_stresses(&sigma_trial, dim);
+                            let s3 = prin[2];
+                            let arg = (self.cfg.hb_m * s3 / self.cfg.hb_ci + self.cfg.hb_s).max(0.0);
+                            let df_ds3 = if arg > 0.0 {
+                                -1.0 - self.cfg.hb_m * self.cfg.hb_a * arg.powf(self.cfg.hb_a - 1.0)
+                            } else { -1.0 };
+                            let eigvecs = principal_directions(&sigma_trial, dim);
+                            let n_prin: [f64; 3] = [1.0, 0.0, df_ds3];
+                            let r = flow_voigt(&n_prin, &eigvecs, dim);
+                            D_ep = tangent_elasto_plastic(&c_e, &r, &r, n_comp, H);
+                            alpha_old + dgamma * sqrt23
+                        }
+                        PlasticModel::CamClay => {
+                            let bulk = self.cfg.bulk();
+                            let (sigma_new, dg, _new_pc, p_ret, q_ret) = cc_return_mapping(
+                                &sigma_trial, dim,
+                                self.cfg.m, self.cfg.p_c0,
+                                self.cfg.lambda_index, self.cfg.kappa_index,
+                                self.cfg.void_ratio, mu, bulk);
+                            sigma.copy_from_slice(&sigma_new);
+                            dgamma = dg;
+                            // Cam-Clay consistent tangent in p-q space (associated flow).
+                            // n_Voigt = M²·(2p-p_c)/3 · δ + 3·s
+                            let pc = self.cfg.p_c0 * (dgamma * (1.0 + self.cfg.void_ratio)
+                                / (self.cfg.lambda_index - self.cfg.kappa_index + 1e-30)).exp();
+                            let m2p = self.cfg.m * self.cfg.m * (2.0 * p_ret - pc);
+                            let mut r_cc = vec![0.0; n_comp];
+                            for i in 0..dim { r_cc[i] = m2p / 3.0 + 3.0 * (sigma_new[i] - p_ret); }
+                            if dim == 2 { r_cc[2] = 3.0 * sigma_new[2]; }
+                            else {
+                                r_cc[2] = m2p / 3.0 + 3.0 * (sigma_new[2] - p_ret);
+                                for i in 3..6 { r_cc[i] = 3.0 * sigma_new[i]; }
+                            }
+                            // Hardening modulus from p_c evolution
+                            let h_cc = if pc > 1e-30 && (self.cfg.lambda_index - self.cfg.kappa_index).abs() > 1e-30 {
+                                let v = 1.0 + self.cfg.void_ratio;
+                                let hard_slope = self.cfg.lambda_index - self.cfg.kappa_index;
+                                self.cfg.m.powi(4) * p_ret * pc * v / hard_slope * (2.0 * p_ret - pc).powi(2)
+                            } else { 0.0 };
+                            D_ep = tangent_elasto_plastic(&c_e, &r_cc, &r_cc, n_comp, h_cc);
+                            alpha_old + dgamma
                         }
                         _ => unreachable!(),
                     }
@@ -457,6 +737,35 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                     for i in 0..n_comp { state[old_idx][i] += dgamma * s_trial[i] / (s_norm + 1e-30); }
                 }
                 state[old_idx][6] = new_alpha;
+                // Back stress storage (kinematic hardening; only J2 branch updates it)
+                if self.cfg.model == PlasticModel::J2 && self.cfg.kinematic_modulus > 0.0 {
+                    if f_trial > 0.0 {
+                        // alpha_new was computed in J2 branch; re-derive from plastic strain inc
+                        let a_denom = 1.0 + self.cfg.kinematic_recall * dgamma;
+                        let n_eta = if eta_norm > 1e-30 {
+                            let inv = 1.0 / eta_norm;
+                            (0..n_comp).map(|i| eta_trial[i] * inv).collect::<Vec<f64>>()
+                        } else { vec![0.0; n_comp] };
+                        for i in 0..n_comp {
+                            state[old_idx][7+i] = (alpha_back_old[i]
+                                + (2.0/3.0)*self.cfg.kinematic_modulus * dgamma * n_eta[i]) / a_denom;
+                        }
+                    }
+                    // else: elastic step → back stress unchanged
+                }
+
+                // ── Damage coupling (Lemaitre effective stress) ─────
+                // σ = (1-D)·σ̃  where σ̃ is the effective (undamaged) stress
+                // computed by the return mapping above.
+                let damage_active = self.cfg.damage_S > 0.0;
+                if damage_active {
+                    let one_minus_d = (1.0 - d_old).max(1e-6);
+                    for i in 0..n_comp { sigma[i] *= one_minus_d; }
+                    // Simplified damaged tangent: (1-D)·D_ep
+                    for i in 0..n_comp { for j in 0..n_comp {
+                        D_ep[(i,j)] *= one_minus_d;
+                    }}
+                }
 
                 // Assemble residual contribution into f_vec
                 for k in 0..n_ldofs {
@@ -505,6 +814,23 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                                 k_elem[row * n_vec + col] += w * val;
                             }
                         }
+                    }
+                }
+                // ── Damage variable update (Lemaitre) ──────────────
+                if damage_active && f_trial > 0.0 {
+                    let dp = dgamma * sqrt23;  // accumulated plastic strain inc
+                    let total_p = alpha_old + dp;  // total accumulated plastic strain
+                    if total_p > self.cfg.damage_p_D && dp > 1e-30 {
+                        // Triaxiality: R_v ≈ 1 for uniaxial (simplified)
+                        let r_v = 1.0_f64;
+                        // Energy release rate Y = σ̃_eq²·R_v / (2E)
+                        let sigma_eq = (sigma_trial.iter().map(|v| v*v).sum::<f64>()
+                            .max(1e-30)).sqrt() * (3.0_f64 / 2.0_f64).sqrt();
+                        let y = sigma_eq * sigma_eq * r_v / (2.0 * self.cfg.E);
+                        // D increment: ΔD = (Y/S)·Δp  (Lemaitre)
+                        let dd = (y / self.cfg.damage_S.max(1e-30)) * dp;
+                        let d_new = (d_old + dd).min(self.cfg.damage_D_c);
+                        state[old_idx][13] = d_new;
                     }
                 }
             }
@@ -611,7 +937,7 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
             elems.push(e);
         }
         let total_qp = qp_offsets.last().copied().unwrap_or(0);
-        let state = Mutex::new(vec![vec![0.0_f64; 7]; total_qp]);
+        let state = Mutex::new(vec![vec![0.0_f64; 14]; total_qp]);
         FiniteStrainPlasticity { space, cfg, dirichlet, quad_order, state, elems, qp_offsets }
     }
 
@@ -1074,6 +1400,390 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
     }
 }
 
+// ─── Principal stress helpers ────────────────────────────────────────────
+
+/// Eigenvalues of a 3×3 symmetric matrix (analytical trigonometric formula).
+fn eig_sym_3x3(a00: f64, a01: f64, a02: f64,
+               a11: f64, a12: f64, a22: f64) -> [f64; 3] {
+    let i1 = a00 + a11 + a22;
+    let i2 = a00*a11 + a11*a22 + a00*a22 - a01*a01 - a12*a12 - a02*a02;
+    let i3 = a00*(a11*a22 - a12*a12) - a01*(a01*a22 - a02*a12) + a02*(a01*a12 - a02*a11);
+    let p = i1 / 3.0;
+    let q_val = (i1*i1 - 3.0*i2) / 9.0;
+    if q_val <= 1e-60 {
+        return [p, p, p];
+    }
+    let r = (2.0*i1*i1*i1 - 9.0*i1*i2 + 27.0*i3) / 54.0;
+    let q_sqrt = q_val.sqrt();
+    let phi = (r / (q_sqrt*q_sqrt*q_sqrt)).clamp(-1.0, 1.0).acos() / 3.0;
+    let two_q = 2.0 * q_sqrt;
+    [
+        p + two_q * phi.cos(),
+        p + two_q * (phi - 2.0*std::f64::consts::PI / 3.0).cos(),
+        p + two_q * (phi + 2.0*std::f64::consts::PI / 3.0).cos(),
+    ]
+}
+
+/// Principal stresses from Voigt stress (3D: 6 components, or 2D: 3 components).
+/// Returns `[σ₁, σ₂, σ₃]` with σ₁ ≥ σ₂ ≥ σ₃ (tension positive).
+fn principal_stresses(sigma: &[f64], dim: usize) -> [f64; 3] {
+    if dim == 2 {
+        // Plane strain: σ = [σ_xx, σ_yy, τ_xy]. σ_zz = ν·(σ_xx + σ_yy) but
+        // we use the in-plane principal values (σ₃ is out-of-plane).
+        let sxx = sigma[0]; let syy = sigma[1]; let sxy = sigma[2];
+        let avg = 0.5 * (sxx + syy);
+        let rad = ((0.5*(sxx - syy)).powi(2) + sxy*sxy).sqrt();
+        let s1 = avg + rad;
+        let s2 = avg - rad;
+        // σ₃ is not uniquely defined in plane strain — approximate with
+        // the intermediate principal value for yield checks.
+        let s3 = if dim == 2 { 0.0 } else { sigma[2] };
+        let mut v = [s1, s2, s3];
+        v.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        v
+    } else {
+        let mut e = eig_sym_3x3(
+            sigma[0], sigma[3], sigma[5],
+            sigma[1], sigma[4], sigma[2],
+        );
+        e.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        e
+    }
+}
+
+// ─── Model-specific yield functions ──────────────────────────────────────
+
+/// Mohr–Coulomb yield function in principal stress space.
+///
+/// `f = σ₁·(1 + sinφ) − σ₃·(1 − sinφ) − 2·c·cosφ`
+fn mohr_coulomb_yield(prin: &[f64; 3], cohesion: f64, sin_phi: f64, cos_phi: f64) -> f64 {
+    let s1 = prin[0];
+    let s3 = prin[2];
+    s1 * (1.0 + sin_phi) - s3 * (1.0 - sin_phi) - 2.0 * cohesion * cos_phi
+}
+
+/// Hoek–Brown yield function in principal stress space.
+///
+/// `f = σ₁ − σ₃ − σ_ci·(m_b·σ₃/σ_ci + s)^a`
+fn hoek_brown_yield(prin: &[f64; 3], ci: f64, mb: f64, s: f64, a: f64) -> f64 {
+    let s1 = prin[0];
+    let s3 = prin[2];
+    let arg = mb * s3 / ci + s;
+    if arg <= 0.0 {
+        // Tension regime: linear extrapolation below the cutoff
+        s1 - s3
+    } else {
+        s1 - s3 - ci * arg.powf(a)
+    }
+}
+
+/// Modified Cam–Clay yield function in invariant space.
+///
+/// `f = q² + M²·p·(p − p_c)`
+fn cam_clay_yield(p: f64, q: f64, pc: f64, m: f64) -> f64 {
+    q * q + m * m * p * (p - pc)
+}
+
+// ─── Return-mapping helpers (cutting-plane / Newton) ─────────────────────
+
+/// Mohr–Coulomb cutting-plane return mapping in principal stress space.
+///
+/// Returns `(sigma_returned, dgamma)` where `sigma_returned` is the
+/// updated stress in Voigt form (same layout as input).
+fn mc_return_mapping(
+    sigma_trial: &[f64], dim: usize,
+    cohesion: f64, sin_phi: f64, cos_phi: f64,
+    sin_psi: f64,
+) -> (Vec<f64>, f64) {
+    let mut sigma = sigma_trial.to_vec();
+    let prin = principal_stresses(sigma_trial, dim);
+    let f_trial = mohr_coulomb_yield(&prin, cohesion, sin_phi, cos_phi);
+    if f_trial <= 0.0 {
+        return (sigma, 0.0);
+    }
+
+    // Yield-function gradient  n_f = ∂f/∂σ  (from friction angle φ)
+    // Plastic-potential gradient  n_g = ∂g/∂σ  (from dilation angle ψ)
+    // For associated flow ψ = φ → n_g = n_f.
+    let n1_f = 1.0 + sin_phi;
+    let n3_f = -(1.0 - sin_phi);
+    let n1_g = 1.0 + sin_psi;
+    let n3_g = -(1.0 - sin_psi);
+    // Mixed denominator:  n_f · C · n_g  (simplified to identity norm)
+    let denom = n1_f * n1_g + n3_f * n3_g;
+    if denom > 1e-30 {
+        let dgamma = f_trial / denom;
+        // Update σ₁ and σ₃ using the POTENTIAL gradient n_g (dilation ψ).
+        let mut prin_new = prin;
+        prin_new[0] -= dgamma * n1_g;
+        prin_new[2] -= dgamma * n3_g;
+        if prin_new[2] > prin_new[1] { // re-sort if needed
+            prin_new.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        }
+
+        // Reconstruct Voigt stress from principal stresses (approximate:
+        // preserve the original eigen-directions by scaling)
+        let (s0, s1, s2, s3, s4, s5) = if dim == 2 {
+            (sigma_trial[0], sigma_trial[1], 0.0, sigma_trial[2], 0.0, 0.0)
+        } else {
+            (sigma_trial[0], sigma_trial[1], sigma_trial[2], sigma_trial[3], sigma_trial[4], sigma_trial[5])
+        };
+        let eig_sorted = eig_sym_3x3(s0, s3, s5, s1, s4, s2);
+        // Use the same relative shifts as the principal changes
+        let shift = [prin_new[0] - eig_sorted[0],
+                     prin_new[1] - eig_sorted[1],
+                     prin_new[2] - eig_sorted[2]];
+        sigma[0] += shift[0] * 0.5; // approximate: distribute shifts
+        sigma[1] += shift[1] * 0.5;
+        sigma[2] += shift[2] * 0.5;
+        // For off-diagonal, scale proportionally
+        let ratio = if eig_sorted[0] - eig_sorted[2] > 1e-30 {
+            (prin_new[0] - prin_new[2]) / (eig_sorted[0] - eig_sorted[2])
+        } else { 1.0 };
+        if dim == 3 {
+            sigma[3] *= ratio;
+            sigma[4] *= ratio;
+            sigma[5] *= ratio;
+        } else {
+            sigma[2] *= ratio;
+        }
+        (sigma, dgamma)
+    } else {
+        (sigma, 0.0)
+    }
+}
+
+/// Hoek–Brown cutting-plane return mapping in principal stress space.
+fn hb_return_mapping(
+    sigma_trial: &[f64], dim: usize,
+    ci: f64, mb: f64, s: f64, a: f64,
+) -> (Vec<f64>, f64) {
+    let mut sigma = sigma_trial.to_vec();
+    let prin = principal_stresses(sigma_trial, dim);
+    let f_trial = hoek_brown_yield(&prin, ci, mb, s, a);
+    if f_trial <= 0.0 {
+        return (sigma, 0.0);
+    }
+
+    // Cutting-plane: ∂f/∂σ in principal space
+    // f = σ₁ - σ₃ - ci·(mb·σ₃/ci + s)^a
+    // ∂f/∂σ₁ = 1
+    // ∂f/∂σ₃ = -1 - mb·a·(mb·σ₃/ci + s)^(a-1)
+    let arg = (mb * prin[2] / ci + s).max(0.0);
+    let df_ds3 = if arg > 0.0 {
+        -1.0 - mb * a * arg.powf(a - 1.0)
+    } else {
+        -1.0
+    };
+    let denom = 1.0 + df_ds3 * df_ds3; // n₁² + n₃²
+    if denom > 1e-30 {
+        let dgamma = f_trial / denom;
+        let mut prin_new = prin;
+        prin_new[0] -= dgamma * 1.0; // ∂f/∂σ₁
+        prin_new[2] -= dgamma * df_ds3;
+        if prin_new[2] > prin_new[1] {
+            prin_new.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        }
+
+        let (s0, s1, s2, s3, s4, s5) = if dim == 2 {
+            (sigma_trial[0], sigma_trial[1], 0.0, sigma_trial[2], 0.0, 0.0)
+        } else {
+            (sigma_trial[0], sigma_trial[1], sigma_trial[2], sigma_trial[3], sigma_trial[4], sigma_trial[5])
+        };
+        let eig_sorted = eig_sym_3x3(s0, s3, s5, s1, s4, s2);
+        let shift = [prin_new[0] - eig_sorted[0],
+                     prin_new[1] - eig_sorted[1],
+                     prin_new[2] - eig_sorted[2]];
+        sigma[0] += shift[0] * 0.5;
+        sigma[1] += shift[1] * 0.5;
+        sigma[2] += shift[2] * 0.5;
+        let ratio = if eig_sorted[0] - eig_sorted[2] > 1e-30 {
+            (prin_new[0] - prin_new[2]) / (eig_sorted[0] - eig_sorted[2])
+        } else { 1.0 };
+        if dim == 3 {
+            sigma[3] *= ratio;
+            sigma[4] *= ratio;
+            sigma[5] *= ratio;
+        } else {
+            sigma[2] *= ratio;
+        }
+        (sigma, dgamma)
+    } else {
+        (sigma, 0.0)
+    }
+}
+
+/// Modified Cam–Clay return mapping: Newton iteration in (p, q) space.
+///
+/// Returns `(sigma_returned, dgamma, new_pc, p_returned, q_returned)`.
+fn cc_return_mapping(
+    sigma_trial: &[f64], dim: usize,
+    m: f64, pc_old: f64, lambda_idx: f64, kappa_idx: f64, void_ratio: f64,
+    mu: f64, bulk: f64,
+) -> (Vec<f64>, f64, f64, f64, f64) {
+    let n_comp = if dim == 2 { 3 } else { 6 };
+    let mut sigma = sigma_trial.to_vec();
+    // Mean stress and deviatoric
+    let p_trial = if dim == 2 {
+        (sigma_trial[0] + sigma_trial[1]) / 3.0
+    } else {
+        (sigma_trial[0] + sigma_trial[1] + sigma_trial[2]) / 3.0
+    };
+    let mut s_dev = vec![0.0; n_comp];
+    for i in 0..dim { s_dev[i] = sigma_trial[i] - p_trial; }
+    if dim == 2 { s_dev[2] = sigma_trial[2]; }
+    else { for i in 3..6 { s_dev[i] = sigma_trial[i]; } }
+    let q_trial = (s_dev.iter().map(|v| v*v).sum::<f64>()).sqrt() * (3.0_f64 / 2.0_f64).sqrt();
+
+    let f_trial = cam_clay_yield(p_trial, q_trial, pc_old, m);
+    if f_trial <= 0.0 {
+        return (sigma, 0.0, pc_old, p_trial, q_trial);
+    }
+
+    // Newton iteration on the return mapping in (p, q) space
+    // with volumetric hardening (p_c evolves with ε_v^p).
+    // f(p, q, pc) = q² + M²·p·(p - pc) = 0
+    // p = p_trial - K·Δε_v^p
+    // q = q_trial - 3G·Δε_s^p
+    // Δε_v^p = Δλ·∂f/∂p = Δλ·M²·(2p - pc)
+    // Δε_s^p = Δλ·∂f/∂q = Δλ·2q
+    // dp_c/dΔλ = pc·(1+e₀)/(λ-κ) · ∂f/∂p  (hardening law)
+    let v = 1.0 + void_ratio;
+    let hard_slope = (lambda_idx - kappa_idx).max(1e-30);
+    let three_g = 3.0 * mu;
+    let mut p = p_trial;
+    let mut q = q_trial;
+    let mut pc = pc_old;
+    let mut dlambda = 0.0;
+
+    for _iter in 0..30 {
+        let df_dp = m * m * (2.0 * p - pc);
+        let df_dq = 2.0 * q;
+        // f = q² + M²·p·(p-pc)
+        let f_val = q * q + m * m * p * (p - pc);
+        if f_val.abs() < 1e-12 { break; }
+
+        // Jacobian of the system: only the denominator of Δλ update is needed.
+        let denom = df_dp * (-bulk * df_dp) + df_dq * (-three_g * df_dq) + df_dp * (pc * v / hard_slope * df_dp);
+        if denom.abs() < 1e-30 { break; }
+        let ddlambda = -f_val / denom;
+        dlambda += ddlambda;
+        if ddlambda.abs() < 1e-14 { break; }
+
+        // Update p, q, pc
+        p = p_trial - bulk * dlambda * df_dp;
+        q = q_trial - three_g * dlambda * df_dq;
+        pc = pc_old * (v * dlambda * df_dp / hard_slope).exp();
+    }
+
+    // Reconstruct stress from (p, q)
+    let q_new = q.max(0.0);
+    let scale = if q_trial > 1e-30 { q_new / q_trial } else { 0.0 };
+    for i in 0..dim { sigma[i] = s_dev[i] * scale + p; }
+    if dim == 2 { sigma[2] = s_dev[2] * scale; }
+    else { for i in 3..6 { sigma[i] = s_dev[i] * scale; } }
+
+    (sigma, dlambda, pc, p, q)
+}
+
+// ─── Consistent tangent helpers ─────────────────────────────────────────
+
+/// Eigenvectors of a 3×3 symmetric matrix (analytical).
+/// Returns 3 eigenvectors as a flat array `[v1_x, v1_y, v1_z, v2_x, ...]`.
+fn eigvec_sym_3x3(a00: f64, a01: f64, a02: f64,
+                  a11: f64, a12: f64, a22: f64) -> [f64; 9] {
+    let evals = eig_sym_3x3(a00, a01, a02, a11, a12, a22);
+    // Build matrix A - λI for each eigenvalue and solve for eigenvector
+    // via the cross-product of two rows.
+    let mut vecs = [0.0_f64; 9];
+    for k in 0..3 {
+        let lam = evals[k];
+        let b00 = a00 - lam; let b01 = a01; let b02 = a02;
+        let b11 = a11 - lam; let b12 = a12;
+        let b22 = a22 - lam;
+        // First two rows of (A - λI)
+        let r0 = [b00, b01, b02];
+        let r1 = [b01, b11, b12];
+        // Cross product of r0 × r1 gives the eigenvector (up to scale)
+        let mut v = [
+            r0[1]*r1[2] - r0[2]*r1[1],
+            r0[2]*r1[0] - r0[0]*r1[2],
+            r0[0]*r1[1] - r0[1]*r1[0],
+        ];
+        let vn = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt().max(1e-30);
+        for c in 0..3 { v[c] /= vn; }
+        vecs[k*3..k*3+3].copy_from_slice(&v);
+    }
+    vecs
+}
+
+/// Principal directions (eigenvectors) of the stress tensor in Voigt form.
+/// Returns 3 normalised eigenvectors as flat `[v1_x..v1_z, v2_x.., v3_x..]`.
+fn principal_directions(sigma: &[f64], dim: usize) -> [f64; 9] {
+    let (s0, s1, s2, s3, s4, s5) = if dim == 2 {
+        (sigma[0], sigma[1], 0.0, sigma[2], 0.0, 0.0)
+    } else {
+        (sigma[0], sigma[1], sigma[2], sigma[3], sigma[4], sigma[5])
+    };
+    eigvec_sym_3x3(s0, s3, s5, s1, s4, s2)
+}
+
+/// Project a principal‑space flow gradient `[n1, n2, n3]` to Voigt form
+/// using the provided eigenvectors (flat 9‑element array).
+fn flow_voigt(n_prin: &[f64; 3], eigvecs: &[f64; 9], dim: usize) -> Vec<f64> {
+    let n_comp = if dim == 2 { 3 } else { 6 };
+    let mut r = vec![0.0; n_comp];
+    for i in 0..3 {
+        let ni = n_prin[i];
+        if ni.abs() < 1e-30 { continue; }
+        let vx = eigvecs[i*3];
+        let vy = eigvecs[i*3+1];
+        let vz = eigvecs[i*3+2];
+        r[0] += ni * vx * vx;
+        r[1] += ni * vy * vy;
+        if dim == 3 { r[2] += ni * vz * vz; }
+        if dim == 2 {
+            r[2] += ni * vx * vy;
+        } else {
+            r[3] += ni * vx * vy;
+            r[4] += ni * vy * vz;
+            r[5] += ni * vx * vz;
+        }
+    }
+    r
+}
+
+/// Continuum elasto‑plastic tangent: `D_ep = C_e - (C_e·r_g ⊗ r_f·C_e) / H`
+/// where `r_f` is the yield‑function gradient (Voigt) and `r_g` the
+/// plastic‑potential gradient (Voigt).  When `r_f == r_g` (associated flow)
+/// the tangent is symmetric.
+fn tangent_elasto_plastic(
+    c_e: &DMatrix<f64>, r_f: &[f64], r_g: &[f64], n_comp: usize,
+    h_prime: f64,
+) -> DMatrix<f64> {
+    let mut dep = c_e.clone();
+    // Ce·r_g  and  r_f·Ce
+    let mut ce_rg = vec![0.0; n_comp];
+    let mut rf_ce = vec![0.0; n_comp];
+    for i in 0..n_comp {
+        for j in 0..n_comp {
+            ce_rg[i] += c_e[(i, j)] * r_g[j];
+            rf_ce[i] += r_f[j] * c_e[(j, i)];  // r_f·Ce = (Ce·r_f)ᵀ
+        }
+    }
+    // r_f · Ce · r_g
+    let mut denom = h_prime;
+    for i in 0..n_comp { denom += rf_ce[i] * r_g[i]; }
+    if denom.abs() < 1e-30 { return dep; }
+
+    for i in 0..n_comp {
+        for j in 0..n_comp {
+            dep[(i, j)] -= ce_rg[i] * rf_ce[j] / denom;
+        }
+    }
+    dep
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1344,5 +2054,468 @@ mod tests {
         // They MUST differ (different yield surfaces).
         assert!((a_j2 - a_dp).abs() > 1e-6,
             "J2 and DP must produce different plastic strain: J2={a_j2:.6e}, DP={a_dp:.6e}");
+    }
+
+    // ── Principal-stress helper tests ─────────────────────────────────
+
+    #[test]
+    fn principal_stresses_diagonal_3d() {
+        let sigma = vec![3.0, 2.0, 1.0, 0.0, 0.0, 0.0];
+        let p = principal_stresses(&sigma, 3);
+        assert!((p[0] - 3.0).abs() < 1e-12, "σ₁=3, got {}", p[0]);
+        assert!((p[1] - 2.0).abs() < 1e-12, "σ₂=2, got {}", p[1]);
+        assert!((p[2] - 1.0).abs() < 1e-12, "σ₃=1, got {}", p[2]);
+    }
+
+    #[test]
+    fn principal_stresses_2d_known() {
+        let sigma = vec![3.0, 1.0, 1.0]; // σ_xx=3, σ_yy=1, τ_xy=1
+        let p = principal_stresses(&sigma, 2);
+        let s1 = 2.0 + 2.0_f64.sqrt();
+        let s2 = 2.0 - 2.0_f64.sqrt();
+        assert!((p[0] - s1).abs() < 1e-12, "σ₁={s1}, got {}", p[0]);
+        assert!((p[1] - s2).abs() < 1e-12, "σ₂={s2}, got {}", p[1]);
+    }
+
+    // ── Mohr–Coulomb tests ────────────────────────────────────────────
+
+    #[test]
+    fn mohr_coulomb_elastic_step_zero_residual() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let cfg = PlasticConfig::mohr_coulomb(2e5, 0.3, 1e6, 30.0, 30.0, 0.0);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let u = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        let rhs = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        let norm: f64 = r.iter().map(|v| v.abs()).sum();
+        assert!(norm < 1e-12, "MC zero-u residual: {norm:.3e}");
+    }
+
+    #[test]
+    fn mohr_coulomb_tangent_nonzero() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let cfg = PlasticConfig::mohr_coulomb(2e5, 0.3, 1e6, 30.0, 30.0, 0.0);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let u = vec![0.0; n];
+        let jac = form.jacobian(&u);
+        let mut sum = 0.0;
+        for i in 0..n.min(10) {
+            for j in 0..n.min(10) { sum += jac.get(i, j).abs(); }
+        }
+        assert!(sum > 0.0, "MC tangent non-zero");
+    }
+
+    #[test]
+    fn mohr_coulomb_yields_under_hydrostatic_tension() {
+        // MC (like DP) yields under hydrostatic tension; J2 does not.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let cfg = PlasticConfig::mohr_coulomb(2e5, 0.3, 10.0, 30.0, 30.0, 0.0);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let c = form.space.mesh().node_coords(i as u32);
+            u[i * 2] = 0.05 * c[0];
+            u[i * 2 + 1] = 0.05 * c[1];
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        let any_plastic = form.state.lock().unwrap()
+            .iter().any(|qp| qp[6] > 1e-12);
+        assert!(any_plastic, "MC must yield under hydrostatic tension");
+    }
+
+    #[test]
+    fn mohr_coulomb_plastic_step() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let cfg = PlasticConfig::mohr_coulomb(2e5, 0.3, 50.0, 30.0, 30.0, 1e3);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.15 * x;
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        let any_plastic = form.state.lock().unwrap()
+            .iter().any(|qp| qp[6] > 1e-12);
+        assert!(any_plastic, "MC plastic step should produce α > 0");
+    }
+
+    // ── Hoek–Brown tests ──────────────────────────────────────────────
+
+    #[test]
+    fn hoek_brown_elastic_step_zero_residual() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        // Intact granite: σ_ci=200MPa, m_i=25, s=1, a=0.5
+        let cfg = PlasticConfig::hoek_brown(7e4, 0.25, 200.0, 25.0, 1.0, 0.5);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let u = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        let rhs = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        let norm: f64 = r.iter().map(|v| v.abs()).sum();
+        assert!(norm < 1e-12, "HB zero-u residual: {norm:.3e}");
+    }
+
+    #[test]
+    fn hoek_brown_tangent_nonzero() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let cfg = PlasticConfig::hoek_brown(7e4, 0.25, 200.0, 25.0, 1.0, 0.5);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let u = vec![0.0; n];
+        let jac = form.jacobian(&u);
+        let mut sum = 0.0;
+        for i in 0..n.min(10) {
+            for j in 0..n.min(10) { sum += jac.get(i, j).abs(); }
+        }
+        assert!(sum > 0.0, "HB tangent non-zero");
+    }
+
+    #[test]
+    fn hoek_brown_yields_under_tension() {
+        // Hoek–Brown with low σ_ci should yield under tensile loading.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let cfg = PlasticConfig::hoek_brown(7e4, 0.25, 20.0, 25.0, 1.0, 0.5);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.1 * x;
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        let any_plastic = form.state.lock().unwrap()
+            .iter().any(|qp| qp[6] > 1e-12);
+        assert!(any_plastic, "HB should yield under tensile strain");
+    }
+
+    // ── Cam–Clay tests ────────────────────────────────────────────────
+
+    #[test]
+    fn cam_clay_elastic_step_zero_residual() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        // Typical soil: M=1.2, p_c0=200kPa, λ=0.15, κ=0.03, e₀=0.9
+        let cfg = PlasticConfig::cam_clay(1e4, 0.3, 1.2, 200.0, 0.15, 0.03, 0.9);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let u = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        let rhs = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        let norm: f64 = r.iter().map(|v| v.abs()).sum();
+        assert!(norm < 1e-12, "CC zero-u residual: {norm:.3e}");
+    }
+
+    #[test]
+    fn cam_clay_tangent_nonzero() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let cfg = PlasticConfig::cam_clay(1e4, 0.3, 1.2, 200.0, 0.15, 0.03, 0.9);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        let n = form.n_dofs();
+        let u = vec![0.0; n];
+        let jac = form.jacobian(&u);
+        let mut sum = 0.0;
+        for i in 0..n.min(10) {
+            for j in 0..n.min(10) { sum += jac.get(i, j).abs(); }
+        }
+        assert!(sum > 0.0, "CC tangent non-zero");
+    }
+
+    #[test]
+    fn cam_clay_yields_under_compression() {
+        // Cam–Clay should yield when the stress path crosses the yield surface.
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        // High M, low p_c0 → easily yields
+        let cfg = PlasticConfig::cam_clay(1e4, 0.3, 1.5, 50.0, 0.15, 0.03, 0.9);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+        // Apply compressive deviatoric + volumetric strain
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let c = form.space.mesh().node_coords(i as u32);
+            u[i * 2] = -0.03 * c[0];
+            u[i * 2 + 1] = -0.03 * c[1];
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        let any_plastic = form.state.lock().unwrap()
+            .iter().any(|qp| qp[6] > 1e-12);
+        assert!(any_plastic, "CC should yield under compressive loading");
+    }
+
+    // ── Non‑associated flow tests ─────────────────────────────────────
+
+    /// DP with ψ = φ (associated) should produce a DIFFERENT plastic
+    /// response than DP with ψ = 0 (non‑associated) under the same
+    /// deviator‑dominated load.  This proves the dilation angle is
+    /// actually dispatched in the return mapping.
+    #[test]
+    fn dp_non_associated_produces_different_response() {
+        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_n = mesh_a.clone();
+        let space_a = VectorH1Space::new(mesh_a, 1, 2);
+        let space_n = VectorH1Space::new(mesh_n, 1, 2);
+        let n = space_a.n_dofs();
+
+        let cfg_a = PlasticConfig::drucker_prager_general(2e5, 0.3, 20.0, 30.0, 30.0, 500.0);
+        let cfg_n = PlasticConfig::drucker_prager_general(2e5, 0.3, 20.0, 30.0, 0.0, 500.0);
+        let form_a = J2PlasticityForm::new(space_a, cfg_a, vec![], 2);
+        let form_n = J2PlasticityForm::new(space_n, cfg_n, vec![], 2);
+
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let c = form_a.space.mesh().node_coords(i as u32);
+            u[i * 2]     =  0.12 * c[0];
+            u[i * 2 + 1] = -0.12 * c[1];
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form_a.residual(&u, &rhs, &mut r);
+        form_n.residual(&u, &rhs, &mut r);
+
+        let a_a = form_a.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+        let a_n = form_n.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+
+        assert!(a_a > 1e-8, "Associated DP must yield, got α={a_a:.6e}");
+        assert!(a_n > 1e-8, "Non-associated DP must yield, got α={a_n:.6e}");
+        assert!((a_a - a_n).abs() > 1e-10,
+            "Associated and non-associated DP should give different α: assoc={a_a:.6e}, non={a_n:.6e}");
+    }
+
+    /// MC associated (ψ=φ) vs non‑associated (ψ=0): same deviator load,
+    /// the non‑associated case must produce different (ideally less
+    /// volumetric) plastic strain.
+    #[test]
+    fn mc_non_associated_produces_different_plastic_response() {
+        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_n = mesh_a.clone();
+        let space_a = VectorH1Space::new(mesh_a, 1, 2);
+        let space_n = VectorH1Space::new(mesh_n, 1, 2);
+        let n = space_a.n_dofs();
+
+        // Same MC material, same φ, different ψ
+        let cfg_a = PlasticConfig::mohr_coulomb(2e5, 0.3, 20.0, 30.0, 30.0, 500.0);
+        let cfg_n = PlasticConfig::mohr_coulomb(2e5, 0.3, 20.0, 30.0, 0.0, 500.0);
+        let form_a = J2PlasticityForm::new(space_a, cfg_a, vec![], 2);
+        let form_n = J2PlasticityForm::new(space_n, cfg_n, vec![], 2);
+
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let c = form_a.space.mesh().node_coords(i as u32);
+            u[i * 2]     =  0.10 * c[0];
+            u[i * 2 + 1] = -0.10 * c[1];
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form_a.residual(&u, &rhs, &mut r);
+        form_n.residual(&u, &rhs, &mut r);
+
+        let a_a = form_a.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+        let a_n = form_n.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+
+        assert!(a_a > 1e-8, "Associated MC must yield, got α={a_a:.6e}");
+        assert!(a_n > 1e-8, "Non-associated MC must yield, got α={a_n:.6e}");
+        // They should produce measurably different plastic multipliers
+        assert!((a_a - a_n).abs() > 1e-10,
+            "Associated and non-associated MC should give different α: assoc={a_a:.6e}, non={a_n:.6e}");
+    }
+
+    // ── Kinematic hardening tests ─────────────────────────────────────
+
+    /// Isotropic-only and kinematic-hardening J2 should produce
+    /// different internal back-stress evolution under the same load.
+    #[test]
+    fn kinematic_back_stress_evolves() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        // Combined isotropic + kinematic (C = 10×H for visible effect)
+        let cfg_kin = PlasticConfig::j2_kinematic(2e5, 0.3, 50.0, 1e2, 1e3, 0.0);
+        let form = J2PlasticityForm::new(space, cfg_kin, vec![], 2);
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.15 * x;
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+        // Back stress should have evolved (at least one non-zero component)
+        let state = form.state.lock().unwrap();
+        let has_back = state.iter().any(|qp| qp[7..13].iter().any(|&a| a.abs() > 1e-12));
+        assert!(has_back, "Kinematic hardening: back stress α should be non-zero after plastic step");
+    }
+
+    /// Isotropic-only and kinematic-hardening J2 produce different
+    /// back-stress fields under the same monotonic load.
+    #[test]
+    fn kinematic_vs_isotropic_diverge() {
+        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_b = mesh_a.clone();
+        let space_iso = VectorH1Space::new(mesh_a, 1, 2);
+        let space_kin = VectorH1Space::new(mesh_b, 1, 2);
+        let n = space_iso.n_dofs();
+        let cfg_iso = PlasticConfig::j2(2e5, 0.3, 50.0, 1e3);
+        // Kinematic with AF recall (γ > 0) to break the monotonic degeneracy
+        let cfg_kin = PlasticConfig::j2_kinematic(2e5, 0.3, 50.0, 5e2, 8e2, 1e1);
+        let form_iso = J2PlasticityForm::new(space_iso, cfg_iso, vec![], 2);
+        let form_kin = J2PlasticityForm::new(space_kin, cfg_kin, vec![], 2);
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form_iso.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.12 * x;
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form_iso.residual(&u, &rhs, &mut r);
+        form_kin.residual(&u, &rhs, &mut r);
+        // Check back stress evolution
+        let has_back = form_kin.state.lock().unwrap()
+            .iter().any(|qp| qp[7..13].iter().any(|&a| a.abs() > 1e-12));
+        assert!(has_back, "Kinematic J2 must produce non-zero back stress");
+        // Plastic multipliers should differ due to AF recall
+        let a_iso = form_iso.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+        let a_kin = form_kin.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+        assert!(a_iso > 1e-8, "Isotropic J2 must yield");
+        assert!((a_iso - a_kin).abs() > 1e-8,
+            "Isotropic and kinematic (AF) J2 produce different α: iso={a_iso:.6e}, kin={a_kin:.6e}");
+    }
+
+    // ── Viscoplasticity (Perzyna) tests ───────────────────────────────
+
+    /// With dt=0 the viscoplastic form behaves identically to rate‑independent J2.
+    #[test]
+    fn viscoplastic_dt_zero_equals_rate_independent() {
+        let mesh1 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = mesh1.clone();
+        let space1 = VectorH1Space::new(mesh1, 1, 2);
+        let space2 = VectorH1Space::new(mesh2, 1, 2);
+        let n = space1.n_dofs();
+        let cfg_vp = PlasticConfig::j2_viscoplastic(2e5, 0.3, 50.0, 1e3, 1e2);
+        let cfg_ri = PlasticConfig::j2(2e5, 0.3, 50.0, 1e3);
+        let form_vp = J2PlasticityForm::with_dt(space1, cfg_vp, vec![], 2, 0.0);
+        let form_ri = J2PlasticityForm::new(space2, cfg_ri, vec![], 2);
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form_vp.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.10 * x;
+        }
+        let rhs = vec![0.0; n];
+        let mut r1 = vec![0.0; n];
+        let mut r2 = vec![0.0; n];
+        form_vp.residual(&u, &rhs, &mut r1);
+        form_ri.residual(&u, &rhs, &mut r2);
+        let a_vp = form_vp.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+        let a_ri = form_ri.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+        assert!(a_vp > 1e-8, "VP with dt=0 must yield");
+        assert!((a_vp - a_ri).abs() < 1e-8,
+            "VP dt=0 and rate-independent should match: vp={a_vp:.6e}, ri={a_ri:.6e}");
+    }
+
+    /// Finite dt with viscosity suppresses the plastic multiplier (overstress
+    /// is partly carried by viscous effects).
+    #[test]
+    fn viscoplastic_finite_dt_reduces_plasticity() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let cfg = PlasticConfig::j2_viscoplastic(2e5, 0.3, 50.0, 1e3, 5e3);
+        // Same form with two different dt values
+        let form_slow = J2PlasticityForm::with_dt(space, cfg.clone(), vec![], 2, 1.0);
+        let n2 = form_slow.n_dofs();
+        let mut u = vec![0.0; n2];
+        for i in 0..n2 / 2 {
+            let x = form_slow.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.10 * x;
+        }
+        let rhs = vec![0.0; n2];
+        let mut r = vec![0.0; n2];
+        form_slow.residual(&u, &rhs, &mut r);
+        let a_slow = form_slow.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+        assert!(a_slow > 0.0, "VP with dt=1 must still yield");
+        // With very large dt (quasi-static), viscosity matters less
+        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let space2 = VectorH1Space::new(mesh2, 1, 2);
+        let form_fast = J2PlasticityForm::with_dt(space2, cfg, vec![], 2, 100.0);
+        let mut r2 = vec![0.0; form_fast.n_dofs()];
+        form_fast.residual(&u, &rhs, &mut r2);
+        let a_fast = form_fast.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
+        // Larger dt → smaller η/dt → less viscous suppression → more plasticity
+        assert!(a_fast >= a_slow - 1e-10,
+            "Larger dt should not decrease plastic strain: fast(dt=100)={a_fast:.6e} < slow(dt=1)={a_slow:.6e}");
+    }
+
+    // ── Damage‑coupled plasticity tests ─────────────────────────────
+
+    /// Lemaitre damage evolves when accumulated plastic strain exceeds
+    /// the damage threshold.
+    #[test]
+    fn damage_plasticity_evolves_d() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        // Low yield, low damage threshold → damage develops
+        let cfg = PlasticConfig::j2_damage(2e5, 0.3, 30.0, 5e2, 1e3, 0.01);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.15 * x;  // tensile strain
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+
+        // Damage variable D must have evolved on at least one QP
+        let state = form.state.lock().unwrap();
+        let has_damage = state.iter().any(|qp| qp[13] > 1e-6);
+        assert!(has_damage, "Damage D should be > 0 after plastic strain exceeds threshold");
+    }
+
+    /// Without damage coupling (damage_S = 0), D stays zero.
+    #[test]
+    fn no_damage_when_disabled() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        // Same J2 but damage_S = 0 → damage disabled
+        let cfg = PlasticConfig::j2(2e5, 0.3, 30.0, 5e2);
+        let form = J2PlasticityForm::new(space, cfg, vec![], 2);
+
+        let mut u = vec![0.0; n];
+        for i in 0..n / 2 {
+            let x = form.space.mesh().node_coords(i as u32)[0];
+            u[i * 2] = 0.15 * x;
+        }
+        let rhs = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        form.residual(&u, &rhs, &mut r);
+
+        let state = form.state.lock().unwrap();
+        let total_d: f64 = state.iter().map(|qp| qp[13]).sum();
+        assert!(total_d < 1e-30, "D should be zero when damage is disabled");
     }
 }

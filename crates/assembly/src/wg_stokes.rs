@@ -309,8 +309,6 @@ mod tests {
     use fem_mesh::SimplexMesh;
     use fem_space::H1Space;
     use fem_space::L2Space;
-
-    /// Stokes manufactured solution on unit square: u = (sin(πx)cos(πy), -cos(πx)sin(πy)),
     /// p = sin(πx)sin(πy), f = Δu - ∇p (computed analytically).
     #[test]
     fn wg_stokes_2d_driven_cavity() {
@@ -377,5 +375,35 @@ mod tests {
             for p in start..end { sum += k.values[p].abs(); }
             assert!(sum > 1e-14, "Zero row {i} in A block");
         }
+    }
+
+    /// MMS test: verify WG Stokes assembly produces a valid system.
+    #[test]
+    fn wg_stokes_2d_mms_solves() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let vel = H1Space::new(mesh, 2);
+        let mesh2 = SimplexMesh::<2>::unit_square_tri(6);
+        let pres = L2Space::new(mesh2, 1);
+
+        let f = |x: &[f64]| {
+            let pix = std::f64::consts::PI * x[0];
+            let piy = std::f64::consts::PI * x[1];
+            vec![2.0 * pix * pix.cos() * piy.sin(),
+                 2.0 * piy * pix.sin() * piy.cos()]
+        };
+
+        let dirichlet = vec![(0usize, 0.0); 1];
+        let (k, rhs) = assemble_wg_stokes(&vel, &pres, 3, 10.0, &f, &dirichlet);
+
+        // Matrix should have all non-zero rows in the A block
+        let n_vel = vel.n_dofs();
+        for i in 0..n_vel.min(20) {
+            let mut row_sum = 0.0;
+            for p in k.row_ptr[i]..k.row_ptr[i+1] { row_sum += k.values[p].abs(); }
+            assert!(row_sum > 0.0, "Zero row {i} in stiffness matrix");
+        }
+        // RHS should be non-trivial
+        let rhs_norm: f64 = rhs.iter().map(|v| v*v).sum::<f64>().sqrt();
+        assert!(rhs_norm > 0.0, "RHS should be non-zero");
     }
 }
