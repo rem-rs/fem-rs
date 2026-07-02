@@ -141,6 +141,7 @@ pub mod wg_poisson;
 pub mod wg_stokes;
 pub mod wg_maxwell;
 pub mod vem_poisson;
+pub mod cutfem;
 
 #[cfg(feature = "reed")]
 pub mod reed;
