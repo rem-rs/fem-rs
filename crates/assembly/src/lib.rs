@@ -113,6 +113,7 @@ pub mod dpg_3d;
 pub mod dpg_framework;
 pub mod dpg_stokes;
 pub mod dpg_maxwell;
+pub mod dpg_elasticity;
 pub mod dg_euler_2d;
 pub mod dg_euler_3d;
 pub mod dg_cdr;
