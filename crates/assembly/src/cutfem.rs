@@ -173,4 +173,141 @@ mod tests {
         for i in 0..space.n_dofs() { nnz += (s.row_ptr[i+1]-s.row_ptr[i]) as usize; }
         assert_eq!(nnz, 0, "Expected zero, got {nnz}");
     }
+
+    // ── CutFEM MMS convergence ──────────────────────────────────────────
+    // Solves standard Poisson on unit square (no cuts) as a first-order check
+    // that the assembly, Dirichlet BC, and error computation are correct.
+    fn apply_dirichlet_full(
+        k: &mut fem_linalg::CsrMatrix<f64>, rhs: &mut [f64],
+        bdr: &std::collections::BTreeSet<usize>,
+        bdr_val: &dyn Fn(usize) -> f64,
+    ) {
+        // 1) rhs[i] -= K[i,d] * g[d] for i ∉ bdr
+        for &d in bdr {
+            let g = bdr_val(d);
+            for i in 0..k.nrows {
+                if bdr.contains(&i) { continue; }
+                let s = k.row_ptr[i]; let e = k.row_ptr[i+1];
+                for p in s..e {
+                    if k.col_idx[p] == d as u32 { rhs[i] -= k.values[p] * g; break; }
+                }
+            }
+        }
+        // 2) zero Dirichlet rows, set diagonal = 1, rhs = g
+        for &d in bdr {
+            k.apply_dirichlet_row_zeroing(d, bdr_val(d), rhs);
+        }
+    }
+
+    fn solve_poisson(level: u32, order: u8) -> (f64, f64) {
+        use fem_linalg::SolverConfig;
+        use fem_solver::solve_cg;
+        let sol = |x: &[f64]| x[0]*(1.0-x[0])*x[1]*(1.0-x[1]);
+        let fsrc = |x: &[f64]| 2.0*(x[0]-x[0]*x[0]+x[1]-x[1]*x[1]);
+        let n = 2u32.pow(level); let h = 1.0 / n as f64;
+        let mesh = SimplexMesh::<2>::unit_square_tri(n as usize);
+        let sp = H1Space::new(mesh, order); let m = sp.mesh();
+        let nd = sp.n_dofs();
+        let qo = 2 * (order + 1);
+        let re = TriPk::new(order as usize);
+        let nv = re.n_dofs();
+
+        let mut coo = CooMatrix::<f64>::new(nd, nd);
+        let mut rhs = vec![0.0_f64; nd];
+
+        for e in m.elem_iter() {
+            let nodes = m.element_nodes(e);
+            let dofs: Vec<usize> = sp.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let x0 = m.node_coords(nodes[0]);
+            let mut jac = nalgebra::DMatrix::<f64>::zeros(2, 2);
+            for i in 0..2 { let xn = m.node_coords(nodes[1+i]);
+                for d in 0..2 { jac[(d,i)] = xn[d] - x0[d]; }
+            }
+            let det = jac.determinant();
+            let jac_saved = jac.clone();
+            let ji = match jac.try_inverse() { Some(v) => v, None => continue };
+            let qr = tri_rule(qo);
+
+            for (qi, pt_ref) in qr.points.iter().enumerate() {
+                let pt = [
+                    x0[0] + jac_saved[(0,0)]*pt_ref[0] + jac_saved[(0,1)]*pt_ref[1],
+                    x0[1] + jac_saved[(1,0)]*pt_ref[0] + jac_saved[(1,1)]*pt_ref[1],
+                ];
+                let w = qr.weights[qi] * det.abs();
+                let mut pv = vec![0.0_f64; nv];
+                let mut gr = vec![0.0_f64; nv*2];
+                re.eval_basis(pt_ref, &mut pv);
+                re.eval_grad_basis(pt_ref, &mut gr);
+                // ∇_x = J^{-T} ∇_ξ; ji[(k,d)] = J^{-1}[k,d], so
+                // ∂φ/∂x_d = Σ_k ji[(k,d)] * ∂φ/∂ξ_k = J^{-T}[d,k] * ∂φ/∂ξ_k
+                let fv = fsrc(&pt);
+                for i in 0..nv {
+                    let gx: f64 = (0..2).map(|k| ji[(k,0)] * gr[i*2+k]).sum();
+                    let gy: f64 = (0..2).map(|k| ji[(k,1)] * gr[i*2+k]).sum();
+                    rhs[dofs[i]] += w * fv * pv[i];
+                    for j in 0..nv {
+                        let hx: f64 = (0..2).map(|k| ji[(k,0)] * gr[j*2+k]).sum();
+                        let hy: f64 = (0..2).map(|k| ji[(k,1)] * gr[j*2+k]).sum();
+                        let kij = w * (gx*hx + gy*hy);
+                        if kij.abs() > 1e-30 { coo.add(dofs[i], dofs[j], kij); }
+                    }
+                }
+            }
+        }
+
+        // Collect Dirichlet DOFs (P1: face_nodes only; P2+: use boundary_dofs)
+        let mut k = coo.into_csr();
+        let mut bdr: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        for bf in 0..m.n_boundary_faces() as u32 {
+            for &n in m.face_nodes(bf) { bdr.insert(n as usize); }
+        }
+        let bdr_val = |d: usize| -> f64 { sol(m.node_coords(d as u32)) };
+        apply_dirichlet_full(&mut k, &mut rhs, &bdr, &bdr_val);
+
+        let mut x = vec![0.0_f64; nd];
+        let cfg = SolverConfig { rtol: 1e-12, max_iter: 10000, ..Default::default() };
+        let _ = solve_cg(&k, &rhs, &mut x, &cfg);
+
+        // L2 error
+        let mut l2 = 0.0_f64;
+        for e in m.elem_iter() {
+            let nodes = m.element_nodes(e);
+            let dofs: Vec<usize> = sp.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let x0 = m.node_coords(nodes[0]);
+            let mut jac = nalgebra::DMatrix::<f64>::zeros(2, 2);
+            for i in 0..2 { let xn = m.node_coords(nodes[1+i]);
+                for d in 0..2 { jac[(d,i)] = xn[d] - x0[d]; }
+            }
+            let det = jac.determinant();
+            let qr = tri_rule(qo);
+            for (qi, pt_ref) in qr.points.iter().enumerate() {
+                let pt = [
+                    x0[0] + jac[(0,0)]*pt_ref[0] + jac[(0,1)]*pt_ref[1],
+                    x0[1] + jac[(1,0)]*pt_ref[0] + jac[(1,1)]*pt_ref[1],
+                ];
+                let w = qr.weights[qi] * det.abs();
+                let mut pv = vec![0.0_f64; nv];
+                re.eval_basis(pt_ref, &mut pv);
+                let uh: f64 = dofs.iter().enumerate().map(|(kk,&d)| x[d]*pv[kk]).sum();
+                l2 += w * (uh - sol(&pt)).powi(2);
+            }
+        }
+        (l2.sqrt(), h)
+    }
+
+    #[test]
+    fn cutfem_mms_p1_no_cut() {
+        let mut pe: Option<f64> = None; let mut ph: Option<f64> = None;
+        let mut r = 0.0_f64;
+        for l in 3..=5 {
+            let (err, h) = solve_poisson(l, 1);
+            eprintln!("P1 h={:.5} L2={:.6e}", h, err);
+            if let (Some(e0), Some(h0)) = (pe, ph) {
+                r = (err/e0).ln() / (h/h0).ln();
+                eprintln!("  rate={:.2}", r);
+            }
+            pe = Some(err); ph = Some(h);
+        }
+        assert!(r > 1.8, "P1: expected O(h^2), got {:.2}", r);
+    }
 }
