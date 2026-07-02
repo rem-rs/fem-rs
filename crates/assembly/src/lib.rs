@@ -73,6 +73,7 @@ pub mod bc;
 pub mod cahn_allen;
 pub mod contact;
 pub mod contact_mortar;
+pub mod contact_nitsche;
 pub mod contact_self;
 pub mod coefficient;
 pub mod complex;
