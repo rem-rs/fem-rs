@@ -30,6 +30,7 @@ pub mod block_fe_space;
 pub mod trace_spaces;
 pub mod cr_space;
 pub mod vector_cr;
+pub mod vem;
 
 pub use dof_manager::{DofManager, EdgeKey, FaceKey};
 pub use fe_space::{FESpace, SpaceType};

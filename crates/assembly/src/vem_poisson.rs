@@ -4,6 +4,10 @@
 
 use nalgebra::DMatrix;
 use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_mesh::poly_mesh::PolyMesh;
+use fem_mesh::topology::MeshTopology;
+use fem_space::vem::VEMSpace;
+use fem_space::fe_space::FESpace;
 
 fn tri_6pt() -> ([[f64;2];6], [f64;6]) {
     ([[1.0/6.0,1.0/6.0],[2.0/3.0,1.0/6.0],[1.0/6.0,2.0/3.0],
@@ -80,15 +84,20 @@ fn vem_p1_projection(v: &[[f64;2]]) -> DMatrix<f64> {
     Pi
 }
 
-/// Assemble P1 VEM-Poisson stiffness matrix.
-pub fn assemble_vem_poisson(
-    coords: &[f64], conn: &[u32], offs: &[usize], n_nodes: usize, n_elems: usize
-) -> CsrMatrix<f64> {
+/// Assemble P1 VEM-Poisson stiffness matrix using a VEMSpace.
+pub fn assemble_vem_poisson(space: &VEMSpace<PolyMesh>) -> CsrMatrix<f64> {
+    let mesh = space.mesh();
+    let n_nodes = mesh.n_nodes();
+    let n_elems = mesh.n_elements();
     let mut coo = CooMatrix::new(n_nodes, n_nodes);
-    for e in 0..n_elems {
-        let s=offs[e]; let e2=offs[e+1]; let nv=e2-s;
-        let dofs: Vec<usize> = (s..e2).map(|k| conn[k] as usize).collect();
-        let v: Vec<[f64;2]> = dofs.iter().map(|&d| [coords[d*2], coords[d*2+1]]).collect();
+    for e in 0..n_elems as u32 {
+        let nodes = mesh.element_nodes(e);
+        let nv = nodes.len();
+        let dofs: Vec<usize> = nodes.iter().map(|&n| n as usize).collect();
+        let v: Vec<[f64; 2]> = nodes.iter().map(|&n| {
+            let c = mesh.node_coords(n);
+            [c[0], c[1]]
+        }).collect();
         let area = poly_area(&v);
         if area < 1e-14 { continue; }
         let c = centroid(&v);
@@ -150,29 +159,24 @@ pub fn assemble_vem_poisson(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn quad_mesh() -> (Vec<f64>, Vec<u32>, Vec<usize>, usize, usize) {
-        let n = 3;
-        let c: Vec<f64> = (0..n).flat_map(|j| (0..n).flat_map(move |i| vec![i as f64, j as f64])).collect();
-        let mut cn = Vec::new(); let mut o = vec![0usize];
-        for j in 0..(n-1) { for i in 0..(n-1) {
-            let id = |x:usize,y:usize| (y*n+x) as u32;
-            cn.extend([id(i,j), id(i+1,j), id(i+1,j+1), id(i,j+1)]); o.push(cn.len());
-        }}
-        (c, cn, o, n*n, (n-1)*(n-1))
-    }
+    use fem_mesh::poly_mesh::PolyMesh;
 
     #[test] fn vem_p1_area() { assert!((poly_area(&[[0.,0.],[2.,0.],[2.,1.],[0.,1.]])-2.).abs()<1e-12); }
 
     #[test] fn vem_p1_assemble() {
-        let (c,cn,o,nn,ne)=quad_mesh();
-        let k=assemble_vem_poisson(&c,&cn,&o,nn,ne);
-        assert_eq!(k.nrows,nn);
+        let mesh = PolyMesh::unit_square_quad(2, 2);
+        let space = VEMSpace::new(mesh);
+        let k = assemble_vem_poisson(&space);
+        let nn = space.n_dofs();
+        assert_eq!(k.nrows, nn);
         for i in 0..nn { assert!(k.get(i,i)>0.0, "diag[{i}]={}", k.get(i,i)); }
     }
 
     #[test] fn vem_p1_spd() {
-        let (c,cn,o,nn,ne)=quad_mesh(); let k=assemble_vem_poisson(&c,&cn,&o,nn,ne);
+        let mesh = PolyMesh::unit_square_quad(2, 2);
+        let space = VEMSpace::new(mesh);
+        let k = assemble_vem_poisson(&space);
+        let nn = space.n_dofs();
         let mut asym=0.0;
         for i in 0..nn { for p in k.row_ptr[i]..k.row_ptr[i+1] {
             let j=k.col_idx[p]as usize; let d=k.values[p]-k.get(j,i); asym+=d*d;
@@ -181,7 +185,9 @@ mod tests {
     }
 
     #[test] fn vem_p1_cg() {
-        let (c,cn,o,nn,ne)=quad_mesh(); let k=assemble_vem_poisson(&c,&cn,&o,nn,ne);
+        let mesh = PolyMesh::unit_square_quad(2, 2);
+        let space = VEMSpace::new(mesh);
+        let k = assemble_vem_poisson(&space);
         let n=k.nrows; let mut x=vec![0.;n]; let mut r=vec![1.;n]; let mut p=r.clone();
         let mut rr: f64 = r.iter().map(|v|v*v).sum();
         for _ in 0..300 {

@@ -39,6 +39,8 @@ pub enum ElementType {
     Pyramid5,
     /// 13-node quadratic pyramid.
     Pyramid13,
+    /// Variable-node polygon (used by VEM, node count per element varies).
+    Polygon,
 }
 
 impl ElementType {
@@ -62,6 +64,7 @@ impl ElementType {
             Self::Prism18   => 18,
             Self::Pyramid5  =>  5,
             Self::Pyramid13 => 13,
+            Self::Polygon   => 0, // variable per element
         }
     }
 
@@ -71,11 +74,13 @@ impl ElementType {
             Self::Point1                        => 0,
             Self::Line2 | Self::Line3           => 1,
             Self::Tri3  | Self::Tri6
-          | Self::Quad4 | Self::Quad8 | Self::Quad9 => 2,
+          | Self::Quad4 | Self::Quad8 | Self::Quad9
+          | Self::Polygon                             => 2,
             Self::Tet4  | Self::Tet10
           | Self::Hex8  | Self::Hex20
           | Self::Prism6 | Self::Prism15 | Self::Prism18
-          | Self::Pyramid5 | Self::Pyramid13       => 3,
+          |             Self::Pyramid5 | Self::Pyramid13 |
+            Self::Polygon                       => 3,
         }
     }
 

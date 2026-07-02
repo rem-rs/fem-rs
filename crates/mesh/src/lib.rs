@@ -24,6 +24,7 @@ pub mod transformation;
 pub mod step_iges;
 pub mod cut_cell;
 pub mod dec;
+pub mod poly_mesh;
 
 pub use amr::{refine_marked, refine_marked_with_tree, derefine_marked, DerefineTree, DerefineRecord, refine_nonconforming, refine_nonconforming_3d, refine_nonconforming_quad, refine_nonconforming_hex, refine_nonconforming_quad_aniso, refine_nonconforming_hex_aniso, refine_nonconforming_prism, refine_nonconforming_tri_aniso, refine_nonconforming_tet_aniso, QuadRefineDir, HexRefineDir, TriRefineDir, TetRefineDir, refine_uniform, refine_uniform_3d, refine_prism6_uniform, zz_estimator, kelly_estimator, zz_estimator_3d, kelly_estimator_3d, dwr_estimator, residual_estimator, residual_estimator_3d, prolongate_p1, restrict_to_coarse_p1, HangingNodeConstraint, HangingFaceConstraint, HangingQuadFaceConstraint, NCState, NCState3D, NCStateQuad, NCStateHex};
 pub use amr::{dorfler_mark, mark_for_derefinement, mark_for_p_refinement, p_refine_tri3_to_tri6, p_prolongate_p1_to_p2};

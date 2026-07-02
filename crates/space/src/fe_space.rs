@@ -17,6 +17,8 @@ pub enum SpaceType {
     HCurl,
     /// H(div) space (Raviart-Thomas face elements).
     HDiv,
+    /// Virtual Element space (polygonal VEM).
+    VEM,
 }
 
 /// A finite element space defined over a mesh.
