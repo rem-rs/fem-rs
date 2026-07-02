@@ -58,7 +58,7 @@ fn main() {
 
     // 5. Homogeneous Dirichlet BCs on all boundaries
     let dm = space.dof_manager();
-    let all_tags: Vec<u16> = mesh.unique_boundary_tags().into_iter().collect();
+    let all_tags: Vec<i32> = space.mesh().unique_boundary_tags().into_iter().collect();
     let bnd = boundary_dofs(space.mesh(), dm, &all_tags);
     let bnd_vals = vec![0.0_f64; bnd.len()];
     let mut mat = mat;

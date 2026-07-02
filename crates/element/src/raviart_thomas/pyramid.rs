@@ -50,7 +50,7 @@ fn face_dof_value(m: &Mono, face: usize, p: usize, q: usize) -> f64 {
     match ftype {
         0 => {
             // Tri face: integrate over reference triangle with appropriate mapping
-            let param_face = || -> Vec<[f64; 3]> {
+            let _param_face = || -> Vec<[f64; 3]> {
                 match face {
                     // x=0 face: param by (y,z) ∈ triangle
                     1 => vec![[0.0, 1.0/3.0, 1.0/3.0], [0.0, 2.0/3.0, 1.0/6.0], [0.0, 1.0/6.0, 2.0/3.0]],
@@ -95,10 +95,10 @@ fn face_dof_value(m: &Mono, face: usize, p: usize, q: usize) -> f64 {
                 Box<dyn Fn(f64, f64) -> f64>,
                 Box<dyn Fn(f64, f64) -> f64>,
             ) = match face {
-                1 => (Box::new(|_, _| 0.0), Box::new(|u, v| u), Box::new(|u, v| v)),
+                1 => (Box::new(|_, _| 0.0), Box::new(|u, _v| u), Box::new(|_u, v| v)),
                 2 => (Box::new(|u, _| u), Box::new(|_, _| 0.0), Box::new(|_, v| v)),
-                3 => (Box::new(|u, v| u), Box::new(|_, _| 0.0), Box::new(|u, v| 1.0 - u - v)),
-                4 => (Box::new(|_, _| 0.0), Box::new(|u, v| u), Box::new(|u, v| 1.0 - u - v)),
+                3 => (Box::new(|u, _v| u), Box::new(|_, _| 0.0), Box::new(|u, v| 1.0 - u - v)),
+                4 => (Box::new(|_, _| 0.0), Box::new(|u, _v| u), Box::new(|u, v| 1.0 - u - v)),
                 _ => unreachable!(),
             };
 
@@ -194,7 +194,7 @@ fn build_pyramid_rtk(k: usize) -> (Vec<f64>, usize) {
 
     for face in 0..5 {
         let (ftype, _) = FACE_DEFS[face];
-        let nmom = if ftype == 0 { n_tri_moms } else { n_quad_moms };
+        let _nmom = if ftype == 0 { n_tri_moms } else { n_quad_moms };
         let pairs = if ftype == 0 { &tri_pairs } else {
             &(0..n_quad_moms).map(|i| (i / (k+1), i % (k+1))).collect::<Vec<_>>()
         };

@@ -37,7 +37,7 @@ fn main() {
     let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, args.order);
     let n = space.n_dofs();
-    let quad = args.order as usize * 2 + 1;
+    let quad: u8 = args.order * 2 + 1;
 
     let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], quad);
     let source = DomainSourceIntegrator::new(|x: &[f64]| {
@@ -61,8 +61,8 @@ fn main() {
     let mut results: Vec<(&str, usize, f64, f64)> = Vec::new();
 
     // ── CG (SPD optimal) ──
-    run(&mut results, "CG", || {
-        let mut x = vec![0.0; n];
+    run(&mut results, "CG", || -> Result<(fem_solver::SolveResult, Vec<f64>), fem_solver::SolverError> {
+        let mut x: Vec<f64> = vec![0.0; n];
         let r = solve_cg(&mat, &rhs, &mut x, &cfg)?;
         Ok((r, x))
     });
@@ -164,11 +164,13 @@ fn main() {
     }
 }
 
-fn run<R>(
+fn run<F>(
     results: &mut Vec<(&'static str, usize, f64, f64)>,
     name: &'static str,
-    f: impl Fn() -> Result<(fem_solver::SolveResult, Vec<f64>), fem_solver::SolverError>,
-) {
+    f: F,
+) where
+    F: Fn() -> Result<(fem_solver::SolveResult, Vec<f64>), fem_solver::SolverError>,
+{
     let t0 = Instant::now();
     match f() {
         Ok((r, x)) => {

@@ -15,7 +15,15 @@ use crate::quadrature::pyramid_rule;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
 // ─── Edge and face definitions ───────────────────────────────────────────────
+//
+// EDGES, TRI_FACES, QUAD_FACE and tri_face_dof are reserved for the k ≥ 2
+// implementation that follows Bergot 2010's collapsed-coordinate NDk basis.
+// The current build_pyramid_ndk only wires k = 1 (edge DOFs only via
+// edge_dof + EDGE_GEOM), so these items are dead until the higher-order
+// face and interior DOF enumeration lands. See M0.5 in
+// docs/evaluation/MFEM_GAP_ANALYSIS_2026-07-02.md.
 
+#[allow(dead_code)]
 const EDGES: [(usize, usize); 8] = [
     (0, 1), (1, 2), (2, 3), (3, 0), // base quad
     (0, 4), (1, 4), (2, 4), (3, 4), // apex edges
@@ -34,9 +42,11 @@ const EDGE_GEOM: [([f64; 3], [f64; 3]); 8] = [
 
 // Triangular faces (4): each connects a base edge to the apex.
 // Quad face (1): the base at z=0.
+#[allow(dead_code)]
 const TRI_FACES: [[usize; 3]; 4] = [
     [0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4],
 ];
+#[allow(dead_code)]
 const QUAD_FACE: [usize; 4] = [0, 1, 2, 3];
 
 // ─── Monomial construction ──────────────────────────────────────────────────
@@ -86,13 +96,17 @@ fn edge_dof(m: &Mono, edge: usize, p: usize) -> f64 {
     sum
 }
 
-/// Integrate over a triangular face: �?Φ · (u^i v^j) · t̂�?dA
+/// Integrate over a triangular face: ∫ Φ · (u^i v^j) · t̂ dA.
+///
+/// Reserved for k ≥ 2 face DOFs — currently not called from
+/// `build_pyramid_ndk` (which only wires k = 1 edge DOFs). See M0.5.
+#[allow(dead_code)]
 fn tri_face_dof(m: &Mono, face: usize, i: usize, j: usize, tangent: usize) -> f64 {
     let face_verts = TRI_FACES[face];
     // Map reference triangle (u,v) to face vertices:
-    // P(u,v) = v0 + u*(v1-v0) + v*(v2-v0), where (u,v) in [0,1]², u+v �?1
+    // P(u,v) = v0 + u*(v1-v0) + v*(v2-v0), where (u,v) in [0,1]², u+v ≤ 1
     let v0 = face_verts[0]; let v1 = face_verts[1]; let v2 = face_verts[2];
-    let p0 = EDGE_GEOM[0].0; // placeholder �?we need actual vertex coords
+    let _p0 = EDGE_GEOM[0].0; // legacy placeholder — kept for backward compat
     // Use vertex coords from pyramid definition
     let verts: [[f64; 3]; 5] = [
         [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0],

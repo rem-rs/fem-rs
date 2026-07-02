@@ -61,12 +61,12 @@ name = "mfem_ex9_dg_advection"
 path = "mfem_ex9_dg_advection.rs"
 
 [[example]]
-name = "mfem_ex10_heat_equation"
-path = "mfem_ex10_heat_equation.rs"
+name = "heat_equation"
+path = "heat_equation.rs"
 
 [[example]]
-name = "mfem_ex10_wave_equation"
-path = "mfem_ex10_wave_equation.rs"
+name = "wave_equation"
+path = "wave_equation.rs"
 
 [[example]]
 name = "mfem_ex23_wave_equation"
@@ -129,16 +129,16 @@ name = "mfem_ex40_stokes"
 path = "mfem_ex40_stokes.rs"
 
 [[example]]
-name = "mfem_ex19_navier_stokes"
-path = "mfem_ex19_navier_stokes.rs"
+name = "navier_stokes_kovasznay"
+path = "navier_stokes_kovasznay.rs"
 
 [[example]]
 name = "mfem_ex7_neumann_mixed_bc"
 path = "mfem_ex7_neumann_mixed_bc.rs"
 
 [[example]]
-name = "mfem_ex10_maxwell_time"
-path = "mfem_ex10_maxwell_time.rs"
+name = "maxwell_time_domain"
+path = "maxwell_time_domain.rs"
 
 [[example]]
 name = "mfem_ex33_tangential_drive_maxwell"
@@ -189,104 +189,12 @@ name = "mfem_ex33_fractional_laplacian"
 path = "mfem_ex33_fractional_laplacian.rs"
 
 [[example]]
-name = "mfem_ex14_dc_current"
-path = "mfem_ex14_dc_current.rs"
+name = "dc_current"
+path = "dc_current.rs"
 
 [[example]]
-name = "mfem_pex4_parallel_heat"
-path = "mfem_pex4_parallel_heat.rs"
-
-[[example]]
-name = "mfem_ex26_geom_mg"
-path = "mfem_ex26_geom_mg.rs"
-
-[[example]]
-name = "mfem_ex41_imex"
-path = "mfem_ex41_imex.rs"
-
-[[example]]
-name = "mfem_ex43_hdf5_checkpoint"
-path = "mfem_ex43_hdf5_checkpoint.rs"
-
-[[example]]
-name = "mfem_ex44_thermoelastic_coupled"
-path = "mfem_ex44_thermoelastic_coupled.rs"
-
-[[example]]
-name = "mfem_ex45_moving_mesh_ale"
-path = "mfem_ex45_moving_mesh_ale.rs"
-
-[[example]]
-name = "mfem_ex3_maxwell_cavity"
-path = "mfem_ex3_maxwell_cavity.rs"
-
-[[example]]
-name = "mfem_ex8_hybridization"
-path = "mfem_ex8_hybridization.rs"
-
-[[example]]
-name = "mfem_ex13_laplacian_eigen"
-path = "mfem_ex13_laplacian_eigen.rs"
-
-[[example]]
-name = "mfem_ex36_obstacle"
-path = "mfem_ex36_obstacle.rs"
-
-[[example]]
-name = "mfem_ex37_topology_optimization"
-path = "mfem_ex37_topology_optimization.rs"
-
-[[example]]
-name = "mfem_ex38_immersed_boundary"
-path = "mfem_ex38_immersed_boundary.rs"
-
-[[example]]
-name = "mfem_ex22_complex_helmholtz"
-path = "mfem_ex22_complex_helmholtz.rs"
-
-[[example]]
-name = "mfem_ex25_pml_helmholtz"
-path = "mfem_ex25_pml_helmholtz.rs"
-
-[[example]]
-name = "mfem_ex31_anisotropic_maxwell"
-path = "mfem_ex31_anisotropic_maxwell.rs"
-
-[[example]]
-name = "mfem_ex32_impedance_maxwell"
-path = "mfem_ex32_impedance_maxwell.rs"
-
-[[example]]
-name = "mfem_ex34_absorbing_maxwell"
-path = "mfem_ex34_absorbing_maxwell.rs"
-
-[[example]]
-name = "mfem_ex0_mesh_intro"
-path = "mfem_ex0_mesh_intro.rs"
-
-[[example]]
-name = "mfem_ex12_solver_comparison"
-path = "mfem_ex12_solver_comparison.rs"
-
-[[example]]
-name = "mfem_ex11_p_multigrid"
-path = "mfem_ex11_p_multigrid.rs"
-
-[[example]]
-name = "mfem_mc_random_field"
-path = "mfem_mc_random_field.rs"
-
-[[example]]
-name = "mfem_ex28_sliding_elasticity"
-path = "mfem_ex28_sliding_elasticity.rs"
-
-[[example]]
-name = "mfem_ex29_curved_poisson"
-path = "mfem_ex29_curved_poisson.rs"
-
-[[example]]
-name = "mfem_ex20_wgpu_poisson"
-path = "mfem_ex20_wgpu_poisson.rs"
+name = "wgpu_poisson"
+path = "wgpu_poisson.rs"
 
 [[example]]
 name = "mfem_tmop_mesh_quality"
@@ -315,6 +223,14 @@ path = "mfem_joule.rs"
 [[example]]
 name = "mfem_phasefield_fracture"
 path = "mfem_phasefield_fracture.rs"
+
+[[example]]
+name = "solver_comparison"
+path = "solver_comparison.rs"
+
+[[example]]
+name = "multiphysics_coupled_newton"
+path = "multiphysics_coupled_newton.rs"
 
 [[example]]
 name = "mfem_vec_ref_elem"

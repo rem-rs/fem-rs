@@ -54,6 +54,8 @@ fn element_type_to_u32(et: ElementType) -> u32 {
         ElementType::Prism15  => 14,
         ElementType::Prism18  => 15,
         ElementType::Pyramid13 => 16,
+        ElementType::Hex27    => 17,
+        ElementType::Polygon  => 18,
     }
 }
 
@@ -76,6 +78,8 @@ fn u32_to_element_type(v: u32) -> Result<ElementType, String> {
         14 => Ok(ElementType::Prism15),
         15 => Ok(ElementType::Prism18),
         16 => Ok(ElementType::Pyramid13),
+        17 => Ok(ElementType::Hex27),
+        18 => Ok(ElementType::Polygon),
         _ => Err(format!("unknown ElementType discriminant: {v}")),
     }
 }

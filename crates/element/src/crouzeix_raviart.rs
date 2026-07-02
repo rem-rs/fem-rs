@@ -306,7 +306,11 @@ pub fn cr1_tet_basis(xi: &[f64], vals: &mut [f64]) {
 /// Gradient of the TetCR1 basis functions at `xi`.
 ///
 /// Output layout: `grads[3*i + d]` = ∂φ_i / ∂x_d.
-pub fn cr1_tet_grad(xi: &[f64], grads: &mut [f64]) {
+///
+/// CR1 basis on a tet is affine (linear), so ∇φ_i is a constant vector
+/// equal to the linear coefficients — hence `xi` is not read here. The
+/// parameter is retained for `ReferenceElement` trait uniformity.
+pub fn cr1_tet_grad(_xi: &[f64], grads: &mut [f64]) {
     let (coeff, m, _) = tet_cr1_cache();
     for i in 0..4 {
         let off = i * m;
@@ -559,6 +563,56 @@ mod tests {
         assert!((sx).abs() < 1e-14, "sum grad_x={sx}");
         assert!((sy).abs() < 1e-14, "sum grad_y={sy}");
         assert!((sz).abs() < 1e-14, "sum grad_z={sz}");
+    }
+
+    /// CR1 tet basis is affine, so `cr1_tet_grad` must return identical
+    /// vectors regardless of `xi` — this guards against the historical bug
+    /// where `xi` was declared but not used (dead_code warning).
+    #[test] fn cr1_tet_grad_is_xi_independent() {
+        let mut g0 = [0.0_f64; 12];
+        let mut g1 = [0.0_f64; 12];
+        let mut g2 = [0.0_f64; 12];
+        cr1_tet_grad(&[0.0, 0.0, 0.0],  &mut g0);
+        cr1_tet_grad(&[0.5, 0.25, 0.1], &mut g1);
+        cr1_tet_grad(&[1.0/3.0, 1.0/3.0, 1.0/3.0], &mut g2);
+        for i in 0..12 {
+            assert!((g0[i] - g1[i]).abs() < 1e-14, "g0[{i}]={} vs g1[{i}]={}", g0[i], g1[i]);
+            assert!((g1[i] - g2[i]).abs() < 1e-14, "g1[{i}]={} vs g2[{i}]={}", g1[i], g2[i]);
+        }
+    }
+
+    /// CR1 tet basis must reproduce affine functions exactly on the reference tet.
+    /// For φ(x) = a + b·x + c·y + d·z, applying the DOF functionals (face
+    /// averages) and reconstructing must give back the original coefficients
+    /// at any interior point via ∑φ_i · N_i.
+    #[test] fn cr1_tet_reproduces_affine_functions() {
+        // affine target: φ(x,y,z) = 1 + 2x - 3y + 4z
+        let phi = |x: f64, y: f64, z: f64| 1.0 + 2.0*x - 3.0*y + 4.0*z;
+
+        // Face centroids (in reference tet coordinates)
+        let face_centroids = [
+            [1.0/3.0, 1.0/3.0, 1.0/3.0],
+            [0.0,     1.0/3.0, 1.0/3.0],
+            [1.0/3.0, 0.0,     1.0/3.0],
+            [1.0/3.0, 1.0/3.0, 0.0    ],
+        ];
+        let dofs: Vec<f64> = face_centroids.iter()
+            .map(|c| phi(c[0], c[1], c[2]))
+            .collect();
+
+        // Reconstruct at interior sample points and compare.
+        let mut vals = [0.0_f64; 4];
+        for &sample in &[
+            [0.1, 0.1, 0.1],
+            [0.25, 0.25, 0.25],
+            [0.4, 0.1, 0.3],
+        ] {
+            cr1_tet_basis(&sample, &mut vals);
+            let recon: f64 = dofs.iter().zip(vals.iter()).map(|(d, v)| d * v).sum();
+            let exact = phi(sample[0], sample[1], sample[2]);
+            assert!((recon - exact).abs() < 1e-10,
+                "affine reproduction failed at {sample:?}: recon={recon}, exact={exact}");
+        }
     }
 
     #[test] fn cr2_tet_finite() {

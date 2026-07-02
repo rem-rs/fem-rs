@@ -232,7 +232,7 @@ pub fn rising_deriv(n: usize, t: f64) -> f64 {
 pub fn rising_hess(n: usize, t: f64) -> f64 {
     if n == 0 { return 0.0; }
     let ln = rising_val(n, t);
-    let nf = n as f64;
+    let _nf = n as f64;
     let mut s1 = 0.0; // Σ 1/(t-a)
     let mut s2 = 0.0; // Σ 1/(t-a)²
     for a in 0..n {

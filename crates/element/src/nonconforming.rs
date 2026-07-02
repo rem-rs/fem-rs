@@ -6,6 +6,7 @@
 //! Built via Vandermonde from monomials + face-average DOFs with Gauss quadrature.
 
 use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
+#[allow(unused_imports)]
 use crate::quadrature;
 
 const EDGE_GEOM: [([f64; 2], [f64; 2]); 4] = [

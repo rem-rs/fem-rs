@@ -240,8 +240,11 @@ impl BsplineBasis {
     pub fn insert_knot(&self, u: f64) -> Result<Self, String> {
         let p = self.degree;
         let knots = self.knots.as_slice();
-        let n = self.n_basis();
-        let n_knots = knots.len();
+        // n / n_knots are retained for clarity even though the current
+        // implementation returns a fresh basis rather than updating
+        // control-point rows in place.
+        let _n = self.n_basis();
+        let _n_knots = knots.len();
 
         // Find insertion span
         let k = self.find_span(u);

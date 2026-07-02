@@ -36,6 +36,13 @@ fn gauss_2d(k: usize) -> (Vec<[f64; 2]>, Vec<f64>) {
     (pts, wts)
 }
 
+/// 3D Gauss-Legendre tensor product on the reference cube [0,1]³.
+///
+/// Reserved for the interior DOF integration in the k ≥ 2 completion path.
+/// The current `if k >= 2` branch uses a monomial fill stub (see M0.5 in
+/// docs/evaluation/MFEM_GAP_ANALYSIS_2026-07-02.md), so this helper is
+/// unused until that stub is replaced.
+#[allow(dead_code)]
 fn gauss_3d(k: usize) -> (Vec<[f64; 3]>, Vec<f64>) {
     let n = (k + 2).max(2);
     let (x1d, w1d) = crate::quadrature::gauss_legendre_arbitrary(n);
@@ -117,7 +124,7 @@ fn build_hex_bdmk(k: usize) -> (Vec<f64>, usize) {
     let mut mom_pairs = Vec::new();
     for p in 0..=k { for q in 0..=k { if p + q <= k { mom_pairs.push((p, q)); } }}
 
-    for &(n_axis, u_axis, v_axis, u_val, v_val, norm) in &faces {
+    for &(n_axis, u_axis, v_axis, u_val, _v_val, norm) in &faces {
         let nn = [norm[0], norm[1], norm[2]];
         for &(p, q) in &mom_pairs {
             for j in 0..m {

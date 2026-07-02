@@ -898,7 +898,7 @@ fn solve_transient_case_nonmatching(
     let nu = 0.3_f64;
     let lambda = e_mod * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
     let mu = e_mod / (2.0 * (1.0 + nu));
-    let elast = ElasticityIntegrator { lambda, mu };
+    let elast = ElasticityIntegrator { lambda, mu, plane_stress: false };
     let mut k_uu = Assembler::assemble_bilinear(&space_u, &[&elast], order * 2 + 1);
 
     let diff = DiffusionIntegrator { kappa: 1.0 };
@@ -1529,7 +1529,7 @@ fn build_model(
     let nu = 0.3_f64;
     let lambda = e_mod * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
     let mu = e_mod / (2.0 * (1.0 + nu));
-    let elast = ElasticityIntegrator { lambda, mu };
+    let elast = ElasticityIntegrator { lambda, mu, plane_stress: false };
     let mut k_uu = Assembler::assemble_bilinear(&space_u, &[&elast], order * 2 + 1);
 
     // Thermal block K_tt = diffusion + convection.

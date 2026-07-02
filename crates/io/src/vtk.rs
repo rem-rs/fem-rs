@@ -33,6 +33,10 @@ use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
 // ---------------------------------------------------------------------------
 
 /// VTK cell type code for a given [`ElementType`].
+///
+/// Reference: VTK File Formats guide, Figure 2 (Linear Cell Types) and
+/// Figure 3 (Non-Linear Cell Types).
+/// <https://vtk.org/wp-content/uploads/2015/04/file-formats.pdf>
 fn vtk_cell_type(et: ElementType) -> u8 {
     match et {
         ElementType::Line2    =>  3,
@@ -46,12 +50,16 @@ fn vtk_cell_type(et: ElementType) -> u8 {
         ElementType::Tet10    => 24,
         ElementType::Hex8     => 12,
         ElementType::Hex20    => 25,
+        // VTK_TRIQUADRATIC_HEXAHEDRON (27 nodes with face + body centers)
+        ElementType::Hex27    => 29,
         ElementType::Prism6   => 13,
         ElementType::Prism15  => 26,
         ElementType::Prism18  => 32,
         ElementType::Pyramid5 => 14,
         ElementType::Pyramid13 => 27,
         ElementType::Point1   =>  1,
+        // VTK_POLYGON — variable-node planar polygon
+        ElementType::Polygon  =>  7,
     }
 }
 

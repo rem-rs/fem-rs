@@ -82,8 +82,7 @@ impl ElementType {
             Self::Tet4  | Self::Tet10
           | Self::Hex8  | Self::Hex20 | Self::Hex27
           | Self::Prism6 | Self::Prism15 | Self::Prism18
-          |             Self::Pyramid5 | Self::Pyramid13 |
-            Self::Polygon                       => 3,
+          | Self::Pyramid5 | Self::Pyramid13        => 3,
         }
     }
 

@@ -86,7 +86,7 @@ fn solve_case(n: usize, order: u8, body_force_y: f64) -> SolveResult {
     let n_scalar = space.n_scalar_dofs();
 
     // ─── 2. Assemble stiffness matrix ─────────────────────────────────────────
-    let elast = ElasticityIntegrator { lambda: lam, mu };
+    let elast = ElasticityIntegrator { lambda: lam, mu, plane_stress: false };
     let mut mat = Assembler::assemble_bilinear(&space, &[&elast], order as u8 * 2 + 1);
 
     // ─── 3. Gravity body force: f = (0, -ρg)  �?assembled into RHS ───────────

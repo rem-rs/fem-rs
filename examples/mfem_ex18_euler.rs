@@ -172,6 +172,7 @@ fn flux_name(flux: NumericalFlux) -> &'static str {
     match flux {
         NumericalFlux::LaxFriedrichs => "lax",
         NumericalFlux::Roe => "roe",
+        NumericalFlux::HLLC => "hllc",
     }
 }
 

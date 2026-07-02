@@ -186,9 +186,8 @@ fn build_prism_rtk(k: usize) -> (Vec<f64>, usize) {
     let mut vand = vec![vec![0.0_f64; m]; n];
     let mut row = 0;
 
-    // Face DOFs: 5 faces, each with (order+1)(order+2)/2 (tri) or (order+1)² (quad) moment pairs
-    let n_tri_moments = (k + 1) * (k + 2) / 2;  // number of (p,q) with p+q ≤ k
-    let n_quad_moments = (k + 1) * (k + 1);     // number of (p,q) with p,q ≤ k
+    // Face DOFs: 5 faces, each with (order+1)(order+2)/2 (tri) or (order+1)² (quad) moment pairs.
+    // Counts derived from `tri_moments.len()` / `quad_moments.len()` below.
 
     // Generate (p,q) pairs for tri faces: p+q ≤ k
     let mut tri_moments = Vec::new();
