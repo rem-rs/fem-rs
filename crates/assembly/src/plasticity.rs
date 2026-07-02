@@ -842,7 +842,7 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
         let mut mat = coo.into_csr();
         let mut dir_rhs = if wants_residual { f_vec } else { vec![0.0; n_dofs] };
         for &(dof, val) in &self.dirichlet {
-            mat.apply_dirichlet_row_zeroing(dof, val, &mut dir_rhs);
+            mat.apply_dirichlet_symmetric(dof, val, &mut dir_rhs);
         }
 
         (dir_rhs, mat)

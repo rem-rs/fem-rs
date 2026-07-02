@@ -17,6 +17,7 @@ use fem_space::vector_h1::VectorH1Space;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
 use fem_space::constraints::boundary_dofs;
+use fem_solver::{solve_cg, SolverConfig};
 
 fn main() {
     println!("=== J2 plasticity: 2D bar (plane strain) ===");
@@ -56,6 +57,19 @@ fn main() {
     for ni in 0..n_scalar {
         let y = (ni as f64) / (n_scalar as f64 - 1.0).max(1.0);
         u[ni + n_scalar] = -0.001 * y; // linear compression
+    }
+
+    // Verify that the Jacobian matrix yields a solvable linear system
+    // (the apply_dirichlet_row_zeroing → _symmetric fix).
+    let jac = form.jacobian(&u);
+    let mut du = vec![0.0; n_dofs];
+    let mut r = vec![0.0; n_dofs];
+    form.residual(&u, &rhs, &mut r);
+    let neg_r: Vec<f64> = r.iter().map(|&v| -v).collect();
+    let cg_cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 200, verbose: false, ..SolverConfig::default() };
+    match solve_cg(&jac, &neg_r, &mut du, &cg_cfg) {
+        Ok(res) => println!("  CG solve: {} iters, residual={:.3e}", res.iterations, res.final_residual),
+        Err(e) => println!("  CG solve FAILED: {e}"),
     }
 
     // Compute residual
