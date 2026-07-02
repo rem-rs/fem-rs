@@ -115,6 +115,7 @@ pub mod dg_euler_3d;
 pub mod dg_cdr;
 pub mod dg_ldg;
 pub mod dg_br2;
+pub mod dg_curved;
 pub mod dg_limiters;
 pub mod navier_stokes;
 pub use navier_stokes::{
