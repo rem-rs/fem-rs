@@ -241,6 +241,10 @@ name = "allen_cahn_evolution"
 path = "cahn_hilliard_spinodal.rs"
 
 [[example]]
+name = "wg_stokes_cavity"
+path = "wg_stokes_cavity.rs"
+
+[[example]]
 name = "mfem_vec_ref_elem"
 path = "mfem_vec_ref_elem.rs"
 
