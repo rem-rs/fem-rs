@@ -35,7 +35,7 @@ fn orthonormal_tangents(n: &[f64; 3]) -> ([f64; 3], [f64; 3]) {
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EulerFluxKind { LaxFriedrichs, Roe, Hllc }
+pub enum EulerFluxKind { LaxFriedrichs, Roe, Hllc, AusmPlus }
 impl Default for EulerFluxKind { fn default() -> Self { EulerFluxKind::LaxFriedrichs } }
 
 pub struct Euler3D { pub gamma: f64 }
@@ -175,11 +175,81 @@ impl Euler3D {
         }
     }
 
+    /// AUSM+ flux (Liou 1996, JCP).
+    ///
+    /// Splits flux into convective + pressure parts using split Mach numbers.
+    /// Robust for all speeds; no entropy fix needed.
+    pub fn ausm_plus_flux(&self, ql: &[f64; 5], qr: &[f64; 5], n: &[f64; 3]) -> [f64; 5] {
+        let g = self.gamma;
+        let (rl, ul, vl, wl, pl) = self.cons_to_prim(ql);
+        let (rr, ur, vr, wr, pr) = self.cons_to_prim(qr);
+        let nl = ul*n[0] + vl*n[1] + wl*n[2];
+        let nr = ur*n[0] + vr*n[1] + wr*n[2];
+        let al = (g*pl/rl).sqrt();
+        let ar = (g*pr/rr).sqrt();
+
+        // Interface speed of sound (simple average)
+        let a12 = 0.5 * (al + ar);
+
+        // Left / right Mach numbers
+        let ml = nl / a12;
+        let mr = nr / a12;
+
+        // Split Mach number functions (Liou 1996)
+        let m4p = |m: f64| -> f64 {
+            if m.abs() >= 1.0 { 0.5*(m + m.abs()) }
+            else { 0.25*(m+1.0)*(m+1.0) }
+        };
+        let m4m = |m: f64| -> f64 {
+            if m.abs() >= 1.0 { 0.5*(m - m.abs()) }
+            else { -0.25*(m-1.0)*(m-1.0) }
+        };
+        // Pressure split functions
+        let p5p = |m: f64| -> f64 {
+            if m.abs() >= 1.0 { 0.5*(1.0 + m.signum()) }
+            else { 0.25*(m+1.0)*(m+1.0)*(2.0-m) }
+        };
+        let p5m = |m: f64| -> f64 {
+            if m.abs() >= 1.0 { 0.5*(1.0 - m.signum()) }
+            else { 0.25*(m-1.0)*(m-1.0)*(2.0+m) }
+        };
+
+        let m12 = m4p(ml) + m4m(mr);
+        let p12 = p5p(ml)*pl + p5m(mr)*pr;
+
+        // Convective flux (common velocity a12 * m12)
+        let vn12 = a12 * m12;
+        let rv = if vn12 >= 0.0 {
+            rl*vn12
+        } else {
+            rr*vn12
+        };
+        let ruv = if vn12 >= 0.0 {
+            [rl*vn12*ul, rl*vn12*vl, rl*vn12*wl]
+        } else {
+            [rr*vn12*ur, rr*vn12*vr, rr*vn12*wr]
+        };
+        let rhv = if vn12 >= 0.0 {
+            rl*vn12*(ql[4]/rl + pl/rl)
+        } else {
+            rr*vn12*(qr[4]/rr + pr/rr)
+        };
+
+        [
+            rv,
+            ruv[0] + p12 * n[0],
+            ruv[1] + p12 * n[1],
+            ruv[2] + p12 * n[2],
+            rhv,
+        ]
+    }
+
     pub fn numerical_flux(&self, kind: EulerFluxKind, ql: &[f64;5], qr: &[f64;5], n: &[f64;3]) -> [f64;5] {
         match kind {
             EulerFluxKind::LaxFriedrichs => self.lax_friedrichs_flux(ql, qr, n),
             EulerFluxKind::Roe => self.roe_flux(ql, qr, n),
             EulerFluxKind::Hllc => self.hllc_flux(ql, qr, n),
+            EulerFluxKind::AusmPlus => self.ausm_plus_flux(ql, qr, n),
         }
     }
 }
@@ -408,6 +478,50 @@ mod tests {
         }
         let du = dg.rhs(&u);
         for v in &du { assert!(v.is_finite(), "HLLC DG RHS non-finite"); }
+    }
+
+    // ── AUSM+ tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn ausm_plus_consistency_uniform_state() {
+        // For a uniform state, AUSM+ must reproduce the physical flux.
+        let e = Euler3D::default();
+        let q = e.prim_to_cons(1.0, 0.3, 0.1, 0.2, 1.0);
+        let n = [1.0, 0.0, 0.0];
+        let f_ausm = e.ausm_plus_flux(&q, &q, &n);
+        let f_phy = e.flux_n(&q, &n);
+        for i in 0..5 {
+            assert!((f_ausm[i] - f_phy[i]).abs() < 1e-10, "AUSM+ consistency at i={i}: {} vs {}", f_ausm[i], f_phy[i]);
+        }
+    }
+
+    #[test]
+    fn ausm_plus_sod_shock_finite() {
+        let e = Euler3D::default();
+        let ql = e.prim_to_cons(1.0, 0.0, 0.0, 0.0, 1.0);
+        let qr = e.prim_to_cons(0.125, 0.0, 0.0, 0.0, 0.1);
+        let n = [1.0, 0.0, 0.0];
+        let f = e.ausm_plus_flux(&ql, &qr, &n);
+        for i in 0..5 { assert!(f[i].is_finite(), "AUSM+ Sod non-finite at {i}: {}", f[i]); }
+        let f_lf = e.lax_friedrichs_flux(&ql, &qr, &n);
+        let diff: f64 = (0..5).map(|i| (f[i] - f_lf[i]).abs()).sum();
+        assert!(diff > 1e-4, "AUSM+ should differ from LF on shock; diff={diff:.3e}");
+    }
+
+    #[test]
+    fn dg_euler_3d_with_ausm_plus_runs() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let dg = DgEuler3D::new(mesh).with_flux(EulerFluxKind::AusmPlus);
+        let euler = Euler3D::default();
+        let mut u = vec![0.0; dg.n_dofs];
+        for e in 0..dg.n_elems as u32 {
+            for i in 0..4 {
+                let c = euler.prim_to_cons(1.0, 0.2, 0.1, 0.0, 1.0);
+                for v in 0..5 { u[dg.idx(e,v,i)] = c[v]; }
+            }
+        }
+        let du = dg.rhs(&u);
+        for v in &du { assert!(v.is_finite(), "AUSM+ DG RHS non-finite"); }
     }
 
     #[test]
