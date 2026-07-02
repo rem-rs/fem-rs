@@ -253,6 +253,18 @@ name = "dpg_poisson_2d"
 path = "dpg_poisson_2d.rs"
 
 [[example]]
+name = "hdg_stokes_channel"
+path = "hdg_stokes_channel.rs"
+
+[[example]]
+name = "hdg_elasticity_beam"
+path = "hdg_elasticity_beam.rs"
+
+[[example]]
+name = "dpg_stokes_2d"
+path = "dpg_stokes_2d.rs"
+
+[[example]]
 name = "mfem_vec_ref_elem"
 path = "mfem_vec_ref_elem.rs"
 
