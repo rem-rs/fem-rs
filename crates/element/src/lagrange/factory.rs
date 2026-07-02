@@ -132,6 +132,14 @@ impl ReferenceElement for SegPk {
             grads[dof_idx] = p as f64 * lagrange_deriv(dof_idx, p, t);
         }
     }
+    fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
+        let p = self.order;
+        let t = p as f64 * xi[0];
+        let p2 = (p as f64) * (p as f64);
+        for dof_idx in 0..=p {
+            hess[dof_idx] = p2 * lagrange_hess(dof_idx, p, t);
+        }
+    }
     fn quadrature(&self, order: u8) -> QuadratureRule { seg_rule(order) }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         equispaced_nodes_1d(self.order).iter().map(|&x| vec![x]).collect()
@@ -171,6 +179,21 @@ pub fn lagrange_deriv(n: usize, p: usize, t: f64) -> f64 {
         }
     }
     sum
+}
+
+/// Second derivative of the degree-p Lagrange polynomial `l_n(t)`.
+/// `l_n''(t) = l_n(t) * [(Σ 1/(t-m))² - Σ 1/(t-m)²]`.
+pub fn lagrange_hess(n: usize, p: usize, t: f64) -> f64 {
+    let mut s1 = 0.0; // Σ 1/(t-m)
+    let mut s2 = 0.0; // Σ 1/(t-m)²
+    for m in 0..=p {
+        if m != n {
+            let inv = 1.0 / (t - m as f64);
+            s1 += inv;
+            s2 += inv * inv;
+        }
+    }
+    lagrange_val(n, p, t) * (s1 * s1 - s2)
 }
 
 /// Rising-factorial basis L_n(t) = Π_{a=0}^{n-1} (t - a) / (n - a), with L_0(t) = 1.
