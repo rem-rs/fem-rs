@@ -21,6 +21,7 @@
 
 use crate::quadrature::{seg_rule, tri_rule, tet_rule, quad_rule, hex_rule};
 use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
+use crate::serendipity::{QuadSerendipityPk, HexSerendipityPk};
 use super::prism::PrismPk;
 use super::pyramid::PyramidPk;
 
@@ -731,7 +732,7 @@ impl ReferenceElement for HexQk {
 
 /// Element type identifier for the factory function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ElemType { Seg, Tri, Tet, Quad, Hex, Prism, Pyramid }
+pub enum ElemType { Seg, Tri, Tet, Quad, Hex, Prism, Pyramid, QuadSerendipity, HexSerendipity }
 
 /// Create a reference element of the given type and order.
 pub fn ref_elem(etype: ElemType, order: u8) -> Box<dyn ReferenceElement> {
@@ -743,6 +744,8 @@ pub fn ref_elem(etype: ElemType, order: u8) -> Box<dyn ReferenceElement> {
         ElemType::Hex     => Box::new(HexQk::new(order as usize)),
         ElemType::Prism   => Box::new(PrismPk::new(order as usize)),
         ElemType::Pyramid => Box::new(PyramidPk::new(order as usize)),
+        ElemType::QuadSerendipity => Box::new(QuadSerendipityPk::new(order as usize)),
+        ElemType::HexSerendipity => Box::new(HexSerendipityPk::new(order as usize)),
     }
 }
 

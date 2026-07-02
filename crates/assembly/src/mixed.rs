@@ -16,9 +16,9 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, HexQ1, HexQ2, HexQ3}};
+use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, HexQ1, HexQ2, HexQ3}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
 use fem_element::raviart_thomas::{TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1};
-use fem_element::nedelec::{TriND1, TetND1, QuadND1, HexND1};
+use fem_element::nedelec::{TriND1, TetND1, QuadND1, HexND1, QuadNDk, HexNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -419,9 +419,15 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn ReferenceEl
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         (ElementType::Quad4, 3) => Box::new(QuadQ3),
+        (ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadSerendipityPk::new(1)),
+        (ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadSerendipityPk::new(2)),
+        (ElementType::Quad8 | ElementType::Quad9, 3) => Box::new(QuadSerendipityPk::new(3)),
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Hex8, 2) => Box::new(HexQ2),
         (ElementType::Hex8, 3) => Box::new(HexQ3),
+        (ElementType::Hex20, 1) => Box::new(HexSerendipityPk::new(1)),
+        (ElementType::Hex20, 2) => Box::new(HexSerendipityPk::new(2)),
+        (ElementType::Hex20, 3) => Box::new(HexSerendipityPk::new(3)),
         _ => return Err(format!("ref_elem_vol: unsupported ({elem_type:?}, order={order})")),
     })
 }
@@ -437,7 +443,17 @@ fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Result<B
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriND1),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetND1),
         (SpaceType::HCurl, ElementType::Quad4, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Quad4, 2) => Box::new(QuadNDk::new(2)),
+        (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadNDk::new(2)),
         (SpaceType::HCurl, ElementType::Hex8, 1) => Box::new(HexND1),
+        (SpaceType::HCurl, ElementType::Hex8, 2) => Box::new(HexNDk::new(2)),
+        (SpaceType::HCurl, ElementType::Hex20, 1) => Box::new(HexND1),
+        (SpaceType::HCurl, ElementType::Hex20, 2) => Box::new(HexNDk::new(2)),
+        (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRT0),
+        (SpaceType::HDiv, ElementType::Hex8, 1) => Box::new(HexRT1),
+        (SpaceType::HDiv, ElementType::Hex20, 0) => Box::new(HexRT0),
+        (SpaceType::HDiv, ElementType::Hex20, 1) => Box::new(HexRT1),
         _ => return Err(format!("ref_elem_vec: unsupported (space={space:?}, {elem_type:?}, order={order})")),
     })
 }
