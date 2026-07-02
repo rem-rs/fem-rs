@@ -8,6 +8,12 @@
 //! 4. **Hanging-node constraints** (2-D/3-D) — stores linear constraint
 //!    equations for non-conforming refinement interfaces.
 //!
+//! # Organization
+//! - [`mod@refine_2d`] — 2-D Tri3/Quad4 refinement, estimators, p-refinement
+//! - [`mod@refine_3d_tet`] — 3-D Tet4 NC refinement and anisotropic
+//! - [`mod@refine_3d_hex`] — 3-D Hex8/20/27 uniform + NC + aniso
+//! - [`mod@refine_3d_prism_pyramid`] — 3-D Prism6 + Pyramid5 all refinements
+//!
 //! # Usage
 //! ```rust,ignore
 //! use fem_mesh::{SimplexMesh, amr::{refine_marked, zz_estimator, dorfler_mark}};
@@ -17,6 +23,7 @@
 //! let marked   = dorfler_mark(&errors, 0.5);   // Dörfler θ = 0.5
 //! mesh         = refine_marked(&mesh, &marked);
 //! ```
+// ─── Test module ───────────────────────────────────────────────────────────
 
 use std::collections::HashMap;
 use fem_core::{FaceId, NodeId, ElemId};
