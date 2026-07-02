@@ -1280,9 +1280,11 @@ impl DiscreteLinearOperator {
                             let fv = eval_field(k, pt[0], pt[1], pt[2]);
                             let nflux = fv[0] * n_unit[0] + fv[1] * n_unit[1] + fv[2] * n_unit[2];
                             let d_sigma = w * jac_area;
+                            // Match HDivSpace face moment order: (p=0,q=0), (p=0,q=1), (p=1,q=0)
+                            //                                  = [1, t, s]
                             m0 += d_sigma * nflux;
-                            m1 += d_sigma * nflux * s;
-                            m2 += d_sigma * nflux * t;
+                            m1 += d_sigma * nflux * t;
+                            m2 += d_sigma * nflux * s;
                         }
 
                         dof_k[3 * face_local] = m0;
@@ -1780,8 +1782,8 @@ impl DiscreteLinearOperator {
 
                         let nflux = cv[0] * n_unit[0] + cv[1] * n_unit[1] + cv[2] * n_unit[2];
                         rt_m0 += d_sigma * nflux;
-                        rt_m1 += d_sigma * nflux * s;
-                        rt_m2 += d_sigma * nflux * t;
+                        rt_m1 += d_sigma * nflux * t;
+                        rt_m2 += d_sigma * nflux * s;
                     }
 
                     dof_nd2[12 + 2 * face_local] = nd_t1;
@@ -2209,7 +2211,7 @@ mod tests {
             .map(|i| (ca[i] - curl_interp.as_slice()[i]).abs())
             .fold(0.0, f64::max);
             assert!(
-                max_err < 0.025,
+                max_err < 1e-8,
                 "ND2->RT1 3D: curl interpolation mismatch, max error = {max_err}"
             );
     }
@@ -2272,7 +2274,7 @@ mod tests {
                 .map(|idx| (ca[idx] - curl_interp.as_slice()[idx]).abs())
                 .fold(0.0, f64::max);
             assert!(
-                max_err < 0.025,
+                max_err < 1e-8,
                 "ND2->RT1 randomized commuting failed (seed={seed}), max error = {max_err}"
             );
         }
@@ -2907,7 +2909,7 @@ mod tests {
                 .map(|idx| (div_f[idx] - div_interp.as_slice()[idx]).abs())
                 .fold(0.0, f64::max);
             assert!(
-                max_err < 15.0,
+                max_err < 1e-8,
                 "RT1->P2 3D randomized commuting failed (seed={seed}), max error = {max_err}"
             );
         }
