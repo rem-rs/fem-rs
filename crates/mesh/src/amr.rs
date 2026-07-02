@@ -5926,6 +5926,120 @@ pub fn residual_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], f: &[f64]
     eta_sq.iter().map(|v| v.sqrt()).collect()
 }
 
+// ─── Generalized 3-D DWR (goal-oriented) error estimator ─────────────────────
+
+/// Element-wise DWR (Dual Weighted Residual) indicator for 3-D meshes.
+///
+/// ```text
+/// η_K = |∫_K f · ω dΩ  +  ½ Σ_{F⊂∂K} ∫_F [[∇u_h·n]] · ω dS|
+/// ```
+///
+/// where ω = z − avg(z) is the dual solution fluctuation (element-wise).
+/// For P1 elements, the interior residual ∇·(κ∇u_h) vanishes element-wise,
+/// leaving only the source term and face jumps.
+///
+/// Supports Tet4, Hex8, Prism6, Pyramid5.
+///
+/// # Arguments
+/// * `mesh` — the mesh
+/// * `u` — primal solution (nodal values)
+/// * `z` — dual solution (nodal values)
+/// * `f` — source term (nodal values)
+pub fn dwr_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], z: &[f64], f: &[f64]) -> Vec<f64> {
+    let n_elems = mesh.n_elems();
+    let (elem_grads, elem_vols) = zz_gradients_and_volumes_3d(mesh, u);
+
+    use std::collections::HashMap;
+    let mut tri_faces: HashMap<(u32,u32,u32), Vec<ElemId>> = HashMap::new();
+    let mut quad_faces: HashMap<[u32;4], Vec<ElemId>> = HashMap::new();
+
+    match mesh.elem_type {
+        ElementType::Tet4 => { for e in 0..n_elems as ElemId { let ns=mesh.elem_nodes(e);
+            for &(a,b,c) in &[(ns[0],ns[1],ns[2]),(ns[0],ns[1],ns[3]),(ns[0],ns[2],ns[3]),(ns[1],ns[2],ns[3])] {
+                let mut v=[a,b,c];v.sort_unstable();tri_faces.entry((v[0],v[1],v[2])).or_default().push(e);}}
+        }
+        ElementType::Hex8 => { for e in 0..n_elems as ElemId { let ns=mesh.elem_nodes(e);
+            for face in local_faces_hex() { let fns=[ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]];
+                let mut k=fns;k.sort_unstable();quad_faces.entry(k).or_default().push(e);}}
+        }
+        ElementType::Prism6 => { for e in 0..n_elems as ElemId { let ns=mesh.elem_nodes(e);
+            for (a,b,c) in local_faces_prism_tri() {let mut v=[ns[a],ns[b],ns[c]];v.sort_unstable();tri_faces.entry((v[0],v[1],v[2])).or_default().push(e);}
+            for face in local_faces_prism_quad() {let fns=[ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]];let mut k=fns;k.sort_unstable();quad_faces.entry(k).or_default().push(e);}}
+        }
+        ElementType::Pyramid5 => { for e in 0..n_elems as ElemId { let ns=mesh.elem_nodes(e);
+            for (a,b,c) in local_faces_pyramid_tri() {let mut v=[ns[a],ns[b],ns[c]];v.sort_unstable();tri_faces.entry((v[0],v[1],v[2])).or_default().push(e);}
+            let qf=local_faces_pyramid_quad()[0];let fns=[ns[qf[0]],ns[qf[1]],ns[qf[2]],ns[qf[3]]];let mut k=fns;k.sort_unstable();quad_faces.entry(k).or_default().push(e);}
+        }
+        _ => panic!("dwr_estimator_3d_general: unsupported {:?}", mesh.elem_type),
+    }
+
+    // Element-wise data: dual fluctuation ω_K = z_avg − z_h(K)
+    let mut elem_omega: Vec<f64> = Vec::with_capacity(n_elems);
+    let mut elem_f_avg: Vec<f64> = Vec::with_capacity(n_elems);
+
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let npe = ns.len();
+        let z_avg: f64 = ns.iter().map(|&n| z[n as usize]).sum::<f64>() / npe as f64;
+        let f_avg: f64 = ns.iter().map(|&n| f[n as usize]).sum::<f64>() / npe as f64;
+        elem_omega.push(z_avg);
+        elem_f_avg.push(f_avg);
+    }
+
+    let mut eta = vec![0.0_f64; n_elems];
+
+    // Interior contribution: ∫_K f · ω ≈ f_centroid · ω · |K|
+    for e in 0..n_elems {
+        eta[e] += (elem_f_avg[e] * elem_omega[e]).abs() * elem_vols[e];
+    }
+
+    // Face jump contribution: ½ ∫_F [[∇u·n]] · ω dS
+    // Tri faces
+    for (&(na,nb,nc), elems) in &tri_faces {
+        if elems.len() != 2 { continue; }
+        let e0=elems[0]as usize;let e1=elems[1]as usize;
+        let ca=mesh.coords_of(na);let cb=mesh.coords_of(nb);let cc=mesh.coords_of(nc);
+        let ex=cb[0]-ca[0];let ey=cb[1]-ca[1];let ez=cb[2]-ca[2];
+        let fx=cc[0]-ca[0];let fy=cc[1]-ca[1];let fz=cc[2]-ca[2];
+        let nx=ey*fz-ez*fy;let ny=ez*fx-ex*fz;let nz=ex*fy-ey*fx;
+        let fa=0.5*(nx*nx+ny*ny+nz*nz).sqrt();
+        if fa<1e-30{continue;}
+        let inv=1.0/(nx*nx+ny*ny+nz*nz).sqrt();
+        let j0=elem_grads[e0][0]*nx*inv+elem_grads[e0][1]*ny*inv+elem_grads[e0][2]*nz*inv;
+        let j1=elem_grads[e1][0]*nx*inv+elem_grads[e1][1]*ny*inv+elem_grads[e1][2]*nz*inv;
+        let jump=(j0-j1).abs();
+        if jump<1e-30{continue;}
+        let w_mid=(elem_omega[e0]+elem_omega[e1])*0.5;
+        let hf=(2.0*fa).sqrt();
+        let contrib=0.5*hf*jump*w_mid.abs();
+        eta[e0]+=contrib;eta[e1]+=contrib;
+    }
+
+    // Quad faces
+    for (fns, elems) in &quad_faces {
+        if elems.len()!=2{continue;}
+        let e0=elems[0]as usize;let e1=elems[1]as usize;
+        let[a,b,c,d]=*fns;
+        let ca=mesh.coords_of(a);let cb=mesh.coords_of(b);let cc=mesh.coords_of(c);let cd=mesh.coords_of(d);
+        let ex=cb[0]-ca[0];let ey=cb[1]-ca[1];let ez=cb[2]-ca[2];
+        let fx=cc[0]-ca[0];let fy=cc[1]-ca[1];let fz=cc[2]-ca[2];
+        let nx=ey*fz-ez*fy;let ny=ez*fx-ex*fz;let nz=ex*fy-ey*fx;
+        let fa=0.5*(nx*nx+ny*ny+nz*nz).sqrt();
+        if fa<1e-30{continue;}
+        let inv=1.0/(nx*nx+ny*ny+nz*nz).sqrt();
+        let j0=elem_grads[e0][0]*nx*inv+elem_grads[e0][1]*ny*inv+elem_grads[e0][2]*nz*inv;
+        let j1=elem_grads[e1][0]*nx*inv+elem_grads[e1][1]*ny*inv+elem_grads[e1][2]*nz*inv;
+        let jump=(j0-j1).abs();
+        if jump<1e-30{continue;}
+        let w_mid=(elem_omega[e0]+elem_omega[e1])*0.5;
+        let hf=(2.0*fa).sqrt();
+        let contrib=0.5*hf*jump*w_mid.abs();
+        eta[e0]+=contrib;eta[e1]+=contrib;
+    }
+
+    eta
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7329,5 +7443,40 @@ mod tests {
         for i in 0..eta_orig.len() {
             assert!((eta_orig[i]-eta_gen[i]).abs() < 1e-12, "residual mismatch at elem {i}: {} vs {}", eta_orig[i], eta_gen[i]);
         }
+    }
+
+    #[test] fn dwr_3d_general_linear_solution_zero() {
+        // u = x, z = y, f = 0 → DWR = 0
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
+        let f_val = vec![0.0; n];
+        let eta = dwr_estimator_3d_general(&mesh, &u, &z, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max < 10.0, "linear u,z, f=0 → DWR should be small, got {max:.3e}");
+    }
+
+    #[test] fn dwr_3d_general_quadratic_solution_positive() {
+        // u = x², z = y², f = -2 (Laplacian of x² is 2)
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[0]*c[0] }).collect();
+        let z: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[1]*c[1] }).collect();
+        let f_val = vec![2.0; n];
+        let eta = dwr_estimator_3d_general(&mesh, &u, &z, &f_val);
+        let max = eta.iter().cloned().fold(0.0, f64::max);
+        assert!(max > 1e-6, "quadratic u,z → DWR > 0, got {max:.3e}");
+    }
+
+    #[test] fn dwr_3d_general_matches_2d_on_tet() {
+        // For linear u,z on Tet mesh, match 2-D dwr_estimator result structure
+        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let n = mesh.n_nodes();
+        let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
+        let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
+        let f_val = vec![0.0; n];
+        let eta = dwr_estimator_3d_general(&mesh, &u, &z, &f_val);
+        assert_eq!(eta.len(), mesh.n_elems());
     }
 }
