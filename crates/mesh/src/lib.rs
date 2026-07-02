@@ -30,7 +30,7 @@ pub use amr::{refine_marked, refine_marked_with_tree, derefine_marked, DerefineT
 pub use amr::{dorfler_mark, mark_for_derefinement, mark_for_p_refinement, p_refine_tri3_to_tri6, p_prolongate_p1_to_p2};
 pub use boundary::{BoundaryTag, NamedAttributeRegistry, NamedAttributeSet, PhysicalGroup};
 pub use cad::{CadShape, CadModel, AnalyticSurface, FacetedCadSurface, NurbsCadSurface2D, ProjectionConfig, project_boundary_to_cad, project_elevated_node};
-pub use curved::{CurvedMesh, JacobianCache, CurvedElementTransformation, refine_curved_2d, refine_curved_3d, refine_curved_2d_nc, refine_curved_3d_nc};
+pub use curved::{CurvedMesh, JacobianCache, CurvedElementTransformation, refine_curved_2d, refine_curved_3d, refine_curved_2d_nc, refine_curved_3d_nc, refine_curved_3d_general, refine_curved_3d_nc_general};
 pub use element_type::ElementType;
 pub use lor::LorMesh;
 pub use moving_mesh::{

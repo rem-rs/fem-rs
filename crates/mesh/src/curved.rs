@@ -48,7 +48,7 @@ pub struct CurvedMesh<const D: usize> {
 impl<const D: usize> CurvedMesh<D> {
     /// Construct an order-1 curved mesh from a `SimplexMesh`.
     pub fn from_linear(mesh: &SimplexMesh<D>) -> Self {
-        let npe = if D == 2 { 3 } else { 4 };
+        let npe = mesh.elem_type.nodes_per_element();
         CurvedMesh {
             coords:     mesh.coords.clone(),
             geom_conn:  mesh.conn.clone(),
@@ -371,6 +371,9 @@ fn mesh_elem_type_to_factory_type(t: ElementType) -> fem_element::lagrange::fact
         ElementType::Tet4 | ElementType::Tet10 => ElemType::Tet,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => ElemType::Quad,
         ElementType::Hex8 | ElementType::Hex20 => ElemType::Hex,
+        ElementType::Hex27 => ElemType::Hex,
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => ElemType::Prism,
+        ElementType::Pyramid5 | ElementType::Pyramid13 => ElemType::Pyramid,
         ElementType::Line2 | ElementType::Line3 => ElemType::Seg,
         _ => panic!("unsupported element type for curved mesh: {t:?}"),
     }
@@ -576,7 +579,7 @@ fn _extract_linear_3d(curved: &CurvedMesh<3>) -> SimplexMesh<3> {
 
 fn _build_vparent_map<const D: usize>(curved: &CurvedMesh<D>) -> Vec<Vec<usize>> {
     let n_verts = curved.geom_conn.iter().max().map(|&m| m as usize + 1).unwrap_or(0).max(curved.n_nodes);
-    let nv = if D == 2 { 3 } else { 4 };
+    let nv = if D == 2 { 3 } else { n_corners_3d(curved.elem_type) };
     let mut map: Vec<Vec<usize>> = vec![Vec::new(); n_verts];
     for p in 0..curved.n_elems {
         for v in 0..nv {
@@ -625,6 +628,192 @@ fn _reinterpolate_curved_3d(curved: &CurvedMesh<3>, fine: &SimplexMesh<3>, geo: 
     CurvedMesh { coords: ns, geom_conn: nc, geom_order: curved.geom_order, nodes_per_elem: npe,
         elem_type: if curved.geom_order >= 2 { ElementType::Tet10 } else { ElementType::Tet4 },
         n_elems: nf, n_nodes: nn as usize, face_conn: fc, face_tags: ft, face_type: ElementType::Tri3, elem_tags: vec![0; nf] }
+}
+
+// ─── Generalized 3-D curved refinement (Hex, Prism, Pyramid) ─────────────────
+
+/// Number of corner (linear) nodes for a given 3-D element type.
+fn n_corners_3d(et: ElementType) -> usize {
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => 4,
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => 8,
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => 6,
+        ElementType::Pyramid5 | ElementType::Pyramid13 => 5,
+        _ => panic!("n_corners_3d: unsupported {et:?}"),
+    }
+}
+
+/// Linear sub-element type for a given 3-D curved element type.
+fn linear_elem_type_3d(et: ElementType) -> ElementType {
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => ElementType::Tet4,
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => ElementType::Hex8,
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => ElementType::Prism6,
+        ElementType::Pyramid5 | ElementType::Pyramid13 => ElementType::Pyramid5,
+        _ => panic!("linear_elem_type_3d: unsupported {et:?}"),
+    }
+}
+
+/// High-order element type for a given curved element type and order.
+fn curved_elem_type_3d(et: ElementType, order: u8) -> ElementType {
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => if order >= 2 { ElementType::Tet10 } else { ElementType::Tet4 },
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => if order >= 2 { ElementType::Hex27 } else { ElementType::Hex8 },
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => if order >= 2 { ElementType::Prism15 } else { ElementType::Prism6 },
+        ElementType::Pyramid5 | ElementType::Pyramid13 => if order >= 2 { ElementType::Pyramid13 } else { ElementType::Pyramid5 },
+        _ => panic!("curved_elem_type_3d: unsupported {et:?}"),
+    }
+}
+
+/// Face element type for a given 3-D curved element type.
+fn curved_face_type_3d(et: ElementType) -> ElementType {
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => ElementType::Tri3,
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => ElementType::Quad4,
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => ElementType::Quad4,
+        ElementType::Pyramid5 | ElementType::Pyramid13 => ElementType::Quad4,
+        _ => panic!("curved_face_type_3d: unsupported {et:?}"),
+    }
+}
+
+/// Uniformly refine a curved 3-D mesh of any element type (Tet, Hex, Prism, Pyramid).
+///
+/// Extracts the linear sub-mesh, refines it uniformly, then re-interpolates the
+/// high-order geometry onto the refined mesh.  Supports arbitrary geometric order `p`.
+pub fn refine_curved_3d_general(curved: &CurvedMesh<3>) -> CurvedMesh<3> {
+    let factory_type = mesh_elem_type_to_factory_type(curved.elem_type);
+    let geo = fem_element::lagrange::factory::ref_elem(factory_type, curved.geom_order);
+    let npe = geo.n_dofs();
+    let nc = n_corners_3d(curved.elem_type);
+    let le = linear_elem_type_3d(curved.elem_type);
+
+    // Extract linear sub-mesh
+    // Reconstruct boundary faces for the linear mesh from the CurvedMesh.
+    // The CurvedMesh stores face_conn as a flat array; the face type for
+    // mixed-face elements (Prism, Pyramid) requires face_offsets.
+    let (lface_conn, lface_tags, lface_type, lface_types, lface_offsets) = {
+        if curved.face_type == ElementType::Tri3 || curved.face_type == ElementType::Quad4 {
+            // Uniform face type — can use directly
+            (curved.face_conn.clone(), curved.face_tags.clone(), curved.face_type, None, None)
+        } else {
+            (Vec::new(), Vec::new(), curved_face_type_3d(curved.elem_type), None, None)
+        }
+    };
+    let lin = SimplexMesh {
+        coords: curved.coords.clone(),
+        conn: curved.geom_conn.chunks(curved.nodes_per_elem).flat_map(|c| c[..nc].to_vec()).collect(),
+        elem_type: le,
+        face_conn: lface_conn, face_tags: lface_tags,
+        face_type: lface_type,
+        elem_tags: curved.elem_tags.clone(),
+        elem_types: None, elem_offsets: None, face_types: lface_types, face_offsets: lface_offsets,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+    };
+
+    // Refine linear mesh
+    let fine = crate::amr::refine_uniform_3d(&lin);
+
+    // Re-interpolate curved geometry
+    let nf = fine.n_elems();
+    let vmap = _build_vparent_map(curved);
+    let dc = geo.dof_coords();
+    let mut nc_vec = Vec::with_capacity(nf * npe);
+    let mut nn = fine.n_nodes() as u32;
+    let mut ns = fine.coords.clone();
+    for fe in 0..nf {
+        let fv = fine.elem_nodes(fe as u32);
+        nc_vec.extend_from_slice(&fv[..nc]);
+        let pe = _find_parent::<3>(&vmap, &fv[..nc], curved.n_elems);
+        for i in nc..npe {
+            let x = curved.reference_to_physical(pe, &dc[i]);
+            ns.extend_from_slice(&x);
+            nc_vec.push(nn);
+            nn += 1;
+        }
+    }
+
+    let ce = curved_elem_type_3d(curved.elem_type, curved.geom_order);
+    let ft = curved_face_type_3d(curved.elem_type);
+    let nfb = fine.n_boundary_faces();
+    let mut fc = Vec::with_capacity(nfb * ft.nodes_per_element());
+    let mut f_tags = Vec::with_capacity(nfb);
+    for f in 0..nfb as u32 {
+        fc.extend_from_slice(fine.face_nodes(f));
+        f_tags.push(fine.face_tag(f));
+    }
+
+    CurvedMesh {
+        coords: ns, geom_conn: nc_vec, geom_order: curved.geom_order, nodes_per_elem: npe,
+        elem_type: ce, n_elems: nf, n_nodes: nn as usize,
+        face_conn: fc, face_tags: f_tags, face_type: ft, elem_tags: vec![0; nf],
+    }
+}
+
+/// Non-conforming uniform refinement for curved 3-D meshes of any element type.
+pub fn refine_curved_3d_nc_general(curved: &CurvedMesh<3>, marked: &[usize]) -> CurvedMesh<3> {
+    let factory_type = mesh_elem_type_to_factory_type(curved.elem_type);
+    let geo = fem_element::lagrange::factory::ref_elem(factory_type, curved.geom_order);
+    let npe = geo.n_dofs();
+    let nc = n_corners_3d(curved.elem_type);
+    let le = linear_elem_type_3d(curved.elem_type);
+
+    let lin = SimplexMesh {
+        coords: curved.coords.clone(),
+        conn: curved.geom_conn.chunks(curved.nodes_per_elem).flat_map(|c| c[..nc].to_vec()).collect(),
+        elem_type: le,
+        face_conn: curved.face_conn.clone(), face_tags: curved.face_tags.clone(),
+        face_type: curved_face_type_3d(curved.elem_type),
+        elem_tags: curved.elem_tags.clone(),
+        elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+    };
+
+    let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();
+    let fine = if le == ElementType::Tet4 {
+        crate::amr::refine_nonconforming_3d(&lin, &mid).0
+    } else {
+        // For non-Tet4 linear meshes, use the NC refiner for that type
+        match le {
+            ElementType::Hex8 => { let (m, _, _, _) = crate::amr::refine_nonconforming_hex(&lin, &mid); m }
+            ElementType::Prism6 => { let (m, _, _, _, _) = crate::amr::refine_nonconforming_prism(&lin, &mid); m }
+            ElementType::Pyramid5 => { let (m, _, _, _, _) = crate::amr::refine_nonconforming_pyramid(&lin, &mid); m }
+            _ => unreachable!(),
+        }
+    };
+
+    let nf = fine.n_elems();
+    let vmap = _build_vparent_map(curved);
+    let dc = geo.dof_coords();
+    let mut nc_vec = Vec::with_capacity(nf * npe);
+    let mut nn = fine.n_nodes() as u32;
+    let mut ns = fine.coords.clone();
+    for fe in 0..nf {
+        let fv = fine.elem_nodes(fe as u32);
+        nc_vec.extend_from_slice(&fv[..nc]);
+        let pe = _find_parent::<3>(&vmap, &fv[..nc], curved.n_elems);
+        for i in nc..npe {
+            let x = curved.reference_to_physical(pe, &dc[i]);
+            ns.extend_from_slice(&x);
+            nc_vec.push(nn);
+            nn += 1;
+        }
+    }
+
+    let ce = curved_elem_type_3d(curved.elem_type, curved.geom_order);
+    let ft = curved_face_type_3d(curved.elem_type);
+    let nfb = fine.n_boundary_faces();
+    let mut fc = Vec::with_capacity(nfb * ft.nodes_per_element());
+    let mut f_tags = Vec::with_capacity(nfb);
+    for f in 0..nfb as u32 {
+        fc.extend_from_slice(fine.face_nodes(f));
+        f_tags.push(fine.face_tag(f));
+    }
+
+    CurvedMesh {
+        coords: ns, geom_conn: nc_vec, geom_order: curved.geom_order, nodes_per_elem: npe,
+        elem_type: ce, n_elems: nf, n_nodes: nn as usize,
+        face_conn: fc, face_tags: f_tags, face_type: ft, elem_tags: vec![0; nf],
+    }
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────
@@ -923,5 +1112,45 @@ mod tests {
         let xi_ref = [1.0/3.0, 1.0/3.0];
         let x_phys = curved.reference_to_physical(0, &xi_ref);
         assert!(x_phys[0] > 0.0 && x_phys[1] > 0.0, "physical coords should be positive");
+    }
+
+    // ─── Generalized 3-D curved refinement tests ─────────────────────────
+    // Note: `elevate_to_order` only supports simplex elements.  For non-simplex
+    // (Hex/Prism/Pyramid) curved refinement, `elevate_to_order` must first be
+    // generalized to use factory::ref_elem for tensor-product node insertion.
+    // The P1 (linear) flow is tested below.
+
+    #[test] fn curved_3d_linear_refine_matches_amr() {
+        // Test that for P1 meshes, the general curved refiner matches the AMR refiner.
+        use crate::amr::refine_uniform_3d;
+
+        // Hex P1 — uniform Quad4 faces
+        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let curved = CurvedMesh::from_linear(&mesh);
+        let fine_curved = refine_curved_3d_general(&curved);
+        let fine_amr = refine_uniform_3d(&mesh);
+        assert_eq!(fine_curved.n_elems, fine_amr.n_elems(), "Hex P1: curved vs AMR element count");
+        assert_eq!(fine_curved.n_nodes, fine_amr.n_nodes(), "Hex P1: curved vs AMR node count");
+        assert_eq!(fine_curved.geom_order, 1);
+
+        // Prism P1 — use uniform Tri3 face type for the linear mesh (tri faces only)
+        let coords = vec![0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,1.0,0.0,1.0,0.0,1.0,1.0];
+        let conn = vec![0u32,1,2,3,4,5];
+        // Split each quad face into 2 triangles
+        let fc = vec![
+            0u32,2,1, 3,4,5,        // 2 tri faces (bottom, top)
+            0,1,4, 0,4,3,            // quad front → 2 tri
+            1,2,5, 1,5,4,            // quad right → 2 tri
+            0,3,5, 0,5,2,            // quad left → 2 tri
+        ];
+        let mesh2 = SimplexMesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Prism6,
+            face_conn: fc, face_tags: vec![1,2,3,4,5,6,7,8], face_type: ElementType::Tri3,
+            elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+        let curved2 = CurvedMesh::from_linear(&mesh2);
+        let fine2 = refine_curved_3d_general(&curved2);
+        let fine2_amr = refine_uniform_3d(&mesh2);
+        assert_eq!(fine2.n_elems, fine2_amr.n_elems(), "Prism P1: curved vs AMR");
+        assert_eq!(fine2.n_nodes, fine2_amr.n_nodes(), "Prism P1: curved vs AMR node count");
     }
 }
