@@ -265,6 +265,18 @@ name = "dpg_stokes_2d"
 path = "dpg_stokes_2d.rs"
 
 [[example]]
+name = "crystal_plasticity_fcc"
+path = "crystal_plasticity_fcc.rs"
+
+[[example]]
+name = "xfem_crack_propagation"
+path = "xfem_crack_propagation.rs"
+
+[[example]]
+name = "contact_active_set_3d"
+path = "contact_active_set_3d.rs"
+
+[[example]]
 name = "mfem_vec_ref_elem"
 path = "mfem_vec_ref_elem.rs"
 
