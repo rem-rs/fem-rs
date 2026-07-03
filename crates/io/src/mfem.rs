@@ -1,10 +1,10 @@
-//! MFEM `.mesh` format reader (v1.0 / v1.2).
+//! MFEM `.mesh` format reader (v1.0 / v1.2) and writer (v1.0).
 //!
 //! Supports linear elements in 2D and 3D:
 //! Segment, Triangle, Quadrilateral, Tetrahedron, Hexahedron, Wedge, Pyramid.
 //! Format reference: https://mfem.org/mesh-format/
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 
 use fem_core::{FemError, FemResult};
 use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
@@ -26,6 +26,27 @@ fn mfem_elem_type(code: u32) -> Option<ElementType> {
         13 => ElementType::Prism15,
         14 => ElementType::Pyramid13,
         _ => return None,
+    })
+}
+
+/// Reverse mapping: `ElementType` → MFEM element type code.
+fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
+    Some(match et {
+        ElementType::Line2    => 1,
+        ElementType::Tri3     => 2,
+        ElementType::Quad4    => 3,
+        ElementType::Tet4     => 4,
+        ElementType::Hex8     => 5,
+        ElementType::Prism6   => 6,
+        ElementType::Pyramid5 => 7,
+        ElementType::Line3    => 8,
+        ElementType::Tri6     => 9,
+        ElementType::Quad8    => 10,
+        ElementType::Tet10    => 11,
+        ElementType::Hex20    => 12,
+        ElementType::Prism15  => 13,
+        ElementType::Pyramid13 => 14,
+        _ => return None, // Hex27 / Polygon / Point1 not in MFEM v1.0
     })
 }
 
@@ -165,6 +186,103 @@ pub fn read_mfem_file(path: impl AsRef<std::path::Path>) -> FemResult<MfemFile> 
     read_mfem(std::fs::File::open(path)?)
 }
 
+/// Write a `SimplexMesh` to MFEM `.mesh` v1.0 format.
+///
+/// Supports 2D and 3D meshes with uniform or mixed element types.
+/// Uses 1-based node indexing (MFEM convention).
+pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &SimplexMesh<2>, mesh_3d: Option<&SimplexMesh<3>>) -> FemResult<()> {
+    let (dim, coords, conn, elem_tags, elem_type, face_conn, face_tags, elem_types_opt)
+        = if let Some(m3) = mesh_3d {
+            (3, &m3.coords, &m3.conn, &m3.elem_tags, &m3.elem_type,
+             &m3.face_conn, &m3.face_tags, &m3.elem_types)
+        } else {
+            (2, &mesh_d.coords, &mesh_d.conn, &mesh_d.elem_tags, &mesh_d.elem_type,
+             &mesh_d.face_conn, &mesh_d.face_tags, &mesh_d.elem_types)
+        };
+    let n_nodes = coords.len() / dim;
+    let n_elems = conn.len() / elem_type.nodes_per_element();
+    // Determine face element type per dimension
+    let (bpe, btype) = if dim == 2 {
+        (2usize, 1u32) // Line2 edge, code 1
+    } else {
+        (3usize, 2u32) // Tri3 face, code 2
+    };
+    let n_face_elem = if bpe > 0 { face_conn.len() / bpe } else { 0 };
+
+    writeln!(writer, "MFEM mesh v1.0\n")?;
+    writeln!(writer, "dimension\n{dim}\n")?;
+
+    // Elements section
+    writeln!(writer, "elements\n{n_elems}")?;
+    let npe = elem_type.nodes_per_element();
+    if let Some(ref etypes) = elem_types_opt {
+        // Mixed element types
+        for (ei, et) in etypes.iter().enumerate() {
+            let code = elem_type_to_mfem_code(*et).ok_or_else(|| {
+                FemError::Mesh(format!("write_mfem: unsupported mixed type {et:?}"))
+            })?;
+            let offset = ei * npe;
+            write!(writer, "{code} {}", elem_tags[ei])?;
+            for j in 0..npe {
+                write!(writer, " {}", conn[offset + j] + 1)?;
+            }
+            writeln!(writer)?;
+        }
+    } else {
+        // Uniform element type
+        let code = elem_type_to_mfem_code(*elem_type).ok_or_else(|| {
+            FemError::Mesh(format!("write_mfem: unsupported element type {elem_type:?}"))
+        })?;
+        for ei in 0..n_elems {
+            let offset = ei * npe;
+            let tag = if !elem_tags.is_empty() { elem_tags[ei] } else { 1 };
+            write!(writer, "{code} {tag}")?;
+            for j in 0..npe {
+                write!(writer, " {}", conn[offset + j] + 1)?;
+            }
+            writeln!(writer)?;
+        }
+    }
+
+    // Boundary section
+    writeln!(writer, "\nboundary\n{n_face_elem}")?;
+    if n_face_elem > 0 {
+        let bpe = if dim == 2 { 2 } else { 3 }; // Line2 edges or Tri3 faces
+        let btype = if dim == 2 { 1 } else { 2 }; // Segment or Triangle
+        for fi in 0..n_face_elem {
+            let offset = fi * bpe;
+            let tag = if !face_tags.is_empty() { face_tags[fi] } else { 1 };
+            write!(writer, "{btype} {tag}")?;
+            for j in 0..bpe {
+                write!(writer, " {}", face_conn[offset + j] + 1)?;
+            }
+            writeln!(writer)?;
+        }
+    }
+
+    // Vertices section
+    writeln!(writer, "\nvertices\n{n_nodes}\n{dim}")?;
+    for i in 0..n_nodes {
+        for d in 0..dim {
+            write!(writer, " {}", coords[i * dim + d])?;
+        }
+        writeln!(writer)?;
+    }
+    Ok(())
+}
+
+/// Write a mesh to MFEM `.mesh` file on disk.
+pub fn write_mfem_file(path: impl AsRef<std::path::Path>, mesh_d: &SimplexMesh<2>) -> FemResult<()> {
+    let mut file = std::fs::File::create(path)?;
+    write_mfem(&mut file, mesh_d, None)
+}
+
+/// Write a 3D mesh to MFEM `.mesh` file on disk.
+pub fn write_mfem_file_3d(path: impl AsRef<std::path::Path>, mesh: &SimplexMesh<3>) -> FemResult<()> {
+    let mut file = std::fs::File::create(path)?;
+    write_mfem(&mut file, &SimplexMesh::<2>::unit_square_tri(2), Some(mesh))
+}
+
 fn skip_comment(line: &str) -> &str {
     loop {
         let trimmed = line.trim();
@@ -204,6 +322,44 @@ fn read_f64_line(r: &mut impl BufRead) -> FemResult<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_mesh::SimplexMesh;
+
+    #[test]
+    fn elem_type_roundtrip() {
+        let cases = [
+            (ElementType::Line2, 1u32), (ElementType::Tri3, 2u32),
+            (ElementType::Quad4, 3u32), (ElementType::Tet4, 4u32),
+            (ElementType::Hex8, 5u32), (ElementType::Prism6, 6u32),
+            (ElementType::Pyramid5, 7u32), (ElementType::Line3, 8u32),
+            (ElementType::Tri6, 9u32), (ElementType::Tet10, 11u32),
+        ];
+        for (et, code) in &cases {
+            assert_eq!(elem_type_to_mfem_code(*et), Some(*code));
+            assert_eq!(mfem_elem_type(*code), Some(*et));
+        }
+    }
+
+    #[test]
+    fn write_then_read_2d_square() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mut buf = Vec::new();
+        write_mfem(&mut buf, &mesh, None).unwrap();
+        let mfem = read_mfem(buf.as_slice()).unwrap();
+        let mesh2 = mfem.mesh2d.unwrap();
+        assert_eq!(mesh.n_nodes(), mesh2.n_nodes());
+        assert_eq!(mesh.n_elems(), mesh2.n_elems());
+    }
+
+    #[test]
+    fn write_then_read_3d_cube() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mut buf = Vec::new();
+        write_mfem(&mut buf, &SimplexMesh::<2>::unit_square_tri(2), Some(&mesh)).unwrap();
+        let mfem = read_mfem(buf.as_slice()).unwrap();
+        let mesh2 = mfem.mesh3d.unwrap();
+        assert_eq!(mesh.n_nodes(), mesh2.n_nodes());
+        assert_eq!(mesh.n_elems(), mesh2.n_elems());
+    }
 
     #[test]
     fn read_2d_square() {
