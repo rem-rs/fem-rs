@@ -28,7 +28,7 @@ use fem_assembly::{
 };
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
-    lagrange::{TriP1, TriP2, TriP3, TriP4, TetP1, TetP2, HexQ1},
+    lagrange::{TriP1, TriP2, TriP3, TriP4, TetP1, TetP2, HexQ1, QuadQ2},
     nedelec::{TriND1, TriND2, HexNDk, TetND1, TetND2},
     raviart_thomas::{TriRT0, TriRT1},
 };
@@ -2157,4 +2157,50 @@ fn solve_h3d(n: usize, order: u8, hex: bool) -> f64 {
     let ns = [4usize, 8]; let e: Vec<f64> = ns.iter().map(|&n| solve_h3d(n, 1, true)).collect();
     let r = convergence_rate(&e, &ns);
     eprintln!("3D HexQ1: err={e:?} rate={r:?}"); assert!(r[0] > 1.5, "rate {:.2}", r[0]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2D Helmholtz on Quad Q2 (tensor-product, quadrilateral mesh)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn l2_err_quad(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+    let mesh = space.mesh(); let o = space.order();
+    let re: &dyn ReferenceElement = match o { 2 => &QuadQ2, _ => &QuadQ2 };
+    let n = re.n_dofs(); let q = re.quadrature(2 * o + 2);
+    let mut phi = vec![0.0; n]; let mut es = 0.0_f64;
+    for e in mesh.elem_iter() {
+        let nd = mesh.element_nodes(e); let df = space.element_dofs(e);
+        let n0 = mesh.node_coords(nd[0]); let n1 = mesh.node_coords(nd[1]);
+        let n2 = mesh.node_coords(nd[2]); let n3 = mesh.node_coords(nd[3]);
+        let hx = n1[0]-n0[0]; let hy = n2[1]-n0[1]; let det_j = hx * hy / 4.0;
+        for (qi, xi) in q.points.iter().enumerate() {
+            let w = q.weights[qi] * det_j; re.eval_basis(xi, &mut phi);
+            let uh_q: f64 = df.iter().zip(phi.iter()).map(|(&d,&p)| uh[d as usize]*p).sum();
+            let xp = [n0[0]+(xi[0]+1.0)*hx/2.0, n0[1]+(xi[1]+1.0)*hy/2.0];
+            es += w * (uh_q - u_helmholtz(&xp)).powi(2);
+        }
+    }
+    es.sqrt()
+}
+
+fn solve_h2d_quad(n: usize, order: u8, k_sq: f64) -> f64 {
+    let mesh = SimplexMesh::<2>::unit_square_quad(n);
+    let space = H1Space::new(mesh.clone(), order);
+    let diff = DiffusionIntegrator { kappa: 1.0 };
+    let mass_neg = MassIntegrator { rho: -k_sq };
+    let src = DomainSourceIntegrator::new(f_helmholtz);
+    let qo = 2 * order + 1;
+    let mut a = Assembler::assemble_bilinear(&space, &[&diff, &mass_neg], qo);
+    let mut rhs = Assembler::assemble_linear(&space, &[&src], qo);
+    let bd = boundary_dofs(&mesh, space.dof_manager(), &[1,2,3,4]);
+    apply_dirichlet(&mut a, &mut rhs, &bd, &vec![0.0; bd.len()]);
+    let x = dense_solve(&a, &rhs);
+    l2_err_quad(&x, &space)
+}
+
+#[test] fn helmholtz_2d_quad_q2() {
+    let k_sq = PI * PI;
+    let ns = [4usize, 8]; let e: Vec<f64> = ns.iter().map(|&n| solve_h2d_quad(n, 2, k_sq)).collect();
+    let r = convergence_rate(&e, &ns);
+    eprintln!("Quad Q2: err={e:?} rate={r:?}"); assert!(r[0] > 2.5, "rate {:.2}", r[0]);
 }
