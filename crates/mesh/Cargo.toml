@@ -8,6 +8,11 @@ fem-core    = { path = "../core" }
 fem-element = { path = "../element" }
 nalgebra    = { workspace = true }
 thiserror   = { workspace = true }
+serde       = { workspace = true, optional = true }
+
+[features]
+serialize = ["serde"]
 
 [dev-dependencies]
 tempfile = "3"
+serde_json = "1"

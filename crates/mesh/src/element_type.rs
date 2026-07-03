@@ -4,6 +4,7 @@
 /// Only first-order (linear) and second-order (quadratic) serendipity
 /// elements are listed; higher orders require a separate `order` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub enum ElementType {
     /// A single node (used for point physical groups in GMSH).
     Point1,

@@ -73,6 +73,7 @@ fn local_element_edges(dim: usize, elem_type: ElementType) -> Vec<[usize; 2]> {
 /// # Type parameter
 /// `D` is the spatial dimension (2 = 2-D, 3 = 3-D).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct SimplexMesh<const D: usize> {
     /// Flat node coordinate array.  Length = `n_nodes * D`.
     pub coords: Vec<f64>,
@@ -1344,5 +1345,46 @@ mod tests {
             .expect_err("expected missing set error");
         let msg = format!("{err}");
         assert!(msg.contains("named attribute set not found"));
+    }
+}
+
+#[cfg(all(test, feature = "serialize"))]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn simplex_mesh_roundtrip() {
+        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let json = serde_json::to_string(&m).unwrap();
+        let m2: SimplexMesh<2> = serde_json::from_str(&json).unwrap();
+        assert_eq!(m.n_nodes(), m2.n_nodes());
+        assert_eq!(m.n_elems(), m2.n_elems());
+        assert_eq!(m.n_faces(), m2.n_faces());
+        assert_eq!(m.coords, m2.coords);
+        assert_eq!(m.conn, m2.conn);
+        assert_eq!(m.elem_tags, m2.elem_tags);
+        assert_eq!(m.elem_type, m2.elem_type);
+    }
+
+    #[test]
+    fn simplex_mesh_3d_roundtrip() {
+        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let json = serde_json::to_string(&m).unwrap();
+        let m2: SimplexMesh<3> = serde_json::from_str(&json).unwrap();
+        assert_eq!(m.n_nodes(), m2.n_nodes());
+        assert_eq!(m.n_elems(), m2.n_elems());
+        assert_eq!(m.coords, m2.coords);
+        assert_eq!(m.conn, m2.conn);
+    }
+
+    #[test]
+    fn simplex_mesh_hex_roundtrip() {
+        let m = SimplexMesh::<3>::unit_cube_hex(2);
+        let json = serde_json::to_string(&m).unwrap();
+        let m2: SimplexMesh<3> = serde_json::from_str(&json).unwrap();
+        assert_eq!(m.n_nodes(), m2.n_nodes());
+        assert_eq!(m.n_elems(), m2.n_elems());
+        assert_eq!(m.coords, m2.coords);
+        assert_eq!(m.elem_type, m2.elem_type);
     }
 }
