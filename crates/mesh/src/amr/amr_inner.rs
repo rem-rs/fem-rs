@@ -2295,12 +2295,12 @@ pub fn refine_uniform_3d(mesh: &SimplexMesh<3>) -> SimplexMesh<3> {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Local edge index pairs for Tri3.
-fn local_edges_tri() -> [(usize, usize); 3] {
+pub(crate) fn local_edges_tri() -> [(usize, usize); 3] {
     [(0, 1), (1, 2), (0, 2)]
 }
 
 /// Canonical edge key (sorted node pair).
-fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+pub(crate) fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     if a < b { (a, b) } else { (b, a) }
 }
 
@@ -2359,7 +2359,7 @@ fn face_key_3d(a: NodeId, b: NodeId, c: NodeId) -> (NodeId, NodeId, NodeId) {
 }
 
 /// Canonical face key for a quad face (sorted 4-tuple).
-fn quad_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
+pub(crate) fn quad_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
     let mut k = ns;
     k.sort();
     k
@@ -2682,12 +2682,12 @@ fn local_edges_tet() -> [(usize, usize); 6] {
 // ─── Quad4 non-conforming AMR ─────────────────────────────────────────────────
 
 /// Canonical edge key for a Quad4 boundary edge (sorted node pair).
-fn quad_edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+pub(crate) fn quad_edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     if a < b { (a, b) } else { (b, a) }
 }
 
 /// Local edges for a Quad4 in CCW order: (0,1), (1,2), (2,3), (3,0).
-fn local_edges_quad() -> [(usize, usize); 4] {
+pub(crate) fn local_edges_quad() -> [(usize, usize); 4] {
     [(0, 1), (1, 2), (2, 3), (3, 0)]
 }
 
@@ -3037,7 +3037,7 @@ fn local_edges_hex() -> [(usize, usize); 12] {
 }
 
 /// Local 6 faces of a Hex8 (each as 4 local node indices in CCW order).
-fn local_faces_hex() -> [[usize; 4]; 6] {
+pub(crate) fn local_faces_hex() -> [[usize; 4]; 6] {
     [
         [0, 1, 2, 3], // bottom (z=0)
         [4, 5, 6, 7], // top    (z=1)
@@ -3049,7 +3049,7 @@ fn local_faces_hex() -> [[usize; 4]; 6] {
 }
 
 /// Canonical face key for Hex8 (sorted 4-tuple of node IDs).
-fn hex_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
+pub(crate) fn hex_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
     let mut k = ns;
     k.sort();
     k

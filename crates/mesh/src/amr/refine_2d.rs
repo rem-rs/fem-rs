@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use fem_core::{FaceId, NodeId, ElemId};
 use crate::element_type::ElementType;
 use crate::simplex::SimplexMesh;
-use super::{HangingNodeConstraint, HangingFaceConstraint, HangingQuadFaceConstraint, NCState, NCStateQuad, DerefineTree, DerefineRecord, NCState3D};
+use super::{HangingNodeConstraint, HangingFaceConstraint, HangingQuadFaceConstraint, NCState, NCStateQuad, DerefineTree, DerefineRecord, NCState3D, QuadRefineDir, TriRefineDir};
 use super::{edge_key, quad_edge_key, local_edges_tri, local_edges_quad, local_faces_hex, quad_face_key, hex_face_key};
 use super::{refine_nonconforming_hex, refine_uniform_3d, refine_prism6_uniform, refine_pyramid5_uniform};
 
@@ -332,7 +332,7 @@ pub fn residual_estimator(mesh:&SimplexMesh<2>,u:&[f64],f:&[f64])->Vec<f64>{
         for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let[x0,y0]=mesh.coords_of(ns[0]);let[x1,y1]=mesh.coords_of(ns[1]);let[x2,y2]=mesh.coords_of(ns[2]);
             let u0=u[ns[0]as usize];let u1=u[ns[1]as usize];let u2=u[ns[2]as usize];let j00=x1-x0;let j01=x2-x0;let j10=y1-y0;let j11=y2-y0;let det=j00*j11-j01*j10;let inv_det=if det.abs()>1e-30{1.0/det}else{0.0};
             let gref=[[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];let mut gx=0.0;let mut gy=0.0;
-            for k in 0..3{let gpx=(j11*gref[k][0]-j10*gref[k][1])*inv_det;let gpy=(-j01*gref[k][0]+j00*gref[k][1])*inv_det;gx+=[u0,u1,u2][k]*gpx;gy+=[u0,u1,u2][k]*gpy;}g.push([gx,gy]);}};
+            for k in 0..3{let gpx=(j11*gref[k][0]-j10*gref[k][1])*inv_det;let gpy=(-j01*gref[k][0]+j00*gref[k][1])*inv_det;gx+=[u0,u1,u2][k]*gpx;gy+=[u0,u1,u2][k]*gpy;}g.push([gx,gy]);}g};
     let mut elem_h=Vec::with_capacity(n_elems);let mut elem_area=Vec::with_capacity(n_elems);
     for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let[x0,y0]=mesh.coords_of(ns[0]);let[x1,y1]=mesh.coords_of(ns[1]);let[x2,y2]=mesh.coords_of(ns[2]);
         let area=0.5*((x1-x0)*(y2-y0)-(x2-x0)*(y1-y0)).abs();let h=(2.0*area).sqrt();elem_h.push(h);elem_area.push(area);}
@@ -406,8 +406,6 @@ pub fn longest_edge_tri(mesh:&SimplexMesh<2>,ns:&[NodeId])->(NodeId,NodeId){
 
 // ─── 2-D Quad4 anisotropic ──────────────────────────────────────────────────
 
-pub enum QuadRefineDir{X,Y,Both,}
-
 pub fn refine_nonconforming_quad_aniso(mesh:&SimplexMesh<2>,marked:&[(ElemId,QuadRefineDir)])->(SimplexMesh<2>,Vec<HangingNodeConstraint>){
     assert!(mesh.elem_type==ElementType::Quad4,"refine_nonconforming_quad_aniso: only Quad4");if marked.is_empty(){return(mesh.clone(),Vec::new());}
     let n_elemes=mesh.n_elems();let marked_map:HashMap<ElemId,QuadRefineDir>=marked.iter().copied().collect();let marked_set:std::collections::HashSet<ElemId>=marked_map.keys().copied().collect();
@@ -428,8 +426,6 @@ pub fn refine_nonconforming_quad_aniso(mesh:&SimplexMesh<2>,marked:&[(ElemId,Qua
 }
 
 // ─── 2-D Tri3 anisotropic ───────────────────────────────────────────────────
-
-pub enum TriRefineDir{Edge0,Edge1,Edge2,Red,}
 
 pub fn refine_nonconforming_tri_aniso(mesh:&SimplexMesh<2>,marked:&[(ElemId,TriRefineDir)])->(SimplexMesh<2>,Vec<HangingNodeConstraint>){
     assert!(mesh.elem_type==ElementType::Tri3,"refine_nonconforming_tri_aniso: only Tri3");if marked.is_empty(){return(mesh.clone(),Vec::new());}
