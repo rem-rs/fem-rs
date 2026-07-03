@@ -28,7 +28,7 @@ use fem_assembly::{
 };
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
-    lagrange::{TriP1, TriP2, TriP3, TriP4},
+    lagrange::{TriP1, TriP2, TriP3, TriP4, TetP1, TetP2, HexQ1},
     nedelec::{TriND1, TriND2, HexNDk, TetND1, TetND2},
     raviart_thomas::{TriRT0, TriRT1},
 };
@@ -2026,21 +2026,16 @@ fn hex_curl_piola_3d(jac: &[f64; 3], ref_curl: &[f64], phys_curl: &mut [f64], n_
     }
 }
 
-// 3D Maxwell — Hex ND2 uses existing solve_maxwell_3d_hex_nd2
+// Maxwell 3D Hex ND1 — test stub (solve_maxwell_3d_hex not yet implemented)
+// #[test]
+// fn maxwell_3d_hex_nd1_convergence() {}
 
-#[test]
-fn maxwell_3d_hex_nd1_convergence() {
-    // ND1 on hex: use the same solver path as the existing ND2 test
-    // (VectorAssembler + HCurlSpace). ND1 on hex meshes converges at O(h^2) in L2.
-    let ns = [2usize, 4];
-    let errors: Vec<f64> = ns.iter().map(|&n| solve_maxwell_3d_hex_nd2(n)).collect();
-    // Note: solve_maxwell_3d_hex_nd2 uses order=2 internally; for ND1 we use the
-    // same path but expect ND2-level accuracy. For this smoke test we verify
-    // monotonic decrease.
-    eprintln!("3D Maxwell Hex ND1/ND2 proxy: L2 errors={:?}", errors);
-    assert!(errors[0].is_finite(), "Hex error finite");
-    assert!(errors.len() > 1, "need at least 2 grid levels");
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3D Helmholtz — H¹ on Tet4 + Hex8
+// ═══════════════════════════════════════════════════════════════════════════════
+// u = sin(πx)sin(πy)sin(πz), -Δu = 3π²u
+// Helmholtz: -Δu + k²u = f with f = (3π² + k²)u, k² = π²
+// Zero Dirichlet BC on all boundaries.
 
 // Note: the original maxwell_3d_hex_nd2_convergence at line ~1673 uses
 // solve_maxwell_3d_hex_nd2 which predates the hex_piola_helpers; both are valid.
@@ -2077,4 +2072,89 @@ fn pyrand1_element_matrix_symmetric() {
     for i in 0..n {
         assert!(ke[i*n+i] > 0.0, "PyraND1 diag {i} = {:.6e}", ke[i*n+i]);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3D Helmholtz — H¹ on Tet4 + Hex8
+// ═══════════════════════════════════════════════════════════════════════════════
+// u = sin(πx)sin(πy)sin(πz), -Δu = 3π²u
+// Helmholtz: -Δu + k²u = f with f = (3π² + k²)u, k² = π²
+
+fn u_h3d(x: &[f64]) -> f64 {
+    (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin()
+}
+
+fn f_h3d(x: &[f64]) -> f64 {
+    4.0 * PI * PI * u_h3d(x)
+}
+
+fn l2_err_tet(uh: &[f64], space: &H1Space<SimplexMesh<3>>) -> f64 {
+    let mesh = space.mesh(); let o = space.order();
+    let re: &dyn ReferenceElement = match o { 1 => &TetP1, _ => &TetP1 };
+    let n = re.n_dofs(); let q = re.quadrature(2 * o + 2);
+    let mut phi = vec![0.0; n]; let mut es = 0.0_f64;
+    for e in mesh.elem_iter() {
+        let nd = mesh.element_nodes(e); let df = space.element_dofs(e);
+        let n0 = mesh.node_coords(nd[0]); let n1 = mesh.node_coords(nd[1]);
+        let n2 = mesh.node_coords(nd[2]); let n3 = mesh.node_coords(nd[3]);
+        let mut j = DMatrix::zeros(3, 3);
+        for r in 0..3 { j[(r,0)]=n1[r]-n0[r]; j[(r,1)]=n2[r]-n0[r]; j[(r,2)]=n3[r]-n0[r]; }
+        let dv = j.determinant().abs() / 6.0;
+        for (qi, xi) in q.points.iter().enumerate() {
+            let w = q.weights[qi] * dv; re.eval_basis(xi, &mut phi);
+            let uh_q: f64 = df.iter().zip(phi.iter()).map(|(&d,&p)| uh[d as usize]*p).sum();
+            let xp = [n0[0]+j[(0,0)]*xi[0]+j[(0,1)]*xi[1]+j[(0,2)]*xi[2],
+                      n0[1]+j[(1,0)]*xi[0]+j[(1,1)]*xi[1]+j[(1,2)]*xi[2],
+                      n0[2]+j[(2,0)]*xi[0]+j[(2,1)]*xi[1]+j[(2,2)]*xi[2]];
+            es += w * (uh_q - u_h3d(&xp)).powi(2);
+        }
+    }
+    es.sqrt()
+}
+
+fn l2_err_hex(uh: &[f64], space: &H1Space<SimplexMesh<3>>) -> f64 {
+    let mesh = space.mesh(); let o = space.order();
+    let re: &dyn ReferenceElement = match o { 1 => &HexQ1, _ => &HexQ1 };
+    let n = re.n_dofs(); let q = re.quadrature(2 * o + 2);
+    let mut phi = vec![0.0; n]; let mut es = 0.0_f64;
+    for e in mesh.elem_iter() {
+        let nd = mesh.element_nodes(e); let df = space.element_dofs(e);
+        let n0 = mesh.node_coords(nd[0]); let n1 = mesh.node_coords(nd[1]);
+        let n2 = mesh.node_coords(nd[2]); let n4 = mesh.node_coords(nd[4]);
+        let hx = n1[0]-n0[0]; let hy = n2[1]-n0[1]; let hz = n4[2]-n0[2];
+        for (qi, xi) in q.points.iter().enumerate() {
+            let w = q.weights[qi] * hx * hy * hz / 8.0; re.eval_basis(xi, &mut phi);
+            let uh_q: f64 = df.iter().zip(phi.iter()).map(|(&d,&p)| uh[d as usize]*p).sum();
+            let xp = [n0[0]+(xi[0]+1.0)*hx/2.0, n0[1]+(xi[1]+1.0)*hy/2.0, n0[2]+(xi[2]+1.0)*hz/2.0];
+            es += w * (uh_q - u_h3d(&xp)).powi(2);
+        }
+    }
+    es.sqrt()
+}
+
+fn solve_h3d(n: usize, order: u8, hex: bool) -> f64 {
+    let mesh = if hex { SimplexMesh::<3>::unit_cube_hex(n) } else { SimplexMesh::<3>::unit_cube_tet(n) };
+    let space = H1Space::new(mesh.clone(), order);
+    let diff = DiffusionIntegrator { kappa: 1.0 };
+    let mass = MassIntegrator { rho: PI * PI };
+    let src = DomainSourceIntegrator::new(f_h3d);
+    let qo = 2 * order + 1;
+    let mut a = Assembler::assemble_bilinear(&space, &[&diff, &mass], qo);
+    let mut rhs = Assembler::assemble_linear(&space, &[&src], qo);
+    let bd = boundary_dofs(&mesh, space.dof_manager(), &[1,2,3,4,5,6]);
+    apply_dirichlet(&mut a, &mut rhs, &bd, &vec![0.0; bd.len()]);
+    let x = dense_solve(&a, &rhs);
+    if hex { l2_err_hex(&x, &space) } else { l2_err_tet(&x, &space) }
+}
+
+#[test] fn helmholtz_3d_tet_p1() {
+    let ns = [4usize, 8]; let e: Vec<f64> = ns.iter().map(|&n| solve_h3d(n, 1, false)).collect();
+    let r = convergence_rate(&e, &ns);
+    eprintln!("3D TetP1: err={e:?} rate={r:?}"); assert!(r[0] > 1.5, "rate {:.2}", r[0]);
+}
+
+#[test] fn helmholtz_3d_hex_q1() {
+    let ns = [4usize, 8]; let e: Vec<f64> = ns.iter().map(|&n| solve_h3d(n, 1, true)).collect();
+    let r = convergence_rate(&e, &ns);
+    eprintln!("3D HexQ1: err={e:?} rate={r:?}"); assert!(r[0] > 1.5, "rate {:.2}", r[0]);
 }
