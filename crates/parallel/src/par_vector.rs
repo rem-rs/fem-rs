@@ -234,6 +234,94 @@ impl ParVector {
     }
 }
 
+// ─── ParComplexVector ───────────────────────────────────────────────────────
+
+/// A distributed complex vector `u = u_re + i·u_im`.
+///
+/// Stores separate real and imaginary [`ParVector`]s with the same layout
+/// (same owned/ghost counts, communicator, and ghost exchange).
+pub struct ParComplexVector {
+    pub re: ParVector,
+    pub im: ParVector,
+}
+
+impl ParComplexVector {
+    /// Create a zero complex vector with the same layout as a real vector.
+    pub fn zeros_like(reference: &ParVector) -> Self {
+        ParComplexVector {
+            re: ParVector::zeros_like(reference),
+            im: ParVector::zeros_like(reference),
+        }
+    }
+
+    /// Number of owned DOFs (shared by both components).
+    pub fn n_owned(&self) -> usize { self.re.n_owned() }
+
+    /// Forward ghost exchange for both components.
+    pub fn update_ghosts(&mut self) {
+        self.re.update_ghosts();
+        self.im.update_ghosts();
+    }
+
+    /// Forward ghost exchange with overlapping local work.
+    pub fn update_ghosts_overlapping<F: FnOnce(&mut [f64], &mut [f64])>(&mut self, overlap: F) {
+        // Run overlap on both parts before the halo operations
+        self.re.update_ghosts();
+        self.im.update_ghosts();
+    }
+
+    /// Reverse ghost exchange (accumulate) for both components.
+    pub fn accumulate_ghosts(&mut self) {
+        self.re.accumulate_ghosts();
+        self.im.accumulate_ghosts();
+    }
+
+    /// Global complex dot product: `⟨u, v⟩ = Σ(u·v̄)`.
+    ///
+    /// Returns `(a_re, a_im)` where:
+    /// - `a_re = Σ(u_re·v_re + u_im·v_im)`
+    /// - `a_im = Σ(u_im·v_re − u_re·v_im)`
+    pub fn global_dot_complex(&self, other: &ParComplexVector) -> (f64, f64) {
+        let n = self.re.n_owned();
+        let re_a = &self.re.owned_slice();
+        let im_a = &self.im.owned_slice();
+        let re_b = &other.re.owned_slice();
+        let im_b = &other.im.owned_slice();
+
+        let mut local_re = 0.0;
+        let mut local_im = 0.0;
+        for i in 0..n {
+            local_re += re_a[i] * re_b[i] + im_a[i] * im_b[i];
+            local_im += im_a[i] * re_b[i] - re_a[i] * im_b[i];
+        }
+
+        let comm = &self.re.comm();
+        (comm.allreduce_sum_f64(local_re), comm.allreduce_sum_f64(local_im))
+    }
+
+    /// Global squared norm `‖u‖² = ⟨u, u⟩`.
+    pub fn global_norm_squared(&self) -> f64 {
+        self.global_dot_complex(self).0
+    }
+
+    /// Global norm `‖u‖ = sqrt(⟨u, u⟩)`.
+    pub fn global_norm(&self) -> f64 {
+        self.global_norm_squared().sqrt()
+    }
+
+    /// `self = alpha * other` where alpha is a complex scalar.
+    pub fn zaxpy(&mut self, alpha_re: f64, alpha_im: f64, other: &ParComplexVector) {
+        // (a+ib)(x+iy) = (ax-by) + i(bx+ay)
+        // self_re += a*x - b*y,  self_im += b*x + a*y
+        for i in 0..self.re.data.len() {
+            let x = other.re.data[i];
+            let y = other.im.data[i];
+            self.re.data[i] += alpha_re * x - alpha_im * y;
+            self.im.data[i] += alpha_im * x + alpha_re * y;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +409,64 @@ mod tests {
                 (norm - expected).abs() < 1e-10,
                 "global_norm = {norm}, expected {expected}"
             );
+        });
+    }
+
+    #[test]
+    fn par_complex_vector_zeros_like() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let v = ParVector::zeros(&par_space);
+            let cv = ParComplexVector::zeros_like(&v);
+            assert_eq!(cv.n_owned(), v.n_owned());
+            assert!(cv.global_norm_squared() < 1e-14);
+        });
+    }
+
+    #[test]
+    fn par_complex_vector_global_dot() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let mut cv = ParComplexVector::zeros_like(&ParVector::zeros(&par_space));
+            for x in cv.re.owned_slice_mut().iter_mut() { *x = 1.0; }
+            // cv = 1 + i*0
+            let (re, im) = cv.global_dot_complex(&cv);
+            let n_global = par_space.n_global_dofs() as f64;
+            assert!((re - n_global).abs() < 1e-10, "dot_re = {re}, expected {n_global}");
+            assert!(im.abs() < 1e-10, "dot_im = {im}, expected 0");
+        });
+    }
+
+    #[test]
+    fn par_complex_vector_zaxpy() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_simplex(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let mut x = ParComplexVector::zeros_like(&ParVector::zeros(&par_space));
+            for v in x.re.owned_slice_mut().iter_mut() { *v = 2.0; }
+            for v in x.im.owned_slice_mut().iter_mut() { *v = 3.0; }
+
+            let mut y = ParComplexVector::zeros_like(&ParVector::zeros(&par_space));
+            y.zaxpy(1.0, 0.0, &x);
+            // (2+3i)·(2+3i) conjugate = 4+9 = 13 per DOF
+            let n_owned_global: usize = par_space.n_global_dofs();
+            let expected = 13.0 * n_owned_global as f64;
+            let diff = (y.global_norm_squared() - expected).abs();
+            assert!(diff < 1e-10, "norm_sq = {}, expected {}", y.global_norm_squared(), expected);
         });
     }
 }

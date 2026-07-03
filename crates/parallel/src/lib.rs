@@ -163,6 +163,7 @@ pub use par_simplex::{partition_simplex, partition_simplex_replicated, partition
 pub use par_solver::{par_solve_cg, par_solve_gmres_jacobi, par_solve_pcg_jacobi, par_solve_minres};
 pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
+pub use par_vector::ParComplexVector;
 pub use par_vector_assembler::ParVectorAssembler;
 pub use partition::MeshPartition;
 pub use shared_entities::{SharedEntities, SharedEntity};
