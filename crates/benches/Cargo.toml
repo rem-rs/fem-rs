@@ -60,3 +60,8 @@ path = "solver_comparison.rs"
 name = "mfem_parity"
 harness = false
 path = "mfem_parity.rs"
+
+[[bench]]
+name = "pa_gpu"
+harness = false
+path = "pa_gpu.rs"

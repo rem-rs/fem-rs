@@ -15,8 +15,8 @@ const GL4_WTS: [f64; 4] = [0.3478548451374538, 0.6521451548625461, 0.65214515486
 
 // ─── 1D Lagrange basis & derivatives at quadrature points ────────────────────
 fn build_1d_basis() -> ([[f64; 4]; 4], [[f64; 4]; 4]) {
-    let mut B = [[0.0_f64; 4]; 4];
-    let mut D = [[0.0_f64; 4]; 4];
+    let mut b = [[0.0_f64; 4]; 4];
+    let mut d = [[0.0_f64; 4]; 4];
     for q in 0..4 {
         let t = GL4_PTS[q];
         for i in 0..4 {
@@ -29,11 +29,11 @@ fn build_1d_basis() -> ([[f64; 4]; 4], [[f64; 4]; 4]) {
                 der += 1.0 / (t - Q3_NODES[j]);
             }
             der *= val;
-            B[q][i] = val;
-            D[q][i] = der;
+            b[q][i] = val;
+            d[q][i] = der;
         }
     }
-    (B, D)
+    (b, d)
 }
 
 fn hex_q3_ixyz(n: usize) -> (usize, usize, usize) {
@@ -65,7 +65,7 @@ pub fn build_hex_q3_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) ->
 
 /// y += A·x for Hex Q3 diffusion (direct per-qp).
 pub fn pa_apply_hex_q3(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
-    let (B, D) = build_1d_basis();
+    let (b, d) = build_1d_basis();
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
         if dofs.len() < 64 { continue; }
@@ -79,7 +79,7 @@ pub fn pa_apply_hex_q3(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
             let(j3,j4,j5)=(pd.data[off+3],pd.data[off+4],pd.data[off+5]);
             let(j6,j7,j8)=(pd.data[off+6],pd.data[off+7],pd.data[off+8]);
             let sc=GL4_WTS[qx]*GL4_WTS[qy]*GL4_WTS[qz]*pd.data[off+9]*pd.data[off+10];
-            let(bq,dq)=(B[qx],D[qx]);let(bqy,dqy)=(B[qy],D[qy]);let(bqz,dqz)=(B[qz],D[qz]);
+            let(bq,dq)=(b[qx],d[qx]);let(bqy,dqy)=(b[qy],d[qy]);let(bqz,dqz)=(b[qz],d[qz]);
 
             let mut rg = [[0.0_f64;3];64];
             for n in 0..64{let(ix,iy,iz)=hex_q3_ixyz(n);rg[n]=[dq[ix]*bqy[iy]*bqz[iz],bq[ix]*dqy[iy]*bqz[iz],bq[ix]*bqy[iy]*dqz[iz]];}
@@ -95,7 +95,7 @@ pub fn pa_apply_hex_q3(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
 ///
 /// Uses 1D tensor contractions instead of full per-node loops.
 pub fn pa_apply_hex_q3_sf(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
-    let (B, D) = build_1d_basis();
+    let (b, d) = build_1d_basis();
     // Precompute 1D basis gradients per qp: G[d][q][i] for direction d, qp q, node i
     // G[0][q][i] = D[q][i], G[1][q][i] = B[q][i], G[2][q][i] = B[q][i] (for d=0)
     // G[0][q][i] = B[q][i], G[1][q][i] = D[q][i], G[2][q][i] = B[q][i] (for d=1)
@@ -119,7 +119,7 @@ pub fn pa_apply_hex_q3_sf(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mu
             let (jit20,jit21,jit22) = (pd.data[off+6],pd.data[off+7],pd.data[off+8]);
             let sc = GL4_WTS[qx]*GL4_WTS[qy]*GL4_WTS[qz]*pd.data[off+9]*pd.data[off+10];
 
-            let (bq,dq) = (B[qx],D[qx]); let (bqy,dqy) = (B[qy],D[qy]); let (bqz,dqz) = (B[qz],D[qz]);
+            let (bq,dq) = (b[qx],d[qx]); let (bqy,dqy) = (b[qy],d[qy]); let (bqz,dqz) = (b[qz],d[qz]);
 
             // Sum-factorized flux computation:
             // For each of 3 reference gradient directions, compute Σ 1D_op · xe
@@ -183,9 +183,9 @@ mod tests {
 
     #[test]
     fn hex_q3_1d_basis() {
-        let (B, D) = build_1d_basis();
-        for q in 0..4 { assert!((B[q].iter().sum::<f64>()-1.0).abs()<1e-14); }
-        for q in 0..4 { assert!(D[q].iter().sum::<f64>().abs()<1e-14); }
+        let (b, d) = build_1d_basis();
+        for q in 0..4 { assert!((b[q].iter().sum::<f64>()-1.0).abs()<1e-14); }
+        for q in 0..4 { assert!(d[q].iter().sum::<f64>().abs()<1e-14); }
         for i in 0..4 { for j in 0..4 {
             let t = Q3_NODES[j];
             let mut val=1.0; for m in 0..4{if m!=i{val*=(t-Q3_NODES[m])/(Q3_NODES[i]-Q3_NODES[m]);}}

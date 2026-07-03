@@ -5,8 +5,6 @@
 
 use crate::pa::types::PaData;
 use fem_mesh::topology::MeshTopology;
-use fem_element::lagrange::HexQk;
-use fem_element::ReferenceElement;
 
 // ─── 5-point Gauss–Legendre on [-1, 1] (exact for degree 9) ─────────────────
 const GL5_PTS: [f64; 5] = [-0.9061798459386640, -0.5384693101056831, 0.0, 0.5384693101056831, 0.9061798459386640];
@@ -16,22 +14,20 @@ const GL5_WTS: [f64; 5] = [0.2369268850561891, 0.4786286704993665, 0.56888888888
 const Q4_NODES_1D: [f64; 5] = [-1.0, -0.5, 0.0, 0.5, 1.0];
 
 fn build_1d_basis() -> ([[f64; 5]; 5], [[f64; 5]; 5]) {
-    let mut B = [[0.0_f64; 5]; 5];
-    let mut D = [[0.0_f64; 5]; 5];
+    let mut b = [[0.0_f64; 5]; 5];
+    let mut d = [[0.0_f64; 5]; 5];
     for q in 0..5 {
         let t = GL5_PTS[q];
-        // Check if t matches a node (avoids 1/0 in derivative formula)
         let at_node = Q4_NODES_1D.iter().position(|&n| (t - n).abs() < 1e-15);
         for i in 0..5 {
             if let Some(k) = at_node {
-                // Analytic eval at node x_k: ℓ_i = δ_{ik}, ℓ'_i = sum_{j≠i} 1/(x_i-x_j)
-                B[q][i] = if i == k { 1.0 } else { 0.0 };
+                b[q][i] = if i == k { 1.0 } else { 0.0 };
                 if i != k {
-                    D[q][i] = 0.0;
+                    d[q][i] = 0.0;
                 } else {
                     let mut s = 0.0;
                     for j in 0..5 { if j != i { s += 1.0 / (Q4_NODES_1D[i] - Q4_NODES_1D[j]); } }
-                    D[q][i] = s;
+                    d[q][i] = s;
                 }
             } else {
                 let mut val = 1.0;
@@ -42,20 +38,15 @@ fn build_1d_basis() -> ([[f64; 5]; 5], [[f64; 5]; 5]) {
                     der += 1.0 / (t - Q4_NODES_1D[j]);
                 }
                 der *= val;
-                B[q][i] = val; D[q][i] = der;
+                b[q][i] = val; d[q][i] = der;
             }
         }
     }
-    (B, D)
-}
-
-fn hex_q4_ixyz(n: usize) -> (usize, usize, usize) {
-    (n % 5, (n / 5) % 5, n / 25)
+    (b, d)
 }
 
 /// Build PA data for Hex Q4 diffusion via HexQk generic.
 pub fn build_hex_q4_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) -> f64) -> PaData {
-    let hex_q4 = HexQk::new(4);
     let n_elems = mesh.n_elements();
     let mut pd = PaData::new(n_elems, 125, 3);
     let hex8_ref: [(f64,f64,f64);8] = [(-1.,-1.,-1.),(1.,-1.,-1.),(1.,1.,-1.),(-1.,1.,-1.),(-1.,-1.,1.),(1.,-1.,1.),(1.,1.,1.),(-1.,1.,1.)];
@@ -80,7 +71,7 @@ pub fn build_hex_q4_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) ->
 
 /// y += A·x for Hex Q4 diffusion (sum-factorized).
 pub fn pa_apply_hex_q4(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
-    let (B, D) = build_1d_basis();
+    let (b, d) = build_1d_basis();
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
         if dofs.len() < 125 { continue; }
@@ -97,7 +88,7 @@ pub fn pa_apply_hex_q4(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
             let (jit20,jit21,jit22) = (pd.data[off+6],pd.data[off+7],pd.data[off+8]);
             let sc = GL5_WTS[qx]*GL5_WTS[qy]*GL5_WTS[qz]*pd.data[off+9]*pd.data[off+10];
 
-            let (bq,dq) = (B[qx],D[qx]); let (bqy,dqy) = (B[qy],D[qy]); let (bqz,dqz) = (B[qz],D[qz]);
+            let (bq,dq) = (b[qx],d[qx]); let (bqy,dqy) = (b[qy],d[qy]); let (bqz,dqz) = (b[qz],d[qz]);
 
             // Tensor-contracted flux
             let contract = |op_ξ:&[f64;5], op_η:&[f64;5], op_ζ:&[f64;5]| -> f64 {
@@ -138,13 +129,13 @@ mod tests {
     #[test]
     fn hex_q4_sf_self_consistent() {
         // First verify the 1D basis
-        let (B, D) = build_1d_basis();
+        let (b, d) = build_1d_basis();
         for q in 0..5 {
-            let sum_b: f64 = B[q].iter().sum();
+            let sum_b: f64 = b[q].iter().sum();
             assert!((sum_b-1.0).abs() < 1e-12, "Q4 POU failed at qp {q}: {sum_b}");
-            let sum_d: f64 = D[q].iter().sum();
+            let sum_d: f64 = d[q].iter().sum();
             assert!(sum_d.abs() < 1e-12, "Q4 grad sum not zero at qp {q}: {sum_d}");
-            for i in 0..5 { assert!(B[q][i].is_finite() && D[q][i].is_finite(), "non-finite basis at qp {q}, i={i}"); }
+            for i in 0..5 { assert!(b[q][i].is_finite() && d[q][i].is_finite(), "non-finite basis at qp {q}, i={i}"); }
         }
 
         let mesh = SimplexMesh::<3>::unit_cube_hex(1);

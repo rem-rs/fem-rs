@@ -62,7 +62,7 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
             ( 0., 0.,-1.),( 0., 0., 1.),( 0.,-1., 0.),( 0., 1., 0.),
             (-1., 0., 0.),( 1., 0., 0.),( 0., 0., 0.),
         ];
-        let x: Vec<[f64; 3]> = ref_nodes.iter().map(|&(rx, ry, rz)| {
+        let _x: Vec<[f64; 3]> = ref_nodes.iter().map(|&(rx, ry, rz)| {
             let mut xp = [0.0; 3];
             for i in 0..8 {
                 let (xi, et, zt) = ref_nodes[i];
@@ -81,7 +81,7 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
                     let mut jac = [[0.0_f64; 3]; 3];
                     for i in 0..8 {
                         let (xi, et, zt) = ref_nodes[i];
-                        let phi   = (1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt) / 8.0;
+                        let _phi   = (1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt) / 8.0;
                         let d_xi  = xi*(1.0+et*qy_pt)*(1.0+zt*qz_pt) / 8.0;
                         let d_et  = (1.0+xi*qx_pt)*et*(1.0+zt*qz_pt) / 8.0;
                         let d_zt  = (1.0+xi*qx_pt)*(1.0+et*qy_pt)*zt / 8.0;

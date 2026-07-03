@@ -10,7 +10,7 @@ use crate::context::GpuContext;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const HEX_Q1_WGSL: &str = r#"
-struct PD{array<f32>}struct ED{array<u32>}struct XV{array<f32>}struct ER{array<f32>}
+struct PD{data:array<f32>}struct ED{dofs:array<u32>}struct XV{vals:array<f32>}struct ER{vals:array<f32>}
 @group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
 @group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
 const GP:array<f32,2>=array(-0.577350269189626,0.577350269189626);
@@ -58,7 +58,7 @@ pub fn gpu_pa_apply_hex_q1(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32]
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const HEX_Q2_WGSL: &str = r#"
-struct PD{array<f32>}struct ED{array<u32>}struct XV{array<f32>}struct ER{array<f32>}
+struct PD{data:array<f32>}struct ED{dofs:array<u32>}struct XV{vals:array<f32>}struct ER{vals:array<f32>}
 @group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
 @group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
 const GP:array<f32,3>=array(-0.7745966692414834,0.0,0.7745966692414834);
@@ -128,7 +128,7 @@ pub fn gpu_pa_apply_hex_q2(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32]
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const HEX_Q3_WGSL: &str = r#"
-struct PD{array<f32>}struct ED{array<u32>}struct XV{array<f32>}struct ER{array<f32>}
+struct PD{data:array<f32>}struct ED{dofs:array<u32>}struct XV{vals:array<f32>}struct ER{vals:array<f32>}
 @group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
 @group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
 const GP:array<f32,4>=array(-0.8611363115940526,-0.3399810435848563,0.3399810435848563,0.8611363115940526);
@@ -190,7 +190,7 @@ pub fn gpu_pa_apply_hex_q3(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32]
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const HEX_Q4_WGSL: &str = r#"
-struct PD{array<f32>}struct ED{array<u32>}struct XV{array<f32>}struct ER{array<f32>}
+struct PD{data:array<f32>}struct ED{dofs:array<u32>}struct XV{vals:array<f32>}struct ER{vals:array<f32>}
 @group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
 @group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
 const GP:array<f32,5>=array(-0.9061798459386640,-0.5384693101056831,0.0,0.5384693101056831,0.9061798459386640);
@@ -246,11 +246,46 @@ pub fn gpu_pa_apply_hex_q4(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32]
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Tet4 WGSL shader (4 nodes, 1 QP centroid, constant gradient)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const TET4_WGSL: &str = r#"
+struct PD{data:array<f32>}struct ED{dofs:array<u32>}struct XV{vals:array<f32>}struct ER{vals:array<f32>}
+@group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
+@group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
+const GX:array<f32,4>=array(-1.0,1.0,0.0,0.0);
+const GY:array<f32,4>=array(-1.0,0.0,1.0,0.0);
+const GZ:array<f32,4>=array(-1.0,0.0,0.0,1.0);
+@compute@workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id)gid:vec3<u32>){
+let e=gid.x;let off=e*11u;
+let(j00,j01,j02)=(pd.data[off],pd.data[off+1u],pd.data[off+2u]);
+let(j10,j11,j12)=(pd.data[off+3u],pd.data[off+4u],pd.data[off+5u]);
+let(j20,j21,j22)=(pd.data[off+6u],pd.data[off+7u],pd.data[off+8u]);
+let vol=pd.data[off+9u]/6.0;let ka=pd.data[off+10u];
+var pgx:array<f32,4>;var pgy:array<f32,4>;var pgz:array<f32,4>;
+for(var i=0u;i<4u;i++){
+pgx[i]=j00*GX[i]+j01*GY[i]+j02*GZ[i];
+pgy[i]=j10*GX[i]+j11*GY[i]+j12*GZ[i];
+pgz[i]=j20*GX[i]+j21*GY[i]+j22*GZ[i];}
+var xe:array<f32,4>;
+for(var i=0u;i<4u;i++){xe[i]=xv.vals[ed.dofs[e*4u+i]];}
+var ye:array<f32,4>=array(0.0,0.0,0.0,0.0);
+for(var i=0u;i<4u;i++){for(var j=0u;j<4u;j++){
+ye[i]+=vol*ka*(pgx[i]*pgx[j]+pgy[i]*pgy[j]+pgz[i]*pgz[j])*xe[j];}}
+for(var i=0u;i<4u;i++){er.vals[e*4u+i]=ye[i];}
+"#;
+
+pub fn gpu_pa_apply_tet4(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
+    run_pa_shader(gpu, TET4_WGSL, pa, dofs, x, y, 4, 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Shared host-side runner
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn run_pa_shader(gpu: &GpuContext, wgsl: &str, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32],
-    ldof: usize, nqp: usize) {
+    ldof: usize, _nqp: usize) {
     let dev = &gpu.device; let q = &gpu.queue; let ne = dofs.len() / ldof;
     let pb = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("pa"),contents:bytemuck::cast_slice(pa),usage:wgpu::BufferUsages::STORAGE,});
     let db = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("dofs"),contents:bytemuck::cast_slice(dofs),usage:wgpu::BufferUsages::STORAGE,});
@@ -281,7 +316,7 @@ fn run_pa_shader(gpu: &GpuContext, wgsl: &str, pa: &[f32], dofs: &[u32], x: &[f3
         let slice = rdb.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
-        dev.poll(wgpu::PollType::Wait { submission_index: Some(si), timeout: Some(std::time::Duration::from_secs(10)) });
+        let _ = dev.poll(wgpu::PollType::Wait { submission_index: Some(si), timeout: Some(std::time::Duration::from_secs(10)) });
         if let Ok(Ok(())) = rx.recv() {
             let m = slice.get_mapped_range();
             let er: &[f32] = bytemuck::cast_slice(&m);
