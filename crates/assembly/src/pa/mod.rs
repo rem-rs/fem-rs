@@ -17,7 +17,7 @@ mod q4;
 mod tet4;
 pub mod types;
 
-pub use hex_q1::{build_hex_q1_pa_data, pa_apply_hex_q1};
+pub use hex_q1::{build_hex_q1_pa_data, pa_apply_hex_q1, pa_apply_mass_hex_q1};
 pub use quad_q1::{build_quad_q1_pa_data, pa_apply_quad_q1};
 pub use q2::{build_hex_q2_pa_data, build_quad_q2_pa_data, pa_apply_hex_q2, pa_apply_quad_q2};
 pub use q3::{build_hex_q3_pa_data, pa_apply_hex_q3, pa_apply_hex_q3_sf};

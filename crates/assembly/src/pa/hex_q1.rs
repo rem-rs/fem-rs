@@ -136,6 +136,43 @@ pub fn pa_apply_hex_q1(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
     }
 }
 
+/// y += M·x via Hex Q1 mass PA — reuses the same PaData (uses |detJ| and κ as ρ).
+///
+/// The mass operator is `M[i,j] = Σ_q |detJ_q|·w_q·ρ_q·φ_i(q)·φ_j(q)`,
+/// which does not need the J⁻ᵀ gradient transform (only basis values).
+pub fn pa_apply_mass_hex_q1(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
+    let nf = 11;
+    for e in 0..pd.n_elems {
+        let dofs = &elem_dofs[e];
+        let mut xe = [0.0_f64; 8];
+        for i in 0..8 { xe[i] = x[dofs[i] as usize]; }
+        let mut ye = [0.0_f64; 8];
+
+        for (qz_idx, &qz) in GL_PTS.iter().enumerate() {
+            for (qy_idx, &qy) in GL_PTS.iter().enumerate() {
+                for (qx_idx, &qx) in GL_PTS.iter().enumerate() {
+                    let qi = qz_idx * 4 + qy_idx * 2 + qx_idx;
+                    let off = (e * 8 + qi) * nf;
+                    let scale = GL_WTS[qx_idx] * GL_WTS[qy_idx] * GL_WTS[qz_idx]
+                        * pd.data[off + 9] // |detJ|
+                        * pd.data[off + 10]; // ρ (stored in κ slot)
+
+                    let phi = [
+                        l0(qx)*l0(qy)*l0(qz), l1(qx)*l0(qy)*l0(qz),
+                        l1(qx)*l1(qy)*l0(qz), l0(qx)*l1(qy)*l0(qz),
+                        l0(qx)*l0(qy)*l1(qz), l1(qx)*l0(qy)*l1(qz),
+                        l1(qx)*l1(qy)*l1(qz), l0(qx)*l1(qy)*l1(qz),
+                    ];
+
+                    let u_qp: f64 = (0..8).map(|j| phi[j] * xe[j]).sum();
+                    for i in 0..8 { ye[i] += scale * phi[i] * u_qp; }
+                }
+            }
+        }
+        for i in 0..8 { y[dofs[i] as usize] += ye[i]; }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +209,32 @@ mod tests {
 
         let max_err: f64 = (0..n).map(|i| (y_pa[i] - y_ref[i]).abs()).fold(0.0, f64::max);
         assert!(max_err < 1e-12, "Hex Q1 PA max error {max_err}");
+    }
+
+    #[test]
+    fn hex_q1_pa_mass_matches_assembled() {
+        use crate::standard::MassIntegrator;
+
+        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let space = H1Space::new(mesh, 1);
+        let mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 2);
+
+        let mesh2 = SimplexMesh::<3>::unit_cube_hex(2);
+        let space2 = H1Space::new(mesh2, 1);
+        let pd = build_hex_q1_pa_data(space2.mesh(), &|_| 1.0);
+        let elem_dofs = hex_elem_dofs(&space2);
+
+        let n = space.n_dofs();
+        let mut rng: u64 = 42;
+        let x: Vec<f64> = (0..n).map(|_| { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1); ((rng>>11) as f64)/((1u64<<53) as f64) }).collect();
+
+        let mut y_ref = vec![0.0; n];
+        mat.spmv(&x, &mut y_ref);
+
+        let mut y_pa = vec![0.0; n];
+        pa_apply_mass_hex_q1(&pd, &elem_dofs, &x, &mut y_pa);
+
+        let max_err: f64 = (0..n).map(|i| (y_pa[i] - y_ref[i]).abs()).fold(0.0, f64::max);
+        assert!(max_err < 1e-12, "Hex Q1 mass PA max error {max_err}");
     }
 }
