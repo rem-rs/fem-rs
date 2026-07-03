@@ -28,7 +28,7 @@
 //!
 //! $$f_A   = \int_\Omega f\, R_A\, \mathrm{d}\Omega$$
 
-use fem_element::nurbs::{NurbsMesh2D, NurbsMesh3D, NurbsPatch2DData, NurbsPatch3DData};
+use fem_element::iga::{NurbsMesh2D, NurbsMesh3D, NurbsPatch2DData, NurbsPatch3DData};
 use fem_element::quadrature::seg_rule;
 use fem_element::reference::{QuadratureRule, ReferenceElement};
 use fem_linalg::{CooMatrix, CsrMatrix};

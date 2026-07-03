@@ -45,6 +45,7 @@ pub mod raviart_thomas;
 pub mod brezzi_douglas_marini;
 pub mod crouzeix_raviart;
 pub mod nonconforming;
+#[deprecated(note = "use fem_element::iga instead (KnotVector → iga::KnotVector, BSplineBasis1D → iga::BsplineBasis)")]
 pub mod nurbs;
 pub mod tri6_geom;
 pub mod iga;

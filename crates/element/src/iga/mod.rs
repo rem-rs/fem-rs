@@ -472,3 +472,25 @@ mod tests {
         }
     }
 }
+
+// ─── Backward-compat re-exports (from the old `nurbs` module) ─────────────
+//
+// These types were originally in `fem_element::nurbs` and are re-exported
+// here so that consumers can migrate by changing `fem_element::nurbs::X` to
+// `fem_element::iga::X`.  The old `pub mod nurbs` is deprecated.
+//
+// The old `KnotVector` (which stored degree) is NOT re-exported because the
+// new `iga::KnotVector` (pure knot sequence) supersedes it.  Code that needs
+// the degree-aware knot vector should construct a `BsplineBasis::new(deg, kv)`
+// from the new `KnotVector`.
+
+pub use crate::nurbs::{
+    BSplineBasis1D as NurbsBSplineBasis1D,
+    greville_abscissae,
+    NurbsMesh2D,
+    NurbsMesh3D,
+    NurbsPatch2D,
+    NurbsPatch2DData,
+    NurbsPatch3D,
+    NurbsPatch3DData,
+};
