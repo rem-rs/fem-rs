@@ -28,6 +28,8 @@ bytemuck       = { workspace = true, optional = true }
 nalgebra     = { workspace = true }
 log          = { workspace = true }
 env_logger   = { workspace = true }
+rand         = "0.8"
+rand_distr   = "0.4"
 
 [[example]]
 name = "mfem_ex1_poisson"
@@ -347,6 +349,10 @@ path = "hyperelastic_hooke.rs"
 [[example]]
 name = "gslib_field_transfer"
 path = "gslib_field_transfer.rs"
+
+[[example]]
+name = "spde_gaussian_field"
+path = "spde_gaussian_field.rs"
 
 [lib]
 name = "fem_examples"
