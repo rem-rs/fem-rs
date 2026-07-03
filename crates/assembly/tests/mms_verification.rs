@@ -28,7 +28,7 @@ use fem_assembly::{
 };
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
-    lagrange::{TriP1, TriP2},
+    lagrange::{TriP1, TriP2, TriP3, TriP4},
     nedelec::{TriND1, TriND2, HexNDk, TetND1, TetND2},
     raviart_thomas::{TriRT0, TriRT1},
 };
@@ -391,7 +391,13 @@ fn f_helmholtz(x: &[f64]) -> f64 {
 fn l2_error_scalar(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
     let mesh = space.mesh();
     let order = space.order();
-    let ref_elem: &dyn ReferenceElement = if order == 1 { &TriP1 } else { &TriP2 };
+    let ref_elem: &dyn ReferenceElement = match order {
+        1 => &TriP1,
+        2 => &TriP2,
+        3 => &TriP3,
+        4 => &TriP4,
+        _ => &TriP2,
+    };
     let quad = ref_elem.quadrature(2 * order + 2);
     let n_ldofs = ref_elem.n_dofs();
     let mut phi = vec![0.0; n_ldofs];
@@ -481,6 +487,41 @@ fn helmholtz_2d_p2_convergence() {
     let rates = convergence_rate(&errors, &ns);
     eprintln!("Helmholtz P2 errors: {:?}, rates: {:?}", errors, rates);
     assert!(rates[0] > 1.5, "Helmholtz P2 rate {:.2} < 1.5", rates[0]);
+}
+
+/// High-order H¹ Helmholtz test (P3 cubic, dense solve).
+fn solve_helmholtz_2d_ho(n: usize, order: u8, k_sq: f64) -> f64 {
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let space = H1Space::new(mesh.clone(), order);
+    let diffusion = DiffusionIntegrator { kappa: 1.0 };
+    let mass_neg = MassIntegrator { rho: -k_sq };
+    let source = DomainSourceIntegrator::new(f_helmholtz);
+    let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion, &mass_neg], 2 * order + 1);
+    let mut rhs = Assembler::assemble_linear(&space, &[&source], 2 * order + 1);
+    let bdofs = boundary_dofs(&mesh, space.dof_manager(), &[1, 2, 3, 4]);
+    apply_dirichlet(&mut mat, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+    let x = dense_solve(&mat, &rhs);
+    l2_error_scalar(&x, &space)
+}
+
+#[test]
+fn helmholtz_2d_p3_convergence() {
+    let k_sq = PI * PI;
+    let ns = [2usize, 3];
+    let errors: Vec<f64> = ns.iter().map(|&n| solve_helmholtz_2d_ho(n, 3, k_sq)).collect();
+    let rates = convergence_rate(&errors, &ns);
+    eprintln!("Helmholtz P3 errors: {:?}, rates: {:?}", errors, rates);
+    assert!(rates[0] > 2.5, "Helmholtz P3 rate {:.2} < 2.5 (expected ~4)", rates[0]);
+}
+
+#[test]
+fn helmholtz_2d_p4_convergence() {
+    let k_sq = PI * PI;
+    let ns = [2usize, 3];
+    let errors: Vec<f64> = ns.iter().map(|&n| solve_helmholtz_2d_ho(n, 4, k_sq)).collect();
+    let rates = convergence_rate(&errors, &ns);
+    eprintln!("Helmholtz P4 errors: {:?}, rates: {:?}", errors, rates);
+    assert!(rates[0] > 3.0, "Helmholtz P4 rate {:.2} < 3.0 (expected ~5)", rates[0]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

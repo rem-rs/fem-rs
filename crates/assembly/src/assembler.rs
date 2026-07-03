@@ -9,7 +9,8 @@ use nalgebra::DMatrix;
 use fem_core::types::DofId;
 use fem_element::{
     ReferenceElement, PrismPk, PyramidPk,
-    lagrange::{SegP1, SegP2, SegP3, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, HexQ1},
+    lagrange::{SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
+                QuadQ1, QuadQ2, HexQ1},
 };
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -100,6 +101,7 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
+        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriP4),
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Tet4, 2)                           => Box::new(TetP2),
         (ElementType::Tet4, 3)                           => Box::new(TetP3),
@@ -121,9 +123,11 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
         (ElementType::Line2, 1) => Box::new(SegP1),
         (ElementType::Line2, 2) => Box::new(SegP2),
         (ElementType::Line2, 3) => Box::new(SegP3),
+        (ElementType::Line2, 4) => Box::new(SegP4),
         (ElementType::Tri3,  1) => Box::new(TriP1),
         (ElementType::Tri3,  2) => Box::new(TriP2),
         (ElementType::Tri3,  3) => Box::new(TriP3),
+        (ElementType::Tri3,  4) => Box::new(TriP4),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         _ => panic!("ref_elem_face: unsupported (element_type={face_elem_type:?}, order={order})"),
