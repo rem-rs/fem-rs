@@ -336,6 +336,10 @@ path = "mesh_quality_tmop.rs"
 name = "mfem_vec_ref_elem"
 path = "mfem_vec_ref_elem.rs"
 
+[[example]]
+name = "plor_hex_solve"
+path = "plor_hex_solve.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
