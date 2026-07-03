@@ -340,6 +340,10 @@ path = "mfem_vec_ref_elem.rs"
 name = "plor_hex_solve"
 path = "plor_hex_solve.rs"
 
+[[example]]
+name = "hyperelastic_hooke"
+path = "hyperelastic_hooke.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
