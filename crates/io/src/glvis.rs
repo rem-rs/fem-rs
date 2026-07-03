@@ -3,7 +3,8 @@
 //! Uses the VTK legacy format and sends it over a TCP socket to a running
 //! GLVis server (default `localhost:19916`).
 //!
-//! Supports 2-D and 3-D simplicial meshes with scalar and vector fields.
+//! Supports 2-D and 3-D simplicial meshes with scalar and vector fields,
+//! window commands (view angle, zoom, etc.), and reading GLVis responses.
 //!
 //! # Usage
 //! ```no_run
@@ -15,6 +16,7 @@
 //! let sol2 = vec![0.5; mesh2.n_nodes()];
 //! let mut vis = GlVisSocket::connect("localhost", 19916).unwrap();
 //! vis.send_solution_2d(&mesh2, &sol2, "u").unwrap();
+//! println!("GLVis: {}", vis.recv_response_line().unwrap());
 //!
 //! // 3-D
 //! let mesh3 = SimplexMesh::<3>::unit_cube_tet(4);
@@ -22,7 +24,7 @@
 //! vis.send_solution_3d(&mesh3, &sol3, "u").unwrap();
 //! ```
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 use fem_mesh::simplex::SimplexMesh;
@@ -30,6 +32,7 @@ use fem_mesh::simplex::SimplexMesh;
 /// A TCP connection to a GLVis server.
 pub struct GlVisSocket {
     stream: TcpStream,
+    reader: BufReader<TcpStream>,
 }
 
 impl GlVisSocket {
@@ -37,7 +40,54 @@ impl GlVisSocket {
     pub fn connect(host: &str, port: u16) -> io::Result<Self> {
         let addr = format!("{}:{}", host, port);
         let stream = TcpStream::connect(&addr)?;
-        Ok(GlVisSocket { stream })
+        let reader = BufReader::new(stream.try_clone()?);
+        Ok(GlVisSocket { stream, reader })
+    }
+
+    /// Read one response line from the GLVis server.
+    pub fn recv_response_line(&mut self) -> io::Result<String> {
+        let mut line = String::new();
+        self.reader.read_line(&mut line)?;
+        Ok(line.trim_end().to_string())
+    }
+
+    /// Read all response lines until GLVis sends an empty line.
+    pub fn recv_response(&mut self) -> io::Result<Vec<String>> {
+        let mut lines = Vec::new();
+        loop {
+            let line = self.recv_response_line()?;
+            if line.is_empty() { break; }
+            lines.push(line);
+        }
+        Ok(lines)
+    }
+
+    /// Send a GLVis window command (e.g. "view 0 0 1", "zoom 2", "autoscale").
+    pub fn send_command(&mut self, cmd: &str) -> io::Result<()> {
+        writeln!(self.stream, "{}", cmd)?;
+        self.stream.flush()
+    }
+
+    /// Convenience: send a 2-D solution followed by GLVis commands.
+    pub fn send_solution_2d_with_cmd(
+        &mut self, mesh: &SimplexMesh<2>,
+        scalar_field: &[f64], field_name: &str,
+        commands: &[&str],
+    ) -> io::Result<()> {
+        self.send_solution_2d(mesh, scalar_field, field_name)?;
+        for cmd in commands { self.send_command(cmd)?; }
+        Ok(())
+    }
+
+    /// Convenience: send a 3-D solution followed by GLVis commands.
+    pub fn send_solution_3d_with_cmd(
+        &mut self, mesh: &SimplexMesh<3>,
+        scalar_field: &[f64], field_name: &str,
+        commands: &[&str],
+    ) -> io::Result<()> {
+        self.send_solution_3d(mesh, scalar_field, field_name)?;
+        for cmd in commands { self.send_command(cmd)?; }
+        Ok(())
     }
 
     // ── 2-D convenience methods ──────────────────────────────────────────────
@@ -336,5 +386,32 @@ mod tests {
         write_vtk_scalar(&mut buf, mesh.n_nodes(), &sol, "u").unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("SCALARS u"));
+    }
+
+    /// Verify that send_command writes to the stream and recv_response_line reads back.
+    /// Uses a local TCP pair to avoid needing a real GLVis server.
+    #[test]
+    fn glvis_bidirectional_local_loopback() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).unwrap();
+            // Echo back to simulate GLVis response
+            let response = b"GLVis v4.7\n\n";
+            stream.write_all(response).unwrap();
+            // Check the command was received
+            let cmd = String::from_utf8_lossy(&buf[..n]);
+            assert!(cmd.contains("autoscale"), "expected autoscale command");
+        });
+        let mut vis = GlVisSocket::connect("127.0.0.1", port).unwrap();
+        vis.send_command("autoscale").unwrap();
+        let resp = vis.recv_response_line().unwrap();
+        assert_eq!(resp, "GLVis v4.7");
+        let all = vis.recv_response().unwrap();
+        assert!(all.is_empty());
+        server.join().unwrap();
     }
 }
