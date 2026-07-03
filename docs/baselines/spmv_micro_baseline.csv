@@ -1,8 +1,0 @@
-benchmark_id,baseline_ns,warn_ratio
-parallel_poisson_128x128,35902.745,1.25
-parallel_poisson_256x256,96938.830,1.25
-parallel_poisson_512x512,321866.112,1.25
-serial_poisson_64x64,19261.266,1.25
-serial_poisson_128x128,35819.282,1.25
-serial_poisson_256x256,97349.687,1.25
-serial_poisson_512x512,326816.387,1.25

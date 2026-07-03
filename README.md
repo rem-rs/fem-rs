@@ -110,14 +110,6 @@ cargo run --example mfem_ex19_navier_stokes
 
 ---
 
-## Architecture Reference
-
-See [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) for trait interfaces, assembly pipeline, AMG design, and MPI/WASM specs.
-
-See [PLAN_622.md](PLAN_622.md) for the current development roadmap and gap closure plan.
-
----
-
 ## Development
 
 ```bash
@@ -149,11 +141,7 @@ check-all  = "check --workspace --all-features"
 Core FEM pipeline (Poisson → Elasticity → Maxwell → Darcy → Stokes → Navier-Stokes →
 multi-physics coupling) is complete for simplex meshes.
 
-Known gaps tracked in [PLAN_622.md](PLAN_622.md):
-- Quad/Hex H(div) elements missing
-- DPG method framework missing
-- No GPU-accelerated assembly (only SpMV)
-- TMOP at baseline only (full target-matrix pending)
+Known gaps:
 
 | Crate | Status | Highlights |
 |-------|--------|------------|
