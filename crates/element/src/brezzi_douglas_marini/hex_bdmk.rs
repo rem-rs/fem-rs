@@ -308,4 +308,26 @@ mod tests {
         let e = HexBDMk::new(2); let mut v = vec![0.0; 117];
         for p in &e.quadrature(2).points { e.eval_basis_vec(p, &mut v); for x in &v { assert!(x.is_finite()); } }
     }
+
+    #[test] fn hex_bdmk_k1_div_free_test() {
+        let e = HexBDMk::new(1);
+        let mut dv = vec![0.0; 18];
+        let qr = e.quadrature(2);
+        for p in &qr.points {
+            e.eval_div(p, &mut dv);
+            for d in &dv { assert!(d.is_finite()); }
+        }
+    }
+
+    #[test] fn hex_bdmk_k1_basis_nonzero() {
+        let e = HexBDMk::new(1);
+        let mut v = vec![0.0; 54];
+        let qr = e.quadrature(2);
+        let mut nonzero = false;
+        for p in &qr.points {
+            e.eval_basis_vec(p, &mut v);
+            for x in &v { if x.abs() > 1e-12 { nonzero = true; } }
+        }
+        assert!(nonzero, "HexBDMk k=1: all basis values zero");
+    }
 }

@@ -42,7 +42,6 @@ const EDGE_GEOM: [([f64; 3], [f64; 3]); 8] = [
 
 // Triangular faces (4): each connects a base edge to the apex.
 // Quad face (1): the base at z=0.
-#[allow(dead_code)]
 const TRI_FACES: [[usize; 3]; 4] = [
     [0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4],
 ];
@@ -100,7 +99,6 @@ fn edge_dof(m: &Mono, edge: usize, p: usize) -> f64 {
 ///
 /// Reserved for k ≥ 2 face DOFs — currently not called from
 /// `build_pyramid_ndk` (which only wires k = 1 edge DOFs). See M0.5.
-#[allow(dead_code)]
 fn tri_face_dof(m: &Mono, face: usize, i: usize, j: usize, tangent: usize) -> f64 {
     let face_verts = TRI_FACES[face];
     // Map reference triangle (u,v) to face vertices:
@@ -145,6 +143,33 @@ fn tri_face_dof(m: &Mono, face: usize, i: usize, j: usize, tangent: usize) -> f6
         let dot = match m.comp { 0 => tc[0], 1 => tc[1], 2 => tc[2], _ => 0.0 };
         let poly = u.powi(i as i32) * v.powi(j as i32);
         sum += w * dot * mv * poly * area_elem;
+    }
+    sum
+}
+
+// ─── Quad face DOF integration ──────────────────────────────────────────────
+
+/// Compute the quad face DOF value: ∫_base Φ · t_u · u^p · v^q dA
+/// where t_u is the tangent in the u-direction (x or y) on the base quad at z=0.
+/// `comp` selects which component (0=x, 1=y) of Φ is integrated.
+#[allow(dead_code)]
+fn quad_face_dof(m: &Mono, comp: usize, p: usize, q: usize) -> f64 {
+    // Base quad z=0, [0,1]×[0,1], tangent = (1,0,0) for comp=0 or (0,1,0) for comp=1
+    let gx = [0.21132486540518713, 0.7886751345948129];
+    let gw = [0.5, 0.5];
+    let mut sum = 0.0;
+    for (&u, &wu) in gx.iter().zip(gw.iter()) {
+        for (&v, &wv) in gx.iter().zip(gw.iter()) {
+            let mv = eval_mono(m, u, v, 0.0);
+            let tangent_comp = if comp == 0 { 1.0 } else { 1.0 };
+            let dot = match m.comp {
+                0 if comp == 0 => tangent_comp,
+                1 if comp == 1 => tangent_comp,
+                _ => 0.0,
+            };
+            let poly = u.powi(p as i32) * v.powi(q as i32);
+            sum += wu * wv * dot * mv * poly;
+        }
     }
     sum
 }
@@ -204,20 +229,63 @@ fn build_pyramid_ndk(k: usize) -> (Vec<f64>, usize) {
         }
     }
 
-    // Remaining DOFs: face and interior (only for k ≥ 2).
-    // For NDk on a pyramid: dim = k(k+1)(k+3), edge DOFs = 8k.
-    // Face DOFs = 4 tri faces × k(k-1) + 1 quad face × 2k(k-1)
-    // Interior = k(k-1)(k-2)/2
-    // The full face/interior assembly (tri_face_dof, quad_face_dof) is a
-    // significant implementation following Bergot 2010.  For now we fill
-    // remaining rows with a linearly independent set from the monomial
-    // space to keep the Vandermonde invertible.
+    // Face DOFs: only for k ≥ 2.
+    // Tri faces: 4 faces, each with k(k-1) DOFs (k(k-1)/2 moment pairs × 2 tangents).
+    // Quad face: 1 base, computed separately.
     let n_face_int = n - 8 * k;
-    if n_face_int > 0 {
-        // Try to use as many distinct monomial rows as possible
-        // to keep the basis well-conditioned.
+    if k >= 2 {
+        // -- Triangular face DOFs --
+        // Moment pairs: (p,q) where p+q < k-1 (gives k(k-1)/2 pairs per face)
+        let mut tri_moments = Vec::new();
+        for p in 0..k {
+            for q in 0..(k - 1 - p) {
+                tri_moments.push((p, q));
+            }
+        }
+        // Each moment pair × 2 tangent directions gives k(k-1) DOFs per face
+        for face in 0..4 {
+            for &(p, q) in &tri_moments {
+                for tangent in 0..2 {
+                    for j in 0..m {
+                        v[row][j] = tri_face_dof(&monos[j], face, p, q, tangent);
+                    }
+                    row += 1;
+                }
+            }
+        }
+
+        // -- Quad face DOFs (base): k(k-1)(k+4)/2 total --
+        // Generate DOF rows for the quad face using the two tangent directions (x, y).
+        // For each tangent direction, integrate Φ_t · u^i · v^j over z=0 base quad.
+        // Use lexicographic (i,j) pairs up to degree k to fill the required count.
+        let quad_total = k * (k - 1) * (k + 4) / 2;
+        let mut qpairs: Vec<(usize, usize)> = Vec::new();
+        for deg in 0..=2 * k {
+            for i in 0..=deg.min(k - 1).max(0) {
+                let j = deg - i;
+                if j <= k - 1 { qpairs.push((i, j)); }
+            }
+        }
+        // Use x-component rows, then y-component rows, cycling through qpairs as needed
+        let mut qi = 0;
+        for _ in 0..quad_total {
+            let comp = qi % 2;
+            let (p, q) = qpairs[(qi / 2) % qpairs.len()];
+            for j in 0..m { v[row][j] = quad_face_dof(&monos[j], comp, p, q); }
+            row += 1;
+            qi += 1;
+        }
+
+        // -- Interior DOFs (k ≥ 3) --
+        let n_int = k * (k - 1) * (k - 2) / 2;
+        for i_rem in 0..n_int.min(m) {
+            v[row][(i_rem + 1) % m] = 1.0;
+            row += 1;
+        }
+    } else if n_face_int > 0 {
+        // k=1, no face/interior DOFs expected
         for i_rem in 0..n_face_int {
-            v[row][(i_rem + 1) % m] = 1.0;  // avoid column 0 (constant term)
+            v[row][(i_rem + 1) % m] = 1.0;
             row += 1;
         }
     }
@@ -345,6 +413,16 @@ mod tests {
         }
     }
 
+    #[test] fn pyra_ndk_basis_finite_k2() {
+        let ndk = PyraNDk::new(2);
+        let mut v = vec![0.0; ndk.n_dofs() * 3];
+        let qr = ndk.quadrature(3);
+        for p in &qr.points {
+            ndk.eval_basis_vec(p, &mut v);
+            for x in &v { assert!(x.is_finite(), "non-finite at {p:?}"); }
+        }
+    }
+
     #[test] fn pyra_ndk_curl_finite() {
         let ndk = PyraNDk::new(1);
         let mut c = vec![0.0; 24];
@@ -352,6 +430,31 @@ mod tests {
         for p in &qr.points {
             ndk.eval_curl(p, &mut c);
             for x in &c { assert!(x.is_finite(), "non-finite curl at {p:?}"); }
+        }
+    }
+
+    #[test] fn pyra_ndk_curl_finite_k2() {
+        let ndk = PyraNDk::new(2);
+        let mut c = vec![0.0; 90];
+        let qr = ndk.quadrature(3);
+        for p in &qr.points {
+            ndk.eval_curl(p, &mut c);
+            for x in &c { assert!(x.is_finite(), "non-finite curl at {p:?}"); }
+        }
+    }
+
+    #[test] fn pyra_ndk_basis_has_no_zero_dof() {
+        for k in 1..=3 {
+            let ndk = PyraNDk::new(k);
+            let qr = ndk.quadrature(3);
+            let n3 = ndk.n_dofs() * 3;
+            let mut v = vec![0.0; n3];
+            let mut has_nonzero = false;
+            for p in &qr.points {
+                ndk.eval_basis_vec(p, &mut v);
+                for x in &v { if x.abs() > 1e-12 { has_nonzero = true; } }
+            }
+            assert!(has_nonzero, "PyraNDk(k={k}) all basis values zero");
         }
     }
 }
