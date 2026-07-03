@@ -11,6 +11,7 @@ use fem_mesh::topology::MeshTopology;
 use fem_mesh::SimplexMesh;
 use fem_space::fe_space::FESpace;
 use fem_space::H1Space;
+use fem_linalg_gpu::{GpuContext, pa_apply::{gpu_pa_apply_hex_q1, gpu_pa_apply_tet4}};
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -292,10 +293,40 @@ fn bench_hex_q4(c: &mut Criterion) {
     }
 }
 
+// ─── GPU Hex Q1 ─────────────────────────────────────────────────────────────
+
+fn bench_gpu_hex_q1(c: &mut Criterion) {
+    let gpu = pollster::block_on(GpuContext::new()).unwrap_or_else(|e| panic!("GPU init: {e}"));
+    let mut g = c.benchmark_group("pa_gpu_apply");
+    for &n in &[10usize, 20, 40] {
+        let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+        let space = H1Space::new(mesh, 1);
+        let nd = space.n_dofs();
+        let ne = space.mesh().n_elements();
+        let ldof = 8usize;
+        let pd = build_hex_q1_pa_data(space.mesh(), &|_| 1.0);
+        let pa: Vec<f32> = pd.data.iter().map(|&v| v as f32).collect();
+        let ed: Vec<Vec<u32>> = (0..ne as u32)
+            .map(|e| space.element_dofs(e).to_vec()).collect();
+        let flat_ed: Vec<u32> = ed.iter().flat_map(|e| e.iter().copied()).collect();
+        let x_f64 = random_x(nd);
+        let x: Vec<f32> = x_f64.iter().map(|&v| v as f32).collect();
+        let ny = ne * ldof;
+        g.bench_with_input(BenchmarkId::new("hex_q1", nd), &(pa, flat_ed, x, ny),
+            |b, (pa, ed, x, ny)| b.iter(|| {
+                let mut y = vec![0.0f32; *ny];
+                gpu_pa_apply_hex_q1(black_box(&gpu), black_box(pa), black_box(ed), black_box(x), black_box(y.as_mut_slice()));
+            })
+        );
+    }
+    g.finish();
+}
+
 // ─── main entry ─────────────────────────────────────────────────────────────
 
 fn bench_pa_all(c: &mut Criterion) {
     bench_hex_q1(c);
+    bench_gpu_hex_q1(c);
     bench_quad_q1(c);
     bench_quad_q2(c);
     bench_tet4(c);

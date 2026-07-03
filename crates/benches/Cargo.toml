@@ -16,6 +16,7 @@ fem-solver = { path = "../solver", features = ["gpu"] }
 fem-amg = { path = "../amg" }
 criterion = { workspace = true }
 wgpu = "27"
+pollster = "0.4"
 
 [features]
 default = ["parallel"]
