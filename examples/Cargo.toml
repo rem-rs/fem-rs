@@ -362,6 +362,10 @@ path = "meshing_tmop_target_matrix.rs"
 name = "fluids_navier_transient"
 path = "fluids_navier_transient.rs"
 
+[[example]]
+name = "shifted_sbm_diffusion"
+path = "shifted_sbm_diffusion.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
