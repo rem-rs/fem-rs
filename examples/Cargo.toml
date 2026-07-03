@@ -177,6 +177,22 @@ name = "mfem_ex14_dg_poisson"
 path = "mfem_ex14_dg_poisson.rs"
 
 [[example]]
+name = "mfem_ex10_hyperelastic_dyn"
+path = "mfem_ex10_hyperelastic_dyn.rs"
+
+[[example]]
+name = "mfem_ex19_hyperelastic_dyn_incomp"
+path = "mfem_ex19_hyperelastic_dyn_incomp.rs"
+
+[[example]]
+name = "mfem_ex20_symplectic"
+path = "mfem_ex20_symplectic.rs"
+
+[[example]]
+name = "mfem_ex35_multidomain"
+path = "mfem_ex35_multidomain.rs"
+
+[[example]]
 name = "mfem_ex21_amr_elasticity"
 path = "mfem_ex21_amr_elasticity.rs"
 
