@@ -358,6 +358,10 @@ path = "spde_gaussian_field.rs"
 name = "meshing_tmop_target_matrix"
 path = "meshing_tmop_target_matrix.rs"
 
+[[example]]
+name = "fluids_navier_transient"
+path = "fluids_navier_transient.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
