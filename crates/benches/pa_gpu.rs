@@ -35,8 +35,6 @@ fn flat_elem_dofs(n_elems: usize, ldof: usize) -> Vec<Vec<u32>> {
 
 fn bench_hex_q1(c: &mut Criterion) {
     let sizes = [10usize, 20, 40, 80];
-
-    // apply
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
@@ -56,8 +54,6 @@ fn bench_hex_q1(c: &mut Criterion) {
         }
         g.finish();
     }
-
-    // build
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
@@ -74,7 +70,6 @@ fn bench_hex_q1(c: &mut Criterion) {
 
 fn bench_quad_q1(c: &mut Criterion) {
     let sizes = [20usize, 40, 80, 160];
-
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
@@ -94,7 +89,6 @@ fn bench_quad_q1(c: &mut Criterion) {
         }
         g.finish();
     }
-
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
@@ -111,7 +105,6 @@ fn bench_quad_q1(c: &mut Criterion) {
 
 fn bench_quad_q2(c: &mut Criterion) {
     let sizes = [10usize, 20, 40, 80];
-
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
@@ -131,7 +124,6 @@ fn bench_quad_q2(c: &mut Criterion) {
         }
         g.finish();
     }
-
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
@@ -147,8 +139,7 @@ fn bench_quad_q2(c: &mut Criterion) {
 // ─── Tet4 ───────────────────────────────────────────────────────────────────
 
 fn bench_tet4(c: &mut Criterion) {
-    let sizes = [2usize, 4, 6, 8];
-
+    let sizes = [4usize, 8, 16, 32];
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
@@ -168,7 +159,6 @@ fn bench_tet4(c: &mut Criterion) {
         }
         g.finish();
     }
-
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
@@ -184,8 +174,7 @@ fn bench_tet4(c: &mut Criterion) {
 // ─── Hex Q2 (synthetic DOFs, 27 nodes per element) ─────────────────────────
 
 fn bench_hex_q2(c: &mut Criterion) {
-    let sizes = [2usize, 4, 8, 16];  // n³ elements
-
+    let sizes = [2usize, 4, 8, 16];
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
@@ -204,7 +193,6 @@ fn bench_hex_q2(c: &mut Criterion) {
         }
         g.finish();
     }
-
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
@@ -221,7 +209,6 @@ fn bench_hex_q2(c: &mut Criterion) {
 
 fn bench_hex_q3(c: &mut Criterion) {
     let sizes = [2usize, 4, 6];
-
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
@@ -240,7 +227,6 @@ fn bench_hex_q3(c: &mut Criterion) {
         }
         g.finish();
     }
-
     // sum-factorized version
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
@@ -260,7 +246,6 @@ fn bench_hex_q3(c: &mut Criterion) {
         }
         g.finish();
     }
-
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
@@ -277,7 +262,6 @@ fn bench_hex_q3(c: &mut Criterion) {
 
 fn bench_hex_q4(c: &mut Criterion) {
     let sizes = [2usize, 3];
-
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
@@ -296,7 +280,6 @@ fn bench_hex_q4(c: &mut Criterion) {
         }
         g.finish();
     }
-
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
