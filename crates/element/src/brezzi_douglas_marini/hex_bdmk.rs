@@ -37,12 +37,6 @@ fn gauss_2d(k: usize) -> (Vec<[f64; 2]>, Vec<f64>) {
 }
 
 /// 3D Gauss-Legendre tensor product on the reference cube [0,1]³.
-///
-/// Reserved for the interior DOF integration in the k ≥ 2 completion path.
-/// The current `if k >= 2` branch uses a monomial fill stub (see M0.5 in
-/// docs/evaluation/MFEM_GAP_ANALYSIS_2026-07-02.md), so this helper is
-/// unused until that stub is replaced.
-#[allow(dead_code)]
 fn gauss_3d(k: usize) -> (Vec<[f64; 3]>, Vec<f64>) {
     let n = (k + 2).max(2);
     let (x1d, w1d) = crate::quadrature::gauss_legendre_arbitrary(n);
@@ -148,12 +142,48 @@ fn build_hex_bdmk(k: usize) -> (Vec<f64>, usize) {
         }
     }
 
-    // Interior DOFs: L² moments of div(v) weighted by monomials vanishing on all faces
-    // For k >= 2, we use bubble functions vanishing on boundary.
+    // Interior DOFs: L² moments of div(v) weighted by monomials.
+    // The interior space for BDMk has dim = k(k-1)(k+1)/2.
+    // We integrate div(M) · φ over [0,1]³ where φ ranges over (some of)
+    // the P_{k-1} monomials.  For k=2 this gives 3 interior DOFs (using
+    // weight functions {1, x, y}); for k=3, 12 DOFs; etc.
     if k >= 2 {
         let n_int = k * (k - 1) * (k + 1) / 2;
-        for i2 in 0..n_int.min(m) {
-            vand[row][i2 % m] = 1.0;
+        let (g3_pts, g3_wts) = gauss_3d(k);
+        // Build weight-function exponent list from first n_int P_{k-1} monomials
+        let mut exponents: Vec<(usize, usize, usize)> = Vec::new();
+        for deg in 0..=k {
+            for i in 0..=deg { for j in 0..=(deg - i) {
+                let ij = deg - i - j;
+                exponents.push((i, j, ij));
+                if exponents.len() >= n_int { break; }
+            } if exponents.len() >= n_int { break; } }
+            if exponents.len() >= n_int { break; }
+        }
+        for &(ei, ej, ek) in &exponents {
+            for midx in 0..m {
+                let mut sum = 0.0;
+                for (pt, &w) in g3_pts.iter().zip(g3_wts.iter()) {
+                    let div_mv = match monos[midx].comp {
+                        0 => { let a = monos[midx].a as f64;
+                               if a > 0.0 { a * pt[0].powi(monos[midx].a as i32 - 1)
+                                                  * pt[1].powi(monos[midx].b as i32)
+                                                  * pt[2].powi(monos[midx].c as i32) } else { 0.0 } }
+                        1 => { let b = monos[midx].b as f64;
+                               if b > 0.0 { b * pt[0].powi(monos[midx].a as i32)
+                                                  * pt[1].powi(monos[midx].b as i32 - 1)
+                                                  * pt[2].powi(monos[midx].c as i32) } else { 0.0 } }
+                        2 => { let c = monos[midx].c as f64;
+                               if c > 0.0 { c * pt[0].powi(monos[midx].a as i32)
+                                                  * pt[1].powi(monos[midx].b as i32)
+                                                  * pt[2].powi(monos[midx].c as i32 - 1) } else { 0.0 } }
+                        _ => 0.0,
+                    };
+                    let phi = pt[0].powi(ei as i32) * pt[1].powi(ej as i32) * pt[2].powi(ek as i32);
+                    sum += w * div_mv * phi;
+                }
+                vand[row][midx] = sum;
+            }
             row += 1;
         }
     }

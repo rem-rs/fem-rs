@@ -196,26 +196,29 @@ fn build_pyramid_ndk(k: usize) -> (Vec<f64>, usize) {
     let mut row = 0;
 
     // Edge DOFs: 8 edges, k moments each.
-    // For k=1, this gives 8 DOFs (correct).
-    // For k>=2, face and interior DOFs must be added.
-    // These require correct (i,j,m) enumeration per face type.
-    // Currently k>=2 is a placeholder — the face/interior DOF
-    // enumeration follows from the Bergot 2010 collapsed-coord basis
-    // and needs a dedicated implementation pass.
-    if k >= 2 {
-        // Placeholder: fill remaining DOFs with monomial rows
-        // so the Vandermonde matrix is invertible (basis spans
-        // a subspace of the full NDk space).
-        for i_rem in 0..n {
-            v[i_rem][i_rem % m] = 1.0;
+    // For all k ≥ 1, edge DOFs are evaluated via `edge_dof`.
+    for edge in 0..8 {
+        for p in 0..k {
+            for j in 0..m { v[row][j] = edge_dof(&monos[j], edge, p); }
+            row += 1;
         }
-        row = n;
-    } else {
-        for edge in 0..8 {
-            for p in 0..k {
-                for j in 0..m { v[row][j] = edge_dof(&monos[j], edge, p); }
-                row += 1;
-            }
+    }
+
+    // Remaining DOFs: face and interior (only for k ≥ 2).
+    // For NDk on a pyramid: dim = k(k+1)(k+3), edge DOFs = 8k.
+    // Face DOFs = 4 tri faces × k(k-1) + 1 quad face × 2k(k-1)
+    // Interior = k(k-1)(k-2)/2
+    // The full face/interior assembly (tri_face_dof, quad_face_dof) is a
+    // significant implementation following Bergot 2010.  For now we fill
+    // remaining rows with a linearly independent set from the monomial
+    // space to keep the Vandermonde invertible.
+    let n_face_int = n - 8 * k;
+    if n_face_int > 0 {
+        // Try to use as many distinct monomial rows as possible
+        // to keep the basis well-conditioned.
+        for i_rem in 0..n_face_int {
+            v[row][(i_rem + 1) % m] = 1.0;  // avoid column 0 (constant term)
+            row += 1;
         }
     }
 
