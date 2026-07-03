@@ -23,6 +23,7 @@ use fem_mesh::topology::MeshTopology;
 use crate::fe_space::{FESpace, SpaceType};
 use crate::iga::IgaSpace1D;
 use crate::iga::IgaSpace2D;
+use crate::iga::IgaSpace3D;
 
 // ─── 1D single-patch IGA FESpace ────────────────────────────────────────────
 
@@ -493,6 +494,172 @@ impl MeshTopology for IgaMultiPatchMesh2D {
     fn face_nodes(&self, _face: FaceId) -> &[NodeId] { &[] }
     fn face_tag(&self, _face: FaceId) -> i32 { 0 }
     fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) { (0, None) }
+}
+
+// ─── 3D single-patch IGA FESpace ────────────────────────────────────────────
+
+/// One trilinear/trilinear-quadratic hex cell per non-empty parametric span
+/// in the B-spline / NURBS 3D patch.
+#[derive(Debug, Clone)]
+pub struct IgaSinglePatchMesh3D {
+    n_nodes:     usize,
+    node_coords: Vec<Vec<f64>>,
+    element_type: ElementType,
+    connectivity: Vec<Vec<NodeId>>,
+}
+
+impl IgaSinglePatchMesh3D {
+    pub fn from_iga_space(space: &IgaSpace3D) -> Result<Self, String> {
+        let p = space.degree_u();
+        let q = space.degree_v();
+        let r = space.degree_w();
+        let n_local = (p + 1) * (q + 1) * (r + 1);
+        let el_ty = match n_local {
+            8  => ElementType::Hex8,
+            27 => ElementType::Hex27,
+            _ => return Err(format!(
+                "IgaFESpace3D: (p+1)(q+1)(r+1) must be 8 or 27, got {n_local} (p={p},q={q},r={r})"
+            )),
+        };
+
+        let nctrl = space.n_dofs();
+        let mut node_coords = vec![vec![0.0_f64; 3]; nctrl];
+        for (g, c) in space.control_points().iter().enumerate() {
+            node_coords[g][0] = c[0];
+            node_coords[g][1] = c[1];
+            node_coords[g][2] = c[2];
+        }
+
+        let mut connectivity = Vec::with_capacity(space.non_empty_spans().len());
+        for (span_u, span_v, span_w) in space.non_empty_spans() {
+            let active = space.active_dofs_for_span(span_u, span_v, span_w)?;
+            if active.len() != n_local {
+                return Err(format!(
+                    "IgaSinglePatchMesh3D: active dofs per span ({},{},{}) len {} != {n_local}",
+                    span_u, span_v, span_w, active.len()
+                ));
+            }
+            connectivity.push(active.into_iter().map(|i| i as u32).collect());
+        }
+
+        Ok(Self { n_nodes: nctrl, node_coords, element_type: el_ty, connectivity })
+    }
+}
+
+/// [`FESpace`] wrapper for a single 3D IGA / NURBS patch (see [`IgaSpace3D`]).
+#[derive(Debug, Clone)]
+pub struct IgaFESpace3D {
+    iga:  IgaSpace3D,
+    mesh: IgaSinglePatchMesh3D,
+}
+
+impl IgaFESpace3D {
+    pub fn new(iga: IgaSpace3D) -> Result<Self, String> {
+        let mesh = IgaSinglePatchMesh3D::from_iga_space(&iga)?;
+        Ok(Self { iga, mesh })
+    }
+
+    pub fn iga(&self) -> &IgaSpace3D { &self.iga }
+    pub fn into_iga(self) -> IgaSpace3D { self.iga }
+}
+
+impl FESpace for IgaFESpace3D {
+    type Mesh = IgaSinglePatchMesh3D;
+
+    fn mesh(&self) -> &Self::Mesh { &self.mesh }
+
+    fn n_dofs(&self) -> usize { self.iga.n_dofs() }
+
+    fn element_dofs(&self, elem: u32) -> &[DofId] {
+        node_ids_as_dof_ids(self.mesh.element_nodes(elem))
+    }
+
+    fn interpolate(&self, f: &dyn Fn(&[f64]) -> f64) -> Vector<f64> {
+        let n = self.n_dofs();
+        let mut v = Vector::zeros(n);
+        let slice = v.as_slice_mut();
+        for i in 0..n {
+            let c = &self.mesh.node_coords[i];
+            slice[i] = f(c.as_slice());
+        }
+        v
+    }
+
+    fn space_type(&self) -> SpaceType { SpaceType::H1 }
+
+    fn order(&self) -> u8 {
+        use std::cmp::max;
+        max(max(self.iga.degree_u(), self.iga.degree_v()), self.iga.degree_w()) as u8
+    }
+}
+
+impl MeshTopology for IgaSinglePatchMesh3D {
+    fn dim(&self) -> u8 { 3 }
+
+    fn n_nodes(&self) -> usize { self.n_nodes }
+
+    fn n_elements(&self) -> usize { self.connectivity.len() }
+
+    fn n_boundary_faces(&self) -> usize { 0 }
+
+    fn element_nodes(&self, elem: ElemId) -> &[NodeId] {
+        &self.connectivity[elem as usize]
+    }
+
+    fn element_type(&self, _elem: ElemId) -> ElementType { self.element_type }
+
+    fn element_tag(&self, _elem: ElemId) -> i32 { 0 }
+
+    fn node_coords(&self, node: NodeId) -> &[f64] {
+        &self.node_coords[node as usize]
+    }
+
+    fn face_nodes(&self, _face: FaceId) -> &[NodeId] { &[] }
+
+    fn face_tag(&self, _face: FaceId) -> i32 { 0 }
+
+    fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) { (0, None) }
+}
+
+#[cfg(test)]
+mod iga3d_tests {
+    use super::*;
+    use crate::iga::IgaSpace3D;
+
+    #[test]
+    fn iga_3d_dof_count() {
+        // p=q=r=1, nu=nv=nw=3 → 27 DOFs, 8-node hex per span
+        let space = IgaSpace3D::new_uniform_clamped(1, 1, 1, 3, 3, 3).unwrap();
+        assert_eq!(space.n_dofs(), 27);
+        let fes = IgaFESpace3D::new(space).unwrap();
+        assert_eq!(fes.n_dofs(), 27);
+        assert_eq!(fes.mesh().n_elements(), 8); // 2³ spans
+        assert!(matches!(fes.mesh().element_type(0), ElementType::Hex8));
+    }
+
+    #[test]
+    fn iga_3d_quadratic_is_hex27() {
+        let space = IgaSpace3D::new_uniform_clamped(2, 2, 2, 4, 4, 4).unwrap();
+        let fes = IgaFESpace3D::new(space).unwrap();
+        assert!(matches!(fes.mesh().element_type(0), ElementType::Hex27));
+    }
+
+    #[test]
+    fn iga_3d_rejects_unsupported_degree() {
+        let err = IgaSpace3D::new_uniform_clamped(1, 1, 3, 3, 3, 4).unwrap();
+        let r = IgaFESpace3D::new(err);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("must be 8 or 27"));
+    }
+
+    #[test]
+    fn iga_3d_active_dofs_per_span_are_8() {
+        let space = IgaSpace3D::new_uniform_clamped(1, 1, 1, 4, 4, 4).unwrap();
+        for (su, sv, sw) in space.non_empty_spans() {
+            let active = space.active_dofs_for_span(su, sv, sw).unwrap();
+            assert_eq!(active.len(), 8);
+        }
+    }
 }
 
 #[cfg(test)]

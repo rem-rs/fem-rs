@@ -118,6 +118,16 @@ pub enum IgaBoundary2D {
     VMax,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IgaBoundary3D {
+    UMin,
+    UMax,
+    VMin,
+    VMax,
+    WMin,
+    WMax,
+}
+
 /// Minimal single-patch tensor-product IGA space in 2D.
 ///
 /// Global control-point DOFs use row-major indexing:
@@ -313,6 +323,140 @@ impl IgaSpace2D {
     pub fn control_points(&self) -> &[[f64; 2]] {
         &self.ctrl_points
     }
+}
+
+// ─── 3D tri-variate IGA space ─────────────────────────────────────────────
+
+/// Minimal single-patch tri-variate tensor-product IGA space in 3D.
+///
+/// Global control-point DOFs use standard lexicographic indexing:
+/// `global = k * nu * nv + j * nu + i`, where `k` is the w-index,
+/// `j` the v-index, and `i` the u-index.
+#[derive(Clone, Debug)]
+pub struct IgaSpace3D {
+    basis_u: BsplineBasis,
+    basis_v: BsplineBasis,
+    basis_w: BsplineBasis,
+    knots_u: Vec<f64>,
+    knots_v: Vec<f64>,
+    knots_w: Vec<f64>,
+    nu: usize,
+    nv: usize,
+    nw: usize,
+    weights: Option<Vec<f64>>,
+    ctrl_points: Vec<[f64; 3]>,
+}
+
+impl IgaSpace3D {
+    pub fn new(
+        p: usize, q: usize, r: usize,
+        knots_u: Vec<f64>, knots_v: Vec<f64>, knots_w: Vec<f64>,
+        nu: usize, nv: usize, nw: usize,
+        weights: Option<Vec<f64>>,
+    ) -> Result<Self, String> {
+        let ctrl_points = default_unit_cube_ctrl_points(nu, nv, nw)?;
+        Self::new_with_ctrl_points(p, q, r, knots_u, knots_v, knots_w, nu, nv, nw, weights, ctrl_points)
+    }
+
+    pub fn new_with_ctrl_points(
+        p: usize, q: usize, r: usize,
+        knots_u: Vec<f64>, knots_v: Vec<f64>, knots_w: Vec<f64>,
+        nu: usize, nv: usize, nw: usize,
+        weights: Option<Vec<f64>>,
+        ctrl_points: Vec<[f64; 3]>,
+    ) -> Result<Self, String> {
+        if nu == 0 || nv == 0 || nw == 0 {
+            return Err("IgaSpace3D: nu, nv, nw must be > 0".to_string());
+        }
+        let ku = KnotVector::new_clamped(knots_u.clone())?;
+        let kv = KnotVector::new_clamped(knots_v.clone())?;
+        let kw = KnotVector::new_clamped(knots_w.clone())?;
+        let basis_u = BsplineBasis::new(p, ku)?;
+        let basis_v = BsplineBasis::new(q, kv)?;
+        let basis_w = BsplineBasis::new(r, kw)?;
+        if basis_u.n_basis() != nu {
+            return Err(format!("IgaSpace3D: nu ({nu}) does not match u basis count ({})", basis_u.n_basis()));
+        }
+        if basis_v.n_basis() != nv {
+            return Err(format!("IgaSpace3D: nv ({nv}) does not match v basis count ({})", basis_v.n_basis()));
+        }
+        if basis_w.n_basis() != nw {
+            return Err(format!("IgaSpace3D: nw ({nw}) does not match w basis count ({})", basis_w.n_basis()));
+        }
+        validate_weights(weights.as_deref(), nu * nv * nw, "IgaSpace3D")?;
+        if ctrl_points.len() != nu * nv * nw {
+            return Err(format!("IgaSpace3D: ctrl_points length ({}) does not match expected count ({})", ctrl_points.len(), nu * nv * nw));
+        }
+        Ok(Self { basis_u, basis_v, basis_w, knots_u, knots_v, knots_w, nu, nv, nw, weights, ctrl_points })
+    }
+
+    pub fn new_uniform_clamped(p: usize, q: usize, r: usize, nu: usize, nv: usize, nw: usize) -> Result<Self, String> {
+        let knots_u = uniform_clamped_knots(p, nu)?;
+        let knots_v = uniform_clamped_knots(q, nv)?;
+        let knots_w = uniform_clamped_knots(r, nw)?;
+        Self::new(p, q, r, knots_u, knots_v, knots_w, nu, nv, nw, None)
+    }
+
+    pub fn n_dofs(&self) -> usize { self.nu * self.nv * self.nw }
+    pub fn degree_u(&self) -> usize { self.basis_u.degree() }
+    pub fn degree_v(&self) -> usize { self.basis_v.degree() }
+    pub fn degree_w(&self) -> usize { self.basis_w.degree() }
+    pub fn knot_slice_u(&self) -> &[f64] { &self.knots_u }
+    pub fn knot_slice_v(&self) -> &[f64] { &self.knots_v }
+    pub fn knot_slice_w(&self) -> &[f64] { &self.knots_w }
+    pub fn weights(&self) -> Option<&[f64]> { self.weights.as_deref() }
+    pub fn control_points(&self) -> &[[f64; 3]] { &self.ctrl_points }
+
+    pub fn non_empty_spans(&self) -> Vec<(usize, usize, usize)> {
+        let p = self.basis_u.degree();
+        let nu_last = self.basis_u.n_basis() - 1;
+        let q = self.basis_v.degree();
+        let nv_last = self.basis_v.n_basis() - 1;
+        let r = self.basis_w.degree();
+        let nw_last = self.basis_w.n_basis() - 1;
+        let u_spans: Vec<usize> = (p..=nu_last).filter(|&s| self.knots_u[s] < self.knots_u[s + 1]).collect();
+        let v_spans: Vec<usize> = (q..=nv_last).filter(|&s| self.knots_v[s] < self.knots_v[s + 1]).collect();
+        let w_spans: Vec<usize> = (r..=nw_last).filter(|&s| self.knots_w[s] < self.knots_w[s + 1]).collect();
+        let mut spans = Vec::with_capacity(u_spans.len() * v_spans.len() * w_spans.len());
+        for sw in &w_spans { for sv in &v_spans { for su in &u_spans { spans.push((*su, *sv, *sw)); } } }
+        spans
+    }
+
+    pub fn active_dofs_for_span(&self, span_u: usize, span_v: usize, span_w: usize) -> Result<Vec<usize>, String> {
+        let p = self.basis_u.degree(); let nu_last = self.basis_u.n_basis() - 1;
+        let q = self.basis_v.degree(); let nv_last = self.basis_v.n_basis() - 1;
+        let r = self.basis_w.degree(); let nw_last = self.basis_w.n_basis() - 1;
+        if span_u < p || span_u > nu_last { return Err(format!("span_u {span_u} out of range [{p},{nu_last}]")); }
+        if span_v < q || span_v > nv_last { return Err(format!("span_v {span_v} out of range [{q},{nv_last}]")); }
+        if span_w < r || span_w > nw_last { return Err(format!("span_w {span_w} out of range [{r},{nw_last}]")); }
+        if self.knots_u[span_u] >= self.knots_u[span_u + 1] { return Err(format!("span_u {span_u} is empty")); }
+        if self.knots_v[span_v] >= self.knots_v[span_v + 1] { return Err(format!("span_v {span_v} is empty")); }
+        if self.knots_w[span_w] >= self.knots_w[span_w + 1] { return Err(format!("span_w {span_w} is empty")); }
+        let au = self.basis_u.active_basis_indices(span_u);
+        let av = self.basis_v.active_basis_indices(span_v);
+        let aw = self.basis_w.active_basis_indices(span_w);
+        let mut active = Vec::with_capacity(au.len() * av.len() * aw.len());
+        for k in aw { for j in &av { for &i in &au { active.push(k * self.nu * self.nv + j * self.nu + i); } } }
+        Ok(active)
+    }
+}
+
+fn default_unit_cube_ctrl_points(nu: usize, nv: usize, nw: usize) -> Result<Vec<[f64; 3]>, String> {
+    if nu < 2 || nv < 2 || nw < 2 {
+        return Err(format!("IgaSpace3D: default control net requires nu,nv,nw >= 2, got ({nu},{nv},{nw})"));
+    }
+    let mut pts = Vec::with_capacity(nu * nv * nw);
+    for k in 0..nw {
+        for j in 0..nv {
+            for i in 0..nu {
+                let u = i as f64 / (nu - 1) as f64;
+                let v = j as f64 / (nv - 1) as f64;
+                let w = k as f64 / (nw - 1) as f64;
+                pts.push([u, v, w]);
+            }
+        }
+    }
+    Ok(pts)
 }
 
 fn default_unit_square_ctrl_points(nu: usize, nv: usize) -> Result<Vec<[f64; 2]>, String> {

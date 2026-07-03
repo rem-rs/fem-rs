@@ -26,10 +26,12 @@ pub struct HCurlTraceSpace<M: MeshTopology> {
     face_dofs: Vec<DofId>,
     /// DOFs per boundary face.
     dofs_per_face: usize,
+    #[allow(dead_code)]
     n_bfaces: usize,
 }
 
 impl<M: MeshTopology> HCurlTraceSpace<M> {
+    /// Create a trace space.
     pub fn new(mesh: M, order: u8) -> Self {
         let k = order as usize;
         let dim = mesh.dim() as usize;
@@ -74,6 +76,7 @@ pub struct HDivTraceSpace<M: MeshTopology> {
     n_dofs: usize,
     face_dofs: Vec<DofId>,
     dofs_per_face: usize,
+    #[allow(dead_code)]
     n_bfaces: usize,
 }
 
