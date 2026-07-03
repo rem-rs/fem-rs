@@ -25,6 +25,7 @@ pub mod step_iges;
 pub mod cut_cell;
 pub mod hp_amr;
 pub mod dec;
+pub mod extrusion;
 pub mod poly_mesh;
 
 pub use amr::{refine_marked, refine_marked_with_tree, derefine_marked, DerefineTree, DerefineRecord, refine_nonconforming, refine_nonconforming_3d, refine_nonconforming_quad, refine_nonconforming_hex, refine_nonconforming_quad_aniso, refine_nonconforming_hex_aniso, refine_nonconforming_prism, refine_nonconforming_prism_aniso, refine_nonconforming_pyramid, refine_nonconforming_pyramid_aniso, refine_nonconforming_tri_aniso, refine_nonconforming_tet_aniso, QuadRefineDir, HexRefineDir, TriRefineDir, TetRefineDir, PrismRefineDir, PyramidRefineDir, refine_uniform, refine_uniform_3d, refine_prism6_uniform, refine_pyramid5_uniform, refine_hex8_uniform, refine_hex20_uniform, refine_hex27_uniform, zz_estimator, zz_estimator_3d, zz_estimator_3d_general, kelly_estimator, kelly_estimator_3d, kelly_estimator_3d_general, residual_estimator, residual_estimator_3d, residual_estimator_3d_general, dwr_estimator, dwr_estimator_3d_general, prolongate_p1, restrict_to_coarse_p1, HangingNodeConstraint, HangingFaceConstraint, HangingQuadFaceConstraint, NCState, NCState3D, NCStateQuad, NCStateHex, NCStatePrism, NCStatePyramid};
@@ -47,3 +48,4 @@ pub use simplex::SimplexMesh;
 pub use submesh::{SubMesh, extract_submesh, extract_submesh_by_name};
 pub use topology::MeshTopology;
 pub use transformation::ElementTransformation;
+pub use extrusion::{extrude_tri3_to_prisms, extrude_quad4_to_hex8};
