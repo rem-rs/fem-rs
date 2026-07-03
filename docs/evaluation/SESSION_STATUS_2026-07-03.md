@@ -1,6 +1,26 @@
-# Session Status — GPU PA 工作盘点
+# Session Status — GPU PA 工作盘点 + M1.5 Miniapp 完成
 
 日期：2026-07-03
+
+---
+
+## 0. 本 Session 完成的工作
+
+| 任务 | 文件 | 状态 |
+|---|---|---|
+| CPU PA 链路导出 | `crates/assembly/src/pa/mod.rs` | ✅ |
+| Warning 清理 | `q2.rs`, `q3.rs`, `q4.rs`, `pa_apply.rs`, `tet4.rs` | ✅ 0 PA warning |
+| CPU PA 全算子基准 | `crates/benches/pa_gpu.rs` | ✅ 8 算子 |
+| Tet4 CPU PA 修复 | `crates/assembly/src/pa/tet4.rs` | ✅ SpMV 对比测试通过 |
+| WGSL `array` 关键字 | `crates/linalg-gpu/src/pa_apply.rs` | ✅ 5 个 shader 修复 |
+| **M1.5 Miniapp 7/7** | | **全部完成** |
+| — `plor_hex_solve` | 3D LOR / AMG 预条件 | ✅ |
+| — `hyperelastic_hooke` | 3D NeoHookean 压缩 | ✅ |
+| — `gslib_field_transfer` | 保守 L² 场传输 | ✅ |
+| — `spde_gaussian_field` | 2D KL 随机场 | ✅ |
+| — `meshing_tmop_target_matrix` | Shape vs SizeShape | ✅ |
+| — `fluids_navier_transient` | BDF1 驱动方腔 NS | ✅ |
+| — `shifted_sbm_diffusion` | SBM 替代网格 | ✅ |
 
 ---
 
@@ -104,25 +124,17 @@
 ## 4. 下 Session 提示词
 
 ```
-继续 GPU PA 工作。参考 docs/evaluation/SESSION_STATUS_2026-07-03.md。
+继续 fem-rs 的 MFEM 对齐工作。上 Session 完成了 GPU PA CPU 链路、warning 清理、CPU 全算子基准、Tet4 PA 修复、WGSL 语法修正、M1.5 全部 7 个 miniapp（plor_hex_solve/hyperelastic_hooke/gslib_field_transfer/spde_gaussian_field/meshing_tmop_target_matrix/fluids_navier_transient/shifted_sbm_diffusion）。
 
-第一步：运行性能基准
-- FEM_BENCH_QUICK=1 cargo bench -p fem-benches --bench pa_gpu
-- 观察 CPU PA apply、CPU PA build、GPU PA apply 三组时间
-- 确认 GPU 上下文初始化成功
-- 记录各规模加速比
+当前状态见 docs/evaluation/SESSION_STATUS_2026-07-03.md。
 
-第二步：如果基准通过 → 扩展 benchmark 到 100³ (1M DOF)
-- 或加大 sample_size 跑正式基准
+下一步可选项：
+1. NURBS 双份实现清理 — 消除 fem-element 中 15 个 deprecated warning，将旧 nurbs.rs API 逐步迁移至 iga 模块
+2. pex 并行示例补齐 — 当前 5/36，需新增至 20 个（参考 mfem_pex1_parallel_poisson.rs 模式，用 ThreadLauncher，无需 MPI）
+3. NURBS/IGA 示例补齐 — 当前 2 个，需 5 个 (iga_ex_annulus_poisson 等)
+4. M0.3 完成 HANDOVER_2B — Hex8/Prism6/Pyramid5 Quad face 上的 HCurl/HDiv NC 约束
 
-第三步：修复 Tet4 PA bug
-- 对比单元素 tet 的 pa_apply_tet4 和 Assembler::assemble_bilinear 的元素矩阵
-- 排查 J⁻ᵀ 计算或参考梯度符号
-
-第四步：GPU PA 端到端 CG
-- 修改 gpu_pa_apply_* 以复用 buffer
-- 将 PA apply 接入 solve_cg_gpu
-- 编写端到端测试：build_pa → GPU PA CG → CPU PA CG 对比
+我的建议按顺序推进：NURBS 清理 → pex 补齐 → IGA 示例 → HANDOVER_2B。
 ```
 
 ---
