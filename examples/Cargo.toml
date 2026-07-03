@@ -354,6 +354,10 @@ path = "gslib_field_transfer.rs"
 name = "spde_gaussian_field"
 path = "spde_gaussian_field.rs"
 
+[[example]]
+name = "meshing_tmop_target_matrix"
+path = "meshing_tmop_target_matrix.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
