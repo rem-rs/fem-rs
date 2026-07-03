@@ -698,7 +698,7 @@ mod tests {
     /// Control points at the four corners with Q1 (bilinear degree-1) basis.
     #[test]
     fn physical_map_2d_unit_square_is_identity() {
-        let kv = NurbsNurbsKnotVector::uniform(1, 1);
+        let kv = NurbsKnotVector::uniform(1, 1);
         // Q1 patch on [0,1]^2: control pts = corners in (i,j) order
         // DOF order: j*n_u + i, so DOF 0=(0,0), 1=(1,0), 2=(0,1), 3=(1,1)
         let ctrl = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
