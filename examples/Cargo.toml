@@ -344,6 +344,10 @@ path = "plor_hex_solve.rs"
 name = "hyperelastic_hooke"
 path = "hyperelastic_hooke.rs"
 
+[[example]]
+name = "gslib_field_transfer"
+path = "gslib_field_transfer.rs"
+
 [lib]
 name = "fem_examples"
 path = "src/lib.rs"
