@@ -346,7 +346,7 @@ pub struct IgaMultiPatchMesh2D {
 /// For each pair in `edge_connectivity`: maps the DOFs along patch_a's edge `edge_a`
 /// to the same global DOFs as patch_b's edge `edge_b` (C⁰ continuity).
 fn build_multi_patch_dof_maps(
-    patches: &[fem_element::nurbs::NurbsPatch2DData],
+    patches: &[fem_element::iga::NurbsPatch2DData],
     edge_conn: &[(usize, usize, usize, usize)],
 ) -> (Vec<Vec<DofId>>, usize) {
     let n_patches = patches.len();
@@ -413,7 +413,7 @@ fn edge_dof_indices_2d(nu: usize, nv: usize, edge: usize) -> Vec<usize> {
 
 impl IgaMultiPatchMesh2D {
     /// Build from a NURBS mesh with edge connectivity.
-    pub fn from_nurbs_mesh(nurbs: &fem_element::nurbs::NurbsMesh2D) -> Self {
+    pub fn from_nurbs_mesh(nurbs: &fem_element::iga::NurbsMesh2D) -> Self {
         let (dof_maps, n_global_dofs) = build_multi_patch_dof_maps(
             &nurbs.patches, &nurbs.edge_connectivity,
         );
@@ -501,7 +501,7 @@ mod tests {
     use crate::fe_space::FESpace;
     use crate::iga::{IgaSpace1D, IgaSpace2D};
     use fem_mesh::MeshTopology;
-    use fem_element::nurbs::{KnotVector, NurbsPatch2DData, NurbsMesh2D};
+    use fem_element::iga::{NurbsKnotVector, NurbsPatch2DData, NurbsMesh2D};
 
     #[test]
     fn iga_fespace2d_quadratic_matches_span_count() {
@@ -542,7 +542,7 @@ mod tests {
     fn make_double_patch_square() -> NurbsMesh2D {
         // Two patches side by side: [0,0.5]x[0,1] and [0.5,1]x[0,1]
         // Each is P1×P1 bilinear with 2×2 control points, 1×1 elements
-        let kv = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1);
+        let kv = NurbsKnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1);
 
         let patch_a = NurbsPatch2DData {
             kv_u: kv.clone(),

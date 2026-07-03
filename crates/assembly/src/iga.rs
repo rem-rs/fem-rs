@@ -125,7 +125,7 @@ pub struct PhysMap2D {
 /// # Panics
 /// Panics if $|\det J| < 10^{-14}$ (degenerate mapping).
 pub fn physical_map_2d(pd: &NurbsPatch2DData, xi: &[f64]) -> PhysMap2D {
-    use fem_element::nurbs::NurbsPatch2D;
+    use fem_element::iga::NurbsPatch2D;
 
     let patch = NurbsPatch2D::new(pd.kv_u.clone(), pd.kv_v.clone(), pd.weights.clone());
     let n_dof = patch.n_dofs();
@@ -180,7 +180,7 @@ pub fn physical_map_2d(pd: &NurbsPatch2DData, xi: &[f64]) -> PhysMap2D {
 /// Returns `(phys_grads, det_j)` where `phys_grads` has length `n_dof * 2`:
 /// `phys_grads[a*2] = dR_A/dx`, `phys_grads[a*2+1] = dR_A/dy`.
 pub fn physical_grads_2d(pd: &NurbsPatch2DData, xi: &[f64]) -> (Vec<f64>, f64) {
-    use fem_element::nurbs::NurbsPatch2D;
+    use fem_element::iga::NurbsPatch2D;
 
     let patch = NurbsPatch2D::new(pd.kv_u.clone(), pd.kv_v.clone(), pd.weights.clone());
     let n_dof = patch.n_dofs();
@@ -243,7 +243,7 @@ fn inv_t3(m: &[[f64; 3]; 3], det: f64) -> [[f64; 3]; 3] {
 
 /// Compute the physical-domain map for a 3-D patch at `xi = [u, v, w]`.
 pub fn physical_map_3d(pd: &NurbsPatch3DData, xi: &[f64]) -> PhysMap3D {
-    use fem_element::nurbs::NurbsPatch3D;
+    use fem_element::iga::NurbsPatch3D;
 
     let patch = NurbsPatch3D::new(
         pd.kv_u.clone(), pd.kv_v.clone(), pd.kv_w.clone(), pd.weights.clone(),
@@ -292,7 +292,7 @@ pub fn physical_map_3d(pd: &NurbsPatch3DData, xi: &[f64]) -> PhysMap3D {
 ///
 /// Returns `(phys_grads, det_j)` where `phys_grads[a*3 + i] = dR_A/dx_i`.
 pub fn physical_grads_3d(pd: &NurbsPatch3DData, xi: &[f64]) -> (Vec<f64>, f64) {
-    use fem_element::nurbs::NurbsPatch3D;
+    use fem_element::iga::NurbsPatch3D;
 
     let patch = NurbsPatch3D::new(
         pd.kv_u.clone(), pd.kv_v.clone(), pd.kv_w.clone(), pd.weights.clone(),
@@ -542,8 +542,8 @@ pub fn assemble_iga_load_3d(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn pd_to_patch2d(pd: &NurbsPatch2DData) -> fem_element::nurbs::NurbsPatch2D {
-    fem_element::nurbs::NurbsPatch2D::new(
+fn pd_to_patch2d(pd: &NurbsPatch2DData) -> fem_element::iga::NurbsPatch2D {
+    fem_element::iga::NurbsPatch2D::new(
         pd.kv_u.clone(), pd.kv_v.clone(), pd.weights.clone(),
     )
 }
@@ -690,7 +690,7 @@ fn csr_axpy_solve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_element::nurbs::{KnotVector, NurbsMesh2D, NurbsMesh3D};
+    use fem_element::iga::{NurbsKnotVector, NurbsMesh2D, NurbsMesh3D};
 
     // ── Physical map ──────────────────────────────────────────────────────────
 
@@ -698,7 +698,7 @@ mod tests {
     /// Control points at the four corners with Q1 (bilinear degree-1) basis.
     #[test]
     fn physical_map_2d_unit_square_is_identity() {
-        let kv = KnotVector::uniform(1, 1);
+        let kv = NurbsNurbsKnotVector::uniform(1, 1);
         // Q1 patch on [0,1]^2: control pts = corners in (i,j) order
         // DOF order: j*n_u + i, so DOF 0=(0,0), 1=(1,0), 2=(0,1), 3=(1,1)
         let ctrl = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
@@ -717,7 +717,7 @@ mod tests {
     /// det = 2*3 = 6.
     #[test]
     fn physical_map_2d_rectangle_jacobian() {
-        let kv = KnotVector::uniform(1, 1);
+        let kv = NurbsKnotVector::uniform(1, 1);
         let ctrl = vec![[0.0, 0.0], [2.0, 0.0], [0.0, 3.0], [2.0, 3.0]];
         let mesh = NurbsMesh2D::single_patch(kv.clone(), kv.clone(), ctrl, vec![1.0; 4]);
         let pd = &mesh.patches[0];
@@ -733,7 +733,7 @@ mod tests {
     /// 3-D unit cube: det_j should be 1 everywhere.
     #[test]
     fn physical_map_3d_unit_cube_det_is_one() {
-        let kv = KnotVector::uniform(1, 1);
+        let kv = NurbsKnotVector::uniform(1, 1);
         // 8 control points of the unit cube
         let ctrl = vec![
             [0.0,0.0,0.0],[1.0,0.0,0.0],[0.0,1.0,0.0],[1.0,1.0,0.0],
@@ -752,7 +752,7 @@ mod tests {
     /// Partition-of-unity test: mass matrix row sums should equal the patch volume.
     #[test]
     fn iga_mass_2d_row_sum_equals_area() {
-        let kv = KnotVector::uniform(1, 2); // 2 elements per direction
+        let kv = NurbsKnotVector::uniform(1, 2); // 2 elements per direction
         let n_u = kv.n_basis(); // = 3
         let n_dof = n_u * n_u; // = 9
         let ctrl: Vec<[f64; 2]> = (0..n_dof).map(|idx| {
@@ -780,7 +780,7 @@ mod tests {
     /// Load vector sum should equal the integral of f = 1 over the domain = area.
     #[test]
     fn iga_load_2d_unit_source_sums_to_area() {
-        let kv = KnotVector::uniform(1, 2);
+        let kv = NurbsKnotVector::uniform(1, 2);
         let n_u = kv.n_basis();
         let n_dof = n_u * n_u;
         let ctrl: Vec<[f64; 2]> = (0..n_dof).map(|idx| {
@@ -799,7 +799,7 @@ mod tests {
     /// Stiffness matrix symmetry for unit-square patch.
     #[test]
     fn iga_stiffness_2d_is_symmetric() {
-        let kv = KnotVector::uniform(2, 2); // degree-2, 2 elements
+        let kv = NurbsKnotVector::uniform(2, 2); // degree-2, 2 elements
         let n_u = kv.n_basis();
         let n_dof = n_u * n_u;
         let ctrl: Vec<[f64; 2]> = (0..n_dof).map(|idx| {
@@ -832,7 +832,7 @@ mod tests {
     /// We check this by verifying x^T K x ≥ 0 for random vectors.
     #[test]
     fn iga_stiffness_2d_is_positive_semidefinite() {
-        let kv = KnotVector::uniform(1, 3); // degree-1, 3 elements
+        let kv = NurbsKnotVector::uniform(1, 3); // degree-1, 3 elements
         let n_u = kv.n_basis();
         let n_dof = n_u * n_u;
         let ctrl: Vec<[f64; 2]> = (0..n_dof).map(|idx| {
@@ -868,7 +868,7 @@ mod tests {
     /// 3-D load vector sum for f=1 on unit cube should equal volume = 1.
     #[test]
     fn iga_load_3d_unit_source_sums_to_volume() {
-        let kv = KnotVector::uniform(1, 2);
+        let kv = NurbsKnotVector::uniform(1, 2);
         let n_u = kv.n_basis();
         let n_dof = n_u * n_u * n_u;
         let ctrl: Vec<[f64; 3]> = (0..n_dof).map(|idx| {
@@ -892,7 +892,7 @@ mod tests {
     /// 3-D stiffness matrix symmetry on unit cube.
     #[test]
     fn iga_stiffness_3d_is_symmetric() {
-        let kv = KnotVector::uniform(1, 2);
+        let kv = NurbsKnotVector::uniform(1, 2);
         let n_u = kv.n_basis();
         let n_dof = n_u * n_u * n_u;
         let ctrl: Vec<[f64; 3]> = (0..n_dof).map(|idx| {
@@ -934,7 +934,7 @@ mod tests {
     #[test]
     fn iga_poisson_2d_l2_error_decreases_with_refinement() {
         fn l2_error_with_n_elems(n_elems: usize) -> f64 {
-            let kv = KnotVector::uniform(2, n_elems); // degree-2
+            let kv = NurbsKnotVector::uniform(2, n_elems); // degree-2
             let n_u = kv.n_basis();
             let n_dof = n_u * n_u;
             let ctrl: Vec<[f64; 2]> = (0..n_dof).map(|idx| {
@@ -1049,9 +1049,9 @@ mod tests {
     // ── IGA time integration tests ────────────────────────────────────────────
 
     fn make_1d_iga_mesh() -> NurbsMesh2D {
-        use fem_element::nurbs::{KnotVector, NurbsMesh2D};
-        let kv_u = KnotVector::uniform(1, 2); // degree-1, 2 elements
-        let kv_v = KnotVector::uniform(1, 2);
+        use fem_element::iga::{NurbsKnotVector, NurbsMesh2D};
+        let kv_u = NurbsKnotVector::uniform(1, 2); // degree-1, 2 elements
+        let kv_v = NurbsKnotVector::uniform(1, 2);
         let n_u = kv_u.n_basis();
         let n_v = kv_v.n_basis();
         let mut cpts = Vec::new();

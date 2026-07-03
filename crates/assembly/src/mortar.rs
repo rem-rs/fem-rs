@@ -14,7 +14,7 @@
 //! [B_A -B_B   0   ] [ λ ]   [ 0 ]
 //! ```
 
-use fem_element::nurbs::NurbsPatch2D;
+use fem_element::iga::NurbsPatch2D;
 use fem_element::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 

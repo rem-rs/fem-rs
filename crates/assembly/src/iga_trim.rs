@@ -1,4 +1,4 @@
-use fem_element::nurbs::{KnotVector, NurbsPatch2D};
+use fem_element::iga::{NurbsKnotVector, NurbsPatch2D};
 use fem_element::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 
@@ -102,7 +102,7 @@ pub fn trimmed_span_quad(
 
 /// Assemble the mass matrix for a trimmed 2-D NURBS patch.
 pub fn assemble_trimmed_mass_2d(
-    kv_u: &KnotVector, kv_v: &KnotVector,
+    kv_u: &NurbsKnotVector, kv_v: &NurbsKnotVector,
     patch: &NurbsPatch2D,
     poly: &TrimPolygon,
     quad_order: u8, subdiv: usize,
@@ -169,11 +169,11 @@ pub fn assemble_trimmed_mass_2d(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_element::nurbs::NurbsPatch2D;
+    use fem_element::iga::NurbsPatch2D;
 
-    fn quad_patch() -> (KnotVector, KnotVector, NurbsPatch2D) {
-        let kv = KnotVector::new(vec![0.0, 0.0, 0.5, 1.0, 1.0], 1);
-        let kv2 = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1);
+    fn quad_patch() -> (NurbsKnotVector, NurbsKnotVector, NurbsPatch2D) {
+        let kv = NurbsKnotVector::new(vec![0.0, 0.0, 0.5, 1.0, 1.0], 1);
+        let kv2 = NurbsKnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1);
         let w = vec![1.0; 6];
         let p = NurbsPatch2D::new(kv.clone(), kv2.clone(), w);
         (kv, kv2, p)

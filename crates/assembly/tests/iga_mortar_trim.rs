@@ -1,12 +1,12 @@
 //! Integration tests for NURBS trimming and Mortar coupling.
 
 use fem_assembly::mortar::{MortarCoupling2D, build_mortar_constraint, build_mortar_system};
-use fem_element::nurbs::{KnotVector, NurbsPatch2D};
+use fem_element::iga::{NurbsKnotVector, NurbsPatch2D};
 use fem_linalg::CsrMatrix;
 
-fn make_patch(n_elems_u: usize, n_elems_v: usize, degree: usize) -> (KnotVector, KnotVector, NurbsPatch2D) {
-    let kv_u = KnotVector::uniform(degree, n_elems_u);
-    let kv_v = KnotVector::uniform(degree, n_elems_v);
+fn make_patch(n_elems_u: usize, n_elems_v: usize, degree: usize) -> (NurbsKnotVector, NurbsKnotVector, NurbsPatch2D) {
+    let kv_u = NurbsKnotVector::uniform(degree, n_elems_u);
+    let kv_v = NurbsKnotVector::uniform(degree, n_elems_v);
     let nu = kv_u.n_basis();
     let nv = kv_v.n_basis();
     let w = vec![1.0; nu * nv];

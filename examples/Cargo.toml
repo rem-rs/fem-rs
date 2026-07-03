@@ -49,6 +49,18 @@ name = "mfem_ex_iga_poisson_2d_patch"
 path = "mfem_ex_iga_poisson_2d_patch.rs"
 
 [[example]]
+name = "mfem_ex_iga_helmholtz_2d"
+path = "mfem_ex_iga_helmholtz_2d.rs"
+
+[[example]]
+name = "mfem_ex_iga_poisson_3d"
+path = "mfem_ex_iga_poisson_3d.rs"
+
+[[example]]
+name = "mfem_ex_iga_heat_2d"
+path = "mfem_ex_iga_heat_2d.rs"
+
+[[example]]
 name = "mfem_ex2_elasticity"
 path = "mfem_ex2_elasticity.rs"
 
@@ -141,6 +153,54 @@ path = "mfem_pex6_parallel_amr.rs"
 [[example]]
 name = "mfem_pex9_parallel_dg_advection"
 path = "mfem_pex9_parallel_dg_advection.rs"
+
+[[example]]
+name = "mfem_pex16_parallel_nonlinear_heat"
+path = "mfem_pex16_parallel_nonlinear_heat.rs"
+
+[[example]]
+name = "mfem_pex7_parallel_surface"
+path = "mfem_pex7_parallel_surface.rs"
+
+[[example]]
+name = "mfem_pex8_parallel_p_multigrid"
+path = "mfem_pex8_parallel_p_multigrid.rs"
+
+[[example]]
+name = "mfem_pex10_parallel_hyperelastic"
+path = "mfem_pex10_parallel_hyperelastic.rs"
+
+[[example]]
+name = "mfem_pex11_parallel_eigenvalue"
+path = "mfem_pex11_parallel_eigenvalue.rs"
+
+[[example]]
+name = "mfem_pex15_parallel_dynamic_amr"
+path = "mfem_pex15_parallel_dynamic_amr.rs"
+
+[[example]]
+name = "mfem_pex17_parallel_dg_elasticity"
+path = "mfem_pex17_parallel_dg_elasticity.rs"
+
+[[example]]
+name = "mfem_pex18_parallel_euler"
+path = "mfem_pex18_parallel_euler.rs"
+
+[[example]]
+name = "mfem_pex20_parallel_symplectic"
+path = "mfem_pex20_parallel_symplectic.rs"
+
+[[example]]
+name = "mfem_pex22_parallel_complex_helmholtz"
+path = "mfem_pex22_parallel_complex_helmholtz.rs"
+
+[[example]]
+name = "mfem_pex23_parallel_wave"
+path = "mfem_pex23_parallel_wave.rs"
+
+[[example]]
+name = "mfem_pex27_parallel_robin_bc"
+path = "mfem_pex27_parallel_robin_bc.rs"
 
 [[example]]
 name = "mfem_ex40_stokes"
