@@ -50,5 +50,5 @@ pub use constraints::{apply_dirichlet, apply_hanging_constraints, apply_hanging_
 pub use iga::{IgaBoundary2D, IgaBoundary3D, IgaSpace1D, IgaSpace2D, IgaSpace3D};
 pub use block_fe_space::BlockFESpace;
 pub use trace_spaces::{HCurlTraceSpace, HDivTraceSpace};
-pub use complex::{ComplexGridFunction, apply_complex_dirichlet};
+pub use complex::{ComplexGridFunction, ComplexSpace, apply_complex_dirichlet};
 
