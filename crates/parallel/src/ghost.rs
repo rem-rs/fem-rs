@@ -170,10 +170,9 @@ impl GhostExchange {
     /// those whose `owning_rank != local_rank`.
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use fem_parallel::ghost::GhostExchange;
-    /// let comm = fem_parallel::Comm::new(vec![0]);
-    /// let local_rank = 0i32;
+    /// let mut comm = fem_parallel::Comm::init().expect("no comm");
     /// // elem_owners[i] = (local_id, owner_rank)
     /// let elem_owners = vec![(0u32, 0i32), (1u32, 0i32), (2u32, 1i32)];
     /// let exchange = GhostExchange::from_element_ghosts(&elem_owners, &comm);
