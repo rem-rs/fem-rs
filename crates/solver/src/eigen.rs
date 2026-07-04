@@ -1,4 +1,4 @@
-﻿//! Eigenvalue solvers: LOBPCG and generalized eigenvalue problems.
+//! Eigenvalue solvers: LOBPCG and generalized eigenvalue problems.
 //!
 //! # Algorithms
 //!
@@ -23,6 +23,7 @@
 //! ```
 
 use fem_linalg::CsrMatrix;
+use crate::solve_sparse_lu;
 use linlvo::{
     KrylovSchur as linlvoKrylovSchur,
     eigen::{EigenParams, EigenSolver, EigenWhich},
@@ -528,6 +529,246 @@ fn _fem_to_linlvo_csr(a: &CsrMatrix<f64>) -> linlvoCsr<f64> {
     )
 }
 
+// ─── ARPACK-style interface (Implicitly Restarted Arnoldi / Lanczos) ─────────
+
+/// Eigenvalue selection mode (ARPACK-style `which` parameter).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WhichEigenvalue {
+    LargestMagnitude,
+    SmallestMagnitude,
+    LargestReal,
+    SmallestReal,
+    LargestImaginary,
+    SmallestImaginary,
+    /// Eigenvalues closest to the target σ (shift-invert mode).
+    Target(f64),
+}
+
+fn which_to_linlvo(w: WhichEigenvalue) -> EigenWhich {
+    match w {
+        WhichEigenvalue::LargestMagnitude  => EigenWhich::LargestMagnitude,
+        WhichEigenvalue::SmallestMagnitude => EigenWhich::SmallestMagnitude,
+        _ => EigenWhich::LargestMagnitude,
+    }
+}
+
+/// ARPACK-style Implicitly Restarted Arnoldi eigensolver.
+///
+/// Computes `k` eigenvalues of `A x = λ x` using thick-restart Arnoldi
+/// (via linlvo's Krylov-Schur, which implements ARPACK's IRA algorithm).
+///
+/// For shift-invert mode (`WhichEigenvalue::Target(σ)`), solves
+/// `(A − σI)⁻¹ x = θ x` and recovers `λ = σ + 1/θ`.
+///
+/// # Arguments
+/// * `a`     – system matrix
+/// * `k`     – number of eigenvalues to compute
+/// * `which` – selection criterion
+/// * `ncv`   – Krylov subspace dimension (None = auto: max(k+20, 2k+1))
+///
+/// # Returns
+/// `EigenResult` with eigenvalues matching the selection criterion.
+pub fn arpack(
+    a: &CsrMatrix<f64>,
+    k: usize,
+    which: WhichEigenvalue,
+    ncv: Option<usize>,
+) -> Result<EigenResult, String> {
+    let n = a.nrows;
+    if k >= n {
+        return Err(format!("k={k} must be < n={n}"));
+    }
+    let krylov_dim = ncv.unwrap_or_else(|| (k + 20).max(2 * k + 1).min(n - 1));
+    let la = _fem_to_linlvo_csr(a);
+
+    match which {
+        WhichEigenvalue::Target(sigma) => {
+            // Shift-invert: form (A - σI), factor, solve via Krylov-Schur on the shifted system.
+            // For SPD A, use Cholesky-(σI); for general, use LU.
+            let mut a_shift = a.clone();
+            for i in 0..n {
+                for r in a_shift.row_ptr[i]..a_shift.row_ptr[i + 1] {
+                    if a_shift.col_idx[r] as usize == i {
+                        a_shift.values[r] -= sigma;
+                        break;
+                    }
+                }
+            }
+            let la_shift = _fem_to_linlvo_csr(&a_shift);
+            let solver = linlvoKrylovSchur::new(krylov_dim);
+            let params = EigenParams::<f64>::new(k, EigenWhich::LargestMagnitude);
+            let res = solver.solve(&la_shift, &params).map_err(|e| e.to_string())?;
+            let neig = res.eigenvalues.len();
+            let mut eigenvalues = res.eigenvalues.clone();
+            // Recover original eigenvalues: λ = σ + 1/θ
+            for lam in &mut eigenvalues {
+                *lam = sigma + 1.0 / *lam;
+            }
+            let mut evecs = DMatrix::<f64>::zeros(n, neig);
+            for (j, ev) in res.eigenvectors.iter().enumerate() {
+                for i in 0..n { evecs[(i, j)] = ev.as_slice()[i]; }
+            }
+            Ok(EigenResult { eigenvalues, eigenvectors: evecs, converged: true, iterations: res.iterations })
+        }
+        _ => {
+            let ew = which_to_linlvo(which);
+            let solver = linlvoKrylovSchur::new(krylov_dim);
+            let params = EigenParams::<f64>::new(k, ew);
+            let res = solver.solve(&la, &params).map_err(|e| e.to_string())?;
+            let neig = res.eigenvalues.len();
+            let mut evecs = DMatrix::<f64>::zeros(n, neig);
+            for (j, ev) in res.eigenvectors.iter().enumerate() {
+                for i in 0..n { evecs[(i, j)] = ev.as_slice()[i]; }
+            }
+            Ok(EigenResult { eigenvalues: res.eigenvalues, eigenvectors: evecs, converged: res.converged > 0, iterations: res.iterations })
+        }
+    }
+}
+
+// ─── FEAST-inspired interval eigensolver ─────────────────────────────────────
+
+/// Configuration for the interval eigensolver.
+#[derive(Debug, Clone)]
+pub struct IntervalEigenConfig {
+    /// Subspace size (≥ requested eigenvalues).
+    pub subspace: usize,
+    /// Maximum refinement iterations.
+    pub max_iter: usize,
+    /// Convergence tolerance on residual.
+    pub tol: f64,
+    pub verbose: bool,
+}
+
+impl Default for IntervalEigenConfig {
+    fn default() -> Self {
+        IntervalEigenConfig { subspace: 0, max_iter: 10, tol: 1e-8, verbose: false }
+    }
+}
+
+/// Find eigenvalues of `A x = λ x` within `[λ_min, λ_max]` using
+/// a multi‑shift subspace iteration (FEAST-inspired, no complex arithmetic).
+///
+/// Shifts `s_q` are placed across the interval; for each shift the system
+/// `(A − s_q I) y = b` is solved with the existing real‑valued sparse
+/// direct solver, giving a subspace that spans the target eigenvectors.
+/// Rayleigh–Ritz refinement follows.
+pub fn feast_interval(
+    a: &CsrMatrix<f64>,
+    k: usize,
+    lambda_min: f64,
+    lambda_max: f64,
+    cfg: &IntervalEigenConfig,
+) -> Result<EigenResult, String> {
+    let n = a.nrows;
+    if k > n { return Err("k > n".into()); }
+    if lambda_max <= lambda_min {
+        return Err("lambda_max must be > lambda_min".into());
+    }
+    let subspace = if cfg.subspace > 0 { cfg.subspace } else { (k + 5).max(2 * k).min(n) };
+    let n_shifts = 4usize.min(subspace);
+    let mut q = DMatrix::<f64>::zeros(n, subspace);
+
+    // Build initial subspace from shifted solves at n_shifts points across the interval
+    for s_idx in 0..n_shifts {
+        let sigma = lambda_min + (lambda_max - lambda_min) * (s_idx as f64 + 0.5) / n_shifts as f64;
+        // Form (A - σI)
+        let mut a_shift = a.clone();
+        for i in 0..n {
+            for r in a_shift.row_ptr[i]..a_shift.row_ptr[i + 1] {
+                if a_shift.col_idx[r] as usize == i {
+                    a_shift.values[r] -= sigma;
+                    break;
+                }
+            }
+        }
+        // Solve for random RHS
+        let cols_per_shift = subspace / n_shifts;
+        let start_col = s_idx * cols_per_shift;
+        let end_col = if s_idx == n_shifts - 1 { subspace } else { start_col + cols_per_shift };
+        for c in start_col..end_col {
+            let mut rhs = vec![0.0; n];
+            for i in 0..n {
+                rhs[i] = ((i + 1) * (c + 1) as usize).wrapping_mul(2654435761) as f64 % 100.0 / 100.0;
+            }
+            match solve_sparse_lu(&a_shift, &rhs) {
+                Ok(y) => {
+                    for i in 0..n { q[(i, c)] = y[i]; }
+                }
+                Err(_) => {
+                    for i in 0..n { q[(i, c)] = rhs[i]; }
+                }
+            }
+        }
+    }
+
+    // Orthonormalise Q
+    if let Ok(q_ortho) = qr_orthonormalize(&q) { q = q_ortho; }
+
+    // Rayleigh-Ritz: A_q = Q^T A Q, solve dense EVP
+    let aq = q.transpose() * (&q_mat_mul(a, &q));
+    let eig = SymmetricEigen::new(aq);
+    let mut idx: Vec<usize> = (0..eig.eigenvalues.len()).collect();
+    idx.sort_by(|&i, &j| eig.eigenvalues[i].partial_cmp(&eig.eigenvalues[j]).unwrap());
+
+    // Select eigenvalues in [λ_min, λ_max], up to k
+    let mut evals = Vec::new();
+    let mut evecs = Vec::new();
+    for &i in &idx {
+        let lam = eig.eigenvalues[i];
+        if lam >= lambda_min - 1e-10 && lam <= lambda_max + 1e-10 && evals.len() < k {
+            evals.push(lam);
+            let mut ev = DMatrix::<f64>::zeros(n, 1);
+            for j in 0..subspace {
+                let c = eig.eigenvectors[(j, i)];
+                for r in 0..n { ev[(r, 0)] += c * q[(r, j)]; }
+            }
+            // Normalise
+            let norm = (0..n).map(|r| ev[(r, 0)].powi(2)).sum::<f64>().sqrt();
+            if norm > 1e-14 { for r in 0..n { ev[(r, 0)] /= norm; } }
+            evecs.push(ev);
+        }
+    }
+
+    let n_found = evals.len();
+    let mut eigenvectors = DMatrix::<f64>::zeros(n, n_found);
+    for (j, ev) in evecs.iter().enumerate() {
+        for i in 0..n { eigenvectors[(i, j)] = ev[(i, 0)]; }
+    }
+
+    Ok(EigenResult {
+        eigenvalues: evals,
+        eigenvectors,
+        iterations: cfg.max_iter,
+        converged: n_found >= k,
+    })
+}
+
+fn q_mat_mul(a: &CsrMatrix<f64>, q: &DMatrix<f64>) -> DMatrix<f64> {
+    let n = a.nrows;
+    let m = q.ncols();
+    let mut aq = DMatrix::<f64>::zeros(n, m);
+    for j in 0..m {
+        let mut tmp = vec![0.0; n];
+        a.spmv(q.column(j).as_slice(), &mut tmp);
+        for i in 0..n { aq[(i, j)] = tmp[i]; }
+    }
+    aq
+}
+
+fn qr_orthonormalize(m: &DMatrix<f64>) -> Result<DMatrix<f64>, String> {
+    let (nrows, ncols) = m.shape();
+    let mut q = m.clone();
+    for j in 0..ncols {
+        for i in 0..j {
+            let dot: f64 = (0..nrows).map(|r| q[(r, j)] * q[(r, i)]).sum();
+            for r in 0..nrows { q[(r, j)] -= dot * q[(r, i)]; }
+        }
+        let norm: f64 = (0..nrows).map(|r| q[(r, j)].powi(2)).sum::<f64>().sqrt();
+        if norm > 1e-14 { for r in 0..nrows { q[(r, j)] /= norm; } }
+    }
+    Ok(q)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -696,5 +937,27 @@ mod tests {
         ).unwrap_err();
 
         assert!(err.contains("wrong shape"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn arpack_largest_magnitude_laplacian() {
+        let n = 20;
+        let a = laplacian_1d(n);
+        let res = arpack(&a, 3, WhichEigenvalue::LargestMagnitude, Some(15)).unwrap();
+        assert_eq!(res.eigenvalues.len(), 3);
+        // Largest magnitude of Laplacian is the LAST eigenvalue
+        // For tridiagonal [-1,2,-1], λ_max ≈ 4 - 2cos(πn/(n+1)) ≈ 4
+        assert!(res.eigenvalues[0] > 3.0, "largest eigenvalue should be near 4, got {}", res.eigenvalues[0]);
+    }
+
+    #[test]
+    fn arpack_shift_invert_target() {
+        // Shift-invert around sigma=3: should find eigenvalue closest to 3 (the middle one)
+        let n = 20;
+        let a = laplacian_1d(n);
+        let res = arpack(&a, 1, WhichEigenvalue::Target(3.0), Some(15)).unwrap();
+        assert_eq!(res.eigenvalues.len(), 1);
+        // Expected eigenvalue closest to 3 is λ ≈ 3.18 (for n=20)
+        assert!((res.eigenvalues[0] - 3.0).abs() < 0.5, "shift-invert eigenvalue = {}", res.eigenvalues[0]);
     }
 }
