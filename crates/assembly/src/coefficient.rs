@@ -641,6 +641,45 @@ impl<C: ScalarCoeff> MatrixCoeff for ScalarMatrixCoeff<C> {
     }
 }
 
+/// Piecewise matrix coefficient selected by element tag.
+///
+/// Like [`PWCoeff`] but for matrix-valued coefficients.  Each region identified
+/// by an element tag gets its own [`MatrixCoeff`]; unmatched tags fall back to
+/// the default.
+///
+/// # Example
+/// ```rust,ignore
+/// use fem_assembly::coefficient::PwMatrixCoeff;
+/// // Tag 1 → isotropic (κ=1), tag 2 → anisotropic, default → isotropic (κ=0.1)
+/// let pw = PwMatrixCoeff::new(ScalarMatrixCoeff(0.1))
+///     .add_region(1, ScalarMatrixCoeff(1.0))
+///     .add_region(2, ConstantMatrixCoeff(vec![10.0, 0.0, 0.0, 1.0]));
+/// ```
+pub struct PwMatrixCoeff {
+    regions: HashMap<i32, Box<dyn MatrixCoeff>>,
+    default: Box<dyn MatrixCoeff>,
+}
+
+impl PwMatrixCoeff {
+    pub fn new(default: impl MatrixCoeff + 'static) -> Self {
+        PwMatrixCoeff {
+            regions: HashMap::new(),
+            default: Box::new(default),
+        }
+    }
+    pub fn add_region(mut self, tag: i32, coeff: impl MatrixCoeff + 'static) -> Self {
+        self.regions.insert(tag, Box::new(coeff));
+        self
+    }
+}
+
+impl MatrixCoeff for PwMatrixCoeff {
+    fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
+        let coeff = self.regions.get(&ctx.elem_tag).unwrap_or(&self.default);
+        coeff.eval(ctx, out);
+    }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Convenience free functions
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
