@@ -1782,6 +1782,8 @@ pub use ode::{
     HamiltonianSystem, VerletStepper, LeapfrogStepper, Yoshida4Stepper,
     ForwardEuler, Rk4, Rk45,
     ImplicitEuler, Sdirk2,
+    CrankNicolson,
+    AdamsBashforthMoulton, AbmState,
     Bdf2, Bdf2State,
     Newmark, NewmarkState,
     GeneralizedAlpha, GeneralizedAlphaState,

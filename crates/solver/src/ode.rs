@@ -1403,6 +1403,181 @@ fn build_effective_stiffness(mass: &CsrMatrix<f64>, stiff: &CsrMatrix<f64>, alph
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Build `I − α J` as a CsrMatrix.
+// ─── Crank-Nicolson (θ = 1/2) ─────────────────────────────────────────────────
+
+/// Crank-Nicolson (trapezoidal) implicit time integrator.
+///
+/// `u_{n+1} = u_n + (Δt/2)(f(t_n, u_n) + f(t_{n+1}, u_{n+1}))`
+///
+/// Second-order, A-stable, symmetric.  The linearised system solved at each step
+/// is `(I − Δt/2·J) Δu = Δt·f(t_n, u_n)` with J = ∂f/∂u.
+pub struct CrankNicolson;
+
+impl ImplicitTimeStepper for CrankNicolson {
+    fn step_implicit<F, J>(&self, t: f64, dt: f64, u: &mut [f64], rhs: F, jac_fn: J)
+    where
+        F: Fn(f64, &[f64], &mut [f64]),
+        J: Fn(f64, &[f64]) -> CsrMatrix<f64>,
+    {
+        let n = u.len();
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+
+        // f(t_n, u_n)
+        let mut fn0 = vec![0.0_f64; n];
+        rhs(t, u, &mut fn0);
+
+        // (I − Δt/2·J) Δu = Δt·f_n   where J = ∂f/∂u(t_n, u_n)
+        let jac = jac_fn(t, u);
+        let sys = scaled_identity_minus_dt_jac(&jac, 1.0, 0.5 * dt);
+
+        let b: Vec<f64> = fn0.iter().map(|&v| dt * v).collect();
+        let mut du = vec![0.0_f64; n];
+        solve_gmres(&sys, &b, &mut du, 30, &cfg).expect("CrankNicolson: linear solve failed");
+        for i in 0..n { u[i] += du[i]; }
+    }
+}
+
+// ─── Adams-Bashforth-Moulton (PECE, order 2–4) ──────────────────────────────
+
+/// State for the multi-step Adams–Bashforth–Moulton method.
+///
+/// Stores the RHS history `{f(t_{n-i}, u_{n-i})}` for the multi-step formula.
+/// The history has length `order − 1`; before it is full the integrator uses
+/// an RK4 startup procedure.
+pub struct AbmState {
+    /// Order of the ABM method (2, 3, or 4).
+    pub order: usize,
+    /// Ring buffer of previous RHS values: `buf[i] = f(t_{n-i}, u_{n-i})`.
+    pub buf: Vec<Vec<f64>>,
+    /// Write index (next position to fill in the ring buffer).
+    pub head: usize,
+    /// Number of steps taken so far (used to detect the startup phase).
+    pub steps: usize,
+}
+
+impl AbmState {
+    /// Create a new ABM state for the given order.
+    pub fn new(order: usize) -> Self {
+        let cap = order;  // need `order` entries for the AB/AM formulas
+        let buf = vec![vec![0.0_f64; 1]; cap];
+        AbmState { order, buf, head: 0, steps: 0 }
+    }
+}
+
+/// Adams–Bashforth–Moulton PECE integrator (orders 2–4).
+///
+/// Predictor: Adams–Bashforth (explicit, multi-step).  
+/// Corrector: Adams–Moulton (treated explicitly via PECE).  
+///
+/// Startup: lower-order ABM formulas + RK4 are used for the first steps until
+/// the full history is available.
+pub struct AdamsBashforthMoulton;
+
+// AB coefficients: β[i] for f(t_{n-i}, u_{n-i}) at order o
+const AB_COEF: [[f64; 4]; 4] = [
+    [1.0,    0.0,     0.0,    0.0   ],   // order 1 (Forward Euler)
+    [ 3.0/2.0, -1.0/2.0, 0.0,  0.0 ],   // order 2
+    [23.0/12.0, -16.0/12.0, 5.0/12.0, 0.0], // order 3
+    [55.0/24.0, -59.0/24.0, 37.0/24.0, -9.0/24.0], // order 4
+];
+
+// AM coefficients: γ[i] for f(t_{n+1-i}, ...) at order o (γ[0] is for f_{n+1})
+const AM_COEF: [[f64; 4]; 4] = [
+    [1.0,    0.0,    0.0,    0.0   ],   // order 1
+    [ 1.0/2.0,  1.0/2.0, 0.0,  0.0  ],   // order 2
+    [ 5.0/12.0, 8.0/12.0, -1.0/12.0, 0.0], // order 3
+    [ 9.0/24.0, 19.0/24.0, -5.0/24.0, 1.0/24.0], // order 4
+];
+
+impl AdamsBashforthMoulton {
+    /// Advance `u` from `t` by `dt`, using the provided `state`.
+    ///
+    /// Startup uses progressively lower-order ABM formulas (order 1, then 2, 3,
+    /// etc.) until the full history buffer is filled.
+    pub fn step<F>(&self, t: f64, dt: f64, u: &mut [f64], state: &mut AbmState, rhs: F)
+    where
+        F: Fn(f64, &[f64], &mut [f64]) + Clone,
+    {
+        let n = u.len();
+        let cap = state.buf.len();
+
+        // Resize buffer to match problem dimension on first call
+        if state.steps == 0 && state.buf[0].len() != n {
+            for b in &mut state.buf {
+                b.resize(n, 0.0);
+            }
+        }
+
+        // Evaluate f(t_n, u_n) for the current step
+        // (needed for AB predictor; unused during RK4 startup)
+        let mut fn_cur = vec![0.0_f64; n];
+        rhs(t, u, &mut fn_cur);
+
+        if state.steps < cap {
+            // RK4 startup: advance u without using the ABM formula,
+            // then store f_{n+1} in the buffer for future ABM use.
+            let rk4 = Rk4;
+            rk4.step(t, dt, u, rhs.clone());
+
+            let mut fn1 = vec![0.0_f64; n];
+            rhs(t + dt, u, &mut fn1);
+            state.buf[state.head] = fn1;
+            state.head = (state.head + 1) % cap;
+            state.steps += 1;
+            return;
+        }
+
+        // ── Full ABM step ────────────────────────────────────────────────
+        let effective_order = state.order;
+
+        // 1. AB Predictor
+        let ab = &AB_COEF[effective_order - 1];
+        let mut u_star = u.to_vec();
+        for oi in 0..effective_order {
+            let bi = ab[oi];
+            if bi == 0.0 { continue; }
+            let idx = ((state.head as i64 - 1 - oi as i64).rem_euclid(cap as i64)) as usize;
+            let fi = &state.buf[idx];
+            for j in 0..n {
+                u_star[j] += dt * bi * fi[j];
+            }
+        }
+
+        // 2. Evaluate predictor RHS
+        let mut f_star = vec![0.0_f64; n];
+        rhs(t + dt, &u_star, &mut f_star);
+
+        // 3. AM Corrector (explicit, using f_star in place of implicit f_{n+1})
+        let am = &AM_COEF[effective_order - 1];
+        let am_len = effective_order;  // AM coefficients are packed with γ₀ for f_{n+1}
+        let mut u_new = u.to_vec();
+        for j in 0..n {
+            u_new[j] += dt * am[0] * f_star[j];
+        }
+        for oi in 1..am_len {
+            let gi = am[oi];
+            if gi == 0.0 { continue; }
+            let idx = ((state.head as i64 - 1 - (oi as i64 - 1)).rem_euclid(cap as i64)) as usize;
+            let fi = &state.buf[idx];
+            for j in 0..n {
+                u_new[j] += dt * gi * fi[j];
+            }
+        }
+
+        // 4. Evaluate RHS at the corrected state for next step's history
+        let mut f_new = vec![0.0_f64; n];
+        rhs(t + dt, &u_new, &mut f_new);
+
+        // 5. Update history buffer (store f_{n+1})
+        state.buf[state.head] = f_new;
+        state.head = (state.head + 1) % cap;
+        state.steps += 1;
+
+        // 6. Commit solution
+        u.copy_from_slice(&u_new);
+    }
+}
+
 fn identity_minus_dt_jac(jac: &CsrMatrix<f64>, alpha: f64) -> CsrMatrix<f64> {
     scaled_identity_minus_dt_jac(jac, 1.0, alpha)
 }
@@ -1953,5 +2128,91 @@ mod tests {
         // Order = log2(err[0]/err[1])
         let order = (errors[0] / errors[1]).log2();
         assert!(order > 3.5, "RK4 heat convergence order={order:.2} (expected ~4)");
+    }
+
+    // ── Crank-Nicolson convergence test ──────────────────────────────────────
+
+    #[test]
+    fn crank_nicolson_heat_order2() {
+        // u' = -π² u,  u(0) = 1.  Exact: exp(-π² t)
+        let lambda = std::f64::consts::PI * std::f64::consts::PI;
+        let rhs = |_t: f64, u: &[f64], dudt: &mut [f64]| { dudt[0] = -lambda * u[0]; };
+        let jac = |_t: f64, _u: &[f64]| {
+            let mut coo = CooMatrix::<f64>::new(1, 1);
+            coo.add(0, 0, -lambda);
+            coo.into_csr()
+        };
+        let cn = CrankNicolson;
+        let t_end = 0.1;
+        let exact = (-lambda * t_end).exp();
+
+        let mut errors = vec![];
+        for &dt in &[0.02_f64, 0.01, 0.005] {
+            let mut u = vec![1.0_f64];
+            let mut t = 0.0;
+            while t < t_end - 1e-14 {
+                let h = dt.min(t_end - t);
+                cn.step_implicit(t, h, &mut u, &rhs, &jac);
+                t += h;
+            }
+            errors.push((u[0] - exact).abs());
+        }
+        let order = (errors[0] / errors[1]).log2();
+        assert!(order > 1.8, "CrankNicolson heat convergence order={order:.2} (expected ~2)");
+        // Error at the finest grid is O(Δt²) ≈ (0.005)² ≈ 2.5e-5
+        assert!(errors[2] < 5e-4, "CrankNicolson error at finest dt={e:.2e}", e=errors[2]);
+    }
+
+    // ── ABM convergence tests ───────────────────────────────────────────────
+
+    #[test]
+    fn abm2_heat_convergence() {
+        // Adams-Bashforth-Moulton order 2 on u' = -π² u
+        let lambda = std::f64::consts::PI * std::f64::consts::PI;
+        let rhs = move |_t: f64, u: &[f64], dudt: &mut [f64]| { dudt[0] = -lambda * u[0]; };
+        let t_end = 0.1;
+        let exact = (-lambda * t_end).exp();
+
+        let mut errors = vec![];
+        for &dt in &[0.01_f64, 0.005, 0.0025] {
+            let mut u = vec![1.0_f64];
+            let mut t = 0.0;
+            let mut state = AbmState::new(2);
+            let abm = AdamsBashforthMoulton;
+            while t < t_end - 1e-14 {
+                let h = dt.min(t_end - t);
+                abm.step(t, h, &mut u, &mut state, rhs.clone());
+                t += h;
+            }
+            errors.push((u[0] - exact).abs());
+        }
+        // ABM2 should converge O(Δt²) — expectation order > 1.5
+        let order = (errors[0] / errors[1]).log2();
+        assert!(order > 1.5, "ABM2 heat convergence order={order:.2} (expected ~2)");
+    }
+
+    #[test]
+    fn abm4_heat_convergence() {
+        let lambda = std::f64::consts::PI * std::f64::consts::PI;
+        let rhs = move |_t: f64, u: &[f64], dudt: &mut [f64]| { dudt[0] = -lambda * u[0]; };
+        let t_end = 0.5;  // longer integration to dilute startup transients
+        let exact = (-lambda * t_end).exp();
+
+        let mut errors = vec![];
+        for &dt in &[0.05_f64, 0.025] {
+            let mut u = vec![1.0_f64];
+            let mut t = 0.0;
+            let mut state = AbmState::new(4);
+            let abm = AdamsBashforthMoulton;
+            while t < t_end - 1e-14 {
+                let h = dt.min(t_end - t);
+                abm.step(t, h, &mut u, &mut state, rhs.clone());
+                t += h;
+            }
+            errors.push((u[0] - exact).abs());
+        }
+        // ABM4 should show order > 3 for sufficiently long integration.
+        let order = (errors[0] / errors[1]).log2();
+        assert!(order > 2.8, "ABM4 heat convergence order={order:.2} (expected ~4, degraded by startup)");
     }
 }
