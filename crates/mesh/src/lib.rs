@@ -26,6 +26,7 @@ pub mod cut_cell;
 pub mod hp_amr;
 pub mod dec;
 pub mod extrusion;
+pub mod particle;
 pub mod poly_mesh;
 pub mod size_function;
 pub mod supermesh;
@@ -51,6 +52,7 @@ pub use submesh::{SubMesh, extract_submesh, extract_submesh_by_name};
 pub use topology::MeshTopology;
 pub use transformation::ElementTransformation;
 pub use extrusion::{extrude_tri3_to_prisms, extrude_quad4_to_hex8};
+pub use particle::ParticleSet;
 pub use size_function::{
     compute_element_sizes, compute_target_sizes,
     size_to_markers, smooth_size_field,
