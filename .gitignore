@@ -18,10 +18,11 @@ output/
 *.tmp
 *.bak
 *.log
-*.txt
 ~$*
 
 # OS files
 .DS_Store
 Thumbs.db
-EOF
+
+# Agent artifacts
+.mimocode/
