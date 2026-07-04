@@ -177,6 +177,7 @@ pub use complex::{ComplexAssembler, ComplexGridFunction, ComplexLinearForm, Comp
 pub use discrete_op::{DiscreteLinearOperator, DiscreteOpError};
 pub use integrator::{
     BdQpData, BilinearIntegrator, BoundaryBilinearIntegrator, BoundaryLinearIntegrator,
+    BoundaryMassIntegrator, RobinLFIntegrator,
     LinearIntegrator, QpData,
 };
 pub use vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};

@@ -88,3 +88,51 @@ pub trait BoundaryLinearIntegrator: Send + Sync {
 pub trait BoundaryBilinearIntegrator: Send + Sync {
     fn add_to_face_matrix(&self, qp: &BdQpData<'_>, k_face: &mut [f64]);
 }
+
+/// Boundary mass bilinear integrator: `∫ κ · φᵢ · φⱼ ds`.
+///
+/// Adds the Robin / mass contribution on boundary faces.
+/// Combine with a [`RobinLFIntegrator`] for the full Robin BC.
+pub struct BoundaryMassIntegrator {
+    pub kappa: f64,
+    pub bdr_tags: Vec<i32>,
+}
+
+impl BoundaryBilinearIntegrator for BoundaryMassIntegrator {
+    fn add_to_face_matrix(&self, qp: &BdQpData<'_>, k_face: &mut [f64]) {
+        let n = qp.n_dofs;
+        let w = qp.weight;
+        for i in 0..n {
+            let phi_i = qp.phi[i];
+            for j in 0..n {
+                k_face[i * n + j] += w * self.kappa * phi_i * qp.phi[j];
+            }
+        }
+    }
+}
+
+/// Robin boundary linear integrator: `∫ (g − κ · u_D) · φᵢ ds`.
+///
+/// The RHS contribution of a Robin BC: `∂u/∂n + κ·u = g` on the boundary.
+/// The bilinear part `∫ κ·u·v ds` should be added via a
+/// [`BoundaryMassIntegrator`] on the same boundary tags.
+pub struct RobinLFIntegrator {
+    pub kappa: f64,
+    pub u_bdr: Box<dyn Fn(&[f64]) -> f64 + Send + Sync>,
+    pub g: Box<dyn Fn(&[f64]) -> f64 + Send + Sync>,
+    pub bdr_tags: Vec<i32>,
+}
+
+impl BoundaryLinearIntegrator for RobinLFIntegrator {
+    fn add_to_face_vector(&self, qp: &BdQpData<'_>, f_face: &mut [f64]) {
+        let n = qp.n_dofs;
+        let w = qp.weight;
+        let x = qp.x_phys;
+        let ud = (self.u_bdr)(x);
+        let gv = (self.g)(x);
+        let source = gv - self.kappa * ud;
+        for i in 0..n {
+            f_face[i] += w * source * qp.phi[i];
+        }
+    }
+}
