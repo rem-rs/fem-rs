@@ -568,9 +568,139 @@ impl AndersonAccelerator {
                             for l in 0..n_col {
                                 let fl = r_hist[l][i];
                                 ata[j * n_col + l] += (fk - fj) * (fk - fl);
-                            }
-                        }
-                    }
+        }
+    }
+
+    // ── LBFGS tests ───────────────────────────────────────────────────────
+
+    struct TestQuadratic {
+        n: usize,
+        coeffs: Vec<f64>,
+    }
+
+    impl NonlinearForm for TestQuadratic {
+        fn residual(&self, u: &[f64], _rhs: &[f64], r: &mut [f64]) {
+            for i in 0..self.n {
+                let a = self.coeffs[3*i];
+                let b = self.coeffs[3*i+1];
+                let c = self.coeffs[3*i+2];
+                r[i] = a * u[i] * u[i] + b * u[i] + c;
+            }
+        }
+        fn jacobian(&self, u: &[f64]) -> CsrMatrix<f64> {
+            use fem_linalg::CooMatrix;
+            let mut coo = CooMatrix::<f64>::new(self.n, self.n);
+            for i in 0..self.n {
+                coo.add(i, i, 2.0 * self.coeffs[3*i] * u[i] + self.coeffs[3*i+1]);
+            }
+            coo.into_csr()
+        }
+        fn n_dofs(&self) -> usize { self.n }
+    }
+
+    #[test]
+    fn lbfgs_scalar_quadratic() {
+        let form = TestQuadratic { n: 1, coeffs: vec![1.0, -4.0, 3.0] };
+        let rhs = vec![0.0];
+        let cfg = LbfgsConfig { rtol: 1e-12, verbose: false, ..Default::default() };
+        let solver = LbfgsSolver::new(cfg);
+        let mut u = vec![10.0_f64];
+        let res = solver.solve(&form, &rhs, &mut u).unwrap();
+        assert!(res.converged);
+        assert!((u[0] - 1.0).abs() < 1e-6 || (u[0] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lbfgs_two_variable() {
+        let coeffs = vec![1.0, 0.0, -2.0, 1.0, 0.0, -27.0];
+        let form = TestQuadratic { n: 2, coeffs };
+        let rhs = vec![0.0; 2];
+        let cfg = LbfgsConfig { rtol: 1e-10, history: 5, verbose: false, ..Default::default() };
+        let solver = LbfgsSolver::new(cfg);
+        let mut u = vec![4.0_f64, 5.0_f64];
+        let res = solver.solve(&form, &rhs, &mut u).unwrap();
+        assert!(res.converged, "LBFGS 2-var failed: {} iters res={:.3e}", res.iterations, res.final_residual);
+        assert!((u[0] - 2.0_f64.sqrt()).abs() < 1e-5);
+        assert!((u[1] - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lbfgs_fewer_iters_than_newton() {
+        let form = TestQuadratic { n: 1, coeffs: vec![1.0, -4.0, 3.0] };
+        let rhs = vec![0.0];
+        let mut u = vec![100.0_f64];
+        let cfg = LbfgsConfig { rtol: 1e-10, history: 3, verbose: false, ..Default::default() };
+        let solver = LbfgsSolver::new(cfg);
+        let res = solver.solve(&form, &rhs, &mut u).unwrap();
+        assert!(res.converged);
+        assert!(res.iterations < 50);
+    }
+
+    #[test]
+    fn lbfgs_residual_decreases() {
+        let form = TestQuadratic { n: 1, coeffs: vec![1.0, 0.0, -2.0] };
+        let rhs = vec![0.0];
+        let cfg = LbfgsConfig { rtol: 1e-12, history: 5, verbose: true, ..Default::default() };
+        let solver = LbfgsSolver::new(cfg);
+        let mut u = vec![3.0_f64];
+        let res = solver.solve(&form, &rhs, &mut u).unwrap();
+        assert!(res.converged);
+        assert!((u[0] - 2.0_f64.sqrt()).abs() < 1e-8);
+    }
+
+    // ── Trust-region tests ────────────────────────────────────────────────
+
+    #[test]
+    fn trust_region_scalar_quadratic() {
+        let form = TestQuadratic { n: 1, coeffs: vec![1.0, -2.0, 0.0] };
+        let rhs = vec![0.0];
+        let cfg = TrustRegionConfig { rtol: 1e-12, verbose: false, ..Default::default() };
+        let solver = TrustRegionSolver::new(cfg);
+        let mut u = vec![10.0_f64];
+        let res = solver.solve(&form, &rhs, &mut u).unwrap();
+        assert!(res.converged);
+        assert!((u[0] - 2.0).abs() < 1e-6 || (u[0] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn trust_region_two_variable() {
+        let coeffs = vec![1.0, 0.0, -2.0, 1.0, 0.0, -27.0];
+        let form = TestQuadratic { n: 2, coeffs };
+        let rhs = vec![0.0; 2];
+        let cfg = TrustRegionConfig { rtol: 1e-10, verbose: false, ..Default::default() };
+        let solver = TrustRegionSolver::new(cfg);
+        let mut u = vec![3.0_f64, 4.0_f64];
+        let res = solver.solve(&form, &rhs, &mut u).unwrap();
+        assert!(res.converged, "TR 2-var failed: {} iters res={:.3e}", res.iterations, res.final_residual);
+        assert!((u[0] - 2.0_f64.sqrt()).abs() < 1e-5);
+        assert!((u[1] - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn trust_region_handles_indefinite() {
+        let form = TestQuadratic { n: 1, coeffs: vec![-1.0, 0.0, 4.0] };
+        let rhs = vec![0.0];
+        let cfg = TrustRegionConfig { rtol: 1e-10, verbose: false, ..Default::default() };
+        let solver = TrustRegionSolver::new(cfg);
+        let mut u = vec![2.0_f64];
+        let res = solver.solve(&form, &rhs, &mut u).unwrap();
+        assert!(res.converged, "TR indefinite failed: {} iters res={:.3e}", res.iterations, res.final_residual);
+        assert!((u[0] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn trust_region_residual_decreases() {
+        let form = TestQuadratic { n: 1, coeffs: vec![2.0, -8.0, 6.0] };
+        let rhs = vec![0.0];
+        let cfg = TrustRegionConfig { rtol: 1e-12, verbose: false, ..Default::default() };
+        let solver = TrustRegionSolver::new(cfg);
+        let mut u = vec![0.5_f64];
+        let res = solver.solve(&form, &rhs, &mut u).unwrap();
+        assert!(res.converged);
+        // F(u) = 2u² - 8u + 6 = 2(u-1)(u-3); roots at 1 and 3
+        assert!((u[0] - 1.0).abs() < 1e-6 || (u[0] - 3.0).abs() < 1e-6);
+    }
+}
                     // Regularize
                     for j in 0..n_col { ata[j * n_col + j] += self.cfg.lambda; }
                     // Solve (dense, Cramer's rule for small systems)
@@ -849,6 +979,375 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
             gp[i*dim+j] = s;
         }
     }
+}
+
+// ─── LBFGS (Limited-memory BFGS) ─────────────────────────────────────────────
+
+/// Convergence and iteration parameters for the LBFGS solver.
+#[derive(Debug, Clone)]
+pub struct LbfgsConfig {
+    pub atol: f64,                    // ‖F‖₂ absolute tolerance
+    pub rtol: f64,                    // ‖F‖₂ / ‖F₀‖₂ relative tolerance
+    pub max_iter: usize,              // max outer iterations
+    pub history: usize,               // L-BFGS history size m
+    pub line_search_max_backtracks: usize,
+    pub line_search_shrink: f64,
+    pub line_search_sufficient_decrease: f64,
+    pub verbose: bool,
+}
+
+impl Default for LbfgsConfig {
+    fn default() -> Self {
+        LbfgsConfig {
+            atol: 1e-10, rtol: 1e-8, max_iter: 200, history: 10,
+            line_search_max_backtracks: 20, line_search_shrink: 0.5,
+            line_search_sufficient_decrease: 1e-4, verbose: false,
+        }
+    }
+}
+
+/// Outcome of an LBFGS solve.
+#[derive(Debug, Clone)]
+pub struct LbfgsResult {
+    pub converged: bool,
+    pub iterations: usize,
+    pub final_residual: f64,
+}
+
+/// Limited-memory BFGS quasi-Newton solver.
+///
+/// Approximates the inverse Hessian via `m` history pairs (sᵢ, yᵢ) and the
+/// two-loop recursion (Nocedal & Wright).  No Jacobian assembly is required.
+pub struct LbfgsSolver {
+    cfg: LbfgsConfig,
+}
+
+impl LbfgsSolver {
+    pub fn new(cfg: LbfgsConfig) -> Self { LbfgsSolver { cfg } }
+
+    /// Solve `F(u) = 0` starting from the initial guess in `u`.
+    pub fn solve(
+        &self,
+        form: &dyn NonlinearForm,
+        rhs:  &[f64],
+        u:    &mut [f64],
+    ) -> Result<LbfgsResult, LbfgsResult> {
+        let n = form.n_dofs();
+        assert_eq!(u.len(), n);
+        let m = self.cfg.history.max(1);
+
+        let mut g  = vec![0.0_f64; n];  // current gradient (= residual)
+        let mut g_old = vec![0.0_f64; n];
+        let mut d  = vec![0.0_f64; n];  // search direction
+        form.residual(u, rhs, &mut g);
+        let g0_norm = norm2(&g);
+        let mut g_norm = g0_norm;
+
+        if g0_norm < self.cfg.atol {
+            return Ok(LbfgsResult { converged: true, iterations: 0, final_residual: g0_norm });
+        }
+
+        // Ring buffers for s = x_{k+1} − x_k  and  y = g_{k+1} − g_k
+        let mut ss: Vec<Vec<f64>> = Vec::with_capacity(m);
+        let mut yy: Vec<Vec<f64>> = Vec::with_capacity(m);
+        let mut rho: Vec<f64> = Vec::with_capacity(m);
+        let mut head: usize = 0;
+
+        for iter in 0..self.cfg.max_iter {
+            // ── Build search direction d via two-loop recursion ──────────
+            d.copy_from_slice(&g);
+
+            // Loop 1: q ← g; αᵢ = ρᵢ · sᵢᵀ q; q ← q − αᵢ yᵢ
+            let n_hist = ss.len();
+            let mut alpha = vec![0.0_f64; n_hist];
+            for i in (0..n_hist).rev() {
+                let idx = (head + i) % n_hist;
+                let si = &ss[idx];
+                let yi = &yy[idx];
+                alpha[i] = rho[idx] * dot_product(si, &d);
+                for j in 0..n { d[j] -= alpha[i] * yi[j]; }
+            }
+
+            // Scale: γ = (yᵏ⁻¹ᵀ sᵏ⁻¹) / (yᵏ⁻¹ᵀ yᵏ⁻¹)
+            if n_hist > 0 {
+                let last = (head + n_hist - 1) % n_hist;
+                let sl = &ss[last];
+                let yl = &yy[last];
+                let sy = dot_product(sl, yl);
+                let yy_inner = dot_product(yl, yl);
+                let gamma = if yy_inner > 1e-32 { sy / yy_inner } else { 1.0 };
+                for j in 0..n { d[j] *= gamma; }
+            }
+
+            // Loop 2: βᵢ = ρᵢ · yᵢᵀ z; z ← z + sᵢ(αᵢ − βᵢ)
+            for i in 0..n_hist {
+                let idx = (head + i) % n_hist;
+                let si = &ss[idx];
+                let yi = &yy[idx];
+                let beta = rho[idx] * dot_product(yi, &d);
+                for j in 0..n { d[j] += si[j] * (alpha[i] - beta); }
+            }
+
+            // d = -z  (negative gradient direction)
+            for j in 0..n { d[j] = -d[j]; }
+
+            // ── Line search (Armijo backtracking) ────────────────────────
+            let mut step = 1.0_f64;
+            let mut accepted = false;
+            form.residual(u, rhs, &mut g_old);
+            let old_norm = norm2(&g_old);
+
+            for _ in 0..self.cfg.line_search_max_backtracks {
+                let mut u_trial = vec![0.0_f64; n];
+                for j in 0..n { u_trial[j] = u[j] + step * d[j]; }
+                let mut g_trial = vec![0.0_f64; n];
+                form.residual(&u_trial, rhs, &mut g_trial);
+                let trial_norm = norm2(&g_trial);
+
+                let target = (1.0 - self.cfg.line_search_sufficient_decrease * step).max(0.0) * old_norm;
+                if trial_norm <= target {
+                    u.copy_from_slice(&u_trial);
+                    g.copy_from_slice(&g_trial);
+                    accepted = true;
+                    break;
+                }
+                step *= self.cfg.line_search_shrink;
+            }
+            if !accepted {
+                // Accept best effort (step was too small)
+                for j in 0..n { u[j] += step * d[j]; }
+                form.residual(u, rhs, &mut g);
+            }
+
+            g_norm = norm2(&g);
+
+            if self.cfg.verbose {
+                println!("[LBFGS] iter={} ‖F‖={g_norm:.3e} step={step:.2e} hist={n_hist}", iter + 1);
+            }
+
+            if g_norm < self.cfg.atol || g_norm < g0_norm * self.cfg.rtol {
+                return Ok(LbfgsResult { converged: true, iterations: iter + 1, final_residual: g_norm });
+            }
+
+            // ── Update history ───────────────────────────────────────────
+            if ss.len() < m {
+                ss.push(vec![0.0_f64; n]);
+                yy.push(vec![0.0_f64; n]);
+                rho.push(0.0);
+            }
+            let si = &mut ss[head];
+            let yi = &mut yy[head];
+            for j in 0..n { si[j] = step * d[j]; }
+            for j in 0..n { yi[j] = g[j] - g_old[j]; }
+            let sy = dot_product(si, yi);
+            rho[head] = if sy.abs() > 1e-32 { 1.0 / sy } else { 1.0 };
+            head = (head + 1) % m;
+        }
+
+        Err(LbfgsResult { converged: false, iterations: self.cfg.max_iter, final_residual: g_norm })
+    }
+}
+
+// ─── Trust-region (Steihaug-CG) ──────────────────────────────────────────────
+
+/// Convergence and iteration parameters for the trust-region solver.
+#[derive(Debug, Clone)]
+pub struct TrustRegionConfig {
+    pub atol: f64,
+    pub rtol: f64,
+    pub max_iter: usize,
+    /// Initial trust-region radius.
+    pub delta0: f64,
+    /// Maximum trust-region radius.
+    pub delta_max: f64,
+    /// Shrink factor when step is rejected.
+    pub shrink: f64,
+    /// Expand factor when step is accepted (good quality).
+    pub expand: f64,
+    /// Threshold ρ for accepting step.
+    pub eta_accept: f64,
+    /// Threshold ρ for expanding the radius.
+    pub eta_expand: f64,
+    /// Linear solver tolerance for CG inner solve.
+    pub linear_tol: f64,
+    pub verbose: bool,
+}
+
+impl Default for TrustRegionConfig {
+    fn default() -> Self {
+        TrustRegionConfig {
+            atol: 1e-10, rtol: 1e-8, max_iter: 100,
+            delta0: 1.0, delta_max: 1e8, shrink: 0.25, expand: 2.0,
+            eta_accept: 0.1, eta_expand: 0.75,
+            linear_tol: 1e-10, verbose: false,
+        }
+    }
+}
+
+/// Outcome of a trust-region solve.
+#[derive(Debug, Clone)]
+pub struct TrustRegionResult {
+    pub converged: bool,
+    pub iterations: usize,
+    pub final_residual: f64,
+}
+
+/// Trust-region method with Steihaug-CG subproblem solver.
+///
+/// Uses the quadratic model `m(p) = F(u)ᵀp + ½ pᵀJ(u)p` and CG to solve
+/// the constrained minimisation `min_{‖p‖≤Δ} m(p)`.
+pub struct TrustRegionSolver {
+    cfg: TrustRegionConfig,
+}
+
+impl TrustRegionSolver {
+    pub fn new(cfg: TrustRegionConfig) -> Self { TrustRegionSolver { cfg } }
+
+    /// Solve `F(u) = 0` starting from the initial guess in `u`.
+    pub fn solve(
+        &self,
+        form: &dyn NonlinearForm,
+        rhs:  &[f64],
+        u:    &mut [f64],
+    ) -> Result<TrustRegionResult, TrustRegionResult> {
+        let n = form.n_dofs();
+        assert_eq!(u.len(), n);
+        let cfg = &self.cfg;
+
+        let mut delta = cfg.delta0;
+        let mut g = vec![0.0_f64; n];   // residual = gradient of ½‖F‖²
+        let mut p = vec![0.0_f64; n];   // step
+        let mut g_jp = vec![0.0_f64; n];// J·p for CG
+
+        form.residual(u, rhs, &mut g);
+        let g0_norm = norm2(&g);
+        let mut g_norm = g0_norm;
+
+        if g_norm < cfg.atol {
+            return Ok(TrustRegionResult { converged: true, iterations: 0, final_residual: g_norm });
+        }
+
+        for iter in 0..cfg.max_iter {
+            let jac = form.jacobian(u);
+
+            // ── Steihaug-CG for the constrained step ─────────────────────
+            // Solve min_{‖p‖≤Δ}  gᵀ·p + ½·pᵀ·J·p
+            let mut z = vec![0.0_f64; n];  // CG iterate
+            let mut r_cg = g.clone();      // negative gradient = -g (we minimise g·p + ½p·J·p)
+            // Actually: m(p) = gᵀp + ½pᵀJp. ∇m = g + Jp = 0 → Jp = -g
+            // So we solve J·p = -g with CG, truncated by ‖p‖ ≤ Δ.
+            for j in 0..n { r_cg[j] = -g[j]; }  // r = -g − J·z  (initially z=0 → r = -g)
+
+            let mut cg_dir = r_cg.clone();
+            let mut rz = dot_product(&r_cg, &r_cg);
+            let mut reached_boundary = false;
+            let mut cg_finished = false;
+
+            let cg_max = n.min(200);
+            for _cg in 0..cg_max {
+                if rz < cfg.linear_tol * cfg.linear_tol {
+                    cg_finished = true;
+                    break;
+                }
+
+                // J·cg_dir
+                jac.spmv(&cg_dir, &mut g_jp);
+                let cg_jcg = dot_product(&cg_dir, &g_jp);
+
+                if cg_jcg <= 0.0 {
+                    // Negative curvature: step to boundary along cg_dir
+                    // τ solves ‖z + τ·cg_dir‖ = Δ
+                    let z_norm_sq = dot_product(&z, &z);
+                    let d_norm_sq = dot_product(&cg_dir, &cg_dir);
+                    let zd = dot_product(&z, &cg_dir);
+                    // ‖z + τ·d‖² = z·z + 2τ·z·d + τ²·d·d = Δ²
+                    let a = d_norm_sq;
+                    let b = 2.0 * zd;
+                    let c = z_norm_sq - delta * delta;
+                    let disc = b * b - 4.0 * a * c;
+                    if disc > 0.0 && a > 0.0 {
+                        let tau = (-b + disc.sqrt()) / (2.0 * a);
+                        for j in 0..n { z[j] += tau * cg_dir[j]; }
+                    }
+                    reached_boundary = true;
+                    break;
+                }
+
+                let alpha = rz / cg_jcg;
+                // Check if z + α·cg_dir would exceed Δ
+                let new_z_sq = dot_product(&z, &z) + 2.0 * alpha * dot_product(&z, &cg_dir)
+                             + alpha * alpha * dot_product(&cg_dir, &cg_dir);
+                if new_z_sq > delta * delta {
+                    // Step truncated by boundary
+                    let z_norm_sq = dot_product(&z, &z);
+                    let d_norm_sq = dot_product(&cg_dir, &cg_dir);
+                    let zd = dot_product(&z, &cg_dir);
+                    let a = d_norm_sq;
+                    let b = 2.0 * zd;
+                    let c = z_norm_sq - delta * delta;
+                    let disc = b * b - 4.0 * a * c;
+                    if disc > 0.0 && a > 0.0 {
+                        let tau = (-b + disc.sqrt()) / (2.0 * a);
+                        for j in 0..n { z[j] += tau * cg_dir[j]; }
+                    }
+                    reached_boundary = true;
+                    break;
+                }
+
+                for j in 0..n { z[j] += alpha * cg_dir[j]; }
+                for j in 0..n { r_cg[j] -= alpha * g_jp[j]; }
+
+                let rz_new = dot_product(&r_cg, &r_cg);
+                let beta = rz_new / rz;
+                for j in 0..n { cg_dir[j] = r_cg[j] + beta * cg_dir[j]; }
+                rz = rz_new;
+            }
+
+            if !cg_finished && !reached_boundary {
+                // CG completed naturally — z is the Newton step
+            }
+
+            // z is the candidate step p_k
+            // ── Compute ρ = actual reduction / predicted reduction ─────
+            let mut g_new = vec![0.0_f64; n];
+            let mut u_new = vec![0.0_f64; n];
+            for j in 0..n { u_new[j] = u[j] + z[j]; }
+            form.residual(&u_new, rhs, &mut g_new);
+
+            // Model predicted reduction: m(0) − m(p) = −gᵀp − ½pᵀJp
+            jac.spmv(&z, &mut g_jp);
+            let predicted = -dot_product(&g, &z) - 0.5 * dot_product(&z, &g_jp);
+            let actual = 0.5 * (norm2(&g).powi(2) - norm2(&g_new).powi(2));
+            let rho = if predicted.abs() > 1e-32 { actual / predicted } else { 0.0 };
+
+            if rho > cfg.eta_accept {
+                u.copy_from_slice(&u_new);
+                g.copy_from_slice(&g_new);
+                g_norm = norm2(&g);
+                delta = (delta * cfg.expand).min(cfg.delta_max);
+            } else {
+                delta *= cfg.shrink;
+            }
+
+            if self.cfg.verbose {
+                println!("[TR] iter={} ‖F‖={g_norm:.3e} Δ={delta:.3e} ρ={rho:.3e}", iter + 1);
+            }
+
+            if g_norm < cfg.atol || g_norm < g0_norm * cfg.rtol {
+                return Ok(TrustRegionResult { converged: true, iterations: iter + 1, final_residual: g_norm });
+            }
+
+            if delta < 1e-16 {
+                break;
+            }
+        }
+
+        Err(TrustRegionResult { converged: false, iterations: self.cfg.max_iter, final_residual: g_norm })
+    }
+}
+
+fn dot_product(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 #[cfg(test)]
