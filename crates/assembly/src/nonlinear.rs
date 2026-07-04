@@ -216,6 +216,94 @@ fn norm2(v: &[f64]) -> f64 {
     v.iter().map(|&x| x * x).sum::<f64>().sqrt()
 }
 
+// ─── Finite-difference Jacobian ────────────────────────────────────────────
+
+/// Compute a sparse Jacobian matrix via column-wise finite differences.
+///
+/// Perturbs each DOF by `h = eps * (1 + |u_j|)` and computes
+/// `J[:,j] ≈ (F(u + h·eⱼ) − F(u)) / h`.
+///
+/// Uses `element_dofs` to determine the sparsity pattern: only DOFs that share
+/// an element with column `j` are stored in that column.
+pub fn finite_diff_jacobian(
+    u: &[f64],
+    form: &dyn NonlinearForm,
+    rhs: &[f64],
+    n_dofs: usize,
+    element_dofs: &[Vec<u32>],
+    eps: f64,
+) -> CsrMatrix<f64> {
+    use std::collections::BTreeSet;
+    let mut sparsity = vec![BTreeSet::new(); n_dofs];
+    for elem in element_dofs {
+        for &di in elem { for &dj in elem {
+            if di != dj { sparsity[di as usize].insert(dj as usize); }
+        }}
+    }
+    let mut row_ptr = vec![0usize; n_dofs + 1];
+    let mut col_idx = Vec::new();
+    for i in 0..n_dofs {
+        col_idx.extend(sparsity[i].iter());
+        row_ptr[i + 1] = col_idx.len();
+    }
+    let mut values = vec![0.0_f64; col_idx.len()];
+    let mut r0 = vec![0.0; n_dofs];
+    form.residual(u, rhs, &mut r0);
+    let mut u_pert = u.to_vec();
+    for j in 0..n_dofs {
+        let coupled: Vec<usize> = (0..n_dofs).filter(|&i| sparsity[i].contains(&j)).collect();
+        if coupled.is_empty() { continue; }
+        let h = eps * (1.0 + u[j].abs());
+        u_pert[j] = u[j] + h;
+        let mut r1 = vec![0.0; n_dofs];
+        form.residual(&u_pert, rhs, &mut r1);
+        let inv_h = 1.0 / h;
+        for &i in &coupled {
+            let start = row_ptr[i];
+            let end = row_ptr[i + 1];
+            if let Some(pos) = col_idx[start..end].iter().position(|&c: &usize| c == j) {
+                values[start + pos] = (r1[i] - r0[i]) * inv_h;
+            }
+        }
+        u_pert[j] = u[j];
+    }
+    CsrMatrix {
+        nrows: n_dofs, ncols: n_dofs,
+        row_ptr, col_idx: col_idx.into_iter().map(|c| c as u32).collect(), values,
+    }
+}
+
+/// Wrapper: implements `NonlinearForm` using finite-difference Jacobian.
+///
+/// Define the residual and get a working Jacobian for prototyping.
+/// For production, replace with an analytic Jacobian.
+pub struct FdNonlinearForm<F> {
+    n_dofs: usize,
+    residual_fn: F,
+    element_dofs: Vec<Vec<u32>>,
+    eps: f64,
+}
+
+impl<F> FdNonlinearForm<F>
+where F: Fn(&[f64], &[f64], &mut [f64]) + Send + Sync,
+{
+    pub fn new(n_dofs: usize, residual_fn: F, element_dofs: Vec<Vec<u32>>) -> Self {
+        FdNonlinearForm { n_dofs, residual_fn, element_dofs, eps: 1e-7 }
+    }
+}
+
+impl<F> NonlinearForm for FdNonlinearForm<F>
+where F: Fn(&[f64], &[f64], &mut [f64]) + Send + Sync,
+{
+    fn residual(&self, u: &[f64], rhs: &[f64], r: &mut [f64]) {
+        (self.residual_fn)(u, rhs, r);
+    }
+    fn jacobian(&self, u: &[f64]) -> CsrMatrix<f64> {
+        finite_diff_jacobian(u, self, &vec![0.0; self.n_dofs], self.n_dofs, &self.element_dofs, self.eps)
+    }
+    fn n_dofs(&self) -> usize { self.n_dofs }
+}
+
 // ─── JFNK (Jacobian-Free Newton-Krylov) ────────────────────────────────────
 
 /// Configuration for the JFNK solver.

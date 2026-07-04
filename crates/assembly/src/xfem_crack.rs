@@ -100,7 +100,7 @@ pub fn max_hoop_stress_angle(k_i: f64, k_ii: f64) -> f64 {
 /// `K_eq = cos(θ_c/2)·[K_I·cos²(θ_c/2) − 1.5·K_II·sin(θ_c)]`.
 pub fn equivalent_k(k_i: f64, k_ii: f64, theta_c: f64) -> f64 {
     let ch = (theta_c / 2.0).cos();
-    let sh = (theta_c / 2.0).sin();
+    let _sh = (theta_c / 2.0).sin();
     ch * (k_i * ch * ch - 1.5 * k_ii * theta_c.sin())
 }
 
@@ -167,6 +167,7 @@ pub fn propagate_crack_front(
 }
 
 #[cfg(test)]
+#[allow(unused_variables)]
 mod tests {
     use super::*;
 

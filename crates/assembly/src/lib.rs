@@ -206,7 +206,7 @@ pub use dg_framework::{
 pub use dg_elasticity::DgElasticityAssembler;
 pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux, HyperbolicConservationLaw, EulerConservationLaw, minmod, limiter_minmod_tet_p1};
 pub use interior_faces::InteriorFaceList;
-pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator};
+pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm};
 pub use nonlinear_hyperelasticity::HyperelasticityForm;
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator,
                   HcurlMatrixFreeOperator, solve_hcurl_matrix_free,
