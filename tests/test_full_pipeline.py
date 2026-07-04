@@ -293,3 +293,31 @@ def test_all_iterative_solvers_converge():
     x[:] = 0.0
     r = fem.solve_pcg_jacobi(A, b, x, tol=1e-8)
     assert r.converged
+
+
+# ─── Mesh operations ──────────────────────────────────────────────────────
+
+def test_mesh_extrusion():
+    """Extrude a 2-D Tri3 mesh into 3-D Prism6."""
+    mesh = fem.Mesh.unit_square_tri(2)
+    m3d = mesh.extrude_to_prisms(3, 1.0)
+    assert m3d.dim() == 3
+    assert m3d.n_nodes() == mesh.n_nodes() * 4
+    assert m3d.n_elements() == mesh.n_elements() * 3
+
+
+def test_mesh_supermesh():
+    """Supermesh of mesh with itself covers the domain."""
+    a = fem.Mesh.unit_square_tri(3)
+    sm = fem.Mesh.supermesh(a, a)
+    assert sm.n_elements() >= a.n_elements()
+
+
+def test_complex_grid_function():
+    """Complex grid function amplitude for unit-amplitude field."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V = fem.H1Space(mesh, order=1)
+    cgf = fem.ComplexGridFunction(V)
+    assert cgf.n_dofs() == V.n_dofs()
+    amp = cgf.amplitude()
+    assert len(amp) == V.n_dofs()

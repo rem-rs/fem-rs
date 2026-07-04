@@ -4,6 +4,7 @@ from fem._core import (
     L2Space,
     VectorH1Space,
     HCurlSpace,
+    ComplexGridFunction,
     StiffnessIntegrator,
     MassIntegrator,
     ConstantLoad,
@@ -27,7 +28,7 @@ from fem.forms import (
 )
 
 __all__ = [
-    "Mesh", "H1Space", "L2Space", "VectorH1Space", "HCurlSpace",
+    "Mesh", "H1Space", "L2Space", "VectorH1Space", "HCurlSpace", "ComplexGridFunction",
     "StiffnessIntegrator", "MassIntegrator", "ConstantLoad",
     "CsrMatrix", "SolveResult",
     "assemble_bilinear", "assemble_linear", "apply_dirichlet",

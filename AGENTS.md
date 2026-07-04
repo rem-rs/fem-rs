@@ -62,4 +62,15 @@ The Python bindings use PyO3 + maturin, located at `crates/python/`.
    ```powershell
    $env:PYO3_PYTHON = "$(uv python find 3.11)"
    cargo build -p fem-py
+   Copy-Item target/debug/fem_py.dll python/fem/_core.pyd -Force
    ```
+
+4. Run the test suite:
+   ```powershell
+   $env:PYTHONPATH = "python"
+   uv run python -m pytest tests/test_full_pipeline.py -x -q
+   ```
+
+The Python module exposes mesh generation, FE spaces (H¹/L²/VectorH¹/HCurl/ComplexH¹),
+assembly (stiffness/mass/source), linear solvers (CG/GMRES/PCG/BiCGSTAB/LU/Cholesky),
+extrusion, supermesh construction, and complex grid function operations.

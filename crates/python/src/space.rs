@@ -1,7 +1,9 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
+use pyo3::types::PyList;
+use numpy::{PyArray1, PyArrayMethods};
 use fem_mesh::SimplexMesh;
-use fem_space::{FESpace, H1Space, L2Space, VectorH1Space, HCurlSpace};
+use fem_space::{FESpace, H1Space, L2Space, VectorH1Space, HCurlSpace, ComplexGridFunction, ComplexSpace};
 use crate::mesh::PyMesh;
 
 /// H¹ finite element space (continuous Lagrange).
@@ -165,4 +167,28 @@ impl PyHCurlSpace {
     }
 
     pub fn dim(&self) -> u8 { self.dim }
+}
+
+/// Complex-valued H¹ grid function (real + imaginary parts).
+#[pyclass(name = "ComplexGridFunction")]
+pub struct PyComplexGridFunction {
+    pub u_re: Vec<f64>,
+    pub u_im: Vec<f64>,
+}
+
+#[pymethods]
+impl PyComplexGridFunction {
+    #[new]
+    pub fn new(space: &PyH1Space) -> PyResult<Self> {
+        let n = space.n_dofs()?;
+        Ok(PyComplexGridFunction { u_re: vec![0.0; n], u_im: vec![0.0; n] })
+    }
+
+    pub fn n_dofs(&self) -> usize { self.u_re.len() }
+
+    pub fn amplitude<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        let a: Vec<f64> = self.u_re.iter().zip(self.u_im.iter())
+            .map(|(&r, &i)| (r*r + i*i).sqrt()).collect();
+        PyArray1::from_vec(py, a)
+    }
 }

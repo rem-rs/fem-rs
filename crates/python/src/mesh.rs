@@ -2,6 +2,9 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use fem_mesh::SimplexMesh;
 use fem_mesh::boundary_nodes_with_tags;
+use fem_mesh::extrude_tri3_to_prisms;
+use fem_mesh::extrude_quad4_to_hex8;
+use fem_mesh::build_supermesh;
 
 /// Unstructured simplex mesh in 2-D or 3-D.
 ///
@@ -92,5 +95,38 @@ impl PyMesh {
             )),
             _ => Err(PyValueError::new_err("invalid mesh state")),
         }
+    }
+
+    /// Extrude a 2-D Tri3 mesh into a 3-D Prism6 mesh.
+    #[pyo3(signature = (n_layers, height))]
+    pub fn extrude_to_prisms(&self, n_layers: usize, height: f64) -> PyResult<PyMesh> {
+        let mesh = self.inner_2d.as_ref().ok_or_else(||
+            PyValueError::new_err("extrude_to_prisms requires a 2-D Tri3 mesh")
+        )?;
+        let m3 = extrude_tri3_to_prisms(mesh, n_layers, height);
+        Ok(PyMesh { inner_2d: None, inner_3d: Some(m3), dim: 3 })
+    }
+
+    /// Extrude a 2-D Quad4 mesh into a 3-D Hex8 mesh.
+    #[pyo3(signature = (n_layers, height))]
+    pub fn extrude_to_hex(&self, n_layers: usize, height: f64) -> PyResult<PyMesh> {
+        let mesh = self.inner_2d.as_ref().ok_or_else(||
+            PyValueError::new_err("extrude_to_hex requires a 2-D Quad4 mesh")
+        )?;
+        let m3 = extrude_quad4_to_hex8(mesh, n_layers, height);
+        Ok(PyMesh { inner_2d: None, inner_3d: Some(m3), dim: 3 })
+    }
+
+    /// Compute the supermesh (intersection) of two 2-D Tri3 meshes.
+    #[staticmethod]
+    pub fn supermesh(mesh_a: &PyMesh, mesh_b: &PyMesh) -> PyResult<PyMesh> {
+        let a = mesh_a.inner_2d.as_ref().ok_or_else(||
+            PyValueError::new_err("supermesh: mesh_a must be 2-D Tri3")
+        )?;
+        let b = mesh_b.inner_2d.as_ref().ok_or_else(||
+            PyValueError::new_err("supermesh: mesh_b must be 2-D Tri3")
+        )?;
+        let (super_mesh, _) = build_supermesh(a, b);
+        Ok(PyMesh { inner_2d: Some(super_mesh), inner_3d: None, dim: 2 })
     }
 }
