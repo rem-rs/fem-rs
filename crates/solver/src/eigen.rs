@@ -555,10 +555,7 @@ fn which_to_linlvo(w: WhichEigenvalue) -> EigenWhich {
 /// ARPACK-style Implicitly Restarted Arnoldi eigensolver.
 ///
 /// Computes `k` eigenvalues of `A x = λ x` using thick-restart Arnoldi
-/// (via linlvo's Krylov-Schur, which implements ARPACK's IRA algorithm).
-///
-/// For shift-invert mode (`WhichEigenvalue::Target(σ)`), solves
-/// `(A − σI)⁻¹ x = θ x` and recovers `λ = σ + 1/θ`.
+/// (via linlvo's Krylov-Schur).  No external libraries (no arpack-ng FFI).
 ///
 /// # Arguments
 /// * `a`     – system matrix
