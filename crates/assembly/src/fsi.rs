@@ -142,6 +142,7 @@ pub fn nodal_displacement_to_dofs(
 /// The fluid and structure are assumed to share the same mesh topology
 /// at the interface (matching nodes). `rhs_struct` uses the structure's
 /// VectorH1Space DOF layout (interleaved).
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_fluid_traction_to_struct<M: MeshTopology + Clone>(
     fluid_mesh: &M,
     struct_mesh: &M,
@@ -301,6 +302,7 @@ impl Default for FsiConfig {
 /// and the fluid on the updated mesh.
 ///
 /// Returns the maximum |disp| on the interface.
+#[allow(clippy::too_many_arguments)]
 pub fn fsi_couple_step<M: MeshTopology + Clone>(
     fluid_mesh: &M,
     struct_mesh: &M,

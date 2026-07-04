@@ -68,9 +68,9 @@ pub fn wgpu_dot<T: Scalar>(
     a: &GpuVector<T>,
     b: &GpuVector<T>,
 ) -> f64 {
-    let n_wg = (a.len() + 255) / 256;
+    let n_wg = a.len().div_ceil(256);
     let dot_buf = crate::DeviceBuffer::with_staging(
-        &backend.device(),
+        backend.device(),
         n_wg as u64 * std::mem::size_of::<T>() as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         "backend_dot",

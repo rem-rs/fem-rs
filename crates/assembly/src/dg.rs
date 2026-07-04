@@ -78,7 +78,7 @@ impl DgAssembler {
         // ── 1. Volume terms ────────────────────────────────────────────────────
         #[cfg(feature = "parallel")]
         {
-            if mesh.n_elements() as usize >= assembly_parallel_min_elems() {
+            if mesh.n_elements() >= assembly_parallel_min_elems() {
                 coo.append(assemble_dg_volume_parallel(space, kappa, quad_order));
             } else {
                 assemble_volume(&mut coo, space, kappa, quad_order);
@@ -464,7 +464,7 @@ fn build_face_elem_map<M: MeshTopology>(mesh: &M, _order: u8) -> HashMap<u32, u3
 }
 
 // ─── Boundary face contribution (Dirichlet) ───────────────────────────────────
-
+#[allow(clippy::too_many_arguments)]
 fn assemble_boundary_face_with_elem<S: FESpace>(
     coo:        &mut CooMatrix<f64>,
     mesh:       &S::Mesh,

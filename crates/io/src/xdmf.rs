@@ -176,10 +176,10 @@ fn write_data_item_with_text<W: io::Write>(
     let precision = "8";
     let format = "HDF";
     let full_path = format!("{hdf5_path}:{dataset_path}");
-    write!(
+    writeln!(
         w,
         "{prefix}<DataItem DataType=\"{number_type}\" Precision=\"{precision}\" \
-         Format=\"{format}\" Dimensions=\"{dimensions}\">\n"
+         Format=\"{format}\" Dimensions=\"{dimensions}\">"
     )?;
     writeln!(w, "{content_prefix}{full_path}")?;
     writeln!(w, "{prefix}</DataItem>")?;
@@ -201,6 +201,7 @@ fn write_data_item_with_text<W: io::Write>(
 /// * `hdf5_path_template` — Template with `{}` for rank number, e.g.
 ///   `"solution_rank_{}.h5"`.  For serial mode the `{}` is replaced with `0`.
 /// * `fields` — Field metadata array.
+#[allow(clippy::too_many_arguments)]
 pub fn write_xdmf(
     path: impl AsRef<Path>,
     num_ranks: usize,

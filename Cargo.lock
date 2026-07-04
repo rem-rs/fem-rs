@@ -626,6 +626,7 @@ dependencies = [
  "fem-mesh",
  "fem-solver",
  "fem-space",
+ "pollster",
  "wgpu",
 ]
 
@@ -670,6 +671,8 @@ dependencies = [
  "fem-stochastic",
  "log",
  "nalgebra 0.33.3",
+ "rand 0.8.6",
+ "rand_distr",
  "wgpu",
 ]
 
@@ -738,6 +741,8 @@ dependencies = [
  "fem-core",
  "fem-element",
  "nalgebra 0.33.3",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
 ]

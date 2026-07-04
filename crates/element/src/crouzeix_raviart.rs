@@ -14,6 +14,12 @@ use crate::quadrature;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct CrouzeixRaviart1 { _priv: () }
+impl Default for CrouzeixRaviart1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CrouzeixRaviart1 { pub fn new() -> Self { CrouzeixRaviart1 { _priv: () } } }
 
 /// CR1 scalar reference element on the reference triangle (3 edge-midpoint DOFs).
@@ -43,6 +49,12 @@ pub fn cr1_grad(_xi: &[f64], grads: &mut [f64]) {
 }
 
 pub struct CrouzeixRaviartVec1 { _priv: () }
+impl Default for CrouzeixRaviartVec1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CrouzeixRaviartVec1 { pub fn new() -> Self { CrouzeixRaviartVec1 { _priv: () } } }
 impl VectorReferenceElement for CrouzeixRaviartVec1 {
     fn n_dofs(&self) -> usize { 6 } fn dim(&self) -> u8 { 2 } fn order(&self) -> u8 { 1 }
@@ -52,7 +64,7 @@ impl VectorReferenceElement for CrouzeixRaviartVec1 {
         for i in 0..3 { vals[i*2] = p[i]; vals[i*2+1] = p[i]; }
     }
     fn eval_curl(&self, _xi: &[f64], c: &mut [f64]) {
-        for k in 0..2 { c[k*3]=2.0; c[k*3+1]=0.0; c[k*3+2]=-2.0; }
+        for k in 0..2 { c[k*3]=2.0; c[k*3+1]=0.0; c[k*3+2] = -2.0; }
     }
     fn eval_div(&self, _xi: &[f64], d: &mut [f64]) {
         for i in 0..6 { d[i] = if i%3==0 {-2.0} else if i%3==1 {4.0} else {-2.0}; }
@@ -186,6 +198,7 @@ fn tri_cr2_build() -> (Vec<f64>, usize, Vec<(usize, usize)>) {
 
 fn cr2_tri_cache() -> &'static (Vec<f64>, usize, Vec<(usize, usize)>) {
     use std::sync::OnceLock;
+    #[allow(clippy::type_complexity)]
     static C: OnceLock<(Vec<f64>, usize, Vec<(usize, usize)>)> = OnceLock::new();
     C.get_or_init(tri_cr2_build)
 }
@@ -286,8 +299,10 @@ fn tet_cr1_build() -> (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
     (direct_invert(&v, n, m), m, monos)
 }
 
+#[allow(clippy::type_complexity)]
 fn tet_cr1_cache() -> &'static (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
     use std::sync::OnceLock;
+    #[allow(clippy::type_complexity)]
     static C: OnceLock<(Vec<f64>, usize, Vec<(usize, usize, usize)>)> = OnceLock::new();
     C.get_or_init(tet_cr1_build)
 }
@@ -421,8 +436,10 @@ fn tet_cr2_build() -> (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
     (normal_eq(&v, n, m), m, monos)
 }
 
+#[allow(clippy::type_complexity)]
 fn tet_cr2_cache() -> &'static (Vec<f64>, usize, Vec<(usize, usize, usize)>) {
     use std::sync::OnceLock;
+    #[allow(clippy::type_complexity)]
     static C: OnceLock<(Vec<f64>, usize, Vec<(usize, usize, usize)>)> = OnceLock::new();
     C.get_or_init(tet_cr2_build)
 }

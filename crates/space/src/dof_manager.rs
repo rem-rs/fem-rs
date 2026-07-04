@@ -969,7 +969,7 @@ impl DofManager {
                 dofs_flat[base+3+2*k]=d0; dofs_flat[base+4+2*k]=d1;
             }
             let fk=FaceKey::new(n0,n1,n2);
-            dofs_flat[base+9]=*face_map.entry(fk).or_insert_with(||{let d=next_dof;next_dof+=1;d});
+            dofs_flat[base+9] = *face_map.entry(fk).or_insert_with(||{let d=next_dof;next_dof+=1;d});
 
             // Layer 1 (ξ=1/3): DOFs 10..19
             for (k,&(a,b)) in [(n0,n3),(n1,n4),(n2,n5)].iter().enumerate() {
@@ -1008,7 +1008,7 @@ impl DofManager {
                 dofs_flat[base+33+2*k]=d0; dofs_flat[base+34+2*k]=d1;
             }
             let fk2=FaceKey::new(n3,n4,n5);
-            dofs_flat[base+39]=*face_map.entry(fk2).or_insert_with(||{let d=next_dof;next_dof+=1;d});
+            dofs_flat[base+39] = *face_map.entry(fk2).or_insert_with(||{let d=next_dof;next_dof+=1;d});
         }
 
         let n_dofs=next_dof as usize;
@@ -1129,7 +1129,7 @@ impl DofManager {
         let dofs_per_elem = n_verts + n_edges * edge_dofs_per + interior_dofs_per;
         let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
         let mut next_dof = n_nodes as DofId;
-        let mut dofs_flat = vec![0u32; n_elems as usize * dofs_per_elem];
+        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
@@ -1214,13 +1214,13 @@ impl DofManager {
         let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
         let mut quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>> = HashMap::new();
         let mut next_dof = n_nodes as DofId;
-        let mut dofs_flat = vec![0u32; n_elems as usize * dofs_per_elem];
+        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             assert!(ns.len() >= 8);
             let base = e as usize * dofs_per_elem;
-            for i in 0..8 { dofs_flat[base + i] = ns[i]; }
+            dofs_flat[base..base + 8].copy_from_slice(&ns[..8]);
             let edges: [(usize, usize); 12] = [
                 (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
             let mut off = 8;
@@ -1338,7 +1338,7 @@ impl DofManager {
             assert!(ns.len() >= 6);
             let base = e as usize * dofs_per_elem;
 
-            for i in 0..6 { dofs_flat[base + i] = ns[i]; }
+            dofs_flat[base..base + 6].copy_from_slice(&ns[..6]);
             let mut off = 6;
 
             if p >= 2 {
@@ -1467,7 +1467,7 @@ impl DofManager {
                     mesh.node_coords(ns[3]), mesh.node_coords(ns[4]), mesh.node_coords(ns[5]),
                 ];
                 for k in 0..volume_dofs_per {
-                    let did = (vol_start + e as usize * volume_dofs_per + k) as usize;
+                    let did = vol_start + e as usize * volume_dofs_per + k;
                     let ri = surface_dofs + k;
                     let rc = &ref_coords[ri];
                     let xi = rc[0]; let eta = rc[1]; let zeta = rc[2];
@@ -1528,7 +1528,7 @@ impl DofManager {
             assert!(ns.len() >= 5);
             let base = e as usize * dofs_per_elem;
 
-            for i in 0..5 { dofs_flat[base + i] = ns[i]; }
+            dofs_flat[base..base + 5].copy_from_slice(&ns[..5]);
             let mut off = 5;
 
             if p >= 2 {
@@ -1639,13 +1639,13 @@ impl DofManager {
                     mesh.node_coords(ns[4]),
                 ];
                 for k in 0..volume_dofs_per {
-                    let did = (vol_start + e as usize * volume_dofs_per + k) as usize;
+                    let did = vol_start + e as usize * volume_dofs_per + k;
                     let ri = surface_dofs + k;
                     let rc = &ref_coords[ri];
                     let (rx, ry, rz) = (rc[0], rc[1], rc[2]);
                     let dbase = did * dim;
                     if (rz - 1.0).abs() < 1e-14 {
-                        for d in 0..dim { dof_coords[dbase + d] = c[4][d]; }
+                        dof_coords[dbase..dbase + dim].copy_from_slice(c[4]);
                     } else {
                         let iz = 1.0 - rz;
                         let u = rx / iz;
@@ -1868,7 +1868,7 @@ impl DofManager {
         if volume_dofs_per > 0 {
             use fem_element::lagrange::factory::{ref_elem, ElemType};
             let ft = if dim == 2 { ElemType::Tri } else { ElemType::Tet };
-            let factory = ref_elem(ft, order as u8);
+            let factory = ref_elem(ft, order);
             let ref_coords = factory.dof_coords();
             // Volume DOFs in factory are the LAST volume_dofs_per entries.
             let vol_factory_start = dofs_per_elem - volume_dofs_per;
@@ -1878,7 +1878,7 @@ impl DofManager {
                 // Vertex coordinates for barycentric interpolation
                 let c0 = mesh.node_coords(ns[0]);
                 let c1 = mesh.node_coords(ns[1]);
-                let c2 = if dim == 2 { mesh.node_coords(ns[2]) } else { mesh.node_coords(ns[2]) };
+                let c2 = mesh.node_coords(ns[2]);
                 let c3 = if dim >= 3 { mesh.node_coords(ns[3]) } else { &[] };
                 for k in 0..volume_dofs_per {
                     let dof_id = vol_start + e as usize * volume_dofs_per + k;
@@ -1901,7 +1901,7 @@ impl DofManager {
         }
 
         DofManager {
-            order, n_dofs: n_dofs as usize, dofs_flat, dofs_per_elem,
+            order, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
             edge_dof_map: HashMap::new(),

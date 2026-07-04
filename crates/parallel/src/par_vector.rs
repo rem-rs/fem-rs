@@ -138,6 +138,10 @@ impl ParVector {
     #[inline]
     pub fn len(&self) -> usize { self.data.len() }
 
+    /// Returns true if the vector contains no elements.
+    #[inline]
+    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+
     /// Number of owned DOFs.
     #[inline]
     pub fn n_owned(&self) -> usize { self.n_owned }
@@ -264,7 +268,7 @@ impl ParComplexVector {
     }
 
     /// Forward ghost exchange with overlapping local work.
-    pub fn update_ghosts_overlapping<F: FnOnce(&mut [f64], &mut [f64])>(&mut self, overlap: F) {
+    pub fn update_ghosts_overlapping<F: FnOnce(&mut [f64], &mut [f64])>(&mut self, _overlap: F) {
         // Run overlap on both parts before the halo operations
         self.re.update_ghosts();
         self.im.update_ghosts();

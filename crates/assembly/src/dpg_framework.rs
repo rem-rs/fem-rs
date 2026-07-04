@@ -70,7 +70,7 @@ impl<'a, M: MeshTopology, F: BilinearForm<M>> DpgSolver<'a, M, F> {
 
         for e in 0..n_elems as u32 {
             let dofs: Vec<usize> = self.mesh.element_nodes(e).iter().map(|&n| n as usize).collect();
-            let (mut b_mat, mut mv) = self.form.eval(self.mesh, e, self.n_test, self.n_trial);
+            let (b_mat, mv) = self.form.eval(self.mesh, e, self.n_test, self.n_trial);
 
             // Solve MV * v_opt_i = b[:,i] for each trial DOF i
             let n_test = self.n_test;

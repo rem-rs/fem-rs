@@ -134,12 +134,12 @@ impl<T: Scalar> CooMatrix<T> {
                 }
                 // Fill row_ptr for rows between the previous and current entry.
                 let prev_r = (pk >> 32) as usize;
-                for rr in (prev_r + 1)..=r {
-                    row_ptr[rr] = col_idx.len();
+                for item in row_ptr.iter_mut().take(r + 1).skip(prev_r + 1) {
+                    *item = col_idx.len();
                 }
             } else {
-                for rr in 0..=r {
-                    row_ptr[rr] = 0;
+                for item in row_ptr.iter_mut().take(r + 1) {
+                    *item = 0;
                 }
             }
 
@@ -150,8 +150,8 @@ impl<T: Scalar> CooMatrix<T> {
 
         // Fill remaining rows
         let last_r = prev_key.map_or(0, |k| (k >> 32) as usize);
-        for rr in (last_r + 1)..=(self.nrows) {
-            row_ptr[rr] = col_idx.len();
+        for item in row_ptr.iter_mut().take(self.nrows + 1).skip(last_r + 1) {
+            *item = col_idx.len();
         }
 
         CsrMatrix { nrows: self.nrows, ncols: self.ncols, row_ptr, col_idx, values }

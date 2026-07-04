@@ -43,10 +43,10 @@ impl VectorReferenceElement for QuadNDk {
 
         // Edge 0 (y=-1): tangent +x
         let hy = hat(y, -1.0);
-        for j in 0..p { values[(0 * p + j) * 2] = lag(&nodes, j, x) * hy; }
+        for j in 0..p { values[j * 2] = lag(&nodes, j, x) * hy; }
         // Edge 1 (x=1): tangent +y
         let hx = hat(x, 1.0);
-        for j in 0..p { values[(1 * p + j) * 2 + 1] = lag(&nodes, j, y) * hx; }
+        for j in 0..p { values[(p + j) * 2 + 1] = lag(&nodes, j, y) * hx; }
         // Edge 2 (y=1): tangent -x
         let hy2 = hat(y, 1.0);
         for j in 0..p { values[(2 * p + j) * 2] = -lag(&nodes, j, x) * hy2; }
@@ -87,9 +87,9 @@ impl VectorReferenceElement for QuadNDk {
             let dhy = hat_d(y, -1.0); let dhx = hat_d(x, 1.0);
             let dhy2 = hat_d(y, 1.0); let dhx2 = hat_d(x, -1.0);
             // e0: Φ=(lx·hat(y,-1), 0) → curl = -lx · dhy
-            curl_vals[0 * p + j] = -lx * dhy;
+            curl_vals[j] = -lx * dhy;
             // e1: Φ=(0, ly·hat(x,1)) → curl = ly · dhx
-            curl_vals[1 * p + j] = ly * dhx;
+            curl_vals[p + j] = ly * dhx;
             // e2: Φ=(-lx·hat(y,1), 0) → curl = -(-lx·dhy2) = lx·dhy2
             curl_vals[2 * p + j] = lx * dhy2;
             // e3: Φ=(0, -ly·hat(x,-1)) → curl = -ly·dhx2

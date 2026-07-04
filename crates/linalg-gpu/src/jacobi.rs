@@ -147,7 +147,7 @@ impl<T: Scalar> GpuJacobiPrecond<T> {
             ],
         });
 
-        let wg = (self.n + 255) / 256;
+        let wg = self.n.div_ceil(256);
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("jacobi_pass"),
             timestamp_writes: None,

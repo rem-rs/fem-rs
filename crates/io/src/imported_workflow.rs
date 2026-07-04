@@ -96,6 +96,7 @@ pub fn vtk_named_attribute_cell_fields(
     cell_data
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn vtk_named_attribute_solution_fields(
     solution: Vec<f64>,
     inlet_mask: Vec<f64>,

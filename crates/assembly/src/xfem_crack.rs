@@ -13,7 +13,7 @@
 //! let (new_ls, angle) = propagate_crack_front(&old_ls, &cfg, 0);
 //! ```
 
-use crate::xfem::{tip_branch_functions, polar_coords, XfemLevelSet};
+use crate::xfem::XfemLevelSet;
 
 /// Material and numerical parameters for crack propagation.
 #[derive(Debug, Clone)]

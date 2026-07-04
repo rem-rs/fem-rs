@@ -52,6 +52,8 @@ impl BlockVector {
     /// Total length (sum of all block sizes).
     pub fn len(&self) -> usize { self.data.len() }
 
+    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+
     /// Immutable view of block `i`.
     pub fn block(&self, i: usize) -> &[f64] {
         &self.data[self.offsets[i]..self.offsets[i + 1]]

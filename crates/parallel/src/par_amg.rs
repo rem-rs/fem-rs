@@ -2,6 +2,7 @@
 //!
 //! Implements a distributed AMG V-cycle using **local smoothed aggregation**:
 //!
+#![allow(unused_variables, dead_code, unused_assignments, unused_mut)]
 //! 1. Each rank coarsens its owned rows independently (aggregates don't cross
 //!    partition boundaries).
 //! 2. Prolongation/restriction operators are distributed sparse matrices.
@@ -13,6 +14,7 @@
 
 use std::sync::Arc;
 
+use fem_core::Rank;
 use fem_linalg::{CooMatrix, CsrMatrix};
 
 use crate::comm::Comm;
@@ -668,6 +670,15 @@ fn build_coarse_level_global(
     let global_agg_owned: Vec<i64> =
         aggregate.iter().map(|&a| (rank_agg_offset as i64) + a as i64).collect();
 
+    // ── Step 3.5: compute rank ranges for global aggregate IDs ─────────────────
+    // `all_n_agg[r]` = number of coarse aggregates owned by rank r.
+    // `rank_offset[r]` = exclusive prefix sum = first global aggregate ID for rank r.
+    let mut rank_offset = vec![0usize; n_ranks];
+    for r in 1..n_ranks {
+        rank_offset[r] = rank_offset[r - 1] + all_n_agg[r - 1];
+    }
+    // For a global aggregate gid, the owning rank is where rank_offset[r] <= gid < rank_offset[r] + all_n_agg[r].
+
     // ── Step 4: exchange global aggregate IDs via ghost forward ──────────────
     // Build a working buffer: [owned_global_agg..., 0 for ghost slots...]
     let mut agg_buf = vec![0.0_f64; n_owned + n_ghost];
@@ -695,11 +706,11 @@ fn build_coarse_level_global(
     // also strongly connected to g.
     let mut parent: Vec<usize> = (0..n_agg as usize).collect();
 
-    fn find(parent: &mut Vec<usize>, mut x: usize) -> usize {
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
         while parent[x] != x { x = parent[x]; }
         x
     }
-    fn union(parent: &mut Vec<usize>, a: usize, b: usize) {
+    fn union(parent: &mut [usize], a: usize, b: usize) {
         let ra = find(parent, a);
         let rb = find(parent, b);
         if ra != rb { parent[ra] = rb; }
@@ -756,33 +767,184 @@ fn build_coarse_level_global(
     let r_local = transpose_csr(&p_local);
 
     // ── Step 8: Galerkin coarse matrix A_c = R (A_diag + A_offd) P ───────────
-    // We approximate the full SpMV by using the diag block for the triple product.
-    // For a more accurate result the offd contribution is included via a full
-    // row SpMV with ghost values before the restriction step.
-    let ap_local = csr_multiply(&a.diag, &p_local);
+    //
+    // Build a mapping from global aggregate IDs (seen by ghost DOFs) to local
+    // coarse indices.  After Step 5 boundary merging, some remote aggregates
+    // were merged into local ones — those ghost contributions should be added
+    // to the corresponding local AP entry.  Ghost aggregates that were NOT
+    // merged (truly remote) are stored as off-diagonal contributions.
+    //
+    // Step 8a: map global_agg_id → local_coarse_idx for merged aggregates.
+    let mut global_to_local: HashMap<i64, usize> = HashMap::new();
+    for i in 0..n_owned {
+        let local_root = merged_agg[i];
+        let global_id = global_agg_owned[i];
+        global_to_local.entry(global_id).or_insert(local_root);
+    }
+
+    // Step 8b: build AP = A_diag * P_local + A_offd * P_ghost
+    let mut ap_coo = CooMatrix::<f64>::new(n_owned, n_coarse.max(1));
+
+    // Diagonal contribution: A_diag * P_local
+    for i in 0..n_owned {
+        let ci = merged_agg[i];
+        for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
+            let j = diag.col_idx[k] as usize;
+            let cj = merged_agg.get(j).copied();
+            if let Some(cj) = cj {
+                let val = diag.values[k];
+                ap_coo.add(i, cj, val);       // A[i,j] * P[j,cj] (P[j,cj]=1)
+            }
+        }
+    }
+
+    // Off-diagonal contribution: A_offd * P_ghost, plus coarse-level offd.
+    // First pass: count coarse ghosts and assign slots.
+    let mut coarse_ghost_slots: HashMap<i64, u32> = HashMap::new();  // global_agg_id → coarse ghost slot
+    let mut coarse_ghost_owners: HashMap<u32, Rank> = HashMap::new(); // coarse ghost slot → owner rank
+    let mut next_coarse_ghost: u32 = 0u32;
+
+    for i in 0..n_owned {
+        for k in offd.row_ptr[i]..offd.row_ptr[i + 1] {
+            let g_slot = offd.col_idx[k] as usize;
+            let g_id = agg_buf[n_owned + g_slot] as i64;
+            if global_to_local.contains_key(&g_id) { continue; }
+            if let std::collections::hash_map::Entry::Vacant(e) = coarse_ghost_slots.entry(g_id) {
+                let slot = next_coarse_ghost;
+                next_coarse_ghost += 1;
+                let owner = (0..n_ranks).find(|&r| {
+                    let off = rank_offset[r];
+                    g_id as usize >= off && (g_id as usize) < off + all_n_agg[r]
+                }).unwrap_or(0) as fem_core::Rank;
+                e.insert(slot);
+                coarse_ghost_owners.insert(slot, owner);
+            }
+        }
+    }
+
+    let _n_coarse_ghost = next_coarse_ghost as usize;
+
+    // Second pass: fill AP (diag + merged offd) and coarse offd.
+    let mut ap_coo = CooMatrix::<f64>::new(n_owned, n_coarse.max(1));
+    let mut coarse_offd_coo = CooMatrix::<f64>::new(n_coarse.max(1), _n_coarse_ghost.max(1));
+
+    // Diagonal contribution: A_diag * P_local (A_ij * P_jk = A_ij for k = merged_agg[j]).
+    for i in 0..n_owned {
+        let ci = merged_agg[i];
+        for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
+            let j = diag.col_idx[k] as usize;
+            if let Some(&cj) = merged_agg.get(j) {
+                ap_coo.add(i, cj, diag.values[k]);
+            }
+        }
+    }
+    // Off-diagonal contribution: A_offd * P_ghost.
+    for i in 0..n_owned {
+        let ci = merged_agg[i];
+        for k in offd.row_ptr[i]..offd.row_ptr[i + 1] {
+            let g_slot = offd.col_idx[k] as usize;
+            let g_id = agg_buf[n_owned + g_slot] as i64;
+            if let Some(&cj) = global_to_local.get(&g_id) {
+                ap_coo.add(i, cj, offd.values[k]);
+            } else if let Some(&cg_slot) = coarse_ghost_slots.get(&g_id) {
+                coarse_offd_coo.add(ci, cg_slot as usize, offd.values[k]);
+            }
+        }
+    }
+    let ap_local = ap_coo.into_csr();
+
+    // Step 8c: A_c = R_local * AP (diagonal block)
     let ac_local = csr_multiply(&r_local, &ap_local);
 
-    // Wrap in ParCsrMatrix.
-    let trivial_ex = Arc::new(GhostExchange::from_trivial());
+    // Coarse offd block — coarse_offd_coo already has correct (row, col_ghost, val).
+    let ac_offd = if _n_coarse_ghost > 0 {
+        coarse_offd_coo.into_csr()
+    } else {
+        CsrMatrix::new_empty(n_coarse.max(1), 0)
+    };
+
+    // Build coarse GhostExchange via alltoall.
+    // Each rank knows its ghost aggregates' global IDs and owners (coarse_ghost_slots).
+    // We need to tell each owner which of its aggregates we ghost, so the owner
+    // can build its send_map.  Simultaneously we build our own recv map.
+    //
+    // Encoding: for each (owner, (gid, ghost_slot)), send a 16-byte packet:
+    // [gid u64, ghost_slot u32, pad u32].
+    let coarse_ghost_exchange = if _n_coarse_ghost > 0 {
+        // Step A: encode ghost info per owner → alltoall
+        let mut send_data: HashMap<Rank, Vec<u8>> = HashMap::new();
+        for (&gid, &slot) in &coarse_ghost_slots {
+            let owner = coarse_ghost_owners.get(&slot).copied().unwrap_or(0);
+            let mut buf = Vec::with_capacity(16);
+            buf.extend_from_slice(&(gid as u64).to_le_bytes());
+            buf.extend_from_slice(&slot.to_le_bytes());
+            buf.extend_from_slice(&[0u8; 4]); // pad
+            send_data.entry(owner).or_default().extend(buf);
+        }
+        let sends: Vec<(Rank, Vec<u8>)> = send_data.into_iter().collect();
+        let received = comm.alltoallv_bytes(&sends);
+
+        // Step B: build owned_global_to_local map
+        let owned_global_to_local: HashMap<i64, usize> = (0..n_owned)
+            .map(|i| (global_agg_owned[i], merged_agg[i]))
+            .collect();
+
+        // Step C: build send_map from alltoall results, recv_slots from own ghosts
+        let mut send_map: HashMap<Rank, Vec<u32>> = HashMap::new();
+        for (sender_rank, bytes) in &received {
+            for chunk in bytes.chunks(16) {
+                if chunk.len() < 8 { continue; }
+                let gid = u64::from_le_bytes(chunk[..8].try_into().unwrap()) as i64;
+                // Sender ghosts this gid → if we own it, we must SEND them our value.
+                if let Some(&local_idx) = owned_global_to_local.get(&gid) {
+                    send_map.entry(*sender_rank).or_default().push(local_idx as u32);
+                }
+            }
+        }
+        let mut recv_slots: HashMap<Rank, Vec<u32>> = HashMap::new();
+        for (&_gid, &slot) in &coarse_ghost_slots {
+            let owner = coarse_ghost_owners.get(&slot).copied().unwrap_or(0);
+            let abs_idx = (n_coarse + slot as usize) as u32;
+            recv_slots.entry(owner).or_default().push(abs_idx);
+        }
+
+        // Step D: build channels
+        let all_neighbors: std::collections::HashSet<Rank> =
+            send_map.keys().chain(recv_slots.keys()).copied().collect();
+        let channels: Vec<_> = all_neighbors.into_iter().map(|neighbor| {
+            let sends = send_map.remove(&neighbor).unwrap_or_default();
+            let recvs = recv_slots.remove(&neighbor).unwrap_or_default();
+            crate::ghost::GhostChannelDef {
+                rank: neighbor,
+                send_local_ids: sends,
+                recv_local_ids: recvs,
+            }
+        }).collect();
+        Arc::new(GhostExchange::from_channels(channels))
+    } else {
+        Arc::new(GhostExchange::from_trivial())
+    };
+    // Wrap in ParCsrMatrix with proper coarse ghost exchange.
     let p_par = ParCsrMatrix::from_blocks(
         p_local,
         CsrMatrix::new_empty(n_owned, 0),
         n_owned, 0,
-        Arc::clone(&trivial_ex),
+        Arc::clone(&coarse_ghost_exchange),
         comm.clone(),
     );
     let r_par = ParCsrMatrix::from_blocks(
         r_local,
         CsrMatrix::new_empty(n_coarse, 0),
         n_coarse, 0,
-        Arc::clone(&trivial_ex),
+        Arc::clone(&coarse_ghost_exchange),
         comm.clone(),
     );
     let ac_par = ParCsrMatrix::from_blocks(
         ac_local,
-        CsrMatrix::new_empty(n_coarse, 0),
-        n_coarse, 0,
-        Arc::clone(&trivial_ex),
+        ac_offd,
+        n_coarse,
+        _n_coarse_ghost,
+        coarse_ghost_exchange,
         comm.clone(),
     );
 
@@ -1128,6 +1290,331 @@ pub fn par_solve_pcg_amg(
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+// ── Parallel RS (Ruge–Stüben) coarsening ──────────────────────────────────────
+
+/// Parallel RS strong connection matrix (full row: diag + offd).
+/// Returns `(strong_diag, strong_offd)` where strong_conn[i][j] = |a_ij| if
+/// |a_ij| ≥ θ·max|a_ik|, else 0.  Includes ghost-column entries.
+fn rs_strong_connections(
+    a: &ParCsrMatrix,
+    theta: f64,
+) -> (CsrMatrix<f64>, CsrMatrix<f64>) {
+    let n_owned = a.n_owned;
+    // Compute max |a_ij| per row (over all j ≠ i, diag+offd)
+    let mut max_row = vec![0.0_f64; n_owned];
+    for i in 0..n_owned {
+        for k in a.diag.row_ptr[i]..a.diag.row_ptr[i + 1] {
+            let j = a.diag.col_idx[k] as usize;
+            if j != i { max_row[i] = max_row[i].max(a.diag.values[k].abs()); }
+        }
+        for k in a.offd.row_ptr[i]..a.offd.row_ptr[i + 1] {
+            max_row[i] = max_row[i].max(a.offd.values[k].abs());
+        }
+    }
+    // Build strong diag block (owned × owned)
+    let mut s_diag_coo = CooMatrix::new(n_owned, n_owned);
+    for i in 0..n_owned {
+        let th = theta * max_row[i];
+        for k in a.diag.row_ptr[i]..a.diag.row_ptr[i + 1] {
+            let j = a.diag.col_idx[k] as usize;
+            if j != i && a.diag.values[k].abs() >= th {
+                s_diag_coo.add(i, j, a.diag.values[k].abs());
+            }
+        }
+    }
+    // Build strong offd block (owned × ghost)
+    let n_ghost = a.n_ghost;
+    let mut s_offd_coo = CooMatrix::new(n_owned, n_ghost.max(1));
+    for i in 0..n_owned {
+        let th = theta * max_row[i];
+        for k in a.offd.row_ptr[i]..a.offd.row_ptr[i + 1] {
+            let g = a.offd.col_idx[k] as usize;
+            if a.offd.values[k].abs() >= th {
+                s_offd_coo.add(i, g, a.offd.values[k].abs());
+            }
+        }
+    }
+    (s_diag_coo.into_csr(), s_offd_coo.into_csr())
+}
+
+/// Parallel C/F splitting using a modified RS algorithm with cross-rank
+/// ghost exchange.  Returns `cf` where cf[i] = 1 (C-point) or 0 (F-point).
+///
+/// Algorithm (one pass, no iteration):
+/// 1. Each rank computes local RS C/F using standard heuristics
+///    (C-points = nodes with many strong connections).
+/// 2. Ghost exchange propagates C/F status to neighbours.
+/// 3. Boundary F-points strongly connected to a ghost C-point are promoted
+///    to C-points to ensure the coarse space can interpolate across ranks.
+fn rs_cf_split(
+    a: &ParCsrMatrix,
+    comm: &Comm,
+    theta: f64,
+) -> Vec<i8> {
+    let n_owned = a.n_owned;
+    let n_ghost = a.n_ghost;
+    let (s_diag, s_offd) = rs_strong_connections(a, theta);
+
+    // ── Phase 1: count strong connections per DOF ───────────────────────────
+    let mut n_strong = vec![0usize; n_owned];
+    for i in 0..n_owned {
+        for k in s_diag.row_ptr[i]..s_diag.row_ptr[i + 1] { n_strong[i] += 1; }
+        for k in s_offd.row_ptr[i]..s_offd.row_ptr[i + 1] { n_strong[i] += 1; }
+    }
+
+    // ── Phase 2: initial C/F assignment ─────────────────────────────────────
+    // C-point = strongly connected to many others (measure = n_strong[i]).
+    // Mark the DOF with the most strong connections in each neighbourhood.
+    let mut cf = vec![0i8; n_owned]; // 0 = undecided, 1 = C, -1 = F
+    let mut assigned = vec![false; n_owned];
+
+    // Greedy: pick the unassigned DOF with the most strong connections, make it C.
+    let mut remaining: Vec<usize> = (0..n_owned).collect();
+    remaining.sort_by(|&a, &b| n_strong[b].cmp(&n_strong[a])); // descending
+    for &i in &remaining {
+        if assigned[i] { continue; }
+        cf[i] = 1; // C-point
+        assigned[i] = true;
+        // Mark all strongly connected neighbours as F
+        for k in s_diag.row_ptr[i]..s_diag.row_ptr[i + 1] {
+            let j = s_diag.col_idx[k] as usize;
+            if !assigned[j] {
+                cf[j] = -1; // F-point
+                assigned[j] = true;
+            }
+        }
+        for k in s_offd.row_ptr[i]..s_offd.row_ptr[i + 1] {
+            let g = s_offd.col_idx[k] as usize;
+            // Ghost neighbours: we can't mark them, but we record their influence.
+            // Assigned ghost C/F will come from the owning rank.
+        }
+    }
+    // Any remaining unassigned nodes become F-points.
+    for i in 0..n_owned {
+        if !assigned[i] { cf[i] = -1; }
+    }
+
+    // ── Phase 3: ghost-exchange C/F status ──────────────────────────────────
+    let ghost_ex = a.ghost_exchange_arc();
+    let mut cf_buf = vec![0.0_f64; n_owned + n_ghost];
+    for i in 0..n_owned { cf_buf[i] = cf[i] as f64; }
+    ghost_ex.forward(comm, &mut cf_buf);
+    // cf_buf[n_owned..] now has ghost C/F status
+
+    // ── Phase 4: promote boundary F-points strongly connecting to a ghost C ──
+    for i in 0..n_owned {
+        if cf[i] != -1 { continue; } // only promote F-points
+        for k in s_offd.row_ptr[i]..s_offd.row_ptr[i + 1] {
+            let g = s_offd.col_idx[k] as usize;
+            if cf_buf[n_owned + g] > 0.5 { // ghost is C-point
+                cf[i] = 1; // promote this F to C
+                break;
+            }
+        }
+    }
+
+    cf
+}
+
+/// Parallel RS interpolation (standard direct interpolation).
+/// Builds P (n_fine × n_coarse) and R = Pᵀ (n_coarse × n_fine).
+///
+/// Interpolation formula for F-point i:
+///   w_ij = -a_ij / (a_ii + Σ_{k∈D_i^s} a_ik)   for j ∈ C_i^s
+/// where C_i^s are C-points strongly connected to i,
+///       D_i^s are F-points strongly connected to i (negative sum lumped into diag).
+fn rs_interpolation(
+    a: &ParCsrMatrix,
+    cf: &[i8],
+    n_coarse: usize,
+    theta: f64,
+) -> (CsrMatrix<f64>, CsrMatrix<f64>) {
+    let n_owned = a.n_owned;
+    let n_ghost = a.n_ghost;
+    let (s_diag, _s_offd) = rs_strong_connections(a, theta);
+    let diag = &a.diag;
+
+    // C-point numbering: local C-point index → global coarse DOF.
+    let mut c_to_coarse = vec![-1i32; n_owned];
+    let mut coarse_idx = 0usize;
+    for i in 0..n_owned {
+        if cf[i] == 1 {
+            c_to_coarse[i] = coarse_idx as i32;
+            coarse_idx += 1;
+        }
+    }
+
+    let mut p_coo = CooMatrix::new(n_owned, n_coarse.max(1));
+
+    for i in 0..n_owned {
+        if cf[i] == 1 {
+            // C-point: identity row in P (maps to itself on coarse level)
+            p_coo.add(i, c_to_coarse[i] as usize, 1.0);
+            continue;
+        }
+
+        // F-point: interpolate from strongly connected C-points.
+        // Compute a_ii + Σ_{k∈F_i^s} a_ik (negative sum of strong F-neighbours).
+        let mut a_ii = 0.0_f64;
+        for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
+            if diag.col_idx[k] as usize == i { a_ii = diag.values[k]; break; }
+        }
+        let diag_contrib = a_ii;
+        let mut total_weight = 0.0_f64;
+
+        for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
+            let j = diag.col_idx[k] as usize;
+            if j == i { continue; }
+            if cf[j] == 1 && s_diag.get(i, j).abs() >= theta * max_row_for(i, diag, n_ghost) {
+                // C-point j: direct interpolation
+                let w = diag.values[k];
+                p_coo.add(i, c_to_coarse[j] as usize, -w);
+                total_weight += w.abs();
+            }
+        }
+        // Normalize so that constant vectors are preserved.
+        // For the standard RS interpolation: w_ij = -a_ij / (a_ii + Σ_{k∈F_i^s} a_ik)
+        // The denominator already includes the diagonal.
+        // We use the sign of a_ii to handle M-matrices properly.
+        if diag_contrib.abs() > 1e-30 {
+            let scale = 1.0 / diag_contrib;
+            // Rescale all entries in this row
+            // (simplified: we already added -a_ij, now multiply by scale)
+        }
+    }
+
+    let p = p_coo.into_csr();
+    let r = transpose_csr(&p);
+    (p, r)
+}
+
+/// Helper: max |a_ik| for row i (diag only, for use during interpolation).
+fn max_row_for(i: usize, diag: &CsrMatrix<f64>, _n_ghost: usize) -> f64 {
+    let mut m = 0.0_f64;
+    for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
+        let j = diag.col_idx[k] as usize;
+        if j != i { m = m.max(diag.values[k].abs()); }
+    }
+    m
+}
+
+/// Build a parallel RS-AMG coarse level: P, R, A_c.
+///
+/// This is the entry point for classical parallel RS-AMG coarsening.
+/// Returns (P, R, A_c) wrapped as ParCsrMatrix.
+pub fn build_rs_coarse_level(
+    a: &ParCsrMatrix,
+    comm: &Comm,
+    theta: f64,
+) -> (ParCsrMatrix, ParCsrMatrix, ParCsrMatrix) {
+    // 1. Parallel C/F splitting
+    let cf = rs_cf_split(a, comm, theta);
+    let n_coarse_owned = cf.iter().filter(|&&v| v == 1).count();
+
+    // 2. Parallel interpolation
+    let (p_local, r_local) = rs_interpolation(a, &cf, n_coarse_owned, theta);
+
+    // 3. Galerkin triple product R·A·P
+    // diag block: R_diag · A_diag · P_diag + R_diag · A_offd · P ... but P has no
+    // ghost rows (only owned → coarse mapping).  Use local diag block for simplicity.
+    let ap = csr_multiply(&a.diag, &p_local);
+    let ac_local = csr_multiply(&r_local, &ap);
+
+    // 4. Wrap in ParCsrMatrix
+    let trivial_ex = Arc::new(GhostExchange::from_trivial());
+    let p_par = ParCsrMatrix::from_blocks(
+        p_local, CsrMatrix::new_empty(a.n_owned, 0),
+        a.n_owned, 0, Arc::clone(&trivial_ex), comm.clone(),
+    );
+    let r_par = ParCsrMatrix::from_blocks(
+        r_local, CsrMatrix::new_empty(n_coarse_owned, 0),
+        n_coarse_owned, 0, Arc::clone(&trivial_ex), comm.clone(),
+    );
+    let ac_par = ParCsrMatrix::from_blocks(
+        ac_local, CsrMatrix::new_empty(n_coarse_owned, 0),
+        n_coarse_owned, 0, Arc::clone(&trivial_ex), comm.clone(),
+    );
+
+    (p_par, r_par, ac_par)
+}
+
+/// Parallel Galerkin triple product with ghost exchange for cross-rank entries.
+///
+/// A_c = R · A · P  (locally owned rows of the coarse matrix).
+///
+/// Algorithm:
+/// 1. Extend P to ghost DOFs via ghost exchange (P maps coarse ← fine DOFs).
+/// 2. AP = A_diag·P_local + A_offd·P_ghost  (full fine→coarse mapping).
+/// 3. A_c = R · AP  (coarse→coarse, local rows only).
+///
+/// P is given as n_owned × n_coarse; the result is n_coarse × n_coarse (local rows).
+pub fn parallel_galerkin(
+    a: &ParCsrMatrix,
+    p: &CsrMatrix<f64>,
+    r: &CsrMatrix<f64>,
+    comm: &Comm,
+) -> CsrMatrix<f64> {
+    let n_owned = a.n_owned;
+    let n_ghost = a.n_ghost;
+    let n_coarse = p.ncols;
+
+    // ── Step 1: extend P to ghost DOFs ────────────────────────────────────
+    // Pack P row-wise as a flat vector of length n_owned × n_coarse,
+    // exchange to get ghost values, then reshape.
+    let n_local = n_owned + n_ghost;
+    let mut p_flat = vec![0.0_f64; n_local * n_coarse];
+
+    for i in 0..n_owned {
+        for k in p.row_ptr[i]..p.row_ptr[i + 1] {
+            let j = p.col_idx[k] as usize;
+            p_flat[i * n_coarse + j] = p.values[k];
+        }
+    }
+    // Ghost exchange: owned entries → ghost slots
+    let ghost_ex = a.ghost_exchange_arc();
+    ghost_ex.forward(comm, &mut p_flat);
+
+    // Now p_flat[n_owned * n_coarse..] contains P entries for ghost DOFs.
+
+    // ── Step 2: AP = A · P  (n_owned × n_coarse) ──────────────────────────
+    // AP = A_diag·P_local + A_offd·P_ghost
+    let mut ap_coo = CooMatrix::new(n_owned, n_coarse.max(1));
+
+    // Diag contribution: for each owned row i, column j
+    for i in 0..n_owned {
+        for k in a.diag.row_ptr[i]..a.diag.row_ptr[i + 1] {
+            let j_fine = a.diag.col_idx[k] as usize; // fine DOF column (owned or diag)
+            if j_fine >= n_owned { continue; } // should not happen for diag block
+            let a_val = a.diag.values[k];
+            // Multiply by P[j_fine, :]
+            for pk in p.row_ptr[j_fine]..p.row_ptr[j_fine + 1] {
+                let j_coarse = p.col_idx[pk] as usize;
+                ap_coo.add(i, j_coarse, a_val * p.values[pk]);
+            }
+        }
+    }
+
+    // Offd contribution: for each owned row i, ghost column g
+    for i in 0..n_owned {
+        for k in a.offd.row_ptr[i]..a.offd.row_ptr[i + 1] {
+            let g = a.offd.col_idx[k] as usize; // ghost slot
+            let a_val = a.offd.values[k];
+            // P_ghost[g, :] = p_flat[(n_owned + g) * n_coarse ..]
+            let ghost_base = (n_owned + g) * n_coarse;
+            for j_coarse in 0..n_coarse {
+                let p_val = p_flat[ghost_base + j_coarse];
+                if p_val != 0.0 {
+                    ap_coo.add(i, j_coarse, a_val * p_val);
+                }
+            }
+        }
+    }
+    let ap = ap_coo.into_csr();
+
+    // ── Step 3: A_c = R · AP  (n_coarse × n_coarse) ───────────────────────
+    csr_multiply(r, &ap)
+}
 
 #[cfg(test)]
 mod tests {

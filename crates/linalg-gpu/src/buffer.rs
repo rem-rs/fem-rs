@@ -44,7 +44,7 @@ impl DeviceBuffer {
         });
         Self {
             buffer,
-            size: (data.len() * std::mem::size_of::<T>()) as u64,
+            size: std::mem::size_of_val(data) as u64,
             usage,
             staging: None,
         }
@@ -58,7 +58,7 @@ impl DeviceBuffer {
         usage: wgpu::BufferUsages,
         label: &str,
     ) -> Self {
-        let size = (data.len() * std::mem::size_of::<T>()) as u64;
+        let size = std::mem::size_of_val(data) as u64;
         let buffer = Self::with_staging(device, size, usage, label);
         queue.write_buffer(buffer.buffer(), 0, bytemuck::cast_slice(data));
         buffer

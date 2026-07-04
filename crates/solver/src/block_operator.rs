@@ -106,6 +106,7 @@ pub struct MultiphysicsOperator {
     n_fields: usize,
     field_sizes: Vec<usize>,
     diag_csr: Vec<Option<CsrMatrix<f64>>>,
+    #[allow(clippy::type_complexity)]
     couplings: Vec<(usize, usize, Box<dyn Fn(f64, &BlockVector) -> CsrMatrix<f64> + Send + Sync>)>,
 }
 
@@ -117,6 +118,7 @@ impl MultiphysicsOperator {
 
     pub fn set_diagonal_csr(&mut self, k: usize, mat: CsrMatrix<f64>) { self.diag_csr[k] = Some(mat); }
 
+    #[allow(clippy::type_complexity)]
     pub fn add_coupling(
         &mut self, i: usize, j: usize,
         gen: Box<dyn Fn(f64, &BlockVector) -> CsrMatrix<f64> + Send + Sync>,
@@ -158,7 +160,9 @@ impl BlockOperator for MultiphysicsOperator {
 pub struct BlockNonlinearForm<F> {
     field_data: Vec<F>,
     block_sizes: Vec<usize>,
+    #[allow(clippy::type_complexity)]
     field_integrators: Vec<Vec<Box<dyn Fn(&F) -> CsrMatrix<f64> + Send + Sync>>>,
+    #[allow(clippy::type_complexity)]
     coupling_integrators: Vec<Box<dyn Fn(&F, &F, f64, &[f64], &[f64]) -> CsrMatrix<f64> + Send + Sync>>,
 }
 
@@ -174,11 +178,13 @@ impl<F: Send + Sync> BlockNonlinearForm<F> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn add_diagonal_integrator(
         &mut self, k: usize,
         f: Box<dyn Fn(&F) -> CsrMatrix<f64> + Send + Sync>,
     ) { self.field_integrators[k].push(f); }
 
+    #[allow(clippy::type_complexity)]
     pub fn add_coupling_integrator(
         &mut self,
         f: Box<dyn Fn(&F, &F, f64, &[f64], &[f64]) -> CsrMatrix<f64> + Send + Sync>,

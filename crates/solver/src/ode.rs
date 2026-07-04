@@ -383,7 +383,7 @@ impl Rk45 {
 
             // Adjust step size (PI controller with safety 0.9)
             if err > 0.0 {
-                dt *= (0.9 / err).powf(0.2).min(5.0).max(0.1);
+                dt *= (0.9 / err).powf(0.2).clamp(0.1, 5.0);
             } else {
                 dt *= 5.0;
             }
@@ -620,6 +620,7 @@ impl Newmark {
     /// - `u`: displacement (updated in-place)
     /// - `state`: Newmark state (velocity + acceleration, updated in-place)
     /// - `bc_dofs`: Dirichlet boundary DOFs (displacement = 0)
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &self,
         mass: &CsrMatrix<f64>,
@@ -752,6 +753,7 @@ impl GeneralizedAlpha {
     /// - `v`:       state vector (updated in-place)
     /// - `state`:   Generalized-α state (dvdt, updated in-place)
     /// - `bc_dofs`: Dirichlet zero boundary DOFs
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &self,
         mass:     &CsrMatrix<f64>,
@@ -972,6 +974,7 @@ impl ImexRk3 {
     }
 
     /// Integrate with fixed step size `dt` to `t_end`.
+    #[allow(clippy::too_many_arguments)]
     pub fn integrate<FE, FI, J>(
         &self,
         t0: f64,
@@ -1065,6 +1068,7 @@ impl ImexArk3 {
     /// `jac_implicit(t, u)` returns a CSR approximation to ∂f_I/∂u.
     ///
     /// Returns `(t_final, dt_last)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn integrate<FE, FI, J>(
         &self,
         t0:       f64,
@@ -1167,7 +1171,7 @@ impl ImexArk3 {
             // PI controller for next step size
             if err_norm > 0.0 {
                 let factor = (0.9 / err_norm).powf(1.0 / 3.0); // order p=3
-                dt *= factor.min(5.0).max(0.1);
+                dt *= factor.clamp(0.1, 5.0);
             } else {
                 dt *= 5.0;
             }
@@ -1240,6 +1244,7 @@ impl ImexEuler {
     /// Integrate from `t0` to `t_end` with fixed step `dt`.
     ///
     /// Returns the final time reached.
+    #[allow(clippy::too_many_arguments)]
     pub fn integrate<FE, FI, J>(
         &self,
         t0:           f64,
@@ -1356,6 +1361,7 @@ impl ImexSsp2 {
     /// Integrate from `t0` to `t_end` with fixed step `dt`.
     ///
     /// Returns the final time reached.
+    #[allow(clippy::too_many_arguments)]
     pub fn integrate<FE, FI, J>(
         &self,
         t0:           f64,
@@ -1402,9 +1408,8 @@ fn build_effective_stiffness(mass: &CsrMatrix<f64>, stiff: &CsrMatrix<f64>, alph
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Build `I − α J` as a CsrMatrix.
+// Build `I − α J` as a CsrMatrix.
 // ─── Crank-Nicolson (θ = 1/2) ─────────────────────────────────────────────────
-
 /// Crank-Nicolson (trapezoidal) implicit time integrator.
 ///
 /// `u_{n+1} = u_n + (Δt/2)(f(t_n, u_n) + f(t_{n+1}, u_{n+1}))`

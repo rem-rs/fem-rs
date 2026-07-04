@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 //! # fem-wasm
 //!
 //! WebAssembly bindings for fem-rs.  Exposes a JS-friendly [`WasmSolver`]

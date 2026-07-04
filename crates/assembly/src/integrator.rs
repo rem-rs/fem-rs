@@ -118,7 +118,9 @@ impl BoundaryBilinearIntegrator for BoundaryMassIntegrator {
 /// [`BoundaryMassIntegrator`] on the same boundary tags.
 pub struct RobinLFIntegrator {
     pub kappa: f64,
+    #[allow(clippy::type_complexity)]
     pub u_bdr: Box<dyn Fn(&[f64]) -> f64 + Send + Sync>,
+    #[allow(clippy::type_complexity)]
     pub g: Box<dyn Fn(&[f64]) -> f64 + Send + Sync>,
     pub bdr_tags: Vec<i32>,
 }

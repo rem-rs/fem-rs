@@ -648,8 +648,8 @@ impl VectorAssembler {
                 nd1.eval_basis_vec(xi, &mut ref_nd);
                 rt0.eval_basis_vec(xi, &mut ref_rt);
 
-                piola_hcurl_basis(&j_inv_t, &ref_nd, &mut phys_nd, n_nd1, dim);
-                piola_hdiv_basis(&jac, det_j, &ref_rt, &mut phys_rt, n_rt0, dim);
+                piola_hcurl_basis(j_inv_t, &ref_nd, &mut phys_nd, n_nd1, dim);
+                piola_hdiv_basis(jac, det_j, &ref_rt, &mut phys_rt, n_rt0, dim);
 
                 for j in 0..n_nd1 {
                     let px = phys_nd[j * dim];

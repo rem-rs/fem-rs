@@ -73,10 +73,10 @@ where
             nd.eval_basis_vec(xi, &mut phi); nd.eval_curl(xi, &mut curl);
             let vol = (w*det_j).abs();
             // Piola covariant transform for vector basis
-            let mut pphi = vec![0.0; 6];
+            let mut pphi = [0.0; 6];
             for i in 0..3 { pphi[i*2]=(j11*phi[i*2]-j10*phi[i*2+1])*id; pphi[i*2+1]=(-j01*phi[i*2]+j00*phi[i*2+1])*id; }
             // geom
-            let mut geo_phi = vec![0.0; 3]; TriP1.eval_basis(xi, &mut geo_phi);
+            let mut geo_phi = [0.0; 3]; TriP1.eval_basis(xi, &mut geo_phi);
             let xp = [x0[0]+(x1[0]-x0[0])*xi[0]+(x2[0]-x0[0])*xi[1], x0[1]+(x1[1]-x0[1])*xi[0]+(x2[1]-x0[1])*xi[1]];
             let fv = source(&xp);
             for i in 0..3 { let c = curl[i]*id; for j in 0..3 { A[i*3+j] += vol * (c*c - k*k*(pphi[i*2]*pphi[j*2]+pphi[i*2+1]*pphi[j*2+1])); } }
@@ -90,15 +90,15 @@ where
                 let a=en[lf];let b=en[(lf+1)%3];let pa=mesh.node_coords(a);let pb=mesh.node_coords(b);
                 let tx=pb[0]-pa[0];let ty=pb[1]-pa[1];let h=(tx*tx+ty*ty).sqrt();let wf=fw*h;
                 let nx=ty/h;let ny=-tx/h;
-                let mut pphi = vec![0.0; 6];
+                let mut pphi = [0.0; 6];
                 for i in 0..3 { pphi[i*2]=(j11*phi[i*2]-j10*phi[i*2+1])*id; pphi[i*2+1]=(-j01*phi[i*2]+j00*phi[i*2+1])*id; }
                 for i in 0..3 { for j in 0..3 { let nxi=nx*pphi[i*2+1]-ny*pphi[i*2]; let nxj=nx*pphi[j*2+1]-ny*pphi[j*2]; A[i*3+j] += tau*wf*nxi*nxj; } }
                 if face_off[lf].is_some() { for i in 0..3 { let nxi=nx*pphi[i*2+1]-ny*pphi[i*2]; B[i*3+lf] += tau*wf*nxi*psi[0]; } }
             }
         }
-        let a_inv = invert_dense(&A,3).unwrap_or_else(||{let s:Vec<f64>=A.iter().map(|&v|v+1e-12).collect();invert_dense(&s,3).unwrap_or(vec![0.;9])});
-        let mut u0=vec![0.;3];for i in 0..3{for j in 0..3{u0[i]+=a_inv[i*3+j]*f_elem[j];}}
-        let mut u_lam=vec![0.;9];for i in 0..3{for s in 0..3{let mut v=0.;for j in 0..3{v+=a_inv[i*3+j]*B[j*3+s];}u_lam[i*3+s]=v;}}
+        let a_inv = invert_dense(&A,3).unwrap_or_else(||{let s:Vec<f64>=A.iter().map(|&v|v+1e-12).collect();invert_dense(&s,3).unwrap_or(vec![0.; 9])});
+        let mut u0=[0.; 3];for i in 0..3{for j in 0..3{u0[i]+=a_inv[i*3+j]*f_elem[j];}}
+        let mut u_lam=[0.; 9];for i in 0..3{for s in 0..3{let mut v=0.;for j in 0..3{v+=a_inv[i*3+j]*B[j*3+s];}u_lam[i*3+s]=v;}}
         for s in 0..3{let Some(loff)=face_off[s]else{continue;};let mut bt=0.;for i in 0..3{bt+=B[i*3+s]*u0[i];}sk_rhs[loff]+=bt;
             for t in 0..3{let Some(_)=face_off[t]else{continue;};let mut kst=0.;for i in 0..3{kst+=B[i*3+s]*u_lam[i*3+t];}sk_coo.add(loff,face_off[t].unwrap(),kst);}}
     }

@@ -159,6 +159,7 @@ impl SpmvPipeline {
     }
 
     /// Encode an SpMV dispatch: `y = alpha * A * x + beta * y`.
+    #[allow(clippy::too_many_arguments)]
     pub fn encode_spmv<T: Scalar>(
         &self,
         ctx: &GpuContext,
@@ -208,7 +209,7 @@ impl SpmvPipeline {
             ],
         });
 
-        let workgroup_count = (mat.nrows + 255) / 256;
+        let workgroup_count = mat.nrows.div_ceil(256);
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("spmv_pass"),
             timestamp_writes: None,

@@ -313,7 +313,7 @@ fn dominant_eigenpairs(
             // Normalise
             let nrm = w.iter().map(|x| x * x).sum::<f64>().sqrt();
             if nrm > 1e-30 {
-                for vi in &mut v { *vi = 0.0; }
+                v.fill(0.0);
                 for i in 0..n { v[i] += w[i] / nrm; }
             }
             if (lambda - lambda_old).abs() < tol * lambda.abs().max(1.0) {

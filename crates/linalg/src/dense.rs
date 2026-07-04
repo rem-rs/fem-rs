@@ -88,8 +88,8 @@ pub fn lu_solve(a: &[f64], n: usize, piv: &[usize], b: &mut [f64]) {
     assert_eq!(b.len(), n);
 
     // --- apply row permutations to b ---
-    for k in 0..n {
-        b.swap(k, piv[k]);
+    for (k, &p) in piv.iter().enumerate().take(n) {
+        b.swap(k, p);
     }
 
     // --- forward substitution: solve L y = b (L unit lower-triangular) ---

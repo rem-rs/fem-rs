@@ -20,8 +20,7 @@
 //! println!("Converged in {} steps", result.steps.len());
 //! ```
 
-use crate::nonlinear::{NewtonConfig, NewtonResult, NewtonSolver};
-use fem_linalg::CsrMatrix;
+use crate::nonlinear::{NewtonConfig, NewtonSolver};
 
 /// Configuration for the plasticity load‑stepping driver.
 #[derive(Debug, Clone)]

@@ -156,7 +156,7 @@ impl DecOperators2D {
             for i in 0..ns { p[i] = r[i] + be * p[i]; }
         }
         let mut u = vec![0.0; n];
-        for i in 1..n { u[i] = x[i - 1]; }
+        u[1..n].copy_from_slice(&x[..(n - 1)]);
         u
     }
 }

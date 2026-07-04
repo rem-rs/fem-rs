@@ -166,7 +166,7 @@ pub struct DgEuler2D {
 }
 
 impl DgEuler2D {
-    pub fn new(mesh: impl MeshTopology + Send + Sync + 'static) -> Self {
+    pub fn new(mesh: impl MeshTopology + 'static) -> Self {
         let n_elems = mesh.n_elements();
         let dofs_per_elem = 3; // P1 triangle
         let n_dofs = n_elems * dofs_per_elem * 4; // 4 Euler components
@@ -191,9 +191,9 @@ impl DgEuler2D {
             for q in 0..qr.n_points() {
                 let xi = &qr.points[q]; let w = qr.weights[q];
                 ref_elem.eval_basis(xi, &mut phi);
-                let (_jac, det) = affine_jacobian_det(&*self.mesh, &enodes);
+                let (_jac, det) = affine_jacobian_det(&*self.mesh, enodes);
                 let vol = (w * det).abs();
-                let (cx, cy) = affine_map(&*self.mesh, &enodes, xi);
+                let (cx, cy) = affine_map(&*self.mesh, enodes, xi);
                 let (r, uvel, vvel, p) = init(cx, cy);
                 let cons = euler.prim_to_cons(r, uvel, vvel, p);
                 for i in 0..3 {
@@ -224,7 +224,7 @@ impl DgEuler2D {
         // Volume integral: ∫ ∇φ·F(U) dΩ
         for e in 0..self.n_elems as u32 {
             let enodes = self.mesh.element_nodes(e);
-            let (jac, det) = affine_jacobian_det(&*self.mesh, &enodes);
+            let (jac, det) = affine_jacobian_det(&*self.mesh, enodes);
             let _ = jac;
             let inv_j = affine_inv_jac(jac);
             for q in 0..qr_vol.n_points() {
@@ -255,13 +255,13 @@ impl DgEuler2D {
             let en_l = self.mesh.element_nodes(el);
             let en_r = self.mesh.element_nodes(er);
             // Face normal (outward from left) and Jacobian
-            let (nx, ny) = face_normal(&*self.mesh, &en_l, el, &fn_l);
+            let (nx, ny) = face_normal(&*self.mesh, en_l, el, &fn_l);
             let face_jac = face_size(&*self.mesh, &fn_l);
             // Map face qp to reference element for left and right
             for q in 0..qr_face.n_points() {
                 let t = qr_face.points[q][0]; let w = qr_face.weights[q] * face_jac;
-                let xi_l = map_to_elem(el, &fn_l, t, &en_l);
-                let xi_r = map_to_elem(er, &fn_l, t, &en_r);
+                let xi_l = map_to_elem(el, &fn_l, t, en_l);
+                let xi_r = map_to_elem(er, &fn_l, t, en_r);
                 tri.eval_basis(&xi_l, &mut phi);
                 let mut ul = [0.0; 4];
                 for i in 0..3 { for c in 0..4 { ul[c] += phi[i] * u[self.idx(el, c, i)]; } }
@@ -280,16 +280,16 @@ impl DgEuler2D {
         for e in 0..self.n_elems as u32 {
             let enodes = self.mesh.element_nodes(e);
             for lf in 0..3 {
-                let fnodes = tri_face_nodes(lf, &enodes);
-                let mut key: Vec<u32> = fnodes.iter().copied().collect();
+                let fnodes = tri_face_nodes(lf, enodes);
+                let mut key: Vec<u32> = fnodes.to_vec();
                 key.sort_unstable();
                 let is_interior = interior_faces.iter().any(|f| { let mut k = f.2.clone(); k.sort_unstable(); k == key });
                 if !is_interior {
-                    let (nx, ny) = face_normal(&*self.mesh, &enodes, e, &fnodes);
+                    let (nx, ny) = face_normal(&*self.mesh, enodes, e, &fnodes);
                     let face_jac = face_size(&*self.mesh, &fnodes);
                     for q in 0..qr_face.n_points() {
                         let t = qr_face.points[q][0]; let w = qr_face.weights[q] * face_jac;
-                        let xi = map_to_elem(e, &fnodes, t, &enodes);
+                        let xi = map_to_elem(e, &fnodes, t, enodes);
                         tri.eval_basis(&xi, &mut phi);
                         let mut uqp = [0.0; 4];
                         for i in 0..3 { for c in 0..4 { uqp[c] += phi[i] * u[self.idx(e, c, i)]; } }
@@ -427,7 +427,7 @@ fn build_interior_faces(mesh: &dyn MeshTopology) -> Vec<(u32, u32, Vec<u32>)> {
     for e in mesh.elem_iter() {
         let enodes = mesh.element_nodes(e);
         for lf in 0..3 {
-            let fno = tri_face_nodes(lf, &enodes);
+            let fno = tri_face_nodes(lf, enodes);
             let mut key = fno.clone(); key.sort_unstable();
             match map.remove(&key) {
                 None => { map.insert(key, (e, fno.clone())); }

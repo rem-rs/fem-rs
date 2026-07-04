@@ -128,9 +128,9 @@ pub fn compute_element_gradients<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec
 /// * `space`      — finite element space (H¹, scalar)
 /// * `dofs`       — FE solution coefficient vector (length = `space.n_dofs()`)
 /// * `grad_exact` — closure mapping physical coordinates `x` to the exact
-///                  gradient vector (length = mesh dimension)
+///   gradient vector (length = mesh dimension)
 /// * `quad_order` — quadrature accuracy order.  Use `order * 2 + 2` or higher
-///                  for P1/P2 solutions.
+///   for P1/P2 solutions.
 ///
 /// # Returns
 /// `sqrt( ∫_Ω |∇u_exact - ∇u_h|² dΩ )`

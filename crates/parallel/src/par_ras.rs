@@ -126,6 +126,7 @@ pub struct RasPrecond {
     n_sweeps: usize,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum RasKernel {
     DiagJacobi { inv_diag: Vec<f64> },
     Ilu0 { ilu: Ilu0Precond<f64> },
@@ -512,7 +513,7 @@ pub fn par_solve_gmres_ras(
             h[j + 1][j] = 0.0;
 
             let g_next = -sn[j] * g[j];
-            g[j] = cs[j] * g[j];
+            g[j] *= cs[j];
             g[j + 1] = g_next;
 
             iter_total += 1;
@@ -589,8 +590,10 @@ pub fn par_solve_gmres_ras(
 /// Schur complement preconditioner for distributed direct solve.
 pub struct SchurPrecond {
     solver: linlvo::direct::MultifrontalLu<f64>,
+    #[allow(dead_code)]
     a_ig: CsrMatrix<f64>,
     a_gi: CsrMatrix<f64>,
+    #[allow(dead_code)]
     a_gg: CsrMatrix<f64>,
     schur_diag_inv: Vec<f64>,
     n_interior: usize,
@@ -724,7 +727,7 @@ pub fn par_solve_gmres_schur(
             cs[j] = if d > 1e-30 { h[j][j]/d } else { 1.0 };
             sn[j] = if d > 1e-30 { h[j+1][j]/d } else { 0.0 };
             h[j][j] = cs[j]*h[j][j] + sn[j]*h[j+1][j]; h[j+1][j] = 0.0;
-            g[j+1] = -sn[j]*g[j]; g[j] = cs[j]*g[j];
+            g[j+1] = -sn[j]*g[j]; g[j] *= cs[j];
             iter_total += 1; inner = j + 1;
             rel_res = g[j+1].abs() / b_norm;
             if rel_res < cfg.rtol || g[j+1].abs() < cfg.atol { break; }

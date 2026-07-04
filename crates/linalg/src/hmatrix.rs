@@ -64,9 +64,9 @@ impl<const D: usize> BoundingBox<D> {
     /// Expand this box to also contain `p`.
     #[inline]
     pub fn expand(&mut self, p: &[f64; D]) {
-        for d in 0..D {
-            if p[d] < self.min[d] { self.min[d] = p[d]; }
-            if p[d] > self.max[d] { self.max[d] = p[d]; }
+        for (d, &val) in p.iter().enumerate() {
+            if val < self.min[d] { self.min[d] = val; }
+            if val > self.max[d] { self.max[d] = val; }
         }
     }
 

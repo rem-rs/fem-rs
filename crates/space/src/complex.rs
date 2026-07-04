@@ -176,9 +176,8 @@ impl<S: FESpace> ComplexSpace<S> {
         for e in 0..mesh.n_elements() as u32 {
             for (local, &global) in self.inner.element_dofs(e).iter().enumerate() {
                 let en = mesh.element_nodes(e);
-                if local < en.len() && bdy_nodes.contains(&en[local]) {
-                    if !dofs.contains(&global) { dofs.push(global); }
-                }
+                if local < en.len() && bdy_nodes.contains(&en[local])
+                    && !dofs.contains(&global) { dofs.push(global); }
             }
         }
         dofs.sort_unstable();

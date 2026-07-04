@@ -353,8 +353,8 @@ pub fn solve_galerkin_convection_diffusion_1d(
         let jac = h / 2.0;
         let trial_dofs = [e, e + 1];
 
-        let mut ke = vec![0.0; 4];
-        let mut fe = vec![0.0; 2];
+        let mut ke = [0.0; 4];
+        let mut fe = [0.0; 2];
 
         for (xi, w_ref) in quad.0.iter().zip(quad.1.iter()) {
             let w = w_ref * jac;

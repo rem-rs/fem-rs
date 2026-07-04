@@ -16,13 +16,13 @@ pub struct NitscheContactConfig {
 pub fn assemble_nitsche_contact_3d<M: MeshTopology>(
     mesh: &M, cfg: &NitscheContactConfig, u: &[f64],
 ) -> (Vec<f64>, CsrMatrix<f64>) {
-    let n = mesh.n_nodes() as usize; let nd = n*3;
+    let n = mesh.n_nodes(); let nd = n*3;
     let mut rhs = vec![0.0; nd]; let mut coo = CooMatrix::new(nd, nd);
     let cs: std::collections::HashSet<i32> = cfg.contact_tags.iter().copied().collect();
     let (tp, tw) = tri3();
 
     // Map boundary face to owning element
-    let mut f2e: Vec<u32> = vec![0; mesh.n_boundary_faces() as usize];
+    let mut f2e: Vec<u32> = vec![0; mesh.n_boundary_faces()];
     for f in 0..mesh.n_boundary_faces() as u32 {
         let fn_ = mesh.face_nodes(f);
         for e in 0..mesh.n_elements() as u32 {
@@ -69,7 +69,7 @@ pub fn assemble_nitsche_contact_3d<M: MeshTopology>(
         let nu=[nx/al,ny/al,nz/al];
         let gam = cfg.gamma * (cfg.lambda + 2.0*cfg.mu) / h;
 
-        for (_ti, (l, wt)) in tp.iter().zip(tw.iter()).enumerate() {
+        for (l, wt) in tp.iter().zip(tw.iter()) {
             let (l1,l2,l3)=(l[0],l[1],l[2]);let ph=[l1,l2,l3];
             let xp=[p[0][0]*l1+p[1][0]*l2+p[2][0]*l3,p[0][1]*l1+p[1][1]*l2+p[2][1]*l3,p[0][2]*l1+p[1][2]*l2+p[2][2]*l3];
             let wb = wt * al * 0.5;

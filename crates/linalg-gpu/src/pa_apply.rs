@@ -218,6 +218,14 @@ ye[i]+=sc*(pg0*fl[0]+pg1*fl[1]+pg2*fl[2]);}
 for(var i=0u;i<125u;i++){er.vals[e*125u+i]=ye[i];}}
 "#;
 
+pub fn gpu_pa_apply_hex_q3(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
+    run_pa_shader(gpu, HEX_Q3_WGSL, pa, dofs, x, y, 64, 64);
+}
+
+pub fn gpu_pa_apply_hex_q4(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
+    run_pa_shader(gpu, HEX_Q4_WGSL, pa, dofs, x, y, 125, 125);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tet4 WGSL shader (4 nodes, 1 QP centroid, constant gradient)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -257,8 +265,10 @@ pub fn gpu_pa_apply_tet4(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], 
 // Shared host-side runner
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[allow(clippy::too_many_arguments)]
 fn run_pa_shader(gpu: &GpuContext, wgsl: &str, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32],
     ldof: usize, _nqp: usize) {
+    let _ = _nqp; // reserved for multi-QP kernel variants
     let dev = &gpu.device; let q = &gpu.queue; let ne = dofs.len() / ldof;
     let pb = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("pa"),contents:bytemuck::cast_slice(pa),usage:wgpu::BufferUsages::STORAGE,});
     let db = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("dofs"),contents:bytemuck::cast_slice(dofs),usage:wgpu::BufferUsages::STORAGE,});
@@ -302,4 +312,146 @@ fn run_pa_shader(gpu: &GpuContext, wgsl: &str, pa: &[f32], dofs: &[u32], x: &[f3
 
 pub fn gpu_pa_apply_hex_q1(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
     run_pa_shader(gpu, HEX_Q1_WGSL, pa, dofs, x, y, 8, 8);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Generic Hex Qk WGSL generator (compile-time free, works for any p)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Generate a WGSL compute shader for Hex Qk diffusion PA for any degree p.
+///
+/// Uses sum-factorized tensor contractions (like the CPU `pa_apply_hex_qk`),
+/// but with Lagrange basis evaluated via the general product formula instead
+/// of hardcoded per-degree basis functions.
+///
+/// The generated shader includes:
+/// - Gauss–Legendre quadrature table (p+1 points)
+/// - Lagrange basis evaluation at quadrature points via barycentric formula
+/// - Triple-nested qp loop with flux gather and scatter
+pub fn generate_hex_qk_wgsl(p: usize) -> String {
+    let nq = p + 1;
+    let nloc = nq * nq * nq;
+    let (qpts, qwts) = gauss_legendre_f64(nq);
+    let nodes = equispaced_1d_nodes(p);
+
+    let qpts_str: String = qpts.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
+    let qwts_str: String = qwts.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
+    let nodes_str: String = nodes.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
+    let bxs: String = (0..nq).map(|i| format!("bx{i}")).collect::<Vec<_>>().join(",");
+    let dxs: String = (0..nq).map(|i| format!("dx{i}")).collect::<Vec<_>>().join(",");
+    let bys: String = (0..nq).map(|i| format!("by{i}")).collect::<Vec<_>>().join(",");
+    let dys: String = (0..nq).map(|i| format!("dy{i}")).collect::<Vec<_>>().join(",");
+    let bzs: String = (0..nq).map(|i| format!("bz{i}")).collect::<Vec<_>>().join(",");
+    let dzs: String = (0..nq).map(|i| format!("dz{i}")).collect::<Vec<_>>().join(",");
+    let nqp = nq * nq;
+
+    // Build the WGSL shader as a single format string
+    let wgsl = format!(r#"
+struct PD{{data:array<f32>}}struct ED{{dofs:array<u32>}}struct XV{{vals:array<f32>}}struct ER{{vals:array<f32>}}
+@group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
+@group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
+const GP:array<f32,{nq}>=array({qpts_str});
+const GW:array<f32,{nq}>=array({qwts_str});
+fn bary(t:f32,i:u32)->f32{{let n=array<f32,{nq}>({nodes_str});var r=1.0;for(var j=0u;j<{nq}u;j++){{if(j!=i){{r*=(t-n[j])/(n[i]-n[j]);}}}}return r;}}
+fn dary(t:f32,i:u32)->f32{{let n=array<f32,{nq}>({nodes_str});var r=0.0;for(var m=0u;m<{nq}u;m++){{if(m==i){{continue;}}var term=1.0/(n[i]-n[m]);for(var j=0u;j<{nq}u;j++){{if(j!=i&&j!=m){{term*=(t-n[j])/(n[i]-n[j]);}}}}r+=term;}}return r;}}
+fn qka(n:u32)->u32{{return n%{nq}u;}}fn qkb(n:u32)->u32{{return(n/{nq}u)%{nq}u;}}fn qkc(n:u32)->u32{{return n/{nqp}u;}}
+@compute@workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id)gid:vec3<u32>){{
+let e=gid.x;var xe:array<f32,{nloc}>;for(var i=0u;i<{nloc}u;i++){{xe[i]=xv.vals[ed.dofs[e*{nloc}u+i]];}}
+var ye:array<f32,{nloc}>=array(0.0{zeros});
+for(var qz=0u;qz<{nq}u;qz++){{for(var qy=0u;qy<{nq}u;qy++){{for(var qx=0u;qx<{nq}u;qx++){{
+let qi=qz*{nqp}u+qy*{nq}u+qx;let off=(e*{nloc}u+qi)*11u;
+let j00=pd.data[off];let j01=pd.data[off+1u];let j02=pd.data[off+2u];
+let j10=pd.data[off+3u];let j11=pd.data[off+4u];let j12=pd.data[off+5u];
+let j20=pd.data[off+6u];let j21=pd.data[off+7u];let j22=pd.data[off+8u];
+let sc=GW[qx]*GW[qy]*GW[qz]*pd.data[off+9u]*pd.data[off+10u];
+{bvals}
+var fl:array<f32,3>=array(0.0,0.0,0.0);
+for(var j=0u;j<{nloc}u;j++){{let a=qka(j);let b=qkb(j);let c=qkc(j);
+let bx=array<f32,{nq}>({bxs});let by=array<f32,{nq}>({bys});let bz=array<f32,{nq}>({bzs});
+let dx=array<f32,{nq}>({dxs});let dy=array<f32,{nq}>({dys});let dz=array<f32,{nq}>({dzs});
+let g0=dx[a]*by[b]*bz[c];let g1=bx[a]*dy[b]*bz[c];let g2=bx[a]*by[b]*dz[c];
+let pg0=j00*g0+j01*g1+j02*g2;let pg1=j10*g0+j11*g1+j12*g2;let pg2=j20*g0+j21*g1+j22*g2;
+fl[0]+=pg0*xe[j];fl[1]+=pg1*xe[j];fl[2]+=pg2*xe[j];}}
+for(var i=0u;i<{nloc}u;i++){{let a=qka(i);let b=qkb(i);let c=qkc(i);
+let bx=array<f32,{nq}>({bxs});let by=array<f32,{nq}>({bys});let bz=array<f32,{nq}>({bzs});
+let dx=array<f32,{nq}>({dxs});let dy=array<f32,{nq}>({dys});let dz=array<f32,{nq}>({dzs});
+let g0=dx[a]*by[b]*bz[c];let g1=bx[a]*dy[b]*bz[c];let g2=bx[a]*by[b]*dz[c];
+let pg0=j00*g0+j01*g1+j02*g2;let pg1=j10*g0+j11*g1+j12*g2;let pg2=j20*g0+j21*g1+j22*g2;
+ye[i]+=sc*(pg0*fl[0]+pg1*fl[1]+pg2*fl[2]);}}
+}}}}
+for(var i=0u;i<{nloc}u;i++){{er.vals[e*{nloc}u+i]=ye[i];}}}}
+"#,
+        nq = nq, nloc = nloc, nqp = nqp,
+        qpts_str = qpts_str, qwts_str = qwts_str, nodes_str = nodes_str,
+        bxs = bxs, dxs = dxs, bys = bys, dys = dys, bzs = bzs, dzs = dzs,
+        zeros = (0..nloc-1).map(|_| ",0.0").collect::<String>(),
+        bvals = (0..nq).map(|i| format!(
+            "let bx{i}=bary(GP[qx],{i}u);let dx{i}=dary(GP[qx],{i}u);\
+             let by{i}=bary(GP[qy],{i}u);let dy{i}=dary(GP[qy],{i}u);\
+             let bz{i}=bary(GP[qz],{i}u);let dz{i}=dary(GP[qz],{i}u);")).collect::<Vec<_>>().join("\n"),
+    );
+    wgsl
+}
+
+/// Compute Gauss–Legendre points and weights on [-1, 1] (inline, no dep).
+fn gauss_legendre_f64(n: usize) -> (Vec<f64>, Vec<f64>) {
+    match n {
+        1 => (vec![0.0], vec![2.0]),
+        2 => { let x = 1.0/3.0_f64.sqrt(); (vec![-x, x], vec![1.0, 1.0]) }
+        3 => { let x = (3.0/5.0_f64).sqrt(); (vec![-x, 0.0, x], vec![5.0/9.0, 8.0/9.0, 5.0/9.0]) }
+        4 => {
+            let a = (3.0/7.0 - 2.0/7.0*(6.0/5.0_f64).sqrt()).sqrt();
+            let b = (3.0/7.0 + 2.0/7.0*(6.0/5.0_f64).sqrt()).sqrt();
+            let wa = (18.0 + 30.0_f64.sqrt())/36.0;
+            let wb = (18.0 - 30.0_f64.sqrt())/36.0;
+            (vec![-b, -a, a, b], vec![wb, wa, wa, wb])
+        }
+        5 => {
+            let pts = vec![-0.906_179_845_938_664, -0.5384693101056831, 0.0, 0.5384693101056831, 0.906_179_845_938_664];
+            let wts = vec![0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891];
+            (pts, wts)
+        }
+        6 => {
+            let pts = vec![-0.932_469_514_203_152, -0.6612093864662645, -0.2386191860831969, 0.2386191860831969, 0.6612093864662645, 0.932_469_514_203_152];
+            let wts = vec![0.1713244923791704, 0.3607615730481386, 0.467_913_934_572_691, 0.467_913_934_572_691, 0.3607615730481386, 0.1713244923791704];
+            (pts, wts)
+        }
+        7 => {
+            let pts = vec![-0.9491079123427585, -0.7415311855993945, -0.4058451513773972, 0.0, 0.4058451513773972, 0.7415311855993945, 0.9491079123427585];
+            let wts = vec![0.1294849661688697, 0.2797053914892766, 0.3818300505051189, 0.4179591836734694, 0.3818300505051189, 0.2797053914892766, 0.1294849661688697];
+            (pts, wts)
+        }
+        8 => {
+            let pts = vec![-0.9602898564975363, -0.7966664774136267, -0.525_532_409_916_329, -0.1834346424956498, 0.1834346424956498, 0.525_532_409_916_329, 0.7966664774136267, 0.9602898564975363];
+            let wts = vec![0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.362_683_783_378_362, 0.362_683_783_378_362, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763];
+            (pts, wts)
+        }
+        9 => {
+            let pts = vec![-0.9681602395076261, -0.8360311073266358, -0.6133714327005904, -0.3242534234038089, 0.0, 0.3242534234038089, 0.6133714327005904, 0.8360311073266358, 0.9681602395076261];
+            let wts = vec![0.0812743883615744, 0.1806481606948574, 0.2606106964029354, 0.3123470770400029, 0.3302393550012598, 0.3123470770400029, 0.2606106964029354, 0.1806481606948574, 0.0812743883615744];
+            (pts, wts)
+        }
+        10 => {
+            let pts = vec![-0.9739065285171717, -0.8650633666889845, -0.6794095682990244, -0.4333953941292472, -0.1488743389816312, 0.1488743389816312, 0.4333953941292472, 0.6794095682990244, 0.8650633666889845, 0.9739065285171717];
+            let wts = vec![0.0666713443086881, 0.1494513491505806, 0.219_086_362_515_982, 0.2692667193099963, 0.2955242247147529, 0.2955242247147529, 0.2692667193099963, 0.219_086_362_515_982, 0.1494513491505806, 0.0666713443086881];
+            (pts, wts)
+        }
+        _ => panic!("gauss_legendre_f64: unsupported n={n} (max 10)"),
+    }
+}
+
+/// Equispaced 1D nodes on [-1, 1] for degree p.
+fn equispaced_1d_nodes(p: usize) -> Vec<f64> {
+    let n = p + 1;
+    if n == 1 { return vec![0.0]; }
+    let h = 2.0 / (n as f64 - 1.0);
+    (0..n).map(|i| -1.0 + i as f64 * h).collect()
+}
+
+/// Run a dynamically generated Qk PA shader.
+pub fn gpu_pa_apply_hex_qk(gpu: &GpuContext, p: usize, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
+    let nloc = (p + 1) * (p + 1) * (p + 1);
+    let wgsl = generate_hex_qk_wgsl(p);
+    run_pa_shader(gpu, &wgsl, pa, dofs, x, y, nloc, nloc);
 }

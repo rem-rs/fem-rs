@@ -46,7 +46,7 @@ fn nonempty_spans(knots: &[f64]) -> Vec<(f64, f64)> {
 /// Build a span-wise tensor-product Gauss rule on a 2-D NURBS patch.
 ///
 /// Integration is performed over each non-empty knot span in `u` and `v`.
-fn patch_quad_2d(pd: &NurbsPatch2DData, order: u8) -> QuadratureRule {
+pub(crate) fn patch_quad_2d(pd: &NurbsPatch2DData, order: u8) -> QuadratureRule {
     let seg = seg_rule(order);
     let spans_u = nonempty_spans(&pd.kv_u.knots);
     let spans_v = nonempty_spans(&pd.kv_v.knots);
@@ -542,7 +542,7 @@ pub fn assemble_iga_load_3d(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn pd_to_patch2d(pd: &NurbsPatch2DData) -> fem_element::iga::NurbsPatch2D {
+pub(crate) fn pd_to_patch2d(pd: &NurbsPatch2DData) -> fem_element::iga::NurbsPatch2D {
     fem_element::iga::NurbsPatch2D::new(
         pd.kv_u.clone(), pd.kv_v.clone(), pd.weights.clone(),
     )

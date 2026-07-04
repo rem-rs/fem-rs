@@ -15,10 +15,11 @@
 use crate::{solve_gmres, solve_pcg_jacobi, SolveResult, SolverConfig, SolverError};
 use fem_linalg::{csr_spmm, fem_to_linlvo_csr, CsrMatrix};
 use linlvo::{
-    amg::{AmgConfig, AmgHierarchy, AmgPrecond},
+    amg::{AmgHierarchy, AmgPrecond},
     core::preconditioner::Preconditioner,
     DenseVec, Scalar as linlvoScalar,
 };
+pub use linlvo::amg::AmgConfig;
 
 /// LOR preconditioner configuration.
 #[derive(Debug, Clone)]

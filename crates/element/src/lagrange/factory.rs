@@ -730,10 +730,8 @@ impl HexQk {
                 idx = ix;
                 local = if on_ymin && !on_ymax && !on_zmin && !on_zmax {
                     ix                                    // e0: xmax∩ymin
-                } else if !on_ymin && on_ymax && !on_zmin && !on_zmax {
-                    p - ix                                // e1: xmax∩ymax
-                } else if !on_ymin && on_ymax && !on_zmin && !on_zmax { // xmin∩ymax
-                    p - ix                                // e2
+                } else if on_ymax && !on_zmin && !on_zmax {
+                    p - ix                                // e1/e2: x∩ymax
                 } else {
                     ix                                    // e3: xmin∩ymin
                 };
@@ -741,13 +739,9 @@ impl HexQk {
                 // y varies
                 idx = iy;
                 local = if on_xmin && !on_xmax && on_zmin && !on_zmax {
-                    iy                                    // e4
-                } else if !on_xmin && on_xmax && on_zmin && !on_zmax {
-                    iy                                    // e5
-                } else if !on_xmin && on_xmax && !on_zmin && on_zmax {
-                    p - iy                                // e6
+                    iy                                    // e4/e5
                 } else {
-                    p - iy                                // e7
+                    p - iy                                // e6/e7
                 };
             } else {
                 // z varies

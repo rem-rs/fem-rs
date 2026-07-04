@@ -10,10 +10,9 @@
 
 use crate::phasefield::{
     assemble_degraded_stiffness, assemble_miehe_stiffness_and_force,
-    assemble_phase_field_system, build_elem_dof_cache, compute_elastic_energy,
+    assemble_phase_field_system, compute_elastic_energy,
     compute_psi_plus, update_history_field,
 };
-use fem_linalg::CsrMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
@@ -62,7 +61,7 @@ impl PhaseFieldSolver {
     ) -> StaggeredStepResult {
         let n_u = u.len(); let n_d = d.len();
         let dim = mesh.dim() as usize;
-        let n_elems = mesh.n_elements() as usize;
+        let n_elems = mesh.n_elements();
         for iter in 0..cfg.max_iter {
             let u_old = u.to_vec(); let d_old = d.to_vec();
             let (k_uu, f_int) = if dim == 2 {

@@ -162,6 +162,7 @@ impl IgaSpace2D {
         Self::new_with_ctrl_points(p, q, knots_u, knots_v, nu, nv, weights, ctrl_points)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_ctrl_points(
         p: usize,
         q: usize,
@@ -348,6 +349,7 @@ pub struct IgaSpace3D {
 }
 
 impl IgaSpace3D {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         p: usize, q: usize, r: usize,
         knots_u: Vec<f64>, knots_v: Vec<f64>, knots_w: Vec<f64>,
@@ -358,6 +360,7 @@ impl IgaSpace3D {
         Self::new_with_ctrl_points(p, q, r, knots_u, knots_v, knots_w, nu, nv, nw, weights, ctrl_points)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_ctrl_points(
         p: usize, q: usize, r: usize,
         knots_u: Vec<f64>, knots_v: Vec<f64>, knots_w: Vec<f64>,

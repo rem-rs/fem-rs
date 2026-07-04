@@ -119,7 +119,7 @@ fn rotate_stiffness(c: &DMatrix<f64>, r: &DMatrix<f64>) -> DMatrix<f64> {
 
 /// A single slip system: slip direction s, plane normal m.
 #[derive(Debug, Clone, Copy)]
-struct SlipSystem {
+pub struct SlipSystem {
     s: [f64; 3],
     m: [f64; 3],
 }
@@ -256,7 +256,7 @@ pub fn assemble_crystal_plasticity<M: MeshTopology>(
             xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
             // Total strain increment at QP
-            let mut deps = vec![0.0_f64; 6];
+            let mut deps = [0.0_f64; 6];
             for k in 0..n_ldofs {
                 deps[0] += u_elem[k*dim]   * gphys[k*dim];
                 deps[1] += u_elem[k*dim+1] * gphys[k*dim+1];
@@ -281,7 +281,7 @@ pub fn assemble_crystal_plasticity<M: MeshTopology>(
             }
 
             // Power-law flow: Δγᵅ = Δt · γ̇₀ · (|τᵅ|/gᵅ)ⁿ · sign(τᵅ)
-            let mut dgamma = vec![0.0_f64; 12];
+            let mut dgamma = [0.0_f64; 12];
             let mut gamma_dot_sum = 0.0_f64;
             for (a, s) in schmid.iter().enumerate() {
                 let tau = resolved_shear(&sigma_trial, s);
@@ -299,7 +299,7 @@ pub fn assemble_crystal_plasticity<M: MeshTopology>(
             }
 
             // Plastic strain increment: Δε^p = Σ Δγᵅ · Pᵅ
-            let mut deps_p = vec![0.0_f64; 6];
+            let mut deps_p = [0.0_f64; 6];
             for (a, s) in schmid.iter().enumerate() {
                 let p = s;
                 deps_p[0] += dgamma[a] * p[(0,0)];
@@ -311,7 +311,7 @@ pub fn assemble_crystal_plasticity<M: MeshTopology>(
             }
 
             // Elastic strain and stress
-            let mut eps_e = vec![0.0_f64; 6];
+            let mut eps_e = [0.0_f64; 6];
             for i in 0..6 { eps_e[i] = deps[i] - deps_p[i]; }
             let mut sigma = [0.0_f64; 6];
             for i in 0..6 {

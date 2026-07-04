@@ -32,6 +32,7 @@ use fem_space::fe_space::FESpace;
 /// - `G = JᵀJ` is the 2×2 metric tensor
 /// - `sqrt_det_G = √det(G)` is the surface area scaling (`dS = √det(G) dξ`)
 /// - `normal` is the unit surface normal (3-D vector)
+#[allow(clippy::type_complexity)]
 fn surface_jacobian(x: &[[f64; 3]; 3]) -> ([[f64; 3]; 2], [[f64; 2]; 2], f64, [f64; 3]) {
     // J = [x1-x0, x2-x0]  — 3×2 matrix stored as 2 columns of 3 components
     let j0 = [x[1][0] - x[0][0], x[1][1] - x[0][1], x[1][2] - x[0][2]];
@@ -125,7 +126,7 @@ impl SurfaceMassIntegrator {
         // Mass matrix for P1: M[i,j] = ∫ φ_i·φ_j dS
         // One-point quadrature at centroid (ξ=1/3, η=1/3): φ_i = 1/3 for all i
         let phi_qp = 1.0 / 3.0;
-        let val = phi_qp * phi_qp * area_factor;
+        let _val = phi_qp * phi_qp * area_factor;
 
         // 3-point quadrature for better accuracy
         // Using centroid + edge midpoints (stiffness accuracy is fine)
@@ -182,6 +183,7 @@ impl SurfaceDomainSourceIntegrator<'_> {
 pub struct SurfaceAssembler;
 
 impl SurfaceAssembler {
+    #[allow(clippy::type_complexity)]
     pub fn assemble_bilinear<S: FESpace>(
         space: &S,
         integrator: &dyn Fn(&[[f64; 3]; 3], &mut [f64; 9]),
@@ -212,6 +214,7 @@ impl SurfaceAssembler {
         coo.into_csr()
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn assemble_linear<S: FESpace>(
         space: &S,
         integrator: &dyn Fn(&[[f64; 3]; 3], &mut [f64; 3]),
@@ -258,7 +261,7 @@ mod tests {
     /// Unit sphere mesh: octahedron refined n times.
     fn sphere_mesh(n: u32) -> SimplexMesh<3> {
         // Start with an octahedron (6 vertices, 8 faces)
-        let t = (2.0_f64.sqrt() / 2.0); // = 1/√2
+        let t = 2.0_f64.sqrt() / 2.0; // = 1/√2
         let mut coords = vec![
             0.0, 0.0, -1.0,    // 0: south
             -t, 0.0, t,         // 1: front-left

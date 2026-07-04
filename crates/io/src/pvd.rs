@@ -19,6 +19,7 @@ use std::io::Write;
 use fem_core::FemResult;
 
 /// A ParaView `.pvd` collection of `.vtu` files.
+#[derive(Default)]
 pub struct PvdCollection {
     entries: Vec<(f64, String)>,
 }
@@ -26,7 +27,7 @@ pub struct PvdCollection {
 impl PvdCollection {
     /// Create an empty collection.
     pub fn new() -> Self {
-        PvdCollection { entries: Vec::new() }
+        Self::default()
     }
 
     /// Add a time step entry.
@@ -37,6 +38,11 @@ impl PvdCollection {
     /// Number of entries in the collection.
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Returns true if the collection has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     /// Write the `.pvd` file.
@@ -71,6 +77,7 @@ mod tests {
     fn empty_collection() {
         let col = PvdCollection::new();
         assert_eq!(col.len(), 0);
+        assert!(col.is_empty());
         let mut buf = Vec::new();
         col.write(&mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();

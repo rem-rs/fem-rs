@@ -71,7 +71,7 @@ pub fn write_msh<W: Write, const D: usize>(mesh: &SimplexMesh<D>, writer: &mut W
         let et = if let Some(ref ftypes) = mesh.face_types { ftypes[f] } else { mesh.face_type };
         let code = elem_type_code(et).unwrap_or(2);
         let npe = et.nodes_per_element();
-        let tag = mesh.face_tags[f] as i32;
+        let tag = mesh.face_tags[f];
         let off = if let Some(ref o) = mesh.face_offsets { o[f] } else { f * mesh.face_type.nodes_per_element() };
         write!(writer, "{idx} {code} 1 {tag}")?;
         for j in 0..npe { write!(writer, " {}", mesh.face_conn[off + j] + 1)?; }

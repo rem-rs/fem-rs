@@ -7,13 +7,12 @@
 
 use std::collections::HashMap;
 use nalgebra::DMatrix;
-use fem_core::types::DofId;
 use fem_element::{
-    ReferenceElement, lagrange::{TriPk, TetPk, SegPk},
+    ReferenceElement, lagrange::{TriPk, TetPk},
 };
 use fem_element::quadrature::{tri_rule, tet_rule};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{element_type::ElementType, topology::MeshTopology};
+use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
 // ─── Local helpers (mirrored from crate internals) ─────────────────────────
@@ -114,7 +113,7 @@ fn weak_gradient_matrix<M: MeshTopology>(
     let mut G = DMatrix::zeros(n_v, n_s);
     let mut Ms = DMatrix::zeros(n_s, n_s);
     let mut pv = vec![0.0; n_v];
-    let mut gv = vec![0.0; n_v * dim];
+    let _gv = vec![0.0; n_v * dim];
     let mut ps = vec![0.0; n_ss];
     let mut gsp = vec![0.0; n_ss * dim];
 
@@ -156,7 +155,7 @@ pub fn assemble_wg_poisson<S: FESpace>(space: &S, quad_order: u8, penalty: f64) 
     let n = space.n_dofs();
     let ne = mesh.n_elements();
     let order = space.order() as usize;
-    use std::collections::HashMap;
+    
 
     let mut coo = CooMatrix::new(n, n);
 
@@ -193,6 +192,7 @@ pub fn assemble_wg_poisson<S: FESpace>(space: &S, quad_order: u8, penalty: f64) 
     coo.into_csr()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_face_penalty<M: MeshTopology, S: FESpace<Mesh=M>>(
     coo: &mut CooMatrix<f64>, mesh: &M, space: &S,
     el: u32, er: u32, fnodes: &[u32], alpha: f64, qo: u8,
@@ -202,7 +202,7 @@ fn add_face_penalty<M: MeshTopology, S: FESpace<Mesh=M>>(
     let ref_e: Box<dyn ReferenceElement> = if dim == 2 { Box::new(TriPk::new(order)) }
                                            else { Box::new(TetPk::new(order)) };
     let ne = ref_e.n_dofs();
-    let qf = if dim == 2 { tri_rule(qo) } else { tri_rule(qo) };
+    let qf = tri_rule(qo);
     let dofs_l: Vec<usize> = space.element_dofs(el).iter().map(|&d| d as usize).collect();
     let dofs_r: Vec<usize> = space.element_dofs(er).iter().map(|&d| d as usize).collect();
 

@@ -131,7 +131,7 @@ pub fn cut_tri_subtriangles(
             result.push(SubTri { verts: [a, b, *c_other], sign: s_other });
             result.push(SubTri { verts: [a, *c_other, *c_iso], sign: s_other });
         }
-        3 | _ => {
+        _ => {
             // Three+ edges cut is geometrically impossible for a line through a
             // triangle (a line can cut at most 2 edges). Fallback: return whole
             // element with sign of the majority.
@@ -182,7 +182,7 @@ pub fn cut_tet_subtets(
         0 => {
             result.push(SubTet { verts: *node_coords, sign: sgn(0) });
         }
-        1 | 2 | 3 => {
+        1..=3 => {
             // Tet cut by a plane �?3-4 sub-tets via standard algorithm.
             // The zero level set is a triangle (3 crossings) or quad (4 crossings).
             // For now, fall through to the general decomposition.

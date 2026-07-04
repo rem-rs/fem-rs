@@ -44,7 +44,7 @@ impl<T: Scalar> CgGpuWorkspace<T> {
         let gpu_p = GpuVector::<T>::zeros(ctx, n);
         let gpu_ap = GpuVector::<T>::zeros(ctx, n);
         let gpu_tmp = GpuVector::<T>::zeros(ctx, n);
-        let n_wg = (n + 255) / 256;
+        let n_wg = n.div_ceil(256);
         let dot_buf = DeviceBuffer::with_staging(
             &ctx.device,
             n_wg as u64 * std::mem::size_of::<T>() as u64,
@@ -308,7 +308,7 @@ impl<T: Scalar> PcgGpuWorkspace<T> {
         let gpu_z = GpuVector::zeros(ctx, n);
         let gpu_p = GpuVector::zeros(ctx, n);
         let gpu_ap = GpuVector::zeros(ctx, n);
-        let n_wg = (n + 255) / 256;
+        let n_wg = n.div_ceil(256);
         let dot_buf = DeviceBuffer::with_staging(&ctx.device,
             n_wg as u64 * std::mem::size_of::<T>() as u64,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, "pcg_dot");

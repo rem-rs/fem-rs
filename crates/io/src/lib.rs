@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! # fem-io
 //!
 //! Mesh and solution I/O for fem-rs.
@@ -27,9 +28,12 @@ pub mod matrix_market;
 pub mod mfem;
 pub mod xdmf;
 pub mod glvis;
+pub mod pumi;
+pub mod sidre;
 pub mod cgns_exodus;
 pub mod imported_workflow;
 pub mod stl_obj;
+pub mod data_collection;
 
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
@@ -50,6 +54,9 @@ pub use vtk_reader::{read_vtu, read_vtu_mesh, read_vtu_str, VtuData};
 pub use matrix_market::{read_matrix_market, read_matrix_market_coo, write_matrix_market, MmioError};
 pub use xdmf::{write_xdmf, write_xdmf_mixed, xdmf_topology_code, XdmfField, XdmfCenter};
 pub use stl_obj::{read_stl, read_stl_file, read_obj, read_obj_file};
+pub use pumi::read_smb;
+pub use sidre::{write_sidre_blueprint, read_sidre_blueprint};
+pub use data_collection::DataCollection;
 pub use imported_workflow::{
 	DATASET_ELEM_TAGS,
 	hdf5_field_values_path,

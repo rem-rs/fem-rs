@@ -134,7 +134,7 @@ fn run_assembly_shader(
 
     let elem_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("gpu_assemble_elements"),
-        contents: &elem_bytes,
+        contents: elem_bytes,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
@@ -227,7 +227,7 @@ fn run_assembly_shader(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bg, &[]);
-        let wg = ((n_elem as u32) + 63) / 64;
+        let wg = (n_elem as u32).div_ceil(64);
         pass.dispatch_workgroups(wg, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&coo_buffer, 0, &staging, 0, triplet_byte_len);
@@ -268,7 +268,7 @@ fn run_assembly_shader_f64(
 
     let elem_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("gpu_assemble_f64_elements"),
-        contents: &elem_bytes,
+        contents: elem_bytes,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
@@ -345,7 +345,7 @@ fn run_assembly_shader_f64(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bg, &[]);
-        let wg = ((n_elem as u32) + 63) / 64;
+        let wg = (n_elem as u32).div_ceil(64);
         pass.dispatch_workgroups(wg, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&coo_buffer, 0, &staging, 0, triplet_byte_len);
@@ -433,7 +433,7 @@ fn run_assembly_shader_f64_with_params(
     {
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpu_f64p_pass"), timestamp_writes: None });
         pass.set_pipeline(&pipeline); pass.set_bind_group(0, &bg, &[]);
-        pass.dispatch_workgroups(((n_elem as u32) + 63) / 64, 1, 1);
+        pass.dispatch_workgroups((n_elem as u32).div_ceil(64), 1, 1);
     }
     enc.copy_buffer_to_buffer(&cb, 0, &sb, 0, tbl);
     queue.submit(Some(enc.finish()));
@@ -977,7 +977,7 @@ pub fn assemble_elasticity_2d_tri3(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bg, &[]);
-        let wg = ((n_elem as u32) + 63) / 64;
+        let wg = (n_elem as u32).div_ceil(64);
         pass.dispatch_workgroups(wg, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&coo_buffer, 0, &staging, 0, triplet_byte_len);
@@ -1112,7 +1112,7 @@ fn run_elasticity_shader(
 
     let elem_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("gpu_elasticity_elements"),
-        contents: &elem_bytes,
+        contents: elem_bytes,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
@@ -1193,7 +1193,7 @@ fn run_elasticity_shader(
             label: Some("gpu_elasticity_pass"), timestamp_writes: None,
         });
         pass.set_pipeline(&pipeline); pass.set_bind_group(0, &bg, &[]);
-        pass.dispatch_workgroups(((n_elem as u32) + 63) / 64, 1, 1);
+        pass.dispatch_workgroups((n_elem as u32).div_ceil(64), 1, 1);
     }
     encoder.copy_buffer_to_buffer(&coo_buffer, 0, &staging, 0, triplet_byte_len);
     queue.submit(Some(encoder.finish()));

@@ -14,6 +14,7 @@ pub trait GpuDeviceBuffer: Send + Sync {
 // ─── Vector abstraction ─────────────────────────────────────────────────────
 
 /// A dense vector on the GPU.
+#[allow(clippy::len_without_is_empty)]
 pub trait GpuVector: Send + Sync {
     type T: 'static;
     fn len(&self) -> u32;

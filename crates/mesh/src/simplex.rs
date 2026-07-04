@@ -680,7 +680,7 @@ impl<const D: usize> SimplexMesh<D> {
         if bf_verts.len() != sorted_set.len() {
             return false;
         }
-        let mut bf_sorted: Vec<u32> = bf_verts.iter().copied().collect();
+        let mut bf_sorted: Vec<u32> = bf_verts.to_vec();
         bf_sorted.sort_unstable();
         bf_sorted == sorted_set
     }

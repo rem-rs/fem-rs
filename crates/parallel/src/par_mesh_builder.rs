@@ -64,8 +64,8 @@ impl<const D: usize> ParMeshBuilder<D> {
 
     /// Record a node owned by another rank (local ghost).
     pub fn push_ghost_node(&mut self, global_id: NodeId, owner: Rank, coords: &[f64; D]) {
-        if !self.node_owner.contains_key(&global_id) {
-            self.node_owner.insert(global_id, owner);
+        if let std::collections::hash_map::Entry::Vacant(e) = self.node_owner.entry(global_id) {
+            e.insert(owner);
             self.coords.extend_from_slice(coords);
         }
     }

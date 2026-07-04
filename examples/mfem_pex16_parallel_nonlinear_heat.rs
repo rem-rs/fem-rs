@@ -1,4 +1,4 @@
-//! # Parallel Example 16 �?Parallel nonlinear heat equation
+﻿//! # Parallel Example 16 �?Parallel nonlinear heat equation
 //! (analogous to MFEM pex16)
 //!
 //! κ(u) = 1 + u², Newton + GMRES in parallel.
@@ -65,3 +65,4 @@ fn main() {
         println!("  Rank {rank}: {n} DOFs");
     }
 }
+

@@ -64,6 +64,7 @@ fn tet_data(k: usize) -> &'static TetNDkData {
             // Face 2: vertices (0,1,3) = (0,0,0),(1,0,0),(0,0,1). Param: x=u, y=0, z=v
             // Face 3: vertices (0,1,2) = (0,0,0),(1,0,0),(0,1,0). Param: x=u, y=v, z=0
             // Tangents for each face: t1 = ∂/∂u, t2 = ∂/∂v
+            #[allow(clippy::type_complexity)]
             let face_map: [(fn(f64,f64)->f64, fn(f64,f64)->f64, fn(f64,f64)->f64,
                             f64,f64,f64, f64,f64,f64); 4] = [
                 (|u,v| 1.0-u-v, |u,_v| u, |_u,v| v, -1.0,1.0,0.0, -1.0,0.0,1.0),
@@ -152,9 +153,6 @@ impl VectorReferenceElement for TetNDk {
         for deg in 0..=k { for a in 0..=deg { for b in 0..=(deg - a) { let c = deg - a - b;
             let v = x.powi(a as i32) * y.powi(b as i32) * z.powi(c as i32);
             for comp in 0..3 {
-                mv[idx * 3 + comp] = if comp == 0 { v } else if comp == 1 { v } else { v };
-                // Actually only the matching component should be set
-                mv[idx * 3] = 0.0; mv[idx * 3 + 1] = 0.0; mv[idx * 3 + 2] = 0.0;
                 mv[idx * 3 + comp] = v;
                 idx += 1;
             }

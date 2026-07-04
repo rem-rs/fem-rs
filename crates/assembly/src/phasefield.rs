@@ -96,6 +96,7 @@ fn transform_grads(j_inv_t: &DMatrix<f64>, grad_ref: &[f64], grad_phys: &mut [f6
 /// K_ij = ∫ [(1-d)² + κ] · C_{ijkl} · ε(φ_i) : ε(φ_j) dx
 ///
 /// where d is interpolated from `d_dofs` using `space_d`.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_degraded_stiffness<M: MeshTopology>(
     mesh: &M,
     space_u: &dyn FESpace<Mesh = M>,
@@ -219,6 +220,7 @@ pub fn assemble_degraded_stiffness<M: MeshTopology>(
 /// ψ₀ = ½λ·tr(ε)² + μ·ε:ε
 ///
 /// Returns Vec<f64> flattened over [elem][qp].
+#[allow(clippy::too_many_arguments)]
 pub fn compute_elastic_energy<M: MeshTopology>(
     mesh: &M,
     space_u: &dyn FESpace<Mesh = M>,
@@ -318,6 +320,7 @@ pub fn update_history_field(h: &mut [f64], new_energy: &[f64]) {
 /// RHS:    b_i  = ∫ 2·H(ξ)·φ_i dx
 ///
 /// H values are stored per quadrature point, flattened [elem][qp].
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_phase_field_system<M: MeshTopology>(
     mesh: &M,
     space_d: &dyn FESpace<Mesh = M>,
@@ -569,6 +572,7 @@ pub fn miehe_split_2d(eps_Voigt: &[f64; 3], lambda: f64, mu: f64) -> MieheSplit2
 ///
 /// The split is evaluated at each QP from the current displacement `u`.
 /// The phase field `d` is held fixed during this assembly.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_miehe_stiffness_and_force<M: MeshTopology>(
     mesh: &M,
     space_u: &dyn FESpace<Mesh = M>,
@@ -646,9 +650,9 @@ pub fn assemble_miehe_stiffness_and_force<M: MeshTopology>(
             }
 
             // Strain tensor ε = ½(∇u + ∇uᵀ)
-            let strain_xx = grad_u[0 * dim + 0];
-            let strain_yy = grad_u[1 * dim + 1];
-            let strain_xy = 0.5 * (grad_u[0 * dim + 1] + grad_u[1 * dim + 0]);
+            let strain_xx = grad_u[0];
+            let strain_yy = grad_u[dim + 1];
+            let strain_xy = 0.5 * (grad_u[1] + grad_u[dim]);
             let gamma_xy = 2.0 * strain_xy; // Voigt shear
 
             // Miehe spectral split at this QP
@@ -724,6 +728,7 @@ pub fn assemble_miehe_stiffness_and_force<M: MeshTopology>(
 ///
 /// Uses Miehe spectral split: only the tensile part drives fracture.
 /// Returns (psi_plus_flattened, n_qp_per_elem).
+#[allow(clippy::too_many_arguments)]
 pub fn compute_psi_plus<M: MeshTopology>(
     mesh: &M,
     space_u: &dyn FESpace<Mesh = M>,
@@ -782,9 +787,9 @@ pub fn compute_psi_plus<M: MeshTopology>(
             }
 
             // Strain ε = ½(∇u + ∇uᵀ)
-            let strain_xx = grad_u[0 * dim + 0];
-            let strain_yy = grad_u[1 * dim + 1];
-            let strain_xy = 0.5 * (grad_u[0 * dim + 1] + grad_u[1 * dim + 0]);
+            let strain_xx = grad_u[0];
+            let strain_yy = grad_u[dim + 1];
+            let strain_xy = 0.5 * (grad_u[1] + grad_u[dim]);
             let gamma_xy = 2.0 * strain_xy;
 
             // ψ⁺ from Miehe spectral split

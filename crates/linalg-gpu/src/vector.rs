@@ -86,6 +86,9 @@ impl<T: Scalar> GpuVector<T> {
     /// Length of the vector.
     pub fn len(&self) -> u32 { self.len }
 
+    /// Returns true if the vector contains no elements.
+    pub fn is_empty(&self) -> bool { self.len == 0 }
+
     /// Raw buffer reference for pipeline binding.
     pub fn buffer(&self) -> &wgpu::Buffer { self.buffer.buffer() }
 }

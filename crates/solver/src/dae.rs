@@ -31,9 +31,10 @@ impl DaeState {
     /// Create a new DAE state from consistent initial conditions `(y0, yp0)`.
     pub fn new(_t0: f64, y0: &[f64], yp0: &[f64], dt: f64) -> Self {
         let _n = y0.len();
-        let mut z = Vec::with_capacity(2);
-        z.push(y0.to_vec());
-        z.push(yp0.iter().map(|&v| dt * v).collect());
+        let z = vec![
+            y0.to_vec(),
+            yp0.iter().map(|&v| dt * v).collect(),
+        ];
         // Verify consistency: currently trusts the caller.
         // A proper implementation would check F(t0, y0, yp0) ≈ 0.
         DaeState { z, order: 1, dt }
@@ -86,7 +87,7 @@ impl DaeIntegrator {
         }).collect();
 
         let y_pred = &zp_pred[0];
-        let _yp_recon: Vec<f64> = (0..n).map(|d| beta * (y_pred[d] - y_pred[d])).collect();
+        let _yp_recon: Vec<f64> = vec![0.0; n];
         // At prediction, the reconstructed y' = (y_pred - ẑ₀) / (h·αₖ) = 0
         // since y_pred = ẑ₀. So yp_recon = 0 initially.
 
@@ -313,6 +314,7 @@ impl Default for DaeConfig {
 /// Uses a simple Newton iteration on the combined variable `(y, yp)`.
 /// The `y_guess` and `yp_guess` are starting values; `dof_y` and `dof_yp` indicate
 /// which components of y and yp are unknown (true = unknown, false = fixed).
+#[allow(clippy::too_many_arguments)]
 pub fn dae_consistent_initialization<F, J>(
     t0: f64,
     y_guess: &[f64],

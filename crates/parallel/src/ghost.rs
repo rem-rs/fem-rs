@@ -44,6 +44,18 @@ struct NeighbourChannel {
 
 // ── GhostExchange ─────────────────────────────────────────────────────────────
 
+/// Public channel definition for building a [`GhostExchange`] with
+/// [`from_channels`](GhostExchange::from_channels).
+#[derive(Debug, Clone)]
+pub struct GhostChannelDef {
+    /// Peer rank.
+    pub rank: Rank,
+    /// Local indices to SEND to this rank (owned positions).
+    pub send_local_ids: Vec<u32>,
+    /// Local ghost-slot indices to RECEIVE from this rank.
+    pub recv_local_ids: Vec<u32>,
+}
+
 /// Pre-computed communication pattern for halo (ghost node) updates.
 ///
 /// Construct via [`GhostExchange::from_partition`]; then call
@@ -66,6 +78,24 @@ impl GhostExchange {
     /// Useful for serial / single-rank contexts or testing.
     pub fn from_trivial() -> Self {
         GhostExchange { channels: Vec::new() }
+    }
+
+    /// Build from explicit channel specifications.
+    ///
+    /// Each channel describes one neighbouring rank with:
+    /// - `send_local_ids`: local indices to SEND to that rank (forward).
+    /// - `recv_local_ids`: local ghost slots to fill FROM that rank (forward).
+    ///
+    /// This is the raw builder used internally by `from_partition` and
+    /// `from_element_ghosts`; callers who need full control can use it
+    /// directly.
+    pub fn from_channels(channels: Vec<GhostChannelDef>) -> Self {
+        let inner: Vec<NeighbourChannel> = channels.into_iter().map(|c| NeighbourChannel {
+            rank: c.rank,
+            send_local_ids: c.send_local_ids,
+            recv_local_ids: c.recv_local_ids,
+        }).collect();
+        GhostExchange { channels: inner }
     }
 
     /// Build the exchange pattern from a partition.

@@ -389,12 +389,11 @@ pub fn tmop_metric_3d(a: &Matrix3<f64>, w: &Matrix3<f64>, metric: &TmopMetric) -
     }
 }
 
-/// Result of evaluating a TMOP metric on a 3-D element.
+// Result of evaluating a TMOP metric on a 3-D element.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 2-D objective
 // ═══════════════════════════════════════════════════════════════════════════════
-
 /// Objective function and gradient for 2-D TMOP mesh optimisation (Tri3).
 pub struct TmopObjective2d {
     n_nodes: usize,
@@ -888,7 +887,7 @@ impl TmopObjectiveHex {
                 if det_j_abs <= 0.0 { continue; }
 
                 // Deformation gradient T = J·W⁻¹
-                let t = &j * w.try_inverse().unwrap_or(Matrix3::identity());
+                let t = j * w.try_inverse().unwrap_or(Matrix3::identity());
                 let r = tmop_metric_3d(&t, &Matrix3::identity(), metric);
                 *obj += r.value * wq * det_j_abs;
 

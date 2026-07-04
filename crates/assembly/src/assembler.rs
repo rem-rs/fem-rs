@@ -9,7 +9,7 @@ use nalgebra::DMatrix;
 use fem_core::types::DofId;
 use fem_element::{
     ReferenceElement, PrismPk, PyramidPk,
-    lagrange::{SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
+    lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
                 QuadQ1, QuadQ2, HexQ1},
 };
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
@@ -584,7 +584,7 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
     // Thread-local pool: one CooMatrix per Rayon thread, reused across fold iterations.
     // This reduces allocations from O(n_elements) to O(n_threads).
     thread_local! {
-        static TL_COO: RefCell<Option<CooMatrix<f64>>> = RefCell::new(None);
+        static TL_COO: RefCell<Option<CooMatrix<f64>>> = const { RefCell::new(None) };
     }
 
     mesh.elem_iter()
@@ -880,7 +880,7 @@ impl Assembler {
     /// Supports:
     /// - `DiffusionIntegrator` on P1 Tri3, P2 Tri6, Q1 Quad4 (2D)
     /// - `DiffusionIntegrator` on P1 Tet4 (3D)
-    /// Requires the `gpu` feature.
+    ///   Requires the `gpu` feature.
     #[cfg(feature = "gpu")]
     pub fn assemble_bilinear_gpu<S: FESpace>(
         space: &S,
@@ -897,6 +897,7 @@ impl Assembler {
         let order = space.order();
 
         // Determine element type and dispatch
+        #[allow(clippy::type_complexity)]
         let (npe, npe_coords, dofs_per_elem, assemble_fn): (
             usize, usize, usize,
             fn(&GpuContext, &[f32], &[u32], usize) -> Vec<(u32, u32, f32)>,
@@ -919,7 +920,7 @@ impl Assembler {
 
         for e in 0..n_elem as u32 {
             let nodes = mesh.element_nodes(e);
-            let dofs: Vec<u32> = space.element_dofs(e).iter().map(|&d| d as u32).collect();
+            let dofs: Vec<u32> = space.element_dofs(e).to_vec();
             for kn in 0..npe {
                 let c = mesh.node_coords(nodes[kn]);
             for d in 0..dim as usize {

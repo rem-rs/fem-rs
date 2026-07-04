@@ -7,11 +7,10 @@
 //! - `xfem_level_set` — signed-distance functions and sub-cell triangulation
 //! - This module — enrichment detection, DOF management, assembly
 
-use std::collections::HashMap;
 use fem_core::types::DofId;
 use fem_mesh::topology::MeshTopology;
 
-use crate::xfem_level_set::{cut_triangle, CutResult, SubTriangle};
+use crate::xfem_level_set::{cut_triangle, CutResult};
 pub use crate::xfem_level_set::XfemLevelSet;
 
 /// Type of enrichment applied to a node.
@@ -81,14 +80,10 @@ pub fn detect_enriched_nodes<M: MeshTopology>(
         }).collect();
 
         let tri_nodes: [[f64; 2]; 3] = [phys[0], phys[1], phys[2]];
-        match cut_triangle(ls, &tri_nodes) {
-            CutResult::Cut(_) => {
-                // Element is cut → enrich all its nodes
-                for &n in nodes {
-                    is_enriched_heaviside[n as usize] = true;
-                }
+        if let CutResult::Cut(_) = cut_triangle(ls, &tri_nodes) {
+            for &n in nodes {
+                is_enriched_heaviside[n as usize] = true;
             }
-            _ => {}
         }
     }
 

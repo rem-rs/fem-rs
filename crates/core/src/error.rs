@@ -28,6 +28,10 @@ pub enum FemError {
     /// Feature not yet implemented.
     #[error("not implemented: {0}")]
     NotImplemented(String),
+
+    /// Catch-all generic error for cases that don't fit the other categories.
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Convenience alias — all public API functions return this.

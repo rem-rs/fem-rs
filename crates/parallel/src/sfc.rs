@@ -55,7 +55,7 @@ pub fn partition_simplex_morton<const D: usize>(
     comm: &crate::Comm,
     opts: Option<&SfcOptions>,
 ) -> crate::ParallelMesh<SimplexMesh<D>> {
-    let elem_part = partition_morton(mesh, comm.size() as usize, opts);
+    let elem_part = partition_morton(mesh, comm.size(), opts);
     let (local_mesh, part) = extract_submesh_from_partition(mesh, comm.rank(), &elem_part);
     crate::ParallelMesh::new(local_mesh, comm.clone(), part)
 }
@@ -87,7 +87,7 @@ pub fn partition_simplex_hilbert<const D: usize>(
     comm: &crate::Comm,
     opts: Option<&SfcOptions>,
 ) -> crate::ParallelMesh<SimplexMesh<D>> {
-    let elem_part = partition_hilbert(mesh, comm.size() as usize, opts);
+    let elem_part = partition_hilbert(mesh, comm.size(), opts);
     let (local_mesh, part) = extract_submesh_from_partition(mesh, comm.rank(), &elem_part);
     crate::ParallelMesh::new(local_mesh, comm.clone(), part)
 }

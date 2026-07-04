@@ -1,19 +1,21 @@
 //! Bridge between single-patch IGA and [`FESpace`].
 //!
 //! The generic [`FESpace`](crate::fe_space::FESpace) trait is tied to [`MeshTopology`]. This module
-//! provides a minimal 2D tensor-product IGA "mesh" view (one `Quad4` or `Quad9` cell per
+//! provides a minimal tensor-product IGA "mesh" view (one cell per
 //! non-empty knot span) so that IGA can participate in the same type ecosystem as simplicial FE.
-//! For Poisson/IGA assembly, the `fem-assembly` crate provides `iga_assembler` and
+//! For IGA assembly, the `fem-assembly` crate provides `iga_assembler` and
 //! `Assembler::assemble_bilinear_iga_1d` / `assemble_bilinear_iga_2d` (B-spline / NURBS basis);
 //! the generic `Assembler::assemble_bilinear` path on this mesh uses Lagrange shapes and is not
 //! equivalent.
 //!
-//! **1D supported:** `IgaFESpace1D` when each knot span has `p+1 ∈ {2, 3}` (`Line2` / `Line3`).
+//! **1D:** `IgaFESpace1D` supports arbitrary degree `p ≥ 1`. Each knot span has `p+1` active
+//! DOFs; the element type is `Line2` for p=1 and `Line3` for p≥2 (topology label only).
 //! Node locations use [Greville abscissae](https://en.wikipedia.org/wiki/Collocation_method#Example)
 //! from [`IgaSpace1D::greville_param_coords`].
-//! **2D supported:** `IgaFESpace2D` when each knot-span element has
-//! `(p+1)(q+1) ∈ {4, 9}` (biquadratic `p=q=2` or bilinear `p=q=1` on quads), matching
-//! [`ElementType::Quad4`] and [`fem_mesh::ElementType::Quad9`].
+//! **2D:** `IgaFESpace2D` supports arbitrary degrees `p,q ≥ 1`. Each knot span has `(p+1)(q+1)`
+//! active DOFs; the element type is `Quad4` for p=q=1 and `Quad9` for higher orders.
+//! **3D:** `IgaFESpace3D` supports arbitrary degrees `p,q,r ≥ 1`. Each knot span has
+//! `(p+1)(q+1)(r+1)` active DOFs; the element type is `Hex8` for p=q=r=1 and `Hex27` for higher.
 
 use fem_core::types::{DofId, ElemId, FaceId, NodeId};
 use fem_linalg::Vector;
@@ -40,18 +42,13 @@ pub struct IgaSinglePatchMesh1D {
 }
 
 impl IgaSinglePatchMesh1D {
-    /// Build the mesh. Requires `p+1 ∈ {2, 3}`.
+    /// Build the mesh. Supports arbitrary degree `p ≥ 1`.
     pub fn from_iga_space(space: &IgaSpace1D) -> Result<Self, String> {
         let p = space.degree();
-        let nloc = p + 1;
+        let nloc = p + 1;  // active DOFs per knot span
         let el_ty = match nloc {
             2 => ElementType::Line2,
-            3 => ElementType::Line3,
-            _ => {
-                return Err(format!(
-                    "IgaFESpace1D: p+1 must be 2 or 3 for the FESpace bridge, got {nloc} (p={p})"
-                ));
-            }
+            _ => ElementType::Line3, // topology label for p ≥ 2
         };
         let g = space.greville_param_coords()?;
         if g.len() != space.n_dofs() {
@@ -65,7 +62,7 @@ impl IgaSinglePatchMesh1D {
             let active = space.active_dofs_for_span(span)?;
             if active.len() != nloc {
                 return Err(format!(
-                    "IgaSinglePatchMesh1D: active len {} != {nloc} at span {span}",
+                    "IgaSinglePatchMesh1D: active len {} != p+1={nloc} at span {span}",
                     active.len()
                 ));
             }
@@ -93,7 +90,7 @@ pub struct IgaFESpace1D {
 }
 
 impl IgaFESpace1D {
-    /// Build from an [`IgaSpace1D`]. Fails if `p+1` is not 2 or 3.
+    /// Build from an [`IgaSpace1D`]. Supports arbitrary degree `p >= 1`.
     pub fn new(iga: IgaSpace1D) -> Result<Self, String> {
         let mesh = IgaSinglePatchMesh1D::from_iga_space(&iga)?;
         Ok(Self { iga, mesh })
@@ -192,7 +189,7 @@ pub struct IgaSinglePatchMesh2D {
 }
 
 impl IgaSinglePatchMesh2D {
-    /// Build connectivity from a space. Fails if `(p+1)(q+1)` is not 4 or 9.
+    /// Build connectivity from a space. Supports arbitrary degrees `p,q >= 1`.
     pub fn from_iga_space(space: &IgaSpace2D) -> Result<Self, String> {
         let p = space.degree_u();
         let q = space.degree_v();
@@ -200,11 +197,7 @@ impl IgaSinglePatchMesh2D {
         let el_ty = match n_local {
             4  => ElementType::Quad4,
             9  => ElementType::Quad9,
-            _ => {
-                return Err(format!(
-                    "IgaFESpace2D: (p+1)(q+1) must be 4 or 9 for the FESpace bridge, got {n_local} (p={p}, q={q})"
-                ));
-            }
+            _ => ElementType::Quad9, // fallback: element topology for higher p,q
         };
 
         let nctrl = space.n_dofs();
@@ -404,7 +397,7 @@ fn build_multi_patch_dof_maps(
 /// Return the global control-point indices along a given edge of a 2-D tensor-product patch.
 fn edge_dof_indices_2d(nu: usize, nv: usize, edge: usize) -> Vec<usize> {
     match edge {
-        0 => (0..nu).map(|i| i).collect(),                         // v=0 (bottom)
+        0 => (0..nu).collect(),                         // v=0 (bottom)
         1 => (0..nv).map(|j| (j + 1) * nu - 1).collect(),          // u=1 (right)
         2 => (0..nu).map(|i| (nv - 1) * nu + i).rev().collect(),   // v=1 (top, reversed)
         3 => (0..nv).map(|j| j * nu).rev().collect(),              // u=0 (left, reversed)
@@ -452,7 +445,7 @@ impl IgaMultiPatchMesh2D {
             node_coords.extend(iga.control_points().iter().map(|&c| vec![c[0], c[1]]));
         }
 
-        let element_type = if let Some(ref m) = patch_meshes.first() {
+        let element_type = if let Some(m) = patch_meshes.first() {
             m.element_type
         } else {
             ElementType::Quad4
@@ -474,6 +467,17 @@ impl IgaMultiPatchMesh2D {
     pub fn n_global_dofs(&self) -> usize { self.n_global_dofs }
 
     pub fn n_patches(&self) -> usize { self.patch_meshes.len() }
+
+    /// Build a multi-patch IGA mesh directly from a STEP file.
+    ///
+    /// Reads all `B_SPLINE_SURFACE` entities, builds a [`NurbsMesh2D`],
+    /// auto-detects shared edges, and constructs the merged IGA mesh.
+    ///
+    /// This is the simplest way to go from CAD → IGA analysis.
+    pub fn from_step_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let nurbs = fem_mesh::nurbs_from_cad::step_to_nurbs_mesh(path)?;
+        Ok(Self::from_nurbs_mesh(&nurbs))
+    }
 
     pub fn dof_map(&self, patch: usize) -> &[DofId] { &self.dof_maps[patch] }
 }
@@ -517,9 +521,7 @@ impl IgaSinglePatchMesh3D {
         let el_ty = match n_local {
             8  => ElementType::Hex8,
             27 => ElementType::Hex27,
-            _ => return Err(format!(
-                "IgaFESpace3D: (p+1)(q+1)(r+1) must be 8 or 27, got {n_local} (p={p},q={q},r={r})"
-            )),
+            _ => ElementType::Hex27, // fallback: element topology for higher p,q,r
         };
 
         let nctrl = space.n_dofs();
@@ -645,11 +647,14 @@ mod iga3d_tests {
     }
 
     #[test]
-    fn iga_3d_rejects_unsupported_degree() {
-        let err = IgaSpace3D::new_uniform_clamped(1, 1, 3, 3, 3, 4).unwrap();
-        let r = IgaFESpace3D::new(err);
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("must be 8 or 27"));
+    fn iga_3d_high_degree_is_accepted() {
+        // p=1,q=1,r=3 → n_local=16, no exact ElementType match → Hex27 fallback
+        let space = IgaSpace3D::new_uniform_clamped(1, 1, 3, 3, 3, 4).unwrap();
+        let fes = IgaFESpace3D::new(space).unwrap();
+        assert_eq!(fes.n_dofs(), 36);
+        assert_eq!(fes.mesh().n_elements(), 4); // 2×2×1 spans
+        assert_eq!(fes.element_dofs(0).len(), 16); // (1+1)*(1+1)*(3+1)
+        assert!(matches!(fes.mesh().element_type(0), ElementType::Hex27));
     }
 
     #[test]
@@ -702,6 +707,36 @@ mod tests {
         let g = iga.greville_param_coords().expect("g");
         assert!((g[0] - 0.0).abs() < 1e-12);
         assert!((g[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn iga_fespace1d_high_degree_is_accepted() {
+        let iga = IgaSpace1D::new_uniform_clamped(4, 8).expect("1d");
+        let fe = IgaFESpace1D::new(iga).expect("fes");
+        // p=4 → 5 nodes per element → no exact Line variant → Line3 fallback
+        assert_eq!(fe.n_dofs(), 8);
+        assert_eq!(fe.mesh().n_elements(), 4); // 8-4 = 4 spans
+        assert_eq!(fe.element_dofs(0).len(), 5); // p+1
+        assert!(matches!(fe.mesh().element_type(0), ElementType::Line3));
+    }
+
+    #[test]
+    fn iga_fespace2d_high_degree_is_accepted() {
+        let iga = IgaSpace2D::new_uniform_clamped(3, 3, 6, 5).expect("2d");
+        let fe = IgaFESpace2D::new(iga).expect("fes");
+        // p=q=3 → 16 nodes per element → Quad9 fallback
+        assert_eq!(fe.n_dofs(), 30); // 6×5
+        let el_dofs = fe.element_dofs(0);
+        assert_eq!(el_dofs.len(), 16); // (3+1)*(3+1)
+        assert!(matches!(fe.mesh().element_type(0), ElementType::Quad9));
+    }
+
+    #[test]
+    fn iga_fespace2d_mixed_degree_is_accepted() {
+        let iga = IgaSpace2D::new_uniform_clamped(2, 3, 5, 5).expect("2d");
+        let fe = IgaFESpace2D::new(iga).expect("fes");
+        // p=2,q=3 → 3*4=12 nodes per element → Quad9 fallback
+        assert_eq!(fe.element_dofs(0).len(), 12);
     }
 
     // ─── Multi-patch tests ────────────────────────────────────────────────────

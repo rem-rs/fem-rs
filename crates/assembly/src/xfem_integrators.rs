@@ -8,11 +8,9 @@ use fem_mesh::SimplexMesh;
 use fem_mesh::topology::MeshTopology;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
-use fem_space::constraints;
-use fem_solver::{solve_cg, SolverConfig};
 
 use crate::xfem::{EnrichmentMap, EnrichmentType, XfemEnrichment, XfemLevelSet, tip_branch_functions, polar_coords};
-use crate::xfem_level_set::{cut_triangle, CutResult, XfemLevelSet as LS};
+use crate::xfem_level_set::{cut_triangle, CutResult};
 
 /// Reference gradients for P1 triangle: ∇φ₁ = (-1,-1), ∇φ₂ = (1,0), ∇φ₃ = (0,1)
 const REF_GRAD: [[f64; 2]; 3] = [[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]];
@@ -234,7 +232,7 @@ pub fn assemble_xfem_elasticity(
     let enr_map = EnrichmentMap::from_enrichment(enr);
 
     // 3×3 constitutive matrix for plane strain
-    let d_mat = [
+    let _d_mat = [
         [lambda + 2.0*mu, lambda, 0.0],
         [lambda, lambda + 2.0*mu, 0.0],
         [0.0, 0.0, mu],
@@ -305,7 +303,7 @@ pub fn assemble_xfem_elasticity(
             let n = nodes[k] as usize;
             let ed_list = &enr_map.enr_dofs[n];
             let etype = &enr_map.enr_type[n];
-            for (idx, &ed) in ed_list.iter().enumerate() {
+            for &ed in ed_list.iter() {
                 enr_dof_map.push((k, ed, etype.unwrap_or(EnrichmentType::Heaviside)));
                 enr_dofs.push(ed);
             }
@@ -319,7 +317,7 @@ pub fn assemble_xfem_elasticity(
                             (phys[0][1]+phys[1][1]+phys[2][1])/3.0];
 
         // Evaluate shape functions at centroid (constant for P1: 1/3 each)
-        let phi_at_centroid = [1.0/3.0, 1.0/3.0, 1.0/3.0];
+        let _phi_at_centroid = [1.0/3.0, 1.0/3.0, 1.0/3.0];
 
         // Integration over element or sub-cells
         let sub_areas: Vec<f64>;
@@ -353,7 +351,7 @@ pub fn assemble_xfem_elasticity(
                 (Some(tip), Some(dir)) => polar_coords(centroid, tip, dir),
                 _ => (1.0, 0.0),
             };
-            let tip_f = tip_branch_functions(r, theta);
+            let _tip_f = tip_branch_functions(r, theta);
 
             for ei in 0..n_enr_loc {
                 let (node_i, row_global, type_i) = enr_dof_map[ei];
@@ -430,7 +428,7 @@ pub fn assemble_xfem_elasticity(
 mod tests {
     use super::*;
     use fem_mesh::SimplexMesh;
-    use fem_space::H1Space;
+    use fem_space::{H1Space, constraints};
     use fem_solver::{solve_cg, SolverConfig};
 
     #[test]
@@ -504,7 +502,7 @@ mod tests {
             let n_total = enr.n_total_dofs();
 
             // Standard Poisson: -Δu = 1 with u=0 on boundary
-            let mut rhs = vec![0.0; n_total];
+            let rhs = vec![0.0; n_total];
 
             // Apply Dirichlet BCs: u=0 on all boundary nodes
             let mut a_mod = a.clone();

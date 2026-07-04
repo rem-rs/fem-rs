@@ -134,7 +134,7 @@ fn assemble_volume<S: FESpace>(
     mesh: &S::Mesh,
     kappa: f64,
     quad_order: u8,
-    coo: &mut CooMatrix<f64>,
+    _coo: &mut CooMatrix<f64>,
 ) {
     let dim = mesh.dim() as usize;
     let ne = mesh.n_elements();
@@ -143,9 +143,9 @@ fn assemble_volume<S: FESpace>(
     let (gpt, gwt) = fem_element::quadrature::gauss_legendre_01(quad_order as usize);
 
     for e in 0..ne as u32 {
-        let dofs = space.element_dofs(e);
-        let nodes = mesh.element_nodes(e);
-        let (j, ji, det) = elem_jac(mesh, e, dim);
+        let _dofs = space.element_dofs(e);
+        let _nodes = mesh.element_nodes(e);
+        let (_j, ji, det) = elem_jac(mesh, e, dim);
         let vol = if dim == 2 { 0.5 * det.abs() } else { det.abs() / 6.0 };
 
         // For P1 we can use centroid rule (exact for constant ∇φ).
@@ -172,7 +172,7 @@ fn assemble_volume<S: FESpace>(
                     } else {
                         vec![gpt[pi], gpt[pj], 0.0]
                     };
-                    let w = if dim == 2 { gwt[pi] * gwt[pj] } else { gwt[pi] * gwt[pj] };
+                    let w = gwt[pi] * gwt[pj];
                     let _ = (xi, w);
                 }
             }
@@ -187,7 +187,7 @@ fn assemble_volume<S: FESpace>(
 /// * `ifl`      — precomputed `InteriorFaceList`
 /// * `kappa`    — diffusion coefficient (positive scalar)
 /// * `eta`      — BR2 stabilization parameter (typical: 1.0–10.0; should be ≥
-///                number of faces per element, e.g. 3 for Tri, 4 for Tet)
+///   number of faces per element, e.g. 3 for Tri, 4 for Tet)
 /// * `quad_order` — quadrature order for volume term
 pub fn assemble_br2<S: FESpace + Sync>(
     space: &S,
@@ -209,7 +209,7 @@ pub fn assemble_br2<S: FESpace + Sync>(
 
     // ── 2. Interior face terms (BR2) ──────────────────────────────────────
     // Face quadrature: centroid rule (exact for P1 on affine elements).
-    let q_xi = if dim == 2 {
+    let _q_xi = if dim == 2 {
         vec![1.0 / 3.0, 1.0 / 3.0] // tri face centroid
     } else {
         vec![0.25, 0.25, 0.25]    // tet face centroid
@@ -225,8 +225,8 @@ pub fn assemble_br2<S: FESpace + Sync>(
         let (h_f, n_l) = face_geom(mesh, fnodes);
         let n_r: Vec<f64> = n_l.iter().map(|x| -x).collect();
 
-        let (_, ji_l, det_l) = elem_jac(mesh, e_l, dim);
-        let (_, ji_r, det_r) = elem_jac(mesh, e_r, dim);
+        let (_, ji_l, _det_l) = elem_jac(mesh, e_l, dim);
+        let (_, ji_r, _det_r) = elem_jac(mesh, e_r, dim);
         let gphys_l = phys_grad(&ji_l, &gref, npe, dim);
         let gphys_r = phys_grad(&ji_r, &gref, npe, dim);
 
@@ -242,7 +242,7 @@ pub fn assemble_br2<S: FESpace + Sync>(
         let dofs_r = space.element_dofs(e_r);
 
         // Face area/length factor (weight = h_F in 2D, area in 3D for centroid rule).
-        let w_face = if dim == 2 { h_f } else { h_f }; // centroid rule: weight = face measure
+        let _w_face = h_f; // centroid rule: weight = face measure
 
         // Face area (2D: edge length, 3D: face area).
         let area = h_f;

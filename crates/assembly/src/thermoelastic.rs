@@ -33,6 +33,7 @@ use crate::dg_advection::{ref_elem_vol, simplex_jac, xform_grads};
 /// expansion coefficient, and `λ, μ` are the Lamé parameters.
 ///
 /// Returns a vector of length `n_dofs` (same as the displacement space).
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_thermal_expansion_rhs<M: MeshTopology + Clone>(
     mesh: &M,
     disp_space: &VectorH1Space<M>,
@@ -130,6 +131,7 @@ pub fn assemble_heat_system<M: MeshTopology + Clone>(
 /// 3. Solve linear elasticity with thermal load.
 ///
 /// Returns `(T, u)`.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_thermoelastic_staggered<M: MeshTopology + Clone>(
     mesh: &M,
     kappa: f64,

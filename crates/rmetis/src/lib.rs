@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! Pure-Rust mesh graph partitioning.
 //!
 //! Builds an element **dual graph** from a [`SimplexMesh`] and partitions it
@@ -214,7 +215,7 @@ fn coarsen(n: usize, xadj: &[i32], adjncy: &[i32]) -> CoarseGraph {
     });
     // Sort and dedup each coarse adjacency (parallel)
     c_adj.par_iter_mut().for_each(|adj| {
-        let mut v = adj.lock().unwrap();
+        let v = adj.get_mut().unwrap();
         v.sort_unstable();
         v.dedup();
     });
@@ -434,7 +435,7 @@ pub fn partition_kway(n: usize, xadj: &[i32], adjncy: &[i32], k: usize) -> Vec<i
 /// | 16 + (n+1)*8 | [i32; edge_count*2] | adjncy in native endian |
 ///
 /// Total file size = 16 + (n+1)*8 + edge_count*8 bytes.
-
+///
 /// Write a CSR graph in binary format for memory-mapped access.
 pub fn write_csr_bin(path: impl AsRef<Path>, n: usize, xadj: &[i32], adjncy: &[i32]) -> std::io::Result<()> {
     use std::io::Write;

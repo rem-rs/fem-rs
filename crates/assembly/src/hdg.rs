@@ -27,7 +27,7 @@ where
 {
     let dim = mesh.dim() as usize;
     let n_elems = mesh.n_elements();
-    let tau = 1.0 as f64;
+    let tau = 1.0_f64;
     let bo = bulk_order as usize;
 
     let dofs_per_elem = if dim == 2 {
@@ -50,8 +50,8 @@ where
     let geo_n = geo_elem.n_dofs();
 
     let face_ref_bulk: Box<dyn fem_element::ReferenceElement> = match dim {
-        2 => Box::new(SegPk::new(bo as usize)),
-        3 => Box::new(TriPk::new(bo as usize)),
+        2 => Box::new(SegPk::new(bo)),
+        3 => Box::new(TriPk::new(bo)),
         _ => unreachable!(),
     };
     let dofs_per_sk_face = if skeleton_order == 0 { 1 } else if dim == 2 { skeleton_order as usize + 1 } else { (skeleton_order as usize + 1) * (skeleton_order as usize + 2) / 2 };
@@ -127,7 +127,7 @@ where
             key.sort_unstable();
             let mut found = None;
             for (fi, (fnodes, _)) in face_list.iter().enumerate() {
-                let mut fk: Vec<u32> = fnodes.iter().copied().collect();
+                let mut fk: Vec<u32> = fnodes.to_vec();
                 fk.sort_unstable();
                 if fk == key { found = Some(fi); break; }
             }
@@ -231,7 +231,7 @@ where
                 ref_elem.eval_basis(&xi_ref, &mut phi);
                 if let Some(ref sk) = sk_elem { sk.eval_basis(fxi, &mut psi); } else { psi[0] = 1.0; }
 
-                let face_jac = compute_face_size(&mesh, &enodes, lf_idx, dim, npe);
+                let face_jac = compute_face_size(&mesh, enodes, lf_idx, dim, npe);
                 let w_face = fw * face_jac;
 
                 for i in 0..dofs_per_elem {
@@ -271,7 +271,7 @@ where
                 };
                 ref_elem.eval_basis(&xi_ref, &mut phi);
                 if let Some(ref sk) = sk_elem { sk.eval_basis(fxi, &mut psi); } else { psi[0] = 1.0; }
-                let face_jac = compute_face_size(&mesh, &enodes, lf_idx, dim, npe);
+                let face_jac = compute_face_size(&mesh, enodes, lf_idx, dim, npe);
                 let w_face = fw * face_jac;
 
                 if face_lambda_offset[lf_idx].is_some() {
@@ -340,7 +340,7 @@ where
                 // τ ∫ ψ_f ψ_g = τ * face_jac * δ_{fg}
                 // For P1+: face inner product of skeleton basis
                 if lf_idx == lf_idx2 {
-                    let face_jac = compute_face_size(&mesh, &enodes, lf_idx, dim, npe);
+                    let face_jac = compute_face_size(&mesh, enodes, lf_idx, dim, npe);
                     let mut face_mass = 0.0;
                     for fq in 0..n_qp_face {
                         let fw = quad_face.weights[fq];
@@ -385,7 +385,7 @@ where
             key.sort_unstable();
             let mut found = None;
             for (fi, (fnodes, _)) in face_list.iter().enumerate() {
-                let mut fk: Vec<u32> = fnodes.iter().copied().collect();
+                let mut fk: Vec<u32> = fnodes.to_vec();
                 fk.sort_unstable();
                 if fk == key { found = Some(fi); break; }
             }
@@ -431,7 +431,7 @@ where
                     (3,0)=>vec![fxi[0],fxi[1],0.0], (3,1)=>vec![fxi[0],0.0,fxi[1]], (3,2)=>vec![0.0,fxi[0],fxi[1]], (3,3)=>vec![fxi[0],fxi[1],1.0-fxi[0]-fxi[1]], _=>unreachable!() };
                 ref_elem.eval_basis(&xi_ref, &mut phi);
                 if let Some(ref sk) = sk_elem { sk.eval_basis(fxi, &mut psi); } else { psi[0] = 1.0; }
-                let fj = compute_face_size(&mesh, &enodes, lf_idx, dim, npe);
+                let fj = compute_face_size(&mesh, enodes, lf_idx, dim, npe);
                 let wf = fw * fj;
                 for i in 0..dofs_per_elem { for j in 0..dofs_per_elem { a_elem[i*dofs_per_elem+j] += tau*wf*phi[i]*phi[j]; } }
                 if face_lambda_offset[lf_idx].is_some() {
@@ -450,9 +450,7 @@ where
         for i in 0..dofs_per_elem { for j in 0..dofs_per_elem { u0[i] += a_inv[i*dofs_per_elem+j]*f_elem[j]; } }
 
         let base = e as usize * dofs_per_elem;
-        for i in 0..dofs_per_elem {
-            u_bulk[base + i] = u0[i];
-        }
+        u_bulk[base..base + dofs_per_elem].copy_from_slice(&u0[..dofs_per_elem]);
         // Add U_lambda * lambda contribution
         for f in 0..n_sk_dofs_elem {
             let lf_idx = f / dofs_per_sk_face;

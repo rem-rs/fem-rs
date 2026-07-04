@@ -564,7 +564,7 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                 if dim == 2 && ns.len() == 3 {
                     // Tri bubble: use TriPk factory
                     let factory = fem_element::lagrange::factory::ref_elem(
-                        fem_element::lagrange::factory::ElemType::Tri, p_e as u8);
+                        fem_element::lagrange::factory::ElemType::Tri, p_e);
                     let rc = factory.dof_coords();
                     let vol_factory_start = rc.len() - n_vol;
                     for k in 0..n_vol {
@@ -598,7 +598,7 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                 } else if dim == 3 && ns.len() == 4 {
                     // Tet volume: use TetPk factory
                     let factory = fem_element::lagrange::factory::ref_elem(
-                        fem_element::lagrange::factory::ElemType::Tet, p_e as u8);
+                        fem_element::lagrange::factory::ElemType::Tet, p_e);
                     let rc = factory.dof_coords();
                     let vol_factory_start = rc.len() - n_vol;
                     for k in 0..n_vol {
@@ -812,7 +812,7 @@ pub fn detect_p_constraints<M: MeshTopology>(
                 if n_extra == 0 || face_dofs.is_empty() { continue; }
 
                 // Quad face edges (4 edges)
-                let _face_edges = vec![
+                let _face_edges = [
                     EdgeKey::new(face4[0], face4[1]),
                     EdgeKey::new(face4[1], face4[2]),
                     EdgeKey::new(face4[2], face4[3]),

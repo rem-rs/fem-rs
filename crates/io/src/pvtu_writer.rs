@@ -18,6 +18,7 @@ use std::io::Write;
 use fem_core::FemResult;
 
 /// A `.pvtu` collection referencing multiple `.vtu` piece files.
+#[derive(Default)]
 pub struct PvtuCollection {
     pieces: Vec<String>,
     point_data_arrays: Vec<String>,
@@ -26,7 +27,7 @@ pub struct PvtuCollection {
 
 impl PvtuCollection {
     pub fn new() -> Self {
-        PvtuCollection { pieces: Vec::new(), point_data_arrays: Vec::new(), cell_data_arrays: Vec::new() }
+        Self::default()
     }
 
     pub fn add_piece(&mut self, filename: impl Into<String>) {

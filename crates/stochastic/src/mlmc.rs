@@ -141,7 +141,7 @@ impl SmolyakGrid {
         F: Fn(usize) -> QuadRule1D,
     {
         // Pre-compute 1-D rules up to level
-        let rules: Vec<QuadRule1D> = (1..=level).map(|l| rule(l)).collect();
+        let rules: Vec<QuadRule1D> = (1..=level).map(rule).collect();
 
         // Generate multi-index set: {i ∈ ℕ^M : 1 ≤ i_j, |i| ≤ L}
         let multi_indices = Self::index_set(dim, level);
@@ -202,7 +202,7 @@ impl SmolyakGrid {
         Self::index_set_recursive(dim, level + dim, &mut vec![], &mut result);
         result.retain(|mi| {
             let sum: usize = mi.iter().sum();
-            sum >= level && sum <= level + dim - 1
+            sum >= level && sum < level + dim
         });
         result
     }
@@ -230,7 +230,7 @@ impl SmolyakGrid {
             let s = level + dim - 1;
             let q = sum_i as isize - level as isize;
             if q < 0 || q > (dim - 1) as isize { return 0.0; }
-            let sign = if (s - sum_i) % 2 == 0 { 1.0 } else { -1.0 };
+            let sign = if (s - sum_i).is_multiple_of(2) { 1.0 } else { -1.0 };
             sign * binom(dim - 1, q as usize) as f64
         }).collect()
     }

@@ -59,8 +59,8 @@ fn jacobi_smooth(a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], omega: f64, sweep
 fn spmv_transpose(a: &CsrMatrix<f64>, x: &[f64]) -> Vec<f64> {
     let mut y = vec![0.0; a.ncols];
     for row in 0..a.nrows {
-        let start = a.row_ptr[row] as usize;
-        let end = a.row_ptr[row + 1] as usize;
+        let start = a.row_ptr[row];
+        let end = a.row_ptr[row + 1];
         for nz in start..end {
             let col = a.col_idx[nz] as usize;
             y[col] += a.values[nz] * x[row];

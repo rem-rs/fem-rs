@@ -132,10 +132,10 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
             for face_nodes_orig in local_faces {
                 let mut key = face_nodes_orig.clone();
                 key.sort_unstable();
-                if !face_node_map.contains_key(&key) {
+                let is_bdr = bdr_face_keys.contains(&key);
+                if let std::collections::hash_map::Entry::Vacant(e) = face_node_map.entry(key) {
                     let idx = all_face_nodes.len();
-                    let is_bdr = bdr_face_keys.contains(&key);
-                    face_node_map.insert(key, (idx, face_nodes_orig.clone()));
+                    e.insert((idx, face_nodes_orig.clone()));
                     all_face_nodes.push(face_nodes_orig);
                     face_is_boundary.push(is_bdr);
                 }

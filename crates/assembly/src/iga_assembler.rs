@@ -136,6 +136,7 @@ fn local_values_for_active_indices(
     Ok(vals)
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn evaluate_surface_shape(
     active: &[usize],
     active_u: &[usize],
@@ -217,6 +218,7 @@ fn evaluate_surface_shape(
     Ok((phi, dphi_du, dphi_dv))
 }
 
+#[allow(clippy::type_complexity)]
 fn eval_surface_geometry(
     active: &[usize],
     ctrl_points: &[[f64; 2]],

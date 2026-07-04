@@ -90,6 +90,7 @@ fn face_dof_value(m: &Mono, face: usize, p: usize, q: usize) -> f64 {
             let mut sum = 0.0;
 
             // Map to physical coordinates based on face
+            #[allow(clippy::type_complexity)]
             let (xi_fn, eta_fn, zeta_fn): (
                 Box<dyn Fn(f64, f64) -> f64>,
                 Box<dyn Fn(f64, f64) -> f64>,

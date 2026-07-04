@@ -65,9 +65,9 @@ impl<T: Send + 'static> CooVectorPool<T> {
     ) -> PooledCooVectors<T> {
         let mut inner = self.inner.lock();
         
-        let rows = inner.rows.pop().unwrap_or_else(Vec::new);
-        let cols = inner.cols.pop().unwrap_or_else(Vec::new);
-        let vals = inner.vals.pop().unwrap_or_else(Vec::new);
+        let rows = inner.rows.pop().unwrap_or_default();
+        let cols = inner.cols.pop().unwrap_or_default();
+        let vals = inner.vals.pop().unwrap_or_default();
 
         PooledCooVectors {
             pool: self.clone(),

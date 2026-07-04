@@ -186,7 +186,7 @@ pub fn cut_triangle(ls: &XfemLevelSet, phys_nodes: &[[f64; 2]; 3]) -> CutResult 
         (2, 2) => {
             // Two vertices are negative, one is positive
             // Result: two sub-triangles (a quad split by a diagonal)
-            let p = pos_verts[0];
+            let _p = pos_verts[0];
             let i0 = intersections[0];
             let i1 = intersections[1];
 

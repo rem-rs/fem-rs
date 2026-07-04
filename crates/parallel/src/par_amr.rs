@@ -76,7 +76,7 @@ pub fn par_refine_marked(
 
     Ok(ParRefinedMesh {
         par_mesh: new_par_mesh,
-        nc_state: nc_state,
+        nc_state,
         solution: prolongated,
         n_new_elems,
     })
@@ -142,7 +142,7 @@ fn merge_submeshes(
 
     let n_glob_nodes = global_nodes.len();
     let mut coords = Vec::with_capacity(n_glob_nodes * 2);
-    for (_gid, xy) in &global_nodes {
+    for xy in global_nodes.values() {
         coords.push(xy[0]);
         coords.push(xy[1]);
     }
@@ -158,7 +158,7 @@ fn merge_submeshes(
 
     let mut conn = Vec::with_capacity(n_glob_elems * npe);
     let mut elem_tags = Vec::with_capacity(n_glob_elems);
-    for (_ge, (global_conn, tag)) in &global_elems {
+    for (global_conn, tag) in global_elems.values() {
         for &gn_id in global_conn {
             conn.push(new_id[&gn_id]);
         }
@@ -220,7 +220,7 @@ pub fn par_repartition(
         for src in 1..size as i32 {
             let buf = comm.recv_bytes(src, REPART_TAG_BASE + src);
             let (sub_mesh, sub_part) = decode_submesh::<2>(&buf)
-                .map_err(|e| ParAmrError::SerializationError(e))?;
+                .map_err(ParAmrError::SerializationError)?;
             meshes.push(sub_mesh);
             parts.push(sub_part);
         }
@@ -229,7 +229,7 @@ pub fn par_repartition(
 
         // Redistribute using the streaming partitioner
         partition_simplex_streaming(Some(&global_mesh), &comm)
-            .map_err(|e| ParAmrError::RepartitionError(e))
+            .map_err(ParAmrError::RepartitionError)
     } else {
         // Send our mesh to rank 0
         let encoded = encode_submesh(&local_mesh, &partition);
@@ -238,7 +238,7 @@ pub fn par_repartition(
         // Receive new partition from rank 0
         let buf = comm.recv_bytes(0, STREAM_TAG_BASE + rank);
         let (new_mesh, new_part) = decode_submesh::<2>(&buf)
-            .map_err(|e| ParAmrError::SerializationError(e))?;
+            .map_err(ParAmrError::SerializationError)?;
         Ok(ParallelMesh::new(new_mesh, comm.clone(), new_part))
     }
 }
@@ -342,7 +342,7 @@ pub fn sfc_rebalance_ring<const D: usize>(
     // 5. Merge received elements into local mesh
     let final_mesh = if let Some(buf) = recv_buf {
         let (recv_mesh, _recv_part) = crate::mesh_serde::decode_submesh::<D>(&buf)
-            .map_err(|e| ParAmrError::SerializationError(e))?;
+            .map_err(ParAmrError::SerializationError)?;
         merge_two_meshes(&keep_mesh, &recv_mesh)
     } else {
         keep_mesh
@@ -425,7 +425,7 @@ fn extract_submesh_elements<const D: usize>(
 
     // Create a minimal mesh with the subset
     // (face data is not transferred; caller regenerates if needed)
-    let new_mesh = SimplexMesh {
+    SimplexMesh {
         coords: new_coords,
         conn: new_conn,
         elem_tags: new_tags,
@@ -440,8 +440,7 @@ fn extract_submesh_elements<const D: usize>(
         face_to_elem: None,
         edge_conn: Vec::new(),
         edge_to_elem: Vec::new(),
-    };
-    new_mesh
+    }
 }
 
 /// Merge two meshes (concatenate nodes and elements).
@@ -540,6 +539,127 @@ pub fn prolongate_p1(
         }
     }
     sol_fine
+}
+
+/// Compute the global element count via allreduce.
+///
+/// Returns `(n_global, max_local)`.
+fn compute_global_stats(n_local: usize, comm: &crate::Comm) -> (usize, usize) {
+    let n_global = comm.allreduce_sum_i64(n_local as i64) as usize;
+    // Approximate max with a simple ring to avoid needing allreduce_max.
+    // Each rank sends local count to next rank; after size steps each has seen all.
+    let size = comm.size();
+    let rank = comm.rank();
+    let mut max_seen = n_local;
+    if size > 1 {
+        let next = (rank + 1) % size as i32;
+        let prev = if rank == 0 { size as i32 - 1 } else { rank - 1 };
+        let mut buf = n_local.to_le_bytes().to_vec();
+        for _step in 0..size - 1 {
+            comm.send_bytes(next, REPART_TAG_BASE + 5000 + rank, &buf);
+            let recv = comm.recv_bytes(prev, REPART_TAG_BASE + 5000 + prev);
+            let incoming = usize::from_le_bytes(recv[..8].try_into().unwrap());
+            max_seen = max_seen.max(incoming);
+            buf = recv;
+        }
+    }
+    (n_global, max_seen)
+}
+
+/// Compute the global load imbalance factor across all ranks.
+///
+/// Returns `max_local / ideal`.  Value > 1.0 means overloaded ranks exist.
+pub fn compute_global_imbalance(n_local: usize, comm: &crate::Comm) -> f64 {
+    let size = comm.size() as f64;
+    if size <= 0.0 { return 0.0; }
+    let n_global: usize = comm.allreduce_sum_i64(n_local as i64) as usize;
+    if n_global == 0 { return 0.0; }
+    let ideal = n_global as f64 / size;
+    if ideal <= 0.0 { return 0.0; }
+    let (_total, max_local) = compute_global_stats(n_local, comm);
+    max_local as f64 / ideal
+}
+
+/// Multi-iteration diffusive load-balancing.
+///
+/// Unlike [`sfc_rebalance_ring`] (single-pass ring exchange), this function
+/// performs **iterative nearest-neighbour diffusion**: each step exchanges
+/// excess elements with the neighbour that has the most complementary load.
+///
+/// After each iteration the global imbalance is recomputed.  The process
+/// stops when `imbalance < 1.0 + threshold` or `max_iters` is reached.
+pub fn par_diffusive_rebalance<const D: usize>(
+    par_mesh: ParallelMesh<SimplexMesh<D>>,
+    threshold: f64,
+    max_iters: usize,
+    n_diffuse: usize,
+) -> Result<ParallelMesh<SimplexMesh<D>>, ParAmrError> {
+    let comm = par_mesh.comm().clone();
+    let size = comm.size();
+    if size <= 1 { return Ok(par_mesh); }
+
+    let mut mesh = par_mesh;
+    let rank = comm.rank();
+    let size_i32 = size as i32;
+
+    for _iter in 0..max_iters {
+        let n_local = mesh.local_mesh().n_elems();
+        let imb = compute_global_imbalance(n_local, &comm);
+        if imb < 1.0 + threshold { break; }
+
+        let n_global: usize = comm.allreduce_sum_i64(n_local as i64) as usize;
+        let target = n_global / size;
+        let n_excess = n_local.saturating_sub(target);
+        let n_to_send = n_excess.min(n_diffuse);
+
+        if n_to_send == 0 { continue; }
+
+        // SFC plan: keep lowest keys, send highest keys
+        let n_keep = n_local.saturating_sub(n_to_send);
+        let (keep_idx, send_idx) = sfc_rebalance_plan(mesh.local_mesh(), n_keep);
+        if send_idx.is_empty() { continue; }
+
+        let keep_mesh = extract_submesh_elements(mesh.local_mesh(), &keep_idx);
+        let send_mesh = extract_submesh_elements(mesh.local_mesh(), &send_idx);
+
+        // Send to neighbour one step clockwise (ring diffusion)
+        let next_rank = (rank + 1) % size_i32;
+        let prev_rank = if rank == 0 { size_i32 - 1 } else { rank - 1 };
+
+        let send_part = MeshPartition::new_serial(send_mesh.n_nodes(), send_mesh.n_elems());
+        let encoded_send = crate::mesh_serde::encode_submesh::<D>(&send_mesh, &send_part);
+        let tag = REPART_TAG_BASE + 4000 + (_iter as i32) * 100;
+
+        let recv_buf = if (rank % 2) == 0 {
+            comm.send_bytes(next_rank, tag + rank, &encoded_send);
+            if n_to_send > 0 {
+                Some(comm.recv_bytes(prev_rank, tag + prev_rank))
+            } else {
+                None
+            }
+        } else {
+            let buf = if n_to_send > 0 {
+                Some(comm.recv_bytes(prev_rank, tag + prev_rank))
+            } else {
+                None
+            };
+            comm.send_bytes(next_rank, tag + rank, &encoded_send);
+            buf
+        };
+
+        let final_mesh = if let Some(buf) = recv_buf {
+            let (recv_mesh, _recv_part) = crate::mesh_serde::decode_submesh::<D>(&buf)
+                .map_err(ParAmrError::SerializationError)?;
+            merge_two_meshes(&keep_mesh, &recv_mesh)
+        } else {
+            keep_mesh
+        };
+
+        let new_part = MeshPartition::new_serial(final_mesh.n_nodes(), final_mesh.n_elems());
+        mesh = ParallelMesh::new(final_mesh, comm.clone(), new_part);
+    }
+
+    Ok(mesh)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

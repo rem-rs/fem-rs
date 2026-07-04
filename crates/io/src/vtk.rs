@@ -248,6 +248,152 @@ fn write_data_array(s: &mut String, arr: &DataArray) {
     writeln!(s, r#"        </DataArray>"#).unwrap();
 }
 
+// ── Bezier extractor for high-order VTK output ──────────────────────────────
+
+/// Evaluate Lagrange basis at reference point xi for element type.
+fn lagrange_basis(elem_type: ElementType, xi: &[f64]) -> Vec<f64> {
+    let nodes = match elem_type {
+        ElementType::Tri3 | ElementType::Tri6 => {
+            vec![[0.0f64,0.0],[1.0,0.0],[0.0,1.0]]
+        }
+        _ => return vec![1.0],
+    };
+    let n = nodes.len();
+    let mut vals = vec![0.0; n];
+    for i in 0..n {
+        let mut v = 1.0;
+        for j in 0..n {
+            if i == j { continue; }
+            let d = nodes[i][0] - nodes[j][0];
+            let e = nodes[i][1] - nodes[j][1];
+            if d.abs() > 1e-15f64 { v *= (xi[0] - nodes[j][0]) / d; }
+            if e.abs() > 1e-15f64 { v *= (xi[1] - nodes[j][1]) / e; }
+        }
+        vals[i] = v;
+    }
+    vals
+}
+
+/// Tessellate a high-order element into linear sub-elements for VTK.
+/// Returns (sub_coords, sub_conn, sub_field) in flat format.
+fn tessellate_element<const D: usize>(
+    p: usize,
+    elem_type: ElementType,
+    elem_conn: &[u32],
+    mesh_coords: &[f64],
+    values_at_node: &[f64],
+) -> (Vec<f64>, Vec<u32>, Vec<f64>) {
+    let npe = elem_conn.len();
+    let dim = D;
+    let mut sub_v = Vec::new();
+    let mut sub_c = Vec::new();
+    let mut sub_f = Vec::new();
+    let mut node_x: Vec<f64> = Vec::with_capacity(npe);
+    let mut node_y: Vec<f64> = Vec::with_capacity(npe);
+    let mut node_z: Vec<f64> = Vec::with_capacity(npe);
+    for &n in elem_conn {
+        let base = (n as usize) * dim;
+        node_x.push(mesh_coords[base]);
+        node_y.push(mesh_coords[base + 1]);
+        if dim == 3 { node_z.push(mesh_coords[base + 2]); }
+    }
+    let node_vals: Vec<f64> = values_at_node.to_vec();
+    if dim == 2 {
+        // 2D triangle tessellation
+        let mut sub_idx = std::collections::HashMap::new();
+        let mut next_v = 0u32;
+        for j in 0..=p {
+            for i in 0..=(p - j) {
+                let xi = [i as f64 / p as f64, j as f64 / p as f64];
+                sub_idx.insert((i, j), next_v);
+                let basis = lagrange_basis(elem_type, &xi);
+                let (mut x, mut y, mut f) = (0.0, 0.0, 0.0);
+                for k in 0..npe {
+                    x += basis[k] * node_x[k];
+                    y += basis[k] * node_y[k];
+                    f += basis[k] * node_vals[k];
+                }
+                sub_v.push(x); sub_v.push(y); sub_f.push(f);
+                next_v += 1;
+            }
+        }
+        for j in 0..p {
+            for i in 0..(p - j) {
+                let (v00, v10, v01) = (sub_idx[&(i,j)], sub_idx[&(i+1,j)], sub_idx[&(i,j+1)]);
+                sub_c.extend_from_slice(&[v00, v10, v01]);
+                if i < p - j - 1 {
+                    let v11 = sub_idx[&(i+1, j+1)];
+                    sub_c.extend_from_slice(&[v10, v11, v01]);
+                }
+            }
+        }
+    }
+    (sub_v, sub_c, sub_f)
+}
+
+/// Write a high-order mesh + field to VTK using Bezier tessellation.
+///
+/// Subdivides each high-order element into linear sub-elements,
+/// interpolates the field using the element's Lagrange basis,
+/// and writes the resulting linear mesh + field as a standard `.vtu`.
+pub fn write_vtu_higher_order<const D: usize>(
+    path: impl AsRef<std::path::Path>,
+    mesh: &SimplexMesh<D>,
+    p: u8,
+    field_name: &str,
+    field_values: &[f64],
+) -> FemResult<()> {
+    let npe = mesh.elem_type.nodes_per_element();
+    if npe <= D + 1 {
+        let mut w = VtkWriter::new(mesh);
+        w.add_point_data(DataArray::scalars(field_name, field_values.to_vec()));
+        w.write_file(path)?;
+        return Ok(());
+    }
+
+    // Tessellate each element
+    let mut all_sub_v = Vec::new();
+    let mut all_sub_c = Vec::new();
+    let mut all_sub_f = Vec::new();
+    let mut v_offset = 0u32;
+
+    for e in 0..mesh.n_elems() as u32 {
+        let elem_conn = if let Some(offsets) = &mesh.elem_offsets {
+            &mesh.conn[offsets[e as usize]..offsets[e as usize + 1]]
+        } else {
+            &mesh.conn[e as usize * npe..(e as usize + 1) * npe]
+        };
+        let (sv, sc, sf) = tessellate_element::<D>(
+            p as usize, mesh.elem_type, elem_conn, &mesh.coords, field_values,
+        );
+        let n_sub_v = (sv.len() / D) as u32;
+        let remap: Vec<u32> = (0..n_sub_v).map(|i| i + v_offset).collect();
+        all_sub_v.extend_from_slice(&sv);
+        for &c in &sc { all_sub_c.push(remap[c as usize]); }
+        all_sub_f.extend_from_slice(&sf);
+        v_offset += n_sub_v;
+    }
+
+    let _n_total_v = all_sub_v.len() / D;
+    let n_total_e = all_sub_c.len() / 3;
+    let face_type = if D == 2 { ElementType::Line2 } else { ElementType::Tri3 };
+    let vis_mesh: SimplexMesh<D> = SimplexMesh {
+        coords: all_sub_v, conn: all_sub_c,
+        elem_tags: vec![1i32; n_total_e],
+        elem_type: ElementType::Tri3,
+        face_conn: vec![], face_tags: vec![], face_type,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    };
+
+    let mut w = VtkWriter::new(&vis_mesh);
+    w.add_point_data(DataArray::scalars(field_name, all_sub_f));
+    w.write_file(path)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

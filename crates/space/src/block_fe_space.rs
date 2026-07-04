@@ -89,6 +89,7 @@ impl<M: MeshTopology + 'static> BlockFESpace<M> {
     }
 
     /// Interpolate a vector of functions (one per component) into a flat DOF vector.
+    #[allow(clippy::type_complexity)]
     pub fn interpolate(&self, fns: &[&dyn Fn(&[f64]) -> f64]) -> Vec<f64> {
         assert_eq!(fns.len(), self.n_spaces());
         let mut result = vec![0.0; self.n_dofs()];

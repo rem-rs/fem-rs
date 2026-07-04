@@ -1,3 +1,4 @@
+#![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 //! Maxwell helpers aligned with MFEM-style **examples** in this workspace (curl-curl + mass,
 //! boundary-driven H(curl), and first-order E-B time stepping).
 //!

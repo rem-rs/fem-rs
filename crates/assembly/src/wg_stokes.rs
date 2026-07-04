@@ -10,13 +10,12 @@
 
 use std::collections::HashMap;
 use nalgebra::DMatrix;
-use fem_core::types::DofId;
 use fem_element::{
-    ReferenceElement, lagrange::{TriPk, TetPk, SegPk},
+    ReferenceElement, lagrange::{TriPk, TetPk},
 };
 use fem_element::quadrature::{tri_rule, tet_rule};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{element_type::ElementType, topology::MeshTopology};
+use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
 // ─── Local helpers ──────────────────────────────────────────────────────────
@@ -99,7 +98,7 @@ fn weak_gradient_matrix<M: MeshTopology>(
     let mut G = DMatrix::zeros(n_v, n_s);
     let mut Ms = DMatrix::zeros(n_s, n_s);
     let mut pv = vec![0.0; n_v];
-    let mut gv = vec![0.0; n_v * dim];
+    let _gv = vec![0.0; n_v * dim];
     let mut ps = vec![0.0; n_ss];
     let mut gsp = vec![0.0; n_ss * dim];
 
@@ -135,7 +134,7 @@ fn weak_gradient_matrix<M: MeshTopology>(
 }
 
 // ─── Face stabilizer (same as WG Poisson) ──────────────────────────────────
-
+#[allow(clippy::too_many_arguments)]
 fn add_face_penalty<M: MeshTopology>(
     coo: &mut CooMatrix<f64>, mesh: &M,
     vel_space: &dyn FESpace<Mesh=M>,
@@ -175,8 +174,8 @@ fn add_face_penalty<M: MeshTopology>(
                 for i in 0..ne { for j in 0..ne {
                     let vi = alpha * w * pl[i] * pl[j];
                     if vi.abs() > 1e-30 {
-                        let row = (comp * ne + i) + dofs[0] as usize;
-                        let col = (comp * ne + j) + dofs[0] as usize;
+                        let row = (comp * ne + i) + dofs[0];
+                        let col = (comp * ne + j) + dofs[0];
                         coo.add(row, col, vi);
                     }
                 }}
@@ -236,7 +235,7 @@ where
         let A_elem = &G * X; // n_v × n_v
 
         let v_dofs: Vec<usize> = vel_space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let p_dofs: Vec<usize> = pres_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let _p_dofs: Vec<usize> = pres_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let n_v_local = v_dofs.len();
 
         // A block: velocity stiffness

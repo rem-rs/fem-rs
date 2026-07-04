@@ -8,7 +8,7 @@
 //! - Boundary face emitter
 //! - VTK output for ParaView
 
-use fem_core::{ElemId, FaceId, NodeId};
+use fem_core::{ElemId, FaceId};
 use crate::SimplexMesh;
 
 /// A single particle: position, owning element, and scalar data.

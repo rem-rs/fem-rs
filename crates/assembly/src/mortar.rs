@@ -139,27 +139,27 @@ pub fn build_mortar_system(
     let mut rhs = vec![0.0; n_total];
 
     for i in 0..n_a {
-        let s = k_a.row_ptr[i] as usize;
-        let e = k_a.row_ptr[i + 1] as usize;
+        let s = k_a.row_ptr[i];
+        let e = k_a.row_ptr[i + 1];
         for nz in s..e { coo.add(i, k_a.col_idx[nz] as usize, k_a.values[nz]); }
         rhs[i] = f_a[i];
     }
     for i in 0..n_b {
-        let s = k_b.row_ptr[i] as usize;
-        let e = k_b.row_ptr[i + 1] as usize;
+        let s = k_b.row_ptr[i];
+        let e = k_b.row_ptr[i + 1];
         for nz in s..e { coo.add(n_a + i, n_a + k_b.col_idx[nz] as usize, k_b.values[nz]); }
         rhs[n_a + i] = f_b[i];
     }
 
     for i in 0..n_m {
-        let (s, e) = (b_a.row_ptr[i] as usize, b_a.row_ptr[i + 1] as usize);
+        let (s, e) = (b_a.row_ptr[i], b_a.row_ptr[i + 1]);
         for nz in s..e {
             let j = b_a.col_idx[nz] as usize;
             let v = b_a.values[nz];
             coo.add(n_a + n_b + i, j, v);
             coo.add(j, n_a + n_b + i, v);
         }
-        let (s, e) = (b_b.row_ptr[i] as usize, b_b.row_ptr[i + 1] as usize);
+        let (s, e) = (b_b.row_ptr[i], b_b.row_ptr[i + 1]);
         for nz in s..e {
             let j = b_b.col_idx[nz] as usize;
             let v = b_b.values[nz];

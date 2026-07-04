@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 //! # fem-parallel
 //!
 //! MPI-parallel infrastructure: abstract backend, distributed mesh primitives,
@@ -125,6 +127,7 @@ pub mod par_mixed_assembler;
 pub mod par_ras;
 pub mod par_simplex;
 pub mod par_solver;
+pub mod par_direct;
 pub mod par_space;
 pub mod par_vector;
 pub mod par_vector_assembler;
@@ -138,6 +141,7 @@ pub mod par_mesh_builder;
 mod mpi_test_env;
 #[cfg(feature = "hdf5")]
 pub mod par_hdf5;
+pub mod pmesh;
 #[cfg(feature = "hdf5")]
 pub mod checkpoint;
 
@@ -170,5 +174,7 @@ pub use shared_entities::{SharedEntities, SharedEntity};
 
 #[cfg(feature = "hdf5")]
 pub use par_hdf5::{par_write_mesh_and_fields, ParHdf5Options, ParallelWriteMode};
+// .pmesh format is independent of HDF5
+pub use pmesh::{write_pmesh, read_pmesh};
 #[cfg(feature = "hdf5")]
 pub use checkpoint::{write_checkpoint, read_checkpoint, CheckpointData};

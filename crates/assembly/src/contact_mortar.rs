@@ -88,8 +88,8 @@ impl<'a, M1: MeshTopology, M2: MeshTopology> MortarContact2D<'a, M1, M2> {
         let n_lambda = lambda_nodes.len();
 
         // Build Mortar matrices B_A and B_B
-        let mut coo_a = CooMatrix::<f64>::new(n_lambda, mesh_a.n_nodes() as usize);
-        let mut coo_b = CooMatrix::<f64>::new(n_lambda, mesh_b.n_nodes() as usize);
+        let mut coo_a = CooMatrix::<f64>::new(n_lambda, mesh_a.n_nodes());
+        let mut coo_b = CooMatrix::<f64>::new(n_lambda, mesh_b.n_nodes());
 
         let (gl_pts, gl_wts) = gauss_legendre(quad_order);
 
@@ -124,8 +124,8 @@ impl<'a, M1: MeshTopology, M2: MeshTopology> MortarContact2D<'a, M1, M2> {
                 let eta = eta.clamp(0.0, 1.0);
 
                 // Master point
-                let mx = (1.0 - eta) * q0[0] + eta * q1[0];
-                let my = (1.0 - eta) * q0[1] + eta * q1[1];
+                let _mx = (1.0 - eta) * q0[0] + eta * q1[0];
+                let _my = (1.0 - eta) * q0[1] + eta * q1[1];
 
                 // Segment length at integration point (slave segment)
                 let seg_len = ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2)).sqrt();
@@ -232,6 +232,7 @@ impl<'a, M1: MeshTopology, M2: MeshTopology> MortarContact2D<'a, M1, M2> {
 /// λ^{k+1} = max(0, λ^k + ρ · B · u^{k+1})
 /// ```
 /// where K_tilde = [K_A 0; 0 K_B] is the block-diagonal stiffness.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn solve_mortar_uzawa(
     k_a: &CsrMatrix<f64>,
     k_b: &CsrMatrix<f64>,
@@ -256,7 +257,7 @@ pub fn solve_mortar_uzawa(
 
     let cfg = SolverConfig { rtol: 1e-8, max_iter: 5000, ..Default::default() };
 
-    for iter in 0..max_iter {
+    for _iter in 0..max_iter {
         // u^{k+1} = K^{-1} (f - B^T · λ^k)
         // f_tilde_a = f_a - B_A^T · lambda
         let mut rhs_a = f_a.to_vec();
@@ -405,7 +406,7 @@ pub fn steel_on_steel_benchmark(
     let contact = MortarContact2D::new(&mesh_a, &mesh_b, &slave_edges, &master_edges, 4)?;
     let (_k_saddle, _rhs) = contact.assemble_saddle(&k_a, &k_b, &f_a, &f_b);
 
-    let (u_a, u_b, lambda) = solve_mortar_uzawa(
+    let (u_a, u_b, _lambda) = solve_mortar_uzawa(
         &k_a, &k_b, &f_a, &f_b,
         &contact.b_a, &contact.b_b, contact.n_lambda,
         1e3, 500, 1e-8,

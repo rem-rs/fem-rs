@@ -129,7 +129,7 @@ fn mooney_rivlin_pk1_tangent(f: &DMatrix<f64>, c10: f64, c01: f64, K: f64) -> (D
     // Numerical tangent via central differences
     let ct = numerical_tangent(f, &|ft| {
         let j = ft.determinant();
-        let i = ft.transpose();
+        let _i = ft.transpose();
         let ci = ft.transpose() * ft;
         let i1t = ci.trace();
         let ci_inv = ft.clone().try_inverse().map(|mi| { let mt = mi.transpose(); mi * mt }).unwrap_or_else(|| DMatrix::identity(dim, dim));
@@ -149,7 +149,7 @@ fn mooney_rivlin_pk1_tangent(f: &DMatrix<f64>, c10: f64, c01: f64, K: f64) -> (D
 fn ogden_pk1_tangent(f: &DMatrix<f64>, params: &[(f64, f64)], K: f64) -> (DMatrix<f64>, DMatrix<f64>) {
     let dim = f.nrows();
     let jac = f.determinant();
-    let inv_f_t = f.clone().try_inverse().map(|m| m.transpose()).unwrap_or_else(|| DMatrix::identity(dim, dim));
+    let _inv_f_t = f.clone().try_inverse().map(|m| m.transpose()).unwrap_or_else(|| DMatrix::identity(dim, dim));
 
     // Principal stretches via SVD of F
     let svd = SVD::new(f.clone(), true, true);

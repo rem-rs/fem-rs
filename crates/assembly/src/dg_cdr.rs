@@ -64,8 +64,8 @@ impl DgCdrSystem {
         let matrices = [&k_diff, &k_conv, &k_mass, &k_sip, &k_adv_face];
         for mat in &matrices {
             for i in 0..n_dofs {
-                let start = mat.row_ptr[i] as usize;
-                let end = mat.row_ptr[i + 1] as usize;
+                let start = mat.row_ptr[i];
+                let end = mat.row_ptr[i + 1];
                 for p in start..end {
                     let j = mat.col_idx[p] as usize;
                     let v = mat.values[p];

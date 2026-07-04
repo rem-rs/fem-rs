@@ -81,6 +81,7 @@ pub enum DiscreteOpError {
 
 /// Local RT2 Vandermonde and P2-sampled divergences for the RT2→P2 reconstruction on an
 /// affine triangle (`dmat[i,k] = DOF_i^{RT2}(Φ_k^{ref})`, `ymat[p,k] = div(Φ_k)(x_p)/det_j`).
+#[allow(clippy::too_many_arguments)]
 fn rt2_triangle_dmat_ymat_div_p2<M: MeshTopology>(
     mesh: &M,
     nodes: &[u32],
@@ -355,8 +356,8 @@ impl DiscreteLinearOperator {
             p2_elem.eval_grad_basis(&[t, 0.0], &mut p2_grads);
             for j in 0..n_p2_local {
                 let vx = p2_grads[j * dim];
-                g_edge[0 * n_p2_local + j] += w * vx;
-                g_edge[1 * n_p2_local + j] += w * vx * t;
+                g_edge[j] += w * vx;
+                g_edge[n_p2_local + j] += w * vx * t;
             }
         }
         // Edge e₁: hypotenuse, param (1−t, t), tangential = −v_x+v_y
@@ -414,8 +415,8 @@ impl DiscreteLinearOperator {
                     // J^{-T} ∇_ref φ_j
                     let phys_x = jit00 * gx + jit01 * gy;
                     let phys_y = jit10 * gx + jit11 * gy;
-                    g_int[0 * n_p2_local + j] += w * phys_x; // DOF 6
-                    g_int[1 * n_p2_local + j] += w * phys_y; // DOF 7
+                    g_int[j] += w * phys_x; // DOF 6
+                    g_int[n_p2_local + j] += w * phys_y; // DOF 7
                 }
             }
             // Scale by |det_J|
@@ -508,7 +509,7 @@ impl DiscreteLinearOperator {
             o => return Err(DiscreteOpError::UnsupportedHCurlOrder { op: "curl_2d", order: o }),
         }
         match l2_order {
-            0 | 1 | 2 => {}
+            0..=2 => {}
             o => return Err(DiscreteOpError::UnsupportedL2Order { op: "curl_2d", order: o }),
         }
         // ND1 -> P0 and ND2 -> P1/P2 are the supported pairs.
@@ -963,11 +964,11 @@ impl DiscreteLinearOperator {
         let l2_order   = l2_space.order();
 
         match hdiv_order {
-            0 | 1 | 2 => {}
+            0..=2 => {}
             o => return Err(DiscreteOpError::UnsupportedHDivOrder { op: "divergence", order: o }),
         }
         match l2_order {
-            0 | 1 | 2 => {}
+            0..=2 => {}
             o => return Err(DiscreteOpError::UnsupportedL2Order { op: "divergence", order: o }),
         }
         // RT0→P0, RT1→P1/P2, RT2→P2 (2D).
@@ -1438,7 +1439,7 @@ impl DiscreteLinearOperator {
             let jit = transform.jacobian_inv_t();
 
             let (dmat, ymat) =
-                rt2_triangle_dmat_ymat_div_p2(mesh, nodes, j00, j01, j10, j11, det_j, &jit, &bop, &iop);
+                rt2_triangle_dmat_ymat_div_p2(mesh, nodes, j00, j01, j10, j11, det_j, jit, &bop, &iop);
 
             let mut dt = vec![0.0_f64; n_rt2 * n_rt2];
             for i in 0..n_rt2 {

@@ -94,7 +94,7 @@ pub fn gauss_lobatto_01(n: usize) -> (Vec<f64>, Vec<f64>) {
 /// exact for polynomials up to degree `2n − 3`.
 pub fn seg_lobatto_rule(order: u8) -> QuadratureRule {
     // n points integrates degree 2n-3 exactly; need 2n-3 >= order => n >= (order+3)/2
-    let n = ((order as usize + 4) / 2).max(2).min(5);
+    let n = ((order as usize + 4) / 2).clamp(2, 5);
     let (pts, wts) = gauss_lobatto_01(n);
     QuadratureRule {
         points: pts.into_iter().map(|x| vec![x]).collect(),
@@ -107,7 +107,7 @@ pub fn seg_lobatto_rule(order: u8) -> QuadratureRule {
 /// Uses `n×n` Gauss-Lobatto points; exact for polynomials of degree ≤ `2n−3`
 /// in each variable.  Points include all edges and corners of the reference quad.
 pub fn quad_lobatto_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 4) / 2).max(2).min(5);
+    let n = ((order as usize + 4) / 2).clamp(2, 5);
     let (xs, ws) = gauss_lobatto_1d(n);
     let mut pts = Vec::with_capacity(n * n);
     let mut wts = Vec::with_capacity(n * n);
@@ -125,7 +125,7 @@ pub fn quad_lobatto_rule(order: u8) -> QuadratureRule {
 /// Uses `n×n×n` Gauss-Lobatto points; exact for polynomials of degree ≤ `2n−3`
 /// in each variable.
 pub fn hex_lobatto_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 4) / 2).max(2).min(5);
+    let n = ((order as usize + 4) / 2).clamp(2, 5);
     let (xs, ws) = gauss_lobatto_1d(n);
     let mut pts = Vec::with_capacity(n * n * n);
     let mut wts = Vec::with_capacity(n * n * n);
@@ -211,7 +211,7 @@ pub fn gauss_legendre_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
     }
 
     // Sort by point location for consistency
-    let mut pairs: Vec<(f64, f64)> = pts.into_iter().zip(wts.into_iter()).collect();
+    let mut pairs: Vec<(f64, f64)> = pts.into_iter().zip(wts).collect();
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     let (pts_sorted, wts_sorted): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
 
@@ -328,7 +328,7 @@ pub fn gauss_lobatto_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
     }
 
     // Sort by point location
-    let mut pairs: Vec<(f64, f64)> = pts.into_iter().zip(wts.into_iter()).collect();
+    let mut pairs: Vec<(f64, f64)> = pts.into_iter().zip(wts).collect();
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     let (pts_sorted, wts_sorted): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
 
@@ -446,7 +446,7 @@ pub fn hex_lobatto_rule_arbitrary(order: u8) -> QuadratureRule {
 /// Uses `n` Gauss-Legendre points; exact for polynomials up to degree `2n-1`.
 /// Weights sum to 1 (length of the reference segment).
 pub fn seg_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 2) / 2).max(1).min(4);
+    let n = ((order as usize + 2) / 2).clamp(1, 4);
     let (pts, wts) = gauss_legendre_01(n);
     QuadratureRule {
         points:  pts.into_iter().map(|x| vec![x]).collect(),
@@ -503,16 +503,16 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
         }
     } else if order <= 6 {
         // 12-point Dunavant rule (exact for degree 6)
-        let a = 0.063_089_014_491_502_228;
+        let a = 0.063_089_014_491_502_23;
         let a1 = 1.0 - 2.0 * a;
         let b = 0.249_286_745_170_910_42;
         let b1 = 1.0 - 2.0 * b;
         let c = 0.053_145_049_844_816_947;
-        let d = 0.310_352_451_033_784_41;
+        let d = 0.310_352_451_033_784_4;
         let e = 1.0 - c - d;
-        let wa = 0.050_844_906_370_206_817 / 2.0;
+        let wa = 0.050_844_906_370_206_82 / 2.0;
         let wb = 0.116_786_275_726_379_37 / 2.0;
-        let wc = 0.082_851_075_618_373_575 / 2.0;
+        let wc = 0.082_851_075_618_373_57 / 2.0;
         QuadratureRule {
             points: vec![
                 // Type 0: permutations of (a, a, 1-2a)
@@ -534,7 +534,7 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
         witherden_tri_15()
     } else {
         // Use generalized Grundmann-Moller for higher orders
-        let s = ((order as u32) + 1) / 2;
+        let s = (order as u32).div_ceil(2);
         grundmann_moller_simplex(2, s)
     }
 }
@@ -578,7 +578,7 @@ pub fn tet_rule(order: u8) -> QuadratureRule {
         grundmann_moller_tet(3)
     } else {
         // Use generalized Grundmann-Moller for higher orders
-        let s = ((order as u32) + 1) / 2;
+        let s = (order as u32).div_ceil(2);
         grundmann_moller_simplex(3, s)
     }
 }
@@ -681,7 +681,7 @@ fn fact_f64(n: u32) -> f64 {
 /// Uses `n×n` Gauss points; exact for polynomials of degree ≤ `2n-1` in each variable.
 /// Weights sum to 4 (area of reference quad).
 pub fn quad_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 2) / 2).max(1).min(4);
+    let n = ((order as usize + 2) / 2).clamp(1, 4);
     let (xs, ws) = gauss_legendre_1d(n);
     let mut pts = Vec::with_capacity(n * n);
     let mut wts = Vec::with_capacity(n * n);
@@ -962,11 +962,11 @@ pub fn tri_rule_named(min_degree: u8) -> QuadratureRule {
 ///
 /// Structure: 2 × S21 (3 pts each) + 1 × S111 (6 pts) = 12 pts.
 fn dunavant_tri_12() -> QuadratureRule {
-    let (a1, w1) = (0.063_089_014_491_502_228_f64, 0.025_422_453_185_103_408_f64);
+    let (a1, w1) = (0.063_089_014_491_502_23_f64, 0.025_422_453_185_103_41_f64);
     let (a2, w2) = (0.249_286_745_170_910_42_f64, 0.058_393_137_863_189_685_f64);
     let (a3, b3, w3) = (
         0.053_145_049_844_816_947_f64,
-        0.310_352_451_033_784_41_f64,
+        0.310_352_451_033_784_4_f64,
         0.041_425_537_809_186_787_f64,
     );
 
@@ -1006,13 +1006,13 @@ fn witherden_tri_15() -> QuadratureRule {
     // S21(a): 3 symmetric points (a,a),(1-2a,a),(a,1-2a) in Cartesian
     // S111(a,b): 6 asymmetric points, all permutations of (a,b,1-a-b)
 
-    let (a1, w1) = (3.373_064_855_458_784_983_00e-2_f64, 8.272_525_055_396_065_529_76e-3_f64);
-    let (a2, w2) = (2.415_773_825_954_035_669_56e-1_f64, 6.397_208_561_507_779_223_11e-2_f64);
-    let (a3, w3) = (4.743_096_925_047_183_276_55e-1_f64, 3.854_332_309_299_303_427_34e-2_f64);
+    let (a1, w1) = (3.373_064_855_458_785e-2_f64, 8.272_525_055_396_066e-3_f64);
+    let (a2, w2) = (2.415_773_825_954_035_7e-1_f64, 6.397_208_561_507_779e-2_f64);
+    let (a3, w3) = (4.743_096_925_047_183e-1_f64, 3.854_332_309_299_303_4e-2_f64);
     let (a4, b4, w4) = (
-        7.542_800_405_500_531_546_47e-1_f64,
-        1.986_833_147_973_516_844_33e-1_f64,
-        2.793_936_645_159_988_962_92e-2_f64,
+        7.542_800_405_500_532e-1_f64,
+        1.986_833_147_973_516_8e-1_f64,
+        2.793_936_645_159_989e-2_f64,
     );
 
     macro_rules! s21 {
@@ -1053,15 +1053,15 @@ fn dunavant_tri_19() -> QuadratureRule {
     // S21(a): 3 symmetric pts (a, a, 1-2a) in barycentric → Cartesian (a,a),(1-2a,a),(a,1-2a)
     // S111(a,b): 6 asymmetric pts, all permutations of (a, b, 1-a-b)
 
-    let wc = 4.856_789_814_139_941_818_82e-2_f64; // centroid
-    let (a1, w1) = (4.370_895_914_929_366_909_97e-1_f64, 3.891_377_050_238_713_913_85e-2_f64);
-    let (a2, w2) = (1.882_035_356_190_328_023_73e-1_f64, 3.982_386_946_360_512_436_36e-2_f64);
-    let (a3, w3) = (4.896_825_191_987_376_202_36e-1_f64, 1.566_735_011_356_953_574_67e-2_f64);
-    let (a4, w4) = (4.472_951_339_445_274_676_62e-2_f64, 1.278_883_782_934_901_562_62e-2_f64);
+    let wc = 4.856_789_814_139_942e-2_f64; // centroid
+    let (a1, w1) = (4.370_895_914_929_367e-1_f64, 3.891_377_050_238_714e-2_f64);
+    let (a2, w2) = (1.882_035_356_190_328e-1_f64, 3.982_386_946_360_512_4e-2_f64);
+    let (a3, w3) = (4.896_825_191_987_376e-1_f64, 1.566_735_011_356_953_6e-2_f64);
+    let (a4, w4) = (4.472_951_339_445_275e-2_f64, 1.278_883_782_934_901_6e-2_f64);
     let (a5, b5, w5) = (
-        7.411_985_987_844_980_083_85e-1_f64,
-        2.219_629_891_607_657_334_87e-1_f64,
-        2.164_176_968_864_468_808_55e-2_f64,
+        7.411_985_987_844_98e-1_f64,
+        2.219_629_891_607_657_3e-1_f64,
+        2.164_176_968_864_468_8e-2_f64,
     );
 
     macro_rules! s21 {
@@ -1132,7 +1132,7 @@ pub fn prism_rule(order: u8) -> QuadratureRule {
 /// Weights sum to 1/3.
 pub fn pyramid_rule(order: u8) -> QuadratureRule {
     // Minimum n=2 to integrate the quadratic Jacobian (1-t)² correctly.
-    let n = ((order as usize + 2) / 2).max(2).min(4);
+    let n = ((order as usize + 2) / 2).clamp(2, 4);
     let (xs, ws) = gauss_legendre_1d(n);
     let mut pts = Vec::with_capacity(n * n * n);
     let mut wts = Vec::with_capacity(n * n * n);

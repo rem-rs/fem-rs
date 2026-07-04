@@ -89,13 +89,13 @@ pub fn read_obj<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
         let line = line?;
         let t = line.trim();
         if t.starts_with("v ") || t.starts_with("v\t") {
-            let mut parts = t[1..].trim().split_whitespace();
+            let mut parts = t[1..].split_whitespace();
             let x = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
             let y = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
             let z = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
             vertices.push([x, y, z]);
         } else if t.starts_with("f ") || t.starts_with("f\t") {
-            let parts: Vec<&str> = t[1..].trim().split_whitespace().collect();
+            let parts: Vec<&str> = t[1..].split_whitespace().collect();
             let idxs: Vec<NodeId> = parts.iter().map(|p| {
                 let v = p.split('/').next().unwrap_or("0");
                 (v.parse::<i32>().unwrap_or(0).unsigned_abs() - 1) as NodeId

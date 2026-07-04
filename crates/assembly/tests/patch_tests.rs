@@ -11,12 +11,6 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator, ElasticityIntegrator},
     DiscreteLinearOperator,
 };
-use fem_element::{
-    ReferenceElement, VectorReferenceElement,
-    lagrange::TriP1,
-    raviart_thomas::{TriRT0, TriRT1, TetRT0, TetRT1},
-    nedelec::{TriND1, TriND2, TetND1, TetND2},
-};
 use fem_linalg::CsrMatrix;
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
 use fem_space::{
@@ -238,6 +232,7 @@ fn grad_op(mesh: SimplexMesh<2>, mesh2: SimplexMesh<2>, h1o: u8, hco: u8, pot: f
     assert!(max_abs(&vec_diff(&gu, gi.as_slice())) < tol, "Grad P{h1o}->ND{hco}");
 }
 
+#[allow(dead_code)]
 fn grad_op_3d(mesh: SimplexMesh<3>, mesh2: SimplexMesh<3>, h1o: u8, hco: u8, pot: fn(&[f64]) -> f64, grad: fn(&[f64]) -> Vec<f64>, tol: f64) {
     let h1 = H1Space::new(mesh, h1o);
     let hcurl = HCurlSpace::new(mesh2, hco);

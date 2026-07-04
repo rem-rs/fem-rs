@@ -272,7 +272,7 @@ impl VectorOpsPipeline {
             ],
         });
 
-        let workgroups = (x.len() + 255) / 256;
+        let workgroups = x.len().div_ceil(256);
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("axpy_pass"),
             timestamp_writes: None,
@@ -292,7 +292,7 @@ impl VectorOpsPipeline {
         result_buf: &wgpu::Buffer,
     ) {
         assert_eq!(a.len(), b.len());
-        let n_workgroups = (a.len() + 255u32) / 256u32;
+        let n_workgroups = a.len().div_ceil(256u32);
         let params = DotParams { len: a.len(), _pad0: 0, _pad1: 0, _pad2: 0 };
         ctx.queue.write_buffer(&self.dot_params_buffer, 0, bytemuck::bytes_of(&params));
         let pipeline = if TypeId::of::<T>() == TypeId::of::<f64>() {
@@ -334,7 +334,7 @@ impl VectorOpsPipeline {
         b: &GpuVector<T>,
         result_buf: &DeviceBuffer,
     ) -> f64 {
-        let partial_count = (a.len() + 255) / 256;
+        let partial_count = a.len().div_ceil(256);
         let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         self.encode_dot(ctx, &mut enc, a, b, result_buf.buffer());
         result_buf.encode_copy_to_staging(&mut enc);
@@ -361,7 +361,7 @@ impl VectorOpsPipeline {
     ) {
         assert_eq!(others.len(), result_bufs.len());
         assert_eq!(others.len(), out.len());
-        let partial_count = (a.len() + 255) / 256;
+        let partial_count = a.len().div_ceil(256);
         let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         for (other, result_buf) in others.iter().zip(result_bufs.iter()) {
             assert_eq!(a.len(), other.len());
@@ -385,7 +385,7 @@ impl VectorOpsPipeline {
 
     /// Compute ||v||₂ by dispatching dot(v,v) and reading back the partial reduction.
     pub fn compute_norm2<T: Scalar>(&self, ctx: &GpuContext, v: &GpuVector<T>) -> f64 {
-        let n_wg = (v.len() + 255) / 256;
+        let n_wg = v.len().div_ceil(256);
         let required_size = n_wg as u64 * std::mem::size_of::<T>() as u64;
         let mut scratch = self.dot_reduction_scratch.lock().unwrap();
         let needs_resize = scratch

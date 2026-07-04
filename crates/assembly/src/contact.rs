@@ -149,8 +149,8 @@ pub fn assemble_contact_2d<S, M>(
 where
     M: MeshTopology,
 {
-    assert_eq!(mesh.dim() as usize, 2, "assemble_contact_2d requires dim=2");
-    let n_nodes = mesh.n_nodes() as usize;
+    assert_eq!(mesh.dim(), 2, "assemble_contact_2d requires dim=2");
+    let n_nodes = mesh.n_nodes();
     let mut rhs = vec![0.0; n_nodes];
     let mut coo = CooMatrix::<f64>::new(n_nodes, n_nodes);
     let pen = cfg.penalty_normal;
@@ -197,11 +197,7 @@ where
             for ln in 0..2 {
                 rhs[[n0, n1][ln]] += force * phi[ln];
                 for lm in 0..2 {
-                    let k = if lagrange_multipliers.is_empty() {
-                        -pen * npd
-                    } else {
-                        -pen * npd
-                    };
+                    let k = -pen * npd;
                     coo.add([n0, n1][ln], [n0, n1][lm], k * phi[ln] * phi[lm] * w_phys);
                 }
             }
@@ -219,8 +215,8 @@ pub fn assemble_contact_2d_vector<M: MeshTopology>(
     u: &[f64],
     lam_n: &[f64],
 ) -> (Vec<f64>, CsrMatrix<f64>) {
-    assert_eq!(mesh.dim() as usize, 2, "assemble_contact_2d_vector requires dim=2");
-    let n_nodes = mesh.n_nodes() as usize;
+    assert_eq!(mesh.dim(), 2, "assemble_contact_2d_vector requires dim=2");
+    let n_nodes = mesh.n_nodes();
     let n_dofs = n_nodes * 2;
     let mut rhs = vec![0.0; n_dofs];
     let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
@@ -351,8 +347,8 @@ pub fn assemble_contact_3d<M: MeshTopology>(
     u: &[f64],
     lagrange_multipliers: &[f64],
 ) -> (Vec<f64>, CsrMatrix<f64>) {
-    assert_eq!(mesh.dim() as usize, 3, "assemble_contact_3d requires dim=3");
-    let n_nodes = mesh.n_nodes() as usize;
+    assert_eq!(mesh.dim(), 3, "assemble_contact_3d requires dim=3");
+    let n_nodes = mesh.n_nodes();
     let mut rhs = vec![0.0; n_nodes];
     let mut coo = CooMatrix::<f64>::new(n_nodes, n_nodes);
     let pen = cfg.penalty_normal;
@@ -422,8 +418,8 @@ pub fn assemble_contact_3d<M: MeshTopology>(
 pub fn assemble_contact_3d_vector<M: MeshTopology>(
     mesh: &M, cfg: &ContactConfig, u: &[f64], lagrange_multipliers: &[f64],
 ) -> (Vec<f64>, CsrMatrix<f64>) {
-    assert_eq!(mesh.dim() as usize, 3, "requires dim=3");
-    let n_nodes = mesh.n_nodes() as usize; let n_dofs = n_nodes * 3;
+    assert_eq!(mesh.dim(), 3, "requires dim=3");
+    let n_nodes = mesh.n_nodes(); let n_dofs = n_nodes * 3;
     let mut rhs = vec![0.0; n_dofs]; let mut coo = CooMatrix::new(n_dofs, n_dofs);
     let pen_n = cfg.penalty_normal;
     let (pen_t, mu) = match &cfg.friction {
@@ -496,9 +492,9 @@ pub fn solve_contact_newton<M: MeshTopology>(
     let n = stiffness.nrows;
     let mut u = vec![0.0; n];
     let dim = mesh.dim() as usize;
-    let is_vector = n == mesh.n_nodes() as usize * dim && dim == 2;
-    let is_3d_scalar = dim == 3 && n == mesh.n_nodes() as usize;
-    let is_3d_vector = dim == 3 && n == mesh.n_nodes() as usize * 3;
+    let is_vector = n == mesh.n_nodes() * dim && dim == 2;
+    let is_3d_scalar = dim == 3 && n == mesh.n_nodes();
+    let is_3d_vector = dim == 3 && n == mesh.n_nodes() * 3;
 
     let al_iters = match &cfg.contact_type {
         ContactType::AugmentedLagrangian { max_al_iter, .. } => *max_al_iter,
@@ -510,7 +506,7 @@ pub fn solve_contact_newton<M: MeshTopology>(
     };
 
     // AL multipliers
-    let n_faces = mesh.n_boundary_faces() as usize;
+    let n_faces = mesh.n_boundary_faces();
     let qp_per_face = 2;
     let mut lam_n = vec![0.0; n_faces.max(1) * qp_per_face];
 
@@ -572,13 +568,13 @@ pub fn solve_contact_newton<M: MeshTopology>(
         // Augmented Lagrangian multiplier update
         if matches!(cfg.contact_type, ContactType::AugmentedLagrangian { .. }) {
             let pen = cfg.penalty_normal;
-            for f in 0..mesh.n_boundary_faces() as usize {
+            for f in 0..mesh.n_boundary_faces() {
                 let fnodes = mesh.face_nodes(f as u32);
                 if fnodes.len() < 2 { continue; }
                 let p0 = mesh.node_coords(fnodes[0]);
                 let uh_avg = if is_vector { u[fnodes[0] as usize * 2] }
                              else { u[fnodes[0] as usize] };
-                let gap = (cfg.gap_function)(&p0);
+                let gap = (cfg.gap_function)(p0);
                 for q in 0..qp_per_face {
                     lam_n[f * qp_per_face + q] = (lam_n[f * qp_per_face + q] + pen * (uh_avg - gap)).max(0.0);
                 }
@@ -589,11 +585,11 @@ pub fn solve_contact_newton<M: MeshTopology>(
         if al_iter > 0 {
             let mut pmax = 0.0;
             let pen = cfg.penalty_normal;
-            for f in 0..mesh.n_boundary_faces() as usize {
+            for f in 0..mesh.n_boundary_faces() {
                 let fnodes = mesh.face_nodes(f as u32);
                 if fnodes.len() < 2 { continue; }
                 let p0 = mesh.node_coords(fnodes[0]);
-                let gap = (cfg.gap_function)(&p0);
+                let gap = (cfg.gap_function)(p0);
                 let uh_avg = if is_vector { u[fnodes[0] as usize * 2] } else { u[fnodes[0] as usize] };
                 let gp = (pen * (uh_avg - gap)).abs();
                 if gp > pmax { pmax = gp; }
@@ -627,10 +623,10 @@ mod tests {
     #[test]
     fn test_contact_assembles() {
         let (ref mesh, cfg) = setup_2d();
-        let u = vec![0.0; mesh.n_nodes() as usize];
+        let u = vec![0.0; mesh.n_nodes()];
         let (f, k) = assemble_contact_2d(mesh, mesh, &cfg, &u, &[]);
-        assert_eq!(f.len(), mesh.n_nodes() as usize);
-        assert_eq!(k.nrows, mesh.n_nodes() as usize);
+        assert_eq!(f.len(), mesh.n_nodes());
+        assert_eq!(k.nrows, mesh.n_nodes());
     }
 
     #[test]
@@ -640,7 +636,7 @@ mod tests {
             gap_function: |_: &[f64]| -1.0,
             ..setup_2d().1
         };
-        let u = vec![0.0; mesh.n_nodes() as usize];
+        let u = vec![0.0; mesh.n_nodes()];
         let (f, _) = assemble_contact_2d(&mesh, &mesh, &cfg, &u, &[]);
         let fnorm: f64 = f.iter().map(|v| v * v).sum::<f64>().sqrt();
         assert!(fnorm < 1e-30, "expected zero contact force: {fnorm:.3e}");
@@ -654,7 +650,7 @@ mod tests {
             gap_function: |_: &[f64]| 0.1,
             ..setup_2d().1
         };
-        let u = vec![0.0; mesh.n_nodes() as usize];
+        let u = vec![0.0; mesh.n_nodes()];
         let (f, _) = assemble_contact_2d(&mesh, &mesh, &cfg, &u, &[]);
         let fnorm: f64 = f.iter().map(|v| v * v).sum::<f64>().sqrt();
         assert!(fnorm > 0.0, "expected contact force: {fnorm:.3e}");
@@ -668,10 +664,10 @@ mod tests {
             gap_function: |_: &[f64]| -0.1,
             ..Default::default()
         };
-        let u = vec![0.0; mesh.n_nodes() as usize * 2];
+        let u = vec![0.0; mesh.n_nodes() * 2];
         let (f, k) = assemble_contact_2d_vector(&mesh, &cfg, &u, &[]);
-        assert_eq!(f.len(), mesh.n_nodes() as usize * 2);
-        assert_eq!(k.nrows, mesh.n_nodes() as usize * 2);
+        assert_eq!(f.len(), mesh.n_nodes() * 2);
+        assert_eq!(k.nrows, mesh.n_nodes() * 2);
     }
 
     #[test]
@@ -702,7 +698,7 @@ mod tests {
             gap_function: |_: &[f64]| 0.01,
             ..cfg
         };
-        let n = mesh.n_nodes() as usize;
+        let n = mesh.n_nodes();
         let u = vec![0.0; n];
         // With lagrange_multipliers = [], it falls back to penalty mode
         let (f_penalty, _k) = assemble_contact_2d(&mesh, &mesh, &cfg, &u, &[]);

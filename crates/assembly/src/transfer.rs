@@ -236,8 +236,8 @@ fn boundary_face_outward_normal_2d(mesh: &SimplexMesh<2>, face: u32) -> ([f64; 2
 }
 
 /// Compute net boundary flux \int_{dOmega} grad(u)·n ds for 2D H1 P1 field.
+///
 // ── Generic GetProlongation ──────────────────────────────────────────────────
-
 /// Build H1 prolongation matrix P where fine = P * coarse.
 ///
 /// Works for H1 spaces on SimplexMesh<2> (TriP1/TriP2) and SimplexMesh<3> (TetP1).
@@ -485,10 +485,7 @@ pub fn transfer_h1_p1_nonmatching_l2_projection(
 
     let mass = mass_coo.into_csr();
     let mut out = vec![0.0_f64; n_tgt];
-    let mut cfg = SolverConfig::default();
-    cfg.rtol = 1e-12;
-    cfg.atol = 1e-14;
-    cfg.max_iter = 5_000;
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-14, max_iter: 5_000, ..SolverConfig::default() };
     solve_cg(&mass, &rhs, &mut out, &cfg)
         .map_err(|e| TransferError::LinearSolveFailed(e.to_string()))?;
 
@@ -598,10 +595,7 @@ pub fn transfer_h1_p1_nonmatching_l2_projection_3d(
 
     let mass = mass_coo.into_csr();
     let mut out = vec![0.0_f64; n_tgt];
-    let mut cfg = SolverConfig::default();
-    cfg.rtol = 1e-12;
-    cfg.atol = 1e-14;
-    cfg.max_iter = 8_000;
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-14, max_iter: 8_000, ..SolverConfig::default() };
     solve_cg(&mass, &rhs, &mut out, &cfg)
         .map_err(|e| TransferError::LinearSolveFailed(e.to_string()))?;
 
@@ -853,11 +847,7 @@ pub fn build_prolongation_hcurl<M: MeshTopology>(
     // 1b. Build coarse face→DOF map (3-D only, k≥2)
     let mut coarse_face_dofs: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
     if dim == 3 && k >= 2 {
-        let local_faces: &[(usize, usize, usize)] = if cell_type == fem_mesh::element_type::ElementType::Tet4 {
-            &[(1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2)]
-        } else {
-            &[(1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2)]
-        };
+        let local_faces: &[(usize, usize, usize)] = &[(1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2)];
         for elem in 0..coarse.mesh().n_elements() as u32 {
             let nodes = coarse.mesh().element_nodes(elem);
             for &(li, lj, lk) in local_faces {
@@ -1588,7 +1578,7 @@ pub fn build_nc_prolongation_h1(
 ) -> CsrMatrix<f64> {
     // First compute full prolongation as vector
     let u_ones: Vec<f64> = (0..n_coarse).map(|i| i as f64).collect();
-    let u_full = apply_nc_prolongation_h1_full(&u_ones, coarse_mesh, fine_mesh, constraints);
+    let _u_full = apply_nc_prolongation_h1_full(&u_ones, coarse_mesh, fine_mesh, constraints);
 
     // Build matrix from the prolongation operator
     // For each fine DOF i, find which coarse DOFs contribute
@@ -1636,7 +1626,7 @@ pub fn apply_nc_prolongation_h1(
 ) -> Vec<f64> {
     let n_coarse = u_coarse.len();
     let mut u_fine = vec![0.0; n_fine];
-    for i in 0..n_coarse.min(n_fine) { u_fine[i] = u_coarse[i]; }
+    u_fine[..n_coarse.min(n_fine)].copy_from_slice(&u_coarse[..n_coarse.min(n_fine)]);
     for c in constraints {
         u_fine[c.constrained] = 0.5 * (u_coarse[c.parent_a] + u_coarse[c.parent_b]);
     }
@@ -1688,7 +1678,7 @@ pub fn apply_nc_restriction_h1(
     constraints: &[fem_mesh::HangingNodeConstraint],
 ) -> Vec<f64> {
     let mut u_coarse = vec![0.0; n_coarse];
-    for i in 0..n_coarse.min(u_fine.len()) { u_coarse[i] = u_fine[i]; }
+    u_coarse[..n_coarse.min(u_fine.len())].copy_from_slice(&u_fine[..n_coarse.min(u_fine.len())]);
     for c in constraints {
         let contrib = 0.5 * u_fine[c.constrained];
         u_coarse[c.parent_a] += contrib;

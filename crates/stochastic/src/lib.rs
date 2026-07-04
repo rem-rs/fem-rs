@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 //! # fem-stochastic
 //!
 //! Random field generation and Monte Carlo simulation for stochastic finite

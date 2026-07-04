@@ -10,7 +10,7 @@ pub fn solve_active_set_contact<M: MeshTopology>(
     gap_function: &dyn Fn(&[f64]) -> f64, max_iter: usize,
 ) -> Vec<f64> {
     let n = stiffness.nrows;
-    let n_nodes = mesh.n_nodes() as usize;
+    let n_nodes = mesh.n_nodes();
     let dim = mesh.dim() as usize;
     let mut u = vec![0.0; n];
     let mut active = vec![false; n_nodes];

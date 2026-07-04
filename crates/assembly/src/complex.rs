@@ -133,7 +133,7 @@ impl ComplexSystem {
         dofs:  &[usize],
         bc_re: &[f64],
         bc_im: &[f64],
-        rhs:   &mut Vec<f64>,
+        rhs: &mut [f64],
     ) {
         let n = self.n_dofs();
         // Eliminate each constrained DOF i in the real part (row/col i)
@@ -401,6 +401,7 @@ impl NativeComplexSystem {
     }
 
     /// Solve with initial guess (in-place update).
+    #[allow(clippy::too_many_arguments)]
     pub fn solve_with_guess(
         &self,
         b_re: &[f64],
@@ -423,8 +424,8 @@ impl NativeComplexSystem {
         dofs: &[usize],
         bc_re: &[f64],
         bc_im: &[f64],
-        rhs_re: &mut Vec<f64>,
-        rhs_im: &mut Vec<f64>,
+        rhs_re: &mut [f64],
+        rhs_im: &mut [f64],
     ) {
         for (k, &dof) in dofs.iter().enumerate() {
             let vr = if k < bc_re.len() { bc_re[k] } else { 0.0 };

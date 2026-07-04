@@ -161,7 +161,7 @@ fn quad_face_dof(m: &Mono, comp: usize, p: usize, q: usize) -> f64 {
     for (&u, &wu) in gx.iter().zip(gw.iter()) {
         for (&v, &wv) in gx.iter().zip(gw.iter()) {
             let mv = eval_mono(m, u, v, 0.0);
-            let tangent_comp = if comp == 0 { 1.0 } else { 1.0 };
+            let tangent_comp = 1.0;
             let dot = match m.comp {
                 0 if comp == 0 => tangent_comp,
                 1 if comp == 1 => tangent_comp,
@@ -263,17 +263,15 @@ fn build_pyramid_ndk(k: usize) -> (Vec<f64>, usize) {
         for deg in 0..=2 * k {
             for i in 0..=deg.min(k - 1).max(0) {
                 let j = deg - i;
-                if j <= k - 1 { qpairs.push((i, j)); }
+                if j < k { qpairs.push((i, j)); }
             }
         }
         // Use x-component rows, then y-component rows, cycling through qpairs as needed
-        let mut qi = 0;
-        for _ in 0..quad_total {
+        for qi in 0..quad_total {
             let comp = qi % 2;
             let (p, q) = qpairs[(qi / 2) % qpairs.len()];
             for j in 0..m { v[row][j] = quad_face_dof(&monos[j], comp, p, q); }
             row += 1;
-            qi += 1;
         }
 
         // -- Interior DOFs (k ≥ 3) --

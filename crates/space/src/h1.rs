@@ -43,7 +43,7 @@ impl<M: MeshTopology> H1Space<M> {
 
     /// Current per-element orders (None for uniform).
     pub fn elem_orders(&self) -> Option<&[u8]> {
-        self.elem_orders.as_ref().map(|v| v.as_slice())
+        self.elem_orders.as_deref()
     }
 
     /// Increase polynomial order of specified elements (p-refinement).
@@ -52,8 +52,7 @@ impl<M: MeshTopology> H1Space<M> {
     /// Requires `M: Clone` to move the mesh into the new space.
     pub fn refine_p(&self, elem_ids: &[ElemId], new_order: u8) -> (Self, Vec<PRefineConstraint>)
     where M: Clone {
-        let orders = self.elem_orders.as_ref()
-            .map(|v| v.clone())
+        let orders = self.elem_orders.clone()
             .unwrap_or_else(|| vec![self.order; self.mesh.n_elements()]);
         let (new_dm, constraints) = p_refine::refine_p(
             &self.dm, &self.mesh, &orders, elem_ids, new_order,
@@ -67,8 +66,7 @@ impl<M: MeshTopology> H1Space<M> {
     /// Decrease polynomial order of specified elements (p-derefinement).
     pub fn derefine_p(&self, elem_ids: &[ElemId], new_order: u8) -> (Self, Vec<PRefineConstraint>)
     where M: Clone {
-        let orders = self.elem_orders.as_ref()
-            .map(|v| v.clone())
+        let orders = self.elem_orders.clone()
             .unwrap_or_else(|| vec![self.order; self.mesh.n_elements()]);
         let (new_dm, constraints) = p_refine::derefine_p(
             &self.dm, &self.mesh, &orders, elem_ids, new_order,

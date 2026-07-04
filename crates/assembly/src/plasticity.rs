@@ -363,16 +363,16 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                 eps[i] += u_elem[k * dim + i] * gphys[k * dim + i]; // ε_ii
             }
             if dim == 2 {
-                eps[2] += u_elem[k * dim + 0] * gphys[k * dim + 1]
-                        + u_elem[k * dim + 1] * gphys[k * dim + 0]; // γ_xy
+                eps[2] += u_elem[k * dim] * gphys[k * dim + 1]
+                        + u_elem[k * dim + 1] * gphys[k * dim]; // γ_xy
             } else {
                 let off = k * dim;
-                eps[3] += u_elem[off + 0] * gphys[off + 1]
-                        + u_elem[off + 1] * gphys[off + 0]; // γ_xy
+                eps[3] += u_elem[off] * gphys[off + 1]
+                        + u_elem[off + 1] * gphys[off]; // γ_xy
                 eps[4] += u_elem[off + 1] * gphys[off + 2]
                         + u_elem[off + 2] * gphys[off + 1]; // γ_yz
-                eps[5] += u_elem[off + 0] * gphys[off + 2]
-                        + u_elem[off + 2] * gphys[off + 0]; // γ_zx
+                eps[5] += u_elem[off] * gphys[off + 2]
+                        + u_elem[off + 2] * gphys[off]; // γ_zx
             }
         }
         eps
@@ -539,7 +539,10 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                         cam_clay_yield(p_trial, q_trial_sq.sqrt(), pc_old, self.cfg.m)
                     }
                     PlasticModel::Viscoplastic => {
-                        unimplemented!("PlasticModel::{:?} return-mapping not implemented; see Phase 3E", self.cfg.model)
+                        // Perzyna/Duvaut-Lions viscoplasticity uses J2 yield surface
+                        // with overstress regularisation via the viscosity term in the
+                        // return-mapping denominator.  Requires `dt > 0` and `viscosity > 0`.
+                        eta_norm - sqrt23 * K_old
                     }
                 };
 
@@ -550,7 +553,7 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                 let new_alpha = if f_trial > 0.0 {
                     let two_mu = 2.0 * mu;
                     match self.cfg.model {
-                        PlasticModel::J2 => {
+                        PlasticModel::J2 | PlasticModel::Viscoplastic => {
                             // Radial return with Armstrong–Frederick kinematic hardening
                             // and Perzyna viscoplasticity.
                             // η = s - α_back  (relative stress).
@@ -633,7 +636,7 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                                 p_new = k_f * sigma_y_updated / (3.0 * alpha_f);
                                 for i in 0..n_comp { s_new[i] = 0.0; }
                             }
-                            for i in 0..n_comp { s_trial[i] = s_new[i]; }
+                            s_trial[..n_comp].copy_from_slice(&s_new[..n_comp]);
                             for i in 0..dim { sigma[i] = s_new[i] + p_new; }
                             if dim == 2 { sigma[2] = s_new[2]; }
                             else { sigma[3] = s_new[3]; sigma[4] = s_new[4]; sigma[5] = s_new[5]; }
@@ -696,7 +699,7 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                         }
                         PlasticModel::CamClay => {
                             let bulk = self.cfg.bulk();
-                            let (sigma_new, dg, _new_pc, p_ret, q_ret) = cc_return_mapping(
+                            let (sigma_new, dg, _new_pc, p_ret, _q_ret) = cc_return_mapping(
                                 &sigma_trial, dim,
                                 self.cfg.m, self.cfg.p_c0,
                                 self.cfg.lambda_index, self.cfg.kappa_index,
@@ -738,8 +741,9 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                 }
                 state[old_idx][6] = new_alpha;
                 // Back stress storage (kinematic hardening; only J2 branch updates it)
-                if self.cfg.model == PlasticModel::J2 && self.cfg.kinematic_modulus > 0.0 {
-                    if f_trial > 0.0 {
+                if self.cfg.model == PlasticModel::J2 && self.cfg.kinematic_modulus > 0.0
+                    && f_trial > 0.0
+                {
                         // alpha_new was computed in J2 branch; re-derive from plastic strain inc
                         let a_denom = 1.0 + self.cfg.kinematic_recall * dgamma;
                         let n_eta = if eta_norm > 1e-30 {
@@ -751,8 +755,7 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
                                 + (2.0/3.0)*self.cfg.kinematic_modulus * dgamma * n_eta[i]) / a_denom;
                         }
                     }
-                    // else: elastic step → back stress unchanged
-                }
+                // else: elastic step → back stress unchanged
 
                 // ── Damage coupling (Lemaitre effective stress) ─────
                 // σ = (1-D)·σ̃  where σ̃ is the effective (undamaged) stress
@@ -1103,9 +1106,7 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                 let alpha_prev = state[si][6];
 
                 // Previous plastic strain (offset 0..n_comp)
-                for c in 0..n_comp {
-                    e_strain_prev[c] = state[si][c];
-                }
+                e_strain_prev[..n_comp].copy_from_slice(&state[si][..n_comp]);
 
                 // ── Elastic trial strain ──
                 let mut e_trial = vec![0.0; n_comp];
@@ -1131,10 +1132,10 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                     s_dev[i] = s_trial[i] - inv_dim * tr;
                 }
                 if is_2d { s_dev[2] = s_trial[2]; }
-                else { for i in 3..6 { s_dev[i] = s_trial[i]; } }
+                else { s_dev[3..6].copy_from_slice(&s_trial[3..6]); }
 
                 let eta_norm = (s_dev.iter().map(|v| v * v).sum::<f64>()
-                    + if is_2d { 0.0 } else { 0.0 }).sqrt(); // full norm already summed over all comps
+                    + 0.0).sqrt(); // full norm already summed over all comps
 
                 let mut alpha_new = alpha_prev;
                 let mut dgamma = 0.0_f64;
@@ -1160,7 +1161,7 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                         s_ep[i] = s_new[i] + inv_dim * tr;
                     }
                     if is_2d { s_ep[2] = s_new[2]; }
-                    else { for i in 3..6 { s_ep[i] = s_new[i]; } }
+                    else { s_ep[3..6].copy_from_slice(&s_new[3..6]); }
 
                     // Consistent tangent (material part) — beta reserved for fully consistent tangent
                     let _beta = 2.0 * mu * (1.0 - 2.0 * mu * dgamma / eta_norm.max(1e-300));
@@ -1616,6 +1617,7 @@ fn hb_return_mapping(
 /// Modified Cam–Clay return mapping: Newton iteration in (p, q) space.
 ///
 /// Returns `(sigma_returned, dgamma, new_pc, p_returned, q_returned)`.
+#[allow(clippy::too_many_arguments)]
 fn cc_return_mapping(
     sigma_trial: &[f64], dim: usize,
     m: f64, pc_old: f64, lambda_idx: f64, kappa_idx: f64, void_ratio: f64,
@@ -1632,7 +1634,7 @@ fn cc_return_mapping(
     let mut s_dev = vec![0.0; n_comp];
     for i in 0..dim { s_dev[i] = sigma_trial[i] - p_trial; }
     if dim == 2 { s_dev[2] = sigma_trial[2]; }
-    else { for i in 3..6 { s_dev[i] = sigma_trial[i]; } }
+    else { s_dev[3..6].copy_from_slice(&sigma_trial[3..6]); }
     let q_trial = (s_dev.iter().map(|v| v*v).sum::<f64>()).sqrt() * (3.0_f64 / 2.0_f64).sqrt();
 
     let f_trial = cam_clay_yield(p_trial, q_trial, pc_old, m);
@@ -1700,7 +1702,7 @@ fn eigvec_sym_3x3(a00: f64, a01: f64, a02: f64,
         let lam = evals[k];
         let b00 = a00 - lam; let b01 = a01; let b02 = a02;
         let b11 = a11 - lam; let b12 = a12;
-        let b22 = a22 - lam;
+        let _b22 = a22 - lam;
         // First two rows of (A - λI)
         let r0 = [b00, b01, b02];
         let r1 = [b01, b11, b12];

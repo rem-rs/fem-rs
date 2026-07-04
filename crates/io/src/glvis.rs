@@ -99,7 +99,7 @@ impl GlVisSocket {
         scalar_field: &[f64],
         field_name: &str,
     ) -> io::Result<()> {
-        write!(self.stream, "solution\n")?;
+        writeln!(self.stream, "solution")?;
         write_vtk_mesh_2d(&mut self.stream, mesh)?;
         write_vtk_scalar(&mut self.stream, mesh.n_nodes(), scalar_field, field_name)?;
         self.stream.flush()
@@ -113,7 +113,7 @@ impl GlVisSocket {
         field_y: &[f64],
         field_name: &str,
     ) -> io::Result<()> {
-        write!(self.stream, "solution\n")?;
+        writeln!(self.stream, "solution")?;
         write_vtk_mesh_2d(&mut self.stream, mesh)?;
         write_vtk_vector_2d(&mut self.stream, mesh.n_nodes(), field_x, field_y, field_name)?;
         self.stream.flush()
@@ -128,7 +128,7 @@ impl GlVisSocket {
         scalar_field: &[f64],
         field_name: &str,
     ) -> io::Result<()> {
-        write!(self.stream, "solution\n")?;
+        writeln!(self.stream, "solution")?;
         write_vtk_mesh_3d(&mut self.stream, mesh)?;
         write_vtk_scalar(&mut self.stream, mesh.n_nodes(), scalar_field, field_name)?;
         self.stream.flush()
@@ -143,7 +143,7 @@ impl GlVisSocket {
         field_z: &[f64],
         field_name: &str,
     ) -> io::Result<()> {
-        write!(self.stream, "solution\n")?;
+        writeln!(self.stream, "solution")?;
         write_vtk_mesh_3d(&mut self.stream, mesh)?;
         write_vtk_vector_3d(&mut self.stream, mesh.n_nodes(), field_x, field_y, field_z, field_name)?;
         self.stream.flush()
@@ -308,8 +308,155 @@ fn write_vtk_vector_3d(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tests
+// GLVis native high-order binary protocol
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// GLVis element type codes (from MFEM's Element::Type).
+#[repr(u32)]
+enum GlvisElemType {
+    Triangle    = 2,
+    Tetrahedron = 4,
+    Hexahedron  = 7,
+}
+
+/// Convert fem-rs ElementType to GLVis base type code.
+fn elem_to_glvis(et: fem_mesh::ElementType) -> GlvisElemType {
+    match et {
+        fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6 => GlvisElemType::Triangle,
+        fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10 => GlvisElemType::Tetrahedron,
+        fem_mesh::ElementType::Hex8 | fem_mesh::ElementType::Hex20 | fem_mesh::ElementType::Hex27 => GlvisElemType::Hexahedron,
+        fem_mesh::ElementType::Quad4 | fem_mesh::ElementType::Quad9 => GlvisElemType::Triangle, // GLVis uses tri for quad
+        _ => GlvisElemType::Triangle,
+    }
+}
+
+impl GlVisSocket {
+    /// Send a high-order solution using the GLVis native binary protocol.
+    ///
+    /// GLVis will tessellate the high-order elements internally using
+    /// the provided `refines` level (typically equal to the polynomial order).
+    ///
+    /// This is faster and more accurate than the legacy VTK text format
+    /// for high-order fields.
+    pub fn send_native_solution<const D: usize>(
+        &mut self,
+        mesh: &SimplexMesh<D>,
+        scalar_field: &[f64],
+        _field_name: &str,
+        order: u32,
+        refines: u32,
+    ) -> io::Result<()> {
+        let nv = mesh.n_nodes() as u32;
+        let ne = mesh.n_elems() as u32;
+        let dim = D as u32;
+        let npe = mesh.elem_type.nodes_per_element() as u32;
+        let glvis_type = elem_to_glvis(mesh.elem_type) as u32;
+
+        // Header line
+        writeln!(self.stream, "solution")?;
+
+        // Binary section: nv, ne, dim, fetsize, fet[], ordersize, order[], refines
+        self.stream.write_all(&nv.to_le_bytes())?;
+        self.stream.write_all(&ne.to_le_bytes())?;
+        self.stream.write_all(&dim.to_le_bytes())?;
+        // fetsize & fet array
+        let fetsize = 1u32;
+        self.stream.write_all(&fetsize.to_le_bytes())?;
+        self.stream.write_all(&glvis_type.to_le_bytes())?;
+        // ordersize & order array
+        let ordersize = 1u32;
+        self.stream.write_all(&ordersize.to_le_bytes())?;
+        self.stream.write_all(&order.to_le_bytes())?;
+        // refines
+        self.stream.write_all(&refines.to_le_bytes())?;
+
+        // Coordinates (float32, 3 components per vertex)
+        for i in 0..nv as usize {
+            let base = i * D;
+            let x = mesh.coords[base] as f32;
+            let y = mesh.coords[base + 1] as f32;
+            let z = if D == 3 { mesh.coords[base + 2] as f32 } else { 0.0f32 };
+            self.stream.write_all(&x.to_le_bytes())?;
+            self.stream.write_all(&y.to_le_bytes())?;
+            self.stream.write_all(&z.to_le_bytes())?;
+        }
+
+        // Connectivity (int32, npe per element)
+        for e in 0..ne as usize {
+            let conn = if let Some(offsets) = &mesh.elem_offsets {
+                &mesh.conn[offsets[e]..offsets[e + 1]]
+            } else {
+                &mesh.conn[e * npe as usize..(e + 1) * npe as usize]
+            };
+            for &n in conn {
+                self.stream.write_all(&(n as i32).to_le_bytes())?;
+            }
+        }
+
+        // Solution (float32 per vertex)
+        for i in 0..nv as usize {
+            let val = scalar_field.get(i).copied().unwrap_or(0.0) as f32;
+            self.stream.write_all(&val.to_le_bytes())?;
+        }
+
+        self.stream.flush()
+    }
+}
+
+/// Write a GLVis native binary solution to any `Write` sink (for testing).
+pub fn write_native_solution_bin<const D: usize>(
+    w: &mut dyn Write,
+    mesh: &SimplexMesh<D>,
+    scalar_field: &[f64],
+    order: u32,
+    refines: u32,
+) -> io::Result<()> {
+    let nv = mesh.n_nodes() as u32;
+    let ne = mesh.n_elems() as u32;
+    let dim = D as u32;
+    let npe = mesh.elem_type.nodes_per_element() as u32;
+    let glvis_type = elem_to_glvis(mesh.elem_type) as u32;
+
+    writeln!(w, "solution")?;
+    w.write_all(&nv.to_le_bytes())?;
+    w.write_all(&ne.to_le_bytes())?;
+    w.write_all(&dim.to_le_bytes())?;
+    let fetsize = 1u32;
+    w.write_all(&fetsize.to_le_bytes())?;
+    w.write_all(&glvis_type.to_le_bytes())?;
+    let ordersize = 1u32;
+    w.write_all(&ordersize.to_le_bytes())?;
+    w.write_all(&order.to_le_bytes())?;
+    w.write_all(&refines.to_le_bytes())?;
+
+    for i in 0..nv as usize {
+        let base = i * D;
+        let x = mesh.coords[base] as f32;
+        let y = mesh.coords[base + 1] as f32;
+        let z = if D == 3 { mesh.coords[base + 2] as f32 } else { 0.0f32 };
+        w.write_all(&x.to_le_bytes())?;
+        w.write_all(&y.to_le_bytes())?;
+        w.write_all(&z.to_le_bytes())?;
+    }
+
+    for e in 0..ne as usize {
+        let conn = if let Some(offsets) = &mesh.elem_offsets {
+            &mesh.conn[offsets[e]..offsets[e + 1]]
+        } else {
+            &mesh.conn[e * npe as usize..(e + 1) * npe as usize]
+        };
+        for &n in conn {
+            w.write_all(&(n as i32).to_le_bytes())?;
+        }
+    }
+
+    for i in 0..nv as usize {
+        let val = scalar_field.get(i).copied().unwrap_or(0.0) as f32;
+        w.write_all(&val.to_le_bytes())?;
+    }
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -321,7 +468,7 @@ mod tests {
         let mesh = SimplexMesh::<2>::unit_square_tri(2);
         let sol = vec![1.0_f64; mesh.n_nodes()];
         let mut buf = Vec::new();
-        write!(buf, "solution\n").unwrap();
+        writeln!(buf, "solution").unwrap();
         write_vtk_mesh_2d(&mut buf, &mesh).unwrap();
         write_vtk_scalar(&mut buf, mesh.n_nodes(), &sol, "u").unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -337,7 +484,7 @@ mod tests {
         let mesh = SimplexMesh::<3>::unit_cube_tet(2);
         let sol = vec![1.0_f64; mesh.n_nodes()];
         let mut buf = Vec::new();
-        write!(buf, "solution\n").unwrap();
+        writeln!(buf, "solution").unwrap();
         write_vtk_mesh_3d(&mut buf, &mesh).unwrap();
         write_vtk_scalar(&mut buf, mesh.n_nodes(), &sol, "u").unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -361,7 +508,7 @@ mod tests {
         let fy = vec![1.0_f64; mesh.n_nodes()];
         let fz = vec![2.0_f64; mesh.n_nodes()];
         let mut buf = Vec::new();
-        write!(buf, "solution\n").unwrap();
+        writeln!(buf, "solution").unwrap();
         write_vtk_mesh_3d(&mut buf, &mesh).unwrap();
         write_vtk_vector_3d(&mut buf, mesh.n_nodes(), &fx, &fy, &fz, "F").unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -381,7 +528,7 @@ mod tests {
         // Simulate a local connection on a dummy socket for format check.
         let mut buf = Vec::new();
         // Manually write the old-style format for verification.
-        write!(buf, "solution\n").unwrap();
+        writeln!(buf, "solution").unwrap();
         write_vtk_mesh_2d(&mut buf, &mesh).unwrap();
         write_vtk_scalar(&mut buf, mesh.n_nodes(), &sol, "u").unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -414,5 +561,44 @@ mod tests {
         let all = vis.recv_response().unwrap();
         assert!(all.is_empty());
         server.join().unwrap();
+    }
+
+    /// Native binary protocol smoke test: verify binary output structure for Tet4 mesh.
+    #[test]
+    fn glvis_native_binary_structured_check() {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let sol = vec![1.0f64; mesh.n_nodes()];
+        let mut buf = Vec::new();
+        write_native_solution_bin(&mut buf, &mesh, &sol, 1, 1).unwrap();
+        // Check text header
+        let header = String::from_utf8_lossy(&buf[..9]);
+        assert_eq!(header, "solution\n");
+        // Parse binary header: nv(4) ne(4) dim(4) fetsize(4) fet(4) ordersize(4) order(4) refines(4)
+        let nv = u32::from_le_bytes(buf[9..13].try_into().unwrap());
+        let ne = u32::from_le_bytes(buf[13..17].try_into().unwrap());
+        let dim = u32::from_le_bytes(buf[17..21].try_into().unwrap());
+        let fet = u32::from_le_bytes(buf[25..29].try_into().unwrap());
+        assert_eq!(nv, mesh.n_nodes() as u32);
+        assert_eq!(ne, mesh.n_elems() as u32);
+        assert_eq!(dim, 3);
+        assert_eq!(fet, 4); // GLVis Tetrahedron = 4
+    }
+
+    /// Native binary P2 triangle smoke test.
+    #[test]
+    fn glvis_native_binary_tri6() {
+        use fem_mesh::SimplexMesh;
+        // Create a P2 mesh (Tri6) using curved 2D refinement
+        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let sol = vec![0.5f64; mesh.n_nodes()];
+        let mut buf = Vec::new();
+        write_native_solution_bin(&mut buf, &mesh, &sol, 2, 2).unwrap();
+        let nv = u32::from_le_bytes(buf[9..13].try_into().unwrap());
+        assert_eq!(nv, mesh.n_nodes() as u32);
+        // Verify order and refines in binary header
+        let order = u32::from_le_bytes(buf[33..37].try_into().unwrap());
+        let refines = u32::from_le_bytes(buf[37..41].try_into().unwrap());
+        assert_eq!(order, 2);
+        assert_eq!(refines, 2);
     }
 }

@@ -17,7 +17,7 @@
 use nalgebra::DMatrix;
 
 use fem_core::types::{DofId, ElemId};
-use fem_element::{ReferenceElement, CrTri1, CrTri2, CrTet1, CrTet2, Q1RotRef,
+use fem_element::{ReferenceElement,
     lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};

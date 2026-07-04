@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! # fem-element
 //!
 //! Reference finite elements, quadrature rules, and Lagrange basis functions.
@@ -53,6 +54,7 @@ pub mod nonconforming;
 pub mod nurbs;
 pub mod tri6_geom;
 pub mod iga;
+pub mod hierarchical;
 pub mod basis_cache;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
@@ -70,5 +72,6 @@ pub use raviart_thomas::{TriRT0, TriRTk, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2,
 pub use brezzi_douglas_marini::{QuadBDMk, TriBDMk, TetBDMk, HexBDMk};
 pub use nonconforming::{QuadQ1Rot, QuadQ1RotVec, Q1RotRef};
 pub use crouzeix_raviart::{CrouzeixRaviart1, CrouzeixRaviartVec1, CrTri1, CrTri2, CrTet1, CrTet2, cr1_basis, cr1_grad, cr1_tet_basis, cr1_tet_grad, cr2_tri_basis, cr2_tri_grad, cr2_tet_basis, cr2_tet_grad};
+pub use hierarchical::{HierarchicalSegPk, HierarchicalTriPk, HierarchicalTetPk};
 // Use fem_element::iga::* instead (migration target)
 

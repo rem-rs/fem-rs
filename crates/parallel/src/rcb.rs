@@ -15,15 +15,9 @@ use fem_mesh::{MeshTopology, SimplexMesh};
 use crate::par_simplex::extract_submesh_from_partition;
 
 /// Options for RCB partitioning.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RcbOptions {
     pub verbose: bool,
-}
-
-impl Default for RcbOptions {
-    fn default() -> Self {
-        Self { verbose: false }
-    }
 }
 
 /// Partition a simplex mesh into `n_parts` balanced parts using RCB.
@@ -65,7 +59,7 @@ pub fn partition_simplex_rcb<const D: usize>(
     comm: &crate::Comm,
     opts: Option<&RcbOptions>,
 ) -> crate::ParallelMesh<SimplexMesh<D>> {
-    let elem_part = partition_rcb(mesh, comm.size() as usize, opts);
+    let elem_part = partition_rcb(mesh, comm.size(), opts);
     let (local_mesh, part) = extract_submesh_from_partition(mesh, comm.rank(), &elem_part);
     crate::ParallelMesh::new(local_mesh, comm.clone(), part)
 }
@@ -154,7 +148,7 @@ fn rcb_assign<const D: usize>(
     // We need to offset the right subtree.
     let right_offset = left_parts as i32;
     for e in right.iter() {
-        partition[*e] = partition[*e] + right_offset;
+        partition[*e] += right_offset;
     }
 }
 

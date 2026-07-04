@@ -11,7 +11,7 @@
 //! 3. For `k = 1..K` (correction sweeps):
 //!    - Compute residual `r(t) = u(t) - u(t_n) - ∫ f(u(s)) ds`
 //!    - Solve correction: `δ(t) = u_prov(t) + ∫ [f(u_prov(s)) - f(u(s))] ds`
-//! Explicit SDC: u_new_j = u_0 + Σ w_l · f(u_old_l)  (deferred correction iteration)
+//!      Explicit SDC: u_new_j = u_0 + Σ w_l · f(u_old_l)  (deferred correction iteration)
 
 /// Gauss-Lobatto nodes and weights on [0, 1].
 fn gauss_lobatto_legendre(m: usize) -> (Vec<f64>, Vec<f64>) {

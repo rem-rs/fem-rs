@@ -43,6 +43,8 @@
 //!
 //! All solvers operate on [`fem_linalg::CsrMatrix<T>`].
 
+#![allow(clippy::needless_range_loop)]
+
 use fem_linalg::CsrMatrix as FemCsr;
 use linlvo::{
     core::scalar::Scalar as linlvoScalar,
@@ -416,7 +418,7 @@ where
             h[j + 1][j] = 0.0;
 
             let g_next = -sn[j] * g[j];
-            g[j] = cs[j] * g[j];
+            g[j] *= cs[j];
             g[j + 1] = g_next;
 
             res_norm = g[j + 1].abs();
@@ -866,9 +868,10 @@ pub fn solve_gmres_ildlt<T: linlvoScalar>(
 /// | `Ilu0`  | Sparsity of `A` | Cheap, SPD or diagonally dominant |
 /// | `Iluk(k)` | Level-of-fill �?k | Better quality for moderate fill |
 /// | `Ilut { tau, fill }` | Drop tolerance + fill bound | Non-symmetric, harder systems |
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum PrecondKind {
     /// ILU(0): no extra fill (fastest build, lowest quality).
+    #[default]
     Ilu0,
     /// ILU(k): allow fill-in entries up to level `k`.
     /// `k = 0` equals ILU(0); larger `k` approaches exact LU.
@@ -881,10 +884,6 @@ pub enum PrecondKind {
         /// Max off-diagonal fill per row in each factor.
         fill: usize,
     },
-}
-
-impl Default for PrecondKind {
-    fn default() -> Self { PrecondKind::Ilu0 }
 }
 
 /// GMRES with ILU(k) preconditioner.
@@ -1834,7 +1833,7 @@ pub use hypre::{
 };
 pub use lor::{
     LorPrecond, solve_pcg_lor, solve_gmres_lor,
-    LorAmgPrecond, build_lor_operator,
+    LorAmgPrecond, build_lor_operator, AmgConfig,
     solve_pcg_lor_amg, solve_gmres_lor_amg,
     GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg,
 };

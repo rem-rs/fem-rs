@@ -47,6 +47,7 @@ pub fn build_supermesh(
     let mut sup_elems: Vec<SupermeshElement> = Vec::new();
     let mut coord_map: HashMap<u64, NodeId> = HashMap::new();
 
+    #[allow(dead_code)]
     fn add_node(c: [f64; 2], coords: &mut Vec<[f64; 2]>, map: &mut HashMap<u64, NodeId>) -> NodeId {
         let x = (c[0] * 1e10).round() as i64;
         let y = (c[1] * 1e10).round() as i64;

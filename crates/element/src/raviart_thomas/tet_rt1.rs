@@ -218,19 +218,13 @@ impl VectorReferenceElement for TetRT1 {
     fn quadrature(&self, order: u8) -> QuadratureRule { tet_rule(order) }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        let mut c = Vec::with_capacity(15);
-        // Face DOFs: 3 per face, at Gauss points on each face triangle
-        // Face 0: v₁v₂v₃
-        c.push(vec![2./3.,1./6.,1./6.]); c.push(vec![1./6.,2./3.,1./6.]); c.push(vec![1./6.,1./6.,2./3.]);
-        // Face 1: v₀v₂v₃ (ξ=0)
-        c.push(vec![0.,2./3.,1./6.]); c.push(vec![0.,1./6.,2./3.]); c.push(vec![0.,1./6.,1./6.]);
-        // Face 2: v₀v₁v₃ (η=0)
-        c.push(vec![2./3.,0.,1./6.]); c.push(vec![1./6.,0.,2./3.]); c.push(vec![1./6.,0.,1./6.]);
-        // Face 3: v₀v₁v₂ (ζ=0)
-        c.push(vec![2./3.,1./6.,0.]); c.push(vec![1./6.,2./3.,0.]); c.push(vec![1./6.,1./6.,0.]);
-        // Interior
-        c.push(vec![0.25,0.25,0.25]); c.push(vec![0.5,0.1,0.1]); c.push(vec![0.1,0.5,0.1]);
-        c
+        vec![
+            vec![2./3.,1./6.,1./6.], vec![1./6.,2./3.,1./6.], vec![1./6.,1./6.,2./3.],
+            vec![0.,2./3.,1./6.], vec![0.,1./6.,2./3.], vec![0.,1./6.,1./6.],
+            vec![2./3.,0.,1./6.], vec![1./6.,0.,2./3.], vec![1./6.,0.,1./6.],
+            vec![2./3.,1./6.,0.], vec![1./6.,2./3.,0.], vec![1./6.,1./6.,0.],
+            vec![0.25,0.25,0.25], vec![0.5,0.1,0.1], vec![0.1,0.5,0.1],
+        ]
     }
 }
 

@@ -60,7 +60,7 @@ impl ParCsrMatrix {
         comm: Comm,
     ) -> Self {
         let n_local = local.nrows;
-        let n_ghost = if n_local > n_owned { n_local - n_owned } else { 0 };
+        let n_ghost = n_local.saturating_sub(n_owned);
 
         let mut diag_coo = CooMatrix::<f64>::new(n_owned, n_owned);
         let offd_cols = if n_ghost > 0 { n_ghost } else { 0 };

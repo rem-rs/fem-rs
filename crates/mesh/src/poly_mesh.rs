@@ -37,7 +37,7 @@ impl PolyMesh {
         // Extract boundary edges: any edge (i,i+1) not shared by two elements.
         let mut bdr_conn = Vec::new();
         let mut bdr_offsets = vec![0usize];
-        let n_nodes = coords.len() / 2;
+        let _n_nodes = coords.len() / 2;
         // Build edge-to-element map using sorted (a,b) keys
         let mut edge_map: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
         for e in 0..n_elems {

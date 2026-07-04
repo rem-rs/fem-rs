@@ -2,7 +2,7 @@
 # Enable SIMD optimizations for native targets
 # Note: wasm builds will ignore these flags (x86_64 targets only)
 # `-Cllvm-args=--inline-threshold=...` replaces the deprecated `-C inline-threshold=...`.
-rustflags = ["-C", "link-arg=-ffast-math", "-Cllvm-args=--inline-threshold=1000"]
+rustflags = ["-C", "link-arg=-ffast-math", "-Cllvm-args=--inline-threshold=1000", "-D", "warnings"]
 
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "target-feature=+avx2,+fma", "-C", "link-arg=-ffast-math", "-Cllvm-args=--inline-threshold=1000"]

@@ -267,8 +267,8 @@ impl ComplexCoo {
                 if prev_row != Some(r) {
                     // Moved to a new row — fill in row_ptr for all skipped rows
                     let from = prev_row.map(|pr| pr + 1).unwrap_or(0);
-                    for row in from..=r {
-                        row_ptr[row] = col_idx.len();
+                    for item in row_ptr.iter_mut().take(r + 1).skip(from) {
+                        *item = col_idx.len();
                     }
                 }
                 col_idx.push(c);
@@ -281,8 +281,8 @@ impl ComplexCoo {
 
         // Fill remaining row_ptr entries
         let from = prev_row.map(|pr| pr + 1).unwrap_or(0);
-        for row in from..=n {
-            row_ptr[row] = col_idx.len();
+        for item in row_ptr.iter_mut().take(n + 1).skip(from) {
+            *item = col_idx.len();
         }
 
         // Free original storage
@@ -309,6 +309,7 @@ impl ComplexCoo {
 /// - `precond`    — if true, apply Jacobi preconditioner using diagonal of A
 ///
 /// Returns `(iterations, final_relative_residual)`.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_gmres_complex(
     a: &ComplexCsr,
     b_re: &[f64],
@@ -342,6 +343,7 @@ pub fn solve_gmres_complex(
 /// GMRES for complex systems with a caller-provided preconditioner.
 ///
 /// `apply_prec(r_re, r_im) -> (z_re, z_im)` should compute `z = M⁻¹·r`.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_gmres_complex_with<F>(
     a: &ComplexCsr,
     b_re: &[f64],
@@ -396,7 +398,7 @@ where
     let mut total_iter = 0usize;
     let m = restart.min(n);
 
-    for _outer in 0..((max_iter + m - 1) / m).max(1) {
+    for _outer in 0..(max_iter.div_ceil(m)).max(1) {
         // Arnoldi with modified Gram-Schmidt
         let mut v_re: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
         let mut v_im: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
@@ -579,6 +581,7 @@ where
 /// - `precond`    — if true, Jacobi precondition M ≈ diag(A)
 ///
 /// Returns `(iterations, final_relative_residual)`.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_bicgstab_complex(
     a: &ComplexCsr,
     b_re: &[f64],
@@ -611,6 +614,7 @@ pub fn solve_bicgstab_complex(
 /// BiCGSTAB for complex systems with a caller-provided preconditioner.
 ///
 /// `apply_prec(r_re, r_im) -> (z_re, z_im)` should compute `z = M⁻¹·r`.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_bicgstab_complex_with<F>(
     a: &ComplexCsr,
     b_re: &[f64],
@@ -774,6 +778,7 @@ where
 /// - `precond`    — if true, Jacobi precondition M ≈ diag(A)
 ///
 /// Returns `(iterations, final_relative_residual)`.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_tfqmr_complex(
     a: &ComplexCsr,
     b_re: &[f64],
@@ -940,10 +945,10 @@ pub fn solve_tfqmr_complex(
                 // w_{m} ← w_{m-1} - α_k·v_k   (w starts as r_{k-1})
                 // y_{m} ← y_{m-1} - α_k·p̂_k
                 for i in 0..n {
-                    w_re[i] = w_re[i] - (alpha_re*v_re[i] - alpha_im*v_im[i]);
-                    w_im[i] = w_im[i] - (alpha_re*v_im[i] + alpha_im*v_re[i]);
-                    y_re[i] = y_re[i] - (alpha_re*ph_re[i] - alpha_im*ph_im[i]);
-                    y_im[i] = y_im[i] - (alpha_re*ph_im[i] + alpha_im*ph_re[i]);
+                    w_re[i] -= alpha_re*v_re[i] - alpha_im*v_im[i];
+                    w_im[i] -= alpha_re*v_im[i] + alpha_im*v_re[i];
+                    y_re[i] -= alpha_re*ph_re[i] - alpha_im*ph_im[i];
+                    y_im[i] -= alpha_re*ph_im[i] + alpha_im*ph_re[i];
                 }
             } // second half: w,y unchanged
 
@@ -1013,8 +1018,8 @@ pub fn solve_tfqmr_complex(
 
         // Step 22: r_k = r_{k-1} - α_k · v_k  (BiCG residual update)
         for i in 0..n {
-            r_re[i] = r_re[i] - (alpha_re*v_re[i] - alpha_im*v_im[i]);
-            r_im[i] = r_im[i] - (alpha_re*v_im[i] + alpha_im*v_re[i]);
+            r_re[i] -= alpha_re*v_re[i] - alpha_im*v_im[i];
+            r_im[i] -= alpha_re*v_im[i] + alpha_im*v_re[i];
         }
 
         // ω_k = 1 (standard BiCG)

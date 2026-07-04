@@ -11,7 +11,7 @@
 //! - Optimal test functions via local H¹ Gram matrix solve
 
 use fem_element::{ReferenceElement, lagrange::{TriP1, TriP3}, quadrature::tri_rule};
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CooMatrix;
 use fem_mesh::MeshTopology;
 
 fn solve_dense(n: usize, a: &mut [f64], b: &mut [f64]) {
@@ -101,7 +101,7 @@ pub fn solve_dpg_elasticity_2d<M: MeshTopology>(
             let tri_p1 = TriP1;
             tri_p1.eval_basis(xi, &mut phi);
             let tgrad_x = [-1.0, 1.0, 0.0]; let tgrad_y = [-1.0, 0.0, 1.0];
-            let mut tdpx = vec![0.0; 3]; let mut tdpy = vec![0.0; 3];
+            let mut tdpx = [0.0; 3]; let mut tdpy = [0.0; 3];
             for i in 0..3 {
                 tdpx[i] = (j11*tgrad_x[i] - j10*tgrad_y[i]) * inv_det;
                 tdpy[i] = (-j01*tgrad_x[i] + j00*tgrad_y[i]) * inv_det;

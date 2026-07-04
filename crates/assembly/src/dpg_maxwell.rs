@@ -13,7 +13,7 @@
 //! - Stabilization via local H¹ Gram matrix solve M_V^{-1} B
 
 use fem_element::{ReferenceElement, lagrange::{TriP1, TriP3}, quadrature::tri_rule};
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CooMatrix;
 use fem_mesh::MeshTopology;
 
 fn solve_dense(n: usize, a: &mut [f64], b: &mut [f64]) {

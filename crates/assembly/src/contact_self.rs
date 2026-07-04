@@ -25,7 +25,7 @@ pub fn assemble_self_contact_3d<M: MeshTopology>(
     mesh: &M, cfg: &ContactConfig, u: &[f64], lam: &[f64],
     locator: &TetPointLocator, gap_max: f64,
 ) -> (Vec<f64>, CsrMatrix<f64>) {
-    let n = mesh.n_nodes() as usize; let nd = n*3;
+    let n = mesh.n_nodes(); let nd = n*3;
     let mut rhs = vec![0.0; nd]; let mut coo = CooMatrix::new(nd, nd);
     let pn = cfg.penalty_normal;
     let (pt, mu) = match &cfg.friction {

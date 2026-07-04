@@ -71,8 +71,8 @@ fn parse_step_file(path: &Path) -> Result<HashMap<usize, StepEntity>, String> {
         // Entity line: #ID = TYPE_NAME('param', ...);
         if let Some(eq_pos) = trimmed.find('=') {
             let id_part = trimmed[..eq_pos].trim();
-            if id_part.starts_with('#') {
-                let id: usize = id_part[1..].trim().parse().map_err(|_|
+            if let Some(id_part) = id_part.strip_prefix('#') {
+                let id: usize = id_part.trim().parse().map_err(|_|
                     format!("invalid STEP entity id: {id_part}"))?;
 
                 let rest = trimmed[eq_pos + 1..].trim();
@@ -94,8 +94,8 @@ fn parse_step_file(path: &Path) -> Result<HashMap<usize, StepEntity>, String> {
 /// entity; otherwise parse as a literal value.
 fn resolve_ref<'a>(param: &str, entities: &'a HashMap<usize, StepEntity>) -> Option<&'a StepEntity> {
     let p = param.trim();
-    if p.starts_with('#') {
-        let id: usize = p[1..].parse().ok()?;
+    if let Some(p) = p.strip_prefix('#') {
+        let id: usize = p.parse().ok()?;
         entities.get(&id)
     } else {
         None
@@ -106,8 +106,8 @@ fn resolve_ref<'a>(param: &str, entities: &'a HashMap<usize, StepEntity>) -> Opt
 #[allow(dead_code)]
 fn extract_string(param: &str) -> Option<String> {
     let p = param.trim();
-    if p.starts_with('\'') {
-        let end = p[1..].find('\'')?;
+    if let Some(p) = p.strip_prefix('\'') {
+        let end = p.find('\'')?;
         Some(p[1..=end].to_string())
     } else {
         None
@@ -303,7 +303,7 @@ pub fn read_step_surfaces(path: impl AsRef<Path>) -> Result<Vec<(i32, CadShape)>
         "B_SPLINE_SURFACE_WITH_KNOTS",
     ];
 
-    for (_id, entity) in &entities {
+    for entity in entities.values() {
         if surface_types.contains(&entity.type_name.as_str()) {
             if let Some(cad) = step_to_cad(entity, &entities) {
                 result.push((next_tag, cad));
@@ -379,7 +379,7 @@ pub fn read_iges_surfaces(path: impl AsRef<Path>) -> Result<Vec<(i32, CadShape)>
     for line in &lines {
         let trimmed = line.trim();
         if trimmed.ends_with('P') || trimmed.ends_with(';') {
-            param_lines.push_str(&trimmed[..trimmed.len().saturating_sub(1)].trim());
+            param_lines.push_str(trimmed[..trimmed.len().saturating_sub(1)].trim());
             if trimmed.ends_with(';') {
                 param_lines.push(';');
             }

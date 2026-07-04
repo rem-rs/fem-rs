@@ -3,5 +3,6 @@ mod amr_inner;
 mod refine_2d;
 mod make_conforming;
 pub use amr_inner::*;
+pub use refine_2d::{closure_refine, closure_refine_default};
 pub use make_conforming::make_conforming_tri;
 

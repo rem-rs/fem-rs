@@ -108,7 +108,7 @@ impl<M: MeshTopology> L2Space<M> {
 
                         // Vertices.
                         for d in 0..2 {
-                            dof_coords[(base_dof + 0) * 2 + d] = p0[d];
+                            dof_coords[base_dof * 2 + d] = p0[d];
                             dof_coords[(base_dof + 1) * 2 + d] = p1[d];
                             dof_coords[(base_dof + 2) * 2 + d] = p2[d];
                         }
@@ -128,7 +128,7 @@ impl<M: MeshTopology> L2Space<M> {
 
                         // Vertices.
                         for d in 0..3 {
-                            dof_coords[(base_dof + 0) * 3 + d] = p0[d];
+                            dof_coords[base_dof * 3 + d] = p0[d];
                             dof_coords[(base_dof + 1) * 3 + d] = p1[d];
                             dof_coords[(base_dof + 2) * 3 + d] = p2[d];
                             dof_coords[(base_dof + 3) * 3 + d] = p3[d];

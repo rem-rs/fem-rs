@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! Shared FEM utilities for the em_* and Maxwell examples.
 //!
 //! Implements:
@@ -94,12 +95,12 @@ pub fn p1_assemble_poisson(
         //   ∇_ξ φ₀ = (-1, -1),  φ₁ = (1, 0),  φ₂ = (0, 1)
         // Physical gradients = J^{-T} * ∇_ξ φᵢ
         let gx = [
-            inv_det * ( j11 * (-1.0) + (-j10) * (-1.0)),
+            inv_det * (-j11 + j10),
             inv_det * ( j11 *   1.0  + (-j10) *   0.0 ),
             inv_det * ( j11 *   0.0  + (-j10) *   1.0 ),
         ];
         let gy = [
-            inv_det * ((-j01) * (-1.0) + j00 * (-1.0)),
+            inv_det * (j01 - j00),
             inv_det * ((-j01) *   1.0  + j00 *   0.0 ),
             inv_det * ((-j01) *   0.0  + j00 *   1.0 ),
         ];
@@ -218,6 +219,7 @@ pub fn dirichlet_nodes_fn(
 /// - Subtracts column contributions from the RHS.
 /// - Zeros the row and column.
 /// - Sets diagonal to 1 and `rhs[dof] = value`.
+#[allow(clippy::ptr_arg)]
 pub fn apply_dirichlet(
     mat: &mut CsrMatrix<f64>,
     rhs: &mut Vec<f64>,

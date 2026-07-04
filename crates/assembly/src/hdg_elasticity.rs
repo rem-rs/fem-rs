@@ -8,7 +8,7 @@ use fem_linalg::CooMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::SolverConfig;
 use fem_element::lagrange::{TriPk, TetPk, SegPk};
-use fem_element::{ReferenceElement, quadrature::{tri_rule, tet_rule}};
+use fem_element::ReferenceElement;
 
 fn npe(dim: usize, k: usize) -> usize {
     match dim {
@@ -137,7 +137,7 @@ where
             k.sort_unstable();
             let mut found = None;
             for (fi, (fnodes, _)) in face_list.iter().enumerate() {
-                let mut fk: Vec<u32> = fnodes.iter().copied().collect();
+                let mut fk: Vec<u32> = fnodes.to_vec();
                 fk.sort_unstable();
                 if fk == k { found = Some(fi); break; }
             }
@@ -274,7 +274,7 @@ where
                 };
                 ref_elem.eval_basis(&xi_ref, &mut phi);
                 face_ref.eval_basis(fxi, &mut psi);
-                let fj = face_size(&mesh, &en, lf_idx, dim);
+                let fj = face_size(&mesh, en, lf_idx, dim);
                 let wf = fw * fj;
 
                 // τ∫φ·φ on ∂K
@@ -398,7 +398,7 @@ where
             k.sort_unstable();
             let mut found = None;
             for (fi, (fnodes, _)) in face_list.iter().enumerate() {
-                let mut fk: Vec<u32> = fnodes.iter().copied().collect();
+                let mut fk: Vec<u32> = fnodes.to_vec();
                 fk.sort_unstable();
                 if fk == k { found = Some(fi); break; }
             }
@@ -501,7 +501,7 @@ where
                 };
                 ref_elem.eval_basis(&xi_ref, &mut phi);
                 face_ref.eval_basis(fxi, &mut psi);
-                let fj = face_size(&mesh, &en, lf_idx, dim);
+                let fj = face_size(&mesh, en, lf_idx, dim);
                 let wf = fw * fj;
 
                 for a in 0..dim {
@@ -512,7 +512,7 @@ where
                     }
                 }
 
-                if let Some(_) = face_off[lf_idx] {
+                if face_off[lf_idx].is_some() {
                     let base = lf_idx * sk_dpe;
                     for a in 0..dim {
                         for i in 0..n_vel_b {
@@ -543,9 +543,7 @@ where
         }
 
         let base_u = e as usize * u_dpe;
-        for i in 0..nu {
-            u_bulk[base_u + i] = u0[i];
-        }
+        u_bulk[base_u..base_u + nu].copy_from_slice(&u0[..nu]);
 
         // Add u_lam · λ contribution
         for s in 0..ns {

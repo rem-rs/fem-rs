@@ -100,6 +100,7 @@ fn sub_lincomb2(dst: &mut [f64], a: &[f64], ca: f64, b: &[f64], cb: f64, n: usiz
 
 /// `dst[i] = (v[i] - r1 * p[i] - r2 * c[i]) / gamma` for `i < n`.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 fn lincomb3_div(
     dst: &mut [f64],
     v: &[f64],
@@ -453,7 +454,7 @@ pub fn par_solve_gmres_jacobi(
             h[j + 1][j] = 0.0;
 
             let g_next = -sn[j] * g[j];
-            g[j] = cs[j] * g[j];
+            g[j] *= cs[j];
             g[j + 1] = g_next;
 
             iter_total += 1;
@@ -622,8 +623,8 @@ pub fn par_solve_minres(
         add_scaled_slice(&mut x.data, &w_new.data, tau, n);
 
         // Update residual norm
-        res_norm = s_new.abs() * res_norm;
-        beta1 = s_new * beta1;
+        res_norm *= s_new.abs();
+        beta1 *= s_new;
 
         if cfg.verbose && x.comm().is_root() {
             log::info!("par_minres iter {}: residual = {:.3e}", iter + 1, res_norm / b_norm);
@@ -869,7 +870,7 @@ pub fn par_solve_fgmres_jacobi(
             if denom > 1e-30 { cs[j] = h[j][j] / denom; sn[j] = h[j + 1][j] / denom; }
             else { cs[j] = 1.0; sn[j] = 0.0; }
             h[j][j] = cs[j] * h[j][j] + sn[j] * h[j + 1][j];
-            g[j + 1] = -sn[j] * g[j]; g[j] = cs[j] * g[j];
+            g[j + 1] = -sn[j] * g[j]; g[j] *= cs[j];
             rel_res = g[j + 1].abs() / b_norm;
             if rel_res < cfg.rtol || g[j + 1].abs() < cfg.atol {
                 let mut y = vec![0.0_f64; j + 1];
@@ -1121,7 +1122,7 @@ where
             if denom > 1e-30 { cs[j] = h[j][j] / denom; sn[j] = h[j + 1][j] / denom; }
             else { cs[j] = 1.0; sn[j] = 0.0; }
             h[j][j] = cs[j] * h[j][j] + sn[j] * h[j + 1][j]; h[j + 1][j] = 0.0;
-            let g_next = -sn[j] * g[j]; g[j] = cs[j] * g[j]; g[j + 1] = g_next;
+            let g_next = -sn[j] * g[j]; g[j] *= cs[j]; g[j + 1] = g_next;
             iter_total += 1; inner_done = j + 1;
             rel_res = g[j + 1].abs() / b_norm;
             if cfg.verbose && x.comm().is_root() {
@@ -1219,7 +1220,7 @@ where
             if denom > 1e-30 { cs[j] = h[j][j] / denom; sn[j] = h[j + 1][j] / denom; }
             else { cs[j] = 1.0; sn[j] = 0.0; }
             h[j][j] = cs[j] * h[j][j] + sn[j] * h[j + 1][j];
-            g[j + 1] = -sn[j] * g[j]; g[j] = cs[j] * g[j];
+            g[j + 1] = -sn[j] * g[j]; g[j] *= cs[j];
             rel_res = g[j + 1].abs() / b_norm;
             if cfg.verbose && x.comm().is_root() {
                 log::info!("par_fgmres_ilu iter {}: residual = {:.3e}", iter_total, rel_res);
@@ -1331,7 +1332,7 @@ pub fn par_solve_idrs(
 /// * `b`               — parallel RHS vector
 /// * `x`               — output solution vector (written on all ranks)
 /// * `global_dof_ids`  — mapping `local_dof_id -> global_dof_id` from
-///                        `DofPartition::global_dof_ids`; length `n_owned + n_ghost`
+///   `DofPartition::global_dof_ids`; length `n_owned + n_ghost`
 ///
 /// This is suitable for small-to-moderate problems (up to ~1e5 DOFs) where
 /// iterative solver convergence is unreliable.
@@ -1647,7 +1648,7 @@ pub fn par_solve_gmres(
             h[j + 1][j] = 0.0;
 
             let g_next = -sn[j] * g[j];
-            g[j] = cs[j] * g[j];
+            g[j] *= cs[j];
             g[j + 1] = g_next;
 
             iter_total += 1;

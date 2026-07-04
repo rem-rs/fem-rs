@@ -112,7 +112,7 @@ fn eval_monomial_curls(x: f64, y: f64, z: f64, curls: &mut [f64]) {
     // j=1:(ξ,0,0): (0-0,0-0,0-0)=(0,0,0)
     curls[3]=0.0; curls[4]=0.0; curls[5]=0.0;
     // j=2:(η,0,0): u=η,v=0,w=0 → (0-0,0-0,0-1)=(0,0,-1)
-    curls[6]=0.0; curls[7]=0.0; curls[8]=-1.0;
+    curls[6]=0.0; curls[7]=0.0; curls[8] = -1.0;
     // j=3:(ζ,0,0): (0-0,1-0,0-0)=(0,1,0)... wait ∂u/∂z=1 where u=ζ? No, u=ζ means u=x₃=z.
     // curl(ζ,0,0): (∂0/∂y-∂0/∂z, ∂ζ/∂z-∂0/∂x, ∂0/∂x-∂ζ/∂y)=(0,1,0)
     curls[9]=0.0; curls[10]=1.0; curls[11]=0.0;
@@ -124,12 +124,12 @@ fn eval_monomial_curls(x: f64, y: f64, z: f64, curls: &mut [f64]) {
     curls[18]=0.0; curls[19]=0.0; curls[20]=0.0;
     // j=7:(0,ζ,0): u=0,v=ζ,w=0 → (0-0,0-0,0-0)=(0,0,0)... ∂v/∂x=0, ∂w/∂z=0 hmm
     // curl: (∂0/∂y-∂ζ/∂z, ∂0/∂z-∂0/∂x, ∂ζ/∂x-∂0/∂y)=(-1,0,0)
-    curls[21]=-1.0; curls[22]=0.0; curls[23]=0.0;
+    curls[21] = -1.0; curls[22]=0.0; curls[23]=0.0;
     // j=8:(0,0,1): (0,0,0)
     curls[24]=0.0; curls[25]=0.0; curls[26]=0.0;
     // j=9:(0,0,ξ): (0-0, ∂ξ/∂z-... wait: (∂w/∂y-∂v/∂z, ∂u/∂z-∂w/∂x, ∂v/∂x-∂u/∂y)
     // u=0,v=0,w=ξ: (0-0,0-1,0-0)=(0,-1,0)
-    curls[27]=0.0; curls[28]=-1.0; curls[29]=0.0;
+    curls[27]=0.0; curls[28] = -1.0; curls[29]=0.0;
     // j=10:(0,0,η): u=0,v=0,w=η: (1-0,0-0,0-0)=(1,0,0)
     curls[30]=1.0; curls[31]=0.0; curls[32]=0.0;
     // j=11:(0,0,ζ): u=0,v=0,w=ζ: (0-0,0-0,0-0)=(0,0,0)
@@ -156,7 +156,7 @@ fn eval_monomial_curls(x: f64, y: f64, z: f64, curls: &mut [f64]) {
     // j=18: (-ηζ, ξζ, 0): u=-yz, v=xz, w=0
     // curl: (0-∂xz/∂z, ∂(-yz)/∂z-0, ∂xz/∂x-∂(-yz)/∂y)=(−x, −y, z+z)=(−x,−y,2z)
     // Hmm — this isn't simply 3*monomial. That's ok, just record it.
-    curls[54]=-x; curls[55]=-y; curls[56]=2.0*z;
+    curls[54] = -x; curls[55] = -y; curls[56]=2.0*z;
     // j=19: (-ζη, 0, ξη): u=-zy, v=0, w=xy
     // curl: (∂xy/∂y-∂0/∂z, ∂(-zy)/∂z-∂xy/∂x, ∂0/∂x-∂(-zy)/∂y)=(x, -y-y, z)=(x,-2y,z)
     // Wait: ∂(-zy)/∂z = -y; ∂xy/∂x = y → ∂u/∂z-∂w/∂x = -y - y = -2y? Let me redo:

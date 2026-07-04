@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 //! # fem-space
 //!
 //! Finite element spaces: DOF management for H¹, L², H(curl), and H(div).

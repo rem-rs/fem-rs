@@ -106,7 +106,7 @@ fn face_dof_value(m: &Mono, face: usize, p: usize, q: usize) -> f64 {
                             };
                             let poly = u.powi(p as i32) * v.powi(q as i32);
                             // ds = √2 dξ·dη
-                            sum += wu * wv * dot * mv * poly * 1.4142135623730951;
+                            sum += wu * wv * dot * mv * poly * std::f64::consts::SQRT_2;
                         }
                     }
                     return sum;

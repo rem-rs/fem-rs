@@ -206,7 +206,7 @@ pub fn assemble_damaged_elasticity<M: MeshTopology>(
             let mut sigma = vec![0.0; if dim == 2 { 3 } else { 6 }];
             for i in 0..sigma.len() {
                 for j in 0..sigma.len() { sigma[i] += c_e[(i,j)] * eps[j]; }
-                sigma[i] *= (1.0 - d_val);
+                sigma[i] *= 1.0 - d_val;
             }
 
             // Internal force: f_int += Bᵀ·σ·w
@@ -271,7 +271,7 @@ pub fn update_damage_field<M: MeshTopology>(
         let quad = re.quadrature(quad_order);
         let n_qp_e = quad.weights.len();
         let nodes = mesh.element_nodes(e);
-        let (jac, det_j) = simplex_jac_2(mesh, nodes, dim);
+        let (jac, _det_j) = simplex_jac_2(mesh, nodes, dim);
         let jit = jac.try_inverse().map(|m| m.transpose()).unwrap_or_else(|| DMatrix::identity(dim, dim));
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let n_ldofs = dofs.len();
@@ -283,7 +283,7 @@ pub fn update_damage_field<M: MeshTopology>(
         let mut gphys = vec![0.0_f64; n_ldofs * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q];
+            let _w = quad.weights[q];
             re.eval_grad_basis(xi, &mut gref);
             xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
             let eps = strain_at_qp(&u_elem, &gphys, dim, n_ldofs);
@@ -306,10 +306,11 @@ pub fn update_damage_field<M: MeshTopology>(
 pub struct StaggeredDamageSolver;
 
 impl StaggeredDamageSolver {
+    #[allow(clippy::too_many_arguments)]
     pub fn solve<M: MeshTopology>(
         mesh: &M,
         space: &dyn FESpace<Mesh = M>,
-        stiffness: &CsrMatrix<f64>,   // undamaged elastic stiffness
+        _stiffness: &CsrMatrix<f64>,   // undamaged elastic stiffness
         rhs: &[f64],
         cfg: &DamageConfig,
         state: &mut DamageState,

@@ -157,9 +157,9 @@ pub fn assemble_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: FaceInteg
 
         let quad = r_elem.quadrature(quad_order);
         let mut k_ll = vec![0.0; n_l * n_l];
-        let mut k_lr = vec![0.0; n_l * 0]; // will be resized if both sides
-        let mut k_rl = vec![0.0; 0 * n_l];
-        let mut k_rr = vec![0.0; 0 * 0];
+        let mut k_lr = Vec::with_capacity(0); // will be resized if both sides
+        let mut k_rl = Vec::with_capacity(0);
+        let mut k_rr = Vec::with_capacity(0);
 
         if n_r > 0 {
             k_lr = vec![0.0; n_l * n_r];

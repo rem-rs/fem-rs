@@ -436,6 +436,7 @@ where
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assemble_face_bilinear_contrib<S: FESpace>(
     space: &S,
     vol_elem: &dyn VectorReferenceElement,
@@ -495,6 +496,7 @@ where
     Some((global_dofs, k_face))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assemble_face_linear_contrib<S: FESpace>(
     space: &S,
     vol_elem: &dyn VectorReferenceElement,

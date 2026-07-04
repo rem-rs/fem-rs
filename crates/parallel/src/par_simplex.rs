@@ -328,6 +328,7 @@ pub(crate) fn compute_node_owners_from_partition<const D: usize>(
 /// Assignment rule: a boundary face belongs to rank `r` iff the minimum
 /// global node ID among its nodes is owned by `r`.  This is uniquely defined
 /// and consistent across ranks.
+#[allow(clippy::type_complexity)]
 fn extract_local_faces<const D: usize>(
     mesh: &SimplexMesh<D>,
     g2l: &HashMap<NodeId, u32>,

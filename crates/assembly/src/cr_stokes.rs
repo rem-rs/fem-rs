@@ -9,8 +9,7 @@
 //! −νΔu + ∇p = f,   ∇·u = 0
 //! ```
 
-use fem_core::NodeId;
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CooMatrix;
 use fem_linalg::dense::{lu_factor, lu_solve};
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::element_type::ElementType;
@@ -32,7 +31,7 @@ pub struct CrStokesResult {
 /// * `f`    — body force per vertex `[f_x0, f_y0, f_x1, f_y1, …]`.  `&[]` for zero.
 /// * `nu`   — kinematic viscosity.
 /// * `bdry_dofs` — velocity DOFs to zero (no-slip).  Each entry is a *scalar*
-///                 CR DOF index `edge_id * 2 + component` (0=x, 1=y).
+///   CR DOF index `edge_id * 2 + component` (0=x, 1=y).
 pub fn solve_cr_stokes<M: MeshTopology + Clone + 'static>(
     mesh: &M,
     f: &[f64],
@@ -150,6 +149,7 @@ pub fn solve_cr_stokes<M: MeshTopology + Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_core::NodeId;
     use fem_mesh::SimplexMesh;
     use fem_space::FESpace;
     use fem_element::ReferenceElement;

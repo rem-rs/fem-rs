@@ -205,7 +205,7 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &SimplexMesh<2>, mesh_3d: Op
     let n_nodes = coords.len() / dim;
     let n_elems = conn.len() / elem_type.nodes_per_element();
     // Determine face element type per dimension
-    let (bpe, btype) = if dim == 2 {
+    let (bpe, _btype) = if dim == 2 {
         (2usize, 1u32) // Line2 edge, code 1
     } else {
         (3usize, 2u32) // Tri3 face, code 2
@@ -287,12 +287,10 @@ pub fn write_mfem_file_3d(path: impl AsRef<std::path::Path>, mesh: &SimplexMesh<
 }
 
 fn skip_comment(line: &str) -> &str {
-    loop {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() { return ""; }
-        if let Some(idx) = trimmed.find('#') { return trimmed[..idx].trim(); }
-        return trimmed;
-    }
+    let trimmed = line.trim();
+    if trimmed.starts_with('#') || trimmed.is_empty() { return ""; }
+    if let Some(idx) = trimmed.find('#') { return trimmed[..idx].trim(); }
+    trimmed
 }
 
 fn read_line(r: &mut impl BufRead) -> FemResult<String> {

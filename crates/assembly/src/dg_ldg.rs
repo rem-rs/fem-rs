@@ -17,7 +17,7 @@
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
-use crate::interior_faces::{InteriorFace, InteriorFaceList};
+use crate::interior_faces::InteriorFaceList;
 
 // ─── helpers (cloned from dg.rs to avoid coupling) ──────────────────────────
 
@@ -55,7 +55,7 @@ fn face_geom<M: MeshTopology>(
     }
 }
 
-fn ref_shape_grads(dim: usize, npe: usize, xi: &[f64]) -> Vec<f64> {
+fn ref_shape_grads(dim: usize, npe: usize, _xi: &[f64]) -> Vec<f64> {
     if dim == 2 && npe == 3 {
         // P1 triangle: ∇φ_ref
         vec![-1.0, -1.0, 1.0, 0.0, 0.0, 1.0]
@@ -174,8 +174,8 @@ pub fn assemble_ldg<S: FESpace + Sync>(
         let (_, j_inv_l, det_l) = elem_jacobian(mesh, e_l, dim);
         let (_, j_inv_r, det_r) = elem_jacobian(mesh, e_r, dim);
 
-        let vol_l = if dim == 2 { 0.5 * det_l.abs() } else { det_l.abs() / 6.0 };
-        let vol_r = if dim == 2 { 0.5 * det_r.abs() } else { det_r.abs() / 6.0 };
+        let _vol_l = if dim == 2 { 0.5 * det_l.abs() } else { det_l.abs() / 6.0 };
+        let _vol_r = if dim == 2 { 0.5 * det_r.abs() } else { det_r.abs() / 6.0 };
 
         // Physical gradients (constant for P1)
         let grad_l = phys_grad(&j_inv_l, &ref_grad, npe, dim);

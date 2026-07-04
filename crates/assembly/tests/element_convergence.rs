@@ -13,6 +13,7 @@ use fem_mesh::SimplexMesh;
 use fem_solver::{MinresSolver, SolverConfig};
 use fem_space::{fe_space::FESpace, HDivSpace};
 
+#[allow(dead_code)]
 fn exact_flux(x: &[f64], _scale: f64) -> [f64; 2] {
     let sx = (PI * x[0]).sin();
     let cx = (PI * x[0]).cos();

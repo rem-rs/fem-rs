@@ -25,7 +25,7 @@ use crate::GpuJacobiPrecond;
 // ─── helper: allocate dot-reduction scratch ────────────────────────────────
 
 fn make_dot_buf<T: bytemuck::Pod>(device: &wgpu::Device, n: u32) -> (DeviceBuffer, u32) {
-    let n_wg = (n + 255) / 256;
+    let n_wg = n.div_ceil(256);
     let size = if TypeId::of::<T>() == TypeId::of::<f64>() { 8 } else { 4 };
     let buf = DeviceBuffer::with_staging(device,
         n_wg as u64 * size,
@@ -45,6 +45,7 @@ macro_rules! dot {
 /// Solve `A·x = b` using Conjugate Gradient on GPU.
 ///
 /// Returns `(iterations, final_relative_residual)`.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_cg_gpu<T: Scalar + bytemuck::Pod>(
     gpu: &GpuContext,
     spmv: &SpmvPipeline,
@@ -137,6 +138,7 @@ pub fn solve_cg_gpu<T: Scalar + bytemuck::Pod>(
 /// Applies `z = diag(A)^{-1} · r` as preconditioner each iteration.
 /// Typically converges in far fewer iterations than unpreconditioned CG
 /// for ill-conditioned problems.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_pcg_jacobi_gpu<T: Scalar + bytemuck::Pod>(
     gpu: &GpuContext,
     spmv: &SpmvPipeline,

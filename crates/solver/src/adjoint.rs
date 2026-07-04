@@ -183,7 +183,7 @@ pub fn adjoint_sensitivity(
         // λ_{m-1} = λ_m + (-h)/6 · (k1 + 2·k2 + 2·k3 + k4)
         let h6 = h / 6.0;
         for ii in 0..n {
-            lam[ii] = lam[ii] - h6 * (k1[ii] + 2.0 * k2[ii] + 2.0 * k3[ii] + k4[ii]);
+            lam[ii] -= h6 * (k1[ii] + 2.0 * k2[ii] + 2.0 * k3[ii] + k4[ii]);
         }
 
         _t = tmm;

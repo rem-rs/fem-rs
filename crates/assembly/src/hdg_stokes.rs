@@ -147,7 +147,7 @@ where
             let mut k: Vec<u32> = f.iter().map(|&x| en[x as usize]).collect(); k.sort_unstable();
             let mut found = None;
             for (fi, (fnodes, _)) in face_list.iter().enumerate() {
-                let mut fk: Vec<u32> = fnodes.iter().copied().collect(); fk.sort_unstable();
+                let mut fk: Vec<u32> = fnodes.to_vec(); fk.sort_unstable();
                 if fk == k { found = Some(fi); break; }
             }
             face_off.push(match found { Some(fi) => lam_off[fi], None => None });
@@ -158,7 +158,7 @@ where
         let mut f_u = vec![0.0; nu];
         let mut B = vec![0.0; nu * ns];
         let mut phi_v = vec![0.0; n_vel_b];
-        let mut phi_p = vec![0.0; n_pres_b];
+        let _phi_p = vec![0.0; n_pres_b];
         let mut gref = vec![0.0; n_vel_b * dim];
         let mut gphys = vec![0.0; n_vel_b * dim];
 
@@ -223,7 +223,7 @@ where
                 };
                 ref_elem.eval_basis(&xi_ref, &mut phi_v);
                 face_ref.eval_basis(fxi, &mut psi);
-                let fj = face_size(&mesh, &en, lf_idx, dim);
+                let fj = face_size(&mesh, en, lf_idx, dim);
                 let wf = fw * fj;
                 // A += τ φ·φ on ∂K
                 for a in 0..dim { for i in 0..n_vel_b { for j in 0..n_vel_b {
@@ -250,7 +250,7 @@ where
             sys[i*n_tot + nu + p] = C[p*nu + i];       // C^T
             sys[(nu+p)*n_tot + i] = C[p*nu + i];       // C
         }}
-        for i in 0..nu { rhs[i] = f_u[i]; }
+        rhs[..nu].copy_from_slice(&f_u[..nu]);
 
         let sys_inv = invert_dense(&sys, n_tot).unwrap_or_else(|| {
             let s: Vec<f64> = sys.iter().map(|&v| v + 1e-12).collect();

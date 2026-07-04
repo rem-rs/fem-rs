@@ -13,7 +13,22 @@
 //!   assembles the full mesh and fields and writes a single HDF5 file
 //!   (`{base_path}.h5`) plus an XDMF file.
 //!
+//! * **Collective mode** (`.pmesh`): All ranks write to a single binary
+//!   `.pmesh` file using collective MPI I/O.  The file can be read back
+//!   serially or in parallel.
+//!
 //! This module is feature-gated behind `cfg(feature = "hdf5")`.
+//!
+//! ## `.pmesh` binary format
+//!
+//! ```text
+//! [header]   — 7 × u64le: magic(0x504D4553), n_ranks, dim, elem_type_u32,
+//!                        n_nodes_per_rank[0..n_ranks], n_elems_per_rank[0..n_ranks]
+//!                         (as flat u64 array), npe, n_coords_total, n_conn_total
+//! [coords]   — n_coords_total × f64le
+//! [conn]     — n_conn_total × u32le
+//! [elem_tags] — n_elems_total × i32le
+//! ```
 
 
 use fem_core::FemResult;

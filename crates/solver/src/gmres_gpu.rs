@@ -73,7 +73,7 @@ impl<T: Scalar> GmresGpuWorkspace<T> {
             basis.push(GpuVector::<T>::zeros(ctx, n));
         }
 
-        let n_wg = (n + 255) / 256;
+        let n_wg = n.div_ceil(256);
         let dot_buf = DeviceBuffer::with_staging(
             &ctx.device,
             n_wg as u64 * std::mem::size_of::<T>() as u64,
@@ -376,7 +376,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
         let residual_start = Instant::now();
         compute_residual_into(ctx, spmv, vops, a, b, gpu_x, gpu_ax, gpu_r);
         let r_norm = vops.compute_norm2(ctx, gpu_r);
-        if let Some(profile) = profile.as_deref_mut() {
+        if let Some(ref mut profile) = profile {
             profile.residual_phase += residual_start.elapsed();
         }
         last_residual = r_norm;
@@ -386,7 +386,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
                 let cpu_x = gpu_x.read_to_cpu(ctx);
                 x.copy_from_slice(&cpu_x);
             }
-            if let Some(profile) = profile.as_deref_mut() {
+            if let Some(ref mut profile) = profile {
                 profile.iterations = iter_count;
                 profile.final_residual = r_norm;
                 profile.total_phase = total_start.elapsed();
@@ -406,7 +406,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
             vops.encode_axpy(ctx, &mut enc, 1.0 / r_norm, gpu_r, 0.0, &basis[0]);
             ctx.queue.submit(Some(enc.finish()));
         }
-        if let Some(profile) = profile.as_deref_mut() {
+        if let Some(ref mut profile) = profile {
             profile.basis_seed_phase += basis_seed_start.elapsed();
         }
 
@@ -422,7 +422,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
                 spmv.encode_spmv(ctx, &mut enc, 1.0, a, &basis[jj], 0.0, gpu_w);
                 ctx.queue.submit(Some(enc.finish()));
             }
-            if let Some(profile) = profile.as_deref_mut() {
+            if let Some(ref mut profile) = profile {
                 profile.arnoldi_spmv_phase += spmv_start.elapsed();
             }
 
@@ -437,7 +437,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
                         ctx.queue.submit(Some(enc.finish()));
                     }
                 }
-                if let Some(profile) = profile.as_deref_mut() {
+                if let Some(ref mut profile) = profile {
                     profile.arnoldi_orthogonalization_phase += orth_start.elapsed();
                 }
             }
@@ -486,7 +486,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
                 vops.encode_axpy(ctx, &mut enc, 1.0, gpu_w, 0.0, &basis[jj + 1]);
                 ctx.queue.submit(Some(enc.finish()));
             }
-            if let Some(profile) = profile.as_deref_mut() {
+            if let Some(ref mut profile) = profile {
                 profile.arnoldi_normalization_phase += normalize_start.elapsed();
             }
         }
@@ -506,7 +506,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
                 vops.encode_axpy(ctx, &mut enc, y[i], &basis[i], 1.0, gpu_x);
                 ctx.queue.submit(Some(enc.finish()));
             }
-            if let Some(profile) = profile.as_deref_mut() {
+            if let Some(ref mut profile) = profile {
                 profile.solution_update_phase += solution_update_start.elapsed();
             }
         }
@@ -516,7 +516,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
                 let cpu_x = gpu_x.read_to_cpu(ctx);
                 x.copy_from_slice(&cpu_x);
             }
-            if let Some(profile) = profile.as_deref_mut() {
+            if let Some(ref mut profile) = profile {
                 profile.iterations = iter_count;
                 profile.final_residual = gmres_r_norm;
                 profile.total_phase = total_start.elapsed();
@@ -526,7 +526,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
     }
 
     if fixed_iterations.is_some() && !read_back_solution {
-        if let Some(profile) = profile.as_deref_mut() {
+        if let Some(ref mut profile) = profile {
             profile.iterations = iter_count;
             profile.final_residual = last_residual;
             profile.total_phase = total_start.elapsed();
@@ -541,7 +541,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
         let cpu_x = gpu_x.read_to_cpu(ctx);
         x.copy_from_slice(&cpu_x);
     }
-    if let Some(profile) = profile.as_deref_mut() {
+    if let Some(ref mut profile) = profile {
         profile.iterations = iter_count;
         profile.final_residual = final_residual;
         profile.finalization_phase += finalization_start.elapsed();
@@ -550,6 +550,7 @@ fn solve_gmres_gpu_prepared<T: Scalar>(
     Err(SolverError::ConvergenceFailed { max_iter: target_iterations, residual: final_residual })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_residual_into<T: Scalar>(
     ctx: &GpuContext,
     spmv: &SpmvPipeline,

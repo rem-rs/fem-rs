@@ -5,7 +5,6 @@
 //! derefinement for Tri3 triangular meshes.
 
 use fem_core::ElemId;
-use crate::element_type::ElementType;
 use crate::simplex::SimplexMesh;
 
 /// Compute target element sizes from error indicators.

@@ -101,8 +101,8 @@ pub fn assemble_sip_curved_3d<S: FESpace + Sync>(
     let tet_faces: [(usize, usize, usize); 4] = [(1,2,3), (0,2,3), (0,1,3), (0,1,2)];
 
     let q_face = ref_elem(ElementType::Tri3, order).quadrature(2);
-    let nf = q_face.points.len();
-    let mut phi_f = vec![0.0; 3]; // Tri3: 3 basis fns
+    let _nf = q_face.points.len();
+    let _phi_f = [0.0; 3]; // Tri3: 3 basis fns
     let mut phi_l = vec![0.0; n];
     let mut phi_r = vec![0.0; n];
     let mut gref_l = vec![0.0; n * dim];

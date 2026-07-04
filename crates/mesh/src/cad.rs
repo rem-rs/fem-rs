@@ -238,6 +238,29 @@ pub struct NurbsCadSurface2D {
 }
 
 impl NurbsCadSurface2D {
+    /// Build from element-crate patch data (2-D control points → 3-D).
+    pub fn from_patch_data(pd: &fem_element::iga::NurbsPatch2DData) -> Self {
+        let ctrl_3d: Vec<[f64; 3]> = pd.control_pts.iter().map(|&c| [c[0], c[1], 0.0]).collect();
+        let kv_u = pd.kv_u.knots.clone();
+        let kv_v = pd.kv_v.knots.clone();
+        Self { kv_u, kv_v, control_pts: ctrl_3d, weights: pd.weights.clone(), n_u: pd.kv_u.n_basis(), n_v: pd.kv_v.n_basis() }
+    }
+
+    /// Convert back to element-crate patch data (drops z-coordinate).
+    pub fn into_patch_data(self) -> fem_element::iga::NurbsPatch2DData {
+        let pu = self.kv_u.len() - self.n_u - 1;
+        let pv = self.kv_v.len() - self.n_v - 1;
+        let c2d: Vec<[f64; 2]> = self.control_pts.iter().map(|c| [c[0], c[1]]).collect();
+        use fem_element::iga::NurbsKnotVector;
+        fem_element::iga::NurbsPatch2DData {
+            kv_u: NurbsKnotVector::new(self.kv_u, pu),
+            kv_v: NurbsKnotVector::new(self.kv_v, pv),
+            control_pts: c2d,
+            weights: self.weights,
+            tag: 0,
+        }
+    }
+
     /// Build a NURBS CAD surface from knot vectors, 3D control points, and weights.
     /// `control_pts` in lexicographic order (u-fast, v-slow).
     pub fn new(
@@ -478,6 +501,10 @@ pub struct ProjectionConfig {
     surfaces: Vec<(i32, CadShape)>,
 }
 
+impl Default for ProjectionConfig {
+    fn default() -> Self { Self::new() }
+}
+
 impl ProjectionConfig {
     pub fn new() -> Self { Self { surfaces: Vec::new() } }
 
@@ -551,11 +578,11 @@ pub fn project_elevated_node<const D: usize>(
     for &(t, ref surface) in &config.surfaces {
         if t == tag {
             let mut pt3 = [0.0; 3];
-            for i in 0..D { pt3[i] = linear_coord[i]; }
+            pt3[..D].copy_from_slice(&linear_coord[..D]);
             let (u, v, _) = surface.project(&pt3);
             let proj = surface.eval(u, v);
             let mut out = [0.0; D];
-            for i in 0..D { out[i] = proj[i]; }
+            out[..D].copy_from_slice(&proj[..D]);
             return out;
         }
     }
@@ -611,13 +638,12 @@ mod tests {
     #[test]
     fn faceted_from_stl_projection() {
         // Build a simple triangle that represents a flat plane at z=0
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let _mesh = SimplexMesh::<3>::unit_cube_tet(1);
         let verts = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let tris = vec![[0, 1, 2]];
         let faceted = FacetedCadSurface::from_triangulated(verts, tris);
-        let (u, v, d) = faceted.project(&[0.2, 0.3, 0.5]);
+        let (_, _, d) = faceted.project(&[0.2, 0.3, 0.5]);
         assert!(d > 0.0, "expected non-zero distance from plane");
-        // Point projects to (0.2, 0.3, 0) with dist 0.5
         assert!((d - 0.5).abs() < 1e-10, "expected dist 0.5 got {d:.6e}");
     }
 }

@@ -55,7 +55,7 @@ pub fn hermite_all(p: usize, x: f64) -> Vec<f64> {
 #[allow(dead_code)]
 fn hermite_triple_product(i: usize, j: usize, k: usize) -> f64 {
     // E[H_i H_j H_k] = 0 unless i+j+k is even and |i-j| ≤ k ≤ i+j
-    if (i + j + k) % 2 != 0 { return 0.0; }
+    if !(i + j + k).is_multiple_of(2) { return 0.0; }
     if k > i + j || k < i.abs_diff(j) { return 0.0; }
     // For normalized Hermite: factor = i!j!k! / ((s-i)!(s-j)!(s-k)!) where s = (i+j+k)/2
     let s = (i + j + k) / 2;
@@ -68,7 +68,7 @@ fn hermite_triple_product(i: usize, j: usize, k: usize) -> f64 {
 }
 
 fn factorial(n: usize) -> usize {
-    (2..=n).fold(1, |a, b| a * b)
+    (2..=n).product()
 }
 
 /// PCE basis: multi-index set for an M-dimensional random space up to total order P.

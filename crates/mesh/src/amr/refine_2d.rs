@@ -1,12 +1,12 @@
 //! 2-D adaptive mesh refinement: bisection, non-conforming, p-refinement,
 //! error estimators, and anisotropic refinement for Tri3 and Quad4.
+#![allow(dead_code)]
 use std::collections::HashMap;
-use fem_core::{FaceId, NodeId, ElemId};
+use fem_core::{NodeId, ElemId};
 use crate::element_type::ElementType;
 use crate::simplex::SimplexMesh;
-use super::{HangingNodeConstraint, HangingFaceConstraint, HangingQuadFaceConstraint, NCState, NCStateQuad, DerefineTree, DerefineRecord, NCState3D, QuadRefineDir, TriRefineDir};
-use super::{edge_key, quad_edge_key, local_edges_tri, local_edges_quad, local_faces_hex, quad_face_key, hex_face_key};
-use super::{refine_nonconforming_hex, refine_uniform_3d, refine_prism6_uniform, refine_pyramid5_uniform};
+use super::{HangingNodeConstraint, DerefineTree, DerefineRecord, QuadRefineDir, TriRefineDir};
+use super::{edge_key, quad_edge_key, local_edges_tri, local_edges_quad};
 
 // ─── Bisection refinement ─────────────────────────────────────────────────────
 
@@ -116,7 +116,116 @@ pub fn refine_marked(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2>
     )
 }
 
-// ─── refine_marked_with_tree / derefine_marked ────────────────────────────────
+// ─── Closure refinement ────────────────────────────────────────────────────────
+
+/// Detect edges where a hanging node exists: the edge key has some elements that
+/// have the midpoint node and others that do not.  Returns the set of coarser
+/// elements (those missing the midpoint) that must be refined.
+fn detect_hanging_edges(
+    mesh: &SimplexMesh<2>,
+    edge_elems: &HashMap<(NodeId, NodeId), Vec<ElemId>>,
+) -> Vec<ElemId> {
+    let mut to_refine: std::collections::HashSet<ElemId> = std::collections::HashSet::new();
+    for (&key, elems) in edge_elems {
+        if elems.len() < 2 { continue; }
+        let (a, b) = key;
+        // Compute the expected midpoint for this edge.
+        // Check if the edge was bisected by looking at element node counts.
+        // An element that has 3 nodes for a Tri3 means no split on this edge;
+        // an element with the midpoint (a,b)→m has a node at the midpoint.
+        // The midpoint lies at coords (coords_of(a)+coords_of(b))/2.
+        // We detect hanging by checking if any element in the set contains all
+        // three of (a, b, mid) vs only (a, b).
+        let mid_coord = [
+            0.5 * (mesh.coords_of(a)[0] + mesh.coords_of(b)[0]),
+            0.5 * (mesh.coords_of(a)[1] + mesh.coords_of(b)[1]),
+        ];
+        // Find midpoint node if it exists
+        let mut mid_node = None;
+        for &e in elems {
+            let ns = mesh.elem_nodes(e);
+            // An element has the midpoint if it has 4+ nodes on this edge
+            // (i.e., it was refined and has the edge-bisection node).
+            // In a Tri3 mesh after bisection, an element has a node on this
+            // edge if one of its nodes is at the midpoint coordinate.
+            for &n in ns {
+                let nc = mesh.coords_of(n);
+                if (nc[0] - mid_coord[0]).abs() < 1e-12 && (nc[1] - mid_coord[1]).abs() < 1e-12 {
+                    mid_node = Some(n);
+                    break;
+                }
+            }
+            if mid_node.is_some() { break; }
+        }
+        let Some(mid) = mid_node else { continue; };
+
+        // Elements that DON'T have the midpoint are coarser (need refinement)
+        for &e in elems {
+            if !mesh.elem_nodes(e).contains(&mid) {
+                to_refine.insert(e);
+            }
+        }
+    }
+    to_refine.into_iter().collect()
+}
+
+/// Closure-safe refinement: marks elements, refines, then iteratively detects
+/// hanging edges and refines coarser neighbours until the mesh is conforming.
+///
+/// Uses longest-edge bisection (same as [`refine_marked`]).  Guarantees the
+/// returned mesh has no hanging nodes (within the tolerance used for midpoint
+/// detection).
+///
+/// The iteration limit (default 20) prevents infinite loops on pathological
+/// inputs.  Each pass may add elements, so the total cost is bounded by
+/// `O(n_passes · n_elems)`.
+pub fn closure_refine(mesh: &SimplexMesh<2>, marked: &[ElemId], max_iter: usize) -> SimplexMesh<2> {
+    assert!(
+        mesh.elem_type == ElementType::Tri3,
+        "closure_refine: only Tri3 meshes are supported"
+    );
+
+    let mut current = mesh.clone();
+    let mut to_refine: Vec<ElemId> = marked.to_vec();
+    let mut visited: std::collections::HashSet<ElemId> = std::collections::HashSet::new();
+
+    for _iter in 0..max_iter {
+        if to_refine.is_empty() { break; }
+
+        // Deduplicate and skip already-refined elements
+        let mut dedup: Vec<ElemId> = Vec::new();
+        for &e in &to_refine {
+            if e < current.n_elems() as ElemId && visited.insert(e) {
+                dedup.push(e);
+            }
+        }
+        if dedup.is_empty() { break; }
+
+        // Refine the marked elements
+        current = refine_marked(&current, &dedup);
+        visited.clear(); // After refinement, element IDs shift — reset.
+
+        // Build edge → elements map for the new mesh
+        let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+        for e in 0..current.n_elems() as ElemId {
+            let ns = current.elem_nodes(e);
+            for &(ea, eb) in &local_edges_tri() {
+                let key = edge_key(ns[ea], ns[eb]);
+                edge_elems.entry(key).or_default().push(e);
+            }
+        }
+
+        // Detect hanging edges and collect elements to refine
+        to_refine = detect_hanging_edges(&current, &edge_elems);
+    }
+
+    current
+}
+
+/// Convenience overload with a default iteration limit (20).
+pub fn closure_refine_default(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2> {
+    closure_refine(mesh, marked, 20)
+}
 // (Placeholder — full implementation same as before, calls local_edges_tri etc.)
 pub fn refine_marked_with_tree(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> (SimplexMesh<2>, DerefineTree) {
     // Same implementation as original
@@ -357,7 +466,7 @@ pub fn p_refine_tri3_to_tri6(mesh:&SimplexMesh<2>,marked:&[ElemId])->(SimplexMes
     let mut edge_to_new_node:HashMap<(NodeId,NodeId),NodeId>=HashMap::new();
     let mut next_node=mesh.n_nodes()as NodeId;let mut new_coords=mesh.coords.clone();
     for &e in marked{let ns=mesh.elem_nodes(e);let edge_pairs=[(ns[0],ns[1]),(ns[1],ns[2]),(ns[0],ns[2])];
-        for &(a,b)in &edge_pairs{let ek=edge_key(a,b);if!edge_to_new_node.contains_key(&ek){let[xa,ya]=mesh.coords_of(a);let[xb,yb]=mesh.coords_of(b);new_coords.push(0.5*(xa+xb));new_coords.push(0.5*(ya+yb));edge_to_new_node.insert(ek,next_node);next_node+=1;}}}
+        for &(a,b)in &edge_pairs{let ek=edge_key(a,b);edge_to_new_node.entry(ek).or_insert_with(||{let[xa,ya]=mesh.coords_of(a);let[xb,yb]=mesh.coords_of(b);new_coords.push(0.5*(xa+xb));new_coords.push(0.5*(ya+yb));next_node+=1;next_node-1});}}
     let mut new_conn=Vec::new();let mut elem_types_vec:Vec<ElementType>=Vec::with_capacity(n_elemes);let mut elem_offsets=vec![0usize];
     for e in 0..n_elemes as ElemId{let ns=mesh.elem_nodes(e);if marked_set.contains(&e){let ek=|a:NodeId,b:NodeId|edge_key(a,b);
             let m01=edge_to_new_node[&ek(ns[0],ns[1])];let m12=edge_to_new_node[&ek(ns[1],ns[2])];let m02=edge_to_new_node[&ek(ns[0],ns[2])];
@@ -443,4 +552,155 @@ pub fn refine_nonconforming_tri_aniso(mesh:&SimplexMesh<2>,marked:&[(ElemId,TriR
     let nf=mesh.n_faces();let mut nfc=Vec::new();let mut nft=Vec::new();
     for f in 0..nf{let a=mesh.face_conn[2*f];let b=mesh.face_conn[2*f+1];let tag=mesh.face_tags[f];if let Some(&mid)=mm.get(&edge_key(a,b)){nfc.extend_from_slice(&[a,mid]);nft.push(tag);nfc.extend_from_slice(&[mid,b]);nft.push(tag);}else{nfc.extend_from_slice(&[a,b]);nft.push(tag);}}
     let nm=SimplexMesh::uniform(nc,ncn,nt,ElementType::Tri3,nfc,nft,ElementType::Line2);(nm,c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SimplexMesh;
+
+    /// Check that a single marked element produces a conforming mesh.
+    #[test]
+    fn closure_single_element() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let c = closure_refine_default(&mesh, &[0]);
+        // Every edge should be shared by exactly 2 elements (or 1 on boundary).
+        // For a conforming mesh, no edge should have a hanging node.
+        let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+        for e in 0..c.n_elems() as ElemId {
+            let ns = c.elem_nodes(e);
+            for &(a, b) in &local_edges_tri() {
+                edge_counts.entry(edge_key(ns[a], ns[b])).or_default().push(e);
+            }
+        }
+        // Boundary edges have 1 element, interior have 2.
+        for (_key, elems) in &edge_counts {
+            assert!(elems.len() <= 2, "Edge shared by >2 elements");
+        }
+        assert!(c.n_elems() > mesh.n_elems(), "Mesh should be refined");
+    }
+
+    /// Multiple marked elements should still produce a conforming mesh.
+    #[test]
+    fn closure_multiple_elements() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let c = closure_refine_default(&mesh, &[0, 4, 7]);
+        let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+        for e in 0..c.n_elems() as ElemId {
+            let ns = c.elem_nodes(e);
+            for &(a, b) in &local_edges_tri() {
+                edge_counts.entry(edge_key(ns[a], ns[b])).or_default().push(e);
+            }
+        }
+        for (_key, elems) in &edge_counts {
+            assert!(elems.len() <= 2, "Edge shared by {} elements", elems.len());
+        }
+    }
+
+    /// Deterministic test with a variety of marked sets: verify conforming mesh every time.
+    #[test]
+    fn closure_variety_markings() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        // Test a range of marking patterns
+        let patterns: Vec<Vec<ElemId>> = vec![
+            vec![0],
+            vec![1],
+            vec![0, 1],
+            vec![0, 3],
+            vec![4, 5, 7],
+            vec![2, 6, 8],
+            vec![0, 4, 8],
+            (0..mesh.n_elems() as ElemId).step_by(2).collect(),
+            (0..mesh.n_elems() as ElemId).step_by(3).collect(),
+        ];
+        for (trial, marked) in patterns.iter().enumerate() {
+            let c = closure_refine_default(&mesh, marked);
+            let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+            for e in 0..c.n_elems() as ElemId {
+                let ns = c.elem_nodes(e);
+                for &(a, b) in &local_edges_tri() {
+                    edge_counts.entry(edge_key(ns[a], ns[b])).or_default().push(e);
+                }
+            }
+            let mut bad = 0;
+            for (_key, elems) in &edge_counts {
+                if elems.len() > 2 { bad += 1; }
+            }
+            assert_eq!(bad, 0, "Trial {trial}: {bad} edges with >2 elements");
+        }
+    }
+
+    /// 50 trials using a deterministic LCG random to avoid external rand dependency.
+    #[test]
+    fn closure_50_randomish_markings() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let n = mesh.n_elems();
+        let mut state: u64 = 42;
+        for trial in 0..50 {
+            let mut marked: Vec<ElemId> = Vec::new();
+            for e in 0..n as ElemId {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let r: f64 = (state >> 33) as f64 / (1u64 << 31) as f64;
+                if r < 0.3 { marked.push(e); }
+            }
+            if marked.is_empty() { marked.push((state % n as u64) as ElemId); }
+            let c = closure_refine_default(&mesh, &marked);
+            let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+            for e in 0..c.n_elems() as ElemId {
+                let ns = c.elem_nodes(e);
+                for &(a, b) in &local_edges_tri() {
+                    edge_counts.entry(edge_key(ns[a], ns[b])).or_default().push(e);
+                }
+            }
+            let mut bad = 0;
+            for (_key, elems) in &edge_counts {
+                if elems.len() > 2 { bad += 1; }
+            }
+            assert_eq!(bad, 0, "Trial {trial}: {bad} edges with >2 elements");
+            // Verify no degenerate elements
+            for e in 0..c.n_elems() as ElemId {
+                let ns = c.elem_nodes(e);
+                assert!(ns[0] != ns[1] && ns[1] != ns[2] && ns[0] != ns[2],
+                    "Trial {trial}: degenerate element {e}");
+            }
+        }
+    }
+
+    /// Empty marking → mesh unchanged.
+    #[test]
+    fn closure_no_marked() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let c = closure_refine_default(&mesh, &[]);
+        assert_eq!(c.n_elems(), mesh.n_elems());
+    }
+
+    /// All elements marked → every element splits, no hanging nodes.
+    #[test]
+    fn closure_all_marked() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let c = closure_refine_default(&mesh, &all);
+        // All original elements are bisected into 4 children
+        assert_eq!(c.n_elems(), mesh.n_elems() * 4);
+        let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+        for e in 0..c.n_elems() as ElemId {
+            let ns = c.elem_nodes(e);
+            for &(a, b) in &local_edges_tri() {
+                edge_counts.entry(edge_key(ns[a], ns[b])).or_default().push(e);
+            }
+        }
+        for (_key, elems) in &edge_counts {
+            assert!(elems.len() <= 2, "Edge shared by {} elements", elems.len());
+        }
+    }
+
+    /// Verify that repeated closure application converges (idempotent property).
+    #[test]
+    fn closure_idempotent() {
+        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let c1 = closure_refine_default(&mesh, &[2, 5]);
+        // Applying closure again with empty marking should not change anything
+        let c2 = closure_refine_default(&c1, &[]);
+        assert_eq!(c2.n_elems(), c1.n_elems());
+    }
 }

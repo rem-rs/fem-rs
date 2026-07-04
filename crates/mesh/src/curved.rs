@@ -85,6 +85,7 @@ impl<const D: usize> CurvedMesh<D> {
         let mut edge_map: HashMap<(NodeId, NodeId), Vec<NodeId>> = HashMap::new();
 
         // Helper: get or create (p-1) nodes along edge (a,b), ordered a→b
+        #[allow(clippy::too_many_arguments)]
         fn get_edge_nodes<const D: usize>(
             a: NodeId, b: NodeId,
             a_coords: &[f64; D], b_coords: &[f64; D],
@@ -119,12 +120,12 @@ impl<const D: usize> CurvedMesh<D> {
 
         for e in 0..n_elems {
             let ns = mesh.elem_nodes(e as NodeId);
-            let _base = e as usize * npe_new;
+            let _base = e * npe_new;
             let off = geom_conn.len();
             geom_conn.resize(off + npe_new, 0);
 
             // Copy vertex nodes
-            for i in 0..=dim { geom_conn[off + i] = ns[i]; }
+            geom_conn[off..(dim + off + 1)].copy_from_slice(&ns[..(dim + 1)]);
 
             if dim == 2 {
                 // Tri: 3 edges �?v0v1, v1v2, v0v2
@@ -895,7 +896,7 @@ mod tests {
     #[test]
     fn spherical_curved_jacobian_differs_from_flat() {
         let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let spherical = |mut x: [f64; 2]| { x };
+        let spherical = |x: [f64; 2]| { x };
         let flat = CurvedMesh::from_linear(&mesh);
         let curved = CurvedMesh::elevate_to_order(&mesh, 2, spherical);
         let xi = [1.0/3.0, 1.0/3.0];
@@ -1058,7 +1059,7 @@ mod tests {
             .collect();
         let cache = JacobianCache::build::<2>(&curved, &per_elem);
         let xi = [1.0/3.0, 1.0/3.0];
-        let (_, det_direct) = curved.element_jacobian(0, &xi);
+        let (_, _det_direct) = curved.element_jacobian(0, &xi);
         let det_cached = cache.det_j(0, 1); // second QP
         assert!(det_cached.abs() > 1e-15, "cached det should be non-zero");
     }

@@ -279,10 +279,10 @@ impl CoupledNewtonSolver {
                 Ok((dx, lin))
             }
             CoupledLinearStrategy::BlockDiagonalGmres => {
-                return Err(CoupledSolveError::InvalidLayout(
+                Err(CoupledSolveError::InvalidLayout(
                     "BlockDiagonalGmres: use solve_block_precond_gmres directly; \
                      see fem_solver::block_operator::solve_block_precond_gmres".to_string(),
-                ));
+                ))
             }
         }
     }

@@ -205,8 +205,8 @@ pub fn limiter_weno(
 
         // WENO reconstruction for the gradient ∇u ≈ (u - u_e)
         // For each DOF, compute candidate slopes from neighbor means
-        let mut weno_sum = 0.0;
-        let mut weno_weight = 0.0;
+        let _weno_sum = 0.0;
+        let _weno_weight = 0.0;
         let eps = 1e-14;
 
         // Compute oscillation indicator (smoothness measurement)

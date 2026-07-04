@@ -100,7 +100,7 @@ impl NordsieckState {
     /// Manually initialise from known Nordsieck vector.
     pub fn from_z(z: Vec<Vec<f64>>, dt: f64) -> Self {
         let order = z.len() - 1;
-        assert!(order >= 1 && order <= 6, "BDF order {order} not supported");
+        assert!((1..=6).contains(&order), "BDF order {order} not supported");
         NordsieckState { z, order, dt, nordsieck_history: None }
     }
 
@@ -420,6 +420,10 @@ pub struct BdfStats {
     pub n_linear_solves: u64,
     pub final_dt: f64,
     pub last_error: Option<String>,
+}
+
+impl Default for BdfStats {
+    fn default() -> Self { Self::new() }
 }
 
 impl BdfStats {

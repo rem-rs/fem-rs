@@ -131,6 +131,11 @@ impl BasisCache {
         self.cache.lock().expect("BasisCache mutex poisoned").len()
     }
 
+    /// Returns `true` if the cache contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Clear the cache.
     pub fn clear(&self) {
         self.cache.lock().expect("BasisCache mutex poisoned").clear();

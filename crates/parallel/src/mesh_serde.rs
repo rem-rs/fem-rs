@@ -123,14 +123,14 @@ pub fn encode_submesh<const D: usize>(
 
     let mut mix_flags: u32 = 0;
     let mut ext_tail: usize = 0;
-    if mesh.elem_offsets.is_some() {
-        debug_assert_eq!(mesh.elem_offsets.as_ref().unwrap().len(), n_elems + 1);
+    if let Some(elem_offsets) = &mesh.elem_offsets {
+        debug_assert_eq!(elem_offsets.len(), n_elems + 1);
         debug_assert_eq!(mesh.elem_types.as_ref().map(|t| t.len()), Some(n_elems));
         mix_flags |= 1;
         ext_tail += (n_elems + 1) * 4 + n_elems * 4;
     }
-    if mesh.face_offsets.is_some() {
-        debug_assert_eq!(mesh.face_offsets.as_ref().unwrap().len(), n_faces + 1);
+    if let Some(face_offsets) = &mesh.face_offsets {
+        debug_assert_eq!(face_offsets.len(), n_faces + 1);
         debug_assert_eq!(mesh.face_types.as_ref().map(|t| t.len()), Some(n_faces));
         mix_flags |= 2;
         ext_tail += (n_faces + 1) * 4 + n_faces * 4;

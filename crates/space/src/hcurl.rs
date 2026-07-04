@@ -42,16 +42,22 @@ const TET_EDGES: [(usize, usize); 6] = [
 ];
 
 /// Local edge vertex pairs for 3-D hexahedra (Hex8 ordering).
+///
+/// Ordering MUST match the HexNDk basis function ordering:
+///   edges 0..3:  x-edges (bottom-front, bottom-back, top-back, top-front)
+///   edges 4..7:  y-edges (left-front, right-front, right-back, left-back)
+///   edges 8..11: z-edges (left-front, right-front, right-back, left-back)
 const HEX_EDGES: [(usize, usize); 12] = [
-    (0, 1), (1, 2), (2, 3), (3, 0),
-    (4, 5), (5, 6), (6, 7), (7, 4),
-    (0, 4), (1, 5), (2, 6), (3, 7),
+    (0, 1), (3, 2), (7, 6), (4, 5),   // x-edges (y0=-1,+1,+1,-1; z0=-1,-1,+1,+1)
+    (0, 3), (1, 2), (5, 6), (4, 7),   // y-edges (x0=-1,+1,+1,-1; z0=-1,-1,+1,+1)
+    (0, 4), (1, 5), (2, 6), (3, 7),   // z-edges (x0=-1,+1,+1,-1; y0=-1,-1,+1,+1)
 ];
 
 /// Local edge vertex pairs for prism (Prism6 ordering).
+/// Ordering MUST match PrismND1 element EDGES table.
 const PRISM_EDGES: [(usize, usize); 9] = [
-    (0, 1), (1, 2), (0, 2), // bottom triangle
-    (3, 4), (4, 5), (3, 5), // top triangle
+    (0, 1), (0, 2), (1, 2), // bottom triangle
+    (3, 4), (3, 5), (4, 5), // top triangle
     (0, 3), (1, 4), (2, 5), // vertical
 ];
 

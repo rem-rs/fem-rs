@@ -8,15 +8,14 @@
 
 use std::collections::HashMap;
 use nalgebra::DMatrix;
-use fem_core::types::DofId;
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
-    lagrange::{TriPk, TetPk, SegPk},
+    lagrange::{TriPk, TetPk},
     nedelec::{TriNDk, TetNDk},
 };
 use fem_element::quadrature::{tri_rule, tet_rule};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{element_type::ElementType, topology::MeshTopology};
+use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
 // ─── Local geometry helpers (same as wg_poisson) ──────────────────────────
@@ -157,7 +156,7 @@ fn weak_curl_matrix<M: MeshTopology>(
 }
 
 // ─── Face stabilizer (tangential jump for H(curl)) ────────────────────────
-
+#[allow(clippy::too_many_arguments)]
 fn add_face_penalty_hcurl<M: MeshTopology>(
     coo: &mut CooMatrix<f64>, mesh: &M,
     hcurl_space: &dyn FESpace<Mesh=M>,

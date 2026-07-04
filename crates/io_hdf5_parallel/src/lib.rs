@@ -990,7 +990,7 @@ pub fn read_checkpoint_bundle_f64(
                 },
             ));
         }
-        return Ok(CheckpointBundleReadF64 { step, time, mesh_meta, fields });
+        Ok(CheckpointBundleReadF64 { step, time, mesh_meta, fields })
     }
 
     #[cfg(feature = "hdf5")]
@@ -1027,7 +1027,7 @@ pub fn read_checkpoint_bundle_f64_latest(
             .copied()
             .max()
             .ok_or_else(|| Hdf5ParallelError::InvalidCheckpoint("checkpoint has no steps".into()))?;
-        return read_checkpoint_bundle_f64(file_path, cfg, step, field_names);
+        read_checkpoint_bundle_f64(file_path, cfg, step, field_names)
     }
 
     #[cfg(feature = "hdf5")]

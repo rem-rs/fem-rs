@@ -86,6 +86,7 @@ pub fn build_face_map<M: MeshTopology>(
 /// Static condensation: eliminate interior DOFs, return Schur complement.
 ///
 /// Returns `(condensed_matrix, condensed_rhs)` for the skeleton system.
+#[allow(clippy::too_many_arguments)]
 pub fn static_condensation(
     k_ee: &[f64], k_ef: &[f64], k_fe: &[f64], k_ff: &[f64],
     f_e: &[f64], f_f: &[f64], n_bulk: usize, n_skel: usize,

@@ -18,7 +18,7 @@ fn main() {
     let t0 = Instant::now();
 
     let mesh = PolyMesh::unit_square_quad(4, 3);
-    let space = VEMSpace::new(mesh);
+    let space = VEMSpace::new(mesh, 1);
     let n = space.n_dofs();
     println!("  Polygonal mesh: 4×3 quads, DOFs = {n}");
 
@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn vem_assemble_and_check() {
         let mesh = PolyMesh::unit_square_quad(3, 3);
-        let space = VEMSpace::new(mesh);
+        let space = VEMSpace::new(mesh, 1);
         let k = assemble_vem_poisson(&space);
         assert_eq!(k.nrows, space.n_dofs());
         for i in 0..space.n_dofs() {

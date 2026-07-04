@@ -497,6 +497,10 @@ struct NCState3DSnapshot {
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
 }
 
+impl Default for NCState3D {
+    fn default() -> Self { Self::new() }
+}
+
 impl NCState3D {
     /// Create an empty 3-D NC state for a conforming initial mesh.
     pub fn new() -> Self {
@@ -526,6 +530,7 @@ impl NCState3D {
     /// Perform one level of non-conforming refinement for Tet4 meshes.
     ///
     /// Returns `(new_mesh, constraints, midpoint_map, hanging_faces)`.
+    #[allow(clippy::type_complexity)]
     pub fn refine(
         &mut self,
         mesh: &SimplexMesh<3>,
@@ -563,6 +568,10 @@ impl NCState3D {
         self.active_midpoints = snap.active_midpoints;
         Some((snap.mesh, self.constraints.clone(), self.hanging_faces.clone()))
     }
+}
+
+impl Default for NCState {
+    fn default() -> Self { Self::new() }
 }
 
 impl NCState {
@@ -789,7 +798,7 @@ impl NCState {
 /// * `u_coarse`     — solution on the coarse mesh (length = coarse n_nodes).
 /// * `n_nodes_fine` — number of nodes in the fine mesh.
 /// * `midpoint_map` — mapping `(a, b) → mid` from edge endpoints to midpoint
-///                    node IDs (as returned by [`refine_nonconforming`]).
+///   node IDs (as returned by [`refine_nonconforming`]).
 ///
 /// # Returns
 /// Solution vector of length `n_nodes_fine`.
@@ -1677,15 +1686,14 @@ pub fn p_refine_tri3_to_tri6(
         ];
         for &(a, b) in &edge_pairs {
             let ek = edge_key(a, b);
-            if !edge_to_new_node.contains_key(&ek) {
-                // Add midpoint
+            edge_to_new_node.entry(ek).or_insert_with(|| {
                 let [xa, ya] = mesh.coords_of(a);
                 let [xb, yb] = mesh.coords_of(b);
                 new_coords.push(0.5 * (xa + xb));
                 new_coords.push(0.5 * (ya + yb));
-                edge_to_new_node.insert(ek, next_node);
                 next_node += 1;
-            }
+                next_node - 1
+            });
         }
     }
 
@@ -1828,15 +1836,15 @@ pub fn p_refine_tet4_to_tet10(
         let ns = mesh.elem_nodes(e);
         for &(i,j) in &tet_edges {
             let ek = edge_key(ns[i], ns[j]);
-            if !edge_to_new.contains_key(&ek) {
+            edge_to_new.entry(ek).or_insert_with(|| {
                 let a = mesh.coords_of(ns[i]);
                 let b = mesh.coords_of(ns[j]);
                 new_coords.push(0.5*(a[0]+b[0]));
                 new_coords.push(0.5*(a[1]+b[1]));
                 new_coords.push(0.5*(a[2]+b[2]));
-                edge_to_new.insert(ek, next_node);
                 next_node += 1;
-            }
+                next_node - 1
+            });
         }
     }
 
@@ -1904,14 +1912,14 @@ pub fn p_refine_tet10_to_tet20(
         let ns = mesh.elem_nodes(e);
         for &(i,j,k) in &tet_faces {
             let fk = face_key(ns[i], ns[j], ns[k]);
-            if !face_to_new.contains_key(&fk) {
+            face_to_new.entry(fk).or_insert_with(|| {
                 let a = mesh.coords_of(ns[i]); let b = mesh.coords_of(ns[j]); let c = mesh.coords_of(ns[k]);
                 new_coords.push((a[0]+b[0]+c[0])/3.0);
                 new_coords.push((a[1]+b[1]+c[1])/3.0);
                 new_coords.push((a[2]+b[2]+c[2])/3.0);
-                face_to_new.insert(fk, next_node);
                 next_node += 1;
-            }
+                next_node - 1
+            });
         }
     }
 
@@ -1978,13 +1986,13 @@ pub fn p_refine_quad4_to_quad9(
         let ns = mesh.elem_nodes(e);
         for &(i,j) in &[(0,1),(1,2),(2,3),(3,0)] {
             let ek = edge_key(ns[i], ns[j]);
-            if !edge_to_new.contains_key(&ek) {
+            edge_to_new.entry(ek).or_insert_with(|| {
                 let a = mesh.coords_of(ns[i]); let b = mesh.coords_of(ns[j]);
                 new_coords.push(0.5*(a[0]+b[0]));
                 new_coords.push(0.5*(a[1]+b[1]));
-                edge_to_new.insert(ek, next_node);
                 next_node += 1;
-            }
+                next_node - 1
+            });
         }
     }
 
@@ -2058,14 +2066,14 @@ pub fn p_refine_hex8_to_hex20(
         let ns = mesh.elem_nodes(e);
         for &(i,j) in &hex_edges {
             let ek = edge_key(ns[i], ns[j]);
-            if !edge_to_new.contains_key(&ek) {
+            edge_to_new.entry(ek).or_insert_with(|| {
                 let a = mesh.coords_of(ns[i]); let b = mesh.coords_of(ns[j]);
                 new_coords.push(0.5*(a[0]+b[0]));
                 new_coords.push(0.5*(a[1]+b[1]));
                 new_coords.push(0.5*(a[2]+b[2]));
-                edge_to_new.insert(ek, next_node);
                 next_node += 1;
-            }
+                next_node - 1
+            });
         }
     }
 
@@ -2143,14 +2151,14 @@ pub fn p_refine_hex20_to_hex27(
         for face in &hex_faces {
             let fns = [ns[face[0]], ns[face[1]], ns[face[2]], ns[face[3]]];
             let mut k = fns; k.sort_unstable();
-            if !face_to_new.contains_key(&k) {
+            face_to_new.entry(k).or_insert_with(|| {
                 let mut cx = 0.0; let mut cy = 0.0; let mut cz = 0.0;
                 for &fi in face.iter() { let c = mesh.coords_of(ns[fi]); cx += c[0]; cy += c[1]; cz += c[2]; }
                 cx /= 4.0; cy /= 4.0; cz /= 4.0;
                 new_coords.push(cx); new_coords.push(cy); new_coords.push(cz);
-                face_to_new.insert(k, next_node);
                 next_node += 1;
-            }
+                next_node - 1
+            });
         }
         // Volume centroid
         let mut cx = 0.0; let mut cy = 0.0; let mut cz = 0.0;
@@ -2418,6 +2426,7 @@ pub fn refine_nonconforming_3d(
     (new_mesh, edge_constraints, face_constraints)
 }
 
+#[allow(clippy::type_complexity)]
 fn refine_nonconforming_3d_internal(
     mesh: &SimplexMesh<3>,
     marked: &[ElemId],
@@ -2860,6 +2869,10 @@ pub struct NCStateQuad {
     history: Vec<NCStateQuadSnapshot>,
 }
 
+impl Default for NCStateQuad {
+    fn default() -> Self { Self::new() }
+}
+
 impl NCStateQuad {
     pub fn new() -> Self {
         NCStateQuad { constraints: Vec::new(), active_midpoints: HashMap::new(), history: Vec::new() }
@@ -3067,6 +3080,7 @@ pub(crate) fn hex_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
 ///
 /// # Returns
 /// `(new_mesh, edge_constraints, quad_face_constraints, midpoint_map)`.
+#[allow(clippy::type_complexity)]
 pub fn refine_nonconforming_hex(
     mesh: &SimplexMesh<3>,
     marked: &[ElemId],
@@ -3678,6 +3692,7 @@ pub struct HangingQuadFaceConstraint {
 /// ...
 /// # Returns
 /// `(new_mesh, edge_constraints, tri_face_constraints, quad_face_constraints, midpoint_map)`.
+#[allow(clippy::type_complexity)]
 pub fn refine_nonconforming_prism(
     mesh: &SimplexMesh<3>,
     marked: &[ElemId],
@@ -3692,6 +3707,7 @@ pub fn refine_nonconforming_prism(
     (m, ec, tc, qc, mm)
 }
 
+#[allow(clippy::type_complexity)]
 fn refine_nonconforming_prism_internal(
     mesh: &SimplexMesh<3>,
     marked: &[ElemId],
@@ -4731,6 +4747,10 @@ pub struct NCStateHex {
     history: Vec<NCStateHexSnapshot>,
 }
 
+impl Default for NCStateHex {
+    fn default() -> Self { Self::new() }
+}
+
 impl NCStateHex {
     pub fn new() -> Self {
         Self {
@@ -4749,6 +4769,7 @@ impl NCStateHex {
     /// Perform one level of non-conforming refinement for Hex8.
     ///
     /// Returns `(new_mesh, edge_constraints, quad_face_constraints, midpoint_map)`.
+    #[allow(clippy::type_complexity)]
     pub fn refine(
         &mut self,
         mesh: &SimplexMesh<3>,
@@ -4813,6 +4834,10 @@ pub struct NCStatePrism {
     history: Vec<NCStatePrismSnapshot>,
 }
 
+impl Default for NCStatePrism {
+    fn default() -> Self { Self::new() }
+}
+
 impl NCStatePrism {
     pub fn new() -> Self {
         Self {
@@ -4832,6 +4857,7 @@ impl NCStatePrism {
     /// Perform one level of non-conforming refinement for Prism6.
     ///
     /// Returns `(new_mesh, edge_constraints, tri_face_constraints, quad_face_constraints, midpoint_map)`.
+    #[allow(clippy::type_complexity)]
     pub fn refine(
         &mut self,
         mesh: &SimplexMesh<3>,
@@ -4861,6 +4887,7 @@ impl NCStatePrism {
     }
 
     /// Roll back one NC refinement step.
+    #[allow(clippy::type_complexity)]
     pub fn derefine_last(
         &mut self,
     ) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>)> {
@@ -5641,7 +5668,7 @@ pub fn refine_nonconforming_prism_aniso(
                 if let(Some(mab),Some(mbc),Some(mca))=(ma,mb,mc){nfc.extend_from_slice(&[a,mab,mca]);nft.push(tag);nfc.extend_from_slice(&[mab,b,mbc]);nft.push(tag);nfc.extend_from_slice(&[mca,mbc,c]);nft.push(tag);nfc.extend_from_slice(&[mab,mbc,mca]);nft.push(tag);}
                 else{nfc.extend_from_slice(&[a,b,c]);nft.push(tag);}}
             4=>{let(a,b,c,d)=(fs[0],fs[1],fs[2],fs[3]);let ma=mm.get(&edge_key(a,b)).copied();let mb=mm.get(&edge_key(b,c)).copied();let mc=mm.get(&edge_key(c,d)).copied();let md=mm.get(&edge_key(d,a)).copied();
-                if let(Some(mab),Some(mbc),Some(mcd),Some(mda))=(ma,mb,mc,md){let fk=quad_face_key([a,b,c,d]);nfc.extend_from_slice(&[a,mab,mda]);nft.push(tag);nfc.extend_from_slice(&[mab,b,mbc]);nft.push(tag);nfc.extend_from_slice(&[mda,mbc,c,mcd]);nft.push(tag);}
+                if let(Some(mab),Some(mbc),Some(mcd),Some(mda))=(ma,mb,mc,md){let _fk=quad_face_key([a,b,c,d]);nfc.extend_from_slice(&[a,mab,mda]);nft.push(tag);nfc.extend_from_slice(&[mab,b,mbc]);nft.push(tag);nfc.extend_from_slice(&[mda,mbc,c,mcd]);nft.push(tag);}
                 else{nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag);}}
             _=>{for&n in fs{nfc.push(n);}nft.push(tag);}
         }
@@ -5709,6 +5736,7 @@ pub fn refine_pyramid5_uniform(
 // ─── Pyramid5 non-conforming refinement ─────────────────────────────────────
 
 /// Non-conforming refinement for Pyramid5 → 16 Tet4 children.
+#[allow(clippy::type_complexity)]
 pub fn refine_nonconforming_pyramid(
     mesh: &SimplexMesh<3>,
     marked: &[ElemId],
@@ -5720,6 +5748,7 @@ pub fn refine_nonconforming_pyramid(
     (m, ec, tc, qc, mm)
 }
 
+#[allow(clippy::type_complexity)]
 fn refine_nonconforming_pyramid_internal(
     mesh: &SimplexMesh<3>, marked: &[ElemId],
     active_midpoints: Option<&HashMap<(NodeId, NodeId), NodeId>>,
@@ -5899,6 +5928,10 @@ pub struct NCStatePyramid {
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>, history: Vec<NCStatePyramidSnapshot>,
 }
 
+impl Default for NCStatePyramid {
+    fn default() -> Self { Self::new() }
+}
+
 impl NCStatePyramid {
     pub fn new() -> Self {
         Self { constraints: Vec::new(), tri_face_constraints: Vec::new(), quad_face_constraints: Vec::new(),
@@ -5908,12 +5941,14 @@ impl NCStatePyramid {
     pub fn tri_face_constraints(&self) -> &[HangingFaceConstraint] { &self.tri_face_constraints }
     pub fn quad_face_constraints(&self) -> &[HangingQuadFaceConstraint] { &self.quad_face_constraints }
     pub fn can_derefine(&self) -> bool { !self.history.is_empty() }
+    #[allow(clippy::type_complexity)]
     pub fn refine(&mut self, mesh: &SimplexMesh<3>, marked: &[ElemId]) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
         self.history.push(NCStatePyramidSnapshot { mesh: mesh.clone(), constraints: self.constraints.clone(), tri_face_constraints: self.tri_face_constraints.clone(), quad_face_constraints: self.quad_face_constraints.clone(), active_midpoints: self.active_midpoints.clone() });
         let (nm, ec, tc, qc, mm, nam) = refine_nonconforming_pyramid_internal(mesh, marked, Some(&self.active_midpoints));
         self.constraints = ec.clone(); self.tri_face_constraints = tc.clone(); self.quad_face_constraints = qc.clone(); self.active_midpoints = nam;
         (nm, ec, tc, qc, mm)
     }
+    #[allow(clippy::type_complexity)]
     pub fn derefine_last(&mut self) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>)> {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints; self.tri_face_constraints = snap.tri_face_constraints; self.quad_face_constraints = snap.quad_face_constraints; self.active_midpoints = snap.active_midpoints;
@@ -6012,7 +6047,7 @@ fn refine_hex27_uniform_inner(mesh: &SimplexMesh<3>, marked: &[ElemId], npe: usi
 pub fn zz_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
     let n_nodes = mesh.n_nodes();
     let n_elems = mesh.n_elems();
-    let dim = 3usize;
+    let _dim = 3usize;
 
     // Compute constant element gradient at centroid via reference basis.
     let mut elem_grads: Vec<[f64;3]> = Vec::with_capacity(n_elems);
@@ -6140,7 +6175,7 @@ pub fn zz_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
 /// Supports Tet4, Hex8, Prism6, Pyramid5.
 pub fn kelly_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
-    let npe = mesh.elem_type.nodes_per_element();
+    let _npe = mesh.elem_type.nodes_per_element();
 
     // Compute element gradients and volumes (same as ZZ)
     let (elem_grads, _) = zz_gradients_and_volumes_3d(mesh, u);
@@ -6317,7 +6352,7 @@ fn zz_gradients_and_volumes_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> (Vec<[f64;3]
 /// Supports Tet4, Hex8, Prism6, Pyramid5.
 pub fn residual_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], f: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
-    let npe = mesh.elem_type.nodes_per_element();
+    let _npe = mesh.elem_type.nodes_per_element();
 
     let (elem_grads, elem_vols) = zz_gradients_and_volumes_3d(mesh, u);
 

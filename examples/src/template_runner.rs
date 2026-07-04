@@ -1,3 +1,4 @@
+#![allow(clippy::print_literal)]
 //! Shared utilities for built-in multiphysics template driver examples.
 
 use std::{

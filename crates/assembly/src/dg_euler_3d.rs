@@ -34,9 +34,8 @@ fn orthonormal_tangents(n: &[f64; 3]) -> ([f64; 3], [f64; 3]) {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EulerFluxKind { LaxFriedrichs, Roe, Hllc, AusmPlus }
-impl Default for EulerFluxKind { fn default() -> Self { EulerFluxKind::LaxFriedrichs } }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EulerFluxKind { #[default] LaxFriedrichs, Roe, Hllc, AusmPlus }
 
 pub struct Euler3D { pub gamma: f64 }
 impl Default for Euler3D { fn default() -> Self { Self { gamma: 1.4 } } }
@@ -263,8 +262,8 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
     pub fn rhs(&self, u: &[f64]) -> Vec<f64> {
         let euler = &self.euler; let mut du = vec![0.0; self.n_dofs];
         let tet = TetP1; let tri = TriP1; let qv = tet.quadrature(2); let qf = tri.quadrature(3);
-        let mut phi = vec![0.0; 4]; let mut grad = vec![0.0; 12];
-        let mut gg = vec![0.0; 12]; let mut jac = vec![vec![0.0;3];3];
+        let mut phi = vec![0.0; 4]; let mut grad = [0.0; 12];
+        let mut gg = [0.0; 12]; let mut jac = vec![vec![0.0;3];3];
         // Volume
         for e in 0..self.n_elems as u32 {
             let en = self.mesh.element_nodes(e);
@@ -279,7 +278,7 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
                     (jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])*id,(jac[0][2]*jac[2][1]-jac[0][1]*jac[2][2])*id,(jac[0][1]*jac[1][2]-jac[0][2]*jac[1][1])*id,
                     (jac[1][2]*jac[2][0]-jac[1][0]*jac[2][2])*id,(jac[0][0]*jac[2][2]-jac[0][2]*jac[2][0])*id,(jac[0][2]*jac[1][0]-jac[0][0]*jac[1][2])*id,
                     (jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0])*id,(jac[0][1]*jac[2][0]-jac[0][0]*jac[2][1])*id,(jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0])*id);
-                let mut gp = vec![0.0; 12];
+                let mut gp = [0.0; 12];
                 for i in 0..4 { gp[i*3]=m00*grad[i*3]+m01*grad[i*3+1]+m02*grad[i*3+2]; gp[i*3+1]=m10*grad[i*3]+m11*grad[i*3+1]+m12*grad[i*3+2]; gp[i*3+2]=m20*grad[i*3]+m21*grad[i*3+1]+m22*grad[i*3+2]; }
                 let mut uqp = [0.0;5]; for i in 0..4 { for c in 0..5 { uqp[c] += phi[i] * u[self.idx(e, c, i)]; } }
                 let fx = euler.flux_x(&uqp); let fy = euler.flux_y(&uqp); let fz = euler.flux_z(&uqp);
@@ -299,15 +298,15 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
         // Face integrals
         for &(el, er, ref fnodes) in &ifaces {
             let enl = self.mesh.element_nodes(el); let enr = self.mesh.element_nodes(er);
-                let (nx, ny, nz, fj) = tet_face_normal(&self.mesh, &enl, &fnodes);
+                let (nx, ny, nz, fj) = tet_face_normal(&self.mesh, enl, fnodes);
             // Determine which local face index fnodes corresponds to
             let face_idx = |en: &[u32]| -> usize {
-                if fnodes[0]==en[0]||fnodes[0]==en[1]||fnodes[0]==en[2] { if fnodes[2]==en[0]||fnodes[2]==en[1]||fnodes[2]==en[2] { return 0; } }
-                if fnodes[0]==en[0]||fnodes[0]==en[1]||fnodes[0]==en[3] { if fnodes[2]==en[0]||fnodes[2]==en[1]||fnodes[2]==en[3] { return 1; } }
-                if fnodes[0]==en[0]||fnodes[0]==en[2]||fnodes[0]==en[3] { if fnodes[2]==en[0]||fnodes[2]==en[2]||fnodes[2]==en[3] { return 2; } }
+                if (fnodes[0]==en[0]||fnodes[0]==en[1]||fnodes[0]==en[2]) && (fnodes[2]==en[0]||fnodes[2]==en[1]||fnodes[2]==en[2]) { return 0; }
+                if (fnodes[0]==en[0]||fnodes[0]==en[1]||fnodes[0]==en[3]) && (fnodes[2]==en[0]||fnodes[2]==en[1]||fnodes[2]==en[3]) { return 1; }
+                if (fnodes[0]==en[0]||fnodes[0]==en[2]||fnodes[0]==en[3]) && (fnodes[2]==en[0]||fnodes[2]==en[2]||fnodes[2]==en[3]) { return 2; }
                 3
             };
-            let fl = face_idx(&enl);
+            let fl = face_idx(enl);
             for q in 0..qf.n_points() {
                 let (pu, pv) = (qf.points[q][0], qf.points[q][1]);
                 let w = qf.weights[q] * fj;
@@ -315,7 +314,7 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
                     0 => vec![pu, pv, 0.0], 1 => vec![pu, 0.0, pv], 2 => vec![0.0, pu, pv],
                     _ => vec![1.0-pu-pv, pu, pv],
                 };
-                let fr = face_idx(&enr);
+                let fr = face_idx(enr);
                 let xir = match fr {
                     0 => vec![pu, pv, 0.0], 1 => vec![pu, 0.0, pv], 2 => vec![0.0, pu, pv],
                     _ => vec![1.0-pu-pv, pu, pv],
@@ -333,8 +332,8 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
             'lf: for lf in 0..4 {
                 let fno: Vec<u32> = match lf { 0=>vec![en[0],en[1],en[2]], 1=>vec![en[0],en[1],en[3]], 2=>vec![en[0],en[2],en[3]], 3=>vec![en[1],en[2],en[3]], _=>unreachable!() };
                 let mut key = fno.clone(); key.sort_unstable();
-                for &(_, _, ref ff) in &ifaces { let mut fk = ff.clone(); fk.sort_unstable(); if fk == key { continue 'lf; } }
-                let (nx, ny, nz, fj) = tet_face_normal(&self.mesh, &en, &fno);
+                for (_, _, ff) in &ifaces { let mut fk = ff.clone(); fk.sort_unstable(); if fk == key { continue 'lf; } }
+                let (nx, ny, nz, fj) = tet_face_normal(&self.mesh, en, &fno);
                 for q in 0..qf.n_points() {
                     let (pu, pv) = (qf.points[q][0], qf.points[q][1]);
                     let w = qf.weights[q] * fj;

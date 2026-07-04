@@ -118,6 +118,7 @@ where
     lobpcg_projected(a, b, k, Some(constraints), Some(&preconditioner), cfg)
 }
 
+#[allow(clippy::type_complexity)]
 fn lobpcg_projected(
     a: &CsrMatrix<f64>,
     b: Option<&CsrMatrix<f64>>,
@@ -685,7 +686,7 @@ pub fn feast_interval(
         for c in start_col..end_col {
             let mut rhs = vec![0.0; n];
             for i in 0..n {
-                rhs[i] = ((i + 1) * (c + 1) as usize).wrapping_mul(2654435761) as f64 % 100.0 / 100.0;
+                rhs[i] = ((i + 1) * (c + 1)).wrapping_mul(2654435761) as f64 % 100.0 / 100.0;
             }
             match solve_sparse_lu(&a_shift, &rhs) {
                 Ok(y) => {

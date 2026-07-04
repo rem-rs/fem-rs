@@ -157,7 +157,7 @@ where
     S: FESpace<Mesh = M>,
 {
     let m: &M = gf.space().mesh();
-    let ne = m.n_elements() as usize;
+    let ne = m.n_elements();
     let d = m.dim() as usize;
 
     // Barycentric coordinates for element centroid evaluation
@@ -324,7 +324,7 @@ where
     S: FESpace<Mesh = M>,
 {
     let m: &M = u_gf.space().mesh();
-    let ne = m.n_elements() as usize;
+    let ne = m.n_elements();
     let d = m.dim() as usize;
 
     let xi: Vec<f64> = if d == 2 { vec![1.0 / 3.0; 2] } else { vec![0.25; 4] };

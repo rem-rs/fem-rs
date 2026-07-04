@@ -3,6 +3,7 @@
 //! Bilinear/linear form assembly: [`Assembler`], [`BilinearIntegrator`],
 //! [`LinearIntegrator`], and standard integrators (diffusion, mass, source,
 //! Neumann, elasticity).
+#![allow(non_snake_case, dead_code, unreachable_patterns, unused_imports, unused_variables, unused_assignments, clippy::needless_range_loop)]
 //!
 //! - **IGA FESpace:** for [`IgaFESpace1D`](fem_space::IgaFESpace1D) / [`IgaFESpace2D`](fem_space::IgaFESpace2D),
 //!   use [`Assembler::assemble_bilinear_iga_1d`](Assembler::assemble_bilinear_iga_1d) /
@@ -156,6 +157,7 @@ pub mod wg_stokes;
 pub mod wg_maxwell;
 pub mod vem_poisson;
 pub mod cutfem;
+pub mod lor_factory;
 
 #[cfg(feature = "reed")]
 pub mod reed;
@@ -265,4 +267,5 @@ pub use thermoelastic::{
     solve_thermoelastic_staggered,
 };
 pub use static_cond::{StaticCondensation, GlobalBacksolve, condense_global};
+pub use lor_factory::{build_lor_amg_h1, build_lor_amg_h1_3d};
 pub use form::{BilinearForm, LinearForm, VectorBilinearForm, VectorLinearForm};

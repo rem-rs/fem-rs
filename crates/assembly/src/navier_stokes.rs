@@ -145,7 +145,7 @@ pub fn assemble_divergence_matrix<M: MeshTopology + Clone>(
                 for d in 0..dim {
                     let vel_dof = dofs_v[v * dim + d];
                     let idx = p * n_v * dim + v * dim + d;
-                    coo.add(pres_dof as usize, vel_dof as usize, -b_mat[idx]);
+                    coo.add(pres_dof, vel_dof, -b_mat[idx]);
                 }
             }
         }
@@ -329,6 +329,7 @@ pub fn assemble_oseen_block<M: MeshTopology + Clone>(
 /// where r_u = f_vel - A_oseen·u_curr - Bᵀ·p_curr  and  r_p = f_pres - B·u_curr
 ///
 /// Returns (Δu, Δp) such that u_{k+1} = u_k + Δu, p_{k+1} = p_k + Δp.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_oseen_step(
     a_oseen: &CsrMatrix<f64>,
     b: &CsrMatrix<f64>,
@@ -390,6 +391,7 @@ pub fn solve_oseen_step(
 ///
 /// # Returns
 /// `(u, p, n_iter)` — final velocity, pressure, number of iterations
+#[allow(clippy::too_many_arguments)]
 pub fn solve_ns_picard<M: MeshTopology + Clone>(
     vel_space: &VectorH1Space<M>,
     pres_space: &H1Space<M>,

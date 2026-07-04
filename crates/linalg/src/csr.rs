@@ -104,6 +104,7 @@ fn csr_row_dot_f64(
     csr_row_segment_dot_f64(col_idx, values, x, start, end)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline]
 fn csr_row_dot_axpby_f64(
     row_ptr: &[usize],
@@ -303,8 +304,8 @@ impl<T: Scalar> CsrMatrix<T> {
         }
 
         let mut d = vec![T::zero(); self.nrows];
-        for row in 0..self.nrows {
-            d[row] = self.get(row, row);
+        for (row, di) in d.iter_mut().enumerate().take(self.nrows) {
+            *di = self.get(row, row);
         }
         d
     }
@@ -383,10 +384,7 @@ impl<T: Scalar> CsrMatrix<T> {
     fn find_entry(&self, row: usize, col: usize) -> Option<usize> {
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
-        for k in start..end {
-            if self.col_idx[k] as usize == col { return Some(k); }
-        }
-        None
+        (start..end).find(|&k| self.col_idx[k] as usize == col)
     }
 
     // -----------------------------------------------------------------------
@@ -788,10 +786,7 @@ pub fn csr_spmm_parallel(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f6
             }
 
             dirty.sort_unstable();
-            let vals: Vec<f64> = dirty.iter().map(|&j| {
-                let v = acc[j as usize];
-                v
-            }).collect();
+            let vals: Vec<f64> = dirty.iter().map(|&j| acc[j as usize]).collect();
             // The acc vec is dropped here — no explicit reset needed.
 
             (dirty, vals)

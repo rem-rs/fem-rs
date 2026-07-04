@@ -79,13 +79,13 @@ impl KnotVector {
         assert!(n_elems >= 1, "n_elems must be ≥ 1");
         let mut knots = Vec::new();
         // p+1 leading zeros
-        for _ in 0..=degree { knots.push(0.0); }
+        knots.extend(std::iter::repeat_n(0.0, degree + 1));
         // interior knots
         for i in 1..n_elems {
             knots.push(i as f64 / n_elems as f64);
         }
         // p+1 trailing ones
-        for _ in 0..=degree { knots.push(1.0); }
+        knots.extend(std::iter::repeat_n(1.0, degree + 1));
         KnotVector { knots, degree }
     }
 

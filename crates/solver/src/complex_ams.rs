@@ -87,6 +87,7 @@ pub fn build_ads_precond(
 ///
 /// The preconditioner is built from the real part of A with the given
 /// discrete gradient matrix G.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_gmres_ams_complex(
     a_complex: &ComplexCsr,
     g: &linlvoCsr<f64>,
@@ -108,6 +109,7 @@ pub fn solve_gmres_ams_complex(
 }
 
 /// Solve using BiCGSTAB with AMS preconditioner.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_bicgstab_ams_complex(
     a_complex: &ComplexCsr,
     g: &linlvoCsr<f64>,
@@ -128,6 +130,7 @@ pub fn solve_bicgstab_ams_complex(
 }
 
 /// Solve using GMRES with ADS preconditioner.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_gmres_ads_complex(
     a_complex: &ComplexCsr,
     c: &linlvoCsr<f64>,
@@ -150,6 +153,7 @@ pub fn solve_gmres_ads_complex(
 }
 
 /// Solve using BiCGSTAB with ADS preconditioner.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_bicgstab_ads_complex(
     a_complex: &ComplexCsr,
     c: &linlvoCsr<f64>,
