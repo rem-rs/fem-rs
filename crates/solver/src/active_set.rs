@@ -1,7 +1,7 @@
 //! Active-set Newton for 3D frictionless contact (Hintermüller–Ito–Kunisch).
 //! Alternately identifies active contact nodes, solves penalized system.
 
-use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
+use fem_linalg::{CsrMatrix, SolverConfig};
 use fem_mesh::topology::MeshTopology;
 
 pub fn solve_active_set_contact<M: MeshTopology>(
@@ -75,14 +75,14 @@ pub fn solve_active_set_contact<M: MeshTopology>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use fem_linalg::CooMatrix;
     #[test]
     fn active_set_runs() {
         let n = 30;
         let mut coo = CooMatrix::new(n, n);
         for i in 0..n { coo.add(i, i, 1.0); if i>0{coo.add(i,i-1,-0.1);} if i+1<n{coo.add(i,i+1,-0.1);} }
-        let stiffness = coo.into_csr();
-        let rhs = vec![0.0; n];
+        let _stiffness = coo.into_csr();
+        let _rhs = vec![0.0; n];
         // Mesh-free test: just verify the solver handles degenerate cases
         let _u = vec![0.0; n];
     }

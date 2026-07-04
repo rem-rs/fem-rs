@@ -2215,4 +2215,10 @@ mod tests {
         let order = (errors[0] / errors[1]).log2();
         assert!(order > 2.8, "ABM4 heat convergence order={order:.2} (expected ~4, degraded by startup)");
     }
+
+    // ─── BDF (see bdf.rs for comprehensive BdfIntegrator) ─────────────────
+
+    // BDF-1 through BDF-6 with Nordsieck representation and adaptive step-size
+    // control are provided in `crate::bdf::BdfIntegrator`.
+
 }

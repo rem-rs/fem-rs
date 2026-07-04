@@ -13,6 +13,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<space::PyL2Space>()?;
     m.add_class::<space::PyVectorH1Space>()?;
     m.add_class::<space::PyHCurlSpace>()?;
+    m.add_class::<space::PyHDivSpace>()?;
     m.add_class::<space::PyComplexGridFunction>()?;
     m.add_class::<assembly::PyStiffnessIntegrator>()?;
     m.add_class::<assembly::PyMassIntegrator>()?;

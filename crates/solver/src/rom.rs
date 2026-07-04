@@ -971,7 +971,7 @@ mod tests {
         let a2_raw = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator {
             kappa: FnCoeff(Box::new(|x: &[f64]| x[0])),
         }], 3);
-        let mut b_raw = Assembler::assemble_linear(&space, &[
+        let b_raw = Assembler::assemble_linear(&space, &[
             &fem_assembly::standard::DomainSourceIntegrator::new(|_| 1.0)
         ], 3);
 
@@ -1000,7 +1000,7 @@ mod tests {
         let params = [(1.0, 0.0), (0.0, 1.0), (2.0, 1.0), (1.0, 2.0),
                       (3.0, 1.0), (1.0, 3.0), (0.5, 0.5), (2.0, 2.0)];
         for &(m1, m2) in &params {
-            let (mut am, r_mu) = assemble_am(m1, m2);
+            let (am, r_mu) = assemble_am(m1, m2);
             let mut u = vec![0.0; n];
             solve_cg(&am, &r_mu, &mut u, &SolverConfig { rtol: 1e-10, ..Default::default() })
                 .expect("CG solve during snapshot");
@@ -1031,7 +1031,7 @@ mod tests {
         assert_eq!(u_full.len(), n);
 
         // Full solve at same parameter for error comparison
-        let (mut a_full, r_full) = assemble_am(mu_new[0], mu_new[1]);
+        let (a_full, r_full) = assemble_am(mu_new[0], mu_new[1]);
         let mut x_full = vec![0.0; n];
         solve_cg(&a_full, &r_full, &mut x_full, &SolverConfig { rtol: 1e-10, ..Default::default() })
             .expect("CG solve for reference");

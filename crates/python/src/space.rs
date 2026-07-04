@@ -3,7 +3,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::types::PyList;
 use numpy::{PyArray1, PyArrayMethods};
 use fem_mesh::SimplexMesh;
-use fem_space::{FESpace, H1Space, L2Space, VectorH1Space, HCurlSpace, ComplexGridFunction, ComplexSpace};
+use fem_space::{FESpace, H1Space, L2Space, VectorH1Space, HCurlSpace, HDivSpace, ComplexGridFunction};
 use crate::mesh::PyMesh;
 
 /// H¹ finite element space (continuous Lagrange).
@@ -191,4 +191,44 @@ impl PyComplexGridFunction {
             .map(|(&r, &i)| (r*r + i*i).sqrt()).collect();
         PyArray1::from_vec(py, a)
     }
+}
+
+/// H(div) finite element space (Raviart-Thomas elements).
+#[pyclass(name = "HDivSpace")]
+pub struct PyHDivSpace {
+    pub(crate) inner_2d: Option<HDivSpace<SimplexMesh<2>>>,
+    pub(crate) inner_3d: Option<HDivSpace<SimplexMesh<3>>>,
+    pub(crate) dim: u8,
+}
+
+#[pymethods]
+impl PyHDivSpace {
+    #[new]
+    pub fn new(mesh: &PyMesh, order: u8) -> PyResult<Self> {
+        match mesh.dim {
+            2 => {
+                let m = mesh.inner_2d.as_ref().ok_or_else(||
+                    PyValueError::new_err("HDivSpace: mesh is not 2-D")
+                )?.clone();
+                Ok(PyHDivSpace { inner_2d: Some(HDivSpace::new(m, order)), inner_3d: None, dim: 2 })
+            }
+            3 => {
+                let m = mesh.inner_3d.as_ref().ok_or_else(||
+                    PyValueError::new_err("HDivSpace: mesh is not 3-D")
+                )?.clone();
+                Ok(PyHDivSpace { inner_2d: None, inner_3d: Some(HDivSpace::new(m, order)), dim: 3 })
+            }
+            _ => Err(PyValueError::new_err("HDivSpace: unsupported mesh dimension")),
+        }
+    }
+
+    pub fn n_dofs(&self) -> PyResult<usize> {
+        match self.dim {
+            2 => Ok(self.inner_2d.as_ref().unwrap().n_dofs()),
+            3 => Ok(self.inner_3d.as_ref().unwrap().n_dofs()),
+            _ => Err(PyValueError::new_err("invalid space state")),
+        }
+    }
+
+    pub fn dim(&self) -> u8 { self.dim }
 }

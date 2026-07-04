@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn cr1_tet_gradient_matches_fd() {
         let mut vals = [0.0; 4]; let mut grads = [0.0; 12];
-        let (coeff, m, _monos) = tet_cr1_cache();
+        let (coeff, _m, _monos) = tet_cr1_cache();
         // Print coefficients for debugging
         eprintln!("CR1 coeff: {:?}", &coeff);
         let h = 1e-6;
