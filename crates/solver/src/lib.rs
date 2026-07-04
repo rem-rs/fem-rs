@@ -1829,6 +1829,8 @@ pub use hypre::{
 };
 pub use lor::{
     LorPrecond, solve_pcg_lor, solve_gmres_lor,
+    LorAmgPrecond, build_lor_operator,
+    solve_pcg_lor_amg, solve_gmres_lor_amg,
     GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg,
 };
 pub use p_multigrid::{
