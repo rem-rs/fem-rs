@@ -24,7 +24,7 @@
 //! vis.send_solution_3d(&mesh3, &sol3, "u").unwrap();
 //! ```
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 
 use fem_mesh::simplex::SimplexMesh;
@@ -393,6 +393,7 @@ mod tests {
     #[test]
     fn glvis_bidirectional_local_loopback() {
         use std::net::TcpListener;
+        use std::io::Read;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {

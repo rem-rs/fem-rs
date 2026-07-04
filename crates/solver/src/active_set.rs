@@ -1,7 +1,7 @@
 //! Active-set Newton for 3D frictionless contact (Hintermüller–Ito–Kunisch).
 //! Alternately identifies active contact nodes, solves penalized system.
 
-use fem_linalg::{CsrMatrix, CooMatrix, SolverConfig};
+use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
 use fem_mesh::topology::MeshTopology;
 
 pub fn solve_active_set_contact<M: MeshTopology>(
