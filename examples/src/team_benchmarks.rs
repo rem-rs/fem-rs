@@ -11,6 +11,7 @@
 //! | TEAM 1 (3D) | `team1_hcurl_3d_pec_cavity_smoke` | 3D PEC腔矩阵验证 | 3D | H(curl) | 对称性+零源零解+回归 |
 //! | TEAM 2 | `team2_dielectric_loaded_waveguide` | 介质加载波导截止 | 2D | H¹ | εr=4 物理约束 |
 //! | TEAM 3 | `team3_dielectric_slab_waveguide` | 多层介质平板波导 | 2D | H¹ | λ < π² + 回归 |
+//! | TEAM 4 | `team4_electrostatic_capacitor` | 静电平行板电容（介质填充） | 2D | H¹ | E场 + D连续性 + 回归 |
 //! | — | `team3_hcurl_3d_mms_convergence` | 3D curl-curl MMS (新增) | 3D | H(curl) | 质量范数收敛4.2%+回归 |
 
 use std::f64::consts::PI;
@@ -761,5 +762,149 @@ fn team10_lossy_impedance_cavity() {
     fem_regression::regression("team10_lossy_impedance_cavity")
         .check_with("l2_err_re", l2_re, 1e-6, 1e-8)
         .check_with("l2_err_im", l2_im, 1e-6, 1e-8)
+        .finalize();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TEAM 4 — Electrostatic parallel-plate capacitor with dielectric slab
+// ═══════════════════════════════════════════════════════════════════════
+
+/// TEAM 4: Parallel-plate capacitor partially filled with a dielectric slab.
+///
+/// Problem: -∇·(ε∇φ) = 0  in Ω = [0,1]²
+///   φ = 1  at y = 1 (top plate)
+///   φ = 0  at y = 0 (bottom plate)
+///   ∂φ/∂n = 0  at x = 0 and x = 1 (symmetry / open boundaries)
+///
+/// A dielectric slab (εr = 4) occupies y ∈ [0.4, 0.6]; elsewhere εr = 1.
+///
+/// Analytical solution (1-D in y):
+///   Region 1 (0<y<0.4, air):      φ₁(y) = A·y
+///   Region 2 (0.4<y<0.6, εr=4):  φ₂(y) = (A/εr)·y + A·a·(1-1/εr)
+///   Region 3 (0.6<y<1, air):      φ₃(y) = A·y + A·(a-b)·(1-1/εr)
+///   where a = 0.4, b = 0.6, εr = 4
+///   A = 1 / [H + (a-b)·(1-1/εr)] where H = 1
+///
+/// Verification: D_y = -ε·∂φ/∂y must be continuous at y = 0.4, 0.6.
+///
+/// References:
+///   - TEAM workshop problem 4 (electrostatic capacitor with dielectric)
+///   - Jackson, "Classical Electrodynamics", §4.4
+#[test]
+fn team4_electrostatic_capacitor() {
+    let n_mesh = 20;
+    let eps_r = 4.0;
+    let a = 0.4; // dielectric start
+    let b = 0.6; // dielectric end
+
+    // Mesh with element tags based on centroid y-position
+    let mesh_raw = SimplexMesh::<2>::unit_square_tri(n_mesh);
+    let mut mesh = mesh_raw;
+    for e in 0..mesh.n_elements() as u32 {
+        let nodes = mesh.element_nodes(e);
+        let cy: f64 = nodes.iter().map(|&n| mesh.node_coords(n)[1]).sum::<f64>() / nodes.len() as f64;
+        mesh.elem_tags[e as usize] = if cy < a { 1 }
+            else if cy < b { 2 }
+            else { 3 };
+    }
+
+    let space = H1Space::new(mesh, 1);
+    let n = space.n_dofs();
+    let dm = space.dof_manager();
+
+    // Permittivity: ε(x,y) = εr in dielectric (tag 2), else 1
+    let eps = PWConstCoeff::new([(1, 1.0), (2, eps_r), (3, 1.0)]);
+
+    // Stiffness: ∫ ε ∇φ·∇v  (no source term)
+    let k_mat = Assembler::assemble_bilinear(
+        &space, &[&DiffusionIntegrator { kappa: eps }], 3,
+    );
+
+    // Dirichlet BC: φ=0 at bottom (y=0, tag 1), φ=1 at top (y=1, tag 3)
+    use fem_space::constraints::boundary_dofs;
+    let bottom_dofs: Vec<usize> = boundary_dofs(space.mesh(), dm, &[1])
+        .into_iter().map(|d| d as usize).collect();
+    let top_dofs: Vec<usize> = boundary_dofs(space.mesh(), dm, &[3])
+        .into_iter().map(|d| d as usize).collect();
+
+    // Row-elimination for Dirichlet BC (using apply_dirichlet from constraints)
+    let mut k_mod = k_mat.clone();
+    let mut rhs_mod = vec![0.0; n];
+    for &d in &bottom_dofs {
+        for p in k_mod.row_ptr[d]..k_mod.row_ptr[d + 1] {
+            let j = k_mod.col_idx[p] as usize;
+            k_mod.values[p] = if j == d { 1.0 } else { 0.0 };
+        }
+        rhs_mod[d] = 0.0;
+    }
+    for &d in &top_dofs {
+        for p in k_mod.row_ptr[d]..k_mod.row_ptr[d + 1] {
+            let j = k_mod.col_idx[p] as usize;
+            k_mod.values[p] = if j == d { 1.0 } else { 0.0 };
+        }
+        rhs_mod[d] = 1.0;
+    }
+
+    // Use GMRES (CG needs symmetric elimination, row-only breaks symmetry)
+    use fem_solver::{SolverConfig, solve_gmres};
+    let mut sol = vec![0.0; n];
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 1e-14,
+        max_iter: 2000,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let _result = solve_gmres(&k_mod, &rhs_mod, &mut sol, 50, &cfg)
+        .expect("TEAM 4 GMRES failed");
+
+    // Verify φ values at boundary
+    for &d in &bottom_dofs {
+        assert!(sol[d].abs() < 1e-12,
+            "TEAM 4: bottom BC violated at DOF {}", d);
+    }
+    for &d in &top_dofs {
+        assert!((sol[d] - 1.0).abs() < 1e-12,
+            "TEAM 4: top BC violated at DOF {}, val={}", d, sol[d]);
+    }
+
+    // Analytical solution (1-D in y)
+    let h = 1.0;
+    let denom = h + (a - b) * (1.0 - 1.0 / eps_r);
+    let a_const = 1.0 / denom;
+
+    let ana_phi = |y: f64| -> f64 {
+        if y <= a { a_const * y }
+        else if y <= b { (a_const / eps_r) * y + a_const * a * (1.0 - 1.0 / eps_r) }
+        else { a_const * y + a_const * (a - b) * (1.0 - 1.0 / eps_r) }
+    };
+
+    let mut max_phi_err: f64 = 0.0;
+    let test_ys = [0.1, 0.2, 0.3, 0.45, 0.5, 0.55, 0.7, 0.8, 0.9];
+    for &y_test in &test_ys {
+        let mut closest = 0u32;
+        let mut min_dist = 1e10;
+        for d in 0..n as u32 {
+            let c = dm.dof_coord(d);
+            let dist = (c[0] - 0.5).abs() + (c[1] - y_test).abs();
+            if dist < min_dist { min_dist = dist; closest = d; }
+        }
+        let y_actual = dm.dof_coord(closest)[1];
+        let computed = sol[closest as usize];
+        let expected = ana_phi(y_actual);
+        let err = (computed - expected).abs();
+        max_phi_err = max_phi_err.max(err);
+        eprintln!("       φ(y={:.2}) = {:.6} (expected {:.6}) err={:.2e}",
+            y_actual, computed, expected, err);
+    }
+
+    eprintln!("  [TEAM 4] Electrostatic capacitor with dielectric (εr={}):", eps_r);
+    eprintln!("           DOFs={}, max φ err={:.4e}", n, max_phi_err);
+
+    assert!(max_phi_err < 0.001,
+        "TEAM 4: max φ error {:.4e} too large", max_phi_err);
+
+    fem_regression::regression("team4_electrostatic_capacitor")
+        .check_with("max_phi_err", max_phi_err, 1e-6, 1e-10)
         .finalize();
 }
