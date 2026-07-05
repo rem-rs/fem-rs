@@ -2,12 +2,12 @@
   "name": "em_complex_helmholtz_lossy_mms",
   "metrics": {
     "l2_err_im": {
-      "value": 0.033878785950088114,
+      "value": 0.03387878595008836,
       "rtol": 1e-6,
       "atol": 1e-8
     },
     "l2_err_re": {
-      "value": 0.03152626803098241,
+      "value": 0.031526268030982386,
       "rtol": 1e-6,
       "atol": 1e-8
     }

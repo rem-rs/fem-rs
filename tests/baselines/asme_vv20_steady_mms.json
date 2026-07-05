@@ -2,7 +2,7 @@
   "name": "asme_vv20_steady_mms",
   "metrics": {
     "l2_err": {
-      "value": 0.00043081169704358097,
+      "value": 0.0004308116970435818,
       "rtol": 1e-6,
       "atol": 1e-10
     },

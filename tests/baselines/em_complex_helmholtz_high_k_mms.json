@@ -2,12 +2,12 @@
   "name": "em_complex_helmholtz_high_k_mms",
   "metrics": {
     "l2_err_im": {
-      "value": 0.00034201110763800244,
+      "value": 0.00034200912780812763,
       "rtol": 1e-6,
       "atol": 1e-8
     },
     "l2_err_re": {
-      "value": 0.00034201110764963435,
+      "value": 0.00034200912795136575,
       "rtol": 1e-6,
       "atol": 1e-8
     }

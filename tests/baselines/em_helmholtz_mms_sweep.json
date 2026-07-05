@@ -2,12 +2,12 @@
   "name": "em_helmholtz_mms_sweep",
   "metrics": {
     "l2_err_k16": {
-      "value": 0.000370565938714269,
+      "value": 0.0003705658663114118,
       "rtol": 1e-6,
       "atol": 1e-8
     },
     "l2_err_k4": {
-      "value": 0.01314528665334092,
+      "value": 0.013145286653340933,
       "rtol": 1e-6,
       "atol": 1e-8
     }

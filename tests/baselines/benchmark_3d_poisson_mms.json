@@ -1,10 +1,15 @@
 {
   "name": "benchmark_3d_poisson_mms",
   "metrics": {
-    "sol_norm_n4_p1": {
-      "value": 2.5551819938981906,
+    "l2_error": {
+      "value": 0.007650959157014308,
       "rtol": 1e-6,
       "atol": 1e-10
+    },
+    "n_dofs": {
+      "value": 729.0,
+      "rtol": 1e-6,
+      "atol": 0.5
     }
   }
 }

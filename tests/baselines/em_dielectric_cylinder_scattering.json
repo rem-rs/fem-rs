@@ -2,12 +2,12 @@
   "name": "em_dielectric_cylinder_scattering",
   "metrics": {
     "max_mag": {
-      "value": 0.017341329226183182,
+      "value": 0.017341329224925373,
       "rtol": 1e-6,
       "atol": 1e-8
     },
     "mean_mag": {
-      "value": 0.006720827363843843,
+      "value": 0.006720827363108935,
       "rtol": 1e-6,
       "atol": 1e-8
     }
