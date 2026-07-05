@@ -600,6 +600,7 @@ dependencies = [
  "fem-linalg",
  "fem-linalg-gpu",
  "fem-mesh",
+ "fem-regression",
  "fem-solver",
  "fem-space",
  "nalgebra 0.33.3",
