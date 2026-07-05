@@ -277,6 +277,15 @@ mod tests {
         assert!(r.mean_right_amp.is_finite());
         assert!(r.mean_interior_amp.is_finite());
         assert!(r.max_amp >= r.min_amp);
+        fem_regression::regression("mfem_ex25_pml_helmholtz")
+            .check_with("max_amp", r.max_amp, 1e-6, 1e-8)
+            .check_with("min_amp", r.min_amp, 1e-6, 1e-8)
+            .check_with("mean_left_amp", r.mean_left_amp, 1e-6, 1e-8)
+            .check_with("mean_right_amp", r.mean_right_amp, 1e-6, 1e-8)
+            .check_with("mean_interior_amp", r.mean_interior_amp, 1e-6, 1e-8)
+            .check_with("reflection_ratio", r.reflection_ratio(), 1e-6, 1e-8)
+            .check_with("final_residual", r.final_residual, 1e-4, 1e-10)
+            .finalize();
     }
 
     #[test]
