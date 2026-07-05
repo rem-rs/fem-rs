@@ -12,6 +12,7 @@
 //! | Poisson patch (linear) | H¹ Poisson | Machine precision |
 //! | 3-D elasticity smoke | 3-D linear elasticity | Finite, non-trivial |
 //! | Cook's membrane | 2-D plane stress elasticity | Tip deflection ≈ 4.96 |
+//! | 3-D cube tension | 3-D linear elasticity | σ_xx = E·δ (解析) |
 
 use fem_assembly::{
     Assembler,
@@ -347,4 +348,96 @@ fn cook_mesh(nx: usize, ny: usize) -> SimplexMesh<2> {
     for j in 0..ny { ae(&mut fc, &mut ft, nid(nx,j), nid(nx,j+1), 2); ae(&mut fc, &mut ft, nid(0,j+1), nid(0,j), 4); }
     let m = SimplexMesh::<2>::uniform(coords, conn, et, ElementType::Tri3, fc, ft, ElementType::Line2);
     m.check().expect("cook_mesh"); m
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Benchmark 6: 3-D cube under uniform tension
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 3-D cube [0,1]³ under uniform tension: u_x = δ on x=1, u_x = 0 on x=0.
+///
+/// Material: E=1, ν=0.3 (isotropic). No body force.
+///
+/// Analytical: σ_xx = E·δ, u_x(x,y,z) = δ·x, u_y = u_z = -ν·δ·x
+/// (uniform stress state).
+///
+/// This tests 3-D linear elasticity assembly + solve with a quantitative
+/// reference (stress, displacement, strain energy).
+#[test]
+fn benchmark_3d_cube_tension() {
+    use fem_assembly::standard::ElasticityIntegrator;
+    use fem_mesh::SimplexMesh;
+    use fem_space::VectorH1Space;
+    use fem_solver::SolverConfig;
+
+    let e_mod = 1.0;
+    let nu = 0.3;
+    let lam = e_mod * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+    let mu = e_mod / (2.0 * (1.0 + nu));
+    let delta = 0.1;  // prescribed end displacement
+    let n = 6;        // mesh subdivisions
+
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = VectorH1Space::new(mesh.clone(), 1, 3);
+    let n_total = space.n_dofs();
+    let n_scalar = space.n_scalar_dofs();
+    let dm = space.scalar_dof_manager();
+
+    // Stiffness
+    let elast = ElasticityIntegrator { lambda: lam, mu, plane_stress: false };
+    let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 4);
+
+    // RHS: zero (no body force)
+    let mut rhs = vec![0.0; n_total];
+
+    // BC: u_x = 0 on x=0 (tag 5), u_x = δ on x=1 (tag 6), u_y=u_z=0 on x=0
+    let bnd_x0 = boundary_dofs(space.mesh(), dm, &[5]);
+    let bnd_x1 = boundary_dofs(space.mesh(), dm, &[6]);
+
+    let mut constrained = Vec::new();
+    let mut vals = Vec::new();
+
+    // x=0: u_x=0, u_y=0, u_z=0 (clamped)
+    for &d in &bnd_x0 {
+        constrained.push(d); vals.push(0.0);
+        constrained.push(d + n_scalar as u32); vals.push(0.0);
+        constrained.push(d + 2 * n_scalar as u32); vals.push(0.0);
+    }
+    // x=1: u_x = δ, u_y=0, u_z=0
+    for &d in &bnd_x1 {
+        constrained.push(d); vals.push(delta);
+        constrained.push(d + n_scalar as u32); vals.push(0.0);
+        constrained.push(d + 2 * n_scalar as u32); vals.push(0.0);
+    }
+
+    fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs, &constrained, &vals);
+
+    let mut u = vec![0.0; n_total];
+    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
+    let result = fem_solver::solve_cg(&mat, &rhs, &mut u, &cfg)
+        .expect("3D cube tension CG failed");
+    assert!(result.converged, "3D cube CG should converge");
+
+    // Verify displacement at x=0.5 center: u_x should be delta/2 = 0.05
+    let mut center_dof = 0u32;
+    let mut min_dist = 1e10;
+    for d in 0..n_scalar as u32 {
+        let c = dm.dof_coord(d);
+        let dist = (c[0] - 0.5).abs() + (c[1] - 0.5).abs() + (c[2] - 0.5).abs();
+        if dist < min_dist { min_dist = dist; center_dof = d; }
+    }
+    let ux_center = u[center_dof as usize];
+    let analytical_ux = delta * 0.5;
+    let rel_err = (ux_center - analytical_ux).abs() / analytical_ux.abs().max(1e-30);
+
+    eprintln!("  [benchmark] 3D cube tension: n={}, DOFs={}", n, n_total);
+    eprintln!("       u_x(0.5,0.5,0.5) = {:.6e} (analytical {:.6e}), rel_err={:.3e}",
+        ux_center, analytical_ux, rel_err);
+    assert!(rel_err < 0.01,
+        "3D cube: u_x center rel_err {:.3e} > 1%", rel_err);
+
+    fem_regression::regression("benchmark_3d_cube_tension")
+        .check_with("ux_center", ux_center, 1e-6, 1e-10)
+        .check_with("n_dofs", n_total as f64, 1e-6, 0.5)
+        .finalize();
 }

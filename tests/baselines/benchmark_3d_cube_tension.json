@@ -1,0 +1,15 @@
+{
+  "name": "benchmark_3d_cube_tension",
+  "metrics": {
+    "n_dofs": {
+      "value": 1029.0,
+      "rtol": 1e-6,
+      "atol": 0.5
+    },
+    "ux_center": {
+      "value": 0.04999999998561499,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    }
+  }
+}
