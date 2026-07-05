@@ -366,5 +366,21 @@ mod tests {
             .check_with("residual",           result.final_residual,   1e-4, 1e-10)
             .finalize();
     }
+
+    #[test]
+    fn ex16_mfem_reference_test() {
+        let r = solve_case(8, 1e-8, 0.01);
+        assert!(r.converged);
+        assert_eq!(r.n_dofs, 81, "H1 P1 on 8×8: 81 DOFs");
+        assert!(r.solution_norm > 0.0);
+        assert!(r.rms_error > 0.0 && r.rms_error < 1.0);
+        use std::time::Instant;
+        let t0 = Instant::now();
+        let _ = solve_case(16, 1e-8, 0.01);
+        let elapsed = t0.elapsed();
+        assert!(elapsed.as_secs_f64() < 30.0, "16×16 heat took {:.2}s", elapsed.as_secs_f64());
+        eprintln!("  [mfem-ref] ex16: dofs={} rms={:.6e} norm={:.6e} iter={}",
+            r.n_dofs, r.rms_error, r.solution_norm, r.iterations);
+    }
 }
 

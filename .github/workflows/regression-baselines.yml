@@ -120,3 +120,21 @@ jobs:
 
       - name: Run MFEM cross-validation (ex34 absorbing Maxwell)
         run: cargo test -p fem-examples --example mfem_ex34_absorbing_maxwell -- ex34_mfem_reference_test
+
+      - name: Run MFEM cross-validation (ex16 nonlinear heat)
+        run: cargo test -p fem-examples --example mfem_ex16_nonlinear_heat -- ex16_mfem_reference_test
+
+  perf-regression:
+    name: Performance Regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.REM_RS_SUBMODULES_TOKEN || github.token }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks (quick mode, smoke)
+        run: FEM_BENCH_QUICK=1 cargo bench -p fem-benches -- --test
