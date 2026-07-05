@@ -270,8 +270,24 @@ mod tests {
         assert!(r.solution_l2 > 0.0);
         assert!(r.iterations < 500);
         assert!(r.final_residual < 1e-8);
-        eprintln!("  [mfem-ref] ex31: dofs={} L2={:.6e} iter={}",
-            r.n_dofs, r.l2_error, r.iterations);
+
+        // MFEM C++ cross-validation (verified 2026-07-05 via MSYS2 mingw64 g++ 15.2.0, MFEM 4.8-1):
+        //   anisotropic curl-curl + diag(4,1.5) mass, ND1, 8×8 tri, PEC BC
+        //   Manufactured: E = (sin(πy), sin(πx))
+        //   Solver: PCG(GSSmoother) 5000 iters, rtol=1e-12
+        //   Source: tests/mfem_references/cpp_refs/ex31_ref.cpp
+        const MFEM_L2_ERROR: f64 = 0.1127764445187523_f64;
+        let rel_diff = (r.l2_error - MFEM_L2_ERROR).abs() / MFEM_L2_ERROR.max(1e-30);
+        assert!(
+            rel_diff < 0.02,
+            "L2 error relative diff vs MFEM C++: {:.2e} (fem-rs={}, mfem={})",
+            rel_diff, r.l2_error, MFEM_L2_ERROR
+        );
+        eprintln!(
+            "  [mfem-cxx] ex31: L2 diff vs MFEM={:.2e}% (fem-rs={:.6e}, mfem={:.6e})",
+            rel_diff * 100.0, r.l2_error, MFEM_L2_ERROR
+        );
+
         fem_regression::regression("mfem_ex31_anisotropic_maxwell")
             .check_with("l2_error", r.l2_error, 1e-6, 1e-8)
             .check_with("solution_l2", r.solution_l2, 1e-6, 1e-8)
