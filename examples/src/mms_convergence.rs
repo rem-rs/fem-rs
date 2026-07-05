@@ -87,6 +87,10 @@ fn mms_poisson_p1_convergence() {
         eprintln!("  [MMS] Poisson P1 n={}: L²={:.4e}", n, err);
         pe = err; ph = h;
     }
+    // Regression on finest mesh
+    fem_regression::regression("mms_poisson_p1")
+        .check_with("l2_err_n32", pe, 1e-6, 1e-10)
+        .finalize();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -122,6 +126,9 @@ fn mms_poisson_p2_convergence() {
         eprintln!("  [MMS] Poisson P2 n={}: L²={:.4e}", n, err);
         pe = err; ph = h;
     }
+    fem_regression::regression("mms_poisson_p2")
+        .check_with("l2_err_n24", pe, 1e-6, 1e-10)
+        .finalize();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -391,6 +398,9 @@ fn mms_poisson_3d_convergence() {
         eprintln!("  [MMS] 3D Poisson P1 n={}: L²={:.4e}", n, err);
         pe = err; ph = h;
     }
+    fem_regression::regression("mms_poisson_3d_p1")
+        .check_with("l2_err_n8", pe, 1e-6, 1e-10)
+        .finalize();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
