@@ -312,10 +312,14 @@ mod tests {
         let r = solve_case_with_gamma_and_scale(8, 1.0, 1.0);
         assert!(r.converged);
         assert_eq!(r.n_dofs, 208, "ND1 on 8×8: 208 DOFs");
-        assert!(r.l2_error > 0.0 && r.l2_error < 2.0, "L2={:.4e} out of range", r.l2_error);
         assert!(r.solution_l2 > 0.0);
         assert!(r.final_residual < 1e-8);
         eprintln!("  [mfem-ref] ex32: dofs={} L2={:.6e} iter={}",
             r.n_dofs, r.l2_error, r.iterations);
+        fem_regression::regression("mfem_ex32_impedance_maxwell")
+            .check_with("l2_error", r.l2_error, 1e-6, 1e-8)
+            .check_with("solution_l2", r.solution_l2, 1e-6, 1e-8)
+            .check_with("final_residual", r.final_residual, 1e-4, 1e-10)
+            .finalize();
     }
 }

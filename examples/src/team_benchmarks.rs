@@ -204,3 +204,75 @@ fn team2_dielectric_loaded_waveguide() {
         eprintln!("          λ[{i}] = {:.6}  (empty: {:.6})", ev[i], empty_ref[i]);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// TEAM 1 (vector HCurl) — PEC cavity curl-curl eigenvalues
+// ═══════════════════════════════════════════════════════════════════════
+
+/// TEAM 1: Rectangular PEC cavity — vector curl-curl eigenvalue problem.
+///
+/// Solves the full H(curl) eigenproblem:
+///   curl curl E = λ E   in Ω = [0,1]²
+///          n×E = 0      on ∂Ω (PEC)
+///
+/// The analytical eigenvalues for the 2-D rectangular PEC cavity are:
+///   TE modes: λ = π²(m²+n²) for m,n ≥ 0, not both 0
+///   TM modes: λ = π²(m²+n²) for m,n ≥ 1
+///
+/// The first three sorted eigenvalues are: π², π², 2π².
+///
+/// This test uses the full H(curl) Nedelec discretisation with
+/// AMG-preconditioned LOBPCG, providing a stricter validation of
+/// the curl-curl operator than the scalar H¹ TM_z approximation.
+///
+/// References:
+///   - TEAM workshop problem 1 (basic cavity resonator)
+///   - Monk, "Finite Element Methods for Maxwell's Equations", §4.4
+#[test]
+fn team1_hcurl_pec_cavity_eigenvalues() {
+    use fem_solver::{LobpcgConfig, SolverConfig};
+    use fem_space::HCurlSpace;
+    use fem_amg::AmgConfig;
+    use crate::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
+    use std::f64::consts::PI;
+
+    let n = 8;
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let space = HCurlSpace::new(mesh, 1);
+    let h1 = H1Space::new(SimplexMesh::<2>::unit_square_tri(n), 1);
+    let bdr = [1, 2, 3, 4];
+    let ess = [1, 1, 1, 1];
+    let sys = assemble_hcurl_eigen_system_from_marker(&h1, &space, &bdr, &ess, 1.0, 1.0, 4);
+
+    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false };
+    let inner = SolverConfig { rtol: 1e-2, atol: 1e-12, max_iter: 30, verbose: false, ..SolverConfig::default() };
+    let result = solve_hcurl_eigen_preconditioned_amg(
+        &sys, 3, &cfg, AmgConfig::default(), &inner,
+    ).expect("TEAM 1 H(curl) LOBPCG");
+
+    assert!(result.converged, "TEAM 1 H(curl) LOBPCG should converge");
+
+    let exact: Vec<f64> = vec![PI * PI, PI * PI, 2.0 * PI * PI];
+    let mut max_rel_err: f64 = 0.0;
+    let k = 3.min(result.eigenvalues.len());
+    for i in 0..k {
+        let err = (result.eigenvalues[i] - exact[i]).abs() / exact[i];
+        max_rel_err = max_rel_err.max(err);
+        assert!(err < 0.03,
+            "TEAM 1 H(curl): λ[{i}] computed={:.6}, exact={:.6}, rel_err={:.3}",
+            result.eigenvalues[i], exact[i], err);
+    }
+    eprintln!("  [TEAM 1 H(curl)] PEC cavity ND1 eigenvalues (n=8):");
+    for i in 0..k {
+        eprintln!("                   λ[{i}] = {:.6} (exact {:.6})",
+            result.eigenvalues[i], exact[i]);
+    }
+    eprintln!("                   max rel err = {:.3e}", max_rel_err);
+
+    fem_regression::regression("team1_hcurl_pec_cavity")
+        .check_with("lambda_0", result.eigenvalues[0], 1e-6, 1e-10)
+        .check_with("lambda_1", result.eigenvalues[1], 1e-6, 1e-10)
+        .check_with("lambda_2", result.eigenvalues[2], 1e-6, 1e-10)
+        .check_with("max_rel_err", max_rel_err, 1e-6, 1e-10)
+        .finalize();
+}

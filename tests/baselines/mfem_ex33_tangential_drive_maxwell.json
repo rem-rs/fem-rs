@@ -1,0 +1,20 @@
+{
+  "name": "mfem_ex33_tangential_drive_maxwell",
+  "metrics": {
+    "final_residual": {
+      "value": 4.6376066359971783e-11,
+      "rtol": 0.0001,
+      "atol": 1e-10
+    },
+    "l2_error": {
+      "value": 0.11301036611980986,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    },
+    "solution_l2": {
+      "value": 1.084569312100886,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    }
+  }
+}
