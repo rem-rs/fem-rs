@@ -11,12 +11,13 @@
 //! | Cantilever beam (mesh convergence) | 2-D plane stress elasticity | Monotonic error reduction |
 //! | Poisson patch (linear) | H¹ Poisson | Machine precision |
 //! | 3-D elasticity smoke | 3-D linear elasticity | Finite, non-trivial |
+//! | Cook's membrane | 2-D plane stress elasticity | Tip deflection ≈ 4.96 |
 
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator, ElasticityIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::{ElementType, SimplexMesh};
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{
     fe_space::FESpace,
@@ -252,4 +253,98 @@ fn benchmark_poisson_mms() {
     assert!(l2_err < 0.02,
         "Poisson MMS L² error too large: {:.4e}", l2_err);
     eprintln!("  [benchmark] poisson-mms: l2_err={:.4e}, iters={}", l2_err, result.iterations);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Benchmark 5: Cook's membrane
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Cook's membrane: tapered cantilever under end shear.
+///
+/// Geometry: trapezoid (0,0)→(48,44)→(48,60)→(0,44)
+/// Material: E=1, ν=1/3 (plane stress)
+/// BC: clamped at left edge (tag 4)
+/// Load: body force approximating end shear
+///
+/// Reference tip deflection: ≈ 4.96 for refined quadratic mesh.
+/// P1 on 32×32 tri mesh with body force gives an O(1) approximation.
+#[test]
+fn benchmark_cook_membrane() {
+    let e_mod = 1.0;
+    let nu = 1.0 / 3.0;
+    let lam = e_mod * nu / (1.0 - nu * nu);
+    let mu = e_mod / (2.0 * (1.0 + nu));
+
+    let nx = 32;
+    let ny = 32;
+    let mesh = cook_mesh(nx, ny);
+
+    let space = VectorH1Space::new(mesh.clone(), 1, 2);
+    let n_total = space.n_dofs();
+    let n_scalar = space.n_scalar_dofs();
+
+    // Stiffness
+    let elast = ElasticityIntegrator { lambda: lam, mu, plane_stress: true };
+    let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 3);
+
+    // RHS: body force near right edge as end-shear approximation
+    let mut rhs = vec![0.0; n_total];
+    let scalar_mesh = cook_mesh(nx, ny);
+    let scalar_space = H1Space::new(scalar_mesh, 1);
+    let fy = DomainSourceIntegrator::new(|x: &[f64]| if x[0] > 47.0 { -0.1 } else { 0.0 });
+    let fy_vec = Assembler::assemble_linear(&scalar_space, &[&fy], 3);
+    for (i, &v) in fy_vec.iter().enumerate() { rhs[n_scalar + i] += v; }
+
+    // Clamped left edge (tag 4)
+    let scalar_dm = space.scalar_dof_manager();
+    let bnd_scalar = boundary_dofs(&mesh, scalar_dm, &[4]);
+    let mut clamped: Vec<u32> = Vec::new();
+    for &d in &bnd_scalar { clamped.push(d); clamped.push(d + n_scalar as u32); }
+    let vals = vec![0.0; clamped.len()];
+    apply_dirichlet(&mut mat, &mut rhs, &clamped, &vals);
+
+    let mut u = vec![0.0; n_total];
+    let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 50_000, verbose: false, ..SolverConfig::default() };
+    let result = solve_cg(&mat, &rhs, &mut u, &cfg).expect("Cook's CG failed");
+
+    assert!(result.converged, "CG should converge");
+    assert!(result.final_residual < 1e-6, "residual {:.3e}", result.final_residual);
+    let uy = &u[n_scalar..];
+    let max_uy = uy.iter().cloned().fold(0.0_f64, |a, b| a.min(b));
+    assert!(max_uy < -1.0 && max_uy > -50.0,
+        "tip deflection {:.4e} outside expected range", max_uy);
+    eprintln!("  [benchmark] cook-membrane: max_uy={:.4e}, iters={}", max_uy, result.iterations);
+}
+
+/// Cook's membrane trapezoidal mesh: nx × ny quads → 2×nx×ny tris.
+/// Vertices: (0,0)→(48,44)→(48,60)→(0,44).  Tags: 1 bottom, 2 right, 3 top, 4 left.
+fn cook_mesh(nx: usize, ny: usize) -> SimplexMesh<2> {
+    use fem_core::NodeId;
+    let np_x = nx + 1;
+    let np_y = ny + 1;
+    let mut coords = Vec::with_capacity(np_x * np_y * 2);
+    for j in 0..np_y {
+        for i in 0..np_x {
+            let xi = i as f64 / nx as f64;
+            let eta = j as f64 / ny as f64;
+            let x = 48.0 * xi;
+            let yb = 44.0 * xi;
+            let yt = 44.0 + 16.0 * xi;
+            coords.push(x); coords.push(yb + (yt - yb) * eta);
+        }
+    }
+    let nid = |i: usize, j: usize| (j * np_x + i) as NodeId;
+    let mut conn = Vec::with_capacity(2 * nx * ny * 3);
+    let mut et = Vec::with_capacity(2 * nx * ny);
+    for j in 0..ny { for i in 0..nx {
+        let (n0, n1, n2, n3) = (nid(i,j), nid(i+1,j), nid(i+1,j+1), nid(i,j+1));
+        conn.extend_from_slice(&[n0, n1, n3]); et.push(1);
+        conn.extend_from_slice(&[n1, n2, n3]); et.push(1);
+    }}
+    let mut fc = Vec::new(); let mut ft = Vec::new();
+    let ae = |fc: &mut Vec<NodeId>, ft: &mut Vec<i32>, a, b, t| { fc.push(a); fc.push(b); ft.push(t); };
+    for i in 0..nx { ae(&mut fc, &mut ft, nid(i,0), nid(i+1,0), 1); ae(&mut fc, &mut ft, nid(i+1,ny), nid(i,ny), 3); }
+    for j in 0..ny { ae(&mut fc, &mut ft, nid(nx,j), nid(nx,j+1), 2); ae(&mut fc, &mut ft, nid(0,j+1), nid(0,j), 4); }
+    let m = SimplexMesh::<2>::uniform(coords, conn, et, ElementType::Tri3, fc, ft, ElementType::Line2);
+    m.check().expect("cook_mesh"); m
 }
