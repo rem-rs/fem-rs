@@ -158,3 +158,93 @@ fn relative_residual_free_dofs(
         .max(1e-30);
     r_norm / b_norm
 }
+
+#[cfg(test)]
+mod tests {
+    use fem_assembly::iga::{assemble_iga_elasticity_2d, assemble_iga_load_2d};
+    use fem_element::iga::NurbsKnotVector;
+    use fem_element::nurbs::NurbsMesh2D;
+    use fem_solver::{SolverConfig, solve_cg};
+
+    #[test]
+    fn iga_elasticity_2d_smoke() {
+        let p = 2;
+        let nu = 8;
+        let nv = 8;
+        let n_ctrl = nu * nv;
+
+        // NURBS unit square patch
+        let kv = NurbsKnotVector::uniform(p, nu - p);
+        let mut ctrl = Vec::with_capacity(n_ctrl);
+        for j in 0..nv {
+            for i in 0..nu {
+                ctrl.push([i as f64 / (nu - 1) as f64, j as f64 / (nv - 1) as f64]);
+            }
+        }
+        let mesh = NurbsMesh2D::single_patch(kv.clone(), kv.clone(), ctrl, vec![1.0; n_ctrl]);
+        let n_vec = 2 * n_ctrl;
+
+        // Elasticity: E=1e3, nu=0.3, plane stress
+        let e_mod = 1e3;
+        let nu_poisson = 0.3;
+        let lam = e_mod * nu_poisson / (1.0 - nu_poisson * nu_poisson);
+        let mu = e_mod / (2.0 * (1.0 + nu_poisson));
+        let mut stiff = assemble_iga_elasticity_2d(&mesh, lam, mu, 4);
+
+        // Gravity-like body force in y-direction
+        let f_val = |_x: &[f64]| -1.0; // constant downward force
+        let load_y = assemble_iga_load_2d(&mesh, f_val, 4);
+        let mut rhs = vec![0.0; n_vec];
+        for a in 0..n_ctrl {
+            rhs[2 * a + 1] = load_y[a]; // y-component
+        }
+
+        // Clamped BC (u=0) on all boundary control points
+        let mut is_bnd = vec![false; n_ctrl];
+        for j in 0..nv {
+            for i in 0..nu {
+                let idx = j * nu + i;
+                if i == 0 || i == nu - 1 || j == 0 || j == nv - 1 {
+                    is_bnd[idx] = true;
+                }
+            }
+        }
+        // Symmetric elimination: for each boundary control point, set DOF 2a and 2a+1
+        let bnd_dofs: Vec<usize> = (0..n_ctrl)
+            .filter(|&a| is_bnd[a])
+            .flat_map(|a| vec![2 * a, 2 * a + 1])
+            .collect();
+
+        for &d in &bnd_dofs {
+            // Zero column
+            for i in 0..n_vec {
+                if i == d { continue; }
+                for p in stiff.row_ptr[i]..stiff.row_ptr[i + 1] {
+                    if stiff.col_idx[p] as usize == d {
+                        stiff.values[p] = 0.0;
+                    }
+                }
+            }
+            // Zero row + diagonal
+            for p in stiff.row_ptr[d]..stiff.row_ptr[d + 1] {
+                let col = stiff.col_idx[p] as usize;
+                stiff.values[p] = if col == d { 1.0 } else { 0.0 };
+            }
+            rhs[d] = 0.0;
+        }
+
+        let mut u = vec![0.0; n_vec];
+        solve_cg(&stiff, &rhs, &mut u,
+            &SolverConfig { rtol: 1e-8, max_iter: 5000, ..Default::default() })
+            .expect("IGA 2D elasticity CG failed");
+
+        let norm: f64 = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+        eprintln!("  [IGA 2D elasticity] p={}, n_ctrl={}, ||u||={:.6e}", p, n_ctrl, norm);
+        assert!(norm > 0.0 && norm < 100.0, "||u||={:.6e} outside range", norm);
+
+        fem_regression::regression("iga_elasticity_2d_smoke")
+            .check_with("l2_norm", norm, 1e-6, 1e-10)
+            .check_with("n_dofs", n_vec as f64, 1e-6, 0.5)
+            .finalize();
+    }
+}

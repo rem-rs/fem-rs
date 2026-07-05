@@ -434,6 +434,77 @@ pub fn assemble_iga_load_2d(
     rhs
 }
 
+/// Assemble the 2-D linear elasticity stiffness matrix.
+///
+/// Uses interleaved DOF ordering: control point `a` contributes DOFs
+/// `2a` (x-displacement) and `2a+1` (y-displacement).
+/// Assembles the standard isotropic elasticity operator:
+///
+/// ```text
+/// K_{ab} = ∫ B_a^T D B_b dΩ
+/// ```
+///
+/// where D is the plane-stress or plane-strain material matrix:
+///
+/// ```text
+/// D = [λ+2μ   λ    0  ]
+///     [λ     λ+2μ  0  ]
+///     [0      0    μ  ]
+/// ```
+pub fn assemble_iga_elasticity_2d(
+    mesh: &NurbsMesh2D,
+    lambda: f64,
+    mu: f64,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let n_total: usize = mesh.patches.iter().map(|p| p.control_pts.len()).sum();
+    let n_vec = 2 * n_total;
+    let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
+
+    let c1 = lambda + 2.0 * mu;  // D[0,0] and D[1,1]
+
+    let mut dof_offset = 0usize;
+    for pd in &mesh.patches {
+        let elem = pd_to_patch2d(pd);
+        let n_dof = elem.n_dofs();
+        let qr = patch_quad_2d(pd, quad_order);
+
+        for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+            let (phys_grads, det_j) = physical_grads_2d(pd, qp_xi);
+            let w = qp_w * det_j.abs();
+
+            for a in 0..n_dof {
+                let gax = phys_grads[a * 2];
+                let gay = phys_grads[a * 2 + 1];
+                let base_a = 2 * (dof_offset + a);
+
+                for b in 0..n_dof {
+                    let gbx = phys_grads[b * 2];
+                    let gby = phys_grads[b * 2 + 1];
+                    let base_b = 2 * (dof_offset + b);
+
+                    // K[2a,   2b]    = ∫ (λ+2μ)·∂Ra/∂x·∂Rb/∂x + μ·∂Ra/∂y·∂Rb/∂y
+                    let k00 = w * (c1 * gax * gbx + mu * gay * gby);
+                    // K[2a,   2b+1]  = ∫ λ·∂Ra/∂x·∂Rb/∂y + μ·∂Ra/∂y·∂Rb/∂x
+                    let k01 = w * (lambda * gax * gby + mu * gay * gbx);
+                    // K[2a+1, 2b]    = ∫ λ·∂Ra/∂y·∂Rb/∂x + μ·∂Ra/∂x·∂Rb/∂y
+                    let k10 = w * (lambda * gay * gbx + mu * gax * gby);
+                    // K[2a+1, 2b+1]  = ∫ μ·∂Ra/∂x·∂Rb/∂x + (λ+2μ)·∂Ra/∂y·∂Rb/∂y
+                    let k11 = w * (mu * gax * gbx + c1 * gay * gby);
+
+                    coo.add(base_a, base_b, k00);
+                    coo.add(base_a, base_b + 1, k01);
+                    coo.add(base_a + 1, base_b, k10);
+                    coo.add(base_a + 1, base_b + 1, k11);
+                }
+            }
+        }
+        dof_offset += n_dof;
+    }
+
+    coo.into_csr()
+}
+
 // ─── 3-D single-patch global assembly ────────────────────────────────────────
 
 /// Assemble the diffusion stiffness matrix for a 3-D NURBS mesh.
