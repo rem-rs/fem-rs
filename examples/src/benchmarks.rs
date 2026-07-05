@@ -13,6 +13,7 @@
 //! | 3-D elasticity smoke | 3-D linear elasticity | Finite, non-trivial |
 //! | Cook's membrane | 2-D plane stress elasticity | Tip deflection ≈ 4.96 |
 //! | 3-D cube tension | 3-D linear elasticity | σ_xx = E·δ (解析) |
+//! | 3-D Poisson MMS | H¹ Poisson | L²误差 < 2% + 回归 |
 
 use fem_assembly::{
     Assembler,
@@ -439,5 +440,62 @@ fn benchmark_3d_cube_tension() {
     fem_regression::regression("benchmark_3d_cube_tension")
         .check_with("ux_center", ux_center, 1e-6, 1e-10)
         .check_with("n_dofs", n_total as f64, 1e-6, 0.5)
+        .finalize();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Benchmark 7: 3-D Poisson MMS with manufactured solution
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 3-D Poisson: -∇²u = f on [0,1]³ with u=0 on all faces.
+///
+/// Manufactured: u = sin(πx)sin(πy)sin(πz)
+/// Source: f = 3π²·u
+///
+/// Tests: 3D H1 assembly, Dirichlet BCs, CG solver, L² error vs
+/// analytical solution. Tet mesh n=8 (729 DOFs).
+#[test]
+fn benchmark_3d_poisson_mms() {
+    use std::f64::consts::PI;
+    use fem_mesh::SimplexMesh;
+    use fem_solver::SolverConfig;
+
+    let n = 8;
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = H1Space::new(mesh, 1);
+    let n_dofs = space.n_dofs();
+    let dm = space.dof_manager();
+
+    let diff = DiffusionIntegrator { kappa: 1.0 };
+    let src = DomainSourceIntegrator::new(|x: &[f64]| {
+        3.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin()
+    });
+    let mut mat = Assembler::assemble_bilinear(&space, &[&diff], 4);
+    let mut rhs = Assembler::assemble_linear(&space, &[&src], 4);
+
+    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4, 5, 6]);
+    let bnd_vals = vec![0.0; bnd.len()];
+    apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
+
+    let mut u = vec![0.0; n_dofs];
+    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
+    let result = solve_cg(&mat, &rhs, &mut u, &cfg).expect("3D Poisson MMS CG failed");
+    assert!(result.converged, "CG should converge");
+
+    // L² error
+    let mut l2_err: f64 = 0.0;
+    for d in 0..n_dofs as u32 {
+        let c = dm.dof_coord(d);
+        let exact = (PI * c[0]).sin() * (PI * c[1]).sin() * (PI * c[2]).sin();
+        l2_err += (u[d as usize] - exact).powi(2);
+    }
+    l2_err = (l2_err / n_dofs as f64).sqrt();
+
+    eprintln!("  [benchmark] 3D Poisson MMS: n={}, DOFs={}, L² error={:.6e}", n, n_dofs, l2_err);
+    assert!(l2_err < 0.02, "3D Poisson MMS: L² error {:.6e} > 2%", l2_err);
+
+    fem_regression::regression("benchmark_3d_poisson_mms")
+        .check_with("l2_error", l2_err, 1e-6, 1e-10)
+        .check_with("n_dofs", n_dofs as f64, 1e-6, 0.5)
         .finalize();
 }
