@@ -1,0 +1,15 @@
+{
+  "name": "em_complex_helmholtz_high_k_mms",
+  "metrics": {
+    "l2_err_im": {
+      "value": 0.00034200724476347497,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    },
+    "l2_err_re": {
+      "value": 0.0003420072448591257,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    }
+  }
+}
