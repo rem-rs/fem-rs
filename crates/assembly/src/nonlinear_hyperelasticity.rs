@@ -56,7 +56,7 @@ pub enum HyperelasticModel {
 
 impl HyperelasticModel {
     /// PK1 stress and consistent tangent for the model.
-    fn pk1_and_tangent(&self, f: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
+    pub(crate) fn pk1_and_tangent(&self, f: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
         match self {
             HyperelasticModel::NeoHookean { mu, lambda } => {
                 neo_hookean_pk1_tangent(f, *mu, *lambda)
