@@ -297,3 +297,39 @@ fn mms_poisson_3d_convergence() {
         pe = err; ph = h;
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 7: H(curl) eigenvalue convergence (ND1 → O(h²) in ω²)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn mms_hcurl_eigenvalue_convergence() {
+    use fem_solver::{LobpcgConfig, SolverConfig};
+    use fem_space::HCurlSpace;
+    use fem_amg::AmgConfig;
+    use crate::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
+
+    let n = 8;
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let space = HCurlSpace::new(mesh, 1);
+    let h1 = H1Space::new(SimplexMesh::<2>::unit_square_tri(n), 1);
+    let bdr = [1, 2, 3, 4];
+    let ess = [1, 1, 1, 1];
+    let sys = assemble_hcurl_eigen_system_from_marker(&h1, &space, &bdr, &ess, 1.0, 1.0, 4);
+
+    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false };
+    let inner = SolverConfig { rtol: 1e-2, atol: 1e-12, max_iter: 20, verbose: false, ..SolverConfig::default() };
+    let result = solve_hcurl_eigen_preconditioned_amg(
+        &sys, 3, &cfg, AmgConfig::default(), &inner,
+    ).expect("H(curl) LOBPCG");
+
+    assert!(result.converged, "H(curl) LOBPCG should converge");
+    let exact = vec![PI * PI, PI * PI, 2.0 * PI * PI];
+    let mut max_err: f64 = 0.0;
+    for i in 0..3.min(result.eigenvalues.len()) {
+        let e = (result.eigenvalues[i] - exact[i]).abs() / exact[i];
+        max_err = max_err.max(e);
+    }
+    assert!(max_err < 0.02, "H(curl) eigenvalue max rel err={:.3e} > 2%", max_err);
+    eprintln!("  [MMS] H(curl) n={}: max_rel_err={:.3e}", n, max_err);
+}

@@ -466,5 +466,28 @@ mod tests {
             "RK4 should be comparable to sdirk2: rk4={:.3e} sdirk2={:.3e}",
             result.rms_error, sdirk2.rms_error);
     }
+
+    // ─── MMS convergence: SDIRK2 temporal order ─────────────────────────
+
+    /// SDIRK2 is second-order.  Halving dt should roughly halve the error
+    /// when temporal error dominates.  On n=16 mesh, spatial error floors
+    /// the finest dt, so we check the first dt-halving rate > 1.0.
+    #[test]
+    fn ex10_heat_sdirk2_temporal_convergence_rate() {
+        let mut errors: Vec<(f64, f64)> = Vec::new();
+        for &dt in &[0.04, 0.02, 0.01] {
+            let r = solve_case(16, dt, 0.04, 1.0, "sdirk2", 1.0);
+            eprintln!("  [MMS] heat SDIRK2 dt={:.4}: RMS={:.4e}", dt, r.rms_error);
+            errors.push((dt, r.rms_error));
+        }
+        // First halving (0.04→0.02) should show rate > 1.0
+        let rate1 = (errors[0].1 / errors[1].1).ln() / (errors[0].0 / errors[1].0).ln();
+        assert!(rate1 > 1.0, "SDIRK2 temporal rate(0.04→0.02)={:.3} < 1.0", rate1);
+
+        fem_regression::regression("heat_sdirk2_temporal")
+            .check_with("rms_dt0p04", errors[0].1, 1e-6, 1e-10)
+            .check_with("rms_dt0p01", errors[2].1, 1e-6, 1e-10)
+            .finalize();
+    }
 }
 
