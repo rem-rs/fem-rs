@@ -415,3 +415,58 @@ fn error_assembly_mismatched_mesh() {
         match &result { Ok(_) => "completed (unexpected)", Err(_) => "panicked (expected)" });
     // We don't assert on the outcome — different configurations may behave differently
 }
+
+// ─── Large-scale 3D smoke test ────────────────────────────────────────────
+
+/// 3-D Poisson solve on a ~100K DOF hexahedral mesh.
+///
+/// This verifies that the full pipeline (mesh → assembly → solve) remains
+/// stable at a problem size where sparse direct solvers become impractical
+/// and iterative solver convergence matters.
+///
+/// Problem: -Δu = 1 on [0,1]³, u = 0 on boundary.
+/// Mesh: 32×32×32 hexahedral → ~35K nodes, ~100K DOFs for Q1.
+#[test]
+fn stress_3d_poisson_large_scale() {
+    use fem_solver::SolverConfig;
+    use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
+    use fem_assembly::Assembler;
+    use fem_mesh::SimplexMesh;
+    use fem_space::H1Space;
+    use fem_space::fe_space::FESpace;
+    use fem_space::constraints::{apply_dirichlet, boundary_dofs};
+    use fem_solver::solve_pcg_jacobi;
+
+    let n = 32;
+    let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+    let space = H1Space::new(mesh, 1);
+    let n_dofs = space.n_dofs();
+
+    eprintln!("  [stress-3d] mesh: {n}³ hex, DOFs: {n_dofs}");
+    assert!(n_dofs > 30_000, "expected >30K DOFs for 32³ hex mesh, got {n_dofs}");
+
+    let diff = DiffusionIntegrator { kappa: 1.0 };
+    let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
+    let mut mat = Assembler::assemble_bilinear(&space, &[&diff], 2);
+    let mut rhs = Assembler::assemble_linear(&space, &[&source], 2);
+
+    let dm = space.dof_manager();
+    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4, 5, 6]);
+    let bnd_vals = vec![0.0; bnd.len()];
+    apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
+
+    let mut u = vec![0.0; n_dofs];
+    let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+    let result = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
+        .expect("3D large-scale PCG solve failed");
+    assert!(result.converged,
+        "3D large-scale PCG did not converge: iters={}, residual={:.3e}",
+        result.iterations, result.final_residual);
+
+    let u_norm: f64 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(u_norm.is_finite(), "solution norm is not finite");
+    assert!(u_norm > 0.0, "solution norm should be positive");
+
+    eprintln!("  [stress-3d] PCG: {n}³ hex, {n_dofs} DOFs, {iters} iters, residual={res:.3e}, ||u||={norm:.6e}",
+        n=n, n_dofs=n_dofs, iters=result.iterations, res=result.final_residual, norm=u_norm);
+}

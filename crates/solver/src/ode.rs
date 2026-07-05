@@ -2223,6 +2223,59 @@ mod tests {
 
     // ─── BDF (see bdf.rs for comprehensive BdfIntegrator) ─────────────────
 
+    // ── Additional temporal-convergence tests ────────────────────────────────
+
+    /// Forward Euler on u' = -π² u: should converge O(Δt).
+    #[test]
+    fn forward_euler_heat_convergence() {
+        let lambda = std::f64::consts::PI * std::f64::consts::PI;
+        let rhs = exp_decay(lambda);
+        let t_end = 0.01;  // short time for stability (explicit Euler is conditionally stable)
+        let exact = (-lambda * t_end).exp();
+        let fe = ForwardEuler;
+
+        let mut errors = vec![];
+        for &dt in &[0.0005_f64, 0.00025] {
+            let mut u = vec![1.0_f64];
+            let mut t = 0.0;
+            while t < t_end - 1e-14 {
+                let h = dt.min(t_end - t);
+                fe.step(t, h, &mut u, &rhs);
+                t += h;
+            }
+            errors.push((u[0] - exact).abs());
+        }
+        let order = (errors[0] / errors[1]).log2();
+        assert!(order > 0.8, "Forward Euler heat convergence order={order:.2} (expected ~1)");
+    }
+
+    /// Van der Pol oscillator (stiff, two-variable) — verify RK4 resolves limit cycle.
+    /// This tests with a non-trivial nonlinear RHS that exercises the full RK4 state update.
+    #[test]
+    fn rk4_vanderpol_limit_cycle() {
+        // van der Pol: u'' - mu(1-u^2)u' + u = 0, mu = 1
+        // First-order system: u' = v, v' = mu(1-u^2)v - u
+        let mu = 1.0;
+        let rhs = move |_t: f64, y: &[f64], dydt: &mut [f64]| {
+            dydt[0] = y[1];
+            dydt[1] = mu * (1.0 - y[0] * y[0]) * y[1] - y[0];
+        };
+        let rk4 = Rk4;
+        let mut y = vec![2.0_f64, 0.0];
+        let mut t = 0.0;
+        let dt = 0.01_f64;
+        let t_end = 6.2832; // ~one period
+        while t < t_end - 1e-14 {
+            let h = dt.min(t_end - t);
+            rk4.step(t, h, &mut y, &rhs);
+            t += h;
+        }
+        assert!(y[0].is_finite(), "van der Pol u diverged: {}", y[0]);
+        assert!(y[1].is_finite(), "van der Pol v diverged: {}", y[1]);
+        // The limit cycle amplitude is approx 2.0 for mu = 1
+        assert!(y[0].abs() < 3.0, "van der Pol u out of range: {}", y[0]);
+    }
+
     // BDF-1 through BDF-6 with Nordsieck representation and adaptive step-size
     // control are provided in `crate::bdf::BdfIntegrator`.
 

@@ -28,7 +28,7 @@ use fem_assembly::{
 };
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
-    lagrange::{TriP1, TriP2, TriP3, TriP4, TetP1, HexQ1, QuadQ2},
+    lagrange::{TriP1, TriP2, TriP3, TriP4, HexQ1, QuadQ2},
     nedelec::{TriND1, TriND2, HexNDk, TetND1, TetND2},
     raviart_thomas::{TriRT0, TriRT1},
 };
@@ -149,7 +149,7 @@ fn f_elasticity_3d(x: &[f64]) -> [f64; 3] {
 }
 
 fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
-    use fem_element::lagrange::{TetP1, TetP2};
+    use fem_element::lagrange::{TetP1, TetP2, TetP3};
     let mesh = SimplexMesh::<3>::unit_cube_tet(n);
     let space = VectorH1Space::new(mesh.clone(), order, 3);
     let n_scalar = space.n_scalar_dofs();
@@ -158,7 +158,11 @@ fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
     let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 2 * order + 1);
 
     let mut rhs = vec![0.0; space.n_dofs()];
-    let ref_elem: &dyn ReferenceElement = if order == 1 { &TetP1 } else { &TetP2 };
+    let ref_elem: &dyn ReferenceElement = match order {
+        1 => &TetP1,
+        2 => &TetP2,
+        _ => &TetP3,
+    };
     let quad = ref_elem.quadrature(2 * order + 1);
     let n_ldofs = ref_elem.n_dofs();
     let mut phi = vec![0.0; n_ldofs];
@@ -201,7 +205,11 @@ fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
     let uh = dense_solve(&mat, &rhs);
 
     // L閾?error
-    let ref_elem_q: &dyn ReferenceElement = if order == 1 { &TetP1 } else { &TetP2 };
+    let ref_elem_q: &dyn ReferenceElement = match order {
+        1 => &TetP1,
+        2 => &TetP2,
+        _ => &TetP3,
+    };
     let quad_q = ref_elem_q.quadrature(2 * order + 2);
     let mut err_sq = 0.0;
     for e in mesh.elem_iter() {
@@ -866,6 +874,16 @@ fn elasticity_3d_p2_convergence() {
     let rates = convergence_rate(&errors, &ns);
     eprintln!("3D Elasticity P2 errors: {:?}, rates: {:?}", errors, rates);
     assert!(rates[0] > 2.5, "3D Elasticity P2 rate {:.2} < 2.5 (expected ~3)", rates[0]);
+}
+
+#[test]
+fn elasticity_3d_p3_convergence() {
+    // P3: expect O(h⁴) ≈ 4.0 for L² error (3D elasticity)
+    let ns = [2usize, 3];
+    let errors: Vec<f64> = ns.iter().map(|&n| solve_elasticity_3d(n, 3)).collect();
+    let rates = convergence_rate(&errors, &ns);
+    eprintln!("3D Elasticity P3 errors: {:?}, rates: {:?}", errors, rates);
+    assert!(rates[0] > 3.0, "3D Elasticity P3 rate {:.2} < 3.0 (expected ~4)", rates[0]);
 }
 
 // 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?Helmholtz H妤?seminorm 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?
@@ -2093,8 +2111,9 @@ fn f_h3d(x: &[f64]) -> f64 {
 }
 
 fn l2_err_tet(uh: &[f64], space: &H1Space<SimplexMesh<3>>) -> f64 {
+    use fem_element::lagrange::{TetP1, TetP2, TetP3};
     let mesh = space.mesh(); let o = space.order();
-    let re: &dyn ReferenceElement = match o { 1 => &TetP1, _ => &TetP1 };
+    let re: &dyn ReferenceElement = match o { 1 => &TetP1, 2 => &TetP2, _ => &TetP3 };
     let n = re.n_dofs(); let q = re.quadrature(2 * o + 2);
     let mut phi = vec![0.0; n]; let mut es = 0.0_f64;
     for e in mesh.elem_iter() {
@@ -2155,6 +2174,19 @@ fn solve_h3d(n: usize, order: u8, hex: bool) -> f64 {
     let ns = [4usize, 8]; let e: Vec<f64> = ns.iter().map(|&n| solve_h3d(n, 1, false)).collect();
     let r = convergence_rate(&e, &ns);
     eprintln!("3D TetP1: err={e:?} rate={r:?}"); assert!(r[0] > 1.5, "rate {:.2}", r[0]);
+}
+
+#[test] fn helmholtz_3d_tet_p2() {
+    let ns = [3usize, 6]; let e: Vec<f64> = ns.iter().map(|&n| solve_h3d(n, 2, false)).collect();
+    let r = convergence_rate(&e, &ns);
+    eprintln!("3D TetP2: err={e:?} rate={r:?}"); assert!(r[0] > 2.5, "rate {:.2}", r[0]);
+}
+
+#[test] fn helmholtz_3d_tet_p3() {
+    // P3: expect O(h⁴) ≈ 4.0 convergence for L² error
+    let ns = [2usize, 4]; let e: Vec<f64> = ns.iter().map(|&n| solve_h3d(n, 3, false)).collect();
+    let r = convergence_rate(&e, &ns);
+    eprintln!("3D TetP3: err={e:?} rate={r:?}"); assert!(r[0] > 3.0, "rate {:.2}", r[0]);
 }
 
 #[test] fn helmholtz_3d_hex_q1() {
