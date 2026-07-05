@@ -430,3 +430,111 @@ def test_poisson_mms_l2_error():
     # just a sanity check)
     assert np.isfinite(errors[-1])
     assert errors[-1] > 0
+
+
+# ─── HCurl space assembly ──────────────────────────────────────────────────
+
+
+def test_hcurl_space():
+    """HCurl ND1 basic DOF count."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V = fem.HCurlSpace(mesh, order=1)
+    assert V.n_dofs() > 0
+    assert V.dim() == 2
+
+
+def test_hcurl_mass_matrix():
+    """HCurl mass matrix is symmetric."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V = fem.HCurlSpace(mesh, order=1)
+    A = fem.assemble_bilinear(V, [fem.MassIntegrator(alpha=1.0)])
+    dense = A.to_dense()
+    n = A.nrows()
+    for i in range(n):
+        for j in range(n):
+            diff = abs(dense[i * n + j] - dense[j * n + i])
+            assert diff < 1e-12, f"A[{i},{j}] - A[{j},{i}] = {diff}"
+
+
+# ─── Complex grid function operations ──────────────────────────────────────
+
+
+def test_complex_grid_function_real_imag():
+    """ComplexGridFunction real/imag parts round-trip."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V = fem.H1Space(mesh, order=1)
+    cgf = fem.ComplexGridFunction(V)
+    n = cgf.n_dofs()
+    real_part = np.random.randn(n)
+    imag_part = np.random.randn(n)
+    cgf.set_real(real_part.tolist())
+    cgf.set_imag(imag_part.tolist())
+    r2 = np.array(cgf.get_real())
+    i2 = np.array(cgf.get_imag())
+    assert np.max(np.abs(r2 - real_part)) < 1e-14
+    assert np.max(np.abs(i2 - imag_part)) < 1e-14
+
+
+def test_complex_amplitude():
+    """amplitude = sqrt(real² + imag²)."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    V = fem.H1Space(mesh, order=1)
+    cgf = fem.ComplexGridFunction(V)
+    n = cgf.n_dofs()
+    cgf.set_real([1.0] * n)
+    cgf.set_imag([0.0] * n)
+    amp = cgf.amplitude()
+    assert abs(amp[0] - 1.0) < 1e-14
+
+
+# ─── Mesh element type and connectivity ─────────────────────────────────────
+
+
+def test_mesh_element_type():
+    """Mesh element type is correct for triangles."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    t = mesh.element_type(0)
+    assert t is not None
+
+
+def test_mesh_node_coords():
+    """Node coordinates are in [0,1]² for unit square mesh."""
+    mesh = fem.Mesh.unit_square_tri(4)
+    for e in range(mesh.n_elements()):
+        for n in mesh.element_nodes(e):
+            x = mesh.node_coords(n)
+            assert len(x) == 2
+            assert 0.0 <= x[0] <= 1.0 + 1e-14
+            assert 0.0 <= x[1] <= 1.0 + 1e-14
+
+
+# ─── Solver: preconditioned variants ───────────────────────────────────────
+
+
+def test_solve_pcg_jacobi_converges_tight():
+    """PCG-Jacobi converges to tight tolerance on refined mesh."""
+    mesh = fem.Mesh.unit_square_tri(8)
+    V = fem.H1Space(mesh, order=1)
+    A = fem.assemble_bilinear(V, [fem.StiffnessIntegrator()])
+    b_vec = fem.assemble_linear(V, fem.ConstantLoad(1.0))
+    b = np.array(b_vec, dtype=np.float64)
+    boundary = mesh.boundary_nodes([1, 2, 3, 4])
+    fem.apply_dirichlet(A, b, boundary)
+    x = np.zeros(V.n_dofs(), dtype=np.float64)
+    r = fem.solve_pcg_jacobi(A, b, x, tol=1e-10)
+    assert r.converged, f"PCG-Jacobi not converged: iter={r.iterations} res={r.final_residual:.3e}"
+    assert r.final_residual < 1e-8
+
+
+def test_solve_bicgstab_converges():
+    """BiCGSTAB converges on SPD Poisson."""
+    mesh = fem.Mesh.unit_square_tri(6)
+    V = fem.H1Space(mesh, order=1)
+    A = fem.assemble_bilinear(V, [fem.StiffnessIntegrator()])
+    b_vec = fem.assemble_linear(V, fem.ConstantLoad(1.0))
+    b = np.array(b_vec, dtype=np.float64)
+    boundary = mesh.boundary_nodes([1, 2, 3, 4])
+    fem.apply_dirichlet(A, b, boundary)
+    x = np.zeros(V.n_dofs(), dtype=np.float64)
+    r = fem.solve_bicgstab(A, b, x, tol=1e-8)
+    assert r.converged, f"BiCGSTAB not converged: res={r.final_residual:.3e}"
