@@ -1299,7 +1299,10 @@ fn em_ieee1597_pec_cylinder_scattering() {
     eprintln!("  [IEEE 1597 PEC cylinder] ka={:.1}, a={}, k={}:", k_wave * a, a, k_wave);
     eprintln!("       DOFs={}, max|E_scat|={:.4e}", n, max_mag);
     eprintln!("       Mie ref at r=2.0: θ=0°:0.375 45°:0.457 90°:0.726 135°:0.457 180°:0.375");
-    eprintln!("       (FEM values at r≈2.83 on square boundary, see mie_pec_cylinder.py)");
+    eprintln!("       RCS reference (Mie series, ka=2.0):");
+    eprintln!("       Monostatic σ/λ = 1.087 @ θ=180°");
+    eprintln!("       Bistatic  σ/λ = 0.993 @ θ=90°  = 1.509 @ θ=45°");
+    eprintln!("       (Full RCS computation: tests/mfem_references/rcs_pec_cylinder.py)");
 
     // Compare against Mie series at 5 test points on outer boundary
     // (θ = 0°, 45°, 90°, 135°, 180° at r ≈ 2.0)
@@ -1317,6 +1320,18 @@ fn em_ieee1597_pec_cylinder_scattering() {
     mean_field_mag /= 5.0_f64.min(e_positions.len() as f64);
     assert!(mean_field_mag > 0.01 && mean_field_mag < 10.0,
         "PEC cylinder: mean field {:.4e} outside physical range", mean_field_mag);
+
+    // Check that field is physically reasonable: backscatter point
+    // (the corner at θ≈135° should have |E_scat| in a meaningful range)
+    let backscatter_idx = (0..e_positions.len()).find(|&i| {
+        let (x, y) = e_positions[i];
+        x < 0.0 && y.abs() < 0.1  // near θ=180° (backscatter direction)
+    });
+    if let Some(idx) = backscatter_idx {
+        let mag = (e_field_re[idx].powi(2) + e_field_im[idx].powi(2)).sqrt();
+        // Backscatter magnitude should be > 0.05 (not near-zero)
+        assert!(mag > 0.05, "PEC cylinder: backscatter |E_scat|={:.4e} too small", mag);
+    }
 
     fem_regression::regression("em_ieee1597_pec_cylinder_scattering")
         .check_with("max_mag", max_mag, 1e-6, 1e-8)
