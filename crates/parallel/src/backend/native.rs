@@ -14,7 +14,7 @@ use ::mpi::point_to_point::{Destination, Source};
 #[cfg(feature = "mpi")]
 use ::mpi::traits::{Communicator, CommunicatorCollectives, Root};
 #[cfg(feature = "mpi")]
-use ::mpi::topology::SystemCommunicator;
+use ::mpi::topology::{Color, SimpleCommunicator};
 
 // ── SerialBackend ─────────────────────────────────────────────────────────────
 
@@ -61,26 +61,20 @@ impl CommBackend for SerialBackend {
 pub struct NativeMpiBackend {
     rank: Rank,
     size: i32,
-    comm: SystemCommunicator,
+    comm: SimpleCommunicator,
 }
 
 #[cfg(feature = "mpi")]
 impl NativeMpiBackend {
     /// Construct from a live `mpi::environment::Universe`.
     pub fn from_world(universe: &::mpi::environment::Universe) -> Self {
-        let w: SystemCommunicator = universe.world();
+        let w: SimpleCommunicator = universe.world();
         NativeMpiBackend {
             rank: w.rank(),
             size: w.size(),
             comm: w,
         }
     }
-}
-
-#[cfg(feature = "mpi")]
-fn wrap_comm(comm: &SystemCommunicator) -> ::mpi::topology::SimpleCommunicator {
-    use ::mpi::traits::Communicator;
-    comm.as_ref()
 }
 
 #[cfg(feature = "mpi")]
@@ -91,14 +85,13 @@ impl CommBackend for NativeMpiBackend {
     fn size(&self) -> usize { self.size as usize }
 
     fn barrier(&self) {
-        use ::mpi::topology::SimpleCommunicator;
-        SimpleCommunicator(self.comm).barrier();
+        self.comm.barrier();
     }
 
     fn allreduce_sum_f64(&self, local: f64) -> f64 {
         use ::mpi::collective::SystemOperation;
         let mut result = 0.0_f64;
-        SimpleCommunicator(self.comm)
+        self.comm
             .all_reduce_into(&local, &mut result, &SystemOperation::sum());
         result
     }
@@ -106,15 +99,13 @@ impl CommBackend for NativeMpiBackend {
     fn allreduce_sum_i64(&self, local: i64) -> i64 {
         use ::mpi::collective::SystemOperation;
         let mut result = 0_i64;
-        SimpleCommunicator(self.comm)
+        self.comm
             .all_reduce_into(&local, &mut result, &SystemOperation::sum());
         result
     }
 
     fn broadcast_bytes(&self, root: Rank, buf: &mut Vec<u8>) {
-        use ::mpi::topology::SimpleCommunicator;
-        let world = SimpleCommunicator(self.comm);
-        let root_proc = world.process_at_rank(root);
+        let root_proc = self.comm.process_at_rank(root);
         let mut len = buf.len();
         root_proc.broadcast_into(&mut len);
         if self.rank != root {
@@ -124,24 +115,19 @@ impl CommBackend for NativeMpiBackend {
     }
 
     fn send_bytes(&self, dest: Rank, tag: i32, data: &[u8]) {
-        use ::mpi::topology::SimpleCommunicator;
-        SimpleCommunicator(self.comm)
+        self.comm
             .process_at_rank(dest)
             .send_with_tag(data, tag);
     }
 
     fn recv_bytes(&self, src: Rank, tag: i32) -> Vec<u8> {
-        use ::mpi::topology::SimpleCommunicator;
-        let (msg, _status) = SimpleCommunicator(self.comm)
+        let (msg, _status) = self.comm
             .process_at_rank(src)
             .receive_vec_with_tag::<u8>(tag);
         msg
     }
 
     fn alltoallv_bytes(&self, sends: &[(Rank, Vec<u8>)]) -> Vec<(Rank, Vec<u8>)> {
-        use ::mpi::topology::SimpleCommunicator;
-
-        let world = SimpleCommunicator(self.comm);
         let n     = self.size as usize;
 
         let mut send_counts = vec![0i64; n];
@@ -149,20 +135,20 @@ impl CommBackend for NativeMpiBackend {
             send_counts[*dest as usize] = data.len() as i64;
         }
         let mut recv_counts = vec![0i64; n];
-        world.all_to_all_into(&send_counts, &mut recv_counts);
+        self.comm.all_to_all_into(&send_counts, &mut recv_counts);
 
         const TAG_A2AV: i32 = 0x3000;
 
         for (dest, data) in sends {
             let tag = TAG_A2AV + self.rank;
-            world.process_at_rank(*dest).send_with_tag(data.as_slice(), tag);
+            self.comm.process_at_rank(*dest).send_with_tag(data.as_slice(), tag);
         }
 
         let mut results: Vec<(Rank, Vec<u8>)> = Vec::new();
         for src in 0..n {
             if recv_counts[src] == 0 { continue; }
             let tag = TAG_A2AV + src as i32;
-            let (msg, _status) = world
+            let (msg, _status) = self.comm
                 .process_at_rank(src as i32)
                 .receive_vec_with_tag::<u8>(tag);
             results.push((src as Rank, msg));
@@ -171,12 +157,12 @@ impl CommBackend for NativeMpiBackend {
     }
 
     fn split(&self, color: i32, key: i32) -> Box<dyn CommBackend> {
-        use ::mpi::topology::SimpleCommunicator;
-        let new_comm = SimpleCommunicator(self.comm).split(color, key);
+        let new_comm = self.comm.split_by_color_with_key(Color::with_value(color), key)
+            .expect("split_by_color_with_key returned None");
         Box::new(NativeMpiBackend {
             rank: new_comm.rank(),
             size: new_comm.size(),
-            comm: new_comm.into(),
+            comm: new_comm,
         })
     }
 }
