@@ -56,6 +56,7 @@
 //! | **时域 MMS** | `ex10_maxwell_time_exhibits_second_order_temporal_self_convergence` | maxwell_time_domain | 时域二阶精度 | 2D | H(curl) | O(dt²) > 2.0 |
 //! | **H(curl) MMS** | `mms_hcurl_eigenvalue_convergence` | mms_convergence | H(curl) 特征值MMS | 2D | H(curl) | λ相对误差 < 2% |
 //! | **H(curl) MMS** | `anisotropic_maxwell_exhibits_first_order_hcurl_convergence_trend` | mfem_ex31 | HCurl O(h)收敛 | 2D | H(curl) | O(h) > 0.85 |
+//! | **CEM** | `em_dielectric_cylinder_scattering` | em_benchmarks | 介质柱散射(Annular+εr=4) | 2D | H¹ | 近场范围 + 回归 |
 
 use std::f64::consts::PI;
 
@@ -1336,5 +1337,125 @@ fn em_ieee1597_pec_cylinder_scattering() {
     fem_regression::regression("em_ieee1597_pec_cylinder_scattering")
         .check_with("max_mag", max_mag, 1e-6, 1e-8)
         .check_with("mean_field", mean_field_mag, 1e-6, 1e-8)
+        .finalize();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CEM: Dielectric cylinder scattering (annular mesh, scattered field)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// CEM benchmark: TMz plane wave scattering by a dielectric cylinder (εr=4).
+///
+/// Uses the same annular mesh pattern as the PEC cylinder test, but with
+/// the cylinder being dielectric (penetrable, no inner Dirichlet BC).
+/// The scattered-field formulation with PWConstCoeff handles the material
+/// contrast at the cylinder interface.
+///
+/// Source term: -k²·(εr-1)·e^{-ikx} (polarization current in the dielectric)
+/// ABC on outer boundary for the scattered field.
+///
+/// References: ACES/CEM canonical scattering series
+#[test]
+fn em_dielectric_cylinder_scattering() {
+    use fem_assembly::standard::BoundaryMassIntegrator;
+    use fem_assembly::standard::DomainSourceIntegrator;
+    use fem_assembly::assembler::face_dofs_p1;
+    use fem_assembly::complex::NativeComplexSystem;
+    use fem_linalg::complex_csr::ComplexCsr;
+
+    let a = 0.5;
+    let k_wave = 4.0;
+    let k2 = k_wave * k_wave;
+    let eps_r = 4.0;
+    let r_outer = 2.0;
+    let n_mesh = 60;
+
+    // Square mesh [-r_outer, r_outer]² with element tags by distance from center
+    let mesh_raw = SimplexMesh::<2>::unit_square_tri(n_mesh);
+    let mut mesh = mesh_raw;
+    for c in mesh.coords.chunks_mut(2) {
+        c[0] = c[0] * 2.0 * r_outer - r_outer;  // map [0,1]→[-r,r]
+        c[1] = c[1] * 2.0 * r_outer - r_outer;
+    }
+    for e in 0..mesh.n_elements() as u32 {
+        let nodes = mesh.element_nodes(e);
+        let cx: f64 = nodes.iter()
+            .map(|&n| mesh.node_coords(n)[0]).sum::<f64>() / nodes.len() as f64;
+        let cy: f64 = nodes.iter()
+            .map(|&n| mesh.node_coords(n)[1]).sum::<f64>() / nodes.len() as f64;
+        let r = (cx * cx + cy * cy).sqrt();
+        mesh.elem_tags[e as usize] = if r < a { 1 } else { 2 };
+    }
+
+    let space = H1Space::new(mesh.clone(), 1);
+    let n = space.n_dofs();
+    let dm = space.dof_manager();
+
+    // Piecewise permittivity
+    let eps = PWConstCoeff::new([(1, eps_r), (2, 1.0)]);
+
+    let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
+    let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: eps }], 5);
+
+    let mut coo_re = CooMatrix::<f64>::new(n, n);
+    for i in 0..n {
+        for p in k_mat.row_ptr[i]..k_mat.row_ptr[i + 1] {
+            coo_re.add(i, k_mat.col_idx[p] as usize, k_mat.values[p]);
+        }
+        for p in m_mat.row_ptr[i]..m_mat.row_ptr[i + 1] {
+            coo_re.add(i, m_mat.col_idx[p] as usize, -k2 * m_mat.values[p]);
+        }
+    }
+    let a_re: CsrMatrix<f64> = coo_re.into_csr();
+
+    // ABC on all outer boundaries
+    let bnd = BoundaryMassIntegrator { alpha: k_wave };
+    let a_im = Assembler::assemble_boundary_bilinear(
+        n, &mesh, &face_dofs_p1(&mesh), 1, &[&bnd], &[1, 2, 3, 4], 5,
+    );
+
+    let csr = ComplexCsr::from_re_im(&a_re, &a_im);
+    let sys = NativeComplexSystem { mat: csr, omega: k_wave, n_dofs: n };
+
+    // RHS: -k²·(εr-1)·e^{-ikx}  (zero in air, non-zero in dielectric)
+    let src_re_fn = |x: &[f64]| {
+        let r = (x[0]*x[0] + x[1]*x[1]).sqrt();
+        let eps_local = if r < a { eps_r } else { 1.0 };
+        -k2 * (eps_local - 1.0) * (k_wave * x[0]).cos()
+    };
+    let src_im_fn = |x: &[f64]| {
+        let r = (x[0]*x[0] + x[1]*x[1]).sqrt();
+        let eps_local = if r < a { eps_r } else { 1.0 };
+        -k2 * (eps_local - 1.0) * (k_wave * x[0]).sin()
+    };
+    let src_re = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(src_re_fn)], 5);
+    let src_im = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(src_im_fn)], 5);
+
+    // No essential BC (pure Robin/ABC on outer boundary)
+    let gf = sys.solve(&src_re, &src_im, 1e-8, 8000, 50)
+        .expect("Dielectric cylinder GMRES failed");
+
+    use fem_space::constraints::boundary_dofs;
+    let outer = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let mut max_mag: f64 = 0.0;
+    let mut mean_mag: f64 = 0.0;
+    for &d in &outer {
+        let m = (gf.u_re[d as usize].powi(2) + gf.u_im[d as usize].powi(2)).sqrt();
+        max_mag = max_mag.max(m);
+        mean_mag += m;
+    }
+    mean_mag /= outer.len() as f64;
+
+    assert!(max_mag > 0.0 && max_mag < 10.0,
+        "Dielectric cylinder: max|E_scat|={:.4e} outside range", max_mag);
+    assert!(mean_mag > 0.0 && mean_mag < 5.0,
+        "Dielectric cylinder: mean|E_scat|={:.4e} outside range", mean_mag);
+
+    eprintln!("  [CEM Dielectric cylinder] ka={:.1}, εr={}: DOFs={}, max|E_scat|={:.4e}, mean={:.4e}",
+        k_wave * a, eps_r, n, max_mag, mean_mag);
+
+    fem_regression::regression("em_dielectric_cylinder_scattering")
+        .check_with("max_mag", max_mag, 1e-6, 1e-8)
+        .check_with("mean_mag", mean_mag, 1e-6, 1e-8)
         .finalize();
 }
