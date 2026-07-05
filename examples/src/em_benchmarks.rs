@@ -7,6 +7,7 @@
 //! | TE waveguide | 2-D Helmholtz, ∂u/∂n=0 | λ = π²(m²+n²), m,n≥0 |
 //! | TM waveguide | 2-D Helmholtz, u=0 | λ = π²(m²+n²), m,n≥1 |
 //! | Dielectric-loaded cavity | 2-D Helmholtz, εr(x) piecewise | Frequency ratio |
+//! | Helmholtz manufactured | Indefinite Helmholtz, MMS | L² error < 2% |
 
 use std::f64::consts::PI;
 
@@ -21,7 +22,7 @@ use fem_solver::{lobpcg, LobpcgConfig};
 use fem_space::{
     fe_space::FESpace,
     H1Space,
-    constraints::boundary_dofs,
+    constraints::{apply_dirichlet, boundary_dofs},
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -277,4 +278,84 @@ fn em_cavity_eigenvalue_convergence() {
         eprintln!("  [EM] cavity convergence n={}: max_rel_err={:.3e}", n, max_err);
         prev_err = max_err;
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Benchmark EM5: 2-D Helmholtz manufactured solution (indefinite)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Time-harmonic Helmholtz: -Δu - k²u = f with manufactured solution.
+///
+/// Manufactured: u_exact = sin(πx)sin(πy), k = 2π (indefinite regime).
+/// Source: f = (2π² - k²)sin(πx)sin(πy) = -2π² sin(πx)sin(πy).
+/// BC: u = 0 on boundary (PEC-like Dirichlet).
+///
+/// The system K - k²M is indefinite (k² > 2π²), so we use GMRES.
+#[test]
+fn em_helmholtz_mms() {
+    use fem_assembly::standard::MassIntegrator;
+
+    let k_wave = 2.0 * PI; // wavenumber
+    let mesh = SimplexMesh::<2>::unit_square_tri(20);
+    let space = H1Space::new(mesh.clone(), 1);
+    let n = space.n_dofs();
+
+    // Build K and M separately
+    let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
+    let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 5);
+
+    // Form A = K - k²M using COO
+    use fem_linalg::CooMatrix;
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    let k2 = k_wave * k_wave;
+    for i in 0..n {
+        for pk in k_mat.row_ptr[i]..k_mat.row_ptr[i + 1] {
+            let j = k_mat.col_idx[pk] as usize;
+            let k_ij = k_mat.values[pk];
+            // Subtract k² * M_ij
+            // Find M_ij at same position
+            let mut m_ij = 0.0;
+            for pl in m_mat.row_ptr[i]..m_mat.row_ptr[i + 1] {
+                if m_mat.col_idx[pl] as usize == j {
+                    m_ij = m_mat.values[pl];
+                    break;
+                }
+            }
+            coo.add(i, j, k_ij - k2 * m_ij);
+        }
+    }
+    let mut a_mat: CsrMatrix<f64> = coo.into_csr();
+
+    // RHS: f(x) = (2π² - k²) sin(πx)sin(πy)
+    let src = fem_assembly::standard::DomainSourceIntegrator::new(|x: &[f64]| {
+        (2.0 * PI * PI - k_wave * k_wave) * (PI * x[0]).sin() * (PI * x[1]).sin()
+    });
+    let mut rhs = Assembler::assemble_linear(&space, &[&src], 5);
+
+    // Dirichlet BC (u = 0 on boundary)
+    let dm = space.dof_manager();
+    let bnd = boundary_dofs(&mesh, dm, &[1, 2, 3, 4]);
+    let bnd_vals = vec![0.0; bnd.len()];
+    apply_dirichlet(&mut a_mat, &mut rhs, &bnd, &bnd_vals);
+
+    // Solve with GMRES (indefinite system)
+    let mut u = vec![0.0; n];
+    let cfg = fem_solver::SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 5000, verbose: false, ..fem_solver::SolverConfig::default() };
+    let result = fem_solver::solve_gmres(&a_mat, &rhs, &mut u, 50, &cfg)
+        .expect("Helmholtz GMRES failed");
+
+    assert!(result.converged, "Helmholtz GMRES should converge");
+    assert!(result.final_residual < 1e-6, "residual {:.3e}", result.final_residual);
+
+    // L² error
+    let mut l2_err: f64 = 0.0;
+    for dof in 0..n as u32 {
+        let c = dm.dof_coord(dof);
+        let exact = (PI * c[0]).sin() * (PI * c[1]).sin();
+        l2_err += (u[dof as usize] - exact).powi(2);
+    }
+    l2_err = (l2_err / n as f64).sqrt();
+    assert!(l2_err < 0.02,
+        "Helmholtz MMS L² error too large: {:.4e}", l2_err);
+    eprintln!("  [EM] helmholtz-mms: l2_err={:.4e}, iters={}", l2_err, result.iterations);
 }
