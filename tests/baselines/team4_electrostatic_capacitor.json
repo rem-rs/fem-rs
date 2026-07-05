@@ -2,7 +2,7 @@
   "name": "team4_electrostatic_capacitor",
   "metrics": {
     "max_phi_err": {
-      "value": 2.387090525246549e-11,
+      "value": 9.939493672561639e-12,
       "rtol": 1e-6,
       "atol": 1e-10
     }

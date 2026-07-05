@@ -2,7 +2,7 @@
   "name": "em_complex_helmholtz_3d_mms",
   "metrics": {
     "l2_error": {
-      "value": 0.016383314067156048,
+      "value": 0.016383314065016998,
       "rtol": 1e-6,
       "atol": 1e-8
     },
