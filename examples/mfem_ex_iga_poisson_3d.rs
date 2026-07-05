@@ -5,7 +5,6 @@ use fem_assembly::iga::{assemble_iga_diffusion_3d, assemble_iga_load_3d};
 use fem_element::iga::NurbsKnotVector;
 use fem_element::nurbs::NurbsMesh3D;
 use fem_solver::{SolverConfig, solve_cg};
-use std::f64::consts::PI;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -28,6 +27,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
 
     #[test]
     fn iga_poisson_3d_mms() {

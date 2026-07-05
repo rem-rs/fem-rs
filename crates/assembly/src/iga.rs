@@ -611,6 +611,77 @@ pub fn assemble_iga_load_3d(
     rhs
 }
 
+/// Assemble the 3-D linear elasticity stiffness matrix.
+///
+/// Uses interleaved DOF ordering: control point `a` contributes DOFs
+/// `3a` (x-displacement), `3a+1` (y-displacement), `3a+2` (z-displacement).
+///
+/// Isotropic 3-D elasticity (λ and μ are the Lamé parameters).
+pub fn assemble_iga_elasticity_3d(
+    mesh: &NurbsMesh3D,
+    lambda: f64,
+    mu: f64,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let n_total: usize = mesh.patches.iter().map(|p| p.control_pts.len()).sum();
+    let n_vec = 3 * n_total;
+    let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
+    let c1 = lambda + 2.0 * mu;
+
+    let mut dof_offset = 0usize;
+    for pd in &mesh.patches {
+        let elem = pd.patch_element_ref();
+        let n_dof = elem.n_dofs();
+        let qr = patch_quad_3d(pd, quad_order);
+
+        for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+            let (phys_grads, det_j) = physical_grads_3d(pd, qp_xi);
+            let w = qp_w * det_j.abs();
+
+            for a in 0..n_dof {
+                let gax = phys_grads[a * 3];
+                let gay = phys_grads[a * 3 + 1];
+                let gaz = phys_grads[a * 3 + 2];
+                let base_a = 3 * (dof_offset + a);
+
+                for b in 0..n_dof {
+                    let gbx = phys_grads[b * 3];
+                    let gby = phys_grads[b * 3 + 1];
+                    let gbz = phys_grads[b * 3 + 2];
+                    let base_b = 3 * (dof_offset + b);
+
+                    // 3×3 block: K[3a+i, 3b+j] for i,j ∈ {0,1,2}
+                    // K[0,0] = (λ+2μ)·gax·gbx + μ·(gay·gby + gaz·gbz)
+                    let k00 = w * (c1 * gax * gbx + mu * (gay * gby + gaz * gbz));
+                    // K[0,1] = λ·gax·gby + μ·gay·gbx
+                    let k01 = w * (lambda * gax * gby + mu * gay * gbx);
+                    // K[0,2] = λ·gax·gbz + μ·gaz·gbx
+                    let k02 = w * (lambda * gax * gbz + mu * gaz * gbx);
+                    // K[1,1] = (λ+2μ)·gay·gby + μ·(gax·gbx + gaz·gbz)
+                    let k11 = w * (c1 * gay * gby + mu * (gax * gbx + gaz * gbz));
+                    // K[1,2] = λ·gay·gbz + μ·gaz·gby
+                    let k12 = w * (lambda * gay * gbz + mu * gaz * gby);
+                    // K[2,2] = (λ+2μ)·gaz·gbz + μ·(gax·gbx + gay·gby)
+                    let k22 = w * (c1 * gaz * gbz + mu * (gax * gbx + gay * gby));
+
+                    coo.add(base_a, base_b, k00);
+                    coo.add(base_a, base_b + 1, k01);
+                    coo.add(base_a, base_b + 2, k02);
+                    coo.add(base_a + 1, base_b, k01);     // symmetric: K[1,0]
+                    coo.add(base_a + 1, base_b + 1, k11);
+                    coo.add(base_a + 1, base_b + 2, k12);
+                    coo.add(base_a + 2, base_b, k02);     // symmetric: K[2,0]
+                    coo.add(base_a + 2, base_b + 1, k12); // symmetric: K[2,1]
+                    coo.add(base_a + 2, base_b + 2, k22);
+                }
+            }
+        }
+        dof_offset += n_dof;
+    }
+
+    coo.into_csr()
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 pub(crate) fn pd_to_patch2d(pd: &NurbsPatch2DData) -> fem_element::iga::NurbsPatch2D {
@@ -1192,5 +1263,57 @@ mod tests {
         let diff: f64 = u_be.iter().zip(&u_cn).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
         // Both should give zero (from zero IC + zero source)
         assert!(diff < 1e-12, "BE and CN from zero IC/source should agree, diff={diff}");
+    }
+
+    // ── IGA 3D elasticity ─────────────────────────────────────────────────
+
+    #[test]
+    fn iga_elasticity_3d_unit_cube_smoke() {
+        let p = 1;
+        let n = 4; // 4×4×4 control points
+        let n_ctrl = n * n * n;
+        let kv = NurbsKnotVector::uniform(p, n - p);
+        let ctrl: Vec<[f64; 3]> = (0..n_ctrl).map(|idx| {
+            let i = idx % n;
+            let j = (idx / n) % n;
+            let k = idx / (n * n);
+            [i as f64 / (n - 1) as f64,
+             j as f64 / (n - 1) as f64,
+             k as f64 / (n - 1) as f64]
+        }).collect();
+        let mesh = NurbsMesh3D::single_patch(
+            kv.clone(), kv.clone(), kv.clone(), ctrl, vec![1.0; n_ctrl],
+        );
+        let n_vec = 3 * n_ctrl;
+
+        let e_mod = 1e3;
+        let nu = 0.3;
+        let lam = e_mod * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        let mu = e_mod / (2.0 * (1.0 + nu));
+        let mut stiff = assemble_iga_elasticity_3d(&mesh, lam, mu, 3);
+
+        // Gravity-like load in z-direction
+        let load = assemble_iga_load_3d(&mesh, |_| -1.0, 3);
+        let mut rhs = vec![0.0; n_vec];
+        for a in 0..n_ctrl {
+            rhs[3 * a + 2] = load[a]; // z-component
+        }
+
+        // Clamped BC: u=0 on all boundary control points
+        let mut bc_dofs = Vec::new();
+        for i in 0..n { for j in 0..n { for k in 0..n {
+            if i == 0 || i == n-1 || j == 0 || j == n-1 || k == 0 || k == n-1 {
+                let a = k * n * n + j * n + i;
+                bc_dofs.push(3*a); bc_dofs.push(3*a+1); bc_dofs.push(3*a+2);
+            }
+        }}}
+        bc_dofs.sort_unstable();
+        bc_dofs.dedup();
+        apply_dirichlet_iga(&mut stiff, &mut rhs, &bc_dofs);
+
+        let u = direct_solve(&stiff, &rhs);
+        let norm: f64 = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+        eprintln!("  [IGA 3D elasticity] p={}, n_ctrl={}, ||u||={:.6e}", p, n_ctrl, norm);
+        assert!(norm > 0.0 && norm < 100.0, "||u||={:.6e} outside [0, 100]", norm);
     }
 }
