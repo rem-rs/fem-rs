@@ -1993,11 +1993,13 @@ fn maxwell_3d_tet_nd1_convergence() {
     }).unzip();
     let rates_l2 = convergence_rate(&errors_l2, &ns);
     let rates_curl = convergence_rate(&errors_curl, &ns);
-    eprintln!("3D Maxwell TetND1: L閾?err={:?} rates={:?}, curl err={:?} rates={:?}",
+    eprintln!("3D Maxwell TetND1: L² err={:?} rates={:?}, curl err={:?} rates={:?}",
         errors_l2, rates_l2, errors_curl, rates_curl);
+    // ND1 L² theory: O(h) for the field (lowest-order Nedelec)
+    assert!(rates_l2[0] > 0.5, "TetND1 L² rate {:.2} < 0.5 (too low)", rates_l2[0]);
     assert!(errors_curl[0].is_finite(), "TetND1 curl error not finite");
-    assert!(errors_curl[1] < errors_curl[0], "TetND1 curl error should decrease (h=1/2闁?/3)");
-    eprintln!("TetND1 rates: L閾?{:?}, curl={:?}", rates_l2, rates_curl);
+    assert!(errors_curl[1] < errors_curl[0], "TetND1 curl error should decrease (h=1/2→1/3)");
+    eprintln!("TetND1 rates: L²={:?}, curl={:?}", rates_l2, rates_curl);
 }
 
 #[test]

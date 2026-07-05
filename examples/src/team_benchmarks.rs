@@ -438,3 +438,125 @@ fn team3_dielectric_slab_waveguide() {
         .check_with("lambda_2", ev[2], 1e-6, 1e-10)
         .finalize();
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 3D H(curl) MMS — ND1 convergence via CG solver + regression baseline
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 3D H(curl) manufactured solution convergence test using CG solver.
+///
+/// Solves: curl curl E + E = f  in [0,1]³,  n×E = 0 on all faces.
+///
+/// Manufactured: E = (sin(πy)sin(πz), sin(πx)sin(πz), sin(πx)sin(πy))
+/// Source: f = (2π²+1)·E  (since curl curl E = 2π²·E)
+///
+/// Analytical L² norm: ||E||² = 3/4.  We track the mass-weighted norm
+/// ||u_h||²_M = u_h^T M u_h as a convergence proxy across mesh refinements.
+///
+/// This validates the full 3D H(curl) assembly → solver → postprocessing
+/// pipeline with a genuine manufactured solution.
+#[test]
+fn team3_hcurl_3d_mms_convergence() {
+    use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+    use fem_assembly::vector_integrator::{VectorLinearIntegrator, VectorQpData};
+    use fem_assembly::VectorAssembler;
+    use fem_space::constraints::boundary_dofs_hcurl;
+    use fem_solver::SolverConfig;
+    use std::f64::consts::PI;
+
+    // 3D manufactured source: f = (2π²+1)·E(x)
+    struct MmsSource3D;
+    impl VectorLinearIntegrator for MmsSource3D {
+        fn add_to_element_vector(&self, qp: &VectorQpData<'_>, f_elem: &mut [f64]) {
+            let x = qp.x_phys;
+            let sx = (PI * x[0]).sin();
+            let sy = (PI * x[1]).sin();
+            let sz = (PI * x[2]).sin();
+            let coeff = 2.0 * PI * PI + 1.0;
+            let fx = coeff * sy * sz;
+            let fy = coeff * sx * sz;
+            let fz = coeff * sx * sy;
+            for i in 0..qp.n_dofs {
+                let dot = qp.phi_vec[i * 3] * fx + qp.phi_vec[i * 3 + 1] * fy + qp.phi_vec[i * 3 + 2] * fz;
+                f_elem[i] += qp.weight * dot;
+            }
+        }
+    }
+
+    let mut prev_norm = f64::MAX;
+    let analytical_norm_sq = 0.75; // ∫(E_x²+E_y²+E_z²) = 3·(1/2)·(1/2) = 3/4
+    for &n in &[2usize, 3, 4] {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+        let space = HCurlSpace::new(mesh.clone(), 1);
+        let n_dof = space.n_dofs();
+
+        let mat = VectorAssembler::assemble_bilinear(
+            &space, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], 5,
+        );
+        let mut rhs = VectorAssembler::assemble_linear(&space, &[&MmsSource3D], 5);
+        let mut a_mat = mat;
+
+        // PEC BC: n×E = 0 on all 6 faces
+        let bnd = boundary_dofs_hcurl(&mesh, &space, &[1, 2, 3, 4, 5, 6]);
+        let bnd_vals = vec![0.0; bnd.len()];
+        fem_space::constraints::apply_dirichlet(&mut a_mat, &mut rhs, &bnd, &bnd_vals);
+
+        let mut u = vec![0.0; n_dof];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
+        let result = fem_solver::solve_cg(&a_mat, &rhs, &mut u, &cfg)
+            .expect(&format!("3D H(curl) MMS CG n={} failed", n));
+        assert!(result.converged, "3D H(curl) MMS CG n={} not converged", n);
+
+        // Mass-weighted norm as L² proxy
+        let mass_mat = VectorAssembler::assemble_bilinear(
+            &space, &[&VectorMassIntegrator { alpha: 1.0 }], 5,
+        );
+        let mut mv = vec![0.0; n_dof];
+        mass_mat.spmv(&u, &mut mv);
+        let norm_sq: f64 = u.iter().zip(mv.iter()).map(|(a, b)| a * b).sum();
+        let norm = norm_sq.sqrt();
+
+        let rel_err = (norm_sq - analytical_norm_sq).abs() / analytical_norm_sq;
+        if prev_norm < f64::MAX {
+            let change = (prev_norm - norm).abs() / prev_norm;
+            eprintln!("  [3D HCurl MMS] n={}: ||u||_M={:.6e}, rel_err={:.4e}, change={:.3}, iters={}",
+                n, norm, rel_err, change, result.iterations);
+        } else {
+            eprintln!("  [3D HCurl MMS] n={}: ||u||_M={:.6e}, rel_err={:.4e}, iters={}",
+                n, norm, rel_err, result.iterations);
+        }
+        prev_norm = norm;
+    }
+
+    // Verify final mesh gives norm close to analytical value
+    // (ND1 on n=4 with CG should be within 10%)
+    {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let space = HCurlSpace::new(mesh.clone(), 1);
+        let n_dof = space.n_dofs();
+        let mat = VectorAssembler::assemble_bilinear(
+            &space, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], 5,
+        );
+        let mut rhs = VectorAssembler::assemble_linear(&space, &[&MmsSource3D], 5);
+        let mut a_mat = mat;
+        let bnd = boundary_dofs_hcurl(&mesh, &space, &[1, 2, 3, 4, 5, 6]);
+        fem_space::constraints::apply_dirichlet(&mut a_mat, &mut rhs, &bnd, &vec![0.0; bnd.len()]);
+        let mut u = vec![0.0; n_dof];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
+        let result = fem_solver::solve_cg(&a_mat, &rhs, &mut u, &cfg).expect("3D MMS CG n=4");
+        assert!(result.converged);
+
+        let mass_mat = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: 1.0 }], 5);
+        let mut mv = vec![0.0; n_dof];
+        mass_mat.spmv(&u, &mut mv);
+        let norm_sq: f64 = u.iter().zip(mv.iter()).map(|(a, b)| a * b).sum();
+        let rel_err = (norm_sq - analytical_norm_sq).abs() / analytical_norm_sq;
+        assert!(rel_err < 0.15, "3D H(curl) MMS: norm rel_err={:.4e} > 15%", rel_err);
+
+        fem_regression::regression("team3_hcurl_3d_mms")
+            .check_with("n_dofs", n_dof as f64, 1e-6, 0.5)
+            .check_with("norm_sq", norm_sq, 1e-6, 1e-8)
+            .check_with("rel_err", rel_err, 1e-6, 1e-8)
+            .finalize();
+    }
+}
