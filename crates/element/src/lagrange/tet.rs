@@ -176,14 +176,7 @@ fn tet_ijkl(p: usize) -> Vec<(usize, usize, usize, usize)> {
     v
 }
 
-fn rising_val(n: usize, t: f64) -> f64 {
-    if n == 0 { return 1.0; } let mut val = 1.0;
-    for a in 0..n { val *= (t - a as f64) / (n as f64 - a as f64); } val
-}
-fn rising_deriv(n: usize, t: f64) -> f64 {
-    if n == 0 { return 0.0; } let nf = n as f64; let mut sum = 0.0;
-    for b in 0..n { let mut term = 1.0; for a in 0..n { if a != b { term *= (t - a as f64) / (nf - a as f64); }} sum += term / (nf - b as f64); } sum
-}
+use super::factory::{rising_val, rising_deriv};
 
 macro_rules! impl_tet_pk_fixed {
     ($name:ident, $p:literal) => {

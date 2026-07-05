@@ -3,7 +3,7 @@
 //! Bilinear/linear form assembly: [`Assembler`], [`BilinearIntegrator`],
 //! [`LinearIntegrator`], and standard integrators (diffusion, mass, source,
 //! Neumann, elasticity).
-#![allow(non_snake_case, dead_code, unreachable_patterns, unused_imports, unused_variables, unused_assignments, clippy::needless_range_loop)]
+#![allow(non_snake_case, unreachable_patterns, unused_imports, unused_variables, unused_assignments, clippy::needless_range_loop)]
 //!
 //! - **IGA FESpace:** for [`IgaFESpace1D`](fem_space::IgaFESpace1D) / [`IgaFESpace2D`](fem_space::IgaFESpace2D),
 //!   use [`Assembler::assemble_bilinear_iga_1d`](Assembler::assemble_bilinear_iga_1d) /

@@ -533,6 +533,30 @@ impl<T: Scalar> CsrMatrix<T> {
 
 // ─── Free functions ──────────────────────────────────────────────────────────
 
+/// Merge two sorted CSR row segments into a single (col_idx, values) row.
+/// The two ranges are from the same row index in A and B respectively.
+fn merge_rows<T: Scalar>(
+    a: &CsrMatrix<T>, b: &CsrMatrix<T>,
+    a_start: usize, a_end: usize,
+    b_start: usize, b_end: usize,
+) -> (Vec<u32>, Vec<T>) {
+    let cap = (a_end - a_start) + (b_end - b_start);
+    let mut cols: Vec<u32> = Vec::with_capacity(cap);
+    let mut vals: Vec<T>   = Vec::with_capacity(cap);
+    let mut ja = a_start;
+    let mut jb = b_start;
+    while ja < a_end && jb < b_end {
+        let ca = a.col_idx[ja];
+        let cb = b.col_idx[jb];
+        if ca < cb { cols.push(ca); vals.push(a.values[ja]); ja += 1; }
+        else if ca > cb { cols.push(cb); vals.push(b.values[jb]); jb += 1; }
+        else { cols.push(ca); vals.push(a.values[ja] + b.values[jb]); ja += 1; jb += 1; }
+    }
+    while ja < a_end { cols.push(a.col_idx[ja]); vals.push(a.values[ja]); ja += 1; }
+    while jb < b_end { cols.push(b.col_idx[jb]); vals.push(b.values[jb]); jb += 1; }
+    (cols, vals)
+}
+
 /// Sparse matrix addition: `C = A + B`.
 ///
 /// Both matrices must have the same dimensions.  The result has the union
@@ -552,46 +576,9 @@ pub fn spadd<T: Scalar>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> CsrMatrix<T> {
     row_ptr.push(0);
 
     for i in 0..m {
-        let a_start = a.row_ptr[i];
-        let a_end   = a.row_ptr[i + 1];
-        let b_start = b.row_ptr[i];
-        let b_end   = b.row_ptr[i + 1];
-
-        let mut ja = a_start;
-        let mut jb = b_start;
-
-        // Merge two sorted column-index streams.
-        while ja < a_end && jb < b_end {
-            let ca = a.col_idx[ja];
-            let cb = b.col_idx[jb];
-            if ca < cb {
-                col_idx.push(ca);
-                values.push(a.values[ja]);
-                ja += 1;
-            } else if ca > cb {
-                col_idx.push(cb);
-                values.push(b.values[jb]);
-                jb += 1;
-            } else {
-                // Same column — sum values.
-                col_idx.push(ca);
-                values.push(a.values[ja] + b.values[jb]);
-                ja += 1;
-                jb += 1;
-            }
-        }
-        // Flush remaining entries.
-        while ja < a_end {
-            col_idx.push(a.col_idx[ja]);
-            values.push(a.values[ja]);
-            ja += 1;
-        }
-        while jb < b_end {
-            col_idx.push(b.col_idx[jb]);
-            values.push(b.values[jb]);
-            jb += 1;
-        }
-
+        let (ci, vi) = merge_rows(a, b, a.row_ptr[i], a.row_ptr[i + 1], b.row_ptr[i], b.row_ptr[i + 1]);
+        col_idx.extend_from_slice(&ci);
+        values.extend_from_slice(&vi);
         row_ptr.push(col_idx.len());
     }
 
@@ -631,38 +618,7 @@ pub fn spadd_parallel<T: Scalar + Send + Sync>(
     // Compute each row independently in parallel.
     let rows: Vec<(Vec<u32>, Vec<T>)> = (0..m)
         .into_par_iter()
-        .map(|i| {
-            let a_start = a.row_ptr[i];
-            let a_end   = a.row_ptr[i + 1];
-            let b_start = b.row_ptr[i];
-            let b_end   = b.row_ptr[i + 1];
-
-            let cap = (a_end - a_start) + (b_end - b_start);
-            let mut cols: Vec<u32> = Vec::with_capacity(cap);
-            let mut vals: Vec<T>   = Vec::with_capacity(cap);
-
-            let mut ja = a_start;
-            let mut jb = b_start;
-
-            while ja < a_end && jb < b_end {
-                let ca = a.col_idx[ja];
-                let cb = b.col_idx[jb];
-                if ca < cb {
-                    cols.push(ca); vals.push(a.values[ja]);
-                    ja += 1;
-                } else if ca > cb {
-                    cols.push(cb); vals.push(b.values[jb]);
-                    jb += 1;
-                } else {
-                    cols.push(ca); vals.push(a.values[ja] + b.values[jb]);
-                    ja += 1; jb += 1;
-                }
-            }
-            while ja < a_end { cols.push(a.col_idx[ja]); vals.push(a.values[ja]); ja += 1; }
-            while jb < b_end { cols.push(b.col_idx[jb]); vals.push(b.values[jb]); jb += 1; }
-
-            (cols, vals)
-        })
+        .map(|i| merge_rows(a, b, a.row_ptr[i], a.row_ptr[i + 1], b.row_ptr[i], b.row_ptr[i + 1]))
         .collect();
 
     // Assemble CSR.

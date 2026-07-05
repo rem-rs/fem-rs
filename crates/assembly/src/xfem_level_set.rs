@@ -128,18 +128,6 @@ fn edge_intersection(
     ]
 }
 
-/// Convert reference coordinate (ξ, η) on the reference triangle
-/// (0 ≤ ξ, 0 ≤ η, ξ+η ≤ 1) to physical coordinates via affine map.
-fn ref_to_phys(ref_coord: [f64; 2], phys_nodes: &[[f64; 2]; 3]) -> [f64; 2] {
-    let (xi, eta) = (ref_coord[0], ref_coord[1]);
-    [
-        phys_nodes[0][0] + xi * (phys_nodes[1][0] - phys_nodes[0][0])
-            + eta * (phys_nodes[2][0] - phys_nodes[0][0]),
-        phys_nodes[0][1] + xi * (phys_nodes[1][1] - phys_nodes[0][1])
-            + eta * (phys_nodes[2][1] - phys_nodes[0][1]),
-    ]
-}
-
 /// Cut a single triangle by a level set, returning sub-triangles
 /// that cover the NEGATIVE (active, ψ < 0) side.
 ///

@@ -278,11 +278,6 @@ mod tests {
     use super::*;
     use fem_space::L2Space;
 
-    fn sphere_map(p: [f64; 3], r: f64) -> [f64; 3] {
-        let len = f64::sqrt(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]).max(1e-14);
-        [p[0]*r/len, p[1]*r/len, p[2]*r/len]
-    }
-
     #[test]
     fn curved_3d_sip_symmetric() {
         let mesh = SimplexMesh::<3>::unit_cube_tet(2);

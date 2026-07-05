@@ -47,16 +47,6 @@ fn area_integral(ix: usize, iy: usize) -> f64 {
     num / den
 }
 
-#[allow(dead_code)]
-fn monomial_component_x(a: usize, b: usize, x: f64, y: f64) -> f64 {
-    x.powi(a as i32) * y.powi(b as i32)
-}
-
-#[allow(dead_code)]
-fn monomial_component_y(a: usize, b: usize, x: f64, y: f64) -> f64 {
-    x.powi(a as i32) * y.powi(b as i32)
-}
-
 fn tri_data(k: usize) -> &'static TriNDkData {
     static CACHE: [OnceLock<TriNDkData>; 9] = [
         OnceLock::new(), OnceLock::new(), OnceLock::new(),

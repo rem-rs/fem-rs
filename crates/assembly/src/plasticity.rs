@@ -303,6 +303,7 @@ impl PlasticConfig {
 pub struct J2PlasticityForm<M: MeshTopology> {
     space: VectorH1Space<M>,
     cfg: PlasticConfig,
+    #[allow(dead_code)]
     dirichlet: Vec<(usize, f64)>,
     quad_order: u8,
     dt: f64,  // time step for rate‑dependent (viscoplastic) integration
@@ -322,7 +323,9 @@ impl<M: MeshTopology> J2PlasticityForm<M> {
     /// Like `new` but with an explicit time step `dt` for rate‑dependent
     /// (viscoplastic) integration.  Pass `dt = 0` (default) for rate‑independent.
     pub fn with_dt(space: VectorH1Space<M>, cfg: PlasticConfig,
-                   dirichlet: Vec<(usize, f64)>, quad_order: u8, dt: f64) -> Self {
+                       #[allow(dead_code)]
+    dirichlet: Vec<(usize, f64)>,
+    quad_order: u8, dt: f64) -> Self {
         let mesh = space.mesh();
         let mut qp_offsets = vec![0usize];
         let mut elems = Vec::new();
@@ -912,6 +915,8 @@ fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
 pub struct FiniteStrainPlasticity<M: MeshTopology> {
     space: VectorH1Space<M>,
     cfg: PlasticConfig,
+    /// Dirichlet boundary conditions (not yet applied — reserved).
+    #[allow(dead_code)]
     dirichlet: Vec<(usize, f64)>,
     quad_order: u8,
     /// Per-element, per-QP state: `(E^p_xx, E^p_yy, E^p_zz, Γ^p_xy, Γ^p_yz, Γ^p_zx, α)`.
@@ -926,6 +931,7 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
     pub fn new(
         space: VectorH1Space<M>,
         cfg: PlasticConfig,
+    #[allow(dead_code)]
     dirichlet: Vec<(usize, f64)>,  // TODO: apply Dirichlet BCs in assemble_jacobian
     quad_order: u8,
     ) -> Self {

@@ -15,9 +15,6 @@ use crate::xfem_level_set::{cut_triangle, CutResult};
 /// Reference gradients for P1 triangle: ∇φ₁ = (-1,-1), ∇φ₂ = (1,0), ∇φ₃ = (0,1)
 const REF_GRAD: [[f64; 2]; 3] = [[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]];
 
-/// Shape values for P1 triangle at centroid (ξ=1/3, η=1/3): all 1/3
-const CENTROID_PHI: [f64; 3] = [1.0/3.0, 1.0/3.0, 1.0/3.0];
-
 /// Assemble the XFEM-enriched scalar diffusion matrix `∫ ∇u·∇v dΩ`
 /// with Heaviside enrichment.
 ///
@@ -196,14 +193,6 @@ fn sub_to_phys(ref_pt: &[f64; 2], phys: &[[f64; 2]; 3]) -> [f64; 2] {
         phys[0][0] + xi*(phys[1][0]-phys[0][0]) + eta*(phys[2][0]-phys[0][0]),
         phys[0][1] + xi*(phys[1][1]-phys[0][1]) + eta*(phys[2][1]-phys[0][1]),
     ]
-}
-
-/// Compute barycentric coordinates of point `p` w.r.t. triangle `(a,b,c)`.
-fn phys_to_bary(p: [f64; 2], a: [f64; 2], b: [f64; 2], c: [f64; 2], det: f64) -> (f64, f64) {
-    let inv_det = 1.0 / det.abs().max(1e-30);
-    let beta  = ((b[1] - a[1]) * (p[0] - a[0]) - (b[0] - a[0]) * (p[1] - a[1])) * inv_det;
-    let gamma = ((c[0] - a[0]) * (p[1] - a[1]) - (c[1] - a[1]) * (p[0] - a[0])) * inv_det;
-    (beta, gamma)
 }
 
 // ─── Enriched linear elasticity (2-D plane strain) ─────────────────────────

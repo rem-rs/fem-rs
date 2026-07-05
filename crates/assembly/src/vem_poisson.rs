@@ -115,11 +115,6 @@ fn monomial_exponents(p: usize) -> Vec<(usize, usize)> {
     exps
 }
 
-/// Evaluate monomial (x-cx)^α · (y-cy)^β at point (x,y).
-fn eval_monomial(x: f64, y: f64, cx: f64, cy: f64, a: usize, b: usize) -> f64 {
-    (x - cx).powi(a as i32) * (y - cy).powi(b as i32)
-}
-
 /// Build the H¹ projection matrix Π and stiffness matrix for one VEM element.
 ///
 /// Returns (K_e, dofs) where K_e is the n_dofs×n_dofs element stiffness.

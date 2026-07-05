@@ -436,94 +436,112 @@ impl ReferenceElement for TetPk {
     }
 }
 
-// ─── QuadQk ──────────────────────────────────────────────────────────────────
 
-/// Arbitrary-order Lagrange element on the reference quad `[-1,1]²` — `(p+1)²` DOFs.
-pub struct QuadQk {
-    order: usize,
-    nodes_1d: Vec<f64>,
-    bary_w: Vec<f64>, // barycentric weights for O(p) evaluation
+// ─── Lagrange1D: shared 1D barycentric basis for Quad and Hex ──────────────
+
+/// Pre-computed 1D equispaced Lagrange basis on `[-1, 1]` (barycentric form).
+///
+/// Shared by [`QuadQk`] and [`HexQk`] to avoid duplicating the O(p) evaluation
+/// methods (`val`, `val_d`, `val_d_h`).
+pub(crate) struct Lagrange1D {
+    pub(crate) nodes: Vec<f64>,
+    pub(crate) bary_w: Vec<f64>,
 }
 
-impl QuadQk {
-    pub fn new(p: usize) -> Self {
-        assert!(p >= 1, "order must be ≥ 1");
-        let nodes_1d: Vec<f64> = (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect();
-        let n = nodes_1d.len();
+impl Lagrange1D {
+    pub(crate) fn new(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        let nodes: Vec<f64> = (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect();
+        let n = nodes.len();
         let mut bary_w = vec![1.0_f64; n];
         for i in 0..n {
             for j in 0..n {
-                if j != i { bary_w[i] *= nodes_1d[i] - nodes_1d[j]; }
+                if j != i { bary_w[i] *= nodes[i] - nodes[j]; }
             }
             bary_w[i] = 1.0 / bary_w[i];
         }
-        Self { order: p, nodes_1d, bary_w }
+        Self { nodes, bary_w }
     }
 
-    /// Evaluate ALL 1D Lagrange values at x in O(p) using barycentric formula.
-    fn lagrange_1d_fast(&self, x: f64) -> Vec<f64> {
-        let n = self.nodes_1d.len();
+    fn ell(&self, x: f64) -> f64 {
+        let mut e = 1.0_f64;
+        for &xj in &self.nodes { e *= x - xj; }
+        e
+    }
+
+    /// Evaluate all 1D Lagrange basis values at `x` in O(p).
+    pub(crate) fn val(&self, x: f64) -> Vec<f64> {
+        let n = self.nodes.len();
         let mut vals = vec![0.0_f64; n];
-        // ℓ(x) = Π (x - x_j)
-        let mut ell = 1.0_f64;
-        for &xj in &self.nodes_1d { ell *= x - xj; }
+        let ell = self.ell(x);
         if ell.abs() < 1e-30 {
-            // x coincides with a node
-            for (i, &xi) in self.nodes_1d.iter().enumerate() {
+            for (i, &xi) in self.nodes.iter().enumerate() {
                 if (x - xi).abs() < 1e-30 { vals[i] = 1.0; break; }
             }
             return vals;
         }
-        for (i, &xi) in self.nodes_1d.iter().enumerate() {
+        for (i, &xi) in self.nodes.iter().enumerate() {
             vals[i] = ell * self.bary_w[i] / (x - xi);
         }
         vals
     }
 
-    /// Evaluate ALL 1D Lagrange values AND derivatives at x in O(p).
-    fn lagrange_1d_fast_d(&self, x: f64) -> (Vec<f64>, Vec<f64>) {
-        let vals = self.lagrange_1d_fast(x);
-        let n = self.nodes_1d.len();
+    /// Evaluate values and first derivatives.
+    pub(crate) fn val_d(&self, x: f64) -> (Vec<f64>, Vec<f64>) {
+        let vals = self.val(x);
+        let n = self.nodes.len();
         let mut ders = vec![0.0_f64; n];
-        // Σ 1/(x - x_j)
         let mut sum_inv = 0.0_f64;
-        for &xj in &self.nodes_1d {
-            let d = x - xj;
-            if d.abs() < 1e-30 { /* x at node — already handled */ }
-            sum_inv += 1.0 / d;
-        }
+        for &xj in &self.nodes { sum_inv += 1.0 / (x - xj); }
         for i in 0..n {
-            ders[i] = vals[i] * sum_inv;
-            let d = x - self.nodes_1d[i];
-            if d.abs() > 1e-30 { ders[i] -= vals[i] / d; }
+            let d = x - self.nodes[i];
+            ders[i] = if d.abs() > 1e-30 { vals[i] * (sum_inv - 1.0 / d) } else { 0.0 };
         }
         (vals, ders)
     }
 
-    /// Evaluate ALL 1D Lagrange values, derivatives, and second derivatives at x.
-    fn lagrange_1d_fast_h(&self, x: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let vals = self.lagrange_1d_fast(x);
-        let n = self.nodes_1d.len();
+    /// Evaluate values, first derivatives, and second derivatives.
+    pub(crate) fn val_d_h(&self, x: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let vals = self.val(x);
+        let n = self.nodes.len();
         let mut ders = vec![0.0_f64; n];
         let mut hess = vec![0.0_f64; n];
         let mut s = 0.0_f64; let mut t = 0.0_f64;
-        for &xj in &self.nodes_1d {
+        for &xj in &self.nodes {
             let inv = 1.0 / (x - xj);
             s += inv; t += inv * inv;
         }
         for i in 0..n {
-            let inv_i = 1.0 / (x - self.nodes_1d[i]);
-            let si = s - inv_i;
+            let inv_i = 1.0 / (x - self.nodes[i]);
+            let si = if (x - self.nodes[i]).abs() > 1e-30 { s - inv_i } else { 0.0 };
             ders[i] = vals[i] * si;
-            hess[i] = vals[i] * (si * si - t + inv_i * inv_i);
+            hess[i] = if (x - self.nodes[i]).abs() > 1e-30 {
+                vals[i] * (si * si - t + inv_i * inv_i)
+            } else { 0.0 };
         }
         (vals, ders, hess)
+    }
+}
+
+// ─── QuadQk ──────────────────────────────────────────────────────────────────
+
+
+/// Arbitrary-order Lagrange element on the reference quad `[-1,1]²` — `(p+1)²` DOFs.
+pub struct QuadQk {
+    order: usize,
+    lag1d: Lagrange1D,
+}
+
+impl QuadQk {
+    pub fn new(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        Self { order: p, lag1d: Lagrange1D::new(p) }
     }
 
     fn node_to_dof(&self, ix: usize, iy: usize) -> usize {
         let p = self.order;
-        let x = self.nodes_1d[ix];
-        let y = self.nodes_1d[iy];
+        let x = self.lag1d.nodes[ix];
+        let y = self.lag1d.nodes[iy];
         let tol = 1e-12;
         let on_xmin = (x + 1.0).abs() < tol;
         let on_xmax = (x - 1.0).abs() < tol;
@@ -558,7 +576,7 @@ impl QuadQk {
         for iy in 0..=p {
             for ix in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
-                coords[dof] = [self.nodes_1d[ix], self.nodes_1d[iy]];
+                coords[dof] = [self.lag1d.nodes[ix], self.lag1d.nodes[iy]];
             }
         }
         coords
@@ -570,7 +588,7 @@ impl ReferenceElement for QuadQk {
     fn order(&self) -> u8 { self.order as u8 }
     fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 1) }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let (lx, ly) = (self.lagrange_1d_fast(xi[0]), self.lagrange_1d_fast(xi[1]));
+        let (lx, ly) = (self.lag1d.val(xi[0]), self.lag1d.val(xi[1]));
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
@@ -579,8 +597,8 @@ impl ReferenceElement for QuadQk {
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (lx, dlx) = self.lagrange_1d_fast_d(xi[0]);
-        let (ly, dly) = self.lagrange_1d_fast_d(xi[1]);
+        let (lx, dlx) = self.lag1d.val_d(xi[0]);
+        let (ly, dly) = self.lag1d.val_d(xi[1]);
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
@@ -591,17 +609,17 @@ impl ReferenceElement for QuadQk {
         }
     }
     fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
-        let (lx, dlx, hlx) = self.lagrange_1d_fast_h(xi[0]);
-        let (ly, dly, hly) = self.lagrange_1d_fast_h(xi[1]);
+        let (lx, dlx, hlx) = self.lag1d.val_d_h(xi[0]);
+        let (ly, dly, hly) = self.lag1d.val_d_h(xi[1]);
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
                 let base = dof * 4;
-                hess[base]     = hlx[ix] * ly[iy];           // ∂²/∂ξ²
-                hess[base + 1] = dlx[ix] * dly[iy];          // ∂²/∂ξ∂η
-                hess[base + 2] = hess[base + 1];              // ∂²/∂η∂ξ
-                hess[base + 3] = lx[ix]  * hly[iy];          // ∂²/∂η²
+                hess[base]     = hlx[ix] * ly[iy];
+                hess[base + 1] = dlx[ix] * dly[iy];
+                hess[base + 2] = hess[base + 1];
+                hess[base + 3] = lx[ix]  * hly[iy];
             }
         }
     }
@@ -611,89 +629,27 @@ impl ReferenceElement for QuadQk {
     }
 }
 
+
 // ─── HexQk ───────────────────────────────────────────────────────────────────
+
 
 /// Arbitrary-order Lagrange element on the reference hex `[-1,1]³` — `(p+1)³` DOFs.
 pub struct HexQk {
     order: usize,
-    nodes_1d: Vec<f64>,
-    bary_w: Vec<f64>,
+    lag1d: Lagrange1D,
 }
 
 impl HexQk {
     pub fn new(p: usize) -> Self {
-        assert!(p >= 1, "order must be ≥ 1");
-        let nodes_1d: Vec<f64> = (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect();
-        let n = nodes_1d.len();
-        let mut bary_w = vec![1.0_f64; n];
-        for i in 0..n {
-            for j in 0..n {
-                if j != i { bary_w[i] *= nodes_1d[i] - nodes_1d[j]; }
-            }
-            bary_w[i] = 1.0 / bary_w[i];
-        }
-        Self { order: p, nodes_1d, bary_w }
-    }
-
-    /// Evaluate ALL 1D Lagrange values at x in O(p) using barycentric formula.
-    fn lagrange_1d_fast(&self, x: f64) -> Vec<f64> {
-        let n = self.nodes_1d.len();
-        let mut vals = vec![0.0_f64; n];
-        let mut ell = 1.0_f64;
-        for &xj in &self.nodes_1d { ell *= x - xj; }
-        if ell.abs() < 1e-30 {
-            for (i, &xi) in self.nodes_1d.iter().enumerate() {
-                if (x - xi).abs() < 1e-30 { vals[i] = 1.0; break; }
-            }
-            return vals;
-        }
-        for (i, &xi) in self.nodes_1d.iter().enumerate() {
-            vals[i] = ell * self.bary_w[i] / (x - xi);
-        }
-        vals
-    }
-
-    /// Evaluate ALL 1D Lagrange values AND derivatives at x in O(p).
-    fn lagrange_1d_fast_d(&self, x: f64) -> (Vec<f64>, Vec<f64>) {
-        let vals = self.lagrange_1d_fast(x);
-        let n = self.nodes_1d.len();
-        let mut ders = vec![0.0_f64; n];
-        let mut sum_inv = 0.0_f64;
-        for &xj in &self.nodes_1d { sum_inv += 1.0 / (x - xj); }
-        for i in 0..n {
-            let d = x - self.nodes_1d[i];
-            ders[i] = if d.abs() > 1e-30 { vals[i] * (sum_inv - 1.0 / d) } else { 0.0 };
-        }
-        (vals, ders)
-    }
-
-    /// Evaluate ALL 1D Lagrange values, derivatives, AND second derivatives at x.
-    fn lagrange_1d_fast_h(&self, x: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let vals = self.lagrange_1d_fast(x);
-        let n = self.nodes_1d.len();
-        let mut ders = vec![0.0_f64; n];
-        let mut hess = vec![0.0_f64; n];
-        let mut s = 0.0_f64; let mut t = 0.0_f64;
-        for &xj in &self.nodes_1d {
-            let inv = 1.0 / (x - xj);
-            s += inv; t += inv * inv;
-        }
-        for i in 0..n {
-            let inv_i = 1.0 / (x - self.nodes_1d[i]);
-            let si = if (x - self.nodes_1d[i]).abs() > 1e-30 { s - inv_i } else { 0.0 };
-            ders[i] = vals[i] * si;
-            hess[i] = if (x - self.nodes_1d[i]).abs() > 1e-30 {
-                vals[i] * (si * si - t + inv_i * inv_i)
-            } else { 0.0 };
-        }
-        (vals, ders, hess)
+        assert!(p >= 1, "order must be >= 1");
+        Self { order: p, lag1d: Lagrange1D::new(p) }
     }
 
     fn node_to_dof(&self, ix: usize, iy: usize, iz: usize) -> usize {
         let p = self.order;
-        let x = self.nodes_1d[ix];
-        let y = self.nodes_1d[iy];
-        let z = self.nodes_1d[iz];
+        let x = self.lag1d.nodes[ix];
+        let y = self.lag1d.nodes[iy];
+        let z = self.lag1d.nodes[iz];
         let tol = 1e-12;
 
         let on_xmin = (x + 1.0).abs() < tol;
@@ -720,45 +676,39 @@ impl HexQk {
         let mut base = 8usize;
 
         if n_faces == 2 {
-            // Determine which axis varies and compute DOF directly.
-            // The varying axis is the one whose faces are NOT active.
             let idx;
             let local;
 
             if !on_xmin && !on_xmax {
-                // x varies
                 idx = ix;
                 local = if on_ymin && !on_ymax && !on_zmin && !on_zmax {
-                    ix                                    // e0: xmax∩ymin
+                    ix
                 } else if on_ymax && !on_zmin && !on_zmax {
-                    p - ix                                // e1/e2: x∩ymax
+                    p - ix
                 } else {
-                    ix                                    // e3: xmin∩ymin
+                    ix
                 };
             } else if !on_ymin && !on_ymax {
-                // y varies
                 idx = iy;
                 local = if on_xmin && !on_xmax && on_zmin && !on_zmax {
-                    iy                                    // e4/e5
+                    iy
                 } else {
-                    p - iy                                // e6/e7
+                    p - iy
                 };
             } else {
-                // z varies
                 idx = iz;
                 local = if on_ymin && !on_ymax && on_xmin && !on_xmax {
-                    p - iz                                // e8
+                    p - iz
                 } else if !on_ymin && on_ymax && on_xmin && !on_xmax {
-                    iz                                    // e9
+                    iz
                 } else if !on_ymin && on_ymax && !on_xmin && on_xmax {
-                    p - iz                                // e10
+                    p - iz
                 } else {
-                    iz                                    // e11
+                    iz
                 };
             }
 
             if idx > 0 && idx < p {
-                // Map face pair to edge index for DOF computation
                 let faces: Vec<usize> = [on_xmin, on_xmax, on_ymin, on_ymax, on_zmin, on_zmax]
                     .iter().enumerate().filter(|(_, &b)| b).map(|(i, _)| i).collect();
                 let (f0, f1) = if faces[0] < faces[1] { (faces[0], faces[1]) } else { (faces[1], faces[0]) };
@@ -770,17 +720,14 @@ impl HexQk {
                 };
                 return base + ei * (p - 1) + (local - 1);
             }
-            // idx is on boundary → corner vertex, fall through
         }
 
-        // n_faces == 0 → volume interior point
         if n_faces == 0 && p >= 2 {
             let vol_base = 8 + 12 * (p - 1) + 6 * (p - 1) * (p - 1);
             return vol_base + (iz - 1) * (p - 1) * (p - 1) + (iy - 1) * (p - 1) + (ix - 1);
         }
 
-        // n_faces == 1 → face interior point
-        if p < 2 { return 0; } // No face interior DOFs for p < 2
+        if p < 2 { return 0; }
         base += 12 * (p - 1);
         let face_idx = if on_xmin { 0 }
             else if on_xmax { 1 }
@@ -789,19 +736,16 @@ impl HexQk {
             else if on_zmin { 4 }
             else { 5 };
 
-        // Varying coordinate indices for this face
         let (va, vb) = match face_idx {
-            0 | 1 => (iy, iz), // xmin/xmax: y,z vary
-            2 | 3 => (ix, iz), // ymin/ymax: x,z vary
-            4 | 5 => (ix, iy), // zmin/zmax: x,y vary
+            0 | 1 => (iy, iz),
+            2 | 3 => (ix, iz),
+            4 | 5 => (ix, iy),
             _ => unreachable!(),
         };
-        // Varying coordinates must be strictly interior (not on any edge of this face)
         if va == 0 || va == p || vb == 0 || vb == p {
-            return 0; // Fallback: this is an edge/corner point misclassified as face
+            return 0;
         }
 
-        // Compute face DOF index with direction adjustment
         let (fa, fb) = match face_idx {
             0 => (p - iy, iz),
             1 => (iy, iz),
@@ -822,7 +766,7 @@ impl HexQk {
             for iy in 0..=p {
                 for ix in 0..=p {
                     let dof = self.node_to_dof(ix, iy, iz);
-                    coords[dof] = [self.nodes_1d[ix], self.nodes_1d[iy], self.nodes_1d[iz]];
+                    coords[dof] = [self.lag1d.nodes[ix], self.lag1d.nodes[iy], self.lag1d.nodes[iz]];
                 }
             }
         }
@@ -835,7 +779,7 @@ impl ReferenceElement for HexQk {
     fn order(&self) -> u8 { self.order as u8 }
     fn n_dofs(&self) -> usize { let p = self.order + 1; p * p * p }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let (lx, ly, lz) = (self.lagrange_1d_fast(xi[0]), self.lagrange_1d_fast(xi[1]), self.lagrange_1d_fast(xi[2]));
+        let (lx, ly, lz) = (self.lag1d.val(xi[0]), self.lag1d.val(xi[1]), self.lag1d.val(xi[2]));
         let p = self.order;
         for iz in 0..=p {
             for iy in 0..=p {
@@ -846,9 +790,9 @@ impl ReferenceElement for HexQk {
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (lx, dlx) = self.lagrange_1d_fast_d(xi[0]);
-        let (ly, dly) = self.lagrange_1d_fast_d(xi[1]);
-        let (lz, dlz) = self.lagrange_1d_fast_d(xi[2]);
+        let (lx, dlx) = self.lag1d.val_d(xi[0]);
+        let (ly, dly) = self.lag1d.val_d(xi[1]);
+        let (lz, dlz) = self.lag1d.val_d(xi[2]);
         let p = self.order;
         for iz in 0..=p {
             for iy in 0..=p {
@@ -862,24 +806,24 @@ impl ReferenceElement for HexQk {
         }
     }
     fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
-        let (lx, dlx, hlx) = self.lagrange_1d_fast_h(xi[0]);
-        let (ly, dly, hly) = self.lagrange_1d_fast_h(xi[1]);
-        let (lz, dlz, hlz) = self.lagrange_1d_fast_h(xi[2]);
+        let (lx, dlx, hlx) = self.lag1d.val_d_h(xi[0]);
+        let (ly, dly, hly) = self.lag1d.val_d_h(xi[1]);
+        let (lz, dlz, hlz) = self.lag1d.val_d_h(xi[2]);
         let p = self.order;
         for iz in 0..=p {
             for iy in 0..=p {
                 for ix in 0..=p {
                     let dof = self.node_to_dof(ix, iy, iz);
                     let b = dof * 9;
-                    hess[b]     = hlx[ix] * ly[iy]  * lz[iz];   // ξξ
-                    hess[b + 1] = dlx[ix] * dly[iy] * lz[iz];   // ξη
-                    hess[b + 2] = dlx[ix] * ly[iy]  * dlz[iz];  // ξζ
-                    hess[b + 3] = hess[b + 1];                   // ηξ
-                    hess[b + 4] = lx[ix]  * hly[iy] * lz[iz];   // ηη
-                    hess[b + 5] = lx[ix]  * dly[iy] * dlz[iz];  // ηζ
-                    hess[b + 6] = hess[b + 2];                   // ζξ
-                    hess[b + 7] = hess[b + 5];                   // ζη
-                    hess[b + 8] = lx[ix]  * ly[iy]  * hlz[iz];  // ζζ
+                    hess[b]     = hlx[ix] * ly[iy]  * lz[iz];
+                    hess[b + 1] = dlx[ix] * dly[iy] * lz[iz];
+                    hess[b + 2] = dlx[ix] * ly[iy]  * dlz[iz];
+                    hess[b + 3] = hess[b + 1];
+                    hess[b + 4] = lx[ix]  * hly[iy] * lz[iz];
+                    hess[b + 5] = lx[ix]  * dly[iy] * dlz[iz];
+                    hess[b + 6] = hess[b + 2];
+                    hess[b + 7] = hess[b + 5];
+                    hess[b + 8] = lx[ix]  * ly[iy]  * hlz[iz];
                 }
             }
         }
@@ -889,6 +833,8 @@ impl ReferenceElement for HexQk {
         self.all_dof_coords().iter().map(|c| c.to_vec()).collect()
     }
 }
+
+
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 

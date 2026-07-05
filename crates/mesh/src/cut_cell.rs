@@ -20,9 +20,6 @@ fn tri_q6() -> [[f64; 2]; 6] {
     [[1.0/6.0,1.0/6.0],[2.0/3.0,1.0/6.0],[1.0/6.0,2.0/3.0],
      [0.2,0.2],[0.6,0.2],[0.2,0.6]]
 }
-#[allow(dead_code)]
-const TRI_W6: [f64; 6] = [1.0/12.0; 6];
-
 // ─── Level-set utilities ─────────────────────────────────────────────────────
 
 /// Evaluate a level set function φ at the nodes of element `e` given a function.
