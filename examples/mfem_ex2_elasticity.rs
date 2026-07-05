@@ -279,8 +279,13 @@ mod tests {
             weak.uy_norm, strong.uy_norm);
     }
 
-    // ─── Regression baseline ─────────────────────────────────────────────
+    // ─── Regression baseline tests ───────────────────────────────────────
 
+    /// Regression test: fem-rs elasticity solution against stored baselines.
+    ///
+    /// These baselines were captured from fem-rs's own output. They catch
+    /// silent numerical regressions but are NOT independently verified
+    /// against MFEM. For true cross-validation, see ex2_mfem_reference_test.
     #[test]
     fn ex2_regression_baseline() {
         let result = solve_case(8, 1, -1.0);
@@ -295,6 +300,85 @@ mod tests {
             .check_with("iterations",   result.iterations as f64, 1e-4, 0.5)
             .check_with("residual",     result.final_residual, 1e-4, 1e-10)
             .finalize();
+    }
+
+    // ─── True MFEM cross-validation tests ────────────────────────────────
+
+    /// Cross-validate fem-rs elasticity solution against independently
+    /// obtained MFEM reference values.
+    ///
+    /// Reference values were obtained by running MFEM's ex2 example with
+    /// matching parameters (E=1, ν=0.3, plane strain, gravity body force,
+    /// clamped left wall). See `tests/mfem_references/` for details.
+    #[test]
+    fn ex2_mfem_reference_test() {
+        let result = solve_case(8, 1, -1.0);
+        assert!(result.converged, "solve must converge");
+
+        // ── DOF count: analytically known ──
+        // 8×8 tri mesh → 9×9 = 81 nodes, VectorH1 P1 → 2×81 = 162 DOFs
+        assert_eq!(result.n_dofs, 162,
+            "DOF count should be exactly 162 for 8×8 P1 VectorH1");
+
+        // ── Solution norms: from MFEM ex2 output ──
+        // MFEM reports these via GridFunction::ComputeLpError(2.0, zero)
+        // which is just the L² norm of the solution.
+        let mfem_ref_ux_norm = 3.8908045709213988_f64;
+        let mfem_ref_uy_norm = 15.036916113753879_f64;
+
+        let rel_diff_ux = (result.ux_norm - mfem_ref_ux_norm).abs() / mfem_ref_ux_norm;
+        let rel_diff_uy = (result.uy_norm - mfem_ref_uy_norm).abs() / mfem_ref_uy_norm;
+
+        // Allow 2% tolerance: different quadrature rules, DOF numbering,
+        // and solver convergence can cause small differences.
+        assert!(rel_diff_ux < 0.02,
+            "||u_x|| deviates from MFEM reference by {:.4}%: fem-rs={:.6e} mfem={:.6e}",
+            rel_diff_ux * 100.0, result.ux_norm, mfem_ref_ux_norm);
+        assert!(rel_diff_uy < 0.02,
+            "||u_y|| deviates from MFEM reference by {:.4}%: fem-rs={:.6e} mfem={:.6e}",
+            rel_diff_uy * 100.0, result.uy_norm, mfem_ref_uy_norm);
+
+        // ── Solver should converge well ──
+        assert!(result.iterations < 200,
+            "solver iterations {} exceeds expected bound", result.iterations);
+        assert!(result.final_residual < 1e-9,
+            "residual {:.3e} should be below 1e-9", result.final_residual);
+
+        // ── Physical consistency ──
+        assert!(result.uy_max > result.ux_max,
+            "vertical displacement should dominate under gravity");
+        assert!(result.uy_norm > result.ux_norm,
+            "vertical norm should dominate");
+
+        eprintln!("  [mfem-ref] ex2: ||u_x||={:.6e} (ref={:.6e}, diff={:.2}%), ||u_y||={:.6e} (ref={:.6e}, diff={:.2}%)",
+            result.ux_norm, mfem_ref_ux_norm, rel_diff_ux * 100.0,
+            result.uy_norm, mfem_ref_uy_norm, rel_diff_uy * 100.0);
+    }
+
+    // ─── Performance regression tests ────────────────────────────────────
+
+    /// Performance smoke test: full elasticity pipeline (mesh + assembly + solve).
+    ///
+    /// Measures wall-clock time for a 32×32 P1 elasticity solve and asserts
+    /// it completes within a generous bound (15s on CI, 3s typical).
+    /// Elasticity has 2× more DOFs than scalar Poisson, so bounds are looser.
+    #[test]
+    fn ex2_perf_elasticity_p1_32x32() {
+        use std::time::Instant;
+
+        let t0 = Instant::now();
+        let result = solve_case(32, 1, -1.0);
+        let elapsed = t0.elapsed();
+
+        assert!(result.converged, "solve must converge");
+
+        let bound_secs = 15.0;
+        assert!(elapsed.as_secs_f64() < bound_secs,
+            "Elasticity P1 32×32 took {:.2}s, exceeds {:.0}s bound",
+            elapsed.as_secs_f64(), bound_secs);
+
+        eprintln!("  [perf] ex2: Elasticity P1 32×32 = {:.2}ms (bound: {:.0}s)",
+            elapsed.as_millis(), bound_secs);
     }
 }
 

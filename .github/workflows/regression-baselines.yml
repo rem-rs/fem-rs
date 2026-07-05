@@ -49,6 +49,9 @@ jobs:
       - name: Run regression baselines (mfem_ex1_poisson)
         run: cargo test -p fem-examples --example mfem_ex1_poisson -- ex1_regression_baseline
 
+      - name: Run MFEM cross-validation (ex1 Poisson)
+        run: cargo test -p fem-examples --example mfem_ex1_poisson -- ex1_mfem_reference_test
+
       - name: Run regression baselines (mfem_ex13_eigenvalue)
         run: cargo test -p fem-examples --example mfem_ex13_eigenvalue -- ex13_eigenvalue_regression_baseline
 
@@ -57,6 +60,9 @@ jobs:
 
       - name: Run regression baselines (mfem_ex2_elasticity)
         run: cargo test -p fem-examples --example mfem_ex2_elasticity -- ex2_regression_baseline
+
+      - name: Run MFEM cross-validation (ex2 Elasticity)
+        run: cargo test -p fem-examples --example mfem_ex2_elasticity -- ex2_mfem_reference_test
 
       - name: Run regression baselines (mfem_ex9_dg_advection)
         run: cargo test -p fem-examples --example mfem_ex9_dg_advection -- ex9_regression_baseline
