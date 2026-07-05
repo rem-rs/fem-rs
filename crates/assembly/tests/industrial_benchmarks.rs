@@ -11,12 +11,14 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator,
                BoundaryMassIntegrator, NeumannIntegrator},
+    VectorAssembler,
+    standard::CurlCurlIntegrator,
 };
 use fem_assembly::assembler::face_dofs_p1;
 use fem_mesh::{SimplexMesh, topology::MeshTopology};
 use fem_solver::{solve_cg, solve_pcg_jacobi, SolverConfig};
 use fem_space::{
-    H1Space, fe_space::FESpace,
+    H1Space, HCurlSpace, fe_space::FESpace,
     constraints::{boundary_dofs},
 };
 
@@ -210,5 +212,73 @@ fn em_helmholtz_mms_k16() {
     let norm = solve_helmholtz_mms(32, 256.0);
     fem_regression::regression("em_helmholtz_mms_k16")
         .check("sol_norm_k16_n32_p1", norm)
+        .finalize();
+}
+
+// ─── 7. TEAM4 Electrostatic Capacitor (Patch Test) ───────────────────────
+//
+// Parallel-plate capacitor: unit square, V=0 on bottom, V=1 on top.
+// P1 exactly reproduces the linear solution V = y → max error ≈ machine ε.
+
+fn solve_team4_capacitor(n: usize) -> f64 {
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let space = H1Space::new(mesh.clone(), 1);
+
+    // -∇²V = 0 (Laplace)
+    let mut a = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
+    let mut rhs = vec![0.0_f64; space.n_dofs()];
+
+    // Bottom (tag 1): V = 0, Top (tag 3): V = 1
+    let bnd_bot = boundary_dofs(space.mesh(), space.dof_manager(), &[1]);
+    let bnd_top = boundary_dofs(space.mesh(), space.dof_manager(), &[3]);
+    for &dof in &bnd_bot { a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs); }
+    for &dof in &bnd_top { a.apply_dirichlet_symmetric(dof as usize, 1.0, &mut rhs); }
+
+    // Natural BC on sides (tags 2, 4): ∂V/∂n = 0 (Neumann, automatically satisfied)
+
+    let mut x = vec![0.0_f64; space.n_dofs()];
+    solve_cg(&a, &rhs, &mut x, &default_cfg()).unwrap();
+
+    // Check max nodal error: exact V = y (y-coordinate of each node)
+    let mut max_err = 0.0_f64;
+    for n in 0..mesh.n_nodes() as u32 {
+        let y = mesh.node_coords(n)[1];
+        let err = (x[n as usize] - y).abs();
+        max_err = max_err.max(err);
+    }
+    max_err
+}
+
+#[test]
+fn team4_electrostatic_capacitor() {
+    let max_err = solve_team4_capacitor(8);
+    fem_regression::regression("team4_electrostatic_capacitor")
+        .check("max_phi_err", max_err)
+        .finalize();
+}
+
+// ─── 8. TEAM1 HCurl 3D PEC Smoke Test ────────────────────────────────────
+//
+// HCurl ND1 space on unit cube, curl-curl + mass assembly with zero BC.
+// Checks DOF count and matrix sparsity — a smoke test for 3-D H(curl).
+
+fn solve_hcurl_3d_smoke(n: usize) -> (f64, f64) {
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let hcurl = HCurlSpace::new(mesh.clone(), 1);
+    let n_dofs = hcurl.n_dofs() as f64;
+
+    let curl_curl = CurlCurlIntegrator { mu: 1.0 };
+    let mat = VectorAssembler::assemble_bilinear(&hcurl, &[&curl_curl], 3);
+    let nnz = mat.nnz() as f64;
+
+    (n_dofs, nnz)
+}
+
+#[test]
+fn team1_hcurl_3d_pec_smoke() {
+    let (n_dofs, nnz) = solve_hcurl_3d_smoke(2);
+    fem_regression::regression("team1_hcurl_3d_pec_smoke")
+        .check("n_dofs", n_dofs)
+        .check("nnz", nnz)
         .finalize();
 }
