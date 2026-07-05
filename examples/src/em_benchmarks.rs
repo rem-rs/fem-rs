@@ -607,6 +607,92 @@ fn em_helmholtz_mms_wavenumber_sweep() {
     }
 }
 
+/// Regression baseline for the wavenumber sweep at key wavenumbers.
+/// This captures the L² error at k=4 and k=16 as a numerical fingerprint.
+#[test]
+fn em_helmholtz_mms_sweep_regression() {
+    use fem_assembly::standard::MassIntegrator;
+    use fem_solver::SolverConfig;
+
+    // k=4 on n=20
+    let l2_k4 = {
+        let k_wave = 4.0; let k2 = k_wave * k_wave;
+        let mesh = SimplexMesh::<2>::unit_square_tri(20);
+        let space = H1Space::new(mesh.clone(), 1);
+        let n_dof = space.n_dofs();
+        let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
+        let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 5);
+        let mut coo = CooMatrix::<f64>::new(n_dof, n_dof);
+        for i in 0..n_dof {
+            for pk in k_mat.row_ptr[i]..k_mat.row_ptr[i + 1] {
+                let j = k_mat.col_idx[pk] as usize;
+                let mut m_ij = 0.0;
+                for pl in m_mat.row_ptr[i]..m_mat.row_ptr[i + 1] {
+                    if m_mat.col_idx[pl] as usize == j { m_ij = m_mat.values[pl]; break; }
+                }
+                coo.add(i, j, k_mat.values[pk] - k2 * m_ij);
+            }
+        }
+        let mut a_mat: CsrMatrix<f64> = coo.into_csr();
+        let src = fem_assembly::standard::DomainSourceIntegrator::new(|x: &[f64]| {
+            (2.0 * PI * PI - k2) * (PI * x[0]).sin() * (PI * x[1]).sin()
+        });
+        let mut rhs = Assembler::assemble_linear(&space, &[&src], 5);
+        let dm = space.dof_manager();
+        let bnd = boundary_dofs(&mesh, dm, &[1, 2, 3, 4]);
+        apply_dirichlet(&mut a_mat, &mut rhs, &bnd, &vec![0.0; bnd.len()]);
+        let mut u = vec![0.0; n_dof];
+        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
+        fem_solver::solve_gmres(&a_mat, &rhs, &mut u, 50, &cfg).expect("sweep reg k4");
+        let mut l2 = 0.0;
+        for dof in 0..n_dof as u32 { let c = dm.dof_coord(dof); let ex = (PI*c[0]).sin()*(PI*c[1]).sin(); l2 += (u[dof as usize]-ex).powi(2); }
+        (l2/n_dof as f64).sqrt()
+    };
+
+    // k=16 on n=60
+    let l2_k16 = {
+        let k_wave = 16.0; let k2 = k_wave * k_wave;
+        let mesh = SimplexMesh::<2>::unit_square_tri(60);
+        let space = H1Space::new(mesh.clone(), 1);
+        let n_dof = space.n_dofs();
+        let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
+        let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 5);
+        let mut coo = CooMatrix::<f64>::new(n_dof, n_dof);
+        for i in 0..n_dof {
+            for pk in k_mat.row_ptr[i]..k_mat.row_ptr[i + 1] {
+                let j = k_mat.col_idx[pk] as usize;
+                let mut m_ij = 0.0;
+                for pl in m_mat.row_ptr[i]..m_mat.row_ptr[i + 1] {
+                    if m_mat.col_idx[pl] as usize == j { m_ij = m_mat.values[pl]; break; }
+                }
+                coo.add(i, j, k_mat.values[pk] - k2 * m_ij);
+            }
+        }
+        let mut a_mat: CsrMatrix<f64> = coo.into_csr();
+        let src = fem_assembly::standard::DomainSourceIntegrator::new(|x: &[f64]| {
+            (2.0 * PI * PI - k2) * (PI * x[0]).sin() * (PI * x[1]).sin()
+        });
+        let mut rhs = Assembler::assemble_linear(&space, &[&src], 5);
+        let dm = space.dof_manager();
+        let bnd = boundary_dofs(&mesh, dm, &[1, 2, 3, 4]);
+        apply_dirichlet(&mut a_mat, &mut rhs, &bnd, &vec![0.0; bnd.len()]);
+        let mut u = vec![0.0; n_dof];
+        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 15000, verbose: false, ..SolverConfig::default() };
+        fem_solver::solve_gmres(&a_mat, &rhs, &mut u, 50, &cfg).expect("sweep reg k16");
+        let mut l2 = 0.0;
+        for dof in 0..n_dof as u32 { let c = dm.dof_coord(dof); let ex = (PI*c[0]).sin()*(PI*c[1]).sin(); l2 += (u[dof as usize]-ex).powi(2); }
+        (l2/n_dof as f64).sqrt()
+    };
+
+    eprintln!("  [sweep regression] k=4: L²={:.4e}", l2_k4);
+    eprintln!("  [sweep regression] k=16: L²={:.4e}", l2_k16);
+
+    fem_regression::regression("em_helmholtz_mms_sweep")
+        .check_with("l2_err_k4", l2_k4, 1e-6, 1e-8)
+        .check_with("l2_err_k16", l2_k16, 1e-6, 1e-8)
+        .finalize();
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Helmholtz — GMRES / BiCGSTAB cross-solver consistency
 // ═══════════════════════════════════════════════════════════════════════

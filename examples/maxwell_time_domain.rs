@@ -208,6 +208,11 @@ mod tests {
             "final L2 error too large: {}",
             r.l2_err_final
         );
+        fem_regression::regression("maxwell_time_domain")
+            .check_with("l2_err_final", r.l2_err_final, 1e-6, 1e-8)
+            .check_with("l2_err_half", r.l2_err_half, 1e-6, 1e-8)
+            .check_with("n_dof", r.n_dof as f64, 1e-6, 0.5)
+            .finalize();
     }
 
     /// Halving dt (with same mesh) should reduce the L² error �?verifies second-
@@ -273,7 +278,16 @@ mod tests {
         let e_m = l2_diff(&rm.final_solution, &rf.final_solution);
 
         assert!(e_m < e_c, "expected temporal refinement to reduce self-error: coarse={} medium={}", e_c, e_m);
-        assert!(e_c / e_m > 2.0, "expected near second-order temporal improvement; ratio={}", e_c / e_m);
+
+        let ratio = e_c / e_m;
+        assert!(ratio > 2.0, "expected near second-order temporal improvement; ratio={}", ratio);
+        eprintln!("  [time MMS] temporal convergence: coarse/medium error ratio={:.2} (expected >2.0)", ratio);
+
+        fem_regression::regression("maxwell_time_domain_temporal_rate")
+            .check_with("convergence_ratio", ratio, 1e-6, 0.1)
+            .check_with("e_c", e_c, 1e-6, 1e-8)
+            .check_with("e_m", e_m, 1e-6, 1e-8)
+            .finalize();
     }
 
     #[test]

@@ -1,0 +1,20 @@
+{
+  "name": "maxwell_time_domain_temporal_rate",
+  "metrics": {
+    "convergence_ratio": {
+      "value": 4.889291400301517,
+      "rtol": 1e-6,
+      "atol": 0.1
+    },
+    "e_c": {
+      "value": 0.004210626307671212,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    },
+    "e_m": {
+      "value": 0.0008611935683382559,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    }
+  }
+}

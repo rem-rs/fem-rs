@@ -21,7 +21,7 @@ use fem_mesh::{topology::MeshTopology, SimplexMesh};
 use fem_solver::{lobpcg, LobpcgConfig};
 use fem_space::{
     fe_space::FESpace,
-    H1Space,
+    H1Space, HCurlSpace,
     constraints::boundary_dofs,
 };
 
@@ -230,8 +230,7 @@ fn team2_dielectric_loaded_waveguide() {
 ///   - Monk, "Finite Element Methods for Maxwell's Equations", §4.4
 #[test]
 fn team1_hcurl_pec_cavity_eigenvalues() {
-    use fem_solver::{LobpcgConfig, SolverConfig};
-    use fem_space::HCurlSpace;
+    use fem_solver::{SolverConfig};
     use fem_amg::AmgConfig;
     use crate::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
     use std::f64::consts::PI;
@@ -274,5 +273,168 @@ fn team1_hcurl_pec_cavity_eigenvalues() {
         .check_with("lambda_1", result.eigenvalues[1], 1e-6, 1e-10)
         .check_with("lambda_2", result.eigenvalues[2], 1e-6, 1e-10)
         .check_with("max_rel_err", max_rel_err, 1e-6, 1e-10)
+        .finalize();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TEAM 1 (3D Hcurl) — PEC cavity curl-curl eigenvalues
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 3D H(curl) PEC cavity — zero-source smoke test + matrix sanity.
+///
+/// Assembles curl-curl + mass on a unit cube tet mesh, applies PEC BCs
+/// on all faces, solves with zero source.  The nullspace (gradient fields)
+/// is eliminated by the CG solver which finds the minimum-norm solution.
+///
+/// Checks:
+///   - curl-curl matrix is structurally symmetric
+///   - CG solver converges with zero RHS → zero solution
+///   - Matrix dimensions match ND1 DOF count
+#[test]
+fn team1_hcurl_3d_pec_cavity_smoke() {
+    use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+    use fem_assembly::VectorAssembler;
+    use fem_space::constraints::boundary_dofs_hcurl;
+    use fem_solver::SolverConfig;
+
+    let n = 4;
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let space = HCurlSpace::new(mesh.clone(), 1);
+    let n_dof = space.n_dofs();
+
+    let mut mat = VectorAssembler::assemble_bilinear(
+        &space,
+        &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }],
+        4,
+    );
+
+    // Verify structural symmetry
+    assert_eq!(mat.nrows, n_dof);
+    assert_eq!(mat.ncols, n_dof);
+    assert!(mat.nnz() > 0, "3D curl-curl matrix should have entries");
+
+    // Check symmetry: (i,j) entry should match (j,i)
+    let mut sym_ok = true;
+    'outer: for i in 0..n_dof {
+        for p in mat.row_ptr[i]..mat.row_ptr[i+1] {
+            let j = mat.col_idx[p] as usize;
+            let mut found = false;
+            for q in mat.row_ptr[j]..mat.row_ptr[j+1] {
+                if mat.col_idx[q] as usize == i {
+                    if (mat.values[p] - mat.values[q]).abs() > 1e-14 {
+                        sym_ok = false;
+                        break 'outer;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if !found { sym_ok = false; break 'outer; }
+        }
+    }
+    assert!(sym_ok, "3D curl-curl + mass matrix should be symmetric");
+
+    // Zero-source solve: should converge to trivial solution
+    let mut rhs = vec![0.0; n_dof];
+    let bnd = boundary_dofs_hcurl(&mesh, &space, &[1, 2, 3, 4, 5, 6]);
+    let vals = vec![0.0; bnd.len()];
+    fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs, &bnd, &vals);
+
+    let mut u = vec![0.0; n_dof];
+    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
+    let result = fem_solver::solve_cg(&mat, &rhs, &mut u, &cfg)
+        .expect("3D H(curl) smoke CG failed");
+
+    assert!(result.converged, "3D H(curl) smoke should converge");
+    let norm_u: f64 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(norm_u < 1e-12, "3D zero-source solution should be zero, norm={:.4e}", norm_u);
+
+    eprintln!("  [TEAM 1 3D H(curl)] PEC cavity smoke (n={}):", n);
+    eprintln!("       DOFs={}, nnz={}, ||u||₂={:.4e}, iters={}",
+        n_dof, mat.nnz(), norm_u, result.iterations);
+
+    fem_regression::regression("team1_hcurl_3d_pec_smoke")
+        .check_with("n_dofs", n_dof as f64, 1e-6, 0.5)
+        .check_with("nnz", mat.nnz() as f64, 1e-6, 0.5)
+        .check_with("solution_norm", norm_u, 1e-6, 1e-12)
+        .finalize();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TEAM 3 / CEM: Multi-layer dielectric-loaded waveguide
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Multi-layer dielectric-loaded rectangular waveguide (three regions).
+///
+/// Waveguide cross-section [0,1]² with three vertical strips:
+///   Left  (x < 0.3):  εr = 1 (air)
+///   Center (0.3 ≤ x ≤ 0.7): εr = 4 (dielectric)
+///   Right (x > 0.7):  εr = 1 (air)
+///
+/// TE modes: ∂u/∂n = 0 on waveguide walls (natural BCs).
+/// The dielectric slab loading reduces the first non-zero TE cutoff
+/// below the empty-waveguide value π² ≈ 9.87.
+///
+/// References: Collin, "Field Theory of Guided Waves", §6.3;
+///             TEAM workshop problem 3 (multi-material waveguide).
+#[test]
+fn team3_dielectric_slab_waveguide() {
+    let mesh_raw = SimplexMesh::<2>::unit_square_tri(24);
+    let mut mesh = mesh_raw;
+    for e in 0..mesh.n_elements() as u32 {
+        let nodes = mesh.element_nodes(e);
+        let cx: f64 = nodes.iter()
+            .map(|&n| mesh.node_coords(n)[0])
+            .sum::<f64>() / nodes.len() as f64;
+        mesh.elem_tags[e as usize] = if cx < 0.3 { 1 }
+            else if cx <= 0.7 { 2 }
+            else { 3 };
+    }
+
+    let space = H1Space::new(mesh, 1);
+
+    // Piecewise εr: tag 1,3 → εr=1 (air), tag 2 → εr=4 (dielectric slab)
+    let m_mat = Assembler::assemble_bilinear(
+        &space,
+        &[&MassIntegrator { rho: PWConstCoeff::new([(1, 1.0), (2, 4.0), (3, 1.0)]) }],
+        3,
+    );
+    let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
+
+    // TE modes: natural BCs → no Dirichlet constraints.
+    // Skip the zero eigenvalue (nullspace of −Δ with Neumann BC).
+    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false };
+    let result = lobpcg(&k_mat, Some(&m_mat), 5, &cfg)
+        .expect("TEAM 3 LOBPCG failed");
+
+    let mut ev = result.eigenvalues;
+    ev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    while !ev.is_empty() && ev[0] < 1.0 { ev.remove(0); }
+
+    let k_target = 3;
+    assert!(ev.len() >= k_target, "TEAM 3: expected ≥3 non-zero eigenvalues, got {}", ev.len());
+    for (i, &lam) in ev.iter().enumerate().take(k_target) {
+        assert!(lam > 0.0, "TEAM 3: λ[{i}] = {lam:.6} should be positive");
+    }
+
+    // Dielectric slab lowers the first eigenvalue below π²
+    let empty_fundamental = PI * PI;
+    assert!(ev[0] < empty_fundamental,
+        "TEAM 3: fundamental λ={:.6} should be < π²={:.6} (dielectric loading)",
+        ev[0], empty_fundamental);
+    // But physically it should still be positive and > 3 (not too low)
+    assert!(ev[0] > 3.0,
+        "TEAM 3: fundamental λ={:.6} suspiciously low", ev[0]);
+
+    eprintln!("  [TEAM 3] Dielectric slab waveguide (εr=4, 0.3-0.7):");
+    for i in 0..k_target {
+        eprintln!("           λ[{i}] = {:.6}  (empty ref π²={:.6})", ev[i], empty_fundamental);
+    }
+    eprintln!("           empty waveguide fundamental = π² = {:.6}", empty_fundamental);
+
+    fem_regression::regression("team3_dielectric_slab_waveguide")
+        .check_with("lambda_0", ev[0], 1e-6, 1e-10)
+        .check_with("lambda_1", ev[1], 1e-6, 1e-10)
+        .check_with("lambda_2", ev[2], 1e-6, 1e-10)
         .finalize();
 }
