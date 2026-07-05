@@ -57,6 +57,7 @@
 //! | **H(curl) MMS** | `mms_hcurl_eigenvalue_convergence` | mms_convergence | H(curl) 特征值MMS | 2D | H(curl) | λ相对误差 < 2% |
 //! | **H(curl) MMS** | `anisotropic_maxwell_exhibits_first_order_hcurl_convergence_trend` | mfem_ex31 | HCurl O(h)收敛 | 2D | H(curl) | O(h) > 0.85 |
 //! | **CEM** | `em_dielectric_cylinder_scattering` | em_benchmarks | 介质柱散射(Annular+εr=4) | 2D | H¹ | 近场范围 + 回归 |
+//! | **3D 复Helmholtz** | `em_complex_helmholtz_3d_mms` | em_benchmarks | 3D复Helmholtz MMS | 3D | H¹ | L² < 8% + 回归 |
 
 use std::f64::consts::PI;
 
@@ -1457,5 +1458,108 @@ fn em_dielectric_cylinder_scattering() {
     fem_regression::regression("em_dielectric_cylinder_scattering")
         .check_with("max_mag", max_mag, 1e-6, 1e-8)
         .check_with("mean_mag", mean_mag, 1e-6, 1e-8)
+        .finalize();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 3D Complex Helmholtz MMS
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 3D complex Helmholtz MMS with lossy medium.
+///
+/// Problem: -∇²u - k²·u + j·α·u = f  in Ω = [0,1]³
+///   u = 0  on all faces (Dirichlet)
+///
+/// Manufactured: u = sin(πx)·sin(πy)·sin(πz)  (real-valued for simplicity)
+///   f_re = (3π² - k²) · u
+///   f_im = α · u
+///
+/// The complex system A = K - k²·M + j·α·M is solved with GMRES.
+/// Verifies L² error at mesh resolution n=8 (729 DOFs).
+///
+/// References: extends IEEE 1597 §5.3 MMS framework to 3D.
+#[test]
+fn em_complex_helmholtz_3d_mms() {
+    use fem_assembly::standard::DomainSourceIntegrator;
+    use fem_assembly::complex::NativeComplexSystem;
+    use fem_linalg::complex_csr::ComplexCsr;
+    use fem_mesh::SimplexMesh;
+    use fem_space::H1Space;
+    use fem_space::constraints::boundary_dofs;
+    use std::f64::consts::PI;
+
+    let k_wave = PI;       // k = π
+    let k2 = k_wave * k_wave;
+    let alpha = 1.0;        // loss factor
+    let n_mesh = 8;
+
+    // 3D tet mesh
+    let mesh = SimplexMesh::<3>::unit_cube_tet(n_mesh);
+    let space = H1Space::new(mesh, 1);
+    let n = space.n_dofs();
+    let dm = space.dof_manager();
+
+    // K = stiffness, M = mass
+    let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 4);
+    let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 4);
+
+    // A_re = K - k²·M,  A_im = α·M
+    let mut coo_re = CooMatrix::<f64>::new(n, n);
+    let mut coo_im = CooMatrix::<f64>::new(n, n);
+    for i in 0..n {
+        for p in k_mat.row_ptr[i]..k_mat.row_ptr[i + 1] {
+            let j = k_mat.col_idx[p] as usize;
+            coo_re.add(i, j, k_mat.values[p]);
+        }
+        for p in m_mat.row_ptr[i]..m_mat.row_ptr[i + 1] {
+            let j = m_mat.col_idx[p] as usize;
+            coo_re.add(i, j, -k2 * m_mat.values[p]);
+            coo_im.add(i, j, alpha * m_mat.values[p]);
+        }
+    }
+    let csr = ComplexCsr::from_re_im(&coo_re.into_csr(), &coo_im.into_csr());
+    let mut sys = NativeComplexSystem { mat: csr, omega: k_wave, n_dofs: n };
+
+    // RHS: f_re = (3π² - k²)·u, f_im = α·u
+    let src_re_fn = |x: &[f64]| {
+        (3.0 * PI * PI - k2) * (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin()
+    };
+    let src_im_fn = |x: &[f64]| {
+        alpha * (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin()
+    };
+    let rhs_re = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(src_re_fn)], 4);
+    let rhs_im = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(src_im_fn)], 4);
+
+    // Dirichlet BC: u = 0 on all 6 faces (tags 1-6 for unit_cube_tet)
+    let bnd_dofs = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4, 5, 6]);
+    let bnd_u: Vec<usize> = bnd_dofs.iter().map(|&d| d as usize).collect();
+    let mut r_re = rhs_re;
+    let mut r_im = rhs_im;
+    sys.apply_dirichlet(&bnd_u, &vec![0.0; bnd_u.len()], &vec![0.0; bnd_u.len()],
+        &mut r_re, &mut r_im);
+
+    // Solve
+    let gf = sys.solve(&r_re, &r_im, 1e-8, 5000, 50)
+        .expect("3D complex Helmholtz GMRES failed");
+
+    // Compute L² error at DOFs
+    let exact_fn = |c: &[f64]| (PI * c[0]).sin() * (PI * c[1]).sin() * (PI * c[2]).sin();
+    let mut l2_err: f64 = 0.0;
+    for d in 0..n as u32 {
+        let c = dm.dof_coord(d);
+        let ex = exact_fn(c);
+        l2_err += (gf.u_re[d as usize] - ex).powi(2) + gf.u_im[d as usize].powi(2);
+    }
+    l2_err = (l2_err / n as f64).sqrt();
+
+    eprintln!("  [3D Complex Helmholtz MMS] k={:.1}, α={}: DOFs={}, L² err={:.4e}",
+        k_wave, alpha, n, l2_err);
+
+    assert!(l2_err < 0.08,
+        "3D complex Helmholtz: L² error {:.4e} > 8%", l2_err);
+
+    fem_regression::regression("em_complex_helmholtz_3d_mms")
+        .check_with("l2_error", l2_err, 1e-6, 1e-8)
+        .check_with("n_dofs", n as f64, 1e-6, 0.5)
         .finalize();
 }
