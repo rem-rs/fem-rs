@@ -41,6 +41,8 @@ pub mod io_roundtrip_tests;
 #[cfg(test)]
 pub mod team_benchmarks;
 #[cfg(test)]
+pub mod nafems_thermal;
+#[cfg(test)]
 pub mod mms_convergence;
 pub use maxwell::{
     BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,
