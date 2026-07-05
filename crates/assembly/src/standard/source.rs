@@ -6,49 +6,24 @@
 //! F(v) = ∫_Ω f(x) v dx
 //! ```
 
-use crate::integrator::{LinearIntegrator, QpData};
+domain_linear_closure!(DomainSourceIntegrator,
+    "Linear integrator for the domain source term `∫ f(x) v dx`.
 
-/// Linear integrator for the domain source term `∫ f(x) v dx`.
-///
-/// The source function `f` may depend on the physical coordinates `x`.
-///
-/// # Example
-/// ```
-/// # use fem_assembly::standard::DomainSourceIntegrator;
-/// // f(x, y) = 2π² sin(πx) sin(πy)
-/// let integ = DomainSourceIntegrator::new(|x| {
-///     use std::f64::consts::PI;
-///     2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
-/// });
-/// ```
-pub struct DomainSourceIntegrator<F>
-where
-    F: Fn(&[f64]) -> f64 + Send + Sync,
-{
-    f: F,
-}
+The source function `f` may depend on the physical coordinates `x`.
 
-impl<F> DomainSourceIntegrator<F>
-where
-    F: Fn(&[f64]) -> f64 + Send + Sync,
-{
-    /// Create a new source integrator with the given forcing function.
-    pub fn new(f: F) -> Self { DomainSourceIntegrator { f } }
-}
-
-impl<F> LinearIntegrator for DomainSourceIntegrator<F>
-where
-    F: Fn(&[f64]) -> f64 + Send + Sync,
-{
-    /// `f_elem[i] += w · f(x) · φᵢ`
-    fn add_to_element_vector(&self, qp: &QpData<'_>, f_elem: &mut [f64]) {
-        let fval = (self.f)(qp.x_phys);
-        let w_f  = qp.weight * fval;
-        for i in 0..qp.n_dofs {
-            f_elem[i] += w_f * qp.phi[i];
-        }
+# Example
+```
+# use fem_assembly::standard::DomainSourceIntegrator;
+// f(x, y) = 2π² sin(πx) sin(πy)
+let integ = DomainSourceIntegrator::new(|x| {
+    use std::f64::consts::PI;
+    2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
+});
+```", |qp, f_elem, n, w| {
+    for i in 0..n {
+        f_elem[i] += w * qp.phi[i];
     }
-}
+});
 
 #[cfg(test)]
 mod tests {

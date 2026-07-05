@@ -39,6 +39,91 @@ macro_rules! scalar_bilinear_integrator {
     };
 }
 
+/// Helper macro for boundary scalar bilinear integrators with a [`ScalarCoeff`] field.
+///
+/// Like [`scalar_bilinear_integrator!`] but for [`BoundaryBilinearIntegrator`] on
+/// [`BdQpData`], with `CoeffCtx::from_qp` receiving `Some(phi), None`.
+macro_rules! boundary_scalar_bilinear {
+    ($name:ident, $field:ident, $doc:literal, |$qp:ident, $kface:ident, $n:ident, $w:ident| $body:block) => {
+        use crate::coefficient::{CoeffCtx, ScalarCoeff};
+        use crate::integrator::{BdQpData, BoundaryBilinearIntegrator};
+
+        #[doc = $doc]
+        pub struct $name<C: ScalarCoeff = f64> {
+            pub $field: C,
+        }
+
+        impl<C: ScalarCoeff> BoundaryBilinearIntegrator for $name<C> {
+            fn add_to_face_matrix(&self, $qp: &BdQpData<'_>, $kface: &mut [f64]) {
+                let $n = $qp.n_dofs;
+                let ctx = CoeffCtx::from_qp(
+                    $qp.x_phys, $qp.dim, $qp.elem_id, $qp.elem_tag,
+                    Some($qp.phi), None,
+                );
+                let $w = $qp.weight * self.$field.eval(&ctx);
+                $body
+            }
+        }
+    };
+}
+
+/// Helper macro for domain source (linear form) integrators with a closure.
+///
+/// Generates a struct generic over `F: Fn(&[f64]) -> f64 + Send + Sync` with a
+/// `pub fn new(f: F) -> Self` constructor, plus the [`LinearIntegrator`] impl.
+///
+/// The body block receives `|qp, f_elem, n, w|` where `w = qp.weight × f(x)`.
+macro_rules! domain_linear_closure {
+    ($name:ident, $doc:literal, |$qp:ident, $felem:ident, $n:ident, $w:ident| $body:block) => {
+        use crate::integrator::{LinearIntegrator, QpData};
+
+        #[doc = $doc]
+        pub struct $name<F: Fn(&[f64]) -> f64 + Send + Sync> {
+            f: F,
+        }
+
+        impl<F: Fn(&[f64]) -> f64 + Send + Sync> $name<F> {
+            pub fn new(f: F) -> Self { $name { f } }
+        }
+
+        impl<F: Fn(&[f64]) -> f64 + Send + Sync> LinearIntegrator for $name<F> {
+            fn add_to_element_vector(&self, $qp: &QpData<'_>, $felem: &mut [f64]) {
+                let $n = $qp.n_dofs;
+                let $w = $qp.weight * (self.f)($qp.x_phys);
+                $body
+            }
+        }
+    };
+}
+
+/// Helper macro for boundary linear (Neumann) integrators with a closure.
+///
+/// Like [`domain_linear_closure!`] but for [`BoundaryLinearIntegrator`] on
+/// [`BdQpData`]; the closure receives both coordinates and the outward normal.
+/// Body block receives `|qp, f_face, n, w|` where `w = qp.weight × g(x, n)`.
+macro_rules! boundary_linear_closure {
+    ($name:ident, $doc:literal, |$qp:ident, $fface:ident, $n:ident, $w:ident| $body:block) => {
+        use crate::integrator::{BdQpData, BoundaryLinearIntegrator};
+
+        #[doc = $doc]
+        pub struct $name<F: Fn(&[f64], &[f64]) -> f64 + Send + Sync> {
+            g: F,
+        }
+
+        impl<F: Fn(&[f64], &[f64]) -> f64 + Send + Sync> $name<F> {
+            pub fn new(g: F) -> Self { $name { g } }
+        }
+
+        impl<F: Fn(&[f64], &[f64]) -> f64 + Send + Sync> BoundaryLinearIntegrator for $name<F> {
+            fn add_to_face_vector(&self, $qp: &BdQpData<'_>, $fface: &mut [f64]) {
+                let $n = $qp.n_dofs;
+                let $w = $qp.weight * (self.g)($qp.x_phys, $qp.normal);
+                $body
+            }
+        }
+    };
+}
+
 pub mod diffusion;
 pub mod mass;
 pub mod neumann;
