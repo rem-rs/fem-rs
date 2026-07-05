@@ -307,9 +307,18 @@ mod tests {
     /// Cross-validate fem-rs elasticity solution against independently
     /// obtained MFEM reference values.
     ///
-    /// Reference values were obtained by running MFEM's ex2 example with
-    /// matching parameters (E=1, ν=0.3, plane strain, gravity body force,
-    /// clamped left wall). See `tests/mfem_references/` for details.
+    /// Reference values were obtained by running MFEM's ex2 example via
+    /// the Python bindings (mfem.ser) with matching parameters:
+    ///   - Mesh: 8×8 triangular subdivision of unit square
+    ///   - Material: E=1, ν=0.3 (plane strain)
+    ///   - Body force: f = (0, -1) (gravity)
+    ///   - BC: clamped left wall (x=0)
+    ///
+    /// The solution L² norms match MFEM to machine precision (1e-13),
+    /// confirming the fem-rs elasticity assembly + solve is correct.
+    /// Checksums are implementation-specific (DOF ordering dependent).
+    ///
+    /// See `tests/mfem_references/run_ex2.py` and `tests/mfem_references/README.md`.
     #[test]
     fn ex2_mfem_reference_test() {
         let result = solve_case(8, 1, -1.0);
@@ -321,22 +330,22 @@ mod tests {
             "DOF count should be exactly 162 for 8×8 P1 VectorH1");
 
         // ── Solution norms: from MFEM ex2 output ──
-        // MFEM reports these via GridFunction::ComputeLpError(2.0, zero)
-        // which is just the L² norm of the solution.
-        let mfem_ref_ux_norm = 3.8908045709213988_f64;
-        let mfem_ref_uy_norm = 15.036916113753879_f64;
+        // These L² norms are DOF-ordering independent and should match
+        // between any conforming FEM implementation. MFEM values obtained
+        // via run_ex2.py using the same mesh, material, and BCs.
+        let mfem_ref_ux_norm = 3.890804570921894_f64;
+        let mfem_ref_uy_norm = 15.036916113754382_f64;
 
         let rel_diff_ux = (result.ux_norm - mfem_ref_ux_norm).abs() / mfem_ref_ux_norm;
         let rel_diff_uy = (result.uy_norm - mfem_ref_uy_norm).abs() / mfem_ref_uy_norm;
 
-        // Allow 2% tolerance: different quadrature rules, DOF numbering,
-        // and solver convergence can cause small differences.
-        assert!(rel_diff_ux < 0.02,
-            "||u_x|| deviates from MFEM reference by {:.4}%: fem-rs={:.6e} mfem={:.6e}",
-            rel_diff_ux * 100.0, result.ux_norm, mfem_ref_ux_norm);
-        assert!(rel_diff_uy < 0.02,
-            "||u_y|| deviates from MFEM reference by {:.4}%: fem-rs={:.6e} mfem={:.6e}",
-            rel_diff_uy * 100.0, result.uy_norm, mfem_ref_uy_norm);
+        // Machine-precision match: tolerance 1e-12
+        assert!(rel_diff_ux < 1e-12,
+            "||u_x|| deviates from MFEM reference by {:.4e}%: fem-rs={:.15e} mfem={:.15e}",
+            rel_diff_ux, result.ux_norm, mfem_ref_ux_norm);
+        assert!(rel_diff_uy < 1e-12,
+            "||u_y|| deviates from MFEM reference by {:.4e}%: fem-rs={:.15e} mfem={:.15e}",
+            rel_diff_uy, result.uy_norm, mfem_ref_uy_norm);
 
         // ── Solver should converge well ──
         assert!(result.iterations < 200,
@@ -350,9 +359,9 @@ mod tests {
         assert!(result.uy_norm > result.ux_norm,
             "vertical norm should dominate");
 
-        eprintln!("  [mfem-ref] ex2: ||u_x||={:.6e} (ref={:.6e}, diff={:.2}%), ||u_y||={:.6e} (ref={:.6e}, diff={:.2}%)",
-            result.ux_norm, mfem_ref_ux_norm, rel_diff_ux * 100.0,
-            result.uy_norm, mfem_ref_uy_norm, rel_diff_uy * 100.0);
+        eprintln!("  [mfem-ref] ex2: ||u_x||={:.15e} (MFEM={:.15e}, rel_diff={:.2e}), ||u_y||={:.15e} (MFEM={:.15e}, rel_diff={:.2e})",
+            result.ux_norm, mfem_ref_ux_norm, rel_diff_ux,
+            result.uy_norm, mfem_ref_uy_norm, rel_diff_uy);
     }
 
     // ─── Performance regression tests ────────────────────────────────────
