@@ -67,11 +67,17 @@ jobs:
       - name: Run regression baselines (mfem_ex9_dg_advection)
         run: cargo test -p fem-examples --example mfem_ex9_dg_advection -- ex9_regression_baseline
 
+      - name: Run MFEM cross-validation (ex9 DG advection)
+        run: cargo test -p fem-examples --example mfem_ex9_dg_advection -- ex9_mfem_reference_test
+
       - name: Run regression baselines (mfem_ex16_nonlinear_heat)
         run: cargo test -p fem-examples --example mfem_ex16_nonlinear_heat -- ex16_regression_baseline
 
       - name: Run regression baselines (mfem_ex40_stokes)
         run: cargo test -p fem-examples --example mfem_ex40_stokes -- ex40_regression_baseline
+
+      - name: Run MFEM cross-validation (ex40 Stokes)
+        run: cargo test -p fem-examples --example mfem_ex40_stokes -- ex40_mfem_reference_test
 
       - name: Run regression baselines (mfem_ex3_maxwell_cavity)
         run: cargo test -p fem-examples --example mfem_ex3_maxwell_cavity -- ex3_regression_baseline
@@ -82,8 +88,17 @@ jobs:
       - name: Run regression baselines (mfem_ex4_darcy)
         run: cargo test -p fem-examples --example mfem_ex4_darcy -- ex4_regression_baseline
 
+      - name: Run MFEM cross-validation (ex4 Darcy)
+        run: cargo test -p fem-examples --example mfem_ex4_darcy -- ex4_mfem_reference_test
+
       - name: Run regression baselines (mfem_ex5_mixed_darcy)
         run: cargo test -p fem-examples --example mfem_ex5_mixed_darcy -- ex5_regression_baseline
 
+      - name: Run MFEM cross-validation (ex5 mixed Darcy)
+        run: cargo test -p fem-examples --example mfem_ex5_mixed_darcy -- ex5_mfem_reference_test
+
       - name: Run regression baselines (mfem_ex22_complex_helmholtz)
         run: cargo test -p fem-examples --example mfem_ex22_complex_helmholtz -- ex22_regression_baseline
+
+      - name: Run MFEM cross-validation (ex22 complex Helmholtz)
+        run: cargo test -p fem-examples --example mfem_ex22_complex_helmholtz -- ex22_mfem_reference_test

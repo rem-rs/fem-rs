@@ -335,5 +335,27 @@ mod tests {
             .check_with("convergence_rate",   rate_8_16,              1e-6, 1e-10)
             .finalize();
     }
+
+    #[test]
+    fn ex9_mfem_reference_test() {
+        let result = solve_case(8, 1, 20.0, 1.0);
+        assert!(result.converged);
+        assert_eq!(result.n_dofs, 384, "DG P1 on 8×8: 6×8² = 384 DOFs");
+        assert!(result.solution_norm > 0.0);
+        let rate = {
+            let m = solve_case(16, 1, 20.0, 1.0);
+            let h_c: f64 = 1.0 / 8.0;
+            let h_f: f64 = 1.0 / 16.0;
+            (m.l2_error / result.l2_error).ln() / (h_f / h_c).ln()
+        };
+        assert!(rate > 0.0, "convergence rate should be positive");
+        eprintln!("  [mfem-ref] ex9: dofs={} l2={:.6e} rate={:.3}",
+            result.n_dofs, result.l2_error, rate);
+        use std::time::Instant;
+        let t0 = Instant::now();
+        let _ = solve_case(32, 1, 20.0, 1.0);
+        let elapsed = t0.elapsed();
+        assert!(elapsed.as_secs_f64() < 15.0, "DG 32×32 took {:.2}s", elapsed.as_secs_f64());
+    }
 }
 

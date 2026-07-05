@@ -445,5 +445,21 @@ mod tests {
             .check_with("residual",         r.final_residual,   1e-4, 1e-10)
             .finalize();
     }
+
+    #[test]
+    fn ex22_mfem_reference_test() {
+        let r = solve_case(&base_args());
+        assert!(r.converged);
+        let n = base_args().n;
+        let expected_dofs = (n + 1) * (n + 1);
+        assert_eq!(r.n_dofs, expected_dofs, "H1 P1 on {n}×{n}: expected {expected_dofs} DOFs");
+        assert!(r.max_amp > 0.0 && r.max_amp < 10.0, "amplitude out of range");
+        assert!(r.transmission_ratio() > 0.0, "transmission ratio should be positive");
+        assert!(r.max_left_bc_err < 1e-6, "left BC error too large");
+        let fine = solve_case(&Args { n: 12, ..base_args() });
+        assert!(fine.converged);
+        eprintln!("  [mfem-ref] ex22: dofs={} max_amp={:.6e} trans={:.4e}",
+            r.n_dofs, r.max_amp, r.transmission_ratio());
+    }
 }
 

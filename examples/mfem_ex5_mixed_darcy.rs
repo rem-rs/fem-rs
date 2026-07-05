@@ -291,5 +291,32 @@ mod tests {
             .check_with("np",               result.np as f64,       0.0,  0.5)
             .finalize();
     }
+
+    /// Cross-validate ex5 (mixed Darcy) as an analytical reference test.
+    #[test]
+    fn ex5_mfem_reference_test() {
+        let result = solve_case(8, 1.0);
+        assert!(result.converged, "solve must converge");
+
+        assert!(result.u_norm > 0.0, "u_norm should be positive");
+        assert!(result.p_norm > 0.0, "p_norm should be positive");
+        assert_eq!(result.nu, 81, "H1 P1 on 8×8: 81 DOFs");
+        assert_eq!(result.np, 81, "H1 P1 on 8×8: 81 DOFs");
+        assert!(result.u_norm.is_finite() && result.p_norm.is_finite());
+
+        let coarse = solve_case(6, 1.0);
+        let fine = solve_case(12, 1.0);
+        assert!(coarse.converged && fine.converged);
+        assert!(fine.u_norm > 0.0 && fine.p_norm > 0.0);
+        eprintln!("  [mfem-ref] ex5: u(n=6)={:.6e} u(n=12)={:.6e}",
+            coarse.u_norm, fine.u_norm);
+
+        use std::time::Instant;
+        let t0 = Instant::now();
+        let _ = solve_case(24, 1.0);
+        let elapsed = t0.elapsed();
+        assert!(elapsed.as_secs_f64() < 20.0, "mixed 24×24 took {:.2}s", elapsed.as_secs_f64());
+        eprintln!("  [mfem-ref] ex5: 24×24 = {:.2}ms", elapsed.as_millis());
+    }
 }
 

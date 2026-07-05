@@ -373,5 +373,21 @@ mod tests {
             .check_with("pressure_dofs",      result.pressure_dofs as f64, 0.0,  0.5)
             .finalize();
     }
+
+    #[test]
+    fn ex40_mfem_reference_test() {
+        let result = solve_case(8, 1.0, 1.0);
+        assert!(result.converged);
+        // Stokes on 8×8 P2/P1: velocity=P2(VC), pressure=P1
+        assert!(result.velocity_norm > 0.0);
+        assert!(result.pressure_norm > 0.0);
+        assert_eq!(result.pressure_dofs, 81, "P1 pressure on 8×8: 81 DOFs");
+        let coarse = solve_case(6, 1.0, 1.0);
+        let fine = solve_case(12, 1.0, 1.0);
+        assert!(coarse.converged && fine.converged);
+        assert!(fine.uy_abs_max > coarse.uy_abs_max, "refinement strengthens recirculation");
+        eprintln!("  [mfem-ref] ex40: vel={:.6e} pres={:.6e} iter={}",
+            result.velocity_norm, result.pressure_norm, result.iterations);
+    }
 }
 

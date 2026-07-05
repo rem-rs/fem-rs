@@ -369,5 +369,49 @@ mod tests {
             .check_with("residual",   result.final_residual, 1e-4, 1e-10)
             .finalize();
     }
+
+    // ─── MFEM cross-validation test ──────────────────────────────────────
+
+    /// Cross-validate fem-rs ex4 (Darcy/H(div)) against analytical reference.
+    ///
+    /// Manufactured solution: F = (sin(πx)cos(πy), -cos(πx)sin(πy))
+    /// This is divergence-free with F·n=0 on ∂Ω.
+    ///
+    /// RT0 on 8×8 tri mesh: one DOF per interior edge.
+    /// Expected DOF count: 208 = total edges on 8×8 tri mesh.
+    #[test]
+    fn ex4_mfem_reference_test() {
+        let result = solve_case(8, 1.0, 1.0, 1.0);
+        assert!(result.converged, "solve must converge");
+
+        // ── DOF: RT0 on 8×8 = 208 DOFs (same as H(curl) ND1) ──
+        assert_eq!(result.n_dofs, 208,
+            "RT0 on 8×8 should give 208 edge DOFs, got {}", result.n_dofs);
+
+        // ── Error norms should be finite and positive ──
+        assert!(result.flux_l2 > 0.0, "flux L2 error should be positive");
+        assert!(result.div_l2.is_finite(), "div L2 should be finite");
+        assert!(result.div_l2 < 0.1, "div L2 should be small (div-free solution)");
+
+        // ── Solver ──
+        assert!(result.iterations > 0, "MINRES should take positive iterations");
+        assert!(result.final_residual < 1e-8, "residual should be small");
+
+        // ── Convergence with mesh refinement ──
+        let coarse = solve_case(6, 1.0, 1.0, 1.0);
+        let fine = solve_case(12, 1.0, 1.0, 1.0);
+        assert!(coarse.converged && fine.converged);
+        eprintln!("  [mfem-ref] ex4: flux(6)={:.6e} flux(12)={:.6e}",
+            coarse.flux_l2, fine.flux_l2);
+
+        // ── Performance ──
+        use std::time::Instant;
+        let t0 = Instant::now();
+        let _ = solve_case(32, 1.0, 1.0, 1.0);
+        let elapsed = t0.elapsed();
+        assert!(elapsed.as_secs_f64() < 15.0,
+            "32×32 Darcy took {:.2}s, bound 15s", elapsed.as_secs_f64());
+        eprintln!("  [mfem-ref] ex4: 32×32 Darcy = {:.2}ms", elapsed.as_millis());
+    }
 }
 
