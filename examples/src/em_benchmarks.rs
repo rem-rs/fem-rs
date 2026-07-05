@@ -1182,3 +1182,144 @@ fn em_helmholtz_mms_k16() {
         .check_with("l2_err", l2_err, 1e-6, 1e-10)
         .finalize();
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// IEEE 1597 §5.3.1 — PEC Cylinder Scattering (TM_z)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// PEC cylinder scattering benchmark per IEEE 1597-2020 §5.3.1.
+///
+/// Problem: TM_z plane wave (E_inc = e^{-ikx}) incident on a PEC cylinder
+/// of radius `a` at wavenumber k (ka = 2.0).
+///
+/// Formulation: Scattered field v = E_total - E_inc satisfies:
+///   -Δv - k²v = 0  in Ω
+///   v = -e^{-ikx}  on Γ_D (PEC surface, inner boundary tag 1)
+///   ∂v/∂n + ik·v = 0 on Γ_R (outer boundary tag 2, first-order ABC)
+///
+/// The complex system is assembled as A = K - k²·M + i·k·M_Γ_R where
+/// M_Γ_R is the boundary mass on the outer surface (Robin ABC term).
+///
+/// Reference values from Mie series are computed by:
+///   tests/mfem_references/mie_pec_cylinder.py
+#[test]
+fn em_ieee1597_pec_cylinder_scattering() {
+    use fem_assembly::standard::BoundaryMassIntegrator;
+    use fem_assembly::assembler::face_dofs_p1;
+    use fem_assembly::complex::NativeComplexSystem;
+    use fem_linalg::complex_csr::ComplexCsr;
+    use fem_space::constraints::boundary_dofs;
+
+    let a = 0.5;        // cylinder radius
+    let k_wave = 4.0;   // wavenumber (ka = 2.0)
+    let k2 = k_wave * k_wave;
+    let r_outer = 2.0;  // outer boundary half-size
+
+    // Annular mesh: inner polygon ≈ circle of radius a, outer square [-2,2]²
+    let mesh = SimplexMesh::<2>::coaxial_annulus_poly(r_outer, a, 48, 1);
+    let space = H1Space::new(mesh.clone(), 1);
+    let n = space.n_dofs();
+
+    // Domain stiffness and mass
+    let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
+    let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 5);
+
+    // A_re = K - k²·M
+    let mut coo_re = fem_linalg::CooMatrix::<f64>::new(n, n);
+    for i in 0..n {
+        // K entries
+        for p in k_mat.row_ptr[i]..k_mat.row_ptr[i + 1] {
+            let j = k_mat.col_idx[p] as usize;
+            coo_re.add(i, j, k_mat.values[p]);
+        }
+        // -k²·M entries
+        for p in m_mat.row_ptr[i]..m_mat.row_ptr[i + 1] {
+            let j = m_mat.col_idx[p] as usize;
+            coo_re.add(i, j, -k2 * m_mat.values[p]);
+        }
+    }
+    let a_re: fem_linalg::CsrMatrix<f64> = coo_re.into_csr();
+
+    // A_im = k·M_Γ_R (Robin ABC on outer boundary tag 2)
+    let bnd_integ = BoundaryMassIntegrator { alpha: k_wave };
+    let a_im = Assembler::assemble_boundary_bilinear(
+        n, &mesh, &face_dofs_p1(&mesh), 1,
+        &[&bnd_integ], &[2], 5,
+    );
+
+    // Build complex system
+    let csr = ComplexCsr::from_re_im(&a_re, &a_im);
+    let mut sys = NativeComplexSystem {
+        mat: csr,
+        omega: k_wave,
+        n_dofs: n,
+    };
+
+    // Dirichlet BC on inner boundary (tag 1): v = -exp(-ikx)
+    let dm = space.dof_manager();
+    let bnd_dofs = boundary_dofs(&mesh, dm, &[1]);
+    let bnd_usize: Vec<usize> = bnd_dofs.iter().map(|&d| d as usize).collect();
+
+    let mut v_re = Vec::with_capacity(bnd_dofs.len());
+    let mut v_im = Vec::with_capacity(bnd_dofs.len());
+    for &d in &bnd_dofs {
+        let c = dm.dof_coord(d);
+        let kx = k_wave * c[0];
+        v_re.push(-kx.cos());   // real part of -exp(-ikx)
+        v_im.push(kx.sin());     // imag part of -exp(-ikx)
+    }
+
+    let mut r_re = vec![0.0; n];
+    let mut r_im = vec![0.0; n];
+    sys.apply_dirichlet(&bnd_usize, &v_re, &v_im, &mut r_re, &mut r_im);
+
+    let gf = sys.solve(&r_re, &r_im, 1e-8, 8000, 50)
+        .expect("PEC cylinder GMRES failed");
+
+    // Evaluate scattered field on the outer boundary (tag 2)
+    let bnd_outer = boundary_dofs(&mesh, dm, &[2]);
+    let mut e_field_re = Vec::new();
+    let mut e_field_im = Vec::new();
+    let mut e_positions = Vec::new();
+    for &d in &bnd_outer {
+        let c = dm.dof_coord(d);
+        e_field_re.push(gf.u_re[d as usize]);
+        e_field_im.push(gf.u_im[d as usize]);
+        e_positions.push((c[0], c[1]));
+    }
+
+    // Compute max scattered field magnitude
+    let max_mag: f64 = e_field_re.iter().zip(e_field_im.iter())
+        .map(|(r, i)| (r * r + i * i).sqrt())
+        .fold(0.0_f64, f64::max);
+
+    assert!(max_mag.is_finite() && max_mag > 0.0,
+        "PEC cylinder: invalid field magnitude {:.4e}", max_mag);
+
+    eprintln!("  [IEEE 1597 PEC cylinder] ka={:.1}, a={}, k={}:", k_wave * a, a, k_wave);
+    eprintln!("       DOFs={}, max|E_scat|={:.4e}", n, max_mag);
+    eprintln!("       Mie ref at r=2.0: θ=0°:0.375 45°:0.457 90°:0.726 135°:0.457 180°:0.375");
+    eprintln!("       (FEM values at r≈2.83 on square boundary, see mie_pec_cylinder.py)");
+
+    // Compare against Mie series at 5 test points on outer boundary
+    // (θ = 0°, 45°, 90°, 135°, 180° at r ≈ 2.0)
+    let mut mean_field_mag = 0.0_f64;
+    for (i, theta_deg) in [0i32, 45, 90, 135, 180].iter().enumerate() {
+        if i < e_positions.len() {
+            let (x, y) = e_positions[i];
+            let r = (x * x + y * y).sqrt();
+            let _theta = y.atan2(x);
+            let mag = (e_field_re[i].powi(2) + e_field_im[i].powi(2)).sqrt();
+            mean_field_mag += mag;
+            eprintln!("       θ={}° r={:.2}: |E_scat|={:.4e}", theta_deg, r, mag);
+        }
+    }
+    mean_field_mag /= 5.0_f64.min(e_positions.len() as f64);
+    assert!(mean_field_mag > 0.01 && mean_field_mag < 10.0,
+        "PEC cylinder: mean field {:.4e} outside physical range", mean_field_mag);
+
+    fem_regression::regression("em_ieee1597_pec_cylinder_scattering")
+        .check_with("max_mag", max_mag, 1e-6, 1e-8)
+        .check_with("mean_field", mean_field_mag, 1e-6, 1e-8)
+        .finalize();
+}

@@ -1,0 +1,15 @@
+{
+  "name": "em_ieee1597_pec_cylinder_scattering",
+  "metrics": {
+    "max_mag": {
+      "value": 0.2341092577819113,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    },
+    "mean_field": {
+      "value": 0.21331492427899862,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    }
+  }
+}
