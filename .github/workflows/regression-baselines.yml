@@ -55,8 +55,14 @@ jobs:
       - name: Run regression baselines (mfem_ex13_eigenvalue)
         run: cargo test -p fem-examples --example mfem_ex13_eigenvalue -- ex13_eigenvalue_regression_baseline
 
+      - name: Run MFEM cross-validation (ex13 eigenvalue)
+        run: cargo test -p fem-examples --example mfem_ex13_eigenvalue -- ex13_eigenvalue_reference_test
+
       - name: Run regression baselines (mfem_ex13_laplacian_eigen)
         run: cargo test -p fem-examples --example mfem_ex13_laplacian_eigen -- ex13_laplacian_regression_baseline
+
+      - name: Run MFEM cross-validation (ex13 Laplacian eigen)
+        run: cargo test -p fem-examples --example mfem_ex13_laplacian_eigen -- ex13_laplacian_reference_test
 
       - name: Run regression baselines (mfem_ex2_elasticity)
         run: cargo test -p fem-examples --example mfem_ex2_elasticity -- ex2_regression_baseline

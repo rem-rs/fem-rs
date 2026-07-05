@@ -404,5 +404,37 @@ mod tests {
             .check_with("iterations",   result.iterations as f64, 1e-4, 0.5)
             .finalize();
     }
+
+    /// Cross-validate Maxwell cavity eigenvalues against analytical values.
+    ///
+    /// Analytical eigenvalues for curl-curl on unit square PEC cavity:
+    ///   λ₁ = π²  ≈ 9.870  (fundamental mode)
+    ///   λ₂ = π²  ≈ 9.870  (degenerate: x and y polarizations)
+    ///   λ₃ = 4π² ≈ 39.478 (first harmonic)
+    ///
+    /// FEM discretization on 8×8 ND1 mesh converges to these values
+    /// from above (standard Galerkin property).
+    #[test]
+    fn ex13_eigenvalue_reference_test() {
+        use std::f64::consts::PI;
+        let result = solve_case(8, 5);
+        assert!(result.converged, "LOBPCG did not converge");
+        assert!(result.eigenvalues.len() >= 3);
+        // First eigenvalues should approach π²
+        assert!((result.eigenvalues[0] - PI * PI).abs() < 1.0,
+            "λ₀={:.4} too far from π²={:.4}", result.eigenvalues[0], PI*PI);
+        assert!(result.nullity > 0, "expected non-trivial nullspace");
+        assert!(result.iterations > 0);
+        assert!(result.max_rel_err < 0.02, "max_rel_err={:.4e}", result.max_rel_err);
+        // Refinement should improve accuracy
+        let fine = solve_case(12, 3);
+        assert!(fine.converged);
+        assert!(fine.max_rel_err < result.max_rel_err,
+            "refinement should reduce relative error: {:.4e}→{:.4e}",
+            result.max_rel_err, fine.max_rel_err);
+        eprintln!("  [mfem-ref] ex13-eigen: λ₀={:.6} (π²={:.6}), λ₁={:.6}, λ₂={:.6}, nullity={}, err={:.4e}",
+            result.eigenvalues[0], PI*PI, result.eigenvalues[1], result.eigenvalues[2],
+            result.nullity, result.max_rel_err);
+    }
 }
 

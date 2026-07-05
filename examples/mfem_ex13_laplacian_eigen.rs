@@ -305,5 +305,34 @@ mod tests {
             .check_with("iterations",    result.iterations as f64, 1e-4, 0.5)
             .finalize();
     }
+
+    /// Cross-validate Laplacian eigenvalues against analytical values.
+    ///
+    /// Analytical eigenvalues for -Δ on unit square with u=0 BC:
+    ///   λ₁₁ = 2π² ≈ 19.739
+    ///   λ₁₂ = λ₂₁ = 5π² ≈ 49.348
+    ///   λ₂₂ = 8π² ≈ 78.957
+    #[test]
+    fn ex13_laplacian_reference_test() {
+        use std::f64::consts::PI;
+        let result = solve_case(8, 4);
+        assert!(result.converged, "LOBPCG did not converge");
+        assert!(result.eigenvalues.len() >= 3);
+        let lam11 = 2.0 * PI * PI;
+        let lam12 = 5.0 * PI * PI;
+        let _lam22 = 8.0 * PI * PI;
+        // FEM eigenvalues converge from above
+        assert!(result.eigenvalues[0] > lam11 * 0.9 && result.eigenvalues[0] < lam11 * 1.3,
+            "λ₀={:.4} far from 2π²={:.4}", result.eigenvalues[0], lam11);
+        assert!(result.eigenvalues[2] > lam12 * 0.8 && result.eigenvalues[2] < lam12 * 1.3,
+            "λ₂={:.4} far from 5π²={:.4}", result.eigenvalues[2], lam12);
+        // Refinement improves accuracy
+        let fine = solve_case(12, 3);
+        assert!(fine.converged);
+        assert!(fine.max_rel_err < result.max_rel_err);
+        eprintln!("  [mfem-ref] ex13-Laplacian: λ₀={:.6} (2π²={:.6}), λ₁={:.6}, λ₂={:.6}, n_free={}, err={:.4e}",
+            result.eigenvalues[0], lam11, result.eigenvalues[1], result.eigenvalues[2],
+            result.n_free, result.max_rel_err);
+    }
 }
 
