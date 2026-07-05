@@ -1,0 +1,15 @@
+{
+  "name": "nafems_bimaterial_conduction",
+  "metrics": {
+    "sol_norm": {
+      "value": 0.4852930984231413,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "t_center": {
+      "value": 0.013384497700822619,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    }
+  }
+}

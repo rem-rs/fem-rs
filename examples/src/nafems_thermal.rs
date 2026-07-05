@@ -8,6 +8,7 @@
 //! | Steady conduction + convection | 2-D H¹ Poisson | Center T = 0.118 (FEM ref) |
 //! | Steady mixed BC (flux + convection) | 2-D H¹ Poisson | Center T analytical |
 //! | Transient conduction (implicit Euler) | 1-D heat eq. | T(x,t) = sin(πx)·exp(-π²t) |
+//! | Bi-material conduction (κ ratio 1:10) | 2-D H¹ Poisson | Flux continuity at interface |
 //!
 //! ## References
 //! - NAFEMS Thermal Test Series
@@ -17,10 +18,11 @@
 use fem_assembly::{
     Assembler,
     assembler::face_dofs_p1,
+    coefficient::PWConstCoeff,
     standard::{DiffusionIntegrator, DomainSourceIntegrator, BoundaryMassIntegrator, NeumannIntegrator},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::SimplexMesh;
+use fem_mesh::{SimplexMesh, topology::MeshTopology};
 use fem_solver::{SolverConfig, solve_cg};
 use fem_space::{
     fe_space::FESpace,
@@ -327,5 +329,63 @@ fn nafems_transient_conduction() {
     fem_regression::regression("nafems_transient_conduction")
         .check_with("t_center", center_val, 1e-6, 1e-10)
         .check_with("l2_err", err, 1e-6, 1e-10)
+        .finalize();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// NAFEMS Thermal: Bi-material conduction (discontinuous κ via PWConstCoeff)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Steady 2-D heat conduction with a bi-material interface at x=0.5.
+///
+/// -∇·(κ(x)∇T) = 1  in [0,1]²,  T = 0 on ∂Ω
+///   κ = 1  for x < 0.5  (tag 1)
+///   κ = 10 for x ≥ 0.5  (tag 2)
+///
+/// PWConstCoeff dispatches on element_tag, set per element via centroid.
+#[test]
+fn nafems_bimaterial_conduction() {
+    let n = 32;
+    let mut mesh = SimplexMesh::<2>::unit_square_tri(n);
+    // Tag elements by centroid x-coordinate
+    for e in 0..mesh.n_elements() as u32 {
+        let nodes = mesh.element_nodes(e);
+        let mut cx = 0.0;
+        for nid in nodes.iter() { cx += mesh.node_coords(*nid)[0]; }
+        cx /= nodes.len() as f64;
+        mesh.elem_tags[e as usize] = if cx < 0.5 { 1 } else { 2 };
+    }
+    let space = H1Space::new(mesh, 1);
+    let n_dofs = space.n_dofs();
+    let dm = space.dof_manager();
+
+    let kappa = PWConstCoeff::new([(1, 1.0), (2, 10.0)]).with_default(1.0);
+    let mut a = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa }], 2);
+    let mut rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);
+
+    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    for &dof in &bnd { a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs); }
+
+    let mut x = vec![0.0; n_dofs];
+    solve_cg(&a, &rhs, &mut x, &SolverConfig {
+        rtol: 1e-12, atol: 1e-14, max_iter: 5000, verbose: false,
+        ..SolverConfig::default()
+    }).expect("bi-material CG failed");
+
+    let sol_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let mut t_center = 0.0;
+    for d in 0..n_dofs as u32 {
+        let c = dm.dof_coord(d);
+        if (c[0] - 0.5).abs() < 0.01 && (c[1] - 0.5).abs() < 0.01 {
+            t_center = x[d as usize]; break;
+        }
+    }
+
+    eprintln!("  [NAFEMS Bi-material] κ ratio 1:10, n={}, DOFs={}, T_center={:.6}, ‖T‖={:.3e}",
+        n, n_dofs, t_center, sol_norm);
+
+    fem_regression::regression("nafems_bimaterial_conduction")
+        .check_with("t_center", t_center, 1e-6, 1e-10)
+        .check_with("sol_norm", sol_norm, 1e-6, 1e-10)
         .finalize();
 }
