@@ -1,13 +1,17 @@
-//! TEAM (Testing Electromagnetic Analysis Methods) benchmark suite.
+//! # TEAM (Testing Electromagnetic Analysis Methods) 基准套件
 //!
-//! TEAM is the most widely recognised industrial validation suite for
-//! electromagnetic field computation software.  This module implements
-//! TEAM problems that map onto fem-rs' existing PDE solvers.
+//! TEAM 是工业电磁场计算软件最广泛认可的验证标准。
 //!
-//! | TEAM # | Title | Physics | Solver |
-//! |--------|-------|---------|--------|
-//! | TEAM 1 | Rectangular PEC cavity eigenvalues | H(curl) curl-curl | LOBPCG |
-//! | TEAM 2 | Dielectric-loaded waveguide | Scalar Helmholtz, piecewise εr | LOBPCG |
+//! ## 覆盖总表
+//!
+//! | TEAM # | 测试函数 | 问题 | 维度 | 空间 | 验证方法 |
+//! |--------|---------|------|------|------|---------|
+//! | TEAM 1 | `team1_pec_cavity_eigenvalues` | PEC腔 H¹标量特征值 | 2D | H¹ | λ=π²/5π² < 2% + 回归 |
+//! | TEAM 1 (Hcurl) | `team1_hcurl_pec_cavity_eigenvalues` | PEC腔 H(curl)矢量特征值 | 2D | H(curl) | λ=π²/π²/2π² < 3% + 回归 |
+//! | TEAM 1 (3D) | `team1_hcurl_3d_pec_cavity_smoke` | 3D PEC腔矩阵验证 | 3D | H(curl) | 对称性+零源零解+回归 |
+//! | TEAM 2 | `team2_dielectric_loaded_waveguide` | 介质加载波导截止 | 2D | H¹ | εr=4 物理约束 |
+//! | TEAM 3 | `team3_dielectric_slab_waveguide` | 多层介质平板波导 | 2D | H¹ | λ < π² + 回归 |
+//! | — | `team3_hcurl_3d_mms_convergence` | 3D curl-curl MMS (新增) | 3D | H(curl) | 质量范数收敛4.2%+回归 |
 
 use std::f64::consts::PI;
 
@@ -232,8 +236,7 @@ fn team2_dielectric_loaded_waveguide() {
 fn team1_hcurl_pec_cavity_eigenvalues() {
     use fem_solver::{SolverConfig};
     use fem_amg::AmgConfig;
-    use crate::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
-    use std::f64::consts::PI;
+use crate::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
 
     let n = 8;
     let mesh = SimplexMesh::<2>::unit_square_tri(n);
@@ -559,4 +562,89 @@ fn team3_hcurl_3d_mms_convergence() {
             .check_with("rel_err", rel_err, 1e-6, 1e-8)
             .finalize();
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 3D Time-domain Maxwell — MMS energy check
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 3D time-domain Maxwell with manufactured solution using the first-order
+/// formulation (FirstOrderMaxwellSolver3D).
+///
+/// Manufactured: E(x,y,z,t) = sin(πt)·E₀ where
+///   E₀ = (sin(πy)sin(πz), sin(πx)sin(πz), sin(πx)sin(πy))
+///
+/// For the first-order system (σ=0, ε=μ=1):
+///   ∂E/∂t = curl B - J(t),  ∂B/∂t = -curl E
+/// With B(x,y,z,t) = cos(πt)·curl(E₀)/π, the force J(t) = π·cos(πt)·E₀.
+///
+/// At t = 1/(2π) ≈ 0.159, E = sin(0.5)·E₀, ||E||²_L² = sin²(0.5)·3/4.
+/// Checks the mass-weighted norm ||E||_M against this analytical value.
+#[test]
+fn team3_td_maxwell_3d_mms() {
+    use fem_assembly::vector_integrator::{VectorLinearIntegrator, VectorQpData};
+    use fem_assembly::VectorAssembler;
+    use fem_solver::SolverConfig;
+    use crate::maxwell::{FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellSolver3D, FirstOrderStepConfig3D};
+    use std::f64::consts::PI;
+
+    struct MmsSource3D;
+    impl VectorLinearIntegrator for MmsSource3D {
+        fn add_to_element_vector(&self, qp: &VectorQpData<'_>, f_elem: &mut [f64]) {
+            let x = qp.x_phys;
+            let sy = (PI * x[1]).sin();
+            let sz = (PI * x[2]).sin();
+            let sx = (PI * x[0]).sin();
+            let fx = sy * sz;
+            let fy = sx * sz;
+            let fz = sx * sy;
+            for i in 0..qp.n_dofs {
+                let dot = qp.phi_vec[i * 3] * fx + qp.phi_vec[i * 3 + 1] * fy + qp.phi_vec[i * 3 + 2] * fz;
+                f_elem[i] += qp.weight * dot;
+            }
+        }
+    }
+
+    // Skeleton uses unit_cube_tet(4) internally with PEC on all faces
+    let skel = FirstOrderMaxwell3DSkeleton::new_unit_cube_with_params(4, 1.0, 1.0, 0.0);
+
+    // Build matching mesh + space to assemble the force
+    let mesh3 = fem_mesh::SimplexMesh::<3>::unit_cube_tet(4);
+    let hcurl = fem_space::HCurlSpace::new(mesh3, 1);
+
+    let mut rhs_unit = VectorAssembler::assemble_linear(&hcurl, &[&MmsSource3D], 4);
+    for v in rhs_unit.iter_mut() { *v *= PI; }
+    // Apply PEC constraints: zero boundary DOFs like the skeleton does
+    for &d in &skel.pec_dofs { if d < rhs_unit.len() { rhs_unit[d] = 0.0; } }
+
+    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
+    let step_cfg = FirstOrderStepConfig3D::explicit(0.005);
+    let mut solver = FirstOrderMaxwellSolver3D::new(skel, cfg, step_cfg);
+
+    let rhs_static = rhs_unit.clone();
+    solver.set_time_dependent_force(move |t, out| {
+        let scale = (PI * t).cos();
+        for i in 0..out.len() { out[i] = scale * rhs_static[i]; }
+    });
+
+    let target_time = 1.0 / (2.0 * PI);
+    let n_steps = (target_time / 0.005).ceil() as usize;
+    solver.advance_n(n_steps);
+
+    let mut mv = vec![0.0; solver.op.n_e];
+    solver.op.m_e.spmv(&solver.e, &mut mv);
+    let norm_sq: f64 = solver.e.iter().zip(mv.iter()).map(|(a, b)| a * b).sum();
+    let e_norm = norm_sq.sqrt();
+
+    let analytical_scale = (PI * target_time).sin();
+    let analytical_norm = (analytical_scale.powi(2) * 0.75).sqrt();
+    let rel_err = (e_norm - analytical_norm).abs() / analytical_norm.max(1e-16);
+    eprintln!("  [3D TD Maxwell MMS] t={:.4}, ||E||_M={:.6e}, analytical={:.6e}, rel_err={:.3}",
+        target_time, e_norm, analytical_norm, rel_err);
+    assert!(rel_err < 0.25, "3D TD Maxwell MMS: rel_err={:.3} > 25%", rel_err);
+
+    fem_regression::regression("team3_td_maxwell_3d_mms")
+        .check_with("e_norm", e_norm, 1e-6, 1e-8)
+        .check_with("n_dofs_e", solver.op.n_e as f64, 1e-6, 0.5)
+        .finalize();
 }

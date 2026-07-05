@@ -1,13 +1,61 @@
-//! NAFEMS-style EM benchmarks for fem-rs.
+//! # NAFEMS / IEEE / CEM 电磁仿真验证套件
 //!
-//! Validates electromagnetic FEM computations against analytical solutions:
+//! 按 **标准** 和 **问题类型** 分类的工业级验证测试。
 //!
-//! | Benchmark | Problem | Reference |
-//! |-----------|---------|-----------|
-//! | TE waveguide | 2-D Helmholtz, ∂u/∂n=0 | λ = π²(m²+n²), m,n≥0 |
-//! | TM waveguide | 2-D Helmholtz, u=0 | λ = π²(m²+n²), m,n≥1 |
-//! | Dielectric-loaded cavity | 2-D Helmholtz, εr(x) piecewise | Frequency ratio |
-//! | Helmholtz manufactured | Indefinite Helmholtz, MMS | L² error < 2% |
+//! ## 覆盖总表
+//!
+//! | 标准 | 测试函数 | 文件 | 问题 | 维度 | 空间 | 验证方法 |
+//! |------|---------|------|------|------|------|---------|
+//! | **IEEE 1597 §5.3.2** | `em_ieee1597_helmholtz_mms` | em_benchmarks | 复Helmholtz MMS (k=4) | 2D | H¹ | L² < 4% + 回归基线 |
+//! | **IEEE 1597 §5.3.2** | `em_complex_helmholtz_high_k_mms` | em_benchmarks | 复Helmholtz MMS (k=8) | 2D | H¹ | L² < 4% + 回归基线 |
+//! | **IEEE 1597 §5.3.2** | `em_complex_helmholtz_lossy_mms` | em_benchmarks | 复Helmholtz 有损MMS (σ=2) | 2D | H¹ | L² < 4% + 回归基线 |
+//! | **IEEE 1597 §5.3** | `mms_complex_helmholtz_convergence` | mms_convergence | 复Helmholtz P1收敛 | 2D | H¹ | O(h²) 率验证 |
+//! | **IEEE 1597 §5.3** | `mms_complex_helmholtz_p2_convergence` | mms_convergence | 复Helmholtz P2收敛 | 2D | H¹ | O(h²) 有限性 |
+//! | **MMS 标准** | `em_helmholtz_mms` | em_benchmarks | Helmholtz MMS (k=2π) | 2D | H¹ | L² < 2% |
+//! | **MMS 标准** | `em_helmholtz_mms_k8` | em_benchmarks | Helmholtz MMS (k=8) | 2D | H¹ | L² < 4% + 回归基线 |
+//! | **MMS 标准** | `em_helmholtz_mms_k16` | em_benchmarks | Helmholtz MMS (k=16) | 2D | H¹ | L² < 6% + 回归基线 |
+//! | **MMS 标准** | `em_helmholtz_mms_wavenumber_sweep` | em_benchmarks | 波数扫描 (k=2→16) | 2D | H¹ | 全波数GMRES收敛 |
+//! | **MMS 标准** | `em_helmholtz_mms_sweep_regression` | em_benchmarks | 波数扫描回归基线 | 2D | H¹ | k=4/k=16 基线 |
+//! | **MMS 收敛率** | `mms_helmholtz_indefinite_convergence` | mms_convergence | Helmholtz (k=2π) 率 | 2D | H¹ | O(h²) > 1.5 |
+//! | **MMS 收敛率** | `mms_helmholtz_k4_convergence` | mms_convergence | Helmholtz (k=4) 率 | 2D | H¹ | O(h²) > 1.5 |
+//! | **MMS 收敛率** | `mms_helmholtz_k8_convergence` | mms_convergence | Helmholtz (k=8) 率 | 2D | H¹ | O(h²) > 1.5 |
+//! | **MMS 收敛率** | `mms_poisson_p1_convergence` | mms_convergence | Poisson P1率 | 2D | H¹ | O(h²) > 1.7 |
+//! | **MMS 收敛率** | `mms_poisson_p2_convergence` | mms_convergence | Poisson P2率 | 2D | H¹ | O(h³) > 2.5 |
+//! | **MMS 收敛率** | `mms_poisson_3d_convergence` | mms_convergence | Poisson 3D P1率 | 3D | H¹ | O(h²) > 1.3 |
+//! | **MMS 收敛率** | `mms_laplace_eigenvalue_convergence` | mms_convergence | Laplace特征值收敛 | 2D | H¹ | O(h²) > 1.3 |
+//! | **NAFEMS EM** | `em_te_waveguide_cutoff` | em_benchmarks | TE波导截止 | 2D | H¹ | 解析λ < 3% |
+//! | **NAFEMS EM** | `em_tm_waveguide_cutoff` | em_benchmarks | TM波导截止 | 2D | H¹ | 解析λ < 3% |
+//! | **NAFEMS EM** | `em_dielectric_loaded_cavity` | em_benchmarks | 介质加载腔 | 2D | H¹ | 物理约束检验 |
+//! | **NAFEMS EM** | `em_cavity_eigenvalue_convergence` | em_benchmarks | 腔体特征值收敛 | 2D | H¹ | 误差单调递减 |
+//! | **NAFEMS EM** | `em_scp_point_source_radiation` | em_benchmarks | SCP点源辐射 | 2D | H¹ | GMRES收敛+有限解 |
+//! | **NAFEMS EM** | `em_scp_point_source_mesh_convergence` | em_benchmarks | SCP点源网格收敛 | 2D | H¹ | 多网格稳定解 |
+//! | **NAFEMS EM** | `em_helmholtz_gmres_bicgstab_consistency` | em_benchmarks | CG/GMRES交叉验证 | 2D | H¹ | 解一致性 < 1e-10 |
+//! | **TEAM 1** | `team1_pec_cavity_eigenvalues` | team_benchmarks | PEC腔 H¹ 标量特征值 | 2D | H¹ | λ=π²/5π² < 2% |
+//! | **TEAM 1 (Hcurl)** | `team1_hcurl_pec_cavity_eigenvalues` | team_benchmarks | PEC腔 H(curl) 特征值 | 2D | H(curl) | λ=π²/2π² < 3% |
+//! | **TEAM 1 (3D)** | `team1_hcurl_3d_pec_cavity_smoke` | team_benchmarks | 3D PEC腔烟雾测试 | 3D | H(curl) | 矩阵对称+零解 |
+//! | **TEAM 2** | `team2_dielectric_loaded_waveguide` | team_benchmarks | 介质加载波导截止 | 2D | H¹ | εr=4 物理约束 |
+//! | **TEAM 3** | `team3_dielectric_slab_waveguide` | team_benchmarks | 多层介质平板波导 | 2D | H¹ | 特征值 < π² |
+//! | **3D H(curl) MMS** | `team3_hcurl_3d_mms_convergence` | team_benchmarks | 3D curl-curl MMS | 3D | H(curl) | 质量加权范数收敛+回归 |
+//! | **3D H(curl) MMS** | `maxwell_3d_tet_nd1_convergence` | assembly/tests/mms_verification | 3D ND1 L²/curl率 | 3D | H(curl) | O(h) > 0.5 + 有限curl |
+//! | **3D H(curl) MMS** | `maxwell_3d_tet_nd2_convergence` | assembly/tests/mms_verification | 3D ND2 L²率 | 3D | H(curl) | 误差递减 |
+//! | **3D H(curl) MMS** | `maxwell_3d_hex_nd2_convergence` | assembly/tests/mms_verification | 3D Hex ND2率 | 3D | H(curl) | 有限L² |
+//! | **MFEM 交叉验证** | `ex1_mfem_reference_test` | mfem_ex1_poisson | Poisson L²误差 | 2D | H¹ | 解析参考值 < 1% |
+//! | **MFEM 交叉验证** | `ex2_mfem_reference_test` | mfem_ex2_elasticity | 弹性 L²误差 | 2D | VectorH¹ | 参考值 < 2% |
+//! | **MFEM 交叉验证** | `ex3_mfem_reference_test` | mfem_ex3_maxwell_cavity | Maxwell腔 L² | 2D | H(curl) | 回归基线 |
+//! | **MFEM 交叉验证** | `ex4_mfem_reference_test` | mfem_ex4_darcy | Darcy L² | 2D | H¹/H(div) | 回归基线 |
+//! | **MFEM 交叉验证** | `ex5_mfem_reference_test` | mfem_ex5_mixed_darcy | 混合Darcy L² | 2D | H(div)/L² | 回归基线 |
+//! | **MFEM 交叉验证** | `ex9_mfem_reference_test` | mfem_ex9_dg_advection | DG平流 L² | 2D | DG | 回归基线 |
+//! | **MFEM 交叉验证** | `ex16_mfem_reference_test` | mfem_ex16_nonlinear_heat | 非线性热 | 2D | H¹ | 回归基线 |
+//! | **MFEM 交叉验证** | `ex22_mfem_reference_test` | mfem_ex22_complex_helmholtz | 复Helmholtz | 2D | H¹ | DOFs+幅度+回归 |
+//! | **MFEM 交叉验证** | `ex31_mfem_reference_test` | mfem_ex31_anisotropic_maxwell | 各向异性Maxwell | 2D | H(curl) | 回归基线 |
+//! | **MFEM 交叉验证** | `ex32_mfem_reference_test` | mfem_ex32_impedance_maxwell | 阻抗边界Maxwell | 2D | H(curl) | 回归基线 |
+//! | **MFEM 交叉验证** | `ex33_mfem_reference_test` | mfem_ex33_tangential_drive_maxwell | 切向驱动Maxwell | 2D | H(curl) | 回归基线 |
+//! | **MFEM 交叉验证** | `ex34_mfem_reference_test` | mfem_ex34_absorbing_maxwell | 吸收边界Maxwell | 2D | H(curl) | 回归基线 |
+//! | **MFEM 交叉验证** | `ex25_pml_converges_and_has_finite_metrics` | mfem_ex25_pml_helmholtz | PML Helmholtz | 2D | H¹ | 回归基线 |
+//! | **MFEM 交叉验证** | `ex10_maxwell_time_converges` | maxwell_time_domain | 时域Maxwell MMS | 2D | H(curl) | 回归基线 |
+//! | **时域 MMS** | `ex10_maxwell_time_exhibits_second_order_temporal_self_convergence` | maxwell_time_domain | 时域二阶精度 | 2D | H(curl) | O(dt²) > 2.0 |
+//! | **H(curl) MMS** | `mms_hcurl_eigenvalue_convergence` | mms_convergence | H(curl) 特征值MMS | 2D | H(curl) | λ相对误差 < 2% |
+//! | **H(curl) MMS** | `anisotropic_maxwell_exhibits_first_order_hcurl_convergence_trend` | mfem_ex31 | HCurl O(h)收敛 | 2D | H(curl) | O(h) > 0.85 |
 
 use std::f64::consts::PI;
 
