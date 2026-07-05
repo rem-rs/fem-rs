@@ -32,10 +32,25 @@
 //! fn ex1_regression() {
 //!     let result = solve_case(8, 1, 1.0);
 //!     regression("mfem_ex1_poisson")
-//!         .check("l2_error_n8_p1", result.l2_error)       // default 1e-6 rtol, 1e-10 atol
-//!         .check_with("residual_n8_p1", result.final_residual, 1e-4, 1e-8)  // custom
+//!         .check("l2_error_n8_p1", result.l2_error)
+//!         .check_with("residual_n8_p1", result.final_residual, 1e-4, 1e-8)
 //!         .finalize();
 //! }
+//! ```
+//!
+//! (The example above requires a baseline file; run with `FEM_UPDATE_BASELINES=1` to create one.)
+//!
+//! A minimal standalone doc-test showing the metric-building API:
+//!
+//! ```
+//! use fem_regression::{regression, MetricEntry};
+//! use std::collections::BTreeMap;
+//!
+//! // Demonstrate metric data structure — not a full regression check.
+//! let metrics: BTreeMap<String, MetricEntry> = [
+//!     ("pi".into(), MetricEntry { value: 3.14159, rtol: 1e-6, atol: 1e-10 }),
+//! ].into();
+//! assert!((metrics["pi"].value - std::f64::consts::PI).abs() < 1e-5);
 //! ```
 
 use std::collections::BTreeMap;
