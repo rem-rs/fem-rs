@@ -1,20 +1,15 @@
 {
   "name": "team3_hcurl_3d_mms",
   "metrics": {
-    "n_dofs": {
-      "value": 604.0,
+    "l2_err_n2": {
+      "value": 0.5022258684862559,
       "rtol": 1e-6,
-      "atol": 0.5
+      "atol": 1e-10
     },
-    "norm_sq": {
-      "value": 0.7184071176939125,
+    "l2_err_n3": {
+      "value": 0.37302527748523934,
       "rtol": 1e-6,
-      "atol": 1e-8
-    },
-    "rel_err": {
-      "value": 0.042123843074783306,
-      "rtol": 1e-6,
-      "atol": 1e-8
+      "atol": 1e-10
     }
   }
 }

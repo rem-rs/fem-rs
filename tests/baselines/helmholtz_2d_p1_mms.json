@@ -1,0 +1,20 @@
+{
+  "name": "helmholtz_2d_p1_mms",
+  "metrics": {
+    "conv_rate": {
+      "value": 1.7544038027296536,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "l2_err_n4": {
+      "value": 0.12631512080767374,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "l2_err_n8": {
+      "value": 0.037439252799201725,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    }
+  }
+}

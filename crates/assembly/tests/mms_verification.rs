@@ -343,6 +343,11 @@ fn elasticity_2d_p1_convergence() {
     let rates = convergence_rate(&errors, &ns);
     eprintln!("Elasticity P1 errors: {:?}, rates: {:?}", errors, rates);
     assert!(rates[0] > 1.7, "Elasticity P1 rate {:.2} < 1.7", rates[0]);
+    fem_regression::regression("elasticity_2d_p1_mms")
+        .check("l2_err_n4", errors[0])
+        .check("l2_err_n8", errors[1])
+        .check("conv_rate", rates[0])
+        .finalize();
 }
 
 /// Patch test: u(x,y) = [x, y] (uniform expansion) with zero body force.
@@ -465,6 +470,11 @@ fn helmholtz_2d_p1_convergence() {
     let rates = convergence_rate(&errors, &ns);
     eprintln!("Helmholtz P1 errors: {:?}, rates: {:?}", errors, rates);
     assert!(rates[0] > 1.5, "Helmholtz P1 rate {:.2} < 1.5", rates[0]);
+    fem_regression::regression("helmholtz_2d_p1_mms")
+        .check("l2_err_n4", errors[0])
+        .check("l2_err_n8", errors[1])
+        .check("conv_rate", rates[0])
+        .finalize();
 }
 
 /// Dense-solve variant for higher-order elements where GMRES may struggle.
@@ -1999,7 +2009,12 @@ fn maxwell_3d_tet_nd1_convergence() {
     assert!(rates_l2[0] > 0.5, "TetND1 L² rate {:.2} < 0.5 (too low)", rates_l2[0]);
     assert!(errors_curl[0].is_finite(), "TetND1 curl error not finite");
     assert!(errors_curl[1] < errors_curl[0], "TetND1 curl error should decrease (h=1/2→1/3)");
-    eprintln!("TetND1 rates: L²={:?}, curl={:?}", rates_l2, rates_curl);
+    eprintln!("TetND1 rates: L²={:.4?}, curl={:.4?}", rates_l2, rates_curl);
+    // Regression baseline for the coarsest mesh
+    fem_regression::regression("team3_hcurl_3d_mms")
+        .check("l2_err_n2", errors_l2[0])
+        .check("l2_err_n3", errors_l2[1])
+        .finalize();
 }
 
 #[test]
