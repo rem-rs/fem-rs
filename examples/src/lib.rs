@@ -34,6 +34,10 @@ pub mod stress_tests;
 pub mod benchmarks;
 #[cfg(test)]
 pub mod em_benchmarks;
+#[cfg(test)]
+pub mod cross_backend_tests;
+#[cfg(test)]
+pub mod io_roundtrip_tests;
 pub use maxwell::{
     BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,
     FirstOrderMaxwellSolver3D, FirstOrderStepConfig3D, FirstOrderTimeStepper3D,
