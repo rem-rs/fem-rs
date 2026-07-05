@@ -1,8 +1,8 @@
 {
   "name": "em_helmholtz_mms_k8",
   "metrics": {
-    "l2_err": {
-      "value": 0.0012937343796473146,
+    "sol_norm_k8_n16_p1": {
+      "value": 8.03316149161596,
       "rtol": 1e-6,
       "atol": 1e-10
     }

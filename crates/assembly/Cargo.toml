@@ -31,4 +31,5 @@ optional  = true
 
 [dev-dependencies]
 fem-linalg = { path = "../linalg" }
+fem-regression = { path = "../regression" }
 proptest = "1"
