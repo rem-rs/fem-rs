@@ -826,6 +826,182 @@ impl crate::nonlinear::NonlinearForm for IgaHyperelasticity2D {
     }
 }
 
+// ─── IGA geometrically nonlinear hyperelasticity (3-D) ──────────────────
+
+/// 3-D IGA geometrically nonlinear hyperelasticity (Neo-Hookean).
+///
+/// DOF ordering: control point `a` → DOFs `3a` (ux), `3a+1` (uy), `3a+2` (uz).
+pub struct IgaHyperelasticity3D {
+    mesh: NurbsMesh3D,
+    model: crate::nonlinear_hyperelasticity::HyperelasticModel,
+    dirichlet: Vec<(usize, f64)>,
+    quad_order: u8,
+}
+
+impl IgaHyperelasticity3D {
+    pub fn new(
+        mesh: NurbsMesh3D,
+        model: crate::nonlinear_hyperelasticity::HyperelasticModel,
+        dirichlet: Vec<(usize, f64)>,
+        quad_order: u8,
+    ) -> Self {
+        Self { mesh, model, dirichlet, quad_order }
+    }
+}
+
+impl crate::nonlinear::NonlinearForm for IgaHyperelasticity3D {
+    fn n_dofs(&self) -> usize {
+        3 * self.mesh.patches.iter().map(|p| p.control_pts.len()).sum::<usize>()
+    }
+
+    fn residual(&self, u: &[f64], rhs: &[f64], r: &mut [f64]) {
+        let dim = 3usize;
+        for i in 0..r.len() { r[i] = -rhs[i]; }
+
+        let mut offset = 0usize;
+        for pd in &self.mesh.patches {
+            let elem = pd.patch_element_ref();
+            let n_dof = elem.n_dofs();
+            let qr = patch_quad_3d(pd, self.quad_order);
+            let mut f_elem = vec![0.0_f64; n_dof * dim];
+
+            for (xi, wq) in qr.points.iter().zip(qr.weights.iter()) {
+                let (grads, det_j) = physical_grads_3d(pd, xi);
+                let w = wq * det_j.abs();
+
+                let mut du = nalgebra::DMatrix::zeros(dim, dim);
+                for a in 0..n_dof {
+                    let ux = u[3 * (offset + a)];
+                    let uy = u[3 * (offset + a) + 1];
+                    let uz = u[3 * (offset + a) + 2];
+                    du[(0, 0)] += ux * grads[a * 3];
+                    du[(0, 1)] += ux * grads[a * 3 + 1];
+                    du[(0, 2)] += ux * grads[a * 3 + 2];
+                    du[(1, 0)] += uy * grads[a * 3];
+                    du[(1, 1)] += uy * grads[a * 3 + 1];
+                    du[(1, 2)] += uy * grads[a * 3 + 2];
+                    du[(2, 0)] += uz * grads[a * 3];
+                    du[(2, 1)] += uz * grads[a * 3 + 1];
+                    du[(2, 2)] += uz * grads[a * 3 + 2];
+                }
+                let mut f_mat = nalgebra::DMatrix::identity(dim, dim);
+                f_mat += &du;
+                let (p, _) = self.model.pk1_and_tangent(&f_mat);
+
+                for a in 0..n_dof {
+                    let gx = grads[a * 3];
+                    let gy = grads[a * 3 + 1];
+                    let gz = grads[a * 3 + 2];
+                    f_elem[a * 3]     += w * (p[(0, 0)] * gx + p[(0, 1)] * gy + p[(0, 2)] * gz);
+                    f_elem[a * 3 + 1] += w * (p[(1, 0)] * gx + p[(1, 1)] * gy + p[(1, 2)] * gz);
+                    f_elem[a * 3 + 2] += w * (p[(2, 0)] * gx + p[(2, 1)] * gy + p[(2, 2)] * gz);
+                }
+            }
+            for a in 0..n_dof {
+                r[3 * (offset + a)]     += f_elem[a * 3];
+                r[3 * (offset + a) + 1] += f_elem[a * 3 + 1];
+                r[3 * (offset + a) + 2] += f_elem[a * 3 + 2];
+            }
+            offset += n_dof;
+        }
+        for &(dof, val) in &self.dirichlet { r[dof] = u[dof] - val; }
+    }
+
+    fn jacobian(&self, u: &[f64]) -> CsrMatrix<f64> {
+        let dim = 3usize;
+        let n_total: usize = self.mesh.patches.iter().map(|p| p.control_pts.len()).sum();
+        let n_vec = dim * n_total;
+        let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
+
+        let (lam, mu) = match &self.model {
+            crate::nonlinear_hyperelasticity::HyperelasticModel::NeoHookean { lambda, mu } => (*lambda, *mu),
+            _ => (0.0, 1.0),
+        };
+
+        let mut offset = 0usize;
+        for pd in &self.mesh.patches {
+            let elem = pd.patch_element_ref();
+            let n_dof = elem.n_dofs();
+            let qr = patch_quad_3d(pd, self.quad_order);
+
+            for (xi, wq) in qr.points.iter().zip(qr.weights.iter()) {
+                let (grads, det_j) = physical_grads_3d(pd, xi);
+                let w = wq * det_j.abs();
+
+                let mut du = nalgebra::DMatrix::zeros(dim, dim);
+                for a in 0..n_dof {
+                    let ux = u[3 * (offset + a)];
+                    let uy = u[3 * (offset + a) + 1];
+                    let uz = u[3 * (offset + a) + 2];
+                    du[(0, 0)] += ux * grads[a * 3];
+                    du[(0, 1)] += ux * grads[a * 3 + 1];
+                    du[(0, 2)] += ux * grads[a * 3 + 2];
+                    du[(1, 0)] += uy * grads[a * 3];
+                    du[(1, 1)] += uy * grads[a * 3 + 1];
+                    du[(1, 2)] += uy * grads[a * 3 + 2];
+                    du[(2, 0)] += uz * grads[a * 3];
+                    du[(2, 1)] += uz * grads[a * 3 + 1];
+                    du[(2, 2)] += uz * grads[a * 3 + 2];
+                }
+                let mut f_mat = nalgebra::DMatrix::identity(dim, dim);
+                f_mat += &du;
+                let jac: f64 = f_mat.determinant();
+                let ln_j = jac.ln();
+                let c2 = mu - lam * ln_j / jac;
+
+                for a in 0..n_dof {
+                    let ba = 3 * (offset + a);
+                    let gax = grads[a * 3];
+                    let gay = grads[a * 3 + 1];
+                    let gaz = grads[a * 3 + 2];
+                    for b in 0..n_dof {
+                        let bb = 3 * (offset + b);
+                        let gbx = grads[b * 3];
+                        let gby = grads[b * 3 + 1];
+                        let gbz = grads[b * 3 + 2];
+
+                        // Spatial tangent for neo-Hookean in 3D:
+                        // C_ijkl = (λ/J) δ_ij δ_kl + (μ - λ·lnJ/J) (δ_ik δ_jl + δ_il δ_jk)
+                        // K[3a+i, 3b+k] += ∫ C_ijkl · ∂R_a/∂x_j · ∂R_b/∂x_l
+                        let c0 = lam / jac;
+                        let c1 = c2;
+
+                        for i in 0..3 {
+                            for k in 0..3 {
+                                let mut val = 0.0;
+                                for j in 0..3 {
+                                    for l in 0..3 {
+                                        let mut ct = 0.0;
+                                        // (λ/J) * δ_ij * δ_kl
+                                        ct += c0 * (if i == j { 1.0 } else { 0.0 })
+                                                  * (if k == l { 1.0 } else { 0.0 });
+                                        // c2 * (δ_ik * δ_jl + δ_il * δ_jk)
+                                        let d_ik = if i == k { 1.0 } else { 0.0 };
+                                        let d_jl = if j == l { 1.0 } else { 0.0 };
+                                        let d_il = if i == l { 1.0 } else { 0.0 };
+                                        let d_jk = if j == k { 1.0 } else { 0.0 };
+                                        ct += c1 * (d_ik * d_jl + d_il * d_jk);
+                                        val += ct * grads[a * 3 + j] * grads[b * 3 + l];
+                                    }
+                                }
+                                coo.add(ba + i, bb + k, w * val);
+                            }
+                        }
+                    }
+                }
+            }
+            offset += n_dof;
+        }
+
+        let mut mat = coo.into_csr();
+        let mut dummy = vec![0.0; n_vec];
+        for &(dof, _) in &self.dirichlet {
+            mat.apply_dirichlet_row_zeroing(dof, 0.0, &mut dummy);
+        }
+        mat
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 pub(crate) fn pd_to_patch2d(pd: &NurbsPatch2DData) -> fem_element::iga::NurbsPatch2D {
@@ -1519,5 +1695,63 @@ mod tests {
             assert!(norm > 0.0 && norm < 100.0, "||u||={:.6e} outside range", norm);
         }
         assert!(result.is_ok(), "Newton did not converge");
+    }
+
+    #[test]
+    fn iga_hyperelasticity_3d_smoke() {
+        use crate::nonlinear::NewtonConfig;
+        use crate::nonlinear_hyperelasticity::HyperelasticModel;
+
+        let p = 1;
+        let n = 3; // 3×3×3 = 27 control points
+        let n_ctrl = n * n * n;
+        let kv = NurbsKnotVector::uniform(p, n - p);
+        let ctrl: Vec<[f64; 3]> = (0..n_ctrl).map(|idx| {
+            let i = idx % n;
+            let j = (idx / n) % n;
+            let k = idx / (n * n);
+            [i as f64 / (n - 1) as f64,
+             j as f64 / (n - 1) as f64,
+             k as f64 / (n - 1) as f64]
+        }).collect();
+        let mesh = NurbsMesh3D::single_patch(
+            kv.clone(), kv.clone(), kv.clone(), ctrl, vec![1.0; n_ctrl],
+        );
+
+        let mu = 10.0;
+        let lam = 10.0;
+        let model = HyperelasticModel::NeoHookean { mu, lambda: lam };
+        let n_dofs = 3 * n_ctrl;
+
+        // Clamped on bottom (z=0, k=0), ux=uy=uz=0
+        // Prescribed uz = -0.05 on top (z=1, k=2)
+        let mut dirichlet = Vec::new();
+        for i in 0..n { for j in 0..n {
+            let b = j * n + i;          // k=0 (bottom)
+            let t = (n-1)*n*n + j*n + i; // k=n-1 (top)
+            dirichlet.push((3*b, 0.0)); dirichlet.push((3*b+1, 0.0)); dirichlet.push((3*b+2, 0.0));
+            dirichlet.push((3*t, 0.0)); dirichlet.push((3*t+1, 0.0)); dirichlet.push((3*t+2, -0.05));
+        }}
+
+        let form = IgaHyperelasticity3D::new(mesh, model, dirichlet, 4);
+        let rhs = vec![0.0; n_dofs];
+        let mut u = vec![0.0; n_dofs];
+
+        let cfg = NewtonConfig {
+            atol: 1e-6, rtol: 1e-6, max_iter: 50, linear_tol: 1e-8,
+            line_search: false,
+            ..NewtonConfig::default()
+        };
+        let result = crate::nonlinear::NewtonSolver::new(cfg).solve(&form, &rhs, &mut u);
+        match &result {
+            Ok(r) => eprintln!("  [IGA 3D hyperelasticity] converged in {} iters, ‖F‖={:.3e}", r.iterations, r.final_residual),
+            Err(r) => eprintln!("  [IGA 3D hyperelasticity] FAILED: {} iters, ‖F‖={:.3e}", r.iterations, r.final_residual),
+        }
+        if let Ok(r) = &result {
+            let norm: f64 = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+            eprintln!("  [IGA 3D hyperelasticity] ||u||={:.6e}, iters={}", norm, r.iterations);
+            assert!(norm > 0.0 && norm < 100.0, "||u||={:.6e} outside range", norm);
+        }
+        assert!(result.is_ok(), "3D Newton did not converge");
     }
 }
