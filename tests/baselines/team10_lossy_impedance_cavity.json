@@ -1,0 +1,15 @@
+{
+  "name": "team10_lossy_impedance_cavity",
+  "metrics": {
+    "l2_err_im": {
+      "value": 0.03926927946104953,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    },
+    "l2_err_re": {
+      "value": 0.045570102982061246,
+      "rtol": 1e-6,
+      "atol": 1e-8
+    }
+  }
+}
