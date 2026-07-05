@@ -76,6 +76,9 @@ jobs:
       - name: Run regression baselines (mfem_ex3_maxwell_cavity)
         run: cargo test -p fem-examples --example mfem_ex3_maxwell_cavity -- ex3_regression_baseline
 
+      - name: Run MFEM cross-validation (ex3 Maxwell)
+        run: cargo test -p fem-examples --example mfem_ex3_maxwell_cavity -- ex3_mfem_reference_test
+
       - name: Run regression baselines (mfem_ex4_darcy)
         run: cargo test -p fem-examples --example mfem_ex4_darcy -- ex4_regression_baseline
 
