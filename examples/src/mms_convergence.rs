@@ -252,3 +252,48 @@ fn mms_laplace_eigenvalue_convergence() {
         pe = err; ph = h;
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 6: 3-D Poisson P1 — expected rate O(h²)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn mms_poisson_3d_convergence() {
+    use std::f64::consts::PI;
+
+    let exact = |x: &[f64]| (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin();
+    let source = |x: &[f64]| 3.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin();
+    let mut pe = f64::MAX;
+    let mut ph: f64 = 0.0;
+    for &n in &[4, 6, 8] {
+        let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+        let space = H1Space::new(mesh.clone(), 1);
+        let diff = DiffusionIntegrator { kappa: 1.0 };
+        let src = DomainSourceIntegrator::new(source);
+        let mut a_mat = Assembler::assemble_bilinear(&space, &[&diff], 3);
+        let mut rhs = Assembler::assemble_linear(&space, &[&src], 3);
+        let dm = space.dof_manager();
+        let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4, 5, 6]);
+        apply_dirichlet(&mut a_mat, &mut rhs, &bnd, &vec![0.0; bnd.len()]);
+        let mut u = vec![0.0; space.n_dofs()];
+        let cfg = fem_solver::SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 20000, verbose: false, ..fem_solver::SolverConfig::default() };
+        let r = fem_solver::solve_cg(&a_mat, &rhs, &mut u, &cfg).expect("CG");
+        assert!(r.converged);
+
+        // L² error at DOFs
+        let mut s = 0.0;
+        for d in 0..space.n_dofs() as u32 {
+            let c = dm.dof_coord(d);
+            let e = exact(c);
+            s += (u[d as usize] - e).powi(2);
+        }
+        let err = (s / space.n_dofs() as f64).sqrt();
+        let h = 1.0 / n as f64;
+        if n > 4 {
+            let rate = observed_rate(pe, err, ph / h);
+            assert!(rate > 1.3, "3D Poisson P1 rate={:.3} < 1.3 n={}", rate, n);
+        }
+        eprintln!("  [MMS] 3D Poisson P1 n={}: L²={:.4e}", n, err);
+        pe = err; ph = h;
+    }
+}

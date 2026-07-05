@@ -483,5 +483,32 @@ mod tests {
         assert!(result.velocity_norm > result.pressure_norm * 0.01,
             "velocity should not be negligibly small vs pressure");
     }
-}
 
+    // ─── MMS convergence: Kovasznay flow, P2 velocity → O(h³) ─────────────
+
+    /// Kovasznay flow has an analytical solution.  Velocity uses P2 elements
+    /// (Taylor-Hood P2/P1).  The Navier-Stokes system requires resolving
+    /// boundary layers; on coarse meshes the asymptotic regime is not reached.
+    /// This test verifies the solver converges and the error decreases.
+    #[test]
+    fn ex19_kovasznay_mms_convergence() {
+        let re = 40.0;
+        let mut errors: Vec<f64> = Vec::new();
+        for &n in &[4, 8, 12] {
+            let r = run_case(n, re, false);
+            assert!(r.picard_converged, "n={}: Picard did not converge", n);
+            let err = r.velocity_rel_l2;
+            eprintln!("  [MMS] Kovasznay n={}: vel_err={:.4e}", n, err);
+            errors.push(err);
+        }
+        // Verify error decreases monotonically
+        for w in errors.windows(2) {
+            assert!(w[1] < w[0], "Kovasznay: error increased {:.4e} → {:.4e}", w[0], w[1]);
+        }
+
+        fem_regression::regression("kovasznay_ns")
+            .check_with("vel_err_n4", errors[0], 1e-6, 1e-10)
+            .check_with("vel_err_n8", errors[1], 1e-6, 1e-10)
+            .finalize();
+    }
+}
