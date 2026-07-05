@@ -38,6 +38,8 @@ pub mod em_benchmarks;
 pub mod cross_backend_tests;
 #[cfg(test)]
 pub mod io_roundtrip_tests;
+#[cfg(test)]
+pub mod team_benchmarks;
 pub use maxwell::{
     BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,
     FirstOrderMaxwellSolver3D, FirstOrderStepConfig3D, FirstOrderTimeStepper3D,
