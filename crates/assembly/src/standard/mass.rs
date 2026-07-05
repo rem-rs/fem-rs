@@ -6,39 +6,22 @@
 //! m(u, v) = ∫_Ω ρ u v dx
 //! ```
 
-use crate::coefficient::{CoeffCtx, ScalarCoeff};
-use crate::integrator::{BilinearIntegrator, QpData};
+scalar_bilinear_integrator!(MassIntegrator, rho,
+    "Bilinear integrator for the scalar mass operator `ρ u v`.
 
-/// Bilinear integrator for the scalar mass operator `ρ u v`.
-///
-/// For `ρ = 1` this is the standard L² mass matrix.
-///
-/// # Example
-/// ```
-/// # use fem_assembly::standard::MassIntegrator;
-/// let integ = MassIntegrator { rho: 1.0 };
-/// ```
-pub struct MassIntegrator<C: ScalarCoeff = f64> {
-    /// Scalar density / reaction coefficient.
-    pub rho: C,
-}
+For `ρ = 1` this is the standard L² mass matrix.
 
-impl<C: ScalarCoeff> BilinearIntegrator for MassIntegrator<C> {
-    /// `M_elem[i,j] += w · ρ(x) · φᵢ · φⱼ`
-    fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
-        let n = qp.n_dofs;
-        let ctx = CoeffCtx::from_qp(
-            qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag,
-            Some(qp.phi), qp.elem_dofs,
-        );
-        let w_rho = qp.weight * self.rho.eval(&ctx);
-        for i in 0..n {
-            for j in 0..n {
-                k_elem[i * n + j] += w_rho * qp.phi[i] * qp.phi[j];
-            }
+# Example
+```
+# use fem_assembly::standard::MassIntegrator;
+let integ = MassIntegrator { rho: 1.0 };
+```", |qp, k_elem, n, w| {
+    for i in 0..n {
+        for j in 0..n {
+            k_elem[i * n + j] += w * qp.phi[i] * qp.phi[j];
         }
     }
-}
+});
 
 #[cfg(test)]
 mod tests {

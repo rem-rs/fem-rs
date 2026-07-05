@@ -2,6 +2,43 @@
 //!
 //! Re-exports the most commonly used integrators for convenience.
 
+/// Helper macro for scalar bilinear integrators with a [`ScalarCoeff`] field.
+///
+/// Generates the struct definition, necessary imports, and the
+/// [`BilinearIntegrator`] trait impl with the standard
+/// `CoeffCtx::from_qp(x_phys, dim, elem_id, elem_tag, Some(phi), elem_dofs)`
+/// preamble.
+///
+/// The last argument is a block with the four bindings available:
+/// `|qp, k_elem, n, w|` where:
+/// * `qp` — [`QpData`] reference
+/// * `k_elem` — element matrix slice
+/// * `n` — number of DOFs (`= qp.n_dofs`)
+/// * `w` — weighted coefficient (`= qp.weight × coeff.eval(&ctx)`)
+macro_rules! scalar_bilinear_integrator {
+    ($name:ident, $field:ident, $doc:literal, |$qp:ident, $kelem:ident, $n:ident, $w:ident| $body:block) => {
+        use crate::coefficient::{CoeffCtx, ScalarCoeff};
+        use crate::integrator::{BilinearIntegrator, QpData};
+
+        #[doc = $doc]
+        pub struct $name<C: ScalarCoeff = f64> {
+            pub $field: C,
+        }
+
+        impl<C: ScalarCoeff> BilinearIntegrator for $name<C> {
+            fn add_to_element_matrix(&self, $qp: &QpData<'_>, $kelem: &mut [f64]) {
+                let $n = $qp.n_dofs;
+                let ctx = CoeffCtx::from_qp(
+                    $qp.x_phys, $qp.dim, $qp.elem_id, $qp.elem_tag,
+                    Some($qp.phi), $qp.elem_dofs,
+                );
+                let $w = $qp.weight * self.$field.eval(&ctx);
+                $body
+            }
+        }
+    };
+}
+
 pub mod diffusion;
 pub mod mass;
 pub mod neumann;
