@@ -1,15 +1,10 @@
 {
   "name": "em_helmholtz_mms_sweep",
   "metrics": {
-    "l2_err_k16": {
-      "value": 0.00037056586933425183,
+    "sol_norm_k10_n16_p1": {
+      "value": 8.000118960920982,
       "rtol": 1e-6,
-      "atol": 1e-8
-    },
-    "l2_err_k4": {
-      "value": 0.01314528665334092,
-      "rtol": 1e-6,
-      "atol": 1e-8
+      "atol": 1e-10
     }
   }
-}
+}}

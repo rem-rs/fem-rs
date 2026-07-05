@@ -9,10 +9,12 @@ use std::f64::consts::PI;
 
 use fem_assembly::{
     Assembler,
-    standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator},
+    standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator,
+               BoundaryMassIntegrator, NeumannIntegrator},
 };
-use fem_mesh::SimplexMesh;
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_assembly::assembler::face_dofs_p1;
+use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_solver::{solve_cg, solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space, fe_space::FESpace,
     constraints::{boundary_dofs},
@@ -20,6 +22,27 @@ use fem_space::{
 
 fn default_cfg() -> SolverConfig {
     SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() }
+}
+
+/// Evaluate a P1 FE solution at a physical point (x,y) by iterating elements.
+fn eval_p1(uh: &[f64], mesh: &SimplexMesh<2>, x: f64, y: f64) -> f64 {
+    let tol = 1e-12;
+    for e in 0..mesh.n_elements() as u32 {
+        let nodes = mesh.element_nodes(e);
+        let x0 = mesh.node_coords(nodes[0])[0]; let y0 = mesh.node_coords(nodes[0])[1];
+        let x1 = mesh.node_coords(nodes[1])[0]; let y1 = mesh.node_coords(nodes[1])[1];
+        let x2 = mesh.node_coords(nodes[2])[0]; let y2 = mesh.node_coords(nodes[2])[1];
+        let det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+        if det.abs() < tol { continue; }
+        let lam1 = ((x1 - x) * (y2 - y) - (x2 - x) * (y1 - y)) / det;
+        let lam2 = ((x2 - x) * (y0 - y) - (x0 - x) * (y2 - y)) / det;
+        let lam3 = 1.0 - lam1 - lam2;
+        if lam1 >= -tol && lam2 >= -tol && lam3 >= -tol {
+            let n0 = nodes[0] as usize; let n1 = nodes[1] as usize; let n2 = nodes[2] as usize;
+            return lam1 * uh[n0] + lam2 * uh[n1] + lam3 * uh[n2];
+        }
+    }
+    f64::NAN
 }
 
 // ─── 1. 3-D Poisson MMS Benchmark ─────────────────────────────────────────
@@ -89,7 +112,88 @@ fn ieee1597_helmholtz_mms() {
         .finalize();
 }
 
-// ─── 3. Helmholtz MMS (k² = 64, k=8) ─────────────────────────────────
+// ─── 5. NAFEMS Thermal Convection Benchmark ──────────────────────────────
+//
+// Steady-state heat conduction on unit square with Robin BC (convection):
+//   -∇·(k∇T) = 0,  k = 1
+//   Bottom (y=0):  T = 0          (Dirichlet)
+//   Right (x=1):   ∂T/∂n = 0      (Neumann)
+//   Top (y=1):     ∂T/∂n + α(T-T∞) = 0  (Robin, α=1, T∞=1)
+//   Left (x=0):    ∂T/∂n = 0      (Neumann)
+// Reference: NAFEMS "A Simple Problem with Convection Boundary Conditions"
+
+fn solve_nafems_convection(n: usize) -> (f64, f64) {
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let space = H1Space::new(mesh.clone(), 1);
+    let n_dofs = space.n_dofs() as f64;
+
+    // Stiffness matrix: -∇·(∇u) = 0
+    let mut a = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
+    let mut rhs = vec![0.0_f64; space.n_dofs()];
+
+    // Dirichlet BC on bottom (tag 1): T = 0
+    let bnd = boundary_dofs(space.mesh(), space.dof_manager(), &[1]);
+    for &dof in &bnd {
+        a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+    }
+
+    // Robin BC on top (tag 3): ∂T/∂n + α(T - T∞) = 0, α = 1, T∞ = 1
+    // Weak form: ∫(α T v) ds = ∫(α T∞ v) ds  (on top boundary)
+    let robin_tags = [3i32];
+    let robin_mat = Assembler::assemble_boundary_bilinear(
+        n_dofs as usize, space.mesh(), &face_dofs_p1(space.mesh()), 1,
+        &[&BoundaryMassIntegrator { alpha: 1.0 }], &robin_tags, 2,
+    );
+    let a_total = a.add(&robin_mat);
+
+    // Robin RHS: ∫(α T∞ v) ds = ∫(1.0 * v) ds
+    let robin_rhs = Assembler::assemble_boundary_linear(
+        n_dofs as usize, space.mesh(), &face_dofs_p1(space.mesh()), 1,
+        &[&NeumannIntegrator::new(|_, _| 1.0)], &robin_tags, 2,
+    );
+    for i in 0..rhs.len() { rhs[i] += robin_rhs[i]; }
+
+    let mut x = vec![0.0_f64; space.n_dofs()];
+    solve_cg(&a_total, &rhs, &mut x, &default_cfg()).unwrap();
+
+    let t_center = eval_p1(&x, &mesh, 0.5, 0.5);
+    (n_dofs, t_center)
+}
+
+#[test]
+fn nafems_thermal_convection() {
+    let (n_dofs, t_center) = solve_nafems_convection(40);
+    fem_regression::regression("nafems_thermal_convection")
+        .check("n_dofs", n_dofs)
+        .check("t_center", t_center)
+        .finalize();
+}
+
+// ─── 6. Helmholtz MMS Frequency Sweep (k² = 1, 10, 100) ────────────────
+
+#[test]
+fn em_helmholtz_mms_sweep_k1() {
+    let norm = solve_helmholtz_mms(16, 1.0);
+    fem_regression::regression("em_helmholtz_mms_sweep")
+        .check("sol_norm_k1_n16_p1", norm)
+        .finalize();
+}
+
+#[test]
+fn em_helmholtz_mms_sweep_k10() {
+    let norm = solve_helmholtz_mms(16, 10.0);
+    fem_regression::regression("em_helmholtz_mms_sweep")
+        .check("sol_norm_k10_n16_p1", norm)
+        .finalize();
+}
+
+#[test]
+fn em_helmholtz_mms_sweep_k100() {
+    let norm = solve_helmholtz_mms(16, 100.0);
+    fem_regression::regression("em_helmholtz_mms_sweep")
+        .check("sol_norm_k100_n16_p1", norm)
+        .finalize();
+}
 
 #[test]
 fn em_helmholtz_mms_k8() {
