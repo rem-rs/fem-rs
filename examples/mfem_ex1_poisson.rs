@@ -304,5 +304,52 @@ mod tests {
             ratio
         );
     }
+
+    // ─── Regression baselines ─────────────────────────────────────────────
+
+    /// Regression baseline for Poisson example 1.
+    ///
+    /// Captures precise numerical values (L² errors, solution norms,
+    /// residuals, convergence rates) at fixed mesh sizes and polynomial
+    /// orders. Any code change that silently shifts these values will
+    /// be caught here.
+    ///
+    /// To update baselines after intentional changes:
+    /// ```bash
+    /// FEM_UPDATE_BASELINES=1 cargo test --example mfem_ex1_poisson -- ex1_regression_baseline
+    /// ```
+    #[test]
+    fn ex1_regression_baseline() {
+        // Run solves at several mesh/order combinations
+        let n8_p1  = solve_case(8, 1, 1.0);
+        let n16_p1 = solve_case(16, 1, 1.0);
+        let n8_p2  = solve_case(8, 2, 1.0);
+
+        assert!(n8_p1.converged && n16_p1.converged && n8_p2.converged);
+
+        let rate_p1  = (n8_p1.l2_error / n16_p1.l2_error).ln()
+                     / (n8_p1.h / n16_p1.h).ln();
+
+        fem_regression::regression("mfem_ex1_poisson")
+            // ── P1 L² errors at different mesh sizes ──
+            .check_with("l2_error_n8_p1",   n8_p1.l2_error,   1e-6, 1e-10)
+            .check_with("l2_error_n16_p1",  n16_p1.l2_error,  1e-6, 1e-10)
+            .check_with("l2_error_n8_p2",   n8_p2.l2_error,   1e-6, 1e-10)
+
+            // ── Solution norms ──
+            .check_with("solution_l2_n8_p1",  n8_p1.solution_l2,  1e-6, 1e-10)
+            .check_with("solution_l2_n16_p1", n16_p1.solution_l2, 1e-6, 1e-10)
+            .check_with("solution_l2_n8_p2",  n8_p2.solution_l2,  1e-6, 1e-10)
+
+            // ── Solver residual should be very small ──
+            .check_with("residual_n8_p1",  n8_p1.final_residual,  1e-4, 1e-10)
+            .check_with("residual_n16_p1", n16_p1.final_residual, 1e-4, 1e-10)
+            .check_with("residual_n8_p2",  n8_p2.final_residual,  1e-4, 1e-10)
+
+            // ── Observed convergence rate (≈2 for P1) ──
+            .check_with("convergence_rate_p1", rate_p1, 1e-6, 1e-10)
+
+            .finalize();
+    }
 }
 

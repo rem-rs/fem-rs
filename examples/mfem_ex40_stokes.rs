@@ -353,5 +353,25 @@ mod tests {
         let free_dofs = result.velocity_dofs - result.constrained_velocity_dofs;
         assert!(free_dofs > 0, "must have interior free DOFs");
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    #[test]
+    fn ex40_regression_baseline() {
+        let result = solve_case(8, 1.0, 1.0);
+        assert!(result.converged);
+
+        fem_regression::regression("mfem_ex40_stokes")
+            .check_with("velocity_norm",      result.velocity_norm,        1e-6, 1e-10)
+            .check_with("pressure_norm",      result.pressure_norm,        1e-6, 1e-10)
+            .check_with("velocity_checksum",  result.velocity_checksum,    1e-6, 1e-10)
+            .check_with("pressure_checksum",  result.pressure_checksum,    1e-6, 1e-10)
+            .check_with("momentum_residual",  result.momentum_residual,    1e-4, 1e-10)
+            .check_with("divergence_residual", result.divergence_residual, 1e-4, 1e-10)
+            .check_with("iterations",         result.iterations as f64,    1e-4, 0.5)
+            .check_with("velocity_dofs",      result.velocity_dofs as f64, 0.0,  0.5)
+            .check_with("pressure_dofs",      result.pressure_dofs as f64, 0.0,  0.5)
+            .finalize();
+    }
 }
 

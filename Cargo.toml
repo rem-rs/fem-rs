@@ -17,6 +17,7 @@ members = [
     "crates/python",
     "crates/benches",
     "crates/rmetis",
+    "crates/regression",
     "crates/stochastic",
     "examples",
 ]
@@ -36,6 +37,7 @@ env_logger  = "0.11"
 mpi         = { version = "0.8", features = ["user-operations"] }
 criterion   = { version = "0.5", features = ["html_reports"] }
 jsmpi       = "0.1"
+serde_json  = "1"
 # rem-rs/reed (libCEED-style discretization); git pin — bump `rev` when upgrading.
 reed        = { git = "https://github.com/rem-rs/reed.git", rev = "11eaaed88aaa4c9aebb3da10c8c10833824ab865", package = "reed", default-features = false }
 reed-core   = { git = "https://github.com/rem-rs/reed.git", rev = "11eaaed88aaa4c9aebb3da10c8c10833824ab865", package = "reed-core" }

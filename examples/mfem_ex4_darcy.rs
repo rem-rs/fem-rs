@@ -352,5 +352,22 @@ mod tests {
         // With very weak source, solution should be proportionally small
         assert!(result.max_dof < 1e-4, "very weak source should give small solution, got max_dof={}", result.max_dof);
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    #[test]
+    fn ex4_regression_baseline() {
+        let result = solve_case(8, 1.0, 1.0, 1.0);
+        assert!(result.converged);
+
+        fem_regression::regression("mfem_ex4_darcy")
+            .check_with("div_l2",     result.div_l2,     1e-6, 1e-10)
+            .check_with("flux_l2",    result.flux_l2,    1e-6, 1e-10)
+            .check_with("max_dof",    result.max_dof,    1e-6, 1e-10)
+            .check_with("n_dofs",     result.n_dofs as f64, 0.0, 0.5)
+            .check_with("iterations", result.iterations as f64, 1e-4, 0.5)
+            .check_with("residual",   result.final_residual, 1e-4, 1e-10)
+            .finalize();
+    }
 }
 

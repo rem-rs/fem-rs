@@ -272,5 +272,24 @@ mod tests {
             "higher forcing should increase p norm: weak={} strong={}",
             weak.p_norm, strong.p_norm);
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    #[test]
+    fn ex5_regression_baseline() {
+        let result = solve_case(8, 1.0);
+        assert!(result.converged);
+
+        fem_regression::regression("mfem_ex5_mixed_darcy")
+            .check_with("u_norm",           result.u_norm,          1e-6, 1e-10)
+            .check_with("p_norm",           result.p_norm,          1e-6, 1e-10)
+            .check_with("u_checksum",       result.u_checksum,      1e-6, 1e-10)
+            .check_with("p_checksum",       result.p_checksum,      1e-6, 1e-10)
+            .check_with("block_residual_u", result.block_residual_u, 1e-4, 1e-10)
+            .check_with("block_residual_p", result.block_residual_p, 1e-4, 1e-10)
+            .check_with("nu",               result.nu as f64,       0.0,  0.5)
+            .check_with("np",               result.np as f64,       0.0,  0.5)
+            .finalize();
+    }
 }
 

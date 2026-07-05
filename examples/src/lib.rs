@@ -28,6 +28,12 @@ pub mod hdf5_checkpoint;
 pub mod maxwell;
 pub mod template_runner;
 pub mod workflow_cli;
+#[cfg(test)]
+pub mod stress_tests;
+#[cfg(test)]
+pub mod benchmarks;
+#[cfg(test)]
+pub mod em_benchmarks;
 pub use maxwell::{
     BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,
     FirstOrderMaxwellSolver3D, FirstOrderStepConfig3D, FirstOrderTimeStepper3D,

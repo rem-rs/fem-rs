@@ -1,0 +1,35 @@
+{
+  "name": "mfem_ex13_laplacian_eigen",
+  "metrics": {
+    "eigenvalue_0": {
+      "value": 20.505544897707882,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "eigenvalue_1": {
+      "value": 52.629792311575315,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "eigenvalue_2": {
+      "value": 54.604071815406584,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "iterations": {
+      "value": 52.0,
+      "rtol": 0.0001,
+      "atol": 0.5
+    },
+    "max_rel_err": {
+      "value": 0.1065098376056421,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "n_free": {
+      "value": 49.0,
+      "rtol": 0.0,
+      "atol": 0.5
+    }
+  }
+}

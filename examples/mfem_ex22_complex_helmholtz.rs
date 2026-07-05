@@ -425,5 +425,25 @@ mod tests {
         assert!(r.mean_right_amp < 1.0e-12, "right amplitude should be near zero, got {}", r.mean_right_amp);
         assert!(r.mean_interior_amp < 1.0e-12, "interior amplitude should be near zero, got {}", r.mean_interior_amp);
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    #[test]
+    fn ex22_regression_baseline() {
+        let r = solve_case(&base_args());
+        assert!(r.converged);
+
+        fem_regression::regression("mfem_ex22_complex_helmholtz")
+            .check_with("min_amp",          r.min_amp,          1e-6, 1e-10)
+            .check_with("max_amp",          r.max_amp,          1e-6, 1e-10)
+            .check_with("max_left_bc_err",  r.max_left_bc_err,  1e-6, 1e-10)
+            .check_with("mean_left_amp",    r.mean_left_amp,    1e-6, 1e-10)
+            .check_with("mean_right_amp",   r.mean_right_amp,   1e-6, 1e-10)
+            .check_with("mean_interior_amp", r.mean_interior_amp, 1e-6, 1e-10)
+            .check_with("transmission_ratio", r.transmission_ratio(), 1e-6, 1e-10)
+            .check_with("iterations",       r.iterations as f64, 1e-4, 0.5)
+            .check_with("residual",         r.final_residual,   1e-4, 1e-10)
+            .finalize();
+    }
 }
 

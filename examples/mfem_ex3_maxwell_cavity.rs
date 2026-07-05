@@ -464,5 +464,31 @@ mod tests {
             strong.solution_l2_norm
         );
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    #[test]
+    fn ex3_regression_baseline() {
+        let result = solve_case(&Args {
+            n: 8,
+            pml_like: false,
+            multi_material: false,
+            pml_thickness: 0.2,
+            sigma_max: 2.0,
+            wx: 1.0,
+            wy: 1.0,
+            source_scale: 1.0,
+        });
+        assert!(result.converged);
+
+        fem_regression::regression("mfem_ex3_maxwell_cavity")
+            .check_with("l2_error",        result.l2_error.unwrap(), 1e-6, 1e-10)
+            .check_with("solution_l2_norm", result.solution_l2_norm, 1e-6, 1e-10)
+            .check_with("solution_max_abs", result.solution_max_abs, 1e-6, 1e-10)
+            .check_with("iterations",       result.iterations as f64, 1e-4, 0.5)
+            .check_with("residual",         result.final_residual,   1e-4, 1e-10)
+            .check_with("n_dofs",           result.n_dofs as f64,    0.0,  0.5)
+            .finalize();
+    }
 }
 

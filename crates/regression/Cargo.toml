@@ -1,0 +1,18 @@
+[package]
+name    = "fem-regression"
+version = "0.1.0"
+edition = "2021"
+
+# Regression baseline testing utilities for fem-rs.
+# No runtime dependencies beyond serde; fem-core is optional for type compatibility.
+[dependencies]
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+fem-core   = { path = "../core", optional = true }
+
+[dev-dependencies]
+fem-mesh     = { path = "../mesh" }
+fem-space    = { path = "../space" }
+fem-linalg   = { path = "../linalg" }
+fem-assembly = { path = "../assembly" }
+fem-solver   = { path = "../solver" }

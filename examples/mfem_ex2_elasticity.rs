@@ -278,5 +278,23 @@ mod tests {
             "stronger force should increase y-displacement norm: weak={} strong={}",
             weak.uy_norm, strong.uy_norm);
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    #[test]
+    fn ex2_regression_baseline() {
+        let result = solve_case(8, 1, -1.0);
+        assert!(result.converged);
+
+        fem_regression::regression("mfem_ex2_elasticity")
+            .check_with("ux_norm",      result.ux_norm,      1e-6, 1e-10)
+            .check_with("uy_norm",      result.uy_norm,      1e-6, 1e-10)
+            .check_with("ux_checksum",  result.ux_checksum,  1e-6, 1e-10)
+            .check_with("uy_checksum",  result.uy_checksum,  1e-6, 1e-10)
+            .check_with("n_dofs",       result.n_dofs as f64, 0.0,  0.5)
+            .check_with("iterations",   result.iterations as f64, 1e-4, 0.5)
+            .check_with("residual",     result.final_residual, 1e-4, 1e-10)
+            .finalize();
+    }
 }
 

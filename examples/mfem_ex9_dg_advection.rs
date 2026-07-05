@@ -311,5 +311,29 @@ mod tests {
         assert!(p2.n_dofs > p1.n_dofs,
             "P2 should have more DOFs than P1: p1={} p2={}", p1.n_dofs, p2.n_dofs);
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    #[test]
+    fn ex9_regression_baseline() {
+        let result = solve_case(8, 1, 20.0, 1.0);
+        assert!(result.converged);
+        let rate_8_16 = {
+            let m = solve_case(16, 1, 20.0, 1.0);
+            let h_coarse: f64 = 1.0 / 8.0;
+            let h_fine: f64 = 1.0 / 16.0;
+            (m.l2_error / result.l2_error).ln() / (h_fine / h_coarse).ln()
+        };
+
+        fem_regression::regression("mfem_ex9_dg_advection")
+            .check_with("l2_error_n8",        result.l2_error,        1e-6, 1e-10)
+            .check_with("solution_norm",      result.solution_norm,   1e-6, 1e-10)
+            .check_with("solution_checksum",  result.solution_checksum, 1e-6, 1e-10)
+            .check_with("residual",           result.final_residual,  1e-4, 1e-10)
+            .check_with("n_dofs",             result.n_dofs as f64,   0.0,  0.5)
+            .check_with("interior_faces",     result.n_interior_faces as f64, 0.0, 0.5)
+            .check_with("convergence_rate",   rate_8_16,              1e-6, 1e-10)
+            .finalize();
+    }
 }
 

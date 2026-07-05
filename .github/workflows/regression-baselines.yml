@@ -1,0 +1,80 @@
+name: Regression Baselines
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - examples/**
+      - tests/baselines/**
+      - .github/workflows/regression-baselines.yml
+  pull_request:
+    branches: [main, master]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - examples/**
+      - tests/baselines/**
+      - .github/workflows/regression-baselines.yml
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  regression-check:
+    name: Regression Baseline Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.REM_RS_SUBMODULES_TOKEN || github.token }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify baseline files exist
+        shell: bash
+        run: |
+          echo "=== Registered baselines ==="
+          ls -la tests/baselines/*.json 2>/dev/null || echo "(no baselines yet)"
+          echo ""
+
+      - name: Run regression baselines (mfem_ex1_poisson)
+        run: cargo test -p fem-examples --example mfem_ex1_poisson -- ex1_regression_baseline
+
+      - name: Run regression baselines (mfem_ex13_eigenvalue)
+        run: cargo test -p fem-examples --example mfem_ex13_eigenvalue -- ex13_eigenvalue_regression_baseline
+
+      - name: Run regression baselines (mfem_ex13_laplacian_eigen)
+        run: cargo test -p fem-examples --example mfem_ex13_laplacian_eigen -- ex13_laplacian_regression_baseline
+
+      - name: Run regression baselines (mfem_ex2_elasticity)
+        run: cargo test -p fem-examples --example mfem_ex2_elasticity -- ex2_regression_baseline
+
+      - name: Run regression baselines (mfem_ex9_dg_advection)
+        run: cargo test -p fem-examples --example mfem_ex9_dg_advection -- ex9_regression_baseline
+
+      - name: Run regression baselines (mfem_ex16_nonlinear_heat)
+        run: cargo test -p fem-examples --example mfem_ex16_nonlinear_heat -- ex16_regression_baseline
+
+      - name: Run regression baselines (mfem_ex40_stokes)
+        run: cargo test -p fem-examples --example mfem_ex40_stokes -- ex40_regression_baseline
+
+      - name: Run regression baselines (mfem_ex3_maxwell_cavity)
+        run: cargo test -p fem-examples --example mfem_ex3_maxwell_cavity -- ex3_regression_baseline
+
+      - name: Run regression baselines (mfem_ex4_darcy)
+        run: cargo test -p fem-examples --example mfem_ex4_darcy -- ex4_regression_baseline
+
+      - name: Run regression baselines (mfem_ex5_mixed_darcy)
+        run: cargo test -p fem-examples --example mfem_ex5_mixed_darcy -- ex5_regression_baseline
+
+      - name: Run regression baselines (mfem_ex22_complex_helmholtz)
+        run: cargo test -p fem-examples --example mfem_ex22_complex_helmholtz -- ex22_regression_baseline

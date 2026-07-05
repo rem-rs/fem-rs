@@ -349,5 +349,22 @@ mod tests {
             loose.final_residual,
             tight.final_residual);
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    #[test]
+    fn ex16_regression_baseline() {
+        let result = solve_case(8, 1e-8, 0.01);
+        assert!(result.converged);
+
+        fem_regression::regression("mfem_ex16_nonlinear_heat")
+            .check_with("rms_error",          result.rms_error,        1e-6, 1e-10)
+            .check_with("solution_norm",      result.solution_norm,    1e-6, 1e-10)
+            .check_with("solution_checksum",  result.solution_checksum, 1e-6, 1e-10)
+            .check_with("n_dofs",             result.n_dofs as f64,    0.0,  0.5)
+            .check_with("iterations",         result.iterations as f64, 1e-4, 0.5)
+            .check_with("residual",           result.final_residual,   1e-4, 1e-10)
+            .finalize();
+    }
 }
 

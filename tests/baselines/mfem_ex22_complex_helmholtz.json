@@ -1,0 +1,50 @@
+{
+  "name": "mfem_ex22_complex_helmholtz",
+  "metrics": {
+    "iterations": {
+      "value": 53.0,
+      "rtol": 0.0001,
+      "atol": 0.5
+    },
+    "max_amp": {
+      "value": 1.0,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "max_left_bc_err": {
+      "value": 0.0,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "mean_interior_amp": {
+      "value": 0.3045735743442652,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "mean_left_amp": {
+      "value": 1.0,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "mean_right_amp": {
+      "value": 0.08231068290743879,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "min_amp": {
+      "value": 0.0,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "residual": {
+      "value": 9.49905737127401e-9,
+      "rtol": 0.0001,
+      "atol": 1e-10
+    },
+    "transmission_ratio": {
+      "value": 0.08231068290743879,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    }
+  }
+}

@@ -383,5 +383,26 @@ mod tests {
                 "expected {k} eigenvalues, got {}", result.eigenvalues.len());
         }
     }
+
+    // ─── Regression baseline ─────────────────────────────────────────────
+
+    /// Regression baseline for Maxwell cavity eigenvalues.
+    ///
+    /// Captures precise numerical values (eigenvalues, max relative error,
+    /// nullity, iteration count) at fixed mesh size.
+    #[test]
+    fn ex13_eigenvalue_regression_baseline() {
+        let result = solve_case(8, 3);
+        assert!(result.converged);
+
+        fem_regression::regression("mfem_ex13_eigenvalue")
+            .check_with("eigenvalue_0", result.eigenvalues[0], 1e-6, 1e-10)
+            .check_with("eigenvalue_1", result.eigenvalues[1], 1e-6, 1e-10)
+            .check_with("eigenvalue_2", result.eigenvalues[2], 1e-6, 1e-10)
+            .check_with("max_rel_err",  result.max_rel_err,  1e-6, 1e-10)
+            .check_with("nullity",      result.nullity as f64, 0.0, 0.5)
+            .check_with("iterations",   result.iterations as f64, 1e-4, 0.5)
+            .finalize();
+    }
 }
 

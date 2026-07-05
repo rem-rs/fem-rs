@@ -1,0 +1,35 @@
+{
+  "name": "mfem_ex13_eigenvalue",
+  "metrics": {
+    "eigenvalue_0": {
+      "value": 9.793818771788587,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "eigenvalue_1": {
+      "value": 9.861184904444427,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "eigenvalue_2": {
+      "value": 19.820475949609122,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "iterations": {
+      "value": 353.0,
+      "rtol": 0.0001,
+      "atol": 0.5
+    },
+    "max_rel_err": {
+      "value": 0.00767868966383358,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "nullity": {
+      "value": 49.0,
+      "rtol": 0.0,
+      "atol": 0.5
+    }
+  }
+}

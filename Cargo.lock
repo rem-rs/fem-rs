@@ -666,6 +666,7 @@ dependencies = [
  "fem-linalg-gpu",
  "fem-mesh",
  "fem-parallel",
+ "fem-regression",
  "fem-solver",
  "fem-space",
  "fem-stochastic",
@@ -782,6 +783,20 @@ dependencies = [
  "fem-space",
  "numpy",
  "pyo3",
+]
+
+[[package]]
+name = "fem-regression"
+version = "0.1.0"
+dependencies = [
+ "fem-assembly",
+ "fem-core",
+ "fem-linalg",
+ "fem-mesh",
+ "fem-solver",
+ "fem-space",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
