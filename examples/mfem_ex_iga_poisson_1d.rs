@@ -109,3 +109,42 @@ fn relative_residual_free_dofs(
         .max(1e-30);
     r_norm / b_norm
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iga_poisson_1d_smoke() {
+        let iga = IgaSpace1D::new_uniform_clamped(DEGREE, N_CTRL)
+            .expect("IgaSpace1D");
+        let fe = IgaFESpace1D::new(iga.clone()).expect("IgaFESpace1D");
+
+        let k = Assembler::assemble_bilinear_iga_1d(
+            &fe,
+            &[Iga1dBilinearItem::Diffusion { kappa: 1.0 }],
+            QUAD_ORDER,
+        ).expect("diff matrix");
+
+        let rhs = Assembler::assemble_linear_iga_1d_parametric(&fe, |_u| SOURCE_VALUE, QUAD_ORDER)
+            .expect("source vector");
+
+        let (left, right) = iga.boundary_dofs();
+        let dirichlet = build_dirichlet_zero_bcs(iga.n_dofs(), &[left, right]);
+
+        let (u, _iters, _res) =
+            solve_dirichlet_reduced(&k, &rhs, &dirichlet, SOLVER_TOL, MAX_ITER);
+
+        let l2_u: f64 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+        eprintln!("  [IGA 1D] degree={}, n_ctrl={}, ||u||={:.6e}",
+            DEGREE, N_CTRL, l2_u);
+
+        assert!(l2_u > 0.0 && l2_u < 10.0,
+            "IGA 1D: ||u||={:.6e} outside [0, 10]", l2_u);
+
+        fem_regression::regression("iga_poisson_1d_smoke")
+            .check_with("l2_u", l2_u, 1e-6, 1e-10)
+            .check_with("n_dofs", iga.n_dofs() as f64, 1e-6, 0.5)
+            .finalize();
+    }
+}
