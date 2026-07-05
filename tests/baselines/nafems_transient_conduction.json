@@ -1,0 +1,15 @@
+{
+  "name": "nafems_transient_conduction",
+  "metrics": {
+    "l2_err": {
+      "value": 0.006145450393749113,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "t_center": {
+      "value": 0.14505658353654938,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    }
+  }
+}

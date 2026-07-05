@@ -44,6 +44,8 @@ pub mod team_benchmarks;
 pub mod nafems_thermal;
 #[cfg(test)]
 pub mod mms_convergence;
+#[cfg(test)]
+pub mod asme_benchmarks;
 pub use maxwell::{
     BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,
     FirstOrderMaxwellSolver3D, FirstOrderStepConfig3D, FirstOrderTimeStepper3D,
