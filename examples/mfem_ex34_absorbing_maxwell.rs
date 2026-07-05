@@ -429,4 +429,15 @@ mod tests {
             "expected zero checksum, got {}", result.solution_checksum);
         assert!(result.l2_error < 1.0e-14, "expected zero manufactured-solution error, got {}", result.l2_error);
     }
+
+    #[test]
+    fn ex34_mfem_reference_test() {
+        let r = solve_case_with_scale(&Args { n: 8, anisotropic: false, gamma_x: 1.0, gamma_y: 1.5 }, 1.0);
+        assert!(r.converged);
+        assert_eq!(r.n_dofs, 208, "ND1 on 8×8: 208 DOFs");
+        assert!(r.l2_error > 0.0 && r.l2_error < 2.0);
+        assert!(r.final_residual < 1e-8);
+        eprintln!("  [mfem-ref] ex34: dofs={} L2={:.6e} iter={}",
+            r.n_dofs, r.l2_error, r.iterations);
+    }
 }

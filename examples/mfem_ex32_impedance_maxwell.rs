@@ -306,4 +306,16 @@ mod tests {
             "impedance Maxwell checksum is not deterministic: {} vs {}",
             r1.solution_checksum, r2.solution_checksum);
     }
+
+    #[test]
+    fn ex32_mfem_reference_test() {
+        let r = solve_case_with_gamma_and_scale(8, 1.0, 1.0);
+        assert!(r.converged);
+        assert_eq!(r.n_dofs, 208, "ND1 on 8×8: 208 DOFs");
+        assert!(r.l2_error > 0.0 && r.l2_error < 2.0, "L2={:.4e} out of range", r.l2_error);
+        assert!(r.solution_l2 > 0.0);
+        assert!(r.final_residual < 1e-8);
+        eprintln!("  [mfem-ref] ex32: dofs={} L2={:.6e} iter={}",
+            r.n_dofs, r.l2_error, r.iterations);
+    }
 }

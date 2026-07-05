@@ -102,3 +102,15 @@ jobs:
 
       - name: Run MFEM cross-validation (ex22 complex Helmholtz)
         run: cargo test -p fem-examples --example mfem_ex22_complex_helmholtz -- ex22_mfem_reference_test
+
+      - name: Run MFEM cross-validation (ex31 anisotropic Maxwell)
+        run: cargo test -p fem-examples --example mfem_ex31_anisotropic_maxwell -- ex31_mfem_reference_test
+
+      - name: Run MFEM cross-validation (ex32 impedance Maxwell)
+        run: cargo test -p fem-examples --example mfem_ex32_impedance_maxwell -- ex32_mfem_reference_test
+
+      - name: Run MFEM cross-validation (ex33 tangential drive Maxwell)
+        run: cargo test -p fem-examples --example mfem_ex33_tangential_drive_maxwell -- ex33_mfem_reference_test
+
+      - name: Run MFEM cross-validation (ex34 absorbing Maxwell)
+        run: cargo test -p fem-examples --example mfem_ex34_absorbing_maxwell -- ex34_mfem_reference_test
