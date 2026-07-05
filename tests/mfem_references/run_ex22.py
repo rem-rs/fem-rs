@@ -20,13 +20,13 @@ from mfem.ser import *
 import numpy as np
 
 
-mesh = Mesh.MakeCartesian2D(12, 12, Element.TRIANGLE, True, 1.0, 2.0)
+mesh = Mesh.MakeCartesian2D(12, 24, Element.TRIANGLE, True, 2.0, 1.0)  # 12x24 quads → 2×1 domain, (13×25)=325 nodes
 fec = H1_FECollection(1, 2)
 fespace = FiniteElementSpace(mesh, fec)
 ndofs = fespace.GetNDofs()
 
 sys.stderr.write("Mesh: %d nodes, %d elements\n" % (mesh.GetNV(), mesh.GetNE()))
-sys.stderr.write("Space: %d DOFs (fem-rs: (12+1)*(2*12+1)=325)\n" % ndofs)
+sys.stderr.write("Space: %d DOFs (fem-rs ex22 n=12: (12+1)*(24+1)=325)\n" % ndofs)
 
 # Assemble stiffness + mass (Helmholtz operator)
 a = BilinearForm(fespace)
@@ -34,8 +34,10 @@ a.AddDomainIntegrator(DiffusionIntegrator(ConstantCoefficient(1.0)))
 a.AddDomainIntegrator(MassIntegrator(ConstantCoefficient(-16.0)))  # -k² with k=4
 a.Assemble()
 
-A_sp = a.SpMat()
-nnz = A_sp.NumberOfNonZeroElements()
+# Get matrix dimensions
+h = a.Height()
+w = a.Width()
+nnz = 0  # NNZ access varies by MFEM version
 
 results = {
     "summary": "ex22: mesh/space verification via MFEM Python",
@@ -43,7 +45,8 @@ results = {
         "n_dofs": {"mfem": ndofs, "fem_rs": 325, "match": ndofs == 325},
         "n_nodes": mesh.GetNV(),
         "n_elements": mesh.GetNE(),
-        "matrix_nnz": nnz,
+        "matrix_height": h,
+        "matrix_width": w,
     },
     "note": "Complex Helmholtz requires MFEM C++ ex22 for full numerical comparison. "
             "Python bindings lack complex-valued linear form assembly for port BCs.",

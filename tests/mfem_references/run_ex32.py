@@ -32,16 +32,12 @@ a.AddDomainIntegrator(CurlCurlIntegrator(ConstantCoefficient(1.0)))
 a.AddDomainIntegrator(VectorFEMassIntegrator(ConstantCoefficient(1.0)))
 a.Assemble()
 
-A_sp = a.SpMat()
-nnz = A_sp.NumberOfNonZeroElements()
-
 results = {
     "summary": "ex32: mesh/space verification via MFEM Python",
     "verified_metrics": {
         "n_dofs": {"mfem": ndofs, "fem_rs": 208, "match": ndofs == 208},
         "n_nodes": mesh.GetNV(),
         "n_elements": mesh.GetNE(),
-        "matrix_nnz": nnz,
     },
     "note": "Tangential Robin BC requires MFEM C++ ex32 for full assembly. "
             "Python bindings lack VectorFEBoundaryTangentLFIntegrator.",

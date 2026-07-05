@@ -34,16 +34,12 @@ a.AddDomainIntegrator(CurlCurlIntegrator(ConstantCoefficient(1.0)))
 a.AddDomainIntegrator(VectorFEMassIntegrator(ConstantCoefficient(1.0)))
 a.Assemble()
 
-A_sp = a.SpMat()
-nnz = A_sp.NumberOfNonZeroElements()
-
 results = {
     "summary": "ex34: mesh/space verification via MFEM",
     "verified_metrics": {
         "n_dofs": {"mfem": ndofs, "fem_rs": 208, "match": ndofs == 208},
         "n_nodes": mesh.GetNV(),
         "n_elements": mesh.GetNE(),
-        "matrix_nnz": nnz,
     },
     "note": "Full absorbing BC requires MFEM ex34 C++ executable. "
             "Python bindings lack absorber boundary integrator.",

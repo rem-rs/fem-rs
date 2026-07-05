@@ -34,16 +34,12 @@ a.AddDomainIntegrator(CurlCurlIntegrator(ConstantCoefficient(1.0)))
 a.AddDomainIntegrator(VectorFEMassIntegrator(VectorConstantCoefficient([sigma_x, sigma_y])))
 a.Assemble()
 
-A_sp = a.SpMat()
-nnz = A_sp.NumberOfNonZeroElements()
-
 results = {
     "summary": "ex31: mesh/space verification via MFEM Python",
     "verified_metrics": {
         "n_dofs": {"mfem": ndofs, "fem_rs": 208, "match": ndofs == 208},
         "n_nodes": mesh.GetNV(),
         "n_elements": mesh.GetNE(),
-        "matrix_nnz": nnz,
     },
     "note": "Full anisotropic solve + L² error requires MFEM C++ ex31. "
             "Python SWIG bindings lack anisotropic VectorFEMassIntegrator support.",

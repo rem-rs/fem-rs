@@ -41,9 +41,9 @@ f.Assemble()
 
 # PEC on all boundaries + Robin BC is not trivial in MFEM Python
 # For ex33, we only verify the unconstrained system matrix properties
-A_sp = a.SpMat()
-nnz = A_sp.NumberOfNonZeroElements()
-sys.stderr.write("Matrix: %d x %d, nnz=%d\n" % (A_sp.Height(), A_sp.Width(), nnz))
+h = a.Height()
+w = a.Width()
+sys.stderr.write("Matrix: %d x %d\n" % (h, w))
 
 results = {
     "summary": "ex33: mesh/space verification via MFEM",
@@ -51,7 +51,6 @@ results = {
         "n_dofs": {"mfem": ndofs, "fem_rs": 208, "match": ndofs == 208},
         "n_nodes": mesh.GetNV(),
         "n_elements": mesh.GetNE(),
-        "matrix_nnz": nnz,
     },
     "note": "Full BC + solve requires MFEM ex33 C++ executable. "
             "Python bindings lack tangential boundary integrators.",
