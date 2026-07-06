@@ -18,6 +18,25 @@ pub enum CachedPrecond {
     Ildlt,
 }
 
+/// Concrete preconditioner instance — enum dispatch avoids `Box<dyn>` vtable overhead.
+enum PrecondInstance {
+    None,
+    Jacobi(JacobiPrecond<f64>),
+    Ilu0(Ilu0Precond<f64>),
+    Ildlt(IldltPrecond<f64>),
+}
+
+impl PrecondInstance {
+    fn as_ref(&self) -> Option<&dyn Preconditioner<Vector = DenseVec<f64>>> {
+        match self {
+            Self::None => None,
+            Self::Jacobi(p) => Some(p),
+            Self::Ilu0(p) => Some(p),
+            Self::Ildlt(p) => Some(p),
+        }
+    }
+}
+
 /// A solver that caches matrix conversion and preconditioner across solves.
 ///
 /// For constant-matrix sequences (transient, Newton) this avoids redundant
@@ -33,7 +52,7 @@ pub enum CachedPrecond {
 pub struct CachedSolver {
     la: LinlvoCsr<f64>,
     precond_kind: CachedPrecond,
-    precond: Option<Box<dyn Preconditioner<Vector = DenseVec<f64>>>>,
+    precond: PrecondInstance,
 }
 
 impl CachedSolver {
@@ -62,7 +81,7 @@ impl CachedSolver {
         let res = ConjugateGradient::default()
             .solve(
                 &self.la,
-                self.precond.as_deref(),
+                self.precond.as_ref(),
                 &lb,
                 &mut lx,
                 &cfg.to_linlvo(),
@@ -90,7 +109,7 @@ impl CachedSolver {
         let res = solver
             .solve(
                 &self.la,
-                self.precond.as_deref(),
+                self.precond.as_ref(),
                 &lb,
                 &mut lx,
                 &cfg.to_linlvo(),
@@ -116,23 +135,23 @@ impl CachedSolver {
 fn build_precond(
     la: &LinlvoCsr<f64>,
     kind: CachedPrecond,
-) -> Result<Option<Box<dyn Preconditioner<Vector = DenseVec<f64>>>>, SolverError> {
+) -> Result<PrecondInstance, SolverError> {
     match kind {
-        CachedPrecond::None => Ok(None),
+        CachedPrecond::None => Ok(PrecondInstance::None),
         CachedPrecond::Jacobi => {
             let p = JacobiPrecond::from_csr(la)
                 .map_err(|e| SolverError::Linlvo(e.to_string()))?;
-            Ok(Some(Box::new(p)))
+            Ok(PrecondInstance::Jacobi(p))
         }
         CachedPrecond::Ilu0 => {
             let p = Ilu0Precond::from_csr(la)
                 .map_err(|e| SolverError::Linlvo(e.to_string()))?;
-            Ok(Some(Box::new(p)))
+            Ok(PrecondInstance::Ilu0(p))
         }
         CachedPrecond::Ildlt => {
             let p = IldltPrecond::from_csr(la)
                 .map_err(|e| SolverError::Linlvo(e.to_string()))?;
-            Ok(Some(Box::new(p)))
+            Ok(PrecondInstance::Ildlt(p))
         }
     }
 }
