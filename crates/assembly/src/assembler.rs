@@ -254,6 +254,7 @@ struct ElementScratch {
     phi:       Vec<f64>,
     grad_ref:  Vec<f64>,
     grad_phys: Vec<f64>,
+    global_dofs: Vec<usize>,  // reused per-element to avoid allocation
 }
 
 impl ElementScratch {
@@ -264,6 +265,7 @@ impl ElementScratch {
             phi:       Vec::new(),
             grad_ref:  Vec::new(),
             grad_phys: Vec::new(),
+            global_dofs: Vec::new(),
         }
     }
 }
@@ -285,8 +287,10 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let n_ldofs   = ref_elem.n_dofs();
     let quad      = ref_elem.quadrature(quad_order);
 
-    let raw_dofs: Vec<DofId> = space.element_dofs(e).to_vec();
-    let global_dofs: Vec<usize> = raw_dofs.iter().map(|&d| d as usize).collect();
+    let raw_dofs: &[DofId] = space.element_dofs(e);
+    scratch.global_dofs.clear();
+    scratch.global_dofs.extend(raw_dofs.iter().map(|&d| d as usize));
+    let global_dofs = &scratch.global_dofs;
     let n_elem_dofs = global_dofs.len();
     let nodes = mesh.element_nodes(e);
     let elem_tag = mesh.element_tag(e);
@@ -386,8 +390,10 @@ fn accumulate_volume_linear_element<S: FESpace>(
     let n_ldofs   = ref_elem.n_dofs();
     let quad      = ref_elem.quadrature(quad_order);
 
-    let raw_dofs: Vec<DofId> = space.element_dofs(e).to_vec();
-    let global_dofs: Vec<usize> = raw_dofs.iter().map(|&d| d as usize).collect();
+    let raw_dofs: &[DofId] = space.element_dofs(e);
+    scratch.global_dofs.clear();
+    scratch.global_dofs.extend(raw_dofs.iter().map(|&d| d as usize));
+    let global_dofs = &scratch.global_dofs;
     let nodes = mesh.element_nodes(e);
     let elem_tag = mesh.element_tag(e);
 

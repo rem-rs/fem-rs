@@ -46,12 +46,20 @@ impl<T: Scalar> CooMatrix<T> {
     /// Add a dense `k × k` element matrix at the DOF index pairs in `dofs`.
     ///
     /// `k_elem` is row-major: `k_elem[i * k + j]` is the (i,j) entry.
+    /// Uses batched Vec extension to minimise capacity checks.
     pub fn add_element_matrix(&mut self, dofs: &[usize], k_elem: &[T]) {
         let k = dofs.len();
         debug_assert_eq!(k_elem.len(), k * k);
+        let n_entries = k * k;
+        self.rows.reserve(n_entries);
+        self.cols.reserve(n_entries);
+        self.vals.reserve(n_entries);
         for i in 0..k {
+            let row = dofs[i] as u32;
             for j in 0..k {
-                self.add(dofs[i], dofs[j], k_elem[i * k + j]);
+                self.rows.push(row);
+                self.cols.push(dofs[j] as u32);
+                self.vals.push(k_elem[i * k + j]);
             }
         }
     }
