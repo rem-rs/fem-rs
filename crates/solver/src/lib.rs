@@ -77,9 +77,11 @@ mod direct;
 pub use iterative::*;
 pub use precond::*;
 pub use direct::*;
+pub use cached::CachedSolver;
 
 // ─── Additional sub-modules ──────────────────────────────────────────────────
 
+pub mod cached;
 pub mod block;
 pub mod block_gmres;
 pub mod block_operator;

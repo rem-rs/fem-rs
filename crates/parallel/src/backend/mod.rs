@@ -58,6 +58,17 @@ pub trait CommBackend: Send + Sync {
     /// AllReduce sum of a single `i64` value across all ranks.
     fn allreduce_sum_i64(&self, local: i64) -> i64;
 
+    /// AllReduce sum of every element of `local` in-place (element-wise sum).
+    ///
+    /// The default implementation calls [`allreduce_sum_f64`](Self::allreduce_sum_f64)
+    /// per element. Backends with native slice support (e.g. MPI) should override
+    /// this with a single collective call.
+    fn allreduce_sum_f64_slice(&self, local: &mut [f64]) {
+        for x in local.iter_mut() {
+            *x = self.allreduce_sum_f64(*x);
+        }
+    }
+
     /// Broadcast a byte buffer from `root` to all ranks in-place.
     ///
     /// On non-root ranks `buf` is resized to match the root's length before

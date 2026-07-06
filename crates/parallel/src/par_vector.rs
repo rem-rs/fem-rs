@@ -197,6 +197,20 @@ impl ParVector {
         self.comm.allreduce_sum_f64(local)
     }
 
+    /// Local owned dot product (no MPI allreduce).
+    ///
+    /// Used together with [`Comm::allreduce_sum_f64_slice`] to batch multiple
+    /// dot products into a single allreduce.
+    pub fn owned_dot(&self, other: &ParVector) -> f64 {
+        let a = &self.data[..self.n_owned];
+        let b = &other.data[..self.n_owned];
+        #[cfg(not(target_arch = "wasm32"))]
+        if a.len() >= crate::env::local_rayon_min() {
+            return a.par_iter().zip(b).map(|(x, y)| x * y).sum();
+        }
+        a.iter().zip(b).map(|(x, y)| x * y).sum()
+    }
+
     /// Global L2 norm: `sqrt(global_dot(self, self))`.
     pub fn global_norm(&self) -> f64 {
         self.global_dot(self).sqrt()

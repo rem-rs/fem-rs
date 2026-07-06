@@ -423,11 +423,12 @@ pub fn par_solve_gmres_jacobi(
             let mut w = ParVector::zeros_like(b);
             a.spmv(&mut z_basis[j], &mut w);
 
-            // Modified Gram-Schmidt
-            for i in 0..=j {
-                h[i][j] = v[i].global_dot(&w);
-                w.axpy(-h[i][j], &v[i]);
-            }
+            // Modified Gram-Schmidt (batched local dots + single allreduce)
+            let jp1 = j + 1;
+            let mut h_loc = vec![0.0_f64; jp1];
+            for i in 0..jp1 { h_loc[i] = v[i].owned_dot(&w); }
+            v[0].comm().allreduce_sum_f64_slice(&mut h_loc);
+            for i in 0..jp1 { h[i][j] = h_loc[i]; w.axpy(-h[i][j], &v[i]); }
 
             h[j + 1][j] = w.global_norm();
             if h[j + 1][j] > 1e-30 {
@@ -859,7 +860,11 @@ pub fn par_solve_fgmres_jacobi(
             mul_assign_diag(&mut z[j].data, &inv_diag, &v[j].data, n);
             z[j].update_ghosts();
             let mut w = ParVector::zeros_like(b); a.spmv(&mut z[j], &mut w);
-            for i in 0..=j { h[i][j] = v[i].global_dot(&w); w.axpy(-h[i][j], &v[i]); }
+            let jp1 = j + 1;
+            let mut h_loc = vec![0.0_f64; jp1];
+            for i in 0..jp1 { h_loc[i] = v[i].owned_dot(&w); }
+            v[0].comm().allreduce_sum_f64_slice(&mut h_loc);
+            for i in 0..jp1 { h[i][j] = h_loc[i]; w.axpy(-h[i][j], &v[i]); }
             h[j + 1][j] = w.global_norm();
             if h[j + 1][j] > 1e-30 { v[j + 1].copy_from(&w); v[j + 1].scale(1.0 / h[j + 1][j]); }
             for i in 0..j {
@@ -1111,7 +1116,11 @@ where
             apply_precond(&v[j].data, &mut z_basis[j].data);
             z_basis[j].update_ghosts();
             let mut w = ParVector::zeros_like(b); a.spmv(&mut z_basis[j], &mut w);
-            for i in 0..=j { h[i][j] = v[i].global_dot(&w); w.axpy(-h[i][j], &v[i]); }
+            let jp1 = j + 1;
+            let mut h_loc = vec![0.0_f64; jp1];
+            for i in 0..jp1 { h_loc[i] = v[i].owned_dot(&w); }
+            v[0].comm().allreduce_sum_f64_slice(&mut h_loc);
+            for i in 0..jp1 { h[i][j] = h_loc[i]; w.axpy(-h[i][j], &v[i]); }
             h[j + 1][j] = w.global_norm();
             if h[j + 1][j] > 1e-30 { v[j + 1].copy_from(&w); v[j + 1].scale(1.0 / h[j + 1][j]); }
             for i in 0..j {
@@ -1209,7 +1218,11 @@ where
             apply_precond(&v[j].data, &mut z[j].data);
             z[j].update_ghosts();
             let mut w = ParVector::zeros_like(b); a.spmv(&mut z[j], &mut w);
-            for i in 0..=j { h[i][j] = v[i].global_dot(&w); w.axpy(-h[i][j], &v[i]); }
+            let jp1 = j + 1;
+            let mut h_loc = vec![0.0_f64; jp1];
+            for i in 0..jp1 { h_loc[i] = v[i].owned_dot(&w); }
+            v[0].comm().allreduce_sum_f64_slice(&mut h_loc);
+            for i in 0..jp1 { h[i][j] = h_loc[i]; w.axpy(-h[i][j], &v[i]); }
             h[j + 1][j] = w.global_norm();
             if h[j + 1][j] > 1e-30 { v[j + 1].copy_from(&w); v[j + 1].scale(1.0 / h[j + 1][j]); }
             for i in 0..j {
@@ -1617,11 +1630,12 @@ pub fn par_solve_gmres(
             let mut w = ParVector::zeros_like(b);
             a.spmv(&mut v[j], &mut w);
 
-            // Modified Gram-Schmidt
-            for i in 0..=j {
-                h[i][j] = v[i].global_dot(&w);
-                w.axpy(-h[i][j], &v[i]);
-            }
+            // Modified Gram-Schmidt (batched local dots + single allreduce)
+            let jp1 = j + 1;
+            let mut h_loc = vec![0.0_f64; jp1];
+            for i in 0..jp1 { h_loc[i] = v[i].owned_dot(&w); }
+            v[0].comm().allreduce_sum_f64_slice(&mut h_loc);
+            for i in 0..jp1 { h[i][j] = h_loc[i]; w.axpy(-h[i][j], &v[i]); }
 
             h[j + 1][j] = w.global_norm();
             if h[j + 1][j] > 1e-30 {

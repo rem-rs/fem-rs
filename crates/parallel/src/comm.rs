@@ -86,6 +86,12 @@ impl Comm {
         self.inner.allreduce_sum_i64(local)
     }
 
+    /// AllReduce sum of every element of `local` in-place (element-wise sum).
+    #[inline]
+    pub fn allreduce_sum_f64_slice(&self, local: &mut [f64]) {
+        self.inner.allreduce_sum_f64_slice(local);
+    }
+
     /// Broadcast a `usize` from `root` to all ranks.
     pub fn broadcast_usize(&self, root: Rank, val: usize) -> usize {
         let mut buf = (val as u64).to_le_bytes().to_vec();
