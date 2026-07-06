@@ -22,17 +22,17 @@ let integ = VectorDiffusionIntegrator { kappa: 1.0 };
 ```", |qp, k_elem, n, w| {
     let dim     = qp.dim;
     let n_nodes = n / dim;
-    for k in 0..n_nodes {
-        for l in 0..n_nodes {
-            let mut dot = 0.0;
-            for d in 0..dim {
-                dot += qp.grad_phys[k * dim + d] * qp.grad_phys[l * dim + d];
-            }
-            let contrib = w * dot;
-            for a in 0..dim {
-                let row = k * dim + a;
-                let col = l * dim + a;
-                k_elem[row * n + col] += contrib;
+    // Outer product over spatial dimensions: same-component coupling.
+    for d in 0..dim {
+        for k in 0..n_nodes {
+            let g_kd = qp.grad_phys[k * dim + d];
+            for l in 0..n_nodes {
+                let contrib = w * g_kd * qp.grad_phys[l * dim + d];
+                for a in 0..dim {
+                    let row = k * dim + a;
+                    let col = l * dim + a;
+                    k_elem[row * n + col] += contrib;
+                }
             }
         }
     }
