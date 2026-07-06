@@ -39,21 +39,22 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for CurlCurlIntegrator<C> {
         let w_mu = qp.weight * self.mu.eval(&ctx);
 
         if qp.dim == 2 {
-            // Scalar curl: curl[i] is a single f64.
+            // Scalar curl: curl[i] is a single f64 — already outer-product form.
             for i in 0..n {
                 for j in 0..n {
                     k_elem[i * n + j] += w_mu * qp.curl[i] * qp.curl[j];
                 }
             }
         } else {
-            // 3-D vector curl: curl[i*3 + c] is component c of curl of basis i.
-            for i in 0..n {
-                for j in 0..n {
-                    let mut dot = 0.0;
-                    for c in 0..3 {
-                        dot += qp.curl[i * 3 + c] * qp.curl[j * 3 + c];
+            // 3-D vector curl: outer product over 3 components.
+            // K += w_mu · (c₀·c₀ᵀ + c₁·c₁ᵀ + c₂·c₂ᵀ) where cₖ is column k
+            // of the n×3 vector-curl matrix.
+            for c in 0..3 {
+                for i in 0..n {
+                    let ci = qp.curl[i * 3 + c];
+                    for j in 0..n {
+                        k_elem[i * n + j] += w_mu * ci * qp.curl[j * 3 + c];
                     }
-                    k_elem[i * n + j] += w_mu * dot;
                 }
             }
         }
