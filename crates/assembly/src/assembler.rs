@@ -8,7 +8,7 @@ use nalgebra::DMatrix;
 
 use fem_core::types::DofId;
 use fem_element::{
-    ReferenceElement, PrismPk, PyramidPk,
+    QuadratureRule, ReferenceElement, PrismPk, PyramidPk, VectorReferenceElement,
     lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
                 QuadQ1, QuadQ2, HexQ1},
 };
@@ -274,7 +274,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     space: &S,
     e: u32,
     integrators: &[&dyn BilinearIntegrator],
-    quad_order: u8,
+    quad: &QuadratureRule,
     coo: &mut CooMatrix<f64>,
     scratch: &mut ElementScratch,
 ) {
@@ -285,7 +285,6 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let elem_type = mesh.element_type(e);
     let ref_elem  = ref_elem_vol(elem_type, order);
     let n_ldofs   = ref_elem.n_dofs();
-    let quad      = ref_elem.quadrature(quad_order);
 
     let raw_dofs: &[DofId] = space.element_dofs(e);
     scratch.global_dofs.clear();
@@ -377,7 +376,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
     space: &S,
     e: u32,
     integrators: &[&dyn LinearIntegrator],
-    quad_order: u8,
+    quad: &QuadratureRule,
     rhs: &mut [f64],
     scratch: &mut ElementScratch,
 ) {
@@ -388,7 +387,6 @@ fn accumulate_volume_linear_element<S: FESpace>(
     let elem_type = mesh.element_type(e);
     let ref_elem  = ref_elem_vol(elem_type, order);
     let n_ldofs   = ref_elem.n_dofs();
-    let quad      = ref_elem.quadrature(quad_order);
 
     let raw_dofs: &[DofId] = space.element_dofs(e);
     scratch.global_dofs.clear();
@@ -582,7 +580,7 @@ fn accumulate_boundary_bilinear_face(
 fn assemble_bilinear_volume_parallel<S: FESpace>(
     space: &S,
     integrators: &[&dyn BilinearIntegrator],
-    quad_order: u8,
+    quad: &QuadratureRule,
 ) -> CsrMatrix<f64> {
     let mesh = space.mesh();
     let n_dofs = space.n_dofs();
@@ -611,7 +609,7 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
                 (coo, ElementScratch::new())
             },
             |(mut local_coo, mut scratch), e| {
-                accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut local_coo, &mut scratch);
+                accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut local_coo, &mut scratch);
                 (local_coo, scratch)
             },
         )
@@ -630,7 +628,7 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
 fn assemble_linear_volume_parallel<S: FESpace>(
     space: &S,
     integrators: &[&dyn LinearIntegrator],
-    quad_order: u8,
+    quad: &QuadratureRule,
 ) -> Vec<f64> {
     let mesh = space.mesh();
     let n_dofs = space.n_dofs();
@@ -639,7 +637,7 @@ fn assemble_linear_volume_parallel<S: FESpace>(
         .fold(
             || (vec![0.0_f64; n_dofs], ElementScratch::new()),
             |(mut local_rhs, mut scratch), e| {
-                accumulate_volume_linear_element(space, e, integrators, quad_order, &mut local_rhs, &mut scratch);
+                accumulate_volume_linear_element(space, e, integrators, quad, &mut local_rhs, &mut scratch);
                 (local_rhs, scratch)
             },
         )
@@ -742,17 +740,31 @@ impl Assembler {
         let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
 
+        // Precompute quadrature rule from the first element's type (same for all).
+        let elem_type = mesh.element_type(0);
+        let ref_elem  = ref_elem_vol(elem_type, 1); // order doesn't matter for quadrature
+        let quad      = ref_elem.quadrature(quad_order);
+
+        // Estimate raw nnz for COO pre-allocation.
+        // Each element contributes `dofs_per_elem^2` triplets.
+        // Use first element's n_dofs for uniform-order meshes (common case).
+        let elem0    = mesh.element_type(0);
+        let ref0     = ref_elem_vol(elem0, space.element_order(0));
+        let dofs_per_elem = ref0.n_dofs();
+        let est_nnz  = mesh.n_elements() as usize * dofs_per_elem * dofs_per_elem;
+
         #[cfg(feature = "parallel")]
         {
             if mesh.n_elements() >= assembly_parallel_min_elems() {
-                return assemble_bilinear_volume_parallel(space, integrators, quad_order);
+                return assemble_bilinear_volume_parallel(space, integrators, &quad);
             }
         }
 
         let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+        coo.reserve(est_nnz.min(10_000_000)); // cap to avoid giant pre-allocs for hp meshes
         let mut scratch = ElementScratch::new();
         for e in mesh.elem_iter() {
-            accumulate_volume_bilinear_element(space, e, integrators, quad_order, &mut coo, &mut scratch);
+            accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut coo, &mut scratch);
         }
         coo.into_csr()
     }
@@ -768,17 +780,22 @@ impl Assembler {
         let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
 
+        // Precompute quadrature rule.
+        let elem_type = mesh.element_type(0);
+        let ref_elem  = ref_elem_vol(elem_type, 1);
+        let quad      = ref_elem.quadrature(quad_order);
+
         #[cfg(feature = "parallel")]
         {
             if mesh.n_elements() >= assembly_parallel_min_elems() {
-                return assemble_linear_volume_parallel(space, integrators, quad_order);
+                return assemble_linear_volume_parallel(space, integrators, &quad, quad_order);
             }
         }
 
         let mut rhs = vec![0.0_f64; n_dofs];
         let mut scratch = ElementScratch::new();
         for e in mesh.elem_iter() {
-            accumulate_volume_linear_element(space, e, integrators, quad_order, &mut rhs, &mut scratch);
+            accumulate_volume_linear_element(space, e, integrators, &quad, &mut rhs, &mut scratch);
         }
         rhs
     }
