@@ -343,7 +343,7 @@ impl DgEuler2D {
             for e in 0..self.n_elems {
                 for i in 0..dofs_per_elem { comp_buf[e * dofs_per_elem + i] = u[self.idx(e as u32, c, i)]; }
             }
-            crate::hyperbolic::limiter_barth_jespersen(
+            crate::physics::hyperbolic::limiter_barth_jespersen(
                 &mut comp_buf, self.n_elems, dofs_per_elem, &[], face_elems,
             );
             for e in 0..self.n_elems {

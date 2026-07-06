@@ -47,8 +47,8 @@ use fem_assembly::{
     HcurlMatrixFreeOperator, MatFreeOperator,
     TangentialMassIntegrator,
     VectorAssembler,
-    VectorBoundaryAssembler,
-    coefficient::{ConstantMatrixCoeff, FnMatrixCoeff},
+    boundary::vector_boundary::VectorBoundaryAssembler,
+    postproc::coefficient::{ConstantMatrixCoeff, FnMatrixCoeff},
     standard::{CurlCurlIntegrator, TangentialTraceLFIntegrator, VectorMassIntegrator, VectorMassTensorIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };

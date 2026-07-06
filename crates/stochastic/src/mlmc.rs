@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn legendre_poly_known_values() {
-        let (p0, dp0) = legendre_poly(0, 0.5);
+        let (p0, _dp0) = legendre_poly(0, 0.5);
         assert!((p0 - 1.0).abs() < 1e-14);
         let (p1, dp1) = legendre_poly(1, 0.5);
         assert!((p1 - 0.5).abs() < 1e-14);

@@ -17,7 +17,7 @@
 /// * `w` — weighted coefficient (`= qp.weight × coeff.eval(&ctx)`)
 macro_rules! scalar_bilinear_integrator {
     ($name:ident, $field:ident, $doc:literal, |$qp:ident, $kelem:ident, $n:ident, $w:ident| $body:block) => {
-        use crate::coefficient::{CoeffCtx, ScalarCoeff};
+        use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
         use crate::integrator::{BilinearIntegrator, QpData};
 
         #[doc = $doc]
@@ -45,7 +45,7 @@ macro_rules! scalar_bilinear_integrator {
 /// [`BdQpData`], with `CoeffCtx::from_qp` receiving `Some(phi), None`.
 macro_rules! boundary_scalar_bilinear {
     ($name:ident, $field:ident, $doc:literal, |$qp:ident, $kface:ident, $n:ident, $w:ident| $body:block) => {
-        use crate::coefficient::{CoeffCtx, ScalarCoeff};
+        use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
         use crate::integrator::{BdQpData, BoundaryBilinearIntegrator};
 
         #[doc = $doc]

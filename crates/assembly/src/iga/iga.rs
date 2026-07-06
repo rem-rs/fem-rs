@@ -692,7 +692,7 @@ pub fn assemble_iga_elasticity_3d(
 /// Extensions: multi-patch, higher-order materials.
 pub struct IgaHyperelasticity2D {
     mesh: NurbsMesh2D,
-    model: crate::nonlinear_hyperelasticity::HyperelasticModel,
+    model: crate::physics::nonlinear_hyperelasticity::HyperelasticModel,
     dirichlet: Vec<(usize, f64)>,
     quad_order: u8,
 }
@@ -700,7 +700,7 @@ pub struct IgaHyperelasticity2D {
 impl IgaHyperelasticity2D {
     pub fn new(
         mesh: NurbsMesh2D,
-        model: crate::nonlinear_hyperelasticity::HyperelasticModel,
+        model: crate::physics::nonlinear_hyperelasticity::HyperelasticModel,
         dirichlet: Vec<(usize, f64)>,
         quad_order: u8,
     ) -> Self {
@@ -708,7 +708,7 @@ impl IgaHyperelasticity2D {
     }
 }
 
-impl crate::nonlinear::NonlinearForm for IgaHyperelasticity2D {
+impl crate::physics::nonlinear::NonlinearForm for IgaHyperelasticity2D {
     fn n_dofs(&self) -> usize {
         2 * self.mesh.patches.iter().map(|p| p.control_pts.len()).sum::<usize>()
     }
@@ -764,7 +764,7 @@ impl crate::nonlinear::NonlinearForm for IgaHyperelasticity2D {
         let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
 
         let (lam, mu) = match &self.model {
-            crate::nonlinear_hyperelasticity::HyperelasticModel::NeoHookean { lambda, mu } => (*lambda, *mu),
+            crate::physics::nonlinear_hyperelasticity::HyperelasticModel::NeoHookean { lambda, mu } => (*lambda, *mu),
             _ => (0.0, 1.0),
         };
 
@@ -833,7 +833,7 @@ impl crate::nonlinear::NonlinearForm for IgaHyperelasticity2D {
 /// DOF ordering: control point `a` → DOFs `3a` (ux), `3a+1` (uy), `3a+2` (uz).
 pub struct IgaHyperelasticity3D {
     mesh: NurbsMesh3D,
-    model: crate::nonlinear_hyperelasticity::HyperelasticModel,
+    model: crate::physics::nonlinear_hyperelasticity::HyperelasticModel,
     dirichlet: Vec<(usize, f64)>,
     quad_order: u8,
 }
@@ -841,7 +841,7 @@ pub struct IgaHyperelasticity3D {
 impl IgaHyperelasticity3D {
     pub fn new(
         mesh: NurbsMesh3D,
-        model: crate::nonlinear_hyperelasticity::HyperelasticModel,
+        model: crate::physics::nonlinear_hyperelasticity::HyperelasticModel,
         dirichlet: Vec<(usize, f64)>,
         quad_order: u8,
     ) -> Self {
@@ -849,7 +849,7 @@ impl IgaHyperelasticity3D {
     }
 }
 
-impl crate::nonlinear::NonlinearForm for IgaHyperelasticity3D {
+impl crate::physics::nonlinear::NonlinearForm for IgaHyperelasticity3D {
     fn n_dofs(&self) -> usize {
         3 * self.mesh.patches.iter().map(|p| p.control_pts.len()).sum::<usize>()
     }
@@ -914,7 +914,7 @@ impl crate::nonlinear::NonlinearForm for IgaHyperelasticity3D {
         let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
 
         let (lam, mu) = match &self.model {
-            crate::nonlinear_hyperelasticity::HyperelasticModel::NeoHookean { lambda, mu } => (*lambda, *mu),
+            crate::physics::nonlinear_hyperelasticity::HyperelasticModel::NeoHookean { lambda, mu } => (*lambda, *mu),
             _ => (0.0, 1.0),
         };
 
@@ -1641,8 +1641,8 @@ mod tests {
 
     #[test]
     fn iga_hyperelasticity_2d_smoke() {
-        use crate::nonlinear::NewtonConfig;
-        use crate::nonlinear_hyperelasticity::HyperelasticModel;
+        use crate::physics::nonlinear::NewtonConfig;
+        use crate::physics::nonlinear_hyperelasticity::HyperelasticModel;
 
         let p = 1;
         let n = 4;
@@ -1683,7 +1683,7 @@ mod tests {
             line_search: false,
             ..NewtonConfig::default()
         };
-        let result = crate::nonlinear::NewtonSolver::new(cfg).solve(&form, &rhs, &mut u);
+        let result = crate::physics::nonlinear::NewtonSolver::new(cfg).solve(&form, &rhs, &mut u);
         match &result {
             Ok(r) => eprintln!("  [IGA hyperelasticity] converged in {} iters, final ‖F‖={:.3e}", r.iterations, r.final_residual),
             Err(r) => eprintln!("  [IGA hyperelasticity] FAILED: {} iters, ‖F‖={:.3e}", r.iterations, r.final_residual),
@@ -1699,8 +1699,8 @@ mod tests {
 
     #[test]
     fn iga_hyperelasticity_3d_smoke() {
-        use crate::nonlinear::NewtonConfig;
-        use crate::nonlinear_hyperelasticity::HyperelasticModel;
+        use crate::physics::nonlinear::NewtonConfig;
+        use crate::physics::nonlinear_hyperelasticity::HyperelasticModel;
 
         let p = 1;
         let n = 3; // 3×3×3 = 27 control points
@@ -1742,7 +1742,7 @@ mod tests {
             line_search: false,
             ..NewtonConfig::default()
         };
-        let result = crate::nonlinear::NewtonSolver::new(cfg).solve(&form, &rhs, &mut u);
+        let result = crate::physics::nonlinear::NewtonSolver::new(cfg).solve(&form, &rhs, &mut u);
         match &result {
             Ok(r) => eprintln!("  [IGA 3D hyperelasticity] converged in {} iters, ‖F‖={:.3e}", r.iterations, r.final_residual),
             Err(r) => eprintln!("  [IGA 3D hyperelasticity] FAILED: {} iters, ‖F‖={:.3e}", r.iterations, r.final_residual),

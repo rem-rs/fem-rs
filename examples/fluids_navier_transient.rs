@@ -10,7 +10,7 @@
 use std::time::Instant;
 use fem_assembly::{
     Assembler, standard::{VectorDiffusionIntegrator, MassIntegrator},
-    navier_stokes::{assemble_convection_matrix, assemble_divergence_matrix},
+    physics::navier_stokes::{assemble_convection_matrix, assemble_divergence_matrix},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::SimplexMesh;
@@ -120,7 +120,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use fem_assembly::{Assembler, standard::{VectorDiffusionIntegrator, MassIntegrator}};
-    use fem_assembly::navier_stokes::assemble_divergence_matrix;
+    use fem_assembly::physics::navier_stokes::assemble_divergence_matrix;
     use fem_linalg::CooMatrix;
     use fem_mesh::SimplexMesh;
     use fem_space::{H1Space, VectorH1Space, fe_space::FESpace};

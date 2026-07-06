@@ -33,7 +33,7 @@
 //! op.apply(&x, &mut y);  // y += K x  (matrix-free)
 //! ```
 
-use crate::coefficient::{CoeffCtx, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3}};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -634,7 +634,7 @@ mod tests {
     use super::*;
     use fem_mesh::SimplexMesh;
     use fem_space::H1Space;
-    use crate::coefficient::FnCoeff;
+    use crate::postproc::coefficient::FnCoeff;
     use crate::assembler::Assembler;
     use crate::standard::{DiffusionIntegrator, MassIntegrator};
 

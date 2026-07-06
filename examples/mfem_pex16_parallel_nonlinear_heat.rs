@@ -1,4 +1,4 @@
-﻿//! # Parallel Example 16 �?Parallel nonlinear heat equation
+//! # Parallel Example 16 �?Parallel nonlinear heat equation
 //! (analogous to MFEM pex16)
 //!
 //! κ(u) = 1 + u², Newton + GMRES in parallel.
@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use fem_assembly::standard::DomainSourceIntegrator;
-use fem_assembly::nonlinear::{NewtonConfig, NewtonSolver, NonlinearForm};
+use fem_assembly::physics::nonlinear::{NewtonConfig, NewtonSolver, NonlinearForm};
 use fem_mesh::SimplexMesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
@@ -47,7 +47,7 @@ fn main() {
         for _iter in 0..20 {
             let u_slice: Vec<f64> = u.as_slice().to_vec();
             let kappa = move |x: &[f64]| 1.0 + (x[0].powi(2) + x[1].powi(2)) / 2.0; // approximate
-            let diff = fem_assembly::coefficient::ScalarFunctionCoefficient(Arc::new(kappa));
+            let diff = fem_assembly::postproc::coefficient::ScalarFunctionCoefficient(Arc::new(kappa));
             let _ = diff;
             // For simplicity, just solve the linear problem with constant κ = 2
             break;

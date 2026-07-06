@@ -9,7 +9,7 @@
 //! where `f` is a vector-valued source and `v` is a vector basis function
 //! from H(curl), H(div), or similar vector FE spaces.
 
-use crate::coefficient::{CoeffCtx, VectorCoeff};
+use crate::postproc::coefficient::{CoeffCtx, VectorCoeff};
 use crate::vector_integrator::{VectorLinearIntegrator, VectorQpData};
 
 /// Linear integrator for a vector source term `∫ f · v dx`.
@@ -55,7 +55,7 @@ impl<V: VectorCoeff> VectorLinearIntegrator for VectorDomainLFIntegrator<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coefficient::ConstantVectorCoeff;
+    use crate::postproc::coefficient::ConstantVectorCoeff;
     use crate::vector_assembler::VectorAssembler;
     use fem_mesh::SimplexMesh;
     use fem_space::HCurlSpace;

@@ -1710,7 +1710,7 @@ mod tests {
     use crate::par_assembler::ParAssembler;
     use crate::par_simplex::partition_simplex;
     use crate::par_space::ParallelFESpace;
-    use fem_assembly::coefficient::ConstantVectorCoeff;
+    use fem_assembly::postproc::coefficient::ConstantVectorCoeff;
     use fem_assembly::standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator};
     use fem_mesh::SimplexMesh;
     use fem_space::H1Space;

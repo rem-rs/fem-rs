@@ -14,7 +14,7 @@
 //! Element DOFs must be **interleaved** (node-major):
 //! `[u_x(0), u_y(0), u_x(1), u_y(1), …]` as produced by [`VectorH1Space`].
 
-use crate::coefficient::{CoeffCtx, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 
 /// Bilinear integrator for the isotropic linear elasticity operator.

@@ -9,7 +9,7 @@
 //!
 //! where `u` and `v` are vector-valued basis functions.
 
-use crate::coefficient::{CoeffCtx, MatrixCoeff, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, MatrixCoeff, ScalarCoeff};
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorQpData};
 
 // ─── Isotropic ───────────────────────────────────────────────────────────────

@@ -264,6 +264,7 @@ pub use sdc::{
 mod tests {
     use super::*;
     use fem_linalg::{CooMatrix, CsrMatrix};
+    use linlvo::{Ilu0Precond, IldltPrecond, JacobiPrecond};
 
     /// 1-D Laplacian: tridiagonal [-1, 2, -1] of size n.
     fn laplacian_1d(n: usize) -> CsrMatrix<f64> {

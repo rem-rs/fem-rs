@@ -31,7 +31,7 @@
 
 use std::f64::consts::PI;
 
-use fem_assembly::{Assembler, nonlinear::{NonlinearDiffusionForm, NewtonSolver, NewtonConfig}};
+use fem_assembly::{Assembler, physics::nonlinear::{NonlinearDiffusionForm, NewtonSolver, NewtonConfig}};
 use fem_mesh::SimplexMesh;
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 

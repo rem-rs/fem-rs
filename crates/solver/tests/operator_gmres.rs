@@ -3,7 +3,7 @@
 use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, CsrLinearOperator, LinearOperator as AssemblyLinearOperator, standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator}};
-use fem_assembly::coefficient::ConstantVectorCoeff;
+use fem_assembly::postproc::coefficient::ConstantVectorCoeff;
 use fem_mesh::SimplexMesh;
 use fem_solver::{solve_fgmres_ilu0, solve_fgmres_ilut, solve_gmres, solve_gmres_ilu0, solve_gmres_iluk, solve_gmres_ilut, solve_gmres_operator, solve_precond_kind, PrecondKind, SolverConfig};
 use fem_space::{H1Space, constraints::{apply_dirichlet, boundary_dofs}};

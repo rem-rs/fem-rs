@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use crate::assembler::Assembler;
     use crate::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-    use crate::grid_function::GridFunction;
+    use crate::postproc::grid_function::GridFunction;
     use fem_mesh::SimplexMesh;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;

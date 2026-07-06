@@ -36,8 +36,8 @@
 //! cargo run --example mfem_ex14_dc_current -- --n 16 --vtk output.vtu
 //! ```
 
-use fem_assembly::postprocess::compute_element_gradients;
-use fem_assembly::{coefficient::FnCoeff, standard::DiffusionIntegrator, Assembler};
+use fem_assembly::postproc::postprocess::compute_element_gradients;
+use fem_assembly::{postproc::coefficient::FnCoeff, standard::DiffusionIntegrator, Assembler};
 use fem_io::vtk::{DataArray, VtkWriter};
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
 use fem_solver::{solve_gmres, solve_pcg_jacobi, SolverConfig};

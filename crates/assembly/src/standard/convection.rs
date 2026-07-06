@@ -8,7 +8,7 @@
 //!
 //! where `b` is a vector-valued convection velocity field.
 
-use crate::coefficient::{CoeffCtx, VectorCoeff};
+use crate::postproc::coefficient::{CoeffCtx, VectorCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 
 /// Bilinear integrator for the convection operator `(b · ∇u) v`.
@@ -60,7 +60,7 @@ impl<V: VectorCoeff> BilinearIntegrator for ConvectionIntegrator<V> {
 mod tests {
     use super::*;
     use crate::assembler::Assembler;
-    use crate::coefficient::ConstantVectorCoeff;
+    use crate::postproc::coefficient::ConstantVectorCoeff;
     use fem_mesh::SimplexMesh;
     use fem_space::H1Space;
 

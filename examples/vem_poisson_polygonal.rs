@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use fem_assembly::vem_poisson::assemble_vem_poisson;
+use fem_assembly::physics::vem_poisson::assemble_vem_poisson;
 use fem_mesh::poly_mesh::PolyMesh;
 use fem_space::vem::VEMSpace;
 use fem_space::fe_space::FESpace;
@@ -37,7 +37,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use fem_assembly::vem_poisson::assemble_vem_poisson;
+    use fem_assembly::physics::vem_poisson::assemble_vem_poisson;
     use fem_mesh::poly_mesh::PolyMesh;
     use fem_space::vem::VEMSpace;
     use fem_space::fe_space::FESpace;

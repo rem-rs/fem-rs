@@ -121,9 +121,19 @@ impl RegressionCheck {
     }
 
     fn save(&self) {
+        // Merge with existing baseline entries so parallel tests don't clobber.
+        let mut merged = self.metrics.clone();
+        if let Ok(content) = fs::read_to_string(&self.baseline_path) {
+            if let Ok(stored) = serde_json::from_str::<BaselineFile>(&content) {
+                for (k, v) in stored.metrics {
+                    merged.entry(k).or_insert(v);
+                }
+            }
+        }
+        let n_metrics = merged.len();
         let file = BaselineFile {
             name: self.name.clone(),
-            metrics: self.metrics.clone(),
+            metrics: merged,
         };
         if let Some(parent) = self.baseline_path.parent() {
             fs::create_dir_all(parent).expect("failed to create baseline directory");
@@ -135,7 +145,7 @@ impl RegressionCheck {
         eprintln!(
             "  [regression] BASELINE UPDATED: {}  ({} metrics)",
             self.baseline_path.display(),
-            self.metrics.len()
+            n_metrics
         );
     }
 

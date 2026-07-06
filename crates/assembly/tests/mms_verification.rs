@@ -23,7 +23,7 @@ use fem_assembly::{
     },
     mixed::DivIntegrator,
     vector_integrator::VectorBilinearIntegrator,
-    coefficient::FnVectorCoeff,
+    postproc::coefficient::FnVectorCoeff,
     DiscreteLinearOperator,
 };
 use fem_element::{

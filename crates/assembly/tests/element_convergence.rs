@@ -5,7 +5,7 @@
 use std::f64::consts::PI;
 
 use fem_assembly::{
-    coefficient::FnVectorCoeff,
+    postproc::coefficient::FnVectorCoeff,
     standard::{VectorDomainLFIntegrator, VectorMassIntegrator},
     vector_assembler::VectorAssembler,
 };

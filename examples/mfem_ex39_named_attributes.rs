@@ -361,7 +361,7 @@ fn assemble_named_region_source_p1(
     rhs
 }
 
-fn solve_diffusion_p1<const D: usize, C: fem_assembly::coefficient::ScalarCoeff>(
+fn solve_diffusion_p1<const D: usize, C: fem_assembly::postproc::coefficient::ScalarCoeff>(
     mesh: SimplexMesh<D>,
     dirichlet: &[(u32, f64)],
     kappa: C,

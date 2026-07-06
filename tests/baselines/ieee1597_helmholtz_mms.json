@@ -1,13 +1,8 @@
 {
   "name": "ieee1597_helmholtz_mms",
   "metrics": {
-    "l2_err_im": {
-      "value": 0.03080635904407916,
-      "rtol": 1e-6,
-      "atol": 1e-10
-    },
-    "l2_err_re": {
-      "value": 0.030806359044079155,
+    "sol_norm_k1_n16_p1": {
+      "value": 7.978058902693199,
       "rtol": 1e-6,
       "atol": 1e-10
     }

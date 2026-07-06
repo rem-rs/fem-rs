@@ -830,7 +830,7 @@ mod tests {
     fn curl_curl_tensor_identity_matches_scalar_2d() {
         use crate::standard::{CurlCurlIntegrator, CurlCurlTensorIntegrator};
         use crate::vector_assembler::VectorAssembler;
-        use crate::coefficient::ConstantMatrixCoeff;
+        use crate::postproc::coefficient::ConstantMatrixCoeff;
 
         let mesh1 = SimplexMesh::<2>::unit_square_tri(4);
         let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
@@ -862,7 +862,7 @@ mod tests {
     fn vector_mass_tensor_identity_matches_scalar_2d() {
         use crate::standard::{VectorMassIntegrator, VectorMassTensorIntegrator};
         use crate::vector_assembler::VectorAssembler;
-        use crate::coefficient::ConstantMatrixCoeff;
+        use crate::postproc::coefficient::ConstantMatrixCoeff;
 
         let mesh1 = SimplexMesh::<2>::unit_square_tri(4);
         let mesh2 = SimplexMesh::<2>::unit_square_tri(4);

@@ -20,7 +20,7 @@
 //! println!("Converged in {} steps", result.steps.len());
 //! ```
 
-use crate::nonlinear::{NewtonConfig, NewtonSolver};
+use crate::physics::nonlinear::{NewtonConfig, NewtonSolver};
 
 /// Configuration for the plasticity load‑stepping driver.
 #[derive(Debug, Clone)]
@@ -110,7 +110,7 @@ impl PlasticityDriver {
     ///   converged solution at the final load level.
     pub fn solve(
         &self,
-        form: &dyn crate::nonlinear::NonlinearForm,
+        form: &dyn crate::physics::nonlinear::NonlinearForm,
         rhs_base: &[f64],
         u: &mut [f64],
     ) -> Result<DriverResult, DriverResult> {
@@ -188,7 +188,7 @@ impl PlasticityDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nonlinear::NonlinearForm;
+    use crate::physics::nonlinear::NonlinearForm;
     use super::super::plasticity::{J2PlasticityForm, PlasticConfig};
     use fem_mesh::topology::MeshTopology;
     use fem_mesh::SimplexMesh;

@@ -55,8 +55,8 @@ fn main() {
     println!();
 
     let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
-    let exact = |x: &[f64]| (PI * x[0]).sin() * (PI * x[1]).sin();
-    let pm = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let _exact = |x: &[f64]| (PI * x[0]).sin() * (PI * x[1]).sin();
+    let _pm = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
 
     let mut results: Vec<(&str, usize, f64, f64)> = Vec::new();
 

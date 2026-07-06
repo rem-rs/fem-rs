@@ -85,7 +85,7 @@ mod tests {
     /// DiffusionIntegrator with FnCoeff for spatially-varying kappa.
     #[test]
     fn spatially_varying_kappa() {
-        use crate::coefficient::FnCoeff;
+        use crate::postproc::coefficient::FnCoeff;
         let mesh  = SimplexMesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let integ = DiffusionIntegrator { kappa: FnCoeff(|x: &[f64]| 1.0 + x[0]) };

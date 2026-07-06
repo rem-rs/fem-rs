@@ -7,7 +7,7 @@
 //!   cargo run --example hyperelastic_hooke
 //!   cargo run --example hyperelastic_hooke -- --n 6
 
-use fem_assembly::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};
+use fem_assembly::physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};
 use fem_assembly::NewtonConfig;
 use fem_mesh::SimplexMesh;
 use fem_space::VectorH1Space;
@@ -59,7 +59,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use fem_assembly::nonlinear_hyperelasticity::HyperelasticModel;
+    use fem_assembly::physics::nonlinear_hyperelasticity::HyperelasticModel;
 
     #[test]
     fn hooke_3d_converges() {
@@ -82,7 +82,7 @@ mod tests {
             dirichlet.push((d as usize + 2 * n_scalar, -0.2));
         }
         let model = HyperelasticModel::NeoHookean { mu: 0.3, lambda: 1.0 };
-        let form = fem_assembly::nonlinear_hyperelasticity::HyperelasticityForm::new(space, model, dirichlet, 3);
+        let form = fem_assembly::physics::nonlinear_hyperelasticity::HyperelasticityForm::new(space, model, dirichlet, 3);
         let rhs = vec![0.0; n_dofs];
         let mut u = vec![0.0; n_dofs];
         for &(d, v) in &form.dirichlet { u[d] = v; }

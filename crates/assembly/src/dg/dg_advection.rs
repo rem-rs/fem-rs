@@ -23,7 +23,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
-use crate::coefficient::{CoeffCtx, VectorCoeff};
+use crate::postproc::coefficient::{CoeffCtx, VectorCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 use crate::interior_faces::InteriorFaceList;
 
@@ -563,7 +563,7 @@ mod tests {
     use super::*;
     use fem_mesh::SimplexMesh;
     use fem_space::L2Space;
-    use crate::coefficient::ConstantVectorCoeff;
+    use crate::postproc::coefficient::ConstantVectorCoeff;
 
     #[test]
     fn volume_term_is_transpose_of_convection() {

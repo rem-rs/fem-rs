@@ -17,7 +17,7 @@
 //! These types are provided for API completeness and naming consistency
 //! with MFEM.
 
-use crate::coefficient::{CoeffCtx, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 use crate::integrator::{BdQpData, BoundaryLinearIntegrator};
 
 /// Boundary linear integrator for `∫_Γ g(x) (n · v) ds`.

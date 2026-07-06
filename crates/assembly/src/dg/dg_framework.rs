@@ -29,7 +29,7 @@ use fem_space::{fe_space::FESpace, L2Space};
 
 use crate::{
     assembler::Assembler,
-    coefficient::ConstantVectorCoeff,
+    postproc::coefficient::ConstantVectorCoeff,
     interior_faces::InteriorFaceList,
     standard::MassIntegrator,
 };

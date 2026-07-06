@@ -48,7 +48,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use fem_assembly::{nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel}, NewtonConfig};
+use fem_assembly::{physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel}, NewtonConfig};
     use fem_mesh::SimplexMesh;
     use fem_space::VectorH1Space;
     #[test] fn smoke() {

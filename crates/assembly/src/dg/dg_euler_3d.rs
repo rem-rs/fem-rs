@@ -393,7 +393,7 @@ impl<M: MeshTopology + Send + Sync> DgEuler3D<M> {
             for e in 0..self.n_elems {
                 for i in 0..4 { comp_buf[e * 4 + i] = u[self.idx(e as u32, c, i)]; }
             }
-            crate::hyperbolic::limiter_barth_jespersen(
+            crate::physics::hyperbolic::limiter_barth_jespersen(
                 &mut comp_buf, self.n_elems, 4, &[], face_elems,
             );
             for e in 0..self.n_elems {

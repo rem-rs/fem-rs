@@ -17,7 +17,7 @@ use fem_assembly::{
 use fem_mesh::{SimplexMesh, MeshTopology};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_stochastic::{
-    Covariance1D, ExponentialCovariance1D, KarhunenLoeveExpansion1D,
+    Covariance1D as _, ExponentialCovariance1D, KarhunenLoeveExpansion1D,
     RandomField, MonteCarloConfig, run_monte_carlo,
 };
 use fem_space::{

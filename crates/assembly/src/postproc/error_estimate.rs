@@ -3,7 +3,7 @@
 
 use fem_mesh::topology::MeshTopology;
 use fem_space::FESpace;
-use crate::grid_function::GridFunction;
+use crate::postproc::grid_function::GridFunction;
 
 // ─── ElementIndicators ───────────────────────────────────────────────────────
 

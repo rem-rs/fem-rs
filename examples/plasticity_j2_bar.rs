@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use fem_assembly::nonlinear::NonlinearForm;
+use fem_assembly::physics::nonlinear::NonlinearForm;
 use fem_assembly::plasticity::{J2PlasticityForm, PlasticConfig};
 use fem_assembly::Assembler;
 use fem_assembly::standard::DomainSourceIntegrator;
@@ -84,7 +84,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use fem_assembly::nonlinear::NonlinearForm;
+    use fem_assembly::physics::nonlinear::NonlinearForm;
     use fem_assembly::plasticity::{J2PlasticityForm, PlasticConfig};
     use fem_mesh::SimplexMesh;
     use fem_space::vector_h1::VectorH1Space;

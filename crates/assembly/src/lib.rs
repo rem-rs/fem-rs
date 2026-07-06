@@ -67,50 +67,37 @@
 //!   [`VectorAssembler`].  Backed by the workspace-pinned [`reed`](https://github.com/rem-rs/reed)
 //!   crates.
 
-pub mod adjoint_pde;
 pub mod assembler;
 pub mod backend;
-pub mod bc;
-pub mod coefficient;
 pub mod complex;
 pub mod integrator;
 pub mod standard;
 pub mod block_assembler;
 pub mod mixed;
 pub mod interior_faces;
-pub mod hyperbolic;
-pub mod nonlinear;
-pub mod nonlinear_hyperelasticity;
 pub mod partial;
 pub mod vector_integrator;
 pub mod vector_assembler;
-pub mod vector_boundary;
-pub mod grid_function;
 mod assembler_iga_fespace;
-pub mod postprocess;
 pub mod discrete_op;
 pub mod transfer;
 /// High-level Form abstractions (BilinearForm / LinearForm).
 pub mod form;
 pub mod static_cond;
-pub mod face_assembly;
-pub mod navier_stokes;
-pub use navier_stokes::{
+pub mod h1_quad_order_hint;
+pub mod lor_factory;
+
+pub use physics::navier_stokes::{
     assemble_convection_matrix, assemble_divergence_matrix,
     assemble_oseen_block, assemble_pressure_mass,
     solve_oseen_step, solve_ns_picard,
     assemble_ale_convection_matrix, assemble_ale_oseen_block,
 };
-pub mod error_estimate;
-pub mod h1_quad_order_hint;
-pub mod pf_solver;
-pub mod fsi;
-pub mod thermoelastic;
-pub mod cr_stokes;
-pub mod surface;
-pub mod vem_poisson;
-pub mod cutfem;
-pub mod lor_factory;
+
+// ── Reorganised subdirectory modules ──────────────────────────────────────
+pub mod physics;
+pub mod boundary;
+pub mod postproc;
 
 // ── Method-family subdirectories ──────────────────────────────────────────
 
@@ -176,7 +163,7 @@ pub use integrator::{
 };
 pub use vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};
 pub use vector_assembler::{VectorAssembler, TRI_ND2_RT2_MIXED_QUAD_ORDER};
-pub use vector_boundary::{
+pub use boundary::vector_boundary::{
     VectorBoundaryAssembler, VectorBoundaryBilinearIntegrator, VectorBoundaryLinearIntegrator,
     VectorBdQpData, TangentialMassIntegrator,
 };
@@ -184,17 +171,17 @@ pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, Pressure
 pub use block_assembler::{
     assemble_mixed_block, assemble_diagonal_block, assemble_system_2x2,
 };
-pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux, HyperbolicConservationLaw, EulerConservationLaw, minmod, limiter_minmod_tet_p1};
+pub use physics::hyperbolic::{HyperbolicFormIntegrator, NumericalFlux, HyperbolicConservationLaw, EulerConservationLaw, minmod, limiter_minmod_tet_p1};
 pub use interior_faces::InteriorFaceList;
-pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
-pub use nonlinear_hyperelasticity::HyperelasticityForm;
+pub use physics::nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
+pub use physics::nonlinear_hyperelasticity::HyperelasticityForm;
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator,
                   HcurlMatrixFreeOperator, solve_hcurl_matrix_free,
                   solve_hcurl_eigen_preconditioned_amg};
 #[cfg(feature = "reed")]
 pub use reed::HcurlReedOperator;
-pub use grid_function::GridFunction;
-pub use grid_function::project_coefficient;
+pub use postproc::grid_function::GridFunction;
+pub use postproc::grid_function::project_coefficient;
 pub use iga::iga_assembler::{
     assemble_bilinear_diffusion_iga_1d, assemble_bilinear_diffusion_iga_1d_physical,
     assemble_bilinear_helmholtz_iga_1d, assemble_bilinear_helmholtz_iga_1d_physical,
@@ -204,7 +191,7 @@ pub use iga::iga_assembler::{
     assemble_bilinear_mass_iga_2d, assemble_linear_source_iga_2d,
 };
 pub use assembler_iga_fespace::{Iga1dBilinearItem, Iga2dBilinearItem};
-pub use postprocess::{compute_element_gradients, compute_h1_error, compute_kelly_indicators, recover_gradient_nodal};
+pub use postproc::postprocess::{compute_element_gradients, compute_h1_error, compute_kelly_indicators, recover_gradient_nodal};
 pub use transfer::{
     build_prolongation_h1,
     build_prolongation_h1_3d,
@@ -225,17 +212,22 @@ pub use transfer::{
     TransferError,
     TransferStats,
 };
-pub use fsi::{
+pub use physics::fsi::{
     assemble_mesh_stiffness, solve_mesh_movement_laplacian,
     fsi_interface_faces, fsi_interface_nodes,
     nodal_displacement_to_dofs,
     assemble_fluid_traction_to_struct,
     FsiConfig, FsiReport, fsi_couple_step, fsi_partitioned_solve,
 };
-pub use thermoelastic::{
+pub use physics::thermoelastic::{
     assemble_thermal_expansion_rhs, assemble_heat_system,
     solve_thermoelastic_staggered,
 };
 pub use static_cond::{StaticCondensation, GlobalBacksolve, condense_global};
 pub use lor_factory::{build_lor_amg_h1, build_lor_amg_h1_3d};
 pub use form::{BilinearForm, LinearForm, VectorBilinearForm, VectorLinearForm};
+
+// ── Re-export sub-modules from reorganized directories ─────────────────
+pub use physics::*;
+pub use boundary::*;
+pub use postproc::*;

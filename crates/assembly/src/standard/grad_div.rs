@@ -9,7 +9,7 @@
 //! This is the grad-div stabilization term, commonly used in Stokes/Navier-Stokes
 //! to improve mass conservation, and in Maxwell problems.
 
-use crate::coefficient::{CoeffCtx, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorQpData};
 
 /// Bilinear integrator for the grad-div operator `κ (∇·u)(∇·v)`.

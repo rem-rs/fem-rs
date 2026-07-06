@@ -11,7 +11,7 @@ use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
 use crate::assembler::Assembler;
-use crate::coefficient::ConstantVectorCoeff;
+use crate::postproc::coefficient::ConstantVectorCoeff;
 use super::dg::DgAssembler;
 use super::dg_advection::{DGAdvectionIntegrator, assemble_dg_interior_faces};
 use crate::interior_faces::InteriorFaceList;

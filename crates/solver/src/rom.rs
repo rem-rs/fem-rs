@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn rom_parametric_diffusion_end_to_end() {
         use fem_assembly::standard::DiffusionIntegrator;
-        use fem_assembly::coefficient::FnCoeff;
+        use fem_assembly::postproc::coefficient::FnCoeff;
         use fem_mesh::SimplexMesh;
         use fem_space::H1Space;
         use fem_space::fe_space::FESpace;

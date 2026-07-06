@@ -41,7 +41,7 @@ use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 use fem_space::vector_h1::VectorH1Space;
 
-use crate::nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
+use crate::physics::nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
 
 /// Hyperelastic material model.
 #[derive(Debug, Clone)]

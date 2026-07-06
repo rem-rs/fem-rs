@@ -18,8 +18,8 @@
 //! - non-homogeneous tangential trace loading,
 //! - boundary-driven Maxwell test problems.
 
-use crate::coefficient::CoeffCtx;
-use crate::vector_boundary::{VectorBdQpData, VectorBoundaryLinearIntegrator};
+use crate::postproc::coefficient::CoeffCtx;
+use crate::boundary::vector_boundary::{VectorBdQpData, VectorBoundaryLinearIntegrator};
 
 /// Tangential boundary load integrator for H(curl) spaces.
 ///
@@ -111,7 +111,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vector_boundary::VectorBoundaryAssembler;
+    use crate::boundary::vector_boundary::VectorBoundaryAssembler;
     use fem_mesh::SimplexMesh;
     use fem_space::{EdgeKey, HCurlSpace};
 

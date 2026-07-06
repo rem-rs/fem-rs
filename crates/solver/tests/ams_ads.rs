@@ -98,7 +98,7 @@ fn ams_2d_hpc_improvement() {
         let h1 = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator};
-        use fem_assembly::coefficient::FnVectorCoeff;
+        use fem_assembly::postproc::coefficient::FnVectorCoeff;
         let a = fem_assembly::VectorAssembler::assemble_bilinear(
             &hcurl, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], 4);
         use std::f64::consts::PI;

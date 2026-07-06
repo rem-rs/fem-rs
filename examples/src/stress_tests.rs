@@ -34,7 +34,7 @@ use fem_space::{
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /// Solve −∇·(κ ∇u) = f with homogeneous Dirichlet BCs.
-fn solve_poisson_generic<C: fem_assembly::coefficient::ScalarCoeff>(
+fn solve_poisson_generic<C: fem_assembly::postproc::coefficient::ScalarCoeff>(
     mesh: SimplexMesh<2>,
     kappa: C,
     source_fn: impl Fn(&[f64]) -> f64 + Send + Sync,

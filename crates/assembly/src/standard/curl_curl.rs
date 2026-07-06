@@ -11,7 +11,7 @@
 //! In 3-D, `∇×u` is a 3-vector; the tensor integrator computes `(M c_u)·c_v`
 //! where `c_u = curl u` and `M` is the 3×3 permeability inverse tensor.
 
-use crate::coefficient::{CoeffCtx, MatrixCoeff, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, MatrixCoeff, ScalarCoeff};
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorQpData};
 
 // ─── Isotropic ───────────────────────────────────────────────────────────────
