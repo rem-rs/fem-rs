@@ -63,10 +63,7 @@ impl ParCsrMatrix {
         let n_ghost = n_local.saturating_sub(n_owned);
 
         let mut diag_coo = CooMatrix::<f64>::new(n_owned, n_owned);
-        let offd_cols = if n_ghost > 0 { n_ghost } else { 0 };
-        let mut offd_coo = CooMatrix::<f64>::new(n_owned, offd_cols.max(1));
 
-        // Only process owned rows.
         for row in 0..n_owned {
             for k in local.row_ptr[row]..local.row_ptr[row + 1] {
                 let col = local.col_idx[k] as usize;
@@ -74,8 +71,6 @@ impl ParCsrMatrix {
                 if val == 0.0 { continue; }
                 if col < n_owned {
                     diag_coo.add(row, col, val);
-                } else if n_ghost > 0 {
-                    offd_coo.add(row, col - n_owned, val);
                 }
             }
         }

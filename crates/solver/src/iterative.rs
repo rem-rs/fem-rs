@@ -202,12 +202,12 @@ where
             });
         }
 
-        let mut v = vec![vec![0.0; n]; restart + 1];
+        let mut v = vec![0.0; (restart + 1) * n];
         for i in 0..n {
-            v[0][i] = r[i] / beta;
+            v[i] = r[i] / beta;
         }
 
-        let mut h = vec![vec![0.0; restart]; restart + 1];
+        let mut h = vec![0.0; (restart + 1) * restart];
         let mut cs = vec![0.0; restart];
         let mut sn = vec![0.0; restart];
         let mut g = vec![0.0; restart + 1];
@@ -216,47 +216,47 @@ where
         let mut inner_done = 0usize;
         let mut converged = false;
 
+        let mut w = vec![0.0; n];
         for j in 0..restart {
             if iter_total >= cfg.max_iter {
                 break;
             }
 
-            let mut w = vec![0.0; n];
-            apply(&v[j], &mut w);
+            apply(&v[j * n..(j + 1) * n], &mut w);
 
             for i in 0..=j {
-                h[i][j] = dot(&w, &v[i]);
+                h[i * restart + j] = dot(&w, &v[i * n..(i + 1) * n]);
                 for k in 0..n {
-                    w[k] -= h[i][j] * v[i][k];
+                    w[k] -= h[i * restart + j] * v[i * n + k];
                 }
             }
 
-            h[j + 1][j] = norm(&w);
-            if h[j + 1][j] > 1e-32 {
+            h[(j + 1) * restart + j] = norm(&w);
+            if h[(j + 1) * restart + j] > 1e-32 {
                 for k in 0..n {
-                    v[j + 1][k] = w[k] / h[j + 1][j];
+                    v[(j + 1) * n + k] = w[k] / h[(j + 1) * restart + j];
                 }
             }
 
             // Apply existing Givens rotations.
             for i in 0..j {
-                let tmp = cs[i] * h[i][j] + sn[i] * h[i + 1][j];
-                h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j];
-                h[i][j] = tmp;
+                let tmp = cs[i] * h[i * restart + j] + sn[i] * h[(i + 1) * restart + j];
+                h[(i + 1) * restart + j] = -sn[i] * h[i * restart + j] + cs[i] * h[(i + 1) * restart + j];
+                h[i * restart + j] = tmp;
             }
 
             // Build and apply new Givens rotation.
-            let denom = (h[j][j] * h[j][j] + h[j + 1][j] * h[j + 1][j]).sqrt();
+            let denom = (h[j * restart + j] * h[j * restart + j] + h[(j + 1) * restart + j] * h[(j + 1) * restart + j]).sqrt();
             if denom > 1e-32 {
-                cs[j] = h[j][j] / denom;
-                sn[j] = h[j + 1][j] / denom;
+                cs[j] = h[j * restart + j] / denom;
+                sn[j] = h[(j + 1) * restart + j] / denom;
             } else {
                 cs[j] = 1.0;
                 sn[j] = 0.0;
             }
 
-            h[j][j] = cs[j] * h[j][j] + sn[j] * h[j + 1][j];
-            h[j + 1][j] = 0.0;
+            h[j * restart + j] = cs[j] * h[j * restart + j] + sn[j] * h[(j + 1) * restart + j];
+            h[(j + 1) * restart + j] = 0.0;
 
             let g_next = -sn[j] * g[j];
             g[j] *= cs[j];
@@ -282,9 +282,9 @@ where
         for i in (0..m).rev() {
             let mut s = g[i];
             for k in i + 1..m {
-                s -= h[i][k] * y[k];
+                s -= h[i * restart + k] * y[k];
             }
-            let diag = h[i][i];
+            let diag = h[i * restart + i];
             if diag.abs() < 1e-32 {
                 return Err(SolverError::Linlvo(
                     "GMRES operator breakdown: near-singular Hessenberg diagonal".to_string(),
@@ -295,7 +295,7 @@ where
 
         for i in 0..m {
             for k in 0..n {
-                x[k] += y[i] * v[i][k];
+                x[k] += y[i] * v[i * n + k];
             }
         }
 
