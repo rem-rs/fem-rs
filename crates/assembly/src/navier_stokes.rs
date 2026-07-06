@@ -36,13 +36,13 @@ pub fn assemble_convection_matrix<M: MeshTopology + Clone>(
 
     for e in mesh.elem_iter() {
         let elem_type = mesh.element_type(e);
-        let ref_elem = super::dg_advection::ref_elem_vol(elem_type, vel_space.order());
+        let ref_elem = crate::dg::dg_advection::ref_elem_vol(elem_type, vel_space.order());
         let n_ldofs = ref_elem.n_dofs();
         let n_vec = n_ldofs * mesh.dim() as usize;
         let quad = ref_elem.quadrature(quad_order);
         let dofs: Vec<usize> = vel_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
-        let (jac, det_j) = super::dg_advection::simplex_jac(mesh, nodes, mesh.dim() as usize);
+        let (jac, det_j) = crate::dg::dg_advection::simplex_jac(mesh, nodes, mesh.dim() as usize);
         let jit = jac.try_inverse().unwrap().transpose();
         let dim = mesh.dim() as usize;
 
@@ -58,7 +58,7 @@ pub fn assemble_convection_matrix<M: MeshTopology + Clone>(
             let w = quad.weights[q] * det_j.abs();
             ref_elem.eval_basis(xi, &mut phi);
             ref_elem.eval_grad_basis(xi, &mut gref);
-            super::dg_advection::xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
+            crate::dg::dg_advection::xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
             // Interpolate u₀ at QP
             let mut u0_at_qp = [0.0_f64; 3];
@@ -103,15 +103,15 @@ pub fn assemble_divergence_matrix<M: MeshTopology + Clone>(
 
     for e in pres_mesh.elem_iter() {
         let elem_type = pres_mesh.element_type(e);
-        let ref_v = super::dg_advection::ref_elem_vol(elem_type, vel_space.order());
-        let ref_p = super::dg_advection::ref_elem_vol(elem_type, 1);
+        let ref_v = crate::dg::dg_advection::ref_elem_vol(elem_type, vel_space.order());
+        let ref_p = crate::dg::dg_advection::ref_elem_vol(elem_type, 1);
         let n_v = ref_v.n_dofs();
         let n_p = ref_p.n_dofs();
         let quad = ref_v.quadrature(quad_order);
         let dofs_v: Vec<usize> = vel_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let dofs_p: Vec<usize> = pres_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = pres_mesh.element_nodes(e);
-        let (jac, det_j) = super::dg_advection::simplex_jac(pres_mesh, nodes, dim);
+        let (jac, det_j) = crate::dg::dg_advection::simplex_jac(pres_mesh, nodes, dim);
         let jit = jac.try_inverse().unwrap().transpose();
 
         // B has rows = pressure DOF, cols = velocity DOF
@@ -126,7 +126,7 @@ pub fn assemble_divergence_matrix<M: MeshTopology + Clone>(
             ref_v.eval_basis(xi, &mut phi_v);
             ref_p.eval_basis(xi, &mut phi_p);
             ref_v.eval_grad_basis(xi, &mut gref);
-            super::dg_advection::xform_grads(&jit, &gref, &mut gphys, n_v, dim);
+            crate::dg::dg_advection::xform_grads(&jit, &gref, &mut gphys, n_v, dim);
 
             for p in 0..n_p {
                 for v in 0..n_v {
@@ -176,13 +176,13 @@ pub fn assemble_ale_convection_matrix<M: MeshTopology + Clone>(
 
     for e in mesh.elem_iter() {
         let elem_type = mesh.element_type(e);
-        let ref_elem = super::dg_advection::ref_elem_vol(elem_type, vel_space.order());
+        let ref_elem = crate::dg::dg_advection::ref_elem_vol(elem_type, vel_space.order());
         let n_ldofs = ref_elem.n_dofs();
         let n_vec = n_ldofs * dim;
         let quad = ref_elem.quadrature(quad_order);
         let dofs: Vec<usize> = vel_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
-        let (jac, det_j) = super::dg_advection::simplex_jac(mesh, nodes, dim);
+        let (jac, det_j) = crate::dg::dg_advection::simplex_jac(mesh, nodes, dim);
         let jit = jac.try_inverse().unwrap().transpose();
 
         let mut u_elem = vec![0.0_f64; n_vec];
@@ -203,7 +203,7 @@ pub fn assemble_ale_convection_matrix<M: MeshTopology + Clone>(
             let w = quad.weights[q] * det_j.abs();
             ref_elem.eval_basis(xi, &mut phi);
             ref_elem.eval_grad_basis(xi, &mut gref);
-            super::dg_advection::xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
+            crate::dg::dg_advection::xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
             // Interpolate u₀ and u_mesh at QP
             let mut u0_at_qp = [0.0_f64; 3];

@@ -356,7 +356,7 @@ mod tests {
         let (mat_new, _) = solver.assemble(&|_| 1.0);
 
         // Compare with legacy solve_dpg_poisson_2d
-        let u_legacy = crate::dpg_2d::solve_dpg_poisson_2d(&mesh, &|_, _| 1.0);
+        let u_legacy = super::super::dpg_2d::solve_dpg_poisson_2d(&mesh, &|_, _| 1.0);
         // Both should produce finite results with same Dirichlet BC structure
         for &v in &u_legacy { assert!(v.is_finite()); }
         assert_eq!(mat_new.nrows, u_legacy.len());

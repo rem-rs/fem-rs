@@ -71,34 +71,21 @@ pub mod adjoint_pde;
 pub mod assembler;
 pub mod backend;
 pub mod bc;
-pub mod cahn_allen;
-pub mod contact;
-pub mod contact_mortar;
-pub mod contact_nitsche;
-pub mod contact_self;
 pub mod coefficient;
 pub mod complex;
-pub mod crystal_plasticity;
-pub mod damage;
 pub mod integrator;
 pub mod standard;
 pub mod block_assembler;
 pub mod mixed;
-pub mod hdg_framework;
 pub mod interior_faces;
-pub mod dg;
-pub mod dg_elasticity;
 pub mod hyperbolic;
 pub mod nonlinear;
 pub mod nonlinear_hyperelasticity;
-pub mod plasticity;
-pub mod plasticity_driver;
 pub mod partial;
 pub mod vector_integrator;
 pub mod vector_assembler;
 pub mod vector_boundary;
 pub mod grid_function;
-pub mod iga_assembler;
 mod assembler_iga_fespace;
 pub mod postprocess;
 pub mod discrete_op;
@@ -106,27 +93,7 @@ pub mod transfer;
 /// High-level Form abstractions (BilinearForm / LinearForm).
 pub mod form;
 pub mod static_cond;
-pub mod iga;
-pub mod iga_trim;
-pub mod mortar;
-pub mod dg_advection;
 pub mod face_assembly;
-pub mod dg_framework;
-pub mod dpg;
-pub mod dpg_2d;
-pub mod dpg_3d;
-pub mod dpg_framework;
-pub mod dpg_stokes;
-pub mod dpg_maxwell;
-pub mod dpg_elasticity;
-pub mod dg_euler_2d;
-pub mod dg_euler_3d;
-pub mod dg_cdr;
-pub mod dg_ldg;
-pub mod dg_br1;
-pub mod dg_br2;
-pub mod dg_curved;
-pub mod dg_limiters;
 pub mod navier_stokes;
 pub use navier_stokes::{
     assemble_convection_matrix, assemble_divergence_matrix,
@@ -136,28 +103,52 @@ pub use navier_stokes::{
 };
 pub mod error_estimate;
 pub mod h1_quad_order_hint;
-pub mod phasefield;
 pub mod pf_solver;
 pub mod fsi;
 pub mod thermoelastic;
-pub mod hdg;
-pub mod hdg_stokes;
 pub mod cr_stokes;
-pub mod hdg_elasticity;
-pub mod hdg_maxwell;
-
-pub mod pa;
 pub mod surface;
-pub mod xfem;
-pub mod xfem_level_set;
-pub mod xfem_integrators;
-pub mod xfem_crack;
-pub mod wg_poisson;
-pub mod wg_stokes;
-pub mod wg_maxwell;
 pub mod vem_poisson;
 pub mod cutfem;
 pub mod lor_factory;
+
+// ── Method-family subdirectories ──────────────────────────────────────────
+
+/// Discontinuous Galerkin (DG) interior-penalty assembly and related solvers.
+pub mod dg;
+pub use dg::*;
+
+/// Discontinuous Petrov-Galerkin (DPG) methods.
+pub mod dpg;
+pub use dpg::*;
+
+/// Hybridizable Discontinuous Galerkin (HDG) methods.
+pub mod hdg;
+pub use hdg::*;
+
+/// Weak Galerkin (WG) methods.
+pub mod wg;
+pub use wg::*;
+
+/// eXtended Finite Element Method (XFEM).
+pub mod xfem;
+pub use xfem::*;
+
+/// Contact mechanics (Signorini, friction, mortar, Nitsche).
+pub mod contact;
+pub use contact::*;
+
+/// Isogeometric Analysis (IGA).
+pub mod iga;
+pub use iga::*;
+
+/// Plasticity (J2, Drucker-Prager, crystal plasticity).
+pub mod plasticity;
+pub use plasticity::*;
+
+/// Phase field fracture (brittle fracture, Cahn-Hilliard, damage).
+pub mod phasefield;
+pub use phasefield::*;
 
 #[cfg(feature = "reed")]
 pub mod reed;
@@ -193,21 +184,6 @@ pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, Pressure
 pub use block_assembler::{
     assemble_mixed_block, assemble_diagonal_block, assemble_system_2x2,
 };
-pub use dg::{DgAssembler};
-pub use dpg::{
-    solve_dpg_convection_diffusion_1d,
-    solve_galerkin_convection_diffusion_1d,
-};
-pub use dpg_2d::solve_dpg_poisson_2d;
-pub use dpg_3d::solve_dpg_poisson_3d;
-pub use dg_advection::{DGAdvectionIntegrator, DgAdvectionRhs, DgFaceIntegrator, DgFaceQpData, assemble_dg_interior_faces, assemble_advection_boundary, ref_elem_cr, ref_elem_q1rot};
-pub use face_assembly::{FaceIntegrator, FaceQpData, assemble_interior_faces, assemble_boundary_faces};
-pub use dg_cdr::DgCdrSystem;
-pub use dg_framework::{
-    DgNumericalFlux, DgAdvection2D, DgDiffusion2D, DgAdvectionDiffusion2D,
-    dg_energy,
-};
-pub use dg_elasticity::DgElasticityAssembler;
 pub use hyperbolic::{HyperbolicFormIntegrator, NumericalFlux, HyperbolicConservationLaw, EulerConservationLaw, minmod, limiter_minmod_tet_p1};
 pub use interior_faces::InteriorFaceList;
 pub use nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
@@ -219,7 +195,7 @@ pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMa
 pub use reed::HcurlReedOperator;
 pub use grid_function::GridFunction;
 pub use grid_function::project_coefficient;
-pub use iga_assembler::{
+pub use iga::iga_assembler::{
     assemble_bilinear_diffusion_iga_1d, assemble_bilinear_diffusion_iga_1d_physical,
     assemble_bilinear_helmholtz_iga_1d, assemble_bilinear_helmholtz_iga_1d_physical,
     assemble_bilinear_mass_iga_1d, assemble_bilinear_mass_iga_1d_physical,
@@ -248,12 +224,6 @@ pub use transfer::{
     ConservativeTransferReport,
     TransferError,
     TransferStats,
-};
-pub use phasefield::{
-    assemble_degraded_stiffness, assemble_phase_field_system,
-    build_elem_dof_cache, compute_elastic_energy, update_history_field,
-    miehe_split_2d, MieheSplit2d,
-    assemble_miehe_stiffness_and_force, compute_psi_plus,
 };
 pub use fsi::{
     assemble_mesh_stiffness, solve_mesh_movement_laplacian,

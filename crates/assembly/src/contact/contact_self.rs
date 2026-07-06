@@ -5,7 +5,7 @@
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, point_locator::TetPointLocator};
-use crate::contact::{ContactConfig, FrictionModel};
+use super::contact::{ContactConfig, FrictionModel};
 
 fn gp(x: f64) -> f64 { if x < 0.0 { -x } else { 0.0 } }
 fn gpd(x: f64) -> f64 { if x < 0.0 { -1.0 } else { 0.0 } }

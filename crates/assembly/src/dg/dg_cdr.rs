@@ -12,8 +12,8 @@ use fem_space::fe_space::FESpace;
 
 use crate::assembler::Assembler;
 use crate::coefficient::ConstantVectorCoeff;
-use crate::dg::DgAssembler;
-use crate::dg_advection::{DGAdvectionIntegrator, assemble_dg_interior_faces};
+use super::dg::DgAssembler;
+use super::dg_advection::{DGAdvectionIntegrator, assemble_dg_interior_faces};
 use crate::interior_faces::InteriorFaceList;
 use crate::standard::{DiffusionIntegrator, MassIntegrator, ConvectionIntegrator};
 

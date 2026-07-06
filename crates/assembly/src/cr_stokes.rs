@@ -16,7 +16,7 @@ use fem_mesh::element_type::ElementType;
 use fem_element::{ReferenceElement, lagrange::TriP1};
 use fem_space::{FESpace, CRSpace};
 
-use crate::dg_advection::{ref_elem_cr, simplex_jac, xform_grads};
+use crate::dg::dg_advection::{ref_elem_cr, simplex_jac, xform_grads};
 
 /// Result of a CR/P1 Stokes solve.
 pub struct CrStokesResult {

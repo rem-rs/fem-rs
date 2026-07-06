@@ -788,7 +788,7 @@ impl Assembler {
         #[cfg(feature = "parallel")]
         {
             if mesh.n_elements() >= assembly_parallel_min_elems() {
-                return assemble_linear_volume_parallel(space, integrators, &quad, quad_order);
+                return assemble_linear_volume_parallel(space, integrators, &quad);
             }
         }
 

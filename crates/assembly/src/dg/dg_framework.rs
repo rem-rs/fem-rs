@@ -30,14 +30,14 @@ use fem_space::{fe_space::FESpace, L2Space};
 use crate::{
     assembler::Assembler,
     coefficient::ConstantVectorCoeff,
-    dg::DgAssembler,
-    dg_advection::{
-        assemble_advection_boundary, assemble_dg_interior_faces,
-        orient_normal_outward, DgFaceIntegrator, DgFaceQpData,
-        DGAdvectionIntegrator,
-    },
     interior_faces::InteriorFaceList,
     standard::MassIntegrator,
+};
+use super::dg::DgAssembler;
+use super::dg_advection::{
+    assemble_advection_boundary, assemble_dg_interior_faces,
+    orient_normal_outward, DgFaceIntegrator, DgFaceQpData,
+    DGAdvectionIntegrator,
 };
 
 // ─── Numerical Flux ──────────────────────────────────────────────────────────

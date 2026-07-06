@@ -21,7 +21,7 @@ use fem_solver::SolverConfig;
 
 use crate::assembler::Assembler;
 use crate::standard::{DiffusionIntegrator, ElasticityIntegrator};
-use crate::dg_advection::{ref_elem_vol, simplex_jac, xform_grads};
+use crate::dg::dg_advection::{ref_elem_vol, simplex_jac, xform_grads};
 
 /// Assemble the thermal expansion right-hand side vector.
 ///

@@ -14,7 +14,8 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
-use crate::{DgAssembler, InteriorFaceList};
+use crate::interior_faces::InteriorFaceList;
+use super::dg::DgAssembler;
 
 /// Baseline DG elasticity assembler.
 pub struct DgElasticityAssembler;

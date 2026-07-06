@@ -10,8 +10,8 @@
 use fem_core::types::DofId;
 use fem_mesh::topology::MeshTopology;
 
-use crate::xfem_level_set::{cut_triangle, CutResult};
-pub use crate::xfem_level_set::XfemLevelSet;
+use super::xfem_level_set::{cut_triangle, CutResult};
+pub use super::xfem_level_set::XfemLevelSet;
 
 /// Type of enrichment applied to a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

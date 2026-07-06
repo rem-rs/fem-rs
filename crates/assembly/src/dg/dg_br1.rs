@@ -27,7 +27,7 @@
 
 use fem_linalg::CsrMatrix;
 use fem_space::fe_space::FESpace;
-use crate::dg_br2::assemble_br2;
+use super::dg_br2::assemble_br2;
 use crate::interior_faces::InteriorFaceList;
 
 /// Assemble the BR1 (Bassi–Rebay 1) DG diffusion matrix.

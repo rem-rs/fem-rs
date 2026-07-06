@@ -9,8 +9,8 @@ use fem_mesh::topology::MeshTopology;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
 
-use crate::xfem::{EnrichmentMap, EnrichmentType, XfemEnrichment, XfemLevelSet, tip_branch_functions, polar_coords};
-use crate::xfem_level_set::{cut_triangle, CutResult};
+use super::xfem::{EnrichmentMap, EnrichmentType, XfemEnrichment, XfemLevelSet, tip_branch_functions, polar_coords};
+use super::xfem_level_set::{cut_triangle, CutResult};
 
 /// Reference gradients for P1 triangle: ∇φ₁ = (-1,-1), ∇φ₂ = (1,0), ∇φ₃ = (0,1)
 const REF_GRAD: [[f64; 2]; 3] = [[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]];

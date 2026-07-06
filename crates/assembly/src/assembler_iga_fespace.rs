@@ -10,7 +10,7 @@
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_space::{FESpace, IgaFESpace1D, IgaFESpace2D};
 
-use crate::iga_assembler::{
+use crate::iga::iga_assembler::{
     assemble_bilinear_diffusion_iga_1d, assemble_bilinear_diffusion_iga_1d_physical,
     assemble_bilinear_diffusion_iga_2d, assemble_bilinear_helmholtz_iga_1d,
     assemble_bilinear_helmholtz_iga_1d_physical, assemble_bilinear_helmholtz_iga_2d,

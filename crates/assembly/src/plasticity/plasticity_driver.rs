@@ -189,7 +189,7 @@ impl PlasticityDriver {
 mod tests {
     use super::*;
     use crate::nonlinear::NonlinearForm;
-    use crate::plasticity::{J2PlasticityForm, PlasticConfig};
+    use super::super::plasticity::{J2PlasticityForm, PlasticConfig};
     use fem_mesh::topology::MeshTopology;
     use fem_mesh::SimplexMesh;
     use fem_space::vector_h1::VectorH1Space;

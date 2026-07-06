@@ -18,6 +18,8 @@ output/
 *.tmp
 *.bak
 *.log
+tmp_*.txt
+gcr_test_out.txt
 ~$*
 
 # OS files

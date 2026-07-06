@@ -158,7 +158,7 @@ pub fn assemble_fluid_traction_to_struct<M: MeshTopology + Clone>(
     let dim = fluid_mesh.dim() as usize;
     let pres_space = H1Space::new(fluid_mesh.clone(), 1);
     let order = vel_space.order();
-    use crate::dg_advection::{ref_elem_vol, simplex_jac, xform_grads, phys_to_ref, find_face_elem};
+    use crate::dg::dg_advection::{ref_elem_vol, simplex_jac, xform_grads, phys_to_ref, find_face_elem};
 
     for f in fluid_mesh.face_iter() {
         if fluid_mesh.face_tag(f) != interface_tag { continue; }
@@ -201,7 +201,7 @@ pub fn assemble_fluid_traction_to_struct<M: MeshTopology + Clone>(
         for (k, &dof) in dofs_v.iter().enumerate() { u_elem[k] = u_vel[dof]; }
 
         let face_type = ElementType::Line2;
-        let ref_face = crate::dg_advection::ref_elem_face(face_type, order);
+        let ref_face = crate::dg::dg_advection::ref_elem_face(face_type, order);
         let q_face = ref_face.quadrature(quad_order);
 
         let mut phi = vec![0.0; n_ldofs];
