@@ -123,12 +123,42 @@ struct AmgLevel {
     lambda_max: f64,
 }
 
+// ── AmgLevelWorkspace ───────────────────────────────────────────────────────
+
+/// Preallocated workspace for one non-coarsest AMG level.
+///
+/// Holds the temporary vectors needed during the residual/restriction/correction
+/// phase of a V-cycle, avoiding per-call `ParVector` allocations.
+struct AmgLevelWorkspace {
+    /// A*x product (same layout as the fine-level right-hand side).
+    ax: ParVector,
+    /// b - A*x residual (same layout as the fine-level right-hand side).
+    res: ParVector,
+    /// Restricted residual R*res (same layout as the coarse-level RHS).
+    r_coarse: ParVector,
+    /// Coarse-grid correction (same layout as the coarse-level RHS).
+    e_coarse: ParVector,
+}
+
+impl AmgLevelWorkspace {
+    fn new(fine: &AmgLevel, coarse: &AmgLevel) -> Self {
+        AmgLevelWorkspace {
+            ax:       zeros_for_mat(&fine.a),
+            res:      zeros_for_mat(&fine.a),
+            r_coarse: zeros_for_mat(&coarse.a),
+            e_coarse: zeros_for_mat(&coarse.a),
+        }
+    }
+}
+
 // ── ParAmgHierarchy ─────────────────────────────────────────────────────────
 
 /// A distributed AMG hierarchy for use as a preconditioner.
 pub struct ParAmgHierarchy {
     levels: Vec<AmgLevel>,
     config: ParAmgConfig,
+    /// Preallocated workspace for each non-coarsest level (indexed by level).
+    level_workspaces: Vec<AmgLevelWorkspace>,
 }
 
 impl ParAmgHierarchy {
@@ -206,7 +236,14 @@ impl ParAmgHierarchy {
             levels.push(AmgLevel { a: ca, p: None, r: None, inv_diag, lambda_max });
         }
 
-        ParAmgHierarchy { levels, config }
+        // Build per-level workspaces (skip the coarsest level which doesn't need
+        // the residual/restriction/correction phase).
+        let level_workspaces = levels
+            .windows(2)
+            .map(|w| AmgLevelWorkspace::new(&w[0], &w[1]))
+            .collect();
+
+        ParAmgHierarchy { levels, config, level_workspaces }
     }
 
     /// Number of levels in the hierarchy.
@@ -245,7 +282,6 @@ impl ParAmgHierarchy {
 
         let p = lvl.p.as_ref().unwrap();
         let r_op = lvl.r.as_ref().unwrap();
-        let coarse_lvl = &self.levels[level + 1];
 
         // Pre-smoothing.
         match self.config.smoother {
@@ -266,26 +302,27 @@ impl ParAmgHierarchy {
             }
         }
 
-        // Compute residual: res = b - A*x
-        let mut ax = ParVector::zeros_like(b);
+        // Compute residual: res = b - A*x  (using preallocated workspace).
+        // SAFETY: Recursion visits strictly increasing level indices, so no two
+        // active frames access the same workspace slot concurrently.
+        let ws_ptr = self.level_workspaces.as_ptr() as *mut AmgLevelWorkspace;
+        let ws = unsafe { &mut *ws_ptr.add(level) };
         let mut x_mut = x.clone_vec();
-        lvl.a.spmv(&mut x_mut, &mut ax);
-        let mut res = b.clone_vec();
+        lvl.a.spmv(&mut x_mut, &mut ws.ax);
         for i in 0..lvl.a.n_owned {
-            res.data[i] -= ax.data[i];
+            ws.res.data[i] = b.data[i] - ws.ax.data[i];
         }
 
         // Restrict residual to coarse level: r_coarse = R * res (local CSR SpMV)
-        let mut r_coarse = zeros_for_mat(&coarse_lvl.a);
-        local_spmv(&r_op.diag, res.as_slice(), r_coarse.as_slice_mut());
+        local_spmv(&r_op.diag, ws.res.as_slice(), ws.r_coarse.as_slice_mut());
 
         // Recursively solve on coarse level.
-        let mut e_coarse = ParVector::zeros_like(&r_coarse);
-        self.vcycle_level(level + 1, &r_coarse, &mut e_coarse);
+        ws.e_coarse.owned_slice_mut().fill(0.0);
+        self.vcycle_level(level + 1, &ws.r_coarse, &mut ws.e_coarse);
 
         // Prolongate correction: x += P * e_coarse (local CSR SpMV)
         let mut correction = vec![0.0_f64; lvl.a.n_owned];
-        local_spmv(&p.diag, e_coarse.as_slice(), &mut correction);
+        local_spmv(&p.diag, ws.e_coarse.as_slice(), &mut correction);
         for i in 0..lvl.a.n_owned {
             x.data[i] += correction[i];
         }

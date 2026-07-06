@@ -718,8 +718,8 @@ where
 
 /// Shared core: Lanczos tridiagonalisation + Givens QR.
 ///
-/// Algorithm: Paige & Saunders (1975); vector–w update variant stores
-/// two w-vectors and updates x incrementally, **not** all Lanczos vectors.
+/// Algorithm: Paige & Saunders (1975); Lanczos vectors stored in a contiguous
+/// `Vec<f64>` (`v[iter * n + i]`) for cache locality instead of `Vec<Vec<f64>>`.
 fn solve_minres_impl<F>(
     n: usize,
     apply: F,
@@ -743,15 +743,14 @@ where
         return Ok(SolveResult { converged: true, iterations: 0, final_residual: res_norm });
     }
 
-    // ── Lanczos vectors V (V_0..V_{k+1}) ──────────────────────────────
-    // V[0] = v_0 = 0 (placeholder)
-    let mut v: Vec<Vec<f64>> = Vec::with_capacity(cfg.max_iter + 2);
-    v.push(vec![0.0; n]);                        // v₀ = 0
+    // ── Lanczos vectors (contiguous: v[iter * n + i]) ──────────────────
+    // V[0] = v_0 = 0 (placeholder), V[1] = v_1 = r₀ / ‖r₀‖
+    let max_vecs = cfg.max_iter + 2;
+    let mut v = vec![0.0_f64; max_vecs * n];  // single allocation
+    // v₀ = 0 already (zero-initialised)
     {
-        let mut v1 = vec![0.0; n];
         let inv = 1.0 / res_norm;
-        for i in 0..n { v1[i] = r[i] * inv; }
-        v.push(v1);                              // v₁
+        for i in 0..n { v[1 * n + i] = r[i] * inv; }
     }
 
     // Tricliagonal coefficients: α[1..k], β[0..k]  (β[0] = 0)
@@ -759,74 +758,49 @@ where
     let mut beta:  Vec<f64> = vec![0.0];          // β₀
 
     // QR factorisation of T̃_k:
-    // R entries (three relevant diagonals of the upper-triangular factor)
-    // R_{k-2,k}, R_{k-1,k}, R_{k,k} for each column k
-    let mut r_sup2: Vec<f64> = Vec::new();  // R_{k-2,k}
-    let mut r_sup1: Vec<f64> = Vec::new();  // R_{k-1,k}
-    let mut r_diag: Vec<f64> = Vec::new();  // R_{k,k} = ρ_k
+    let mut r_sup2: Vec<f64> = Vec::new();   // R_{k-2,k}
+    let mut r_sup1: Vec<f64> = Vec::new();   // R_{k-1,k}
+    let mut r_diag: Vec<f64> = Vec::new();   // R_{k,k} = ρ_k
 
-    // Givens rotation history (need TWO previous pairs for the tridiagonal QR)
-    // rotation (k-2): cs_older, sn_older
-    // rotation (k-1): cs_old,   sn_old
-    let mut cs_old   = 1.0_f64;  // cos(θ_{k-1}) — identity when k=1
-    let mut sn_old   = 0.0_f64;  // sin(θ_{k-1})
-    let mut cs_older = 1.0_f64;  // cos(θ_{k-2}) — identity when k≤2
-    let mut sn_older = 0.0_f64;  // sin(θ_{k-2})
+    // Givens rotation history
+    let mut cs_old   = 1.0_f64;
+    let mut sn_old   = 0.0_f64;
+    let mut cs_older = 1.0_f64;
+    let mut sn_older = 0.0_f64;
 
     // Transformed RHS: g = Q_k^T · β₁·e₁
-    // g[k-1] is the transformed entry, g[k] tracks ‖r_k‖
-    let mut g = vec![res_norm];  // g[0] = β₁ initially
+    let mut g = vec![res_norm];
 
     for iter in 1..=cfg.max_iter {
         // ── Lanczos step ────────────────────────────────────────────────
         let mut av = vec![0.0; n];
-        apply(&v[iter], &mut av);                  // A · v_iter
+        apply(&v[iter * n..(iter + 1) * n], &mut av);
 
-        let ak = dot(&v[iter], &av);                // α_k
+        let ak = dot(&v[iter * n..(iter + 1) * n], &av);
         alpha.push(ak);
 
-        // v_tilde = A·v_k − α_k·v_k − β_{k-1}·v_{k-1}
         for i in 0..n {
-            r[i] = av[i] - ak * v[iter][i] - beta[iter - 1] * v[iter - 1][i];
+            r[i] = av[i] - ak * v[iter * n + i] - beta[iter - 1] * v[(iter - 1) * n + i];
         }
-        let bk = norm(&r);                           // β_k
+        let bk = norm(&r);
         beta.push(bk);
 
         if bk > 1e-32 {
             let inv = 1.0 / bk;
-            let mut v_next = vec![0.0; n];
-            for i in 0..n { v_next[i] = r[i] * inv; }
-            v.push(v_next);                          // v_{k+1}
+            for i in 0..n { v[(iter + 1) * n + i] = r[i] * inv; }
         } else {
-            v.push(vec![0.0; n]);                    // Lanczos terminated
+            // v_{k+1} = 0 (already zero-initialised)
         }
 
         // ── Apply Givens QR to column k of T̃_k ────────────────────────
-        // Column k has three non-zero entries:
-        //   row k-1: β_{k-1}   (sub-diagonal)
-        //   row k:   α_k       (diagonal)
-        //   row k+1: β_k       (new sub-diagonal)
-        //
-        // Two previous rotations affect this column:
-        //   G_{k-2,k-1} (θ_{k-2}) on rows (k-2, k-1): transforms β_{k-1}
-        //   G_{k-1,k}   (θ_{k-1}) on rows (k-1, k):   transforms (result, α_k)
-        // Then G_{k,k+1} (θ_k) on rows (k, k+1): zeros β_k, producing R_{k,k}.
-
-        // Apply rotation k-2 (G_{k-2,k-1}) to (0, β_{k-1}) at rows (k-2, k-1):
-        //   row k-2' = cs_older·0 + sn_older·β_{k-1} = sn_older·β  → R_{k-2,k}
-        //   row k-1' = -sn_older·0 + cs_older·β_{k-1} = cs_older·β  → passed to rot k-1
         let zeta_sup2 = sn_older * beta[iter - 1];
         let zeta_sub  = cs_older * beta[iter - 1];
-        r_sup2.push(zeta_sup2);  // R_{k-2,k}
+        r_sup2.push(zeta_sup2);
 
-        // Apply rotation k-1 (G_{k-1,k}) to (zeta_sub, α_k):
-        //   R_{k-1,k}  = cs_old·zeta_sub + sn_old·α_k
-        //   diag_in    = -sn_old·zeta_sub + cs_old·α_k  → passed to new rotation
         let zeta_sup1 = cs_old * zeta_sub + sn_old * ak;
         let diag_in   = -sn_old * zeta_sub + cs_old * ak;
-        r_sup1.push(zeta_sup1);  // R_{k-1,k}
+        r_sup1.push(zeta_sup1);
 
-        // ── New Givens rotation k (G_{k,k+1}) on (diag_in, β_k) ────────
         let rk = (diag_in * diag_in + bk * bk).sqrt();
         let (csk, snk) = if rk > 1e-32 {
             (diag_in / rk, bk / rk)
@@ -834,41 +808,34 @@ where
             (1.0, 0.0)
         };
 
-        r_diag.push(rk);         // R_{k,k} = ρ_k
+        r_diag.push(rk);
 
         // ── Update g (transformed RHS) ──────────────────────────────────
-        // Apply the new rotation to (g[iter-1], 0):
-        //   g[iter-1] ← csk * g[iter-1]
-        //   g[iter]   ← -snk * g[iter-1]
         let g_old = g[iter - 1];
         g[iter - 1] = csk * g_old;
         g.push(-snk * g_old);
 
-        // ‖r_k‖ = |g_{k+1}| = |g[iter]|
         res_norm = g[iter].abs();
         if res_norm <= tol {
             // ── Solve R_k y = g_{1:k} and compute x = V_k y ────────────
             let k = iter;
             let mut y = vec![0.0; k];
-            // Back-substitution: R y = g_{1:k}
-            // R is k×k upper triangular with up to 2 super-diagonals.
             for i in (0..k).rev() {
                 let mut s = g[i];
-                // R_{i,i+1} * y_{i+1}
                 if i + 1 < k { s -= r_sup1[i + 1] * y[i + 1]; }
-                // R_{i,i+2} * y_{i+2}
                 if i + 2 < k { s -= r_sup2[i + 2] * y[i + 2]; }
                 y[i] = s / r_diag[i];
             }
-            // x = V_k y = sum_{j=1}^{k} y_j * v_j
+            // x = V_k y = Σ y_j * v_j  (contiguous access)
             for i in 0..n { x[i] = 0.0; }
             for j in 0..k {
-                for i in 0..n { x[i] += y[j] * v[j + 1][i]; }
+                let vj = &v[(j + 1) * n..(j + 2) * n];
+                for i in 0..n { x[i] += y[j] * vj[i]; }
             }
             return Ok(SolveResult { converged: true, iterations: iter, final_residual: res_norm });
         }
 
-        // ── Shift Givens history for next iteration ────────────────────
+        // ── Shift Givens history ─────────────────────────────────────────
         cs_older = cs_old;
         sn_older = sn_old;
         cs_old = csk;
