@@ -262,21 +262,16 @@ impl ParAmgHierarchy {
         let lvl = &self.levels[level];
 
         if lvl.p.is_none() {
-            // Coarsest level: solve with CG (adaptive) or fallback Jacobi.
-            if self.config.coarse_cg {
-                let coarse_cfg = SolverConfig {
-                    rtol: 1e-10,
-                    atol: 1e-14,
-                    max_iter: 200,
-                    ..SolverConfig::default()
-                };
-                // Best-effort: ignore convergence failure (fallback to current x).
-                let _ = par_solve_cg(&lvl.a, b, x, &coarse_cfg);
-            } else {
-                for _ in 0..20 {
-                    jacobi_smooth(&lvl.a, x, b, &lvl.inv_diag);
-                }
-            }
+            // Coarsest level: solve with CG (tight tolerance, many iterations)
+            // to get an accurate coarse-grid correction.
+            let coarse_cfg = SolverConfig {
+                rtol: 1e-12,
+                atol: 1e-14,
+                max_iter: 500,
+                ..SolverConfig::default()
+            };
+            // Best-effort: ignore convergence failure (fallback to current x).
+            let _ = par_solve_cg(&lvl.a, b, x, &coarse_cfg);
             return;
         }
 
