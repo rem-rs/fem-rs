@@ -153,9 +153,18 @@ impl<T: Scalar> CsrMatrix<T> {
     pub fn get(&self, row: usize, col: usize) -> T {
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
-        for k in start..end {
-            if self.col_idx[k] as usize == col {
-                return self.values[k];
+        let len = end - start;
+        if len >= 32 {
+            // Binary search for column-sorted CSR with long rows.
+            let slice = &self.col_idx[start..end];
+            if let Ok(i) = slice.binary_search(&(col as u32)) {
+                return self.values[start + i];
+            }
+        } else {
+            for k in start..end {
+                if self.col_idx[k] as usize == col {
+                    return self.values[k];
+                }
             }
         }
         T::zero()
@@ -384,7 +393,14 @@ impl<T: Scalar> CsrMatrix<T> {
     fn find_entry(&self, row: usize, col: usize) -> Option<usize> {
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
-        (start..end).find(|&k| self.col_idx[k] as usize == col)
+        let len = end - start;
+        // Binary search for rows with many entries (CSR is column-sorted).
+        if len >= 32 {
+            let slice = &self.col_idx[start..end];
+            slice.binary_search(&(col as u32)).ok().map(|i| start + i)
+        } else {
+            (start..end).find(|&k| self.col_idx[k] as usize == col)
+        }
     }
 
     // -----------------------------------------------------------------------

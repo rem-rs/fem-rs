@@ -2,7 +2,7 @@
   "name": "benchmark_3d_poisson_mms",
   "metrics": {
     "l2_error": {
-      "value": 0.007650959157014308,
+      "value": 0.00765095915701485,
       "rtol": 1e-6,
       "atol": 1e-10
     },

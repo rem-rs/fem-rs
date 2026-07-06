@@ -2,7 +2,7 @@
   "name": "em_helmholtz_mms_k8",
   "metrics": {
     "l2_err": {
-      "value": 0.00129373437964801,
+      "value": 0.0012937343796492582,
       "rtol": 1e-6,
       "atol": 1e-10
     }
