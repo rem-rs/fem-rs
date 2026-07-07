@@ -178,7 +178,9 @@ fn main() {
     };
 
     // 13. Compute and print the L² norm of the error against the exact solution.
-    let l2_err = compute_l2_error(&space, &u, kappa);
+    let l2_err = fem_assembly::hdiv_error::compute_hdiv_l2_error(
+        &space, &u, |x| exact_f(x, kappa),
+    );
     println!("\n|| F_h - F ||_{{L^2}} = {l2_err:.14e}\n");
 
     // 14. Save the refined mesh and the solution (matches MFEM ex4 output files).
@@ -233,63 +235,6 @@ fn exact_f(x: &[f64], kappa: f64) -> [f64; 2] {
      (k * x[0]).cos() * (k * x[1]).sin()]
 }
 
-// ─── L² error ────────────────────────────────────────────────────────────────
-
-fn compute_l2_error(
-    space: &HDivSpace<Mesh<2>>,
-    uh: &[f64],
-    kappa: f64,
-) -> f64 {
-    use fem_element::{raviart_thomas::TriRT0, reference::VectorReferenceElement};
-    use fem_mesh::ElementTransformation;
-
-    let mesh = space.mesh();
-    let ref_elem = TriRT0;
-    let quad = ref_elem.quadrature(6);
-    let n_ldofs = ref_elem.n_dofs();
-    let mut ref_phi = vec![0.0; n_ldofs * 2];
-    let mut phys_phi = vec![0.0; n_ldofs * 2];
-    let mut err2 = 0.0_f64;
-
-    for e in mesh.elem_iter() {
-        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let signs = space.element_signs(e);
-        let nodes = mesh.element_nodes(e);
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let jac = tr.jacobian();
-        let det_j = tr.det_j();
-
-        for (qi, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[qi] * det_j.abs();
-            let xp = tr.map_to_physical(xi);
-
-            ref_elem.eval_basis_vec(xi, &mut ref_phi);
-
-            // Contravariant Piola: φ_phys = (1/det(J)) · J · φ_ref
-            let inv_det = 1.0 / det_j;
-            for i in 0..n_ldofs {
-                let s = signs[i];
-                let r0 = ref_phi[i * 2];
-                let r1 = ref_phi[i * 2 + 1];
-                phys_phi[i * 2]     = s * (jac[(0, 0)] * r0 + jac[(0, 1)] * r1) * inv_det;
-                phys_phi[i * 2 + 1] = s * (jac[(1, 0)] * r0 + jac[(1, 1)] * r1) * inv_det;
-            }
-
-            let mut fh = [0.0_f64; 2];
-            for i in 0..n_ldofs {
-                fh[0] += uh[dofs[i]] * phys_phi[i * 2];
-                fh[1] += uh[dofs[i]] * phys_phi[i * 2 + 1];
-            }
-
-            let fe = exact_f(&xp, kappa);
-            let dx = fh[0] - fe[0];
-            let dy = fh[1] - fe[1];
-            err2 += w * (dx * dx + dy * dy);
-        }
-    }
-
-    err2.sqrt()
-}
 
 // ─── GLVis helper ────────────────────────────────────────────────────────────
 
@@ -521,7 +466,9 @@ mod tests {
             x_red
         };
 
-        let l2_err = compute_l2_error(&space, &u, kappa);
+        let l2_err = fem_assembly::hdiv_error::compute_hdiv_l2_error(
+            &space, &u, |x| exact_f(x, kappa),
+        );
 
         (u, n_dofs, l2_err)
     }
