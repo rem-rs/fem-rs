@@ -24,6 +24,7 @@
 //! Prints DOF count, linear system size, solver statistics, and L² error.
 //! Writes `refined.mesh` and `sol.gf` (matching MFEM ex4 output files).
 
+use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::fs::File;
 use std::io::Write;
@@ -136,12 +137,40 @@ fn main() {
     println!("done.");
 
     // Project exact solution ⟶ DOF values for non-homogeneous BC elimination.
+    // We integrate over each boundary face using the DOF's element sign to
+    // determine the correct sign for the DOF value relative to the assembly.
     let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
-        let x_exact = space.interpolate_vector(&|p| {
-            let k = kappa;
-            vec![(k * p[1]).cos() * (k * p[0]).sin(),
-                 (k * p[0]).cos() * (k * p[1]).sin()]
-        });
+        // Build DOF→sign map from the sole incident element on the boundary.
+        let mut dof_sign: HashMap<u32, f64> = HashMap::new();
+        for e in space.mesh().elem_iter() {
+            let dofs = space.element_dofs(e);
+            let signs = space.element_signs(e);
+            for (j, &d) in dofs.iter().enumerate() {
+                dof_sign.entry(d).or_insert(signs[j]);
+            }
+        }
+        use fem_space::EdgeKey;
+        let mut x_exact = vec![0.0_f64; n_dofs];
+        for f in 0..space.mesh().n_boundary_faces() as u32 {
+            if !all_tags.contains(&space.mesh().face_tag(f)) { continue; }
+            let nodes = space.mesh().face_nodes(f);
+            let pa = space.mesh().node_coords(nodes[0]);
+            let pb = space.mesh().node_coords(nodes[1]);
+            // CCW normal of face direction (n0→n1): length = edge length.
+            let tx = pb[0] - pa[0];
+            let ty = pb[1] - pa[1];
+            let normal = [-ty, tx];
+            let mid = [0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1])];
+            let fe = exact_f(&mid, kappa);
+            let flux = fe[0] * normal[0] + fe[1] * normal[1];
+            let ek = EdgeKey::new(nodes[0], nodes[1]);
+            if let Some(dof) = space.edge_face_dof(ek) {
+                // Apply element sign so the flux sign matches the assembly's
+                // DOF convention (which uses element_signs to orient the
+                // basis function relative to the reference element).
+                x_exact[dof as usize] = flux * dof_sign.get(&dof).copied().unwrap_or(1.0);
+            }
+        }
         let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
         let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
         (rm, rf, fm, cm, bv)
