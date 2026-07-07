@@ -106,10 +106,26 @@ git push
 - 等参 Jacobian（`isoparametric_jacobian` + `QuadQ1`）：与 MFEM 的 bilinear mapping 逻辑一致
 - L² 误差计算（`compute_hdiv_l2_error`）：对新模块，三/四边形分别用仿射/等参 Jacobian
 - `eliminate_dirichlet` BC 消除：与 beam-tri 一致
+- `HDivSpace::build_2d_quad` DOF 分配和 element_signs：DOF 计数正确，signs 符合预期
+- QuadRT0 参考单元基函数验证：满足 ∫Φ_i·n̂_j = δ_ij
 
-**可能的根因（待验证）：**
-- `GradDivIntegrator`/`VectorMassIntegrator` 对 QuadRT0 的处理与 MFEM 有差异
-- 或 `VectorAssembler` 中 Piola 变换对非仿射单元的符号约定
+**关键线索：四边形 RT0 插值误差不随网格加密收敛**
+
+对比试验（统一单位正方形网格，RT0，MMS 解）：
+
+| h | 三角形 L² | 四边形 L² |
+|---|----------|----------|
+| 0.5 | 0.317 | 1.25 |
+| 0.25 | 0.160 | 1.37 |
+| 0.125 | 0.080 | 1.40 |
+| 0.0625 | 0.040 | 1.41 |
+
+三角形 O(h) 收敛 ✅。四边形 ~1.4 **恒定不收敛** ❌。说明 `interpolate_vector` 或 `compute_hdiv_l2_error` 的四边形路径存在未被发现的 bug。
+
+**后续排查方向：**
+- 对比 MFEM `RT_FECollection` 对 Quad4 的局部 DOF 排序和面法向约定
+- 检查 `QuadRT0` 的 `eval_basis_vec` 与 `compute_hdiv_l2_error` 中 Piola 变换的符号一致性
+- 在 `compute_hdiv_l2_error` 中对单个四边形单元输出中间值（jac, det_j, phys_phi, xp）与解析解对比
 
 ### H(curl) 求解器选择（ex3 经验）
 
