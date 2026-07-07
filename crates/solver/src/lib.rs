@@ -183,7 +183,7 @@ mod linlvo_integration_tests {
 pub use ode::{
     TimeStepper, ImplicitTimeStepper,
     ImexOperator, ImexTimeStepper,
-    HamiltonianSystem, VerletStepper, LeapfrogStepper, Yoshida4Stepper,
+    HamiltonianSystem, VerletStepper, LeapfrogStepper, Yoshida4Stepper, SIAVSolver,
     ForwardEuler, Rk4, Rk45,
     ImplicitEuler, Sdirk2,
     CrankNicolson,
