@@ -1,42 +1,40 @@
-//! # Example 3 �?Maxwell cavity  (analogous to MFEM ex3)
+//! # Example 3 -- Maxwell cavity  (one-to-one with MFEM ex3)
 //!
-//! Solves the vector curl-curl + mass problem on the unit square:
-//!
-//! ```text
-//!   ∇�?∇×E) + E = f    in Ω = [0,1]²
-//!          n×E = 0    on ∂�?
-//! ```
-//!
-//! with the manufactured solution `E = (sin(πy), sin(πx))`.
+//! Solves the second-order definite Maxwell problem:
 //!
 //! ```text
-//!   curl E = π cos(πx) �?π cos(πy)  (scalar in 2-D)
-//!   ∇�?curl E) = (π² sin(πy), π² sin(πx))
-//!   f = ∇×∇×E + E = ((1+π²) sin(πy), (1+π²) sin(πx))
+//!   curl curl E + E = f    in Omega
+//!             n x E = 0    on dOmega
 //! ```
+//!
+//! with an impressed current source `f = (1+kappa^2)*(sin(kappa*y), sin(kappa*x))`
+//! where `kappa = pi * freq`.
 //!
 //! ## Usage
 //! ```
-//! cargo run --example mfem_ex3
-//! cargo run --example mfem_ex3 -- --n 8
-//! cargo run --example mfem_ex3 -- --n 16
-//! cargo run --example mfem_ex3 -- --n 32
+//! cargo run --example mfem_ex3_maxwell_cavity
+//! cargo run --example mfem_ex3_maxwell_cavity -- -m ../data/star.mesh
+//! cargo run --example mfem_ex3_maxwell_cavity -- --mesh ../data/beam-tri.mesh
+//! cargo run --example mfem_ex3_maxwell_cavity -- -f 2.0
+//! cargo run --example mfem_ex3_maxwell_cavity -- --n 32
 //! ```
 
 use std::f64::consts::PI;
-use fem_examples::maxwell::{StaticMaxwellBuilder, l2_error_hcurl_exact};
+use fem_examples::maxwell::StaticMaxwellBuilder;
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::SimplexMesh;
-use fem_space::{
-    HCurlSpace,
-};
+use fem_space::{FESpace, HCurlSpace};
 
 fn main() {
     let args = parse_args();
     let result = solve_case(&args);
 
     println!("=== fem-rs Example 3: Maxwell cavity (curl-curl + mass) ===");
-    println!("  Mesh: {}×{} subdivisions, ND1 elements", args.n, args.n);
-    println!("  Source scale: {}", args.source_scale);
+    match &args.mesh {
+        Some(path) => println!("  Mesh file: {}", path),
+        None => println!("  Mesh: {}x{} subdivisions, ND1 elements", args.n, args.n),
+    }
+    println!("  Frequency: {}", args.freq);
     if args.pml_like {
         println!(
             "  Mode: PML-like anisotropic damping (thickness={}, sigma_max={}, wx={}, wy={})",
@@ -55,16 +53,10 @@ fn main() {
         "  Solve: {} iterations, residual = {:.3e}, converged = {}",
         result.iterations, result.final_residual, result.converged
     );
-    if let Some(err) = result.l2_error {
-        println!("  h = {:.4e},  L² error = {:.4e}", result.h, err);
-        println!("  (Expected O(h) for ND1 elements)");
-    } else {
-        println!("  h = {:.4e},  L² error = n/a (PML-like/multi-material modified operator)", result.h);
-        println!(
-            "  ||u||�?= {:.4e}, max|u| = {:.4e}",
-            result.solution_l2_norm, result.solution_max_abs
-        );
-    }
+    println!(
+        "  ||u||_2 = {:.4e}, max|u| = {:.4e}",
+        result.solution_l2_norm, result.solution_max_abs
+    );
 }
 
 struct CaseResult {
@@ -73,18 +65,13 @@ struct CaseResult {
     iterations: usize,
     final_residual: f64,
     converged: bool,
-    h: f64,
-    l2_error: Option<f64>,
     solution_l2_norm: f64,
     solution_max_abs: f64,
 }
 
-fn source_value(x: &[f64], source_scale: f64) -> [f64; 2] {
-    let coeff = 1.0 + PI * PI;
-    [
-        source_scale * coeff * (PI * x[1]).sin(),
-        source_scale * coeff * (PI * x[0]).sin(),
-    ]
+fn source_value(x: &[f64], kappa: f64) -> [f64; 2] {
+    let coeff = 1.0 + kappa * kappa;
+    [coeff * (kappa * x[1]).sin(), coeff * (kappa * x[0]).sin()]
 }
 
 fn axis_sigma_1d(coord: f64, lo: f64, hi: f64, thickness: f64, sigma_max: f64) -> f64 {
@@ -100,7 +87,9 @@ fn axis_sigma_1d(coord: f64, lo: f64, hi: f64, thickness: f64, sigma_max: f64) -
 }
 
 /// Compute anisotropic tensor [sx, 0; 0, sy] with region-dependent coefficients.
-/// Divides [0,1]² into 4 quadrants: Q1 (0.5,1)², Q2 (0,0.5)², Q3 (0,0.5)×(0.5,1), Q4 (0.5,1)×(0,0.5)
+/// Divides [0,1]^2 into 4 quadrants:
+///   Q1 (0.5,1)^2,  Q2 (0,0.5)^2,
+///   Q3 (0,0.5)x(0.5,1), Q4 (0.5,1)x(0,0.5)
 /// Each quadrant gets a different (wx, wy) weight for tuned absorption.
 fn multi_material_pml_tensor(
     x: &[f64],
@@ -108,16 +97,12 @@ fn multi_material_pml_tensor(
     sigma_max: f64,
 ) -> [f64; 4] {
     let (wx, wy) = if x[0] >= 0.5 && x[1] >= 0.5 {
-        // Q1: high damping (1.0, 1.2)
         (1.0, 1.2)
     } else if x[0] < 0.5 && x[1] >= 0.5 {
-        // Q3: moderate x, high y (0.8, 1.3)
         (0.8, 1.3)
     } else if x[0] < 0.5 && x[1] < 0.5 {
-        // Q2: moderate damping (0.9, 1.1)
         (0.9, 1.1)
     } else {
-        // Q4: high x, moderate y (1.2, 0.9)
         (1.2, 0.9)
     };
 
@@ -126,19 +111,31 @@ fn multi_material_pml_tensor(
     [1.0 + sx, 0.0, 0.0, 1.0 + sy]
 }
 
+/// Collect unique boundary face tags from a mesh for PEC BC.
+fn boundary_tags(mesh: &SimplexMesh<2>) -> Vec<i32> {
+    let mut tags: Vec<_> = mesh.face_tags.iter().copied().collect();
+    tags.sort_unstable();
+    tags.dedup();
+    tags
+}
+
 fn solve_case(args: &Args) -> CaseResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(args.n)
+    };
     let space = HCurlSpace::new(mesh, 1);
 
-    // MFEM-style boundary marker (`ess_bdr`): all boundary attributes are essential.
-    let attrs = [1, 2, 3, 4];
-    let ess_bdr = [1, 1, 1, 1];
-    let source_scale = args.source_scale;
+    // Mark all boundary attributes as essential (PEC).
+    let bdr_attrs = boundary_tags(space.mesh());
+    let kappa = args.freq * PI;
 
     let mut builder = StaticMaxwellBuilder::new(space)
         .with_quad_order(4)
-        .with_source_fn(move |x| source_value(x, source_scale))
-        .add_pec_zero_from_marker(&attrs, &ess_bdr);
+        .with_source_fn(move |x| source_value(x, kappa))
+        .add_pec_zero(&bdr_attrs);
 
     builder = if args.multi_material {
         let thickness = args.pml_thickness;
@@ -171,16 +168,6 @@ fn solve_case(args: &Args) -> CaseResult {
         .iter()
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max);
-    let l2_error = if args.pml_like || args.multi_material {
-        None
-    } else {
-        Some(l2_error_hcurl_exact(&solved.space, &solved.solution, |x| {
-            [
-                args.source_scale * (PI * x[1]).sin(),
-                args.source_scale * (PI * x[0]).sin(),
-            ]
-        }))
-    };
 
     CaseResult {
         n_dofs,
@@ -188,16 +175,15 @@ fn solve_case(args: &Args) -> CaseResult {
         iterations: solved.solve_result.iterations,
         final_residual: solved.solve_result.final_residual,
         converged: solved.solve_result.converged,
-        h: 1.0 / args.n as f64,
-        l2_error,
         solution_l2_norm,
         solution_max_abs,
     }
 }
 
-// ─── CLI ────────────────────────────────────────────────────────────────────
+// --- CLI --------------------------------------------------------------------
 
 struct Args {
+    mesh: Option<String>,
     n: usize,
     pml_like: bool,
     multi_material: bool,
@@ -205,11 +191,12 @@ struct Args {
     sigma_max: f64,
     wx: f64,
     wy: f64,
-    source_scale: f64,
+    freq: f64,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
+        mesh: None,
         n: 16,
         pml_like: false,
         multi_material: false,
@@ -217,12 +204,16 @@ fn parse_args() -> Args {
         sigma_max: 2.0,
         wx: 1.0,
         wy: 1.0,
-        source_scale: 1.0,
+        freq: 1.0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "-m" | "--mesh" => { a.mesh = it.next(); }
             "--n" => { a.n = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
+            "-f" | "--freq" => {
+                a.freq = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0);
+            }
             "--pml-like" => { a.pml_like = true; }
             "--multi-material" => { a.multi_material = true; a.pml_like = false; }
             "--pml-thickness" => {
@@ -233,9 +224,6 @@ fn parse_args() -> Args {
             }
             "--wx" => { a.wx = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0); }
             "--wy" => { a.wy = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0); }
-            "--source-scale" => {
-                a.source_scale = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0);
-            }
             _ => {}
         }
     }
@@ -245,14 +233,35 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_examples::maxwell::l2_error_hcurl_exact;
 
     fn rel_diff(a: f64, b: f64) -> f64 {
         (a - b).abs() / a.abs().max(b.abs()).max(1.0)
     }
 
-    #[test]
-    fn ex3_mfem_marker_path_has_reasonable_error() {
-        let result = solve_case(&Args {
+    fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
+        [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
+    }
+
+    fn mms_l2_error(args: &Args) -> f64 {
+        let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let space = HCurlSpace::new(mesh, 1);
+        let bdr_attrs = boundary_tags(space.mesh());
+        let kappa = args.freq * PI;
+        let problem = StaticMaxwellBuilder::new(space)
+            .with_quad_order(4)
+            .with_source_fn(move |x| source_value(x, kappa))
+            .add_pec_zero(&bdr_attrs)
+            .with_isotropic_coeffs(1.0, 1.0)
+            .build();
+        let solved = problem.solve();
+        let kappa = args.freq * PI;
+        l2_error_hcurl_exact(&solved.space, &solved.solution, |x| exact_e(x, kappa))
+    }
+
+    fn default_args() -> Args {
+        Args {
+            mesh: None,
             n: 8,
             pml_like: false,
             multi_material: false,
@@ -260,16 +269,20 @@ mod tests {
             sigma_max: 2.0,
             wx: 1.0,
             wy: 1.0,
-            source_scale: 1.0,
-        });
-        assert!(result.converged);
-        let l2 = result.l2_error.expect("expected manufactured L2 error in non-PML mode");
+            freq: 1.0,
+        }
+    }
+
+    #[test]
+    fn ex3_mfem_marker_path_has_reasonable_error() {
+        let l2 = mms_l2_error(&default_args());
         assert!(l2 < 1.5e-1, "L2 error = {}", l2);
     }
 
     #[test]
     fn ex3_pml_like_mode_converges() {
         let result = solve_case(&Args {
+            mesh: None,
             n: 8,
             pml_like: true,
             multi_material: false,
@@ -277,62 +290,39 @@ mod tests {
             sigma_max: 2.0,
             wx: 1.0,
             wy: 1.5,
-            source_scale: 1.0,
+            freq: 1.0,
         });
         assert!(result.converged);
         assert!(result.n_boundary_dofs > 0);
         assert!(result.final_residual < 1.0e-6, "residual = {}", result.final_residual);
-        assert!(result.l2_error.is_none());
     }
 
     #[test]
     fn ex3_standard_mode_refinement_halves_hcurl_error() {
-        let coarse = solve_case(&Args {
-            n: 8,
-            pml_like: false,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 1.0,
+        let coarse = mms_l2_error(&Args {
+            mesh: None, n: 8, pml_like: false, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
         });
-        let medium = solve_case(&Args {
-            n: 16,
-            pml_like: false,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 1.0,
+        let medium = mms_l2_error(&Args {
+            mesh: None, n: 16, pml_like: false, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
         });
 
-        let coarse_err = coarse.l2_error.expect("expected manufactured L2 error on coarse mesh");
-        let medium_err = medium.l2_error.expect("expected manufactured L2 error on refined mesh");
-
-        assert!(coarse.converged && medium.converged);
-        assert!(medium_err < coarse_err, "expected refinement to reduce error: coarse={} medium={}", coarse_err, medium_err);
-        let ratio = coarse_err / medium_err;
+        assert!(coarse.is_finite() && medium.is_finite());
+        assert!(medium < coarse, "expected refinement to reduce error: coarse={} medium={}", coarse, medium);
+        let ratio = coarse / medium;
         assert!(ratio > 1.8, "expected roughly first-order error halving on mesh doubling, got ratio {}", ratio);
     }
 
     #[test]
     fn ex3_multi_material_pml_mode_converges() {
         let result = solve_case(&Args {
-            n: 8,
-            pml_like: false,
-            multi_material: true,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 1.0,
+            mesh: None, n: 8, pml_like: false, multi_material: true,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
         });
         assert!(result.converged, "multi-material PML should converge");
         assert!(result.n_boundary_dofs > 0);
         assert!(result.final_residual < 1.0e-6, "residual = {}", result.final_residual);
-        assert!(result.l2_error.is_none(), "multi-material mode should not compute L2 error");
         assert!(result.solution_l2_norm.is_finite());
         assert!(result.solution_max_abs.is_finite());
     }
@@ -340,24 +330,12 @@ mod tests {
     #[test]
     fn ex3_pml_like_stronger_sigma_reduces_solution_norm() {
         let weak = solve_case(&Args {
-            n: 8,
-            pml_like: true,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 0.2,
-            wx: 1.0,
-            wy: 1.5,
-            source_scale: 1.0,
+            mesh: None, n: 8, pml_like: true, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 0.2, wx: 1.0, wy: 1.5, freq: 1.0,
         });
         let strong = solve_case(&Args {
-            n: 8,
-            pml_like: true,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 4.0,
-            wx: 1.0,
-            wy: 1.5,
-            source_scale: 1.0,
+            mesh: None, n: 8, pml_like: true, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 4.0, wx: 1.0, wy: 1.5, freq: 1.0,
         });
 
         assert!(weak.converged && strong.converged);
@@ -372,24 +350,12 @@ mod tests {
     #[test]
     fn ex3_pml_like_swapping_axis_weights_preserves_response_by_symmetry() {
         let xy = solve_case(&Args {
-            n: 8,
-            pml_like: true,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.5,
-            source_scale: 1.0,
+            mesh: None, n: 8, pml_like: true, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.5, freq: 1.0,
         });
         let yx = solve_case(&Args {
-            n: 8,
-            pml_like: true,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.5,
-            wy: 1.0,
-            source_scale: 1.0,
+            mesh: None, n: 8, pml_like: true, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.5, wy: 1.0, freq: 1.0,
         });
 
         assert!(xy.converged && yx.converged);
@@ -402,58 +368,14 @@ mod tests {
     }
 
     #[test]
-    fn ex3_standard_mode_solution_scales_linearly_with_source() {
-        let half = solve_case(&Args {
-            n: 8,
-            pml_like: false,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 0.5,
-        });
-        let full = solve_case(&Args {
-            n: 8,
-            pml_like: false,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 1.0,
-        });
-
-        assert!(half.converged && full.converged);
-        let ratio = full.solution_l2_norm / half.solution_l2_norm.max(1.0e-30);
-        assert!(
-            (ratio - 2.0).abs() < 1.0e-6,
-            "expected linear response to source scaling, got ratio {}",
-            ratio
-        );
-    }
-
-    #[test]
     fn ex3_multi_material_stronger_sigma_reduces_solution_norm() {
         let weak = solve_case(&Args {
-            n: 8,
-            pml_like: false,
-            multi_material: true,
-            pml_thickness: 0.2,
-            sigma_max: 0.2,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 1.0,
+            mesh: None, n: 8, pml_like: false, multi_material: true,
+            pml_thickness: 0.2, sigma_max: 0.2, wx: 1.0, wy: 1.0, freq: 1.0,
         });
         let strong = solve_case(&Args {
-            n: 8,
-            pml_like: false,
-            multi_material: true,
-            pml_thickness: 0.2,
-            sigma_max: 4.0,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 1.0,
+            mesh: None, n: 8, pml_like: false, multi_material: true,
+            pml_thickness: 0.2, sigma_max: 4.0, wx: 1.0, wy: 1.0, freq: 1.0,
         });
 
         assert!(weak.converged && strong.converged);
@@ -465,24 +387,21 @@ mod tests {
         );
     }
 
-    // ─── Regression baseline ─────────────────────────────────────────────
+    // --- Regression baseline -------------------------------------------------
 
     #[test]
     fn ex3_regression_baseline() {
-        let result = solve_case(&Args {
-            n: 8,
-            pml_like: false,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 1.0,
-        });
+        let args = Args {
+            mesh: None, n: 8, pml_like: false, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
+        };
+        let l2 = mms_l2_error(&args);
+        let result = solve_case(&args);
+
         assert!(result.converged);
 
         fem_regression::regression("mfem_ex3_maxwell_cavity")
-            .check_with("l2_error",        result.l2_error.unwrap(), 1e-6, 1e-10)
+            .check_with("l2_error",        l2, 1e-6, 1e-10)
             .check_with("solution_l2_norm", result.solution_l2_norm, 1e-6, 1e-10)
             .check_with("solution_max_abs", result.solution_max_abs, 1e-6, 1e-10)
             .check_with("iterations",       result.iterations as f64, 1e-4, 0.5)
@@ -491,77 +410,57 @@ mod tests {
             .finalize();
     }
 
-    // ─── MFEM cross-validation test ─────────────────────────────────────
+    // --- MFEM cross-validation test -----------------------------------------
 
-    /// Cross-validate fem-rs ex3 (Maxwell cavity) against MFEM reference.
-    ///
-    /// Verified against MFEM Python bindings (mfem.ser v4.8):
-    ///   - ND1 space on 8×8 tri mesh: 208 DOFs ✅
-    ///   - CG solver converges to finite solution ✅
-    ///   - Mesh topology: 81 nodes, 128 triangles ✅
-    ///
-    /// Note: The L² error for the manufactured solution E = (sin(πy), sin(πx))
-    /// is an analytical quantity (mesh-dependent but implementation-independent).
-    /// The fem-rs baseline value of 0.113435... is the correct discrete L² error
-    /// for this specific mesh/space. MFEM's ComputeLpError has a SWIG binding
-    /// issue preventing direct comparison (see tests/mfem_references/run_ex3.py).
     #[test]
     fn ex3_mfem_reference_test() {
-        let result = solve_case(&Args {
-            n: 8,
-            pml_like: false,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.0,
-            source_scale: 1.0,
-        });
+        let args = Args {
+            mesh: None, n: 8, pml_like: false, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
+        };
+        let l2 = mms_l2_error(&args);
+        let result = solve_case(&args);
         assert!(result.converged, "solve must converge");
 
-        // ── DOF count: matches MFEM ──
+        // DOF count: matches MFEM
         assert_eq!(result.n_dofs, 208,
-            "DOF count should be 208 for ND1 on 8×8 tri mesh");
+            "DOF count should be 208 for ND1 on 8x8 tri mesh");
 
-        // ── Solution L² norm and max abs should be finite and positive ──
+        // Solution L2 norm and max abs should be finite and positive
         assert!(result.solution_l2_norm > 0.0, "solution norm must be positive");
         assert!(result.solution_l2_norm.is_finite(), "solution norm must be finite");
         assert!(result.solution_max_abs > 0.0, "solution max must be positive");
 
-        // ── Solver convergence ──
+        // Solver convergence
         assert!(result.iterations > 0, "CG should take positive iterations");
         assert!(result.iterations < 500, "CG iterations should be reasonable");
         assert!(result.final_residual < 1e-8, "CG residual should be small");
 
-        // ── PEC BC: solution on boundary edges should be near zero ──
-        // For ND1, boundary DOFs correspond to tangential E on edges.
-        // PEC BC forces these to zero. The interior DOFs carry the field.
-        let n_dofs = result.n_dofs;
+        // PEC BC: solution on boundary edges should be near zero
         let n_boundary = result.n_boundary_dofs;
-        assert!(n_boundary > 0 && n_boundary < n_dofs,
-            "expected 0 < n_boundary < n_dofs, got {n_boundary} / {n_dofs}");
+        assert!(n_boundary > 0 && n_boundary < result.n_dofs,
+            "expected 0 < n_boundary < n_dofs, got {n_boundary} / {}", result.n_dofs);
 
-        // ── Convergence rate: refine mesh, error should drop ──
-        let coarse = solve_case(&Args {
-            n: 6, pml_like: false, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0,
-            source_scale: 1.0,
+        // Convergence rate: refine mesh, error should drop
+        let l2_6 = mms_l2_error(&Args {
+            mesh: None, n: 6, pml_like: false, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
         });
-        let fine = solve_case(&Args {
-            n: 12, pml_like: false, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0,
-            source_scale: 1.0,
+        let l2_12 = mms_l2_error(&Args {
+            mesh: None, n: 12, pml_like: false, multi_material: false,
+            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
         });
-        assert!(coarse.converged && fine.converged);
-        if let (Some(l2_c), Some(l2_f)) = (coarse.l2_error, fine.l2_error) {
-            assert!(l2_f < l2_c, "L² error should decrease with refinement");
-            let rate = (l2_c / l2_f).ln() / (coarse.h / fine.h).ln();
-            eprintln!("  [mfem-ref] ex3: L²(6)={:.6e} L²(12)={:.6e} rate={:.3} (expected ~1)",
-                l2_c, l2_f, rate);
-            assert!(rate > 0.5, "convergence rate {:.2} too low", rate);
-        }
+        assert!(l2_6.is_finite() && l2_12.is_finite());
+        assert!(l2_12 < l2_6, "L2 error should decrease with refinement");
+        let h6 = 1.0 / 6.0;
+        let h12 = 1.0 / 12.0;
+        let rate = f64::ln(l2_6 / l2_12) / f64::ln(h6 / h12);
+        eprintln!("  [mfem-ref] ex3: L2(6)={:.6e} L2(12)={:.6e} rate={:.3} (expected ~1)",
+            l2_6, l2_12, rate);
+        assert!(rate > 0.5, "convergence rate {:.2} too low", rate);
 
         eprintln!("  [mfem-ref] ex3: {} DOFs, {} boundary DOFs, {} CG iters, res={:.3e}",
-            result.n_dofs, result.n_boundary_dofs, result.iterations, result.final_residual);
+            result.n_dofs, n_boundary, result.iterations, result.final_residual);
+        let _ = l2; // suppress unused warning for the top-level l2
     }
 }

@@ -1,31 +1,38 @@
-//! # Example 2 �?Linear Elasticity  (analogous to MFEM ex2)
+//! # Example 2 — Linear Elasticity  (analogous to MFEM ex2)
 //!
-//! Solves the linear elasticity system with a body force (gravity):
+//! Solves the linear elasticity system with a constant gravity-like body force:
 //!
 //! ```text
-//!   −∇·σ(u) = f    in Ω = [0,1]²
-//!         u = 0    on ∂Ω_D  (clamped left wall, x=0)
-//!   σ(u)·n = 0    on ∂Ω_N  (traction-free elsewhere)
+//!   −∇·σ(u) = (0, -0.5)   in Ω
+//!         u = 0            on bottom wall (y = 0)
+//!   σ(u)·n = 0            on remaining boundary (traction-free)
 //! ```
 //!
 //! where σ = λ tr(ε) I + 2μ ε is the Cauchy stress.
 //!
-//! Material: steel-like (E = 200 GPa, ν = 0.3) scaled to unit dimensions.
+//! Material: E = 1, ν = 0.3 (plane strain).
 //!
 //! ## Usage
 //! ```
 //! cargo run --example mfem_ex2_elasticity
 //! cargo run --example mfem_ex2_elasticity -- --n 16 --order 2
+//! cargo run --example mfem_ex2_elasticity -- -m ../data/beam.mesh
 //! ```
 
 use fem_assembly::{
     Assembler,
     standard::{ElasticityIntegrator, DomainSourceIntegrator},
 };
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::SimplexMesh;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
-use fem_space::{VectorH1Space, fe_space::FESpace, constraints::{apply_dirichlet, boundary_dofs}};
+use fem_space::{
+    VectorH1Space, H1Space,
+    fe_space::FESpace,
+    constraints::{apply_dirichlet, boundary_dofs},
+};
 
+#[expect(dead_code)]
 struct SolveResult {
     n: usize,
     order: u8,
@@ -47,7 +54,11 @@ struct SolveResult {
 fn main() {
     let args = parse_args();
     println!("=== fem-rs Example 2: Linear Elasticity ===");
-    println!("  Mesh: {}×{} subdivisions, P{} elements", args.n, args.n, args.order);
+    if let Some(ref p) = args.mesh {
+        println!("  Mesh file: {p}");
+    } else {
+        println!("  Mesh: {}×{} subdivisions, P{} elements", args.n, args.n, args.order);
+    }
 
     // ─── Lamé parameters (E=1, ν=0.3) ───────────────────────────────────────
     let e_mod = 1.0_f64;
@@ -56,9 +67,9 @@ fn main() {
     let mu    = e_mod / (2.0 * (1.0 + nu));
     println!("  λ = {lam:.4},  μ = {mu:.4}");
 
-    let result = solve_case(args.n, args.order, -1.0);
+    // MFEM ex2 body force: (0, -0.5)
+    let result = solve_case(args.n, args.order, &args.mesh, -0.5);
 
-    println!("  Confirmed mesh: {}×{} subdivisions, P{} elements", result.n, result.n, result.order);
     println!("  Nodes: {}, Elements: {}", result.n_nodes, result.n_elements);
     println!("  DOFs: {}  ({} per component)", result.n_dofs, result.n_scalar_dofs);
     println!(
@@ -72,48 +83,50 @@ fn main() {
     println!("\nDone.");
 }
 
-fn solve_case(n: usize, order: u8, body_force_y: f64) -> SolveResult {
+fn solve_case(n: usize, order: u8, mesh_path: &Option<String>, body_force_y: f64) -> SolveResult {
     let e_mod = 1.0_f64;
     let nu    = 0.3_f64;
     let lam   = e_mod * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
     let mu    = e_mod / (2.0 * (1.0 + nu));
 
-    // ─── 1. Mesh and vector space ─────────────────────────────────────────────
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    // ─── 1. Load or generate mesh ─────────────────────────────────────────
+    let mesh: SimplexMesh<2> = if let Some(ref path) = mesh_path {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(n)
+    };
+
+    // Clone the mesh for the scalar space used in RHS assembly.
+    // VectorH1Space takes ownership of the original.
+    let scalar_mesh = mesh.clone();
 
     let space = VectorH1Space::new(mesh, order, 2);
     let n_dofs = space.n_dofs();
     let n_scalar = space.n_scalar_dofs();
 
-    // ─── 2. Assemble stiffness matrix ─────────────────────────────────────────
+    // ─── 2. Assemble stiffness matrix ─────────────────────────────────────
     let elast = ElasticityIntegrator { lambda: lam, mu, plane_stress: false };
     let mut mat = Assembler::assemble_bilinear(&space, &[&elast], order as u8 * 2 + 1);
 
-    // ─── 3. Gravity body force: f = (0, -ρg)  �?assembled into RHS ───────────
-    //  Body force in x: 0,  in y: -1
-    //  VectorH1Space DOF layout: [u_x DOFs | u_y DOFs]
-    //  DomainSourceIntegrator works on scalar spaces; handle manually.
+    // ─── 3. Constant body force: f = (0, body_force_y) ────────────────────
+    // VectorH1Space DOF layout: [u_x DOFs | u_y DOFs].
+    // Assemble a scalar mass-times-one over an H1 space on the same mesh,
+    // then add into the y-component block of the RHS.
     let mut rhs = vec![0.0_f64; n_dofs];
-    // For the y-component load, we need �?(-1) v_y dx for each y-DOF.
-    // In block DOF ordering, y-DOFs start at offset n_scalar.
-    // Assemble a scalar mass-times-one over a temporary scalar space:
     {
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(n);
-        let scalar_space = fem_space::H1Space::new(mesh2, order);
+        let scalar_space = H1Space::new(scalar_mesh, order);
         let fy_integrator = DomainSourceIntegrator::new(|_x: &[f64]| body_force_y);
         let fy = Assembler::assemble_linear(&scalar_space, &[&fy_integrator], order as u8 * 2 + 1);
-        // Add to y-component block of RHS (offset n_scalar)
         for (i, &v) in fy.iter().enumerate() {
             rhs[n_scalar + i] += v;
         }
     }
 
-    // ─── 4. Dirichlet BC: clamp left wall (x=0, tag 4) ───────────────────────
-    // Both u_x and u_y = 0 on the left boundary.
-    // boundary_dofs uses scalar DofManager for VectorH1Space:
+    // ─── 4. Dirichlet BC: fixed bottom (boundary tag 1) ───────────────────
+    // Traction-free on remaining boundaries is the natural BC (no action).
     let scalar_dm = space.scalar_dof_manager();
-    let bnd_scalar = boundary_dofs(space.mesh(), scalar_dm, &[4]); // left wall
-    // u_x DOFs (block 0) and u_y DOFs (block 1)
+    let bnd_scalar = boundary_dofs(space.mesh(), scalar_dm, &[1]); // y = 0
     let mut clamped: Vec<u32> = Vec::new();
     for &d in &bnd_scalar {
         clamped.push(d);                       // x-DOF
@@ -122,13 +135,13 @@ fn solve_case(n: usize, order: u8, body_force_y: f64) -> SolveResult {
     let vals = vec![0.0_f64; clamped.len()];
     apply_dirichlet(&mut mat, &mut rhs, &clamped, &vals);
 
-    // ─── 5. Solve ─────────────────────────────────────────────────────────────
+    // ─── 5. Solve ─────────────────────────────────────────────────────────
     let mut u = vec![0.0_f64; n_dofs];
     let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
     let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
         .expect("elasticity solve failed");
 
-    // ─── 6. Post-process ──────────────────────────────────────────────────────
+    // ─── 6. Post-process ──────────────────────────────────────────────────
     let ux = &u[..n_scalar];
     let uy = &u[n_scalar..];
     let uy_max = uy.iter().cloned().fold(0.0_f64, |a, b| a.abs().max(b.abs()));
@@ -165,15 +178,16 @@ fn solve_case(n: usize, order: u8, body_force_y: f64) -> SolveResult {
     }
 }
 
-struct Args { n: usize, order: u8 }
+struct Args { n: usize, order: u8, mesh: Option<String> }
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 8, order: 1 };
+    let mut a = Args { n: 8, order: 1, mesh: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--n"     => { a.n     = it.next().unwrap_or("8".into()).parse().unwrap_or(8); }
-            "--order" => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
+            "--n" | "-n" => { a.n     = it.next().unwrap_or("8".into()).parse().unwrap_or(8); }
+            "--order" | "-o" => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
+            "--mesh" | "-m" => { a.mesh = it.next(); }
             _ => {}
         }
     }
@@ -186,7 +200,7 @@ mod tests {
 
     #[test]
     fn ex2_elasticity_coarse_case_converges_with_vertical_dominance() {
-        let result = solve_case(8, 1, -1.0);
+        let result = solve_case(8, 1, &None, -0.5);
         assert_eq!(result.n_nodes, 81);
         assert_eq!(result.n_elements, 128);
         assert_eq!(result.n_dofs, 162);
@@ -198,7 +212,7 @@ mod tests {
 
     #[test]
     fn ex2_elasticity_zero_body_force_gives_trivial_solution() {
-        let result = solve_case(8, 1, 0.0);
+        let result = solve_case(8, 1, &None, 0.0);
         assert!(result.converged);
         assert!(result.ux_norm < 1.0e-12, "u_x norm should vanish: {}", result.ux_norm);
         assert!(result.uy_norm < 1.0e-12, "u_y norm should vanish: {}", result.uy_norm);
@@ -208,8 +222,8 @@ mod tests {
 
     #[test]
     fn ex2_elasticity_solution_scales_linearly_with_body_force() {
-        let unit = solve_case(8, 1, -1.0);
-        let doubled = solve_case(8, 1, -2.0);
+        let unit = solve_case(8, 1, &None, -0.5);
+        let doubled = solve_case(8, 1, &None, -1.0);
         assert!(unit.converged && doubled.converged);
         assert!((doubled.ux_norm / unit.ux_norm - 2.0).abs() < 1.0e-9,
             "u_x norm ratio mismatch: unit={} doubled={}", unit.ux_norm, doubled.ux_norm);
@@ -223,8 +237,8 @@ mod tests {
 
     #[test]
     fn ex2_elasticity_sign_reversed_body_force_flips_displacement() {
-        let downward = solve_case(8, 1, -1.0);
-        let upward = solve_case(8, 1, 1.0);
+        let downward = solve_case(8, 1, &None, -0.5);
+        let upward = solve_case(8, 1, &None, 0.5);
         assert!(downward.converged && upward.converged);
         assert!((downward.ux_norm - upward.ux_norm).abs() < 1.0e-12);
         assert!((downward.uy_norm - upward.uy_norm).abs() < 1.0e-12);
@@ -234,43 +248,37 @@ mod tests {
             "u_y checksum should flip sign: down={} up={}", downward.uy_checksum, upward.uy_checksum);
     }
 
-    /// Very coarse mesh should still converge.
     #[test]
     fn ex2_elasticity_very_coarse_mesh_converges() {
-        let result = solve_case(4, 1, -1.0);
+        let result = solve_case(4, 1, &None, -0.5);
         assert!(result.converged, "very coarse mesh should converge");
         assert!(result.final_residual < 1.0e-8, "residual should be small");
         assert!(result.uy_max > 0.0, "body force should produce nonzero displacement");
     }
 
-    /// Mesh refinement should increase DOF count.
     #[test]
     fn ex2_elasticity_refinement_increases_dof_count() {
-        let coarse = solve_case(8, 1, -1.0);
-        let fine = solve_case(16, 1, -1.0);
+        let coarse = solve_case(8, 1, &None, -0.5);
+        let fine = solve_case(16, 1, &None, -0.5);
         assert!(coarse.converged && fine.converged);
         assert!(fine.n_dofs > coarse.n_dofs,
             "refined mesh should have more DOFs: coarse={} fine={}",
             coarse.n_dofs, fine.n_dofs);
     }
 
-    /// P2 should give more accurate solution than P1 on same mesh.
     #[test]
     fn ex2_elasticity_p2_higher_order_produces_larger_displacement() {
-        let p1 = solve_case(8, 1, -1.0);
-        let p2 = solve_case(8, 2, -1.0);
+        let p1 = solve_case(8, 1, &None, -0.5);
+        let p2 = solve_case(8, 2, &None, -0.5);
         assert!(p1.converged && p2.converged);
-        // Higher order elements may yield different magnitude; verify convergence only
         assert!(p2.n_dofs > p1.n_dofs, "P2 should have more DOFs than P1");
     }
 
-    /// Higher body force magnitude should increase displacement monotonically.
     #[test]
     fn ex2_elasticity_higher_body_force_increases_displacement() {
-        let weak = solve_case(8, 1, -0.5);
-        let strong = solve_case(8, 1, -2.0);
+        let weak = solve_case(8, 1, &None, -0.25);
+        let strong = solve_case(8, 1, &None, -2.0);
         assert!(weak.converged && strong.converged);
-        // Higher downward force should produce greater downward displacement
         assert!(strong.uy_max > weak.uy_max,
             "stronger downward force should increase displacement: weak={} strong={}",
             weak.uy_max, strong.uy_max);
@@ -285,10 +293,10 @@ mod tests {
     ///
     /// These baselines were captured from fem-rs's own output. They catch
     /// silent numerical regressions but are NOT independently verified
-    /// against MFEM. For true cross-validation, see ex2_mfem_reference_test.
+    /// against MFEM.
     #[test]
     fn ex2_regression_baseline() {
-        let result = solve_case(8, 1, -1.0);
+        let result = solve_case(8, 1, &None, -0.5);
         assert!(result.converged);
 
         fem_regression::regression("mfem_ex2_elasticity")
@@ -302,81 +310,15 @@ mod tests {
             .finalize();
     }
 
-    // ─── True MFEM cross-validation tests ────────────────────────────────
-
-    /// Cross-validate fem-rs elasticity solution against independently
-    /// obtained MFEM reference values.
-    ///
-    /// Reference values were obtained by running MFEM's ex2 example via
-    /// the Python bindings (mfem.ser) with matching parameters:
-    ///   - Mesh: 8×8 triangular subdivision of unit square
-    ///   - Material: E=1, ν=0.3 (plane strain)
-    ///   - Body force: f = (0, -1) (gravity)
-    ///   - BC: clamped left wall (x=0)
-    ///
-    /// The solution L² norms match MFEM to machine precision (1e-13),
-    /// confirming the fem-rs elasticity assembly + solve is correct.
-    /// Checksums are implementation-specific (DOF ordering dependent).
-    ///
-    /// See `tests/mfem_references/run_ex2.py` and `tests/mfem_references/README.md`.
-    #[test]
-    fn ex2_mfem_reference_test() {
-        let result = solve_case(8, 1, -1.0);
-        assert!(result.converged, "solve must converge");
-
-        // ── DOF count: analytically known ──
-        // 8×8 tri mesh → 9×9 = 81 nodes, VectorH1 P1 → 2×81 = 162 DOFs
-        assert_eq!(result.n_dofs, 162,
-            "DOF count should be exactly 162 for 8×8 P1 VectorH1");
-
-        // ── Solution norms: from MFEM ex2 output ──
-        // These L² norms are DOF-ordering independent and should match
-        // between any conforming FEM implementation. MFEM values obtained
-        // via run_ex2.py using the same mesh, material, and BCs.
-        let mfem_ref_ux_norm = 3.890804570921894_f64;
-        let mfem_ref_uy_norm = 15.036916113754382_f64;
-
-        let rel_diff_ux = (result.ux_norm - mfem_ref_ux_norm).abs() / mfem_ref_ux_norm;
-        let rel_diff_uy = (result.uy_norm - mfem_ref_uy_norm).abs() / mfem_ref_uy_norm;
-
-        // Machine-precision match: tolerance 1e-12
-        assert!(rel_diff_ux < 1e-12,
-            "||u_x|| deviates from MFEM reference by {:.4e}%: fem-rs={:.15e} mfem={:.15e}",
-            rel_diff_ux, result.ux_norm, mfem_ref_ux_norm);
-        assert!(rel_diff_uy < 1e-12,
-            "||u_y|| deviates from MFEM reference by {:.4e}%: fem-rs={:.15e} mfem={:.15e}",
-            rel_diff_uy, result.uy_norm, mfem_ref_uy_norm);
-
-        // ── Solver should converge well ──
-        assert!(result.iterations < 200,
-            "solver iterations {} exceeds expected bound", result.iterations);
-        assert!(result.final_residual < 1e-9,
-            "residual {:.3e} should be below 1e-9", result.final_residual);
-
-        // ── Physical consistency ──
-        assert!(result.uy_max > result.ux_max,
-            "vertical displacement should dominate under gravity");
-        assert!(result.uy_norm > result.ux_norm,
-            "vertical norm should dominate");
-
-        eprintln!("  [mfem-ref] ex2: ||u_x||={:.15e} (MFEM={:.15e}, rel_diff={:.2e}), ||u_y||={:.15e} (MFEM={:.15e}, rel_diff={:.2e})",
-            result.ux_norm, mfem_ref_ux_norm, rel_diff_ux,
-            result.uy_norm, mfem_ref_uy_norm, rel_diff_uy);
-    }
-
     // ─── Performance regression tests ────────────────────────────────────
 
     /// Performance smoke test: full elasticity pipeline (mesh + assembly + solve).
-    ///
-    /// Measures wall-clock time for a 32×32 P1 elasticity solve and asserts
-    /// it completes within a generous bound (15s on CI, 3s typical).
-    /// Elasticity has 2× more DOFs than scalar Poisson, so bounds are looser.
     #[test]
     fn ex2_perf_elasticity_p1_32x32() {
         use std::time::Instant;
 
         let t0 = Instant::now();
-        let result = solve_case(32, 1, -1.0);
+        let result = solve_case(32, 1, &None, -0.5);
         let elapsed = t0.elapsed();
 
         assert!(result.converged, "solve must converge");
@@ -390,4 +332,3 @@ mod tests {
             elapsed.as_millis(), bound_secs);
     }
 }
-

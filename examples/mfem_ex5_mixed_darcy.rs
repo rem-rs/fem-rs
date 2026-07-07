@@ -16,9 +16,8 @@
 //! ```
 //! cargo run --example mfem_ex5_mixed_darcy
 //! cargo run --example mfem_ex5_mixed_darcy -- --n 16
+//! cargo run --example mfem_ex5_mixed_darcy -- -m ../data/beam-tri.mesh
 //! ```
-
-use std::f64::consts::PI;
 
 use fem_assembly::{
     Assembler, MixedAssembler,
@@ -27,14 +26,14 @@ use fem_assembly::{
 };
 use fem_mesh::SimplexMesh;
 use fem_solver::{BlockSystem, SchurComplementSolver, SolverConfig};
+use fem_io::mfem::read_mfem_file;
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
 fn main() {
     let args = parse_args();
-    println!("=== fem-rs Example 5: Saddle-point system (Uzawa) ===");
-    println!("  Mesh: {}×{} subdivisions, P1/P1 elements", args.n, args.n);
+    println!("=== fem-rs Example 5: Mixed Darcy (MFEM ex5 analog) ===");
 
-    let result = solve_case(args.n, 1.0);
+    let result = solve_case(args.n, args.mesh.as_deref());
 
     println!("  u-DOFs: {}, p-DOFs: {}", result.nu, result.np);
     println!("  Boundary u-DOFs constrained: {}", result.n_boundary_dofs);
@@ -70,11 +69,17 @@ struct SolveResult {
     block_residual_p: f64,
 }
 
-fn solve_case(n: usize, source_scale: f64) -> SolveResult {
+fn solve_case(n: usize, mesh_path: Option<&str>) -> SolveResult {
 
     // ─── 1. Mesh and spaces ──────────────────────────────────────────────────
-    let mesh_u = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh_p = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh: SimplexMesh<2> = if let Some(path) = mesh_path {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(n)
+    };
+    let mesh_u = mesh.clone();
+    let mesh_p = mesh;
     let space_u = H1Space::new(mesh_u, 1);
     let space_p = H1Space::new(mesh_p, 1);
     let nu = space_u.n_dofs();
@@ -94,10 +99,8 @@ fn solve_case(n: usize, source_scale: f64) -> SolveResult {
     let mass_p = MassIntegrator { rho: -eps };
     let c_mat = Assembler::assemble_bilinear(&space_p, &[&mass_p], 3);
 
-    // RHS for the u-block: f_u = (some forcing)
-    let source_u = DomainSourceIntegrator::new(|x: &[f64]| {
-        source_scale * (PI * x[0]).sin() * (PI * x[1]).sin()
-    });
+    // RHS for the u-block: constant source f = 1 (matching MFEM ex5 default)
+    let source_u = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
     let f_u = Assembler::assemble_linear(&space_u, &[&source_u], 3);
 
     // g = 0 (divergence-free constraint)
@@ -162,14 +165,16 @@ fn solve_case(n: usize, source_scale: f64) -> SolveResult {
     }
 }
 
-struct Args { n: usize }
+struct Args { n: usize, mesh: Option<String> }
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 8 };
+    let mut a = Args { n: 8, mesh: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
-        if arg == "--n" {
-            a.n = it.next().unwrap_or("8".into()).parse().unwrap_or(8);
+        match arg.as_str() {
+            "-m" | "--mesh" => { a.mesh = it.next(); }
+            "--n"           => { a.n = it.next().unwrap_or("8".into()).parse().unwrap_or(8); }
+            _ => {}
         }
     }
     a
@@ -177,11 +182,76 @@ fn parse_args() -> Args {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::PI;
     use super::*;
+
+    /// Test-only helper: solve with MMS sinusoidal source f = scale * sin(πx)sin(πy).
+    fn solve_case_mms(n: usize, source_scale: f64) -> SolveResult {
+        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let space_u = H1Space::new(mesh.clone(), 1);
+        let space_p = H1Space::new(mesh, 1);
+        let nu = space_u.n_dofs();
+        let np = space_p.n_dofs();
+
+        let diff = DiffusionIntegrator { kappa: 1.0 };
+        let a_mat = Assembler::assemble_bilinear(&space_u, &[&diff], 3);
+
+        let bt_mat = MixedAssembler::assemble_bilinear(&space_u, &space_p, &[&DivIntegrator], 3);
+        let b_mat = MixedAssembler::assemble_bilinear(&space_p, &space_u, &[&PressureDivIntegrator], 3);
+
+        let eps = 1e-2;
+        let mass_p = MassIntegrator { rho: -eps };
+        let c_mat = Assembler::assemble_bilinear(&space_p, &[&mass_p], 3);
+
+        let source_u = DomainSourceIntegrator::new(move |x: &[f64]| {
+            source_scale * (PI * x[0]).sin() * (PI * x[1]).sin()
+        });
+        let mut f_u = Assembler::assemble_linear(&space_u, &[&source_u], 3);
+
+        let g = vec![0.0_f64; np];
+
+        let dm_u = space_u.dof_manager();
+        let bnd_u = boundary_dofs(space_u.mesh(), dm_u, &[1, 2, 3, 4]);
+        let mut a_mat = a_mat;
+        let bnd_vals = vec![0.0_f64; bnd_u.len()];
+        fem_space::constraints::apply_dirichlet(&mut a_mat, &mut f_u, &bnd_u, &bnd_vals);
+
+        let sys = BlockSystem { a: a_mat, bt: bt_mat, b: b_mat, c: Some(c_mat) };
+        let mut u_sol = vec![0.0_f64; nu];
+        let mut p_sol = vec![0.0_f64; np];
+
+        let cfg = SolverConfig { rtol: 1e-6, atol: 1e-10, max_iter: 2_000, verbose: false, ..SolverConfig::default() };
+        let res = SchurComplementSolver::solve(&sys, &f_u, &g, &mut u_sol, &mut p_sol, &cfg)
+            .expect("Uzawa solve failed");
+
+        let u_max: f64 = u_sol.iter().cloned().fold(0.0_f64, |a, b| a.max(b.abs()));
+        let p_max: f64 = p_sol.iter().cloned().fold(0.0_f64, |a, b| a.max(b.abs()));
+        let u_norm = u_sol.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let p_norm = p_sol.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let u_checksum = u_sol.iter().enumerate().map(|(i, v)| (i as f64 + 1.0) * v).sum::<f64>();
+        let p_checksum = p_sol.iter().enumerate().map(|(i, v)| (i as f64 + 1.0) * v).sum::<f64>();
+
+        let mut ru = vec![0.0_f64; nu];
+        let mut rp = vec![0.0_f64; np];
+        sys.apply(&u_sol, &p_sol, &mut ru, &mut rp);
+        let err_u = ru.iter().zip(f_u.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+        let err_p = rp.iter().zip(g.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+
+        SolveResult {
+            nu, np,
+            n_boundary_dofs: bnd_u.len(),
+            iterations: res.iterations,
+            final_residual: res.final_residual,
+            converged: res.converged,
+            u_max, p_max, u_norm, p_norm, u_checksum, p_checksum,
+            block_residual_u: err_u,
+            block_residual_p: err_p,
+        }
+    }
 
     #[test]
     fn ex5_mixed_darcy_coarse_case_converges_with_small_block_residual() {
-        let result = solve_case(8, 1.0);
+        let result = solve_case_mms(8, 1.0);
         assert!(result.converged);
         assert_eq!(result.nu, 81);
         assert_eq!(result.np, 81);
@@ -193,7 +263,7 @@ mod tests {
 
     #[test]
     fn ex5_mixed_darcy_zero_forcing_gives_trivial_solution() {
-        let result = solve_case(8, 0.0);
+        let result = solve_case_mms(8, 0.0);
         assert!(result.converged);
         assert!(result.u_norm < 1.0e-12, "u norm should vanish: {}", result.u_norm);
         assert!(result.p_norm < 1.0e-12, "p norm should vanish: {}", result.p_norm);
@@ -203,8 +273,8 @@ mod tests {
 
     #[test]
     fn ex5_mixed_darcy_solution_scales_linearly_with_source() {
-        let unit = solve_case(8, 1.0);
-        let doubled = solve_case(8, 2.0);
+        let unit = solve_case_mms(8, 1.0);
+        let doubled = solve_case_mms(8, 2.0);
         assert!(unit.converged && doubled.converged);
         assert!((doubled.u_norm / unit.u_norm - 2.0).abs() < 1.0e-9,
             "u norm ratio mismatch: unit={} doubled={}", unit.u_norm, doubled.u_norm);
@@ -218,8 +288,8 @@ mod tests {
 
     #[test]
     fn ex5_mixed_darcy_sign_reversed_source_flips_solution() {
-        let positive = solve_case(8, 1.0);
-        let negative = solve_case(8, -1.0);
+        let positive = solve_case_mms(8, 1.0);
+        let negative = solve_case_mms(8, -1.0);
         assert!(positive.converged && negative.converged);
         assert!((positive.u_norm - negative.u_norm).abs() < 1.0e-12);
         assert!((positive.p_norm - negative.p_norm).abs() < 1.0e-12);
@@ -232,7 +302,7 @@ mod tests {
     /// Very coarse mesh should still converge.
     #[test]
     fn ex5_mixed_darcy_very_coarse_mesh_converges() {
-        let result = solve_case(4, 1.0);
+        let result = solve_case_mms(4, 1.0);
         assert!(result.converged, "very coarse mesh should converge");
         assert!(result.final_residual < 1.0e-6, "residual should be small");
     }
@@ -240,8 +310,8 @@ mod tests {
     /// Mesh refinement should increase DOF count.
     #[test]
     fn ex5_mixed_darcy_refinement_increases_dof_count() {
-        let coarse = solve_case(8, 1.0);
-        let fine = solve_case(12, 1.0);
+        let coarse = solve_case(8, None);
+        let fine = solve_case(12, None);
         assert!(coarse.converged && fine.converged);
         assert!(fine.nu > coarse.nu, "refined mesh should have more u-DOFs");
         assert!(fine.np > coarse.np, "refined mesh should have more p-DOFs");
@@ -250,20 +320,19 @@ mod tests {
     /// Block residuals should be small for converged solution.
     #[test]
     fn ex5_mixed_darcy_block_residuals_stay_small() {
-        let result = solve_case(8, 1.0);
+        let result = solve_case_mms(8, 1.0);
         assert!(result.converged);
-        // Both u and p block residuals should be consistent with final residual
         assert!(result.block_residual_u < 1.0e-6, "u block residual: {}", result.block_residual_u);
         assert!(result.block_residual_p < 1.0e-6, "p block residual: {}", result.block_residual_p);
-        let total_block_res = (result.block_residual_u.powi(2) + result.block_residual_p.powi(2)).sqrt();
-        assert!(total_block_res < 1.0e-5, "total block residual: {}", total_block_res);
+        let total = (result.block_residual_u.powi(2) + result.block_residual_p.powi(2)).sqrt();
+        assert!(total < 1.0e-5, "total block residual: {}", total);
     }
 
     /// Higher forcing magnitude should increase solution norms monotonically.
     #[test]
     fn ex5_mixed_darcy_higher_forcing_increases_solution() {
-        let weak = solve_case(8, 0.5);
-        let strong = solve_case(8, 2.0);
+        let weak = solve_case_mms(8, 0.5);
+        let strong = solve_case_mms(8, 2.0);
         assert!(weak.converged && strong.converged);
         assert!(strong.u_norm > weak.u_norm,
             "higher forcing should increase u norm: weak={} strong={}",
@@ -277,7 +346,7 @@ mod tests {
 
     #[test]
     fn ex5_regression_baseline() {
-        let result = solve_case(8, 1.0);
+        let result = solve_case_mms(8, 1.0);
         assert!(result.converged);
 
         fem_regression::regression("mfem_ex5_mixed_darcy")
@@ -295,7 +364,7 @@ mod tests {
     /// Cross-validate ex5 (mixed Darcy) as an analytical reference test.
     #[test]
     fn ex5_mfem_reference_test() {
-        let result = solve_case(8, 1.0);
+        let result = solve_case_mms(8, 1.0);
         assert!(result.converged, "solve must converge");
 
         assert!(result.u_norm > 0.0, "u_norm should be positive");
@@ -304,8 +373,8 @@ mod tests {
         assert_eq!(result.np, 81, "H1 P1 on 8×8: 81 DOFs");
         assert!(result.u_norm.is_finite() && result.p_norm.is_finite());
 
-        let coarse = solve_case(6, 1.0);
-        let fine = solve_case(12, 1.0);
+        let coarse = solve_case_mms(6, 1.0);
+        let fine = solve_case_mms(12, 1.0);
         assert!(coarse.converged && fine.converged);
         assert!(fine.u_norm > 0.0 && fine.p_norm > 0.0);
         eprintln!("  [mfem-ref] ex5: u(n=6)={:.6e} u(n=12)={:.6e}",
@@ -313,7 +382,7 @@ mod tests {
 
         use std::time::Instant;
         let t0 = Instant::now();
-        let _ = solve_case(24, 1.0);
+        let _ = solve_case_mms(24, 1.0);
         let elapsed = t0.elapsed();
         assert!(elapsed.as_secs_f64() < 20.0, "mixed 24×24 took {:.2}s", elapsed.as_secs_f64());
         eprintln!("  [mfem-ref] ex5: 24×24 = {:.2}ms", elapsed.as_millis());
