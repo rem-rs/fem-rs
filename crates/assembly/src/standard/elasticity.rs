@@ -140,11 +140,11 @@ mod tests {
     }
 
     use crate::assembler::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::VectorH1Space;
 
     #[test] fn elasticity_matrix_symmetric() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let integ = ElasticityIntegrator::new(1.0, 1.0);
         let mat = Assembler::assemble_bilinear(&space, &[&integ], 3);
@@ -152,7 +152,7 @@ mod tests {
         for i in 0..n { for j in 0..n { assert!((dense[i*n+j]-dense[j*n+i]).abs() < 1e-11); } }
     }
     #[test] fn elasticity_row_sums_zero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = VectorH1Space::new(mesh, 1, 2);
         let integ = ElasticityIntegrator::new(1.0, 0.5);
         let mat = Assembler::assemble_bilinear(&space, &[&integ], 3);
@@ -160,7 +160,7 @@ mod tests {
         for row in 0..n { let s: f64 = (0..n).map(|c| dense[row*n+c]).sum(); assert!(s.abs() < 1e-10); }
     }
     #[test] fn plane_stress_differs_from_plane_strain() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = VectorH1Space::new(mesh, 1, 2);
         let strain = ElasticityIntegrator::new(1.0, 0.5);
         let stress = ElasticityIntegrator::new(1.0, 0.5).with_plane_stress(true);

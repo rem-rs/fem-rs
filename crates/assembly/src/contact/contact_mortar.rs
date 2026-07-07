@@ -328,16 +328,16 @@ pub fn steel_on_steel_benchmark(
 ) -> Result<(), String> {
     use crate::standard::*;
     use crate::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     // Two unit squares: top block [0,1]×[0,1], bottom [0,1]×[-1,0]
     // Contact interface at y=0
-    let mesh_a = SimplexMesh::<2>::unit_square_tri(n_per_side);
+    let mesh_a = Mesh::<2>::unit_square_tri(n_per_side);
 
     // Bottom block: translate by -1 in y
     let mesh_b = {
-        let mut m = SimplexMesh::<2>::unit_square_tri(n_per_side);
+        let mut m = Mesh::<2>::unit_square_tri(n_per_side);
         m.translate([0.0, -1.0]);
         m
     };
@@ -450,17 +450,17 @@ mod tests {
     use super::*;
     use crate::standard::*;
     use crate::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     #[test]
     fn mortar_build_two_blocks() {
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
-        let mut mesh_b = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_a = Mesh::<2>::unit_square_tri(4);
+        let mut mesh_b = Mesh::<2>::unit_square_tri(4);
         mesh_b.translate([0.0, -1.0]);
 
         // Find edges at y ≈ 0 on both meshes
-        let find_edges = |mesh: &SimplexMesh<2>, y_target: f64| -> Vec<(u32, u8)> {
+        let find_edges = |mesh: &Mesh<2>, y_target: f64| -> Vec<(u32, u8)> {
             (0..mesh.n_elems() as u32).filter_map(|e| {
                 for (ei, &(a, b)) in [(0,1),(1,2),(0,2)].iter().enumerate() {
                     let ca = mesh.node_coords(mesh.element_nodes(e)[a]);
@@ -488,8 +488,8 @@ mod tests {
 
     #[test]
     fn mortar_saddle_system_nonzero() {
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
-        let mut mesh_b = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_a = Mesh::<2>::unit_square_tri(4);
+        let mut mesh_b = Mesh::<2>::unit_square_tri(4);
         mesh_b.translate([0.0, -1.0]);
 
     let se: Vec<(u32, u8)> = (0..mesh_a.n_elems() as u32).filter_map(|e| {

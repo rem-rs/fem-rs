@@ -21,7 +21,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{SolverConfig, solve_cg};
 use fem_space::{
     fe_space::FESpace,
@@ -50,7 +50,7 @@ fn asme_vv20_transient_slab() {
     let t_final = 0.2;
     let nt = (t_final / 0.01_f64).round() as usize;
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
     let dm = space.dof_manager();
@@ -135,7 +135,7 @@ fn asme_vv20_transient_slab() {
 fn asme_vv20_steady_mms() {
     let n = 16;
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let dm = space.dof_manager();
     let n_dofs = space.n_dofs();

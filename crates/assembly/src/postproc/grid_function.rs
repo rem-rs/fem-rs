@@ -435,13 +435,13 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
 }
 #[cfg(test)]
 mod tests {
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_mesh::topology::MeshTopology;
     use fem_space::{H1Space, fe_space::FESpace};
 
     #[test]
     fn interpolate_linear_exact_p1() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let f = |x: &[f64]| 2.0 * x[0] + 3.0 * x[1];
         let dofs_vec = space.interpolate(&f);
@@ -454,7 +454,7 @@ mod tests {
         }
     }
 
-    fn dof_coords_2d(space: &H1Space<SimplexMesh<2>>) -> Vec<[f64; 2]> {
+    fn dof_coords_2d(space: &H1Space<Mesh<2>>) -> Vec<[f64; 2]> {
         let mesh = space.mesh();
         (0..mesh.n_nodes() as u32).map(|n| {
             let c = mesh.node_coords(n);
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn interpolate_at_dof_coords_matches_function() {
         let f = |x: &[f64]| (x[0] * std::f64::consts::PI).sin();
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let dofs_vec = space.interpolate(&f);
         let dofs = dofs_vec.as_slice();

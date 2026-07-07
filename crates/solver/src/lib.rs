@@ -882,7 +882,7 @@ mod ams_ads_tests {
     use super::*;
     use fem_assembly::{DiscreteLinearOperator, VectorAssembler};
     use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, HCurlSpace};
     use fem_space::constraints::{apply_dirichlet, boundary_dofs_hcurl};
     use fem_space::fe_space::FESpace;
@@ -892,7 +892,7 @@ mod ams_ads_tests {
     #[test]
     fn pcg_ams_hcurl_2d_converges() {
         let n = 4;
-        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh  = Mesh::<2>::unit_square_tri(n);
         let h1    = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         let ndofs = hcurl.n_dofs();
@@ -927,7 +927,7 @@ mod ams_ads_tests {
     #[test]
     fn gmres_ams_hcurl_2d_converges() {
         let n = 4;
-        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh  = Mesh::<2>::unit_square_tri(n);
         let h1    = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         let ndofs = hcurl.n_dofs();
@@ -960,7 +960,7 @@ mod ams_ads_tests {
     #[test]
     fn pcg_ams_solution_satisfies_ax_eq_b() {
         let n = 4;
-        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh  = Mesh::<2>::unit_square_tri(n);
         let h1    = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         let ndofs = hcurl.n_dofs();
@@ -1000,7 +1000,7 @@ mod ams_ads_tests {
     fn pcg_ams_iteration_count_reasonable() {
         // AMS should converge in far fewer iterations than plain CG on H(curl)
         let n = 6;
-        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh  = Mesh::<2>::unit_square_tri(n);
         let h1    = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         let ndofs = hcurl.n_dofs();
@@ -1039,7 +1039,7 @@ mod ams_ads_tests {
         use fem_space::HDivSpace;
 
         let n = 2usize;
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(n);
+        let mesh3 = Mesh::<3>::unit_cube_tet(n);
         let h1    = H1Space::new(mesh3.clone(), 1);
         let hcurl = HCurlSpace::new(mesh3.clone(), 1);
         let hdiv  = HDivSpace::new(mesh3.clone(), 0);
@@ -1083,7 +1083,7 @@ mod ams_ads_tests {
         use fem_space::HDivSpace;
 
         let n = 2usize;
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(n);
+        let mesh3 = Mesh::<3>::unit_cube_tet(n);
         let h1    = H1Space::new(mesh3.clone(), 1);
         let hcurl = HCurlSpace::new(mesh3.clone(), 1);
         let hdiv  = HDivSpace::new(mesh3.clone(), 0);
@@ -1121,7 +1121,7 @@ mod ams_ads_tests {
         use fem_space::HDivSpace;
 
         let n = 2usize;
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(n);
+        let mesh3 = Mesh::<3>::unit_cube_tet(n);
         let h1    = H1Space::new(mesh3.clone(), 1);
         let hcurl = HCurlSpace::new(mesh3.clone(), 1);
         let hdiv  = HDivSpace::new(mesh3.clone(), 0);
@@ -1163,7 +1163,7 @@ mod ams_ads_tests {
         // AMS with H^1 order 1 + H(curl) order 2 (ND2).
         // Tests that gradient() works with mismatched orders (h1=1, hcurl=2).
         let n = 4;
-        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh  = Mesh::<2>::unit_square_tri(n);
         let h1    = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 2); // ND2
         let ndofs = hcurl.n_dofs();

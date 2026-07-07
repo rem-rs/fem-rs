@@ -149,11 +149,11 @@ pub fn face_ref_elem(dim: usize, order: usize) -> Box<dyn ReferenceElement> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn hdg_face_map_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let (faces, n_skel) = build_face_map(&mesh, 2, 1);
         assert!(n_skel > 0);
         assert!(faces.len() > 0);
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn hdg_face_map_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let (faces, n_skel) = build_face_map(&mesh, 3, 1);
         assert!(n_skel > 0);
         assert!(faces.len() > 0);

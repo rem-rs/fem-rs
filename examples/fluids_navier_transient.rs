@@ -13,13 +13,13 @@ use fem_assembly::{
     physics::navier_stokes::{assemble_convection_matrix, assemble_divergence_matrix},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_gmres, SolverConfig, BlockSystem};
 use fem_space::{H1Space, VectorH1Space, fe_space::FESpace};
 
 /// Build block-diagonal mass matrix for VectorH1Space (2 components) from scalar mass.
-fn build_vector_mass(n_scalar: usize, mesh: &SimplexMesh<2>, quad_order: u8) -> CsrMatrix<f64> {
+fn build_vector_mass(n_scalar: usize, mesh: &Mesh<2>, quad_order: u8) -> CsrMatrix<f64> {
     let scalar_space = fem_space::H1Space::new(mesh.clone(), 2);
     let scalar_mass = Assembler::assemble_bilinear(
         &scalar_space, &[&MassIntegrator { rho: 1.0 }], quad_order);
@@ -41,7 +41,7 @@ fn main() {
     let steps = 50;
     let t0 = Instant::now();
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let vs = VectorH1Space::new(mesh.clone(), 2, 2);
     let ps = H1Space::new(mesh, 1);
     let n_u = vs.n_dofs(); let n_p = ps.n_dofs();
@@ -122,12 +122,12 @@ mod tests {
     use fem_assembly::{Assembler, standard::{VectorDiffusionIntegrator, MassIntegrator}};
     use fem_assembly::physics::navier_stokes::assemble_divergence_matrix;
     use fem_linalg::CooMatrix;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, VectorH1Space, fe_space::FESpace};
 
     #[test]
     fn ns_transient_step_is_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let vs = VectorH1Space::new(mesh.clone(), 2, 2);
         let ps = H1Space::new(mesh, 1);
         let nu = 0.01;
@@ -136,7 +136,7 @@ mod tests {
         let a_diff = Assembler::assemble_bilinear(&vs, &[&diff], 5);
 
         // Build scalar mass, then extend to vector
-        let scalar_mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let scalar_mesh = Mesh::<2>::unit_square_tri(6);
         let scalar_space = fem_space::H1Space::new(scalar_mesh, 2);
         let sm = Assembler::assemble_bilinear(&scalar_space, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], 5);
         let n_s = vs.n_scalar_dofs();

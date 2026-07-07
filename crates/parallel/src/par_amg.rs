@@ -1657,7 +1657,7 @@ mod tests {
     use crate::par_simplex::partition_simplex;
     use crate::par_space::ParallelFESpace;
     use fem_assembly::standard::DiffusionIntegrator;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::SolverConfig;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
@@ -1665,7 +1665,7 @@ mod tests {
 
     #[test]
     fn par_pcg_amg_poisson_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
@@ -1701,7 +1701,7 @@ mod tests {
 
     #[test]
     fn par_pcg_amg_poisson_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -1741,7 +1741,7 @@ mod tests {
     /// in that case it should behave identically to `build`.
     #[test]
     fn par_amg_global_aggregation_serial_converges() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
@@ -1790,7 +1790,7 @@ mod tests {
     /// This is the primary WP2 integration test for cross-rank aggregation.
     #[test]
     fn par_amg_global_aggregation_two_ranks_converges() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(10);
+        let mesh = Mesh::<2>::unit_square_tri(10);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -1870,7 +1870,7 @@ mod tests {
     /// confirming cross-rank merging is active.
     #[test]
     fn par_amg_global_aggregation_four_ranks_coarsens() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let mesh = Mesh::<2>::unit_square_tri(12);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(4));
         launcher.launch(move |comm| {
@@ -1915,7 +1915,7 @@ mod tests {
     #[test]
     fn par_amg_fewer_iters_than_jacobi() {
         // AMG should converge in fewer iterations than plain Jacobi PCG.
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
@@ -1963,7 +1963,7 @@ mod tests {
     fn par_amg_sgs_fewer_iters_than_jacobi_smoother() {
         // SGS smoother should need fewer V-cycles than Jacobi smoother
         // for the same problem (Poisson with homogeneous Dirichlet BCs).
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
@@ -2025,7 +2025,7 @@ mod tests {
     fn par_amg_chebyshev_converges() {
         // Chebyshev smoother (degree 3) should converge to the same solution
         // as Jacobi and need no more outer PCG iterations.
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
@@ -2090,7 +2090,7 @@ mod tests {
     fn gershgorin_lambda_max_positive() {
         // A 2×2 identity matrix as ParCsr: D⁻¹A = I, spectral radius = 1.
         // Gershgorin bound should return ≥ 1.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);

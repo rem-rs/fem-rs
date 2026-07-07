@@ -315,12 +315,12 @@ pub fn pa_apply_hex_qk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{fe_space::FESpace, H1Space};
     use crate::assembler::Assembler;
     use crate::standard::DiffusionIntegrator;
 
-    fn hex_elem_dofs(space: &H1Space<SimplexMesh<3>>) -> Vec<Vec<u32>> {
+    fn hex_elem_dofs(space: &H1Space<Mesh<3>>) -> Vec<Vec<u32>> {
         let mesh = space.mesh();
         (0..mesh.n_elements() as u32)
             .map(|e| space.element_dofs(e).to_vec())
@@ -330,11 +330,11 @@ mod tests {
     /// Verify Hex Q1 PA matches assembled SpMV (only P1 is supported by the standard assembler on Hex8).
     #[test]
     fn hex_qk_p1_matches_assembled() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let space = H1Space::new(mesh, 1);
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
 
-        let mesh2 = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh2 = Mesh::<3>::unit_cube_hex(1);
         let space2 = H1Space::new(mesh2, 1);
         let pd = build_hex_qk_pa_data(space2.mesh(), &|_| 1.0, 1);
         let elem_dofs = hex_elem_dofs(&space2);
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn hex_qk_pa_data_is_finite() {
         for p in 1..=5 {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+            let mesh = Mesh::<3>::unit_cube_hex(1);
             let pd = build_hex_qk_pa_data(&mesh, &|_| 1.0, p);
             assert!(
                 pd.data.iter().all(|v| v.is_finite()),
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn hex_qk_pa_data_matches_specific_builder() {
         // Verify PA data from generic builder matches order-specific builder
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let pd_qk = build_hex_qk_pa_data(&mesh, &|_| 1.0, 1);
         let pd_spec = crate::pa::hex_q1::build_hex_q1_pa_data(&mesh, &|_| 1.0);
         assert_eq!(pd_qk.data.len(), pd_spec.data.len());
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn hex_qk_q1_agrees_with_specific_impl() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let pd = build_hex_qk_pa_data(&mesh, &|_| 1.0, 1);
         let ed: Vec<Vec<u32>> = vec![(0..8).map(|i| i as u32).collect()];
         let mut rng: u64 = 42;
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn hex_qk_q3_agrees_with_sf_impl() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let pd_sf = crate::pa::q3::build_hex_q3_pa_data(&mesh, &|_| 1.0);
         let pd_qk = build_hex_qk_pa_data(&mesh, &|_| 1.0, 3);
         let ed: Vec<Vec<u32>> = vec![(0..64).map(|i| i as u32).collect()];

@@ -78,7 +78,7 @@ impl SharedEntities {
         // is "shared" (at least one node is ghost).  If so, the neighbor rank
         // is the owner of the ghost node (or the first ghost node owner).
         //
-        // Note: SimplexMesh does not currently expose a direct edge enumeration;
+        // Note: Mesh does not currently expose a direct edge enumeration;
         // this requires an `edge_conn` / `edge_to_elem` table (P4-1 gap).
         // For now, we skip edge/face population — the infrastructure is
         // ready to be filled once the mesh topology provides those tables.
@@ -123,13 +123,13 @@ impl SharedEntities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use crate::par_simplex::partition_simplex;
     use crate::mpi_test_env::test_world_comm;
 
     #[test]
     fn shared_vertices_on_serial_rank() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let n_total_nodes = mesh.n_nodes();
         let comm_rank: Rank = 0;
         let pmesh = partition_simplex(&mesh, &test_world_comm());
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn shared_edges_placeholder_does_not_panic() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let pmesh = partition_simplex(&mesh, &test_world_comm());
         let mut se = SharedEntities::from_partition(pmesh.partition(), 0);
         se.build_edges_faces(&mesh, pmesh.partition(), 0);

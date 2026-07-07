@@ -235,12 +235,12 @@ pub fn pa_apply_quad_qk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{fe_space::FESpace, H1Space};
     use crate::assembler::Assembler;
     use crate::standard::DiffusionIntegrator;
 
-    fn quad_elem_dofs(space: &H1Space<SimplexMesh<2>>) -> Vec<Vec<u32>> {
+    fn quad_elem_dofs(space: &H1Space<Mesh<2>>) -> Vec<Vec<u32>> {
         let mesh = space.mesh();
         (0..mesh.n_elements() as u32)
             .map(|e| space.element_dofs(e).to_vec())
@@ -248,12 +248,12 @@ mod tests {
     }
 
     fn run_quad_qk_check(p: usize) {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let space = H1Space::new(mesh, p as u8);
         // Standard assembler only supports Quad4 P1
         if p == 1 {
             let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
-            let mesh2 = SimplexMesh::<2>::unit_square_quad(2);
+            let mesh2 = Mesh::<2>::unit_square_quad(2);
             let space2 = H1Space::new(mesh2, 1);
             let pd = build_quad_qk_pa_data(space2.mesh(), &|_| 1.0, 1);
             let elem_dofs = quad_elem_dofs(&space2);
@@ -272,7 +272,7 @@ mod tests {
             assert!(max_err < 1e-12, "Quad Q1 PA vs assembled {max_err:.2e}");
         }
         // For higher p, verify self-consistency: apply twice should give same result
-        let mesh2 = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh2 = Mesh::<2>::unit_square_quad(2);
         let space2 = H1Space::new(mesh2, p as u8);
         let pd = build_quad_qk_pa_data(space2.mesh(), &|_| 1.0, p);
         let elem_dofs = quad_elem_dofs(&space2);
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn quad_qk_pa_data_is_finite() {
         for p in 1..=5 {
-            let mesh = SimplexMesh::<2>::unit_square_quad(1);
+            let mesh = Mesh::<2>::unit_square_quad(1);
             let pd = build_quad_qk_pa_data(&mesh, &|_| 1.0, p);
             assert!(pd.data.iter().all(|v| v.is_finite()), "Quad Q{} not all finite", p);
             assert!(pd.data.iter().any(|&v| v.abs() > 0.0), "Quad Q{} all zero", p);

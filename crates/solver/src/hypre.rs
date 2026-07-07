@@ -230,14 +230,14 @@ mod tests {
             Assembler,
             standard::{DiffusionIntegrator, DomainSourceIntegrator},
         };
-        use fem_mesh::SimplexMesh;
+        use fem_mesh::Mesh;
         use fem_space::{
             H1Space, fe_space::FESpace,
             constraints::{apply_dirichlet, boundary_dofs},
         };
 
         let n = 16;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, 1);
         let dofs = space.n_dofs();
         let quad = 3;

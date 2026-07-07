@@ -33,7 +33,7 @@ use std::f64::consts::PI;
 use fem_assembly::{Assembler, GridFunction, standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator}};
 use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{MeshTopology, SimplexMesh};
+use fem_mesh::{MeshTopology, Mesh};
 use fem_solver::{SolverConfig, solve_pcg_jacobi};
 use fem_space::{H1Space, constraints::boundary_dofs, fe_space::FESpace};
 use nalgebra::{DMatrix, DVector, linalg::{Cholesky, SymmetricEigen}};
@@ -46,7 +46,7 @@ fn main() {
             let msh = read_msh_file(p).expect("failed to read mesh file");
             msh.into_2d().expect("expected 2D mesh")
         }
-        None => SimplexMesh::<2>::unit_square_tri(args.n),
+        None => Mesh::<2>::unit_square_tri(args.n),
     };
 
     let result = solve_fractional_problem_with_method(mesh, args.s, args.method, args.n_quad, args.verification);
@@ -158,7 +158,7 @@ mod tests {
 
     fn solve_fractional_problem(n: usize, s: f64) -> FractionalResult {
         solve_fractional_problem_with_method(
-            SimplexMesh::<2>::unit_square_tri(n), s, FractionalMethod::Spectral, 64, true,
+            Mesh::<2>::unit_square_tri(n), s, FractionalMethod::Spectral, 64, true,
         )
     }
 
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn mk_mesh() -> SimplexMesh<2> { SimplexMesh::<2>::unit_square_tri(8) }
+    fn mk_mesh() -> Mesh<2> { Mesh::<2>::unit_square_tri(8) }
 
     fn ex33_rational_matches_spectral_baseline() {
         let spectral = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Spectral, 64, true);
@@ -287,7 +287,7 @@ mod tests {
 // ── Core solver functions ─────────────────────────────────────────────────────
 
 fn solve_fractional_problem_with_method(
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
     s: f64,
     method: FractionalMethod,
     n_quad: usize,

@@ -25,7 +25,7 @@ use fem_assembly::{
     coefficient::ConstantMatrixCoeff,
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     ParVectorAssembler, ParVector, ParallelFESpace,
     par_simplex::partition_simplex,
@@ -124,7 +124,7 @@ fn main() {
 }
 
 fn solve_case(run: RunArgs) -> CaseResult {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(run.mesh_n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(run.mesh_n));
     let out = Arc::new(Mutex::new(None::<CaseResult>));
     let out_closure = Arc::clone(&out);
 

@@ -7,7 +7,7 @@
 
 use fem_core::{ElemId, NodeId};
 
-use crate::{ElementType, SimplexMesh};
+use crate::{ElementType, Mesh};
 
 /// Result of locating a point in a triangular mesh.
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ pub struct LocatedPoint3D {
 /// Uses per-element axis-aligned bounding boxes to cheaply reject most
 /// elements, then a barycentric inclusion test for exact containment.
 pub struct TriPointLocator<'a> {
-    mesh: &'a SimplexMesh<2>,
+    mesh: &'a Mesh<2>,
     elem_bboxes: Vec<([f64; 2], [f64; 2])>,
 }
 
@@ -36,12 +36,12 @@ pub struct TriPointLocator<'a> {
 ///
 /// Uses per-element axis-aligned bounding boxes and barycentric inclusion.
 pub struct TetPointLocator<'a> {
-    mesh: &'a SimplexMesh<3>,
+    mesh: &'a Mesh<3>,
     elem_bboxes: Vec<([f64; 3], [f64; 3])>,
 }
 
 impl<'a> TriPointLocator<'a> {
-    pub fn new(mesh: &'a SimplexMesh<2>) -> Self {
+    pub fn new(mesh: &'a Mesh<2>) -> Self {
         assert!(
             mesh.elem_type == ElementType::Tri3 || mesh.is_mixed(),
             "TriPointLocator::new: only Tri3 meshes are supported"
@@ -110,7 +110,7 @@ impl<'a> TriPointLocator<'a> {
 }
 
 impl<'a> TetPointLocator<'a> {
-    pub fn new(mesh: &'a SimplexMesh<3>) -> Self {
+    pub fn new(mesh: &'a Mesh<3>) -> Self {
         assert!(
             mesh.elem_type == ElementType::Tet4 || mesh.is_mixed(),
             "TetPointLocator::new: only Tet4 meshes are supported"
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn locate_point_in_unit_square_tri_mesh() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let loc = TriPointLocator::new(&m);
         let p = [0.37, 0.41];
         let r = loc.locate(&p, 1e-12).expect("point should be inside mesh");
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn locate_returns_none_for_outside_point() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let loc = TriPointLocator::new(&m);
         let p = [1.5, -0.2];
         assert!(loc.locate(&p, 1e-12).is_none());
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn nearest_node_returns_valid_id() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let loc = TriPointLocator::new(&m);
         let nid = loc.nearest_node(&[0.99, 0.99]);
         assert!((nid as usize) < m.n_nodes());
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn locate_point_in_unit_cube_tet_mesh() {
-        let m = SimplexMesh::<3>::unit_cube_tet(3);
+        let m = Mesh::<3>::unit_cube_tet(3);
         let loc = TetPointLocator::new(&m);
         let p = [0.21, 0.41, 0.37];
         let r = loc.locate(&p, 1e-12).expect("point should be inside mesh");
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn locate_returns_none_for_outside_point_3d() {
-        let m = SimplexMesh::<3>::unit_cube_tet(3);
+        let m = Mesh::<3>::unit_cube_tet(3);
         let loc = TetPointLocator::new(&m);
         assert!(loc.locate(&[-0.1, 0.2, 1.5], 1e-12).is_none());
     }

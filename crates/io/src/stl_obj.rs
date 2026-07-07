@@ -5,10 +5,10 @@
 
 use std::io::{BufRead, BufReader, Read};
 use fem_core::{FemResult, NodeId};
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{element_type::ElementType, simplex::Mesh};
 
 /// Read an ASCII or binary STL stream, detect format automatically.
-pub fn read_stl<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
+pub fn read_stl<R: Read>(reader: R) -> FemResult<Mesh<3>> {
     let mut buf = Vec::new();
     BufReader::new(reader).read_to_end(&mut buf)?;
     let head = String::from_utf8_lossy(&buf[..std::cmp::min(80, buf.len())]);
@@ -20,7 +20,7 @@ pub fn read_stl<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
     }
 }
 
-fn parse_ascii_stl(text: &str) -> FemResult<SimplexMesh<3>> {
+fn parse_ascii_stl(text: &str) -> FemResult<Mesh<3>> {
     let mut coords = Vec::new();
     let mut conn = Vec::new();
     let mut tri_verts: Vec<f64> = Vec::with_capacity(9);
@@ -42,13 +42,13 @@ fn parse_ascii_stl(text: &str) -> FemResult<SimplexMesh<3>> {
     }
     let n_tri = conn.len() / 3;
     let elem_tags = vec![1i32; n_tri];
-    Ok(SimplexMesh::uniform(
+    Ok(Mesh::uniform(
         coords, conn, elem_tags, ElementType::Tri3,
         vec![], vec![], ElementType::Line2,
     ))
 }
 
-fn parse_binary_stl(buf: &[u8]) -> FemResult<SimplexMesh<3>> {
+fn parse_binary_stl(buf: &[u8]) -> FemResult<Mesh<3>> {
     if buf.len() < 84 { return Err(fem_core::FemError::Mesh("truncated binary STL".into())); }
     let n = u32::from_le_bytes([buf[80], buf[81], buf[82], buf[83]]) as usize;
     let expected = 84 + n * 50;
@@ -73,14 +73,14 @@ fn parse_binary_stl(buf: &[u8]) -> FemResult<SimplexMesh<3>> {
         conn.extend_from_slice(&[base, base + 1, base + 2]);
     }
     let elem_tags = vec![1i32; n];
-    Ok(SimplexMesh::uniform(
+    Ok(Mesh::uniform(
         coords, conn, elem_tags, ElementType::Tri3,
         vec![], vec![], ElementType::Line2,
     ))
 }
 
 /// Read a Wavefront OBJ stream returning a 3-D surface mesh.
-pub fn read_obj<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
+pub fn read_obj<R: Read>(reader: R) -> FemResult<Mesh<3>> {
     let mut vertices: Vec<[f64; 3]> = Vec::new();
     let mut tri_conn = Vec::new();
     let mut quad_conn = Vec::new();
@@ -121,7 +121,7 @@ pub fn read_obj<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
         let mut elem_types = vec![ElementType::Tri3; n_elems];
         for i in n_tri..n_elems { elem_types[i] = ElementType::Quad4; }
         let tags = vec![1i32; n_elems];
-        return Ok(SimplexMesh {
+        return Ok(Mesh {
             coords, conn: conn_all, elem_tags: tags, elem_type: ElementType::Tri3,
             face_conn: vec![], face_tags: vec![], face_type: ElementType::Line2,
             elem_types: Some(elem_types),
@@ -138,16 +138,16 @@ pub fn read_obj<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
         let n_tri = tri_conn.len() / 3;
         (tri_conn, ElementType::Tri3, vec![1i32; n_tri])
     };
-    Ok(SimplexMesh::uniform(coords, conn, elem_tags, elem_type, vec![], vec![], ElementType::Line2))
+    Ok(Mesh::uniform(coords, conn, elem_tags, elem_type, vec![], vec![], ElementType::Line2))
 }
 
 /// Convenience: read STL by file path.
-pub fn read_stl_file(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> {
+pub fn read_stl_file(path: impl AsRef<std::path::Path>) -> FemResult<Mesh<3>> {
     read_stl(std::fs::File::open(path)?)
 }
 
 /// Convenience: read OBJ by file path.
-pub fn read_obj_file(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> {
+pub fn read_obj_file(path: impl AsRef<std::path::Path>) -> FemResult<Mesh<3>> {
     read_obj(std::fs::File::open(path)?)
 }
 

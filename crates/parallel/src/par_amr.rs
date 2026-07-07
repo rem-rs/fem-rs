@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, BTreeMap};
 
-use fem_mesh::{SimplexMesh, amr::NCState, topology::MeshTopology, boundary::BoundaryTag};
+use fem_mesh::{Mesh, amr::NCState, topology::MeshTopology, boundary::BoundaryTag};
 use fem_core::types::{ElemId, NodeId};
 
 use crate::{
@@ -42,7 +42,7 @@ impl std::fmt::Display for ParAmrError {
 
 /// Result of a single parallel AMR cycle.
 pub struct ParRefinedMesh {
-    pub par_mesh:    ParallelMesh<SimplexMesh<2>>,
+    pub par_mesh:    ParallelMesh<Mesh<2>>,
     pub nc_state:    NCState,
     pub solution:    Vec<f64>,
     pub n_new_elems: usize,
@@ -50,7 +50,7 @@ pub struct ParRefinedMesh {
 
 /// Perform one cycle of parallel non-conforming AMR.
 pub fn par_refine_marked(
-    par_mesh: &ParallelMesh<SimplexMesh<2>>,
+    par_mesh: &ParallelMesh<Mesh<2>>,
     mut nc_state: NCState,
     marked:    &[ElemId],
     solution:  Option<&[f64]>,
@@ -85,9 +85,9 @@ pub fn par_refine_marked(
 // ─── par_repartition ──────────────────────────────────────────────────────────
 
 fn merge_submeshes(
-    meshes: &[SimplexMesh<2>],
+    meshes: &[Mesh<2>],
     partitions: &[MeshPartition],
-) -> Result<SimplexMesh<2>, ParAmrError> {
+) -> Result<Mesh<2>, ParAmrError> {
     // Collect unique global nodes: global_id → coords
     let mut global_nodes: BTreeMap<NodeId, [f64; 2]> = BTreeMap::new();
     // Collect all elements keyed by global element ID
@@ -112,7 +112,7 @@ fn merge_submeshes(
         }
         // Boundary faces
         let n_faces = mesh.face_conn.len() / 3; // Tri face = 2 nodes, but in 2D boundary faces are edges
-        // Actually for SimplexMesh<2>, face_conn stores edge vertex pairs
+        // Actually for Mesh<2>, face_conn stores edge vertex pairs
         // face_conn is flat: each face has face_type.nodes_per_element() entries
         let f_npe = mesh.face_type.nodes_per_element();
         if f_npe > 0 && n_faces > 0 {
@@ -177,7 +177,7 @@ fn merge_submeshes(
         face_tags.push(*tag);
     }
 
-    Ok(SimplexMesh {
+    Ok(Mesh {
         coords,
         conn,
         elem_tags,
@@ -199,8 +199,8 @@ fn merge_submeshes(
 /// Gathers all sub-meshes to rank 0, merges them into a single global mesh,
 /// and redistributes via [`partition_simplex_streaming`].
 pub fn par_repartition(
-    par_mesh: ParallelMesh<SimplexMesh<2>>,
-) -> Result<ParallelMesh<SimplexMesh<2>>, ParAmrError> {
+    par_mesh: ParallelMesh<Mesh<2>>,
+) -> Result<ParallelMesh<Mesh<2>>, ParAmrError> {
     let comm = par_mesh.comm().clone();
     let size = comm.size();
     let rank = comm.rank();
@@ -256,8 +256,8 @@ pub fn par_repartition(
 /// This is a **single-pass diffusive** scheme.  Full balance may require
 /// multiple passes (call in a loop until imbalance < threshold).
 pub fn sfc_rebalance_ring<const D: usize>(
-    par_mesh: ParallelMesh<SimplexMesh<D>>,
-) -> Result<ParallelMesh<SimplexMesh<D>>, ParAmrError> {
+    par_mesh: ParallelMesh<Mesh<D>>,
+) -> Result<ParallelMesh<Mesh<D>>, ParAmrError> {
     let comm = par_mesh.comm().clone();
     let size = comm.size();
     let rank = comm.rank();
@@ -368,7 +368,7 @@ pub fn sfc_rebalance_ring<const D: usize>(
 /// This is a **one-step diffusive** scheme: each rank talks only to its
 /// clockwise neighbour.  Full balance is reached after O(P) ring passes.
 pub fn sfc_rebalance_plan<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     target: usize,
 ) -> (Vec<usize>, Vec<usize>) {
     let n_local = mesh.n_elems();
@@ -394,9 +394,9 @@ pub fn sfc_rebalance_plan<const D: usize>(
 
 /// Extract a subset of elements from a mesh into a new mesh.
 fn extract_submesh_elements<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     elem_indices: &[usize],
-) -> SimplexMesh<D> {
+) -> Mesh<D> {
     use std::collections::HashMap;
     let n = elem_indices.len();
     let mut new_conn = Vec::new();
@@ -425,7 +425,7 @@ fn extract_submesh_elements<const D: usize>(
 
     // Create a minimal mesh with the subset
     // (face data is not transferred; caller regenerates if needed)
-    SimplexMesh {
+    Mesh {
         coords: new_coords,
         conn: new_conn,
         elem_tags: new_tags,
@@ -445,9 +445,9 @@ fn extract_submesh_elements<const D: usize>(
 
 /// Merge two meshes (concatenate nodes and elements).
 fn merge_two_meshes<const D: usize>(
-    mesh_a: &SimplexMesh<D>,
-    mesh_b: &SimplexMesh<D>,
-) -> SimplexMesh<D> {
+    mesh_a: &Mesh<D>,
+    mesh_b: &Mesh<D>,
+) -> Mesh<D> {
     let n_a_nodes = mesh_a.n_nodes();
     let mut coords = mesh_a.coords.clone();
     coords.extend_from_slice(&mesh_b.coords);
@@ -461,7 +461,7 @@ fn merge_two_meshes<const D: usize>(
     let mut elem_tags = mesh_a.elem_tags.clone();
     elem_tags.extend_from_slice(&mesh_b.elem_tags);
 
-    SimplexMesh {
+    Mesh {
         coords,
         conn,
         elem_tags,
@@ -480,7 +480,7 @@ fn merge_two_meshes<const D: usize>(
 }
 
 /// Compute element centroids (simplified, for D=2 and D=3).
-fn compute_centroids_simple<const D: usize>(mesh: &SimplexMesh<D>) -> Vec<[f64; D]> {
+fn compute_centroids_simple<const D: usize>(mesh: &Mesh<D>) -> Vec<[f64; D]> {
     let n_elems = mesh.n_elems();
     let mut centroids = Vec::with_capacity(n_elems);
     for e in 0..n_elems as u32 {
@@ -505,8 +505,8 @@ fn compute_centroids_simple<const D: usize>(mesh: &SimplexMesh<D>) -> Vec<[f64; 
 /// Coarse-node values are copied directly. New midpoint nodes are
 /// interpolated from the two nearest coarse nodes — exact for P1.
 pub fn prolongate_p1(
-    coarse:     &SimplexMesh<2>,
-    refined:    &SimplexMesh<2>,
+    coarse:     &Mesh<2>,
+    refined:    &Mesh<2>,
     sol_coarse: &[f64],
 ) -> Vec<f64> {
     let n_fine   = refined.n_nodes();
@@ -589,11 +589,11 @@ pub fn compute_global_imbalance(n_local: usize, comm: &crate::Comm) -> f64 {
 /// After each iteration the global imbalance is recomputed.  The process
 /// stops when `imbalance < 1.0 + threshold` or `max_iters` is reached.
 pub fn par_diffusive_rebalance<const D: usize>(
-    par_mesh: ParallelMesh<SimplexMesh<D>>,
+    par_mesh: ParallelMesh<Mesh<D>>,
     threshold: f64,
     max_iters: usize,
     n_diffuse: usize,
-) -> Result<ParallelMesh<SimplexMesh<D>>, ParAmrError> {
+) -> Result<ParallelMesh<Mesh<D>>, ParAmrError> {
     let comm = par_mesh.comm().clone();
     let size = comm.size();
     if size <= 1 { return Ok(par_mesh); }
@@ -667,11 +667,11 @@ pub fn par_diffusive_rebalance<const D: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::{SimplexMesh, amr::NCState};
+    use fem_mesh::{Mesh, amr::NCState};
     use crate::{par_mesh::ParallelMesh, partition::MeshPartition, backend::native::SerialBackend, comm::Comm};
 
-    fn make_serial_par_mesh(n: usize) -> (ParallelMesh<SimplexMesh<2>>, NCState) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    fn make_serial_par_mesh(n: usize) -> (ParallelMesh<Mesh<2>>, NCState) {
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elements());
         let comm = Comm::from_backend(Box::new(SerialBackend));
         let par_mesh = ParallelMesh::new(mesh, comm, partition);
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn prolongate_constant_function() {
-        let coarse = SimplexMesh::<2>::unit_square_tri(2);
+        let coarse = Mesh::<2>::unit_square_tri(2);
         let mut nc = NCState::new();
         let marked: Vec<ElemId> = (0..coarse.n_elements() as ElemId).collect();
         let (refined, _, _) = nc.refine(&coarse, &marked);
@@ -710,7 +710,7 @@ mod tests {
 
     #[test]
     fn prolongate_linear_function() {
-        let coarse = SimplexMesh::<2>::unit_square_tri(4);
+        let coarse = Mesh::<2>::unit_square_tri(4);
         let mut nc = NCState::new();
         let marked: Vec<ElemId> = (0..coarse.n_elements() as ElemId).collect();
         let (refined, _, _) = nc.refine(&coarse, &marked);
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn merge_submeshes_round_trip() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let part = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
         let merged = merge_submeshes(&[mesh.clone()], &[part]).unwrap();
         assert_eq!(merged.n_elems(), mesh.n_elems());
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn sfc_rebalance_plan_under_target_keeps_all() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4); // 32 elements
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements
         let n = mesh.n_elems();
         let (keep, send) = sfc_rebalance_plan(&mesh, n + 10);
         assert_eq!(keep.len(), n, "should keep all when target exceeds local count");
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn sfc_rebalance_plan_over_target_sends_excess() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4); // 32 elements
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements
         let n = mesh.n_elems();
         let target = n / 2;
         let (keep, send) = sfc_rebalance_plan(&mesh, target);
@@ -773,7 +773,7 @@ mod tests {
 
     #[test]
     fn sfc_rebalance_plan_elements_are_disjoint() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n = mesh.n_elems();
         let target = n / 2;
         let (keep, send) = sfc_rebalance_plan(&mesh, target);
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn extract_submesh_elements_preserves_connectivity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3); // 18 elements
+        let mesh = Mesh::<2>::unit_square_tri(3); // 18 elements
         let indices: Vec<usize> = (0..3).collect(); // first 3 elements
         let sub = extract_submesh_elements(&mesh, &indices);
         assert_eq!(sub.n_elems(), 3, "should have 3 elements");
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn merge_two_meshes_concatenates() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let n = mesh.n_elems();
         let mid = n / 2;
         let left: Vec<usize> = (0..mid).collect();
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn compute_centroids_simple_2d_triangle() {
         // A known triangle: (0,0), (1,0), (0,1) → centroid at (1/3, 1/3)
-        let mesh = SimplexMesh::<2> {
+        let mesh = Mesh::<2> {
             coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
             conn: vec![0, 1, 2],
             elem_tags: vec![0],

@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace, WorkerConfig,
@@ -28,8 +28,8 @@ fn build_poisson(
     comm: &fem_parallel::comm::Comm,
     mesh_n: usize,
     order: u8,
-) -> (fem_parallel::ParCsrMatrix, ParVector, ParallelFESpace<H1Space<SimplexMesh<2>>>) {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(mesh_n));
+) -> (fem_parallel::ParCsrMatrix, ParVector, ParallelFESpace<H1Space<Mesh<2>>>) {
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(mesh_n));
     let par_mesh = partition_simplex(&mesh, comm);
     let local_mesh = par_mesh.local_mesh().clone();
     let local_space = H1Space::new(local_mesh, order);
@@ -163,7 +163,7 @@ fn par_mms_p1_two_ranks() {
     use std::f64::consts::PI;
     let src_fn = |x: &[f64]| 2.0*PI*PI*(PI*x[0]).sin()*(PI*x[1]).sin();
     launcher(2).launch(move |comm| {
-        let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+        let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
         let pm = partition_simplex(&mesh, &comm);
         let ls = H1Space::new(pm.local_mesh().clone(), 1);
         let ps = ParallelFESpace::new(ls, &pm, comm.clone());
@@ -189,7 +189,7 @@ fn par_mms_p2_two_ranks() {
     use std::f64::consts::PI;
     let src_fn = |x: &[f64]| 2.0*PI*PI*(PI*x[0]).sin()*(PI*x[1]).sin();
     launcher(2).launch(move |comm| {
-        let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+        let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
         let pm = partition_simplex(&mesh, &comm);
         let lm = pm.local_mesh().clone();
         let ls = H1Space::new(lm.clone(), 2);
@@ -219,7 +219,7 @@ fn par_mms_p1_four_ranks_matches_two_ranks() {
     let results = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
     launcher(4).launch(move |comm| {
-        let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(12));
+        let mesh = Arc::new(Mesh::<2>::unit_square_tri(12));
         let pm = partition_simplex(&mesh, &comm);
         let ls = H1Space::new(pm.local_mesh().clone(), 1);
         let ps = ParallelFESpace::new(ls, &pm, comm.clone());

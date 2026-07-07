@@ -33,7 +33,7 @@
 use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{
     solve_pcg_jacobi, SolverConfig,
     ForwardEuler, Rk4, TimeStepper,
@@ -84,7 +84,7 @@ fn solve_case(
     initial_scale: f64,
 ) -> SolveResult {
     // ─── 1. Mesh and H¹ space ─────────────────────────────────────────────────
-    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh  = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 

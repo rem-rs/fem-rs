@@ -12,11 +12,11 @@
 
 use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::solve_sparse_cholesky;
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space};
 
-fn load_mesh(path: &str) -> SimplexMesh<2> {
+fn load_mesh(path: &str) -> Mesh<2> {
     let msh = read_msh_file(path).expect("failed to read mesh file");
     msh.into_2d().expect("expected 2D mesh")
 }
@@ -25,7 +25,7 @@ fn main() {
     let args = parse_args();
     let mesh = match args.mesh_file {
         Some(ref p) => load_mesh(p),
-        None => SimplexMesh::<2>::unit_square_tri(args.n),
+        None => Mesh::<2>::unit_square_tri(args.n),
     };
     let result = run_topology_optimization(&args, mesh);
 
@@ -129,14 +129,14 @@ fn parse_args() -> Args {
     args
 }
 
-fn run_topology_optimization(args: &Args, mesh: SimplexMesh<2>) -> TopOptResult {
+fn run_topology_optimization(args: &Args, mesh: Mesh<2>) -> TopOptResult {
     match args.model {
         TopOptModel::Scalar => run_scalar_topology_optimization(args, mesh),
         TopOptModel::PlaneStrainElastic => run_elastic_topology_optimization(args, mesh),
     }
 }
 
-fn run_scalar_topology_optimization(args: &Args, mesh: SimplexMesh<2>) -> TopOptResult {
+fn run_scalar_topology_optimization(args: &Args, mesh: Mesh<2>) -> TopOptResult {
     let space = H1Space::new(mesh, 1);
     let elements = build_element_data(&space);
     let filters = build_filter_neighbors(&elements, args.rmin);
@@ -227,7 +227,7 @@ struct ElasticElementData {
 ///
 /// DOF layout: node `n` → global DOFs `2n` (x) and `2n+1` (y).
 /// Material: E = 1.0, ν = 0.3 (non-dimensionalised).
-fn build_elastic_element_data(space: &H1Space<SimplexMesh<2>>) -> Vec<ElasticElementData> {
+fn build_elastic_element_data(space: &H1Space<Mesh<2>>) -> Vec<ElasticElementData> {
     let mesh = space.mesh();
     let e_mod = 1.0_f64;
     let nu = 0.3_f64;
@@ -343,7 +343,7 @@ fn assemble_elastic_stiffness(
 ///
 /// Setup: unit-square domain, left edge clamped, point load in the
 /// −y direction applied at the right-boundary node closest to mid-height.
-fn run_elastic_topology_optimization(args: &Args, mesh: SimplexMesh<2>) -> TopOptResult {
+fn run_elastic_topology_optimization(args: &Args, mesh: Mesh<2>) -> TopOptResult {
     let space = H1Space::new(mesh, 1);
     let elements = build_elastic_element_data(&space);
     let centroids: Vec<[f64; 2]> = elements.iter().map(|e| e.centroid).collect();
@@ -483,7 +483,7 @@ fn build_filter_neighbors_from_centroids(
     filters
 }
 
-fn build_element_data(space: &H1Space<SimplexMesh<2>>) -> Vec<ElementData> {    let mesh = space.mesh();
+fn build_element_data(space: &H1Space<Mesh<2>>) -> Vec<ElementData> {    let mesh = space.mesh();
     let mut elems = Vec::with_capacity(mesh.n_elements());
 
     for e in 0..mesh.n_elements() as u32 {
@@ -618,7 +618,7 @@ fn assemble_global_stiffness(
     coo.into_csr()
 }
 
-fn find_nearest_dof_on_right_boundary(space: &H1Space<SimplexMesh<2>>, target_y: f64) -> usize {
+fn find_nearest_dof_on_right_boundary(space: &H1Space<Mesh<2>>, target_y: f64) -> usize {
     let mesh = space.mesh();
     let dm = space.dof_manager();
     let right = boundary_dofs(mesh, dm, &[2]);
@@ -641,7 +641,7 @@ mod tests {
     use super::*;
 
     fn run(args: &Args) -> TopOptResult {
-        run_topology_optimization(args, SimplexMesh::<2>::unit_square_tri(args.n))
+        run_topology_optimization(args, Mesh::<2>::unit_square_tri(args.n))
     }
 
     #[test]

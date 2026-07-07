@@ -1926,18 +1926,18 @@ impl DofManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn p1_unit_square_dof_count() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dm = DofManager::new(&mesh, 1);
         assert_eq!(dm.n_dofs, mesh.n_nodes());
     }
 
     #[test]
     fn p1_element_dofs_are_node_ids() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 1);
         for e in 0..mesh.n_elements() as u32 {
             let dofs = dm.element_dofs(e);
@@ -1950,7 +1950,7 @@ mod tests {
     fn p2_unit_square_dof_count() {
         // n×n grid → 2n² triangles; n_nodes = (n+1)², n_edges = 3n² + 2n (internal formula)
         // But we just check the lower bound: n_dofs > n_nodes
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dm = DofManager::new(&mesh, 2);
         assert!(dm.n_dofs > mesh.n_nodes(), "P2 must have more DOFs than nodes");
         assert_eq!(dm.dofs_per_elem, 6);
@@ -1958,7 +1958,7 @@ mod tests {
 
     #[test]
     fn p2_element_first_three_are_vertex_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 2);
         for e in 0..mesh.n_elements() as u32 {
             let dofs  = dm.element_dofs(e);
@@ -1970,7 +1970,7 @@ mod tests {
     #[test]
     fn p2_edge_dofs_are_shared_between_adjacent_elements() {
         // On a 1×1 unit square with 2 triangles (2×2 mesh, but using 1×1):
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         // Should have exactly 2 triangles sharing the diagonal edge.
         // The two shared edge DOFs should be the same global index.
         let dm = DofManager::new(&mesh, 2);
@@ -1992,7 +1992,7 @@ mod tests {
         //  2---3---4
         //  |   | /
         //  0---1
-        let mut mesh = SimplexMesh::<2>::uniform(
+        let mut mesh = Mesh::<2>::uniform(
             vec![0.0, 0.0,  1.0, 0.0,  0.0, 1.0,  1.0, 1.0,  2.0, 1.0],
             vec![0, 1, 3, 2,  1, 4, 3],  // quad then tri
             vec![1, 1],
@@ -2015,11 +2015,11 @@ mod tests {
     fn p3_unit_square_dof_count() {
         // P3 on n×n mesh: n_nodes + 2*n_edges + n_elements bubble DOFs.
         // Just verify: n_dofs > P2 dofs > P1 dofs.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dm1 = DofManager::new(&mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let dm2 = DofManager::new(&mesh2, 2);
-        let mesh3 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh3 = Mesh::<2>::unit_square_tri(4);
         let dm3 = DofManager::new(&mesh3, 3);
         assert!(dm3.n_dofs > dm2.n_dofs, "P3 must have more DOFs than P2");
         assert!(dm2.n_dofs > dm1.n_dofs, "P2 must have more DOFs than P1");
@@ -2028,7 +2028,7 @@ mod tests {
 
     #[test]
     fn p3_element_first_three_are_vertex_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 3);
         for e in 0..mesh.n_elements() as u32 {
             let dofs  = dm.element_dofs(e);
@@ -2039,7 +2039,7 @@ mod tests {
 
     #[test]
     fn p3_edge_dofs_are_shared_between_adjacent_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let dm = DofManager::new(&mesh, 3);
         assert_eq!(mesh.n_elements(), 2);
 
@@ -2054,7 +2054,7 @@ mod tests {
 
     #[test]
     fn p3_bubble_dofs_are_unique_per_element() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 3);
         let n_elems = mesh.n_elements();
         let mut bubble_dofs: Vec<u32> = (0..n_elems as u32)
@@ -2068,7 +2068,7 @@ mod tests {
 
     #[test]
     fn p3_dof_coords_in_unit_square() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dm = DofManager::new(&mesh, 3);
         for dof in 0..dm.n_dofs as u32 {
             let c = dm.dof_coord(dof);
@@ -2082,7 +2082,7 @@ mod tests {
 
     #[test]
     fn p3_bubble_dof_start_correct() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 3);
         // bubble_dof_start = n_nodes + 2*n_unique_edges
         // Verify all bubble DOFs (one per element, at position 9) are >= bubble_dof_start
@@ -2097,7 +2097,7 @@ mod tests {
 
     #[test]
     fn tet_p3_dof_manager_basic() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let dm = DofManager::new(&mesh, 3);
         // n=2 cube tet: n_nodes = 3×3×3 = 27, n_elements = 6*2³ = 48
         assert_eq!(dm.dofs_per_elem, 20, "TetP3 must have 20 DOFs per element");
@@ -2114,7 +2114,7 @@ mod tests {
 
     #[test]
     fn tet_p3_dof_coords_in_unit_cube() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let dm = DofManager::new(&mesh, 3);
         for dof in 0..dm.n_dofs as u32 {
             let c = dm.dof_coord(dof);
@@ -2127,7 +2127,7 @@ mod tests {
 
     #[test]
     fn tet_p3_edge_dofs_shared() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let dm = DofManager::new(&mesh, 3);
         // Elements sharing an edge should share the 2 edge DOFs.
         // Verify edge_dof2_map has consistent entries.
@@ -2144,7 +2144,7 @@ mod tests {
 
     #[test]
     fn pk4_tri_dof_count() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 4);
         assert_eq!(dm.dofs_per_elem, 15, "P4 triangle should have 15 DOFs per element");
         assert!(dm.n_dofs > mesh.n_nodes(), "P4 must have more DOFs than nodes");
@@ -2152,7 +2152,7 @@ mod tests {
 
     #[test]
     fn pk4_tri_vertex_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 4);
         for e in 0..mesh.n_elements() as u32 {
             let dofs  = dm.element_dofs(e);
@@ -2163,7 +2163,7 @@ mod tests {
 
     #[test]
     fn pk4_tri_edge_dofs_shared() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let dm = DofManager::new(&mesh, 4);
         assert_eq!(mesh.n_elements(), 2, "1×1 = 2 triangles");
         let dofs0 = dm.element_dofs(0).to_vec();
@@ -2176,7 +2176,7 @@ mod tests {
 
     #[test]
     fn pk4_tri_bubble_dofs_unique() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 4);
         let n_elems = mesh.n_elements();
         let mut bubbles: Vec<u32> = (0..n_elems as u32)
@@ -2190,7 +2190,7 @@ mod tests {
 
     #[test]
     fn pk4_tri_n_dofs_increases_with_order() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let prev = DofManager::new(&mesh, 3).n_dofs;
         let cur  = DofManager::new(&mesh, 4).n_dofs;
         assert!(cur > prev, "P4 must have more DOFs than P3");
@@ -2198,7 +2198,7 @@ mod tests {
 
     #[test]
     fn pk4_tri_dof_coords_in_bounds() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm = DofManager::new(&mesh, 4);
         for dof in 0..dm.n_dofs as u32 {
             let c = dm.dof_coord(dof);
@@ -2211,7 +2211,7 @@ mod tests {
 
     #[test]
     fn pk4_tet_basic() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let dm = DofManager::new(&mesh, 4);
         assert_eq!(dm.dofs_per_elem, 35, "P4 tet should have 35 DOFs per element");
         for e in 0..mesh.n_elements() as u32 {
@@ -2224,9 +2224,9 @@ mod tests {
 
     // ─── Prism6 P2 tests ──────────────────────────────────────────────────────
 
-    fn make_prism_mesh() -> SimplexMesh<3> {
+    fn make_prism_mesh() -> Mesh<3> {
         use fem_mesh::element_type::ElementType;
-        SimplexMesh::<3>::uniform(
+        Mesh::<3>::uniform(
             vec![
                 0.,0.,0., 1.,0.,0., 0.,1.,0.,
                 0.,0.,1., 1.,0.,1., 0.,1.,1.,
@@ -2295,9 +2295,9 @@ mod tests {
 
     // ─── Pyramid5 P2 tests ────────────────────────────────────────────────────
 
-    fn make_pyramid_mesh() -> SimplexMesh<3> {
+    fn make_pyramid_mesh() -> Mesh<3> {
         use fem_mesh::element_type::ElementType;
-        SimplexMesh::<3>::uniform(
+        Mesh::<3>::uniform(
             vec![0.,0.,0., 1.,0.,0., 1.,1.,0., 0.,1.,0., 0.5,0.5,1., 0.,0.,1.],
             vec![0,1,2,3,4, 3,0,4,5],
             vec![1,1], ElementType::Pyramid5, vec![], vec![], ElementType::Tri3,

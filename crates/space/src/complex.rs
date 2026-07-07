@@ -202,13 +202,13 @@ impl<S: FESpace> FESpace for ComplexSpace<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use crate::H1Space;
     use std::f64::consts::PI;
 
     #[test]
     fn complex_grid_function_zero_init() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let gf = ComplexGridFunction::new(space);
         assert_eq!(gf.n_dofs(), gf.space.n_dofs());
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn complex_interpolate_plane_wave() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let mut gf = ComplexGridFunction::new(space);
         let kx = 2.0 * PI;
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn complex_l2_error_is_zero_for_exact() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let mut gf = ComplexGridFunction::new(space);
         let fre = |x: &[f64]| x[0] * x[1];
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn complex_space_delegates_to_inner() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh, 1);
         let csp = ComplexSpace::new(h1.clone());
         assert_eq!(csp.n_dofs(), h1.n_dofs());
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn complex_space_create_grid_function() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh, 1);
         let csp = ComplexSpace::new(h1);
         let gf = csp.create_grid_function();
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn complex_space_interpolate() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh, 1);
         let csp = ComplexSpace::new(h1);
         let gf = csp.interpolate(&|x| x[0], &|x| x[1]);
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn complex_space_boundary_dofs_non_empty() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh, 1);
         let csp = ComplexSpace::new(h1);
         let bdy = csp.boundary_dofs();

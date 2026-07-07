@@ -506,12 +506,12 @@ fn invert_dense(mat: &[f64], n: usize) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn hdg_poisson_2d_p1() {
         use std::f64::consts::PI;
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let source = |x: &[f64]| 2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin();
         let result = solve_hdg_poisson(mesh, source, 1, 0);
         for &v in &result.u { assert!(v.is_finite()); }
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn hdg_poisson_2d_p2() {
         use std::f64::consts::PI;
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let source = |x: &[f64]| 2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin();
         let result = solve_hdg_poisson(mesh, source, 2, 0);
         for &v in &result.u { assert!(v.is_finite()); }

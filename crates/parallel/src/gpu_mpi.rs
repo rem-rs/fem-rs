@@ -99,14 +99,14 @@ impl GpuAwareOverlap<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use crate::launcher::native::ThreadLauncher;
     use crate::launcher::WorkerConfig;
     use crate::par_simplex::partition_simplex;
 
     #[test]
     fn gpu_aware_serial_noop() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn gpu_aware_overlap_pipeline_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);

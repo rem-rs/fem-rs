@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use fem_core::Scalar;
 use fem_linalg::CsrMatrix;
 use fem_linalg_gpu::GpuContext;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{H1Space, fe_space::FESpace};
 use fem_assembly::{Assembler, standard::DiffusionIntegrator};
 use fem_solver::{
@@ -73,7 +73,7 @@ fn bench_pcg(c: &mut Criterion) {
 
     for n in [16, 32, 64].iter() {
         group.bench_with_input(BenchmarkId::new("jacobi", n), n, |b, n| {
-            let mesh = SimplexMesh::<2>::unit_square_tri(*n);
+            let mesh = Mesh::<2>::unit_square_tri(*n);
             let space = H1Space::new(mesh, 1u8);
 
             let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -438,7 +438,7 @@ fn bench_cg_2d_poisson(c: &mut Criterion) {
     };
 
     for &n in sizes {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, 1u8);
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
         let n_dofs = space.n_dofs();

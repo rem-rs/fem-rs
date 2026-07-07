@@ -632,7 +632,7 @@ pub fn solve_hcurl_eigen_preconditioned_amg(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use crate::postproc::coefficient::FnCoeff;
     use crate::assembler::Assembler;
@@ -641,7 +641,7 @@ mod tests {
     /// M_matfree x == M_assembled x for a constant vector x = 1.
     #[test]
     fn pa_mass_matches_assembled() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
 
@@ -665,7 +665,7 @@ mod tests {
     /// K_matfree x == K_assembled x for a constant vector x = 1.
     #[test]
     fn pa_diffusion_matches_assembled() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
 
@@ -687,7 +687,7 @@ mod tests {
     /// Lumped mass: sum of diagonal = total mass = ρ * ∫ 1 dx = 1 for ρ=1.
     #[test]
     fn lumped_mass_sum_equals_area() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let lm = LumpedMassOperator::assemble(&space, 1.0, 3);
         let total_mass: f64 = lm.diag.iter().sum();
@@ -699,7 +699,7 @@ mod tests {
     /// PA diffusion: K 1 = 0 for a 1-by-1 system since ∇1 = 0.
     #[test]
     fn pa_diffusion_of_constant_is_zero() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
         let op = PADiffusionOperator::new(space, FnCoeff(|_: &[f64]| 1.0), 3);
@@ -713,7 +713,7 @@ mod tests {
     /// Repeated apply: apply twice should equal 2x the single apply.
     #[test]
     fn pa_mass_linearity() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh  = Mesh::<2>::unit_square_tri(3);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
         let op = PAMassOperator::new(space, 1.0, 3);
@@ -739,7 +739,7 @@ mod tests {
         use crate::VectorAssembler;
         use crate::standard::{CurlCurlIntegrator, VectorMassIntegrator};
 
-        let mesh  = fem_mesh::SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = fem_mesh::Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let n     = space.n_dofs();
         let mu_inv = 2.0_f64;
@@ -777,7 +777,7 @@ mod tests {
         use crate::VectorAssembler;
         use crate::standard::{CurlCurlIntegrator, VectorMassIntegrator};
 
-        let mesh  = fem_mesh::SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = fem_mesh::Mesh::<3>::unit_cube_tet(2);
         let space = HCurlSpace::new(mesh, 1);
         let n     = space.n_dofs();
         let mu_inv = 1.0_f64;
@@ -813,7 +813,7 @@ mod tests {
         use fem_space::HCurlSpace;
 
         // alpha=1, mu_inv=0: pure vector mass problem → M x = b, trivial.
-        let mesh  = fem_mesh::SimplexMesh::<2>::unit_square_tri(3);
+        let mesh  = fem_mesh::Mesh::<2>::unit_square_tri(3);
         let space = HCurlSpace::new(mesh, 1);
         let n     = space.n_dofs();
 
@@ -846,7 +846,7 @@ mod tests {
         use crate::discrete_op::DiscreteLinearOperator;
         use fem_solver::LobpcgConfig;
 
-        let mesh   = fem_mesh::SimplexMesh::<2>::unit_square_tri(8);
+        let mesh   = fem_mesh::Mesh::<2>::unit_square_tri(8);
         let hcurl  = HCurlSpace::new(mesh.clone(), 1);
         let h1     = H1Space::new(mesh, 1);
 
@@ -893,7 +893,7 @@ mod tests {
         use fem_solver::LobpcgConfig;
 
         // n=7 → ≈168 Tri3 elements → 3D: unit_square_tri(7) gives ~98+49*2 edges
-        let mesh  = fem_mesh::SimplexMesh::<2>::unit_square_tri(8);
+        let mesh  = fem_mesh::Mesh::<2>::unit_square_tri(8);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         let h1    = H1Space::new(mesh, 1);
 

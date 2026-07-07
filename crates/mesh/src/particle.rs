@@ -9,7 +9,7 @@
 //! - VTK output for ParaView
 
 use fem_core::{ElemId, FaceId};
-use crate::SimplexMesh;
+use crate::Mesh;
 
 /// A single particle: position, owning element, and scalar data.
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ impl ParticleSet {
     // ── Locate ──────────────────────────────────────────────────────────────
 
     /// Locate in 2D Tri3 mesh.
-    pub fn locate_2d(&mut self, mesh: &SimplexMesh<2>, tol: f64) {
+    pub fn locate_2d(&mut self, mesh: &Mesh<2>, tol: f64) {
         let loc = crate::TriPointLocator::new(mesh);
         for p in &mut self.particles {
             if let Some(lp) = loc.locate(&[p.x[0], p.x[1]], tol) {
@@ -64,7 +64,7 @@ impl ParticleSet {
     }
 
     /// Locate in 3D Tet4 mesh.
-    pub fn locate_3d(&mut self, mesh: &SimplexMesh<3>, tol: f64) {
+    pub fn locate_3d(&mut self, mesh: &Mesh<3>, tol: f64) {
         let loc = crate::TetPointLocator::new(mesh);
         for p in &mut self.particles {
             if let Some(lp) = loc.locate(&[p.x[0], p.x[1], p.x[2]], tol) {
@@ -108,7 +108,7 @@ impl ParticleSet {
     // ── Mesh interpolation (2D) ─────────────────────────────────────────────
 
     /// Interpolate mesh node data onto particles (2D).
-    pub fn interpolate_2d(&mut self, mesh: &SimplexMesh<2>, node_vals: &[f64], data_idx: usize) {
+    pub fn interpolate_2d(&mut self, mesh: &Mesh<2>, node_vals: &[f64], data_idx: usize) {
         for p in &mut self.particles {
             if let Some(e) = p.elem {
                 let ns = mesh.elem_nodes(e);
@@ -118,7 +118,7 @@ impl ParticleSet {
     }
 
     /// Project particle data to mesh nodes via barycentric scatter (2D).
-    pub fn project_to_nodes_2d(&self, mesh: &SimplexMesh<2>, data_idx: usize) -> (Vec<f64>, Vec<f64>) {
+    pub fn project_to_nodes_2d(&self, mesh: &Mesh<2>, data_idx: usize) -> (Vec<f64>, Vec<f64>) {
         let nn = mesh.n_nodes();
         let mut sum = vec![0.0; nn]; let mut wgt = vec![0.0; nn];
         for p in &self.particles {
@@ -135,7 +135,7 @@ impl ParticleSet {
     // ── Mesh interpolation (3D) ─────────────────────────────────────────────
 
     /// Interpolate mesh node data onto particles (3D).
-    pub fn interpolate_3d(&mut self, mesh: &SimplexMesh<3>, node_vals: &[f64], data_idx: usize) {
+    pub fn interpolate_3d(&mut self, mesh: &Mesh<3>, node_vals: &[f64], data_idx: usize) {
         for p in &mut self.particles {
             if let Some(e) = p.elem {
                 let ns = mesh.elem_nodes(e);
@@ -145,7 +145,7 @@ impl ParticleSet {
     }
 
     /// Project particle data to mesh nodes via barycentric scatter (3D).
-    pub fn project_to_nodes_3d(&self, mesh: &SimplexMesh<3>, data_idx: usize) -> (Vec<f64>, Vec<f64>) {
+    pub fn project_to_nodes_3d(&self, mesh: &Mesh<3>, data_idx: usize) -> (Vec<f64>, Vec<f64>) {
         let nn = mesh.n_nodes();
         let mut sum = vec![0.0; nn]; let mut wgt = vec![0.0; nn];
         for p in &self.particles {
@@ -204,7 +204,7 @@ impl ParticleSet {
     /// For each boundary face, places `n_per_face` particles uniformly
     /// along the edge, plus a random offset orthogonal to the edge.
     /// Each particle gets `n_data` fields initialized to 0.
-    pub fn emit_at_boundary_2d(&mut self, mesh: &SimplexMesh<2>, n_per_face: usize, n_data: usize, offset: f64) {
+    pub fn emit_at_boundary_2d(&mut self, mesh: &Mesh<2>, n_per_face: usize, n_data: usize, offset: f64) {
         for f in 0..mesh.n_faces() as FaceId {
             let fnodes = mesh.bface_nodes(f);
             if fnodes.len() != 2 { continue; }
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn locate_and_project_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let mut ps = ParticleSet::new(2);
         ps.add_particle(vec![0.5, 0.5], 1);
         ps.locate_2d(&mesh, 1e-10);
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn locate_and_project_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let mut ps = ParticleSet::new(3);
         ps.add_particle(vec![0.5, 0.5, 0.5], 1);
         ps.locate_3d(&mesh, 1e-10);
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn interpolate_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let mut ps = ParticleSet::new(3);
         ps.add_particle(vec![0.0, 0.0, 0.0], 1);
         ps.locate_3d(&mesh, 1e-10);
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn boundary_emitter() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let mut ps = ParticleSet::new(2);
         ps.emit_at_boundary_2d(&mesh, 3, 1, 0.01);
         assert!(ps.n_particles() > 0, "should emit particles at boundary");
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn remove_outside_filters() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let mut ps = ParticleSet::new(2);
         ps.add_particle(vec![0.5, 0.5], 0);
         ps.add_particle(vec![5.0, 5.0], 0);

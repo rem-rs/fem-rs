@@ -92,12 +92,12 @@ impl<'a> BilinearIntegrator for VectorConvectionIntegrator<'a> {
 mod tests {
     use super::*;
     use crate::assembler::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{VectorH1Space, fe_space::FESpace};
 
     #[test]
     fn vector_convection_is_non_symmetric() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         // Uniform w = (1, 0) via DOF vector
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn vector_convection_zero_velocity_is_zero_matrix() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let w = vec![0.0_f64; n];

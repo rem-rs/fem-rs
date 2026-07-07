@@ -5,14 +5,14 @@
 
 use std::time::Instant;
 use fem_assembly::crystal_plasticity::{assemble_crystal_plasticity, CrystalConfig, CrystalState};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::vector_h1::VectorH1Space;
 use fem_space::fe_space::FESpace;
 
 fn main() {
     println!("=== Crystal plasticity FCC (3D) ===");
     let t0 = Instant::now();
-    let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+    let mesh = Mesh::<3>::unit_cube_tet(2);
     let space = VectorH1Space::new(mesh, 1, 3);
     let cfg = CrystalConfig::aluminium();
     let n = space.n_dofs();
@@ -28,11 +28,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use fem_assembly::crystal_plasticity::{assemble_crystal_plasticity, CrystalConfig, CrystalState};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::vector_h1::VectorH1Space;
     use fem_space::fe_space::FESpace;
     #[test] fn smoke() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let space = VectorH1Space::new(mesh, 1, 3);
         let cfg = CrystalConfig::aluminium();
     let mut state = CrystalState::new(500); // enough for the 3D mesh QPs

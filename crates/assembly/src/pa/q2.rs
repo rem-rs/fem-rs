@@ -274,14 +274,14 @@ pub fn pa_apply_quad_q2(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
 
     #[test]
     fn hex_q2_pa_finite() {
         // Hex Q2: only test basic properties (H1Space on Hex8 doesn't expose 27 DOFs)
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let pd = build_hex_q2_pa_data(&mesh, &|_|1.0);
         // Verify PA data is finite
         assert!(pd.data.iter().all(|v| v.is_finite()));
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn quad_q2_pa_symmetric() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(1); // 1 element
+        let mesh = Mesh::<2>::unit_square_quad(1); // 1 element
         let space = fem_space::H1Space::new(mesh, 2);
         let pd = build_quad_q2_pa_data(space.mesh(), &|_|1.0);
         let ed: Vec<Vec<u32>> = (0..space.mesh().n_elements() as u32).map(|e| space.element_dofs(e).to_vec()).collect();

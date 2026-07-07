@@ -49,12 +49,12 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for GradDivIntegrator<C> {
 mod tests {
     use super::*;
     use crate::vector_assembler::VectorAssembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::HDivSpace;
 
     #[test]
     fn grad_div_is_symmetric() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HDivSpace::new(mesh, 0);
         let integ = GradDivIntegrator { kappa: 1.0 };
         let mat = VectorAssembler::assemble_bilinear(&space, &[&integ], 4);
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn grad_div_positive_semi_definite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HDivSpace::new(mesh, 0);
         let integ = GradDivIntegrator { kappa: 1.0 };
         let mat = VectorAssembler::assemble_bilinear(&space, &[&integ], 4);

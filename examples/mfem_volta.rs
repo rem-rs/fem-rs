@@ -1,14 +1,14 @@
 use fem_examples::{apply_dirichlet, dirichlet_nodes_fn, p1_assemble_poisson, pcg_solve};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 
 const DEFAULT_BC_SCALE: f64 = 1.0;
 
-fn solve_volta(n: usize) -> (SimplexMesh<2>, Vec<(usize, f64)>, Vec<f64>, usize, f64) {
+fn solve_volta(n: usize) -> (Mesh<2>, Vec<(usize, f64)>, Vec<f64>, usize, f64) {
 	solve_volta_with_scale(n, DEFAULT_BC_SCALE)
 }
 
-fn solve_volta_with_scale(n: usize, bc_scale: f64) -> (SimplexMesh<2>, Vec<(usize, f64)>, Vec<f64>, usize, f64) {
-	let mesh = SimplexMesh::<2>::unit_square_tri(n);
+fn solve_volta_with_scale(n: usize, bc_scale: f64) -> (Mesh<2>, Vec<(usize, f64)>, Vec<f64>, usize, f64) {
+	let mesh = Mesh::<2>::unit_square_tri(n);
 	let (mut k, mut rhs) = p1_assemble_poisson(&mesh, |_, _| 1.0, |_, _| 0.0);
 	let bcs = dirichlet_nodes_fn(&mesh, &[1, 3], |_, y| bc_scale * y);
 	apply_dirichlet(&mut k, &mut rhs, &bcs);

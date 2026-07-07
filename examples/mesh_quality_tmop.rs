@@ -8,11 +8,11 @@
 
 use std::time::Instant;
 
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::tmop::{tmop_optimise_2d, TmopMetric};
 
-fn perturb_square(n: usize, amp: f64) -> SimplexMesh<2> {
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(n);
+fn perturb_square(n: usize, amp: f64) -> Mesh<2> {
+    let mut mesh = Mesh::<2>::unit_square_tri(n);
     let nn = mesh.n_nodes();
     for i in 0..nn {
         let x = mesh.coords[i * 2];
@@ -42,10 +42,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_mesh::tmop::{tmop_optimise_2d, TmopMetric};
     #[test] fn smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let r = tmop_optimise_2d(&mesh, &TmopMetric::Shape, 10, 0.01);
         assert!(r.iter().all(|v| v.is_finite()));
     }

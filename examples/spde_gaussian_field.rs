@@ -6,13 +6,13 @@
 //! Usage:
 //!   cargo run --example spde_gaussian_field
 
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_stochastic::{
     SquaredExponentialCovariance2D, KarhunenLoeveExpansion2D, RandomField2D,
 };
 
 fn main() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(20);
+    let mesh = Mesh::<2>::unit_square_tri(20);
     let pts: Vec<[f64; 2]> = (0..mesh.n_nodes() as usize).map(|i| {
         let c = mesh.node_coords(i as u32);
         [c[0], c[1]]
@@ -39,12 +39,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use fem_mesh::{SimplexMesh, topology::MeshTopology};
+    use fem_mesh::{Mesh, topology::MeshTopology};
     use fem_stochastic::{SquaredExponentialCovariance2D, KarhunenLoeveExpansion2D, RandomField2D};
 
     #[test]
     fn spde_field_is_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let pts: Vec<[f64; 2]> = (0..mesh.n_nodes() as usize).map(|i| {
             let c = mesh.node_coords(i as u32); [c[0], c[1]]
         }).collect();

@@ -17,7 +17,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{
     fe_space::FESpace,
     H1Space,
@@ -28,7 +28,7 @@ fn observed_rate(e_coarse: f64, e_fine: f64, h_ratio: f64) -> f64 {
     (e_coarse / e_fine).ln() / h_ratio.ln()
 }
 
-fn l2_error(u: &[f64], space: &H1Space<SimplexMesh<2>>, exact: impl Fn(&[f64]) -> f64) -> f64 {
+fn l2_error(u: &[f64], space: &H1Space<Mesh<2>>, exact: impl Fn(&[f64]) -> f64) -> f64 {
     let dm = space.dof_manager();
     let n = space.n_dofs();
     let mut s = 0.0;
@@ -65,7 +65,7 @@ fn mms_poisson_p1_convergence() {
     let mut pe = f64::MAX;
     let mut ph: f64 = 0.0;
     for &n in &[8, 16, 32] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let diff = DiffusionIntegrator { kappa: 1.0 };
         let src = DomainSourceIntegrator::new(source);
@@ -104,7 +104,7 @@ fn mms_poisson_p2_convergence() {
     let mut pe = f64::MAX;
     let mut ph: f64 = 0.0;
     for &n in &[6, 12, 24] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 2);
         let diff = DiffusionIntegrator { kappa: 1.0 };
         let src = DomainSourceIntegrator::new(source);
@@ -144,7 +144,7 @@ fn mms_helmholtz_indefinite_convergence() {
     let mut pe = f64::MAX;
     let mut ph: f64 = 0.0;
     for &n in &[8, 16, 24] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
         let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 5);
@@ -193,7 +193,7 @@ fn mms_helmholtz_k4_convergence() {
     let mut pe = f64::MAX;
     let mut ph: f64 = 0.0;
     for &n in &[10, 20, 30] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
         let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 5);
@@ -242,7 +242,7 @@ fn mms_helmholtz_k8_convergence() {
     let mut pe = f64::MAX;
     let mut ph: f64 = 0.0;
     for &n in &[20, 30, 40] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
         let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 5);
@@ -291,7 +291,7 @@ fn mms_complex_helmholtz_convergence() {
     let exact = |x: &[f64]| x[0]*(1.0-x[0])*x[1]*(1.0-x[1]);
     let mut errors: Vec<f64> = Vec::new();
     for &n in &[10, 18, 26] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let mut sys = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.0, 1.0, omega, 5);
         let src = DomainSourceIntegrator::new(src_fn);
@@ -332,7 +332,7 @@ fn mms_laplace_eigenvalue_convergence() {
     let mut pe = f64::MAX;
     let mut ph: f64 = 0.0;
     for &n in &[8, 12, 20] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let m_mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
@@ -368,7 +368,7 @@ fn mms_poisson_3d_convergence() {
     let mut pe = f64::MAX;
     let mut ph: f64 = 0.0;
     for &n in &[4, 6, 8] {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+        let mesh = Mesh::<3>::unit_cube_tet(n);
         let space = H1Space::new(mesh.clone(), 1);
         let diff = DiffusionIntegrator { kappa: 1.0 };
         let src = DomainSourceIntegrator::new(source);
@@ -415,9 +415,9 @@ fn mms_hcurl_eigenvalue_convergence() {
     use crate::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
 
     let n = 8;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = HCurlSpace::new(mesh, 1);
-    let h1 = H1Space::new(SimplexMesh::<2>::unit_square_tri(n), 1);
+    let h1 = H1Space::new(Mesh::<2>::unit_square_tri(n), 1);
     let bdr = [1, 2, 3, 4];
     let ess = [1, 1, 1, 1];
     let sys = assemble_hcurl_eigen_system_from_marker(&h1, &space, &bdr, &ess, 1.0, 1.0, 4);
@@ -464,7 +464,7 @@ fn mms_complex_helmholtz_p2_convergence() {
     };
     let exact = |x: &[f64]| x[0]*(1.0-x[0])*x[1]*(1.0-x[1]);
     for &n in &[10, 18, 26] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 2); // P2
         let mut sys = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.0, 1.0, omega, 6);
         let src = DomainSourceIntegrator::new(src_fn);

@@ -23,7 +23,7 @@ use fem_assembly::{
     },
 };
 use fem_linalg::{CooMatrix, CsrMatrix, SolverError};
-use fem_mesh::{ElementType, SimplexMesh};
+use fem_mesh::{ElementType, Mesh};
 use fem_solver::{solve_cg, solve_gmres, SolverConfig};
 use fem_space::{
     fe_space::FESpace,
@@ -35,7 +35,7 @@ use fem_space::{
 
 /// Solve −∇·(κ ∇u) = f with homogeneous Dirichlet BCs.
 fn solve_poisson_generic<C: fem_assembly::postproc::coefficient::ScalarCoeff>(
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
     kappa: C,
     source_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
 ) -> (Vec<f64>, usize, f64) {
@@ -63,7 +63,7 @@ fn solve_poisson_generic<C: fem_assembly::postproc::coefficient::ScalarCoeff>(
 }
 
 /// Stretch mesh coordinates anisotropically.
-fn stretch_mesh(mut mesh: SimplexMesh<2>, sx: f64, sy: f64) -> SimplexMesh<2> {
+fn stretch_mesh(mut mesh: Mesh<2>, sx: f64, sy: f64) -> Mesh<2> {
     for c in mesh.coords.chunks_mut(2) {
         c[0] *= sx;
         c[1] *= sy;
@@ -80,7 +80,7 @@ fn stretch_mesh(mut mesh: SimplexMesh<2>, sx: f64, sy: f64) -> SimplexMesh<2> {
 /// iterations than the constant-coefficient case.
 #[test]
 fn stress_high_contrast_diffusion() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh = Mesh::<2>::unit_square_tri(16);
     let (_u, iters, norm) = solve_poisson_generic(
         mesh,
         FnCoeff(|x: &[f64]| if x[0] < 0.5 { 1.0 } else { 1e6 }),
@@ -94,7 +94,7 @@ fn stress_high_contrast_diffusion() {
 /// κ = 1 vs 1e-6 (six orders contrast, opposite direction).
 #[test]
 fn stress_high_contrast_diffusion_low_kappa() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh = Mesh::<2>::unit_square_tri(16);
     let (_u, iters, norm) = solve_poisson_generic(
         mesh,
         FnCoeff(|x: &[f64]| if x[0] < 0.5 { 1e-6 } else { 1.0 }),
@@ -108,7 +108,7 @@ fn stress_high_contrast_diffusion_low_kappa() {
 /// κ = 1 vs 1e8 (eight orders, extreme contrast).
 #[test]
 fn stress_high_contrast_diffusion_extreme() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(12);
+    let mesh = Mesh::<2>::unit_square_tri(12);
     let (_u, iters, norm) = solve_poisson_generic(
         mesh,
         FnCoeff(|x: &[f64]| if x[0] < 0.5 { 1.0 } else { 1e8 }),
@@ -131,7 +131,7 @@ fn stress_high_contrast_diffusion_extreme() {
 /// large diagonal shift to emulate stiff systems.
 #[test]
 fn stress_large_reaction_term() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh = Mesh::<2>::unit_square_tri(8);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 
@@ -165,7 +165,7 @@ fn stress_large_reaction_term() {
 /// Fast spatial oscillations stress the quadrature and linear solver.
 #[test]
 fn stress_oscillatory_diffusion() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(20);
+    let mesh = Mesh::<2>::unit_square_tri(20);
     let (_u, iters, norm) = solve_poisson_generic(
         mesh,
         FnCoeff(|x: &[f64]| 2.0 + (20.0 * PI * x[0]).sin() * (20.0 * PI * x[1]).sin()),
@@ -179,7 +179,7 @@ fn stress_oscillatory_diffusion() {
 /// Higher frequency: κ(x,y) = 2 + sin(50π x) * sin(50π y)
 #[test]
 fn stress_oscillatory_diffusion_high_freq() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(30);
+    let mesh = Mesh::<2>::unit_square_tri(30);
     let (_u, iters, norm) = solve_poisson_generic(
         mesh,
         FnCoeff(|x: &[f64]| 2.0 + (50.0 * PI * x[0]).sin() * (50.0 * PI * x[1]).sin()),
@@ -195,7 +195,7 @@ fn stress_oscillatory_diffusion_high_freq() {
 /// Mesh stretched to 100:1 aspect ratio (x-direction).
 #[test]
 fn stress_high_aspect_ratio_mesh() {
-    let mesh = stretch_mesh(SimplexMesh::<2>::unit_square_tri(12), 100.0, 1.0);
+    let mesh = stretch_mesh(Mesh::<2>::unit_square_tri(12), 100.0, 1.0);
     let (_u, iters, norm) = solve_poisson_generic(
         mesh,
         1.0_f64,
@@ -209,7 +209,7 @@ fn stress_high_aspect_ratio_mesh() {
 /// Mesh stretched to 1:100 aspect ratio (y-direction).
 #[test]
 fn stress_high_aspect_ratio_mesh_y() {
-    let mesh = stretch_mesh(SimplexMesh::<2>::unit_square_tri(12), 1.0, 100.0);
+    let mesh = stretch_mesh(Mesh::<2>::unit_square_tri(12), 1.0, 100.0);
     let (_u, iters, norm) = solve_poisson_generic(
         mesh,
         1.0_f64,
@@ -225,7 +225,7 @@ fn stress_high_aspect_ratio_mesh_y() {
 /// Both a sharp jump and high-frequency oscillation in κ.
 #[test]
 fn stress_combined_jump_and_oscillation() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(20);
+    let mesh = Mesh::<2>::unit_square_tri(20);
     let (_u, iters, norm) = solve_poisson_generic(
         mesh,
         FnCoeff(|x: &[f64]| {
@@ -250,7 +250,7 @@ fn stress_combined_jump_and_oscillation() {
 /// than hanging or producing NaN.
 #[test]
 fn stress_pure_neumann_detects_singularity() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh = Mesh::<2>::unit_square_tri(8);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 
@@ -358,7 +358,7 @@ fn error_invalid_mesh_connectivity() {
     let elem_tags = vec![1, 1];
     let face_conn = vec![0u32, 1, 1, 2, 2, 0];
     let face_tags = vec![1i32, 1, 1];
-    let mesh = SimplexMesh::<2>::uniform(
+    let mesh = Mesh::<2>::uniform(
         coords, conn, elem_tags, ElementType::Tri3,
         face_conn, face_tags, ElementType::Line2,
     );
@@ -370,7 +370,7 @@ fn error_invalid_mesh_connectivity() {
 /// Empty mesh (zero elements) should still pass check().
 #[test]
 fn error_empty_mesh_passes_check() {
-    let mesh = SimplexMesh::<2>::uniform(
+    let mesh = Mesh::<2>::uniform(
         vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
         vec![], vec![], ElementType::Tri3,
         vec![], vec![], ElementType::Line2,
@@ -401,8 +401,8 @@ fn error_assembly_mismatched_mesh() {
     use fem_assembly::standard::DiffusionIntegrator;
     use fem_assembly::Assembler;
 
-    let _mesh_a = SimplexMesh::<2>::unit_square_tri(4);
-    let mesh_b = SimplexMesh::<2>::unit_square_tri(8);
+    let _mesh_a = Mesh::<2>::unit_square_tri(4);
+    let mesh_b = Mesh::<2>::unit_square_tri(8);
     let space = H1Space::new(mesh_b, 1);
     let diff = DiffusionIntegrator { kappa: 1.0 };
 
@@ -431,14 +431,14 @@ fn stress_3d_poisson_large_scale() {
     use fem_solver::SolverConfig;
     use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
     use fem_assembly::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
     use fem_space::constraints::{apply_dirichlet, boundary_dofs};
     use fem_solver::solve_pcg_jacobi;
 
     let n = 32;
-    let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+    let mesh = Mesh::<3>::unit_cube_hex(n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 

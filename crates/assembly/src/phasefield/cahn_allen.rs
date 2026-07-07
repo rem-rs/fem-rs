@@ -114,11 +114,11 @@ pub fn solve_allen_cahn<M: MeshTopology + Clone + Send + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn cahn_hilliard_solver_runs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
         let mut c0 = vec![0.5; n]; for i in 0..n { c0[i] += 0.1*(2.0*std::f64::consts::PI*i as f64/n as f64).cos(); }
         let r = solve_cahn_hilliard(&mesh, 1, c0, 2, &CahnHilliardConfig { epsilon: 0.2, dt: 1e-6, t_max: 2e-6, ..Default::default() });
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn allen_cahn_solver_runs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
         let mut c0 = vec![0.0; n]; for i in 0..n { c0[i] = (std::f64::consts::PI*i as f64/n as f64).sin(); }
         let r = solve_allen_cahn(&mesh, 1, c0, 2, &AllenCahnConfig { epsilon: 0.2, dt: 1e-6, t_max: 2e-6, ..Default::default() });
@@ -137,7 +137,7 @@ mod tests {
     /// Cahn-Hilliard: verify output structure and free-energy sign.
     #[test]
     fn cahn_hilliard_output_valid() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
         let mut c0 = vec![0.5; n];
         for i in 0..n { c0[i] += 0.1 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos(); }
@@ -153,7 +153,7 @@ mod tests {
     /// Allen-Cahn: verify output structure.
     #[test]
     fn allen_cahn_output_valid() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
         let mut c0 = vec![0.0; n];
         for i in 0..n { c0[i] = (std::f64::consts::PI * i as f64 / n as f64).sin(); }
@@ -168,7 +168,7 @@ mod tests {
     /// into phase-separated domains.
     #[test]
     fn cahn_hilliard_spinodal_decomposition() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
         let mut c0 = vec![0.5; n];
         for i in 0..n { c0[i] += 0.05 * (std::f64::consts::PI * i as f64).sin() * (std::f64::consts::PI * i as f64 / n as f64).cos(); }

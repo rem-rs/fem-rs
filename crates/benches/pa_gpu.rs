@@ -8,7 +8,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::time::Duration;
 use fem_assembly::pa::*;
 use fem_mesh::topology::MeshTopology;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::fe_space::FESpace;
 use fem_space::H1Space;
 use fem_linalg_gpu::{GpuContext, pa_apply::{gpu_pa_apply_hex_q1, gpu_pa_apply_tet4}};
@@ -39,7 +39,7 @@ fn bench_hex_q1(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             let space = H1Space::new(mesh, 1);
             let nd = space.n_dofs();
             let pd = build_hex_q1_pa_data(space.mesh(), &|_| 1.0);
@@ -58,7 +58,7 @@ fn bench_hex_q1(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             g.bench_with_input(BenchmarkId::new("hex_q1", n * n * n), &mesh,
                 |b, m| b.iter(|| build_hex_q1_pa_data(black_box(m), &|_| 1.0))
             );
@@ -74,7 +74,7 @@ fn bench_quad_q1(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
-            let mesh = SimplexMesh::<2>::unit_square_quad(n);
+            let mesh = Mesh::<2>::unit_square_quad(n);
             let space = H1Space::new(mesh, 1);
             let nd = space.n_dofs();
             let pd = build_quad_q1_pa_data(space.mesh(), &|_| 1.0);
@@ -93,7 +93,7 @@ fn bench_quad_q1(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
-            let mesh = SimplexMesh::<2>::unit_square_quad(n);
+            let mesh = Mesh::<2>::unit_square_quad(n);
             g.bench_with_input(BenchmarkId::new("quad_q1", n * n), &mesh,
                 |b, m| b.iter(|| build_quad_q1_pa_data(black_box(m), &|_| 1.0))
             );
@@ -109,7 +109,7 @@ fn bench_quad_q2(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
-            let mesh = SimplexMesh::<2>::unit_square_quad(n);
+            let mesh = Mesh::<2>::unit_square_quad(n);
             let space = H1Space::new(mesh, 2);
             let nd = space.n_dofs();
             let pd = build_quad_q2_pa_data(space.mesh(), &|_| 1.0);
@@ -128,7 +128,7 @@ fn bench_quad_q2(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
-            let mesh = SimplexMesh::<2>::unit_square_quad(n);
+            let mesh = Mesh::<2>::unit_square_quad(n);
             g.bench_with_input(BenchmarkId::new("quad_q2", n * n), &mesh,
                 |b, m| b.iter(|| build_quad_q2_pa_data(black_box(m), &|_| 1.0))
             );
@@ -144,7 +144,7 @@ fn bench_tet4(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+            let mesh = Mesh::<3>::unit_cube_tet(n);
             let space = H1Space::new(mesh, 1);
             let nd = space.n_dofs();
             let pd = build_tet4_pa_data(space.mesh(), &|_| 1.0);
@@ -163,7 +163,7 @@ fn bench_tet4(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+            let mesh = Mesh::<3>::unit_cube_tet(n);
             g.bench_with_input(BenchmarkId::new("tet4", n * n * n * 6), &mesh,
                 |b, m| b.iter(|| build_tet4_pa_data(black_box(m), &|_| 1.0))
             );
@@ -179,7 +179,7 @@ fn bench_hex_q2(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             let ne = mesh.n_elements();
             let nd = ne * 27;
             let pd = build_hex_q2_pa_data(&mesh, &|_| 1.0);
@@ -197,7 +197,7 @@ fn bench_hex_q2(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             g.bench_with_input(BenchmarkId::new("hex_q2", n * n * n), &mesh,
                 |b, m| b.iter(|| build_hex_q2_pa_data(black_box(m), &|_| 1.0))
             );
@@ -213,7 +213,7 @@ fn bench_hex_q3(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             let ne = mesh.n_elements();
             let nd = ne * 64;
             let pd = build_hex_q3_pa_data(&mesh, &|_| 1.0);
@@ -232,7 +232,7 @@ fn bench_hex_q3(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             let ne = mesh.n_elements();
             let nd = ne * 64;
             let pd = build_hex_q3_pa_data(&mesh, &|_| 1.0);
@@ -250,7 +250,7 @@ fn bench_hex_q3(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             g.bench_with_input(BenchmarkId::new("hex_q3", n * n * n), &mesh,
                 |b, m| b.iter(|| build_hex_q3_pa_data(black_box(m), &|_| 1.0))
             );
@@ -266,7 +266,7 @@ fn bench_hex_q4(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_apply");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             let ne = mesh.n_elements();
             let nd = ne * 125;
             let pd = build_hex_q4_pa_data(&mesh, &|_| 1.0);
@@ -284,7 +284,7 @@ fn bench_hex_q4(c: &mut Criterion) {
     {
         let mut g = c.benchmark_group("pa_cpu_build");
         for &n in &sizes {
-            let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+            let mesh = Mesh::<3>::unit_cube_hex(n);
             g.bench_with_input(BenchmarkId::new("hex_q4", n * n * n), &mesh,
                 |b, m| b.iter(|| build_hex_q4_pa_data(black_box(m), &|_| 1.0))
             );
@@ -299,7 +299,7 @@ fn bench_gpu_hex_q1(c: &mut Criterion) {
     let gpu = pollster::block_on(GpuContext::new()).unwrap_or_else(|e| panic!("GPU init: {e}"));
     let mut g = c.benchmark_group("pa_gpu_apply");
     for &n in &[10usize, 20, 40] {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+        let mesh = Mesh::<3>::unit_cube_hex(n);
         let space = H1Space::new(mesh, 1);
         let nd = space.n_dofs();
         let ne = space.mesh().n_elements();

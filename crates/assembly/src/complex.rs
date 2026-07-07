@@ -654,12 +654,12 @@ impl NativeComplexAssembler {
 #[cfg(test)]
 mod native_complex_tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     #[test]
     fn native_helmholtz_zero_omega_is_real() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let sys   = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.0, 1.0, 0.0, 3);
         // With ω=0, kappa_im=0 the matrix should be purely real (all im_vals ≈ 0)
@@ -672,7 +672,7 @@ mod native_complex_tests {
 
     #[test]
     fn native_helmholtz_imaginary_part_grows_with_kappa_im() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let sys1  = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.5, 1.0, 1.0, 3);
         let sys2  = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 1.5, 1.0, 1.0, 3);
@@ -683,7 +683,7 @@ mod native_complex_tests {
 
     #[test]
     fn native_helmholtz_omega_shifts_real_diagonal() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let sys0  = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.0, 1.0, 0.0, 3);
         let sys1  = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.0, 1.0, 2.0, 3);
@@ -717,7 +717,7 @@ mod native_complex_tests {
 
     #[test]
     fn native_helmholtz_size_matches_space() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh  = Mesh::<2>::unit_square_tri(6);
         let space = H1Space::new(mesh, 1);
         let sys   = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.1, 1.0, 3.14, 3);
         assert_eq!(sys.n_dofs, space.n_dofs());
@@ -729,7 +729,7 @@ mod native_complex_tests {
     #[test]
     fn native_helmholtz_2d_pml_solve_converges() {
         // Solve Helmholtz with PML-like imaginary coefficient (strong damping → easy solve)
-        let mesh  = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh  = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let omega = 2.0;
         let kappa_im = 5.0; // large imaginary part → well-conditioned
@@ -771,7 +771,7 @@ mod native_complex_tests {
         use fem_space::constraints::boundary_dofs;
         use fem_solver::{SolverConfig, solve_gmres};
 
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let omega = 0.1;
         let n     = space.n_dofs();
@@ -826,14 +826,14 @@ mod native_complex_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use crate::standard::{DiffusionIntegrator, MassIntegrator};
 
     /// For ω = 0 the complex system collapses to the pure stiffness matrix.
     #[test]
     fn complex_system_omega_zero_is_pure_stiffness() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
 
         let sys = ComplexAssembler::assemble(
@@ -864,7 +864,7 @@ mod tests {
     /// The 2×2 block matrix should be square of size 2n.
     #[test]
     fn flat_csr_size() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let omega = 1.0;
 
@@ -892,7 +892,7 @@ mod tests {
     /// But the full system IS the right formulation for Re{A}·x_re − Im{A}·x_im = f_re.
     #[test]
     fn flat_csr_diagonal_positive() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let omega = 0.5;
 
@@ -930,7 +930,7 @@ mod tests {
     /// RHS assembly flattens correctly.
     #[test]
     fn rhs_assembly_concatenation() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n     = space.n_dofs();
         let f_re  = vec![1.0; n];

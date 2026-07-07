@@ -69,13 +69,13 @@ pub type VectorFEBoundaryFluxLFIntegrator<C = f64> = BoundaryNormalLFIntegrator<
 mod tests {
     use super::*;
     use crate::assembler::{Assembler, face_dofs_p1};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, fe_space::FESpace};
 
     /// ∫_Γ 1 · φ ds summed over all DOFs should equal the boundary length (= 4).
     #[test]
     fn boundary_normal_integral() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let integ = BoundaryNormalLFIntegrator { g: 1.0 };
         let tags: Vec<i32> = (1..=4).collect();

@@ -42,13 +42,13 @@ let integ = VectorDiffusionIntegrator { kappa: 1.0 };
 mod tests {
     use super::*;
     use crate::assembler::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::VectorH1Space;
 
     /// The vector diffusion matrix should be symmetric.
     #[test]
     fn vector_diffusion_is_symmetric() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let integ = VectorDiffusionIntegrator { kappa: 1.0 };
         let mat   = Assembler::assemble_bilinear(&space, &[&integ], 3);

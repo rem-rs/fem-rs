@@ -35,7 +35,7 @@ use fem_element::{
     raviart_thomas::TriRT0,
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{SimplexMesh, topology::MeshTopology, element_type::ElementType};
+use fem_mesh::{Mesh, topology::MeshTopology, element_type::ElementType};
 use fem_space::{
     VectorH1Space, H1Space, HDivSpace, L2Space,
     fe_space::FESpace,
@@ -49,7 +49,7 @@ use fem_space::{
 /// Build a uniform triangle mesh on the left half `[0, 0.5] × [0, 1]`.
 ///
 /// Boundary tags: 1 = bottom, 2 = right (interface Γ), 3 = top, 4 = left.
-fn unit_half_square_tri_left(n: usize) -> SimplexMesh<2> {
+fn unit_half_square_tri_left(n: usize) -> Mesh<2> {
     let np = n + 1;
     let mut coords = Vec::with_capacity(np * np * 2);
     for j in 0..np {
@@ -94,7 +94,7 @@ fn unit_half_square_tri_left(n: usize) -> SimplexMesh<2> {
         add_edge(nid(0, i + 1), nid(0, i), 4);
     }
 
-    SimplexMesh::uniform(
+    Mesh::uniform(
         coords, conn, elem_tags, ElementType::Tri3,
         face_conn, face_tags, ElementType::Line2,
     )
@@ -103,7 +103,7 @@ fn unit_half_square_tri_left(n: usize) -> SimplexMesh<2> {
 /// Build a uniform triangle mesh on the right half `[0.5, 1] × [0, 1]`.
 ///
 /// Boundary tags: 1 = bottom, 2 = left (interface Γ), 3 = top, 4 = right.
-fn unit_half_square_tri_right(n: usize) -> SimplexMesh<2> {
+fn unit_half_square_tri_right(n: usize) -> Mesh<2> {
     let np = n + 1;
     let mut coords = Vec::with_capacity(np * np * 2);
     for j in 0..np {
@@ -148,7 +148,7 @@ fn unit_half_square_tri_right(n: usize) -> SimplexMesh<2> {
         add_edge(nid(n, i), nid(n, i + 1), 4);
     }
 
-    SimplexMesh::uniform(
+    Mesh::uniform(
         coords, conn, elem_tags, ElementType::Tri3,
         face_conn, face_tags, ElementType::Line2,
     )
@@ -230,7 +230,7 @@ fn piola_hdiv(jac: &DMatrix<f64>, det_j: f64, ref_vals: &[f64], phys_vals: &mut 
 
 /// Solve Stokes (-νΔu + ∇p = f_stokes, ∇·u = g_stokes) on a mesh.
 /// Returns L² errors for velocity and pressure.
-fn solve_stokes_on_mesh(mesh: SimplexMesh<2>, _n_sub: usize) -> (f64, f64) {
+fn solve_stokes_on_mesh(mesh: Mesh<2>, _n_sub: usize) -> (f64, f64) {
     let nu = 1.0;
     let mesh_p = mesh.clone();
     let vel_space = VectorH1Space::new(mesh, 2, 2);
@@ -433,7 +433,7 @@ fn solve_stokes_on_mesh(mesh: SimplexMesh<2>, _n_sub: usize) -> (f64, f64) {
 
 /// Solve Darcy (σ + ∇p = f_darcy, ∇·σ = g) on a mesh.
 /// Returns L² errors for flux and pressure.
-fn solve_darcy_on_mesh(mesh: SimplexMesh<2>, _n_sub: usize) -> (f64, f64) {
+fn solve_darcy_on_mesh(mesh: Mesh<2>, _n_sub: usize) -> (f64, f64) {
     let mesh2 = mesh.clone();
     let mesh3 = mesh.clone();
     let hdiv = HDivSpace::new(mesh, 0);

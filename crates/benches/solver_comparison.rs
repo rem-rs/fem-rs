@@ -8,7 +8,7 @@ use std::env;
 use std::time::Duration;
 
 use fem_linalg::CsrMatrix;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{H1Space, fe_space::FESpace};
 use fem_assembly::{Assembler, standard::DiffusionIntegrator};
 use fem_solver::{
@@ -37,7 +37,7 @@ fn bench_config() -> Criterion {
 }
 
 fn poisson_2d(n: usize) -> (CsrMatrix<f64>, Vec<f64>) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1u8);
     let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
     let rhs = vec![1.0_f64; space.n_dofs()];

@@ -450,12 +450,12 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::vector_h1::VectorH1Space;
 
     #[test]
     fn zero_displacement_zero_residual_neo() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let model = HyperelasticModel::NeoHookean { mu: 0.3, lambda: 1.0 };
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn tangent_matrix_nonzero_neo() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let model = HyperelasticModel::NeoHookean { mu: 0.3, lambda: 1.0 };
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn mooney_rivlin_tangent_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let model = HyperelasticModel::MooneyRivlin { c10: 0.3, c01: 0.1, bulk_modulus: 1e3 };
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn ogden_tangent_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let model = HyperelasticModel::Ogden {

@@ -171,11 +171,11 @@ pub fn pa_apply_hex_q3_sf(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn hex_q3_pa_finite() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let pd = build_hex_q3_pa_data(&mesh, &|_|1.0);
         assert!(pd.data.iter().all(|v| v.is_finite()));
         assert!(pd.data.iter().any(|&v| v.abs() > 0.0));
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn hex_q3_sf_matches_naive() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1); // 1 element, 8 vertices, 125 Q3 DOFs
+        let mesh = Mesh::<3>::unit_cube_hex(1); // 1 element, 8 vertices, 125 Q3 DOFs
         // Build PA and apply with both methods on a properly-sized array
         let pd = build_hex_q3_pa_data(&mesh, &|_|1.0);
         let n = 125; // Q3 DOFs per element

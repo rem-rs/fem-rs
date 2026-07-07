@@ -318,11 +318,11 @@ mod tests {
     /// for a 2D TriND1 mesh (relative error < 1e-10).
     #[test]
     fn hcurl_reed_matches_matfree_tri_nd1() {
-        use fem_mesh::SimplexMesh;
+        use fem_mesh::Mesh;
         use fem_space::{HCurlSpace, fe_space::FESpace};
 
         // Unit square: 2 × 2 structured triangulation (8 triangles)
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = HCurlSpace::new(mesh, 1);
         let n = space.n_dofs();
 
@@ -356,10 +356,10 @@ mod tests {
     /// Check HcurlReedOperator for a 3D TetND1 mesh.
     #[test]
     fn hcurl_reed_matches_matfree_tet_nd1() {
-        use fem_mesh::SimplexMesh;
+        use fem_mesh::Mesh;
         use fem_space::{HCurlSpace, fe_space::FESpace};
 
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh  = Mesh::<3>::unit_cube_tet(1);
         let space = HCurlSpace::new(mesh, 1);
         let n     = space.n_dofs();
 

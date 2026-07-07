@@ -303,11 +303,11 @@ impl<M: MeshTopology + Clone + Send + Sync> FESpace for SkeletonSpace<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn p0_skeleton_all_faces() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let sk = SkeletonSpace::new(mesh, 0, true);
         // P0: one DOF per face
         assert_eq!(sk.dofs_per_face, 1);
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn p0_skeleton_interior_only_has_fewer_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let sk_all = SkeletonSpace::new(mesh.clone(), 0, true);
         let sk_int = SkeletonSpace::new(mesh, 0, false);
         assert!(sk_int.n_dofs() < sk_all.n_dofs(),
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn p1_skeleton_has_more_dofs_than_p0() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let sk0 = SkeletonSpace::new(mesh.clone(), 0, true);
         let sk1 = SkeletonSpace::new(mesh, 1, true);
         assert!(sk1.n_dofs() > sk0.n_dofs(),
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn p0_dof_indices_are_unique() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let sk = SkeletonSpace::new(mesh, 0, true);
         let mut seen = std::collections::HashSet::new();
         for f in 0..sk.n_skeleton_faces() {
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn active_faces_match_include_boundary() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let sk = SkeletonSpace::new(mesh, 0, false);
         // With include_boundary=false, boundary faces should not be active
         let active_count = (0..sk.n_skeleton_faces())
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn p0_skeleton_3d_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let sk = SkeletonSpace::new(mesh, 0, true);
         assert_eq!(sk.dofs_per_face, 1);
         assert!(sk.n_dofs() > 0);
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn p2_skeleton_3d_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let sk = SkeletonSpace::new(mesh, 2, true);
         // P2 tri face: 6 DOFs (3 vertices + 3 edge midpoints)
         assert_eq!(sk.dofs_per_face, 6, "P2 tri face should have 6 DOFs");
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn p2_skeleton_3d_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let sk = SkeletonSpace::new(mesh, 2, true);
         // P2 quad face: 9 DOFs (4 vertices + 4 edge midpoints + 1 face center)
         assert_eq!(sk.dofs_per_face, 9, "P2 quad face should have 9 DOFs");
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn p2_skeleton_has_more_dofs_than_p1() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let sk1 = SkeletonSpace::new(mesh.clone(), 1, true);
         let sk2 = SkeletonSpace::new(mesh, 2, true);
         assert!(sk2.n_dofs() > sk1.n_dofs(),

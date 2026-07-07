@@ -17,7 +17,7 @@
 
 use fem_core::FemResult;
 use fem_linalg::CsrMatrix;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::lor::{AmgConfig, LorAmgPrecond};
 use fem_space::fe_space::FESpace;
 use fem_space::h1::H1Space;
@@ -40,7 +40,7 @@ use crate::transfer::build_prolongation_h1;
 /// # Returns
 /// `Ok(LorAmgPrecond)` or `Err` if the prolongation could not be built.
 pub fn build_lor_amg_h1(
-    pk_space: &H1Space<SimplexMesh<2>>,
+    pk_space: &H1Space<Mesh<2>>,
     a_ho: &CsrMatrix<f64>,
     amg_cfg: Option<AmgConfig>,
 ) -> FemResult<LorAmgPrecond> {
@@ -70,7 +70,7 @@ pub fn build_lor_amg_h1(
 
 /// Build a LOR-AMG preconditioner for a 3-D high-order H¹ space (Tet4 mesh).
 pub fn build_lor_amg_h1_3d(
-    pk_space: &H1Space<SimplexMesh<3>>,
+    pk_space: &H1Space<Mesh<3>>,
     a_ho: &CsrMatrix<f64>,
     amg_cfg: Option<AmgConfig>,
 ) -> FemResult<LorAmgPrecond> {
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn build_lor_amg_h1_p2_smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let pk = H1Space::new(mesh, 2);
         let na = pk.n_dofs();
         // Build a simple SPD matrix (identity for smoke test)
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn build_lor_amg_h1_p3_smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let pk = H1Space::new(mesh, 3);
         let na = pk.n_dofs();
         let mut coo = fem_linalg::CooMatrix::<f64>::new(na, na);
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn build_lor_amg_h1_3d_p2_smoke() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let pk = H1Space::new(mesh, 2);
         let na = pk.n_dofs();
         let mut coo = fem_linalg::CooMatrix::<f64>::new(na, na);

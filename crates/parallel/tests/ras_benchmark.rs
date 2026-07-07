@@ -4,7 +4,7 @@ use std::{env, fs};
 use std::sync::{Arc, Mutex};
 
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     par_solve_gmres_ras, par_solve_pcg_ras, partition_simplex,
     summarize_ras_hpc, ParAssembler, ParallelFESpace, RasConfig, RasLocalSolverKind,
@@ -127,7 +127,7 @@ fn combine_scores(scores: &[MaturityScore]) -> MaturityScore {
 }
 
 fn run_scaling_point(ranks: usize, mode: &'static str, mesh_n: usize) -> ScalingRow {
-    let mesh = SimplexMesh::<2>::unit_square_tri(mesh_n);
+    let mesh = Mesh::<2>::unit_square_tri(mesh_n);
     let launcher = ThreadLauncher::new(WorkerConfig::new(ranks));
     let out: Arc<Mutex<Option<ScalingRow>>> = Arc::new(Mutex::new(None));
     let out_shared = Arc::clone(&out);
@@ -207,7 +207,7 @@ fn run_scaling_point(ranks: usize, mode: &'static str, mesh_n: usize) -> Scaling
 #[test]
 #[ignore = "benchmark-style timing test; run explicitly"]
 fn ras_benchmark_report_two_ranks() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(24);
+    let mesh = Mesh::<2>::unit_square_tri(24);
     let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
     launcher.launch(move |comm| {
@@ -578,7 +578,7 @@ fn schur_scaling_report_gmres() {
     let mut rows: Vec<ScalingRow> = Vec::new();
 
     for &ranks in &ranks_list {
-        let mesh = SimplexMesh::<2>::unit_square_tri(mesh_n);
+        let mesh = Mesh::<2>::unit_square_tri(mesh_n);
         let launcher = ThreadLauncher::new(WorkerConfig::new(ranks));
         let out: Arc<Mutex<Option<ScalingRow>>> = Arc::new(Mutex::new(None));
         let out_shared = Arc::clone(&out);

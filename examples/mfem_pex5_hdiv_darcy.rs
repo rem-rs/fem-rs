@@ -22,7 +22,7 @@ use fem_assembly::{
     standard::{GradDivIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator},
     coefficient::FnVectorCoeff,
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     ParVectorAssembler, ParVector, ParallelFESpace,
     par_simplex::partition_simplex,
@@ -70,7 +70,7 @@ fn run_case(mesh_n: usize, n_workers: usize, alpha: f64, beta: f64, source_scale
     let result = Arc::new(Mutex::new(None::<RunResult>));
     let result_slot = Arc::clone(&result);
 
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(mesh_n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(mesh_n));
 
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
     launcher.launch(move |comm| {

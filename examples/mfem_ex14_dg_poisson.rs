@@ -9,17 +9,17 @@
 
 use fem_assembly::{Assembler, DgAssembler, InteriorFaceList, standard::DomainSourceIntegrator};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{L2Space, fe_space::FESpace};
 
 fn main() {
     let args = parse_args();
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
     let sigma: f64 = args.sigma.unwrap_or_else(|| match args.order { 1 => 4.0, 2 => 10.0, _ => 24.0 });
 
@@ -69,7 +69,7 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use fem_assembly::{Assembler, DgAssembler, InteriorFaceList, standard::DomainSourceIntegrator};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::solve_gmres;
     use fem_solver::SolverConfig;
     use fem_space::L2Space;
@@ -77,7 +77,7 @@ mod tests {
 
     fn solve_dg_poisson_mms(n: usize, order: u8) -> f64 {
         let sigma: f64 = match order { 1 => 4.0, 2 => 10.0, _ => 24.0 };
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = L2Space::new(mesh, order);
         let ifl = InteriorFaceList::build(space.mesh());
 
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);

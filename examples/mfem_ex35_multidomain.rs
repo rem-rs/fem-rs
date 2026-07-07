@@ -10,11 +10,11 @@
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
 use fem_io::read_msh_file;
 use fem_linalg::CooMatrix;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
-fn load_mesh(path: &str) -> SimplexMesh<2> {
+fn load_mesh(path: &str) -> Mesh<2> {
     let msh = read_msh_file(path).expect("failed to read mesh file");
     msh.into_2d().expect("expected 2D mesh")
 }
@@ -24,7 +24,7 @@ fn main() {
     // Two independent meshes (sub-domains)
     let mesh_a = match mesh_file {
         Some(ref p) => load_mesh(p),
-        None => SimplexMesh::<2>::unit_square_tri(6),
+        None => Mesh::<2>::unit_square_tri(6),
     };
     let mesh_b = mesh_a.clone();
     let space_a = H1Space::new(mesh_a, 1);
@@ -75,12 +75,12 @@ fn parse_mesh_arg() -> Option<String> {
 mod tests {
     use fem_assembly::{Assembler, standard::DiffusionIntegrator};
     use fem_linalg::CooMatrix;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::{solve_cg, SolverConfig};
     use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
     #[test] fn smoke() {
-        let a = H1Space::new(SimplexMesh::<2>::unit_square_tri(4), 1);
-        let b = H1Space::new(SimplexMesh::<2>::unit_square_tri(4), 1);
+        let a = H1Space::new(Mesh::<2>::unit_square_tri(4), 1);
+        let b = H1Space::new(Mesh::<2>::unit_square_tri(4), 1);
         let ka = Assembler::assemble_bilinear(&a, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let kb = Assembler::assemble_bilinear(&b, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let n = a.n_dofs() + b.n_dofs();

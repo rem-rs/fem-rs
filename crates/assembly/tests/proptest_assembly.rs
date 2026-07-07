@@ -3,7 +3,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, MassIntegrator, ElasticityIntegrator},
 };
 use fem_linalg::CsrMatrix;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{H1Space, VectorH1Space, fe_space::FESpace};
 use proptest::prelude::*;
 
@@ -24,7 +24,7 @@ fn check_symmetric(a: &CsrMatrix<f64>) {
 proptest! {
     #[test]
     fn stiffness_symmetric_across_meshes(n in (2usize..=6).prop_map(|x| x)) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, 1);
         let a = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         check_symmetric(&a);
@@ -36,7 +36,7 @@ proptest! {
 proptest! {
     #[test]
     fn mass_symmetric_across_meshes(n in (2usize..=6).prop_map(|x| x)) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, 1);
         let m = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
         check_symmetric(&m);
@@ -48,7 +48,7 @@ proptest! {
 proptest! {
     #[test]
     fn mass_diagonal_positive_across_meshes(n in (2usize..=6).prop_map(|x| x)) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, 1);
         let m = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
         for i in 0..m.nrows {
@@ -62,7 +62,7 @@ proptest! {
 proptest! {
     #[test]
     fn elasticity_symmetric_across_meshes(n in (2usize..=5).prop_map(|x| x)) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = VectorH1Space::new(mesh, 1, 2);
         let e = Assembler::assemble_bilinear(&space, &[&ElasticityIntegrator::new(1.0, 1.0)], 3);
         check_symmetric(&e);
@@ -74,7 +74,7 @@ proptest! {
 proptest! {
     #[test]
     fn p2_has_more_dofs_than_p1(n in (2usize..=5).prop_map(|x| x)) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let s1 = H1Space::new(mesh.clone(), 1);
         let s2 = H1Space::new(mesh, 2);
         assert!(s2.n_dofs() > s1.n_dofs(),

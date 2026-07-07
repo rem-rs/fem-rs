@@ -308,11 +308,11 @@ pub fn solve_dpg_stokes_2d<M: MeshTopology>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn dpg_stokes_2d_square_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let (ux, uy, p) = solve_dpg_stokes_2d(&mesh, 1.0, &|_,_| (0.0, 0.0));
         for &v in &ux { assert!(v.is_finite(), "ux non-finite"); }
         for &v in &uy { assert!(v.is_finite(), "uy non-finite"); }
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn dpg_stokes_2d_symmetric_produces_zero_velocity() {
         // Symmetric BC with f=0 → u=0, p=constant (up to pressure pin)
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let (ux, uy, _p) = solve_dpg_stokes_2d(&mesh, 1.0, &|_,_| (0.0, 0.0));
         let max_u = ux.iter().chain(uy.iter()).map(|x| x.abs()).fold(0.0, f64::max);
         assert!(max_u < 0.1, "zero forcing → small velocity, got max |u|={max_u:.3e}");

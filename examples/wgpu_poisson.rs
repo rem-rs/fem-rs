@@ -23,7 +23,7 @@ fn main() {
     println!("=== fem-rs Example 20: GPU-accelerated Poisson (wgpu) ===");
 
     // 1. Assemble on CPU (same as ex1)
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n = space.n_dofs();
 

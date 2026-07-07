@@ -20,7 +20,7 @@ use fem_assembly::{
     standard::DomainSourceIntegrator,
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{L2Space, fe_space::FESpace};
 
@@ -37,11 +37,11 @@ struct SolveResult {
 fn main() {
     let args = parse_args();
 
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     println!("=== fem-rs Example 9: SIP-DG Diffusion  (one-to-one with MFEM ex9) ===");
@@ -61,7 +61,7 @@ fn main() {
     println!("\nDone.");
 }
 
-fn solve_case(mesh: SimplexMesh<2>, order: u8, sigma: f64) -> SolveResult {
+fn solve_case(mesh: Mesh<2>, order: u8, sigma: f64) -> SolveResult {
     let space = L2Space::new(mesh, order);
     let n_dofs = space.n_dofs();
 
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn dg_poisson_converges() {
-        let r = solve_case(SimplexMesh::<2>::unit_square_tri(8), 1, 20.0);
+        let r = solve_case(Mesh::<2>::unit_square_tri(8), 1, 20.0);
         assert!(r.converged);
         assert!(r.final_residual < 1.0e-6);
     }

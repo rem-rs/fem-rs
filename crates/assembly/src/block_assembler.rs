@@ -61,24 +61,24 @@ where S0: FESpace, S1: FESpace,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, BlockFESpace};
     use fem_space::fe_space::FESpace;
     use crate::standard::MassIntegrator;
     use crate::mixed::{PressureDivIntegrator, DivIntegrator};
 
     #[test] fn diagonal_block() {
-        let m = SimplexMesh::<2>::unit_square_tri(4); let s = H1Space::new(m, 1);
+        let m = Mesh::<2>::unit_square_tri(4); let s = H1Space::new(m, 1);
         let a = assemble_diagonal_block(&s, &[&MassIntegrator { rho: 1.0 }], 3);
         assert_eq!(a.nrows, s.n_dofs()); assert_eq!(a.nrows, a.ncols); assert!(a.nnz() > 0);
     }
     #[test] fn mixed_block_with_integrators() {
-        let m = SimplexMesh::<2>::unit_square_tri(4); let v = H1Space::new(m.clone(), 1); let p = H1Space::new(m, 1);
+        let m = Mesh::<2>::unit_square_tri(4); let v = H1Space::new(m.clone(), 1); let p = H1Space::new(m, 1);
         let b = assemble_mixed_block(&p, &v, &[&PressureDivIntegrator], 3);
         assert!(b.nnz() > 0); assert_eq!(b.nrows, p.n_dofs()); assert_eq!(b.ncols, v.n_dofs());
     }
     #[test] fn bt_is_transpose_of_b() {
-        let m = SimplexMesh::<2>::unit_square_tri(8); let s0 = H1Space::new(m.clone(), 1); let s1 = H1Space::new(m, 1);
+        let m = Mesh::<2>::unit_square_tri(8); let s0 = H1Space::new(m.clone(), 1); let s1 = H1Space::new(m, 1);
         let b = assemble_mixed_block(&s1, &s0, &[&DivIntegrator], 3);
         let bt = b.transpose();
         assert_eq!(bt.nrows, b.ncols); assert_eq!(bt.ncols, b.nrows);
@@ -93,30 +93,30 @@ mod tests {
         assert!(c>0, "transpose verified");
     }
     #[test] fn system_2x2_flat_layout() {
-        let m = SimplexMesh::<2>::unit_square_tri(6); let s0 = H1Space::new(m.clone(),1); let s1 = H1Space::new(m,1);
+        let m = Mesh::<2>::unit_square_tri(6); let s0 = H1Space::new(m.clone(),1); let s1 = H1Space::new(m,1);
         let (_, f) = assemble_system_2x2(&s0,&s1,&[&MassIntegrator{rho:1.0}],&[&MassIntegrator{rho:2.0}],&[&DivIntegrator],&[&DivIntegrator],3);
         assert_eq!(f.nrows, s0.n_dofs()+s1.n_dofs());
     }
     #[test] fn system_2x2_with_block_fespace() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
-        let bs = BlockFESpace::new(vec![Box::new(H1Space::new(m.clone(),1)) as Box<dyn FESpace<Mesh=SimplexMesh<2>>>,
-                                        Box::new(H1Space::new(m,1)) as Box<dyn FESpace<Mesh=SimplexMesh<2>>>]);
+        let m = Mesh::<2>::unit_square_tri(4);
+        let bs = BlockFESpace::new(vec![Box::new(H1Space::new(m.clone(),1)) as Box<dyn FESpace<Mesh=Mesh<2>>>,
+                                        Box::new(H1Space::new(m,1)) as Box<dyn FESpace<Mesh=Mesh<2>>>]);
         assert_eq!(bs.n_spaces(),2); assert_eq!(bs.n_dofs(), bs.n_dofs_component(0)+bs.n_dofs_component(1));
     }
     #[test] fn system_2x2_zero_c_block() {
-        let m = SimplexMesh::<2>::unit_square_tri(4); let s0 = H1Space::new(m.clone(),1); let s1 = H1Space::new(m,1);
+        let m = Mesh::<2>::unit_square_tri(4); let s0 = H1Space::new(m.clone(),1); let s1 = H1Space::new(m,1);
         let (b, _) = assemble_system_2x2(&s0,&s1,&[&MassIntegrator{rho:1.0}],&[],&[],&[],3);
         assert_eq!(b[1][0].nnz(),0); assert_eq!(b[1][1].nnz(),0);
     }
     #[test] fn mixed_block_rect() {
         // Test that empty integrators produce correct matrix shape with nnz==0
         // (when both spaces have the same mesh, the assembly yields a zero nnz matrix)
-        let m = SimplexMesh::<2>::unit_square_tri(4); let s0 = H1Space::new(m.clone(),1); let s1 = H1Space::new(m,1);
+        let m = Mesh::<2>::unit_square_tri(4); let s0 = H1Space::new(m.clone(),1); let s1 = H1Space::new(m,1);
         let mx = assemble_mixed_block(&s0,&s1,&[],3);
         assert_eq!(mx.nrows, s0.n_dofs()); assert_eq!(mx.ncols, s1.n_dofs());
     }
     #[test] fn diagonal_block_p2() {
-        let m = SimplexMesh::<2>::unit_square_tri(4); let s = H1Space::new(m,2);
+        let m = Mesh::<2>::unit_square_tri(4); let s = H1Space::new(m,2);
         let a = assemble_diagonal_block(&s, &[&MassIntegrator{rho:1.0}],5);
         assert_eq!(a.nrows, s.n_dofs()); assert!(a.nnz()>0);
     }

@@ -29,13 +29,13 @@ let integ = DomainSourceIntegrator::new(|x| {
 mod tests {
     use super::*;
     use crate::assembler::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     /// ∫_Ω 1 dx over the unit square should be ≈ 1.
     #[test]
     fn source_constant_one_integrates_to_area() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh  = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let integ = DomainSourceIntegrator::new(|_x| 1.0);
         let rhs   = Assembler::assemble_linear(&space, &[&integ], 3);

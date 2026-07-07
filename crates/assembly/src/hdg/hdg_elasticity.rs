@@ -640,11 +640,11 @@ fn invert_dense(mat: &[f64], n: usize) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn hdg_elasticity_2d_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let source = |_: &[f64]| vec![0.0, 0.0];
         let result = solve_hdg_elasticity(mesh, source, 1.0, 1.0);
         for &v in &result.u {
@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn hdg_elasticity_2d_p2_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let result = solve_hdg_elasticity_order(mesh, |_| vec![0.0,0.0], 1.0, 1.0, 2);
         assert!(result.u.iter().all(|v|v.is_finite()) && result.lambda.iter().all(|v|v.is_finite()));
     }
@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn hdg_elasticity_nonzero_source() {
         use std::f64::consts::PI;
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let source = |x: &[f64]| vec![
             2.0 * (PI * x[0]).sin() * (PI * x[1]).sin(),
             2.0 * (PI * x[0]).cos() * (PI * x[1]).cos(),
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     #[ignore] // 3D skeleton assembly needs further debugging (boundary face iteration)
     fn hdg_elasticity_3d_finite() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let result = solve_hdg_elasticity_order(mesh, |_| vec![0.0,0.0,0.0], 1.0, 1.0, 1);
         assert!(result.u.iter().all(|v|v.is_finite()), "u has non-finite values");
         assert!(result.lambda.iter().all(|v|v.is_finite()), "lambda has non-finite values");

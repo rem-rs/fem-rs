@@ -153,12 +153,12 @@ mod tests {
     use super::*;
     use crate::vector_assembler::VectorAssembler;
     use crate::standard::VectorMassIntegrator;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::HCurlSpace;
 
     #[test]
     fn curl_curl_is_symmetric() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let integ = CurlCurlIntegrator { mu: 1.0 };
         let mat = VectorAssembler::assemble_bilinear(&space, &[&integ], 4);
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn curl_curl_positive_semi_definite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let integ = CurlCurlIntegrator { mu: 1.0 };
         let mat = VectorAssembler::assemble_bilinear(&space, &[&integ], 4);
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn vector_mass_is_symmetric() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let integ = VectorMassIntegrator { alpha: 1.0 };
         let mat = VectorAssembler::assemble_bilinear(&space, &[&integ], 4);
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn curl_curl_plus_mass_is_spd() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let cc = CurlCurlIntegrator { mu: 1.0 };
         let vm = VectorMassIntegrator { alpha: 1.0 };

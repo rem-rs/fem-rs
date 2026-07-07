@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use fem_assembly::cahn_allen::{solve_allen_cahn, AllenCahnConfig};
 use fem_io::vtk::{DataArray, VtkWriter};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::fe_space::FESpace;
 
 fn main() {
@@ -21,7 +21,7 @@ fn main() {
     let t0 = Instant::now();
 
     // Mesh: 6×6 (matching existing test parameters)
-    let mesh = SimplexMesh::<2>::unit_square_tri(6);
+    let mesh = Mesh::<2>::unit_square_tri(6);
 
     // Initial condition: low-amplitude perturbation
     let order: u8 = 1;
@@ -85,12 +85,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use fem_assembly::cahn_allen::{solve_allen_cahn, AllenCahnConfig};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::fe_space::FESpace;
 
     #[test]
     fn smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
         let mut c0 = vec![0.0; n];
         for i in 0..n {

@@ -9,13 +9,13 @@
 use std::f64::consts::PI;
 use fem_assembly::transfer::transfer_h1_p1_nonmatching_l2_projection_conservative_3d;
 use fem_mesh::topology::MeshTopology;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
 
 fn main() {
-    let mesh_coarse = SimplexMesh::<3>::unit_cube_tet(4);
-    let mesh_fine = SimplexMesh::<3>::unit_cube_tet(8);
+    let mesh_coarse = Mesh::<3>::unit_cube_tet(4);
+    let mesh_fine = Mesh::<3>::unit_cube_tet(8);
     let space_coarse = H1Space::new(mesh_coarse, 1);
     let space_fine = H1Space::new(mesh_fine, 1);
     let n_coarse = space_coarse.n_dofs();
@@ -52,15 +52,15 @@ fn main() {
 mod tests {
     use fem_assembly::transfer::transfer_h1_p1_nonmatching_l2_projection_conservative_3d;
     use fem_mesh::topology::MeshTopology;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
 
     #[test]
     fn gslib_transfer_produces_finite_field() {
         use std::f64::consts::PI;
-        let mc = SimplexMesh::<3>::unit_cube_tet(3);
-        let mf = SimplexMesh::<3>::unit_cube_tet(6);
+        let mc = Mesh::<3>::unit_cube_tet(3);
+        let mf = Mesh::<3>::unit_cube_tet(6);
         let sc = H1Space::new(mc, 1);
         let sf = H1Space::new(mf, 1);
         let u: Vec<f64> = (0..sc.n_dofs()).map(|i| {

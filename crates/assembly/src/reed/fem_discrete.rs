@@ -16,7 +16,7 @@ pub use crate::vector_assembler::TRI_ND2_RT2_MIXED_QUAD_ORDER;
 
 use fem_linalg::CsrMatrix;
 use fem_mesh::topology::MeshTopology;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{HCurlSpace, HDivSpace, H1Space};
 
 use crate::assembler::Assembler;
@@ -26,13 +26,13 @@ use crate::standard::{DiffusionIntegrator, MassIntegrator};
 pub use crate::h1_quad_order_hint::{h1_tet_quad_order, h1_tri_quad_order};
 
 /// Global H¹ mass matrix on a 2D triangular mesh (`ρ = 1`).
-pub fn assemble_mass_h1_2d(mesh: &SimplexMesh<2>, poly: u8, quad_order: u8) -> CsrMatrix<f64> {
+pub fn assemble_mass_h1_2d(mesh: &Mesh<2>, poly: u8, quad_order: u8) -> CsrMatrix<f64> {
     let space = H1Space::new(mesh.clone(), poly);
     Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], quad_order)
 }
 
 /// Global H¹ stiffness (Poisson) matrix on a 2D triangular mesh (`κ = 1`).
-pub fn assemble_poisson_h1_2d(mesh: &SimplexMesh<2>, poly: u8, quad_order: u8) -> CsrMatrix<f64> {
+pub fn assemble_poisson_h1_2d(mesh: &Mesh<2>, poly: u8, quad_order: u8) -> CsrMatrix<f64> {
     let space = H1Space::new(mesh.clone(), poly);
     Assembler::assemble_bilinear(
         &space,
@@ -42,13 +42,13 @@ pub fn assemble_poisson_h1_2d(mesh: &SimplexMesh<2>, poly: u8, quad_order: u8) -
 }
 
 /// Global H¹ mass matrix on a 3D tetrahedral mesh (`ρ = 1`).
-pub fn assemble_mass_h1_3d(mesh: &SimplexMesh<3>, poly: u8, quad_order: u8) -> CsrMatrix<f64> {
+pub fn assemble_mass_h1_3d(mesh: &Mesh<3>, poly: u8, quad_order: u8) -> CsrMatrix<f64> {
     let space = H1Space::new(mesh.clone(), poly);
     Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], quad_order)
 }
 
 /// Global H¹ stiffness (Poisson) matrix on a 3D tetrahedral mesh (`κ = 1`).
-pub fn assemble_poisson_h1_3d(mesh: &SimplexMesh<3>, poly: u8, quad_order: u8) -> CsrMatrix<f64> {
+pub fn assemble_poisson_h1_3d(mesh: &Mesh<3>, poly: u8, quad_order: u8) -> CsrMatrix<f64> {
     let space = H1Space::new(mesh.clone(), poly);
     Assembler::assemble_bilinear(
         &space,
@@ -81,7 +81,7 @@ mod fem_ceed_kernel_alignment {
 
     #[test]
     fn mass_poisson_csr_matches_fem_ceed_p1_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         for (poly, q_hint) in [(1usize, 3usize), (2usize, 7usize)] {
             let quad = h1_tri_quad_order(poly, q_hint);
             let space = H1Space::new(mesh.clone(), poly as u8);
@@ -118,7 +118,7 @@ mod fem_ceed_kernel_alignment {
 
     #[test]
     fn mass_poisson_csr_matches_fem_ceed_3d_p1_p2() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         for (poly, q_hint) in [(1usize, 3usize), (2usize, 7usize)] {
             let quad = h1_tet_quad_order(poly, q_hint);
             let space = H1Space::new(mesh.clone(), poly as u8);

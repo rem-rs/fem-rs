@@ -191,7 +191,7 @@ mod tests {
     use crate::assembler::Assembler;
     use crate::standard::{DiffusionIntegrator, DomainSourceIntegrator};
     use crate::postproc::grid_function::GridFunction;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
 
@@ -207,7 +207,7 @@ mod tests {
     fn nitsche_poisson_square_converges() {
         use std::f64::consts::PI;
         let n = 8;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, 1);
         let quad = 3;
 
@@ -232,7 +232,7 @@ mod tests {
         let sol = |x: &[f64]| (PI * x[0]).sin() * (PI * x[1]).sin();
         let mut prev = 1.0;
         for &n in &[4, 8] {
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let mesh = Mesh::<2>::unit_square_tri(n);
             let space = H1Space::new(mesh, 1);
             let quad = 3;
             let stiffness = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], quad);

@@ -34,7 +34,7 @@
 use fem_core::FemResult;
 use fem_io::hdf5::{write_mesh_and_fields, Hdf5WriteOptions};
 use fem_io::xdmf::{write_xdmf, XdmfCenter, XdmfField};
-use fem_mesh::{ElementType, SimplexMesh};
+use fem_mesh::{ElementType, Mesh};
 
 use crate::comm::Comm;
 use crate::par_vector::ParVector;
@@ -88,7 +88,7 @@ impl Default for ParHdf5Options {
 /// * `comm` — MPI communicator.
 /// * `options` — Write options including mode selection.
 pub fn par_write_mesh_and_fields<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     fields: &[(&str, &ParVector, &str)],
     base_path: &str,
     comm: &Comm,
@@ -108,7 +108,7 @@ pub fn par_write_mesh_and_fields<const D: usize>(
 
 /// Per-rank write: each rank writes its own HDF5, rank 0 writes XDMF.
 fn par_write_per_rank<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     fields: &[(&str, &ParVector, &str)],
     base_path: &str,
     comm: &Comm,
@@ -172,7 +172,7 @@ fn par_write_per_rank<const D: usize>(
 
 /// Gather mode: rank 0 collects all local sub-meshes + fields and writes one file.
 fn par_write_gather<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     fields: &[(&str, &ParVector, &str)],
     base_path: &str,
     comm: &Comm,
@@ -210,7 +210,7 @@ fn par_write_gather<const D: usize>(
         let n_total_nodes = all_coords.len() / D;
         let n_total_elems = all_conn.len() / unified_elem_type.nodes_per_element();
 
-        let unified_mesh: SimplexMesh<D> = SimplexMesh {
+        let unified_mesh: Mesh<D> = Mesh {
             coords: all_coords,
             conn: all_conn,
             elem_tags: all_elem_tags,
@@ -328,7 +328,7 @@ fn gather_f64s(local: &[f64], n_ranks: usize, comm: &Comm) -> Vec<Vec<f64>> {
     result
 }
 
-/// Gather the local mesh to rank 0 and reassemble a unified `SimplexMesh`.
+/// Gather the local mesh to rank 0 and reassemble a unified `Mesh`.
 struct GatheredMeshData {
     coords: Vec<f64>,
     conn: Vec<u32>, // global node IDs
@@ -338,7 +338,7 @@ struct GatheredMeshData {
 }
 
 fn gather_mesh<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     n_ranks: usize,
     all_n_nodes: &[usize],
     all_n_elems: &[usize],

@@ -20,7 +20,7 @@
 use fem_assembly::{Assembler, GridFunction, standard::DiffusionIntegrator};
 use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::solve_sparse_cholesky;
 use fem_space::{
     H1Space,
@@ -41,7 +41,7 @@ fn main() {
             let msh = read_msh_file(p).expect("failed to read mesh file");
             msh.into_2d().expect("expected 2D mesh")
         }
-        None => SimplexMesh::<2>::unit_square_tri(args.n),
+        None => Mesh::<2>::unit_square_tri(args.n),
     };
     let result = solve_obstacle_problem(mesh, args.load, args.method);
 
@@ -108,7 +108,7 @@ fn parse_args() -> Args {
     args
 }
 
-fn solve_obstacle_problem(mesh: SimplexMesh<2>, load: f64, method: SolveMethod) -> ObstacleResult {
+fn solve_obstacle_problem(mesh: Mesh<2>, load: f64, method: SolveMethod) -> ObstacleResult {
     let space = H1Space::new(mesh, 1);
     let ndofs = space.n_dofs();
 
@@ -479,7 +479,7 @@ fn obstacle_kkt_metrics(
 mod tests {
     use super::*;
 
-    fn m(n: usize) -> SimplexMesh<2> { SimplexMesh::<2>::unit_square_tri(n) }
+    fn m(n: usize) -> Mesh<2> { Mesh::<2>::unit_square_tri(n) }
 
     #[test]
     fn ex36_obstacle_solution_is_feasible_and_has_contact() {

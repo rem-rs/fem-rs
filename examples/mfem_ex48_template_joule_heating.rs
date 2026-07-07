@@ -43,7 +43,7 @@ use fem_io_hdf5_parallel::{
     validate_checkpoint_layout,
     write_checkpoint_step_bundle_f64,
 };
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     BuiltinMultiphysicsTemplate,
     MultiRateAdaptiveConfig,
@@ -78,7 +78,7 @@ struct JouleTemplateResult {
     joule_power_tracker_prev: Option<f64>,
     phi: Vec<f64>,
     temperature: Vec<f64>,
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
 }
 
 #[derive(Clone)]
@@ -285,7 +285,7 @@ fn solve_joule_template_single_rate(
     args: &Args,
     restart: Option<&JouleCheckpointState>,
 ) -> JouleTemplateResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 
@@ -457,7 +457,7 @@ fn solve_joule_template_subcycling(
         converged: bool,
     }
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 
@@ -675,7 +675,7 @@ fn seeded_scalar_tracker(prev: Option<f64>) -> RelativeScalarTracker {
     tracker
 }
 
-fn integrate_element_scalar(space: &H1Space<SimplexMesh<2>>, elem_values: &[f64]) -> f64 {
+fn integrate_element_scalar(space: &H1Space<Mesh<2>>, elem_values: &[f64]) -> f64 {
     let mesh = space.mesh();
     let mut acc = 0.0_f64;
     for (e, &value) in mesh.elem_iter().zip(elem_values.iter()) {
@@ -685,7 +685,7 @@ fn integrate_element_scalar(space: &H1Space<SimplexMesh<2>>, elem_values: &[f64]
     acc
 }
 
-fn tri_area(mesh: &SimplexMesh<2>, elem: u32) -> f64 {
+fn tri_area(mesh: &Mesh<2>, elem: u32) -> f64 {
     let ns = mesh.elem_nodes(elem);
     let a = mesh.coords_of(ns[0]);
     let b = mesh.coords_of(ns[1]);
@@ -695,7 +695,7 @@ fn tri_area(mesh: &SimplexMesh<2>, elem: u32) -> f64 {
 }
 
 fn sample_piecewise_constant_on_mesh(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     elem_values: &[f64],
     x: &[f64],
 ) -> f64 {
@@ -763,7 +763,7 @@ fn checksum(v: &[f64]) -> f64 {
 
 fn write_ex48_vtk_export(
     prefix: &str,
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     phi: &[f64],
     temperature: &[f64],
 ) -> Result<(), String> {

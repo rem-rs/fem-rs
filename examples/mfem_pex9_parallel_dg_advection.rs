@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
     par_simplex::partition_simplex,
@@ -22,7 +22,7 @@ fn main() {
     let n: usize = args.iter().position(|a| a == "--n").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(8);
     let n_workers: usize = args.iter().position(|a| a == "--ranks").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(2);
 
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(n));
     let result = Arc::new(Mutex::new(Vec::new()));
     let result_slot = Arc::clone(&result);
 

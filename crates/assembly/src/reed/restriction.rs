@@ -1,4 +1,4 @@
-//! Convert [`SimplexMesh`] connectivity to a reed [`ElemRestriction`].
+//! Convert [`Mesh`] connectivity to a reed [`ElemRestriction`].
 //!
 //! A reed `ElemRestriction` is the "gather/scatter" operator `E` in the
 //! operator decomposition `Eᵀ Bᵀ D B E`.  It maps a local DOF vector to
@@ -18,7 +18,7 @@
 //! element-by-element (the node count cannot exceed `i32::MAX` in practice).
 
 use fem_core::ElemId;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use reed_core::{
     elem_restriction::ElemRestrictionTrait,
     error::{ReedError, ReedResult},
@@ -26,7 +26,7 @@ use reed_core::{
     scalar::Scalar,
 };
 
-/// Build a reed `ElemRestriction` from a [`SimplexMesh`].
+/// Build a reed `ElemRestriction` from a [`Mesh`].
 ///
 /// # Parameters
 /// * `mesh`    — the finite-element mesh.
@@ -37,7 +37,7 @@ use reed_core::{
 /// Propagates reed allocation errors or returns `ReedError::ElemRestriction`
 /// if a node ID overflows `i32`.
 pub fn mesh_to_elem_restriction<const D: usize, T, B>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     ncomp: usize,
     backend: &B,
 ) -> ReedResult<Box<dyn ElemRestrictionTrait<T>>>

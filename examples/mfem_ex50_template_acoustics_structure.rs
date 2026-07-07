@@ -19,7 +19,7 @@ use fem_examples::template_runner::{
     print_template_header,
     push_partitioned_multirate_cli_help,
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{
     BuiltinMultiphysicsTemplate,
     MultiRateConfig,
@@ -142,7 +142,7 @@ fn solve_acoustics_structure_template(args: &Args) -> AcousticsStructureResult {
 }
 
 fn solve_acoustics_structure_template_single_rate(args: &Args) -> AcousticsStructureResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 
@@ -207,7 +207,7 @@ fn solve_acoustics_structure_template_subcycling(args: &Args) -> AcousticsStruct
         last_rel: f64,
     }
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
     let mut state = SubcyclingState {
@@ -280,7 +280,7 @@ fn solve_acoustics_structure_template_subcycling(args: &Args) -> AcousticsStruct
 }
 
 fn solve_acoustic_pressure(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     initial_guess: &[f64],
     drive: f64,
     interface_disp: f64,
@@ -335,7 +335,7 @@ fn solve_acoustic_pressure(
     p
 }
 
-fn top_boundary_average_pressure(space: &H1Space<SimplexMesh<2>>, p: &[f64]) -> f64 {
+fn top_boundary_average_pressure(space: &H1Space<Mesh<2>>, p: &[f64]) -> f64 {
     let dm = space.dof_manager();
     let mut sum = 0.0_f64;
     let mut cnt = 0usize;

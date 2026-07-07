@@ -141,11 +141,11 @@ pub fn optimize_poisson_control<M: MeshTopology + Clone + Send + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
     /// Compute the finite-difference gradient for component `idx`.
-    fn fd_gradient(ctrl: &PoissonControl<SimplexMesh<2>>, c: &[f64], f: &[f64], u_d: &[f64],
+    fn fd_gradient(ctrl: &PoissonControl<Mesh<2>>, c: &[f64], f: &[f64], u_d: &[f64],
                    bnd_dofs: &[u32], idx: usize, eps: f64) -> f64 {
         let mut c_plus = c.to_vec();
         c_plus[idx] += eps;
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn adjoint_gradient_matches_finite_difference() {
         // Poisson control on unit square: verify adjoint gradient vs FD
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let order = 1;
         let quad = order + 2;
         let n = H1Space::new(mesh.clone(), order).n_dofs();
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn optimization_reduces_cost() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let order = 1;
         let quad = order + 2;
         let n = H1Space::new(mesh.clone(), order).n_dofs();

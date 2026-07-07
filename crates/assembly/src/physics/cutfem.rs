@@ -126,12 +126,12 @@ where M: MeshTopology, S: FESpace<Mesh = M>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     #[test]
     fn ghost_penalty_2d_spd() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let mesh_ref = space.mesh();
         let s = assemble_ghost_penalty(&space, mesh_ref, &|x| x[0]-0.6, 1.0, 3);
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn ghost_penalty_2d_symmetry() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let mesh_ref = space.mesh();
         let s = assemble_ghost_penalty(&space, mesh_ref, &|x| x[0]-0.6, 1.0, 3);
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn ghost_penalty_no_cut_is_zero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let mesh_ref = space.mesh();
         let s = assemble_ghost_penalty(&space, mesh_ref, &|_| 1.0, 1.0, 3);
@@ -205,7 +205,7 @@ mod tests {
         let sol = |x: &[f64]| x[0]*(1.0-x[0])*x[1]*(1.0-x[1]);
         let fsrc = |x: &[f64]| 2.0*(x[0]-x[0]*x[0]+x[1]-x[1]*x[1]);
         let n = 2u32.pow(level); let h = 1.0 / n as f64;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n as usize);
+        let mesh = Mesh::<2>::unit_square_tri(n as usize);
         let sp = H1Space::new(mesh, order); let m = sp.mesh();
         let nd = sp.n_dofs();
         let qo = 2 * (order + 1);

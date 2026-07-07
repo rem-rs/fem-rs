@@ -41,16 +41,16 @@ pub fn refine_curved_3d_nc(curved: &CurvedMesh<3>, marked: &[usize]) -> CurvedMe
     _reinterpolate_curved_3d(curved, &fine, geo, npe)
 }
 
-fn _refine_linear_2d(curved: &CurvedMesh<2>) -> SimplexMesh<2> {
+fn _refine_linear_2d(curved: &CurvedMesh<2>) -> Mesh<2> {
     crate::amr::refine_uniform(&_extract_linear_2d(curved))
 }
 
-fn _refine_linear_3d(curved: &CurvedMesh<3>) -> SimplexMesh<3> {
+fn _refine_linear_3d(curved: &CurvedMesh<3>) -> Mesh<3> {
     crate::amr::refine_uniform_3d(&_extract_linear_3d(curved))
 }
 
-fn _extract_linear_2d(curved: &CurvedMesh<2>) -> SimplexMesh<2> {
-    SimplexMesh {
+fn _extract_linear_2d(curved: &CurvedMesh<2>) -> Mesh<2> {
+    Mesh {
         coords: curved.coords.clone(),
         conn: curved.geom_conn.chunks(curved.nodes_per_elem).flat_map(|c| c[..3].to_vec()).collect(),
         elem_type: ElementType::Tri3,
@@ -61,8 +61,8 @@ fn _extract_linear_2d(curved: &CurvedMesh<2>) -> SimplexMesh<2> {
     }
 }
 
-fn _extract_linear_3d(curved: &CurvedMesh<3>) -> SimplexMesh<3> {
-    SimplexMesh {
+fn _extract_linear_3d(curved: &CurvedMesh<3>) -> Mesh<3> {
+    Mesh {
         coords: curved.coords.clone(),
         conn: curved.geom_conn.chunks(curved.nodes_per_elem).flat_map(|c| c[..4].to_vec()).collect(),
         elem_type: ElementType::Tet4,
@@ -96,7 +96,7 @@ fn _find_parent<const D: usize>(vmap: &[Vec<usize>], verts: &[u32], n_parent: us
     votes.into_iter().max_by_key(|&(_, c)| c).map(|(p,_)| p).unwrap_or(0).min(n_parent - 1)
 }
 
-fn _reinterpolate_curved_2d(curved: &CurvedMesh<2>, fine: &SimplexMesh<2>, geo: Box<dyn fem_element::ReferenceElement>, npe: usize) -> CurvedMesh<2> {
+fn _reinterpolate_curved_2d(curved: &CurvedMesh<2>, fine: &Mesh<2>, geo: Box<dyn fem_element::ReferenceElement>, npe: usize) -> CurvedMesh<2> {
     let nf = fine.n_elems(); let vmap = _build_vparent_map(curved); let dc = geo.dof_coords();
     let mut nc = Vec::with_capacity(nf * npe); let mut nn = fine.n_nodes() as u32; let mut ns = fine.coords.clone();
     for fe in 0..nf {
@@ -111,7 +111,7 @@ fn _reinterpolate_curved_2d(curved: &CurvedMesh<2>, fine: &SimplexMesh<2>, geo: 
         n_elems: nf, n_nodes: nn as usize, face_conn: fc, face_tags: ft, face_type: ElementType::Line2, elem_tags: vec![0; nf] }
 }
 
-fn _reinterpolate_curved_3d(curved: &CurvedMesh<3>, fine: &SimplexMesh<3>, geo: Box<dyn fem_element::ReferenceElement>, npe: usize) -> CurvedMesh<3> {
+fn _reinterpolate_curved_3d(curved: &CurvedMesh<3>, fine: &Mesh<3>, geo: Box<dyn fem_element::ReferenceElement>, npe: usize) -> CurvedMesh<3> {
     let nf = fine.n_elems(); let vmap = _build_vparent_map(curved); let dc = geo.dof_coords();
     let mut nc = Vec::with_capacity(nf * npe); let mut nn = fine.n_nodes() as u32; let mut ns = fine.coords.clone();
     for fe in 0..nf {

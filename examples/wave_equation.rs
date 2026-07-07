@@ -20,7 +20,7 @@
 use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_cg, SolverConfig, Newmark, NewmarkState};
 use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, boundary_dofs}};
 
@@ -72,7 +72,7 @@ fn solve_case(
     emit_progress: bool,
 ) -> SolveResult {
     // 1. Mesh and H1 space
-    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh  = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let ndof  = space.n_dofs();
     if emit_progress {

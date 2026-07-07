@@ -208,11 +208,11 @@ pub fn solve_dpg_maxwell_2d<M: MeshTopology>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn dpg_maxwell_2d_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let u = solve_dpg_maxwell_2d(&mesh, 1.0, &|_,_| 1.0);
         for &v in &u { assert!(v.is_finite(), "non-finite solution"); }
     }
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn dpg_maxwell_k0_finite() {
         // k=0 → Poisson-like, should give finite result
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let u = solve_dpg_maxwell_2d(&mesh, 0.0, &|_,_| 1.0);
         for &v in &u { assert!(v.is_finite()); }
     }

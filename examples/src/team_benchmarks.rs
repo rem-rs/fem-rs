@@ -22,7 +22,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, MassIntegrator},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{lobpcg, LobpcgConfig};
 use fem_space::{
     fe_space::FESpace,
@@ -48,7 +48,7 @@ fn free_submatrix(a: &CsrMatrix<f64>, free: &[usize]) -> CsrMatrix<f64> {
 }
 
 /// Build the set of DOF indices NOT in the given boundary tags.
-fn free_dofs(space: &H1Space<SimplexMesh<2>>, bnd_tags: &[i32]) -> Vec<usize> {
+fn free_dofs(space: &H1Space<Mesh<2>>, bnd_tags: &[i32]) -> Vec<usize> {
     let n = space.n_dofs();
     let dm = space.dof_manager();
     let bnd = boundary_dofs(space.mesh(), dm, bnd_tags);
@@ -82,7 +82,7 @@ fn extract_k(ev: &[f64], k: usize) -> Vec<f64> {
 ///   - Harrington, "Time-Harmonic Electromagnetic Fields", §4.4
 #[test]
 fn team1_pec_cavity_eigenvalues() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(20);
+    let mesh = Mesh::<2>::unit_square_tri(20);
     let space = H1Space::new(mesh.clone(), 1);
 
     let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
@@ -149,7 +149,7 @@ fn team1_pec_cavity_eigenvalues() {
 #[test]
 fn team2_dielectric_loaded_waveguide() {
     // Create mesh with two element tags (x < 0.5 → tag 1, x ≥ 0.5 → tag 2)
-    let mesh_raw = SimplexMesh::<2>::unit_square_tri(20);
+    let mesh_raw = Mesh::<2>::unit_square_tri(20);
     let mut mesh = mesh_raw;
     for e in 0..mesh.n_elements() as u32 {
         let nodes = mesh.element_nodes(e);
@@ -240,9 +240,9 @@ fn team1_hcurl_pec_cavity_eigenvalues() {
 use crate::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
 
     let n = 8;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = HCurlSpace::new(mesh, 1);
-    let h1 = H1Space::new(SimplexMesh::<2>::unit_square_tri(n), 1);
+    let h1 = H1Space::new(Mesh::<2>::unit_square_tri(n), 1);
     let bdr = [1, 2, 3, 4];
     let ess = [1, 1, 1, 1];
     let sys = assemble_hcurl_eigen_system_from_marker(&h1, &space, &bdr, &ess, 1.0, 1.0, 4);
@@ -302,7 +302,7 @@ fn team1_hcurl_3d_pec_cavity_smoke() {
     use fem_solver::SolverConfig;
 
     let n = 4;
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = HCurlSpace::new(mesh.clone(), 1);
     let n_dof = space.n_dofs();
 
@@ -383,7 +383,7 @@ fn team1_hcurl_3d_pec_cavity_smoke() {
 ///             TEAM workshop problem 3 (multi-material waveguide).
 #[test]
 fn team3_dielectric_slab_waveguide() {
-    let mesh_raw = SimplexMesh::<2>::unit_square_tri(24);
+    let mesh_raw = Mesh::<2>::unit_square_tri(24);
     let mut mesh = mesh_raw;
     for e in 0..mesh.n_elements() as u32 {
         let nodes = mesh.element_nodes(e);
@@ -490,7 +490,7 @@ fn team3_hcurl_3d_mms_convergence() {
     let mut prev_norm = f64::MAX;
     let analytical_norm_sq = 0.75; // ∫(E_x²+E_y²+E_z²) = 3·(1/2)·(1/2) = 3/4
     for &n in &[2usize, 3, 4] {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+        let mesh = Mesh::<3>::unit_cube_tet(n);
         let space = HCurlSpace::new(mesh.clone(), 1);
         let n_dof = space.n_dofs();
 
@@ -535,7 +535,7 @@ fn team3_hcurl_3d_mms_convergence() {
     // Verify final mesh gives norm close to analytical value
     // (ND1 on n=4 with CG should be within 10%)
     {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let mesh = Mesh::<3>::unit_cube_tet(4);
         let space = HCurlSpace::new(mesh.clone(), 1);
         let n_dof = space.n_dofs();
         let mat = VectorAssembler::assemble_bilinear(
@@ -610,7 +610,7 @@ fn team3_td_maxwell_3d_mms() {
     let skel = FirstOrderMaxwell3DSkeleton::new_unit_cube_with_params(4, 1.0, 1.0, 0.0);
 
     // Build matching mesh + space to assemble the force
-    let mesh3 = fem_mesh::SimplexMesh::<3>::unit_cube_tet(4);
+    let mesh3 = fem_mesh::Mesh::<3>::unit_cube_tet(4);
     let hcurl = fem_space::HCurlSpace::new(mesh3, 1);
 
     let mut rhs_unit = VectorAssembler::assemble_linear(&hcurl, &[&MmsSource3D], 4);
@@ -682,7 +682,7 @@ fn team10_lossy_impedance_cavity() {
     let z_imp = 1.0; // surface impedance
     let n_mesh = 20;
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(n_mesh);
+    let mesh = Mesh::<2>::unit_square_tri(n_mesh);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 
@@ -798,7 +798,7 @@ fn team4_electrostatic_capacitor() {
     let b = 0.6; // dielectric end
 
     // Mesh with element tags based on centroid y-position
-    let mesh_raw = SimplexMesh::<2>::unit_square_tri(n_mesh);
+    let mesh_raw = Mesh::<2>::unit_square_tri(n_mesh);
     let mut mesh = mesh_raw;
     for e in 0..mesh.n_elements() as u32 {
         let nodes = mesh.element_nodes(e);
@@ -914,7 +914,7 @@ fn team4_electrostatic_capacitor() {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Create a uniform rectangular triangulation [0, lx]×[0, ly] with nx×ny subdivisions.
-fn rect_tri_mesh(nx: usize, ny: usize, lx: f64, ly: f64) -> SimplexMesh<2> {
+fn rect_tri_mesh(nx: usize, ny: usize, lx: f64, ly: f64) -> Mesh<2> {
     let npx = nx + 1;
     let npy = ny + 1;
     let mut coords = Vec::with_capacity(npx * npy * 2);
@@ -946,7 +946,7 @@ fn rect_tri_mesh(nx: usize, ny: usize, lx: f64, ly: f64) -> SimplexMesh<2> {
         face_conn.extend_from_slice(&[nid(nx,j), nid(nx,j+1)]); face_tags.push(2);
         face_conn.extend_from_slice(&[nid(0,j+1), nid(0,j)]); face_tags.push(4);
     }
-    SimplexMesh::uniform(coords, conn, elem_tags, fem_mesh::ElementType::Tri3,
+    Mesh::uniform(coords, conn, elem_tags, fem_mesh::ElementType::Tri3,
         face_conn, face_tags, fem_mesh::ElementType::Line2)
 }
 

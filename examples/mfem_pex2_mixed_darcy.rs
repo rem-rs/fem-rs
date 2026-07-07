@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
     par_simplex::partition_simplex,
@@ -76,7 +76,7 @@ fn run_case(mesh_n: usize, n_workers: usize, source_scale: f64) -> RunResult {
     let result = Arc::new(Mutex::new(None::<RunResult>));
     let result_slot = Arc::clone(&result);
 
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(mesh_n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(mesh_n));
 
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
     launcher.launch(move |comm| {

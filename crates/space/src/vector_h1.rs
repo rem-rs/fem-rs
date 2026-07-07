@@ -147,11 +147,11 @@ impl<M: MeshTopology> VectorH1Space<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn vector_h1_n_dofs_is_dim_times_scalar() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n_nodes = mesh.n_nodes();
         let space = VectorH1Space::new(mesh, 1, 2);
         assert_eq!(space.n_dofs(), 2 * n_nodes);
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn vector_h1_element_dofs_interleaved() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = VectorH1Space::new(mesh, 1, 2);
         // For P1 on a triangle: 3 scalar DOFs → 6 interleaved DOFs.
         let dofs = space.element_dofs(0);
@@ -177,14 +177,14 @@ mod tests {
 
     #[test]
     fn vector_h1_space_type() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = VectorH1Space::new(mesh, 1, 2);
         assert_eq!(space.space_type(), SpaceType::VectorH1(2));
     }
 
     #[test]
     fn vector_h1_interpolate_vec_linear() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         // f(x,y) = (x, y)
         let v = space.interpolate_vec(&|x| vec![x[0], x[1]]);

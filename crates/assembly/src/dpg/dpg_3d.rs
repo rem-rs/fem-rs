@@ -182,13 +182,13 @@ pub fn solve_dpg_poisson_3d<M: MeshTopology>(mesh: &M, f: &dyn Fn(f64, f64, f64)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     fn f_src(_x: f64, _y: f64, _z: f64) -> f64 { 6.0 * _x }
 
     #[test]
     fn dpg_3d_finite_solution() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let mesh = Mesh::<3>::unit_cube_tet(4);
         let u = solve_dpg_poisson_3d(&mesh, &f_src);
         let mx = u.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
         let mn = u.iter().fold(f64::INFINITY, |a, &b| a.min(b));
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn dpg_3d_midpoint_value() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(8);
+        let mesh = Mesh::<3>::unit_cube_tet(8);
         let u = solve_dpg_poisson_3d(&mesh, &f_src);
         let mut mx_idx = 0;
         for i in 1..mesh.n_nodes() {

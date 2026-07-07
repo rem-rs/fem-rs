@@ -9,7 +9,7 @@
 //! libCEED-style `Eᵀ Bᵀ D B E` pipeline together with [`super::restriction`].  That path stays
 //! useful when you already drive assembly through reed restrictions and device backends.
 //!
-//! For a **fully assembled CSR** and matvec on an [`fem_mesh::SimplexMesh`] with the same
+//! For a **fully assembled CSR** and matvec on an [`fem_mesh::Mesh`] with the same
 //! bilinear forms as the rest of `fem-assembly`, use [`crate::reed::FemCeed`]: e.g.
 //! [`crate::reed::FemCeed::apply_mass_2d`] / [`crate::reed::FemCeed::apply_poisson_2d`] (triangles)
 //! or [`crate::reed::FemCeed::apply_mass_3d`] / [`crate::reed::FemCeed::apply_poisson_3d`] (tets),

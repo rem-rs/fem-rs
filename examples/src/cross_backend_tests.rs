@@ -12,7 +12,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_cg, solve_gmres, solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     fe_space::FESpace,
@@ -24,7 +24,7 @@ use fem_space::{
 
 /// Solve a Poisson problem with homogeneous Dirichlet BCs.
 fn solve_poisson(n: usize, solver: &str) -> Vec<f64> {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let n_dof = space.n_dofs();
 
@@ -93,7 +93,7 @@ fn cross_solver_consistency() {
 #[cfg_attr(not(feature = "parallel"), ignore)]
 #[test]
 fn cross_serial_parallel_assembly() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(32); // large enough to trigger parallel
+    let mesh = Mesh::<2>::unit_square_tri(32); // large enough to trigger parallel
     let space = H1Space::new(mesh, 1);
     let diff = DiffusionIntegrator { kappa: 1.0 };
 

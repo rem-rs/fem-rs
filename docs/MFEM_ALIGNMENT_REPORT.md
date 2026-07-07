@@ -200,7 +200,7 @@
 
 | 类型 | 状态 |
 |------|------|
-| SimplexMesh `<D>` (标准非结构化) | ✅ |
+| Mesh `<D>` (标准非结构化) | ✅ |
 | PolyMesh (多边形网格) | ✅ |
 | CurvedMesh (曲边网格) | ✅ (P1–P4) |
 | ParallelMesh `<M>` (分布式) | ✅ |

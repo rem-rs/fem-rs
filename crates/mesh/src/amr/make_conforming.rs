@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use fem_core::{ElemId, NodeId};
 use crate::element_type::ElementType;
-use crate::simplex::SimplexMesh;
+use crate::simplex::Mesh;
 use super::HangingNodeConstraint;
 use super::refine_marked;
 
@@ -17,9 +17,9 @@ fn local_edges_tri() -> [(usize, usize); 3] {
 
 /// Convert a non-conforming Tri3 mesh to fully conforming.
 pub fn make_conforming_tri(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     hanging: &[HangingNodeConstraint],
-) -> SimplexMesh<2> {
+) -> Mesh<2> {
     assert_eq!(mesh.elem_type, ElementType::Tri3,
         "make_conforming_tri: only Tri3 supported");
 
@@ -64,11 +64,11 @@ pub fn make_conforming_tri(
 mod tests {
     use super::*;
     use crate::amr::refine_nonconforming;
-    use crate::simplex::SimplexMesh;
+    use crate::simplex::Mesh;
 
     #[test]
     fn tc_single_hanging() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let (nc, constraints) = refine_nonconforming(&mesh, &[0]);
         assert!(!constraints.is_empty());
         let c = make_conforming_tri(&nc, &constraints);
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn tc_no_hanging() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let (nc, cns) = refine_nonconforming(&mesh, &[]);
         assert!(cns.is_empty());
         assert_eq!(make_conforming_tri(&nc, &cns).n_nodes(), nc.n_nodes());
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn tc_all_refined() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (nc, _) = refine_nonconforming(&mesh, &all);
         assert_eq!(make_conforming_tri(&nc, &[]).n_nodes(), nc.n_nodes());

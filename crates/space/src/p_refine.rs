@@ -1206,7 +1206,7 @@ pub fn derefine_p<M: MeshTopology>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     // ─── Lagrange weights ──────────────────────────────────────────────────
 
@@ -1265,7 +1265,7 @@ mod tests {
         // Note: dofs_flat may differ because the variable-order builder
         // assigns global DOF numbers by EdgeKey sort order (deterministic),
         // while build_p3 assigns by element iteration order.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let elem_orders = vec![3u8; mesh.n_elements()];
         let dm_var = build_variable_order_dof_manager(&mesh, &elem_orders);
         let dm_pk = DofManager::new(&mesh, 3);
@@ -1300,7 +1300,7 @@ mod tests {
 
     #[test]
     fn variable_order_mixed_count() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut elem_orders = vec![2u8; n_elems];
         // Promote first element to P3
@@ -1321,7 +1321,7 @@ mod tests {
 
     #[test]
     fn variable_order_uses_elem_dof_offsets() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut elem_orders = vec![2u8; n_elems];
         elem_orders[0] = 3;
@@ -1342,7 +1342,7 @@ mod tests {
 
     #[test]
     fn variable_order_vertex_dofs_correct() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut elem_orders = vec![2u8; n_elems];
         elem_orders[0] = 3;
@@ -1359,7 +1359,7 @@ mod tests {
 
     #[test]
     fn variable_order_elem_orders_stored() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut elem_orders = vec![2u8; n_elems];
         elem_orders[0] = 4;
@@ -1377,7 +1377,7 @@ mod tests {
 
     #[test]
     fn detect_p_constraints_p2_p3_interface() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         assert_eq!(mesh.n_elements(), 2);
         let elem_orders = vec![3u8, 2u8]; // one P3, one P2
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
@@ -1390,7 +1390,7 @@ mod tests {
 
     #[test]
     fn detect_constraints_none_for_uniform() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let elem_orders = vec![2u8; mesh.n_elements()];
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
         let constraints = detect_p_constraints(&dm, &mesh, &elem_orders);
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[test]
     fn p_constraint_parents_sum_to_one() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let elem_orders = vec![3u8, 2u8];
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
         let constraints = detect_p_constraints(&dm, &mesh, &elem_orders);
@@ -1418,7 +1418,7 @@ mod tests {
     fn apply_p_constraints_modifies_matrix() {
         use fem_linalg::{CooMatrix, CsrMatrix};
 
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let elem_orders = vec![3u8, 2u8];
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
         let constraints = detect_p_constraints(&dm, &mesh, &elem_orders);
@@ -1445,7 +1445,7 @@ mod tests {
 
     #[test]
     fn recover_p_values_p2_p3_interface() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let elem_orders = vec![3u8, 2u8];
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
         let constraints = detect_p_constraints(&dm, &mesh, &elem_orders);
@@ -1472,7 +1472,7 @@ mod tests {
 
     #[test]
     fn refine_p_increases_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let elem_orders = vec![2u8; mesh.n_elements()];
         let dm = DofManager::new(&mesh, 2);
 
@@ -1484,7 +1484,7 @@ mod tests {
 
     #[test]
     fn derefine_p_decreases_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let elem_orders = vec![3u8; mesh.n_elements()];
         let dm = DofManager::new(&mesh, 3);
 
@@ -1498,7 +1498,7 @@ mod tests {
 
     #[test]
     fn smooth_order_field_clamps_jumps() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut orders = vec![1u8; n_elems];
         // Set one element to very high order
@@ -1544,7 +1544,7 @@ mod tests {
 
     #[test]
     fn variable_order_3d_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let n_elems = mesh.n_elements();
         let mut elem_orders = vec![2u8; n_elems];
         elem_orders[0] = 3;
@@ -1562,7 +1562,7 @@ mod tests {
 
     #[test]
     fn face_constraints_3d_p2_p3_interface() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let n_elems = mesh.n_elements();
         let mut elem_orders = vec![2u8; n_elems];
         elem_orders[0] = 3; // P3 element 0, P2 element 1
@@ -1589,7 +1589,7 @@ mod tests {
 
     #[test]
     fn face_dof_coords_3d_not_centroid() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let n_elems = mesh.n_elements();
         let elem_orders = vec![3u8; n_elems]; // all P3
 
@@ -1614,7 +1614,7 @@ mod tests {
 
     #[test]
     fn variable_order_quad() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n_elems = mesh.n_elements();
         let elem_orders = vec![2u8; n_elems];
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
@@ -1630,7 +1630,7 @@ mod tests {
 
     #[test]
     fn variable_order_quad_p3() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n_elems = mesh.n_elements();
         let elem_orders = vec![3u8; n_elems]; // all Q3
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
@@ -1645,7 +1645,7 @@ mod tests {
 
     #[test]
     fn variable_order_quad_p2_p3_interface() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n_elems = mesh.n_elements();
         let mut elem_orders = vec![2u8; n_elems];
         elem_orders[0] = 3; // Q3 element 0, Q2 element 1..3
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn variable_order_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let n_elems = mesh.n_elements();
         let elem_orders = vec![2u8; n_elems]; // all Q2 (Serendipity-like)
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);
@@ -1678,7 +1678,7 @@ mod tests {
 
     #[test]
     fn variable_order_hex_p3() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let n_elems = mesh.n_elements();
         let elem_orders = vec![3u8; n_elems]; // all Q3
         let dm = build_variable_order_dof_manager(&mesh, &elem_orders);

@@ -26,7 +26,7 @@
 //! ```
 
 use fem_assembly::{Assembler, physics::nonlinear::{NonlinearDiffusionForm, NewtonSolver, NewtonConfig}};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_io::mfem::read_mfem_file;
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
@@ -97,7 +97,7 @@ fn main() {
 
 fn run_main(args: Args) -> SolveResult {
     let mesh = if args.mesh_file.is_empty() {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     } else {
         let mfem = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
@@ -118,14 +118,14 @@ fn run_main(args: Args) -> SolveResult {
 
 #[cfg(test)]
 fn solve_case(n: usize, newton_tol: f64, exact_scale: f64) -> SolveResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     solve_case_with_ls(mesh, newton_tol, exact_scale, default_line_search_options())
 }
 
 /// Core solver: builds the nonlinear form, assembles RHS via a user-supplied
 /// source function, runs Newton, and returns diagnostics.
 fn solve_nonlinear_heat(
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
     source_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
     newton_tol: f64,
     ls: LineSearchOptions,
@@ -196,7 +196,7 @@ fn solve_nonlinear_heat(
 /// with the corresponding RHS f = -∇·((1+α·u*)∇u*).
 #[cfg(test)]
 fn solve_case_with_ls(
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
     newton_tol: f64,
     exact_scale: f64,
     ls: LineSearchOptions,

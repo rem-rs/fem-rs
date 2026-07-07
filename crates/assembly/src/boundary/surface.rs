@@ -1,6 +1,6 @@
 //! Surface finite element method for solving PDEs on 2-D manifolds in 3-D.
 //!
-//! Provides integrators that work with `SimplexMesh<3>` containing Tri3 elements
+//! Provides integrators that work with `Mesh<3>` containing Tri3 elements
 //! (2-D topology embedded in 3-D space).  Key differences from planar FEM:
 //!
 //! - Jacobian is `3×2` instead of `2×2`
@@ -10,7 +10,7 @@
 //!
 //! # Example
 //! ```ignore
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //! use fem_space::H1Space;
 //! use fem_assembly::surface::{SurfaceAssembler, SurfaceDiffusionIntegrator};
 //!
@@ -179,7 +179,7 @@ impl SurfaceDomainSourceIntegrator<'_> {
 
 /// Assemble a surface bilinear form using a surface integrator.
 ///
-/// Works with `H1Space<SimplexMesh<3>>` containing Tri3 surface elements.
+/// Works with `H1Space<Mesh<3>>` containing Tri3 surface elements.
 pub struct SurfaceAssembler;
 
 impl SurfaceAssembler {
@@ -254,12 +254,12 @@ fn get_coord3<M: MeshTopology>(mesh: &M, n: u32) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_solver::{solve_cg, SolverConfig};
 
     /// Unit sphere mesh: octahedron refined n times.
-    fn sphere_mesh(n: u32) -> SimplexMesh<3> {
+    fn sphere_mesh(n: u32) -> Mesh<3> {
         // Start with an octahedron (6 vertices, 8 faces)
         let t = 2.0_f64.sqrt() / 2.0; // = 1/√2
         let mut coords = vec![
@@ -322,7 +322,7 @@ mod tests {
         }
 
         let n_elem = conn.len() / 3;
-        SimplexMesh {
+        Mesh {
             coords, conn,
             elem_tags: vec![0; n_elem],
             elem_type: fem_mesh::element_type::ElementType::Tri3,

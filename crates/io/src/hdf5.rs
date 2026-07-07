@@ -28,7 +28,7 @@
 use std::path::Path;
 
 use fem_core::NodeId;
-use fem_mesh::{BoundaryTag, ElementType, SimplexMesh};
+use fem_mesh::{BoundaryTag, ElementType, Mesh};
 
 use rust_hdf5::{H5File, H5Group, VarLenUnicode};
 
@@ -59,7 +59,7 @@ impl Default for Hdf5WriteOptions {
 
 pub fn write_mesh_and_fields<const D: usize>(
     path: impl AsRef<Path>,
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     fields: &[(&str, &[f64], &str)], // (name, values, space_type)
     options: &Hdf5WriteOptions,
 ) -> H5Result<()> {
@@ -135,7 +135,7 @@ pub fn write_mesh_and_fields<const D: usize>(
 
 fn write_conn<const D: usize>(
     mg: &H5Group,
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     _opts: &Hdf5WriteOptions,
 ) -> H5Result<()> {
     let ne = mesh.n_elems();
@@ -184,7 +184,7 @@ fn write_conn<const D: usize>(
 
 fn write_face_conn<const D: usize>(
     mg: &H5Group,
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     _opts: &Hdf5WriteOptions,
 ) -> H5Result<()> {
     let nf = mesh.n_faces();
@@ -237,7 +237,7 @@ fn write_face_conn<const D: usize>(
 
 pub fn read_mesh_and_fields<const D: usize>(
     path: impl AsRef<Path>,
-) -> H5Result<(SimplexMesh<D>, Vec<(String, Vec<f64>, String)>)> {
+) -> H5Result<(Mesh<D>, Vec<(String, Vec<f64>, String)>)> {
     let path_str = path.as_ref().to_str().ok_or("non-UTF8 path")?;
     let file = H5File::open(path_str)?;
     let root = file.root_group();
@@ -279,7 +279,7 @@ pub fn read_mesh_and_fields<const D: usize>(
         vec![]
     };
 
-    let mesh = SimplexMesh {
+    let mesh = Mesh {
         coords,
         conn,
         elem_tags,
@@ -452,8 +452,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn tri_mesh_2d() -> SimplexMesh<2> {
-        SimplexMesh {
+    fn tri_mesh_2d() -> Mesh<2> {
+        Mesh {
             coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             conn: vec![
                 0u32, 1u32, 2u32,
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn test_hdf5_roundtrip_tet3d() {
-        let mesh: SimplexMesh<3> = SimplexMesh {
+        let mesh: Mesh<3> = Mesh {
             coords: vec![
                 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
             ],

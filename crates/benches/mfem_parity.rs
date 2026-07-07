@@ -6,7 +6,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::time::{Duration, Instant};
 
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
 use fem_space::vector_h1::VectorH1Space;
@@ -38,7 +38,7 @@ fn config() -> Criterion {
 
 fn bench_poisson(c: &mut Criterion) {
     for &n in &[4, 8, 16, 24] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, 1);
         let dofs = space.n_dofs();
         if dofs > 2_000_000 && quick_mode() { break; }
@@ -48,7 +48,7 @@ fn bench_poisson(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let t0 = Instant::now();
-                    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+                    let mesh = Mesh::<2>::unit_square_tri(n);
                     let space = H1Space::new(mesh, 1);
                     let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
                     let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 1.0)], 2);
@@ -68,7 +68,7 @@ fn bench_poisson(c: &mut Criterion) {
 
 fn bench_elasticity(c: &mut Criterion) {
     for &n in &[4, 8, 16] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = VectorH1Space::new(mesh, 1, 2);
         let dofs = space.n_dofs();
         if dofs > 2_000_000 && quick_mode() { break; }
@@ -78,7 +78,7 @@ fn bench_elasticity(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let t0 = Instant::now();
-                    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+                    let mesh = Mesh::<2>::unit_square_tri(n);
                     let space = VectorH1Space::new(mesh, 1, 2);
                     let _mat = Assembler::assemble_bilinear(&space, &[&VectorDiffusionIntegrator { kappa: 1.0 }], 3);
                     total += t0.elapsed();
@@ -93,7 +93,7 @@ fn bench_elasticity(c: &mut Criterion) {
 
 fn bench_maxwell(c: &mut Criterion) {
     for &n in &[4, 8, 16] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = HCurlSpace::new(mesh, 1);
         let dofs = space.n_dofs();
         if dofs > 2_000_000 && quick_mode() { break; }
@@ -103,7 +103,7 @@ fn bench_maxwell(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let t0 = Instant::now();
-                    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+                    let mesh = Mesh::<2>::unit_square_tri(n);
                     let space = HCurlSpace::new(mesh, 1);
                     // Curl-curl + mass (time-harmonic like)
                     let mat = VectorAssembler::assemble_bilinear(
@@ -120,7 +120,7 @@ fn bench_maxwell(c: &mut Criterion) {
 
 fn bench_stokes(c: &mut Criterion) {
     for &n in &[3, 6, 9] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let vel_space = VectorH1Space::new(mesh.clone(), 2, 2);
         let pre_space = H1Space::new(mesh, 1);
         let n_v = vel_space.n_dofs();
@@ -133,7 +133,7 @@ fn bench_stokes(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let t0 = Instant::now();
-                    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+                    let mesh = Mesh::<2>::unit_square_tri(n);
                     let vel_space = VectorH1Space::new(mesh.clone(), 2, 2);
                     let pre_space = H1Space::new(mesh, 1);
 

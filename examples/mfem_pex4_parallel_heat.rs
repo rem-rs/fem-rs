@@ -32,7 +32,7 @@ use std::f64::consts::PI;
 use std::sync::{Arc, Mutex};
 
 use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     par_simplex::partition_simplex, par_solve_pcg_jacobi, ParAssembler, ParVector, ParallelFESpace,
     WorkerConfig,
@@ -105,7 +105,7 @@ fn run_case(
     let result = Arc::new(Mutex::new(None::<RunResult>));
     let result_slot = Arc::clone(&result);
 
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(mesh_n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(mesh_n));
 
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
     launcher.launch(move |comm| {

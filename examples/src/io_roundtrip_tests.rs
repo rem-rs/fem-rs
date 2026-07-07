@@ -14,7 +14,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_space::{
     fe_space::FESpace,
     H1Space,
@@ -32,7 +32,7 @@ fn temp_path(suffix: &str) -> std::path::PathBuf {
 }
 
 /// Maximum difference in node coordinates.
-fn coords_max_diff(a: &SimplexMesh<2>, b: &SimplexMesh<2>) -> f64 {
+fn coords_max_diff(a: &Mesh<2>, b: &Mesh<2>) -> f64 {
     let mut d = 0.0_f64;
     let n = a.n_nodes().min(b.n_nodes());
     for i in 0..n {
@@ -46,7 +46,7 @@ fn coords_max_diff(a: &SimplexMesh<2>, b: &SimplexMesh<2>) -> f64 {
 }
 
 /// Compare connectivity of two meshes (element count, node indices per element).
-fn conn_matches(a: &SimplexMesh<2>, b: &SimplexMesh<2>) -> bool {
+fn conn_matches(a: &Mesh<2>, b: &Mesh<2>) -> bool {
     if a.n_elements() != b.n_elements() { return false; }
     if a.n_nodes() != b.n_nodes() { return false; }
     for e in 0..a.n_elements() as u32 {
@@ -67,7 +67,7 @@ fn conn_matches(a: &SimplexMesh<2>, b: &SimplexMesh<2>) -> bool {
 /// Write a 2-D Tri3 mesh to GMSH format, read it back, and compare.
 #[test]
 fn io_gmsh_2d_roundtrip() {
-    let orig = SimplexMesh::<2>::unit_square_tri(6);
+    let orig = Mesh::<2>::unit_square_tri(6);
 
     let path = temp_path("gmsh_2d.msh");
     fem_io::write_msh_file(&orig, &path).expect("write_msh failed");
@@ -94,7 +94,7 @@ fn io_gmsh_2d_roundtrip() {
 fn io_matrix_market_roundtrip() {
     use fem_linalg::CsrMatrix;
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(6);
+    let mesh = Mesh::<2>::unit_square_tri(6);
     let space = H1Space::new(mesh, 1);
     let diff = DiffusionIntegrator { kappa: 1.0 };
     let orig: CsrMatrix<f64> = Assembler::assemble_bilinear(&space, &[&diff], 3);
@@ -199,7 +199,7 @@ fn io_netgen_to_gmsh_roundtrip() {
 fn io_vtk_solution_smoke() {
     use std::f64::consts::PI;
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh = Mesh::<2>::unit_square_tri(8);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 

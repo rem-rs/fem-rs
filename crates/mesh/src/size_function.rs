@@ -5,7 +5,7 @@
 //! derefinement for Tri3 triangular meshes.
 
 use fem_core::ElemId;
-use crate::simplex::SimplexMesh;
+use crate::simplex::Mesh;
 
 /// Compute target element sizes from error indicators.
 ///
@@ -77,7 +77,7 @@ pub fn compute_target_sizes(
 /// * `n_iter` — number of smoothing passes (typical 3–10).
 /// * `lambda` — smoothing factor (default 0.5).
 /// * `mu` — stabilisation factor for Taubin (default 0.5).
-pub fn smooth_size_field(h: &mut [f64], mesh: &SimplexMesh<2>, n_iter: usize, lambda: f64) {
+pub fn smooth_size_field(h: &mut [f64], mesh: &Mesh<2>, n_iter: usize, lambda: f64) {
     assert_eq!(mesh.n_elems(), h.len(), "size array length must match n_elements");
     if n_iter == 0 { return; }
     // Build element adjacency from mesh connectivity
@@ -123,7 +123,7 @@ pub fn size_to_markers(h_target: &[f64], h_cur: &[f64]) -> (Vec<ElemId>, Vec<Ele
 }
 
 /// Compute current element sizes from a Tri3 mesh (diameter = max edge length).
-pub fn compute_element_sizes(mesh: &SimplexMesh<2>) -> Vec<f64> {
+pub fn compute_element_sizes(mesh: &Mesh<2>) -> Vec<f64> {
     let mut h = Vec::with_capacity(mesh.n_elems());
     for e in 0..mesh.n_elems() as ElemId {
         let ns = mesh.elem_nodes(e);
@@ -142,11 +142,11 @@ pub fn compute_element_sizes(mesh: &SimplexMesh<2>) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::amr::zz_estimator;
-    use crate::SimplexMesh;
+    use crate::Mesh;
 
     #[test]
     fn element_sizes_on_unit_square() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h = compute_element_sizes(&mesh);
         assert_eq!(h.len(), mesh.n_elems());
         // A 4×4 quad mesh with diagonal split: element diameter ≈ sqrt(2)/4
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn compute_target_from_estimator() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let u: Vec<f64> = (0..mesh.n_nodes()).map(|i| {
             let c = mesh.coords_of(i as u32);
             (std::f64::consts::PI * c[0]).sin() * (std::f64::consts::PI * c[1]).sin()
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn smooth_field_uniform() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n = mesh.n_elems();
         let mut h = vec![1.0_f64; n];
         smooth_size_field(&mut h, &mesh, 5, 0.5);

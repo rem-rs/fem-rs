@@ -96,7 +96,7 @@ pub fn pa_apply_tet4(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::fe_space::FESpace;
     use fem_space::H1Space;
     use crate::assembler::Assembler;
@@ -104,18 +104,18 @@ mod tests {
 
     #[test]
     fn tet4_pa_finite() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let pd = build_tet4_pa_data(&mesh, &|_| 1.0);
         assert!(pd.data.iter().all(|v| v.is_finite()));
     }
 
     #[test]
     fn tet4_pa_matches_assembled() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let space = H1Space::new(mesh, 1);
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
 
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let space2 = H1Space::new(mesh2, 1);
         let pd = build_tet4_pa_data(space2.mesh(), &|_| 1.0);
         let elem_dofs: Vec<Vec<u32>> = (0..space2.mesh().n_elements() as u32)

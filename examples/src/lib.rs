@@ -21,7 +21,7 @@
 //! ```
 
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{ElementType, MeshTopology, SimplexMesh};
+use fem_mesh::{ElementType, MeshTopology, Mesh};
 
 pub mod checkpoint_text;
 pub mod hdf5_checkpoint;
@@ -62,7 +62,7 @@ pub use maxwell::{
 /// -∇·(coeff ∇u) = rhs_fn(x, y)  in Ω
 /// ```
 ///
-/// using P1 (linear triangle) elements on a 2-D `SimplexMesh<2>`.
+/// using P1 (linear triangle) elements on a 2-D `Mesh<2>`.
 ///
 /// # Arguments
 /// - `mesh`    — 2-D triangular mesh
@@ -72,7 +72,7 @@ pub use maxwell::{
 /// # Returns
 /// `(K, f)` where K is the global stiffness matrix and f is the load vector.
 pub fn p1_assemble_poisson(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     coeff: impl Fn(f64, f64) -> f64,
     rhs_fn: impl Fn(f64, f64) -> f64,
 ) -> (CsrMatrix<f64>, Vec<f64>) {
@@ -163,7 +163,7 @@ pub fn p1_assemble_poisson(
 /// - `flux_fn` — g(x,y): outward flux value at a point on the boundary
 /// - `rhs`     — load vector to accumulate into (modified in place)
 pub fn p1_neumann_load(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     bc_tags: &[i32],
     flux_fn: impl Fn(f64, f64) -> f64,
     rhs: &mut [f64],
@@ -195,7 +195,7 @@ pub fn p1_neumann_load(
 // ---------------------------------------------------------------------------
 
 /// Identify nodes on boundary faces with a given set of tags.
-pub fn dirichlet_nodes(mesh: &SimplexMesh<2>, bc_tags: &[i32]) -> Vec<(usize, f64)> {
+pub fn dirichlet_nodes(mesh: &Mesh<2>, bc_tags: &[i32]) -> Vec<(usize, f64)> {
     // Returns Vec<(node_id, value)>; value computed from value_fn.
     // This overload sets value = 0 for all matching nodes.
     let mut result = Vec::new();
@@ -213,7 +213,7 @@ pub fn dirichlet_nodes(mesh: &SimplexMesh<2>, bc_tags: &[i32]) -> Vec<(usize, f6
 
 /// Identify nodes on boundary faces with a given set of tags, applying `value_fn`.
 pub fn dirichlet_nodes_fn(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     bc_tags: &[i32],
     value_fn: impl Fn(f64, f64) -> f64,
 ) -> Vec<(usize, f64)> {
@@ -420,7 +420,7 @@ pub fn solve_dirichlet_reduced(
 /// Returns two parallel vectors `(gx[n_elems], gy[n_elems])`: the gradient
 /// at each element's centroid.
 pub fn p1_gradient_2d(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     u: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
     let ne = mesh.n_elems();
@@ -489,7 +489,7 @@ pub fn p1_gradient_2d(
 /// - `field_name` — name of the scalar field (e.g. `"potential"`)
 pub fn write_vtk_scalar(
     path: impl AsRef<std::path::Path>,
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     scalar: &[f64],
     field_name: &str,
 ) -> std::io::Result<()> {
@@ -543,7 +543,7 @@ pub fn write_vtk_scalar(
 /// Write mesh + scalar + vector fields (e.g. E-field or B-field).
 pub fn write_vtk_scalar_vector(
     path: impl AsRef<std::path::Path>,
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     scalar: &[f64],
     scalar_name: &str,
     vec_x: &[f64],
@@ -617,7 +617,7 @@ pub(crate) fn axpy(alpha: f64, x: &[f64], y: &mut [f64]) {
 /// Compute the L2 error between the FEM solution `u_h` and the exact solution
 /// `u_exact` on a P1 mesh using 3-point Gaussian quadrature.
 pub fn l2_error_p1(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     u_h: &[f64],
     u_exact: impl Fn(f64, f64) -> f64,
 ) -> f64 {
@@ -662,7 +662,7 @@ mod tests {
         coefficient::ConstantVectorCoeff,
         standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator},
     };
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::{solve_block_gmres, solve_gmres, BlockGmresConfig, SolverConfig};
     use fem_space::{H1Space, constraints::{apply_dirichlet, boundary_dofs}};
 
@@ -692,7 +692,7 @@ mod tests {
     }
 
     fn build_nonsym_rhs_pair() -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, Vec<f64>) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let mesh = Mesh::<2>::unit_square_tri(12);
         let space = H1Space::new(mesh.clone(), 1);
         let diffusion = DiffusionIntegrator { kappa: 1.0 };
         let convection = ConvectionIntegrator {

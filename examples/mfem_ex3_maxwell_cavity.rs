@@ -22,7 +22,7 @@
 use std::f64::consts::PI;
 use fem_examples::maxwell::StaticMaxwellBuilder;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{FESpace, HCurlSpace};
 
 fn main() {
@@ -112,7 +112,7 @@ fn multi_material_pml_tensor(
 }
 
 /// Collect unique boundary face tags from a mesh for PEC BC.
-fn boundary_tags(mesh: &SimplexMesh<2>) -> Vec<i32> {
+fn boundary_tags(mesh: &Mesh<2>) -> Vec<i32> {
     let mut tags: Vec<_> = mesh.face_tags.iter().copied().collect();
     tags.sort_unstable();
     tags.dedup();
@@ -120,11 +120,11 @@ fn boundary_tags(mesh: &SimplexMesh<2>) -> Vec<i32> {
 }
 
 fn solve_case(args: &Args) -> CaseResult {
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
     let space = HCurlSpace::new(mesh, 1);
 
@@ -244,7 +244,7 @@ mod tests {
     }
 
     fn mms_l2_error(args: &Args) -> f64 {
-        let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mesh = Mesh::<2>::unit_square_tri(args.n);
         let space = HCurlSpace::new(mesh, 1);
         let bdr_attrs = boundary_tags(space.mesh());
         let kappa = args.freq * PI;

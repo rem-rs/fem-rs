@@ -1,7 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 //! Pure-Rust mesh graph partitioning.
 //!
-//! Builds an element **dual graph** from a [`SimplexMesh`] and partitions it
+//! Builds an element **dual graph** from a [`Mesh`] and partitions it
 //! using a multilevel k-way algorithm (heavy-edge matching coarsening +
 //! Kernighan-Lin refinement), producing results comparable to METIS.
 //!
@@ -17,9 +17,9 @@
 //! # Example
 //! ```
 //! use fem_rmetis::{build_dual_graph, partition_kway};
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //!
-//! let mesh = SimplexMesh::<2>::unit_square_tri(8);
+//! let mesh = Mesh::<2>::unit_square_tri(8);
 //! let (xadj, adjncy) = build_dual_graph(&mesh);
 //! let parts = partition_kway(mesh.n_elems(), &xadj, &adjncy, 4);
 //! assert_eq!(parts.len(), mesh.n_elems());
@@ -33,7 +33,7 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 
 use fem_core::{ElemId, NodeId};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 
 // ─── Dual graph construction ─────────────────────────────────────────────────
 
@@ -93,7 +93,7 @@ pub fn local_faces(nodes: &[NodeId], dim: usize) -> Vec<Vec<NodeId>> {
 /// Returns `(xadj, adjncy)` in CSR adjacency format, matching the METIS C API:
 /// - `xadj[e]..xadj[e+1]` gives adjacency slice for element `e`.
 /// - Edges are stored twice (once per direction).
-pub fn build_dual_graph<const D: usize>(mesh: &SimplexMesh<D>) -> (Vec<i32>, Vec<i32>) {
+pub fn build_dual_graph<const D: usize>(mesh: &Mesh<D>) -> (Vec<i32>, Vec<i32>) {
     let n_elems = mesh.n_elems();
     let dim = D;
 
@@ -554,12 +554,12 @@ fn balance_partitions(
     }
 }
 
-/// Convenience: partition a `SimplexMesh` into `nparts` balanced parts.
+/// Convenience: partition a `Mesh` into `nparts` balanced parts.
 ///
 /// Builds the dual graph, runs multilevel k-way partitioning, and returns
 /// `partition[e]` for each element.
 pub fn partition_mesh<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     nparts: usize,
 ) -> Vec<i32> {
     if nparts <= 1 {
@@ -574,15 +574,15 @@ pub fn partition_mesh<const D: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::{ElementType, SimplexMesh};
+    use fem_mesh::{ElementType, Mesh};
 
-    fn two_prisms_sharing_triangle() -> SimplexMesh<3> {
+    fn two_prisms_sharing_triangle() -> Mesh<3> {
         let coords = vec![0.0_f64; 9 * 3];
         let conn = vec![
             0u32, 1, 2, 3, 4, 5,
             3, 4, 5, 6, 7, 8,
         ];
-        SimplexMesh::uniform(coords, conn, vec![1, 1], ElementType::Prism6, vec![], vec![], ElementType::Tri3)
+        Mesh::uniform(coords, conn, vec![1, 1], ElementType::Prism6, vec![], vec![], ElementType::Tri3)
     }
 
     #[test]
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn partition_all_elements_assigned() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let parts = partition_mesh(&mesh, 4);
         assert_eq!(parts.len(), mesh.n_elems());
         assert!(parts.iter().all(|&p| p >= 0 && p < 4));
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn partition_balanced() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let n = mesh.n_elems();
         let parts = partition_mesh(&mesh, 4);
         let mut counts = vec![0usize; 4];
@@ -615,14 +615,14 @@ mod tests {
 
     #[test]
     fn partition_single_part_is_identity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let parts = partition_mesh(&mesh, 1);
         assert!(parts.iter().all(|&p| p == 0));
     }
 
     #[test]
     fn partition_tet_mesh() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let mesh = Mesh::<3>::unit_cube_tet(4);
         let parts = partition_mesh(&mesh, 2);
         assert_eq!(parts.len(), mesh.n_elems());
         assert!(parts.iter().all(|&p| p == 0 || p == 1));
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn kway_partition_covers_all_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
         let (xadj, adjncy) = build_dual_graph(&mesh);
         let n = mesh.n_elems();
         let parts = partition_kway(n, &xadj, &adjncy, 4);
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn kway_partition_balanced() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
         let (xadj, adjncy) = build_dual_graph(&mesh);
         let n = mesh.n_elems();
         let parts = partition_kway(n, &xadj, &adjncy, 4);
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn kway_lower_edge_cut_than_bfs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let mesh = Mesh::<2>::unit_square_tri(32);
         let (xadj, adjncy) = build_dual_graph(&mesh);
         let n = mesh.n_elems();
         let k = 4;
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn kway_partition_3d_valid() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(6);
+        let mesh = Mesh::<3>::unit_cube_tet(6);
         let (xadj, adjncy) = build_dual_graph(&mesh);
         let n = mesh.n_elems();
         let k = 4;
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn kway_64_by_4_is_reasonable() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let mesh = Mesh::<2>::unit_square_tri(32);
         let (xadj, adjncy) = build_dual_graph(&mesh);
         let n = mesh.n_elems();
         let parts = partition_kway(n, &xadj, &adjncy, 4);

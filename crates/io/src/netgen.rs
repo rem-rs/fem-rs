@@ -16,17 +16,17 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 
 use fem_core::{FemError, FemResult, NodeId};
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{element_type::ElementType, simplex::Mesh};
 
 /// Read a Netgen `.vol` stream (ASCII baseline) into a 3-D mesh.
-pub fn read_netgen_vol<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
+pub fn read_netgen_vol<R: Read>(reader: R) -> FemResult<Mesh<3>> {
     let mut p = VolParser::default();
     p.parse(BufReader::new(reader))?;
     p.build_mesh()
 }
 
 /// Convenience wrapper: open a `.vol` file by path and parse it.
-pub fn read_netgen_vol_file(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> {
+pub fn read_netgen_vol_file(path: impl AsRef<std::path::Path>) -> FemResult<Mesh<3>> {
     let f = std::fs::File::open(path)?;
     read_netgen_vol(f)
 }
@@ -36,7 +36,7 @@ pub fn read_netgen_vol_file(path: impl AsRef<std::path::Path>) -> FemResult<Simp
 /// Supports uniform and mixed meshes with element types:
 /// Tet4, Pyramid5, Prism6, Hex8.  Also writes a `surfaceelements`
 /// section if the mesh contains boundary face data.
-pub fn write_netgen_vol<W: Write>(mesh: &SimplexMesh<3>, mut writer: W) -> FemResult<()> {
+pub fn write_netgen_vol<W: Write>(mesh: &Mesh<3>, mut writer: W) -> FemResult<()> {
     let n_nodes = mesh.n_nodes();
     let n_elems = mesh.n_elems();
     if n_nodes == 0 {
@@ -143,7 +143,7 @@ fn face_type_code(ft: ElementType) -> FemResult<i32> {
 
 /// Convenience wrapper: write a `.vol` file by path.
 pub fn write_netgen_vol_file(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     path: impl AsRef<std::path::Path>,
 ) -> FemResult<()> {
     let f = std::fs::File::create(path)?;
@@ -219,7 +219,7 @@ impl VolParser {
         Ok(())
     }
 
-    fn build_mesh(self) -> FemResult<SimplexMesh<3>> {
+    fn build_mesh(self) -> FemResult<Mesh<3>> {
         if self.dim.unwrap_or(3) != 3 {
             return Err(mesh_err("only dimension=3 Netgen .vol meshes are supported"));
         }
@@ -273,7 +273,7 @@ impl VolParser {
             ElementType::Tri3
         };
 
-        Ok(SimplexMesh {
+        Ok(Mesh {
             coords,
             conn,
             elem_tags,

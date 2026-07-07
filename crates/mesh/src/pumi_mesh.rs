@@ -1,6 +1,6 @@
 //! PUMI-style mesh entity interface.
 //!
-//! Provides a higher-level mesh abstraction over [`SimplexMesh`] that follows the
+//! Provides a higher-level mesh abstraction over [`Mesh`] that follows the
 //! SCOREC PUMI API patterns:
 //!
 //! - Entity iteration: `vertices()`, `edges()`, `faces()`, `regions()`
@@ -9,7 +9,7 @@
 //!
 //! # Architecture
 //!
-//! [`PumiMesh<D>`] wraps a [`SimplexMesh<D>`] and caches entity-to-entity
+//! [`PumiMesh<D>`] wraps a [`Mesh<D>`] and caches entity-to-entity
 //! adjacency tables (edge→vertex, face→vertex, region→face, region→edge,
 //! etc.) at construction time.  After construction all adjacency queries are
 //! O(1) lookups (amortised O(1) per entity pair).
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use fem_core::NodeId;
 
 use crate::element_type::ElementType;
-use crate::simplex::SimplexMesh;
+use crate::simplex::Mesh;
 
 /// Mesh entity dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,7 +49,7 @@ impl Entity {
 /// After construction the adjacency tables are built once.  All queries are
 /// O(1) (the returned vector is a pre-allocated slice).
 pub struct PumiMesh<const D: usize> {
-    mesh: SimplexMesh<D>,
+    mesh: Mesh<D>,
 
     // ── entity counts ──
     n_vertices: usize,
@@ -75,8 +75,8 @@ pub struct PumiMesh<const D: usize> {
 }
 
 impl<const D: usize> PumiMesh<D> {
-    /// Build a `PumiMesh` from a `SimplexMesh`, caching all adjacency tables.
-    pub fn new(mesh: SimplexMesh<D>) -> Self {
+    /// Build a `PumiMesh` from a `Mesh`, caching all adjacency tables.
+    pub fn new(mesh: Mesh<D>) -> Self {
         let n_regions = mesh.n_elems();
         let n_vertices = mesh.n_nodes();
         let elem_type = mesh.elem_type;
@@ -341,8 +341,8 @@ impl<const D: usize> PumiMesh<D> {
         *self.entity_tags.get(idx).unwrap_or(&0)
     }
 
-    /// Access the underlying `SimplexMesh`.
-    pub fn mesh(&self) -> &SimplexMesh<D> {
+    /// Access the underlying `Mesh`.
+    pub fn mesh(&self) -> &Mesh<D> {
         &self.mesh
     }
 
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn pumi_2d_tri3_vertex_count() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let pumi = PumiMesh::new(mesh);
         assert_eq!(pumi.n_vertices(), 4);
         assert_eq!(pumi.n_regions(), 2);
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn pumi_3d_tet4_entity_counts() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let pumi = PumiMesh::new(mesh);
         assert_eq!(pumi.n_vertices(), 8);
         assert_eq!(pumi.n_regions(), 6); // 5 or 6 tets in a unit cube
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn pumi_region_faces_tet4() {
         // A single tet: 4 faces
-        let mesh = SimplexMesh::<3> {
+        let mesh = Mesh::<3> {
             coords: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             conn: vec![0, 1, 2, 3],
             elem_tags: vec![0],
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn pumi_set_and_get_tag() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let mut pumi = PumiMesh::new(mesh);
         let v = Entity::vertex(0);
         assert_eq!(pumi.tag(&v), 0);
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn pumi_adj_region_to_vertices() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let pumi = PumiMesh::new(mesh);
         let adj = pumi.adj(&Entity::region(0), PumiDim::Vertex);
         assert_eq!(adj.len(), 3); // Tri3 has 3 vertices
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn pumi_vertices_iter() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let pumi = PumiMesh::new(mesh);
         let verts = pumi.vertices();
         assert_eq!(verts.len(), 4);
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn pumi_edges_iter() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let pumi = PumiMesh::new(mesh);
         let edges = pumi.edges();
         assert!(edges.len() >= 5);
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn pumi_face_vertices_hex() {
-        let hex = SimplexMesh::<3> {
+        let hex = Mesh::<3> {
             coords: vec![0.0,0.0,0.0, 1.0,0.0,0.0, 0.0,1.0,0.0, 1.0,1.0,0.0,
                          0.0,0.0,1.0, 1.0,0.0,1.0, 0.0,1.0,1.0, 1.0,1.0,1.0],
             conn: vec![0,1,2,3,4,5,6,7],

@@ -765,14 +765,14 @@ fn gauss_legendre_1d(order: u8) -> (Vec<f64>, Vec<f64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::HCurlSpace;
 
     /// The tangential mass matrix over the full boundary of the unit square
     /// must be symmetric.
     #[test]
     fn tangential_mass_symmetric_2d() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let n     = space.n_dofs();
 
@@ -794,7 +794,7 @@ mod tests {
     /// (PSD on boundary DOFs).
     #[test]
     fn tangential_mass_psd_2d() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
 
         let integ = TangentialMassIntegrator { gamma: 1.0 };
@@ -811,7 +811,7 @@ mod tests {
     /// Interior-only boundary tags should produce an all-zero matrix.
     #[test]
     fn tangential_mass_empty_tag_gives_zero() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
 
         let integ = TangentialMassIntegrator { gamma: 1.0 };
@@ -832,8 +832,8 @@ mod tests {
         use crate::vector_assembler::VectorAssembler;
         use crate::postproc::coefficient::ConstantMatrixCoeff;
 
-        let mesh1 = SimplexMesh::<2>::unit_square_tri(4);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh1 = Mesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let sp1 = HCurlSpace::new(mesh1, 1);
         let sp2 = HCurlSpace::new(mesh2, 1);
 
@@ -864,8 +864,8 @@ mod tests {
         use crate::vector_assembler::VectorAssembler;
         use crate::postproc::coefficient::ConstantMatrixCoeff;
 
-        let mesh1 = SimplexMesh::<2>::unit_square_tri(4);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh1 = Mesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let sp1 = HCurlSpace::new(mesh1, 1);
         let sp2 = HCurlSpace::new(mesh2, 1);
 

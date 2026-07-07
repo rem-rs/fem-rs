@@ -9,14 +9,14 @@
 
 use fem_assembly::physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};
 use fem_assembly::NewtonConfig;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::VectorH1Space;
 use fem_space::fe_space::FESpace;
 use fem_space::constraints::boundary_dofs;
 
 fn main() {
     let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(4);
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = VectorH1Space::new(mesh, 1, 3);
     let n_dofs = space.n_dofs();
     let n_scalar = space.n_scalar_dofs();
@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn hooke_3d_converges() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let space = fem_space::VectorH1Space::new(mesh, 1, 3);
         let n_dofs = space.n_dofs();
         let n_scalar = space.n_scalar_dofs();

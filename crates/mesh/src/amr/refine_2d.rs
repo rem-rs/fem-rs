@@ -4,13 +4,13 @@
 use std::collections::HashMap;
 use fem_core::{NodeId, ElemId};
 use crate::element_type::ElementType;
-use crate::simplex::SimplexMesh;
+use crate::simplex::Mesh;
 use super::{HangingNodeConstraint, DerefineTree, DerefineRecord, QuadRefineDir, TriRefineDir};
 use super::{edge_key, quad_edge_key, local_edges_tri, local_edges_quad};
 
 // ─── Bisection refinement ─────────────────────────────────────────────────────
 
-pub fn refine_marked(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2> {
+pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "refine_marked: only Tri3 meshes are supported"
@@ -110,7 +110,7 @@ pub fn refine_marked(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2>
         }
     }
 
-    SimplexMesh::uniform(
+    Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tri3,
         new_face_conn, new_face_tags, ElementType::Line2,
     )
@@ -122,7 +122,7 @@ pub fn refine_marked(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2>
 /// have the midpoint node and others that do not.  Returns the set of coarser
 /// elements (those missing the midpoint) that must be refined.
 fn detect_hanging_edges(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     edge_elems: &HashMap<(NodeId, NodeId), Vec<ElemId>>,
 ) -> Vec<ElemId> {
     let mut to_refine: std::collections::HashSet<ElemId> = std::collections::HashSet::new();
@@ -179,7 +179,7 @@ fn detect_hanging_edges(
 /// The iteration limit (default 20) prevents infinite loops on pathological
 /// inputs.  Each pass may add elements, so the total cost is bounded by
 /// `O(n_passes · n_elems)`.
-pub fn closure_refine(mesh: &SimplexMesh<2>, marked: &[ElemId], max_iter: usize) -> SimplexMesh<2> {
+pub fn closure_refine(mesh: &Mesh<2>, marked: &[ElemId], max_iter: usize) -> Mesh<2> {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "closure_refine: only Tri3 meshes are supported"
@@ -223,11 +223,11 @@ pub fn closure_refine(mesh: &SimplexMesh<2>, marked: &[ElemId], max_iter: usize)
 }
 
 /// Convenience overload with a default iteration limit (20).
-pub fn closure_refine_default(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2> {
+pub fn closure_refine_default(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
     closure_refine(mesh, marked, 20)
 }
 // (Placeholder — full implementation same as before, calls local_edges_tri etc.)
-pub fn refine_marked_with_tree(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> (SimplexMesh<2>, DerefineTree) {
+pub fn refine_marked_with_tree(mesh: &Mesh<2>, marked: &[ElemId]) -> (Mesh<2>, DerefineTree) {
     // Same implementation as original
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
     let n_elems = mesh.n_elems();
@@ -292,11 +292,11 @@ pub fn refine_marked_with_tree(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> (Sim
         if let Some(&mid)=midpoint_map.get(&edge_key(a,b)){new_face_conn.extend_from_slice(&[a,mid]);new_face_tags.push(tag);new_face_conn.extend_from_slice(&[mid,b]);new_face_tags.push(tag);}
         else{new_face_conn.extend_from_slice(&[a,b]);new_face_tags.push(tag);}
     }
-    let fine = SimplexMesh::uniform(new_coords,new_conn,new_tags,ElementType::Tri3,new_face_conn,new_face_tags,ElementType::Line2);
+    let fine = Mesh::uniform(new_coords,new_conn,new_tags,ElementType::Tri3,new_face_conn,new_face_tags,ElementType::Line2);
     (fine, DerefineTree{records:tree_records,midpoint_map})
 }
 
-pub fn derefine_marked(mesh: &SimplexMesh<2>, tree: &DerefineTree, parents: &[ElemId]) -> SimplexMesh<2> {
+pub fn derefine_marked(mesh: &Mesh<2>, tree: &DerefineTree, parents: &[ElemId]) -> Mesh<2> {
     assert!(mesh.elem_type==ElementType::Tri3,"derefine_marked: only Tri3");
     if parents.is_empty(){return mesh.clone();}
     let mut child_drop=std::collections::HashSet::<ElemId>::new();let mut restore=Vec::<DerefineRecord>::new();
@@ -313,15 +313,15 @@ pub fn derefine_marked(mesh: &SimplexMesh<2>, tree: &DerefineTree, parents: &[El
     for(&k,&cnt) in &edge_count{if cnt!=1{continue;}let(a,b)=oriented_edge[&k];let mut tag=old_bnd_tags.get(&k).copied().unwrap_or(0);if tag==0{for m in 0..mesh.n_nodes()as NodeId{let k1=edge_key(a,m);let k2=edge_key(m,b);if let(Some(&t1),Some(&t2))=(old_bnd_tags.get(&k1),old_bnd_tags.get(&k2)){if t1==t2{tag=t1;break;}}}}
         if tag!=0{new_face_conn.extend_from_slice(&[a,b]);new_face_tags.push(tag);}
     }
-    SimplexMesh::uniform(mesh.coords.clone(),new_conn,new_tags,ElementType::Tri3,new_face_conn,new_face_tags,ElementType::Line2)
+    Mesh::uniform(mesh.coords.clone(),new_conn,new_tags,ElementType::Tri3,new_face_conn,new_face_tags,ElementType::Line2)
 }
 
 // ─── Non-conforming refinement (2-D Tri3) ────────────────────────────────────
 
 pub fn refine_nonconforming(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     marked: &[ElemId],
-) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(mesh.elem_type == ElementType::Tri3, "refine_nonconforming: only Tri3");
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
     let n_elems = mesh.n_elems();
@@ -345,7 +345,7 @@ pub fn refine_nonconforming(
     for f in 0..n_faces { let fn_slice=&mesh.face_conn[f*npf..(f+1)*npf];let a=fn_slice[0];let b=fn_slice[1];let tag=mesh.face_tags[f];
         if let Some(&mid)=midpoint_map.get(&edge_key(a,b)){new_face_conn.extend_from_slice(&[a,mid]);new_face_tags.push(tag);new_face_conn.extend_from_slice(&[mid,b]);new_face_tags.push(tag);}
         else{new_face_conn.extend_from_slice(&[a,b]);new_face_tags.push(tag);} }
-    let new_mesh=SimplexMesh::uniform(new_coords,new_conn,new_tags,ElementType::Tri3,new_face_conn,new_face_tags,ElementType::Line2);
+    let new_mesh=Mesh::uniform(new_coords,new_conn,new_tags,ElementType::Tri3,new_face_conn,new_face_tags,ElementType::Line2);
     (new_mesh,constraints)
 }
 
@@ -360,7 +360,7 @@ pub fn restrict_to_coarse_p1(u_fine:&[f64],n_nodes_coarse:usize)->Vec<f64>{asser
 
 // ─── 2-D error estimators ────────────────────────────────────────────────────
 
-pub fn zz_estimator(mesh:&SimplexMesh<2>,u:&[f64])->Vec<f64>{
+pub fn zz_estimator(mesh:&Mesh<2>,u:&[f64])->Vec<f64>{
     let n_nodes=mesh.n_nodes();let n_elems=mesh.n_elems();
     let mut elem_grads=Vec::with_capacity(n_elems);
     for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let[x0,y0]=mesh.coords_of(ns[0]);let[x1,y1]=mesh.coords_of(ns[1]);let[x2,y2]=mesh.coords_of(ns[2]);
@@ -380,7 +380,7 @@ pub fn zz_estimator(mesh:&SimplexMesh<2>,u:&[f64])->Vec<f64>{
     eta
 }
 
-pub fn kelly_estimator(mesh:&SimplexMesh<2>,u:&[f64])->Vec<f64>{
+pub fn kelly_estimator(mesh:&Mesh<2>,u:&[f64])->Vec<f64>{
     let n_elems=mesh.n_elems();let mut elem_grads=Vec::with_capacity(n_elems);
     for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let c=|i|mesh.coords_of(ns[i]);let uu=|i|u[ns[i]as usize];
         let j00=c(1)[0]-c(0)[0];let j01=c(2)[0]-c(0)[0];let j10=c(1)[1]-c(0)[1];let j11=c(2)[1]-c(0)[1];let det=j00*j11-j01*j10;
@@ -413,7 +413,7 @@ pub fn mark_for_p_refinement(eta:&[f64],theta:f64)->Vec<ElemId>{
     eta.iter().enumerate().filter(|(_,&e)|e>=cutoff).map(|(i,_)|i as ElemId).collect()
 }
 
-pub fn dwr_estimator(mesh:&SimplexMesh<2>,u:&[f64],z:&[f64],f:&[f64])->Vec<f64>{
+pub fn dwr_estimator(mesh:&Mesh<2>,u:&[f64],z:&[f64],f:&[f64])->Vec<f64>{
     let n_elems=mesh.n_elems();
     let mut elem_grad=Vec::with_capacity(n_elems);
     for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let[x0,y0]=mesh.coords_of(ns[0]);let[x1,y1]=mesh.coords_of(ns[1]);let[x2,y2]=mesh.coords_of(ns[2]);
@@ -436,7 +436,7 @@ pub fn dwr_estimator(mesh:&SimplexMesh<2>,u:&[f64],z:&[f64],f:&[f64])->Vec<f64>{
     eta
 }
 
-pub fn residual_estimator(mesh:&SimplexMesh<2>,u:&[f64],f:&[f64])->Vec<f64>{
+pub fn residual_estimator(mesh:&Mesh<2>,u:&[f64],f:&[f64])->Vec<f64>{
     let n_elems=mesh.n_elems();let elem_grads={let mut g=Vec::with_capacity(n_elems);
         for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let[x0,y0]=mesh.coords_of(ns[0]);let[x1,y1]=mesh.coords_of(ns[1]);let[x2,y2]=mesh.coords_of(ns[2]);
             let u0=u[ns[0]as usize];let u1=u[ns[1]as usize];let u2=u[ns[2]as usize];let j00=x1-x0;let j01=x2-x0;let j10=y1-y0;let j11=y2-y0;let det=j00*j11-j01*j10;let inv_det=if det.abs()>1e-30{1.0/det}else{0.0};
@@ -458,7 +458,7 @@ pub fn residual_estimator(mesh:&SimplexMesh<2>,u:&[f64],f:&[f64])->Vec<f64>{
 
 // ─── p-refinement ────────────────────────────────────────────────────────────
 
-pub fn p_refine_tri3_to_tri6(mesh:&SimplexMesh<2>,marked:&[ElemId])->(SimplexMesh<2>,std::collections::HashMap<(NodeId,NodeId),NodeId>){
+pub fn p_refine_tri3_to_tri6(mesh:&Mesh<2>,marked:&[ElemId])->(Mesh<2>,std::collections::HashMap<(NodeId,NodeId),NodeId>){
     assert_eq!(mesh.elem_type,ElementType::Tri3,"p_refine_tri3_to_tri6 requires a Tri3 mesh");
     let n_elemes=mesh.n_elems();use std::collections::HashMap;
     fn edge_key(a:NodeId,b:NodeId)->(NodeId,NodeId){if a<b{(a,b)}else{(b,a)}}
@@ -472,18 +472,18 @@ pub fn p_refine_tri3_to_tri6(mesh:&SimplexMesh<2>,marked:&[ElemId])->(SimplexMes
             let m01=edge_to_new_node[&ek(ns[0],ns[1])];let m12=edge_to_new_node[&ek(ns[1],ns[2])];let m02=edge_to_new_node[&ek(ns[0],ns[2])];
             new_conn.extend_from_slice(&[ns[0],ns[1],ns[2],m01,m12,m02]);elem_types_vec.push(ElementType::Tri6);elem_offsets.push(elem_offsets.last().unwrap()+6);}
         else{new_conn.extend_from_slice(&[ns[0],ns[1],ns[2]]);elem_types_vec.push(ElementType::Tri3);elem_offsets.push(elem_offsets.last().unwrap()+3);}}
-    let new_mesh=SimplexMesh{coords:new_coords,conn:new_conn,elem_tags:mesh.elem_tags.clone(),elem_type:ElementType::Tri6,face_conn:mesh.face_conn.clone(),face_tags:mesh.face_tags.clone(),face_type:mesh.face_type,elem_types:Some(elem_types_vec),elem_offsets:Some(elem_offsets),face_types:None,face_offsets:None,face_to_elem:None,edge_conn:Vec::new(),edge_to_elem:Vec::new()};
+    let new_mesh=Mesh{coords:new_coords,conn:new_conn,elem_tags:mesh.elem_tags.clone(),elem_type:ElementType::Tri6,face_conn:mesh.face_conn.clone(),face_tags:mesh.face_tags.clone(),face_type:mesh.face_type,elem_types:Some(elem_types_vec),elem_offsets:Some(elem_offsets),face_types:None,face_offsets:None,face_to_elem:None,edge_conn:Vec::new(),edge_to_elem:Vec::new()};
     (new_mesh,edge_to_new_node)
 }
 
-pub fn p_prolongate_p1_to_p2(u_p1:&[f64],midpoint_map:&std::collections::HashMap<(NodeId,NodeId),NodeId>,mesh_p2:&SimplexMesh<2>)->Vec<f64>{
+pub fn p_prolongate_p1_to_p2(u_p1:&[f64],midpoint_map:&std::collections::HashMap<(NodeId,NodeId),NodeId>,mesh_p2:&Mesh<2>)->Vec<f64>{
     let n_total=mesh_p2.n_nodes();let mut u_p2=vec![0.0_f64;n_total];let n_orig=u_p1.len().min(n_total);u_p2[..n_orig].copy_from_slice(&u_p1[..n_orig]);
     for(&(a,b),&new_node)in midpoint_map{let idx=new_node as usize;if idx<n_total{u_p2[idx]=0.5*(u_p2[a as usize]+u_p2[b as usize]);}}u_p2
 }
 
 // ─── 2-D Quad4 ──────────────────────────────────────────────────────────────
 
-pub fn refine_nonconforming_quad(mesh:&SimplexMesh<2>,marked:&[ElemId])->(SimplexMesh<2>,Vec<HangingNodeConstraint>){
+pub fn refine_nonconforming_quad(mesh:&Mesh<2>,marked:&[ElemId])->(Mesh<2>,Vec<HangingNodeConstraint>){
     assert!(mesh.elem_type==ElementType::Quad4,"refine_nonconforming_quad: only Quad4 meshes are supported");
     if marked.is_empty(){return(mesh.clone(),Vec::new());}
     let marked_set:std::collections::HashSet<ElemId>=marked.iter().copied().collect();let n_elems=mesh.n_elems();
@@ -502,20 +502,20 @@ pub fn refine_nonconforming_quad(mesh:&SimplexMesh<2>,marked:&[ElemId])->(Simple
     constraints.sort_by_key(|c|c.constrained);
     let n_faces=mesh.n_faces();let mut new_face_conn=Vec::new();let mut new_face_tags=Vec::new();
     for f in 0..n_faces{let a=mesh.face_conn[2*f];let b=mesh.face_conn[2*f+1];let tag=mesh.face_tags[f];if let Some(&mid)=midpoint_map.get(&quad_edge_key(a,b)){new_face_conn.extend_from_slice(&[a,mid]);new_face_tags.push(tag);new_face_conn.extend_from_slice(&[mid,b]);new_face_tags.push(tag);}else{new_face_conn.extend_from_slice(&[a,b]);new_face_tags.push(tag);}}
-    let new_mesh=SimplexMesh::uniform(new_coords,new_conn,new_tags,ElementType::Quad4,new_face_conn,new_face_tags,ElementType::Line2);
+    let new_mesh=Mesh::uniform(new_coords,new_conn,new_tags,ElementType::Quad4,new_face_conn,new_face_tags,ElementType::Line2);
     (new_mesh,constraints)
 }
 
 // ─── 2-D NCStateQuad ────────────────────────────────────────────────────────
 
-pub fn longest_edge_tri(mesh:&SimplexMesh<2>,ns:&[NodeId])->(NodeId,NodeId){
+pub fn longest_edge_tri(mesh:&Mesh<2>,ns:&[NodeId])->(NodeId,NodeId){
     let coords:[[f64;2];3]=std::array::from_fn(|k|mesh.coords_of(ns[k]));let edges=local_edges_tri();let mut best=edge_key(ns[edges[0].0],ns[edges[0].1]);let mut best_len2=0.0_f64;
     for(a,b)in edges{let dx=coords[b][0]-coords[a][0];let dy=coords[b][1]-coords[a][1];let l2=dx*dx+dy*dy;if l2>best_len2{best_len2=l2;best=edge_key(ns[a],ns[b]);}}best
 }
 
 // ─── 2-D Quad4 anisotropic ──────────────────────────────────────────────────
 
-pub fn refine_nonconforming_quad_aniso(mesh:&SimplexMesh<2>,marked:&[(ElemId,QuadRefineDir)])->(SimplexMesh<2>,Vec<HangingNodeConstraint>){
+pub fn refine_nonconforming_quad_aniso(mesh:&Mesh<2>,marked:&[(ElemId,QuadRefineDir)])->(Mesh<2>,Vec<HangingNodeConstraint>){
     assert!(mesh.elem_type==ElementType::Quad4,"refine_nonconforming_quad_aniso: only Quad4");if marked.is_empty(){return(mesh.clone(),Vec::new());}
     let n_elemes=mesh.n_elems();let marked_map:HashMap<ElemId,QuadRefineDir>=marked.iter().copied().collect();let marked_set:std::collections::HashSet<ElemId>=marked_map.keys().copied().collect();
     let mut edge_elems:HashMap<(NodeId,NodeId),Vec<ElemId>>=HashMap::new();
@@ -531,12 +531,12 @@ pub fn refine_nonconforming_quad_aniso(mesh:&SimplexMesh<2>,marked:&[(ElemId,Qua
     c.sort_by_key(|c|c.constrained);
     let nf=mesh.n_faces();let mut nfc=Vec::new();let mut nft=Vec::new();
     for f in 0..nf{let a=mesh.face_conn[2*f];let b=mesh.face_conn[2*f+1];let tag=mesh.face_tags[f];if let Some(&mid)=mm.get(&quad_edge_key(a,b)){nfc.extend_from_slice(&[a,mid]);nft.push(tag);nfc.extend_from_slice(&[mid,b]);nft.push(tag);}else{nfc.extend_from_slice(&[a,b]);nft.push(tag);}}
-    let nm=SimplexMesh::uniform(nc,ncn,nt,ElementType::Quad4,nfc,nft,ElementType::Line2);(nm,c)
+    let nm=Mesh::uniform(nc,ncn,nt,ElementType::Quad4,nfc,nft,ElementType::Line2);(nm,c)
 }
 
 // ─── 2-D Tri3 anisotropic ───────────────────────────────────────────────────
 
-pub fn refine_nonconforming_tri_aniso(mesh:&SimplexMesh<2>,marked:&[(ElemId,TriRefineDir)])->(SimplexMesh<2>,Vec<HangingNodeConstraint>){
+pub fn refine_nonconforming_tri_aniso(mesh:&Mesh<2>,marked:&[(ElemId,TriRefineDir)])->(Mesh<2>,Vec<HangingNodeConstraint>){
     assert!(mesh.elem_type==ElementType::Tri3,"refine_nonconforming_tri_aniso: only Tri3");if marked.is_empty(){return(mesh.clone(),Vec::new());}
     let n_elemes=mesh.n_elems();let marked_map:HashMap<ElemId,TriRefineDir>=marked.iter().copied().collect();let marked_set:std::collections::HashSet<ElemId>=marked_map.keys().copied().collect();
     let mut edge_elems:HashMap<(NodeId,NodeId),Vec<ElemId>>=HashMap::new();
@@ -551,18 +551,18 @@ pub fn refine_nonconforming_tri_aniso(mesh:&SimplexMesh<2>,marked:&[(ElemId,TriR
     c.sort_by_key(|c|c.constrained);
     let nf=mesh.n_faces();let mut nfc=Vec::new();let mut nft=Vec::new();
     for f in 0..nf{let a=mesh.face_conn[2*f];let b=mesh.face_conn[2*f+1];let tag=mesh.face_tags[f];if let Some(&mid)=mm.get(&edge_key(a,b)){nfc.extend_from_slice(&[a,mid]);nft.push(tag);nfc.extend_from_slice(&[mid,b]);nft.push(tag);}else{nfc.extend_from_slice(&[a,b]);nft.push(tag);}}
-    let nm=SimplexMesh::uniform(nc,ncn,nt,ElementType::Tri3,nfc,nft,ElementType::Line2);(nm,c)
+    let nm=Mesh::uniform(nc,ncn,nt,ElementType::Tri3,nfc,nft,ElementType::Line2);(nm,c)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SimplexMesh;
+    use crate::Mesh;
 
     /// Check that a single marked element produces a conforming mesh.
     #[test]
     fn closure_single_element() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let c = closure_refine_default(&mesh, &[0]);
         // Every edge should be shared by exactly 2 elements (or 1 on boundary).
         // For a conforming mesh, no edge should have a hanging node.
@@ -583,7 +583,7 @@ mod tests {
     /// Multiple marked elements should still produce a conforming mesh.
     #[test]
     fn closure_multiple_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let c = closure_refine_default(&mesh, &[0, 4, 7]);
         let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
         for e in 0..c.n_elems() as ElemId {
@@ -600,7 +600,7 @@ mod tests {
     /// Deterministic test with a variety of marked sets: verify conforming mesh every time.
     #[test]
     fn closure_variety_markings() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         // Test a range of marking patterns
         let patterns: Vec<Vec<ElemId>> = vec![
             vec![0],
@@ -633,7 +633,7 @@ mod tests {
     /// 50 trials using a deterministic LCG random to avoid external rand dependency.
     #[test]
     fn closure_50_randomish_markings() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let n = mesh.n_elems();
         let mut state: u64 = 42;
         for trial in 0..50 {
@@ -669,7 +669,7 @@ mod tests {
     /// Empty marking → mesh unchanged.
     #[test]
     fn closure_no_marked() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let c = closure_refine_default(&mesh, &[]);
         assert_eq!(c.n_elems(), mesh.n_elems());
     }
@@ -677,7 +677,7 @@ mod tests {
     /// All elements marked → every element splits, no hanging nodes.
     #[test]
     fn closure_all_marked() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let c = closure_refine_default(&mesh, &all);
         // All original elements are bisected into 4 children
@@ -697,7 +697,7 @@ mod tests {
     /// Verify that repeated closure application converges (idempotent property).
     #[test]
     fn closure_idempotent() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let c1 = closure_refine_default(&mesh, &[2, 5]);
         // Applying closure again with empty marking should not change anything
         let c2 = closure_refine_default(&c1, &[]);

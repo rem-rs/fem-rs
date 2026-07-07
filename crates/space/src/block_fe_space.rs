@@ -9,7 +9,7 @@
 //!
 //! # Example (2-field Stokes)
 //! ```ignore
-//! let mesh = SimplexMesh::<2>::unit_square_tri(4);
+//! let mesh = Mesh::<2>::unit_square_tri(4);
 //! let u = VectorH1Space::new(mesh.clone(), 2);
 //! let p = H1Space::new(mesh, 1);
 //! let block = BlockFESpace::new(vec![Box::new(u), Box::new(p)]);
@@ -110,13 +110,13 @@ impl<M: MeshTopology + 'static> BlockFESpace<M> {
 mod tests {
     use super::*;
     use crate::{H1Space, VectorH1Space};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn block_two_p1_h1_spaces() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let s0: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
-        let s1: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh, 1));
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let s0: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
+        let s1: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh, 1));
         let b = BlockFESpace::new(vec![s0, s1]);
         assert_eq!(b.n_spaces(), 2);
         assert_eq!(b.n_dofs(), 2 * b.n_dofs_component(0));
@@ -126,10 +126,10 @@ mod tests {
 
     #[test]
     fn block_component_for_dof() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let s0: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let s0: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
         let n0 = s0.n_dofs();
-        let s1: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh, 1));
+        let s1: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh, 1));
         let b = BlockFESpace::new(vec![s0, s1]);
         let (ci, ld) = b.component_for_dof(0);
         assert_eq!(ci, 0); assert_eq!(ld, 0);
@@ -139,10 +139,10 @@ mod tests {
 
     #[test]
     fn block_global_element_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
-        let s0: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let s0: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
         let n0 = s0.n_dofs();
-        let s1: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh, 1));
+        let s1: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh, 1));
         let b = BlockFESpace::new(vec![s0, s1]);
         let d0 = b.global_element_dofs(0, 0);
         let d1 = b.global_element_dofs(1, 0);
@@ -153,9 +153,9 @@ mod tests {
     #[test]
     fn block_vector_h1_and_h1() {
         // Stokes-like: VectorH1 × H1
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
-        let v: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(VectorH1Space::new(mesh.clone(), 1, 2));
-        let p: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh, 1));
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let v: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(VectorH1Space::new(mesh.clone(), 1, 2));
+        let p: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh, 1));
         let b = BlockFESpace::new(vec![v, p]);
         assert_eq!(b.n_spaces(), 2);
         assert_eq!(b.n_dofs(), b.n_dofs_component(0) + b.n_dofs_component(1));
@@ -163,10 +163,10 @@ mod tests {
 
     #[test]
     fn block_three_spaces() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let s0: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
-        let s1: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh.clone(), 2));
-        let s2: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh, 1));
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let s0: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
+        let s1: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh.clone(), 2));
+        let s2: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh, 1));
         let b = BlockFESpace::new(vec![s0, s1, s2]);
         assert_eq!(b.n_spaces(), 3);
         assert_eq!(b.global_dof_offset(0), 0);
@@ -183,9 +183,9 @@ mod tests {
 
     #[test]
     fn block_interpolate_constant() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let s0: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
-        let s1: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh, 1));
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let s0: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh.clone(), 1));
+        let s1: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh, 1));
         let b = BlockFESpace::new(vec![s0, s1]);
         let vals = b.interpolate(&[&|_| 3.0, &|_| 7.0]);
         assert_eq!(vals.len(), b.n_dofs());
@@ -196,9 +196,9 @@ mod tests {
 
     #[test]
     fn block_3d_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let s0: Box<dyn FESpace<Mesh = SimplexMesh<3>>> = Box::new(H1Space::new(mesh.clone(), 1));
-        let s1: Box<dyn FESpace<Mesh = SimplexMesh<3>>> = Box::new(H1Space::new(mesh, 1));
+        let mesh = Mesh::<3>::unit_cube_tet(2);
+        let s0: Box<dyn FESpace<Mesh = Mesh<3>>> = Box::new(H1Space::new(mesh.clone(), 1));
+        let s1: Box<dyn FESpace<Mesh = Mesh<3>>> = Box::new(H1Space::new(mesh, 1));
         let b = BlockFESpace::new(vec![s0, s1]);
         assert_eq!(b.n_spaces(), 2);
         assert_eq!(b.n_dofs(), b.n_dofs_component(0) + b.n_dofs_component(1));
@@ -211,8 +211,8 @@ mod tests {
 
     #[test]
     fn block_single_space() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let s: Box<dyn FESpace<Mesh = SimplexMesh<2>>> = Box::new(H1Space::new(mesh, 1));
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let s: Box<dyn FESpace<Mesh = Mesh<2>>> = Box::new(H1Space::new(mesh, 1));
         let b = BlockFESpace::new(vec![s]);
         assert_eq!(b.n_spaces(), 1);
         assert_eq!(b.n_dofs(), b.n_dofs_component(0));

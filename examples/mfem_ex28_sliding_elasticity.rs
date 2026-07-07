@@ -20,7 +20,7 @@ use fem_assembly::{
     standard::{ElasticityIntegrator, NeumannIntegrator},
 };
 use fem_mesh::{
-    MeshTopology, SimplexMesh,
+    MeshTopology, Mesh,
     element_type::ElementType,
     refine_uniform,
 };
@@ -121,7 +121,7 @@ fn main() {
     println!("Done.");
 }
 
-fn build_trapezoid_mesh(offset: f64) -> SimplexMesh<2> {
+fn build_trapezoid_mesh(offset: f64) -> Mesh<2> {
     assert!(offset < 0.9, "offset too large");
     // Triangle mesh for trapezoid: split quad (0,1,3,2) into two triangles
     // Vertices: 0=(0,0), 1=(1,0), 2=(offset,1), 3=(1,1)
@@ -143,7 +143,7 @@ fn build_trapezoid_mesh(offset: f64) -> SimplexMesh<2> {
         0u32, 2, // left,   attr 4
     ];
     let face_tags = vec![1, 2, 3, 4];
-    SimplexMesh::uniform(
+    Mesh::uniform(
         coords, conn, elem_tags, ElementType::Tri3,
         face_conn, face_tags, ElementType::Line2,
     )

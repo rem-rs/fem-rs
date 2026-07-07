@@ -1,10 +1,10 @@
 //! Hex8 TMOP optimisation example.
 //! Creates a perturbed 6×6×6 hex mesh and runs shape optimisation.
 
-use fem_mesh::{SimplexMesh, ElementType};
+use fem_mesh::{Mesh, ElementType};
 use fem_mesh::tmop::{TmopMetric, TmopObjectiveHex, tmop_optimise_hex};
 
-fn hex_grid(nx: usize, ny: usize, nz: usize) -> SimplexMesh<3> {
+fn hex_grid(nx: usize, ny: usize, nz: usize) -> Mesh<3> {
     let n = nx * ny * nz;
     let npe = 8usize;
     let mut coords = Vec::with_capacity((nx+1)*(ny+1)*(nz+1)*3);
@@ -31,7 +31,7 @@ fn hex_grid(nx: usize, ny: usize, nz: usize) -> SimplexMesh<3> {
         ]);
     }}}
 
-    SimplexMesh::uniform(coords, conn, tags, ElementType::Hex8, vec![], vec![], ElementType::Quad4)
+    Mesh::uniform(coords, conn, tags, ElementType::Hex8, vec![], vec![], ElementType::Quad4)
 }
 
 fn main() {
@@ -60,7 +60,7 @@ fn main() {
     // Run optimisation
     println!("Running Shape optimisation (max 100 iters, step 0.05)...");
     let result = tmop_optimise_hex(&mesh, &TmopMetric::Shape, 100, 0.05);
-    let final_mesh = SimplexMesh::<3>::uniform(
+    let final_mesh = Mesh::<3>::uniform(
         result, mesh.conn.clone(), mesh.elem_tags.clone(),
         mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
         mesh.face_type,
@@ -79,7 +79,7 @@ fn main() {
     }
 }
 
-fn hex_scaled_jacobian(mesh: &SimplexMesh<3>, e: u32) -> f64 {
+fn hex_scaled_jacobian(mesh: &Mesh<3>, e: u32) -> f64 {
     let ns = mesh.elem_nodes(e);
     let mut p = [[0.0; 3]; 8];
     for k in 0..8 {

@@ -118,10 +118,10 @@ fn tri3() -> (Vec<[f64;3]>, Vec<f64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     #[test]
     fn nitsche_contact_3d_finite() {
-        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let m = Mesh::<3>::unit_cube_tet(2);
         let c = NitscheContactConfig {
             contact_tags: vec![2], gamma: 10.0, theta: -1.0,
             lambda: 100.0, mu: 50.0,

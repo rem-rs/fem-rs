@@ -28,7 +28,7 @@
 //! ```
 
 use fem_linalg::CooMatrix;
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
@@ -183,7 +183,7 @@ fn element_residual_and_jacobian(
 // ─── Newton solver with autodiff Jacobian ────────────────────────────────────
 
 fn solve_with_autodiff(n: usize, alpha: f64, newton_max: usize, newton_tol: f64) -> Option<(Vec<f64>, usize, f64)> {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let ndofs = space.n_dofs();
     let dm = space.dof_manager();

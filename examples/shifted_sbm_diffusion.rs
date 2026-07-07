@@ -12,13 +12,13 @@
 
 use std::f64::consts::PI;
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, boundary_dofs}};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 
 fn u_exact(x: f64, y: f64) -> f64 { (PI * x).sin() * (PI * y).sin() }
 
-fn solve_poisson(mesh: SimplexMesh<2>, shift: f64) -> (Vec<f64>, usize) {
+fn solve_poisson(mesh: Mesh<2>, shift: f64) -> (Vec<f64>, usize) {
     let space = H1Space::new(mesh, 1);
     let n = space.n_dofs();
     let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
@@ -40,7 +40,7 @@ fn solve_poisson(mesh: SimplexMesh<2>, shift: f64) -> (Vec<f64>, usize) {
     (u, res.iterations)
 }
 
-fn l2_error(mesh: &SimplexMesh<2>, u: &[f64], shift: f64) -> f64 {
+fn l2_error(mesh: &Mesh<2>, u: &[f64], shift: f64) -> f64 {
     let mut err2 = 0.0;
     for i in 0..mesh.n_nodes() as usize {
         let c = mesh.node_coords(i as u32);
@@ -56,12 +56,12 @@ fn main() {
     let d_shift: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(0.05);
 
     // Body-fitted reference
-    let (u_ref, _) = solve_poisson(SimplexMesh::<2>::unit_square_tri(n), 0.0);
-    let mesh_ref = SimplexMesh::<2>::unit_square_tri(n);
+    let (u_ref, _) = solve_poisson(Mesh::<2>::unit_square_tri(n), 0.0);
+    let mesh_ref = Mesh::<2>::unit_square_tri(n);
     let err_ref = l2_error(&mesh_ref, &u_ref, 0.0);
 
     // SBM surrogate: shift bottom nodes upward
-    let mut mesh_sbm = SimplexMesh::<2>::unit_square_tri(n);
+    let mut mesh_sbm = Mesh::<2>::unit_square_tri(n);
     for i in 0..mesh_sbm.n_nodes() as usize {
         if mesh_sbm.coords[i * 2 + 1] < 1e-14 {
             mesh_sbm.coords[i * 2 + 1] = d_shift;
@@ -81,14 +81,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
-    use fem_mesh::{SimplexMesh, topology::MeshTopology};
+    use fem_mesh::{Mesh, topology::MeshTopology};
     use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, boundary_dofs}};
     use fem_solver::{solve_pcg_jacobi, SolverConfig};
 
     #[test]
     fn sbm_surrogate_solve_finite() {
         use std::f64::consts::PI;
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mut mesh = Mesh::<2>::unit_square_tri(8);
         for i in 0..mesh.n_nodes() as usize {
             if mesh.coords[i * 2 + 1] < 1e-14 { mesh.coords[i * 2 + 1] = 0.05; }
         }

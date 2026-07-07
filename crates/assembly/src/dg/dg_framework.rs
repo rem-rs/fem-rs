@@ -23,7 +23,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{
     element_type::ElementType,
     topology::MeshTopology,
-    SimplexMesh,
+    Mesh,
 };
 use fem_space::{fe_space::FESpace, L2Space};
 
@@ -218,7 +218,7 @@ fn lumped_mass_diagonal(mass: &CsrMatrix<f64>) -> Vec<f64> {
 ///
 /// Returns `(k_adv: CsrMatrix, rhs_bc: Vec<f64>)`.
 fn assemble_advection_operator(
-    space: &L2Space<SimplexMesh<2>>,
+    space: &L2Space<Mesh<2>>,
     ifl: &InteriorFaceList,
     velocity: [f64; 2],
     flux: DgNumericalFlux,
@@ -382,8 +382,8 @@ fn assemble_advection_operator(
 /// stepping.  The lumped mass matrix gives a fully explicit scheme.
 #[allow(dead_code)]
 pub struct DgAdvection2D {
-    mesh: SimplexMesh<2>,
-    space: L2Space<SimplexMesh<2>>,
+    mesh: Mesh<2>,
+    space: L2Space<Mesh<2>>,
     ifl: InteriorFaceList,
     mass_diag: Vec<f64>,
     k_adv: CsrMatrix<f64>,
@@ -397,7 +397,7 @@ impl DgAdvection2D {
     /// - `velocity` — constant advection velocity `[vx, vy]`.
     /// - `flux` — numerical flux choice.
     pub fn new(n: usize, velocity: [f64; 2], flux: DgNumericalFlux) -> Self {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         let quad_order = 3_u8;
@@ -429,12 +429,12 @@ impl DgAdvection2D {
     }
 
     /// Reference to the underlying mesh.
-    pub fn mesh(&self) -> &SimplexMesh<2> {
+    pub fn mesh(&self) -> &Mesh<2> {
         &self.mesh
     }
 
     /// Reference to the L² space.
-    pub fn space(&self) -> &L2Space<SimplexMesh<2>> {
+    pub fn space(&self) -> &L2Space<Mesh<2>> {
         &self.space
     }
 
@@ -490,8 +490,8 @@ impl DgAdvection2D {
 /// `σ = sigma * p(p+1) / h_min` following standard DG theory.
 #[allow(dead_code)]
 pub struct DgDiffusion2D {
-    mesh: SimplexMesh<2>,
-    space: L2Space<SimplexMesh<2>>,
+    mesh: Mesh<2>,
+    space: L2Space<Mesh<2>>,
     ifl: InteriorFaceList,
     mass_diag: Vec<f64>,
     k_sip: CsrMatrix<f64>,
@@ -506,7 +506,7 @@ impl DgDiffusion2D {
     /// - `sigma` — dimensionless penalty factor (use ≥ 3·(p+1)² for coercivity;
     ///   P1 → σ ≥ 12).
     pub fn new(n: usize, nu: f64, sigma: f64) -> Self {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         let quad_order = 3_u8;
@@ -538,12 +538,12 @@ impl DgDiffusion2D {
     }
 
     /// Reference to the underlying mesh.
-    pub fn mesh(&self) -> &SimplexMesh<2> {
+    pub fn mesh(&self) -> &Mesh<2> {
         &self.mesh
     }
 
     /// Reference to the L² space.
-    pub fn space(&self) -> &L2Space<SimplexMesh<2>> {
+    pub fn space(&self) -> &L2Space<Mesh<2>> {
         &self.space
     }
 
@@ -595,8 +595,8 @@ impl DgDiffusion2D {
 /// Combines upwind DG advection with SIP-DG diffusion using SSP-RK3.
 #[allow(dead_code)]
 pub struct DgAdvectionDiffusion2D {
-    mesh: SimplexMesh<2>,
-    space: L2Space<SimplexMesh<2>>,
+    mesh: Mesh<2>,
+    space: L2Space<Mesh<2>>,
     ifl: InteriorFaceList,
     mass_diag: Vec<f64>,
     k_adv: CsrMatrix<f64>,
@@ -620,7 +620,7 @@ impl DgAdvectionDiffusion2D {
         sigma: f64,
         flux: DgNumericalFlux,
     ) -> Self {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         let quad_order = 3_u8;
@@ -655,12 +655,12 @@ impl DgAdvectionDiffusion2D {
     }
 
     /// Reference to the underlying mesh.
-    pub fn mesh(&self) -> &SimplexMesh<2> {
+    pub fn mesh(&self) -> &Mesh<2> {
         &self.mesh
     }
 
     /// Reference to the L² space.
-    pub fn space(&self) -> &L2Space<SimplexMesh<2>> {
+    pub fn space(&self) -> &L2Space<Mesh<2>> {
         &self.space
     }
 

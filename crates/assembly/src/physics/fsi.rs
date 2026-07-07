@@ -406,11 +406,11 @@ pub fn fsi_partitioned_solve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn mesh_stiffness_assembles() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let k = assemble_mesh_stiffness(&mesh, 2);
         let n_nodes = mesh.n_nodes();
         let dim = 2;
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn mesh_movement_on_square() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let n_nodes = mesh.n_nodes();
         let dim = 2;
         let quad_order = 2;
@@ -478,8 +478,8 @@ mod tests {
     #[test]
     fn interface_face_identification() {
         // Build two meshes: fluid (tag 1) and structure (tag 2)
-        // Since SimplexMesh has uniform tags, we test with one mesh
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        // Since Mesh has uniform tags, we test with one mesh
+        let mesh = Mesh::<2>::unit_square_tri(4);
         // All elements have tag 1 by default
         let faces = fsi_interface_faces(&mesh, 1);
         assert_eq!(faces.len(), mesh.n_boundary_faces(),
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn interface_nodes_dedup() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let faces: Vec<u32> = (0..mesh.n_boundary_faces() as u32).collect();
         let nodes = fsi_interface_nodes(&mesh, &faces);
         assert!(!nodes.is_empty());
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn fluid_traction_assemble_into_struct_rhs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dim: u8 = 2;
         let d = dim as usize;
         let order = 1;
@@ -566,7 +566,7 @@ mod tests {
     /// Tests that the coupling data transfer (traction, RHS, mesh movement) works.
     #[test]
     fn fsi_partitioned_coupling_loop_runs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dim: u8 = 2;
         let d = dim as usize;
         let order = 1;
@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn fsi_couple_step_transfers_data() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dim: u8 = 2;
         let d = dim as usize;
         let order = 1;

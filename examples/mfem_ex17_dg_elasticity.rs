@@ -30,7 +30,7 @@ use fem_element::lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3};
 use fem_element::ReferenceElement;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
-use fem_mesh::{refine_uniform, SimplexMesh};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{L2Space, fe_space::FESpace};
 
@@ -100,11 +100,11 @@ fn run_case(
     refine: usize,
 ) -> RunResult {
     // 1. Mesh
-    let base_mesh: SimplexMesh<2> = if let Some(ref path) = mesh_path {
+    let base_mesh: Mesh<2> = if let Some(ref path) = mesh_path {
         let mfem = fem_io::mfem::read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(n)
+        Mesh::<2>::unit_square_tri(n)
     };
     let mesh = if refine > 0 {
         let mut m = base_mesh;
@@ -505,7 +505,7 @@ mod tests {
         force_x: f64,
         force_y: f64,
     ) -> RunResult {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = L2Space::new(mesh, order);
         let ifl = InteriorFaceList::build(space.mesh());
         let scalar_dofs = space.n_dofs();

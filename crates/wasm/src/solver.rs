@@ -24,7 +24,7 @@ use fem_assembly::{
 };
 use fem_core::types::DofId;
 use fem_linalg::CsrMatrix;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{apply_dirichlet, boundary_dofs, H1Space, FESpace};
 
@@ -44,7 +44,7 @@ pub struct WasmSolver {
     dirichlet_dofs: Vec<DofId>,
     n_dofs:        usize,
     /// Mesh stored for RHS re-assembly.
-    mesh:          SimplexMesh<2>,
+    mesh:          Mesh<2>,
     order:         u8,
 }
 
@@ -58,7 +58,7 @@ impl WasmSolver {
     /// * `n` — number of grid divisions per axis (total triangles = 2n²).
     #[cfg_attr(feature = "wasm", wasm_bindgen(constructor))]
     pub fn new(n: u32) -> WasmSolver {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(n as usize);
+        let mesh  = Mesh::<2>::unit_square_tri(n as usize);
         let order = 1_u8;
         let space = H1Space::new(mesh.clone(), order);
 

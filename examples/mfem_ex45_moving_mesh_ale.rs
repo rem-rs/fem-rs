@@ -48,7 +48,7 @@ use fem_io::vtk::{DataArray, VtkWriter};
 use fem_linalg::Vector;
 use fem_mesh::{
     MeshMotionConfig,
-    SimplexMesh,
+    Mesh,
     all_boundary_nodes,
     apply_node_displacement,
     laplacian_smooth_2d,
@@ -65,7 +65,7 @@ struct SolveResult {
     max_abs_int_err: f64,
     prev_shift: f64,
     values: Vec<f64>,
-    final_mesh: SimplexMesh<2>,
+    final_mesh: Mesh<2>,
 }
 
 struct TransientCheckpointState {
@@ -202,7 +202,7 @@ fn solve_case_with_restart(
     restart: Option<&TransientCheckpointState>,
     checkpoint_at_step: Option<usize>,
 ) -> SolveResult {
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mut mesh = Mesh::<2>::unit_square_tri(args.n);
     let total_steps = args.steps;
     let start_step = restart.map(|r| r.completed_steps).unwrap_or(0);
     let stop_step = checkpoint_at_step.unwrap_or(total_steps);
@@ -289,7 +289,7 @@ fn solve_case_with_restart(
 }
 
 fn apply_mesh_motion_step(
-    mesh: &mut SimplexMesh<2>,
+    mesh: &mut Mesh<2>,
     step: usize,
     total_steps: usize,
     amp: f64,
@@ -329,7 +329,7 @@ fn apply_mesh_motion_step(
 
 fn write_ex45_vtk_export(
     prefix: &str,
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     values: &[f64],
 ) -> Result<(), String> {
     let path = format!("{prefix}_scalar.vtu");
@@ -535,7 +535,7 @@ mod tests {
             smooth_iters: 15,
         };
 
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mut mesh = Mesh::<2>::unit_square_tri(args.n);
         let mut values = H1Space::new(mesh.clone(), 1).interpolate(&|x| {
             (PI * x[0]).sin() * (PI * x[1]).sin()
         });
@@ -590,7 +590,7 @@ mod tests {
     fn ex45_zero_amplitude_mesh_stays_unchanged_and_transfer_is_exact() {
         let args = Args { n: 8, steps: 3, amp: 0.0, omega: 0.7, smooth_iters: 10 };
 
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mut mesh = Mesh::<2>::unit_square_tri(args.n);
         let space0 = H1Space::new(mesh.clone(), 1);
         let initial_values: Vec<f64> = space0.interpolate(&|x| {
             (PI * x[0]).sin() * (PI * x[1]).sin()
@@ -632,7 +632,7 @@ mod tests {
     fn ex45_mesh_remains_valid_no_inverted_elements_after_motion() {
         let args = Args { n: 14, steps: 6, amp: 0.015, omega: 0.7, smooth_iters: 30 };
 
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mut mesh = Mesh::<2>::unit_square_tri(args.n);
         let mut values = H1Space::new(mesh.clone(), 1).interpolate(&|x| {
             (PI * x[0]).sin() * (PI * x[1]).sin()
         });
@@ -674,7 +674,7 @@ mod tests {
     fn ex45_field_norm_is_stable_over_many_steps() {
         let args = Args { n: 10, steps: 10, amp: 0.01, omega: 0.7, smooth_iters: 20 };
 
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mut mesh = Mesh::<2>::unit_square_tri(args.n);
         let mut values = H1Space::new(mesh.clone(), 1).interpolate(&|x| {
             (PI * x[0]).sin() * (PI * x[1]).sin()
         });
@@ -709,7 +709,7 @@ mod tests {
     #[test]
     fn ex45_dof_count_matches_p1_h1_formula_for_multiple_meshes() {
         for &n in &[6usize, 10usize, 14usize] {
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let mesh = Mesh::<2>::unit_square_tri(n);
             let space = H1Space::new(mesh, 1);
             assert_eq!(space.n_dofs(), (n + 1) * (n + 1));
         }
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn ex45_top_boundary_nodes_are_detected_for_motion() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let mesh = Mesh::<2>::unit_square_tri(12);
         let top_nodes: Vec<u32> = all_boundary_nodes(&mesh)
             .into_iter()
             .filter(|&n| (mesh.coords_of(n)[1] - 1.0).abs() < 1.0e-12)
@@ -734,7 +734,7 @@ mod tests {
     fn ex45_stronger_motion_still_preserves_integral_after_correction() {
         let args = Args { n: 10, steps: 5, amp: 0.02, omega: 0.7, smooth_iters: 20 };
 
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mut mesh = Mesh::<2>::unit_square_tri(args.n);
         let mut values = H1Space::new(mesh.clone(), 1).interpolate(&|x| {
             (PI * x[0]).sin() * (PI * x[1]).sin()
         });
@@ -785,7 +785,7 @@ mod tests {
     #[test]
     fn ex45_smoothing_parameter_variation_keeps_mesh_valid() {
         for &omega in &[0.3_f64, 0.7_f64, 0.9_f64] {
-            let mut mesh = SimplexMesh::<2>::unit_square_tri(10);
+            let mut mesh = Mesh::<2>::unit_square_tri(10);
             let top_nodes: Vec<u32> = all_boundary_nodes(&mesh)
                 .into_iter()
                 .filter(|&n| (mesh.coords_of(n)[1] - 1.0).abs() < 1.0e-12)

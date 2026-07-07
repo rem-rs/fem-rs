@@ -24,7 +24,7 @@ use fem_assembly::{
     standard::{ElasticityIntegrator, DomainSourceIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     VectorH1Space, H1Space,
@@ -90,11 +90,11 @@ fn solve_case(n: usize, order: u8, mesh_path: &Option<String>, body_force_y: f64
     let mu    = e_mod / (2.0 * (1.0 + nu));
 
     // ─── 1. Load or generate mesh ─────────────────────────────────────────
-    let mesh: SimplexMesh<2> = if let Some(ref path) = mesh_path {
+    let mesh: Mesh<2> = if let Some(ref path) = mesh_path {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(n)
+        Mesh::<2>::unit_square_tri(n)
     };
 
     // Clone the mesh for the scalar space used in RHS assembly.

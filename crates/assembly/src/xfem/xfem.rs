@@ -200,7 +200,7 @@ pub fn polar_coords(x: [f64; 2], tip: [f64; 2], crack_dir: [f64; 2]) -> (f64, f6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn heaviside_sign() {
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn detect_crack_enrichment() {
         // Unit square with horizontal crack at y=0.5, from x=0 to x=0.5
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let crack_ls = XfemLevelSet::CrackLine {
             x1: [0.0, 0.5],
             x2: [0.5, 0.5],

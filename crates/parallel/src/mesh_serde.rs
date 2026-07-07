@@ -29,7 +29,7 @@
 //! ```
 
 use fem_core::{ElemId, NodeId, Rank};
-use fem_mesh::{ElementType, SimplexMesh};
+use fem_mesh::{ElementType, Mesh};
 
 use crate::MeshPartition;
 
@@ -114,7 +114,7 @@ const _: () = assert!(HEADER_SIZE == 56);
 
 /// Encode a sub-mesh and its partition descriptor into a flat byte buffer.
 pub fn encode_submesh<const D: usize>(
-    mesh:      &SimplexMesh<D>,
+    mesh:      &Mesh<D>,
     partition: &MeshPartition,
 ) -> Vec<u8> {
     let n_nodes = mesh.n_nodes();
@@ -235,7 +235,7 @@ pub fn encode_submesh<const D: usize>(
 
 /// Decode a sub-mesh and partition descriptor from a byte buffer produced by
 /// [`encode_submesh`].
-pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(SimplexMesh<D>, MeshPartition), String> {
+pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartition), String> {
     if buf.len() < HEADER_SIZE {
         return Err(format!("buffer too short for header: {} < {HEADER_SIZE}", buf.len()));
     }
@@ -274,7 +274,7 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(SimplexMesh<D>, Mes
     let node_owner = read_i32_vec(buf, &mut offset, total_part_nodes)?;
     let global_elem_ids = read_u32_vec(buf, &mut offset, n_local_elems)?;
 
-    let mut mesh = SimplexMesh::uniform(
+    let mut mesh = Mesh::uniform(
         coords, conn, elem_tags, elem_type,
         face_conn, face_tags, face_type,
     );
@@ -385,11 +385,11 @@ fn read_i32_vec(buf: &[u8], offset: &mut usize, count: usize) -> Result<Vec<i32>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::{ElementType, SimplexMesh};
+    use fem_mesh::{ElementType, Mesh};
 
     #[test]
     fn round_trip_serial_mesh() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
 
         let buf = encode_submesh(&mesh, &partition);
@@ -430,7 +430,7 @@ mod tests {
 
         // Build a minimal local mesh matching the partition.
         let n_local_nodes = owned_global.len() + ghost_global.len(); // 7
-        let mesh = SimplexMesh::<2>::uniform(
+        let mesh = Mesh::<2>::uniform(
             vec![0.0; n_local_nodes * 2],
             vec![0, 1, 2,  3, 4, 5,  4, 5, 6],
             vec![1, 1, 1],
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn dimension_mismatch_detected() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
         let buf = encode_submesh(&mesh, &partition);
         let result = decode_submesh::<3>(&buf);
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn round_trip_3d_mesh() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
 
         let buf = encode_submesh(&mesh, &partition);
@@ -483,7 +483,7 @@ mod tests {
     }
 
     /// Single `Prism6` with mixed Tri3 + Quad4 boundary (cylinder-like extrusion).
-    fn unit_prism_mixed_boundary() -> SimplexMesh<3> {
+    fn unit_prism_mixed_boundary() -> Mesh<3> {
         let coords: Vec<f64> = vec![
             0.0, 0.0, 0.0,
             1.0, 0.0, 0.0,
@@ -510,7 +510,7 @@ mod tests {
             ElementType::Quad4,
         ];
         let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
-        let mut m = SimplexMesh::uniform(
+        let mut m = Mesh::uniform(
             coords,
             conn,
             elem_tags,

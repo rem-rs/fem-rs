@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use fem_core::{FaceId, NodeId, ElemId};
-use crate::{element_type::ElementType, simplex::SimplexMesh};
+use crate::{element_type::ElementType, simplex::Mesh};
 
 use super::bisect::{edge_key, local_edges_tri, refine_marked};
 
@@ -64,14 +64,14 @@ pub struct NCState3D {
 
 #[derive(Debug, Clone)]
 struct NCState2DSnapshot {
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
     constraints: Vec<HangingNodeConstraint>,
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
 }
 
 #[derive(Debug, Clone)]
 struct NCState3DSnapshot {
-    mesh: SimplexMesh<3>,
+    mesh: Mesh<3>,
     constraints: Vec<HangingNodeConstraint>,
     hanging_faces: Vec<HangingFaceConstraint>,
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
@@ -113,10 +113,10 @@ impl NCState3D {
     #[allow(clippy::type_complexity)]
     pub fn refine(
         &mut self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         marked: &[ElemId],
     ) -> (
-        SimplexMesh<3>,
+        Mesh<3>,
         Vec<HangingNodeConstraint>,
         HashMap<(NodeId, NodeId), NodeId>,
         Vec<HangingFaceConstraint>,
@@ -141,7 +141,7 @@ impl NCState3D {
     /// Returns the previous mesh and restored constraints if history exists.
     pub fn derefine_last(
         &mut self,
-    ) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>)> {
+    ) -> Option<(Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>)> {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints.clone();
         self.hanging_faces = snap.hanging_faces.clone();
@@ -183,9 +183,9 @@ impl NCState {
     ///   Use [`prolongate_p1`] with the midpoint map to transfer solutions.
     pub fn refine(
         &mut self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         marked: &[ElemId],
-    ) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+    ) -> (Mesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
         assert!(
             mesh.elem_type == ElementType::Tri3,
             "NCState::refine: only Tri3 meshes are supported"
@@ -349,7 +349,7 @@ impl NCState {
             }
         }
 
-        let new_mesh = SimplexMesh::uniform(
+        let new_mesh = Mesh::uniform(
             new_coords, new_conn, new_tags, ElementType::Tri3,
             new_face_conn, new_face_tags, ElementType::Line2,
         );
@@ -360,7 +360,7 @@ impl NCState {
     /// Roll back one NC refinement step.
     ///
     /// Returns the previous mesh and restored constraints if history exists.
-    pub fn derefine_last(&mut self) -> Option<(SimplexMesh<2>, Vec<HangingNodeConstraint>)> {
+    pub fn derefine_last(&mut self) -> Option<(Mesh<2>, Vec<HangingNodeConstraint>)> {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints.clone();
         self.active_midpoints = snap.active_midpoints;
@@ -422,15 +422,15 @@ pub fn restrict_to_coarse_p1(u_fine: &[f64], n_nodes_coarse: usize) -> Vec<f64> 
 /// DOF value must be constrained to `u_hang = 0.5*(u_a + u_b)`.
 ///
 /// # Arguments
-/// - `mesh`   — input `SimplexMesh<2>` with `elem_type = Tri3`.
+/// - `mesh`   — input `Mesh<2>` with `elem_type = Tri3`.
 /// - `marked` — sorted list of element indices to refine.
 ///
 /// # Returns
 /// `(new_mesh, constraints)` where `constraints` lists all hanging nodes.
 pub fn refine_nonconforming(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     marked: &[ElemId],
-) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "refine_nonconforming: only Tri3 meshes are supported"
@@ -535,7 +535,7 @@ pub fn refine_nonconforming(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tri3,
         new_face_conn, new_face_tags, ElementType::Line2,
     );
@@ -546,7 +546,7 @@ pub fn refine_nonconforming(
 
 
 /// Uniformly refine all elements of a 2-D mesh (Tri3 → 4 Tri3).
-pub fn refine_uniform(mesh: &SimplexMesh<2>) -> SimplexMesh<2> {
+pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     refine_marked(mesh, &all)
 }
@@ -556,7 +556,7 @@ pub fn refine_uniform(mesh: &SimplexMesh<2>) -> SimplexMesh<2> {
 ///
 /// Tet4 → 8 Tet4, Hex8 → 8 Hex8, Hex20 → 8 Hex8, Hex27 → 8 Hex8,
 /// Prism6 → 8 Prism6, Pyramid5 → 16 Tet4.
-pub fn refine_uniform_3d(mesh: &SimplexMesh<3>) -> SimplexMesh<3> {
+pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     match mesh.elem_type {
         ElementType::Tet4 | ElementType::Tet10 => {
@@ -576,7 +576,7 @@ pub fn refine_uniform_3d(mesh: &SimplexMesh<3>) -> SimplexMesh<3> {
                 let off = e * npe;
                 hex8_conn.extend_from_slice(&mesh.conn[off..off + 8]);
             }
-            let hex8_mesh = SimplexMesh {
+            let hex8_mesh = Mesh {
                 coords: mesh.coords.clone(),
                 conn: hex8_conn,
                 elem_tags: mesh.elem_tags.clone(),
@@ -696,9 +696,9 @@ pub(crate) fn local_faces_prism_quad() -> [[usize; 4]; 3] {
 /// - 4 edge midpoints (one per parent edge)
 /// - 1 face center per refined face (only for faces touching a refined tet)
 pub fn refine_nonconforming_3d(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>) {
+) -> (Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>) {
     let (new_mesh, edge_constraints, face_constraints, _, _) =
         refine_nonconforming_3d_internal(mesh, marked, None);
     (new_mesh, edge_constraints, face_constraints)
@@ -706,11 +706,11 @@ pub fn refine_nonconforming_3d(
 
 #[allow(clippy::type_complexity)]
 fn refine_nonconforming_3d_internal(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
     active_midpoints: Option<&HashMap<(NodeId, NodeId), NodeId>>,
 ) -> (
-    SimplexMesh<3>,
+    Mesh<3>,
     Vec<HangingNodeConstraint>,
     Vec<HangingFaceConstraint>,
     HashMap<(NodeId, NodeId), NodeId>,
@@ -939,7 +939,7 @@ fn refine_nonconforming_3d_internal(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords,
         new_conn,
         new_tags,
@@ -989,9 +989,9 @@ pub(crate) fn local_edges_quad() -> [(usize, usize); 4] {
 /// # Returns
 /// `(new_mesh, constraints)`.
 pub fn refine_nonconforming_quad(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     marked: &[ElemId],
-) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Quad4,
         "refine_nonconforming_quad: only Quad4 meshes are supported"
@@ -1119,7 +1119,7 @@ pub fn refine_nonconforming_quad(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Quad4,
         new_face_conn, new_face_tags, ElementType::Line2,
     );
@@ -1130,7 +1130,7 @@ pub fn refine_nonconforming_quad(
 
 #[derive(Debug, Clone)]
 struct NCStateQuadSnapshot {
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
     constraints: Vec<HangingNodeConstraint>,
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
 }
@@ -1164,9 +1164,9 @@ impl NCStateQuad {
     /// Returns `(new_mesh, constraints, midpoint_map)`.
     pub fn refine(
         &mut self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         marked: &[ElemId],
-    ) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+    ) -> (Mesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
         assert!(
             mesh.elem_type == ElementType::Quad4,
             "NCStateQuad::refine: only Quad4 meshes are supported"
@@ -1291,14 +1291,14 @@ impl NCStateQuad {
             }
         }
 
-        let new_mesh = SimplexMesh::uniform(
+        let new_mesh = Mesh::uniform(
             new_coords, new_conn, new_tags, ElementType::Quad4,
             new_face_conn, new_face_tags, ElementType::Line2,
         );
         (new_mesh, self.constraints.clone(), midpoint_map)
     }
 
-    pub fn derefine_last(&mut self) -> Option<(SimplexMesh<2>, Vec<HangingNodeConstraint>)> {
+    pub fn derefine_last(&mut self) -> Option<(Mesh<2>, Vec<HangingNodeConstraint>)> {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints.clone();
         self.active_midpoints = snap.active_midpoints;
@@ -1360,9 +1360,9 @@ pub(crate) fn hex_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
 /// `(new_mesh, edge_constraints, quad_face_constraints, midpoint_map)`.
 #[allow(clippy::type_complexity)]
 pub fn refine_nonconforming_hex(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+) -> (Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
     assert!(
         mesh.elem_type == ElementType::Hex8,
         "refine_nonconforming_hex: only Hex8 meshes are supported"
@@ -1677,7 +1677,7 @@ pub fn refine_nonconforming_hex(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
@@ -1697,9 +1697,9 @@ pub fn refine_nonconforming_hex(
 /// and a top layer (children 4-7, above mid-height), each with one child per
 /// sub-triangle of the triangular faces plus one central child.
 pub fn refine_prism6_uniform(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+) -> (Mesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
     assert!(
         mesh.elem_type == ElementType::Prism6,
         "refine_prism6_uniform: only Prism6 meshes are supported"
@@ -1938,7 +1938,7 @@ pub fn refine_prism6_uniform(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Prism6,
         new_face_conn, new_face_tags, mesh.face_type,
     );
@@ -1972,10 +1972,10 @@ pub struct HangingQuadFaceConstraint {
 /// `(new_mesh, edge_constraints, tri_face_constraints, quad_face_constraints, midpoint_map)`.
 #[allow(clippy::type_complexity)]
 pub fn refine_nonconforming_prism(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
 ) -> (
-    SimplexMesh<3>,
+    Mesh<3>,
     Vec<HangingNodeConstraint>,
     Vec<HangingFaceConstraint>,
     Vec<HangingQuadFaceConstraint>,
@@ -1987,11 +1987,11 @@ pub fn refine_nonconforming_prism(
 
 #[allow(clippy::type_complexity)]
 fn refine_nonconforming_prism_internal(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
     active_midpoints: Option<&HashMap<(NodeId, NodeId), NodeId>>,
 ) -> (
-    SimplexMesh<3>,
+    Mesh<3>,
     Vec<HangingNodeConstraint>,
     Vec<HangingFaceConstraint>,
     Vec<HangingQuadFaceConstraint>,
@@ -2311,7 +2311,7 @@ fn refine_nonconforming_prism_internal(
     let new_node_set: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
     new_active_midpoints.retain(|_, mid| new_node_set.contains(mid));
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Prism6,
         new_face_conn, new_face_tags, mesh.face_type,
     );
@@ -2376,9 +2376,9 @@ pub enum HexRefineDir {
 ///   n0 ─── n1
 /// ```
 pub fn refine_nonconforming_quad_aniso(
-    mesh:   &SimplexMesh<2>,
+    mesh:   &Mesh<2>,
     marked: &[(ElemId, QuadRefineDir)],
-) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Quad4,
         "refine_nonconforming_quad_aniso: only Quad4 meshes are supported"
@@ -2558,7 +2558,7 @@ pub fn refine_nonconforming_quad_aniso(
     constraints.sort_by_key(|c| c.constrained);
     constraints.dedup_by_key(|c| c.constrained);
 
-    let new_mesh = SimplexMesh::<2>::uniform(
+    let new_mesh = Mesh::<2>::uniform(
         new_coords,
         new_conn,
         new_elem_tags,
@@ -2597,9 +2597,9 @@ pub fn refine_nonconforming_quad_aniso(
 /// # Returns
 /// `(new_mesh, constraints)` where constraints encode hanging-node DOF dependencies.
 pub fn refine_nonconforming_hex_aniso(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[(ElemId, HexRefineDir)],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Hex8,
         "refine_nonconforming_hex_aniso: only Hex8 meshes are supported"
@@ -2994,7 +2994,7 @@ pub fn refine_nonconforming_hex_aniso(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
@@ -3005,7 +3005,7 @@ pub fn refine_nonconforming_hex_aniso(
 
 #[derive(Debug, Clone)]
 struct NCStateHexSnapshot {
-    mesh: SimplexMesh<3>,
+    mesh: Mesh<3>,
     constraints: Vec<HangingNodeConstraint>,
     face_constraints: Vec<HangingQuadFaceConstraint>,
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
@@ -3050,10 +3050,10 @@ impl NCStateHex {
     #[allow(clippy::type_complexity)]
     pub fn refine(
         &mut self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         marked: &[ElemId],
     ) -> (
-        SimplexMesh<3>,
+        Mesh<3>,
         Vec<HangingNodeConstraint>,
         Vec<HangingQuadFaceConstraint>,
         HashMap<(NodeId, NodeId), NodeId>,
@@ -3078,7 +3078,7 @@ impl NCStateHex {
     /// Roll back one NC refinement step.
     pub fn derefine_last(
         &mut self,
-    ) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingQuadFaceConstraint>)> {
+    ) -> Option<(Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingQuadFaceConstraint>)> {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints;
         self.face_constraints = snap.face_constraints;
@@ -3092,7 +3092,7 @@ impl NCStateHex {
 
 #[derive(Debug, Clone)]
 struct NCStatePrismSnapshot {
-    mesh: SimplexMesh<3>,
+    mesh: Mesh<3>,
     constraints: Vec<HangingNodeConstraint>,
     tri_face_constraints: Vec<HangingFaceConstraint>,
     quad_face_constraints: Vec<HangingQuadFaceConstraint>,
@@ -3138,10 +3138,10 @@ impl NCStatePrism {
     #[allow(clippy::type_complexity)]
     pub fn refine(
         &mut self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         marked: &[ElemId],
     ) -> (
-        SimplexMesh<3>,
+        Mesh<3>,
         Vec<HangingNodeConstraint>,
         Vec<HangingFaceConstraint>,
         Vec<HangingQuadFaceConstraint>,
@@ -3168,7 +3168,7 @@ impl NCStatePrism {
     #[allow(clippy::type_complexity)]
     pub fn derefine_last(
         &mut self,
-    ) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>)> {
+    ) -> Option<(Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>)> {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints;
         self.tri_face_constraints = snap.tri_face_constraints;
@@ -3184,12 +3184,12 @@ impl NCStatePrism {
 /// nodes created in prior refinement steps.
 #[allow(clippy::type_complexity)]
 fn refine_nonconforming_hex_internal(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
     active_midpoints: Option<&HashMap<(NodeId, NodeId), NodeId>>,
     active_face_centers: Option<&HashMap<[NodeId; 4], NodeId>>,
 ) -> (
-    SimplexMesh<3>,
+    Mesh<3>,
     Vec<HangingNodeConstraint>,
     Vec<HangingQuadFaceConstraint>,
     HashMap<(NodeId, NodeId), NodeId>,
@@ -3433,7 +3433,7 @@ fn refine_nonconforming_hex_internal(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
@@ -3464,9 +3464,9 @@ pub enum TriRefineDir {
 ///
 /// `Red` splits into 4 children (same as [`refine_nonconforming`]).
 pub fn refine_nonconforming_tri_aniso(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     marked: &[(ElemId, TriRefineDir)],
-) -> (SimplexMesh<2>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "refine_nonconforming_tri_aniso: only Tri3 meshes are supported"
@@ -3591,7 +3591,7 @@ pub fn refine_nonconforming_tri_aniso(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tri3,
         new_face_conn, new_face_tags, ElementType::Line2,
     );
@@ -3620,9 +3620,9 @@ pub enum TetRefineDir {
 /// Face-bisection splits into 4 children via a face's 3 edge midpoints and
 /// face center.
 pub fn refine_nonconforming_tet_aniso(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[(ElemId, TetRefineDir)],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Tet4,
         "refine_nonconforming_tet_aniso: only Tet4 meshes are supported"
@@ -3849,7 +3849,7 @@ pub fn refine_nonconforming_tet_aniso(
         }
     }
 
-    let new_mesh = SimplexMesh::uniform(
+    let new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tet4,
         new_face_conn, new_face_tags, ElementType::Tri3,
     );
@@ -3871,9 +3871,9 @@ pub enum PrismRefineDir { Edge0, Edge1, Edge2, Z, All, }
 
 /// Anisotropic non-conforming refinement for Prism6 meshes.
 pub fn refine_nonconforming_prism_aniso(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[(ElemId, PrismRefineDir)],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     assert!(mesh.elem_type == ElementType::Prism6, "refine_nonconforming_prism_aniso: only Prism6");
     if marked.is_empty() { return (mesh.clone(), Vec::new()); }
 
@@ -3951,7 +3951,7 @@ pub fn refine_nonconforming_prism_aniso(
             _=>{for&n in fs{nfc.push(n);}nft.push(tag);}
         }
     }
-    let nm=SimplexMesh::uniform(nc,ncn,nt,ElementType::Prism6,nfc,nft,mesh.face_type);
+    let nm=Mesh::uniform(nc,ncn,nt,ElementType::Prism6,nfc,nft,mesh.face_type);
     (nm, c)
 }
 
@@ -3967,9 +3967,9 @@ pub enum PyramidRefineDir { Base, Apex, All, }
 
 /// Anisotropic non-conforming refinement for Pyramid5 meshes.
 pub fn refine_nonconforming_pyramid_aniso(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[(ElemId, PyramidRefineDir)],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     assert!(mesh.elem_type == ElementType::Pyramid5, "refine_nonconforming_pyramid_aniso: only Pyramid5");
     if marked.is_empty() { return (mesh.clone(), Vec::new()); }
 
@@ -4004,9 +4004,9 @@ pub(crate) fn local_faces_pyramid_tri() -> [(usize, usize, usize); 4] {
 
 /// Uniformly refine Pyramid5 → 16 Tet4 (split along diagonal (0,2), each tet → 8).
 pub fn refine_pyramid5_uniform(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>) {
+) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     let (m, c, _, _, _, _) = refine_nonconforming_pyramid_internal(mesh, marked, None);
     (m, c)
 }
@@ -4016,10 +4016,10 @@ pub fn refine_pyramid5_uniform(
 /// Non-conforming refinement for Pyramid5 → 16 Tet4 children.
 #[allow(clippy::type_complexity)]
 pub fn refine_nonconforming_pyramid(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
 ) -> (
-    SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>,
+    Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>,
     Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>,
 ) {
     let (m, ec, tc, qc, mm, _) = refine_nonconforming_pyramid_internal(mesh, marked, None);
@@ -4028,10 +4028,10 @@ pub fn refine_nonconforming_pyramid(
 
 #[allow(clippy::type_complexity)]
 fn refine_nonconforming_pyramid_internal(
-    mesh: &SimplexMesh<3>, marked: &[ElemId],
+    mesh: &Mesh<3>, marked: &[ElemId],
     active_midpoints: Option<&HashMap<(NodeId, NodeId), NodeId>>,
 ) -> (
-    SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>,
+    Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>,
     Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>,
     HashMap<(NodeId, NodeId), NodeId>,
 ) {
@@ -4186,7 +4186,7 @@ fn refine_nonconforming_pyramid_internal(
     for (&k,&v) in &midpoint_map { nam.insert(k,v); }
     let nns: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
     nam.retain(|_,mid| nns.contains(mid));
-    let nm = SimplexMesh::uniform(new_coords,new_conn,new_tags,ElementType::Tet4,nfc,nft,mesh.face_type);
+    let nm = Mesh::uniform(new_coords,new_conn,new_tags,ElementType::Tet4,nfc,nft,mesh.face_type);
     (nm, ec, tc, qc, midpoint_map, nam)
 }
 
@@ -4194,7 +4194,7 @@ fn refine_nonconforming_pyramid_internal(
 
 #[derive(Debug, Clone)]
 struct NCStatePyramidSnapshot {
-    mesh: SimplexMesh<3>, constraints: Vec<HangingNodeConstraint>,
+    mesh: Mesh<3>, constraints: Vec<HangingNodeConstraint>,
     tri_face_constraints: Vec<HangingFaceConstraint>, quad_face_constraints: Vec<HangingQuadFaceConstraint>,
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
 }
@@ -4220,14 +4220,14 @@ impl NCStatePyramid {
     pub fn quad_face_constraints(&self) -> &[HangingQuadFaceConstraint] { &self.quad_face_constraints }
     pub fn can_derefine(&self) -> bool { !self.history.is_empty() }
     #[allow(clippy::type_complexity)]
-    pub fn refine(&mut self, mesh: &SimplexMesh<3>, marked: &[ElemId]) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+    pub fn refine(&mut self, mesh: &Mesh<3>, marked: &[ElemId]) -> (Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
         self.history.push(NCStatePyramidSnapshot { mesh: mesh.clone(), constraints: self.constraints.clone(), tri_face_constraints: self.tri_face_constraints.clone(), quad_face_constraints: self.quad_face_constraints.clone(), active_midpoints: self.active_midpoints.clone() });
         let (nm, ec, tc, qc, mm, nam) = refine_nonconforming_pyramid_internal(mesh, marked, Some(&self.active_midpoints));
         self.constraints = ec.clone(); self.tri_face_constraints = tc.clone(); self.quad_face_constraints = qc.clone(); self.active_midpoints = nam;
         (nm, ec, tc, qc, mm)
     }
     #[allow(clippy::type_complexity)]
-    pub fn derefine_last(&mut self) -> Option<(SimplexMesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>)> {
+    pub fn derefine_last(&mut self) -> Option<(Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>, Vec<HangingQuadFaceConstraint>)> {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints; self.tri_face_constraints = snap.tri_face_constraints; self.quad_face_constraints = snap.quad_face_constraints; self.active_midpoints = snap.active_midpoints;
         Some((snap.mesh, self.constraints.clone(), self.tri_face_constraints.clone(), self.quad_face_constraints.clone()))
@@ -4238,8 +4238,8 @@ impl NCStatePyramid {
 
 /// Uniformly refine Hex8 → 8 Hex8 children using edge midpoints, face centroids, body centroid.
 pub fn refine_hex8_uniform(
-    mesh: &SimplexMesh<3>, marked: &[ElemId],
-) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+    mesh: &Mesh<3>, marked: &[ElemId],
+) -> (Mesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
     assert!(mesh.elem_type == ElementType::Hex8, "refine_hex8_uniform: only Hex8");
     if marked.is_empty() { return (mesh.clone(), Vec::new(), HashMap::new()); }
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
@@ -4285,31 +4285,31 @@ pub fn refine_hex8_uniform(
             else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
         } else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
     }
-    let nm=SimplexMesh::uniform(nc,ncn,nt,ElementType::Hex8,nfc,nft,ElementType::Quad4);
+    let nm=Mesh::uniform(nc,ncn,nt,ElementType::Hex8,nfc,nft,ElementType::Quad4);
     (nm,c,mm)
 }
 
 // ─── Hex20 / Hex27 uniform refinement ────────────────────────────────────────
 
 /// Uniformly refine Hex20 → 8 Hex8 children by extracting the 8 corner nodes.
-pub fn refine_hex20_uniform(mesh: &SimplexMesh<3>, marked: &[ElemId]) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
+pub fn refine_hex20_uniform(mesh: &Mesh<3>, marked: &[ElemId]) -> (Mesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
     let (m,c,mm) = refine_hex27_uniform_inner(mesh, marked, 20);
     (m,c,mm)
 }
 
 /// Uniformly refine Hex27 → 8 Hex8 children by extracting the 8 corner nodes.
-pub fn refine_hex27_uniform(mesh: &SimplexMesh<3>, marked: &[ElemId]) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
+pub fn refine_hex27_uniform(mesh: &Mesh<3>, marked: &[ElemId]) -> (Mesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
     let (m,c,mm) = refine_hex27_uniform_inner(mesh, marked, 27);
     (m,c,mm)
 }
 
-fn refine_hex27_uniform_inner(mesh: &SimplexMesh<3>, marked: &[ElemId], npe: usize) -> (SimplexMesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
+fn refine_hex27_uniform_inner(mesh: &Mesh<3>, marked: &[ElemId], npe: usize) -> (Mesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId,NodeId),NodeId>) {
     assert!(mesh.elem_type == ElementType::Hex20 || mesh.elem_type == ElementType::Hex27, "refine_hex27_uniform_inner: only Hex20/Hex27");
     if marked.is_empty() { return (mesh.clone(), Vec::new(), HashMap::new()); }
     let n_elems = mesh.n_elems();
     let mut hex8_conn = Vec::with_capacity(n_elems * 8);
     for e in 0..n_elems { let off = e * npe; hex8_conn.extend_from_slice(&mesh.conn[off..off+8]); }
-    let hex8_mesh = SimplexMesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![] };
+    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![] };
     refine_hex8_uniform(&hex8_mesh, marked)
 }
 
@@ -4319,12 +4319,12 @@ fn refine_hex27_uniform_inner(mesh: &SimplexMesh<3>, marked: &[ElemId], npe: usi
 mod tests {
     use crate::amr::*;
     use fem_core::{NodeId, ElemId};
-    use crate::{element_type::ElementType, simplex::SimplexMesh};
+    use crate::{element_type::ElementType, simplex::Mesh};
 
     #[test]
     fn uniform_refinement_element_count() {
         // Each Tri3 → 4 children with red refinement.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_before = mesh.n_elems();
         let fine = refine_uniform(&mesh);
         assert_eq!(fine.n_elems(), 4 * n_before,
@@ -4335,7 +4335,7 @@ mod tests {
     fn uniform_refinement_node_count() {
         // A 1×1 square → 2 triangles, 4 nodes.
         // After red refinement: 8 triangles, 4+3=7 new midpoints? Actually 4+3=7 total.
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let fine = refine_uniform(&mesh);
         // 1×1 unit square: 4 corners + 4 edge midpoints + 1 interior midpoint = 9
         assert!(fine.n_nodes() > mesh.n_nodes(),
@@ -4345,7 +4345,7 @@ mod tests {
     #[test]
     fn uniform_refinement_two_levels() {
         // 2 levels of uniform refinement: n → 4n → 16n elements.
-        let mesh0 = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh0 = Mesh::<2>::unit_square_tri(2);
         let n0 = mesh0.n_elems();
         let mesh1 = refine_uniform(&mesh0);
         let mesh2 = refine_uniform(&mesh1);
@@ -4380,7 +4380,7 @@ mod tests {
     #[test]
     fn zz_estimator_smooth_solution() {
         // For u = x (linear), the FE solution is exact on Tri3 → ZZ error should be ≈ 0.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let u: Vec<f64> = (0..mesh.n_nodes())
             .map(|n| mesh.coords_of(n as NodeId)[0])
             .collect();
@@ -4392,7 +4392,7 @@ mod tests {
     #[test]
     fn refine_marked_subset() {
         // Mark only a few elements and verify total element count.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n0 = mesh.n_elems();
         let marked = vec![0u32, 1, 2]; // mark 3 elements
         let fine = refine_marked(&mesh, &marked);
@@ -4404,7 +4404,7 @@ mod tests {
 
     #[test]
     fn refine_with_tree_then_derefine_roundtrip_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let marked = vec![0u32, 1u32];
         let (fine, tree) = refine_marked_with_tree(&mesh, &marked);
         let coarse = derefine_marked(&fine, &tree, &marked);
@@ -4419,7 +4419,7 @@ mod tests {
 
     #[test]
     fn prolongate_then_restrict_p1_roundtrip_on_coarse_nodes() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n0 = mesh.n_nodes();
         let u0: Vec<f64> = (0..n0).map(|i| i as f64).collect();
 
@@ -4435,7 +4435,7 @@ mod tests {
     fn kelly_estimator_linear_exact() {
         // For a linear function u(x,y) = x, the gradient is constant everywhere,
         // so jumps across edges should be zero → Kelly indicator = 0.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let eta = kelly_estimator(&mesh, &u);
@@ -4447,7 +4447,7 @@ mod tests {
     fn kelly_estimator_nonzero_for_quadratic() {
         // u(x,y) = x² has a piecewise-constant gradient x-component = 2x
         // that varies between elements → non-zero jumps.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| {
             let x = mesh.coords_of(i as NodeId)[0];
@@ -4461,7 +4461,7 @@ mod tests {
     #[test]
     fn dwr_linear_solution_has_zero_indicator() {
         // u(x,y) = x, z(x,y) = y, f = 0 → DWR = 0
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
@@ -4475,7 +4475,7 @@ mod tests {
     fn dwr_quadratic_solution_has_positive_indicator() {
         // u(x,y) = x², z(x,y) = y², f = 2 (Poisson source for Δu=2)
         // DWR should detect the error on P1 elements.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| {
             let c = mesh.coords_of(i as NodeId); c[0] * c[0]
@@ -4492,7 +4492,7 @@ mod tests {
     #[test]
     fn zz_3d_linear_solution_zero_indicator() {
         // u(x,y,z) = x → constant gradient → zero ZZ error
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let eta = zz_estimator_3d(&mesh, &u);
@@ -4502,7 +4502,7 @@ mod tests {
 
     #[test]
     fn zz_3d_quadratic_solution_positive_indicator() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| {
             let c = mesh.coords_of(i as NodeId); c[0] * c[0]
@@ -4515,7 +4515,7 @@ mod tests {
     #[test]
     fn kelly_3d_linear_solution_zero_indicator() {
         // u = x → constant gradient → no face jumps → zero Kelly
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let eta = kelly_estimator_3d(&mesh, &u);
@@ -4525,7 +4525,7 @@ mod tests {
 
     #[test]
     fn kelly_3d_quadratic_solution_positive_indicator() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| {
             let c = mesh.coords_of(i as NodeId); c[0] * c[0]
@@ -4537,7 +4537,7 @@ mod tests {
 
     #[test]
     fn p_refine_tri3_marked_elements_become_tri6() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n_orig = mesh.n_nodes();
         let (p2, midpoint_map) = p_refine_tri3_to_tri6(&mesh, &[0, 1, 2]);
         // Elements 0-2 each gain 3 edge midpoints, but shared edges are deduplicated
@@ -4559,7 +4559,7 @@ mod tests {
 
     #[test]
     fn p_prolongate_p1_to_p2_preserves_vertices() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n_orig = mesh.n_nodes();
         let u: Vec<f64> = (0..n_orig).map(|i| {
             let c = mesh.coords_of(i as NodeId); c[0] + c[1]
@@ -4582,7 +4582,7 @@ mod tests {
 
     #[test]
     fn p_refine_tet4_to_tet10_adds_midpoints() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let n_orig = mesh.n_nodes();
         let (p2, midpoint_map) = p_refine_tet4_to_tet10(&mesh, &[0, 1]);
         assert!(p2.n_nodes() > n_orig, "should have added midpoint nodes");
@@ -4598,7 +4598,7 @@ mod tests {
 
     #[test]
     fn p_refine_tet10_to_tet20_adds_face_centroids() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let tet10_mesh = p_refine_tet4_to_tet10(&mesh, &[0, 1]).0;
         let n_orig = tet10_mesh.n_nodes();
         let (p3, face_map) = p_refine_tet10_to_tet20(&tet10_mesh, &[0]);
@@ -4611,7 +4611,7 @@ mod tests {
 
     #[test]
     fn p_refine_quad4_to_quad9_adds_nodes() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n_orig = mesh.n_nodes();
         let (q9, midpoint_map) = p_refine_quad4_to_quad9(&mesh, &[0, 1]);
         assert!(q9.n_nodes() > n_orig);
@@ -4623,7 +4623,7 @@ mod tests {
 
     #[test]
     fn p_refine_hex8_to_hex20_adds_midpoints() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let n_orig = mesh.n_nodes();
         let (h20, midpoint_map) = p_refine_hex8_to_hex20(&mesh, &[0]);
         assert!(h20.n_nodes() > n_orig);
@@ -4638,7 +4638,7 @@ mod tests {
 
     #[test]
     fn p_refine_hex20_to_hex27_adds_centroids() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let (h20, _) = p_refine_hex8_to_hex20(&mesh, &[0]);
         let n_orig = h20.n_nodes();
         let (h27, centroids) = p_refine_hex20_to_hex27(&h20, &[0]);
@@ -4652,7 +4652,7 @@ mod tests {
 
     #[test]
     fn p_refine_tri6_to_tri10_adds_centroid() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let (tri6, _) = p_refine_tri3_to_tri6(&mesh, &[0, 1, 2]);
         let n_orig = tri6.n_nodes();
         let (tri10, centroids) = p_refine_tri6_to_tri10(&tri6, &[0, 1]);
@@ -4666,7 +4666,7 @@ mod tests {
 
     #[test]
     fn p_refine_chain_preserves_volume_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let (h20, _) = p_refine_hex8_to_hex20(&mesh, &[0]);
         let (h27, _) = p_refine_hex20_to_hex27(&h20, &[0]);
         assert!(h27.n_nodes() > h20.n_nodes());
@@ -4685,7 +4685,7 @@ mod tests {
 
     #[test]
     fn nc_refine_no_marked_is_identity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let (nc, constraints) = refine_nonconforming(&mesh, &[]);
         assert_eq!(nc.n_elems(), mesh.n_elems());
         assert_eq!(nc.n_nodes(), mesh.n_nodes());
@@ -4695,7 +4695,7 @@ mod tests {
     #[test]
     fn nc_refine_all_marked_no_hanging() {
         // Refining all elements → no hanging nodes (equivalent to uniform).
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (nc, constraints) = refine_nonconforming(&mesh, &all);
         assert_eq!(nc.n_elems(), 4 * mesh.n_elems());
@@ -4707,7 +4707,7 @@ mod tests {
     fn nc_refine_single_element_has_hanging_nodes() {
         // Refine just element 0 of a 2×2 mesh → should produce hanging nodes
         // on the edges shared with unrefined neighbours.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let (nc, constraints) = refine_nonconforming(&mesh, &[0]);
 
         // Element 0 → 4 children, rest (7) unchanged → 7 + 4 = 11 elements.
@@ -4729,7 +4729,7 @@ mod tests {
 
     #[test]
     fn nc_refine_hanging_node_coords_are_midpoints() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let (nc, constraints) = refine_nonconforming(&mesh, &[0]);
 
         for c in &constraints {
@@ -4751,7 +4751,7 @@ mod tests {
     fn nc_refine_fewer_elements_than_conforming() {
         // Non-conforming refine of a subset should produce fewer elements
         // than the conforming refine_marked (which propagates to neighbours).
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let marked = vec![0u32, 1, 2];
 
         let conforming = refine_marked(&mesh, &marked);
@@ -4767,7 +4767,7 @@ mod tests {
     #[test]
     fn nc_refine_two_levels() {
         // Refine once, then refine again on some new elements.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let (nc1, c1) = refine_nonconforming(&mesh, &[0, 1]);
         assert!(!c1.is_empty() || mesh.n_elems() == 2,
             "first level should have constraints (or trivial mesh)");
@@ -4782,7 +4782,7 @@ mod tests {
     #[test]
     fn nc_refine_mesh_valid() {
         // The resulting mesh should pass consistency check.
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let (nc, _) = refine_nonconforming(&mesh, &[0, 3, 5]);
         nc.check().unwrap();
     }
@@ -4792,7 +4792,7 @@ mod tests {
     #[test]
     fn prolongate_p1_linear_exact() {
         // For u = x (linear), prolongation should be exact.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let u: Vec<f64> = (0..mesh.n_nodes())
             .map(|n| mesh.coords_of(n as NodeId)[0])
             .collect();
@@ -4813,7 +4813,7 @@ mod tests {
 
     #[test]
     fn prolongate_p1_preserves_coarse_values() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let u: Vec<f64> = (0..mesh.n_nodes()).map(|i| i as f64 * 1.5).collect();
 
         let mut nc = NCState::new();
@@ -4833,7 +4833,7 @@ mod tests {
 
     #[test]
     fn ncstate_two_level_refine() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let mut nc = NCState::new();
 
         let (m1, c1, _) = nc.refine(&mesh, &[0, 1]);
@@ -4856,7 +4856,7 @@ mod tests {
         // However, when we refine only the coarse elements that cause hanging nodes
         // (and not the already-fine ones), the hanging nodes SHOULD be resolved
         // at that interface — though new hanging nodes may appear elsewhere.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let mut nc = NCState::new();
 
         // Refine half the elements → hanging nodes.
@@ -4878,7 +4878,7 @@ mod tests {
     #[test]
     fn ncstate_multi_level_prolongation() {
         // Prolongate u=x through two levels of NC refinement.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let u0: Vec<f64> = (0..mesh.n_nodes())
             .map(|n| mesh.coords_of(n as NodeId)[0])
             .collect();
@@ -4902,7 +4902,7 @@ mod tests {
 
     #[test]
     fn ncstate_derefine_last_rolls_back_mesh_and_constraints() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let mut nc = NCState::new();
 
         let (m1, c1, _) = nc.refine(&mesh, &[0, 1]);
@@ -4921,7 +4921,7 @@ mod tests {
     #[test]
     fn tet4_nonconforming_refine_single_element() {
         // Create a simple Tet4 mesh: unit cube with some tets.
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let n_elems_orig = mesh.n_elems();
 
         let (refined, edge_constraints, face_constraints) = refine_nonconforming_3d(&mesh, &[0]);
@@ -4945,7 +4945,7 @@ mod tests {
     #[test]
     fn tet4_nonconforming_refine_with_neighbor() {
         // Refine one tet and verify non-conforming constraints are emitted.
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let n_elems_orig = mesh.n_elems();
 
         // Refine the first tet only.
@@ -4980,7 +4980,7 @@ mod tests {
 
     #[test]
     fn ncstate3d_two_level_refine() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc3 = NCState3D::new();
 
         let (m1, c1, _, f1) = nc3.refine(&mesh, &[0]);
@@ -4998,7 +4998,7 @@ mod tests {
 
     #[test]
     fn ncstate3d_derefine_last_rolls_back() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc3 = NCState3D::new();
 
         let (m1, c1, _, f1) = nc3.refine(&mesh, &[0]);
@@ -5018,7 +5018,7 @@ mod tests {
 
     #[test]
     fn quad4_nonconforming_refine_empty() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let (nc, constraints) = refine_nonconforming_quad(&mesh, &[]);
         assert_eq!(nc.n_elems(), mesh.n_elems());
         assert_eq!(nc.n_nodes(), mesh.n_nodes());
@@ -5027,7 +5027,7 @@ mod tests {
 
     #[test]
     fn quad4_nonconforming_refine_all_gives_no_constraints() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (nc, constraints) = refine_nonconforming_quad(&mesh, &all);
         // Refining all → 4× as many elements, no hanging nodes
@@ -5038,7 +5038,7 @@ mod tests {
 
     #[test]
     fn quad4_nonconforming_refine_single_element_creates_constraints() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let (nc, constraints) = refine_nonconforming_quad(&mesh, &[0]);
         // Element 0 split into 4, rest unchanged → total = 3 + 4 = 7
         assert_eq!(nc.n_elems(), 7);
@@ -5049,7 +5049,7 @@ mod tests {
 
     #[test]
     fn ncstate_quad_multi_level_tracks_constraints() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let mut ncq = NCStateQuad::new();
 
         let (m1, c1, _) = ncq.refine(&mesh, &[0]);
@@ -5065,7 +5065,7 @@ mod tests {
 
     #[test]
     fn ncstate_quad_derefine_last_rolls_back() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let mut ncq = NCStateQuad::new();
 
         let (_m1, _, _) = ncq.refine(&mesh, &[0]);
@@ -5081,7 +5081,7 @@ mod tests {
 
     #[test]
     fn hex8_nonconforming_refine_empty() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let (nc, constraints, _, _) = refine_nonconforming_hex(&mesh, &[]);
         assert_eq!(nc.n_elems(), mesh.n_elems());
         assert_eq!(nc.n_nodes(), mesh.n_nodes());
@@ -5090,7 +5090,7 @@ mod tests {
 
     #[test]
     fn hex8_nonconforming_refine_all_gives_no_constraints() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (nc, constraints, fc, _) = refine_nonconforming_hex(&mesh, &all);
         assert_eq!(nc.n_elems(), mesh.n_elems() * 8);
@@ -5101,7 +5101,7 @@ mod tests {
 
     #[test]
     fn hex8_nonconforming_refine_single_element_creates_constraints() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let (nc, constraints, fc, _) = refine_nonconforming_hex(&mesh, &[0]);
         // 1 element refined into 8, rest unchanged
         assert!(nc.n_elems() > mesh.n_elems());
@@ -5115,7 +5115,7 @@ mod tests {
 
     #[test]
     fn quad_aniso_x_split_doubles_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n = mesh.n_elems();
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
         let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -5124,7 +5124,7 @@ mod tests {
 
     #[test]
     fn quad_aniso_y_split_doubles_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n = mesh.n_elems();
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::Y)];
         let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -5133,7 +5133,7 @@ mod tests {
 
     #[test]
     fn quad_aniso_both_quadruples_element() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n = mesh.n_elems();
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::Both)];
         let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -5142,7 +5142,7 @@ mod tests {
 
     #[test]
     fn quad_aniso_empty_marked_is_identity() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(3);
+        let mesh = Mesh::<2>::unit_square_quad(3);
         let (refined, constraints) = refine_nonconforming_quad_aniso(&mesh, &[]);
         assert_eq!(refined.n_elems(), mesh.n_elems());
         assert_eq!(refined.n_nodes(), mesh.n_nodes());
@@ -5151,7 +5151,7 @@ mod tests {
 
     #[test]
     fn quad_aniso_x_split_adds_midpoints() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n_nodes_before = mesh.n_nodes();
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
         let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -5162,7 +5162,7 @@ mod tests {
     #[test]
     fn quad_aniso_partial_refine_creates_hanging_constraints() {
         // A 2×1 mesh: 2 quads side by side. Refine only the first.
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         if mesh.n_elems() < 2 { return; } // skip if not enough elements
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
         let (_, constraints) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -5175,7 +5175,7 @@ mod tests {
 
     #[test]
     fn hex_aniso_x_split_gives_two_children() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
         // 1 element → 2 children along X
         assert_eq!(refined.n_elems(), 2);
@@ -5183,49 +5183,49 @@ mod tests {
 
     #[test]
     fn hex_aniso_y_split_gives_two_children() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::Y)]);
         assert_eq!(refined.n_elems(), 2);
     }
 
     #[test]
     fn hex_aniso_z_split_gives_two_children() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::Z)]);
         assert_eq!(refined.n_elems(), 2);
     }
 
     #[test]
     fn hex_aniso_xy_split_gives_four_children() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::XY)]);
         assert_eq!(refined.n_elems(), 4);
     }
 
     #[test]
     fn hex_aniso_xz_split_gives_four_children() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::XZ)]);
         assert_eq!(refined.n_elems(), 4);
     }
 
     #[test]
     fn hex_aniso_yz_split_gives_four_children() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::YZ)]);
         assert_eq!(refined.n_elems(), 4);
     }
 
     #[test]
     fn hex_aniso_all_delegates_to_isotropic() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::All)]);
         assert_eq!(refined.n_elems(), 8);
     }
 
     #[test]
     fn hex_aniso_empty_marked_is_identity() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let (refined, constraints) = refine_nonconforming_hex_aniso(&mesh, &[]);
         assert_eq!(refined.n_elems(), mesh.n_elems());
         assert_eq!(refined.n_nodes(), mesh.n_nodes());
@@ -5234,7 +5234,7 @@ mod tests {
 
     #[test]
     fn hex_aniso_x_split_adds_four_midpoints() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let n_before = mesh.n_nodes();
         let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
         // X cut adds 4 edge midpoints on the 4 X-parallel edges
@@ -5245,7 +5245,7 @@ mod tests {
     fn hex_aniso_multi_elem_x_split_partial_creates_constraints() {
         // 2x2x1 mesh (4 elements). Refine one element with X split;
         // neighbouring unrefined elements should produce hanging constraints.
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         if mesh.n_elems() < 2 { return; }
         let (_, constraints) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
         // At least some hanging constraints expected on shared faces.
@@ -5254,7 +5254,7 @@ mod tests {
 
     #[test]
     fn tet4_uniform_3d_creates_eight_tets() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         assert_eq!(mesh.n_elems(), 6);
         let fine = refine_uniform_3d(&mesh);
         assert_eq!(fine.n_elems(), 48, "6 tet parents × 8 = 48");
@@ -5263,7 +5263,7 @@ mod tests {
 
     #[test]
     fn hex8_uniform_3d_creates_eight_hexes() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         assert_eq!(mesh.n_elems(), 1);
         let fine = refine_uniform_3d(&mesh);
         assert_eq!(fine.n_elems(), 8, "1 hex parent × 8 = 8");
@@ -5286,7 +5286,7 @@ mod tests {
     ///
     /// Decomposition: split along edge (2,3), giving tets (0,1,2,3), (1,2,3,4), (2,3,4,5).
     /// This avoids coplanarity for right prisms.
-    fn prism6_vol(mesh: &SimplexMesh<3>, e: ElemId) -> f64 {
+    fn prism6_vol(mesh: &Mesh<3>, e: ElemId) -> f64 {
         let ns = mesh.elem_nodes(e);
         let c = |i: usize| -> [f64; 3] {
             let off = ns[i] as usize * 3;
@@ -5332,7 +5332,7 @@ mod tests {
         ];
         let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
 
-        let mesh = SimplexMesh {
+        let mesh = Mesh {
             coords, conn, elem_tags,
             elem_type: ElementType::Prism6,
             face_conn, face_tags, face_type: ElementType::Tri3,
@@ -5379,7 +5379,7 @@ mod tests {
                               ElementType::Quad4, ElementType::Quad4, ElementType::Quad4];
         let face_offsets = vec![0, 3, 6, 10, 14, 18];
 
-        let mesh = SimplexMesh {
+        let mesh = Mesh {
             coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn, face_tags, face_type: ElementType::Tri3,
             elem_types: None, elem_offsets: None,
@@ -5395,7 +5395,7 @@ mod tests {
 
     // ─── Prism6 NC refinement tests ───────────────────────────────────────────
 
-    fn make_single_prism_mesh() -> SimplexMesh<3> {
+    fn make_single_prism_mesh() -> Mesh<3> {
         let coords = vec![
             0.0, 0.0, 0.0,  1.0, 0.0, 0.0,  0.0, 1.0, 0.0,
             0.0, 0.0, 1.0,  1.0, 0.0, 1.0,  0.0, 1.0, 1.0,
@@ -5407,7 +5407,7 @@ mod tests {
         let face_types = vec![ElementType::Tri3, ElementType::Tri3,
                               ElementType::Quad4, ElementType::Quad4, ElementType::Quad4];
         let face_offsets = vec![0, 3, 6, 10, 14, 18];
-        SimplexMesh {
+        Mesh {
             coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn, face_tags, face_type: ElementType::Tri3,
             elem_types: None, elem_offsets: None,
@@ -5480,7 +5480,7 @@ mod tests {
         ];
         let face_offsets = vec![0,3,6,10,14, 17,20,24,28];
 
-        let mesh = SimplexMesh {
+        let mesh = Mesh {
             coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn, face_tags, face_type: ElementType::Tri3,
             elem_types: None, elem_offsets: None,
@@ -5520,7 +5520,7 @@ mod tests {
                               ElementType::Tri3, ElementType::Tri3,
                               ElementType::Quad4, ElementType::Quad4];
         let face_offsets = vec![0,3,6,10,14, 17,20,24,28];
-        let mesh = SimplexMesh {
+        let mesh = Mesh {
             coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn, face_tags, face_type: ElementType::Tri3,
             elem_types: None, elem_offsets: None,
@@ -5547,7 +5547,7 @@ mod tests {
     // ─── Hex8 uniform refinement tests ────────────────────────────────────
 
     /// Volume of Hex8 via 5-tet decomposition along diagonal (0,2,5,7).
-    fn hex8_vol(mesh: &SimplexMesh<3>, e: ElemId) -> f64 {
+    fn hex8_vol(mesh: &Mesh<3>, e: ElemId) -> f64 {
         let ns = mesh.elem_nodes(e);
         let c = |i: usize| -> [f64; 3] { let off = ns[i] as usize * 3; [mesh.coords[off], mesh.coords[off+1], mesh.coords[off+2]] };
         tet_signed_vol(&c(0),&c(1),&c(2),&c(5)).abs()+tet_signed_vol(&c(2),&c(3),&c(0),&c(7)).abs()
@@ -5556,7 +5556,7 @@ mod tests {
     }
 
     #[test] fn hex8_uniform_single_element() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let v0 = hex8_vol(&mesh, 0); assert!((v0-1.0).abs() < 1e-14);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex8_uniform(&mesh, &all);
@@ -5578,7 +5578,7 @@ mod tests {
         let conn = (0..20u32).collect::<Vec<_>>();
         let fc = vec![0u32,1,2,3, 4,5,6,7, 0,1,5,4, 2,3,7,6, 0,3,7,4, 1,2,6,5];
         let ft = vec![1,2,3,4,5,6];
-        let mesh = SimplexMesh { coords:c, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex20,
+        let mesh = Mesh { coords:c, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex20,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
@@ -5599,7 +5599,7 @@ mod tests {
         }
         let fc = vec![0u32,1,2,3, 4,5,6,7, 0,1,5,4, 2,3,7,6, 0,3,7,4, 1,2,6,5];
         let ft = vec![1,2,3,4,5,6];
-        let mesh = SimplexMesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex27,
+        let mesh = Mesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex27,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
@@ -5611,7 +5611,7 @@ mod tests {
 
     // ─── Pyramid5 uniform + NC tests ──────────────────────────────────────
 
-    fn pyramid5_vol(mesh: &SimplexMesh<3>, e: ElemId) -> f64 {
+    fn pyramid5_vol(mesh: &Mesh<3>, e: ElemId) -> f64 {
         let ns = mesh.elem_nodes(e);
         let c = |i: usize| -> [f64; 3] { let off = ns[i] as usize * 3; [mesh.coords[off], mesh.coords[off+1], mesh.coords[off+2]] };
         tet_signed_vol(&c(0),&c(1),&c(2),&c(4)).abs()+tet_signed_vol(&c(2),&c(3),&c(0),&c(4)).abs()
@@ -5624,7 +5624,7 @@ mod tests {
         let ft = vec![1,2,3,4,5];
         let fty = vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3];
         let fo = vec![0,4,7,10,13,16];
-        let mesh = SimplexMesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
+        let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
@@ -5639,7 +5639,7 @@ mod tests {
     }
 
     #[test] fn pyramid5_uniform_through_dispatch() {
-        let mesh = SimplexMesh { coords: vec![0.0,0.0,0.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0],
+        let mesh = Mesh { coords: vec![0.0,0.0,0.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0],
             conn: vec![0u32,1,2,3,4], elem_tags: vec![1i32], elem_type: ElementType::Pyramid5,
             face_conn: vec![0u32,1,2,3,0,1,4,1,2,4,2,3,4,3,0,4], face_tags: vec![1,2,3,4,5],
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
@@ -5650,8 +5650,8 @@ mod tests {
         assert_eq!(fine.n_elems(), 16); fine.check().unwrap();
     }
 
-    fn make_pyramid_mesh() -> SimplexMesh<3> {
-        SimplexMesh { coords: vec![0.0,0.0,0.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0],
+    fn make_pyramid_mesh() -> Mesh<3> {
+        Mesh { coords: vec![0.0,0.0,0.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0],
             conn: vec![0u32,1,2,3,4], elem_tags: vec![1i32], elem_type: ElementType::Pyramid5,
             face_conn: vec![0u32,1,2,3,0,1,4,1,2,4,2,3,4,3,0,4], face_tags: vec![1,2,3,4,5],
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
@@ -5683,7 +5683,7 @@ mod tests {
         let fty = vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,
                        ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3];
         let fo = vec![0,4,7,10,13, 17,20,23,26];
-        let mesh = SimplexMesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
+        let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
@@ -5694,14 +5694,14 @@ mod tests {
 
     // ─── Prism6 anisotropic tests ────────────────────────────────────────
 
-    fn make_prism_mesh() -> SimplexMesh<3> {
+    fn make_prism_mesh() -> Mesh<3> {
         let coords = vec![0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0, 0.0,0.0,1.0,1.0,0.0,1.0,0.0,1.0,1.0];
         let conn = vec![0u32,1,2,3,4,5]; let elem_tags = vec![1i32];
         let fc = vec![0u32,2,1, 3,4,5, 0,1,4,3, 1,2,5,4, 0,3,5,2];
         let ft = vec![1,2,3,4,5];
         let fty = vec![ElementType::Tri3,ElementType::Tri3,ElementType::Quad4,ElementType::Quad4,ElementType::Quad4];
         let fo = vec![0,3,6,10,14,18];
-        SimplexMesh { coords, conn, elem_tags, elem_type: ElementType::Prism6,
+        Mesh { coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] }
@@ -5756,7 +5756,7 @@ mod tests {
     // ─── Generalized 3-D estimator tests ─────────────────────────────────
 
     #[test] fn zz_3d_general_linear_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let eta = zz_estimator_3d_general(&mesh, &u);
@@ -5765,7 +5765,7 @@ mod tests {
     }
 
     #[test] fn zz_3d_general_quadratic_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[0]*c[0] }).collect();
         let eta = zz_estimator_3d_general(&mesh, &u);
@@ -5774,7 +5774,7 @@ mod tests {
     }
 
     #[test] fn kelly_3d_general_linear_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let eta = kelly_estimator_3d_general(&mesh, &u);
@@ -5783,7 +5783,7 @@ mod tests {
     }
 
     #[test] fn zz_3d_general_matches_original_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let eta_orig = zz_estimator_3d(&mesh, &u);
@@ -5795,7 +5795,7 @@ mod tests {
     }
 
     #[test] fn residual_3d_general_linear_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let f_val = vec![0.0; n];
@@ -5805,7 +5805,7 @@ mod tests {
     }
 
     #[test] fn residual_3d_general_matches_original_tet() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let f_val = vec![1.0; n]; // constant source
@@ -5818,7 +5818,7 @@ mod tests {
     }
 
     #[test] fn residual_3d_general_linear_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let mesh = Mesh::<3>::unit_cube_hex(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let f_val = vec![0.0; n];
@@ -5849,7 +5849,7 @@ mod tests {
 
     #[test] fn dwr_3d_general_linear_solution_zero() {
         // u = x, z = y, f = 0 → DWR = 0
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
@@ -5861,7 +5861,7 @@ mod tests {
 
     #[test] fn dwr_3d_general_quadratic_solution_positive() {
         // u = x², z = y², f = -2 (Laplacian of x² is 2)
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[0]*c[0] }).collect();
         let z: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[1]*c[1] }).collect();
@@ -5873,7 +5873,7 @@ mod tests {
 
     #[test] fn dwr_3d_general_matches_2d_on_tet() {
         // For linear u,z on Tet mesh, match 2-D dwr_estimator result structure
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
@@ -5885,7 +5885,7 @@ mod tests {
     // ── Hex8 estimator tests ──────────────────────────────────────────────
 
     #[test] fn zz_3d_general_linear_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let mesh = Mesh::<3>::unit_cube_hex(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let eta = zz_estimator_3d_general(&mesh, &u);
@@ -5894,7 +5894,7 @@ mod tests {
     }
 
     #[test] fn zz_3d_general_quadratic_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let mesh = Mesh::<3>::unit_cube_hex(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[0]*c[0] }).collect();
         let eta = zz_estimator_3d_general(&mesh, &u);
@@ -5903,7 +5903,7 @@ mod tests {
     }
 
     #[test] fn kelly_3d_general_linear_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let mesh = Mesh::<3>::unit_cube_hex(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let eta = kelly_estimator_3d_general(&mesh, &u);
@@ -5914,7 +5914,7 @@ mod tests {
     // ── Prism6 estimator tests ────────────────────────────────────────────
 
     /// Build a unit right prism mesh: right triangle base z=0 → top z=1.
-    fn prism6_unit_mesh() -> SimplexMesh<3> {
+    fn prism6_unit_mesh() -> Mesh<3> {
         let coords = vec![
             0.0, 0.0, 0.0,  // 0
             1.0, 0.0, 0.0,  // 1
@@ -5938,7 +5938,7 @@ mod tests {
             ElementType::Quad4, ElementType::Quad4, ElementType::Quad4,
         ];
         let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
-        SimplexMesh {
+        Mesh {
             coords, conn, elem_tags,
             elem_type: ElementType::Prism6,
             face_conn, face_tags, face_type: ElementType::Tri3,
@@ -5971,7 +5971,7 @@ mod tests {
     // ── Pyramid5 estimator tests ───────────────────────────────────────────
 
     /// Build a unit pyramid mesh: base z=0 (unit square), apex at (0,0,1).
-    fn pyramid5_unit_mesh() -> SimplexMesh<3> {
+    fn pyramid5_unit_mesh() -> Mesh<3> {
         let coords = vec![
             0.0, 0.0, 0.0,  // 0
             1.0, 0.0, 0.0,  // 1
@@ -5995,7 +5995,7 @@ mod tests {
             ElementType::Tri3, ElementType::Tri3,
         ];
         let face_offsets = vec![0usize, 4, 7, 10, 13, 16];
-        SimplexMesh {
+        Mesh {
             coords, conn, elem_tags,
             elem_type: ElementType::Pyramid5,
             face_conn, face_tags, face_type: ElementType::Tri3,
@@ -6028,7 +6028,7 @@ mod tests {
     // ── Hex8 DWR tests ───────────────────────────────────────────────────
 
     #[test] fn dwr_3d_general_linear_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let mesh = Mesh::<3>::unit_cube_hex(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[0]).collect();
         let z: Vec<f64> = (0..n).map(|i| mesh.coords_of(i as NodeId)[1]).collect();
@@ -6039,7 +6039,7 @@ mod tests {
     }
 
     #[test] fn dwr_3d_general_quadratic_hex() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(3);
+        let mesh = Mesh::<3>::unit_cube_hex(3);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[0]*c[0] }).collect();
         let z: Vec<f64> = (0..n).map(|i| { let c = mesh.coords_of(i as NodeId); c[1]*c[1] }).collect();

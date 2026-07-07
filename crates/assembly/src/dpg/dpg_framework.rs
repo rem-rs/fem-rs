@@ -314,11 +314,11 @@ impl<M: MeshTopology> BilinearForm<M> for Poisson3DForm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn dpg_framework_2d_poisson() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let form = Poisson2DForm;
         let solver = DpgSolver::new(&mesh, &form, 10, 3);
         let (mat, _rhs) = solver.assemble(&|_| 1.0);
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn dpg_framework_3d_poisson() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let form = Poisson3DForm;
         let solver = DpgSolver::new(&mesh, &form, 20, 4);
         let (mat, _rhs) = solver.assemble(&|_| 1.0);
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn dpg_framework_2d_matches_legacy() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let form = Poisson2DForm;
         let solver = DpgSolver::new(&mesh, &form, 10, 3);
         let (mat_new, _) = solver.assemble(&|_| 1.0);

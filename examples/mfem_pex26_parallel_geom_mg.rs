@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use fem_assembly::Assembler;
 use fem_assembly::standard::DiffusionIntegrator;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_parallel::{
     launcher::native::ThreadLauncher, WorkerConfig, par_simplex::partition_simplex,
@@ -17,7 +17,7 @@ fn main() {
     let r = a.iter().position(|x| x == "--ranks").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(2);
     let levels: usize = a.iter().position(|x| x == "--levels").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(3);
 
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(n));
     let res = Arc::new(Mutex::new(None)); let rs = Arc::clone(&res);
 
     ThreadLauncher::new(WorkerConfig::new(r)).launch(move |c| {
@@ -68,7 +68,7 @@ fn main() {
 
 // ─── Uniform mesh refinement (2D triangles) ────────────────────────────────
 
-fn refine_tri_mesh(mesh: &SimplexMesh<2>) -> SimplexMesh<2> {
+fn refine_tri_mesh(mesh: &Mesh<2>) -> Mesh<2> {
     let n_nodes = mesh.n_nodes();
     let n_elems = mesh.n_elems();
     let mut edge_map: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
@@ -104,7 +104,7 @@ fn refine_tri_mesh(mesh: &SimplexMesh<2>) -> SimplexMesh<2> {
         }
     }
 
-    SimplexMesh::<2>::uniform(
+    Mesh::<2>::uniform(
         new_coords, new_conn, new_tags,
         fem_mesh::ElementType::Tri3,
         vec![], vec![],
@@ -114,7 +114,7 @@ fn refine_tri_mesh(mesh: &SimplexMesh<2>) -> SimplexMesh<2> {
 
 fn mid(
     a: usize, b: usize,
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     coords: &mut Vec<f64>,
     edge_map: &mut std::collections::HashMap<(u32, u32), usize>,
     next_node: &mut usize,
@@ -133,7 +133,7 @@ fn mid(
 
 // ─── Prolongation ──────────────────────────────────────────────────────────
 
-fn build_prolongation(mesh_fine: &SimplexMesh<2>, mesh_coarse: &SimplexMesh<2>) -> CsrMatrix<f64> {
+fn build_prolongation(mesh_fine: &Mesh<2>, mesh_coarse: &Mesh<2>) -> CsrMatrix<f64> {
     let n_fine = mesh_fine.n_nodes();
     let n_coarse = mesh_coarse.n_nodes();
     let mut coo = CooMatrix::<f64>::new(n_fine, n_coarse);
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn geom_mg_converges_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n0 = mesh.n_nodes();
         let refined = refine_tri_mesh(&mesh);
         assert!(refined.n_nodes() > n0, "refinement should increase nodes");

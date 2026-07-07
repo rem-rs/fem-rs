@@ -47,7 +47,7 @@ use fem_io_hdf5_parallel::{
 use fem_linalg::Vector;
 use fem_mesh::{
     MeshMotionConfig,
-    SimplexMesh,
+    Mesh,
     all_boundary_nodes,
     apply_node_displacement,
     laplacian_smooth_2d,
@@ -101,7 +101,7 @@ struct FsiTemplateResult {
     rejected_sync_steps: usize,
     rollback_count: usize,
     pressure: Vec<f64>,
-    final_mesh: SimplexMesh<2>,
+    final_mesh: Mesh<2>,
 }
 
 struct CliArgs {
@@ -292,7 +292,7 @@ fn solve_fsi_template_single_rate(
     args: &Args,
     restart: Option<&FsiCheckpointState>,
 ) -> FsiTemplateResult {
-    let ref_mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let ref_mesh = Mesh::<2>::unit_square_tri(args.n);
     let mut wall_disp = restart.map(|state| state.final_wall_displacement).unwrap_or(0.0_f64);
     let mut mesh = restart
         .map(|state| mesh_from_checkpoint_coords(&ref_mesh, &state.mesh_coords))
@@ -425,7 +425,7 @@ fn solve_fsi_template_subcycling(
 ) -> FsiTemplateResult {
     #[derive(Clone)]
     struct SubcyclingState {
-        mesh: SimplexMesh<2>,
+        mesh: Mesh<2>,
         pressure: Vector<f64>,
         wall_disp: f64,
         max_wall_disp: f64,
@@ -433,7 +433,7 @@ fn solve_fsi_template_subcycling(
         converged_steps: usize,
     }
 
-    let ref_mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let ref_mesh = Mesh::<2>::unit_square_tri(args.n);
     let init_wall_disp = restart.map(|state| state.final_wall_displacement).unwrap_or(0.0_f64);
     let init_mesh = restart
         .map(|state| mesh_from_checkpoint_coords(&ref_mesh, &state.mesh_coords))
@@ -588,11 +588,11 @@ fn solve_fsi_template_subcycling(
 }
 
 fn build_deformed_mesh(
-    ref_mesh: &SimplexMesh<2>,
+    ref_mesh: &Mesh<2>,
     wall_disp: f64,
     omega: f64,
     smooth_iters: usize,
-) -> SimplexMesh<2> {
+) -> Mesh<2> {
     let mut mesh = ref_mesh.clone();
     if wall_disp.abs() > 0.0 {
         let top_nodes: Vec<u32> = all_boundary_nodes(&mesh)
@@ -619,14 +619,14 @@ fn build_deformed_mesh(
     mesh
 }
 
-fn mesh_from_checkpoint_coords(ref_mesh: &SimplexMesh<2>, coords: &[f64]) -> SimplexMesh<2> {
+fn mesh_from_checkpoint_coords(ref_mesh: &Mesh<2>, coords: &[f64]) -> Mesh<2> {
     let mut mesh = ref_mesh.clone();
     mesh.coords = coords.to_vec();
     mesh
 }
 
 fn solve_pressure_on_mesh(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     inlet: f64,
     initial_guess: &[f64],
 ) -> Vec<f64> {
@@ -665,7 +665,7 @@ fn solve_pressure_on_mesh(
     p
 }
 
-fn top_boundary_average_pressure(space: &H1Space<SimplexMesh<2>>, p: &[f64]) -> f64 {
+fn top_boundary_average_pressure(space: &H1Space<Mesh<2>>, p: &[f64]) -> f64 {
     let dm = space.dof_manager();
     let mut sum = 0.0_f64;
     let mut cnt = 0usize;
@@ -696,7 +696,7 @@ fn checksum(v: &[f64]) -> f64 {
 
 fn write_ex49_vtk_export(
     prefix: &str,
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     pressure: &[f64],
 ) -> Result<(), String> {
     let path = format!("{prefix}_fsi_pressure.vtu");

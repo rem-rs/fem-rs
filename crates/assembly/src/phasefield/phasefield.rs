@@ -805,13 +805,13 @@ pub fn compute_psi_plus<M: MeshTopology>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, VectorH1Space};
     use fem_space::fe_space::FESpace;
 
-    fn small_mesh() -> SimplexMesh<2> {
+    fn small_mesh() -> Mesh<2> {
         // 2×2 unit square with 8 triangles
-        SimplexMesh::<2>::unit_square_tri(2)
+        Mesh::<2>::unit_square_tri(2)
     }
 
     #[test]

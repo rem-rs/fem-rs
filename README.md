@@ -17,7 +17,7 @@ not as required external FFI deliverables.
 fem-rs/
 ├── crates/
 │   ├── core/       fem-core     — scalar types, index aliases, FemError
-│   ├── mesh/       fem-mesh     — SimplexMesh<D>, AMR, NCMesh, CurvedMesh, periodic, generators
+│   ├── mesh/       fem-mesh     — Mesh<D>, AMR, NCMesh, CurvedMesh, periodic, generators
 │   ├── element/    fem-element  — Lagrange P1–P3 (Seg/Tri/Tet/Quad/Hex), Nedelec ND1, RT0, quadrature
 │   ├── space/      fem-space    — H1/L2/HCurl/HDiv/VectorH1/H1Trace spaces, DOF management, hanging nodes
 │   ├── assembly/   fem-assembly — bilinear/linear/mixed/DG/nonlinear/partial assembly, coefficients; optional `--features reed` helpers
@@ -146,7 +146,7 @@ Known gaps:
 | Crate | Status | Highlights |
 |-------|--------|------------|
 | `fem-core` | ✅ | Scalar traits, FemError, NodeId/DofId, coord aliases |
-| `fem-mesh` | ✅ | SimplexMesh, AMR, NCMesh (Tri3/Tet4/Quad4/Hex8), CurvedMesh P2, periodic |
+| `fem-mesh` | ✅ | Mesh, AMR, NCMesh (Tri3/Tet4/Quad4/Hex8), CurvedMesh P2, periodic |
 | `fem-element` | ✅ | Lagrange P1–P3 (Seg/Tri/Tet/Quad/Hex + Pk/Qk), Nédélec ND1/ND2 (Tri/Quad/Tet/Hex), RT0/RT1/RT2 (Tri), RT0/RT1 (Tet), NURBS/IGA basis |
 | `fem-linalg` | ✅ | CsrMatrix, CooMatrix, Vector, BlockMatrix, DenseTensor |
 | `fem-space` | ✅ | H1, L2, VectorH1, HCurl, HDiv, H1Trace, IGA spaces, p-refinement |

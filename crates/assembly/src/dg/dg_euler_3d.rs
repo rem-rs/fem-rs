@@ -420,9 +420,9 @@ fn tet_face_normal<M: MeshTopology>(mesh: &M, enodes: &[u32], fnodes: &[u32]) ->
 
 #[cfg(test)]
 mod tests {
-    use super::*; use fem_mesh::SimplexMesh;
+    use super::*; use fem_mesh::Mesh;
     #[test] fn euler_3d_finite() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let dg = DgEuler3D::new(mesh);
         let mut u = vec![0.0; dg.n_dofs];
         let euler = Euler3D::default();
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn dg_euler_3d_with_hllc_runs() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let dg = DgEuler3D::new(mesh).with_flux(EulerFluxKind::Hllc);
         let euler = Euler3D::default();
         let mut u = vec![0.0; dg.n_dofs];
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn dg_euler_3d_with_ausm_plus_runs() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let dg = DgEuler3D::new(mesh).with_flux(EulerFluxKind::AusmPlus);
         let euler = Euler3D::default();
         let mut u = vec![0.0; dg.n_dofs];
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn limiter_clamps_overshoot() {
         // Two-element setup: one element has an overshoot in density relative to neighbors.
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let dg = DgEuler3D::new(mesh).with_flux(EulerFluxKind::Hllc).with_limiter(true);
         let euler = Euler3D::default();
         let mut u = vec![0.0; dg.n_dofs];
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn step_rk3_with_limiter_finite() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let dg = DgEuler3D::new(mesh).with_flux(EulerFluxKind::Hllc).with_limiter(true);
         let euler = Euler3D::default();
         let mut u = vec![0.0; dg.n_dofs];

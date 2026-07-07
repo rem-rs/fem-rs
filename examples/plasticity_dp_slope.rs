@@ -13,7 +13,7 @@ use fem_assembly::physics::nonlinear::NonlinearForm;
 use fem_assembly::plasticity::{J2PlasticityForm, PlasticConfig};
 use fem_assembly::Assembler;
 use fem_assembly::standard::DomainSourceIntegrator;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::vector_h1::VectorH1Space;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
@@ -23,7 +23,7 @@ fn main() {
     println!("=== Drucker-Prager plasticity: slope ===");
     let t0 = Instant::now();
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let order: u8 = 1;
     let quad_order: u8 = 2;
     let space = VectorH1Space::new(mesh, order, 2);
@@ -62,11 +62,11 @@ fn main() {
 mod tests {
     use fem_assembly::physics::nonlinear::NonlinearForm;
     use fem_assembly::plasticity::{J2PlasticityForm, PlasticConfig};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::vector_h1::VectorH1Space;
     use fem_space::constraints::boundary_dofs;
     #[test] fn smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let ns = space.n_scalar_dofs();
         let dm = space.scalar_dof_manager();

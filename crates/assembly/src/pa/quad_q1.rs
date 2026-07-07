@@ -87,23 +87,23 @@ pub fn pa_apply_quad_q1(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, fe_space::FESpace};
     use crate::assembler::Assembler;
     use crate::standard::DiffusionIntegrator;
 
-    fn quad_elem_dofs(space: &H1Space<SimplexMesh<2>>) -> Vec<Vec<u32>> {
+    fn quad_elem_dofs(space: &H1Space<Mesh<2>>) -> Vec<Vec<u32>> {
         let mesh = space.mesh();
         (0..mesh.n_elements() as u32).map(|e| space.element_dofs(e).to_vec()).collect()
     }
 
     #[test]
     fn quad_q1_pa_matches_assembled() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(4);
+        let mesh = Mesh::<2>::unit_square_quad(4);
         let space = H1Space::new(mesh, 1);
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
 
-        let mesh2 = SimplexMesh::<2>::unit_square_quad(4);
+        let mesh2 = Mesh::<2>::unit_square_quad(4);
         let space2 = H1Space::new(mesh2, 1);
         let pd = build_quad_q1_pa_data(space2.mesh(), &|_| 1.0);
         let elem_dofs = quad_elem_dofs(&space2);

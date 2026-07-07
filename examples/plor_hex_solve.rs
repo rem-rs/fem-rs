@@ -15,7 +15,7 @@ use std::f64::consts::PI;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_assembly::Assembler;
 use fem_amg::{AmgConfig, AmgSolver};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, boundary_dofs}};
@@ -32,7 +32,7 @@ struct LorSolveResult {
     final_residual: f64,
 }
 
-fn l2_error_p2(space: &H1Space<SimplexMesh<3>>, uh: &[f64]) -> f64 {
+fn l2_error_p2(space: &H1Space<Mesh<3>>, uh: &[f64]) -> f64 {
     use fem_element::{lagrange::TetP2, ReferenceElement};
     let mesh = space.mesh();
     let elem = TetP2;
@@ -69,7 +69,7 @@ fn l2_error_p2(space: &H1Space<SimplexMesh<3>>, uh: &[f64]) -> f64 {
 }
 
 fn solve_lor_3d(n: usize) -> LorSolveResult {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
 
     // Source: -∇²u = 3π² sin(πx) sin(πy) sin(πz)
     let diffusion = DiffusionIntegrator { kappa: 1.0 };

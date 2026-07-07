@@ -13,12 +13,12 @@ use fem_parallel::{
     GhostExchange,
     WorkerConfig,
 };
-use fem_mesh::{ElementType, SimplexMesh};
+use fem_mesh::{ElementType, Mesh};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /// One `Prism6` with Tri3 caps + Quad4 sides (mixed `face_offsets`).
-fn unit_prism_mixed_boundary() -> SimplexMesh<3> {
+fn unit_prism_mixed_boundary() -> Mesh<3> {
     let coords: Vec<f64> = vec![
         0.0, 0.0, 0.0,
         1.0, 0.0, 0.0,
@@ -45,7 +45,7 @@ fn unit_prism_mixed_boundary() -> SimplexMesh<3> {
         ElementType::Quad4,
     ];
     let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
-    let mut m = SimplexMesh::uniform(
+    let mut m = Mesh::uniform(
         coords,
         conn,
         elem_tags,
@@ -60,7 +60,7 @@ fn unit_prism_mixed_boundary() -> SimplexMesh<3> {
 }
 
 /// Two disjoint prisms (12 nodes, 2 elems, 10 boundary faces, mixed offsets).
-fn two_disjoint_prisms_mixed_boundary() -> SimplexMesh<3> {
+fn two_disjoint_prisms_mixed_boundary() -> Mesh<3> {
     let o = 6u32;
     let coords: Vec<f64> = vec![
         // prism 0
@@ -111,7 +111,7 @@ fn two_disjoint_prisms_mixed_boundary() -> SimplexMesh<3> {
     let face_offsets: Vec<usize> = vec![
         0, 3, 6, 10, 14, 18, 21, 24, 28, 32, 36,
     ];
-    let mut m = SimplexMesh::uniform(
+    let mut m = Mesh::uniform(
         coords,
         conn,
         elem_tags,
@@ -295,7 +295,7 @@ fn thread_alltoallv_sparse() {
 /// ghost exchange correctly propagates owned-node values to ghost copies.
 #[test]
 fn ghost_exchange_forward_2d() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4); // 4×4 grid → 32 triangles
+    let mesh = Mesh::<2>::unit_square_tri(4); // 4×4 grid → 32 triangles
     let n_total_nodes = mesh.n_nodes();
 
     // Shared storage so every thread can write its owned values and the test
@@ -347,7 +347,7 @@ fn ghost_exchange_forward_2d() {
 /// Verify that reverse exchange accumulates ghost contributions to owned slots.
 #[test]
 fn ghost_exchange_reverse_2d() {
-    let mesh    = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh    = Mesh::<2>::unit_square_tri(4);
     let results = Arc::new(Mutex::new(Vec::<(i32, bool)>::new()));
     let results2 = Arc::clone(&results);
     let mesh_arc = Arc::new(mesh);
@@ -445,7 +445,7 @@ fn comm_split_single_group() {
 
 #[test]
 fn streaming_single_rank() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     launcher(1).launch(move |comm| {
         let pmesh = partition_simplex_streaming(Some(&mesh), &comm)
             .expect("streaming partition failed");
@@ -457,7 +457,7 @@ fn streaming_single_rank() {
 
 #[test]
 fn streaming_matches_replicated_2_ranks() {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
     let mesh2 = Arc::clone(&mesh);
 
     // Replicated partition for reference.
@@ -500,7 +500,7 @@ fn streaming_matches_replicated_2_ranks() {
 
 #[test]
 fn streaming_ghost_exchange_after_partition() {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(4));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(4));
     launcher(2).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
         let pmesh = partition_simplex_streaming(mesh_opt, &comm)
@@ -529,7 +529,7 @@ fn streaming_ghost_exchange_after_partition() {
 
 #[test]
 fn streaming_4_ranks() {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
     let total_elems = mesh.n_elems();
     let total_nodes = mesh.n_nodes();
 
@@ -616,7 +616,7 @@ fn streaming_two_prisms_matches_replicated_2_ranks() {
 
 #[test]
 fn metis_streaming_2_ranks() {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
     let total_elems = mesh.n_elems();
     let total_nodes = mesh.n_nodes();
     let opts = MetisOptions::default();
@@ -634,7 +634,7 @@ fn metis_streaming_2_ranks() {
 
 #[test]
 fn metis_streaming_4_ranks() {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
     let total_elems = mesh.n_elems();
     let total_nodes = mesh.n_nodes();
     let opts = MetisOptions::default();
@@ -660,7 +660,7 @@ fn metis_streaming_4_ranks() {
 
 #[test]
 fn metis_streaming_ghost_exchange() {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(8));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
     let opts = MetisOptions::default();
 
     launcher(2).launch(move |comm| {

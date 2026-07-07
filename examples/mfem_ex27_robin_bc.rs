@@ -22,7 +22,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, NeumannIntegrator, BoundaryMassIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{MeshTopology, SimplexMesh};
+use fem_mesh::{MeshTopology, Mesh};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space, FESpace,
@@ -42,11 +42,11 @@ fn main() {
         args.dbc, args.nbc, args.rbc_a, args.rbc_b
     );
 
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     let order = 1u8;
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn ex27_robin_bc_solve_converges() {
         let args = Args { mesh: None, n: 8, dbc: 0.0, nbc: 1.0, rbc_a: 1.0, rbc_b: 1.0 };
-        let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mesh = Mesh::<2>::unit_square_tri(args.n);
         let order = 1u8;
         let space = H1Space::new(mesh.clone(), order);
         let n = space.n_dofs();
@@ -216,7 +216,7 @@ mod tests {
         let inv_sinh = 1.0_f64 / PI.sinh();
 
         let n = 16;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let order = 1u8;
         let space = H1Space::new(mesh.clone(), order);
         let n_dofs = space.n_dofs();

@@ -74,11 +74,11 @@ impl<M: MeshTopology> FESpace for VectorCRSpace<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn vector_cr_tri1_dof_count() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let vs = VectorCRSpace::new(m, 1, 2);
         assert!(vs.n_dofs() > 0);
         // n_vel = 2 * n_edges ≥ 16 for a 2×2 tri mesh

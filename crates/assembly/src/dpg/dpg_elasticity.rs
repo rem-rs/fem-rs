@@ -271,11 +271,11 @@ pub fn solve_dpg_elasticity_2d<M: MeshTopology>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn dpg_elasticity_2d_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let e = 100.0; let nu = 0.3;
         let lam = e * nu / ((1.0+nu)*(1.0-2.0*nu));
         let mu = e / (2.0*(1.0+nu));
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn dpg_elasticity_gravity_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let e = 1000.0; let nu = 0.3;
         let lam = e * nu / ((1.0+nu)*(1.0-2.0*nu));
         let mu = e / (2.0*(1.0+nu));

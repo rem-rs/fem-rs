@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{
-    SimplexMesh, MeshTopology,
+    Mesh, MeshTopology,
     zz_estimator, dorfler_mark,
     refine_nonconforming_quad, refine_nonconforming_quad_aniso, QuadRefineDir,
 };
@@ -37,11 +37,11 @@ fn main() {
              args.cycles, args.theta, args.enriched_order);
 
     // Load or generate initial quad mesh
-    let mut mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mut mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_quad(args.n)
+        Mesh::<2>::unit_square_quad(args.n)
     };
 
     let t0 = Instant::now();
@@ -138,7 +138,7 @@ fn singular_fn(p: &[f64]) -> f64 {
     num / denom
 }
 
-fn element_centroid(mesh: &SimplexMesh<2>, e: u32) -> [f64; 2] {
+fn element_centroid(mesh: &Mesh<2>, e: u32) -> [f64; 2] {
     let nodes = mesh.elem_nodes(e);
     let npe = nodes.len() as f64;
     let mut c = [0.0_f64; 2];
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn ex30_amr_increases_elements_with_refinement() {
-        let mut mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mut mesh = Mesh::<2>::unit_square_quad(2);
         let n0 = mesh.n_elems();
         for cycle in 0..2 {
             let u: Vec<f64> = (0..mesh.n_nodes())
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn ex30_jump_function_induces_refinement() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(4);
+        let mesh = Mesh::<2>::unit_square_quad(4);
         let u: Vec<f64> = (0..mesh.n_nodes())
             .map(|i| jump_fn(&mesh.node_coords(i as u32)))
             .collect();

@@ -61,12 +61,12 @@ pub fn assemble_br1_from_space<S: FESpace + Sync>(space: &S, kappa: f64, quad_or
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{FESpace, L2Space};
 
     #[test]
     fn br1_matrix_has_consistent_structure() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_br1_from_space(&space, 1.0, 3);
         assert_eq!(mat.nrows, space.n_dofs());
@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn br1_matrix_positive_semidefinite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_br1_from_space(&space, 1.0, 3);
         let u: Vec<f64> = (0..space.n_dofs()).map(|i| (i as f64).sin()).collect();

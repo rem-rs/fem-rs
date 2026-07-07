@@ -561,7 +561,7 @@ pub(crate) fn find_face_elem<M: MeshTopology>(mesh: &M, _face_id: u32, face_node
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::L2Space;
     use crate::postproc::coefficient::ConstantVectorCoeff;
 
@@ -573,7 +573,7 @@ mod tests {
         use crate::standard::ConvectionIntegrator;
         use crate::assembler::Assembler;
 
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
 
         let vel = vec![1.0, 0.0];
@@ -600,7 +600,7 @@ mod tests {
     fn constant_advection_preserved() {
         // For u=1 with div-free b=(1,0), the weak form gives du/dt=0.
         const N: usize = 4;
-        let mesh = SimplexMesh::<2>::unit_square_tri(N);
+        let mesh = Mesh::<2>::unit_square_tri(N);
         let space = L2Space::new(mesh, 1);  // P1 L2
         let ifl = InteriorFaceList::build(space.mesh());
 
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn face_assembly_constant_velocity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         eprintln!("Interior face: nodes={:?}", mesh.element_nodes(0));
         let ifl = InteriorFaceList::build(&mesh);
         eprintln!("ifl.faces[0]: left={}, right={}, nodes={:?}",

@@ -15,7 +15,7 @@ use fem_assembly::{
     standard::CurlCurlIntegrator,
 };
 use fem_assembly::assembler::face_dofs_p1;
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{solve_cg, solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space, HCurlSpace, fe_space::FESpace,
@@ -27,7 +27,7 @@ fn default_cfg() -> SolverConfig {
 }
 
 /// Evaluate a P1 FE solution at a physical point (x,y) by iterating elements.
-fn eval_p1(uh: &[f64], mesh: &SimplexMesh<2>, x: f64, y: f64) -> f64 {
+fn eval_p1(uh: &[f64], mesh: &Mesh<2>, x: f64, y: f64) -> f64 {
     let tol = 1e-12;
     for e in 0..mesh.n_elements() as u32 {
         let nodes = mesh.element_nodes(e);
@@ -52,7 +52,7 @@ fn eval_p1(uh: &[f64], mesh: &SimplexMesh<2>, x: f64, y: f64) -> f64 {
 // MMS solution: u = sin(πx) sin(πy) sin(πz)
 
 fn solve_poisson_3d_mms(n: usize) -> f64 {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = H1Space::new(mesh, 1);
 
     let forcing = DomainSourceIntegrator::new(|x: &[f64]| {
@@ -84,7 +84,7 @@ fn benchmark_3d_poisson_mms() {
 // Exact: u = sin(πx) sin(πy)
 
 fn solve_helmholtz_mms(n: usize, k_sq: f64) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
 
     let forcing = DomainSourceIntegrator::new(move |x: &[f64]| {
@@ -125,7 +125,7 @@ fn ieee1597_helmholtz_mms() {
 // Reference: NAFEMS "A Simple Problem with Convection Boundary Conditions"
 
 fn solve_nafems_convection(n: usize) -> (f64, f64) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let n_dofs = space.n_dofs() as f64;
 
@@ -221,7 +221,7 @@ fn em_helmholtz_mms_k16() {
 // P1 exactly reproduces the linear solution V = y → max error ≈ machine ε.
 
 fn solve_team4_capacitor(n: usize) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
 
     // -∇²V = 0 (Laplace)
@@ -263,7 +263,7 @@ fn team4_electrostatic_capacitor() {
 // Checks DOF count and matrix sparsity — a smoke test for 3-D H(curl).
 
 fn solve_hcurl_3d_smoke(n: usize) -> (f64, f64) {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
     let n_dofs = hcurl.n_dofs() as f64;
 

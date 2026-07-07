@@ -1797,11 +1797,11 @@ fn tangent_elasto_plastic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn j2_elastic_step_zero_plasticity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::j2(2e5, 0.3, 1e6, 0.0); // very high yield → elastic
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -1816,7 +1816,7 @@ mod tests {
 
     #[test]
     fn j2_tangent_matrix_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::j2(2e5, 0.3, 1e6, 0.0);
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -1839,7 +1839,7 @@ mod tests {
     /// We apply u_x(x,y) = 0.1·x on a unit square so ε_xx = 0.1.
     #[test]
     fn j2_state_evolution_plastic_step() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let cfg = PlasticConfig::j2(2e5, 0.3, 50.0, 1e3); // low yield → plastic
@@ -1864,7 +1864,7 @@ mod tests {
 
     #[test]
     fn j2_elastic_step_state_unchanged() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::j2(2e5, 0.3, 1e8, 0.0); // very high yield → elastic
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -1885,7 +1885,7 @@ mod tests {
 
     #[test]
     fn finite_strain_zero_displacement_zero_residual() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::j2(2e5, 0.3, 1e8, 0.0); // elastic
         let form = FiniteStrainPlasticity::new(space, cfg, vec![], 2);
@@ -1900,7 +1900,7 @@ mod tests {
 
     #[test]
     fn finite_strain_tangent_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::j2(2e5, 0.3, 1e8, 0.0);
         let form = FiniteStrainPlasticity::new(space, cfg, vec![], 2);
@@ -1918,7 +1918,7 @@ mod tests {
 
     #[test]
     fn finite_strain_plastic_step_updates_state() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let cfg = PlasticConfig::j2(2e5, 0.3, 50.0, 1e3); // low yield
@@ -1942,7 +1942,7 @@ mod tests {
 
     #[test]
     fn finite_strain_state_persistence_across_calls() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let cfg = PlasticConfig::j2(2e5, 0.3, 50.0, 5e2);
@@ -1989,7 +1989,7 @@ mod tests {
     /// no plastic evolution would occur.
     #[test]
     fn drucker_prager_dispatches_to_dp_branch_not_j2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
 
@@ -2028,7 +2028,7 @@ mod tests {
     /// includes the volumetric term while J2 does not.
     #[test]
     fn drucker_prager_and_j2_diverge_under_dev_heavy_load() {
-        let mesh1 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh1 = Mesh::<2>::unit_square_tri(4);
         let mesh2 = mesh1.clone();
         let space1 = VectorH1Space::new(mesh1, 1, 2);
         let space2 = VectorH1Space::new(mesh2, 1, 2);
@@ -2089,7 +2089,7 @@ mod tests {
 
     #[test]
     fn mohr_coulomb_elastic_step_zero_residual() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::mohr_coulomb(2e5, 0.3, 1e6, 30.0, 30.0, 0.0);
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -2104,7 +2104,7 @@ mod tests {
 
     #[test]
     fn mohr_coulomb_tangent_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::mohr_coulomb(2e5, 0.3, 1e6, 30.0, 30.0, 0.0);
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -2121,7 +2121,7 @@ mod tests {
     #[test]
     fn mohr_coulomb_yields_under_hydrostatic_tension() {
         // MC (like DP) yields under hydrostatic tension; J2 does not.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::mohr_coulomb(2e5, 0.3, 10.0, 30.0, 30.0, 0.0);
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -2142,7 +2142,7 @@ mod tests {
 
     #[test]
     fn mohr_coulomb_plastic_step() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let cfg = PlasticConfig::mohr_coulomb(2e5, 0.3, 50.0, 30.0, 30.0, 1e3);
@@ -2164,7 +2164,7 @@ mod tests {
 
     #[test]
     fn hoek_brown_elastic_step_zero_residual() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         // Intact granite: σ_ci=200MPa, m_i=25, s=1, a=0.5
         let cfg = PlasticConfig::hoek_brown(7e4, 0.25, 200.0, 25.0, 1.0, 0.5);
@@ -2180,7 +2180,7 @@ mod tests {
 
     #[test]
     fn hoek_brown_tangent_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::hoek_brown(7e4, 0.25, 200.0, 25.0, 1.0, 0.5);
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -2197,7 +2197,7 @@ mod tests {
     #[test]
     fn hoek_brown_yields_under_tension() {
         // Hoek–Brown with low σ_ci should yield under tensile loading.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let cfg = PlasticConfig::hoek_brown(7e4, 0.25, 20.0, 25.0, 1.0, 0.5);
@@ -2219,7 +2219,7 @@ mod tests {
 
     #[test]
     fn cam_clay_elastic_step_zero_residual() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         // Typical soil: M=1.2, p_c0=200kPa, λ=0.15, κ=0.03, e₀=0.9
         let cfg = PlasticConfig::cam_clay(1e4, 0.3, 1.2, 200.0, 0.15, 0.03, 0.9);
@@ -2235,7 +2235,7 @@ mod tests {
 
     #[test]
     fn cam_clay_tangent_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::cam_clay(1e4, 0.3, 1.2, 200.0, 0.15, 0.03, 0.9);
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -2252,7 +2252,7 @@ mod tests {
     #[test]
     fn cam_clay_yields_under_compression() {
         // Cam–Clay should yield when the stress path crosses the yield surface.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         // High M, low p_c0 → easily yields
@@ -2281,7 +2281,7 @@ mod tests {
     /// actually dispatched in the return mapping.
     #[test]
     fn dp_non_associated_produces_different_response() {
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_a = Mesh::<2>::unit_square_tri(4);
         let mesh_n = mesh_a.clone();
         let space_a = VectorH1Space::new(mesh_a, 1, 2);
         let space_n = VectorH1Space::new(mesh_n, 1, 2);
@@ -2317,7 +2317,7 @@ mod tests {
     /// volumetric) plastic strain.
     #[test]
     fn mc_non_associated_produces_different_plastic_response() {
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_a = Mesh::<2>::unit_square_tri(4);
         let mesh_n = mesh_a.clone();
         let space_a = VectorH1Space::new(mesh_a, 1, 2);
         let space_n = VectorH1Space::new(mesh_n, 1, 2);
@@ -2356,7 +2356,7 @@ mod tests {
     /// different internal back-stress evolution under the same load.
     #[test]
     fn kinematic_back_stress_evolves() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         // Combined isotropic + kinematic (C = 10×H for visible effect)
@@ -2380,7 +2380,7 @@ mod tests {
     /// back-stress fields under the same monotonic load.
     #[test]
     fn kinematic_vs_isotropic_diverge() {
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_a = Mesh::<2>::unit_square_tri(4);
         let mesh_b = mesh_a.clone();
         let space_iso = VectorH1Space::new(mesh_a, 1, 2);
         let space_kin = VectorH1Space::new(mesh_b, 1, 2);
@@ -2416,7 +2416,7 @@ mod tests {
     /// With dt=0 the viscoplastic form behaves identically to rate‑independent J2.
     #[test]
     fn viscoplastic_dt_zero_equals_rate_independent() {
-        let mesh1 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh1 = Mesh::<2>::unit_square_tri(4);
         let mesh2 = mesh1.clone();
         let space1 = VectorH1Space::new(mesh1, 1, 2);
         let space2 = VectorH1Space::new(mesh2, 1, 2);
@@ -2446,7 +2446,7 @@ mod tests {
     /// is partly carried by viscous effects).
     #[test]
     fn viscoplastic_finite_dt_reduces_plasticity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         let cfg = PlasticConfig::j2_viscoplastic(2e5, 0.3, 50.0, 1e3, 5e3);
@@ -2464,7 +2464,7 @@ mod tests {
         let a_slow = form_slow.state.lock().unwrap().iter().map(|qp| qp[6]).sum::<f64>();
         assert!(a_slow > 0.0, "VP with dt=1 must still yield");
         // With very large dt (quasi-static), viscosity matters less
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let space2 = VectorH1Space::new(mesh2, 1, 2);
         let form_fast = J2PlasticityForm::with_dt(space2, cfg, vec![], 2, 100.0);
         let mut r2 = vec![0.0; form_fast.n_dofs()];
@@ -2481,7 +2481,7 @@ mod tests {
     /// the damage threshold.
     #[test]
     fn damage_plasticity_evolves_d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         // Low yield, low damage threshold → damage develops
@@ -2506,7 +2506,7 @@ mod tests {
     /// Without damage coupling (damage_S = 0), D stays zero.
     #[test]
     fn no_damage_when_disabled() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let n = space.n_dofs();
         // Same J2 but damage_S = 0 → damage disabled

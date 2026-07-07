@@ -1726,7 +1726,7 @@ mod tests {
     use crate::par_space::ParallelFESpace;
     use fem_assembly::postproc::coefficient::ConstantVectorCoeff;
     use fem_assembly::standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
     use fem_space::constraints::boundary_dofs;
@@ -1734,7 +1734,7 @@ mod tests {
     #[test]
     fn par_cg_laplacian_serial() {
         // Single-rank parallel CG on a simple Poisson problem.
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
@@ -1770,7 +1770,7 @@ mod tests {
     #[test]
     fn par_pcg_jacobi_two_ranks() {
         // Two-rank parallel PCG on Poisson.
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -1807,7 +1807,7 @@ mod tests {
     #[test]
     fn par_gmres_jacobi_two_ranks() {
         // Two-rank parallel GMRES+Jacobi on Poisson (SPD; exercises GMRES path).
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -1843,7 +1843,7 @@ mod tests {
     #[test]
     fn par_gmres_jacobi_conv_diff_two_ranks() {
         // Convection–diffusion (nonsymmetric): diffusion dominates for a stable solve.
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -1882,7 +1882,7 @@ mod tests {
     #[test]
     fn par_pcg_jacobi_p2_two_ranks() {
         // Two-rank parallel PCG on Poisson with P2 elements.
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -1926,7 +1926,7 @@ mod tests {
 
     #[test]
     fn par_bicgstab_poisson_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -1951,7 +1951,7 @@ mod tests {
 
     #[test]
     fn par_tfqmr_poisson_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -1977,7 +1977,7 @@ mod tests {
 
     #[test]
     fn par_idrs_poisson_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -2003,7 +2003,7 @@ mod tests {
 
     #[test]
     fn par_fgmres_jacobi_poisson_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -2028,7 +2028,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ilu0_poisson_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -2054,7 +2054,7 @@ mod tests {
 
     #[test]
     fn par_gmres_laplacian_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -2080,7 +2080,7 @@ mod tests {
 
     #[test]
     fn par_gmres_ilu0_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -2107,7 +2107,7 @@ mod tests {
 
     #[test]
     fn par_gmres_iluk1_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -2134,7 +2134,7 @@ mod tests {
 
     #[test]
     fn par_gmres_ilut_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -2161,7 +2161,7 @@ mod tests {
 
     #[test]
     fn par_fgmres_ilu0_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -2188,7 +2188,7 @@ mod tests {
 
     #[test]
     fn par_pcg_iluk2_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);

@@ -9,7 +9,7 @@ use fem_io::{
     FIELD_TEMPERATURE,
     vtk_nodal_workflow_fields,
 };
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 
 #[cfg(feature = "hdf5")]
 use fem_io::{
@@ -117,7 +117,7 @@ fn gmsh_named_attribute_solver_square() -> &'static str {
 }
 
 fn vtk_xml_with_fields<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     point_data: Vec<DataArray>,
     cell_data: Vec<DataArray>,
 ) -> String {
@@ -135,7 +135,7 @@ fn vtk_xml_with_fields<const D: usize>(
 }
 
 #[cfg(feature = "hdf5")]
-fn point_mask_from_node_ids<const D: usize>(mesh: &SimplexMesh<D>, node_ids: &[u32]) -> Vec<f64> {
+fn point_mask_from_node_ids<const D: usize>(mesh: &Mesh<D>, node_ids: &[u32]) -> Vec<f64> {
     let mut mask = vec![0.0; mesh.n_nodes()];
     for &node in node_ids {
         mask[node as usize] = 1.0;
@@ -145,7 +145,7 @@ fn point_mask_from_node_ids<const D: usize>(mesh: &SimplexMesh<D>, node_ids: &[u
 
 #[cfg(feature = "hdf5")]
 fn unique_nodes_for_named_boundary_set(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     name: &str,
 ) -> Vec<u32> {
@@ -163,7 +163,7 @@ fn unique_nodes_for_named_boundary_set(
 
 #[cfg(feature = "hdf5")]
 fn nodal_mask_for_boundary_set(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     name: &str,
 ) -> Vec<f64> {
@@ -172,7 +172,7 @@ fn nodal_mask_for_boundary_set(
 
 #[cfg(feature = "hdf5")]
 fn cell_mask_for_named_region(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     name: &str,
 ) -> Vec<f64> {
@@ -187,7 +187,7 @@ fn cell_mask_for_named_region(
 }
 
 #[cfg(feature = "hdf5")]
-fn merged_boundary_mask(mesh: &SimplexMesh<2>, registry: &NamedAttributeRegistry) -> Vec<f64> {
+fn merged_boundary_mask(mesh: &Mesh<2>, registry: &NamedAttributeRegistry) -> Vec<f64> {
     nodal_mask_for_boundary_set(mesh, registry, "inlet")
         .into_iter()
         .zip(nodal_mask_for_boundary_set(mesh, registry, "outlet"))
@@ -197,7 +197,7 @@ fn merged_boundary_mask(mesh: &SimplexMesh<2>, registry: &NamedAttributeRegistry
 
 #[cfg(feature = "hdf5")]
 fn cell_values_from_tags<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     values_by_tag: &[(i32, f64)],
     default: f64,
 ) -> Vec<f64> {
@@ -210,7 +210,7 @@ fn cell_values_from_tags<const D: usize>(
 
 #[cfg(feature = "hdf5")]
 fn cell_values_from_named_regions(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     values_by_name: &[(&str, f64)],
 ) -> Vec<f64> {
@@ -761,7 +761,7 @@ volumeelements
 
 #[test]
 fn netgen_write_then_read_roundtrip() {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+    let mesh = Mesh::<3>::unit_cube_tet(1);
     let mut buf = Vec::new();
     write_netgen_vol(&mesh, &mut buf).unwrap();
 
@@ -825,7 +825,7 @@ fn abaqus_mixed_element_types_parse() {
 /// Write a mesh to a buffer and verify the XML is syntactically valid.
 #[test]
 fn vtk_write_2d_mesh() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let n    = mesh.n_nodes();
     let e    = mesh.n_elems();
     let w    = VtkWriter::new(&mesh);
@@ -839,7 +839,7 @@ fn vtk_write_2d_mesh() {
 
 #[test]
 fn vtk_write_3d_mesh() {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+    let mesh = Mesh::<3>::unit_cube_tet(2);
     let w    = VtkWriter::new(&mesh);
     let mut buf = Vec::<u8>::new();
     w.write(&mut buf).unwrap();
@@ -852,7 +852,7 @@ fn vtk_write_3d_mesh() {
 #[test]
 fn vtk_write_poisson_solution() {
     use std::f64::consts::PI;
-    let mesh  = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh  = Mesh::<2>::unit_square_tri(8);
     let n     = mesh.n_nodes();
 
     // "Exact" solution values at nodes.
@@ -886,7 +886,7 @@ fn vtk_write_poisson_solution() {
 /// Write to a temp file and read it back to confirm non-empty.
 #[test]
 fn vtk_write_file_roundtrip() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let w    = VtkWriter::new(&mesh);
 
     let tmp = std::env::temp_dir().join("fem_rs_test_output.vtu");

@@ -33,7 +33,7 @@ mod tests {
     use super::*;
     use fem_linalg::{CooMatrix, CsrMatrix};
     use fem_mesh::amr::{HangingFaceConstraint, HangingNodeConstraint};
-    use fem_mesh::{SimplexMesh, NCState};
+    use fem_mesh::{Mesh, NCState};
     use crate::dof_manager::DofManager;
     use crate::fe_space::FESpace;
 
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn boundary_dofs_returns_sorted_valid_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm   = DofManager::new(&mesh, 1);
         let dofs = boundary_dofs(&mesh, &dm, &[1, 2, 3, 4]);
         assert!(!dofs.is_empty());
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn boundary_dofs_p2_includes_edge_midpoints() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let dm   = DofManager::new(&mesh, 2);
         let n_nodes = mesh.n_nodes();
         let dofs = boundary_dofs(&mesh, &dm, &[1, 2, 3, 4]);
@@ -92,7 +92,7 @@ mod tests {
     fn boundary_dofs_hcurl_unit_square() {
         use crate::hcurl::HCurlSpace;
         use crate::fe_space::FESpace;
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let dofs = boundary_dofs_hcurl(space.mesh(), &space, &[1, 2, 3, 4]);
         assert!(!dofs.is_empty(), "should find boundary edge DOFs");
@@ -111,7 +111,7 @@ mod tests {
     fn boundary_dofs_hdiv_unit_square() {
         use crate::hdiv::HDivSpace;
         use crate::fe_space::FESpace;
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HDivSpace::new(mesh, 0);
         let dofs = boundary_dofs_hdiv(space.mesh(), &space, &[1, 2, 3, 4]);
         assert!(!dofs.is_empty(), "should find boundary face DOFs");
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn prolongate_p2_hanging_is_exact_for_quadratic() {
-        let coarse = SimplexMesh::<2>::unit_square_tri(2);
+        let coarse = Mesh::<2>::unit_square_tri(2);
         let coarse_dm = DofManager::new(&coarse, 2);
 
         let f = |x: f64, y: f64| -> f64 { x * x + x * y + y * y + 2.0 * x - y + 1.0 };
@@ -505,7 +505,7 @@ mod tests {
         use fem_mesh::amr::{NCState3D, HangingNodeConstraint, HangingFaceConstraint};
 
         // Create a 3-D Tet mesh and non-conforming refinement.
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         // Mark first element for refinement → creates hanging faces.
         let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
@@ -543,7 +543,7 @@ mod tests {
         use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
 
@@ -575,7 +575,7 @@ mod tests {
 
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         // Uniform refinement = no hanging faces.
         let mut nc = NCState3D::new();
         let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0, 1, 2, 3, 4, 5]);
@@ -599,7 +599,7 @@ mod tests {
         use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
 
@@ -629,7 +629,7 @@ mod tests {
         use fem_mesh::amr::NCState3D;
 
         // Build a small 3D non-conforming mesh and HCurl ND2 space.
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
 
@@ -677,7 +677,7 @@ mod tests {
         use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
 
@@ -712,7 +712,7 @@ mod tests {
         use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
 
@@ -757,7 +757,7 @@ mod tests {
         use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fine_mesh, edge_cons, _midpoint_map, face_cons) = nc.refine(&mesh, &[0]);
 
@@ -856,7 +856,7 @@ mod tests {
         use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fm, ec, _mm, fc) = nc.refine(&mesh, &[0]);
         if ec.is_empty() { return; }
@@ -880,7 +880,7 @@ mod tests {
         use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fm, ec, _mm, fc) = nc.refine(&mesh, &[0]);
         if ec.is_empty() { return; }
@@ -900,7 +900,7 @@ mod tests {
         use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc = NCState3D::new();
         let (fm, ec, _mm, fc) = nc.refine(&mesh, &[0]);
         if ec.is_empty() { return; }
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn recover_hanging_values_hcurl_nd2_face_dofs() {
-        let mesh = fem_mesh::SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = fem_mesh::Mesh::<3>::unit_cube_tet(1);
         let mut nc = fem_mesh::amr::NCState3D::new();
         let (fm, ec, _, fc) = nc.refine(&mesh, &[0]);
         if ec.is_empty() { return; }
@@ -950,7 +950,7 @@ mod tests {
 
         // 2×2×2 hex mesh; refine element 0 → hanging quad faces on the
         // interface with neighbour elements.
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
         let (fine_mesh, edge_cons, quad_face_cons, _midpoint_map) = nc.refine(&mesh, &[0]);
 
@@ -982,7 +982,7 @@ mod tests {
         use crate::hcurl::HCurlSpace;
         use crate::fe_space::FESpace;
 
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
         let (fine_mesh, edge_cons, quad_face_cons, _midpoint_map) = nc.refine(&mesh, &[0]);
 
@@ -1012,7 +1012,7 @@ mod tests {
         use crate::hcurl::HCurlSpace;
         use crate::fe_space::FESpace;
 
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
         let (fine_mesh, edge_cons, quad_face_cons, _midpoint_map) = nc.refine(&mesh, &[0]);
 
@@ -1049,7 +1049,7 @@ mod tests {
         use crate::hcurl::HCurlSpace;
         use crate::fe_space::FESpace;
 
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
         let (fine_mesh, edge_cons, quad_face_cons, _midpoint_map) = nc.refine(&mesh, &[0]);
 
@@ -1094,7 +1094,7 @@ mod tests {
         use crate::hdiv::HDivSpace;
         use crate::fe_space::FESpace;
 
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
         let (fine_mesh, edge_cons, quad_face_cons, _midpoint_map) = nc.refine(&mesh, &[0]);
 
@@ -1124,7 +1124,7 @@ mod tests {
         use crate::hdiv::HDivSpace;
         use crate::fe_space::FESpace;
 
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
         let (fine_mesh, edge_cons, quad_face_cons, _midpoint_map) = nc.refine(&mesh, &[0]);
 
@@ -1159,7 +1159,7 @@ mod tests {
         use crate::hdiv::HDivSpace;
         use crate::fe_space::FESpace;
 
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
         let (fine_mesh, edge_cons, quad_face_cons, _midpoint_map) = nc.refine(&mesh, &[0]);
 

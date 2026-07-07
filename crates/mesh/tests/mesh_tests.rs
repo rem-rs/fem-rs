@@ -1,6 +1,6 @@
 //! Integration tests for the fem-mesh crate.
 
-use fem_mesh::{element_type::ElementType, topology::MeshTopology, SimplexMesh};
+use fem_mesh::{element_type::ElementType, topology::MeshTopology, Mesh};
 
 // ─── Unit-square mesh topology ────────────────────────────────────────────────
 
@@ -8,7 +8,7 @@ use fem_mesh::{element_type::ElementType, topology::MeshTopology, SimplexMesh};
 fn unit_square_tri_node_count() {
     // unit_square_tri(n) produces an (n+1)×(n+1) grid of nodes.
     for n in [4usize, 8, 16] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         assert_eq!(
             mesh.n_nodes(),
             (n + 1) * (n + 1),
@@ -23,7 +23,7 @@ fn unit_square_tri_node_count() {
 fn unit_square_tri_element_count() {
     // unit_square_tri(n) creates 2*n*n triangles (each quad split into 2 tris).
     for n in [4usize, 8, 16] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         assert_eq!(
             mesh.n_elements(),
             2 * n * n,
@@ -36,7 +36,7 @@ fn unit_square_tri_element_count() {
 
 #[test]
 fn unit_square_tri_all_elements_are_tri3() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     for e in mesh.elem_iter() {
         assert_eq!(
             mesh.element_type(e),
@@ -48,7 +48,7 @@ fn unit_square_tri_all_elements_are_tri3() {
 
 #[test]
 fn unit_square_tri_element_nodes_have_three_nodes() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     for e in mesh.elem_iter() {
         let nodes = mesh.element_nodes(e);
         assert_eq!(
@@ -72,7 +72,7 @@ fn unit_square_tri_element_nodes_have_three_nodes() {
 fn unit_square_tri_face_count() {
     // A unit-square mesh of n×n tris has 4*n boundary edges.
     for n in [4usize, 8, 16] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         assert_eq!(
             mesh.n_faces(),
             4 * n,
@@ -85,7 +85,7 @@ fn unit_square_tri_face_count() {
 
 #[test]
 fn unit_square_tri_boundary_tags_are_1_to_4() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh = Mesh::<2>::unit_square_tri(8);
     let tags = mesh.unique_boundary_tags();
     // All four walls should be present
     for &expected in &[1i32, 2, 3, 4] {
@@ -110,7 +110,7 @@ fn unit_square_tri_boundary_tag_physical_location() {
     //   tag 2 = right  (x ≈ 1)
     //   tag 3 = top    (y ≈ 1)
     //   tag 4 = left   (x ≈ 0)
-    let mesh = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh = Mesh::<2>::unit_square_tri(8);
 
     for f in mesh.face_iter() {
         let nodes = mesh.face_nodes(f);
@@ -147,7 +147,7 @@ fn unit_square_tri_boundary_tag_physical_location() {
 
 #[test]
 fn unit_square_tri_node_coords_in_unit_square() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh = Mesh::<2>::unit_square_tri(8);
     for n in 0..mesh.n_nodes() as u32 {
         let c = mesh.node_coords(n);
         assert!(
@@ -166,7 +166,7 @@ fn unit_square_tri_node_coords_in_unit_square() {
 #[test]
 fn unit_square_tri_check_passes() {
     // mesh.check() should return Ok for a well-formed mesh
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     mesh.check()
         .expect("mesh.check() should pass for unit_square_tri");
 }
@@ -183,7 +183,7 @@ fn mixed_mesh_elem_type_accessor() {
     let elem_offsets = vec![0usize, 4, 7, 10];
     let elem_types = vec![ElementType::Quad4, ElementType::Tri3, ElementType::Tri3];
 
-    let mesh = SimplexMesh::<2> {
+    let mesh = Mesh::<2> {
         coords,
         conn,
         elem_tags: vec![0; 3],
@@ -211,7 +211,7 @@ fn mixed_mesh_elem_type_accessor() {
 
 #[test]
 fn face_elements_after_build_all_boundary_faces_have_owner() {
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mut mesh = Mesh::<2>::unit_square_tri(4);
     mesh.build_face_to_elem();
 
     let f2e = mesh
@@ -238,7 +238,7 @@ fn face_elements_after_build_all_boundary_faces_have_owner() {
 
 #[test]
 fn face_elements_3d_cube_each_boundary_face_has_owner() {
-    let mut mesh = SimplexMesh::<3>::unit_cube_tet(2);
+    let mut mesh = Mesh::<3>::unit_cube_tet(2);
     mesh.build_face_to_elem();
 
     let f2e = mesh
@@ -259,7 +259,7 @@ fn face_elements_3d_cube_each_boundary_face_has_owner() {
 
 #[test]
 fn face_elements_not_built_returns_zero() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let (elem, _neighbor) = mesh.face_elements(0);
     assert_eq!(
         elem, 0,

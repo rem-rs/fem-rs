@@ -1,12 +1,12 @@
 //! GMSH v2.2 ASCII format writer.
 //!
-//! Writes a [`SimplexMesh`] (plus optional boundary faces) to Gmsh
+//! Writes a [`Mesh`] (plus optional boundary faces) to Gmsh
 //! v2.2 ASCII format, viewable in the GMSH GUI.
 
 use std::io::Write;
 
 use fem_core::{FemResult};
-use fem_mesh::{element_type::ElementType, topology::MeshTopology, SimplexMesh};
+use fem_mesh::{element_type::ElementType, topology::MeshTopology, Mesh};
 
 fn elem_type_code(et: ElementType) -> Option<u32> {
     Some(match et {
@@ -29,7 +29,7 @@ fn elem_type_code(et: ElementType) -> Option<u32> {
 }
 
 /// Write a mesh as GMSH v2.2 ASCII.
-pub fn write_msh<W: Write, const D: usize>(mesh: &SimplexMesh<D>, writer: &mut W) -> FemResult<()> {
+pub fn write_msh<W: Write, const D: usize>(mesh: &Mesh<D>, writer: &mut W) -> FemResult<()> {
     writeln!(writer, "$MeshFormat")?;
     writeln!(writer, "2.2 0 8")?;
     writeln!(writer, "$EndMeshFormat")?;
@@ -83,7 +83,7 @@ pub fn write_msh<W: Write, const D: usize>(mesh: &SimplexMesh<D>, writer: &mut W
 }
 
 /// Write to a GMSH file.
-pub fn write_msh_file<const D: usize>(mesh: &SimplexMesh<D>, path: impl AsRef<std::path::Path>) -> FemResult<()> {
+pub fn write_msh_file<const D: usize>(mesh: &Mesh<D>, path: impl AsRef<std::path::Path>) -> FemResult<()> {
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     write_msh(mesh, &mut f)
 }
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn roundtrip_cube() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let mut buf = Vec::new();
         write_msh(&mesh, &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn roundtrip_square_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let mut buf = Vec::new();
         write_msh(&mesh, &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();

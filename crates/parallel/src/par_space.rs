@@ -148,13 +148,13 @@ mod tests {
     use crate::launcher::native::ThreadLauncher;
     use crate::launcher::WorkerConfig;
     use crate::par_simplex::partition_simplex;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::dof_manager::DofManager;
 
     #[test]
     fn par_space_global_dofs_match_serial_p1() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let serial_n_dofs = mesh.n_nodes(); // P1
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn par_space_global_dofs_match_serial_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let serial_space = H1Space::new(mesh.clone(), 2);
         let serial_n_dofs = serial_space.n_dofs();
 
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn par_space_ghost_exchange_p1() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn par_space_ghost_exchange_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {

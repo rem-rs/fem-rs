@@ -26,7 +26,7 @@
 use std::f64::consts::PI;
 use fem_examples::maxwell::StaticMaxwellBuilder;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::HCurlSpace;
 
 const DEFAULT_GAMMA: f64 = 2.0;
@@ -71,11 +71,11 @@ fn solve_case_with_gamma_and_scale(args: &Args, gamma: f64, scale: f64) -> CaseR
 }
 
 fn solve_case_with_gamma_and_scale_and_field(args: &Args, gamma: f64, scale: f64) -> (CaseResult, Vec<f64>) {
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
     let space = HCurlSpace::new(mesh, 1);
 
@@ -156,7 +156,7 @@ mod tests {
     }
 
     fn mms_l2_error(args: &Args, gamma: f64, scale: f64) -> f64 {
-        let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mesh = Mesh::<2>::unit_square_tri(args.n);
         let space = HCurlSpace::new(mesh, 1);
         let bdr_attrs = [1, 2, 3, 4];
         let robin_bdr = [1, 1, 1, 1];

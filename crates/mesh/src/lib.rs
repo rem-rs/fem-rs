@@ -7,7 +7,7 @@
 //! - [`element_type`] — `ElementType` enum (Tri3, Tet4, Hex8, …)
 //! - [`boundary`]     — `BoundaryTag` and `PhysicalGroup`
 //! - [`topology`]     — `MeshTopology` trait
-//! - [`simplex`]      — `SimplexMesh<D>`: concrete unstructured mesh with built-in generators
+//! - [`simplex`]      — [`Mesh<D>`]: concrete unstructured mesh with built-in generators
 
 pub mod amr;
 pub mod boundary;
@@ -50,7 +50,7 @@ pub use moving_mesh::{
 	laplacian_smooth_2d,
 };
 pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPointLocator};
-pub use simplex::SimplexMesh;
+pub use simplex::Mesh;
 pub use submesh::{SubMesh, extract_submesh, extract_submesh_by_name};
 pub use topology::MeshTopology;
 pub use transformation::ElementTransformation;

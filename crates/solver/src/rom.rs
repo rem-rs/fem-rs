@@ -952,14 +952,14 @@ mod tests {
     fn rom_parametric_diffusion_end_to_end() {
         use fem_assembly::standard::DiffusionIntegrator;
         use fem_assembly::postproc::coefficient::FnCoeff;
-        use fem_mesh::SimplexMesh;
+        use fem_mesh::Mesh;
         use fem_space::H1Space;
         use fem_space::fe_space::FESpace;
         use fem_space::constraints::boundary_dofs;
         use fem_assembly::Assembler;
         use crate::solve_cg;
 
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let space = H1Space::new(mesh.clone(), 1);
         let dm = fem_space::DofManager::new(&mesh, 1);
 

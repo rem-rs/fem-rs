@@ -120,43 +120,43 @@ impl<M: MeshTopology + Clone> FESpace for HDivTraceSpace<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test] fn hcurl_trace_3d_tet_p1() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let t = HCurlTraceSpace::new(mesh, 1);
         assert_eq!(t.dofs_per_face(), 2);
         assert!(t.n_dofs() > 0);
     }
 
     #[test] fn hcurl_trace_3d_hex_p1() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let t = HCurlTraceSpace::new(mesh, 1);
         assert_eq!(t.dofs_per_face(), 4);  // 2*k*(k+1) = 4 for k=1
         assert_eq!(t.n_dofs(), 6 * 4);
     }
 
     #[test] fn hcurl_trace_3d_tet_p2() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let t = HCurlTraceSpace::new(mesh, 2);
         assert_eq!(t.dofs_per_face(), 6);  // k(k+1) = 6 for k=2
     }
 
     #[test] fn hdiv_trace_3d_tet_p1() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let t = HDivTraceSpace::new(mesh, 1);
         assert_eq!(t.dofs_per_face(), 3);  // (k+1)(k+2)/2 = 3 for k=1
     }
 
     #[test] fn hdiv_trace_3d_hex_p1() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let t = HDivTraceSpace::new(mesh, 1);
         assert_eq!(t.dofs_per_face(), 4);
         assert_eq!(t.n_dofs(), 6 * 4);
     }
 
     #[test] fn hcurl_trace_finite() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let t = HCurlTraceSpace::new(mesh, 2);
         let dofs = t.face_dofs(0);
         for &d in dofs { assert!(d != DofId::MAX); }

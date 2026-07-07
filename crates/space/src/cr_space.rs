@@ -216,11 +216,11 @@ impl<M: MeshTopology> FESpace for CRSpace<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn crspace_tri1_dof_count() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let s = CRSpace::new(m, 1);
         assert!(s.n_dofs() > 0);
         assert_eq!(s.order(), 1);
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn crspace_tri2_dof_count() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let s = CRSpace::new(m, 2);
         assert_eq!(s.order(), 2);
         assert!(s.n_dofs() > 0);
@@ -239,14 +239,14 @@ mod tests {
 
     #[test]
     fn crspace_per_element_dofs_tri() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let s = CRSpace::new(m, 1);
         assert_eq!(s.element_dofs(0).len(), 3, "TriCR1: 3 DOFs per element");
     }
 
     #[test]
     fn crspace_tet1_dof_count() {
-        let m = SimplexMesh::<3>::unit_cube_tet(1);
+        let m = Mesh::<3>::unit_cube_tet(1);
         let s = CRSpace::new(m.clone(), 1);
         assert!(s.n_dofs() > 0);
         // A unit cube with 6 tets has 4 interior faces + boundary faces

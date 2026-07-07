@@ -1,6 +1,6 @@
 //! Interior face list: pairs of elements sharing an interior edge/face.
 //!
-//! The `SimplexMesh` only stores boundary faces.  For DG methods, the
+//! The `Mesh` only stores boundary faces.  For DG methods, the
 //! assembly loop also needs to iterate over interior faces with the two
 //! adjacent elements and the shared face geometry.
 //!
@@ -95,12 +95,12 @@ fn local_faces(npe: usize, dim: usize) -> Vec<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     /// A 1×1 unit square split into 2 triangles → exactly 1 interior edge.
     #[test]
     fn single_square_interior_faces() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let ifl = InteriorFaceList::build(&mesh);
         assert_eq!(ifl.len(), 1, "Expected 1 interior face, got {}", ifl.len());
         assert_eq!(ifl.faces[0].face_nodes.len(), 2);
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn unit_square_interior_face_count() {
         let n = 4usize;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let ifl = InteriorFaceList::build(&mesh);
         // Each of the 2n² triangles has 3 edges; total edge-slots = 6n².
         // Boundary edges = 4n, so interior face-slots = 6n² - 4n.

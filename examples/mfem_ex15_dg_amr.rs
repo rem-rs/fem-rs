@@ -33,7 +33,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_mesh::amr::{refine_uniform, NCState, zz_estimator, dorfler_mark, prolongate_p1};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, apply_hanging_constraints, recover_hanging_values, boundary_dofs}};
@@ -103,11 +103,11 @@ struct RunResult {
 fn main() {
     let args = parse_args();
 
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh_file {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh_file {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n0)
+        Mesh::<2>::unit_square_tri(args.n0)
     };
 
     println!("=== fem-rs Example 15: Poisson + Mesh Refinement with Error Estimation ===");
@@ -159,7 +159,7 @@ fn main() {
 }
 
 fn run_case(
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
     levels: usize,
     theta: f64,
     nonconforming: bool,
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn ex15_conforming_refinement_monotonically_reduces_true_error() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let result = run_case(mesh, 3, 0.5, false, mms_exact, mms_rhs);
         assert_eq!(result.n0, 0);
         assert_eq!(result.levels, 3);
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn ex15_conforming_refinement_approaches_second_order_gain() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let result = run_case(mesh, 4, 0.5, false, mms_exact, mms_rhs);
         let levels = &result.levels_data;
         let ratio_12 = levels[1].l2_error / levels[2].l2_error;
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn ex15_nonconforming_mode_creates_hanging_nodes_and_reduces_error() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let result = run_case(mesh, 3, 0.5, true, mms_exact, mms_rhs);
         assert!(result.nonconforming);
         assert_eq!(result.levels_data.len(), 4);
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn ex15_marking_selects_nonzero_subset_each_level() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let result = run_case(mesh, 3, 0.5, false, mms_exact, mms_rhs);
         for level in &result.levels_data {
             assert!(level.n_marked > 0, "each level should mark at least one element");
@@ -420,8 +420,8 @@ mod tests {
     /// Higher Dörfler threshold should generally mark fewer elements on refined levels.
     #[test]
     fn ex15_dorfler_marking_threshold_affects_selection() {
-        let mesh_low = SimplexMesh::<2>::unit_square_tri(4);
-        let mesh_high = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_low = Mesh::<2>::unit_square_tri(4);
+        let mesh_high = Mesh::<2>::unit_square_tri(4);
         let low_theta = run_case(mesh_low, 2, 0.3, false, mms_exact, mms_rhs);
         let high_theta = run_case(mesh_high, 2, 0.8, false, mms_exact, mms_rhs);
 
@@ -441,8 +441,8 @@ mod tests {
     /// Coarser starting mesh should still achieve convergence.
     #[test]
     fn ex15_coarser_start_still_converges() {
-        let mesh_coarse = SimplexMesh::<2>::unit_square_tri(2);
-        let mesh_fine = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_coarse = Mesh::<2>::unit_square_tri(2);
+        let mesh_fine = Mesh::<2>::unit_square_tri(4);
         let coarse_start = run_case(mesh_coarse, 3, 0.5, false, mms_exact, mms_rhs);
         let fine_start = run_case(mesh_fine, 3, 0.5, false, mms_exact, mms_rhs);
 
@@ -460,7 +460,7 @@ mod tests {
     /// Estimator error should correlate with true error reduction.
     #[test]
     fn ex15_estimator_tracks_true_error() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let result = run_case(mesh, 3, 0.5, false, mms_exact, mms_rhs);
         let levels = &result.levels_data;
 
@@ -489,7 +489,7 @@ mod tests {
     /// DOF count should grow monotonically with refinement.
     #[test]
     fn ex15_dof_count_grows_monotonically() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let result = run_case(mesh, 4, 0.5, false, mms_exact, mms_rhs);
         let levels = &result.levels_data;
 
@@ -503,7 +503,7 @@ mod tests {
     /// Element count should grow monotonically with refinement.
     #[test]
     fn ex15_element_count_grows_monotonically() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let result = run_case(mesh, 4, 0.5, false, mms_exact, mms_rhs);
         let levels = &result.levels_data;
 

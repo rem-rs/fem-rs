@@ -21,7 +21,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2, TriP3}};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_space::{
     H1Space,
     fe_space::FESpace,
@@ -136,7 +136,7 @@ fn solve_poisson<M: MeshTopology + Clone>(
 
 #[test]
 fn poisson_p1_16x16_l2_error() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh = Mesh::<2>::unit_square_tri(16);
     let err  = solve_poisson(mesh, 1);
     println!("P1 16×16 L2 error = {err:.3e}");
     assert!(err < 6e-3, "P1 L2 error too large: {err:.3e} >= 6e-3");
@@ -144,7 +144,7 @@ fn poisson_p1_16x16_l2_error() {
 
 #[test]
 fn poisson_p2_16x16_l2_error() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh = Mesh::<2>::unit_square_tri(16);
     let err  = solve_poisson(mesh, 2);
     println!("P2 16×16 L2 error = {err:.3e}");
     assert!(err < 8e-4, "P2 L2 error too large: {err:.3e} >= 8e-4");
@@ -153,8 +153,8 @@ fn poisson_p2_16x16_l2_error() {
 /// Verify P1 convergence rate ≥ 1.9 (theoretical: 2).
 #[test]
 fn poisson_p1_convergence_rate() {
-    let err8  = solve_poisson(SimplexMesh::<2>::unit_square_tri(8),  1);
-    let err16 = solve_poisson(SimplexMesh::<2>::unit_square_tri(16), 1);
+    let err8  = solve_poisson(Mesh::<2>::unit_square_tri(8),  1);
+    let err16 = solve_poisson(Mesh::<2>::unit_square_tri(16), 1);
     let rate = (err8 / err16).log2();
     println!("P1 convergence rate = {rate:.2}");
     assert!(rate > 1.9, "P1 convergence rate {rate:.2} < 1.9");
@@ -163,8 +163,8 @@ fn poisson_p1_convergence_rate() {
 /// Verify P2 convergence rate ≥ 2.8 (theoretical: 3).
 #[test]
 fn poisson_p2_convergence_rate() {
-    let err8  = solve_poisson(SimplexMesh::<2>::unit_square_tri(8),  2);
-    let err16 = solve_poisson(SimplexMesh::<2>::unit_square_tri(16), 2);
+    let err8  = solve_poisson(Mesh::<2>::unit_square_tri(8),  2);
+    let err16 = solve_poisson(Mesh::<2>::unit_square_tri(16), 2);
     let rate = (err8 / err16).log2();
     println!("P2 convergence rate = {rate:.2}");
     assert!(rate > 2.8, "P2 convergence rate {rate:.2} < 2.8");
@@ -175,11 +175,11 @@ fn poisson_p2_convergence_rate() {
 #[ignore]
 fn poisson_p3_debug_rates() {
     for n in [2usize, 4, 8, 16] {
-        let err = solve_poisson(SimplexMesh::<2>::unit_square_tri(n), 3);
+        let err = solve_poisson(Mesh::<2>::unit_square_tri(n), 3);
         println!("P3 n={n}: error = {err:.6e}");
     }
     let errs: Vec<f64> = [2usize, 4, 8, 16].iter()
-        .map(|&n| solve_poisson(SimplexMesh::<2>::unit_square_tri(n), 3))
+        .map(|&n| solve_poisson(Mesh::<2>::unit_square_tri(n), 3))
         .collect();
     for i in 0..errs.len()-1 {
         let ns = [2usize, 4, 8, 16];
@@ -190,7 +190,7 @@ fn poisson_p3_debug_rates() {
 /// Verify P3 L2 error < 8e-4 on a 16×16 mesh (theoretical: O(h⁴)).
 #[test]
 fn poisson_p3_16x16_l2_error() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh = Mesh::<2>::unit_square_tri(16);
     let err  = solve_poisson(mesh, 3);
     println!("P3 16×16 L2 error = {err:.3e}");
     assert!(err < 8e-4, "P3 L2 error too large: {err:.3e} >= 8e-4");
@@ -200,8 +200,8 @@ fn poisson_p3_16x16_l2_error() {
 /// Uses n=8→16 to avoid pre-asymptotic regime at small mesh sizes.
 #[test]
 fn poisson_p3_convergence_rate() {
-    let err8  = solve_poisson(SimplexMesh::<2>::unit_square_tri(8),  3);
-    let err16 = solve_poisson(SimplexMesh::<2>::unit_square_tri(16), 3);
+    let err8  = solve_poisson(Mesh::<2>::unit_square_tri(8),  3);
+    let err16 = solve_poisson(Mesh::<2>::unit_square_tri(16), 3);
     let rate = (err8 / err16).log2();
     println!("P3 convergence rate = {rate:.2}");
     assert!(rate > 3.5, "P3 convergence rate {rate:.2} < 3.5");
@@ -214,7 +214,7 @@ fn poisson_p3_convergence_rate() {
 /// For a Q1 element the map from reference [-1,1]² to physical coords is bilinear.
 /// On a uniform axis-aligned mesh every element is an affine parallelogram with
 /// det_J = (h/2)² where h = 1/n, but we compute it properly via the Jacobian.
-fn l2_error_quad(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+fn l2_error_quad(uh: &[f64], space: &H1Space<Mesh<2>>) -> f64 {
     use fem_element::lagrange::QuadQ1;
     let ref_elem = QuadQ1;
     let mesh = space.mesh();
@@ -274,7 +274,7 @@ fn l2_error_quad(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
 
 /// Solve Poisson on a Quad4 mesh and return the L2 error.
 fn solve_poisson_quad(n: usize) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_quad(n);
+    let mesh = Mesh::<2>::unit_square_quad(n);
     let space = H1Space::new(mesh.clone(), 1);
 
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -313,7 +313,7 @@ fn poisson_q1_convergence_rate() {
 ///
 /// Uses Q1 bilinear geometry map (4 mesh nodes per element) but Q2 solution
 /// basis (9 DOFs per element: 4 corners + 4 edge midpoints + 1 interior).
-fn l2_error_quad2(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+fn l2_error_quad2(uh: &[f64], space: &H1Space<Mesh<2>>) -> f64 {
     use fem_element::lagrange::QuadQ2;
     let ref_elem = QuadQ2;
     let geo_elem = fem_element::lagrange::QuadQ1;
@@ -363,7 +363,7 @@ fn l2_error_quad2(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
 }
 
 fn solve_poisson_q2(n: usize) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_quad(n);
+    let mesh = Mesh::<2>::unit_square_quad(n);
     let space = H1Space::new(mesh.clone(), 2);
 
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -402,7 +402,7 @@ fn poisson_q2_convergence_rate() {
 fn patch_test_linear_p1() {
     // For u(x,y) = x: -Δu = 0, so f = 0.
     // BCs: u = x on boundary.
-    let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh  = Mesh::<2>::unit_square_tri(4);
     let space = H1Space::new(mesh.clone(), 1);
 
     // Zero forcing.
@@ -497,7 +497,7 @@ fn l2_error_3d<M: MeshTopology>(uh: &[f64], space: &H1Space<M>, order: u8) -> f6
 }
 
 fn solve_poisson_3d(n: usize, order: u8) -> f64 {
-    let mesh  = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh  = Mesh::<3>::unit_cube_tet(n);
     let space = H1Space::new(mesh.clone(), order);
 
     let diffusion = DiffusionIntegrator { kappa: 1.0 };

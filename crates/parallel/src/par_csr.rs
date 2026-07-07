@@ -172,7 +172,7 @@ mod tests {
     use crate::ghost::GhostExchange;
     use crate::par_vector::ParVector;
     use fem_linalg::CooMatrix;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn par_csr_spmv_identity() {
         // Parallel SpMV with identity matrix on 2 ranks.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -275,7 +275,7 @@ mod tests {
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
-            let mesh = SimplexMesh::<2>::unit_square_tri(2);
+            let mesh = Mesh::<2>::unit_square_tri(2);
             let pmesh = partition_simplex(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn par_csr_spmv_serial() {
         // Verify serial SpMV gives correct result.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {

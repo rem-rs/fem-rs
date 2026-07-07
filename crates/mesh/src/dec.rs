@@ -164,24 +164,24 @@ impl DecOperators2D {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SimplexMesh;
+    use crate::Mesh;
 
     #[test] fn dec_edge_count() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let dec = DecOperators2D::build(&m);
         assert_eq!(dec.n_vertices, 9);
         assert!(dec.n_edges > 0);
     }
 
     #[test] fn dec_d0_constant_zero() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let dec = DecOperators2D::build(&m);
         let df = dec.apply_d0(&vec![1.0; dec.n_vertices]);
         assert!(df.iter().all(|v| v.abs() < 1e-14));
     }
 
     #[test] fn dec_d1_d0_zero() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let dec = DecOperators2D::build(&m);
         let f: Vec<f64> = (0..dec.n_vertices).map(|i| (i as f64).sin()).collect();
         let ddf = dec.apply_d1(&dec.apply_d0(&f));
@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test] fn dec_laplacian_spd() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let dec = DecOperators2D::build(&m);
         let lap = dec.laplacian();
         let n = lap.len();
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test] fn dec_poisson_solves() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let dec = DecOperators2D::build(&m);
         let rhs: Vec<f64> = (0..dec.n_vertices).map(|i| {
             let c = m.node_coords(i as u32);
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test] fn dec_exact_de_rham() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let dec = DecOperators2D::build(&m);
         let mut w = vec![0.0; dec.n_edges];
         for (&(a, b), &eid) in &dec.edge_map {

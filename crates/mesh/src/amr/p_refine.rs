@@ -1,5 +1,5 @@
 use fem_core::{NodeId, ElemId};
-use crate::{element_type::ElementType, simplex::SimplexMesh};
+use crate::{element_type::ElementType, simplex::Mesh};
 
 /// Elevate selected Tri3 elements to Tri6 (quadratic) by adding edge-midpoint
 /// nodes.  Elements not in `marked` remain Tri3.
@@ -11,9 +11,9 @@ use crate::{element_type::ElementType, simplex::SimplexMesh};
 /// `(new_mesh, midpoint_map)` where `midpoint_map` maps edge keys to new
 /// node indices (for prolongation).
 pub fn p_refine_tri3_to_tri6(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     marked: &[ElemId],
-) -> (SimplexMesh<2>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
+) -> (Mesh<2>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
     assert_eq!(mesh.elem_type, ElementType::Tri3,
         "p_refine_tri3_to_tri6 requires a Tri3 mesh");
     let n_elems = mesh.n_elems();
@@ -73,7 +73,7 @@ pub fn p_refine_tri3_to_tri6(
         }
     }
 
-    let new_mesh = SimplexMesh {
+    let new_mesh = Mesh {
         coords: new_coords,
         conn: new_conn,
         elem_tags: mesh.elem_tags.clone(),
@@ -97,9 +97,9 @@ pub fn p_refine_tri3_to_tri6(
 ///
 /// Each marked Tri6 element gains one new node at its centroid.
 pub fn p_refine_tri6_to_tri10(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     marked: &[ElemId],
-) -> (SimplexMesh<2>, Vec<NodeId>) {
+) -> (Mesh<2>, Vec<NodeId>) {
     assert_eq!(mesh.elem_type, ElementType::Tri6,
         "p_refine_tri6_to_tri10 requires a Tri6 mesh");
     let n_elems = mesh.n_elems();
@@ -141,7 +141,7 @@ pub fn p_refine_tri6_to_tri10(
         }
     }
 
-    let new_mesh = SimplexMesh {
+    let new_mesh = Mesh {
         coords: new_coords, conn: new_conn,
         elem_tags: mesh.elem_tags.clone(),
         elem_type: ElementType::Tri6,
@@ -160,9 +160,9 @@ pub fn p_refine_tri6_to_tri10(
 ///
 /// Edge midpoints are shared between adjacent tets (deduplicated by edge key).
 pub fn p_refine_tet4_to_tet10(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (SimplexMesh<3>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
+) -> (Mesh<3>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
     assert_eq!(mesh.elem_type, ElementType::Tet4,
         "p_refine_tet4_to_tet10 requires a Tet4 mesh");
 
@@ -217,7 +217,7 @@ pub fn p_refine_tet4_to_tet10(
         }
     }
 
-    let new_mesh = SimplexMesh {
+    let new_mesh = Mesh {
         coords: new_coords, conn: new_conn,
         elem_tags: mesh.elem_tags.clone(),
         elem_type: ElementType::Tet10,
@@ -236,9 +236,9 @@ pub fn p_refine_tet4_to_tet10(
 ///
 /// Face centroids are shared between adjacent tets (deduplicated by face key).
 pub fn p_refine_tet10_to_tet20(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (SimplexMesh<3>, std::collections::HashMap<(NodeId,NodeId,NodeId), NodeId>) {
+) -> (Mesh<3>, std::collections::HashMap<(NodeId,NodeId,NodeId), NodeId>) {
     assert_eq!(mesh.elem_type, ElementType::Tet10,
         "p_refine_tet10_to_tet20 requires a Tet10 mesh");
 
@@ -293,7 +293,7 @@ pub fn p_refine_tet10_to_tet20(
         }
     }
 
-    let new_mesh = SimplexMesh {
+    let new_mesh = Mesh {
         coords: new_coords, conn: new_conn,
         elem_tags: mesh.elem_tags.clone(),
         elem_type: ElementType::Tet10,
@@ -312,9 +312,9 @@ pub fn p_refine_tet10_to_tet20(
 ///
 /// Edge midpoints are shared between adjacent quads (deduplicated by edge key).
 pub fn p_refine_quad4_to_quad9(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     marked: &[ElemId],
-) -> (SimplexMesh<2>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
+) -> (Mesh<2>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
     assert_eq!(mesh.elem_type, ElementType::Quad4,
         "p_refine_quad4_to_quad9 requires a Quad4 mesh");
 
@@ -370,7 +370,7 @@ pub fn p_refine_quad4_to_quad9(
         }
     }
 
-    let new_mesh = SimplexMesh {
+    let new_mesh = Mesh {
         coords: new_coords, conn: new_conn,
         elem_tags: mesh.elem_tags.clone(),
         elem_type: ElementType::Quad4,
@@ -389,9 +389,9 @@ pub fn p_refine_quad4_to_quad9(
 ///
 /// Edge midpoints are shared between adjacent hexes (deduplicated by edge key).
 pub fn p_refine_hex8_to_hex20(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (SimplexMesh<3>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
+) -> (Mesh<3>, std::collections::HashMap<(NodeId, NodeId), NodeId>) {
     assert_eq!(mesh.elem_type, ElementType::Hex8,
         "p_refine_hex8_to_hex20 requires a Hex8 mesh");
 
@@ -453,7 +453,7 @@ pub fn p_refine_hex8_to_hex20(
         }
     }
 
-    let new_mesh = SimplexMesh {
+    let new_mesh = Mesh {
         coords: new_coords, conn: new_conn,
         elem_tags: mesh.elem_tags.clone(),
         elem_type: ElementType::Hex20,
@@ -472,9 +472,9 @@ pub fn p_refine_hex8_to_hex20(
 ///
 /// Face centers are shared between adjacent hexes (deduplicated by quad face key).
 pub fn p_refine_hex20_to_hex27(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (SimplexMesh<3>, Vec<NodeId>) {
+) -> (Mesh<3>, Vec<NodeId>) {
     assert_eq!(mesh.elem_type, ElementType::Hex20,
         "p_refine_hex20_to_hex27 requires a Hex20 mesh");
 
@@ -540,7 +540,7 @@ pub fn p_refine_hex20_to_hex27(
         }
     }
 
-    let new_mesh = SimplexMesh {
+    let new_mesh = Mesh {
         coords: new_coords, conn: new_conn,
         elem_tags: mesh.elem_tags.clone(),
         elem_type: ElementType::Hex27,
@@ -568,7 +568,7 @@ pub fn p_refine_hex20_to_hex27(
 pub fn p_prolongate_p1_to_p2(
     u_p1: &[f64],
     midpoint_map: &std::collections::HashMap<(NodeId, NodeId), NodeId>,
-    mesh_p2: &SimplexMesh<2>,
+    mesh_p2: &Mesh<2>,
 ) -> Vec<f64> {
     let n_total = mesh_p2.n_nodes();
     let mut u_p2 = vec![0.0_f64; n_total];

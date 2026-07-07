@@ -14,7 +14,7 @@
 
 use fem_core::ElemId;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{SimplexMesh, NCState3D, prolongate_p1};
+use fem_mesh::{Mesh, NCState3D, prolongate_p1};
 use fem_mesh::topology::MeshTopology;
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
 use fem_io::vtk::{DataArray, VtkWriter};
@@ -99,11 +99,11 @@ struct SolveLevelResult {
 fn main() {
     let args = parse_args();
 
-    let mut mesh: SimplexMesh<3> = if let Some(ref path) = args.mesh_file {
+    let mut mesh: Mesh<3> = if let Some(ref path) = args.mesh_file {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh3d.expect("MFEM mesh must be 3D")
     } else {
-        SimplexMesh::<3>::unit_cube_tet(args.n0)
+        Mesh::<3>::unit_cube_tet(args.n0)
     };
     println!("=== fem-rs Example 15 (3-D): Tet4 Non-Conforming AMR ===");
     if let Some(ref _path) = args.mesh_file {
@@ -180,7 +180,7 @@ fn main() {
     println!("\nDone.");
 }
 
-fn nodal_linear_field(mesh: &SimplexMesh<3>) -> Vec<f64> {
+fn nodal_linear_field(mesh: &Mesh<3>) -> Vec<f64> {
     (0..mesh.n_nodes())
         .map(|n| {
             let c = mesh.coords_of(n as u32);
@@ -190,7 +190,7 @@ fn nodal_linear_field(mesh: &SimplexMesh<3>) -> Vec<f64> {
 }
 
 #[cfg(test)]
-fn nodal_affine_field(mesh: &SimplexMesh<3>, coeffs: [f64; 4]) -> Vec<f64> {
+fn nodal_affine_field(mesh: &Mesh<3>, coeffs: [f64; 4]) -> Vec<f64> {
     (0..mesh.n_nodes())
         .map(|n| {
             let c = mesh.coords_of(n as u32);
@@ -201,7 +201,7 @@ fn nodal_affine_field(mesh: &SimplexMesh<3>, coeffs: [f64; 4]) -> Vec<f64> {
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn run_plumbing_case(n0: usize, levels: usize, fraction: f64) -> Vec<PlumbingLevelResult> {
-    let mut mesh = SimplexMesh::<3>::unit_cube_tet(n0);
+    let mut mesh = Mesh::<3>::unit_cube_tet(n0);
     let mut nc3 = NCState3D::new();
     let mut u = nodal_linear_field(&mesh);
     let mut results = Vec::new();
@@ -245,7 +245,7 @@ fn run_solve_case(
     u_exact: impl Fn(&[f64]) -> f64 + Send + Sync,
     rhs_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
 ) -> Vec<SolveLevelResult> {
-    let mut mesh = SimplexMesh::<3>::unit_cube_tet(n0);
+    let mut mesh = Mesh::<3>::unit_cube_tet(n0);
     let mut nc3 = NCState3D::new();
     let mut results = Vec::new();
 
@@ -279,7 +279,7 @@ fn run_solve_case(
     results
 }
 
-fn max_linear_error(mesh: &SimplexMesh<3>, u: &[f64]) -> f64 {
+fn max_linear_error(mesh: &Mesh<3>, u: &[f64]) -> f64 {
     let mut max_err = 0.0_f64;
     for n in 0..mesh.n_nodes() {
         let c = mesh.coords_of(n as u32);
@@ -293,7 +293,7 @@ fn max_linear_error(mesh: &SimplexMesh<3>, u: &[f64]) -> f64 {
 }
 
 #[cfg(test)]
-fn max_affine_error(mesh: &SimplexMesh<3>, u: &[f64], coeffs: [f64; 4]) -> f64 {
+fn max_affine_error(mesh: &Mesh<3>, u: &[f64], coeffs: [f64; 4]) -> f64 {
     let mut max_err = 0.0_f64;
     for n in 0..mesh.n_nodes() {
         let c = mesh.coords_of(n as u32);
@@ -307,7 +307,7 @@ fn max_affine_error(mesh: &SimplexMesh<3>, u: &[f64], coeffs: [f64; 4]) -> f64 {
 }
 
 #[cfg(test)]
-fn elem_center_distance2(mesh: &SimplexMesh<3>, elem: ElemId) -> f64 {
+fn elem_center_distance2(mesh: &Mesh<3>, elem: ElemId) -> f64 {
     let ns = mesh.elem_nodes(elem);
     let mut cx = 0.0;
     let mut cy = 0.0;
@@ -327,7 +327,7 @@ fn elem_center_distance2(mesh: &SimplexMesh<3>, elem: ElemId) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
-fn mark_closest_to_center(mesh: &SimplexMesh<3>, fraction: f64) -> Vec<ElemId> {
+fn mark_closest_to_center(mesh: &Mesh<3>, fraction: f64) -> Vec<ElemId> {
     let n = mesh.n_elems();
     if n == 0 {
         return Vec::new();
@@ -418,7 +418,7 @@ fn parse_args() -> Args {
 }
 
 fn solve_level_poisson(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     hanging_constraints: &[fem_mesh::HangingNodeConstraint],
     u_exact: impl Fn(&[f64]) -> f64 + Send + Sync,
     rhs_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn ex15_tet_nc_marker_is_monotone_and_selects_center_closest_elements() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let marked_low = mark_closest_to_center(&mesh, 0.10);
         let marked_mid = mark_closest_to_center(&mesh, 0.35);
         let marked_high = mark_closest_to_center(&mesh, 1.50);
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn ex15_tet_nc_prolongation_preserves_general_affine_field() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let mut nc3 = NCState3D::new();
         let coeffs = [2.0, -3.0, 0.5, 1.25];
         let u = nodal_affine_field(&mesh, coeffs);

@@ -150,7 +150,7 @@ pub fn solve_cr_stokes<M: MeshTopology + Clone + 'static>(
 mod tests {
     use super::*;
     use fem_core::NodeId;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::FESpace;
     use fem_element::ReferenceElement;
     use fem_element::crouzeix_raviart::cr1_basis;
@@ -165,7 +165,7 @@ mod tests {
     /// Solve Poiseuille flow on an n×n grid and return L² velocity error.
     fn poiseuille_error(n: usize) -> f64 {
         let nu = 1.0;
-        let m = SimplexMesh::<2>::unit_square_tri(n);
+        let m = Mesh::<2>::unit_square_tri(n);
         let nn = m.n_nodes();
         let f: Vec<f64> = (0..nn).flat_map(|_| vec![8.0*nu, 0.0]).collect();
 
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn cr_stokes_fully_pinned_solves() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let cr = CRSpace::new(m.clone(), 1);
         use std::collections::{HashSet, HashMap};
         let mut key_eid: HashMap<(NodeId,NodeId), usize> = HashMap::new();
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn cr_stokes_poiseuille() {
-        let m = SimplexMesh::<2>::unit_square_tri(6);
+        let m = Mesh::<2>::unit_square_tri(6);
         let nn = m.n_nodes();
         let nu = 1.0;
         let f: Vec<f64> = (0..nn).flat_map(|_| vec![8.0*nu, 0.0]).collect();

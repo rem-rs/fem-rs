@@ -40,7 +40,7 @@ use std::f64::consts::PI;
 use fem_amg::AmgConfig;
 use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{LobpcgConfig, SolverConfig};
 use fem_space::{
     H1Space,
@@ -78,11 +78,11 @@ struct EigenCaseResult {
 
 fn solve_case(args: Args) -> EigenCaseResult {
     // ─── 1. Mesh + H(curl) space ─────────────────────────────────────────────
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
     let space = HCurlSpace::new(mesh, 1);
     let n_dof = space.n_dofs();
@@ -92,7 +92,7 @@ fn solve_case(args: Args) -> EigenCaseResult {
     let ess_bdr = [1, 1, 1, 1];
 
     // ─── 2. Build reduced generalized eigen-system from marker semantics ────
-    let h1 = H1Space::new(SimplexMesh::<2>::unit_square_tri(args.n), 1);
+    let h1 = H1Space::new(Mesh::<2>::unit_square_tri(args.n), 1);
     let eig_system = assemble_hcurl_eigen_system_from_marker(
         &h1,
         &space,

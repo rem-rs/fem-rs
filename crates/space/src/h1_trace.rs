@@ -268,20 +268,20 @@ impl<M: MeshTopology> FESpace for H1TraceSpace<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn h1_trace_unit_square_dof_count() {
         // Unit square 4×4 mesh: (5×5 = 25 nodes).
         // Boundary nodes: 4 * 4 = 16 (perimeter of 4×4 grid).
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1TraceSpace::new(mesh, 1);
         assert_eq!(space.n_dofs(), 16, "4×4 unit square has 16 boundary nodes");
     }
 
     #[test]
     fn h1_trace_face_dofs_valid() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let space = H1TraceSpace::new(mesh, 1);
         for f in 0..space.n_boundary_faces() as u32 {
             let dofs = space.face_dofs(f);
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn h1_trace_interpolate_constant() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1TraceSpace::new(mesh, 1);
         let v = space.interpolate(&|_x| 5.0);
         assert_eq!(v.len(), space.n_dofs());
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn h1_trace_node_mapping() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let space = H1TraceSpace::new(mesh, 1);
         // Interior nodes should map to None
         // Node at (1/3, 1/3) should not be on boundary for a 3×3 mesh
@@ -317,7 +317,7 @@ mod tests {
     fn h1_trace_p2_2d_dof_count() {
         // n=4 mesh: boundary nodes = 16, boundary edges = 16 (perimeter edges of 4×4 grid)
         // P2 trace DOFs = 16 + 16 = 32
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1TraceSpace::new(mesh, 2);
         // 16 boundary vertices + 16 boundary edge midpoints = 32
         assert_eq!(space.n_dofs(), 32, "P2 trace n=4: expected 32 DOFs");
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn h1_trace_p2_2d_face_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let space = H1TraceSpace::new(mesh, 2);
         for f in 0..space.n_boundary_faces() as u32 {
             let dofs = space.face_dofs(f);
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn h1_trace_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let space = H1TraceSpace::new(mesh, 1);
         // All surface nodes of a 2×2×2 cube
         // Total nodes = 3×3×3 = 27, interior = 1×1×1 = 1
@@ -353,14 +353,14 @@ mod tests {
     fn h1_trace_p3_2d_dof_count() {
         // For n=4 unit square tri mesh:
         // P3 trace: 16 boundary vertices + 16 boundary edges × 2 = 48 total
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1TraceSpace::new(mesh, 3);
         assert_eq!(space.n_dofs(), 16 + 16 * 2, "P3 trace 2D: 16 verts + 32 edge DOFs");
     }
 
     #[test]
     fn h1_trace_p3_2d_face_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let space = H1TraceSpace::new(mesh, 3);
         for f in 0..space.n_boundary_faces() as u32 {
             let dofs = space.face_dofs(f);

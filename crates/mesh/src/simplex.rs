@@ -74,7 +74,7 @@ fn local_element_edges(dim: usize, elem_type: ElementType) -> Vec<[usize; 2]> {
 /// `D` is the spatial dimension (2 = 2-D, 3 = 3-D).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
-pub struct SimplexMesh<const D: usize> {
+pub struct Mesh<const D: usize> {
     /// Flat node coordinate array.  Length = `n_nodes * D`.
     pub coords: Vec<f64>,
     /// Flat element connectivity (0-based node indices).
@@ -118,7 +118,7 @@ pub struct SimplexMesh<const D: usize> {
     pub edge_to_elem: Vec<ElemId>,
 }
 
-impl<const D: usize> SimplexMesh<D> {
+impl<const D: usize> Mesh<D> {
     /// Number of nodes.
     pub fn n_nodes(&self) -> usize {
         self.coords.len() / D
@@ -450,7 +450,7 @@ impl<const D: usize> SimplexMesh<D> {
             new_face_tags.push(tag);
         }
 
-        Ok(SimplexMesh::uniform(
+        Ok(Mesh::uniform(
             new_coords,
             new_conn,
             self.elem_tags.clone(),
@@ -544,7 +544,7 @@ impl<const D: usize> SimplexMesh<D> {
             for &n in ns { new_face_conn.push(new_id[n as usize]); }
             new_face_tags.push(tag);
         }
-        Ok(SimplexMesh::<D>::uniform(
+        Ok(Mesh::<D>::uniform(
             new_coords,
             new_conn,
             self.elem_tags.clone(),
@@ -586,7 +586,7 @@ impl<const D: usize> SimplexMesh<D> {
         face_tags: Vec<BoundaryTag>,
         face_type: ElementType,
     ) -> Self {
-        SimplexMesh {
+        Mesh {
             coords, conn, elem_tags, elem_type, face_conn, face_tags, face_type,
             elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
             face_to_elem: None,
@@ -751,7 +751,7 @@ impl<const D: usize> SimplexMesh<D> {
             add_edge(&mut face_conn, &mut face_tags, nid(0,i+1), nid(0,i), 4);
         }
 
-        SimplexMesh::uniform(
+        Mesh::uniform(
             coords, conn, elem_tags, ElementType::Tri3,
             face_conn, face_tags, ElementType::Line2,
         )
@@ -801,7 +801,7 @@ impl<const D: usize> SimplexMesh<D> {
             add_edge(&mut face_conn, &mut face_tags, nid(0,i+1), nid(0,i), 4);
         }
 
-        SimplexMesh::uniform(
+        Mesh::uniform(
             coords, conn, elem_tags, ElementType::Quad4,
             face_conn, face_tags, ElementType::Line2,
         )
@@ -810,7 +810,7 @@ impl<const D: usize> SimplexMesh<D> {
     /// Generate a coaxial cable cross-section mesh (annular region).
     ///
     /// Outer square boundary `[-a, a]²`, inner circular conductor radius `r`.
-    /// This is a helper that returns a `SimplexMesh` suitable for the
+    /// This is a helper that returns a `Mesh` suitable for the
     /// electrostatics example; requires GMSH for a proper curved mesh.
     /// Here we use a polygonal approximation of the inner conductor.
     pub fn coaxial_annulus_poly(outer_half: f64, inner_r: f64, n_poly: usize, n_radial: usize) -> Self
@@ -889,7 +889,7 @@ impl<const D: usize> SimplexMesh<D> {
             face_tags_v.push(2i32);
         }
 
-        SimplexMesh::uniform(
+        Mesh::uniform(
             coords, conn, elem_tags, ElementType::Tri3,
             face_conn, face_tags_v, ElementType::Line2,
         )
@@ -998,7 +998,7 @@ impl<const D: usize> SimplexMesh<D> {
             }
         }
 
-        SimplexMesh::uniform(
+        Mesh::uniform(
             coords, conn, elem_tags, ElementType::Tet4,
             face_conn, face_tags, ElementType::Tri3,
         )
@@ -1093,7 +1093,7 @@ impl<const D: usize> SimplexMesh<D> {
             }
         }
 
-        SimplexMesh::uniform(
+        Mesh::uniform(
             coords, conn, elem_tags, ElementType::Hex8,
             face_conn, face_tags, ElementType::Quad4,
         )
@@ -1104,7 +1104,7 @@ impl<const D: usize> SimplexMesh<D> {
 // MeshTopology implementation
 // ---------------------------------------------------------------------------
 
-impl<const D: usize> MeshTopology for SimplexMesh<D> {
+impl<const D: usize> MeshTopology for Mesh<D> {
     fn dim(&self) -> u8 { D as u8 }
 
     fn n_nodes(&self) -> usize { self.n_nodes() }
@@ -1172,7 +1172,7 @@ mod tests {
     #[test]
     fn unit_square_counts() {
         let n = 4usize;
-        let m = SimplexMesh::<2>::unit_square_tri(n);
+        let m = Mesh::<2>::unit_square_tri(n);
         assert_eq!(m.n_nodes(), (n + 1) * (n + 1));
         assert_eq!(m.n_elems(), 2 * n * n);
         assert_eq!(m.n_faces(), 4 * n);
@@ -1181,7 +1181,7 @@ mod tests {
 
     #[test]
     fn topology_trait_unit_square() {
-        let m = SimplexMesh::<2>::unit_square_tri(3);
+        let m = Mesh::<2>::unit_square_tri(3);
         let mt: &dyn MeshTopology = &m;
         assert_eq!(mt.dim(), 2);
         assert_eq!(mt.n_elements(), 18);
@@ -1192,7 +1192,7 @@ mod tests {
 
     #[test]
     fn coords_bottom_left() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let c = m.coords_of(0);
         assert!((c[0]).abs() < 1e-14);
         assert!((c[1]).abs() < 1e-14);
@@ -1200,7 +1200,7 @@ mod tests {
 
     #[test]
     fn face_tags_present() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let tags: std::collections::HashSet<i32> = m.face_tags.iter().copied().collect();
         assert!(tags.contains(&1));
         assert!(tags.contains(&3));
@@ -1208,7 +1208,7 @@ mod tests {
 
     #[test]
     fn bounding_box_unit_square() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let (lo, hi) = m.bounding_box();
         assert!((lo[0]).abs() < 1e-14);
         assert!((lo[1]).abs() < 1e-14);
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[test]
     fn bounding_box_unit_cube() {
-        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let m = Mesh::<3>::unit_cube_tet(2);
         let (lo, hi) = m.bounding_box();
         for d in 0..3 {
             assert!(lo[d].abs() < 1e-14, "lo[{d}] = {}", lo[d]);
@@ -1228,21 +1228,21 @@ mod tests {
 
     #[test]
     fn unique_boundary_tags_unit_square() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let tags = m.unique_boundary_tags();
         assert_eq!(tags, vec![1, 2, 3, 4]);
     }
 
     #[test]
     fn unique_boundary_tags_unit_cube() {
-        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let m = Mesh::<3>::unit_cube_tet(2);
         let tags = m.unique_boundary_tags();
         assert_eq!(tags, vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
     fn unit_cube_tet_elements_non_degenerate() {
-        let m = SimplexMesh::<3>::unit_cube_tet(1);
+        let m = Mesh::<3>::unit_cube_tet(1);
         for e in 0..m.n_elems() as ElemId {
             let ns = m.elem_nodes(e);
             assert_eq!(ns.len(), 4);
@@ -1268,7 +1268,7 @@ mod tests {
         // Unit square with tags: 1=bottom, 2=right, 3=top, 4=left.
         // Make periodic in x: pair left (tag=4) with right (tag=2),
         // translation = [1, 0].
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let n_before = m.n_nodes();
         let pm = m.make_periodic(&[(4, 2, [1.0, 0.0])], 1e-10).unwrap();
 
@@ -1291,7 +1291,7 @@ mod tests {
     #[test]
     fn make_periodic_both_directions() {
         // Make fully periodic (x and y)
-        let m = SimplexMesh::<2>::unit_square_tri(3);
+        let m = Mesh::<2>::unit_square_tri(3);
         let pm = m.make_periodic(
             &[
                 (4, 2, [1.0, 0.0]),  // left → right
@@ -1307,7 +1307,7 @@ mod tests {
 
     #[test]
     fn named_attribute_set_queries_elements_and_faces() {
-        let mut m = SimplexMesh::<2>::unit_square_tri(2);
+        let mut m = Mesh::<2>::unit_square_tri(2);
         let n = m.n_elems();
         for i in 0..n {
             m.elem_tags[i] = if i < n / 2 { 7 } else { 9 };
@@ -1338,7 +1338,7 @@ mod tests {
 
     #[test]
     fn named_attribute_set_missing_name_errors() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let reg = NamedAttributeRegistry::new();
         let err = m
             .element_ids_for_named_set(&reg, "missing")
@@ -1354,9 +1354,9 @@ mod serde_tests {
 
     #[test]
     fn simplex_mesh_roundtrip() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let json = serde_json::to_string(&m).unwrap();
-        let m2: SimplexMesh<2> = serde_json::from_str(&json).unwrap();
+        let m2: Mesh<2> = serde_json::from_str(&json).unwrap();
         assert_eq!(m.n_nodes(), m2.n_nodes());
         assert_eq!(m.n_elems(), m2.n_elems());
         assert_eq!(m.n_faces(), m2.n_faces());
@@ -1368,9 +1368,9 @@ mod serde_tests {
 
     #[test]
     fn simplex_mesh_3d_roundtrip() {
-        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let m = Mesh::<3>::unit_cube_tet(2);
         let json = serde_json::to_string(&m).unwrap();
-        let m2: SimplexMesh<3> = serde_json::from_str(&json).unwrap();
+        let m2: Mesh<3> = serde_json::from_str(&json).unwrap();
         assert_eq!(m.n_nodes(), m2.n_nodes());
         assert_eq!(m.n_elems(), m2.n_elems());
         assert_eq!(m.coords, m2.coords);
@@ -1379,9 +1379,9 @@ mod serde_tests {
 
     #[test]
     fn simplex_mesh_hex_roundtrip() {
-        let m = SimplexMesh::<3>::unit_cube_hex(2);
+        let m = Mesh::<3>::unit_cube_hex(2);
         let json = serde_json::to_string(&m).unwrap();
-        let m2: SimplexMesh<3> = serde_json::from_str(&json).unwrap();
+        let m2: Mesh<3> = serde_json::from_str(&json).unwrap();
         assert_eq!(m.n_nodes(), m2.n_nodes());
         assert_eq!(m.n_elems(), m2.n_elems());
         assert_eq!(m.coords, m2.coords);

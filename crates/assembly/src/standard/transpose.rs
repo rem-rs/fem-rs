@@ -36,13 +36,13 @@ mod tests {
     use super::*;
     use crate::assembler::Assembler;
     use crate::standard::DiffusionIntegrator;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     /// Transpose of a symmetric integrator (diffusion) should give the same matrix.
     #[test]
     fn transpose_of_symmetric_is_same() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let integ = DiffusionIntegrator { kappa: 1.0 };
         let trans = TransposeIntegrator(DiffusionIntegrator { kappa: 1.0 });

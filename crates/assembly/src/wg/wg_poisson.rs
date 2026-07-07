@@ -240,11 +240,11 @@ fn add_face_penalty<M: MeshTopology, S: FESpace<Mesh=M>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::L2Space;
 
     #[test] fn wg_poisson_spd() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let sp = L2Space::new(mesh, 1);
         let k = assemble_wg_poisson(&sp, 3, 10.0);
         let n = k.nrows;
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test] fn wg_poisson_cg_solves() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let sp = L2Space::new(mesh, 1);
         let k = assemble_wg_poisson(&sp, 3, 100.0);
         let n = k.nrows;

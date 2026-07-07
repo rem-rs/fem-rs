@@ -5,7 +5,7 @@ use fem_assembly::{
     coefficient::ConstantVectorCoeff,
     standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_block_gmres, solve_gmres, BlockGmresConfig, SolverConfig};
 use fem_space::{H1Space, constraints::{apply_dirichlet, boundary_dofs}};
 
@@ -35,7 +35,7 @@ fn block_cfg() -> BlockGmresConfig {
 }
 
 fn build_nonsym_matrix_and_rhs_pair() -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, Vec<f64>) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(12);
+    let mesh = Mesh::<2>::unit_square_tri(12);
     let space = H1Space::new(mesh.clone(), 1);
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let convection = ConvectionIntegrator {

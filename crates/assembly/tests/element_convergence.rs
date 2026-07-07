@@ -9,7 +9,7 @@ use fem_assembly::{
     standard::{VectorDomainLFIntegrator, VectorMassIntegrator},
     vector_assembler::VectorAssembler,
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{MinresSolver, SolverConfig};
 use fem_space::{fe_space::FESpace, HDivSpace};
 
@@ -26,7 +26,7 @@ fn exact_flux(x: &[f64], _scale: f64) -> [f64; 2] {
 /// Since H(div) DOFs are normal-flux moments, the DOF space L² norm
 /// is mesh-dependent so we normalize by sqrt(n_dofs).
 #[allow(dead_code)]
-fn dof_error(space: &HDivSpace<SimplexMesh<2>>, uh: &[f64]) -> f64 {
+fn dof_error(space: &HDivSpace<Mesh<2>>, uh: &[f64]) -> f64 {
     let n = space.n_dofs();
     let norm2: f64 = uh.iter().map(|&v| v * v).sum();
     (norm2 / n as f64).sqrt()
@@ -34,7 +34,7 @@ fn dof_error(space: &HDivSpace<SimplexMesh<2>>, uh: &[f64]) -> f64 {
 
 fn quad_rt0_mass_test() {
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
-    let mesh = SimplexMesh::<2>::unit_square_quad(4);
+    let mesh = Mesh::<2>::unit_square_quad(4);
     let space = HDivSpace::new(mesh, 0); // QuadRT0
     println!("QuadRT0 n_dofs = {}", space.n_dofs());
 
@@ -71,7 +71,7 @@ fn quad_rt1_darcy_convergence() {
     // Patch test: f = (1, 0) should have u ≈ u_exact (constant in RT1 space)
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
     for &n in [4usize, 8].iter() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(n);
+        let mesh = Mesh::<2>::unit_square_quad(n);
         let space = HDivSpace::new(mesh, 1);
         let mat = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: 1.0 }], 5);
         let source = VectorDomainLFIntegrator {
@@ -87,7 +87,7 @@ fn quad_rt1_darcy_convergence() {
     }
 
     // Positive diagonal check
-    let mesh = SimplexMesh::<2>::unit_square_quad(4);
+    let mesh = Mesh::<2>::unit_square_quad(4);
     let space = HDivSpace::new(mesh, 1);
     let mat = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: 1.0 }], 5);
     for i in 0..mat.nrows.min(40) {

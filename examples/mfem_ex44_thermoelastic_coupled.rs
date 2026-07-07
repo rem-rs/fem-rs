@@ -58,7 +58,7 @@ use fem_io_hdf5_parallel::{
 };
 use fem_io::vtk::{DataArray, VtkWriter};
 use fem_linalg::{BlockMatrix, BlockVector, CooMatrix, CsrMatrix};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{
     BuiltinMultiphysicsTemplate,
     solve_gmres,
@@ -878,9 +878,9 @@ fn solve_transient_case_nonmatching(
 ) -> TransientResult {
     let t0 = Instant::now();
 
-    let mesh_u = SimplexMesh::<2>::unit_square_tri(n_u);
+    let mesh_u = Mesh::<2>::unit_square_tri(n_u);
     let mesh_u_scalar = mesh_u.clone();
-    let mut mesh_t = SimplexMesh::<2>::unit_square_tri(n_t_mesh);
+    let mut mesh_t = Mesh::<2>::unit_square_tri(n_t_mesh);
     for i in 0..mesh_t.n_nodes() {
         mesh_t.coords[2 * i] += shift_x;
         mesh_t.coords[2 * i + 1] += shift_y;
@@ -1514,8 +1514,8 @@ fn build_model(
     vy: f64,
     thermal_source_scale: f64,
 ) -> ThermoelasticModel {
-    let mesh_u = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh_t = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh_u = Mesh::<2>::unit_square_tri(n);
+    let mesh_t = Mesh::<2>::unit_square_tri(n);
     let space_u = VectorH1Space::new(mesh_u, order, 2);
     let space_t = H1Space::new(mesh_t, order);
 
@@ -1649,7 +1649,7 @@ fn state_to_result_steady(
 }
 
 fn write_ex44_vtk_exports(prefix: &str, args: &Args, u: &[f64], temp: &[f64]) -> Result<(), String> {
-    let mechanics_mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mechanics_mesh = Mesh::<2>::unit_square_tri(args.n);
     let mechanics_path = format!("{prefix}_mechanics.vtu");
     ensure_parent_dir(&mechanics_path).map_err(|e| e.to_string())?;
     let mut mechanics_writer = VtkWriter::new(&mechanics_mesh);
@@ -1661,7 +1661,7 @@ fn write_ex44_vtk_exports(prefix: &str, args: &Args, u: &[f64], temp: &[f64]) ->
         .write_file(&mechanics_path)
         .map_err(|e| e.to_string())?;
 
-    let mut thermal_mesh = SimplexMesh::<2>::unit_square_tri(if args.nonmatching_transfer {
+    let mut thermal_mesh = Mesh::<2>::unit_square_tri(if args.nonmatching_transfer {
         args.thermal_n
     } else {
         args.n

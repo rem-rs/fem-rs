@@ -39,7 +39,7 @@ use std::str::FromStr;
 
 use fem_core::{FemError, FemResult};
 use fem_linalg::CsrMatrix;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::fe_space::FESpace;
 
 use crate::comm::Comm;
@@ -149,7 +149,7 @@ pub fn read_checkpoint<const D: usize>(
     comm: &Comm,
     dof_ghost_exchange: Arc<GhostExchange>,
     space: &ParallelFESpace<impl FESpace>,
-    _local_mesh: &SimplexMesh<D>,
+    _local_mesh: &Mesh<D>,
 ) -> FemResult<CheckpointData> {
     let rank = comm.rank();
     let rank_path = format!("{path}_rank_{rank}.chk");

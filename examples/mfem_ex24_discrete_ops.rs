@@ -20,7 +20,7 @@ use std::f64::consts::PI;
 
 use fem_assembly::DiscreteLinearOperator;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace, L2Space,
     fe_space::FESpace,
@@ -44,11 +44,11 @@ fn main() {
         }
     );
 
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     match args.prob {
@@ -61,7 +61,7 @@ fn main() {
 
 /// Grad: trial = H¹, test = H(curl).  Interpolate p = sin(πx)sin(πy),
 /// then apply the gradient discrete operator.
-fn run_grad(mesh: &SimplexMesh<2>, p: u8) {
+fn run_grad(mesh: &Mesh<2>, p: u8) {
     let trial = H1Space::new(mesh.clone(), p);
     let test = HCurlSpace::new(mesh.clone(), p);
 
@@ -85,7 +85,7 @@ fn run_grad(mesh: &SimplexMesh<2>, p: u8) {
 }
 
 /// Curl: trial = H(curl), test = L².  Scalar curl in 2D.
-fn run_curl(mesh: &SimplexMesh<2>, p: u8) {
+fn run_curl(mesh: &Mesh<2>, p: u8) {
     let trial = HCurlSpace::new(mesh.clone(), p);
     let l2_order = if p <= 1 { 0 } else { p - 1 };
     let test = L2Space::new(mesh.clone(), l2_order);
@@ -112,7 +112,7 @@ fn run_curl(mesh: &SimplexMesh<2>, p: u8) {
 }
 
 /// Div: trial = H(div), test = L².
-fn run_div(mesh: &SimplexMesh<2>, p: u8) {
+fn run_div(mesh: &Mesh<2>, p: u8) {
     let trial = HDivSpace::new(mesh.clone(), p);
     let test = L2Space::new(mesh.clone(), p);
 
@@ -192,19 +192,19 @@ mod tests {
 
     #[test]
     fn ex24_grad_operator_produces_finite_gradient() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         run_grad(&mesh, 1);
     }
 
     #[test]
     fn ex24_curl_operator_produces_finite_curl() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         run_curl(&mesh, 1);
     }
 
     #[test]
     fn ex24_div_operator_produces_finite_divergence() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         run_div(&mesh, 1);
     }
 }

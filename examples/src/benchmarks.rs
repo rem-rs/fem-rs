@@ -19,7 +19,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator, ElasticityIntegrator},
 };
-use fem_mesh::{ElementType, SimplexMesh};
+use fem_mesh::{ElementType, Mesh};
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{
     fe_space::FESpace,
@@ -46,7 +46,7 @@ fn solve_elasticity_beam(
     let mu  = e_mod / (2.0 * (1.0 + nu));
 
     // Create mesh on [0,L]×[0,H] by scaling unit_square_tri(n)
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mut mesh = Mesh::<2>::unit_square_tri(n);
     for c in mesh.coords.chunks_mut(2) {
         c[0] *= l;
         c[1] *= h;
@@ -63,7 +63,7 @@ fn solve_elasticity_beam(
     // RHS: assemble on a matching scalar mesh (ex2 pattern)
     let mut rhs = vec![0.0; n_total];
     {
-        let mut scalar_mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mut scalar_mesh = Mesh::<2>::unit_square_tri(n);
         for c in scalar_mesh.coords.chunks_mut(2) {
             c[0] *= l;
             c[1] *= h;
@@ -184,7 +184,7 @@ fn benchmark_beam_convergence() {
 /// Laplace(u) = 0 with u=0 on boundary → u=0 everywhere.
 #[test]
 fn benchmark_poisson_homogeneous_patch() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 
@@ -221,7 +221,7 @@ fn benchmark_poisson_homogeneous_patch() {
 fn benchmark_poisson_mms() {
     use std::f64::consts::PI;
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh = Mesh::<2>::unit_square_tri(16);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 
@@ -320,7 +320,7 @@ fn benchmark_cook_membrane() {
 
 /// Cook's membrane trapezoidal mesh: nx × ny quads → 2×nx×ny tris.
 /// Vertices: (0,0)→(48,44)→(48,60)→(0,44).  Tags: 1 bottom, 2 right, 3 top, 4 left.
-fn cook_mesh(nx: usize, ny: usize) -> SimplexMesh<2> {
+fn cook_mesh(nx: usize, ny: usize) -> Mesh<2> {
     use fem_core::NodeId;
     let np_x = nx + 1;
     let np_y = ny + 1;
@@ -347,7 +347,7 @@ fn cook_mesh(nx: usize, ny: usize) -> SimplexMesh<2> {
     let ae = |fc: &mut Vec<NodeId>, ft: &mut Vec<i32>, a, b, t| { fc.push(a); fc.push(b); ft.push(t); };
     for i in 0..nx { ae(&mut fc, &mut ft, nid(i,0), nid(i+1,0), 1); ae(&mut fc, &mut ft, nid(i+1,ny), nid(i,ny), 3); }
     for j in 0..ny { ae(&mut fc, &mut ft, nid(nx,j), nid(nx,j+1), 2); ae(&mut fc, &mut ft, nid(0,j+1), nid(0,j), 4); }
-    let m = SimplexMesh::<2>::uniform(coords, conn, et, ElementType::Tri3, fc, ft, ElementType::Line2);
+    let m = Mesh::<2>::uniform(coords, conn, et, ElementType::Tri3, fc, ft, ElementType::Line2);
     m.check().expect("cook_mesh"); m
 }
 
@@ -367,7 +367,7 @@ fn cook_mesh(nx: usize, ny: usize) -> SimplexMesh<2> {
 #[test]
 fn benchmark_3d_cube_tension() {
     use fem_assembly::standard::ElasticityIntegrator;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::VectorH1Space;
     use fem_solver::SolverConfig;
 
@@ -378,7 +378,7 @@ fn benchmark_3d_cube_tension() {
     let delta = 0.1;  // prescribed end displacement
     let n = 6;        // mesh subdivisions
 
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = VectorH1Space::new(mesh.clone(), 1, 3);
     let n_total = space.n_dofs();
     let n_scalar = space.n_scalar_dofs();
@@ -457,11 +457,11 @@ fn benchmark_3d_cube_tension() {
 #[test]
 fn benchmark_3d_poisson_mms() {
     use std::f64::consts::PI;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::SolverConfig;
 
     let n = 8;
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
     let dm = space.dof_manager();

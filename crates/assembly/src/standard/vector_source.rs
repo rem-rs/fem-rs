@@ -57,13 +57,13 @@ mod tests {
     use super::*;
     use crate::postproc::coefficient::ConstantVectorCoeff;
     use crate::vector_assembler::VectorAssembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::HCurlSpace;
 
     /// ∫ f · v dx with constant f should produce a non-zero load vector.
     #[test]
     fn vector_source_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let integ = VectorDomainLFIntegrator {
             f: ConstantVectorCoeff(vec![1.0, 0.0]),

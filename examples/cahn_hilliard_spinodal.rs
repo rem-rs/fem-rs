@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use fem_assembly::cahn_allen::{solve_cahn_hilliard, CahnHilliardConfig};
 use fem_io::vtk::{DataArray, VtkWriter};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
@@ -24,7 +24,7 @@ fn main() {
     // Coarse mesh (4×4) — the IMEX time-stepper uses a consistent mass
     // matrix (fixed in this session) which improves stability but the
     // semi-implicit scheme still requires modest dt on fine meshes.
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
 
     let order: u8 = 1;
     let quad_order: u8 = 2;
@@ -68,10 +68,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use fem_assembly::cahn_allen::{solve_cahn_hilliard, CahnHilliardConfig};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::fe_space::FESpace;
     #[test] fn smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n = fem_space::H1Space::new(mesh.clone(), 1).n_dofs();
         let mut c0 = vec![0.5; n];
         for i in 0..n {

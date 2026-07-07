@@ -276,13 +276,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::HCurlSpace;
 
     /// WG Maxwell matrix must be symmetric positive semi-definite.
     #[test]
     fn wg_maxwell_2d_spd() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh, 1);
         let (k, _) = assemble_wg_maxwell(&hcurl, 3, 10.0, &[]);
         let n = hcurl.n_dofs();
@@ -320,7 +320,7 @@ mod tests {
     /// WG Maxwell 2D matrix must be invertible (no zero rows).
     #[test]
     fn wg_maxwell_2d_no_zero_rows() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh, 1);
         let (k, _) = assemble_wg_maxwell(&hcurl, 3, 10.0, &[]);
         let n = hcurl.n_dofs();

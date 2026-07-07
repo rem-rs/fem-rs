@@ -61,13 +61,13 @@ mod tests {
     use super::*;
     use crate::assembler::Assembler;
     use crate::postproc::coefficient::ConstantVectorCoeff;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     /// Convection matrix with uniform b = (1, 0) should be non-symmetric.
     #[test]
     fn convection_is_non_symmetric() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let integ = ConvectionIntegrator {
             velocity: ConstantVectorCoeff(vec![1.0, 0.0]),

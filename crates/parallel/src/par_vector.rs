@@ -347,12 +347,12 @@ mod tests {
     use crate::launcher::WorkerConfig;
     use crate::par_simplex::partition_simplex;
     use crate::par_space::ParallelFESpace;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     #[test]
     fn par_vector_global_dot() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn par_vector_axpy() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn par_vector_global_norm() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn par_complex_vector_zeros_like() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn par_complex_vector_global_dot() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn par_complex_vector_zaxpy() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
             let pmesh = partition_simplex(&mesh, &comm);

@@ -51,7 +51,7 @@ use fem_io_hdf5_parallel::{
 use fem_io::vtk::{DataArray, VtkWriter};
 use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{BuiltinMultiphysicsTemplate, builtin_template_spec, solve_sparse_cholesky};
 use fem_space::{constraints::apply_dirichlet, fe_space::FESpace, H1Space};
 
@@ -238,7 +238,7 @@ struct EmbeddedResult {
     min_u: f64,
     max_u: f64,
     values: Vec<f64>,
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
 }
 
 #[derive(Debug, Clone)]
@@ -413,7 +413,7 @@ fn solve_embedded_problem(args: &Args) -> EmbeddedResult {
             let msh = read_msh_file(p).expect("failed to read mesh file");
             msh.into_2d().expect("expected 2D mesh")
         }
-        None => SimplexMesh::<2>::unit_square_tri(args.n),
+        None => Mesh::<2>::unit_square_tri(args.n),
     };
     let space = H1Space::new(mesh.clone(), 1);
     let ls = args.level_set.clone().unwrap_or_else(|| {
@@ -486,7 +486,7 @@ fn solve_embedded_problem(args: &Args) -> EmbeddedResult {
     }
 }
 
-fn write_ex38_vtk_export(prefix: &str, mesh: &SimplexMesh<2>, values: &[f64]) -> Result<(), String> {
+fn write_ex38_vtk_export(prefix: &str, mesh: &Mesh<2>, values: &[f64]) -> Result<(), String> {
     let path = format!("{prefix}_embedded_solution.vtu");
     ensure_parent_dir(&path).map_err(|e| e.to_string())?;
     let mut writer = VtkWriter::new(mesh);
@@ -614,7 +614,7 @@ fn read_embedded_checkpoint(path: &str) -> Result<EmbeddedCheckpointState, Strin
             min_u: min_u.ok_or_else(|| "missing min_u".to_string())?,
             max_u: max_u.ok_or_else(|| "missing max_u".to_string())?,
             values,
-            mesh: SimplexMesh::<2>::unit_square_tri(args.n),
+            mesh: Mesh::<2>::unit_square_tri(args.n),
         },
         args,
     })
@@ -758,7 +758,7 @@ fn read_embedded_hdf5_checkpoint(path: &str) -> Result<EmbeddedCheckpointState, 
             min_u: min_u.ok_or_else(|| "missing min_u".to_string())?,
             max_u: max_u.ok_or_else(|| "missing max_u".to_string())?,
             values,
-            mesh: SimplexMesh::<2>::unit_square_tri(n),
+            mesh: Mesh::<2>::unit_square_tri(n),
         },
     })
 }
@@ -787,7 +787,7 @@ fn write_embedded_hdf5_xdmf_sidecars(h5_path: &str, state: &EmbeddedCheckpointSt
 }
 
 fn assemble_embedded_system(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     ls: &LevelSetShape,
     alpha: f64,
     subdiv: usize,
@@ -879,7 +879,7 @@ fn assemble_embedded_system(
 }
 
 fn embedded_solution_metrics(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     u: &[f64],
     ls: &LevelSetShape,
     subdiv: usize,

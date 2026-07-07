@@ -2,15 +2,15 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use pyo3::types::PyList;
 use numpy::{PyArray1, PyArrayMethods};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{FESpace, H1Space, L2Space, VectorH1Space, HCurlSpace, HDivSpace, ComplexGridFunction};
 use crate::mesh::PyMesh;
 
 /// H¹ finite element space (continuous Lagrange).
 #[pyclass(name = "H1Space")]
 pub struct PyH1Space {
-    pub(crate) inner_2d: Option<H1Space<SimplexMesh<2>>>,
-    pub(crate) inner_3d: Option<H1Space<SimplexMesh<3>>>,
+    pub(crate) inner_2d: Option<H1Space<Mesh<2>>>,
+    pub(crate) inner_3d: Option<H1Space<Mesh<3>>>,
     pub(crate) dim: u8,
 }
 
@@ -52,8 +52,8 @@ impl PyH1Space {
 /// L² (discontinuous) finite element space.
 #[pyclass(name = "L2Space")]
 pub struct PyL2Space {
-    pub(crate) inner_2d: Option<L2Space<SimplexMesh<2>>>,
-    pub(crate) inner_3d: Option<L2Space<SimplexMesh<3>>>,
+    pub(crate) inner_2d: Option<L2Space<Mesh<2>>>,
+    pub(crate) inner_3d: Option<L2Space<Mesh<3>>>,
     pub(crate) dim: u8,
 }
 
@@ -92,8 +92,8 @@ impl PyL2Space {
 /// Vector H¹ space [H¹]ᵈ for elasticity and Stokes.
 #[pyclass(name = "VectorH1Space")]
 pub struct PyVectorH1Space {
-    pub(crate) inner_2d: Option<VectorH1Space<SimplexMesh<2>>>,
-    pub(crate) inner_3d: Option<VectorH1Space<SimplexMesh<3>>>,
+    pub(crate) inner_2d: Option<VectorH1Space<Mesh<2>>>,
+    pub(crate) inner_3d: Option<VectorH1Space<Mesh<3>>>,
     pub(crate) dim: u8,
 }
 
@@ -132,8 +132,8 @@ impl PyVectorH1Space {
 /// H(curl) finite element space (Nedelec edge elements).
 #[pyclass(name = "HCurlSpace")]
 pub struct PyHCurlSpace {
-    pub(crate) inner_2d: Option<HCurlSpace<SimplexMesh<2>>>,
-    pub(crate) inner_3d: Option<HCurlSpace<SimplexMesh<3>>>,
+    pub(crate) inner_2d: Option<HCurlSpace<Mesh<2>>>,
+    pub(crate) inner_3d: Option<HCurlSpace<Mesh<3>>>,
     pub(crate) dim: u8,
 }
 
@@ -196,8 +196,8 @@ impl PyComplexGridFunction {
 /// H(div) finite element space (Raviart-Thomas elements).
 #[pyclass(name = "HDivSpace")]
 pub struct PyHDivSpace {
-    pub(crate) inner_2d: Option<HDivSpace<SimplexMesh<2>>>,
-    pub(crate) inner_3d: Option<HDivSpace<SimplexMesh<3>>>,
+    pub(crate) inner_2d: Option<HDivSpace<Mesh<2>>>,
+    pub(crate) inner_3d: Option<HDivSpace<Mesh<3>>>,
     pub(crate) dim: u8,
 }
 

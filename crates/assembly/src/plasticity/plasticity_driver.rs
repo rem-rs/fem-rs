@@ -5,10 +5,10 @@
 //! use fem_assembly::plasticity::{J2PlasticityForm, PlasticConfig};
 //! use fem_assembly::plasticity_driver::{PlasticityDriver, DriverConfig, DriverResult};
 //! use fem_assembly::nonlinear::{NewtonConfig, NewtonSolver};
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //! use fem_space::vector_h1::VectorH1Space;
 //!
-//! let mesh = SimplexMesh::<2>::unit_square_tri(4);
+//! let mesh = Mesh::<2>::unit_square_tri(4);
 //! let space = VectorH1Space::new(mesh, 1, 2);
 //! let cfg = PlasticConfig::j2(2e5, 0.3, 200.0, 1e3);
 //! let form = J2PlasticityForm::new(space, cfg, vec![], 2);
@@ -191,14 +191,14 @@ mod tests {
     use crate::physics::nonlinear::NonlinearForm;
     use super::super::plasticity::{J2PlasticityForm, PlasticConfig};
     use fem_mesh::topology::MeshTopology;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::vector_h1::VectorH1Space;
 
     /// Elastic J2: the driver should converge in one Newton iteration per step
     /// (zero residual at each converged step).
     #[test]
     fn driver_elastic_converges() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         // High yield → elastic
         let cfg = PlasticConfig::j2(2e5, 0.3, 1e8, 0.0);
@@ -220,7 +220,7 @@ mod tests {
     /// persistence (basic acceptance test with zero load).
     #[test]
     fn driver_plastic_zero_load_converges() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let cfg = PlasticConfig::j2(2e5, 0.3, 50.0, 1e3);
         let form = J2PlasticityForm::new(space, cfg, vec![], 2);

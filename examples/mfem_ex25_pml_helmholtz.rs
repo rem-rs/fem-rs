@@ -24,7 +24,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, MassIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{
     H1Space,
@@ -46,11 +46,11 @@ fn main() {
     );
 
     // Load or generate mesh
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     let space = H1Space::new(mesh, args.order);
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn ex25_pml_converges_and_has_finite_metrics() {
         let a = base_args();
-        let mesh = SimplexMesh::<2>::unit_square_tri(a.n);
+        let mesh = Mesh::<2>::unit_square_tri(a.n);
         let space = H1Space::new(mesh, a.order);
         let pml_sigma = PmlCoeff::new(
             vec![0.0, 0.0],
@@ -310,7 +310,7 @@ mod tests {
         for &n in &[6usize, 10usize] {
             let mut a = base_args();
             a.n = n;
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let mesh = Mesh::<2>::unit_square_tri(n);
             let space = H1Space::new(mesh, 1);
             assert_eq!(space.n_dofs(), (n + 1) * (n + 1));
         }

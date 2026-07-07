@@ -3,7 +3,7 @@
 //! CR1 on triangles: projection convergence O(h^2) in L2.
 //! PyraND1 on pyramids: element matrix symmetry + positive diagonal.
 
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_element::ReferenceElement;
 
 fn convergence_rate(errors: &[f64], ns: &[usize]) -> Vec<f64> {
@@ -17,7 +17,7 @@ fn convergence_rate(errors: &[f64], ns: &[usize]) -> Vec<f64> {
 
 fn cr1_interpolation_error(n: usize) -> f64 {
     use fem_element::crouzeix_raviart::cr1_basis;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let tri_ref: &dyn ReferenceElement = &fem_element::lagrange::TriP1;
     let mut err_sq = 0.0_f64;
     let quad = tri_ref.quadrature(4);

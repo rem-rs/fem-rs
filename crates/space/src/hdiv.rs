@@ -1164,12 +1164,12 @@ impl<M: MeshTopology> FESpace for HDivSpace<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn hdiv_dof_count_tri_2d() {
         // 4×4 unit-square mesh: 32 triangles, 56 unique edges.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HDivSpace::new(mesh, 0);
         assert_eq!(space.dofs_per_elem, 3);
         assert_eq!(space.n_dofs(), 56, "n_dofs should equal number of unique edges in 2-D");
@@ -1178,7 +1178,7 @@ mod tests {
     #[test]
     fn hdiv_shared_face_dof_2d() {
         // 1×1 mesh → 2 triangles sharing the diagonal edge.
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let space = HDivSpace::new(mesh, 0);
         assert_eq!(space.mesh().n_elements(), 2);
 
@@ -1191,7 +1191,7 @@ mod tests {
 
     #[test]
     fn hdiv_signs_opposite_on_shared_face_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let space = HDivSpace::new(mesh, 0);
 
         let dofs0 = space.element_dofs(0);
@@ -1214,7 +1214,7 @@ mod tests {
 
     #[test]
     fn hdiv_space_type() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = HDivSpace::new(mesh, 0);
         assert_eq!(space.space_type(), SpaceType::HDiv);
     }
@@ -1222,7 +1222,7 @@ mod tests {
     #[test]
     fn hdiv_dof_count_tet_3d() {
         // Unit-cube tet mesh.
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let space = HDivSpace::new(mesh, 0);
         assert_eq!(space.dofs_per_elem, 4);
         // Each tet has 4 faces; total unique faces > n_elements (interior faces shared).
@@ -1239,7 +1239,7 @@ mod tests {
 
     #[test]
     fn hdiv_interpolate_vector_constant_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = HDivSpace::new(mesh, 0);
         let v = space.interpolate_vector(&|_x| vec![1.0, 0.0]);
         for &val in v.as_slice() {
@@ -1249,7 +1249,7 @@ mod tests {
 
     #[test]
     fn hdiv_interpolate_vector_constant_3d_rt1_moments() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let space = HDivSpace::new(mesh, 1);
 
         // Constant field F = (1,0,0).
@@ -1267,7 +1267,7 @@ mod tests {
 
     #[test]
     fn hdiv_bdm1_2d_n_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HDivSpace::new_bdm(mesh, 1);
         let ldofs = space.element_dofs(0);
         assert_eq!(ldofs.len(), 6, "TriBDM1 should have 6 DOFs per element");
@@ -1275,7 +1275,7 @@ mod tests {
 
     #[test]
     fn hdiv_bdm2_2d_n_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let space = HDivSpace::new_bdm(mesh, 2);
         let ldofs = space.element_dofs(0);
         assert_eq!(ldofs.len(), 12, "TriBDM2 should have 12 DOFs per element");
@@ -1283,7 +1283,7 @@ mod tests {
 
     #[test]
     fn hdiv_bdm1_3d_n_dofs() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let space = HDivSpace::new_bdm(mesh, 1);
         let ldofs = space.element_dofs(0);
         assert_eq!(ldofs.len(), 12, "TetBDM1 should have 12 DOFs per element");

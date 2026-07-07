@@ -1,6 +1,6 @@
 //! VTK UnstructuredGrid (`.vtu`) XML writer.
 //!
-//! Writes a [`SimplexMesh`] together with any number of scalar or vector
+//! Writes a [`Mesh`] together with any number of scalar or vector
 //! point/cell data arrays to the VTK XML UnstructuredGrid format (version 0.1,
 //! ASCII encoding).  The resulting file can be opened directly in ParaView,
 //! VisIt, or any VTK-based tool.
@@ -11,9 +11,9 @@
 //! # Quick start
 //! ```no_run
 //! use fem_io::vtk::{VtkWriter, DataArray};
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //!
-//! let mesh = SimplexMesh::<2>::unit_square_tri(4);
+//! let mesh = Mesh::<2>::unit_square_tri(4);
 //! let n = mesh.n_nodes();
 //! let solution = vec![1.0_f64; n];
 //!
@@ -26,7 +26,7 @@ use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 
 use fem_core::FemResult;
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{element_type::ElementType, simplex::Mesh};
 
 // ---------------------------------------------------------------------------
 // VTK element type codes
@@ -95,14 +95,14 @@ impl DataArray {
 
 /// Builder for a single `.vtu` file.
 pub struct VtkWriter<'a, const D: usize> {
-    mesh:       &'a SimplexMesh<D>,
+    mesh:       &'a Mesh<D>,
     point_data: Vec<DataArray>,
     cell_data:  Vec<DataArray>,
 }
 
 impl<'a, const D: usize> VtkWriter<'a, D> {
     /// Create a new writer for `mesh`.
-    pub fn new(mesh: &'a SimplexMesh<D>) -> Self {
+    pub fn new(mesh: &'a Mesh<D>) -> Self {
         VtkWriter { mesh, point_data: Vec::new(), cell_data: Vec::new() }
     }
 
@@ -338,7 +338,7 @@ fn tessellate_element<const D: usize>(
 /// and writes the resulting linear mesh + field as a standard `.vtu`.
 pub fn write_vtu_higher_order<const D: usize>(
     path: impl AsRef<std::path::Path>,
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     p: u8,
     field_name: &str,
     field_values: &[f64],
@@ -377,7 +377,7 @@ pub fn write_vtu_higher_order<const D: usize>(
     let _n_total_v = all_sub_v.len() / D;
     let n_total_e = all_sub_c.len() / 3;
     let face_type = if D == 2 { ElementType::Line2 } else { ElementType::Tri3 };
-    let vis_mesh: SimplexMesh<D> = SimplexMesh {
+    let vis_mesh: Mesh<D> = Mesh {
         coords: all_sub_v, conn: all_sub_c,
         elem_tags: vec![1i32; n_total_e],
         elem_type: ElementType::Tri3,
@@ -401,11 +401,11 @@ pub fn write_vtu_higher_order<const D: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn write_unit_square_no_data() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let w    = VtkWriter::new(&mesh);
         let mut buf = Vec::<u8>::new();
         w.write(&mut buf).unwrap();
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn write_with_scalar_point_data() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n    = mesh.n_nodes();
         let u    = (0..n).map(|i| i as f64).collect::<Vec<_>>();
         let mut w = VtkWriter::new(&mesh);
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn write_with_cell_data() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let e    = mesh.n_elems();
         let p    = vec![1.0_f64; e];
         let mut w = VtkWriter::new(&mesh);
@@ -448,8 +448,8 @@ mod tests {
 
     #[test]
     fn write_3d_mesh() {
-        use fem_mesh::SimplexMesh;
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        use fem_mesh::Mesh;
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let w    = VtkWriter::new(&mesh);
         let mut buf = Vec::<u8>::new();
         w.write(&mut buf).unwrap();
@@ -461,7 +461,7 @@ mod tests {
     /// Round-trip: write then parse back node count from XML attribute.
     #[test]
     fn xml_is_parseable_ascii() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let w    = VtkWriter::new(&mesh);
         let mut buf = Vec::<u8>::new();
         w.write(&mut buf).unwrap();

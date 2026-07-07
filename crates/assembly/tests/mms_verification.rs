@@ -33,7 +33,7 @@ use fem_element::{
     raviart_thomas::{TriRT0, TriRT1},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     SolverConfig,
     solve_gmres,
@@ -150,7 +150,7 @@ fn f_elasticity_3d(x: &[f64]) -> [f64; 3] {
 
 fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
     use fem_element::lagrange::{TetP1, TetP2, TetP3};
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = VectorH1Space::new(mesh.clone(), order, 3);
     let n_scalar = space.n_scalar_dofs();
 
@@ -241,7 +241,7 @@ fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
     err_sq.sqrt()
 }
 
-fn l2_error_elasticity(uh: &[f64], space: &VectorH1Space<SimplexMesh<2>>) -> f64 {
+fn l2_error_elasticity(uh: &[f64], space: &VectorH1Space<Mesh<2>>) -> f64 {
     let mesh = space.mesh();
     let order = space.order();
     let ref_elem: &dyn ReferenceElement = if order == 1 { &TriP1 } else { &TriP2 };
@@ -280,7 +280,7 @@ fn l2_error_elasticity(uh: &[f64], space: &VectorH1Space<SimplexMesh<2>>) -> f64
 }
 
 fn solve_elasticity_2d(n: usize, order: u8) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = VectorH1Space::new(mesh.clone(), order, 2);
     let n_scalar = space.n_scalar_dofs();
 
@@ -354,7 +354,7 @@ fn elasticity_2d_p1_convergence() {
 /// The elasticity system should reproduce this exactly for P1 elements.
 #[test]
 fn elasticity_patch_test_linear_p1() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let space = VectorH1Space::new(mesh.clone(), 1, 2);
     let n_scalar = space.n_scalar_dofs();
 
@@ -401,7 +401,7 @@ fn f_helmholtz(x: &[f64]) -> f64 {
     PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
 }
 
-fn l2_error_scalar(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+fn l2_error_scalar(uh: &[f64], space: &H1Space<Mesh<2>>) -> f64 {
     let mesh = space.mesh();
     let order = space.order();
     let ref_elem: &dyn ReferenceElement = match order {
@@ -441,7 +441,7 @@ fn l2_error_scalar(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
 }
 
 fn solve_helmholtz_2d(n: usize, order: u8, k_sq: f64) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), order);
 
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -479,7 +479,7 @@ fn helmholtz_2d_p1_convergence() {
 
 /// Dense-solve variant for higher-order elements where GMRES may struggle.
 fn solve_helmholtz_2d_dense(n: usize, order: u8, k_sq: f64) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), order);
 
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -509,7 +509,7 @@ fn helmholtz_2d_p2_convergence() {
 
 /// High-order H妤?Helmholtz test (P3 cubic, dense solve).
 fn solve_helmholtz_2d_ho(n: usize, order: u8, k_sq: f64) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), order);
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let mass_neg = MassIntegrator { rho: -k_sq };
@@ -558,7 +558,7 @@ fn f_maxwell(x: &[f64]) -> [f64; 2] {
 }
 
 fn solve_maxwell_2d(n: usize) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
 
     // Stiffness: curl-curl + mass via VectorAssembler
@@ -638,7 +638,7 @@ fn maxwell_2d_nd1_convergence() {
 // 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?Maxwell ND2 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾
 
 fn solve_maxwell_2d_nd2(n: usize) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let hcurl = HCurlSpace::new(mesh.clone(), 2);
 
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
@@ -721,7 +721,7 @@ fn u_darcy(x: &[f64]) -> [f64; 2] {
 }
 
 fn solve_darcy_2d(n: usize) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let hdiv = HDivSpace::new(mesh.clone(), 0);
 
     // Mass matrix via VectorAssembler
@@ -793,7 +793,7 @@ fn darcy_2d_rt0_projection_convergence() {
 // 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?Darcy RT1 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾
 
 fn solve_darcy_2d_rt1(n: usize) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let hdiv = HDivSpace::new(mesh.clone(), 1);
 
     let mass = VectorMassIntegrator { alpha: 1.0 };
@@ -898,7 +898,7 @@ fn elasticity_3d_p3_convergence() {
 
 // 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?Helmholtz H妤?seminorm 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?
 
-fn h1_seminorm_error(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+fn h1_seminorm_error(uh: &[f64], space: &H1Space<Mesh<2>>) -> f64 {
     let mesh = space.mesh();
     let order = space.order();
     let ref_elem: &dyn ReferenceElement = if order == 1 { &TriP1 } else { &TriP2 };
@@ -961,7 +961,7 @@ fn h1_seminorm_error(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
 
 fn solve_helmholtz_h1(n: usize, order: u8) -> (f64, f64) {
     let k_sq = PI * PI;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), order);
 
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -1010,9 +1010,9 @@ fn g_darcy_div(x: &[f64]) -> f64 {
 }
 
 fn solve_darcy_mixed_rt0_p0(n: usize) -> (f64, f64) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh2 = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh3 = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
+    let mesh2 = Mesh::<2>::unit_square_tri(n);
+    let mesh3 = Mesh::<2>::unit_square_tri(n);
     let hdiv = HDivSpace::new(mesh, 0);
     let l2 = L2Space::new(mesh2, 0);
     let n_sigma = hdiv.n_dofs();
@@ -1202,9 +1202,9 @@ fn g_brinkman_div(x: &[f64]) -> f64 {
 fn solve_brinkman_p2p1(n: usize) -> (f64, f64) {
     let nu = 1.0;
     let kappa = 1.0;
-    let mesh_v = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh_p = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh_p2 = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh_v = Mesh::<2>::unit_square_tri(n);
+    let mesh_p = Mesh::<2>::unit_square_tri(n);
+    let mesh_p2 = Mesh::<2>::unit_square_tri(n);
     let vel_space = VectorH1Space::new(mesh_v.clone(), 2, 2);
     let pre_space = H1Space::new(mesh_p, 1);
     let n_v = vel_space.n_dofs();
@@ -1409,9 +1409,9 @@ fn f_darcy_only(x: &[f64]) -> [f64; 2] {
 
 fn solve_brinkman_general(n: usize, nu: f64, kappa: f64,
                            f: fn(&[f64]) -> [f64; 2]) -> (f64, f64) {
-    let mesh_v = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh_p = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh_p2 = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh_v = Mesh::<2>::unit_square_tri(n);
+    let mesh_p = Mesh::<2>::unit_square_tri(n);
+    let mesh_p2 = Mesh::<2>::unit_square_tri(n);
     let vel_space = VectorH1Space::new(mesh_v.clone(), 2, 2);
     let pre_space = H1Space::new(mesh_p, 1);
     let n_v = vel_space.n_dofs();
@@ -1620,7 +1620,7 @@ fn helmholtz_p1_h1_seminorm_convergence() {
 // H妤?seminorm convergence, Elasticity 闁?VectorH1
 // 闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩?
 
-fn h1_error_elasticity(uh: &[f64], space: &VectorH1Space<SimplexMesh<2>>) -> f64 {
+fn h1_error_elasticity(uh: &[f64], space: &VectorH1Space<Mesh<2>>) -> f64 {
     let mesh = space.mesh();
     let order = space.order();
     let ref_elem: &dyn ReferenceElement = if order == 1 { &TriP1 } else { &TriP2 };
@@ -1698,7 +1698,7 @@ fn h1_error_elasticity(uh: &[f64], space: &VectorH1Space<SimplexMesh<2>>) -> f64
 }
 
 fn solve_elasticity_2d_h1(n: usize, order: u8) -> (f64, f64) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = VectorH1Space::new(mesh.clone(), order, 2);
     let n_scalar = space.n_scalar_dofs();
 
@@ -1798,7 +1798,7 @@ fn f_maxwell_3d(x: &[f64]) -> [f64; 3] {
 }
 
 fn solve_maxwell_3d_hex_nd2(n: usize) -> f64 {
-    let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+    let mesh = Mesh::<3>::unit_cube_hex(n);
     let hcurl = HCurlSpace::new(mesh.clone(), 2);
 
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
@@ -1892,7 +1892,7 @@ fn tet_jac(n0: &[f64], n1: &[f64], n2: &[f64], n3: &[f64]) -> (DMatrix<f64>, f64
 }
 
 fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let hcurl = HCurlSpace::new(mesh.clone(), order);
 
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
@@ -2127,7 +2127,7 @@ fn f_h3d(x: &[f64]) -> f64 {
     4.0 * PI * PI * u_h3d(x)
 }
 
-fn l2_err_tet(uh: &[f64], space: &H1Space<SimplexMesh<3>>) -> f64 {
+fn l2_err_tet(uh: &[f64], space: &H1Space<Mesh<3>>) -> f64 {
     use fem_element::lagrange::{TetP1, TetP2, TetP3};
     let mesh = space.mesh(); let o = space.order();
     let re: &dyn ReferenceElement = match o { 1 => &TetP1, 2 => &TetP2, _ => &TetP3 };
@@ -2152,7 +2152,7 @@ fn l2_err_tet(uh: &[f64], space: &H1Space<SimplexMesh<3>>) -> f64 {
     es.sqrt()
 }
 
-fn l2_err_hex(uh: &[f64], space: &H1Space<SimplexMesh<3>>) -> f64 {
+fn l2_err_hex(uh: &[f64], space: &H1Space<Mesh<3>>) -> f64 {
     let mesh = space.mesh(); let o = space.order();
     let re: &dyn ReferenceElement = match o { 1 => &HexQ1, _ => &HexQ1 };
     let n = re.n_dofs(); let q = re.quadrature(2 * o + 2);
@@ -2173,7 +2173,7 @@ fn l2_err_hex(uh: &[f64], space: &H1Space<SimplexMesh<3>>) -> f64 {
 }
 
 fn solve_h3d(n: usize, order: u8, hex: bool) -> f64 {
-    let mesh = if hex { SimplexMesh::<3>::unit_cube_hex(n) } else { SimplexMesh::<3>::unit_cube_tet(n) };
+    let mesh = if hex { Mesh::<3>::unit_cube_hex(n) } else { Mesh::<3>::unit_cube_tet(n) };
     let space = H1Space::new(mesh.clone(), order);
     let diff = DiffusionIntegrator { kappa: 1.0 };
     let mass = MassIntegrator { rho: PI * PI };
@@ -2216,7 +2216,7 @@ fn solve_h3d(n: usize, order: u8, hex: bool) -> f64 {
 // 2D Helmholtz on Quad Q2 (tensor-product, quadrilateral mesh)
 // 闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩?
 
-fn l2_err_quad(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+fn l2_err_quad(uh: &[f64], space: &H1Space<Mesh<2>>) -> f64 {
     let mesh = space.mesh(); let o = space.order();
     let re: &dyn ReferenceElement = match o { 2 => &QuadQ2, _ => &QuadQ2 };
     let n = re.n_dofs(); let q = re.quadrature(2 * o + 2);
@@ -2237,7 +2237,7 @@ fn l2_err_quad(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
 }
 
 fn solve_h2d_quad(n: usize, order: u8, k_sq: f64) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_quad(n);
+    let mesh = Mesh::<2>::unit_square_quad(n);
     let space = H1Space::new(mesh.clone(), order);
     let diff = DiffusionIntegrator { kappa: 1.0 };
     let mass_neg = MassIntegrator { rho: -k_sq };
@@ -2269,8 +2269,8 @@ fn solve_h2d_quad(n: usize, order: u8, k_sq: f64) -> f64 {
 // This test checks basic consistency: single-element solve with a simple
 // manufactured solution.
 
-fn assemble_maxwell_hex_mat(n: usize) -> (CsrMatrix<f64>, Vec<f64>, HCurlSpace<SimplexMesh<3>>) {
-    let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+fn assemble_maxwell_hex_mat(n: usize) -> (CsrMatrix<f64>, Vec<f64>, HCurlSpace<Mesh<3>>) {
+    let mesh = Mesh::<3>::unit_cube_hex(n);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
     let k = 1;
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
@@ -2305,7 +2305,7 @@ fn hex_hcurl_nd1_matrix_symmetric() {
 
 #[test]
 fn hex_hcurl_nd1_interpolate_constant_field() {
-    let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+    let mesh = Mesh::<3>::unit_cube_hex(1);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
     
     let f_const = |_: &[f64]| vec![1.0, 0.0, 0.0];
@@ -2340,7 +2340,7 @@ fn hex_hcurl_nd1_interpolate_constant_field() {
 
 #[test]
 fn hex_hcurl_nd1_assembly_matches_hand() {
-    let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+    let mesh = Mesh::<3>::unit_cube_hex(1);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
     let mass = VectorMassIntegrator { alpha: 1.0 };
     let m = VectorAssembler::assemble_bilinear(&hcurl, &[&mass], 3);
@@ -2354,7 +2354,7 @@ fn hex_hcurl_nd1_assembly_matches_hand() {
 #[test]
 fn hex_hcurl_nd1_polynomial_mms_converges() {
     let e_fn = |x: &[f64]| [x[1]*x[2], x[0]*x[2], x[0]*x[1]];
-    let mesh = SimplexMesh::<3>::unit_cube_hex(4);
+    let mesh = Mesh::<3>::unit_cube_hex(4);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
     let cc = CurlCurlIntegrator { mu: 1.0 };
     let vm = VectorMassIntegrator { alpha: 1.0 };
@@ -2409,7 +2409,7 @@ fn hex_hcurl_nd1_polynomial_mms_converges() {
 /// Hex ND1 Maxwell regression 鈥?known flat L2 at ~0.44 after HEX_EDGES fix.
 #[test]
 fn hex_hcurl_nd1_maxwell_converges() {
-    let mesh = SimplexMesh::<3>::unit_cube_hex(4);
+    let mesh = Mesh::<3>::unit_cube_hex(4);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
     let cc = CurlCurlIntegrator { mu: 1.0 };
     let vm = VectorMassIntegrator { alpha: 1.0 };
@@ -2466,7 +2466,7 @@ fn hex_hcurl_nd1_maxwell_converges() {
 /// If u_solved != u_interp but residual=0, the system (matrix or RHS) is wrong.
 #[test]
 fn hex_hcurl_nd1_solve_vs_interp_consistency() {
-    let mesh = SimplexMesh::<3>::unit_cube_hex(2); // small mesh
+    let mesh = Mesh::<3>::unit_cube_hex(2); // small mesh
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
     let n = hcurl.n_dofs();
 

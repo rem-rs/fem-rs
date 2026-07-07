@@ -20,7 +20,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::{refine_uniform, SimplexMesh};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space,
@@ -39,7 +39,7 @@ fn main() {
         });
         mfem.mesh2d.expect("only 2-D meshes are supported in this example")
     } else {
-        SimplexMesh::<2>::unit_square_tri(16)
+        Mesh::<2>::unit_square_tri(16)
     };
     println!(
         "  Mesh: {} nodes, {} elements",
@@ -161,7 +161,7 @@ mod tests {
     use fem_element::lagrange::TriP1;
     use fem_element::ReferenceElement;
     use fem_mesh::topology::MeshTopology;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::{solve_pcg_jacobi, SolverConfig};
     use fem_space::constraints::{apply_dirichlet, boundary_dofs};
     use fem_space::fe_space::FESpace;
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn ex0_poisson_converges() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let source = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);

@@ -27,7 +27,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::read_mfem_file;
 use fem_linalg_gpu::{GpuContext, GpuCsrMatrix, assemble_poisson_2d_p1_gpu};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{SolverConfig, SolveResult as SolverResult};
 use fem_solver::cg_gpu::solve_pcg_gpu;
@@ -42,11 +42,11 @@ fn main() {
     let gpu = GpuContext::new_sync().expect("failed to init wgpu");
 
     // Load or generate mesh
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     let mesh = &mesh;
@@ -132,7 +132,7 @@ mod tests {
     };
     use fem_element::{ReferenceElement, lagrange::TriP1};
     use fem_linalg_gpu::{GpuContext, GpuCsrMatrix, assemble_poisson_2d_p1_gpu};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_mesh::topology::MeshTopology;
     use fem_solver::{SolverConfig, SolveResult};
     use fem_solver::cg_gpu::solve_pcg_gpu;
@@ -174,7 +174,7 @@ mod tests {
         let order = 1u8;
         let n_subdiv = 16usize;
 
-        let mesh = SimplexMesh::<2>::unit_square_tri(n_subdiv);
+        let mesh = Mesh::<2>::unit_square_tri(n_subdiv);
         let space = H1Space::new(mesh, order);
         let n = space.n_dofs();
         let n_elem = space.mesh().n_elements();

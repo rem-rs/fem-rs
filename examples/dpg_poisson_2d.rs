@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use fem_assembly::dpg_2d::solve_dpg_poisson_2d;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 
 fn main() {
     println!("=== DPG Poisson 2D ===");
@@ -21,7 +21,7 @@ fn main() {
         2.0 * p * p * (p * x).sin() * (p * y).sin()
     };
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh = Mesh::<2>::unit_square_tri(8);
     let u = solve_dpg_poisson_2d(&mesh, &f);
     let n = u.len();
     let u_norm: f64 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -33,12 +33,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use fem_assembly::dpg_2d::solve_dpg_poisson_2d;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn smoke() {
         let f = |_: f64, _: f64| 1.0;
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let u = solve_dpg_poisson_2d(&mesh, &f);
         assert!(u.iter().all(|v| v.is_finite()));
     }

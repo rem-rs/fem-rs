@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use fem_core::{FemError, FemResult};
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{element_type::ElementType, simplex::Mesh};
 
 /// Read result: mesh + named point/cell data arrays.
 pub struct VtuData {
-    pub mesh: SimplexMesh<3>,
+    pub mesh: Mesh<3>,
     pub point_data: HashMap<String, (usize, Vec<f64>)>,
     pub cell_data: HashMap<String, (usize, Vec<f64>)>,
 }
@@ -24,7 +24,7 @@ pub fn read_vtu(path: impl AsRef<std::path::Path>) -> FemResult<VtuData> {
 }
 
 /// Read a `.vtu` file, returning only mesh connectivity (no field data).
-pub fn read_vtu_mesh(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> {
+pub fn read_vtu_mesh(path: impl AsRef<std::path::Path>) -> FemResult<Mesh<3>> {
     let mut content = String::new();
     std::fs::File::open(path)?.read_to_string(&mut content)?;
     parse_vtu(&content).map(|d| d.mesh)
@@ -85,7 +85,7 @@ fn parse_vtu(xml: &str) -> FemResult<VtuData> {
 
     let flat_elem: Vec<u32> = elem_conn.into_iter().flatten().collect();
 
-    let mesh = SimplexMesh {
+    let mesh = Mesh {
         coords,
         conn: flat_elem,
         elem_tags,
@@ -231,11 +231,11 @@ fn parse_point_data_array(xml: &str, open_tag: &str, close_tag: &str) -> FemResu
 mod tests {
     use super::*;
     use crate::vtk::{DataArray, VtkWriter};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn roundtrip_tet_mesh() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let w = VtkWriter::new(&mesh);
         let mut buf = Vec::new();
         w.write(&mut buf).unwrap();
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn roundtrip_hex_mesh() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let w = VtkWriter::new(&mesh);
         let mut buf = Vec::new();
         w.write(&mut buf).unwrap();
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn roundtrip_point_data() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let n = mesh.n_nodes();
         let u: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
         let mut w = VtkWriter::new(&mesh);
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn missing_point_data_ok() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let w = VtkWriter::new(&mesh);
         let mut buf = Vec::new();
         w.write(&mut buf).unwrap();

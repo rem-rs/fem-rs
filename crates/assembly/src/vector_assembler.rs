@@ -724,12 +724,12 @@ impl VectorAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{HCurlSpace, HDivSpace};
 
     #[test]
     fn vector_assembler_hcurl_matrix_size() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let n = space.n_dofs();
 
@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     fn vector_assembler_hcurl_linear_size() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let n = space.n_dofs();
 
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn curl_hdiv_pairing_nd2_rt2_shape_and_nonempty() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let hcurl = HCurlSpace::new(mesh.clone(), 2);
         let hdiv = HDivSpace::new(mesh, 2);
 

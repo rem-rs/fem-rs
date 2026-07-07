@@ -10,7 +10,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 
 use fem_core::{FemError, FemResult};
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{element_type::ElementType, simplex::Mesh};
 
 fn mfem_elem_type(code: u32) -> Option<ElementType> {
     Some(match code {
@@ -55,8 +55,8 @@ fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
 
 /// Parsed MFEM mesh data (supports both 2D and 3D).
 pub struct MfemFile {
-    pub mesh2d: Option<SimplexMesh<2>>,
-    pub mesh3d: Option<SimplexMesh<3>>,
+    pub mesh2d: Option<Mesh<2>>,
+    pub mesh3d: Option<Mesh<3>>,
 }
 
 /// Read an MFEM `.mesh` file from a `BufRead` source.
@@ -162,7 +162,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     let face_types_opt = if use_mixed_faces { Some(bdr_types) } else { None };
 
     if dim == 2 {
-        let mesh = SimplexMesh {
+        let mesh = Mesh {
             coords,
             conn: flat_elem,
             elem_tags,
@@ -179,7 +179,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             };
             Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
         } else {
-        let mesh = SimplexMesh {
+        let mesh = Mesh {
             coords,
             conn: flat_elem,
             elem_tags,
@@ -203,11 +203,11 @@ pub fn read_mfem_file(path: impl AsRef<std::path::Path>) -> FemResult<MfemFile> 
     read_mfem(std::fs::File::open(path)?)
 }
 
-/// Write a `SimplexMesh` to MFEM `.mesh` v1.0 format.
+/// Write a `Mesh` to MFEM `.mesh` v1.0 format.
 ///
 /// Supports 2D and 3D meshes with uniform or mixed element types.
 /// Uses 1-based node indexing (MFEM convention).
-pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &SimplexMesh<2>, mesh_3d: Option<&SimplexMesh<3>>) -> FemResult<()> {
+pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemResult<()> {
     let (dim, coords, conn, elem_tags, elem_type, face_conn, face_tags, elem_types_opt)
         = if let Some(m3) = mesh_3d {
             (3, &m3.coords, &m3.conn, &m3.elem_tags, &m3.elem_type,
@@ -289,15 +289,15 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &SimplexMesh<2>, mesh_3d: Op
 }
 
 /// Write a mesh to MFEM `.mesh` file on disk.
-pub fn write_mfem_file(path: impl AsRef<std::path::Path>, mesh_d: &SimplexMesh<2>) -> FemResult<()> {
+pub fn write_mfem_file(path: impl AsRef<std::path::Path>, mesh_d: &Mesh<2>) -> FemResult<()> {
     let mut file = std::fs::File::create(path)?;
     write_mfem(&mut file, mesh_d, None)
 }
 
 /// Write a 3D mesh to MFEM `.mesh` file on disk.
-pub fn write_mfem_file_3d(path: impl AsRef<std::path::Path>, mesh: &SimplexMesh<3>) -> FemResult<()> {
+pub fn write_mfem_file_3d(path: impl AsRef<std::path::Path>, mesh: &Mesh<3>) -> FemResult<()> {
     let mut file = std::fs::File::create(path)?;
-    write_mfem(&mut file, &SimplexMesh::<2>::unit_square_tri(2), Some(mesh))
+    write_mfem(&mut file, &Mesh::<2>::unit_square_tri(2), Some(mesh))
 }
 
 fn skip_comment(line: &str) -> &str {
@@ -418,7 +418,7 @@ pub fn read_gf_file(path: impl AsRef<std::path::Path>) -> FemResult<(GfInfo, Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn gf_write_then_read() {
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn write_then_read_2d_square() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let mut buf = Vec::new();
         write_mfem(&mut buf, &mesh, None).unwrap();
         let mfem = read_mfem(buf.as_slice()).unwrap();
@@ -478,9 +478,9 @@ mod tests {
 
     #[test]
     fn write_then_read_3d_cube() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let mut buf = Vec::new();
-        write_mfem(&mut buf, &SimplexMesh::<2>::unit_square_tri(2), Some(&mesh)).unwrap();
+        write_mfem(&mut buf, &Mesh::<2>::unit_square_tri(2), Some(&mesh)).unwrap();
         let mfem = read_mfem(buf.as_slice()).unwrap();
         let mesh2 = mfem.mesh3d.unwrap();
         assert_eq!(mesh.n_nodes(), mesh2.n_nodes());

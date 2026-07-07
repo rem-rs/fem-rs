@@ -642,13 +642,13 @@ mod tests {
     use crate::launcher::native::ThreadLauncher;
     use crate::launcher::WorkerConfig;
     use crate::par_simplex::partition_simplex;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::dof_manager::DofManager;
     use std::sync::{Arc, Mutex};
 
     #[test]
     fn dof_partition_p1_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n_nodes = mesh.n_nodes();
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn dof_partition_p1_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let total_nodes = mesh.n_nodes();
 
         let results = Arc::new(Mutex::new(Vec::new()));
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn dof_partition_p2_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn dof_partition_p2_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let serial_dm = DofManager::new(&mesh, 2);
         let serial_n_dofs = serial_dm.n_dofs;
 

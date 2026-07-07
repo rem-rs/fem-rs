@@ -43,7 +43,7 @@ use fem_io_hdf5_parallel::{
     validate_checkpoint_layout,
     write_checkpoint_step_bundle_f64,
 };
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     BuiltinMultiphysicsTemplate,
     MultiRateAdaptiveConfig,
@@ -80,7 +80,7 @@ struct ReactionFlowThermalResult {
     rate_peak_tracker_prev: Option<f64>,
     species: Vec<f64>,
     temperature: Vec<f64>,
-    mesh: SimplexMesh<2>,
+    mesh: Mesh<2>,
 }
 
 #[derive(Clone)]
@@ -307,7 +307,7 @@ fn solve_reaction_flow_thermal_template_single_rate(
     args: &Args,
     restart: Option<&ReactionFlowThermalCheckpointState>,
 ) -> ReactionFlowThermalResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n = space.n_dofs();
 
@@ -466,7 +466,7 @@ fn solve_reaction_flow_thermal_template_subcycling(
         sync_error: f64,
     }
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n = space.n_dofs();
     let completed_steps = restart.map(|state| state.completed_steps).unwrap_or(0);
@@ -658,7 +658,7 @@ fn seeded_scalar_tracker(prev: Option<f64>) -> RelativeScalarTracker {
     tracker
 }
 
-fn solve_pressure_proxy(space: &H1Space<SimplexMesh<2>>, drive: f64) -> Vec<f64> {
+fn solve_pressure_proxy(space: &H1Space<Mesh<2>>, drive: f64) -> Vec<f64> {
     let mut a = Assembler::assemble_bilinear(space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     let mut rhs = vec![0.0_f64; space.n_dofs()];
 
@@ -684,7 +684,7 @@ fn solve_pressure_proxy(space: &H1Space<SimplexMesh<2>>, drive: f64) -> Vec<f64>
 }
 
 fn solve_species(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     initial_guess: &[f64],
     rate_nodal: &[f64],
     k_species: f64,
@@ -731,7 +731,7 @@ fn solve_species(
 }
 
 fn solve_temperature(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     initial_guess: &[f64],
     rate_nodal: &[f64],
     k_thermal: f64,
@@ -767,7 +767,7 @@ fn solve_temperature(
     t
 }
 
-fn sample_nodal_field(space: &H1Space<SimplexMesh<2>>, field: &[f64], x: &[f64]) -> f64 {
+fn sample_nodal_field(space: &H1Space<Mesh<2>>, field: &[f64], x: &[f64]) -> f64 {
     let mesh = space.mesh();
     for e in mesh.elem_iter() {
         let ns = mesh.elem_nodes(e);
@@ -806,7 +806,7 @@ fn barycentric_2d(
     }
 }
 
-fn pressure_drop_metric(space: &H1Space<SimplexMesh<2>>, p: &[f64]) -> f64 {
+fn pressure_drop_metric(space: &H1Space<Mesh<2>>, p: &[f64]) -> f64 {
     let dm = space.dof_manager();
     let mut left_sum = 0.0_f64;
     let mut left_cnt = 0usize;
@@ -852,7 +852,7 @@ fn checksum(v: &[f64]) -> f64 {
 
 fn write_ex52_vtk_export(
     prefix: &str,
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     species: &[f64],
     temperature: &[f64],
 ) -> Result<(), String> {

@@ -16,7 +16,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{
     SolverConfig,
     solve_cg, solve_pcg_jacobi, solve_pcg_ilu0, solve_pcg_ildlt,
@@ -34,7 +34,7 @@ fn main() {
     let args = parse_args();
     println!("=== fem-rs Example 12: Solver comparison ===");
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, args.order);
     let n = space.n_dofs();
     let quad: u8 = args.order * 2 + 1;
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn ex12_all_solvers_converge() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let quad = 3;
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], quad);

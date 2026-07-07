@@ -9,7 +9,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{solve_bicgstab, solve_cg, solve_gmres, solve_gmres_ilu0, solve_pcg_ilu0, solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space,
@@ -22,8 +22,8 @@ fn forcing(x: &[f64]) -> f64 { 2.0 * PI * PI * u_exact(x) }
 
 /// Assemble the Poisson system on a 16×16 P1 unit-square mesh.
 /// Returns (mat, rhs, space).
-fn build_poisson_system() -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<SimplexMesh<2>>) {
-    let mesh  = SimplexMesh::<2>::unit_square_tri(16);
+fn build_poisson_system() -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<Mesh<2>>) {
+    let mesh  = Mesh::<2>::unit_square_tri(16);
     let space = H1Space::new(mesh.clone(), 1);
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let source    = DomainSourceIntegrator::new(forcing);
@@ -34,7 +34,7 @@ fn build_poisson_system() -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<Simp
     (mat, rhs, space)
 }
 
-fn l2_error(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+fn l2_error(uh: &[f64], space: &H1Space<Mesh<2>>) -> f64 {
     use fem_element::{ReferenceElement, lagrange::TriP1};
     let mesh = space.mesh();
     let quad = TriP1.quadrature(5);
@@ -134,7 +134,7 @@ fn poisson_bicgstab() {
 fn poisson_nc_amr_convergence() {
     use fem_mesh::amr::{NCState, zz_estimator, dorfler_mark};
     use fem_space::constraints::{apply_hanging_constraints, recover_hanging_values};
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(2);
+    let mut mesh = Mesh::<2>::unit_square_tri(2);
     let mut nc_state = NCState::new();
     let mut hanging_constraints = Vec::new();
     let mut errors = Vec::new();

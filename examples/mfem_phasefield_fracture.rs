@@ -9,14 +9,14 @@ use fem_assembly::{
 use fem_assembly::phasefield::apply_dirichlet as pf_apply_dirichlet;
 use fem_io::vtk::{DataArray, VtkWriter};
 use fem_linalg::CsrMatrix;
-use fem_mesh::{SimplexMesh, element_type::ElementType};
+use fem_mesh::{Mesh, element_type::ElementType};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{H1Space, VectorH1Space, constraints::boundary_dofs, fe_space::FESpace};
 
 /// Build a notched mesh for the SEN tension test.
 /// Domain: [0,1]×[0,1], horizontal notch from (0,0.5) to (0.5,0.5).
 /// `n` elements per side of each half (total ~8n² triangles).
-fn build_sen_mesh(n: usize) -> SimplexMesh<2> {
+fn build_sen_mesh(n: usize) -> Mesh<2> {
     let h = 0.5 / n as f64;
     let mut coords = Vec::new();
     let mut conn = Vec::new();
@@ -217,7 +217,7 @@ fn build_sen_mesh(n: usize) -> SimplexMesh<2> {
         face_tags.push(4);
     }
 
-    SimplexMesh {
+    Mesh {
         coords,
         conn,
         elem_tags,

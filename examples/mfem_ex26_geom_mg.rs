@@ -26,7 +26,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space,
@@ -57,11 +57,11 @@ fn main() {
     println!("  Poisson: −Δu = 1, u|_∂Ω = 0, P{}, LOR AMG preconditioner", args.order);
 
     // Load or generate mesh
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     let r = solve_lor_case(mesh, args.order);
@@ -78,7 +78,7 @@ fn main() {
     println!("  PASS");
 }
 
-fn solve_lor_case(mesh: SimplexMesh<2>, p: u8) -> LorResult {
+fn solve_lor_case(mesh: Mesh<2>, p: u8) -> LorResult {
     let order_p2 = p;
     let order_p1 = 1u8;
 
@@ -144,7 +144,7 @@ fn solve_lor_case(mesh: SimplexMesh<2>, p: u8) -> LorResult {
     }
 }
 
-fn l2_error_2d(space: &H1Space<SimplexMesh<2>>, uh: &[f64]) -> f64 {
+fn l2_error_2d(space: &H1Space<Mesh<2>>, uh: &[f64]) -> f64 {
     use fem_element::{lagrange::TriP2, ReferenceElement};
     use fem_mesh::topology::MeshTopology;
 
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn ex26_lor_pcg_2d_poisson_converges() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let r = solve_lor_case(mesh, 2);
         assert!(r.converged,
             "AMG P2 solve did not converge: iters={}, residual={:.3e}",
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn ex26_lor_p1_dofs_less_than_p2_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let r = solve_lor_case(mesh, 2);
         assert!(r.n_p1 < r.n_p2,
             "expected n_p1 < n_p2: {} vs {}", r.n_p1, r.n_p2);
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn ex26_lor_amg_faster_than_jacobi() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let r = solve_lor_case(mesh, 2);
         assert!(r.converged, "AMG P2 solve did not converge");
         assert!(

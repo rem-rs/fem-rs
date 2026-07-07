@@ -27,13 +27,13 @@ let integ = MassIntegrator { rho: 1.0 };
 mod tests {
     use super::*;
     use crate::assembler::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     /// The mass matrix must be symmetric.
     #[test]
     fn mass_is_symmetric() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let integ = MassIntegrator { rho: 1.0 };
         let mat   = Assembler::assemble_bilinear(&space, &[&integ], 2);
@@ -51,7 +51,7 @@ mod tests {
     /// That is, `1^T M 1 ≈ 1`.
     #[test]
     fn mass_norm_of_one_is_domain_area() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh  = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let integ = MassIntegrator { rho: 1.0 };
         let mat   = Assembler::assemble_bilinear(&space, &[&integ], 3);

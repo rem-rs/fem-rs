@@ -141,7 +141,7 @@ pub fn solve_dpg_poisson_2d<M: MeshTopology>(mesh: &M, f: &dyn Fn(f64, f64) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use std::f64::consts::PI;
 
     fn f_src(x: f64, y: f64) -> f64 { 2.0*PI*PI * (PI*x).sin() * (PI*y).sin() }
@@ -151,7 +151,7 @@ mod tests {
     fn dpg_2d_convergence() {
         let mut prev = f64::MAX;
         for &n in &[4, 8, 16] {
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let mesh = Mesh::<2>::unit_square_tri(n);
             let u = solve_dpg_poisson_2d(&mesh, &f_src);
             let nn = mesh.n_nodes();
             let mut e2 = 0.0;

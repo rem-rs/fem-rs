@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use fem_core::{NodeId, ElemId};
-use crate::{element_type::ElementType, simplex::SimplexMesh};
+use crate::{element_type::ElementType, simplex::Mesh};
 
 /// Compute element-wise Zienkiewicz–Zhu (ZZ) gradient-recovery error indicators.
 ///
@@ -15,7 +15,7 @@ use crate::{element_type::ElementType, simplex::SimplexMesh};
 ///
 /// # Returns
 /// Vector of `η_K` for each element (length = `n_elems`).
-pub fn zz_estimator(mesh: &SimplexMesh<2>, u: &[f64]) -> Vec<f64> {
+pub fn zz_estimator(mesh: &Mesh<2>, u: &[f64]) -> Vec<f64> {
     let n_nodes = mesh.n_nodes();
     let n_elems = mesh.n_elems();
 
@@ -101,7 +101,7 @@ pub fn zz_estimator(mesh: &SimplexMesh<2>, u: &[f64]) -> Vec<f64> {
 }
 
 /// 3-D ZZ error indicator for Tet4 meshes.
-pub fn zz_estimator_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
+pub fn zz_estimator_3d(mesh: &Mesh<3>, u: &[f64]) -> Vec<f64> {
     let n_nodes = mesh.n_nodes();
     let n_elems = mesh.n_elems();
     let mut elem_grads: Vec<[f64; 3]> = Vec::with_capacity(n_elems);
@@ -156,7 +156,7 @@ pub fn zz_estimator_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
 }
 
 /// 3-D Kelly (face-jump) error indicator for Tet4 meshes.
-pub fn kelly_estimator_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
+pub fn kelly_estimator_3d(mesh: &Mesh<3>, u: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
 
     // Face adjacency
@@ -218,7 +218,7 @@ pub fn kelly_estimator_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
 }
 
 /// Compute element-wise Kelly (face-jump) error indicators for 2-D Tri3.
-pub fn kelly_estimator(mesh: &SimplexMesh<2>, u: &[f64]) -> Vec<f64> {
+pub fn kelly_estimator(mesh: &Mesh<2>, u: &[f64]) -> Vec<f64> {
     use std::collections::HashMap;
     let n_elems = mesh.n_elems();
     let mut elem_grads: Vec<[f64;2]> = Vec::with_capacity(n_elems);
@@ -308,7 +308,7 @@ pub fn mark_for_derefinement(eta: &[f64], theta: f64) -> Vec<ElemId> {
 ///
 /// # Returns
 /// Vector of `η_K` for each element (length = `n_elems`).
-pub fn dwr_estimator(mesh: &SimplexMesh<2>, u: &[f64], z: &[f64], f: &[f64]) -> Vec<f64> {
+pub fn dwr_estimator(mesh: &Mesh<2>, u: &[f64], z: &[f64], f: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
     use std::collections::HashMap;
 
@@ -431,7 +431,7 @@ pub fn dwr_estimator(mesh: &SimplexMesh<2>, u: &[f64], z: &[f64], f: &[f64]) -> 
 ///
 /// # Returns
 /// Element-wise error indicators η_K.
-pub fn residual_estimator(mesh: &SimplexMesh<2>, u: &[f64], f: &[f64]) -> Vec<f64> {
+pub fn residual_estimator(mesh: &Mesh<2>, u: &[f64], f: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
     let elem_grads: Vec<[f64; 2]> = {
         let mut g = Vec::with_capacity(n_elems);
@@ -518,7 +518,7 @@ pub fn residual_estimator(mesh: &SimplexMesh<2>, u: &[f64], f: &[f64]) -> Vec<f6
 /// For P1 elements the interior residual vanishes, leaving the face-jump term.
 /// The face jump contribution is computed similarly to the 3-D Kelly estimator
 /// but weighted by the face diameter rather than the face area.
-pub fn residual_estimator_3d(mesh: &SimplexMesh<3>, u: &[f64], f: &[f64]) -> Vec<f64> {
+pub fn residual_estimator_3d(mesh: &Mesh<3>, u: &[f64], f: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
     let mut elem_grads: Vec<[f64; 3]> = Vec::with_capacity(n_elems);
     for e in 0..n_elems as ElemId {
@@ -629,7 +629,7 @@ pub fn mark_for_p_refinement(eta: &[f64], theta: f64) -> Vec<ElemId> {
 /// where G is the nodal-averaged recovered gradient.
 ///
 /// Supports Tet4, Hex8, Prism6, Pyramid5.
-pub fn zz_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
+pub fn zz_estimator_3d_general(mesh: &Mesh<3>, u: &[f64]) -> Vec<f64> {
     let n_nodes = mesh.n_nodes();
     let n_elems = mesh.n_elems();
     let _dim = 3usize;
@@ -749,7 +749,7 @@ pub fn zz_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
 /// η_K² = ½ Σ_{F⊂∂K} h_F · ‖[[∇u_h · n]]‖²_L²(F)
 ///
 /// Supports Tet4, Hex8, Prism6, Pyramid5.
-pub fn kelly_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> {
+pub fn kelly_estimator_3d_general(mesh: &Mesh<3>, u: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
     let (elem_grads, _) = zz_gradients_and_volumes_3d(mesh, u);
 
@@ -855,7 +855,7 @@ pub fn kelly_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64]) -> Vec<f64> 
 }
 
 /// Compute element gradients and volumes for the generalized 3-D estimators.
-fn zz_gradients_and_volumes_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> (Vec<[f64;3]>, Vec<f64>) {
+fn zz_gradients_and_volumes_3d(mesh: &Mesh<3>, u: &[f64]) -> (Vec<[f64;3]>, Vec<f64>) {
     let n_elems = mesh.n_elems();
     let mut g = Vec::with_capacity(n_elems);
     let mut v = Vec::with_capacity(n_elems);
@@ -916,7 +916,7 @@ fn zz_gradients_and_volumes_3d(mesh: &SimplexMesh<3>, u: &[f64]) -> (Vec<[f64;3]
 /// reducing the formula to the face-jump estimator weighted by h_F.
 ///
 /// Supports Tet4, Hex8, Prism6, Pyramid5.
-pub fn residual_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], f: &[f64]) -> Vec<f64> {
+pub fn residual_estimator_3d_general(mesh: &Mesh<3>, u: &[f64], f: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
     let (elem_grads, elem_vols) = zz_gradients_and_volumes_3d(mesh, u);
 
@@ -1017,7 +1017,7 @@ pub fn residual_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], f: &[f64]
 /// * `u` — primal solution (nodal values)
 /// * `z` — dual solution (nodal values)
 /// * `f` — source term (nodal values)
-pub fn dwr_estimator_3d_general(mesh: &SimplexMesh<3>, u: &[f64], z: &[f64], f: &[f64]) -> Vec<f64> {
+pub fn dwr_estimator_3d_general(mesh: &Mesh<3>, u: &[f64], z: &[f64], f: &[f64]) -> Vec<f64> {
     let n_elems = mesh.n_elems();
     let (elem_grads, elem_vols) = zz_gradients_and_volumes_3d(mesh, u);
 

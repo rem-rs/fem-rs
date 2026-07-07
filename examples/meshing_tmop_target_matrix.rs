@@ -9,11 +9,11 @@
 
 use std::time::Instant;
 use fem_mesh::topology::MeshTopology;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::tmop::{tmop_optimise_2d, TmopMetric};
 
 /// Min scaled Jacobian from coordinates + mesh topology.
-fn min_scaled_jacobian(mesh: &SimplexMesh<2>, coords: &[f64]) -> f64 {
+fn min_scaled_jacobian(mesh: &Mesh<2>, coords: &[f64]) -> f64 {
     let ne = mesh.n_elements() as usize;
     let mut worst = 1.0_f64;
     for e in 0..ne {
@@ -30,8 +30,8 @@ fn min_scaled_jacobian(mesh: &SimplexMesh<2>, coords: &[f64]) -> f64 {
     worst
 }
 
-fn perturb_square(n: usize, amp: f64) -> SimplexMesh<2> {
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(n);
+fn perturb_square(n: usize, amp: f64) -> Mesh<2> {
+    let mut mesh = Mesh::<2>::unit_square_tri(n);
     for i in 0..mesh.n_nodes() as usize {
         let x = mesh.coords[i * 2];
         let y = mesh.coords[i * 2 + 1];
@@ -64,12 +64,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_mesh::tmop::{tmop_optimise_2d, TmopMetric};
 
     #[test]
     fn tmop_moves_nodes() {
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mut mesh = Mesh::<2>::unit_square_tri(6);
         for i in 0..mesh.n_nodes() as usize {
             let x = mesh.coords[i * 2];
             let y = mesh.coords[i * 2 + 1];

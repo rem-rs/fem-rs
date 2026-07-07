@@ -7,7 +7,7 @@ use fem_assembly::{
     mixed::PressureDivIntegrator,
     standard::{VectorDiffusionIntegrator, VectorConvectionIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{BlockSystem, SchurComplementSolver, SolverConfig};
 use fem_space::{
     H1Space, VectorH1Space,
@@ -62,8 +62,8 @@ fn kovasznay_p(x: f64, _y: f64, lam: f64) -> f64 {
 // ─── Mesh generation ─────────────────────────────────────────────────────────
 
 /// Create a triangular mesh on `[x0, x1] × [y0, y1]`.
-fn rect_mesh(n: usize, x0: f64, x1: f64, y0: f64, y1: f64) -> SimplexMesh<2> {
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(n);
+fn rect_mesh(n: usize, x0: f64, x1: f64, y0: f64, y1: f64) -> Mesh<2> {
+    let mut mesh = Mesh::<2>::unit_square_tri(n);
     // Scale coordinates from [0,1]² to [x0,x1] × [y0,y1]
     let nn = mesh.n_nodes();
     for i in 0..nn {

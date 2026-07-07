@@ -24,7 +24,7 @@ use fem_element::lagrange::{TriP1, TriP2, TriP3};
 use fem_element::ReferenceElement;
 use fem_io::{DataArray, VtkWriter};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{SimplexMesh, topology::MeshTopology, element_type::ElementType};
+use fem_mesh::{Mesh, topology::MeshTopology, element_type::ElementType};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space,
@@ -39,7 +39,7 @@ fn main() {
     println!("=== MFEM Example 6: Flux Recovery ===");
 
     // ─── 1. Mesh (from file or unit-square) ──────────────────────────────────
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         println!("  Mesh file: {path}");
         read_mfem_file(path)
             .expect("failed to read MFEM mesh")
@@ -48,7 +48,7 @@ fn main() {
     } else {
         let r = args.refinements.unwrap_or(3);
         println!("  Unit-square tri mesh, refinements = {r}");
-        SimplexMesh::<2>::unit_square_tri(r)
+        Mesh::<2>::unit_square_tri(r)
     };
     println!("  Mesh: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
 
@@ -199,7 +199,7 @@ mod tests {
     use fem_assembly::postprocess::compute_h1_error;
     use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
     use fem_assembly::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_mesh::topology::MeshTopology;
     use fem_solver::{solve_pcg_jacobi, SolverConfig};
     use fem_space::constraints::{apply_dirichlet, boundary_dofs};
@@ -267,8 +267,8 @@ mod tests {
         ]
     }
 
-    fn solve_mms(n: usize, order: u8) -> (Vec<f64>, H1Space<SimplexMesh<2>>) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    fn solve_mms(n: usize, order: u8) -> (Vec<f64>, H1Space<Mesh<2>>) {
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, order);
         let ndofs = space.n_dofs();
         let quad = order as u8 * 2 + 1;

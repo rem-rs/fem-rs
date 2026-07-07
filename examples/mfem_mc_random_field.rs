@@ -14,7 +14,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::{SimplexMesh, MeshTopology};
+use fem_mesh::{Mesh, MeshTopology};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_stochastic::{
     Covariance1D as _, ExponentialCovariance1D, KarhunenLoeveExpansion1D,
@@ -30,7 +30,7 @@ fn main() {
     println!("=== fem-rs: Monte Carlo with random diffusion ===");
 
     // FE mesh and space
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let quad = 3;
     let n = space.n_dofs();

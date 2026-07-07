@@ -27,15 +27,15 @@
 //! # Usage
 //! ```rust,ignore
 //! use fem_parallel::metis::{MetisPartitioner, MetisOptions};
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //!
-//! let mesh = SimplexMesh::<2>::unit_square_tri(16);
+//! let mesh = Mesh::<2>::unit_square_tri(16);
 //! let opt  = MetisOptions::default();
 //! let parts = MetisPartitioner::partition_mesh(&mesh, 4, &opt).unwrap();
 //! ```
 
 use fem_core::Rank;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
 use crate::mesh_serde;
@@ -61,7 +61,7 @@ impl MetisPartitioner {
     /// Returns a vector of length `n_elems` where `partition[e]` is the rank
     /// (0..nparts) assigned to element `e`.
     pub fn partition_mesh<const D: usize>(
-        mesh:   &SimplexMesh<D>,
+        mesh:   &Mesh<D>,
         nparts: usize,
         opts:   &MetisOptions,
     ) -> Result<Vec<Rank>, String> {
@@ -84,10 +84,10 @@ impl MetisPartitioner {
 
 /// Distribute `mesh` across `comm.size()` ranks using k-way partitioning.
 pub fn partition_simplex_metis<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     comm: &Comm,
     opts: &MetisOptions,
-) -> ParallelMesh<SimplexMesh<D>> {
+) -> ParallelMesh<Mesh<D>> {
     let n_elems = mesh.n_elems();
     let n_nodes_total = mesh.n_nodes();
     assert!(n_elems > 0, "partition_simplex_metis: mesh has no elements");
@@ -111,10 +111,10 @@ pub fn partition_simplex_metis<const D: usize>(
 
 /// Streaming partition: only rank 0 holds the full mesh.
 pub fn partition_simplex_metis_streaming<const D: usize>(
-    mesh: Option<&SimplexMesh<D>>,
+    mesh: Option<&Mesh<D>>,
     comm: &Comm,
     opts: &MetisOptions,
-) -> Result<ParallelMesh<SimplexMesh<D>>, String> {
+) -> Result<ParallelMesh<Mesh<D>>, String> {
     let size = comm.size();
 
     if size == 1 {
@@ -150,11 +150,11 @@ pub fn partition_simplex_metis_streaming<const D: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn partition_covers_all_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let n_elems = mesh.n_elems();
         let parts = MetisPartitioner::partition_mesh(&mesh, 4, &MetisOptions::default()).unwrap();
         assert_eq!(parts.len(), n_elems);
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn partition_balanced() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let mesh = Mesh::<2>::unit_square_tri(32);
         let n_elems = mesh.n_elems();
         let nparts = 4;
         let parts = MetisPartitioner::partition_mesh(&mesh, nparts, &MetisOptions::default()).unwrap();
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn partition_single_part_is_identity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let parts = MetisPartitioner::partition_mesh(&mesh, 1, &MetisOptions::default()).unwrap();
         assert!(parts.iter().all(|&p| p == 0));
     }
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn partition_simplex_serial() {
         use crate::mpi_test_env::test_world_comm;
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = test_world_comm();
         let pmesh = partition_simplex_metis(&mesh, &comm, &MetisOptions::default());
         assert_eq!(pmesh.global_n_elems(), mesh.n_elems());

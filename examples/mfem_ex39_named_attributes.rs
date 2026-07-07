@@ -27,7 +27,7 @@ use fem_io::{
     vtk_named_boundary_fields,
     vtk::{DataArray, VtkWriter},
 };
-use fem_mesh::{extract_submesh_by_name, topology::MeshTopology, NamedAttributeRegistry, SimplexMesh};
+use fem_mesh::{extract_submesh_by_name, topology::MeshTopology, NamedAttributeRegistry, Mesh};
 use fem_solver::{SolverConfig, solve_gmres};
 use fem_space::{H1Space, constraints::apply_dirichlet, fe_space::FESpace};
 use std::collections::{BTreeMap, HashSet};
@@ -157,31 +157,31 @@ surfaceelements
 
 #[derive(Debug, Clone)]
 struct DiffusionSolveResult<const D: usize> {
-    mesh: SimplexMesh<D>,
+    mesh: Mesh<D>,
     solution: Vec<f64>,
     iterations: usize,
     final_residual: f64,
     converged: bool,
 }
 
-fn load_demo_mesh() -> (SimplexMesh<2>, NamedAttributeRegistry) {
+fn load_demo_mesh() -> (Mesh<2>, NamedAttributeRegistry) {
     let msh = read_msh(DEMO_MSH_TEXT.as_bytes()).expect("failed to parse in-memory gmsh");
     let registry = msh.named_attribute_registry();
-    let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D mesh");
+    let mesh: Mesh<2> = msh.into_2d().expect("expected 2D mesh");
     (mesh, registry)
 }
 
-fn load_solver_demo_mesh() -> (SimplexMesh<2>, NamedAttributeRegistry) {
+fn load_solver_demo_mesh() -> (Mesh<2>, NamedAttributeRegistry) {
     let msh = read_msh(SOLVER_MSH_TEXT.as_bytes()).expect("failed to parse solve demo gmsh");
     let registry = msh.named_attribute_registry();
-    let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D solve demo mesh");
+    let mesh: Mesh<2> = msh.into_2d().expect("expected 2D solve demo mesh");
     (mesh, registry)
 }
 
-fn load_gmsh_file_mesh(path: impl AsRef<std::path::Path>) -> (SimplexMesh<2>, NamedAttributeRegistry) {
+fn load_gmsh_file_mesh(path: impl AsRef<std::path::Path>) -> (Mesh<2>, NamedAttributeRegistry) {
     let msh = read_msh_file(path).expect("failed to read Gmsh mesh file");
     let registry = msh.named_attribute_registry();
-    let mesh: SimplexMesh<2> = msh.into_2d().expect("expected 2D mesh");
+    let mesh: Mesh<2> = msh.into_2d().expect("expected 2D mesh");
     (mesh, registry)
 }
 
@@ -189,7 +189,7 @@ fn load_abaqus_demo_data() -> AbaqusInpData {
     read_abaqus_inp_full(ABAQUS_DEMO_INP.as_bytes()).expect("failed to parse demo Abaqus input")
 }
 
-fn load_netgen_demo_mesh() -> SimplexMesh<3> {
+fn load_netgen_demo_mesh() -> Mesh<3> {
     read_netgen_vol(NETGEN_DEMO_VOL.as_bytes()).expect("failed to parse demo Netgen volume mesh")
 }
 
@@ -209,7 +209,7 @@ fn example_mesh_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("meshes").join(name)
 }
 
-fn point_mask_from_node_ids<const D: usize>(mesh: &SimplexMesh<D>, node_ids: &[u32]) -> Vec<f64> {
+fn point_mask_from_node_ids<const D: usize>(mesh: &Mesh<D>, node_ids: &[u32]) -> Vec<f64> {
     let mut mask = vec![0.0; mesh.n_nodes()];
     for &node in node_ids {
         mask[node as usize] = 1.0;
@@ -217,7 +217,7 @@ fn point_mask_from_node_ids<const D: usize>(mesh: &SimplexMesh<D>, node_ids: &[u
     mask
 }
 
-fn point_mask_for_boundary_tag<const D: usize>(mesh: &SimplexMesh<D>, tag: i32) -> Vec<f64> {
+fn point_mask_for_boundary_tag<const D: usize>(mesh: &Mesh<D>, tag: i32) -> Vec<f64> {
     let mut mask = vec![0.0; mesh.n_nodes()];
     for face in 0..mesh.n_boundary_faces() as u32 {
         if mesh.face_tag(face) == tag {
@@ -229,12 +229,12 @@ fn point_mask_for_boundary_tag<const D: usize>(mesh: &SimplexMesh<D>, tag: i32) 
     mask
 }
 
-fn material_id_field<const D: usize>(mesh: &SimplexMesh<D>) -> Vec<f64> {
+fn material_id_field<const D: usize>(mesh: &Mesh<D>) -> Vec<f64> {
     mesh.elem_tags.iter().map(|&tag| tag as f64).collect()
 }
 
 fn unique_nodes_for_named_boundary_set(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     name: &str,
 ) -> Vec<u32> {
@@ -251,7 +251,7 @@ fn unique_nodes_for_named_boundary_set(
 }
 
 fn nodal_mask_for_boundary_set(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     name: &str,
 ) -> Vec<f64> {
@@ -259,7 +259,7 @@ fn nodal_mask_for_boundary_set(
 }
 
 fn cell_mask_for_named_region(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     name: &str,
 ) -> Vec<f64> {
@@ -274,7 +274,7 @@ fn cell_mask_for_named_region(
 }
 
 fn maybe_cell_mask_for_named_region(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     name: &str,
 ) -> Option<Vec<f64>> {
@@ -285,7 +285,7 @@ fn maybe_cell_mask_for_named_region(
     }
 }
 
-fn merged_boundary_mask(mesh: &SimplexMesh<2>, registry: &NamedAttributeRegistry) -> Vec<f64> {
+fn merged_boundary_mask(mesh: &Mesh<2>, registry: &NamedAttributeRegistry) -> Vec<f64> {
     nodal_mask_for_boundary_set(mesh, registry, "inlet")
         .into_iter()
         .zip(nodal_mask_for_boundary_set(mesh, registry, "outlet"))
@@ -294,7 +294,7 @@ fn merged_boundary_mask(mesh: &SimplexMesh<2>, registry: &NamedAttributeRegistry
 }
 
 fn write_vtk_with_fields<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     path: impl AsRef<std::path::Path>,
     point_data: Vec<DataArray>,
     cell_data: Vec<DataArray>,
@@ -310,7 +310,7 @@ fn write_vtk_with_fields<const D: usize>(
 }
 
 fn cell_values_from_tags<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     values_by_tag: &[(i32, f64)],
     default: f64,
 ) -> Vec<f64> {
@@ -322,7 +322,7 @@ fn cell_values_from_tags<const D: usize>(
 }
 
 fn cell_values_from_named_regions(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     values_by_name: &[(&str, f64)],
 ) -> Vec<f64> {
@@ -339,7 +339,7 @@ fn cell_values_from_named_regions(
 }
 
 fn assemble_named_region_source_p1(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     region_sources: &[(&str, f64)],
 ) -> Vec<f64> {
@@ -362,7 +362,7 @@ fn assemble_named_region_source_p1(
 }
 
 fn solve_diffusion_p1<const D: usize, C: fem_assembly::postproc::coefficient::ScalarCoeff>(
-    mesh: SimplexMesh<D>,
+    mesh: Mesh<D>,
     dirichlet: &[(u32, f64)],
     kappa: C,
     mut rhs: Vec<f64>,
@@ -400,7 +400,7 @@ fn solve_diffusion_p1<const D: usize, C: fem_assembly::postproc::coefficient::Sc
 }
 
 fn write_named_attribute_vtk(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     path: impl AsRef<std::path::Path>,
     include_merged_boundary: bool,
@@ -421,7 +421,7 @@ fn write_named_attribute_vtk(
 }
 
 fn write_named_attribute_solution_vtk(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     solution: Vec<f64>,
     material_kappa: &[(i32, f64)],
@@ -468,7 +468,7 @@ fn write_abaqus_solution_vtk(
 }
 
 fn write_netgen_boundary_vtk(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     boundary_tag: i32,
     path: impl AsRef<std::path::Path>,
 ) -> FemResult<()> {
@@ -887,7 +887,7 @@ where
 mod tests {
     use super::*;
 
-    fn load_named_sets() -> (SimplexMesh<2>, NamedAttributeRegistry, Vec<u32>, Vec<u32>) {
+    fn load_named_sets() -> (Mesh<2>, NamedAttributeRegistry, Vec<u32>, Vec<u32>) {
         let (mesh, registry) = load_demo_mesh();
         let inlet = mesh
             .face_ids_for_named_set(&registry, "inlet")

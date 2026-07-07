@@ -13,7 +13,7 @@
 
 use std::io::{Read, Write};
 use fem_core::{FemError, FemResult};
-use fem_mesh::{ElementType, SimplexMesh};
+use fem_mesh::{ElementType, Mesh};
 use crate::comm::Comm;
 
 const PMESH_MAGIC: u64 = 0x504D_4553; // "PMES"
@@ -23,7 +23,7 @@ const PMESH_MAGIC: u64 = 0x504D_4553; // "PMES"
 /// Rank 0 orchestrates: receives data from all ranks and serializes to file.
 /// Non-root ranks send their mesh data via point-to-point.
 pub fn write_pmesh<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     base_path: &str,
     comm: &Comm,
 ) -> FemResult<()> {
@@ -120,8 +120,8 @@ pub fn write_pmesh<const D: usize>(
     Ok(())
 }
 
-/// Read a `.pmesh` file back into a serial `SimplexMesh` (single rank).
-pub fn read_pmesh<const D: usize>(path: &str) -> FemResult<SimplexMesh<D>> {
+/// Read a `.pmesh` file back into a serial `Mesh` (single rank).
+pub fn read_pmesh<const D: usize>(path: &str) -> FemResult<Mesh<D>> {
     let mut file = std::fs::File::open(path).map_err(FemError::Io)?;
 
     let read_u64 = |f: &mut std::fs::File| -> FemResult<u64> {
@@ -172,7 +172,7 @@ pub fn read_pmesh<const D: usize>(path: &str) -> FemResult<SimplexMesh<D>> {
     let elem_tags: Vec<i32> = tag_buf.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
 
     let face_type = if D == 2 { ElementType::Line2 } else { ElementType::Tri3 };
-    Ok(SimplexMesh {
+    Ok(Mesh {
         coords, conn, elem_tags, elem_type,
         face_conn: vec![], face_tags: vec![], face_type,
         elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
@@ -182,7 +182,7 @@ pub fn read_pmesh<const D: usize>(path: &str) -> FemResult<SimplexMesh<D>> {
 
 /// Serial pmesh write (no MPI, single rank). Used for testing.
 #[allow(dead_code)]
-fn write_pmesh_serial<const D: usize>(mesh: &SimplexMesh<D>, path: &str) -> FemResult<()> {
+fn write_pmesh_serial<const D: usize>(mesh: &Mesh<D>, path: &str) -> FemResult<()> {
     use std::io::Write;
     let dim = D as u64;
     let npe = mesh.elem_type.nodes_per_element() as u64;
@@ -215,11 +215,11 @@ fn write_pmesh_serial<const D: usize>(mesh: &SimplexMesh<D>, path: &str) -> FemR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn pmesh_roundtrip_tri3() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let tmp = std::env::temp_dir().join("test_pmesh_tri3.pmesh");
         let path = tmp.to_str().unwrap().to_string();
 
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn pmesh_roundtrip_tet4() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let tmp = std::env::temp_dir().join("test_pmesh_tet4.pmesh");
         let path = tmp.to_str().unwrap().to_string();
         write_pmesh_serial(&mesh, &path).unwrap();

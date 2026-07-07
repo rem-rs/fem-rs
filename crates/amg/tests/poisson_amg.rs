@@ -13,7 +13,7 @@ use fem_assembly::{
     standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_element::{ReferenceElement, lagrange::TriP1};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{
     H1Space,
@@ -24,8 +24,8 @@ use fem_space::{
 fn u_exact(x: &[f64]) -> f64 { (PI * x[0]).sin() * (PI * x[1]).sin() }
 fn forcing(x: &[f64]) -> f64 { 2.0 * PI * PI * u_exact(x) }
 
-fn build_system(n: usize) -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<SimplexMesh<2>>) {
-    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+fn build_system(n: usize) -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<Mesh<2>>) {
+    let mesh  = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let source    = DomainSourceIntegrator::new(forcing);
@@ -36,8 +36,8 @@ fn build_system(n: usize) -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<Simp
     (mat, rhs, space)
 }
 
-fn build_nonsym_system(n: usize) -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<SimplexMesh<2>>) {
-    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+fn build_nonsym_system(n: usize) -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<Mesh<2>>) {
+    let mesh  = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let convection = ConvectionIntegrator {
@@ -51,7 +51,7 @@ fn build_nonsym_system(n: usize) -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Spa
     (mat, rhs, space)
 }
 
-fn l2_error(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+fn l2_error(uh: &[f64], space: &H1Space<Mesh<2>>) -> f64 {
     let mesh = space.mesh();
     let quad = TriP1.quadrature(5);
     let mut phi = vec![0.0_f64; 3];

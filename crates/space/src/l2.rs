@@ -262,11 +262,11 @@ impl<M: MeshTopology> FESpace for L2Space<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn l2_p0_n_dofs_equals_n_elems() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n_elems = mesh.n_elements();
         let space = L2Space::new(mesh, 0);
         assert_eq!(space.n_dofs(), n_elems);
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn l2_p0_element_dofs_are_sequential() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 0);
         for e in 0..space.mesh().n_elements() as u32 {
             let dofs = space.element_dofs(e);
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn l2_p1_n_dofs_equals_n_elems_times_npe() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let npe = mesh.element_nodes(0).len();
         let n_elems = mesh.n_elements();
         let space = L2Space::new(mesh, 1);
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn l2_p0_interpolate_constant() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 0);
         let v = space.interpolate(&|_x| 2.0);
         for &c in v.as_slice() {
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn l2_p2_tri_n_dofs_equals_n_elems_times_6() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let n_elems = mesh.n_elements();
         let space = L2Space::new(mesh, 2);
         assert_eq!(space.n_dofs(), n_elems * 6);
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn l2_p2_tet_n_dofs_equals_n_elems_times_10() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let n_elems = mesh.n_elements();
         let space = L2Space::new(mesh, 2);
         assert_eq!(space.n_dofs(), n_elems * 10);
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn l2_p3_tri_n_dofs_equals_n_elems_times_10() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let n_elems = mesh.n_elements();
         let space = L2Space::new(mesh, 3);
         assert_eq!(space.n_dofs(), n_elems * 10);
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn l2_p3_tet_n_dofs_equals_n_elems_times_20() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let n_elems = mesh.n_elements();
         let space = L2Space::new(mesh, 3);
         assert_eq!(space.n_dofs(), n_elems * 20);

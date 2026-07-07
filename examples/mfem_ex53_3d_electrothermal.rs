@@ -57,7 +57,7 @@ use fem_examples::template_runner::{
     print_template_coupling_summary,
     print_template_header,
 };
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     BuiltinMultiphysicsTemplate,
     SolverConfig,
@@ -136,7 +136,7 @@ impl Default for Args {
 // ─── Solver ──────────────────────────────────────────────────────────────────
 
 fn solve_3d_electrothermal(args: &Args) -> SolveResult3D {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(args.n);
+    let mesh = Mesh::<3>::unit_cube_tet(args.n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
     let n_elems = space.mesh().n_elements();
@@ -258,7 +258,7 @@ fn solve_3d_electrothermal(args: &Args) -> SolveResult3D {
 
 /// Integrate a piecewise-constant element field over a 3-D tet mesh.
 /// Volume of a tet with Jacobian J is |det(J)| / 6.
-fn integrate_element_scalar_3d(mesh: &SimplexMesh<3>, elem_values: &[f64]) -> f64 {
+fn integrate_element_scalar_3d(mesh: &Mesh<3>, elem_values: &[f64]) -> f64 {
     let mut acc = 0.0_f64;
     for (e, &val) in mesh.elem_iter().zip(elem_values.iter()) {
         let vol = tet_volume(mesh, e);
@@ -267,7 +267,7 @@ fn integrate_element_scalar_3d(mesh: &SimplexMesh<3>, elem_values: &[f64]) -> f6
     acc
 }
 
-fn tet_volume(mesh: &SimplexMesh<3>, elem: u32) -> f64 {
+fn tet_volume(mesh: &Mesh<3>, elem: u32) -> f64 {
     let ns = mesh.elem_nodes(elem);
     let a = mesh.coords_of(ns[0]);
     let b = mesh.coords_of(ns[1]);

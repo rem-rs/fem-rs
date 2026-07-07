@@ -10,7 +10,7 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator},
 };
 use fem_linalg::fem_to_linlvo_csr;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_gmres_ams, solve_pcg_ads, SolverConfig, AmsSolverConfig, AdsSolverConfig};
 use fem_space::{H1Space, HCurlSpace, HDivSpace,
                 fe_space::FESpace, constraints::{boundary_dofs_hcurl, apply_dirichlet}};
@@ -37,7 +37,7 @@ fn ads_solver_cfg() -> AdsSolverConfig {
 }
 
 fn solve_maxwell_2d(n: usize) -> (bool, usize) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let h1 = H1Space::new(mesh.clone(), 1);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
 
@@ -94,7 +94,7 @@ fn ams_2d_hpc_improvement() {
     // HPC config uses stronger node solver (AMG coarse_threshold=64)
     // and 3 smoother sweeps for better h-independence.
     fn run(n: usize, cfg: &AmsSolverConfig) -> (bool, usize) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let h1 = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator};
@@ -134,7 +134,7 @@ fn ams_2d_hpc_improvement() {
 
 fn solve_darcy_3d(n: usize) -> (bool, usize) {
     use std::f64::consts::PI;
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let hdiv = HDivSpace::new(mesh.clone(), 0); // RT0
     let h1 = H1Space::new(mesh.clone(), 1);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
@@ -188,7 +188,7 @@ fn ads_darcy_3d_h_independent() {
     };
     let (conv2, it2) = {
         use std::f64::consts::PI;
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let hdiv = HDivSpace::new(mesh.clone(), 0);
         let h1 = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
@@ -232,7 +232,7 @@ fn build_complex_maxwell_2d(
     n: usize, omega: f64,
 ) -> (ComplexCsr, linlvo::sparse::CsrMatrix<f64>, Vec<f64>, Vec<f64>) {
     use std::f64::consts::PI;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let h1 = H1Space::new(mesh.clone(), 1);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);
     let n_dofs = hcurl.n_dofs();
@@ -362,7 +362,7 @@ fn build_complex_darcy_3d(
 ) -> (ComplexCsr, linlvo::sparse::CsrMatrix<f64>, linlvo::sparse::CsrMatrix<f64>,
       Vec<f64>, Vec<f64>) {
     use std::f64::consts::PI;
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let hdiv = HDivSpace::new(mesh.clone(), 0); // RT0
     let h1 = H1Space::new(mesh.clone(), 1);
     let hcurl = HCurlSpace::new(mesh.clone(), 1);

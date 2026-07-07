@@ -5,7 +5,7 @@
 //! - Analytic surfaces: plane, sphere, cylinder, torus, cone
 //! - NURBS surface wrapper using existing fem-element NURBS patches
 //! - Faceted (STL) surface for approximate CAD
-//! - [`project_boundary_to_cad`] — elevate a SimplexMesh boundary to a CAD surface
+//! - [`project_boundary_to_cad`] — elevate a Mesh boundary to a CAD surface
 //!
 //! # Usage
 //! ```rust,ignore
@@ -22,7 +22,7 @@
 use std::f64::consts::PI;
 
 use crate::topology::MeshTopology;
-use crate::SimplexMesh;
+use crate::Mesh;
 
 // ─── CadModel trait ──────────────────────────────────────────────────────────
 
@@ -395,7 +395,7 @@ impl FacetedCadSurface {
     }
 
     /// Load from STL mesh (tessellated surface).
-    pub fn from_stl_mesh(mesh: &SimplexMesh<3>) -> Self {
+    pub fn from_stl_mesh(mesh: &Mesh<3>) -> Self {
         let n = mesh.n_nodes();
         let verts: Vec<[f64; 3]> = (0..n).map(|i| {
             let c = mesh.node_coords(i as u32);
@@ -517,13 +517,13 @@ impl ProjectionConfig {
 
 /// Project boundary nodes of a mesh onto CAD surfaces.
 ///
-/// Returns a new `SimplexMesh` with curved (projected) boundary nodes.
+/// Returns a new `Mesh` with curved (projected) boundary nodes.
 /// Interior nodes are left unchanged.
     pub fn project_boundary_to_cad<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     config: &ProjectionConfig,
     _geom_order: u8,
-) -> SimplexMesh<D> {
+) -> Mesh<D> {
     // Build a lookup: tag → surface
     use std::collections::HashMap;
     let tag_to_surface: HashMap<i32, &CadShape> =
@@ -547,7 +547,7 @@ impl ProjectionConfig {
         }
     }
 
-    SimplexMesh {
+    Mesh {
         coords: new_coords,
         conn: mesh.conn.clone(),
         elem_type: mesh.elem_type,
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn faceted_from_stl_projection() {
         // Build a simple triangle that represents a flat plane at z=0
-        let _mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let _mesh = Mesh::<3>::unit_cube_tet(1);
         let verts = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let tris = vec![[0, 1, 2]];
         let faceted = FacetedCadSurface::from_triangulated(verts, tris);

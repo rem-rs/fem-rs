@@ -68,11 +68,11 @@ impl<M: MeshTopology> FESpace for RestrictedHCurlSpace<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn restricted_hcurl_2d_embedded_3d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let s = RestrictedHCurlSpace::new(mesh, 1, 3);
         assert_eq!(s.mesh().dim(), 2);
         assert_eq!(s.ambient_dim(), 3);

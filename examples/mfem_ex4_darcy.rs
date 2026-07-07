@@ -36,7 +36,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::topology::MeshTopology;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{MinresSolver, SolverConfig};
 use fem_space::{fe_space::FESpace, HDivSpace};
 
@@ -96,11 +96,11 @@ struct SolveResult {
 }
 
 fn solve_case(args: &Args) -> SolveResult {
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
     let space = HDivSpace::new(mesh, 0);
     let n_dofs = space.n_dofs();
@@ -157,7 +157,7 @@ fn solve_case(args: &Args) -> SolveResult {
 }
 
 /// Compute ‖∇·F_h - 1‖_L2 over the mesh.
-fn div_error_l2(space: &HDivSpace<SimplexMesh<2>>, uh: &[f64]) -> f64 {
+fn div_error_l2(space: &HDivSpace<Mesh<2>>, uh: &[f64]) -> f64 {
     let mesh = space.mesh();
     compute_element_divergence(space, uh)
         .into_iter()
@@ -247,7 +247,7 @@ mod tests {
         beta: f64,
         source_scale: f64,
     ) -> (SolveResult, Vec<f64>) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = HDivSpace::new(mesh, 0);
         let n_dofs = space.n_dofs();
 
@@ -317,7 +317,7 @@ mod tests {
     }
 
     fn compute_flux_error(
-        space: &HDivSpace<SimplexMesh<2>>,
+        space: &HDivSpace<Mesh<2>>,
         uh: &[f64],
         source_scale: f64,
     ) -> f64 {

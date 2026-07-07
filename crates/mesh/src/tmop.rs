@@ -19,7 +19,7 @@
 //! - 3-D: [`tmop_metric_3d`], [`TmopObjectiveTetra`], [`tmop_optimise_tetra`] for Tet4 meshes.
 
 use nalgebra::{Matrix2, Matrix3};
-use crate::{SimplexMesh, topology::MeshTopology};
+use crate::{Mesh, topology::MeshTopology};
 
 /// Available TMOP quality metrics.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -407,7 +407,7 @@ pub struct TmopObjective2d {
 
 impl TmopObjective2d {
     /// Build from a 2-D Tri3 mesh. By default all boundary nodes are fixed.
-    pub fn new(mesh: &SimplexMesh<2>) -> Self {
+    pub fn new(mesh: &Mesh<2>) -> Self {
         Self::from_mesh_with_free_tags(mesh, &[])
     }
 
@@ -416,7 +416,7 @@ impl TmopObjective2d {
     /// Nodes on boundary faces with tags in `free_tags` are **not** frozen,
     /// allowing them to slide along the boundary during optimisation.
     /// All other boundary nodes remain fixed.
-    pub fn from_mesh_with_free_tags(mesh: &SimplexMesh<2>, free_tags: &[i32]) -> Self {
+    pub fn from_mesh_with_free_tags(mesh: &Mesh<2>, free_tags: &[i32]) -> Self {
         let n_nodes = mesh.n_nodes();
         let coords = mesh.coords.clone();
         let n_elem = mesh.n_elems();
@@ -514,7 +514,7 @@ impl TmopObjective2d {
 }
 
 /// Run TMOP optimisation for 2-D Tri3 meshes using gradient descent.
-pub fn tmop_optimise_2d(mesh: &SimplexMesh<2>, metric: &TmopMetric, max_iter: usize, step_size: f64) -> Vec<f64> {
+pub fn tmop_optimise_2d(mesh: &Mesh<2>, metric: &TmopMetric, max_iter: usize, step_size: f64) -> Vec<f64> {
     let mut obj = TmopObjective2d::new(mesh);
     let n_free = obj.n_free();
     let mut x = obj.get_x();
@@ -548,14 +548,14 @@ pub fn tmop_optimise_2d(mesh: &SimplexMesh<2>, metric: &TmopMetric, max_iter: us
 /// for CAD-aware mesh optimisation: improve element quality via TMOP
 /// while keeping the boundary on the intended geometry.
 pub fn tmop_optimise_2d_with_cad(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     metric: &TmopMetric,
     max_iter: usize,
     step_size: f64,
     config: &crate::cad::ProjectionConfig,
-) -> SimplexMesh<2> {
+) -> Mesh<2> {
     let new_coords = tmop_optimise_2d(mesh, metric, max_iter, step_size);
-    let opt_mesh = SimplexMesh::uniform(
+    let opt_mesh = Mesh::uniform(
         new_coords, mesh.conn.clone(), mesh.elem_tags.clone(),
         mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
         mesh.face_type,
@@ -578,12 +578,12 @@ pub struct TmopObjectiveTetra {
 
 impl TmopObjectiveTetra {
     /// Build from a tetrahedral mesh. By default all boundary nodes are fixed.
-    pub fn new(mesh: &SimplexMesh<3>) -> Self {
+    pub fn new(mesh: &Mesh<3>) -> Self {
         Self::from_mesh_with_free_tags(mesh, &[])
     }
 
     /// Build with specified boundary face tags whose nodes may move freely.
-    pub fn from_mesh_with_free_tags(mesh: &SimplexMesh<3>, free_tags: &[i32]) -> Self {
+    pub fn from_mesh_with_free_tags(mesh: &Mesh<3>, free_tags: &[i32]) -> Self {
         let n_nodes = mesh.n_nodes();
         let coords = mesh.coords.clone();
         let n_elem = mesh.n_elems();
@@ -712,7 +712,7 @@ impl TmopObjectiveTetra {
 }
 
 /// Run TMOP optimisation for 3-D tetrahedral meshes using gradient descent.
-pub fn tmop_optimise_tetra(mesh: &SimplexMesh<3>, metric: &TmopMetric, max_iter: usize, step_size: f64) -> Vec<f64> {
+pub fn tmop_optimise_tetra(mesh: &Mesh<3>, metric: &TmopMetric, max_iter: usize, step_size: f64) -> Vec<f64> {
     let mut obj = TmopObjectiveTetra::new(mesh);
     let n_free = obj.n_free();
     let mut x = obj.get_x();
@@ -741,14 +741,14 @@ pub fn tmop_optimise_tetra(mesh: &SimplexMesh<3>, metric: &TmopMetric, max_iter:
 
 /// TMOP optimisation for tetrahedral meshes with CAD projection.
 pub fn tmop_optimise_tetra_with_cad(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     metric: &TmopMetric,
     max_iter: usize,
     step_size: f64,
     config: &crate::cad::ProjectionConfig,
-) -> SimplexMesh<3> {
+) -> Mesh<3> {
     let new_coords = tmop_optimise_tetra(mesh, metric, max_iter, step_size);
-    let opt_mesh = SimplexMesh::uniform(
+    let opt_mesh = Mesh::uniform(
         new_coords, mesh.conn.clone(), mesh.elem_tags.clone(),
         mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
         mesh.face_type,
@@ -804,12 +804,12 @@ pub struct TmopObjectiveHex {
 
 impl TmopObjectiveHex {
     /// Build from a hexahedral mesh. By default all boundary nodes are fixed.
-    pub fn new(mesh: &SimplexMesh<3>) -> Self {
+    pub fn new(mesh: &Mesh<3>) -> Self {
         Self::from_mesh_with_free_tags(mesh, &[])
     }
 
     /// Build with specified boundary face tags whose nodes may move freely.
-    pub fn from_mesh_with_free_tags(mesh: &SimplexMesh<3>, free_tags: &[i32]) -> Self {
+    pub fn from_mesh_with_free_tags(mesh: &Mesh<3>, free_tags: &[i32]) -> Self {
         let n_nodes = mesh.n_nodes();
         let coords = mesh.coords.clone();
         let n_elem = mesh.n_elems();
@@ -938,7 +938,7 @@ impl TmopObjectiveHex {
 }
 
 /// Run TMOP optimisation for 3-D hexahedral meshes using gradient descent.
-pub fn tmop_optimise_hex(mesh: &SimplexMesh<3>, metric: &TmopMetric, max_iter: usize, step_size: f64) -> Vec<f64> {
+pub fn tmop_optimise_hex(mesh: &Mesh<3>, metric: &TmopMetric, max_iter: usize, step_size: f64) -> Vec<f64> {
     let mut obj = TmopObjectiveHex::new(mesh);
     let n_free = obj.n_free();
     let mut x = obj.get_x();
@@ -967,14 +967,14 @@ pub fn tmop_optimise_hex(mesh: &SimplexMesh<3>, metric: &TmopMetric, max_iter: u
 
 /// TMOP optimisation for hexahedral meshes with CAD projection.
 pub fn tmop_optimise_hex_with_cad(
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     metric: &TmopMetric,
     max_iter: usize,
     step_size: f64,
     config: &crate::cad::ProjectionConfig,
-) -> SimplexMesh<3> {
+) -> Mesh<3> {
     let new_coords = tmop_optimise_hex(mesh, metric, max_iter, step_size);
-    let opt_mesh = SimplexMesh::uniform(
+    let opt_mesh = Mesh::uniform(
         new_coords, mesh.conn.clone(), mesh.elem_tags.clone(),
         mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
         mesh.face_type,
@@ -985,10 +985,10 @@ pub fn tmop_optimise_hex_with_cad(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SimplexMesh;
+    use crate::Mesh;
 
-    fn unit_square_tri4() -> SimplexMesh<2> {
-        SimplexMesh::<2>::unit_square_tri(4)
+    fn unit_square_tri4() -> Mesh<2> {
+        Mesh::<2>::unit_square_tri(4)
     }
 
     #[test]
@@ -1055,7 +1055,7 @@ mod tests {
 
         // Compute min q before and after
         let min_q_initial = min_element_quality_2d(&mesh);
-        let final_mesh = SimplexMesh::<2>::uniform(
+        let final_mesh = Mesh::<2>::uniform(
             result.clone(), mesh.conn.clone(), mesh.elem_tags.clone(),
             mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
             mesh.face_type,
@@ -1067,7 +1067,7 @@ mod tests {
     }
 
     /// Mean-ratio metric for a triangle: q = 4*sqrt(3)*A / (l01² + l12² + l20²).
-    fn element_quality_2d(mesh: &SimplexMesh<2>, e: u32) -> f64 {
+    fn element_quality_2d(mesh: &Mesh<2>, e: u32) -> f64 {
         let ns = mesh.element_nodes(e);
         let p0 = mesh.node_coords(ns[0]);
         let p1 = mesh.node_coords(ns[1]);
@@ -1079,7 +1079,7 @@ mod tests {
         4.0 * 3.0f64.sqrt() * a / (l01.powi(2) + l12.powi(2) + l20.powi(2))
     }
 
-    fn min_element_quality_2d(mesh: &SimplexMesh<2>) -> f64 {
+    fn min_element_quality_2d(mesh: &Mesh<2>) -> f64 {
         (0..mesh.n_elems() as u32)
             .map(|e| element_quality_2d(mesh, e))
             .fold(f64::INFINITY, f64::min)
@@ -1124,7 +1124,7 @@ mod tests {
 
     #[test]
     fn tmop_tetra_optimise_improves_quality() {
-        use crate::SimplexMesh;
+        use crate::Mesh;
         let mesh = unit_cube_tet5();
         let n_before = mesh.n_nodes();
 
@@ -1144,7 +1144,7 @@ mod tests {
 
         let min_q_initial = min_tet_quality(&m2);
         let result = tmop_optimise_tetra(&m2, &TmopMetric::Shape, 30, 0.05);
-        let final_m = SimplexMesh::<3>::uniform(
+        let final_m = Mesh::<3>::uniform(
             result, m2.conn.clone(), m2.elem_tags.clone(),
             m2.elem_type, m2.face_conn.clone(), m2.face_tags.clone(),
             m2.face_type,
@@ -1154,14 +1154,14 @@ mod tests {
             "min tet quality decreased: initial={:.6}, final={:.6}", min_q_initial, min_q_final);
     }
 
-    fn unit_cube_tet5() -> SimplexMesh<3> {
-        SimplexMesh::<3>::unit_cube_tet(5)
+    fn unit_cube_tet5() -> Mesh<3> {
+        Mesh::<3>::unit_cube_tet(5)
     }
 
     /// Mean-ratio quality for a tetrahedron:
     /// q = 12 * (3V)^{2/3} / Σ(l_i²)
     /// where V is volume, l_i are edge lengths (6 edges).
-    fn tet_quality(mesh: &SimplexMesh<3>, e: u32) -> f64 {
+    fn tet_quality(mesh: &Mesh<3>, e: u32) -> f64 {
         let ns = mesh.element_nodes(e);
         let p: Vec<[f64; 3]> = (0..4).map(|k| {
             let c = mesh.node_coords(ns[k]);
@@ -1184,13 +1184,13 @@ mod tests {
         12.0 * (3.0 * vol).powf(2.0 / 3.0) / sum_l2
     }
 
-    fn min_tet_quality(mesh: &SimplexMesh<3>) -> f64 {
+    fn min_tet_quality(mesh: &Mesh<3>) -> f64 {
         (0..mesh.n_elems() as u32).map(|e| tet_quality(mesh, e)).fold(f64::INFINITY, f64::min)
     }
 
     #[test]
     fn tmop_tetra_l2_gradient_near_zero_for_uniform() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let mesh = Mesh::<3>::unit_cube_tet(4);
         let obj = TmopObjectiveTetra::new(&mesh);
         let n_free = obj.n_free();
         let mut val = 0.0;
@@ -1237,8 +1237,8 @@ mod tests {
 
     // ─── Hex8 TMOP tests ──────────────────────────────────────────────────────
 
-    fn hex_grid_mesh(nx: usize, ny: usize, nz: usize) -> SimplexMesh<3> {
-        use crate::SimplexMesh;
+    fn hex_grid_mesh(nx: usize, ny: usize, nz: usize) -> Mesh<3> {
+        use crate::Mesh;
         let n = nx * ny * nz;
         let npe = 8usize;
         let mut coords = Vec::with_capacity(n * npe * 3);
@@ -1263,7 +1263,7 @@ mod tests {
             coords.push(k as f64 / nz as f64);
         }}}
 
-        SimplexMesh::uniform(coords, conn, tags,
+        Mesh::uniform(coords, conn, tags,
             crate::ElementType::Hex8, vec![], vec![], crate::ElementType::Quad4)
     }
 
@@ -1339,7 +1339,7 @@ mod tests {
 
         let min_q_init = min_hex_quality(&mesh);
         let result = tmop_optimise_hex(&mesh, &TmopMetric::Shape, 20, 0.05);
-        let final_m = SimplexMesh::<3>::uniform(
+        let final_m = Mesh::<3>::uniform(
             result, mesh.conn.clone(), mesh.elem_tags.clone(),
             mesh.elem_type, mesh.face_conn.clone(), mesh.face_tags.clone(),
             mesh.face_type,
@@ -1349,7 +1349,7 @@ mod tests {
             "hex quality decreased: {:.6} → {:.6}", min_q_init, min_q_final);
     }
 
-    fn hex_scaled_jacobian(mesh: &SimplexMesh<3>, e: u32) -> f64 {
+    fn hex_scaled_jacobian(mesh: &Mesh<3>, e: u32) -> f64 {
         let ns = mesh.element_nodes(e);
         let mut p = [[0.0; 3]; 8];
         for k in 0..8 { let c = mesh.node_coords(ns[k]); p[k] = [c[0], c[1], c[2]]; }
@@ -1370,7 +1370,7 @@ mod tests {
         min_q
     }
 
-    fn min_hex_quality(mesh: &SimplexMesh<3>) -> f64 {
+    fn min_hex_quality(mesh: &Mesh<3>) -> f64 {
         (0..mesh.n_elems() as u32).map(|e| hex_scaled_jacobian(mesh, e)).fold(f64::INFINITY, f64::min)
     }
 
@@ -1391,7 +1391,7 @@ mod tests {
 
     #[test]
     fn tmop_2d_improves_with_ideal_target() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let mut obj = TmopObjective2d::new(&mesh);
         obj.set_ideal_equilateral();
         let result = tmop_optimise_2d(&mesh, &TmopMetric::Shape, 30, 0.05);
@@ -1434,7 +1434,7 @@ mod tests {
     fn tmop_2d_free_tags_releases_boundary_nodes() {
         // unit_square_tri uses face tags {1,2,3,4} for the four sides.
         // With free_tags=[1,2,3,4], ALL nodes should be free.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let obj_all_free = TmopObjective2d::from_mesh_with_free_tags(&mesh, &[1, 2, 3, 4]);
         assert_eq!(obj_all_free.n_free(), mesh.n_nodes(),
             "with all boundary tags free, all {} nodes should be free, got {}",
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[test]
     fn tmop_tetra_free_tags_releases_boundary_nodes() {
-        let mesh = crate::SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = crate::Mesh::<3>::unit_cube_tet(3);
         let obj_all_free = TmopObjectiveTetra::from_mesh_with_free_tags(&mesh, &[1, 2, 3, 4, 5, 6]);
         assert_eq!(obj_all_free.n_free(), mesh.n_nodes(),
             "with all boundary tags free, all nodes should be free");
@@ -1467,7 +1467,7 @@ mod tests {
     #[test]
     fn tmop_hex_free_tags_releases_boundary_nodes() {
         // unit_cube_hex uses face tags {1,2,3,4,5,6} for its six faces.
-        let mesh = crate::SimplexMesh::<3>::unit_cube_hex(3);
+        let mesh = crate::Mesh::<3>::unit_cube_hex(3);
         let obj_all_free = TmopObjectiveHex::from_mesh_with_free_tags(&mesh, &[1, 2, 3, 4, 5, 6]);
         assert_eq!(obj_all_free.n_free(), mesh.n_nodes(),
             "with all boundary tags free, all nodes should be free");

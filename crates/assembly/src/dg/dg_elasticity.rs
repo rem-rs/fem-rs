@@ -197,12 +197,12 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::L2Space;
 
     #[test]
     fn dg_elasticity_block_size() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         #[allow(deprecated)]
@@ -216,7 +216,7 @@ mod tests {
     /// is non-zero vs zero (regression: old block-diagonal ignored lambda).
     #[test]
     fn dg_elasticity_coupling_differs_from_block_diagonal() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
 
@@ -244,7 +244,7 @@ mod tests {
     /// SPD check: both shear-only and coupled must be SPD.
     #[test]
     fn dg_elasticity_spd() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
 

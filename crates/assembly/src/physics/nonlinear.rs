@@ -1223,10 +1223,10 @@ fn dot_product(a: &[f64], b: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, DofManager, fe_space::FESpace, constraints::boundary_dofs};
 
-    fn get_bnd_dofs(mesh: &SimplexMesh<2>, order: u8) -> Vec<usize> {
+    fn get_bnd_dofs(mesh: &Mesh<2>, order: u8) -> Vec<usize> {
         let dm = DofManager::new(mesh, order);
         boundary_dofs(mesh, &dm, &[1, 2, 3, 4])
             .iter().map(|&d| d as usize).collect()
@@ -1236,7 +1236,7 @@ mod tests {
     /// Verify that the Newton solver converges in 1 iteration.
     #[test]
     fn newton_linear_problem_converges_in_one_iter() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh  = Mesh::<2>::unit_square_tri(6);
         let bnd   = get_bnd_dofs(&mesh, 1);
         let space = H1Space::new(mesh, 1);
         let n     = space.n_dofs();
@@ -1259,7 +1259,7 @@ mod tests {
     /// Just verify convergence.
     #[test]
     fn newton_nonlinear_converges() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh  = Mesh::<2>::unit_square_tri(8);
         let bnd   = get_bnd_dofs(&mesh, 1);
         let space = H1Space::new(mesh, 1);
         let n     = space.n_dofs();
@@ -1286,7 +1286,7 @@ mod tests {
     /// Uses constant κ so that the Picard Jacobian equals the full tangent stiffness.
     #[test]
     fn jacobian_finite_difference_check() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh  = Mesh::<2>::unit_square_tri(2);
         let bnd   = get_bnd_dofs(&mesh, 1);
         let space = H1Space::new(mesh, 1);
         let n     = space.n_dofs();

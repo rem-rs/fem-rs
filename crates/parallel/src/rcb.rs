@@ -11,7 +11,7 @@
 //! ```
 
 use fem_core::Rank;
-use fem_mesh::{MeshTopology, SimplexMesh};
+use fem_mesh::{MeshTopology, Mesh};
 use crate::par_simplex::extract_submesh_from_partition;
 
 /// Options for RCB partitioning.
@@ -24,7 +24,7 @@ pub struct RcbOptions {
 ///
 /// Returns `partition[e]` = rank (0 .. n_parts) for each element.
 pub fn partition_rcb<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     n_parts: usize,
     opts: Option<&RcbOptions>,
 ) -> Vec<Rank> {
@@ -55,10 +55,10 @@ pub fn partition_rcb<const D: usize>(
 
 /// Build an RCB-based ParallelMesh.
 pub fn partition_simplex_rcb<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     comm: &crate::Comm,
     opts: Option<&RcbOptions>,
-) -> crate::ParallelMesh<SimplexMesh<D>> {
+) -> crate::ParallelMesh<Mesh<D>> {
     let elem_part = partition_rcb(mesh, comm.size(), opts);
     let (local_mesh, part) = extract_submesh_from_partition(mesh, comm.rank(), &elem_part);
     crate::ParallelMesh::new(local_mesh, comm.clone(), part)
@@ -66,7 +66,7 @@ pub fn partition_simplex_rcb<const D: usize>(
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-fn compute_centroids<const D: usize>(mesh: &SimplexMesh<D>) -> Vec<[f64; D]> {
+fn compute_centroids<const D: usize>(mesh: &Mesh<D>) -> Vec<[f64; D]> {
     let n_elems = mesh.n_elems();
     let mut centroids = vec![[0.0; D]; n_elems];
     for e in 0..n_elems {
@@ -187,14 +187,14 @@ mod tests {
 
     #[test]
     fn rcb_single_part() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let parts = partition_rcb(&mesh, 1, None);
         assert!(parts.iter().all(|&r| r == 0));
     }
 
     #[test]
     fn rcb_2d_power_of_two() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
         for &n in &[2, 4, 8] {
             let parts = partition_rcb(&mesh, n, None);
             check_valid(&parts, n);
@@ -203,14 +203,14 @@ mod tests {
 
     #[test]
     fn rcb_3d_eight_parts() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let mesh = Mesh::<3>::unit_cube_tet(4);
         let parts = partition_rcb(&mesh, 8, None);
         check_valid(&parts, 8);
     }
 
     #[test]
     fn rcb_reproducible() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let mesh = Mesh::<2>::unit_square_tri(12);
         let p1 = partition_rcb(&mesh, 4, None);
         let p2 = partition_rcb(&mesh, 4, None);
         assert_eq!(p1, p2);
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn rcb_non_power_of_two() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
         for &n in &[3, 5, 6, 7] {
             let parts = partition_rcb(&mesh, n, None);
             check_valid(&parts, n);
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn rcb_fewer_elements_than_parts() {
         // unit_square_tri(1) gives 2 tri elements
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let parts = partition_rcb(&mesh, 4, None);
         assert_eq!(parts.len(), 2);
         for &r in &parts {

@@ -111,10 +111,10 @@ pub fn assemble_self_contact_3d<M: MeshTopology>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test] fn self_contact_3d_finite() {
-        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let m = Mesh::<3>::unit_cube_tet(2);
         let loc = TetPointLocator::new(&m);
         let cfg = ContactConfig {
             penalty_normal: 1e6, contact_type: crate::contact::ContactType::Penalty,
@@ -125,7 +125,7 @@ mod tests {
         assert!(f.iter().all(|v|v.is_finite())); assert!(k.nrows>0);
     }
     #[test] fn self_contact_3d_friction_finite() {
-        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let m = Mesh::<3>::unit_cube_tet(2);
         let loc = TetPointLocator::new(&m);
         let cfg = ContactConfig {
             penalty_normal: 1e6, contact_type: crate::contact::ContactType::Penalty,

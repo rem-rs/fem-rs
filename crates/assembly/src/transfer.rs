@@ -1,7 +1,7 @@
 //! Nonmatching mesh field transfer utilities.
 //!
 //! Current MVP scope:
-//! - source/target spaces: `H1Space<SimplexMesh<2>>`
+//! - source/target spaces: `H1Space<Mesh<2>>`
 //! - order: P1 only
 //! - transfer type: nodal interpolation on target nodes by locating each target
 //!   node in source mesh and evaluating source P1 field with barycentric weights
@@ -16,7 +16,7 @@ use thiserror::Error;
 use fem_core::types::DofId;
 use fem_element::{ReferenceElement, TetP1, TriP1};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{topology::MeshTopology, SimplexMesh, TetPointLocator, TriPointLocator};
+use fem_mesh::{topology::MeshTopology, Mesh, TetPointLocator, TriPointLocator};
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{
     fe_space::FESpace,
@@ -61,7 +61,7 @@ pub enum TransferError {
 }
 
 fn sample_source_tri(
-    source_mesh: &SimplexMesh<2>,
+    source_mesh: &Mesh<2>,
     source_locator: &TriPointLocator,
     source_values: &[f64],
     x: &[f64],
@@ -81,7 +81,7 @@ fn sample_source_tri(
 }
 
 fn sample_source_tet(
-    source_mesh: &SimplexMesh<3>,
+    source_mesh: &Mesh<3>,
     source_locator: &TetPointLocator,
     source_values: &[f64],
     x: &[f64],
@@ -105,7 +105,7 @@ fn relative_error(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs().max(1e-14)
 }
 
-fn integrate_h1_p1_field_2d(space: &H1Space<SimplexMesh<2>>, values: &[f64], quad_order: u8) -> f64 {
+fn integrate_h1_p1_field_2d(space: &H1Space<Mesh<2>>, values: &[f64], quad_order: u8) -> f64 {
     let mesh = space.mesh();
     let ref_elem = TriP1;
     let quad = ref_elem.quadrature(quad_order.max(2));
@@ -136,7 +136,7 @@ fn integrate_h1_p1_field_2d(space: &H1Space<SimplexMesh<2>>, values: &[f64], qua
     out
 }
 
-fn integrate_h1_p1_field_3d(space: &H1Space<SimplexMesh<3>>, values: &[f64], quad_order: u8) -> f64 {
+fn integrate_h1_p1_field_3d(space: &H1Space<Mesh<3>>, values: &[f64], quad_order: u8) -> f64 {
     let mesh = space.mesh();
     let ref_elem = TetP1;
     let quad = ref_elem.quadrature(quad_order.max(2));
@@ -177,7 +177,7 @@ fn integrate_h1_p1_field_3d(space: &H1Space<SimplexMesh<3>>, values: &[f64], qua
     out
 }
 
-fn p1_tri_grad(mesh: &SimplexMesh<2>, elem: u32, values: &[f64], space: &H1Space<SimplexMesh<2>>) -> [f64; 2] {
+fn p1_tri_grad(mesh: &Mesh<2>, elem: u32, values: &[f64], space: &H1Space<Mesh<2>>) -> [f64; 2] {
     let nodes = mesh.elem_nodes(elem);
     let c0 = mesh.coords_of(nodes[0]);
     let c1 = mesh.coords_of(nodes[1]);
@@ -202,7 +202,7 @@ fn p1_tri_grad(mesh: &SimplexMesh<2>, elem: u32, values: &[f64], space: &H1Space
     [gx, gy]
 }
 
-fn boundary_face_outward_normal_2d(mesh: &SimplexMesh<2>, face: u32) -> ([f64; 2], f64) {
+fn boundary_face_outward_normal_2d(mesh: &Mesh<2>, face: u32) -> ([f64; 2], f64) {
     let fnodes = mesh.face_nodes(face);
     let xa = mesh.coords_of(fnodes[0]);
     let xb = mesh.coords_of(fnodes[1]);
@@ -240,27 +240,27 @@ fn boundary_face_outward_normal_2d(mesh: &SimplexMesh<2>, face: u32) -> ([f64; 2
 // ── Generic GetProlongation ──────────────────────────────────────────────────
 /// Build H1 prolongation matrix P where fine = P * coarse.
 ///
-/// Works for H1 spaces on SimplexMesh<2> (TriP1/TriP2) and SimplexMesh<3> (TetP1).
+/// Works for H1 spaces on Mesh<2> (TriP1/TriP2) and Mesh<3> (TetP1).
 /// Each fine DOF coordinate is located in the coarse mesh and interpolated
 /// via barycentric weights.
 pub fn get_prolongation_h1(
-    coarse_space: &H1Space<SimplexMesh<2>>,
-    fine_space: &H1Space<SimplexMesh<2>>,
+    coarse_space: &H1Space<Mesh<2>>,
+    fine_space: &H1Space<Mesh<2>>,
     tol: f64,
 ) -> (CsrMatrix<f64>, TransferStats) {
     build_prolongation_h1(coarse_space, fine_space, tol)
 }
 
 pub fn get_prolongation_h1_3d(
-    coarse_space: &H1Space<SimplexMesh<3>>,
-    fine_space: &H1Space<SimplexMesh<3>>,
+    coarse_space: &H1Space<Mesh<3>>,
+    fine_space: &H1Space<Mesh<3>>,
     tol: f64,
 ) -> (CsrMatrix<f64>, TransferStats) {
     build_prolongation_h1_3d(coarse_space, fine_space, tol)
 }
 
 pub fn net_boundary_flux_h1_p1_2d(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     values: &[f64],
 ) -> Result<f64, TransferError> {
     if space.order() != 1 {
@@ -295,9 +295,9 @@ pub fn net_boundary_flux_h1_p1_2d(
 /// - evaluate source field via barycentric interpolation
 /// - if not located, fallback to nearest source node value
 pub fn transfer_h1_p1_nonmatching(
-    source_space: &H1Space<SimplexMesh<2>>,
+    source_space: &H1Space<Mesh<2>>,
     source_values: &[f64],
-    target_space: &H1Space<SimplexMesh<2>>,
+    target_space: &H1Space<Mesh<2>>,
     tol: f64,
 ) -> Result<(Vec<f64>, TransferStats), TransferError> {
     if source_space.order() != 1 || target_space.order() != 1 {
@@ -347,9 +347,9 @@ pub fn transfer_h1_p1_nonmatching(
 /// Transfer nodal field values from a source H1 P1 space to a target H1 P1 space
 /// on nonmatching tetrahedral meshes.
 pub fn transfer_h1_p1_nonmatching_3d(
-    source_space: &H1Space<SimplexMesh<3>>,
+    source_space: &H1Space<Mesh<3>>,
     source_values: &[f64],
-    target_space: &H1Space<SimplexMesh<3>>,
+    target_space: &H1Space<Mesh<3>>,
     tol: f64,
 ) -> Result<(Vec<f64>, TransferStats), TransferError> {
     if source_space.order() != 1 || target_space.order() != 1 {
@@ -405,9 +405,9 @@ pub fn transfer_h1_p1_nonmatching_3d(
 /// and u_s is sampled at target quadrature points through nonmatching location
 /// on the source mesh.
 pub fn transfer_h1_p1_nonmatching_l2_projection(
-    source_space: &H1Space<SimplexMesh<2>>,
+    source_space: &H1Space<Mesh<2>>,
     source_values: &[f64],
-    target_space: &H1Space<SimplexMesh<2>>,
+    target_space: &H1Space<Mesh<2>>,
     tol: f64,
     quad_order: u8,
 ) -> Result<(Vec<f64>, TransferStats), TransferError> {
@@ -501,9 +501,9 @@ pub fn transfer_h1_p1_nonmatching_l2_projection(
 /// Transfer field values from source to target using L2 projection on target
 /// H1 P1 space (3D tetrahedral meshes).
 pub fn transfer_h1_p1_nonmatching_l2_projection_3d(
-    source_space: &H1Space<SimplexMesh<3>>,
+    source_space: &H1Space<Mesh<3>>,
     source_values: &[f64],
-    target_space: &H1Space<SimplexMesh<3>>,
+    target_space: &H1Space<Mesh<3>>,
     tol: f64,
     quad_order: u8,
 ) -> Result<(Vec<f64>, TransferStats), TransferError> {
@@ -613,9 +613,9 @@ pub fn transfer_h1_p1_nonmatching_l2_projection_3d(
 /// After L2 projection, applies a constant offset so that the target global
 /// integral exactly matches the source global integral.
 pub fn transfer_h1_p1_nonmatching_l2_projection_conservative(
-    source_space: &H1Space<SimplexMesh<2>>,
+    source_space: &H1Space<Mesh<2>>,
     source_values: &[f64],
-    target_space: &H1Space<SimplexMesh<2>>,
+    target_space: &H1Space<Mesh<2>>,
     tol: f64,
     quad_order: u8,
 ) -> Result<(Vec<f64>, TransferStats, ConservativeTransferReport), TransferError> {
@@ -683,9 +683,9 @@ pub fn transfer_h1_p1_nonmatching_l2_projection_conservative(
 /// After L2 projection, applies a constant offset so that the target global
 /// integral exactly matches the source global integral.
 pub fn transfer_h1_p1_nonmatching_l2_projection_conservative_3d(
-    source_space: &H1Space<SimplexMesh<3>>,
+    source_space: &H1Space<Mesh<3>>,
     source_values: &[f64],
-    target_space: &H1Space<SimplexMesh<3>>,
+    target_space: &H1Space<Mesh<3>>,
     tol: f64,
     quad_order: u8,
 ) -> Result<(Vec<f64>, TransferStats, ConservativeTransferReport), TransferError> {
@@ -742,8 +742,8 @@ pub fn transfer_h1_p1_nonmatching_l2_projection_conservative_3d(
 
 /// Build an H¹ prolongation matrix from `coarse` to `fine` (2-D tri).
 pub fn build_prolongation_h1(
-    coarse: &H1Space<SimplexMesh<2>>,
-    fine: &H1Space<SimplexMesh<2>>,
+    coarse: &H1Space<Mesh<2>>,
+    fine: &H1Space<Mesh<2>>,
     tol: f64,
 ) -> (CsrMatrix<f64>, TransferStats) {
     let cmesh = coarse.mesh();
@@ -771,8 +771,8 @@ pub fn build_prolongation_h1(
 
 /// Build an H¹ prolongation matrix from `coarse` to `fine` (3-D tet).
 pub fn build_prolongation_h1_3d(
-    coarse: &H1Space<SimplexMesh<3>>,
-    fine: &H1Space<SimplexMesh<3>>,
+    coarse: &H1Space<Mesh<3>>,
+    fine: &H1Space<Mesh<3>>,
     tol: f64,
 ) -> (CsrMatrix<f64>, TransferStats) {
     let cmesh = coarse.mesh();
@@ -1224,11 +1224,11 @@ mod tests {
 
     #[test]
     fn nonmatching_h1_p1_transfer_is_exact_for_linear_fields() {
-        let src_mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let src_mesh = Mesh::<2>::unit_square_tri(6);
         let src_space = H1Space::new(src_mesh, 1);
         let src_vals = src_space.interpolate(&|x| 1.5 * x[0] - 0.7 * x[1] + 2.0);
 
-        let tgt_mesh = SimplexMesh::<2>::unit_square_tri(11);
+        let tgt_mesh = Mesh::<2>::unit_square_tri(11);
         let tgt_space = H1Space::new(tgt_mesh, 1);
         let exact_tgt = tgt_space.interpolate(&|x| 1.5 * x[0] - 0.7 * x[1] + 2.0);
 
@@ -1253,11 +1253,11 @@ mod tests {
 
     #[test]
     fn nonmatching_h1_p1_transfer_is_exact_for_linear_fields_3d() {
-        let src_mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let src_mesh = Mesh::<3>::unit_cube_tet(3);
         let src_space = H1Space::new(src_mesh, 1);
         let src_vals = src_space.interpolate(&|x| 1.2 * x[0] - 0.4 * x[1] + 0.9 * x[2] + 0.7);
 
-        let tgt_mesh = SimplexMesh::<3>::unit_cube_tet(5);
+        let tgt_mesh = Mesh::<3>::unit_cube_tet(5);
         let tgt_space = H1Space::new(tgt_mesh, 1);
         let exact_tgt = tgt_space.interpolate(&|x| 1.2 * x[0] - 0.4 * x[1] + 0.9 * x[2] + 0.7);
 
@@ -1282,11 +1282,11 @@ mod tests {
 
     #[test]
     fn nonmatching_h1_p1_l2_projection_is_exact_for_linear_fields() {
-        let src_mesh = SimplexMesh::<2>::unit_square_tri(7);
+        let src_mesh = Mesh::<2>::unit_square_tri(7);
         let src_space = H1Space::new(src_mesh, 1);
         let src_vals = src_space.interpolate(&|x| 0.9 * x[0] - 0.2 * x[1] + 1.7);
 
-        let tgt_mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let tgt_mesh = Mesh::<2>::unit_square_tri(12);
         let tgt_space = H1Space::new(tgt_mesh, 1);
         let exact_tgt = tgt_space.interpolate(&|x| 0.9 * x[0] - 0.2 * x[1] + 1.7);
 
@@ -1319,11 +1319,11 @@ mod tests {
         let levels = [4_usize, 8_usize, 16_usize];
         let mut errs = Vec::new();
         for &n in &levels {
-            let src_mesh = SimplexMesh::<2>::unit_square_tri(2 * n + 1);
+            let src_mesh = Mesh::<2>::unit_square_tri(2 * n + 1);
             let src_space = H1Space::new(src_mesh, 1);
             let src_vals = src_space.interpolate(&exact);
 
-            let tgt_mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let tgt_mesh = Mesh::<2>::unit_square_tri(n);
             let tgt_space = H1Space::new(tgt_mesh, 1);
 
             let (transferred, stats) = transfer_h1_p1_nonmatching_l2_projection(
@@ -1351,13 +1351,13 @@ mod tests {
 
     #[test]
     fn conservative_projection_matches_global_integral() {
-        let src_mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let src_mesh = Mesh::<2>::unit_square_tri(8);
         let src_space = H1Space::new(src_mesh, 1);
         let src_vals = src_space.interpolate(&|x| {
             (2.0 * std::f64::consts::PI * x[0]).sin() + 0.3 * (std::f64::consts::PI * x[1]).cos()
         });
 
-        let mut tgt_mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let mut tgt_mesh = Mesh::<2>::unit_square_tri(12);
         for i in 0..tgt_mesh.n_nodes() {
             tgt_mesh.coords[2 * i] += 0.02;
         }
@@ -1382,11 +1382,11 @@ mod tests {
 
     #[test]
     fn boundary_flux_metric_is_consistent_for_exact_linear_transfer() {
-        let src_mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let src_mesh = Mesh::<2>::unit_square_tri(6);
         let src_space = H1Space::new(src_mesh, 1);
         let src_vals = src_space.interpolate(&|x| 1.25 * x[0] - 0.4 * x[1] + 0.2);
 
-        let tgt_mesh = SimplexMesh::<2>::unit_square_tri(10);
+        let tgt_mesh = Mesh::<2>::unit_square_tri(10);
         let tgt_space = H1Space::new(tgt_mesh, 1);
         let (tgt_vals, stats) = transfer_h1_p1_nonmatching(&src_space, src_vals.as_slice(), &tgt_space, 1e-12)
             .unwrap();
@@ -1399,11 +1399,11 @@ mod tests {
 
     #[test]
     fn l2_projection_3d_reports_finite_global_integral() {
-        let src_mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let src_mesh = Mesh::<3>::unit_cube_tet(3);
         let src_space = H1Space::new(src_mesh, 1);
         let src_vals = src_space.interpolate(&|x| x[0] + 2.0 * x[1] - 0.7 * x[2] + 0.3);
 
-        let tgt_mesh = SimplexMesh::<3>::unit_cube_tet(5);
+        let tgt_mesh = Mesh::<3>::unit_cube_tet(5);
         let tgt_space = H1Space::new(tgt_mesh, 1);
         let (tgt_vals, stats) = transfer_h1_p1_nonmatching_l2_projection_3d(
             &src_space,
@@ -1423,7 +1423,7 @@ mod tests {
 
     #[test]
     fn conservative_projection_3d_matches_global_integral() {
-        let src_mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let src_mesh = Mesh::<3>::unit_cube_tet(3);
         let src_space = H1Space::new(src_mesh, 1);
         let src_vals = src_space.interpolate(&|x| {
             (2.0 * std::f64::consts::PI * x[0]).sin()
@@ -1431,7 +1431,7 @@ mod tests {
                 + 0.2 * x[2]
         });
 
-        let mut tgt_mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let mut tgt_mesh = Mesh::<3>::unit_cube_tet(4);
         for i in 0..tgt_mesh.n_nodes() {
             tgt_mesh.coords[3 * i] += 0.02;
         }
@@ -1457,9 +1457,9 @@ mod tests {
 
     #[test]
     fn prolongation_h1_p1_2d() {
-        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let coarse_mesh = Mesh::<2>::unit_square_tri(2);
         let coarse = H1Space::new(coarse_mesh, 1);
-        let fine_mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let fine_mesh = Mesh::<2>::unit_square_tri(4);
         let fine = H1Space::new(fine_mesh, 1);
         let (p, stats) = super::build_prolongation_h1(&coarse, &fine, 0.1);
         assert_eq!(p.nrows, fine.n_dofs());
@@ -1490,7 +1490,7 @@ mod tests {
     #[test]
     fn prolongation_hcurl_nd1_2d() {
         use fem_mesh::amr::refine_uniform;
-        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let coarse_mesh = Mesh::<2>::unit_square_tri(2);
         let fine_mesh = refine_uniform(&coarse_mesh);
         let coarse = HCurlSpace::new(coarse_mesh, 1);
         let fine = HCurlSpace::new(fine_mesh, 1);
@@ -1508,7 +1508,7 @@ mod tests {
     #[test]
     fn prolongation_hcurl_nd2_2d() {
         use fem_mesh::amr::refine_uniform;
-        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let coarse_mesh = Mesh::<2>::unit_square_tri(2);
         let fine_mesh = refine_uniform(&coarse_mesh);
         let coarse = HCurlSpace::new(coarse_mesh, 2);
         let fine = HCurlSpace::new(fine_mesh, 2);
@@ -1525,7 +1525,7 @@ mod tests {
     #[test]
     fn prolongation_hdiv_rt0_2d() {
         use fem_mesh::amr::refine_uniform;
-        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let coarse_mesh = Mesh::<2>::unit_square_tri(2);
         let fine_mesh = refine_uniform(&coarse_mesh);
         let coarse = HDivSpace::new(coarse_mesh, 0);
         let fine = HDivSpace::new(fine_mesh, 0);
@@ -1543,7 +1543,7 @@ mod tests {
     #[test]
     fn prolongation_hdiv_rt1_2d() {
         use fem_mesh::amr::refine_uniform;
-        let coarse_mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let coarse_mesh = Mesh::<2>::unit_square_tri(2);
         let fine_mesh = refine_uniform(&coarse_mesh);
         let coarse = HDivSpace::new(coarse_mesh, 1);
         let fine = HDivSpace::new(fine_mesh, 1);
@@ -1572,8 +1572,8 @@ mod tests {
 pub fn build_nc_prolongation_h1(
     n_fine: usize,
     n_coarse: usize,
-    coarse_mesh: &SimplexMesh<2>,
-    fine_mesh: &SimplexMesh<2>,
+    coarse_mesh: &Mesh<2>,
+    fine_mesh: &Mesh<2>,
     constraints: &[fem_mesh::HangingNodeConstraint],
 ) -> CsrMatrix<f64> {
     // First compute full prolongation as vector
@@ -1640,8 +1640,8 @@ pub fn apply_nc_prolongation_h1(
 /// coarse mesh via barycentric coordinates and interpolate the P1 value.
 pub fn apply_nc_prolongation_h1_full(
     u_coarse: &[f64],
-    coarse_mesh: &SimplexMesh<2>,
-    fine_mesh: &SimplexMesh<2>,
+    coarse_mesh: &Mesh<2>,
+    fine_mesh: &Mesh<2>,
     constraints: &[fem_mesh::HangingNodeConstraint],
 ) -> Vec<f64> {
     let n_coarse = u_coarse.len();
@@ -1692,13 +1692,13 @@ pub fn apply_nc_restriction_h1(
 #[cfg(test)]
 mod nc_transfer_tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_mesh::amr::refine_nonconforming;
     use fem_space::H1Space;
 
     #[test]
     fn nc_prolong_p1_linear_exact() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let space = H1Space::new(m, 1);
         let u_fn = &|x: &[f64]| x[0] + x[1];
         let u_coarse = space.interpolate(u_fn).as_slice().to_vec();
@@ -1715,7 +1715,7 @@ mod nc_transfer_tests {
 
     #[test]
     fn nc_restrict_injection_preserves_coarse() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let space = H1Space::new(m, 1);
         let u_fn = &|x: &[f64]| x[0] * x[0] + x[1] * x[1];
         let u_coarse = space.interpolate(u_fn).as_slice().to_vec();
@@ -1732,7 +1732,7 @@ mod nc_transfer_tests {
 
     #[test]
     fn nc_prolongation_matrix_matches_direct() {
-        let m = SimplexMesh::<2>::unit_square_tri(2);
+        let m = Mesh::<2>::unit_square_tri(2);
         let space = H1Space::new(m, 1);
         let u_fn = &|x: &[f64]| x[0] + 2.0 * x[1];
         let u_coarse = space.interpolate(u_fn).as_slice().to_vec();

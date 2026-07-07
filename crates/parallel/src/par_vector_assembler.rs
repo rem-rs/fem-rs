@@ -129,12 +129,12 @@ mod tests {
     use crate::par_simplex::partition_simplex;
     use crate::par_space::ParallelFESpace;
     use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::HCurlSpace;
 
     #[test]
     fn par_vector_assembly_hcurl_diagonal_positive() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn par_vector_assembly_hcurl_global_dof_count() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let serial_space = HCurlSpace::new(mesh.clone(), 1);
         let serial_n = serial_space.n_dofs();
 
@@ -183,7 +183,7 @@ mod tests {
         // Single-rank parallel should produce matrix with same diagonal set.
         use fem_assembly::VectorAssembler;
 
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let serial_space = HCurlSpace::new(mesh.clone(), 1);
         let curl_curl = CurlCurlIntegrator { mu: 1.0 };
         let vec_mass = VectorMassIntegrator { alpha: 1.0 };
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn par_vector_assembly_hcurl_ghost_exchange() {
         // Verify ghost exchange works correctly for edge DOF spaces.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -271,7 +271,7 @@ mod tests {
         use fem_solver::SolverConfig;
         use fem_space::constraints::boundary_dofs_hcurl;
 
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {

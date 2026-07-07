@@ -116,11 +116,11 @@ pub fn pa_apply_hex_q4(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn hex_q4_pa_finite() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let pd = build_hex_q4_pa_data(&mesh, &|_|1.0);
         assert!(pd.data.iter().all(|v| v.is_finite()));
         assert!(pd.data.iter().any(|&v| v.abs() > 0.0));
@@ -138,7 +138,7 @@ mod tests {
             for i in 0..5 { assert!(b[q][i].is_finite() && d[q][i].is_finite(), "non-finite basis at qp {q}, i={i}"); }
         }
 
-        let mesh = SimplexMesh::<3>::unit_cube_hex(1);
+        let mesh = Mesh::<3>::unit_cube_hex(1);
         let pd = build_hex_q4_pa_data(&mesh, &|_|1.0);
         let n = 125;
         let ed: Vec<Vec<u32>> = vec![(0..125).map(|i| i as u32).collect()];

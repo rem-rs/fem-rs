@@ -2,7 +2,7 @@
 
 use fem_linalg_gpu::{GpuContext, assemble_elasticity_2d_tri3};
 use fem_linalg::CooMatrix;
-use fem_mesh::{SimplexMesh, MeshTopology};
+use fem_mesh::{Mesh, MeshTopology};
 use fem_space::{VectorH1Space, FESpace};
 use fem_assembly::standard::ElasticityIntegrator;
 use fem_assembly::Assembler;
@@ -10,8 +10,8 @@ use fem_assembly::Assembler;
 /// Build a unit-square mesh with 2 triangles and extract node coordinates
 /// and DOFs in the format expected by the GPU assembly function.
 fn build_tri3_mesh_data(
-) -> (Vec<f32>, Vec<u32>, SimplexMesh<2>, VectorH1Space<SimplexMesh<2>>) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(2);
+) -> (Vec<f32>, Vec<u32>, Mesh<2>, VectorH1Space<Mesh<2>>) {
+    let mesh = Mesh::<2>::unit_square_tri(2);
     let space = VectorH1Space::new(mesh.clone(), 1, 2);
 
     let n_elem = mesh.n_elements();

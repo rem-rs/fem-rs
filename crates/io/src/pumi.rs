@@ -29,12 +29,12 @@
 use std::io::{BufReader, Read};
 
 use fem_core::FemResult;
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{element_type::ElementType, simplex::Mesh};
 
 const SMB_MAGIC: u32 = 0x00424D53;
 
 /// Read a serial SCOREC Mesh Binary (`.smb`) file.
-pub fn read_smb(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> {
+pub fn read_smb(path: impl AsRef<std::path::Path>) -> FemResult<Mesh<3>> {
     let mut file = std::fs::File::open(path.as_ref())?;
     let mut buf = Vec::new();
     BufReader::new(&mut file).read_to_end(&mut buf)?;
@@ -130,7 +130,7 @@ pub fn read_smb(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> 
 
     let _ne_actual = if npe > 0 { conn.len() / npe } else { 0 };
 
-    Ok(SimplexMesh {
+    Ok(Mesh {
         coords,
         conn,
         elem_tags,

@@ -12,7 +12,7 @@
 //! ```
 
 use fem_core::Rank;
-use fem_mesh::{MeshTopology, SimplexMesh};
+use fem_mesh::{MeshTopology, Mesh};
 use crate::par_simplex::extract_submesh_from_partition;
 
 /// Options for SFC partitioners.
@@ -32,7 +32,7 @@ impl Default for SfcOptions {
 
 /// Partition using Morton (Z-order) curve ordering.
 pub fn partition_morton<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     n_parts: usize,
     opts: Option<&SfcOptions>,
 ) -> Vec<Rank> {
@@ -51,10 +51,10 @@ pub fn partition_morton<const D: usize>(
 
 /// Build a Morton-based ParallelMesh.
 pub fn partition_simplex_morton<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     comm: &crate::Comm,
     opts: Option<&SfcOptions>,
-) -> crate::ParallelMesh<SimplexMesh<D>> {
+) -> crate::ParallelMesh<Mesh<D>> {
     let elem_part = partition_morton(mesh, comm.size(), opts);
     let (local_mesh, part) = extract_submesh_from_partition(mesh, comm.rank(), &elem_part);
     crate::ParallelMesh::new(local_mesh, comm.clone(), part)
@@ -64,7 +64,7 @@ pub fn partition_simplex_morton<const D: usize>(
 
 /// Partition using Hilbert curve ordering (2D and 3D).
 pub fn partition_hilbert<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     n_parts: usize,
     opts: Option<&SfcOptions>,
 ) -> Vec<Rank> {
@@ -83,10 +83,10 @@ pub fn partition_hilbert<const D: usize>(
 
 /// Build a Hilbert-based ParallelMesh.
 pub fn partition_simplex_hilbert<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     comm: &crate::Comm,
     opts: Option<&SfcOptions>,
-) -> crate::ParallelMesh<SimplexMesh<D>> {
+) -> crate::ParallelMesh<Mesh<D>> {
     let elem_part = partition_hilbert(mesh, comm.size(), opts);
     let (local_mesh, part) = extract_submesh_from_partition(mesh, comm.rank(), &elem_part);
     crate::ParallelMesh::new(local_mesh, comm.clone(), part)
@@ -113,7 +113,7 @@ fn sfc_partition(codes: &[u64], n_parts: usize) -> Vec<Rank> {
     partition
 }
 
-fn compute_centroids<const D: usize>(mesh: &SimplexMesh<D>) -> Vec<[f64; D]> {
+fn compute_centroids<const D: usize>(mesh: &Mesh<D>) -> Vec<[f64; D]> {
     let n_elems = mesh.n_elems();
     let mut centroids = vec![[0.0; D]; n_elems];
     for e in 0..n_elems {
@@ -252,14 +252,14 @@ mod tests {
 
     #[test]
     fn morton_single_part() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let parts = partition_morton(&mesh, 1, None);
         assert!(parts.iter().all(|&r| r == 0));
     }
 
     #[test]
     fn morton_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
         for &n in &[2, 4, 8] {
             let parts = partition_morton(&mesh, n, None);
             check_valid(&parts, n);
@@ -268,27 +268,27 @@ mod tests {
 
     #[test]
     fn morton_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let mesh = Mesh::<3>::unit_cube_tet(4);
         let parts = partition_morton(&mesh, 8, None);
         check_valid(&parts, 8);
     }
 
     #[test]
     fn morton_reproducible() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let mesh = Mesh::<2>::unit_square_tri(12);
         assert_eq!(partition_morton(&mesh, 4, None), partition_morton(&mesh, 4, None));
     }
 
     #[test]
     fn hilbert_single_part() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let parts = partition_hilbert(&mesh, 1, None);
         assert!(parts.iter().all(|&r| r == 0));
     }
 
     #[test]
     fn hilbert_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
         for &n in &[2, 4, 8] {
             let parts = partition_hilbert(&mesh, n, None);
             check_valid(&parts, n);
@@ -297,20 +297,20 @@ mod tests {
 
     #[test]
     fn hilbert_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(4);
+        let mesh = Mesh::<3>::unit_cube_tet(4);
         let parts = partition_hilbert(&mesh, 8, None);
         check_valid(&parts, 8);
     }
 
     #[test]
     fn hilbert_reproducible() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(12);
+        let mesh = Mesh::<2>::unit_square_tri(12);
         assert_eq!(partition_hilbert(&mesh, 4, None), partition_hilbert(&mesh, 4, None));
     }
 
     #[test]
     fn sfc_non_power_of_two() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(16);
+        let mesh = Mesh::<2>::unit_square_tri(16);
         for &n in &[3, 5, 6, 7] {
             assert!(partition_morton(&mesh, n, None).iter().all(|&r| r < n as i32));
             assert!(partition_hilbert(&mesh, n, None).iter().all(|&r| r < n as i32));
@@ -335,7 +335,7 @@ mod tests {
     fn morton_2d_balanced_partition() {
         // Verify that Morton partitioning produces roughly balanced partitions
         // (within 20% of ideal for a uniform mesh).
-        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let mesh = Mesh::<2>::unit_square_tri(32);
         let n_elems = mesh.n_elems();
         for &n_parts in &[2, 4, 8] {
             let parts = partition_morton(&mesh, n_parts, None);
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn hilbert_2d_balanced_partition() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(32);
+        let mesh = Mesh::<2>::unit_square_tri(32);
         let n_elems = mesh.n_elems();
         for &n_parts in &[2, 4, 8] {
             let parts = partition_hilbert(&mesh, n_parts, None);

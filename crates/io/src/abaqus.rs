@@ -12,15 +12,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read};
 
 use fem_core::{FemError, FemResult, NodeId};
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{element_type::ElementType, simplex::Mesh};
 
-pub fn read_abaqus_inp<R: Read>(reader: R) -> FemResult<SimplexMesh<3>> {
+pub fn read_abaqus_inp<R: Read>(reader: R) -> FemResult<Mesh<3>> {
     let mut p = InpParser::default();
     p.parse(BufReader::new(reader))?;
     p.build_mesh()
 }
 
-pub fn read_abaqus_inp_file(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> {
+pub fn read_abaqus_inp_file(path: impl AsRef<std::path::Path>) -> FemResult<Mesh<3>> {
     let f = std::fs::File::open(path)?;
     read_abaqus_inp(f)
 }
@@ -46,7 +46,7 @@ struct ElementRec {
 /// Exposes mesh + named sets.
 pub struct AbaqusInpData {
     /// Reconstructed volumetric mesh.
-    pub mesh: SimplexMesh<3>,
+    pub mesh: Mesh<3>,
     /// Node sets: set name → 0-based node indices.
     pub node_sets: HashMap<String, Vec<NodeId>>,
     /// Element sets: set name → 0-based element indices.
@@ -232,7 +232,7 @@ impl InpParser {
         Ok(())
     }
 
-    fn build_mesh(self) -> FemResult<SimplexMesh<3>> {
+    fn build_mesh(self) -> FemResult<Mesh<3>> {
         if self.nodes.is_empty() {
             return Err(mesh_err("no nodes found in Abaqus .inp"));
         }
@@ -319,7 +319,7 @@ impl InpParser {
             ElementType::Tri3
         };
 
-        Ok(SimplexMesh {
+        Ok(Mesh {
             coords,
             conn,
             elem_tags,
@@ -391,7 +391,7 @@ impl InpParser {
 /// Parse an Abaqus `.inp` file and return the mesh with named sets.
 ///
 /// Returns [`AbaqusInpData`] which includes:
-/// - `mesh`: volumetric [`SimplexMesh<3>`]
+/// - `mesh`: volumetric [`Mesh<3>`]
 /// - `node_sets`: map of set name → 0-based node indices
 /// - `elem_sets`: map of set name → 0-based element indices
 pub fn read_abaqus_inp_full<R: Read>(reader: R) -> FemResult<AbaqusInpData> {

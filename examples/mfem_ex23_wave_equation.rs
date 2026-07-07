@@ -24,7 +24,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_cg, SolverConfig, Newmark, NewmarkState};
 use fem_space::{
     H1Space, FESpace,
@@ -51,11 +51,11 @@ fn main() {
     );
 
     // Load or generate mesh
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     let space = H1Space::new(mesh, args.order);
@@ -226,7 +226,7 @@ mod tests {
     fn ex23_wave_coarse_newmark_converges() {
         let n = 8;
         let order = 1;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, order);
         let dofs = space.n_dofs();
 

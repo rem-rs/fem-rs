@@ -24,7 +24,7 @@ use fem_assembly::{
     mixed::{DivIntegrator, PressureDivIntegrator},
     standard::{DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{BlockSystem, SchurComplementSolver, SolverConfig};
 use fem_io::mfem::read_mfem_file;
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
@@ -72,11 +72,11 @@ struct SolveResult {
 fn solve_case(n: usize, mesh_path: Option<&str>) -> SolveResult {
 
     // ─── 1. Mesh and spaces ──────────────────────────────────────────────────
-    let mesh: SimplexMesh<2> = if let Some(path) = mesh_path {
+    let mesh: Mesh<2> = if let Some(path) = mesh_path {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(n)
+        Mesh::<2>::unit_square_tri(n)
     };
     let mesh_u = mesh.clone();
     let mesh_p = mesh;
@@ -187,7 +187,7 @@ mod tests {
 
     /// Test-only helper: solve with MMS sinusoidal source f = scale * sin(πx)sin(πy).
     fn solve_case_mms(n: usize, source_scale: f64) -> SolveResult {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space_u = H1Space::new(mesh.clone(), 1);
         let space_p = H1Space::new(mesh, 1);
         let nu = space_u.n_dofs();

@@ -50,7 +50,7 @@ use fem_io::vtk::{DataArray, VtkWriter};
 use fem_linalg::{CooMatrix, CsrMatrix, Vector};
 use fem_mesh::{
     MeshMotionConfig,
-    SimplexMesh,
+    Mesh,
     all_boundary_nodes,
     apply_node_displacement,
     laplacian_smooth_2d,
@@ -77,7 +77,7 @@ struct SolveResult {
     l2_history: Vec<f64>,
     prev_shift: f64,
     temperature: Vec<f64>,
-    final_mesh: SimplexMesh<2>,
+    final_mesh: Mesh<2>,
 }
 
 struct TransientCheckpointState {
@@ -263,7 +263,7 @@ fn solve_case_with_restart(
     mesh_advection: bool,
     restart: Option<&TransientCheckpointState>,
 ) -> SolveResult {
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mut mesh = Mesh::<2>::unit_square_tri(n);
     let n_steps = (t_end / dt).ceil() as usize;
     let completed_steps = restart.map(|r| r.completed_steps).unwrap_or(0);
     let mut prev_shift = 0.0_f64;
@@ -398,7 +398,7 @@ fn solve_case_with_restart(
 }
 
 fn apply_mesh_motion_step(
-    mesh: &mut SimplexMesh<2>,
+    mesh: &mut Mesh<2>,
     target_time: f64,
     amp: f64,
     omega: f64,
@@ -537,7 +537,7 @@ fn parse_args() -> Args {
 
 fn write_ex46_vtk_export(
     prefix: &str,
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     temperature: &[f64],
 ) -> Result<(), String> {
     let path = format!("{prefix}_temperature.vtu");

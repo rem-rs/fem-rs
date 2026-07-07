@@ -96,12 +96,12 @@ impl DgCdrSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::L2Space;
 
     #[test]
     fn dg_cdr_assembles() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         let k = DgCdrSystem::assemble(&space, &ifl, 1.0, &[1.0, 0.0], 0.0, 10.0, 3);
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn dg_cdr_rhs_assembles() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let source = |x: &[f64]| { (std::f64::consts::PI * x[0]).sin() };
         let rhs = DgCdrSystem::assemble_rhs(&space, &source, 3);

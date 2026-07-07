@@ -1,10 +1,10 @@
 //! GMSH `.msh` file format reader (v2 ASCII, v4.1 ASCII and binary) **and** writer.
 //!
-//! **Reading** – produces a [`SimplexMesh`] from the highest-dimension
+//! **Reading** – produces a [`Mesh`] from the highest-dimension
 //! elements found in the file.  Lower-dimension elements that belong to
 //! physical groups are treated as boundary faces.
 //!
-//! **Writing** – serialises a [`SimplexMesh`] (plus optional
+//! **Writing** – serialises a [`Mesh`] (plus optional
 //! [`PhysicalGroup`] metadata) back to a valid GMSH v4.1 ASCII `.msh` file
 //! that can be opened directly in the Gmsh GUI for inspection.
 //!
@@ -27,7 +27,7 @@ use fem_mesh::{
     boundary::{NamedAttributeRegistry, NamedAttributeSet, PhysicalGroup},
     curved::CurvedMesh,
     element_type::ElementType,
-    simplex::SimplexMesh,
+    simplex::Mesh,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ use fem_mesh::{
 // ---------------------------------------------------------------------------
 
 /// Read a GMSH `.msh` file (v2 ASCII, v4 ASCII, or v4 binary) and return a
-/// 2-D or 3-D `SimplexMesh`.
+/// 2-D or 3-D `Mesh`.
 ///
 /// The mesh spatial dimension is inferred from the highest-dimension elements
 /// present.  If both 2-D and 3-D elements exist, 3-D takes precedence.
@@ -60,16 +60,16 @@ pub fn read_msh_file(path: impl AsRef<std::path::Path>) -> FemResult<MshFile> {
 // Output type
 // ---------------------------------------------------------------------------
 
-/// Parsed mesh data.  The caller can then convert to the desired `SimplexMesh<D>`.
+/// Parsed mesh data.  The caller can then convert to the desired `Mesh<D>`.
 pub struct MshFile {
     /// Physical group definitions.
     pub physical_groups: Vec<PhysicalGroup>,
     /// Map from physical tag → name (for BCs).
     pub tag_names: HashMap<i32, String>,
     /// The 2-D mesh (populated when highest element dimension is 2).
-    pub mesh2d: Option<SimplexMesh<2>>,
+    pub mesh2d: Option<Mesh<2>>,
     /// The 3-D mesh (populated when highest element dimension is 3).
-    pub mesh3d: Option<SimplexMesh<3>>,
+    pub mesh3d: Option<Mesh<3>>,
     /// Curved 2-D mesh (populated when highest element dimension is 2).
     /// Contains full second-order geometry for Tri6 imports; order-1 for Tri3.
     pub curved2d: Option<CurvedMesh<2>>,
@@ -77,11 +77,11 @@ pub struct MshFile {
 
 impl MshFile {
     /// Unwrap the 2-D mesh, or return an error if none was found.
-    pub fn into_2d(self) -> FemResult<SimplexMesh<2>> {
+    pub fn into_2d(self) -> FemResult<Mesh<2>> {
         self.mesh2d.ok_or_else(|| FemError::Mesh("no 2-D elements found in .msh file".into()))
     }
     /// Unwrap the 3-D mesh, or return an error if none was found.
-    pub fn into_3d(self) -> FemResult<SimplexMesh<3>> {
+    pub fn into_3d(self) -> FemResult<Mesh<3>> {
         self.mesh3d.ok_or_else(|| FemError::Mesh("no 3-D elements found in .msh file".into()))
     }
     /// Unwrap the curved 2-D mesh (`CurvedMesh<2>`), or return an error if none was found.
@@ -565,7 +565,7 @@ impl MshParser {
         Ok(MshFile { physical_groups, tag_names, mesh2d, mesh3d, curved2d })
     }
 
-    fn build_2d(&self, n_nodes: usize) -> FemResult<SimplexMesh<2>> {
+    fn build_2d(&self, n_nodes: usize) -> FemResult<Mesh<2>> {
         let mut coords = vec![0.0f64; n_nodes * 2];
         for (i, c) in self.nodes.iter().enumerate() {
             coords[i * 2    ] = c[0];
@@ -617,7 +617,7 @@ impl MshParser {
             }
         }
 
-        let mut mesh = SimplexMesh::uniform(
+        let mut mesh = Mesh::uniform(
             coords, conn, elem_tags, elem_type,
             face_conn, face_tags, face_type,
         );
@@ -712,7 +712,7 @@ impl MshParser {
         }))
     }
 
-    fn build_3d(&self, n_nodes: usize) -> FemResult<SimplexMesh<3>> {
+    fn build_3d(&self, n_nodes: usize) -> FemResult<Mesh<3>> {
         let mut coords = vec![0.0f64; n_nodes * 3];
         for (i, c) in self.nodes.iter().enumerate() {
             coords[i * 3    ] = c[0];
@@ -765,7 +765,7 @@ impl MshParser {
             }
         }
 
-        let mut mesh = SimplexMesh::uniform(
+        let mut mesh = Mesh::uniform(
             coords, conn, elem_tags, elem_type,
             face_conn, face_tags, face_type,
         );

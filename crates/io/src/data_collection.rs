@@ -8,9 +8,9 @@
 //! # Usage
 //! ```no_run
 //! use fem_io::data_collection::DataCollection;
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //!
-//! let mesh = SimplexMesh::<2>::unit_square_tri(8);
+//! let mesh = Mesh::<2>::unit_square_tri(8);
 //! let solution = vec![1.0_f64; mesh.n_nodes()];
 //!
 //! let mut dc = DataCollection::new("output/poisson", mesh);
@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 
 use fem_core::FemResult;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 
 use crate::pvd::PvdCollection;
 use crate::vtk::{DataArray, VtkWriter};
@@ -44,7 +44,7 @@ pub struct DataCollection<const D: usize> {
     /// Current cycle / time-step index.
     cycle: usize,
     /// The mesh (cloned from caller to own the data).
-    mesh: SimplexMesh<D>,
+    mesh: Mesh<D>,
     /// Accumulated PVD entries.
     pvd: PvdCollection,
     /// Scalar point fields: `(name, values)` where `values.len()` == `mesh.n_nodes()`.
@@ -56,7 +56,7 @@ impl<const D: usize> DataCollection<D> {
     ///
     /// The prefix determines the output directory and the per-cycle filenames.
     /// For example `"results/sim"` produces files like `results/sim_0000.vtu`.
-    pub fn new(prefix: impl Into<PathBuf>, mesh: SimplexMesh<D>) -> Self {
+    pub fn new(prefix: impl Into<PathBuf>, mesh: Mesh<D>) -> Self {
         DataCollection {
             prefix: prefix.into(),
             time: 0.0,
@@ -80,7 +80,7 @@ impl<const D: usize> DataCollection<D> {
     }
 
     /// Access the underlying mesh (read-only).
-    pub fn mesh(&self) -> &SimplexMesh<D> {
+    pub fn mesh(&self) -> &Mesh<D> {
         &self.mesh
     }
 
@@ -199,13 +199,13 @@ impl<const D: usize> DataCollection<D> {
 mod tests {
     use super::*;
     use std::fs;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn data_collection_save_smoke() {
         let tmp = std::env::temp_dir().join("fem_dc_test_save_smoke");
         let _ = fs::remove_dir_all(&tmp);
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let sol = vec![0.5_f64; mesh.n_nodes()];
 
         let mut dc = DataCollection::new(tmp.join("smoke"), mesh);
@@ -228,7 +228,7 @@ mod tests {
     fn data_collection_field_update() {
         let tmp = std::env::temp_dir().join("fem_dc_test_field_update");
         let _ = fs::remove_dir_all(&tmp);
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n = mesh.n_nodes();
         let sol0 = vec![0.0_f64; n];
         let sol1 = vec![1.0_f64; n];
@@ -251,7 +251,7 @@ mod tests {
     fn data_collection_single_step() {
         let tmp = std::env::temp_dir().join("fem_dc_test_single");
         let _ = fs::remove_dir_all(&tmp);
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let sol = vec![0.5_f64; mesh.n_nodes()];
 
         let mut dc = DataCollection::new(tmp.join("single3d"), mesh);

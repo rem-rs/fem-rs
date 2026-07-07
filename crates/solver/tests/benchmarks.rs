@@ -13,13 +13,13 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, MassIntegrator, ConvectionIntegrator, DomainSourceIntegrator},
     coefficient::ConstantVectorCoeff,
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::*;
 use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, boundary_dofs}};
 
 /// Solve Poisson with CG + Jacobi and report time.
 fn bench_poisson_cg_jacobi(n: usize, label: &str) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     let f = |x: &[f64]| 2.0 * std::f64::consts::PI.powi(2) * (std::f64::consts::PI * x[0]).sin() * (std::f64::consts::PI * x[1]).sin();
@@ -38,7 +38,7 @@ fn bench_poisson_cg_jacobi(n: usize, label: &str) {
 
 /// Solve Poisson with CG + ILU0.
 fn bench_poisson_cg_ilu0(n: usize, label: &str) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     let f = |x: &[f64]| 2.0 * std::f64::consts::PI.powi(2) * (std::f64::consts::PI * x[0]).sin() * (std::f64::consts::PI * x[1]).sin();
@@ -57,7 +57,7 @@ fn bench_poisson_cg_ilu0(n: usize, label: &str) {
 
 /// Solve mass matrix with CG (near-optimal scaling).
 fn bench_mass_cg(n: usize, label: &str) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
     let rhs = vec![1.0; space.n_dofs()];
@@ -71,7 +71,7 @@ fn bench_mass_cg(n: usize, label: &str) {
 
 /// Solve non-symmetric convection-diffusion with GMRES + ILUT.
 fn bench_convdiff_gmres_ilut(n: usize, label: &str) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let diff = DiffusionIntegrator { kappa: 0.01 };
     let conv = ConvectionIntegrator { velocity: ConstantVectorCoeff(vec![1.0, 0.0]) };

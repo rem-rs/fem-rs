@@ -606,10 +606,10 @@ pub fn solve_contact_newton<M: MeshTopology>(
 mod tests {
     use super::*;
     use fem_linalg::CooMatrix;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
-    fn setup_2d() -> (SimplexMesh<2>, ContactConfig) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+    fn setup_2d() -> (Mesh<2>, ContactConfig) {
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let cfg = ContactConfig {
             penalty_normal: 1e6,
             contact_type: ContactType::Penalty,
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn penalty_force_vanishes_when_no_penetration() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let cfg = ContactConfig {
             gap_function: |_: &[f64]| -1.0,
             ..setup_2d().1
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn penalty_force_exists_when_penetration() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let cfg = ContactConfig {
             penalty_normal: 1e5,
             gap_function: |_: &[f64]| 0.1,
@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn test_contact_2d_vector_assembles() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let cfg = ContactConfig {
             penalty_normal: 1e6,
             gap_function: |_: &[f64]| -0.1,
@@ -674,7 +674,7 @@ mod tests {
     fn test_contact_3d_assembles() {
         use fem_space::H1Space;
         use fem_space::fe_space::FESpace;
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let space = H1Space::new(mesh, 1);
         let mesh_ref = space.mesh();
         let cfg = ContactConfig {
@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn contact_3d_vector_assembly_finite() {
-        let mesh = fem_mesh::SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = fem_mesh::Mesh::<3>::unit_cube_tet(2);
         let cfg = ContactConfig {
             penalty_normal: 1e6,
             contact_type: ContactType::Penalty,

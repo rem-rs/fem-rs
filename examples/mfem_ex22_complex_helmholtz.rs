@@ -22,7 +22,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, MassIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{
     H1Space,
@@ -84,11 +84,11 @@ fn main() {
     }
 
     // Load or generate mesh
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     // H1 space
@@ -303,7 +303,7 @@ mod tests {
             SIGMA = args.sigma;
             OMEGA = args.omega;
         }
-        let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mesh = Mesh::<2>::unit_square_tri(args.n);
         let space = H1Space::new(mesh, args.order);
         let mut sys = ComplexAssembler::assemble(
             &space,
@@ -366,7 +366,7 @@ mod tests {
                 SIGMA = a.sigma;
                 OMEGA = a.omega;
             }
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let mesh = Mesh::<2>::unit_square_tri(n);
             let space = H1Space::new(mesh, 1);
             assert_eq!(space.n_dofs(), (n + 1) * (n + 1));
         }

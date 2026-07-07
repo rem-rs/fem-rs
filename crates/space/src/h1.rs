@@ -122,18 +122,18 @@ impl<M: MeshTopology> FESpace for H1Space<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn h1_p1_n_dofs_equals_n_nodes() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         assert_eq!(space.n_dofs(), space.mesh().n_nodes());
     }
 
     #[test]
     fn h1_p2_n_dofs_greater_than_n_nodes() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let n_nodes = mesh.n_nodes();
         let space = H1Space::new(mesh, 2);
         assert!(space.n_dofs() > n_nodes);
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn h1_interpolate_constant() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let v = space.interpolate(&|_x| 3.14);
         for &c in v.as_slice() {
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn h1_interpolate_linear_x() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let v = space.interpolate(&|x| x[0]);
         // All DOF values should be in [0,1].
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn h1_space_type() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = H1Space::new(mesh, 1);
         assert_eq!(space.space_type(), SpaceType::H1);
     }
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn h1_variable_order_new() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let orders = vec![2u8; n_elems];
         let space = H1Space::new_variable(mesh, orders);
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn h1_variable_order_mixed() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut orders = vec![2u8; n_elems];
         orders[0] = 3; // promote first element to P3
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn h1_variable_order_element_dof_counts() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut orders = vec![2u8; n_elems];
         orders[0] = 4; // P4
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn h1_refine_p_increases_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = H1Space::new(mesh, 2);
         let n_before = space.n_dofs();
         let (refined, _) = space.refine_p(&[0], 3);
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn h1_derefine_p_decreases_dofs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = H1Space::new(mesh, 3);
         let n_before = space.n_dofs();
         let (derefined, _) = space.derefine_p(&[0, 1], 2);
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn h1_smooth_order_field_clamps_jumps() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut orders = vec![1u8; n_elems];
         orders[0] = 5; // high order next to low order
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn h1_variable_interpolate_constant() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let n_elems = mesh.n_elements();
         let mut orders = vec![2u8; n_elems];
         orders[0] = 3;
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn h1_refine_p_returns_constraints() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         assert_eq!(mesh.n_elements(), 2);
         let space = H1Space::new(mesh, 2);
         // Refine one element to P3: the shared edge creates constraints

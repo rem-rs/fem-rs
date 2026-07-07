@@ -140,7 +140,7 @@ impl DgAssembler {
         }
 
         // ── 3. Boundary face terms (Dirichlet) ─────────────────────────────────
-        // Build face→element map (SimplexMesh::face_elements always returns (0,None)).
+        // Build face→element map (Mesh::face_elements always returns (0,None)).
         let face_to_elem = build_face_elem_map(mesh, order);
         let boundary_pairs: Vec<(u32, u32)> = mesh
             .face_iter()
@@ -428,7 +428,7 @@ fn assemble_interior_face<S: FESpace>(
 
 /// Build a map from boundary face index → owning element index.
 ///
-/// `SimplexMesh::face_elements()` always returns `(0, None)` (not implemented),
+/// `Mesh::face_elements()` always returns `(0, None)` (not implemented),
 /// so we build this by matching boundary face node sets against element faces.
 fn build_face_elem_map<M: MeshTopology>(mesh: &M, _order: u8) -> HashMap<u32, u32> {
     let dim = mesh.dim() as usize;
@@ -640,14 +640,14 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::L2Space;
     use crate::interior_faces::InteriorFaceList;
 
     /// SIP matrix should be symmetric for a uniform mesh.
     #[test]
     fn sip_matrix_symmetric() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let ifl   = InteriorFaceList::build(&mesh);
         let space = L2Space::new(mesh, 1);
         let mat   = DgAssembler::assemble_sip(&space, &ifl, 1.0, 10.0, 3);
@@ -666,7 +666,7 @@ mod tests {
     /// diagonal entry should be the largest in each row for a well-conditioned problem.
     #[test]
     fn sip_matrix_positive_diagonal() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh  = Mesh::<2>::unit_square_tri(3);
         let ifl   = InteriorFaceList::build(&mesh);
         let space = L2Space::new(mesh, 1);
         let mat   = DgAssembler::assemble_sip(&space, &ifl, 1.0, 20.0, 3);
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn sip_matrix_symmetric_l2_p3() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let ifl = InteriorFaceList::build(&mesh);
         let space = L2Space::new(mesh, 3);
         let mat = DgAssembler::assemble_sip(&space, &ifl, 1.0, 40.0, 7);

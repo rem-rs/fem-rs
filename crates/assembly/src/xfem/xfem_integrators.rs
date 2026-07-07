@@ -4,7 +4,7 @@
 //! with Heaviside enrichment, crack-tip branch enrichment, and sub-cell integration.
 
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
@@ -21,7 +21,7 @@ const REF_GRAD: [[f64; 2]; 3] = [[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]];
 /// System size = n_std_dofs + n_enr_dofs, where enriched DOFs are appended
 /// after the standard ones.
 pub fn assemble_xfem_diffusion(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     ls: &XfemLevelSet,
     enr: &XfemEnrichment,
 ) -> CsrMatrix<f64> {
@@ -207,7 +207,7 @@ fn sub_to_phys(ref_pt: &[f64; 2], phys: &[[f64; 2]; 3]) -> [f64; 2] {
 ///   [n_std..)   — enrichment DOFs (Heaviside: 2 per enriched node;
 ///                  Tip: 8 per enriched node)
 pub fn assemble_xfem_elasticity(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     ls: &XfemLevelSet,
     enr: &XfemEnrichment,
     crack_tip: Option<[f64; 2]>,  // crack tip position for branch enrichment
@@ -416,13 +416,13 @@ pub fn assemble_xfem_elasticity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, constraints};
     use fem_solver::{solve_cg, SolverConfig};
 
     #[test]
     fn xfem_heaviside_diffusion_matrix_properties() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let mesh = space.mesh();
 
@@ -447,7 +447,7 @@ mod tests {
     /// Verify XFEM elasticity matrix is symmetric and positive diagonal
     #[test]
     fn xfem_elasticity_matrix_properties() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let mesh = space.mesh();
 
@@ -480,7 +480,7 @@ mod tests {
         };
 
         for &n in &[4usize, 8] {
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let mesh = Mesh::<2>::unit_square_tri(n);
             let space = H1Space::new(mesh, 1);
             let mesh = space.mesh();
 
@@ -538,7 +538,7 @@ mod tests {
         let crack_ls = XfemLevelSet::CrackLine {
             x1: [0.0, 0.5], x2: [0.5, 0.5],
         };
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let space = H1Space::new(mesh, 1);
         let mesh = space.mesh();
 

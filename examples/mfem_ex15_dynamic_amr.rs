@@ -10,7 +10,7 @@
 use fem_core::NodeId;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{
-    SimplexMesh,
+    Mesh,
     zz_estimator,
     dorfler_mark,
     mark_for_derefinement,
@@ -23,11 +23,11 @@ use fem_mesh::{
 fn main() {
     let args = parse_args();
 
-    let mesh0: SimplexMesh<2> = if let Some(ref path) = args.mesh_file {
+    let mesh0: Mesh<2> = if let Some(ref path) = args.mesh_file {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
     let n0 = mesh0.n_nodes();
     let u0 = synthetic_field(&mesh0, 0.35, 0.45, 0.08);
@@ -63,7 +63,7 @@ fn main() {
     println!("  PASS");
 }
 
-fn synthetic_field(mesh: &SimplexMesh<2>, cx: f64, cy: f64, sigma: f64) -> Vec<f64> {
+fn synthetic_field(mesh: &Mesh<2>, cx: f64, cy: f64, sigma: f64) -> Vec<f64> {
     (0..mesh.n_nodes())
         .map(|i| {
             let [x, y] = mesh.coords_of(i as NodeId);
@@ -74,8 +74,8 @@ fn synthetic_field(mesh: &SimplexMesh<2>, cx: f64, cy: f64, sigma: f64) -> Vec<f
 }
 
 #[cfg(test)]
-fn run_roundtrip(n: usize, theta_refine: f64, field: &[f64]) -> (SimplexMesh<2>, SimplexMesh<2>, SimplexMesh<2>, Vec<f64>) {
-    let mesh0 = SimplexMesh::<2>::unit_square_tri(n);
+fn run_roundtrip(n: usize, theta_refine: f64, field: &[f64]) -> (Mesh<2>, Mesh<2>, Mesh<2>, Vec<f64>) {
+    let mesh0 = Mesh::<2>::unit_square_tri(n);
     let eta0 = zz_estimator(&mesh0, field);
     let marked_refine = dorfler_mark(&eta0, theta_refine);
     let (mesh1, tree) = refine_marked_with_tree(&mesh0, &marked_refine);
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn ex15_refine_marking_grows_with_theta() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let field = synthetic_field(&mesh, 0.35, 0.45, 0.08);
         let eta = zz_estimator(&mesh, &field);
 
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn ex15_constant_field_survives_roundtrip() {
-        let mesh0 = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh0 = Mesh::<2>::unit_square_tri(8);
         let u0 = vec![1.0; mesh0.n_nodes()];
         let (mesh_coarse, mesh_refined, mesh_roundtrip, u2) = run_roundtrip(8, 0.5, &u0);
 
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn ex15_zero_field_roundtrip_stays_zero() {
-        let mesh0 = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh0 = Mesh::<2>::unit_square_tri(8);
         let u0 = vec![0.0; mesh0.n_nodes()];
         let (_, _, mesh_roundtrip, u2) = run_roundtrip(8, 0.5, &u0);
 
@@ -179,7 +179,7 @@ mod tests {
     /// Refining a mesh should strictly increase the element count.
     #[test]
     fn ex15_mesh_refinement_increases_element_count() {
-        let mesh0 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh0 = Mesh::<2>::unit_square_tri(6);
         let field = synthetic_field(&mesh0, 0.5, 0.5, 0.15);
         let eta = zz_estimator(&mesh0, &field);
         let marked = dorfler_mark(&eta, 0.7);
@@ -198,7 +198,7 @@ mod tests {
     /// Multiple refinement passes should further increase element count.
     #[test]
     fn ex15_multiple_refinement_passes_grow_mesh() {
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mut mesh = Mesh::<2>::unit_square_tri(6);
         let mut field = synthetic_field(&mesh, 0.5, 0.5, 0.15);
         let mut elem_counts = vec![mesh.n_elems()];
 
@@ -224,7 +224,7 @@ mod tests {
     /// Error estimator should be positive and finite everywhere.
     #[test]
     fn ex15_error_estimator_is_positive_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let field = synthetic_field(&mesh, 0.3, 0.7, 0.1);
         let eta = zz_estimator(&mesh, &field);
 
@@ -238,7 +238,7 @@ mod tests {
     /// Stronger Dörfler marking parameter should mark more elements.
     #[test]
     fn ex15_dorfler_marking_is_monotone_in_threshold() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let field = synthetic_field(&mesh, 0.4, 0.6, 0.12);
         let eta = zz_estimator(&mesh, &field);
 
@@ -258,7 +258,7 @@ mod tests {
     /// original field's min/max range (linear interpolation is bounded).
     #[test]
     fn ex15_prolongated_field_range_bounded_by_original() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let field = synthetic_field(&mesh, 0.5, 0.5, 0.15);
         let eta = zz_estimator(&mesh, &field);
         let marked = dorfler_mark(&eta, 0.6);
@@ -279,7 +279,7 @@ mod tests {
     /// X-split of a Quad4 mesh doubles elements, adds one new node per element.
     #[test]
     fn ex15_quad_aniso_x_split_doubles_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n0 = mesh.n_elems();
         let marked: Vec<_> = (0..n0 as u32).map(|e| (e, QuadRefineDir::X)).collect();
         let (new_mesh, constraints) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -292,7 +292,7 @@ mod tests {
     /// Y-split of a Quad4 mesh doubles elements.
     #[test]
     fn ex15_quad_aniso_y_split_doubles_elements() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(3);
+        let mesh = Mesh::<2>::unit_square_quad(3);
         let n0 = mesh.n_elems();
         let marked: Vec<_> = (0..n0 as u32).map(|e| (e, QuadRefineDir::Y)).collect();
         let (new_mesh, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -302,7 +302,7 @@ mod tests {
     /// Partial anisotropic refinement creates hanging constraints.
     #[test]
     fn ex15_quad_aniso_partial_creates_hanging_constraints() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         // Only refine first element in X direction.
         let marked = vec![(0u32, QuadRefineDir::X)];
         let (new_mesh, constraints) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -316,7 +316,7 @@ mod tests {
     /// Hex8 Z-split gives 2 children per element.
     #[test]
     fn ex15_hex_aniso_z_split_gives_two_children_per_elem() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let n0 = mesh.n_elems();
         let marked: Vec<_> = (0..n0 as u32).map(|e| (e, HexRefineDir::Z)).collect();
         let (new_mesh, _) = refine_nonconforming_hex_aniso(&mesh, &marked);
@@ -327,7 +327,7 @@ mod tests {
     /// Hex8 XY-split gives 4 children per element.
     #[test]
     fn ex15_hex_aniso_xy_split_gives_four_children_per_elem() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let n0 = mesh.n_elems();
         let marked: Vec<_> = (0..n0 as u32).map(|e| (e, HexRefineDir::XY)).collect();
         let (new_mesh, _) = refine_nonconforming_hex_aniso(&mesh, &marked);
@@ -338,7 +338,7 @@ mod tests {
     /// Anisotropic AMR preserves total mesh volume (sum of element volumes).
     #[test]
     fn ex15_quad_aniso_both_preserves_total_area() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(3);
+        let mesh = Mesh::<2>::unit_square_quad(3);
         // Use Both (isotropic 4-way) via aniso API.
         let marked: Vec<_> = (0..mesh.n_elems() as u32).map(|e| (e, QuadRefineDir::Both)).collect();
         let (new_mesh, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
@@ -351,7 +351,7 @@ mod tests {
     /// X-then-Y (sequential anisotropic) gives same element count as full isotropic.
     #[test]
     fn ex15_quad_aniso_x_then_y_matches_isotropic_count() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(2);
+        let mesh = Mesh::<2>::unit_square_quad(2);
         let n0 = mesh.n_elems();
         // Full isotropic gives 4×.
         let marked_iso: Vec<_> = (0..n0 as u32).map(|e| (e, QuadRefineDir::Both)).collect();
@@ -369,7 +369,7 @@ mod tests {
     /// Fake test line to avoid duplicate fn name — this is the original copy below.
     #[test]
     fn ex15_prolongated_field_range_bounded_by_original_verify() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let field = synthetic_field(&mesh, 0.5, 0.5, 0.15);
         let eta = zz_estimator(&mesh, &field);
         let marked = dorfler_mark(&eta, 0.6);

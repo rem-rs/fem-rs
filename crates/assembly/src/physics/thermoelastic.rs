@@ -190,11 +190,11 @@ pub fn solve_thermoelastic_staggered<M: MeshTopology + Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn thermal_expansion_rhs_zero_at_reference_temp() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dim: u8 = 2;
         let quad_order = 2;
         let disp_space = VectorH1Space::new(mesh.clone(), 1, dim);
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn thermal_expansion_rhs_nonzero_with_delta_t() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dim: u8 = 2;
         let quad_order = 2;
         let disp_space = VectorH1Space::new(mesh.clone(), 1, dim);
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn heat_system_assembles() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let (k, rhs) = assemble_heat_system(&mesh, 1.0, 2);
         assert_eq!(k.nrows, mesh.n_nodes());
         assert_eq!(rhs.len(), mesh.n_nodes());
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn thermoelastic_staggered_solves() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let kappa = 1.0;
         let alpha = 1.0e-5;
         let lambda = 121154.0;

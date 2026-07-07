@@ -16,7 +16,7 @@
 use wasm_bindgen::prelude::*;
 
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
 use fem_space::H1Space;
@@ -63,7 +63,7 @@ pub fn jsmpi_main() {
 fn run_poisson_2d(comm: &Comm, n_grid: usize) {
     // Only rank 0 builds the full mesh.
     let mesh = if comm.is_root() {
-        Some(SimplexMesh::<2>::unit_square_tri(n_grid))
+        Some(Mesh::<2>::unit_square_tri(n_grid))
     } else {
         None
     };

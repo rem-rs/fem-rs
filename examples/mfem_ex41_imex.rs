@@ -26,7 +26,7 @@ use fem_assembly::{
 };
 use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{
     solve_cg,
     ImexArk3, ImexOperator, ImexTimeStepper,
@@ -103,7 +103,7 @@ fn main() {
             let msh = read_msh_file(p).expect("failed to read mesh file");
             msh.into_2d().expect("expected 2D mesh")
         }
-        None => SimplexMesh::<2>::unit_square_tri(args.n),
+        None => Mesh::<2>::unit_square_tri(args.n),
     };
 
     println!("=== mfem_ex41_imex: FEM advection-diffusion with IMEX ===");
@@ -151,7 +151,7 @@ fn main() {
     println!("  PASS");
 }
 
-fn solve_case(mesh: SimplexMesh<2>, args: &Args) -> SolveResult {
+fn solve_case(mesh: Mesh<2>, args: &Args) -> SolveResult {
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 
@@ -382,7 +382,7 @@ mod tests {
     use super::*;
 
     fn solve(args: &Args) -> SolveResult {
-        solve_case(SimplexMesh::<2>::unit_square_tri(args.n), args)
+        solve_case(Mesh::<2>::unit_square_tri(args.n), args)
     }
 
     #[test]

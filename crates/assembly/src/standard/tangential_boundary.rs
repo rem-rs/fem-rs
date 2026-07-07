@@ -112,12 +112,12 @@ where
 mod tests {
     use super::*;
     use crate::boundary::vector_boundary::VectorBoundaryAssembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{EdgeKey, HCurlSpace};
 
     #[test]
     fn tangential_trace_zero_load_gives_zero_rhs() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = HCurlSpace::new(mesh, 1);
         let integ = TangentialTraceLFIntegrator::new(|_ctx, _n, out| {
             out[0] = 0.0;
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn tangential_trace_unit_load_on_bottom_edge_matches_edge_moment() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let space = HCurlSpace::new(mesh, 1);
         let integ = TangentialTraceLFIntegrator::new(|_ctx, _n, out| {
             out[0] = 1.0;

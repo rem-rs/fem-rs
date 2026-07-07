@@ -22,13 +22,13 @@ use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, BufReader, Write};
 
 use fem_core::{FemError, FemResult};
-use fem_mesh::{element_type::ElementType, simplex::SimplexMesh};
+use fem_mesh::{element_type::ElementType, simplex::Mesh};
 
-/// Write a `SimplexMesh` (and optional scalar fields) as a Conduit Blueprint
+/// Write a `Mesh` (and optional scalar fields) as a Conduit Blueprint
 /// JSON file.
 pub fn write_sidre_blueprint<const D: usize>(
     path: impl AsRef<std::path::Path>,
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     fields: &[(&str, &[f64])],
 ) -> FemResult<()> {
     let mut out = std::io::BufWriter::new(std::fs::File::create(path.as_ref())?);
@@ -116,7 +116,7 @@ pub fn write_sidre_blueprint<const D: usize>(
 #[allow(clippy::type_complexity)]
 pub fn read_sidre_blueprint<const D: usize>(
     path: impl AsRef<std::path::Path>,
-) -> FemResult<(SimplexMesh<D>, Vec<(String, Vec<f64>)>)> {
+) -> FemResult<(Mesh<D>, Vec<(String, Vec<f64>)>)> {
     let file = std::fs::File::open(path.as_ref())?;
     let reader = BufReader::new(file);
     let mut json = String::new();
@@ -133,7 +133,7 @@ pub fn read_sidre_blueprint<const D: usize>(
 #[allow(clippy::type_complexity)]
 fn parse_blueprint_json<const D: usize>(
     json: &str,
-) -> FemResult<(SimplexMesh<D>, Vec<(String, Vec<f64>)>)> {
+) -> FemResult<(Mesh<D>, Vec<(String, Vec<f64>)>)> {
     let json = json.trim();
     let mut coords: Vec<f64> = Vec::new();
     let mut connectivity: Vec<u32> = Vec::new();
@@ -203,7 +203,7 @@ fn parse_blueprint_json<const D: usize>(
     let ne = if npe > 0 { connectivity.len() / npe } else { 0 };
     let conn = connectivity;
 
-    let vis_mesh = SimplexMesh {
+    let vis_mesh = Mesh {
         coords,
         conn,
         elem_tags: vec![1i32; ne],
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn debug_json_output_3d() {
-        let mesh: SimplexMesh<3> = SimplexMesh::unit_cube_tet(1);
+        let mesh: Mesh<3> = Mesh::unit_cube_tet(1);
         eprintln!("3D mesh has {} nodes, {} elems", mesh.n_nodes(), mesh.n_elems());
         let field = vec![1.0f64; mesh.n_nodes()];
         let dir = std::env::temp_dir().join("sidre_debug_3d.json");
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn roundtrip_3d_tet4() {
-        let mesh: SimplexMesh<3> = SimplexMesh::unit_cube_tet(1);
+        let mesh: Mesh<3> = Mesh::unit_cube_tet(1);
         let field = vec![1.0f64; mesh.n_nodes()];
         let dir = std::env::temp_dir().join("sidre_test_3d.json");
         write_sidre_blueprint(&dir, &mesh, &[("p", &field)]).unwrap();
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn roundtrip_multi_field() {
-        let mesh: SimplexMesh<2> = SimplexMesh::unit_square_tri(1);
+        let mesh: Mesh<2> = Mesh::unit_square_tri(1);
         let u = vec![0.0f64; mesh.n_nodes()];
         let v = vec![1.0f64; mesh.n_nodes()];
         let dir = std::env::temp_dir().join("sidre_multi.json");
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn no_fields() {
-        let mesh: SimplexMesh<2> = SimplexMesh::unit_square_tri(1);
+        let mesh: Mesh<2> = Mesh::unit_square_tri(1);
         let dir = std::env::temp_dir().join("sidre_nofields.json");
         write_sidre_blueprint::<2>(&dir, &mesh, &[]).unwrap();
         let (read_mesh, fields) = read_sidre_blueprint::<2>(&dir).unwrap();

@@ -32,10 +32,10 @@
 //!
 //! ```rust,ignore
 //! use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //! use fem_space::H1Space;
 //!
-//! let mesh  = SimplexMesh::<2>::unit_square_tri(16);
+//! let mesh  = Mesh::<2>::unit_square_tri(16);
 //! let space = H1Space::new(mesh, 1);
 //!
 //! // Assemble K and f for -Δu = 2π² sin(πx)sin(πy)

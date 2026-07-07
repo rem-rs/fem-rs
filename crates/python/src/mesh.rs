@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::boundary_nodes_with_tags;
 use fem_mesh::extrude_tri3_to_prisms;
 use fem_mesh::extrude_quad4_to_hex8;
@@ -13,8 +13,8 @@ use fem_mesh::build_supermesh;
 ///   ``fem.Mesh.unit_cube_tet(n)``    — 3-D tetrahedral mesh
 #[pyclass(name = "Mesh")]
 pub struct PyMesh {
-    pub(crate) inner_2d: Option<SimplexMesh<2>>,
-    pub(crate) inner_3d: Option<SimplexMesh<3>>,
+    pub(crate) inner_2d: Option<Mesh<2>>,
+    pub(crate) inner_3d: Option<Mesh<3>>,
     pub(crate) dim: u8,
 }
 
@@ -38,7 +38,7 @@ impl PyMesh {
                 "unit_square_tri: n must be ≥ 1"
             ));
         }
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         Ok(PyMesh { inner_2d: Some(mesh), inner_3d: None, dim: 2 })
     }
 
@@ -52,7 +52,7 @@ impl PyMesh {
                 "unit_cube_tet: n must be ≥ 1"
             ));
         }
-        let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+        let mesh = Mesh::<3>::unit_cube_tet(n);
         Ok(PyMesh { inner_2d: None, inner_3d: Some(mesh), dim: 3 })
     }
 

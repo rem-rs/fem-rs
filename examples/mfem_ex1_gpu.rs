@@ -22,7 +22,7 @@
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
 use fem_io::mfem::read_mfem_file;
 use fem_linalg_gpu::{GpuContext, assemble_poisson_2d_p1_gpu};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::cg_gpu::PcgGpuWorkspace;
 use fem_solver::SolverConfig;
@@ -33,11 +33,11 @@ fn main() {
     let ctx = GpuContext::new_sync().expect("failed to create GPU context");
 
     // Load or generate mesh
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     let space = H1Space::new(mesh.clone(), args.order);
@@ -161,7 +161,7 @@ mod tests {
         // MMS problem: -(u_xx + u_yy) = f, u = sin(πx)sin(πy) on ∂Ω
         // Source: f = 2π² sin(πx)sin(πy)
         // Reproduce the old reference solution on a tiny mesh.
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let rhs_fun = DomainSourceIntegrator::new(|x: &[f64]| {
             2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()

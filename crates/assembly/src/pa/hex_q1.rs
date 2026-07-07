@@ -176,23 +176,23 @@ pub fn pa_apply_mass_hex_q1(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, fe_space::FESpace};
     use crate::assembler::Assembler;
     use crate::standard::DiffusionIntegrator;
 
-    fn hex_elem_dofs(space: &H1Space<SimplexMesh<3>>) -> Vec<Vec<u32>> {
+    fn hex_elem_dofs(space: &H1Space<Mesh<3>>) -> Vec<Vec<u32>> {
         let mesh = space.mesh();
         (0..mesh.n_elements() as u32).map(|e| space.element_dofs(e).to_vec()).collect()
     }
 
     #[test]
     fn hex_q1_pa_matches_assembled() {
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let space = H1Space::new(mesh, 1);
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
 
-        let mesh2 = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh2 = Mesh::<3>::unit_cube_hex(2);
         let space2 = H1Space::new(mesh2, 1);
         let pd = build_hex_q1_pa_data(space2.mesh(), &|_| 1.0);
         let elem_dofs = hex_elem_dofs(&space2);
@@ -215,11 +215,11 @@ mod tests {
     fn hex_q1_pa_mass_matches_assembled() {
         use crate::standard::MassIntegrator;
 
-        let mesh = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh = Mesh::<3>::unit_cube_hex(2);
         let space = H1Space::new(mesh, 1);
         let mat = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 2);
 
-        let mesh2 = SimplexMesh::<3>::unit_cube_hex(2);
+        let mesh2 = Mesh::<3>::unit_cube_hex(2);
         let space2 = H1Space::new(mesh2, 1);
         let pd = build_hex_q1_pa_data(space2.mesh(), &|_| 1.0);
         let elem_dofs = hex_elem_dofs(&space2);

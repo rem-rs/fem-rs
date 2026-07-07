@@ -497,11 +497,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     #[test] fn zz_linear_exact() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0] + x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test] fn zz_quadratic_nonzero() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0]*x[0] + x[1]*x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[test] fn kelly_linear_exact() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0] + x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[test] fn kelly_quadratic_nonzero() {
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0]*x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test] fn zz_3d_linear() {
-        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let m = Mesh::<3>::unit_cube_tet(2);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0]+x[1]+x[2]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test] fn zz_3d_nonzero() {
-        let m = SimplexMesh::<3>::unit_cube_tet(2);
+        let m = Mesh::<3>::unit_cube_tet(2);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0]*x[1] + x[2]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
@@ -558,7 +558,7 @@ mod tests {
         // u = x + y, f = 0, z = x + y (dual = primal)
         // For a linear solution where dual = primal, ω_K should be zero
         // (since z_h is linear and nodal recovery doesn't change it)
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let u_dofs = s.interpolate(&|x| x[0] + x[1]);
         let z_dofs = s.interpolate(&|x| x[0] + x[1]);
@@ -573,7 +573,7 @@ mod tests {
     fn dwr_quadratic_u_nonlinear_z() {
         // u = x^2 + y^2, f = -4, z = sin(πx)sin(πy) (nonlinear dual, poorly resolved by P1)
         // DWR should be > 0 since ω_K ≠ 0 for the dual
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let u_dofs = s.interpolate(&|x| x[0] * x[0] + x[1] * x[1]);
         let z_dofs = s.interpolate(&|x| (std::f64::consts::PI * x[0]).sin()
@@ -590,8 +590,8 @@ mod tests {
         // z = sin(πx) * y (dual differs from primal, has more structure)
         let f_u = &|_: &[f64]| -4.0;
         let z_fn = &|x: &[f64]| (std::f64::consts::PI * x[0]).sin() * x[1];
-        let m_coarse = SimplexMesh::<2>::unit_square_tri(2);
-        let m_fine = SimplexMesh::<2>::unit_square_tri(8);
+        let m_coarse = Mesh::<2>::unit_square_tri(2);
+        let m_fine = Mesh::<2>::unit_square_tri(8);
         let s_coarse = H1Space::new(m_coarse, 1);
         let s_fine = H1Space::new(m_fine, 1);
         let u_fn = &|x: &[f64]| x[0] * x[0] + x[1] * x[1];
@@ -616,7 +616,7 @@ mod tests {
         // u = x + y  =>  -Δu = 0, f = 0
         // For linear functions, the residual estimator should be near zero
         // since ∇u is constant, face jumps are zero.
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0] + x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
@@ -630,7 +630,7 @@ mod tests {
     fn residual_quadratic_nonzero() {
         // u = x^2 + y^2  =>  -Δu = -4, f = -4
         // P1 approx of quadratic has non-zero face jumps
-        let m = SimplexMesh::<2>::unit_square_tri(4);
+        let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0] * x[0] + x[1] * x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
@@ -644,8 +644,8 @@ mod tests {
         let f = &|x: &[f64]| 2.0 * std::f64::consts::PI * std::f64::consts::PI
             * (std::f64::consts::PI * x[0]).sin()
             * (std::f64::consts::PI * x[1]).sin();
-        let m_coarse = SimplexMesh::<2>::unit_square_tri(2);
-        let m_fine = SimplexMesh::<2>::unit_square_tri(8);
+        let m_coarse = Mesh::<2>::unit_square_tri(2);
+        let m_fine = Mesh::<2>::unit_square_tri(8);
         let s_coarse = H1Space::new(m_coarse, 1);
         let s_fine = H1Space::new(m_fine, 1);
         let d_coarse = s_coarse.interpolate(&|x| (std::f64::consts::PI * x[0]).sin() * (std::f64::consts::PI * x[1]).sin());

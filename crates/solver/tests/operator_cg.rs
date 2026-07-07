@@ -3,7 +3,7 @@
 use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, CsrLinearOperator, LinearOperator as AssemblyLinearOperator, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{solve_cg, solve_cg_operator, SolverConfig};
 use fem_space::{H1Space, constraints::{apply_dirichlet, boundary_dofs}, fe_space::FESpace};
 
@@ -20,8 +20,8 @@ fn cfg() -> SolverConfig {
     }
 }
 
-fn build_poisson_system() -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<SimplexMesh<2>>) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(12);
+fn build_poisson_system() -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<Mesh<2>>) {
+    let mesh = Mesh::<2>::unit_square_tri(12);
     let space = H1Space::new(mesh.clone(), 1);
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let source = DomainSourceIntegrator::new(forcing);
@@ -35,7 +35,7 @@ fn build_poisson_system() -> (fem_linalg::CsrMatrix<f64>, Vec<f64>, H1Space<Simp
     (mat, rhs, space)
 }
 
-fn l2_error(uh: &[f64], space: &H1Space<SimplexMesh<2>>) -> f64 {
+fn l2_error(uh: &[f64], space: &H1Space<Mesh<2>>) -> f64 {
     use fem_element::{ReferenceElement, lagrange::TriP1};
 
     let mesh = space.mesh();

@@ -754,7 +754,7 @@ mod tests {
     use crate::par_solver::par_solve_pcg_jacobi;
     use crate::par_space::ParallelFESpace;
     use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::SolverConfig;
     use fem_space::constraints::boundary_dofs;
     use fem_space::fe_space::FESpace;
@@ -762,7 +762,7 @@ mod tests {
 
     #[test]
     fn ras_hpc_diag_serial_is_consistent() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn ras_hpc_diag_two_ranks_is_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_overlap_one_builds_and_gt_one_rejects() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_matches_jacobi_path_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
@@ -873,7 +873,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_converges_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -923,7 +923,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_not_worse_than_jacobi_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_ilu0_converges_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
@@ -1014,7 +1014,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_ilu0_converges_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -1055,7 +1055,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_ilu0_and_diag_are_both_stable_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -1124,7 +1124,7 @@ mod tests {
 
     #[test]
     fn par_gmres_ras_converges_serial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
@@ -1164,7 +1164,7 @@ mod tests {
 
     #[test]
     fn par_gmres_ras_converges_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_overlap_one_converges_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -1253,7 +1253,7 @@ mod tests {
 
     #[test]
     fn par_gmres_ras_overlap_one_converges_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -1297,7 +1297,7 @@ mod tests {
 
     #[test]
     fn par_pcg_ras_overlap_zero_and_one_are_stable_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -1350,7 +1350,7 @@ mod tests {
 
     #[test]
     fn par_gmres_ras_ilu0_converges_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -1392,7 +1392,7 @@ mod tests {
 
     #[test]
     fn par_gmres_ras_ilu0_overlap_one_converges_two_ranks() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
@@ -1436,7 +1436,7 @@ mod tests {
     // ─── Schur complement preconditioner tests ────────────────────────────────
 
     fn test_schur_precond_build_and_solve(comm: &crate::comm::Comm) {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let pmesh = partition_simplex(&mesh, comm);
         let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
         let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());

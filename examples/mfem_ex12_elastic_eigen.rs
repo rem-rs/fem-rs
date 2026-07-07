@@ -13,7 +13,7 @@
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::eigen::{lobpcg, LobpcgConfig};
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
@@ -23,11 +23,11 @@ fn main() {
     println!("=== fem-rs Example 12: Elasticity Eigenvalue ===");
 
     // Load or generate mesh
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
     let space = H1Space::new(mesh, args.order);
 
@@ -76,14 +76,14 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::eigen::{lobpcg, LobpcgConfig};
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
 
     #[test]
     fn smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let k = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let m = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);

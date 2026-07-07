@@ -13,7 +13,7 @@
 
 use fem_assembly::{nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel}, NewtonConfig};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::VectorH1Space;
 use fem_space::fe_space::FESpace;
 use fem_space::constraints::boundary_dofs;
@@ -23,11 +23,11 @@ fn main() {
     println!("=== fem-rs Example 10: Hyperelastic (NeoHookean) ===");
 
     // Load or generate mesh
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(8)
+        Mesh::<2>::unit_square_tri(8)
     };
     let space = VectorH1Space::new(mesh, args.order, 2);
     let n_dofs = space.n_dofs();
@@ -99,12 +99,12 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use fem_assembly::{physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel}, NewtonConfig};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::VectorH1Space;
 
     #[test]
     fn smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let ns = space.n_scalar_dofs();
         let dm = space.scalar_dof_manager();

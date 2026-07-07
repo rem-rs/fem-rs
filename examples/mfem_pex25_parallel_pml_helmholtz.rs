@@ -1,7 +1,7 @@
 //! Parallel PML Helmholtz (pex25). Usage: --n 12 --ranks 2 --k 5.0
 use std::sync::{Arc, Mutex};
 use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace, par_simplex::partition_simplex,
     par_solve_gmres_jacobi, launcher::native::ThreadLauncher, WorkerConfig,
@@ -13,7 +13,7 @@ fn main() {
     let n = a.iter().position(|x| x == "--n").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(12);
     let r = a.iter().position(|x| x == "--ranks").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(2);
     let k = a.iter().position(|x| x == "--k").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(5.0);
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(n));
     let res = Arc::new(Mutex::new(None)); let rs = Arc::clone(&res);
     ThreadLauncher::new(WorkerConfig::new(r)).launch(move |c| {
         let pm = partition_simplex(&mesh, &c); let lm = pm.local_mesh().clone();

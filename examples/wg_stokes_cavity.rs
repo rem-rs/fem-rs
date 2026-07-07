@@ -10,7 +10,7 @@
 use std::time::Instant;
 
 use fem_assembly::wg_stokes::assemble_wg_stokes;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{H1Space, L2Space, fe_space::FESpace};
 
 fn main() {
@@ -18,8 +18,8 @@ fn main() {
     let t0 = Instant::now();
 
     // Mesh
-    let mesh = SimplexMesh::<2>::unit_square_tri(8);
-    let mesh2 = SimplexMesh::<2>::unit_square_tri(8);
+    let mesh = Mesh::<2>::unit_square_tri(8);
+    let mesh2 = Mesh::<2>::unit_square_tri(8);
 
     // Velocity: continuous H1 P2, pressure: discontinuous L2 P1
     let vel_space = H1Space::new(mesh, 2);
@@ -48,14 +48,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use fem_assembly::wg_stokes::assemble_wg_stokes;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, L2Space, fe_space::FESpace};
 
     #[test]
     fn wg_stokes_assembles() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel = H1Space::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let pres = L2Space::new(mesh2, 0);
         let f = |_: &[f64]| vec![1.0, 0.0];
         let (k, rhs) = assemble_wg_stokes(&vel, &pres, 3, 5.0, &f, &[]);

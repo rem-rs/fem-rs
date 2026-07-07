@@ -7,7 +7,7 @@
 
 use fem_core::NodeId;
 use crate::element_type::ElementType;
-use crate::simplex::SimplexMesh;
+use crate::simplex::Mesh;
 
 /// Extrude a 2-D Tri3 mesh into a 3-D Prism6 mesh.
 ///
@@ -17,10 +17,10 @@ use crate::simplex::SimplexMesh;
 /// Boundary faces: bottom (tag=1), top (tag=2), sides (tag=3).
 /// Each triangle extruded into `n_layers` prisms.
 pub fn extrude_tri3_to_prisms(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     n_layers: usize,
     height: f64,
-) -> SimplexMesh<3> {
+) -> Mesh<3> {
     assert_eq!(mesh.elem_type, ElementType::Tri3,
         "extrude_tri3_to_prisms: requires Tri3 mesh");
     assert!(n_layers > 0);
@@ -121,7 +121,7 @@ pub fn extrude_tri3_to_prisms(
         }
     }
 
-    SimplexMesh {
+    Mesh {
         coords: coords_3d,
         conn: conn_3d,
         elem_tags: elem_tags_3d,
@@ -144,10 +144,10 @@ pub fn extrude_tri3_to_prisms(
 /// Each quad `{a, b, c, d}` in layer `k` becomes hex
 /// `{a_k, b_k, c_k, d_k, a_{k+1}, b_{k+1}, c_{k+1}, d_{k+1}}`.
 pub fn extrude_quad4_to_hex8(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     n_layers: usize,
     height: f64,
-) -> SimplexMesh<3> {
+) -> Mesh<3> {
     assert_eq!(mesh.elem_type, ElementType::Quad4,
         "extrude_quad4_to_hex8: requires Quad4 mesh");
     assert!(n_layers > 0);
@@ -231,7 +231,7 @@ pub fn extrude_quad4_to_hex8(
         }
     }
 
-    SimplexMesh {
+    Mesh {
         coords: coords_3d,
         conn: conn_3d,
         elem_tags: elem_tags_3d,
@@ -252,11 +252,11 @@ pub fn extrude_quad4_to_hex8(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::SimplexMesh;
+    use crate::simplex::Mesh;
 
     #[test]
     fn extrude_tri_prism_counts() {
-        let m2 = SimplexMesh::<2>::unit_square_tri(2);
+        let m2 = Mesh::<2>::unit_square_tri(2);
         let m3 = extrude_tri3_to_prisms(&m2, 3, 1.0);
         assert_eq!(m3.n_nodes(), m2.n_nodes() * 4); // n_layers+1 = 4
         assert_eq!(m3.n_elems(), m2.n_elems() * 3); // 3 layers
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn extrude_quad_hex_counts() {
-        let m2 = SimplexMesh::<2>::unit_square_quad(2);
+        let m2 = Mesh::<2>::unit_square_quad(2);
         let m3 = extrude_quad4_to_hex8(&m2, 2, 2.0);
         assert_eq!(m3.n_nodes(), m2.n_nodes() * 3);
         assert_eq!(m3.n_elems(), m2.n_elems() * 2);
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn extrude_prism_geometry() {
-        let m2 = SimplexMesh::<2>::unit_square_tri(1);
+        let m2 = Mesh::<2>::unit_square_tri(1);
         let m3 = extrude_tri3_to_prisms(&m2, 1, 5.0);
         // Top layer nodes at z = 5.0
         let top_node = m2.n_nodes() as u32;

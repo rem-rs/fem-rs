@@ -9,11 +9,11 @@
 //! The HDF5-based path requires the `hdf5` feature.
 
 use fem_core::{FemError, FemResult};
-use fem_mesh::{ElementType, SimplexMesh};
+use fem_mesh::{ElementType, Mesh};
 use std::collections::BTreeMap;
 
 /// Read an Exodus II file — auto-detects HDF5-based format.
-pub fn read_exodus(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> {
+pub fn read_exodus(path: impl AsRef<std::path::Path>) -> FemResult<Mesh<3>> {
     let p = path.as_ref();
     #[cfg(feature = "hdf5")]
     { return read_exodus_hdf5_impl(p.to_str().ok_or(FemError::Mesh("non-UTF8 path".into()))?); }
@@ -22,12 +22,12 @@ pub fn read_exodus(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3
 }
 
 /// Read an Exodus II file via HDF5 (requires `hdf5` feature).
-pub fn read_exodus_hdf5(path: &str) -> FemResult<SimplexMesh<3>> {
+pub fn read_exodus_hdf5(path: &str) -> FemResult<Mesh<3>> {
     read_exodus_hdf5_impl(path)
 }
 
 #[cfg(feature = "hdf5")]
-fn read_exodus_hdf5_impl(path: &str) -> FemResult<SimplexMesh<3>> {
+fn read_exodus_hdf5_impl(path: &str) -> FemResult<Mesh<3>> {
     use hdf5::H5File;
     use std::path::Path;
 
@@ -119,7 +119,7 @@ fn read_exodus_hdf5_impl(path: &str) -> FemResult<SimplexMesh<3>> {
         &conn, elem_type, &elem_tags, 0..n_elems,
     );
 
-    Ok(SimplexMesh {
+    Ok(Mesh {
         coords, conn, elem_tags, elem_type,
         face_conn, face_tags, face_type,
         elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
@@ -128,7 +128,7 @@ fn read_exodus_hdf5_impl(path: &str) -> FemResult<SimplexMesh<3>> {
 }
 
 #[cfg(not(feature = "hdf5"))]
-fn read_exodus_hdf5_impl(_path: &str) -> FemResult<SimplexMesh<3>> {
+fn read_exodus_hdf5_impl(_path: &str) -> FemResult<Mesh<3>> {
     Err(FemError::Mesh("Exodus HDF5 reader requires `hdf5` feature".into()))
 }
 
@@ -151,7 +151,7 @@ fn node_coord_3d(nod: &hdf5::Group) -> FemResult<Vec<f64>> {
 }
 
 /// Read a CGNS mesh file (HDF5-based).
-pub fn read_cgns(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>> {
+pub fn read_cgns(path: impl AsRef<std::path::Path>) -> FemResult<Mesh<3>> {
     #[cfg(feature = "hdf5")]
     { return read_cgns_hdf5(path.as_ref().to_str().ok_or(FemError::Mesh("non-UTF8 path".into()))?); }
     #[cfg(not(feature = "hdf5"))]
@@ -159,7 +159,7 @@ pub fn read_cgns(path: impl AsRef<std::path::Path>) -> FemResult<SimplexMesh<3>>
 }
 
 #[cfg(feature = "hdf5")]
-fn read_cgns_hdf5(path: &str) -> FemResult<SimplexMesh<3>> {
+fn read_cgns_hdf5(path: &str) -> FemResult<Mesh<3>> {
     use hdf5::H5File;
     let file = H5File::open(path).map_err(|e| FemError::Mesh(format!("HDF5 open: {e}")))?;
     let root = file.root_group();
@@ -223,7 +223,7 @@ fn read_cgns_hdf5(path: &str) -> FemResult<SimplexMesh<3>> {
         &conn, elem_type, &elem_tags, 0..n_elems,
     );
 
-    Ok(SimplexMesh {
+    Ok(Mesh {
         coords, conn, elem_tags, elem_type,
         face_conn, face_tags, face_type,
         elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
@@ -274,7 +274,7 @@ fn elem_type_npe(name: &str) -> usize {
 /// local node ordering.
 ///
 /// Returns `(flat_face_conn, face_tags)` — the same format used by
-/// [`SimplexMesh`](fem_mesh::SimplexMesh).
+/// [`Mesh`](fem_mesh::Mesh).
 pub fn build_boundary_faces_3d(
     conn: &[u32],
     elem_type: ElementType,

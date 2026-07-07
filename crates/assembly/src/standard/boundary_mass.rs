@@ -27,13 +27,13 @@ let integ = BoundaryMassIntegrator { alpha: 1.0 };
 mod tests {
     use super::*;
     use crate::assembler::{Assembler, face_dofs_p1};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, fe_space::FESpace};
 
     /// 1^T M_Γ 1 should equal the boundary length (= 4 for unit square).
     #[test]
     fn boundary_mass_integral_equals_perimeter() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
         let integ = BoundaryMassIntegrator { alpha: 1.0 };
@@ -54,7 +54,7 @@ mod tests {
     /// Boundary mass matrix should be symmetric.
     #[test]
     fn boundary_mass_is_symmetric() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
         let integ = BoundaryMassIntegrator { alpha: 1.0 };

@@ -67,7 +67,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, MassIntegrator},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{lobpcg, LobpcgConfig};
 use fem_space::{
     fe_space::FESpace,
@@ -78,7 +78,7 @@ use fem_space::{
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /// Assign element tags 1 (left half) or 2 (right half) based on x-coordinate.
-fn tag_mesh_by_x(mut mesh: SimplexMesh<2>, split_x: f64) -> SimplexMesh<2> {
+fn tag_mesh_by_x(mut mesh: Mesh<2>, split_x: f64) -> Mesh<2> {
     for e in 0..mesh.n_elements() as u32 {
         let nodes = mesh.element_nodes(e);
         let mut cx = 0.0;
@@ -153,7 +153,7 @@ fn tm_analytical(k: usize) -> Vec<f64> {
 /// the first (near-zero) one.
 #[test]
 fn em_te_waveguide_cutoff() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh = Mesh::<2>::unit_square_tri(16);
     let space = H1Space::new(mesh, 1);
 
     let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
@@ -195,7 +195,7 @@ fn em_te_waveguide_cutoff() {
 /// to impose Dirichlet BCs without breaking matrix symmetry.
 #[test]
 fn em_tm_waveguide_cutoff() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh = Mesh::<2>::unit_square_tri(16);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 
@@ -243,7 +243,7 @@ fn em_tm_waveguide_cutoff() {
 /// Dielectric loading lowers the resonant frequency.
 #[test]
 fn em_dielectric_loaded_cavity() {
-    let mesh_raw = SimplexMesh::<2>::unit_square_tri(16);
+    let mesh_raw = Mesh::<2>::unit_square_tri(16);
     let mesh = tag_mesh_by_x(mesh_raw, 0.5);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
@@ -296,7 +296,7 @@ fn em_cavity_eigenvalue_convergence() {
     let mut prev_err: f64 = f64::MAX;
 
     for &n in &[8, 12, 16] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let n_dofs = space.n_dofs();
 
@@ -346,7 +346,7 @@ fn em_helmholtz_mms() {
     use fem_assembly::standard::MassIntegrator;
 
     let k_wave = 2.0 * PI; // wavenumber
-    let mesh = SimplexMesh::<2>::unit_square_tri(20);
+    let mesh = Mesh::<2>::unit_square_tri(20);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 
@@ -430,7 +430,7 @@ fn em_ieee1597_helmholtz_mms() {
         2.0 * (x[0] * (1.0 - x[0]) + x[1] * (1.0 - x[1])) - k2 * xy
     };
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(20);
+    let mesh = Mesh::<2>::unit_square_tri(20);
     let space = H1Space::new(mesh.clone(), 1);
 
     let mut sys = NativeComplexAssembler::assemble_helmholtz(
@@ -510,7 +510,7 @@ fn em_scp_point_source_radiation() {
     let sigma = 0.04; // Gaussian half-width
 
     for &n in &[12, 20] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let n_dof = space.n_dofs();
 
@@ -595,7 +595,7 @@ fn em_helmholtz_mms_wavenumber_sweep() {
     for case in &cases {
         let k_wave = case.k;
         let k2 = k_wave * k_wave;
-        let mesh = SimplexMesh::<2>::unit_square_tri(case.n);
+        let mesh = Mesh::<2>::unit_square_tri(case.n);
         let space = H1Space::new(mesh.clone(), 1);
         let n_dof = space.n_dofs();
 
@@ -667,7 +667,7 @@ fn em_helmholtz_mms_sweep_regression() {
     // k=4 on n=20
     let l2_k4 = {
         let k_wave = 4.0; let k2 = k_wave * k_wave;
-        let mesh = SimplexMesh::<2>::unit_square_tri(20);
+        let mesh = Mesh::<2>::unit_square_tri(20);
         let space = H1Space::new(mesh.clone(), 1);
         let n_dof = space.n_dofs();
         let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
@@ -702,7 +702,7 @@ fn em_helmholtz_mms_sweep_regression() {
     // k=16 on n=60
     let l2_k16 = {
         let k_wave = 16.0; let k2 = k_wave * k_wave;
-        let mesh = SimplexMesh::<2>::unit_square_tri(60);
+        let mesh = Mesh::<2>::unit_square_tri(60);
         let space = H1Space::new(mesh.clone(), 1);
         let n_dof = space.n_dofs();
         let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 5);
@@ -755,7 +755,7 @@ fn em_helmholtz_gmres_bicgstab_consistency() {
     use fem_solver::SolverConfig;
 
     // Pure Poisson (SPD) — both CG and GMRES converge
-    let mesh = SimplexMesh::<2>::unit_square_tri(6);
+    let mesh = Mesh::<2>::unit_square_tri(6);
     let space = H1Space::new(mesh.clone(), 1);
     let n_dof = space.n_dofs();
 
@@ -842,7 +842,7 @@ fn em_complex_helmholtz_lossy_mms() {
         lap - k_sigma * p - k2 * p
     };
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(20);
+    let mesh = Mesh::<2>::unit_square_tri(20);
     let space = H1Space::new(mesh.clone(), 1);
 
     // Assemble complex system: epsilon=1, sigma=sigma, mu_inv=1, k=k_wave
@@ -925,7 +925,7 @@ fn em_complex_helmholtz_high_k_mms() {
         (2.0 * PI * PI - k2) * (PI * x[0]).sin() * (PI * x[1]).sin()
     };
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(60);
+    let mesh = Mesh::<2>::unit_square_tri(60);
     let space = H1Space::new(mesh.clone(), 1);
 
     let mut sys = NativeComplexAssembler::assemble_helmholtz(
@@ -1003,7 +1003,7 @@ fn em_scp_point_source_mesh_convergence() {
     let mut prev_norm = f64::MAX;
 
     for &n in &[12, 20, 30] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh.clone(), 1);
         let n_dof = space.n_dofs();
 
@@ -1073,7 +1073,7 @@ fn em_helmholtz_mms_k8() {
 
     let k_wave = 8.0;
     let k2 = k_wave * k_wave;
-    let mesh = SimplexMesh::<2>::unit_square_tri(40);
+    let mesh = Mesh::<2>::unit_square_tri(40);
     let space = H1Space::new(mesh.clone(), 1);
     let n_dof = space.n_dofs();
 
@@ -1133,7 +1133,7 @@ fn em_helmholtz_mms_k16() {
 
     let k_wave = 16.0;
     let k2 = k_wave * k_wave;
-    let mesh = SimplexMesh::<2>::unit_square_tri(60);
+    let mesh = Mesh::<2>::unit_square_tri(60);
     let space = H1Space::new(mesh.clone(), 1);
     let n_dof = space.n_dofs();
 
@@ -1218,7 +1218,7 @@ fn em_ieee1597_pec_cylinder_scattering() {
     let r_outer = 2.0;  // outer boundary half-size
 
     // Annular mesh: inner polygon ≈ circle of radius a, outer square [-2,2]²
-    let mesh = SimplexMesh::<2>::coaxial_annulus_poly(r_outer, a, 48, 1);
+    let mesh = Mesh::<2>::coaxial_annulus_poly(r_outer, a, 48, 1);
     let space = H1Space::new(mesh.clone(), 1);
     let n = space.n_dofs();
 
@@ -1372,7 +1372,7 @@ fn em_dielectric_cylinder_scattering() {
     let n_mesh = 60;
 
     // Square mesh [-r_outer, r_outer]² with element tags by distance from center
-    let mesh_raw = SimplexMesh::<2>::unit_square_tri(n_mesh);
+    let mesh_raw = Mesh::<2>::unit_square_tri(n_mesh);
     let mut mesh = mesh_raw;
     for c in mesh.coords.chunks_mut(2) {
         c[0] = c[0] * 2.0 * r_outer - r_outer;  // map [0,1]→[-r,r]
@@ -1483,7 +1483,7 @@ fn em_complex_helmholtz_3d_mms() {
     use fem_assembly::standard::DomainSourceIntegrator;
     use fem_assembly::complex::NativeComplexSystem;
     use fem_linalg::complex_csr::ComplexCsr;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::constraints::boundary_dofs;
     use std::f64::consts::PI;
@@ -1494,7 +1494,7 @@ fn em_complex_helmholtz_3d_mms() {
     let n_mesh = 8;
 
     // 3D tet mesh
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n_mesh);
+    let mesh = Mesh::<3>::unit_cube_tet(n_mesh);
     let space = H1Space::new(mesh, 1);
     let n = space.n_dofs();
     let dm = space.dof_manager();

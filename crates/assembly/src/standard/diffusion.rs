@@ -45,7 +45,7 @@ let integ = DiffusionIntegrator { kappa: PWConstCoeff::new([(1, 1.0), (2, 100.0)
 mod tests {
     use super::*;
     use crate::assembler::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     /// The stiffness matrix from a DiffusionIntegrator on the reference triangle
@@ -53,7 +53,7 @@ mod tests {
     /// row-sum of zero (constant functions are in the kernel of ∇).
     #[test]
     fn stiffness_row_sum_zero_single_element() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh  = Mesh::<2>::unit_square_tri(1);
         let space = H1Space::new(mesh, 1);
         let integ = DiffusionIntegrator { kappa: 1.0 };
         let mat   = Assembler::assemble_bilinear(&space, &[&integ], 2);
@@ -68,7 +68,7 @@ mod tests {
     /// Symmetry check: K[i,j] == K[j,i].
     #[test]
     fn stiffness_is_symmetric() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let integ = DiffusionIntegrator { kappa: 1.0 };
         let mat   = Assembler::assemble_bilinear(&space, &[&integ], 2);
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn spatially_varying_kappa() {
         use crate::postproc::coefficient::FnCoeff;
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let integ = DiffusionIntegrator { kappa: FnCoeff(|x: &[f64]| 1.0 + x[0]) };
         let mat   = Assembler::assemble_bilinear(&space, &[&integ], 2);

@@ -9,7 +9,7 @@ use fem_mesh::{
     curved::{CurvedElementTransformation, CurvedMesh},
     element_type::ElementType,
     topology::MeshTopology,
-    SimplexMesh,
+    Mesh,
 };
 use fem_space::fe_space::FESpace;
 
@@ -48,7 +48,7 @@ fn face_geom_3d(coords: &[f64], a: u32, b: u32, c: u32) -> (f64, [f64; 3]) {
 /// `mesh` is a linear mesh matching `curved`'s topology.
 pub fn assemble_sip_curved_3d<S: FESpace + Sync>(
     space: &S,
-    mesh: &SimplexMesh<3>,
+    mesh: &Mesh<3>,
     curved: &CurvedMesh<3>,
     kappa: f64,
     sigma: f64,
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn curved_3d_sip_symmetric() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let curved = CurvedMesh::elevate_to_order(&mesh, 1, |p| p);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_sip_curved_3d(&space, space.mesh(), &curved, 1.0, 10.0, 3);
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn curved_3d_constant_kernel() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let curved = CurvedMesh::elevate_to_order(&mesh, 1, |p| p);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_sip_curved_3d(&space, space.mesh(), &curved, 1.0, 10.0, 3);

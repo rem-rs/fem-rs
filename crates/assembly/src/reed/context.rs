@@ -12,9 +12,9 @@
 //!
 //! ```ignore
 //! use fem_assembly::reed::FemCeed;
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //!
-//! let mesh = SimplexMesh::<2>::unit_square_tri(4);
+//! let mesh = Mesh::<2>::unit_square_tri(4);
 //! let ceed = FemCeed::new();
 //! let mass = ceed.cache_mass_2d(&mesh, 2, 7)?; // P2; q is quadrature hint
 //! let mut y = vec![0.0_f64; mass.n_dofs()];
@@ -37,7 +37,7 @@
 
 use fem_linalg::CsrMatrix;
 use fem_mesh::topology::MeshTopology;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{HCurlSpace, HDivSpace};
 
 // ── FemCeedError ─────────────────────────────────────────────────────────────
@@ -328,7 +328,7 @@ impl FemCeed {
     ///   [`crate::h1_quad_order_hint::h1_tri_quad_order`] to a `fem-element` triangle rule order.
     pub fn assemble_mass_2d_csr(
         &self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         poly: usize,
         q: usize,
     ) -> Result<CsrMatrix<f64>, FemCeedError> {
@@ -351,7 +351,7 @@ impl FemCeed {
     /// `input` / `output` length is `H1Space::n_dofs()` (for P2 this is **not** `n_nodes`).
     pub fn apply_mass_2d(
         &self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         poly: usize,
         q: usize,
         input: &[f64],
@@ -367,7 +367,7 @@ impl FemCeed {
     /// [`Self::apply_mass_2d`] (which re-assembles every call).
     pub fn cache_mass_2d(
         &self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         poly: usize,
         q: usize,
     ) -> Result<CachedH1Mass2d, FemCeedError> {
@@ -381,7 +381,7 @@ impl FemCeed {
     /// Assemble the global H¹ Poisson / stiffness matrix (`κ = 1`).
     pub fn assemble_poisson_2d_csr(
         &self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         poly: usize,
         q: usize,
     ) -> Result<CsrMatrix<f64>, FemCeedError> {
@@ -398,7 +398,7 @@ impl FemCeed {
     /// when applying `K` many times.
     pub fn apply_poisson_2d(
         &self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         poly: usize,
         q: usize,
         input: &[f64],
@@ -413,7 +413,7 @@ impl FemCeed {
     /// Assemble `K` once; use [`CachedH1Poisson2d::apply_into`] for repeated `K x`.
     pub fn cache_poisson_2d(
         &self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         poly: usize,
         q: usize,
     ) -> Result<CachedH1Poisson2d, FemCeedError> {
@@ -425,7 +425,7 @@ impl FemCeed {
     /// Assemble `M` and `K` once with the same quadrature mapping as separate cache calls.
     pub fn cache_h1_scalar_ops_2d(
         &self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         poly: usize,
         q: usize,
     ) -> Result<CachedH1ScalarOps2d, FemCeedError> {
@@ -442,7 +442,7 @@ impl FemCeed {
     /// `q` is mapped with [`crate::h1_quad_order_hint::h1_tet_quad_order`] to a `fem-element` tet rule.
     pub fn assemble_mass_3d_csr(
         &self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         poly: usize,
         q: usize,
     ) -> Result<CsrMatrix<f64>, FemCeedError> {
@@ -456,7 +456,7 @@ impl FemCeed {
     /// Apply `M · input` on a 3D tetrahedral mesh (assembles each call unless you cache).
     pub fn apply_mass_3d(
         &self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         poly: usize,
         q: usize,
         input: &[f64],
@@ -470,7 +470,7 @@ impl FemCeed {
 
     pub fn cache_mass_3d(
         &self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         poly: usize,
         q: usize,
     ) -> Result<CachedH1Mass3d, FemCeedError> {
@@ -481,7 +481,7 @@ impl FemCeed {
 
     pub fn assemble_poisson_3d_csr(
         &self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         poly: usize,
         q: usize,
     ) -> Result<CsrMatrix<f64>, FemCeedError> {
@@ -494,7 +494,7 @@ impl FemCeed {
 
     pub fn apply_poisson_3d(
         &self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         poly: usize,
         q: usize,
         input: &[f64],
@@ -508,7 +508,7 @@ impl FemCeed {
 
     pub fn cache_poisson_3d(
         &self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         poly: usize,
         q: usize,
     ) -> Result<CachedH1Poisson3d, FemCeedError> {
@@ -519,7 +519,7 @@ impl FemCeed {
 
     pub fn cache_h1_scalar_ops_3d(
         &self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         poly: usize,
         q: usize,
     ) -> Result<CachedH1ScalarOps3d, FemCeedError> {
@@ -584,8 +584,8 @@ mod tests {
 
     #[test]
     fn fem_ceed_unsupported_h1_poly_scalar_paths() {
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh2 = Mesh::<2>::unit_square_tri(2);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let ceed = FemCeed::new();
         for res in [
             ceed.assemble_mass_2d_csr(&mesh2, 0, 3),
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_mass_input_len_mismatch_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let ceed = FemCeed::new();
         let err = ceed
             .apply_mass_2d(&mesh, 1, 3, &[0.0, 0.0])
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_poisson_input_len_mismatch_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let ceed = FemCeed::new();
         let err = ceed
             .apply_poisson_2d(&mesh, 1, 3, &[0.0, 0.0])
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_poisson_output_len_mismatch_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let ceed = FemCeed::new();
         let k = ceed.cache_poisson_2d(&mesh, 1, 3).expect("cache poisson");
         let n = k.n_dofs();
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_poisson_input_len_mismatch_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let ceed = FemCeed::new();
         let k = ceed.cache_poisson_2d(&mesh, 1, 3).expect("cache poisson");
         let n = k.n_dofs();
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_mass_output_len_mismatch_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let ceed = FemCeed::new();
         let mass = ceed.cache_mass_2d(&mesh, 1, 3).expect("cache mass");
         let n = mass.n_dofs();
@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_mass_input_len_mismatch_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let ceed = FemCeed::new();
         let mass = ceed.cache_mass_2d(&mesh, 1, 3).expect("cache mass");
         let n = mass.n_dofs();
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_mass_input_len_mismatch_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let ceed = FemCeed::new();
         let err = ceed
             .apply_mass_3d(&mesh, 1, 3, &[0.0])
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_mass_output_len_mismatch_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let ceed = FemCeed::new();
         let mass = ceed.cache_mass_3d(&mesh, 1, 3).expect("cache mass 3d");
         let n = mass.n_dofs();
@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_mass_input_len_mismatch_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let ceed = FemCeed::new();
         let mass = ceed.cache_mass_3d(&mesh, 1, 3).expect("cache mass 3d");
         let n = mass.n_dofs();
@@ -772,7 +772,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_poisson_input_len_mismatch_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let ceed = FemCeed::new();
         let err = ceed
             .apply_poisson_3d(&mesh, 1, 3, &[0.0])
@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_poisson_output_len_mismatch_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let ceed = FemCeed::new();
         let k = ceed.cache_poisson_3d(&mesh, 1, 3).expect("cache poisson 3d");
         let n = k.n_dofs();
@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_poisson_input_len_mismatch_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let ceed = FemCeed::new();
         let k = ceed.cache_poisson_3d(&mesh, 1, 3).expect("cache poisson 3d");
         let n = k.n_dofs();
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_mass_matches_assembler_spmv_p1() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let poly = 1usize;
         let q = 3usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_poisson_matches_assembler_spmv_p1() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let poly = 1usize;
         let q = 3usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_mass_matches_assembler_spmv_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let poly = 2usize;
         let q = 7usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -913,7 +913,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_poisson_matches_assembler_spmv_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let poly = 2usize;
         let q = 7usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_mass_matches_apply_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let poly = 2usize;
         let q = 5usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_poisson_matches_apply_p1() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let poly = 1usize;
         let q = 3usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_poisson_matches_apply_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let poly = 2usize;
         let q = 7usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -1024,7 +1024,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_h1_scalar_ops_bundle_matches_apply_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let poly = 2usize;
         let q = 7usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -1067,7 +1067,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_mass_matches_spmv_p1_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let poly = 1usize;
         let q = 3usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -1093,7 +1093,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_apply_poisson_matches_spmv_p2_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let poly = 2usize;
         let q = 7usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -1119,7 +1119,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_h1_scalar_ops_bundle_matches_apply_p1_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let poly = 1usize;
         let q = 3usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_cached_h1_scalar_ops_bundle_matches_apply_p2_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let poly = 2usize;
         let q = 7usize;
         let space = H1Space::new(mesh.clone(), poly as u8);
@@ -1205,7 +1205,7 @@ mod tests {
 
     #[test]
     fn fem_ceed_assemble_curl_nd2_rt2_matches_discrete_linear_operator() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let hcurl = HCurlSpace::new(mesh.clone(), 2);
         let hdiv = HDivSpace::new(mesh, 2);
 

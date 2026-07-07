@@ -30,7 +30,7 @@
 use std::collections::HashSet;
 use std::f64::consts::PI;
 
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 
 fn main() {
     let args = parse_args();
@@ -104,7 +104,7 @@ fn parse_args() -> Args {
 }
 
 fn run_tmop_baseline(args: &Args) -> TmopResult {
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mut mesh = Mesh::<2>::unit_square_tri(args.n);
     perturb_interior_nodes(&mut mesh, args.perturb);
 
     let initial = quality_stats(&mesh);
@@ -133,7 +133,7 @@ fn run_tmop_baseline(args: &Args) -> TmopResult {
     }
 }
 
-fn perturb_interior_nodes(mesh: &mut SimplexMesh<2>, amp: f64) {
+fn perturb_interior_nodes(mesh: &mut Mesh<2>, amp: f64) {
     if amp <= 0.0 {
         return;
     }
@@ -151,7 +151,7 @@ fn perturb_interior_nodes(mesh: &mut SimplexMesh<2>, amp: f64) {
     }
 }
 
-fn collect_interior_nodes(mesh: &SimplexMesh<2>) -> Vec<u32> {
+fn collect_interior_nodes(mesh: &Mesh<2>) -> Vec<u32> {
     let mut out = Vec::new();
     let n_nodes = mesh.n_nodes() as u32;
     for node in 0..n_nodes {
@@ -168,13 +168,13 @@ fn is_boundary_xy(x: f64, y: f64) -> bool {
     x <= eps || y <= eps || (1.0 - x) <= eps || (1.0 - y) <= eps
 }
 
-fn set_node_coords(mesh: &mut SimplexMesh<2>, node: u32, xy: [f64; 2]) {
+fn set_node_coords(mesh: &mut Mesh<2>, node: u32, xy: [f64; 2]) {
     let off = node as usize * 2;
     mesh.coords[off] = xy[0];
     mesh.coords[off + 1] = xy[1];
 }
 
-fn build_node_neighbors(mesh: &SimplexMesh<2>) -> Vec<Vec<u32>> {
+fn build_node_neighbors(mesh: &Mesh<2>) -> Vec<Vec<u32>> {
     let n_nodes = mesh.n_nodes();
     let mut sets: Vec<HashSet<u32>> = (0..n_nodes).map(|_| HashSet::new()).collect();
     for e in 0..mesh.n_elements() as u32 {
@@ -193,7 +193,7 @@ fn build_node_neighbors(mesh: &SimplexMesh<2>) -> Vec<Vec<u32>> {
 }
 
 fn smoothing_step_with_backtracking(
-    mesh: &mut SimplexMesh<2>,
+    mesh: &mut Mesh<2>,
     interior: &[u32],
     neighbors: &[Vec<u32>],
     omega: f64,
@@ -241,7 +241,7 @@ fn smoothing_step_with_backtracking(
     false
 }
 
-fn quality_stats(mesh: &SimplexMesh<2>) -> MeshQualityStats {
+fn quality_stats(mesh: &Mesh<2>) -> MeshQualityStats {
     let mut sum_q = 0.0;
     let mut min_q = f64::INFINITY;
     let mut objective = 0.0;

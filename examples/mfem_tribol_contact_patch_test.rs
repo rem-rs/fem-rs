@@ -20,7 +20,7 @@
 //! Fem-rs provides native contact mechanics without external dependencies.
 //! This miniapp demonstrates a 3D contact patch test using the penalty method:
 //!
-//! 1. Tetrahedral mesh of [0,1]³ using `SimplexMesh::unit_cube_tet()`
+//! 1. Tetrahedral mesh of [0,1]³ using `Mesh::unit_cube_tet()`
 //! 2. Linear elasticity with body force pressing the block downward
 //! 3. Dirichlet BC on the top face (tag 2)
 //! 4. Penalty contact on the bottom face (tag 1) against an obstacle
@@ -39,7 +39,7 @@ use fem_assembly::contact::{assemble_contact_3d_vector, ContactConfig, ContactTy
 use fem_assembly::Assembler;
 use fem_assembly::standard::DiffusionIntegrator;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::fe_space::FESpace;
@@ -58,7 +58,7 @@ const TOP: i32 = 2;
 
 // ─── Linear elasticity stiffness ─────────────────────────────────────────────
 
-fn assemble_elasticity(mesh: &SimplexMesh<3>) -> (CsrMatrix<f64>, VectorH1Space) {
+fn assemble_elasticity(mesh: &Mesh<3>) -> (CsrMatrix<f64>, VectorH1Space) {
     let space = VectorH1Space::new(mesh.clone(), 1, 3);
     let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     (stiff, space)
@@ -66,7 +66,7 @@ fn assemble_elasticity(mesh: &SimplexMesh<3>) -> (CsrMatrix<f64>, VectorH1Space)
 
 // ─── Dirichlet BC: fix top face in all directions ────────────────────────────
 
-fn apply_dirichlet_top(stiff: &CsrMatrix<f64>, rhs: &mut [f64], mesh: &SimplexMesh<3>) -> CsrMatrix<f64> {
+fn apply_dirichlet_top(stiff: &CsrMatrix<f64>, rhs: &mut [f64], mesh: &Mesh<3>) -> CsrMatrix<f64> {
     let n_dofs = mesh.n_nodes() as usize * 3;
     let mut is_fixed = vec![false; n_dofs];
 
@@ -96,7 +96,7 @@ fn apply_dirichlet_top(stiff: &CsrMatrix<f64>, rhs: &mut [f64], mesh: &SimplexMe
 
 // ─── Body force ──────────────────────────────────────────────────────────────
 
-fn body_force_rhs(mesh: &SimplexMesh<3>, total_force: f64) -> Vec<f64> {
+fn body_force_rhs(mesh: &Mesh<3>, total_force: f64) -> Vec<f64> {
     let n = mesh.n_nodes() as usize;
     let mut rhs = vec![0.0_f64; n * 3];
     let f = total_force / n as f64;
@@ -117,7 +117,7 @@ struct ContactResult {
 }
 
 fn solve_contact_3d(n: usize, gap_offset: f64, penalty: f64, newton_max: usize, newton_tol: f64) -> ContactResult {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     println!("  Mesh: {} nodes, {} tets", mesh.n_nodes(), mesh.n_elems());
 
     let (stiff, space) = assemble_elasticity(&mesh);
@@ -218,7 +218,7 @@ fn build_tangent(k_bc: &CsrMatrix<f64>, k_contact: &CsrMatrix<f64>) -> CsrMatrix
     coo.into_csr()
 }
 
-fn max_penetration(mesh: &SimplexMesh<3>, u: &[f64], gap_offset: f64) -> f64 {
+fn max_penetration(mesh: &Mesh<3>, u: &[f64], gap_offset: f64) -> f64 {
     let mut max_p = 0.0;
     for f in 0..mesh.n_boundary_faces() as u32 {
         if mesh.face_tag(f) == BOTTOM {
@@ -232,7 +232,7 @@ fn max_penetration(mesh: &SimplexMesh<3>, u: &[f64], gap_offset: f64) -> f64 {
     max_p
 }
 
-fn max_pressure(f_contact: &[f64], mesh: &SimplexMesh<3>) -> f64 {
+fn max_pressure(f_contact: &[f64], mesh: &Mesh<3>) -> f64 {
     let mut max_p = 0.0;
     for f in 0..mesh.n_boundary_faces() as u32 {
         if mesh.face_tag(f) == BOTTOM {
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn cube_mesh_tags_match_convention() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let mut tags = std::collections::HashSet::new();
         for f in 0..mesh.n_boundary_faces() as u32 {
             tags.insert(mesh.face_tag(f));
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn no_contact_when_gap_is_zero_without_force() {
         // With zero body force and zero gap offset, there should be no contact
-        let mesh = SimplexMesh::<3>::unit_cube_tet(3);
+        let mesh = Mesh::<3>::unit_cube_tet(3);
         let (_, space) = assemble_elasticity(&mesh);
         let n_dofs = space.n_dofs();
         let u = vec![0.0; n_dofs];

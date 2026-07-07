@@ -3,7 +3,7 @@
 //! Tests DOF counting, boundary DOF extraction, DOF coordinate access, and
 //! interpolation for H1 spaces.
 
-use fem_mesh::{SimplexMesh};
+use fem_mesh::{Mesh};
 use fem_space::{
     constraints::{apply_dirichlet, boundary_dofs},
     fe_space::FESpace,
@@ -16,7 +16,7 @@ use fem_space::{
 fn h1_p1_dof_count() {
     // P1 on an n×n mesh has (n+1)² DOFs = number of nodes.
     for n in [4usize, 8, 16] {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let expected = (n + 1) * (n + 1);
         let space = H1Space::new(mesh, 1);
         assert_eq!(
@@ -38,8 +38,8 @@ fn h1_p2_dof_count() {
     // = (n+1)^2 + (total edges)
     // We just verify it is larger than P1 and consistent across levels.
     for n in [4usize, 8] {
-        let mesh_p1 = SimplexMesh::<2>::unit_square_tri(n);
-        let mesh_p2 = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh_p1 = Mesh::<2>::unit_square_tri(n);
+        let mesh_p2 = Mesh::<2>::unit_square_tri(n);
         let p1_dofs = H1Space::new(mesh_p1, 1).n_dofs();
         let p2_dofs = H1Space::new(mesh_p2, 2).n_dofs();
         assert!(
@@ -61,7 +61,7 @@ fn h1_p2_dof_count() {
 fn boundary_dofs_all_walls() {
     // Requesting all 4 wall tags should return all boundary nodes.
     let n = 8;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let dm = space.dof_manager();
 
@@ -81,7 +81,7 @@ fn boundary_dofs_all_walls() {
 fn boundary_dofs_single_wall() {
     // Each wall should have n+1 boundary nodes (including corners).
     let n = 8;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let dm = space.dof_manager();
 
@@ -101,7 +101,7 @@ fn boundary_dofs_single_wall() {
 fn boundary_dofs_partial_subset() {
     // Two opposing walls should give fewer DOFs than all four walls.
     let n = 8;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let dm = space.dof_manager();
 
@@ -122,7 +122,7 @@ fn boundary_dofs_partial_subset() {
 fn p1_dof_coords_match_node_coords() {
     // For P1, each DOF corresponds to a mesh node.
     // DOF coordinate returned by dof_manager should equal the mesh node coord.
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let space = H1Space::new(mesh.clone(), 1);
     let dm = space.dof_manager();
     let n_dofs = space.n_dofs();
@@ -144,7 +144,7 @@ fn p1_dof_coords_match_node_coords() {
 #[test]
 fn p1_interpolate_linear_exact() {
     // P1 interpolates linear functions exactly.
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let space = H1Space::new(mesh, 1);
     let v = space.interpolate(&|x| 2.0 * x[0] + 3.0 * x[1]);
     let dm = space.dof_manager();
@@ -164,7 +164,7 @@ fn p1_interpolate_linear_exact() {
 
 #[test]
 fn p1_interpolate_constant_exact() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let space = H1Space::new(mesh, 1);
     let v = space.interpolate(&|_| 7.0);
     let dofs = v.as_slice();
@@ -176,7 +176,7 @@ fn p1_interpolate_constant_exact() {
 #[test]
 fn p2_interpolate_quadratic_exact() {
     // P2 interpolates quadratics exactly.
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let space = H1Space::new(mesh, 2);
     let v = space.interpolate(&|x| x[0] * x[0] + x[1] * x[1]);
     let dm = space.dof_manager();
@@ -202,7 +202,7 @@ fn apply_dirichlet_zeros_rhs_at_boundary() {
     
 
     let n = 4;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let ndofs = space.n_dofs();
     let dm = space.dof_manager();

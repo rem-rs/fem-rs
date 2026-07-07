@@ -4,7 +4,7 @@
 //! Mesh and solution I/O for fem-rs.
 //!
 //! ## Modules
-//! - [`gmsh`]           — GMSH `.msh` v4.1 ASCII/binary reader → `SimplexMesh`
+//! - [`gmsh`]           — GMSH `.msh` v4.1 ASCII/binary reader → `Mesh`
 //! - [`netgen`]         — Netgen `.vol` ASCII reader (Tet4 baseline)
 //! - [`abaqus`]         — Abaqus `.inp` reader (C3D4/C3D8 baseline)
 //! - [`vtk`]            — VTK UnstructuredGrid `.vtu` XML writer

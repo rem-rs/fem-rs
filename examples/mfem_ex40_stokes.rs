@@ -32,7 +32,7 @@ use fem_assembly::{
     standard::VectorDiffusionIntegrator,
 };
 use fem_io::read_msh_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{BlockSystem, SchurComplementSolver, SolverConfig};
 use fem_space::{H1Space, VectorH1Space, fe_space::FESpace, constraints::boundary_dofs};
 
@@ -69,7 +69,7 @@ fn main() {
             let msh = read_msh_file(p).expect("failed to read mesh file");
             msh.into_2d().expect("expected 2D mesh")
         }
-        None => SimplexMesh::<2>::unit_square_tri(args.n),
+        None => Mesh::<2>::unit_square_tri(args.n),
     };
 
     let result = solve_case(mesh, args.nu, args.lid_speed);
@@ -99,7 +99,7 @@ fn main() {
     println!("\nDone.");
 }
 
-fn solve_case(mesh_in: SimplexMesh<2>, nu: f64, lid_speed: f64) -> SolveResult {
+fn solve_case(mesh_in: Mesh<2>, nu: f64, lid_speed: f64) -> SolveResult {
     let mesh_u = mesh_in.clone();
     let mesh_p = mesh_in;
     let n = (mesh_u.n_nodes() as f64).sqrt() as usize - 1;
@@ -266,7 +266,7 @@ mod tests {
     use super::*;
 
     fn solve(n: usize, nu: f64, lid_speed: f64) -> SolveResult {
-        solve_case(SimplexMesh::<2>::unit_square_tri(n), nu, lid_speed)
+        solve_case(Mesh::<2>::unit_square_tri(n), nu, lid_speed)
     }
 
     #[test]

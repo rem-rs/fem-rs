@@ -603,7 +603,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use fem_core::{ElemId, FaceId, NodeId};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[derive(Clone)]
     struct OneQuadMesh {
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn hcurl_dof_count_tri() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         assert_eq!(space.dofs_per_elem, 3);
         // Each triangle has 3 edges, 32 triangles, but edges are shared.
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn hcurl_shared_edge_dof() {
         // 1×1 mesh → 2 triangles sharing the diagonal edge.
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let space = HCurlSpace::new(mesh, 1);
         assert_eq!(space.mesh().n_elements(), 2);
 
@@ -705,7 +705,7 @@ mod tests {
         // and that both elements reference the same global DOF.
         // Note: signs are NOT necessarily opposite — they are both relative
         // to the global edge orientation (min→max vertex ID).
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let space = HCurlSpace::new(mesh, 1);
 
         let dofs0 = space.element_dofs(0);
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn hcurl_space_type() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = HCurlSpace::new(mesh, 1);
         assert_eq!(space.space_type(), SpaceType::HCurl);
     }
@@ -780,7 +780,7 @@ mod tests {
     fn hcurl_interpolate_vector_constant() {
         // Interpolate a constant vector field F = (1, 0).
         // DOF value on each edge = F · tangent = tangent_x.
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let space = HCurlSpace::new(mesh, 1);
         let v = space.interpolate_vector(&|_x| vec![1.0, 0.0]);
         // All DOF values should be finite and within the range of edge lengths.
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn hcurl_nd2_tet_local_dof_layout() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let space = HCurlSpace::new(mesh, 2);
 
         assert_eq!(space.element_dofs(0).len(), 20, "TetND2 should have 20 local DOFs");
@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn hcurl_nd2_tet_global_dof_count_matches_edges_faces() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
 
         let mut edges: HashSet<EdgeKey> = HashSet::new();
         let mut faces: HashSet<FaceKey> = HashSet::new();
@@ -839,14 +839,14 @@ mod tests {
 
     #[test]
     fn hcurl_nd3_tet_dof_count() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let space = HCurlSpace::new(mesh, 3);
         assert_eq!(space.element_dofs(0).len(), 45, "TetND3: k*(k+2)*(k+3)/2 = 45");
     }
 
     #[test]
     fn hcurl_nd3_tri_dof_count() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let space = HCurlSpace::new(mesh, 3);
         assert_eq!(space.dofs_per_elem, 15, "TriND3: k*(k+2) = 15");
     }

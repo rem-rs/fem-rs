@@ -4,7 +4,7 @@
 //! Run: cargo test -p fem-linalg-gpu -- --ignored gpu_mms
 
 use fem_linalg::CsrMatrix;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
@@ -15,7 +15,7 @@ use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
 
 fn cpu_matrix(label: &str, n: usize, integrator: &dyn fem_assembly::BilinearIntegrator, quad: u8) -> CsrMatrix<f64> {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let start = std::time::Instant::now();
     let mat = Assembler::assemble_bilinear(&space, &[integrator], quad);
@@ -70,7 +70,7 @@ fn gpu_vs_cpu_poisson_f64() {
     let n = 8;
     let cpu = cpu_matrix("Poisson", n, &DiffusionIntegrator { kappa: 1.0 }, 3);
     use fem_linalg_gpu::assembly::assemble_poisson_2d_p1_f64;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_tri3_p1(&space);
     let triplets = gpu_matrix_f64("Poisson", n, |gpu| {
@@ -88,7 +88,7 @@ fn gpu_vs_cpu_mass_f64() {
     use fem_assembly::standard::MassIntegrator;
     let cpu = cpu_matrix("Mass", n, &MassIntegrator { rho: 1.0 }, 3);
     use fem_linalg_gpu::assembly::assemble_mass_2d_tri3_f64;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_tri3_p1(&space);
     let triplets = gpu_matrix_f64("Mass", n, |gpu| {
@@ -105,7 +105,7 @@ fn gpu_vs_cpu_elasticity_f64() {
     let n = 8;
     use fem_assembly::standard::VectorDiffusionIntegrator;
     use fem_space::vector_h1::VectorH1Space;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = VectorH1Space::new(mesh, 1, 2);
     let n_dofs = space.n_dofs();
     let start = std::time::Instant::now();
@@ -114,7 +114,7 @@ fn gpu_vs_cpu_elasticity_f64() {
     eprintln!("CPU Elasticity: {:.3}ms, {n_dofs} DOF", start.elapsed().as_secs_f64() * 1e3);
 
     use fem_linalg_gpu::assembly::assemble_elasticity_2d_tri3_f64;
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = VectorH1Space::new(mesh, 1, 2);
     // Extract elasticity element data (3 nodes, 2 DOFs per node = 6 DOFs per element)
     let n_elem = space.mesh().n_elems();
@@ -154,7 +154,7 @@ fn gpu_vs_cpu_elasticity_f64() {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-fn extract_tri3_p1(space: &H1Space<SimplexMesh<2>>) -> (Vec<f64>, Vec<u32>, usize) {
+fn extract_tri3_p1(space: &H1Space<Mesh<2>>) -> (Vec<f64>, Vec<u32>, usize) {
     let mesh = space.mesh();
     let n_elem = mesh.n_elems();
     let mut elem_nodes = Vec::with_capacity(n_elem * 6);
@@ -172,7 +172,7 @@ fn extract_tri3_p1(space: &H1Space<SimplexMesh<2>>) -> (Vec<f64>, Vec<u32>, usiz
 }
 
 /// Extract Tet4 P1 element data: node coords (12 per element) + DOF ids (4 per element).
-fn extract_tet4_p1(space: &H1Space<SimplexMesh<3>>) -> (Vec<f64>, Vec<u32>, usize) {
+fn extract_tet4_p1(space: &H1Space<Mesh<3>>) -> (Vec<f64>, Vec<u32>, usize) {
     let mesh = space.mesh();
     let n_elem = mesh.n_elems();
     let mut elem_nodes = Vec::with_capacity(n_elem * 12);
@@ -195,16 +195,16 @@ fn extract_tet4_p1(space: &H1Space<SimplexMesh<3>>) -> (Vec<f64>, Vec<u32>, usiz
 #[ignore]
 fn gpu_vs_cpu_poisson_tet4_f64() {
     let n = 4;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_assembly::standard::DiffusionIntegrator;
     use fem_assembly::Assembler;
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = H1Space::new(mesh, 1);
     let cpu = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     eprintln!("CPU Poisson Tet4: {} DOF", space.n_dofs());
 
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = H1Space::new(mesh, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_tet4_p1(&space);
 
@@ -234,16 +234,16 @@ fn gpu_vs_cpu_poisson_tet4_f64() {
 #[ignore]
 fn gpu_vs_cpu_mass_tet4_f64() {
     let n = 4;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_assembly::standard::MassIntegrator;
     use fem_assembly::Assembler;
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = H1Space::new(mesh, 1);
     let cpu = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
     eprintln!("CPU Mass Tet4: {} DOF", space.n_dofs());
 
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = H1Space::new(mesh, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_tet4_p1(&space);
 
@@ -273,17 +273,17 @@ fn gpu_vs_cpu_mass_tet4_f64() {
 #[ignore]
 fn gpu_vs_cpu_elasticity_tet4_f64() {
     let n = 3;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::vector_h1::VectorH1Space;
     use fem_assembly::standard::VectorDiffusionIntegrator;
     use fem_assembly::Assembler;
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = VectorH1Space::new(mesh, 1, 3);
     let cpu = Assembler::assemble_bilinear(&space, &[&VectorDiffusionIntegrator { kappa: 1.0 }], 3);
     let n_dofs = cpu.nrows;
     eprintln!("CPU Elasticity Tet4: {} DOF", n_dofs);
 
-    let mesh = SimplexMesh::<3>::unit_cube_tet(n);
+    let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = VectorH1Space::new(mesh, 1, 3);
     let n_elem = space.mesh().n_elems();
     let mut elem_nodes = Vec::with_capacity(n_elem * 12);
@@ -327,7 +327,7 @@ fn gpu_vs_cpu_elasticity_tet4_f64() {
 fn e2e_gpu_assemble_solve_poisson_2d() {
     let n = 8;
     // ── CPU path ───────────────────────────────────────────────────────────
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let dm = fem_space::DofManager::new(&mesh, 1);
     let a_cpu = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
@@ -347,7 +347,7 @@ fn e2e_gpu_assemble_solve_poisson_2d() {
     if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
 
     // 1. GPU assembly via f64 shader
-    let mesh_g = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh_g = Mesh::<2>::unit_square_tri(n);
     let space_g = H1Space::new(mesh_g, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_tri3_p1(&space_g);
 
@@ -387,7 +387,7 @@ fn e2e_gpu_assemble_solve_poisson_2d() {
 // ─── Hex8 end-to-end tests ─────────────────────────────────────────────────
 
 /// Extract Hex8 P1 element data: 8 nodes × 3 coords + 8 DOFs per element.
-fn extract_hex8_p1(space: &H1Space<SimplexMesh<3>>) -> (Vec<f64>, Vec<u32>, usize) {
+fn extract_hex8_p1(space: &H1Space<Mesh<3>>) -> (Vec<f64>, Vec<u32>, usize) {
     let mesh = space.mesh();
     let n_elem = mesh.n_elems();
     let mut elem_nodes = Vec::with_capacity(n_elem * 24);
@@ -408,12 +408,12 @@ fn extract_hex8_p1(space: &H1Space<SimplexMesh<3>>) -> (Vec<f64>, Vec<u32>, usiz
 #[ignore]
 fn gpu_vs_cpu_poisson_hex8_f64() {
     let n = 4;
-    let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+    let mesh = Mesh::<3>::unit_cube_hex(n);
     let space = H1Space::new(mesh, 1);
     let cpu = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     eprintln!("CPU Poisson Hex8: {} DOF", space.n_dofs());
 
-    let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+    let mesh = Mesh::<3>::unit_cube_hex(n);
     let space = H1Space::new(mesh, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_hex8_p1(&space);
 
@@ -444,7 +444,7 @@ fn gpu_vs_cpu_poisson_hex8_f64() {
 fn e2e_hex8_assemble_solve_poisson_f64() {
     let n = 3;
     // ── CPU reference ─────────────────────────────────────────────────────
-    let mesh = SimplexMesh::<3>::unit_cube_hex(n);
+    let mesh = Mesh::<3>::unit_cube_hex(n);
     let space = H1Space::new(mesh.clone(), 1);
     let dm = fem_space::DofManager::new(&mesh, 1);
     let a_cpu = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
@@ -464,7 +464,7 @@ fn e2e_hex8_assemble_solve_poisson_f64() {
     let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
     if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
 
-    let mesh_g = SimplexMesh::<3>::unit_cube_hex(n);
+    let mesh_g = Mesh::<3>::unit_cube_hex(n);
     let space_g = H1Space::new(mesh_g, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_hex8_p1(&space_g);
 

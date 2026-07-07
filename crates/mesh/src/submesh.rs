@@ -9,13 +9,13 @@ use std::collections::{HashMap, HashSet};
 
 use fem_core::{ElemId, NodeId};
 
-use crate::{ElementType, NamedAttributeRegistry, SimplexMesh};
+use crate::{ElementType, NamedAttributeRegistry, Mesh};
 
 /// Submesh view extracted from a parent mesh.
 #[derive(Debug, Clone)]
 pub struct SubMesh {
     /// Extracted mesh.
-    pub mesh: SimplexMesh<2>,
+    pub mesh: Mesh<2>,
     /// Parent element ids corresponding to submesh elements.
     pub parent_elem_ids: Vec<ElemId>,
     /// parent_node_of_sub[sub_node_id] = parent_node_id.
@@ -64,7 +64,7 @@ impl SubMesh {
 /// Extract a submesh containing elements whose tag belongs to `element_tags`.
 ///
 /// Returns node- and element-remapped mesh plus parent mapping vectors.
-pub fn extract_submesh(mesh: &SimplexMesh<2>, element_tags: &[i32]) -> SubMesh {
+pub fn extract_submesh(mesh: &Mesh<2>, element_tags: &[i32]) -> SubMesh {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "extract_submesh: only Tri3 meshes are supported"
@@ -123,7 +123,7 @@ pub fn extract_submesh(mesh: &SimplexMesh<2>, element_tags: &[i32]) -> SubMesh {
         }
     }
 
-    let sub_mesh = SimplexMesh::uniform(
+    let sub_mesh = Mesh::uniform(
         sub_coords,
         sub_conn,
         sub_elem_tags,
@@ -145,7 +145,7 @@ pub fn extract_submesh(mesh: &SimplexMesh<2>, element_tags: &[i32]) -> SubMesh {
 /// The named set is resolved through `registry`, and its element tags are used
 /// as extraction tags.
 pub fn extract_submesh_by_name(
-    mesh: &SimplexMesh<2>,
+    mesh: &Mesh<2>,
     registry: &NamedAttributeRegistry,
     set_name: &str,
 ) -> Result<SubMesh, fem_core::FemError> {
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn extract_submesh_by_tag() {
-        let mut m = SimplexMesh::<2>::unit_square_tri(2);
+        let mut m = Mesh::<2>::unit_square_tri(2);
         // Mark first half with tag 2, second half with tag 3.
         let half = m.n_elems() / 2;
         for (i, t) in m.elem_tags.iter_mut().enumerate() {
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn transfer_parent_sub_parent_roundtrip_on_selected_nodes() {
-        let mut m = SimplexMesh::<2>::unit_square_tri(2);
+        let mut m = Mesh::<2>::unit_square_tri(2);
         for (i, t) in m.elem_tags.iter_mut().enumerate() {
             *t = if i % 2 == 0 { 1 } else { 2 };
         }
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn extract_submesh_by_name_works() {
-        let mut m = SimplexMesh::<2>::unit_square_tri(2);
+        let mut m = Mesh::<2>::unit_square_tri(2);
         for (i, t) in m.elem_tags.iter_mut().enumerate() {
             *t = if i % 2 == 0 { 4 } else { 8 };
         }
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn extract_submesh_by_name_missing_set_errors() {
-        let m = SimplexMesh::<2>::unit_square_tri(1);
+        let m = Mesh::<2>::unit_square_tri(1);
         let reg = NamedAttributeRegistry::new();
         let err = extract_submesh_by_name(&m, &reg, "missing")
             .expect_err("expected missing set error");

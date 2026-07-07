@@ -24,7 +24,7 @@ use fem_examples::template_runner::{
     print_template_header,
     push_partitioned_multirate_cli_help,
 };
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     BuiltinMultiphysicsTemplate,
     MultiRateConfig,
@@ -152,7 +152,7 @@ fn solve_em_thermal_stress_template(args: &Args) -> EmThermalStressResult {
 }
 
 fn solve_em_thermal_stress_template_single_rate(args: &Args) -> EmThermalStressResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 
@@ -252,7 +252,7 @@ fn solve_em_thermal_stress_template_subcycling(args: &Args) -> EmThermalStressRe
         sync_error: f64,
     }
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
     let n_elems = space.mesh().n_elements();
@@ -359,7 +359,7 @@ fn solve_em_thermal_stress_template_subcycling(args: &Args) -> EmThermalStressRe
     }
 }
 
-fn solve_potential(space: &H1Space<SimplexMesh<2>>, sigma_eff: f64, drive: f64) -> Vec<f64> {
+fn solve_potential(space: &H1Space<Mesh<2>>, sigma_eff: f64, drive: f64) -> Vec<f64> {
     let mut a = Assembler::assemble_bilinear(
         space,
         &[&DiffusionIntegrator {
@@ -391,7 +391,7 @@ fn solve_potential(space: &H1Space<SimplexMesh<2>>, sigma_eff: f64, drive: f64) 
 }
 
 fn solve_temperature(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     initial_guess: &[f64],
     q_elem: &[f64],
     kappa: f64,
@@ -425,7 +425,7 @@ fn solve_temperature(
     t
 }
 
-fn integrate_element_scalar(space: &H1Space<SimplexMesh<2>>, elem_values: &[f64]) -> f64 {
+fn integrate_element_scalar(space: &H1Space<Mesh<2>>, elem_values: &[f64]) -> f64 {
     let mesh = space.mesh();
     let mut acc = 0.0_f64;
     for (e, &value) in mesh.elem_iter().zip(elem_values.iter()) {
@@ -434,7 +434,7 @@ fn integrate_element_scalar(space: &H1Space<SimplexMesh<2>>, elem_values: &[f64]
     acc
 }
 
-fn tri_area(mesh: &SimplexMesh<2>, elem: u32) -> f64 {
+fn tri_area(mesh: &Mesh<2>, elem: u32) -> f64 {
     let ns = mesh.elem_nodes(elem);
     let a = mesh.coords_of(ns[0]);
     let b = mesh.coords_of(ns[1]);
@@ -444,7 +444,7 @@ fn tri_area(mesh: &SimplexMesh<2>, elem: u32) -> f64 {
 }
 
 fn sample_piecewise_constant_on_mesh(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     elem_values: &[f64],
     x: &[f64],
 ) -> f64 {

@@ -39,7 +39,7 @@
 use fem_assembly::postproc::postprocess::compute_element_gradients;
 use fem_assembly::{postproc::coefficient::FnCoeff, standard::DiffusionIntegrator, Assembler};
 use fem_io::vtk::{DataArray, VtkWriter};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{solve_gmres, solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     constraints::{apply_dirichlet, boundary_dofs},
@@ -88,7 +88,7 @@ fn main() {
 
     if let Some(ref path) = args.vtk {
         let (_, _, phi, e_field, j_field) = solve_case_with_fields(&args);
-        let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let mesh = Mesh::<2>::unit_square_tri(args.n);
         let space = H1Space::new(mesh, 1);
         let mut writer = VtkWriter::new(space.mesh());
         writer.add_point_data(DataArray {
@@ -128,12 +128,12 @@ fn exact_phi(x: f64, sigma1: f64, sigma2: f64, voltage: f64) -> f64 {
     }
 }
 
-fn solve_case_with_fields(args: &Args) -> (CaseResult, H1Space<SimplexMesh<2>>, Vec<f64>, Vec<f64>, Vec<f64>) {
+fn solve_case_with_fields(args: &Args) -> (CaseResult, H1Space<Mesh<2>>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let sigma1 = args.sigma1;
     let sigma2 = args.sigma2;
 
     // ─── 1. Mesh and H¹ space ────────────────────────────────────────────────
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = H1Space::new(mesh, 1);
     let n = space.n_dofs();
 

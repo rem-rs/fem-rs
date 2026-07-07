@@ -323,12 +323,12 @@ pub fn pa_apply_prism_pk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
 
-    fn make_prism_mesh() -> SimplexMesh<3> {
-        SimplexMesh::<3>::uniform(
+    fn make_prism_mesh() -> Mesh<3> {
+        Mesh::<3>::uniform(
             vec![
                 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
                 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0,

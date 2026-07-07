@@ -1,6 +1,6 @@
 //! Mesh intersection / supermesh construction for 2-D triangular meshes.
 //!
-//! Given two `SimplexMesh<2>` (Tri3) meshes covering the same domain,
+//! Given two `Mesh<2>` (Tri3) meshes covering the same domain,
 //! computes the intersection supermesh: a conforming triangulation where
 //! each element lies entirely within exactly one element from each input mesh.
 //!
@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use fem_core::{ElemId, NodeId};
 use crate::ElementType;
-use crate::SimplexMesh;
+use crate::Mesh;
 
 /// A supermesh element: triangular sub-element of the intersection of
 /// `src_elem` from mesh A and `tgt_elem` from mesh B.
@@ -27,12 +27,12 @@ pub struct SupermeshElement {
 /// Build the supermesh (intersection) of two Tri3 meshes.
 ///
 /// # Returns
-/// `(supermesh, elements)` where `supermesh` is a `SimplexMesh<2>` and
+/// `(supermesh, elements)` where `supermesh` is a `Mesh<2>` and
 /// `elements` lists each triangle with its source/target element indices.
 pub fn build_supermesh(
-    mesh_a: &SimplexMesh<2>,
-    mesh_b: &SimplexMesh<2>,
-) -> (SimplexMesh<2>, Vec<SupermeshElement>) {
+    mesh_a: &Mesh<2>,
+    mesh_b: &Mesh<2>,
+) -> (Mesh<2>, Vec<SupermeshElement>) {
     assert_eq!(mesh_a.elem_type, ElementType::Tri3,
         "build_supermesh: mesh_a must be Tri3");
     assert_eq!(mesh_b.elem_type, ElementType::Tri3,
@@ -86,7 +86,7 @@ pub fn build_supermesh(
         }
     }
 
-    // Build SimplexMesh from collected nodes and elements
+    // Build Mesh from collected nodes and elements
     let n_sup = sup_elems.len();
     let mut conn = Vec::with_capacity(n_sup * 3);
     let mut tags = Vec::with_capacity(n_sup);
@@ -96,7 +96,7 @@ pub fn build_supermesh(
     }
     let coords: Vec<f64> = all_coords.iter().flat_map(|c| { vec![c[0], c[1]] }).collect();
 
-    let mesh = SimplexMesh {
+    let mesh = Mesh {
         coords,
         conn,
         elem_tags: tags,
@@ -117,7 +117,7 @@ pub fn build_supermesh(
 }
 
 /// Build AABBs for all elements in a Tri3 mesh.
-fn build_bboxes(mesh: &SimplexMesh<2>) -> Vec<([f64; 2], [f64; 2])> {
+fn build_bboxes(mesh: &Mesh<2>) -> Vec<([f64; 2], [f64; 2])> {
     let mut bboxes = Vec::with_capacity(mesh.n_elems());
     for e in 0..mesh.n_elems() as ElemId {
         let ns = mesh.elem_nodes(e);
@@ -217,17 +217,17 @@ fn add_node_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SimplexMesh;
+    use crate::Mesh;
 
     #[test]
     fn supermesh_inner_square() {
         // Mesh A: full unit square
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh_a = Mesh::<2>::unit_square_tri(2);
         // Mesh B: inner [0.25,0.75]²
         let coords_b = vec![0.25,0.25, 0.75,0.25, 0.75,0.75, 0.25,0.75];
         let conn_b = vec![0u32,1,2, 0,2,3];
         let tags_b = vec![1i32; 2];
-        let mesh_b = SimplexMesh {
+        let mesh_b = Mesh {
             coords: coords_b, conn: conn_b, elem_tags: tags_b,
             elem_type: ElementType::Tri3, face_conn: vec![], face_tags: vec![],
             face_type: ElementType::Line2, elem_types: None, elem_offsets: None,
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn supermesh_same_mesh() {
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_a = Mesh::<2>::unit_square_tri(4);
         let (super_mesh, _elems) = build_supermesh(&mesh_a, &mesh_a);
         // Same mesh intersection should produce at least as many elements
         assert!(super_mesh.n_elems() >= mesh_a.n_elems(),

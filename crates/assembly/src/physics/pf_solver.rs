@@ -120,7 +120,7 @@ impl PhaseFieldSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, VectorH1Space};
 
     #[test]

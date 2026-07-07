@@ -38,7 +38,7 @@ use fem_assembly::{
 };
 use fem_element::nedelec::TriND1;
 use fem_element::reference::VectorReferenceElement;
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     SolverConfig, solve_cg,
     ode::{Newmark, NewmarkState},
@@ -119,13 +119,13 @@ fn solve_case(args: &Args) -> SolveResult {
 fn assemble_system(
     args: &Args,
 ) -> (
-    HCurlSpace<SimplexMesh<2>>,
+    HCurlSpace<Mesh<2>>,
     Vec<u32>,
     fem_linalg::CsrMatrix<f64>,
     fem_linalg::CsrMatrix<f64>,
     fem_linalg::CsrMatrix<f64>,
 ) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = Mesh::<2>::unit_square_tri(args.n);
     let space = HCurlSpace::new(mesh, 1);
     let n_dof = space.n_dofs();
 
@@ -542,7 +542,7 @@ impl VectorLinearIntegrator for MaxwellTimeForce {
     }
 }
 
-fn assemble_force(space: &HCurlSpace<SimplexMesh<2>>, args: &Args, t: f64) -> Vec<f64> {
+fn assemble_force(space: &HCurlSpace<Mesh<2>>, args: &Args, t: f64) -> Vec<f64> {
     let integ = MaxwellTimeForce {
         t,
         eps: args.eps,
@@ -555,7 +555,7 @@ fn assemble_force(space: &HCurlSpace<SimplexMesh<2>>, args: &Args, t: f64) -> Ve
 
 // ─── Initial velocity: Ė(0) = ω E₀ ─────────────────────────────────────────
 
-fn project_exact_vel_scaled(space: &HCurlSpace<SimplexMesh<2>>, t: f64, source_scale: f64) -> Vec<f64> {
+fn project_exact_vel_scaled(space: &HCurlSpace<Mesh<2>>, t: f64, source_scale: f64) -> Vec<f64> {
     // Ė = ω cos(ωt) E₀  �? at t=0: Ė(0) = ω E₀
     let cos_wt = (OMEGA * t).cos();
     let vel_fn = |x: &[f64]| vec![
@@ -567,7 +567,7 @@ fn project_exact_vel_scaled(space: &HCurlSpace<SimplexMesh<2>>, t: f64, source_s
 
 // ─── L² error ────────────────────────────────────────────────────────────────
 
-fn l2_error_hcurl_scaled(space: &HCurlSpace<SimplexMesh<2>>, uh: &[f64], t: f64, source_scale: f64) -> f64 {
+fn l2_error_hcurl_scaled(space: &HCurlSpace<Mesh<2>>, uh: &[f64], t: f64, source_scale: f64) -> f64 {
     let mesh      = space.mesh();
     let ref_elem  = TriND1;
     let quad      = ref_elem.quadrature(6);

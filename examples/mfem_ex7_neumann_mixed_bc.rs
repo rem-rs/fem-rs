@@ -27,7 +27,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space,
@@ -41,7 +41,7 @@ fn main() {
     println!("=== MFEM Example 7: Screened Poisson (2D adaptation) ===");
 
     // ─── 1. Mesh ─────────────────────────────────────────────────────────────
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         println!("  Mesh file: {path}");
         read_mfem_file(path)
             .expect("failed to read MFEM mesh")
@@ -50,7 +50,7 @@ fn main() {
     } else {
         let n = args.n.unwrap_or(32);
         println!("  Unit-square tri mesh, n = {n}");
-        SimplexMesh::<2>::unit_square_tri(n)
+        Mesh::<2>::unit_square_tri(n)
     };
     println!("  Mesh: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
 
@@ -148,7 +148,7 @@ mod tests {
     use fem_assembly::assembler::face_dofs_p1;
     use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator, NeumannIntegrator};
     use fem_assembly::Assembler;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_solver::{solve_pcg_jacobi, SolverConfig};
     use fem_space::constraints::{apply_dirichlet, boundary_dofs};
     use fem_space::fe_space::FESpace;
@@ -175,7 +175,7 @@ mod tests {
     }
 
     fn solve_mms(n: usize, kappa: f64, solution_scale: f64) -> SolveResult {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, 1);
         let ndofs = space.n_dofs();
 

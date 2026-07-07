@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use fem_core::{NodeId, ElemId};
-use crate::{element_type::ElementType, simplex::SimplexMesh};
+use crate::{element_type::ElementType, simplex::Mesh};
 
 /// Newest-vertex bisection refinement for a 2-D triangle mesh.
 ///
@@ -10,12 +10,12 @@ use crate::{element_type::ElementType, simplex::SimplexMesh};
 /// here to a single conformity pass).
 ///
 /// # Arguments
-/// - `mesh`    — input `SimplexMesh<2>` with `elem_type = Tri3`.
+/// - `mesh`    — input `Mesh<2>` with `elem_type = Tri3`.
 /// - `marked`  — sorted list of element indices to refine.
 ///
 /// # Returns
-/// A new `SimplexMesh<2>` with the refined elements replaced by their children.
-pub fn refine_marked(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2> {
+/// A new `Mesh<2>` with the refined elements replaced by their children.
+pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "refine_marked: only Tri3 meshes are supported"
@@ -137,7 +137,7 @@ pub fn refine_marked(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> SimplexMesh<2>
         }
     }
 
-    SimplexMesh::uniform(
+    Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tri3,
         new_face_conn, new_face_tags, ElementType::Line2,
     )
@@ -172,7 +172,7 @@ impl DerefineTree {
 
 /// Same as [`refine_marked`], but also returns a provenance tree that enables
 /// one-level derefinement through [`derefine_marked`].
-pub fn refine_marked_with_tree(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> (SimplexMesh<2>, DerefineTree) {
+pub fn refine_marked_with_tree(mesh: &Mesh<2>, marked: &[ElemId]) -> (Mesh<2>, DerefineTree) {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "refine_marked_with_tree: only Tri3 meshes are supported"
@@ -287,7 +287,7 @@ pub fn refine_marked_with_tree(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> (Sim
         }
     }
 
-    let fine = SimplexMesh::uniform(
+    let fine = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tri3,
         new_face_conn, new_face_tags, ElementType::Line2,
     );
@@ -300,7 +300,7 @@ pub fn refine_marked_with_tree(mesh: &SimplexMesh<2>, marked: &[ElemId]) -> (Sim
 /// This function expects `mesh` to be the direct output of
 /// [`refine_marked_with_tree`] with no additional refinement/coarsening in
 /// between. It removes the 4 child triangles and restores the parent triangle.
-pub fn derefine_marked(mesh: &SimplexMesh<2>, tree: &DerefineTree, parents: &[ElemId]) -> SimplexMesh<2> {
+pub fn derefine_marked(mesh: &Mesh<2>, tree: &DerefineTree, parents: &[ElemId]) -> Mesh<2> {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "derefine_marked: only Tri3 meshes are supported"
@@ -389,7 +389,7 @@ pub fn derefine_marked(mesh: &SimplexMesh<2>, tree: &DerefineTree, parents: &[El
         }
     }
 
-    SimplexMesh::uniform(
+    Mesh::uniform(
         mesh.coords.clone(),
         new_conn,
         new_tags,
@@ -411,7 +411,7 @@ pub(crate) fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
 }
 
 /// Return the canonical edge key of the longest edge of a Tri3 element.
-fn longest_edge_tri(mesh: &SimplexMesh<2>, ns: &[NodeId]) -> (NodeId, NodeId) {
+fn longest_edge_tri(mesh: &Mesh<2>, ns: &[NodeId]) -> (NodeId, NodeId) {
     let coords: [[f64; 2]; 3] = std::array::from_fn(|k| mesh.coords_of(ns[k]));
     let edges = local_edges_tri();
     let mut best = edge_key(ns[edges[0].0], ns[edges[0].1]);

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use fem_core::NodeId;
 
-use crate::{SimplexMesh, topology::MeshTopology};
+use crate::{Mesh, topology::MeshTopology};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MeshMotionConfig {
@@ -29,7 +29,7 @@ impl Default for MeshMotionConfig {
     }
 }
 
-pub fn boundary_nodes_with_tags(mesh: &SimplexMesh<2>, tags: &[i32]) -> Vec<NodeId> {
+pub fn boundary_nodes_with_tags(mesh: &Mesh<2>, tags: &[i32]) -> Vec<NodeId> {
     let mut out = BTreeSet::<NodeId>::new();
     for f in mesh.face_iter() {
         if tags.contains(&mesh.face_tag(f)) {
@@ -41,7 +41,7 @@ pub fn boundary_nodes_with_tags(mesh: &SimplexMesh<2>, tags: &[i32]) -> Vec<Node
     out.into_iter().collect()
 }
 
-pub fn all_boundary_nodes(mesh: &SimplexMesh<2>) -> Vec<NodeId> {
+pub fn all_boundary_nodes(mesh: &Mesh<2>) -> Vec<NodeId> {
     let mut out = BTreeSet::<NodeId>::new();
     for f in mesh.face_iter() {
         for &n in mesh.face_nodes(f) {
@@ -52,7 +52,7 @@ pub fn all_boundary_nodes(mesh: &SimplexMesh<2>) -> Vec<NodeId> {
 }
 
 pub fn apply_node_displacement<F>(
-    mesh: &mut SimplexMesh<2>,
+    mesh: &mut Mesh<2>,
     nodes: &[NodeId],
     mut displacement: F,
 ) where
@@ -68,7 +68,7 @@ pub fn apply_node_displacement<F>(
 }
 
 pub fn laplacian_smooth_2d(
-    mesh: &mut SimplexMesh<2>,
+    mesh: &mut Mesh<2>,
     fixed_nodes: &[NodeId],
     cfg: MeshMotionConfig,
 ) -> usize {
@@ -129,7 +129,7 @@ pub fn laplacian_smooth_2d(
     cfg.max_iters
 }
 
-fn build_node_neighbors(mesh: &SimplexMesh<2>) -> Vec<Vec<NodeId>> {
+fn build_node_neighbors(mesh: &Mesh<2>) -> Vec<Vec<NodeId>> {
     let mut sets: Vec<BTreeSet<NodeId>> = (0..mesh.n_nodes()).map(|_| BTreeSet::new()).collect();
     for e in 0..mesh.n_elems() as u32 {
         let ns = mesh.elem_nodes(e);
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn boundary_node_collection_is_nonempty() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let b = all_boundary_nodes(&mesh);
         assert!(!b.is_empty());
         let tagged = boundary_nodes_with_tags(&mesh, &[1, 2, 3, 4]);
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn smoothing_moves_interior_with_fixed_boundary() {
-        let mut mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mut mesh = Mesh::<2>::unit_square_tri(8);
         let fixed = all_boundary_nodes(&mesh);
 
         let center = (mesh.n_nodes() as u32) / 2;

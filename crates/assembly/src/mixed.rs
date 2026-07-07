@@ -617,15 +617,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     /// B = ∫ p (∇·u) dx should have the right shape.
     #[test]
     fn mixed_assembler_shape() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         // Create separate owned meshes for each space.
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let vel_space = fem_space::VectorH1Space::new(mesh, 1, 2);
         let pre_space = H1Space::new(mesh2, 1);
         let b = MixedAssembler::assemble_bilinear(
@@ -644,8 +644,8 @@ mod tests {
     fn mixed_volume_parallel_matches_elementwise_reference() {
         use fem_linalg::CooMatrix;
 
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
+        let mesh2 = Mesh::<2>::unit_square_tri(6);
         let vel_space = fem_space::VectorH1Space::new(mesh, 1, 2);
         let pre_space = H1Space::new(mesh2, 1);
         let n_rows = pre_space.n_dofs();
@@ -685,8 +685,8 @@ mod tests {
     #[test]
     fn hdiv_l2_darcy_shape() {
         use fem_space::{HDivSpace, L2Space};
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let vel = HDivSpace::new(mesh, 0);
         let pre = L2Space::new(mesh2, 0);
         let b = assemble_hdiv_l2_mixed(&pre, &vel, &[&HDivL2DivIntegrator], 3);
@@ -699,8 +699,8 @@ mod tests {
     #[test]
     fn hcurl_h1_curl_shape() {
         use fem_space::{HCurlSpace, H1Space};
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let curl_space = HCurlSpace::new(mesh, 1);
         let h1_space = H1Space::new(mesh2, 1);
         let b = assemble_hcurl_h1_mixed(&h1_space, &curl_space, &[&HCurlH1CurlIntegrator], 3);

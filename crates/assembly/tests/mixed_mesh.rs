@@ -14,7 +14,7 @@ use fem_mesh::{
     boundary::BoundaryTag,
     element_type::ElementType,
     topology::MeshTopology,
-    SimplexMesh,
+    Mesh,
 };
 use fem_space::{
     constraints::{apply_dirichlet, boundary_dofs},
@@ -48,7 +48,7 @@ use fem_space::{
 ///   tag 2 (right):  (2,5)
 ///   tag 3 (top):    (5,4), (4,3)
 ///   tag 4 (left):   (3,0)
-fn build_mixed_mesh() -> SimplexMesh<2> {
+fn build_mixed_mesh() -> Mesh<2> {
     // 6 nodes
     #[rustfmt::skip]
     let coords = vec![
@@ -146,7 +146,7 @@ fn build_mixed_mesh() -> SimplexMesh<2> {
     ];
     let face_tags: Vec<BoundaryTag> = vec![1, 1, 2, 3, 3, 4];
 
-    SimplexMesh::<2> {
+    Mesh::<2> {
         coords: coords_final,
         conn,
         elem_tags,

@@ -16,7 +16,7 @@ use std::f64::consts::PI;
 use std::sync::Arc;
 
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     MetisOptions, ParAssembler, ParVector, ParallelFESpace,
     par_simplex::{partition_simplex, partition_simplex_streaming},
@@ -84,7 +84,7 @@ fn main() {
 }
 
 fn run_case(run: RunArgs) -> RunResult {
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(run.mesh_n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(run.mesh_n));
     let result = Arc::new(std::sync::Mutex::new(None::<RunResult>));
     let result_slot = Arc::clone(&result);
 

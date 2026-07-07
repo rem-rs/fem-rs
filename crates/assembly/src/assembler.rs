@@ -1070,12 +1070,12 @@ fn find_edge_dof(elem_nodes: &[u32], elem_dofs: &[DofId], pos_a: usize, pos_b: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, fe_space::FESpace};
 
     #[test]
     fn assemble_bilinear_p1_returns_correct_size() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
         // Diffusion integrator stub (adds nothing) — just test shape.
@@ -1090,7 +1090,7 @@ mod tests {
 
     #[test]
     fn assemble_linear_p1_returns_correct_size() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let n = space.n_dofs();
         struct Zero;

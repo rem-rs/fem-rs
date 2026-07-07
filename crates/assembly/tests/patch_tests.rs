@@ -12,7 +12,7 @@ use fem_assembly::{
     DiscreteLinearOperator,
 };
 use fem_linalg::CsrMatrix;
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace, L2Space, VectorH1Space,
     fe_space::FESpace,
@@ -47,7 +47,7 @@ fn max_abs(v: &[f64]) -> f64 {
 // H¹ Poisson patches
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn h1_patch_2d(mesh: SimplexMesh<2>, order: u8, exact: fn(&[f64]) -> f64, forcing: fn(&[f64]) -> f64, tol: f64) {
+fn h1_patch_2d(mesh: Mesh<2>, order: u8, exact: fn(&[f64]) -> f64, forcing: fn(&[f64]) -> f64, tol: f64) {
     let space = H1Space::new(mesh, order);
     let kappa = DiffusionIntegrator { kappa: 1.0 };
     let source = DomainSourceIntegrator::new(forcing);
@@ -62,20 +62,20 @@ fn h1_patch_2d(mesh: SimplexMesh<2>, order: u8, exact: fn(&[f64]) -> f64, forcin
     assert!(err < tol, "H1 P{order} Poisson patch: max error {err:.2e} > {tol:.0e}");
 }
 
-#[test] fn h1_p1_2d_tri3() { h1_patch_2d(SimplexMesh::<2>::unit_square_tri(4), 1, |x| x[0]+x[1], |_| 0.0, 1e-12); }
-#[test] fn h1_p2_2d_tri6() { h1_patch_2d(SimplexMesh::<2>::unit_square_tri(4), 2, |x| x[0]*x[0]+x[1]*x[1], |_| -4.0, 1e-12); }
-#[test] fn h1_p2_linear_2d_tri6() { h1_patch_2d(SimplexMesh::<2>::unit_square_tri(4), 2, |x| 2.0*x[0]-x[1], |_| 0.0, 1e-12); }
-#[test] fn h1_q1_2d_quad4() { h1_patch_2d(SimplexMesh::<2>::unit_square_quad(4), 1, |x| x[0]+x[1], |_| 0.0, 1e-12); }
-#[test] fn h1_q2_2d_quad8() { h1_patch_2d(SimplexMesh::<2>::unit_square_quad(4), 2, |x| x[0]*x[0]+x[1]*x[1], |_| -4.0, 1e-12); }
-#[test] fn h1_p1_3d_tet4() { h1_patch_2d(SimplexMesh::<2>::unit_square_tri(4), 1, |x| x[0]+x[1], |_| 0.0, 1e-12); } // placeholder: 2D proxy
-#[test] fn h1_p2_3d_tet10() { h1_patch_2d(SimplexMesh::<2>::unit_square_tri(4), 2, |x| x[0]*x[0]+x[1]*x[1], |_| -4.0, 1e-12); } // placeholder
-#[test] fn h1_q1_3d_hex8() { h1_patch_2d(SimplexMesh::<2>::unit_square_quad(4), 1, |x| x[0]+x[1], |_| 0.0, 1e-12); } // placeholder
+#[test] fn h1_p1_2d_tri3() { h1_patch_2d(Mesh::<2>::unit_square_tri(4), 1, |x| x[0]+x[1], |_| 0.0, 1e-12); }
+#[test] fn h1_p2_2d_tri6() { h1_patch_2d(Mesh::<2>::unit_square_tri(4), 2, |x| x[0]*x[0]+x[1]*x[1], |_| -4.0, 1e-12); }
+#[test] fn h1_p2_linear_2d_tri6() { h1_patch_2d(Mesh::<2>::unit_square_tri(4), 2, |x| 2.0*x[0]-x[1], |_| 0.0, 1e-12); }
+#[test] fn h1_q1_2d_quad4() { h1_patch_2d(Mesh::<2>::unit_square_quad(4), 1, |x| x[0]+x[1], |_| 0.0, 1e-12); }
+#[test] fn h1_q2_2d_quad8() { h1_patch_2d(Mesh::<2>::unit_square_quad(4), 2, |x| x[0]*x[0]+x[1]*x[1], |_| -4.0, 1e-12); }
+#[test] fn h1_p1_3d_tet4() { h1_patch_2d(Mesh::<2>::unit_square_tri(4), 1, |x| x[0]+x[1], |_| 0.0, 1e-12); } // placeholder: 2D proxy
+#[test] fn h1_p2_3d_tet10() { h1_patch_2d(Mesh::<2>::unit_square_tri(4), 2, |x| x[0]*x[0]+x[1]*x[1], |_| -4.0, 1e-12); } // placeholder
+#[test] fn h1_q1_3d_hex8() { h1_patch_2d(Mesh::<2>::unit_square_quad(4), 1, |x| x[0]+x[1], |_| 0.0, 1e-12); } // placeholder
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VectorH¹ elasticity patches
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn elasticity_patch_2d(mesh: SimplexMesh<2>, order: u8, exact: fn(&[f64]) -> Vec<f64>, dim: u8, tol: f64) {
+fn elasticity_patch_2d(mesh: Mesh<2>, order: u8, exact: fn(&[f64]) -> Vec<f64>, dim: u8, tol: f64) {
     let space = VectorH1Space::new(mesh, order, dim);
     let n_scalar = space.n_scalar_dofs();
     let elast = ElasticityIntegrator::new(1.0, 1.0);
@@ -106,8 +106,8 @@ fn elasticity_patch_2d(mesh: SimplexMesh<2>, order: u8, exact: fn(&[f64]) -> Vec
     assert!(max_err < tol, "Elasticity P{order} patch: max error {max_err:.2e} > {tol:.0e}");
 }
 
-#[test] fn elast_p1_2d_tri3() { elasticity_patch_2d(SimplexMesh::<2>::unit_square_tri(4), 1, |x| vec![x[0], x[1]], 2, 1e-10); }
-#[test] fn elast_q1_2d_quad4() { elasticity_patch_2d(SimplexMesh::<2>::unit_square_quad(4), 1, |x| vec![x[0], x[1]], 2, 1e-10); }
+#[test] fn elast_p1_2d_tri3() { elasticity_patch_2d(Mesh::<2>::unit_square_tri(4), 1, |x| vec![x[0], x[1]], 2, 1e-10); }
+#[test] fn elast_q1_2d_quad4() { elasticity_patch_2d(Mesh::<2>::unit_square_quad(4), 1, |x| vec![x[0], x[1]], 2, 1e-10); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // H(div) interpolation patches
@@ -120,19 +120,19 @@ fn hdiv_interp<M: MeshTopology>(mesh: M, order: u8, field: fn(&[f64]) -> Vec<f64
     assert!(max_abs(&vec_diff(f.as_slice(), g.as_slice())) < tol, "HDiv RT{order} interpolation");
 }
 
-#[test] fn hdiv_rt0_const_2d() { hdiv_interp(SimplexMesh::<2>::unit_square_tri(4), 0, |_| vec![1.0, 0.0], 1e-12); }
-#[test] fn hdiv_rt0_linear_2d() { hdiv_interp(SimplexMesh::<2>::unit_square_tri(4), 0, |x| vec![x[0], x[1]], 1e-12); }
-#[test] fn hdiv_rt1_linear_2d() { hdiv_interp(SimplexMesh::<2>::unit_square_tri(4), 1, |x| vec![x[0]+x[1], x[0]-x[1]], 1e-12); }
-#[test] fn hdiv_rt1_quadratic_2d() { hdiv_interp(SimplexMesh::<2>::unit_square_tri(4), 1, |x| vec![x[0]*x[0], x[1]*x[1]], 1e-12); }
-#[test] fn hdiv_rt0_const_3d() { hdiv_interp(SimplexMesh::<3>::unit_cube_tet(2), 0, |_| vec![1.0, 0.0, 0.0], 1e-12); }
-#[test] fn hdiv_rt1_linear_3d() { hdiv_interp(SimplexMesh::<3>::unit_cube_tet(2), 1, |x| vec![x[0], x[1], x[2]], 1e-12); }
-#[test] fn hdiv_rt1_quadratic_3d() { hdiv_interp(SimplexMesh::<3>::unit_cube_tet(2), 1, |x| vec![x[0]*x[0], x[1]*x[1], x[2]*x[2]], 1e-12); }
+#[test] fn hdiv_rt0_const_2d() { hdiv_interp(Mesh::<2>::unit_square_tri(4), 0, |_| vec![1.0, 0.0], 1e-12); }
+#[test] fn hdiv_rt0_linear_2d() { hdiv_interp(Mesh::<2>::unit_square_tri(4), 0, |x| vec![x[0], x[1]], 1e-12); }
+#[test] fn hdiv_rt1_linear_2d() { hdiv_interp(Mesh::<2>::unit_square_tri(4), 1, |x| vec![x[0]+x[1], x[0]-x[1]], 1e-12); }
+#[test] fn hdiv_rt1_quadratic_2d() { hdiv_interp(Mesh::<2>::unit_square_tri(4), 1, |x| vec![x[0]*x[0], x[1]*x[1]], 1e-12); }
+#[test] fn hdiv_rt0_const_3d() { hdiv_interp(Mesh::<3>::unit_cube_tet(2), 0, |_| vec![1.0, 0.0, 0.0], 1e-12); }
+#[test] fn hdiv_rt1_linear_3d() { hdiv_interp(Mesh::<3>::unit_cube_tet(2), 1, |x| vec![x[0], x[1], x[2]], 1e-12); }
+#[test] fn hdiv_rt1_quadratic_3d() { hdiv_interp(Mesh::<3>::unit_cube_tet(2), 1, |x| vec![x[0]*x[0], x[1]*x[1], x[2]*x[2]], 1e-12); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Divergence operator patches
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn div_op(mesh: SimplexMesh<2>, hdiv_o: u8, l2_o: u8, field: fn(&[f64]) -> Vec<f64>, div_f: fn(&[f64]) -> f64, tol: f64) {
+fn div_op(mesh: Mesh<2>, hdiv_o: u8, l2_o: u8, field: fn(&[f64]) -> Vec<f64>, div_f: fn(&[f64]) -> f64, tol: f64) {
     let mesh2 = mesh.clone();
     let hdiv = HDivSpace::new(mesh, hdiv_o);
     let l2 = L2Space::new(mesh2, l2_o);
@@ -145,7 +145,7 @@ fn div_op(mesh: SimplexMesh<2>, hdiv_o: u8, l2_o: u8, field: fn(&[f64]) -> Vec<f
     assert!(err < tol, "Div RT{hdiv_o}->P{l2_o}: err={err:.6e} tol={tol:.0e}");
 }
 
-fn div_op_3d(mesh: SimplexMesh<3>, hdiv_o: u8, l2_o: u8, field: fn(&[f64]) -> Vec<f64>, div_f: fn(&[f64]) -> f64, tol: f64) {
+fn div_op_3d(mesh: Mesh<3>, hdiv_o: u8, l2_o: u8, field: fn(&[f64]) -> Vec<f64>, div_f: fn(&[f64]) -> f64, tol: f64) {
     let mesh2 = mesh.clone();
     let hdiv = HDivSpace::new(mesh, hdiv_o);
     let l2 = L2Space::new(mesh2, l2_o);
@@ -159,8 +159,8 @@ fn div_op_3d(mesh: SimplexMesh<3>, hdiv_o: u8, l2_o: u8, field: fn(&[f64]) -> Ve
 }
 
 // Divergence operator: only RT1→P1 2D and RT1→P1 3D linear (already feature-tested in discrete_op.rs).
-#[test] fn div_rt1_p1_2d() { div_op(SimplexMesh::<2>::unit_square_tri(4), 1, 1, |x| vec![x[0]*x[0], x[1]*x[1]], |x| 2.0*x[0]+2.0*x[1], 1e-10); }
-#[test] fn div_rt1_p1_3d() { div_op_3d(SimplexMesh::<3>::unit_cube_tet(2), 1, 1, |x| vec![x[0], x[1], x[2]], |_| 3.0, 1e-8); }
+#[test] fn div_rt1_p1_2d() { div_op(Mesh::<2>::unit_square_tri(4), 1, 1, |x| vec![x[0]*x[0], x[1]*x[1]], |x| 2.0*x[0]+2.0*x[1], 1e-10); }
+#[test] fn div_rt1_p1_3d() { div_op_3d(Mesh::<3>::unit_cube_tet(2), 1, 1, |x| vec![x[0], x[1], x[2]], |_| 3.0, 1e-8); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // H(curl) interpolation patches
@@ -173,19 +173,19 @@ fn hcurl_interp<M: MeshTopology>(mesh: M, order: u8, field: fn(&[f64]) -> Vec<f6
     assert!(max_abs(&vec_diff(f.as_slice(), g.as_slice())) < tol, "HCurl ND{order}");
 }
 
-#[test] fn hcurl_nd1_const_2d() { hcurl_interp(SimplexMesh::<2>::unit_square_tri(4), 1, |_| vec![1.0, 0.0], 1e-12); }
-#[test] fn hcurl_nd1_linear_2d() { hcurl_interp(SimplexMesh::<2>::unit_square_tri(4), 1, |x| vec![x[0], x[1]], 1e-12); }
-#[test] fn hcurl_nd2_linear_2d() { hcurl_interp(SimplexMesh::<2>::unit_square_tri(4), 2, |x| vec![x[0], x[1]], 1e-12); }
-#[test] fn hcurl_nd2_quad_2d() { hcurl_interp(SimplexMesh::<2>::unit_square_tri(4), 2, |x| vec![x[0]*x[1], x[1]*x[1]], 1e-12); }
-#[test] fn hcurl_nd1_const_3d() { hcurl_interp(SimplexMesh::<3>::unit_cube_tet(2), 1, |_| vec![1.0, 0.0, 0.0], 1e-12); }
-#[test] fn hcurl_nd1_linear_3d() { hcurl_interp(SimplexMesh::<3>::unit_cube_tet(2), 1, |x| vec![x[0], x[1], x[2]], 1e-12); }
-#[test] fn hcurl_nd2_quad_3d() { hcurl_interp(SimplexMesh::<3>::unit_cube_tet(2), 2, |x| vec![x[0]*x[1], x[1]*x[2], x[2]*x[0]], 1e-12); }
+#[test] fn hcurl_nd1_const_2d() { hcurl_interp(Mesh::<2>::unit_square_tri(4), 1, |_| vec![1.0, 0.0], 1e-12); }
+#[test] fn hcurl_nd1_linear_2d() { hcurl_interp(Mesh::<2>::unit_square_tri(4), 1, |x| vec![x[0], x[1]], 1e-12); }
+#[test] fn hcurl_nd2_linear_2d() { hcurl_interp(Mesh::<2>::unit_square_tri(4), 2, |x| vec![x[0], x[1]], 1e-12); }
+#[test] fn hcurl_nd2_quad_2d() { hcurl_interp(Mesh::<2>::unit_square_tri(4), 2, |x| vec![x[0]*x[1], x[1]*x[1]], 1e-12); }
+#[test] fn hcurl_nd1_const_3d() { hcurl_interp(Mesh::<3>::unit_cube_tet(2), 1, |_| vec![1.0, 0.0, 0.0], 1e-12); }
+#[test] fn hcurl_nd1_linear_3d() { hcurl_interp(Mesh::<3>::unit_cube_tet(2), 1, |x| vec![x[0], x[1], x[2]], 1e-12); }
+#[test] fn hcurl_nd2_quad_3d() { hcurl_interp(Mesh::<3>::unit_cube_tet(2), 2, |x| vec![x[0]*x[1], x[1]*x[2], x[2]*x[0]], 1e-12); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 2D curl operator patches
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn curl2d(mesh: SimplexMesh<2>, mesh2: SimplexMesh<2>, hco: u8, l2o: u8, field: fn(&[f64]) -> Vec<f64>, curl_f: fn(&[f64]) -> f64, tol: f64) {
+fn curl2d(mesh: Mesh<2>, mesh2: Mesh<2>, hco: u8, l2o: u8, field: fn(&[f64]) -> Vec<f64>, curl_f: fn(&[f64]) -> f64, tol: f64) {
     let hcurl = HCurlSpace::new(mesh, hco);
     let l2 = L2Space::new(mesh2, l2o);
     let c = DiscreteLinearOperator::curl_2d(&hcurl, &l2).unwrap();
@@ -196,14 +196,14 @@ fn curl2d(mesh: SimplexMesh<2>, mesh2: SimplexMesh<2>, hco: u8, l2o: u8, field: 
     assert!(max_abs(&vec_diff(&cf, ci.as_slice())) < tol, "Curl ND{hco}->P{l2o}");
 }
 
-#[test] fn curl_nd1_p0_2d() { curl2d(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 1, 0, |x| vec![x[0], x[1]], |_| 0.0, 1e-12); }
-#[test] fn curl_nd2_p1_2d() { curl2d(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 2, 1, |x| vec![x[0]*x[1], x[1]*x[1]], |x| -x[0], 1e-10); }
+#[test] fn curl_nd1_p0_2d() { curl2d(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 1, 0, |x| vec![x[0], x[1]], |_| 0.0, 1e-12); }
+#[test] fn curl_nd2_p1_2d() { curl2d(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 2, 1, |x| vec![x[0]*x[1], x[1]*x[1]], |x| -x[0], 1e-10); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 3D curl operator patches
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn curl3d(mesh: SimplexMesh<3>, mesh2: SimplexMesh<3>, hco: u8, hdo: u8, field: fn(&[f64]) -> Vec<f64>, curl_f: fn(&[f64]) -> Vec<f64>, tol: f64) {
+fn curl3d(mesh: Mesh<3>, mesh2: Mesh<3>, hco: u8, hdo: u8, field: fn(&[f64]) -> Vec<f64>, curl_f: fn(&[f64]) -> Vec<f64>, tol: f64) {
     let hcurl = HCurlSpace::new(mesh, hco);
     let hdiv = HDivSpace::new(mesh2, hdo);
     let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
@@ -214,14 +214,14 @@ fn curl3d(mesh: SimplexMesh<3>, mesh2: SimplexMesh<3>, hco: u8, hdo: u8, field: 
     assert!(max_abs(&vec_diff(&cf, ci.as_slice())) < tol, "3D Curl ND{hco}->RT{hdo}");
 }
 
-#[test] fn curl_nd1_rt0_3d() { curl3d(SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), 1, 0, |x| vec![x[0], x[1], x[2]], |_| vec![0.0, 0.0, 0.0], 1e-12); }
-#[test] fn curl_nd2_rt1_3d() { curl3d(SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), 2, 1, |x| vec![x[0]*x[1], x[1]*x[2], x[2]*x[0]], |x| vec![-x[1], -x[2], -x[0]], 0.025); }
+#[test] fn curl_nd1_rt0_3d() { curl3d(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 1, 0, |x| vec![x[0], x[1], x[2]], |_| vec![0.0, 0.0, 0.0], 1e-12); }
+#[test] fn curl_nd2_rt1_3d() { curl3d(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 2, 1, |x| vec![x[0]*x[1], x[1]*x[2], x[2]*x[0]], |x| vec![-x[1], -x[2], -x[0]], 0.025); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Gradient operator patches
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn grad_op(mesh: SimplexMesh<2>, mesh2: SimplexMesh<2>, h1o: u8, hco: u8, pot: fn(&[f64]) -> f64, grad: fn(&[f64]) -> Vec<f64>, tol: f64) {
+fn grad_op(mesh: Mesh<2>, mesh2: Mesh<2>, h1o: u8, hco: u8, pot: fn(&[f64]) -> f64, grad: fn(&[f64]) -> Vec<f64>, tol: f64) {
     let h1 = H1Space::new(mesh, h1o);
     let hcurl = HCurlSpace::new(mesh2, hco);
     let g = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
@@ -233,7 +233,7 @@ fn grad_op(mesh: SimplexMesh<2>, mesh2: SimplexMesh<2>, h1o: u8, hco: u8, pot: f
 }
 
 #[allow(dead_code)]
-fn grad_op_3d(mesh: SimplexMesh<3>, mesh2: SimplexMesh<3>, h1o: u8, hco: u8, pot: fn(&[f64]) -> f64, grad: fn(&[f64]) -> Vec<f64>, tol: f64) {
+fn grad_op_3d(mesh: Mesh<3>, mesh2: Mesh<3>, h1o: u8, hco: u8, pot: fn(&[f64]) -> f64, grad: fn(&[f64]) -> Vec<f64>, tol: f64) {
     let h1 = H1Space::new(mesh, h1o);
     let hcurl = HCurlSpace::new(mesh2, hco);
     let g = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
@@ -244,14 +244,14 @@ fn grad_op_3d(mesh: SimplexMesh<3>, mesh2: SimplexMesh<3>, h1o: u8, hco: u8, pot
     assert!(max_abs(&vec_diff(&gu, gi.as_slice())) < tol, "Grad P{h1o}->ND{hco}");
 }
 
-#[test] fn grad_p1_nd1_2d() { grad_op(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 1, 1, |x| x[0]+2.0*x[1], |_| vec![1.0, 2.0], 1e-12); }
-#[test] fn grad_p2_nd2_2d() { grad_op(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 2, 2, |x| x[0]*x[0]+2.0*x[0]*x[1], |x| vec![2.0*x[0]+2.0*x[1], 2.0*x[0]], 1e-10); }
+#[test] fn grad_p1_nd1_2d() { grad_op(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 1, 1, |x| x[0]+2.0*x[1], |_| vec![1.0, 2.0], 1e-12); }
+#[test] fn grad_p2_nd2_2d() { grad_op(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 2, 2, |x| x[0]*x[0]+2.0*x[0]*x[1], |x| vec![2.0*x[0]+2.0*x[1], 2.0*x[0]], 1e-10); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // de Rham complex patches
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn derham_curl_grad(mesh: SimplexMesh<2>, mesh2: SimplexMesh<2>, mesh3: SimplexMesh<2>, h1o: u8, hco: u8, l2o: u8, pot: fn(&[f64]) -> f64, tol: f64) {
+fn derham_curl_grad(mesh: Mesh<2>, mesh2: Mesh<2>, mesh3: Mesh<2>, h1o: u8, hco: u8, l2o: u8, pot: fn(&[f64]) -> f64, tol: f64) {
     let h1 = H1Space::new(mesh, h1o);
     let hcurl = HCurlSpace::new(mesh2, hco);
     let l2 = L2Space::new(mesh3, l2o);
@@ -265,10 +265,10 @@ fn derham_curl_grad(mesh: SimplexMesh<2>, mesh2: SimplexMesh<2>, mesh3: SimplexM
     assert!(max_abs(&cgu) < tol, "de Rham curl(grad) P{h1o}->ND{hco}");
 }
 
-#[test] fn derham_p1_nd1_p0_2d() { derham_curl_grad(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 1, 1, 0, |x| x[0]*x[0]+x[1]*x[1], 1e-12); }
-#[test] fn derham_p2_nd2_p1_2d() { derham_curl_grad(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 2, 2, 1, |x| x[0]*x[0]+x[0]*x[1]+x[1]*x[1], 1e-12); }
+#[test] fn derham_p1_nd1_p0_2d() { derham_curl_grad(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 1, 1, 0, |x| x[0]*x[0]+x[1]*x[1], 1e-12); }
+#[test] fn derham_p2_nd2_p1_2d() { derham_curl_grad(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 2, 2, 1, |x| x[0]*x[0]+x[0]*x[1]+x[1]*x[1], 1e-12); }
 
-fn derham_div_curl(mesh: SimplexMesh<3>, mesh2: SimplexMesh<3>, mesh3: SimplexMesh<3>, mesh4: SimplexMesh<3>, hco: u8, hdo: u8, l2o: u8, tol: f64) {
+fn derham_div_curl(mesh: Mesh<3>, mesh2: Mesh<3>, mesh3: Mesh<3>, mesh4: Mesh<3>, hco: u8, hdo: u8, l2o: u8, tol: f64) {
     let hcurl = HCurlSpace::new(mesh, hco);
     let hdiv = HDivSpace::new(mesh2, hdo);
     let hdiv2 = HDivSpace::new(mesh3, hdo);
@@ -289,8 +289,8 @@ fn derham_div_curl(mesh: SimplexMesh<3>, mesh2: SimplexMesh<3>, mesh3: SimplexMe
     assert!(max_abs(&dcu) < tol, "de Rham div(curl) 3D ND{hco}->RT{hdo}->P{l2o}");
 }
 
-#[test] fn derham_nd1_rt0_p0_3d() { derham_div_curl(SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), 1, 0, 0, 1e-12); }
-#[test] fn derham_nd2_rt1_p1_3d() { derham_div_curl(SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), 2, 1, 1, 1e-8); }
+#[test] fn derham_nd1_rt0_p0_3d() { derham_div_curl(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 1, 0, 0, 1e-12); }
+#[test] fn derham_nd2_rt1_p1_3d() { derham_div_curl(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 2, 1, 1, 1e-8); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // L2 interpolation patches
@@ -302,34 +302,34 @@ fn l2_interp<M: MeshTopology>(mesh: M, order: u8, exact: fn(&[f64]) -> f64, tol:
     let g = l2.interpolate(&exact);
     assert!(max_abs(&vec_diff(f.as_slice(), g.as_slice())) < tol, "L2 P{order}");
 }
-#[test] fn l2_p0_2d() { l2_interp(SimplexMesh::<2>::unit_square_tri(4), 0, |_| 3.0, 1e-12); }
-#[test] fn l2_p1_2d() { l2_interp(SimplexMesh::<2>::unit_square_tri(4), 1, |x| x[0]+x[1], 1e-12); }
-#[test] fn l2_p2_2d() { l2_interp(SimplexMesh::<2>::unit_square_tri(4), 2, |x| x[0]*x[0]+x[1]*x[1], 1e-12); }
-#[test] fn l2_p0_3d() { l2_interp(SimplexMesh::<3>::unit_cube_tet(2), 0, |_| 3.0, 1e-12); }
-#[test] fn l2_p1_3d() { l2_interp(SimplexMesh::<3>::unit_cube_tet(2), 1, |x| x[0]+x[1]+x[2], 1e-12); }
-#[test] fn l2_p2_3d() { l2_interp(SimplexMesh::<3>::unit_cube_tet(2), 2, |x| x[0]*x[0]+x[1]*x[1]+x[2]*x[2], 1e-12); }
+#[test] fn l2_p0_2d() { l2_interp(Mesh::<2>::unit_square_tri(4), 0, |_| 3.0, 1e-12); }
+#[test] fn l2_p1_2d() { l2_interp(Mesh::<2>::unit_square_tri(4), 1, |x| x[0]+x[1], 1e-12); }
+#[test] fn l2_p2_2d() { l2_interp(Mesh::<2>::unit_square_tri(4), 2, |x| x[0]*x[0]+x[1]*x[1], 1e-12); }
+#[test] fn l2_p0_3d() { l2_interp(Mesh::<3>::unit_cube_tet(2), 0, |_| 3.0, 1e-12); }
+#[test] fn l2_p1_3d() { l2_interp(Mesh::<3>::unit_cube_tet(2), 1, |x| x[0]+x[1]+x[2], 1e-12); }
+#[test] fn l2_p2_3d() { l2_interp(Mesh::<3>::unit_cube_tet(2), 2, |x| x[0]*x[0]+x[1]*x[1]+x[2]*x[2], 1e-12); }
 
 // H1 Poisson extra fields for Quad4/Quad8
-#[test] fn h1_q1_2d_quad4_lin2() { h1_patch_2d(SimplexMesh::<2>::unit_square_quad(4), 1, |x| 2.0*x[0]-3.0*x[1], |_| 0.0, 1e-12); }
-#[test] fn h1_q2_2d_quad8_lin2() { h1_patch_2d(SimplexMesh::<2>::unit_square_quad(4), 2, |x| 2.0*x[0]-3.0*x[1], |_| 0.0, 1e-12); }
+#[test] fn h1_q1_2d_quad4_lin2() { h1_patch_2d(Mesh::<2>::unit_square_quad(4), 1, |x| 2.0*x[0]-3.0*x[1], |_| 0.0, 1e-12); }
+#[test] fn h1_q2_2d_quad8_lin2() { h1_patch_2d(Mesh::<2>::unit_square_quad(4), 2, |x| 2.0*x[0]-3.0*x[1], |_| 0.0, 1e-12); }
 
 // HCurl extra tests
-#[test] fn hcurl_nd2_const_2d() { hcurl_interp(SimplexMesh::<2>::unit_square_tri(4), 2, |_| vec![1.0, 0.0], 1e-12); }
-#[test] fn hcurl_nd1_grad_3d() { hcurl_interp(SimplexMesh::<3>::unit_cube_tet(2), 1, |x| vec![x[0], x[1], x[2]], 1e-12); }
+#[test] fn hcurl_nd2_const_2d() { hcurl_interp(Mesh::<2>::unit_square_tri(4), 2, |_| vec![1.0, 0.0], 1e-12); }
+#[test] fn hcurl_nd1_grad_3d() { hcurl_interp(Mesh::<3>::unit_cube_tet(2), 1, |x| vec![x[0], x[1], x[2]], 1e-12); }
 
 // HDiv extra tests
-#[test] fn hdiv_rt1_const_2d() { hdiv_interp(SimplexMesh::<2>::unit_square_tri(4), 1, |_| vec![1.0, 0.0], 1e-12); }
+#[test] fn hdiv_rt1_const_2d() { hdiv_interp(Mesh::<2>::unit_square_tri(4), 1, |_| vec![1.0, 0.0], 1e-12); }
 
 // L2 extra field tests
-#[test] fn l2_p1_2d_lin2() { l2_interp(SimplexMesh::<2>::unit_square_tri(4), 1, |x| 2.0*x[0]+3.0*x[1], 1e-12); }
-#[test] fn l2_p0_2d_quad() { l2_interp(SimplexMesh::<2>::unit_square_quad(4), 0, |_| 5.0, 1e-12); }
-#[test] fn l2_p2_3d_quad2() { l2_interp(SimplexMesh::<3>::unit_cube_tet(2), 2, |x| x[0]*x[0]+2.0*x[1]*x[1]+3.0*x[2]*x[2], 1e-12); }
+#[test] fn l2_p1_2d_lin2() { l2_interp(Mesh::<2>::unit_square_tri(4), 1, |x| 2.0*x[0]+3.0*x[1], 1e-12); }
+#[test] fn l2_p0_2d_quad() { l2_interp(Mesh::<2>::unit_square_quad(4), 0, |_| 5.0, 1e-12); }
+#[test] fn l2_p2_3d_quad2() { l2_interp(Mesh::<3>::unit_cube_tet(2), 2, |x| x[0]*x[0]+2.0*x[1]*x[1]+3.0*x[2]*x[2], 1e-12); }
 
 // de Rham extra: uses separate meshes like existing tests
 
 // Gradient extra
-#[test] fn grad_p1_nd1_2d_q() { grad_op(SimplexMesh::<2>::unit_square_quad(4), SimplexMesh::<2>::unit_square_quad(4), 1, 1, |x| x[0]+2.0*x[1], |_| vec![1.0, 2.0], 1e-10); }
-#[test] fn hdiv_rt1_linear_2d_q() { hdiv_interp(SimplexMesh::<2>::unit_square_quad(4), 1, |x| vec![x[0]+x[1], x[0]-x[1]], 1e-12); }
+#[test] fn grad_p1_nd1_2d_q() { grad_op(Mesh::<2>::unit_square_quad(4), Mesh::<2>::unit_square_quad(4), 1, 1, |x| x[0]+2.0*x[1], |_| vec![1.0, 2.0], 1e-10); }
+#[test] fn hdiv_rt1_linear_2d_q() { hdiv_interp(Mesh::<2>::unit_square_quad(4), 1, |x| vec![x[0]+x[1], x[0]-x[1]], 1e-12); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Additional element-level tests (reach ≥60)
@@ -338,27 +338,27 @@ fn l2_interp<M: MeshTopology>(mesh: M, order: u8, exact: fn(&[f64]) -> f64, tol:
 // H1 P3 Poisson on Tri6/P3-compatible mesh: P3 not supported on all meshes, skip.
 
 // H1 more field variants
-#[test] fn h1_p1_2d_lin_3x() { h1_patch_2d(SimplexMesh::<2>::unit_square_tri(4), 1, |x| 3.0*x[0]-x[1], |_| 0.0, 1e-12); }
+#[test] fn h1_p1_2d_lin_3x() { h1_patch_2d(Mesh::<2>::unit_square_tri(4), 1, |x| 3.0*x[0]-x[1], |_| 0.0, 1e-12); }
 
 // HCurl ND2 more fields
-#[test] fn hcurl_nd2_mixed_2d() { hcurl_interp(SimplexMesh::<2>::unit_square_tri(4), 2, |x| vec![x[0]*x[0], x[0]*x[1]], 1e-12); }
+#[test] fn hcurl_nd2_mixed_2d() { hcurl_interp(Mesh::<2>::unit_square_tri(4), 2, |x| vec![x[0]*x[0], x[0]*x[1]], 1e-12); }
 
 // HDiv more variants
-#[test] fn hdiv_rt0_const_y_2d() { hdiv_interp(SimplexMesh::<2>::unit_square_tri(4), 0, |_| vec![0.0, 1.0], 1e-12); }
-#[test] fn hdiv_rt1_const_3d() { hdiv_interp(SimplexMesh::<3>::unit_cube_tet(2), 1, |_| vec![0.0, 1.0, 0.0], 1e-12); }
+#[test] fn hdiv_rt0_const_y_2d() { hdiv_interp(Mesh::<2>::unit_square_tri(4), 0, |_| vec![0.0, 1.0], 1e-12); }
+#[test] fn hdiv_rt1_const_3d() { hdiv_interp(Mesh::<3>::unit_cube_tet(2), 1, |_| vec![0.0, 1.0, 0.0], 1e-12); }
 
 // Curl 2D extra fields: P0 curl is topological (exact), skip additional.
 // Curl 2D extra — ND2→P1 with new field
-#[test] fn curl_nd2_p1_2d_quad() { curl2d(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 2, 1, |x| vec![x[0]*x[0], x[0]*x[1]], |x| x[1], 1e-10); }
+#[test] fn curl_nd2_p1_2d_quad() { curl2d(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 2, 1, |x| vec![x[0]*x[0], x[0]*x[1]], |x| x[1], 1e-10); }
 
 // Curl 3D more fields (ND1→RT0 topological, exact)
-#[test] fn curl_nd1_rt0_3d_lin() { curl3d(SimplexMesh::<3>::unit_cube_tet(2), SimplexMesh::<3>::unit_cube_tet(2), 1, 0, |x| vec![x[0], 0.0, 0.0], |_| vec![0.0, 0.0, 0.0], 1e-12); }
+#[test] fn curl_nd1_rt0_3d_lin() { curl3d(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 1, 0, |x| vec![x[0], 0.0, 0.0], |_| vec![0.0, 0.0, 0.0], 1e-12); }
 
 // de Rham more variants
-#[test] fn derham_p1_nd1_p0_2d_x2y2() { derham_curl_grad(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 1, 1, 0, |x| 2.0*x[0]*x[0]+x[1]*x[1], 1e-12); }
+#[test] fn derham_p1_nd1_p0_2d_x2y2() { derham_curl_grad(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 1, 1, 0, |x| 2.0*x[0]*x[0]+x[1]*x[1], 1e-12); }
 
 // Gradient more fields
-#[test] fn grad_p1_nd1_2d_lin2() { grad_op(SimplexMesh::<2>::unit_square_tri(4), SimplexMesh::<2>::unit_square_tri(4), 1, 1, |x| 3.0*x[0]-2.0*x[1], |_| vec![3.0, -2.0], 1e-12); }
+#[test] fn grad_p1_nd1_2d_lin2() { grad_op(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 1, 1, |x| 3.0*x[0]-2.0*x[1], |_| vec![3.0, -2.0], 1e-12); }
 
 // Total: ≥60 tests (Phase 1.2 minimum met)
 // Next addition for more coverage: NC mesh, curved mesh, hex ND2/NDk tests.

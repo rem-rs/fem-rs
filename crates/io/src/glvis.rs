@@ -9,17 +9,17 @@
 //! # Usage
 //! ```no_run
 //! use fem_io::glvis::GlVisSocket;
-//! use fem_mesh::SimplexMesh;
+//! use fem_mesh::Mesh;
 //!
 //! // 2-D
-//! let mesh2 = SimplexMesh::<2>::unit_square_tri(8);
+//! let mesh2 = Mesh::<2>::unit_square_tri(8);
 //! let sol2 = vec![0.5; mesh2.n_nodes()];
 //! let mut vis = GlVisSocket::connect("localhost", 19916).unwrap();
 //! vis.send_solution_2d(&mesh2, &sol2, "u").unwrap();
 //! println!("GLVis: {}", vis.recv_response_line().unwrap());
 //!
 //! // 3-D
-//! let mesh3 = SimplexMesh::<3>::unit_cube_tet(4);
+//! let mesh3 = Mesh::<3>::unit_cube_tet(4);
 //! let sol3 = vec![0.5; mesh3.n_nodes()];
 //! vis.send_solution_3d(&mesh3, &sol3, "u").unwrap();
 //! ```
@@ -27,7 +27,7 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 
-use fem_mesh::simplex::SimplexMesh;
+use fem_mesh::simplex::Mesh;
 
 /// A TCP connection to a GLVis server.
 pub struct GlVisSocket {
@@ -70,7 +70,7 @@ impl GlVisSocket {
 
     /// Convenience: send a 2-D solution followed by GLVis commands.
     pub fn send_solution_2d_with_cmd(
-        &mut self, mesh: &SimplexMesh<2>,
+        &mut self, mesh: &Mesh<2>,
         scalar_field: &[f64], field_name: &str,
         commands: &[&str],
     ) -> io::Result<()> {
@@ -81,7 +81,7 @@ impl GlVisSocket {
 
     /// Convenience: send a 3-D solution followed by GLVis commands.
     pub fn send_solution_3d_with_cmd(
-        &mut self, mesh: &SimplexMesh<3>,
+        &mut self, mesh: &Mesh<3>,
         scalar_field: &[f64], field_name: &str,
         commands: &[&str],
     ) -> io::Result<()> {
@@ -95,7 +95,7 @@ impl GlVisSocket {
     /// Send a 2-D scalar solution to GLVis.
     pub fn send_solution_2d(
         &mut self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         scalar_field: &[f64],
         field_name: &str,
     ) -> io::Result<()> {
@@ -108,7 +108,7 @@ impl GlVisSocket {
     /// Send a 2-D vector solution to GLVis.
     pub fn send_solution_2d_vector(
         &mut self,
-        mesh: &SimplexMesh<2>,
+        mesh: &Mesh<2>,
         field_x: &[f64],
         field_y: &[f64],
         field_name: &str,
@@ -124,7 +124,7 @@ impl GlVisSocket {
     /// Send a 3-D scalar solution to GLVis.
     pub fn send_solution_3d(
         &mut self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         scalar_field: &[f64],
         field_name: &str,
     ) -> io::Result<()> {
@@ -137,7 +137,7 @@ impl GlVisSocket {
     /// Send a 3-D vector solution to GLVis.
     pub fn send_solution_3d_vector(
         &mut self,
-        mesh: &SimplexMesh<3>,
+        mesh: &Mesh<3>,
         field_x: &[f64],
         field_y: &[f64],
         field_z: &[f64],
@@ -162,7 +162,7 @@ impl GlVisSocket {
 // VTK legacy format serializers — 2D
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn write_vtk_mesh_2d(w: &mut dyn Write, mesh: &SimplexMesh<2>) -> io::Result<()> {
+fn write_vtk_mesh_2d(w: &mut dyn Write, mesh: &Mesh<2>) -> io::Result<()> {
     let nn = mesh.n_nodes();
     let ne = mesh.n_elems();
 
@@ -196,7 +196,7 @@ fn write_vtk_mesh_2d(w: &mut dyn Write, mesh: &SimplexMesh<2>) -> io::Result<()>
     Ok(())
 }
 
-fn cell_type_vtk_2d(mesh: &SimplexMesh<2>, elem: u32) -> u8 {
+fn cell_type_vtk_2d(mesh: &Mesh<2>, elem: u32) -> u8 {
     match mesh.elem_nodes(elem).len() {
         3 => 5,  // VTK_TRIANGLE
         6 => 22, // VTK_QUADRATIC_TRIANGLE
@@ -211,7 +211,7 @@ fn cell_type_vtk_2d(mesh: &SimplexMesh<2>, elem: u32) -> u8 {
 // VTK legacy format serializers — 3D
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn write_vtk_mesh_3d(w: &mut dyn Write, mesh: &SimplexMesh<3>) -> io::Result<()> {
+fn write_vtk_mesh_3d(w: &mut dyn Write, mesh: &Mesh<3>) -> io::Result<()> {
     let nn = mesh.n_nodes();
     let ne = mesh.n_elems();
 
@@ -245,7 +245,7 @@ fn write_vtk_mesh_3d(w: &mut dyn Write, mesh: &SimplexMesh<3>) -> io::Result<()>
     Ok(())
 }
 
-fn cell_type_vtk_3d(mesh: &SimplexMesh<3>, elem: u32) -> u8 {
+fn cell_type_vtk_3d(mesh: &Mesh<3>, elem: u32) -> u8 {
     match mesh.elem_nodes(elem).len() {
         4 => 10, // VTK_TETRA
         10 => 24, // VTK_QUADRATIC_TETRA
@@ -340,7 +340,7 @@ impl GlVisSocket {
     /// for high-order fields.
     pub fn send_native_solution<const D: usize>(
         &mut self,
-        mesh: &SimplexMesh<D>,
+        mesh: &Mesh<D>,
         scalar_field: &[f64],
         _field_name: &str,
         order: u32,
@@ -406,7 +406,7 @@ impl GlVisSocket {
 /// Write a GLVis native binary solution to any `Write` sink (for testing).
 pub fn write_native_solution_bin<const D: usize>(
     w: &mut dyn Write,
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     scalar_field: &[f64],
     order: u32,
     refines: u32,
@@ -465,7 +465,7 @@ mod tests {
     /// VTK legacy format smoke test: serialise a 2-D mesh + scalar.
     #[test]
     fn glvis_format_2d_scalar() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let sol = vec![1.0_f64; mesh.n_nodes()];
         let mut buf = Vec::new();
         writeln!(buf, "solution").unwrap();
@@ -481,7 +481,7 @@ mod tests {
     /// VTK legacy format smoke test: serialise a 3-D mesh + scalar.
     #[test]
     fn glvis_format_3d_scalar() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let sol = vec![1.0_f64; mesh.n_nodes()];
         let mut buf = Vec::new();
         writeln!(buf, "solution").unwrap();
@@ -503,7 +503,7 @@ mod tests {
     /// VTK legacy format: 3-D mesh + vector field.
     #[test]
     fn glvis_format_3d_vector() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1); // single tet for simpler output
+        let mesh = Mesh::<3>::unit_cube_tet(1); // single tet for simpler output
         let fx = vec![0.0_f64; mesh.n_nodes()];
         let fy = vec![1.0_f64; mesh.n_nodes()];
         let fz = vec![2.0_f64; mesh.n_nodes()];
@@ -523,7 +523,7 @@ mod tests {
     /// Verify backward compatibility: old public method still works.
     #[test]
     fn glvis_backward_compat_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let sol = vec![0.5_f64; mesh.n_nodes()];
         // Simulate a local connection on a dummy socket for format check.
         let mut buf = Vec::new();
@@ -566,7 +566,7 @@ mod tests {
     /// Native binary protocol smoke test: verify binary output structure for Tet4 mesh.
     #[test]
     fn glvis_native_binary_structured_check() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let sol = vec![1.0f64; mesh.n_nodes()];
         let mut buf = Vec::new();
         write_native_solution_bin(&mut buf, &mesh, &sol, 1, 1).unwrap();
@@ -587,9 +587,9 @@ mod tests {
     /// Native binary P2 triangle smoke test.
     #[test]
     fn glvis_native_binary_tri6() {
-        use fem_mesh::SimplexMesh;
+        use fem_mesh::Mesh;
         // Create a P2 mesh (Tri6) using curved 2D refinement
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let sol = vec![0.5f64; mesh.n_nodes()];
         let mut buf = Vec::new();
         write_native_solution_bin(&mut buf, &mesh, &sol, 2, 2).unwrap();

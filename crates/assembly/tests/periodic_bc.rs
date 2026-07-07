@@ -16,7 +16,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2}};
-use fem_mesh::{topology::MeshTopology, SimplexMesh};
+use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_mesh::amr::HangingNodeConstraint;
 use fem_space::{
     H1Space,
@@ -94,7 +94,7 @@ fn dense_solve(mat: &fem_linalg::CsrMatrix<f64>, rhs: &[f64]) -> Vec<f64> {
 /// Solve −Δu = f on unit square, periodic in x (left↔right), Dirichlet in y (top/bottom).
 /// Returns the L2 error against the exact solution.
 fn solve_periodic_poisson(n: usize, order: u8) -> f64 {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), order);
 
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -151,7 +151,7 @@ fn solve_periodic_poisson(n: usize, order: u8) -> f64 {
 #[test]
 fn periodic_pairs_count_p1() {
     let n = 8_usize;
-    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh  = Mesh::<2>::unit_square_tri(n);
     let dm    = fem_space::DofManager::new(&mesh, 1);
     let offset = [-1.0_f64, 0.0];
     // master=left (tag 4), slave=right (tag 2)
@@ -167,7 +167,7 @@ fn periodic_pairs_count_p1() {
 /// Verify periodicity is symmetric: swapping master/slave with negated offset gives same count.
 #[test]
 fn periodic_pairs_symmetric() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(4);
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let dm   = fem_space::DofManager::new(&mesh, 1);
     // master=left(4), slave=right(2), slave+offset -> master: right + [-1,0] = left
     let pairs_lr = identify_periodic_dof_pairs(&mesh, &dm, 4, 2, &[-1.0_f64, 0.0], 1e-10);

@@ -19,7 +19,7 @@ use fem_assembly::{
     NewtonConfig,
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{refine_uniform, SimplexMesh};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_space::VectorH1Space;
 use fem_space::constraints::boundary_dofs;
 use fem_space::fe_space::FESpace;
@@ -33,11 +33,11 @@ fn main() {
     println!("  Order: {}, refine: {}, mu: {}", args.order, args.refine, args.mu);
 
     // 1. Load or generate mesh
-    let base_mesh: SimplexMesh<2> = if !args.mesh.is_empty() {
+    let base_mesh: Mesh<2> = if !args.mesh.is_empty() {
         let mfem = read_mfem_file(&args.mesh).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(8)
+        Mesh::<2>::unit_square_tri(8)
     };
     let mesh = if args.refine > 0 {
         let mut m = base_mesh;
@@ -145,12 +145,12 @@ mod tests {
         nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel},
         NewtonConfig, NonlinearForm,
     };
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{VectorH1Space, FESpace};
 
     #[test]
     fn smoke() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let ns = space.n_scalar_dofs();
         let dm = space.scalar_dof_manager();

@@ -291,7 +291,7 @@ pub fn assemble_br2<S: FESpace + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{fe_space::FESpace, L2Space};
 
     fn assemble_laplacian_br2<M: fem_mesh::topology::MeshTopology + Sync>(
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn br2_matrix_symmetric_2d() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_laplacian_br2(&space, 1.0, 3.0);
         let n = mat.nrows.min(100);
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn br2_matrix_symmetric_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_laplacian_br2(&space, 1.0, 4.0);
         let n = mat.nrows.min(100);
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn br2_laplacian_constant_solution_zero_rhs_2d() {
         // u = 1 → Δu = 0 → matrix-vector product should be near-zero.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_laplacian_br2(&space, 1.0, 3.0);
         let u: Vec<f64> = vec![1.0; space.n_dofs()];
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn br2_laplacian_constant_solution_zero_rhs_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_laplacian_br2(&space, 1.0, 4.0);
         let u: Vec<f64> = vec![1.0; space.n_dofs()];
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn br2_linear_solution_in_kernel_2d() {
         // u = x+y is in the kernel of the BR2 operator on an affine mesh.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let n = space.n_dofs();
         let mat = assemble_laplacian_br2(&space, 1.0, 3.0);
@@ -407,7 +407,7 @@ mod tests {
     fn br2_matrix_positive_semidefinite_2d() {
         // The BR2 matrix should be positive semi-definite:
         // u^T A u >= 0 for all u, and = 0 only for constants.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_laplacian_br2(&space, 1.0, 3.0);
 
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn br2_matrix_positive_semidefinite_3d() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let space = L2Space::new(mesh, 1);
         let mat = assemble_laplacian_br2(&space, 1.0, 4.0);
 

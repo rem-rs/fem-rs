@@ -1936,7 +1936,7 @@ fn simplex_det<M: MeshTopology>(mesh: &M, geo_nodes: &[u32]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     /// Test: Discrete gradient of a linear function u = x + 2y.
     ///
@@ -1945,9 +1945,9 @@ mod tests {
     /// into H(curl) via its DOF functional.
     #[test]
     fn gradient_of_linear_function() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh2, 1);
 
         // Interpolate u = x + 2y into H1
@@ -1976,11 +1976,11 @@ mod tests {
     /// Build G (H1 -> H(curl)) and C (H(curl) -> L2), then verify C * G = 0.
     #[test]
     fn de_rham_curl_of_grad_is_zero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh2, 1);
-        let mesh3 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh3 = Mesh::<2>::unit_square_tri(4);
         let l2 = L2Space::new(mesh3, 0);
 
         let g = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
@@ -2015,9 +2015,9 @@ mod tests {
     /// For the field F = (x, y), div(F) = 2.
     #[test]
     fn divergence_constant_field() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let hdiv = HDivSpace::new(mesh, 0);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2 = L2Space::new(mesh2, 0);
 
         let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
@@ -2048,13 +2048,13 @@ mod tests {
     /// Test: Matrix dimensions are correct.
     #[test]
     fn matrix_dimensions() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh2, 1);
-        let mesh3 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh3 = Mesh::<2>::unit_square_tri(4);
         let hdiv = HDivSpace::new(mesh3, 0);
-        let mesh4 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh4 = Mesh::<2>::unit_square_tri(4);
         let l2 = L2Space::new(mesh4, 0);
 
         let g = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
@@ -2073,9 +2073,9 @@ mod tests {
     /// Test: gradient is nonzero for non-constant functions, zero for constants.
     #[test]
     fn gradient_nonzero_for_nonconst() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh2, 1);
 
         let g = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
@@ -2100,10 +2100,10 @@ mod tests {
     /// Test: de Rham exact sequence in 3D — div(curl(u)) = 0.
     #[test]
     fn de_rham_div_of_curl_3d_is_zero() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh4 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = Mesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
+        let mesh3 = Mesh::<3>::unit_cube_tet(2);
+        let mesh4 = Mesh::<3>::unit_cube_tet(2);
 
         let hcurl = HCurlSpace::new(mesh,  1);
         let hdiv  = HDivSpace::new(mesh2, 0);
@@ -2134,10 +2134,10 @@ mod tests {
     /// Test: order-2 3D de Rham property div(curl(u)) = 0 for ND2->RT1->P1.
     #[test]
     fn de_rham_div_of_curl_3d_is_zero_order2() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh4 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
+        let mesh3 = Mesh::<3>::unit_cube_tet(2);
+        let mesh4 = Mesh::<3>::unit_cube_tet(2);
 
         let hcurl = HCurlSpace::new(mesh, 2);
         let hdiv = HDivSpace::new(mesh2, 1);
@@ -2167,8 +2167,8 @@ mod tests {
     /// Test: curl_3d matrix dimensions.
     #[test]
     fn curl_3d_dimensions() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = Mesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let hcurl = HCurlSpace::new(mesh,  1);
         let hdiv  = HDivSpace::new(mesh2, 0);
         let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
@@ -2180,8 +2180,8 @@ mod tests {
     /// Test: Curl ND2->RT1 matrix dimensions in 3D.
     #[test]
     fn curl_3d_nd2_rt1_dimensions() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let hcurl = HCurlSpace::new(mesh, 2);
         let hdiv = HDivSpace::new(mesh2, 1);
 
@@ -2194,8 +2194,8 @@ mod tests {
     /// Test: Curl ND2->RT1 in 3D — commuting property.
     #[test]
     fn curl_3d_nd2_rt1_commutes_with_interpolation() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let hcurl = HCurlSpace::new(mesh, 2);
         let hdiv = HDivSpace::new(mesh2, 1);
 
@@ -2220,8 +2220,8 @@ mod tests {
     /// Test: Curl ND2->RT1 in 3D — randomized commuting stress test.
     #[test]
     fn curl_3d_nd2_rt1_commuting_randomized_stress() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let hcurl = HCurlSpace::new(mesh, 2);
         let hdiv = HDivSpace::new(mesh2, 1);
 
@@ -2286,9 +2286,9 @@ mod tests {
     /// H1 P2 (order 2) + ND1 (order 1): ND1 is unsupported for H1 order 2.
     #[test]
     fn gradient_bad_order_returns_error() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let h1 = H1Space::new(mesh, 2); // P2
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh2 = Mesh::<2>::unit_square_tri(2);
         let hcurl = HCurlSpace::new(mesh2, 1); // ND1
 
         let result = DiscreteLinearOperator::gradient(&h1, &hcurl);
@@ -2301,9 +2301,9 @@ mod tests {
     /// Test: curl_2d with wrong dimension returns an error.
     #[test]
     fn curl_2d_wrong_dim_returns_error() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh = Mesh::<3>::unit_cube_tet(1);
         let hcurl = HCurlSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh2 = Mesh::<3>::unit_cube_tet(1);
         let l2 = L2Space::new(mesh2, 0);
 
         let result = DiscreteLinearOperator::curl_2d(&hcurl, &l2);
@@ -2316,9 +2316,9 @@ mod tests {
     /// Test: curl_2d supports ND2->L2(P2) with expected dimensions.
     #[test]
     fn curl_2d_nd2_p2_dimensions() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let hcurl = HCurlSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh2 = Mesh::<2>::unit_square_tri(2);
         let l2 = L2Space::new(mesh2, 2);
 
         let c = DiscreteLinearOperator::curl_2d(&hcurl, &l2).unwrap();
@@ -2330,9 +2330,9 @@ mod tests {
     /// Test: curl_3d with wrong dimension returns an error.
     #[test]
     fn curl_3d_wrong_dim_returns_error() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let hcurl = HCurlSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh2 = Mesh::<2>::unit_square_tri(2);
         let hdiv = HDivSpace::new(mesh2, 0);
 
         let result = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv);
@@ -2345,9 +2345,9 @@ mod tests {
     /// Test: divergence supports RT1->L2(P2) with expected dimensions.
     #[test]
     fn divergence_rt1_p2_dimensions() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let hdiv = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh2 = Mesh::<2>::unit_square_tri(2);
         let l2 = L2Space::new(mesh2, 2);
 
         let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
@@ -2366,9 +2366,9 @@ mod tests {
     /// We verify this for u = x² + 2xy (a quadratic function).
     #[test]
     fn gradient_p2_nd2_commutes_with_interpolation() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let h1    = H1Space::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh2, 2);
 
         // u = x² + 2xy,  ∇u = (2x + 2y,  2x)
@@ -2394,9 +2394,9 @@ mod tests {
     /// Test: Gradient P2→ND2 — dimensions are correct.
     #[test]
     fn gradient_p2_nd2_dimensions() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh  = Mesh::<2>::unit_square_tri(3);
         let h1    = H1Space::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh2 = Mesh::<2>::unit_square_tri(3);
         let hcurl = HCurlSpace::new(mesh2, 2);
 
         let g = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
@@ -2408,9 +2408,9 @@ mod tests {
     /// Test: Gradient P2→ND2 — constant function has zero gradient.
     #[test]
     fn gradient_p2_nd2_constant_is_zero() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh  = Mesh::<2>::unit_square_tri(3);
         let h1    = H1Space::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh2 = Mesh::<2>::unit_square_tri(3);
         let hcurl = HCurlSpace::new(mesh2, 2);
 
         let u = h1.interpolate(&|_x| 3.0);
@@ -2425,9 +2425,9 @@ mod tests {
     /// Test: Curl 2D rejects incompatible order pairs.
     #[test]
     fn curl_2d_incompatible_orders_returns_error() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh  = Mesh::<2>::unit_square_tri(2);
         let hcurl = HCurlSpace::new(mesh, 2); // ND2
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh2 = Mesh::<2>::unit_square_tri(2);
         let l2    = L2Space::new(mesh2, 0); // P0 (mismatch for ND2)
 
         let result = DiscreteLinearOperator::curl_2d(&hcurl, &l2);
@@ -2440,9 +2440,9 @@ mod tests {
     /// Test: Curl ND2->P1 matrix dimensions.
     #[test]
     fn curl_2d_nd2_p1_dimensions() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh  = Mesh::<2>::unit_square_tri(3);
         let hcurl = HCurlSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh2 = Mesh::<2>::unit_square_tri(3);
         let l2    = L2Space::new(mesh2, 1);
 
         let c = DiscreteLinearOperator::curl_2d(&hcurl, &l2).unwrap();
@@ -2454,11 +2454,11 @@ mod tests {
     /// Test: order-2 2D de Rham property curl(grad(u)) = 0.
     #[test]
     fn de_rham_curl_of_grad_is_zero_order2() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let h1    = H1Space::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh2, 2);
-        let mesh3 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh3 = Mesh::<2>::unit_square_tri(4);
         let l2    = L2Space::new(mesh3, 1);
 
         let g = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
@@ -2478,9 +2478,9 @@ mod tests {
     /// Test: ND2->P1 curl of a curl-free field is zero.
     #[test]
     fn curl_2d_nd2_p1_curl_free_field_is_zero() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2    = L2Space::new(mesh2, 1);
 
         let c = DiscreteLinearOperator::curl_2d(&hcurl, &l2).unwrap();
@@ -2497,9 +2497,9 @@ mod tests {
     /// Test: ND2->P1 curl of F=(-y, x) equals constant 2.
     #[test]
     fn curl_2d_nd2_p1_constant_curl_field() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2    = L2Space::new(mesh2, 1);
 
         let c = DiscreteLinearOperator::curl_2d(&hcurl, &l2).unwrap();
@@ -2519,9 +2519,9 @@ mod tests {
     /// Test: ND2->P2 curl commutes with interpolation.
     #[test]
     fn curl_2d_nd2_p2_commutes_with_interpolation() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2    = L2Space::new(mesh2, 2);
 
         let c = DiscreteLinearOperator::curl_2d(&hcurl, &l2).unwrap();
@@ -2541,9 +2541,9 @@ mod tests {
     /// Gradient P2→ND1: unsupported HCurl order returns error.
     #[test]
     fn gradient_incompatible_orders_returns_error() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh  = Mesh::<2>::unit_square_tri(2);
         let h1    = H1Space::new(mesh, 2); // P2
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh2 = Mesh::<2>::unit_square_tri(2);
         let hcurl = HCurlSpace::new(mesh2, 1); // ND1
 
         let result = DiscreteLinearOperator::gradient(&h1, &hcurl);
@@ -2561,9 +2561,9 @@ mod tests {
     /// div(x², xy) = 2x + x = 3x.  Since P1 can represent 3x, this works.
     #[test]
     fn divergence_rt1_p1_commutes_with_interpolation() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2    = L2Space::new(mesh2, 1);
 
         // F = (x, y),  div F = 2 (constant — lies in P0 ⊂ P1)
@@ -2589,9 +2589,9 @@ mod tests {
     /// Test: Divergence RT1->P2 commutes with interpolation.
     #[test]
     fn divergence_rt1_p2_commutes_with_interpolation() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2    = L2Space::new(mesh2, 2);
 
         // F = (x^2, y^2), so div F = 2x + 2y.
@@ -2615,9 +2615,9 @@ mod tests {
     /// Test: divergence supports RT2→L2(P2) on 2D meshes (matrix shape).
     #[test]
     fn divergence_rt2_p2_dimensions() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh = Mesh::<2>::unit_square_tri(2);
         let hdiv = HDivSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh2 = Mesh::<2>::unit_square_tri(2);
         let l2 = L2Space::new(mesh2, 2);
 
         let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
@@ -2629,9 +2629,9 @@ mod tests {
     /// Test: Divergence RT2→P2 — commuting diagram for a linear field (exact in RT2 / P2).
     #[test]
     fn divergence_rt2_p2_commutes_with_interpolation() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let hdiv = HDivSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2 = L2Space::new(mesh2, 2);
 
         // F = (x, y), div F = 2 (constant — exact in RT2 and P2).
@@ -2654,9 +2654,9 @@ mod tests {
     /// Test: Divergence RT2→P2 — divergence-free field gives zero.
     #[test]
     fn divergence_rt2_p2_div_free_field_is_zero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let hdiv = HDivSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2 = L2Space::new(mesh2, 2);
 
         let f = hdiv.interpolate_vector(&|x| vec![-x[1], x[0]]);
@@ -2674,9 +2674,9 @@ mod tests {
     /// Test: `curl_2d_hdiv` rejects 3-D meshes.
     #[test]
     fn curl_2d_hdiv_wrong_dim_returns_error() {
-        let mesh = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh = Mesh::<3>::unit_cube_tet(2);
         let hcurl = HCurlSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let hdiv = HDivSpace::new(mesh2, 1);
 
         let r = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv);
@@ -2689,7 +2689,7 @@ mod tests {
     /// Test: ND1→RT0 `curl_2d_hdiv` matrix dimensions.
     #[test]
     fn curl_2d_nd1_rt0_dimensions() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         let hdiv = HDivSpace::new(mesh, 0);
         let c = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv).unwrap();
@@ -2701,9 +2701,9 @@ mod tests {
     /// Test: ND2→RT2 `curl_2d_hdiv` matrix dimensions.
     #[test]
     fn curl_2d_nd2_rt2_dimensions() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let hcurl = HCurlSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh2 = Mesh::<2>::unit_square_tri(3);
         let hdiv = HDivSpace::new(mesh2, 2);
 
         let c = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv).unwrap();
@@ -2718,9 +2718,9 @@ mod tests {
     /// guards against gross assembly errors on multi-triangle meshes.
     #[test]
     fn curl_2d_nd2_rt2_curl_free_radial_field_bounded() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let hcurl = HCurlSpace::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let hdiv = HDivSpace::new(mesh2, 2);
 
         let c = DiscreteLinearOperator::curl_2d_hdiv(&hcurl, &hdiv).unwrap();
@@ -2738,7 +2738,7 @@ mod tests {
     /// ND2→RT2: discrete `C*G*u` for a quadratic potential stays small (continuum curl(grad u)=0).
     #[test]
     fn de_rham_curl_grad_nd2_rt2_bounded() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let h1 = H1Space::new(mesh.clone(), 2);
         let hcurl = HCurlSpace::new(mesh.clone(), 2);
         let hdiv = HDivSpace::new(mesh, 2);
@@ -2762,9 +2762,9 @@ mod tests {
     /// Test: Divergence RT1→P1 — dimensions are correct.
     #[test]
     fn divergence_rt1_p1_dimensions() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh  = Mesh::<2>::unit_square_tri(3);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh2 = Mesh::<2>::unit_square_tri(3);
         let l2    = L2Space::new(mesh2, 1);
 
         let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
@@ -2776,9 +2776,9 @@ mod tests {
     /// Test: Divergence RT1→P1 — divergence-free field gives zero.
     #[test]
     fn divergence_rt1_p1_div_free_field_is_zero() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2    = L2Space::new(mesh2, 1);
 
         // F = (-y, x) is div-free
@@ -2794,9 +2794,9 @@ mod tests {
     /// Test: Divergence RT1->P1 in 3D — dimensions are correct.
     #[test]
     fn divergence_rt1_p1_3d_dimensions() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = Mesh::<3>::unit_cube_tet(2);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let l2    = L2Space::new(mesh2, 1);
 
         let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
@@ -2808,9 +2808,9 @@ mod tests {
     /// Test: Divergence RT1->P1 in 3D — commuting property for F=(x,y,z).
     #[test]
     fn divergence_rt1_p1_3d_commutes_with_interpolation() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = Mesh::<3>::unit_cube_tet(2);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let l2    = L2Space::new(mesh2, 1);
 
         let f = hdiv.interpolate_vector(&|x| vec![x[0], x[1], x[2]]);
@@ -2829,9 +2829,9 @@ mod tests {
     /// Test: Divergence RT1->P2 in 3D — dimensions are correct.
     #[test]
     fn divergence_rt1_p2_3d_dimensions() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = Mesh::<3>::unit_cube_tet(2);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let l2    = L2Space::new(mesh2, 2);
 
         let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
@@ -2843,9 +2843,9 @@ mod tests {
     /// Test: Divergence RT1->P2 in 3D — commuting property for F=(x,y,z).
     #[test]
     fn divergence_rt1_p2_3d_commutes_with_interpolation() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = Mesh::<3>::unit_cube_tet(2);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let l2    = L2Space::new(mesh2, 2);
 
         // F = (x,y,z), div F = 3.
@@ -2864,9 +2864,9 @@ mod tests {
     /// Test: Divergence RT1->P2 in 3D — randomized commuting stress test.
     #[test]
     fn divergence_rt1_p2_3d_commuting_randomized_stress() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = Mesh::<3>::unit_cube_tet(2);
         let hdiv  = HDivSpace::new(mesh, 1);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
         let l2    = L2Space::new(mesh2, 2);
 
         let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
@@ -2919,10 +2919,10 @@ mod tests {
     /// Test: order-2 3D de Rham property with L2(P2) target — div(curl(u)) = 0.
     #[test]
     fn de_rham_div_of_curl_3d_is_zero_order2_l2_p2() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(2);
-        let mesh4 = SimplexMesh::<3>::unit_cube_tet(2);
+        let mesh  = Mesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
+        let mesh3 = Mesh::<3>::unit_cube_tet(2);
+        let mesh4 = Mesh::<3>::unit_cube_tet(2);
 
         let hcurl = HCurlSpace::new(mesh,  2);
         let hdiv  = HDivSpace::new(mesh2, 1);
@@ -2958,9 +2958,9 @@ mod tests {
     #[test]
     #[ignore] // Disabled - curl_3d is placeholder
     fn debug_curl_3d_single_element() {
-        let mesh  = SimplexMesh::<3>::unit_cube_tet(1);
-        let mesh2 = SimplexMesh::<3>::unit_cube_tet(1);
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh  = Mesh::<3>::unit_cube_tet(1);
+        let mesh2 = Mesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let hcurl = HCurlSpace::new(mesh,  1);
         let hdiv  = HDivSpace::new(mesh2, 0);
         let l2    = L2Space::new(mesh3,  0);

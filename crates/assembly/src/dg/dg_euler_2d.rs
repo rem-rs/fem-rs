@@ -441,7 +441,7 @@ fn build_interior_faces(mesh: &dyn MeshTopology) -> Vec<(u32, u32, Vec<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     #[test]
     fn euler_flux_consistency() {
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn dg_euler_2d_finite() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let dg = DgEuler2D::new(mesh);
         let u = dg.project_initial(&|_x, _y| (1.0, 0.5, 0.0, 1.0));
         let du = dg.rhs(&u);

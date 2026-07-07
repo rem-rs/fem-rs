@@ -55,7 +55,7 @@ use fem_assembly::{
 use fem_element::nedelec::TriND1;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::CsrMatrix;
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{EigenResult, LobpcgConfig, SolveResult, SolverConfig, lobpcg_constrained_preconditioned, solve_cg_operator, solve_pcg_jacobi};
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space, constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl}, fe_space::FESpace};
 use nalgebra::DMatrix;
@@ -140,7 +140,7 @@ pub struct HcurlMatrixFreeOperator2D {
 
 impl HcurlMatrixFreeOperator2D {
     pub fn new(
-        hcurl: &HCurlSpace<SimplexMesh<2>>,
+        hcurl: &HCurlSpace<Mesh<2>>,
         mu: f64,
         alpha: f64,
         quad_order: u8,
@@ -296,7 +296,7 @@ fn boundary_admittance(epsilon: f64, mu: f64) -> f64 {
 }
 
 pub struct StaticMaxwellProblem {
-    space: HCurlSpace<SimplexMesh<2>>,
+    space: HCurlSpace<Mesh<2>>,
     mat: CsrMatrix<f64>,
     rhs: Vec<f64>,
     boundary: HcurlBoundaryConfig,
@@ -304,18 +304,18 @@ pub struct StaticMaxwellProblem {
 }
 
 pub struct StaticMaxwellSolveOutput {
-    pub space: HCurlSpace<SimplexMesh<2>>,
+    pub space: HCurlSpace<Mesh<2>>,
     pub solution: Vec<f64>,
     pub solve_result: SolveResult,
     pub boundary_report: BoundaryApplyReport,
 }
 
-/// Fluent builder for 2-D ND1 static Maxwell (curl-curl + mass) on [`SimplexMesh<2>`].
+/// Fluent builder for 2-D ND1 static Maxwell (curl-curl + mass) on [`Mesh<2>`].
 ///
 /// Prefer `add_*_on` with [`BoundarySelection`] when using markers; `add_*_from_marker` is sugar
 /// for [`BoundarySelection::Marker`]. Every `add_*` method delegates to [`HcurlBoundaryConfig`].
 pub struct StaticMaxwellBuilder {
-    space: HCurlSpace<SimplexMesh<2>>,
+    space: HCurlSpace<Mesh<2>>,
     quad_order: u8,
     volume_model: StaticMaxwellVolumeModel,
     source: Option<Box<VectorSourceFn>>,
@@ -637,7 +637,7 @@ impl HcurlBoundaryConfig {
 
     pub fn apply(
         &self,
-        space: &HCurlSpace<SimplexMesh<2>>,
+        space: &HCurlSpace<Mesh<2>>,
         mat: &mut CsrMatrix<f64>,
         rhs: &mut Vec<f64>,
         quad_order: u8,
@@ -689,7 +689,7 @@ pub fn marker_to_tags(boundary_attributes: &[i32], marker: &[i32]) -> Vec<i32> {
 
 /// Return free HCurl DOFs by excluding boundary DOFs selected by marker.
 pub fn free_hcurl_dofs_from_marker(
-    space: &HCurlSpace<SimplexMesh<2>>,
+    space: &HCurlSpace<Mesh<2>>,
     boundary_attributes: &[i32],
     marker: &[i32],
 ) -> Vec<usize> {
@@ -706,7 +706,7 @@ pub fn free_hcurl_dofs_from_marker(
 
 /// Return free H1 DOFs by excluding boundary DOFs selected by marker.
 pub fn free_h1_dofs_from_marker(
-    space: &H1Space<SimplexMesh<2>>,
+    space: &H1Space<Mesh<2>>,
     boundary_attributes: &[i32],
     marker: &[i32],
 ) -> Vec<usize> {
@@ -806,8 +806,8 @@ pub fn csr_to_dense_matrix(mat: &CsrMatrix<f64>) -> DMatrix<f64> {
 /// Returns free DOF lists and the dense constraint matrix obtained from the
 /// discrete gradient restricted to free HCurl/H1 DOFs.
 pub fn build_hcurl_constraint_subspace_from_marker(
-    h1: &H1Space<SimplexMesh<2>>,
-    hcurl: &HCurlSpace<SimplexMesh<2>>,
+    h1: &H1Space<Mesh<2>>,
+    hcurl: &HCurlSpace<Mesh<2>>,
     boundary_attributes: &[i32],
     marker: &[i32],
 ) -> HcurlConstraintSubspace {
@@ -831,8 +831,8 @@ pub fn build_hcurl_constraint_subspace_from_marker(
 /// Builds full curl-curl and mass matrices, applies MFEM-style marker semantics
 /// for essential boundaries, and returns reduced matrices plus gradient constraints.
 pub fn assemble_hcurl_eigen_system_from_marker(
-    h1: &H1Space<SimplexMesh<2>>,
-    hcurl: &HCurlSpace<SimplexMesh<2>>,
+    h1: &H1Space<Mesh<2>>,
+    hcurl: &HCurlSpace<Mesh<2>>,
     boundary_attributes: &[i32],
     marker: &[i32],
     mu: f64,
@@ -858,7 +858,7 @@ pub fn assemble_hcurl_eigen_system_from_marker(
 
 impl StaticMaxwellProblem {
     pub fn new(
-        space: HCurlSpace<SimplexMesh<2>>,
+        space: HCurlSpace<Mesh<2>>,
         mat: CsrMatrix<f64>,
         rhs: Vec<f64>,
         quad_order: u8,
@@ -904,7 +904,7 @@ impl StaticMaxwellProblem {
 }
 
 impl StaticMaxwellBuilder {
-    pub fn new(space: HCurlSpace<SimplexMesh<2>>) -> Self {
+    pub fn new(space: HCurlSpace<Mesh<2>>) -> Self {
         Self {
             space,
             quad_order: 4,
@@ -1296,14 +1296,14 @@ impl StaticMaxwellBuilder {
 }
 
 pub fn assemble_isotropic_hcurl_volume(
-    space: &HCurlSpace<SimplexMesh<2>>,
+    space: &HCurlSpace<Mesh<2>>,
     quad_order: u8,
 ) -> CsrMatrix<f64> {
     assemble_isotropic_hcurl_system(space, None, &[], quad_order)
 }
 
 pub fn assemble_isotropic_hcurl_system(
-    space: &HCurlSpace<SimplexMesh<2>>,
+    space: &HCurlSpace<Mesh<2>>,
     gamma: Option<f64>,
     boundary_tags: &[i32],
     quad_order: u8,
@@ -1329,7 +1329,7 @@ pub fn assemble_isotropic_hcurl_system(
 }
 
 pub fn assemble_tangential_boundary_rhs<F>(
-    space: &HCurlSpace<SimplexMesh<2>>,
+    space: &HCurlSpace<Mesh<2>>,
     boundary_tags: &[i32],
     quad_order: u8,
     g: F,
@@ -1355,7 +1355,7 @@ pub fn add_assign(dst: &mut [f64], src: &[f64]) {
 }
 
 pub fn apply_pec_zero(
-    space: &HCurlSpace<SimplexMesh<2>>,
+    space: &HCurlSpace<Mesh<2>>,
     mat: &mut CsrMatrix<f64>,
     rhs: &mut Vec<f64>,
     boundary_tags: &[i32],
@@ -1367,7 +1367,7 @@ pub fn apply_pec_zero(
 }
 
 pub fn add_tangential_robin_boundary<F>(
-    space: &HCurlSpace<SimplexMesh<2>>,
+    space: &HCurlSpace<Mesh<2>>,
     mat: &mut CsrMatrix<f64>,
     rhs: &mut [f64],
     boundary_tags: &[i32],
@@ -1404,7 +1404,7 @@ pub fn solve_hcurl_jacobi(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, Solve
 }
 
 pub fn l2_error_hcurl_exact<F>(
-    space: &HCurlSpace<SimplexMesh<2>>,
+    space: &HCurlSpace<Mesh<2>>,
     uh: &[f64],
     exact: F,
 ) -> f64
@@ -1571,7 +1571,7 @@ mod tests {
 
     #[test]
     fn builder_zero_source_with_pec_has_zero_solution() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let space = HCurlSpace::new(mesh, 1);
 
         let mut boundary = HcurlBoundaryConfig::new();
@@ -1592,7 +1592,7 @@ mod tests {
 
     #[test]
     fn builder_zero_source_with_pec_has_zero_solution_on_quad_mesh() {
-        let mesh = SimplexMesh::<2>::unit_square_quad(6);
+        let mesh = Mesh::<2>::unit_square_quad(6);
         let space = HCurlSpace::new(mesh, 1);
 
         let mut boundary = HcurlBoundaryConfig::new();
@@ -1615,9 +1615,9 @@ mod tests {
     fn builder_matches_legacy_assembly_path() {
         const GAMMA: f64 = 2.0;
 
-        let mesh1 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh1 = Mesh::<2>::unit_square_tri(6);
         let space1 = HCurlSpace::new(mesh1, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh2 = Mesh::<2>::unit_square_tri(6);
         let space2 = HCurlSpace::new(mesh2, 1);
 
         let data = move |x: &[f64], n: &[f64]| {
@@ -1668,9 +1668,9 @@ mod tests {
 
     #[test]
     fn builder_matrix_fn_identity_matches_isotropic() {
-        let mesh1 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh1 = Mesh::<2>::unit_square_tri(6);
         let space1 = HCurlSpace::new(mesh1, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh2 = Mesh::<2>::unit_square_tri(6);
         let space2 = HCurlSpace::new(mesh2, 1);
 
         let src = |x: &[f64]| {
@@ -1760,9 +1760,9 @@ mod tests {
 
     #[test]
     fn builder_mixed_boundary_matches_low_level_pipeline() {
-        let mesh1 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh1 = Mesh::<2>::unit_square_tri(6);
         let space1 = HCurlSpace::new(mesh1, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh2 = Mesh::<2>::unit_square_tri(6);
         let space2 = HCurlSpace::new(mesh2, 1);
 
         let mut cfg = HcurlBoundaryConfig::new();
@@ -1812,9 +1812,9 @@ mod tests {
 
     #[test]
     fn boundary_config_condition_order_is_result_invariant() {
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let mut cfg_a = HcurlBoundaryConfig::new();
@@ -1870,9 +1870,9 @@ mod tests {
         let gammas = [0.0_f64, 0.25, 1.0, 2.0, 5.0];
 
         for gamma in gammas {
-            let mesh1 = SimplexMesh::<2>::unit_square_tri(6);
+            let mesh1 = Mesh::<2>::unit_square_tri(6);
             let space1 = HCurlSpace::new(mesh1, 1);
-            let mesh2 = SimplexMesh::<2>::unit_square_tri(6);
+            let mesh2 = Mesh::<2>::unit_square_tri(6);
             let space2 = HCurlSpace::new(mesh2, 1);
 
             let robin_data = move |x: &[f64], n: &[f64]| {
@@ -1937,9 +1937,9 @@ mod tests {
         let epsilon = 1.2;
         let alpha = epsilon * omega * omega;
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let solved_freq = StaticMaxwellBuilder::new(space_a)
@@ -1990,9 +1990,9 @@ mod tests {
         let pec_marker = [1, 0, 1, 0];
         let robin_marker = [0, 1, 0, 1];
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let src = |x: &[f64]| {
@@ -2060,9 +2060,9 @@ mod tests {
         let marker = [1, 1, 1, 1];
         let gamma = 1.7;
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let source = |x: &[f64]| {
@@ -2116,9 +2116,9 @@ mod tests {
         let marker = [1, 1, 1, 1];
         let gamma_abs = 0.9;
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let source = |x: &[f64]| {
@@ -2173,9 +2173,9 @@ mod tests {
         let marker = [1, 1, 1, 1];
         let gamma = 1.25;
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let source = |x: &[f64]| {
@@ -2229,9 +2229,9 @@ mod tests {
         let pec_marker = [1, 0, 1, 0];
         let robin_marker = [0, 1, 0, 1];
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let src = |x: &[f64]| {
@@ -2303,9 +2303,9 @@ mod tests {
         let mu = 0.64_f64;
         let gamma = (epsilon / mu).sqrt();
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let source = |x: &[f64]| {
@@ -2360,9 +2360,9 @@ mod tests {
         let mu = 0.81_f64;
         let gamma_abs = (epsilon / mu).sqrt();
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let source = |x: &[f64]| {
@@ -2414,7 +2414,7 @@ mod tests {
         let attrs = [1, 2, 3, 4];
 
         // Case A: isotropic + full PEC
-        let solved_a = StaticMaxwellBuilder::new(HCurlSpace::new(SimplexMesh::<2>::unit_square_tri(6), 1))
+        let solved_a = StaticMaxwellBuilder::new(HCurlSpace::new(Mesh::<2>::unit_square_tri(6), 1))
             .with_quad_order(4)
             .with_isotropic_coeffs(1.0, 1.0)
             .with_source_fn(|x| [(PI * x[1]).sin(), (PI * x[0]).sin()])
@@ -2424,7 +2424,7 @@ mod tests {
         assert!(solved_a.solve_result.converged);
 
         // Case B: frequency isotropic + physical impedance on subset marker
-        let solved_b = StaticMaxwellBuilder::new(HCurlSpace::new(SimplexMesh::<2>::unit_square_tri(6), 1))
+        let solved_b = StaticMaxwellBuilder::new(HCurlSpace::new(Mesh::<2>::unit_square_tri(6), 1))
             .with_quad_order(4)
             .with_frequency_isotropic(1.0, 2.0, 1.5)
             .with_source_fn(|x| [
@@ -2441,7 +2441,7 @@ mod tests {
         assert!(solved_b.solve_result.converged);
 
         // Case C: anisotropic + physical absorbing + partial PEC
-        let solved_c = StaticMaxwellBuilder::new(HCurlSpace::new(SimplexMesh::<2>::unit_square_tri(6), 1))
+        let solved_c = StaticMaxwellBuilder::new(HCurlSpace::new(Mesh::<2>::unit_square_tri(6), 1))
             .with_quad_order(4)
             .with_anisotropic_diag(1.0, 1.7, 2.3)
             .with_source_fn(|x| [
@@ -2465,7 +2465,7 @@ mod tests {
 
     #[test]
     fn mfem_ex3_manufactured_l2_error_acceptance() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(24);
+        let mesh = Mesh::<2>::unit_square_tri(24);
         let space = HCurlSpace::new(mesh, 1);
         let solved = StaticMaxwellBuilder::new(space)
             .with_quad_order(5)
@@ -2490,7 +2490,7 @@ mod tests {
 
     #[test]
     fn free_hcurl_dofs_from_marker_matches_manual_filter() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let space = HCurlSpace::new(mesh, 1);
 
         let attrs = [1, 2, 3, 4];
@@ -2512,7 +2512,7 @@ mod tests {
 
     #[test]
     fn free_h1_dofs_from_marker_matches_manual_filter() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let h1 = H1Space::new(mesh, 1);
 
         let attrs = [1, 2, 3, 4];
@@ -2543,9 +2543,9 @@ mod tests {
     #[test]
     fn assemble_hcurl_eigen_system_from_marker_matches_manual_pipeline() {
         let n = 6;
-        let hcurl_mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let hcurl_mesh = Mesh::<2>::unit_square_tri(n);
         let hcurl = HCurlSpace::new(hcurl_mesh, 1);
-        let h1_mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let h1_mesh = Mesh::<2>::unit_square_tri(n);
         let h1 = H1Space::new(h1_mesh, 1);
 
         let attrs = [1, 2, 3, 4];
@@ -2598,7 +2598,7 @@ mod tests {
 
     #[test]
     fn hcurl_matrix_free_apply_enforces_pec_and_linearity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
         let hcurl = HCurlSpace::new(mesh, 1);
 
         let mu = 1.0;
@@ -2655,7 +2655,7 @@ mod tests {
 
     #[test]
     fn hcurl_matrix_free_solve_matches_assembled_solve() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(10);
+        let mesh = Mesh::<2>::unit_square_tri(10);
         let hcurl = HCurlSpace::new(mesh, 1);
 
         let mu = 1.0;
@@ -2712,7 +2712,7 @@ mod tests {
     fn hcurl_matrix_free_large_dof_apply_smoke() {
         // Large-DOF smoke for matrix-free apply path used by scalable Krylov solves.
         let n = 40;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let hcurl = HCurlSpace::new(mesh, 1);
         let op = HcurlMatrixFreeOperator2D::new(&hcurl, 1.0, 1.0, 4, &[1, 2, 3, 4]);
 
@@ -2731,9 +2731,9 @@ mod tests {
     #[test]
     fn hcurl_eigen_amg_preconditioned_lobpcg_smoke() {
         let n = 10;
-        let hcurl_mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let hcurl_mesh = Mesh::<2>::unit_square_tri(n);
         let hcurl = HCurlSpace::new(hcurl_mesh, 1);
-        let h1_mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let h1_mesh = Mesh::<2>::unit_square_tri(n);
         let h1 = H1Space::new(h1_mesh, 1);
 
         let attrs = [1, 2, 3, 4];
@@ -2782,7 +2782,7 @@ mod tests {
     #[test]
     fn builder_anisotropic_pec_zero_source_has_zero_solution() {
         // Anisotropic diagonal material + full PEC BC + zero source must yield u=0.
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let space = HCurlSpace::new(mesh, 1);
 
         let solved = StaticMaxwellBuilder::new(space)
@@ -2816,9 +2816,9 @@ mod tests {
             1.5 * (e[0] * n[1] - e[1] * n[0]) + 0.1 * (x[0] + x[1])
         };
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let solved_diag = StaticMaxwellBuilder::new(space_a)
@@ -2875,9 +2875,9 @@ mod tests {
             2.0 * (e[0] * n[1] - e[1] * n[0])
         };
 
-        let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_a = Mesh::<2>::unit_square_tri(6);
         let space_a = HCurlSpace::new(mesh_a, 1);
-        let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_b = Mesh::<2>::unit_square_tri(6);
         let space_b = HCurlSpace::new(mesh_b, 1);
 
         let solved_freq = StaticMaxwellBuilder::new(space_a)
@@ -2935,7 +2935,7 @@ mod tests {
     }
 
     fn solve_aniso_pec(n: usize) -> f64 {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = HCurlSpace::new(mesh, 1);
         let solved = StaticMaxwellBuilder::new(space)
             .with_quad_order(5)
@@ -2993,7 +2993,7 @@ mod tests {
     }
 
     fn solve_aniso_robin(n: usize) -> f64 {
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let space = HCurlSpace::new(mesh, 1);
         let solved = StaticMaxwellBuilder::new(space)
             .with_quad_order(5)
@@ -3076,7 +3076,7 @@ impl FirstOrderMaxwellOp {
     /// Assemble operators on the unit square [0,1]² triangulated with an
     /// `n×n` uniform triangular mesh. Boundary tags 1‥4 impose PEC (n×E=0).
     pub fn new_unit_square(n: usize, eps: f64, mu: f64, sigma: f64) -> Self {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh  = Mesh::<2>::unit_square_tri(n);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         let l2    = L2Space::new(mesh, 0);
 
@@ -3425,7 +3425,7 @@ impl FirstOrderMaxwellSolver3D {
 
 impl FirstOrderMaxwell3DSkeleton {
     fn assemble_with_mesh_and_pec_tags(
-        mesh3: SimplexMesh<3>,
+        mesh3: Mesh<3>,
         eps: f64,
         mu: f64,
         sigma: f64,
@@ -3569,7 +3569,7 @@ impl FirstOrderMaxwell3DSkeleton {
 
     /// Assemble ND1/RT0 spaces, mass matrices, and curl operators on unit cube tet mesh.
     pub fn new_unit_cube_with_params(n: usize, eps: f64, mu: f64, sigma: f64) -> Self {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(n);
+        let mesh3 = Mesh::<3>::unit_cube_tet(n);
 
         // Use all boundary tags as PEC by default for the 3-D skeleton.
         let mut tags_set: HashSet<i32> = HashSet::new();
@@ -3628,7 +3628,7 @@ impl FirstOrderMaxwell3DSkeleton {
         impedance_tags: &[i32],
         impedance_gamma: f64,
     ) -> Self {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(n);
+        let mesh3 = Mesh::<3>::unit_cube_tet(n);
         Self::assemble_with_mesh_and_pec_tags(
             mesh3,
             eps,
@@ -4094,7 +4094,7 @@ mod first_order_tests {
         // B(x,t) = cos(pi t) * (cos(pi x) - cos(pi y))
         // So at t=0: E=0, B=B0; at t=1: E=0, B=-B0.
         let mut e = vec![0.0_f64; op.n_e];
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let l2 = L2Space::new(mesh.clone(), 0);
         let mut b0 = vec![0.0_f64; op.n_b];
         for elem in l2.mesh().elem_iter() {
@@ -4386,7 +4386,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_subset_pec_tags_clamp_only_selected_boundary_dofs() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let hcurl = HCurlSpace::new(mesh3.clone(), 1);
 
         let mut tags_set: HashSet<i32> = HashSet::new();
@@ -4453,7 +4453,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_default_constructor_matches_explicit_all_tags() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags_set: HashSet<i32> = HashSet::new();
         for f in 0..mesh3.n_boundary_faces() as u32 {
             tags_set.insert(mesh3.face_tag(f));
@@ -4604,7 +4604,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_single_tag_constructor_matches_singleton_tag_list() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags_set: HashSet<i32> = HashSet::new();
         for f in 0..mesh3.n_boundary_faces() as u32 {
             tags_set.insert(mesh3.face_tag(f));
@@ -4662,7 +4662,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_pec_tags_order_and_duplicates_do_not_change_constraints() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags_set: HashSet<i32> = HashSet::new();
         for f in 0..mesh3.n_boundary_faces() as u32 {
             tags_set.insert(mesh3.face_tag(f));
@@ -4782,7 +4782,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_mixed_valid_invalid_duplicate_tags_match_valid_unique_subset() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags_set: HashSet<i32> = HashSet::new();
         for f in 0..mesh3.n_boundary_faces() as u32 {
             tags_set.insert(mesh3.face_tag(f));
@@ -4815,7 +4815,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_effective_pec_tags_are_sorted_unique_and_valid() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags: Vec<i32> = (0..mesh3.n_boundary_faces() as u32)
             .map(|f| mesh3.face_tag(f))
             .collect::<HashSet<_>>()
@@ -4880,7 +4880,7 @@ mod first_order_tests {
         assert!(!no_pec.has_pec_tags(), "without_pec constructor should disable PEC tags");
         assert_eq!(no_pec.n_pec_tags(), 0, "without_pec constructor should have zero PEC tags");
 
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags: Vec<i32> = (0..mesh3.n_boundary_faces() as u32)
             .map(|f| mesh3.face_tag(f))
             .collect::<HashSet<_>>()
@@ -4894,7 +4894,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_is_pec_tag_matches_effective_tag_set() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut all_tags: Vec<i32> = (0..mesh3.n_boundary_faces() as u32)
             .map(|f| mesh3.face_tag(f))
             .collect::<HashSet<_>>()
@@ -4941,7 +4941,7 @@ mod first_order_tests {
         let frac_with = with_pec.pec_tag_fraction();
         assert_eq!(frac_with, 1.0, "default constructor should activate all boundary tags");
 
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags: Vec<i32> = (0..mesh3.n_boundary_faces() as u32)
             .map(|f| mesh3.face_tag(f))
             .collect::<HashSet<_>>()
@@ -5021,7 +5021,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_is_free_tag_complements_is_pec_tag() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut all_tags: Vec<i32> = (0..mesh3.n_boundary_faces() as u32)
             .map(|f| mesh3.face_tag(f))
             .collect::<HashSet<_>>()
@@ -5049,7 +5049,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_pec_dofs_are_sorted_unique_after_normalization() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags_set: HashSet<i32> = HashSet::new();
         for f in 0..mesh3.n_boundary_faces() as u32 {
             tags_set.insert(mesh3.face_tag(f));
@@ -5070,7 +5070,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_absorbing_boundary_term_dissipates_energy_without_sigma() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags: Vec<i32> = (0..mesh3.n_boundary_faces() as u32)
             .map(|f| mesh3.face_tag(f))
             .collect::<HashSet<_>>()
@@ -5150,7 +5150,7 @@ mod first_order_tests {
 
     #[test]
     fn first_order_3d_impedance_boundary_term_dissipates_energy_without_sigma() {
-        let mesh3 = SimplexMesh::<3>::unit_cube_tet(1);
+        let mesh3 = Mesh::<3>::unit_cube_tet(1);
         let mut tags: Vec<i32> = (0..mesh3.n_boundary_faces() as u32)
             .map(|f| mesh3.face_tag(f))
             .collect::<HashSet<_>>()
@@ -8043,12 +8043,12 @@ pub fn solve_maxwell_matrix_free<M: fem_mesh::topology::MeshTopology>(
 #[cfg(test)]
 mod tests_maxwell_mf {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
 
     /// Matrix-free solver matches assembled PCG for a 2D H(curl) problem.
     #[test]
     fn maxwell_mf_matches_assembled_pcg() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let n     = space.n_dofs();
 

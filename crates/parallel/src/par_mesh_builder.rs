@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use fem_core::{Rank, NodeId};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_mesh::element_type::ElementType;
 use crate::comm::Comm;
 use crate::partition::MeshPartition;
@@ -80,7 +80,7 @@ impl<const D: usize> ParMeshBuilder<D> {
     /// Build the ParallelMesh from accumulated data.
     ///
     /// After this call, the builder is consumed.
-    pub fn build(self) -> ParallelMesh<SimplexMesh<D>> {
+    pub fn build(self) -> ParallelMesh<Mesh<D>> {
         let local_rank = self.comm.rank();
         let _n_ranks = self.comm.size();
 
@@ -114,7 +114,7 @@ impl<const D: usize> ParMeshBuilder<D> {
         }
 
         // Build local mesh.
-        let local_mesh = SimplexMesh {
+        let local_mesh = Mesh {
             coords: self.coords,
             conn: local_conn,
             elem_tags: self.elem_tags,
@@ -140,14 +140,14 @@ impl<const D: usize> ParMeshBuilder<D> {
 mod tests {
     use super::*;
     use fem_core::ElemId;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_mesh::topology::MeshTopology;
     use crate::mpi_test_env::test_world_comm;
     use crate::par_simplex::partition_simplex;
 
     #[test]
     fn builder_matches_serial_partition() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = test_world_comm();
         let serial_pmesh = partition_simplex(&mesh, &comm);
 

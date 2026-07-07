@@ -103,11 +103,11 @@ impl ElementTransformation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SimplexMesh;
+    use crate::Mesh;
 
     #[test]
     fn tri2d_det_and_map() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(1);
+        let mesh = Mesh::<2>::unit_square_tri(1);
         let tr = ElementTransformation::from_simplex(&mesh, 0);
         assert_eq!(tr.dim(), 2);
         assert!(tr.det_j().abs() > 1e-14);

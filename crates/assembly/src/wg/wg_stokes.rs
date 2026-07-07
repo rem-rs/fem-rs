@@ -305,15 +305,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::L2Space;
     /// p = sin(πx)sin(πy), f = Δu - ∇p (computed analytically).
     #[test]
     fn wg_stokes_2d_driven_cavity() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel = H1Space::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh2 = Mesh::<2>::unit_square_tri(4);
         let pres = L2Space::new(mesh2, 1);
 
         let f = |x: &[f64]| {
@@ -361,9 +361,9 @@ mod tests {
     /// Stokes matrix must be invertible (no zero rows/columns in A block).
     #[test]
     fn wg_stokes_2d_no_zero_rows() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh = Mesh::<2>::unit_square_tri(3);
         let vel = H1Space::new(mesh, 1);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(3);
+        let mesh2 = Mesh::<2>::unit_square_tri(3);
         let pres = L2Space::new(mesh2, 0);
 
         let f = |_: &[f64]| vec![1.0, 1.0];
@@ -379,9 +379,9 @@ mod tests {
     /// MMS test: verify WG Stokes assembly produces a valid system.
     #[test]
     fn wg_stokes_2d_mms_solves() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh = Mesh::<2>::unit_square_tri(6);
         let vel = H1Space::new(mesh, 2);
-        let mesh2 = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh2 = Mesh::<2>::unit_square_tri(6);
         let pres = L2Space::new(mesh2, 1);
 
         let f = |x: &[f64]| {

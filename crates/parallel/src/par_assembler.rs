@@ -121,13 +121,13 @@ mod tests {
     use crate::par_space::ParallelFESpace;
     use fem_assembly::assembler::Assembler;
     use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::dof_manager::DofManager;
 
     #[test]
     fn par_assembly_rhs_integral_p1() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn par_assembly_rhs_integral_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(8);
+        let mesh = Mesh::<2>::unit_square_tri(8);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn par_assembly_stiffness_diagonal_positive() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn par_assembly_serial_matches() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let mesh2 = mesh.clone();
 
         let serial_space = H1Space::new(mesh.clone(), 1);
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn par_assembly_stiffness_diagonal_positive_p2() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {

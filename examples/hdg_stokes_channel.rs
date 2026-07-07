@@ -5,12 +5,12 @@
 
 use std::time::Instant;
 use fem_assembly::hdg_stokes::solve_hdg_stokes;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 
 fn main() {
     println!("=== HDG Stokes: lid-driven cavity ===");
     let t0 = Instant::now();
-    let mesh = SimplexMesh::<2>::unit_square_tri(6);
+    let mesh = Mesh::<2>::unit_square_tri(6);
     let source = |_: &[f64]| vec![0.0, 0.0];
     let result = solve_hdg_stokes(mesh, source, 1.0);
     println!("  ‖u‖ = {:.6e}, ‖p‖ = {:.6e}",
@@ -25,9 +25,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use fem_assembly::hdg_stokes::solve_hdg_stokes;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     #[test] fn smoke() {
-        let r = solve_hdg_stokes(SimplexMesh::<2>::unit_square_tri(4), |_: &[f64]| vec![0.0, 0.0], 1.0);
+        let r = solve_hdg_stokes(Mesh::<2>::unit_square_tri(4), |_: &[f64]| vec![0.0, 0.0], 1.0);
         assert!(r.u.iter().all(|v| v.is_finite()));
     }
 }

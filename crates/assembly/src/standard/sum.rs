@@ -32,13 +32,13 @@ mod tests {
     use super::*;
     use crate::assembler::Assembler;
     use crate::standard::{DiffusionIntegrator, MassIntegrator};
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     /// SumIntegrator(D, M) should equal assembling with &[&D, &M].
     #[test]
     fn sum_equals_separate_assembly() {
-        let mesh  = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
 
         let d = DiffusionIntegrator { kappa: 1.0 };

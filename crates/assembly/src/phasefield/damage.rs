@@ -395,7 +395,7 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::H1Space;
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
     fn damaged_stiffness_assembles() {
         use fem_space::VectorH1Space;
         use fem_space::fe_space::FESpace;
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = VectorH1Space::new(mesh, 1, 2);
         let mesh_ref = space.mesh();
         let u = vec![0.0; space.n_dofs()];

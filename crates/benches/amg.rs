@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{H1Space, fe_space::FESpace};
 use fem_assembly::{Assembler, standard::DiffusionIntegrator};
 use fem_amg::{AmgConfig, AmgSolver};
@@ -10,7 +10,7 @@ fn bench_amg_setup(c: &mut Criterion) {
 
     for n in [16, 32, 64].iter() {
         group.bench_with_input(BenchmarkId::new("hierarchy", n), n, |b, n| {
-            let mesh = SimplexMesh::<2>::unit_square_tri(*n);
+            let mesh = Mesh::<2>::unit_square_tri(*n);
             let space = H1Space::new(mesh, 1u8);
 
             let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -33,7 +33,7 @@ fn bench_amg_solve(c: &mut Criterion) {
 
     for n in [16, 32, 64].iter() {
         group.bench_with_input(BenchmarkId::new("vcycle", n), n, |b, n| {
-            let mesh = SimplexMesh::<2>::unit_square_tri(*n);
+            let mesh = Mesh::<2>::unit_square_tri(*n);
             let space = H1Space::new(mesh, 1u8);
 
             let diffusion = DiffusionIntegrator { kappa: 1.0 };

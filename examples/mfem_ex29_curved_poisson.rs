@@ -21,7 +21,7 @@ use fem_assembly::{
     standard::DomainSourceIntegrator,
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{CurvedMesh, SimplexMesh};
+use fem_mesh::{CurvedMesh, Mesh};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space, FESpace,
@@ -67,11 +67,11 @@ fn main() {
     );
 
     // Load or generate base mesh
-    let mesh_lin: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh_lin: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
 
     // Elevate to high-order geometry with sinusoidal deformation
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn ex29_curved_poisson_converges() {
-        let mesh_lin = SimplexMesh::<2>::unit_square_tri(6);
+        let mesh_lin = Mesh::<2>::unit_square_tri(6);
         let curved = CurvedMesh::elevate_to_order(&mesh_lin, 2, |p| {
             let x = p[0];
             let y = p[1];

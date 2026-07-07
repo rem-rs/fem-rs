@@ -270,14 +270,14 @@ fn invert_dense(mat:&[f64],n:usize)->Option<Vec<f64>>{
 
 #[cfg(test)]
 mod tests{
-    use super::*; use fem_mesh::SimplexMesh;
+    use super::*; use fem_mesh::Mesh;
     #[test]fn hdg_maxwell_2d_finite(){
-        let m=SimplexMesh::<2>::unit_square_tri(4);
+        let m=Mesh::<2>::unit_square_tri(4);
         let lam=solve_hdg_maxwell(m,|_|vec![1.,0.],1.);
         assert!(!lam.is_empty()&&lam.iter().all(|v|v.is_finite()));
     }
     #[test]fn hdg_maxwell_3d_finite(){
-        let m=SimplexMesh::<3>::unit_cube_tet(2);
+        let m=Mesh::<3>::unit_cube_tet(2);
         let lam=solve_hdg_maxwell(m,|_|vec![1.,0.,0.],1.);
         assert!(!lam.is_empty()&&lam.iter().all(|v|v.is_finite()));
     }

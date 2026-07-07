@@ -1,6 +1,6 @@
-//! Partitioner for [`SimplexMesh<D>`].
+//! Partitioner for [`Mesh<D>`].
 //!
-//! [`partition_simplex`] distributes a serial `SimplexMesh<D>` across the
+//! [`partition_simplex`] distributes a serial `Mesh<D>` across the
 //! ranks of a [`Comm`] using a **contiguous element partition**:
 //!
 //! * Rank `r` owns elements `[r·chunk, (r+1)·chunk)`.
@@ -30,7 +30,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use fem_core::{FaceId, NodeId, Rank};
-use fem_mesh::{ElementType, SimplexMesh};
+use fem_mesh::{ElementType, Mesh};
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
 use crate::mesh_serde;
@@ -55,9 +55,9 @@ use crate::mesh_serde;
 /// # Panics
 /// Panics if the mesh has zero elements.
 pub fn partition_simplex<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     comm: &Comm,
-) -> ParallelMesh<SimplexMesh<D>> {
+) -> ParallelMesh<Mesh<D>> {
     if comm.size() == 1 {
         let n = mesh.n_elems();
         assert!(n > 0, "partition_simplex: mesh has no elements");
@@ -76,9 +76,9 @@ pub fn partition_simplex<const D: usize>(
 /// is unavailable (e.g., WASM Workers with limited channels).  On native
 /// platforms, [`partition_simplex`] uses streaming by default.
 pub fn partition_simplex_replicated<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     comm: &Comm,
-) -> ParallelMesh<SimplexMesh<D>> {
+) -> ParallelMesh<Mesh<D>> {
     let n_elems = mesh.n_elems();
     let n_nodes_total = mesh.n_nodes();
     assert!(n_elems > 0, "partition_simplex: mesh has no elements");
@@ -115,9 +115,9 @@ pub(crate) const STREAM_TAG_BASE: i32 = 0x3700;
 /// # Errors
 /// Returns `Err` if the binary mesh decode fails on a receiving rank.
 pub fn partition_simplex_streaming<const D: usize>(
-    mesh: Option<&SimplexMesh<D>>,
+    mesh: Option<&Mesh<D>>,
     comm: &Comm,
-) -> Result<ParallelMesh<SimplexMesh<D>>, String> {
+) -> Result<ParallelMesh<Mesh<D>>, String> {
     let size = comm.size();
 
     // ── single-rank fast path ────────────────────────────────────────────────
@@ -157,10 +157,10 @@ pub fn partition_simplex_streaming<const D: usize>(
 /// This is a convenience wrapper around [`extract_submesh_from_partition`] that
 /// builds a contiguous-block partition vector internally.
 fn extract_submesh_for_rank<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     target_rank: Rank,
     n_ranks: usize,
-) -> (SimplexMesh<D>, MeshPartition) {
+) -> (Mesh<D>, MeshPartition) {
     let n_elems = mesh.n_elems();
     let chunk = n_elems.div_ceil(n_ranks);
     let elem_part: Vec<Rank> = (0..n_elems)
@@ -181,10 +181,10 @@ fn extract_submesh_for_rank<const D: usize>(
 /// * `target_rank` — the rank whose sub-mesh to extract.
 /// * `elem_part` — `elem_part[e]` is the rank that owns element `e`.
 pub(crate) fn extract_submesh_from_partition<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     target_rank: Rank,
     elem_part: &[Rank],
-) -> (SimplexMesh<D>, MeshPartition) {
+) -> (Mesh<D>, MeshPartition) {
     let n_elems = mesh.n_elems();
 
     // 1. Collect elements owned by target_rank.
@@ -277,7 +277,7 @@ pub(crate) fn extract_submesh_from_partition<const D: usize>(
         extract_local_faces(mesh, &g2l, &node_owners, target_rank);
 
     // 8. Assemble the local sub-mesh.
-    let mut local_mesh = SimplexMesh::uniform(
+    let mut local_mesh = Mesh::uniform(
         local_coords, local_conn, local_elem_tags, mesh.elem_type,
         local_face_conn, local_face_tags, mesh.face_type,
     );
@@ -305,7 +305,7 @@ pub(crate) fn extract_submesh_from_partition<const D: usize>(
 /// it.  Sweeping elements 0 → n_elems in order, the first rank to "see" a node
 /// becomes its owner.
 pub(crate) fn compute_node_owners_from_partition<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     elem_part: &[Rank],
 ) -> Vec<Rank> {
     let n_nodes = mesh.n_nodes();
@@ -330,7 +330,7 @@ pub(crate) fn compute_node_owners_from_partition<const D: usize>(
 /// and consistent across ranks.
 #[allow(clippy::type_complexity)]
 fn extract_local_faces<const D: usize>(
-    mesh: &SimplexMesh<D>,
+    mesh: &Mesh<D>,
     g2l: &HashMap<NodeId, u32>,
     node_owners: &[Rank],
     local_rank: Rank,
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn serial_partition_counts() {
         let n = 4usize;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let comm = serial_comm();
 
         let pmesh = partition_simplex(&mesh, &comm);
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn serial_partition_coords_preserved() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
         let pmesh = partition_simplex(&mesh, &comm);
 
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn serial_partition_connectivity_preserved() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
         let pmesh = partition_simplex(&mesh, &comm);
 
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn serial_partition_global_id_mapping() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
         let pmesh = partition_simplex(&mesh, &comm);
 
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn serial_partition_global_sum() {
         let n = 4usize;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let comm = serial_comm();
         let pmesh = partition_simplex(&mesh, &comm);
 
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn serial_partition_ghost_exchange_trivial() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
         let pmesh = partition_simplex(&mesh, &comm);
 
@@ -502,14 +502,14 @@ mod tests {
 
     #[test]
     fn local_mesh_passes_check() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
         let pmesh = partition_simplex(&mesh, &comm);
         pmesh.local_mesh().check().expect("local mesh check failed");
     }
 
     /// `Prism6` with Tri3 caps + Quad4 sides — must keep `face_offsets` through extraction.
-    fn unit_prism_mixed_boundary() -> SimplexMesh<3> {
+    fn unit_prism_mixed_boundary() -> Mesh<3> {
         let coords: Vec<f64> = vec![
             0.0, 0.0, 0.0,
             1.0, 0.0, 0.0,
@@ -536,7 +536,7 @@ mod tests {
             ElementType::Quad4,
         ];
         let face_offsets = vec![0usize, 3, 6, 10, 14, 18];
-        let mut m = SimplexMesh::uniform(
+        let mut m = Mesh::uniform(
             coords,
             conn,
             elem_tags,

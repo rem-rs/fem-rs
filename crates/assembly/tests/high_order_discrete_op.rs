@@ -4,13 +4,13 @@
 //!   cargo test -p fem-assembly --test high_order_discrete_op -- --nocapture
 
 use fem_assembly::DiscreteLinearOperator;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_space::{fe_space::FESpace, H1Space, HCurlSpace, HDivSpace, L2Space};
 
 #[test]
 fn gradient_p2_nd2_dimensions_ci() {
-    let mesh = SimplexMesh::<2>::unit_square_tri(3);
-    let mesh2 = SimplexMesh::<2>::unit_square_tri(3);
+    let mesh = Mesh::<2>::unit_square_tri(3);
+    let mesh2 = Mesh::<2>::unit_square_tri(3);
 
     let h1 = H1Space::new(mesh, 2);
     let hcurl = HCurlSpace::new(mesh2, 2);
@@ -22,8 +22,8 @@ fn gradient_p2_nd2_dimensions_ci() {
 
 #[test]
 fn curl_3d_nd2_rt1_commuting_ci() {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-    let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
+    let mesh = Mesh::<3>::unit_cube_tet(2);
+    let mesh2 = Mesh::<3>::unit_cube_tet(2);
 
     let hcurl = HCurlSpace::new(mesh, 2);
     let hdiv = HDivSpace::new(mesh2, 1);
@@ -45,10 +45,10 @@ fn curl_3d_nd2_rt1_commuting_ci() {
 
 #[test]
 fn de_rham_div_of_curl_3d_order2_l2_p2_ci() {
-    let mesh = SimplexMesh::<3>::unit_cube_tet(2);
-    let mesh2 = SimplexMesh::<3>::unit_cube_tet(2);
-    let mesh3 = SimplexMesh::<3>::unit_cube_tet(2);
-    let mesh4 = SimplexMesh::<3>::unit_cube_tet(2);
+    let mesh = Mesh::<3>::unit_cube_tet(2);
+    let mesh2 = Mesh::<3>::unit_cube_tet(2);
+    let mesh3 = Mesh::<3>::unit_cube_tet(2);
+    let mesh4 = Mesh::<3>::unit_cube_tet(2);
 
     let hcurl = HCurlSpace::new(mesh, 2);
     let hdiv = HDivSpace::new(mesh2, 1);

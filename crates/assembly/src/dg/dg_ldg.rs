@@ -304,14 +304,14 @@ pub fn assemble_ldg_system<S: FESpace + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::L2Space;
     use crate::interior_faces::InteriorFaceList;
 
     /// Verify LDG matrix symmetry (should be symmetric for β=0).
     #[test]
     fn ldg_matrix_is_symmetric_beta0() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         let a = assemble_ldg(&space, &ifl, 1.0, 1.0, 0.0, 3);
@@ -329,7 +329,7 @@ mod tests {
     /// LDG with β=0.5 should be non-symmetric.
     #[test]
     fn ldg_matrix_is_non_symmetric_beta05() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         let a = assemble_ldg(&space, &ifl, 1.0, 1.0, 0.5, 3);
@@ -349,7 +349,7 @@ mod tests {
     /// LDG should be positive-definite (positive diagonal for η=10).
     #[test]
     fn ldg_positive_diagonal() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = L2Space::new(mesh, 1);
         let ifl = InteriorFaceList::build(space.mesh());
         let a = assemble_ldg(&space, &ifl, 1.0, 10.0, 0.0, 3);

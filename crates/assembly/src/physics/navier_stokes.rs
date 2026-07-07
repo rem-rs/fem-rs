@@ -443,13 +443,13 @@ pub fn solve_ns_picard<M: MeshTopology + Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::vector_h1::VectorH1Space;
     use fem_space::H1Space;
     use fem_solver::SolverConfig;
     #[test]
     fn divergence_matrix_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel_space = VectorH1Space::new(mesh.clone(), 1, 2);
         let b = assemble_divergence_matrix(&vel_space, &mesh, 2);
         let mut sum = 0.0;
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn divergence_matrix_shape() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel_space = VectorH1Space::new(mesh.clone(), 1, 2);
         let pres_mesh = mesh.clone();
         let n_pres = pres_mesh.n_nodes();
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn convection_matrix_shape() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel_space = VectorH1Space::new(mesh.clone(), 1, 2);
         let n = vel_space.n_dofs();
         let mut u0 = vec![0.0_f64; n];
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn convection_matrix_nonzero() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel_space = VectorH1Space::new(mesh.clone(), 1, 2);
         let n = vel_space.n_dofs();
         let mut u0 = vec![0.0_f64; n];
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn ale_convection_zero_mesh_matches_standard() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel_space = VectorH1Space::new(mesh.clone(), 1, 2);
         let n = vel_space.n_dofs();
         let mut u0 = vec![0.0_f64; n];
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn ale_convection_different_with_mesh_motion() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel_space = VectorH1Space::new(mesh.clone(), 1, 2);
         let n = vel_space.n_dofs();
         let mut u0 = vec![0.0_f64; n];
@@ -559,7 +559,7 @@ mod tests {
         // Verify that assemble_divergence_matrix produces the same B as
         // MixedAssembler + PressureDivIntegrator (reference implementation)
         let n = 4;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let vel_space = VectorH1Space::new(mesh.clone(), 2, 2);
         let pres_mesh = mesh.clone();
         let space_p = H1Space::new(pres_mesh, 1);
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn assemble_oseen_block_zero_u_matches_stokes() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let vel_space = VectorH1Space::new(mesh.clone(), 2, 2);
         let u_zero = vec![0.0; vel_space.n_dofs()];
         let nu = 1.0;
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn oseen_solve_stokes_converges_in_one() {
         let n = 4;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let dim = 2;
         let order = 2;
         let vel_space = VectorH1Space::new(mesh.clone(), order, dim);
@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn assemble_pressure_mass_shape() {
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let pres_space = H1Space::new(mesh.clone(), 1);
         let mp = assemble_pressure_mass(&pres_space, 2);
         assert_eq!(mp.nrows, pres_space.n_dofs());
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn ns_picard_converges_for_stokes() {
         let n = 6;
-        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let mesh = Mesh::<2>::unit_square_tri(n);
         let vel_space = VectorH1Space::new(mesh.clone(), 2, 2);
         let pres_space = H1Space::new(mesh.clone(), 1);
 

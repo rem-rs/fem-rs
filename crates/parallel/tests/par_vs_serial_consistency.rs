@@ -15,7 +15,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
     launcher::native::ThreadLauncher,
@@ -32,7 +32,7 @@ use fem_space::{
 /// Solve Poisson serially and return the full solution vector.
 fn solve_serial(mesh_n: usize, order: u8) -> Vec<f64> {
     use std::f64::consts::PI;
-    let mesh = SimplexMesh::<2>::unit_square_tri(mesh_n);
+    let mesh = Mesh::<2>::unit_square_tri(mesh_n);
     let space = H1Space::new(mesh, order);
     let n = space.n_dofs();
 
@@ -63,9 +63,9 @@ fn build_and_solve_parallel(
     comm: &fem_parallel::comm::Comm,
     mesh_n: usize,
     order: u8,
-) -> (ParVector, ParallelFESpace<H1Space<SimplexMesh<2>>>) {
+) -> (ParVector, ParallelFESpace<H1Space<Mesh<2>>>) {
     use std::f64::consts::PI;
-    let mesh = Arc::new(SimplexMesh::<2>::unit_square_tri(mesh_n));
+    let mesh = Arc::new(Mesh::<2>::unit_square_tri(mesh_n));
     let par_mesh = partition_simplex(&mesh, comm);
     let local_mesh = par_mesh.local_mesh().clone();
     let local_space = H1Space::new(local_mesh, order);
@@ -99,7 +99,7 @@ fn build_and_solve_parallel(
 }
 
 /// Gather the parallel solution to rank 0, reordered by global DOF IDs.
-fn gather_par_solution(u_par: &ParVector, par_space: &ParallelFESpace<H1Space<SimplexMesh<2>>>) -> Vec<f64> {
+fn gather_par_solution(u_par: &ParVector, par_space: &ParallelFESpace<H1Space<Mesh<2>>>) -> Vec<f64> {
     let comm = par_space.comm();
     let dp = par_space.dof_partition();
     let n_global = par_space.n_global_dofs();

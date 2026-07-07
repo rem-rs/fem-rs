@@ -491,13 +491,13 @@ pub fn recover_gradient_nodal<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::SimplexMesh;
+    use fem_mesh::Mesh;
     use fem_space::{H1Space, HCurlSpace, HDivSpace, fe_space::FESpace};
 
     #[test]
     fn element_gradients_linear_function() {
         // u(x,y) = 3x - 2y → ∇u = [3, -2] everywhere (constant per element).
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let v = space.interpolate(&|x| 3.0 * x[0] - 2.0 * x[1]);
         let dofs = v.as_slice();
@@ -523,7 +523,7 @@ mod tests {
     fn recover_gradient_nodal_linear() {
         // For u(x,y) = 3x - 2y, the recovered gradient at every node should
         // be [3, -2] exactly (since all contributing elements have the same gradient).
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let v = space.interpolate(&|x| 3.0 * x[0] - 2.0 * x[1]);
         let dofs = v.as_slice();
@@ -550,7 +550,7 @@ mod tests {
     fn element_curl_hcurl_basic() {
         // Sanity check: compute element curls on a simple mesh, verify the
         // output has the right length.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
         let n = space.n_dofs();
         let dofs = vec![0.0; n]; // zero field → curl should be zero
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn element_divergence_hdiv_basic() {
         // Sanity check: compute element divergences for zero field.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HDivSpace::new(mesh, 0);
         let n = space.n_dofs();
         let dofs = vec![0.0; n];
@@ -593,7 +593,7 @@ mod tests {
     fn h1_error_linear_function() {
         // u = 3x - 2y → ∇u = [3, -2] exactly for P1.
         // So H1 seminorm error should be essentially machine-zero.
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let v = space.interpolate(&|x| 3.0 * x[0] - 2.0 * x[1]);
         let dofs = v.as_slice();
@@ -618,7 +618,7 @@ mod tests {
         let mut prev: Option<(f64, f64)> = None;
 
         for &n in &ns {
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let mesh = Mesh::<2>::unit_square_tri(n);
             let space = H1Space::new(mesh, 1);
             let ndofs = space.n_dofs();
 
@@ -672,7 +672,7 @@ mod tests {
         let mut prev: Option<(f64, f64)> = None;
 
         for &n in &ns {
-            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let mesh = Mesh::<2>::unit_square_tri(n);
             let space = H1Space::new(mesh, 2);
             let ndofs = space.n_dofs();
 
@@ -721,7 +721,7 @@ mod tests {
         // u = 3x - 2y: P1 reproduces this exactly → constant gradient per element
         // → no gradient jump across any interior edge → all indicators = 0.
         use crate::InteriorFaceList;
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let v = space.interpolate(&|x| 3.0 * x[0] - 2.0 * x[1]);
         let dofs = v.as_slice();
@@ -746,7 +746,7 @@ mod tests {
         use fem_space::constraints::{apply_dirichlet, boundary_dofs};
         use std::f64::consts::PI;
 
-        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh.clone(), 1);
         let ndofs = space.n_dofs();
 

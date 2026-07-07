@@ -27,7 +27,7 @@ use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::SimplexMesh;
+use fem_mesh::Mesh;
 use fem_solver::{lobpcg, LobpcgConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
@@ -64,11 +64,11 @@ fn main() {
 
 fn solve_case(args: Args) -> EigenCaseResult {
     // ─── 1. Mesh and H¹ space ─────────────────────────────────────────────────
-    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        SimplexMesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(args.n)
     };
     let space = H1Space::new(mesh, 1);
     let n = space.n_dofs();

@@ -22,7 +22,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator, BoundaryMassIntegrator, NeumannIntegrator},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{SolverConfig, solve_cg};
 use fem_space::{
     fe_space::FESpace,
@@ -64,7 +64,7 @@ fn nafems_thermal_convection() {
     let q_src = 1.0;   // volumetric heat generation
     let n = 40;        // mesh subdivisions
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
     let dm = space.dof_manager();
@@ -169,7 +169,7 @@ fn nafems_steady_mixed_bc() {
     let q0 = 1.0;   // inward heat flux on left wall
     let n = 40;
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh.clone(), 1);
     let n_dofs = space.n_dofs();
     let dm = space.dof_manager();
@@ -265,7 +265,7 @@ fn nafems_transient_conduction() {
     let dt = 5e-3;     // time step
     let nt = 40;       // steps (t_final = 0.2)
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
     let dm = space.dof_manager();
@@ -346,7 +346,7 @@ fn nafems_transient_conduction() {
 #[test]
 fn nafems_bimaterial_conduction() {
     let n = 32;
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(n);
+    let mut mesh = Mesh::<2>::unit_square_tri(n);
     // Tag elements by centroid x-coordinate
     for e in 0..mesh.n_elements() as u32 {
         let nodes = mesh.element_nodes(e);
