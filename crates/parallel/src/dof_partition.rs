@@ -641,7 +641,7 @@ mod tests {
     use super::*;
     use crate::launcher::native::ThreadLauncher;
     use crate::launcher::WorkerConfig;
-    use crate::par_simplex::partition_simplex;
+    use crate::par_partition::partition_mesh;
     use fem_mesh::Mesh;
     use fem_space::dof_manager::DofManager;
     use std::sync::{Arc, Mutex};
@@ -653,7 +653,7 @@ mod tests {
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let dof_part = DofPartition::from_mesh_partition(pmesh.partition(), &comm);
 
             assert_eq!(dof_part.n_owned_dofs, n_nodes);
@@ -673,7 +673,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         let results_clone = Arc::clone(&results);
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let dof_part = DofPartition::from_mesh_partition(pmesh.partition(), &comm);
 
             let rank = comm.rank();
@@ -709,7 +709,7 @@ mod tests {
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let dm = DofManager::new(pmesh.local_mesh(), 2);
             let dof_part = DofPartition::from_dof_manager(&dm, pmesh.partition(), &comm);
 
@@ -728,7 +728,7 @@ mod tests {
 
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let dm = DofManager::new(pmesh.local_mesh(), 2);
             let dof_part = DofPartition::from_dof_manager(&dm, pmesh.partition(), &comm);
 

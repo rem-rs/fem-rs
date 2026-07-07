@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_mesh::Mesh;
 use fem_parallel::{
-    ParAssembler, ParVector, ParallelFESpace, par_simplex::partition_simplex,
+    ParAssembler, ParVector, ParallelFESpace, par_partition::partition_mesh,
     par_solve_pcg_jacobi, launcher::native::ThreadLauncher, WorkerConfig,
 };
 use fem_solver::SolverConfig;
@@ -15,7 +15,7 @@ fn main() {
     let mesh = Arc::new(Mesh::<2>::unit_square_tri(n));
     let res = Arc::new(Mutex::new(None)); let rs = Arc::clone(&res);
     ThreadLauncher::new(WorkerConfig::new(r)).launch(move |c| {
-        let pm = partition_simplex(&mesh, &c); let lm = pm.local_mesh().clone();
+        let pm = partition_mesh(&mesh, &c); let lm = pm.local_mesh().clone();
         let dm = DofManager::new(&lm, 2);
         let ps = ParallelFESpace::new_with_dof_manager(H1Space::new(lm, 2), &pm, &dm, c.clone());
         let diff = DiffusionIntegrator { kappa: 1.0 };

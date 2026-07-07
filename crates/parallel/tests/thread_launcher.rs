@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use fem_parallel::{
     launcher::native::ThreadLauncher,
-    metis::{MetisOptions, partition_simplex_metis, partition_simplex_metis_streaming},
-    par_simplex::{partition_simplex, partition_simplex_streaming},
+    metis::{MetisOptions, partition_mesh_metis, partition_mesh_metis_streaming},
+    par_partition::{partition_mesh, partition_mesh_streaming},
     GhostExchange,
     WorkerConfig,
 };
@@ -305,7 +305,7 @@ fn ghost_exchange_forward_2d() {
     let mesh_arc = Arc::new(mesh);
 
     launcher(4).launch(move |comm| {
-        let par_mesh = partition_simplex(&mesh_arc, &comm);
+        let par_mesh = partition_mesh(&mesh_arc, &comm);
         let partition = par_mesh.partition();
         let exchange  = GhostExchange::from_partition(partition, &comm);
 
@@ -353,7 +353,7 @@ fn ghost_exchange_reverse_2d() {
     let mesh_arc = Arc::new(mesh);
 
     launcher(4).launch(move |comm| {
-        let par_mesh  = partition_simplex(&mesh_arc, &comm);
+        let par_mesh  = partition_mesh(&mesh_arc, &comm);
         let partition = par_mesh.partition();
         let exchange  = GhostExchange::from_partition(partition, &comm);
 
@@ -447,7 +447,7 @@ fn comm_split_single_group() {
 fn streaming_single_rank() {
     let mesh = Mesh::<2>::unit_square_tri(4);
     launcher(1).launch(move |comm| {
-        let pmesh = partition_simplex_streaming(Some(&mesh), &comm)
+        let pmesh = partition_mesh_streaming(Some(&mesh), &comm)
             .expect("streaming partition failed");
         assert_eq!(pmesh.global_n_nodes(), mesh.n_nodes());
         assert_eq!(pmesh.global_n_elems(), mesh.n_elems());
@@ -467,7 +467,7 @@ fn streaming_matches_replicated_2_ranks() {
     let re = Arc::clone(&replicated_elems);
     let mesh_ref = Arc::clone(&mesh);
     launcher(2).launch(move |comm| {
-        let pmesh = partition_simplex(&mesh_ref, &comm);
+        let pmesh = partition_mesh(&mesh_ref, &comm);
         rn.lock().unwrap().push((comm.rank(), pmesh.n_owned_nodes(), pmesh.n_ghost_nodes()));
         re.lock().unwrap().push((comm.rank(), pmesh.global_n_nodes(), pmesh.global_n_elems()));
     });
@@ -479,7 +479,7 @@ fn streaming_matches_replicated_2_ranks() {
     let se = Arc::clone(&streaming_elems);
     launcher(2).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh2) } else { None };
-        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+        let pmesh = partition_mesh_streaming(mesh_opt, &comm)
             .expect("streaming partition failed");
         sn.lock().unwrap().push((comm.rank(), pmesh.n_owned_nodes(), pmesh.n_ghost_nodes()));
         se.lock().unwrap().push((comm.rank(), pmesh.global_n_nodes(), pmesh.global_n_elems()));
@@ -503,7 +503,7 @@ fn streaming_ghost_exchange_after_partition() {
     let mesh = Arc::new(Mesh::<2>::unit_square_tri(4));
     launcher(2).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
-        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+        let pmesh = partition_mesh_streaming(mesh_opt, &comm)
             .expect("streaming partition failed");
 
         // Set owned nodes to their global ID, ghosts to -1.
@@ -537,7 +537,7 @@ fn streaming_4_ranks() {
     let res = Arc::clone(&results);
     launcher(4).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
-        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+        let pmesh = partition_mesh_streaming(mesh_opt, &comm)
             .expect("streaming partition failed");
 
         assert_eq!(pmesh.global_n_elems(), total_elems);
@@ -559,7 +559,7 @@ fn streaming_prism_mixed_boundary_single_rank() {
     mesh.check().expect("fixture prism");
     launcher(1).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
-        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+        let pmesh = partition_mesh_streaming(mesh_opt, &comm)
             .expect("streaming partition failed");
         assert_eq!(pmesh.global_n_nodes(), mesh.n_nodes());
         assert_eq!(pmesh.global_n_elems(), mesh.n_elems());
@@ -580,7 +580,7 @@ fn streaming_two_prisms_matches_replicated_2_ranks() {
     let rep = Arc::clone(&replicated);
     let mesh_ref = Arc::clone(&mesh);
     launcher(2).launch(move |comm| {
-        let pmesh = partition_simplex(&mesh_ref, &comm);
+        let pmesh = partition_mesh(&mesh_ref, &comm);
         rep.lock().unwrap().push((
             comm.rank(),
             pmesh.n_owned_nodes(),
@@ -593,7 +593,7 @@ fn streaming_two_prisms_matches_replicated_2_ranks() {
     let stm = Arc::clone(&streaming);
     launcher(2).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh2) } else { None };
-        let pmesh = partition_simplex_streaming(mesh_opt, &comm)
+        let pmesh = partition_mesh_streaming(mesh_opt, &comm)
             .expect("streaming partition failed");
         stm.lock().unwrap().push((
             comm.rank(),
@@ -623,7 +623,7 @@ fn metis_streaming_2_ranks() {
 
     launcher(2).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
-        let pmesh = partition_simplex_metis_streaming(mesh_opt, &comm, &opts)
+        let pmesh = partition_mesh_metis_streaming(mesh_opt, &comm, &opts)
             .expect("METIS streaming partition failed");
 
         assert_eq!(pmesh.global_n_elems(), total_elems);
@@ -643,7 +643,7 @@ fn metis_streaming_4_ranks() {
     let res = Arc::clone(&results);
     launcher(4).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
-        let pmesh = partition_simplex_metis_streaming(mesh_opt, &comm, &opts)
+        let pmesh = partition_mesh_metis_streaming(mesh_opt, &comm, &opts)
             .expect("METIS streaming partition failed");
 
         assert_eq!(pmesh.global_n_elems(), total_elems);
@@ -665,7 +665,7 @@ fn metis_streaming_ghost_exchange() {
 
     launcher(2).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
-        let pmesh = partition_simplex_metis_streaming(mesh_opt, &comm, &opts)
+        let pmesh = partition_mesh_metis_streaming(mesh_opt, &comm, &opts)
             .expect("METIS streaming partition failed");
 
         let n_total = pmesh.n_total_nodes();
@@ -699,7 +699,7 @@ fn metis_streaming_two_disjoint_prisms_matches_replicated_2_ranks() {
     let rep = Arc::clone(&replicated);
     let mesh_ref = Arc::clone(&mesh);
     launcher(2).launch(move |comm| {
-        let pmesh = partition_simplex_metis(&mesh_ref, &comm, &opts_rep);
+        let pmesh = partition_mesh_metis(&mesh_ref, &comm, &opts_rep);
         rep.lock().unwrap().push((
             comm.rank(),
             pmesh.n_owned_nodes(),
@@ -712,7 +712,7 @@ fn metis_streaming_two_disjoint_prisms_matches_replicated_2_ranks() {
     let stm = Arc::clone(&streaming);
     launcher(2).launch(move |comm| {
         let mesh_opt = if comm.is_root() { Some(&*mesh2) } else { None };
-        let pmesh = partition_simplex_metis_streaming(mesh_opt, &comm, &opts_stm)
+        let pmesh = partition_mesh_metis_streaming(mesh_opt, &comm, &opts_stm)
             .expect("METIS streaming partition failed");
         stm.lock().unwrap().push((
             comm.rank(),

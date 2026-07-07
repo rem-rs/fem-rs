@@ -20,7 +20,7 @@ use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
     launcher::native::ThreadLauncher,
     WorkerConfig,
-    par_simplex::partition_simplex,
+    par_partition::partition_mesh,
 };
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{
@@ -66,7 +66,7 @@ fn build_and_solve_parallel(
 ) -> (ParVector, ParallelFESpace<H1Space<Mesh<2>>>) {
     use std::f64::consts::PI;
     let mesh = Arc::new(Mesh::<2>::unit_square_tri(mesh_n));
-    let par_mesh = partition_simplex(&mesh, comm);
+    let par_mesh = partition_mesh(&mesh, comm);
     let local_mesh = par_mesh.local_mesh().clone();
     let local_space = H1Space::new(local_mesh, order);
     let par_space = ParallelFESpace::new(local_space, &par_mesh, comm.clone());

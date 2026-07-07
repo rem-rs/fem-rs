@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
 use fem_mesh::Mesh;
 use fem_parallel::{
-    par_simplex::partition_simplex, par_solve_pcg_jacobi, ParAssembler, ParVector, ParallelFESpace,
+    par_partition::partition_mesh, par_solve_pcg_jacobi, ParAssembler, ParVector, ParallelFESpace,
     WorkerConfig,
 };
 use fem_parallel::launcher::native::ThreadLauncher;
@@ -112,7 +112,7 @@ fn run_case(
         let rank = comm.rank();
 
         // 1. Partition mesh.
-        let par_mesh = partition_simplex(&mesh, &comm);
+        let par_mesh = partition_mesh(&mesh, &comm);
         let local_mesh = par_mesh.local_mesh().clone();
 
         // 2. Build parallel FE space.

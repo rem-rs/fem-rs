@@ -31,7 +31,7 @@ use crate::{Comm, GhostExchange, MeshPartition};
 
 /// A distributed mesh: local sub-mesh + MPI partition metadata.
 ///
-/// Construct via [`partition_simplex`](super::par_simplex::partition_simplex)
+/// Construct via [`partition_mesh`](super::par_partition::partition_mesh)
 /// or any custom partitioner that builds a [`MeshPartition`] describing the
 /// local node/element ownership.
 pub struct ParallelMesh<M: MeshTopology> {

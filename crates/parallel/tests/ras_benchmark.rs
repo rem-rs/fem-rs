@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_mesh::Mesh;
 use fem_parallel::{
-    par_solve_gmres_ras, par_solve_pcg_ras, partition_simplex,
+    par_solve_gmres_ras, par_solve_pcg_ras, partition_mesh,
     summarize_ras_hpc, ParAssembler, ParallelFESpace, RasConfig, RasLocalSolverKind,
 };
 use fem_parallel::par_ras::{par_solve_gmres_schur, SchurPrecond};
@@ -133,7 +133,7 @@ fn run_scaling_point(ranks: usize, mode: &'static str, mesh_n: usize) -> Scaling
     let out_shared = Arc::clone(&out);
 
     launcher.launch(move |comm| {
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
         let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
         let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -211,7 +211,7 @@ fn ras_benchmark_report_two_ranks() {
     let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
     launcher.launch(move |comm| {
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
         let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
         let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -584,7 +584,7 @@ fn schur_scaling_report_gmres() {
         let out_shared = Arc::clone(&out);
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 

@@ -12,7 +12,7 @@
 
 use fem_core::Rank;
 use fem_mesh::{MeshTopology, Mesh};
-use crate::par_simplex::extract_submesh_from_partition;
+use crate::par_partition::extract_submesh_from_partition;
 
 /// Options for RCB partitioning.
 #[derive(Debug, Clone, Default)]
@@ -54,7 +54,7 @@ pub fn partition_rcb<const D: usize>(
 }
 
 /// Build an RCB-based ParallelMesh.
-pub fn partition_simplex_rcb<const D: usize>(
+pub fn partition_mesh_rcb<const D: usize>(
     mesh: &Mesh<D>,
     comm: &crate::Comm,
     opts: Option<&RcbOptions>,

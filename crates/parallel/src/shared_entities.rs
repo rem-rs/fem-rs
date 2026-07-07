@@ -124,7 +124,7 @@ impl SharedEntities {
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
-    use crate::par_simplex::partition_simplex;
+    use crate::par_partition::partition_mesh;
     use crate::mpi_test_env::test_world_comm;
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_tri(8);
         let n_total_nodes = mesh.n_nodes();
         let comm_rank: Rank = 0;
-        let pmesh = partition_simplex(&mesh, &test_world_comm());
+        let pmesh = partition_mesh(&mesh, &test_world_comm());
         let se = SharedEntities::from_partition(pmesh.partition(), comm_rank);
         let n_shared: usize = se.vertices.values().map(|v| v.len()).sum();
         eprintln!("Serial rank: {n_shared} shared vertices out of {n_total_nodes} total");
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn shared_edges_placeholder_does_not_panic() {
         let mesh = Mesh::<3>::unit_cube_tet(2);
-        let pmesh = partition_simplex(&mesh, &test_world_comm());
+        let pmesh = partition_mesh(&mesh, &test_world_comm());
         let mut se = SharedEntities::from_partition(pmesh.partition(), 0);
         se.build_edges_faces(&mesh, pmesh.partition(), 0);
     }

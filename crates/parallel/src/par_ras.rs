@@ -750,7 +750,7 @@ mod tests {
     use crate::launcher::native::ThreadLauncher;
     use crate::launcher::WorkerConfig;
     use crate::par_assembler::ParAssembler;
-    use crate::par_simplex::partition_simplex;
+    use crate::par_partition::partition_mesh;
     use crate::par_solver::par_solve_pcg_jacobi;
     use crate::par_space::ParallelFESpace;
     use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
@@ -766,7 +766,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -787,7 +787,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -809,7 +809,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -832,7 +832,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -877,7 +877,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -927,7 +927,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -982,7 +982,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1018,7 +1018,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1059,7 +1059,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1128,7 +1128,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1168,7 +1168,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1219,7 +1219,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1257,7 +1257,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1301,7 +1301,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1354,7 +1354,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1396,7 +1396,7 @@ mod tests {
         let launcher = ThreadLauncher::new(WorkerConfig::new(2));
 
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
             let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 
@@ -1437,7 +1437,7 @@ mod tests {
 
     fn test_schur_precond_build_and_solve(comm: &crate::comm::Comm) {
         let mesh = Mesh::<2>::unit_square_tri(6);
-        let pmesh = partition_simplex(&mesh, comm);
+        let pmesh = partition_mesh(&mesh, comm);
         let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
         let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
 

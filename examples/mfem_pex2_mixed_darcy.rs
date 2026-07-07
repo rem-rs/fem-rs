@@ -25,7 +25,7 @@ use fem_assembly::{
 use fem_mesh::Mesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
-    par_simplex::partition_simplex,
+    par_partition::partition_mesh,
     par_solve_pcg_jacobi,
     WorkerConfig,
 };
@@ -83,7 +83,7 @@ fn run_case(mesh_n: usize, n_workers: usize, source_scale: f64) -> RunResult {
         let rank = comm.rank();
 
         // 1. Partition mesh.
-        let par_mesh = partition_simplex(&mesh, &comm);
+        let par_mesh = partition_mesh(&mesh, &comm);
         let local_mesh = par_mesh.local_mesh().clone();
 
         // 2. Build parallel FE spaces (two H1 P1 spaces on same mesh).

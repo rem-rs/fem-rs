@@ -360,7 +360,7 @@ fn gather_mesh<const D: usize>(
         // For simplicity, we treat each rank's local nodes as consecutive blocks.
         //
         // NOTE: This simplified gather assumes contiguous per-rank node ranges,
-        // which matches the contiguous partition strategy used by partition_simplex.
+        // which matches the contiguous partition strategy used by partition_mesh.
         node_offset += all_n_nodes[0];
         _elem_offset += all_n_elems[0];
 

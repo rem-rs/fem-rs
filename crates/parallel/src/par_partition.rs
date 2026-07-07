@@ -1,6 +1,6 @@
 //! Partitioner for [`Mesh<D>`].
 //!
-//! [`partition_simplex`] distributes a serial `Mesh<D>` across the
+//! [`partition_mesh`] distributes a serial `Mesh<D>` across the
 //! ranks of a [`Comm`] using a **contiguous element partition**:
 //!
 //! * Rank `r` owns elements `[r·chunk, (r+1)·chunk)`.
@@ -50,38 +50,38 @@ use crate::mesh_serde;
 /// mesh; other ranks hold only their local portion.
 ///
 /// For the **replicate-then-extract** fallback (all ranks hold the full mesh),
-/// use [`partition_simplex_replicated`].
+/// use [`partition_mesh_replicated`].
 ///
 /// # Panics
 /// Panics if the mesh has zero elements.
-pub fn partition_simplex<const D: usize>(
+pub fn partition_mesh<const D: usize>(
     mesh: &Mesh<D>,
     comm: &Comm,
 ) -> ParallelMesh<Mesh<D>> {
     if comm.size() == 1 {
         let n = mesh.n_elems();
-        assert!(n > 0, "partition_simplex: mesh has no elements");
+        assert!(n > 0, "partition_mesh: mesh has no elements");
         let partition = MeshPartition::new_serial(mesh.n_nodes(), n);
         return ParallelMesh::new(mesh.clone(), comm.clone(), partition);
     }
     // Multi-rank: use streaming path (rank 0 partitions, sends sub-meshes).
     // Non-root ranks receive their portion without loading the full mesh.
-    partition_simplex_streaming(Some(mesh), comm)
-        .expect("partition_simplex streaming failed")
+    partition_mesh_streaming(Some(mesh), comm)
+        .expect("partition_mesh streaming failed")
 }
 
 /// Replicated-then-extract partitioner (all ranks hold the full mesh).
 ///
 /// This is the **fallback** for environments where point-to-point messaging
 /// is unavailable (e.g., WASM Workers with limited channels).  On native
-/// platforms, [`partition_simplex`] uses streaming by default.
-pub fn partition_simplex_replicated<const D: usize>(
+/// platforms, [`partition_mesh`] uses streaming by default.
+pub fn partition_mesh_replicated<const D: usize>(
     mesh: &Mesh<D>,
     comm: &Comm,
 ) -> ParallelMesh<Mesh<D>> {
     let n_elems = mesh.n_elems();
     let n_nodes_total = mesh.n_nodes();
-    assert!(n_elems > 0, "partition_simplex: mesh has no elements");
+    assert!(n_elems > 0, "partition_mesh: mesh has no elements");
 
     // ── single-rank fast path ────────────────────────────────────────────────
     if comm.size() == 1 {
@@ -114,7 +114,7 @@ pub(crate) const STREAM_TAG_BASE: i32 = 0x3700;
 ///
 /// # Errors
 /// Returns `Err` if the binary mesh decode fails on a receiving rank.
-pub fn partition_simplex_streaming<const D: usize>(
+pub fn partition_mesh_streaming<const D: usize>(
     mesh: Option<&Mesh<D>>,
     comm: &Comm,
 ) -> Result<ParallelMesh<Mesh<D>>, String> {
@@ -173,8 +173,8 @@ fn extract_submesh_for_rank<const D: usize>(
 /// arbitrary element partition vector.
 ///
 /// This is the shared core used by both the contiguous-block partitioner
-/// (`partition_simplex`) and the METIS graph partitioner
-/// (`partition_simplex_metis`).
+/// (`partition_mesh`) and the METIS graph partitioner
+/// (`partition_mesh_metis`).
 ///
 /// # Arguments
 /// * `mesh` — the full serial mesh.
@@ -397,7 +397,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_tri(n);
         let comm = serial_comm();
 
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
 
         // Global stats must match the original serial mesh.
         assert_eq!(pmesh.global_n_nodes(), mesh.n_nodes(),
@@ -419,7 +419,7 @@ mod tests {
     fn serial_partition_coords_preserved() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
 
         // All node coordinates must be preserved.
         for n in 0..mesh.n_nodes() as u32 {
@@ -434,7 +434,7 @@ mod tests {
     fn serial_partition_connectivity_preserved() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
 
         // Single-rank: element connectivity is identical to serial.
         for e in 0..mesh.n_elems() as u32 {
@@ -450,7 +450,7 @@ mod tests {
     fn serial_partition_global_id_mapping() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
 
         // Single-rank: global IDs == local IDs.
         for lid in 0..mesh.n_nodes() as u32 {
@@ -468,7 +468,7 @@ mod tests {
         let n = 4usize;
         let mesh = Mesh::<2>::unit_square_tri(n);
         let comm = serial_comm();
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
 
         // Sum x-coordinates of all owned nodes via allreduce.
         // unit_square_tri(4): nodes at (i/4, j/4) for i,j in 0..=4.
@@ -488,7 +488,7 @@ mod tests {
     fn serial_partition_ghost_exchange_trivial() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
 
         // Single rank: ghost exchange is a no-op.
         assert!(pmesh.ghost_exchange().is_trivial());
@@ -504,7 +504,7 @@ mod tests {
     fn local_mesh_passes_check() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = serial_comm();
-        let pmesh = partition_simplex(&mesh, &comm);
+        let pmesh = partition_mesh(&mesh, &comm);
         pmesh.local_mesh().check().expect("local mesh check failed");
     }
 

@@ -53,9 +53,9 @@
 //!
 //! ### Typical distributed FEM pipeline
 //!
-//! 1. **Partition** the global mesh: [`partition_simplex`](par_simplex::partition_simplex),
-//!    [`partition_simplex_metis`](metis::partition_simplex_metis), or **streaming** variants
-//!    when only rank 0 holds the full mesh — see [`partition_simplex_streaming`](par_simplex::partition_simplex_streaming)
+//! 1. **Partition** the global mesh: [`partition_mesh`](par_partition::partition_mesh),
+//!    [`partition_mesh_metis`](metis::partition_mesh_metis), or **streaming** variants
+//!    when only rank 0 holds the full mesh — see [`partition_mesh_streaming`](par_partition::partition_mesh_streaming)
 //!    and [`mesh_serde::encode_submesh`](mesh_serde::encode_submesh).
 //! 2. **Ghost layout**: [`GhostExchange::from_partition`](ghost::GhostExchange::from_partition)
 //!    (uses an all-to-all style setup so each rank knows halo send/recv lists).
@@ -104,7 +104,7 @@
 //! when [`Comm::is_native_mpi`](comm::Comm::is_native_mpi) is true, overlapping the diagonal
 //! SpMV with in-flight receives/sends (see [`GhostExchange::forward_overlapping`](crate::ghost::GhostExchange::forward_overlapping)).
 //!
-//! Streaming partition ([`partition_simplex_streaming`]) serialises sub-meshes with
+//! Streaming partition ([`partition_mesh_streaming`]) serialises sub-meshes with
 //! [`mesh_serde::encode_submesh`](mesh_serde::encode_submesh); **wire format v2** carries
 //! mixed volume elements and mixed boundary faces (e.g. `Prism6` / `Pyramid5` with Tri3+Quad4
 //! boundaries) so cylinder- or cone-like GMSH meshes round-trip correctly across ranks.
@@ -125,7 +125,7 @@ pub mod par_csr;
 pub mod par_mesh;
 pub mod par_mixed_assembler;
 pub mod par_ras;
-pub mod par_simplex;
+pub mod par_partition;
 pub mod par_solver;
 pub mod par_direct;
 pub mod par_space;
@@ -153,7 +153,7 @@ pub use fem_linalg::{spmv_parallel_min_rows, FEM_LINALG_SPMV_PARALLEL_MIN_ROWS};
 pub use dof_partition::DofPartition;
 pub use ghost::GhostExchange;
 pub use launcher::{Launcher, WorkerConfig};
-pub use metis::{MetisPartitioner, MetisOptions, partition_simplex_metis, partition_simplex_metis_streaming};
+pub use metis::{MetisPartitioner, MetisOptions, partition_mesh_metis, partition_mesh_metis_streaming};
 pub use par_assembler::ParAssembler;
 pub use par_amg::{ParAmgConfig, ParAmgHierarchy, par_solve_pcg_amg};
 pub use par_csr::ParCsrMatrix;
@@ -163,7 +163,7 @@ pub use par_ras::{
 	RasConfig, RasHpcDiagnostics, RasLocalSolverKind, RasPrecond, par_solve_gmres_ras,
 	par_solve_pcg_ras, summarize_ras_hpc,
 };
-pub use par_simplex::{partition_simplex, partition_simplex_replicated, partition_simplex_streaming};
+pub use par_partition::{partition_mesh, partition_mesh_replicated, partition_mesh_streaming};
 pub use par_solver::{par_solve_cg, par_solve_gmres_jacobi, par_solve_pcg_jacobi, par_solve_minres};
 pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;

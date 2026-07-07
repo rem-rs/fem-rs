@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
 use fem_mesh::Mesh;
 use fem_parallel::{
-    ParAssembler, ParVector, ParallelFESpace, par_simplex::partition_simplex,
+    ParAssembler, ParVector, ParallelFESpace, par_partition::partition_mesh,
     par_solve_pcg_jacobi, launcher::native::ThreadLauncher, WorkerConfig,
 };
 use fem_solver::SolverConfig;
@@ -15,7 +15,7 @@ fn main() {
     let mesh = Arc::new(Mesh::<2>::unit_square_tri(n));
     let res = Arc::new(Mutex::new(None)); let rs = Arc::clone(&res);
     ThreadLauncher::new(WorkerConfig::new(r)).launch(move |c| {
-        let pm = partition_simplex(&mesh, &c); let lm = pm.local_mesh().clone();
+        let pm = partition_mesh(&mesh, &c); let lm = pm.local_mesh().clone();
         let ps = ParallelFESpace::new(H1Space::new(lm, 1), &pm, c.clone());
         let stiff = ParAssembler::assemble_bilinear(&ps, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let mut mass = ParAssembler::assemble_bilinear(&ps, &[&MassIntegrator { rho: 1.0 }], 3);

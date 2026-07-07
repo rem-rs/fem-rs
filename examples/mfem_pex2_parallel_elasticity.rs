@@ -10,7 +10,7 @@ use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_mesh::Mesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
-    par_simplex::partition_simplex,
+    par_partition::partition_mesh,
     launcher::native::ThreadLauncher, WorkerConfig,
 };
 use fem_solver::SolverConfig;
@@ -27,7 +27,7 @@ fn main() {
 
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
     launcher.launch(move |comm| {
-        let par_mesh = partition_simplex(&mesh, &comm);
+        let par_mesh = partition_mesh(&mesh, &comm);
         let local_mesh = par_mesh.local_mesh().clone();
         let order: u8 = 1;
         let local_space = H1Space::new(local_mesh, order);

@@ -27,7 +27,7 @@ use fem_parallel::{
     ParAssembler,
     ParVector,
     ParallelFESpace,
-    par_simplex::partition_simplex_streaming,
+    par_partition::partition_mesh_streaming,
     par_solver::par_solve_pcg_jacobi,
 };
 
@@ -68,7 +68,7 @@ fn run_poisson_2d(comm: &Comm, n_grid: usize) {
         None
     };
 
-    let pmesh = partition_simplex_streaming(mesh.as_ref(), comm)
+    let pmesh = partition_mesh_streaming(mesh.as_ref(), comm)
         .expect("streaming partition failed");
 
     let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);

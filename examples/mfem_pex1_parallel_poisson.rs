@@ -19,8 +19,8 @@ use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_mesh::Mesh;
 use fem_parallel::{
     MetisOptions, ParAssembler, ParVector, ParallelFESpace,
-    par_simplex::{partition_simplex, partition_simplex_streaming},
-    metis::{partition_simplex_metis, partition_simplex_metis_streaming},
+    par_partition::{partition_mesh, partition_mesh_streaming},
+    metis::{partition_mesh_metis, partition_mesh_metis_streaming},
     par_solve_pcg_jacobi,
     WorkerConfig,
 };
@@ -94,16 +94,16 @@ fn run_case(run: RunArgs) -> RunResult {
         let par_mesh = if run.use_streaming {
             let mesh_opt = if comm.is_root() { Some(&*mesh) } else { None };
             if run.use_metis {
-                partition_simplex_metis_streaming(mesh_opt, &comm, &MetisOptions::default())
+                partition_mesh_metis_streaming(mesh_opt, &comm, &MetisOptions::default())
                     .expect("METIS streaming partition failed")
             } else {
-                partition_simplex_streaming(mesh_opt, &comm)
+                partition_mesh_streaming(mesh_opt, &comm)
                     .expect("streaming partition failed")
             }
         } else if run.use_metis {
-            partition_simplex_metis(&mesh, &comm, &MetisOptions::default())
+            partition_mesh_metis(&mesh, &comm, &MetisOptions::default())
         } else {
-            partition_simplex(&mesh, &comm)
+            partition_mesh(&mesh, &comm)
         };
 
         let rank = comm.rank();

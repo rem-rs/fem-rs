@@ -5,7 +5,7 @@
 //! only its owned elements and nodes; ghost topology is built automatically
 //! via node‑owner exchange.
 //!
-//! This avoids the `O(N)` memory overhead of [`partition_simplex`] where
+//! This avoids the `O(N)` memory overhead of [`partition_mesh`] where
 //! every rank first replicates the full serial mesh.
 //!
 //! # Example
@@ -143,13 +143,13 @@ mod tests {
     use fem_mesh::Mesh;
     use fem_mesh::topology::MeshTopology;
     use crate::mpi_test_env::test_world_comm;
-    use crate::par_simplex::partition_simplex;
+    use crate::par_partition::partition_mesh;
 
     #[test]
     fn builder_matches_serial_partition() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = test_world_comm();
-        let serial_pmesh = partition_simplex(&mesh, &comm);
+        let serial_pmesh = partition_mesh(&mesh, &comm);
 
         // Build the same mesh via builder
         let mut builder = ParMeshBuilder::new(comm.clone());

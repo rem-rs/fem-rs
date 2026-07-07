@@ -28,7 +28,7 @@ use fem_assembly::{
 use fem_mesh::Mesh;
 use fem_parallel::{
     ParVectorAssembler, ParVector, ParallelFESpace,
-    par_simplex::partition_simplex,
+    par_partition::partition_mesh,
     par_solve_pcg_jacobi,
     WorkerConfig,
 };
@@ -133,7 +133,7 @@ fn solve_case(run: RunArgs) -> CaseResult {
         let rank = comm.rank();
 
         // 1. Partition mesh.
-        let par_mesh = partition_simplex(&mesh, &comm);
+        let par_mesh = partition_mesh(&mesh, &comm);
 
         // 2. Build parallel H(curl) space.
         let local_space = HCurlSpace::new(par_mesh.local_mesh().clone(), 1);

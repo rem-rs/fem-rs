@@ -102,14 +102,14 @@ mod tests {
     use fem_mesh::Mesh;
     use crate::launcher::native::ThreadLauncher;
     use crate::launcher::WorkerConfig;
-    use crate::par_simplex::partition_simplex;
+    use crate::par_partition::partition_mesh;
 
     #[test]
     fn gpu_aware_serial_noop() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let ex = GpuAwareExchange::new(pmesh.ghost_exchange(), GpuAwareConfig::default());
             let n = pmesh.n_total_nodes();
             let mut data: Vec<f64> = (0..n).map(|i| i as f64).collect();
@@ -124,7 +124,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let launcher = ThreadLauncher::new(WorkerConfig::new(1));
         launcher.launch(move |comm| {
-            let pmesh = partition_simplex(&mesh, &comm);
+            let pmesh = partition_mesh(&mesh, &comm);
             let ex = GpuAwareExchange::new(pmesh.ghost_exchange(), GpuAwareConfig::default());
             let n = pmesh.n_total_nodes();
             let mut data: Vec<f64> = (0..n).map(|i| i as f64).collect();

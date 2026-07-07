@@ -6,7 +6,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_parallel::{
-    launcher::native::ThreadLauncher, WorkerConfig, par_simplex::partition_simplex,
+    launcher::native::ThreadLauncher, WorkerConfig, par_partition::partition_mesh,
 };
 use fem_solver::{SolverConfig, GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg};
 use fem_space::H1Space;
@@ -21,7 +21,7 @@ fn main() {
     let res = Arc::new(Mutex::new(None)); let rs = Arc::clone(&res);
 
     ThreadLauncher::new(WorkerConfig::new(r)).launch(move |c| {
-        let pm = partition_simplex(&mesh, &c);
+        let pm = partition_mesh(&mesh, &c);
         let lm = pm.local_mesh().clone();
 
         // Build GMG hierarchy on local mesh

@@ -39,7 +39,7 @@ use fem_mesh::Mesh;
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
 use crate::mesh_serde;
-use crate::par_simplex::{extract_submesh_from_partition, STREAM_TAG_BASE};
+use crate::par_partition::{extract_submesh_from_partition, STREAM_TAG_BASE};
 
 // ─── Options ─────────────────────────────────────────────────────────────────
 
@@ -80,17 +80,17 @@ impl MetisPartitioner {
     }
 }
 
-// ─── partition_simplex_metis ──────────────────────────────────────────────────
+// ─── partition_mesh_metis ──────────────────────────────────────────────────
 
 /// Distribute `mesh` across `comm.size()` ranks using k-way partitioning.
-pub fn partition_simplex_metis<const D: usize>(
+pub fn partition_mesh_metis<const D: usize>(
     mesh: &Mesh<D>,
     comm: &Comm,
     opts: &MetisOptions,
 ) -> ParallelMesh<Mesh<D>> {
     let n_elems = mesh.n_elems();
     let n_nodes_total = mesh.n_nodes();
-    assert!(n_elems > 0, "partition_simplex_metis: mesh has no elements");
+    assert!(n_elems > 0, "partition_mesh_metis: mesh has no elements");
 
     let size = comm.size();
     if size == 1 {
@@ -107,10 +107,10 @@ pub fn partition_simplex_metis<const D: usize>(
     ParallelMesh::new(local_mesh, comm.clone(), partition)
 }
 
-// ─── partition_simplex_metis_streaming ─────────────────────────────────────────
+// ─── partition_mesh_metis_streaming ─────────────────────────────────────────
 
 /// Streaming partition: only rank 0 holds the full mesh.
-pub fn partition_simplex_metis_streaming<const D: usize>(
+pub fn partition_mesh_metis_streaming<const D: usize>(
     mesh: Option<&Mesh<D>>,
     comm: &Comm,
     opts: &MetisOptions,
@@ -183,11 +183,11 @@ mod tests {
     }
 
     #[test]
-    fn partition_simplex_serial() {
+    fn partition_mesh_serial() {
         use crate::mpi_test_env::test_world_comm;
         let mesh = Mesh::<2>::unit_square_tri(4);
         let comm = test_world_comm();
-        let pmesh = partition_simplex_metis(&mesh, &comm, &MetisOptions::default());
+        let pmesh = partition_mesh_metis(&mesh, &comm, &MetisOptions::default());
         assert_eq!(pmesh.global_n_elems(), mesh.n_elems());
         assert_eq!(pmesh.global_n_nodes(), mesh.n_nodes());
         pmesh.local_mesh().check().expect("local mesh failed check");

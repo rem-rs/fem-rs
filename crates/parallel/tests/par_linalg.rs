@@ -12,7 +12,7 @@ use fem_mesh::Mesh;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace, WorkerConfig,
-    par_simplex::partition_simplex,
+    par_partition::partition_mesh,
     par_solve_pcg_amg, ParAmgConfig,
     par_solve_pcg_ras, RasConfig, RasLocalSolverKind,
 };
@@ -30,7 +30,7 @@ fn build_poisson(
     order: u8,
 ) -> (fem_parallel::ParCsrMatrix, ParVector, ParallelFESpace<H1Space<Mesh<2>>>) {
     let mesh = Arc::new(Mesh::<2>::unit_square_tri(mesh_n));
-    let par_mesh = partition_simplex(&mesh, comm);
+    let par_mesh = partition_mesh(&mesh, comm);
     let local_mesh = par_mesh.local_mesh().clone();
     let local_space = H1Space::new(local_mesh, order);
     let par_space = ParallelFESpace::new(local_space, &par_mesh, comm.clone());
@@ -164,7 +164,7 @@ fn par_mms_p1_two_ranks() {
     let src_fn = |x: &[f64]| 2.0*PI*PI*(PI*x[0]).sin()*(PI*x[1]).sin();
     launcher(2).launch(move |comm| {
         let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
-        let pm = partition_simplex(&mesh, &comm);
+        let pm = partition_mesh(&mesh, &comm);
         let ls = H1Space::new(pm.local_mesh().clone(), 1);
         let ps = ParallelFESpace::new(ls, &pm, comm.clone());
         let diff = DiffusionIntegrator { kappa: 1.0 };
@@ -190,7 +190,7 @@ fn par_mms_p2_two_ranks() {
     let src_fn = |x: &[f64]| 2.0*PI*PI*(PI*x[0]).sin()*(PI*x[1]).sin();
     launcher(2).launch(move |comm| {
         let mesh = Arc::new(Mesh::<2>::unit_square_tri(8));
-        let pm = partition_simplex(&mesh, &comm);
+        let pm = partition_mesh(&mesh, &comm);
         let lm = pm.local_mesh().clone();
         let ls = H1Space::new(lm.clone(), 2);
         let dm = fem_space::dof_manager::DofManager::new(&lm, 2);
@@ -220,7 +220,7 @@ fn par_mms_p1_four_ranks_matches_two_ranks() {
     let r = Arc::clone(&results);
     launcher(4).launch(move |comm| {
         let mesh = Arc::new(Mesh::<2>::unit_square_tri(12));
-        let pm = partition_simplex(&mesh, &comm);
+        let pm = partition_mesh(&mesh, &comm);
         let ls = H1Space::new(pm.local_mesh().clone(), 1);
         let ps = ParallelFESpace::new(ls, &pm, comm.clone());
         let diff = DiffusionIntegrator { kappa: 1.0 };

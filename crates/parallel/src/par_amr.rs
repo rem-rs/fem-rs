@@ -13,7 +13,7 @@ use crate::{
     partition::MeshPartition,
     ghost::GhostExchange,
     mesh_serde::{encode_submesh, decode_submesh},
-    par_simplex::{partition_simplex_streaming, STREAM_TAG_BASE},
+    par_partition::{partition_mesh_streaming, STREAM_TAG_BASE},
 };
 
 const REPART_TAG_BASE: i32 = 0x3800;
@@ -197,7 +197,7 @@ fn merge_submeshes(
 /// Re-distribute elements across MPI ranks after refinement.
 ///
 /// Gathers all sub-meshes to rank 0, merges them into a single global mesh,
-/// and redistributes via [`partition_simplex_streaming`].
+/// and redistributes via [`partition_mesh_streaming`].
 pub fn par_repartition(
     par_mesh: ParallelMesh<Mesh<2>>,
 ) -> Result<ParallelMesh<Mesh<2>>, ParAmrError> {
@@ -228,7 +228,7 @@ pub fn par_repartition(
         let global_mesh = merge_submeshes(&meshes, &parts)?;
 
         // Redistribute using the streaming partitioner
-        partition_simplex_streaming(Some(&global_mesh), &comm)
+        partition_mesh_streaming(Some(&global_mesh), &comm)
             .map_err(ParAmrError::RepartitionError)
     } else {
         // Send our mesh to rank 0

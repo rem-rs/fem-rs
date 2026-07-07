@@ -13,7 +13,7 @@
 
 use fem_core::Rank;
 use fem_mesh::{MeshTopology, Mesh};
-use crate::par_simplex::extract_submesh_from_partition;
+use crate::par_partition::extract_submesh_from_partition;
 
 /// Options for SFC partitioners.
 #[derive(Debug, Clone)]
@@ -50,7 +50,7 @@ pub fn partition_morton<const D: usize>(
 }
 
 /// Build a Morton-based ParallelMesh.
-pub fn partition_simplex_morton<const D: usize>(
+pub fn partition_mesh_morton<const D: usize>(
     mesh: &Mesh<D>,
     comm: &crate::Comm,
     opts: Option<&SfcOptions>,
@@ -82,7 +82,7 @@ pub fn partition_hilbert<const D: usize>(
 }
 
 /// Build a Hilbert-based ParallelMesh.
-pub fn partition_simplex_hilbert<const D: usize>(
+pub fn partition_mesh_hilbert<const D: usize>(
     mesh: &Mesh<D>,
     comm: &crate::Comm,
     opts: Option<&SfcOptions>,
