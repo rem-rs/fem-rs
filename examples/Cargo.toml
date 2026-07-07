@@ -585,3 +585,5 @@ path = "mfem_mc_random_field.rs"
 name = "fem_examples"
 path = "src/lib.rs"
 
+
+[[example]]

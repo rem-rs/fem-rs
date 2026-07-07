@@ -511,11 +511,17 @@ impl<M: MeshTopology> HDivSpace<M> {
         let outward_y = my - cy;
         let dot = nx * outward_x + ny * outward_y;
 
-        // `normal = [-ty, tx]` is the 90° CCW rotation of edge a→b.
+        // `normal = [-ty, tx]` is the 90° CCW rotation of edge gi→gj.
         // For a CCW element this always points INWARD.
         // outward_flip = -1 when the CCW normal disagrees with outward.
-        // global_flip is not needed: the CCW normal is independent of edge orientation.
-        if dot > 0.0 { 1.0 } else { -1.0 }
+        //
+        // global_flip: the EdgeKey stores edges canonically as (min, max).
+        // When gi > gj, the element's edge direction is opposite to the
+        // canonical direction, so the CCW normal above is also reversed.
+        // We must flip the sign to compensate.
+        let outward_flip = if dot > 0.0 { 1.0 } else { -1.0 };
+        let global_flip = if gi < gj { 1.0 } else { -1.0 };
+        global_flip * outward_flip
     }
 
     // ─── 3-D hexahedron construction ───────────────────────────────────────
