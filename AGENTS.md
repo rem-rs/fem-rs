@@ -91,6 +91,26 @@ git push
 
 ## 踩坑记录（持续更新）
 
+### ex4 H(div) 四边形/曲边界网格 L² 误差差距
+
+| 网格 | 类型 | MFEM L² | fem-rs L² | 状态 |
+|------|------|---------|-----------|------|
+| beam-tri.mesh | 直线三角 | 0.0567 | 0.0567 | ✅ 完美 |
+| square-disc.mesh | 曲边界三角 | 0.0147 | 0.141 | ❌ 10x |
+| star.mesh | 四边形 | 0.016 | 2.162 | ❌ 大差距 |
+
+三角形直线网格（beam-tri）完美匹配，说明组装路径（GradDivIntegrator + VectorMassIntegrator + Piola 变换）对仿射 Tri3 正确。四边形和曲边界网格的差异在**组装层**，目前原因未明。
+
+**已排除的原因：**
+- 插值符号修正（`interpolate_vector` 的 `element_sign`）：已验证正确
+- 等参 Jacobian（`isoparametric_jacobian` + `QuadQ1`）：与 MFEM 的 bilinear mapping 逻辑一致
+- L² 误差计算（`compute_hdiv_l2_error`）：对新模块，三/四边形分别用仿射/等参 Jacobian
+- `eliminate_dirichlet` BC 消除：与 beam-tri 一致
+
+**可能的根因（待验证）：**
+- `GradDivIntegrator`/`VectorMassIntegrator` 对 QuadRT0 的处理与 MFEM 有差异
+- 或 `VectorAssembler` 中 Piola 变换对非仿射单元的符号约定
+
 ### H(curl) 求解器选择（ex3 经验）
 
 | 预条件器 | 收敛性 | 适用场景 |

@@ -779,13 +779,16 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// affine triangles (contravariant Piola pullback of `F` to the reference triangle).
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
-        // Build DOF → element-sign map (first incident element determines the sign).
-        let mut dof_sign = vec![1.0f64; self.n_dofs];
+        // element_sign already accounts for the sorted EdgeKey direction via
+        // global_flip inside compute_sign_2d_tri / compute_sign_2d_quad.
+        // Multiplying each DOF by its element_sign gives the value that matches
+        // the assembly's convention (outward normal of the reference element).
+        let mut dof_sign = vec![0.0f64; self.n_dofs];
         for e in 0..self.mesh.n_elements() as u32 {
             let dofs = self.element_dofs(e);
             let signs = self.element_signs(e);
             for (j, &d) in dofs.iter().enumerate() {
-                if dof_sign[d as usize] == 1.0 {
+                if dof_sign[d as usize] == 0.0 {
                     dof_sign[d as usize] = signs[j];
                 }
             }
@@ -794,23 +797,19 @@ impl<M: MeshTopology> HDivSpace<M> {
             FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => {
                 if self.order == 0 {
                     // RT0: 1 DOF per edge — zero-th normal moment via midpoint rule.
-                    // The raw flux ∫ F·n ds uses the sorted EdgeKey normal (a→b, a<b).
-                    // Multiply by element_sign so the value matches the reference
-                    // element's outward-normal convention used by the assembly.
                     for (&EdgeKey(a, b), &dof) in map {
                         let pa = self.mesh.node_coords(a);
                         let pb = self.mesh.node_coords(b);
                         let mid = [0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1])];
                         let tx = pb[0] - pa[0];
                         let ty = pb[1] - pa[1];
-                        let normal = [-ty, tx]; // length = edge length, CCW of a→b
+                        let normal = [-ty, tx]; // CCW of sorted a→b direction
                         let fval = f(&mid);
                         let flux = fval[0] * normal[0] + fval[1] * normal[1];
                         result.as_slice_mut()[dof as usize] = flux * dof_sign[dof as usize];
                     }
                 } else if self.order == 1 {
                     // RT1: 2 DOFs per edge + interior bubble DOFs.
-                    // Edge DOFs (same for Tri and Quad).
                     let sq_3_5: f64 = (3.0_f64 / 5.0).sqrt();
                     let gl_pts = [0.5 * (1.0 - sq_3_5), 0.5, 0.5 * (1.0 + sq_3_5)];
                     let gl_wts = [5.0_f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
