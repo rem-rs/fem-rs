@@ -81,7 +81,7 @@ pub(crate) fn geo_ref_elem(elem_type: ElementType) -> Option<Box<dyn ReferenceEl
 ///
 /// Returns `Some` for non-affine elements (Quad/Hex with P1, or any element
 /// with `geom_order > 1`). Returns `None` for affine P1 simplex.
-pub(crate) fn geo_ref_elem_from_mesh(
+pub fn geo_ref_elem_from_mesh(
     mesh: &dyn MeshTopology,
     e: u32,
 ) -> Option<Box<dyn ReferenceElement>> {
@@ -105,7 +105,7 @@ pub(crate) fn geo_ref_elem_from_mesh(
 
 // ─── Jacobian helpers (same as assembler.rs) ────────────────────────────────
 
-pub(crate) fn isoparametric_jacobian<M: MeshTopology>(
+pub fn isoparametric_jacobian<M: MeshTopology>(
     mesh: &M,
     nodes: &[u32],
     geo_elem: &dyn ReferenceElement,

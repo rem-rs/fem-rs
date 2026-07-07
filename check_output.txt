@@ -1,0 +1,229 @@
+﻿cargo :     Checking fem-examples v0.1.0 (C:\Users\lilu\works\fem-rs\examples)
+At line:1 char:87
++ ... m.Text.UTF8Encoding]::new($false);cargo check --examples 2>&1 | Out-F ...
++                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking fe...em-rs\examples):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: unused import: `fem_assembly::Assembler`
+  --> examples\plasticity_dp_slope.rs:14:5
+   |
+14 | use fem_assembly::Assembler;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `fem_assembly::standard::DomainSourceIntegrator`
+  --> examples\plasticity_dp_slope.rs:15:5
+   |
+15 | use fem_assembly::standard::DomainSourceIntegrator;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `fem_space::H1Space`
+  --> examples\plasticity_dp_slope.rs:18:5
+   |
+18 | use fem_space::H1Space;
+   |     ^^^^^^^^^^^^^^^^^^
+
+error: unused import: `ParVector`
+ --> examples\mfem_pex10_parallel_hyperelastic.rs:6:19
+  |
+6 |     ParAssembler, ParVector, ParallelFESpace, par_simplex::partition_simplex,
+  |                   ^^^^^^^^^
+  |
+  = note: `-D unused-imports` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `fe_space::FESpace`
+ --> examples\mfem_pex10_parallel_hyperelastic.rs:9:26
+  |
+9 | use fem_space::{H1Space, fe_space::FESpace};
+  |                          ^^^^^^^^^^^^^^^^^
+
+error: unused import: `VectorReferenceElement`
+  --> examples\mfem_vec_ref_elem.rs:15:54
+   |
+15 | use fem_element::{ElemType, VecFamily, vec_ref_elem, VectorReferenceElement};
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `dof_manager::DofManager`
+  --> examples\mfem_pex6_parallel_amr.rs:21:73
+   |
+21 | use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs, dof_manager::DofManager};
+   |                                                                         ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `fem-examples` (example "mfem_vec_ref_elem") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0107]: missing generics for struct `VectorH1Space`
+  --> examples\mfem_tribol_contact_patch.rs:57:67
+   |
+57 | fn assemble_elasticity(mesh: &SimplexMesh<3>) -> (CsrMatrix<f64>, VectorH1Space) {
+   |                                                                   ^^^^^^^^^^^^^ expected 1 generic argument
+   |
+note: struct defined here, with 1 generic parameter: `M`
+  --> crates\space\src\vector_h1.rs:39:12
+   |
+39 | pub struct VectorH1Space<M: MeshTopology> {
+   |            ^^^^^^^^^^^^^ -
+help: add missing generic argument
+   |
+57 | fn assemble_elasticity(mesh: &SimplexMesh<3>) -> (CsrMatrix<f64>, VectorH1Space<M>) {
+   |                                                                                +++
+
+error: unused import: `fem_mesh::topology::MeshTopology`
+  --> examples\fluids_navier_transient.rs:17:5
+   |
+17 | use fem_mesh::topology::MeshTopology;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `fem-examples` (example "plasticity_dp_slope") due to 3 previous errors
+error: unused variable: `mat`
+  --> examples\wg_stokes_cavity.rs:39:10
+   |
+39 |     let (mat, rhs) = assemble_wg_stokes(&vel_space, &pres_space, 3, penalty, &force, &dirichlet_bc);
+   |          ^^^ help: if this is intentional, prefix it with an underscore: `_mat`
+   |
+   = note: `-D unused-variables` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: unused imports: `CoupledLinearStrategy` and `SolverConfig`
+  --> examples\multiphysics_coupled_newton.rs:15:5
+   |
+15 |     CoupledLinearStrategy, CoupledNewtonConfig,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+16 |     CoupledNewtonSolver, CoupledProblem, SolverConfig,
+   |                                          ^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `fem-examples` (example "mfem_pex10_parallel_hyperelastic") due to 2 previous errors
+error[E0308]: mismatched types
+   --> examples\mfem_tribol_contact_patch.rs:123:9
+    |
+123 |         move |x: &[f64]| -g - x[2]
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected fn pointer, found closure
+    |
+    = note: expected fn pointer `for<'a> fn(&'a [f64]) -> f64`
+                  found closure `{closure@examples\mfem_tribol_contact_patch.rs:123:9: 123:25}`
+note: closures can only be coerced to `fn` types if they do not capture any variables
+   --> examples\mfem_tribol_contact_patch.rs:123:27
+    |
+123 |         move |x: &[f64]| -g - x[2]
+    |                           ^ `g` captured here
+
+error: unused import: `Covariance1D`
+  --> examples\mfem_mc_random_field.rs:20:5
+   |
+20 |     Covariance1D as _, ExponentialCovariance1D, KarhunenLoeveExpansion1D,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `fem-examples` (example "wg_stokes_cavity") due to 1 previous error
+error: unused variable: `c`
+  --> examples\shifted_sbm_diffusion.rs:31:13
+   |
+31 |         let c = space.mesh().node_coords(d);
+   |             ^ help: if this is intentional, prefix it with an underscore: `_c`
+   |
+   = note: `-D unused-variables` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: unused variable: `shift`
+  --> examples\shifted_sbm_diffusion.rs:21:40
+   |
+21 | fn solve_poisson(mesh: SimplexMesh<2>, shift: f64) -> (Vec<f64>, usize) {
+   |                                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_shift`
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ScalarFunctionCoefficient` in module 
+`fem_assembly::postproc::coefficient`
+  --> examples\mfem_pex16_parallel_nonlinear_heat.rs:50:61
+   |
+50 |             let diff = fem_assembly::postproc::coefficient::ScalarFunctionCoefficient(Arc::new(kappa));
+   |                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in 
+`fem_assembly::postproc::coefficient`
+
+error: could not compile `fem-examples` (example "mfem_mc_random_field") due to 1 previous error
+error: could not compile `fem-examples` (example "mfem_pex6_parallel_amr") due to 1 previous error
+error: unused variable: `zero_p`
+  --> examples\fluids_navier_transient.rs:55:9
+   |
+55 |     let zero_p = vec![0.0_f64; n_p];
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_zero_p`
+   |
+   = note: `-D unused-variables` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error[E0689]: can't call method `max` on ambiguous numeric type `{float}`
+   --> examples\mfem_tribol_contact_patch.rs:218:31
+    |
+218 |                 max_p = max_p.max((-gap_offset - z).max(0.0));
+    |                               ^^^
+    |
+help: you must specify a type for this binding, like `f32`
+    |
+212 |     let mut max_p: f32 = 0.0;
+    |                  +++++
+
+error: unused variable: `n`
+  --> examples\contact_active_set_3d.rs:18:9
+   |
+18 |     let n = mesh.n_nodes() as usize;
+   |         ^ help: if this is intentional, prefix it with an underscore: `_n`
+   |
+   = note: `-D unused-variables` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error[E0689]: can't call method `max` on ambiguous numeric type `{float}`
+   --> examples\mfem_tribol_contact_patch.rs:234:31
+    |
+234 |                 max_p = max_p.max((fx * fx + fy * fy + fz * fz).sqrt());
+    |                               ^^^
+    |
+help: you must specify a type for this binding, like `f32`
+    |
+226 |     let mut max_p: f32 = 0.0;
+    |                  +++++
+
+error: unused imports: `NewtonConfig`, `NewtonSolver`, and `NonlinearForm`
+  --> examples\mfem_pex16_parallel_nonlinear_heat.rs:12:40
+   |
+12 | use fem_assembly::physics::nonlinear::{NewtonConfig, NewtonSolver, NonlinearForm};
+   |                                        ^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `fem_solver::SolverConfig`
+  --> examples\mfem_pex16_parallel_nonlinear_heat.rs:20:5
+   |
+20 | use fem_solver::SolverConfig;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `constraints::boundary_dofs`, `dof_manager::DofManager`, and `fe_space::FESpace`
+  --> examples\mfem_pex16_parallel_nonlinear_heat.rs:21:26
+   |
+21 | use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs, dof_manager::DofManager};
+   |                          ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `fem-examples` (example "shifted_sbm_diffusion") due to 2 previous errors
+error: could not compile `fem-examples` (example "multiphysics_coupled_newton") due to 1 previous error
+error: could not compile `fem-examples` (example "contact_active_set_3d") due to 1 previous error
+Some errors have detailed explanations: E0107, E0308, E0689.
+For more information about an error, try `rustc --explain E0107`.
+error: could not compile `fem-examples` (example "fluids_navier_transient") due to 2 previous errors
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `fem-examples` (example "mfem_tribol_contact_patch") due to 4 previous errors
+error: could not compile `fem-examples` (example "mfem_pex16_parallel_nonlinear_heat") due to 4 previous errors

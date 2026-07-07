@@ -240,6 +240,7 @@ fn compute_l2_error(
     uh: &[f64],
     kappa: f64,
 ) -> f64 {
+    use fem_assembly::{geo_ref_elem_from_mesh, isoparametric_jacobian};
     use fem_element::{
         reference::VectorReferenceElement,
         raviart_thomas::{QuadRT0, TriRT0},
@@ -248,6 +249,7 @@ fn compute_l2_error(
 
     let mesh = space.mesh();
     let elem_type = mesh.element_type(0);
+    let is_quad = matches!(elem_type, ElementType::Quad4);
     let ref_elem: &dyn VectorReferenceElement = match elem_type {
         ElementType::Tri3 | ElementType::Tri6 => &TriRT0,
         ElementType::Quad4 => &QuadRT0,
@@ -263,13 +265,20 @@ fn compute_l2_error(
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);
         let nodes = mesh.element_nodes(e);
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let jac = tr.jacobian();
-        let det_j = tr.det_j();
+
+        // Use per-point isoparametric Jacobian for quads, affine for tri.
+        let affine_tr = (!is_quad).then(|| ElementTransformation::from_simplex_nodes(mesh, nodes));
 
         for (qi, xi) in quad.points.iter().enumerate() {
+            let (jac, det_j, xp) = if is_quad {
+                let ge = geo_ref_elem_from_mesh(mesh as &dyn fem_mesh::topology::MeshTopology, e)
+                    .expect("geometry element for quad");
+                isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, 2)
+            } else {
+                let tr = affine_tr.as_ref().unwrap();
+                (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
+            };
             let w = quad.weights[qi] * det_j.abs();
-            let xp = tr.map_to_physical(xi);
 
             ref_elem.eval_basis_vec(xi, &mut ref_phi);
 
