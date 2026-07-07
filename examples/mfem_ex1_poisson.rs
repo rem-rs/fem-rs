@@ -29,7 +29,7 @@ use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space,
     fe_space::FESpace,
-    constraints::{apply_dirichlet, boundary_dofs},
+    constraints::{apply_dirichlet, eliminate_dirichlet, expand_from_reduced, boundary_dofs},
 };
 use fem_io::mfem::read_mfem_file;
 
@@ -44,55 +44,72 @@ fn main() {
         SimplexMesh::<2>::unit_square_tri(args.n)
     };
 
-    let mesh = &mesh;
     let space = H1Space::new(mesh.clone(), args.order);
-    let n = space.n_dofs();
+    let n_full = space.n_dofs();
 
     // Assemble stiffness matrix: a(u,v) = ∫∇u·∇v dx
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
-    let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
+    let mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
 
     // Assemble RHS: f(v) = ∫ 1·v dx  (constant source, matching MFEM ex1)
     let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
-    let mut rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
+    let rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
 
     // Homogeneous Dirichlet BCs
     let dm = space.dof_manager();
     let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
     let bnd_vals = vec![0.0_f64; bnd.len()];
-    apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
 
-    // Solve with PCG + Jacobi
-    let mut u = vec![0.0_f64; n];
-    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5_000, verbose: false, ..SolverConfig::default() };
-    let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("solver failed");
+    let u = if args.eliminate {
+        // Elimination mode: remove constrained DOFs, matching MFEM's approach
+        let (red_mat, red_rhs, free_map, constrained_map) =
+            eliminate_dirichlet(&mat, &rhs, &bnd, &bnd_vals);
+        let mut x_red = vec![0.0_f64; red_mat.nrows];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5_000, verbose: false, ..SolverConfig::default() };
+        let _res = solve_pcg_jacobi(&red_mat, &red_rhs, &mut x_red, &cfg).expect("solver failed");
+        expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_full)
+    } else {
+        // Row-zeroing mode (default, faster setup)
+        let mut mat = mat;
+        let mut rhs = rhs;
+        apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
+        let mut u = vec![0.0_f64; n_full];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5_000, verbose: false, ..SolverConfig::default() };
+        let _res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("solver failed");
+        u
+    };
 
     let u_norm = u.iter().map(|v| v * v).sum::<f64>().sqrt();
 
     println!("=== fem-rs Example 1: Poisson  (one-to-one with MFEM ex1) ===");
     println!("  Nodes: {}, Elements: {}", mesh.n_nodes(), mesh.n_elems());
-    println!("  DOFs:  {}", n);
-    println!("  Solve: {} PCG iterations, final residual = {:.3e}, converged = {}",
-             res.iterations, res.final_residual, res.converged);
+    print!("  DOFs: {} (full)", n_full);
+    if args.eliminate {
+        println!(" → {} (after elimination)", n_full - bnd.len());
+    } else {
+        println!(" → {} (row-zeroing)", n_full);
+    }
     println!("  ||u||_2 = {:.6e}", u_norm);
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 struct Args {
-    mesh:  Option<String>,
-    n:     usize,
-    order: u8,
+    mesh:      Option<String>,
+    n:         usize,
+    order:     u8,
+    eliminate: bool,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: None, n: 16, order: 1 };
+    let mut a = Args { mesh: None, n: 16, order: 1, eliminate: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-m" | "--mesh" => { a.mesh = it.next(); }
-            "--n"           => { a.n     = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
-            "--order"       => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
+            "-m" | "--mesh"  => { a.mesh = it.next(); }
+            "--n"            => { a.n     = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
+            "--order"        => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
+            "--eliminate"    => { a.eliminate = true; }
             _ => {}
         }
     }

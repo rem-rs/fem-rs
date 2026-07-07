@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use fem_core::types::DofId;
-use fem_linalg::CsrMatrix;
+use fem_linalg::{CooMatrix, CsrMatrix};
 
 use crate::dof_manager::{DofManager, EdgeKey, FaceKey, QuadFaceKey};
 use crate::hcurl::HCurlSpace;
@@ -30,6 +30,99 @@ pub fn apply_dirichlet(
     for (&dof, &val) in constrained_dofs.iter().zip(values.iter()) {
         mat.apply_dirichlet_row_zeroing(dof as usize, val, rhs);
     }
+}
+
+/// Build a reduced system by eliminating Dirichlet DOFs from the matrix.
+///
+/// Returns `(reduced_mat, reduced_rhs, free_map, constrained_map)` where:
+/// - `reduced_mat` is `m×m` (m = n − |constrained|)
+/// - `reduced_rhs` has length `m`
+/// - `free_map[i]` = original DOF index for reduced DOF `i`
+/// - `constrained_map[j]` = original DOF index for constrained DOF `j`
+///
+/// The caller can solve `reduced_mat * x_red = reduced_rhs`, then expand
+/// with [`expand_from_reduced`].
+///
+/// This produces **exactly the same linear system** that MFEM's
+/// `eliminate_bc` creates, ensuring matching DOF counts and identical
+/// numerical solutions at unconstrained nodes.
+pub fn eliminate_dirichlet(
+    mat:              &CsrMatrix<f64>,
+    rhs:              &[f64],
+    constrained_dofs: &[DofId],
+    values:           &[f64],
+) -> (CsrMatrix<f64>, Vec<f64>, Vec<usize>, Vec<usize>) {
+    assert_eq!(constrained_dofs.len(), values.len(),
+        "constrained_dofs and values must have the same length");
+
+    let n = mat.nrows;
+    let constrained_set: HashSet<usize> = constrained_dofs.iter().map(|&d| d as usize).collect();
+
+    // Build free → original mapping and constrained → original mapping
+    let mut free_map: Vec<usize> = Vec::with_capacity(n - constrained_set.len());
+    let mut constrained_map: Vec<usize> = constrained_dofs.iter().map(|&d| d as usize).collect();
+    constrained_map.sort_unstable();
+
+    // Map original → reduced index (-1 for constrained)
+    let mut orig_to_red: Vec<isize> = vec![-1; n];
+    for (red_idx, &orig_idx) in constrained_map.iter().enumerate() {
+        orig_to_red[orig_idx] = -(red_idx as isize + 1); // negative = constrained
+    }
+    for (red_idx, orig_idx) in (0..n).filter(|i| !constrained_set.contains(i)).enumerate() {
+        orig_to_red[orig_idx] = red_idx as isize;
+        free_map.push(orig_idx);
+    }
+
+    let m = free_map.len();
+    let mut coo = CooMatrix::<f64>::new(m, m);
+    let mut reduced_rhs = vec![0.0_f64; m];
+
+    // Build reduced matrix and RHS
+    for &ri in &free_map {
+        let r_red = orig_to_red[ri] as usize;
+        let mut rhs_val = rhs[ri];
+
+        for k in mat.row_ptr[ri]..mat.row_ptr[ri + 1] {
+            let cj = mat.col_idx[k] as usize;
+            let v = mat.values[k];
+
+            if let Some(c_red) = orig_to_red.get(cj) {
+                if *c_red >= 0 {
+                    // Free column → add to reduced matrix
+                    coo.add(r_red, *c_red as usize, v);
+                } else {
+                    // Constrained column → move to RHS: subtract K[i,c] * u[c]
+                    let constrained_idx = (-*c_red - 1) as usize;
+                    rhs_val -= v * values[constrained_idx];
+                }
+            }
+        }
+        reduced_rhs[r_red] = rhs_val;
+    }
+
+    let reduced_mat = coo.into_csr();
+    (reduced_mat, reduced_rhs, free_map, constrained_map)
+}
+
+/// Expand a reduced solution back to the full vector.
+///
+/// `x_full[i] = x_red[free_idx(i)]` for free DOFs,
+/// `x_full[c[j]] = values[j]` for constrained DOFs.
+pub fn expand_from_reduced(
+    x_red: &[f64],
+    free_map: &[usize],
+    constrained_map: &[usize],
+    values: &[f64],
+    n_full: usize,
+) -> Vec<f64> {
+    let mut x = vec![0.0_f64; n_full];
+    for (&orig, &val) in constrained_map.iter().zip(values.iter()) {
+        x[orig] = val;
+    }
+    for (&orig, &val) in free_map.iter().zip(x_red.iter()) {
+        x[orig] = val;
+    }
+    x
 }
 
 /// Identify which DOFs lie on boundary faces with the given tag(s).
