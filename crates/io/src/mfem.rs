@@ -78,14 +78,13 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
 
     read_line(&mut r)?;  // "elements"
     let n_elem = read_uint(&mut r)?;
-    let mut elem_conn: Vec<Vec<u32>> = Vec::with_capacity(n_elem);
-    let mut elem_tags: Vec<i32> = Vec::with_capacity(n_elem);
+    let mut elem_raw_conn: Vec<Vec<usize>> = Vec::with_capacity(n_elem);
     let mut elem_types: Vec<ElementType> = Vec::with_capacity(n_elem);
+    let mut elem_tags: Vec<i32> = Vec::with_capacity(n_elem);
     let mut uniform_type: Option<ElementType> = None;
     for _ in 0..n_elem {
         let vals = read_uint_line(&mut r)?;
         if vals.len() < 3 { return Err(FemError::Mesh("MFEM: invalid element line".into())); }
-        // MFEM v1.0/v1.2 format: attribute geometry_type v1 v2 ...
         let attr = vals[0];
         let et = mfem_elem_type(vals[1] as u32)
             .ok_or_else(|| FemError::Mesh(format!("MFEM: unknown elem type {}", vals[1])))?;
@@ -95,13 +94,25 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         }
         elem_types.push(et);
         elem_tags.push(attr as i32);
-        elem_conn.push(vals[2..].iter().map(|&v| (v - 1) as u32).collect());
+        elem_raw_conn.push(vals[2..].to_vec());
         if n_elem == 1 { uniform_type = Some(et); }
     }
     if n_elem > 0 {
         let first = elem_types[0];
         uniform_type = if elem_types.iter().all(|&t| t == first) { Some(first) } else { None };
     }
+
+    // Detect 0-based vs 1-based vertex indexing
+    // MFEM spec says 1-based, but some files (star.mesh) use 0-based.
+    let is_zero_based = elem_raw_conn.iter().flatten().any(|&v| v == 0);
+
+    // Convert to 0-based (subtract 1 if file is 1-based, leave as-is if 0-based)
+    let fix_idx = |v: usize| -> u32 {
+        if is_zero_based { v as u32 } else { (v - 1) as u32 }
+    };
+    let elem_conn: Vec<Vec<u32>> = elem_raw_conn.iter()
+        .map(|row| row.iter().map(|&v| fix_idx(v)).collect())
+        .collect();
 
     read_line(&mut r)?;  // "boundary"
     let n_bdr = read_uint(&mut r)?;
@@ -120,7 +131,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         }
         bdr_types.push(et);
         face_tags.push(attr as i32);
-        face_conn.push(vals[2..].iter().map(|&v| (v - 1) as u32).collect());
+        face_conn.push(vals[2..].iter().map(|&v| fix_idx(v)).collect());
     }
 
     read_line(&mut r)?;  // "vertices"
