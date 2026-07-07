@@ -55,9 +55,15 @@ fn main() {
     let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
     let rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
 
-    // Homogeneous Dirichlet BCs
+    // Homogeneous Dirichlet BCs on all external boundaries (matching MFEM ex1)
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let mesh = space.mesh();
+    let all_tags: Vec<i32> = mesh.unique_boundary_tags();
+    let bnd = if all_tags.is_empty() {
+        vec![]
+    } else {
+        boundary_dofs(mesh, dm, &all_tags)
+    };
     let bnd_vals = vec![0.0_f64; bnd.len()];
 
     let u = if args.eliminate {

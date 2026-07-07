@@ -22,7 +22,7 @@ fn main() {
         let mut rhs = ParAssembler::assemble_linear(&ps, &[&DomainSourceIntegrator::new(|x: &[f64]| {
             let r2 = (x[0]-0.5).powi(2)+(x[1]-0.5).powi(2); if r2 < 0.04 { 1.0 } else { 0.0 }
         })], 3);
-        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &[1,2,3,4]);
+        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &ps.local_space().mesh().unique_boundary_tags());
         let dp = ps.dof_partition(); for &d in &bd { let p = dp.permute_dof(d) as usize; if p < dp.n_owned_dofs { a.apply_dirichlet_par(p, 0.0, &mut rhs); } }
         let mut u = ParVector::zeros(&ps);
         let ok = par_solve_pcg_jacobi(&a, &rhs, &mut u, &SolverConfig { rtol: 1e-6, max_iter: 2000, ..Default::default() }).unwrap();

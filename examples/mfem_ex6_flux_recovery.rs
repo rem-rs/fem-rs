@@ -67,7 +67,7 @@ fn main() {
 
     // ─── 4. Homogeneous Dirichlet BC on all boundaries ───────────────────────
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let bnd_vals = vec![0.0_f64; bnd.len()];
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
     println!("  Dirichlet BC on {} DOFs", bnd.len());
@@ -279,7 +279,7 @@ mod tests {
         let mut rhs = Assembler::assemble_linear(&space, &[&src], quad);
 
         let dm = space.dof_manager();
-        let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+        let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
         let bnd_vals: Vec<f64> = bnd.iter().map(|&dof| {
             let x = dm.dof_coord(dof);
             exact(&x)

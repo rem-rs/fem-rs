@@ -926,7 +926,7 @@ fn solve_transient_case_nonmatching(
     let vals_u = vec![0.0_f64; bnd_u_all.len()];
     apply_dirichlet(&mut k_uu, &mut rhs_u, &bnd_u_all, &vals_u);
 
-    let bnd_t = boundary_dofs(space_t.mesh(), space_t.dof_manager(), &[1, 2, 3, 4]);
+    let bnd_t = boundary_dofs(space_t.mesh(), space_t.dof_manager(), &space_t.mesh().unique_boundary_tags());
     let vals_t = vec![0.0_f64; bnd_t.len()];
     apply_dirichlet(&mut k_tt, &mut rhs_t, &bnd_t, &vals_t);
     let mut rhs_t_dummy = vec![0.0_f64; n_t];
@@ -1563,7 +1563,7 @@ fn build_model(
     apply_dirichlet(&mut k_uu, &mut rhs_u, &bnd_u_all, &vals_u);
 
     // Dirichlet thermal: all walls fixed temperature.
-    let bnd_t = boundary_dofs(space_t.mesh(), space_t.dof_manager(), &[1, 2, 3, 4]);
+    let bnd_t = boundary_dofs(space_t.mesh(), space_t.dof_manager(), &space_t.mesh().unique_boundary_tags());
     let vals_t = vec![0.0_f64; bnd_t.len()];
     apply_dirichlet(&mut k_tt, &mut rhs_t, &bnd_t, &vals_t);
     let mut rhs_t_dummy = vec![0.0_f64; n_t];

@@ -78,7 +78,7 @@ fn main() {
 
     // ─── 5. Dirichlet BC on all boundaries: u = x₁ x₂ / (x₁² + x₂²) ────
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let bnd_vals: Vec<f64> = bnd
         .iter()
         .map(|&dof| {

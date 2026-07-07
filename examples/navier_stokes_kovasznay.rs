@@ -139,7 +139,7 @@ fn run_case(n: usize, re: f64, emit_progress: bool) -> RunResult {
     let scalar_velocity_dofs = space_u.n_scalar_dofs();
     let scalar_dm = space_u.scalar_dof_manager();
 
-    let bnd_all = boundary_dofs(space_u.mesh(), scalar_dm, &[1, 2, 3, 4]);
+    let bnd_all = boundary_dofs(space_u.mesh(), scalar_dm, &space_u.mesh().unique_boundary_tags());
     let mut bc_dofs = Vec::new();
     let mut bc_vals = Vec::new();
     for &d in &bnd_all {

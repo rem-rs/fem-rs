@@ -309,7 +309,7 @@ fn solve_fractional_problem_with_method(
     let rhs = Assembler::assemble_linear(&space, &[&rhs_integrator], 3);
 
     let dm = space.dof_manager();
-    let boundary = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let boundary = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let boundary_set: HashSet<u32> = boundary.iter().copied().collect();
     let free: Vec<usize> = (0..space.n_dofs()).filter(|&i| !boundary_set.contains(&(i as u32))).collect();
 

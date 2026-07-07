@@ -94,7 +94,7 @@ fn solve_lor_case(mesh: Mesh<2>, p: u8) -> LorResult {
 
     let mut mat_p2 = Assembler::assemble_bilinear(&space_p2, &[&diffusion], quad_p2);
     let mut rhs_p2 = Assembler::assemble_linear(&space_p2, &[&source], quad_p2);
-    let bnd_p2 = boundary_dofs(space_p2.mesh(), space_p2.dof_manager(), &[1, 2, 3, 4]);
+    let bnd_p2 = boundary_dofs(space_p2.mesh(), space_p2.dof_manager(), &space_p2.mesh().unique_boundary_tags());
     apply_dirichlet(&mut mat_p2, &mut rhs_p2, &bnd_p2, &vec![0.0; bnd_p2.len()]);
 
     // ── Low-order (LOR) space ─────────────────────────────────────────
@@ -102,7 +102,7 @@ fn solve_lor_case(mesh: Mesh<2>, p: u8) -> LorResult {
     let n_p1 = space_p1.n_dofs();
     let mut mat_p1 = Assembler::assemble_bilinear(&space_p1, &[&diffusion], 3);
     let mut zero_p1 = vec![0.0_f64; n_p1];
-    let bnd_p1 = boundary_dofs(space_p1.mesh(), space_p1.dof_manager(), &[1, 2, 3, 4]);
+    let bnd_p1 = boundary_dofs(space_p1.mesh(), space_p1.dof_manager(), &space_p1.mesh().unique_boundary_tags());
     apply_dirichlet(&mut mat_p1, &mut zero_p1, &bnd_p1, &vec![0.0; bnd_p1.len()]);
 
     // ── AMG hierarchies ───────────────────────────────────────────────

@@ -90,7 +90,7 @@ fn solve_case(
 
     // 3. Boundary DOFs (Dirichlet u=0 on all boundaries)
     let dm  = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let vals = vec![0.0_f64; bnd.len()];
     let mut dummy_rhs = vec![0.0_f64; ndof];
     apply_dirichlet(&mut k_mat, &mut dummy_rhs, &bnd, &vals);

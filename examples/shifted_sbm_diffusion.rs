@@ -26,7 +26,7 @@ fn solve_poisson(mesh: Mesh<2>, shift: f64) -> (Vec<f64>, usize) {
         2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
     })], 3);
     let (mut a, mut b) = (mat, rhs);
-    let bnd = boundary_dofs(space.mesh(), space.dof_manager(), &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), space.dof_manager(), &space.mesh().unique_boundary_tags());
     let bnd_vals: Vec<f64> = bnd.iter().map(|&d| {
         let c = space.mesh().node_coords(d);
         // On shifted bottom (tag 1, y=shift), impose u_shift = u_exact(x, 0)
@@ -100,7 +100,7 @@ mod tests {
                 2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
             })], 3),
         );
-        let bnd = boundary_dofs(space.mesh(), space.dof_manager(), &[1, 2, 3, 4]);
+        let bnd = boundary_dofs(space.mesh(), space.dof_manager(), &space.mesh().unique_boundary_tags());
         apply_dirichlet(&mut a, &mut b, &bnd, &vec![0.0; bnd.len()]);
         let mut u = vec![0.0; n];
         let r = solve_pcg_jacobi(&a, &b, &mut u, &SolverConfig { rtol: 1e-8, ..Default::default() });

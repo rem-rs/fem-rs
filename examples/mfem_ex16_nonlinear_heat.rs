@@ -136,7 +136,7 @@ fn solve_nonlinear_heat(
 
     // Dirichlet: u = 0 on all walls
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let dirichlet: Vec<(usize, f64)> = bnd.iter().map(|&d| (d as usize, 0.0)).collect();
 
     // Assemble RHS from the provided source
@@ -208,7 +208,7 @@ fn solve_case_with_ls(
     let n_dofs = space.n_dofs();
 
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let dirichlet: Vec<(usize, f64)> = bnd.iter().map(|&d| (d as usize, 0.0)).collect();
 
     // Keep a separate mesh for error computation (owned clone of space's mesh)

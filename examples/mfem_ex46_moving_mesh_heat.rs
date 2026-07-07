@@ -342,7 +342,7 @@ fn solve_case_with_restart(
         let k_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa }], 3);
 
         let dm = space.dof_manager();
-        let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+        let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
         let mut rhs = vec![0.0_f64; n_dofs];
         m_mat.spmv(&u_vec, &mut rhs);
 

@@ -120,7 +120,7 @@ fn main() {
 
     // Homogeneous Dirichlet BC on all boundaries
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let vals = vec![0.0; bnd.len()];
     let mut mat = mat;
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &vals);
@@ -200,7 +200,7 @@ mod tests {
         let mut rhs = Assembler::assemble_linear(&space, &[&src], 3);
 
         let dm = space.dof_manager();
-        let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+        let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
         let vals = vec![0.0; bnd.len()];
         let mut mat = mat;
         apply_dirichlet(&mut mat, &mut rhs, &bnd, &vals);

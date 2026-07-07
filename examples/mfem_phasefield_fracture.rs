@@ -285,7 +285,7 @@ fn main() {
     let dt = max_disp / n_load_steps as f64;
 
     // Dirichlet BCs for phase field: d=0 on all boundaries (far-field undamaged)
-    let bd_d = boundary_dofs(&mesh, space_d.dof_manager(), &[1, 2, 3, 4]);
+    let bd_d = boundary_dofs(&mesh, space_d.dof_manager(), &&mesh.unique_boundary_tags());
     let bd_d_usize: Vec<usize> = bd_d.iter().map(|&d| d as usize).collect();
     let bd_d_vals = vec![0.0; bd_d_usize.len()];
 

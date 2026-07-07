@@ -80,7 +80,7 @@ fn main() {
         Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 0.0)], 3);
 
     // Dirichlet BC: u = 0 on all boundaries
-    let bdofs = boundary_dofs(space.mesh(), space.dof_manager(), &[1, 2, 3, 4]);
+    let bdofs = boundary_dofs(space.mesh(), space.dof_manager(), &space.mesh().unique_boundary_tags());
     let bvals = vec![0.0; bdofs.len()];
 
     let mut stiff_bc = stiff.clone();
@@ -235,7 +235,7 @@ mod tests {
         let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
         let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 0.0)], 3);
 
-        let bdofs = boundary_dofs(space.mesh(), space.dof_manager(), &[1, 2, 3, 4]);
+        let bdofs = boundary_dofs(space.mesh(), space.dof_manager(), &space.mesh().unique_boundary_tags());
         let bvals = vec![0.0; bdofs.len()];
         let mut stiff_bc = stiff.clone();
         let mut mass_bc = mass.clone();

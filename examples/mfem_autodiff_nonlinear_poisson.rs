@@ -195,7 +195,7 @@ fn solve_with_autodiff(n: usize, alpha: f64, newton_max: usize, newton_tol: f64)
     };
 
     // Boundary DOFs
-    let bdr: Vec<usize> = boundary_dofs(&mesh, dm, &[1, 2, 3, 4])
+    let bdr: Vec<usize> = boundary_dofs(&mesh, dm, &&mesh.unique_boundary_tags())
         .into_iter().map(|d| d as usize).collect();
     let mut is_bdr = vec![false; ndofs];
     for &d in &bdr { is_bdr[d] = true; }

@@ -107,7 +107,7 @@ fn run_case(mesh_n: usize, n_workers: usize, source_scale: f64) -> RunResult {
 
         // 5. Apply Dirichlet u = 0 on boundary.
         let dm_u = par_space_u.local_space().dof_manager();
-        let bnd_u = boundary_dofs(par_space_u.local_space().mesh(), dm_u, &[1, 2, 3, 4]);
+        let bnd_u = boundary_dofs(par_space_u.local_space().mesh(), dm_u, &par_space_u.local_space().mesh().unique_boundary_tags());
         let dof_part = par_space_u.dof_partition();
         for &d in &bnd_u {
             let pid = dof_part.permute_dof(d) as usize;

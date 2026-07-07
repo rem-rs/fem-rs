@@ -46,8 +46,8 @@ fn main() {
     let mut rhs = [fa, fb].concat();
 
     // Dirichlet BCs: u=0 on all boundaries
-    let bnd_a = boundary_dofs(space_a.mesh(), &space_a.dof_manager(), &[1,2,3,4]);
-    let bnd_b = boundary_dofs(space_b.mesh(), &space_b.dof_manager(), &[1,2,3,4]);
+    let bnd_a = boundary_dofs(space_a.mesh(), &space_a.dof_manager(), &space_a.mesh().unique_boundary_tags());
+    let bnd_b = boundary_dofs(space_b.mesh(), &space_b.dof_manager(), &space_b.mesh().unique_boundary_tags());
     for &d in &bnd_a { k.apply_dirichlet_symmetric(d as usize, 0.0, &mut rhs); }
     for &d in &bnd_b { k.apply_dirichlet_symmetric(na + d as usize, 0.0, &mut rhs); }
 
@@ -90,8 +90,8 @@ mod tests {
         for i in 0..b.n_dofs() { for p in kb.row_ptr[i]..kb.row_ptr[i+1] { coo.add(na+i, na+kb.col_idx[p] as usize, kb.values[p]); }}
         let mut k = coo.into_csr();
         let mut rhs = vec![1.0; n];
-        for &d in &boundary_dofs(a.mesh(), &a.dof_manager(), &[1,2,3,4]) { k.apply_dirichlet_symmetric(d as usize, 0.0, &mut rhs); }
-        for &d in &boundary_dofs(b.mesh(), &b.dof_manager(), &[1,2,3,4]) { k.apply_dirichlet_symmetric(na + d as usize, 0.0, &mut rhs); }
+        for &d in &boundary_dofs(a.mesh(), &a.dof_manager(), &a.mesh().unique_boundary_tags()) { k.apply_dirichlet_symmetric(d as usize, 0.0, &mut rhs); }
+        for &d in &boundary_dofs(b.mesh(), &b.dof_manager(), &b.mesh().unique_boundary_tags()) { k.apply_dirichlet_symmetric(na + d as usize, 0.0, &mut rhs); }
         let mut u = vec![0.0; n];
         assert!(solve_cg(&k, &rhs, &mut u, &SolverConfig { max_iter: 500, ..SolverConfig::default() }).is_ok());
     }

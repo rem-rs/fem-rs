@@ -164,7 +164,7 @@ fn solve_case(mesh: Mesh<2>, args: &Args) -> SolveResult {
     );
 
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
 
     let mut m_bc = mass.clone();
     let mut k_bc = diff.clone();

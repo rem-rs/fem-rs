@@ -117,7 +117,7 @@ fn main() {
 
     // Project exact solution for BCs
     let dm = space.dof_manager();
-    let bnd: Vec<usize> = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4])
+    let bnd: Vec<usize> = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags())
         .into_iter()
         .map(|d| d as usize)
         .collect();
@@ -321,7 +321,7 @@ mod tests {
         );
         let n = space.n_dofs();
         let dm = space.dof_manager();
-        let bnd: Vec<usize> = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4])
+        let bnd: Vec<usize> = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags())
             .into_iter()
             .map(|d| d as usize)
             .collect();

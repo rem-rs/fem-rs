@@ -130,7 +130,7 @@ fn run_case(
 
         let quad_order = order * 2 + 1;
         let dof_part = par_space.dof_partition();
-        let bnd = boundary_dofs(par_space.local_space().mesh(), par_space.local_space().dof_manager(), &[1, 2, 3, 4]);
+        let bnd = boundary_dofs(par_space.local_space().mesh(), par_space.local_space().dof_manager(), &par_space.local_space().mesh().unique_boundary_tags());
 
         // 3. Assemble M (mass matrix).
         let mut par_m = ParAssembler::assemble_bilinear(

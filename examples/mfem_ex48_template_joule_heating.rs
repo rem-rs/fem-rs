@@ -290,7 +290,7 @@ fn solve_joule_template_single_rate(
     let n_dofs = space.n_dofs();
 
     let dm = space.dof_manager();
-    let all_boundary = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let all_boundary = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let left_bnd = boundary_dofs(space.mesh(), dm, &[4]);
     let right_bnd = boundary_dofs(space.mesh(), dm, &[2]);
 
@@ -462,7 +462,7 @@ fn solve_joule_template_subcycling(
     let n_dofs = space.n_dofs();
 
     let dm = space.dof_manager();
-    let all_boundary = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let all_boundary = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let left_bnd = boundary_dofs(space.mesh(), dm, &[4]);
     let right_bnd = boundary_dofs(space.mesh(), dm, &[2]);
 

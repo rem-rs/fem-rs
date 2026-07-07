@@ -20,7 +20,7 @@ fn main() {
         let diff = DiffusionIntegrator { kappa: 1.0 };
         let mut a = ParAssembler::assemble_bilinear(&ps, &[&diff], 3);
         let mut rhs = ParAssembler::assemble_linear(&ps, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);
-        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &[1,2,3,4]);
+        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &ps.local_space().mesh().unique_boundary_tags());
         let dp = ps.dof_partition(); for &d in &bd { let p = dp.permute_dof(d) as usize; if p < dp.n_owned_dofs { a.apply_dirichlet_par(p, 0.0, &mut rhs); } }
         let mut u = ParVector::zeros(&ps);
         let ok = par_solve_pcg_jacobi(&a, &rhs, &mut u, &SolverConfig { rtol: 1e-8, max_iter: 2000, ..Default::default() }).unwrap();

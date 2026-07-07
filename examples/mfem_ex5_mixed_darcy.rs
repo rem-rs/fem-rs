@@ -109,7 +109,7 @@ fn solve_case(n: usize, mesh_path: Option<&str>) -> SolveResult {
     // ─── 3. Apply Dirichlet u = 0 on boundary ───────────────────────────────
     // For Uzawa, we handle BCs by zeroing A rows/cols for boundary DOFs.
     let dm_u = space_u.dof_manager();
-    let bnd_u = boundary_dofs(space_u.mesh(), dm_u, &[1, 2, 3, 4]);
+    let bnd_u = boundary_dofs(space_u.mesh(), dm_u, &space_u.mesh().unique_boundary_tags());
     let mut a_mat = a_mat;
     let mut f_u = f_u;
     let bnd_vals = vec![0.0_f64; bnd_u.len()];
@@ -211,7 +211,7 @@ mod tests {
         let g = vec![0.0_f64; np];
 
         let dm_u = space_u.dof_manager();
-        let bnd_u = boundary_dofs(space_u.mesh(), dm_u, &[1, 2, 3, 4]);
+        let bnd_u = boundary_dofs(space_u.mesh(), dm_u, &space_u.mesh().unique_boundary_tags());
         let mut a_mat = a_mat;
         let bnd_vals = vec![0.0_f64; bnd_u.len()];
         fem_space::constraints::apply_dirichlet(&mut a_mat, &mut f_u, &bnd_u, &bnd_vals);

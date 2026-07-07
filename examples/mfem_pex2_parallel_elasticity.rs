@@ -39,7 +39,7 @@ fn main() {
         let source = DomainSourceIntegrator::new(|x: &[f64]| 2.0 * (x[0] + x[1]));
         let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], quad_order);
 
-        let bc_dofs = boundary_dofs(par_space.local_space().mesh(), par_space.local_space().dof_manager(), &[1, 2, 3, 4]);
+        let bc_dofs = boundary_dofs(par_space.local_space().mesh(), par_space.local_space().dof_manager(), &par_space.local_space().mesh().unique_boundary_tags());
         let dof_part = par_space.dof_partition();
         for &d in &bc_dofs {
             let pid = dof_part.permute_dof(d) as usize;

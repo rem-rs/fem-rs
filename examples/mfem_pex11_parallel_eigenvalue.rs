@@ -21,7 +21,7 @@ fn main() {
         let mass = MassIntegrator { rho: 1.0 };
         let mut stiff = ParAssembler::assemble_bilinear(&ps, &[&diff], 3);
         let _mass_mat = ParAssembler::assemble_bilinear(&ps, &[&mass], 3);
-        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &[1,2,3,4]);
+        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &ps.local_space().mesh().unique_boundary_tags());
         let dp = ps.dof_partition(); let mut tmp = ParVector::zeros(&ps);
         for &d in &bd { let p = dp.permute_dof(d) as usize; if p < dp.n_owned_dofs { stiff.apply_dirichlet_par(p, 1.0, &mut tmp); } }
         let mut ones = ParVector::zeros(&ps);

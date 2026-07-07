@@ -131,7 +131,7 @@ fn run_case(run: RunArgs) -> RunResult {
 
         // 4. Apply Dirichlet BCs: u=0 on all boundary faces.
         let bc_dm = par_space.local_space().dof_manager();
-        let bc_dofs = boundary_dofs(par_space.local_space().mesh(), bc_dm, &[1, 2, 3, 4]);
+        let bc_dofs = boundary_dofs(par_space.local_space().mesh(), bc_dm, &par_space.local_space().mesh().unique_boundary_tags());
         let dof_part = par_space.dof_partition();
         for &d in &bc_dofs {
             let pid = dof_part.permute_dof(d) as usize;

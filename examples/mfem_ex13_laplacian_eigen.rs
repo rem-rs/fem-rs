@@ -83,7 +83,7 @@ fn solve_case(args: Args) -> EigenCaseResult {
 
     // ─── 3. Apply Dirichlet BCs for eigenvalue problem ────────────────────────
     let dm   = space.dof_manager();
-    let bnd  = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd  = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let bnd_set: std::collections::HashSet<u32> = bnd.iter().cloned().collect();
     let free: Vec<usize> = (0..n).filter(|&i| !bnd_set.contains(&(i as u32))).collect();
     let nf = free.len();

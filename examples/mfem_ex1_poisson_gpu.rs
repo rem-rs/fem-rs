@@ -77,7 +77,7 @@ fn main() {
     let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
     let mut rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let bnd_vals = vec![0.0_f64; bnd.len()];
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
 
@@ -211,7 +211,7 @@ mod tests {
         );
 
         let dm = space.dof_manager();
-        let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+        let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
         apply_dirichlet(&mut mat, &mut rhs, &bnd, &vec![0.0_f64; bnd.len()]);
 
         // Solve

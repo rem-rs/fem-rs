@@ -75,7 +75,7 @@ fn main() {
     let mut rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
 
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let bnd_vals = vec![0.0_f64; bnd.len()];
     apply_dirichlet(&mut cpu_mat, &mut rhs, &bnd, &bnd_vals);
 
@@ -169,7 +169,7 @@ mod tests {
         let mut mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let mut rhs = Assembler::assemble_linear(&space, &[&rhs_fun], 3);
         let dm = space.dof_manager();
-        let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+        let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
         let bnd_vals = vec![0.0_f64; bnd.len()];
         apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
         let mut u = vec![0.0_f64; space.n_dofs()];

@@ -127,7 +127,7 @@ fn solve_case(mesh_in: Mesh<2>, nu: f64, lid_speed: f64) -> SolveResult {
     let g_p = vec![0.0_f64; pressure_dofs];
 
     let scalar_dm = space_u.scalar_dof_manager();
-    let bnd_all = boundary_dofs(space_u.mesh(), scalar_dm, &[1, 2, 3, 4]);
+    let bnd_all = boundary_dofs(space_u.mesh(), scalar_dm, &space_u.mesh().unique_boundary_tags());
     let bnd_lid = boundary_dofs(space_u.mesh(), scalar_dm, &[3]);
 
     let mut bc_dofs = Vec::new();

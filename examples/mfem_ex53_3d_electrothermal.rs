@@ -154,7 +154,7 @@ fn solve_3d_electrothermal(args: &Args) -> SolveResult3D {
     //   T = 0 on all faces (tags 1–6)
     let bnd_bottom = boundary_dofs(space.mesh(), space.dof_manager(), &[1]);
     let bnd_top    = boundary_dofs(space.mesh(), space.dof_manager(), &[2]);
-    let bnd_all    = boundary_dofs(space.mesh(), space.dof_manager(), &[1, 2, 3, 4, 5, 6]);
+    let bnd_all    = boundary_dofs(space.mesh(), space.dof_manager(), &space.mesh().unique_boundary_tags());
 
     let mut phi  = vec![0.0_f64; n_dofs];
     let mut temp = vec![0.0_f64; n_dofs];

@@ -403,7 +403,7 @@ fn solve_temperature(
     let mut a = Assembler::assemble_bilinear(space, &[&DiffusionIntegrator { kappa }], 3);
 
     let dm = space.dof_manager();
-    let all_bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let all_bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     apply_dirichlet(&mut a, &mut rhs, &all_bnd, &vec![0.0; all_bnd.len()]);
 
     let cfg = SolverConfig {

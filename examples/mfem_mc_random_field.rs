@@ -37,7 +37,7 @@ fn main() {
 
     // Boundary DOFs (all walls)
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
 
     println!("  DOFs: {}", n);
     println!("  KL modes: {}", args.kl_modes);

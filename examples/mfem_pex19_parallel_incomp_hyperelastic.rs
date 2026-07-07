@@ -23,7 +23,7 @@ fn main() {
         let mut rhs = ParVector::zeros(&ps);
         for v in rhs.owned_slice_mut().iter_mut() { *v = 1.0; }
         rhs.update_ghosts();
-        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &[1,2,3,4]);
+        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &ps.local_space().mesh().unique_boundary_tags());
         let dp = ps.dof_partition(); for &d in &bd { let p = dp.permute_dof(d) as usize; if p < dp.n_owned_dofs { a.apply_dirichlet_par(p, 0.0, &mut rhs); } }
         let ok = par_solve_pcg_jacobi(&a, &rhs, &mut u, &SolverConfig { rtol: 1e-6, max_iter: 1000, ..Default::default() }).unwrap();
         *rs.lock().unwrap() = Some((ok.converged, ok.iterations, ps.n_global_dofs()));

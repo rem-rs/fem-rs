@@ -116,7 +116,7 @@ fn solve_obstacle_problem(mesh: Mesh<2>, load: f64, method: SolveMethod) -> Obst
     let mut rhs = assemble_constant_rhs(&space, load);
 
     let dm = space.dof_manager();
-    let boundary = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let boundary = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     let boundary_mask = dof_mask(ndofs, &boundary);
     apply_dirichlet(&mut mat, &mut rhs, &boundary, &vec![0.0; boundary.len()]);
 

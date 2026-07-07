@@ -745,7 +745,7 @@ fn solve_temperature(
     let mut rhs = Assembler::assemble_linear(space, &[&source], 3);
 
     let dm = space.dof_manager();
-    let all = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let all = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
     apply_dirichlet(&mut a, &mut rhs, &all, &vec![0.0; all.len()]);
 
     let cfg = SolverConfig {
