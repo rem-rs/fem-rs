@@ -39,7 +39,7 @@ use fem_solver::{solve_pcg_precond, SolverConfig};
 use fem_space::{
     HDivSpace,
     fe_space::FESpace,
-    constraints::{boundary_dofs_hdiv, apply_dirichlet},
+    constraints::{boundary_dofs_hdiv, eliminate_dirichlet, expand_from_reduced},
 };
 
 fn main() {
@@ -114,53 +114,68 @@ fn main() {
     //    f = (1+2κ²)(cos(κy)sin(κx), cos(κx)sin(κy)).
     let source = MaxwellHSource { kappa };
     let quad_order = args.order * 2 + 2;
-    let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+    let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
     // 8. Solution vector x — zero initial guess (will be set by Dirichlet below).
 
     // 9. Stiffness matrix: a(u, v) = ∫ α (∇·u)(∇·v) + β u·v dx.
     let grad_div = GradDivIntegrator { kappa: 1.0 };
     let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-    let mut mat = VectorAssembler::assemble_bilinear(
+    let mat = VectorAssembler::assemble_bilinear(
         &space, &[&grad_div, &vec_mass], quad_order,
     );
     print!("Assembling: matrix ... ");
 
-    // 10. Form the linear system (apply essential BCs in-place).
+    // 10. Form the linear system (project exact BC, then eliminate).
     if args.static_cond {
         eprintln!("  Warning: static condensation not yet implemented — skipping.");
     }
     if args.hybridization {
         eprintln!("  Warning: hybridization not yet implemented — skipping.");
     }
-    if !ess_bdr.is_empty() {
-        // F·n = 0 on the boundary (homogeneous BC).
-        apply_dirichlet(&mut mat, &mut rhs, &ess_bdr, &vec![0.0_f64; ess_bdr.len()]);
-    }
     println!("done.");
 
-    println!("Size of linear system: {n_dofs}");
+    // Project exact solution ⟶ DOF values for non-homogeneous BC elimination.
+    let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+        let x_exact = space.interpolate_vector(&|p| {
+            let k = kappa;
+            vec![(k * p[1]).cos() * (k * p[0]).sin(),
+                 (k * p[0]).cos() * (k * p[1]).sin()]
+        });
+        let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
+        let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
+        (rm, rf, fm, cm, bv)
+    } else {
+        let free: Vec<usize> = (0..n_dofs).collect();
+        (mat, rhs, free, vec![], vec![])
+    };
+    let n_sys = sys_mat.nrows;
+    println!("Size of linear system: {n_sys}");
 
-    // 11. Solve: PCG with SSOR(ω=1) preconditioner (symmetric Gauss-Seidel,
-    //     matching MFEM's GSSmoother).
-    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
+    // 11. Solve the reduced system with PCG+GSSmoother.
+    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
     let precond = linlvo::SsorPrecond::from_csr(&linlvo_mat, 1.0)
         .expect("SSOR preconditioner setup failed");
-    let mut u = vec![0.0_f64; n_dofs];
+    let mut x_red = vec![0.0_f64; n_sys];
     let cfg = SolverConfig {
         rtol: 1e-10,
         max_iter: 2000,
         verbose: false,
         ..SolverConfig::default()
     };
-    let result = solve_pcg_precond(&mat, &rhs, &mut u, &precond, &cfg)
+    let result = solve_pcg_precond(&sys_mat, &sys_rhs, &mut x_red, &precond, &cfg)
         .expect("PCG solve failed");
     println!(
         "PCG+GSSmoother: {} iterations, ||r||/||b|| = {:.3e}",
         result.iterations, result.final_residual,
     );
 
-    // 12. RecoverFEMSolution — u already holds the full solution.
+    // 12. RecoverFEMSolution: expand the reduced solution to the full space.
+    let u = if !ess_bdr.is_empty() {
+        expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
+    } else {
+        x_red
+    };
 
     // 13. Compute and print the L² norm of the error against the exact solution.
     let l2_err = compute_l2_error(&space, &u, kappa);
@@ -225,13 +240,21 @@ fn compute_l2_error(
     uh: &[f64],
     kappa: f64,
 ) -> f64 {
-    use fem_element::{raviart_thomas::TriRT0, reference::VectorReferenceElement};
-    use fem_mesh::ElementTransformation;
+    use fem_element::{
+        reference::VectorReferenceElement,
+        raviart_thomas::{QuadRT0, TriRT0},
+    };
+    use fem_mesh::{ElementTransformation, ElementType};
 
     let mesh = space.mesh();
-    let ref_elem = TriRT0;
+    let elem_type = mesh.element_type(0);
+    let ref_elem: &dyn VectorReferenceElement = match elem_type {
+        ElementType::Tri3 | ElementType::Tri6 => &TriRT0,
+        ElementType::Quad4 => &QuadRT0,
+        _ => panic!("compute_l2_error: unsupported element type {elem_type:?}"),
+    };
     let quad = ref_elem.quadrature(6);
-    let n_ldofs = ref_elem.n_dofs();
+    let n_ldofs = ref_elem.n_dofs() as usize;
     let mut ref_phi = vec![0.0; n_ldofs * 2];
     let mut phys_phi = vec![0.0; n_ldofs * 2];
     let mut err2 = 0.0_f64;
@@ -463,30 +486,48 @@ mod tests {
 
         let source = MaxwellHSource { kappa };
         let quad_order = args.order * 2 + 2;
-        let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+        let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
         let grad_div = GradDivIntegrator { kappa: 1.0 };
         let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-        let mut mat = VectorAssembler::assemble_bilinear(
+        let mat = VectorAssembler::assemble_bilinear(
             &space, &[&grad_div, &vec_mass], quad_order,
         );
 
-        if !ess_bdr.is_empty() {
-            apply_dirichlet(&mut mat, &mut rhs, &ess_bdr, &vec![0.0_f64; ess_bdr.len()]);
-        }
+        let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+            let x_exact = space.interpolate_vector(&|p| {
+                let k = kappa;
+                vec![(k * p[1]).cos() * (k * p[0]).sin(),
+                     (k * p[0]).cos() * (k * p[1]).sin()]
+            });
+            let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
+            let (rm, rf, fm, cm) = fem_space::constraints::eliminate_dirichlet(
+                &mat, &rhs, &ess_bdr, &bv
+            );
+            (rm, rf, fm, cm, bv)
+        } else {
+            let free: Vec<usize> = (0..n_dofs).collect();
+            (mat, rhs, free, vec![], vec![])
+        };
 
-        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
+        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
         let precond = linlvo::SsorPrecond::from_csr(&linlvo_mat, 1.0)
             .expect("SSOR preconditioner setup failed");
-        let mut u = vec![0.0_f64; n_dofs];
+        let mut x_red = vec![0.0_f64; sys_mat.nrows];
         let cfg = SolverConfig {
             rtol: 1e-10,
             max_iter: 2000,
             verbose: false,
             ..SolverConfig::default()
         };
-        fem_solver::solve_pcg_precond(&mat, &rhs, &mut u, &precond, &cfg)
+        fem_solver::solve_pcg_precond(&sys_mat, &sys_rhs, &mut x_red, &precond, &cfg)
             .expect("PCG solve failed");
+
+        let u = if !ess_bdr.is_empty() {
+            expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
+        } else {
+            x_red
+        };
 
         let l2_err = compute_l2_error(&space, &u, kappa);
 
