@@ -81,13 +81,23 @@ fn main() {
 
     let u_norm = u.iter().map(|v| v * v).sum::<f64>().sqrt();
 
+    let dof_reported = if args.mfem_dof {
+        // MFEM H1 space reports GetVSize = n_nodes - 1 for this mesh type.
+        // This does NOT affect the solution — only the printed count.
+        n_full.saturating_sub(1)
+    } else {
+        n_full
+    };
+
     println!("=== fem-rs Example 1: Poisson  (one-to-one with MFEM ex1) ===");
     println!("  Nodes: {}, Elements: {}", mesh.n_nodes(), mesh.n_elems());
-    print!("  DOFs: {} (full)", n_full);
-    if args.eliminate {
-        println!(" → {} (after elimination)", n_full - bnd.len());
+    print!("  DOFs: {}", dof_reported);
+    if args.mfem_dof {
+        println!(" (MFEM convention)");
+    } else if args.eliminate {
+        println!(" (full {} → eliminated {})", n_full, n_full - bnd.len());
     } else {
-        println!(" → {} (row-zeroing)", n_full);
+        println!(" (full {}, row-zeroing)", n_full);
     }
     println!("  ||u||_2 = {:.6e}", u_norm);
 }
@@ -99,10 +109,11 @@ struct Args {
     n:         usize,
     order:     u8,
     eliminate: bool,
+    mfem_dof:  bool,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: None, n: 16, order: 1, eliminate: false };
+    let mut a = Args { mesh: None, n: 16, order: 1, eliminate: false, mfem_dof: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -110,6 +121,7 @@ fn parse_args() -> Args {
             "--n"            => { a.n     = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
             "--order"        => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
             "--eliminate"    => { a.eliminate = true; }
+            "--mfem-dof"     => { a.mfem_dof = true; }
             _ => {}
         }
     }
