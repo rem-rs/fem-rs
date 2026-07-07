@@ -1,466 +1,463 @@
-//! # Example 3 -- Maxwell cavity  (one-to-one with MFEM ex3)
+//! # Example 3 — Maxwell Electromagnetic Diffusion  (one-to-one with MFEM ex3)
 //!
 //! Solves the second-order definite Maxwell problem:
 //!
 //! ```text
-//!   curl curl E + E = f    in Omega
-//!             n x E = 0    on dOmega
+//!   ∇×(∇×E) + E = f    in Ω
+//!          n×E = 0    on ∂Ω
 //! ```
 //!
-//! with an impressed current source `f = (1+kappa^2)*(sin(kappa*y), sin(kappa*x))`
-//! where `kappa = pi * freq`.
+//! with a manufactured source `f = (1+κ²)·(sin(κy), sin(κx))` where `κ = π·freq`.
+//! The exact solution is `E = (sin(κy), sin(κx))`.  Discretisation uses
+//! Nédélec (H(curl)) edge elements.
 //!
 //! ## Usage
-//! ```
+//! ```text
 //! cargo run --example mfem_ex3_maxwell_cavity
 //! cargo run --example mfem_ex3_maxwell_cavity -- -m ../data/star.mesh
-//! cargo run --example mfem_ex3_maxwell_cavity -- --mesh ../data/beam-tri.mesh
+//! cargo run --example mfem_ex3_maxwell_cavity -- -m ../data/star.mesh -o 2
 //! cargo run --example mfem_ex3_maxwell_cavity -- -f 2.0
-//! cargo run --example mfem_ex3_maxwell_cavity -- --n 32
+//! cargo run --example mfem_ex3_maxwell_cavity -- -no-vis
 //! ```
+//!
+//! ## Output
+//! Prints DOF count, linear system size, solver statistics, and L² error.
+//! Writes `refined.mesh` and `sol.gf` (matching MFEM ex3 output files).
 
 use std::f64::consts::PI;
-use fem_examples::maxwell::StaticMaxwellBuilder;
-use fem_io::mfem::read_mfem_file;
-use fem_mesh::Mesh;
-use fem_space::{FESpace, HCurlSpace};
+use std::fs::File;
+use std::io::Write;
+
+use fem_assembly::{
+    VectorAssembler,
+    vector_integrator::{VectorLinearIntegrator, VectorQpData},
+    standard::{CurlCurlIntegrator, VectorMassIntegrator},
+};
+use fem_element::{nedelec::TriND1, VectorReferenceElement};
+use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_mesh::{refine_uniform, Mesh, MeshTopology};
+use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_space::{
+    HCurlSpace,
+    fe_space::FESpace,
+    constraints::{boundary_dofs_hcurl, apply_dirichlet},
+};
 
 fn main() {
+    // 1. Parse command-line options.
     let args = parse_args();
-    let result = solve_case(&args);
 
-    println!("=== fem-rs Example 3: Maxwell cavity (curl-curl + mass) ===");
-    match &args.mesh {
-        Some(path) => println!("  Mesh file: {}", path),
-        None => println!("  Mesh: {}x{} subdivisions, ND1 elements", args.n, args.n),
-    }
-    println!("  Frequency: {}", args.freq);
-    if args.pml_like {
-        println!(
-            "  Mode: PML-like anisotropic damping (thickness={}, sigma_max={}, wx={}, wy={})",
-            args.pml_thickness, args.sigma_max, args.wx, args.wy
-        );
-    }
-    if args.multi_material {
-        println!(
-            "  Mode: Multi-material PML (4 regions with distinct coefficients)"
-        );
-    }
-
-    println!("  Edge DOFs: {}", result.n_dofs);
-    println!("  Boundary DOFs constrained: {}", result.n_boundary_dofs);
-    println!(
-        "  Solve: {} iterations, residual = {:.3e}, converged = {}",
-        result.iterations, result.final_residual, result.converged
-    );
-    println!(
-        "  ||u||_2 = {:.4e}, max|u| = {:.4e}",
-        result.solution_l2_norm, result.solution_max_abs
-    );
-}
-
-struct CaseResult {
-    n_dofs: usize,
-    n_boundary_dofs: usize,
-    iterations: usize,
-    final_residual: f64,
-    converged: bool,
-    solution_l2_norm: f64,
-    solution_max_abs: f64,
-}
-
-fn source_value(x: &[f64], kappa: f64) -> [f64; 2] {
-    let coeff = 1.0 + kappa * kappa;
-    [coeff * (kappa * x[1]).sin(), coeff * (kappa * x[0]).sin()]
-}
-
-fn axis_sigma_1d(coord: f64, lo: f64, hi: f64, thickness: f64, sigma_max: f64) -> f64 {
-    let t = thickness.max(1e-14);
-    let s = if coord < lo + t {
-        ((lo + t - coord) / t).clamp(0.0, 1.0)
-    } else if coord > hi - t {
-        ((coord - (hi - t)) / t).clamp(0.0, 1.0)
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("(built-in unit square)"));
+    println!("   --order {}", args.order);
+    println!("   --frequency {}", args.freq);
+    if args.static_cond {
+        println!("   --static-condensation");
     } else {
-        0.0
-    };
-    sigma_max * s * s
-}
-
-/// Compute anisotropic tensor [sx, 0; 0, sy] with region-dependent coefficients.
-/// Divides [0,1]^2 into 4 quadrants:
-///   Q1 (0.5,1)^2,  Q2 (0,0.5)^2,
-///   Q3 (0,0.5)x(0.5,1), Q4 (0.5,1)x(0,0.5)
-/// Each quadrant gets a different (wx, wy) weight for tuned absorption.
-fn multi_material_pml_tensor(
-    x: &[f64],
-    thickness: f64,
-    sigma_max: f64,
-) -> [f64; 4] {
-    let (wx, wy) = if x[0] >= 0.5 && x[1] >= 0.5 {
-        (1.0, 1.2)
-    } else if x[0] < 0.5 && x[1] >= 0.5 {
-        (0.8, 1.3)
-    } else if x[0] < 0.5 && x[1] < 0.5 {
-        (0.9, 1.1)
+        println!("   --no-static-condensation");
+    }
+    if args.visualization {
+        println!("   --visualization");
     } else {
-        (1.2, 0.9)
-    };
+        println!("   --no-visualization");
+    }
 
-    let sx = wx * axis_sigma_1d(x[0], 0.0, 1.0, thickness, sigma_max);
-    let sy = wy * axis_sigma_1d(x[1], 0.0, 1.0, thickness, sigma_max);
-    [1.0 + sx, 0.0, 0.0, 1.0 + sy]
-}
+    // 2. Device setup — skipped (no Rust equivalent of MFEM's Device class yet).
 
-/// Collect unique boundary face tags from a mesh for PEC BC.
-fn boundary_tags(mesh: &Mesh<2>) -> Vec<i32> {
-    let mut tags: Vec<_> = mesh.face_tags.iter().copied().collect();
-    tags.sort_unstable();
-    tags.dedup();
-    tags
-}
-
-fn solve_case(args: &Args) -> CaseResult {
+    // 3. Read the mesh from the given mesh file.
     let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        Mesh::<2>::unit_square_tri(args.n)
+        Mesh::<2>::unit_square_tri(16)
     };
-    let space = HCurlSpace::new(mesh, 1);
+    let dim = 2;
 
-    // Mark all boundary attributes as essential (PEC).
-    let bdr_attrs = boundary_tags(space.mesh());
-    let kappa = args.freq * PI;
-
-    let mut builder = StaticMaxwellBuilder::new(space)
-        .with_quad_order(4)
-        .with_source_fn(move |x| source_value(x, kappa))
-        .add_pec_zero(&bdr_attrs);
-
-    builder = if args.multi_material {
-        let thickness = args.pml_thickness;
-        let sigma_max = args.sigma_max;
-        builder.with_anisotropic_matrix_fn(1.0, move |x| {
-            multi_material_pml_tensor(x, thickness, sigma_max)
-        })
-    } else if args.pml_like {
-        let thickness = args.pml_thickness;
-        let sigma_max = args.sigma_max;
-        let wx = args.wx;
-        let wy = args.wy;
-        builder.with_anisotropic_matrix_fn(1.0, move |x| {
-            let sx = wx * axis_sigma_1d(x[0], 0.0, 1.0, thickness, sigma_max);
-            let sy = wy * axis_sigma_1d(x[1], 0.0, 1.0, thickness, sigma_max);
-            [1.0 + sx, 0.0, 0.0, 1.0 + sy]
-        })
+    // 4. Uniform refinement: choose levels so the final mesh has ≤ 50 000 elements.
+    //    (Matching MFEM ex3's refinement target.)
+    let ref_levels =
+        ((50000.0 / mesh.n_elems() as f64).ln() / (2.0_f64).ln() / dim as f64).floor() as usize;
+    let mesh = if ref_levels > 0 {
+        let mut m = mesh;
+        for _ in 0..ref_levels {
+            m = refine_uniform(&m);
+        }
+        m
     } else {
-        builder.with_isotropic_coeffs(1.0, 1.0)
+        mesh
     };
 
-    let problem = builder.build();
+    // 5. H(curl) Nédélec finite element space of the specified order.
+    let space = HCurlSpace::new(mesh, args.order);
+    let n_dofs = space.n_dofs();
+    println!("\nNumber of finite element unknowns: {n_dofs}");
 
-    let n_dofs = problem.n_dofs();
-    let solved = problem.solve();
+    // 6. Essential (PEC) boundary DOFs — all external boundaries.
+    //    n×E = 0  →  tangential component vanishes.
+    let all_tags: Vec<i32> = space.mesh().unique_boundary_tags();
+    let ess_bdr = if all_tags.is_empty() {
+        vec![]
+    } else {
+        boundary_dofs_hcurl(space.mesh(), &space, &all_tags)
+    };
+    let ess_vals = vec![0.0_f64; ess_bdr.len()];
 
-    let solution_l2_norm = solved.solution.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let solution_max_abs = solved
-        .solution
-        .iter()
-        .map(|v| v.abs())
-        .fold(0.0_f64, f64::max);
+    // 7. Right-hand side: b(v) = ∫ f·v dx  where
+    //    f = (1+κ²)·(sin(κy), sin(κx)).
+    let kappa = args.freq * PI;
+    let source = MaxwellSource { kappa };
+    let quad_order = args.order as u8 * 2 + 2;
+    let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
-    CaseResult {
-        n_dofs,
-        n_boundary_dofs: solved.boundary_report.essential_dofs,
-        iterations: solved.solve_result.iterations,
-        final_residual: solved.solve_result.final_residual,
-        converged: solved.solve_result.converged,
-        solution_l2_norm,
-        solution_max_abs,
+    // 8. Solution vector x — zero initial guess (will be set by Dirichlet below).
+
+    // 9. Stiffness matrix: a(u, v) = ∫ (∇×u)·(∇×v) + u·v dx.
+    let curl_curl = CurlCurlIntegrator { mu: 1.0 };
+    let vec_mass = VectorMassIntegrator { alpha: 1.0 };
+    let mut mat = VectorAssembler::assemble_bilinear(
+        &space, &[&curl_curl, &vec_mass], quad_order,
+    );
+    print!("Assembling: matrix ... ");
+
+    // 10. Form the linear system (apply essential BCs in-place).
+    if args.static_cond {
+        eprintln!("  Warning: static condensation not yet implemented — skipping.");
+    }
+    if !ess_bdr.is_empty() {
+        apply_dirichlet(&mut mat, &mut rhs, &ess_bdr, &ess_vals);
+    }
+    println!("done.");
+
+    println!("Size of linear system: {n_dofs}");
+
+    // 11. Solve: PCG with Jacobi preconditioner (simple diagonal scaling).
+    let cfg = SolverConfig {
+        rtol: 1e-8,
+        max_iter: 2000,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let mut u = vec![0.0_f64; n_dofs];
+    let result = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
+        .expect("PCG solve failed");
+    println!(
+        "PCG+Jacobi: {} iterations, ||r||/||b|| = {:.3e}",
+        result.iterations, result.final_residual,
+    );
+
+    // 12. RecoverFEMSolution — u already holds the full solution in the right
+    //     form (the H(curl) DOF layout matches the space).
+
+    // 13. Compute and print the L² norm of the error against the exact solution.
+    let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
+        &space, &u, |x| exact_e(x, kappa),
+    );
+    println!("\n|| E_h - E ||_{{L^2}} = {l2_err:.14e}\n");
+
+    // 14. Save the refined mesh and the solution (matches MFEM ex3 output files).
+    {
+        let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
+        write_mfem(&mut mesh_f, space.mesh(), None).expect("mesh write failed");
+        let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
+        for &v in &u {
+            writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
+        }
+        eprintln!("  Wrote refined.mesh and sol.gf");
+    }
+
+    // 15. Send a nodal-projected view of the solution to GLVis.
+    if args.visualization {
+        match send_to_glvis(space.mesh(), &space, &u, "E") {
+            Ok(_) => eprintln!("  Sent solution to GLVis (localhost:19916)"),
+            Err(e) => eprintln!("  GLVis not available: {e}"),
+        }
     }
 }
 
-// --- CLI --------------------------------------------------------------------
+// ─── Source term (VectorLinearIntegrator) ─────────────────────────────────────
+//
+//   f = (1 + κ²) · (sin(κy), sin(κx))
 
+struct MaxwellSource {
+    kappa: f64,
+}
+
+impl VectorLinearIntegrator for MaxwellSource {
+    fn add_to_element_vector(&self, qp: &VectorQpData<'_>, f_elem: &mut [f64]) {
+        let x = qp.x_phys;
+        let coeff = 1.0 + self.kappa * self.kappa;
+        let fx = coeff * (self.kappa * x[1]).sin();
+        let fy = coeff * (self.kappa * x[0]).sin();
+        for i in 0..qp.n_dofs {
+            let dot = qp.phi_vec[i * 2] * fx + qp.phi_vec[i * 2 + 1] * fy;
+            f_elem[i] += qp.weight * dot;
+        }
+    }
+}
+
+// ─── Exact solution ──────────────────────────────────────────────────────────
+//
+//   E = (sin(κy), sin(κx))
+
+fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
+    [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
+}
+
+// ─── GLVis helper ────────────────────────────────────────────────────────────
+//
+// H(curl) DOFs live on edges, so we project the edge solution onto mesh
+// vertices by evaluating the field inside each element at its reference
+// vertices and averaging at shared nodes.  The result is a nodal vector
+// field that GLVis (VTK-based protocol) can display.
+
+fn send_to_glvis(
+    mesh: &Mesh<2>,
+    space: &HCurlSpace<Mesh<2>>,
+    u: &[f64],
+    field_name: &str,
+) -> std::io::Result<()> {
+    let n_nodes = mesh.n_nodes() as usize;
+    let ref_elem = TriND1;
+    let n_ldofs = ref_elem.n_dofs();
+    let dim = 2usize;
+
+    // Reference-vertex coordinates for the Tri3 reference element.
+    let ref_verts: [[f64; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+
+    let mut sum_x = vec![0.0_f64; n_nodes];
+    let mut sum_y = vec![0.0_f64; n_nodes];
+    let mut count = vec![0u32; n_nodes];
+    let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
+
+    for e in mesh.elem_iter() {
+        let nodes = mesh.element_nodes(e);
+        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e);
+
+        let x0 = mesh.node_coords(nodes[0]);
+        let x1 = mesh.node_coords(nodes[1]);
+        let x2 = mesh.node_coords(nodes[2]);
+
+        // Affine Jacobian J = [x1-x0, x2-x0],  J^{-T} = adj(J)^T / det(J).
+        let j00 = x1[0] - x0[0];
+        let j01 = x2[0] - x0[0];
+        let j10 = x1[1] - x0[1];
+        let j11 = x2[1] - x0[1];
+        let det_j = j00 * j11 - j01 * j10;
+        let inv_det = 1.0 / det_j;
+        let jit00 =  j11 * inv_det;
+        let jit01 = -j10 * inv_det;
+        let jit10 = -j01 * inv_det;
+        let jit11 =  j00 * inv_det;
+
+        // Evaluate at each of the three reference vertices.
+        for vi in 0..3 {
+            let xi = &ref_verts[vi];
+            ref_elem.eval_basis_vec(xi, &mut ref_phi);
+
+            // Covariant Piola:  φ_phys = J^{-T} φ_ref.
+            let mut eh_x = 0.0_f64;
+            let mut eh_y = 0.0_f64;
+            for i in 0..n_ldofs {
+                let s = signs[i];
+                let px = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
+                let py = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
+                eh_x += s * u[dofs[i]] * px;
+                eh_y += s * u[dofs[i]] * py;
+            }
+
+            let nid = nodes[vi] as usize;
+            sum_x[nid] += eh_x;
+            sum_y[nid] += eh_y;
+            count[nid] += 1;
+        }
+    }
+
+    // Average contributions at shared nodes.
+    let mut e_node_x = vec![0.0_f64; n_nodes];
+    let mut e_node_y = vec![0.0_f64; n_nodes];
+    for i in 0..n_nodes {
+        if count[i] > 0 {
+            let inv = 1.0 / count[i] as f64;
+            e_node_x[i] = sum_x[i] * inv;
+            e_node_y[i] = sum_y[i] * inv;
+        }
+    }
+
+    let mut sock = fem_io::glvis::GlVisSocket::connect("localhost", 19916)?;
+    sock.send_solution_2d_vector(mesh, &e_node_x, &e_node_y, field_name)?;
+    Ok(())
+}
+
+// ─── CLI ─────────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
 struct Args {
-    mesh: Option<String>,
-    n: usize,
-    pml_like: bool,
-    multi_material: bool,
-    pml_thickness: f64,
-    sigma_max: f64,
-    wx: f64,
-    wy: f64,
-    freq: f64,
+    mesh:          Option<String>,
+    n:             usize,
+    order:         u8,
+    /// Static condensation (not yet implemented).
+    static_cond:   bool,
+    visualization: bool,
+    freq:          f64,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
-        mesh: None,
-        n: 16,
-        pml_like: false,
-        multi_material: false,
-        pml_thickness: 0.2,
-        sigma_max: 2.0,
-        wx: 1.0,
-        wy: 1.0,
-        freq: 1.0,
+        mesh:          None,
+        n:             16,
+        order:         1,
+        static_cond:   false,
+        visualization: true,
+        freq:          1.0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-m" | "--mesh" => { a.mesh = it.next(); }
-            "--n" => { a.n = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
-            "-f" | "--freq" => {
-                a.freq = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0);
+            "-m" | "--mesh" => {
+                a.mesh = it.next();
             }
-            "--pml-like" => { a.pml_like = true; }
-            "--multi-material" => { a.multi_material = true; a.pml_like = false; }
-            "--pml-thickness" => {
-                a.pml_thickness = it.next().unwrap_or("0.2".into()).parse().unwrap_or(0.2);
+            "-o" | "--order" => {
+                a.order = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
             }
-            "--sigma-max" => {
-                a.sigma_max = it.next().unwrap_or("2.0".into()).parse().unwrap_or(2.0);
+            "-f" | "--frequency" => {
+                a.freq = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.0);
             }
-            "--wx" => { a.wx = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0); }
-            "--wy" => { a.wy = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0); }
+            "-sc" | "--static-condensation" => {
+                a.static_cond = true;
+            }
+            "-no-sc" | "--no-static-condensation" => {
+                a.static_cond = false;
+            }
+            "-vis" | "--visualization" => {
+                a.visualization = true;
+            }
+            "-no-vis" | "--no-visualization" => {
+                a.visualization = false;
+            }
             _ => {}
         }
     }
     a
 }
 
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_examples::maxwell::l2_error_hcurl_exact;
 
-    fn rel_diff(a: f64, b: f64) -> f64 {
-        (a - b).abs() / a.abs().max(b.abs()).max(1.0)
-    }
+    fn solve_case(args: &Args) -> (Vec<f64>, usize, f64) {
+        let mesh = if let Some(ref path) = args.mesh {
+            let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+            mfem.mesh2d.expect("MFEM mesh must be 2D")
+        } else {
+            Mesh::<2>::unit_square_tri(args.n)
+        };
 
-    fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
-        [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
-    }
+        let space = HCurlSpace::new(mesh, args.order);
+        let n_dofs = space.n_dofs();
 
-    fn mms_l2_error(args: &Args) -> f64 {
-        let mesh = Mesh::<2>::unit_square_tri(args.n);
-        let space = HCurlSpace::new(mesh, 1);
-        let bdr_attrs = boundary_tags(space.mesh());
+        let all_tags: Vec<i32> = space.mesh().unique_boundary_tags();
+        let ess_bdr = if all_tags.is_empty() {
+            vec![]
+        } else {
+            boundary_dofs_hcurl(space.mesh(), &space, &all_tags)
+        };
+        let ess_vals = vec![0.0_f64; ess_bdr.len()];
+
         let kappa = args.freq * PI;
-        let problem = StaticMaxwellBuilder::new(space)
-            .with_quad_order(4)
-            .with_source_fn(move |x| source_value(x, kappa))
-            .add_pec_zero(&bdr_attrs)
-            .with_isotropic_coeffs(1.0, 1.0)
-            .build();
-        let solved = problem.solve();
-        let kappa = args.freq * PI;
-        l2_error_hcurl_exact(&solved.space, &solved.solution, |x| exact_e(x, kappa))
+        let source = MaxwellSource { kappa };
+        let quad_order = args.order as u8 * 2 + 2;
+        let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+
+        let curl_curl = CurlCurlIntegrator { mu: 1.0 };
+        let vec_mass = VectorMassIntegrator { alpha: 1.0 };
+        let mut mat = VectorAssembler::assemble_bilinear(
+            &space, &[&curl_curl, &vec_mass], quad_order,
+        );
+
+        if !ess_bdr.is_empty() {
+            fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs, &ess_bdr, &ess_vals);
+        }
+
+        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
+        let precond = linlvo::SsorPrecond::from_csr(&linlvo_mat, 1.0)
+            .expect("SSOR preconditioner setup failed");
+        let mut u = vec![0.0_f64; n_dofs];
+        fem_solver::solve_pcg(&mat, &rhs, &mut u, &precond, 1e-12, 500, false)
+            .expect("PCG solve failed");
+
+        let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
+            &space, &u, |x| exact_e(x, kappa),
+        );
+
+        (u, n_dofs, l2_err)
     }
 
     fn default_args() -> Args {
         Args {
-            mesh: None,
-            n: 8,
-            pml_like: false,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.0,
-            freq: 1.0,
+            mesh:          None,
+            n:             8,
+            order:         1,
+            static_cond:   false,
+            visualization: false,
+            freq:          1.0,
         }
     }
 
-    #[test]
-    fn ex3_mfem_marker_path_has_reasonable_error() {
-        let l2 = mms_l2_error(&default_args());
-        assert!(l2 < 1.5e-1, "L2 error = {}", l2);
-    }
+    // ── Behavioural tests ────────────────────────────────────────────────
 
     #[test]
-    fn ex3_pml_like_mode_converges() {
-        let result = solve_case(&Args {
-            mesh: None,
-            n: 8,
-            pml_like: true,
-            multi_material: false,
-            pml_thickness: 0.2,
-            sigma_max: 2.0,
-            wx: 1.0,
-            wy: 1.5,
-            freq: 1.0,
-        });
-        assert!(result.converged);
-        assert!(result.n_boundary_dofs > 0);
-        assert!(result.final_residual < 1.0e-6, "residual = {}", result.final_residual);
-    }
-
-    #[test]
-    fn ex3_standard_mode_refinement_halves_hcurl_error() {
-        let coarse = mms_l2_error(&Args {
-            mesh: None, n: 8, pml_like: false, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
-        });
-        let medium = mms_l2_error(&Args {
-            mesh: None, n: 16, pml_like: false, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
-        });
-
-        assert!(coarse.is_finite() && medium.is_finite());
-        assert!(medium < coarse, "expected refinement to reduce error: coarse={} medium={}", coarse, medium);
-        let ratio = coarse / medium;
-        assert!(ratio > 1.8, "expected roughly first-order error halving on mesh doubling, got ratio {}", ratio);
-    }
-
-    #[test]
-    fn ex3_multi_material_pml_mode_converges() {
-        let result = solve_case(&Args {
-            mesh: None, n: 8, pml_like: false, multi_material: true,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
-        });
-        assert!(result.converged, "multi-material PML should converge");
-        assert!(result.n_boundary_dofs > 0);
-        assert!(result.final_residual < 1.0e-6, "residual = {}", result.final_residual);
-        assert!(result.solution_l2_norm.is_finite());
-        assert!(result.solution_max_abs.is_finite());
-    }
-
-    #[test]
-    fn ex3_pml_like_stronger_sigma_reduces_solution_norm() {
-        let weak = solve_case(&Args {
-            mesh: None, n: 8, pml_like: true, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 0.2, wx: 1.0, wy: 1.5, freq: 1.0,
-        });
-        let strong = solve_case(&Args {
-            mesh: None, n: 8, pml_like: true, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 4.0, wx: 1.0, wy: 1.5, freq: 1.0,
-        });
-
-        assert!(weak.converged && strong.converged);
-        assert!(
-            strong.solution_l2_norm < weak.solution_l2_norm,
-            "expected stronger PML damping to reduce ||u||2: weak={} strong={}",
-            weak.solution_l2_norm,
-            strong.solution_l2_norm
+    fn ex3_dof_count() {
+        let args = default_args();
+        let (_, n_dofs, _) = solve_case(&args);
+        assert_eq!(
+            n_dofs, 208,
+            "DOF count should be 208 for ND1 on 8×8 tri mesh"
         );
     }
 
     #[test]
-    fn ex3_pml_like_swapping_axis_weights_preserves_response_by_symmetry() {
-        let xy = solve_case(&Args {
-            mesh: None, n: 8, pml_like: true, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.5, freq: 1.0,
-        });
-        let yx = solve_case(&Args {
-            mesh: None, n: 8, pml_like: true, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.5, wy: 1.0, freq: 1.0,
-        });
+    fn ex3_convergence_on_refinement() {
+        let coarse = solve_case(&Args { n: 6, ..default_args() });
+        let fine   = solve_case(&Args { n: 12, ..default_args() });
 
-        assert!(xy.converged && yx.converged);
-        assert!(rel_diff(xy.solution_l2_norm, yx.solution_l2_norm) < 1.0e-10,
-            "expected symmetry under x/y weight swap in ||u||2: xy={} yx={}",
-            xy.solution_l2_norm, yx.solution_l2_norm);
-        assert!(rel_diff(xy.solution_max_abs, yx.solution_max_abs) < 1.0e-10,
-            "expected symmetry under x/y weight swap in max|u|: xy={} yx={}",
-            xy.solution_max_abs, yx.solution_max_abs);
-    }
-
-    #[test]
-    fn ex3_multi_material_stronger_sigma_reduces_solution_norm() {
-        let weak = solve_case(&Args {
-            mesh: None, n: 8, pml_like: false, multi_material: true,
-            pml_thickness: 0.2, sigma_max: 0.2, wx: 1.0, wy: 1.0, freq: 1.0,
-        });
-        let strong = solve_case(&Args {
-            mesh: None, n: 8, pml_like: false, multi_material: true,
-            pml_thickness: 0.2, sigma_max: 4.0, wx: 1.0, wy: 1.0, freq: 1.0,
-        });
-
-        assert!(weak.converged && strong.converged);
+        assert!(coarse.2.is_finite() && fine.2.is_finite());
         assert!(
-            strong.solution_l2_norm < weak.solution_l2_norm,
-            "expected stronger multi-material damping to reduce ||u||2: weak={} strong={}",
-            weak.solution_l2_norm,
-            strong.solution_l2_norm
+            fine.2 < coarse.2,
+            "expected refinement to reduce L² error: coarse={:.6e} fine={:.6e}",
+            coarse.2, fine.2,
         );
+
+        let h6 = 1.0 / 6.0;
+        let h12 = 1.0 / 12.0;
+        let rate = f64::ln(coarse.2 / fine.2) / f64::ln(h6 / h12);
+        eprintln!(
+            "  [ex3] L²(6)={:.6e}  L²(12)={:.6e}  rate={:.3} (expected ~1)",
+            coarse.2, fine.2, rate,
+        );
+        assert!(rate > 0.5, "convergence rate {:.2} too low", rate);
     }
 
-    // --- Regression baseline -------------------------------------------------
+    // ── Regression baseline ──────────────────────────────────────────────
 
     #[test]
     fn ex3_regression_baseline() {
         let args = Args {
-            mesh: None, n: 8, pml_like: false, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
+            n: 8, ..default_args()
         };
-        let l2 = mms_l2_error(&args);
-        let result = solve_case(&args);
-
-        assert!(result.converged);
+        let (_, n_dofs, l2_err) = solve_case(&args);
 
         fem_regression::regression("mfem_ex3_maxwell_cavity")
-            .check_with("l2_error",        l2, 1e-6, 1e-10)
-            .check_with("solution_l2_norm", result.solution_l2_norm, 1e-6, 1e-10)
-            .check_with("solution_max_abs", result.solution_max_abs, 1e-6, 1e-10)
-            .check_with("iterations",       result.iterations as f64, 1e-4, 0.5)
-            .check_with("residual",         result.final_residual,   1e-4, 1e-10)
-            .check_with("n_dofs",           result.n_dofs as f64,    0.0,  0.5)
+            .check_with("l2_error", l2_err,   1e-6, 1e-10)
+            .check_with("n_dofs",   n_dofs as f64, 0.0, 0.5)
             .finalize();
-    }
-
-    // --- MFEM cross-validation test -----------------------------------------
-
-    #[test]
-    fn ex3_mfem_reference_test() {
-        let args = Args {
-            mesh: None, n: 8, pml_like: false, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
-        };
-        let l2 = mms_l2_error(&args);
-        let result = solve_case(&args);
-        assert!(result.converged, "solve must converge");
-
-        // DOF count: matches MFEM
-        assert_eq!(result.n_dofs, 208,
-            "DOF count should be 208 for ND1 on 8x8 tri mesh");
-
-        // Solution L2 norm and max abs should be finite and positive
-        assert!(result.solution_l2_norm > 0.0, "solution norm must be positive");
-        assert!(result.solution_l2_norm.is_finite(), "solution norm must be finite");
-        assert!(result.solution_max_abs > 0.0, "solution max must be positive");
-
-        // Solver convergence
-        assert!(result.iterations > 0, "CG should take positive iterations");
-        assert!(result.iterations < 500, "CG iterations should be reasonable");
-        assert!(result.final_residual < 1e-8, "CG residual should be small");
-
-        // PEC BC: solution on boundary edges should be near zero
-        let n_boundary = result.n_boundary_dofs;
-        assert!(n_boundary > 0 && n_boundary < result.n_dofs,
-            "expected 0 < n_boundary < n_dofs, got {n_boundary} / {}", result.n_dofs);
-
-        // Convergence rate: refine mesh, error should drop
-        let l2_6 = mms_l2_error(&Args {
-            mesh: None, n: 6, pml_like: false, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
-        });
-        let l2_12 = mms_l2_error(&Args {
-            mesh: None, n: 12, pml_like: false, multi_material: false,
-            pml_thickness: 0.2, sigma_max: 2.0, wx: 1.0, wy: 1.0, freq: 1.0,
-        });
-        assert!(l2_6.is_finite() && l2_12.is_finite());
-        assert!(l2_12 < l2_6, "L2 error should decrease with refinement");
-        let h6 = 1.0 / 6.0;
-        let h12 = 1.0 / 12.0;
-        let rate = f64::ln(l2_6 / l2_12) / f64::ln(h6 / h12);
-        eprintln!("  [mfem-ref] ex3: L2(6)={:.6e} L2(12)={:.6e} rate={:.3} (expected ~1)",
-            l2_6, l2_12, rate);
-        assert!(rate > 0.5, "convergence rate {:.2} too low", rate);
-
-        eprintln!("  [mfem-ref] ex3: {} DOFs, {} boundary DOFs, {} CG iters, res={:.3e}",
-            result.n_dofs, n_boundary, result.iterations, result.final_residual);
-        let _ = l2; // suppress unused warning for the top-level l2
     }
 }

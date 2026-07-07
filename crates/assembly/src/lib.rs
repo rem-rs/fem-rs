@@ -83,6 +83,7 @@ pub mod discrete_op;
 pub mod transfer;
 /// High-level Form abstractions (BilinearForm / LinearForm).
 pub mod form;
+pub mod ams_solver;
 pub mod static_cond;
 pub mod h1_quad_order_hint;
 pub mod lor_factory;
