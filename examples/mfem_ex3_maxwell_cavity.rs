@@ -24,19 +24,20 @@
 //! Prints DOF count, linear system size, solver statistics, and L² error.
 //! Writes `refined.mesh` and `sol.gf` (matching MFEM ex3 output files).
 
+use std::collections::HashSet;
 use std::f64::consts::PI;
 use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{
-    VectorAssembler,
+    VectorAssembler, condense_global,
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
 };
 use fem_element::{nedelec::TriND1, VectorReferenceElement};
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_solver::{solve_pcg_precond, SolverConfig};
 use fem_space::{
     HCurlSpace,
     fe_space::FESpace,
@@ -107,46 +108,90 @@ fn main() {
     let kappa = args.freq * PI;
     let source = MaxwellSource { kappa };
     let quad_order = args.order as u8 * 2 + 2;
-    let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+    let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
     // 8. Solution vector x — zero initial guess (will be set by Dirichlet below).
 
     // 9. Stiffness matrix: a(u, v) = ∫ (∇×u)·(∇×v) + u·v dx.
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
     let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-    let mut mat = VectorAssembler::assemble_bilinear(
+    let mat = VectorAssembler::assemble_bilinear(
         &space, &[&curl_curl, &vec_mass], quad_order,
     );
     print!("Assembling: matrix ... ");
 
-    // 10. Form the linear system (apply essential BCs in-place).
-    if args.static_cond {
-        eprintln!("  Warning: static condensation not yet implemented — skipping.");
-    }
-    if !ess_bdr.is_empty() {
-        apply_dirichlet(&mut mat, &mut rhs, &ess_bdr, &ess_vals);
-    }
     println!("done.");
 
-    println!("Size of linear system: {n_dofs}");
+    // 10. Static condensation (-sc): eliminate interior (bubble) DOFs.
+    //     Interior DOFs = DOFs that appear in only one element (not shared
+    //     between adjacent elements) AND are not on the PEC boundary.
+    //     ND1 has only edge DOFs (shared by 2 elements each) → no SC possible.
+    let (sys_mat, sys_rhs, sc_opt) = if args.static_cond {
+        // Count how many elements reference each DOF.
+        let mut dof_count = vec![0u32; n_dofs];
+        for e in space.mesh().elem_iter() {
+            for &d in space.element_dofs(e) {
+                dof_count[d as usize] += 1;
+            }
+        }
+        let bdr_set: HashSet<usize> = ess_bdr.iter().map(|&d| d as usize).collect();
+        let interior: Vec<usize> = (0..n_dofs)
+            .filter(|&d| dof_count[d] == 1 && !bdr_set.contains(&d))
+            .collect();
+        if interior.is_empty() {
+            if args.static_cond {
+                eprintln!("  Static condensation: no interior DOFs — skipping.");
+            }
+            (mat, rhs, None)
+        } else {
+            println!("  Static condensation: {} interior → {} boundary DOFs",
+                interior.len(), n_dofs - interior.len());
+            let (sc_k, sc_f, handle) = condense_global(&mat, &rhs, &interior);
+            (sc_k, sc_f, Some(handle))
+        }
+    } else {
+        (mat, rhs, None)
+    };
+    let n_sys = sys_mat.nrows;
 
-    // 11. Solve: PCG with Jacobi preconditioner (simple diagonal scaling).
+    // 11. Apply essential (PEC) BCs.
+    let (mut sys_mat, mut sys_rhs) = (sys_mat, sys_rhs);
+    if !ess_bdr.is_empty() {
+        apply_dirichlet(&mut sys_mat, &mut sys_rhs, &ess_bdr, &ess_vals);
+    }
+    println!("Size of linear system: {n_sys}");
+
+    // 12. Solve: PCG with SSOR(ω=1) preconditioner (symmetric Gauss-Seidel,
+    //     matching MFEM's GSSmoother).
+    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
+    let precond = linlvo::SsorPrecond::from_csr(&linlvo_mat, 1.0)
+        .expect("SSOR preconditioner setup failed");
+    let mut u_red = vec![0.0_f64; n_sys];
     let cfg = SolverConfig {
-        rtol: 1e-8,
+        rtol: 1e-10,
         max_iter: 2000,
         verbose: false,
         ..SolverConfig::default()
     };
-    let mut u = vec![0.0_f64; n_dofs];
-    let result = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
+    let result = solve_pcg_precond(&sys_mat, &sys_rhs, &mut u_red, &precond, &cfg)
         .expect("PCG solve failed");
     println!(
-        "PCG+Jacobi: {} iterations, ||r||/||b|| = {:.3e}",
+        "PCG+GSSmoother: {} iterations, ||r||/||b|| = {:.3e}",
         result.iterations, result.final_residual,
     );
 
-    // 12. RecoverFEMSolution — u already holds the full solution in the right
-    //     form (the H(curl) DOF layout matches the space).
+    // 13. RecoverFEMSolution: back-substitute interior DOFs (if SC was used),
+    //     yielding the full-length solution matching the space.
+    let u = if let Some(ref handle) = sc_opt {
+        let mut u_full = handle.backsolve(&u_red, 1e-10, 1000)
+            .expect("SC backsolve failed");
+        for (&d, &v) in ess_bdr.iter().zip(ess_vals.iter()) {
+            u_full[d as usize] = v;
+        }
+        u_full
+    } else {
+        u_red
+    };
 
     // 13. Compute and print the L² norm of the error against the exact solution.
     let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
