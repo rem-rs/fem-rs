@@ -56,7 +56,7 @@ use fem_element::nedelec::TriND1;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{Mesh, topology::MeshTopology};
-use fem_solver::{EigenResult, LobpcgConfig, SolveResult, SolverConfig, lobpcg_constrained_preconditioned, solve_cg_operator, solve_pcg_jacobi};
+use fem_solver::{EigenResult, LobpcgConfig, SolveResult, SolverConfig, lobpcg_constrained_preconditioned, solve_cg_operator, solve_pcg_jacobi, solve_pcg_precond};
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space, constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl}, fe_space::FESpace};
 use nalgebra::DMatrix;
 
@@ -106,6 +106,7 @@ pub struct HcurlBoundaryConfig {
 
 pub struct BoundaryApplyReport {
     pub essential_dofs: usize,
+    pub pec_dofs: Vec<u32>,
 }
 
 pub struct HcurlConstraintSubspace {
@@ -301,6 +302,7 @@ pub struct StaticMaxwellProblem {
     rhs: Vec<f64>,
     boundary: HcurlBoundaryConfig,
     quad_order: u8,
+    static_cond: bool,
 }
 
 pub struct StaticMaxwellSolveOutput {
@@ -320,6 +322,7 @@ pub struct StaticMaxwellBuilder {
     volume_model: StaticMaxwellVolumeModel,
     source: Option<Box<VectorSourceFn>>,
     boundary: HcurlBoundaryConfig,
+    static_cond: bool,
 }
 
 struct FnVectorSourceIntegrator<'a> {
@@ -643,6 +646,7 @@ impl HcurlBoundaryConfig {
         quad_order: u8,
     ) -> BoundaryApplyReport {
         let mut essential_dofs = 0;
+        let mut all_pec_dofs = Vec::new();
 
         for condition in &self.conditions {
             if let HcurlBoundaryCondition::TangentialRobin { tags, gamma, data } = condition {
@@ -660,11 +664,13 @@ impl HcurlBoundaryConfig {
 
         for condition in &self.conditions {
             if let HcurlBoundaryCondition::PecZero { tags } = condition {
-                essential_dofs += apply_pec_zero(space, mat, rhs, tags);
+                let (cnt, dofs) = apply_pec_zero(space, mat, rhs, tags);
+                essential_dofs += cnt;
+                all_pec_dofs.extend(dofs);
             }
         }
 
-        BoundaryApplyReport { essential_dofs }
+        BoundaryApplyReport { essential_dofs, pec_dofs: all_pec_dofs }
     }
 }
 
@@ -869,11 +875,17 @@ impl StaticMaxwellProblem {
             rhs,
             boundary: HcurlBoundaryConfig::new(),
             quad_order,
+            static_cond: false,
         }
     }
 
     pub fn with_boundary(mut self, boundary: HcurlBoundaryConfig) -> Self {
         self.boundary = boundary;
+        self
+    }
+
+    pub fn with_static_cond(mut self, enabled: bool) -> Self {
+        self.static_cond = enabled;
         self
     }
 
@@ -892,7 +904,40 @@ impl StaticMaxwellProblem {
             &mut self.rhs,
             self.quad_order,
         );
-        let (solution, solve_result) = solve_hcurl_jacobi(&self.mat, &self.rhs);
+
+        let n_dofs = self.space.n_dofs();
+        let (solution, solve_result) = if self.static_cond {
+            // Identify interior (bubble) DOFs: appear in exactly one element and not on PEC boundary.
+            let pec_set: HashSet<usize> =
+                boundary_report.pec_dofs.iter().map(|&d| d as usize).collect();
+            let mut dof_count = vec![0u32; n_dofs];
+            for e in self.space.mesh().elem_iter() {
+                for &d in self.space.element_dofs(e) {
+                    dof_count[d as usize] += 1;
+                }
+            }
+            let interior: Vec<usize> = (0..n_dofs)
+                .filter(|&d| dof_count[d] == 1 && !pec_set.contains(&d))
+                .collect();
+
+            if interior.is_empty() {
+                solve_hcurl_gssmoother(&self.mat, &self.rhs)
+            } else {
+                let (sys_mat, sys_rhs, handle) =
+                    fem_assembly::condense_global(&self.mat, &self.rhs, &interior);
+                let (u_red, res) = solve_hcurl_gssmoother(&sys_mat, &sys_rhs);
+                let mut u_full = handle.backsolve(&u_red, 1e-10, 1000)
+                    .expect("SC backsolve failed");
+                for (&d, &v) in boundary_report.pec_dofs.iter()
+                    .zip(std::iter::repeat(&0.0_f64))
+                {
+                    u_full[d as usize] = v;
+                }
+                (u_full, res)
+            }
+        } else {
+            solve_hcurl_gssmoother(&self.mat, &self.rhs)
+        };
 
         StaticMaxwellSolveOutput {
             space: self.space,
@@ -911,7 +956,13 @@ impl StaticMaxwellBuilder {
             volume_model: StaticMaxwellVolumeModel::Isotropic { mu: 1.0, alpha: 1.0 },
             source: None,
             boundary: HcurlBoundaryConfig::new(),
+            static_cond: false,
         }
+    }
+
+    pub fn with_static_cond(mut self, enabled: bool) -> Self {
+        self.static_cond = enabled;
+        self
     }
 
     pub fn with_quad_order(mut self, quad_order: u8) -> Self {
@@ -1291,7 +1342,9 @@ impl StaticMaxwellBuilder {
             vec![0.0_f64; self.space.n_dofs()]
         };
 
-        StaticMaxwellProblem::new(self.space, mat, rhs, self.quad_order).with_boundary(self.boundary)
+        StaticMaxwellProblem::new(self.space, mat, rhs, self.quad_order)
+            .with_boundary(self.boundary)
+            .with_static_cond(self.static_cond)
     }
 }
 
@@ -1359,11 +1412,11 @@ pub fn apply_pec_zero(
     mat: &mut CsrMatrix<f64>,
     rhs: &mut Vec<f64>,
     boundary_tags: &[i32],
-) -> usize {
+) -> (usize, Vec<u32>) {
     let bnd = boundary_dofs_hcurl(space.mesh(), space, boundary_tags);
     let vals = vec![0.0_f64; bnd.len()];
     apply_dirichlet(mat, rhs, &bnd, &vals);
-    bnd.len()
+    (bnd.len(), bnd)
 }
 
 pub fn add_tangential_robin_boundary<F>(
@@ -1400,6 +1453,23 @@ pub fn solve_hcurl_jacobi(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, Solve
         ..SolverConfig::default()
     };
     let res = solve_pcg_jacobi(mat, rhs, &mut u, &cfg).expect("solver failed");
+    (u, res)
+}
+
+/// PCG with SSOR(ω=1) preconditioner (symmetric Gauss-Seidel, GSSmoother).
+pub fn solve_hcurl_gssmoother(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, SolveResult) {
+    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(mat);
+    let precond = linlvo::SsorPrecond::from_csr(&linlvo_mat, 1.0)
+        .expect("SSOR preconditioner setup failed");
+    let mut u = vec![0.0_f64; rhs.len()];
+    let cfg = SolverConfig {
+        rtol: 1e-10,
+        atol: 0.0,
+        max_iter: 10_000,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let res = solve_pcg_precond(mat, rhs, &mut u, &precond, &cfg).expect("solver failed");
     (u, res)
 }
 
