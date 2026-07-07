@@ -85,14 +85,16 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     for _ in 0..n_elem {
         let vals = read_uint_line(&mut r)?;
         if vals.len() < 3 { return Err(FemError::Mesh("MFEM: invalid element line".into())); }
-        let et = mfem_elem_type(vals[0] as u32)
-            .ok_or_else(|| FemError::Mesh(format!("MFEM: unknown elem type {}", vals[0])))?;
+        // MFEM v1.0/v1.2 format: attribute geometry_type v1 v2 ...
+        let attr = vals[0];
+        let et = mfem_elem_type(vals[1] as u32)
+            .ok_or_else(|| FemError::Mesh(format!("MFEM: unknown elem type {}", vals[1])))?;
         let npe = et.nodes_per_element();
         if vals.len() != 2 + npe {
-            return Err(FemError::Mesh(format!("MFEM: elem type {} expects {npe} nodes, got {}", vals[0], vals.len() - 2)));
+            return Err(FemError::Mesh(format!("MFEM: elem type {} expects {npe} nodes, got {}", vals[1], vals.len() - 2)));
         }
         elem_types.push(et);
-        elem_tags.push(vals[1] as i32);
+        elem_tags.push(attr as i32);
         elem_conn.push(vals[2..].iter().map(|&v| (v - 1) as u32).collect());
         if n_elem == 1 { uniform_type = Some(et); }
     }
@@ -109,14 +111,15 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     for _ in 0..n_bdr {
         let vals = read_uint_line(&mut r)?;
         if vals.len() < 3 { return Err(FemError::Mesh("MFEM: invalid boundary line".into())); }
-        let et = mfem_elem_type(vals[0] as u32)
-            .ok_or_else(|| FemError::Mesh(format!("MFEM: unknown boundary type {}", vals[0])))?;
+        let attr = vals[0];
+        let et = mfem_elem_type(vals[1] as u32)
+            .ok_or_else(|| FemError::Mesh(format!("MFEM: unknown boundary type {}", vals[1])))?;
         let npe = et.nodes_per_element();
         if vals.len() != 2 + npe {
-            return Err(FemError::Mesh(format!("MFEM: bdr type {} expects {npe} nodes", vals[0])));
+            return Err(FemError::Mesh(format!("MFEM: bdr type {} expects {npe} nodes", vals[1])));
         }
         bdr_types.push(et);
-        face_tags.push(vals[1] as i32);
+        face_tags.push(attr as i32);
         face_conn.push(vals[2..].iter().map(|&v| (v - 1) as u32).collect());
     }
 
@@ -225,7 +228,7 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &SimplexMesh<2>, mesh_3d: Op
                 FemError::Mesh(format!("write_mfem: unsupported mixed type {et:?}"))
             })?;
             let offset = ei * npe;
-            write!(writer, "{code} {}", elem_tags[ei])?;
+            write!(writer, "{} {code}", elem_tags[ei])?;
             for j in 0..npe {
                 write!(writer, " {}", conn[offset + j] + 1)?;
             }
@@ -239,7 +242,7 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &SimplexMesh<2>, mesh_3d: Op
         for ei in 0..n_elems {
             let offset = ei * npe;
             let tag = if !elem_tags.is_empty() { elem_tags[ei] } else { 1 };
-            write!(writer, "{code} {tag}")?;
+            write!(writer, "{tag} {code}")?;
             for j in 0..npe {
                 write!(writer, " {}", conn[offset + j] + 1)?;
             }
@@ -255,7 +258,7 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &SimplexMesh<2>, mesh_3d: Op
         for fi in 0..n_face_elem {
             let offset = fi * bpe;
             let tag = if !face_tags.is_empty() { face_tags[fi] } else { 1 };
-            write!(writer, "{btype} {tag}")?;
+            write!(writer, "{tag} {btype}")?;
             for j in 0..bpe {
                 write!(writer, " {}", face_conn[offset + j] + 1)?;
             }
@@ -481,7 +484,7 @@ MFEM mesh v1.0
 dimension
 2
 
-elements\n1\n3 1 1 2 3 4\n\nboundary\n4\n1 1 1 2\n1 1 2 3\n1 1 3 4\n1 1 4 1\n\nvertices\n4\n2\n0.0 0.0\n1.0 0.0\n1.0 1.0\n0.0 1.0
+elements\n1\n1 3 1 2 3 4\n\nboundary\n4\n1 1 1 2\n1 1 2 3\n1 1 3 4\n1 1 4 1\n\nvertices\n4\n2\n0.0 0.0\n1.0 0.0\n1.0 1.0\n0.0 1.0
 ";
         let mfem = read_mfem(data.as_bytes()).unwrap();
         let mesh = mfem.mesh2d.unwrap();
@@ -498,7 +501,7 @@ MFEM mesh v1.0
 dimension
 3
 
-elements\n1\n5 1 1 2 3 4 5 6 7 8\n\nboundary\n6\n3 1 1 2 3 4\n3 1 5 6 7 8\n3 1 1 2 6 5\n3 1 3 4 8 7\n3 1 1 4 8 5\n3 1 2 3 7 6\n\nvertices\n8\n3\n0.0 0.0 0.0\n1.0 0.0 0.0\n1.0 1.0 0.0\n0.0 1.0 0.0\n0.0 0.0 1.0\n1.0 0.0 1.0\n1.0 1.0 1.0\n0.0 1.0 1.0
+elements\n1\n1 5 1 2 3 4 5 6 7 8\n\nboundary\n6\n1 3 1 2 3 4\n1 3 5 6 7 8\n1 3 1 2 6 5\n1 3 3 4 8 7\n1 3 1 4 8 5\n1 3 2 3 7 6\n\nvertices\n8\n3\n0.0 0.0 0.0\n1.0 0.0 0.0\n1.0 1.0 0.0\n0.0 1.0 0.0\n0.0 0.0 1.0\n1.0 0.0 1.0\n1.0 1.0 1.0\n0.0 1.0 1.0
 ";
         let mfem = read_mfem(data.as_bytes()).unwrap();
         let mesh = mfem.mesh3d.unwrap();

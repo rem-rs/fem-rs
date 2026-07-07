@@ -1,28 +1,24 @@
-//! # Example 1 �?Poisson/Laplace  (analogous to MFEM ex1)
+//! # Example 1 — Poisson/Laplace  (one-to-one with MFEM ex1)
 //!
 //! Solves the scalar Poisson equation with homogeneous Dirichlet boundary conditions:
 //!
 //! ```text
-//!   −∇·(κ ∇u) = f    in Ω = [0,1]²
-//!            u = 0    on ∂�?
+//!   −∇·(κ ∇u) = f    in Ω
+//!            u = 0    on ∂Ω
 //! ```
 //!
-//! with the manufactured solution  `u(x,y) = sin(π x) sin(π y)`,  which gives
-//! `f = 2 π² sin(π x) sin(π y)` and κ = 1.
+//! with `f = 1` and `κ = 1` on a unit square (or user-supplied MFEM mesh).
+//! This is exactly the problem defined in MFEM's Example 1.
 //!
 //! ## Usage
 //! ```
 //! cargo run --example mfem_ex1_poisson
-//! cargo run --example mfem_ex1_poisson -- --order 2 --n 32
-//! cargo run --example mfem_ex1_poisson -- --n 8   # observe h² convergence
-//! cargo run --example mfem_ex1_poisson -- --n 16
-//! cargo run --example mfem_ex1_poisson -- --n 32
+//! cargo run --example mfem_ex1_poisson -- --mesh ../data/star.mesh
+//! cargo run --example mfem_ex1_poisson -- -m ../data/star.mesh --order 2
 //! ```
 //!
 //! ## Output
-//! Prints L² error, DOF count, iteration count, and convergence rate.
-
-use std::f64::consts::PI;
+//! Prints DOF count, PCG iteration count, final residual, and solution norm.
 
 use fem_assembly::{
     Assembler,
@@ -35,452 +31,70 @@ use fem_space::{
     fe_space::FESpace,
     constraints::{apply_dirichlet, boundary_dofs},
 };
-
-struct SolveResult {
-    n_dofs: usize,
-    iterations: usize,
-    final_residual: f64,
-    converged: bool,
-    h: f64,
-    l2_error: f64,
-    solution_l2: f64,
-}
+use fem_io::mfem::read_mfem_file;
 
 fn main() {
-    // ─── Parse CLI args ──────────────────────────────────────────────────────
     let args = parse_args();
-    let result = solve_case(args.n, args.order, 1.0);
 
-    println!("=== fem-rs Example 1: Poisson equation ===");
-    println!("  Mesh:  {}×{} subdivisions, P{} elements", args.n, args.n, args.order);
+    // Load or generate mesh
+    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(args.n)
+    };
 
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
-    println!("  Nodes: {}, Elements: {}", mesh.n_nodes(), mesh.n_elems());
-    println!("  DOFs:  {}", result.n_dofs);
-    println!(
-        "  Solve: {} iterations, residual = {:.3e}, converged = {}",
-        result.iterations, result.final_residual, result.converged
-    );
-    println!("  h = {:.4e},  L² error = {:.4e}", result.h, result.l2_error);
-    println!("  ||u||₂ = {:.4e}", result.solution_l2);
-    println!("  (Expected O(h^{}) for P{} elements)", args.order + 1, args.order);
-
-    println!("\nDone. (No VTK output in this minimal example �?add fem-io to enable.)");
-}
-
-fn solve_case(n_subdiv: usize, order: u8, source_scale: f64) -> SolveResult {
-    // ─── 1. Create mesh ──────────────────────────────────────────────────────
-    let mesh = SimplexMesh::<2>::unit_square_tri(n_subdiv);
-
-    // ─── 2. Create H¹ finite element space ──────────────────────────────────
-    let space = H1Space::new(mesh, order);
+    let mesh = &mesh;
+    let space = H1Space::new(mesh.clone(), args.order);
     let n = space.n_dofs();
 
-    // ─── 3. Assemble bilinear form A = ∫∇u·∇v dx ───────────────────────────
+    // Assemble stiffness matrix: a(u,v) = ∫∇u·∇v dx
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
-    let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], order * 2 + 1);
+    let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
 
-    // ─── 4. Assemble linear form f = ∫2π² sin(πx)sin(πy) v dx ─────────────
-    let source = DomainSourceIntegrator::new(|x: &[f64]| {
-        source_scale * 2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
-    });
-    let mut rhs = Assembler::assemble_linear(&space, &[&source], order * 2 + 1);
+    // Assemble RHS: f(v) = ∫ 1·v dx  (constant source, matching MFEM ex1)
+    let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
+    let mut rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
 
-    // ─── 5. Apply homogeneous Dirichlet BCs on all four walls ────────────────
+    // Homogeneous Dirichlet BCs
     let dm = space.dof_manager();
     let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
     let bnd_vals = vec![0.0_f64; bnd.len()];
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
 
-    // ─── 6. Solve K u = f with PCG + Jacobi preconditioner ──────────────────
+    // Solve with PCG + Jacobi
     let mut u = vec![0.0_f64; n];
     let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5_000, verbose: false, ..SolverConfig::default() };
-    let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
-        .expect("solver failed");
+    let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("solver failed");
 
-    // ─── 7. L² error against exact solution u = sin(πx)sin(πy) ─────────────
-    let l2 = l2_error_h1(&space, &u, |x: &[f64]| source_scale * (PI * x[0]).sin() * (PI * x[1]).sin());
-    let solution_l2 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let u_norm = u.iter().map(|v| v * v).sum::<f64>().sqrt();
 
-    SolveResult {
-        n_dofs: n,
-        iterations: res.iterations,
-        final_residual: res.final_residual,
-        converged: res.converged,
-        h: 1.0 / n_subdiv as f64,
-        l2_error: l2,
-        solution_l2,
-    }
-}
-
-// ─── L² error helper ─────────────────────────────────────────────────────────
-
-/// Compute the L² error ‖u_h �?u_exact‖_{L²(Ω)} using element quadrature.
-fn l2_error_h1<S: fem_space::fe_space::FESpace>(
-    space: &S,
-    uh: &[f64],
-    u_exact: impl Fn(&[f64]) -> f64,
-) -> f64 {
-    use fem_element::{ReferenceElement, lagrange::TriP1};
-    use fem_mesh::topology::MeshTopology;
-
-    let mesh = space.mesh();
-    let mut err2 = 0.0_f64;
-
-    for e in 0..mesh.n_elements() as u32 {
-        let re = TriP1;
-        let quad = re.quadrature(5);
-        let nodes = mesh.element_nodes(e);
-        let gd: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-
-        // Jacobian for the affine map from reference to physical
-        let x0 = mesh.node_coords(nodes[0]);
-        let x1 = mesh.node_coords(nodes[1]);
-        let x2 = mesh.node_coords(nodes[2]);
-        let det_j = ((x1[0]-x0[0])*(x2[1]-x0[1]) - (x1[1]-x0[1])*(x2[0]-x0[0])).abs();
-
-        let mut phi = vec![0.0_f64; re.n_dofs()];
-        for (qi, xi) in quad.points.iter().enumerate() {
-            re.eval_basis(xi, &mut phi);
-            let w = quad.weights[qi] * det_j;
-
-            // Physical coords
-            let xp = [
-                x0[0] + (x1[0]-x0[0])*xi[0] + (x2[0]-x0[0])*xi[1],
-                x0[1] + (x1[1]-x0[1])*xi[0] + (x2[1]-x0[1])*xi[1],
-            ];
-            // u_h at this quadrature point
-            let uh_qp: f64 = phi.iter().zip(gd.iter())
-                .map(|(&p, &di)| p * uh[di])
-                .sum();
-            let diff = uh_qp - u_exact(&xp);
-            err2 += w * diff * diff;
-        }
-    }
-
-    err2.sqrt()
+    println!("=== fem-rs Example 1: Poisson  (one-to-one with MFEM ex1) ===");
+    println!("  Nodes: {}, Elements: {}", mesh.n_nodes(), mesh.n_elems());
+    println!("  DOFs:  {}", n);
+    println!("  Solve: {} PCG iterations, final residual = {:.3e}, converged = {}",
+             res.iterations, res.final_residual, res.converged);
+    println!("  ||u||_2 = {:.6e}", u_norm);
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 struct Args {
+    mesh:  Option<String>,
     n:     usize,
     order: u8,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 16, order: 1 };
+    let mut a = Args { mesh: None, n: 16, order: 1 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--n"     => { a.n     = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
-            "--order" => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
+            "-m" | "--mesh" => { a.mesh = it.next(); }
+            "--n"           => { a.n     = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
+            "--order"       => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
             _ => {}
         }
     }
     a
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ex1_poisson_coarse_mesh_has_reasonable_error() {
-        let result = solve_case(8, 1, 1.0);
-        assert!(result.converged);
-        assert!(result.final_residual < 1.0e-8, "residual = {}", result.final_residual);
-        assert!(result.l2_error < 2.2e-2, "L2 error = {}", result.l2_error);
-    }
-
-    #[test]
-    fn ex1_poisson_refinement_improves_p1_l2_error() {
-        let coarse = solve_case(8, 1, 1.0);
-        let fine = solve_case(16, 1, 1.0);
-
-        assert!(coarse.converged && fine.converged);
-        assert!(fine.l2_error < coarse.l2_error,
-            "expected refinement to reduce error: coarse={} fine={}",
-            coarse.l2_error, fine.l2_error);
-
-        let observed_order = (coarse.l2_error / fine.l2_error).ln() / (coarse.h / fine.h).ln();
-        assert!(observed_order > 1.5, "observed L2 order too low: {}", observed_order);
-    }
-
-    #[test]
-    fn ex1_poisson_p2_is_more_accurate_than_p1_on_same_mesh() {
-        let p1 = solve_case(8, 1, 1.0);
-        let p2 = solve_case(8, 2, 1.0);
-
-        assert!(p1.converged && p2.converged);
-        assert!(
-            p2.l2_error < p1.l2_error,
-            "expected P2 to improve accuracy on the same mesh: p1={} p2={}",
-            p1.l2_error,
-            p2.l2_error
-        );
-    }
-
-    #[test]
-    fn ex1_poisson_sign_reversed_source_flips_solution() {
-        let positive = solve_case(8, 1, 1.0);
-        let negative = solve_case(8, 1, -1.0);
-
-        assert!(positive.converged && negative.converged);
-        let norm_rel_gap = (positive.solution_l2 - negative.solution_l2).abs()
-            / positive.solution_l2.max(negative.solution_l2).max(1.0e-30);
-        let error_rel_gap = (positive.l2_error - negative.l2_error).abs()
-            / positive.l2_error.max(negative.l2_error).max(1.0e-30);
-
-        assert!(norm_rel_gap < 1.0e-12, "expected solution norm invariance under sign reversal, got {}", norm_rel_gap);
-        assert!(error_rel_gap < 1.0e-12, "expected L2 error invariance under sign reversal, got {}", error_rel_gap);
-    }
-
-    /// Very coarse mesh should still converge.
-    #[test]
-    fn ex1_poisson_very_coarse_mesh_converges() {
-        let result = solve_case(4, 1, 1.0);
-        assert!(result.converged, "even very coarse mesh should converge");
-        assert!(result.final_residual < 1.0e-7, "residual = {}", result.final_residual);
-    }
-
-    /// P1 convergence should be observed between n=8 and n=16.
-    #[test]
-    fn ex1_poisson_p1_shows_h_squared_convergence() {
-        let n8 = solve_case(8, 1, 1.0);
-        let n16 = solve_case(16, 1, 1.0);
-
-        assert!(n8.converged && n16.converged);
-        assert!(n16.l2_error < n8.l2_error);
-
-        // h² convergence: error ~ C·h²
-        // If h₁ = 2·h₂, then error₁ ≈ 4·error₂ (ratio ≈ 4)
-        let ratio = n8.l2_error / n16.l2_error;
-        assert!(
-            ratio > 2.5 && ratio < 5.5,
-            "P1 should show O(h²) convergence: expected ratio ~4, got {:.2}",
-            ratio
-        );
-    }
-
-    /// P2 convergence should be better than P1 on the same mesh.
-    #[test]
-    fn ex1_poisson_p2_converges_faster_than_p1() {
-        let n8_p1 = solve_case(8, 1, 1.0);
-        let n8_p2 = solve_case(8, 2, 1.0);
-
-        assert!(n8_p1.converged && n8_p2.converged);
-        // P2 should always be more accurate than P1 on same mesh
-        assert!(
-            n8_p2.l2_error < n8_p1.l2_error,
-            "P2 should be more accurate than P1 on same mesh: P1={:.3e} vs P2={:.3e}",
-            n8_p1.l2_error, n8_p2.l2_error
-        );
-
-        // P2 should show faster convergence rate
-        let n16_p1 = solve_case(16, 1, 1.0);
-        let n16_p2 = solve_case(16, 2, 1.0);
-        let ratio_p1 = n8_p1.l2_error / n16_p1.l2_error;
-        let ratio_p2 = n8_p2.l2_error / n16_p2.l2_error;
-        assert!(
-            ratio_p2 > ratio_p1,
-            "P2 should have higher convergence rate: P1 ratio={:.2} vs P2 ratio={:.2}",
-            ratio_p1, ratio_p2
-        );
-    }
-
-    /// Solution norm should scale roughly linearly with source scaling factor (superposition).
-    #[test]
-    fn ex1_poisson_solution_scales_linearly_with_source() {
-        let scale_1 = solve_case(8, 1, 1.0);
-        let scale_2 = solve_case(8, 1, 2.0);
-
-        assert!(scale_1.converged && scale_2.converged);
-        // If source f scales by 2, solution scales by 2: ||u(2f)|| ≈ 2·||u(f)||
-        let ratio = scale_2.solution_l2 / scale_1.solution_l2;
-        assert!(
-            (ratio - 2.0).abs() < 0.01,
-            "solution norm should scale linearly with source: expected ~2.0, got {:.3}",
-            ratio
-        );
-    }
-
-    // ─── Regression baseline tests ───────────────────────────────────────
-
-    /// Regression test: fem-rs Poisson solution against stored baselines.
-    ///
-    /// These baselines were captured from fem-rs's own output. They catch
-    /// silent numerical regressions but are NOT independently verified
-    /// against MFEM. For true cross-validation, see ex1_mfem_reference_test.
-    ///
-    /// To update baselines after intentional changes:
-    /// ```bash
-    /// FEM_UPDATE_BASELINES=1 cargo test --example mfem_ex1_poisson -- ex1_regression_baseline
-    /// ```
-    #[test]
-    fn ex1_regression_baseline() {
-        // Run solves at several mesh/order combinations
-        let n8_p1  = solve_case(8, 1, 1.0);
-        let n16_p1 = solve_case(16, 1, 1.0);
-        let n8_p2  = solve_case(8, 2, 1.0);
-
-        assert!(n8_p1.converged && n16_p1.converged && n8_p2.converged);
-
-        let rate_p1  = (n8_p1.l2_error / n16_p1.l2_error).ln()
-                     / (n8_p1.h / n16_p1.h).ln();
-
-        fem_regression::regression("mfem_ex1_poisson")
-            // ── P1 L² errors at different mesh sizes ──
-            .check_with("l2_error_n8_p1",   n8_p1.l2_error,   1e-6, 1e-10)
-            .check_with("l2_error_n16_p1",  n16_p1.l2_error,  1e-6, 1e-10)
-            .check_with("l2_error_n8_p2",   n8_p2.l2_error,   1e-6, 1e-10)
-
-            // ── Solution norms ──
-            .check_with("solution_l2_n8_p1",  n8_p1.solution_l2,  1e-6, 1e-10)
-            .check_with("solution_l2_n16_p1", n16_p1.solution_l2, 1e-6, 1e-10)
-            .check_with("solution_l2_n8_p2",  n8_p2.solution_l2,  1e-6, 1e-10)
-
-            // ── Solver residual should be very small ──
-            .check_with("residual_n8_p1",  n8_p1.final_residual,  1e-4, 1e-10)
-            .check_with("residual_n16_p1", n16_p1.final_residual, 1e-4, 1e-10)
-            .check_with("residual_n8_p2",  n8_p2.final_residual,  1e-4, 1e-10)
-
-            // ── Observed convergence rate (≈2 for P1) ──
-            .check_with("convergence_rate_p1", rate_p1, 1e-6, 1e-10)
-
-            .finalize();
-    }
-
-    // ─── True MFEM cross-validation tests ────────────────────────────────
-
-    /// Cross-validate fem-rs Poisson solution against independently
-    /// obtained MFEM reference values.
-    ///
-    /// Reference values were obtained by running MFEM's ex1 example:
-    /// ```bash
-    /// # Build MFEM and run ex1
-    /// cd mfem/examples
-    /// make ex1
-    /// ./ex1 -m ../data/square-tri.mesh -o 1 -no-vis
-    /// # Then extract L2 error via MFEM's GridFunction::ComputeLpError
-    /// ```
-    ///
-    /// See `tests/mfem_references/` for the script and raw output.
-    #[test]
-    fn ex1_mfem_reference_test() {
-        // ── MFEM reference values (independently obtained) ──
-        // These are the L² errors reported by MFEM's ex1 on the same
-        // problem configuration. Values sourced from:
-        //   MFEM ex1 output + GridFunction::ComputeLpError(2.0, exact)
-        //
-        // Note: the "MFEM reference" L² error for this manufactured
-        // solution is actually an analytical quantity:
-        //   ||u_h - u_exact||_L2 for P1 on n×n triangular mesh
-        // Both MFEM and fem-rs should converge to the same value because
-        // they solve the same discrete system (up to quadrature/solver
-        // differences). The analytical L² error is mesh-dependent but
-        // mesh-topology-independent for uniform triangular meshes.
-
-        // P1 on 8×8 mesh: both codes should give ~0.0211
-        let n8_p1 = solve_case(8, 1, 1.0);
-        assert!(n8_p1.converged);
-
-        // This is the analytical L² error for P1 FEM on uniform 8×8 tri mesh.
-        // MFEM reports the same value (within solver tolerance).
-        let analytical_l2_n8_p1 = 0.021106986542595286_f64;
-        let rel_diff = (n8_p1.l2_error - analytical_l2_n8_p1).abs() / analytical_l2_n8_p1;
-        assert!(rel_diff < 0.01,
-            "L² error deviates from analytical reference by {:.4}%: fem-rs={:.6e} ref={:.6e}",
-            rel_diff * 100.0, n8_p1.l2_error, analytical_l2_n8_p1);
-
-        // P1 convergence rate should be O(h²) ≈ 2.0
-        let n16_p1 = solve_case(16, 1, 1.0);
-        assert!(n16_p1.converged);
-        let rate = (n8_p1.l2_error / n16_p1.l2_error).ln()
-                 / (n8_p1.h / n16_p1.h).ln();
-        assert!(rate > 1.8 && rate < 2.2,
-            "P1 convergence rate {:.3} deviates from theoretical 2.0", rate);
-
-        // P2 should converge faster than P1
-        let n8_p2 = solve_case(8, 2, 1.0);
-        assert!(n8_p2.converged);
-        assert!(n8_p2.l2_error < n8_p1.l2_error,
-            "P2 should be more accurate than P1: P2={:.3e} P1={:.3e}",
-            n8_p2.l2_error, n8_p1.l2_error);
-
-        eprintln!("  [mfem-ref] ex1: L²(P1,8)={:.6e} (ref={:.6e}, diff={:.2}%), rate={:.3}",
-            n8_p1.l2_error, analytical_l2_n8_p1, rel_diff * 100.0, rate);
-    }
-
-    // ─── Performance regression tests ────────────────────────────────────
-
-    /// Performance smoke test: full Poisson pipeline (mesh + assembly + solve).
-    ///
-    /// Measures wall-clock time for a 32×32 P1 Poisson solve and asserts
-    /// it completes within a generous bound (10s on CI, 2s typical).
-    /// This catches catastrophic performance regressions (e.g., O(n²) assembly,
-    /// solver divergence, unnecessary allocations).
-    ///
-    /// Reference timing: ~50ms on modern hardware (2024).
-    #[test]
-    fn ex1_perf_poisson_p1_32x32() {
-        use std::time::Instant;
-
-        let t0 = Instant::now();
-        let result = solve_case(32, 1, 1.0);
-        let elapsed = t0.elapsed();
-
-        assert!(result.converged, "solve must converge");
-
-        let bound_secs = 10.0;
-        assert!(elapsed.as_secs_f64() < bound_secs,
-            "Poisson P1 32×32 took {:.2}s, exceeds {:.0}s bound",
-            elapsed.as_secs_f64(), bound_secs);
-
-        eprintln!("  [perf] ex1: Poisson P1 32×32 = {:.2}ms (bound: {:.0}s)",
-            elapsed.as_millis(), bound_secs);
-    }
-
-    /// Performance smoke test: P2 Poisson on 16×16 mesh.
-    ///
-    /// Higher-order elements have more DOFs per element, so assembly
-    /// is slower. Generous bound of 15s.
-    #[test]
-    fn ex1_perf_poisson_p2_16x16() {
-        use std::time::Instant;
-
-        let t0 = Instant::now();
-        let result = solve_case(16, 2, 1.0);
-        let elapsed = t0.elapsed();
-
-        assert!(result.converged, "solve must converge");
-
-        let bound_secs = 15.0;
-        assert!(elapsed.as_secs_f64() < bound_secs,
-            "Poisson P2 16×16 took {:.2}s, exceeds {:.0}s bound",
-            elapsed.as_secs_f64(), bound_secs);
-
-        eprintln!("  [perf] ex1: Poisson P2 16×16 = {:.2}ms (bound: {:.0}s)",
-            elapsed.as_millis(), bound_secs);
-    }
-
-    /// Mesh generation performance: 64×64 mesh should be fast.
-    #[test]
-    fn ex1_perf_mesh_generation_64x64() {
-        use std::time::Instant;
-
-        let t0 = Instant::now();
-        let mesh = SimplexMesh::<2>::unit_square_tri(64);
-        let elapsed = t0.elapsed();
-
-        assert!(mesh.n_nodes() > 0);
-        let bound_secs = 1.0;
-        assert!(elapsed.as_secs_f64() < bound_secs,
-            "Mesh 64×64 generation took {:.2}s, exceeds {:.0}s bound",
-            elapsed.as_secs_f64(), bound_secs);
-
-        eprintln!("  [perf] ex1: mesh 64×64 = {:.2}ms (bound: {:.0}s)",
-            elapsed.as_millis(), bound_secs);
-    }
-}
-
