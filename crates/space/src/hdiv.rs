@@ -785,34 +785,10 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// affine triangles (contravariant Piola pullback of `F` to the reference triangle).
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
-        // The global basis function: Φ_global(x) = element_sign[i] · φ_phys_i(x).
-        // element_sign already accounts for sorted-vs-element direction on
-        // triangles (via global_flip in compute_sign_2d_tri) but NOT on quads
-        // (compute_sign_2d_quad omits global_flip).  For quads we build a sign
-        // map that additionally flips when the element direction (verts[li]→verts[lj])
-        // is opposite to the sorted EdgeKey direction (min→max).
-        let is_quad = matches!(self.elem_type, ElementType::Quad4);
-        let mut dof_sign = if is_quad { vec![0.0f64; self.n_dofs] } else { vec![] };
-        if is_quad {
-            let faces: &[(usize, usize)] = &QUAD_FACES;
-            for e in 0..self.mesh.n_elements() as u32 {
-                let verts = self.mesh.element_nodes(e);
-                let dofs = self.element_dofs(e);
-                let signs = self.element_signs(e);
-                for (fi, &(li, lj)) in faces.iter().enumerate() {
-                    let dof = dofs[fi];
-                    if dof_sign[dof as usize] == 0.0 {
-                        let gi = verts[li];
-                        let gj = verts[lj];
-                        // compute_sign_2d_quad uses CCW normal of gi→gj.
-                        // interpolate_vector uses CCW normal of sorted a→b.
-                        // Flip when gi > gj (sorted = gj→gi, opposite direction).
-                        let sign = if gi < gj { signs[fi] } else { -signs[fi] };
-                        dof_sign[dof as usize] = sign;
-                    }
-                }
-            }
-        }
+        // The DOF value is the flux integral through the face in the face's
+        // canonical direction (CCW normal of the sorted edge a→b).  This is
+        // independent of element orientation — element signs are applied during
+        // element-level assembly and reconstruction (via element_signs), not here.
         match &self.face_map {
             FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => {
                 if self.order == 0 {
@@ -826,8 +802,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let normal = [-ty, tx]; // CCW of sorted a→b direction
                         let fval = f(&mid);
                         let flux = fval[0] * normal[0] + fval[1] * normal[1];
-                        let sgn = if is_quad { dof_sign[dof as usize] } else { 1.0 };
-                        result.as_slice_mut()[dof as usize] = flux * sgn;
+                        result.as_slice_mut()[dof as usize] = flux;
                     }
                 } else if self.order == 1 {
                     // RT1: 2 DOFs per edge + interior bubble DOFs.
@@ -853,10 +828,9 @@ impl<M: MeshTopology> HDivSpace<M> {
                             mom0 += w * flux;
                             mom1 += w * flux * t;
                         }
-                        let sgn = if is_quad { dof_sign[first_dof as usize] } else { 1.0 };
                         let r = result.as_slice_mut();
-                        r[first_dof as usize]     = mom0 * sgn;
-                        r[first_dof as usize + 1] = mom1 * sgn;
+                        r[first_dof as usize]     = mom0;
+                        r[first_dof as usize + 1] = mom1;
                     }
 
                     // Interior bubble DOFs depend on element type.
