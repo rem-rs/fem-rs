@@ -27,6 +27,7 @@ fem-linalg-gpu = { path = "../crates/linalg-gpu", optional = true }
 wgpu           = { version = "27", optional = true }
 bytemuck       = { workspace = true, optional = true }
 nalgebra     = { workspace = true }
+linlvo       = { git = "https://github.com/rem-rs/linlvo.git" }
 log          = { workspace = true }
 env_logger   = { workspace = true }
 rand         = "0.8"

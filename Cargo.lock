@@ -671,6 +671,7 @@ dependencies = [
  "fem-solver",
  "fem-space",
  "fem-stochastic",
+ "linlvo",
  "log",
  "nalgebra 0.33.3",
  "rand 0.8.6",

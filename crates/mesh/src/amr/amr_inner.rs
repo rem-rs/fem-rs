@@ -545,10 +545,23 @@ pub fn refine_nonconforming(
 
 
 
-/// Uniformly refine all elements of a 2-D mesh (Tri3 → 4 Tri3).
+/// Uniformly refine all elements of a 2-D mesh.
+///
+/// - Tri3  → 4 Tri3  (newest-vertex bisection).
+/// - Quad4 → 4 Quad4 (hanging-node conforming split).
 pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-    refine_marked(mesh, &all)
+    match mesh.elem_type {
+        ElementType::Tri3 => refine_marked(mesh, &all),
+        ElementType::Quad4 => {
+            let (m, _constraints) = refine_nonconforming_quad(mesh, &all);
+            m
+        }
+        _ => panic!(
+            "refine_uniform: unsupported element type {:?} (only Tri3 and Quad4 are supported)",
+            mesh.elem_type
+        ),
+    }
 }
 
 /// Uniformly refine all elements of a 3-D mesh, dispatching to the appropriate

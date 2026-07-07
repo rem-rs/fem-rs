@@ -1,133 +1,175 @@
 //! # Example 1 — Poisson/Laplace  (one-to-one with MFEM ex1)
 //!
-//! Solves the scalar Poisson equation with homogeneous Dirichlet boundary conditions:
-//!
-//! ```text
-//!   −∇·(κ ∇u) = f    in Ω
-//!            u = 0    on ∂Ω
-//! ```
-//!
-//! with `f = 1` and `κ = 1` on a unit square (or user-supplied MFEM mesh).
-//! This is exactly the problem defined in MFEM's Example 1.
+//! Solves: `-Δu = 1` in Ω, `u = 0` on ∂Ω
 //!
 //! ## Usage
-//! ```
-//! cargo run --example mfem_ex1_poisson
-//! cargo run --example mfem_ex1_poisson -- --mesh ../data/star.mesh
-//! cargo run --example mfem_ex1_poisson -- -m ../data/star.mesh --order 2
+//!
+//! ```text
+//! cargo run --example mfem_ex1_poisson                          # default mesh
+//! cargo run --example mfem_ex1_poisson -- -m ../data/star.mesh
+//! cargo run --example mfem_ex1_poisson -- -m ../data/star.mesh -o 2
+//! cargo run --example mfem_ex1_poisson -- -m ../data/star.mesh -no-vis
 //! ```
 //!
 //! ## Output
-//! Prints DOF count, PCG iteration count, final residual, and solution norm.
+//!
+//! Prints DOF count, linear system size, solver iterations, and final residual.
+//! Writes `refined.mesh` and `sol.gf` (matching MFEM ex1 output files).
+
+use std::fs::File;
+use std::io::Write;
 
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::Mesh;
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_mesh::{refine_uniform, Mesh};
+use fem_solver::solve_pcg;
 use fem_space::{
     H1Space,
     fe_space::FESpace,
-    constraints::{apply_dirichlet, eliminate_dirichlet, expand_from_reduced, boundary_dofs},
+    constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
 };
-use fem_io::mfem::read_mfem_file;
+use linlvo::SsorPrecond;
 
 fn main() {
+    // 1. Parse command-line options.
     let args = parse_args();
 
-    // Load or generate mesh
+    // 2. Device setup — skipped (no Rust equivalent of MFEM's Device class).
+
+    // 3. Read the mesh from the given mesh file.
     let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
         Mesh::<2>::unit_square_tri(args.n)
     };
+    let dim = 2;
 
+    // 4. Uniform refinement: choose levels so the final mesh has ≤ 50 000 elements.
+    let ref_levels =
+        ((50000.0 / mesh.n_elems() as f64).ln() / (2.0_f64).ln() / dim as f64).floor() as usize;
+    let mesh = if ref_levels > 0 {
+        let mut m = mesh;
+        for _ in 0..ref_levels {
+            m = refine_uniform(&m);
+        }
+        m
+    } else {
+        mesh
+    };
+
+    // 5. H¹ finite element space of the given order.
     let space = H1Space::new(mesh.clone(), args.order);
     let n_full = space.n_dofs();
 
-    // Assemble stiffness matrix: a(u,v) = ∫∇u·∇v dx
-    let diffusion = DiffusionIntegrator { kappa: 1.0 };
-    let mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
-
-    // Assemble RHS: f(v) = ∫ 1·v dx  (constant source, matching MFEM ex1)
-    let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
-    let rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
-
-    // Homogeneous Dirichlet BCs on all external boundaries (matching MFEM ex1)
+    // 6. Essential (Dirichlet) boundary DOFs — all external boundaries.
     let dm = space.dof_manager();
-    let mesh = space.mesh();
-    let all_tags: Vec<i32> = mesh.unique_boundary_tags();
+    let mesh_ref = space.mesh();
+    let all_tags: Vec<i32> = mesh_ref.unique_boundary_tags();
     let bnd = if all_tags.is_empty() {
         vec![]
     } else {
-        boundary_dofs(mesh, dm, &all_tags)
+        boundary_dofs(mesh_ref, dm, &all_tags)
     };
+
+    // 7. Right-hand side: b(v) = ∫ 1·v dx.
+    let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
+    let rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
+
+    // 8. Solution vector x — zero initial guess (built by expand_from_reduced).
+
+    // 9. Stiffness matrix: a(u, v) = ∫ ∇u · ∇v dx.
+    let diffusion = DiffusionIntegrator { kappa: 1.0 };
+    let mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
+
+    // 10. Form the linear system (eliminate essential BCs).
     let bnd_vals = vec![0.0_f64; bnd.len()];
+    let (red_mat, red_rhs, free_map, constrained_map) =
+        eliminate_dirichlet(&mat, &rhs, &bnd, &bnd_vals);
 
-    let u = if args.eliminate {
-        // Elimination mode: remove constrained DOFs, matching MFEM's approach
-        let (red_mat, red_rhs, free_map, constrained_map) =
-            eliminate_dirichlet(&mat, &rhs, &bnd, &bnd_vals);
-        let mut x_red = vec![0.0_f64; red_mat.nrows];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5_000, verbose: false, ..SolverConfig::default() };
-        let _res = solve_pcg_jacobi(&red_mat, &red_rhs, &mut x_red, &cfg).expect("solver failed");
-        expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_full)
-    } else {
-        // Row-zeroing mode (default, faster setup)
-        let mut mat = mat;
-        let mut rhs = rhs;
-        apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
-        let mut u = vec![0.0_f64; n_full];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5_000, verbose: false, ..SolverConfig::default() };
-        let _res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("solver failed");
-        u
-    };
+    // 11. Solve: PCG with symmetric Gauss-Seidel preconditoner (ω = 1 = GS).
+    let n_sys = red_mat.nrows;
+    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&red_mat);
+    let precond = SsorPrecond::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
+    let mut x_red = vec![0.0_f64; n_sys];
+    let _result =
+        solve_pcg(&red_mat, &red_rhs, &mut x_red, &precond, 1e-12, 500, true)
+            .expect("solver failed");
 
-    let u_norm = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+    // 12. Recover the full solution (MFEM RecoverFEMSolution).
+    let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_full);
 
-    let dof_reported = if args.mfem_dof {
-        // MFEM H1 space reports GetVSize = n_nodes - 1 for this mesh type.
-        // This does NOT affect the solution — only the printed count.
-        n_full.saturating_sub(1)
-    } else {
-        n_full
-    };
+    // 13. Print summary.
+    println!();
+    println!("Number of finite element unknowns: {}", n_full);
+    println!("Size of linear system:            {}", n_full);
 
-    println!("=== fem-rs Example 1: Poisson  (one-to-one with MFEM ex1) ===");
-    println!("  Nodes: {}, Elements: {}", mesh.n_nodes(), mesh.n_elems());
-    print!("  DOFs: {}", dof_reported);
-    if args.mfem_dof {
-        println!(" (MFEM convention)");
-    } else if args.eliminate {
-        println!(" (full {} → eliminated {})", n_full, n_full - bnd.len());
-    } else {
-        println!(" (full {}, row-zeroing)", n_full);
+    // 14. Save the refined mesh and solution (MFEM ex1 step 13).
+    {
+        let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
+        write_mfem(&mut mesh_f, mesh_ref, None).expect("mesh write failed");
+        let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
+        for &v in &u {
+            writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
+        }
+        eprintln!("  Wrote refined.mesh and sol.gf");
     }
-    println!("  ||u||_2 = {:.6e}", u_norm);
+
+    // 15. Send solution to GLVis (MFEM ex1 step 14).
+    if args.visualization {
+        match fem_io::glvis::GlVisSocket::connect("localhost", 19916) {
+            Ok(mut sock) => {
+                sock.send_solution_2d(mesh_ref, &u, "u").ok();
+                eprintln!("  Sent solution to GLVis (localhost:19916)");
+            }
+            Err(e) => eprintln!("  GLVis not available: {}", e),
+        }
+    }
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 struct Args {
-    mesh:      Option<String>,
-    n:         usize,
-    order:     u8,
-    eliminate: bool,
-    mfem_dof:  bool,
+    mesh:          Option<String>,
+    n:             usize,
+    order:         u8,
+    /// Static condensation (not yet implemented).
+    _static_cond:  bool,
+    visualization: bool,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: None, n: 16, order: 1, eliminate: false, mfem_dof: false };
+    let mut a = Args {
+        mesh:          None,
+        n:             16,
+        order:         1,
+        _static_cond:  false,
+        visualization: true,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-m" | "--mesh"  => { a.mesh = it.next(); }
-            "--n"            => { a.n     = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
-            "--order"        => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
-            "--eliminate"    => { a.eliminate = true; }
-            "--mfem-dof"     => { a.mfem_dof = true; }
+            "-m" | "--mesh" => {
+                a.mesh = it.next();
+            }
+            "-o" | "--order" => {
+                a.order = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
+            }
+            "-sc" | "--static-condensation" => {
+                a._static_cond = true;
+            }
+            "-vis" | "--visualization" => {
+                a.visualization = true;
+            }
+            "-no-vis" | "--no-visualization" => {
+                a.visualization = false;
+            }
             _ => {}
         }
     }

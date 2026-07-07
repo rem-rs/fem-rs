@@ -5,6 +5,7 @@ use linlvo::{
     DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner,
 };
 use linlvo::precond::{IlukPrecond, IlutPrecond};
+use linlvo::{LinearOperator, Vector};
 use fem_linalg::{fem_to_linlvo_csr, into_result, SolverConfig, SolverError, SolveResult};
 
 use crate::macros::check_dims;
@@ -468,6 +469,96 @@ where
 }
 
 // ─── Generic preconditioner interface ──────────────────────────────────────
+
+/// Preconditioned conjugate gradient with energy-norm convergence.
+///
+/// Convergence criterion: `(M⁻¹r_k, r_k) < rtol · (M⁻¹r₀, r₀)`.
+/// This checks the **preconditioned residual energy norm** — the natural
+/// convergence metric for PCG — rather than the true residual `‖r‖`.
+///
+/// Prints per-iteration history when `verbose` is true.
+pub fn solve_pcg<P>(
+    a: &FemCsr<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    precond: &P,
+    rtol: f64,
+    max_iter: usize,
+    verbose: bool,
+) -> Result<SolveResult, SolverError>
+where
+    P: Preconditioner<Vector = DenseVec<f64>>,
+{
+    let n = a.nrows;
+    check_dims(a, b, x)?;
+
+    let la = fem_to_linlvo_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+
+    // r = b - A·x
+    let mut r = DenseVec::zeros(n);
+    la.apply(&lx, &mut r);
+    for i in 0..n {
+        r.as_mut_slice()[i] = lb.as_slice()[i] - r.as_slice()[i];
+    }
+
+    // z = M⁻¹·r
+    let mut z = DenseVec::zeros(n);
+    precond.apply_precond(&r, &mut z);
+
+    let gamma0 = r.dot(&z);            // (B r₀, r₀)
+    if gamma0 == 0.0 {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 });
+    }
+
+    let tol = rtol * gamma0;
+    let mut p = z.clone();            // p₀ = z₀
+    let mut gamma = gamma0;
+    let mut w = DenseVec::zeros(n);
+
+    if verbose {
+        eprintln!("   Iteration :    0  (B r, r) = {:.5e}", gamma0);
+    }
+
+    for iter in 1..=max_iter {
+        // w = A·p
+        la.apply(&p, &mut w);
+
+        let alpha = gamma / p.dot(&w);
+        lx.axpy(alpha, &p);            // x ← x + α·p
+        r.axpy(-alpha, &w);            // r ← r − α·w
+
+        precond.apply_precond(&r, &mut z);  // z = M⁻¹·r
+
+        let gamma_new = r.dot(&z);      // (B r_{k+1}, r_{k+1})
+
+        if verbose {
+            eprintln!("   Iteration : {:4}  (B r, r) = {:.5e}", iter, gamma_new);
+        }
+
+        if gamma_new < tol {
+            x.copy_from_slice(lx.as_slice());
+            let final_residual = gamma_new.sqrt();
+            if verbose {
+                let reduction = final_residual / gamma0.sqrt();
+                let avg = reduction.powf(1.0 / iter as f64);
+                eprintln!("Average reduction factor = {:.6}", avg);
+            }
+            return Ok(SolveResult { converged: true, iterations: iter, final_residual });
+        }
+
+        let beta = gamma_new / gamma;
+        // p = z + β·p  (scale old p by β, then add z)
+        p.scale(beta);
+        p.axpy(1.0, &z);
+
+        gamma = gamma_new;
+    }
+
+    x.copy_from_slice(lx.as_slice());
+    Err(SolverError::ConvergenceFailed { max_iter, residual: gamma.sqrt() })
+}
 
 /// Preconditioned CG with a user-supplied preconditioner.
 ///
