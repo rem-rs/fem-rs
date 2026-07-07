@@ -779,21 +779,34 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// affine triangles (contravariant Piola pullback of `F` to the reference triangle).
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
+        // Build DOF → element-sign map (first incident element determines the sign).
+        let mut dof_sign = vec![1.0f64; self.n_dofs];
+        for e in 0..self.mesh.n_elements() as u32 {
+            let dofs = self.element_dofs(e);
+            let signs = self.element_signs(e);
+            for (j, &d) in dofs.iter().enumerate() {
+                if dof_sign[d as usize] == 1.0 {
+                    dof_sign[d as usize] = signs[j];
+                }
+            }
+        }
         match &self.face_map {
             FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => {
                 if self.order == 0 {
                     // RT0: 1 DOF per edge — zero-th normal moment via midpoint rule.
+                    // The raw flux ∫ F·n ds uses the sorted EdgeKey normal (a→b, a<b).
+                    // Multiply by element_sign so the value matches the reference
+                    // element's outward-normal convention used by the assembly.
                     for (&EdgeKey(a, b), &dof) in map {
                         let pa = self.mesh.node_coords(a);
                         let pb = self.mesh.node_coords(b);
                         let mid = [0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1])];
-                        // Global edge tangent a→b (a < b), normal = 90° CCW rotation.
                         let tx = pb[0] - pa[0];
                         let ty = pb[1] - pa[1];
-                        let normal = [-ty, tx]; // length = edge length
+                        let normal = [-ty, tx]; // length = edge length, CCW of a→b
                         let fval = f(&mid);
-                        result.as_slice_mut()[dof as usize] =
-                            fval[0] * normal[0] + fval[1] * normal[1];
+                        let flux = fval[0] * normal[0] + fval[1] * normal[1];
+                        result.as_slice_mut()[dof as usize] = flux * dof_sign[dof as usize];
                     }
                 } else if self.order == 1 {
                     // RT1: 2 DOFs per edge + interior bubble DOFs.
@@ -820,9 +833,10 @@ impl<M: MeshTopology> HDivSpace<M> {
                             mom0 += w * flux;
                             mom1 += w * flux * t;
                         }
+                        let sgn = dof_sign[first_dof as usize];
                         let r = result.as_slice_mut();
-                        r[first_dof as usize]     = mom0;
-                        r[first_dof as usize + 1] = mom1;
+                        r[first_dof as usize]     = mom0 * sgn;
+                        r[first_dof as usize + 1] = mom1 * sgn;
                     }
 
                     // Interior bubble DOFs depend on element type.

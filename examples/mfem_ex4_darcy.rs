@@ -24,7 +24,6 @@
 //! Prints DOF count, linear system size, solver statistics, and L² error.
 //! Writes `refined.mesh` and `sol.gf` (matching MFEM ex4 output files).
 
-use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::fs::File;
 use std::io::Write;
@@ -137,40 +136,12 @@ fn main() {
     println!("done.");
 
     // Project exact solution ⟶ DOF values for non-homogeneous BC elimination.
-    // We integrate over each boundary face using the DOF's element sign to
-    // determine the correct sign for the DOF value relative to the assembly.
     let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
-        // Build DOF→sign map from the sole incident element on the boundary.
-        let mut dof_sign: HashMap<u32, f64> = HashMap::new();
-        for e in space.mesh().elem_iter() {
-            let dofs = space.element_dofs(e);
-            let signs = space.element_signs(e);
-            for (j, &d) in dofs.iter().enumerate() {
-                dof_sign.entry(d).or_insert(signs[j]);
-            }
-        }
-        use fem_space::EdgeKey;
-        let mut x_exact = vec![0.0_f64; n_dofs];
-        for f in 0..space.mesh().n_boundary_faces() as u32 {
-            if !all_tags.contains(&space.mesh().face_tag(f)) { continue; }
-            let nodes = space.mesh().face_nodes(f);
-            let pa = space.mesh().node_coords(nodes[0]);
-            let pb = space.mesh().node_coords(nodes[1]);
-            // CCW normal of face direction (n0→n1): length = edge length.
-            let tx = pb[0] - pa[0];
-            let ty = pb[1] - pa[1];
-            let normal = [-ty, tx];
-            let mid = [0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1])];
-            let fe = exact_f(&mid, kappa);
-            let flux = fe[0] * normal[0] + fe[1] * normal[1];
-            let ek = EdgeKey::new(nodes[0], nodes[1]);
-            if let Some(dof) = space.edge_face_dof(ek) {
-                // Apply element sign so the flux sign matches the assembly's
-                // DOF convention (which uses element_signs to orient the
-                // basis function relative to the reference element).
-                x_exact[dof as usize] = flux * dof_sign.get(&dof).copied().unwrap_or(1.0);
-            }
-        }
+        let x_exact = space.interpolate_vector(&|p| {
+            let k = kappa;
+            vec![(k * p[1]).cos() * (k * p[0]).sin(),
+                 (k * p[0]).cos() * (k * p[1]).sin()]
+        });
         let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
         let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
         (rm, rf, fm, cm, bv)
@@ -269,23 +240,13 @@ fn compute_l2_error(
     uh: &[f64],
     kappa: f64,
 ) -> f64 {
-    use fem_assembly::{geo_ref_elem_from_mesh, isoparametric_jacobian};
-    use fem_element::{
-        reference::VectorReferenceElement,
-        raviart_thomas::{QuadRT0, TriRT0},
-    };
-    use fem_mesh::{ElementTransformation, ElementType};
+    use fem_element::{raviart_thomas::TriRT0, reference::VectorReferenceElement};
+    use fem_mesh::ElementTransformation;
 
     let mesh = space.mesh();
-    let elem_type = mesh.element_type(0);
-    let is_quad = matches!(elem_type, ElementType::Quad4);
-    let ref_elem: &dyn VectorReferenceElement = match elem_type {
-        ElementType::Tri3 | ElementType::Tri6 => &TriRT0,
-        ElementType::Quad4 => &QuadRT0,
-        _ => panic!("compute_l2_error: unsupported element type {elem_type:?}"),
-    };
+    let ref_elem = TriRT0;
     let quad = ref_elem.quadrature(6);
-    let n_ldofs = ref_elem.n_dofs() as usize;
+    let n_ldofs = ref_elem.n_dofs();
     let mut ref_phi = vec![0.0; n_ldofs * 2];
     let mut phys_phi = vec![0.0; n_ldofs * 2];
     let mut err2 = 0.0_f64;
@@ -294,20 +255,13 @@ fn compute_l2_error(
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);
         let nodes = mesh.element_nodes(e);
-
-        // Use per-point isoparametric Jacobian for quads, affine for tri.
-        let affine_tr = (!is_quad).then(|| ElementTransformation::from_simplex_nodes(mesh, nodes));
+        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+        let jac = tr.jacobian();
+        let det_j = tr.det_j();
 
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (jac, det_j, xp) = if is_quad {
-                let ge = geo_ref_elem_from_mesh(mesh as &dyn fem_mesh::topology::MeshTopology, e)
-                    .expect("geometry element for quad");
-                isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, 2)
-            } else {
-                let tr = affine_tr.as_ref().unwrap();
-                (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
-            };
             let w = quad.weights[qi] * det_j.abs();
+            let xp = tr.map_to_physical(xi);
 
             ref_elem.eval_basis_vec(xi, &mut ref_phi);
 
