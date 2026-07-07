@@ -10,14 +10,24 @@
 //! - same density filter + Heaviside + OC update
 //! - adjoint sensitivity via element strain energy
 
+use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
 use fem_solver::solve_sparse_cholesky;
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space};
 
+fn load_mesh(path: &str) -> SimplexMesh<2> {
+    let msh = read_msh_file(path).expect("failed to read mesh file");
+    msh.into_2d().expect("expected 2D mesh")
+}
+
 fn main() {
     let args = parse_args();
-    let result = run_topology_optimization(&args);
+    let mesh = match args.mesh_file {
+        Some(ref p) => load_mesh(p),
+        None => SimplexMesh::<2>::unit_square_tri(args.n),
+    };
+    let result = run_topology_optimization(&args, mesh);
 
     let model_label = match args.model {
         TopOptModel::Scalar => "scalar",
@@ -34,6 +44,7 @@ fn main() {
     println!("  Final compliance:   {:.6e}", result.final_compliance);
     println!("  Max density change: {:.3e}", result.max_density_change);
     println!("  Density range:      [{:.3}, {:.3}]", result.min_density, result.max_density);
+        if let Some(ref p) = args.mesh_file { println!("  Mesh file: {}", p); }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +64,7 @@ struct Args {
     beta: f64,
     eta: f64,
     model: TopOptModel,
+    mesh_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,10 +97,12 @@ fn parse_args() -> Args {
         beta: 2.5,
         eta: 0.5,
         model: TopOptModel::Scalar,
+        mesh_file: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "-m" | "--mesh" => args.mesh_file = Some(it.next().unwrap_or("".into())),
             "--n" => args.n = it.next().unwrap_or("18".into()).parse().unwrap_or(18),
             "--iters" => args.iters = it.next().unwrap_or("20".into()).parse().unwrap_or(20),
             "--volfrac" => args.volfrac = it.next().unwrap_or("0.4".into()).parse().unwrap_or(0.4),
@@ -115,15 +129,14 @@ fn parse_args() -> Args {
     args
 }
 
-fn run_topology_optimization(args: &Args) -> TopOptResult {
+fn run_topology_optimization(args: &Args, mesh: SimplexMesh<2>) -> TopOptResult {
     match args.model {
-        TopOptModel::Scalar => run_scalar_topology_optimization(args),
-        TopOptModel::PlaneStrainElastic => run_elastic_topology_optimization(args),
+        TopOptModel::Scalar => run_scalar_topology_optimization(args, mesh),
+        TopOptModel::PlaneStrainElastic => run_elastic_topology_optimization(args, mesh),
     }
 }
 
-fn run_scalar_topology_optimization(args: &Args) -> TopOptResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+fn run_scalar_topology_optimization(args: &Args, mesh: SimplexMesh<2>) -> TopOptResult {
     let space = H1Space::new(mesh, 1);
     let elements = build_element_data(&space);
     let filters = build_filter_neighbors(&elements, args.rmin);
@@ -330,8 +343,7 @@ fn assemble_elastic_stiffness(
 ///
 /// Setup: unit-square domain, left edge clamped, point load in the
 /// −y direction applied at the right-boundary node closest to mid-height.
-fn run_elastic_topology_optimization(args: &Args) -> TopOptResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+fn run_elastic_topology_optimization(args: &Args, mesh: SimplexMesh<2>) -> TopOptResult {
     let space = H1Space::new(mesh, 1);
     let elements = build_elastic_element_data(&space);
     let centroids: Vec<[f64; 2]> = elements.iter().map(|e| e.centroid).collect();
@@ -628,9 +640,13 @@ fn find_nearest_dof_on_right_boundary(space: &H1Space<SimplexMesh<2>>, target_y:
 mod tests {
     use super::*;
 
+    fn run(args: &Args) -> TopOptResult {
+        run_topology_optimization(args, SimplexMesh::<2>::unit_square_tri(args.n))
+    }
+
     #[test]
     fn ex37_topopt_respects_design_volume_constraint() {
-        let result = run_topology_optimization(&Args {
+        let result = run(&Args {
             n: 10,
             iters: 10,
             volfrac: 0.45,
@@ -639,7 +655,7 @@ mod tests {
             rmin: 0.22,
             beta: 2.5,
             eta: 0.5,
-            model: TopOptModel::Scalar,
+            model: TopOptModel::Scalar, mesh_file: None,
         });
         assert!(
             (result.design_volume_fraction - 0.45).abs() < 5.0e-3,
@@ -656,7 +672,7 @@ mod tests {
 
     #[test]
     fn ex37_topopt_reduces_compliance() {
-        let result = run_topology_optimization(&Args {
+        let result = run(&Args {
             n: 10,
             iters: 12,
             volfrac: 0.40,
@@ -665,7 +681,7 @@ mod tests {
             rmin: 0.22,
             beta: 2.5,
             eta: 0.5,
-            model: TopOptModel::Scalar,
+            model: TopOptModel::Scalar, mesh_file: None,
         });
         assert!(
             result.final_compliance < result.initial_compliance,
@@ -679,42 +695,24 @@ mod tests {
     fn ex37_topopt_remains_stable_across_projection_parameters() {
         let cases = [
             Args {
-                n: 10,
-                iters: 12,
-                volfrac: 0.40,
-                penal: 2.0,
-                rho_min: 1.0e-3,
-                rmin: 0.22,
-                beta: 1.5,
-                eta: 0.5,
-                model: TopOptModel::Scalar,
+                n: 10, iters: 12, volfrac: 0.40, penal: 2.0,
+                rho_min: 1.0e-3, rmin: 0.22, beta: 1.5, eta: 0.5,
+                model: TopOptModel::Scalar, mesh_file: None,
             },
             Args {
-                n: 10,
-                iters: 12,
-                volfrac: 0.40,
-                penal: 3.0,
-                rho_min: 1.0e-3,
-                rmin: 0.22,
-                beta: 2.5,
-                eta: 0.5,
-                model: TopOptModel::Scalar,
+                n: 10, iters: 12, volfrac: 0.40, penal: 3.0,
+                rho_min: 1.0e-3, rmin: 0.22, beta: 2.5, eta: 0.5,
+                model: TopOptModel::Scalar, mesh_file: None,
             },
             Args {
-                n: 10,
-                iters: 12,
-                volfrac: 0.40,
-                penal: 4.0,
-                rho_min: 1.0e-3,
-                rmin: 0.22,
-                beta: 4.0,
-                eta: 0.5,
-                model: TopOptModel::Scalar,
+                n: 10, iters: 12, volfrac: 0.40, penal: 4.0,
+                rho_min: 1.0e-3, rmin: 0.22, beta: 4.0, eta: 0.5,
+                model: TopOptModel::Scalar, mesh_file: None,
             },
         ];
 
         for args in cases {
-            let result = run_topology_optimization(&args);
+            let result = run(&args);
             assert!(
                 (result.design_volume_fraction - args.volfrac).abs() < 5.0e-3,
                 "design volume fraction drifted for penal={} beta={}: {}",
@@ -750,27 +748,15 @@ mod tests {
 
     #[test]
     fn ex37_higher_volume_fraction_lowers_final_compliance() {
-        let lean = run_topology_optimization(&Args {
-            n: 10,
-            iters: 12,
-            volfrac: 0.40,
-            penal: 3.0,
-            rho_min: 1.0e-3,
-            rmin: 0.22,
-            beta: 2.5,
-            eta: 0.5,
-            model: TopOptModel::Scalar,
+        let lean = run(&Args {
+            n: 10, iters: 12, volfrac: 0.40, penal: 3.0,
+            rho_min: 1.0e-3, rmin: 0.22, beta: 2.5, eta: 0.5,
+            model: TopOptModel::Scalar, mesh_file: None,
         });
-        let rich = run_topology_optimization(&Args {
-            n: 10,
-            iters: 12,
-            volfrac: 0.55,
-            penal: 3.0,
-            rho_min: 1.0e-3,
-            rmin: 0.22,
-            beta: 2.5,
-            eta: 0.5,
-            model: TopOptModel::Scalar,
+        let rich = run(&Args {
+            n: 10, iters: 12, volfrac: 0.55, penal: 3.0,
+            rho_min: 1.0e-3, rmin: 0.22, beta: 2.5, eta: 0.5,
+            model: TopOptModel::Scalar, mesh_file: None,
         });
 
         assert!(
@@ -797,7 +783,7 @@ mod tests {
 
     #[test]
     fn ex37_elastic_topopt_reduces_compliance() {
-        let result = run_topology_optimization(&Args {
+        let result = run(&Args {
             n: 10,
             iters: 15,
             volfrac: 0.40,
@@ -806,7 +792,7 @@ mod tests {
             rmin: 0.22,
             beta: 2.5,
             eta: 0.5,
-            model: TopOptModel::PlaneStrainElastic,
+            model: TopOptModel::PlaneStrainElastic, mesh_file: None,
         });
         assert!(
             result.final_compliance < result.initial_compliance,
@@ -818,16 +804,10 @@ mod tests {
 
     #[test]
     fn ex37_elastic_topopt_respects_volume_constraint() {
-        let result = run_topology_optimization(&Args {
-            n: 10,
-            iters: 15,
-            volfrac: 0.40,
-            penal: 3.0,
-            rho_min: 1.0e-3,
-            rmin: 0.22,
-            beta: 2.5,
-            eta: 0.5,
-            model: TopOptModel::PlaneStrainElastic,
+        let result = run(&Args {
+            n: 10, iters: 15, volfrac: 0.40, penal: 3.0,
+            rho_min: 1.0e-3, rmin: 0.22, beta: 2.5, eta: 0.5,
+            model: TopOptModel::PlaneStrainElastic, mesh_file: None,
         });
         assert!(
             (result.design_volume_fraction - 0.40).abs() < 5.0e-3,
@@ -844,27 +824,15 @@ mod tests {
 
     #[test]
     fn ex37_elastic_higher_volume_lowers_compliance() {
-        let lean = run_topology_optimization(&Args {
-            n: 10,
-            iters: 15,
-            volfrac: 0.35,
-            penal: 3.0,
-            rho_min: 1.0e-3,
-            rmin: 0.22,
-            beta: 2.5,
-            eta: 0.5,
-            model: TopOptModel::PlaneStrainElastic,
+        let lean = run(&Args {
+            n: 10, iters: 15, volfrac: 0.35, penal: 3.0,
+            rho_min: 1.0e-3, rmin: 0.22, beta: 2.5, eta: 0.5,
+            model: TopOptModel::PlaneStrainElastic, mesh_file: None,
         });
-        let rich = run_topology_optimization(&Args {
-            n: 10,
-            iters: 15,
-            volfrac: 0.55,
-            penal: 3.0,
-            rho_min: 1.0e-3,
-            rmin: 0.22,
-            beta: 2.5,
-            eta: 0.5,
-            model: TopOptModel::PlaneStrainElastic,
+        let rich = run(&Args {
+            n: 10, iters: 15, volfrac: 0.55, penal: 3.0,
+            rho_min: 1.0e-3, rmin: 0.22, beta: 2.5, eta: 0.5,
+            model: TopOptModel::PlaneStrainElastic, mesh_file: None,
         });
         assert!(
             rich.final_compliance < lean.final_compliance,
@@ -880,9 +848,10 @@ mod tests {
         let args = Args {
             n: 8, iters: 6, volfrac: 0.40, penal: 3.0, rho_min: 1.0e-3,
             rmin: 0.22, beta: 2.5, eta: 0.5, model: TopOptModel::Scalar,
+            mesh_file: None,
         };
-        let r1 = run_topology_optimization(&args);
-        let r2 = run_topology_optimization(&args);
+        let r1 = run(&args);
+        let r2 = run(&args);
         assert_eq!(r1.final_compliance, r2.final_compliance,
             "topology optimization compliance is not deterministic: {} vs {}",
             r1.final_compliance, r2.final_compliance);

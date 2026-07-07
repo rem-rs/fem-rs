@@ -49,6 +49,7 @@ use fem_io_hdf5_parallel::{
     write_checkpoint_step_bundle_f64,
 };
 use fem_io::vtk::{DataArray, VtkWriter};
+use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, SimplexMesh};
 use fem_solver::{BuiltinMultiphysicsTemplate, builtin_template_spec, solve_sparse_cholesky};
@@ -221,6 +222,8 @@ struct Args {
     nitsche_gamma: f64,
     /// Level-set shape override; if None, uses the `Circle` built from cx/cy/radius.
     level_set: Option<LevelSetShape>,
+    /// Optional mesh file; if None, uses unit_square_tri(n).
+    mesh_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +362,7 @@ fn parse_args() -> CliArgs {
         subdiv: 8,
         nitsche_gamma: 20.0,
         level_set: None,
+        mesh_file: None,
     };
     let mut workflow = WorkflowCliOptions::default();
     let mut it = std::env::args().skip(1);
@@ -367,6 +371,7 @@ fn parse_args() -> CliArgs {
             continue;
         }
         match arg.as_str() {
+            "-m" | "--mesh" => sim.mesh_file = Some(it.next().unwrap_or("".into())),
             "--n" => sim.n = it.next().unwrap_or("18".into()).parse().unwrap_or(18),
             "--radius" => sim.radius = it.next().unwrap_or("0.30".into()).parse().unwrap_or(0.30),
             "--cx" => sim.cx = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
@@ -403,7 +408,13 @@ fn parse_args() -> CliArgs {
 }
 
 fn solve_embedded_problem(args: &Args) -> EmbeddedResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh = match args.mesh_file {
+        Some(ref p) => {
+            let msh = read_msh_file(p).expect("failed to read mesh file");
+            msh.into_2d().expect("expected 2D mesh")
+        }
+        None => SimplexMesh::<2>::unit_square_tri(args.n),
+    };
     let space = H1Space::new(mesh.clone(), 1);
     let ls = args.level_set.clone().unwrap_or_else(|| {
         LevelSetShape::Circle(Circle {
@@ -580,6 +591,7 @@ fn read_embedded_checkpoint(path: &str) -> Result<EmbeddedCheckpointState, Strin
             }),
             _ => None,
         },
+        mesh_file: None,
     };
     let values = values.ok_or_else(|| "missing values".to_string())?;
     let expected_dofs = (args.n + 1) * (args.n + 1);
@@ -722,6 +734,7 @@ fn read_embedded_hdf5_checkpoint(path: &str) -> Result<EmbeddedCheckpointState, 
         subdiv: subdiv.ok_or_else(|| "missing subdiv".to_string())?,
         nitsche_gamma: nitsche_gamma.ok_or_else(|| "missing nitsche_gamma".to_string())?,
         level_set: decode_level_set(level_set_code_value.ok_or_else(|| "missing level_set_code".to_string())?),
+        mesh_file: None,
     };
     let values = values.ok_or_else(|| "missing embedded_solution".to_string())?;
     let expected_dofs = (n + 1) * (n + 1);
@@ -1059,7 +1072,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 8,
             nitsche_gamma: 20.0,
-            level_set: None,
+            level_set: None, mesh_file: None,
         });
         assert!(result.area_rel_error < 3.0e-2, "area rel error = {}", result.area_rel_error);
         assert!(result.active_dofs > 0, "expected non-empty active set");
@@ -1080,7 +1093,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 8,
             nitsche_gamma: 20.0,
-            level_set: None,
+            level_set: None, mesh_file: None,
         });
         assert!(result.l2_error < 6.0e-2, "embedded L2 error = {}", result.l2_error);
         assert!(
@@ -1102,7 +1115,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 4,
             nitsche_gamma: 20.0,
-            level_set: None,
+            level_set: None, mesh_file: None,
         });
         let fine = solve_embedded_problem(&Args {
             n: 16,
@@ -1112,7 +1125,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 8,
             nitsche_gamma: 20.0,
-            level_set: None,
+            level_set: None, mesh_file: None,
         });
 
         assert!(
@@ -1134,7 +1147,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 8,
             nitsche_gamma: 10.0,
-            level_set: None,
+            level_set: None, mesh_file: None,
         });
         let strong = solve_embedded_problem(&Args {
             n: 16,
@@ -1144,7 +1157,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 8,
             nitsche_gamma: 40.0,
-            level_set: None,
+            level_set: None, mesh_file: None,
         });
 
         for (label, result) in [("weak", &weak), ("strong", &strong)] {

@@ -8,6 +8,7 @@
 //! 5) derefine selected parents and restrict back
 
 use fem_core::NodeId;
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::{
     SimplexMesh,
     zz_estimator,
@@ -17,19 +18,17 @@ use fem_mesh::{
     derefine_marked,
     prolongate_p1,
     restrict_to_coarse_p1,
-    refine_nonconforming_quad_aniso,
-    refine_nonconforming_hex_aniso,
-    QuadRefineDir,
-    HexRefineDir,
 };
 
 fn main() {
     let args = parse_args();
 
-    println!("=== mfem_ex15_dynamic_amr: refine + derefine demo ===");
-    println!("  n={}, theta_refine={}, theta_derefine={}", args.n, args.theta_refine, args.theta_derefine);
-
-    let mesh0 = SimplexMesh::<2>::unit_square_tri(args.n);
+    let mesh0: SimplexMesh<2> = if let Some(ref path) = args.mesh_file {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(args.n)
+    };
     let n0 = mesh0.n_nodes();
     let u0 = synthetic_field(&mesh0, 0.35, 0.45, 0.08);
 
@@ -91,6 +90,7 @@ struct Args {
     n: usize,
     theta_refine: f64,
     theta_derefine: f64,
+    mesh_file: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -98,6 +98,7 @@ fn parse_args() -> Args {
         n: 8,
         theta_refine: 0.5,
         theta_derefine: 0.2,
+        mesh_file: None,
     };
 
     let mut it = std::env::args().skip(1);
@@ -106,6 +107,7 @@ fn parse_args() -> Args {
             "--n" => a.n = it.next().unwrap_or("8".into()).parse().unwrap_or(8),
             "--theta-refine" => a.theta_refine = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
             "--theta-derefine" => a.theta_derefine = it.next().unwrap_or("0.2".into()).parse().unwrap_or(0.2),
+            "-m" | "--mesh" => { a.mesh_file = it.next(); }
             _ => {}
         }
     }
@@ -115,6 +117,12 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_mesh::{
+        refine_nonconforming_quad_aniso,
+        refine_nonconforming_hex_aniso,
+        QuadRefineDir,
+        HexRefineDir,
+    };
 
     #[test]
     fn ex15_refine_marking_grows_with_theta() {

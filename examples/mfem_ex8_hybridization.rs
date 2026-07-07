@@ -1,7 +1,12 @@
-//! # Example 8 -- Static Condensation baseline (toward MFEM ex8/hybr)
+//! # Example 8 — Static Condensation baseline (toward MFEM ex8/hybr)
 //!
 //! This example demonstrates the algebraic static-condensation primitive used by
-//! fem-rs non-conforming constraints:
+//! fem-rs non-conforming constraints, using a unit-source RHS (`f = 1`) matching
+//! the spirit of MFEM Example 8.
+//!
+//! MFEM ex8 solves `-Δu = 1` with homogeneous Dirichlet BC using a DPG
+//! formulation.  Here we use the same RHS (unit source) on a toy SPD system
+//! with a single hanging-node constraint:
 //!
 //! ```text
 //!   u_h = 0.5 * (u_a + u_b)
@@ -11,11 +16,13 @@
 //! free-DOF solution against an explicit reduced system solve.
 //!
 //! ## Usage
-//! ```
+//! ```bash
 //! cargo run --example mfem_ex8_hybridization
+//! cargo run --example mfem_ex8_hybridization -- -m ../data/star.mesh
 //! cargo run --example mfem_ex8_hybridization -- --rhs-scale 2.0
 //! ```
 
+use fem_io::mfem::read_mfem_file;
 use fem_linalg::CooMatrix;
 use fem_mesh::amr::HangingNodeConstraint;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
@@ -23,10 +30,26 @@ use fem_space::constraints::{apply_hanging_constraints, recover_hanging_values};
 
 fn main() {
     let args = parse_args();
+
+    // Load mesh (if provided) for CLI consistency with MFEM examples.
+    if let Some(ref path) = args.mesh {
+        match read_mfem_file(path) {
+            Ok(mfem) => {
+                if let Some(m2) = mfem.mesh2d {
+                    println!("  Mesh: 2D, {} nodes, {} elements", m2.n_nodes(), m2.n_elems());
+                }
+                if let Some(m3) = mfem.mesh3d {
+                    println!("  Mesh: 3D, {} nodes, {} elements", m3.n_nodes(), m3.n_elems());
+                }
+            }
+            Err(e) => eprintln!("  Warning: failed to read mesh '{:?}': {e}", path),
+        }
+    }
+
     let result = run_case(args.rhs_scale);
 
-    println!("=== fem-rs Example 8: static condensation baseline ===");
-    println!("  rhs scale: {:.3}", args.rhs_scale);
+    println!("=== MFEM Example 8: static condensation baseline ===");
+    println!("  rhs scale: {:.3}  (RHS coefficients all = {:.3}, matching MFEM f=1)", args.rhs_scale, args.rhs_scale);
     println!("  iterations: {}", result.iterations);
     println!("  final residual: {:.3e}", result.final_residual);
     println!("  converged: {}", result.converged);
@@ -54,14 +77,17 @@ struct CaseResult {
     solution_checksum: f64,
 }
 
+/// Toy 3×3 SPD system with a unit-source RHS (matching MFEM ex8 f=1).
 fn run_case(rhs_scale: f64) -> CaseResult {
-    // Dense 3x3 SPD toy matrix with one constrained (hanging) DOF at index 2.
+    // A = 3×3 SPD with diagonal 4.0 and off-diagonal -1.0.
     let a = [
         [4.0, -1.0, -1.0],
         [-1.0, 4.0, -1.0],
         [-1.0, -1.0, 4.0],
     ];
-    let b = [1.0 * rhs_scale, 2.0 * rhs_scale, 0.5 * rhs_scale];
+    // MFEM ex8 uses f = 1 everywhere → all RHS entries equal.
+    // This also makes the system symmetric w.r.t. permutation.
+    let b = [1.0 * rhs_scale, 1.0 * rhs_scale, 1.0 * rhs_scale];
 
     let mut mat = dense3_to_csr(a);
     let mut rhs = b.to_vec();
@@ -158,14 +184,21 @@ fn solve_2x2(a: [[f64; 2]; 2], b: [f64; 2]) -> [f64; 2] {
 }
 
 struct Args {
+    mesh: Option<String>,
     rhs_scale: f64,
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { rhs_scale: 1.0 };
+    let mut args = Args {
+        mesh: None,
+        rhs_scale: 1.0,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "-m" | "--mesh" => {
+                args.mesh = it.next();
+            }
             "--rhs-scale" => {
                 args.rhs_scale = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0);
             }
@@ -244,8 +277,6 @@ mod tests {
 
     #[test]
     fn ex8_hanging_consistency_is_scale_invariant() {
-        // The hanging-node constraint u_h = 0.5(u_a + u_b) should hold to
-        // machine precision regardless of the RHS magnitude.
         for &scale in &[0.001f64, 1.0, 1000.0] {
             let r = run_case(scale);
             assert!(r.converged, "scale={}: did not converge", scale);
@@ -256,8 +287,6 @@ mod tests {
 
     #[test]
     fn ex8_free_dof_mismatch_is_scale_invariant() {
-        // The agreement between the full-system solve and the reduced-system
-        // reference should stay near machine precision at any scale.
         for &scale in &[0.1f64, 5.0, 50.0] {
             let r = run_case(scale);
             assert!(r.converged, "scale={}: did not converge", scale);
@@ -274,7 +303,6 @@ mod tests {
             "large-scale hanging consistency: {:.3e}", large.hanging_consistency);
         assert!(large.free_dof_mismatch < 1.0e-10,
             "large-scale free dof mismatch: {:.3e}", large.free_dof_mismatch);
-        // solution should be exactly 100× the unit case
         let unit = run_case(1.0);
         assert!((large.solution_norm / unit.solution_norm - 100.0).abs() < 1.0e-10,
             "solution_norm ratio mismatch: {:.6}", large.solution_norm / unit.solution_norm);
@@ -292,7 +320,6 @@ mod tests {
             "fractional-scale hanging consistency: {:.3e}", frac.hanging_consistency);
         assert!(frac.free_dof_mismatch < 1.0e-10,
             "fractional-scale free dof mismatch: {:.3e}", frac.free_dof_mismatch);
-        // solution should be exactly 1/4 of the unit case
         let unit = run_case(1.0);
         assert!((frac.solution_norm / unit.solution_norm - 0.25).abs() < 1.0e-12,
             "solution_norm ratio mismatch: {:.6}", frac.solution_norm / unit.solution_norm);

@@ -28,16 +28,59 @@
 //! cargo run --example mfem_ex15_dg_amr -- --nc --levels 4
 //! ```
 
-use std::f64::consts::PI;
-
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::{SimplexMesh, topology::MeshTopology};
 use fem_mesh::amr::{refine_uniform, NCState, zz_estimator, dorfler_mark, prolongate_p1};
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::{apply_dirichlet, apply_hanging_constraints, recover_hanging_values, boundary_dofs}};
+
+// Constants for the MFEM ex15 front/ball problem definitions.
+const ALPHA: f64 = 0.02;
+
+/// Spherical front (smooth Gaussian-like pulse), problem = 0.
+fn front_2d(x: &[f64]) -> f64 {
+    let r = (x[0] * x[0] + x[1] * x[1]).sqrt();
+    (-0.5 * (r / ALPHA).powi(2)).exp()
+}
+
+/// Laplacian of the spherical front in 2-D (t = 0).
+fn front_laplace_2d(x: &[f64]) -> f64 {
+    let r2 = x[0] * x[0] + x[1] * x[1];
+    let r = r2.sqrt();
+    if r < 1e-15 {
+        return 2.0 / (ALPHA * ALPHA);
+    }
+    let a2 = ALPHA * ALPHA;
+    (-0.5 * r2 / a2).exp() * (2.0 * a2 - r2) / (a2 * a2)
+}
+
+#[allow(dead_code)]
+/// Smooth ball indicator (arctan-based step), problem = 1.
+fn ball_2d(x: &[f64]) -> f64 {
+    let r = (x[0] * x[0] + x[1] * x[1]).sqrt();
+    -((2.0 * r - 0.5) / ALPHA).atan()
+}
+
+#[allow(dead_code)]
+/// Laplacian of the smooth ball indicator in 2-D.
+fn ball_laplace_2d(x: &[f64]) -> f64 {
+    let x2 = x[0] * x[0];
+    let y2 = x[1] * x[1];
+    let r2 = x2 + y2;
+    let r = r2.sqrt();
+    if r < 1e-15 {
+        return 0.0;
+    }
+    let a2 = ALPHA * ALPHA;
+    let t = 0.25;
+    let t2 = 4.0 * t * t;
+    let den = (-a2 - 4.0 * (r2 - 2.0 * r * t) - t2).powi(2);
+    2.0 * ALPHA * (a2 + t2 - 4.0 * x2 - 4.0 * y2) / r / den
+}
 
 struct LevelResult {
     level: usize,
@@ -59,12 +102,22 @@ struct RunResult {
 
 fn main() {
     let args = parse_args();
+
+    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh_file {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(args.n0)
+    };
+
     println!("=== fem-rs Example 15: Poisson + Mesh Refinement with Error Estimation ===");
-    println!("  Initial mesh: {}x{}, P1 elements", args.n0, args.n0);
+    println!("  Mesh elements: {}, P1 elements", mesh.n_elems());
     println!("  Refinement levels: {}, Doerfler theta = {}", args.levels, args.theta);
     println!("  Mode: {}\n", if args.nonconforming { "non-conforming (hanging nodes)" } else { "conforming (uniform)" });
 
-    let result = run_case(args.n0, args.levels, args.theta, args.nonconforming);
+    let u_exact = |x: &[f64]| front_2d(x);
+    let rhs_fn = |x: &[f64]| front_laplace_2d(x);
+    let result = run_case(mesh, args.levels, args.theta, args.nonconforming, u_exact, rhs_fn);
     println!(
         "  Confirmed run: n0 = {}, levels = {}, theta = {:.2}, mode = {}",
         result.n0,
@@ -105,16 +158,15 @@ fn main() {
     println!("\nDone.");
 }
 
-fn run_case(n0: usize, levels: usize, theta: f64, nonconforming: bool) -> RunResult {
-    let u_exact = |x: &[f64]| -> f64 {
-        (PI * x[0]).sin() * (PI * x[1]).sin()
-    };
-
-    let rhs_fn = |x: &[f64]| -> f64 {
-        2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
-    };
-
-    let mut mesh = SimplexMesh::<2>::unit_square_tri(n0);
+fn run_case(
+    mesh: SimplexMesh<2>,
+    levels: usize,
+    theta: f64,
+    nonconforming: bool,
+    u_exact: impl Fn(&[f64]) -> f64 + Send + Sync,
+    rhs_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
+) -> RunResult {
+    let mut mesh = mesh;
     let mut prev_l2: Option<f64> = None;
     let mut hanging_constraints = Vec::new();
     let mut nc_state = NCState::new();
@@ -214,7 +266,7 @@ fn run_case(n0: usize, levels: usize, theta: f64, nonconforming: bool) -> RunRes
     let _ = prev_l2;
 
     RunResult {
-        n0,
+        n0: 0,
         levels,
         theta,
         nonconforming,
@@ -269,11 +321,13 @@ struct Args {
     levels: usize,
     theta:  f64,
     nonconforming: bool,
+    mesh_file: Option<String>,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
         n0: 4, levels: 5, theta: 0.5, nonconforming: false,
+        mesh_file: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -282,6 +336,7 @@ fn parse_args() -> Args {
             "--levels"=> { a.levels = it.next().unwrap_or("5".into()).parse().unwrap_or(5); }
             "--theta" => { a.theta  = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5); }
             "--nc"    => { a.nonconforming = true; }
+            "-m" | "--mesh" => { a.mesh_file = it.next(); }
             _ => {}
         }
     }
@@ -291,11 +346,21 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
+
+    fn mms_exact(x: &[f64]) -> f64 {
+        (PI * x[0]).sin() * (PI * x[1]).sin()
+    }
+
+    fn mms_rhs(x: &[f64]) -> f64 {
+        2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
+    }
 
     #[test]
     fn ex15_conforming_refinement_monotonically_reduces_true_error() {
-        let result = run_case(4, 3, 0.5, false);
-        assert_eq!(result.n0, 4);
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let result = run_case(mesh, 3, 0.5, false, mms_exact, mms_rhs);
+        assert_eq!(result.n0, 0);
         assert_eq!(result.levels, 3);
         assert!((result.theta - 0.5).abs() < 1.0e-12);
         assert!(!result.nonconforming);
@@ -314,7 +379,8 @@ mod tests {
 
     #[test]
     fn ex15_conforming_refinement_approaches_second_order_gain() {
-        let result = run_case(4, 4, 0.5, false);
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let result = run_case(mesh, 4, 0.5, false, mms_exact, mms_rhs);
         let levels = &result.levels_data;
         let ratio_12 = levels[1].l2_error / levels[2].l2_error;
         let ratio_23 = levels[2].l2_error / levels[3].l2_error;
@@ -326,7 +392,8 @@ mod tests {
 
     #[test]
     fn ex15_nonconforming_mode_creates_hanging_nodes_and_reduces_error() {
-        let result = run_case(4, 3, 0.5, true);
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let result = run_case(mesh, 3, 0.5, true, mms_exact, mms_rhs);
         assert!(result.nonconforming);
         assert_eq!(result.levels_data.len(), 4);
         assert_eq!(result.levels_data[0].n_hanging, 0);
@@ -342,7 +409,8 @@ mod tests {
 
     #[test]
     fn ex15_marking_selects_nonzero_subset_each_level() {
-        let result = run_case(4, 3, 0.5, false);
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let result = run_case(mesh, 3, 0.5, false, mms_exact, mms_rhs);
         for level in &result.levels_data {
             assert!(level.n_marked > 0, "each level should mark at least one element");
             assert!(level.n_marked < level.n_elems, "Doerfler marking should not mark every element on these calibrated levels");
@@ -352,8 +420,10 @@ mod tests {
     /// Higher Dörfler threshold should generally mark fewer elements on refined levels.
     #[test]
     fn ex15_dorfler_marking_threshold_affects_selection() {
-        let low_theta = run_case(4, 2, 0.3, false);
-        let high_theta = run_case(4, 2, 0.8, false);
+        let mesh_low = SimplexMesh::<2>::unit_square_tri(4);
+        let mesh_high = SimplexMesh::<2>::unit_square_tri(4);
+        let low_theta = run_case(mesh_low, 2, 0.3, false, mms_exact, mms_rhs);
+        let high_theta = run_case(mesh_high, 2, 0.8, false, mms_exact, mms_rhs);
 
         // Both should mark at each level
         for level in &low_theta.levels_data {
@@ -371,8 +441,10 @@ mod tests {
     /// Coarser starting mesh should still achieve convergence.
     #[test]
     fn ex15_coarser_start_still_converges() {
-        let coarse_start = run_case(2, 3, 0.5, false);
-        let fine_start = run_case(4, 3, 0.5, false);
+        let mesh_coarse = SimplexMesh::<2>::unit_square_tri(2);
+        let mesh_fine = SimplexMesh::<2>::unit_square_tri(4);
+        let coarse_start = run_case(mesh_coarse, 3, 0.5, false, mms_exact, mms_rhs);
+        let fine_start = run_case(mesh_fine, 3, 0.5, false, mms_exact, mms_rhs);
 
         assert_eq!(coarse_start.levels, fine_start.levels);
         // Both should show error reduction
@@ -388,7 +460,8 @@ mod tests {
     /// Estimator error should correlate with true error reduction.
     #[test]
     fn ex15_estimator_tracks_true_error() {
-        let result = run_case(4, 3, 0.5, false);
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let result = run_case(mesh, 3, 0.5, false, mms_exact, mms_rhs);
         let levels = &result.levels_data;
 
         // Both should decrease monotonically
@@ -416,7 +489,8 @@ mod tests {
     /// DOF count should grow monotonically with refinement.
     #[test]
     fn ex15_dof_count_grows_monotonically() {
-        let result = run_case(4, 4, 0.5, false);
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let result = run_case(mesh, 4, 0.5, false, mms_exact, mms_rhs);
         let levels = &result.levels_data;
 
         for pair in levels.windows(2) {
@@ -429,7 +503,8 @@ mod tests {
     /// Element count should grow monotonically with refinement.
     #[test]
     fn ex15_element_count_grows_monotonically() {
-        let result = run_case(4, 4, 0.5, false);
+        let mesh = SimplexMesh::<2>::unit_square_tri(4);
+        let result = run_case(mesh, 4, 0.5, false, mms_exact, mms_rhs);
         let levels = &result.levels_data;
 
         for pair in levels.windows(2) {

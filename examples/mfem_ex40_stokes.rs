@@ -31,6 +31,7 @@ use fem_assembly::{
     mixed::PressureDivIntegrator,
     standard::VectorDiffusionIntegrator,
 };
+use fem_io::read_msh_file;
 use fem_mesh::SimplexMesh;
 use fem_solver::{BlockSystem, SchurComplementSolver, SolverConfig};
 use fem_space::{H1Space, VectorH1Space, fe_space::FESpace, constraints::boundary_dofs};
@@ -62,7 +63,16 @@ struct SolveResult {
 fn main() {
     let args = parse_args();
     println!("=== fem-rs: Taylor-Hood P2-P1 Stokes (lid-driven cavity) ===");
-    let result = solve_case(args.n, args.nu, args.lid_speed);
+
+    let mesh = match args.mesh_file {
+        Some(ref p) => {
+            let msh = read_msh_file(p).expect("failed to read mesh file");
+            msh.into_2d().expect("expected 2D mesh")
+        }
+        None => SimplexMesh::<2>::unit_square_tri(args.n),
+    };
+
+    let result = solve_case(mesh, args.nu, args.lid_speed);
 
     println!("  Mesh: {}x{}, P2/P1, nu = {:.3e}, lid = {:.3e}", result.n, result.n, result.nu, result.lid_speed);
     println!("  velocity DOFs: {} ({} per component)", result.velocity_dofs, result.scalar_velocity_dofs);
@@ -89,9 +99,10 @@ fn main() {
     println!("\nDone.");
 }
 
-fn solve_case(n: usize, nu: f64, lid_speed: f64) -> SolveResult {
-    let mesh_u = SimplexMesh::<2>::unit_square_tri(n);
-    let mesh_p = SimplexMesh::<2>::unit_square_tri(n);
+fn solve_case(mesh_in: SimplexMesh<2>, nu: f64, lid_speed: f64) -> SolveResult {
+    let mesh_u = mesh_in.clone();
+    let mesh_p = mesh_in;
+    let n = (mesh_u.n_nodes() as f64).sqrt() as usize - 1;
 
     let space_u = VectorH1Space::new(mesh_u, 2, 2);
     let space_p = H1Space::new(mesh_p, 1);
@@ -232,13 +243,15 @@ struct Args {
     n: usize,
     nu: f64,
     lid_speed: f64,
+    mesh_file: Option<String>,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 8, nu: 1.0, lid_speed: 1.0 };
+    let mut a = Args { n: 8, nu: 1.0, lid_speed: 1.0, mesh_file: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "-m" | "--mesh" => { a.mesh_file = Some(it.next().unwrap_or("".into())); }
             "--n"  => { a.n  = it.next().unwrap_or("8".into()).parse().unwrap_or(8); }
             "--nu" => { a.nu = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0); }
             "--lid" | "--lid-speed" => { a.lid_speed = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0); }
@@ -252,9 +265,13 @@ fn parse_args() -> Args {
 mod tests {
     use super::*;
 
+    fn solve(n: usize, nu: f64, lid_speed: f64) -> SolveResult {
+        solve_case(SimplexMesh::<2>::unit_square_tri(n), nu, lid_speed)
+    }
+
     #[test]
     fn ex40_stokes_coarse_case_converges_with_recirculation() {
-        let result = solve_case(8, 1.0, 1.0);
+        let result = solve(8, 1.0, 1.0);
         assert_eq!(result.velocity_dofs, 578);
         assert_eq!(result.pressure_dofs, 81);
         assert!(result.converged);
@@ -267,7 +284,7 @@ mod tests {
 
     #[test]
     fn ex40_stokes_zero_lid_gives_trivial_solution() {
-        let result = solve_case(8, 1.0, 0.0);
+        let result = solve(8, 1.0, 0.0);
         assert!(result.converged);
         assert!(result.velocity_norm < 1.0e-12, "velocity should vanish: {}", result.velocity_norm);
         assert!(result.pressure_norm < 1.0e-12, "pressure should vanish: {}", result.pressure_norm);
@@ -278,8 +295,8 @@ mod tests {
 
     #[test]
     fn ex40_stokes_solution_scales_linearly_with_lid_speed() {
-        let unit = solve_case(8, 1.0, 1.0);
-        let doubled = solve_case(8, 1.0, 2.0);
+        let unit = solve(8, 1.0, 1.0);
+        let doubled = solve(8, 1.0, 2.0);
         assert!(unit.converged && doubled.converged);
         assert!((doubled.velocity_norm / unit.velocity_norm - 2.0).abs() < 1.0e-9,
             "velocity norm ratio mismatch: unit={} doubled={}", unit.velocity_norm, doubled.velocity_norm);
@@ -293,8 +310,8 @@ mod tests {
 
     #[test]
     fn ex40_stokes_refinement_strengthens_cavity_recirculation() {
-        let coarse = solve_case(8, 1.0, 1.0);
-        let fine = solve_case(16, 1.0, 1.0);
+        let coarse = solve(8, 1.0, 1.0);
+        let fine = solve(16, 1.0, 1.0);
         assert!(coarse.converged && fine.converged);
         assert!(fine.divergence_residual < 1.0e-7, "fine-grid divergence too large: {}", fine.divergence_residual);
         assert!(fine.uy_abs_max > coarse.uy_abs_max,
@@ -307,7 +324,7 @@ mod tests {
     fn ex40_stokes_dof_count_matches_taylor_hood_formula() {
         // P2-P1 Taylor-Hood: velocity H1-P2 → (2n+1)^2, pressure H1-P1 → (n+1)^2
         for n in [6usize, 8] {
-            let result = solve_case(n, 1.0, 1.0);
+            let result = solve(n, 1.0, 1.0);
             let expected_pressure = (n + 1) * (n + 1);
             assert_eq!(result.pressure_dofs, expected_pressure,
                 "pressure DOF mismatch for n={}: got {} expected {}",
@@ -319,8 +336,8 @@ mod tests {
 
     #[test]
     fn ex40_stokes_higher_viscosity_increases_pressure() {
-        let low_nu = solve_case(8, 1.0, 1.0);
-        let high_nu = solve_case(8, 10.0, 1.0);
+        let low_nu = solve(8, 1.0, 1.0);
+        let high_nu = solve(8, 10.0, 1.0);
         assert!(low_nu.converged && high_nu.converged);
         // For Stokes with velocity-only BCs, velocity is independent of nu;
         // pressure scales linearly with nu (p ~ nu * grad(u))
@@ -333,7 +350,7 @@ mod tests {
 
     #[test]
     fn ex40_stokes_pressure_has_zero_mean_approximately() {
-        let result = solve_case(8, 1.0, 1.0);
+        let result = solve(8, 1.0, 1.0);
         assert!(result.converged);
         // For Stokes with pure Dirichlet BCs, pressure is determined up to a constant.
         // The Schur complement fix pins pressure: min and max should straddle zero
@@ -345,7 +362,7 @@ mod tests {
 
     #[test]
     fn ex40_stokes_constrained_velocity_dofs_are_strictly_fewer() {
-        let result = solve_case(8, 1.0, 1.0);
+        let result = solve(8, 1.0, 1.0);
         assert!(result.constrained_velocity_dofs < result.velocity_dofs,
             "constrained DOFs={} should be less than total velocity DOFs={}",
             result.constrained_velocity_dofs, result.velocity_dofs);
@@ -358,7 +375,7 @@ mod tests {
 
     #[test]
     fn ex40_regression_baseline() {
-        let result = solve_case(8, 1.0, 1.0);
+        let result = solve(8, 1.0, 1.0);
         assert!(result.converged);
 
         fem_regression::regression("mfem_ex40_stokes")
@@ -376,14 +393,14 @@ mod tests {
 
     #[test]
     fn ex40_mfem_reference_test() {
-        let result = solve_case(8, 1.0, 1.0);
+        let result = solve(8, 1.0, 1.0);
         assert!(result.converged);
         // Stokes on 8×8 P2/P1: velocity=P2(VC), pressure=P1
         assert!(result.velocity_norm > 0.0);
         assert!(result.pressure_norm > 0.0);
         assert_eq!(result.pressure_dofs, 81, "P1 pressure on 8×8: 81 DOFs");
-        let coarse = solve_case(6, 1.0, 1.0);
-        let fine = solve_case(12, 1.0, 1.0);
+        let coarse = solve(6, 1.0, 1.0);
+        let fine = solve(12, 1.0, 1.0);
         assert!(coarse.converged && fine.converged);
         assert!(fine.uy_abs_max > coarse.uy_abs_max, "refinement strengthens recirculation");
         eprintln!("  [mfem-ref] ex40: vel={:.6e} pres={:.6e} iter={}",

@@ -1,40 +1,36 @@
-//! # Example 16 �?Nonlinear Heat Equation (Newton)  (analogous to MFEM ex16)
+//! # Example 16 — Nonlinear Heat Equation (Newton)  (analogous to MFEM ex16)
 //!
 //! Solves the nonlinear heat equation with conductivity κ(u) = 1 + u²:
 //!
 //! ```text
-//!   −∇·(κ(u) ∇u) = f    in Ω = [0,1]²
-//!              u = 0    on ∂�?//! ```
+//!   −∇·(κ(u) ∇u) = f    in Ω
+//!              u = 0    on ∂Ω
+//! ```
 //!
 //! Uses Newton–Raphson iteration with Picard Jacobian:
 //! ```text
-//!   J(u�? Δu = −F(u�?,    uₙ₊�?= u�?+ Δu
-//!   F(u) = �?κ(u) ∇u·∇v dx �?�?f v dx
-//!   J(u) �?�?κ(u) ∇φⱼ·∇φᵢ dx   (Picard / frozen-κ Jacobian)
+//!   J(uₖ) Δu = −F(uₖ),    uₖ₊₁ = uₖ + Δu
+//!   F(u) = ∫κ(u) ∇u·∇v dx − ∫f v dx
+//!   J(u) ≈ ∫κ(u) ∇φⱼ·∇φᵢ dx   (Picard / frozen-κ Jacobian)
 //! ```
 //!
-//! Manufactured solution approach: choose `u* = sin(πx)sin(πy)` and compute
-//! `f = −∇·((1+u*²)∇u*)` analytically:
-//!
-//! For u* = sin(πx)sin(πy), κ(u*) = 1 + sin²(πx)sin²(πy):
-//! ```text
-//!   f = π²(2 + sin²(πx)sin²(πy)) sin(πx)sin(πy)
-//!       �?2π² sin³(πx)sin(πy)cos²(πx) �?2π² sin(πx)sin³(πy)cos²(πy)
-//! ```
-//! (simplified below)
+//! Matches MFEM ex16 in structure: mesh from CLI, κ = 1 + α·u,
+//! Newton solve with zero RHS (steady-state). MMS-based verification
+//! lives under #[cfg(test)].
 //!
 //! ## Usage
 //! ```
 //! cargo run --example mfem_ex16_nonlinear_heat
+//! cargo run --example mfem_ex16_nonlinear_heat -- --mesh path/to/mesh.mesh
 //! cargo run --example mfem_ex16_nonlinear_heat -- --n 16 --newton-tol 1e-10
 //! ```
 
-use std::f64::consts::PI;
-
 use fem_assembly::{Assembler, physics::nonlinear::{NonlinearDiffusionForm, NewtonSolver, NewtonConfig}};
 use fem_mesh::SimplexMesh;
+use fem_io::mfem::read_mfem_file;
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
+#[allow(dead_code)]
 struct SolveResult {
     n: usize,
     newton_tol: f64,
@@ -70,8 +66,12 @@ fn default_line_search_options() -> LineSearchOptions {
 fn main() {
     let args = parse_args();
     println!("=== fem-rs Example 16: Nonlinear heat equation (Newton) ===");
-    println!("  Mesh: {}×{} subdivisions, P1 elements", args.n, args.n);
-    println!("  κ(u) = 1 + u²,  Newton tol = {:.0e}", args.newton_tol);
+    if !args.mesh_file.is_empty() {
+        println!("  Mesh file: {}", args.mesh_file);
+    } else {
+        println!("  Mesh: {}×{} subdivisions, P1 elements", args.n, args.n);
+    }
+    println!("  κ(u) = 1 + {:.3}·u,  Newton tol = {:.0e}", args.alpha, args.newton_tol);
     println!(
         "  line-search: enabled={}, min_alpha={}, shrink={}, max_backtracks={}, c1={}",
         args.ls_enabled,
@@ -81,90 +81,77 @@ fn main() {
         args.ls_c1,
     );
 
-    let result = solve_case_with_ls(
-        args.n,
-        args.newton_tol,
-        1.0,
-        LineSearchOptions {
-            enabled: args.ls_enabled,
-            min_alpha: args.ls_min_alpha,
-            shrink: args.ls_shrink,
-            max_backtracks: args.ls_max_backtracks,
-            sufficient_decrease: args.ls_c1,
-        },
-    );
-
-    println!("  Confirmed Newton tol = {:.0e}", result.newton_tol);
+    // Use MFEM-style zero RHS (steady nonlinear heat, analogous to MFEM ex16's
+    // ConductionOperator which evolves from an initial condition).
+    let result = run_main(args);
     println!("  DOFs: {}", result.n_dofs);
     if result.converged {
         println!("\n  Newton converged: {} iters, ‖F‖ = {:.3e}", result.iterations, result.final_residual);
     } else {
         println!("\n  Newton did NOT converge: {} iters, ‖F‖ = {:.3e}", result.iterations, result.final_residual);
     }
-    let h = 1.0 / result.n as f64;
-    println!("  h = {h:.4e},  nodal RMS error = {:.4e}", result.rms_error);
     println!("  ||u_h||_L2 = {:.4e}", result.solution_norm);
     println!("  checksum = {:.8e}", result.solution_checksum);
-    println!("  (Expected O(h²) for P1 manufactured solution)");
     println!("\nDone.");
+}
+
+fn run_main(args: Args) -> SolveResult {
+    let mesh = if args.mesh_file.is_empty() {
+        SimplexMesh::<2>::unit_square_tri(args.n)
+    } else {
+        let mfem = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    };
+    let n_dofs = {
+        let space = H1Space::new(mesh.clone(), 1);
+        space.n_dofs()
+    };
+    let ls = LineSearchOptions {
+        enabled: args.ls_enabled,
+        min_alpha: args.ls_min_alpha,
+        shrink: args.ls_shrink,
+        max_backtracks: args.ls_max_backtracks,
+        sufficient_decrease: args.ls_c1,
+    };
+    solve_nonlinear_heat(mesh, |_x: &[f64]| 0.0, args.newton_tol, ls, args.alpha, n_dofs)
 }
 
 #[cfg(test)]
 fn solve_case(n: usize, newton_tol: f64, exact_scale: f64) -> SolveResult {
-    solve_case_with_ls(n, newton_tol, exact_scale, default_line_search_options())
+    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+    solve_case_with_ls(mesh, newton_tol, exact_scale, default_line_search_options())
 }
 
-fn solve_case_with_ls(
-    n: usize,
+/// Core solver: builds the nonlinear form, assembles RHS via a user-supplied
+/// source function, runs Newton, and returns diagnostics.
+fn solve_nonlinear_heat(
+    mesh: SimplexMesh<2>,
+    source_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
     newton_tol: f64,
-    exact_scale: f64,
     ls: LineSearchOptions,
+    alpha: f64,
+    n_dofs: usize,
 ) -> SolveResult {
-    // ─── 1. Mesh and H¹ space ─────────────────────────────────────────────────
-    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
-    let space = H1Space::new(mesh, 1);
-    let n_dofs = space.n_dofs();
+    let space = H1Space::new(mesh.clone(), 1);
 
-    // ─── 2. Identify Dirichlet DOFs ───────────────────────────────────────────
-    let dm   = space.dof_manager();
-    let bnd  = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
     // Dirichlet: u = 0 on all walls
+    let dm = space.dof_manager();
+    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
     let dirichlet: Vec<(usize, f64)> = bnd.iter().map(|&d| (d as usize, 0.0)).collect();
 
-    // ─── 3. Assemble RHS f = manufactured source ─────────────────────────────
-    // f = (2 + 3sin²(πx)sin²(πy)) * π² * sin(πx)sin(πy)
-    //   This comes from: -div((1+u²)∇u) where u = sin(πx)sin(πy):
-    //   ∂u/∂x = π cos(πx) sin(πy),  ∂²u/∂x² = -π² sin(πx)sin(πy)
-    //   κ(u) = 1 + sin²(πx)sin²(πy)
-    //   -div(κ∇u) = -κ Δu - ∇κ·∇u = κ·2π²·u - ∇κ·∇u
-    //   ∇�?= (2u ∂u/∂x, 2u ∂u/∂y)
-    //   ∇κ·∇u = 2u(|∂u/∂x|² + |∂u/∂y|²) = 2u · π²(cos²(πx)sin²(πy) + sin²(πx)cos²(πy))
-    //          = 2u · π²(cos²(πx)sin²(πy) + sin²(πx)cos²(πy))
-    //   Combined: f = (1+u²)·2π²·u - 2u·π²(...)
-    use fem_assembly::standard::DomainSourceIntegrator;
-    let src = DomainSourceIntegrator::new(|x: &[f64]| {
-        let (sx, sy) = ((PI * x[0]).sin(), (PI * x[1]).sin());
-        let (cx, cy) = ((PI * x[0]).cos(), (PI * x[1]).cos());
-        let u_star = exact_scale * sx * sy;
-        let kappa  = 1.0 + u_star * u_star;
-        let lap_u  = -2.0 * PI * PI * u_star;
-        let grad_kappa_dot_grad_u = 2.0 * u_star * PI * PI *
-            (cx * cx * sy * sy + sx * sx * cy * cy);
-        -kappa * lap_u - grad_kappa_dot_grad_u
-    });
-    let mesh2 = SimplexMesh::<2>::unit_square_tri(n);
-    let space2 = H1Space::new(mesh2, 1);
-    let rhs = Assembler::assemble_linear(&space2, &[&src], 5);
+    // Assemble RHS from the provided source
+    let src = fem_assembly::standard::DomainSourceIntegrator::new(source_fn);
+    let rhs = Assembler::assemble_linear(&space, &[&src], 5);
 
-    // ─── 4. Build nonlinear form ──────────────────────────────────────────────
+    // Build nonlinear form with κ(u) = 1 + alpha·u
     let mut form = NonlinearDiffusionForm::new(
         space,
-        |u: f64| 1.0 + u * u,   // κ(u) = 1 + u²
+        move |u: f64| 1.0 + alpha * u,
         3,
     );
     form.set_dirichlet(dirichlet);
 
-    // ─── 5. Newton solve ──────────────────────────────────────────────────────
+    // Newton solve
     let cfg = NewtonConfig {
         atol:       newton_tol,
         rtol:       newton_tol * 1e2,
@@ -185,12 +172,94 @@ fn solve_case_with_ls(
         Err(r) => (false, r.iterations, r.final_residual),
     };
 
-    // ─── 6. L² error ─────────────────────────────────────────────────────────
-    let dm2 = space2.dof_manager();
+    let solution_norm = u.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let solution_checksum = u
+        .iter()
+        .enumerate()
+        .map(|(i, value)| (i as f64 + 1.0) * value)
+        .sum::<f64>();
+
+    SolveResult {
+        n: 0,
+        newton_tol,
+        n_dofs,
+        iterations,
+        final_residual,
+        converged,
+        rms_error: 0.0,
+        solution_norm,
+        solution_checksum,
+    }
+}
+
+/// MMS-based solve (test only): manufactured solution u* = sin(πx)sin(πy)
+/// with the corresponding RHS f = -∇·((1+α·u*)∇u*).
+#[cfg(test)]
+fn solve_case_with_ls(
+    mesh: SimplexMesh<2>,
+    newton_tol: f64,
+    exact_scale: f64,
+    ls: LineSearchOptions,
+) -> SolveResult {
+    use std::f64::consts::PI;
+    use fem_assembly::standard::DomainSourceIntegrator;
+
+    let space = H1Space::new(mesh.clone(), 1);
+    let n_dofs = space.n_dofs();
+
+    let dm = space.dof_manager();
+    let bnd = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
+    let dirichlet: Vec<(usize, f64)> = bnd.iter().map(|&d| (d as usize, 0.0)).collect();
+
+    // Keep a separate mesh for error computation (owned clone of space's mesh)
+    let err_mesh = space.mesh().clone();
+
+    // Manufactured RHS for u* = sin(πx)sin(πy), κ(u) = 1 + u²
+    let src = DomainSourceIntegrator::new(move |x: &[f64]| {
+        let (sx, sy) = ((PI * x[0]).sin(), (PI * x[1]).sin());
+        let (cx, cy) = ((PI * x[0]).cos(), (PI * x[1]).cos());
+        let u_star = exact_scale * sx * sy;
+        let kappa = 1.0 + u_star * u_star;
+        let lap_u = -2.0 * PI * PI * u_star;
+        let grad_kappa_dot_grad_u = 2.0 * u_star * PI * PI *
+            (cx * cx * sy * sy + sx * sx * cy * cy);
+        -kappa * lap_u - grad_kappa_dot_grad_u
+    });
+    let rhs = Assembler::assemble_linear(&space, &[&src], 5);
+
+    let mut form = NonlinearDiffusionForm::new(
+        space,
+        |u: f64| 1.0 + u * u,
+        3,
+    );
+    form.set_dirichlet(dirichlet);
+
+    let cfg = NewtonConfig {
+        atol:       newton_tol,
+        rtol:       newton_tol * 1e2,
+        max_iter:   50,
+        linear_tol: newton_tol * 0.1,
+        line_search: ls.enabled,
+        line_search_min_alpha: ls.min_alpha,
+        line_search_shrink: ls.shrink,
+        line_search_max_backtracks: ls.max_backtracks,
+        line_search_sufficient_decrease: ls.sufficient_decrease,
+        verbose:    false,
+    };
+    let solver = NewtonSolver::new(cfg);
+    let mut u = vec![0.0_f64; n_dofs];
+
+    let (converged, iterations, final_residual) = match solver.solve(&form, &rhs, &mut u) {
+        Ok(r) => (true, r.iterations, r.final_residual),
+        Err(r) => (false, r.iterations, r.final_residual),
+    };
+
     let rms_error = {
+        let err_space = H1Space::new(err_mesh, 1);
+        let err_dm = err_space.dof_manager();
         let mut err = 0.0_f64;
         for i in 0..n_dofs {
-            let x = dm2.dof_coord(i as u32);
+            let x = err_dm.dof_coord(i as u32);
             let u_ex = exact_scale * (PI * x[0]).sin() * (PI * x[1]).sin();
             err += (u[i] - u_ex).powi(2);
         }
@@ -204,7 +273,7 @@ fn solve_case_with_ls(
         .sum::<f64>();
 
     SolveResult {
-        n,
+        n: 0,
         newton_tol,
         n_dofs,
         iterations,
@@ -219,8 +288,10 @@ fn solve_case_with_ls(
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 struct Args {
+    mesh_file: String,
     n: usize,
     newton_tol: f64,
+    alpha: f64,
     ls_enabled: bool,
     ls_min_alpha: f64,
     ls_shrink: f64,
@@ -230,8 +301,10 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut a = Args {
+        mesh_file: String::new(),
         n: 16,
         newton_tol: 1e-10,
+        alpha: 1.0,
         ls_enabled: true,
         ls_min_alpha: 1e-6,
         ls_shrink: 0.5,
@@ -241,8 +314,10 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--n"          => { a.n          = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
-            "--newton-tol" => { a.newton_tol = it.next().unwrap_or("1e-10".into()).parse().unwrap_or(1e-10); }
+            "--mesh" | "-m" => { a.mesh_file = it.next().unwrap_or_default(); }
+            "--n"           => { a.n          = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
+            "--newton-tol"  => { a.newton_tol = it.next().unwrap_or("1e-10".into()).parse().unwrap_or(1e-10); }
+            "--alpha" | "-a" => { a.alpha = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0); }
             "--no-line-search" => { a.ls_enabled = false; }
             "--line-search" => { a.ls_enabled = true; }
             "--ls-min-alpha" => { a.ls_min_alpha = it.next().unwrap_or("1e-6".into()).parse().unwrap_or(1e-6); }

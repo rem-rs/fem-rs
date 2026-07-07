@@ -24,6 +24,7 @@ use fem_assembly::{
     coefficient::ConstantVectorCoeff,
     standard::{ConvectionIntegrator, DiffusionIntegrator, MassIntegrator},
 };
+use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::SimplexMesh;
 use fem_solver::{
@@ -97,11 +98,19 @@ impl ImexOperator for AdvectionDiffusionSplit {
 fn main() {
     let args = parse_args();
 
+    let mesh = match args.mesh_file {
+        Some(ref p) => {
+            let msh = read_msh_file(p).expect("failed to read mesh file");
+            msh.into_2d().expect("expected 2D mesh")
+        }
+        None => SimplexMesh::<2>::unit_square_tri(args.n),
+    };
+
     println!("=== mfem_ex41_imex: FEM advection-diffusion with IMEX ===");
     println!("  mesh n={}, dt={}, T={}", args.n, args.dt, args.t_end);
     println!("  kappa={}, velocity=({}, {})", args.kappa, args.vx, args.vy);
 
-    let result = solve_case(&args);
+    let result = solve_case(mesh, &args);
 
     println!("  confirmed dofs={}", result.n_dofs);
     println!(
@@ -142,8 +151,7 @@ fn main() {
     println!("  PASS");
 }
 
-fn solve_case(args: &Args) -> SolveResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+fn solve_case(mesh: SimplexMesh<2>, args: &Args) -> SolveResult {
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 
@@ -339,6 +347,7 @@ struct Args {
     kappa: f64,
     vx: f64,
     vy: f64,
+    mesh_file: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -349,11 +358,13 @@ fn parse_args() -> Args {
         kappa: 0.01,
         vx: 1.0,
         vy: 0.3,
+        mesh_file: None,
     };
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "-m" | "--mesh" => a.mesh_file = Some(it.next().unwrap_or("".into())),
             "--n" => a.n = it.next().unwrap_or("8".into()).parse().unwrap_or(8),
             "--dt" => a.dt = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
             "--T" => a.t_end = it.next().unwrap_or("0.2".into()).parse().unwrap_or(0.2),
@@ -370,10 +381,14 @@ fn parse_args() -> Args {
 mod tests {
     use super::*;
 
+    fn solve(args: &Args) -> SolveResult {
+        solve_case(SimplexMesh::<2>::unit_square_tri(args.n), args)
+    }
+
     #[test]
     fn ex41_imex_default_case_preserves_expected_method_ordering() {
-        let args = Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3 };
-        let result = solve_case(&args);
+        let args = Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None };
+        let result = solve(&args);
         assert_eq!(result.n_dofs, 81);
         assert!((result.euler.final_time - result.t_end).abs() < 1.0e-12);
         assert!((result.ark3.final_time - result.t_end).abs() < 1.0e-12);
@@ -385,8 +400,8 @@ mod tests {
 
     #[test]
     fn ex41_imex_smaller_dt_improves_euler_and_rk3_accuracy() {
-        let coarse = solve_case(&Args { n: 8, dt: 0.02, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3 });
-        let fine = solve_case(&Args { n: 8, dt: 0.005, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3 });
+        let coarse = solve(&Args { n: 8, dt: 0.02, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
+        let fine   = solve(&Args { n: 8, dt: 0.005, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
         assert!(fine.euler.error < coarse.euler.error * 0.5,
             "Euler refinement gain too small: coarse={} fine={}", coarse.euler.error, fine.euler.error);
         assert!(fine.rk3.error < coarse.rk3.error * 0.1,
@@ -399,7 +414,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_pure_diffusion_limit_favors_high_order_methods() {
-        let result = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0 });
+        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0, mesh_file: None });
         assert!(result.euler.error < 5.0e-5, "Euler error too large in pure diffusion: {}", result.euler.error);
         assert!(result.ssp2.error < result.euler.error * 1.0e-2,
             "SSP2 should sharply improve in pure diffusion: euler={} ssp2={}", result.euler.error, result.ssp2.error);
@@ -409,7 +424,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_stronger_diffusion_keeps_high_order_schemes_accurate() {
-        let result = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 1.0, vy: 0.3 });
+        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 1.0, vy: 0.3, mesh_file: None });
         assert!(result.euler.error.is_finite() && result.ssp2.error.is_finite());
         assert!(result.rk3.error < result.euler.error * 1.0e-2,
             "RK3 should remain far more accurate under stronger diffusion: euler={} rk3={}", result.euler.error, result.rk3.error);
@@ -421,15 +436,15 @@ mod tests {
     #[test]
     fn ex41_imex_dof_count_matches_p1_h1_formula() {
         for &n in &[6usize, 8usize, 10usize] {
-            let result = solve_case(&Args { n, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3 });
+            let result = solve(&Args { n, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
             assert_eq!(result.n_dofs, (n + 1) * (n + 1));
         }
     }
 
     #[test]
     fn ex41_imex_higher_kappa_decays_faster_in_pure_diffusion() {
-        let low_kappa = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0 });
-        let high_kappa = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 0.0, vy: 0.0 });
+        let low_kappa  = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0, mesh_file: None });
+        let high_kappa = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 0.0, vy: 0.0, mesh_file: None });
         assert!(low_kappa.rk3.solution_norm > 0.0 && high_kappa.rk3.solution_norm > 0.0);
         assert!(high_kappa.rk3.solution_norm < low_kappa.rk3.solution_norm,
             "higher kappa should increase decay: low={} high={}",
@@ -439,7 +454,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_zero_final_time_is_noop_for_all_methods() {
-        let result = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.0, kappa: 0.01, vx: 1.0, vy: 0.3 });
+        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.0, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
         assert!((result.euler.final_time - 0.0).abs() < 1.0e-14);
         assert!((result.ssp2.final_time - 0.0).abs() < 1.0e-14);
         assert!((result.rk3.final_time - 0.0).abs() < 1.0e-14);
@@ -452,7 +467,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_ark3_last_dt_is_positive_and_bounded() {
-        let result = solve_case(&Args { n: 8, dt: 0.01, t_end: 0.215, kappa: 0.01, vx: 1.0, vy: 0.3 });
+        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.215, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
         let dt_last = result.ark3.dt_last.expect("ARK3 should report last dt");
         assert!(dt_last > 0.0, "ARK3 last dt must be positive");
         assert!(dt_last <= result.dt + 1.0e-12,

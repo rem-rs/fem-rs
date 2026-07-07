@@ -1,10 +1,11 @@
-//! # Example 13 �?Eigenvalue Problem (LOBPCG)  (analogous to MFEM ex13)
+//! # Example 13 — Laplacian Eigenvalue Problem (LOBPCG)  (analogous to MFEM ex13)
 //!
 //! Finds the smallest eigenvalues and eigenmodes of the Laplacian:
 //!
 //! ```text
 //!   −Δu = λ u    in Ω = [0,1]²
-//!     u = 0    on ∂�?//! ```
+//!     u = 0      on ∂Ω
+//! ```
 //!
 //! In discrete form this is the generalized eigenvalue problem:
 //! ```text
@@ -12,17 +13,20 @@
 //! ```
 //! where K is the stiffness matrix and M is the mass matrix.
 //!
-//! The analytical eigenvalues are `λ_{m,n} = π²(m² + n²)` for m,n = 1,2,�?//! Smallest: λ₁₁ = 2π² �?19.739, λ₁₂ = λ₂₁ = 5π² �?49.348, λ₂₂ = 8π² �?78.957.
+//! The analytical eigenvalues are `λ_{m,n} = π²(m² + n²)` for m,n = 1,2,...
+//! Smallest: λ₁₁ = 2π² ≈ 19.739, λ₁₂ = λ₂₁ = 5π² ≈ 49.348, λ₂₂ = 8π² ≈ 78.957.
 //!
 //! ## Usage
-//! ```
-//! cargo run --example mfem_ex13
-//! cargo run --example mfem_ex13 -- --n 16 --k 6
+//! ```text
+//! cargo run --example mfem_ex13_laplacian_eigen
+//! cargo run --example mfem_ex13_laplacian_eigen -- -m ../data/star.mesh -n 6
+//! cargo run --example mfem_ex13_laplacian_eigen -- --n 16 --k 6
 //! ```
 
 use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::SimplexMesh;
 use fem_solver::{lobpcg, LobpcgConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
@@ -39,10 +43,9 @@ struct EigenCaseResult {
 
 fn main() {
     let args = parse_args();
-    let result = solve_case(args.n, args.k);
+    let result = solve_case(args);
 
     println!("=== fem-rs Example 13: Laplacian eigenvalues (LOBPCG) ===");
-    println!("  Mesh: {}×{} subdivisions, {} smallest eigenpairs", args.n, args.n, args.k);
     println!("  DOFs: {}", result.n_dofs);
     println!("  Free (interior) DOFs: {}", result.n_free);
 
@@ -59,9 +62,14 @@ fn main() {
     println!("\nDone.");
 }
 
-fn solve_case(n_subdiv: usize, k: usize) -> EigenCaseResult {
+fn solve_case(args: Args) -> EigenCaseResult {
     // ─── 1. Mesh and H¹ space ─────────────────────────────────────────────────
-    let mesh = SimplexMesh::<2>::unit_square_tri(n_subdiv);
+    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(args.n)
+    };
     let space = H1Space::new(mesh, 1);
     let n = space.n_dofs();
 
@@ -74,8 +82,6 @@ fn solve_case(n_subdiv: usize, k: usize) -> EigenCaseResult {
     );
 
     // ─── 3. Apply Dirichlet BCs for eigenvalue problem ────────────────────────
-    // Strategy: build reduced system restricted to free (interior) DOFs.
-    // This avoids pollution from the boundary penalty modes.
     let dm   = space.dof_manager();
     let bnd  = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4]);
     let bnd_set: std::collections::HashSet<u32> = bnd.iter().cloned().collect();
@@ -92,10 +98,10 @@ fn solve_case(n_subdiv: usize, k: usize) -> EigenCaseResult {
         tol:      1e-8,
         verbose:  false,
     };
-    let result = lobpcg(&k_free, Some(&m_free), k, &cfg)
+    let result = lobpcg(&k_free, Some(&m_free), args.k, &cfg)
         .expect("LOBPCG failed");
 
-    let exact_eigs = analytical_eigenvalues(k);
+    let exact_eigs = analytical_eigenvalues(args.k);
     let mut max_rel_err = 0.0_f64;
     for (lam, exact) in result.eigenvalues.iter().zip(exact_eigs.iter()) {
         let rel_err = (lam - exact).abs() / exact.max(1.0e-30);
@@ -130,7 +136,6 @@ fn analytical_eigenvalues(k: usize) -> Vec<f64> {
 /// Extract the submatrix rows/cols indexed by `free_dofs` (a sorted subset).
 fn extract_submatrix(a: &fem_linalg::CsrMatrix<f64>, free: &[usize]) -> fem_linalg::CsrMatrix<f64> {
     let n = free.len();
-    // Build reverse map: global index �?free index (or usize::MAX if constrained)
     let global_n = a.nrows;
     let mut rev = vec![usize::MAX; global_n];
     for (fi, &gi) in free.iter().enumerate() { rev[gi] = fi; }
@@ -150,15 +155,24 @@ fn extract_submatrix(a: &fem_linalg::CsrMatrix<f64>, free: &[usize]) -> fem_lina
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
-struct Args { n: usize, k: usize }
+struct Args {
+    mesh: Option<String>,
+    n: usize,
+    k: usize,
+}
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 12, k: 6 };
+    let mut a = Args { mesh: None, n: 12, k: 6 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--n" => { a.n = it.next().unwrap_or("12".into()).parse().unwrap_or(12); }
-            "--k" => { a.k = it.next().unwrap_or("6".into()).parse().unwrap_or(6); }
+            "-m" | "--mesh" => a.mesh = it.next(),
+            "-n" | "--num-eigs" => {
+                a.k = it.next().and_then(|v| v.parse().ok()).unwrap_or(6)
+            }
+            "--n" => {
+                a.n = it.next().and_then(|v| v.parse().ok()).unwrap_or(12)
+            }
             _ => {}
         }
     }
@@ -173,9 +187,14 @@ mod tests {
         (value - exact).abs() / exact.abs().max(1.0e-30)
     }
 
+    fn solve_case_test(n: usize, k: usize) -> EigenCaseResult {
+        let args = Args { mesh: None, n, k };
+        solve_case(args)
+    }
+
     #[test]
     fn ex13_scalar_eigenvalues_coarse_mesh_matches_first_modes() {
-        let result = solve_case(10, 3);
+        let result = solve_case_test(10, 3);
 
         assert!(result.converged, "LOBPCG did not converge");
         assert_eq!(result.eigenvalues.len(), 3);
@@ -187,8 +206,8 @@ mod tests {
 
     #[test]
     fn ex13_scalar_refinement_improves_first_eigenvalue() {
-        let coarse = solve_case(8, 3);
-        let fine = solve_case(12, 3);
+        let coarse = solve_case_test(8, 3);
+        let fine = solve_case_test(12, 3);
 
         assert!(coarse.converged && fine.converged);
         let exact = 2.0 * PI * PI;
@@ -205,7 +224,7 @@ mod tests {
 
     #[test]
     fn ex13_scalar_first_excited_pair_remains_nearly_degenerate() {
-        let result = solve_case(10, 3);
+        let result = solve_case_test(10, 3);
 
         assert!(result.converged);
         let exact = 5.0 * PI * PI;
@@ -218,8 +237,8 @@ mod tests {
 
     #[test]
     fn ex13_scalar_low_modes_are_stable_when_requesting_more_modes() {
-        let base = solve_case(10, 3);
-        let extended = solve_case(10, 5);
+        let base = solve_case_test(10, 3);
+        let extended = solve_case_test(10, 5);
 
         assert!(base.converged && extended.converged);
         for mode in 0..3 {
@@ -236,9 +255,8 @@ mod tests {
 
     #[test]
     fn ex13_dof_count_matches_p1_h1_formula() {
-        // P1 H1 on n×n tri mesh: (n+1)^2 nodes
         for n in [6usize, 8, 12] {
-            let result = solve_case(n, 3);
+            let result = solve_case_test(n, 3);
             let expected = (n + 1) * (n + 1);
             assert_eq!(result.n_dofs, expected,
                 "DOF count mismatch for n={}: got {} expected {}", n, result.n_dofs, expected);
@@ -249,13 +267,12 @@ mod tests {
 
     #[test]
     fn ex13_eigenvalue_convergence_order_is_at_least_linear() {
-        let coarse = solve_case(8, 3);
-        let fine = solve_case(16, 3);
+        let coarse = solve_case_test(8, 3);
+        let fine = solve_case_test(16, 3);
         assert!(coarse.converged && fine.converged);
         let exact = 2.0 * PI * PI;
         let coarse_err = rel_err(coarse.eigenvalues[0], exact);
         let fine_err = rel_err(fine.eigenvalues[0], exact);
-        // Doubling mesh should give at least 2x improvement (h^2 expected for P1)
         assert!(fine_err < coarse_err / 2.0,
             "expected at least linear convergence: coarse_err={:.4e} fine_err={:.4e}",
             coarse_err, fine_err);
@@ -263,8 +280,7 @@ mod tests {
 
     #[test]
     fn ex13_second_eigenvalue_pair_satisfies_exact_ratio() {
-        // λ₂₁ = 5π², λ₁₁ = 2π², so ratio = 2.5 exactly
-        let result = solve_case(12, 3);
+        let result = solve_case_test(12, 3);
         assert!(result.converged);
         let ratio = result.eigenvalues[1] / result.eigenvalues[0];
         assert!((ratio - 2.5).abs() < 0.05,
@@ -273,27 +289,20 @@ mod tests {
 
     #[test]
     fn ex13_all_eigenvalues_are_positive() {
-        let result = solve_case(10, 5);
+        let result = solve_case_test(10, 5);
         assert!(result.converged);
         for (i, &lam) in result.eigenvalues.iter().enumerate() {
             assert!(lam > 0.0, "eigenvalue {} should be positive: got {:.4e}", i+1, lam);
         }
-        // Eigenvalues should be sorted in ascending order
         for w in result.eigenvalues.windows(2) {
             assert!(w[0] <= w[1] + 1e-10,
                 "eigenvalues should be sorted: {} > {}", w[0], w[1]);
         }
     }
 
-    // ─── Regression baseline ─────────────────────────────────────────────
-
-    /// Regression baseline for scalar Laplacian eigenvalues.
-    ///
-    /// Captures precise numerical values (eigenvalues, max relative error,
-    /// iteration count) at fixed mesh size.
     #[test]
     fn ex13_laplacian_regression_baseline() {
-        let result = solve_case(8, 3);
+        let result = solve_case_test(8, 3);
         assert!(result.converged);
 
         fem_regression::regression("mfem_ex13_laplacian_eigen")
@@ -306,28 +315,20 @@ mod tests {
             .finalize();
     }
 
-    /// Cross-validate Laplacian eigenvalues against analytical values.
-    ///
-    /// Analytical eigenvalues for -Δ on unit square with u=0 BC:
-    ///   λ₁₁ = 2π² ≈ 19.739
-    ///   λ₁₂ = λ₂₁ = 5π² ≈ 49.348
-    ///   λ₂₂ = 8π² ≈ 78.957
     #[test]
     fn ex13_laplacian_reference_test() {
         use std::f64::consts::PI;
-        let result = solve_case(8, 4);
+        let result = solve_case_test(8, 4);
         assert!(result.converged, "LOBPCG did not converge");
         assert!(result.eigenvalues.len() >= 3);
         let lam11 = 2.0 * PI * PI;
         let lam12 = 5.0 * PI * PI;
         let _lam22 = 8.0 * PI * PI;
-        // FEM eigenvalues converge from above
         assert!(result.eigenvalues[0] > lam11 * 0.9 && result.eigenvalues[0] < lam11 * 1.3,
             "λ₀={:.4} far from 2π²={:.4}", result.eigenvalues[0], lam11);
         assert!(result.eigenvalues[2] > lam12 * 0.8 && result.eigenvalues[2] < lam12 * 1.3,
             "λ₂={:.4} far from 5π²={:.4}", result.eigenvalues[2], lam12);
-        // Refinement improves accuracy
-        let fine = solve_case(12, 3);
+        let fine = solve_case_test(12, 3);
         assert!(fine.converged);
         assert!(fine.max_rel_err < result.max_rel_err);
         eprintln!("  [mfem-ref] ex13-Laplacian: λ₀={:.6} (2π²={:.6}), λ₁={:.6}, λ₂={:.6}, n_free={}, err={:.4e}",
@@ -335,4 +336,3 @@ mod tests {
             result.n_free, result.max_rel_err);
     }
 }
-

@@ -1,185 +1,276 @@
-use std::f64::consts::PI;
+//! # Example 23 — Wave Equation  (analogous to MFEM ex23)
+//!
+//! Solves the scalar wave equation:
+//!
+//! ```text
+//!   d²u/dt² = c² ∇²u    in Ω
+//!        u  = 0          on ∂Ω  (Dirichlet BC)
+//! ```
+//!
+//! with initial condition `u(x,0) = exp(−30‖x‖²)` and zero initial velocity,
+//! matching MFEM ex23.
+//!
+//! Time integration uses the Newmark-beta scheme (β=¼, γ=½).
+//!
+//! ## Usage
+//! ```text
+//! cargo run --example mfem_ex23_wave_equation
+//! cargo run --example mfem_ex23_wave_equation -- -m ../data/star.mesh
+//! cargo run --example mfem_ex23_wave_equation -- -m ../data/inline-hex.mesh -c 2.0 --dt 0.005
+//! ```
 
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator},
 };
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::SimplexMesh;
-use fem_solver::{solve_cg, SolverConfig, Newmark, NewmarkState, Rk4, TimeStepper};
+use fem_solver::{solve_cg, SolverConfig, Newmark, NewmarkState};
 use fem_space::{
     H1Space, FESpace,
     constraints::{apply_dirichlet, boundary_dofs},
 };
 
-/// Exact solution: u(x,y,t) = cos(πct) sin(πx) sin(πy)
-fn u_exact(x: &[f64], t: f64, c: f64) -> f64 {
-    (PI * c * t).cos() * (PI * x[0]).sin() * (PI * x[1]).sin()
+/// Gaussian initial condition (MFEM ex23): u(x,0) = exp(-30·‖x‖²)
+fn initial_solution(x: &[f64]) -> f64 {
+    let r2 = x.iter().map(|c| c * c).sum::<f64>();
+    (-30.0 * r2).exp()
 }
 
 fn main() {
     let args = parse_args();
-    println!("=== fem-rs Example 23: Wave Equation (d²u/dt² = c² ∇²u) ===");
+    println!("=== Example 23: Wave Equation (MFEM ex23) ===");
+    if let Some(ref p) = args.mesh {
+        println!("  Mesh file: {p}");
+    } else {
+        println!("  Mesh: {}×{} P{}", args.n, args.n, args.order);
+    }
+    println!(
+        "  c = {:.4}, dt = {:.4}, T = {:.4}, scheme = Newmark",
+        args.c, args.dt, args.t_final
+    );
 
-    // 1. Mesh and space
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+    // Load or generate mesh
+    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(args.n)
+    };
+
     let space = H1Space::new(mesh, args.order);
     let n = space.n_dofs();
-    println!("  Mesh: {}×{}, P{}, {} DOFs", args.n, args.n, args.order, n);
+    println!("  DOFs: {n}");
 
-    // 2. Assemble stiffness and mass matrices
+    // Assemble stiffness (K = c²·Diffusion) and mass (M) matrices
     let diff_coeff = args.c * args.c;
-    let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: diff_coeff }], 2 * args.order + 1);
-    let mass   = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 2 * args.order + 1);
-    let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 0.0)], 2 * args.order + 1);
+    let stiff = Assembler::assemble_bilinear(
+        &space,
+        &[&DiffusionIntegrator {
+            kappa: diff_coeff,
+        }],
+        args.order * 2 + 1,
+    );
+    let mass = Assembler::assemble_bilinear(
+        &space,
+        &[&MassIntegrator { rho: 1.0 }],
+        args.order * 2 + 1,
+    );
+    let zero_rhs =
+        Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 0.0)], 3);
 
-    // 3. Dirichlet BCs: u=0 on ∂Ω
+    // Dirichlet BC: u = 0 on all boundaries
     let bdofs = boundary_dofs(space.mesh(), space.dof_manager(), &[1, 2, 3, 4]);
     let bvals = vec![0.0; bdofs.len()];
 
     let mut stiff_bc = stiff.clone();
     let mut mass_bc = mass.clone();
-    let mut rhs_bc = rhs.clone();
+    let mut rhs_bc = zero_rhs.clone();
     apply_dirichlet(&mut stiff_bc, &mut rhs_bc, &bdofs, &bvals);
-    // Also apply BC to mass for implicit solve — zero Dirichlet rows
-    // (Alternative: keep mass as-is and only constrain RHS)
-    let mut rhs_bc_mass = rhs.clone();
+    let mut rhs_bc_mass = zero_rhs.clone();
     apply_dirichlet(&mut mass_bc, &mut rhs_bc_mass, &bdofs, &bvals);
 
-    // 4. Initial condition: u(x,y,0) = sin(πx) sin(πy)
+    // Initial condition: u₀ = exp(-30‖x‖²)
     let mut u = vec![0.0; n];
     for dof in 0..n as u32 {
         let coord = space.dof_manager().dof_coord(dof);
-        u[dof as usize] = (PI * coord[0]).sin() * (PI * coord[1]).sin();
+        u[dof as usize] = initial_solution(&coord);
     }
-    // Apply BC to initial condition
-    for &d in &bdofs { u[d as usize] = 0.0; }
-    let _v0 = vec![0.0; n]; // zero initial velocity
+    for &d in &bdofs {
+        u[d as usize] = 0.0;
+    }
 
-    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..Default::default() };
+    // Initial acceleration: a₀ = M⁻¹(-K u₀)
+    let cfg = SolverConfig {
+        rtol: 1e-10,
+        atol: 0.0,
+        max_iter: 5000,
+        verbose: false,
+        ..Default::default()
+    };
+    let mut ku = vec![0.0; n];
+    stiff.spmv(&u, &mut ku);
+    let mut rhs_a = vec![0.0; n];
+    for i in 0..n {
+        rhs_a[i] = -ku[i];
+    }
+    for &d in &bdofs {
+        rhs_a[d as usize] = 0.0;
+    }
+    let mut a0 = vec![0.0; n];
+    solve_cg(&mass_bc, &rhs_a, &mut a0, &cfg).unwrap();
 
-    match args.scheme.as_str() {
-        "newmark" => {
-            println!("  Scheme: Newmark-beta (β=1/4, γ=1/2)");
-            println!("  dt={}, T={}", args.dt, args.t_final);
+    let mut state = NewmarkState::new(n);
+    state.acc.copy_from_slice(&a0);
 
-            let newmark = Newmark::default();
-            let mut state = NewmarkState::new(n);
-            // Initial acceleration: a₀ = M⁻¹(-K u₀)
-            let mut ku = vec![0.0; n];
-            stiff.spmv(&u, &mut ku);
-            let mut rhs_a = vec![0.0; n];
-            for i in 0..n { rhs_a[i] = -ku[i]; }
-            for &d in &bdofs { rhs_a[d as usize] = 0.0; }
-            let mut a0 = vec![0.0; n];
-            solve_cg(&mass_bc, &rhs_a, &mut a0, &cfg).unwrap();
-            state.acc.copy_from_slice(&a0);
+    let t_end = args.t_final;
+    let dt = args.dt;
+    let n_steps = (t_end / dt).round() as usize;
+    let t_final = n_steps as f64 * dt;
 
-            let mut u_hist = u.clone();
-            let t_end = args.t_final;
-            let dt = args.dt;
-            let n_steps = (t_end / dt).round() as usize;
-            let t_final = n_steps as f64 * dt;
-
-            for _step in 0..n_steps {
-                newmark.step(&mass_bc, &stiff_bc, &rhs_bc, dt, &mut u_hist, &mut state, &[]);
-            }
-
-            let exact = u_exact(&[0.25, 0.25], t_final, args.c);
-            println!("  u(0.25,0.25) ≈ {:.6e}, exact = {:.6e}", u_hist[n / 4], exact);
-            println!("Done.");
-        }
-        "rk4" => {
-            println!("  Scheme: RK4 (explicit, for the equivalent first-order system)");
-            println!("  dt={}, T={}", args.dt, args.t_final);
-
-            // Convert to first-order: [u̇, v̇] = [v, -M⁻¹Ku]
-            // where v = du/dt
-            // We use a mass lumping approach for explicit integration
-
-            // Build lumped mass (row sum for explicit)
-            let mut mlump = vec![0.0; n];
-            for i in 0..n {
-                for ptr in mass.row_ptr[i]..mass.row_ptr[i + 1] {
-                    if mass.col_idx[ptr] as usize == i {
-                        mlump[i] = mass.values[ptr];
-                    }
-                }
-            }
-
-            let uu = u.clone();
-            let vv = vec![0.0; n]; // velocity
-            let t_end = args.t_final;
-            let dt = args.dt;
-            let n_steps = (t_end / dt).round() as usize;
-            let t_final = n_steps as f64 * dt;
-
-            // Prepare: y = [u; v] (size 2n)
-            let mut y = Vec::with_capacity(2 * n);
-            y.extend_from_slice(&uu);
-            y.extend_from_slice(&vv);
-
-            let rhs_fn = |_t: f64, y: &[f64], dydt: &mut [f64]| {
-                let n = y.len() / 2;
-                // du/dt = v
-                for i in 0..n { dydt[i] = y[n + i]; }
-                // dv/dt = -M⁻¹Ku
-                let mut ku = vec![0.0; n];
-                stiff.spmv(&y[..n], &mut ku);
-                for i in 0..n {
-                    if mlump[i].abs() > 1e-30 {
-                        dydt[n + i] = -ku[i] / mlump[i];
-                    } else {
-                        dydt[n + i] = 0.0;
-                    }
-                }
-                // Apply BC: zero on boundary
-                for &d in &bdofs {
-                    dydt[d as usize] = 0.0;
-                    dydt[n + d as usize] = 0.0;
-                }
-            };
-
-            let rk4 = Rk4;
-            let mut t = 0.0;
-            for _ in 0..n_steps {
-                let h = dt.min(t_end - t);
-                rk4.step(t, h, &mut y, &rhs_fn);
-                t += h;
-            }
-
-            let u_final: Vec<f64> = y[..n].to_vec();
-            let exact = u_exact(&[0.25, 0.25], t_final, args.c);
-            println!("  u(0.25,0.25) ≈ {:.6e}, exact = {:.6e}", u_final[n / 4], exact);
-            println!("Done.");
-        }
-        _ => {
-            eprintln!("Unknown scheme '{}' — use 'newmark' or 'rk4'", args.scheme);
+    // Time integration loop
+    let newmark = Newmark::default();
+    let mut u_hist = u.clone();
+    for step in 0..n_steps {
+        newmark.step(&mass_bc, &stiff_bc, &rhs_bc, dt, &mut u_hist, &mut state, &[]);
+        if (step + 1) % std::cmp::max(n_steps / 5, 1) == 0 {
+            let t = (step + 1) as f64 * dt;
+            println!("  t = {t:.4}, max|u| = {:.6e}", max_abs(&u_hist));
         }
     }
+
+    println!(
+        "  Final: max|u| = {:.6e} at t = {t_final}",
+        max_abs(&u_hist)
+    );
+    println!("  ‖u‖₂ = {:.6e}", u_hist.iter().map(|v| v * v).sum::<f64>().sqrt());
+    println!("Done.");
 }
 
+fn max_abs(v: &[f64]) -> f64 {
+    v.iter().cloned().fold(0.0_f64, |a, b| a.max(b.abs()))
+}
+
+// ─── CLI ────────────────────────────────────────────────────────────────────
+
 struct Args {
+    mesh: Option<String>,
     n: usize,
     order: u8,
     c: f64,
     dt: f64,
     t_final: f64,
-    scheme: String,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 20, order: 1, c: 1.0, dt: 0.001, t_final: 0.5, scheme: "newmark".to_string() };
+    let mut a = Args {
+        mesh: None,
+        n: 20,
+        order: 1,
+        c: 1.0,
+        dt: 0.001,
+        t_final: 0.5,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--n"       => { a.n = it.next().and_then(|v| v.parse().ok()).unwrap_or(20); }
-            "--order"   => { a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1); }
-            "--c"       => { a.c = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0); }
-            "--dt"      => { a.dt = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.001); }
-            "--T"       => { a.t_final = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.5); }
-            "--scheme"  => { a.scheme = it.next().unwrap_or_else(|| "newmark".to_string()); }
-            _           => {}
+            "-m" | "--mesh" => a.mesh = it.next(),
+            "--n" => {
+                a.n = it
+                    .next()
+                    .unwrap_or("20".into())
+                    .parse()
+                    .unwrap_or(20)
+            }
+            "-o" | "--order" => {
+                a.order = it
+                    .next()
+                    .unwrap_or("1".into())
+                    .parse()
+                    .unwrap_or(1)
+            }
+            "-c" | "--c" | "--speed" => {
+                a.c = it
+                    .next()
+                    .unwrap_or("1.0".into())
+                    .parse()
+                    .unwrap_or(1.0)
+            }
+            "--dt" => {
+                a.dt = it
+                    .next()
+                    .unwrap_or("0.001".into())
+                    .parse()
+                    .unwrap_or(0.001)
+            }
+            "--T" | "--t-final" => {
+                a.t_final = it
+                    .next()
+                    .unwrap_or("0.5".into())
+                    .parse()
+                    .unwrap_or(0.5)
+            }
+            _ => {}
         }
     }
     a
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ex23_wave_coarse_newmark_converges() {
+        let n = 8;
+        let order = 1;
+        let mesh = SimplexMesh::<2>::unit_square_tri(n);
+        let space = H1Space::new(mesh, order);
+        let dofs = space.n_dofs();
+
+        let diff_coeff = 1.0;
+        let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: diff_coeff }], 3);
+        let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
+        let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 0.0)], 3);
+
+        let bdofs = boundary_dofs(space.mesh(), space.dof_manager(), &[1, 2, 3, 4]);
+        let bvals = vec![0.0; bdofs.len()];
+        let mut stiff_bc = stiff.clone();
+        let mut mass_bc = mass.clone();
+        let mut rhs_bc = rhs.clone();
+        apply_dirichlet(&mut stiff_bc, &mut rhs_bc, &bdofs, &bvals);
+        apply_dirichlet(&mut mass_bc, &mut Vec::new(), &bdofs, &bvals);
+
+        let mut u = vec![0.0; dofs];
+        for d in 0..dofs as u32 {
+            let coord = space.dof_manager().dof_coord(d);
+            u[d as usize] = initial_solution(&coord);
+        }
+        for &d in &bdofs { u[d as usize] = 0.0; }
+
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..Default::default() };
+        let mut ku = vec![0.0; dofs];
+        stiff.spmv(&u, &mut ku);
+        let mut rhs_a = vec![0.0; dofs];
+        for i in 0..dofs { rhs_a[i] = -ku[i]; }
+        for &d in &bdofs { rhs_a[d as usize] = 0.0; }
+        let mut a0 = vec![0.0; dofs];
+        solve_cg(&mass_bc, &rhs_a, &mut a0, &cfg).unwrap();
+
+        let mut state = NewmarkState::new(dofs);
+        state.acc.copy_from_slice(&a0);
+        let newmark = Newmark::default();
+        let mut u_hist = u.clone();
+        let dt = 0.01;
+        let n_steps = 10;
+        for _ in 0..n_steps {
+            newmark.step(&mass_bc, &stiff_bc, &rhs_bc, dt, &mut u_hist, &mut state, &[]);
+        }
+
+        let final_norm: f64 = u_hist.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(final_norm.is_finite());
+        assert!(final_norm > 0.0, "solution should be non-trivial");
+    }
 }

@@ -15,20 +15,23 @@
 //! - `spectral`: generalized eigendecomposition (reference baseline)
 //! - `rational`: multi-shift rational quadrature
 //!
-//! The manufactured solution is the first Dirichlet eigenmode
-//! `u(x,y) = sin(πx) sin(πy)` with eigenvalue `λ�?= 2π²`, so the right-hand side is
+//! By default (--rhs-constant), the right-hand side is f = 1, matching MFEM ex33.
+//! With --verification, the manufactured solution is the first Dirichlet eigenmode
+//! `u(x,y) = sin(πx) sin(πy)` with eigenvalue `λ₁ = 2π²`, so the right-hand side is
 //! `f = λ₁^s u`.
 //!
 //! ## Usage
 //! ```
 //! cargo run --example mfem_ex33_fractional_laplacian
 //! cargo run --example mfem_ex33_fractional_laplacian -- --n 10 --s 0.35
+//! cargo run --example mfem_ex33_fractional_laplacian -- -m mesh.msh --verification
 //! ```
 
 use std::collections::HashSet;
 use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, GridFunction, standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator}};
+use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{MeshTopology, SimplexMesh};
 use fem_solver::{SolverConfig, solve_pcg_jacobi};
@@ -37,14 +40,29 @@ use nalgebra::{DMatrix, DVector, linalg::{Cholesky, SymmetricEigen}};
 
 fn main() {
     let args = parse_args();
-    let result = solve_fractional_problem_with_method(args.n, args.s, args.method, args.n_quad);
 
+    let mesh = match args.mesh_file {
+        Some(ref p) => {
+            let msh = read_msh_file(p).expect("failed to read mesh file");
+            msh.into_2d().expect("expected 2D mesh")
+        }
+        None => SimplexMesh::<2>::unit_square_tri(args.n),
+    };
+
+    let result = solve_fractional_problem_with_method(mesh, args.s, args.method, args.n_quad, args.verification);
+
+    let mesh_label = match args.mesh_file { Some(ref p) => p.clone(), None => format!("{}x{} unit square", args.n, args.n) };
     println!("=== fem-rs Example 33: fractional Laplacian baseline ===");
-    println!("  Mesh: {}x{} subdivisions, P1 elements", args.n, args.n);
+    println!("  Mesh: {}", mesh_label);
     println!("  Fractional exponent s: {:.3}", args.s);
     println!("  Backend: {:?}", args.method);
     if let FractionalMethod::Rational = args.method {
         println!("  Rational quadrature points: {}", args.n_quad);
+    }
+    if args.verification {
+        println!("  Verification mode: MMS with u = sin(πx) sin(πy)");
+    } else {
+        println!("  Default mode: f=1 (constant RHS)");
     }
     println!("  Free DOFs: {}", result.free_dofs);
     println!("  First generalized eigenvalue: {:.8}", result.first_eigenvalue);
@@ -64,6 +82,8 @@ struct Args {
     s: f64,
     method: FractionalMethod,
     n_quad: usize,
+    mesh_file: Option<String>,
+    verification: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,10 +114,15 @@ fn parse_args() -> Args {
         s: 0.5,
         method: FractionalMethod::Rational,
         n_quad: 64,
+        mesh_file: None,
+        verification: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "-m" | "--mesh" => {
+                args.mesh_file = Some(it.next().unwrap_or("".into()));
+            }
             "--n" => {
                 args.n = it.next().unwrap_or("8".into()).parse().unwrap_or(8);
             }
@@ -116,6 +141,9 @@ fn parse_args() -> Args {
             "--nq" | "--n-quad" => {
                 args.n_quad = it.next().unwrap_or("64".into()).parse().unwrap_or(64);
             }
+            "--ver" | "--verification" => {
+                args.verification = true;
+            }
             _ => {}
         }
     }
@@ -124,24 +152,160 @@ fn parse_args() -> Args {
     args
 }
 
-fn solve_fractional_problem(n: usize, s: f64) -> FractionalResult {
-    solve_fractional_problem_with_method(n, s, FractionalMethod::Spectral, 64)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solve_fractional_problem(n: usize, s: f64) -> FractionalResult {
+        solve_fractional_problem_with_method(
+            SimplexMesh::<2>::unit_square_tri(n), s, FractionalMethod::Spectral, 64, true,
+        )
+    }
+
+    fn rel_diff(a: f64, b: f64) -> f64 {
+        (a - b).abs() / a.abs().max(b.abs()).max(1.0)
+    }
+
+    #[test]
+    fn ex33_fractional_first_mode_is_recovered_for_s_half() {
+        let result = solve_fractional_problem(8, 0.5);
+        assert!(result.first_eigenvalue_rel_error < 8.0e-2, "first eigenvalue rel error = {}", result.first_eigenvalue_rel_error);
+        assert!(result.l2_error < 7.0e-2, "L2 error = {}", result.l2_error);
+        assert!((result.center_value - 1.0).abs() < 8.0e-2, "center value = {}", result.center_value);
+    }
+
+    #[test]
+    fn ex33_fractional_first_mode_is_recovered_for_small_s() {
+        let result = solve_fractional_problem(8, 0.25);
+        assert!(result.first_eigenvalue_rel_error < 8.0e-2, "first eigenvalue rel error = {}", result.first_eigenvalue_rel_error);
+        assert!(result.l2_error < 7.0e-2, "L2 error = {}", result.l2_error);
+        assert!((result.center_value - 1.0).abs() < 8.0e-2, "center value = {}", result.center_value);
+    }
+
+    #[test]
+    fn ex33_fractional_refinement_reduces_first_mode_error() {
+        let coarse = solve_fractional_problem(6, 0.5);
+        let fine = solve_fractional_problem(12, 0.5);
+
+        assert!(fine.first_eigenvalue_rel_error < coarse.first_eigenvalue_rel_error,
+            "expected eigenvalue error to improve under refinement: coarse={} fine={}",
+            coarse.first_eigenvalue_rel_error,
+            fine.first_eigenvalue_rel_error);
+        assert!(fine.l2_error < coarse.l2_error,
+            "expected L2 error to improve under refinement: coarse={} fine={}",
+            coarse.l2_error,
+            fine.l2_error);
+    }
+
+    #[test]
+    fn ex33_fractional_manufactured_first_mode_remains_consistent_across_s_scan() {
+        let small_s = solve_fractional_problem(8, 0.2);
+        let half_s = solve_fractional_problem(8, 0.5);
+        let large_s = solve_fractional_problem(8, 0.8);
+
+        assert!(rel_diff(small_s.solution_l2, half_s.solution_l2) < 2.0e-2,
+            "solution norm drift across s is too large: small={} half={}",
+            small_s.solution_l2,
+            half_s.solution_l2);
+        assert!(rel_diff(half_s.solution_l2, large_s.solution_l2) < 2.0e-2,
+            "solution norm drift across s is too large: half={} large={}",
+            half_s.solution_l2,
+            large_s.solution_l2);
+        assert!(rel_diff(small_s.solution_checksum, half_s.solution_checksum) < 2.0e-2,
+            "solution checksum drift across s is too large: small={} half={}",
+            small_s.solution_checksum,
+            half_s.solution_checksum);
+        assert!(rel_diff(half_s.solution_checksum, large_s.solution_checksum) < 2.0e-2,
+            "solution checksum drift across s is too large: half={} large={}",
+            half_s.solution_checksum,
+            large_s.solution_checksum);
+        assert!((small_s.center_value - 1.0).abs() < 8.0e-2);
+        assert!((half_s.center_value - 1.0).abs() < 8.0e-2);
+        assert!((large_s.center_value - 1.0).abs() < 8.0e-2);
+    }
+
+    #[test]
+    fn mk_mesh() -> SimplexMesh<2> { SimplexMesh::<2>::unit_square_tri(8) }
+
+    fn ex33_rational_matches_spectral_baseline() {
+        let spectral = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Spectral, 64, true);
+        let rational = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Rational, 96, true);
+
+        assert!(rel_diff(spectral.solution_l2, rational.solution_l2) < 2.0e-2,
+            "L2 norm mismatch: spectral={} rational={}",
+            spectral.solution_l2, rational.solution_l2);
+        assert!(rel_diff(spectral.solution_checksum, rational.solution_checksum) < 3.0e-2,
+            "checksum mismatch: spectral={} rational={}",
+            spectral.solution_checksum, rational.solution_checksum);
+        assert!((spectral.center_value - rational.center_value).abs() < 3.0e-2,
+            "center mismatch: spectral={} rational={}",
+            spectral.center_value, rational.center_value);
+    }
+
+    // ── sparse rational tests ─────────────────────────────────────────────────
+
+    /// Sparse Jacobi-PCG rational quadrature must match the dense spectral baseline.
+    #[test]
+    fn ex33_sparse_rational_matches_spectral_baseline() {
+        let spectral = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Spectral, 64, true);
+        let sparse   = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::SparseRational, 96, true);
+
+        assert!(rel_diff(spectral.solution_l2, sparse.solution_l2) < 3.0e-2,
+            "L2 norm mismatch: spectral={} sparse={}",
+            spectral.solution_l2, sparse.solution_l2);
+        assert!(rel_diff(spectral.solution_checksum, sparse.solution_checksum) < 4.0e-2,
+            "checksum mismatch: spectral={} sparse={}",
+            spectral.solution_checksum, sparse.solution_checksum);
+        assert!((spectral.center_value - sparse.center_value).abs() < 4.0e-2,
+            "center mismatch: spectral={} sparse={}",
+            spectral.center_value, sparse.center_value);
+    }
+
+    /// Sparse rational must converge with a good L2 error for multiple s values.
+    #[test]
+    fn ex33_sparse_rational_s_scan_converges_accurately() {
+        for &s in &[0.25_f64, 0.5, 0.75] {
+            let r = solve_fractional_problem_with_method(mk_mesh(), s, FractionalMethod::SparseRational, 64, true);
+            assert!(r.l2_error < 1.0e-1,
+                "sparse rational L2 error too large at s={}: {:.3e}", s, r.l2_error);
+            assert!((r.center_value - 1.0).abs() < 1.5e-1,
+                "sparse rational center value wrong at s={}: {:.6}", s, r.center_value);
+        }
+    }
+
+    /// Same inputs must yield the same solution checksum (determinism).
+    #[test]
+    fn ex33_fractional_checksum_is_deterministic() {
+        let r1 = solve_fractional_problem(8, 0.5);
+        let r2 = solve_fractional_problem(8, 0.5);
+        assert_eq!(r1.solution_checksum, r2.solution_checksum,
+            "fractional Laplacian checksum not deterministic: {} vs {}",
+            r1.solution_checksum, r2.solution_checksum);
+    }
 }
 
+// ── Core solver functions ─────────────────────────────────────────────────────
+
 fn solve_fractional_problem_with_method(
-    n: usize,
+    mesh: SimplexMesh<2>,
     s: f64,
     method: FractionalMethod,
     n_quad: usize,
+    verification: bool,
 ) -> FractionalResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
 
     let stiffness = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
 
     let lambda_exact = 2.0 * PI * PI;
-    let rhs_integrator = DomainSourceIntegrator::new(|x: &[f64]| lambda_exact.powf(s) * exact_mode(x));
+    let rhs_integrator = DomainSourceIntegrator::new(move |x: &[f64]| {
+        if verification {
+            lambda_exact.powf(s) * exact_mode(x)
+        } else {
+            1.0
+        }
+    });
     let rhs = Assembler::assemble_linear(&space, &[&rhs_integrator], 3);
 
     let dm = space.dof_manager();
@@ -226,8 +390,6 @@ fn solve_reduced_rational(
     n_quad: usize,
     eigenvalues: &[f64],
 ) -> DVector<f64> {
-    // λ^{-s} = (sin(πs)/π) ∫_0^∞ t^{-s}/(t+λ) dt
-    // and therefore u ≈ c_s Σ ω_q (K + t_q M)^{-1} b.
     let k_dense = csr_to_dense(k_free);
     let m_dense = csr_to_dense(m_free);
     let b = DVector::from_vec(rhs_free.to_vec());
@@ -251,12 +413,9 @@ fn solve_reduced_rational(
         let x_q = chol.solve(&b);
         u += weight * x_q;
     }
-
     u
 }
 
-/// Sparse rational quadrature: same sinc formula as `solve_reduced_rational` but
-/// all shifted systems are solved with sparse Jacobi-PCG on the CSR matrices.
 fn solve_sparse_rational(
     k_free: &CsrMatrix<f64>,
     m_free: &CsrMatrix<f64>,
@@ -282,10 +441,8 @@ fn solve_sparse_rational(
         let t = y.exp();
         let weight = c_s * h * ((1.0 - s) * y).exp();
 
-        // Build sparse shifted system A_q = K + t * M.
         let a_q = csr_add_scaled(k_free, m_free, 1.0, t);
 
-        // Solve A_q x_q = b with sparse Jacobi-PCG.
         let mut x_q = vec![0.0f64; n];
         solve_pcg_jacobi(&a_q, rhs_free, &mut x_q, &cfg)
             .expect("sparse rational: shifted PCG solve failed");
@@ -297,7 +454,6 @@ fn solve_sparse_rational(
     u
 }
 
-/// Build α·A + β·B as a new sparse CSR matrix (same n×n, possibly overlapping sparsity).
 fn csr_add_scaled(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>, alpha: f64, beta: f64) -> CsrMatrix<f64> {
     let n = a.nrows;
     let mut coo = CooMatrix::<f64>::new(n, n);
@@ -368,128 +524,4 @@ fn generalized_eigendecomposition(k: &CsrMatrix<f64>, m: &CsrMatrix<f64>) -> (Ve
 
     let m_orthonormal = l_inv.transpose() * eigenvectors;
     (eigenvalues, m_orthonormal)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rel_diff(a: f64, b: f64) -> f64 {
-        (a - b).abs() / a.abs().max(b.abs()).max(1.0)
-    }
-
-    #[test]
-    fn ex33_fractional_first_mode_is_recovered_for_s_half() {
-        let result = solve_fractional_problem(8, 0.5);
-        assert!(result.first_eigenvalue_rel_error < 8.0e-2, "first eigenvalue rel error = {}", result.first_eigenvalue_rel_error);
-        assert!(result.l2_error < 7.0e-2, "L2 error = {}", result.l2_error);
-        assert!((result.center_value - 1.0).abs() < 8.0e-2, "center value = {}", result.center_value);
-    }
-
-    #[test]
-    fn ex33_fractional_first_mode_is_recovered_for_small_s() {
-        let result = solve_fractional_problem(8, 0.25);
-        assert!(result.first_eigenvalue_rel_error < 8.0e-2, "first eigenvalue rel error = {}", result.first_eigenvalue_rel_error);
-        assert!(result.l2_error < 7.0e-2, "L2 error = {}", result.l2_error);
-        assert!((result.center_value - 1.0).abs() < 8.0e-2, "center value = {}", result.center_value);
-    }
-
-    #[test]
-    fn ex33_fractional_refinement_reduces_first_mode_error() {
-        let coarse = solve_fractional_problem(6, 0.5);
-        let fine = solve_fractional_problem(12, 0.5);
-
-        assert!(fine.first_eigenvalue_rel_error < coarse.first_eigenvalue_rel_error,
-            "expected eigenvalue error to improve under refinement: coarse={} fine={}",
-            coarse.first_eigenvalue_rel_error,
-            fine.first_eigenvalue_rel_error);
-        assert!(fine.l2_error < coarse.l2_error,
-            "expected L2 error to improve under refinement: coarse={} fine={}",
-            coarse.l2_error,
-            fine.l2_error);
-    }
-
-    #[test]
-    fn ex33_fractional_manufactured_first_mode_remains_consistent_across_s_scan() {
-        let small_s = solve_fractional_problem(8, 0.2);
-        let half_s = solve_fractional_problem(8, 0.5);
-        let large_s = solve_fractional_problem(8, 0.8);
-
-        assert!(rel_diff(small_s.solution_l2, half_s.solution_l2) < 2.0e-2,
-            "solution norm drift across s is too large: small={} half={}",
-            small_s.solution_l2,
-            half_s.solution_l2);
-        assert!(rel_diff(half_s.solution_l2, large_s.solution_l2) < 2.0e-2,
-            "solution norm drift across s is too large: half={} large={}",
-            half_s.solution_l2,
-            large_s.solution_l2);
-        assert!(rel_diff(small_s.solution_checksum, half_s.solution_checksum) < 2.0e-2,
-            "solution checksum drift across s is too large: small={} half={}",
-            small_s.solution_checksum,
-            half_s.solution_checksum);
-        assert!(rel_diff(half_s.solution_checksum, large_s.solution_checksum) < 2.0e-2,
-            "solution checksum drift across s is too large: half={} large={}",
-            half_s.solution_checksum,
-            large_s.solution_checksum);
-        assert!((small_s.center_value - 1.0).abs() < 8.0e-2);
-        assert!((half_s.center_value - 1.0).abs() < 8.0e-2);
-        assert!((large_s.center_value - 1.0).abs() < 8.0e-2);
-    }
-
-    #[test]
-    fn ex33_rational_matches_spectral_baseline() {
-        let spectral = solve_fractional_problem_with_method(8, 0.5, FractionalMethod::Spectral, 64);
-        let rational = solve_fractional_problem_with_method(8, 0.5, FractionalMethod::Rational, 96);
-
-        assert!(rel_diff(spectral.solution_l2, rational.solution_l2) < 2.0e-2,
-            "L2 norm mismatch: spectral={} rational={}",
-            spectral.solution_l2, rational.solution_l2);
-        assert!(rel_diff(spectral.solution_checksum, rational.solution_checksum) < 3.0e-2,
-            "checksum mismatch: spectral={} rational={}",
-            spectral.solution_checksum, rational.solution_checksum);
-        assert!((spectral.center_value - rational.center_value).abs() < 3.0e-2,
-            "center mismatch: spectral={} rational={}",
-            spectral.center_value, rational.center_value);
-    }
-
-    // ── sparse rational tests ─────────────────────────────────────────────────
-
-    /// Sparse Jacobi-PCG rational quadrature must match the dense spectral baseline.
-    #[test]
-    fn ex33_sparse_rational_matches_spectral_baseline() {
-        let spectral = solve_fractional_problem_with_method(8, 0.5, FractionalMethod::Spectral, 64);
-        let sparse   = solve_fractional_problem_with_method(8, 0.5, FractionalMethod::SparseRational, 96);
-
-        assert!(rel_diff(spectral.solution_l2, sparse.solution_l2) < 3.0e-2,
-            "L2 norm mismatch: spectral={} sparse={}",
-            spectral.solution_l2, sparse.solution_l2);
-        assert!(rel_diff(spectral.solution_checksum, sparse.solution_checksum) < 4.0e-2,
-            "checksum mismatch: spectral={} sparse={}",
-            spectral.solution_checksum, sparse.solution_checksum);
-        assert!((spectral.center_value - sparse.center_value).abs() < 4.0e-2,
-            "center mismatch: spectral={} sparse={}",
-            spectral.center_value, sparse.center_value);
-    }
-
-    /// Sparse rational must converge with a good L2 error for multiple s values.
-    #[test]
-    fn ex33_sparse_rational_s_scan_converges_accurately() {
-        for &s in &[0.25_f64, 0.5, 0.75] {
-            let r = solve_fractional_problem_with_method(8, s, FractionalMethod::SparseRational, 64);
-            assert!(r.l2_error < 1.0e-1,
-                "sparse rational L2 error too large at s={}: {:.3e}", s, r.l2_error);
-            assert!((r.center_value - 1.0).abs() < 1.5e-1,
-                "sparse rational center value wrong at s={}: {:.6}", s, r.center_value);
-        }
-    }
-
-    /// Same inputs must yield the same solution checksum (determinism).
-    #[test]
-    fn ex33_fractional_checksum_is_deterministic() {
-        let r1 = solve_fractional_problem(8, 0.5);
-        let r2 = solve_fractional_problem(8, 0.5);
-        assert_eq!(r1.solution_checksum, r2.solution_checksum,
-            "fractional Laplacian checksum not deterministic: {} vs {}",
-            r1.solution_checksum, r2.solution_checksum);
-    }
 }

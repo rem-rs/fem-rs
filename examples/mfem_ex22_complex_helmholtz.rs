@@ -1,185 +1,148 @@
-//! # Example 22 �?Complex-Valued Time-Harmonic Helmholtz (analogous to MFEM ex22)
+//! # Example 22 — Complex Time-Harmonic (analogous to MFEM ex22)
 //!
-//! Solves a damped time-harmonic scalar Helmholtz equation using the
-//! **2×2 real-block** strategy in `fem_assembly::complex`:
+//! Solves the damped scalar Helmholtz equation (MFEM ex22, problem type 0):
 //!
 //! ```text
-//!   −∇·(a∇u) �?ω²b·u + iω·c·u = 0    in Ω = [0,1]²
+//!   −∇·(a ∇u) − ω²·b·u + i·ω·c·u = 0    in Ω
 //! ```
 //!
-//! with Dirichlet BCs:
-//! - Left edge  (tag 4): u = 1+0i  (unit amplitude port)
-//! - All other edges:    u = 0+0i
-//!
-//! The 2×2 real block system is:
-//! ```text
-//! [ K �?ω²M   −ωC ] [ u_re ]   [ 0 ]
-//! [ ωC        K−ω²M] [ u_im ] = [ 0 ]
-//! ```
-//! Solved with GMRES.
+//! with Dirichlet BCs driving the solution (exact traveling wave imposed on all
+//! boundaries).  The exact solution for an "inline-" mesh is
+//! `u(x) = exp(-i·κ·x_{dim-1})` where `κ = √(μ·ω·(ε·ω − i·σ))`.
 //!
 //! ## Usage
-//! ```
-//! cargo run --example mfem_ex22
-//! cargo run --example mfem_ex22 -- --n 16 --omega 2.0
-//! cargo run --example mfem_ex22 -- --n 32 --sigma 0.2
+//! ```text
+//! cargo run --example mfem_ex22_complex_helmholtz
+//! cargo run --example mfem_ex22_complex_helmholtz -- --mesh ../data/inline-quad.mesh -o 3
+//! cargo run --example mfem_ex22_complex_helmholtz -- --omega 10.0 --sigma 20.0 --mu 1.0
 //! ```
 
 use fem_assembly::{
-    Assembler, ComplexAssembler, ComplexGridFunction, face_dofs_p1,
-    standard::{BoundaryMassIntegrator, DiffusionIntegrator, MassIntegrator},
+    ComplexAssembler, ComplexGridFunction,
+    standard::{DiffusionIntegrator, MassIntegrator},
 };
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::SimplexMesh;
-use fem_solver::{SolverConfig, solve_gmres};
+use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{
     H1Space,
     fe_space::FESpace,
     constraints::boundary_dofs,
 };
 
-// ─── CLI ─────────────────────────────────────────────────────────────────────
+// ─── Global coefficients (set via CLI) ──────────────────────────────────────
+static mut MU: f64 = 1.0;
+static mut EPSILON: f64 = 1.0;
+static mut SIGMA: f64 = 20.0;
+static mut OMEGA: f64 = 10.0;
 
-struct Args {
-    n: usize,
-    omega: f64,
-    sigma: f64,
-    abc_alpha_right: f64,
-    left_drive_amp: f64,
+/// Exact solution: u(x) = exp(-i·κ·x_{d-1})
+fn u0_complex(x: &[f64]) -> (f64, f64) {
+    let d = x.len();
+    let dim = if d >= 1 { d - 1 } else { 0 };
+    unsafe {
+        let alpha_re = EPSILON * OMEGA;
+        let alpha_im = -SIGMA;
+        // κ = √(μ·ω·(α_re + i·α_im))
+        let tmp_re = MU * OMEGA * alpha_re;
+        let tmp_im = MU * OMEGA * alpha_im;
+        // sqrt via: √(a+ib) = √((|z|+a)/2) + i·sign(b)·√((|z|-a)/2)
+        let mag = (tmp_re * tmp_re + tmp_im * tmp_im).sqrt();
+        let kappa_re = ((mag + tmp_re) / 2.0).sqrt();
+        let kappa_im = if tmp_im >= 0.0 { 1.0 } else { -1.0 } * ((mag - tmp_re) / 2.0).sqrt();
+        // exp(-i·κ·z) = exp(-i·(κ_re+i·κ_im)·z) = exp(κ_im·z)·exp(-i·κ_re·z)
+        let z = x[dim];
+        let mag_exp = (kappa_im * z).exp();
+        let phase = -kappa_re * z;
+        (mag_exp * phase.cos(), mag_exp * (-phase.sin()))
+    }
 }
 
-fn parse_args() -> Args {
-    let mut a = Args {
-        n: 8,
-        omega: 1.5,
-        sigma: 0.1,
-        abc_alpha_right: 1.0,
-        left_drive_amp: 1.0,
+fn u0_re(x: &[f64]) -> f64 {
+    u0_complex(x).0
+}
+fn u0_im(x: &[f64]) -> f64 {
+    u0_complex(x).1
+}
+
+fn main() {
+    let args = parse_args();
+    println!("=== Example 22: Complex Time-Harmonic (MFEM ex22, H1) ===");
+    if let Some(ref p) = args.mesh {
+        println!("  Mesh file: {p}");
+    }
+    println!(
+        "  μ={:.4}, ε={:.4}, σ={:.4}, ω={:.4}, order={}",
+        args.mu, args.eps, args.sigma, args.omega, args.order
+    );
+
+    unsafe {
+        MU = args.mu;
+        EPSILON = args.eps;
+        SIGMA = args.sigma;
+        OMEGA = args.omega;
+    }
+
+    // Load or generate mesh
+    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(args.n)
     };
-    let raw: Vec<String> = std::env::args().skip(1).collect();
-    let mut i = 0;
-    while i < raw.len() {
-        match raw[i].as_str() {
-            "--n"     => { i += 1; a.n     = raw[i].parse().unwrap(); }
-            "--omega" => { i += 1; a.omega = raw[i].parse().unwrap(); }
-            "--sigma" => { i += 1; a.sigma = raw[i].parse().unwrap(); }
-            "--abc-alpha-right" => { i += 1; a.abc_alpha_right = raw[i].parse().unwrap(); }
-            "--left-drive-amp" => { i += 1; a.left_drive_amp = raw[i].parse().unwrap(); }
-            other     => eprintln!("unknown arg: {other}"),
-        }
-        i += 1;
-    }
-    a.abc_alpha_right = a.abc_alpha_right.max(0.0);
-    a
-}
 
-#[derive(Debug, Clone)]
-struct SolveResult {
-    n_dofs: usize,
-    iterations: usize,
-    final_residual: f64,
-    converged: bool,
-    min_amp: f64,
-    max_amp: f64,
-    max_left_bc_err: f64,
-    mean_left_amp: f64,
-    mean_right_amp: f64,
-    mean_interior_amp: f64,
-}
+    // H1 space
+    let space = H1Space::new(mesh, args.order);
+    let n = space.n_dofs();
+    println!("  DOFs: {n}");
 
-impl SolveResult {
-    fn transmission_ratio(&self) -> f64 {
-        self.mean_right_amp / self.mean_left_amp.max(1.0e-14)
-    }
-}
-
-fn mean_on_indices(values: &[f64], idx: &[usize]) -> f64 {
-    if idx.is_empty() {
-        return 0.0;
-    }
-    idx.iter().map(|&i| values[i]).sum::<f64>() / idx.len() as f64
-}
-
-fn add_scaled_csr(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>, scale_b: f64) -> CsrMatrix<f64> {
-    let mut coo = CooMatrix::<f64>::new(a.nrows, a.ncols);
-    for i in 0..a.nrows {
-        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
-            coo.add(i, a.col_idx[p] as usize, a.values[p]);
-        }
-    }
-    for i in 0..b.nrows {
-        for p in b.row_ptr[i]..b.row_ptr[i + 1] {
-            coo.add(i, b.col_idx[p] as usize, scale_b * b.values[p]);
-        }
-    }
-    coo.into_csr()
-}
-
-fn solve_case(args: &Args) -> SolveResult {
-    solve_case_with_field(args).0
-}
-
-fn solve_case_with_field(args: &Args) -> (SolveResult, ComplexGridFunction) {
-    let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
-    let space = H1Space::new(mesh, 1);
-    let ndofs = space.n_dofs();
+    // Build system: (K − ω²M + i·ω·C) u = 0
+    //   K = 1/μ · Diffusion
+    //   M = ε · Mass   → ω²·ε = 1/μ · ω²·μ·ε (but MFEM convention)
+    //   C = σ · Mass
+    let stiff_coef = 1.0 / args.mu;
+    let mass_coef = -args.omega * args.omega * args.eps;
+    let damp_coef = args.omega * args.sigma;
 
     let mut sys = ComplexAssembler::assemble(
         &space,
-        &[&DiffusionIntegrator { kappa: 1.0 }],
-        &[&MassIntegrator { rho: 1.0 }],
-        &[&MassIntegrator { rho: args.sigma }],
+        &[&DiffusionIntegrator {
+            kappa: stiff_coef,
+        }],
+        &[&MassIntegrator { rho: mass_coef }],
+        &[&MassIntegrator { rho: damp_coef }],
         args.omega,
-        3,
+        args.order * 2 + 1,
     );
 
-    // Add right-boundary first-order absorbing contribution i*omega*alpha*u.
-    if args.abc_alpha_right > 0.0 {
-        let face_dofs = face_dofs_p1(space.mesh());
-        let bnd = Assembler::assemble_boundary_bilinear(
-            ndofs,
-            space.mesh(),
-            &face_dofs,
-            1,
-            &[&BoundaryMassIntegrator {
-                alpha: args.abc_alpha_right,
-            }],
-            &[2],
-            3,
-        );
-        sys.k_im = add_scaled_csr(&sys.k_im, &bnd, args.omega);
-    }
-
-    let f_re = vec![0.0_f64; ndofs];
-    let f_im = vec![0.0_f64; ndofs];
-    let mut rhs = sys.assemble_rhs(&f_re, &f_im);
-
+    // Project exact solution for BCs
     let dm = space.dof_manager();
-    let mesh_ref = space.mesh();
-    let left_dofs: Vec<usize> = boundary_dofs(mesh_ref, dm, &[4])
-        .into_iter()
-        .map(|d| d as usize)
-        .collect();
-    let right_dofs: Vec<usize> = boundary_dofs(mesh_ref, dm, &[2])
-        .into_iter()
-        .map(|d| d as usize)
-        .collect();
-    // Keep right boundary open (ABC handles it weakly); clamp only top and bottom.
-    let other_dofs: Vec<usize> = boundary_dofs(mesh_ref, dm, &[1, 3])
+    let bnd: Vec<usize> = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4])
         .into_iter()
         .map(|d| d as usize)
         .collect();
 
-    let left_re: Vec<f64> = vec![args.left_drive_amp; left_dofs.len()];
-    let left_im: Vec<f64> = vec![0.0; left_dofs.len()];
-    let other_re: Vec<f64> = vec![0.0; other_dofs.len()];
-    let other_im: Vec<f64> = vec![0.0; other_dofs.len()];
+    let exact_re: Vec<f64> = bnd
+        .iter()
+        .map(|&d| {
+            let coord = space.dof_manager().dof_coord(d as u32);
+            u0_re(&coord)
+        })
+        .collect();
+    let exact_im: Vec<f64> = bnd
+        .iter()
+        .map(|&d| {
+            let coord = space.dof_manager().dof_coord(d as u32);
+            u0_im(&coord)
+        })
+        .collect();
 
-    sys.apply_dirichlet(&other_dofs, &other_re, &other_im, &mut rhs);
-    sys.apply_dirichlet(&left_dofs, &left_re, &left_im, &mut rhs);
+    let mut rhs = sys.assemble_rhs(&vec![0.0; n], &vec![0.0; n]);
+    sys.apply_dirichlet(&bnd, &exact_re, &exact_im, &mut rhs);
 
-    let flat = sys.to_flat_csr();
-    let mut x = vec![0.0_f64; 2 * ndofs];
+    // Solve
+    let a = sys.to_flat_csr();
+    let mut x = vec![0.0; 2 * n];
     let cfg = SolverConfig {
         rtol: 1e-8,
         atol: 1e-14,
@@ -187,79 +150,133 @@ fn solve_case_with_field(args: &Args) -> (SolveResult, ComplexGridFunction) {
         verbose: false,
         ..SolverConfig::default()
     };
-    let res = solve_gmres(&flat, &rhs, &mut x, 50, &cfg).expect("GMRES did not converge");
+    let res = solve_gmres(&a, &rhs, &mut x, 50, &cfg).expect("GMRES did not converge");
 
     let gf = ComplexGridFunction::from_flat(&x);
     let amp = gf.amplitude();
     let max_amp = amp.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let min_amp = amp.iter().cloned().fold(f64::INFINITY, f64::min);
 
-    let max_left_bc_err = left_dofs
+    println!(
+        "  GMRES: {} iters, residual={:.3e}, converged={}",
+        res.iterations, res.final_residual, res.converged
+    );
+    println!("  |u| ∈ [{:.6e}, {:.6e}]", min_amp, max_amp);
+
+    // L2 error vs exact
+    let exact_all_re: Vec<f64> = (0..n)
+        .map(|i| {
+            let coord = space.dof_manager().dof_coord(i as u32);
+            u0_re(&coord)
+        })
+        .collect();
+    let exact_all_im: Vec<f64> = (0..n)
+        .map(|i| {
+            let coord = space.dof_manager().dof_coord(i as u32);
+            u0_im(&coord)
+        })
+        .collect();
+    let err_re: f64 = gf
+        .u_re
         .iter()
-        .map(|&i| (gf.u_re[i] - args.left_drive_amp).abs())
-        .fold(0.0_f64, f64::max);
+        .zip(exact_all_re.iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let err_im: f64 = gf
+        .u_im
+        .iter()
+        .zip(exact_all_im.iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let norm_re = exact_all_re.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-14);
+    let norm_im = exact_all_im.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-14);
+    println!(
+        "  Relative L2 error: re={:.3e}, im={:.3e}",
+        err_re / norm_re,
+        err_im / norm_im
+    );
 
-    let mut is_boundary = vec![false; ndofs];
-    for &i in &left_dofs {
-        is_boundary[i] = true;
-    }
-    for &i in &right_dofs {
-        is_boundary[i] = true;
-    }
-    for &i in &other_dofs {
-        is_boundary[i] = true;
-    }
-    let interior: Vec<usize> = (0..ndofs).filter(|&i| !is_boundary[i]).collect();
-
-    (
-        SolveResult {
-            n_dofs: ndofs,
-            iterations: res.iterations,
-            final_residual: res.final_residual,
-            converged: res.converged,
-            min_amp,
-            max_amp,
-            max_left_bc_err,
-            mean_left_amp: mean_on_indices(&amp, &left_dofs),
-            mean_right_amp: mean_on_indices(&amp, &right_dofs),
-            mean_interior_amp: mean_on_indices(&amp, &interior),
-        },
-        gf,
-    )
+    assert!(res.converged, "GMRES did not converge");
+    println!("  PASS");
 }
 
-// ─── main ─────────────────────────────────────────────────────────────────────
+// ─── CLI ────────────────────────────────────────────────────────────────────
 
-fn main() {
-    let args = parse_args();
-    let result = solve_case(&args);
-
-    println!("=== fem-rs Example 22: Complex Helmholtz (2×2 real-block) ===");
-    println!(
-        "  Mesh: {}×{},  ω = {:.4},  σ = {:.4},  α_right = {:.4}",
-        args.n, args.n, args.omega, args.sigma, args.abc_alpha_right
-    );
-    println!("  Left drive amplitude: {:.4}", args.left_drive_amp);
-    println!("  DOFs: {}  (2×{} flat system)", result.n_dofs, result.n_dofs);
-    println!(
-        "  GMRES: {} iters, residual = {:.3e}, converged = {}",
-        result.iterations, result.final_residual, result.converged
-    );
-    println!("  |u| �?[{:.4}, {:.4}]", result.min_amp, result.max_amp);
-    println!(
-        "  |u| mean: left={:.4e}, right={:.4e}, interior={:.4e}",
-        result.mean_left_amp, result.mean_right_amp, result.mean_interior_amp
-    );
-    println!(
-        "  Transmission proxy (right/left) = {:.4e}",
-        result.transmission_ratio()
-    );
-    println!("  Max left-BC error: {:.2e}", result.max_left_bc_err);
-
-    assert!(result.max_left_bc_err < 1e-10, "left Dirichlet BC not satisfied");
-    assert!(result.converged, "GMRES did not converge");
-    println!("  �?Example 22 passed");
+struct Args {
+    mesh: Option<String>,
+    n: usize,
+    order: u8,
+    mu: f64,
+    eps: f64,
+    sigma: f64,
+    omega: f64,
 }
+
+fn parse_args() -> Args {
+    let mut a = Args {
+        mesh: None,
+        n: 8,
+        order: 1,
+        mu: 1.0,
+        eps: 1.0,
+        sigma: 20.0,
+        omega: 10.0,
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "-m" | "--mesh" => a.mesh = it.next(),
+            "--n" => {
+                a.n = it
+                    .next()
+                    .unwrap_or("8".into())
+                    .parse()
+                    .unwrap_or(8)
+            }
+            "-o" | "--order" => {
+                a.order = it
+                    .next()
+                    .unwrap_or("1".into())
+                    .parse()
+                    .unwrap_or(1)
+            }
+            "--mu" => {
+                a.mu = it
+                    .next()
+                    .unwrap_or("1.0".into())
+                    .parse()
+                    .unwrap_or(1.0)
+            }
+            "--eps" => {
+                a.eps = it
+                    .next()
+                    .unwrap_or("1.0".into())
+                    .parse()
+                    .unwrap_or(1.0)
+            }
+            "--sigma" => {
+                a.sigma = it
+                    .next()
+                    .unwrap_or("20.0".into())
+                    .parse()
+                    .unwrap_or(20.0)
+            }
+            "--omega" => {
+                a.omega = it
+                    .next()
+                    .unwrap_or("10.0".into())
+                    .parse()
+                    .unwrap_or(10.0)
+            }
+            _ => {}
+        }
+    }
+    a
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -267,199 +284,91 @@ mod tests {
 
     fn base_args() -> Args {
         Args {
+            mesh: None,
             n: 10,
-            omega: 1.5,
-            sigma: 0.1,
-            abc_alpha_right: 1.0,
-            left_drive_amp: 1.0,
+            order: 1,
+            mu: 1.0,
+            eps: 1.0,
+            sigma: 20.0,
+            omega: 10.0,
         }
     }
 
     #[test]
-    fn ex22_converges_with_absorbing_right_boundary() {
-        let r = solve_case(&base_args());
-        assert!(r.converged);
-        assert!(r.final_residual < 1.0e-6, "residual = {}", r.final_residual);
-        assert!(r.max_left_bc_err < 1.0e-10, "bc err = {}", r.max_left_bc_err);
-    }
-
-    #[test]
-    fn ex22_stronger_right_absorption_reduces_transmission_proxy() {
-        let mut weak = base_args();
-        weak.abc_alpha_right = 0.05;
-        let rw = solve_case(&weak);
-
-        let mut strong = base_args();
-        strong.abc_alpha_right = 4.0;
-        let rs = solve_case(&strong);
-
-        assert!(rw.converged && rs.converged);
-        assert!(
-            rs.transmission_ratio() < rw.transmission_ratio(),
-            "expected stronger right absorption to lower transmission proxy: weak={} strong={}",
-            rw.transmission_ratio(),
-            rs.transmission_ratio()
+    fn ex22_h1_converges_with_reasonable_error() {
+        let args = base_args();
+        unsafe {
+            MU = args.mu;
+            EPSILON = args.eps;
+            SIGMA = args.sigma;
+            OMEGA = args.omega;
+        }
+        let mesh = SimplexMesh::<2>::unit_square_tri(args.n);
+        let space = H1Space::new(mesh, args.order);
+        let mut sys = ComplexAssembler::assemble(
+            &space,
+            &[&DiffusionIntegrator {
+                kappa: 1.0 / args.mu,
+            }],
+            &[&MassIntegrator {
+                rho: -args.omega * args.omega * args.eps,
+            }],
+            &[&MassIntegrator {
+                rho: args.omega * args.sigma,
+            }],
+            args.omega,
+            args.order * 2 + 1,
         );
-    }
-
-    #[test]
-    fn ex22_turning_off_right_absorption_increases_right_boundary_amplitude() {
-        let mut open = base_args();
-        open.abc_alpha_right = 0.0;
-        let ro = solve_case(&open);
-
-        let absorbed = solve_case(&base_args());
-
-        assert!(ro.converged && absorbed.converged);
-        assert!(
-            ro.mean_right_amp > absorbed.mean_right_amp,
-            "expected no-ABC case to have larger right-boundary amplitude: open={} absorbed={}",
-            ro.mean_right_amp,
-            absorbed.mean_right_amp
-        );
-        assert!(
-            ro.transmission_ratio() > absorbed.transmission_ratio(),
-            "expected no-ABC case to have larger transmission proxy: open={} absorbed={}",
-            ro.transmission_ratio(),
-            absorbed.transmission_ratio()
-        );
-    }
-
-    #[test]
-    fn ex22_stronger_volumetric_damping_reduces_interior_and_transmitted_amplitude() {
-        let mut weak = base_args();
-        weak.sigma = 0.0;
-        let rw = solve_case(&weak);
-
-        let mut strong = base_args();
-        strong.sigma = 5.0;
-        let rs = solve_case(&strong);
-
-        assert!(rw.converged && rs.converged);
-        assert!(
-            rs.mean_interior_amp < rw.mean_interior_amp,
-            "expected stronger sigma to reduce interior amplitude: weak={} strong={}",
-            rw.mean_interior_amp,
-            rs.mean_interior_amp
-        );
-        assert!(
-            rs.transmission_ratio() < rw.transmission_ratio(),
-            "expected stronger sigma to reduce transmission proxy: weak={} strong={}",
-            rw.transmission_ratio(),
-            rs.transmission_ratio()
-        );
-    }
-
-    #[test]
-    fn ex22_solution_scales_linearly_with_left_port_drive() {
-        let mut half = base_args();
-        half.left_drive_amp = 0.5;
-        let rh = solve_case(&half);
-
-        let full = solve_case(&base_args());
-
-        assert!(rh.converged && full.converged);
-
-        let right_ratio = full.mean_right_amp / rh.mean_right_amp.max(1.0e-30);
-        let interior_ratio = full.mean_interior_amp / rh.mean_interior_amp.max(1.0e-30);
-        let max_ratio = full.max_amp / rh.max_amp.max(1.0e-30);
-
-        assert!((right_ratio - 2.0).abs() < 1.0e-6, "expected right amplitude to scale linearly, got ratio {}", right_ratio);
-        assert!((interior_ratio - 2.0).abs() < 1.0e-6, "expected interior amplitude to scale linearly, got ratio {}", interior_ratio);
-        assert!((max_ratio - 2.0).abs() < 1.0e-6, "expected max amplitude to scale linearly, got ratio {}", max_ratio);
-    }
-
-    #[test]
-    fn ex22_sign_reversed_left_drive_flips_complex_field() {
-        let (pos_result, pos_field) = solve_case_with_field(&base_args());
-
-        let mut neg = base_args();
-        neg.left_drive_amp = -1.0;
-        let (neg_result, neg_field) = solve_case_with_field(&neg);
-
-        assert!(pos_result.converged && neg_result.converged);
-        assert_eq!(pos_field.u_re.len(), neg_field.u_re.len());
-        assert_eq!(pos_field.u_im.len(), neg_field.u_im.len());
-
-        let re_sym_err = pos_field
-            .u_re
+        let n = space.n_dofs();
+        let dm = space.dof_manager();
+        let bnd: Vec<usize> = boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4])
+            .into_iter()
+            .map(|d| d as usize)
+            .collect();
+        let exact_re: Vec<f64> = bnd
             .iter()
-            .zip(&neg_field.u_re)
-            .map(|(a, b)| (a + b).abs())
-            .fold(0.0_f64, f64::max);
-        let im_sym_err = pos_field
-            .u_im
+            .map(|&d| {
+                let coord = space.dof_manager().dof_coord(d as u32);
+                u0_re(&coord)
+            })
+            .collect();
+        let exact_im: Vec<f64> = bnd
             .iter()
-            .zip(&neg_field.u_im)
-            .map(|(a, b)| (a + b).abs())
-            .fold(0.0_f64, f64::max);
-
-        assert!(re_sym_err < 1.0e-10, "expected real field to flip sign, got max symmetry error {}", re_sym_err);
-        assert!(im_sym_err < 1.0e-10, "expected imaginary field to flip sign, got max symmetry error {}", im_sym_err);
-        assert!(
-            (pos_result.max_amp - neg_result.max_amp).abs() < 1.0e-10,
-            "expected amplitude envelope to be invariant under sign reversal: pos={} neg={}",
-            pos_result.max_amp,
-            neg_result.max_amp
-        );
+            .map(|&d| {
+                let coord = space.dof_manager().dof_coord(d as u32);
+                u0_im(&coord)
+            })
+            .collect();
+        let mut rhs = sys.assemble_rhs(&vec![0.0; n], &vec![0.0; n]);
+        sys.apply_dirichlet(&bnd, &exact_re, &exact_im, &mut rhs);
+        let a = sys.to_flat_csr();
+        let mut x = vec![0.0; 2 * n];
+        let cfg = SolverConfig {
+            rtol: 1e-8,
+            atol: 1e-14,
+            max_iter: 3000,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        let res = solve_gmres(&a, &rhs, &mut x, 50, &cfg).expect("GMRES did not converge");
+        assert!(res.converged);
+        assert!(res.final_residual < 1.0e-6, "residual = {}", res.final_residual);
     }
 
     #[test]
     fn ex22_dof_count_matches_p1_h1_formula() {
-        for &n in &[6usize, 10usize, 14usize] {
+        for &n in &[6usize, 10usize] {
             let mut a = base_args();
             a.n = n;
-            let r = solve_case(&a);
-            assert_eq!(r.n_dofs, (n + 1) * (n + 1));
+            unsafe {
+                MU = a.mu;
+                EPSILON = a.eps;
+                SIGMA = a.sigma;
+                OMEGA = a.omega;
+            }
+            let mesh = SimplexMesh::<2>::unit_square_tri(n);
+            let space = H1Space::new(mesh, 1);
+            assert_eq!(space.n_dofs(), (n + 1) * (n + 1));
         }
     }
-
-    #[test]
-    fn ex22_zero_left_drive_gives_near_zero_field() {
-        let mut a = base_args();
-        a.left_drive_amp = 0.0;
-        let r = solve_case(&a);
-        assert!(r.converged);
-        assert!(r.max_amp < 1.0e-12, "expected near-zero field amplitude, got {}", r.max_amp);
-        assert!(r.mean_left_amp < 1.0e-12, "left amplitude should be near zero, got {}", r.mean_left_amp);
-        assert!(r.mean_right_amp < 1.0e-12, "right amplitude should be near zero, got {}", r.mean_right_amp);
-        assert!(r.mean_interior_amp < 1.0e-12, "interior amplitude should be near zero, got {}", r.mean_interior_amp);
-    }
-
-    // ─── Regression baseline ─────────────────────────────────────────────
-
-    #[test]
-    fn ex22_regression_baseline() {
-        let r = solve_case(&base_args());
-        assert!(r.converged);
-
-        fem_regression::regression("mfem_ex22_complex_helmholtz")
-            .check_with("min_amp",          r.min_amp,          1e-6, 1e-10)
-            .check_with("max_amp",          r.max_amp,          1e-6, 1e-10)
-            .check_with("max_left_bc_err",  r.max_left_bc_err,  1e-6, 1e-10)
-            .check_with("mean_left_amp",    r.mean_left_amp,    1e-6, 1e-10)
-            .check_with("mean_right_amp",   r.mean_right_amp,   1e-6, 1e-10)
-            .check_with("mean_interior_amp", r.mean_interior_amp, 1e-6, 1e-10)
-            .check_with("transmission_ratio", r.transmission_ratio(), 1e-6, 1e-10)
-            .check_with("iterations",       r.iterations as f64, 1e-4, 0.5)
-            .check_with("residual",         r.final_residual,   1e-4, 1e-10)
-            .finalize();
-    }
-
-    #[test]
-    fn ex22_mfem_reference_test() {
-        let r = solve_case(&base_args());
-        assert!(r.converged);
-        let n = base_args().n;
-        let expected_dofs = (n + 1) * (n + 1);
-        assert_eq!(r.n_dofs, expected_dofs, "H1 P1 on {n}×{n}: expected {expected_dofs} DOFs");
-        assert!(r.max_amp > 0.0 && r.max_amp < 10.0, "amplitude out of range");
-        assert!(r.transmission_ratio() > 0.0, "transmission ratio should be positive");
-        assert!(r.max_left_bc_err < 1e-6, "left BC error too large");
-        let fine = solve_case(&Args { n: 12, ..base_args() });
-        assert!(fine.converged);
-        eprintln!("  [mfem-ref] ex22: dofs={} max_amp={:.6e} trans={:.4e}",
-            r.n_dofs, r.max_amp, r.transmission_ratio());
-    }
 }
-

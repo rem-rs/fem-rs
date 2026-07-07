@@ -3,8 +3,8 @@
 //! Solves the constrained minimization problem
 //!
 //! ```text
-//!   minimize  1/2 �?|∇u|² dx - �?f u dx
-//!   subject to u >= ψ in Ω,   u = 0 on ∂�?
+//!   minimize  1/2 ∫|∇u|² dx - ∫f u dx
+//!   subject to u >= ψ in Ω,   u = 0 on ∂Ω
 //! ```
 //!
 //! on the unit square using a primal-dual active-set (PDAS) iteration on the
@@ -14,9 +14,11 @@
 //! ```
 //! cargo run --example mfem_ex36_obstacle
 //! cargo run --example mfem_ex36_obstacle -- --n 24 --load -7.5
+//! cargo run --example mfem_ex36_obstacle -- -m mesh.msh
 //! ```
 
 use fem_assembly::{Assembler, GridFunction, standard::DiffusionIntegrator};
+use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{SimplexMesh, topology::MeshTopology};
 use fem_solver::solve_sparse_cholesky;
@@ -34,7 +36,14 @@ enum SolveMethod {
 
 fn main() {
     let args = parse_args();
-    let result = solve_obstacle_problem(args.n, args.load, args.method);
+    let mesh = match args.mesh_file {
+        Some(ref p) => {
+            let msh = read_msh_file(p).expect("failed to read mesh file");
+            msh.into_2d().expect("expected 2D mesh")
+        }
+        None => SimplexMesh::<2>::unit_square_tri(args.n),
+    };
+    let result = solve_obstacle_problem(mesh, args.load, args.method);
 
     let method_label = match args.method {
         SolveMethod::Pdas => "PDAS",
@@ -58,6 +67,7 @@ struct Args {
     n: usize,
     load: f64,
     method: SolveMethod,
+    mesh_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,10 +83,13 @@ struct ObstacleResult {
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { n: 20, load: -5.0, method: SolveMethod::Pdas };
+    let mut args = Args { n: 20, load: -5.0, method: SolveMethod::Pdas, mesh_file: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "-m" | "--mesh" => {
+                args.mesh_file = Some(it.next().unwrap_or("".into()));
+            }
             "--n" => {
                 args.n = it.next().unwrap_or("20".into()).parse().unwrap_or(20);
             }
@@ -95,8 +108,7 @@ fn parse_args() -> Args {
     args
 }
 
-fn solve_obstacle_problem(n: usize, load: f64, method: SolveMethod) -> ObstacleResult {
-    let mesh = SimplexMesh::<2>::unit_square_tri(n);
+fn solve_obstacle_problem(mesh: SimplexMesh<2>, load: f64, method: SolveMethod) -> ObstacleResult {
     let space = H1Space::new(mesh, 1);
     let ndofs = space.n_dofs();
 
@@ -467,9 +479,11 @@ fn obstacle_kkt_metrics(
 mod tests {
     use super::*;
 
+    fn m(n: usize) -> SimplexMesh<2> { SimplexMesh::<2>::unit_square_tri(n) }
+
     #[test]
     fn ex36_obstacle_solution_is_feasible_and_has_contact() {
-        let result = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
+        let result = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
         assert!(result.final_update < 1e-8, "final update too large: {}", result.final_update);
         assert!(result.min_gap >= -1e-8, "solution violated obstacle: {}", result.min_gap);
         assert!(result.min_multiplier >= -1e-6, "negative multiplier: {}", result.min_multiplier);
@@ -479,16 +493,16 @@ mod tests {
 
     #[test]
     fn ex36_obstacle_improves_on_unconstrained_solution() {
-        let result = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
+        let result = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
         assert!(result.unconstrained_min_gap < -1e-3, "unconstrained solution should violate obstacle: {}", result.unconstrained_min_gap);
         assert!(result.min_gap >= -1e-8, "projected solution should be feasible: {}", result.min_gap);
     }
 
     #[test]
     fn ex36_stronger_downward_loads_expand_contact_set() {
-        let light = solve_obstacle_problem(14, -2.0, SolveMethod::Pdas);
-        let medium = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
-        let strong = solve_obstacle_problem(14, -8.0, SolveMethod::Pdas);
+        let light = solve_obstacle_problem(m(14), -2.0, SolveMethod::Pdas);
+        let medium = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
+        let strong = solve_obstacle_problem(m(14), -8.0, SolveMethod::Pdas);
 
         for (label, result) in [("light", &light), ("medium", &medium), ("strong", &strong)] {
             assert!(result.min_gap >= -1e-8, "{label} load violated obstacle: {}", result.min_gap);
@@ -515,8 +529,8 @@ mod tests {
 
     #[test]
     fn ex36_upward_load_has_smaller_contact_than_downward_load() {
-        let upward = solve_obstacle_problem(14, 1.0, SolveMethod::Pdas);
-        let downward = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
+        let upward = solve_obstacle_problem(m(14), 1.0, SolveMethod::Pdas);
+        let downward = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
 
         assert!(upward.min_gap >= -1e-8, "upward load violated obstacle: {}", upward.min_gap);
         assert!(upward.complementarity < 1e-6, "upward load complementarity too large: {}", upward.complementarity);
@@ -538,7 +552,7 @@ mod tests {
 
     #[test]
     fn ex36_ssn_solution_is_feasible_and_has_contact() {
-        let result = solve_obstacle_problem(14, -5.0, SolveMethod::SemismoothNewton);
+        let result = solve_obstacle_problem(m(14), -5.0, SolveMethod::SemismoothNewton);
         assert!(result.final_update < 1e-8, "SSN: final update too large: {}", result.final_update);
         assert!(result.min_gap >= -1e-8, "SSN: solution violated obstacle: {}", result.min_gap);
         assert!(result.min_multiplier >= -1e-6, "SSN: negative multiplier: {}", result.min_multiplier);
@@ -548,8 +562,8 @@ mod tests {
 
     #[test]
     fn ex36_ssn_agrees_with_pdas() {
-        let pdas = solve_obstacle_problem(14, -5.0, SolveMethod::Pdas);
-        let ssn  = solve_obstacle_problem(14, -5.0, SolveMethod::SemismoothNewton);
+        let pdas = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
+        let ssn  = solve_obstacle_problem(m(14), -5.0, SolveMethod::SemismoothNewton);
 
         let l2_diff = (pdas.obstacle_l2_distance - ssn.obstacle_l2_distance).abs();
         assert!(
@@ -573,7 +587,7 @@ mod tests {
     fn ex36_ssn_converges_in_few_iterations() {
         // SSN has quadratic local convergence; should need ≤ 20 outer iterations
         // on a moderate mesh with a well-posed load.
-        let result = solve_obstacle_problem(20, -5.0, SolveMethod::SemismoothNewton);
+        let result = solve_obstacle_problem(m(20), -5.0, SolveMethod::SemismoothNewton);
         assert!(result.iterations <= 20,
             "SSN took too many iterations: {}", result.iterations);
         assert!(result.min_gap >= -1e-8, "SSN: obstacle violated: {}", result.min_gap);
@@ -584,7 +598,7 @@ mod tests {
     #[test]
     fn ex36_finer_mesh_preserves_obstacle_feasibility() {
         for method in [SolveMethod::Pdas, SolveMethod::SemismoothNewton] {
-            let result = solve_obstacle_problem(20, -5.0, method);
+            let result = solve_obstacle_problem(m(20), -5.0, method);
             assert!(result.min_gap >= -1e-8,
                 "finer mesh violated obstacle: min_gap={}", result.min_gap);
             assert!(result.complementarity < 1e-6,

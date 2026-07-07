@@ -717,6 +717,8 @@ fn run_netgen_workflow(args: &Args) {
 
 fn main() {
     let args = parse_args();
+    // Support -m/--mesh as an alias for --input for Gmsh format
+    let args = args.with_mesh_fallback();
     match args.selected_import_format() {
         ImportFormat::Gmsh => run_named_attribute_workflow(&args),
         ImportFormat::Abaqus => run_abaqus_workflow(&args),
@@ -738,6 +740,7 @@ struct Args {
     solve_poisson: bool,
     import_format: Option<ImportFormat>,
     input: Option<String>,
+    mesh: Option<String>,
     abaqus_demo: bool,
     abaqus: Option<String>,
     fixed_set: String,
@@ -750,6 +753,13 @@ struct Args {
 }
 
 impl Args {
+    fn with_mesh_fallback(mut self) -> Self {
+        if self.input.is_none() {
+            self.input = self.mesh.clone();
+        }
+        self
+    }
+
     fn selected_import_format(&self) -> ImportFormat {
         self.import_format
             .or_else(|| {
@@ -803,6 +813,7 @@ where
         solve_poisson: false,
         import_format: None,
         input: None,
+        mesh: None,
         abaqus_demo: false,
         abaqus: None,
         fixed_set: "FIXED".to_string(),
@@ -816,6 +827,9 @@ where
     let mut it = iter.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "-m" | "--mesh" => {
+                args.mesh = Some(it.next().expect("expected input path after -m/--mesh"));
+            }
             "--merge-boundary" => { args.merge_boundary = true; }
             "--intersection-region" => { args.intersection_region = true; }
             "--difference-region" => { args.difference_region = true; }

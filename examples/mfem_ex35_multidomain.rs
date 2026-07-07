@@ -5,17 +5,28 @@
 //!
 //! Usage:
 //!   cargo run --example mfem_ex35_multidomain
+//!   cargo run --example mfem_ex35_multidomain -- -m mesh.msh
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_io::read_msh_file;
+use fem_linalg::CooMatrix;
 use fem_mesh::SimplexMesh;
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
+fn load_mesh(path: &str) -> SimplexMesh<2> {
+    let msh = read_msh_file(path).expect("failed to read mesh file");
+    msh.into_2d().expect("expected 2D mesh")
+}
+
 fn main() {
+    let mesh_file = parse_mesh_arg();
     // Two independent meshes (sub-domains)
-    let mesh_a = SimplexMesh::<2>::unit_square_tri(6);
-    let mesh_b = SimplexMesh::<2>::unit_square_tri(6);
+    let mesh_a = match mesh_file {
+        Some(ref p) => load_mesh(p),
+        None => SimplexMesh::<2>::unit_square_tri(6),
+    };
+    let mesh_b = mesh_a.clone();
     let space_a = H1Space::new(mesh_a, 1);
     let space_b = H1Space::new(mesh_b, 1);
     let na = space_a.n_dofs();
@@ -48,6 +59,16 @@ fn main() {
     println!("=== ex35: Multidomain Poisson ===");
     println!("  DOFs: {n} (A={na}, B={nb}), iters={}, ‖u‖={:.6e}", res.iterations, u_norm);
     println!("  PASS");
+}
+
+fn parse_mesh_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "-m" || a == "--mesh" {
+            return args.next();
+        }
+    }
+    None
 }
 
 #[cfg(test)]

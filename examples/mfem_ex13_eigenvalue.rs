@@ -1,11 +1,11 @@
-//! # Example: Maxwell Cavity Eigenvalue Problem (LOBPCG)
+//! # Example 13 — Maxwell Cavity Eigenvalue Problem (analogous to MFEM ex13)
 //!
 //! Computes the lowest resonant frequencies of a perfectly conducting
 //! electromagnetic cavity by solving the H(curl) generalized eigenvalue problem:
 //!
 //! ```text
 //!   curl curl E = ω² ε E    in Ω
-//!         n×E = 0            on ∂�? (PEC boundary)
+//!         n×E = 0            on ∂Ω (PEC boundary)
 //! ```
 //!
 //! which becomes the discrete generalized eigenvalue problem on the **free DOFs**
@@ -15,10 +15,6 @@
 //!   K_free x = λ M_free x     (λ = ω²)
 //! ```
 //!
-//! where:
-//! - `K = �?μ⁻�?(curl E) · (curl v) dx`  �?curl-curl stiffness
-//! - `M = �?ε E · v dx`                   �?vector mass (permittivity weighted)
-//!
 //! ## Analytical solution (unit square cavity, μ=ε=1)
 //!
 //! For the 2D vector curl-curl problem `curl curl E = ω² E` with `n×E = 0` on `∂Ω`,
@@ -26,27 +22,24 @@
 //!
 //! The lowest non-zero eigenvalues are:
 //! ```text
-//!   ω²�?= π²       �?9.870    E = (sin(πy), sin(πx))
-//!   ω²�?= 4π²      �?39.478   E = (sin(2πy), sin(2πx))
-//!   ω²�?= 5π²      �?49.348   E = (sin(πy)cos(2πx), sin(2πx)cos(πy))  etc.
-//!   ω²�?= 8π²      �?78.957   E = (sin(2πy), sin(2πx)) with mixed modes
+//!   ω²₁ = π²       ≈ 9.870    E = (sin(πy), sin(πx))
+//!   ω²₂ = 4π²      ≈ 39.478   E = (sin(2πy), sin(2πx))
+//!   ω²₃ = 5π²      ≈ 49.348   E = (sin(πy)cos(2πx), sin(2πx)cos(πy))  etc.
+//!   ω²₄ = 8π²      ≈ 78.957   E = (sin(2πy), sin(2πx)) with mixed modes
 //! ```
-//!
-//! Note: this differs from the scalar Helmholtz eigenvalues `π²(m²+n²)` with `m,n�?`.
-//! The vector curl-curl problem admits modes where one component varies in x and the
-//! other in y independently, giving smaller eigenvalues like `π²(1²+0²) = π²`.
 //!
 //! ## Usage
-//! ```
+//! ```text
 //! cargo run --example mfem_ex13_eigenvalue
+//! cargo run --example mfem_ex13_eigenvalue -- -m ../data/star.mesh -n 4
 //! cargo run --example mfem_ex13_eigenvalue -- --n 16 --k 4
-//! cargo run --example mfem_ex13_eigenvalue -- --n 8 --k 3
 //! ```
 
 use std::f64::consts::PI;
 
 use fem_amg::AmgConfig;
 use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::SimplexMesh;
 use fem_solver::{LobpcgConfig, SolverConfig};
 use fem_space::{
@@ -57,10 +50,9 @@ use fem_space::{
 
 fn main() {
     let args = parse_args();
-    let result = solve_case(args.n, args.k);
+    let result = solve_case(args);
 
-    println!("=== fem-rs: Maxwell Cavity Eigenvalue (Constrained LOBPCG) ===");
-    println!("  Mesh: {}×{}, seeking {} smallest physical eigenvalues", args.n, args.n, args.k);
+    println!("=== fem-rs Example 13: Maxwell Cavity Eigenvalue ===");
     println!("  Edge DOFs: {}", result.n_dof);
     println!("  Free DOFs (interior edges): {}", result.n_free);
     println!(
@@ -70,7 +62,7 @@ fn main() {
         result.nullity
     );
 
-    print_result(args.n, &result);
+    print_result(&result);
 }
 
 struct EigenCaseResult {
@@ -84,9 +76,14 @@ struct EigenCaseResult {
     iterations: usize,
 }
 
-fn solve_case(n: usize, k: usize) -> EigenCaseResult {
+fn solve_case(args: Args) -> EigenCaseResult {
     // ─── 1. Mesh + H(curl) space ─────────────────────────────────────────────
-    let mesh  = SimplexMesh::<2>::unit_square_tri(n);
+    let mesh: SimplexMesh<2> = if let Some(ref path) = args.mesh {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
+    } else {
+        SimplexMesh::<2>::unit_square_tri(args.n)
+    };
     let space = HCurlSpace::new(mesh, 1);
     let n_dof = space.n_dofs();
 
@@ -95,7 +92,7 @@ fn solve_case(n: usize, k: usize) -> EigenCaseResult {
     let ess_bdr = [1, 1, 1, 1];
 
     // ─── 2. Build reduced generalized eigen-system from marker semantics ────
-    let h1 = H1Space::new(SimplexMesh::<2>::unit_square_tri(n), 1);
+    let h1 = H1Space::new(SimplexMesh::<2>::unit_square_tri(args.n), 1);
     let eig_system = assemble_hcurl_eigen_system_from_marker(
         &h1,
         &space,
@@ -118,7 +115,7 @@ fn solve_case(n: usize, k: usize) -> EigenCaseResult {
     };
     let result = solve_hcurl_eigen_preconditioned_amg(
         &eig_system,
-        k,
+        args.k,
         &cfg,
         AmgConfig::default(),
         &inner_cfg,
@@ -126,7 +123,7 @@ fn solve_case(n: usize, k: usize) -> EigenCaseResult {
     let physical_eigs = result.eigenvalues;
 
     let mut max_rel_err = 0.0_f64;
-    let exact_eigs = analytical_eigenvalues(k);
+    let exact_eigs = analytical_eigenvalues(args.k);
     for (i, &lam) in physical_eigs.iter().enumerate() {
         let exact = exact_eigs.get(i).copied().unwrap_or(f64::NAN);
         let rel_err = if exact.is_finite() { (lam - exact).abs() / exact } else { f64::NAN };
@@ -145,7 +142,7 @@ fn solve_case(n: usize, k: usize) -> EigenCaseResult {
     }
 }
 
-fn print_result(n: usize, result: &EigenCaseResult) {
+fn print_result(result: &EigenCaseResult) {
     println!("\n  Cavity resonant frequencies (ω² = λ):");
     println!("  {:>4}  {:>14}  {:>14}  {:>10}", "Mode", "Computed ω²", "Exact ω²", "Rel. err");
     println!("  {}", "-".repeat(50));
@@ -157,20 +154,14 @@ fn print_result(n: usize, result: &EigenCaseResult) {
     }
 
     if result.eigenvalues.is_empty() {
-        println!("  (no physical eigenvalues found �?try larger --n or smaller --k)");
+        println!("  (no physical eigenvalues found — try larger --n or smaller --k)");
         return;
     }
 
-    let h = 1.0 / n as f64;
-    println!("\n  Max relative error: {:.3e}  (h={h:.4e})", result.max_rel_err);
+    let h = 1.0 / 8.0; // approximate mesh size
+    println!("\n  Max relative error: {:.3e}  (h≈{:.4e})", result.max_rel_err, h);
     println!("  Converged: {}, iterations: {}", result.converged, result.iterations);
     println!("  (Expected O(h²) convergence in ω² for ND1 elements)");
-
-    if result.max_rel_err < 0.15 {
-        println!("  �?Eigenvalues within 15% of exact");
-    } else {
-        println!("  �?Use larger --n for better accuracy");
-    }
 }
 
 fn analytical_eigenvalues(k: usize) -> Vec<f64> {
@@ -190,15 +181,24 @@ fn analytical_eigenvalues(k: usize) -> Vec<f64> {
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
-struct Args { n: usize, k: usize }
+struct Args {
+    mesh: Option<String>,
+    n: usize,
+    k: usize,
+}
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 16, k: 4 };
+    let mut a = Args { mesh: None, n: 16, k: 4 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--n" => { a.n = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
-            "--k" => { a.k = it.next().unwrap_or("4".into()).parse().unwrap_or(4); }
+            "-m" | "--mesh" => a.mesh = it.next(),
+            "-n" | "--num-eigs" => {
+                a.k = it.next().and_then(|v| v.parse().ok()).unwrap_or(4)
+            }
+            "--n" => {
+                a.n = it.next().and_then(|v| v.parse().ok()).unwrap_or(16)
+            }
             _ => {}
         }
     }
@@ -213,9 +213,14 @@ mod tests {
         (value - exact).abs() / exact.abs().max(1e-30)
     }
 
+    fn solve_case_test(n: usize, k: usize) -> EigenCaseResult {
+        let args = Args { mesh: None, n, k };
+        solve_case(args)
+    }
+
     #[test]
     fn maxwell_eigenvalue_coarse_mesh_matches_first_modes() {
-        let result = solve_case(8, 3);
+        let result = solve_case_test(8, 3);
         assert!(result.converged, "LOBPCG did not converge");
         assert_eq!(result.eigenvalues.len(), 3);
         assert!(result.max_rel_err < 1.0e-2, "max relative error = {}", result.max_rel_err);
@@ -227,8 +232,8 @@ mod tests {
 
     #[test]
     fn maxwell_eigenvalue_refinement_improves_first_modes() {
-        let coarse = solve_case(8, 3);
-        let fine = solve_case(12, 3);
+        let coarse = solve_case_test(8, 3);
+        let fine = solve_case_test(12, 3);
 
         assert!(coarse.converged, "coarse LOBPCG did not converge");
         assert!(fine.converged, "refined LOBPCG did not converge");
@@ -255,7 +260,7 @@ mod tests {
 
     #[test]
     fn maxwell_eigenvalue_first_doublet_remains_nearly_degenerate() {
-        let result = solve_case(10, 4);
+        let result = solve_case_test(10, 4);
 
         assert!(result.converged, "LOBPCG did not converge");
         assert!(result.eigenvalues.len() >= 2, "expected at least two physical modes");
@@ -286,8 +291,8 @@ mod tests {
 
     #[test]
     fn maxwell_eigenvalue_refinement_improves_fourth_mode() {
-        let coarse = solve_case(8, 4);
-        let fine = solve_case(12, 4);
+        let coarse = solve_case_test(8, 4);
+        let fine = solve_case_test(12, 4);
 
         assert!(coarse.converged && fine.converged, "both eigen solves must converge");
         assert_eq!(coarse.eigenvalues.len(), 4);
@@ -312,8 +317,8 @@ mod tests {
 
     #[test]
     fn maxwell_eigenvalue_refinement_improves_first_doublet_mean_and_split() {
-        let coarse = solve_case(8, 4);
-        let fine = solve_case(12, 4);
+        let coarse = solve_case_test(8, 4);
+        let fine = solve_case_test(12, 4);
 
         assert!(coarse.converged && fine.converged, "both eigen solves must converge");
         assert!(coarse.eigenvalues.len() >= 2 && fine.eigenvalues.len() >= 2);
@@ -342,8 +347,8 @@ mod tests {
 
     #[test]
     fn maxwell_eigenvalue_low_modes_are_stable_when_requesting_more_pairs() {
-        let base = solve_case(10, 3);
-        let extended = solve_case(10, 5);
+        let base = solve_case_test(10, 3);
+        let extended = solve_case_test(10, 5);
 
         assert!(base.converged && extended.converged, "both eigen solves must converge");
         assert_eq!(base.eigenvalues.len(), 3);
@@ -361,10 +366,9 @@ mod tests {
         }
     }
 
-    /// All computed Maxwell eigenvalues are positive (ω² > 0).
     #[test]
     fn maxwell_eigenvalue_all_modes_are_positive_frequencies() {
-        let result = solve_case(8, 4);
+        let result = solve_case_test(8, 4);
         assert!(result.converged, "LOBPCG did not converge");
         for (i, &lam) in result.eigenvalues.iter().enumerate() {
             assert!(lam > 0.0,
@@ -372,27 +376,18 @@ mod tests {
         }
     }
 
-    /// The number of returned eigenvalues equals the requested count k.
     #[test]
     fn maxwell_eigenvalue_output_length_matches_requested_k() {
-        // Verify output always has exactly k eigenvalues regardless of convergence
-        // (LOBPCG returns best-approximations even when tolerance is not met).
         for k in [2, 3, 4] {
-            let result = solve_case(10, k);
+            let result = solve_case_test(10, k);
             assert_eq!(result.eigenvalues.len(), k,
                 "expected {k} eigenvalues, got {}", result.eigenvalues.len());
         }
     }
 
-    // ─── Regression baseline ─────────────────────────────────────────────
-
-    /// Regression baseline for Maxwell cavity eigenvalues.
-    ///
-    /// Captures precise numerical values (eigenvalues, max relative error,
-    /// nullity, iteration count) at fixed mesh size.
     #[test]
     fn ex13_eigenvalue_regression_baseline() {
-        let result = solve_case(8, 3);
+        let result = solve_case_test(8, 3);
         assert!(result.converged);
 
         fem_regression::regression("mfem_ex13_eigenvalue")
@@ -405,29 +400,18 @@ mod tests {
             .finalize();
     }
 
-    /// Cross-validate Maxwell cavity eigenvalues against analytical values.
-    ///
-    /// Analytical eigenvalues for curl-curl on unit square PEC cavity:
-    ///   λ₁ = π²  ≈ 9.870  (fundamental mode)
-    ///   λ₂ = π²  ≈ 9.870  (degenerate: x and y polarizations)
-    ///   λ₃ = 4π² ≈ 39.478 (first harmonic)
-    ///
-    /// FEM discretization on 8×8 ND1 mesh converges to these values
-    /// from above (standard Galerkin property).
     #[test]
     fn ex13_eigenvalue_reference_test() {
         use std::f64::consts::PI;
-        let result = solve_case(8, 5);
+        let result = solve_case_test(8, 5);
         assert!(result.converged, "LOBPCG did not converge");
         assert!(result.eigenvalues.len() >= 3);
-        // First eigenvalues should approach π²
         assert!((result.eigenvalues[0] - PI * PI).abs() < 1.0,
             "λ₀={:.4} too far from π²={:.4}", result.eigenvalues[0], PI*PI);
         assert!(result.nullity > 0, "expected non-trivial nullspace");
         assert!(result.iterations > 0);
         assert!(result.max_rel_err < 0.02, "max_rel_err={:.4e}", result.max_rel_err);
-        // Refinement should improve accuracy
-        let fine = solve_case(12, 3);
+        let fine = solve_case_test(12, 3);
         assert!(fine.converged);
         assert!(fine.max_rel_err < result.max_rel_err,
             "refinement should reduce relative error: {:.4e}→{:.4e}",
@@ -437,4 +421,3 @@ mod tests {
             result.nullity, result.max_rel_err);
     }
 }
-

@@ -13,6 +13,7 @@
 //! ```
 
 use fem_core::ElemId;
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::{SimplexMesh, NCState3D, prolongate_p1};
 use fem_mesh::topology::MeshTopology;
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
@@ -21,7 +22,56 @@ use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace};
 use fem_space::constraints::{apply_dirichlet, apply_hanging_constraints, recover_hanging_values, boundary_dofs};
 use fem_element::{ReferenceElement, lagrange::TetP1};
-use std::f64::consts::PI;
+
+/// MFEM ex15 problem constants (front/ball).
+const ALPHA: f64 = 0.02;
+
+/// 3-D spherical front, problem = 0 (t = 0).
+fn front_3d(x: &[f64]) -> f64 {
+    let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
+    (-0.5 * r2 / (ALPHA * ALPHA)).exp()
+}
+
+/// Laplacian of the 3-D spherical front (t = 0, dim = 3).
+fn front_laplace_3d(x: &[f64]) -> f64 {
+    let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
+    let r = r2.sqrt();
+    if r < 1e-15 {
+        return 3.0 / (ALPHA * ALPHA); // limit r→0
+    }
+    let a2 = ALPHA * ALPHA;
+    let a4 = a2 * a2;
+    let exp_term = (-0.5 * r2 / a2).exp();
+    // MFEM front_laplace(t=0, dim=3): -exp/α⁴ · (r² - 3α²)
+    -exp_term / a4 * (r2 - 3.0 * a2)
+}
+
+#[allow(dead_code)]
+/// 3-D smooth ball indicator, problem = 1.
+fn ball_3d(x: &[f64]) -> f64 {
+    let r = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
+    -((2.0 * r - 0.5) / ALPHA).atan()
+}
+
+#[allow(dead_code)]
+/// Laplacian of the 3-D smooth ball indicator.
+fn ball_laplace_3d(x: &[f64]) -> f64 {
+    let x2 = x[0] * x[0];
+    let y2 = x[1] * x[1];
+    let z2 = x[2] * x[2];
+    let r2 = x2 + y2 + z2;
+    let r = r2.sqrt();
+    if r < 1e-15 {
+        return 0.0;
+    }
+    let a2 = ALPHA * ALPHA;
+    let t = 0.25;
+    let t2 = 4.0 * t * t;
+    // den = (-α² - 4(r² - 2rt) - t2)²
+    let den = (-a2 - 4.0 * (r2 - 2.0 * r * t) - t2).powi(2);
+    // dim=3: 4α·(α² + t2 - 4rt)/r/den
+    4.0 * ALPHA * (a2 + t2 - 4.0 * r * t) / r / den
+}
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
@@ -49,8 +99,18 @@ struct SolveLevelResult {
 fn main() {
     let args = parse_args();
 
+    let mut mesh: SimplexMesh<3> = if let Some(ref path) = args.mesh_file {
+        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+        mfem.mesh3d.expect("MFEM mesh must be 3D")
+    } else {
+        SimplexMesh::<3>::unit_cube_tet(args.n0)
+    };
     println!("=== fem-rs Example 15 (3-D): Tet4 Non-Conforming AMR ===");
-    println!("  Initial mesh: {}x{}x{} Tet4", args.n0, args.n0, args.n0);
+    if let Some(ref _path) = args.mesh_file {
+        println!("  Mesh from file, {} elements", mesh.n_elems());
+    } else {
+        println!("  Initial mesh: {}x{}x{} Tet4", args.n0, args.n0, args.n0);
+    }
     println!("  Levels: {}, mark fraction: {:.2}", args.levels, args.fraction);
     println!("  Mode: {}", if args.solve { "Poisson solve + NC AMR" } else { "NC AMR plumbing" });
     if args.vtk {
@@ -62,7 +122,6 @@ fn main() {
         std::fs::create_dir_all(&args.vtk_dir).expect("failed to create VTK output directory");
     }
 
-    let mut mesh = SimplexMesh::<3>::unit_cube_tet(args.n0);
     let mut nc3 = NCState3D::new();
 
     // Linear field used to verify P1 prolongation exactness.
@@ -80,7 +139,7 @@ fn main() {
     for level in 0..=args.levels {
         let hang = nc3.constraints().len();
         if args.solve {
-            let (u_solved, l2, res) = solve_level_poisson(&mesh, nc3.constraints());
+            let (u_solved, l2, res) = solve_level_poisson(&mesh, nc3.constraints(), front_3d, front_laplace_3d);
             u = u_solved;
             println!("{:>5}  {:>8}  {:>8}  {:>8}  {:>12.4e}  {:>12.4e}",
                      level, mesh.n_elems(), mesh.n_nodes(), hang, l2, res);
@@ -179,14 +238,20 @@ fn run_plumbing_case(n0: usize, levels: usize, fraction: f64) -> Vec<PlumbingLev
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn run_solve_case(n0: usize, levels: usize, fraction: f64) -> Vec<SolveLevelResult> {
+fn run_solve_case(
+    n0: usize,
+    levels: usize,
+    fraction: f64,
+    u_exact: impl Fn(&[f64]) -> f64 + Send + Sync,
+    rhs_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
+) -> Vec<SolveLevelResult> {
     let mut mesh = SimplexMesh::<3>::unit_cube_tet(n0);
     let mut nc3 = NCState3D::new();
     let mut results = Vec::new();
 
     for level in 0..=levels {
         let n_hanging = nc3.constraints().len();
-        let (_u, l2_error, residual) = solve_level_poisson(&mesh, nc3.constraints());
+        let (_u, l2_error, residual) = solve_level_poisson(&mesh, nc3.constraints(), &u_exact, &rhs_fn);
         let marked = if level < levels {
             mark_closest_to_center(&mesh, fraction)
         } else {
@@ -310,6 +375,7 @@ struct Args {
     solve: bool,
     vtk: bool,
     vtk_dir: String,
+    mesh_file: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -320,6 +386,7 @@ fn parse_args() -> Args {
         solve: false,
         vtk: false,
         vtk_dir: "output/mfem_ex15_tet_nc_amr".to_string(),
+        mesh_file: None,
     };
 
     let mut it = std::env::args().skip(1);
@@ -343,6 +410,7 @@ fn parse_args() -> Args {
             "--vtk-dir" => {
                 a.vtk_dir = it.next().unwrap_or("output/mfem_ex15_tet_nc_amr".to_string());
             }
+            "-m" | "--mesh" => { a.mesh_file = it.next(); }
             _ => {}
         }
     }
@@ -352,15 +420,10 @@ fn parse_args() -> Args {
 fn solve_level_poisson(
     mesh: &SimplexMesh<3>,
     hanging_constraints: &[fem_mesh::HangingNodeConstraint],
+    u_exact: impl Fn(&[f64]) -> f64 + Send + Sync,
+    rhs_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
 ) -> (Vec<f64>, f64, f64) {
     let space = H1Space::new(mesh.clone(), 1);
-
-    let u_exact = |x: &[f64]| -> f64 {
-        (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin()
-    };
-    let rhs_fn = |x: &[f64]| -> f64 {
-        3.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin()
-    };
 
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], 3);
@@ -451,6 +514,15 @@ fn l2_error_tet_p1<S: FESpace>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
+
+    fn mms_exact(x: &[f64]) -> f64 {
+        (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin()
+    }
+
+    fn mms_rhs(x: &[f64]) -> f64 {
+        3.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin() * (PI * x[2]).sin()
+    }
 
     #[test]
     fn ex15_tet_nc_plumbing_preserves_linear_field_exactly() {
@@ -518,7 +590,7 @@ mod tests {
 
     #[test]
     fn ex15_tet_nc_solve_mode_reduces_error_and_keeps_residual_small() {
-        let levels = run_solve_case(1, 2, 0.30);
+        let levels = run_solve_case(1, 2, 0.30, mms_exact, mms_rhs);
         assert_eq!(levels.len(), 3);
         assert_eq!(levels[0].n_hanging, 0);
         assert!(levels.iter().skip(1).any(|level| level.n_hanging > 0), "solve-mode NC refinement should create hanging constraints");
@@ -539,7 +611,7 @@ mod tests {
     #[test]
     fn ex15_tet_nc_zero_levels_returns_single_snapshot() {
         let plumbing = run_plumbing_case(1, 0, 0.30);
-        let solve = run_solve_case(1, 0, 0.30);
+        let solve = run_solve_case(1, 0, 0.30, mms_exact, mms_rhs);
         assert_eq!(plumbing.len(), 1);
         assert_eq!(solve.len(), 1);
         assert_eq!(plumbing[0].level, 0);
@@ -561,7 +633,7 @@ mod tests {
 
     #[test]
     fn ex15_tet_nc_solve_mode_mesh_size_grows_monotonically() {
-        let levels = run_solve_case(1, 3, 0.30);
+        let levels = run_solve_case(1, 3, 0.30, mms_exact, mms_rhs);
         for pair in levels.windows(2) {
             assert!(pair[1].n_elems > pair[0].n_elems,
                 "element count should increase: prev={} next={}", pair[0].n_elems, pair[1].n_elems);

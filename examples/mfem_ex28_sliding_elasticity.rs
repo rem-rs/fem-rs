@@ -1,162 +1,214 @@
-//! # Example 28 — Elastic contact with Coulomb friction (2D Signorini)
+//! # Example 28 — Sliding Elasticity (analogous to MFEM ex28)
 //!
-//! A deformable block pressed against a rigid obstacle, demonstrating:
-//! - Normal contact with penalty / Augmented Lagrangian regularisation
-//! - Coulomb friction (stick–slip) on the contact interface
-//! - Nonlinear Newton solver for the coupled system
+//! Linear elasticity on a trapezoid with sliding (normal-constraint) BC:
 //!
-//! This example aligns with MFEM's contact miniapp and ex36 (obstacle problem).
+//! ```text
+//!   −∇·σ(u) = 0         in Ω
+//!    u = 0               on boundary 1 (bottom, fixed)
+//!    u_y = 0             on boundary 4 (left, sliding)
+//!    σ·n = (f_x, 0)      on boundary 2 (right, push force)
+//! ```
 //!
 //! ## Usage
 //! ```text
-//! cargo run --example mfem_ex28_sliding_elasticity --release
-//! cargo run --example mfem_ex28_sliding_elasticity -- --mu 0.3 --penalty 1e6
+//! cargo run --example mfem_ex28_sliding_elasticity
+//! cargo run --example mfem_ex28_sliding_elasticity -- --offset 0.3 --order 2
 //! ```
 
-use fem_assembly::contact::*;
-use fem_mesh::{SimplexMesh, topology::MeshTopology};
-use fem_space::fe_space::FESpace;
+use fem_assembly::{
+    Assembler,
+    standard::{ElasticityIntegrator, NeumannIntegrator},
+};
+use fem_mesh::{
+    MeshTopology, SimplexMesh,
+    element_type::ElementType,
+    refine_uniform,
+};
+use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_space::{
+    VectorH1Space, H1Space,
+    fe_space::FESpace,
+    constraints::{apply_dirichlet, boundary_dofs},
+};
 
 fn main() {
     let args = parse_args();
-    println!("=== fem-rs Example 28: Elastic contact with Coulomb friction ===");
+    println!("=== Example 28: Sliding Elasticity (MFEM ex28) ===");
+    println!("  Offset: {:.3}, Order: {}, Refinements: {}",
+             args.offset, args.order, args.ref_levels);
 
-    // 1. Build mesh: a block [0,1]×[0,1] that will be pressed onto an obstacle
-    let n_refine = args.n_refine;
-    let n_el = 2usize.pow(n_refine as u32);
-    let mesh = SimplexMesh::<2>::unit_square_tri(n_el);
-    println!("  Mesh: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
+    // Build trapezoid mesh
+    let mesh = build_trapezoid_mesh(args.offset);
 
-    // 2. Vector H¹ space (2 DOFs per node)
-    use fem_space::VectorH1Space;
-    let space = VectorH1Space::new(mesh, 1, 2);
-    let mesh_ref = space.mesh();
-    let dim = 2usize;
+    // Refine uniformly
+    let mut mesh = mesh;
+    for _ in 0..args.ref_levels {
+        mesh = refine_uniform(&mesh);
+    }
+
+    let scalar_mesh = mesh.clone();
+    let space = VectorH1Space::new(mesh, args.order, 2);
     let n_dofs = space.n_dofs();
-    println!("  DOFs: {}", n_dofs);
+    let n_scalar = space.n_scalar_dofs();
 
-    // 3. Assemble stiffness matrix (linear elasticity via vector Laplacian)
-    use fem_assembly::Assembler;
-    use fem_assembly::standard::DiffusionIntegrator;
-    let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
+    println!("  Mesh: {} nodes, {} elements",
+             space.mesh().n_nodes(), space.mesh().n_elems());
+    println!("  DOFs: {n_dofs}");
 
-    // 4. Body force (downward) and BCs
-    let mut rhs = vec![0.0_f64; n_dofs];
-    for i in 0..mesh_ref.n_nodes() {
-        rhs[i * dim + 1] = -args.body_force / mesh_ref.n_nodes() as f64;
-    }
+    // Lamé parameters
+    let lam = 0.5;
+    let mu_val = 0.5;
 
-    // Fix top boundary (tag=3 on unit square): set ux=uy=0
-    let mut is_fixed = vec![false; n_dofs];
-    for f in 0..mesh_ref.n_boundary_faces() as u32 {
-        if mesh_ref.face_tag(f) == 3 {
-            for &n in mesh_ref.face_nodes(f) {
-                for c in 0..dim { is_fixed[n as usize * dim + c] = true; }
-            }
-        }
-    }
-    let mut stiff_fixed = stiff;
-    for dof in 0..n_dofs {
-        if is_fixed[dof] {
-            let row_s = stiff_fixed.row_ptr[dof] as usize;
-            let row_e = stiff_fixed.row_ptr[dof + 1] as usize;
-            // Find and zero the row, keep track of diagonal
-            let mut diag_idx = None;
-            for nz in row_s..row_e {
-                if stiff_fixed.col_idx[nz] as usize == dof {
-                    diag_idx = Some(nz);
-                }
-                stiff_fixed.values[nz] = 0.0;
-            }
-            if let Some(di) = diag_idx {
-                stiff_fixed.values[di] = 1.0;
-            }
-            rhs[dof] = 0.0;
-        }
-    }
-
-    // 5. Configure contact on the bottom boundary (attribute 1)
-    //    Obstacle is a flat surface at y = -0.02 (slight interference)
-    let gap_fn: fn(&[f64]) -> f64 = |x: &[f64]| -0.02 - x[1];
-    let contact_cfg = ContactConfig {
-        penalty_normal: args.penalty,
-        contact_type: if args.al_iters > 1 {
-            ContactType::AugmentedLagrangian { max_al_iter: args.al_iters, al_tol: 1e-6 }
-        } else {
-            ContactType::Penalty
-        },
-        friction: if args.mu > 0.0 {
-            FrictionModel::Coulomb { mu: args.mu, penalty_tangential: args.penalty * 0.1 }
-        } else {
-            FrictionModel::Frictionless
-        },
-        gap_function: gap_fn,
-        contact_tags: vec![1],
+    let elast = ElasticityIntegrator {
+        lambda: lam,
+        mu: mu_val,
+        plane_stress: false,
     };
+    let mut mat = Assembler::assemble_bilinear(&space, &[&elast], args.order as u8 * 2 + 1);
 
-    println!("  Contact: penalty={:.1e}, mu={}, AL-iter={}",
-             args.penalty, args.mu, args.al_iters);
-
-    // 6. Solve the contact problem with Newton
-    let u = solve_contact_newton(
-        &stiff_fixed, &rhs, mesh_ref, &contact_cfg, 50, 1e-8,
-    );
-
-    // 7. Post-process
-    let max_uy = u.iter().skip(1).step_by(2).cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min_uy = u.iter().skip(1).step_by(2).cloned().fold(f64::INFINITY, f64::min);
-    println!("  u_y range: [{:.6e}, {:.6e}]", min_uy, max_uy);
-
-    // 8. Verify no penetration on the contact boundary
-    let mut max_penetration = 0.0_f64;
-    for f in 0..mesh_ref.n_boundary_faces() as u32 {
-        if mesh_ref.face_tag(f) == 1 {
-            for &n in mesh_ref.face_nodes(f) {
-                let ni = n as usize;
-                let uy = u[ni * 2 + 1];
-                let x = mesh_ref.node_coords(n);
-                let gap = (gap_fn)(&x);
-                let penetration = (uy - gap).max(0.0);
-                if penetration > max_penetration {
-                    max_penetration = penetration;
-                }
-            }
+    // Push force on boundary attribute 2 (right): f_x = -5.0e-2
+    let mut rhs = vec![0.0_f64; n_dofs];
+    {
+        let scalar_space = H1Space::new(scalar_mesh, args.order);
+        let n_sc = scalar_space.n_dofs();
+        let face_dofs = |f: u32| -> Vec<u32> {
+            let nodes = scalar_space.mesh().face_nodes(f);
+            nodes.iter().copied().collect()
+        };
+        let push = NeumannIntegrator::new(move |_x: &[f64], _n: &[f64]| -5.0e-2);
+        let f_rhs = Assembler::assemble_boundary_linear(
+            n_sc, scalar_space.mesh(), &face_dofs, args.order,
+            &[&push], &[2], args.order as u8 * 2 + 1,
+        );
+        for (i, &v) in f_rhs.iter().enumerate() {
+            rhs[i] += v; // x-component
         }
     }
-    println!("  Max penetration: {:.6e} (target < 1e-4)", max_penetration);
 
-    // Check if friction is active — look at horizontal displacement of bottom nodes
-    if args.mu > 0.0 {
-        let mut max_ux_bottom = 0.0_f64;
-        for f in 0..mesh_ref.n_boundary_faces() as u32 {
-            if mesh_ref.face_tag(f) == 1 {
-                for &n in mesh_ref.face_nodes(f) {
-                    let ni = n as usize;
-                    let ux = u[ni * 2].abs();
-                    if ux > max_ux_bottom { max_ux_bottom = ux; }
-                }
-            }
-        }
-        println!("  Max horizontal slip (bottom): {:.6e}", max_ux_bottom);
+    // BCs: fix all components on boundary 1 (bottom);
+    //       fix y-component only on boundary 4 (left, sliding-like normal constraint).
+    let scalar_dm = space.scalar_dof_manager();
+    let bnd1 = boundary_dofs(space.mesh(), scalar_dm, &[1]);
+    let bnd4 = boundary_dofs(space.mesh(), scalar_dm, &[4]);
+
+    let mut clamped: Vec<u32> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+    for &d in &bnd1 {
+        clamped.push(d); vals.push(0.0);
+        clamped.push(d + n_scalar as u32); vals.push(0.0);
     }
+    for &d in &bnd4 {
+        clamped.push(d + n_scalar as u32); vals.push(0.0);
+    }
+    apply_dirichlet(&mut mat, &mut rhs, &clamped, &vals);
 
+    // Solve
+    let mut u = vec![0.0_f64; n_dofs];
+    let cfg = SolverConfig {
+        rtol: 1e-8, atol: 0.0, max_iter: 10_000, verbose: false,
+        ..SolverConfig::default()
+    };
+    let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("elasticity solve failed");
+
+    let ux = &u[..n_scalar];
+    let uy = &u[n_scalar..];
+    let ux_max = ux.iter().cloned().fold(0.0_f64, |a, b| a.abs().max(b.abs()));
+    let uy_max = uy.iter().cloned().fold(0.0_f64, |a, b| a.abs().max(b.abs()));
+
+    println!("  Solve: {} iters, residual={:.3e}, converged={}",
+             res.iterations, res.final_residual, res.converged);
+    println!("  max|u_x| = {:.4e}, max|u_y| = {:.4e}", ux_max, uy_max);
     println!("Done.");
 }
 
-struct Args { penalty: f64, mu: f64, al_iters: usize, body_force: f64, n_refine: u32 }
+fn build_trapezoid_mesh(offset: f64) -> SimplexMesh<2> {
+    assert!(offset < 0.9, "offset too large");
+    // Triangle mesh for trapezoid: split quad (0,1,3,2) into two triangles
+    // Vertices: 0=(0,0), 1=(1,0), 2=(offset,1), 3=(1,1)
+    let coords = vec![
+        0.0, 0.0,
+        1.0, 0.0,
+        offset, 1.0,
+        1.0, 1.0,
+    ];
+    let conn = vec![
+        0u32, 1, 3,
+        0u32, 3, 2,
+    ];
+    let elem_tags = vec![1, 1];
+    let face_conn = vec![
+        0u32, 1, // bottom, attr 1
+        1u32, 3, // right,  attr 2
+        2u32, 3, // top,    attr 3
+        0u32, 2, // left,   attr 4
+    ];
+    let face_tags = vec![1, 2, 3, 4];
+    SimplexMesh::uniform(
+        coords, conn, elem_tags, ElementType::Tri3,
+        face_conn, face_tags, ElementType::Line2,
+    )
+}
+
+// ─── CLI ────────────────────────────────────────────────────────────────────
+
+struct Args {
+    offset: f64,
+    order: u8,
+    ref_levels: usize,
+}
 
 fn parse_args() -> Args {
-    let mut a = Args { penalty: 1e6, mu: 0.3, al_iters: 0, body_force: -1.0, n_refine: 3 };
+    let mut a = Args { offset: 0.3, order: 1, ref_levels: 3 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--penalty" => { a.penalty = it.next().and_then(|v| v.parse().ok()).unwrap_or(1e6); }
-            "--mu" => { a.mu = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.3); }
-            "--al-iters" => { a.al_iters = it.next().and_then(|v| v.parse().ok()).unwrap_or(0); }
-            "--body-force" => { a.body_force = it.next().and_then(|v| v.parse().ok()).unwrap_or(-1.0); }
-            "--n-refine" => { a.n_refine = it.next().and_then(|v| v.parse().ok()).unwrap_or(3); }
+            "--offset" => a.offset = it.next().unwrap_or("0.3".into()).parse().unwrap_or(0.3),
+            "-o" | "--order" => a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1),
+            "-r" | "--refine" | "--ref-levels" => {
+                a.ref_levels = it.next().unwrap_or("3".into()).parse().unwrap_or(3)
+            }
             _ => {}
         }
     }
     a
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ex28_sliding_elasticity_converges() {
+        let mesh = build_trapezoid_mesh(0.3);
+        let mesh = refine_uniform(&refine_uniform(&mesh));
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n_dofs = space.n_dofs();
+        let n_sc = space.n_scalar_dofs();
+
+        let elast = ElasticityIntegrator { lambda: 0.5, mu: 0.5, plane_stress: false };
+        let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 3);
+        let mut rhs = vec![0.0_f64; n_dofs];
+
+        let scalar_dm = space.scalar_dof_manager();
+        let bnd1 = boundary_dofs(space.mesh(), scalar_dm, &[1]);
+        let bnd4 = boundary_dofs(space.mesh(), scalar_dm, &[4]);
+        let mut clamped: Vec<u32> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for &d in &bnd1 {
+            clamped.push(d); vals.push(0.0);
+            clamped.push(d + n_sc as u32); vals.push(0.0);
+        }
+        for &d in &bnd4 {
+            clamped.push(d + n_sc as u32); vals.push(0.0);
+        }
+        apply_dirichlet(&mut mat, &mut rhs, &clamped, &vals);
+
+        let mut u = vec![0.0_f64; n_dofs];
+        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 10000, verbose: false, ..Default::default() };
+        let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).unwrap();
+        assert!(res.converged);
+        assert!(res.final_residual < 1.0e-6);
+    }
 }

@@ -1,6 +1,6 @@
-//! # MFEM Example 42 — Reduced-Order Model (POD‑Galerkin)
+//! # MFEM Example 42 — Reduced-Order Model (POD-Galerkin)
 //!
-//! Demonstrates a complete POD‑Galerkin ROM workflow:
+//! Demonstrates a complete POD-Galerkin ROM workflow:
 //!
 //! 1. Assemble a 1-D Poisson system `−κ·u″ = f` with varying `κ`
 //! 2. Collect full-order snapshots for different `κ` values
@@ -13,6 +13,7 @@
 //! ## Usage
 //! ```bash
 //! cargo run --example mfem_ex42_rom [n=50] [r=4]
+//! cargo run --example mfem_ex42_rom -- -n 100 -r 6
 //! ```
 
 use std::time::Instant;
@@ -21,10 +22,26 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_solver::rom::{Snapshots, PodBasis, project_system, reconstruct, relative_error};
 use fem_solver::solve_sparse_lu;
 
+fn parse_args() -> (usize, usize) {
+    let mut n: usize = 50;
+    let mut r: usize = 4;
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "-n" | "--n" => {
+                n = it.next().and_then(|s| s.parse().ok()).unwrap_or(50);
+            }
+            "-r" | "--r" => {
+                r = it.next().and_then(|s| s.parse().ok()).unwrap_or(4);
+            }
+            _ => {}
+        }
+    }
+    (n, r)
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(50);
-    let r: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
+    let (n, r) = parse_args();
 
     println!("=== MFEM Example 42: Reduced-Order Model ===");
     println!("  n (full-order DOFs) = {n}, r (POD modes) = {r}");
@@ -53,16 +70,14 @@ fn main() {
         println!("  Mode {i}: energy fraction = {ef:.6}");
     }
 
-    // ─── 4. Galerkin projection (returns dense DMatrix/DVector) ────────────
+    // ─── 4. Galerkin projection ────────────────────────────────────────────
     let (a_r, b_r) = project_system(&a_ref, &rhs, &pod);
-    // a_r: r×r dense, b_r: length r
 
     // ─── 5. Online: solve at κ_test (not in snapshot set) ──────────────────
     let kappa_test = 3.14_f64;
     let a_test = scale_matrix(&a_ref, kappa_test);
     let u_fom = solve_sparse_lu(&a_test, &rhs).expect("FOM test solve");
 
-    // Reduced solve: κ_test · A_r · u_r = b_r
     let a_r_scaled = &a_r * kappa_test;
     let lu = a_r_scaled.clone().lu();
     let u_r = lu.solve(&b_r).expect("ROM dense solve");
@@ -98,4 +113,36 @@ fn scale_matrix(a: &CsrMatrix<f64>, kappa: f64) -> CsrMatrix<f64> {
 
 fn l2_norm(x: &[f64]) -> f64 {
     x.iter().map(|v| v * v).sum::<f64>().sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ex42_rom_default_params_converges() {
+        let n = 20;
+        let r = 3;
+        let a_ref = assemble_laplacian_1d(n);
+        let rhs = vec![1.0_f64; n];
+        let n_snaps = 5;
+        let mut snaps = Snapshots::new(n);
+        for si in 0..n_snaps {
+            let kappa = 0.1 * 10.0_f64.powf(si as f64 / (n_snaps - 1) as f64);
+            let a = scale_matrix(&a_ref, kappa);
+            let u = solve_sparse_lu(&a, &rhs).unwrap();
+            snaps.add_snapshot(&u);
+        }
+        let pod = PodBasis::compute(&snaps, r).unwrap();
+        let (a_r, b_r) = project_system(&a_ref, &rhs, &pod);
+        let kappa_test = 3.14_f64;
+        let a_test = scale_matrix(&a_ref, kappa_test);
+        let u_fom = solve_sparse_lu(&a_test, &rhs).unwrap();
+        let a_r_scaled = &a_r * kappa_test;
+        let lu = a_r_scaled.clone().lu();
+        let u_r = lu.solve(&b_r).unwrap();
+        let u_rom = reconstruct(&pod, u_r.as_slice());
+        let err = relative_error(&u_fom, &u_rom);
+        assert!(err < 0.3, "ROM error too large: {err:.4e}");
+    }
 }
