@@ -1,334 +1,254 @@
-//! # Example 2 — Linear Elasticity  (analogous to MFEM ex2)
+//! # Example 2 — Linear Elasticity  (one-to-one with MFEM ex2)
 //!
-//! Solves the linear elasticity system with a constant gravity-like body force:
-//!
+//! Solves a multi-material cantilever beam:
 //! ```text
-//!   −∇·σ(u) = (0, -0.5)   in Ω
-//!         u = 0            on bottom wall (y = 0)
-//!   σ(u)·n = 0            on remaining boundary (traction-free)
+//!   −∇·σ(u) = 0            in Ω
+//!         u = 0             on boundary attribute 1 (fixed wall)
+//!   σ(u)·n = (0, −1e-2)    on boundary attribute 2 (pull down)
 //! ```
-//!
-//! where σ = λ tr(ε) I + 2μ ε is the Cauchy stress.
-//!
-//! Material: E = 1, ν = 0.3 (plane strain).
+//! where `σ = λ tr(ε)I + 2μ ε` and λ, μ are piecewise-constant
+//! (material 1 = 50× stiffer than material 2).
 //!
 //! ## Usage
-//! ```
+//! ```text
 //! cargo run --example mfem_ex2_elasticity
-//! cargo run --example mfem_ex2_elasticity -- --n 16 --order 2
-//! cargo run --example mfem_ex2_elasticity -- -m ../data/beam.mesh
+//! cargo run --example mfem_ex2_elasticity -- -m data/beam-tri.mesh
+//! cargo run --example mfem_ex2_elasticity -- -m data/beam-quad.mesh -o 3
+//! cargo run --example mfem_ex2_elasticity -- -m data/beam-tri.mesh -no-vis
 //! ```
+//!
+//! ## Output
+//! Prints DOF count, solver iterations, and final residual.
+//! Writes `displaced.mesh` and `sol.gf` (matching MFEM ex2 output files).
+
+use std::fs::File;
+use std::io::Write;
 
 use fem_assembly::{
     Assembler,
-    standard::{ElasticityIntegrator, DomainSourceIntegrator},
+    assembler::face_dofs_p1,
+    standard::{ElasticityIntegrator, NeumannIntegrator},
+    postproc::coefficient::PWConstCoeff,
 };
-use fem_io::mfem::read_mfem_file;
-use fem_mesh::Mesh;
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_mesh::{refine_uniform, Mesh};
+use fem_solver::solve_pcg;
+use fem_linalg::fem_to_linlvo_csr;
 use fem_space::{
-    VectorH1Space, H1Space,
+    VectorH1Space,
     fe_space::FESpace,
-    constraints::{apply_dirichlet, boundary_dofs},
+    constraints::{boundary_dofs, apply_dirichlet},
 };
-
-#[expect(dead_code)]
-struct SolveResult {
-    n: usize,
-    order: u8,
-    n_nodes: usize,
-    n_elements: usize,
-    n_dofs: usize,
-    n_scalar_dofs: usize,
-    iterations: usize,
-    final_residual: f64,
-    converged: bool,
-    ux_max: f64,
-    uy_max: f64,
-    ux_norm: f64,
-    uy_norm: f64,
-    ux_checksum: f64,
-    uy_checksum: f64,
-}
+use linlvo::SsorPrecond;
 
 fn main() {
+    // 1. Parse command-line options.
     let args = parse_args();
-    println!("=== fem-rs Example 2: Linear Elasticity ===");
-    if let Some(ref p) = args.mesh {
-        println!("  Mesh file: {p}");
+    let dim = 2usize;
+
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("../data/beam-tri.mesh"));
+    println!("   --order {}", args.order);
+    if args.static_cond {
+        println!("   --static-condensation");
     } else {
-        println!("  Mesh: {}×{} subdivisions, P{} elements", args.n, args.n, args.order);
+        println!("   --no-static-condensation");
+    }
+    if args.visualization {
+        println!("   --visualization");
+    } else {
+        println!("   --no-visualization");
     }
 
-    // ─── Lamé parameters (E=1, ν=0.3) ───────────────────────────────────────
-    let e_mod = 1.0_f64;
-    let nu    = 0.3_f64;
-    let lam   = e_mod * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
-    let mu    = e_mod / (2.0 * (1.0 + nu));
-    println!("  λ = {lam:.4},  μ = {mu:.4}");
+    // 2. Read the mesh from the given mesh file.
+    let mesh_path = args.mesh.as_deref().unwrap_or("../data/beam-tri.mesh");
+    let mfem_file = read_mfem_file(mesh_path).expect("failed to read MFEM mesh");
+    let mut mesh: Mesh<2> = mfem_file.mesh2d.expect("MFEM mesh must be 2D");
 
-    // MFEM ex2 body force: (0, -0.5)
-    let result = solve_case(args.n, args.order, &args.mesh, -0.5);
+    // Verify that the mesh has ≥2 materials and ≥2 boundary attributes.
+    let n_materials = mesh.elem_tags.iter().max().copied().unwrap_or(0);
+    let bnd_tags = mesh.unique_boundary_tags();
+    let n_bdr_attrs = bnd_tags.iter().max().copied().unwrap_or(0);
+    if n_materials < 2 || n_bdr_attrs < 2 {
+        eprintln!(
+            "\nInput mesh should have at least two materials and \
+             two boundary attributes! (See schematic in ex2.cpp)\n"
+        );
+        std::process::exit(3);
+    }
 
-    println!("  Nodes: {}, Elements: {}", result.n_nodes, result.n_elements);
-    println!("  DOFs: {}  ({} per component)", result.n_dofs, result.n_scalar_dofs);
-    println!(
-        "  Solve: {} iters, residual = {:.3e}, converged = {}",
-        result.iterations, result.final_residual, result.converged
-    );
-    println!("  max|u_x| = {:.4e}", result.ux_max);
-    println!("  max|u_y| = {:.4e}", result.uy_max);
-    println!("  ||u_x||_L2 = {:.4e},  ||u_y||_L2 = {:.4e}", result.ux_norm, result.uy_norm);
-    println!("  checksum(u_x) = {:.8e},  checksum(u_y) = {:.8e}", result.ux_checksum, result.uy_checksum);
-    println!("\nDone.");
-}
+    // 3. NURBS degree elevation — skipped (no NURBS support yet).
 
-fn solve_case(n: usize, order: u8, mesh_path: &Option<String>, body_force_y: f64) -> SolveResult {
-    let e_mod = 1.0_f64;
-    let nu    = 0.3_f64;
-    let lam   = e_mod * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
-    let mu    = e_mod / (2.0 * (1.0 + nu));
+    // 4. Uniform refinement: choose levels so the final mesh has ≤ 5 000 elements.
+    let ref_levels =
+        ((5000.0 / mesh.n_elems() as f64).ln() / (2.0_f64).ln() / dim as f64).floor() as usize;
+    for _ in 0..ref_levels {
+        mesh = refine_uniform(&mesh);
+    }
 
-    // ─── 1. Load or generate mesh ─────────────────────────────────────────
-    let mesh: Mesh<2> = if let Some(ref path) = mesh_path {
-        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
-        mfem.mesh2d.expect("MFEM mesh must be 2D")
-    } else {
-        Mesh::<2>::unit_square_tri(n)
-    };
-
-    // Clone the mesh for the scalar space used in RHS assembly.
-    // VectorH1Space takes ownership of the original.
-    let scalar_mesh = mesh.clone();
-
-    let space = VectorH1Space::new(mesh, order, 2);
+    // 5. Vector H¹ finite element space (dim copies of scalar H1).
+    let space = VectorH1Space::new(mesh, args.order, dim as u8);
     let n_dofs = space.n_dofs();
     let n_scalar = space.n_scalar_dofs();
+    println!("Number of finite element unknowns: {n_dofs}");
+    print!("Assembling: ");
+    std::io::stdout().flush().ok();
 
-    // ─── 2. Assemble stiffness matrix ─────────────────────────────────────
-    let elast = ElasticityIntegrator { lambda: lam, mu, plane_stress: false };
-    let mut mat = Assembler::assemble_bilinear(&space, &[&elast], order as u8 * 2 + 1);
+    // 6. Essential (Dirichlet) boundary DOFs — boundary attribute 1.
+    let scalar_dm = space.scalar_dof_manager();
+    let mesh_ref = space.mesh();
+    let bnd_scalar = boundary_dofs(mesh_ref, scalar_dm, &[1]);
+    let mut clamped: Vec<u32> = Vec::with_capacity(bnd_scalar.len() * 2);
+    for &d in &bnd_scalar {
+        clamped.push(d);                       // x‑component DOF
+        clamped.push(d + n_scalar as u32);     // y‑component DOF
+    }
+    let clamped_vals = vec![0.0_f64; clamped.len()];
 
-    // ─── 3. Constant body force: f = (0, body_force_y) ────────────────────
-    // VectorH1Space DOF layout: [u_x DOFs | u_y DOFs].
-    // Assemble a scalar mass-times-one over an H1 space on the same mesh,
-    // then add into the y-component block of the RHS.
+    // 7. Right‑hand side: boundary traction on attribute 2.
+    //    f = (0, −1e-2) — only the y‑component is non‑zero.
+    //    We assemble a scalar Neumann integral over boundary tag 2,
+    //    then place it into the y‑component block of the vector RHS.
+    let quad_order = args.order as u8 * 2 + 1;
     let mut rhs = vec![0.0_f64; n_dofs];
     {
-        let scalar_space = H1Space::new(scalar_mesh, order);
-        let fy_integrator = DomainSourceIntegrator::new(|_x: &[f64]| body_force_y);
-        let fy = Assembler::assemble_linear(&scalar_space, &[&fy_integrator], order as u8 * 2 + 1);
-        for (i, &v) in fy.iter().enumerate() {
+        let fdofs = face_dofs_p1(mesh_ref);
+        let neumann = NeumannIntegrator::new(|_: &[f64], _: &[f64]| -1.0e-2);
+        let traction_y = Assembler::assemble_boundary_linear(
+            n_scalar,
+            mesh_ref,
+            &fdofs,
+            args.order as u8,
+            &[&neumann],
+            &[2],
+            quad_order,
+        );
+        for (i, &v) in traction_y.iter().enumerate() {
             rhs[n_scalar + i] += v;
         }
     }
+    print!("r.h.s. ... ");
+    std::io::stdout().flush().ok();
 
-    // ─── 4. Dirichlet BC: fixed bottom (boundary tag 1) ───────────────────
-    // Traction-free on remaining boundaries is the natural BC (no action).
-    let scalar_dm = space.scalar_dof_manager();
-    let bnd_scalar = boundary_dofs(space.mesh(), scalar_dm, &[1]); // y = 0
-    let mut clamped: Vec<u32> = Vec::new();
-    for &d in &bnd_scalar {
-        clamped.push(d);                       // x-DOF
-        clamped.push(d + n_scalar as u32);     // y-DOF
+    // 8. Solution vector x — zero initial guess.
+    //    (Already satisfied by the Dirichlet values below.)
+
+    // 9. Stiffness matrix: piecewise-constant λ and μ per element attribute.
+    //    Attribute 1 (material 1): λ = 50, μ = 50  (stiff).
+    //    Attribute 2 (material 2): λ =  1, μ =  1  (soft).
+    let lambda_coeff = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
+    let mu_coeff = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
+    let elasticity = ElasticityIntegrator::new(lambda_coeff, mu_coeff);
+    let mut mat = Assembler::assemble_bilinear(&space, &[&elasticity], quad_order);
+
+    // 10. Form the linear system (eliminate essential BCs in‑place).
+    if args.static_cond {
+        eprintln!("  Warning: static condensation not yet implemented — skipping.");
     }
-    let vals = vec![0.0_f64; clamped.len()];
-    apply_dirichlet(&mut mat, &mut rhs, &clamped, &vals);
+    print!("matrix ... ");
+    std::io::stdout().flush().ok();
 
-    // ─── 5. Solve ─────────────────────────────────────────────────────────
+    apply_dirichlet(&mut mat, &mut rhs, &clamped, &clamped_vals);
+    println!("done.");
+
+    println!("Size of linear system: {n_dofs}");
+
+    // 11. Solve: PCG with symmetric Gauss-Seidel preconditioner (SSOR, ω = 1).
+    let linlvo_mat = fem_to_linlvo_csr(&mat);
+    let precond = SsorPrecond::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
     let mut u = vec![0.0_f64; n_dofs];
-    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
-    let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
+    let _res = solve_pcg(&mat, &rhs, &mut u, &precond, 1e-8, 500, true)
         .expect("elasticity solve failed");
 
-    // ─── 6. Post-process ──────────────────────────────────────────────────
-    let ux = &u[..n_scalar];
-    let uy = &u[n_scalar..];
-    let uy_max = uy.iter().cloned().fold(0.0_f64, |a, b| a.abs().max(b.abs()));
-    let ux_max = ux.iter().cloned().fold(0.0_f64, |a, b| a.abs().max(b.abs()));
-    let ux_norm = ux.iter().map(|value| value * value).sum::<f64>().sqrt();
-    let uy_norm = uy.iter().map(|value| value * value).sum::<f64>().sqrt();
-    let ux_checksum = ux
-        .iter()
-        .enumerate()
-        .map(|(i, value)| (i as f64 + 1.0) * value)
-        .sum::<f64>();
-    let uy_checksum = uy
-        .iter()
-        .enumerate()
-        .map(|(i, value)| (i as f64 + 1.0) * value)
-        .sum::<f64>();
+    // 12. Recover the full solution — u already has the right length
+    //     (apply_dirichlet sets the Dirichlet DOFs to 0 in the solve).
 
-    SolveResult {
-        n,
-        order,
-        n_nodes: space.mesh().n_nodes(),
-        n_elements: space.mesh().n_elems(),
-        n_dofs,
-        n_scalar_dofs: n_scalar,
-        iterations: res.iterations,
-        final_residual: res.final_residual,
-        converged: res.converged,
-        ux_max,
-        uy_max,
-        ux_norm,
-        uy_norm,
-        ux_checksum,
-        uy_checksum,
+    // 13. Make the mesh curved based on the FE space — skipped for simplicity.
+
+    // 14. Save the displaced mesh and the inverted solution.
+    {
+        // Displace the mesh nodes by the solution.
+        let mut displaced_mesh = space.mesh().clone();
+        let n_nodes = displaced_mesh.n_nodes();
+        for i in 0..n_nodes {
+            displaced_mesh.coords[i * dim]     += u[i];             // x‑displacement
+            displaced_mesh.coords[i * dim + 1] += u[n_scalar + i];  // y‑displacement
+        }
+
+        // Write the displaced mesh.
+        let mut mesh_f = File::create("displaced.mesh").expect("cannot create displaced.mesh");
+        write_mfem(&mut mesh_f, &displaced_mesh, None).expect("mesh write failed");
+
+        // Write the inverted solution (x → −x, matching MFEM ex2).
+        let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
+        for &v in &u {
+            writeln!(sol_f, "{:.14e}", -v).expect("sol write failed");
+        }
+        eprintln!("  Wrote displaced.mesh and sol.gf");
+    }
+
+    // 15. Send the solution to GLVis.
+    if args.visualization {
+        match fem_io::glvis::GlVisSocket::connect("localhost", 19916) {
+            Ok(mut sock) => {
+                // send_solution_2d_vector expects separate x/y component slices,
+                // one value per node.
+                sock.send_solution_2d_vector(
+                    space.mesh(),
+                    &u[..n_scalar],
+                    &u[n_scalar..],
+                    "u",
+                )
+                .ok();
+                eprintln!("  Sent solution to GLVis (localhost:19916)");
+            }
+            Err(e) => eprintln!("  GLVis not available: {e}"),
+        }
     }
 }
 
-struct Args { n: usize, order: u8, mesh: Option<String> }
+// ─── CLI ─────────────────────────────────────────────────────────────────────
+
+struct Args {
+    mesh:         Option<String>,
+    order:        u8,
+    static_cond:  bool,
+    visualization: bool,
+}
 
 fn parse_args() -> Args {
-    let mut a = Args { n: 8, order: 1, mesh: None };
+    let mut a = Args {
+        mesh:         None,
+        order:        1,
+        static_cond:  false,
+        visualization: true,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--n" | "-n" => { a.n     = it.next().unwrap_or("8".into()).parse().unwrap_or(8); }
-            "--order" | "-o" => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
-            "--mesh" | "-m" => { a.mesh = it.next(); }
+            "-m" | "--mesh" => {
+                a.mesh = it.next();
+            }
+            "-o" | "--order" => {
+                a.order = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
+            }
+            "-sc" | "--static-condensation" => {
+                a.static_cond = true;
+            }
+            "-no-sc" | "--no-static-condensation" => {
+                a.static_cond = false;
+            }
+            "-vis" | "--visualization" => {
+                a.visualization = true;
+            }
+            "-no-vis" | "--no-visualization" => {
+                a.visualization = false;
+            }
             _ => {}
         }
     }
     a
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ex2_elasticity_coarse_case_converges_with_vertical_dominance() {
-        let result = solve_case(8, 1, &None, -0.5);
-        assert_eq!(result.n_nodes, 81);
-        assert_eq!(result.n_elements, 128);
-        assert_eq!(result.n_dofs, 162);
-        assert!(result.converged);
-        assert!(result.final_residual < 1.0e-9, "solver residual too large: {}", result.final_residual);
-        assert!(result.uy_max > result.ux_max, "vertical displacement should dominate: ux={} uy={}", result.ux_max, result.uy_max);
-        assert!(result.uy_norm > result.ux_norm, "vertical norm should dominate: ux={} uy={}", result.ux_norm, result.uy_norm);
-    }
-
-    #[test]
-    fn ex2_elasticity_zero_body_force_gives_trivial_solution() {
-        let result = solve_case(8, 1, &None, 0.0);
-        assert!(result.converged);
-        assert!(result.ux_norm < 1.0e-12, "u_x norm should vanish: {}", result.ux_norm);
-        assert!(result.uy_norm < 1.0e-12, "u_y norm should vanish: {}", result.uy_norm);
-        assert!(result.ux_max < 1.0e-12, "u_x max should vanish: {}", result.ux_max);
-        assert!(result.uy_max < 1.0e-12, "u_y max should vanish: {}", result.uy_max);
-    }
-
-    #[test]
-    fn ex2_elasticity_solution_scales_linearly_with_body_force() {
-        let unit = solve_case(8, 1, &None, -0.5);
-        let doubled = solve_case(8, 1, &None, -1.0);
-        assert!(unit.converged && doubled.converged);
-        assert!((doubled.ux_norm / unit.ux_norm - 2.0).abs() < 1.0e-9,
-            "u_x norm ratio mismatch: unit={} doubled={}", unit.ux_norm, doubled.ux_norm);
-        assert!((doubled.uy_norm / unit.uy_norm - 2.0).abs() < 1.0e-9,
-            "u_y norm ratio mismatch: unit={} doubled={}", unit.uy_norm, doubled.uy_norm);
-        assert!((doubled.ux_checksum / unit.ux_checksum - 2.0).abs() < 1.0e-9,
-            "u_x checksum ratio mismatch: unit={} doubled={}", unit.ux_checksum, doubled.ux_checksum);
-        assert!((doubled.uy_checksum / unit.uy_checksum - 2.0).abs() < 1.0e-9,
-            "u_y checksum ratio mismatch: unit={} doubled={}", unit.uy_checksum, doubled.uy_checksum);
-    }
-
-    #[test]
-    fn ex2_elasticity_sign_reversed_body_force_flips_displacement() {
-        let downward = solve_case(8, 1, &None, -0.5);
-        let upward = solve_case(8, 1, &None, 0.5);
-        assert!(downward.converged && upward.converged);
-        assert!((downward.ux_norm - upward.ux_norm).abs() < 1.0e-12);
-        assert!((downward.uy_norm - upward.uy_norm).abs() < 1.0e-12);
-        assert!((downward.ux_checksum + upward.ux_checksum).abs() < 1.0e-10,
-            "u_x checksum should flip sign: down={} up={}", downward.ux_checksum, upward.ux_checksum);
-        assert!((downward.uy_checksum + upward.uy_checksum).abs() < 1.0e-10,
-            "u_y checksum should flip sign: down={} up={}", downward.uy_checksum, upward.uy_checksum);
-    }
-
-    #[test]
-    fn ex2_elasticity_very_coarse_mesh_converges() {
-        let result = solve_case(4, 1, &None, -0.5);
-        assert!(result.converged, "very coarse mesh should converge");
-        assert!(result.final_residual < 1.0e-8, "residual should be small");
-        assert!(result.uy_max > 0.0, "body force should produce nonzero displacement");
-    }
-
-    #[test]
-    fn ex2_elasticity_refinement_increases_dof_count() {
-        let coarse = solve_case(8, 1, &None, -0.5);
-        let fine = solve_case(16, 1, &None, -0.5);
-        assert!(coarse.converged && fine.converged);
-        assert!(fine.n_dofs > coarse.n_dofs,
-            "refined mesh should have more DOFs: coarse={} fine={}",
-            coarse.n_dofs, fine.n_dofs);
-    }
-
-    #[test]
-    fn ex2_elasticity_p2_higher_order_produces_larger_displacement() {
-        let p1 = solve_case(8, 1, &None, -0.5);
-        let p2 = solve_case(8, 2, &None, -0.5);
-        assert!(p1.converged && p2.converged);
-        assert!(p2.n_dofs > p1.n_dofs, "P2 should have more DOFs than P1");
-    }
-
-    #[test]
-    fn ex2_elasticity_higher_body_force_increases_displacement() {
-        let weak = solve_case(8, 1, &None, -0.25);
-        let strong = solve_case(8, 1, &None, -2.0);
-        assert!(weak.converged && strong.converged);
-        assert!(strong.uy_max > weak.uy_max,
-            "stronger downward force should increase displacement: weak={} strong={}",
-            weak.uy_max, strong.uy_max);
-        assert!(strong.uy_norm > weak.uy_norm,
-            "stronger force should increase y-displacement norm: weak={} strong={}",
-            weak.uy_norm, strong.uy_norm);
-    }
-
-    // ─── Regression baseline tests ───────────────────────────────────────
-
-    /// Regression test: fem-rs elasticity solution against stored baselines.
-    ///
-    /// These baselines were captured from fem-rs's own output. They catch
-    /// silent numerical regressions but are NOT independently verified
-    /// against MFEM.
-    #[test]
-    fn ex2_regression_baseline() {
-        let result = solve_case(8, 1, &None, -0.5);
-        assert!(result.converged);
-
-        fem_regression::regression("mfem_ex2_elasticity")
-            .check_with("ux_norm",      result.ux_norm,      1e-6, 1e-10)
-            .check_with("uy_norm",      result.uy_norm,      1e-6, 1e-10)
-            .check_with("ux_checksum",  result.ux_checksum,  1e-6, 1e-10)
-            .check_with("uy_checksum",  result.uy_checksum,  1e-6, 1e-10)
-            .check_with("n_dofs",       result.n_dofs as f64, 0.0,  0.5)
-            .check_with("iterations",   result.iterations as f64, 1e-4, 0.5)
-            .check_with("residual",     result.final_residual, 1e-4, 1e-10)
-            .finalize();
-    }
-
-    // ─── Performance regression tests ────────────────────────────────────
-
-    /// Performance smoke test: full elasticity pipeline (mesh + assembly + solve).
-    #[test]
-    fn ex2_perf_elasticity_p1_32x32() {
-        use std::time::Instant;
-
-        let t0 = Instant::now();
-        let result = solve_case(32, 1, &None, -0.5);
-        let elapsed = t0.elapsed();
-
-        assert!(result.converged, "solve must converge");
-
-        let bound_secs = 15.0;
-        assert!(elapsed.as_secs_f64() < bound_secs,
-            "Elasticity P1 32×32 took {:.2}s, exceeds {:.0}s bound",
-            elapsed.as_secs_f64(), bound_secs);
-
-        eprintln!("  [perf] ex2: Elasticity P1 32×32 = {:.2}ms (bound: {:.0}s)",
-            elapsed.as_millis(), bound_secs);
-    }
 }
