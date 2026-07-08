@@ -93,3 +93,56 @@ where
 
     err2.sqrt()
 }
+
+/// Compute ‖p_h − p_exact‖_{L²(Ω)} for a scalar L₂ (DG) solution.
+///
+/// Supports Tri3 (Pk) and Quad4 (Qk) elements — selects the correct
+/// reference element based on the mesh element type.
+pub fn compute_l2_error_scalar<F>(
+    space: &fem_space::L2Space<Mesh<2>>,
+    uh: &[f64],
+    exact: F,
+) -> f64
+where
+    F: Fn(&[f64]) -> f64,
+{
+    use fem_element::{
+        lagrange::{QuadQ1, TriP1},
+        ReferenceElement,
+    };
+    use fem_mesh::{ElementTransformation, ElementType};
+
+    let mesh = space.mesh();
+    let elem_type = mesh.element_type(0);
+    let ref_elem: &dyn ReferenceElement = match elem_type {
+        ElementType::Tri3 | ElementType::Tri6 => &TriP1,
+        ElementType::Quad4 => &QuadQ1,
+        _ => panic!("compute_l2_error_scalar: unsupported element type {elem_type:?}"),
+    };
+    let quad = ref_elem.quadrature(6);
+    let n_ldofs = ref_elem.n_dofs();
+    let mut ref_phi = vec![0.0; n_ldofs];
+    let mut err2 = 0.0_f64;
+
+    for e in mesh.elem_iter() {
+        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let nodes = mesh.element_nodes(e);
+        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+        let det_j = tr.det_j();
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[qi] * det_j.abs();
+            let xp = tr.map_to_physical(xi);
+            ref_elem.eval_basis(xi, &mut ref_phi);
+
+            let mut vh = 0.0;
+            for i in 0..n_ldofs {
+                vh += uh[dofs[i]] * ref_phi[i];
+            }
+            let ve = exact(&xp);
+            err2 += w * (vh - ve) * (vh - ve);
+        }
+    }
+
+    err2.sqrt()
+}

@@ -12,7 +12,7 @@ use fem_assembly::mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator};
 use fem_assembly::standard::VectorMassIntegrator;
 use fem_assembly::{VectorAssembler, VectorBoundaryAssembler};
 use fem_io::mfem::{read_mfem_file, write_mfem};
-use fem_mesh::{refine_uniform, Mesh, MeshTopology};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::{SolverConfig, block::BlockSystem, solve_gmres};
 use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
 
@@ -56,8 +56,8 @@ fn main() {
     // L2 errors
     let eu = fem_assembly::hdiv_error::compute_hdiv_l2_error(&u_sp, &x[..n_u], |x| [-(x[0].exp()*x[1].sin()),-(x[0].exp()*x[0].cos())]);
     let nu_ = fem_assembly::hdiv_error::compute_hdiv_l2_error(&u_sp, &x[..n_u], |_|[0.0,0.0]);
-    let ep = l2s(&p_sp, &x[n_u..], |x| x[0].exp()*x[1].sin());
-    let np_ = l2s(&p_sp, &x[n_u..], |_|0.0);
+    let ep = fem_assembly::hdiv_error::compute_l2_error_scalar(&p_sp, &x[n_u..], |x| x[0].exp()*x[1].sin());
+    let np_ = fem_assembly::hdiv_error::compute_l2_error_scalar(&p_sp, &x[n_u..], |_|0.0);
     println!("||u_h−u_ex||/||u_ex|| = {:.6e}", eu/nu_.max(1e-32));
     println!("||p_h−p_ex||/||p_ex|| = {:.6e}", ep/np_.max(1e-32));
 
@@ -73,20 +73,6 @@ fn main() {
 
 fn p_exact(x: &[f64]) -> f64 { x[0].exp() * x[1].sin() }
 
-fn l2s<F: Fn(&[f64])->f64>(s: &L2Space<Mesh<2>>, uh: &[f64], ex: F) -> f64 {
-    use fem_element::{ReferenceElement, lagrange::TriP1};
-    use fem_mesh::ElementTransformation;
-    let m = s.mesh(); let r = TriP1; let q = r.quadrature(6); let n = r.n_dofs(); let mut p = vec![0.0; n]; let mut e2 = 0.0;
-    for el in m.elem_iter() {
-        let d: Vec<usize> = s.element_dofs(el).iter().map(|&d| d as usize).collect();
-        let no = m.element_nodes(el); let tr = ElementTransformation::from_simplex_nodes(m, no); let dj = tr.det_j();
-        for (qi, xi) in q.points.iter().enumerate() {
-            let w = q.weights[qi] * dj.abs(); let xp = tr.map_to_physical(xi); r.eval_basis(xi, &mut p);
-            let mut vh = 0.0; for i in 0..n { vh += uh[d[i]] * p[i]; } let ve = ex(&xp); e2 += w * (vh - ve) * (vh - ve);
-        }
-    }
-    e2.sqrt()
-}
 
 struct Args { mesh: Option<String>, order: u8, visualization: bool }
 fn parse_args() -> Args {
