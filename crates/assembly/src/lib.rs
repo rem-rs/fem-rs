@@ -176,7 +176,7 @@ pub use block_assembler::{
 pub use physics::hyperbolic::{HyperbolicFormIntegrator, NumericalFlux, HyperbolicConservationLaw, EulerConservationLaw, minmod, limiter_minmod_tet_p1};
 pub use interior_faces::InteriorFaceList;
 pub use physics::nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
-pub use physics::nonlinear_hyperelasticity::HyperelasticityForm;
+pub use physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator,
                   HcurlMatrixFreeOperator, solve_hcurl_matrix_free,
                   solve_hcurl_eigen_preconditioned_amg};

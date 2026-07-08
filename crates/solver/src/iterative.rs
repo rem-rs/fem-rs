@@ -936,6 +936,59 @@ where
     Err(SolverError::ConvergenceFailed { max_iter: cfg.max_iter, residual: res_norm })
 }
 
+/// MINRES with Jacobi (diagonal) preconditioning.
+///
+/// Uses split preconditioning: `A' = D^{-1/2} A D^{-1/2}` where `D = diag(A)`.
+/// The algorithm is mathematically equivalent to applying MINRES to the
+/// diagonally-scaled system, then unscaling the solution.
+///
+/// This preserves symmetry and is the most effective preconditioner for
+/// diagonally-dominant matrices (mass + diffusion + stiffness combinations).
+pub fn solve_minres_jacobi(
+    a: &FemCsr<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    let n = a.nrows;
+    if b.len() != n || x.len() != n {
+        return Err(SolverError::DimensionMismatch { rows: n, cols: n, rhs: b.len() });
+    }
+
+    // 1. Extract Jacobi scaling: s[i] = 1 / sqrt(|A[i,i]|)
+    let mut s = vec![1.0; n];
+    for i in 0..n {
+        let d = a.get(i, i).abs().max(f64::MIN_POSITIVE);
+        s[i] = 1.0 / d.sqrt();
+    }
+
+    // 2. Create scaled operator: A'[i,j] = s[i] * A[i,j] * s[j]
+    let apply_scaled = |y: &[f64], z: &mut [f64]| {
+        // tmp = A * (s ⊙ y)
+        let mut tmp = vec![0.0; n];
+        let mut sy = vec![0.0; n];
+        for i in 0..n { sy[i] = y[i] * s[i]; }
+        a.spmv(&sy, &mut tmp);
+        // z = s ⊙ tmp  (i.e., z = s ⊙ (A * (s ⊙ y)))
+        for i in 0..n { z[i] = s[i] * tmp[i]; }
+    };
+
+    // 3. Scale RHS: b'[i] = s[i] * b[i]
+    let mut bs = vec![0.0; n];
+    for i in 0..n { bs[i] = s[i] * b[i]; }
+
+    // 4. Solve A' * y = b' using the existing MINRES implementation
+    let mut y = x.to_vec();
+    match solve_minres_impl(n, apply_scaled, &bs, &mut y, cfg) {
+        Ok(res) => {
+            // 5. Unscale: x[i] = s[i] * y[i]
+            for i in 0..n { x[i] = s[i] * y[i]; }
+            Ok(res)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 // ─── GCR (generalised conjugate residual, restart) ─────────────────────────
 
 /// GCR(m) — for general (possibly non-symmetric) linear systems.

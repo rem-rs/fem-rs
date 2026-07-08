@@ -56,7 +56,7 @@ pub enum HyperelasticModel {
 
 impl HyperelasticModel {
     /// PK1 stress and consistent tangent for the model.
-    pub(crate) fn pk1_and_tangent(&self, f: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
+    pub fn pk1_and_tangent(&self, f: &DMatrix<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
         match self {
             HyperelasticModel::NeoHookean { mu, lambda } => {
                 neo_hookean_pk1_tangent(f, *mu, *lambda)
@@ -66,6 +66,41 @@ impl HyperelasticModel {
             }
             HyperelasticModel::Ogden { params, bulk_modulus } => {
                 ogden_pk1_tangent(f, params, *bulk_modulus)
+            }
+        }
+    }
+
+    /// Elastic energy density ψ(F) for the model (per-unit reference volume).
+    pub fn elastic_energy_density(&self, f: &DMatrix<f64>) -> f64 {
+        match self {
+            HyperelasticModel::NeoHookean { mu, lambda } => {
+                let dim = f.nrows();
+                let c = f.transpose() * f;
+                let i1 = c.trace();
+                let jac = f.determinant();
+                let ln_j = jac.ln();
+                0.5 * mu * (i1 - dim as f64) - mu * ln_j + 0.5 * lambda * ln_j * ln_j
+            }
+            HyperelasticModel::MooneyRivlin { c10, c01, bulk_modulus } => {
+                let ct = f.transpose() * f;
+                let i1 = ct.trace();
+                let i2 = 0.5 * (i1 * i1 - (ct.clone() * ct).trace());
+                let jac = f.determinant();
+                c10 * (i1 - 3.0) + c01 * (i2 - 3.0) + 0.5 * bulk_modulus * (jac - 1.0).powi(2)
+            }
+            HyperelasticModel::Ogden { params, bulk_modulus } => {
+                let dim = f.nrows();
+                let jac = f.determinant();
+                let svd = SVD::new(f.clone(), true, true);
+                let mut lam = vec![1.0_f64; dim];
+                for i in 0..dim { lam[i] = svd.singular_values[i].max(1e-30); }
+                let mut psi = 0.0;
+                for (mu_p, alpha_p) in params {
+                    let mut sum = 0.0;
+                    for a in 0..dim { sum += lam[a].powf(*alpha_p); }
+                    psi += *mu_p / *alpha_p * (sum - dim as f64);
+                }
+                psi + 0.5 * *bulk_modulus * (jac - 1.0).powi(2)
             }
         }
     }
@@ -266,6 +301,197 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
     pub fn solve(&self, rhs: &[f64], u: &mut [f64],
                  config: &NewtonConfig) -> Result<NewtonResult, NewtonResult> {
         NewtonSolver::new(config.clone()).solve(self, rhs, u)
+    }
+
+    /// Reference to the underlying FE space.
+    pub fn space(&self) -> &VectorH1Space<M> { &self.space }
+
+    /// Compute the hyperelastic residual **without** Dirichlet BC enforcement.
+    ///
+    /// This is the raw element-level internal force vector: `∫ P(F) : ∇δu dV`.
+    /// Unlike [`NonlinearForm::residual`], this does NOT set `r[dof] = u[dof] - val`
+    /// for constrained DOFs.
+    pub fn raw_residual(&self, u: &[f64], r: &mut [f64]) {
+        let mesh = self.space.mesh();
+        let dim = mesh.dim() as usize;
+        let order = self.space.order();
+
+        for i in 0..r.len() { r[i] = 0.0; }
+
+        for e in mesh.elem_iter() {
+            let elem_type = mesh.element_type(e);
+            let ref_elem = ref_elem_vol(elem_type, order);
+            let n_ldofs = ref_elem.n_dofs();
+            let n_vec = n_ldofs * dim;
+            let quad = ref_elem.quadrature(self.quad_order);
+
+            let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
+                .map(|&d| d as usize).collect();
+            let nodes = mesh.element_nodes(e);
+            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
+            let jit = jac.try_inverse().expect("singular").transpose();
+
+            let mut u_elem = vec![0.0_f64; n_vec];
+            for (k, &dof) in elem_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
+
+            let mut f_elem = vec![0.0_f64; n_vec];
+            let mut phi = vec![0.0_f64; n_ldofs];
+            let mut gref = vec![0.0_f64; n_ldofs * dim];
+            let mut gphys = vec![0.0_f64; n_ldofs * dim];
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                let w = quad.weights[q] * det_j.abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                ref_elem.eval_grad_basis(xi, &mut gref);
+                xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
+
+                let mut du = DMatrix::zeros(dim, dim);
+                for k in 0..n_ldofs {
+                    for i in 0..dim {
+                        for j in 0..dim {
+                            du[(i, j)] += u_elem[k * dim + i] * gphys[k * dim + j];
+                        }
+                    }
+                }
+                let mut f_mat = DMatrix::identity(dim, dim);
+                f_mat += &du;
+                let (p, _ct) = self.model.pk1_and_tangent(&f_mat);
+
+                for k in 0..n_ldofs {
+                    for i in 0..dim {
+                        let row = k * dim + i;
+                        let mut s = 0.0;
+                        for j in 0..dim { s += p[(i, j)] * gphys[k * dim + j]; }
+                        f_elem[row] += w * s;
+                    }
+                }
+            }
+            for (k, &dof) in elem_dofs.iter().enumerate() { r[dof] += f_elem[k]; }
+        }
+    }
+
+    /// Compute the hyperelastic tangent matrix **without** Dirichlet BC modification.
+    ///
+    /// Returns the raw element-level tangent stiffness: `∫ 𝔸 : (∇δu ⊗ ∇u) dV`
+    /// where 𝔸 is the consistent tangent modulus.
+    pub fn raw_jacobian(&self, u: &[f64]) -> CsrMatrix<f64> {
+        let mesh = self.space.mesh();
+        let dim = mesh.dim() as usize;
+        let order = self.space.order();
+        let n_dofs = self.space.n_dofs();
+        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+
+        for e in mesh.elem_iter() {
+            let elem_type = mesh.element_type(e);
+            let ref_elem = ref_elem_vol(elem_type, order);
+            let n_ldofs = ref_elem.n_dofs();
+            let n_vec = n_ldofs * dim;
+            let quad = ref_elem.quadrature(self.quad_order);
+
+            let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
+                .map(|&d| d as usize).collect();
+            let nodes = mesh.element_nodes(e);
+            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
+            let jit = jac.try_inverse().expect("singular").transpose();
+
+            let mut u_elem = vec![0.0_f64; n_vec];
+            for (k, &dof) in elem_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
+
+            let mut k_elem = vec![0.0_f64; n_vec * n_vec];
+            let mut phi = vec![0.0_f64; n_ldofs];
+            let mut gref = vec![0.0_f64; n_ldofs * dim];
+            let mut gphys = vec![0.0_f64; n_ldofs * dim];
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                let w = quad.weights[q] * det_j.abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                ref_elem.eval_grad_basis(xi, &mut gref);
+                xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
+
+                let mut du = DMatrix::zeros(dim, dim);
+                for k in 0..n_ldofs {
+                    for i in 0..dim {
+                        for j in 0..dim {
+                            du[(i, j)] += u_elem[k * dim + i] * gphys[k * dim + j];
+                        }
+                    }
+                }
+                let mut f_mat = DMatrix::identity(dim, dim);
+                f_mat += &du;
+                let (_p, ct) = self.model.pk1_and_tangent(&f_mat);
+
+                for k in 0..n_ldofs {
+                    for i in 0..dim {
+                        let row = k * dim + i;
+                        for l in 0..n_ldofs {
+                            for a in 0..dim {
+                                let col = l * dim + a;
+                                let mut val = 0.0;
+                                for j in 0..dim {
+                                    for b in 0..dim {
+                                        val += ct[(i * dim + j, a * dim + b)]
+                                            * gphys[k * dim + j]
+                                            * gphys[l * dim + b];
+                                    }
+                                }
+                                k_elem[row * n_vec + col] += w * val;
+                            }
+                        }
+                    }
+                }
+            }
+            coo.add_element_matrix(&elem_dofs, &k_elem);
+        }
+        coo.into_csr()
+    }
+
+    /// Compute the total elastic (internal) energy `∫ ψ(F) dV`.
+    pub fn elastic_energy(&self, u: &[f64]) -> f64 {
+        let mesh = self.space.mesh();
+        let dim = mesh.dim() as usize;
+        let order = self.space.order();
+        let mut energy = 0.0;
+
+        for e in mesh.elem_iter() {
+            let elem_type = mesh.element_type(e);
+            let ref_elem = ref_elem_vol(elem_type, order);
+            let n_ldofs = ref_elem.n_dofs();
+            let n_vec = n_ldofs * dim;
+            let quad = ref_elem.quadrature(self.quad_order);
+
+            let nodes = mesh.element_nodes(e);
+            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
+            let jit = jac.try_inverse().expect("singular").transpose();
+
+            let mut u_elem = vec![0.0_f64; n_vec];
+            let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
+                .map(|&d| d as usize).collect();
+            for (k, &dof) in elem_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
+
+            let mut phi = vec![0.0_f64; n_ldofs];
+            let mut gref = vec![0.0_f64; n_ldofs * dim];
+            let mut gphys = vec![0.0_f64; n_ldofs * dim];
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                let w = quad.weights[q] * det_j.abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                ref_elem.eval_grad_basis(xi, &mut gref);
+                xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
+
+                let mut du = DMatrix::zeros(dim, dim);
+                for k in 0..n_ldofs {
+                    for i in 0..dim {
+                        for j in 0..dim {
+                            du[(i, j)] += u_elem[k * dim + i] * gphys[k * dim + j];
+                        }
+                    }
+                }
+                let mut f_mat = DMatrix::identity(dim, dim);
+                f_mat += &du;
+                energy += w * self.model.elastic_energy_density(&f_mat);
+            }
+        }
+        energy
     }
 }
 
