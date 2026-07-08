@@ -100,6 +100,7 @@ fn main() {
     } else {
         boundary_dofs_hcurl(space.mesh(), &space, &all_tags)
     };
+    eprintln!("  Boundary DOFs: {} / {}", ess_bdr.len(), n_dofs);
     let ess_vals = vec![0.0_f64; ess_bdr.len()];
 
     // 7. Right-hand side: b(v) = ∫ f·v dx  where

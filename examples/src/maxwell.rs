@@ -53,9 +53,8 @@ use fem_assembly::{
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
 use fem_element::nedelec::TriND1;
-use fem_element::reference::VectorReferenceElement;
 use fem_linalg::CsrMatrix;
-use fem_mesh::{Mesh, topology::MeshTopology};
+use fem_mesh::{Mesh, element_type::ElementType, topology::MeshTopology};
 use fem_solver::{EigenResult, LobpcgConfig, SolveResult, SolverConfig, lobpcg_constrained_preconditioned, solve_cg_operator, solve_pcg_jacobi, solve_pcg_precond};
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space, constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl}, fe_space::FESpace};
 use nalgebra::DMatrix;
@@ -1481,59 +1480,142 @@ pub fn l2_error_hcurl_exact<F>(
 where
     F: Fn(&[f64]) -> [f64; 2],
 {
-    let mesh = space.mesh();
-    let ref_elem = TriND1;
-    let quad = ref_elem.quadrature(6);
-    let n_ldofs = ref_elem.n_dofs();
+    use fem_element::nedelec::QuadND1;
+    use fem_element::VectorReferenceElement;
 
+    let mesh = space.mesh();
     let mut err2 = 0.0_f64;
-    let mut ref_phi = vec![0.0; n_ldofs * 2];
 
     for e in mesh.elem_iter() {
-        let nodes = mesh.element_nodes(e);
+        let elem_type = mesh.element_type(e);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);
+        let nodes = mesh.element_nodes(e);
 
-        let x0 = mesh.node_coords(nodes[0]);
-        let x1 = mesh.node_coords(nodes[1]);
-        let x2 = mesh.node_coords(nodes[2]);
-        let j00 = x1[0] - x0[0];
-        let j01 = x2[0] - x0[0];
-        let j10 = x1[1] - x0[1];
-        let j11 = x2[1] - x0[1];
-        let det_j = (j00 * j11 - j01 * j10).abs();
+        match elem_type {
+            ElementType::Tri3 => {
+                let ref_elem = TriND1;
+                let quad = ref_elem.quadrature(6);
+                let n_ldofs = ref_elem.n_dofs();
+                let mut ref_phi = vec![0.0; n_ldofs * 2];
 
-        let inv_det = 1.0 / (j00 * j11 - j01 * j10);
-        let jit00 =  j11 * inv_det;
-        let jit01 = -j10 * inv_det;
-        let jit10 = -j01 * inv_det;
-        let jit11 =  j00 * inv_det;
+                let x0 = mesh.node_coords(nodes[0]);
+                let x1 = mesh.node_coords(nodes[1]);
+                let x2 = mesh.node_coords(nodes[2]);
+                let j00 = x1[0] - x0[0]; let j01 = x2[0] - x0[0];
+                let j10 = x1[1] - x0[1]; let j11 = x2[1] - x0[1];
+                let det_j = (j00 * j11 - j01 * j10).abs();
+                let inv_det = 1.0 / (j00 * j11 - j01 * j10);
+                let (jit00, jit01) = ( j11 * inv_det, -j10 * inv_det);
+                let (jit10, jit11) = (-j01 * inv_det,  j00 * inv_det);
 
-        for (qi, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[qi] * det_j;
-            let xp = [
-                x0[0] + j00 * xi[0] + j01 * xi[1],
-                x0[1] + j10 * xi[0] + j11 * xi[1],
-            ];
+                for (qi, xi) in quad.points.iter().enumerate() {
+                    let w = quad.weights[qi] * det_j;
+                    let xp = [
+                        x0[0] + j00 * xi[0] + j01 * xi[1],
+                        x0[1] + j10 * xi[0] + j11 * xi[1],
+                    ];
+                    ref_elem.eval_basis_vec(xi, &mut ref_phi);
 
-            ref_elem.eval_basis_vec(xi, &mut ref_phi);
-
-            let mut eh = [0.0_f64; 2];
-            for i in 0..n_ldofs {
-                let s = signs[i];
-                let phi_x = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
-                let phi_y = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
-                eh[0] += s * uh[dofs[i]] * phi_x;
-                eh[1] += s * uh[dofs[i]] * phi_y;
+                    let mut eh = [0.0_f64; 2];
+                    for i in 0..n_ldofs {
+                        let s = signs[i];
+                        let phi_x = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
+                        let phi_y = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
+                        eh[0] += s * uh[dofs[i]] * phi_x;
+                        eh[1] += s * uh[dofs[i]] * phi_y;
+                    }
+                    let dx = eh[0] - exact(&xp)[0];
+                    let dy = eh[1] - exact(&xp)[1];
+                    err2 += w * (dx * dx + dy * dy);
+                }
             }
+            ElementType::Quad4 => {
+                let ref_elem = QuadND1;
+                let quad = ref_elem.quadrature(6);
+                let n_ldofs = ref_elem.n_dofs();
+                let mut ref_phi = vec![0.0; n_ldofs * 2];
 
-            let ex = exact(&xp);
-            let dx = eh[0] - ex[0];
-            let dy = eh[1] - ex[1];
-            err2 += w * (dx * dx + dy * dy);
+                // Quad4 bilinear mapping: x(ξ,η) = Σ N_i(ξ,η) * x_i
+                let xc: Vec<Vec<f64>> = (0..4)
+                    .map(|k| mesh.node_coords(nodes[k]).to_vec())
+                    .collect();
+                // Quad4 scalar shape functions for the mapping
+                #[allow(non_snake_case)]
+                fn N(k: usize, xi: f64, eta: f64) -> f64 {
+                    match k {
+                        0 => 0.25 * (1.0 - xi) * (1.0 - eta),
+                        1 => 0.25 * (1.0 + xi) * (1.0 - eta),
+                        2 => 0.25 * (1.0 + xi) * (1.0 + eta),
+                        3 => 0.25 * (1.0 - xi) * (1.0 + eta),
+                        _ => 0.0,
+                    }
+                }
+                #[allow(non_snake_case)]
+                fn dN_dxi(k: usize, eta: f64) -> f64 {
+                    match k {
+                        0 => -0.25 * (1.0 - eta),
+                        1 =>  0.25 * (1.0 - eta),
+                        2 =>  0.25 * (1.0 + eta),
+                        3 => -0.25 * (1.0 + eta),
+                        _ => 0.0,
+                    }
+                }
+                #[allow(non_snake_case)]
+                fn dN_deta(k: usize, xi: f64) -> f64 {
+                    match k {
+                        0 => -0.25 * (1.0 - xi),
+                        1 => -0.25 * (1.0 + xi),
+                        2 =>  0.25 * (1.0 + xi),
+                        3 =>  0.25 * (1.0 - xi),
+                        _ => 0.0,
+                    }
+                }
+
+                for (qi, xi_eta) in quad.points.iter().enumerate() {
+                    let (xi, eta) = (xi_eta[0], xi_eta[1]);
+
+                    // Jacobian of the bilinear mapping
+                    let mut j00 = 0.0; let mut j01 = 0.0;
+                    let mut j10 = 0.0; let mut j11 = 0.0;
+                    for k in 0..4 {
+                        let dxi = dN_dxi(k, eta);
+                        let deta = dN_deta(k, xi);
+                        j00 += dxi * xc[k][0]; j01 += deta * xc[k][0];
+                        j10 += dxi * xc[k][1]; j11 += deta * xc[k][1];
+                    }
+                    let det_j = (j00 * j11 - j01 * j10).abs();
+                    let inv_det = 1.0 / (j00 * j11 - j01 * j10);
+                    let (jit00, jit01) = ( j11 * inv_det, -j10 * inv_det);
+                    let (jit10, jit11) = (-j01 * inv_det,  j00 * inv_det);
+
+                    // Physical coordinates
+                    let xp = [
+                        xc[0][0] * N(0, xi, eta) + xc[1][0] * N(1, xi, eta)
+                            + xc[2][0] * N(2, xi, eta) + xc[3][0] * N(3, xi, eta),
+                        xc[0][1] * N(0, xi, eta) + xc[1][1] * N(1, xi, eta)
+                            + xc[2][1] * N(2, xi, eta) + xc[3][1] * N(3, xi, eta),
+                    ];
+
+                    let w = quad.weights[qi] * det_j;
+                    ref_elem.eval_basis_vec(&[xi, eta], &mut ref_phi);
+
+                    let mut eh = [0.0_f64; 2];
+                    for i in 0..n_ldofs {
+                        let s = signs[i];
+                        let phi_x = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
+                        let phi_y = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
+                        eh[0] += s * uh[dofs[i]] * phi_x;
+                        eh[1] += s * uh[dofs[i]] * phi_y;
+                    }
+                    let dx = eh[0] - exact(&xp)[0];
+                    let dy = eh[1] - exact(&xp)[1];
+                    err2 += w * (dx * dx + dy * dy);
+                }
+            }
+            _ => panic!("l2_error_hcurl_exact: unsupported element type {elem_type:?}"),
         }
     }
-
     err2.sqrt()
 }
 
