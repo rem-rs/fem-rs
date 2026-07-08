@@ -2,47 +2,61 @@
 //!
 //! Solves `-Δu + u = f` on the unit sphere surface with `f = 7·x·y / r²`,
 //! exact solution `u = x·y / r²`.  Demonstrates surface FEM on a 2-D manifold
-//! embedded in 3-D space using `Mesh<3>` with Tri3 elements.
+//! embedded in 3-D space using `Mesh<3>` with Tri3 or Quad4 elements.
 //!
 //! Reference: `mfem/ex7.cpp`
 //!
 //! ## Usage
 //! ```bash
+//! # Triangles (default)
 //! cargo run --example mfem_ex7_surface_poisson -- -no-vis
-//! cargo run --example mfem_ex7_surface_poisson -- -r 3 -snap -no-vis
+//! # Quads
+//! cargo run --example mfem_ex7_surface_poisson -- -e 1 -snap -no-vis
 //! ```
 //!
 //! ## Flags
 //! | Flag | Default | Description |
 //! |------|---------|-------------|
-//! | `-r/--refine` | 2 | Uniform refinements (octahedron → subdivided N times) |
-//! | `-o/--order` | 2 | FE order (only 1 supported; higher values warn) |
-//! | `-e/--elem` | 0 | Element type (0 = triangles; quads not yet supported) |
-//! | `-snap/--always-snap` | — | Snap nodes to sphere after each refinement |
-//! | `-amr/--refine-locally` | 0 | Local refinement (not yet implemented) |
-//! | `-no-vis` | — | Disable GLVis (accepted, no-op) |
+//! | `-e/--elem` | 0 | Element type (0=tri, 1=quad) |
+//! | `-r/--refine` | 2 | Uniform refinements |
+//! | `-o/--order` | 2 | FE order (only 1 supported) |
+//! | `-snap/--always-snap` | — | Snap after each refinement |
+//! | `-amr/--refine-locally` | 0 | Not yet implemented |
+//! | `-no-vis` | — | Disable GLVis (no-op) |
+
+use std::collections::HashMap;
 
 use fem_assembly::boundary::surface::{
     SurfaceAssembler, SurfaceDiffusionIntegrator, SurfaceDomainSourceIntegrator,
     SurfaceMassIntegrator,
+    SurfaceQuad4Assembler, SurfaceQuad4DiffusionIntegrator,
+    SurfaceQuad4DomainSourceIntegrator, SurfaceQuad4MassIntegrator,
 };
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType};
 use fem_solver::{fem_to_linlvo_csr, solve_pcg, SolveResult};
 use fem_space::{H1Space, fe_space::FESpace};
 use linlvo::SsorPrecond;
-use std::collections::HashMap;
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 fn main() {
     let args = Args::parse();
     let t0 = std::time::Instant::now();
+    let is_quad = args.elem_type == 1;
 
-    // ── 1. Build sphere mesh (octahedron, subdivided N times) ──────────────────
-    let mut mesh = build_octahedron_mesh();
+    // ── 1. Build sphere mesh ─────────────────────────────────────────────────
+    let mut mesh: Mesh<3> = if is_quad {
+        build_cube_mesh()
+    } else {
+        build_octahedron_mesh()
+    };
     for l in 0..=args.ref_levels {
         if l > 0 {
-            mesh = subdivide_tri3_surface(&mesh);
+            mesh = if is_quad {
+                subdivide_quad4_surface(&mesh)
+            } else {
+                subdivide_tri3_surface(&mesh)
+            };
         }
         if args.always_snap || l == args.ref_levels {
             snap_nodes(&mut mesh);
@@ -51,24 +65,38 @@ fn main() {
 
     let n_elems = mesh.n_elems();
     let n_nodes = mesh.n_nodes();
-    eprintln!("  Mesh: {} nodes, {} triangles on unit sphere", n_nodes, n_elems);
+    let elem_name = if is_quad { "quads" } else { "triangles" };
+    eprintln!("  Mesh: {} nodes, {} {} on unit sphere", n_nodes, n_elems, elem_name);
 
-    // ── 2. Define H¹ space (order 1) ───────────────────────────────────────────
-    let order = args.order.min(1); // only order 1 supported
+    // ── 2. Define H1 space (order 1) ─────────────────────────────────────────
+    let order = args.order.min(1);
     let space = H1Space::new(mesh, order);
     let n_dofs = space.n_dofs();
     println!("Number of unknowns: {}", n_dofs);
 
-    // ── 3. Assemble surface stiffness (-Δ_Γ) + mass (+u) ─────────────────────
-    // SurfaceAssembler uses closure-based integrators.
-    let stiffness = SurfaceAssembler::assemble_bilinear(&space, &|nodes, ke| {
-        SurfaceDiffusionIntegrator.add_to_element_matrix(nodes, ke);
-    });
-    let mass_mat = SurfaceAssembler::assemble_bilinear(&space, &|nodes, ke| {
-        SurfaceMassIntegrator.add_to_element_matrix(nodes, ke);
-    });
-    let mut a = stiffness;
-    // a = stiffness + mass
+    // ── 3. Assemble surface stiffness (-Delta_Gamma) + mass (+u) ────────────
+    let rhs_fn = &|x: &[f64; 3]| {
+        let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
+        7.0 * x[0] * x[1] / r2
+    };
+
+    let (mut a, mass_mat) = if is_quad {
+        let k = SurfaceQuad4Assembler::assemble_bilinear(&space, &|x, ke| {
+            SurfaceQuad4DiffusionIntegrator.add_to_element_matrix(x, ke);
+        });
+        let m = SurfaceQuad4Assembler::assemble_bilinear(&space, &|x, ke| {
+            SurfaceQuad4MassIntegrator.add_to_element_matrix(x, ke);
+        });
+        (k, m)
+    } else {
+        let k = SurfaceAssembler::assemble_bilinear(&space, &|x, ke| {
+            SurfaceDiffusionIntegrator.add_to_element_matrix(x, ke);
+        });
+        let m = SurfaceAssembler::assemble_bilinear(&space, &|x, ke| {
+            SurfaceMassIntegrator.add_to_element_matrix(x, ke);
+        });
+        (k, m)
+    };
     for i in 0..a.nrows {
         for jp in a.row_ptr[i]..a.row_ptr[i + 1] {
             let j = a.col_idx[jp] as usize;
@@ -76,16 +104,18 @@ fn main() {
         }
     }
 
-    // ── 4. Assemble RHS: f = 7·x·y / r² ───────────────────────────────────────
-    let rhs_fn = &|x: &[f64; 3]| {
-        let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
-        7.0 * x[0] * x[1] / r2
+    // ── 4. Assemble RHS: f = 7*x*y / r^2 ────────────────────────────────────
+    let rhs = if is_quad {
+        SurfaceQuad4Assembler::assemble_linear(&space, &|x, fe| {
+            SurfaceQuad4DomainSourceIntegrator { f: rhs_fn }.add_to_element_vector(x, fe);
+        })
+    } else {
+        SurfaceAssembler::assemble_linear(&space, &|x, fe| {
+            SurfaceDomainSourceIntegrator { f: rhs_fn }.add_to_element_vector(x, fe);
+        })
     };
-    let rhs = SurfaceAssembler::assemble_linear(&space, &|nodes, fe| {
-        SurfaceDomainSourceIntegrator { f: rhs_fn }.add_to_element_vector(nodes, fe);
-    });
 
-    // ── 5. Solve: PCG + SSOR(ω=1) ────────────────────────────────────────────
+    // ── 5. Solve: PCG + SSOR(omega=1) ──────────────────────────────────────
     let mut u = vec![0.0; n_dofs];
     let la = fem_to_linlvo_csr(&a);
     let prec = SsorPrecond::from_csr(&la, 1.0).expect("SsorPrecond::from_csr");
@@ -98,51 +128,76 @@ fn main() {
         );
     }
 
-    // ── 6. L² error: ‖u_h − u_exact‖_{L²(Γ)} via element-level quadrature ────
-    // Uses 3-point rule on reference triangle (matches SurfaceMassIntegrator),
-    // with surface measure dS = sqrt(det(G)) * dξ.
+    // ── 6. L2 error via element-level quadrature ───────────────────────────
     let exact_fn = |x: &[f64; 3]| {
         let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
         x[0] * x[1] / r2
     };
-    let qpts = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
-    let qwt = [1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0];
     let mesh_3 = space.mesh();
     let mut err2 = 0.0_f64;
-    for e in 0..mesh_3.n_elems() as u32 {
-        let ns = mesh_3.element_nodes(e);
-        let x0 = mesh_3.node_coords(ns[0]);
-        let x1 = mesh_3.node_coords(ns[1]);
-        let x2 = mesh_3.node_coords(ns[2]);
-        // Surface Jacobian J = [x1-x0, x2-x0]  (3×2)
-        let j0 = [x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]];
-        let j1 = [x2[0] - x0[0], x2[1] - x0[1], x2[2] - x0[2]];
-        // Metric G = J^T * J
-        let g00 = j0[0] * j0[0] + j0[1] * j0[1] + j0[2] * j0[2];
-        let g01 = j0[0] * j1[0] + j0[1] * j1[1] + j0[2] * j1[2];
-        let g11 = j1[0] * j1[0] + j1[1] * j1[1] + j1[2] * j1[2];
-        let sqrt_det_g = (g00 * g11 - g01 * g01).sqrt().max(1e-30);
-        for q in 0..3 {
-            let (xi, eta) = (qpts[q][0], qpts[q][1]);
-            let phi = [1.0 - xi - eta, xi, eta];
-            // Physical coordinates of quadrature point
-            let xp = [
-                phi[0] * x0[0] + phi[1] * x1[0] + phi[2] * x2[0],
-                phi[0] * x0[1] + phi[1] * x1[1] + phi[2] * x2[1],
-                phi[0] * x0[2] + phi[1] * x1[2] + phi[2] * x2[2],
-            ];
-            let uh = phi[0] * u[ns[0] as usize]
-                   + phi[1] * u[ns[1] as usize]
-                   + phi[2] * u[ns[2] as usize];
-            let ue = exact_fn(&xp);
-            let diff = uh - ue;
-            err2 += diff * diff * qwt[q] * sqrt_det_g;
+    if is_quad {
+        let qpts = [[-0.57735, -0.57735], [0.57735, -0.57735],
+                    [0.57735,  0.57735], [-0.57735,  0.57735]];
+        let qwt = [1.0, 1.0, 1.0, 1.0];
+        for e in 0..mesh_3.n_elems() as u32 {
+            let ns = mesh_3.element_nodes(e);
+            let x = [mesh_3.node_coords(ns[0]), mesh_3.node_coords(ns[1]),
+                     mesh_3.node_coords(ns[2]), mesh_3.node_coords(ns[3])];
+            let dxi = [(-x[0][0]+x[1][0]+x[2][0]-x[3][0])/4.0,
+                       (-x[0][1]+x[1][1]+x[2][1]-x[3][1])/4.0,
+                       (-x[0][2]+x[1][2]+x[2][2]-x[3][2])/4.0];
+            let deta = [(-x[0][0]-x[1][0]+x[2][0]+x[3][0])/4.0,
+                        (-x[0][1]-x[1][1]+x[2][1]+x[3][1])/4.0,
+                        (-x[0][2]-x[1][2]+x[2][2]+x[3][2])/4.0];
+            let g00 = dxi[0]*dxi[0]+dxi[1]*dxi[1]+dxi[2]*dxi[2];
+            let g01 = dxi[0]*deta[0]+dxi[1]*deta[1]+dxi[2]*deta[2];
+            let g11 = deta[0]*deta[0]+deta[1]*deta[1]+deta[2]*deta[2];
+            let sqrt_det_g = (g00*g11-g01*g01).sqrt().max(1e-30);
+            for q in 0..4 {
+                let (xi, eta) = (qpts[q][0], qpts[q][1]);
+                let phi = [0.25*(1.0-xi)*(1.0-eta), 0.25*(1.0+xi)*(1.0-eta),
+                           0.25*(1.0+xi)*(1.0+eta), 0.25*(1.0-xi)*(1.0+eta)];
+                let xp = [phi[0]*x[0][0]+phi[1]*x[1][0]+phi[2]*x[2][0]+phi[3]*x[3][0],
+                          phi[0]*x[0][1]+phi[1]*x[1][1]+phi[2]*x[2][1]+phi[3]*x[3][1],
+                          phi[0]*x[0][2]+phi[1]*x[1][2]+phi[2]*x[2][2]+phi[3]*x[3][2]];
+                let uh = phi[0]*u[ns[0]as usize]+phi[1]*u[ns[1]as usize]
+                       + phi[2]*u[ns[2]as usize]+phi[3]*u[ns[3]as usize];
+                let ue = exact_fn(&xp);
+                let diff = uh - ue;
+                err2 += diff*diff*qwt[q]*sqrt_det_g;
+            }
+        }
+    } else {
+        let qpts_tri = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
+        let qwt_tri = [1.0/6.0, 1.0/6.0, 1.0/6.0];
+        for e in 0..mesh_3.n_elems() as u32 {
+            let ns = mesh_3.element_nodes(e);
+            let x0 = mesh_3.node_coords(ns[0]);
+            let x1 = mesh_3.node_coords(ns[1]);
+            let x2 = mesh_3.node_coords(ns[2]);
+            let j0 = [x1[0]-x0[0], x1[1]-x0[1], x1[2]-x0[2]];
+            let j1 = [x2[0]-x0[0], x2[1]-x0[1], x2[2]-x0[2]];
+            let g00 = j0[0]*j0[0]+j0[1]*j0[1]+j0[2]*j0[2];
+            let g01 = j0[0]*j1[0]+j0[1]*j1[1]+j0[2]*j1[2];
+            let g11 = j1[0]*j1[0]+j1[1]*j1[1]+j1[2]*j1[2];
+            let sqrt_det_g = (g00*g11-g01*g01).sqrt().max(1e-30);
+            for q in 0..3 {
+                let (xi, eta) = (qpts_tri[q][0], qpts_tri[q][1]);
+                let phi = [1.0-xi-eta, xi, eta];
+                let xp = [phi[0]*x0[0]+phi[1]*x1[0]+phi[2]*x2[0],
+                          phi[0]*x0[1]+phi[1]*x1[1]+phi[2]*x2[1],
+                          phi[0]*x0[2]+phi[1]*x1[2]+phi[2]*x2[2]];
+                let uh = phi[0]*u[ns[0]as usize]+phi[1]*u[ns[1]as usize]+phi[2]*u[ns[2]as usize];
+                let ue = exact_fn(&xp);
+                let diff = uh - ue;
+                err2 += diff*diff*qwt_tri[q]*sqrt_det_g;
+            }
         }
     }
     let l2_err = err2.sqrt();
     println!("\nL2 norm of error: {:.10e}", l2_err);
 
-    // ── 7. Output files ───────────────────────────────────────────────────────
+    // ── 7. Output files ─────────────────────────────────────────────────────
     {
         use fem_io::mfem::write_gf_file;
         use fem_io::mfem::write_mfem_file_3d;
@@ -158,158 +213,185 @@ fn main() {
     eprintln!("  Done.");
 }
 
-// ─── Sphere mesh construction ────────────────────────────────────────────────
+// ─── Octahedron mesh (Tri3) ─────────────────────────────────────────────────
 
-/// Build an octahedron inscribed in the unit sphere (6 vertices, 8 triangles).
-///
-/// Vertices and connectivity match MFEM ex7: (±1,0,0), (0,±1,0), (0,0,±1)
-/// so that the resulting mesh after refinement matches C++ exactly.
 fn build_octahedron_mesh() -> Mesh<3> {
-    // MFEM ex7 vertex order: X+, Y+, X-, Y-, Z+, Z-
     let coords = vec![
-        1.0,  0.0,  0.0,  // 0: X+
-        0.0,  1.0,  0.0,  // 1: Y+
-       -1.0,  0.0,  0.0,  // 2: X-
-        0.0, -1.0,  0.0,  // 3: Y-
-        0.0,  0.0,  1.0,  // 4: Z+
-        0.0,  0.0, -1.0,  // 5: Z-
+        1.0,  0.0,  0.0,
+        0.0,  1.0,  0.0,
+       -1.0,  0.0,  0.0,
+        0.0, -1.0,  0.0,
+        0.0,  0.0,  1.0,
+        0.0,  0.0, -1.0,
     ];
-    // MFEM ex7 triangle connectivity
     let conn = vec![
-        0u32, 1, 4,  1, 2, 4,  2, 3, 4,  3, 0, 4,
+        0, 1, 4,  1, 2, 4,  2, 3, 4,  3, 0, 4,
         1, 0, 5,  2, 1, 5,  3, 2, 5,  0, 3, 5,
     ];
-
     Mesh {
-        coords,
-        conn,
-        elem_tags: (1..=8).collect(), // attributes 1..8 (matches MFEM)
+        coords, conn, elem_tags: (1..=8).collect(),
         elem_type: ElementType::Tri3,
-        face_conn: vec![],
-        face_tags: vec![],
+        face_conn: vec![], face_tags: vec![],
         face_type: ElementType::Line2,
-        elem_types: None,
-        elem_offsets: None,
-        face_types: None,
-        face_offsets: None,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
         face_to_elem: None,
-        edge_conn: vec![],
-        edge_to_elem: vec![],
+        edge_conn: vec![], edge_to_elem: vec![],
     }
 }
 
-/// Uniformly subdivide each Tri3 into 4. New edge-midpoint nodes are placed at
-/// the linear midpoint (not yet snapped to the sphere).
 fn subdivide_tri3_surface(mesh: &Mesh<3>) -> Mesh<3> {
     let old_n_tri = mesh.conn.len() / 3;
-
-    // Build edge → midpoint map.
     let mut edge_map: HashMap<(u32, u32), u32> = HashMap::new();
     let mut coords = mesh.coords.clone();
     let mut next_node = (coords.len() / 3) as u32;
-
     let mut new_conn = Vec::with_capacity(old_n_tri * 12);
     let mut new_tags = Vec::with_capacity(old_n_tri * 4);
+    let ek = |x: u32, y: u32| if x < y { (x, y) } else { (y, x) };
 
     for t in 0..old_n_tri {
         let i = t * 3;
-        let (a, b, c) = (mesh.conn[i], mesh.conn[i + 1], mesh.conn[i + 2]);
+        let (a, b, c) = (mesh.conn[i], mesh.conn[i+1], mesh.conn[i+2]);
         let tag = mesh.elem_tags[t];
-
-        let edge_key = |x: u32, y: u32| if x < y { (x, y) } else { (y, x) };
-
-        let ab = *edge_map.entry(edge_key(a, b)).or_insert_with(|| {
-            let j = next_node;
-            next_node += 1;
-            let (xa, ya, za) = (
-                coords[a as usize * 3],
-                coords[a as usize * 3 + 1],
-                coords[a as usize * 3 + 2],
-            );
-            let (xb, yb, zb) = (
-                coords[b as usize * 3],
-                coords[b as usize * 3 + 1],
-                coords[b as usize * 3 + 2],
-            );
+        let mut mid = |x, y| { let k = ek(x, y); *edge_map.entry(k).or_insert_with(|| {
+            let j = next_node; next_node += 1;
+            let off = |n: u32| -> usize { n as usize * 3 };
             coords.extend_from_slice(&[
-                0.5 * (xa + xb),
-                0.5 * (ya + yb),
-                0.5 * (za + zb),
+                0.5*(coords[off(x)]+coords[off(y)]),
+                0.5*(coords[off(x)+1]+coords[off(y)+1]),
+                0.5*(coords[off(x)+2]+coords[off(y)+2]),
             ]);
             j
-        });
-        let ac = *edge_map.entry(edge_key(a, c)).or_insert_with(|| {
-            let j = next_node;
-            next_node += 1;
-            let (xa, ya, za) = (
-                coords[a as usize * 3],
-                coords[a as usize * 3 + 1],
-                coords[a as usize * 3 + 2],
-            );
-            let (xc, yc, zc) = (
-                coords[c as usize * 3],
-                coords[c as usize * 3 + 1],
-                coords[c as usize * 3 + 2],
-            );
-            coords.extend_from_slice(&[
-                0.5 * (xa + xc),
-                0.5 * (ya + yc),
-                0.5 * (za + zc),
-            ]);
-            j
-        });
-        let bc = *edge_map.entry(edge_key(b, c)).or_insert_with(|| {
-            let j = next_node;
-            next_node += 1;
-            let (xb, yb, zb) = (
-                coords[b as usize * 3],
-                coords[b as usize * 3 + 1],
-                coords[b as usize * 3 + 2],
-            );
-            let (xc, yc, zc) = (
-                coords[c as usize * 3],
-                coords[c as usize * 3 + 1],
-                coords[c as usize * 3 + 2],
-            );
-            coords.extend_from_slice(&[
-                0.5 * (xb + xc),
-                0.5 * (yb + yc),
-                0.5 * (zb + zc),
-            ]);
-            j
-        });
-
+        })};
+        let (ab, ac, bc) = (mid(a,b), mid(a,c), mid(b,c));
         new_conn.extend_from_slice(&[a, ab, ac, b, bc, ab, c, ac, bc, ab, bc, ac]);
         new_tags.extend_from_slice(&[tag, tag, tag, tag]);
     }
-
     Mesh {
-        coords,
-        conn: new_conn,
-        elem_tags: new_tags,
+        coords, conn: new_conn, elem_tags: new_tags,
         elem_type: ElementType::Tri3,
-        face_conn: vec![],
-        face_tags: vec![],
+        face_conn: vec![], face_tags: vec![],
         face_type: ElementType::Line2,
-        elem_types: None,
-        elem_offsets: None,
-        face_types: None,
-        face_offsets: None,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
         face_to_elem: None,
-        edge_conn: vec![],
-        edge_to_elem: vec![],
+        edge_conn: vec![], edge_to_elem: vec![],
     }
 }
 
-/// Project all mesh nodes onto the unit sphere (normalize to r = 1).
+// ─── Cube mesh (Quad4) ──────────────────────────────────────────────────────
+
+fn build_cube_mesh() -> Mesh<3> {
+    let s = 0.5773502691896257_f64; // 1/sqrt(3)
+    let coords = vec![
+       -s, -s, -s,   s, -s, -s,   s,  s, -s,  -s,  s, -s,
+       -s, -s,  s,   s, -s,  s,   s,  s,  s,  -s,  s,  s,
+    ];
+    let conn = vec![
+        3, 2, 1, 0,  0, 1, 5, 4,  1, 2, 6, 5,
+        2, 3, 7, 6,  3, 0, 4, 7,  4, 5, 6, 7,
+    ];
+    Mesh {
+        coords, conn, elem_tags: (1..=6).collect(),
+        elem_type: ElementType::Quad4,
+        face_conn: vec![], face_tags: vec![],
+        face_type: ElementType::Line2,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    }
+}
+
+fn subdivide_quad4_surface(mesh: &Mesh<3>) -> Mesh<3> {
+    let old_n_quad = mesh.conn.len() / 4;
+    let mut edge_map: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut coords = mesh.coords.clone();
+    let mut next_node = (coords.len() / 3) as u32;
+    let mut new_conn = Vec::with_capacity(old_n_quad * 16);
+    let mut new_tags = Vec::with_capacity(old_n_quad * 4);
+    let ek = |x: u32, y: u32| if x < y { (x, y) } else { (y, x) };
+    let off = |n: u32| -> usize { n as usize * 3 };
+
+    for q in 0..old_n_quad {
+        let i = q * 4;
+        let (a, b, c, d) = (mesh.conn[i], mesh.conn[i+1], mesh.conn[i+2], mesh.conn[i+3]);
+        let tag = mesh.elem_tags[q];
+
+        // Compute edge midpoints (no closure borrow issue this way)
+        let ab = *edge_map.entry(ek(a, b)).or_insert_with(|| {
+            let j = next_node; next_node += 1;
+            coords.extend_from_slice(&[
+                0.5*(coords[off(a)]+coords[off(b)]),
+                0.5*(coords[off(a)+1]+coords[off(b)+1]),
+                0.5*(coords[off(a)+2]+coords[off(b)+2]),
+            ]);
+            j
+        });
+        let bc = *edge_map.entry(ek(b, c)).or_insert_with(|| {
+            let j = next_node; next_node += 1;
+            coords.extend_from_slice(&[
+                0.5*(coords[off(b)]+coords[off(c)]),
+                0.5*(coords[off(b)+1]+coords[off(c)+1]),
+                0.5*(coords[off(b)+2]+coords[off(c)+2]),
+            ]);
+            j
+        });
+        let cd = *edge_map.entry(ek(c, d)).or_insert_with(|| {
+            let j = next_node; next_node += 1;
+            coords.extend_from_slice(&[
+                0.5*(coords[off(c)]+coords[off(d)]),
+                0.5*(coords[off(c)+1]+coords[off(d)+1]),
+                0.5*(coords[off(c)+2]+coords[off(d)+2]),
+            ]);
+            j
+        });
+        let da = *edge_map.entry(ek(d, a)).or_insert_with(|| {
+            let j = next_node; next_node += 1;
+            coords.extend_from_slice(&[
+                0.5*(coords[off(d)]+coords[off(a)]),
+                0.5*(coords[off(d)+1]+coords[off(a)+1]),
+                0.5*(coords[off(d)+2]+coords[off(a)+2]),
+            ]);
+            j
+        });
+
+        // Quad center
+        let cx = next_node; next_node += 1;
+        coords.extend_from_slice(&[
+            0.25*(coords[off(a)]+coords[off(b)]+coords[off(c)]+coords[off(d)]),
+            0.25*(coords[off(a)+1]+coords[off(b)+1]+coords[off(c)+1]+coords[off(d)+1]),
+            0.25*(coords[off(a)+2]+coords[off(b)+2]+coords[off(c)+2]+coords[off(d)+2]),
+        ]);
+
+        new_conn.extend_from_slice(&[a, ab, cx, da]);
+        new_conn.extend_from_slice(&[ab, b, bc, cx]);
+        new_conn.extend_from_slice(&[cx, bc, c, cd]);
+        new_conn.extend_from_slice(&[da, cx, cd, d]);
+        new_tags.extend_from_slice(&[tag, tag, tag, tag]);
+    }
+    Mesh {
+        coords, conn: new_conn, elem_tags: new_tags,
+        elem_type: ElementType::Quad4,
+        face_conn: vec![], face_tags: vec![],
+        face_type: ElementType::Line2,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    }
+}
+
+// ─── Snap nodes to unit sphere ──────────────────────────────────────────────
+
 fn snap_nodes(mesh: &mut Mesh<3>) {
     for n in 0..mesh.n_nodes() as u32 {
         let i = n as usize * 3;
-        let (x, y, z) = (mesh.coords[i], mesh.coords[i + 1], mesh.coords[i + 2]);
-        let r = (x * x + y * y + z * z).sqrt();
+        let (x, y, z) = (mesh.coords[i], mesh.coords[i+1], mesh.coords[i+2]);
+        let r = (x*x + y*y + z*z).sqrt();
         mesh.coords[i] = x / r;
-        mesh.coords[i + 1] = y / r;
-        mesh.coords[i + 2] = z / r;
+        mesh.coords[i+1] = y / r;
+        mesh.coords[i+2] = z / r;
     }
 }
 
@@ -318,7 +400,7 @@ fn snap_nodes(mesh: &mut Mesh<3>) {
 struct Args {
     ref_levels: usize,
     order: u8,
-    _elem_type: u8,
+    elem_type: u8,
     always_snap: bool,
     #[allow(dead_code)]
     amr: u8,
@@ -349,9 +431,6 @@ impl Args {
                 }
                 "-e" | "--elem" => {
                     elem_type = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                    if elem_type != 0 {
-                        eprintln!("  Warning: only triangles (elem=0) supported; using triangles");
-                    }
                 }
                 "-snap" | "--always-snap" => {
                     always_snap = true;
@@ -368,14 +447,6 @@ impl Args {
                 _ => {}
             }
         }
-
-        Args {
-            ref_levels,
-            order,
-            _elem_type: elem_type,
-            always_snap,
-            amr,
-            no_vis,
-        }
+        Args { ref_levels, order, elem_type, always_snap, amr, no_vis }
     }
 }
