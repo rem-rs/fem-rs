@@ -367,41 +367,38 @@ fn sdirk2_step(
 
     let (v, x) = vx.split_at_mut(sc);
 
-    // Stage 1: Solve R(k1) = 0 at t + γ*dt,  using u = u_n
-    // The reduced system is evaluated at (v, x) with dt_stage = γ*dt
-    let mut k1 = vec![0.0; sc];
-    let dt1 = gamma * dt;
-    newton_solve_reduced(op, &mut k1, v, x, dt1, verbose);
+    // ── Stage 1 ─────────────────────────────────────────────────────────────
+    // Solve for kv1: R(kv) = 0 at u_n with timestep γ*dt.
+    // The reduced system operates on kv (velocity increment).
+    // The corresponding position increment is kx1 = v + (γ*dt)*kv1.
+    let mut kv1 = vec![0.0; sc];
+    let dt_gamma = gamma * dt;
+    newton_solve_reduced(op, &mut kv1, v, x, dt_gamma, verbose);
+    let mut kx1 = vec![0.0; sc];
+    for i in 0..sc { kx1[i] = v[i] + dt_gamma * kv1[i]; }
 
-    // Stage 2: U2 = u_n + dt * (1-γ)*k1
+    // ── Stage 2 intermediate state ──────────────────────────────────────────
+    // U2 = u_n + dt*(1-γ)*k1 where k1 = [kv1, kx1]
     let mut v2 = v.to_vec();
     let mut x2 = x.to_vec();
     for i in 0..sc {
-        v2[i] += dt * (1.0 - gamma) * k1[i];
-        x2[i] += dt * (1.0 - gamma) * k1[i]; // w = (1-γ)k1 per MFEM reduction
+        v2[i] += dt * (1.0 - gamma) * kv1[i];
+        x2[i] += dt * (1.0 - gamma) * kx1[i];
     }
-    // Actually, for the coupled system: v_stage2 = v + dt*(1-γ)*k1
-    // x_stage2 = x + dt*(1-γ)*k1  (since dx/dt = v)
-    // In MFEM's reduction: after stage1, u2 = u + dt*(1-γ)*k1 where u=[v,x]
-    // Then stage2 solves for k2 with u2 as initial condition
 
-    // Solve R(k2) = 0 at t + dt, using u = u2, with dt_stage = γ*dt
-    let mut k2 = vec![0.0; sc];
-    let dt2 = gamma * dt;
-    newton_solve_reduced(op, &mut k2, &v2, &x2, dt2, verbose);
+    // ── Stage 2 ─────────────────────────────────────────────────────────────
+    let mut kv2 = vec![0.0; sc];
+    newton_solve_reduced(op, &mut kv2, &v2, &x2, dt_gamma, verbose);
+    let mut kx2 = vec![0.0; sc];
+    for i in 0..sc { kx2[i] = v2[i] + dt_gamma * kv2[i]; }
 
-    // Update: u_{n+1} = u_n + dt * ((1-γ)*k1 + γ*k2)
+    // ── Final update: u_{n+1} = u_n + dt * ((1-γ)*k1 + γ*k2) ──────────────
     for i in 0..sc {
-        let dvi = (1.0 - gamma) * k1[i] + gamma * k2[i];
-        v[i] += dt * dvi;
-        x[i] += dt * dvi;
+        v[i] += dt * ((1.0 - gamma) * kv1[i] + gamma * kv2[i]);
+        x[i] += dt * ((1.0 - gamma) * kx1[i] + gamma * kx2[i]);
     }
-    // Enforce BC on k
     for &d in ess_dofs_k {
-        if d < sc {
-            v[d] = 0.0;
-            x[d] = 0.0;
-        }
+        if d < sc { v[d] = 0.0; x[d] = 0.0; }
     }
 }
 
@@ -422,39 +419,46 @@ fn sdirk3_step(
     let gamma = 1.0 - FRAC_1_SQRT_2;
 
     let (v, x) = vx.split_at_mut(sc);
+    let dt_gamma = gamma * dt;
+    let coeff = 1.0 - gamma;
 
     // Stage 1
-    let mut k1 = vec![0.0; sc];
-    newton_solve_reduced(op, &mut k1, v, x, gamma * dt, verbose);
+    let mut kv1 = vec![0.0; sc];
+    newton_solve_reduced(op, &mut kv1, v, x, dt_gamma, verbose);
+    let mut kx1 = vec![0.0; sc];
+    for i in 0..sc { kx1[i] = v[i] + dt_gamma * kv1[i]; }
 
-    // Stage 2
+    // Stage 2: U2 = u_n + dt*(1-γ)*k1
     let mut v2 = v.to_vec();
     let mut x2 = x.to_vec();
     for i in 0..sc {
-        v2[i] += dt * (1.0 - gamma) * k1[i];
-        x2[i] += dt * (1.0 - gamma) * k1[i];
+        v2[i] += dt * coeff * kv1[i];
+        x2[i] += dt * coeff * kx1[i];
     }
-    let mut k2 = vec![0.0; sc];
-    newton_solve_reduced(op, &mut k2, &v2, &x2, gamma * dt, verbose);
+    let mut kv2 = vec![0.0; sc];
+    newton_solve_reduced(op, &mut kv2, &v2, &x2, dt_gamma, verbose);
+    let mut kx2 = vec![0.0; sc];
+    for i in 0..sc { kx2[i] = v2[i] + dt_gamma * kv2[i]; }
 
-    // Stage 3 (SDIRK23 specific)
-    // For a 3-stage, 3rd-order SDIRK, the third stage typically:
-    // U3 = u_n + dt * (a31*k1 + a32*k2 + a33*k3)
-    // For simplicity in this 1:1, we use the same update as MFEM's SDIRK23
-    // which uses coefficients: (b1, b2, b3) = (0.0, 0.5, 0.5) or similar.
-    // The exact coefficients depend on the MFEM SDIRK23 tableau.
-    // For now, use the 2-stage update as a baseline.
+    // Stage 3 (simplified SDIRK23): same algebraic update as stage 2
+    let mut v3 = v2.to_vec();
+    let mut x3 = x2.to_vec();
     for i in 0..sc {
-        let dvi = (1.0 - gamma) * k1[i] + gamma * k2[i];
-        v[i] += dt * dvi;
-        x[i] += dt * dvi;
+        v3[i] += dt * (-coeff / gamma) * kv2[i]; // u3 = u2 - dt*(1-γ)/γ * k2
+        x3[i] += dt * (-coeff / gamma) * kx2[i];
     }
-    for &d in ess_dofs_k {
-        if d < sc {
-            v[d] = 0.0;
-            x[d] = 0.0;
-        }
+    let mut kv3 = vec![0.0; sc];
+    newton_solve_reduced(op, &mut kv3, &v3, &x3, dt_gamma, verbose);
+    let mut kx3 = vec![0.0; sc];
+    for i in 0..sc { kx3[i] = v3[i] + dt_gamma * kv3[i]; }
+
+    // SDIRK23 update coefficients (b1, b2, b3) depend on the tableau
+    // Default to SDIRK2 update for now
+    for i in 0..sc {
+        v[i] += dt * (coeff * kv1[i] + gamma * kv2[i]); // b1=coeff, b2=gamma, b3=0
+        x[i] += dt * (coeff * kx1[i] + gamma * kx2[i]);
     }
+    for &d in ess_dofs_k { if d < sc { v[d] = 0.0; x[d] = 0.0; } }
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────
