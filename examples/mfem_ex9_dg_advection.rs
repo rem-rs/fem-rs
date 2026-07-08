@@ -25,8 +25,8 @@ fn lump(m: &CsrMatrix<f64>) -> Vec<f64> {
 fn main() {
     let args=Args::parse(); let wall=Instant::now();
 
-    // Create unit-square mesh
-    let mesh = Mesh::<2>::unit_square_tri(8);
+    // Create unit-square mesh (2 subdivisions × 2 quads = 8 triangles)
+    let mesh = Mesh::<2>::unit_square_tri(4);
     let mesh = if args.refine>0 { let mut m=mesh;
         for _ in 0..args.refine { m=refine_uniform(&m); } m
     } else { mesh };
