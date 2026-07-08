@@ -24,15 +24,16 @@
 //! | `-amr/--refine-locally` | 0 | Not yet implemented |
 //! | `-no-vis` | — | Disable GLVis (no-op) |
 
-use std::collections::HashMap;
-
 use fem_assembly::boundary::surface::{
     SurfaceAssembler, SurfaceDiffusionIntegrator, SurfaceDomainSourceIntegrator,
     SurfaceMassIntegrator,
     SurfaceQuad4Assembler, SurfaceQuad4DiffusionIntegrator,
     SurfaceQuad4DomainSourceIntegrator, SurfaceQuad4MassIntegrator,
 };
-use fem_mesh::{Mesh, MeshTopology, element_type::ElementType};
+use fem_mesh::{
+    Mesh, MeshTopology, element_type::ElementType,
+    amr::{refine_at_vertex_surface, refine_uniform_surface_quad4, refine_uniform_surface_tri3},
+};
 use fem_solver::{fem_to_linlvo_csr, solve_pcg, SolveResult};
 use fem_space::{H1Space, fe_space::FESpace};
 use linlvo::SsorPrecond;
@@ -53,14 +54,19 @@ fn main() {
     for l in 0..=args.ref_levels {
         if l > 0 {
             mesh = if is_quad {
-                subdivide_quad4_surface(&mesh)
+                refine_uniform_surface_quad4(&mesh)
             } else {
-                subdivide_tri3_surface(&mesh)
+                refine_uniform_surface_tri3(&mesh)
             };
         }
         if args.always_snap || l == args.ref_levels {
             snap_nodes(&mut mesh);
         }
+    }
+    // AMR: refine near north pole (MFEM ex7 -amr 1)
+    for _ in 0..args.amr {
+        mesh = refine_at_vertex_surface(&mesh, &[0.0, 0.0, 1.0]);
+        snap_nodes(&mut mesh);
     }
 
     let n_elems = mesh.n_elems();
@@ -240,45 +246,6 @@ fn build_octahedron_mesh() -> Mesh<3> {
     }
 }
 
-fn subdivide_tri3_surface(mesh: &Mesh<3>) -> Mesh<3> {
-    let old_n_tri = mesh.conn.len() / 3;
-    let mut edge_map: HashMap<(u32, u32), u32> = HashMap::new();
-    let mut coords = mesh.coords.clone();
-    let mut next_node = (coords.len() / 3) as u32;
-    let mut new_conn = Vec::with_capacity(old_n_tri * 12);
-    let mut new_tags = Vec::with_capacity(old_n_tri * 4);
-    let ek = |x: u32, y: u32| if x < y { (x, y) } else { (y, x) };
-
-    for t in 0..old_n_tri {
-        let i = t * 3;
-        let (a, b, c) = (mesh.conn[i], mesh.conn[i+1], mesh.conn[i+2]);
-        let tag = mesh.elem_tags[t];
-        let mut mid = |x, y| { let k = ek(x, y); *edge_map.entry(k).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            let off = |n: u32| -> usize { n as usize * 3 };
-            coords.extend_from_slice(&[
-                0.5*(coords[off(x)]+coords[off(y)]),
-                0.5*(coords[off(x)+1]+coords[off(y)+1]),
-                0.5*(coords[off(x)+2]+coords[off(y)+2]),
-            ]);
-            j
-        })};
-        let (ab, ac, bc) = (mid(a,b), mid(a,c), mid(b,c));
-        new_conn.extend_from_slice(&[a, ab, ac, b, bc, ab, c, ac, bc, ab, bc, ac]);
-        new_tags.extend_from_slice(&[tag, tag, tag, tag]);
-    }
-    Mesh {
-        coords, conn: new_conn, elem_tags: new_tags,
-        elem_type: ElementType::Tri3,
-        face_conn: vec![], face_tags: vec![],
-        face_type: ElementType::Line2,
-        elem_types: None, elem_offsets: None,
-        face_types: None, face_offsets: None,
-        face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
-    }
-}
-
 // ─── Cube mesh (Quad4) ──────────────────────────────────────────────────────
 
 fn build_cube_mesh() -> Mesh<3> {
@@ -293,85 +260,6 @@ fn build_cube_mesh() -> Mesh<3> {
     ];
     Mesh {
         coords, conn, elem_tags: (1..=6).collect(),
-        elem_type: ElementType::Quad4,
-        face_conn: vec![], face_tags: vec![],
-        face_type: ElementType::Line2,
-        elem_types: None, elem_offsets: None,
-        face_types: None, face_offsets: None,
-        face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
-    }
-}
-
-fn subdivide_quad4_surface(mesh: &Mesh<3>) -> Mesh<3> {
-    let old_n_quad = mesh.conn.len() / 4;
-    let mut edge_map: HashMap<(u32, u32), u32> = HashMap::new();
-    let mut coords = mesh.coords.clone();
-    let mut next_node = (coords.len() / 3) as u32;
-    let mut new_conn = Vec::with_capacity(old_n_quad * 16);
-    let mut new_tags = Vec::with_capacity(old_n_quad * 4);
-    let ek = |x: u32, y: u32| if x < y { (x, y) } else { (y, x) };
-    let off = |n: u32| -> usize { n as usize * 3 };
-
-    for q in 0..old_n_quad {
-        let i = q * 4;
-        let (a, b, c, d) = (mesh.conn[i], mesh.conn[i+1], mesh.conn[i+2], mesh.conn[i+3]);
-        let tag = mesh.elem_tags[q];
-
-        // Compute edge midpoints (no closure borrow issue this way)
-        let ab = *edge_map.entry(ek(a, b)).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            coords.extend_from_slice(&[
-                0.5*(coords[off(a)]+coords[off(b)]),
-                0.5*(coords[off(a)+1]+coords[off(b)+1]),
-                0.5*(coords[off(a)+2]+coords[off(b)+2]),
-            ]);
-            j
-        });
-        let bc = *edge_map.entry(ek(b, c)).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            coords.extend_from_slice(&[
-                0.5*(coords[off(b)]+coords[off(c)]),
-                0.5*(coords[off(b)+1]+coords[off(c)+1]),
-                0.5*(coords[off(b)+2]+coords[off(c)+2]),
-            ]);
-            j
-        });
-        let cd = *edge_map.entry(ek(c, d)).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            coords.extend_from_slice(&[
-                0.5*(coords[off(c)]+coords[off(d)]),
-                0.5*(coords[off(c)+1]+coords[off(d)+1]),
-                0.5*(coords[off(c)+2]+coords[off(d)+2]),
-            ]);
-            j
-        });
-        let da = *edge_map.entry(ek(d, a)).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            coords.extend_from_slice(&[
-                0.5*(coords[off(d)]+coords[off(a)]),
-                0.5*(coords[off(d)+1]+coords[off(a)+1]),
-                0.5*(coords[off(d)+2]+coords[off(a)+2]),
-            ]);
-            j
-        });
-
-        // Quad center
-        let cx = next_node; next_node += 1;
-        coords.extend_from_slice(&[
-            0.25*(coords[off(a)]+coords[off(b)]+coords[off(c)]+coords[off(d)]),
-            0.25*(coords[off(a)+1]+coords[off(b)+1]+coords[off(c)+1]+coords[off(d)+1]),
-            0.25*(coords[off(a)+2]+coords[off(b)+2]+coords[off(c)+2]+coords[off(d)+2]),
-        ]);
-
-        new_conn.extend_from_slice(&[a, ab, cx, da]);
-        new_conn.extend_from_slice(&[ab, b, bc, cx]);
-        new_conn.extend_from_slice(&[cx, bc, c, cd]);
-        new_conn.extend_from_slice(&[da, cx, cd, d]);
-        new_tags.extend_from_slice(&[tag, tag, tag, tag]);
-    }
-    Mesh {
-        coords, conn: new_conn, elem_tags: new_tags,
         elem_type: ElementType::Quad4,
         face_conn: vec![], face_tags: vec![],
         face_type: ElementType::Line2,
@@ -402,7 +290,6 @@ struct Args {
     order: u8,
     elem_type: u8,
     always_snap: bool,
-    #[allow(dead_code)]
     amr: u8,
     #[allow(dead_code)]
     no_vis: bool,
@@ -437,9 +324,6 @@ impl Args {
                 }
                 "-amr" | "--refine-locally" => {
                     amr = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                    if amr > 0 {
-                        eprintln!("  Warning: AMR not yet implemented for surface meshes");
-                    }
                 }
                 "-no-vis" | "--no-visualization" => {
                     no_vis = true;

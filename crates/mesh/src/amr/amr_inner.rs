@@ -616,6 +616,171 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     }
 }
 
+fn midpoint_edge(coords: &mut Vec<f64>, em: &mut HashMap<(u32, u32), u32>, nn: &mut u32,
+                 a: u32, b: u32) -> u32 {
+    let k = if a < b { (a, b) } else { (b, a) };
+    *em.entry(k).or_insert_with(|| {
+        let j = *nn; *nn += 1;
+        let oa = a as usize * 3; let ob = b as usize * 3;
+        coords.extend_from_slice(&[
+            0.5 * (coords[oa] + coords[ob]),
+            0.5 * (coords[oa + 1] + coords[ob + 1]),
+            0.5 * (coords[oa + 2] + coords[ob + 2]),
+        ]);
+        j
+    })
+}
+
+/// Uniformly refine all Tri3 elements of a **surface** mesh (`Mesh<3>`).
+///
+/// Each triangle is split into 4 by adding edge midpoints. New nodes are
+/// placed at the linear midpoint (caller should `snap_nodes` afterwards).
+pub fn refine_uniform_surface_tri3(mesh: &Mesh<3>) -> Mesh<3> {
+    let old_n = mesh.conn.len() / 3;
+    let mut em = HashMap::new();
+    let mut coords = mesh.coords.clone();
+    let mut nn = (coords.len() / 3) as u32;
+    let mut nc = Vec::with_capacity(old_n * 12);
+    let mut nt = Vec::with_capacity(old_n * 4);
+    for t in 0..old_n {
+        let i = t * 3;
+        let (a, b, c) = (mesh.conn[i], mesh.conn[i + 1], mesh.conn[i + 2]);
+        let tag = mesh.elem_tags[t];
+        let ab = midpoint_edge(&mut coords, &mut em, &mut nn, a, b);
+        let ac = midpoint_edge(&mut coords, &mut em, &mut nn, a, c);
+        let bc = midpoint_edge(&mut coords, &mut em, &mut nn, b, c);
+        nc.extend_from_slice(&[a, ab, ac, b, bc, ab, c, ac, bc, ab, bc, ac]);
+        nt.extend_from_slice(&[tag, tag, tag, tag]);
+    }
+    Mesh {
+        coords, conn: nc, elem_tags: nt,
+        elem_type: ElementType::Tri3,
+        face_conn: vec![], face_tags: vec![],
+        face_type: ElementType::Line2,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    }
+}
+
+/// Uniformly refine all Quad4 elements of a **surface** mesh (`Mesh<3>`).
+///
+/// Each quad is split into 4 by adding edge midpoints and a center node.
+pub fn refine_uniform_surface_quad4(mesh: &Mesh<3>) -> Mesh<3> {
+    let old_n = mesh.conn.len() / 4;
+    let mut em = HashMap::new();
+    let mut coords = mesh.coords.clone();
+    let mut nn = (coords.len() / 3) as u32;
+    let mut nc = Vec::with_capacity(old_n * 16);
+    let mut nt = Vec::with_capacity(old_n * 4);
+    for q in 0..old_n {
+        let i = q * 4;
+        let (a, b, c, d) = (mesh.conn[i], mesh.conn[i + 1], mesh.conn[i + 2], mesh.conn[i + 3]);
+        let tag = mesh.elem_tags[q];
+        let ab = midpoint_edge(&mut coords, &mut em, &mut nn, a, b);
+        let bc = midpoint_edge(&mut coords, &mut em, &mut nn, b, c);
+        let cd = midpoint_edge(&mut coords, &mut em, &mut nn, c, d);
+        let da = midpoint_edge(&mut coords, &mut em, &mut nn, d, a);
+        // Quad center
+        let cx = nn; nn += 1;
+        let oa = a as usize * 3; let ob = b as usize * 3;
+        let oc = c as usize * 3; let od = d as usize * 3;
+        coords.extend_from_slice(&[
+            0.25 * (coords[oa] + coords[ob] + coords[oc] + coords[od]),
+            0.25 * (coords[oa + 1] + coords[ob + 1] + coords[oc + 1] + coords[od + 1]),
+            0.25 * (coords[oa + 2] + coords[ob + 2] + coords[oc + 2] + coords[od + 2]),
+        ]);
+        nc.extend_from_slice(&[a, ab, cx, da, ab, b, bc, cx, cx, bc, c, cd, da, cx, cd, d]);
+        nt.extend_from_slice(&[tag, tag, tag, tag]);
+    }
+    Mesh {
+        coords, conn: nc, elem_tags: nt,
+        elem_type: ElementType::Quad4,
+        face_conn: vec![], face_tags: vec![],
+        face_type: ElementType::Line2,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    }
+}
+
+/// Refine elements of a Tri3 surface mesh near a target vertex, matching
+/// MFEM's `Mesh::RefineAtVertex` (used by ex7 `-amr 1`).
+pub fn refine_at_vertex_surface(mesh: &Mesh<3>, target: &[f64; 3]) -> Mesh<3> {
+    let old_n = mesh.conn.len() / 3;
+    // Diameter: max distance from target to any node.
+    let max_dist = (0..(mesh.coords.len() / 3) as u32).map(|n| {
+        let o = n as usize * 3;
+        ((mesh.coords[o] - target[0]).powi(2)
+       + (mesh.coords[o + 1] - target[1]).powi(2)
+       + (mesh.coords[o + 2] - target[2]).powi(2)).sqrt()
+    }).fold(0.0_f64, f64::max);
+
+    let threshold = 0.3 * max_dist;
+    let mut marked = Vec::new();
+    for t in 0..old_n as ElemId {
+        let i = t as usize * 3;
+        let oa = mesh.conn[i] as usize * 3;
+        let ob = mesh.conn[i + 1] as usize * 3;
+        let oc = mesh.conn[i + 2] as usize * 3;
+        let cx = (mesh.coords[oa] + mesh.coords[ob] + mesh.coords[oc]) / 3.0;
+        let cy = (mesh.coords[oa + 1] + mesh.coords[ob + 1] + mesh.coords[oc + 1]) / 3.0;
+        let cz = (mesh.coords[oa + 2] + mesh.coords[ob + 2] + mesh.coords[oc + 2]) / 3.0;
+        let d = ((cx - target[0]).powi(2) + (cy - target[1]).powi(2) + (cz - target[2]).powi(2)).sqrt();
+        if d < threshold { marked.push(t); }
+    }
+    if marked.is_empty() { return mesh.clone(); }
+
+    // Closure: also refine neighbours of marked elements.
+    let ek = |x: u32, y: u32| if x < y { (x, y) } else { (y, x) };
+    let mut edge_elems: HashMap<(u32, u32), Vec<ElemId>> = HashMap::new();
+    for t in 0..old_n as ElemId {
+        let i = t as usize * 3;
+        for &(a, b) in &[(mesh.conn[i], mesh.conn[i+1]), (mesh.conn[i+1], mesh.conn[i+2]), (mesh.conn[i], mesh.conn[i+2])] {
+            edge_elems.entry(ek(a, b)).or_default().push(t);
+        }
+    }
+    let mut to_refine: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+    for &t in &marked {
+        let i = t as usize * 3;
+        for &(a, b) in &[(mesh.conn[i], mesh.conn[i+1]), (mesh.conn[i+1], mesh.conn[i+2]), (mesh.conn[i], mesh.conn[i+2])] {
+            if let Some(adj) = edge_elems.get(&ek(a, b)) { for &a in adj { to_refine.insert(a); } }
+        }
+    }
+
+    let mut em = HashMap::new();
+    let mut coords = mesh.coords.clone();
+    let mut nn = (coords.len() / 3) as u32;
+    let mut nc = Vec::with_capacity(old_n * 12);
+    let mut nt = Vec::with_capacity(old_n * 4);
+    for t in 0..old_n as ElemId {
+        let i = t as usize * 3;
+        let (a, b, c) = (mesh.conn[i], mesh.conn[i + 1], mesh.conn[i + 2]);
+        let tag = mesh.elem_tags[t as usize];
+        if to_refine.contains(&t) {
+            let ab = midpoint_edge(&mut coords, &mut em, &mut nn, a, b);
+            let ac = midpoint_edge(&mut coords, &mut em, &mut nn, a, c);
+            let bc = midpoint_edge(&mut coords, &mut em, &mut nn, b, c);
+            nc.extend_from_slice(&[a, ab, ac, b, bc, ab, c, ac, bc, ab, bc, ac]);
+            nt.extend_from_slice(&[tag, tag, tag, tag]);
+        } else {
+            nc.extend_from_slice(&[a, b, c]); nt.push(tag);
+        }
+    }
+    Mesh {
+        coords, conn: nc, elem_tags: nt,
+        elem_type: ElementType::Tri3,
+        face_conn: vec![], face_tags: vec![],
+        face_type: ElementType::Line2,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Local edge index pairs for Tri3.

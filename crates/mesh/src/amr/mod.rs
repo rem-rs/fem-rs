@@ -6,6 +6,10 @@ mod p_refine;
 mod refine_2d;
 mod make_conforming;
 pub use amr_inner::*;
+pub use amr_inner::{
+    refine_uniform_surface_tri3, refine_uniform_surface_quad4,
+    refine_at_vertex_surface,
+};
 pub use bisect::*;
 pub use estimators::*;
 pub use p_refine::*;
