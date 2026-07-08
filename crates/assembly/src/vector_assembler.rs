@@ -92,16 +92,19 @@ pub fn geo_ref_elem_from_mesh(
     use fem_mesh::element_type::ElementType;
     let et = mesh.element_type(e);
     let g = mesh.geom_order();
-    let is_quad_hex = matches!(et,
+    let needs_iso = matches!(et,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
-        | ElementType::Hex8 | ElementType::Hex20);
-    if g == 1 && !is_quad_hex { return None; }
+        | ElementType::Hex8 | ElementType::Hex20
+        | ElementType::Prism6 | ElementType::Prism15
+        | ElementType::Pyramid5);
+    if g == 1 && !needs_iso { return None; }
     let order = if g > 1 { g } else { 1 };
     let ft = match et {
         ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
         ElementType::Tet4 | ElementType::Tet10 => FactoryElemType::Tet,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => FactoryElemType::Quad,
         ElementType::Hex8 | ElementType::Hex20 => FactoryElemType::Hex,
+        ElementType::Prism6 | ElementType::Prism15 => FactoryElemType::Prism,
         _ => return None,
     };
     Some(factory_ref_elem(ft, order))

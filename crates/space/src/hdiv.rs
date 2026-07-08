@@ -105,6 +105,8 @@ pub struct HDivSpace<M: MeshTopology> {
     dofs_flat: Vec<DofId>,
     signs_flat: Vec<f64>,
     dofs_per_elem: usize,
+    /// Per-element offsets into dofs_flat (non-empty for mixed meshes).
+    elem_offsets: Vec<usize>,
     face_map: FaceDofMap,
     /// Cached element type for dispatch.
     elem_type: ElementType,
@@ -131,9 +133,14 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// - If the element type is not supported.
     pub fn new(mesh: M, order: u8) -> Self {
         let dim = mesh.dim() as usize;
-        let elem_type = mesh.element_type(0);
-        Self::validate_order(dim, &elem_type, order);
-        Self::build(mesh, order, elem_type, false)
+        let first_type = mesh.element_type(0);
+        let is_mixed = (1..mesh.n_elements() as u32).any(|e| mesh.element_type(e) != first_type);
+        if !is_mixed {
+            Self::validate_order(dim, &first_type, order);
+            Self::build(mesh, order, first_type, false)
+        } else {
+            Self::build_mixed(mesh, order)
+        }
     }
 
     /// Construct an H(div) space using BDM (Brezzi-Douglas-Marini) elements.
@@ -191,6 +198,86 @@ impl<M: MeshTopology> HDivSpace<M> {
             _ => panic!(
                 "HDivSpace: unsupported (dim={dim}, elem_type={elem_type:?})"
             ),
+        }
+    }
+
+    /// Build an H(div) space for a 3-D mesh with mixed element types.
+    fn build_mixed(mesh: M, order: u8) -> Self {
+        let dofs_per_face = (order as usize) + 1;
+        let n_elem = mesh.n_elements();
+        let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut next_dof: DofId = 0;
+        let mut dofs_flat = Vec::new();
+        let mut signs_flat = Vec::new();
+        let mut elem_offsets = Vec::with_capacity(n_elem + 1);
+        elem_offsets.push(0);
+
+        for e in 0..n_elem as u32 {
+            let et = mesh.element_type(e);
+            let verts = mesh.element_nodes(e);
+            let nd = dofs_per_face as u32;
+
+            match et {
+                ElementType::Tet4 | ElementType::Tet10 => {
+                    let interior = if order == 0 { 0 } else if order == 1 { 2 } else { 6 };
+                    for &(la, lb, lc) in &TET_FACES {
+                        let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                        if nd == 1 {
+                            dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
+                            signs_flat.push(1.0);
+                        } else {
+                            let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
+                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(1.0); }
+                        }
+                    }
+                    for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
+                }
+                ElementType::Hex8 => {
+                    let interior = if order == 0 { 0 } else { 12 };
+                    for fv in &HEX_FACES {
+                        let key = FaceKey::new(verts[fv[0]], verts[fv[1]], verts[fv[2]]);
+                        if nd == 1 {
+                            dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
+                            signs_flat.push(1.0);
+                        } else {
+                            let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
+                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(1.0); }
+                        }
+                    }
+                    for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
+                }
+                ElementType::Prism6 => {
+                    let interior = 0;
+                    // 2 tri faces + 3 quad faces (quad faces use first 3 verts)
+                    for i in 0..5 {
+                        let fv = &PRISM_FACES[i];
+                        let key = FaceKey::new(verts[fv[0]], verts[fv[1]], verts[fv[2]]);
+                        if nd == 1 {
+                            dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
+                            signs_flat.push(1.0);
+                        } else {
+                            let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
+                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(1.0); }
+                        }
+                    }
+                    for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
+                }
+                _ => panic!("HDivSpace::build_mixed: unsupported {et:?}"),
+            }
+            elem_offsets.push(dofs_flat.len());
+        }
+
+        HDivSpace {
+            mesh,
+            order,
+            n_dofs: next_dof as usize,
+            dofs_flat,
+            signs_flat,
+            dofs_per_elem: 0,
+            elem_offsets,
+            face_map: FaceDofMap::Faces(face_map),
+            elem_type: ElementType::Tet4,
+            is_bdm: false,
         }
     }
 
@@ -270,6 +357,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_flat,
             signs_flat,
             dofs_per_elem,
+            elem_offsets: vec![],
             face_map: FaceDofMap::Edges(edge_map),
             elem_type: ElementType::Tri3,
             is_bdm,
@@ -374,6 +462,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_flat,
             signs_flat,
             dofs_per_elem,
+            elem_offsets: vec![],
             face_map: FaceDofMap::Faces(face_map),
             elem_type: ElementType::Tet4,
             is_bdm,
@@ -475,6 +564,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_flat,
             signs_flat,
             dofs_per_elem,
+            elem_offsets: vec![],
             face_map: FaceDofMap::QuadEdges(edge_map),
             elem_type: ElementType::Quad4,
             is_bdm: false,
@@ -581,6 +671,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_flat,
             signs_flat,
             dofs_per_elem,
+            elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             elem_type: ElementType::Hex8,
             is_bdm: false,
@@ -636,6 +727,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_flat,
             signs_flat,
             dofs_per_elem,
+            elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             elem_type: ElementType::Prism6,
             is_bdm: false,
@@ -691,6 +783,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_flat,
             signs_flat,
             dofs_per_elem,
+            elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             elem_type: ElementType::Pyramid5,
             is_bdm: false,
@@ -737,8 +830,13 @@ impl<M: MeshTopology> HDivSpace<M> {
 
     /// Orientation signs (±1.0) for the DOFs on element `elem`.
     pub fn element_signs(&self, elem: u32) -> &[f64] {
-        let start = elem as usize * self.dofs_per_elem;
-        &self.signs_flat[start..start + self.dofs_per_elem]
+        if !self.elem_offsets.is_empty() {
+            let s = self.elem_offsets[elem as usize];
+            &self.signs_flat[s..self.elem_offsets[elem as usize + 1]]
+        } else {
+            let start = elem as usize * self.dofs_per_elem;
+            &self.signs_flat[start..start + self.dofs_per_elem]
+        }
     }
 
     /// Look up the global DOF for a 2-D face (edge).
@@ -1148,8 +1246,13 @@ impl<M: MeshTopology> FESpace for HDivSpace<M> {
     fn n_dofs(&self) -> usize { self.n_dofs }
 
     fn element_dofs(&self, elem: u32) -> &[DofId] {
-        let start = elem as usize * self.dofs_per_elem;
-        &self.dofs_flat[start..start + self.dofs_per_elem]
+        if !self.elem_offsets.is_empty() {
+            let s = self.elem_offsets[elem as usize];
+            &self.dofs_flat[s..self.elem_offsets[elem as usize + 1]]
+        } else {
+            let start = elem as usize * self.dofs_per_elem;
+            &self.dofs_flat[start..start + self.dofs_per_elem]
+        }
     }
 
     fn interpolate(&self, _f: &dyn Fn(&[f64]) -> f64) -> Vector<f64> {

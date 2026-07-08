@@ -125,8 +125,9 @@ pub struct HCurlSpace<M: MeshTopology> {
     dofs_flat: Vec<DofId>,
     /// Orientation signs (±1.0), same layout as `dofs_flat`.
     signs_flat: Vec<f64>,
-    /// Number of DOFs per element.
-    dofs_per_elem: usize,
+    /// CSR-like offsets into `dofs_flat` / `signs_flat`, length `n_elems + 1`.
+    /// `dofs_flat[offsets[e]..offsets[e+1]]` are the DOFs for element `e`.
+    elem_offsets: Vec<usize>,
     /// Edge → global DOF map (for boundary queries and interpolation).
     edge_to_dof: HashMap<EdgeKey, DofId>,
     /// Face → first global DOF map for 3D ND2 (second = first + 1).
@@ -146,79 +147,41 @@ impl<M: MeshTopology> HCurlSpace<M> {
     pub fn new(mesh: M, order: u8) -> Self {
         assert!(order >= 1, "HCurlSpace: order must be >= 1");
         let dim = mesh.dim() as usize;
-
         assert!(mesh.n_elements() > 0, "HCurlSpace: mesh must contain at least one element");
-        let cell_type = mesh.element_type(0);
-        for e in 1..mesh.n_elements() as u32 {
-            assert_eq!(
-                mesh.element_type(e),
-                cell_type,
-                "HCurlSpace: mixed element types are not supported"
-            );
-        }
-
-        let local_edges: &[(usize, usize)] = match cell_type {
-            ElementType::Tri3 | ElementType::Tri6 => &TRI_EDGES,
-            ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
-            ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
-            ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
-            ElementType::Prism6 => &PRISM_EDGES,
-            ElementType::Pyramid5 => &PYRAMID_EDGES,
-            _ => panic!("HCurlSpace: unsupported element type {cell_type:?}"),
-        };
-
-        // DOFs per element:
-        //   Edge DOFs: k per edge
-        //   Face DOFs (3D Tet NDk, k>=2): k(k-1) per triangular face
-        //   Interior DOFs (3D Tet NDk, k>=3): k(k-1)(k-2)/2
-        //   Interior DOFs (2D Tri NDk, k>=2): k(k-1)
         let k = order as usize;
         let dofs_per_edge = k;
-        let face_dofs_per_face = match (dim, cell_type) {
-            (3, ElementType::Tet4 | ElementType::Tet10) if k >= 2 => k * (k - 1),
-            (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => 2 * k * (k - 1),
-            (3, ElementType::Prism6) if k >= 2 => k * (k - 1), // tri face
-            (3, ElementType::Pyramid5) if k >= 2 => k * (k - 1), // tri face
-            _ => 0,
-        };
-        let interior_dofs_per_elem = match (dim, cell_type) {
-            (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => k * (k - 1),
-            (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => 2 * k * (k - 1),
-            (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => k * (k - 1) * (k - 2) / 2,
-            // Hex NDk (k>=2): pure interior bubbles only (face DOFs handled separately)
-            (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => 3 * k * (k - 1) * (k - 1),
-            // Prism: quad face DOFs handled in n_local_faces (quad type),
-            // tri face DOFs in face_dofs_per_face, interior = signed count.
-            (3, ElementType::Prism6) if k >= 2 => k * (k - 1) * (k - 1),
-            (3, ElementType::Pyramid5) if k >= 2 => k * (k - 1) * (k - 1),
-            _ => 0,
-        };
-        let n_local_faces = match cell_type {
-            ElementType::Tet4 | ElementType::Tet10 if dim == 3 => TET_FACES.len(),
-            ElementType::Hex8 | ElementType::Hex20 if dim == 3 => HEX_QUAD_FACES.len(),
-            ElementType::Prism6 if dim == 3 => PRISM_TRI_FACES.len() + PRISM_QUAD_FACES.len(),
-            ElementType::Pyramid5 if dim == 3 => PYRAMID_TRI_FACES.len() + PYRAMID_QUAD_FACE.len(),
-            _ => 0,
-        };
-        let dofs_per_elem =
-            local_edges.len() * dofs_per_edge + n_local_faces * face_dofs_per_face + interior_dofs_per_elem;
         let n_elem = mesh.n_elements();
 
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
         let mut quad_face_to_dof: HashMap<QuadFaceKey, DofId> = HashMap::new();
         let mut next_dof: DofId = 0;
-        let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
-        let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+        let mut dofs_flat = Vec::new();
+        let mut signs_flat = Vec::new();
+        let mut elem_offsets = Vec::with_capacity(n_elem + 1);
+        elem_offsets.push(0);
+        let first_cell_type = mesh.element_type(0);
 
         for e in 0..n_elem as u32 {
+            let cell_type = mesh.element_type(e);
             let verts = mesh.element_nodes(e);
+
+            // Per-element-type local edges.
+            let local_edges: &[(usize, usize)] = match cell_type {
+                ElementType::Tri3 | ElementType::Tri6 => &TRI_EDGES,
+                ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
+                ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
+                ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
+                ElementType::Prism6 => &PRISM_EDGES,
+                ElementType::Pyramid5 => &PYRAMID_EDGES,
+                _ => panic!("HCurlSpace: unsupported element type {cell_type:?}"),
+            };
+
+            // Edge DOFs.
             for &(li, lj) in local_edges {
                 let (gi, gj) = (verts[li], verts[lj]);
                 let key = EdgeKey::new(gi, gj);
                 let sign = if gi < gj { 1.0 } else { -1.0 };
-
-                // NDk: k DOFs per edge
                 let nd = dofs_per_edge as u32;
                 let first_dof = *edge_to_dof.entry(key).or_insert_with(|| {
                     let d = next_dof; next_dof += nd; d
@@ -229,95 +192,85 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 }
             }
 
-            // 3D Tet NDk face DOFs (k >= 2, shared globally by canonical sorted face key).
-            if face_dofs_per_face > 0 && (cell_type == ElementType::Tet4 || cell_type == ElementType::Tet10) {
-                let ndf = face_dofs_per_face as u32;
-                for &(la, lb, lc) in &TET_FACES {
-                    let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
-                    let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
-                        let d = next_dof; next_dof += ndf; d
-                    });
-                    for m in 0..ndf as usize {
-                        dofs_flat.push(first_dof + m as u32);
-                        signs_flat.push(1.0);
+            // Face DOFs (NDk, k>=2).
+            if k >= 2 && dim == 3 {
+                let ndf = k * (k - 1);
+                match cell_type {
+                    ElementType::Tet4 | ElementType::Tet10 => {
+                        for &(la, lb, lc) in &TET_FACES {
+                            let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                            let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
+                                let d = next_dof; next_dof += ndf as u32; d
+                            });
+                            for m in 0..ndf { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                        }
                     }
+                    ElementType::Hex8 | ElementType::Hex20 => {
+                        let ndf_quad = 2 * k * (k - 1);
+                        for &(la, lb, lc, ld) in &HEX_QUAD_FACES {
+                            let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                            let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
+                                let d = next_dof; next_dof += ndf_quad as u32; d
+                            });
+                            for m in 0..ndf_quad { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                        }
+                    }
+                    ElementType::Prism6 => {
+                        // Tri face DOFs
+                        for &(la, lb, lc) in &PRISM_TRI_FACES {
+                            let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                            let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
+                                let d = next_dof; next_dof += ndf as u32; d
+                            });
+                            for m in 0..ndf { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                        }
+                        // Quad face DOFs
+                        let ndf_quad = 2 * k * (k - 1);
+                        for &(la, lb, lc, ld) in &PRISM_QUAD_FACES {
+                            let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                            let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
+                                let d = next_dof; next_dof += ndf_quad as u32; d
+                            });
+                            for m in 0..ndf_quad { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                        }
+                    }
+                    ElementType::Pyramid5 => {
+                        for &(la, lb, lc) in &PYRAMID_TRI_FACES {
+                            let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                            let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
+                                let d = next_dof; next_dof += ndf as u32; d
+                            });
+                            for m in 0..ndf { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                        }
+                        let (la, lb, lc, ld) = PYRAMID_QUAD_FACE[0];
+                        let ndf_quad = 2 * k * (k - 1);
+                        let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                        let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
+                            let d = next_dof; next_dof += ndf_quad as u32; d
+                        });
+                        for m in 0..ndf_quad { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                    }
+                    _ => {}
                 }
             }
 
-            // Hex NDk quad-face DOFs (shared globally by canonical sorted face key).
-            if k >= 2 && dim == 3 && (cell_type == ElementType::Hex8 || cell_type == ElementType::Hex20) {
-                let ndf = face_dofs_per_face as u32;
-                for &(la, lb, lc, ld) in &HEX_QUAD_FACES {
-                    let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                    let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
-                        let d = next_dof; next_dof += ndf; d
-                    });
-                    for m in 0..ndf as usize {
-                        dofs_flat.push(first_dof + m as u32);
-                        signs_flat.push(1.0);
-                    }
-                }
-            }
-
-            // Prism NDk face DOFs (k>=2): 2 tri faces + 3 quad faces.
-            if k >= 2 && cell_type == ElementType::Prism6 {
-                let ndf = face_dofs_per_face as u32;
-                for &(la, lb, lc) in &PRISM_TRI_FACES {
-                    let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
-                    let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
-                        let d = next_dof; next_dof += ndf; d
-                    });
-                    for m in 0..ndf as usize {
-                        dofs_flat.push(first_dof + m as u32);
-                        signs_flat.push(1.0);
-                    }
-                }
-                // Quad faces: use quad_face_to_dof (2 * k * (k-1) DOFs per quad face).
-                let ndf_quad = (2 * k * (k - 1)) as u32;
-                for &(la, lb, lc, ld) in &PRISM_QUAD_FACES {
-                    let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                    let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
-                        let d = next_dof; next_dof += ndf_quad; d
-                    });
-                    for m in 0..ndf_quad as usize {
-                        dofs_flat.push(first_dof + m as u32);
-                        signs_flat.push(1.0);
-                    }
-                }
-            }
-
-            // Pyramid NDk face DOFs (k>=2): 4 tri faces + 1 quad face.
-            if k >= 2 && cell_type == ElementType::Pyramid5 {
-                let ndf = face_dofs_per_face as u32;
-                for &(la, lb, lc) in &PYRAMID_TRI_FACES {
-                    let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
-                    let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
-                        let d = next_dof; next_dof += ndf; d
-                    });
-                    for m in 0..ndf as usize {
-                        dofs_flat.push(first_dof + m as u32);
-                        signs_flat.push(1.0);
-                    }
-                }
-                let ndf_quad = (2 * k * (k - 1)) as u32;
-                for &(la, lb, lc, ld) in &PYRAMID_QUAD_FACE {
-                    let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                    let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
-                        let d = next_dof; next_dof += ndf_quad; d
-                    });
-                    for m in 0..ndf_quad as usize {
-                        dofs_flat.push(first_dof + m as u32);
-                        signs_flat.push(1.0);
-                    }
-                }
-            }
-
-            // Interior bubble DOFs (element-local, not shared)
-            for _ in 0..interior_dofs_per_elem {
+            // Interior DOFs (NDk, k>=3 for Tet, k>=2 for others).
+            let interior_count: u32 = match (dim, cell_type) {
+                (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => (k * (k - 1)) as u32,
+                (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => (2 * k * (k - 1)) as u32,
+                (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => (k * (k - 1) * (k - 2) / 2) as u32,
+                (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => (3 * k * (k - 1) * (k - 1)) as u32,
+                (3, ElementType::Prism6) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
+                (3, ElementType::Pyramid5) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
+                _ => 0,
+            };
+            for _ in 0..interior_count {
                 dofs_flat.push(next_dof);
                 next_dof += 1;
                 signs_flat.push(1.0);
             }
+
+            elem_offsets.push(dofs_flat.len());
         }
 
         HCurlSpace {
@@ -326,12 +279,12 @@ impl<M: MeshTopology> HCurlSpace<M> {
             n_dofs: next_dof as usize,
             dofs_flat,
             signs_flat,
-            dofs_per_elem,
+            elem_offsets,
             edge_to_dof,
             face_to_dof,
             quad_face_to_dof,
             dim,
-            cell_type,
+            cell_type: first_cell_type,
         }
     }
 
@@ -343,8 +296,9 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// `signs[i]` multiplies basis function `i` on this element so that the
     /// tangential trace is consistent with the global edge orientation.
     pub fn element_signs(&self, elem: u32) -> &[f64] {
-        let start = elem as usize * self.dofs_per_elem;
-        &self.signs_flat[start..start + self.dofs_per_elem]
+        let start = self.elem_offsets[elem as usize];
+        let end = self.elem_offsets[elem as usize + 1];
+        &self.signs_flat[start..end]
     }
 
     /// Look up the global DOF index for a given edge (by canonical key).
@@ -581,8 +535,9 @@ impl<M: MeshTopology> FESpace for HCurlSpace<M> {
     fn n_dofs(&self) -> usize { self.n_dofs }
 
     fn element_dofs(&self, elem: u32) -> &[DofId] {
-        let start = elem as usize * self.dofs_per_elem;
-        &self.dofs_flat[start..start + self.dofs_per_elem]
+        let start = self.elem_offsets[elem as usize];
+        let end = self.elem_offsets[elem as usize + 1];
+        &self.dofs_flat[start..end]
     }
 
     fn interpolate(&self, _f: &dyn Fn(&[f64]) -> f64) -> Vector<f64> {

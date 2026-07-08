@@ -297,14 +297,10 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
              &mesh_d.face_conn, &mesh_d.face_tags, &mesh_d.elem_types)
         };
     let n_nodes = coords.len() / dim;
-    let n_elems = conn.len() / elem_type.nodes_per_element();
-    // Determine face element type per dimension
-    let (bpe, _btype) = if dim == 2 {
-        (2usize, 1u32) // Line2 edge, code 1
-    } else {
-        (3usize, 2u32) // Tri3 face, code 2
-    };
-    let n_face_elem = if bpe > 0 { face_conn.len() / bpe } else { 0 };
+    let n_elems = if dim == 3 { mesh_3d.map_or(conn.len() / elem_type.nodes_per_element(), |m| m.n_elems()) }
+        else { conn.len() / elem_type.nodes_per_element() };
+    let n_face_elem = if dim == 3 { mesh_3d.map_or(0, |m| m.n_faces()) }
+        else { face_conn.len() / 2 };
 
     writeln!(writer, "MFEM mesh v1.0\n")?;
     writeln!(writer, "dimension\n{dim}\n")?;
@@ -313,14 +309,19 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
     writeln!(writer, "elements\n{n_elems}")?;
     let npe = elem_type.nodes_per_element();
     if let Some(ref etypes) = elem_types_opt {
-        // Mixed element types
-        for (ei, et) in etypes.iter().enumerate() {
+        // Mixed element types - use elem_offsets if available, else uniform stride
+        let m3 = mesh_3d.unwrap();
+        for ei in 0..n_elems {
+            let et = &etypes[ei];
             let code = elem_type_to_mfem_code(*et).ok_or_else(|| {
                 FemError::Mesh(format!("write_mfem: unsupported mixed type {et:?}"))
             })?;
-            let offset = ei * npe;
+            let npe_local = et.nodes_per_element();
+            let offset = m3.elem_offsets.as_ref()
+                .map(|offs| offs[ei])
+                .unwrap_or(ei * npe);
             write!(writer, "{} {code}", elem_tags[ei])?;
-            for j in 0..npe {
+            for j in 0..npe_local {
                 write!(writer, " {}", conn[offset + j] + 1)?;
             }
             writeln!(writer)?;
@@ -343,18 +344,24 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
 
     // Boundary section
     writeln!(writer, "\nboundary\n{n_face_elem}")?;
-    if n_face_elem > 0 {
-        let bpe = if dim == 2 { 2 } else { 3 }; // Line2 edges or Tri3 faces
-        let btype = if dim == 2 { 1 } else { 2 }; // Segment or Triangle
-        for fi in 0..n_face_elem {
-            let offset = fi * bpe;
-            let tag = if !face_tags.is_empty() { face_tags[fi] } else { 1 };
-            write!(writer, "{tag} {btype}")?;
-            for j in 0..bpe {
-                write!(writer, " {}", face_conn[offset + j] + 1)?;
-            }
-            writeln!(writer)?;
+    for fi in 0..n_face_elem as u32 {
+        let (offset, nvf, btype) = if let Some(ref m3) = mesh_3d {
+            let (off, nv) = if let Some(ref fo) = m3.face_offsets {
+                (fo[fi as usize], fo[fi as usize + 1] - fo[fi as usize])
+            } else {
+                (fi as usize * 3, 3usize)
+            };
+            let code = if nv == 3 { 2u32 } else { 3u32 }; // 2=Triangle, 3=Quad
+            (off, nv, code)
+        } else {
+            (fi as usize * 2, 2usize, 1u32)
+        };
+        let tag = if !face_tags.is_empty() { face_tags[fi as usize] } else { 1 };
+        write!(writer, "{tag} {btype}")?;
+        for j in 0..nvf {
+            write!(writer, " {}", face_conn[offset + j] + 1)?;
         }
+        writeln!(writer)?;
     }
 
     // Vertices section

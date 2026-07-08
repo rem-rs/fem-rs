@@ -18,7 +18,7 @@
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, HexQ1, HexQ2, HexQ3}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
 use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1, PrismRTk};
-use fem_element::nedelec::{TriND1, TetND1, QuadND1, HexND1, QuadNDk, HexNDk, PrismND1, PrismNDk};
+use fem_element::nedelec::{TriND1, TetND1, QuadND1, QuadNDk, HexND1, HexNDk, PrismND1, PrismNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -568,6 +568,10 @@ pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Resu
         (SpaceType::HDiv, ElementType::Hex8, 1) => Box::new(HexRT1),
         (SpaceType::HDiv, ElementType::Hex20, 0) => Box::new(HexRT0),
         (SpaceType::HDiv, ElementType::Hex20, 1) => Box::new(HexRT1),
+        (SpaceType::HDiv, ElementType::Prism6, 0) => Box::new(PrismRTk::new(0)),
+        (SpaceType::HDiv, ElementType::Prism6, 1) => Box::new(PrismRTk::new(1)),
+        (SpaceType::HCurl, ElementType::Prism6, 1) => Box::new(PrismND1),
+        (SpaceType::HCurl, ElementType::Prism6, o) if o >= 2 => Box::new(PrismNDk::new(o as usize)),
         _ => return Err(format!("ref_elem_vec: unsupported (space={space:?}, {elem_type:?}, order={order})")),
     })
 }

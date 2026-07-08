@@ -30,9 +30,10 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_linalg::{CsrMatrix, SolverConfig};
+use fem_assembly::geo_ref_elem_from_mesh;
 use fem_mesh::{
     Mesh, extract_submesh_3d, SubMesh3D,
-    ElementTransformation, refine_uniform_3d,
+    ElementTransformation, ElementType, refine_uniform_3d,
     topology::MeshTopology,
 };
 use fem_solver::{solve_cg, solve_pcg_jacobi};
@@ -375,6 +376,7 @@ fn assemble_hcurl_rhs(
     j_dofs: &[f64],
     quad_order: u8,
 ) -> Vec<f64> {
+    use fem_assembly::isoparametric_jacobian;
     let mesh = nd_space.mesh();
     let dim = 3;
     let n_dofs = nd_space.n_dofs();
@@ -392,15 +394,24 @@ fn assemble_hcurl_rhs(
         let n_rt = rt_dofs.len();
 
         let nodes = mesh.element_nodes(e);
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let det_j = tr.det_j().abs();
+        let use_iso = !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
+        let geo_elem = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
 
         let mut nd_phi = vec![0.0; n_nd * dim];
         let mut rt_phi = vec![0.0; n_rt * dim];
         let mut f_elem = vec![0.0; n_nd];
 
         for (q, xi) in quad.points.iter().enumerate() {
+            let det_j = if use_iso {
+                let ge = geo_elem.as_ref().expect("geo_ref_elem");
+                let (_jac, dj, _x) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
+                dj
+            } else {
+                let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+                tr.det_j().abs()
+            };
             let w = quad.weights[q] * det_j;
+
             nd_ref.eval_basis_vec(xi, &mut nd_phi);
             rt_ref.eval_basis_vec(xi, &mut rt_phi);
 
