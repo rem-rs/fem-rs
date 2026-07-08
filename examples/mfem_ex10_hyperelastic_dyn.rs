@@ -50,7 +50,7 @@ use fem_mesh::{
     topology::MeshTopology,
 };
 use fem_space::fe_space::FESpace;
-use fem_solver::{solve_gmres_ilu0, solve_pcg_jacobi, SolverConfig};
+use fem_solver::{solve_minres_jacobi, solve_pcg_jacobi, SolverConfig};
 
 // ─── CLI arguments (matching MFEM ex10) ────────────────────────────────────
 
@@ -270,10 +270,10 @@ fn newton_solve_reduced(
     // Build the Jacobian J = M + dt·S + dt²·grad_H(z), then eliminate
     // BOTH rows and columns for BC DOFs so the system is symmetric
     // and MINRES/PCG works correctly.
-    let gmres_cfg = SolverConfig {
+    let minres_cfg = SolverConfig {
         rtol: 1e-6,
         atol: 1e-8,
-        max_iter: 300,
+        max_iter: 500,
         verbose: false,
         ..SolverConfig::default()
     };
@@ -283,33 +283,17 @@ fn newton_solve_reduced(
         let jac = op.gradient(k, v, x, dt);
         let mut rhs_work = vec![0.0; n];
         for i in 0..n { rhs_work[i] = -r[i]; }
+        // RHS at BC DOFs must be 0 (consistent with the BC elimination)
         for &d in op.ess_dofs { if d < n { rhs_work[d] = 0.0; } }
 
-        // Solve J * dk = -r with GMRES+ILU(0) (handles non-symmetric BC rows)
+        // Solve J * dk = -r with MINRES (symmetric after BC elimination)
         let mut dk = vec![0.0; n];
-        match solve_gmres_ilu0(&jac, &rhs_work, &mut dk, 30, &gmres_cfg) {
-            Ok(_) => {}
-            Err(_) => { if norm2(&dk) < 1e-14 { break; } }
-        }
+        let dk_ok = solve_minres_jacobi(&jac, &rhs_work, &mut dk, &minres_cfg).is_ok();
+        if !dk_ok && norm2(&dk) < 1e-14 { break; }
 
-        // Newton update with line-search safeguard
-        let trial = k.to_vec();
-        let norm0_iter = norm2(&r);
-        let mut alpha = 1.0;
-        for _ls in 0..8 {
-            for i in 0..n { k[i] = trial[i] + alpha * dk[i]; }
-            op.mult(k, v, x, dt, &mut r);
-            let new_norm = norm2(&r);
-            if new_norm < norm0_iter * (1.0 - 0.25 * alpha) + 1e-15 {
-                break;
-            }
-            alpha *= 0.5;
-            if alpha < 1e-4 {
-                k.copy_from_slice(&trial);
-                break;
-            }
-        }
-
+        // Newton update: k += dk
+        for j in 0..n { k[j] += dk[j]; }
+        op.mult(k, v, x, dt, &mut r);
         let norm = norm2(&r);
         if verbose {
             println!(
