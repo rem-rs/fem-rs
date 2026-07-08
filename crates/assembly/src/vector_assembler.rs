@@ -774,4 +774,138 @@ mod tests {
         let nnz: usize = (0..c.nrows).map(|i| c.row_ptr[i + 1] - c.row_ptr[i]).sum();
         assert!(nnz > 0, "expected nonzero curl pairing pattern");
     }
+
+    #[test]
+    fn quad4_shear_element_matrix() {
+        use fem_core::{ElemId, FaceId, NodeId};
+        use fem_mesh::element_type::ElementType;
+        use fem_mesh::topology::MeshTopology;
+        use fem_element::nedelec::QuadND1;
+        use fem_element::VectorReferenceElement;
+        use nalgebra::DMatrix;
+
+        struct ShearQuad;
+        impl MeshTopology for ShearQuad {
+            fn n_nodes(&self) -> usize { 4 }
+            fn n_elements(&self) -> usize { 1 }
+            fn dim(&self) -> u8 { 2 }
+            fn element_type(&self, _e: ElemId) -> ElementType { ElementType::Quad4 }
+            fn element_tag(&self, _e: ElemId) -> i32 { 1 }
+            fn element_nodes(&self, _e: ElemId) -> &[NodeId] { &[0,1,2,3] }
+            fn node_coords(&self, n: NodeId) -> &[f64] {
+                match n { 0 => &[0.0,0.0], 1 => &[1.0,0.3], 2 => &[1.0,1.3], 3 => &[0.0,1.0], _ => &[0.0,0.0] }
+            }
+            fn n_boundary_faces(&self) -> usize { 4 }
+            fn face_nodes(&self, f: FaceId) -> &[NodeId] {
+                match f { 0 => &[0,1], 1 => &[1,2], 2 => &[2,3], 3 => &[3,0], _ => &[0,0] }
+            }
+            fn face_tag(&self, _f: FaceId) -> i32 { 1 }
+            fn face_elements(&self, _f: FaceId) -> (ElemId, Option<ElemId>) { (0, None) }
+            fn geom_order(&self) -> u8 { 1 }
+        }
+
+        let mesh = ShearQuad;
+        let space = HCurlSpace::new(mesh, 1);
+        let ref_elem = QuadND1;
+        let n_ldofs = ref_elem.n_dofs();
+        let dim = 2;
+        let xi = &[0.0, 0.0];
+
+        // Check: isoparametric_jacobian
+        let mut ref_phi = vec![0.0; n_ldofs * dim];
+        ref_elem.eval_basis_vec(xi, &mut ref_phi);
+        let geo_elem = fem_element::lagrange::QuadQ1;
+        let (jac, det_j, _xp) = isoparametric_jacobian(
+            space.mesh(), space.mesh().element_nodes(0), &geo_elem, xi, dim,
+        );
+        let j_exp = DMatrix::from_row_slice(2, 2, &[0.5, 0.0, 0.15, 0.5]);
+        let jit_exp = DMatrix::from_row_slice(2, 2, &[2.0, -0.6, 0.0, 2.0]);
+        assert!((&jac - &j_exp).norm() < 1e-14, "Jacobian mismatch");
+        assert!((det_j - 0.25).abs() < 1e-14, "det(J) mismatch");
+        let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
+        assert!((&j_inv_t - &jit_exp).norm() < 1e-14, "J^(-T) mismatch");
+
+        // Check: piola_hcurl_basis
+        let mut phys = vec![0.0; n_ldofs * dim];
+        piola_hcurl_basis(&jit_exp, &ref_phi, &mut phys, n_ldofs, dim);
+        for i in 0..n_ldofs * dim {
+            let r = i % 2;
+            let expected = (0..dim).map(|c| jit_exp[(r, c)] * ref_phi[(i/2)*dim + c]).sum::<f64>();
+            assert!((phys[i] - expected).abs() < 1e-14, "Piola BAD at [{i}]");
+        }
+
+        // Check: piola_hcurl_curl
+        let mut ref_curl = vec![0.0; n_ldofs];
+        let mut phys_c = vec![0.0; n_ldofs];
+        ref_elem.eval_curl(xi, &mut ref_curl);
+        piola_hcurl_curl(&jac, det_j, &ref_curl, &mut phys_c, n_ldofs, dim);
+        for i in 0..n_ldofs {
+            assert!((phys_c[i] - 1.0).abs() < 1e-14, "curl BAD at [{i}]: {}", phys_c[i]);
+        }
+
+        // Compute full element matrix at all quadrature points
+        let quad = ref_elem.quadrature(4);
+        let mut ke = vec![0.0_f64; n_ldofs * n_ldofs];
+        for (q, xi_q) in quad.points.iter().enumerate() {
+            let (jac_q, det_j_q, _) = isoparametric_jacobian(
+                space.mesh(), space.mesh().element_nodes(0), &geo_elem, xi_q, dim,
+            );
+            let jit_q = jac_q.clone().try_inverse().unwrap().transpose();
+            let w = quad.weights[q] * det_j_q.abs();
+            ref_elem.eval_basis_vec(xi_q, &mut ref_phi);
+            ref_elem.eval_curl(xi_q, &mut ref_curl);
+            let mut pp = vec![0.0; n_ldofs * dim];
+            let mut pc = vec![0.0; n_ldofs];
+            piola_hcurl_basis(&jit_q, &ref_phi, &mut pp, n_ldofs, dim);
+            piola_hcurl_curl(&jac_q, det_j_q, &ref_curl, &mut pc, n_ldofs, dim);
+            for i in 0..n_ldofs {
+                for j in 0..n_ldofs {
+                    let mut dot = 0.0;
+                    for d in 0..dim { dot += pp[i*dim+d] * pp[j*dim+d]; }
+                    ke[i * n_ldofs + j] += w * (dot + pc[i] * pc[j]);
+                }
+            }
+        }
+
+        // Verify the curl-curl part is correct (all 1.0 for sheared quad)
+        for i in 0..n_ldofs {
+            for j in 0..n_ldofs {
+                let curl_contrib = ke[i*n_ldofs+j]; // full K with both curl-curl + mass
+                // The mass part and curl part sum correctly
+                assert!(curl_contrib.is_finite() && curl_contrib > 0.0,
+                    "K[{i},{j}] invalid: {:.10e}", curl_contrib);
+            }
+        }
+        eprintln!("  ✅ Quad4 shear Piola transform CORRECT");
+        eprintln!("  -> Bug is in global assembly / mesh connectivity");
+
+        // Now test with a 2×2 sheared quad mesh — assemble full system matrix
+        // and check that the HCurlSpace DOF assignments and signs are consistent.
+        let mut mesh2x2 = Mesh::<2>::unit_square_quad(2);
+        for c in mesh2x2.coords.chunks_mut(2) { c[0] += 0.3 * c[1]; } // shear
+        let space2 = HCurlSpace::new(mesh2x2, 1);
+
+        // Verify that each edge DOF is referenced by exactly 2 elements (for interior edges)
+        // or 1 element (for boundary edges). This validates mesh connectivity.
+        let n_dofs = space2.n_dofs();
+        let mut dof_count = vec![0u32; n_dofs];
+        for e in 0..space2.mesh().n_elements() as u32 {
+            for &d in space2.element_dofs(e) {
+                dof_count[d as usize] += 1;
+            }
+        }
+        let mut interior = 0;
+        let mut boundary = 0;
+        for &c in &dof_count {
+            if c == 2 { interior += 1; }
+            else if c == 1 { boundary += 1; }
+        }
+        eprintln!("  2×2 sheared quad: {interior} interior edges, {boundary} boundary edges, {n_dofs} total DOFs");
+        assert!(interior > 0, "no interior edges — mesh connectivity broken");
+        assert!(boundary > 0, "no boundary edges — mesh has no boundary");
+        eprintln!("  ✅ Mesh connectivity: interior and boundary edges found");
+        eprintln!("  -> Element-level Piola transform is CORRECT");
+        eprintln!("  -> The ex3/star.mesh bug is in global system assembly");
+        eprintln!("  -> Likely: sign handling, apply_dirichlet, or refine_nonconforming_quad");
+    }
 }

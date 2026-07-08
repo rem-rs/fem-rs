@@ -10,12 +10,12 @@ use crate::hdiv::HDivSpace;
 /// Apply Dirichlet boundary conditions to the assembled system `(K, f)`.
 ///
 /// For each DOF in `constrained_dofs`:
-/// 1. Zero the row.
+/// 1. Eliminate both row and column (symmetric elimination).
 /// 2. Set the diagonal to 1.
 /// 3. Set `rhs[dof] = value[i]`.
 ///
-/// This is the **non-symmetric** row-zeroing approach — fast and sufficient
-/// for most FEM solves.
+/// For zero-valued BCs (the common case) the RHS is unchanged; for non-zero
+/// BCs the RHS is adjusted to account for eliminated column contributions.
 ///
 /// # Panics
 /// Panics if `constrained_dofs.len() != values.len()`.
@@ -28,7 +28,7 @@ pub fn apply_dirichlet(
     assert_eq!(constrained_dofs.len(), values.len(),
         "constrained_dofs and values must have the same length");
     for (&dof, &val) in constrained_dofs.iter().zip(values.iter()) {
-        mat.apply_dirichlet_row_zeroing(dof as usize, val, rhs);
+        mat.apply_dirichlet_symmetric(dof as usize, val, rhs);
     }
 }
 
