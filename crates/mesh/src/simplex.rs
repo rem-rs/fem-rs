@@ -1107,6 +1107,14 @@ impl<const D: usize> Mesh<D> {
 impl<const D: usize> MeshTopology for Mesh<D> {
     fn dim(&self) -> u8 { D as u8 }
 
+    fn topological_dim(&self) -> u8 {
+        if self.n_elems() > 0 {
+            self.element_type_at(0).dim()
+        } else {
+            D as u8
+        }
+    }
+
     fn n_nodes(&self) -> usize { self.n_nodes() }
 
     fn n_elements(&self) -> usize { self.n_elems() }

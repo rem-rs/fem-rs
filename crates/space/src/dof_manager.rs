@@ -151,10 +151,11 @@ impl DofManager {
     /// # Panics
     /// Panics if the requested order is unsupported for the mesh type.
     pub fn new<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        let topo_dim = mesh.topological_dim() as usize;
         match order {
             1 => Self::build_p1(mesh),
             2 => {
-                if mesh.dim() == 3 {
+                if topo_dim == 3 {
                     if mesh.n_elements() > 0 {
                         let npe = mesh.element_nodes(0).len();
                         match npe {
@@ -167,7 +168,7 @@ impl DofManager {
                     }
                 } else if mesh.n_elements() > 0
                     && mesh.element_nodes(0).len() == 4
-                    && mesh.dim() == 2
+                    && topo_dim == 2
                 {
                     Self::build_q2_quad(mesh)
                 } else {
@@ -175,7 +176,7 @@ impl DofManager {
                 }
             }
             3 => {
-                if mesh.dim() == 3 && mesh.n_elements() > 0 {
+                if topo_dim == 3 && mesh.n_elements() > 0 {
                     let npe = mesh.element_nodes(0).len();
                     if npe == 6 { return Self::build_p3_prism(mesh); }
                     if npe == 5 { return Self::build_p3_pyramid(mesh); }
@@ -183,8 +184,8 @@ impl DofManager {
                 // Quad Q3 / Hex Q3 via general pk path
                 if mesh.n_elements() > 0 {
                     let npe = mesh.element_nodes(0).len();
-                    if npe == 4 && mesh.dim() == 2 { return Self::build_pk_quad(mesh, order); }
-                    if npe == 8 && mesh.dim() == 3 { return Self::build_pk_hex(mesh, order); }
+                    if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
+                    if npe == 8 && topo_dim == 3 { return Self::build_pk_hex(mesh, order); }
                 }
                 Self::build_p3(mesh)
             }
@@ -192,10 +193,10 @@ impl DofManager {
                 // General arbitrary-order path for p >= 4
                 if mesh.n_elements() > 0 {
                     let npe = mesh.element_nodes(0).len();
-                    if npe == 4 && mesh.dim() == 2 { return Self::build_pk_quad(mesh, order); }
-                    if npe == 8 && mesh.dim() == 3 { return Self::build_pk_hex(mesh, order); }
-                    if npe == 6 && mesh.dim() == 3 { return Self::build_prism_pk(mesh, order); }
-                    if npe == 5 && mesh.dim() == 3 { return Self::build_pyramid_pk(mesh, order); }
+                    if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
+                    if npe == 8 && topo_dim == 3 { return Self::build_pk_hex(mesh, order); }
+                    if npe == 6 && topo_dim == 3 { return Self::build_prism_pk(mesh, order); }
+                    if npe == 5 && topo_dim == 3 { return Self::build_pyramid_pk(mesh, order); }
                 }
                 Self::build_pk(mesh, order)
             }
@@ -276,7 +277,7 @@ impl DofManager {
         let n_nodes  = mesh.n_nodes();
         let n_elems  = mesh.n_elements();
         let dim      = mesh.dim() as usize;
-        assert_eq!(dim, 2, "P2 DofManager currently only supports 2-D meshes");
+        assert_eq!(mesh.topological_dim() as usize, 2, "P2 (Tri) DofManager requires 2-D elements");
 
         // Edge enumeration: for each element triangle, 3 edges.
         // Edge local ordering matching TriP2: edge(0→1)=3, edge(1→2)=4, edge(0→2)=5
@@ -359,7 +360,7 @@ impl DofManager {
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
         let dim     = mesh.dim() as usize;
-        assert_eq!(dim, 2, "build_q2_quad requires a 2-D mesh");
+        assert_eq!(mesh.topological_dim() as usize, 2, "build_q2_quad requires 2-D elements");
 
         let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut next_dof = n_nodes as DofId;
@@ -458,7 +459,7 @@ impl DofManager {
         let n_nodes  = mesh.n_nodes();
         let n_elems  = mesh.n_elements();
         let dim      = mesh.dim() as usize;
-        assert_eq!(dim, 2, "build_p3_tri requires a 2-D mesh");
+        assert_eq!(mesh.topological_dim() as usize, 2, "build_p3_tri requires 2-D elements");
 
         // DOF layout per element (10):
         //   0,1,2   → vertex DOFs (same as node IDs)
@@ -594,7 +595,7 @@ impl DofManager {
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
         let dim     = mesh.dim() as usize;
-        assert_eq!(dim, 3, "build_p3_tet requires a 3-D mesh");
+        assert_eq!(mesh.topological_dim() as usize, 3, "build_p3_tet requires 3-D elements");
 
         // DOF layout per element (20):
         //   0-3    → vertex DOFs (node IDs)
@@ -749,7 +750,7 @@ impl DofManager {
         let n_nodes  = mesh.n_nodes();
         let n_elems  = mesh.n_elements();
         let dim      = mesh.dim() as usize;
-        assert_eq!(dim, 3, "build_p2_tet requires a 3-D mesh");
+        assert_eq!(mesh.topological_dim() as usize, 3, "build_p2_tet requires 3-D elements");
 
         // DOF layout per element (10):
         //   0,1,2,3  → vertex DOFs (node IDs)
@@ -833,7 +834,7 @@ impl DofManager {
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
         let dim = mesh.dim() as usize;
-        assert_eq!(dim, 3, "build_p2_prism requires a 3-D mesh");
+        assert_eq!(mesh.topological_dim() as usize, 3, "build_p2_prism requires 3-D elements");
 
         let dofs_per_elem = 18;
         let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
@@ -892,7 +893,7 @@ impl DofManager {
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
         let dim = mesh.dim() as usize;
-        assert_eq!(dim, 3, "build_p2_pyramid requires a 3-D mesh");
+        assert_eq!(mesh.topological_dim() as usize, 3, "build_p2_pyramid requires 3-D elements");
 
         let dofs_per_elem = 14;
         let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
@@ -1678,9 +1679,10 @@ impl DofManager {
 
     fn build_pk<M: MeshTopology>(mesh: &M, order: u8) -> Self {
         let dim = mesh.dim() as usize;
+        let topo_dim = mesh.topological_dim() as usize;
         let p = order as usize;
         // Prism/pyramid dispatch for general order
-        if dim == 3 && mesh.n_elements() > 0 {
+        if topo_dim == 3 && mesh.n_elements() > 0 {
             let npe = mesh.element_nodes(0).len();
             if npe == 6 { return Self::build_prism_pk(mesh, order); }
             if npe == 5 { return Self::build_pyramid_pk(mesh, order); }
@@ -1689,18 +1691,18 @@ impl DofManager {
         let n_elems = mesh.n_elements();
 
         assert!(p >= 1, "build_pk: order must be >= 1");
-        assert!(dim == 2 || dim == 3, "build_pk: only 2D and 3D supported");
+        assert!(topo_dim == 2 || topo_dim == 3, "build_pk: only 2D and 3D elements supported");
 
         // Entity DOF counts
         let edge_dofs_per = if p >= 2 { p - 1 } else { 0 };
-        let face_dofs_per = if dim == 3 && p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
-        let volume_dofs_per = if dim == 2 && p >= 3 {
+        let face_dofs_per = if topo_dim == 3 && p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
+        let volume_dofs_per = if topo_dim == 2 && p >= 3 {
             (p - 1) * (p - 2) / 2
-        } else if dim == 3 && p >= 4 {
+        } else if topo_dim == 3 && p >= 4 {
             (p - 1) * (p - 2) * (p - 3) / 6
         } else { 0 };
 
-        let dofs_per_elem = if dim == 2 {
+        let dofs_per_elem = if topo_dim == 2 {
             (p + 1) * (p + 2) / 2
         } else {
             (p + 1) * (p + 2) * (p + 3) / 6
@@ -1712,7 +1714,7 @@ impl DofManager {
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
-        if dim == 2 {
+        if topo_dim == 2 {
             // ── 2-D triangles ────────────────────────────────────────────────
             // Local edge definitions matching TriPk:
             //   edge(0→1), edge(1→2), edge(0→2)
@@ -1832,7 +1834,7 @@ impl DofManager {
         }
 
         // 3D face DOF coordinates: barycentric interpolation from 3 face vertices.
-        if dim == 3 && !face_pk_map.is_empty() {
+        if topo_dim == 3 && !face_pk_map.is_empty() {
             // Build face→node mapping from element connectivity.
             let mut face_nodes_map: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
             for e in 0..n_elems as u32 {
@@ -1867,7 +1869,7 @@ impl DofManager {
         // Volume/bubble DOF coordinates: use factory reference element for accuracy.
         if volume_dofs_per > 0 {
             use fem_element::lagrange::factory::{ref_elem, ElemType};
-            let ft = if dim == 2 { ElemType::Tri } else { ElemType::Tet };
+            let ft = if topo_dim == 2 { ElemType::Tri } else { ElemType::Tet };
             let factory = ref_elem(ft, order);
             let ref_coords = factory.dof_coords();
             // Volume DOFs in factory are the LAST volume_dofs_per entries.
@@ -1884,14 +1886,14 @@ impl DofManager {
                     let dof_id = vol_start + e as usize * volume_dofs_per + k;
                     let base = dof_id * dim;
                     let rc = &ref_coords[vol_factory_start + k];
-                    if dim == 2 {
+                    if topo_dim == 2 {
                         let lam0 = 1.0 - rc[0] - rc[1];
-                        for d in 0..2 {
+                        for d in 0..dim {
                             dof_coords[base + d] = lam0 * c0[d] + rc[0] * c1[d] + rc[1] * c2[d];
                         }
                     } else {
                         let lam0 = 1.0 - rc[0] - rc[1] - rc[2];
-                        for d in 0..3 {
+                        for d in 0..dim {
                             dof_coords[base + d] = lam0 * c0[d] + rc[0] * c1[d]
                                 + rc[1] * c2[d] + rc[2] * c3[d];
                         }

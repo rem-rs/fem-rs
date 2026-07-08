@@ -10,6 +10,19 @@ pub trait MeshTopology: Send + Sync {
     /// Spatial dimension of the embedding space (2 or 3).
     fn dim(&self) -> u8;
 
+    /// Topological (intrinsic) dimension of the mesh elements.
+    ///
+    /// For volume meshes (2-D Tri3 in 2-D, 3-D Tet4 in 3-D) this returns the
+    /// same value as [`dim()`](Self::dim).  For **surface meshes** (2-D Tri3
+    /// embedded in 3-D), `dim()` returns the embedding dimension (3) while
+    /// `topological_dim()` returns the element dimension (2).
+    ///
+    /// The default implementation returns `self.dim()`.  Override in types
+    /// where the embedding dimension differs from the element dimension.
+    fn topological_dim(&self) -> u8 {
+        self.dim()
+    }
+
     /// Total number of mesh nodes (vertices).
     fn n_nodes(&self) -> usize;
 

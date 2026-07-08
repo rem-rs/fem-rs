@@ -384,6 +384,15 @@ fn mesh_elem_type_to_factory_type(t: ElementType) -> fem_element::lagrange::fact
 
 impl<const D: usize> MeshTopology for CurvedMesh<D> {
     fn dim(&self) -> u8 { D as u8 }
+
+    fn topological_dim(&self) -> u8 {
+        if self.n_elems > 0 {
+            self.elem_type.dim()
+        } else {
+            D as u8
+        }
+    }
+
     fn n_nodes(&self) -> usize { self.n_nodes }
     fn n_elements(&self) -> usize { self.n_elems }
     fn n_boundary_faces(&self) -> usize {
