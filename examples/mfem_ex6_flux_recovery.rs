@@ -44,7 +44,7 @@ use fem_space::{
     },
     fe_space::FESpace,
 };
-use linlvo::JacobiPrecond;
+use linlvo::SsorPrecond;
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -109,12 +109,12 @@ fn main() {
         let bnd_vals = vec![0.0_f64; bnd.len()];
         apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
 
-        // --- 2e. Solve: PCG + Jacobi preconditioner (verbose) ---
+        // --- 2e. Solve: PCG + SSOR preconditioner (matches MFEM GSSmoother) ---
         let mut u = prev_u.take().unwrap_or_else(|| vec![0.0_f64; cdofs]);
         u.resize(cdofs, 0.0);
 
         let la = fem_to_linlvo_csr(&mat);
-        let prec = JacobiPrecond::from_csr(&la).expect("JacobiPrecond::from_csr");
+        let prec = SsorPrecond::from_csr(&la, 1.0).expect("SsorPrecond::from_csr");
 
         let res = solve_pcg(
             &mat, &rhs, &mut u, &prec,
