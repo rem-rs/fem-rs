@@ -362,34 +362,58 @@ pub fn restrict_to_coarse_p1(u_fine:&[f64],n_nodes_coarse:usize)->Vec<f64>{asser
 
 pub fn zz_estimator(mesh:&Mesh<2>,u:&[f64])->Vec<f64>{
     let n_nodes=mesh.n_nodes();let n_elems=mesh.n_elems();
+    let is_quad=mesh.element_type_at(0)==ElementType::Quad4;
     let mut elem_grads=Vec::with_capacity(n_elems);
+    if is_quad{
+        for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let c=|i:usize|mesh.coords_of(ns[i]);let uu=|i:usize|u[ns[i]as usize];
+            let dxi=0.25*(-uu(0)+uu(1)+uu(2)-uu(3));let deta=0.25*(-uu(0)-uu(1)+uu(2)+uu(3));
+            let j00=0.25*(-c(0)[0]+c(1)[0]+c(2)[0]-c(3)[0]);let j01=0.25*(-c(0)[0]-c(1)[0]+c(2)[0]+c(3)[0]);
+            let j10=0.25*(-c(0)[1]+c(1)[1]+c(2)[1]-c(3)[1]);let j11=0.25*(-c(0)[1]-c(1)[1]+c(2)[1]+c(3)[1]);
+            let dj=j00*j11-j01*j10;let gx=(j11*dxi-j10*deta)/dj;let gy=(-j01*dxi+j00*deta)/dj;elem_grads.push([gx,gy]);}
+    }else{
     for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let[x0,y0]=mesh.coords_of(ns[0]);let[x1,y1]=mesh.coords_of(ns[1]);let[x2,y2]=mesh.coords_of(ns[2]);
         let u0=u[ns[0]as usize];let u1=u[ns[1]as usize];let u2=u[ns[2]as usize];
         let j00=x1-x0;let j01=x2-x0;let j10=y1-y0;let j11=y2-y0;let det=j00*j11-j01*j10;
         let gref=[[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];let uh=[u0,u1,u2];let mut gx=0.0;let mut gy=0.0;
         for k in 0..3{let gpx=(j11*gref[k][0]-j10*gref[k][1])/det;let gpy=(-j01*gref[k][0]+j00*gref[k][1])/det;gx+=uh[k]*gpx;gy+=uh[k]*gpy;}
-        elem_grads.push([gx,gy]);}
+        elem_grads.push([gx,gy]);}}
     let mut ng=vec![[0.0_f64;2];n_nodes];let mut nc=vec![0usize;n_nodes];
     for(e,&g)in elem_grads.iter().enumerate(){for&n in mesh.elem_nodes(e as ElemId){ng[n as usize][0]+=g[0];ng[n as usize][1]+=g[1];nc[n as usize]+=1;}}
     for n in 0..n_nodes{let c=nc[n]as f64;if c>0.0{ng[n][0]/=c;ng[n][1]/=c;}}
     let mut eta=Vec::with_capacity(n_elems);
+    if is_quad{
+        for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let c=|i:usize|mesh.coords_of(ns[i]);
+            let area=0.5*(c(0)[0]*c(1)[1]+c(1)[0]*c(2)[1]+c(2)[0]*c(3)[1]+c(3)[0]*c(0)[1]-c(1)[0]*c(0)[1]-c(2)[0]*c(1)[1]-c(3)[0]*c(2)[1]-c(0)[0]*c(3)[1]).abs();
+            let grx=ns.iter().map(|&n|ng[n as usize][0]).sum::<f64>()/4.0;let gry=ns.iter().map(|&n|ng[n as usize][1]).sum::<f64>()/4.0;
+            let eg=&elem_grads[e as usize];let dx=eg[0]-grx;let dy=eg[1]-gry;eta.push(area.sqrt()*(dx*dx+dy*dy).sqrt());}
+    }else{
     for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let[x0,y0]=mesh.coords_of(ns[0]);let[x1,y1]=mesh.coords_of(ns[1]);let[x2,y2]=mesh.coords_of(ns[2]);
         let area=0.5*((x1-x0)*(y2-y0)-(x2-x0)*(y1-y0)).abs();
         let grx=ns.iter().map(|&n|ng[n as usize][0]).sum::<f64>()/3.0;let gry=ns.iter().map(|&n|ng[n as usize][1]).sum::<f64>()/3.0;let eg=&elem_grads[e as usize];
-        let dx=eg[0]-grx;let dy=eg[1]-gry;eta.push(area.sqrt()*(dx*dx+dy*dy).sqrt());}
+        let dx=eg[0]-grx;let dy=eg[1]-gry;eta.push(area.sqrt()*(dx*dx+dy*dy).sqrt());}}
     eta
 }
 
 pub fn kelly_estimator(mesh:&Mesh<2>,u:&[f64])->Vec<f64>{
-    let n_elems=mesh.n_elems();let mut elem_grads=Vec::with_capacity(n_elems);
-    for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let c=|i|mesh.coords_of(ns[i]);let uu=|i|u[ns[i]as usize];
-        let j00=c(1)[0]-c(0)[0];let j01=c(2)[0]-c(0)[0];let j10=c(1)[1]-c(0)[1];let j11=c(2)[1]-c(0)[1];let det=j00*j11-j01*j10;
-        let gref=[[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];let uh=[uu(0),uu(1),uu(2)];let mut gx=0.0;let mut gy=0.0;
-        for k in 0..3{let gpx=(j11*gref[k][0]-j10*gref[k][1])/det;let gpy=(-j01*gref[k][0]+j00*gref[k][1])/det;gx+=uh[k]*gpx;gy+=uh[k]*gpy;}
-        elem_grads.push([gx,gy]);}
+    let n_elems=mesh.n_elems();let is_quad=mesh.element_type_at(0)==ElementType::Quad4;
+    let mut elem_grads=Vec::with_capacity(n_elems);
+    if is_quad{
+        for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let c=|i:usize|mesh.coords_of(ns[i]);let uu=|i:usize|u[ns[i]as usize];
+            let dxi=0.25*(-uu(0)+uu(1)+uu(2)-uu(3));let deta=0.25*(-uu(0)-uu(1)+uu(2)+uu(3));
+            let j00=0.25*(-c(0)[0]+c(1)[0]+c(2)[0]-c(3)[0]);let j01=0.25*(-c(0)[0]-c(1)[0]+c(2)[0]+c(3)[0]);
+            let j10=0.25*(-c(0)[1]+c(1)[1]+c(2)[1]-c(3)[1]);let j11=0.25*(-c(0)[1]-c(1)[1]+c(2)[1]+c(3)[1]);
+            let dj=j00*j11-j01*j10;let gx=(j11*dxi-j10*deta)/dj;let gy=(-j01*dxi+j00*deta)/dj;elem_grads.push([gx,gy]);}
+    }else{
+        for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);let c=|i|mesh.coords_of(ns[i]);let uu=|i|u[ns[i]as usize];
+            let j00=c(1)[0]-c(0)[0];let j01=c(2)[0]-c(0)[0];let j10=c(1)[1]-c(0)[1];let j11=c(2)[1]-c(0)[1];let det=j00*j11-j01*j10;
+            let gref=[[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];let uh=[uu(0),uu(1),uu(2)];let mut gx=0.0;let mut gy=0.0;
+            for k in 0..3{let gpx=(j11*gref[k][0]-j10*gref[k][1])/det;let gpy=(-j01*gref[k][0]+j00*gref[k][1])/det;gx+=uh[k]*gpx;gy+=uh[k]*gpy;}
+            elem_grads.push([gx,gy]);}}
     type Edge=(NodeId,NodeId);fn ek(a:NodeId,b:NodeId)->Edge{if a<b{(a,b)}else{(b,a)}}
     let mut ee:HashMap<Edge,Vec<ElemId>>=HashMap::new();
-    for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);for&(a,b)in&[(ns[0],ns[1]),(ns[1],ns[2]),(ns[0],ns[2])]{ee.entry(ek(a,b)).or_default().push(e);}}
+    for e in 0..n_elems as ElemId{let ns=mesh.elem_nodes(e);
+        if is_quad{for&(a,b)in&[(ns[0],ns[1]),(ns[1],ns[2]),(ns[2],ns[3]),(ns[3],ns[0])]{ee.entry(ek(a,b)).or_default().push(e);}}
+        else{for&(a,b)in&[(ns[0],ns[1]),(ns[1],ns[2]),(ns[0],ns[2])]{ee.entry(ek(a,b)).or_default().push(e);}}}
     let mut eta_sq=vec![0.0_f64;n_elems];
     for(&(na,nb),elems)in &ee{if elems.len()!=2{continue;}let e0=elems[0]as usize;let e1=elems[1]as usize;
         let ca=mesh.coords_of(na);let cb=mesh.coords_of(nb);let h=((cb[0]-ca[0]).powi(2)+(cb[1]-ca[1]).powi(2)).sqrt();if h<1e-30{continue;}

@@ -18,43 +18,69 @@ use crate::{element_type::ElementType, simplex::Mesh};
 pub fn zz_estimator(mesh: &Mesh<2>, u: &[f64]) -> Vec<f64> {
     let n_nodes = mesh.n_nodes();
     let n_elems = mesh.n_elems();
+    let is_quad = mesh.element_type_at(0) == ElementType::Quad4;
 
     // ── 1. Compute element gradients ──────────────────────────────────────────
-    // For Tri3: ∇u is constant over each element.
     let mut elem_grads: Vec<[f64; 2]> = Vec::with_capacity(n_elems);
 
-    for e in 0..n_elems as ElemId {
-        let ns = mesh.elem_nodes(e);
-        let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2];
-        let [x0, y0] = mesh.coords_of(n0);
-        let [x1, y1] = mesh.coords_of(n1);
-        let [x2, y2] = mesh.coords_of(n2);
-        let u0 = u[n0 as usize]; let u1 = u[n1 as usize]; let u2 = u[n2 as usize];
+    if is_quad {
+        // Quad4: bilinear gradient at centroid (ξ=0, η=0).
+        // Bilinear shape functions: Nᵢ = ¼(1±ξ)(1±η)
+        // Reference gradient at centroid: ∂u/∂ξ = ¼(-u₀+u₁+u₂-u₃), ∂u/∂η similarly.
+        // Physical gradient via J^{-T} at centroid.
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            let c = |i: usize| mesh.coords_of(ns[i]);
+            let uu = |i: usize| u[ns[i] as usize];
 
-        // Jacobian of mapping from reference triangle to physical:
-        // J = [[x1-x0, x2-x0], [y1-y0, y2-y0]]
-        let j00 = x1 - x0; let j01 = x2 - x0;
-        let j10 = y1 - y0; let j11 = y2 - y0;
-        let det = j00 * j11 - j01 * j10;
+            let dxi  = 0.25 * (-uu(0) + uu(1) + uu(2) - uu(3));
+            let deta = 0.25 * (-uu(0) - uu(1) + uu(2) + uu(3));
 
-        // Reference gradients of Lagrange basis: ∇ψ₀ = (-1,-1), ∇ψ₁ = (1,0), ∇ψ₂ = (0,1)
-        // Physical grad = J^{-T} * ref_grad
-        // J^{-T} = (1/det) * [[j11, -j10], [-j01, j00]]
-        let g_ref = [
-            [-1.0_f64, -1.0],
-            [ 1.0,  0.0],
-            [ 0.0,  1.0],
-        ];
-        let uh = [u0, u1, u2];
-        let mut gx = 0.0_f64; let mut gy = 0.0_f64;
-        for k in 0..3 {
-            // J^{-T} * g_ref[k]
-            let gpx = ( j11 * g_ref[k][0] - j10 * g_ref[k][1]) / det;
-            let gpy = (-j01 * g_ref[k][0] + j00 * g_ref[k][1]) / det;
-            gx += uh[k] * gpx;
-            gy += uh[k] * gpy;
+            let j00 = 0.25 * (-c(0)[0] + c(1)[0] + c(2)[0] - c(3)[0]);
+            let j01 = 0.25 * (-c(0)[0] - c(1)[0] + c(2)[0] + c(3)[0]);
+            let j10 = 0.25 * (-c(0)[1] + c(1)[1] + c(2)[1] - c(3)[1]);
+            let j11 = 0.25 * (-c(0)[1] - c(1)[1] + c(2)[1] + c(3)[1]);
+            let det_j = j00 * j11 - j01 * j10;
+
+            // J^{-T} = (1/det) * [[j11, -j10], [-j01, j00]]
+            let gx = ( j11 * dxi - j10 * deta) / det_j;
+            let gy = (-j01 * dxi + j00 * deta) / det_j;
+            elem_grads.push([gx, gy]);
         }
-        elem_grads.push([gx, gy]);
+    } else {
+        // Tri3: ∇u is constant over each element (P1).
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2];
+            let [x0, y0] = mesh.coords_of(n0);
+            let [x1, y1] = mesh.coords_of(n1);
+            let [x2, y2] = mesh.coords_of(n2);
+            let u0 = u[n0 as usize]; let u1 = u[n1 as usize]; let u2 = u[n2 as usize];
+
+            // Jacobian of mapping from reference triangle to physical:
+            // J = [[x1-x0, x2-x0], [y1-y0, y2-y0]]
+            let j00 = x1 - x0; let j01 = x2 - x0;
+            let j10 = y1 - y0; let j11 = y2 - y0;
+            let det = j00 * j11 - j01 * j10;
+
+            // Reference gradients of Lagrange basis: ∇ψ₀ = (-1,-1), ∇ψ₁ = (1,0), ∇ψ₂ = (0,1)
+            // Physical grad = J^{-T} * ref_grad
+            // J^{-T} = (1/det) * [[j11, -j10], [-j01, j00]]
+            let g_ref = [
+                [-1.0_f64, -1.0],
+                [ 1.0,  0.0],
+                [ 0.0,  1.0],
+            ];
+            let uh = [u0, u1, u2];
+            let mut gx = 0.0_f64; let mut gy = 0.0_f64;
+            for k in 0..3 {
+                let gpx = ( j11 * g_ref[k][0] - j10 * g_ref[k][1]) / det;
+                let gpy = (-j01 * g_ref[k][0] + j00 * g_ref[k][1]) / det;
+                gx += uh[k] * gpx;
+                gy += uh[k] * gpy;
+            }
+            elem_grads.push([gx, gy]);
+        }
     }
 
     // ── 2. Nodal gradient recovery (simple averaging) ─────────────────────────
@@ -80,22 +106,42 @@ pub fn zz_estimator(mesh: &Mesh<2>, u: &[f64]) -> Vec<f64> {
     // ── 3. Element error indicator ────────────────────────────────────────────
     let mut eta = Vec::with_capacity(n_elems);
 
-    for e in 0..n_elems as ElemId {
-        let ns = mesh.elem_nodes(e);
-        let [x0, y0] = mesh.coords_of(ns[0]);
-        let [x1, y1] = mesh.coords_of(ns[1]);
-        let [x2, y2] = mesh.coords_of(ns[2]);
-        let area = 0.5 * ((x1-x0)*(y2-y0) - (x2-x0)*(y1-y0)).abs();
+    if is_quad {
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            let c = |i: usize| mesh.coords_of(ns[i]);
 
-        // Recovered gradient at centroid = average of nodal recovered gradients
-        let grx: f64 = ns.iter().map(|&n| nodal_grad[n as usize][0]).sum::<f64>() / 3.0;
-        let gry: f64 = ns.iter().map(|&n| nodal_grad[n as usize][1]).sum::<f64>() / 3.0;
-        let eg = &elem_grads[e as usize];
+            // Shoelace formula for quadrilateral area.
+            let area = 0.5 * (
+                c(0)[0]*c(1)[1] + c(1)[0]*c(2)[1] + c(2)[0]*c(3)[1] + c(3)[0]*c(0)[1]
+              - c(1)[0]*c(0)[1] - c(2)[0]*c(1)[1] - c(3)[0]*c(2)[1] - c(0)[0]*c(3)[1]
+            ).abs();
 
-        let dx = eg[0] - grx;
-        let dy = eg[1] - gry;
-        // η_K = ‖(∇u_h − G(u_h))‖ * sqrt(area)
-        eta.push(area.sqrt() * (dx*dx + dy*dy).sqrt());
+            let grx = ns.iter().map(|&n| nodal_grad[n as usize][0]).sum::<f64>() / 4.0;
+            let gry = ns.iter().map(|&n| nodal_grad[n as usize][1]).sum::<f64>() / 4.0;
+            let eg = &elem_grads[e as usize];
+            let dx = eg[0] - grx;
+            let dy = eg[1] - gry;
+            eta.push(area.sqrt() * (dx*dx + dy*dy).sqrt());
+        }
+    } else {
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            let [x0, y0] = mesh.coords_of(ns[0]);
+            let [x1, y1] = mesh.coords_of(ns[1]);
+            let [x2, y2] = mesh.coords_of(ns[2]);
+            let area = 0.5 * ((x1-x0)*(y2-y0) - (x2-x0)*(y1-y0)).abs();
+
+            // Recovered gradient at centroid = average of nodal recovered gradients
+            let grx: f64 = ns.iter().map(|&n| nodal_grad[n as usize][0]).sum::<f64>() / 3.0;
+            let gry: f64 = ns.iter().map(|&n| nodal_grad[n as usize][1]).sum::<f64>() / 3.0;
+            let eg = &elem_grads[e as usize];
+
+            let dx = eg[0] - grx;
+            let dy = eg[1] - gry;
+            // η_K = ‖(∇u_h − G(u_h))‖ * sqrt(area)
+            eta.push(area.sqrt() * (dx*dx + dy*dy).sqrt());
+        }
     }
     eta
 }
@@ -217,33 +263,64 @@ pub fn kelly_estimator_3d(mesh: &Mesh<3>, u: &[f64]) -> Vec<f64> {
     eta_sq.iter().map(|v| v.sqrt()).collect()
 }
 
-/// Compute element-wise Kelly (face-jump) error indicators for 2-D Tri3.
+/// Compute element-wise Kelly (face-jump) error indicators for 2-D Tri3 or Quad4.
 pub fn kelly_estimator(mesh: &Mesh<2>, u: &[f64]) -> Vec<f64> {
     use std::collections::HashMap;
     let n_elems = mesh.n_elems();
-    let mut elem_grads: Vec<[f64;2]> = Vec::with_capacity(n_elems);
-    for e in 0..n_elems as ElemId {
-        let ns = mesh.elem_nodes(e);
-        let c = |i| mesh.coords_of(ns[i]); let uu = |i| u[ns[i] as usize];
-        let j00 = c(1)[0]-c(0)[0]; let j01 = c(2)[0]-c(0)[0];
-        let j10 = c(1)[1]-c(0)[1]; let j11 = c(2)[1]-c(0)[1];
-        let det = j00*j11 - j01*j10;
-        let gref = [[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];
-        let uh = [uu(0),uu(1),uu(2)];
-        let mut gx=0.0; let mut gy=0.0;
-        for k in 0..3 {
-            let gpx = ( j11*gref[k][0] - j10*gref[k][1])/det;
-            let gpy = (-j01*gref[k][0] + j00*gref[k][1])/det;
-            gx += uh[k]*gpx; gy += uh[k]*gpy;
+    let is_quad = mesh.element_type_at(0) == ElementType::Quad4;
+
+    // ── 1. Element gradients at centroid ───────────────────────────────────────
+    let mut elem_grads: Vec<[f64; 2]> = Vec::with_capacity(n_elems);
+    if is_quad {
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            let c = |i: usize| mesh.coords_of(ns[i]);
+            let uu = |i: usize| u[ns[i] as usize];
+            let dxi  = 0.25 * (-uu(0) + uu(1) + uu(2) - uu(3));
+            let deta = 0.25 * (-uu(0) - uu(1) + uu(2) + uu(3));
+            let j00 = 0.25 * (-c(0)[0] + c(1)[0] + c(2)[0] - c(3)[0]);
+            let j01 = 0.25 * (-c(0)[0] - c(1)[0] + c(2)[0] + c(3)[0]);
+            let j10 = 0.25 * (-c(0)[1] + c(1)[1] + c(2)[1] - c(3)[1]);
+            let j11 = 0.25 * (-c(0)[1] - c(1)[1] + c(2)[1] + c(3)[1]);
+            let det_j = j00 * j11 - j01 * j10;
+            let gx = ( j11 * dxi - j10 * deta) / det_j;
+            let gy = (-j01 * dxi + j00 * deta) / det_j;
+            elem_grads.push([gx, gy]);
         }
-        elem_grads.push([gx,gy]);
+    } else {
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            let c = |i| mesh.coords_of(ns[i]); let uu = |i| u[ns[i] as usize];
+            let j00 = c(1)[0]-c(0)[0]; let j01 = c(2)[0]-c(0)[0];
+            let j10 = c(1)[1]-c(0)[1]; let j11 = c(2)[1]-c(0)[1];
+            let det = j00*j11 - j01*j10;
+            let gref = [[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];
+            let uh = [uu(0),uu(1),uu(2)];
+            let mut gx=0.0; let mut gy=0.0;
+            for k in 0..3 {
+                let gpx = ( j11*gref[k][0] - j10*gref[k][1])/det;
+                let gpy = (-j01*gref[k][0] + j00*gref[k][1])/det;
+                gx += uh[k]*gpx; gy += uh[k]*gpy;
+            }
+            elem_grads.push([gx,gy]);
+        }
     }
+
+    // ── 2. Edge jumps ─────────────────────────────────────────────────────────
     type Edge = (NodeId,NodeId);
     fn ek(a: NodeId,b: NodeId) -> Edge { if a<b {(a,b)} else {(b,a)} }
     let mut ee: HashMap<Edge,Vec<ElemId>> = HashMap::new();
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
-        for &(a,b) in &[(ns[0],ns[1]),(ns[1],ns[2]),(ns[0],ns[2])] { ee.entry(ek(a,b)).or_default().push(e); }
+        if is_quad {
+            for &(a,b) in &[(ns[0],ns[1]),(ns[1],ns[2]),(ns[2],ns[3]),(ns[3],ns[0])] {
+                ee.entry(ek(a,b)).or_default().push(e);
+            }
+        } else {
+            for &(a,b) in &[(ns[0],ns[1]),(ns[1],ns[2]),(ns[0],ns[2])] {
+                ee.entry(ek(a,b)).or_default().push(e);
+            }
+        }
     }
     let mut eta_sq = vec![0.0_f64; n_elems];
     for (&(na,nb), elems) in &ee {
