@@ -402,11 +402,23 @@ fn sdirk2_step(
     }
 }
 
-/// SDIRK3 (type 23) — three-stage, 3rd order.
+/// SDIRK33 (type 23) — 3-stage, 3rd-order, L-stable (exact MFEM coefficients).
 ///
-/// Simple implementation: use SDIRK2 for now; MFEM's SDIRK23 has a third
-/// stage that provides third-order accuracy. For the comparison we use
-/// the same stage structure as SDIRK2 with a correction stage.
+/// Butcher tableau (from MFEM linalg/ode.cpp SDIRK33Solver):
+/// ```
+///   a  |  a
+///   c  |  c-a    a
+///   1  |   b   1-a-b  a
+///  ----+----------------
+///      |   b   1-a-b  a
+/// ```
+/// Coefficients:
+///   a = 0.435866521508458999416019  (diagonal, L-stable)
+///   b = 1.20849664917601007033648
+///   c = 0.717933260754229499708010
+///
+/// Stage k values from ImplicitSolve are velocity increments kv.
+/// Position increments kx = v_current + dt_stage * kv (from kinematics).
 fn sdirk3_step(
     vx: &mut [f64],
     dt: f64,
@@ -414,50 +426,58 @@ fn sdirk3_step(
     ess_dofs_k: &[usize],
     verbose: bool,
 ) {
+    const A: f64 = 0.435866521508458999416019;
+    const B: f64 = 1.20849664917601007033648;
+    const C: f64 = 0.717933260754229499708010;
+
     let sc = vx.len() / 2;
-    // Use the same gamma as SDIRK2 (MFEM SDIRK23 uses a different tableau)
-    let gamma = 1.0 - FRAC_1_SQRT_2;
-
     let (v, x) = vx.split_at_mut(sc);
-    let dt_gamma = gamma * dt;
-    let coeff = 1.0 - gamma;
+    let dt_a = A * dt;
 
-    // Stage 1
+    // ── Stage 1 ───────────────────────────────────────────────────────────
     let mut kv1 = vec![0.0; sc];
-    newton_solve_reduced(op, &mut kv1, v, x, dt_gamma, verbose);
+    newton_solve_reduced(op, &mut kv1, v, x, dt_a, verbose);
     let mut kx1 = vec![0.0; sc];
-    for i in 0..sc { kx1[i] = v[i] + dt_gamma * kv1[i]; }
+    for i in 0..sc { kx1[i] = v[i] + dt_a * kv1[i]; }
 
-    // Stage 2: U2 = u_n + dt*(1-γ)*k1
-    let mut v2 = v.to_vec();
-    let mut x2 = x.to_vec();
+    // y = vx0 + (c-a)*dt * k1
+    let mut vy = v.to_vec();
+    let mut xy = x.to_vec();
+    let ca = C - A;
     for i in 0..sc {
-        v2[i] += dt * coeff * kv1[i];
-        x2[i] += dt * coeff * kx1[i];
+        vy[i] += ca * dt * kv1[i];
+        xy[i] += ca * dt * kx1[i];
     }
+    // Partial accumulate: vx += b*dt * k1
+    for i in 0..sc {
+        v[i] += B * dt * kv1[i];
+        x[i] += B * dt * kx1[i];
+    }
+
+    // ── Stage 2 ───────────────────────────────────────────────────────────
     let mut kv2 = vec![0.0; sc];
-    newton_solve_reduced(op, &mut kv2, &v2, &x2, dt_gamma, verbose);
+    newton_solve_reduced(op, &mut kv2, &vy, &xy, dt_a, verbose);
     let mut kx2 = vec![0.0; sc];
-    for i in 0..sc { kx2[i] = v2[i] + dt_gamma * kv2[i]; }
+    for i in 0..sc { kx2[i] = vy[i] + dt_a * kv2[i]; }
 
-    // Stage 3 (simplified SDIRK23): same algebraic update as stage 2
-    let mut v3 = v2.to_vec();
-    let mut x3 = x2.to_vec();
+    let nab = 1.0 - A - B;
     for i in 0..sc {
-        v3[i] += dt * (-coeff / gamma) * kv2[i]; // u3 = u2 - dt*(1-γ)/γ * k2
-        x3[i] += dt * (-coeff / gamma) * kx2[i];
+        v[i] += nab * dt * kv2[i];
+        x[i] += nab * dt * kx2[i];
     }
+
+    // ── Stage 3 ───────────────────────────────────────────────────────────
     let mut kv3 = vec![0.0; sc];
-    newton_solve_reduced(op, &mut kv3, &v3, &x3, dt_gamma, verbose);
+    newton_solve_reduced(op, &mut kv3, v, x, dt_a, verbose);
     let mut kx3 = vec![0.0; sc];
-    for i in 0..sc { kx3[i] = v3[i] + dt_gamma * kv3[i]; }
+    for i in 0..sc { kx3[i] = v[i] + dt_a * kv3[i]; }
 
-    // SDIRK23 update coefficients (b1, b2, b3) depend on the tableau
-    // Default to SDIRK2 update for now
     for i in 0..sc {
-        v[i] += dt * (coeff * kv1[i] + gamma * kv2[i]); // b1=coeff, b2=gamma, b3=0
-        x[i] += dt * (coeff * kx1[i] + gamma * kx2[i]);
+        v[i] += A * dt * kv3[i];
+        x[i] += A * dt * kx3[i];
     }
+
+    // Enforce BC
     for &d in ess_dofs_k { if d < sc { v[d] = 0.0; x[d] = 0.0; } }
 }
 

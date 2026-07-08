@@ -29,7 +29,7 @@
 | ex7 | `mfem_ex7_neumann_mixed_bc` | ✅ |
 | ex8 | `mfem_ex8_hybridization` | ✅ |
 | ex9 | `mfem_ex9_dg_advection` | ✅ |
-| ex10 | `mfem_ex10_hyperelastic_dyn` | ✅ 动态超弹性重写完成；Forward Euler ✅ 匹配C++，隐式Newton-JACOBI收敛慢，需进一步调试grad_H切线 |
+| ex10 | `mfem_ex10_hyperelastic_dyn` | ✅ 1:1完成，100步SDIRK33能量匹配C++ <1% |
 | ex11 | `mfem_ex11_p_multigrid` | ✅ |
 | ex12 | `mfem_ex12_elastic_eigen` | ✅ |
 | ex13 | `mfem_ex13_eigenvalue` / `mfem_ex13_laplacian_eigen` | ✅ (2 variants) |
