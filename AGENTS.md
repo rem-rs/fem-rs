@@ -4,6 +4,9 @@
 
 **前提：C++ 示例和 Rust 示例必须是 1:1 翻译，物理设定、边界条件、材料参数、求解器配置完全一致，比对结果才有意义。** 如果 Rust 示例和 C++ 示例在物理上已偏离（如 ex2 改前用体积力代替边界牵引力、单材料代替双材料），必须先修正为 1:1 翻译，再做比对。
 
+**核心原则：比对的目的不是「让示例跑起来」，而是「发现 fem-rs 核心库的短板并修复」。**
+当比对发现 C++ 有的功能 fem-rs 缺少时（例如某类积分器、预处理器、网格操作），这恰恰是最有价值的工作——改进核心库 `crates/` 的代码，而不是在示例里绕过去。示例翻译是手段，核心库完善才是目的。
+
 将 Rust fem-rs 示例与 C++ MFEM 对应示例进行逐行比对，确保物理设定、求解器配置、输出格式完全一致。
 
 ## 工作流程
@@ -90,6 +93,15 @@ git push
 ---
 
 ## 踩坑记录（持续更新）
+
+### ex7 曲面网格基础设施短板
+
+| 短板 | C++ MFEM | fem-rs | 修复方案 |
+|------|----------|--------|----------|
+| **Quad4 曲面** | `-e 1` 立方体→球面（`Mesh::AddQuad` + `FinalizeQuadMesh`） | `SurfaceAssembler` 只支持 Tri3，无 Quad4 曲面路径 | `surface.rs` 加 `SurfaceQuad4` 系列（Jacobian 用 3×2 双线性映射） |
+| **`dim()` vs `space_dim()` 混淆** | `mesh->Dimension() = 2`（拓扑维），`mesh->SpaceDimension() = 3`（嵌入维） | `MeshTopology::dim()` 返回 `D`（嵌入维），`DofManager` 对 `Mesh<3>` Tri3 用了 3D 公式 | `MeshTopology` 加 `topological_dim()`，`DofManager` 检查 `element_type` 而不是 `dim()` |
+| **曲面 AMR** | `RefineAtVertex` + `RandomRefinement` + 局部加密 + SnapNodes | 无曲面网格细化路径 | 参考 `refine_uniform_3d` 对 Tri3 曲面加细分路径 |
+| **高阶曲面 (order≥2)** | `SetNodalFESpace(&nodal_fes)` + 等参映射 | `CurvedMesh` 对 `Mesh<3>` Tri3 用了四面体边枚举（越界） | 修复 `CurvedMesh` 在 `D=3, elem=Tri3` 时使用三角边枚举 |
 
 ### ex4 H(div) 四边形/曲边界网格 L² 误差差距
 
