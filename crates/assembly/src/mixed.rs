@@ -17,7 +17,7 @@
 
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, HexQ1, HexQ2, HexQ3}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
-use fem_element::raviart_thomas::{TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1};
+use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1};
 use fem_element::nedelec::{TriND1, TetND1, QuadND1, HexND1, QuadNDk, HexNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
@@ -436,6 +436,8 @@ fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Result<B
     Ok(match (space, elem_type, order) {
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriRT0),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriRT1),
+        (SpaceType::HDiv, ElementType::Quad4, 0) => Box::new(QuadRT0),
+        (SpaceType::HDiv, ElementType::Quad4, 1) => Box::new(QuadRT1),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 0) => Box::new(TetRT0),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetRT1),
         (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRT0),
