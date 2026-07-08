@@ -28,3 +28,15 @@ Thumbs.db
 
 # Agent artifacts
 .mimocode/
+
+# Generated output files
+refined.mesh
+displaced.mesh
+ex0_mesh.mesh
+ex0_solution.gf
+ex5.mesh
+examples/refined.mesh
+examples/sol.gf
+sol.gf
+sol_p.gf
+sol_u.gf
