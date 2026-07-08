@@ -17,8 +17,10 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
+use fem_element::{VectorReferenceElement, nedelec::TriND1};
 use fem_io::mfem::{read_mfem_file, write_mfem};
-use fem_mesh::{Mesh, amr::refine_uniform};
+use fem_io::glvis::GlVisSocket;
+use fem_mesh::{Mesh, MeshTopology, amr::refine_uniform};
 use fem_parallel::{
     ParVectorAssembler, ParVector, ParallelFESpace,
     par_partition::partition_mesh, par_solve_pcg_jacobi,
@@ -138,6 +140,82 @@ fn main() {
         }
         if comm.rank() == 0 {
             eprintln!("  Wrote mesh.XXXXXX and sol.XXXXXX per rank");
+        }
+
+        // GLVis visualization (parallel mode).
+        if visualization {
+            let lm = ps.local_space().mesh();
+            let n_nodes = lm.n_nodes() as usize;
+            let ref_elem = TriND1;
+            let n_ldofs = ref_elem.n_dofs();
+            let ref_verts: [[f64; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+
+            let mut sum_x = vec![0.0_f64; n_nodes];
+            let mut sum_y = vec![0.0_f64; n_nodes];
+            let mut count = vec![0u32; n_nodes];
+            let mut ref_phi = vec![0.0_f64; n_ldofs * 2];
+
+            let n_owned_elems = pm.partition().n_owned_elems;
+            for e in 0..n_owned_elems as u32 {
+                let nodes = lm.element_nodes(e);
+                let dofs: Vec<usize> = ps.local_space().element_dofs(e)
+                    .iter().map(|&d| d as usize).collect();
+                let signs = ps.local_space().element_signs(e);
+
+                let x0 = lm.node_coords(nodes[0]);
+                let x1 = lm.node_coords(nodes[1]);
+                let x2 = lm.node_coords(nodes[2]);
+
+                let j00 = x1[0] - x0[0]; let j01 = x2[0] - x0[0];
+                let j10 = x1[1] - x0[1]; let j11 = x2[1] - x0[1];
+                let inv_det = 1.0 / (j00 * j11 - j01 * j10);
+                let (jit00, jit01) = ( j11 * inv_det, -j10 * inv_det);
+                let (jit10, jit11) = (-j01 * inv_det,  j00 * inv_det);
+
+                for vi in 0..3 {
+                    ref_elem.eval_basis_vec(&ref_verts[vi], &mut ref_phi);
+
+                    let mut eh_x = 0.0_f64;
+                    let mut eh_y = 0.0_f64;
+                    for i in 0..n_ldofs {
+                        let px = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
+                        let py = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
+                        let val = u.as_slice()[dofs[i]];
+                        eh_x += signs[i] * val * px;
+                        eh_y += signs[i] * val * py;
+                    }
+
+                    let nid = nodes[vi] as usize;
+                    sum_x[nid] += eh_x;
+                    sum_y[nid] += eh_y;
+                    count[nid] += 1;
+                }
+            }
+
+            let mut e_node_x = vec![0.0_f64; n_nodes];
+            let mut e_node_y = vec![0.0_f64; n_nodes];
+            for i in 0..n_nodes {
+                if count[i] > 0 {
+                    let inv = 1.0 / count[i] as f64;
+                    e_node_x[i] = sum_x[i] * inv;
+                    e_node_y[i] = sum_y[i] * inv;
+                }
+            }
+
+            let n_ranks = pm.comm().size();
+            let my_rank = pm.comm().rank() as usize;
+            match GlVisSocket::connect("localhost", 19916) {
+                Ok(mut vis) => {
+                    vis.send_parallel_solution_2d_vector(
+                        n_ranks, my_rank, lm, &e_node_x, &e_node_y, "E",
+                    ).ok();
+                }
+                Err(e) => {
+                    if comm.rank() == 0 {
+                        eprintln!("  GLVis not available: {e}");
+                    }
+                }
+            }
         }
 
         *r2.lock().unwrap() = Some((n_global, res.iterations, res.final_residual));

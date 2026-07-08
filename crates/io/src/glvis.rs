@@ -119,6 +119,23 @@ impl GlVisSocket {
         self.stream.flush()
     }
 
+    /// Send a 2-D vector solution to GLVis in parallel mode.
+    ///
+    /// Prefixes the stream with `parallel <n_ranks> <rank>` so GLVis combines
+    /// solutions from all ranks into a single view.
+    pub fn send_parallel_solution_2d_vector(
+        &mut self,
+        n_ranks: usize,
+        rank: usize,
+        mesh: &Mesh<2>,
+        field_x: &[f64],
+        field_y: &[f64],
+        field_name: &str,
+    ) -> io::Result<()> {
+        writeln!(self.stream, "parallel {} {}", n_ranks, rank)?;
+        self.send_solution_2d_vector(mesh, field_x, field_y, field_name)
+    }
+
     // ── 3-D convenience methods ──────────────────────────────────────────────
 
     /// Send a 3-D scalar solution to GLVis.
