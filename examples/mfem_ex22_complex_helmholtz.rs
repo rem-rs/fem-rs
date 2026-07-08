@@ -54,7 +54,7 @@ fn u0_complex(x: &[f64]) -> (f64, f64) {
         let z = x[dim];
         let mag_exp = (kappa_im * z).exp();
         let phase = -kappa_re * z;
-        (mag_exp * phase.cos(), mag_exp * (-phase.sin()))
+        (mag_exp * phase.cos(), mag_exp * phase.sin())
     }
 }
 
@@ -101,8 +101,8 @@ fn main() {
     //   M = ε · Mass   → ω²·ε = 1/μ · ω²·μ·ε (but MFEM convention)
     //   C = σ · Mass
     let stiff_coef = 1.0 / args.mu;
-    let mass_coef = -args.omega * args.omega * args.eps;
-    let damp_coef = args.omega * args.sigma;
+    let mass_coef = args.eps; // M = ε·M_base; assembler computes -ω²·M = -ω²·ε·M_base
+    let damp_coef = args.sigma; // C = σ·M; assembler then computes k_im = ω·C = ω·σ·M
 
     let mut sys = ComplexAssembler::assemble(
         &space,
@@ -193,9 +193,8 @@ fn main() {
     let norm_re = exact_all_re.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-14);
     let norm_im = exact_all_im.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-14);
     println!(
-        "  Relative L2 error: re={:.3e}, im={:.3e}",
-        err_re / norm_re,
-        err_im / norm_im
+        "  L2 error (abs): re={:.6e}, im={:.6e}  (rel: re={:.3e}, im={:.3e})",
+        err_re, err_im, err_re / norm_re, err_im / norm_im
     );
 
     assert!(res.converged, "GMRES did not converge");
