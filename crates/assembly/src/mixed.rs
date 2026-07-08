@@ -21,6 +21,7 @@ use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetR
 use fem_element::nedelec::{TriND1, TetND1, QuadND1, QuadNDk, HexND1, HexNDk, PrismND1, PrismNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
+use crate::vector_assembler::isoparametric_jacobian;
 use fem_space::fe_space::{FESpace, SpaceType};
 
 use crate::integrator::QpData;
@@ -464,8 +465,8 @@ where
         let global_cols: Vec<usize> = col_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
         let elem_tag = mesh.element_tag(e);
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let j_inv_t = tr.jacobian_inv_t().clone();
+        let use_iso = !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
+        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
 
         let n_elem_r = global_rows.len();
         let n_elem_c = global_cols.len();
@@ -474,15 +475,23 @@ where
         let mut grad_r = vec![0.0; n_r * dim];
         let mut grad_phys = vec![0.0; n_r * dim];
         let mut vec_col = vec![0.0; n_c * dim];
+        let mut j_inv_t = nalgebra::DMatrix::<f64>::identity(dim, dim);
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * tr.det_j().abs();
+            let (w, xp) = if use_iso {
+                let ge = geo_elem.as_ref().expect("geo_ref_elem");
+                let (jac, det_j, x) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
+                j_inv_t = jac.clone().try_inverse().expect("invertible Jacobian").transpose();
+                (quad.weights[q] * det_j, x)
+            } else {
+                let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+                j_inv_t = tr.jacobian_inv_t().clone();
+                (quad.weights[q] * tr.det_j().abs(), tr.map_to_physical(xi))
+            };
             ref_r.eval_basis(xi, &mut phi_r);
             ref_r.eval_grad_basis(xi, &mut grad_r);
             transform_grads(&j_inv_t, &grad_r, &mut grad_phys, n_r, dim);
             ref_c.eval_basis_vec(xi, &mut vec_col);
-
-            let xp = tr.map_to_physical(xi);
             let qp_r = QpData {
                 n_dofs: n_elem_r, dim, weight: w, phi: &phi_r,
                 grad_phys: &grad_phys,
@@ -540,6 +549,9 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Hex20, 1) => Box::new(HexSerendipityPk::new(1)),
         (ElementType::Hex20, 2) => Box::new(HexSerendipityPk::new(2)),
         (ElementType::Hex20, 3) => Box::new(HexSerendipityPk::new(3)),
+        (ElementType::Prism6 | ElementType::Prism15, 1) => Box::new(fem_element::lagrange::PrismPk::new(1)),
+        (ElementType::Prism6 | ElementType::Prism15, 2) => Box::new(fem_element::lagrange::PrismPk::new(2)),
+        (ElementType::Prism6 | ElementType::Prism15, 3) => Box::new(fem_element::lagrange::PrismPk::new(3)),
         _ => return Err(format!("ref_elem_vol: unsupported ({elem_type:?}, order={order})")),
     })
 }

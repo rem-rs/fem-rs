@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use fem_core::{FaceId, NodeId, ElemId};
-use crate::{element_type::ElementType, simplex::Mesh};
+use crate::{element_type::ElementType, simplex::Mesh, rebuild_boundary::rebuild_3d_boundary};
 
 use super::bisect::{edge_key, local_edges_tri, refine_marked};
 
@@ -571,7 +571,7 @@ pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
 /// Prism6 → 8 Prism6, Pyramid5 → 16 Tet4.
 pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-    match mesh.elem_type {
+    let mut result = match mesh.elem_type {
         ElementType::Tet4 | ElementType::Tet10 => {
             let (m, _, _) = refine_nonconforming_3d(mesh, &all);
             m
@@ -581,7 +581,6 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
             m
         }
         ElementType::Hex20 | ElementType::Hex27 => {
-            // Quadratic hex: extract corners, refine as Hex8
             let n_elems = mesh.n_elems();
             let npe = mesh.elem_type.nodes_per_element();
             let mut hex8_conn = Vec::with_capacity(n_elems * 8);
@@ -613,7 +612,9 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
             m
         }
         _ => panic!("refine_uniform_3d: unsupported {:?}", mesh.elem_type),
-    }
+    };
+    rebuild_3d_boundary(&mut result, mesh);
+    result
 }
 
 fn midpoint_edge(coords: &mut Vec<f64>, em: &mut HashMap<(u32, u32), u32>, nn: &mut u32,
@@ -4497,7 +4498,7 @@ fn refine_hex27_uniform_inner(mesh: &Mesh<3>, marked: &[ElemId], npe: usize) -> 
 mod tests {
     use crate::amr::*;
     use fem_core::{NodeId, ElemId};
-    use crate::{element_type::ElementType, simplex::Mesh};
+    use crate::{element_type::ElementType, simplex::Mesh, rebuild_boundary::rebuild_3d_boundary};
 
     #[test]
     fn uniform_refinement_element_count() {

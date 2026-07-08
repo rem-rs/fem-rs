@@ -116,9 +116,8 @@ fn main() {
     // 5. Set up SubMesh for the conducting region.
     let max_attr = *mesh.elem_tags.iter().max().unwrap_or(&0);
     let submesh_attr = max_attr + 1;
-    // Use tet-only submesh (excludes prism element 9 which HDivSpace can't handle yet).
     let submesh_indices = if args.mixed {
-        &SUBELEMS_MIXED[..SUBELEMS_MIXED.len() - 1] // skip prism for now
+        SUBELEMS_MIXED  // full selection including prism
     } else {
         // For hex mesh, reload fichera.mesh, refine once, then use hex indices.
         let mfem2 = read_mfem_file("data/fichera.mesh").expect("failed to read fichera.mesh");
@@ -126,15 +125,17 @@ fn main() {
         mesh = refine_uniform_3d(&mesh);
         SUBELEMS_HEX
     };
-    // TODO: Mixed-element HDivSpace/HCurlSpace support needed for full ex34.
     for &ei in submesh_indices {
         mesh.elem_tags[ei as usize] = submesh_attr;
     }
 
-    // Further refinements (disabled for now: 3D refinement doesn't build boundary faces).
-    // for _ in 0..ref_levels {
-    //     mesh = refine_uniform_3d(&mesh);
-    // }
+    // Further refinements (only for uniform-element-type meshes).
+    if mesh.elem_types.is_none() {
+        let ref_levels = args.ref_levels;
+        for _ in 0..ref_levels {
+            mesh = refine_uniform_3d(&mesh);
+        }
+    }
 
     let cond_attr = [submesh_attr];
     let submesh: SubMesh3D = extract_submesh_3d(&mesh, &cond_attr);
