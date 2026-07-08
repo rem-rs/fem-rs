@@ -474,6 +474,10 @@ name = "mfem_ex25_pml_helmholtz"
 path = "mfem_ex25_pml_helmholtz.rs"
 
 [[example]]
+name = "mfem_ex25_pml_maxwell"
+path = "mfem_ex25_pml_maxwell.rs"
+
+[[example]]
 name = "mfem_ex26_geom_mg"
 path = "mfem_ex26_geom_mg.rs"
 

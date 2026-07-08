@@ -145,7 +145,6 @@ fn main() {
         "PCG+Jacobi: {} iterations, ||r||/||b|| = {:.3e}",
         result.iterations, result.final_residual,
     );
-
     // 12. RecoverFEMSolution — u already holds the full solution in the right
     //     form (the H(curl) DOF layout matches the space).
 

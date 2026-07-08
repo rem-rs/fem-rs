@@ -38,7 +38,9 @@ use fem_mesh::ElementTransformation;
 use fem_space::fe_space::FESpace;
 
 use crate::assembler::Assembler;
+use crate::vector_assembler::VectorAssembler;
 use crate::integrator::{BilinearIntegrator, LinearIntegrator, QpData};
+use crate::vector_integrator::VectorBilinearIntegrator;
 
 // ─── ComplexSystem ────────────────────────────────────────────────────────────
 
@@ -230,6 +232,45 @@ impl ComplexAssembler {
         let n = k.nrows;
         let k_re = subtract_scaled(&k, &m, omega * omega);
         // k_im = zero matrix (same sparsity as k_re for simplicity)
+        let k_im = zero_like(&k_re, n);
+        ComplexSystem { k_re, k_im, omega }
+    }
+
+    /// Assemble a time-harmonic complex system for H(curl) / H(div) spaces.
+    ///
+    /// Same as [`assemble`] but uses [`VectorBilinearIntegrator`] (e.g.
+    /// [`CurlCurlIntegrator`], [`VectorMassIntegrator`]).
+    pub fn assemble_vector<S: FESpace + Send + Sync>(
+        space:      &S,
+        stiff:      &[&dyn VectorBilinearIntegrator],
+        mass:       &[&dyn VectorBilinearIntegrator],
+        damp:       &[&dyn VectorBilinearIntegrator],
+        omega:      f64,
+        quad_order: u8,
+    ) -> ComplexSystem {
+        let k = VectorAssembler::assemble_bilinear(space, stiff, quad_order);
+        let m = VectorAssembler::assemble_bilinear(space, mass,  quad_order);
+        let c = VectorAssembler::assemble_bilinear(space, damp,  quad_order);
+
+        let k_re = subtract_scaled(&k, &m, omega * omega);
+        let k_im = scale_csr(&c, omega);
+        ComplexSystem { k_re, k_im, omega }
+    }
+
+    /// Assemble an undamped (lossless) complex H(curl) / H(div) system.
+    ///
+    /// `k_re = K − ω²·M`,  `k_im = 0`.
+    pub fn assemble_vector_undamped<S: FESpace + Send + Sync>(
+        space:      &S,
+        stiff:      &[&dyn VectorBilinearIntegrator],
+        mass:       &[&dyn VectorBilinearIntegrator],
+        omega:      f64,
+        quad_order: u8,
+    ) -> ComplexSystem {
+        let k = VectorAssembler::assemble_bilinear(space, stiff, quad_order);
+        let m = VectorAssembler::assemble_bilinear(space, mass,  quad_order);
+        let n = k.nrows;
+        let k_re = subtract_scaled(&k, &m, omega * omega);
         let k_im = zero_like(&k_re, n);
         ComplexSystem { k_re, k_im, omega }
     }
