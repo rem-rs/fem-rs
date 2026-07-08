@@ -25,8 +25,13 @@ fn lump(m: &CsrMatrix<f64>) -> Vec<f64> {
 fn main() {
     let args=Args::parse(); let wall=Instant::now();
 
-    // Create unit-square mesh (2 subdivisions × 2 quads = 8 triangles)
-    let mesh = Mesh::<2>::unit_square_tri(4);
+    // Read mesh file or create default
+    let mesh = if !args.mesh.is_empty() {
+        fem_io::mfem::read_mfem_file(&args.mesh)
+            .expect("read mesh").mesh2d.expect("2D mesh")
+    } else {
+        Mesh::<2>::unit_square_tri(4)
+    };
     let mesh = if args.refine>0 { let mut m=mesh;
         for _ in 0..args.refine { m=refine_uniform(&m); } m
     } else { mesh };
@@ -143,9 +148,10 @@ fn main() {
 struct Args{mesh:String,problem:usize,refine:usize,order:u8,dt:f64,t_final:f64,no_vis:bool}
 impl Args {
     fn parse()->Self {
-        let(mut p,mut r,mut o,mut dt,mut tf)=(0usize,2usize,1u8,0.001_f64,0.5_f64);
+        let(mut mesh,mut p,mut r,mut o,mut dt,mut tf)=(String::new(),0usize,2usize,1u8,0.001_f64,0.5_f64);
         let mut nv=false; let mut it=std::env::args().skip(1);
         while let Some(a)=it.next(){match a.as_str(){
+            "-m"|"--mesh"=>{mesh=it.next().unwrap_or(mesh);}
             "-p"|"--problem"=>{p=it.next().and_then(|s|s.parse().ok()).unwrap_or(0);}
             "-r"|"--refine"=>{r=it.next().and_then(|s|s.parse().ok()).unwrap_or(2);}
             "-o"|"--order"=>{o=it.next().and_then(|s|s.parse().ok()).unwrap_or(1);}
@@ -154,6 +160,6 @@ impl Args {
             "-no-vis"|"--no-visualization"=>{nv=true;}
             _=>{}
         }}
-        Args{mesh:String::new(),problem:p,refine:r,order:o as u8,dt,t_final:tf,no_vis:nv}
+        Args{mesh,problem:p,refine:r,order:o as u8,dt,t_final:tf,no_vis:nv}
     }
 }
