@@ -224,6 +224,10 @@ name = "mfem_ex7_neumann_mixed_bc"
 path = "mfem_ex7_neumann_mixed_bc.rs"
 
 [[example]]
+name = "mfem_ex7_surface_poisson"
+path = "mfem_ex7_surface_poisson.rs"
+
+[[example]]
 name = "maxwell_time_domain"
 path = "maxwell_time_domain.rs"
 
