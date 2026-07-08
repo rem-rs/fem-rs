@@ -281,6 +281,7 @@ fn accumulate_vector_bilinear_element<S: FESpace>(
     let n_i = n_interior;       // number of interior (bubble) DOFs
     let n = n_total;            // total DOFs per element
     let mut k_elem = vec![0.0_f64; n * n];
+    let mut k_edge = k_elem.clone(); // n_e×n_e block, filled by integrator then copied
     let mut ref_phi = vec![0.0; n_e * dim];
     let mut ref_curl = vec![0.0; n_e * curl_dim];
     let mut ref_div = vec![0.0; n_e];
@@ -334,60 +335,62 @@ fn accumulate_vector_bilinear_element<S: FESpace>(
             x_phys: &xp, elem_id: e, elem_tag,
         };
         for integ in integrators {
-            integ.add_to_element_matrix(&qp, &mut k_elem[..n_e * n]);
+            integ.add_to_element_matrix(&qp, &mut k_edge[..n_e * n_e]);
+        }
+        // Copy edge-edge block to k_elem with correct stride n (not n_e)
+        for i in 0..n_e {
+            for j in 0..n_e {
+                k_elem[i * n + j] += k_edge[i * n_e + j];
+            }
         }
 
         // Interior DOFs (bubble modes): zero curl, only mass contribution.
         // For NDk H(curl) on Quad4: 2*k*(k-1) interior DOFs, gradient-bubble type.
-        // ψ_x,m = (1-η^2) * P_m(ξ) * (1,0)^T for m=0..k-2 (x-direction bubbles)
-        // ψ_y,m = (1-ξ^2) * P_m(η) * (0,1)^T for m=0..k-2 (y-direction bubbles)
-        if n_i > 0 {
+        // Use normalized gradient-bubble functions for better conditioning.
+        if n_i > 0 && elem_type == ElementType::Quad4 {
             let x = xi[0]; let y = xi[1];
-            let k = ((n_i / 2) as f64).sqrt() as usize + 1; // approximate k from n_i
-            // Actually compute k from the space order
             let k = space.order() as usize;
-            let n_per_dir = k; // NDk: k interior bubble functions per direction (2k(k-1) total)
 
-            // Build interior basis values at this QP
+            // Interior bubble basis functions for Quad4 NDk:
+            // x-dir: (1-η²)·ξᵐ · (1,0)ᵀ, normalized: scale = √(15(2m+1)/32)
+            // y-dir: (1-ξ²)·ηᵐ · (0,1)ᵀ, normalized: scale = √(15(2m+1)/32)
+            let n_per_dir = k;
             let mut int_phi = vec![0.0_f64; n_i * dim];
             let mut idx = 0;
-            // x-direction bubbles: (1-η²)·ξ^m · (1,0)^T  for m=0..n_per_dir-1
             for m in 0..n_per_dir {
-                let base = (1.0 - y * y) * x.powi(m as i32);
-                int_phi[idx * dim]     = base;  // x-component
-                int_phi[idx * dim + 1] = 0.0;    // y-component = 0
-                idx += 1;
+                let s = ((15.0 * (2.0 * m as f64 + 1.0)) / 32.0).sqrt();
+                let b = s * (1.0 - y * y) * x.powi(m as i32);
+                int_phi[idx * dim] = b; int_phi[idx * dim + 1] = 0.0; idx += 1;
             }
-            // y-direction bubbles: (1-ξ²)·η^m · (0,1)^T  for m=0..n_per_dir-1
             for m in 0..n_per_dir {
-                let base = (1.0 - x * x) * y.powi(m as i32);
-                int_phi[idx * dim]     = 0.0;    // x-component = 0
-                int_phi[idx * dim + 1] = base;   // y-component
-                idx += 1;
+                let s = ((15.0 * (2.0 * m as f64 + 1.0)) / 32.0).sqrt();
+                let b = s * (1.0 - x * x) * y.powi(m as i32);
+                int_phi[idx * dim] = 0.0; int_phi[idx * dim + 1] = b; idx += 1;
             }
-            debug_assert_eq!(idx, n_i, "interior DOF count mismatch");
+            debug_assert_eq!(idx, n_i);
 
-            // Apply covariant Piola transform to interior basis functions
+            // Piola transform for interior functions (covariant)
             let mut int_phys = vec![0.0_f64; n_i * dim];
             for i in 0..n_i {
                 for r in 0..dim {
-                    let mut s = 0.0;
-                    for c in 0..dim { s += j_inv_t[(r, c)] * int_phi[i * dim + c]; }
-                    int_phys[i * dim + r] = s;
+                    for c in 0..dim {
+                        int_phys[i * dim + r] += j_inv_t[(r, c)] * int_phi[i * dim + c];
+                    }
                 }
             }
 
-            // Mass matrix: edge-interior and interior-interior blocks
-            for i_edge in 0..n_e {
-                for j_int in 0..n_i {
+            // Edge-interior mass coupling
+            for ie in 0..n_e {
+                for ji in 0..n_i {
                     let mut dot = 0.0;
                     for d in 0..dim {
-                        dot += phys_phi[i_edge * dim + d] * int_phys[j_int * dim + d];
+                        dot += phys_phi[ie * dim + d] * int_phys[ji * dim + d];
                     }
-                    k_elem[i_edge * n + (n_e + j_int)] += w * dot;
-                    k_elem[(n_e + j_int) * n + i_edge] += w * dot; // symmetric
+                    k_elem[ie * n + (n_e + ji)] += w * dot;
+                    k_elem[(n_e + ji) * n + ie] += w * dot;
                 }
             }
+            // Interior-interior mass
             for i in 0..n_i {
                 for j in 0..=i {
                     let mut dot = 0.0;
@@ -395,9 +398,7 @@ fn accumulate_vector_bilinear_element<S: FESpace>(
                         dot += int_phys[i * dim + d] * int_phys[j * dim + d];
                     }
                     k_elem[(n_e + i) * n + (n_e + j)] += w * dot;
-                    if i != j {
-                        k_elem[(n_e + j) * n + (n_e + i)] += w * dot;
-                    }
+                    if i != j { k_elem[(n_e + j) * n + (n_e + i)] += w * dot; }
                 }
             }
         }
