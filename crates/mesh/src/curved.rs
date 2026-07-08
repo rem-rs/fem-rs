@@ -73,9 +73,12 @@ impl<const D: usize> CurvedMesh<D> {
     where
         F: Fn([f64; D]) -> [f64; D],
     {
-        let dim = D;
+        // Use topological dimension (element type) rather than spatial dim D
+        // so that surface meshes (Mesh<3> with Tri3) use triangle formulas.
+        let topo_dim = mesh.element_type_at(0).dim() as usize;
+        let dim = D; // spatial dimension for coordinate arrays
         let order = p as u8;
-        let npe_new = fem_element::lagrange::factory::n_dofs_simplex(dim, p);
+        let npe_new = fem_element::lagrange::factory::n_dofs_simplex(topo_dim, p);
         let n_linear_nodes = mesh.n_nodes();
         let mut new_coords: Vec<f64> = mesh.coords.clone();
         let mut next_node = n_linear_nodes as NodeId;
@@ -125,9 +128,9 @@ impl<const D: usize> CurvedMesh<D> {
             geom_conn.resize(off + npe_new, 0);
 
             // Copy vertex nodes
-            geom_conn[off..(dim + off + 1)].copy_from_slice(&ns[..(dim + 1)]);
+            geom_conn[off..(off + topo_dim + 1)].copy_from_slice(&ns[..(topo_dim + 1)]);
 
-            if dim == 2 {
+            if topo_dim == 2 {
                 // Tri: 3 edges �?v0v1, v1v2, v0v2
                 let edges = [(0usize, 1usize), (1, 2), (0, 2)];
                 let mut pos = 3;
