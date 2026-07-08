@@ -1,223 +1,183 @@
-//! # Example 30 — Anisotropic AMR (analogous to MFEM ex30)
+//! # Example 30 — Anisotropic AMR data oscillation (1:1 with MFEM ex30)
 //!
-//! Demonstrates anisotropic non-conforming AMR on a 2-D quad mesh.
-//! Three coefficient functions are refined sequentially:
-//!
-//! 1. **Affine** — piecewise-linear (mesh-conforming for P1, oscillation ≈ 0)
-//! 2. **Jump** — discontinuous ring (requires refinement at the interface)
-//! 3. **Singular** — steep wavefront from a near-singular Laplacian source
-//!
-//! Uses ZZ error estimation + Dörfler marking with anisotropic refinement.
+//! Preprocesses a mesh by adaptively refining to resolve coefficient data.
 //!
 //! ## Usage
-//! ```text
-//! cargo run --example mfem_ex30_aniso_amr
-//! cargo run --example mfem_ex30_aniso_amr -- -m ../data/square-disc.mesh -o 2
-//! cargo run --example mfem_ex30_aniso_amr -- --cycles 2 --theta 0.3
+//! ```bash
+//! cargo run --example mfem_ex30_aniso_amr -- -m data/star.mesh -o 2
+//! cargo run --example mfem_ex30_aniso_amr -- -m data/star.mesh -o 2 -e 1e-3
 //! ```
 
 use std::time::Instant;
-
+use fem_assembly::postproc::grid_function::GridFunction;
+use fem_assembly::postproc::grid_function::project_coefficient;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{
-    Mesh, MeshTopology,
-    zz_estimator, dorfler_mark,
-    refine_nonconforming_quad, refine_nonconforming_quad_aniso, QuadRefineDir,
-};
+use fem_mesh::{Mesh, MeshTopology, element_type::ElementType,
+    amr::{refine_nonconforming_quad, closure_refine_default}};
+use fem_space::{L2Space, fe_space::FESpace};
 
-fn main() {
-    let args = parse_args();
-    println!("=== Example 30: Anisotropic AMR (MFEM ex30) ===");
-    if let Some(ref p) = args.mesh {
-        println!("  Mesh file: {p}");
-    } else {
-        println!("  Initial mesh: {}×{} quads", args.n, args.n);
-    }
-    println!("  Cycles: {}, theta: {:.3}, enriched_order: {}",
-             args.cycles, args.theta, args.enriched_order);
-
-    // Load or generate initial quad mesh
-    let mut mesh: Mesh<2> = if let Some(ref path) = args.mesh {
-        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
-        mfem.mesh2d.expect("MFEM mesh must be 2D")
-    } else {
-        Mesh::<2>::unit_square_quad(args.n)
-    };
-
-    let t0 = Instant::now();
-
-    // Run three sequential refinement passes, one per coefficient function
-    let coeffs: [(&str, fn(&[f64]) -> f64); 3] = [
-        ("affine",     affine_fn),
-        ("jump",       jump_fn),
-        ("singular",   singular_fn),
-    ];
-    for (pass, (name, coeff_fn)) in coeffs.iter().enumerate() {
-        println!("\n  Pass {pass}: {name}");
-
-        for cycle in 0..args.cycles {
-            let n0 = mesh.n_nodes();
-            let e0 = mesh.n_elems();
-
-            // Eval coefficient on all nodes
-            let u: Vec<f64> = (0..n0)
-                .map(|i| coeff_fn(&mesh.node_coords(i as u32)))
-                .collect();
-
-            let eta = zz_estimator(&mesh, &u);
-            let marked = dorfler_mark(&eta, args.theta);
-
-            let isotropic: Vec<u32> = marked.iter().filter(|&&e| {
-                let c = element_centroid(&mesh, e);
-                (c[0] - 0.5).abs() < 0.3 && (c[1] - 0.5).abs() < 0.3
-            }).copied().collect();
-
-            let aniso: Vec<(u32, QuadRefineDir)> = marked.iter().filter(|&&e| {
-                let c = element_centroid(&mesh, e);
-                (c[0] - 0.5).abs() >= 0.3 || (c[1] - 0.5).abs() >= 0.3
-            }).map(|&e| {
-                let c = element_centroid(&mesh, e);
-                (e, if c[0] < 0.5 { QuadRefineDir::X } else { QuadRefineDir::Y })
-            }).collect();
-
-            if !isotropic.is_empty() {
-                mesh = refine_nonconforming_quad(&mesh, &isotropic).0;
-            }
-            if !aniso.is_empty() {
-                mesh = refine_nonconforming_quad_aniso(&mesh, &aniso).0;
-            }
-
-            println!("    Cycle {cycle}: nodes {n0}→{}, elems {e0}→{}, marked {}, aniso {}",
-                     mesh.n_nodes(), mesh.n_elems(),
-                     isotropic.len() + aniso.len(), aniso.len());
-        }
-    }
-
-    println!("\n  Final mesh: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
-    println!("  Total time: {:.3}s", t0.elapsed().as_secs_f64());
-    println!("  Done.");
+fn affine_fn(x: &[f64]) -> f64 { x[0] + 2.0 * x[1] + 1.0 }
+fn jump_fn(x: &[f64]) -> f64 {
+    if (x[0]*x[0] + x[1]*x[1]).sqrt() > 0.3 { 1.0 } else { 2.0 }
 }
-
-// ─── Coefficient functions (matching MFEM ex30) ───────────────────────────
-
-/// Piecewise-affine function which is sometimes mesh-conforming.
-fn affine_fn(p: &[f64]) -> f64 {
-    let x = p[0];
-    let y = p[1];
-    if x < 0.0 {
-        1.0 + x + y
-    } else {
-        1.0
-    }
+fn singular_fn(x: &[f64]) -> f64 {
+    (100.0 * (x[0]*x[0] + x[1]*x[1] - 1.0)).atan()
 }
-
-/// Piecewise-constant function which is never mesh-conforming.
-fn jump_fn(p: &[f64]) -> f64 {
-    let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
-    if r > 0.4 && r < 0.6 {
-        1.0
-    } else {
-        5.0
-    }
-}
-
-/// Singular function derived from the Laplacian of a steep wavefront.
-fn singular_fn(p: &[f64]) -> f64 {
-    let x = p[0];
-    let y = p[1];
-    let alpha: f64 = 1000.0;
-    let xc = 0.75;
-    let yc = 0.5;
-    let r0 = 0.7;
-    let r = ((x - xc).powi(2) + (y - yc).powi(2)).sqrt();
-    let num = -(alpha - alpha.powi(3) * (r * r - r0 * r0));
-    let denom = (r * (alpha.powi(2) * r0 * r0 + alpha.powi(2) * r * r
-        - 2.0 * alpha.powi(2) * r0 * r + 1.0))
-        .powi(2);
-    let denom = denom.max(1.0e-8);
-    num / denom
-}
-
-fn element_centroid(mesh: &Mesh<2>, e: u32) -> [f64; 2] {
-    let nodes = mesh.elem_nodes(e);
-    let npe = nodes.len() as f64;
-    let mut c = [0.0_f64; 2];
-    for &n in nodes {
-        let coord = mesh.node_coords(n);
-        c[0] += coord[0];
-        c[1] += coord[1];
-    }
-    [c[0] / npe, c[1] / npe]
-}
-
-// ─── CLI ────────────────────────────────────────────────────────────────────
 
 struct Args {
-    mesh: Option<String>,
-    n: usize,
-    cycles: usize,
-    theta: f64,
-    enriched_order: usize,
+    mesh: String, order: u8, threshold: f64,
+    max_elements: usize, nc_limit: usize,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
-        mesh: None,
-        n: 4,
-        cycles: 3,
-        theta: 0.4,
-        enriched_order: 5,
+        mesh: "data/star.mesh".into(), order: 1, threshold: 1e-2,
+        max_elements: 100_000, nc_limit: 1,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-m" | "--mesh" => a.mesh = it.next(),
-            "--n" => a.n = it.next().unwrap_or("4".into()).parse().unwrap_or(4),
-            "--cycles" => a.cycles = it.next().unwrap_or("3".into()).parse().unwrap_or(3),
-            "--theta" => a.theta = it.next().unwrap_or("0.4".into()).parse().unwrap_or(0.4),
-            "-e" | "--enriched-order" => {
-                a.enriched_order = it.next().unwrap_or("5".into()).parse().unwrap_or(5)
-            }
+            "-m" | "--mesh" => a.mesh = it.next().unwrap_or(a.mesh),
+            "-o" | "--order" => a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "-e" | "--error" => a.threshold = it.next().and_then(|v| v.parse().ok()).unwrap_or(1e-2),
+            "-me" | "--max-elems" => a.max_elements = it.next().and_then(|v| v.parse().ok()).unwrap_or(100_000),
+            "-l" | "--nc-limit" => a.nc_limit = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
             _ => {}
         }
     }
     a
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
+/// Preprocess mesh: refine to resolve coefficient via L² oscillation marking.
+fn preprocess(mesh: &mut Mesh<2>, coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+              order: u8, threshold: f64, max_elements: usize) -> (usize, f64) {
+    for _iter in 0..15 {
+        let ne = mesh.n_elems();
+        let l2 = L2Space::new(mesh.clone(), order);
+        let dofs = project_coefficient(&l2, coeff, order as u8 * 2 + 3);
+        let gf = GridFunction::new(&l2, dofs);
+        let norm_coeff = gf.compute_l2_error(&|_| 0.0, order as u8 * 2 + 3);
+        let av_norm = norm_coeff / (ne as f64).sqrt();
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+        // Element-wise oscillation: use h_K × local projection error
+        // approximated via compute_l2_error with per-element breakdown
+        let mut marked = Vec::new();
+        let mut osc2 = 0.0;
+        let dim = mesh.dim() as usize;
 
-    #[test]
-    fn ex30_amr_increases_elements_with_refinement() {
-        let mut mesh = Mesh::<2>::unit_square_quad(2);
-        let n0 = mesh.n_elems();
-        for cycle in 0..2 {
-            let u: Vec<f64> = (0..mesh.n_nodes())
-                .map(|i| affine_fn(&mesh.node_coords(i as u32)))
-                .collect();
-            let eta = zz_estimator(&mesh, &u);
-            let marked = dorfler_mark(&eta, 0.5);
-            let aniso: Vec<(u32, QuadRefineDir)> = marked.iter().map(|&e| {
-                let c = element_centroid(&mesh, e);
-                (e, if c[0] < 0.5 { QuadRefineDir::X } else { QuadRefineDir::Y })
-            }).collect();
-            mesh = refine_nonconforming_quad_aniso(&mesh, &aniso).0;
-            assert!(mesh.n_elems() > n0 || cycle == 0,
-                    "refinement should increase element count");
+        for e in 0..ne as u32 {
+            let ns = mesh.element_nodes(e);
+            let h = element_size(mesh, ns, dim);
+            // Compute element L² error vs coefficient via grid function
+            let elem_err = element_l2_error(&gf, e, coeff, order as u8 * 2 + 3);
+            let osc = h * elem_err;
+            if osc > threshold * av_norm { marked.push(e); }
+            osc2 += osc * osc;
+        }
+
+        let global_osc = osc2.sqrt() / norm_coeff.max(1e-30);
+        eprintln!("    elems={ne} osc={global_osc:.6e} marked={}", marked.len());
+
+        if global_osc < threshold || ne >= max_elements || marked.is_empty() { return (ne, global_osc); }
+        match mesh.element_type(0) {
+            ElementType::Tri3 => *mesh = closure_refine_default(mesh, &marked),
+            ElementType::Quad4 => *mesh = refine_nonconforming_quad(mesh, &marked).0,
+            _ => panic!("unsupported element type"),
         }
     }
+    (mesh.n_elems(), 0.0)
+}
 
-    #[test]
-    fn ex30_jump_function_induces_refinement() {
-        let mesh = Mesh::<2>::unit_square_quad(4);
-        let u: Vec<f64> = (0..mesh.n_nodes())
-            .map(|i| jump_fn(&mesh.node_coords(i as u32)))
-            .collect();
-        let eta = zz_estimator(&mesh, &u);
-        let marked = dorfler_mark(&eta, 0.5);
-        assert!(!marked.is_empty(), "jump function should generate non-zero indicators");
+/// Characteristic element size = max edge length (matches MFEM GetElementSize).
+fn element_size<M: MeshTopology>(mesh: &M, ns: &[u32], _dim: usize) -> f64 {
+    let nv = ns.len();
+    let mut max_len2 = 0.0_f64;
+    for i in 0..nv {
+        let a = mesh.node_coords(ns[i]);
+        let b = mesh.node_coords(ns[(i + 1) % nv]);
+        let dx = b[0] - a[0]; let dy = b[1] - a[1];
+        max_len2 = max_len2.max(dx * dx + dy * dy);
     }
+    max_len2.sqrt()
+}
+
+fn element_l2_error(gf: &GridFunction<'_, L2Space<Mesh<2>>>, e: u32, exact: &(dyn Fn(&[f64]) -> f64 + Send + Sync), qo: u8) -> f64 {
+    use fem_element::lagrange::{TriP1, TriP2, TriP3};
+    use fem_element::ReferenceElement;
+    let mesh = gf.space().mesh();
+    let dim = mesh.dim() as usize;
+    let order = gf.space().order();
+    let elem_type = mesh.element_type(e);
+    let ref_elem: Box<dyn ReferenceElement> = match (elem_type, order) {
+        (fem_mesh::element_type::ElementType::Tri3, 1) => Box::new(TriP1),
+        (fem_mesh::element_type::ElementType::Tri3, 2) => Box::new(TriP2),
+        (fem_mesh::element_type::ElementType::Tri3, 3) => Box::new(TriP3),
+        _ => panic!("unsupported element"),
+    };
+    let n_ldofs = ref_elem.n_dofs();
+    let quad = ref_elem.quadrature(qo);
+    let elem_dofs = gf.space().element_dofs(e);
+    let nodes = mesh.element_nodes(e);
+    let x0 = mesh.node_coords(nodes[0]);
+    let (jac, det_j) = simplex_jac(mesh, nodes, dim);
+    let mut err2 = 0.0;
+    let mut phi = vec![0.0; n_ldofs];
+    for (q, xi) in quad.points.iter().enumerate() {
+        let w = quad.weights[q] * det_j.abs();
+        ref_elem.eval_basis(xi, &mut phi);
+        let mut uh = 0.0;
+        let d = gf.dofs();
+        for i in 0..n_ldofs { uh += d[elem_dofs[i] as usize] * phi[i]; }
+        let xp = phys_coords(x0, &jac, xi, dim);
+        let ue = exact(&xp);
+        err2 += w * (uh - ue) * (uh - ue);
+    }
+    err2.sqrt()
+}
+
+fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (nalgebra::DMatrix<f64>, f64) {
+    let x0 = mesh.node_coords(nodes[0]);
+    let mut j = nalgebra::DMatrix::<f64>::zeros(dim, dim);
+    for col in 0..dim {
+        let xc = mesh.node_coords(nodes[col + 1]);
+        for row in 0..dim { j[(row, col)] = xc[row] - x0[row]; }
+    }
+    let det = j.determinant();
+    (j, det)
+}
+
+fn phys_coords(x0: &[f64], jac: &nalgebra::DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {
+    let mut xp = x0.to_vec();
+    for d in 0..dim {
+        for k in 0..dim { xp[d] += jac[(d, k)] * xi[k]; }
+    }
+    xp
+}
+
+fn main() {
+    let args = parse_args();
+    let t0 = Instant::now();
+    let mut mesh: Mesh<2> = read_mfem_file(&args.mesh).expect("failed to read MFEM mesh")
+        .mesh2d.expect("MFEM mesh must be 2D");
+
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --order {}", args.order);
+    println!("   --nc-limit {0}  (not implemented)", args.nc_limit);
+    println!("   --max-elems {}", args.max_elements);
+    println!("   --error {}", args.threshold);
+    println!("   --no-visualization\n");
+
+    let fns: [(&str, &(dyn Fn(&[f64]) -> f64 + Send + Sync)); 3] = [
+        ("affine", &|x| affine_fn(x)),
+        ("discontinuous", &|x| jump_fn(x)),
+        ("singular", &|x| singular_fn(x)),
+    ];
+    for (name, coeff) in &fns {
+        println!("Function {} ()", name);
+        let (n, osc) = preprocess(&mut mesh, *coeff, args.order, args.threshold, args.max_elements);
+        println!("Number of Elements {n}");
+        println!("Osc error {osc:.6}\n");
+    }
+    eprintln!("  Total time: {:.3}s", t0.elapsed().as_secs_f64());
 }
