@@ -1,8 +1,8 @@
-//! Boundary assembly for vector finite element spaces (H(curl)).
+//! Boundary assembly for vector finite element spaces (H(curl) / H(div)).
 //!
 //! Provides [`VectorBoundaryAssembler`] for integrating bilinear and linear
 //! forms over boundary faces (edges in 2-D, triangular faces in 3-D) for
-//! H(curl) Nédélec elements.
+//! H(curl) Nédélec and H(div) Raviart-Thomas elements.
 //!
 //! ## H(curl) boundary integrals
 //!
@@ -12,10 +12,12 @@
 //! a(u, v) = ∫_Γ γ (n×u)·(n×v) dS
 //! ```
 //!
-//! which arises in:
-//! - **Silver-Müller absorbing BC**: `n × (μ⁻¹ curl E) + γ (n×E)×n = g`
-//! - **Impedance BC**: `n × H = Y (n × E × n)`  with admittance Y
-//! - **PML / 1st-order ABC** truncation conditions
+//! ## H(div) boundary integrals
+//!
+//! ```text
+//! a(u, v) = ∫_Γ g (u·n)(v·n) dS     (bilinear)
+//! F(v)    = ∫_Γ g (v·n) dS          (linear / natural BC)
+//! ```
 //!
 //! ## Quadrature-point data
 //!
@@ -40,11 +42,13 @@
 use nalgebra::DMatrix;
 
 use fem_element::nedelec::{TetND1, TetND2, TriND1, TriND2};
+use fem_element::raviart_thomas::{QuadRT0, TetRT0, TriRT0};
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::ElementTransformation;
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::{FESpace, SpaceType};
+use fem_space::EdgeKey;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -210,9 +214,10 @@ impl VectorBoundaryAssembler {
         let mesh    = space.mesh();
         let dim     = mesh.dim() as usize;
         let n_dofs  = space.n_dofs();
-        assert_eq!(
-            space.space_type(), SpaceType::HCurl,
-            "VectorBoundaryAssembler: only H(curl) spaces are supported"
+        let stype = space.space_type();
+        assert!(
+            stype == SpaceType::HCurl || stype == SpaceType::HDiv,
+            "VectorBoundaryAssembler: only H(curl) and H(div) spaces are supported"
         );
 
         let face_ids: Vec<u32> = mesh
@@ -253,9 +258,10 @@ impl VectorBoundaryAssembler {
         let mesh   = space.mesh();
         let dim    = mesh.dim() as usize;
         let n_dofs = space.n_dofs();
-        assert_eq!(
-            space.space_type(), SpaceType::HCurl,
-            "VectorBoundaryAssembler: only H(curl) spaces are supported"
+        let stype = space.space_type();
+        assert!(
+            stype == SpaceType::HCurl || stype == SpaceType::HDiv,
+            "VectorBoundaryAssembler: only H(curl) and H(div) spaces are supported"
         );
 
         let face_ids: Vec<u32> = mesh
@@ -292,7 +298,8 @@ fn assemble_boundary_bilinear_serial<S: FESpace>(
 where
     S::Mesh: MeshTopology,
 {
-    let vol_elem = vec_ref_elem_hcurl(dim, space.order());
+    let stype = space.space_type();
+    let vol_elem = vec_ref_elem(stype, dim, space.order());
     let n_ldofs = vol_elem.n_dofs();
     let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
     let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
@@ -300,7 +307,7 @@ where
 
     for &f in face_ids {
         if let Some((global_dofs, k_face)) =
-            assemble_face_bilinear_contrib(space, &*vol_elem, n_ldofs, dim, f, integrators, quad_order, &mut ref_phi, &mut phys_phi)
+            assemble_face_bilinear_contrib(space, &*vol_elem, stype, n_ldofs, dim, f, integrators, quad_order, &mut ref_phi, &mut phys_phi)
         {
             coo.add_element_matrix(&global_dofs, &k_face);
         }
@@ -319,7 +326,8 @@ fn assemble_boundary_linear_serial<S: FESpace>(
 where
     S::Mesh: MeshTopology,
 {
-    let vol_elem = vec_ref_elem_hcurl(dim, space.order());
+    let stype = space.space_type();
+    let vol_elem = vec_ref_elem(stype, dim, space.order());
     let n_ldofs = vol_elem.n_dofs();
     let mut rhs = vec![0.0_f64; n_dofs];
     let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
@@ -327,7 +335,7 @@ where
 
     for &f in face_ids {
         if let Some((global_dofs, f_face)) =
-            assemble_face_linear_contrib(space, &*vol_elem, n_ldofs, dim, f, integrators, quad_order, &mut ref_phi, &mut phys_phi)
+            assemble_face_linear_contrib(space, &*vol_elem, stype, n_ldofs, dim, f, integrators, quad_order, &mut ref_phi, &mut phys_phi)
         {
             for (&d, &v) in global_dofs.iter().zip(f_face.iter()) {
                 rhs[d] += v;
@@ -349,17 +357,19 @@ fn assemble_boundary_bilinear_parallel<S: FESpace + Sync>(
 where
     S::Mesh: MeshTopology + Sync,
 {
+    let stype = space.space_type();
     face_ids
         .par_iter()
         .copied()
         .filter_map(|f| {
-            let vol_elem = vec_ref_elem_hcurl(dim, space.order());
+            let vol_elem = vec_ref_elem(stype, dim, space.order());
             let n_ldofs = vol_elem.n_dofs();
             let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
             let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
             assemble_face_bilinear_contrib(
                 space,
                 &*vol_elem,
+                stype,
                 n_ldofs,
                 dim,
                 f,
@@ -396,17 +406,19 @@ fn assemble_boundary_linear_parallel<S: FESpace + Sync>(
 where
     S::Mesh: MeshTopology + Sync,
 {
+    let stype = space.space_type();
     face_ids
         .par_iter()
         .copied()
         .filter_map(|f| {
-            let vol_elem = vec_ref_elem_hcurl(dim, space.order());
+            let vol_elem = vec_ref_elem(stype, dim, space.order());
             let n_ldofs = vol_elem.n_dofs();
             let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
             let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
             assemble_face_linear_contrib(
                 space,
                 &*vol_elem,
+                stype,
                 n_ldofs,
                 dim,
                 f,
@@ -440,6 +452,7 @@ where
 fn assemble_face_bilinear_contrib<S: FESpace>(
     space: &S,
     vol_elem: &dyn VectorReferenceElement,
+    stype: SpaceType,
     n_ldofs: usize,
     dim: usize,
     f: u32,
@@ -456,7 +469,6 @@ where
     let owner_elem = find_owner_element(mesh, face_nodes)?;
     let elem_nodes = mesh.element_nodes(owner_elem);
     let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
-    let j_inv_t = tr.jacobian_inv_t().clone();
     let global_dofs: Vec<usize> = space
         .element_dofs(owner_elem)
         .iter()
@@ -471,7 +483,18 @@ where
         let norm = &face_normals[q * dim..(q + 1) * dim];
         let xi_ref = phys_to_ref(mesh, elem_nodes, xp, dim);
         vol_elem.eval_basis_vec(&xi_ref, ref_phi);
-        piola_hcurl_basis(&j_inv_t, ref_phi, phys_phi, n_ldofs, dim);
+        match stype {
+            SpaceType::HCurl => {
+                let j_inv_t = tr.jacobian_inv_t().clone();
+                piola_hcurl_basis(&j_inv_t, ref_phi, phys_phi, n_ldofs, dim);
+            }
+            SpaceType::HDiv => {
+                let jac = tr.jacobian().clone();
+                let det_j = tr.det_j();
+                piola_hdiv_basis(&jac, det_j, ref_phi, phys_phi, n_ldofs, dim);
+            }
+            _ => unreachable!(),
+        }
         if let Some(s) = signs_opt {
             for i in 0..n_ldofs {
                 for c in 0..dim {
@@ -500,6 +523,7 @@ where
 fn assemble_face_linear_contrib<S: FESpace>(
     space: &S,
     vol_elem: &dyn VectorReferenceElement,
+    stype: SpaceType,
     n_ldofs: usize,
     dim: usize,
     f: u32,
@@ -516,7 +540,6 @@ where
     let owner_elem = find_owner_element(mesh, face_nodes)?;
     let elem_nodes = mesh.element_nodes(owner_elem);
     let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
-    let j_inv_t = tr.jacobian_inv_t().clone();
     let global_dofs: Vec<usize> = space
         .element_dofs(owner_elem)
         .iter()
@@ -531,7 +554,18 @@ where
         let norm = &face_normals[q * dim..(q + 1) * dim];
         let xi_ref = phys_to_ref(mesh, elem_nodes, xp, dim);
         vol_elem.eval_basis_vec(&xi_ref, ref_phi);
-        piola_hcurl_basis(&j_inv_t, ref_phi, phys_phi, n_ldofs, dim);
+        match stype {
+            SpaceType::HCurl => {
+                let j_inv_t = tr.jacobian_inv_t().clone();
+                piola_hcurl_basis(&j_inv_t, ref_phi, phys_phi, n_ldofs, dim);
+            }
+            SpaceType::HDiv => {
+                let jac = tr.jacobian().clone();
+                let det_j = tr.det_j();
+                piola_hdiv_basis(&jac, det_j, ref_phi, phys_phi, n_ldofs, dim);
+            }
+            _ => unreachable!(),
+        }
         if let Some(s) = signs_opt {
             for i in 0..n_ldofs {
                 for c in 0..dim {
@@ -558,15 +592,25 @@ where
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-fn vec_ref_elem_hcurl(dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
-    match (dim, order) {
-        (2, 1) => Box::new(TriND1),
-        (2, 2) => Box::new(TriND2),
-        (2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
-        (3, 1) => Box::new(TetND1),
-        (3, 2) => Box::new(TetND2),
-        (3, o) if o >= 3 => Box::new(fem_element::nedelec::TetNDk::new(o as usize)),
-        _ => panic!("VectorBoundaryAssembler: unsupported (dim={dim}, order={order})"),
+fn vec_ref_elem(stype: SpaceType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
+    match stype {
+        SpaceType::HCurl => match (dim, order) {
+            (2, 1) => Box::new(TriND1),
+            (2, 2) => Box::new(TriND2),
+            (2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
+            (3, 1) => Box::new(TetND1),
+            (3, 2) => Box::new(TetND2),
+            (3, o) if o >= 3 => Box::new(fem_element::nedelec::TetNDk::new(o as usize)),
+            _ => panic!("VectorBoundaryAssembler: unsupported HCurl (dim={dim}, order={order})"),
+        },
+        SpaceType::HDiv => match (dim, order) {
+            (2, 0) => Box::new(TriRT0),
+            (2, 1) => Box::new(fem_element::raviart_thomas::TriRT1),
+            (3, 0) => Box::new(TetRT0),
+            (3, 1) => Box::new(fem_element::raviart_thomas::TetRT1),
+            _ => panic!("VectorBoundaryAssembler: unsupported HDiv (dim={dim}, order={order})"),
+        },
+        _ => panic!("VectorBoundaryAssembler: unsupported space type {stype:?}"),
     }
 }
 
@@ -584,6 +628,27 @@ fn piola_hcurl_basis(
                 s += j_inv_t[(r, c)] * ref_vals[i * dim + c];
             }
             phys_vals[i * dim + r] = s;
+        }
+    }
+}
+
+/// Contravariant Piola transform for H(div): φ_phys = J · φ_ref / det_j
+fn piola_hdiv_basis(
+    jac:  &DMatrix<f64>,
+    det_j: f64,
+    ref_vals: &[f64],
+    phys_vals: &mut [f64],
+    n_dofs:   usize,
+    dim:      usize,
+) {
+    let inv_det = 1.0 / det_j;
+    for i in 0..n_dofs {
+        for r in 0..dim {
+            let mut s = 0.0;
+            for c in 0..dim {
+                s += jac[(r, c)] * ref_vals[i * dim + c];
+            }
+            phys_vals[i * dim + r] = s * inv_det;
         }
     }
 }
