@@ -131,11 +131,9 @@ fn neo_hookean_pk1_tangent(f: &DMatrix<f64>, mu: f64, lambda: f64) -> (DMatrix<f
             let col = j * dim + J;
             let mut val = 0.0;
             if i == j && I == J { val += mu; }
-            if i == j {
-                let mut sum = 0.0;
-                for k in 0..dim { sum += inv_f[(I, k)] * inv_f[(J, k)]; }
-                val += lambda * sum;
-            }
+            // λ·F^{-T}_{Jj}·F^{-T}_{Ii}  — corresponds to λ·δ_Jj·δ_Ii at F=I
+            // (the linear-elasticity limit gives C_{iI,jJ} = λ·δ_{iI}·δ_{jJ} + μ·(δ_{ij}·δ_{IJ} + δ_{iJ}·δ_{jI}))
+            val += lambda * inv_f[(J, j)] * inv_f[(I, i)];
             val -= pre * inv_f[(J, i)] * inv_f[(I, j)];
             ct[(row, col)] = val;
         }}
@@ -736,5 +734,82 @@ mod tests {
         let mut sum = 0.0;
         for i in 0..n.min(10) { for j in 0..n.min(10) { sum += jac.get(i, j).abs(); } }
         assert!(sum > 0.0, "Ogden tangent should be non-zero");
+    }
+
+    /// Finite-difference verification of `raw_jacobian` against
+    /// numerical differentiation of `raw_residual`.
+    ///
+    /// For a random small displacement u, compute the Jacobian analytically
+    /// via `raw_jacobian(u)`, then approximate it via central differences:
+    ///   J_fd[:, i] = (f(u + ε e_i) - f(u - ε e_i)) / (2 ε)
+    /// and check that ‖J - J_fd‖ / ‖J‖ < tol.
+    #[test]
+    fn finite_difference_verification_raw_jacobian() {
+        let mesh = Mesh::<2>::unit_square_tri(8);
+        let space = VectorH1Space::new(mesh, 1, 2);
+        let n = space.n_dofs();
+        let nd = n.min(20); // test first 20 DOFs only (FD is expensive)
+
+        let model = HyperelasticModel::NeoHookean { mu: 0.3, lambda: 1.0 };
+        // No Dirichlet BCs — test the raw form directly
+        let form = HyperelasticityForm::new(space, model, vec![], 2);
+
+        // Very small random displacement (magnitude ~1e-4)
+        let u: Vec<f64> = (0..n).map(|i| 1e-4 * (i as f64).sin()).collect();
+
+        // Analytical Jacobian (first nd×nd block)
+        let jac = form.raw_jacobian(&u);
+        // Quick sanity: check Jacobian has non-zero entries and no NaN
+        let mut jac_norm = 0.0;
+        for i in 0..nd.min(5) { for j in 0..nd.min(5) {
+            let v = jac.get(i, j);
+            assert!(!v.is_nan(), "raw_jacobian has NaN at ({i},{j})");
+            jac_norm += v.abs();
+        }}
+        assert!(jac_norm > 0.0, "raw_jacobian is all zero");
+        let mut jac_dense = vec![0.0; nd * nd];
+        for i in 0..nd {
+            for j in 0..nd {
+                jac_dense[i * nd + j] = jac.get(i, j);
+            }
+        }
+
+        // FD Jacobian via central differences
+        let eps = 1e-6;
+        let mut jac_fd = vec![0.0; nd * nd];
+        let mut r_plus  = vec![0.0; n];
+        let mut r_minus = vec![0.0; n];
+
+        for j in 0..nd {
+            // u + ε e_j
+            let mut u_pert = u.clone();
+            u_pert[j] += eps;
+            form.raw_residual(&u_pert, &mut r_plus);
+
+            // u - ε e_j
+            u_pert[j] = u[j] - eps;
+            form.raw_residual(&u_pert, &mut r_minus);
+
+            for i in 0..nd {
+                jac_fd[i * nd + j] = (r_plus[i] - r_minus[i]) / (2.0 * eps);
+            }
+        }
+
+        // Relative Frobenius-norm error ‖J - J_fd‖ / ‖J‖
+        let mut err_sq = 0.0;
+        let mut norm_sq = 0.0;
+        for i in 0..nd * nd {
+            let diff = jac_dense[i] - jac_fd[i];
+            err_sq += diff * diff;
+            norm_sq += jac_dense[i] * jac_dense[i];
+        }
+        let rel_err = err_sq.sqrt() / norm_sq.sqrt().max(1e-30);
+
+        eprintln!("  raw_jacobian FD verification: rel_err = {:.6e}", rel_err);
+        assert!(
+            rel_err < 1e-3,
+            "raw_jacobian FD mismatch: rel_err = {:.6e} (expected < 1e-3)",
+            rel_err
+        );
     }
 }
