@@ -1472,6 +1472,183 @@ pub fn solve_hcurl_gssmoother(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, S
     (u, res)
 }
 
+/// Compute the H(Curl) norm of the error: √(‖E_h - E‖²_L² + ‖∇×E_h - ∇×E‖²_L²).
+///
+/// `curl_exact` gives the scalar curl of the exact solution at a point (z-component
+/// in 2D, which is the full curl of a 2D vector field).
+///
+/// Returns the squared H(Curl) error (caller should sqrt).
+pub fn hcurl_error_sq_exact<F, G>(
+    space: &HCurlSpace<Mesh<2>>,
+    uh: &[f64],
+    exact: F,
+    curl_exact: G,
+) -> f64
+where
+    F: Fn(&[f64]) -> [f64; 2],
+    G: Fn(&[f64]) -> f64,
+{
+    use fem_element::nedelec::QuadND1;
+    use fem_element::VectorReferenceElement;
+
+    let mesh = space.mesh();
+    let mut err2 = 0.0_f64;
+
+    for e in mesh.elem_iter() {
+        let elem_type = mesh.element_type(e);
+        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e);
+        let nodes = mesh.element_nodes(e);
+
+        match elem_type {
+            ElementType::Tri3 => {
+                let ref_elem = TriND1;
+                let quad = ref_elem.quadrature(6);
+                let n_ldofs = ref_elem.n_dofs();
+                let mut ref_phi = vec![0.0; n_ldofs * 2];
+                let mut ref_curl = vec![0.0; n_ldofs];
+
+                let x0 = mesh.node_coords(nodes[0]);
+                let x1 = mesh.node_coords(nodes[1]);
+                let x2 = mesh.node_coords(nodes[2]);
+                let j00 = x1[0] - x0[0]; let j01 = x2[0] - x0[0];
+                let j10 = x1[1] - x0[1]; let j11 = x2[1] - x0[1];
+                let det_j = (j00 * j11 - j01 * j10).abs();
+                let inv_det = 1.0 / (j00 * j11 - j01 * j10);
+                let (jit00, jit01) = ( j11 * inv_det, -j10 * inv_det);
+                let (jit10, jit11) = (-j01 * inv_det,  j00 * inv_det);
+
+                for (qi, xi) in quad.points.iter().enumerate() {
+                    let w = quad.weights[qi] * det_j;
+                    let xp = [
+                        x0[0] + j00 * xi[0] + j01 * xi[1],
+                        x0[1] + j10 * xi[0] + j11 * xi[1],
+                    ];
+
+                    // E_h(x) via covariant Piola
+                    ref_elem.eval_basis_vec(xi, &mut ref_phi);
+                    let mut eh = [0.0_f64; 2];
+                    for i in 0..n_ldofs {
+                        let s = signs[i];
+                        let phi_x = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
+                        let phi_y = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
+                        eh[0] += s * uh[dofs[i]] * phi_x;
+                        eh[1] += s * uh[dofs[i]] * phi_y;
+                    }
+
+                    // (∇×E_h)(x) = (1/det_J) · Σ u_i · s_i · (∇_ξ×φ_ref_i)
+                    ref_elem.eval_curl(xi, &mut ref_curl);
+                    let mut curl_eh = 0.0_f64;
+                    for i in 0..n_ldofs {
+                        curl_eh += signs[i] * uh[dofs[i]] * ref_curl[i];
+                    }
+                    curl_eh *= inv_det;
+
+                    // L² contribution
+                    let e_exact = exact(&xp);
+                    let dx = eh[0] - e_exact[0];
+                    let dy = eh[1] - e_exact[1];
+                    err2 += w * (dx * dx + dy * dy);
+
+                    // Curl contribution
+                    let dcurl = curl_eh - curl_exact(&xp);
+                    err2 += w * dcurl * dcurl;
+                }
+            }
+            ElementType::Quad4 => {
+                // Quad4 H(Curl) error — L² only, no curl contribution yet.
+                // The curl error for Quad4/QuadND1 is element-local and
+                // can be added when needed (PR welcome).
+                let ref_elem = QuadND1;
+                let quad = ref_elem.quadrature(6);
+                let n_ldofs = ref_elem.n_dofs();
+                let mut ref_phi = vec![0.0; n_ldofs * 2];
+
+                let xc: Vec<Vec<f64>> = (0..4)
+                    .map(|k| mesh.node_coords(nodes[k]).to_vec())
+                    .collect();
+
+                #[allow(non_snake_case)]
+                fn N(k: usize, xi: f64, eta: f64) -> f64 {
+                    match k {
+                        0 => 0.25 * (1.0 - xi) * (1.0 - eta),
+                        1 => 0.25 * (1.0 + xi) * (1.0 - eta),
+                        2 => 0.25 * (1.0 + xi) * (1.0 + eta),
+                        3 => 0.25 * (1.0 - xi) * (1.0 + eta),
+                        _ => 0.0,
+                    }
+                }
+                #[allow(non_snake_case)]
+                fn dN_dxi(k: usize, eta: f64) -> f64 {
+                    match k {
+                        0 => -0.25 * (1.0 - eta),
+                        1 =>  0.25 * (1.0 - eta),
+                        2 =>  0.25 * (1.0 + eta),
+                        3 => -0.25 * (1.0 + eta),
+                        _ => 0.0,
+                    }
+                }
+                #[allow(non_snake_case)]
+                fn dN_deta(k: usize, xi: f64) -> f64 {
+                    match k {
+                        0 => -0.25 * (1.0 - xi),
+                        1 => -0.25 * (1.0 + xi),
+                        2 =>  0.25 * (1.0 + xi),
+                        3 =>  0.25 * (1.0 - xi),
+                        _ => 0.0,
+                    }
+                }
+
+                for (qi, xi_eta) in quad.points.iter().enumerate() {
+                    let (xi, eta) = (xi_eta[0], xi_eta[1]);
+
+                    let mut j00 = 0.0; let mut j01 = 0.0;
+                    let mut j10 = 0.0; let mut j11 = 0.0;
+                    for k in 0..4 {
+                        let dxi = dN_dxi(k, eta);
+                        let deta = dN_deta(k, xi);
+                        j00 += dxi * xc[k][0]; j01 += deta * xc[k][0];
+                        j10 += dxi * xc[k][1]; j11 += deta * xc[k][1];
+                    }
+                    let det_j = (j00 * j11 - j01 * j10).abs();
+                    let inv_det = 1.0 / (j00 * j11 - j01 * j10);
+                    let (jit00, jit01) = ( j11 * inv_det, -j10 * inv_det);
+                    let (jit10, jit11) = (-j01 * inv_det,  j00 * inv_det);
+
+                    let xp = [
+                        xc[0][0] * N(0, xi, eta) + xc[1][0] * N(1, xi, eta)
+                            + xc[2][0] * N(2, xi, eta) + xc[3][0] * N(3, xi, eta),
+                        xc[0][1] * N(0, xi, eta) + xc[1][1] * N(1, xi, eta)
+                            + xc[2][1] * N(2, xi, eta) + xc[3][1] * N(3, xi, eta),
+                    ];
+
+                    ref_elem.eval_basis_vec(&[xi, eta], &mut ref_phi);
+
+                    let mut eh = [0.0_f64; 2];
+                    for i in 0..n_ldofs {
+                        let s = signs[i];
+                        let phi_x = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
+                        let phi_y = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
+                        eh[0] += s * uh[dofs[i]] * phi_x;
+                        eh[1] += s * uh[dofs[i]] * phi_y;
+                    }
+
+                    let w = quad.weights[qi] * det_j;
+                    let e_exact = exact(&xp);
+                    let dx = eh[0] - e_exact[0];
+                    let dy = eh[1] - e_exact[1];
+                    err2 += w * (dx * dx + dy * dy);
+                }
+            }
+            _ => {
+                // Unsupported element type — skip
+            }
+        }
+    }
+    err2
+}
+
+/// L² norm of the error using the existing quadrature-based H(Curl) integration.
 pub fn l2_error_hcurl_exact<F>(
     space: &HCurlSpace<Mesh<2>>,
     uh: &[f64],

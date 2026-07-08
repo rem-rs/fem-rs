@@ -36,9 +36,7 @@
 
 use std::f64::consts::{PI, SQRT_2};
 
-use fem_examples::maxwell::{
-    StaticMaxwellBuilder, l2_error_hcurl_exact,
-};
+use fem_examples::maxwell::StaticMaxwellBuilder;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, amr::refine_uniform};
 use fem_space::{HCurlSpace, fe_space::FESpace};
@@ -172,9 +170,14 @@ fn main() {
     let solved = problem.solve();
     let u = &solved.solution;
 
-    // L² norm of the error (C++ also has curl contribution for H(Curl) norm).
-    let l2_err = l2_error_hcurl_exact(
-        &solved.space, u, |x| exact_e(x, kappa),
+    // H(Curl) norm of the error: √(‖E_h-E‖²_L² + ‖∇×E_h-∇×E‖²_L²).
+    let curl_exact = |x: &[f64]| -> f64 {
+        let u = (kappa / SQRT_2) * (x[0] + x[1]);
+        (kappa / SQRT_2) * (A1 * (u + PHI1).cos() - A0 * u.cos())
+    };
+    let err2 = fem_examples::maxwell::hcurl_error_sq_exact(
+        &solved.space, u, |x| exact_e(x, kappa), curl_exact,
     );
-    println!("\n|| E_h - E ||_{{L^2}} = {l2_err:.10e}");
+    let hcurl_err = err2.sqrt();
+    println!("\n|| E_h - E ||_{{H(Curl)}} = {hcurl_err:.10e}");
 }
