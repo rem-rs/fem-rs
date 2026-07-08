@@ -27,6 +27,8 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
+use fem_assembly::postproc::error_estimate::zz_estimator_l2;
+use fem_assembly::postproc::grid_function::GridFunction;
 use fem_core::NodeId;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType};
@@ -146,7 +148,14 @@ fn main() {
         }
 
         // --- 2h. ZZ error estimator ---
-        let eta = zz_estimator(&mesh, &u);
+        // Tri3: L² projection recovery (MFEM-compatible).
+        // Quad4: mesh-level nodal-averaging (GridFunction doesn't support Quad4).
+        let eta = if is_quad {
+            zz_estimator(&mesh, &u)
+        } else {
+            let gf = GridFunction::new(&space, u.clone());
+            zz_estimator_l2(&gf).eta
+        };
 
         // --- 2i. Dörfler marking (θ = 0.7) ---
         // Equivalent to MFEM's ThresholdRefiner::SetTotalErrorFraction(0.7)

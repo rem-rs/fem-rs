@@ -3,7 +3,10 @@
 
 use fem_mesh::topology::MeshTopology;
 use fem_space::FESpace;
+use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use crate::postproc::grid_function::GridFunction;
+use crate::standard::MassIntegrator;
+use crate::Assembler;
 
 // ─── ElementIndicators ───────────────────────────────────────────────────────
 
@@ -37,23 +40,28 @@ impl ElementIndicators {
 
 /// Element volume/area for a mesh element (used internally).
 fn elem_vol(m: &dyn MeshTopology, e: u32) -> f64 {
+    let n = m.element_nodes(e);
+    let npe = n.len();
     if m.dim() == 2 {
-        let n = m.element_nodes(e);
-        if n.len() >= 3 {
+        if npe == 4 {
+            // Quadrilateral: shoelace formula
+            let (x0, x1, x2, x3) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]), m.node_coords(n[3]));
+            0.5 * (x0[0]*x1[1] + x1[0]*x2[1] + x2[0]*x3[1] + x3[0]*x0[1]
+                  - x1[0]*x0[1] - x2[0]*x1[1] - x3[0]*x2[1] - x0[0]*x3[1]).abs()
+        } else if npe >= 3 {
+            // Triangle: cross product
             let (x0, x1, x2) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]));
             0.5 * ((x1[0]-x0[0])*(x2[1]-x0[1]) - (x1[1]-x0[1])*(x2[0]-x0[0])).abs()
         } else { 1.0 }
-    } else {
-        let n = m.element_nodes(e);
-        if n.len() >= 4 {
-            let (x0, x1, x2, x3) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]), m.node_coords(n[3]));
-            let a = [x1[0]-x0[0], x1[1]-x0[1], x1[2]-x0[2]];
-            let b = [x2[0]-x0[0], x2[1]-x0[1], x2[2]-x0[2]];
-            let c = [x3[0]-x0[0], x3[1]-x0[1], x3[2]-x0[2]];
-            let cr = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
-            (cr[0]*c[0] + cr[1]*c[1] + cr[2]*c[2]).abs() / 6.0
-        } else { 1.0 }
-    }
+    } else if npe >= 4 {
+        // 3D: tetrahedron volume
+        let (x0, x1, x2, x3) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]), m.node_coords(n[3]));
+        let a = [x1[0]-x0[0], x1[1]-x0[1], x1[2]-x0[2]];
+        let b = [x2[0]-x0[0], x2[1]-x0[1], x2[2]-x0[2]];
+        let c = [x3[0]-x0[0], x3[1]-x0[1], x3[2]-x0[2]];
+        let cr = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+        (cr[0]*c[0] + cr[1]*c[1] + cr[2]*c[2]).abs() / 6.0
+    } else { 1.0 }
 }
 
 /// ZZ gradient-recovery error estimator using GridFunction.
@@ -78,6 +86,106 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
         eta[e as usize] = ((0..d).map(|di| (eg[e as usize][di] - rec[di]).powi(2)).sum::<f64>() * elem_vol(m, e)).sqrt();
     }
     ElementIndicators::new(eta, "ZZ")
+}
+
+/// ZZ gradient-recovery error estimator using **L² projection** (MFEM-compatible).
+///
+/// Recovers a smoothed gradient `G(u)` by solving the global L² projection:
+/// ```text
+/// (G, v) = (∇u_h, v)   ∀ v ∈ V_h
+/// ```
+/// where `V_h` is the scalar H¹ FE space. This yields `M·g = f`, where M is the
+/// mass matrix and `f_d[i] = ∫_Ω ∂u_h/∂x_d · φ_i dΩ`.
+///
+/// Solving with CG (mass matrix is well-conditioned) gives an optimally smooth
+/// recovered gradient.  The per-element error indicator is:
+/// ```text
+/// η_K = ‖∇u_h|_K − G|_K‖_{L²(K)} ≈ ‖∇u_h|_K − G|_K‖ · √|K|
+/// ```
+///
+/// This matches MFEM's `ZienkiewiczZhuEstimator` which projects onto an (H¹)^d space,
+/// whereas the simpler [`zz_estimator`] uses unweighted nodal averaging.
+pub fn zz_estimator_l2<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
+where
+    M: MeshTopology,
+    S: FESpace<Mesh = M>,
+{
+    let m: &M = gf.space().mesh();
+    let ne = m.n_elements();
+    let nn = m.n_nodes();
+    let d = m.dim() as usize;
+    let xi: Vec<f64> = if d == 2 {
+        vec![1.0 / 3.0; 2]
+    } else {
+        vec![0.25; 3]
+    };
+
+    // ── 1. Element gradients at centroid ──────────────────────────────────────
+    let eg: Vec<Vec<f64>> = (0..ne as u32)
+        .map(|e| gf.evaluate_gradient_at_element(e, &xi))
+        .collect();
+
+    // ── 2. Assemble scalar mass matrix M ─────────────────────────────────────
+    let space_ref: &S = gf.space();
+    let mass = MassIntegrator { rho: 1.0 };
+    let m_mat = Assembler::assemble_bilinear(space_ref, &[&mass], 4);
+
+    // ── 3. Build RHS vectors F_x, F_y for L² projection ────────────────────
+    //   f_d[i] = Σ_{K ∋ i} ∇u_h|_K[d] · ∫_K φ_i
+    //   For P1/Q1: ∫_K φ_i = vol(K) / npe
+    let mut f = vec![vec![0.0; nn]; d];
+    for e in 0..ne as u32 {
+        let nlist = m.element_nodes(e);
+        let npe = nlist.len();
+        let vol = elem_vol(m, e);
+        let phi_int = vol / npe as f64;
+        for &n in nlist {
+            let ni = n as usize;
+            for di in 0..d {
+                f[di][ni] += eg[e as usize][di] * phi_int;
+            }
+        }
+    }
+
+    // ── 4. Solve M·g_d = f_d for each component ────────────────────────────
+    // PCG+Jacobi converges rapidly on the well-conditioned mass matrix.
+    let cfg = SolverConfig {
+        rtol: 1e-10,
+        max_iter: 200,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let mut g = vec![vec![0.0; nn]; d];
+    for di in 0..d {
+        let _ = solve_pcg_jacobi(&m_mat, &f[di], &mut g[di], &cfg)
+            .expect("Mass matrix PCG+Jacobi solve failed in zz_estimator_l2");
+    }
+
+    // ── 5. Element error indicator ──────────────────────────────────────────
+    //   η_K = ‖∇u_h|_K − G|_K‖ · √|K|
+    //   G|_K = average of recovered nodal values over element vertices
+    let mut eta = vec![0.0; ne as usize];
+    for e in 0..ne as u32 {
+        let nlist = m.element_nodes(e);
+        let npe = nlist.len();
+        let vol = elem_vol(m, e);
+        let mut rec = vec![0.0; d];
+        for &n in nlist {
+            let ni = n as usize;
+            for di in 0..d {
+                rec[di] += g[di][ni];
+            }
+        }
+        for di in 0..d {
+            rec[di] /= npe as f64;
+        }
+        let err_sq: f64 = (0..d)
+            .map(|di| (eg[e as usize][di] - rec[di]).powi(2))
+            .sum();
+        eta[e as usize] = (err_sq * vol).sqrt();
+    }
+
+    ElementIndicators::new(eta, "ZZ(L²)")
 }
 
 /// Kelly face-jump error estimator using GridFunction.
@@ -506,6 +614,30 @@ mod tests {
         let d = s.interpolate(&|x| x[0] + x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
         for &e in &zz_estimator(&gf).eta { assert!(e < 1e-12); }
+    }
+
+    #[test] fn zz_l2_linear_exact() {
+        let m = Mesh::<2>::unit_square_tri(4);
+        let s = H1Space::new(m, 1);
+        let d = s.interpolate(&|x| x[0] + x[1]);
+        let gf = GridFunction::new(&s, d.as_slice().to_vec());
+        for &e in &zz_estimator_l2(&gf).eta { assert!(e < 1e-12, "L² estimator should be exact for linear functions"); }
+    }
+
+    #[test] fn zz_l2_quadratic_nonzero() {
+        let m = Mesh::<2>::unit_square_tri(4);
+        let s = H1Space::new(m, 1);
+        let d = s.interpolate(&|x| x[0]*x[0] + x[1]*x[1]);
+        let gf = GridFunction::new(&s, d.as_slice().to_vec());
+        let eta = zz_estimator_l2(&gf).eta;
+        assert!(eta.iter().sum::<f64>() > 0.0, "L² estimator should be > 0 for quadratic");
+        // L² projection should give more accurate recovery → smaller total error
+        let eta_naive = zz_estimator(&gf).eta;
+        let total_l2: f64 = eta.iter().sum();
+        let total_naive: f64 = eta_naive.iter().sum();
+        assert!(total_l2 < total_naive,
+            "L² projection ({:.6e}) should beat nodal averaging ({:.6e}) for quadratic",
+            total_l2, total_naive);
     }
 
     #[test] fn zz_quadratic_nonzero() {
