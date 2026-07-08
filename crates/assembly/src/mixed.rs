@@ -17,8 +17,8 @@
 
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, HexQ1, HexQ2, HexQ3}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
-use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1};
-use fem_element::nedelec::{TriND1, TetND1, QuadND1, HexND1, QuadNDk, HexNDk};
+use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1, PrismRTk};
+use fem_element::nedelec::{TriND1, TetND1, QuadND1, HexND1, QuadNDk, HexNDk, PrismND1, PrismNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -389,6 +389,118 @@ where
     coo.into_csr()
 }
 
+// ─── H¹ × HDiv mixed assembly (gradient-vector coupling) ───────────────────
+
+/// Integrator for H¹×HDiv mixed bilinear form `b(φ, w) = ∫ σ ∇φ · w dx`.
+///
+/// Row space: H¹ (scalar), column space: HDiv (vector).
+pub trait H1HDivIntegrator: Send + Sync {
+    fn add_to_element_matrix(
+        &self,
+        qp_scalar: &QpData<'_>,  // H¹: phi + grad_phys
+        vec_col: &[f64],          // HDiv basis vector values (flat: dim × n_dofs)
+        dim: usize,
+        m_elem: &mut [f64],
+    );
+}
+
+/// ∫ σ ∇φ · w dx — gradient-vector coupling for J = -σ∇φ projection.
+pub struct MixedVectorGradientIntegrator {
+    pub sigma: f64,
+}
+
+impl H1HDivIntegrator for MixedVectorGradientIntegrator {
+    fn add_to_element_matrix(
+        &self,
+        qp_scalar: &QpData<'_>,
+        vec_col: &[f64],
+        dim: usize,
+        m_elem: &mut [f64],
+    ) {
+        let n_r = qp_scalar.n_dofs;
+        let n_c = vec_col.len() / dim;
+        let w = qp_scalar.weight * self.sigma;
+        for j in 0..n_r {
+            let gj = &qp_scalar.grad_phys[j * dim..][..dim];
+            for i in 0..n_c {
+                let vi = &vec_col[i * dim..][..dim];
+                let dot = gj[0] * vi[0] + gj[1] * vi[1] + if dim > 2 { gj[2] * vi[2] } else { 0.0 };
+                m_elem[j * n_c + i] += w * dot;
+            }
+        }
+    }
+}
+
+/// Assemble H¹ × HDiv mixed bilinear form.
+///
+/// Row space = H¹ (scalar), column space = HDiv (vector-valued).
+pub fn assemble_h1_hdiv_mixed<SR, SC>(
+    row_space: &SR,   // H¹
+    col_space: &SC,   // HDiv
+    integrators: &[&dyn H1HDivIntegrator],
+    quad_order: u8,
+) -> CsrMatrix<f64>
+where
+    SR: FESpace,
+    SC: FESpace,
+{
+    let mesh = row_space.mesh();
+    let dim = mesh.dim() as usize;
+    let n_rows = row_space.n_dofs();
+    let n_cols = col_space.n_dofs();
+    let mut coo = CooMatrix::<f64>::new(n_rows, n_cols);
+
+    for e in mesh.elem_iter() {
+        let elem_type = mesh.element_type(e);
+        let order_r = row_space.order();
+        let order_c = col_space.order();
+        let ref_r = ref_elem_vol(elem_type, order_r).unwrap();
+        let n_r = ref_r.n_dofs();
+        let ref_c = ref_elem_vec(elem_type, order_c, SpaceType::HDiv).unwrap();
+        let n_c = ref_c.n_dofs();
+        let quad = ref_r.quadrature(quad_order);
+
+        let global_rows: Vec<usize> = row_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let global_cols: Vec<usize> = col_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let nodes = mesh.element_nodes(e);
+        let elem_tag = mesh.element_tag(e);
+        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+        let j_inv_t = tr.jacobian_inv_t().clone();
+
+        let n_elem_r = global_rows.len();
+        let n_elem_c = global_cols.len();
+        let mut m_elem = vec![0.0_f64; n_elem_r * n_elem_c];
+        let mut phi_r = vec![0.0; n_r];
+        let mut grad_r = vec![0.0; n_r * dim];
+        let mut grad_phys = vec![0.0; n_r * dim];
+        let mut vec_col = vec![0.0; n_c * dim];
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[q] * tr.det_j().abs();
+            ref_r.eval_basis(xi, &mut phi_r);
+            ref_r.eval_grad_basis(xi, &mut grad_r);
+            transform_grads(&j_inv_t, &grad_r, &mut grad_phys, n_r, dim);
+            ref_c.eval_basis_vec(xi, &mut vec_col);
+
+            let xp = tr.map_to_physical(xi);
+            let qp_r = QpData {
+                n_dofs: n_elem_r, dim, weight: w, phi: &phi_r,
+                grad_phys: &grad_phys,
+                x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None,
+            };
+            for integ in integrators {
+                integ.add_to_element_matrix(&qp_r, &vec_col, dim, &mut m_elem);
+            }
+        }
+        for (ir, &gr) in global_rows.iter().enumerate() {
+            for (ic, &gc) in global_cols.iter().enumerate() {
+                coo.add(gr, gc, m_elem[ir * n_elem_c + ic]);
+            }
+        }
+    }
+    coo.into_csr()
+}
+
 /// Constant P0 reference element: 1 DOF, constant basis = 1.0, zero gradient.
 struct P0;
 
@@ -404,7 +516,7 @@ impl ReferenceElement for P0 {
     fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.0; 3]] }
 }
 
-fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn ReferenceElement>, String> {
+pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn ReferenceElement>, String> {
     Ok(match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) |
         (ElementType::Tet4 | ElementType::Tet10, 0) |
@@ -432,7 +544,7 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn ReferenceEl
     })
 }
 
-fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Result<Box<dyn VectorReferenceElement>, String> {
+pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Result<Box<dyn VectorReferenceElement>, String> {
     Ok(match (space, elem_type, order) {
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriRT0),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriRT1),

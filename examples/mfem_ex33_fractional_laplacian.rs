@@ -224,9 +224,9 @@ mod tests {
         assert!((large_s.center_value - 1.0).abs() < 8.0e-2);
     }
 
-    #[test]
     fn mk_mesh() -> Mesh<2> { Mesh::<2>::unit_square_tri(8) }
 
+    #[test]
     fn ex33_rational_matches_spectral_baseline() {
         let spectral = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Spectral, 64, true);
         let rational = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Rational, 96, true);

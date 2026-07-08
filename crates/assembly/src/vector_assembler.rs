@@ -18,8 +18,8 @@ use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
 use fem_element::lagrange::{HexQ1, QuadQ1};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
-use fem_element::nedelec::{HexNDk, QuadND1, QuadND2, QuadNDk, TetND1, TetND2, TetNDk, TriND1, TriND2};
-use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, QuadRT0, HexRT0, QuadRT1, HexRT1};
+use fem_element::nedelec::{HexNDk, PrismND1, PrismNDk, QuadND1, QuadND2, QuadNDk, TetND1, TetND2, TetNDk, TriND1, TriND2};
+use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, QuadRT0, HexRT0, QuadRT1, HexRT1, PrismRTk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -62,6 +62,10 @@ pub(crate) fn vec_ref_elem(
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 0) => Box::new(TetRT0),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetRT1),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetRT2),
+        (SpaceType::HDiv, ElementType::Prism6, 3, 0) => Box::new(PrismRTk::new(0)),
+        (SpaceType::HDiv, ElementType::Prism6, 3, 1) => Box::new(PrismRTk::new(1)),
+        (SpaceType::HCurl, ElementType::Prism6, 3, 1) => Box::new(PrismND1),
+        (SpaceType::HCurl, ElementType::Prism6, 3, o) if o >= 2 => Box::new(PrismNDk::new(o as usize)),
         _ => panic!(
             "vec_ref_elem: unsupported (space_type={space_type:?}, elem_type={elem_type:?}, dim={dim}, order={order})"
         ),
@@ -343,6 +347,8 @@ fn accumulate_vector_bilinear_element<S: FESpace>(
                 k_elem[i * n + j] += k_edge[i * n_e + j];
             }
         }
+        // Zero k_edge for next quadrature point (integrator accumulates into it)
+        for v in k_edge[..n_e * n_e].iter_mut() { *v = 0.0; }
 
         // Interior DOFs (bubble modes): zero curl, only mass contribution.
         // For NDk H(curl) on Quad4: 2*k*(k-1) interior DOFs, gradient-bubble type.

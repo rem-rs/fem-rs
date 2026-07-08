@@ -2117,7 +2117,7 @@ mod tests {
             4,
             mixed_robin_data,
         );
-        let n_ess = apply_pec_zero(&space2, &mut legacy_mat, &mut legacy_rhs, &[1, 3]);
+        let (n_ess, _vec) = apply_pec_zero(&space2, &mut legacy_mat, &mut legacy_rhs, &[1, 3]);
         let (legacy_u, legacy_res) = solve_hcurl_jacobi(&legacy_mat, &legacy_rhs);
 
         assert!(builder_solved.solve_result.converged);

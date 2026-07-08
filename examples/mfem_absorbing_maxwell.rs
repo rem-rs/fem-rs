@@ -1,4 +1,4 @@
-//! # Example 34 — Maxwell with first-order absorbing boundary condition  (one-to-one with MFEM ex34)
+//! # Example 34 — Maxwell with first-order absorbing boundary condition
 //!
 //! Solves the 2-D H(curl) problem
 //!

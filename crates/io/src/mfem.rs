@@ -200,12 +200,38 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         return Err(FemError::Mesh(format!("MFEM: expected <dim> or 'nodes', got: {next}")));
     }
 
+    // Build elem_offsets for mixed meshes (CSR-style offsets into flat conn).
+    let use_mixed = uniform_type.is_none() && n_elem > 0;
+    let elem_offsets_opt = if use_mixed {
+        let mut offs = Vec::with_capacity(n_elem + 1);
+        offs.push(0);
+        for conn in &elem_conn {
+            offs.push(offs.last().unwrap() + conn.len());
+        }
+        Some(offs)
+    } else {
+        None
+    };
+
+    // Build face_offsets for mixed boundary faces.
+    let use_mixed_faces = n_bdr > 0 && !bdr_types.iter().all(|&t| t == bdr_types[0]);
+    let face_offsets_opt = if use_mixed_faces {
+        let mut offs = Vec::with_capacity(n_bdr + 1);
+        offs.push(0);
+        for conn in &face_conn {
+            offs.push(offs.last().unwrap() + conn.len());
+        }
+        Some(offs)
+    } else {
+        None
+    };
+
     let flat_elem = elem_conn.into_iter().flatten().collect();
     let flat_face = face_conn.into_iter().flatten().collect();
 
     let face_type_from_file = if n_bdr > 0 {
         let first = bdr_types[0];
-        if bdr_types.iter().all(|&t| t == first) { first } else { ElementType::Line2 }
+        if !use_mixed_faces { first } else { ElementType::Line2 }
     } else if uniform_type.is_some() {
         uniform_type.unwrap().boundary_type().unwrap_or(ElementType::Tri3)
     } else if !elem_types.is_empty() {
@@ -213,7 +239,6 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     } else {
         ElementType::Tri3
     };
-    let use_mixed_faces = !bdr_types.is_empty() && !bdr_types.iter().all(|&t| t == bdr_types[0]);
     let face_types_opt = if use_mixed_faces { Some(bdr_types) } else { None };
 
     if dim == 2 {
@@ -223,17 +248,17 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             elem_tags,
             elem_type: uniform_type.unwrap_or(ElementType::Tri3),
             face_conn: flat_face,
-                face_tags: face_tags.into_iter().map(|t| t as fem_mesh::BoundaryTag).collect(),
-                face_type: face_type_from_file,
-                elem_types: if uniform_type.is_some() { None } else { Some(elem_types) },
-                elem_offsets: None,
-                face_types: face_types_opt.clone(),
-                face_offsets: None,
-                face_to_elem: None,
-                edge_conn: vec![], edge_to_elem: vec![],
-            };
-            Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
-        } else {
+            face_tags: face_tags.into_iter().map(|t| t as fem_mesh::BoundaryTag).collect(),
+            face_type: face_type_from_file,
+            elem_types: if use_mixed { Some(elem_types) } else { None },
+            elem_offsets: elem_offsets_opt,
+            face_types: face_types_opt.clone(),
+            face_offsets: face_offsets_opt.clone(),
+            face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
+        };
+        Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
+    } else {
         let mesh = Mesh {
             coords,
             conn: flat_elem,
@@ -242,13 +267,13 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             face_conn: flat_face,
             face_tags: face_tags.into_iter().map(|t| t as fem_mesh::BoundaryTag).collect(),
             face_type: face_type_from_file,
-            elem_types: if uniform_type.is_some() { None } else { Some(elem_types) },
-            elem_offsets: None,
+            elem_types: if use_mixed { Some(elem_types) } else { None },
+            elem_offsets: elem_offsets_opt,
             face_types: face_types_opt,
-        face_offsets: None,
-        face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
-    };
+            face_offsets: face_offsets_opt,
+            face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
+        };
         Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
     }
 }

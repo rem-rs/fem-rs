@@ -51,7 +51,7 @@ pub use moving_mesh::{
 };
 pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPointLocator};
 pub use simplex::Mesh;
-pub use submesh::{SubMesh, extract_submesh, extract_submesh_by_name};
+pub use submesh::{SubMesh, SubMesh3D, extract_submesh, extract_submesh_3d, extract_submesh_by_name};
 pub use topology::MeshTopology;
 pub use transformation::ElementTransformation;
 pub use extrusion::{extrude_tri3_to_prisms, extrude_quad4_to_hex8};

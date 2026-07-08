@@ -1,4 +1,4 @@
-//! # Example 32 — Maxwell with impedance boundary condition  (one-to-one with MFEM ex32)
+//! # Example 32 — Maxwell with impedance boundary condition
 //!
 //! Solves the 2-D H(curl) problem
 //!

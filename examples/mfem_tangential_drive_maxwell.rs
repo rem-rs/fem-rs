@@ -1,4 +1,4 @@
-//! # Example 33 — Maxwell with non-homogeneous tangential boundary load  (one-to-one with MFEM ex33)
+//! # Example 33 — Maxwell with non-homogeneous tangential boundary load
 //!
 //! Solves the 2-D H(curl) problem
 //!

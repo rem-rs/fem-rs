@@ -236,8 +236,8 @@ name = "maxwell_time_domain"
 path = "maxwell_time_domain.rs"
 
 [[example]]
-name = "mfem_ex33_tangential_drive_maxwell"
-path = "mfem_ex33_tangential_drive_maxwell.rs"
+name = "mfem_tangential_drive_maxwell"
+path = "mfem_tangential_drive_maxwell.rs"
 
 [[example]]
 name = "mfem_ex39_named_attributes"
@@ -503,7 +503,11 @@ path = "mfem_ex32_impedance_maxwell.rs"
 
 [[example]]
 name = "mfem_ex34_absorbing_maxwell"
-path = "mfem_ex34_absorbing_maxwell.rs"
+path = "mfem_absorbing_maxwell.rs"
+
+[[example]]
+name = "mfem_ex34_magnetostatics"
+path = "mfem_ex34_magnetostatics.rs"
 
 [[example]]
 name = "mfem_ex36_obstacle"
