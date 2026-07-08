@@ -65,6 +65,12 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     let mut line = String::new();
 
     r.read_line(&mut line)?;
+
+    // Check for INLINE mesh format
+    if line.trim().starts_with("MFEM INLINE mesh") {
+        return read_mfem_inline(&mut r);
+    }
+
     if !line.trim().starts_with("MFEM mesh") {
         return Err(FemError::Mesh(format!("expected 'MFEM mesh' header, got: {line}")));
     }
@@ -381,6 +387,99 @@ fn read_uint_line(r: &mut impl BufRead) -> FemResult<Vec<usize>> {
 fn read_f64_line(r: &mut impl BufRead) -> FemResult<Vec<f64>> {
     let l = read_line(r)?;
     l.split_whitespace().map(|s| s.parse().map_err(|_| FemError::Mesh(format!("MFEM: bad float: {s}")))).collect()
+}
+
+// ─── INLINE mesh reader ────────────────────────────────────────────────────
+
+/// Read an MFEM INLINE mesh (structured grid) specification.
+///
+/// Format:
+/// ```text
+/// MFEM INLINE mesh v1.0
+///
+/// type = tri|quad|tet|hex
+/// nx = N
+/// ny = N
+/// [nz = N]
+/// sx = size_x
+/// sy = size_y
+/// [sz = size_z]
+/// ```
+fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
+    // Helper: read a key=value line (usize)
+    fn read_param_usize(r: &mut impl BufRead, key: &str) -> FemResult<usize> {
+        let line = read_line(r)?;
+        let parts: Vec<&str> = line.split('=').collect();
+        if parts.len() != 2 || parts[0].trim() != key {
+            return Err(FemError::Mesh(format!("INLINE mesh: expected '{key}=', got '{line}'")));
+        }
+        parts[1].trim().parse::<usize>()
+            .map_err(|_| FemError::Mesh(format!("INLINE mesh: invalid {key} value: '{line}'")))
+    }
+    fn read_param_f64(r: &mut impl BufRead, key: &str) -> FemResult<f64> {
+        let line = read_line(r)?;
+        let parts: Vec<&str> = line.split('=').collect();
+        if parts.len() != 2 || parts[0].trim() != key {
+            return Err(FemError::Mesh(format!("INLINE mesh: expected '{key}=', got '{line}'")));
+        }
+        parts[1].trim().parse::<f64>()
+            .map_err(|_| FemError::Mesh(format!("INLINE mesh: invalid {key} value: '{line}'")))
+    }
+
+    let elem_type_str = {
+        let line = read_line(r)?;
+        let parts: Vec<&str> = line.split('=').collect();
+        if parts.len() != 2 || parts[0].trim() != "type" {
+            return Err(FemError::Mesh(format!("INLINE mesh: expected 'type=', got '{line}'")));
+        }
+        parts[1].trim().to_string()
+    };
+
+    let nx = read_param_usize(r, "nx")?;
+    let ny = read_param_usize(r, "ny")?;
+    let _nz = if elem_type_str == "tet" || elem_type_str == "hex" {
+        Some(read_param_usize(r, "nz")?)
+    } else { None };
+    let sx = read_param_f64(r, "sx")?;
+    let sy = read_param_f64(r, "sy")?;
+    let _sz = if elem_type_str == "tet" || elem_type_str == "hex" {
+        Some(read_param_f64(r, "sz")?)
+    } else { None };
+
+    // Generate structured mesh using existing Mesh constructors.
+    // The INLINE format always maps to [0, sx] × [0, sy] (× [0, sz]) domains.
+    // Our unit_square/unit_cube constructors create meshes on [0,1]^d which
+    // we scale via sx/sy/sz in the coordinate generation below.
+
+    match elem_type_str.as_str() {
+        "tri" => {
+            // unit_square_tri(n) creates an n×n quad grid split into triangles on [0,1]².
+            // For INLINE with nx×ny elements, we use n=max(nx,ny) and scale.
+            let n = nx.max(ny);
+            let mut mesh = Mesh::<2>::unit_square_tri(n);
+            let scale_x = sx / n as f64 * nx as f64;
+            let scale_y = sy / n as f64 * ny as f64;
+            for c in mesh.coords.chunks_mut(2) {
+                c[0] *= scale_x;
+                c[1] *= scale_y;
+            }
+            Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
+        }
+        "quad" => {
+            let n = nx.max(ny);
+            let mut mesh = Mesh::<2>::unit_square_quad(n);
+            let scale_x = sx / n as f64 * nx as f64;
+            let scale_y = sy / n as f64 * ny as f64;
+            for c in mesh.coords.chunks_mut(2) {
+                c[0] *= scale_x;
+                c[1] *= scale_y;
+            }
+            Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
+        }
+        other => Err(FemError::Mesh(format!(
+            "INLINE mesh: unsupported type '{other}' (supported: tri, quad)"
+        ))),
+    }
 }
 
 // ─── GridFunction .gf I/O ────────────────────────────────────────────────
