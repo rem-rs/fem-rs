@@ -98,10 +98,10 @@ git push
 
 | 短板 | C++ MFEM | fem-rs | 修复方案 |
 |------|----------|--------|----------|
-| **Quad4 曲面** | `-e 1` 立方体→球面（`Mesh::AddQuad` + `FinalizeQuadMesh`） | `SurfaceAssembler` 只支持 Tri3，无 Quad4 曲面路径 | `surface.rs` 加 `SurfaceQuad4` 系列（Jacobian 用 3×2 双线性映射） |
-| **`dim()` vs `space_dim()` 混淆** | `mesh->Dimension() = 2`（拓扑维），`mesh->SpaceDimension() = 3`（嵌入维） | `MeshTopology::dim()` 返回 `D`（嵌入维），`DofManager` 对 `Mesh<3>` Tri3 用了 3D 公式 | `MeshTopology` 加 `topological_dim()`，`DofManager` 检查 `element_type` 而不是 `dim()` |
-| **曲面 AMR** | `RefineAtVertex` + `RandomRefinement` + 局部加密 + SnapNodes | 无曲面网格细化路径 | 参考 `refine_uniform_3d` 对 Tri3 曲面加细分路径 |
-| **高阶曲面 (order≥2)** | `SetNodalFESpace(&nodal_fes)` + 等参映射 | `CurvedMesh` 对 `Mesh<3>` Tri3 用了四面体边枚举（越界） | 修复 `CurvedMesh` 在 `D=3, elem=Tri3` 时使用三角边枚举 |
+| **Quad4 曲面** | `-e 1` 立方体→球面 | `SurfaceAssembler` 只支持 Tri3 | ✅ `SurfaceQuad4*` 系列积分器 + `SurfaceQuad4Assembler` |
+| **`dim()` vs `space_dim()` 混淆** | `mesh->Dimension() = 2`，`SpaceDimension() = 3` | `MeshTopology::dim()` 返回嵌入维 | ✅ `topological_dim()` 方法 + `DofManager` 改用 `topo_dim` |
+| **曲面 AMR** | `RefineAtVertex` + 局部加密 | 无曲面网格细化 | ✅ `refine_uniform_surface_tri3/quad4` + `refine_at_vertex_surface` 在 `crates/mesh/src/amr/` |
+| **高阶曲面 (order≥2)** | `SetNodalFESpace` + 等参映射 | `CurvedMesh` 对 `Mesh<3>` Tri3 用 Tet 边枚举 | ✅ `CurvedMesh::elevate_to_order` 改用 `element_type_at(0).dim()` |
 
 ### ex4 H(div) 四边形/曲边界网格 L² 误差差距
 
