@@ -109,7 +109,7 @@ impl SurfaceDiffusionIntegrator {
             for j in 0..3 {
                 let mut dot = 0.0;
                 for c in 0..3 { dot += sg[i][c] * sg[j][c]; }
-                k_elem[i * 3 + j] = dot * area_factor;
+                k_elem[i * 3 + j] += dot * area_factor;
             }
         }
     }
@@ -143,7 +143,7 @@ impl SurfaceMassIntegrator {
                     let phi_j = [1.0 - xi - eta, xi, eta][j];
                     val += phi_i * phi_j * qwt[q];
                 }
-                k_elem[i * 3 + j] = val * sqrt_det_g;
+                k_elem[i * 3 + j] += val * sqrt_det_g;
             }
         }
     }
@@ -170,8 +170,73 @@ impl SurfaceDomainSourceIntegrator<'_> {
         // At centroid, φ_i = 1/3
         let phi_qp = 1.0 / 3.0;
         for i in 0..3 {
-            f_elem[i] = f_val * phi_qp * area_factor;
+            f_elem[i] += f_val * phi_qp * area_factor;
         }
+    }
+}
+
+// ─── Surface integrator traits (MFEM-aligned API) ────────────────────────────
+
+/// Trait for Tri3 surface bilinear integrators (Laplace-Beltrami, mass, …).
+///
+/// Matches MFEM's pattern where integrators implement a common interface
+/// and are added to the form via `AddDomainIntegrator`.
+pub trait SurfaceBilinearIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 3], k_elem: &mut [f64; 9]);
+}
+
+/// Trait for Tri3 surface linear integrators (source terms).
+pub trait SurfaceLinearIntegrator {
+    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 3], f_elem: &mut [f64; 3]);
+}
+
+/// Trait for Quad4 surface bilinear integrators.
+pub trait SurfaceQuad4BilinearIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 4], k_elem: &mut [f64; 16]);
+}
+
+/// Trait for Quad4 surface linear integrators.
+pub trait SurfaceQuad4LinearIntegrator {
+    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 4], f_elem: &mut [f64; 4]);
+}
+
+// Implement traits for existing integrators.
+
+impl SurfaceBilinearIntegrator for SurfaceDiffusionIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 3], k_elem: &mut [f64; 9]) {
+        self.add_to_element_matrix(elem_nodes, k_elem);
+    }
+}
+
+impl SurfaceBilinearIntegrator for SurfaceMassIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 3], k_elem: &mut [f64; 9]) {
+        self.add_to_element_matrix(elem_nodes, k_elem);
+    }
+}
+
+impl SurfaceQuad4BilinearIntegrator for SurfaceQuad4DiffusionIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 4], k_elem: &mut [f64; 16]) {
+        self.add_to_element_matrix(elem_nodes, k_elem);
+    }
+}
+
+impl SurfaceQuad4BilinearIntegrator for SurfaceQuad4MassIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 4], k_elem: &mut [f64; 16]) {
+        self.add_to_element_matrix(elem_nodes, k_elem);
+    }
+}
+
+// Linear integrator traits (source terms for Tri3 surfaces).
+
+impl SurfaceLinearIntegrator for SurfaceDomainSourceIntegrator<'_> {
+    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 3], f_elem: &mut [f64; 3]) {
+        self.add_to_element_vector(elem_nodes, f_elem);
+    }
+}
+
+impl SurfaceQuad4LinearIntegrator for SurfaceQuad4DomainSourceIntegrator<'_> {
+    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 4], f_elem: &mut [f64; 4]) {
+        self.add_to_element_vector(elem_nodes, f_elem);
     }
 }
 
@@ -240,6 +305,72 @@ impl SurfaceAssembler {
             }
         }
 
+        rhs
+    }
+
+    /// MFEM-style bilinear assembly: add all integrators in a slice.
+    ///
+    /// Each integrator's `add_to_element_matrix` contribution is accumulated
+    /// into the same element matrix, matching the semantics of MFEM's
+    /// `BilinearForm::AddDomainIntegrator`.
+    pub fn assemble_bilinear_slice<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn SurfaceBilinearIntegrator],
+    ) -> CsrMatrix<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let ne = mesh.n_elements() as u32;
+        let mut coo = CooMatrix::new(n_dofs, n_dofs);
+
+        for e in 0..ne {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            if nodes.len() < 3 { continue; }
+            let x: [[f64; 3]; 3] = [
+                get_coord3(mesh, nodes[0]),
+                get_coord3(mesh, nodes[1]),
+                get_coord3(mesh, nodes[2]),
+            ];
+            let mut ke = [0.0; 9];
+            for integ in integrators {
+                integ.add_to_element_matrix(&x, &mut ke);
+            }
+            for i in 0..3 {
+                for j in 0..3 {
+                    coo.add(dofs[i] as usize, dofs[j] as usize, ke[i * 3 + j]);
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// MFEM-style linear assembly: add all linear integrators in a slice.
+    pub fn assemble_linear_slice<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn SurfaceLinearIntegrator],
+    ) -> Vec<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let ne = mesh.n_elements() as u32;
+        let mut rhs = vec![0.0; n_dofs];
+
+        for e in 0..ne {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            if nodes.len() < 3 { continue; }
+            let x: [[f64; 3]; 3] = [
+                get_coord3(mesh, nodes[0]),
+                get_coord3(mesh, nodes[1]),
+                get_coord3(mesh, nodes[2]),
+            ];
+            let mut fe = [0.0; 3];
+            for integ in integrators {
+                integ.add_to_element_vector(&x, &mut fe);
+            }
+            for i in 0..3 {
+                rhs[dofs[i] as usize] += fe[i];
+            }
+        }
         rhs
     }
 }
@@ -341,7 +472,7 @@ impl SurfaceQuad4DiffusionIntegrator {
         for i in 0..4 {
             for j in 0..4 {
                 let dot = sg[i][0]*sg[j][0] + sg[i][1]*sg[j][1] + sg[i][2]*sg[j][2];
-                k_elem[i * 4 + j] = dot * area_factor;
+                k_elem[i * 4 + j] += dot * area_factor;
             }
         }
     }
@@ -380,7 +511,7 @@ impl SurfaceQuad4MassIntegrator {
                     });
                     val += phi_i * phi_j * qwt[q];
                 }
-                k_elem[i * 4 + j] = val * sqrt_det_g;
+                k_elem[i * 4 + j] += val * sqrt_det_g;
             }
         }
     }
@@ -407,7 +538,7 @@ impl SurfaceQuad4DomainSourceIntegrator<'_> {
         // At centroid, φ_i = 1/4 for Q1
         let phi_qp = 1.0 / 4.0;
         for i in 0..4 {
-            f_elem[i] = f_val * phi_qp * area_factor;
+            f_elem[i] += f_val * phi_qp * area_factor;
         }
     }
 }
@@ -469,6 +600,70 @@ impl SurfaceQuad4Assembler {
             ];
             let mut fe = [0.0; 4];
             integrator(&x, &mut fe);
+            for i in 0..4 {
+                rhs[dofs[i] as usize] += fe[i];
+            }
+        }
+        rhs
+    }
+
+    /// MFEM-style bilinear assembly for Quad4 surfaces.
+    pub fn assemble_bilinear_slice<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn SurfaceQuad4BilinearIntegrator],
+    ) -> CsrMatrix<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let ne = mesh.n_elements() as u32;
+        let mut coo = CooMatrix::new(n_dofs, n_dofs);
+
+        for e in 0..ne {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            if nodes.len() < 4 { continue; }
+            let x: [[f64; 3]; 4] = [
+                get_coord3(mesh, nodes[0]),
+                get_coord3(mesh, nodes[1]),
+                get_coord3(mesh, nodes[2]),
+                get_coord3(mesh, nodes[3]),
+            ];
+            let mut ke = [0.0; 16];
+            for integ in integrators {
+                integ.add_to_element_matrix(&x, &mut ke);
+            }
+            for i in 0..4 {
+                for j in 0..4 {
+                    coo.add(dofs[i] as usize, dofs[j] as usize, ke[i * 4 + j]);
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// MFEM-style linear assembly for Quad4 surfaces.
+    pub fn assemble_linear_slice<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn SurfaceQuad4LinearIntegrator],
+    ) -> Vec<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let ne = mesh.n_elements() as u32;
+        let mut rhs = vec![0.0; n_dofs];
+
+        for e in 0..ne {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            if nodes.len() < 4 { continue; }
+            let x: [[f64; 3]; 4] = [
+                get_coord3(mesh, nodes[0]),
+                get_coord3(mesh, nodes[1]),
+                get_coord3(mesh, nodes[2]),
+                get_coord3(mesh, nodes[3]),
+            ];
+            let mut fe = [0.0; 4];
+            for integ in integrators {
+                integ.add_to_element_vector(&x, &mut fe);
+            }
             for i in 0..4 {
                 rhs[dofs[i] as usize] += fe[i];
             }

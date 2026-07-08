@@ -25,10 +25,11 @@
 //! | `-no-vis` | — | Disable GLVis (no-op) |
 
 use fem_assembly::boundary::surface::{
-    SurfaceAssembler, SurfaceDiffusionIntegrator, SurfaceDomainSourceIntegrator,
-    SurfaceMassIntegrator,
-    SurfaceQuad4Assembler, SurfaceQuad4DiffusionIntegrator,
-    SurfaceQuad4DomainSourceIntegrator, SurfaceQuad4MassIntegrator,
+    SurfaceAssembler, SurfaceBilinearIntegrator, SurfaceLinearIntegrator,
+    SurfaceDiffusionIntegrator, SurfaceDomainSourceIntegrator, SurfaceMassIntegrator,
+    SurfaceQuad4Assembler, SurfaceQuad4BilinearIntegrator, SurfaceQuad4LinearIntegrator,
+    SurfaceQuad4DiffusionIntegrator, SurfaceQuad4DomainSourceIntegrator,
+    SurfaceQuad4MassIntegrator,
 };
 use fem_mesh::{
     Mesh, MeshTopology, element_type::ElementType,
@@ -86,39 +87,30 @@ fn main() {
         7.0 * x[0] * x[1] / r2
     };
 
-    let (mut a, mass_mat) = if is_quad {
-        let k = SurfaceQuad4Assembler::assemble_bilinear(&space, &|x, ke| {
-            SurfaceQuad4DiffusionIntegrator.add_to_element_matrix(x, ke);
-        });
-        let m = SurfaceQuad4Assembler::assemble_bilinear(&space, &|x, ke| {
-            SurfaceQuad4MassIntegrator.add_to_element_matrix(x, ke);
-        });
-        (k, m)
+    // MFEM-style slice assembly: add integrators, assemble in one pass.
+    let a = if is_quad {
+        SurfaceQuad4Assembler::assemble_bilinear_slice(&space, &[
+            &SurfaceQuad4DiffusionIntegrator as &dyn SurfaceQuad4BilinearIntegrator,
+            &SurfaceQuad4MassIntegrator,
+        ])
     } else {
-        let k = SurfaceAssembler::assemble_bilinear(&space, &|x, ke| {
-            SurfaceDiffusionIntegrator.add_to_element_matrix(x, ke);
-        });
-        let m = SurfaceAssembler::assemble_bilinear(&space, &|x, ke| {
-            SurfaceMassIntegrator.add_to_element_matrix(x, ke);
-        });
-        (k, m)
+        SurfaceAssembler::assemble_bilinear_slice(&space, &[
+            &SurfaceDiffusionIntegrator as &dyn SurfaceBilinearIntegrator,
+            &SurfaceMassIntegrator,
+        ])
     };
-    for i in 0..a.nrows {
-        for jp in a.row_ptr[i]..a.row_ptr[i + 1] {
-            let j = a.col_idx[jp] as usize;
-            a.values[jp] += mass_mat.get(i, j);
-        }
-    }
 
     // ── 4. Assemble RHS: f = 7*x*y / r^2 ────────────────────────────────────
+    let source_tri = SurfaceDomainSourceIntegrator { f: rhs_fn };
+    let source_quad = SurfaceQuad4DomainSourceIntegrator { f: rhs_fn };
     let rhs = if is_quad {
-        SurfaceQuad4Assembler::assemble_linear(&space, &|x, fe| {
-            SurfaceQuad4DomainSourceIntegrator { f: rhs_fn }.add_to_element_vector(x, fe);
-        })
+        SurfaceQuad4Assembler::assemble_linear_slice(&space, &[
+            &source_quad as &dyn SurfaceQuad4LinearIntegrator,
+        ])
     } else {
-        SurfaceAssembler::assemble_linear(&space, &|x, fe| {
-            SurfaceDomainSourceIntegrator { f: rhs_fn }.add_to_element_vector(x, fe);
-        })
+        SurfaceAssembler::assemble_linear_slice(&space, &[
+            &source_tri as &dyn SurfaceLinearIntegrator,
+        ])
     };
 
     // ── 5. Solve: PCG + SSOR(omega=1) ──────────────────────────────────────
