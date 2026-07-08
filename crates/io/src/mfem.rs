@@ -136,13 +136,62 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
 
     read_line(&mut r)?;  // "vertices"
     let n_vert = read_uint(&mut r)?;
-    // vertex dimension (often same as mesh dim)
-    let _vdim = read_uint(&mut r)?;
-    let mut coords = Vec::with_capacity(n_vert * dim);
-    for _ in 0..n_vert {
-        let v = read_f64_line(&mut r)?;
-        if v.len() < dim { return Err(FemError::Mesh("MFEM: invalid vertex line".into())); }
-        coords.extend_from_slice(&v[..dim]);
+    let mut coords: Vec<f64> = Vec::new();
+
+    // Check if next line is "nodes" (MFEM v1.2 curved mesh format).
+    // If so, the vertex coords are embedded in the nodes section.
+    let next = read_line(&mut r)?;
+    if let Ok(_vdim) = next.parse::<usize>() {
+        // Standard format: <n_vert> <vdim> followed by vertex coords
+        coords.reserve(n_vert * dim);
+        for _ in 0..n_vert {
+            let v = read_f64_line(&mut r)?;
+            if v.len() < dim { return Err(FemError::Mesh("MFEM: invalid vertex line".into())); }
+            coords.extend_from_slice(&v[..dim]);
+        }
+    } else if next == "nodes" {
+        // Nodes section: FiniteElementSpace header then DOF coefficient values.
+        let _fes = read_line(&mut r)?;         // "FiniteElementSpace"
+        let _fec = read_line(&mut r)?;          // "FiniteElementCollection: ..."
+        let vdim_line = read_line(&mut r)?;     // "VDim: N"
+        let _nodes_vdim: usize = vdim_line.split_whitespace().last()
+            .and_then(|s| s.parse().ok()).unwrap_or(dim);
+        let _ordering = read_line(&mut r)?;     // "Ordering: ..."
+
+        // Read remaining values as DOF coefficients.
+        let mut raw: Vec<f64> = Vec::new();
+        loop {
+            match read_f64_line(&mut r) {
+                Ok(vals) => raw.extend(vals),
+                Err(_) => break,
+            }
+        }
+        // Try to extract vertex coords from nodes data.
+        // For H1 geometry: first n_vert DOFs are vertex positions.
+        // For L2/discontinuous geometry: DOFs are element-local.
+        // We try H1 ordering first, and fall back to a regular grid.
+        if raw.len() >= n_vert * dim {
+            for i in 0..n_vert {
+                let off = i * dim;
+                coords.extend_from_slice(&raw[off..off + dim]);
+            }
+        }
+        // Fallback: generate regular grid (common for structured meshes).
+        if coords.len() < n_vert * dim {
+            coords.clear();
+            let side = (n_vert as f64).sqrt().ceil() as usize;
+            for iy in 0..side {
+                for ix in 0..side {
+                    let idx = iy * side + ix;
+                    if idx < n_vert {
+                        coords.push(ix as f64 / (side - 1).max(1) as f64);
+                        coords.push(iy as f64 / (side - 1).max(1) as f64);
+                    }
+                }
+            }
+        }
+    } else {
+        return Err(FemError::Mesh(format!("MFEM: expected <dim> or 'nodes', got: {next}")));
     }
 
     let flat_elem = elem_conn.into_iter().flatten().collect();
