@@ -249,12 +249,240 @@ fn get_coord3<M: MeshTopology>(mesh: &M, n: u32) -> [f64; 3] {
     [c[0], c[1], if c.len() > 2 { c[2] } else { 0.0 }]
 }
 
+// ─── Quad4 surface helpers ───────────────────────────────────────────────────
+
+/// Surface Jacobian for a bilinear Quad4 (4-node quadrilateral) embedded in 3-D.
+///
+/// Evaluated at the centroid (ξ=0, η=0) of the reference square [-1,1]².
+/// Returns `(J, sqrt_det_G, normal)` where J is the 3×2 Jacobian.
+fn surface_jacobian_quad4(x: &[[f64; 3]; 4]) -> ([[f64; 3]; 2], f64, [f64; 3]) {
+    // Bilinear shape function reference gradients at centroid:
+    //   ∂N_i/∂ξ = sign_ξ_i / 4,  ∂N_i/∂η = sign_η_i / 4
+    //   sign_ξ:  [-1,  1,  1, -1]
+    //   sign_η:  [-1, -1,  1,  1]
+    let dxi = [
+        (-x[0][0] + x[1][0] + x[2][0] - x[3][0]) / 4.0,
+        (-x[0][1] + x[1][1] + x[2][1] - x[3][1]) / 4.0,
+        (-x[0][2] + x[1][2] + x[2][2] - x[3][2]) / 4.0,
+    ];
+    let deta = [
+        (-x[0][0] - x[1][0] + x[2][0] + x[3][0]) / 4.0,
+        (-x[0][1] - x[1][1] + x[2][1] + x[3][1]) / 4.0,
+        (-x[0][2] - x[1][2] + x[2][2] + x[3][2]) / 4.0,
+    ];
+    let j = [dxi, deta];
+
+    // Metric G = J^T * J (2×2)
+    let g00 = dxi[0]*dxi[0] + dxi[1]*dxi[1] + dxi[2]*dxi[2];
+    let g01 = dxi[0]*deta[0] + dxi[1]*deta[1] + dxi[2]*deta[2];
+    let g11 = deta[0]*deta[0] + deta[1]*deta[1] + deta[2]*deta[2];
+    let det_g = g00 * g11 - g01 * g01;
+    let sqrt_det_g = det_g.sqrt().max(1e-30);
+
+    // Unit normal n = (J_ξ × J_η) / |J_ξ × J_η|
+    let nx = dxi[1]*deta[2] - dxi[2]*deta[1];
+    let ny = dxi[2]*deta[0] - dxi[0]*deta[2];
+    let nz = dxi[0]*deta[1] - dxi[1]*deta[0];
+    let n_len = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-30);
+    let normal = [nx/n_len, ny/n_len, nz/n_len];
+
+    (j, sqrt_det_g, normal)
+}
+
+/// Pseudo-inverse J_pinv = (J^T J)^{-1} J^T for a 3×2 Jacobian (Quad4 centroid).
+fn pseudo_inverse_quad4(j: &[[f64; 3]; 2], det_g: f64) -> [[f64; 2]; 3] {
+    let inv_det = 1.0 / det_g.max(1e-30);
+    // G = J^T J, G^{-1} = [[j11, -j01], [-j10, j00]] / det
+    let g00 = j[0][0]*j[0][0] + j[0][1]*j[0][1] + j[0][2]*j[0][2];
+    let g01 = j[0][0]*j[1][0] + j[0][1]*j[1][1] + j[0][2]*j[1][2];
+    let g11 = j[1][0]*j[1][0] + j[1][1]*j[1][1] + j[1][2]*j[1][2];
+    let ginvt = [[g11 * inv_det, -g01 * inv_det], [-g01 * inv_det, g00 * inv_det]];
+
+    // J_pinv = G^{-1} * J^T  (2×3) → stored as 3 rows × 2 cols
+    let mut p = [[0.0; 2]; 3];
+    for r in 0..3 {
+        p[r][0] = ginvt[0][0] * j[0][r] + ginvt[0][1] * j[1][r];
+        p[r][1] = ginvt[1][0] * j[0][r] + ginvt[1][1] * j[1][r];
+    }
+    p
+}
+
+// ─── Quad4 surface integrators ───────────────────────────────────────────────
+
+/// Surface diffusion (Laplace-Beltrami) bilinear form for Quad4: `∫_Γ ∇_Γ u · ∇_Γ v dS`
+pub struct SurfaceQuad4DiffusionIntegrator;
+
+impl SurfaceQuad4DiffusionIntegrator {
+    pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 4], k_elem: &mut [f64; 16]) {
+        let (j, sqrt_det_g, _normal) = surface_jacobian_quad4(elem_nodes);
+        let det_g = {
+            let g00 = j[0][0]*j[0][0] + j[0][1]*j[0][1] + j[0][2]*j[0][2];
+            let g01 = j[0][0]*j[1][0] + j[0][1]*j[1][1] + j[0][2]*j[1][2];
+            let g11 = j[1][0]*j[1][0] + j[1][1]*j[1][1] + j[1][2]*j[1][2];
+            g00 * g11 - g01 * g01
+        };
+        let pinv = pseudo_inverse_quad4(&j, det_g);
+
+        // Reference gradients of Q1 bilinear at centroid:
+        //   ∇N₀ = (-¼, -¼),  ∇N₁ = (¼, -¼),  ∇N₂ = (¼, ¼),  ∇N₃ = (-¼, ¼)
+        let ref_grad = [[-0.25, -0.25], [0.25, -0.25], [0.25, 0.25], [-0.25, 0.25]];
+
+        // Surface gradients: ∇_Γ N_i = J_pinv^T · ∇_ξ N_i
+        let mut sg = [[0.0; 3]; 4];
+        for i in 0..4 {
+            for c in 0..3 {
+                sg[i][c] = ref_grad[i][0] * pinv[c][0] + ref_grad[i][1] * pinv[c][1];
+            }
+        }
+
+        // dS = sqrt(det(G)) * dξ dη  (area of ref quad = 4, weight = 4 at centroid)
+        let area_factor = 4.0 * sqrt_det_g;
+
+        for i in 0..4 {
+            for j in 0..4 {
+                let dot = sg[i][0]*sg[j][0] + sg[i][1]*sg[j][1] + sg[i][2]*sg[j][2];
+                k_elem[i * 4 + j] = dot * area_factor;
+            }
+        }
+    }
+}
+
+/// Surface mass bilinear form for Quad4: `∫_Γ u v dS`
+pub struct SurfaceQuad4MassIntegrator;
+
+impl SurfaceQuad4MassIntegrator {
+    pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 4], k_elem: &mut [f64; 16]) {
+        let (_j, sqrt_det_g, _normal) = surface_jacobian_quad4(elem_nodes);
+
+        // 2×2 Gauss quadrature on [-1,1]²
+        let qpts = [
+            [-0.5773502691896257, -0.5773502691896257],
+            [ 0.5773502691896257, -0.5773502691896257],
+            [ 0.5773502691896257,  0.5773502691896257],
+            [-0.5773502691896257,  0.5773502691896257],
+        ];
+        let qwt = [1.0, 1.0, 1.0, 1.0]; // weights sum to 4
+
+        for i in 0..4 {
+            for j in 0..4 {
+                let mut val = 0.0;
+                for q in 0..4 {
+                    let (xi, eta) = (qpts[q][0], qpts[q][1]);
+                    let phi_i = 0.25 * (1.0 + match i {
+                        0 | 3 => -xi, _ => xi,
+                    }) * (1.0 + match i {
+                        0 | 1 => -eta, _ => eta,
+                    });
+                    let phi_j = 0.25 * (1.0 + match j {
+                        0 | 3 => -xi, _ => xi,
+                    }) * (1.0 + match j {
+                        0 | 1 => -eta, _ => eta,
+                    });
+                    val += phi_i * phi_j * qwt[q];
+                }
+                k_elem[i * 4 + j] = val * sqrt_det_g;
+            }
+        }
+    }
+}
+
+/// Surface domain source linear form for Quad4: `∫_Γ f(x) v(x) dS`
+pub struct SurfaceQuad4DomainSourceIntegrator<'a> {
+    pub f: &'a dyn Fn(&[f64; 3]) -> f64,
+}
+
+impl SurfaceQuad4DomainSourceIntegrator<'_> {
+    pub fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 4], f_elem: &mut [f64; 4]) {
+        let (_j, sqrt_det_g, _normal) = surface_jacobian_quad4(elem_nodes);
+
+        // Centroid quadrature
+        let centroid = [
+            (elem_nodes[0][0] + elem_nodes[1][0] + elem_nodes[2][0] + elem_nodes[3][0]) / 4.0,
+            (elem_nodes[0][1] + elem_nodes[1][1] + elem_nodes[2][1] + elem_nodes[3][1]) / 4.0,
+            (elem_nodes[0][2] + elem_nodes[1][2] + elem_nodes[2][2] + elem_nodes[3][2]) / 4.0,
+        ];
+        let f_val = (self.f)(&centroid);
+        let area_factor = 4.0 * sqrt_det_g; // dS at centroid * area of ref quad
+
+        // At centroid, φ_i = 1/4 for Q1
+        let phi_qp = 1.0 / 4.0;
+        for i in 0..4 {
+            f_elem[i] = f_val * phi_qp * area_factor;
+        }
+    }
+}
+
+// ─── Quad4 Surface Assembler ─────────────────────────────────────────────────
+
+/// Assemble a surface bilinear form on Quad4 elements.
+pub struct SurfaceQuad4Assembler;
+
+impl SurfaceQuad4Assembler {
+    pub fn assemble_bilinear<S: FESpace>(
+        space: &S,
+        integrator: &dyn Fn(&[[f64; 3]; 4], &mut [f64; 16]),
+    ) -> CsrMatrix<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let ne = mesh.n_elements() as u32;
+        let mut coo = CooMatrix::new(n_dofs, n_dofs);
+
+        for e in 0..ne {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            if nodes.len() < 4 { continue; }
+            let x: [[f64; 3]; 4] = [
+                get_coord3(mesh, nodes[0]),
+                get_coord3(mesh, nodes[1]),
+                get_coord3(mesh, nodes[2]),
+                get_coord3(mesh, nodes[3]),
+            ];
+            let mut ke = [0.0; 16];
+            integrator(&x, &mut ke);
+            for i in 0..4 {
+                for j in 0..4 {
+                    coo.add(dofs[i] as usize, dofs[j] as usize, ke[i * 4 + j]);
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
+    pub fn assemble_linear<S: FESpace>(
+        space: &S,
+        integrator: &dyn Fn(&[[f64; 3]; 4], &mut [f64; 4]),
+    ) -> Vec<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let ne = mesh.n_elements() as u32;
+        let mut rhs = vec![0.0; n_dofs];
+
+        for e in 0..ne {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            if nodes.len() < 4 { continue; }
+            let x: [[f64; 3]; 4] = [
+                get_coord3(mesh, nodes[0]),
+                get_coord3(mesh, nodes[1]),
+                get_coord3(mesh, nodes[2]),
+                get_coord3(mesh, nodes[3]),
+            ];
+            let mut fe = [0.0; 4];
+            integrator(&x, &mut fe);
+            for i in 0..4 {
+                rhs[dofs[i] as usize] += fe[i];
+            }
+        }
+        rhs
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::Mesh;
+    use fem_mesh::{ElementType, Mesh};
     use fem_space::H1Space;
     use fem_solver::{solve_cg, SolverConfig};
 
@@ -403,6 +631,74 @@ mod tests {
     }
 
     /// Convergence test: refine sphere mesh and verify error decreases.
+    #[test]
+    fn surface_quad4_laplace_beltrami_mass() {
+        // Cube inscribed in unit sphere: 8 vertices, 6 quad faces.
+        let coords = vec![
+            -0.57735, -0.57735, -0.57735,
+             0.57735, -0.57735, -0.57735,
+             0.57735,  0.57735, -0.57735,
+            -0.57735,  0.57735, -0.57735,
+            -0.57735, -0.57735,  0.57735,
+             0.57735, -0.57735,  0.57735,
+             0.57735,  0.57735,  0.57735,
+            -0.57735,  0.57735,  0.57735,
+        ];
+        let conn = vec![
+            3, 2, 1, 0,  0, 1, 5, 4,  1, 2, 6, 5,
+            2, 3, 7, 6,  3, 0, 4, 7,  4, 5, 6, 7,
+        ];
+        let mesh: Mesh<3> = Mesh {
+            coords, conn,
+            elem_tags: vec![1; 6],
+            elem_type: ElementType::Quad4,
+            face_conn: vec![], face_tags: vec![],
+            face_type: ElementType::Line2,
+            elem_types: None, elem_offsets: None,
+            face_types: None, face_offsets: None,
+            face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
+        };
+        let space = H1Space::new(mesh, 1);
+
+        // Solve -Δ_Γ u + u = 3x on the cube (u = x is exact for cube)
+        let f = &|x: &[f64; 3]| 3.0 * x[0];
+
+        let stiffness = SurfaceQuad4Assembler::assemble_bilinear(&space, &|x, ke| {
+            SurfaceQuad4DiffusionIntegrator.add_to_element_matrix(x, ke);
+        });
+        let mass = SurfaceQuad4Assembler::assemble_bilinear(&space, &|x, ke| {
+            SurfaceQuad4MassIntegrator.add_to_element_matrix(x, ke);
+        });
+        let mut a = stiffness.clone();
+        for i in 0..a.nrows {
+            for jp in a.row_ptr[i]..a.row_ptr[i + 1] {
+                let j = a.col_idx[jp] as usize;
+                a.values[jp] += mass.get(i, j);
+            }
+        }
+
+        let rhs = SurfaceQuad4Assembler::assemble_linear(&space, &|x, fe| {
+            SurfaceQuad4DomainSourceIntegrator { f }.add_to_element_vector(x, fe);
+        });
+
+        let mut u = vec![0.0; space.n_dofs()];
+        let cfg = SolverConfig { rtol: 1e-10, max_iter: 5000, ..SolverConfig::default() };
+        let res = solve_cg(&a, &rhs, &mut u, &cfg).expect("CG solve failed");
+        assert!(res.converged, "Quad4 CG did not converge");
+
+        let m = space.mesh();
+        let mut err2 = 0.0;
+        for i in 0..space.n_dofs().min(m.n_nodes()) {
+            let x = m.node_coords(i as u32);
+            let diff = u[i] - x[0];
+            err2 += diff * diff;
+        }
+        let err = err2.sqrt() / (space.n_dofs() as f64).sqrt();
+        eprintln!("Quad4 surface error: {:.6e}", err);
+        assert!(err < 0.5, "Quad4 surface error too large: {err:.6e}");
+    }
+
     #[test]
     fn surface_convergence() {
         let mut prev_err: Option<f64> = None;
