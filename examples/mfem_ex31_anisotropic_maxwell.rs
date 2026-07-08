@@ -17,7 +17,7 @@ use fem_examples::maxwell::{
     StaticMaxwellBuilder, l2_error_hcurl_exact,
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{Mesh, amr::refine_uniform};
+use fem_mesh::{Mesh, MeshTopology, amr::refine_uniform};
 use fem_space::{HCurlSpace, fe_space::FESpace};
 
 const DEFAULT_SIGMA_X: f64 = 4.0;
@@ -95,9 +95,14 @@ fn main() {
     };
 
     // Uniform refinement
+    eprintln!("  Init mesh: {} elems, {} nodes, {} bdr faces, tags={:?}",
+        base_mesh.n_elems(), base_mesh.n_nodes(), base_mesh.n_boundary_faces(),
+        base_mesh.unique_boundary_tags());
     let mesh = if args.ref_levels > 0 {
         let mut m = base_mesh;
         for _ in 0..args.ref_levels { m = refine_uniform(&m); }
+        eprintln!("  Refined mesh: {} elems, {} nodes, {} bdr faces",
+            m.n_elems(), m.n_nodes(), m.n_boundary_faces());
         m
     } else {
         base_mesh
