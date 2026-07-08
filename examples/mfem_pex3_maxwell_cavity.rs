@@ -10,13 +10,14 @@
 //! ```
 
 use std::f64::consts::PI;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
-use fem_io::mfem::read_mfem_file;
+use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{Mesh, amr::refine_uniform};
 use fem_parallel::{
     ParVectorAssembler, ParVector, ParallelFESpace,
@@ -45,6 +46,7 @@ fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
     [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
 }
 
+#[allow(unused_variables, unused_assignments)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut mesh_file: Option<String> = None;
@@ -53,6 +55,7 @@ fn main() {
     let mut ranks = 2usize;
     let mut ref_levels = 2usize;
     let mut freq = 1.0_f64;
+    let mut visualization = true;
 
     let mut i = 1;
     while i < args.len() {
@@ -63,6 +66,8 @@ fn main() {
             "--ranks" => { i += 1; ranks = args[i].parse().unwrap_or(2); }
             "-r" | "--refine" => { i += 1; ref_levels = args[i].parse().unwrap_or(0); }
             "-f" | "--frequency" => { i += 1; freq = args[i].parse().unwrap_or(1.0); }
+            "-vis" | "--visualization" => { visualization = true; }
+            "-no-vis" | "--no-visualization" => { visualization = false; }
             _ => {}
         }
         i += 1;
@@ -115,6 +120,24 @@ fn main() {
         if comm.rank() == 0 {
             println!("PCG Iterations = {}", res.iterations);
             println!("Final PCG Relative Residual Norm = {:.6e}", res.final_residual);
+        }
+
+        // Save mesh and solution per rank (matching MFEM pex3 format).
+        {
+            let mesh_name = format!("mesh.{:06}", comm.rank());
+            let sol_name = format!("sol.{:06}", comm.rank());
+            let mut mesh_f = std::fs::File::create(&mesh_name)
+                .expect("cannot create mesh file");
+            write_mfem(&mut mesh_f, ps.local_space().mesh(), None)
+                .expect("mesh write failed");
+            let mut sol_f = std::fs::File::create(&sol_name)
+                .expect("cannot create sol file");
+            for &v in u.owned_slice() {
+                writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
+            }
+        }
+        if comm.rank() == 0 {
+            eprintln!("  Wrote mesh.XXXXXX and sol.XXXXXX per rank");
         }
 
         *r2.lock().unwrap() = Some((n_global, res.iterations, res.final_residual));
