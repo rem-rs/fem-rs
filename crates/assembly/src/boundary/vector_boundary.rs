@@ -56,6 +56,7 @@ use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
 use crate::assembler::assembly_parallel_min_elems;
+use crate::vector_assembler::vec_ref_elem as vol_ref_elem;
 
 // ─── Quadrature-point data ───────────────────────────────────────────────────
 
@@ -331,7 +332,8 @@ where
     S::Mesh: MeshTopology,
 {
     let stype = space.space_type();
-    let vol_elem = vec_ref_elem(stype, dim, space.order());
+    let elem_type = if space.mesh().n_elements() > 0 { space.mesh().element_type(0) } else { panic!("empty mesh") };
+    let vol_elem = vol_ref_elem(stype, elem_type, dim, space.order());
     let n_ldofs = vol_elem.n_dofs();
     let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
     let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
@@ -359,7 +361,8 @@ where
     S::Mesh: MeshTopology,
 {
     let stype = space.space_type();
-    let vol_elem = vec_ref_elem(stype, dim, space.order());
+    let elem_type = if space.mesh().n_elements() > 0 { space.mesh().element_type(0) } else { panic!("empty mesh") };
+    let vol_elem = vol_ref_elem(stype, elem_type, dim, space.order());
     let n_ldofs = vol_elem.n_dofs();
     let mut rhs = vec![0.0_f64; n_dofs];
     let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
@@ -394,7 +397,8 @@ where
         .par_iter()
         .copied()
         .filter_map(|f| {
-            let vol_elem = vec_ref_elem(stype, dim, space.order());
+            let et = space.mesh().element_type(0);
+            let vol_elem = vol_ref_elem(stype, et, dim, space.order());
             let n_ldofs = vol_elem.n_dofs();
             let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
             let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
@@ -443,7 +447,8 @@ where
         .par_iter()
         .copied()
         .filter_map(|f| {
-            let vol_elem = vec_ref_elem(stype, dim, space.order());
+            let et = space.mesh().element_type(0);
+            let vol_elem = vol_ref_elem(stype, et, dim, space.order());
             let n_ldofs = vol_elem.n_dofs();
             let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
             let mut phys_phi = vec![0.0_f64; n_ldofs * dim];
@@ -622,29 +627,7 @@ where
     Some((global_dofs, f_face))
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-fn vec_ref_elem(stype: SpaceType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
-    match stype {
-        SpaceType::HCurl => match (dim, order) {
-            (2, 1) => Box::new(TriND1),
-            (2, 2) => Box::new(TriND2),
-            (2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
-            (3, 1) => Box::new(TetND1),
-            (3, 2) => Box::new(TetND2),
-            (3, o) if o >= 3 => Box::new(fem_element::nedelec::TetNDk::new(o as usize)),
-            _ => panic!("VectorBoundaryAssembler: unsupported HCurl (dim={dim}, order={order})"),
-        },
-        SpaceType::HDiv => match (dim, order) {
-            (2, 0) => Box::new(TriRT0),
-            (2, 1) => Box::new(fem_element::raviart_thomas::TriRT1),
-            (3, 0) => Box::new(TetRT0),
-            (3, 1) => Box::new(fem_element::raviart_thomas::TetRT1),
-            _ => panic!("VectorBoundaryAssembler: unsupported HDiv (dim={dim}, order={order})"),
-        },
-        _ => panic!("VectorBoundaryAssembler: unsupported space type {stype:?}"),
-    }
-}
+// ─── Piola transforms (same as vector_assembler.rs) ──────────────────────────
 
 fn piola_hcurl_basis(
     j_inv_t:  &DMatrix<f64>,
