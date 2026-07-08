@@ -47,8 +47,9 @@ use fem_element::reference::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::ElementTransformation;
 use fem_mesh::topology::MeshTopology;
+use fem_mesh::Mesh;
 use fem_space::fe_space::{FESpace, SpaceType};
-use fem_space::EdgeKey;
+use fem_space::{EdgeKey, HDivSpace};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -284,6 +285,37 @@ impl VectorBoundaryAssembler {
         }
 
         assemble_boundary_linear_serial(space, integrators, quad_order, &face_ids, n_dofs, dim)
+    }
+
+    /// Assemble the RHS for an H(div) natural (flux) BC: ∫_Γ g(x) ds per face DOF.
+    ///
+    /// Each boundary face contributes `∫_Γ g(x) ds` to its associated DOF,
+    /// computed via the midpoint rule (exact for linear g).  Unlike the generic
+    /// [`assemble_boundary_linear`], this targets only the face-specific DOF(s),
+    /// which is correct for H(div) RT spaces.
+    pub fn assemble_hdiv_boundary_flux(
+        space: &HDivSpace<Mesh<2>>,
+        g: &dyn Fn(&[f64]) -> f64,
+        tags: &[i32],
+    ) -> Vec<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let mut rhs = vec![0.0; n_dofs];
+        for f in 0..mesh.n_boundary_faces() as u32 {
+            if !tags.contains(&mesh.face_tag(f)) { continue; }
+            let nodes = mesh.face_nodes(f);
+            if nodes.len() < 2 { continue; }
+            let pa = mesh.node_coords(nodes[0]);
+            let pb = mesh.node_coords(nodes[1]);
+            let tx = pb[0] - pa[0]; let ty = pb[1] - pa[1];
+            let mid = [0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1])];
+            let ek = EdgeKey::new(nodes[0], nodes[1]);
+            if let Some(dof) = space.edge_face_dof(ek) {
+                let edge_len = (tx * tx + ty * ty).sqrt();
+                rhs[dof as usize] += (g)(&mid) * edge_len;
+            }
+        }
+        rhs
     }
 }
 

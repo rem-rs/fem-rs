@@ -10,11 +10,11 @@ use std::fs::File;
 use std::io::Write;
 use fem_assembly::mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator};
 use fem_assembly::standard::VectorMassIntegrator;
-use fem_assembly::VectorAssembler;
+use fem_assembly::{VectorAssembler, VectorBoundaryAssembler};
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
 use fem_solver::{SolverConfig, block::BlockSystem, solve_gmres};
-use fem_space::{EdgeKey, HDivSpace, L2Space, fe_space::FESpace};
+use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
 
 fn main() {
     let args = parse_args();
@@ -33,26 +33,13 @@ fn main() {
     let mut mb = assemble_hdiv_l2_mixed(&p_sp, &u_sp, &[&HDivL2DivIntegrator], qo);
     for v in &mut mb.values { *v *= -1.0; }
 
-    // RHS: natural BC −p = p_exact → ∫ p_exact · (v·n) ds
+    // RHS: natural BC −p = p_exact → ∫ (−p_exact)·(v·n) ds per boundary face DOF
     let tags: Vec<i32> = u_sp.mesh().unique_boundary_tags();
-    let mut fu = vec![0.0; n_u];
-    if !tags.is_empty() {
-        for f in 0..u_sp.mesh().n_boundary_faces() as u32 {
-            if !tags.contains(&u_sp.mesh().face_tag(f)) { continue; }
-            let n = u_sp.mesh().face_nodes(f);
-            if n.len() < 2 { continue; }
-            let pa = u_sp.mesh().node_coords(n[0]);
-            let pb = u_sp.mesh().node_coords(n[1]);
-            let tx = pb[0] - pa[0]; let ty = pb[1] - pa[1];
-            let mid = [0.5*(pa[0]+pb[0]), 0.5*(pa[1]+pb[1])];
-            let ek = EdgeKey::new(n[0], n[1]);
-            if let Some(dof) = u_sp.edge_face_dof(ek) {
-                let edge_len = (tx*tx + ty*ty).sqrt();
-                // Boundary term: ∫ (−p) · (v·n) ds ≈ −p(mid)·edge_len
-                fu[dof as usize] += -p_exact(&mid) * edge_len;
-            }
-        }
-    }
+    let fu = if !tags.is_empty() {
+        VectorBoundaryAssembler::assemble_hdiv_boundary_flux(&u_sp, &|x| -p_exact(x), &tags)
+    } else {
+        vec![0.0; n_u]
+    };
     let gp = vec![0.0; n_p]; // g = 0 in 2D
 
     // Build and solve block system
