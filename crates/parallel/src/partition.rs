@@ -30,7 +30,7 @@ use fem_core::{ElemId, NodeId, Rank};
 /// Index convention
 /// ----------------
 /// * *local node ID* — index into the local node array `[0, n_owned + n_ghost)`.
-/// * *local element ID* — index into the local element array `[0, n_local_elems)`.
+/// * *local element ID* — index into the local element array `[0, n_owned_elems + n_ghost_elems)`.
 /// * *global node/element ID* — mesh-wide unique index assigned by the
 ///   partitioner (same numbering as the serial mesh).
 #[derive(Debug, Clone)]
@@ -58,10 +58,16 @@ pub struct MeshPartition {
     // ── element ownership ───────────────────────────────────────────────────
 
     /// Number of locally owned elements.
-    pub n_local_elems: usize,
+    pub n_owned_elems: usize,
 
-    /// Global element IDs for every local element, length `n_local_elems`.
+    /// Number of ghost elements (owned by neighbor ranks, kept for stencil).
+    pub n_ghost_elems: usize,
+
+    /// Global element IDs for every local element (owned + ghost), length `n_owned_elems + n_ghost_elems`.
     pub global_elem_ids: Vec<ElemId>,
+
+    /// MPI rank that owns each local element, length `n_owned_elems + n_ghost_elems`.
+    pub elem_owner: Vec<Rank>,
 
     // ── reverse lookup ──────────────────────────────────────────────────────
 
@@ -102,8 +108,10 @@ impl MeshPartition {
             n_ghost_nodes: 0,
             global_node_ids,
             node_owner,
-            n_local_elems: n_elems,
+            n_owned_elems: n_elems,
+            n_ghost_elems: 0,
             global_elem_ids,
+            elem_owner: vec![0; n_elems],
             node_global_to_local,
             elem_global_to_local,
         }
@@ -116,11 +124,13 @@ impl MeshPartition {
     ///   in any order.
     /// * `ghost_global_nodes` — global IDs of ghost nodes together with
     ///   their owner ranks.
-    /// * `local_global_elems` — global IDs of elements assigned to this rank.
+    /// * `owned_global_elems` — global IDs of elements owned by this rank.
+    /// * `ghost_global_elems` — global IDs of ghost elements with their owners.
     pub fn from_partitioner(
         owned_global_nodes: &[NodeId],
         ghost_global_nodes: &[(NodeId, Rank)],
-        local_global_elems: &[ElemId],
+        owned_global_elems: &[ElemId],
+        ghost_global_elems: &[(ElemId, Rank)],
         local_rank: Rank,
     ) -> Self {
         let n_owned = owned_global_nodes.len();
@@ -139,7 +149,19 @@ impl MeshPartition {
             node_owner.push(owner);
         }
 
-        let global_elem_ids = local_global_elems.to_vec();
+        let n_owned_elems = owned_global_elems.len();
+        let n_ghost_elems = ghost_global_elems.len();
+
+        let mut global_elem_ids = Vec::with_capacity(n_owned_elems + n_ghost_elems);
+        let mut elem_owner = Vec::with_capacity(n_owned_elems + n_ghost_elems);
+        for &gid in owned_global_elems {
+            global_elem_ids.push(gid);
+            elem_owner.push(local_rank);
+        }
+        for &(gid, owner) in ghost_global_elems {
+            global_elem_ids.push(gid);
+            elem_owner.push(owner);
+        }
 
         let node_global_to_local = global_node_ids
             .iter()
@@ -157,8 +179,10 @@ impl MeshPartition {
             n_ghost_nodes: n_ghost,
             global_node_ids,
             node_owner,
-            n_local_elems: local_global_elems.len(),
+            n_owned_elems,
+            n_ghost_elems,
             global_elem_ids,
+            elem_owner,
             node_global_to_local,
             elem_global_to_local,
         }
@@ -221,9 +245,12 @@ impl MeshPartition {
     pub fn from_raw(
         n_owned_nodes: usize,
         n_ghost_nodes: usize,
+        n_owned_elems: usize,
+        n_ghost_elems: usize,
         global_node_ids: Vec<NodeId>,
         node_owner: Vec<Rank>,
         global_elem_ids: Vec<ElemId>,
+        elem_owner: Vec<Rank>,
     ) -> Self {
         let total = n_owned_nodes + n_ghost_nodes;
         assert_eq!(global_node_ids.len(), total,
@@ -232,8 +259,13 @@ impl MeshPartition {
         assert_eq!(node_owner.len(), total,
             "node_owner.len()={} != n_owned+n_ghost={}",
             node_owner.len(), total);
+        assert_eq!(global_elem_ids.len(), n_owned_elems + n_ghost_elems,
+            "global_elem_ids.len()={} != n_owned_elems + n_ghost_elems = {}",
+            global_elem_ids.len(), n_owned_elems + n_ghost_elems);
+        assert_eq!(elem_owner.len(), global_elem_ids.len(),
+            "elem_owner.len()={} != global_elem_ids.len()={}",
+            elem_owner.len(), global_elem_ids.len());
 
-        let n_local_elems = global_elem_ids.len();
         let node_global_to_local = global_node_ids
             .iter()
             .enumerate()
@@ -250,8 +282,10 @@ impl MeshPartition {
             n_ghost_nodes,
             global_node_ids,
             node_owner,
-            n_local_elems,
+            n_owned_elems,
+            n_ghost_elems,
             global_elem_ids,
+            elem_owner,
             node_global_to_local,
             elem_global_to_local,
         }

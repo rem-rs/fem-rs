@@ -13,7 +13,7 @@ use std::f64::consts::PI;
 use std::sync::{Arc, Mutex};
 
 use fem_assembly::{
-    standard::CurlCurlIntegrator,
+    standard::{CurlCurlIntegrator, VectorMassIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
 use fem_io::mfem::read_mfem_file;
@@ -49,6 +49,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut mesh_file: Option<String> = None;
     let mut n = 16usize;
+    let mut order = 1u8;
     let mut ranks = 2usize;
     let mut ref_levels = 2usize;
     let mut freq = 1.0_f64;
@@ -58,6 +59,7 @@ fn main() {
         match args[i].as_str() {
             "-m" | "--mesh" => { i += 1; mesh_file = Some(args[i].clone()); }
             "--n" => { i += 1; n = args[i].parse().unwrap_or(16); }
+            "-o" | "--order" => { i += 1; order = args[i].parse().unwrap_or(1); }
             "--ranks" => { i += 1; ranks = args[i].parse().unwrap_or(2); }
             "-r" | "--refine" => { i += 1; ref_levels = args[i].parse().unwrap_or(0); }
             "-f" | "--frequency" => { i += 1; freq = args[i].parse().unwrap_or(1.0); }
@@ -79,29 +81,30 @@ fn main() {
     } else { base_mesh });
 
     let kappa = freq * PI;
+    let quad_order = order as u8 * 2 + 2;
     let result = Arc::new(Mutex::new(None));
     let r2 = result.clone();
 
     ThreadLauncher::new(WorkerConfig::new(ranks)).launch(move |comm| {
         let pm = partition_mesh(&mesh, &comm);
         let lm = pm.local_mesh().clone();
-        let ps = ParallelFESpace::new(HCurlSpace::new(lm, 1), &pm, comm.clone());
+        let ps = ParallelFESpace::new_for_edge_space(HCurlSpace::new(lm, order), &pm, comm.clone());
         let n_global = ps.n_global_dofs();
 
         if comm.rank() == 0 {
+            println!("Options: mesh={} order={order} quad_order={quad_order} ranks={ranks}", mesh_file.as_deref().unwrap_or("built-in"));
             println!("Number of finite element unknowns: {n_global}");
         }
 
-        let mut stiff = ParVectorAssembler::assemble_bilinear(&ps, &[&CurlCurlIntegrator { mu: 1.0 }], 3);
-        let rhs = ParVectorAssembler::assemble_linear(&ps, &[&Src { kappa }], 3);
+        let mut stiff = ParVectorAssembler::assemble_bilinear(&ps, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], quad_order);
+        let mut rhs = ParVectorAssembler::assemble_linear(&ps, &[&Src { kappa }], quad_order);
 
-        // PEC BC
+        // PEC BC — zero tangential field on all boundaries
         let bdr = boundary_dofs_hcurl(ps.local_space().mesh(), ps.local_space(), &[1]);
         let dp = ps.dof_partition();
-        let mut tmp = ParVector::zeros(&ps);
         for &d in &bdr {
             let p = dp.permute_dof(d) as usize;
-            if p < dp.n_owned_dofs { stiff.apply_dirichlet_par(p, 1.0, &mut tmp); }
+            if p < dp.n_owned_dofs { stiff.apply_dirichlet_par(p, 0.0, &mut rhs); }
         }
 
         let mut u = ParVector::zeros(&ps);

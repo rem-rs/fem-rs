@@ -135,7 +135,8 @@ fn build_dof_ghost_exchange(dof_part: &DofPartition, comm: &Comm) -> GhostExchan
         &dof_part.ghost_dofs().map(|(lid, owner)| {
             (dof_part.global_dof(lid), owner)
         }).collect::<Vec<_>>(),
-        &[],
+        &[],  // owned elements (none — this is a DOF-based partition)
+        &[],  // ghost elements (none)
         comm.rank(),
     );
 

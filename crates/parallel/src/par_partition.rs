@@ -29,7 +29,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use fem_core::{FaceId, NodeId, Rank};
+use fem_core::{ElemId, FaceId, NodeId, Rank};
 use fem_mesh::{ElementType, Mesh};
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
@@ -286,10 +286,14 @@ pub(crate) fn extract_submesh_from_partition<const D: usize>(
     local_mesh.face_types = local_face_types;
     local_mesh.face_offsets = local_face_offsets;
 
+    let ghost_elem_pairs: Vec<(ElemId, Rank)> = ghost_elem_gids.iter()
+        .map(|&gid| (gid, elem_part[gid as usize]))
+        .collect();
     let partition = MeshPartition::from_partitioner(
         &owned_global,
         &ghost_global,
         &local_elem_gids,
+        &ghost_elem_pairs,
         target_rank,
     );
 

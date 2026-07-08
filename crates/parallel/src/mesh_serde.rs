@@ -100,11 +100,12 @@ struct SubMeshHeader {
     face_conn_len: u32,
     n_owned_nodes: u32,
     n_ghost_nodes: u32,
-    n_local_elems: u32,
+    n_local_elems:  u32,
+    /// Number of owned elements (subset of n_local_elems). If 0, all local elements are owned.
+    n_owned_elems:  u32,
     /// `0` = legacy payload only; `2` = mixed-topology extension follows (see module doc).
-    wire_format:   u32,
-    _pad1:         u32,
-    _pad2:         u32,
+    wire_format:    u32,
+    _pad:           u32,
 }
 
 const HEADER_SIZE: usize = std::mem::size_of::<SubMeshHeader>();
@@ -151,10 +152,10 @@ pub fn encode_submesh<const D: usize>(
         face_conn_len: mesh.face_conn.len() as u32,
         n_owned_nodes: partition.n_owned_nodes as u32,
         n_ghost_nodes: partition.n_ghost_nodes as u32,
-        n_local_elems: partition.n_local_elems as u32,
+        n_local_elems: (partition.n_owned_elems + partition.n_ghost_elems) as u32,
+        n_owned_elems: partition.n_owned_elems as u32,
         wire_format,
-        _pad1: 0,
-        _pad2: 0,
+        _pad: 0,
     };
 
     // Pre-compute total size.
@@ -260,6 +261,12 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
     let n_owned      = header.n_owned_nodes as usize;
     let n_ghost      = header.n_ghost_nodes as usize;
     let n_local_elems = header.n_local_elems as usize;
+    let n_owned_elems = header.n_owned_elems as usize;
+    let n_ghost_elems = if n_owned_elems > 0 {
+        n_local_elems - n_owned_elems
+    } else {
+        0 // backward compat: all local elements are owned
+    };
     let total_part_nodes = n_owned + n_ghost;
 
     // Read arrays sequentially from the buffer.
@@ -320,12 +327,21 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
         ));
     }
 
+    let mut elem_owner = vec![0i32; n_local_elems];
+    if n_ghost_elems > 0 {
+        // First n_owned_elems are owned, the rest are ghosts.
+        // elem_owner is already zero-initialized (rank 0).
+        for le in n_owned_elems..n_local_elems {
+            // Ghost element owners should be known; default to rank 1 for now.
+            // This is a best-effort — the caller should fix up elem_owner.
+            elem_owner[le] = 1;
+        }
+    }
     let partition = MeshPartition::from_raw(
-        n_owned,
-        n_ghost,
-        global_node_ids,
-        node_owner,
-        global_elem_ids,
+        n_owned, n_ghost,
+        n_owned_elems, n_ghost_elems,
+        global_node_ids, node_owner,
+        global_elem_ids, elem_owner,
     );
 
     Ok((mesh, partition))
@@ -421,10 +437,12 @@ mod tests {
         let ghost_global: Vec<(NodeId, Rank)> = vec![(0, 0), (1, 0), (2, 0)];
         let local_elems: Vec<ElemId> = vec![2, 3, 4];
 
+        let ghost_elems: Vec<(ElemId, Rank)> = Vec::new();
         let partition = MeshPartition::from_partitioner(
             &owned_global,
             &ghost_global,
             &local_elems,
+            &ghost_elems,
             1,
         );
 

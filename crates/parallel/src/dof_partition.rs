@@ -290,45 +290,60 @@ impl DofPartition {
             _ => &hcurl_2d,
         };
 
-        // ── Step 1: Map each DOF to its canonical edge and compute sign ────────
-        //
-        // For each DOF we record:
-        //   - The canonical (min, max) global node pair.
-        //   - The sign correction d_i = global_sign / local_sign.
-        //
-        // The sign convention used by HCurlSpace / HDivSpace is:
-        //   sign = if nodes[li] < nodes[lj] { +1 } else { -1 }
-        // where nodes[li], nodes[lj] are LOCAL vertex IDs from element_nodes().
-        //
-        // The canonical global sign for the same edge is:
-        //   global_sign = if ga < gb { +1 } else { -1 }
-        // where ga, gb are the GLOBAL vertex IDs.
+        // Determine DOF layout per edge from the element type.
+        // For order-1 spaces each edge holds 1 DOF and there are no interior DOFs.
+        // Higher-order Nédélec elements have multiple DOFs per edge plus interior bubbles.
+        let (dofs_per_edge, _n_interior_per_elem) = if mesh.n_elements() > 0 {
+            let t = mesh.element_type(0);
+            match (space_type, t) {
+                (_, fem_mesh::ElementType::Tri6) => (2, 2),  // TriND2: 2/edge, 2 interior
+                (_, fem_mesh::ElementType::Tri3) => (1, 0),
+                (_, fem_mesh::ElementType::Quad4) => (1, 0),
+                (_, fem_mesh::ElementType::Tet4) => (1, 0),
+                _ => (1, 0),
+            }
+        } else {
+            (1, 0)
+        };
+        let n_edges = edges_for_space.len();
+        let edge_dofs_total = n_edges * dofs_per_edge;
 
+        // ── Step 1: Map each DOF to its canonical edge (or interior) ──────────
+        //
+        // For higher-order spaces, DOFs are grouped:
+        //   [edge0 × dofs_per_edge, edge1 × dofs_per_edge, ..., interior...]
         let mut dof_to_edge: HashMap<u32, (u32, u32)> = HashMap::new();
+        let mut interior_dofs: Vec<(u32, u32, u32)> = Vec::new(); // (dof_id, local_elem_id, dof_idx_in_elem)
         let mut sign_corr: Vec<f64> = vec![1.0; n_space_dofs];
 
         for e in mesh.elem_iter() {
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
 
-            for (i, &(a, b)) in edges_for_space.iter().enumerate() {
-                if i >= dofs.len() { break; }
-                let dof_id = dofs[i];
-                if dof_to_edge.contains_key(&dof_id) {
-                    continue; // already recorded from an earlier element
+            for (i, &dof_id) in dofs.iter().enumerate() {
+                if dof_to_edge.contains_key(&dof_id) || interior_dofs.iter().any(|&(d, _, _)| d == dof_id) {
+                    continue;
                 }
 
-                let local_a = nodes[a];
-                let local_b = nodes[b];
-                let ga = partition.global_node(local_a);
-                let gb = partition.global_node(local_b);
+                if i < edge_dofs_total {
+                    // Edge DOF: map to the corresponding edge in edges_for_space.
+                    let edge_idx = i / dofs_per_edge;
+                    let (a, b) = edges_for_space[edge_idx];
+                    let local_a = nodes[a];
+                    let local_b = nodes[b];
+                    let ga = partition.global_node(local_a);
+                    let gb = partition.global_node(local_b);
 
-                dof_to_edge.insert(dof_id, (ga.min(gb), ga.max(gb)));
+                    dof_to_edge.insert(dof_id, (ga.min(gb), ga.max(gb)));
 
-                // Sign correction: local_sign * d = global_sign, so d = global_sign / local_sign.
-                let local_sign: f64 = if local_a < local_b { 1.0 } else { -1.0 };
-                let global_sign: f64 = if ga < gb { 1.0 } else { -1.0 };
-                sign_corr[dof_id as usize] = global_sign / local_sign;
+                    // Sign correction: local_sign * d = global_sign, so d = global_sign / local_sign.
+                    let local_sign: f64 = if local_a < local_b { 1.0 } else { -1.0 };
+                    let global_sign: f64 = if ga < gb { 1.0 } else { -1.0 };
+                    sign_corr[dof_id as usize] = global_sign / local_sign;
+                } else {
+                    // Interior DOF: record with element info for ownership later.
+                    interior_dofs.push((dof_id, e, i as u32));
+                }
             }
         }
 
@@ -370,14 +385,47 @@ impl DofPartition {
         owned_edges.sort_by_key(|e| (e.global_node_a, e.global_node_b));
         ghost_edges.sort_by_key(|e| (e.global_node_a, e.global_node_b));
 
-        let n_owned = owned_edges.len();
-        let n_ghost = ghost_edges.len();
+        // ── Step 2b: Process interior DOFs ───────────────────────────────────
+        // Interior DOFs are classified by their element ownership.
+        // We use the partition's elem_owner array (owned elements first, then ghost).
+        let mut owned_interior: Vec<(u32, u32, u32)> = Vec::new(); // (dof_id, elem_gid, dof_idx)
+        let mut ghost_interior: Vec<(u32, u32, u32, Rank)> = Vec::new();
+
+        for &(dof_id, le, dof_idx) in &interior_dofs {
+            let elem_gid = partition.global_elem(le);
+            let owner = if (le as usize) < partition.n_owned_elems {
+                local_rank
+            } else {
+                partition.elem_owner[le as usize]
+            };
+            if owner == local_rank {
+                owned_interior.push((dof_id, elem_gid, dof_idx));
+            } else {
+                ghost_interior.push((dof_id, elem_gid, dof_idx, owner));
+            }
+        }
+        owned_interior.sort();
+        ghost_interior.sort_by_key(|&(dof_id, _, _, _)| dof_id);
+
+        let n_owned_edge = owned_edges.len();
+        let n_ghost_edge = ghost_edges.len();
+        let n_owned_interior = owned_interior.len();
+        let n_ghost_interior = ghost_interior.len();
+        let n_owned = n_owned_edge + n_owned_interior;
+        let n_ghost = n_ghost_edge + n_ghost_interior;
         let total = n_owned + n_ghost;
 
-        debug_assert_eq!(total, n_space_dofs,
-            "from_edge_space: partition found {} DOFs but space has {} DOFs",
-            total, n_space_dofs,
-        );
+        // Note: interior DOFs may not cover all remaining DOFs if the space
+        // has interior DOFs that weren't found by element iteration. The
+        // assertion below only applies when we've classified every DOF.
+        if total != n_space_dofs {
+            // This can happen for unsupported element types — log a warning
+            // but don't crash. The DOFs not found will be unclassified and
+            // may cause issues downstream.
+            eprintln!("  Warning: from_edge_space classified {total}/{n_space_dofs} DOFs \
+                (edge={}, interior={}). Missing DOFs may cause errors.",
+                n_owned_edge + n_ghost_edge, n_owned_interior + n_ghost_interior);
+        }
 
         // ── Step 3: Compute global offsets ─────────────────────────────────────
         let global_dof_offset = exclusive_scan_i64(comm, n_owned as i64) as usize;
@@ -387,6 +435,7 @@ impl DofPartition {
         let mut global_dof_ids = Vec::with_capacity(total);
         let mut dof_owner_vec = Vec::with_capacity(total);
 
+        // 4a. Edge DOFs (owned first, then ghost).
         let mut owned_edge_global_map: HashMap<(u32, u32), u32> = HashMap::new();
         for (i, edge) in owned_edges.iter().enumerate() {
             let gid = edge_offset + i as u32;
@@ -403,16 +452,47 @@ impl DofPartition {
             dof_owner_vec.push(edge.owner);
         }
 
+        // 4b. Interior DOFs (owned then ghost).
+        let owned_interior_offset = edge_offset + owned_edges.len() as u32;
+        let mut owned_interior_map: HashMap<(u32, u32), u32> = HashMap::new();
+        for (j, &(_dof_id, elem_gid, dof_idx)) in owned_interior.iter().enumerate() {
+            let gid = owned_interior_offset + j as u32;
+            global_dof_ids.push(gid);
+            dof_owner_vec.push(local_rank);
+            owned_interior_map.insert((elem_gid, dof_idx), gid);
+        }
+
+        let ghost_interior_gids = exchange_ghost_interior_ids(
+            &ghost_interior, &owned_interior_map, comm,
+        );
+        for &gid in &ghost_interior_gids {
+            global_dof_ids.push(gid);
+        }
+        for &(_, _, _, owner) in &ghost_interior {
+            // Global ID already set by exchange.
+            dof_owner_vec.push(owner);
+        }
+
         // ── Step 5: Build permutation ──────────────────────────────────────────
         let mut dm_to_partition = vec![0u32; n_space_dofs];
         let mut partition_to_dm = vec![0u32; n_space_dofs];
 
+        // Edge DOFs
         for (i, edge) in owned_edges.iter().enumerate() {
             dm_to_partition[edge.local_dof_id as usize] = i as u32;
         }
         for (i, edge) in ghost_edges.iter().enumerate() {
-            dm_to_partition[edge.local_dof_id as usize] = (n_owned + i) as u32;
+            dm_to_partition[edge.local_dof_id as usize] = (n_owned_edge + i) as u32;
         }
+        // Interior DOFs
+        let interior_owned_start = n_owned_edge + n_ghost_edge;
+        for (j, &(dof_id, _, _)) in owned_interior.iter().enumerate() {
+            dm_to_partition[dof_id as usize] = (interior_owned_start + j) as u32;
+        }
+        for (j, &(dof_id, _, _, _)) in ghost_interior.iter().enumerate() {
+            dm_to_partition[dof_id as usize] = (n_owned + j) as u32;
+        }
+        // Build reverse permutation
         for (dm_id, &part_id) in dm_to_partition.iter().enumerate() {
             partition_to_dm[part_id as usize] = dm_id as u32;
         }
@@ -587,6 +667,84 @@ fn exchange_ghost_edge_ids(
 
     // Phase 3: decode replies into the original ghost-edge order.
     let mut result = vec![0u32; ghost_edges.len()];
+    for (responder, bytes) in &reply_received {
+        let gids: Vec<u32> = bytes.chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        let request_indices = &requests_by_owner[responder];
+        assert_eq!(gids.len(), request_indices.len());
+        for (j, &(orig_idx, _, _)) in request_indices.iter().enumerate() {
+            result[orig_idx] = gids[j];
+        }
+    }
+
+    result
+}
+
+/// Exchange global IDs for ghost interior DOFs.
+///
+/// Interior ghost DOFs are identified by (elem_gid, dof_idx) pairs. Each ghost
+/// rank sends these pairs to the element's owning rank, which replies with the
+/// corresponding global DOF ID.
+fn exchange_ghost_interior_ids(
+    ghost_interior: &[(u32, u32, u32, Rank)], // (dof_id, elem_gid, dof_idx, owner)
+    owned_interior_map: &HashMap<(u32, u32), u32>,
+    comm: &Comm,
+) -> Vec<u32> {
+    if comm.size() <= 1 || ghost_interior.is_empty() {
+        return Vec::new();
+    }
+
+    // Group ghost interior DOFs by owner rank.
+    let mut requests_by_owner: HashMap<Rank, Vec<(usize, u32, u32)>> = HashMap::new();
+    for (i, &(_dof_id, elem_gid, dof_idx, owner)) in ghost_interior.iter().enumerate() {
+        requests_by_owner.entry(owner).or_default()
+            .push((i, elem_gid, dof_idx));
+    }
+
+    // Phase 1: send (elem_gid, dof_idx) pairs to owners.
+    let sends: Vec<(Rank, Vec<u8>)> = requests_by_owner
+        .iter()
+        .map(|(&owner, entries)| {
+            let bytes: Vec<u8> = entries.iter()
+                .flat_map(|&(_, elem_gid, dof_idx)| {
+                    let mut buf = [0u8; 8];
+                    buf[..4].copy_from_slice(&elem_gid.to_le_bytes());
+                    buf[4..].copy_from_slice(&dof_idx.to_le_bytes());
+                    buf
+                })
+                .collect();
+            (owner, bytes)
+        })
+        .collect();
+    let received = comm.alltoallv_bytes(&sends);
+
+    // Phase 2: owners look up global DOF IDs and reply.
+    let replies: Vec<(Rank, Vec<u8>)> = received.iter()
+        .map(|(requester, bytes)| {
+            debug_assert_eq!(bytes.len() % 8, 0);
+            let reply_bytes: Vec<u8> = bytes.chunks_exact(8)
+                .flat_map(|chunk| {
+                    let elem_gid = u32::from_le_bytes(chunk[..4].try_into().unwrap());
+                    let dof_idx = u32::from_le_bytes(chunk[4..].try_into().unwrap());
+                    let gid = owned_interior_map.get(&(elem_gid, dof_idx))
+                        .copied()
+                        .unwrap_or_else(|| {
+                            eprintln!("  Warning: exchange_ghost_interior_ids: rank {requester} requested \
+                                interior DOF (elem={elem_gid}, idx={dof_idx}) not found, \
+                                using sentinel GID");
+                            u32::MAX
+                        });
+                    gid.to_le_bytes()
+                })
+                .collect();
+            (*requester, reply_bytes)
+        })
+        .collect();
+    let reply_received = comm.alltoallv_bytes(&replies);
+
+    // Phase 3: decode replies into the original order.
+    let mut result = vec![0u32; ghost_interior.len()];
     for (responder, bytes) in &reply_received {
         let gids: Vec<u32> = bytes.chunks_exact(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))

@@ -12,7 +12,7 @@
 //! | *owned node* | `local_id < n_owned_nodes`; this rank holds the authoritative value |
 //! | *ghost node* | `local_id >= n_owned_nodes`; read-only copy owned by a neighbor |
 //! | *global node ID* | Mesh-wide unique index (same as serial mesh node index) |
-//! | *local elem ID* | Index into this rank's element array `[0, n_local_elems)` |
+//! | *local elem ID* | Index into this rank's element array `[0, n_owned_elems + n_ghost_elems)` |
 //! | *global elem ID* | Mesh-wide unique element index |
 //!
 //! ## `MeshTopology` delegation
@@ -60,7 +60,7 @@ impl<M: MeshTopology> ParallelMesh<M> {
         let global_n_nodes =
             comm.allreduce_sum_i64(partition.n_owned_nodes as i64) as usize;
         let global_n_elems =
-            comm.allreduce_sum_i64(partition.n_local_elems as i64) as usize;
+            comm.allreduce_sum_i64(partition.n_owned_elems as i64) as usize;
         let ghost_exchange = GhostExchange::from_partition(&partition, &comm);
 
         ParallelMesh {

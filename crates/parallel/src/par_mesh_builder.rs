@@ -131,7 +131,11 @@ impl<const D: usize> ParMeshBuilder<D> {
             edge_to_elem: vec![],
         };
 
-        let partition = MeshPartition::from_raw(n_owned, n_local - n_owned, global_ids, node_owner, global_elem_ids);
+        let elem_owner = vec![local_rank; n_owned_elems];
+        let partition = MeshPartition::from_raw(
+            n_owned, n_local - n_owned, n_owned_elems, 0,
+            global_ids, node_owner, global_elem_ids, elem_owner,
+        );
         ParallelMesh::new(local_mesh, self.comm, partition)
     }
 }
