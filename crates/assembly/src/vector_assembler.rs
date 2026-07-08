@@ -877,35 +877,95 @@ mod tests {
             }
         }
         eprintln!("  ✅ Quad4 shear Piola transform CORRECT");
-        eprintln!("  -> Bug is in global assembly / mesh connectivity");
 
-        // Now test with a 2×2 sheared quad mesh — assemble full system matrix
-        // and check that the HCurlSpace DOF assignments and signs are consistent.
-        let mut mesh2x2 = Mesh::<2>::unit_square_quad(2);
-        for c in mesh2x2.coords.chunks_mut(2) { c[0] += 0.3 * c[1]; } // shear
-        let space2 = HCurlSpace::new(mesh2x2, 1);
+        // ─── 4-element (2×2) sheared quad: global matrix symmetry check ───
+        let mut mesh2 = Mesh::<2>::unit_square_quad(2);
+        for c in mesh2.coords.chunks_mut(2) { c[0] += 0.3 * c[1]; }
+        let space2 = HCurlSpace::new(mesh2, 1);
+        let n2 = space2.n_dofs();
 
-        // Verify that each edge DOF is referenced by exactly 2 elements (for interior edges)
-        // or 1 element (for boundary edges). This validates mesh connectivity.
-        let n_dofs = space2.n_dofs();
-        let mut dof_count = vec![0u32; n_dofs];
+        let mut mat2 = VectorAssembler::assemble_bilinear(
+            &space2,
+            &[&crate::standard::CurlCurlIntegrator { mu: 1.0 },
+              &crate::standard::VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let mut rhs2 = vec![0.0; n2];
+        let bdr2 = fem_space::constraints::boundary_dofs_hcurl(space2.mesh(), &space2, &[1,2,3,4]);
+        let bv2 = vec![0.0; bdr2.len()];
+        fem_space::constraints::apply_dirichlet(&mut mat2, &mut rhs2, &bdr2, &bv2);
+
+        // Check symmetry
+        let dense = mat2.to_dense();
+        let mut max_asym = 0.0;
+        for i in 0..n2 { for j in 0..n2 {
+            let d = (dense[i*n2+j] - dense[j*n2+i]).abs();
+            if d > max_asym { max_asym = d; }
+        }}
+        eprintln!("  2-element matrix max asymmetry: {:.6e}", max_asym);
+        assert!(max_asym < 1e-12, "Matrix NOT symmetric! max|Aij-Aji| = {:.6e}", max_asym);
+
+        // Diagonal positivity
+        for i in 0..n2 {
+            assert!(dense[i*n2+i] > 0.0, "A[{i},{i}] = {:.6e} must be positive", dense[i*n2+i]);
+        }
+        eprintln!("  ✅ 2-element quad: symmetric & positive diagonal");
+
+        // Count shared interior edge
+        let mut dc = vec![0u32; n2];
         for e in 0..space2.mesh().n_elements() as u32 {
-            for &d in space2.element_dofs(e) {
-                dof_count[d as usize] += 1;
+            for &d in space2.element_dofs(e) { dc[d as usize] += 1; }
+        }
+        let int2 = dc.iter().filter(|&&c| c == 2).count();
+        eprintln!("  Interior edges: {int2} (expected 1)");
+        assert!(int2 >= 3, "Expected ≥3 interior edges, got {int2}");
+        eprintln!("  ✅ Interior edges found: {int2}");
+
+        // ─── Star.mesh symmetry check (if available) ──────────────────────
+        // Read star.mesh from the example data directory
+        let star_path = std::path::Path::new("data/star.mesh");
+        if star_path.exists() {
+            use fem_io::mfem::read_mfem_file;
+            if let Ok(mfem) = read_mfem_file(star_path) {
+                if let Some(smesh) = mfem.mesh2d {
+                    if smesh.n_elements() > 0 && smesh.element_type(0) == ElementType::Quad4 {
+                        let sspace = HCurlSpace::new(smesh, 1);
+                        let sn = sspace.n_dofs();
+                        let mut smat = VectorAssembler::assemble_bilinear(
+                            &sspace,
+                            &[&crate::standard::CurlCurlIntegrator { mu: 1.0 },
+                              &crate::standard::VectorMassIntegrator { alpha: 1.0 }],
+                            3,
+                        );
+                        let mut srhs = vec![0.0; sn];
+                        let bdr_s = fem_space::constraints::boundary_dofs_hcurl(
+                            sspace.mesh(), &sspace, &[1]);
+                        let bv_s = vec![0.0; bdr_s.len()];
+                        fem_space::constraints::apply_dirichlet(&mut smat, &mut srhs, &bdr_s, &bv_s);
+
+                        // Check symmetry
+                        let sdense = smat.to_dense();
+                        let mut s_asym = 0.0;
+                        for i in 0..sn.min(200) {
+                            for j in 0..sn.min(200) {
+                                let d = (sdense[i*sn+j] - sdense[j*sn+i]).abs();
+                                if d > s_asym { s_asym = d; }
+                            }
+                        }
+                        eprintln!("  Star.mesh matrix max asymmetry (first 200 DOFs): {:.6e}", s_asym);
+                        assert!(s_asym < 1e-10,
+                            "Star.mesh matrix NOT symmetric! max|Aij-Aji| = {:.6e}", s_asym);
+                        eprintln!("  ✅ Star.mesh: matrix is symmetric");
+
+                        // Check diagonal positivity
+                        for i in 0..sn.min(200) {
+                            assert!(sdense[i*sn+i] > 0.0,
+                                "Star.mesh A[{i},{i}] = {:.6e} < 0!", sdense[i*sn+i]);
+                        }
+                        eprintln!("  ✅ Star.mesh: diagonal entries positive");
+                    }
+                }
             }
         }
-        let mut interior = 0;
-        let mut boundary = 0;
-        for &c in &dof_count {
-            if c == 2 { interior += 1; }
-            else if c == 1 { boundary += 1; }
-        }
-        eprintln!("  2×2 sheared quad: {interior} interior edges, {boundary} boundary edges, {n_dofs} total DOFs");
-        assert!(interior > 0, "no interior edges — mesh connectivity broken");
-        assert!(boundary > 0, "no boundary edges — mesh has no boundary");
-        eprintln!("  ✅ Mesh connectivity: interior and boundary edges found");
-        eprintln!("  -> Element-level Piola transform is CORRECT");
-        eprintln!("  -> The ex3/star.mesh bug is in global system assembly");
-        eprintln!("  -> Likely: sign handling, apply_dirichlet, or refine_nonconforming_quad");
     }
 }
