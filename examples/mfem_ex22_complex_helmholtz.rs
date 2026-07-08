@@ -23,6 +23,8 @@ use fem_assembly::{
 };
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::Mesh;
+use fem_mesh::element_type::ElementType;
+use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_gmres, SolverConfig};
 use fem_space::{
     H1Space,
@@ -163,38 +165,13 @@ fn main() {
     );
     println!("  |u| ∈ [{:.6e}, {:.6e}]", min_amp, max_amp);
 
-    // L2 error vs exact
-    let exact_all_re: Vec<f64> = (0..n)
-        .map(|i| {
-            let coord = space.dof_manager().dof_coord(i as u32);
-            u0_re(&coord)
-        })
-        .collect();
-    let exact_all_im: Vec<f64> = (0..n)
-        .map(|i| {
-            let coord = space.dof_manager().dof_coord(i as u32);
-            u0_im(&coord)
-        })
-        .collect();
-    let err_re: f64 = gf
-        .u_re
-        .iter()
-        .zip(exact_all_re.iter())
-        .map(|(a, b)| (a - b).powi(2))
-        .sum::<f64>()
-        .sqrt();
-    let err_im: f64 = gf
-        .u_im
-        .iter()
-        .zip(exact_all_im.iter())
-        .map(|(a, b)| (a - b).powi(2))
-        .sum::<f64>()
-        .sqrt();
-    let norm_re = exact_all_re.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-14);
-    let norm_im = exact_all_im.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-14);
+    // L2 error vs exact via element quadrature (matches C++ ComputeL2Error)
+    let (err_re, err_im, norm_re, norm_im) = compute_complex_l2_error(
+        &space, &gf.u_re, &gf.u_im, u0_re, u0_im, args.order * 2 + 1,
+    );
     println!(
         "  L2 error (abs): re={:.6e}, im={:.6e}  (rel: re={:.3e}, im={:.3e})",
-        err_re, err_im, err_re / norm_re, err_im / norm_im
+        err_re, err_im, err_re / norm_re.max(1e-14), err_im / norm_im.max(1e-14)
     );
 
     assert!(res.converged, "GMRES did not converge");
@@ -273,6 +250,108 @@ fn parse_args() -> Args {
         }
     }
     a
+}
+
+/// Compute L² error using element quadrature (matches C++ ComputeL2Error).
+///
+/// For each element, evaluates u_h and u_exact at quadrature points and
+/// integrates `∫(u_h − u_exact)² dx`.
+fn compute_complex_l2_error<S: FESpace>(
+    space: &S,
+    u_re: &[f64],
+    u_im: &[f64],
+    exact_re: impl Fn(&[f64]) -> f64,
+    exact_im: impl Fn(&[f64]) -> f64,
+    quad_order: u8,
+) -> (f64, f64, f64, f64) {
+    use fem_element::lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3};
+    use fem_element::ReferenceElement;
+
+    let mesh = space.mesh();
+    let dim = mesh.dim() as usize;
+    let order = space.order();
+
+    let ref_elem_vol = |et: ElementType, order: u8| -> Box<dyn ReferenceElement> {
+        match (et, order) {
+            (ElementType::Tri3, 1) => Box::new(TriP1),
+            (ElementType::Tri3, 2) => Box::new(TriP2),
+            (ElementType::Tri3, 3) => Box::new(TriP3),
+            (ElementType::Tet4, 1) => Box::new(TetP1),
+            (ElementType::Tet4, 2) => Box::new(TetP2),
+            (ElementType::Tet4, 3) => Box::new(TetP3),
+            _ => panic!("unsupported element for L2 error: {et:?} o={order}"),
+        }
+    };
+
+    let mut err_re2 = 0.0_f64;
+    let mut err_im2 = 0.0_f64;
+    let mut norm_re2 = 0.0_f64;
+    let mut norm_im2 = 0.0_f64;
+
+    for e in mesh.elem_iter() {
+        let elem_type = mesh.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let elem_dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let nodes = mesh.element_nodes(e);
+
+        // Jacobian determinant for reference→physical mapping
+        let x0: Vec<f64> = mesh.node_coords(nodes[0]).to_vec();
+        let x1: Vec<f64> = mesh.node_coords(nodes[1]).to_vec();
+        let det_j = if dim == 2 {
+            let x2 = mesh.node_coords(nodes[2]);
+            (x1[0] - x0[0]) * (x2[1] - x0[1]) - (x1[1] - x0[1]) * (x2[0] - x0[0])
+        } else {
+            let x2 = mesh.node_coords(nodes[2]);
+            let x3 = mesh.node_coords(nodes[3]);
+            let j00 = x1[0] - x0[0]; let j01 = x2[0] - x0[0]; let j02 = x3[0] - x0[0];
+            let j10 = x1[1] - x0[1]; let j11 = x2[1] - x0[1]; let j12 = x3[1] - x0[1];
+            let j20 = x1[2] - x0[2]; let j21 = x2[2] - x0[2]; let j22 = x3[2] - x0[2];
+            j00 * (j11 * j22 - j12 * j21) - j01 * (j10 * j22 - j12 * j20) + j02 * (j10 * j21 - j11 * j20)
+        };
+
+        let quad = ref_elem.quadrature(quad_order);
+        let mut phi = vec![0.0_f64; n_ldofs];
+
+        // Physical coordinate mapping: x_phys = x0 + J * xi
+        let j_cols: Vec<Vec<f64>> = (0..dim)
+            .map(|k| {
+                let nk = mesh.node_coords(nodes[k + 1]);
+                (0..dim).map(|d| nk[d] - x0[d]).collect()
+            })
+            .collect();
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[qi] * det_j.abs();
+
+            // Physical coordinates: x0 + Σ_k J_col[k] * xi[k]
+            let mut x_phys: Vec<f64> = x0.clone();
+            for k in 0..dim {
+                for d in 0..dim { x_phys[d] += j_cols[k][d] * xi[k]; }
+            }
+
+            // Evaluate u_h at this quadrature point
+            ref_elem.eval_basis(xi, &mut phi);
+            let mut uh_re = 0.0;
+            let mut uh_im = 0.0;
+            for i in 0..n_ldofs {
+                uh_re += phi[i] * u_re[elem_dofs[i]];
+                uh_im += phi[i] * u_im[elem_dofs[i]];
+            }
+
+            // Exact solution
+            let ue_re = exact_re(&x_phys);
+            let ue_im = exact_im(&x_phys);
+
+            let dr = uh_re - ue_re;
+            let di = uh_im - ue_im;
+            err_re2 += w * dr * dr;
+            err_im2 += w * di * di;
+            norm_re2 += w * ue_re * ue_re;
+            norm_im2 += w * ue_im * ue_im;
+        }
+    }
+    (err_re2.sqrt(), err_im2.sqrt(), norm_re2.sqrt(), norm_im2.sqrt())
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
