@@ -44,7 +44,7 @@ use fem_space::{
     },
     fe_space::FESpace,
 };
-use linlvo::SsorPrecond;
+use fem_solver::GSSmoother;
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -114,7 +114,7 @@ fn main() {
         u.resize(cdofs, 0.0);
 
         let la = fem_to_linlvo_csr(&mat);
-        let prec = SsorPrecond::from_csr(&la, 1.0).expect("SsorPrecond::from_csr");
+        let prec = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother");
 
         let res = solve_pcg(
             &mat, &rhs, &mut u, &prec,

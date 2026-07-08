@@ -37,7 +37,7 @@ use fem_mesh::{
 };
 use fem_solver::{fem_to_linlvo_csr, solve_pcg, SolveResult};
 use fem_space::{H1Space, fe_space::FESpace};
-use linlvo::SsorPrecond;
+use fem_solver::GSSmoother;
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -89,12 +89,12 @@ fn main() {
 
     // MFEM-style slice assembly: add integrators, assemble in one pass.
     let a = if is_quad {
-        SurfaceQuad4Assembler::assemble_bilinear_slice(&space, &[
+        SurfaceQuad4Assembler::assemble_bilinear(&space, &[
             &SurfaceQuad4DiffusionIntegrator as &dyn SurfaceQuad4BilinearIntegrator,
             &SurfaceQuad4MassIntegrator,
         ])
     } else {
-        SurfaceAssembler::assemble_bilinear_slice(&space, &[
+        SurfaceAssembler::assemble_bilinear(&space, &[
             &SurfaceDiffusionIntegrator as &dyn SurfaceBilinearIntegrator,
             &SurfaceMassIntegrator,
         ])
@@ -104,11 +104,11 @@ fn main() {
     let source_tri = SurfaceDomainSourceIntegrator { f: rhs_fn };
     let source_quad = SurfaceQuad4DomainSourceIntegrator { f: rhs_fn };
     let rhs = if is_quad {
-        SurfaceQuad4Assembler::assemble_linear_slice(&space, &[
+        SurfaceQuad4Assembler::assemble_linear(&space, &[
             &source_quad as &dyn SurfaceQuad4LinearIntegrator,
         ])
     } else {
-        SurfaceAssembler::assemble_linear_slice(&space, &[
+        SurfaceAssembler::assemble_linear(&space, &[
             &source_tri as &dyn SurfaceLinearIntegrator,
         ])
     };
@@ -116,7 +116,7 @@ fn main() {
     // ── 5. Solve: PCG + SSOR(omega=1) ──────────────────────────────────────
     let mut u = vec![0.0; n_dofs];
     let la = fem_to_linlvo_csr(&a);
-    let prec = SsorPrecond::from_csr(&la, 1.0).expect("SsorPrecond::from_csr");
+    let prec = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother");
     let res: SolveResult = solve_pcg(&a, &rhs, &mut u, &prec, 1e-12, 5000, true)
         .expect("PCG solve failed");
     if !res.converged {

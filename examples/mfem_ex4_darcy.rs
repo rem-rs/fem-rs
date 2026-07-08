@@ -154,7 +154,7 @@ fn main() {
 
     // 11. Solve the reduced system with PCG+GSSmoother.
     let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
-    let precond = linlvo::SsorPrecond::from_csr(&linlvo_mat, 1.0)
+    let precond = linlvo::GSSmoother::from_csr(&linlvo_mat, 1.0)
         .expect("SSOR preconditioner setup failed");
     let mut x_red = vec![0.0_f64; n_sys];
     let cfg = SolverConfig {
@@ -448,7 +448,7 @@ mod tests {
         };
 
         let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
-        let precond = linlvo::SsorPrecond::from_csr(&linlvo_mat, 1.0)
+        let precond = linlvo::GSSmoother::from_csr(&linlvo_mat, 1.0)
             .expect("SSOR preconditioner setup failed");
         let mut x_red = vec![0.0_f64; sys_mat.nrows];
         let cfg = SolverConfig {

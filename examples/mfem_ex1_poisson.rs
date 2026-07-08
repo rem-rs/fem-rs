@@ -31,7 +31,7 @@ use fem_space::{
     fe_space::FESpace,
     constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
 };
-use linlvo::SsorPrecond;
+use fem_solver::GSSmoother;
 
 fn main() {
     // 1. Parse command-line options.
@@ -93,7 +93,7 @@ fn main() {
     // 11. Solve: PCG with symmetric Gauss-Seidel preconditoner (ω = 1 = GS).
     let n_sys = red_mat.nrows;
     let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&red_mat);
-    let precond = SsorPrecond::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
+    let precond = GSSmoother::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
     let mut x_red = vec![0.0_f64; n_sys];
     let _result =
         solve_pcg(&red_mat, &red_rhs, &mut x_red, &precond, 1e-12, 500, true)

@@ -6,7 +6,7 @@
 //! - Jacobian is `3×2` instead of `2×2`
 //! - Gradient transform uses pseudo-inverse `(JᵀJ)⁻¹Jᵀ` instead of `J⁻ᵀ`
 //! - Area element is `√det(JᵀJ)` instead of `|det(J)|`
-//! - Surface normal `n = (J₀ × J₁) / |J₀ × J₁|`
+//! - Surface normal `n = (J₀ × J�? / |J₀ × J₁|`
 //!
 //! # Example
 //! ```ignore
@@ -34,12 +34,12 @@ use fem_space::fe_space::FESpace;
 /// - `normal` is the unit surface normal (3-D vector)
 #[allow(clippy::type_complexity)]
 fn surface_jacobian(x: &[[f64; 3]; 3]) -> ([[f64; 3]; 2], [[f64; 2]; 2], f64, [f64; 3]) {
-    // J = [x1-x0, x2-x0]  — 3×2 matrix stored as 2 columns of 3 components
+    // J = [x1-x0, x2-x0]  �?3×2 matrix stored as 2 columns of 3 components
     let j0 = [x[1][0] - x[0][0], x[1][1] - x[0][1], x[1][2] - x[0][2]];
     let j1 = [x[2][0] - x[0][0], x[2][1] - x[0][1], x[2][2] - x[0][2]];
     let j = [j0, j1];
 
-    // G = JᵀJ  — 2×2 metric
+    // G = JᵀJ  �?2×2 metric
     let g00 = j0[0]*j0[0] + j0[1]*j0[1] + j0[2]*j0[2];
     let g01 = j0[0]*j1[0] + j0[1]*j1[1] + j0[2]*j1[2];
     let g10 = g01;
@@ -50,7 +50,7 @@ fn surface_jacobian(x: &[[f64; 3]; 3]) -> ([[f64; 3]; 2], [[f64; 2]; 2], f64, [f
     let det_g = g00 * g11 - g01 * g01;
     let sqrt_det_g = det_g.sqrt().max(1e-30);
 
-    // Unit normal n = (J₀ × J₁) / |J₀ × J₁|
+    // Unit normal n = (J₀ × J�? / |J₀ × J₁|
     let nx = j0[1]*j1[2] - j0[2]*j1[1];
     let ny = j0[2]*j1[0] - j0[0]*j1[2];
     let nz = j0[0]*j1[1] - j0[1]*j1[0];
@@ -60,9 +60,9 @@ fn surface_jacobian(x: &[[f64; 3]; 3]) -> ([[f64; 3]; 2], [[f64; 2]; 2], f64, [f
     (j, g, sqrt_det_g, normal)
 }
 
-/// Compute the pseudo-inverse J_pinv = (JᵀJ)⁻¹Jᵀ  — 2×3 matrix.
+/// Compute the pseudo-inverse J_pinv = (JᵀJ)⁻¹Jᵀ  �?2×3 matrix.
 ///
-/// Used for surface gradient: `∇_Γ u = J_pinvᵀ · ∇_ξ u = G⁻¹ · Jᵀ · ∇_ξ u`
+/// Used for surface gradient: `∇_Γ u = J_pinvᵀ · ∇_ξ u = G⁻�?· Jᵀ · ∇_ξ u`
 fn pseudo_inverse(j: &[[f64; 3]; 2], g: &[[f64; 2]; 2], det_g: f64) -> [[f64; 2]; 3] {
     let inv_det = 1.0 / det_g.max(1e-30);
     let g_inv_00 = g[1][1] * inv_det;
@@ -70,7 +70,7 @@ fn pseudo_inverse(j: &[[f64; 3]; 2], g: &[[f64; 2]; 2], det_g: f64) -> [[f64; 2]
     let g_inv_10 = g_inv_01;
     let g_inv_11 = g[0][0] * inv_det;
 
-    // J_pinv = G⁻¹ · Jᵀ  (2×3)
+    // J_pinv = G⁻�?· Jᵀ  (2×3)
     let mut p = [[0.0; 2]; 3]; // stored as 3 rows × 2 cols
     for r in 0..3 {
         p[r][0] = g_inv_00 * j[0][r] + g_inv_01 * j[1][r];
@@ -123,7 +123,7 @@ impl SurfaceMassIntegrator {
         let (_j, _g, sqrt_det_g, _normal) = surface_jacobian(elem_nodes);
         let area_factor = 0.5 * sqrt_det_g; // dS = sqrt(det(G)) * dξ (area of ref tri = 0.5)
 
-        // Mass matrix for P1: M[i,j] = ∫ φ_i·φ_j dS
+        // Mass matrix for P1: M[i,j] = �?φ_i·φ_j dS
         // One-point quadrature at centroid (ξ=1/3, η=1/3): φ_i = 1/3 for all i
         let phi_qp = 1.0 / 3.0;
         let _val = phi_qp * phi_qp * area_factor;
@@ -177,7 +177,7 @@ impl SurfaceDomainSourceIntegrator<'_> {
 
 // ─── Surface integrator traits (MFEM-aligned API) ────────────────────────────
 
-/// Trait for Tri3 surface bilinear integrators (Laplace-Beltrami, mass, …).
+/// Trait for Tri3 surface bilinear integrators (Laplace-Beltrami, mass, �?.
 ///
 /// Matches MFEM's pattern where integrators implement a common interface
 /// and are added to the form via `AddDomainIntegrator`.
@@ -248,72 +248,11 @@ impl SurfaceQuad4LinearIntegrator for SurfaceQuad4DomainSourceIntegrator<'_> {
 pub struct SurfaceAssembler;
 
 impl SurfaceAssembler {
-    #[allow(clippy::type_complexity)]
-    pub fn assemble_bilinear<S: FESpace>(
-        space: &S,
-        integrator: &dyn Fn(&[[f64; 3]; 3], &mut [f64; 9]),
-    ) -> CsrMatrix<f64> {
-        let mesh = space.mesh();
-        let n_dofs = space.n_dofs();
-        let ne = mesh.n_elements() as u32;
-        let mut coo = CooMatrix::new(n_dofs, n_dofs);
-
-        for e in 0..ne {
-            let dofs = space.element_dofs(e);
-            let nodes = mesh.element_nodes(e);
-            if nodes.len() < 3 { continue; }
-            let x: [[f64; 3]; 3] = [
-                get_coord3(mesh, nodes[0]),
-                get_coord3(mesh, nodes[1]),
-                get_coord3(mesh, nodes[2]),
-            ];
-            let mut ke = [0.0; 9];
-            integrator(&x, &mut ke);
-            for i in 0..3 {
-                for j in 0..3 {
-                    coo.add(dofs[i] as usize, dofs[j] as usize, ke[i * 3 + j]);
-                }
-            }
-        }
-
-        coo.into_csr()
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn assemble_linear<S: FESpace>(
-        space: &S,
-        integrator: &dyn Fn(&[[f64; 3]; 3], &mut [f64; 3]),
-    ) -> Vec<f64> {
-        let mesh = space.mesh();
-        let n_dofs = space.n_dofs();
-        let ne = mesh.n_elements() as u32;
-        let mut rhs = vec![0.0; n_dofs];
-
-        for e in 0..ne {
-            let dofs = space.element_dofs(e);
-            let nodes = mesh.element_nodes(e);
-            if nodes.len() < 3 { continue; }
-            let x: [[f64; 3]; 3] = [
-                get_coord3(mesh, nodes[0]),
-                get_coord3(mesh, nodes[1]),
-                get_coord3(mesh, nodes[2]),
-            ];
-            let mut fe = [0.0; 3];
-            integrator(&x, &mut fe);
-            for i in 0..3 {
-                rhs[dofs[i] as usize] += fe[i];
-            }
-        }
-
-        rhs
-    }
-
-    /// MFEM-style bilinear assembly: add all integrators in a slice.
+    /// Assemble a surface bilinear form from a slice of integrators.
     ///
-    /// Each integrator's `add_to_element_matrix` contribution is accumulated
-    /// into the same element matrix, matching the semantics of MFEM's
-    /// `BilinearForm::AddDomainIntegrator`.
-    pub fn assemble_bilinear_slice<S: FESpace>(
+    /// Each integrator's contribution is accumulated into the same element
+    /// matrix, matching MFEM's `BilinearForm::AddDomainIntegrator`.
+    pub fn assemble_bilinear<S: FESpace>(
         space: &S,
         integrators: &[&dyn SurfaceBilinearIntegrator],
     ) -> CsrMatrix<f64> {
@@ -345,7 +284,7 @@ impl SurfaceAssembler {
     }
 
     /// MFEM-style linear assembly: add all linear integrators in a slice.
-    pub fn assemble_linear_slice<S: FESpace>(
+    pub fn assemble_linear<S: FESpace>(
         space: &S,
         integrators: &[&dyn SurfaceLinearIntegrator],
     ) -> Vec<f64> {
@@ -388,7 +327,7 @@ fn get_coord3<M: MeshTopology>(mesh: &M, n: u32) -> [f64; 3] {
 /// Returns `(J, sqrt_det_G, normal)` where J is the 3×2 Jacobian.
 fn surface_jacobian_quad4(x: &[[f64; 3]; 4]) -> ([[f64; 3]; 2], f64, [f64; 3]) {
     // Bilinear shape function reference gradients at centroid:
-    //   ∂N_i/∂ξ = sign_ξ_i / 4,  ∂N_i/∂η = sign_η_i / 4
+    //   ∂N_i/∂�?= sign_ξ_i / 4,  ∂N_i/∂�?= sign_η_i / 4
     //   sign_ξ:  [-1,  1,  1, -1]
     //   sign_η:  [-1, -1,  1,  1]
     let dxi = [
@@ -429,7 +368,7 @@ fn pseudo_inverse_quad4(j: &[[f64; 3]; 2], det_g: f64) -> [[f64; 2]; 3] {
     let g11 = j[1][0]*j[1][0] + j[1][1]*j[1][1] + j[1][2]*j[1][2];
     let ginvt = [[g11 * inv_det, -g01 * inv_det], [-g01 * inv_det, g00 * inv_det]];
 
-    // J_pinv = G^{-1} * J^T  (2×3) → stored as 3 rows × 2 cols
+    // J_pinv = G^{-1} * J^T  (2×3) �?stored as 3 rows × 2 cols
     let mut p = [[0.0; 2]; 3];
     for r in 0..3 {
         p[r][0] = ginvt[0][0] * j[0][r] + ginvt[0][1] * j[1][r];
@@ -455,7 +394,7 @@ impl SurfaceQuad4DiffusionIntegrator {
         let pinv = pseudo_inverse_quad4(&j, det_g);
 
         // Reference gradients of Q1 bilinear at centroid:
-        //   ∇N₀ = (-¼, -¼),  ∇N₁ = (¼, -¼),  ∇N₂ = (¼, ¼),  ∇N₃ = (-¼, ¼)
+        //   ∇N₀ = (-¼, -¼),  ∇N�?= (¼, -¼),  ∇N�?= (¼, ¼),  ∇N�?= (-¼, ¼)
         let ref_grad = [[-0.25, -0.25], [0.25, -0.25], [0.25, 0.25], [-0.25, 0.25]];
 
         // Surface gradients: ∇_Γ N_i = J_pinv^T · ∇_ξ N_i
@@ -549,66 +488,8 @@ impl SurfaceQuad4DomainSourceIntegrator<'_> {
 pub struct SurfaceQuad4Assembler;
 
 impl SurfaceQuad4Assembler {
-    pub fn assemble_bilinear<S: FESpace>(
-        space: &S,
-        integrator: &dyn Fn(&[[f64; 3]; 4], &mut [f64; 16]),
-    ) -> CsrMatrix<f64> {
-        let mesh = space.mesh();
-        let n_dofs = space.n_dofs();
-        let ne = mesh.n_elements() as u32;
-        let mut coo = CooMatrix::new(n_dofs, n_dofs);
-
-        for e in 0..ne {
-            let dofs = space.element_dofs(e);
-            let nodes = mesh.element_nodes(e);
-            if nodes.len() < 4 { continue; }
-            let x: [[f64; 3]; 4] = [
-                get_coord3(mesh, nodes[0]),
-                get_coord3(mesh, nodes[1]),
-                get_coord3(mesh, nodes[2]),
-                get_coord3(mesh, nodes[3]),
-            ];
-            let mut ke = [0.0; 16];
-            integrator(&x, &mut ke);
-            for i in 0..4 {
-                for j in 0..4 {
-                    coo.add(dofs[i] as usize, dofs[j] as usize, ke[i * 4 + j]);
-                }
-            }
-        }
-        coo.into_csr()
-    }
-
-    pub fn assemble_linear<S: FESpace>(
-        space: &S,
-        integrator: &dyn Fn(&[[f64; 3]; 4], &mut [f64; 4]),
-    ) -> Vec<f64> {
-        let mesh = space.mesh();
-        let n_dofs = space.n_dofs();
-        let ne = mesh.n_elements() as u32;
-        let mut rhs = vec![0.0; n_dofs];
-
-        for e in 0..ne {
-            let dofs = space.element_dofs(e);
-            let nodes = mesh.element_nodes(e);
-            if nodes.len() < 4 { continue; }
-            let x: [[f64; 3]; 4] = [
-                get_coord3(mesh, nodes[0]),
-                get_coord3(mesh, nodes[1]),
-                get_coord3(mesh, nodes[2]),
-                get_coord3(mesh, nodes[3]),
-            ];
-            let mut fe = [0.0; 4];
-            integrator(&x, &mut fe);
-            for i in 0..4 {
-                rhs[dofs[i] as usize] += fe[i];
-            }
-        }
-        rhs
-    }
-
     /// MFEM-style bilinear assembly for Quad4 surfaces.
-    pub fn assemble_bilinear_slice<S: FESpace>(
+    pub fn assemble_bilinear<S: FESpace>(
         space: &S,
         integrators: &[&dyn SurfaceQuad4BilinearIntegrator],
     ) -> CsrMatrix<f64> {
@@ -641,7 +522,7 @@ impl SurfaceQuad4Assembler {
     }
 
     /// MFEM-style linear assembly for Quad4 surfaces.
-    pub fn assemble_linear_slice<S: FESpace>(
+    pub fn assemble_linear<S: FESpace>(
         space: &S,
         integrators: &[&dyn SurfaceQuad4LinearIntegrator],
     ) -> Vec<f64> {
@@ -684,7 +565,7 @@ mod tests {
     /// Unit sphere mesh: octahedron refined n times.
     fn sphere_mesh(n: u32) -> Mesh<3> {
         // Start with an octahedron (6 vertices, 8 faces)
-        let t = 2.0_f64.sqrt() / 2.0; // = 1/√2
+        let t = 2.0_f64.sqrt() / 2.0; // = 1/�?
         let mut coords = vec![
             0.0, 0.0, -1.0,    // 0: south
             -t, 0.0, t,         // 1: front-left
@@ -785,23 +666,15 @@ mod tests {
         let f = &|x: &[f64; 3]| 3.0 * x[0];
 
         // Assemble: A = Diffusion (stiffness) + Mass
-        let stiffness = SurfaceAssembler::assemble_bilinear(&space, &|x, ke| {
-            SurfaceDiffusionIntegrator.add_to_element_matrix(x, ke);
-        });
-        let mass = SurfaceAssembler::assemble_bilinear(&space, &|x, ke| {
-            SurfaceMassIntegrator.add_to_element_matrix(x, ke);
-        });
-        let mut a = stiffness.clone();
-        for i in 0..a.nrows {
-            for jp in a.row_ptr[i]..a.row_ptr[i+1] {
-                let j = a.col_idx[jp] as usize;
-                a.values[jp] += mass.get(i, j);
-            }
-        }
+        let a = SurfaceAssembler::assemble_bilinear(&space, &[
+            &SurfaceDiffusionIntegrator as &dyn SurfaceBilinearIntegrator,
+            &SurfaceMassIntegrator,
+        ]);
 
-        let rhs = SurfaceAssembler::assemble_linear(&space, &|x, fe| {
-            SurfaceDomainSourceIntegrator { f }.add_to_element_vector(x, fe);
-        });
+        let source = SurfaceDomainSourceIntegrator { f };
+        let rhs = SurfaceAssembler::assemble_linear(&space, &[
+            &source as &dyn SurfaceLinearIntegrator,
+        ]);
 
         let mut u = vec![0.0; space.n_dofs()];
         let cfg = SolverConfig { rtol: 1e-10, max_iter: 5000, ..SolverConfig::default() };
@@ -859,23 +732,15 @@ mod tests {
         // Solve -Δ_Γ u + u = 3x on the cube (u = x is exact for cube)
         let f = &|x: &[f64; 3]| 3.0 * x[0];
 
-        let stiffness = SurfaceQuad4Assembler::assemble_bilinear(&space, &|x, ke| {
-            SurfaceQuad4DiffusionIntegrator.add_to_element_matrix(x, ke);
-        });
-        let mass = SurfaceQuad4Assembler::assemble_bilinear(&space, &|x, ke| {
-            SurfaceQuad4MassIntegrator.add_to_element_matrix(x, ke);
-        });
-        let mut a = stiffness.clone();
-        for i in 0..a.nrows {
-            for jp in a.row_ptr[i]..a.row_ptr[i + 1] {
-                let j = a.col_idx[jp] as usize;
-                a.values[jp] += mass.get(i, j);
-            }
-        }
+        let a = SurfaceQuad4Assembler::assemble_bilinear(&space, &[
+            &SurfaceQuad4DiffusionIntegrator as &dyn SurfaceQuad4BilinearIntegrator,
+            &SurfaceQuad4MassIntegrator,
+        ]);
 
-        let rhs = SurfaceQuad4Assembler::assemble_linear(&space, &|x, fe| {
-            SurfaceQuad4DomainSourceIntegrator { f }.add_to_element_vector(x, fe);
-        });
+        let source = SurfaceQuad4DomainSourceIntegrator { f };
+        let rhs = SurfaceQuad4Assembler::assemble_linear(&space, &[
+            &source as &dyn SurfaceQuad4LinearIntegrator,
+        ]);
 
         let mut u = vec![0.0; space.n_dofs()];
         let cfg = SolverConfig { rtol: 1e-10, max_iter: 5000, ..SolverConfig::default() };
@@ -904,24 +769,16 @@ mod tests {
             let space = H1Space::new(mesh, 1);
             let n = space.n_dofs();
 
-            let stiffness = SurfaceAssembler::assemble_bilinear(&space, &|x, ke| {
-                SurfaceDiffusionIntegrator.add_to_element_matrix(x, ke);
-            });
-            let mass = SurfaceAssembler::assemble_bilinear(&space, &|x, ke| {
-                SurfaceMassIntegrator.add_to_element_matrix(x, ke);
-            });
-            let mut a = stiffness.clone();
-            for i in 0..a.nrows {
-                for jp in a.row_ptr[i]..a.row_ptr[i+1] {
-                    let j = a.col_idx[jp] as usize;
-                    a.values[jp] += mass.get(i, j);
-                }
-            }
+            let a = SurfaceAssembler::assemble_bilinear(&space, &[
+                &SurfaceDiffusionIntegrator as &dyn SurfaceBilinearIntegrator,
+                &SurfaceMassIntegrator,
+            ]);
 
             let f = &|x: &[f64; 3]| 3.0 * x[0];
-            let rhs = SurfaceAssembler::assemble_linear(&space, &|x, fe| {
-                SurfaceDomainSourceIntegrator { f }.add_to_element_vector(x, fe);
-            });
+            let source = SurfaceDomainSourceIntegrator { f };
+            let rhs = SurfaceAssembler::assemble_linear(&space, &[
+                &source as &dyn SurfaceLinearIntegrator,
+            ]);
 
             let mut u = vec![0.0; n];
             let cfg = SolverConfig { rtol: 1e-10, max_iter: 5000, ..SolverConfig::default() };
@@ -943,7 +800,7 @@ mod tests {
 
             if let (Some(pe), Some(ph)) = (prev_err, prev_h) {
                 let rate = (pe / err.max(1e-30)).ln() / (ph / h.max(1e-30)).ln();
-                eprintln!("  └─ observed order ≈ {rate:.2}");
+                eprintln!("  └─ observed order �?{rate:.2}");
                 assert!(rate > 0.5, "expected convergence, got rate={rate:.2}");
             }
 

@@ -388,7 +388,7 @@ mod tests {
         }
 
         let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
-        let precond = linlvo::SsorPrecond::from_csr(&linlvo_mat, 1.0)
+        let precond = linlvo::GSSmoother::from_csr(&linlvo_mat, 1.0)
             .expect("SSOR preconditioner setup failed");
         let mut u = vec![0.0_f64; n_dofs];
         fem_solver::solve_pcg(&mat, &rhs, &mut u, &precond, 1e-12, 500, false)
