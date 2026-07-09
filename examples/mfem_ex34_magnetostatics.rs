@@ -36,7 +36,8 @@ use fem_mesh::{
     ElementTransformation, ElementType, refine_uniform_3d,
     topology::MeshTopology,
 };
-use fem_solver::solve_pcg_ilu0;
+use fem_linalg::fem_to_linlvo_csr;
+use fem_solver::{solve_pcg_ams, solve_pcg_ilu0};
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace,
     constraints::{boundary_dofs_hcurl, boundary_dofs_hdiv},
@@ -273,7 +274,7 @@ fn main() {
     let n_nd = fec_nd_full.n_dofs();
     eprintln!("\nFull mesh ND DOFs: {}", n_nd);
 
-    let nd_stiffness = VectorAssembler::assemble_bilinear(
+    let mut nd_stiffness = VectorAssembler::assemble_bilinear(
         &fec_nd_full,
         &[
             &CurlCurlIntegrator { mu: 1.0 },
@@ -296,20 +297,27 @@ fn main() {
 
     eprintln!("\nSize of linear system: {}", n_nd - ess_dofs_nd.len());
 
-    // 13. Solve for A.
+    // 13. Solve for A with AMS (Auxiliary-space Maxwell Solver) preconditioner.
+    //     AMS uses discrete gradient G: H¹ → H(Curl) to eliminate the curl nullspace.
+    let h1_full = H1Space::new(mesh.clone(), 1);
+    let grad = DiscreteLinearOperator::gradient(&h1_full, &fec_nd_full)
+        .expect("gradient assembly for AMS failed");
+
+    // Symmetric BC elimination (row + column) — required for AMS to stay SPD.
+    let mut ams_rhs = nd_rhs.clone();
+    for &d in &ess_dofs_nd {
+        nd_stiffness.apply_dirichlet_symmetric(d as usize, 0.0, &mut ams_rhs);
+    }
+    let g_linlvo = fem_to_linlvo_csr(&grad);
+
     let mut a_sol = vec![0.0_f64; n_nd];
-    let mut nd_rhs_copy = nd_rhs.clone();
-    let (red_nd, red_rhs_nd, nd_free, nd_constrained) =
-        eliminate_bc(&nd_stiffness, &mut nd_rhs_copy, &ess_dofs_nd, &vec![0.0; ess_dofs_nd.len()], &mut a_sol);
+    eprintln!("\nSolving for magnetic vector potential using PCG with AMS");
+    eprintln!("Size of linear system: {}", n_nd);
 
-    eprintln!("\nSolving for magnetic vector potential using PCG with Gauss-Seidel");
-    eprintln!("Size of linear system: {}", red_nd.nrows);
-
-    let mut x_nd = vec![0.0_f64; red_nd.nrows];
-    let nd_result = solve_pcg_ilu0(&red_nd, &red_rhs_nd, &mut x_nd, &SolverConfig {
-        rtol: 1e-6, max_iter: 2000, verbose: true, ..SolverConfig::default()
-    }).expect("ND PCG+ILU0 solve failed");
-    expand_solution(&x_nd, &nd_free, &nd_constrained, &vec![0.0; ess_dofs_nd.len()], &mut a_sol);
+    let nd_result = solve_pcg_ams(&nd_stiffness, &g_linlvo, &ams_rhs, &mut a_sol, &fem_solver::AmsSolverConfig {
+        inner_cfg: SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 200, verbose: true, ..SolverConfig::default() },
+        ams_cfg: fem_solver::AmsConfig::default(),
+    }).expect("ND PCG+AMS solve failed");
 
     eprintln!("  ND solve: {} iterations, final residual {}",
         nd_result.iterations, nd_result.final_residual);

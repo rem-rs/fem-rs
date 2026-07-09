@@ -281,6 +281,15 @@ impl DiscreteLinearOperator {
                     (0, 3), (1, 2), (4, 7), (5, 6),
                     (0, 4), (1, 5), (2, 6), (3, 7),
                 ],
+                ElementType::Prism6 | ElementType::Prism15 => &[
+                    (0, 1), (0, 2), (1, 2), // bottom tri
+                    (3, 4), (3, 5), (4, 5), // top tri
+                    (0, 3), (1, 4), (2, 5), // vertical
+                ],
+                ElementType::Pyramid5 => &[
+                    (0, 1), (1, 2), (2, 3), (3, 0), // base quad
+                    (0, 4), (1, 4), (2, 4), (3, 4), // apex
+                ],
                 _ => return Err(DiscreteOpError::UnsupportedDimension { op: "gradient", dim: mesh.dim() }),
             };
             let h1_dofs = h1_space.element_dofs(e);
