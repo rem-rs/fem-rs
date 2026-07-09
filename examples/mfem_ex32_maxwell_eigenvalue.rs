@@ -134,7 +134,7 @@ fn main() {
     for &d in &ess_bdr_nd {
         let dof = d as usize;
         a_mat.apply_dirichlet_symmetric(dof, 1.0, &mut zeros);
-        m_mat.apply_dirichlet_symmetric(dof, f64::MIN_POSITIVE, &mut zeros);
+        m_mat.apply_dirichlet_symmetric(dof, 1e-8, &mut zeros);
     }
 
     // Discrete gradient G: H¹ → H(Curl) for LOBPCG constraints + AMS preconditioner.
