@@ -328,20 +328,20 @@ name = "tmop_hex8_optimise"
 path = "tmop_hex8_optimise.rs"
 
 [[example]]
-name = "mfem_volta"
-path = "mfem_volta.rs"
+name = "mfem_miniapp_volta"
+path = "mfem_miniapp_volta.rs"
 
 [[example]]
-name = "mfem_tesla"
-path = "mfem_tesla.rs"
+name = "mfem_miniapp_tesla"
+path = "mfem_miniapp_tesla.rs"
 
 [[example]]
-name = "mfem_maxwell"
-path = "mfem_maxwell.rs"
+name = "mfem_miniapp_maxwell"
+path = "mfem_miniapp_maxwell.rs"
 
 [[example]]
-name = "mfem_joule"
-path = "mfem_joule.rs"
+name = "mfem_miniapp_joule"
+path = "mfem_miniapp_joule.rs"
 
 [[example]]
 name = "mfem_phasefield_fracture"
