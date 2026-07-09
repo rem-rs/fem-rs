@@ -262,13 +262,12 @@ impl<V: VectorCoeff> BilinearIntegrator for DGAdvectionIntegrator<V> {
         let mut b = [0.0_f64; 3];
         self.velocity.eval(&ctx, &mut b[..d]);
 
-        for i in 0..n {
-            let mut b_dot_grad_i = 0.0;
-            for k in 0..d {
-                b_dot_grad_i += b[k] * qp.grad_phys[i * d + k];
-            }
-            for j in 0..n {
-                k_elem[i * n + j] += -qp.weight * b_dot_grad_i * qp.phi[j];
+        // -∫ φ_i · (b·∇u_h) — MFEM ConvectionIntegrator sign
+        for j in 0..n {
+            let mut b_dot_grad_j = 0.0;
+            for k in 0..d { b_dot_grad_j += b[k] * qp.grad_phys[j * d + k]; }
+            for i in 0..n {
+                k_elem[i * n + j] += -qp.weight * qp.phi[i] * b_dot_grad_j;
             }
         }
     }
@@ -299,28 +298,17 @@ impl<V: VectorCoeff> DgFaceIntegrator for DGAdvectionIntegrator<V> {
         let phi_l = qp.phi_l;
         let phi_r = qp.phi_r;
 
-        // DG weak form (integration by parts) interior face contribution:
-        //   ∫_F [[v]]·F̂ dS where [[v]] = v⁻ - v⁺ (scalar jump)
-        //   and F̂ = (b·n)⁺·u⁻ + (b·n)⁻·u⁺ (upwind numerical flux)
-        //
-        // Test=L (v⁻): [[v]] = +v⁻
-        //   K_ll: +∫ v⁻·(b·n)⁺·u⁻ → +w · φ⁻ · (b·n)⁺ · φ⁻
-        //   K_lr: +∫ v⁻·(b·n)⁻·u⁺ → +w · φ⁻ · (b·n)⁻ · φ⁺
-        //
-        // Test=R (v⁺): [[v]] = -v⁺
-        //   K_rl: -∫ v⁺·(b·n)⁺·u⁻ → -w · φ⁺ · (b·n)⁺ · φ⁻
-        //   K_rr: -∫ v⁺·(b·n)⁻·u⁺ → -w · φ⁺ · (b·n)⁻ · φ⁺
-        for i in 0..n_l {
-            for j in 0..n_l { k_ll[i * n_l + j] += w * phi_l[i] * vn_pos * phi_l[j]; }
-        }
-        for i in 0..n_l {
-            for j in 0..n_r { k_lr[i * n_r + j] += w * phi_l[i] * vn_neg * phi_r[j]; }
-        }
-        for i in 0..n_r {
-            for j in 0..n_l { k_rl[i * n_l + j] += -w * phi_r[i] * vn_pos * phi_l[j]; }
-        }
-        for i in 0..n_r {
-            for j in 0..n_r { k_rr[i * n_r + j] += -w * phi_r[i] * vn_neg * phi_r[j]; }
+        // MFEM NonconservativeDGTraceIntegrator with α = -1:
+        // ∫_F (v·n) · u_upwind · ⟦w⟧ where ⟦w⟧ = w⁻ − w⁺
+        // Test=L (w⁻): +α · w · vn · u_upwind · φ⁻
+        // Test=R (w⁺): −α · w · vn · u_upwind · φ⁺
+        // α = -1 → el += -w·vn·φ_test·φ_upwind (for L), +w·vn·φ_test·φ_upwind (for R)
+        if vn >= 0.0 {
+            for i in 0..n_l { for j in 0..n_l { k_ll[i*n_l+j] += -w * vn * phi_l[i] * phi_l[j]; }}
+            for i in 0..n_r { for j in 0..n_l { k_rl[i*n_l+j] += w * vn * phi_r[i] * phi_l[j]; }}
+        } else {
+            for i in 0..n_l { for j in 0..n_r { k_lr[i*n_r+j] += -w * vn * phi_l[i] * phi_r[j]; }}
+            for i in 0..n_r { for j in 0..n_r { k_rr[i*n_r+j] += w * vn * phi_r[i] * phi_r[j]; }}
         }
     }
 }
@@ -600,14 +588,14 @@ mod tests {
         let dense_dg = mat_dg.to_dense();
         let dense_conv = mat_conv.to_dense();
         let n = mat_dg.nrows;
-        // Check that mat_dg ≈ -mat_conv^T (weak form = -transpose of strong form)
+        // Check that mat_dg ≈ -mat_conv (matching MFEM ConvectionIntegrator sign)
         let mut diff_norm = 0.0;
         for i in 0..n {
             for j in 0..n {
-                diff_norm += (dense_dg[i * n + j] + dense_conv[j * n + i]).abs();
+                diff_norm += (dense_dg[i * n + j] + dense_conv[i * n + j]).abs();
             }
         }
-        assert!(diff_norm < 1e-12, "DG volume should be -ConvectionIntegrator^T, diff={diff_norm}");
+        assert!(diff_norm < 1e-12, "DG volume should be -ConvectionIntegrator, diff={diff_norm}");
     }
 
     #[test]
