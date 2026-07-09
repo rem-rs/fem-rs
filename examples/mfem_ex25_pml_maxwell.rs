@@ -305,11 +305,46 @@ fn main() {
         [coeff * alpha.exp(), 0.0]
     };
 
-    // BC
-    let bdr = boundary_dofs_hcurl(space.mesh(), &space, &space.mesh().unique_boundary_tags());
-    // Apply BC to k_re, k_im
-    for &d in &bdr { let d = d as usize; for p in k_re.row_ptr[d]..k_re.row_ptr[d+1] { let c = k_re.col_idx[d] as usize; k_re.values[p] = if c==d {1.0} else {0.0}; } }
-    for &d in &bdr { let d = d as usize; for p in k_im.row_ptr[d]..k_im.row_ptr[d+1] { k_im.values[p] = 0.0; } }
+    // BC: project exact solution on boundaries (ProjectBdrCoefficientTangent)
+    let bdr_tags = space.mesh().unique_boundary_tags();
+    let bdr = boundary_dofs_hcurl(space.mesh(), &space, &bdr_tags);
+    let mut bc_re = vec![0.0_f64; n]; let mut bc_im = vec![0.0_f64; n];
+    if exact_known {
+        let (gl_pts, gl_wts) = fem_element::quadrature::gauss_legendre_01(4);
+        for e in 0..space.mesh().n_elems() as u32 {
+            let et = space.mesh().element_type_at(e);
+            if et != fem_mesh::ElementType::Tri3 { continue; }
+            let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let nodes = space.mesh().elem_nodes(e);
+            let tri_edges: &[(usize,usize)] = &[(0,1),(1,2),(0,2)];
+            for (fi, &(a,b)) in tri_edges.iter().enumerate() {
+                let dm_dof = dofs[fi]; if dm_dof >= n || !bdr.contains(&(dm_dof as u32)) { continue; }
+                let pa = space.mesh().coords_of(nodes[a]); let pb = space.mesh().coords_of(nodes[b]);
+                let mut vr=0.0; let mut vi=0.0;
+                for (qi,xi) in gl_pts.iter().enumerate() {
+                    let t=*xi; let w=gl_wts[qi];
+                    let px=pa[0]+t*(pb[0]-pa[0]); let py=pa[1]+t*(pb[1]-pa[1]);
+                    let ex = exact_e_2d(px, py, omega);
+                    let le = ((pb[0]-pa[0]).powi(2)+(pb[1]-pa[1]).powi(2)).sqrt();
+                    let tx = (pb[0]-pa[0])/le.max(1e-16); let ty = (pb[1]-pa[1])/le.max(1e-16);
+                    vr += w*le*(ex.0*tx+ex.2*ty); vi += w*le*(ex.1*tx+ex.3*ty);
+                }
+                bc_re[dm_dof] = vr; bc_im[dm_dof] = vi;
+            }
+        }
+    }
+    // Apply BC to system
+    for &d in &bdr {
+        let d = d as usize;
+        for p in k_re.row_ptr[d]..k_re.row_ptr[d+1] {
+            let c = k_re.col_idx[p] as usize;
+            k_re.values[p] = if c == d { 1.0 } else { 0.0 };
+        }
+    }
+    for &d in &bdr {
+        let d = d as usize;
+        for p in k_im.row_ptr[d]..k_im.row_ptr[d+1] { k_im.values[p] = 0.0; }
+    }
 
     // RHS (real part only for load_src)
     use fem_assembly::vector_integrator::{VectorLinearIntegrator, VectorQpData};
@@ -323,7 +358,10 @@ fn main() {
     let rhs_re = VectorAssembler::assemble_linear(&space, &[&Src { f: src_fn }], qo);
     let mut flat_rhs = vec![0.0_f64; 2 * n];
     for i in 0..n { flat_rhs[i] = rhs_re[i]; }
-    for &d in &bdr { flat_rhs[d as usize] = 0.0; flat_rhs[n + d as usize] = 0.0; }
+    for &d in &bdr {
+        let d = d as usize;
+        flat_rhs[d] = bc_re[d]; flat_rhs[n + d] = bc_im[d];
+    }
 
     // Build [K_re -K_im; K_im K_re]
     let mut coo = CooMatrix::new(2*n, 2*n);
