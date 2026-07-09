@@ -263,13 +263,11 @@ impl<V: VectorCoeff> BilinearIntegrator for DGAdvectionIntegrator<V> {
         self.velocity.eval(&ctx, &mut b[..d]);
 
         for i in 0..n {
-            // Compute (b·∇φ_i)
             let mut b_dot_grad_i = 0.0;
             for k in 0..d {
                 b_dot_grad_i += b[k] * qp.grad_phys[i * d + k];
             }
             for j in 0..n {
-                // -w · (b·∇φ_i) · φ_j
                 k_elem[i * n + j] += -qp.weight * b_dot_grad_i * qp.phi[j];
             }
         }
