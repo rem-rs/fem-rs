@@ -253,7 +253,7 @@ pub(crate) fn apply_signs(
     }
 }
 
-fn accumulate_vector_bilinear_element<S: FESpace>(
+pub fn accumulate_vector_bilinear_element<S: FESpace>(
     space: &S,
     e: u32,
     integrators: &[&dyn VectorBilinearIntegrator],
@@ -416,7 +416,7 @@ fn accumulate_vector_bilinear_element<S: FESpace>(
     coo.add_element_matrix(&global_dofs, &k_elem);
 }
 
-fn accumulate_vector_linear_element<S: FESpace>(
+pub fn accumulate_vector_linear_element<S: FESpace>(
     space: &S,
     e: u32,
     integrators: &[&dyn VectorLinearIntegrator],

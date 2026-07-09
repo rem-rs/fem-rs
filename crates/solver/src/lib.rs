@@ -897,7 +897,7 @@ mod ams_ads_tests {
     use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
     use fem_mesh::Mesh;
     use fem_space::{H1Space, HCurlSpace};
-    use fem_space::constraints::{apply_dirichlet, boundary_dofs_hcurl};
+    use fem_space::constraints::boundary_dofs_hcurl;
     use fem_space::fe_space::FESpace;
 
     // ── AMS: H(curl) curl-curl + mass on 2-D unit square ──────────────────────
@@ -918,11 +918,11 @@ mod ams_ads_tests {
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl)
             .expect("gradient assembly failed");
 
-        // Apply zero Dirichlet BCs symmetrically (to keep SPD for PCG).
+        // Apply zero Dirichlet BCs symmetrically with diag=1.0 for AMS/PCG compatibility.
         let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
         let mut rhs = vec![1.0_f64; ndofs];
         for &dof in &bnd {
-            a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+            a.apply_dirichlet_symmetric(dof as usize, 1.0, &mut rhs);
         }
 
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
@@ -953,10 +953,12 @@ mod ams_ads_tests {
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl)
             .expect("gradient assembly failed");
 
+        // Apply zero Dirichlet BCs via row-zeroing (diag=1, rhs=0) for AMS compatibility.
         let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
-        let vals = vec![0.0_f64; bnd.len()];
         let mut rhs = vec![1.0_f64; ndofs];
-        apply_dirichlet(&mut a, &mut rhs, &bnd, &vals);
+        for &dof in &bnd {
+            a.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
+        }
 
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
@@ -985,11 +987,11 @@ mod ams_ads_tests {
         );
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
 
-        // Apply zero Dirichlet BCs symmetrically (keeps SPD for PCG+AMS)
+        // Apply BCs symmetrically with diag=1.0 for AMS/PCG compatibility.
         let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
         let mut rhs = vec![1.0_f64; ndofs];
         for &dof in &bnd {
-            a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+            a.apply_dirichlet_symmetric(dof as usize, 1.0, &mut rhs);
         }
 
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
@@ -1025,11 +1027,11 @@ mod ams_ads_tests {
         );
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
 
-        // Apply zero Dirichlet BCs symmetrically (keeps SPD for PCG+AMS)
+        // Apply BCs symmetrically with diag=1.0 for AMS/PCG compatibility.
         let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
         let mut rhs = vec![1.0_f64; ndofs];
         for &dof in &bnd {
-            a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+            a.apply_dirichlet_symmetric(dof as usize, 1.0, &mut rhs);
         }
 
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
@@ -1071,11 +1073,12 @@ mod ams_ads_tests {
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl)
             .expect("gradient assembly failed");
 
-        // Apply zero normal-flux BCs on all boundary faces
+        // Apply zero normal-flux BCs via row-zeroing for ADS compatibility.
         let bnd_hdiv = boundary_dofs_hdiv(hdiv.mesh(), &hdiv, &[1, 2, 3, 4, 5, 6]);
-        let vals_hdiv = vec![0.0_f64; bnd_hdiv.len()];
         let mut rhs = vec![1.0_f64; ndofs_hdiv];
-        apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
+        for &dof in &bnd_hdiv {
+            a_hdiv.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
+        }
 
         let c_linlvo = fem_to_linlvo_csr(&c_fem);
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
@@ -1111,9 +1114,10 @@ mod ams_ads_tests {
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
 
         let bnd_hdiv = boundary_dofs_hdiv(hdiv.mesh(), &hdiv, &[1, 2, 3, 4, 5, 6]);
-        let vals_hdiv = vec![0.0_f64; bnd_hdiv.len()];
         let mut rhs = vec![1.0_f64; ndofs_hdiv];
-        apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
+        for &dof in &bnd_hdiv {
+            a_hdiv.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
+        }
 
         let c_linlvo = fem_to_linlvo_csr(&c_fem);
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
@@ -1149,9 +1153,10 @@ mod ams_ads_tests {
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
 
         let bnd_hdiv = boundary_dofs_hdiv(hdiv.mesh(), &hdiv, &[1, 2, 3, 4, 5, 6]);
-        let vals_hdiv = vec![0.0_f64; bnd_hdiv.len()];
         let mut rhs = vec![1.0_f64; ndofs_hdiv];
-        apply_dirichlet(&mut a_hdiv, &mut rhs, &bnd_hdiv, &vals_hdiv);
+        for &dof in &bnd_hdiv {
+            a_hdiv.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
+        }
 
         let c_linlvo = fem_to_linlvo_csr(&c_fem);
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
@@ -1192,7 +1197,7 @@ mod ams_ads_tests {
         let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
         let mut rhs = vec![1.0_f64; ndofs];
         for &dof in &bnd {
-            a.apply_dirichlet_symmetric(dof as usize, 0.0, &mut rhs);
+            a.apply_dirichlet_symmetric(dof as usize, 1.0, &mut rhs);
         }
 
         let g_linlvo = fem_to_linlvo_csr(&g_fem);

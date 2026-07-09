@@ -164,7 +164,6 @@ fn main() {
 
     // AMS preconditioner wrapper for LOBPCG (applies to a block of vectors).
     use fem_solver::lobpcg_constrained_preconditioned;
-    use linlvo::precond::AuxSpaceSolver;
     let ams_precond = |r: &nalgebra::DMatrix<f64>| {
         let mut z = nalgebra::DMatrix::<f64>::zeros(r.nrows(), r.ncols());
         for j in 0..r.ncols() {
@@ -175,10 +174,7 @@ fn main() {
                     rtol: 1e-4, atol: 1e-20, max_iter: 200, verbose: false,
                     ..fem_solver::SolverConfig::default()
                 },
-                ams_cfg: AmsConfig {
-                    node_solver: AuxSpaceSolver::Ilu0,
-                    ..AmsConfig::default()
-                },
+                ams_cfg: AmsConfig::hpc_default(),
             }) {
                 eprintln!("  AMS PCG warning: {e:?}");
             }

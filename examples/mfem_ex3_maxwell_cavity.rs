@@ -40,7 +40,7 @@ use fem_solver::SolverConfig;
 use fem_space::{
     HCurlSpace,
     fe_space::FESpace,
-    constraints::{boundary_dofs_hcurl, apply_dirichlet},
+    constraints::{boundary_dofs_hcurl, eliminate_dirichlet},
 };
 
 fn main() {
@@ -101,49 +101,60 @@ fn main() {
         boundary_dofs_hcurl(space.mesh(), &space, &all_tags)
     };
     eprintln!("  Boundary DOFs: {} / {}", ess_bdr.len(), n_dofs);
-    let ess_vals = vec![0.0_f64; ess_bdr.len()];
-
     // 7. Right-hand side: b(v) = ∫ f·v dx  where
     //    f = (1+κ²)·(sin(κy), sin(κx)).
     let kappa = args.freq * PI;
     let source = MaxwellSource { kappa };
     let quad_order = args.order as u8 * 2 + 2;
-    let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+    let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
     // 8. Solution vector x — zero initial guess (will be set by Dirichlet below).
 
     // 9. Stiffness matrix: a(u, v) = ∫ (∇×u)·(∇×v) + u·v dx.
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
     let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-    let mut mat = VectorAssembler::assemble_bilinear(
+    let mat = VectorAssembler::assemble_bilinear(
         &space, &[&curl_curl, &vec_mass], quad_order,
     );
     print!("Assembling: matrix ... ");
 
-    // 10. Form the linear system (apply essential BCs in-place).
+    // 10. Form the linear system (MFEM-style elimination).
     if args.static_cond {
         eprintln!("  Warning: static condensation not yet implemented — skipping.");
     }
-    if !ess_bdr.is_empty() {
-        apply_dirichlet(&mut mat, &mut rhs, &ess_bdr, &ess_vals);
-    }
+    let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+        // Exact BC values: the analytical solution satisfies n×E = 0 on all
+        // boundaries (sin(π·0) = sin(π·1) = 0), so zero BC is exact.
+        // eliminate_dirichlet builds the reduced system matching C++ FormLinearSystem.
+        let bv = vec![0.0_f64; ess_bdr.len()];
+        let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
+        (rm, rf, fm, cm, bv)
+    } else {
+        let free: Vec<usize> = (0..n_dofs).collect();
+        (mat, rhs, free, vec![], vec![])
+    };
     println!("done.");
 
-    println!("Size of linear system: {n_dofs}");
+    let n_sys = sys_mat.nrows;
+    println!("Size of linear system: {n_sys}");
 
-    // 11. Solve: PCG with Jacobi preconditioner (matching C++ ex3).
-    let cfg = SolverConfig { rtol:1e-8, max_iter:5000, verbose:true, ..Default::default() };
-    let mut u = vec![0.0_f64; n_dofs];
-    let result = fem_solver::solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
-        .expect("PCG+Jacobi solve failed");
-    println!("PCG+Jacobi: {} iters, ||r||/||b|| = {:.3e}",
+    // 11. Solve reduced system with PCG + GSSmoother (matching C++ ex3 GSSmoother).
+    let cfg = SolverConfig { rtol:1e-12, max_iter:500, verbose:true, ..Default::default() };
+    let mut x_red = vec![0.0_f64; n_sys];
+    let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&sys_mat);
+    let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
+        .expect("GSSmoother setup");
+    let result = fem_solver::solve_pcg(&sys_mat, &sys_rhs, &mut x_red, &precond, cfg.rtol, cfg.max_iter, cfg.verbose)
+        .expect("PCG+GSSmoother solve failed");
+    println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
         result.iterations, result.final_residual);
-    // Matrix/rhs diagnostics
-    let rhs_norm: f64 = rhs.iter().map(|v| v*v).sum::<f64>().sqrt();
-    eprintln!("  ||rhs||={:.6e}  ||x|| after solve={:.6e}",
-        rhs_norm, u.iter().map(|v| v*v).sum::<f64>().sqrt());
-    // 12. RecoverFEMSolution — u already holds the full solution in the right
-    //     form (the H(curl) DOF layout matches the space).
+
+    // Recover full solution (matching C++ RecoverFEMSolution).
+    let u = if !ess_bdr.is_empty() {
+        fem_space::constraints::expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
+    } else {
+        x_red
+    };
 
     // 13. Compute and print the L² norm of the error against the exact solution.
     let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
@@ -349,6 +360,7 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_space::constraints::expand_from_reduced;
 
     fn solve_case(args: &Args) -> (Vec<f64>, usize, f64) {
         let mesh = if let Some(ref path) = args.mesh {
@@ -380,16 +392,27 @@ mod tests {
             &space, &[&curl_curl, &vec_mass], quad_order,
         );
 
-        if !ess_bdr.is_empty() {
-            fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs, &ess_bdr, &ess_vals);
-        }
+        let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+            let bv = vec![0.0_f64; ess_bdr.len()];
+            eliminate_dirichlet(&mut mat, &rhs, &ess_bdr, &bv)
+        } else {
+            let free: Vec<usize> = (0..n_dofs).collect();
+            (mat, rhs, free, vec![], vec![])
+        };
 
-        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
-        let precond = fem_solver::GSSmoother::from_csr(&linlvo_mat, 1.0)
-            .expect("SSOR preconditioner setup failed");
-        let mut u = vec![0.0_f64; n_dofs];
-        fem_solver::solve_pcg(&mat, &rhs, &mut u, &precond, 1e-12, 500, false)
+        let n_sys = sys_mat.nrows;
+        let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&sys_mat);
+        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
+            .expect("GSSmoother setup failed");
+        let mut x_red = vec![0.0_f64; n_sys];
+        fem_solver::solve_pcg(&sys_mat, &sys_rhs, &mut x_red, &precond, 1e-12, 500, false)
             .expect("PCG solve failed");
+
+        let u = if !ess_bdr.is_empty() {
+            expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
+        } else {
+            x_red
+        };
 
         let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
             &space, &u, |x| exact_e(x, kappa),

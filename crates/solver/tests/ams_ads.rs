@@ -13,7 +13,7 @@ use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::Mesh;
 use fem_solver::{solve_gmres_ams, solve_pcg_ads, SolverConfig, AmsSolverConfig, AdsSolverConfig};
 use fem_space::{H1Space, HCurlSpace, HDivSpace,
-                fe_space::FESpace, constraints::{boundary_dofs_hcurl, apply_dirichlet}};
+                fe_space::FESpace, constraints::boundary_dofs_hcurl};
 
 fn ams_solver_cfg() -> AmsSolverConfig {
     AmsSolverConfig {
@@ -57,9 +57,12 @@ fn solve_maxwell_2d(n: usize) -> (bool, usize) {
     let mut rhs = VectorAssembler::assemble_linear(&hcurl, &[&src], 4);
 
     // Boundary conditions: tangential component = 0 on all boundaries
+    // Use row-zeroing (diag = 1.0, rhs = 0.0) to keep matrix valid for AMS.
     let bdofs = boundary_dofs_hcurl(&mesh, &hcurl, &[1, 2, 3, 4]);
     let mut a_mut = a;
-    apply_dirichlet(&mut a_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+    for &dof in &bdofs {
+        a_mut.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
+    }
 
     // Assemble discrete gradient G: H1(P1) → H(curl)(ND1) — topological
     let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
@@ -111,7 +114,9 @@ fn ams_2d_hpc_improvement() {
         let mut rhs = fem_assembly::VectorAssembler::assemble_linear(&hcurl, &[&src], 4);
         let bdofs = boundary_dofs_hcurl(&mesh, &hcurl, &[1, 2, 3, 4]);
         let mut a_mut = a;
-        apply_dirichlet(&mut a_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+        for &dof in &bdofs {
+            a_mut.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
+        }
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let mut x = vec![0.0; hcurl.n_dofs()];
@@ -151,9 +156,12 @@ fn solve_darcy_3d(n: usize) -> (bool, usize) {
     let mut rhs = VectorAssembler::assemble_linear(&hdiv, &[&src], 3);
 
     // Dirichlet BCs: normal component = 0 on all 6 cube faces
+    // Use row-zeroing (diag = 1.0, rhs = 0.0) to keep matrix valid for ADS.
     let bdofs = fem_space::constraints::boundary_dofs_hdiv(&mesh, &hdiv, &[1, 2, 3, 4, 5, 6]);
     let mut a_mut = a;
-    apply_dirichlet(&mut a_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+    for &dof in &bdofs {
+        a_mut.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
+    }
 
     // Discrete curl C: H(curl)(ND1) → H(div)(RT0) — topological in 3D
     let c_fem = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
@@ -201,7 +209,9 @@ fn ads_darcy_3d_h_independent() {
         let mut rhs = VectorAssembler::assemble_linear(&hdiv, &[&src], 3);
         let bdofs = fem_space::constraints::boundary_dofs_hdiv(&mesh, &hdiv, &[1, 2, 3, 4, 5, 6]);
         let mut a_mut = a;
-        apply_dirichlet(&mut a_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+        for &dof in &bdofs {
+            a_mut.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
+        }
         let c_fem = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
         let c_linlvo = fem_to_linlvo_csr(&c_fem);
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();

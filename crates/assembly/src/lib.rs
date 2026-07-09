@@ -85,6 +85,7 @@ pub mod transfer;
 pub mod form;
 pub mod ams_solver;
 pub mod hdiv_error;
+pub mod hybridization;
 pub mod static_cond;
 pub mod h1_quad_order_hint;
 pub mod lor_factory;
