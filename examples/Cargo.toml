@@ -296,16 +296,16 @@ name = "mfem_ex50_template_acoustics_structure"
 path = "mfem_ex50_template_acoustics_structure.rs"
 
 [[example]]
-name = "mfem_ex51_template_em_thermal_stress"
-path = "mfem_ex51_template_em_thermal_stress.rs"
+name = "thermal_em_stress_template"
+path = "thermal_em_stress_template.rs"
 
 [[example]]
 name = "mfem_ex52_template_reaction_flow_thermal"
 path = "mfem_ex52_template_reaction_flow_thermal.rs"
 
 [[example]]
-name = "mfem_ex53_3d_electrothermal"
-path = "mfem_ex53_3d_electrothermal.rs"
+name = "electrothermal_3d"
+path = "electrothermal_3d.rs"
 
 [[example]]
 name = "mfem_ex33_fractional_laplacian"
