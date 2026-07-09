@@ -769,6 +769,7 @@ dependencies = [
  "linlvo",
  "log",
  "mpi",
+ "nalgebra 0.33.3",
  "rayon",
 ]
 

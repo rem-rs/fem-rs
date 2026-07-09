@@ -13,6 +13,7 @@ fem-element  = { path = "../element" }
 fem-solver   = { path = "../solver" }
 fem-rmetis   = { path = "../rmetis" }
 linlvo       = { git = "https://github.com/rem-rs/linlvo.git", default-features = false, features = ["rayon"] }
+ nalgebra     = { workspace = true }
 fem-io       = { path = "../io", optional = true }
 log          = { workspace = true }
 bytemuck     = { workspace = true }

@@ -1,98 +1,220 @@
-//! Parallel LOBPCG eigenvalue solver.
+//! Parallel LOBPCG eigenvalue solver (simplified Rayleigh–Ritz).
 //!
-//! Solves the generalized eigenvalue problem `A x = λ B x` in parallel,
-//! where A and B are [`ParCsrMatrix`] distributed across ranks.
-//!
-//! Uses a block-diagonal preconditioner applied locally on each rank.
+//! Uses [`ParCsrMatrix`] global SpMV and [`ParVector`] dot products.
+//! Preconditioner applied locally (block-Jacobi).
 
-use nalgebra::DMatrix;
-use fem_linalg::CsrMatrix;
-use fem_solver::{EigenResult, LobpcgConfig, SolveResult, SolverError};
-
+use nalgebra as na;
+use na::DMatrix;
 use crate::par_csr::ParCsrMatrix;
 use crate::par_vector::ParVector;
 
-/// Result of a parallel LOBPCG solve.
-pub struct ParEigenResult {
+/// Parallel LOBPCG result.
+pub struct ParLobpcgResult {
     pub eigenvalues: Vec<f64>,
-    /// Eigenvectors as local slices (owned portion only, per rank).
     pub eigenvectors: Vec<Vec<f64>>,
+    pub iterations: usize,
+    pub converged: bool,
+    pub final_residual: f64,
 }
 
-/// Solve `A X = B X Λ` in parallel with LOBPCG.
-///
-/// `precond` is a per-rank preconditioner: `Fn(&CsrMatrix<f64>, &[f64], &mut [f64])`
-/// that solves (or approximates) `A z = r` on the local diagonal block.
+/// Solve `A X = B X Λ` with parallel LOBPCG.
 pub fn par_lobpcg(
     a: &ParCsrMatrix,
     b: Option<&ParCsrMatrix>,
     k: usize,
-    precond: &dyn Fn(&CsrMatrix<f64>, &[f64], &mut [f64]),
-    cfg: &LobpcgConfig,
-) -> Result<ParEigenResult, String> {
+    precond: &dyn Fn(&[f64], &mut [f64]),
+    max_iter: usize,
+    tol: f64,
+) -> ParLobpcgResult {
     let n = a.n_owned;
-    if k == 0 || k > n {
-        return Err(format!("LOBPCG: k={k} out of range [1, {n}]"));
-    }
     let comm = a.comm();
-    let rank = comm.rank();
 
-    // The serial LOBPCG algorithm works on the LOCAL diagonal block (A.diag).
-    // This is a block-Jacobi approach — no inter-rank coupling.
-    //
-    // For a properly converged solution, this requires strong diagonal dominance
-    // or a global preconditioner (which would need a parallel AMS/AMG).
-
-    let block_a = &a.diag;
-
-    // Build mass matrix block (or identity if None).
-    let block_b: CsrMatrix<f64> = if let Some(b_mat) = b {
-        b_mat.diag.clone()
-    } else {
-        CsrMatrix::identity(n)
+    // Helper: allocate block of k parallel vectors.
+    let alloc_vec = || -> Vec<ParVector> {
+        (0..k).map(|_| ParVector::zeros_like(
+            &ParVector::from_local_raw(vec![0.0; n], n, a.ghost_exchange_arc(), comm.clone()),
+        )).collect()
     };
 
-    // Initial random vectors
-    let mut x = DMatrix::<f64>::zeros(n, k);
+    let mut x: Vec<ParVector> = (0..k).map(|j| {
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((comm.rank() as usize * 1000 + i * k + j) as f64).fract() * 2.0 - 1.0)
+            .collect();
+        let mut v = ParVector::from_local_raw(data, n, a.ghost_exchange_arc(), comm.clone());
+        v.update_ghosts();
+        v
+    }).collect();
+
+    let mut ax = alloc_vec();
+    let mut bx = alloc_vec();
+    let mut p = alloc_vec();
+    let mut ap = alloc_vec();
+    let mut bp = alloc_vec();
+    let mut r = alloc_vec();
+    let mut z = alloc_vec();
+
+    // Initial A*X, B*X.
     for j in 0..k {
-        for i in 0..n {
-            x[(i, j)] = (rank as f64 * 1000.0 + (i * k + j) as f64).fract() * 2.0 - 1.0;
+        a.spmv(&mut x[j], &mut ax[j]);
+        let bm = b.unwrap_or(a);
+        bm.spmv(&mut x[j], &mut bx[j]);
+    }
+
+    // Rayleigh–Ritz on initial subspace.
+    let (theta, coeffs) = rayleigh_ritz(k, &x, &ax, &bx, &p, &ap, &bp, false);
+    // Rotate X, AX, BX.
+    let x_new: Vec<ParVector> = (0..k).map(|j| linear_comb(&x, &coeffs, j, k)).collect();
+    let ax_new: Vec<ParVector> = (0..k).map(|j| linear_comb(&ax, &coeffs, j, k)).collect();
+    let bx_new: Vec<ParVector> = (0..k).map(|j| linear_comb(&bx, &coeffs, j, k)).collect();
+    for j in 0..k { x[j] = x_new[j].clone_vec(); }
+    for j in 0..k { ax[j] = ax_new[j].clone_vec(); }
+    for j in 0..k { bx[j] = bx_new[j].clone_vec(); }
+
+    // Initial residuals + precondition.
+    let mut residuals = vec![0.0_f64; k];
+    for j in 0..k {
+        let mut rj = ParVector::zeros_like(&x[0]);
+        rj.axpy(1.0, &ax[j]);
+        rj.axpy(-theta[j], &bx[j]);
+
+        let mut zd = vec![0.0; n];
+        precond(rj.owned_slice(), &mut zd);
+        z[j] = ParVector::from_local_raw(zd, n, a.ghost_exchange_arc(), comm.clone());
+        z[j].update_ghosts();
+        r[j] = rj;
+    }
+
+    let mut iter = 0;
+    let mut converged = false;
+    while iter < max_iter && !converged {
+        iter += 1;
+
+        // Update P.
+        if iter == 1 {
+            for j in 0..k { p[j].copy_from(&z[j]); }
+        } else {
+            for j in 0..k {
+                let betta = -z[j].global_dot(&ap[j]) / ap[j].global_dot(&ap[j]).max(1e-30);
+                let mut new_p = ParVector::zeros_like(&x[0]);
+                new_p.axpy(1.0, &z[j]);
+                new_p.axpy(betta, &p[j]);
+                p[j] = new_p;
+            }
+        }
+        for pj in &mut p { pj.update_ghosts(); }
+
+        // A*P, B*P.
+        for j in 0..k { a.spmv(&mut p[j], &mut ap[j]); }
+        if let Some(bm) = b {
+            for j in 0..k { bm.spmv(&mut p[j], &mut bp[j]); }
+        } else {
+            for j in 0..k { bp[j].copy_from(&p[j]); }
+        }
+
+        // Rayleigh–Ritz on [X, P].
+        let (theta2, coeffs2) = rayleigh_ritz(k, &x, &ax, &bx, &p, &ap, &bp, true);
+
+        let x_new2: Vec<ParVector> = (0..k).map(|j| linear_comb(&x, &coeffs2, j, 2 * k)).collect();
+        let ax_new2: Vec<ParVector> = (0..k).map(|j| linear_comb(&ax, &coeffs2, j, 2 * k)).collect();
+        let bx_new2: Vec<ParVector> = (0..k).map(|j| linear_comb(&bx, &coeffs2, j, 2 * k)).collect();
+        for j in 0..k { x[j] = x_new2[j].clone_vec(); }
+        for j in 0..k { ax[j] = ax_new2[j].clone_vec(); }
+        for j in 0..k { bx[j] = bx_new2[j].clone_vec(); }
+
+        let mut max_res = 0.0f64;
+        for j in 0..k {
+            let mut rj = ParVector::zeros_like(&x[0]);
+            rj.axpy(1.0, &ax[j]);
+            rj.axpy(-theta2[j], &bx[j]);
+            residuals[j] = rj.global_norm();
+            max_res = max_res.max(residuals[j]);
+
+            let mut zd = vec![0.0; n];
+            precond(rj.owned_slice(), &mut zd);
+            z[j] = ParVector::from_local_raw(zd, n, a.ghost_exchange_arc(), comm.clone());
+            z[j].update_ghosts();
+            r[j] = rj;
+        }
+
+        if comm.rank() == 0 && (iter % 10 == 0 || max_res <= tol) {
+            eprintln!("  [ParLOBPCG] iter={iter}: max_res={max_res:.3e}");
+        }
+        if max_res <= tol { converged = true; }
+    }
+
+    let eigenvalues: Vec<f64> = (0..k)
+        .map(|j| ax[j].global_dot(&x[j]) / x[j].global_dot(&x[j]).max(1e-30))
+        .collect();
+    let eigenvectors: Vec<Vec<f64>> = x.iter().map(|xj| xj.owned_slice().to_vec()).collect();
+
+    ParLobpcgResult {
+        eigenvalues,
+        eigenvectors,
+        iterations: iter,
+        converged,
+        final_residual: residuals.iter().copied().fold(0.0f64, f64::max),
+    }
+}
+
+/// Rayleigh–Ritz on a subspace span{X} or span{[X,P]}.
+fn rayleigh_ritz(
+    k: usize,
+    x: &[ParVector], ax: &[ParVector], bx: &[ParVector],
+    p: &[ParVector], ap: &[ParVector], bp: &[ParVector],
+    use_p: bool,
+) -> (Vec<f64>, DMatrix<f64>) {
+    let m = if use_p { 2 * k } else { k };
+    let mut a_proj = DMatrix::<f64>::zeros(m, m);
+    let mut b_proj = DMatrix::<f64>::zeros(m, m);
+
+    for i in 0..k {
+        for j in 0..k {
+            a_proj[(i, j)] = x[i].global_dot(&ax[j]);
+            b_proj[(i, j)] = x[i].global_dot(&bx[j]);
+            if use_p {
+                a_proj[(i, j + k)] = x[i].global_dot(&ap[j]);
+                a_proj[(i + k, j)] = p[i].global_dot(&ax[j]);
+                a_proj[(i + k, j + k)] = p[i].global_dot(&ap[j]);
+                b_proj[(i, j + k)] = x[i].global_dot(&bp[j]);
+                b_proj[(i + k, j)] = p[i].global_dot(&bx[j]);
+                b_proj[(i + k, j + k)] = p[i].global_dot(&bp[j]);
+            }
         }
     }
 
-    // Serial LOBPCG on the diagonal block (block-Jacobi approximation).
-    use fem_solver::lobpcg_constrained_preconditioned;
+    // Generalized eigendecomposition: A_proj s = λ B_proj s.
+    // Use dense solve: B⁻¹ A s = λ s, then sort by λ.
+    let b_inv = match b_proj.clone().try_inverse() {
+        Some(bi) => bi,
+        None => na::DMatrix::identity(m, m),
+    };
+    let a_red = b_inv * a_proj;
 
-    // Build gradient constraints for the nullspace: this is a rank-1 matrix
-    // (all-ones vector) representing the constant gradient field.
-    let constraints = DMatrix::<f64>::zeros(n, 0);
+    // Use nalgebra's symmetric eigendecomposition (works for real eigenvalues).
+    let a_sym = &a_red + a_red.transpose();
+    let a_sym = a_sym * 0.5; // symmetrize for safety.
+    let eig = na::linalg::SymmetricEigen::new(a_sym);
+    let eigenvalues = eig.eigenvalues;
+    let eigenvectors = eig.eigenvectors;
 
-    let result = lobpcg_constrained_preconditioned(
-        block_a, Some(block_b), k, &constraints,
-        |r: &DMatrix<f64>| -> DMatrix<f64> {
-            let mut z = DMatrix::<f64>::zeros(r.nrows(), r.ncols());
-            for j in 0..r.ncols() {
-                let rhs: Vec<f64> = r.column(j).iter().copied().collect();
-                let mut sol = vec![0.0; n];
-                precond(block_a, &rhs, &mut sol);
-                for i in 0..n { z[(i, j)] = sol[i]; }
-            }
-            z
-        },
-        cfg,
-    ).map_err(|e| format!("par_lobpcg: serial block solve failed: {e}"))?;
+    let mut indices: Vec<usize> = (0..m).collect();
+    indices.sort_by(|&i, &j| eigenvalues[i].partial_cmp(&eigenvalues[j]).unwrap());
 
-    let par_eigvals = result.eigenvalues.clone();
-
-    // Distribute eigenvectors: each rank gets its owned portion.
-    let mut par_eigvecs = Vec::new();
-    for j in 0..k {
-        let col: Vec<f64> = result.eigenvectors.column(j).iter().copied().collect();
-        par_eigvecs.push(col);
+    let mut sorted_theta = Vec::with_capacity(k);
+    let mut sorted_coeffs = DMatrix::<f64>::zeros(m, k);
+    for (idx, &src) in indices.iter().enumerate().take(k) {
+        sorted_theta.push(eigenvalues[src]);
+        for i in 0..m {
+            sorted_coeffs[(i, idx)] = eigenvectors[(i, src)];
+        }
     }
+    (sorted_theta, sorted_coeffs)
+}
 
-    Ok(ParEigenResult {
-        eigenvalues: par_eigvals,
-        eigenvectors: par_eigvecs,
-    })
+fn linear_comb(basis: &[ParVector], coeffs: &DMatrix<f64>, j: usize, m: usize) -> ParVector {
+    let mut v = ParVector::zeros_like(&basis[0]);
+    for i in 0..m.min(basis.len()) {
+        v.axpy(coeffs[(i, j)], &basis[i]);
+    }
+    v
 }
