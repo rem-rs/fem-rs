@@ -284,8 +284,8 @@ name = "mfem_ex47_multiphysics_templates"
 path = "mfem_ex47_multiphysics_templates.rs"
 
 [[example]]
-name = "mfem_ex48_template_joule_heating"
-path = "mfem_ex48_template_joule_heating.rs"
+name = "template_joule_heating"
+path = "template_joule_heating.rs"
 
 [[example]]
 name = "mfem_ex49_template_fsi"
