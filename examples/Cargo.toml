@@ -506,6 +506,10 @@ name = "mfem_ex32_maxwell_eigenvalue"
 path = "mfem_ex32_maxwell_eigenvalue.rs"
 
 [[example]]
+name = "mfem_pex32_maxwell_eigenvalue"
+path = "mfem_pex32_maxwell_eigenvalue.rs"
+
+[[example]]
 name = "mfem_ex34_absorbing_maxwell"
 path = "mfem_absorbing_maxwell.rs"
 
