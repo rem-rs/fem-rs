@@ -36,7 +36,7 @@ use fem_mesh::{
     ElementTransformation, ElementType, refine_uniform_3d,
     topology::MeshTopology,
 };
-use fem_solver::{solve_cg, solve_pcg_jacobi};
+use fem_solver::solve_pcg_ilu0;
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace,
     constraints::{boundary_dofs_hcurl, boundary_dofs_hdiv},
@@ -129,12 +129,10 @@ fn main() {
         mesh.elem_tags[ei as usize] = submesh_attr;
     }
 
-    // Further refinements (only for uniform-element-type meshes).
-    if mesh.elem_types.is_none() {
-        let ref_levels = args.ref_levels;
-        for _ in 0..ref_levels {
-            mesh = refine_uniform_3d(&mesh);
-        }
+    // Further refinements.
+    let ref_levels = args.ref_levels;
+    for _ in 0..ref_levels {
+        mesh = refine_uniform_3d(&mesh);
     }
 
     let cond_attr = [submesh_attr];
@@ -142,7 +140,6 @@ fn main() {
     let mesh_cond = submesh.mesh.clone();
     eprintln!("  SubMesh: {} elements, {} nodes, {} boundary faces",
         mesh_cond.n_elems(), mesh_cond.n_nodes(), mesh_cond.n_faces());
-    eprintln!("  SubMesh face tags: {:?}", mesh_cond.face_tags.iter().map(|&t| t as i32).collect::<Vec<_>>());
 
     // 6. Define finite element spaces on the SubMesh.
     let order = args.order;
@@ -204,7 +201,7 @@ fn main() {
     eprintln!("Size of linear system: {}", red_mat.nrows);
 
     let mut x_h1 = vec![0.0_f64; red_mat.nrows];
-    let h1_result = solve_pcg_jacobi(&red_mat, &red_rhs, &mut x_h1, &SolverConfig {
+    let h1_result = solve_pcg_ilu0(&red_mat, &red_rhs, &mut x_h1, &SolverConfig {
         rtol: 1e-12, max_iter: 200, verbose: true, ..SolverConfig::default()
     }).expect("H1 PCG solve failed");
     expand_solution(&x_h1, &h1_free, &h1_constrained, &bc_vals, &mut phi);
@@ -248,9 +245,9 @@ fn main() {
         eliminate_bc(&rt_mass, &mut b_rt, &ess_dofs_rt, &vec![0.0; ess_dofs_rt.len()], &mut j_cond);
 
     let mut x_rt = vec![0.0_f64; red_rt.nrows];
-    let _j_result = solve_cg(&red_rt, &red_rhs_rt, &mut x_rt, &SolverConfig {
-        rtol: 1e-12, max_iter: 2000, verbose: true, ..SolverConfig::default()
-    }).expect("RT CG solve failed");
+    let _j_result = solve_pcg_ilu0(&red_rt, &red_rhs_rt, &mut x_rt, &SolverConfig {
+        rtol: 1e-12, max_iter: 5000, verbose: true, ..SolverConfig::default()
+    }).expect("RT PCG+ILU0 solve failed");
     expand_solution(&x_rt, &rt_free, &rt_constrained, &vec![0.0; ess_dofs_rt.len()], &mut j_cond);
 
     // ── 6c. Save SubMesh and current density ───────────────────────────────
@@ -309,9 +306,9 @@ fn main() {
     eprintln!("Size of linear system: {}", red_nd.nrows);
 
     let mut x_nd = vec![0.0_f64; red_nd.nrows];
-    let nd_result = solve_pcg_jacobi(&red_nd, &red_rhs_nd, &mut x_nd, &SolverConfig {
-        rtol: 1e-12, max_iter: 500, verbose: true, ..SolverConfig::default()
-    }).expect("ND PCG solve failed");
+    let nd_result = solve_pcg_ilu0(&red_nd, &red_rhs_nd, &mut x_nd, &SolverConfig {
+        rtol: 1e-6, max_iter: 8000, verbose: true, ..SolverConfig::default()
+    }).expect("ND PCG+ILU0 solve failed");
     expand_solution(&x_nd, &nd_free, &nd_constrained, &vec![0.0; ess_dofs_nd.len()], &mut a_sol);
 
     eprintln!("  ND solve: {} iterations, final residual {}",

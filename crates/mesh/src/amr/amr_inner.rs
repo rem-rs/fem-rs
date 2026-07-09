@@ -571,6 +571,10 @@ pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
 /// Prism6 → 8 Prism6, Pyramid5 → 16 Tet4.
 pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+    // For mixed-element meshes, use per-element-type refinement with shared edge map.
+    if mesh.elem_types.is_some() {
+        return refine_mixed_3d(mesh);
+    }
     let mut result = match mesh.elem_type {
         ElementType::Tet4 | ElementType::Tet10 => {
             let (m, _, _) = refine_nonconforming_3d(mesh, &all);
@@ -593,9 +597,8 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 conn: hex8_conn,
                 elem_tags: mesh.elem_tags.clone(),
                 elem_type: ElementType::Hex8,
-                face_conn: mesh.face_conn.clone(),
-                face_tags: mesh.face_tags.clone(),
-                face_type: mesh.face_type,
+                face_conn: vec![], face_tags: vec![],
+                face_type: ElementType::Quad4,
                 elem_types: None, elem_offsets: None,
                 face_types: None, face_offsets: None,
                 face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
@@ -612,6 +615,168 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
             m
         }
         _ => panic!("refine_uniform_3d: unsupported {:?}", mesh.elem_type),
+    };
+    rebuild_3d_boundary(&mut result, mesh);
+    result
+}
+
+/// Refine a mixed-element 3-D mesh using a shared edge-midpoint map.
+///
+/// All element types contribute to and use the same edge midpoint map,
+/// ensuring conforming interfaces between different element types.
+fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
+    let n_elems = mesh.n_elems();
+    let mut coords = mesh.coords.clone();
+    let mut em: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
+    let mut next_node = mesh.n_nodes() as NodeId;
+
+    // ── 1. Global edge midpoint map ────────────────────────────────────────
+    let tet_edges = local_edges_tet();
+    let hex_edges = local_edges_hex();
+    let prism_edges = local_edges_prism();
+    for e in 0..n_elems as ElemId {
+        let et = mesh.element_type_at(e);
+        let ns = mesh.elem_nodes(e);
+        let edges = match et {
+            ElementType::Tet4 | ElementType::Tet10 => &tet_edges[..],
+            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => &hex_edges[..],
+            ElementType::Prism6 | ElementType::Prism15 => &prism_edges[..],
+            _ => continue,
+        };
+        for &(a, b) in edges {
+            let key = edge_key(ns[a], ns[b]);
+            em.entry(key).or_insert_with(|| {
+                let ca = mesh.coords_of(ns[a]); let cb = mesh.coords_of(ns[b]);
+                coords.extend_from_slice(&[0.5*(ca[0]+cb[0]), 0.5*(ca[1]+cb[1]), 0.5*(ca[2]+cb[2])]);
+                let id = next_node; next_node += 1; id
+            });
+        }
+    }
+
+    // ── 2. Global tri/quad face center maps + body centers ─────────────────
+    let mut tri_fc: HashMap<(NodeId, NodeId, NodeId), NodeId> = HashMap::new();
+    let mut quad_fc: HashMap<[NodeId; 4], NodeId> = HashMap::new();
+    let mut body_cc: HashMap<ElemId, NodeId> = HashMap::new();
+
+    for e in 0..n_elems as ElemId {
+        let et = mesh.element_type_at(e);
+        let ns = mesh.elem_nodes(e);
+
+        let mut face_center = |fv: &[NodeId]| -> NodeId {
+            let (mut x, mut y, mut z) = (0.0,0.0,0.0);
+            let nv = fv.len() as f64;
+            for &n in fv { let c = mesh.coords_of(n); x+=c[0]; y+=c[1]; z+=c[2]; }
+            coords.extend_from_slice(&[x/nv, y/nv, z/nv]);
+            let id = next_node; next_node += 1; id
+        };
+
+        match et {
+            ElementType::Tet4 => {
+                for &(a,b,c) in &local_faces_tet() {
+                    tri_fc.entry(face_key_3d(ns[a],ns[b],ns[c]))
+                        .or_insert_with(|| face_center(&[ns[a],ns[b],ns[c]]));
+                }
+            }
+            ElementType::Hex8 => {
+                for f in &local_faces_hex() {
+                    let fns = [ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]];
+                    quad_fc.entry(quad_face_key(fns))
+                        .or_insert_with(|| face_center(&fns));
+                }
+            }
+            ElementType::Prism6 => {
+                for &(a,b,c) in &local_faces_prism_tri() {
+                    tri_fc.entry(face_key_3d(ns[a],ns[b],ns[c]))
+                        .or_insert_with(|| face_center(&[ns[a],ns[b],ns[c]]));
+                }
+                for f in &local_faces_prism_quad() {
+                    let fns = [ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]];
+                    quad_fc.entry(quad_face_key(fns))
+                        .or_insert_with(|| face_center(&fns));
+                }
+            }
+            _ => {}
+        }
+        // Body center
+        body_cc.entry(e).or_insert_with(|| {
+            let nv = ns.len() as f64;
+            let (mut x,mut y,mut z) = (0.0,0.0,0.0);
+            for &n in ns { let c = mesh.coords_of(n); x+=c[0]; y+=c[1]; z+=c[2]; }
+            coords.extend_from_slice(&[x/nv, y/nv, z/nv]);
+            let id = next_node; next_node += 1; id
+        });
+    }
+
+    // ── 3. Generate child elements per type, using extend-then-push pattern ─
+    let mut new_conn = Vec::<NodeId>::new();
+    let mut new_tags = Vec::<i32>::new();
+    let mut new_types = Vec::<ElementType>::new();
+    let mut new_offsets = Vec::<usize>::new();
+    new_offsets.push(0); // start offset for first child
+
+    macro_rules! mid { ($a:expr,$b:expr) => { em[&edge_key($a,$b)] }; }
+
+    for e in 0..n_elems as ElemId {
+        let et = mesh.element_type_at(e);
+        let ns = mesh.elem_nodes(e);
+        let tag = mesh.elem_tags[e as usize];
+        let bc = body_cc[&e];
+
+        match et {
+            ElementType::Tet4 => {
+                let m01=mid!(ns[0],ns[1]);let m02=mid!(ns[0],ns[2]);let m03=mid!(ns[0],ns[3]);
+                let m12=mid!(ns[1],ns[2]);let m13=mid!(ns[1],ns[3]);let m23=mid!(ns[2],ns[3]);
+                for &ch in &[
+                    [ns[0],m01,m02,m03],[m01,ns[1],m12,m13],[m02,m12,ns[2],m23],[m03,m13,m23,ns[3]],
+                    [m01,m02,m12,m03],[m02,m12,m23,m03],[m01,m12,m13,m03],[m12,m13,m23,m03],
+                ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
+                for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Tet4); }
+            }
+            ElementType::Hex8 => {
+                let e01=mid!(ns[0],ns[1]);let e23=mid!(ns[2],ns[3]);let e03=mid!(ns[0],ns[3]);let e12=mid!(ns[1],ns[2]);
+                let e45=mid!(ns[4],ns[5]);let e67=mid!(ns[6],ns[7]);let e47=mid!(ns[4],ns[7]);let e56=mid!(ns[5],ns[6]);
+                let e04=mid!(ns[0],ns[4]);let e15=mid!(ns[1],ns[5]);let e26=mid!(ns[2],ns[6]);let e37=mid!(ns[3],ns[7]);
+                let qf = |fi: usize| -> NodeId {
+                    let f=local_faces_hex()[fi]; quad_fc[&quad_face_key([ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]])]
+                };
+                let f0=qf(0);let f1=qf(1);let f2=qf(2);let f3=qf(3);let f4=qf(4);let f5=qf(5);
+                for &ch in &[
+                    [ns[0],e01,f0,e03,e04,f2,bc,f4],[ns[1],e01,f0,e12,e15,f2,bc,f5],
+                    [ns[2],e12,f0,e23,e26,f3,bc,f5],[ns[3],e03,f0,e23,e37,f3,bc,f4],
+                    [ns[4],e04,f1,e45,e47,f2,bc,f4],[ns[5],e15,f1,e45,e56,f2,bc,f5],
+                    [ns[6],e26,f1,e56,e67,f3,bc,f5],[ns[7],e37,f1,e67,e47,f3,bc,f4],
+                ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
+                for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Hex8); }
+            }
+            ElementType::Prism6 => {
+                let m01=mid!(ns[0],ns[1]);let m02=mid!(ns[0],ns[2]);let m12=mid!(ns[1],ns[2]);
+                let m34=mid!(ns[3],ns[4]);let m35=mid!(ns[3],ns[5]);let m45=mid!(ns[4],ns[5]);
+                let m03=mid!(ns[0],ns[3]);let m14=mid!(ns[1],ns[4]);let m25=mid!(ns[2],ns[5]);
+                let qf = |fi: usize| -> NodeId {
+                    let f=local_faces_prism_quad()[fi]; quad_fc[&quad_face_key([ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]])]
+                };
+                let q0=qf(0);let q1=qf(1);let q2=qf(2);
+                for &ch in &[
+                    [ns[0],m01,m02,m03,q0,q2],[m01,ns[1],m12,q0,m14,q1],
+                    [m02,m12,ns[2],q2,q1,m25],[m01,m12,m02,q0,q1,q2],
+                    [m03,q0,q2,ns[3],m34,m35],[q0,m14,q1,m34,ns[4],m45],
+                    [q2,q1,m25,m35,m45,ns[5]],[q0,q1,q2,m34,m45,m35],
+                ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
+                for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Prism6); }
+            }
+            _ => {}
+        }
+    }
+
+    let mut result = Mesh {
+        coords,
+        conn: new_conn,
+        elem_tags: new_tags,
+        elem_type: mesh.elem_type,
+        face_conn: vec![], face_tags: vec![], face_type: ElementType::Tri3,
+        elem_types: Some(new_types), elem_offsets: Some(new_offsets),
+        face_types: None, face_offsets: None,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
     };
     rebuild_3d_boundary(&mut result, mesh);
     result
