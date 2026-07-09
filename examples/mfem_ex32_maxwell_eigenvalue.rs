@@ -1,4 +1,4 @@
-//! # Example 32 — Maxwell eigenvalue problem  (1:1 with MFEM ex32)
+﻿//! # Example 32 — Maxwell eigenvalue problem  (1:1 with MFEM ex32)
 //!
 //! Solves `curl curl E = λ ε E` with anisotropic dielectric tensor ε and
 //! homogeneous Dirichlet (PEC) boundary conditions E × n = 0.
@@ -111,12 +111,12 @@ fn main() {
     let quad_order = 2 * order as u8 + 1;
 
     // Assemble A = curl curl
-    let a_mat = VectorAssembler::assemble_bilinear(
+    let mut a_mat = VectorAssembler::assemble_bilinear(
         &fec_nd, &[&CurlCurlIntegrator { mu: 1.0 }], quad_order,
     );
 
     // Assemble M = ε (anisotropic mass)
-    let m_mat = VectorAssembler::assemble_bilinear(
+    let mut m_mat = VectorAssembler::assemble_bilinear(
         &fec_nd, &[&VectorMassTensorIntegrator { alpha: epsilon_coeff }], quad_order,
     );
 
@@ -128,39 +128,38 @@ fn main() {
         else { boundary_dofs_hcurl(nd_mesh, &fec_nd, &all_tags) };
     eprintln!("  Boundary DOFs: {} / {}", ess_bdr_nd.len(), n_nd);
 
-    // Eliminate BC DOFs from A and M, then solve on the reduced system.
-    // This avoids ALL constraint-projection issues in LOBPCG.
-    use fem_space::constraints::eliminate_dirichlet;
-    let zero_vals = vec![0.0_f64; ess_bdr_nd.len()];
-    let zero_rhs = vec![0.0_f64; n_nd];
-    let (a_red, _, free_map, _) = eliminate_dirichlet(&a_mat, &zero_rhs, &ess_bdr_nd, &zero_vals);
-    let (m_red, _, _, _)     = eliminate_dirichlet(&m_mat, &zero_rhs, &ess_bdr_nd, &zero_vals);
-    let n_red = a_red.nrows;
-    eprintln!("  Reduced system size: {} ({} DOFs eliminated)", n_red, n_nd - n_red);
+    // 7b. EliminateEssentialBCDiag — MFEM 1:1: diagonal-only BC modification.
+    //     A[i,i] = 1.0 shifts the eigenvalue at BC DOFs to ~4.5e307,
+    //     pushing them out of the spectral range of interest.
+    for &d in &ess_bdr_nd {
+        a_mat.eliminate_essential_bc_diag(d as usize, 1.0);
+        m_mat.eliminate_essential_bc_diag(d as usize, 1e-8);
+    }
 
-    // Build gradient constraints in the REDUCED system.
+    // Discrete gradient G: H^1 -> H(Curl) for AMS preconditioner + gradient constraints.
     let fec_h1 = H1Space::new(mesh.clone(), 1);
     let n_h1 = fec_h1.n_dofs();
     let grad = DiscreteLinearOperator::gradient(&fec_h1, &fec_nd)
         .expect("gradient assembly failed");
-    let mut constraints = nalgebra::DMatrix::<f64>::zeros(n_red, n_h1);
-    for (ri, &orig_dof) in free_map.iter().enumerate() {
-        let start = grad.row_ptr[orig_dof];
-        let end = grad.row_ptr[orig_dof + 1];
+    let _g_linlvo = fem_linalg::fem_to_linlvo_csr(&grad);
+
+    // Gradient constraints (curl-curl nullspace) — LOBPCG constraint projection.
+    let mut constraints = nalgebra::DMatrix::<f64>::zeros(n_nd, n_h1);
+    for nd_dof in 0..n_nd {
+        let start = grad.row_ptr[nd_dof];
+        let end = grad.row_ptr[nd_dof + 1];
         for j in start..end {
             let h1_dof = grad.col_idx[j] as usize;
             let val = grad.values[j];
-            constraints[(ri, h1_dof)] = val;
+            constraints[(nd_dof, h1_dof)] = val;
         }
     }
 
-    // 8-9. Solve with CONSTRAINED LOBPCG on the reduced system.
-    // The reduced M has only interior DOFs (original values, no tiny BC entries),
-    // so M-orthogonalization of constraints works correctly.
-    eprintln!("\nSolving for eigenvalues using LOBPCG (reduced system, gradient constraints)");
-    eprintln!("  Number of target eigenmodes: {}", args.nev);
+    // 8-9. Solve with LOBPCG + GSSmoother preconditioner.
+    eprintln!("\nSolving for eigenvalues (EliminateEssentialBCDiag + LOBPCG)");
+    eprintln!("  Number of requested eigenmodes: {}", args.nev);
 
-    let a_csr = fem_linalg::fem_to_linlvo_csr(&a_red);
+    let a_csr = fem_linalg::fem_to_linlvo_csr(&a_mat);
     let gs_smoother = match fem_solver::GSSmoother::from_csr(&a_csr, 1.0) {
         Ok(gs) => gs,
         Err(e) => panic!("GSSmoother setup failed: {e}"),
@@ -170,41 +169,24 @@ fn main() {
         use linlvo::Preconditioner;
         for j in 0..r.ncols() {
             let rv = linlvo::DenseVec::from_vec(r.column(j).iter().copied().collect());
-            let mut zv = linlvo::DenseVec::zeros(n_red);
+            let mut zv = linlvo::DenseVec::zeros(n_nd);
             gs_smoother.apply_precond(&rv, &mut zv);
-            for i in 0..n_red { z[(i, j)] = zv.as_slice()[i]; }
+            for i in 0..n_nd { z[(i, j)] = zv.as_slice()[i]; }
         }
         z
     };
 
-    use fem_solver::lobpcg_constrained_preconditioned;
-    let eig_result = lobpcg_constrained_preconditioned(
-        &a_red, Some(&m_red), args.nev, &constraints, gs_precond,
+    let eig_result = fem_solver::lobpcg_constrained_preconditioned(
+        &a_mat, Some(&m_mat), args.nev, &constraints, gs_precond,
         &LobpcgConfig {
-            max_iter: 5000,
-            tol: 1e-6,
-            verbose: true,
-            ..LobpcgConfig::default()
+            max_iter: 2000, tol: 1e-6, verbose: true, ..LobpcgConfig::default()
         },
     ).expect("LOBPCG solve failed");
 
-    let physical: Vec<(f64, usize)> = eig_result.eigenvalues.iter().enumerate()
-        .map(|(i, &v)| (v, i)).collect();
-
-    // Map eigenvectors back to full space.
-    // The full-space eigenvector has x[free_map[i]] = eigvec[i] and x[bc_dof] = 0.
-    let expand_to_full = |ev: &[f64]| -> Vec<f64> {
-        let mut full = vec![0.0_f64; n_nd];
-        for (ri, &orig_dof) in free_map.iter().enumerate() {
-            full[orig_dof] = ev[ri];
-        }
-        full
-    };
-
-    for (i, &(lambda, _)) in physical.iter().enumerate() {
+    for (i, &lambda) in eig_result.eigenvalues.iter().enumerate() {
         eprintln!("  Eigenmode H(Curl) {}: lambda = {:.15e}", i + 1, lambda);
     }
-    let n_found = physical.len();
+    let n_found = eig_result.eigenvalues.len();
 
     // Compute curl of each eigenmode via DiscreteLinearOperator.
     let curl_op = DiscreteLinearOperator::curl_3d(&fec_nd, &fec_rt)
@@ -217,17 +199,17 @@ fn main() {
         write_mfem(&mut f, &dummy2d, Some(&mesh)).expect("write refined.mesh");
     }
     for i in 0..n_found.min(args.nev) {
-        let (_, orig_idx) = physical[i];
-        let mode = eig_result.eigenvectors.column(orig_idx);
+        
+        let mode = eig_result.eigenvectors.column(i);
         let mode_vec: Vec<f64> = mode.iter().copied().collect();
 
         let mut curl_vec = vec![0.0_f64; n_rt];
-        let mode_full = expand_to_full(&mode_vec);
-        curl_op.spmv(&mode_full, &mut curl_vec);
+        
+        curl_op.spmv(&mode_vec, &mut curl_vec);
 
         let mode_name = format!("mode_{:02}.gf", i);
         let mut f = File::create(&mode_name).expect(&mode_name);
-        write_mfem_gf(&mut f, &mode_full, &fec_nd).expect("write mode");
+        write_mfem_gf(&mut f, &mode_vec, &fec_nd).expect("write mode");
 
         let curl_name = format!("mode_curl_{:02}.gf", i);
         let mut ff = File::create(&curl_name).expect(&curl_name);

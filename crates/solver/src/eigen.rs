@@ -131,8 +131,11 @@ fn lobpcg_projected(
     assert_eq!(a.ncols, n, "A must be square");
     assert!(k >= 1 && k <= n, "k must be in [1, n]");
 
+    // Constraint basis uses Euclidean orthogonalisation so that solver behaviour
+    // is independent of the B-matrix diagonal (important when B has very small or
+    // very large diagonal entries, e.g. after EliminateEssentialBCDiag).
     let constraint_basis = constraints
-        .map(|c| orthonormal_basis(c.clone(), b))
+        .map(|c| orthonormal_basis(c.clone(), None))
         .unwrap_or_else(|| DMatrix::<f64>::zeros(n, 0));
 
     if constraint_basis.ncols() + k > n {
@@ -145,7 +148,7 @@ fn lobpcg_projected(
     }
 
     // ── 1. Initialise X with random orthonormal columns ───────────────────────
-    let mut x = random_feasible_orthonormal(n, k, &constraint_basis, b)?;
+    let mut x = random_feasible_orthonormal(n, k, &constraint_basis, None)?;
 
     let mut p = DMatrix::<f64>::zeros(n, k); // previous search direction (0 on first iter)
     let mut use_p = false;
@@ -174,7 +177,7 @@ fn lobpcg_projected(
             let mut rj = r.column_mut(j);
             rj.axpy(-lj, &bxj, 1.0);
         }
-        project_out(&mut r, &constraint_basis, b);
+        project_out(&mut r, &constraint_basis, None);// Euclidean projection (constraint basis is Euclidean-orthonormal)
 
         // ── 5. Convergence check ──────────────────────────────────────────────
         let res_norms: Vec<f64> = (0..k)
@@ -211,7 +214,7 @@ fn lobpcg_projected(
         } else {
             r.clone()
         };
-        project_out(&mut z, &constraint_basis, b);
+        project_out(&mut z, &constraint_basis, None);
 
         // ── 7. Update X using local Rayleigh–Ritz in span(X, Z, P) ───────────
         // Build the combined basis W = [X | R | P] (skip P on first iter).
@@ -228,9 +231,9 @@ fn lobpcg_projected(
             w
         };
 
-        // Orthonormalise W.
-        project_out(&mut w, &constraint_basis, b);
-        w = orthonormal_basis(w, b);
+        // Orthonormalise W (Euclidean — constraint basis is Euclidean-orthonormal).
+        project_out(&mut w, &constraint_basis, None);
+        w = orthonormal_basis(w, None);
         if w.ncols() < k {
             return Err("projected LOBPCG trial space lost rank".to_string());
         }
@@ -255,12 +258,12 @@ fn lobpcg_projected(
         }
 
         x = x_new;
-        project_out(&mut x, &constraint_basis, b);
-        project_out(&mut p, &constraint_basis, b);
+        project_out(&mut x, &constraint_basis, None);
+        project_out(&mut p, &constraint_basis, None);
         use_p = true;
 
-        // Re-orthonormalise X.
-        let x_basis = orthonormal_basis(x, b);
+        // Re-orthonormalise X (Euclidean).
+        let x_basis = orthonormal_basis(x, None);
         if x_basis.ncols() < k {
             return Err("projected LOBPCG iterate lost rank".to_string());
         }
