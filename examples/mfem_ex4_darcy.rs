@@ -307,7 +307,7 @@ fn main() {
     let l2_err = fem_assembly::hdiv_error::compute_hdiv_l2_error(
         &space, &u, |x| exact_f(x, kappa),
     );
-    println!("\n|| F_h - F ||_{{L^2}} = {l2_err:.14e}\n");
+    println!("\n|| F_h - F ||_{{L^2}} = {l2_err:.14e}");
 
     // 14. Save the refined mesh and the solution (matches MFEM ex4 output files).
     {
