@@ -17,7 +17,7 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::{CooMatrix, SolverConfig};
+use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
 use fem_mesh::{Mesh, refine_uniform};
 use fem_space::{HCurlSpace, constraints::boundary_dofs_hcurl, fe_space::FESpace};
 
@@ -79,6 +79,44 @@ impl ScalarCoeff for PmlCurlIm {
         let det_im = dx_im + dy_im;
         let inv_det_im = -det_im / (det_re*det_re + det_im*det_im);
         if ctx.elem_tag == 1 { 0.0 } else { inv_det_im }
+    }
+}
+
+/// Absolute-value PML coefficients for preconditioner
+struct PmlCurlReAbs { omega: f64, pml: PmlCoeff }
+impl ScalarCoeff for PmlCurlReAbs {
+    fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
+        if ctx.elem_tag == 1 { return 1.0; }
+        let k = self.omega;
+        let sx = pml_sigma_x(ctx.x, &self.pml, k);
+        let sy = pml_sigma_y(ctx.x, &self.pml, k);
+        let dx_im = sx/self.omega; let dy_im = sy/self.omega;
+        let det_re = 1.0 - dx_im*dy_im; let det_im = dx_im + dy_im;
+        let inv_det_abs = 1.0 / (det_re*det_re + det_im*det_im).sqrt();
+        inv_det_abs
+    }
+}
+struct PmlCurlImAbs { omega: f64, pml: PmlCoeff }
+impl ScalarCoeff for PmlCurlImAbs {
+    fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
+        if ctx.elem_tag == 1 { return 0.0; }
+        let k = self.omega;
+        let sx = pml_sigma_x(ctx.x, &self.pml, k);
+        let sy = pml_sigma_y(ctx.x, &self.pml, k);
+        let dx_im = sx/self.omega; let dy_im = sy/self.omega;
+        let det_im = dx_im + dy_im;
+        det_im.abs() / (1.0 + dy_im*dy_im).max(1e-16)
+    }
+}
+struct PmlMassAbs { omega: f64, pml: PmlCoeff }
+impl ScalarCoeff for PmlMassAbs {
+    fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
+        if ctx.elem_tag == 1 { return 1.0; }
+        let sx = pml_sigma_x(ctx.x, &self.pml, self.omega);
+        let sy = pml_sigma_y(ctx.x, &self.pml, self.omega);
+        let d_re = 1.0 - (sx/self.omega)*(sy/self.omega);
+        let d_im = sx/self.omega + sy/self.omega;
+        (d_re*d_re + d_im*d_im).sqrt()
     }
 }
 
@@ -169,8 +207,9 @@ fn main() {
     let mut k_re = curl_re.axpby(1.0, &mass_re, -omega*omega);
 
     let curl_im = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlIm { omega, pml: pml.clone() } }], qo);
-    let mass_im = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassIm { omega, pml } }], qo);
+    let mass_im = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassIm { omega, pml: pml.clone() } }], qo);
     let mut k_im = curl_im.axpby(1.0, &mass_im, -omega*omega);
+    let pml_prec = pml.clone(); // saved for preconditioner
 
     // Source: Gaussian approximation of point source (matching C++ load_src)
     let (cx, cy) = { let (lo, hi) = mesh.bounding_box(); ((lo[0]+hi[0])/2.0, (lo[1]+hi[1])/2.0) };
@@ -211,7 +250,43 @@ fn main() {
     let a = coo.into_csr();
 
     let mut x = vec![0.0; 2*n];
-    let _res = fem_solver::solve_gmres(&a, &flat_rhs, &mut x, 200, &SolverConfig { rtol:1e-2, max_iter:2000, verbose:true, ..Default::default() }).expect("GMRES");
+    use fem_solver::GSSmoother;
+    use fem_linalg::fem_to_linlvo_csr;
+    use linlvo::Preconditioner;
+    use linlvo::DenseVec;
+
+    // Build preconditioner: absolute-value version of the real block
+    let prec_coeff_re = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlReAbs { omega, pml: pml_prec.clone() } }], qo);
+    let prec_coeff_im = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlImAbs { omega, pml: pml_prec.clone() } }], qo);
+    let prec_mass = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassAbs { omega, pml: pml_prec } }], qo);
+    let prec_mat = CsrMatrix::add(&prec_coeff_re, &prec_coeff_im).axpby(1.0, &prec_mass, omega*omega);
+
+    // Block-diagonal preconditioner for [K_re -K_im; K_im K_re]
+    struct BlockDiagPrecond { inner: GSSmoother, n: usize }
+    impl Preconditioner for BlockDiagPrecond {
+        type Vector = DenseVec<f64>;
+        fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
+            let n = self.n;
+            let xs = x.as_slice();
+            let zs = z.as_mut_slice();
+            // Real block
+            let x_re = DenseVec::from_vec(xs[..n].to_vec());
+            let mut z_re = DenseVec::zeros(n);
+            self.inner.apply_precond(&x_re, &mut z_re);
+            zs[..n].copy_from_slice(z_re.as_slice());
+            // Imag block
+            let x_im = DenseVec::from_vec(xs[n..].to_vec());
+            let mut z_im = DenseVec::zeros(n);
+            self.inner.apply_precond(&x_im, &mut z_im);
+            zs[n..].copy_from_slice(z_im.as_slice());
+        }
+    }
+
+    let prec_linlvo = fem_to_linlvo_csr(&prec_mat);
+    let gs = GSSmoother::from_csr(&prec_linlvo, 1.0).expect("GSSmoother");
+    let block_prec = BlockDiagPrecond { inner: gs, n };
+
+    let _res = fem_solver::solve_gmres_precond(&a, &flat_rhs, &mut x, 200, &block_prec, &SolverConfig { rtol:1e-3, max_iter:2000, verbose:true, ..Default::default() }).expect("GMRES");
 
     let norm: f64 = x.iter().map(|v| v*v).sum::<f64>().sqrt();
     println!("  ||E|| = {:.6e}", norm);
