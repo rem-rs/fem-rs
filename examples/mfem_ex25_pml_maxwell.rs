@@ -13,7 +13,7 @@
 use std::f64::consts::PI;
 use nalgebra::Complex;
 use fem_assembly::{
-    VectorAssembler, coefficient::PmlCoeff,
+    VectorAssembler,
     postproc::coefficient::{CoeffCtx, ScalarCoeff, MatrixCoeff},
     standard::{CurlCurlIntegrator, CurlCurlTensorIntegrator, VectorMassIntegrator, VectorMassTensorIntegrator},
 };
@@ -37,20 +37,22 @@ fn pml_sigma(x: &[f64], lo: f64, hi: f64, thick: f64, k: f64) -> f64 {
     0.0
 }
 
-fn pml_det_re_im(x: &[f64], pml: &PmlCoeff, omega: f64) -> (f64, f64) {
-    let k = omega;
+fn pml_sigma_from_bounds(x: &[f64], inner_lo: &[f64], inner_hi: &[f64], omega: f64) -> Vec<f64> {
     let mut s = vec![0.0; x.len()];
     for d in 0..x.len() {
-        let width = pml.max[d] - pml.min[d];
-        s[d] = pml_sigma(&[x[d]], pml.min[d], pml.max[d], width * pml.thickness, k);
+        let width = (inner_hi[d] - inner_lo[d]).abs().max(1e-16);
+        s[d] = pml_sigma(&[x[d]], inner_lo[d], inner_hi[d], width * 0.25, omega);
     }
-    let dim = x.len();
-    if dim == 2 {
+    s
+}
+
+fn pml_det_re_im(s: &[f64], omega: f64) -> (f64, f64) {
+    if s.len() == 2 {
         let det_re = 1.0 - s[0]*s[1]/(omega*omega); let det_im = (s[0]+s[1])/omega;
         (det_re, det_im)
     } else {
         let sx = s[0]/omega; let sy = s[1]/omega; let sz = s[2]/omega;
-        let det_re = 1.0 - sx*sy - sx*sz - sy*sz - 2.0*sx*sy*sz;
+        let det_re = 1.0 - sx*sy - sx*sz - sy*sz;
         let det_im = sx + sy + sz - sx*sy*sz;
         (det_re, det_im)
     }
@@ -60,11 +62,12 @@ fn inv_det_r(dr: f64, di: f64) -> f64 { dr / (dr*dr + di*di) }
 fn inv_det_i(dr: f64, di: f64) -> f64 { -di / (dr*dr + di*di) }
 macro_rules! pml_coeff {
     ($name:ident, $expr:expr) => {
-        struct $name { omega: f64, pml: PmlCoeff }
+        struct $name { omega: f64, inner_lo: Vec<f64>, inner_hi: Vec<f64> }
         impl ScalarCoeff for $name {
             fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
                 if ctx.elem_tag == 1 { return 0.0; }
-                let (dr, di) = pml_det_re_im(ctx.x, &self.pml, self.omega);
+                let s = pml_sigma_from_bounds(ctx.x, &self.inner_lo, &self.inner_hi, self.omega);
+                let (dr, di) = pml_det_re_im(&s, self.omega);
                 $expr(dr, di)
             }
         }
@@ -79,29 +82,21 @@ pml_coeff!(PmlMassAbs, |dr: f64, di: f64| (dr*dr + di*di).sqrt());
 
 // ─── 3D PML tensor coefficients (full tensor formulation) ─────────────────
 
-/// Compute 3D PML tensor diagonal entries T_ii = dx_i²/det(J) as Complex<f64>
-fn pml_tensor_3d(x: &[f64], pml: &PmlCoeff, omega: f64) -> [nalgebra::Complex<f64>; 3] {
-    let sx = pml_sigma(&[x[0]], pml.min[0], pml.max[0],
-        (pml.max[0]-pml.min[0])*pml.thickness, omega);
-    let sy = pml_sigma(&[x[1]], pml.min[1], pml.max[1],
-        (pml.max[1]-pml.min[1])*pml.thickness, omega);
-    let sz = pml_sigma(&[x[2]], pml.min[2], pml.max[2],
-        (pml.max[2]-pml.min[2])*pml.thickness, omega);
-    let dx = Complex::new(1.0, sx/omega);
-    let dy = Complex::new(1.0, sy/omega);
-    let dz = Complex::new(1.0, sz/omega);
+fn pml_tensor_3d(x: &[f64], inner_lo: &[f64], inner_hi: &[f64], omega: f64) -> [nalgebra::Complex<f64>; 3] {
+    let s = pml_sigma_from_bounds(x, inner_lo, inner_hi, omega);
+    let dx = Complex::new(1.0, s[0]/omega); let dy = Complex::new(1.0, s[1]/omega); let dz = Complex::new(1.0, s[2]/omega);
     let det = dx * dy * dz;
     [dx*dx/det, dy*dy/det, dz*dz/det]
 }
 
 macro_rules! tensor_curl {
     ($n:ident, $e:expr) => {
-        struct $n { omega: f64, pml: PmlCoeff }
+        struct $n { omega: f64, inner_lo: Vec<f64>, inner_hi: Vec<f64> }
         impl MatrixCoeff for $n {
             fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
                 for v in out.iter_mut() { *v = 0.0; }
                 if ctx.elem_tag == 1 { for d in 0..3 { out[d*4] = 1.0; } return; }
-                let t = pml_tensor_3d(ctx.x, &self.pml, self.omega);
+                let t = pml_tensor_3d(ctx.x, &self.inner_lo, &self.inner_hi, self.omega);
                 out[0] = $e(t[0]); out[4] = $e(t[1]); out[8] = $e(t[2]);
             }
         }
@@ -113,13 +108,12 @@ tensor_curl!(PmlCurlTAbs, |c: nalgebra::Complex<f64>| c.norm());
 
 macro_rules! tensor_mass {
     ($n:ident, $e:expr) => {
-        struct $n { omega: f64, pml: PmlCoeff }
+        struct $n { omega: f64, inner_lo: Vec<f64>, inner_hi: Vec<f64> }
         impl MatrixCoeff for $n {
             fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
                 for v in out.iter_mut() { *v = 0.0; }
                 if ctx.elem_tag == 1 { for d in 0..3 { out[d*4] = 1.0; } return; }
-                let t = pml_tensor_3d(ctx.x, &self.pml, self.omega);
-                // mass coeff = det/dx² = 1/(dx²/det) = 1/T_ii
+                let t = pml_tensor_3d(ctx.x, &self.inner_lo, &self.inner_hi, self.omega);
                 let i0 = 1.0/t[0]; let i1 = 1.0/t[1]; let i2 = 1.0/t[2];
                 out[0] = $e(i0); out[4] = $e(i1); out[8] = $e(i2);
             }
@@ -151,7 +145,7 @@ fn parse_args() -> Args {
 
 // ─── Generic solver (works for both Mesh<2> and Mesh<3>) ───────────────────
 
-fn solve_pml<M: MeshTopology + Clone>(mesh: M, args: &Args, prob: Prob, _exact_known: bool, bb: ([f64; 3], [f64; 3]), bdr_tags: Vec<i32>, use_tensor_3d: bool) {
+fn solve_pml<M: MeshTopology + Clone>(mesh: M, args: &Args, _prob: Prob, _exact_known: bool, bb: ([f64; 3], [f64; 3]), bdr_tags: Vec<i32>, use_tensor_3d: bool, pml_lo: [f64; 3], pml_hi: [f64; 3]) {
     let dim = mesh.dim() as usize;
     let omega = 2.0 * PI * args.freq;
     let space = HCurlSpace::new(mesh.clone(), args.order as u8);
@@ -160,33 +154,25 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M, args: &Args, prob: Prob, _exact_k
     if dim == 2 { println!("  Mode: 2D"); } else { println!("  Mode: 3D ({})", if use_tensor_3d { "tensor PML" } else { "scalar PML" }); }
 
     let qo = (2 * args.order + 1) as u8;
-    let pml_len = match prob {
-        Prob::Disc => 0.2, Prob::Lshape => 0.1, Prob::Fichera => 0.5,
-        Prob::Beam => 2.0, Prob::LoadSrc => 0.25,
-    };
 
-    // Build PML coeff
-    let pml_lo: Vec<f64> = (0..dim).map(|d| bb.0[d]).collect();
-    let pml_hi: Vec<f64> = (0..dim).map(|d| bb.1[d]).collect();
-    let pml = PmlCoeff::new(pml_lo, pml_hi, pml_len, 5.0);
+    // Inner domain bounds: outside these, PML absorbs
+    let inner_lo: Vec<f64> = (0..dim).map(|d| bb.0[d] + pml_lo[d]).collect();
+    let inner_hi: Vec<f64> = (0..dim).map(|d| bb.1[d] - pml_hi[d]).collect();
 
     // Assemble complex system (2×2 block) — scalar for 2D, tensor for 3D
-    let (mut k_re, mut k_im, pml_prec) = if use_tensor_3d {
-        let c = PmlCurlTRe { omega, pml: pml.clone() };
-        let m = PmlMassTRe { omega, pml: pml.clone() };
-        let ci = PmlCurlTIm { omega, pml: pml.clone() };
-        let mi = PmlMassTIm { omega, pml: pml.clone() };
-        let kr = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlTensorIntegrator { mu: c }], qo);
-        let mr = VectorAssembler::assemble_bilinear(&space, &[&VectorMassTensorIntegrator { alpha: m }], qo);
-        let ki = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlTensorIntegrator { mu: ci }], qo);
-        let mi2 = VectorAssembler::assemble_bilinear(&space, &[&VectorMassTensorIntegrator { alpha: mi }], qo);
-        (kr.axpby(1.0, &mr, -omega*omega), ki.axpby(1.0, &mi2, -omega*omega), pml.clone())
+    let ilo = inner_lo.clone(); let ihi = inner_hi.clone();
+    let (mut k_re, mut k_im) = if use_tensor_3d {
+        let kr = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlTensorIntegrator { mu: PmlCurlTRe { omega, inner_lo: inner_lo.clone(), inner_hi: inner_hi.clone() } }], qo);
+        let mr = VectorAssembler::assemble_bilinear(&space, &[&VectorMassTensorIntegrator { alpha: PmlMassTRe { omega, inner_lo: inner_lo.clone(), inner_hi: inner_hi.clone() } }], qo);
+        let ki = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlTensorIntegrator { mu: PmlCurlTIm { omega, inner_lo: inner_lo.clone(), inner_hi: inner_hi.clone() } }], qo);
+        let mi = VectorAssembler::assemble_bilinear(&space, &[&VectorMassTensorIntegrator { alpha: PmlMassTIm { omega, inner_lo, inner_hi } }], qo);
+        (kr.axpby(1.0, &mr, -omega*omega), ki.axpby(1.0, &mi, -omega*omega))
     } else {
-        let kr = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlRe { omega, pml: pml.clone() } }], qo);
-        let mr = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassRe { omega, pml: pml.clone() } }], qo);
-        let ki = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlIm { omega, pml: pml.clone() } }], qo);
-        let mi = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassIm { omega, pml: pml.clone() } }], qo);
-        (kr.axpby(1.0, &mr, -omega*omega), ki.axpby(1.0, &mi, -omega*omega), pml.clone())
+        let kr = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlRe { omega, inner_lo: inner_lo.clone(), inner_hi: inner_hi.clone() } }], qo);
+        let mr = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassRe { omega, inner_lo: inner_lo.clone(), inner_hi: inner_hi.clone() } }], qo);
+        let ki = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlIm { omega, inner_lo: inner_lo.clone(), inner_hi: inner_hi.clone() } }], qo);
+        let mi = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassIm { omega, inner_lo, inner_hi } }], qo);
+        (kr.axpby(1.0, &mr, -omega*omega), ki.axpby(1.0, &mi, -omega*omega))
     };
 
     // BC
@@ -231,11 +217,11 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M, args: &Args, prob: Prob, _exact_k
 
     // Preconditioner (scalar for 2D, tensor for 3D)
     let (prec_c, prec_m) = if use_tensor_3d {
-        (VectorAssembler::assemble_bilinear(&space, &[&CurlCurlTensorIntegrator { mu: PmlCurlTAbs { omega, pml: pml_prec.clone() } }], qo),
-         VectorAssembler::assemble_bilinear(&space, &[&VectorMassTensorIntegrator { alpha: PmlMassTAbs { omega, pml: pml_prec } }], qo))
+        (VectorAssembler::assemble_bilinear(&space, &[&CurlCurlTensorIntegrator { mu: PmlCurlTAbs { omega, inner_lo: ilo.clone(), inner_hi: ihi.clone() } }], qo),
+         VectorAssembler::assemble_bilinear(&space, &[&VectorMassTensorIntegrator { alpha: PmlMassTAbs { omega, inner_lo: ilo, inner_hi: ihi } }], qo))
     } else {
-        (VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlReAbs { omega, pml: pml_prec.clone() } }], qo),
-         VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassAbs { omega, pml: pml_prec } }], qo))
+        (VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlReAbs { omega, inner_lo: ilo.clone(), inner_hi: ihi.clone() } }], qo),
+         VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassAbs { omega, inner_lo: ilo, inner_hi: ihi } }], qo))
     };
     let prec_mat = prec_c.axpby(1.0, &prec_m, omega*omega);
     // Add small diagonal shift to prevent zero-diagonal in PML regions
@@ -269,32 +255,45 @@ fn main() {
 
     let mfem = read_mfem_file(mesh_file).expect("mesh");
     let dim = if mfem.mesh3d.is_some() { 3 } else { 2 };
+    let (pml_lo, pml_hi) = pml_vals(&prob);
 
     if dim == 2 {
         let mut mesh: Mesh<2> = mfem.mesh2d.expect("2D mesh");
         for _ in 0..args.ref_levels { mesh = refine_uniform(&mesh); }
         let bb = mesh.bounding_box();
         let bt = mesh.unique_boundary_tags();
-        tag_pml(&mut mesh, &prob);
-        solve_pml(mesh, &args, prob, exact_known, ([bb.0[0],bb.0[1],0.0],[bb.1[0],bb.1[1],0.0]), bt, false);
+        tag_pml(&mut mesh, &pml_lo, &pml_hi);
+        solve_pml(mesh, &args, prob, exact_known, ([bb.0[0],bb.0[1],0.0],[bb.1[0],bb.1[1],0.0]), bt, false, pml_lo, pml_hi);
     } else {
         let mut mesh: Mesh<3> = mfem.mesh3d.expect("3D mesh");
         for _ in 0..args.ref_levels { mesh = refine_uniform_3d(&mesh); }
         let bb = mesh.bounding_box();
         let bt = mesh.unique_boundary_tags();
-        tag_pml(&mut mesh, &prob);
-        solve_pml(mesh, &args, prob, exact_known, (bb.0, bb.1), bt, true);
+        tag_pml(&mut mesh, &pml_lo, &pml_hi);
+        solve_pml(mesh, &args, prob, exact_known, (bb.0, bb.1), bt, true, pml_lo, pml_hi);
     }
 }
 
-fn tag_pml<const D: usize>(mesh: &mut Mesh<D>, prob: &Prob) {
+fn pml_vals(prob: &Prob) -> ([f64; 3], [f64; 3]) {
+    match *prob {
+        Prob::Beam    => return ([0.0,0.0,0.0], [2.0,0.0,0.0]),
+        Prob::Disc    => return ([0.2,0.2,0.0], [0.2,0.2,0.0]),
+        Prob::Lshape  => return ([0.1,0.1,0.0], [0.0,0.0,0.0]),
+        Prob::Fichera => return ([0.0,0.0,0.0], [0.5,0.5,0.5]),
+        Prob::LoadSrc => return ([0.25,0.25,0.0], [0.25,0.25,0.0]),
+    }
+}
+
+fn tag_pml<const D: usize>(mesh: &mut Mesh<D>, pml_lo: &[f64; 3], pml_hi: &[f64; 3]) {
     let bb = mesh.bounding_box();
-    let len = match prob { Prob::Disc=>0.2, Prob::Lshape=>0.1, Prob::Fichera=>0.5, Prob::Beam=>2.0, Prob::LoadSrc=>0.25 };
     for e in 0..mesh.n_elems() as u32 {
         let mut in_pml = false;
         for &v in mesh.elem_nodes(e) {
             let c = mesh.coords_of(v);
-            if (0..D).any(|d| c[d] < bb.0[d]+len || c[d] > bb.1[d]-len) { in_pml = true; break; }
+            for d in 0..D {
+                if c[d] < bb.0[d] + pml_lo[d] || c[d] > bb.1[d] - pml_hi[d] { in_pml = true; break; }
+            }
+            if in_pml { break; }
         }
         if in_pml { mesh.elem_tags[e as usize] = 2; }
     }
