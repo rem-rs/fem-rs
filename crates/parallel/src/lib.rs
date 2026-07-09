@@ -159,7 +159,10 @@ pub use launcher::{Launcher, WorkerConfig};
 pub use metis::{MetisPartitioner, MetisOptions, partition_mesh_metis, partition_mesh_metis_streaming};
 pub use par_assembler::ParAssembler;
 pub use par_amg::{ParAmgConfig, ParAmgHierarchy, par_solve_pcg_amg};
+pub use par_ams::ParAmsPrecond;
 pub use par_csr::ParCsrMatrix;
+pub use par_discrete_operator::ParDiscreteLinearOperator;
+pub use par_lobpcg::{par_lobpcg, ParLobpcgResult};
 pub use par_mesh::ParallelMesh;
 pub use par_mixed_assembler::ParMixedAssembler;
 pub use par_ras::{
@@ -171,7 +174,6 @@ pub use par_solver::{par_solve_cg, par_solve_gmres_jacobi, par_solve_pcg_jacobi,
 pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
 pub use par_vector::ParComplexVector;
-pub use par_vector_assembler::ParVectorAssembler;
 pub use partition::MeshPartition;
 pub use shared_entities::{SharedEntities, SharedEntity};
 

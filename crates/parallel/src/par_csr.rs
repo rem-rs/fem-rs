@@ -125,6 +125,21 @@ impl ParCsrMatrix {
         }
     }
 
+    /// Number of owned rows (= local portion of global matrix).
+    pub fn n_owned(&self) -> usize { self.n_owned }
+
+    /// Diagonal block (owned × owned columns).
+    pub fn diag_block(&self) -> &CsrMatrix<f64> { &self.diag }
+
+    /// Off-diagonal block (owned × ghost columns).
+    pub fn offd_block(&self) -> &CsrMatrix<f64> { &self.offd }
+
+    /// Mutable diagonal block.
+    pub fn diag_block_mut(&mut self) -> &mut CsrMatrix<f64> { &mut self.diag }
+
+    /// Ghost exchange handle.
+    pub fn ghost_exchange_handle(&self) -> Arc<GhostExchange> { self.dof_ghost_exchange.clone() }
+
     /// Extract the diagonal of the owned block.
     pub fn diagonal(&self) -> Vec<f64> {
         self.diag.diagonal()
