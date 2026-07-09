@@ -18,7 +18,7 @@ use nalgebra::DMatrix;
 
 use fem_core::types::{DofId, ElemId};
 use fem_element::{ReferenceElement,
-    lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
+    lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -445,6 +445,7 @@ pub(crate) fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceEleme
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriP2),
         (ElementType::Tri3, 3) => Box::new(TriP3),
+        (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
@@ -484,12 +485,27 @@ pub(crate) fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElem
     }
 }
 
-pub(crate) fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
+pub(crate) fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], _dim: usize) -> (DMatrix<f64>, f64) {
+    if nodes.len() > 3 {
+        // Quad element — centroid Jacobian of bilinear mapping
+        let x: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[0]).collect();
+        let y: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[1]).collect();
+        let dxi  = [-0.5,  0.5,  0.5, -0.5];
+        let deta = [-0.5, -0.5,  0.5,  0.5];
+        let mut j = DMatrix::<f64>::zeros(2, 2);
+        for k in 0..4 {
+            j[(0,0)] += dxi[k]  * x[k]; j[(0,1)] += deta[k] * x[k];
+            j[(1,0)] += dxi[k]  * y[k]; j[(1,1)] += deta[k] * y[k];
+        }
+        let det = j.determinant();
+        return (j, det);
+    }
+    // Simplex: affine mapping
     let x0 = mesh.node_coords(nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
+    let mut j = DMatrix::<f64>::zeros(2, 2);
+    for col in 0..2 {
         let xc = mesh.node_coords(nodes[col+1]);
-        for row in 0..dim { j[(row,col)] = xc[row] - x0[row]; }
+        for row in 0..2 { j[(row,col)] = xc[row] - x0[row]; }
     }
     let det = j.determinant();
     (j, det)

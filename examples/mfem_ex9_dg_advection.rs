@@ -14,7 +14,7 @@ use fem_assembly::postproc::coefficient::ConstantVectorCoeff;
 use fem_assembly::standard::MassIntegrator;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{Mesh, MeshTopology, amr::refine_uniform};
-use fem_solver::{ode::Rk4, TimeStepper};
+use fem_solver::{SolverConfig, solve_cg, ode::Rk4, TimeStepper};
 use fem_space::{L2Space, fe_space::FESpace};
 
 fn lump(m: &CsrMatrix<f64>) -> Vec<f64> {
@@ -43,7 +43,7 @@ fn main() {
 
     // Mass matrix and lumped diagonal
     let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator{rho:1.0}], q);
-    let md = lump(&mass);
+    let _md = lump(&mass); // lumped diag (kept for reference)
 
     // DG advection operator (volume + upwind face flux)
     let dg_adv = DGAdvectionIntegrator{velocity:ConstantVectorCoeff(vec![1.0,0.0])};
@@ -115,8 +115,10 @@ fn main() {
     let mx_0 = u.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     eprintln!("  Initial: L2={:.4e}, max={:.4e}", l2_0, mx_0);
 
-    // Time integration: du/dt = -M_lump^(-1) * (K * u + rhs_bc)
-    let (k_ref, rhs_ref, md_ref) = (&k_adv, &rhs_bc, &md);
+    // Time integration: du/dt = -M^{-1} * (K * u + rhs_bc)
+    // Use CG with mass matrix (block-diagonal for DG L2 → fast convergence)
+    let cg_cfg = SolverConfig{rtol:1e-9, max_iter:200, verbose:false, ..Default::default()};
+    let (k_ref, rhs_ref, mass_ref) = (&k_adv, &rhs_bc, &mass);
     let rk4 = Rk4; let dt = args.dt.min(args.t_final);
     let n_steps = (args.t_final/dt).ceil() as usize;
     let mut t=0.0;
@@ -124,9 +126,10 @@ fn main() {
     for step in 0..n_steps {
         let dta = dt.min(args.t_final - t);
         rk4.step(t, dta, &mut u, |_t, u, dudt| {
-            let mut tmp = rhs_ref.clone();
-            k_ref.spmv(u, &mut tmp);
-            for i in 0..n { dudt[i] = -tmp[i] / md_ref[i]; }
+            let mut rhs = rhs_ref.clone();
+            k_ref.spmv(u, &mut rhs);
+            for v in &mut rhs { *v = -*v; }
+            let _ = solve_cg(mass_ref, &rhs, dudt, &cg_cfg);
         });
         t += dta;
         if (step+1)%200==0||step+1==n_steps {

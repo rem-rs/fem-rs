@@ -35,7 +35,7 @@ pub struct InteriorFaceList {
 impl InteriorFaceList {
     /// Build the interior face list from `mesh`.
     ///
-    /// Works for 2-D meshes (triangles) and 3-D meshes (tetrahedra).
+    /// Works for 2-D meshes (triangles, quads) and 3-D meshes (tetrahedra).
     pub fn build<M: MeshTopology>(mesh: &M) -> Self {
         let dim = mesh.dim() as usize;
 
@@ -49,7 +49,8 @@ impl InteriorFaceList {
 
             // Enumerate faces of this element.
             // For a triangle (3 nodes): faces are pairs (0,1),(1,2),(0,2).
-            // For a tet (4 nodes): faces are triples (0,1,2),(0,1,3),(0,2,3),(1,2,3).
+            // For a quad (4 nodes in 2D): faces are pairs (0,1),(1,2),(2,3),(3,0).
+            // For a tet (4 nodes in 3D): faces are triples (0,1,2),(0,1,3),(0,2,3),(1,2,3).
             let local_faces = local_faces(npe, dim);
 
             for lf in &local_faces {
@@ -87,6 +88,7 @@ impl InteriorFaceList {
 fn local_faces(npe: usize, dim: usize) -> Vec<Vec<usize>> {
     match (npe, dim) {
         (3, 2) => vec![vec![0,1], vec![1,2], vec![0,2]], // triangle edges
+        (4, 2) => vec![vec![0,1], vec![1,2], vec![2,3], vec![3,0]], // quad edges
         (4, 3) => vec![vec![1,2,3], vec![0,2,3], vec![0,1,3], vec![0,1,2]], // tet faces
         _ => panic!("local_faces: unsupported (npe={npe}, dim={dim})"),
     }
