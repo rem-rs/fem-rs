@@ -470,10 +470,6 @@ name = "mfem_ex22_complex_helmholtz"
 path = "mfem_ex22_complex_helmholtz.rs"
 
 [[example]]
-name = "mfem_ex25_pml_helmholtz"
-path = "mfem_ex25_pml_helmholtz.rs"
-
-[[example]]
 name = "mfem_ex25_pml_maxwell"
 path = "mfem_ex25_pml_maxwell.rs"
 
@@ -576,10 +572,6 @@ path = "mfem_pex21_parallel_amr_elasticity.rs"
 [[example]]
 name = "mfem_pex24_parallel_discrete_ops"
 path = "mfem_pex24_parallel_discrete_ops.rs"
-
-[[example]]
-name = "mfem_pex25_parallel_pml_helmholtz"
-path = "mfem_pex25_parallel_pml_helmholtz.rs"
 
 [[example]]
 name = "mfem_pex26_parallel_geom_mg"
