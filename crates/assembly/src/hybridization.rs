@@ -61,6 +61,9 @@ pub struct Hybridization {
     n_trace_dofs: usize,
     /// Number of hat (discontinuous element) DOFs.
     n_hat_dofs: usize,
+    /// Element DOF signs (±1), stored for sign-adjusted solution recovery.
+    elem_signs_flat: Vec<f64>,
+    elem_sign_offsets: Vec<usize>,
 }
 
 impl Hybridization {
@@ -77,6 +80,8 @@ impl Hybridization {
             af_ipiv: Vec::new(),
             n_trace_dofs: 0,
             n_hat_dofs: 0,
+            elem_signs_flat: Vec::new(),
+            elem_sign_offsets: Vec::new(),
         }
     }
 
@@ -113,6 +118,16 @@ impl Hybridization {
         }
         self.n_hat_dofs = self.hat_offsets[n_elems];
         self.hat_dofs_marker = vec![0i32; self.n_hat_dofs];
+
+        // ── 1b. Store element signs for sign-adjusted solution recovery ────
+        self.elem_signs_flat.clear();
+        self.elem_sign_offsets = Vec::with_capacity(n_elems + 1);
+        self.elem_sign_offsets.push(0);
+        for e in 0..n_elems as u32 {
+            let sgn = hdiv_space.element_signs(e);
+            self.elem_signs_flat.extend_from_slice(sgn);
+            self.elem_sign_offsets.push(self.elem_signs_flat.len());
+        }
 
         // ── 2. Build per-element face mapping ──────────────────────────────
         // For each element, identify which local DOFs are on which mesh faces.
@@ -763,15 +778,19 @@ impl Hybridization {
                 lu_solve_prefactored(&a_bb, nb, &ipiv, &mut b_b, 1);
             }
 
-            // Recover element solution and scatter into global with multiplicity.
+            // Recover element solution and scatter into global with sign adjustment.
+            let s_off = self.elem_sign_offsets[el_idx];
+
             for (ji, &j) in i_dofs.iter().enumerate() {
                 let gj = edofs[j] as usize;
-                sol[gj] += b_i[ji];
+                let sg = self.elem_signs_flat[s_off + j];
+                sol[gj] += sg * b_i[ji];
                 dof_count[gj] += 1;
             }
             for (jb, &j) in b_dofs.iter().enumerate() {
                 let gj = edofs[j] as usize;
-                sol[gj] += b_b[jb];
+                let sg = self.elem_signs_flat[s_off + j];
+                sol[gj] += sg * b_b[jb];
                 dof_count[gj] += 1;
             }
         }
