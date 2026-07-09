@@ -499,7 +499,11 @@ path = "mfem_ex31_anisotropic_maxwell.rs"
 
 [[example]]
 name = "mfem_ex32_impedance_maxwell"
-path = "mfem_ex32_impedance_maxwell.rs"
+path = "mfem_impedance_maxwell.rs"
+
+[[example]]
+name = "mfem_ex32_maxwell_eigenvalue"
+path = "mfem_ex32_maxwell_eigenvalue.rs"
 
 [[example]]
 name = "mfem_ex34_absorbing_maxwell"
