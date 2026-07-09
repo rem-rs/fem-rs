@@ -17,7 +17,7 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::{CooMatrix, SolverConfig};
+use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
 use fem_mesh::{Mesh, refine_uniform, refine_uniform_3d, topology::MeshTopology};
 use fem_solver::{BlockDiagPrecond, GSSmoother};
 use fem_linalg::fem_to_linlvo_csr;
@@ -184,6 +184,10 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M, args: &Args, prob: Prob, _exact_k
     let prec_c = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlReAbs { omega, pml: pml_prec.clone() } }], qo);
     let prec_m = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassAbs { omega, pml: pml_prec } }], qo);
     let prec_mat = prec_c.axpby(1.0, &prec_m, omega*omega);
+    // Add small diagonal shift to prevent zero-diagonal in PML regions
+    let mut shift_coo = CooMatrix::new(n, n);
+    for i in 0..n { shift_coo.add(i, i, 1e-6); }
+    let prec_mat = CsrMatrix::add(&prec_mat, &shift_coo.into_csr());
     let pl = fem_to_linlvo_csr(&prec_mat);
     let gs = GSSmoother::from_csr(&pl, 1.0).expect("GSSmoother");
     let bp = BlockDiagPrecond { inner: gs, n };
