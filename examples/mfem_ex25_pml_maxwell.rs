@@ -461,8 +461,14 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         println!(" Total Error: {:.6e}", total_err2.sqrt());
     }
 
+    // ── Output ──────────────────────────────────────────────────────────
     let sol_norm: f64 = x.iter().map(|v| v*v).sum::<f64>().sqrt();
     println!("  ||E|| = {:.6e}\n", sol_norm);
+
+    // Write .gf files (compatible with GLVis and MFEM)
+    let _ = fem_io::mfem::write_gf_file("ex25-sol_r.gf", dim, &x[..n], "ND", args.order as u8, dim);
+    let _ = fem_io::mfem::write_gf_file("ex25-sol_i.gf", dim, &x[n..], "ND", args.order as u8, dim);
+    println!("  Wrote ex25-sol_r.gf, ex25-sol_i.gf");
 }
 
 // ─── Error computation helpers ────────────────────────────────────────────
