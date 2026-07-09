@@ -398,6 +398,27 @@ impl<T: Scalar> CsrMatrix<T> {
         rhs[row] = value;
     }
 
+    /// Apply MFEM-style `EliminateEssentialBCDiag` — diagonal-only modification
+    /// suitable for EIGENVALUE problems.
+    ///
+    /// For each constrained DOF `row`:
+    ///   - `A[row, row] = diag_val`
+    ///   - Off-diagonal entries are **kept intact**.
+    ///   - RHS is NOT modified.
+    ///
+    /// This is the correct BC treatment for eigenvalue problems such as
+    /// `K x = λ M x` where shifting the BC diagonals out of the spectral
+    /// range is sufficient.  It preserves the off-diagonal coupling that
+    /// preconditioners (AMS, ADS) and nullspace constraints depend on.
+    ///
+    /// Calling this on the same row multiple times is safe — the diagonal
+    /// is simply overwritten.
+    pub fn eliminate_essential_bc_diag(&mut self, row: usize, diag_val: T) {
+        if let Some(k) = self.find_entry(row, row) {
+            self.values[k] = diag_val;
+        }
+    }
+
     fn find_entry(&self, row: usize, col: usize) -> Option<usize> {
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];

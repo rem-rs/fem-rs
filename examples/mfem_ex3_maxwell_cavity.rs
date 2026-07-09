@@ -29,15 +29,13 @@ use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{
-    VectorAssembler,
+    VectorAssembler, DiscreteLinearOperator,
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
 };
 use fem_element::{nedelec::TriND1, VectorReferenceElement};
 use fem_io::mfem::{read_mfem_file, write_mfem};
-use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_solver::SolverConfig;
 use fem_space::{
     HCurlSpace,
     fe_space::FESpace,
@@ -125,31 +123,66 @@ fn main() {
     }
     println!("done.");
 
-    // 11. Solve with PCG + GSSmoother.
+    // 11. Solve with PCG + GSSmoother (default) or PCG + AMS (--ams flag).
     //     Use the reduced system from eliminate_dirichlet (matches MFEM ex3 path).
-    let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+    // Keep originals for AMS path (which needs the full, unmodified matrix).
+    let ams_path = args.use_ams;
+    let full_mat = if ams_path { Some(mat.clone()) } else { None };
+    let full_rhs: Vec<f64> = if ams_path { rhs.clone() } else { Vec::new() };
+    let mut x_full: Vec<f64> = Vec::new();
+
+    let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals, linlvo_sys) = if !ess_bdr.is_empty() {
         let bv = vec![0.0_f64; ess_bdr.len()];
         let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
-        (rm, rf, fm, cm, bv)
+        let lsys = fem_linalg::fem_to_linlvo_csr(&rm);
+        (rm, rf, fm, cm, bv, lsys)
     } else {
         let free: Vec<usize> = (0..n_dofs).collect();
-        (mat, rhs, free, vec![], vec![])
+        let lsys = fem_linalg::fem_to_linlvo_csr(&mat);
+        (mat, rhs, free, vec![], vec![], lsys)
     };
     let n_sys = sys_mat.nrows;
     println!("  Reduced system size: {n_sys}");
 
     let mut x_red = vec![0.0_f64; n_sys];
-    let linlvo_sys = fem_to_linlvo_csr(&sys_mat);
-    let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
-        .expect("GSSmoother setup");
-    let cfg = SolverConfig { rtol:1e-12, max_iter:2000, verbose:true, ..Default::default() };
-    let result = fem_solver::solve_pcg(&sys_mat, &sys_rhs, &mut x_red, &precond, cfg.rtol, cfg.max_iter, cfg.verbose)
-        .expect("PCG+GSSmoother solve failed");
-    println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
-        result.iterations, result.final_residual);
+
+    if ams_path {
+        use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
+        use fem_linalg::fem_to_linlvo_csr as ftl;
+        let g = DiscreteLinearOperator::gradient(
+            &fem_space::H1Space::new(space.mesh().clone(), 1),
+            &space,
+        ).expect("gradient assembly failed");
+        let g_linlvo = ftl(&g);
+        let mut ams_mat = full_mat.unwrap();
+        for &d in &ess_bdr {
+            ams_mat.eliminate_essential_bc_diag(d as usize, 1.0);
+        }
+        x_full.resize(n_dofs, 0.0);
+        let result = solve_pcg_ams(&ams_mat, &g_linlvo, &full_rhs, &mut x_full, &AmsSolverConfig {
+            inner_cfg: fem_solver::SolverConfig {
+                rtol: 1e-12, atol: 1e-20, max_iter: 2000, verbose: true,
+                ..fem_solver::SolverConfig::default()
+            },
+            ams_cfg: AmsConfig::default(),
+        }).expect("PCG+AMS solve failed");
+        println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}",
+            result.iterations, result.final_residual);
+    } else {
+        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
+            .expect("GSSmoother setup");
+        let result = fem_solver::solve_pcg(
+            &sys_mat, &sys_rhs, &mut x_red, &precond,
+            1e-12, 2000, true,
+        ).expect("PCG+GSSmoother solve failed");
+        println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
+            result.iterations, result.final_residual);
+    }
 
     // Recover full solution.
-    let u = if !ess_bdr.is_empty() {
+    let u: Vec<f64> = if ams_path {
+        x_full
+    } else if !ess_bdr.is_empty() {
         fem_space::constraints::expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
     } else {
         x_red
@@ -307,6 +340,8 @@ struct Args {
     static_cond:   bool,
     visualization: bool,
     freq:          f64,
+    /// Use PCG+AMS preconditioner instead of PCG+GSSmoother.
+    use_ams:       bool,
 }
 
 fn parse_args() -> Args {
@@ -317,6 +352,7 @@ fn parse_args() -> Args {
         static_cond:   false,
         visualization: true,
         freq:          1.0,
+        use_ams:       false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -341,6 +377,9 @@ fn parse_args() -> Args {
             }
             "-no-sc" | "--no-static-condensation" => {
                 a.static_cond = false;
+            }
+            "-ams" | "--ams" => {
+                a.use_ams = true;
             }
             "-vis" | "--visualization" => {
                 a.visualization = true;
@@ -428,6 +467,7 @@ mod tests {
             static_cond:   false,
             visualization: false,
             freq:          1.0,
+            use_ams:       false,
         }
     }
 
