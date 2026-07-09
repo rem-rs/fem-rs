@@ -368,12 +368,12 @@ impl<T: Scalar> CsrMatrix<T> {
             }
         }
 
-        // Zero the entire row, then set diagonal to 1.
+        // Zero the entire row, then set diagonal to `value`.
         for k in start..end {
             self.values[k] = T::zero();
         }
         if let Some(k) = self.find_entry(row, row) {
-            self.values[k] = T::one();
+            self.values[k] = value;
         }
         rhs[row] = value;
     }
