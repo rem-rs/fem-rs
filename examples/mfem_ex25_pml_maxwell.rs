@@ -157,7 +157,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M, args: &Args, prob: Prob, _exact_k
     let space = HCurlSpace::new(mesh.clone(), args.order as u8);
     let n = space.n_dofs();
     println!("\nNumber of finite element unknowns: {}", n);
-    if dim == 2 { println!("  Mode: 2D"); } else { println!("  Mode: 3D (scalar PML)"); }
+    if dim == 2 { println!("  Mode: 2D"); } else { println!("  Mode: 3D ({})", if use_tensor_3d { "tensor PML" } else { "scalar PML" }); }
 
     let qo = (2 * args.order + 1) as u8;
     let pml_len = match prob {
