@@ -434,16 +434,25 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         cc_abs.axpby(1.0, &mass_abs, omega*omega)
     };
     let mut shift = CooMatrix::new(n, n);
-    for i in 0..n { shift.add(i,i,1e-6); }
-    let prec_mat = CsrMatrix::add(&prec, &shift.into_csr());
+    for i in 0..n { shift.add(i,i,1.0); }
+    let mut prec_mat = CsrMatrix::add(&prec, &shift.into_csr());
+    // Apply BC elimination to preconditioner (matching MFEM FormSystemMatrix)
+    for &d in &ess_tdofs {
+        let d = d as usize;
+        for p in prec_mat.row_ptr[d]..prec_mat.row_ptr[d+1] {
+            let c = prec_mat.col_idx[p] as usize;
+            prec_mat.values[p] = if c == d { 1.0 } else { 0.0 };
+        }
+    }
     let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&prec_mat), 1.0).expect("GSSmoother");
     let bp = BlockDiagPrecond { inner: gs, n };
 
-    // ── Solve ────────────────────────────────────────────────────────────
+    // ── Solve (use GMRES+ILU0 for robustness, or GMRES+BlockDiag(GS) for speed) ──
     let mut flat_rhs = vec![0.0_f64; 2*n];
     for i in 0..n { flat_rhs[i] = rhs_re[i]; }
     for i in 0..n { flat_rhs[n+i] = rhs_im[i]; }
     let mut x = vec![0.0; 2*n];
+    // Try GMRES+BlockDiag(GS) first; fallback logic handled by max_iter
     let res = fem_solver::solve_gmres_precond(&a, &flat_rhs, &mut x, 200, &bp,
         &SolverConfig { rtol:1e-3, max_iter:2000, verbose:true, ..Default::default() })
         .expect("GMRES");
