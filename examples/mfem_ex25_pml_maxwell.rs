@@ -160,12 +160,96 @@ fn parse_args() -> Args {
     a
 }
 
+// ─── Bessel functions + exact solution ─────────────────────────────────────
+
+fn bessel_j0(x: f64) -> f64 {
+    if x <= 3.0 { let t=x/3.0; let t2=t*t;
+        1.0-2.2499997*t2+1.2656208*t2*t2-0.3163866*t2*t2*t2+0.0444479*t2*t2*t2*t2-0.0039444*t2*t2*t2*t2*t2+0.00021*t2*t2*t2*t2*t2*t2 }
+    else { let t=3.0/x; let f0=0.79788456-0.00000077*t-0.00552740*t*t-0.00009512*t*t*t+0.00137237*t*t*t*t-0.00072805*t*t*t*t*t+0.00014476*t*t*t*t*t*t;
+        let t0=x-0.78539816-0.04166397*t-0.00003954*t*t+0.00262573*t*t*t-0.00054125*t*t*t*t-0.00029333*t*t*t*t*t+0.00013558*t*t*t*t*t*t; f0*t0.cos() }
+}
+fn bessel_y0(x: f64) -> f64 {
+    if x <= 3.0 { let t=x/3.0; let t2=t*t; (x/2.0).ln()*bessel_j0(x)+0.36746691+0.60559366*t2-0.74350384*t2*t2+0.25300117*t2*t2*t2-0.04261214*t2*t2*t2*t2+0.00427916*t2*t2*t2*t2*t2-0.00024846*t2*t2*t2*t2*t2*t2 }
+    else { let t=3.0/x; let f0=0.79788456+0.00000156*t-0.01659667*t*t+0.00017105*t*t*t-0.00249511*t*t*t*t+0.00113653*t*t*t*t*t-0.00020033*t*t*t*t*t*t;
+        let t0=x-0.78539816-0.04166397*t-0.00003954*t*t+0.00262573*t*t*t-0.00054125*t*t*t*t-0.00029333*t*t*t*t*t+0.00013558*t*t*t*t*t*t; f0*t0.sin() }
+}
+fn bessel_j1(x: f64) -> f64 {
+    if x <= 3.0 { let t=x/3.0; let t2=t*t;
+        t*(0.5-0.56249985*t2+0.21093573*t2*t2-0.03954289*t2*t2*t2+0.00443319*t2*t2*t2*t2-0.00031761*t2*t2*t2*t2*t2+0.00001109*t2*t2*t2*t2*t2*t2) }
+    else { let t=3.0/x; let f1=0.79788456+0.00000156*t-0.01659667*t*t+0.00017105*t*t*t-0.00249511*t*t*t*t+0.00113653*t*t*t*t*t-0.00020033*t*t*t*t*t*t;
+        let t1=x-2.35619449-0.04166397*t-0.00003954*t*t+0.00262573*t*t*t-0.00054125*t*t*t*t-0.00029333*t*t*t*t*t+0.00013558*t*t*t*t*t*t; f1*t1.cos() }
+}
+fn bessel_y1(x: f64) -> f64 {
+    if x <= 3.0 { let t=x/3.0; let t2=t*t; (x/2.0).ln()*bessel_j1(x)+(1.0/x)*(-0.073804295+0.52381352*t2+0.45555564*t2*t2-0.07429993*t2*t2*t2+0.00742009*t2*t2*t2*t2-0.00046207*t2*t2*t2*t2*t2+0.00001554*t2*t2*t2*t2*t2*t2) }
+    else { let t=3.0/x; let f1=0.79788456+0.00000156*t-0.01659667*t*t+0.00017105*t*t*t-0.00249511*t*t*t*t+0.00113653*t*t*t*t*t-0.00020033*t*t*t*t*t*t;
+        let t1=x-2.35619449-0.04166397*t-0.00003954*t*t+0.00262573*t*t*t-0.00054125*t*t*t*t-0.00029333*t*t*t*t*t+0.00013558*t*t*t*t*t*t; f1*t1.sin() }
+}
+
+/// Exact solution E(x) for Maxwell point source (2D Green's function)
+fn exact_e_2d(x0: f64, x1: f64, omega: f64) -> (f64, f64, f64, f64) {
+    let r = (x0*x0 + x1*x1).sqrt();
+    if r < 1e-14 { return (0.0,0.0,0.0,0.0); }
+    let k = omega; let kr = k*r;
+    let (h0_re, h0_im) = (bessel_j0(kr), bessel_y0(kr));
+    let (h1_re, h1_im) = (bessel_j1(kr), bessel_y1(kr));
+    let rx=x0/r; let ry=x1/r; let rxx=(1.0-rx*rx)/r; let rxy=-rx*ry/r;
+    let h0p_re = -k*h1_re; let h0p_im = -k*h1_im;
+    let h0pp_re = -k*k*h0_re + k*h1_re/r.max(1e-16);
+    let h0pp_im = -k*k*h0_im + k*h1_im/r.max(1e-16);
+    let v_xx_re = h0pp_re*rx*rx + h0p_re*rxx;
+    let v_xx_im = h0pp_im*rx*rx + h0p_im*rxx;
+    let v_xy_re = h0pp_re*rx*ry + h0p_re*rxy;
+    let v_xy_im = h0pp_im*rx*ry + h0p_im*rxy;
+    let val_re = -h0_im*0.25; let val_im = h0_re*0.25; // i*H₀/4
+    let s_re = k*k*val_re + v_xx_re; let s_im = k*k*val_im + v_xx_im;
+    let ex_re = -s_im/k; let ex_im = s_re/k; // i*(k²·val + v_xx)/k
+    let ey_re = -v_xy_im/k; let ey_im = v_xy_re/k;
+    (ex_re, ex_im, ey_re, ey_im)
+}
+
+/// Compute relative L² error and norm on non-PML elements
+fn compute_l2_error(space: &HCurlSpace<Mesh<2>>, sol_re: &[f64], sol_im: &[f64], pml_tags: &[i32], omega: f64, prob: Prob) -> (f64, f64) {
+    use fem_assembly::mixed::ref_elem_vec;
+    use fem_mesh::ElementTransformation; use fem_space::SpaceType;
+    let qo = 4u8; let shift = match prob { Prob::Fichera => 1.0, Prob::Disc => -0.5, Prob::Lshape => -1.0, _ => 0.0 };
+    let mut e_re=0.0_f64; let mut n_re=0.0_f64;
+    for e in 0..space.mesh().n_elems() as u32 {
+        if pml_tags.contains(&space.mesh().elem_tags[e as usize]) { continue; }
+        let et = space.mesh().element_type_at(e);
+        let re = ref_elem_vec(et, space.order(), SpaceType::HCurl).unwrap();
+        let quad = re.quadrature(qo); let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e); let nodes = space.mesh().elem_nodes(e);
+        let n_ldof = dofs.len(); let mut phi = vec![0.0; n_ldof*2];
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let tr = ElementTransformation::from_simplex_nodes(space.mesh(), nodes);
+            let w = quad.weights[qi] * tr.det_j().abs(); let xp = tr.map_to_physical(xi);
+            re.eval_basis_vec(xi, &mut phi);
+            let jk = tr.jacobian_inv_t().clone();
+            let jit = |i,j| jk[(i,j)];
+            let mut er = [0.0;2]; let mut ei = [0.0;2];
+            for i in 0..n_ldof {
+                let s = signs[i]; let vr = sol_re[dofs[i]]*s; let vi = sol_im[dofs[i]]*s;
+                let px = jit(0,0)*phi[i*2]+jit(0,1)*phi[i*2+1];
+                let py = jit(1,0)*phi[i*2]+jit(1,1)*phi[i*2+1];
+                er[0] += vr*px; er[1] += vr*py; ei[0] += vi*px; ei[1] += vi*py;
+            }
+            let ex = exact_e_2d(xp[0]+shift, xp[1], omega);
+            let e_ex = if prob == Prob::Beam { let k=omega; (0.0, -k/PI*(k*xp[0]).cos(), 0.0, 0.0) } else { (ex.0, ex.1, ex.2, ex.3) };
+            for c in 0..2 {
+                let dr = er[c]-e_ex.0; let di = ei[c]-e_ex.1;
+                e_re += w*(dr*dr+di*di); n_re += w*(e_ex.0*e_ex.0+e_ex.1*e_ex.1);
+            }
+        }
+    }
+    ((e_re/n_re.max(1e-30)).sqrt(), e_re.sqrt())
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 fn main() {
     let args = parse_args();
     let prob = match args.iprob.min(4) { 0 => Prob::Beam, 1 => Prob::Disc, 2 => Prob::Lshape, 3 => Prob::Fichera, _ => Prob::LoadSrc };
-    let _exact_known = matches!(prob, Prob::Beam | Prob::Disc | Prob::Lshape | Prob::Fichera);
+    let exact_known = matches!(prob, Prob::Beam | Prob::Disc | Prob::Lshape | Prob::Fichera);
 
     let mesh_file = args.mesh.as_deref().unwrap_or(match prob {
         Prob::Beam => "data/beam-quad.mesh", Prob::Disc => "data/square-disc.mesh",
@@ -264,7 +348,32 @@ fn main() {
 
     let _res = fem_solver::solve_gmres_precond(&a, &flat_rhs, &mut x, 200, &block_prec, &SolverConfig { rtol:1e-3, max_iter:2000, verbose:true, ..Default::default() }).expect("GMRES");
 
+    let sol_re: Vec<f64> = x[..n].to_vec();
+    let sol_im: Vec<f64> = x[n..].to_vec();
     let norm: f64 = x.iter().map(|v| v*v).sum::<f64>().sqrt();
     println!("  ||E|| = {:.6e}", norm);
+
+    // Collect PML tags for error computation
+    let pml_tags: Vec<i32> = (0..mesh.n_elems()).map(|e| mesh.elem_tags[e]).filter(|&t| t == 2).collect();
+    if exact_known {
+        let (err_re, err_tot) = compute_l2_error(&space, &sol_re, &sol_im, &pml_tags, omega, prob);
+        println!("\n Relative Error (Re): ||E_h - E|| / ||E|| = {:.6e}", err_re);
+        println!(" Total Error: {:.6e}\n", err_tot);
+    }
+
+    // Save output files (sol_r.gf, sol_i.gf)
+    use std::io::Write;
+    {
+        let mut f = std::fs::File::create("ex25-sol_r.gf").expect("ex25-sol_r.gf");
+        writeln!(f, "MFEM GridFunction v1.0\n\nsolution\n\nFiniteElementSpace").ok();
+        writeln!(f, "FiniteElementCollection: ND1\nVDim: 1\nOrdering: byVDim").ok();
+        for v in &sol_re { writeln!(f, "{:.15e}", v).ok(); }
+    }
+    {
+        let mut f = std::fs::File::create("ex25-sol_i.gf").expect("ex25-sol_i.gf");
+        writeln!(f, "MFEM GridFunction v1.0\n\nsolution\n\nFiniteElementSpace").ok();
+        writeln!(f, "FiniteElementCollection: ND1\nVDim: 1\nOrdering: byVDim").ok();
+        for v in &sol_im { writeln!(f, "{:.15e}", v).ok(); }
+    }
     println!("\nFinished.");
 }
