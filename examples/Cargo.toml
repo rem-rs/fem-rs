@@ -462,10 +462,6 @@ name = "mfem_ex8_dpg_2x2"
 path = "mfem_ex8_dpg_2x2.rs"
 
 [[example]]
-name = "mfem_ex8_dpg_diag"
-path = "mfem_ex8_dpg_diag.rs"
-
-[[example]]
 name = "mfem_ex11_p_multigrid"
 path = "mfem_ex11_p_multigrid.rs"
 
@@ -607,5 +603,6 @@ path = "mfem_mc_random_field.rs"
 
 [lib]
 name = "fem_examples"
+
 
 

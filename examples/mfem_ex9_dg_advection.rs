@@ -54,12 +54,14 @@ fn main() {
         if vn <= 0.0 { continue; }
         let dofs: Vec<usize> = space.element_dofs(el).iter().map(|&d| d as usize).collect();
         let en = mesh.element_nodes(el);
-        for i in 0..dofs.len() {
-            if en[i] != f[0] && en[i] != f[1] { continue; }
-            for j in 0..dofs.len() {
-                if en[j] != f[0] && en[j] != f[1] { continue; }
-                coo.add(dofs[i], dofs[j], h * vn * 0.25);
-            }
+        // Exact edge mass: ∫ φi·φj ds = h * [1/3, 1/6; 1/6, 1/3] for P1 edge
+        // Cancels the IBP boundary artifact from the volume term
+        let find = |n| en.iter().position(|&e| e==n);
+        if let (Some(p0), Some(p1)) = (find(f[0]), find(f[1])) {
+            coo.add(dofs[p0], dofs[p0], h * vn / 3.0);
+            coo.add(dofs[p0], dofs[p1], h * vn / 6.0);
+            coo.add(dofs[p1], dofs[p0], h * vn / 6.0);
+            coo.add(dofs[p1], dofs[p1], h * vn / 3.0);
         }
     }
     let k_adv: CsrMatrix<f64> = coo.into_csr();
