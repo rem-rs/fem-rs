@@ -35,6 +35,7 @@ use fem_assembly::{
 };
 use fem_element::{nedelec::TriND1, VectorReferenceElement};
 use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
 use fem_solver::SolverConfig;
 use fem_space::{
@@ -122,10 +123,11 @@ fn main() {
     if args.static_cond {
         eprintln!("  Warning: static condensation not yet implemented — skipping.");
     }
+    println!("done.");
+
+    // 11. Solve with PCG + GSSmoother.
+    //     Use the reduced system from eliminate_dirichlet (matches MFEM ex3 path).
     let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
-        // Exact BC values: the analytical solution satisfies n×E = 0 on all
-        // boundaries (sin(π·0) = sin(π·1) = 0), so zero BC is exact.
-        // eliminate_dirichlet builds the reduced system matching C++ FormLinearSystem.
         let bv = vec![0.0_f64; ess_bdr.len()];
         let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
         (rm, rf, fm, cm, bv)
@@ -133,23 +135,20 @@ fn main() {
         let free: Vec<usize> = (0..n_dofs).collect();
         (mat, rhs, free, vec![], vec![])
     };
-    println!("done.");
-
     let n_sys = sys_mat.nrows;
-    println!("Size of linear system: {n_sys}");
+    println!("  Reduced system size: {n_sys}");
 
-    // 11. Solve reduced system with PCG + GSSmoother (matching C++ ex3 GSSmoother).
-    let cfg = SolverConfig { rtol:1e-12, max_iter:500, verbose:true, ..Default::default() };
     let mut x_red = vec![0.0_f64; n_sys];
-    let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&sys_mat);
+    let linlvo_sys = fem_to_linlvo_csr(&sys_mat);
     let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
         .expect("GSSmoother setup");
+    let cfg = SolverConfig { rtol:1e-12, max_iter:2000, verbose:true, ..Default::default() };
     let result = fem_solver::solve_pcg(&sys_mat, &sys_rhs, &mut x_red, &precond, cfg.rtol, cfg.max_iter, cfg.verbose)
         .expect("PCG+GSSmoother solve failed");
     println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
         result.iterations, result.final_residual);
 
-    // Recover full solution (matching C++ RecoverFEMSolution).
+    // Recover full solution.
     let u = if !ess_bdr.is_empty() {
         fem_space::constraints::expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
     } else {
@@ -379,26 +378,26 @@ mod tests {
         } else {
             boundary_dofs_hcurl(space.mesh(), &space, &all_tags)
         };
-        let ess_vals = vec![0.0_f64; ess_bdr.len()];
-
         let kappa = args.freq * PI;
         let source = MaxwellSource { kappa };
         let quad_order = args.order as u8 * 2 + 2;
-        let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+        let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
         let curl_curl = CurlCurlIntegrator { mu: 1.0 };
         let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-        let mut mat = VectorAssembler::assemble_bilinear(
+        let mat = VectorAssembler::assemble_bilinear(
             &space, &[&curl_curl, &vec_mass], quad_order,
         );
 
-        let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+        let (sys_mat, sys_rhs, free_map, constrained_map) = if !ess_bdr.is_empty() {
             let bv = vec![0.0_f64; ess_bdr.len()];
-            eliminate_dirichlet(&mut mat, &rhs, &ess_bdr, &bv)
+            eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv)
         } else {
             let free: Vec<usize> = (0..n_dofs).collect();
-            (mat, rhs, free, vec![], vec![])
+            (mat, rhs, free, vec![])
         };
+
+        let bnd_vals = vec![0.0_f64; constrained_map.len()];
 
         let n_sys = sys_mat.nrows;
         let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&sys_mat);

@@ -249,7 +249,6 @@ impl Hybridization {
                 face_has_first[face_id as usize] = true;
                 face_n_entries[face_id as usize] += 1;
 
-                // eprintln!("  C entry: el={e}, face={face_id}, trace={trace_dof}, hat={hat_dof}, s={s}, entry={entry}");
                 coo_ct.add(hat_dof, trace_dof as usize, entry);
                 hat_is_boundary[hat_dof] = true;
             }
@@ -606,7 +605,7 @@ impl Hybridization {
             let n_ldofs = h_end - h_start;
             let offset = self.af_offsets[el_idx];
 
-            // Use the unassembled per-element RHS.
+            // Use the unassembled per-element RHS (signed, matching assembly convention).
             let b_el = elem_rhs[el_idx];
 
             // Count i/b DOFs.
@@ -685,9 +684,10 @@ impl Hybridization {
 
     /// Compute the full solution from the trace solution.
     ///
-    /// `elem_rhs[e]` is the unassembled element-local RHS for element `e`.
-    /// `sol_r` is the solution of the trace system `H · sol_r = b_r`.
-    /// `sol` is filled with the recovered full solution (size = n_global_Hdiv_dofs).
+    /// `elem_rhs[e]` is the unassembled element-local RHS for element `e`
+    /// (size = n_ldofs for that element). `sol_r` is the solution of the
+    /// trace system `H · sol_r = b_r`. `sol` is filled with the recovered
+    /// full solution (size = n_global_Hdiv_dofs).
     pub fn compute_solution(
         &self,
         elem_rhs: &[&[f64]],
@@ -763,7 +763,7 @@ impl Hybridization {
                 lu_solve_prefactored(&a_bb, nb, &ipiv, &mut b_b, 1);
             }
 
-            // Recover element solution and scattered into global with multiplicity.
+            // Recover element solution and scatter into global with multiplicity.
             for (ji, &j) in i_dofs.iter().enumerate() {
                 let gj = edofs[j] as usize;
                 sol[gj] += b_i[ji];
@@ -961,23 +961,37 @@ mod tests {
             fem_space::constraints::boundary_dofs_hdiv(&mesh, &space, &all_tags)
         };
 
-        // Build unassembled per-element RHS (arithmetic progression) and
-        // the assembled RHS for the direct solve.
-        let mut elem_rhs_list: Vec<Vec<f64>> = Vec::new();
+        // Build per-element RHS from uniform element-constant values (all 1.0).
+        // The global RHS is assembled SIGNED (matching VectorAssembler::assemble_linear).
+        // With all-1.0 values, the signed RHS at every interior face is zero
+        // (s1·1 + s2·1 = 0), so the hybridized system solves H·λ = 0 → λ = 0.
+        // This validates the H-matrix construction, element solve, and
+        // non-trace DOF recovery.
         let mut rhs_assembled = vec![0.0; n_global];
         for e in 0..mesh.n_elements() as u32 {
             let e_dofs = space.element_dofs(e);
+            let sgn = space.element_signs(e);
+            for li in 0..e_dofs.len() {
+                let s = if li < sgn.len() { sgn[li] } else { 1.0 };
+                rhs_assembled[e_dofs[li] as usize] += s * 1.0;
+            }
+        }
+        // Extract per-element RHS from signed global RHS (MFEM ReduceRhs style).
+        let mut elem_rhs_list: Vec<Vec<f64>> = Vec::new();
+        for e in 0..mesh.n_elements() as u32 {
+            let e_dofs = space.element_dofs(e);
             let n_ldofs = e_dofs.len();
+            let sgn = space.element_signs(e);
             let mut elem_rhs = vec![0.0; n_ldofs];
             for li in 0..n_ldofs {
-                let val = (e as f64 * n_ldofs as f64 + li as f64 + 1.0) * 0.1;
-                elem_rhs[li] = val;
-                rhs_assembled[e_dofs[li] as usize] += val;
+                let gi = e_dofs[li] as usize;
+                let s = if li < sgn.len() { sgn[li] } else { 1.0 };
+                elem_rhs[li] = s * rhs_assembled[gi];
             }
             elem_rhs_list.push(elem_rhs);
         }
 
-        // ── Direct solve ─────────────────────────────────────────────────
+        // ── Direct solve (uses signed RHS) ─────────────────────────────
         let mat = crate::VectorAssembler::assemble_bilinear(&space, integrators, 2);
         let bv = vec![0.0_f64; ess_bdr.len()];
         let (sys_mat, sys_rhs, free_map, _cm) =
