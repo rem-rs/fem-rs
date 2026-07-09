@@ -698,6 +698,9 @@ impl Hybridization {
         let ct = self.ct.as_ref().expect("Hybridization not initialised");
 
         let n_elems = self.n_elems;
+        // Track multiplicity (number of elements contributing to each global DOF) for averaging.
+        let mut dof_count = vec![0u32; sol.len()];
+
         for e in 0..n_elems as u32 {
             let el_idx = e as usize;
             let h_start = self.hat_offsets[el_idx];
@@ -705,7 +708,6 @@ impl Hybridization {
             let n_ldofs = h_end - h_start;
             let offset = self.af_offsets[el_idx];
 
-            // Use unassembled per-element RHS.
             let b_el_src = elem_rhs[el_idx];
             let mut b_el = b_el_src.to_vec();
             let edofs = elem_dofs[el_idx];
@@ -714,7 +716,6 @@ impl Hybridization {
             for j in 0..n_ldofs {
                 let hat_dof = h_start + j;
                 if self.hat_dofs_marker[hat_dof] == -1 {
-                    // b-dof: subtract trace contributions
                     if let Some(ref ct_mat) = self.ct {
                         for k in ct_mat.row_ptr[hat_dof]..ct_mat.row_ptr[hat_dof + 1] {
                             let trace_col = ct_mat.col_idx[k] as usize;
@@ -737,7 +738,6 @@ impl Hybridization {
             let ni = i_dofs.len();
             let nb = b_dofs.len();
 
-            // Extract b_i and b_b
             let mut b_i = vec![0.0; ni];
             for (ji, &j) in i_dofs.iter().enumerate() {
                 b_i[ji] = b_el[j];
@@ -748,7 +748,6 @@ impl Hybridization {
             }
 
             if ni > 0 {
-                // Solve A_ii · x_i = b_i
                 let a_ii = &self.af_data[offset..offset + ni * ni];
                 let ipiv_offset = Hybridization::count_ipiv_before(
                     &self.hat_dofs_marker, &self.hat_offsets, el_idx);
@@ -756,8 +755,6 @@ impl Hybridization {
                                      &mut b_i, 1);
             }
 
-            // Apply A_bb⁻¹: solve A_bb · x_b = (b_b - Cb·λ)
-            // (This accounts for the element-local Schur complement.)
             if nb > 0 {
                 let a_bb_offset = if ni > 0 { ni * ni + ni * nb + nb * ni } else { 0 };
                 let mut a_bb = self.af_data[offset + a_bb_offset..offset + a_bb_offset + nb * nb].to_vec();
@@ -766,21 +763,23 @@ impl Hybridization {
                 lu_solve_prefactored(&a_bb, nb, &ipiv, &mut b_b, 1);
             }
 
-            // Recover element solution: x_el = [x_i; x_b].
-            let mut x_el = vec![0.0; n_ldofs];
+            // Recover element solution and scattered into global with multiplicity.
             for (ji, &j) in i_dofs.iter().enumerate() {
-                x_el[j] = b_i[ji];
+                let gj = edofs[j] as usize;
+                sol[gj] += b_i[ji];
+                dof_count[gj] += 1;
             }
             for (jb, &j) in b_dofs.iter().enumerate() {
-                x_el[j] = b_b[jb];
+                let gj = edofs[j] as usize;
+                sol[gj] += b_b[jb];
+                dof_count[gj] += 1;
             }
+        }
 
-            // Scatter into global solution.
-            for j in 0..n_ldofs {
-                if self.hat_dofs_marker[h_start + j] != 1 {
-                    // Not essential
-                    sol[edofs[j] as usize] = x_el[j];
-                }
+        // Average: divide by multiplicity at shared DOFs.
+        for i in 0..sol.len() {
+            if dof_count[i] > 1 {
+                sol[i] /= dof_count[i] as f64;
             }
         }
     }
@@ -944,6 +943,98 @@ mod tests {
         let max_abs: f64 = x_hyb.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         eprintln!("Hybridization: H {}×{}, sol ||x||∞ = {:.6e}", h_mat.nrows, h_mat.nrows, max_abs);
         assert!(max_abs.is_finite(), "Solution has non-finite values");
+    }
+
+    /// Compare hybridization with direct solve using per-element unassembled RHS.
+    #[test]
+    fn hybridization_vs_direct_2x2() {
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let space = HDivSpace::new(mesh.clone(), 0);
+        let mass = VectorMassIntegrator { alpha: 1.0 };
+        let integrators: &[&dyn VectorBilinearIntegrator] = &[&mass];
+        let n_global = space.n_dofs();
+        let elem_dofs: Vec<&[u32]> = (0..mesh.n_elements() as u32)
+            .map(|e| space.element_dofs(e))
+            .collect();
+        let all_tags: Vec<i32> = mesh.unique_boundary_tags();
+        let ess_bdr = if all_tags.is_empty() { vec![] } else {
+            fem_space::constraints::boundary_dofs_hdiv(&mesh, &space, &all_tags)
+        };
+
+        // Build unassembled per-element RHS (arithmetic progression) and
+        // the assembled RHS for the direct solve.
+        let mut elem_rhs_list: Vec<Vec<f64>> = Vec::new();
+        let mut rhs_assembled = vec![0.0; n_global];
+        for e in 0..mesh.n_elements() as u32 {
+            let e_dofs = space.element_dofs(e);
+            let n_ldofs = e_dofs.len();
+            let mut elem_rhs = vec![0.0; n_ldofs];
+            for li in 0..n_ldofs {
+                let val = (e as f64 * n_ldofs as f64 + li as f64 + 1.0) * 0.1;
+                elem_rhs[li] = val;
+                rhs_assembled[e_dofs[li] as usize] += val;
+            }
+            elem_rhs_list.push(elem_rhs);
+        }
+
+        // ── Direct solve ─────────────────────────────────────────────────
+        let mat = crate::VectorAssembler::assemble_bilinear(&space, integrators, 2);
+        let bv = vec![0.0_f64; ess_bdr.len()];
+        let (sys_mat, sys_rhs, free_map, _cm) =
+            fem_space::constraints::eliminate_dirichlet(&mat, &rhs_assembled, &ess_bdr, &bv);
+        let x_red = solve_direct(&sys_mat, &sys_rhs);
+        let mut x_ref = vec![0.0; n_global];
+        for (fi, &orig) in free_map.iter().enumerate() {
+            x_ref[orig] = x_red[fi];
+        }
+
+        // ── Hybridization ────────────────────────────────────────────────
+        let mut hyb = Hybridization::new();
+        hyb.init(&mesh, &space, &ess_bdr);
+
+        for e in 0..mesh.n_elements() as u32 {
+            let e_dofs = space.element_dofs(e);
+            let n_ldofs = e_dofs.len();
+            let mut coo = CooMatrix::<f64>::new(n_global, n_global);
+            accumulate_vector_bilinear_element(&space, e, integrators, 2, &mut coo);
+            let elem_csr = coo.into_csr();
+            let mut elem_mat = vec![0.0; n_ldofs * n_ldofs];
+            for (li, &gi) in e_dofs.iter().enumerate() {
+                let gi = gi as usize;
+                for k in elem_csr.row_ptr[gi]..elem_csr.row_ptr[gi + 1] {
+                    let gj = elem_csr.col_idx[k] as usize;
+                    if let Some(lj) = e_dofs.iter().position(|&d| d as usize == gj) {
+                        elem_mat[li * n_ldofs + lj] = elem_csr.values[k];
+                    }
+                }
+            }
+            hyb.assemble_element_matrix(e, &elem_mat);
+        }
+
+        hyb.finalize();
+        let h_mat = hyb.get_matrix().expect("H not built");
+        let elem_dofs_refs: Vec<&[u32]> = elem_dofs.iter().map(|&d| d).collect();
+        let elem_rhs_refs: Vec<&[f64]> = elem_rhs_list.iter().map(|v| v.as_slice()).collect();
+        let b_r = hyb.reduce_rhs(&elem_rhs_refs);
+
+        eprintln!("n_dofs={n_global}, n_trace={}, n_sys={}",
+            h_mat.nrows, sys_mat.nrows);
+
+        let sol_r = solve_direct(h_mat, &b_r);
+        let mut x_hyb = vec![0.0; n_global];
+        hyb.compute_solution(&elem_rhs_refs, &sol_r, &elem_dofs_refs, &mut x_hyb);
+
+        let mut max_diff: f64 = 0.0;
+        for i in 0..n_global {
+            let diff = (x_hyb[i] - x_ref[i]).abs();
+            if diff > max_diff { max_diff = diff; }
+            if diff > 1e-6 {
+                eprintln!("  DOF {i}: ref={:.10e} hyb={:.10e} diff={:.6e}", x_ref[i], x_hyb[i], diff);
+            }
+        }
+        eprintln!("Hybridization vs direct: max_diff={:.6e}", max_diff);
+        assert!(max_diff < 1e-8,
+            "Hybridization vs direct max diff {:.6e} exceeds tolerance (1e-8)", max_diff);
     }
 
     fn solve_direct(a: &CsrMatrix<f64>, b: &[f64]) -> Vec<f64> {

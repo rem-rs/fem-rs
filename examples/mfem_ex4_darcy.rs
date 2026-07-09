@@ -126,56 +126,182 @@ fn main() {
     );
     print!("Assembling: matrix ... ");
 
-    // 10. Form the linear system (project exact BC, then eliminate).
+    // 10. Form the linear system.
     if args.static_cond {
         eprintln!("  Warning: static condensation not yet implemented — skipping.");
     }
-    if args.hybridization {
-        eprintln!("  Warning: hybridization not yet implemented — skipping.");
-    }
     println!("done.");
 
-    // Project exact solution ⟶ DOF values for non-homogeneous BC elimination.
-    let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
-        let x_exact = space.interpolate_vector(&|p| {
-            let k = kappa;
-            vec![(k * p[1]).cos() * (k * p[0]).sin(),
-                 (k * p[0]).cos() * (k * p[1]).sin()]
-        });
-        let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
-        let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
-        (rm, rf, fm, cm, bv)
-    } else {
-        let free: Vec<usize> = (0..n_dofs).collect();
-        (mat, rhs, free, vec![], vec![])
-    };
-    let n_sys = sys_mat.nrows;
-    println!("Size of linear system: {n_sys}");
+    let (u, solver_label) = if args.hybridization {
+        // ── Hybridization path ─────────────────────────────────────────────
+        use fem_assembly::hybridization::Hybridization;
+        use fem_assembly::vector_assembler::accumulate_vector_bilinear_element;
+        use fem_assembly::vector_integrator::VectorBilinearIntegrator;
+        use fem_linalg::CooMatrix;
 
-    // 11. Solve the reduced system with PCG+GSSmoother.
-    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
-    let precond = fem_solver::GSSmoother::from_csr(&linlvo_mat, 1.0)
-        .expect("SSOR preconditioner setup failed");
-    let mut x_red = vec![0.0_f64; n_sys];
-    let cfg = SolverConfig {
-        rtol: 1e-10,
-        max_iter: 2000,
-        verbose: false,
-        ..SolverConfig::default()
-    };
-    let result = solve_pcg_precond(&sys_mat, &sys_rhs, &mut x_red, &precond, &cfg)
-        .expect("PCG solve failed");
-    println!(
-        "PCG+GSSmoother: {} iterations, ||r||/||b|| = {:.3e}",
-        result.iterations, result.final_residual,
-    );
+        // Project exact solution onto boundary DOFs.
+        // Only boundary DOF values are used (interior DOFs set to 0).
+        let x_bc_proj = if !ess_bdr.is_empty() {
+            let mut xp = space.interpolate_vector(&|p| {
+                let k = kappa;
+                vec![(k * p[1]).cos() * (k * p[0]).sin(),
+                     (k * p[0]).cos() * (k * p[1]).sin()]
+            });
+            // Zero out interior DOFs; keep only essential (boundary) DOF values.
+            let ess_set: std::collections::HashSet<u32> = ess_bdr.iter().copied().collect();
+            for i in 0..n_dofs {
+                if !ess_set.contains(&(i as u32)) {
+                    xp[i] = 0.0;
+                }
+            }
+            xp
+        } else {
+            fem_linalg::Vector::from_vec(vec![0.0; n_dofs])
+        };
 
-    // 12. RecoverFEMSolution: expand the reduced solution to the full space.
-    let u = if !ess_bdr.is_empty() {
-        expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
+        // Build hybridization.
+        let mut hyb = Hybridization::new();
+        hyb.init(space.mesh(), &space, &ess_bdr);
+
+        // Build per-element matrices.
+        let integrators: &[&dyn VectorBilinearIntegrator] = &[&grad_div, &vec_mass];
+        let elem_dofs: Vec<&[u32]> = (0..space.mesh().n_elements() as u32)
+            .map(|e| space.element_dofs(e))
+            .collect();
+        let n_elems = space.mesh().n_elements() as usize;
+        let mut elem_rhs_list: Vec<Vec<f64>> = Vec::with_capacity(n_elems);
+
+        // b_hat = R^T · b_rhs: signed assembled RHS for each element.
+        let elem_signs: Vec<&[f64]> = (0..n_elems as u32)
+            .map(|e| space.element_signs(e))
+            .collect();
+
+        for e in 0..n_elems as u32 {
+            let e_dofs = space.element_dofs(e);
+            let n_ldofs = e_dofs.len();
+            let sgn = elem_signs[e as usize];
+
+            // Element matrix (signed).
+            let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+            accumulate_vector_bilinear_element(&space, e, integrators, quad_order, &mut coo);
+            let elem_csr = coo.into_csr();
+            let mut elem_mat = vec![0.0; n_ldofs * n_ldofs];
+            for (li, &gi) in e_dofs.iter().enumerate() {
+                let gi = gi as usize;
+                for k in elem_csr.row_ptr[gi]..elem_csr.row_ptr[gi + 1] {
+                    let gj = elem_csr.col_idx[k] as usize;
+                    if let Some(lj) = e_dofs.iter().position(|&d| d as usize == gj) {
+                        elem_mat[li * n_ldofs + lj] = elem_csr.values[k];
+                    }
+                }
+            }
+            hyb.assemble_element_matrix(e, &elem_mat);
+
+            // b_hat = R^T · b = s_i · rhs[gi]  (signed assembled RHS).
+            let mut elem_rhs = vec![0.0; n_ldofs];
+            for (li, &gi) in e_dofs.iter().enumerate() {
+                let s = if li < sgn.len() { sgn[li] } else { 1.0 };
+                elem_rhs[li] = s * rhs[gi as usize];
+            }
+
+            // Subtract A_e · x_bc for non-homogeneous BCs.
+            if !ess_bdr.is_empty() {
+                for li in 0..n_ldofs {
+                    for lj in 0..n_ldofs {
+                        let bc_val = x_bc_proj[e_dofs[lj] as usize];
+                        if bc_val != 0.0 {
+                            elem_rhs[li] -= elem_mat[li * n_ldofs + lj] * bc_val;
+                        }
+                    }
+                }
+            }
+
+            elem_rhs_list.push(elem_rhs);
+        }
+
+        hyb.finalize();
+
+        // Solve the trace system.
+        let h_mat = hyb.get_matrix().expect("H not built");
+        let n_trace = h_mat.nrows;
+        let elem_dofs_refs: Vec<&[u32]> = elem_dofs.iter().map(|&d| d).collect();
+        let elem_rhs_refs: Vec<&[f64]> = elem_rhs_list.iter().map(|v| v.as_slice()).collect();
+        let b_r = hyb.reduce_rhs(&elem_rhs_refs);
+
+        println!("Hybridized system: {n_trace}×{n_trace}");
+
+        let sol_r = if n_trace > 0 {
+            let linlvo_h = fem_linalg::fem_to_linlvo_csr(h_mat);
+            let h_precond = fem_solver::GSSmoother::from_csr(&linlvo_h, 1.0)
+                .expect("GSSmoother for H");
+            let cfg_h = SolverConfig {
+                rtol: 1e-10, max_iter: 500, verbose: false,
+                ..SolverConfig::default()
+            };
+            let mut sr = vec![0.0; n_trace];
+            let res = solve_pcg_precond(h_mat, &b_r, &mut sr, &h_precond, &cfg_h)
+                .expect("Hybridized PCG solve");
+            println!("  PCG+GSSmoother (trace): {} iters, ||r||/||b|| = {:.3e}",
+                res.iterations, res.final_residual);
+            sr
+        } else {
+            vec![]
+        };
+
+        let mut u_hyb = vec![0.0; n_dofs];
+        hyb.compute_solution(&elem_rhs_refs, &sol_r, &elem_dofs_refs, &mut u_hyb);
+
+        // Add boundary condition values to all DOFs: x = x_int + x_bc
+        for i in 0..n_dofs {
+            u_hyb[i] += x_bc_proj[i];
+        }
+
+        (u_hyb, "Hybridization".to_string())
+
     } else {
-        x_red
+        // ── Standard path: eliminate_dirichlet + PCG ────────────────────────
+        let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+            let x_exact = space.interpolate_vector(&|p| {
+                let k = kappa;
+                vec![(k * p[1]).cos() * (k * p[0]).sin(),
+                     (k * p[0]).cos() * (k * p[1]).sin()]
+            });
+            let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
+            let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
+            (rm, rf, fm, cm, bv)
+        } else {
+            let free: Vec<usize> = (0..n_dofs).collect();
+            (mat, rhs, free, vec![], vec![])
+        };
+        let n_sys = sys_mat.nrows;
+        println!("Size of linear system: {n_sys}");
+
+        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
+        let precond = fem_solver::GSSmoother::from_csr(&linlvo_mat, 1.0)
+            .expect("SSOR preconditioner setup failed");
+        let mut x_red = vec![0.0_f64; n_sys];
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            max_iter: 2000,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        let result = solve_pcg_precond(&sys_mat, &sys_rhs, &mut x_red, &precond, &cfg)
+            .expect("PCG solve failed");
+        println!(
+            "PCG+GSSmoother: {} iterations, ||r||/||b|| = {:.3e}",
+            result.iterations, result.final_residual,
+        );
+
+        let u = if !ess_bdr.is_empty() {
+            expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
+        } else {
+            x_red
+        };
+        (u, "PCG+GSSmoother".to_string())
     };
+
+    println!("Solver: {solver_label}");
 
     // 13. Compute and print the L² norm of the error against the exact solution.
     let l2_err = fem_assembly::hdiv_error::compute_hdiv_l2_error(
