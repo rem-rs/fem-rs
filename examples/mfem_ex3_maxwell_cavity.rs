@@ -36,7 +36,7 @@ use fem_assembly::{
 use fem_element::{nedelec::TriND1, VectorReferenceElement};
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_solver::{solve_gmres, SolverConfig};
+use fem_solver::SolverConfig;
 use fem_space::{
     HCurlSpace,
     fe_space::FESpace,
@@ -131,20 +131,13 @@ fn main() {
 
     println!("Size of linear system: {n_dofs}");
 
-    // 11. Solve: GMRES(50) (does not assume symmetry).
-    let cfg = SolverConfig {
-        rtol: 1e-8,
-        max_iter: 10000,
-        verbose: false,
-        ..SolverConfig::default()
-    };
+    // 11. Solve: PCG with Jacobi preconditioner (matching C++ ex3).
+    let cfg = SolverConfig { rtol:1e-8, max_iter:5000, verbose:true, ..Default::default() };
     let mut u = vec![0.0_f64; n_dofs];
-    let result = solve_gmres(&mat, &rhs, &mut u, 50, &cfg)
-        .expect("GMRES solve failed");
-    println!(
-        "PCG+Jacobi: {} iterations, ||r||/||b|| = {:.3e}",
-        result.iterations, result.final_residual,
-    );
+    let result = fem_solver::solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg)
+        .expect("PCG+Jacobi solve failed");
+    println!("PCG+Jacobi: {} iters, ||r||/||b|| = {:.3e}",
+        result.iterations, result.final_residual);
     // Matrix/rhs diagnostics
     let rhs_norm: f64 = rhs.iter().map(|v| v*v).sum::<f64>().sqrt();
     eprintln!("  ||rhs||={:.6e}  ||x|| after solve={:.6e}",
