@@ -84,23 +84,68 @@ fn transform_grads(jit: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: 
     }}
 }
 
+/// Bilinear quad Jacobian at (xi, eta): J = [J00 J01; J10 J11]
+fn quad_jacobian(x: &[f64; 4], y: &[f64; 4], xi: f64, eta: f64) -> ([[f64;2];2], f64, [[f64;2];2]) {
+    let d_n = [
+        [eta-1.0, 1.0-eta, eta, -eta],           // ∂N/∂ξ
+        [xi-1.0, -xi, xi, 1.0-xi],               // ∂N/∂η
+    ];
+    let mut j = [[0.0;2];2];
+    for i in 0..4 {
+        j[0][0] += d_n[0][i]*x[i]; j[0][1] += d_n[0][i]*y[i];
+        j[1][0] += d_n[1][i]*x[i]; j[1][1] += d_n[1][i]*y[i];
+    }
+    let det = j[0][0]*j[1][1] - j[0][1]*j[1][0];
+    let id = 1.0/det.max(1e-30);
+    let jit = [[j[1][1]*id, -j[0][1]*id], [-j[1][0]*id, j[0][0]*id]];
+    (j, det.abs(), jit)
+}
+
 fn build_sinv<M: MeshTopology>(space: &impl FESpace<Mesh=M>, qo: u8) -> SinvData {
     let mesh = space.mesh(); let ne = mesh.n_elements(); let order = space.order();
     let et = mesh.element_type(0); let dim = 2;
     let (ref_elem, nt) = ref_elem_2d(et, order);
     let qr = get_qr(et, qo);
+    let is_tri = matches!(et, ElementType::Tri3|ElementType::Tri6);
     let mut phi = vec![0.0; nt]; let mut dphi = vec![0.0; nt*dim];
     let mut eb = Vec::with_capacity(ne); let mut ed = Vec::with_capacity(ne);
     for e in mesh.elem_iter() {
         let nodes = mesh.element_nodes(e);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let jit = tr.jacobian_inv_t().clone();
+        let tr = if is_tri {
+            Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+        } else {
+            None
+        };
+        let xq: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(nodes.len()-1)])[0]).collect();
+        let yq: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(nodes.len()-1)])[1]).collect();
+        let (x4, y4): ([f64;4], [f64;4]) = ([xq[0],xq[1],xq[2],xq[3]], [yq[0],yq[1],yq[2],yq[3]]);
         let mut mass = vec![0.0; nt*nt]; let mut stiff = vec![0.0; nt*nt];
         for (xi, &wr) in qr.points.iter().zip(qr.weights.iter()) {
-            let w = wr * tr.det_j().abs();
+            let (det_j, j00, j01, j10, j11) = if is_tri {
+                let t = tr.as_ref().unwrap();
+                (t.det_j().abs(), 0.0, 0.0, 0.0, 0.0) // placeholder, jit used below
+            } else {
+                let xi_f = xi[0]; let eta_f = xi[1];
+                let (j, det, _jit2) = quad_jacobian(&x4, &y4, xi_f, eta_f);
+                (det, j[0][0], j[0][1], j[1][0], j[1][1])
+            };
+            let w = wr * det_j;
             ref_elem.eval_basis(xi, &mut phi); ref_elem.eval_grad_basis(xi, &mut dphi);
-            let mut gp = vec![0.0; nt*dim]; transform_grads(&jit, &dphi, &mut gp, nt, dim);
+            let mut gp = vec![0.0; nt*dim];
+            if is_tri {
+                let jit = tr.as_ref().unwrap().jacobian_inv_t().clone();
+                transform_grads(&jit, &dphi, &mut gp, nt, dim);
+            } else {
+                // Bilinear quad: J^{-T} = [[J11, -J01], [-J10, J00]] / det
+                let id = 1.0 / det_j.max(1e-30);
+                // J = [[∂x/∂ξ, ∂y/∂ξ], [∂x/∂η, ∂y/∂η]] (my convention)
+                // F^{-T} = [J11, -J01; -J10, J00] / det where F = J^T
+                for i in 0..nt {
+                    gp[i*dim]   = ( j11 * dphi[i*dim] - j01 * dphi[i*dim+1]) * id;
+                    gp[i*dim+1] = (-j10 * dphi[i*dim] + j00 * dphi[i*dim+1]) * id;
+                }
+            }
             for i in 0..nt { for j in 0..nt {
                 mass[i*nt+j] += w*phi[i]*phi[j];
                 let mut gdot = 0.0; for d in 0..dim { gdot += gp[i*dim+d] * gp[j*dim+d]; }
@@ -313,10 +358,36 @@ fn solve_dense_inv(n: usize, a: &mut [f64]) {
 
 // ─── Block CG preconditioner ─────────────────────────────────────────────────
 
-fn block_cg_prec(r: &[f64], z: &mut [f64], sizes: &[usize], mats: &[&CsrMatrix<f64>], cfg: &SolverConfig) {
+/// CG solve with zero initial guess, returning residual norm.
+fn cg_solve(mat: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], max_iter: usize, rtol: f64) -> f64 {
+    let n = mat.nrows;
+    x.fill(0.0); // zero initial guess (MFEM iterative_mode=false)
+    let mut r = b.to_vec();
+    // A = mat, start with x=0 → r = b - A*0 = b
+    let bnrm = (0..n).fold(0.0, |s,i| s + b[i]*b[i]).sqrt().max(1e-300);
+    let tol = (rtol * bnrm).max(1e-300);
+    let mut p = r.clone();
+    let mut rr = (0..n).fold(0.0, |s,i| s + r[i]*r[i]);
+    for _it in 0..max_iter {
+        if rr.sqrt() < tol { return rr.sqrt(); }
+        // Ap = A * p
+        let mut ap = vec![0.0; n];
+        for i in 0..n { for pp in mat.row_ptr[i]..mat.row_ptr[i+1] { ap[i] += mat.values[pp] * p[mat.col_idx[pp] as usize]; } }
+        let pap = (0..n).fold(0.0, |s,i| s + p[i]*ap[i]).max(1e-300);
+        let alpha = rr / pap;
+        for i in 0..n { x[i] += alpha * p[i]; r[i] -= alpha * ap[i]; }
+        let rr_new = (0..n).fold(0.0, |s,i| s + r[i]*r[i]);
+        let beta = rr_new / rr.max(1e-300);
+        rr = rr_new;
+        for i in 0..n { p[i] = r[i] + beta * p[i]; }
+    }
+    rr.sqrt()
+}
+
+fn block_cg_prec(r: &[f64], z: &mut [f64], sizes: &[usize], mats: &[&CsrMatrix<f64>], rtol: f64, max_it: usize) {
     let mut off = 0;
     for (k, &sz) in sizes.iter().enumerate() {
-        let _ = fem_solver::solve_cg(mats[k], &r[off..off+sz], &mut z[off..off+sz], cfg);
+        cg_solve(mats[k], &r[off..off+sz], &mut z[off..off+sz], max_it, rtol);
         off += sz;
     }
 }
@@ -437,15 +508,10 @@ fn main() {
 
     let mut iter = 0usize;
     let ess_set: std::collections::HashSet<usize> = ess_dofs.iter().map(|&d| d as usize).collect();
-    // Build block Jacobi preconditioner (diagonal of each block)
-    let diag_s0: Vec<f64> = (0..s0).map(|i| { let d = s0_mat.get(i,i); if d.abs() > 1e-30 { 1.0/d } else { 1.0 } }).collect();
-    let diag_shat: Vec<f64> = (0..s1).map(|i| { let d = shat.get(i,i); if d.abs() > 1e-30 { 1.0/d } else { 1.0 } }).collect();
-    let res = pcg(ntot, &a_op, &rhs, &mut x, 10000, 1e-12, 0.0,
-        |r,z| {
-            for i in 0..s0 { z[i] = diag_s0[i] * r[i]; }
-            for i in 0..s1 { z[s0+i] = diag_shat[i] * r[s0+i]; }
-            for &d in &ess_dofs { z[d as usize] = 0.0; }
-        },
+    let bsizes = vec![s0, s1];
+    let pmats = vec![&s0_mat as &CsrMatrix<f64>, &shat as &CsrMatrix<f64>];
+    let res = pcg(ntot, &a_op, &rhs, &mut x, 200, 1e-12, 0.0,
+        |r,z| { block_cg_prec(r,z,&bsizes,&pmats,1e-3,200); for &d in &ess_dofs {z[d as usize]=0.0;} },
         &ess_set, &mut iter,
     );
     println!("PCG: iterations={iter}, final residual={res:.3e}");
