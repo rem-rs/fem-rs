@@ -22,6 +22,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{CurvedMesh, Mesh};
+use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{
     H1Space, FESpace,
@@ -120,7 +121,12 @@ fn main() {
 
     // Homogeneous Dirichlet BC on all boundaries
     let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
+    let mesh_ref = space.mesh();
+    let all_tags: Vec<i32> = (0..mesh_ref.n_boundary_faces() as u32)
+        .map(|f| mesh_ref.face_tag(f))
+        .collect::<std::collections::HashSet<i32>>()
+        .into_iter().collect();
+    let bnd = boundary_dofs(space.mesh(), dm, &all_tags);
     let vals = vec![0.0; bnd.len()];
     let mut mat = mat;
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &vals);
@@ -200,7 +206,12 @@ mod tests {
         let mut rhs = Assembler::assemble_linear(&space, &[&src], 3);
 
         let dm = space.dof_manager();
-        let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
+        let mesh_ref = space.mesh();
+        let all_tags: Vec<i32> = (0..mesh_ref.n_boundary_faces() as u32)
+            .map(|f| mesh_ref.face_tag(f))
+            .collect::<std::collections::HashSet<i32>>()
+            .into_iter().collect();
+        let bnd = boundary_dofs(space.mesh(), dm, &all_tags);
         let vals = vec![0.0; bnd.len()];
         let mut mat = mat;
         apply_dirichlet(&mut mat, &mut rhs, &bnd, &vals);

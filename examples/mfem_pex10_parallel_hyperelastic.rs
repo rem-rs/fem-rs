@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use fem_assembly::standard::VectorDiffusionIntegrator;
 use fem_mesh::Mesh;
 use fem_parallel::{
-    ParAssembler, ParVector, ParallelFESpace, par_partition::partition_mesh,
+    ParAssembler, ParallelFESpace, par_partition::partition_mesh,
     launcher::native::ThreadLauncher, WorkerConfig,
 };
-use fem_space::{H1Space, fe_space::FESpace};
+use fem_space::H1Space;
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let n = a.iter().position(|x| x == "--n").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(4);

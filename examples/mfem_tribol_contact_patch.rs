@@ -54,7 +54,7 @@ const TOP: i32 = 2;
 
 // ─── Linear elasticity stiffness ─────────────────────────────────────────────
 
-fn assemble_elasticity(mesh: &Mesh<3>) -> (CsrMatrix<f64>, VectorH1Space) {
+fn assemble_elasticity(mesh: &Mesh<3>) -> (CsrMatrix<f64>, VectorH1Space<Mesh<3>>) {
     let space = VectorH1Space::new(mesh.clone(), 1, 3);
     let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     (stiff, space)
@@ -215,7 +215,7 @@ fn max_penetration(mesh: &Mesh<3>, u: &[f64], gap_offset: f64) -> f64 {
             for &n in mesh.face_nodes(f) {
                 let ni = n as usize;
                 let z = mesh.node_coords(n)[2] + u[ni * 3 + 2];
-                max_p = max_p.max((-gap_offset - z).max(0.0));
+                max_p = f64::max(max_p, (-gap_offset - z).max(0.0));
             }
         }
     }
@@ -231,7 +231,7 @@ fn max_pressure(f_contact: &[f64], mesh: &Mesh<3>) -> f64 {
                 let fx = f_contact[ni * 3];
                 let fy = f_contact[ni * 3 + 1];
                 let fz = f_contact[ni * 3 + 2];
-                max_p = max_p.max((fx * fx + fy * fy + fz * fz).sqrt());
+                max_p = f64::max(max_p, (fx * fx + fy * fy + fz * fz).sqrt());
             }
         }
     }

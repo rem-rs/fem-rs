@@ -18,7 +18,7 @@ use fem_parallel::{
     WorkerConfig,
 };
 use fem_solver::SolverConfig;
-use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs, dof_manager::DofManager};
+use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

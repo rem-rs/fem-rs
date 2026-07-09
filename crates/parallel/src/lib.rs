@@ -158,6 +158,7 @@ pub use ghost::GhostExchange;
 pub use launcher::{Launcher, WorkerConfig};
 pub use metis::{MetisPartitioner, MetisOptions, partition_mesh_metis, partition_mesh_metis_streaming};
 pub use par_assembler::ParAssembler;
+pub use par_vector_assembler::ParVectorAssembler;
 pub use par_amg::{ParAmgConfig, ParAmgHierarchy, par_solve_pcg_amg};
 pub use par_ams::ParAmsPrecond;
 pub use par_csr::ParCsrMatrix;

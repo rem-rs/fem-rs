@@ -36,7 +36,7 @@ fn main() {
 
     // Assemble
     let penalty = 10.0;
-    let (mat, rhs) = assemble_wg_stokes(&vel_space, &pres_space, 3, penalty, &force, &dirichlet_bc);
+    let (_mat, rhs) = assemble_wg_stokes(&vel_space, &pres_space, 3, penalty, &force, &dirichlet_bc);
 
     let n_total = n_vel + n_pres;
     println!("  System: {n_total}×{n_total} DOFs (sparse)");

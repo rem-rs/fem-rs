@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use fem_assembly::standard::DomainSourceIntegrator;
-use fem_assembly::physics::nonlinear::{NewtonConfig, NewtonSolver, NonlinearForm};
+//use fem_assembly::physics::nonlinear::{NewtonConfig, NewtonSolver, NonlinearForm};
 use fem_mesh::Mesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
@@ -17,8 +17,8 @@ use fem_parallel::{
     launcher::native::ThreadLauncher,
     WorkerConfig,
 };
-use fem_solver::SolverConfig;
-use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs, dof_manager::DofManager};
+//use fem_solver::SolverConfig;
+use fem_space::H1Space;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -38,17 +38,13 @@ fn main() {
         let par_space = ParallelFESpace::new(local_space, &par_mesh, comm.clone());
 
         let quad_order: u8 = 3;
-        let rhs = ParAssembler::assemble_linear(&par_space, &[&DomainSourceIntegrator::new(|_| 1.0)], quad_order);
+        let _rhs = ParAssembler::assemble_linear(&par_space, &[&DomainSourceIntegrator::new(|_| 1.0)], quad_order);
 
         // Nonlinear diffusion: κ(u) = 1 + u² (Picard linearisation)
-        let mut u = ParVector::zeros(&par_space);
+        let _u = ParVector::zeros(&par_space);
         let n_local = par_space.n_local_dofs();
         // Simple Picard iteration (Newton with approximate Jacobian)
         for _iter in 0..20 {
-            let u_slice: Vec<f64> = u.as_slice().to_vec();
-            let kappa = move |x: &[f64]| 1.0 + (x[0].powi(2) + x[1].powi(2)) / 2.0; // approximate
-            let diff = fem_assembly::postproc::coefficient::ScalarFunctionCoefficient(Arc::new(kappa));
-            let _ = diff;
             // For simplicity, just solve the linear problem with constant κ = 2
             break;
         }
