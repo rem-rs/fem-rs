@@ -52,91 +52,94 @@ fn pml_sigma_y(x: &[f64], pml: &PmlCoeff, k: f64) -> f64 {
     }
     0.0
 }
+fn pml_sigma_z(x: &[f64], pml: &PmlCoeff, k: f64) -> f64 {
+    let d = x.len();
+    if d < 3 { return 0.0; }
+    let width_z = pml.max[2] - pml.min[2];
+    let thick_z = width_z * pml.thickness;
+    let inner_lo = pml.min[2] + thick_z;
+    let inner_hi = pml.max[2] - thick_z;
+    if x[2] <= inner_lo { return 5.0 * ((inner_lo - x[2])/thick_z.max(1e-16)).powi(2) / k.max(1e-16); }
+    if x[2] >= inner_hi { return 5.0 * ((x[2] - inner_hi)/thick_z.max(1e-16)).powi(2) / k.max(1e-16); }
+    0.0
+}
 
 /// Curl-curl coefficient in PML: 1/det(J) where J = diag(1+iσ/ω)
+fn pml_det_re_im(x: &[f64], pml: &PmlCoeff, omega: f64) -> (f64, f64) {
+    let k = omega;
+    let sx = pml_sigma_x(x, pml, k); let sy = pml_sigma_y(x, pml, k); let sz = pml_sigma_z(x, pml, k);
+    let d = x.len();
+    if d == 2 {
+        let det_re = 1.0 - (sx/omega)*(sy/omega); let det_im = sx/omega + sy/omega;
+        (det_re, det_im)
+    } else {
+        let det_re = 1.0 - (sx/omega)*(sy/omega) - (sx/omega)*(sz/omega) - (sy/omega)*(sz/omega);
+        let det_im = sx/omega + sy/omega + sz/omega - (sx/omega)*(sy/omega)*(sz/omega);
+        (det_re, det_im)
+    }
+}
+fn inv_det_re(det_re: f64, det_im: f64) -> f64 { det_re / (det_re*det_re + det_im*det_im) }
+fn inv_det_im(det_re: f64, det_im: f64) -> f64 { -det_im / (det_re*det_re + det_im*det_im) }
+
 struct PmlCurlRe { omega: f64, pml: PmlCoeff }
 impl ScalarCoeff for PmlCurlRe {
     fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
-        let k = self.omega * (1.0f64).sqrt(); // k = ω/c, c=1
-        let sx = pml_sigma_x(ctx.x, &self.pml, k);
-        let sy = pml_sigma_y(ctx.x, &self.pml, k);
-        let dx_re = 1.0; let dx_im = sx/self.omega;
-        let dy_re = 1.0; let dy_im = sy/self.omega;
-        let det_re = dx_re*dy_re - dx_im*dy_im;
-        let det_im = dx_re*dy_im + dx_im*dy_re;
-        let inv_det_re = det_re / (det_re*det_re + det_im*det_im);
-        if ctx.elem_tag == 1 { 1.0 } else { inv_det_re }
+        if ctx.elem_tag == 1 { return 1.0; }
+        let (dr, di) = pml_det_re_im(ctx.x, &self.pml, self.omega);
+        inv_det_re(dr, di)
     }
 }
 struct PmlCurlIm { omega: f64, pml: PmlCoeff }
 impl ScalarCoeff for PmlCurlIm {
     fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
-        let k = self.omega;
-        let sx = pml_sigma_x(ctx.x, &self.pml, k);
-        let sy = pml_sigma_y(ctx.x, &self.pml, k);
-        let dx_im = sx/self.omega; let dy_im = sy/self.omega;
-        let det_re = 1.0 - dx_im*dy_im;
-        let det_im = dx_im + dy_im;
-        let inv_det_im = -det_im / (det_re*det_re + det_im*det_im);
-        if ctx.elem_tag == 1 { 0.0 } else { inv_det_im }
+        if ctx.elem_tag == 1 { return 0.0; }
+        let (dr, di) = pml_det_re_im(ctx.x, &self.pml, self.omega);
+        inv_det_im(dr, di)
     }
 }
 
-/// Absolute-value PML coefficients for preconditioner
+fn pml_abs(x: &[f64], pml: &PmlCoeff, omega: f64) -> f64 {
+    let (dr, di) = pml_det_re_im(x, pml, omega);
+    (dr*dr + di*di).sqrt()
+}
+
 struct PmlCurlReAbs { omega: f64, pml: PmlCoeff }
 impl ScalarCoeff for PmlCurlReAbs {
     fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
         if ctx.elem_tag == 1 { return 1.0; }
-        let k = self.omega;
-        let sx = pml_sigma_x(ctx.x, &self.pml, k);
-        let sy = pml_sigma_y(ctx.x, &self.pml, k);
-        let dx_im = sx/self.omega; let dy_im = sy/self.omega;
-        let det_re = 1.0 - dx_im*dy_im; let det_im = dx_im + dy_im;
-        let inv_det_abs = 1.0 / (det_re*det_re + det_im*det_im).sqrt();
-        inv_det_abs
+        1.0 / pml_abs(ctx.x, &self.pml, self.omega).max(1e-16)
     }
 }
 struct PmlCurlImAbs { omega: f64, pml: PmlCoeff }
 impl ScalarCoeff for PmlCurlImAbs {
     fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
         if ctx.elem_tag == 1 { return 0.0; }
-        let k = self.omega;
-        let sx = pml_sigma_x(ctx.x, &self.pml, k);
-        let sy = pml_sigma_y(ctx.x, &self.pml, k);
-        let dx_im = sx/self.omega; let dy_im = sy/self.omega;
-        let det_im = dx_im + dy_im;
-        det_im.abs() / (1.0 + dy_im*dy_im).max(1e-16)
+        let (dr, di) = pml_det_re_im(ctx.x, &self.pml, self.omega);
+        di.abs() / (dr.abs() + 1e-16).max(1e-16) * 0.5
     }
 }
 struct PmlMassAbs { omega: f64, pml: PmlCoeff }
 impl ScalarCoeff for PmlMassAbs {
     fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
         if ctx.elem_tag == 1 { return 1.0; }
-        let sx = pml_sigma_x(ctx.x, &self.pml, self.omega);
-        let sy = pml_sigma_y(ctx.x, &self.pml, self.omega);
-        let d_re = 1.0 - (sx/self.omega)*(sy/self.omega);
-        let d_im = sx/self.omega + sy/self.omega;
-        (d_re*d_re + d_im*d_im).sqrt()
+        pml_abs(ctx.x, &self.pml, self.omega)
     }
 }
 
-/// Mass coefficient in PML: det(J)
 struct PmlMassRe { omega: f64, pml: PmlCoeff }
 impl ScalarCoeff for PmlMassRe {
     fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
         if ctx.elem_tag == 1 { return 1.0; }
-        let sx = pml_sigma_x(ctx.x, &self.pml, self.omega);
-        let sy = pml_sigma_y(ctx.x, &self.pml, self.omega);
-        1.0 - (sx/self.omega)*(sy/self.omega)
+        let (dr, _di) = pml_det_re_im(ctx.x, &self.pml, self.omega);
+        dr
     }
 }
 struct PmlMassIm { omega: f64, pml: PmlCoeff }
 impl ScalarCoeff for PmlMassIm {
     fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
         if ctx.elem_tag == 1 { return 0.0; }
-        let sx = pml_sigma_x(ctx.x, &self.pml, self.omega);
-        let sy = pml_sigma_y(ctx.x, &self.pml, self.omega);
-        sx/self.omega + sy/self.omega
+        let (_dr, di) = pml_det_re_im(ctx.x, &self.pml, self.omega);
+        di
     }
 }
 
@@ -257,7 +260,7 @@ fn main() {
         Prob::LoadSrc => "data/inline-quad.mesh",
     });
 
-    let mut mesh: Mesh<2> = read_mfem_file(mesh_file).expect("mesh").mesh2d.expect("2D");
+    let mut mesh: Mesh<2> = read_mfem_file(mesh_file).expect("mesh").mesh2d.expect("2D mesh");
     for _ in 0..args.ref_levels { mesh = refine_uniform(&mesh); }
 
     let omega = 2.0 * PI * args.freq;
@@ -265,7 +268,7 @@ fn main() {
     let n = space.n_dofs();
     println!("\nNumber of finite element unknowns: {}", n);
 
-    // Tag PML elements
+    // Tag PML elements (2D)
     let bb = mesh.bounding_box();
     let pml_len = match prob {
         Prob::Disc => 0.2, Prob::Lshape => 0.1, Prob::Fichera => 0.5,
