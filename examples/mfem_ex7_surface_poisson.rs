@@ -59,18 +59,26 @@ fn main() {
     } else {
         build_octahedron_mesh()
     };
+
+    // For P2 (Tri6): elevate before refinement so refinements preserve mid-edge nodes
+    let use_tri6 = !is_quad && args.order >= 2;
+    if use_tri6 {
+        mesh = elevate_to_tri6(&mesh);
+    }
+
     for l in 0..=args.ref_levels {
         if l > 0 {
             mesh = if is_quad {
                 refine_uniform_surface_quad4(&mesh)
+            } else if use_tri6 {
+                refine_uniform_tri6(&mesh)
             } else {
                 refine_uniform_surface_tri3(&mesh)
             };
         }
-        if args.always_snap || l == args.ref_levels {
-            snap_nodes(&mut mesh);
-        }
+        snap_nodes(&mut mesh);
     }
+
     // AMR: refine near north pole (MFEM ex7 -amr 1)
     for _ in 0..args.amr {
         mesh = refine_at_vertex_surface(&mesh, &[0.0, 0.0, 1.0]);
@@ -81,15 +89,6 @@ fn main() {
     let n_nodes = mesh.n_nodes();
     let elem_name = if is_quad { "quads" } else { "triangles" };
     eprintln!("  Mesh: {} nodes, {} {} on unit sphere", n_nodes, n_elems, elem_name);
-
-    // ── 2. Elevate to P2 (Tri6) if order >= 2 and triangle mesh ──────────────
-    let use_tri6 = !is_quad && args.order >= 2;
-    if use_tri6 {
-        let n_old = mesh.n_nodes();
-        mesh = elevate_to_tri6(&mesh);
-        eprintln!("  Elevated: {} nodes → {} nodes, {} Tri6 elements",
-            n_old, mesh.n_nodes(), mesh.n_elems());
-    }
 
     // ── 3. Define H1 space ──────────────────────────────────────────────────
     // For Tri6 mesh, use order=1 (DOFs = mesh nodes, assembly uses P2 bases)
@@ -350,6 +349,72 @@ fn elevate_to_tri6(mesh: &Mesh<3>) -> Mesh<3> {
     }
 }
 
+// ─── Refine Tri6 mesh (each element → 4 children) ─────────────────────────
+
+fn refine_uniform_tri6(mesh: &Mesh<3>) -> Mesh<3> {
+    let ne = mesh.n_elems();
+    let conn6 = &mesh.conn;
+    let mut coords = mesh.coords.clone();
+    let mut edge_map = std::collections::HashMap::<(u32, u32), u32>::new();
+    let mut next_node = mesh.n_nodes() as u32;
+    let mut new_conn = Vec::with_capacity(ne * 24);
+
+    let add_edge = |a: u32, b: u32, coords: &mut Vec<f64>, map: &mut std::collections::HashMap<(u32, u32), u32>, next: &mut u32| -> u32 {
+        let key = if a < b { (a, b) } else { (b, a) };
+        *map.entry(key).or_insert_with(|| {
+            let j = *next; *next += 1;
+            let (xa, ya, za) = (coords[a as usize*3], coords[a as usize*3+1], coords[a as usize*3+2]);
+            let (xb, yb, zb) = (coords[b as usize*3], coords[b as usize*3+1], coords[b as usize*3+2]);
+            let cx = (xa + xb) / 2.0; let cy = (ya + yb) / 2.0; let cz = (za + zb) / 2.0;
+            coords.extend_from_slice(&[cx, cy, cz]);
+            j
+        })
+    };
+
+    for e in 0..ne {
+        let i = e * 6;
+        let (v0, v1, v2) = (conn6[i], conn6[i+1], conn6[i+2]);
+        let (m01, m12, m20) = (conn6[i+3], conn6[i+4], conn6[i+5]);
+
+        // 4 sub-triangles, each gets 6 Tri6 nodes (3 old + 3 new edge midpoints)
+        // Child 0: (v0, m01, m20) → new edges: v0-m01, v0-m20, m01-m20
+        let a = add_edge(v0, m01, &mut coords, &mut edge_map, &mut next_node);
+        let b = add_edge(v0, m20, &mut coords, &mut edge_map, &mut next_node);
+        let c = add_edge(m01, m20, &mut coords, &mut edge_map, &mut next_node);
+        new_conn.extend_from_slice(&[v0, m01, m20, a, c, b]);
+
+        // Child 1: (v1, m12, m01) → new edges: v1-m12, v1-m01, m12-m01
+        let a = add_edge(v1, m12, &mut coords, &mut edge_map, &mut next_node);
+        let b = add_edge(v1, m01, &mut coords, &mut edge_map, &mut next_node);
+        let c = add_edge(m12, m01, &mut coords, &mut edge_map, &mut next_node);
+        new_conn.extend_from_slice(&[v1, m12, m01, a, c, b]);
+
+        // Child 2: (v2, m20, m12) → new edges: v2-m20, v2-m12, m20-m12
+        let a = add_edge(v2, m20, &mut coords, &mut edge_map, &mut next_node);
+        let b = add_edge(v2, m12, &mut coords, &mut edge_map, &mut next_node);
+        let c = add_edge(m20, m12, &mut coords, &mut edge_map, &mut next_node);
+        new_conn.extend_from_slice(&[v2, m20, m12, a, c, b]);
+
+        // Child 3: (m01, m12, m20) → new edges: m01-m12, m12-m20, m20-m01
+        let a = add_edge(m01, m12, &mut coords, &mut edge_map, &mut next_node);
+        let b = add_edge(m12, m20, &mut coords, &mut edge_map, &mut next_node);
+        let c = add_edge(m20, m01, &mut coords, &mut edge_map, &mut next_node);
+        new_conn.extend_from_slice(&[m01, m12, m20, a, b, c]);
+    }
+
+    Mesh {
+        coords, conn: new_conn,
+        elem_tags: vec![0; ne * 4],
+        elem_type: ElementType::Tri6,
+        face_conn: vec![], face_tags: vec![],
+        face_type: ElementType::Line2,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    }
+}
+
 // ─── Cube mesh (Quad4) ──────────────────────────────────────────────────────
 
 fn build_cube_mesh() -> Mesh<3> {
@@ -393,6 +458,7 @@ struct Args {
     ref_levels: usize,
     order: u8,
     elem_type: u8,
+    #[allow(dead_code)]
     always_snap: bool,
     amr: u8,
     #[allow(dead_code)]
