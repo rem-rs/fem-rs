@@ -37,7 +37,7 @@ use fem_linalg::fem_to_linlvo_csr;
 use fem_space::{
     VectorH1Space,
     fe_space::FESpace,
-    constraints::{boundary_dofs, apply_dirichlet},
+    constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
 };
 use fem_solver::GSSmoother;
 
@@ -139,7 +139,7 @@ fn main() {
     let lambda_coeff = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
     let mu_coeff = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
     let elasticity = ElasticityIntegrator::new(lambda_coeff, mu_coeff);
-    let mut mat = Assembler::assemble_bilinear(&space, &[&elasticity], quad_order);
+    let mat = Assembler::assemble_bilinear(&space, &[&elasticity], quad_order);
 
     // 10. Form the linear system (eliminate essential BCs in‑place).
     if args.static_cond {
@@ -148,20 +148,26 @@ fn main() {
     print!("matrix ... ");
     std::io::stdout().flush().ok();
 
-    apply_dirichlet(&mut mat, &mut rhs, &clamped, &clamped_vals);
     println!("done.");
 
-    println!("Size of linear system: {n_dofs}");
+    // 10b. Eliminate essential BCs to form the reduced system (matching MFEM
+    //      FormLinearSystem), so the preconditioner only sees active DOFs.
+    let n_full = n_dofs;
+    let (red_mat, red_rhs, free_map, constrained_map) =
+        eliminate_dirichlet(&mat, &rhs, &clamped, &clamped_vals);
 
-    // 11. Solve: PCG with symmetric Gauss-Seidel preconditioner (SSOR, ω = 1).
-    let linlvo_mat = fem_to_linlvo_csr(&mat);
+    let n_sys = red_mat.nrows;
+    println!("Size of linear system: {n_sys}");
+
+    // 11. Solve the reduced system: PCG + GSSmoother (SSOR, ω = 1).
+    let linlvo_mat = fem_to_linlvo_csr(&red_mat);
     let precond = GSSmoother::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
-    let mut u = vec![0.0_f64; n_dofs];
-    let _res = solve_pcg(&mat, &rhs, &mut u, &precond, 1e-8, 500, true)
+    let mut x_red = vec![0.0_f64; n_sys];
+    let _res = solve_pcg(&red_mat, &red_rhs, &mut x_red, &precond, 1e-8, 500, true)
         .expect("elasticity solve failed");
 
-    // 12. Recover the full solution — u already has the right length
-    //     (apply_dirichlet sets the Dirichlet DOFs to 0 in the solve).
+    // 12. Recover the full solution (MFEM RecoverFEMSolution).
+    let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &clamped_vals, n_full);
 
     // 13. Make the mesh curved based on the FE space — skipped for simplicity.
 

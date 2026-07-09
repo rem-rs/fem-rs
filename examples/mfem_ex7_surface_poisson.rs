@@ -27,14 +27,21 @@
 use fem_assembly::boundary::surface::{
     SurfaceAssembler, SurfaceBilinearIntegrator, SurfaceLinearIntegrator,
     SurfaceDiffusionIntegrator, SurfaceDomainSourceIntegrator, SurfaceMassIntegrator,
+    SurfaceTri6BilinearIntegrator, SurfaceTri6LinearIntegrator,
     SurfaceQuad4Assembler, SurfaceQuad4BilinearIntegrator, SurfaceQuad4LinearIntegrator,
     SurfaceQuad4DiffusionIntegrator, SurfaceQuad4DomainSourceIntegrator,
     SurfaceQuad4MassIntegrator,
+};
+use fem_assembly::boundary::surface_tri6::{
+    SurfaceTri6Assembler,
+    SurfaceTri6DiffusionIntegrator, SurfaceTri6MassIntegrator,
+    SurfaceTri6DomainSourceIntegrator,
 };
 use fem_mesh::{
     Mesh, MeshTopology, element_type::ElementType,
     amr::{refine_at_vertex_surface, refine_uniform_surface_quad4, refine_uniform_surface_tri3},
 };
+use fem_linalg::CsrMatrix;
 use fem_solver::{fem_to_linlvo_csr, solve_pcg, SolveResult};
 use fem_space::{H1Space, fe_space::FESpace};
 use fem_solver::GSSmoother;
@@ -75,23 +82,37 @@ fn main() {
     let elem_name = if is_quad { "quads" } else { "triangles" };
     eprintln!("  Mesh: {} nodes, {} {} on unit sphere", n_nodes, n_elems, elem_name);
 
-    // ── 2. Define H1 space (order 1) ─────────────────────────────────────────
-    let order = args.order.min(1);
-    let space = H1Space::new(mesh, order);
+    // ── 2. Elevate to P2 (Tri6) if order >= 2 and triangle mesh ──────────────
+    let use_tri6 = !is_quad && args.order >= 2;
+    if use_tri6 {
+        let n_old = mesh.n_nodes();
+        mesh = elevate_to_tri6(&mesh);
+        eprintln!("  Elevated: {} nodes → {} nodes, {} Tri6 elements",
+            n_old, mesh.n_nodes(), mesh.n_elems());
+    }
+
+    // ── 3. Define H1 space ──────────────────────────────────────────────────
+    // For Tri6 mesh, use order=1 (DOFs = mesh nodes, assembly uses P2 bases)
+    let h1_order = if use_tri6 { 1 } else { args.order };
+    let space = H1Space::new(mesh, h1_order);
     let n_dofs = space.n_dofs();
     println!("Number of unknowns: {}", n_dofs);
 
-    // ── 3. Assemble surface stiffness (-Delta_Gamma) + mass (+u) ────────────
+    // ── 4. Assemble surface stiffness (-Delta_Gamma) + mass (+u) ────────────
     let rhs_fn = &|x: &[f64; 3]| {
         let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
         7.0 * x[0] * x[1] / r2
     };
 
-    // MFEM-style slice assembly: add integrators, assemble in one pass.
-    let a = if is_quad {
+    let a: CsrMatrix<f64> = if is_quad {
         SurfaceQuad4Assembler::assemble_bilinear(&space, &[
             &SurfaceQuad4DiffusionIntegrator as &dyn SurfaceQuad4BilinearIntegrator,
             &SurfaceQuad4MassIntegrator,
+        ])
+    } else if use_tri6 {
+        SurfaceTri6Assembler::assemble_bilinear(&space, &[
+            &SurfaceTri6DiffusionIntegrator as &dyn SurfaceTri6BilinearIntegrator,
+            &SurfaceTri6MassIntegrator,
         ])
     } else {
         SurfaceAssembler::assemble_bilinear(&space, &[
@@ -100,16 +121,21 @@ fn main() {
         ])
     };
 
-    // ── 4. Assemble RHS: f = 7*x*y / r^2 ────────────────────────────────────
-    let source_tri = SurfaceDomainSourceIntegrator { f: rhs_fn };
-    let source_quad = SurfaceQuad4DomainSourceIntegrator { f: rhs_fn };
-    let rhs = if is_quad {
+    // ── 5. Assemble RHS: f = 7*x*y / r^2 ────────────────────────────────────
+    let rhs: Vec<f64> = if is_quad {
+        let src = SurfaceQuad4DomainSourceIntegrator { f: rhs_fn };
         SurfaceQuad4Assembler::assemble_linear(&space, &[
-            &source_quad as &dyn SurfaceQuad4LinearIntegrator,
+            &src as &dyn SurfaceQuad4LinearIntegrator,
+        ])
+    } else if use_tri6 {
+        let src = SurfaceTri6DomainSourceIntegrator { f: rhs_fn };
+        SurfaceTri6Assembler::assemble_linear(&space, &[
+            &src as &dyn SurfaceTri6LinearIntegrator,
         ])
     } else {
+        let src = SurfaceDomainSourceIntegrator { f: rhs_fn };
         SurfaceAssembler::assemble_linear(&space, &[
-            &source_tri as &dyn SurfaceLinearIntegrator,
+            &src as &dyn SurfaceLinearIntegrator,
         ])
     };
 
@@ -165,6 +191,31 @@ fn main() {
                 err2 += diff*diff*qwt[q]*sqrt_det_g;
             }
         }
+    } else if use_tri6 {
+        // P2 (Tri6) L² error — 3-point quadrature, P2 basis
+        for e in 0..mesh_3.n_elems() as u32 {
+            let ns = mesh_3.element_nodes(e);
+            let x: [[f64; 3]; 6] = {
+                let mut arr = [[0.0; 3]; 6];
+                for i in 0..6 { let c = mesh_3.node_coords(ns[i]); arr[i] = [c[0], c[1], c[2]]; }
+                arr
+            };
+            let (j, sqrt_det_g, _) = fem_assembly::boundary::surface_tri6::surface_jacobian_tri6(&x);
+            let _ = j;
+            for q in 0..3 {
+                let (xi, eta) = match q { 0 => (2./3.,1./6.), 1 => (1./6.,2./3.), _ => (1./6.,1./6.) };
+                let phi = fem_assembly::boundary::surface_tri6::p2_basis_tri6(xi, eta);
+                let xp = [
+                    phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh_3.node_coords(n)[0]).sum::<f64>(),
+                    phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh_3.node_coords(n)[1]).sum::<f64>(),
+                    phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh_3.node_coords(n)[2]).sum::<f64>(),
+                ];
+                let uh = phi.iter().zip(ns.iter()).map(|(&p, &n)| p * u[n as usize]).sum::<f64>();
+                let ue = exact_fn(&xp);
+                let diff = uh - ue;
+                err2 += diff*diff*(1.0/6.0)*sqrt_det_g;
+            }
+        }
     } else {
         let qpts_tri = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
         let qwt_tri = [1.0/6.0, 1.0/6.0, 1.0/6.0];
@@ -202,7 +253,7 @@ fn main() {
         if let Err(e) = write_mfem_file_3d("sphere_refined.mesh", space.mesh()) {
             eprintln!("  Warning: could not write sphere_refined.mesh: {e}");
         }
-        if let Err(e) = write_gf_file("sol.gf", 3, &u, "H1", order as u8, 1) {
+        if let Err(e) = write_gf_file("sol.gf", 3, &u, "H1", args.order, 1) {
             eprintln!("  Warning: could not write sol.gf: {e}");
         }
     }
@@ -229,6 +280,67 @@ fn build_octahedron_mesh() -> Mesh<3> {
     Mesh {
         coords, conn, elem_tags: (1..=8).collect(),
         elem_type: ElementType::Tri3,
+        face_conn: vec![], face_tags: vec![],
+        face_type: ElementType::Line2,
+        elem_types: None, elem_offsets: None,
+        face_types: None, face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![], edge_to_elem: vec![],
+    }
+}
+
+// ─── Elevate Tri3 → Tri6 (add mid-edge nodes snapped to sphere) ─────────────
+
+fn elevate_to_tri6(mesh: &Mesh<3>) -> Mesh<3> {
+    let ne = mesh.n_elems();
+    let tri3_conn = &mesh.conn; // 3 indices per element
+    let n3 = mesh.n_nodes() as u32;
+    let mut coords = mesh.coords.clone();
+    let mut edge_map = std::collections::HashMap::<(u32, u32), u32>::new();
+    let mut next_node = n3;
+    let mut new_conn = Vec::with_capacity(ne * 6);
+
+    for e in 0..ne {
+        let i = e * 3;
+        let a = tri3_conn[i];
+        let b = tri3_conn[i + 1];
+        let c = tri3_conn[i + 2];
+        let key = |x: u32, y: u32| if x < y { (x, y) } else { (y, x) };
+
+        let ab = *edge_map.entry(key(a, b)).or_insert_with(|| {
+            let j = next_node; next_node += 1;
+            let (xa, ya, za) = (coords[a as usize*3], coords[a as usize*3+1], coords[a as usize*3+2]);
+            let (xb, yb, zb) = (coords[b as usize*3], coords[b as usize*3+1], coords[b as usize*3+2]);
+            let cx = (xa + xb) / 2.0; let cy = (ya + yb) / 2.0; let cz = (za + zb) / 2.0;
+            let r = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-30);
+            coords.extend_from_slice(&[cx/r, cy/r, cz/r]);
+            j
+        });
+        let ac = *edge_map.entry(key(a, c)).or_insert_with(|| {
+            let j = next_node; next_node += 1;
+            let (xa, ya, za) = (coords[a as usize*3], coords[a as usize*3+1], coords[a as usize*3+2]);
+            let (xc, yc, zc) = (coords[c as usize*3], coords[c as usize*3+1], coords[c as usize*3+2]);
+            let cx = (xa + xc) / 2.0; let cy = (ya + yc) / 2.0; let cz = (za + zc) / 2.0;
+            let r = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-30);
+            coords.extend_from_slice(&[cx/r, cy/r, cz/r]);
+            j
+        });
+        let bc = *edge_map.entry(key(b, c)).or_insert_with(|| {
+            let j = next_node; next_node += 1;
+            let (xb, yb, zb) = (coords[b as usize*3], coords[b as usize*3+1], coords[b as usize*3+2]);
+            let (xc, yc, zc) = (coords[c as usize*3], coords[c as usize*3+1], coords[c as usize*3+2]);
+            let cx = (xb + xc) / 2.0; let cy = (yb + yc) / 2.0; let cz = (zb + zc) / 2.0;
+            let r = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-30);
+            coords.extend_from_slice(&[cx/r, cy/r, cz/r]);
+            j
+        });
+        new_conn.extend_from_slice(&[a, b, c, ab, bc, ac]);
+    }
+
+    Mesh {
+        coords, conn: new_conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: ElementType::Tri6,
         face_conn: vec![], face_tags: vec![],
         face_type: ElementType::Line2,
         elem_types: None, elem_offsets: None,
@@ -304,9 +416,6 @@ impl Args {
                 }
                 "-o" | "--order" => {
                     order = it.next().and_then(|s| s.parse().ok()).unwrap_or(2);
-                    if order > 1 {
-                        eprintln!("  Warning: order > 1 not yet supported; using order 1");
-                    }
                 }
                 "-e" | "--elem" => {
                     elem_type = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);

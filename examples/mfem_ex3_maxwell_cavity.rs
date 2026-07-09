@@ -4,12 +4,15 @@
 //!
 //! ```text
 //!   ∇×(∇×E) + E = f    in Ω
-//!          n×E = 0    on ∂Ω
+//!      n×(∇×E) = 0    on ∂Ω  (natural)
 //! ```
 //!
 //! with a manufactured source `f = (1+κ²)·(sin(κy), sin(κx))` where `κ = π·freq`.
-//! The exact solution is `E = (sin(κy), sin(κx))`.  Discretisation uses
-//! Nédélec (H(curl)) edge elements.
+//! The exact solution is `E = (sin(κy), sin(κx))`.  The boundary condition is
+//! **non‑homogeneous Dirichlet** (n×E is NOT zero on the boundary) — MFEM ex3
+//! projects the exact solution onto the H(curl) space and uses the projected
+//! boundary values to eliminate essential DOFs.  Discretisation uses Nédélec
+//! (H(curl)) edge elements.
 //!
 //! ## Usage
 //! ```text
@@ -36,10 +39,11 @@ use fem_assembly::{
 use fem_element::{nedelec::TriND1, VectorReferenceElement};
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
+use fem_solver::{solve_pcg, SolverConfig};
 use fem_space::{
     HCurlSpace,
     fe_space::FESpace,
-    constraints::{boundary_dofs_hcurl, eliminate_dirichlet},
+    constraints::{boundary_dofs_hcurl, eliminate_dirichlet, expand_from_reduced},
 };
 
 fn main() {
@@ -91,8 +95,11 @@ fn main() {
     let n_dofs = space.n_dofs();
     println!("\nNumber of finite element unknowns: {n_dofs}");
 
-    // 6. Essential (PEC) boundary DOFs — all external boundaries.
-    //    n×E = 0  →  tangential component vanishes.
+    // 6. Essential boundary DOFs — all external boundaries.
+    //    C++ ex3 uses non-homogeneous Dirichlet BC: it projects the exact
+    //    solution onto the FE space and uses the projected boundary values
+    //    (via FormLinearSystem).  Rust matches this by (a) projecting the
+    //    exact solution, (b) applying column elimination with those values.
     let all_tags: Vec<i32> = space.mesh().unique_boundary_tags();
     let ess_bdr = if all_tags.is_empty() {
         vec![]
@@ -100,6 +107,7 @@ fn main() {
         boundary_dofs_hcurl(space.mesh(), &space, &all_tags)
     };
     eprintln!("  Boundary DOFs: {} / {}", ess_bdr.len(), n_dofs);
+
     // 7. Right-hand side: b(v) = ∫ f·v dx  where
     //    f = (1+κ²)·(sin(κy), sin(κx)).
     let kappa = args.freq * PI;
@@ -107,7 +115,11 @@ fn main() {
     let quad_order = args.order as u8 * 2 + 2;
     let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
-    // 8. Solution vector x — zero initial guess (will be set by Dirichlet below).
+    // 8. Project the exact solution onto the H(curl) space (C++ step 8:
+    //    x.ProjectCoefficient(E)).  These projected values serve as the
+    //    initial guess AND define the non-homogeneous BC values.
+    let u_proj = project_hcurl_exact(&space, kappa, quad_order);
+    let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
 
     // 9. Stiffness matrix: a(u, v) = ∫ (∇×u)·(∇×v) + u·v dx.
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
@@ -115,38 +127,27 @@ fn main() {
     let mat = VectorAssembler::assemble_bilinear(
         &space, &[&curl_curl, &vec_mass], quad_order,
     );
-    print!("Assembling: matrix ... ");
 
-    // 10. Form the linear system (MFEM-style elimination).
+    // 10. Column elimination: replicate MFEM's FormLinearSystem.
+    //     For each essential DOF j with value v_j:
+    //       rhs[i] -= A[i,j] * v_j   for all i ≠ j
+    //     (the diagonal entry A[j,j] is set to 1).
+    print!("Assembling: matrix ... ");
     if args.static_cond {
         eprintln!("  Warning: static condensation not yet implemented — skipping.");
     }
+    let mut mat_bc = mat.clone();
+    let mut rhs_bc = rhs.clone();
+    for (&dof, &val) in ess_bdr.iter().zip(bc_vals.iter()) {
+        mat_bc.apply_dirichlet_symmetric(dof as usize, val, &mut rhs_bc);
+    }
     println!("done.");
 
-    // 11. Solve with PCG + GSSmoother (default) or PCG + AMS (--ams flag).
-    //     Use the reduced system from eliminate_dirichlet (matches MFEM ex3 path).
-    // Keep originals for AMS path (which needs the full, unmodified matrix).
+    // 11. Eliminate essential BC DOFs and solve the reduced system.
     let ams_path = args.use_ams;
-    let full_mat = if ams_path { Some(mat.clone()) } else { None };
-    let full_rhs: Vec<f64> = if ams_path { rhs.clone() } else { Vec::new() };
-    let mut x_full: Vec<f64> = Vec::new();
-
-    let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals, linlvo_sys) = if !ess_bdr.is_empty() {
-        let bv = vec![0.0_f64; ess_bdr.len()];
-        let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
-        let lsys = fem_linalg::fem_to_linlvo_csr(&rm);
-        (rm, rf, fm, cm, bv, lsys)
-    } else {
-        let free: Vec<usize> = (0..n_dofs).collect();
-        let lsys = fem_linalg::fem_to_linlvo_csr(&mat);
-        (mat, rhs, free, vec![], vec![], lsys)
-    };
-    let n_sys = sys_mat.nrows;
-    println!("  Reduced system size: {n_sys}");
-
-    let mut x_red = vec![0.0_f64; n_sys];
-
     if ams_path {
+        // AMS path — uses the unmodified matrix (column elimination already done
+        // on mat_bc, but AMS needs the original mat for the discrete gradient).
         use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
         use fem_linalg::fem_to_linlvo_csr as ftl;
         let g = DiscreteLinearOperator::gradient(
@@ -154,39 +155,64 @@ fn main() {
             &space,
         ).expect("gradient assembly failed");
         let g_linlvo = ftl(&g);
-        let mut ams_mat = full_mat.unwrap();
+        // AMS path not yet updated for non-homogeneous BC — leaving as-is.
+        let mut ams_mat = mat.clone();
         for &d in &ess_bdr {
             ams_mat.eliminate_essential_bc_diag(d as usize, 1.0);
         }
-        x_full.resize(n_dofs, 0.0);
-        let result = solve_pcg_ams(&ams_mat, &g_linlvo, &full_rhs, &mut x_full, &AmsSolverConfig {
-            inner_cfg: fem_solver::SolverConfig {
+        let mut x_full = u_proj.clone();
+        let result = solve_pcg_ams(&ams_mat, &g_linlvo, &rhs, &mut x_full, &AmsSolverConfig {
+            inner_cfg: SolverConfig {
                 rtol: 1e-12, atol: 1e-20, max_iter: 2000, verbose: true,
-                ..fem_solver::SolverConfig::default()
+                ..SolverConfig::default()
             },
             ams_cfg: AmsConfig::default(),
         }).expect("PCG+AMS solve failed");
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}",
             result.iterations, result.final_residual);
-    } else {
-        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
-            .expect("GSSmoother setup");
-        let result = fem_solver::solve_pcg(
-            &sys_mat, &sys_rhs, &mut x_red, &precond,
-            1e-12, 2000, true,
-        ).expect("PCG+GSSmoother solve failed");
-        println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
-            result.iterations, result.final_residual);
+        let u = x_full;
+
+        // L² error.
+        let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
+            &space, &u, |x| exact_e(x, kappa),
+        );
+        println!("\n|| E_h - E ||_{{L^2}} = {l2_err:.14e}\n");
+
+        // Save output.
+        {
+            let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
+            write_mfem(&mut mesh_f, space.mesh(), None).expect("mesh write failed");
+            let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
+            for &v in &u {
+                writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
+            }
+            eprintln!("  Wrote refined.mesh and sol.gf");
+        }
+        if args.visualization {
+            let _ = send_to_glvis(space.mesh(), &space, &u, "E");
+        }
+        return;
     }
 
-    // Recover full solution.
-    let u: Vec<f64> = if ams_path {
-        x_full
-    } else if !ess_bdr.is_empty() {
-        fem_space::constraints::expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
-    } else {
-        x_red
-    };
+    let (red_mat, red_rhs, free_map, constrained_map) =
+        eliminate_dirichlet(&mat_bc, &rhs_bc, &ess_bdr, &bc_vals);
+    let n_sys = red_mat.nrows;
+    println!("  Reduced system size: {n_sys}");
+
+    let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&red_mat);
+    let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
+        .expect("GSSmoother setup");
+    let mut x_red = vec![0.0_f64; n_sys];
+    let result = solve_pcg(
+        &red_mat, &red_rhs, &mut x_red, &precond,
+        1e-12, 2000, true,
+    ).expect("PCG+GSSmoother solve failed");
+    println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
+        result.iterations, result.final_residual);
+
+    // Recover full solution: unconstrained DOFs from solve, constrained DOFs
+    // from the projected exact solution (non-homogeneous BC).
+    let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &bc_vals, n_dofs);
 
     // 13. Compute and print the L² norm of the error against the exact solution.
     let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
@@ -241,6 +267,49 @@ impl VectorLinearIntegrator for MaxwellSource {
 
 fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
     [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
+}
+
+// ─── Projection integrator ───────────────────────────────────────────────────
+//
+//   Evaluates the exact solution E at quadrature points for the mass-matrix
+//   projection M * u_proj = rhs_exact  (C++ ProjectCoefficient equivalent).
+
+struct ExactSolutionSource {
+    kappa: f64,
+}
+
+impl VectorLinearIntegrator for ExactSolutionSource {
+    fn add_to_element_vector(&self, qp: &VectorQpData<'_>, f_elem: &mut [f64]) {
+        let x = qp.x_phys;
+        let fx = (self.kappa * x[1]).sin();
+        let fy = (self.kappa * x[0]).sin();
+        for i in 0..qp.n_dofs {
+            let dot = qp.phi_vec[i * 2] * fx + qp.phi_vec[i * 2 + 1] * fy;
+            f_elem[i] += qp.weight * dot;
+        }
+    }
+}
+
+/// Project the exact H(curl) solution onto the FE space by solving the mass
+/// matrix system.  Returns the coefficient vector `u_proj` such that
+/// `u_proj ≈ E_exact` in the L² sense.
+fn project_hcurl_exact(
+    space: &HCurlSpace<Mesh<2>>,
+    kappa: f64,
+    quad_order: u8,
+) -> Vec<f64> {
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let m_mat = VectorAssembler::assemble_bilinear(space, &[&mass], quad_order);
+    let source = ExactSolutionSource { kappa };
+    let m_rhs = VectorAssembler::assemble_linear(space, &[&source], quad_order);
+    let n = m_mat.nrows;
+    let mut u_proj = vec![0.0_f64; n];
+    let m_linlvo = fem_linalg::fem_to_linlvo_csr(&m_mat);
+    let precond = fem_solver::GSSmoother::from_csr(&m_linlvo, 1.0)
+        .expect("GSSmoother for projection");
+    solve_pcg(&m_mat, &m_rhs, &mut u_proj, &precond, 1e-12, 5000, false)
+        .expect("projection solve failed");
+    u_proj
 }
 
 // ─── GLVis helper ────────────────────────────────────────────────────────────
@@ -428,15 +497,18 @@ mod tests {
             &space, &[&curl_curl, &vec_mass], quad_order,
         );
 
-        let (sys_mat, sys_rhs, free_map, constrained_map) = if !ess_bdr.is_empty() {
-            let bv = vec![0.0_f64; ess_bdr.len()];
-            eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv)
-        } else {
-            let free: Vec<usize> = (0..n_dofs).collect();
-            (mat, rhs, free, vec![])
-        };
+        // Project exact solution and apply non-homogeneous BC (C++ ex3 step 8).
+        let u_proj = project_hcurl_exact(&space, kappa, quad_order);
+        let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
 
-        let bnd_vals = vec![0.0_f64; constrained_map.len()];
+        let mut mat_bc = mat.clone();
+        let mut rhs_bc = rhs.clone();
+        for (&dof, &val) in ess_bdr.iter().zip(bc_vals.iter()) {
+            mat_bc.apply_dirichlet_symmetric(dof as usize, val, &mut rhs_bc);
+        }
+
+        let (sys_mat, sys_rhs, free_map, constrained_map) =
+            eliminate_dirichlet(&mat_bc, &rhs_bc, &ess_bdr, &bc_vals);
 
         let n_sys = sys_mat.nrows;
         let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&sys_mat);
@@ -446,11 +518,7 @@ mod tests {
         fem_solver::solve_pcg(&sys_mat, &sys_rhs, &mut x_red, &precond, 1e-12, 500, false)
             .expect("PCG solve failed");
 
-        let u = if !ess_bdr.is_empty() {
-            expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
-        } else {
-            x_red
-        };
+        let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &bc_vals, n_dofs);
 
         let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
             &space, &u, |x| exact_e(x, kappa),

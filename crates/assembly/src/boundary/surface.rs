@@ -190,6 +190,16 @@ pub trait SurfaceLinearIntegrator {
     fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 3], f_elem: &mut [f64; 3]);
 }
 
+/// Trait for Tri6 (P2) surface bilinear integrators — 6-node triangles.
+pub trait SurfaceTri6BilinearIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]);
+}
+
+/// Trait for Tri6 (P2) surface linear integrators.
+pub trait SurfaceTri6LinearIntegrator {
+    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 6], f_elem: &mut [f64; 6]);
+}
+
 /// Trait for Quad4 surface bilinear integrators.
 pub trait SurfaceQuad4BilinearIntegrator {
     fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 4], k_elem: &mut [f64; 16]);
@@ -314,7 +324,7 @@ impl SurfaceAssembler {
     }
 }
 
-fn get_coord3<M: MeshTopology>(mesh: &M, n: u32) -> [f64; 3] {
+pub(crate) fn get_coord3<M: MeshTopology>(mesh: &M, n: u32) -> [f64; 3] {
     let c = mesh.node_coords(n);
     [c[0], c[1], if c.len() > 2 { c[2] } else { 0.0 }]
 }

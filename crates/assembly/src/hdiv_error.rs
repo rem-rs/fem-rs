@@ -8,7 +8,7 @@
 
 use fem_element::{
     reference::VectorReferenceElement,
-    raviart_thomas::{QuadRT0, TriRT0},
+    raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TriRT2},
 };
 use fem_linalg::CsrMatrix;
 use fem_mesh::{ElementTransformation, ElementType, Mesh, MeshTopology};
@@ -35,11 +35,15 @@ where
 {
     let mesh = space.mesh();
     let elem_type = mesh.element_type(0);
+    let order = space.order();
     let is_quad = matches!(elem_type, ElementType::Quad4);
-    let ref_elem: &dyn VectorReferenceElement = match elem_type {
-        ElementType::Tri3 | ElementType::Tri6 => &TriRT0,
-        ElementType::Quad4 => &QuadRT0,
-        _ => panic!("compute_hdiv_l2_error: unsupported element type {elem_type:?}"),
+    let ref_elem: &dyn VectorReferenceElement = match (elem_type, order) {
+        (ElementType::Tri3 | ElementType::Tri6, 0) => &TriRT0,
+        (ElementType::Tri3 | ElementType::Tri6, 1) => &TriRT1,
+        (ElementType::Tri3 | ElementType::Tri6, 2) => &TriRT2,
+        (ElementType::Quad4, 0) => &QuadRT0,
+        (ElementType::Quad4, 1) => &QuadRT1,
+        _ => panic!("compute_hdiv_l2_error: unsupported (type={elem_type:?}, order={order})"),
     };
     let quad = ref_elem.quadrature(6);
     let n_ldofs = ref_elem.n_dofs() as usize;

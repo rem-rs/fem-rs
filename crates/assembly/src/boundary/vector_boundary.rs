@@ -292,8 +292,11 @@ impl VectorBoundaryAssembler {
     ///
     /// Each boundary face contributes `∫_Γ g(x) ds` to its associated DOF,
     /// computed via the midpoint rule (exact for linear g).  Unlike the generic
-    /// [`assemble_boundary_linear`], this targets only the face-specific DOF(s),
-    /// which is correct for H(div) RT spaces.
+    /// Assemble the H(div) boundary flux RHS: `∫_∂Ω g (v·n) ds`.
+    ///
+    /// Used for natural boundary conditions in mixed Darcy / Poisson.
+    /// Correctly handles DOF orientation signs (contravariant Piola sign)
+    /// by looking up the adjacent element's orientation.
     pub fn assemble_hdiv_boundary_flux(
         space: &HDivSpace<Mesh<2>>,
         g: &dyn Fn(&[f64]) -> f64,
@@ -306,14 +309,24 @@ impl VectorBoundaryAssembler {
             if !tags.contains(&mesh.face_tag(f)) { continue; }
             let nodes = mesh.face_nodes(f);
             if nodes.len() < 2 { continue; }
+            // Find the adjacent element to apply orientation signs.
+            let (elem, _) = mesh.face_elements(f);
             let pa = mesh.node_coords(nodes[0]);
             let pb = mesh.node_coords(nodes[1]);
             let tx = pb[0] - pa[0]; let ty = pb[1] - pa[1];
             let mid = [0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1])];
+            let edge_len = (tx * tx + ty * ty).sqrt();
+            let flux_val = (g)(&mid) * edge_len;
             let ek = EdgeKey::new(nodes[0], nodes[1]);
-            if let Some(dof) = space.edge_face_dof(ek) {
-                let edge_len = (tx * tx + ty * ty).sqrt();
-                rhs[dof as usize] += (g)(&mid) * edge_len;
+            if let Some(global_dof) = space.edge_face_dof(ek) {
+                // Apply orientation sign from the adjacent element.
+                let elem_dofs = space.element_dofs(elem);
+                let signs = space.element_signs(elem);
+                let sign = signs.iter().zip(elem_dofs.iter())
+                    .find(|(_, &gd)| gd == global_dof)
+                    .map(|(s, _)| *s)
+                    .unwrap_or(1.0);
+                rhs[global_dof as usize] += sign * flux_val;
             }
         }
         rhs

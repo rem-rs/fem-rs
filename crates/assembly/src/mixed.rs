@@ -252,18 +252,42 @@ where
         let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
         let _j_inv_t = tr.jacobian_inv_t().clone();
 
+        // Apply H(div) orientation signs (contravariant Piola sign) from
+        // the velocity space — VectorAssembler does this for the mass matrix,
+        // so the mixed divergence matrix must match.
+        let signs_opt = col_space.element_signs(e);
+
         let n_elem_r = global_rows.len();
         let n_elem_c = global_cols.len();
         let mut m_elem = vec![0.0_f64; n_elem_r * n_elem_c];
 
         let mut phi_r = vec![0.0; n_r];
         let mut div_c_vec = vec![0.0; n_c];
+        let mut div_c_signed = vec![0.0; n_c];
 
         for (q, xi) in quad.points.iter().enumerate() {
             let w = quad.weights[q] * tr.det_j().abs();
 
             ref_r.eval_basis(xi, &mut phi_r);
             ref_c.eval_div(xi, &mut div_c_vec);
+
+            // Apply orientation signs and the contravariant Piola transform:
+            // phys_div = ref_div / detJ  (since the Piola transform for H(div)
+            // has div_phys = div_ref / detJ).  The quadrature weight already
+            // includes |detJ|, so the product w * div_phys = q_weight * div_ref.
+            let det_j = tr.det_j();
+            if let Some(signs) = signs_opt {
+                for i in 0..n_c.min(signs.len()) {
+                    div_c_signed[i] = signs[i] * div_c_vec[i] / det_j;
+                }
+                for i in n_c.min(signs.len())..n_c {
+                    div_c_signed[i] = div_c_vec[i] / det_j;
+                }
+            } else {
+                for i in 0..n_c {
+                    div_c_signed[i] = div_c_vec[i] / det_j;
+                }
+            }
 
             let xp = tr.map_to_physical(xi);
             let qp_r = QpData {
@@ -279,7 +303,7 @@ where
             };
 
             for integ in integrators {
-                integ.add_to_element_matrix(&qp_r, &div_c_vec, dim, &mut m_elem);
+                integ.add_to_element_matrix(&qp_r, &div_c_signed, dim, &mut m_elem);
             }
         }
 
