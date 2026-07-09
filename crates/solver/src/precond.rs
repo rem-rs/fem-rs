@@ -4,7 +4,7 @@ use linlvo::{
     iterative::{ConjugateGradient, Gmres},
     precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig},
     sparse::CsrMatrix as linlvoCsr,
-    DenseVec, KrylovSolver,
+    DenseVec, KrylovSolver, Preconditioner,
 };
 use fem_linalg::{fem_to_linlvo_csr, into_result, SolverConfig, SolverError, SolveResult};
 
@@ -223,4 +223,27 @@ pub fn solve_gmres_ads<T: linlvoScalar>(
 
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
+}
+
+/// Block-diagonal preconditioner for complex (2x2 block) systems.
+pub struct BlockDiagPrecond<P: Preconditioner<Vector = DenseVec<f64>>> {
+    pub inner: P,
+    pub n: usize,
+}
+
+impl<P: Preconditioner<Vector = DenseVec<f64>>> Preconditioner for BlockDiagPrecond<P> {
+    type Vector = DenseVec<f64>;
+    fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
+        let n = self.n;
+        let xs = x.as_slice();
+        let zs = z.as_mut_slice();
+        let x_re = DenseVec::from_vec(xs[..n].to_vec());
+        let mut z_re = DenseVec::zeros(n);
+        self.inner.apply_precond(&x_re, &mut z_re);
+        zs[..n].copy_from_slice(z_re.as_slice());
+        let x_im = DenseVec::from_vec(xs[n..].to_vec());
+        let mut z_im = DenseVec::zeros(n);
+        self.inner.apply_precond(&x_im, &mut z_im);
+        zs[n..].copy_from_slice(z_im.as_slice());
+    }
 }

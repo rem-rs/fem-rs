@@ -250,37 +250,13 @@ fn main() {
     let a = coo.into_csr();
 
     let mut x = vec![0.0; 2*n];
-    use fem_solver::GSSmoother;
+    use fem_solver::{BlockDiagPrecond, GSSmoother};
     use fem_linalg::fem_to_linlvo_csr;
-    use linlvo::Preconditioner;
-    use linlvo::DenseVec;
 
-    // Build preconditioner: absolute-value version of the real block
     let prec_coeff_re = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlReAbs { omega, pml: pml_prec.clone() } }], qo);
     let prec_coeff_im = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: PmlCurlImAbs { omega, pml: pml_prec.clone() } }], qo);
     let prec_mass = VectorAssembler::assemble_bilinear(&space, &[&VectorMassIntegrator { alpha: PmlMassAbs { omega, pml: pml_prec } }], qo);
     let prec_mat = CsrMatrix::add(&prec_coeff_re, &prec_coeff_im).axpby(1.0, &prec_mass, omega*omega);
-
-    // Block-diagonal preconditioner for [K_re -K_im; K_im K_re]
-    struct BlockDiagPrecond { inner: GSSmoother, n: usize }
-    impl Preconditioner for BlockDiagPrecond {
-        type Vector = DenseVec<f64>;
-        fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
-            let n = self.n;
-            let xs = x.as_slice();
-            let zs = z.as_mut_slice();
-            // Real block
-            let x_re = DenseVec::from_vec(xs[..n].to_vec());
-            let mut z_re = DenseVec::zeros(n);
-            self.inner.apply_precond(&x_re, &mut z_re);
-            zs[..n].copy_from_slice(z_re.as_slice());
-            // Imag block
-            let x_im = DenseVec::from_vec(xs[n..].to_vec());
-            let mut z_im = DenseVec::zeros(n);
-            self.inner.apply_precond(&x_im, &mut z_im);
-            zs[n..].copy_from_slice(z_im.as_slice());
-        }
-    }
 
     let prec_linlvo = fem_to_linlvo_csr(&prec_mat);
     let gs = GSSmoother::from_csr(&prec_linlvo, 1.0).expect("GSSmoother");

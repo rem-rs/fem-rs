@@ -55,6 +55,7 @@
 /// without depending on the `linlvo` crate directly.
 pub use linlvo::Preconditioner as linlvoPreconditioner;
 pub use linlvo::precond::{AmsConfig, AdsConfig};
+pub use linlvo::DenseVec;
 
 /// Symmetric Gauss-Seidel smoother — MFEM-compatible name for SSOR(ω=1).
 ///
