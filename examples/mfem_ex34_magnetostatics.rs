@@ -59,7 +59,7 @@ fn default_args() -> Args {
     Args {
         mesh_file: "data/fichera-mixed.mesh".into(),
         order: 1,
-        ref_levels: 0,
+        ref_levels: 1,
         delta: 1e-6,
         static_cond: false,
         mixed: true,
@@ -307,7 +307,7 @@ fn main() {
 
     let mut x_nd = vec![0.0_f64; red_nd.nrows];
     let nd_result = solve_pcg_ilu0(&red_nd, &red_rhs_nd, &mut x_nd, &SolverConfig {
-        rtol: 1e-6, max_iter: 8000, verbose: true, ..SolverConfig::default()
+        rtol: 1e-6, max_iter: 2000, verbose: true, ..SolverConfig::default()
     }).expect("ND PCG+ILU0 solve failed");
     expand_solution(&x_nd, &nd_free, &nd_constrained, &vec![0.0; ess_dofs_nd.len()], &mut a_sol);
 

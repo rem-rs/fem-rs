@@ -2,7 +2,7 @@ use fem_linalg::CsrMatrix as FemCsr;
 use linlvo::{
     core::scalar::Scalar as linlvoScalar,
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
-    DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner,
+    DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner, SsorPrecond,
 };
 use linlvo::precond::{IlukPrecond, IlutPrecond};
 use linlvo::{LinearOperator, Vector};
@@ -15,6 +15,22 @@ use crate::macros::check_dims;
 solve_iterative_simple!(solve_cg, ConjugateGradient<T>, "Conjugate Gradient - for symmetric positive definite systems.");
 
 solve_precond_simple!(solve_pcg_jacobi, ConjugateGradient<T>, JacobiPrecond<T>, "Preconditioned CG with Jacobi preconditioner.");
+
+/// PCG with symmetric Gauss-Seidel (SSOR(ω=1)) preconditioner — MFEM GSSmoother.
+pub fn solve_pcg_gssmoother<T: linlvoScalar>(
+    a: &FemCsr<T>, b: &[T], x: &mut [T], cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linlvo_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = SsorPrecond::from_csr(&la, T::one()).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    let res = ConjugateGradient::default()
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
 
 solve_precond_simple!(solve_pcg_ilu0, ConjugateGradient<T>, Ilu0Precond<T>, "Preconditioned CG with ILU(0) preconditioner.");
 

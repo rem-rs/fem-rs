@@ -8,6 +8,7 @@
 //! - [`solve_gmres_operator`] — GMRES with operator callback (backend-agnostic)
 //! - [`solve_bicgstab_operator`] — BiCGSTAB with operator callback (backend-agnostic)
 //! - [`solve_pcg_jacobi`]  — PCG with Jacobi preconditioner
+//! - [`solve_pcg_gssmoother`] — PCG with symmetric Gauss-Seidel (MFEM GSSmoother)
 //! - [`solve_pcg_ilu0`]    — PCG with ILU(0) preconditioner
 //! - [`solve_pcg_ildlt`]   — PCG with ILDLᵀ preconditioner
 //! - [`solve_gmres`]       — GMRES (non-symmetric systems)
