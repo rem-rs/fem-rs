@@ -1,4 +1,4 @@
-//! Nonlinear forms and Newton–Raphson solver.
+﻿//! Nonlinear forms and Newton鈥揜aphson solver.
 //!
 //! # Overview
 //!
@@ -6,21 +6,21 @@
 //! for a nonlinear PDE.  The [`NewtonSolver`] then iterates
 //!
 //! ```text
-//! J(uₙ) Δu = −F(uₙ),   uₙ₊₁ = uₙ + Δu
+//! J(u鈧? 螖u = 鈭扚(u鈧?,   u鈧欌倞鈧?= u鈧?+ 螖u
 //! ```
 //!
-//! until `‖F(u)‖ < tol`.
+//! until `鈥朏(u)鈥?< tol`.
 //!
 //! # Example: nonlinear diffusion
 //! ```rust,ignore
-//! let form = NonlinearDiffusionForm::new(&space, |u| 1.0 + u*u); // κ(u) = 1 + u²
+//! let form = NonlinearDiffusionForm::new(&space, |u| 1.0 + u*u); // 魏(u) = 1 + u虏
 //! let mut solver = NewtonSolver::new(NewtonConfig::default());
 //! let mut u = vec![0.0; space.n_dofs()];
 //! let result = solver.solve(&form, &rhs, &mut u).unwrap();
 //! ```
 
 use fem_linalg::CsrMatrix;
-use fem_solver::{solve_gmres, SolverConfig};
+use fem_solver::{solve_gmres_ilu0, SolverConfig};
 
 /// A nonlinear PDE form that can compute residuals and Jacobians.
 ///
@@ -43,14 +43,14 @@ pub trait NonlinearForm: Send + Sync {
     fn n_dofs(&self) -> usize;
 }
 
-// ─── Newton solver ────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ Newton solver 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Convergence and iteration parameters for the Newton solver.
 #[derive(Debug, Clone)]
 pub struct NewtonConfig {
-    /// Absolute tolerance on `‖F(u)‖₂` (default 1e-10).
+    /// Absolute tolerance on `鈥朏(u)鈥栤倐` (default 1e-10).
     pub atol: f64,
-    /// Relative tolerance on `‖F(u)‖₂ / ‖F(u₀)‖₂` (default 1e-8).
+    /// Relative tolerance on `鈥朏(u)鈥栤倐 / 鈥朏(u鈧€)鈥栤倐` (default 1e-8).
     pub rtol: f64,
     /// Maximum Newton iterations (default 50).
     pub max_iter: usize,
@@ -76,7 +76,7 @@ impl Default for NewtonConfig {
             atol:       1e-10,
             rtol:       1e-8,
             max_iter:   50,
-            linear_tol: 1e-10,
+            linear_tol: 1e-6,
             line_search: true,
             line_search_min_alpha: 1e-6,
             line_search_shrink: 0.5,
@@ -95,7 +95,7 @@ pub struct NewtonResult {
     pub final_residual: f64,
 }
 
-/// Newton–Raphson solver for nonlinear systems `F(u) = 0`.
+/// Newton鈥揜aphson solver for nonlinear systems `F(u) = 0`.
 pub struct NewtonSolver {
     cfg: NewtonConfig,
 }
@@ -120,7 +120,7 @@ impl NewtonSolver {
         let linear_cfg = SolverConfig {
             rtol:     self.cfg.linear_tol,
             atol:     0.0,
-            max_iter: 1000,
+            max_iter: 3000,
             verbose:  false,
             ..SolverConfig::default()
         };
@@ -135,7 +135,7 @@ impl NewtonSolver {
         let r0 = norm2(&r);
 
         if self.cfg.verbose {
-            println!("[Newton] iter=0 ‖F‖={r0:.3e}");
+            println!("[Newton] iter=0 鈥朏鈥?{r0:.3e}");
         }
 
         // Converged immediately (zero initial residual)
@@ -149,10 +149,10 @@ impl NewtonSolver {
             // Assemble Jacobian
             let jac = form.jacobian(u);
 
-            // Solve J Δu = −r
+            // Solve J 螖u = 鈭抮
             let neg_r: Vec<f64> = r.iter().map(|&v| -v).collect();
             du.fill(0.0);
-            solve_gmres(&jac, &neg_r, &mut du, 30, &linear_cfg)
+            solve_gmres_ilu0(&jac, &neg_r, &mut du, 100, &linear_cfg)
                 .map_err(|_| NewtonResult { converged: false, iterations: iter, final_residual: r_norm })?;
 
             if self.cfg.line_search {
@@ -189,7 +189,7 @@ impl NewtonSolver {
                     u[i] += use_alpha * du[i];
                 }
             } else {
-                // Update: u ← u + Δu
+                // Update: u 鈫?u + 螖u
                 for (ui, &dui) in u.iter_mut().zip(du.iter()) {
                     *ui += dui;
                 }
@@ -200,7 +200,7 @@ impl NewtonSolver {
             r_norm = norm2(&r);
 
             if self.cfg.verbose {
-                println!("[Newton] iter={} ‖F‖={r_norm:.3e}", iter + 1);
+                println!("[Newton] iter={} 鈥朏鈥?{r_norm:.3e}", iter + 1);
             }
 
             if r_norm < self.cfg.atol || r_norm < r0 * self.cfg.rtol {
@@ -216,12 +216,12 @@ fn norm2(v: &[f64]) -> f64 {
     v.iter().map(|&x| x * x).sum::<f64>().sqrt()
 }
 
-// ─── Finite-difference Jacobian ────────────────────────────────────────────
+// 鈹€鈹€鈹€ Finite-difference Jacobian 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Compute a sparse Jacobian matrix via column-wise finite differences.
 ///
 /// Perturbs each DOF by `h = eps * (1 + |u_j|)` and computes
-/// `J[:,j] ≈ (F(u + h·eⱼ) − F(u)) / h`.
+/// `J[:,j] 鈮?(F(u + h路e獗? 鈭?F(u)) / h`.
 ///
 /// Uses `element_dofs` to determine the sparsity pattern: only DOFs that share
 /// an element with column `j` are stored in that column.
@@ -304,7 +304,7 @@ where F: Fn(&[f64], &[f64], &mut [f64]) + Send + Sync,
     fn n_dofs(&self) -> usize { self.n_dofs }
 }
 
-// ─── JFNK (Jacobian-Free Newton-Krylov) ────────────────────────────────────
+// 鈹€鈹€鈹€ JFNK (Jacobian-Free Newton-Krylov) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Configuration for the JFNK solver.
 #[derive(Debug, Clone)]
@@ -314,7 +314,7 @@ pub struct JfNKConfig {
     pub max_iter: usize,
     pub gmres_restart: usize,
     pub gmres_max_iter: usize,
-    /// Finite-difference step for Jacobian-vector products (relative to ‖v‖).
+    /// Finite-difference step for Jacobian-vector products (relative to 鈥杤鈥?.
     pub eps: f64,
     pub verbose: bool,
 }
@@ -332,7 +332,7 @@ impl Default for JfNKConfig {
 /// Jacobian-Free Newton-Krylov solver.
 ///
 /// Uses GMRES with finite-difference Jacobian-vector products
-/// `J(u)·v ≈ (F(u+εv) − F(u))/ε`, eliminating the need to assemble the Jacobian.
+/// `J(u)路v 鈮?(F(u+蔚v) 鈭?F(u))/蔚`, eliminating the need to assemble the Jacobian.
 pub struct JfNKSolver {
     cfg: JfNKConfig,
 }
@@ -357,13 +357,13 @@ impl JfNKSolver {
         let r0 = norm2(&r);
         let mut r_norm = r0;
 
-        if self.cfg.verbose { println!("[JFNK] iter=0 ‖F‖={r0:.3e}"); }
+        if self.cfg.verbose { println!("[JFNK] iter=0 鈥朏鈥?{r0:.3e}"); }
         if r0 < self.cfg.atol {
             return Ok(NewtonResult { converged: true, iterations: 0, final_residual: r0 });
         }
 
         for iter in 0..self.cfg.max_iter {
-            // GMRES solve: J·du = -r, using matrix-free Jv products
+            // GMRES solve: J路du = -r, using matrix-free Jv products
             let neg_r: Vec<f64> = r.iter().map(|&v| -v).collect();
             du.fill(0.0);
             self.solve_gmres_jfnk(form, u, &neg_r, &mut du, rhs);
@@ -384,7 +384,7 @@ impl JfNKSolver {
 
             form.residual(u, rhs, &mut r);
             r_norm = norm2(&r);
-            if self.cfg.verbose { println!("[JFNK] iter={} ‖F‖={r_norm:.3e} α={alpha:.4}", iter+1); }
+            if self.cfg.verbose { println!("[JFNK] iter={} 鈥朏鈥?{r_norm:.3e} 伪={alpha:.4}", iter+1); }
 
             if r_norm < self.cfg.atol || r_norm < r0 * self.cfg.rtol {
                 return Ok(NewtonResult { converged: true, iterations: iter+1, final_residual: r_norm });
@@ -393,7 +393,7 @@ impl JfNKSolver {
         Err(NewtonResult { converged: false, iterations: self.cfg.max_iter, final_residual: r_norm })
     }
 
-    /// Solve `J(u)·x = b` using GMRES with matrix-free Jacobian-vector products.
+    /// Solve `J(u)路x = b` using GMRES with matrix-free Jacobian-vector products.
     fn solve_gmres_jfnk(&self, form: &dyn NonlinearForm, u: &[f64], b: &[f64], x: &mut [f64], rhs: &[f64]) {
         let n = u.len();
         let eps = self.cfg.eps;
@@ -404,7 +404,7 @@ impl JfNKSolver {
         let mut fu = vec![0.0; n];
         form.residual(u, rhs, &mut fu);
 
-        // Matrix-vector product operator: v → J(u)·v ≈ (F(u+εv) - F(u))/ε
+        // Matrix-vector product operator: v 鈫?J(u)路v 鈮?(F(u+蔚v) - F(u))/蔚
         let jv = |v: &[f64], w: &mut [f64]| {
             let eps_v = eps / (norm2(v) + 1e-30).max(1e-14);
             let mut up = u.to_vec();
@@ -422,7 +422,7 @@ impl JfNKSolver {
         let mut cs = vec![0.0; restart];
         let mut sn = vec![0.0; restart];
 
-        // Initial residual r0 = b - J·x = b (since x = 0)
+        // Initial residual r0 = b - J路x = b (since x = 0)
         let r = b.to_vec();
         let beta = norm2(&r);
         if beta < 1e-30 { return; }
@@ -477,18 +477,18 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
-// ─── Anderson acceleration ──────────────────────────────────────────────────
+// 鈹€鈹€鈹€ Anderson acceleration 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Configuration for Anderson acceleration (fixed-point mixing).
 #[derive(Debug, Clone)]
 pub struct AndersonConfig {
     /// Number of past residuals to store (history depth).
     pub m: usize,
-    /// Mixing parameter β: u_new = u - β·F(u) (before Anderson mixing).
+    /// Mixing parameter 尾: u_new = u - 尾路F(u) (before Anderson mixing).
     pub beta: f64,
     /// Maximum iterations.
     pub max_iter: usize,
-    /// Absolute tolerance on ‖F(u)‖.
+    /// Absolute tolerance on 鈥朏(u)鈥?
     pub atol: f64,
     /// Relative tolerance.
     pub rtol: f64,
@@ -507,7 +507,7 @@ impl Default for AndersonConfig {
 ///
 /// For `F(u) = 0`, uses Anderson mixing to accelerate convergence:
 /// ```text
-/// u_{k+1} = u_k - β·F(u_k)  (Picard step), then
+/// u_{k+1} = u_k - 尾路F(u_k)  (Picard step), then
 ///          = weighted combination of last m iterates to minimize residual.
 /// ```
 pub struct AndersonAccelerator {
@@ -534,13 +534,13 @@ impl AndersonAccelerator {
         form.residual(u, rhs, &mut r);
         let r0 = norm2(&r);
         let mut r_norm = r0;
-        if self.cfg.verbose { println!("[Anderson] iter=0 ‖F‖={r0:.3e}"); }
+        if self.cfg.verbose { println!("[Anderson] iter=0 鈥朏鈥?{r0:.3e}"); }
         if r0 < self.cfg.atol {
             return Ok(NewtonResult { converged: true, iterations: 0, final_residual: r0 });
         }
 
         for iter in 0..self.cfg.max_iter {
-            // Picard step: u_new = u - β·F(u)
+            // Picard step: u_new = u - 尾路F(u)
             let mut u_new = u.to_vec();
             for i in 0..n { u_new[i] -= beta * r[i]; }
 
@@ -551,13 +551,13 @@ impl AndersonAccelerator {
             let k = r_hist.len();
 
             if k > 1 {
-                // Solve least-squares: min_γ ‖F_k - Σ_{j<k} γ_j·(F_k - F_j)‖
+                // Solve least-squares: min_纬 鈥朏_k - 危_{j<k} 纬_j路(F_k - F_j)鈥?
                 // where F_k is the latest residual.
                 let n_row = n;
                 let n_col = k - 1;
                 if n_col > 0 {
                     // Build the matrix A_ij = (F_k - F_j)_i and RHS b_i = (F_k)_i
-                    // Solve A·γ = b via normal equations with regularization
+                    // Solve A路纬 = b via normal equations with regularization
                     let mut ata = vec![0.0; n_col * n_col];
                     let mut atb = vec![0.0; n_col];
                     for i in 0..n_row {
@@ -579,7 +579,7 @@ impl AndersonAccelerator {
                     } else {
                         solve_2x2(&ata, &atb, n_col)
                     };
-                    // Anderson update: u = Σ γ_j·u_j (last residual weight from constraint Σγ_j = 1)
+                    // Anderson update: u = 危 纬_j路u_j (last residual weight from constraint 危纬_j = 1)
                     let mut gamma_sum = 0.0;
                     for j in 0..n_col { gamma_sum += gamma[j]; }
                     for i in 0..n {
@@ -595,7 +595,7 @@ impl AndersonAccelerator {
             u.copy_from_slice(&u_new);
             form.residual(u, rhs, &mut r);
             r_norm = norm2(&r);
-            if self.cfg.verbose { println!("[Anderson] iter={} ‖F‖={r_norm:.3e}", iter + 1); }
+            if self.cfg.verbose { println!("[Anderson] iter={} 鈥朏鈥?{r_norm:.3e}", iter + 1); }
             if r_norm < self.cfg.atol || r_norm < r0 * self.cfg.rtol {
                 return Ok(NewtonResult { converged: true, iterations: iter + 1, final_residual: r_norm });
             }
@@ -606,7 +606,7 @@ impl AndersonAccelerator {
 
 fn solve_2x2(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     if n == 1 { return vec![b[0] / a[0].max(1e-30)]; }
-    // Gaussian elimination for general n×n (n small)
+    // Gaussian elimination for general n脳n (n small)
     let mut x = b.to_vec();
     let mut aa = a.to_vec();
     for c in 0..n {
@@ -629,7 +629,7 @@ fn solve_2x2(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     x
 }
 
-// ─── NonlinearDiffusionForm ───────────────────────────────────────────────────
+// 鈹€鈹€鈹€ NonlinearDiffusionForm 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3}};
@@ -637,14 +637,14 @@ use fem_linalg::CooMatrix;
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
-/// Nonlinear diffusion form: `F(u) = ∫ κ(u) ∇u · ∇v dx − ∫ f v dx`.
+/// Nonlinear diffusion form: `F(u) = 鈭?魏(u) 鈭噓 路 鈭噕 dx 鈭?鈭?f v dx`.
 ///
-/// The Jacobian is `J(u)[i,j] = ∫ [κ(u) ∇φⱼ · ∇φᵢ + κ'(u) φⱼ ∇u · ∇φᵢ] dx`
+/// The Jacobian is `J(u)[i,j] = 鈭?[魏(u) 鈭囅嗏奔 路 鈭囅嗎耽 + 魏'(u) 蠁獗?鈭噓 路 鈭囅嗎耽] dx`
 /// (linearisation via product rule).
 ///
 /// For simplicity (and robustness), the Jacobian uses **Picard linearisation**:
-/// `J_Picard(u)[i,j] = ∫ κ(u) ∇φⱼ · ∇φᵢ dx`
-/// (freeze κ at the current iterate, ignore the κ' term).
+/// `J_Picard(u)[i,j] = 鈭?魏(u) 鈭囅嗏奔 路 鈭囅嗎耽 dx`
+/// (freeze 魏 at the current iterate, ignore the 魏' term).
 /// This is first-order convergent; set `use_full_jacobian = true` for quadratic.
 pub struct NonlinearDiffusionForm<S: FESpace, K>
 where
@@ -652,13 +652,13 @@ where
 {
     space:           S,
     kappa:           K,
-    /// Also assemble the `κ'(u)` term in the Jacobian for quadratic convergence.
+    /// Also assemble the `魏'(u)` term in the Jacobian for quadratic convergence.
     pub use_full_jacobian: bool,
-    /// Derivative of κ: `kappa_prime(u)`.  Only used if `use_full_jacobian`.
+    /// Derivative of 魏: `kappa_prime(u)`.  Only used if `use_full_jacobian`.
     #[allow(dead_code)]
     kappa_prime:     Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>,
     quad_order:      u8,
-    /// Fixed (linear) Dirichlet constrained DOFs → prescribed value.
+    /// Fixed (linear) Dirichlet constrained DOFs 鈫?prescribed value.
     dirichlet: Vec<(usize, f64)>,
 }
 
@@ -723,19 +723,19 @@ where
                 let u_qp: f64 = gd.iter().zip(phi.iter()).map(|(&d, &ph)| u[d] * ph).sum();
                 let kappa_qp = (self.kappa)(u_qp);
 
-                // ∇u at this point
+                // 鈭噓 at this point
                 let grad_u: Vec<f64> = (0..dim).map(|d| {
                     gd.iter().zip(grad_p.chunks(dim)).map(|(&di, gpi)| u[di] * gpi[d]).sum::<f64>()
                 }).collect();
 
-                // F(u)[i] += w κ(u) ∇u · ∇φᵢ
+                // F(u)[i] += w 魏(u) 鈭噓 路 鈭囅嗎耽
                 for i in 0..n_l {
                     let dot: f64 = (0..dim).map(|d| grad_u[d] * grad_p[i*dim+d]).sum();
                     f_elem[i] += w * kappa_qp * dot;
                 }
             }
 
-            // Scatter: r[gi] += f_elem[i] − rhs[gi]
+            // Scatter: r[gi] += f_elem[i] 鈭?rhs[gi]
             for (i, &gi) in gd.iter().enumerate() {
                 r[gi] += f_elem[i];
             }
@@ -751,7 +751,7 @@ where
     }
 
     fn jacobian(&self, u: &[f64]) -> CsrMatrix<f64> {
-        // Picard linearisation: J = ∫ κ(u_h) ∇φⱼ · ∇φᵢ dx
+        // Picard linearisation: J = 鈭?魏(u_h) 鈭囅嗏奔 路 鈭囅嗎耽 dx
         let mesh  = self.space.mesh();
         let dim   = mesh.dim() as usize;
         let order = self.space.order();
@@ -817,7 +817,7 @@ where
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
@@ -851,13 +851,13 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
     }
 }
 
-// ─── LBFGS (Limited-memory BFGS) ─────────────────────────────────────────────
+// 鈹€鈹€鈹€ LBFGS (Limited-memory BFGS) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Convergence and iteration parameters for the LBFGS solver.
 #[derive(Debug, Clone)]
 pub struct LbfgsConfig {
-    pub atol: f64,                    // ‖F‖₂ absolute tolerance
-    pub rtol: f64,                    // ‖F‖₂ / ‖F₀‖₂ relative tolerance
+    pub atol: f64,                    // 鈥朏鈥栤倐 absolute tolerance
+    pub rtol: f64,                    // 鈥朏鈥栤倐 / 鈥朏鈧€鈥栤倐 relative tolerance
     pub max_iter: usize,              // max outer iterations
     pub history: usize,               // L-BFGS history size m
     pub line_search_max_backtracks: usize,
@@ -886,7 +886,7 @@ pub struct LbfgsResult {
 
 /// Limited-memory BFGS quasi-Newton solver.
 ///
-/// Approximates the inverse Hessian via `m` history pairs (sᵢ, yᵢ) and the
+/// Approximates the inverse Hessian via `m` history pairs (s岬? y岬? and the
 /// two-loop recursion (Nocedal & Wright).  No Jacobian assembly is required.
 pub struct LbfgsSolver {
     cfg: LbfgsConfig,
@@ -917,17 +917,17 @@ impl LbfgsSolver {
             return Ok(LbfgsResult { converged: true, iterations: 0, final_residual: g0_norm });
         }
 
-        // Ring buffers for s = x_{k+1} − x_k  and  y = g_{k+1} − g_k
+        // Ring buffers for s = x_{k+1} 鈭?x_k  and  y = g_{k+1} 鈭?g_k
         let mut ss: Vec<Vec<f64>> = Vec::with_capacity(m);
         let mut yy: Vec<Vec<f64>> = Vec::with_capacity(m);
         let mut rho: Vec<f64> = Vec::with_capacity(m);
         let mut head: usize = 0;
 
         for iter in 0..self.cfg.max_iter {
-            // ── Build search direction d via two-loop recursion ──────────
+            // 鈹€鈹€ Build search direction d via two-loop recursion 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             d.copy_from_slice(&g);
 
-            // Loop 1: q ← g; αᵢ = ρᵢ · sᵢᵀ q; q ← q − αᵢ yᵢ
+            // Loop 1: q 鈫?g; 伪岬?= 蟻岬?路 s岬⑨祤 q; q 鈫?q 鈭?伪岬?y岬?
             let n_hist = ss.len();
             let mut alpha = vec![0.0_f64; n_hist];
             for i in (0..n_hist).rev() {
@@ -938,7 +938,7 @@ impl LbfgsSolver {
                 for j in 0..n { d[j] -= alpha[i] * yi[j]; }
             }
 
-            // Scale: γ = (yᵏ⁻¹ᵀ sᵏ⁻¹) / (yᵏ⁻¹ᵀ yᵏ⁻¹)
+            // Scale: 纬 = (y岬忊伝鹿岬€ s岬忊伝鹿) / (y岬忊伝鹿岬€ y岬忊伝鹿)
             if n_hist > 0 {
                 let last = (head + n_hist - 1) % n_hist;
                 let sl = &ss[last];
@@ -949,7 +949,7 @@ impl LbfgsSolver {
                 for j in 0..n { d[j] *= gamma; }
             }
 
-            // Loop 2: βᵢ = ρᵢ · yᵢᵀ z; z ← z + sᵢ(αᵢ − βᵢ)
+            // Loop 2: 尾岬?= 蟻岬?路 y岬⑨祤 z; z 鈫?z + s岬?伪岬?鈭?尾岬?
             for i in 0..n_hist {
                 let idx = (head + i) % n_hist;
                 let si = &ss[idx];
@@ -961,7 +961,7 @@ impl LbfgsSolver {
             // d = -z  (negative gradient direction)
             for j in 0..n { d[j] = -d[j]; }
 
-            // ── Line search (Armijo backtracking) ────────────────────────
+            // 鈹€鈹€ Line search (Armijo backtracking) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             let mut step = 1.0_f64;
             let mut accepted = false;
             form.residual(u, rhs, &mut g_old);
@@ -992,14 +992,14 @@ impl LbfgsSolver {
             g_norm = norm2(&g);
 
             if self.cfg.verbose {
-                println!("[LBFGS] iter={} ‖F‖={g_norm:.3e} step={step:.2e} hist={n_hist}", iter + 1);
+                println!("[LBFGS] iter={} 鈥朏鈥?{g_norm:.3e} step={step:.2e} hist={n_hist}", iter + 1);
             }
 
             if g_norm < self.cfg.atol || g_norm < g0_norm * self.cfg.rtol {
                 return Ok(LbfgsResult { converged: true, iterations: iter + 1, final_residual: g_norm });
             }
 
-            // ── Update history ───────────────────────────────────────────
+            // 鈹€鈹€ Update history 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             if ss.len() < m {
                 ss.push(vec![0.0_f64; n]);
                 yy.push(vec![0.0_f64; n]);
@@ -1018,7 +1018,7 @@ impl LbfgsSolver {
     }
 }
 
-// ─── Trust-region (Steihaug-CG) ──────────────────────────────────────────────
+// 鈹€鈹€鈹€ Trust-region (Steihaug-CG) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Convergence and iteration parameters for the trust-region solver.
 #[derive(Debug, Clone)]
@@ -1034,9 +1034,9 @@ pub struct TrustRegionConfig {
     pub shrink: f64,
     /// Expand factor when step is accepted (good quality).
     pub expand: f64,
-    /// Threshold ρ for accepting step.
+    /// Threshold 蟻 for accepting step.
     pub eta_accept: f64,
-    /// Threshold ρ for expanding the radius.
+    /// Threshold 蟻 for expanding the radius.
     pub eta_expand: f64,
     /// Linear solver tolerance for CG inner solve.
     pub linear_tol: f64,
@@ -1049,7 +1049,7 @@ impl Default for TrustRegionConfig {
             atol: 1e-10, rtol: 1e-8, max_iter: 100,
             delta0: 1.0, delta_max: 1e8, shrink: 0.25, expand: 2.0,
             eta_accept: 0.1, eta_expand: 0.75,
-            linear_tol: 1e-10, verbose: false,
+            linear_tol: 1e-6, verbose: false,
         }
     }
 }
@@ -1064,8 +1064,8 @@ pub struct TrustRegionResult {
 
 /// Trust-region method with Steihaug-CG subproblem solver.
 ///
-/// Uses the quadratic model `m(p) = F(u)ᵀp + ½ pᵀJ(u)p` and CG to solve
-/// the constrained minimisation `min_{‖p‖≤Δ} m(p)`.
+/// Uses the quadratic model `m(p) = F(u)岬€p + 陆 p岬€J(u)p` and CG to solve
+/// the constrained minimisation `min_{鈥杙鈥栤墹螖} m(p)`.
 pub struct TrustRegionSolver {
     cfg: TrustRegionConfig,
 }
@@ -1085,9 +1085,9 @@ impl TrustRegionSolver {
         let cfg = &self.cfg;
 
         let mut delta = cfg.delta0;
-        let mut g = vec![0.0_f64; n];   // residual = gradient of ½‖F‖²
+        let mut g = vec![0.0_f64; n];   // residual = gradient of 陆鈥朏鈥柭?
         let _p = vec![0.0_f64; n];   // step
-        let mut g_jp = vec![0.0_f64; n];// J·p for CG
+        let mut g_jp = vec![0.0_f64; n];// J路p for CG
 
         form.residual(u, rhs, &mut g);
         let g0_norm = norm2(&g);
@@ -1100,13 +1100,13 @@ impl TrustRegionSolver {
         for iter in 0..cfg.max_iter {
             let jac = form.jacobian(u);
 
-            // ── Steihaug-CG for the constrained step ─────────────────────
-            // Solve min_{‖p‖≤Δ}  gᵀ·p + ½·pᵀ·J·p
+            // 鈹€鈹€ Steihaug-CG for the constrained step 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+            // Solve min_{鈥杙鈥栤墹螖}  g岬€路p + 陆路p岬€路J路p
             let mut z = vec![0.0_f64; n];  // CG iterate
-            let mut r_cg = g.clone();      // negative gradient = -g (we minimise g·p + ½p·J·p)
-            // Actually: m(p) = gᵀp + ½pᵀJp. ∇m = g + Jp = 0 → Jp = -g
-            // So we solve J·p = -g with CG, truncated by ‖p‖ ≤ Δ.
-            for j in 0..n { r_cg[j] = -g[j]; }  // r = -g − J·z  (initially z=0 → r = -g)
+            let mut r_cg = g.clone();      // negative gradient = -g (we minimise g路p + 陆p路J路p)
+            // Actually: m(p) = g岬€p + 陆p岬€Jp. 鈭噈 = g + Jp = 0 鈫?Jp = -g
+            // So we solve J路p = -g with CG, truncated by 鈥杙鈥?鈮?螖.
+            for j in 0..n { r_cg[j] = -g[j]; }  // r = -g 鈭?J路z  (initially z=0 鈫?r = -g)
 
             let mut cg_dir = r_cg.clone();
             let mut rz = dot_product(&r_cg, &r_cg);
@@ -1120,17 +1120,17 @@ impl TrustRegionSolver {
                     break;
                 }
 
-                // J·cg_dir
+                // J路cg_dir
                 jac.spmv(&cg_dir, &mut g_jp);
                 let cg_jcg = dot_product(&cg_dir, &g_jp);
 
                 if cg_jcg <= 0.0 {
                     // Negative curvature: step to boundary along cg_dir
-                    // τ solves ‖z + τ·cg_dir‖ = Δ
+                    // 蟿 solves 鈥杬 + 蟿路cg_dir鈥?= 螖
                     let z_norm_sq = dot_product(&z, &z);
                     let d_norm_sq = dot_product(&cg_dir, &cg_dir);
                     let zd = dot_product(&z, &cg_dir);
-                    // ‖z + τ·d‖² = z·z + 2τ·z·d + τ²·d·d = Δ²
+                    // 鈥杬 + 蟿路d鈥柭?= z路z + 2蟿路z路d + 蟿虏路d路d = 螖虏
                     let a = d_norm_sq;
                     let b = 2.0 * zd;
                     let c = z_norm_sq - delta * delta;
@@ -1144,7 +1144,7 @@ impl TrustRegionSolver {
                 }
 
                 let alpha = rz / cg_jcg;
-                // Check if z + α·cg_dir would exceed Δ
+                // Check if z + 伪路cg_dir would exceed 螖
                 let new_z_sq = dot_product(&z, &z) + 2.0 * alpha * dot_product(&z, &cg_dir)
                              + alpha * alpha * dot_product(&cg_dir, &cg_dir);
                 if new_z_sq > delta * delta {
@@ -1174,17 +1174,17 @@ impl TrustRegionSolver {
             }
 
             if !cg_finished && !reached_boundary {
-                // CG completed naturally — z is the Newton step
+                // CG completed naturally 鈥?z is the Newton step
             }
 
             // z is the candidate step p_k
-            // ── Compute ρ = actual reduction / predicted reduction ─────
+            // 鈹€鈹€ Compute 蟻 = actual reduction / predicted reduction 鈹€鈹€鈹€鈹€鈹€
             let mut g_new = vec![0.0_f64; n];
             let mut u_new = vec![0.0_f64; n];
             for j in 0..n { u_new[j] = u[j] + z[j]; }
             form.residual(&u_new, rhs, &mut g_new);
 
-            // Model predicted reduction: m(0) − m(p) = −gᵀp − ½pᵀJp
+            // Model predicted reduction: m(0) 鈭?m(p) = 鈭抔岬€p 鈭?陆p岬€Jp
             jac.spmv(&z, &mut g_jp);
             let predicted = -dot_product(&g, &z) - 0.5 * dot_product(&z, &g_jp);
             let actual = 0.5 * (norm2(&g).powi(2) - norm2(&g_new).powi(2));
@@ -1200,7 +1200,7 @@ impl TrustRegionSolver {
             }
 
             if self.cfg.verbose {
-                println!("[TR] iter={} ‖F‖={g_norm:.3e} Δ={delta:.3e} ρ={rho:.3e}", iter + 1);
+                println!("[TR] iter={} 鈥朏鈥?{g_norm:.3e} 螖={delta:.3e} 蟻={rho:.3e}", iter + 1);
             }
 
             if g_norm < cfg.atol || g_norm < g0_norm * cfg.rtol {
@@ -1232,7 +1232,7 @@ mod tests {
             .iter().map(|&d| d as usize).collect()
     }
 
-    /// For κ(u) = const, the nonlinear problem reduces to a linear one.
+    /// For 魏(u) = const, the nonlinear problem reduces to a linear one.
     /// Verify that the Newton solver converges in 1 iteration.
     #[test]
     fn newton_linear_problem_converges_in_one_iter() {
@@ -1250,12 +1250,12 @@ mod tests {
         let cfg = NewtonConfig { atol: 1e-12, rtol: 1e-10, max_iter: 10, ..Default::default() };
         let res = NewtonSolver::new(cfg).solve(&form, &rhs, &mut u).unwrap();
         assert!(res.converged, "Newton did not converge");
-        assert!(res.iterations <= 2, "Expected ≤2 iters for linear problem, got {}", res.iterations);
+        assert!(res.iterations <= 2, "Expected 鈮? iters for linear problem, got {}", res.iterations);
         let rn = norm2(&u);
-        assert!(rn < 1e-12, "u should be zero but ‖u‖ = {rn}");
+        assert!(rn < 1e-12, "u should be zero but 鈥杣鈥?= {rn}");
     }
 
-    /// Nonlinear problem: κ(u) = 1 + u², constant forcing.
+    /// Nonlinear problem: 魏(u) = 1 + u虏, constant forcing.
     /// Just verify convergence.
     #[test]
     fn newton_nonlinear_converges() {
@@ -1282,8 +1282,8 @@ mod tests {
         assert!(res.is_ok() && res.unwrap().converged, "Newton did not converge for nonlinear problem");
     }
 
-    /// Jacobian finite-difference check: J[i,j] ≈ (F(u+ε eⱼ)[i] − F(u)[i]) / ε.
-    /// Uses constant κ so that the Picard Jacobian equals the full tangent stiffness.
+    /// Jacobian finite-difference check: J[i,j] 鈮?(F(u+蔚 e獗?[i] 鈭?F(u)[i]) / 蔚.
+    /// Uses constant 魏 so that the Picard Jacobian equals the full tangent stiffness.
     #[test]
     fn jacobian_finite_difference_check() {
         let mesh  = Mesh::<2>::unit_square_tri(2);
@@ -1292,7 +1292,7 @@ mod tests {
         let n     = space.n_dofs();
         let rhs   = vec![0.0_f64; n];
 
-        // With constant κ, the Picard Jacobian matches the full tangent exactly.
+        // With constant 魏, the Picard Jacobian matches the full tangent exactly.
         let mut form = NonlinearDiffusionForm::new(space, |_u| 1.5, 3);
         form.set_dirichlet(bnd.iter().map(|&d| (d, 0.0)).collect());
 
@@ -1328,3 +1328,12 @@ mod tests {
         }
     }
 }
+
+
+
+
+
+
+
+
+
