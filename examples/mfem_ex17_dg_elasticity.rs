@@ -142,6 +142,9 @@ fn main() {
     };
 
     let mut x = vec![0.0_f64; n_total];
+    // Compute initial residual norm ‖rhs - A·0‖ = ‖rhs‖
+    let rhs_norm: f64 = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+    println!("  Initial ‖rhs‖ = {:.4}", rhs_norm);
     println!("  PCG (symmetric, α=-1)");
     let res = solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg);
     let solve_result = res.expect("DG elasticity solve failed");
@@ -276,7 +279,7 @@ where
                     rhs[comp * n_scalar + dofs[a]] -= w_f * pen * phi_a * u_d;
                 }
 
-                // MFEM: +α · Σᵢ (σ(φ_a·e_comp)·n)_i · u_D_i
+                // Symmetry: α·Σᵢ (σ(φ_a·e_comp)·n)_i · u_D_i
                 for comp in 0..dim {
                     let mut dot = 0.0;
                     for i in 0..dim {

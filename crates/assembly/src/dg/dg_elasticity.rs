@@ -331,7 +331,7 @@ fn assemble_interior_face_stress<S: FESpace>(
         // MFEM penalty: κ·|nor|²·wLM  with wLM = (wL+2wM)_avg
         // = κ·h_f²/4·ip.weight·½·[(λ₁+2μ₁)/det₁ + (λ₂+2μ₂)/det₂]
         // Our w_f·pen = q_face.w·h_f·pen must match jmatcoef
-        // SIP penalty: κ·(λ+2μ)/h_f (standard DG penalty scaling)
+        // SIP penalty: κ·(λ+2μ)/h_f — standard DG scaling
         let lam_face = 0.5 * (lam_l + lam_r);
         let mu_face = 0.5 * (mu_l + mu_r);
         let pen = kappa * (lam_face + 2.0 * mu_face) / h_f;
