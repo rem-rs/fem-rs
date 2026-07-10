@@ -12,12 +12,23 @@ use crate::p_refine::{self, PRefineConstraint, build_variable_order_dof_manager,
 ///
 /// Supports both uniform order (all elements same p) and variable order
 /// (per-element p from p-refinement).
-#[derive(Clone)]
+
 pub struct H1Space<M: MeshTopology> {
     mesh:   M,
     dm:     DofManager,
     order:  u8,
     elem_orders: Option<Vec<u8>>,
+}
+
+impl<M: MeshTopology + Clone> Clone for H1Space<M> {
+    fn clone(&self) -> Self {
+        Self {
+            mesh: self.mesh.clone(),
+            dm: self.dm.clone(),
+            order: self.order,
+            elem_orders: self.elem_orders.clone(),
+        }
+    }
 }
 
 impl<M: MeshTopology> H1Space<M> {

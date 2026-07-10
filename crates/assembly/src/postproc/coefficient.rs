@@ -360,6 +360,7 @@ impl MatrixCoeff for PmlTensorCoeff {
 /// // Steel (tag 1) has kappa=50, copper (tag 2) has kappa=400
 /// let kappa = PWConstCoeff::new([(1, 50.0), (2, 400.0)]);
 /// ```
+#[derive(Clone)]
 pub struct PWConstCoeff {
     values: HashMap<i32, f64>,
     default: f64,

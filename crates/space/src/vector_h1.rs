@@ -46,6 +46,19 @@ pub struct VectorH1Space<M: MeshTopology> {
     dofs_per_elem: usize,
 }
 
+impl<M: MeshTopology + Clone> Clone for VectorH1Space<M> {
+    fn clone(&self) -> Self {
+        Self {
+            mesh: self.mesh.clone(),
+            scalar_dm: self.scalar_dm.clone(),
+            order: self.order,
+            dim: self.dim,
+            elem_dofs: self.elem_dofs.clone(),
+            dofs_per_elem: self.dofs_per_elem,
+        }
+    }
+}
+
 impl<M: MeshTopology> VectorH1Space<M> {
     /// Build the `dim`-component H¹ vector space over `mesh`.
     ///
