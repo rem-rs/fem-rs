@@ -23,12 +23,13 @@ fn main() {
     let mesh = mfem.mesh2d.expect("must be 2D");
     let mesh = if a.r > 0 { let mut m = mesh; for _ in 0..a.r { m = refine_uniform(&m); } m } else { mesh };
 
-    // 4. DG(P1) solver (periodic: skip boundary faces)
-    let mut dg = DgEuler2D::new(mesh);
+    // 4. DG solver with configurable order
+    let order = 2; // P2 (matching MFEM ex18's default accuracy)
+    let mut dg = DgEuler2D::with_order(mesh, order);
     dg.periodic = true;
     dg.use_limiter = true; // prevent negative density on coarse meshes
     println!("Number of unknowns: {}", dg.n_dofs());
-    println!("  problem: {}, order: 1 (P1), ref_levels: {}", a.p, a.r);
+    println!("  problem: {}, order: {} (P{}), ref_levels: {}", a.p, order, order, a.r);
     println!("  t_final: {:.3}, cfl: {:.3}", a.tf, a.cfl);
 
     // 5. Initial condition
