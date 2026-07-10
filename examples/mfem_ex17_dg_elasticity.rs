@@ -282,7 +282,7 @@ where
                     for i in 0..dim {
                         dot += sn_flux[comp][i] * dirichlet(&xp, i);
                     }
-                    rhs[comp * n_scalar + dofs[a]] -= w_f * alpha * dot;
+                    rhs[comp * n_scalar + dofs[a]] += w_f * alpha * dot;
                 }
             }
         }

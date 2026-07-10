@@ -288,8 +288,8 @@ fn assemble_interior_face_stress<S: FESpace>(
 
     let nodes_l = mesh.element_nodes(el);
     let nodes_r = mesh.element_nodes(er);
-    let (jac_l, _dl) = simplex_jac(mesh, nodes_l, dim);
-    let (jac_r, _dr) = simplex_jac(mesh, nodes_r, dim);
+    let (jac_l, det_l) = simplex_jac(mesh, nodes_l, dim);
+    let (jac_r, det_r) = simplex_jac(mesh, nodes_r, dim);
     let jit_l = jac_l.clone().try_inverse().unwrap().transpose();
     let jit_r = jac_r.clone().try_inverse().unwrap().transpose();
 
@@ -328,7 +328,10 @@ fn assemble_interior_face_stress<S: FESpace>(
         xform_grads(&jit_l, &gref_l, &mut gphys_l, n_l, dim);
         xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
 
-        // MFEM scales penalty by face-averaged (λ + 2μ)
+        // MFEM penalty: κ·|nor|²·wLM  with wLM = (wL+2wM)_avg
+        // = κ·h_f²/4·ip.weight·½·[(λ₁+2μ₁)/det₁ + (λ₂+2μ₂)/det₂]
+        // Our w_f·pen = q_face.w·h_f·pen must match jmatcoef
+        // SIP penalty: κ·(λ+2μ)/h_f (standard DG penalty scaling)
         let lam_face = 0.5 * (lam_l + lam_r);
         let mu_face = 0.5 * (mu_l + mu_r);
         let pen = kappa * (lam_face + 2.0 * mu_face) / h_f;
