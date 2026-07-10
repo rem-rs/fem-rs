@@ -21,7 +21,8 @@ fn main() {
     } else {
         Mesh::<2>::unit_square_tri(args.n)
     };
-    let sigma: f64 = args.sigma.unwrap_or_else(|| match args.order { 1 => 4.0, 2 => 10.0, _ => 24.0 });
+    // MFEM ex14: kappa = (order+1)^2  (penalty parameter)
+    let kappa: f64 = args.kappa.unwrap_or_else(|| (args.order as f64 + 1.0).powi(2));
 
     let quad_order = args.order * 2 + 1;
 
@@ -31,7 +32,8 @@ fn main() {
     // MFEM ex14 RHS: f = 1 (constant source)
     let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
     let rhs = Assembler::assemble_linear(&space, &[&source], quad_order);
-    let a_mat = DgAssembler::assemble_sip(&space, &ifl, 1.0, sigma, quad_order);
+    // assemble_sip(kappa_diffusion=1.0, sigma_penalty=kappa, ...)
+    let a_mat = DgAssembler::assemble_sip(&space, &ifl, 1.0, kappa, quad_order);
 
     let mut x = vec![0.0_f64; space.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
@@ -39,8 +41,8 @@ fn main() {
 
     let sol_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
     if let Some(ref path) = args.mesh { println!("  Mesh: {path}"); }
-    println!("  n={} (default if no mesh), P{} DOFs={}, iters={}, ‖u‖={:.6e}",
-             args.n, args.order, space.n_dofs(), result.iterations, sol_norm);
+    println!("  n={}, P{}, κ={}, DOFs={}, iters={}, ‖u‖={:.6e}",
+             args.n, args.order, kappa, space.n_dofs(), result.iterations, sol_norm);
     println!("  PASS");
 }
 
@@ -48,18 +50,18 @@ struct Args {
     mesh: Option<String>,
     n: usize,
     order: u8,
-    sigma: Option<f64>,
+    kappa: Option<f64>,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: None, n: 8, order: 1, sigma: None };
+    let mut a = Args { mesh: None, n: 8, order: 1, kappa: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-m" | "--mesh" => { a.mesh = it.next(); }
             "--n" => { a.n = it.next().unwrap_or("8".into()).parse().unwrap_or(8); }
             "--order" | "-o" => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
-            "--sigma" => { a.sigma = it.next().and_then(|s| s.parse().ok()); }
+            "--kappa" | "--sigma" => { a.kappa = it.next().and_then(|s| s.parse().ok()); }
             _ => {}
         }
     }
@@ -76,7 +78,8 @@ mod tests {
     use fem_space::fe_space::FESpace;
 
     fn solve_dg_poisson_mms(n: usize, order: u8) -> f64 {
-        let sigma: f64 = match order { 1 => 4.0, 2 => 10.0, _ => 24.0 };
+        // MFEM ex14: kappa = (order+1)^2
+        let kappa: f64 = (order as f64 + 1.0).powi(2);
         let mesh = Mesh::<2>::unit_square_tri(n);
         let space = L2Space::new(mesh, order);
         let ifl = InteriorFaceList::build(space.mesh());
@@ -87,7 +90,7 @@ mod tests {
             2.0 * p * p * (p * x[0]).sin() * (p * x[1]).sin()
         });
         let rhs = Assembler::assemble_linear(&space, &[&source], order * 2 + 1);
-        let a_mat = DgAssembler::assemble_sip(&space, &ifl, 1.0, sigma, order * 2 + 1);
+        let a_mat = DgAssembler::assemble_sip(&space, &ifl, 1.0, kappa, order * 2 + 1);
 
         let mut x = vec![0.0_f64; space.n_dofs()];
         let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
