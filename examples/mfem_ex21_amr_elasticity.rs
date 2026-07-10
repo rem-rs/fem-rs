@@ -3,7 +3,7 @@
 #![allow(non_snake_case, dead_code)]
 
 use fem_assembly::postproc::coefficient::PWConstCoeff;
-use fem_assembly::postproc::error_estimate::{threshold_mark, zz_estimator};
+use fem_assembly::postproc::error_estimate::zz_estimator;
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::standard::ElasticityIntegrator;
 use fem_assembly::Assembler;
@@ -14,6 +14,23 @@ use fem_space::constraints::hanging_2d::{apply_hanging_constraints, recover_hang
 use fem_space::{FESpace, VectorH1Space};
 
 /// Neumann BC on boundary attr `bdr_attr`: pull force `(fx, fy)`.
+
+/// Mark elements until a fraction of the total error is covered.
+/// Equivalent to MFEM ThresholdRefiner::SetTotalErrorFraction(fraction).
+fn total_error_fraction(eta: &[f64], fraction: f64) -> Vec<u32> {
+    let total: f64 = eta.iter().sum();
+    let target = fraction * total;
+    let mut indices: Vec<usize> = (0..eta.len()).collect();
+    indices.sort_by(|&a, &b| eta[b].partial_cmp(&eta[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut cum = 0.0f64;
+    let mut marked = Vec::new();
+    for &i in &indices {
+        marked.push(i as u32);
+        cum += eta[i];
+        if cum >= target { break; }
+    }
+    marked
+}
 /// Uses element-based traversal (works with any mesh).
 fn bdr_load(mesh: &Mesh<2>, sp: &VectorH1Space<Mesh<2>>, bdr_attr: u32, _fx: f64, fy: f64) -> Vec<f64> {
     use fem_element::{ReferenceElement, lagrange::SegP1};
@@ -117,7 +134,7 @@ fn main() {
             let ind = zz_estimator(&gf);
             let me = ind.eta.iter().cloned().fold(0.0_f64, f64::max);
             println!("  Max element error: {me:.6e}");
-            let marked = threshold_mark(&ind.eta, 0.7*me);
+            let marked = total_error_fraction(&ind.eta, 0.7);
             println!("  Marked {} elements", marked.len());
             if n > max_dofs || marked.is_empty() { println!("Stop."); break; }
             if !marked.is_empty() {
@@ -135,7 +152,7 @@ fn main() {
             let ind = zz_estimator(&gf);
             let me = ind.eta.iter().cloned().fold(0.0_f64, f64::max);
             println!("  Max element error: {me:.6e}");
-            let marked = threshold_mark(&ind.eta, 0.7*me);
+            let marked = total_error_fraction(&ind.eta, 0.7);
             println!("  Marked {} elements", marked.len());
             if n > max_dofs || marked.is_empty() { println!("Stop."); break; }
             if !marked.is_empty() {
@@ -145,6 +162,8 @@ fn main() {
         }
     }
 }
+
+
 
 
 
