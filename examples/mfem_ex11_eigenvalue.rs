@@ -178,22 +178,21 @@ fn main() {
         quad_order,
     );
 
-    // ─── 7. Apply essential BC constraints ──────────────────────────────────
+    // ─── 7. Essential BC constraints ──────────────────────────────────────────
     // MFEM ex11p uses EliminateEssentialBCDiag with A[i,i]=1, M[i,i]≈2e-308,
-    // pushing Dirichlet eigenvalues out of the computational range for
-    // B-orthogonalized LOBPCG.  Since our LOBPCG uses Euclidean
-    // orthogonalization, we equivalently project BC DOFs out of the search
-    // space via the algebraic constraint mechanism.
+    // pushing Dirichlet eigenvalues out of the range for its B-orthogonalized
+    // LOBPCG.  Our LOBPCG uses B-orthogonalization for the search space, but
+    // the extreme M diagonal (2e-308) causes the Rayleigh-Ritz subspace to
+    // lose rank when residual vectors acquire BC DOF components through off-
+    // diagonal coupling.  Instead we project BC DOFs out via Euclidean
+    // algebraic constraints (which are numerically stable for any M diagonal).
     use nalgebra::DMatrix;
 
     let n_bc = ess_dofs.len();
-    let mut constraints = DMatrix::<f64>::zeros(n_dofs, n_bc);
+    let mut constraints_mat = DMatrix::<f64>::zeros(n_dofs, n_bc);
     for (j, &d) in ess_dofs.iter().enumerate() {
-        constraints[(d, j)] = 1.0;
+        constraints_mat[(d, j)] = 1.0;
     }
-
-    // Also flag: for meshes with no boundary, add mass term to A
-    // (this is done above, no change needed here).
 
     // ─── 8. Solve A x = λ M x with LOBPCG ──────────────────────────────────
     use std::time::Instant;
@@ -209,7 +208,7 @@ fn main() {
         verbose: true,
     };
 
-    let result: EigenResult = lobpcg_constrained(&a, Some(&m), args.nev, &constraints, &lobpcg_cfg)
+    let result: EigenResult = lobpcg_constrained(&a, Some(&m), args.nev, &constraints_mat, &lobpcg_cfg)
         .expect("LOBPCG solver failed");
 
     let elapsed = t0.elapsed();
@@ -267,9 +266,10 @@ mod tests {
     use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
     use fem_solver::eigen::{lobpcg_constrained, LobpcgConfig};
 
+    /// Build constrained eigen-system: unmodified A, M + BC DOF constraint matrix.
     fn build_constrained_system(n: usize, fe_order: u8) -> (fem_linalg::CsrMatrix<f64>,
-                                                            fem_linalg::CsrMatrix<f64>,
-                                                            nalgebra::DMatrix<f64>) {
+                                                           fem_linalg::CsrMatrix<f64>,
+                                                           nalgebra::DMatrix<f64>) {
         let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, fe_order);
         let quad = (fe_order as u8) * 2 + 1;
@@ -277,6 +277,7 @@ mod tests {
         let ess: Vec<usize> = fem_space::constraints::boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4])
             .iter().map(|&d| d as usize).collect();
         let n_dofs = space.n_dofs();
+        let n_bc = ess.len();
 
         let a = Assembler::assemble_bilinear(
             &space, &[&DiffusionIntegrator { kappa: 1.0 }], quad,
@@ -285,7 +286,6 @@ mod tests {
             &space, &[&MassIntegrator { rho: 1.0 }], quad,
         );
 
-        let n_bc = ess.len();
         let mut constraints = nalgebra::DMatrix::<f64>::zeros(n_dofs, n_bc);
         for (j, &d) in ess.iter().enumerate() {
             constraints[(d, j)] = 1.0;
@@ -310,12 +310,12 @@ mod tests {
 
     #[test]
     fn ex11_eigenvalue_smoke() {
-        // Basic smoke test: LOBPCG solves the generalized eigenvalue problem
-        // on a unit square with P1 elements (constrained BC).
+        // Basic smoke test: LOBPCG with B-orthogonalized search space
+        // and Euclidean constraint projection.
         let n = 8;
-        let (a, m, constraints) = build_constrained_system(n, 1);
+        let (a, m, c) = build_constrained_system(n, 1);
         let cfg = LobpcgConfig { max_iter: 100, tol: 1e-6, verbose: false };
-        let res = lobpcg_constrained(&a, Some(&m), 3, &constraints, &cfg).unwrap();
+        let res = lobpcg_constrained(&a, Some(&m), 3, &c, &cfg).unwrap();
         assert_eq!(res.eigenvalues.len(), 3);
         assert!(res.converged, "LOBPCG must converge");
     }
@@ -325,9 +325,9 @@ mod tests {
         // For a unit square with P1 elements and homogeneous Dirichlet BC,
         // the lowest eigenvalue should approach 2π² ≈ 19.739.
         let n = 16;
-        let (a, m, constraints) = build_constrained_system(n, 1);
+        let (a, m, c) = build_constrained_system(n, 1);
         let cfg = LobpcgConfig { max_iter: 300, tol: 1e-8, verbose: false };
-        let res = lobpcg_constrained(&a, Some(&m), 4, &constraints, &cfg).unwrap();
+        let res = lobpcg_constrained(&a, Some(&m), 4, &c, &cfg).unwrap();
         let expected = analytical_eigenvalues_square(4);
         for (i, (&lam, &ex)) in res.eigenvalues.iter().zip(expected.iter()).enumerate() {
             let rel_err = (lam - ex).abs() / ex;
@@ -341,9 +341,9 @@ mod tests {
 
     #[test]
     fn ex11_eigenvalue_eigenvalues_sorted() {
-        let (a, m, constraints) = build_constrained_system(12, 1);
+        let (a, m, c) = build_constrained_system(12, 1);
         let cfg = LobpcgConfig { max_iter: 200, tol: 1e-6, verbose: false };
-        let res = lobpcg_constrained(&a, Some(&m), 5, &constraints, &cfg).unwrap();
+        let res = lobpcg_constrained(&a, Some(&m), 5, &c, &cfg).unwrap();
         for i in 1..res.eigenvalues.len() {
             assert!(
                 res.eigenvalues[i - 1] <= res.eigenvalues[i],
@@ -355,9 +355,9 @@ mod tests {
 
     #[test]
     fn ex11_eigenvalue_all_positive() {
-        let (a, m, constraints) = build_constrained_system(10, 1);
+        let (a, m, c) = build_constrained_system(10, 1);
         let cfg = LobpcgConfig { max_iter: 200, tol: 1e-6, verbose: false };
-        let res = lobpcg_constrained(&a, Some(&m), 3, &constraints, &cfg).unwrap();
+        let res = lobpcg_constrained(&a, Some(&m), 3, &c, &cfg).unwrap();
         for (i, &lam) in res.eigenvalues.iter().enumerate() {
             assert!(lam > 0.0, "λ[{}] = {:.6e} must be positive", i, lam);
         }

@@ -131,9 +131,13 @@ fn lobpcg_projected(
     assert_eq!(a.ncols, n, "A must be square");
     assert!(k >= 1 && k <= n, "k must be in [1, n]");
 
-    // Constraint basis uses Euclidean orthogonalisation so that solver behaviour
-    // is independent of the B-matrix diagonal (important when B has very small or
-    // very large diagonal entries, e.g. after EliminateEssentialBCDiag).
+    // Constraint basis: Euclidean-orthonormal regardless of B.
+    // When B has extreme diagonal entries (e.g. EliminateEssentialBCDiag
+    // with M[i,i] ≈ 2e-308), B-orthonormalizing constraints would drop
+    // BC DOF constraint vectors (B-norm below 1e-12).  Euclidean
+    // orthogonalization preserves them, and the subsequent project_out
+    // calls also use Euclidean projection for constraints (the search
+    // space itself is B-orthonormalised for Rayleigh-Ritz stability).
     let constraint_basis = constraints
         .map(|c| orthonormal_basis(c.clone(), None))
         .unwrap_or_else(|| DMatrix::<f64>::zeros(n, 0));
@@ -147,8 +151,8 @@ fn lobpcg_projected(
         ));
     }
 
-    // ── 1. Initialise X with random orthonormal columns ───────────────────────
-    let mut x = random_feasible_orthonormal(n, k, &constraint_basis, None)?;
+    // ── 1. Initialise X with random B-orthonormal (or Euclidean) columns ─────
+    let mut x = random_feasible_orthonormal(n, k, &constraint_basis, b)?;
 
     let mut p = DMatrix::<f64>::zeros(n, k); // previous search direction (0 on first iter)
     let mut use_p = false;
@@ -177,7 +181,9 @@ fn lobpcg_projected(
             let mut rj = r.column_mut(j);
             rj.axpy(-lj, &bxj, 1.0);
         }
-        project_out(&mut r, &constraint_basis, None);// Euclidean projection (constraint basis is Euclidean-orthonormal)
+        // Project residual against Euclidean-orthonormal constraints (Euclidean inner
+        // product — constraints are not B-orthonormal).
+        project_out(&mut r, &constraint_basis, None);
 
         // ── 5. Convergence check ──────────────────────────────────────────────
         let res_norms: Vec<f64> = (0..k)
@@ -231,9 +237,9 @@ fn lobpcg_projected(
             w
         };
 
-        // Orthonormalise W (Euclidean — constraint basis is Euclidean-orthonormal).
+        // Project out Euclidean constraints, then B-orthonormalise the search space.
         project_out(&mut w, &constraint_basis, None);
-        w = orthonormal_basis(w, None);
+        w = orthonormal_basis(w, b);
         if w.ncols() < k {
             return Err("projected LOBPCG trial space lost rank".to_string());
         }
@@ -262,8 +268,8 @@ fn lobpcg_projected(
         project_out(&mut p, &constraint_basis, None);
         use_p = true;
 
-        // Re-orthonormalise X (Euclidean).
-        let x_basis = orthonormal_basis(x, None);
+        // Re-orthonormalise X (B-inner product when B is provided).
+        let x_basis = orthonormal_basis(x, b);
         if x_basis.ncols() < k {
             return Err("projected LOBPCG iterate lost rank".to_string());
         }
@@ -347,14 +353,29 @@ fn random_feasible_orthonormal(
     b: Option<&CsrMatrix<f64>>,
 ) -> Result<DMatrix<f64>, String> {
     if constraints.ncols() == 0 {
-        return Ok(random_orthonormal(n, k));
+        let x = random_orthonormal(n, k);
+        // When B is provided, re-orthonormalize with the B-inner product so
+        // the initial subspace is B-orthonormal, matching MFEM's LOBPCG.
+        // This also naturally suppresses nullspace directions (e.g. BC DOFs
+        // with tiny M-diagonal after EliminateEssentialBCDiag).
+        if let Some(bm) = b {
+            let oversample = (k + 5).min(n);
+            for _ in 0..6 {
+                let x2 = random_orthonormal(n, oversample);
+                let basis = orthonormal_basis(x2, Some(bm));
+                if basis.ncols() >= k {
+                    return Ok(basis.columns(0, k).into_owned());
+                }
+            }
+        }
+        return Ok(x);
     }
 
     let oversample = (k + constraints.ncols()).min(n);
     for _ in 0..6 {
         let mut x = random_orthonormal(n, oversample);
-        project_out(&mut x, constraints, b);
-        let basis = orthonormal_basis(x, b);
+        project_out(&mut x, constraints, None);  // Euclidean projection against constraints
+        let basis = orthonormal_basis(x, b);      // B-orthonormalise the search space
         if basis.ncols() >= k {
             return Ok(basis.columns(0, k).into_owned());
         }
