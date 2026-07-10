@@ -97,6 +97,7 @@ pub struct DgEuler2D {
     n_dofs: usize,
     dofs_per_elem: usize,
     pub use_limiter: bool,
+    pub periodic: bool, // skip boundary faces (periodic-like BC)
 }
 
 impl DgEuler2D {
@@ -104,7 +105,7 @@ impl DgEuler2D {
         let n_elems = mesh.n_elements();
         let dofs_per_elem = 3;
         let n_dofs = n_elems * dofs_per_elem * 4;
-        Self { mesh: Box::new(mesh), euler: Euler2D::default(), n_elems, n_dofs, dofs_per_elem, use_limiter: false }
+        Self { mesh: Box::new(mesh), euler: Euler2D::default(), n_elems, n_dofs, dofs_per_elem, use_limiter: false, periodic: false }
     }
     pub fn with_limiter(mut self, on: bool) -> Self { self.use_limiter = on; self }
     pub fn n_dofs(&self) -> usize { self.n_dofs }
@@ -186,26 +187,28 @@ impl DgEuler2D {
             }
         }
 
-        // ── Reflecting boundary ──────────────────────────────────────────
-        for e in 0..self.n_elems as u32 {
-            let enodes = self.mesh.element_nodes(e);
-            for lf in 0..3 {
-                let fnodes = tri_face_nodes(lf, enodes);
-                let mut k: Vec<u32> = fnodes.to_vec(); k.sort_unstable();
-                let is_int = interior_faces.iter().any(|f| { let mut k2 = f.2.clone(); k2.sort_unstable(); k2 == k });
-                if is_int { continue; }
-                let (nx, ny) = face_normal(&*self.mesh, enodes, e, &fnodes);
-                let fjac = face_size(&*self.mesh, &fnodes);
-                for q in 0..qr_face.n_points() {
-                    let t = qr_face.points[q][0]; let w = qr_face.weights[q] * fjac;
-                    let xi = map_to_elem(e, &fnodes, t, enodes);
-                    tri.eval_basis(&xi, &mut phi); let mut uqp = [0.0; 4];
-                    for i in 0..3 { for c in 0..4 { uqp[c] += phi[i] * u[self.idx(e, c, i)]; }}
-                    let (r, uv, vv, p) = euler.cons_to_prim(&uqp);
-                    let un = uv*nx+vv*ny;
-                    let qref = euler.prim_to_cons(r, uv-2.*un*nx, vv-2.*un*ny, p);
-                    let fstar = euler.lax_friedrichs_flux(&uqp, &qref, &[nx, ny]);
-                    for i in 0..3 { for c in 0..4 { du[self.idx(e, c, i)] -= w * phi[i] * fstar[c]; }}
+        // ── Boundary (reflecting or skip for periodic) ────────────────────
+        if !self.periodic {
+            for e in 0..self.n_elems as u32 {
+                let enodes = self.mesh.element_nodes(e);
+                for lf in 0..3 {
+                    let fnodes = tri_face_nodes(lf, enodes);
+                    let mut k: Vec<u32> = fnodes.to_vec(); k.sort_unstable();
+                    let is_int = interior_faces.iter().any(|f| { let mut k2 = f.2.clone(); k2.sort_unstable(); k2 == k });
+                    if is_int { continue; }
+                    let (nx, ny) = face_normal(&*self.mesh, enodes, e, &fnodes);
+                    let fjac = face_size(&*self.mesh, &fnodes);
+                    for q in 0..qr_face.n_points() {
+                        let t = qr_face.points[q][0]; let w = qr_face.weights[q] * fjac;
+                        let xi = map_to_elem(e, &fnodes, t, enodes);
+                        tri.eval_basis(&xi, &mut phi); let mut uqp = [0.0; 4];
+                        for i in 0..3 { for c in 0..4 { uqp[c] += phi[i] * u[self.idx(e, c, i)]; }}
+                        let (r, uv, vv, p) = euler.cons_to_prim(&uqp);
+                        let un = uv*nx+vv*ny;
+                        let qref = euler.prim_to_cons(r, uv-2.*un*nx, vv-2.*un*ny, p);
+                        let fstar = euler.lax_friedrichs_flux(&uqp, &qref, &[nx, ny]);
+                        for i in 0..3 { for c in 0..4 { du[self.idx(e, c, i)] -= w * phi[i] * fstar[c]; }}
+                    }
                 }
             }
         }
