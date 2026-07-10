@@ -10,7 +10,7 @@ use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_space::constraints::{apply_hanging_constraints, recover_hanging_values};
 use fem_space::FESpace;
-use fem_solver::{solve_cg, SolverConfig};
+use fem_solver::{solve_pcg_gssmoother, SolverConfig};
 use crate::postproc::grid_function::GridFunction;
 use crate::standard::MassIntegrator;
 use crate::Assembler;
@@ -376,7 +376,7 @@ where
         // apply_hanging_constraints for all components, but only the first
         // call actually changes it since subsequent calls with the same
         // constraints produce the same matrix).
-        if let Err(e) = solve_cg(&m_mat, &rhs[di], &mut g[di], &cfg) {
+        if let Err(e) = solve_pcg_gssmoother(&m_mat, &rhs[di], &mut g[di], &cfg) {
             eprintln!("  Warning: CG mass matrix solve (comp {di}) failed: {e}");
         }
     }

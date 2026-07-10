@@ -324,10 +324,11 @@ fn main() {
 
             x = u;
 
-            // Error estimation using DOF-level nodal averaging ZZ
-            // Note: for Q2/hanging-node meshes, results may differ from MFEM's
-            // ZienkiewiczZhuEstimator which uses a separate H1^sdim flux space
-            // with integrator-specific ComputeElementFlux/ComputeFluxEnergy.
+            // Error estimation using DOF-level nodal-averaging ZZ.
+            // Note: for Q2 with hanging nodes, refinement patterns differ from
+            // MFEM because the flux recovery uses solution-space DOF averaging
+            // rather than MFEM's dedicated H1^sdim flux space + integrator
+            // ComputeElementFlux/ComputeFluxEnergy interface.
             let gf = GridFunction::new(&space, x.clone());
             let eta = if use_kelly {
                 kelly_estimator(&gf).eta
