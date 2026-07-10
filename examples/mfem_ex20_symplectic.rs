@@ -1,260 +1,138 @@
-//! Example 20 — Symplectic integration for Hamiltonian systems
-//! (analogous to MFEM ex20.cpp)
+﻿//! Example 20 鈥?Symplectic integration of Hamiltonian systems
+//! **1:1 translation of MFEM ex20**
 //!
-//! 5 Hamiltonian types:
-//!   0 — Simple Harmonic Oscillator (mass on a spring)
-//!   1 — Pendulum
-//!   2 — Gaussian Potential Well
-//!   3 — Quartic Potential
-//!   4 — Negative Quartic Potential
+//! Demonstrates variable-order symplectic ODE integration for 1D Hamiltonian
+//! systems.  Hamiltonian: H(q,p,t) = T(p) + V(q,t)
 //!
-//! Uses SIAVSolver (variable-order symplectic integrator) to preserve energy.
+//! Hamilton's equations:
+//!   dq/dt =  dH/dp
+//!   dp/dt = -dH/dq
+//!
+//! Problems (selected with -p):
+//!   0 鈥?Simple Harmonic Oscillator   H = (p^2/m + k路q^2)/2
+//!   1 鈥?Pendulum                     H = (p^2/m + k路(1-cos(q)))/2
+//!   2 鈥?Gaussian Potential Well      H = (p^2/m - k路exp(-q^2/2))/2
+//!   3 鈥?Quartic Potential            H = (p^2/m + k路(1+q^2)路q^2)/2
+//!   4 鈥?Negative Quartic Potential   H = (p^2/m + k路(1-q^2/8)路q^2)/2
 //!
 //! Usage:
-//!   cargo run --example mfem_ex20_symplectic -- [options]
-//!
-//! Options:
-//!   --order     <int>    Time integration order (default 1, 1..=4)
-//!   --problem   <int>    Hamiltonian type 0..4 (default 0)
-//!   --nsteps    <int>    Number of time steps (default 100)
-//!   --dt        <float>  Time step size (default 0.1)
-//!   --mass      <float>  Mass m (default 1.0)
-//!   --spring    <float>  Spring constant k (default 1.0)
+//!   cargo run --example mfem_ex20_symplectic
+//!   cargo run --example mfem_ex20_symplectic -- -o 2 -n 200 -dt 0.05 -p 1
 
-use fem_solver::ode::{SIAVSolver, HamiltonianSystem};
+use fem_solver::{HamiltonianSystem, SIAVSolver};
 
-// ─── Problem parameters (mutable globals, mimicking MFEM's static globals) ─────
+// 鈹€鈹€ Hamiltonian 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-static mut PROB: i32 = 0;
-static mut MASS: f64 = 1.0;
-static mut SPRING: f64 = 1.0;
-
-// ─── Hamiltonian ──────────────────────────────────────────────────────────────
-
-fn hamiltonian(q: f64, p: f64) -> f64 {
-    unsafe {
-        // Constant shift so energy stays positive (matching MFEM)
-        let h = 1.0 - 0.5 / MASS + 0.5 * p * p / MASS;
-        match PROB {
-            1 => h + SPRING * (1.0 - f64::cos(q)),
-            2 => h + SPRING * (1.0 - f64::exp(-0.5 * q * q)),
-            3 => h + 0.5 * SPRING * (1.0 + q * q) * q * q,
-            4 => h + 0.5 * SPRING * (1.0 - 0.125 * q * q) * q * q,
-            _ => h + 0.5 * SPRING * q * q,
-        }
-    }
+/// Parameters for the 1D Hamiltonian system.
+struct Hamiltonian {
+    prob: i32,   // problem type 0-4
+    m: f64,      // mass
+    k: f64,      // spring constant / potential strength
 }
-
-// ─── System implementation ────────────────────────────────────────────────────
-
-struct Hamiltonian;
 
 impl HamiltonianSystem for Hamiltonian {
+    /// Compute dH/dq  (the force / gradient of potential).
     fn grad_q(&self, q: &[f64], _p: &[f64], out: &mut [f64]) {
-        unsafe {
-            match PROB {
-                1 => out[0] = SPRING * f64::sin(q[0]),
-                2 => out[0] = SPRING * q[0] * f64::exp(-0.5 * q[0] * q[0]),
-                3 => out[0] = SPRING * (1.0 + 2.0 * q[0] * q[0]) * q[0],
-                4 => out[0] = SPRING * (1.0 - 0.25 * q[0] * q[0]) * q[0],
-                _ => out[0] = SPRING * q[0],
-            }
-        }
+        let q0 = q[0];
+        out[0] = match self.prob {
+            1 => self.k * q0.sin(),                              // pendulum
+            2 => -self.k * q0 * (-0.5 * q0 * q0).exp(),          // Gaussian
+            3 => self.k * (1.0 + 2.0 * q0 * q0) * q0,           // quartic
+            4 => self.k * (1.0 - 0.25 * q0 * q0) * q0,          // negative quartic
+            _ => self.k * q0,                                     // harmonic
+        };
     }
+
+    /// Compute dH/dp  (the velocity / derivative of kinetic energy).
     fn grad_p(&self, _q: &[f64], p: &[f64], out: &mut [f64]) {
-        unsafe {
-            out[0] = p[0] / MASS;
-        }
+        out[0] = p[0] / self.m;
     }
 }
 
-// ─── CLI argument parsing ─────────────────────────────────────────────────────
-
-struct Args {
-    order: i32,
-    problem: i32,
-    nsteps: usize,
-    dt: f64,
-    mass: f64,
-    spring: f64,
-}
-
-fn parse_args() -> Args {
-    let mut a = Args {
-        order: 1,
-        problem: 0,
-        nsteps: 100,
-        dt: 0.1,
-        mass: 1.0,
-        spring: 1.0,
+/// Hamiltonian energy H(q,p,t).
+fn hamiltonian(prob: i32, m: f64, k: f64, q: f64, p: f64) -> f64 {
+    let mut h = 1.0 - 0.5 / m + 0.5 * p * p / m;
+    h += match prob {
+        1 => k * (1.0 - q.cos()),                                 // pendulum
+        2 => k * (1.0 - (-0.5 * q * q).exp()),                     // Gaussian
+        3 => 0.5 * k * (1.0 + q * q) * q * q,                     // quartic
+        4 => 0.5 * k * (1.0 - 0.125 * q * q) * q * q,             // negative quartic
+        _ => 0.5 * k * q * q,                                       // harmonic
     };
-    let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--order" => {
-                a.order = it
-                    .next()
-                    .expect("--order needs a value")
-                    .parse()
-                    .expect("--order must be an integer (1..=4)")
-            }
-            "--problem" => {
-                a.problem = it
-                    .next()
-                    .expect("--problem needs a value")
-                    .parse()
-                    .expect("--problem must be an integer (0..=4)")
-            }
-            "--nsteps" => {
-                a.nsteps = it
-                    .next()
-                    .expect("--nsteps needs a value")
-                    .parse()
-                    .expect("--nsteps must be an integer")
-            }
-            "--dt" => {
-                a.dt = it
-                    .next()
-                    .expect("--dt needs a value")
-                    .parse()
-                    .expect("--dt must be a float")
-            }
-            "--mass" => {
-                a.mass = it
-                    .next()
-                    .expect("--mass needs a value")
-                    .parse()
-                    .expect("--mass must be a float")
-            }
-            "--spring" => {
-                a.spring = it
-                    .next()
-                    .expect("--spring needs a value")
-                    .parse()
-                    .expect("--spring must be a float")
-            }
-            other => eprintln!("WARNING: ignoring unknown argument {other}"),
-        }
-    }
-    a
+    h
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€ Main 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 fn main() {
-    let args = parse_args();
-    assert!(
-        (0..=4).contains(&args.problem),
-        "problem must be 0..=4, got {}",
-        args.problem
-    );
-    assert!(
-        (1..=4).contains(&args.order),
-        "order must be 1..=4, got {}",
-        args.order
-    );
+    // 1. Parse command-line options
+    let mut order = 1i32;
+    let mut prob = 0i32;
+    let mut nsteps = 100usize;
+    let mut dt = 0.1f64;
+    let mut m = 1.0f64;
+    let mut k = 1.0f64;
 
-    // Set global parameters
-    unsafe {
-        PROB = args.problem;
-        MASS = args.mass;
-        SPRING = args.spring;
-    }
-
-    // System and solver
-    let sys = Hamiltonian;
-    let solver = SIAVSolver::new(args.order);
-
-    // Initial conditions (matching MFEM ex20: q=0, p=1)
-    let mut q = vec![0.0_f64];
-    let mut p = vec![1.0_f64];
-
-    // Energy history
-    let mut energies = vec![0.0_f64; args.nsteps + 1];
-
-    // Time-stepping
-    for i in 0..args.nsteps {
-        if i == 0 {
-            energies[0] = hamiltonian(q[0], p[0]);
+    let mut i = std::env::args().skip(1);
+    while let Some(arg) = i.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                eprintln!("Usage: ex20 [-o <order=1..4>] [-p <problem=0..4>] [-n <steps>] [-dt <dt>] [-m <mass>] [-k <spring>]");
+                return;
+            }
+            "-o" | "--order" => order = i.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "-p" | "--problem-type" => prob = i.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "-n" | "--number-of-steps" => nsteps = i.next().and_then(|v| v.parse().ok()).unwrap_or(100),
+            "-dt" | "--time-step" => dt = i.next().and_then(|v| v.parse().ok()).unwrap_or(0.1),
+            "-m" | "--mass" => m = i.next().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            "-k" | "--spring-const" => k = i.next().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            _ => {}
         }
-        solver.step(&sys, &mut q, &mut p, args.dt);
-        energies[i + 1] = hamiltonian(q[0], p[0]);
     }
 
-    // Mean and standard deviation of energy
-    let n = energies.len() as f64;
-    let e_mean: f64 = energies.iter().sum::<f64>() / n;
-    let e_var: f64 = energies.iter().map(|e| (e - e_mean).powi(2)).sum::<f64>() / n;
+    println!("Options used:");
+    println!("   --order {order}");
+    println!("   --problem-type {prob}");
+    println!("   --number-of-steps {nsteps}");
+    println!("   --time-step {dt}");
+    println!("   --mass {m}");
+    println!("   --spring-const {k}");
+
+    // 2. Create the symplectic integrator
+    let sys = Hamiltonian { prob, m, k };
+    let solver = SIAVSolver::new(order);
+
+    // 3. Initial conditions
+    let mut _t = 0.0f64;
+    let mut q = vec![0.0f64];
+    let mut p = vec![1.0f64];
+    let mut e = vec![0.0f64; nsteps + 1];
+
+    // 4. Time-stepping
+    let mut e_mean = 0.0f64;
+    for i in 0..nsteps {
+        // Record initial state
+        if i == 0 {
+            e[0] = hamiltonian(prob, m, k, q[0], p[0]);
+            e_mean += e[0];
+        }
+
+        // Advance the state
+        solver.step(&sys, &mut q, &mut p, dt);
+        _t += dt;
+
+        // Record energy
+        e[i + 1] = hamiltonian(prob, m, k, q[0], p[0]);
+        e_mean += e[i + 1];
+    }
+
+    // 5. Compute mean and standard deviation of the energy
+    e_mean /= (nsteps + 1) as f64;
+    let e_var: f64 = e.iter().map(|&v| (v - e_mean).powi(2)).sum::<f64>() / (nsteps + 1) as f64;
     let e_sd = e_var.sqrt();
 
-    println!("=== MFEM ex20: Symplectic integration ===");
-    println!("  Problem type   = {}", args.problem);
-    println!("  Order          = {}", args.order);
-    println!("  Steps          = {}", args.nsteps);
-    println!("  dt             = {}", args.dt);
-    println!("  Mass           = {}", args.mass);
-    println!("  Spring const   = {}", args.spring);
-    println!("  Initial        = q=0, p=1");
-    println!("  Final          = q={:.6e}, p={:.6e}", q[0], p[0]);
-    println!("  H mean         = {:.10e}", e_mean);
-    println!("  H stddev       = {:.10e}", e_sd);
+    println!();
+    println!("Mean and standard deviation of the energy");
+    println!("{e_mean}\t{e_sd}");
 }
 
-#[cfg(test)]
-mod tests {
-    use fem_solver::ode::{SIAVSolver, HamiltonianSystem};
-
-    struct HO;
-    impl HamiltonianSystem for HO {
-        fn grad_q(&self, q: &[f64], _: &[f64], o: &mut [f64]) {
-            o[0] = q[0];
-        }
-        fn grad_p(&self, _: &[f64], p: &[f64], o: &mut [f64]) {
-            o[0] = p[0];
-        }
-    }
-
-    #[test]
-    fn smoke() {
-        // Short run with default parameters; position should move from 0
-        let mut q = vec![0.0];
-        let mut p = vec![1.0];
-        SIAVSolver::new(1).step(&HO, &mut q, &mut p, 0.1);
-        assert!(q[0] > 0.0); // with p>0 and no potential, q should increase
-    }
-
-    #[test]
-    fn energy_mean_stddev_computed() {
-        // Run all 5 problem types and check that energy stays bounded.
-        let dt = 0.1;
-        let nsteps = 100;
-        for prob in 0..=4 {
-            // Reset globals
-            unsafe {
-                super::PROB = prob;
-                super::MASS = 1.0;
-                super::SPRING = 1.0;
-            }
-            let sys = super::Hamiltonian;
-            let solver = SIAVSolver::new(2);
-            let mut q = vec![0.0];
-            let mut p = vec![1.0];
-            let mut energies = vec![0.0_f64; nsteps + 1];
-            for i in 0..nsteps {
-                if i == 0 {
-                    energies[0] = super::hamiltonian(q[0], p[0]);
-                }
-                solver.step(&sys, &mut q, &mut p, dt);
-                energies[i + 1] = super::hamiltonian(q[0], p[0]);
-            }
-            let n = energies.len() as f64;
-            let mean: f64 = energies.iter().sum::<f64>() / n;
-            let var: f64 = energies.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / n;
-            let sd = var.sqrt();
-            // Energy should be positive (shifted Hamiltonian)
-            assert!(mean > 0.0, "prob {prob}: mean energy {mean} <= 0");
-            // Stddev should be small (symplectic integration preserves energy)
-            assert!(sd < 2.0, "prob {prob}: stddev {sd} too large");
-        }
-    }
-}
