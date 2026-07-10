@@ -466,6 +466,10 @@ name = "mfem_ex11_p_multigrid"
 path = "mfem_ex11_p_multigrid.rs"
 
 [[example]]
+name = "mfem_ex11_eigenvalue"
+path = "mfem_ex11_eigenvalue.rs"
+
+[[example]]
 name = "mfem_ex13_laplacian_eigen"
 path = "mfem_ex13_laplacian_eigen.rs"
 
