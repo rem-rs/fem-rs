@@ -1,461 +1,520 @@
-//! # Example 16 — Nonlinear Heat Equation (Newton)  (analogous to MFEM ex16)
+//! # Example 16 — Time-dependent nonlinear heat equation  (analogous to MFEM ex16)
 //!
-//! Solves the nonlinear heat equation with conductivity κ(u) = 1 + u²:
+//! Solves a time dependent nonlinear heat equation problem of the form
+//! `du/dt = C(u)`, with a non-linear diffusion operator
+//! `C(u) = ∇·((κ + α·u) ∇u)`.
+//!
+//! After spatial discretisation the conduction model can be written as:
 //!
 //! ```text
-//!   −∇·(κ(u) ∇u) = f    in Ω
-//!              u = 0    on ∂Ω
+//!   du/dt = M⁻¹(−Ku)
 //! ```
 //!
-//! Uses Newton–Raphson iteration with Picard Jacobian:
-//! ```text
-//!   J(uₖ) Δu = −F(uₖ),    uₖ₊₁ = uₖ + Δu
-//!   F(u) = ∫κ(u) ∇u·∇v dx − ∫f v dx
-//!   J(u) ≈ ∫κ(u) ∇φⱼ·∇φᵢ dx   (Picard / frozen-κ Jacobian)
-//! ```
+//! where `u` is the vector representing the temperature, `M` is the mass matrix,
+//! and `K` is the diffusion operator with diffusivity depending on `u`:
+//! `(κ + α·u)`.
 //!
-//! Matches MFEM ex16 in structure: mesh from CLI, κ = 1 + α·u,
-//! Newton solve with zero RHS (steady-state). MMS-based verification
-//! lives under #[cfg(test)].
+//! The diffusion operator is linearized by evaluating with the lagged solution
+//! from the previous timestep, so there is only a linear solve.
 //!
 //! ## Usage
+//! ```text
+//! cargo run --example mfem_ex16_nonlinear_heat -- -no-vis
+//! cargo run --example mfem_ex16_nonlinear_heat -- -m data/star.mesh -r 2 -o 2
 //! ```
-//! cargo run --example mfem_ex16_nonlinear_heat
-//! cargo run --example mfem_ex16_nonlinear_heat -- --mesh path/to/mesh.mesh
-//! cargo run --example mfem_ex16_nonlinear_heat -- --n 16 --newton-tol 1e-10
-//! ```
+//!
+//! ## CLI parameters (matching MFEM ex16)
+//!
+//! | Short | Long          | Default               | Description                     |
+//! |-------|---------------|-----------------------|---------------------------------|
+//! | `-m`  | `--mesh`      | `data/star.mesh`      | Mesh file                       |
+//! | `-r`  | `--refine`    | `2`                   | Uniform refinements             |
+//! | `-o`  | `--order`     | `2`                   | FE order                        |
+//! | `-tf` | `--t-final`   | `0.5`                 | Final time                      |
+//! | `-dt` | `--time-step` | `0.01`                | Time step                       |
+//! | `-a`  | `--alpha`     | `0.01`                | Alpha coefficient               |
+//! | `-k`  | `--kappa`     | `0.5`                 | Kappa coefficient offset        |
 
-use fem_assembly::{Assembler, physics::nonlinear::{NonlinearDiffusionForm, NewtonSolver, NewtonConfig}};
-use fem_mesh::Mesh;
+use fem_assembly::coefficient::{GridFunctionCoeff, TransformedCoeff};
+use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
 use fem_io::mfem::read_mfem_file;
-use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
+use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_mesh::Mesh;
+use fem_space::{fe_space::FESpace, H1Space};
 
-#[allow(dead_code)]
-struct SolveResult {
-    n: usize,
-    newton_tol: f64,
-    n_dofs: usize,
-    iterations: usize,
-    final_residual: f64,
-    converged: bool,
-    rms_error: f64,
-    solution_norm: f64,
-    solution_checksum: f64,
-}
+/// After spatial discretization, the conduction model can be written as:
+///
+///    du/dt = M⁻¹(−Ku)
+///
+/// where u is the vector representing the temperature, M is the mass matrix,
+/// and K is the diffusion operator with diffusivity depending on u: (κ + α·u).
+///
+/// Class ConductionOperator represents the right-hand side of the above ODE.
+struct ConductionOperator {
+    fespace: H1Space<Mesh<2>>,
+    #[allow(dead_code)]
+    ess_tdof_list: Vec<u32>, // empty for pure Neumann b.c.
 
-#[derive(Clone, Copy)]
-struct LineSearchOptions {
-    enabled: bool,
-    min_alpha: f64,
-    shrink: f64,
-    max_backtracks: usize,
-    sufficient_decrease: f64,
-}
+    m_mat: CsrMatrix<f64>,
+    k_mat: CsrMatrix<f64>,
 
-#[cfg(test)]
-fn default_line_search_options() -> LineSearchOptions {
-    LineSearchOptions {
-        enabled: true,
-        min_alpha: 1e-6,
-        shrink: 0.5,
-        max_backtracks: 20,
-        sufficient_decrease: 1e-4,
-    }
-}
+    t_mat: Option<CsrMatrix<f64>>,
+    current_dt: f64,
 
-fn main() {
-    let args = parse_args();
-    println!("=== fem-rs Example 16: Nonlinear heat equation (Newton) ===");
-    if !args.mesh_file.is_empty() {
-        println!("  Mesh file: {}", args.mesh_file);
-    } else {
-        println!("  Mesh: {}×{} subdivisions, P1 elements", args.n, args.n);
-    }
-    println!("  κ(u) = 1 + {:.3}·u,  Newton tol = {:.0e}", args.alpha, args.newton_tol);
-    println!(
-        "  line-search: enabled={}, min_alpha={}, shrink={}, max_backtracks={}, c1={}",
-        args.ls_enabled,
-        args.ls_min_alpha,
-        args.ls_shrink,
-        args.ls_max_backtracks,
-        args.ls_c1,
-    );
+    // M_solver: CG for mass matrix M
+    // T_solver: CG for system matrix T = M + dt*K
+    solve_cfg: SolverConfig,
 
-    // Use MFEM-style zero RHS (steady nonlinear heat, analogous to MFEM ex16's
-    // ConductionOperator which evolves from an initial condition).
-    let result = run_main(args);
-    println!("  DOFs: {}", result.n_dofs);
-    if result.converged {
-        println!("\n  Newton converged: {} iters, ‖F‖ = {:.3e}", result.iterations, result.final_residual);
-    } else {
-        println!("\n  Newton did NOT converge: {} iters, ‖F‖ = {:.3e}", result.iterations, result.final_residual);
-    }
-    println!("  ||u_h||_L2 = {:.4e}", result.solution_norm);
-    println!("  checksum = {:.8e}", result.solution_checksum);
-    println!("\nDone.");
-}
-
-fn run_main(args: Args) -> SolveResult {
-    let mesh = if args.mesh_file.is_empty() {
-        Mesh::<2>::unit_square_tri(args.n)
-    } else {
-        let mfem = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");
-        mfem.mesh2d.expect("MFEM mesh must be 2D")
-    };
-    let n_dofs = {
-        let space = H1Space::new(mesh.clone(), 1);
-        space.n_dofs()
-    };
-    let ls = LineSearchOptions {
-        enabled: args.ls_enabled,
-        min_alpha: args.ls_min_alpha,
-        shrink: args.ls_shrink,
-        max_backtracks: args.ls_max_backtracks,
-        sufficient_decrease: args.ls_c1,
-    };
-    solve_nonlinear_heat(mesh, |_x: &[f64]| 0.0, args.newton_tol, ls, args.alpha, n_dofs)
-}
-
-#[cfg(test)]
-fn solve_case(n: usize, newton_tol: f64, exact_scale: f64) -> SolveResult {
-    let mesh = Mesh::<2>::unit_square_tri(n);
-    solve_case_with_ls(mesh, newton_tol, exact_scale, default_line_search_options())
-}
-
-/// Core solver: builds the nonlinear form, assembles RHS via a user-supplied
-/// source function, runs Newton, and returns diagnostics.
-fn solve_nonlinear_heat(
-    mesh: Mesh<2>,
-    source_fn: impl Fn(&[f64]) -> f64 + Send + Sync,
-    newton_tol: f64,
-    ls: LineSearchOptions,
     alpha: f64,
-    n_dofs: usize,
-) -> SolveResult {
-    let space = H1Space::new(mesh.clone(), 1);
+    kappa: f64,
 
-    // Dirichlet: u = 0 on all walls
-    let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
-    let dirichlet: Vec<(usize, f64)> = bnd.iter().map(|&d| (d as usize, 0.0)).collect();
-
-    // Assemble RHS from the provided source
-    let src = fem_assembly::standard::DomainSourceIntegrator::new(source_fn);
-    let rhs = Assembler::assemble_linear(&space, &[&src], 5);
-
-    // Build nonlinear form with κ(u) = 1 + alpha·u
-    let mut form = NonlinearDiffusionForm::new(
-        space,
-        move |u: f64| 1.0 + alpha * u,
-        3,
-    );
-    form.set_dirichlet(dirichlet);
-
-    // Newton solve
-    let cfg = NewtonConfig {
-        atol:       newton_tol,
-        rtol:       newton_tol * 1e2,
-        max_iter:   50,
-        linear_tol: newton_tol * 0.1,
-        line_search: ls.enabled,
-        line_search_min_alpha: ls.min_alpha,
-        line_search_shrink: ls.shrink,
-        line_search_max_backtracks: ls.max_backtracks,
-        line_search_sufficient_decrease: ls.sufficient_decrease,
-        verbose:    true,
-    };
-    let solver = NewtonSolver::new(cfg);
-    let mut u = vec![0.0_f64; n_dofs];
-
-    let (converged, iterations, final_residual) = match solver.solve(&form, &rhs, &mut u) {
-        Ok(r) => (true, r.iterations, r.final_residual),
-        Err(r) => (false, r.iterations, r.final_residual),
-    };
-
-    let solution_norm = u.iter().map(|value| value * value).sum::<f64>().sqrt();
-    let solution_checksum = u
-        .iter()
-        .enumerate()
-        .map(|(i, value)| (i as f64 + 1.0) * value)
-        .sum::<f64>();
-
-    SolveResult {
-        n: 0,
-        newton_tol,
-        n_dofs,
-        iterations,
-        final_residual,
-        converged,
-        rms_error: 0.0,
-        solution_norm,
-        solution_checksum,
-    }
+    z: Vec<f64>, // auxiliary vector
 }
 
-/// MMS-based solve (test only): manufactured solution u* = sin(πx)sin(πy)
-/// with the corresponding RHS f = -∇·((1+α·u*)∇u*).
-#[cfg(test)]
-fn solve_case_with_ls(
-    mesh: Mesh<2>,
-    newton_tol: f64,
-    exact_scale: f64,
-    ls: LineSearchOptions,
-) -> SolveResult {
-    use std::f64::consts::PI;
-    use fem_assembly::standard::DomainSourceIntegrator;
+impl ConductionOperator {
+    fn new(fespace: H1Space<Mesh<2>>, alpha: f64, kappa: f64, u: &[f64]) -> Self {
+        let rel_tol = 1e-8;
+        let solve_cfg = SolverConfig {
+            rtol: rel_tol,
+            atol: 0.0,
+            max_iter: 100,
+            verbose: false,
+            ..SolverConfig::default()
+        };
 
-    let space = H1Space::new(mesh.clone(), 1);
-    let n_dofs = space.n_dofs();
+        // Assemble mass matrix M
+        let m_integ = MassIntegrator { rho: 1.0 };
+        let m_mat = Assembler::assemble_bilinear(&fespace, &[&m_integ], 3);
 
-    let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
-    let dirichlet: Vec<(usize, f64)> = bnd.iter().map(|&d| (d as usize, 0.0)).collect();
+        let n = m_mat.nrows;
+        // Temporary K (will be overwritten by set_parameters)
+        let k_mat = CsrMatrix::new_empty(n, n);
+        let mut oper = ConductionOperator {
+            fespace,
+            ess_tdof_list: Vec::new(),
+            m_mat,
+            k_mat,
+            t_mat: None,
+            current_dt: 0.0,
+            solve_cfg,
+            alpha,
+            kappa,
+            z: vec![0.0; n],
+        };
+        oper.set_parameters(u);
+        oper
+    }
 
-    // Keep a separate mesh for error computation (owned clone of space's mesh)
-    let err_mesh = space.mesh().clone();
-
-    // Manufactured RHS for u* = sin(πx)sin(πy), κ(u) = 1 + u²
-    let src = DomainSourceIntegrator::new(move |x: &[f64]| {
-        let (sx, sy) = ((PI * x[0]).sin(), (PI * x[1]).sin());
-        let (cx, cy) = ((PI * x[0]).cos(), (PI * x[1]).cos());
-        let u_star = exact_scale * sx * sy;
-        let kappa = 1.0 + u_star * u_star;
-        let lap_u = -2.0 * PI * PI * u_star;
-        let grad_kappa_dot_grad_u = 2.0 * u_star * PI * PI *
-            (cx * cx * sy * sy + sx * sx * cy * cy);
-        -kappa * lap_u - grad_kappa_dot_grad_u
-    });
-    let rhs = Assembler::assemble_linear(&space, &[&src], 5);
-
-    let mut form = NonlinearDiffusionForm::new(
-        space,
-        |u: f64| 1.0 + u * u,
-        3,
-    );
-    form.set_dirichlet(dirichlet);
-
-    let cfg = NewtonConfig {
-        atol:       newton_tol,
-        rtol:       newton_tol * 1e2,
-        max_iter:   50,
-        linear_tol: newton_tol * 0.1,
-        line_search: ls.enabled,
-        line_search_min_alpha: ls.min_alpha,
-        line_search_shrink: ls.shrink,
-        line_search_max_backtracks: ls.max_backtracks,
-        line_search_sufficient_decrease: ls.sufficient_decrease,
-        verbose:    false,
-    };
-    let solver = NewtonSolver::new(cfg);
-    let mut u = vec![0.0_f64; n_dofs];
-
-    let (converged, iterations, final_residual) = match solver.solve(&form, &rhs, &mut u) {
-        Ok(r) => (true, r.iterations, r.final_residual),
-        Err(r) => (false, r.iterations, r.final_residual),
-    };
-
-    let rms_error = {
-        let err_space = H1Space::new(err_mesh, 1);
-        let err_dm = err_space.dof_manager();
-        let mut err = 0.0_f64;
-        for i in 0..n_dofs {
-            let x = err_dm.dof_coord(i as u32);
-            let u_ex = exact_scale * (PI * x[0]).sin() * (PI * x[1]).sin();
-            err += (u[i] - u_ex).powi(2);
+    /// Compute `du_dt = M⁻¹(−K·u)` for explicit time integration.
+    #[allow(dead_code)]
+    fn mult(&mut self, u: &[f64], du_dt: &mut [f64]) {
+        // Compute: du_dt = M^{-1}*-Ku
+        // where K is linearized by using u from the previous timestep
+        self.k_mat.spmv(u, &mut self.z);
+        // z = -z
+        for v in self.z.iter_mut() {
+            *v = -*v;
         }
-        (err / n_dofs as f64).sqrt()
-    };
-    let solution_norm = u.iter().map(|value| value * value).sum::<f64>().sqrt();
-    let solution_checksum = u
-        .iter()
-        .enumerate()
-        .map(|(i, value)| (i as f64 + 1.0) * value)
-        .sum::<f64>();
+        // M_solver.Mult(z, du_dt)
+        solve_pcg_jacobi(&self.m_mat, &self.z, du_dt, &self.solve_cfg)
+            .expect("ConductionOperator::Mult: PCG solve failed");
+    }
 
-    SolveResult {
-        n: 0,
-        newton_tol,
-        n_dofs,
-        iterations,
-        final_residual,
-        converged,
-        rms_error,
-        solution_norm,
-        solution_checksum,
+    /// Solve the implicit equation for SDIRK stages.
+    ///
+    /// For slope form: (M + dt·K) k = −K·u
+    fn implicit_solve(&mut self, dt: f64, u: &[f64], k: &mut [f64]) {
+        // Build T = M + dt·K on first call; cache across stages (SDIRK uses same dt)
+        if self.t_mat.is_none() {
+            self.t_mat = Some(build_m_plus_alpha_k(&self.m_mat, &self.k_mat, dt));
+            self.current_dt = dt;
+        }
+        // SDIRK methods use the same dt for all stages of one step
+        assert!(
+            (dt - self.current_dt).abs() < 1e-15,
+            "ImplicitSolve: dt changed ({:.4e} vs {:.4e})",
+            dt,
+            self.current_dt
+        );
+
+        // Slope form: k = du/dt
+        // RHS = −K·u
+        self.k_mat.spmv(u, &mut self.z);
+        for v in self.z.iter_mut() {
+            *v = -*v;
+        }
+
+        // Solve T·k = RHS
+        let sys = self.t_mat.as_ref().unwrap();
+        solve_pcg_jacobi(sys, &self.z, k, &self.solve_cfg)
+            .expect("ConductionOperator::ImplicitSolve: PCG solve failed");
+    }
+
+    /// Update the diffusion matrix K using the given solution vector `u`.
+    ///
+    /// Builds K with coefficient κ(u) = kappa + alpha·u at each quadrature point,
+    /// then invalidates T so it is rebuilt on the next ImplicitSolve.
+    fn set_parameters(&mut self, u: &[f64]) {
+        // Build κ = kappa + alpha·u as a GridFunctionCoefficient
+        let alpha = self.alpha;
+        let kappa = self.kappa;
+        let u_coeff = GridFunctionCoeff::new(u.to_vec());
+        let kappa_coeff = TransformedCoeff {
+            inner: u_coeff,
+            transform: move |u_val| kappa + alpha * u_val,
+        };
+
+        // Assemble K with transformed coefficient
+        let k_integ = DiffusionIntegrator {
+            kappa: kappa_coeff,
+        };
+        self.k_mat = Assembler::assemble_bilinear(&self.fespace, &[&k_integ], 3);
+
+        // Invalidate T: re-compute on the next ImplicitSolve
+        self.t_mat = None;
     }
 }
 
-// ─── CLI ─────────────────────────────────────────────────────────────────────
+// ─── Build T = M + α·K ──────────────────────────────────────────────────────
+
+fn build_m_plus_alpha_k(m: &CsrMatrix<f64>, k: &CsrMatrix<f64>, alpha: f64) -> CsrMatrix<f64> {
+    let n = m.nrows;
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    for i in 0..n {
+        for ptr in m.row_ptr[i]..m.row_ptr[i + 1] {
+            coo.add(i, m.col_idx[ptr] as usize, m.values[ptr]);
+        }
+    }
+    for i in 0..n {
+        for ptr in k.row_ptr[i]..k.row_ptr[i + 1] {
+            coo.add(i, k.col_idx[ptr] as usize, alpha * k.values[ptr]);
+        }
+    }
+    coo.into_csr()
+}
+
+// ─── Initial temperature ────────────────────────────────────────────────────
+
+fn initial_temperature(x: &[f64]) -> f64 {
+    if x[0] * x[0] + x[1] * x[1] < 0.25 { 2.0 } else { 1.0 }
+}
+
+// ─── SDIRK33 coefficients ───────────────────────────────────────────────────
+
+const SDIRK3_GAMMA: f64 = 0.435_866_521_508_459;
+const SDIRK3_A21: f64 = 0.564_133_478_491_541; // 1 − γ
+const SDIRK3_A32: f64 = 0.717_933_260_754_229_5;
+const SDIRK3_B: [f64; 3] = [0.225_557_007_738_747, 0.286_419_283_997_043, 0.488_023_708_264_210];
+
+// ─── CLI ────────────────────────────────────────────────────────────────────
 
 struct Args {
     mesh_file: String,
-    n: usize,
-    newton_tol: f64,
+    ref_levels: usize,
+    order: u8,
+    t_final: f64,
+    dt: f64,
     alpha: f64,
-    ls_enabled: bool,
-    ls_min_alpha: f64,
-    ls_shrink: f64,
-    ls_max_backtracks: usize,
-    ls_c1: f64,
+    kappa: f64,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
         mesh_file: String::new(),
-        n: 16,
-        newton_tol: 1e-10,
-        alpha: 1.0,
-        ls_enabled: true,
-        ls_min_alpha: 1e-6,
-        ls_shrink: 0.5,
-        ls_max_backtracks: 20,
-        ls_c1: 1e-4,
+        ref_levels: 2,
+        order: 2,
+        t_final: 0.5,
+        dt: 1.0e-2,
+        alpha: 1.0e-2,
+        kappa: 0.5,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--mesh" | "-m" => { a.mesh_file = it.next().unwrap_or_default(); }
-            "--n"           => { a.n          = it.next().unwrap_or("16".into()).parse().unwrap_or(16); }
-            "--newton-tol"  => { a.newton_tol = it.next().unwrap_or("1e-10".into()).parse().unwrap_or(1e-10); }
-            "--alpha" | "-a" => { a.alpha = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0); }
-            "--no-line-search" => { a.ls_enabled = false; }
-            "--line-search" => { a.ls_enabled = true; }
-            "--ls-min-alpha" => { a.ls_min_alpha = it.next().unwrap_or("1e-6".into()).parse().unwrap_or(1e-6); }
-            "--ls-shrink" => { a.ls_shrink = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5); }
-            "--ls-max-backtracks" => { a.ls_max_backtracks = it.next().unwrap_or("20".into()).parse().unwrap_or(20); }
-            "--ls-c1" => { a.ls_c1 = it.next().unwrap_or("1e-4".into()).parse().unwrap_or(1e-4); }
+            "-m" | "--mesh"     => a.mesh_file   = it.next().unwrap_or_default(),
+            "-r" | "--refine"   => a.ref_levels  = it.next().unwrap_or("2".into()).parse().unwrap_or(2),
+            "-o" | "--order"    => a.order       = it.next().unwrap_or("2".into()).parse().unwrap_or(2),
+            "-tf" | "--t-final" => a.t_final     = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
+            "-dt" | "--time-step" => a.dt        = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
+            "-a"  | "--alpha"   => a.alpha       = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
+            "-k"  | "--kappa"   => a.kappa       = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
             _ => {}
         }
     }
     a
 }
 
+// ─── Main ───────────────────────────────────────────────────────────────────
+
+fn main() {
+    let args = parse_args();
+    // 1. Parse command-line options.
+    //    (done via parse_args() above)
+
+    // 2. Read the mesh from the given mesh file.
+    let mfem_file = if args.mesh_file.is_empty() {
+        let path = {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            p.parent().unwrap().join("data/star.mesh")
+        };
+        read_mfem_file(&path).expect("failed to read default mesh (data/star.mesh)")
+    } else {
+        read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh")
+    };
+    let mesh = mfem_file.mesh2d.expect("MFEM mesh must be 2D");
+    let dim = 2;
+
+    // 3. Define the ODE solver used for time integration.
+    //    SDIRK33 (type 23) — built-in SDIRK coefficients at the top of this file.
+
+    // 4. Refine the mesh uniformly.
+    let mesh = if args.ref_levels > 0 {
+        let mut m = mesh;
+        for _ in 0..args.ref_levels {
+            m = fem_mesh::refine_uniform(&m);
+        }
+        m
+    } else {
+        mesh
+    };
+
+    // 5. Define the H1 FE space.
+    let space = H1Space::new(mesh, args.order);
+    let fe_size = space.n_dofs();
+    println!("Number of temperature unknowns: {}", fe_size);
+
+    // 6. Set the initial conditions for u. All boundaries are considered natural.
+    let dm = space.dof_manager();
+    let mut u: Vec<f64> = (0..fe_size)
+        .map(|i| {
+            let x = dm.dof_coord(i as u32);
+            initial_temperature(&x[..dim])
+        })
+        .collect();
+
+    // 7. Initialize the conduction operator.
+    let oper = ConductionOperator::new(space, args.alpha, args.kappa, &u);
+
+    // 8. Perform time-integration (looping over the time iterations, ti, with a
+    //    time-step dt).
+    let t_final = args.t_final;
+    let dt = args.dt;
+
+    // Time stepping
+    let mut t = 0.0;
+    let vis_steps = 5;
+    let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
+
+    // SDIRK33 needs a mutable operator (ImplicitSolve invalidates/rebuilds T)
+    let mut oper = oper;
+
+    let mut last_step;
+    for ti in 1..=n_steps.max(1) {
+        let dt_actual = if t + dt >= t_final - dt / 2.0 {
+            last_step = true;
+            t_final - t
+        } else {
+            last_step = false;
+            dt
+        };
+
+        // SDIRK33 step
+        let n = fe_size;
+        let g = SDIRK3_GAMMA;
+
+        // Stage 1: k₁ = ImplicitSolve(γ·dt, u)
+        let mut k1 = vec![0.0; n];
+        oper.implicit_solve(g * dt_actual, &u, &mut k1);
+
+        // Stage 2: u_stage = u + a₂₁·dt·k₁
+        //          k₂ = ImplicitSolve(γ·dt, u_stage)
+        let u2: Vec<f64> = (0..n).map(|i| u[i] + SDIRK3_A21 * dt_actual * k1[i]).collect();
+        let mut k2 = vec![0.0; n];
+        oper.implicit_solve(g * dt_actual, &u2, &mut k2);
+
+        // Stage 3: u_stage = u + a₃₂·dt·k₂
+        //          k₃ = ImplicitSolve(γ·dt, u_stage)
+        let u3: Vec<f64> = (0..n).map(|i| u[i] + SDIRK3_A32 * dt_actual * k2[i]).collect();
+        let mut k3 = vec![0.0; n];
+        oper.implicit_solve(g * dt_actual, &u3, &mut k3);
+
+        // Update: u = u + dt·(b₁·k₁ + b₂·k₂ + b₃·k₃)
+        for i in 0..n {
+            u[i] += dt_actual
+                * (SDIRK3_B[0] * k1[i] + SDIRK3_B[1] * k2[i] + SDIRK3_B[2] * k3[i]);
+        }
+
+        t += dt_actual;
+
+        if ti % vis_steps == 0 || last_step || ti == n_steps {
+            println!("step {}, t = {:.6e}", ti, t);
+        }
+
+        // Update K with the new solution (lagged linearization for next step)
+        oper.set_parameters(&u);
+
+        if last_step {
+            break;
+        }
+    }
+
+    // 9. Output comparison metrics
+    let sol_norm: f64 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let checksum: f64 = u
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (i as f64 + 1.0) * v)
+        .sum();
+
+    println!("\n=== Comparison Metrics ===");
+    println!("DOFs: {}", fe_size);
+    println!("Steps: {}", (t / dt).round() as usize);
+    println!("Final t: {:.6e}", t);
+    println!("||u_h||_L2 = {:.6e}", sol_norm);
+    println!("checksum = {:.6e}", checksum);
+    println!("kappa = {:.3}, alpha = {:.3}", args.kappa, args.alpha);
+    println!("order = {}, ref_levels = {}", args.order, args.ref_levels);
+    println!("dt = {:.4e}, t_final = {:.4e}", dt, t_final);
+    println!("=========================");
+    println!("\nDone.");
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn ex16_nonlinear_heat_coarse_case_converges_with_reasonable_error() {
-        let result = solve_case(8, 1e-10, 1.0);
-        assert!(result.converged);
-        assert_eq!(result.n_dofs, 81);
-        assert!(result.iterations <= 15, "Newton took too many iterations: {}", result.iterations);
-        assert!(result.final_residual < 1.0e-8, "Newton residual too large: {}", result.final_residual);
-        assert!(result.rms_error < 3.5e-3, "coarse-grid RMS error too large: {}", result.rms_error);
-    }
+    fn run_case(
+        mesh_file: &str,
+        ref_levels: usize,
+        order: u8,
+        dt: f64,
+        t_final: f64,
+        alpha: f64,
+        kappa: f64,
+    ) -> (usize, usize, f64, f64, f64) {
+        let mfem = read_mfem_file(mesh_file).expect("mesh load failed");
+        let mesh = mfem.mesh2d.expect("must be 2D");
+        let mesh = if ref_levels > 0 {
+            let mut m = mesh;
+            for _ in 0..ref_levels {
+                m = fem_mesh::refine_uniform(&m);
+            }
+            m
+        } else {
+            mesh
+        };
+        let space = H1Space::new(mesh, order);
+        let fe_size = space.n_dofs();
+        let dm = space.dof_manager();
+        let dim = 2;
+        let mut u: Vec<f64> = (0..fe_size)
+            .map(|i| {
+                let x = dm.dof_coord(i as u32);
+                initial_temperature(&x[..dim])
+            })
+            .collect();
+        let mut oper = ConductionOperator::new(space, alpha, kappa, &u);
 
-    #[test]
-    fn ex16_nonlinear_heat_refinement_improves_accuracy() {
-        let coarse = solve_case(8, 1e-10, 1.0);
-        let fine = solve_case(16, 1e-10, 1.0);
-        assert!(fine.rms_error < coarse.rms_error,
-            "refinement should reduce RMS error: coarse={} fine={}", coarse.rms_error, fine.rms_error);
-        assert!(fine.rms_error < 1.0e-3, "fine-grid RMS error too large: {}", fine.rms_error);
-    }
+        let n_steps = if dt > 0.0 {
+            (t_final / dt).ceil() as usize
+        } else {
+            0
+        };
+        let mut t = 0.0;
+        let g = SDIRK3_GAMMA;
 
-    #[test]
-    fn ex16_nonlinear_heat_looser_newton_tolerance_preserves_solution_accuracy() {
-        let tight = solve_case(16, 1e-10, 1.0);
-        let loose = solve_case(16, 1e-8, 1.0);
-        assert!(tight.converged && loose.converged);
-        assert!(loose.iterations <= tight.iterations,
-            "looser tolerance should not need more iterations: tight={} loose={}", tight.iterations, loose.iterations);
-        assert!((loose.rms_error - tight.rms_error).abs() < 1.0e-6,
-            "solution accuracy drifted under looser Newton tolerance: tight={} loose={}", tight.rms_error, loose.rms_error);
-    }
+        for _ in 0..n_steps {
+            let dt_actual = if t + dt >= t_final - dt / 2.0 {
+                t_final - t
+            } else {
+                dt
+            };
 
-    #[test]
-    fn ex16_nonlinear_heat_sign_reversed_manufactured_solution_flips_state() {
-        let positive = solve_case(16, 1e-10, 1.0);
-        let negative = solve_case(16, 1e-10, -1.0);
-        assert!(positive.converged && negative.converged);
-        assert!((positive.solution_norm - negative.solution_norm).abs() < 1.0e-12);
-        assert!((positive.solution_checksum + negative.solution_checksum).abs() < 1.0e-10,
-            "solution checksum should flip sign: positive={} negative={}",
-            positive.solution_checksum,
-            negative.solution_checksum);
-        assert!((positive.rms_error - negative.rms_error).abs() < 1.0e-12);
-    }
+            let mut k1 = vec![0.0; fe_size];
+            oper.implicit_solve(g * dt_actual, &u, &mut k1);
 
-    #[test]
-    fn ex16_nonlinear_heat_zero_manufactured_state_gives_trivial_solution() {
-        let result = solve_case(16, 1e-10, 0.0);
-        assert!(result.converged, "zero-source nonlinear heat solve should converge");
-        assert!(result.final_residual < 1.0e-12, "zero-source residual too large: {}", result.final_residual);
-        assert!(result.rms_error < 1.0e-14, "zero manufactured state should have zero RMS error: {}", result.rms_error);
-        assert!(result.solution_norm < 1.0e-14, "zero manufactured state should give zero solution norm: {}", result.solution_norm);
-        assert!(result.solution_checksum.abs() < 1.0e-14,
-            "zero manufactured state should give zero checksum: {}",
-            result.solution_checksum);
-    }
+            let u2: Vec<f64> = (0..fe_size)
+                .map(|i| u[i] + SDIRK3_A21 * dt_actual * k1[i])
+                .collect();
+            let mut k2 = vec![0.0; fe_size];
+            oper.implicit_solve(g * dt_actual, &u2, &mut k2);
 
-    #[test]
-    fn ex16_nonlinear_heat_dof_count_matches_p1_h1_formula() {
-        for &n in &[8usize, 12usize, 16usize] {
-            let result = solve_case(n, 1e-10, 1.0);
-            assert_eq!(result.n_dofs, (n + 1) * (n + 1));
+            let u3: Vec<f64> = (0..fe_size)
+                .map(|i| u[i] + SDIRK3_A32 * dt_actual * k2[i])
+                .collect();
+            let mut k3 = vec![0.0; fe_size];
+            oper.implicit_solve(g * dt_actual, &u3, &mut k3);
+
+            for i in 0..fe_size {
+                u[i] += dt_actual
+                    * (SDIRK3_B[0] * k1[i] + SDIRK3_B[1] * k2[i] + SDIRK3_B[2] * k3[i]);
+            }
+
+            t += dt_actual;
+            oper.set_parameters(&u);
         }
+
+        let sol_norm = u.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let checksum: f64 = u
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i as f64 + 1.0) * v)
+            .sum();
+        (fe_size, n_steps, t, sol_norm, checksum)
     }
 
     #[test]
-    fn ex16_nonlinear_heat_larger_manufactured_amplitude_increases_response() {
-        let half = solve_case(16, 1e-10, 0.5);
-        let full = solve_case(16, 1e-10, 1.0);
-        assert!(half.converged && full.converged);
-        assert!(full.solution_norm > half.solution_norm,
-            "larger manufactured amplitude should increase solution norm: half={} full={}",
-            half.solution_norm,
-            full.solution_norm);
-        assert!(full.iterations >= half.iterations,
-            "stronger nonlinearity should not require fewer Newton iterations: half={} full={}",
-            half.iterations,
-            full.iterations);
-        assert!(half.rms_error.is_finite() && full.rms_error.is_finite());
-        assert!(half.rms_error > 0.0 && full.rms_error > 0.0);
+    fn ex16_default_regression() {
+        let path = {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            p.parent().unwrap().join("data/star.mesh")
+        };
+        let (dofs, steps, ft, norm, cs) = run_case(
+            &path.to_string_lossy(),
+            2,
+            2,
+            0.01,
+            0.5,
+            0.01,
+            0.5,
+        );
+        assert_eq!(dofs, 1361);
+        assert_eq!(steps, 50);
+        assert!((ft - 0.5).abs() < 1e-12);
+        assert!(norm > 30.0 && norm < 60.0, "norm={:.4e}", norm);
+        assert!(cs > 5e5 && cs < 2e6, "checksum={:.4e}", cs);
     }
 
     #[test]
-    fn ex16_nonlinear_heat_tighter_tolerance_reduces_final_residual() {
-        let loose = solve_case(16, 1e-8, 1.0);
-        let tight = solve_case(16, 1e-10, 1.0);
-        assert!(loose.converged && tight.converged);
-        assert!(tight.final_residual <= loose.final_residual * 1.1,
-            "tighter tolerance should not end with larger residual: loose={} tight={}",
-            loose.final_residual,
-            tight.final_residual);
-    }
-
-    // ─── Regression baseline ─────────────────────────────────────────────
-
-    #[test]
-    fn ex16_regression_baseline() {
-        let result = solve_case(8, 1e-8, 0.01);
-        assert!(result.converged);
-
-        fem_regression::regression("mfem_ex16_nonlinear_heat")
-            .check_with("rms_error",          result.rms_error,        1e-6, 1e-10)
-            .check_with("solution_norm",      result.solution_norm,    1e-6, 1e-10)
-            .check_with("solution_checksum",  result.solution_checksum, 1e-6, 1e-10)
-            .check_with("n_dofs",             result.n_dofs as f64,    0.0,  0.5)
-            .check_with("iterations",         result.iterations as f64, 1e-4, 0.5)
-            .check_with("residual",           result.final_residual,   1e-4, 1e-10)
-            .finalize();
+    fn ex16_refinement_increases_dofs() {
+        let path = {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            p.parent().unwrap().join("data/star.mesh")
+        };
+        let (dofs_c, _, _, _, _) = run_case(&path.to_string_lossy(), 1, 1, 0.01, 0.5, 0.01, 0.5);
+        let (dofs_f, _, _, _, _) = run_case(&path.to_string_lossy(), 2, 2, 0.01, 0.5, 0.01, 0.5);
+        assert!(
+            dofs_f > dofs_c,
+            "refinement should increase DOFs: coarse={} fine={}",
+            dofs_c,
+            dofs_f
+        );
     }
 
     #[test]
-    fn ex16_mfem_reference_test() {
-        let r = solve_case(8, 1e-8, 0.01);
-        assert!(r.converged);
-        assert_eq!(r.n_dofs, 81, "H1 P1 on 8×8: 81 DOFs");
-        assert!(r.solution_norm > 0.0);
-        assert!(r.rms_error > 0.0 && r.rms_error < 1.0);
-        use std::time::Instant;
-        let t0 = Instant::now();
-        let _ = solve_case(16, 1e-8, 0.01);
-        let elapsed = t0.elapsed();
-        assert!(elapsed.as_secs_f64() < 30.0, "16×16 heat took {:.2}s", elapsed.as_secs_f64());
-        eprintln!("  [mfem-ref] ex16: dofs={} rms={:.6e} norm={:.6e} iter={}",
-            r.n_dofs, r.rms_error, r.solution_norm, r.iterations);
+    fn ex16_solution_norm_positive_finite() {
+        let path = {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            p.parent().unwrap().join("data/star.mesh")
+        };
+        let (_, _, _, norm, _) = run_case(&path.to_string_lossy(), 1, 1, 0.01, 0.2, 0.01, 0.5);
+        assert!(
+            norm > 0.0 && norm.is_finite(),
+            "norm should be positive and finite: {:.4e}",
+            norm
+        );
     }
 }
-
