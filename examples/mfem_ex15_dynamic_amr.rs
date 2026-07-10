@@ -280,25 +280,33 @@ fn main() {
                 })
                 .collect();
 
-            // Build reduced system (like MFEM's FormLinearSystem)
-            let (red_mat, red_rhs, free_map, constrained_map) =
-                fem_space::constraints::eliminate_dirichlet(&mat, &rhs_vec, &bnd, &bnd_vals);
+            // Apply Dirichlet BC in-place (like MFEM FormLinearSystem)
+            fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs_vec, &bnd, &bnd_vals);
 
-            // Solve reduced system
-            let mut u_red = vec![0.0_f64; red_rhs.len()];
-            let res = fem_solver::solve_pcg_jacobi(
-                &red_mat, &red_rhs, &mut u_red,
+            // Fix zero diagonals: after apply_dirichlet, any row without a diagonal
+            // entry (e.g. isolated NC DOFs) gets its diag forced to 1.0.
+            //
+            // We detect these by checking which boundary DOFs still have A[i,i]=0
+            // (the only rows that should have zero diag after apply_dirichlet are
+            // non-boundary rows that happen to have no element support — rare but
+            // possible with NC meshes).
+            let diag_vals = mat.diagonal();
+            for (row, &d) in diag_vals.iter().enumerate() {
+                if d == 0.0 {
+                    mat.eliminate_essential_bc_diag(row, 1.0);
+                }
+            }
+
+            // Solve with GSSmoother (matches MFEM GSSmoother)
+            let mut u = vec![0.0_f64; cdofs];
+            let res = fem_solver::solve_pcg_gssmoother(
+                &mat, &rhs_vec, &mut u,
                 &fem_solver::SolverConfig {
-                    rtol: 1e-10,
-                    max_iter: 2000,
+                    rtol: 1e-12,
+                    max_iter: 500,
                     verbose: false,
                     ..Default::default()
                 },
-            );
-
-            // Expand back to full vector
-            let mut u = fem_space::constraints::expand_from_reduced(
-                &u_red, &free_map, &constrained_map, &bnd_vals, cdofs,
             );
 
             if let Err(e) = &res {

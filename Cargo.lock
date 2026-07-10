@@ -1618,9 +1618,9 @@ dependencies = [
  "criterion",
  "mpi",
  "nalgebra 0.33.3",
- "nalgebra-sparse",
  "num-complex",
  "num-traits",
+ "oxiblas",
  "proptest",
  "rayon",
  "thiserror 2.0.18",
@@ -1942,6 +1942,7 @@ version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
+ "bytemuck",
  "num-traits",
 ]
 
@@ -2056,6 +2057,84 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "oxiblas"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e60669149eb19d13d9ea516520f99a8a431e888476c71136aca98946aa99a4f"
+dependencies = [
+ "bytemuck",
+ "num-traits",
+ "oxiblas-blas",
+ "oxiblas-core",
+ "oxiblas-lapack",
+ "oxiblas-matrix",
+ "oxiblas-sparse",
+]
+
+[[package]]
+name = "oxiblas-blas"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b20733edf8bd497233628af75afdb7c5f29157d8dc82e9fdc6c0e862e6e6957"
+dependencies = [
+ "bytemuck",
+ "num-complex",
+ "num-traits",
+ "oxiblas-core",
+ "oxiblas-matrix",
+]
+
+[[package]]
+name = "oxiblas-core"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2d36abb8c720acdb430c810434582b558f0dfdfcc34b73b64e7cd4f641b1ea1"
+dependencies = [
+ "bytemuck",
+ "libc",
+ "num-complex",
+ "num-traits",
+]
+
+[[package]]
+name = "oxiblas-lapack"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d69ba187daaf0d0e38d331c6fba35f5584296160e78d832b8e39c8e6c93b46f"
+dependencies = [
+ "bytemuck",
+ "num-complex",
+ "num-traits",
+ "oxiblas-blas",
+ "oxiblas-core",
+ "oxiblas-matrix",
+]
+
+[[package]]
+name = "oxiblas-matrix"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75bf5ed8ca26065e07b83f98009447302cd01926c88e829d7b5bc50e97d0ff19"
+dependencies = [
+ "bytemuck",
+ "num-complex",
+ "num-traits",
+ "oxiblas-core",
+]
+
+[[package]]
+name = "oxiblas-sparse"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72885edd12c3079cafccd3d2a83cfdd4d2601492030a5c1cb0077ab40b48669e"
+dependencies = [
+ "bytemuck",
+ "num-traits",
+ "oxiblas-core",
+ "oxiblas-matrix",
 ]
 
 [[package]]
