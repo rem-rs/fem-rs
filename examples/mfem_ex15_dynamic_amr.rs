@@ -22,7 +22,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_assembly::postproc::error_estimate::{threshold_mark, derefine_mark, kelly_estimator};
+use fem_assembly::postproc::error_estimate::{threshold_mark, derefine_mark, kelly_estimator, zz_estimator_nodal};
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_core::{ElemId, NodeId};
 use fem_io::mfem::read_mfem_file;
@@ -246,6 +246,8 @@ fn main() {
         println!("\nRefinement:");
 
         // ─── 4a. Inner refinement loop ──────────────────────────────────────
+        let mut eta_last: Vec<f64> = Vec::new(); // keep last eta for derefinement
+
         for ref_it in 1.. {
             // Build H1 space on current mesh
             let space = H1Space::new(mesh.clone(), order);
@@ -283,13 +285,7 @@ fn main() {
             // Apply Dirichlet BC in-place (like MFEM FormLinearSystem)
             fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs_vec, &bnd, &bnd_vals);
 
-            // Fix zero diagonals: after apply_dirichlet, any row without a diagonal
-            // entry (e.g. isolated NC DOFs) gets its diag forced to 1.0.
-            //
-            // We detect these by checking which boundary DOFs still have A[i,i]=0
-            // (the only rows that should have zero diag after apply_dirichlet are
-            // non-boundary rows that happen to have no element support — rare but
-            // possible with NC meshes).
+            // Fix zero diagonals
             let diag_vals = mat.diagonal();
             for (row, &d) in diag_vals.iter().enumerate() {
                 if d == 0.0 {
@@ -309,13 +305,15 @@ fn main() {
                 },
             );
 
+            // On solver failure: keep previous solution, proceed to derefinement
             if let Err(e) = &res {
-                eprintln!("  Solver error: {e:?}");
+                eprintln!("  Solver error: {e:?} — skipping refinement step");
                 break;
             }
             if let Ok(r) = &res {
                 if !r.converged {
-                    eprintln!("  WARNING: solver did not converge (iters={}, res={:.3e})", r.iterations, r.final_residual);
+                    eprintln!("  WARNING: solver did not converge (iters={}, res={:.3e}) — skipping refinement step", r.iterations, r.final_residual);
+                    break;
                 }
             }
 
@@ -326,17 +324,19 @@ fn main() {
 
             x = u;
 
-            // Error estimation (mesh-level zz_estimator — matches MFEM ex6 path)
+            // Error estimation using DOF-level nodal averaging ZZ
+            // Note: for Q2/hanging-node meshes, results may differ from MFEM's
+            // ZienkiewiczZhuEstimator which uses a separate H1^sdim flux space
+            // with integrator-specific ComputeElementFlux/ComputeFluxEnergy.
+            let gf = GridFunction::new(&space, x.clone());
             let eta = if use_kelly {
-                let gf = GridFunction::new(&space, x.clone());
                 kelly_estimator(&gf).eta
             } else {
-                // Use vertex-only values for mesh-level estimator
-                let u_vert: Vec<f64> = (0..mesh.n_nodes()).map(|n| x[n as usize]).collect();
-                fem_mesh::amr::zz_estimator(&mesh, &u_vert)
+                zz_estimator_nodal(&gf).eta
             };
+            eta_last = eta.clone();
 
-            // Threshold marking: refine if η > max_elem_error
+            // Threshold marking: refine if η > max_elem_error (matches MFEM ThresholdRefiner)
             let marked = threshold_mark(&eta, max_elem_error);
 
             if marked.is_empty() {
@@ -350,22 +350,12 @@ fn main() {
         }
 
         // ─── 4b. Derefinement step ─────────────────────────────────────────
-        if nc_state.can_derefine() {
-            // Compute error on final refined mesh
-            let space = H1Space::new(mesh.clone(), order);
-            let gf = GridFunction::new(&space, x.clone());
-            let eta = if use_kelly {
-                kelly_estimator(&gf).eta
-            } else {
-                fem_assembly::postproc::error_estimate::zz_estimator_nodal(&gf).eta
-            };
+        if nc_state.can_derefine() && !eta_last.is_empty() {
+            // Use eta from the last refinement iteration (MFEM reuses estimator state)
+            let derefine_candidates = derefine_mark(&eta_last, derefine_threshold);
 
-            let derefine_candidates = derefine_mark(&eta, derefine_threshold);
-            let frac_below = derefine_candidates.len() as f64 / eta.len().max(1) as f64;
-
-            // Derefine if at least 25% of elements have error below threshold
-            // (conservative approximation of C++ ThresholdDerefiner behavior)
-            if frac_below > 0.25 && nc_state.can_derefine() {
+            // Derefine if at least one candidate exists below threshold
+            if !derefine_candidates.is_empty() && nc_state.can_derefine() {
                 if let Some((old_mesh, old_constraints)) = nc_state.derefine_last() {
                     mesh = old_mesh;
                     hanging_constraints = old_constraints;
