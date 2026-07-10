@@ -854,6 +854,85 @@ fn qr_orthonormalize(m: &DMatrix<f64>) -> Result<DMatrix<f64>, String> {
     Ok(q)
 }
 
+/// Configuration for the AME (Auxiliary-space Maxwell Eigensolver).
+///
+/// Wraps [`linlvo::eigen::AmeConfig`] for the H(curl) eigenvalue problem
+/// `A x = λ M x`.  See the linlvo AME solver for details.
+#[derive(Debug, Clone)]
+pub struct AmeConfig {
+    /// Number of eigenvalue/vector pairs to compute.
+    pub nev: usize,
+    /// Maximum LOBPCG iterations (default 100).
+    pub max_iter: usize,
+    /// Convergence tolerance ‖Ax − λMx‖ / |λ| < tol (default 1e-8).
+    pub tol: f64,
+    /// Print convergence info when true.
+    pub verbose: bool,
+    /// AMS singularity regularization (default 1e-6).
+    pub singularity_regularization: f64,
+    /// Block oversampling (default 20).
+    pub extra: usize,
+}
+
+impl Default for AmeConfig {
+    fn default() -> Self {
+        AmeConfig { nev: 5, max_iter: 100, tol: 1e-8, verbose: false, singularity_regularization: 1e-6, extra: 20 }
+    }
+}
+
+/// Solve the Maxwell eigenvalue problem `A x = λ M x` using the AME solver.
+///
+/// The AME solver combines LOBPCG with the AMS preconditioner and discrete
+/// divergence-free projection (`I − G(GᵀMG)⁻¹GᵀM`) to suppress the gradient
+/// nullspace *without* explicit constraint matrices.  This matches the approach
+/// used in MFEM ex13p / HYPRE AME.
+///
+/// # Arguments
+/// * `a` — curl-curl stiffness matrix (`n × n`)
+/// * `m` — mass matrix (`n × n`)
+/// * `g` — discrete gradient (`n × n_nodes`), from a linear H¹ space
+/// * `cfg` — solver configuration
+///
+/// # Returns
+/// `EigenResult` with eigenvalues sorted ascending.
+pub fn ame_solve(
+    a:   &CsrMatrix<f64>,
+    m:   &CsrMatrix<f64>,
+    g:   &CsrMatrix<f64>,
+    cfg: &AmeConfig,
+) -> Result<EigenResult, String> {
+    use linlvo::eigen::AmeSolver as LinlvoAmeSolver;
+    use linlvo::eigen::AmeResult as LinlvoAmeResult;
+
+    let n = a.nrows;
+    let la = _fem_to_linlvo_csr(a);
+    let lm = _fem_to_linlvo_csr(m);
+    let lg = _fem_to_linlvo_csr(g);
+
+    let solver = LinlvoAmeSolver::new(cfg.nev)
+        .tol(cfg.tol)
+        .max_iter(cfg.max_iter)
+        .verbose(cfg.verbose)
+        .singularity_regularization(cfg.singularity_regularization)
+        .extra(cfg.extra);
+
+    let result: LinlvoAmeResult<f64> = solver.solve(&la, &lm, &lg)
+        .map_err(|e| format!("AME solve failed: {e}"))?;
+
+    let n_found = result.eigenvalues.len().min(cfg.nev);
+    let mut eigenvectors = DMatrix::<f64>::zeros(n, n_found);
+    for (j, ev) in result.eigenvectors.iter().enumerate().take(n_found) {
+        for i in 0..n { eigenvectors[(i, j)] = ev.as_slice()[i]; }
+    }
+
+    Ok(EigenResult {
+        eigenvalues: result.eigenvalues[..n_found].to_vec(),
+        eigenvectors,
+        iterations: result.iterations,
+        converged: result.converged,
+    })
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

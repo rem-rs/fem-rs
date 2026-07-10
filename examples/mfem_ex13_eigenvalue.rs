@@ -1,19 +1,23 @@
 //! MFEM Example 13 — Maxwell Cavity Eigenvalue (1:1 translation of ex13p).
-//! Uses solve_hcurl_eigen_preconditioned_amg (now with AMS + nullspace_skip).
+//!
+//! Supports two solver backends:
+//! - **AMG-LOBPCG** (default): gradient constraints + AMG preconditioner
+//! - **AME** (`--ame`): Auxiliary-space Maxwell Eigensolver (LPBPCG + AMS +
+//!   discrete divergence-free projection) — matches HYPRE AME.
 
 use std::fs::File;
 use std::io::Write;
 use fem_amg::AmgConfig;
-use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
+use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg, solve_hcurl_eigen_ame};
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{refine_uniform, Mesh};
-use fem_solver::{SolverConfig, eigen::LobpcgConfig};
+use fem_solver::{SolverConfig, eigen::{LobpcgConfig, AmeConfig}};
 use fem_space::{H1Space, HCurlSpace, fe_space::FESpace};
 
-struct Args { mesh: String, ser_ref_levels: usize, order: u8, nev: usize, }
+struct Args { mesh: String, ser_ref_levels: usize, order: u8, nev: usize, use_ame: bool, }
 impl Args {
     fn parse() -> Self {
-        let mut a = Args { mesh: "data/beam-tri.mesh".to_string(), ser_ref_levels: 0, order: 1, nev: 5 };
+        let mut a = Args { mesh: "data/beam-tri.mesh".to_string(), ser_ref_levels: 0, order: 1, nev: 5, use_ame: false };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -21,6 +25,7 @@ impl Args {
                 "-rs" | "--refine-serial" => { a.ser_ref_levels = it.next().and_then(|v| v.parse().ok()).unwrap_or(0) }
                 "-o" | "--order" => { a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1) }
                 "-n" | "--num-eigs" => { a.nev = it.next().and_then(|v| v.parse().ok()).unwrap_or(5) }
+                "--ame" => a.use_ame = true,
                 "-no-vis" => {} _ => {}
             }
         }
@@ -44,6 +49,7 @@ fn main() {
     println!("   --refine-serial {}", args.ser_ref_levels);
     println!("   --order {}", args.order);
     println!("   --num-eigs {}", args.nev);
+    println!("   --ame {}", args.use_ame);
     println!("   --no-visualization");
     println!("Number of unknowns: {n}");
 
@@ -56,11 +62,21 @@ fn main() {
     println!("  Free DOFs: {n_free}, nullspace dim: {}", sys.constraints.ncols());
     println!("\nSolving generalized eigenvalue problem with preconditioning");
 
-    let eig_cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: true, ..LobpcgConfig::default() };
-    let inner_cfg = SolverConfig { rtol: 1e-2, atol: 1e-12, max_iter: 20, verbose: false, ..SolverConfig::default() };
-    let result = solve_hcurl_eigen_preconditioned_amg(
-        &sys, args.nev, &eig_cfg, AmgConfig::default(), &inner_cfg,
-    ).expect("LOBPCG failed");
+    let result = if args.use_ame {
+        let ame_cfg = AmeConfig {
+            nev: args.nev,
+            verbose: true,
+            ..AmeConfig::default()
+        };
+        solve_hcurl_eigen_ame(&sys, args.nev, &ame_cfg)
+            .expect("AME solve failed")
+    } else {
+        let eig_cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: true, ..LobpcgConfig::default() };
+        let inner_cfg = SolverConfig { rtol: 1e-2, atol: 1e-12, max_iter: 20, verbose: false, ..SolverConfig::default() };
+        solve_hcurl_eigen_preconditioned_amg(
+            &sys, args.nev, &eig_cfg, AmgConfig::default(), &inner_cfg,
+        ).expect("LOBPCG failed")
+    };
 
     for (i, &lam) in result.eigenvalues.iter().enumerate() {
         println!("Eigenmode {}, Lambda = {:.14e}", i + 1, lam);

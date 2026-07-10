@@ -138,6 +138,7 @@ pub use eigen::{
     LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur,
     arpack, WhichEigenvalue,
     feast_interval, IntervalEigenConfig,
+    ame_solve, AmeConfig,
 };
 pub use multiphysics::{
     CoupledProblem,

@@ -280,6 +280,27 @@ pub fn solve_hcurl_eigen_preconditioned_amg(
     )
 }
 
+/// Solve the Maxwell eigenproblem using AME (Auxiliary-space Maxwell Eigensolver).
+///
+/// Unlike [`solve_hcurl_eigen_preconditioned_amg`], this version does **not**
+/// use explicit gradient constraints.  The AME solver handles the nullspace
+/// internally via the discrete divergence-free projector `I − G(GᵀMG)⁻¹GᵀM`
+/// combined with the AMS preconditioner.
+pub fn solve_hcurl_eigen_ame(
+    eig_system: &HcurlEigenSystem,
+    _k: usize,
+    cfg: &fem_solver::eigen::AmeConfig,
+) -> Result<fem_solver::EigenResult, String> {
+    let g_ams = eig_system.gradient_ams.as_ref()
+        .ok_or_else(|| "gradient_ams not available (use assemble_hcurl_eigen_system_from_marker)".to_string())?;
+    fem_solver::eigen::ame_solve(
+        &eig_system.stiffness_free,
+        &eig_system.mass_free,
+        g_ams,
+        cfg,
+    )
+}
+
 /// Impedance scaling `√(ε/μ)` used by [`HcurlBoundaryConfig::add_impedance_physical_on`] and
 /// [`HcurlBoundaryConfig::add_absorbing_physical_on`] so `γ` matches a first-order absorbing layer
 /// with uniform `ε`, `μ`.
