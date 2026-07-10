@@ -48,6 +48,10 @@ use crate::physics::nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, Newto
 pub enum HyperelasticModel {
     /// Compressible Neo-Hookean: `μ/2·(I₁-3) - μ·ln(J) + λ/2·(ln(J))²`.
     NeoHookean { mu: f64, lambda: f64 },
+    /// MFEM-style deviatoric NeoHookean (ex10 default):
+    /// `μ/2·(J^{-2/3}·I₁ - dim) + K/2·(J-1)²`
+    /// where K is the bulk modulus parameter (MFEM NeoHookeanModel).
+    MfemNeoHookean { mu: f64, bulk_modulus: f64 },
     /// Mooney–Rivlin: `C10·(I₁-3) + C01·(I₂-3) + K/2·(J-1)²`.
     MooneyRivlin { c10: f64, c01: f64, bulk_modulus: f64 },
     /// N-term Ogden: `Σ μ_p/α_p·(λ₁^α+λ₂^α+λ₃^α-3) + K/2·(J-1)²`.
@@ -60,6 +64,9 @@ impl HyperelasticModel {
         match self {
             HyperelasticModel::NeoHookean { mu, lambda } => {
                 neo_hookean_pk1_tangent(f, *mu, *lambda)
+            }
+            HyperelasticModel::MfemNeoHookean { mu, bulk_modulus } => {
+                mfem_neo_hookean_pk1_tangent(f, *mu, *bulk_modulus)
             }
             HyperelasticModel::MooneyRivlin { c10, c01, bulk_modulus } => {
                 mooney_rivlin_pk1_tangent(f, *c10, *c01, *bulk_modulus)
@@ -80,6 +87,14 @@ impl HyperelasticModel {
                 let jac = f.determinant();
                 let ln_j = jac.ln();
                 0.5 * mu * (i1 - dim as f64) - mu * ln_j + 0.5 * lambda * ln_j * ln_j
+            }
+            HyperelasticModel::MfemNeoHookean { mu, bulk_modulus } => {
+                let dim = f.nrows() as f64;
+                let c = f.transpose() * f;
+                let i1 = c.trace();       // I₁ = tr(C)
+                let jac = f.determinant(); // J = det(F)
+                let i1_bar = jac.powf(-2.0 / dim) * i1;  // Ī₁ = J^{-2/dim} * I₁
+                0.5 * mu * (i1_bar - dim) + 0.5 * bulk_modulus * (jac - 1.0).powi(2)
             }
             HyperelasticModel::MooneyRivlin { c10, c01, bulk_modulus } => {
                 let ct = f.transpose() * f;
@@ -138,6 +153,35 @@ fn neo_hookean_pk1_tangent(f: &DMatrix<f64>, mu: f64, lambda: f64) -> (DMatrix<f
             ct[(row, col)] = val;
         }}
     }}
+    (p, ct)
+}
+
+// ─── MFEM-style deviatoric Neo-Hookean ────────────────────────────────────────
+//
+// Matches MFEM's NeoHookeanModel used in ex10:
+//   W = μ/2 · (J^{-2/3}·I₁ - dim) + K/2 · (J-1)²
+//   P = μ·J^{-2/3}·F + [K·(J-1) - μ·J^{-2/3}·I₁/(dim·J)] · J·F^{-T}
+//
+// Tangent computed via numerical differentiation (same as Mooney-Rivlin/Ogden).
+
+fn mfem_neo_hookean_pk1(f: &DMatrix<f64>, mu: f64, K: f64) -> DMatrix<f64> {
+    let dim = f.nrows() as f64;
+    let jac = f.determinant();
+    let c = f.transpose() * f;
+    let i1 = c.trace();
+    let j_pow = jac.powf(-2.0 / dim);        // J^{-2/dim}
+    let inv_f_t = f.clone().try_inverse()
+        .unwrap_or_else(|| DMatrix::identity(f.nrows(), f.nrows()))
+        .transpose();
+
+    let a = mu * j_pow;                       // μ·J^{-2/dim}
+    let b = K * (jac - 1.0) - a * i1 / (dim * jac);  // K·(J-1) - μ·J^{-2/3}·I₁/(dim·J)
+    a * f + (b * jac) * inv_f_t
+}
+
+fn mfem_neo_hookean_pk1_tangent(f: &DMatrix<f64>, mu: f64, K: f64) -> (DMatrix<f64>, DMatrix<f64>) {
+    let p = mfem_neo_hookean_pk1(f, mu, K);
+    let ct = numerical_tangent(f, &|ft| mfem_neo_hookean_pk1(ft, mu, K));
     (p, ct)
 }
 
@@ -325,9 +369,6 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
 
             let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
                 .map(|&d| d as usize).collect();
-            let nodes = mesh.element_nodes(e);
-            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-            let jit = jac.try_inverse().expect("singular").transpose();
 
             let mut u_elem = vec![0.0_f64; n_vec];
             for (k, &dof) in elem_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
@@ -338,9 +379,10 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
             let mut gphys = vec![0.0_f64; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
+                let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
+                let w = quad.weights[q] * det_j.abs();
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -388,9 +430,6 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
 
             let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
                 .map(|&d| d as usize).collect();
-            let nodes = mesh.element_nodes(e);
-            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-            let jit = jac.try_inverse().expect("singular").transpose();
 
             let mut u_elem = vec![0.0_f64; n_vec];
             for (k, &dof) in elem_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
@@ -401,9 +440,10 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
             let mut gphys = vec![0.0_f64; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
+                let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
+                let w = quad.weights[q] * det_j.abs();
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -457,9 +497,6 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
             let n_vec = n_ldofs * dim;
             let quad = ref_elem.quadrature(self.quad_order);
 
-            let nodes = mesh.element_nodes(e);
-            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-            let jit = jac.try_inverse().expect("singular").transpose();
 
             let mut u_elem = vec![0.0_f64; n_vec];
             let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
@@ -471,9 +508,10 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
             let mut gphys = vec![0.0_f64; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
+                let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
+                let w = quad.weights[q] * det_j.abs();
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -512,9 +550,6 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
 
             let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
                 .map(|&d| d as usize).collect();
-            let nodes = mesh.element_nodes(e);
-            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-            let jit = jac.try_inverse().expect("singular").transpose();
 
             let mut u_elem = vec![0.0_f64; n_vec];
             for (k, &dof) in elem_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
@@ -525,9 +560,10 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
             let mut gphys = vec![0.0_f64; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
+                let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
+                let w = quad.weights[q] * det_j.abs();
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -573,9 +609,6 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
 
             let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
                 .map(|&d| d as usize).collect();
-            let nodes = mesh.element_nodes(e);
-            let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-            let jit = jac.try_inverse().expect("singular").transpose();
 
             let mut u_elem = vec![0.0_f64; n_vec];
             for (k, &dof) in elem_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
@@ -586,9 +619,10 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
             let mut gphys = vec![0.0_f64; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
+                let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
+                let w = quad.weights[q] * det_j.abs();
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -637,6 +671,7 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    use fem_element::lagrange::quad::*;
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriP2),
@@ -644,19 +679,54 @@ fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
+        // Quadrilateral elements (straight-sided or curved via isoparametric mapping)
+        (ElementType::Quad4, 1) => Box::new(QuadQ1),
+        (ElementType::Quad4, 2) => Box::new(QuadQ2),
+        (ElementType::Quad4, 3) => Box::new(QuadQ3),
+        (ElementType::Quad4, 4) => Box::new(QuadQ4),
         _ => panic!("hyperelasticity ref_elem_vol: unsupported ({et:?}, {order})"),
     }
 }
 
-fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(nodes[col+1]);
-        for row in 0..dim { j[(row,col)] = xc[row] - x0[row]; }
+/// Geometry reference element (always order 1 — P1/Q1).
+///
+/// The element mapping Jacobian is always computed from the lowest-order
+/// geometry (mesh vertex nodes), even when the field uses higher-order
+/// basis functions (sub-parametric formulation).  This matches MFEM's
+/// behaviour where the transformation uses the mesh's reference element.
+fn ref_elem_geom(et: ElementType) -> Box<dyn ReferenceElement> {
+    ref_elem_vol(et, 1)
+}
+
+/// Compute the element mapping Jacobian at a reference point using the
+/// **geometry** reference element (order-1 vertex mapping).
+///
+/// J[i,j] = Σ_k  x_k[i] · ∂φ̂_k/∂ξⱼ(ξ)   (k over geometry nodes, φ̂ = P1/Q1)
+///
+/// For straight-sided elements this gives a constant Jacobian; for curved
+/// geometries the per-point variation is captured.  Returns (Jacobian,
+/// determinant, inverse-transpose).
+fn jacobian_at_point<M: MeshTopology>(
+    mesh: &M, elem: u32, xi: &[f64], dim: usize,
+) -> (DMatrix<f64>, f64, DMatrix<f64>) {
+    let et = mesh.element_type(elem);
+    let geom_nodes = mesh.element_nodes(elem);
+    let n_geom = geom_nodes.len();
+    let mut gref = vec![0.0_f64; n_geom * dim];
+    ref_elem_geom(et).eval_grad_basis(xi, &mut gref);
+
+    let mut jac = DMatrix::zeros(dim, dim);
+    for k in 0..n_geom {
+        let xk = mesh.node_coords(geom_nodes[k]);
+        for i in 0..dim {
+            for j in 0..dim {
+                jac[(i, j)] += xk[i] * gref[k * dim + j];
+            }
+        }
     }
-    let det = j.determinant();
-    (j, det)
+    let det_j = jac.determinant();
+    let jit = jac.clone().try_inverse().expect("singular element Jacobian").transpose();
+    (jac, det_j, jit)
 }
 
 fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {

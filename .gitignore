@@ -40,3 +40,6 @@ examples/sol.gf
 sol.gf
 sol_p.gf
 sol_u.gf
+deformed.mesh
+velocity.sol
+elastic_energy.sol
