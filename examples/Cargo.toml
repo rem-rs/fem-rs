@@ -264,6 +264,10 @@ name = "mfem_ex19_hyperelastic_dyn_incomp"
 path = "mfem_ex19_hyperelastic_dyn_incomp.rs"
 
 [[example]]
+name = "mfem_ex19_hyperelastic_incomp"
+path = "mfem_ex19_hyperelastic_incomp.rs"
+
+[[example]]
 name = "mfem_ex20_symplectic"
 path = "mfem_ex20_symplectic.rs"
 
