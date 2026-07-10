@@ -1,4 +1,4 @@
-//! Example 19 — Incompressible neo-Hookean hyperelastic
+﻿//! Example 19 鈥?Incompressible neo-Hookean hyperelastic
 //! (analogous to MFEM ex19)
 //!
 //! Solves for the equilibrium of a nearly-incompressible neo-Hookean
@@ -7,7 +7,7 @@
 //!
 //! BCs (matching MFEM ex19):
 //!   Boundary attribute 1: u = 0 (fixed)
-//!   Boundary attribute 2: u_x = 0, u_y = 0.25·x (prescribed shear)
+//!   Boundary attribute 2: u_x = 0, u_y = 0.25路x (prescribed shear)
 //!
 //! Usage:
 //!   cargo run --example mfem_ex19_hyperelastic_dyn_incomp
@@ -17,6 +17,7 @@
 use fem_assembly::{
     nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel},
     NewtonConfig,
+    LinearSolver,
 };
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, Mesh};
@@ -49,14 +50,14 @@ fn main() {
         base_mesh
     };
 
-    // 2. Finite element space — VectorH¹ for displacement (P2 by default)
+    // 2. Finite element space 鈥?VectorH鹿 for displacement (P2 by default)
     let space = VectorH1Space::new(mesh, args.order, 2);
     let n_dofs = space.n_dofs();
     let n_scalar = space.n_scalar_dofs();
 
     // 3. Dirichlet BCs matching MFEM ex19:
-    //    Boundary attribute 1 → fixed (u = 0)
-    //    Boundary attribute 2 → u_y = 0.25·x, u_x = 0
+    //    Boundary attribute 1 鈫?fixed (u = 0)
+    //    Boundary attribute 2 鈫?u_y = 0.25路x, u_x = 0
     let dm = space.scalar_dof_manager();
     let attr1 = boundary_dofs(space.mesh(), dm, &[1]);
     let attr2 = boundary_dofs(space.mesh(), dm, &[2]);
@@ -71,13 +72,13 @@ fn main() {
         dirichlet.push((d as usize + n_scalar, 0.25 * x));
     }
 
-    // 4. Neo-Hookean material (near-incompressible via large λ)
+    // 4. Neo-Hookean material (near-incompressible via large 位)
     let mu = args.mu;
     let lambda = 1.0e3_f64; // bulk penalty for near-incompressibility
     let model = HyperelasticModel::NeoHookean { mu, lambda };
     let form = HyperelasticityForm::new(space, model, dirichlet, 3);
 
-    // 5. Zero RHS — Newton's method for equilibrium F(u) = 0
+    // 5. Zero RHS 鈥?Newton's method for equilibrium F(u) = 0
     let rhs = vec![0.0; n_dofs];
     let mut u = vec![0.0; n_dofs];
     // Initial guess: prescribed Dirichlet values
@@ -87,8 +88,9 @@ fn main() {
 
     // 6. Newton solve
     let config = NewtonConfig {
-        max_iter: 30,
+        max_iter: 200,
         verbose: true,
+        linear_solver: LinearSolver::SparseLu,
         ..NewtonConfig::default()
     };
     let result = form.solve(&rhs, &mut u, &config);
@@ -144,6 +146,7 @@ mod tests {
     use fem_assembly::{
         nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel},
         NewtonConfig, NonlinearForm,
+    LinearSolver,
     };
     use fem_mesh::Mesh;
     use fem_space::{VectorH1Space, FESpace};
@@ -175,3 +178,7 @@ mod tests {
         let _ = result;
     }
 }
+
+
+
+

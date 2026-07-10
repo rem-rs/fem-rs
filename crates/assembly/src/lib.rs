@@ -1,4 +1,4 @@
-//! # fem-assembly
+﻿//! # fem-assembly
 //!
 //! Bilinear/linear form assembly: [`Assembler`], [`BilinearIntegrator`],
 //! [`LinearIntegrator`], and standard integrators (diffusion, mass, source,
@@ -9,7 +9,7 @@
 //!   use [`Assembler::assemble_bilinear_iga_1d`](Assembler::assemble_bilinear_iga_1d) /
 //!   [`Assembler::assemble_bilinear_iga_2d`](Assembler::assemble_bilinear_iga_2d) (or [`iga_assembler`](iga_assembler) directly),
 //!   not the generic [`Assembler::assemble_bilinear`](Assembler::assemble_bilinear) loop.
-//!   1D physical L² and Laplacian w.r.t. an isogeometric map `x(u) = Σ c_i R_i` are
+//!   1D physical L虏 and Laplacian w.r.t. an isogeometric map `x(u) = 危 c_i R_i` are
 //!   [`assemble_bilinear_mass_iga_1d_physical`](iga_assembler::assemble_bilinear_mass_iga_1d_physical) /
 //!   [`assemble_bilinear_diffusion_iga_1d_physical`](iga_assembler::assemble_bilinear_diffusion_iga_1d_physical)
 //!   (or [`Assembler::assemble_bilinear_iga_1d_mass_physical`](Assembler::assemble_bilinear_iga_1d_mass_physical) / [`assemble_bilinear_iga_1d_physical`](Assembler::assemble_bilinear_iga_1d_physical));
@@ -24,9 +24,9 @@
 //!   [`assemble_bilinear_mass_iga_1d`](iga_assembler::assemble_bilinear_mass_iga_1d).
 //!
 //! Also provides:
-//! - [`MixedAssembler`] — rectangular assembly for mixed bilinear forms.
-//! - [`DgAssembler`] — interior-penalty DG assembly (Phase 14).
-//! - [`h1_quad_order_hint`] — map legacy quadrature hints to triangle/tet rule orders for H¹ assembly.
+//! - [`MixedAssembler`] 鈥?rectangular assembly for mixed bilinear forms.
+//! - [`DgAssembler`] 鈥?interior-penalty DG assembly (Phase 14).
+//! - [`h1_quad_order_hint`] 鈥?map legacy quadrature hints to triangle/tet rule orders for H鹿 assembly.
 //!
 //! ## Quick start
 //!
@@ -38,7 +38,7 @@
 //! let mesh  = Mesh::<2>::unit_square_tri(16);
 //! let space = H1Space::new(mesh, 1);
 //!
-//! // Assemble K and f for -Δu = 2π² sin(πx)sin(πy)
+//! // Assemble K and f for -螖u = 2蟺虏 sin(蟺x)sin(蟺y)
 //! let stiffness = Assembler::assemble_bilinear(
 //!     &space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
 //! let rhs = Assembler::assemble_linear(
@@ -50,17 +50,17 @@
 //!
 //! ## Feature flags
 //!
-//! - **`parallel`** — Rayon-parallel **volume** assembly for [`Assembler`],
+//! - **`parallel`** 鈥?Rayon-parallel **volume** assembly for [`Assembler`],
 //!   [`VectorAssembler`], [`MixedAssembler`], and DG volume / face loops when
 //!   counts meet `assembly_parallel_min_elems()` (adaptive default: `64` on a
 //!   single worker down to `8` on 8+ workers; env
 //!   `FEM_ASSEMBLY_PARALLEL_MIN_ELEMS` forces a fixed threshold), plus
 //!   `fem-linalg/parallel` for threaded SpMV on large local matrices.
-//! - **`reed`** — libCEED-style QFunctions plus coordinated FEM entry points in the `reed`
-//!   submodule (`FemCeed`, scalar H¹ `apply_mass_{2d,3d}` / `apply_poisson_{2d,3d}`, …) using the same
+//! - **`reed`** 鈥?libCEED-style QFunctions plus coordinated FEM entry points in the `reed`
+//!   submodule (`FemCeed`, scalar H鹿 `apply_mass_{2d,3d}` / `apply_poisson_{2d,3d}`, 鈥? using the same
 //!   [`Assembler`] + [`H1Space`](fem_space::H1Space) kernels as default builds.  With this feature,
 //!   `cache_*` / `cache_h1_scalar_ops_{2d,3d}` wrappers and discrete helpers (`assemble_mass_h1_2d`,
-//!   curl pairing, …) are also **re-exported at the crate root**.  Quadrature hint mapping
+//!   curl pairing, 鈥? are also **re-exported at the crate root**.  Quadrature hint mapping
 //!   (`h1_tri_quad_order`, `h1_tet_quad_order`) lives in [`h1_quad_order_hint`] for every build.
 //!   Curl CSR and
 //!   `assemble_curl_hdiv_pairing_2d_nd2_rt2` align with [`DiscreteLinearOperator`] /
@@ -97,12 +97,12 @@ pub use physics::navier_stokes::{
     assemble_ale_convection_matrix, assemble_ale_oseen_block,
 };
 
-// ── Reorganised subdirectory modules ──────────────────────────────────────
+// 鈹€鈹€ Reorganised subdirectory modules 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 pub mod physics;
 pub mod boundary;
 pub mod postproc;
 
-// ── Method-family subdirectories ──────────────────────────────────────────
+// 鈹€鈹€ Method-family subdirectories 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Discontinuous Galerkin (DG) interior-penalty assembly and related solvers.
 pub mod dg;
@@ -176,7 +176,7 @@ pub use block_assembler::{
 };
 pub use physics::hyperbolic::{HyperbolicFormIntegrator, NumericalFlux, HyperbolicConservationLaw, EulerConservationLaw, minmod, limiter_minmod_tet_p1};
 pub use interior_faces::InteriorFaceList;
-pub use physics::nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
+pub use physics::nonlinear::{LinearSolver, NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
 pub use physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator,
                   HcurlMatrixFreeOperator, solve_hcurl_matrix_free,
@@ -231,7 +231,8 @@ pub use lor_factory::{build_lor_amg_h1, build_lor_amg_h1_3d};
 pub use form::{BilinearForm, LinearForm, VectorBilinearForm, VectorLinearForm};
 pub use postproc::coefficient::{ConstantMatrixCoeff, FnMatrixCoeff, PwMatrixCoeff, ScalarMatrixCoeff};
 
-// ── Re-export sub-modules from reorganized directories ─────────────────
+// 鈹€鈹€ Re-export sub-modules from reorganized directories 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 pub use physics::*;
 pub use boundary::*;
 pub use postproc::*;
+

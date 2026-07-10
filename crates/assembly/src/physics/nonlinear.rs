@@ -20,7 +20,28 @@
 //! ```
 
 use fem_linalg::CsrMatrix;
-use fem_solver::{solve_gmres_ilu0, SolverConfig};
+use fem_solver::{solve_gmres, solve_gmres_ilu0, solve_pcg_gssmoother, solve_sparse_lu, SolverConfig};
+
+/// Linear solver strategy for the Newton inner system `J(x) · dx = -F(x)`.
+///
+/// Choose the solver that best matches your Jacobian's properties:
+/// - [`LinearSolver::PcgGssmoother`] — SPD Jacobians (nonlinear diffusion, elasticity)
+/// - [`LinearSolver::GmresIlu0`]   — ill-conditioned / non‑symmetric (default)
+/// - [`LinearSolver::Gmres`]       — plain GMRES (no preconditioner)
+/// - [`LinearSolver::SparseLu`]    — direct LU (small systems only)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearSolver {
+    /// GMRES + ILU(0) preconditioner.  Robust default for most nonlinear problems.
+    GmresIlu0,
+    /// Conjugate Gradient + Gauss–Seidel smoother.  For SPD Jacobians only.
+    PcgGssmoother,
+    /// Plain GMRES without preconditioning.  Use only when the Jacobian is
+    /// well‑conditioned or when ILU(0) is too expensive.
+    Gmres,
+    /// Direct sparse LU factorisation.  Use for small systems (<10k DOFs)
+    /// where robustness trumps speed.
+    SparseLu,
+}
 
 /// A nonlinear PDE form that can compute residuals and Jacobians.
 ///
@@ -68,6 +89,8 @@ pub struct NewtonConfig {
     pub line_search_sufficient_decrease: f64,
     /// Print residual each iteration.
     pub verbose: bool,
+    /// Linear solver strategy for the Jacobian system. Default: GmresIlu0.
+    pub linear_solver: LinearSolver,
 }
 
 impl Default for NewtonConfig {
@@ -83,6 +106,7 @@ impl Default for NewtonConfig {
             line_search_max_backtracks: 20,
             line_search_sufficient_decrease: 1e-4,
             verbose:    false,
+            linear_solver: LinearSolver::GmresIlu0,
         }
     }
 }
@@ -1328,6 +1352,9 @@ mod tests {
         }
     }
 }
+
+
+
 
 
 
