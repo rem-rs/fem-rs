@@ -255,14 +255,50 @@ impl DgEuler2D {
         du
     }
 
-    /// SSP-RK3 step (fractional step, no limiter for smooth flows)
+    /// SSP-RK3 step. When `use_limiter` is set, applies Barth-Jespersen limiter.
     pub fn step_rk3(&self, u: &mut [f64], dt: f64) {
+        let fe = if self.use_limiter { Some(self.build_face_elems_2d()) } else { None };
         let k1 = self.rhs(u);
         let mut u1: Vec<f64> = (0..self.n_dofs).map(|i| u[i] + dt * k1[i]).collect();
+        if let Some(ref f) = fe { self.apply_limiter_2d(&mut u1, f); }
         let k2 = self.rhs(&u1);
         for i in 0..self.n_dofs { u1[i] = 0.75*u[i] + 0.25*(u1[i] + dt*k2[i]); }
+        if let Some(ref f) = fe { self.apply_limiter_2d(&mut u1, f); }
         let k3 = self.rhs(&u1);
         for i in 0..self.n_dofs { u[i] = (1.0/3.0)*u[i] + (2.0/3.0)*(u1[i] + dt*k3[i]); }
+        if let Some(ref f) = fe { self.apply_limiter_2d(u, f); }
+    }
+
+    fn build_face_elems_2d(&self) -> Vec<(u32, Option<u32>)> {
+        use std::collections::HashMap;
+        let mut fm: HashMap<Vec<u32>, u32> = HashMap::new();
+        let mut faces = Vec::new();
+        for e in 0..self.n_elems as u32 {
+            let en = self.mesh.element_nodes(e);
+            for lf in 0..3 {
+                let (a, b) = match lf { 0 => (en[0], en[1]), 1 => (en[1], en[2]), _ => (en[2], en[0]) };
+                let mut key = vec![a, b]; key.sort_unstable();
+                match fm.remove(&key) { None => { fm.insert(key, e); } Some(prev) => { faces.push((prev, Some(e))); } }
+            }
+        }
+        for (_, l) in fm { faces.push((l, None)); }
+        faces
+    }
+
+    fn apply_limiter_2d(&self, u: &mut [f64], face_elems: &[(u32, Option<u32>)]) {
+        let dofs_per_elem = self.dofs_per_elem;
+        let mut comp_buf = vec![0.0_f64; self.n_elems * dofs_per_elem];
+        for c in 0..4 {
+            for e in 0..self.n_elems {
+                for i in 0..dofs_per_elem { comp_buf[e * dofs_per_elem + i] = u[self.idx(e as u32, c, i)]; }
+            }
+            crate::physics::hyperbolic::limiter_barth_jespersen(
+                &mut comp_buf, self.n_elems, dofs_per_elem, &[], face_elems,
+            );
+            for e in 0..self.n_elems {
+                for i in 0..dofs_per_elem { u[self.idx(e as u32, c, i)] = comp_buf[e * dofs_per_elem + i]; }
+            }
+        }
     }
 }
 

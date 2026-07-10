@@ -26,6 +26,7 @@ fn main() {
     // 4. DG(P1) solver (periodic: skip boundary faces)
     let mut dg = DgEuler2D::new(mesh);
     dg.periodic = true;
+    dg.use_limiter = true; // prevent negative density on coarse meshes
     println!("Number of unknowns: {}", dg.n_dofs());
     println!("  problem: {}, order: 1 (P1), ref_levels: {}", a.p, a.r);
     println!("  t_final: {:.3}, cfl: {:.3}", a.tf, a.cfl);
