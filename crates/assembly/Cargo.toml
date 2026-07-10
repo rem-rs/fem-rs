@@ -11,6 +11,7 @@ fem-space   = { path = "../space" }
 fem-linalg  = { path = "../linalg" }
 fem-solver  = { path = "../solver" }
 fem-amg     = { path = "../amg" }
+linlvo      = { git = "https://github.com/rem-rs/linlvo.git" }
 fem-linalg-gpu = { path = "../linalg-gpu", optional = true }
 wgpu           = { version = "27", optional = true }
 nalgebra    = { workspace = true }

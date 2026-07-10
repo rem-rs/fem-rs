@@ -21,6 +21,9 @@ use fem_space::{
     constraints::{eliminate_dirichlet, expand_from_reduced},
     fe_space::FESpace,
 };
+use linlvo::precond::{AmsPrecond, AmsConfig};
+use linlvo::core::preconditioner::Preconditioner;
+use linlvo::core::vector::DenseVec;
 use nalgebra::DMatrix;
 
 use crate::discrete_op::DiscreteLinearOperator;
@@ -103,6 +106,14 @@ pub fn solve_hcurl_ams(
 
 /// Solve the Maxwell eigenvalue problem `A x = λ M x` using gradient constraints
 /// + AMG preconditioner + block oversampling.
+///
+/// Note: AMS is NOT used here as a LOBPCG preconditioner because its auxiliary-space
+/// correction `G·P_v⁻¹·Gᵀ` maps the residual into range(G), which is precisely the
+/// space projected out by the gradient constraints.  Hence AMS degenerates to the
+/// diagonal smoother for this use case.  AMS + singularity_regularization is
+/// instead intended for the future AME (Adaptive Multigrid Eigensolver)
+/// implementation where the nullspace is handled internally without explicit
+/// constraints — matching MFEM ex13p's HYPRE AME solver.
 pub fn solve_hcurl_eigen(
     stiffness_free: &CsrMatrix<f64>,
     mass_free: &CsrMatrix<f64>,
@@ -131,6 +142,83 @@ pub fn solve_hcurl_eigen(
                 x.copy_from_slice(&rhs);
             }
             for i in 0..z.nrows() { z[(i, j)] = x[i]; }
+        }
+        z
+    };
+
+    let result = lobpcg_constrained_preconditioned(
+        stiffness_free, Some(mass_free), k_work, gradient_constraints, precond, &cfg,
+    )?;
+
+    let n_found = result.eigenvalues.len().min(k);
+    Ok(EigenResult {
+        eigenvalues: result.eigenvalues[..n_found].to_vec(),
+        eigenvectors: DMatrix::from(result.eigenvectors.columns(0, n_found).to_owned()),
+        iterations: result.iterations,
+        converged: result.converged,
+    })
+}
+
+/// AMS-preconditioned LOBPCG for the Maxwell eigenvalue problem.
+///
+/// Unlike [`solve_hcurl_eigen`], this version does NOT use explicit gradient
+/// constraints — instead it relies on AMS's internal nullspace handling
+/// (via `singularity_regularization`) together with LOBPCG's `nullspace_skip`
+/// to exclude gradient modes.  This is a stepping stone toward a full AME
+/// implementation.
+///
+/// **Caveat**: AMS on the constraint-complement only activates the diagonal
+/// smoother because the auxiliary-space correction maps back into the
+/// constraint space.  Use this only when testing against an AME-based
+/// reference (MFEM ex13p).
+#[allow(dead_code)]
+pub fn solve_hcurl_eigen_ams(
+    stiffness_free: &CsrMatrix<f64>,
+    mass_free: &CsrMatrix<f64>,
+    gradient_constraints: &DMatrix<f64>,
+    gradient_full_for_ams: &CsrMatrix<f64>,
+    k: usize,
+    cfg: &LobpcgConfig,
+) -> Result<EigenResult, String> {
+    let mut cfg = cfg.clone();
+    cfg.max_iter = cfg.max_iter.max(300);
+    // Skip gradient nullspace modes (λ ≈ 0) in the Rayleigh-Ritz selection.
+    // AMS preconditioning on the unconstrained system can introduce nullspace
+    // components into the search space; nullspace_skip ensures the algorithm
+    // converges to physical curl-curl modes rather than gradient nullspace.
+    cfg.nullspace_skip = 1e-8;
+
+    // Block oversampling (constraints consume DOFs, so cap at n - n_constraints)
+    let n_constraints = gradient_constraints.ncols();
+    let k_work = (k + 20).min(stiffness_free.nrows.saturating_sub(n_constraints));
+
+    // ── AMS preconditioner with singularity regularization ──────────────────
+    let a_linlvo = fem_to_linlvo_csr(stiffness_free);
+    let g_linlvo = fem_to_linlvo_csr(gradient_full_for_ams);
+    let ams = AmsPrecond::<f64>::new(
+        &a_linlvo,
+        &g_linlvo,
+        AmsConfig {
+            singularity_regularization: 1e-6,
+            smoother_sweeps: 3,
+            ..AmsConfig::default()
+        },
+    )
+    .map_err(|e| format!("AMS setup for LOBPCG failed: {e}"))?;
+
+    // Block preconditioner: apply AMS column-by-column to the residual block.
+    let precond = move |r: &DMatrix<f64>| -> DMatrix<f64> {
+        let n = r.nrows();
+        let nvec = r.ncols();
+        let mut z = DMatrix::<f64>::zeros(n, nvec);
+        for j in 0..nvec {
+            let rhs_dv = DenseVec::from_vec(r.column(j).iter().copied().collect());
+            let mut z_dv = DenseVec::zeros(n);
+            ams.apply_precond(&rhs_dv, &mut z_dv);
+            let zs = z_dv.as_slice();
+            for i in 0..n {
+                z[(i, j)] = zs[i];
+            }
         }
         z
     };

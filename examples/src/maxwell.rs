@@ -850,15 +850,19 @@ pub fn assemble_hcurl_eigen_system_from_marker(
     let tags = marker_to_tags(boundary_attributes, marker);
     let _pec_dofs: Vec<u32> = boundary_dofs_hcurl(hcurl.mesh(), hcurl, &tags);
 
-    // Build gradient for AMS: free curl rows × free H1 cols.
-    // PEC-bound H1 DOFs have zero columns (no mapping to free curl DOFs),
-    // which makes the AMS nodal system singular → NaN.  Exclude them.
+    // Build gradient for AMS: free curl rows × ALL H1 cols.
+    // PEC-bound H1 DOFs are included because they have zero contribution
+    // from free curl DOFs and are needed for the AMS nodal system to have
+    // the correct dimensions (n_nodes > 0).  Using free-H1-only columns
+    // would give zero columns when the entire H1 boundary is essential
+    // (e.g. a small mesh with PEC on all boundaries).
     let grad_ams = {
         let grad = DiscreteLinearOperator::gradient(h1, hcurl)
             .expect("gradient for AMS failed");
         let curl_free = &subspace.hcurl_free_dofs;
-        let grad_free = extract_rect_submatrix(&grad, curl_free, &subspace.h1_free_dofs);
-        Some(grad_free)
+        let all_h1: Vec<usize> = (0..h1.n_dofs()).collect();
+        let grad_ams_mat = extract_rect_submatrix(&grad, curl_free, &all_h1);
+        Some(grad_ams_mat)
     };
 
     HcurlEigenSystem {
