@@ -22,7 +22,8 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_assembly::postproc::error_estimate::{threshold_mark, derefine_mark, kelly_estimator, zz_estimator_nodal};
+use fem_assembly::postproc::error_estimate::{threshold_mark, derefine_mark, kelly_estimator};
+use fem_assembly::postproc::flux_recovery::zz_estimator_mfem;
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_core::{ElemId, NodeId};
 use fem_io::mfem::read_mfem_file;
@@ -324,16 +325,13 @@ fn main() {
 
             x = u;
 
-            // Error estimation using DOF-level nodal-averaging ZZ.
-            // Note: for Q2 with hanging nodes, refinement patterns differ from
-            // MFEM because the flux recovery uses solution-space DOF averaging
-            // rather than MFEM's dedicated H1^sdim flux space + integrator
-            // ComputeElementFlux/ComputeFluxEnergy interface.
+            // Error estimation using MFEM-style ZZ via FluxRecovery trait.
             let gf = GridFunction::new(&space, x.clone());
             let eta = if use_kelly {
                 kelly_estimator(&gf).eta
             } else {
-                zz_estimator_nodal(&gf).eta
+                let integrator = DiffusionIntegrator { kappa: 1.0 };
+                zz_estimator_mfem(&gf, &integrator).eta
             };
             eta_last = eta.clone();
 

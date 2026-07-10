@@ -871,7 +871,7 @@ mod tests {
         assert!(n > 100, "expected > 100 H(curl) DOFs for smoke gate, got {n}");
         assert!(n_grad > 50, "expected > 50 H1 DOFs, got {n_grad}");
 
-        let cfg = LobpcgConfig { max_iter: 400, tol: 1e-4, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 400, tol: 1e-4, verbose: false, nullspace_skip: 0.0 };
         let result = solve_hcurl_eigen_preconditioned_amg(&k_curl, &m_mass, &grad, 4, &cfg)
             .expect("LOBPCG failed");
 
@@ -906,7 +906,7 @@ mod tests {
         let n = hcurl.n_dofs();
         assert!(n > 200, "need > 200 DOFs for large-scale smoke, got {n}");
 
-        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-4, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-4, verbose: false, nullspace_skip: 0.0 };
         let result = solve_hcurl_eigen_preconditioned_amg(&k_curl, &m_mass, &grad, 3, &cfg)
             .expect("large-scale AMG-LOBPCG failed");
 
