@@ -328,8 +328,7 @@ fn assemble_interior_face_stress<S: FESpace>(
         xform_grads(&jit_l, &gref_l, &mut gphys_l, n_l, dim);
         xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
 
-        // Interior: MFEM w = ip.weight/2 (average). Both consistency and penalty
-        // have this factor, so the ratio is preserved. Use standard SIP scaling.
+        // SIP interior penalty with averaged Lame constants
         let lam_face = 0.5 * (lam_l + lam_r);
         let mu_face = 0.5 * (mu_l + mu_r);
         let pen = kappa * (lam_face + 2.0 * mu_face) / h_f;
@@ -537,8 +536,6 @@ fn assemble_boundary_face_stress<S: FESpace>(
         re.eval_grad_basis(&xi_e, &mut gref);
         xform_grads(&jit, &gref, &mut gphys, n, dim);
 
-        // MFEM scales penalty by (λ + 2μ) for elasticity
-        // SIP boundary penalty (standard DG scaling, matching MFEM for isotropic elements)
         let pen = kappa * (lam + 2.0 * mu) / h_f;
 
         // Precompute stress flux for each basis×component
