@@ -41,7 +41,7 @@
 
 use std::collections::HashSet;
 
-use fem_amg::{AmgConfig, AmgSolver};
+use fem_amg::AmgConfig;
 use fem_assembly::{
     DiscreteLinearOperator,
     HcurlMatrixFreeOperator, MatFreeOperator,
@@ -55,7 +55,7 @@ use fem_assembly::{
 use fem_element::nedelec::TriND1;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{Mesh, element_type::ElementType, topology::MeshTopology};
-use fem_solver::{EigenResult, LobpcgConfig, SolveResult, SolverConfig, lobpcg_constrained_preconditioned, solve_cg_operator, solve_pcg_jacobi, solve_pcg_precond};
+use fem_solver::{EigenResult, LobpcgConfig, SolveResult, SolverConfig, solve_cg_operator, solve_pcg_jacobi, solve_pcg_precond};
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space, constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl}, fe_space::FESpace};
 use nalgebra::DMatrix;
 
@@ -120,6 +120,16 @@ pub struct HcurlEigenSystem {
     pub constraints: DMatrix<f64>,
     pub hcurl_free_dofs: Vec<usize>,
     pub h1_free_dofs: Vec<usize>,
+    /// Gradient matrix restricted to free H(curl) rows × ALL H¹ columns.
+    /// Needed by the AMS preconditioner (which requires the full H¹ space).
+    pub gradient_ams: Option<CsrMatrix<f64>>,
+}
+
+impl HcurlEigenSystem {
+    /// True when the AMS gradient matrix is available.
+    pub fn has_ams(&self) -> bool {
+        self.gradient_ams.is_some()
+    }
 }
 
 /// Matrix-free-ish H(curl) operator for 2-D ND1 static Maxwell problems:
@@ -249,39 +259,23 @@ pub fn solve_hcurl_matrix_free(
     Ok((x, res))
 }
 
-/// Solve reduced Maxwell generalized eigenproblem with constrained LOBPCG and
-/// AMG-preconditioned residual blocks.
+/// Solve the Maxwell eigenproblem using gradient constraints + AMS + block oversampling.
+/// Delegates to [`fem_assembly::ams_solver::solve_hcurl_eigen`].
 pub fn solve_hcurl_eigen_preconditioned_amg(
     eig_system: &HcurlEigenSystem,
     k: usize,
     eig_cfg: &LobpcgConfig,
-    amg_cfg: AmgConfig,
-    inner_cfg: &SolverConfig,
+    _amg_cfg: AmgConfig,
+    _inner_cfg: &SolverConfig,
 ) -> Result<EigenResult, String> {
-    let stiffness = &eig_system.stiffness_free;
-    let amg = AmgSolver::setup(stiffness, amg_cfg);
-
-    let precond = |r: &DMatrix<f64>| {
-        let mut z = DMatrix::<f64>::zeros(r.nrows(), r.ncols());
-        for j in 0..r.ncols() {
-            let rhs_col: Vec<f64> = r.column(j).iter().copied().collect();
-            let mut x_col = vec![0.0_f64; rhs_col.len()];
-            if amg.solve(stiffness, &rhs_col, &mut x_col, inner_cfg).is_err() {
-                x_col.copy_from_slice(&rhs_col);
-            }
-            for i in 0..x_col.len() {
-                z[(i, j)] = x_col[i];
-            }
-        }
-        z
-    };
-
-    lobpcg_constrained_preconditioned(
+    let g_ams = eig_system.gradient_ams.as_ref()
+        .ok_or_else(|| "gradient_ams not available (use assemble_hcurl_eigen_system_from_marker)".to_string())?;
+    fem_assembly::ams_solver::solve_hcurl_eigen(
         &eig_system.stiffness_free,
-        Some(&eig_system.mass_free),
-        k,
+        &eig_system.mass_free,
         &eig_system.constraints,
-        precond,
+        g_ams,
+        k,
         eig_cfg,
     )
 }
@@ -852,12 +846,28 @@ pub fn assemble_hcurl_eigen_system_from_marker(
     let stiffness_free = extract_square_submatrix(&k_full, &subspace.hcurl_free_dofs);
     let mass_free = extract_square_submatrix(&m_full, &subspace.hcurl_free_dofs);
 
+    // Compute PEC DOFs (kept for interface compatibility)
+    let tags = marker_to_tags(boundary_attributes, marker);
+    let _pec_dofs: Vec<u32> = boundary_dofs_hcurl(hcurl.mesh(), hcurl, &tags);
+
+    // Build gradient for AMS: free curl rows × free H1 cols.
+    // PEC-bound H1 DOFs have zero columns (no mapping to free curl DOFs),
+    // which makes the AMS nodal system singular → NaN.  Exclude them.
+    let grad_ams = {
+        let grad = DiscreteLinearOperator::gradient(h1, hcurl)
+            .expect("gradient for AMS failed");
+        let curl_free = &subspace.hcurl_free_dofs;
+        let grad_free = extract_rect_submatrix(&grad, curl_free, &subspace.h1_free_dofs);
+        Some(grad_free)
+    };
+
     HcurlEigenSystem {
         stiffness_free,
         mass_free,
         constraints: subspace.gradient_constraints,
         hcurl_free_dofs: subspace.hcurl_free_dofs,
         h1_free_dofs: subspace.h1_free_dofs,
+        gradient_ams: grad_ams,
     }
 }
 

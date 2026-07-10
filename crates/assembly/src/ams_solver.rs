@@ -8,15 +8,20 @@
 //! problems — it converges in far fewer iterations than point preconditioners
 //! (Jacobi, SSOR).
 
+use fem_amg::{AmgConfig, AmgSolver};
 use fem_linalg::{CooMatrix, CsrMatrix, SolveResult, fem_to_linlvo_csr};
 use fem_mesh::Mesh;
-use fem_solver::{AmsSolverConfig, SolverConfig, solve_pcg_ams};
+use fem_solver::{
+    AmsSolverConfig, SolverConfig, solve_pcg_ams,
+    eigen::{lobpcg_constrained_preconditioned, LobpcgConfig, EigenResult},
+};
 use fem_space::{
     H1Space,
     HCurlSpace,
     constraints::{eliminate_dirichlet, expand_from_reduced},
     fe_space::FESpace,
 };
+use nalgebra::DMatrix;
 
 use crate::discrete_op::DiscreteLinearOperator;
 
@@ -94,4 +99,51 @@ pub fn solve_hcurl_ams(
         let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &pec_vals, n_dofs);
         (u, res)
     }
+}
+
+/// Solve the Maxwell eigenvalue problem `A x = λ M x` using gradient constraints
+/// + AMG preconditioner + block oversampling.
+pub fn solve_hcurl_eigen(
+    stiffness_free: &CsrMatrix<f64>,
+    mass_free: &CsrMatrix<f64>,
+    gradient_constraints: &DMatrix<f64>,
+    _gradient_full_for_ams: &CsrMatrix<f64>,
+    k: usize,
+    cfg: &LobpcgConfig,
+) -> Result<EigenResult, String> {
+    let mut cfg = cfg.clone();
+    cfg.max_iter = cfg.max_iter.max(300);
+
+    // Block oversampling (constraints consume DOFs, so cap at n - n_constraints)
+    let n_constraints = gradient_constraints.ncols();
+    let k_work = (k + 20).min(stiffness_free.nrows.saturating_sub(n_constraints));
+
+    // AMG preconditioner (stable on the reduced curl-curl system)
+    let amg = AmgSolver::setup(stiffness_free, AmgConfig::default());
+    let a_clone = stiffness_free.clone();
+    let inner_cfg = SolverConfig { max_iter: 20, rtol: 1e-2, atol: 1e-12, verbose: false, ..SolverConfig::default() };
+    let precond = move |r: &DMatrix<f64>| -> DMatrix<f64> {
+        let nk = r.ncols(); let mut z = DMatrix::<f64>::zeros(r.nrows(), nk);
+        for j in 0..nk {
+            let rhs: Vec<f64> = r.column(j).iter().copied().collect();
+            let mut x = vec![0.0; a_clone.nrows];
+            if amg.solve(&a_clone, &rhs, &mut x, &inner_cfg).is_err() {
+                x.copy_from_slice(&rhs);
+            }
+            for i in 0..z.nrows() { z[(i, j)] = x[i]; }
+        }
+        z
+    };
+
+    let result = lobpcg_constrained_preconditioned(
+        stiffness_free, Some(mass_free), k_work, gradient_constraints, precond, &cfg,
+    )?;
+
+    let n_found = result.eigenvalues.len().min(k);
+    Ok(EigenResult {
+        eigenvalues: result.eigenvalues[..n_found].to_vec(),
+        eigenvectors: DMatrix::from(result.eigenvectors.columns(0, n_found).to_owned()),
+        iterations: result.iterations,
+        converged: result.converged,
+    })
 }

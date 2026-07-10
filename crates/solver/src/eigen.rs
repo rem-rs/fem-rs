@@ -42,11 +42,18 @@ pub struct LobpcgConfig {
     pub tol: f64,
     /// Print convergence information when true.
     pub verbose: bool,
+    /// When nonzero, eigenvalues below this threshold are treated as nullspace
+    /// and skipped.  The Rayleigh-Ritz selects the next available non-nullspace
+    /// mode instead.  Set to `0.0` (default) to disable.
+    ///
+    /// This is useful for curl-curl eigenvalue problems where the gradient
+    /// nullspace (λ ≈ 0) must be excluded without explicit constraints.
+    pub nullspace_skip: f64,
 }
 
 impl Default for LobpcgConfig {
     fn default() -> Self {
-        LobpcgConfig { max_iter: 300, tol: 1e-8, verbose: false }
+        LobpcgConfig { max_iter: 300, tol: 1e-8, verbose: false, nullspace_skip: 0.0 }
     }
 }
 
@@ -79,7 +86,7 @@ pub fn lobpcg(
     k:   usize,
     cfg: &LobpcgConfig,
 ) -> Result<EigenResult, String> {
-    lobpcg_projected(a, b, k, None, None, cfg)
+    lobpcg_projected(a, b, k, None, None, None, cfg)
 }
 
 /// Compute the `k` smallest eigenpairs of `A x = λ B x` using LOBPCG,
@@ -94,7 +101,7 @@ pub fn lobpcg_constrained(
     constraints: &DMatrix<f64>,
     cfg: &LobpcgConfig,
 ) -> Result<EigenResult, String> {
-    lobpcg_projected(a, b, k, Some(constraints), None, cfg)
+    lobpcg_projected(a, b, k, Some(constraints), None, None, cfg)
 }
 
 /// Compute the `k` smallest eigenpairs of `A x = λ B x` using LOBPCG,
@@ -115,7 +122,40 @@ pub fn lobpcg_constrained_preconditioned<F>(
 where
     F: Fn(&DMatrix<f64>) -> DMatrix<f64>,
 {
-    lobpcg_projected(a, b, k, Some(constraints), Some(&preconditioner), cfg)
+    lobpcg_projected(a, b, k, Some(constraints), Some(&preconditioner), None, cfg)
+}
+
+/// Like [`lobpcg_constrained_preconditioned`] but also forces a set of DOFs to
+/// remain exactly zero throughout the iteration.  This is useful when the B
+/// matrix has extreme diagonal values (e.g. `f64::MIN_POSITIVE` from
+/// `EliminateEssentialBCDiag`) that cause B-orthonormalization underflow.
+///
+/// The zero DOFs are zeroed in `X`, `P`, and the preconditioned `Z` after every
+/// iteration, and the residual norm is computed without those DOFs.
+pub fn lobpcg_essential_bc<F>(
+    a: &CsrMatrix<f64>,
+    b: Option<&CsrMatrix<f64>>,
+    k: usize,
+    constraints: &DMatrix<f64>,
+    preconditioner: F,
+    zero_dofs: &[usize],
+    cfg: &LobpcgConfig,
+) -> Result<EigenResult, String>
+where
+    F: Fn(&DMatrix<f64>) -> DMatrix<f64>,
+{
+    lobpcg_projected(a, b, k, Some(constraints), Some(&preconditioner), Some(zero_dofs), cfg)
+}
+
+/// Zero out specified DOFs in every column of a dense matrix.
+fn zero_rows(mat: &mut DMatrix<f64>, dofs: &[usize]) {
+    for &d in dofs {
+        if d < mat.nrows() {
+            for j in 0..mat.ncols() {
+                mat[(d, j)] = 0.0;
+            }
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -125,6 +165,7 @@ fn lobpcg_projected(
     k: usize,
     constraints: Option<&DMatrix<f64>>,
     preconditioner: Option<&dyn Fn(&DMatrix<f64>) -> DMatrix<f64>>,
+    zero_dofs: Option<&[usize]>,
     cfg: &LobpcgConfig,
 ) -> Result<EigenResult, String> {
     let n = a.nrows;
@@ -153,6 +194,7 @@ fn lobpcg_projected(
 
     // ── 1. Initialise X with random B-orthonormal (or Euclidean) columns ─────
     let mut x = random_feasible_orthonormal(n, k, &constraint_basis, b)?;
+    if let Some(bc) = zero_dofs { zero_rows(&mut x, bc); }
 
     let mut p = DMatrix::<f64>::zeros(n, k); // previous search direction (0 on first iter)
     let mut use_p = false;
@@ -185,7 +227,10 @@ fn lobpcg_projected(
         // product — constraints are not B-orthonormal).
         project_out(&mut r, &constraint_basis, None);
 
-        // ── 5. Convergence check ──────────────────────────────────────────────
+        // ── 5. Convergence check (zero BC DOFs excluded from residual) ───────
+        if let Some(bc) = zero_dofs {
+            for j in 0..k { for &d in bc { if d < n { r[(d, j)] = 0.0; } } }
+        }
         let res_norms: Vec<f64> = (0..k)
             .map(|j| r.column(j).norm() / lambdas[j].abs().max(1e-14))
             .collect();
@@ -196,12 +241,18 @@ fn lobpcg_projected(
         }
 
         if max_res < cfg.tol {
-            return Ok(EigenResult {
-                eigenvalues: lambdas,
-                eigenvectors: x,
-                iterations: iter + 1,
-                converged: true,
-            });
+            // When nullspace_skip is active, don't converge to nullspace modes.
+            // Force more iterations until at least one eigenvalue exceeds the threshold.
+            let skip = cfg.nullspace_skip > 0.0;
+            let all_nullspace = skip && lambdas.iter().all(|&v| v.abs() < cfg.nullspace_skip);
+            if !all_nullspace {
+                return Ok(EigenResult {
+                    eigenvalues: lambdas,
+                    eigenvectors: x,
+                    iterations: iter + 1,
+                    converged: true,
+                });
+            }
         }
 
         // ── 6. Optional residual preconditioning Z = P^{-1} R ───────────────
@@ -220,6 +271,8 @@ fn lobpcg_projected(
         } else {
             r.clone()
         };
+        // Zero BC DOFs in Z (preconditioner may introduce components there).
+        if let Some(bc) = zero_dofs { zero_rows(&mut z, bc); }
         project_out(&mut z, &constraint_basis, None);
 
         // ── 7. Update X using local Rayleigh–Ritz in span(X, Z, P) ───────────
@@ -251,20 +304,30 @@ fn lobpcg_projected(
         let wtbw = w.transpose() * &bw;
 
         let (ritz_vals, ritz_vecs) = small_generalized_eig(&wtaw, &wtbw, w.ncols());
-        let _ = ritz_vals;
 
-        // New X = W * C[:, 0..k] (first k Ritz vectors).
-        let c = ritz_vecs.columns(0, k);
+        // Skip nullspace modes: eigenvalues below nullspace_skip are treated as
+        // zero (gradient nullspace) and excluded from the Ritz selection.
+        let skip = if cfg.nullspace_skip > 0.0 {
+            ritz_vals.iter().take_while(|&&v| v.abs() < cfg.nullspace_skip).count().min(w.ncols().saturating_sub(k))
+        } else {
+            0
+        };
+        let n_avail = w.ncols();
+
+        // New X = W * C[:, skip..skip+k]  (skip nullspace, take next k).
+        let c = ritz_vecs.columns(skip, k);
         let x_new = &w * c;
         p = DMatrix::<f64>::zeros(n, k);
-        let p_cols = (w.ncols() - k).min(k);
+        let p_cols = (n_avail - skip - k).min(k);
         if p_cols > 0 {
-            let p_new = &w * ritz_vecs.columns(k, p_cols);
+            let p_new = &w * ritz_vecs.columns(skip + k, p_cols);
             p.columns_mut(0, p_cols).copy_from(&p_new);
         }
 
         x = x_new;
+        if let Some(bc) = zero_dofs { zero_rows(&mut x, bc); }
         project_out(&mut x, &constraint_basis, None);
+        if let Some(bc) = zero_dofs { zero_rows(&mut p, bc); }
         project_out(&mut p, &constraint_basis, None);
         use_p = true;
 

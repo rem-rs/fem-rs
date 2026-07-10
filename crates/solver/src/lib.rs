@@ -54,7 +54,8 @@
 /// [`solve_pcg_precond`], [`solve_gmres_precond`], or [`solve_fgmres_precond`]
 /// without depending on the `linlvo` crate directly.
 pub use linlvo::Preconditioner as linlvoPreconditioner;
-pub use linlvo::precond::{AmsConfig, AdsConfig};
+pub use linlvo::precond::{AmsConfig, AdsConfig, AmsPrecond, AuxSpaceSolver};
+pub use linlvo::core::preconditioner::Preconditioner;
 pub use linlvo::DenseVec;
 
 /// Symmetric Gauss-Seidel smoother — MFEM-compatible name for SSOR(ω=1).
@@ -133,7 +134,7 @@ pub use block_operator::{
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{
-    lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned,
+    lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, lobpcg_essential_bc,
     LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur,
     arpack, WhichEigenvalue,
     feast_interval, IntervalEigenConfig,

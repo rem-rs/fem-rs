@@ -19,6 +19,7 @@ members = [
     "crates/rmetis",
     "crates/regression",
     "crates/stochastic",
+    "vendor/linger",
     "examples",
 ]
 
@@ -42,6 +43,10 @@ serde_json  = "1"
 reed        = { git = "https://github.com/rem-rs/reed.git", rev = "11eaaed88aaa4c9aebb3da10c8c10833824ab865", package = "reed", default-features = false }
 reed-core   = { git = "https://github.com/rem-rs/reed.git", rev = "11eaaed88aaa4c9aebb3da10c8c10833824ab865", package = "reed-core" }
 reed-cpu    = { git = "https://github.com/rem-rs/reed.git", rev = "11eaaed88aaa4c9aebb3da10c8c10833824ab865", package = "reed-cpu", default-features = false }
+
+# Patch linlvo to use local vendored copy (allows AMS/ADS modifications).
+[patch."https://github.com/rem-rs/linlvo.git"]
+linlvo = { path = "vendor/linger" }
 
 [profile.release]
 opt-level   = 3
