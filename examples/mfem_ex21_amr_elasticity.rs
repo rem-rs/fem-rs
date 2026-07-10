@@ -96,7 +96,7 @@ fn main() {
             )], 3);
 
         let mut A = stiff.clone();
-        let mut rhs = bdr_load(&mesh, &sp, 1, 0.0, -0.01);
+        let mut rhs = bdr_load(&mesh, &sp, 2, 0.0, -0.01);
 
         // Apply hanging node constraints
         if !constraints.is_empty() {
@@ -145,6 +145,8 @@ fn main() {
         }
     }
 }
+
+
 
 
 
