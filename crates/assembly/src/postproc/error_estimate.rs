@@ -1,12 +1,133 @@
 //! Error estimation for adaptive mesh refinement (AMR).
 //! ZZ and Kelly estimators using GridFunction for arbitrary order + 2D/3D.
 
+use nalgebra::DMatrix;
+
+use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
+use fem_element::ReferenceElement;
+use fem_mesh::amr::HangingNodeConstraint;
+use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
+use fem_space::constraints::{apply_hanging_constraints, recover_hanging_values};
 use fem_space::FESpace;
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_solver::{solve_cg, SolverConfig};
 use crate::postproc::grid_function::GridFunction;
 use crate::standard::MassIntegrator;
 use crate::Assembler;
+// ─── Reference element helper (same as grid_function.rs) ──────────────────────
+
+fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    match (elem_type, order) {
+        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
+        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
+        (ElementType::Quad4, 1) => Box::new(QuadQ1),
+        (ElementType::Quad4, 2) => Box::new(QuadQ2),
+        (ElementType::Tet4, 1) => Box::new(TetP1),
+        (ElementType::Tet4, 2) => Box::new(TetP2),
+        (ElementType::Tet4, 3) => Box::new(TetP3),
+        _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
+    }
+}
+
+/// True for simplex element types (Tri3, Tri6, Tet4, …).
+fn is_simplex(elem_type: ElementType) -> bool {
+    matches!(elem_type, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10)
+}
+
+/// Geometric-mapping Jacobian at reference point `xi` on element `e`.
+///
+/// **Simplex** (Tri3, Tri6, Tet4): P1 mapping → constant Jacobian from nodes 0..dim.
+/// **Quad** (Quad4): Q1 bilinear mapping → correct bilinear Jacobian at (ξ,η).
+///
+/// Returns `(J, det J)` where J is the `dim × dim` Jacobian matrix.
+fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usize, elem_type: ElementType) -> (DMatrix<f64>, f64) {
+    if is_simplex(elem_type) {
+        // Simplex: P1 mapping, Jacobian = [x1-x0, x2-x0, …] (constant)
+        let x0 = mesh.node_coords(nodes[0]);
+        let mut j = DMatrix::<f64>::zeros(dim, dim);
+        for col in 0..dim {
+            let xc = mesh.node_coords(nodes[col + 1]);
+            for row in 0..dim {
+                j[(row, col)] = xc[row] - x0[row];
+            }
+        }
+        let det = j.determinant();
+        (j, det)
+    } else if dim == 2 && nodes.len() >= 4 {
+        // Quad: Q1 bilinear mapping at (ξ, η)
+        let (e, n) = (xi[0], xi[1]);
+        let c = |i: usize| mesh.node_coords(nodes[i]);
+        let j00 = 0.25 * (-(1.0 - n) * c(0)[0] + (1.0 - n) * c(1)[0] + (1.0 + n) * c(2)[0] - (1.0 + n) * c(3)[0]);
+        let j01 = 0.25 * (-(1.0 - e) * c(0)[0] - (1.0 + e) * c(1)[0] + (1.0 + e) * c(2)[0] + (1.0 - e) * c(3)[0]);
+        let j10 = 0.25 * (-(1.0 - n) * c(0)[1] + (1.0 - n) * c(1)[1] + (1.0 + n) * c(2)[1] - (1.0 + n) * c(3)[1]);
+        let j11 = 0.25 * (-(1.0 - e) * c(0)[1] - (1.0 + e) * c(1)[1] + (1.0 + e) * c(2)[1] + (1.0 - e) * c(3)[1]);
+        let det = j00 * j11 - j01 * j10;
+        let jac = DMatrix::from_row_slice(2, 2, &[j00, j01, j10, j11]);
+        (jac, det)
+    } else {
+        // Fallback: simplex-like (nodes 0..dim)
+        let x0 = mesh.node_coords(nodes[0]);
+        let mut j = DMatrix::<f64>::zeros(dim, dim);
+        for col in 0..dim.min(nodes.len().saturating_sub(1)) {
+            let xc = mesh.node_coords(nodes[col + 1]);
+            for row in 0..dim {
+                j[(row, col)] = xc[row] - x0[row];
+            }
+        }
+        (j.clone(), j.determinant())
+    }
+}
+
+/// Transform reference-coordinate gradients to physical gradients.
+fn transform_grads(j_inv_t: &DMatrix<f64>, grad_ref: &[f64], grad_phys: &mut [f64], n_ldofs: usize, dim: usize) {
+    for i in 0..n_ldofs {
+        for d in 0..dim {
+            let mut s = 0.0;
+            for k in 0..dim {
+                s += j_inv_t[(d, k)] * grad_ref[i * dim + k];
+            }
+            grad_phys[i * dim + d] = s;
+        }
+    }
+}
+
+/// Evaluate the physical gradient ∇u_h at reference point `xi` on element `e`,
+/// using the correct geometric Jacobian and the full basis (including edge and
+/// interior DOFs for higher-order spaces).
+fn eval_grad_at<M: MeshTopology>(
+    mesh: &M,
+    elem: u32,
+    space: &impl FESpace<Mesh = M>,
+    dofs: &[f64],
+    xi: &[f64],
+    elem_type: ElementType,
+) -> Vec<f64> {
+    let dim = mesh.dim() as usize;
+    let order = space.order();
+    let ref_elem = ref_elem_vol(elem_type, order);
+    let n_ldofs = ref_elem.n_dofs();
+    let elem_dofs = space.element_dofs(elem);
+    let nodes = mesh.element_nodes(elem);
+
+    let (jac, _det) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
+    let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
+
+    let mut grad_ref = vec![0.0; n_ldofs * dim];
+    ref_elem.eval_grad_basis(xi, &mut grad_ref);
+
+    let mut grad_phys = vec![0.0; n_ldofs * dim];
+    transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, dim);
+
+    let mut grad = vec![0.0; dim];
+    for i in 0..n_ldofs {
+        let c = dofs[elem_dofs[i] as usize];
+        for d in 0..dim {
+            grad[d] += c * grad_phys[i * dim + d];
+        }
+    }
+    grad
+}
 
 // ─── ElementIndicators ───────────────────────────────────────────────────────
 
@@ -36,6 +157,56 @@ impl ElementIndicators {
         }
         marked
     }
+
+    /// Mark elements whose error exceeds a local absolute threshold.
+    ///
+    /// Returns indices of elements with `η > max_err`.
+    /// Equivalent to MFEM's `ThresholdRefiner::SetLocalErrorGoal(max_err)`.
+    pub fn threshold_mark(&self, max_err: f64) -> Vec<u32> {
+        self.eta
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e > max_err)
+            .map(|(i, _)| i as u32)
+            .collect()
+    }
+
+    /// Mark elements whose error is below a derefinement threshold.
+    ///
+    /// Returns indices of elements with `η < threshold`.
+    /// Equivalent to MFEM's `ThresholdDerefiner::SetThreshold(threshold)`.
+    pub fn derefine_mark(&self, threshold: f64) -> Vec<u32> {
+        self.eta
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e < threshold)
+            .map(|(i, _)| i as u32)
+            .collect()
+    }
+}
+
+/// Mark elements whose error exceeds a local absolute threshold.
+///
+/// Returns indices of elements with `η > max_err`.
+/// Equivalent to MFEM's `ThresholdRefiner::SetLocalErrorGoal(max_err)`.
+pub fn threshold_mark(eta: &[f64], max_err: f64) -> Vec<u32> {
+    eta.iter()
+        .enumerate()
+        .filter(|(_, &e)| e > max_err)
+        .map(|(i, _)| i as u32)
+        .collect()
+}
+
+/// Mark elements whose error is below a derefinement threshold.
+///
+/// Returns indices of elements with `η < threshold`.
+/// Equivalent to MFEM's `ThresholdDerefiner::SetThreshold(threshold)`.
+pub fn derefine_mark(eta: &[f64], threshold: f64) -> Vec<u32> {
+    eta.iter()
+        .enumerate()
+        .filter(|(_, &e)| e < threshold)
+        .map(|(i, _)| i as u32)
+        .collect()
 }
 
 /// Element volume/area for a mesh element (used internally).
@@ -90,102 +261,317 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
 
 /// ZZ gradient-recovery error estimator using **L² projection** (MFEM-compatible).
 ///
+/// This is a convenience wrapper for conforming (non-NC) meshes.
+/// For non-conforming meshes with hanging nodes, use [`zz_estimator_l2_nc`].
+pub fn zz_estimator_l2<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
+where
+    M: MeshTopology + Clone,
+    S: FESpace<Mesh = M>,
+{
+    zz_estimator_l2_nc(gf, &[])
+}
+
+/// ZZ gradient-recovery error estimator using **L² projection** (MFEM-compatible),
+/// with hanging-node constraint support for non-conforming meshes.
+///
 /// Recovers a smoothed gradient `G(u)` by solving the global L² projection:
 /// ```text
 /// (G, v) = (∇u_h, v)   ∀ v ∈ V_h
 /// ```
-/// where `V_h` is the scalar H¹ FE space. This yields `M·g = f`, where M is the
-/// mass matrix and `f_d[i] = ∫_Ω ∂u_h/∂x_d · φ_i dΩ`.
+/// where `V_h` is a scalar H¹ FE space of the **same order** as the solution.
+/// This yields `M·g = f`, where M is the mass matrix and
+/// `f_d[i] = ∫_Ω ∂u_h/∂x_d · φ_i dΩ`.
 ///
-/// Solving with CG (mass matrix is well-conditioned) gives an optimally smooth
-/// recovered gradient.  The per-element error indicator is:
+/// Key features:
+/// - **Same-order recovery**: the recovered gradient space has the same polynomial
+///   order as the solution (matching MFEM's `ZienkiewiczZhuEstimator`).
+/// - **Correct geometric Jacobian**: uses bilinear Q1 Jacobian for Quad4 elements
+///   (simplex Jacobian for Tri3/Tet4), evaluated at each quadrature point.
+/// - **Full quadrature** for both mass matrix and RHS assembly.
+/// - **Hanging-node constraints**: `constraints` are applied to the mass matrix
+///   and RHS before solving, and `recover_hanging_values` is called after.
+///
+/// The per-element error indicator is:
 /// ```text
-/// η_K = ‖∇u_h|_K − G|_K‖_{L²(K)} ≈ ‖∇u_h|_K − G|_K‖ · √|K|
+/// η_K = ‖∇u_h|_K − G|_K‖_{L²(K)}
 /// ```
+pub fn zz_estimator_l2_nc<M, S>(gf: &GridFunction<'_, S>, constraints: &[HangingNodeConstraint]) -> ElementIndicators
+where
+    M: MeshTopology + Clone,
+    S: FESpace<Mesh = M>,
+{
+    let mref: &M = gf.space().mesh();
+    let ne = mref.n_elements();
+    let d = mref.dim() as usize;
+    let order = gf.space().order();
+
+    // ── 1. Use the solution space as the recovery space ─────────────────────
+    let space_ref: &S = gf.space();
+    let nd = space_ref.n_dofs();
+
+    // ── 2. Assemble mass matrix M on the solution space ─────────────────────
+    let quad_order = (order as u8) * 2 + 2;
+    let mass = MassIntegrator { rho: 1.0 };
+    let mut m_mat = Assembler::assemble_bilinear(space_ref, &[&mass], quad_order);
+
+    // ── 3. Assemble RHS F_d for each component ─────────────────────────────
+    let dofs = gf.dofs();
+    let mut rhs = vec![vec![0.0; nd]; d];
+
+    for e in 0..ne as u32 {
+        let elem_type = mref.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let nodes = mref.element_nodes(e);
+        let elem_dofs = space_ref.element_dofs(e);
+        let quad = ref_elem.quadrature(quad_order);
+
+        let mut phi = vec![0.0; n_ldofs];
+        let mut grad_ref = vec![0.0; n_ldofs * d];
+        let mut grad_phys = vec![0.0; n_ldofs * d];
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (jac, det_j) = geom_jacobian(mref, nodes, xi, d, elem_type);
+            let w_abs_det = quad.weights[q] * det_j.abs();
+            let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
+
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, d);
+
+            let mut grad_u = vec![0.0; d];
+            for i in 0..n_ldofs {
+                let c = dofs[elem_dofs[i] as usize];
+                for di in 0..d {
+                    grad_u[di] += c * grad_phys[i * d + di];
+                }
+            }
+
+            ref_elem.eval_basis(xi, &mut phi);
+
+            for (i, &dof) in elem_dofs.iter().enumerate() {
+                for di in 0..d {
+                    rhs[di][dof as usize] += w_abs_det * grad_u[di] * phi[i];
+                }
+            }
+        }
+    }
+
+    // ── 4. Apply hanging-node constraints to M and each RHS component ──────
+    if !constraints.is_empty() {
+        for di in 0..d {
+            apply_hanging_constraints(&mut m_mat, &mut rhs[di], constraints);
+        }
+    }
+
+    // ── 5. Solve M·g_d = rhs_d for each component ──────────────────────────
+    let cfg = SolverConfig {
+        rtol: 1e-10,
+        max_iter: 500,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let mut g = vec![vec![0.0; nd]; d];
+    for di in 0..d {
+        // Use the constraint-modified matrix (m_mat may have been modified by
+        // apply_hanging_constraints for all components, but only the first
+        // call actually changes it since subsequent calls with the same
+        // constraints produce the same matrix).
+        if let Err(e) = solve_cg(&m_mat, &rhs[di], &mut g[di], &cfg) {
+            eprintln!("  Warning: CG mass matrix solve (comp {di}) failed: {e}");
+        }
+    }
+
+    // ── 6. Recover hanging-node DOFs for each component ────────────────────
+    if !constraints.is_empty() {
+        for di in 0..d {
+            recover_hanging_values(&mut g[di], constraints);
+        }
+    }
+
+    // ── 7. Compute element error indicators ────────────────────────────────
+    let mut eta = vec![0.0; ne as usize];
+    let mut phi = Vec::new();
+    let mut grad_ref = Vec::new();
+    let mut grad_phys = Vec::new();
+
+    for e in 0..ne as u32 {
+        let elem_type = mref.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let nodes = mref.element_nodes(e);
+        let elem_dofs = space_ref.element_dofs(e);
+        let quad = ref_elem.quadrature(quad_order);
+
+        phi.resize(n_ldofs, 0.0);
+        grad_ref.resize(n_ldofs * d, 0.0);
+        grad_phys.resize(n_ldofs * d, 0.0);
+
+        let mut err_sq = 0.0;
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (jac, det_j) = geom_jacobian(mref, nodes, xi, d, elem_type);
+            let w_abs_det = quad.weights[q] * det_j.abs();
+            let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
+
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, d);
+
+            let mut grad_u = vec![0.0; d];
+            for i in 0..n_ldofs {
+                let c = dofs[elem_dofs[i] as usize];
+                for di in 0..d {
+                    grad_u[di] += c * grad_phys[i * d + di];
+                }
+            }
+
+            ref_elem.eval_basis(xi, &mut phi);
+            let mut grad_g = vec![0.0; d];
+            for i in 0..n_ldofs {
+                let dof = elem_dofs[i] as usize;
+                for di in 0..d {
+                    grad_g[di] += g[di][dof] * phi[i];
+                }
+            }
+
+            let diff_sq: f64 = (0..d)
+                .map(|di| (grad_u[di] - grad_g[di]).powi(2))
+                .sum();
+            err_sq += w_abs_det * diff_sq;
+        }
+
+        eta[e as usize] = err_sq.sqrt();
+    }
+
+    ElementIndicators::new(eta, "ZZ(L²)")
+}
+
+/// ZZ error estimator using **DOF-level averaging** (MFEM-compatible, serial version).
 ///
-/// This matches MFEM's `ZienkiewiczZhuEstimator` which projects onto an (H¹)^d space,
-/// whereas the simpler [`zz_estimator`] uses unweighted nodal averaging.
-pub fn zz_estimator_l2<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
+/// This matches MFEM's `ZienkiewiczZhuEstimator` algorithm:
+/// 1. For each element, compute ∇u_h at the **flux space's DOF locations**
+///    (all DOF nodes of the element, not just vertex nodes): for Q2 this includes
+///    edge midpoints and interior nodes.
+/// 2. **DOF averaging** (equivalent to `ComputeFlux` → `SumFluxAndCount`):
+///    for each global DOF, average ∇u_h from all adjacent elements.
+/// 3. For each element, integrate ‖∇u_h − G‖² using the flux space's shape
+///    functions and the integrator's `ComputeFluxEnergy` integration rule
+///    (full quadrature at `2 × order`).
+///
+/// The per-element error is:
+/// ```text
+/// η_K² = ∫_K ‖∇u_h − G‖² dΩ  ≈  f^T · M_K · f
+/// ```
+/// where `f = flux_coeff − smoothed_coeff` are the DOF coefficients of the
+/// flux difference and `M_K` is the element mass matrix.
+pub fn zz_estimator_nodal<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
 where
     M: MeshTopology,
     S: FESpace<Mesh = M>,
 {
     let m: &M = gf.space().mesh();
     let ne = m.n_elements();
-    let nn = m.n_nodes();
+    let nd = gf.space().n_dofs();
     let d = m.dim() as usize;
-    let xi: Vec<f64> = if d == 2 {
-        vec![1.0 / 3.0; 2]
-    } else {
-        vec![0.25; 3]
-    };
+    let order = gf.space().order();
 
-    // ── 1. Element gradients at centroid ──────────────────────────────────────
-    let eg: Vec<Vec<f64>> = (0..ne as u32)
-        .map(|e| gf.evaluate_gradient_at_element(e, &xi))
-        .collect();
+    // ── 1. Compute element gradients at ALL DOF locations ───────────────────
+    // Like MFEM's SumFluxAndCount: for each element, compute ∇u_h at each
+    // DOF of the element (vertex, edge, interior) using the correct geometric
+    // Jacobian.  Accumulate at global DOFs and count.
+    let mut dof_grad = vec![vec![0.0; d]; nd];
+    let mut dof_count = vec![0usize; nd];
 
-    // ── 2. Assemble scalar mass matrix M ─────────────────────────────────────
-    let space_ref: &S = gf.space();
-    let mass = MassIntegrator { rho: 1.0 };
-    let m_mat = Assembler::assemble_bilinear(space_ref, &[&mass], 4);
-
-    // ── 3. Build RHS vectors F_x, F_y for L² projection ────────────────────
-    //   f_d[i] = Σ_{K ∋ i} ∇u_h|_K[d] · ∫_K φ_i
-    //   For P1/Q1: ∫_K φ_i = vol(K) / npe
-    let mut f = vec![vec![0.0; nn]; d];
     for e in 0..ne as u32 {
-        let nlist = m.element_nodes(e);
-        let npe = nlist.len();
-        let vol = elem_vol(m, e);
-        let phi_int = vol / npe as f64;
-        for &n in nlist {
-            let ni = n as usize;
+        let elem_type = m.element_type(e);
+        let elem_dofs = gf.space().element_dofs(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let nodes = m.element_nodes(e);
+
+        // Get DOF reference coordinates for this element type
+        let dof_coords = ref_elem.dof_coords();
+
+        for (i, &dof) in elem_dofs.iter().enumerate() {
+            let xi = &dof_coords[i];
+            let g = eval_grad_at(m, e, gf.space(), gf.dofs(), xi, elem_type);
+            let idx = dof as usize;
             for di in 0..d {
-                f[di][ni] += eg[e as usize][di] * phi_int;
+                dof_grad[idx][di] += g[di];
+            }
+            dof_count[idx] += 1;
+        }
+    }
+
+    // Average: flux(dof) = sum(adjacent element fluxes) / count
+    for i in 0..nd {
+        let c = dof_count[i] as f64;
+        if c > 0.0 {
+            for di in 0..d {
+                dof_grad[i][di] /= c;
             }
         }
     }
 
-    // ── 4. Solve M·g_d = f_d for each component ────────────────────────────
-    // PCG+Jacobi converges rapidly on the well-conditioned mass matrix.
-    let cfg = SolverConfig {
-        rtol: 1e-10,
-        max_iter: 200,
-        verbose: false,
-        ..SolverConfig::default()
-    };
-    let mut g = vec![vec![0.0; nn]; d];
-    for di in 0..d {
-        let _ = solve_pcg_jacobi(&m_mat, &f[di], &mut g[di], &cfg)
-            .expect("Mass matrix PCG+Jacobi solve failed in zz_estimator_l2");
-    }
+    // ── 2. Per-element error via element mass matrix ────────────────────────
+    // Like MFEM: for each element, compute flux_coeff at DOFs (element flux),
+    // subtract dof_grad (smoothed flux), and integrate ‖diff‖² via
+    // ComputeFluxEnergy (i.e., f^T · M_elem · f).
+    //
+    // M_elem is the element mass matrix with integration rule 2×order.
+    let quad_order = (order as u8) * 2;
+    let mut eta = vec![0.0; ne];
 
-    // ── 5. Element error indicator ──────────────────────────────────────────
-    //   η_K = ‖∇u_h|_K − G|_K‖ · √|K|
-    //   G|_K = average of recovered nodal values over element vertices
-    let mut eta = vec![0.0; ne as usize];
     for e in 0..ne as u32 {
-        let nlist = m.element_nodes(e);
-        let npe = nlist.len();
-        let vol = elem_vol(m, e);
-        let mut rec = vec![0.0; d];
-        for &n in nlist {
-            let ni = n as usize;
-            for di in 0..d {
-                rec[di] += g[di][ni];
+        let elem_type = m.element_type(e);
+        let elem_dofs = gf.space().element_dofs(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let nodes = m.element_nodes(e);
+        let quad = ref_elem.quadrature(quad_order);
+
+        // Build element mass matrix M_elem (size: n_ldofs × n_ldofs)
+        let mut m_elem = vec![0.0; n_ldofs * n_ldofs];
+        let mut phi = vec![0.0; n_ldofs];
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (_, det_j) = geom_jacobian(m, nodes, xi, d, elem_type);
+            let w_det = quad.weights[q] * det_j.abs();
+            ref_elem.eval_basis(xi, &mut phi);
+            for i in 0..n_ldofs {
+                for j in 0..n_ldofs {
+                    m_elem[i * n_ldofs + j] += w_det * phi[i] * phi[j];
+                }
             }
         }
+
+        // Compute flux difference DOF vector f
+        let dof_coords = ref_elem.dof_coords();
+        let mut f = vec![0.0; n_ldofs * d];
+        for (i, &dof) in elem_dofs.iter().enumerate() {
+            let idx = dof as usize;
+            // element flux at DOF i (from solution gradient)
+            let xi = &dof_coords[i];
+            let eg = eval_grad_at(m, e, gf.space(), gf.dofs(), xi, elem_type);
+            for di in 0..d {
+                f[i * d + di] = eg[di] - dof_grad[idx][di];
+            }
+        }
+
+        // Energy: ∫ ‖f‖² = Σ_di Σ_i Σ_j f[i,di] · M_elem[i,j] · f[j,di]
+        let mut eng = 0.0;
         for di in 0..d {
-            rec[di] /= npe as f64;
+            for i in 0..n_ldofs {
+                let mut row_sum = 0.0;
+                for j in 0..n_ldofs {
+                    row_sum += m_elem[i * n_ldofs + j] * f[j * d + di];
+                }
+                eng += f[i * d + di] * row_sum;
+            }
         }
-        let err_sq: f64 = (0..d)
-            .map(|di| (eg[e as usize][di] - rec[di]).powi(2))
-            .sum();
-        eta[e as usize] = (err_sq * vol).sqrt();
+
+        eta[e as usize] = eng.sqrt();
     }
 
-    ElementIndicators::new(eta, "ZZ(L²)")
+    ElementIndicators::new(eta, "ZZ(nodal)")
 }
 
 /// Kelly face-jump error estimator using GridFunction.

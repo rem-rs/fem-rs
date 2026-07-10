@@ -6,7 +6,7 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
+use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
 use fem_element::ReferenceElement;
 use fem_linalg::CsrMatrix;
 use fem_mesh::element_type::ElementType;
@@ -24,6 +24,8 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
+        (ElementType::Quad4, 1) => Box::new(QuadQ1),
+        (ElementType::Quad4, 2) => Box::new(QuadQ2),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
