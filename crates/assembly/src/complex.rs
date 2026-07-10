@@ -1,18 +1,18 @@
-//! Complex-valued finite element assembly.
+﻿//! Complex-valued finite element assembly.
 //!
-//! Implements a **2×2 real-block** strategy that avoids introducing complex
-//! number generics: the complex DOF vector `u = u_re + i·u_im` is stored as
-//! two separate real vectors, and the system matrix is a 2×2 block:
+//! Implements a **2脳2 real-block** strategy that avoids introducing complex
+//! number generics: the complex DOF vector `u = u_re + i路u_im` is stored as
+//! two separate real vectors, and the system matrix is a 2脳2 block:
 //!
 //! ```text
-//! [ K - ω²M    -ωC ] [ u_re ]   [ f_re ]
-//! [ ωC       K-ω²M  ] [ u_im ] = [ f_im ]
+//! [ K - 蠅虏M    -蠅C ] [ u_re ]   [ f_re ]
+//! [ 蠅C       K-蠅虏M  ] [ u_im ] = [ f_im ]
 //! ```
 //!
 //! where `K`, `M`, `C` are standard real sparse matrices assembled from
 //! existing integrators.
 //!
-//! # Typical use — scalar H¹ Helmholtz
+//! # Typical use 鈥?scalar H鹿 Helmholtz
 //! ```rust,ignore
 //! use fem_assembly::complex::{ComplexAssembler, ComplexSystem};
 //! use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
@@ -21,12 +21,12 @@
 //! let space = H1Space::new(mesh, 1);
 //! let omega = 2.0 * PI;
 //!
-//! // −Δu − ω²u + iω·c·u = f
+//! // 鈭捨攗 鈭?蠅虏u + i蠅路c路u = f
 //! let sys = ComplexAssembler::assemble(
 //!     &space,
 //!     &[&DiffusionIntegrator { kappa: 1.0 }],  // stiffness K
-//!     &[&MassIntegrator { rho: 1.0 }],           // mass M (multiplied by ω²)
-//!     &[&MassIntegrator { rho: 0.1 }],           // damping C (multiplied by ω)
+//!     &[&MassIntegrator { rho: 1.0 }],           // mass M (multiplied by 蠅虏)
+//!     &[&MassIntegrator { rho: 0.1 }],           // damping C (multiplied by 蠅)
 //!     omega, 3,
 //! );
 //! let x = sys.solve_gmres(&f_re, &f_im, &cfg)?;
@@ -42,24 +42,24 @@ use crate::vector_assembler::VectorAssembler;
 use crate::integrator::{BilinearIntegrator, LinearIntegrator, QpData};
 use crate::vector_integrator::VectorBilinearIntegrator;
 
-// ─── ComplexSystem ────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ ComplexSystem 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-/// A 2×2 real-block equivalent of a complex linear system.
+/// A 2脳2 real-block equivalent of a complex linear system.
 ///
 /// The system is:
 /// ```text
 /// [ A_re  A_im ] [ x_re ]   [ b_re ]
 /// [-A_im  A_re ] [ x_im ] = [ b_im ]
 /// ```
-/// where `A = A_re + i·A_im` is the complex system matrix.
+/// where `A = A_re + i路A_im` is the complex system matrix.
 ///
 /// For the time-harmonic problem with stiffness `K`, mass `M`, damping `C`:
-/// - `A_re = K − ω²·M`
-/// - `A_im = ω·C`
+/// - `A_re = K 鈭?蠅虏路M`
+/// - `A_im = 蠅路C`
 pub struct ComplexSystem {
-    /// Real part of the system matrix (n_dofs × n_dofs).
+    /// Real part of the system matrix (n_dofs 脳 n_dofs).
     pub k_re: CsrMatrix<f64>,
-    /// Imaginary part: the "coupling" matrix (n_dofs × n_dofs).
+    /// Imaginary part: the "coupling" matrix (n_dofs 脳 n_dofs).
     pub k_im: CsrMatrix<f64>,
     /// Angular frequency (stored for reference).
     pub omega: f64,
@@ -69,10 +69,10 @@ impl ComplexSystem {
     /// Number of real DOFs (= total DOFs in the underlying FE space).
     pub fn n_dofs(&self) -> usize { self.k_re.nrows }
 
-    /// Total size of the flattened 2×2 block system = `2 * n_dofs`.
+    /// Total size of the flattened 2脳2 block system = `2 * n_dofs`.
     pub fn n_total(&self) -> usize { 2 * self.n_dofs() }
 
-    /// Build the flat (2n × 2n) block CSR matrix:
+    /// Build the flat (2n 脳 2n) block CSR matrix:
     /// ```text
     /// [ K_re   -K_im ]
     /// [ K_im    K_re ]
@@ -124,7 +124,7 @@ impl ComplexSystem {
         rhs
     }
 
-    /// Apply Dirichlet boundary conditions symmetrically on the 2×2 block
+    /// Apply Dirichlet boundary conditions symmetrically on the 2脳2 block
     /// system.
     ///
     /// Each DOF in `dofs` is eliminated in both the re and im blocks.
@@ -147,7 +147,7 @@ impl ComplexSystem {
             // --- Real block row i: set to identity (diagonal=1) ---
             self.k_re.apply_dirichlet_row_zeroing(i, val_re, rhs);
             // --- Imaginary block row i: zero completely (no diagonal identity) ---
-            // In the flat system, k_im[i,:] appears in both top-right (−k_im)
+            // In the flat system, k_im[i,:] appears in both top-right (鈭択_im)
             // and bottom-left (+k_im) blocks.  We want those rows to be 0 so that
             // the flat rows i and n+i decouple to: u_re[i]=val_re, u_im[i]=val_im.
             zero_row(&mut self.k_im, i, &mut rhs[n..]);
@@ -167,32 +167,32 @@ fn zero_row(mat: &mut CsrMatrix<f64>, row: usize, _rhs: &mut [f64]) {
     }
 }
 
-// ─── ComplexAssembler ─────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ ComplexAssembler 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Assembles a complex-valued time-harmonic PDE system using real block
 /// decomposition.
 ///
 /// The assembled system represents:
 /// ```text
-/// (K − ω²M + iωC) u = f
+/// (K 鈭?蠅虏M + i蠅C) u = f
 /// ```
-/// expanded to the 2×2 real block form stored in [`ComplexSystem`].
+/// expanded to the 2脳2 real block form stored in [`ComplexSystem`].
 pub struct ComplexAssembler;
 
 impl ComplexAssembler {
     /// Assemble a time-harmonic complex system.
     ///
     /// # Arguments
-    /// - `space`   — FE space (H¹, H(curl), H(div))
-    /// - `stiff`   — stiffness integrators for `K` (e.g. `DiffusionIntegrator`, `CurlCurlIntegrator`)
-    /// - `mass`    — mass integrators for `M` (e.g. `MassIntegrator`, `VectorMassIntegrator`)
-    /// - `damp`    — damping integrators for `C` (e.g. `MassIntegrator` with conductivity σ)
-    /// - `omega`   — angular frequency ω
-    /// - `quad_order` — quadrature order
+    /// - `space`   鈥?FE space (H鹿, H(curl), H(div))
+    /// - `stiff`   鈥?stiffness integrators for `K` (e.g. `DiffusionIntegrator`, `CurlCurlIntegrator`)
+    /// - `mass`    鈥?mass integrators for `M` (e.g. `MassIntegrator`, `VectorMassIntegrator`)
+    /// - `damp`    鈥?damping integrators for `C` (e.g. `MassIntegrator` with conductivity 蟽)
+    /// - `omega`   鈥?angular frequency 蠅
+    /// - `quad_order` 鈥?quadrature order
     ///
     /// Returns `(system, k_re, k_im)` where:
-    /// - `k_re = K − ω²·M`
-    /// - `k_im = ω·C`
+    /// - `k_re = K 鈭?蠅虏路M`
+    /// - `k_im = 蠅路C`
     pub fn assemble<S: FESpace + Send + Sync>(
         space:      &S,
         stiff:      &[&dyn BilinearIntegrator],
@@ -206,9 +206,9 @@ impl ComplexAssembler {
         let m = Assembler::assemble_bilinear(space, mass,  quad_order);
         let c = Assembler::assemble_bilinear(space, damp,  quad_order);
 
-        // k_re = K − ω²·M
+        // k_re = K 鈭?蠅虏路M
         let k_re = subtract_scaled(&k, &m, omega * omega);
-        // k_im = ω·C
+        // k_im = 蠅路C
         let k_im = scale_csr(&c, omega);
 
         ComplexSystem { k_re, k_im, omega }
@@ -216,7 +216,7 @@ impl ComplexAssembler {
 
     /// Assemble a purely-stiffness + mass system with no damping.
     ///
-    /// `k_re = K − ω²·M`,  `k_im = 0`.
+    /// `k_re = K 鈭?蠅虏路M`,  `k_im = 0`.
     ///
     /// Suitable for lossless resonators (eigenvalue problems) or
     /// real-sourced Helmholtz when damping is zero.
@@ -259,7 +259,7 @@ impl ComplexAssembler {
 
     /// Assemble an undamped (lossless) complex H(curl) / H(div) system.
     ///
-    /// `k_re = K − ω²·M`,  `k_im = 0`.
+    /// `k_re = K 鈭?蠅虏路M`,  `k_im = 0`.
     pub fn assemble_vector_undamped<S: FESpace + Send + Sync>(
         space:      &S,
         stiff:      &[&dyn VectorBilinearIntegrator],
@@ -276,9 +276,9 @@ impl ComplexAssembler {
     }
 }
 
-// ─── ComplexLinearForm ────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ ComplexLinearForm 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-/// Assembles a complex-valued right-hand side `f = f_re + i·f_im`.
+/// Assembles a complex-valued right-hand side `f = f_re + i路f_im`.
 pub struct ComplexLinearForm {
     /// Real part contributions.
     pub f_re: Vec<f64>,
@@ -289,7 +289,7 @@ pub struct ComplexLinearForm {
 impl ComplexLinearForm {
     /// Assemble separate real and imaginary parts.
     ///
-    /// Either slice of integrators may be empty (→ zero contribution).
+    /// Either slice of integrators may be empty (鈫?zero contribution).
     pub fn assemble<S: FESpace + Send + Sync>(
         space:      &S,
         re_integ:   &[&dyn LinearIntegrator],
@@ -311,9 +311,9 @@ impl ComplexLinearForm {
     }
 }
 
-// ─── ComplexGridFunction ──────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ ComplexGridFunction 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-/// A complex grid function `u = u_re + i·u_im`.
+/// A complex grid function `u = u_re + i路u_im`.
 #[derive(Debug, Clone)]
 pub struct ComplexGridFunction {
     /// Real DOF coefficients.
@@ -332,14 +332,14 @@ impl ComplexGridFunction {
         }
     }
 
-    /// Pointwise amplitude `|u(x)| = sqrt(u_re² + u_im²)`.
+    /// Pointwise amplitude `|u(x)| = sqrt(u_re虏 + u_im虏)`.
     pub fn amplitude(&self) -> Vec<f64> {
         self.u_re.iter().zip(self.u_im.iter())
             .map(|(&r, &i)| (r * r + i * i).sqrt())
             .collect()
     }
 
-    /// Total complex L² norm: `sqrt(‖u_re‖² + ‖u_im‖²)`.
+    /// Total complex L虏 norm: `sqrt(鈥杣_re鈥柭?+ 鈥杣_im鈥柭?`.
     pub fn l2_norm(&self) -> f64 {
         let re: f64 = self.u_re.iter().map(|x| x * x).sum();
         let im: f64 = self.u_im.iter().map(|x| x * x).sum();
@@ -347,9 +347,9 @@ impl ComplexGridFunction {
     }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-/// Compute `A − alpha·B` (both same sparsity pattern, using COO merge).
+/// Compute `A 鈭?alpha路B` (both same sparsity pattern, using COO merge).
 fn subtract_scaled(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>, alpha: f64) -> CsrMatrix<f64> {
     let n = a.nrows;
     let mut coo = CooMatrix::<f64>::new(n, n);
@@ -393,18 +393,18 @@ fn zero_like(_template: &CsrMatrix<f64>, n: usize) -> CsrMatrix<f64> {
     }
 }
 
-// ─── NativeComplexSystem ──────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ NativeComplexSystem 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// A **natively complex** FEM system: the matrix is stored as a single
-/// `ComplexCsr` (not the 2×2 real-block workaround).
+/// `ComplexCsr` (not the 2脳2 real-block workaround).
 ///
 /// Advantages over [`ComplexSystem`]:
-/// - Matrix size is n×n (not 2n×2n) → lower memory and better conditioning
+/// - Matrix size is n脳n (not 2n脳2n) 鈫?lower memory and better conditioning
 /// - Complex GMRES acts directly on complex inner products
 /// - Compatible with complex-valued PML coefficients
-/// - At high ω the preconditioner quality is substantially better
+/// - At high 蠅 the preconditioner quality is substantially better
 ///
-/// # Typical use — Helmholtz or Maxwell
+/// # Typical use 鈥?Helmholtz or Maxwell
 /// ```rust,ignore
 /// let sys = NativeComplexAssembler::assemble_helmholtz(
 ///     &h1_space, kappa_re, kappa_im, 1.0 /* rho */, omega, 3,
@@ -476,7 +476,7 @@ impl NativeComplexSystem {
     }
 }
 
-// ─── NativeComplexAssembler ───────────────────────────────────────────────────
+// 鈹€鈹€鈹€ NativeComplexAssembler 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// Assembles a complex FEM system natively into [`NativeComplexSystem`].
 ///
@@ -486,7 +486,7 @@ pub struct NativeComplexAssembler;
 
 /// Trait for an integrator that produces complex element matrices.
 ///
-/// Implementors fill both `k_re` and `k_im` (row-major `n_dofs × n_dofs`).
+/// Implementors fill both `k_re` and `k_im` (row-major `n_dofs 脳 n_dofs`).
 pub trait ComplexBilinearIntegrator: Send + Sync {
     fn add_to_complex_element_matrix(
         &self,
@@ -496,18 +496,18 @@ pub trait ComplexBilinearIntegrator: Send + Sync {
     );
 }
 
-/// Helmholtz integrator: contributes `κ_re ∇φ·∇ψ − ω² ρ φψ` (real) and
-/// `κ_im ∇φ·∇ψ` (imaginary).
+/// Helmholtz integrator: contributes `魏_re 鈭囅喡封垏蠄 鈭?蠅虏 蟻 蠁蠄` (real) and
+/// `魏_im 鈭囅喡封垏蠄` (imaginary).
 ///
-/// This naturally handles PML coefficients where `κ = κ_re + i κ_im`.
+/// This naturally handles PML coefficients where `魏 = 魏_re + i 魏_im`.
 pub struct HelmholtzIntegrator {
-    /// Real part of the diffusion coefficient κ (can be PML-modified).
+    /// Real part of the diffusion coefficient 魏 (can be PML-modified).
     pub kappa_re: f64,
-    /// Imaginary part of the diffusion coefficient κ (PML absorption).
+    /// Imaginary part of the diffusion coefficient 魏 (PML absorption).
     pub kappa_im: f64,
-    /// Mass coefficient ρ (always real for standard media).
+    /// Mass coefficient 蟻 (always real for standard media).
     pub rho: f64,
-    /// Angular frequency ω.
+    /// Angular frequency 蠅.
     pub omega: f64,
 }
 
@@ -518,12 +518,12 @@ impl ComplexBilinearIntegrator for HelmholtzIntegrator {
         let w = qp.weight;
         for i in 0..n {
             for j in 0..n {
-                // Diffusion: κ ∇φᵢ · ∇φⱼ
+                // Diffusion: 魏 鈭囅嗎耽 路 鈭囅嗏奔
                 let mut grad_dot = 0.0_f64;
                 for d in 0..dim {
                     grad_dot += qp.grad_phys[i * dim + d] * qp.grad_phys[j * dim + d];
                 }
-                // Mass shift: −ω² ρ φᵢ φⱼ
+                // Mass shift: 鈭捪壜?蟻 蠁岬?蠁獗?
                 let mass = self.rho * qp.phi[i] * qp.phi[j];
                 k_re[i * n + j] += w * (self.kappa_re * grad_dot - self.omega * self.omega * mass);
                 k_im[i * n + j] += w *  self.kappa_im * grad_dot;
@@ -533,17 +533,17 @@ impl ComplexBilinearIntegrator for HelmholtzIntegrator {
 }
 
 /// Maxwell time-harmonic integrator (H(curl)):
-/// contributes `μ⁻¹(∇×u)·(∇×v) − ω² ε u·v` (with complex ε/μ for PML).
+/// contributes `渭鈦宦?鈭嚸梪)路(鈭嚸梫) 鈭?蠅虏 蔚 u路v` (with complex 蔚/渭 for PML).
 pub struct MaxwellHarmonicIntegrator {
-    /// Real part of μ⁻¹ (permeability inverse).
+    /// Real part of 渭鈦宦?(permeability inverse).
     pub mu_inv_re: f64,
-    /// Imaginary part of μ⁻¹.
+    /// Imaginary part of 渭鈦宦?
     pub mu_inv_im: f64,
-    /// Real part of permittivity ε.
+    /// Real part of permittivity 蔚.
     pub eps_re: f64,
-    /// Imaginary part of permittivity ε (loss tangent → positive for lossy media).
+    /// Imaginary part of permittivity 蔚 (loss tangent 鈫?positive for lossy media).
     pub eps_im: f64,
-    /// Angular frequency ω.
+    /// Angular frequency 蠅.
     pub omega: f64,
 }
 
@@ -556,17 +556,17 @@ impl ComplexBilinearIntegrator for MaxwellHarmonicIntegrator {
         let w = qp.weight;
         for i in 0..n {
             for j in 0..n {
-                // Curl-curl: μ⁻¹ (∇×φᵢ)·(∇×φⱼ) — use grad as proxy for framework
+                // Curl-curl: 渭鈦宦?(鈭嚸椣嗎耽)路(鈭嚸椣嗏奔) 鈥?use grad as proxy for framework
                 let mut curl_dot = 0.0_f64;
                 for d in 0..dim {
                     curl_dot += qp.grad_phys[i * dim + d] * qp.grad_phys[j * dim + d];
                 }
-                // Mass: ε φᵢ·φⱼ
+                // Mass: 蔚 蠁岬⒙废嗏奔
                 let mass = qp.phi[i] * qp.phi[j];
-                // Re(μ⁻¹) curl·curl − ω² Re(ε) mass
+                // Re(渭鈦宦? curl路curl 鈭?蠅虏 Re(蔚) mass
                 k_re[i * n + j] += w * (self.mu_inv_re * curl_dot
                     - self.omega * self.omega * self.eps_re * mass);
-                // Im(μ⁻¹) curl·curl + ω² Im(ε) mass (note sign: +ω²Im(ε) for lossy)
+                // Im(渭鈦宦? curl路curl + 蠅虏 Im(蔚) mass (note sign: +蠅虏Im(蔚) for lossy)
                 k_im[i * n + j] += w * (self.mu_inv_im * curl_dot
                     + self.omega * self.omega * self.eps_im * mass);
             }
@@ -582,7 +582,7 @@ impl NativeComplexAssembler {
         quad_order: u8,
     ) -> NativeComplexSystem {
         use fem_element::{ReferenceElement,
-            lagrange::{TriP1, TriP2, TetP1, TetP2, QuadQ1}};
+            lagrange::{TriP1, TriP2, TetP1, TetP2, QuadQ1, QuadQ2, QuadQ3, QuadQ4}};
         use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
         let mesh    = space.mesh();
@@ -601,12 +601,15 @@ impl NativeComplexAssembler {
             // Build element transformation (affine simplex)
             let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
 
-            // Reference element — choose by type and polynomial order
+            // Reference element 鈥?choose by type and polynomial order
             let ref_elem: Box<dyn ReferenceElement> = match (etype, order) {
                 (ElementType::Tri6, _) => Box::new(TriP2),
                 (ElementType::Tri3, _) => Box::new(TriP1),
                 (ElementType::Tet4, _) => Box::new(TetP1),
-                (ElementType::Quad4, _) => Box::new(QuadQ1),
+                (ElementType::Quad4, 1) => Box::new(QuadQ1),
+                (ElementType::Quad4, 2) => Box::new(QuadQ2),
+                (ElementType::Quad4, 3) => Box::new(QuadQ3),
+                (ElementType::Quad4, 4) => Box::new(QuadQ4),
                 _ => Box::new(TriP1),
             };
             // Override for P2 orders
@@ -673,8 +676,8 @@ impl NativeComplexAssembler {
         NativeComplexSystem { mat, omega: 0.0, n_dofs }
     }
 
-    /// Convenience: assemble a Helmholtz system `−∇·(κ∇u) − ω²ρ u = f`
-    /// with complex diffusion coefficient `κ = kappa_re + i*kappa_im`.
+    /// Convenience: assemble a Helmholtz system `鈭掆垏路(魏鈭噓) 鈭?蠅虏蟻 u = f`
+    /// with complex diffusion coefficient `魏 = kappa_re + i*kappa_im`.
     pub fn assemble_helmholtz<S: FESpace + Send + Sync>(
         space:      &S,
         kappa_re:   f64,
@@ -690,7 +693,7 @@ impl NativeComplexAssembler {
     }
 }
 
-// ─── Tests (NativeComplex) ────────────────────────────────────────────────────
+// 鈹€鈹€鈹€ Tests (NativeComplex) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 #[cfg(test)]
 mod native_complex_tests {
@@ -703,7 +706,7 @@ mod native_complex_tests {
         let mesh  = Mesh::<2>::unit_square_tri(4);
         let space = H1Space::new(mesh, 1);
         let sys   = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.0, 1.0, 0.0, 3);
-        // With ω=0, kappa_im=0 the matrix should be purely real (all im_vals ≈ 0)
+        // With 蠅=0, kappa_im=0 the matrix should be purely real (all im_vals 鈮?0)
         let max_im = sys.mat.im_vals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         assert!(max_im < 1e-14, "im_vals should be zero for real Helmholtz: {max_im}");
         // Matrix should be non-trivial
@@ -728,11 +731,11 @@ mod native_complex_tests {
         let space = H1Space::new(mesh, 1);
         let sys0  = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.0, 1.0, 0.0, 3);
         let sys1  = NativeComplexAssembler::assemble_helmholtz(&space, 1.0, 0.0, 1.0, 2.0, 3);
-        // With ω=2: K_re = K - 4M, so diagonal should be smaller
+        // With 蠅=2: K_re = K - 4M, so diagonal should be smaller
         let tr0: f64 = sys0.mat.diagonal_complex().0.iter().sum();
         let tr1: f64 = sys1.mat.diagonal_complex().0.iter().sum();
         // Stiffness trace > mass trace * 4, so tr1 < tr0 for coarse meshes
-        assert!(tr1 < tr0, "trace should decrease with ω: {} vs {}", tr0, tr1);
+        assert!(tr1 < tr0, "trace should decrease with 蠅: {} vs {}", tr0, tr1);
     }
 
     #[test]
@@ -769,11 +772,11 @@ mod native_complex_tests {
 
     #[test]
     fn native_helmholtz_2d_pml_solve_converges() {
-        // Solve Helmholtz with PML-like imaginary coefficient (strong damping → easy solve)
+        // Solve Helmholtz with PML-like imaginary coefficient (strong damping 鈫?easy solve)
         let mesh  = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
         let omega = 2.0;
-        let kappa_im = 5.0; // large imaginary part → well-conditioned
+        let kappa_im = 5.0; // large imaginary part 鈫?well-conditioned
 
         let mut sys = NativeComplexAssembler::assemble_helmholtz(
             &space, 1.0, kappa_im, 1.0, omega, 3,
@@ -807,7 +810,7 @@ mod native_complex_tests {
 
     #[test]
     fn native_complex_vs_block_agree_at_low_omega() {
-        // At low ω both approaches should give the same solution (up to numerical tol)
+        // At low 蠅 both approaches should give the same solution (up to numerical tol)
         use crate::standard::{DiffusionIntegrator, MassIntegrator};
         use fem_space::constraints::boundary_dofs;
         use fem_solver::{SolverConfig, solve_gmres};
@@ -832,7 +835,7 @@ mod native_complex_tests {
                                 &mut b_re_nat, &mut b_im_nat);
         let gf_nat = sys_nat.solve(&b_re_nat, &b_im_nat, 1e-10, 300, 50).unwrap();
 
-        // 2×2 block approach
+        // 2脳2 block approach
         let mut sys_blk = ComplexAssembler::assemble(
             &space,
             &[&DiffusionIntegrator { kappa: 1.0 }],
@@ -862,7 +865,7 @@ mod native_complex_tests {
     }
 }
 
-// ─── Tests (original 2×2 block) ───────────────────────────────────────────────
+// 鈹€鈹€鈹€ Tests (original 2脳2 block) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 #[cfg(test)]
 mod tests {
@@ -871,7 +874,7 @@ mod tests {
     use fem_space::H1Space;
     use crate::standard::{DiffusionIntegrator, MassIntegrator};
 
-    /// For ω = 0 the complex system collapses to the pure stiffness matrix.
+    /// For 蠅 = 0 the complex system collapses to the pure stiffness matrix.
     #[test]
     fn complex_system_omega_zero_is_pure_stiffness() {
         let mesh  = Mesh::<2>::unit_square_tri(4);
@@ -889,7 +892,7 @@ mod tests {
         let k = Assembler::assemble_bilinear(
             &space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
 
-        // k_re should equal K for ω = 0
+        // k_re should equal K for 蠅 = 0
         let n = sys.n_dofs();
         for i in 0..n {
             for ptr in sys.k_re.row_ptr[i]..sys.k_re.row_ptr[i + 1] {
@@ -902,7 +905,7 @@ mod tests {
         }
     }
 
-    /// The 2×2 block matrix should be square of size 2n.
+    /// The 2脳2 block matrix should be square of size 2n.
     #[test]
     fn flat_csr_size() {
         let mesh  = Mesh::<2>::unit_square_tri(4);
@@ -923,14 +926,14 @@ mod tests {
         assert_eq!(flat.ncols, 2 * n);
     }
 
-    /// The 2×2 block matrix must be symmetric when `k_re` is symmetric and
-    /// `k_im` is symmetric (standard H¹ bilinear forms are symmetric).
+    /// The 2脳2 block matrix must be symmetric when `k_re` is symmetric and
+    /// `k_im` is symmetric (standard H鹿 bilinear forms are symmetric).
     ///
     /// Symmetry of `[K_re, -K_im; K_im, K_re]`:
-    /// Entry (i, j) = K_re[i,j]   and (j, i) = K_re[j,i] = K_re[i,j] ✓
+    /// Entry (i, j) = K_re[i,j]   and (j, i) = K_re[j,i] = K_re[i,j] 鉁?
     /// Entry (i, n+j) = -K_im[i,j] and (n+j, i) = K_im[j,i] = K_im[i,j]
-    /// → NOT symmetric in general (block off-diagonal is skew-symmetric).
-    /// But the full system IS the right formulation for Re{A}·x_re − Im{A}·x_im = f_re.
+    /// 鈫?NOT symmetric in general (block off-diagonal is skew-symmetric).
+    /// But the full system IS the right formulation for Re{A}路x_re 鈭?Im{A}路x_im = f_re.
     #[test]
     fn flat_csr_diagonal_positive() {
         let mesh  = Mesh::<2>::unit_square_tri(4);
@@ -947,8 +950,8 @@ mod tests {
         let flat = sys.to_flat_csr();
         let n = sys.n_dofs();
 
-        // Diagonal entries come from K_re; for small ω on a coarse mesh at
-        // interior nodes these should all be positive (K dominates ω²M).
+        // Diagonal entries come from K_re; for small 蠅 on a coarse mesh at
+        // interior nodes these should all be positive (K dominates 蠅虏M).
         for i in 0..2 * n {
             let d = flat.get(i, i);
             // Not necessarily positive on boundary-adjacent nodes, just check finite.
@@ -989,3 +992,5 @@ mod tests {
         assert_eq!(&rhs[n..], f_im.as_slice());
     }
 }
+
+
