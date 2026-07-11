@@ -22,10 +22,14 @@ use std::f64::consts::PI;
 use fem_assembly::{
     Assembler,
     coefficient::ConstantVectorCoeff,
+    dg::dg_advection::{
+        assemble_dg_interior_faces, DGAdvectionIntegrator, SipDgDiffusion,
+    },
+    interior_faces::InteriorFaceList,
     standard::{ConvectionIntegrator, DiffusionIntegrator, MassIntegrator},
 };
 use fem_io::read_msh_file;
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::{spadd, CooMatrix, CsrMatrix};
 use fem_mesh::Mesh;
 use fem_solver::{
     solve_cg,
@@ -34,7 +38,7 @@ use fem_solver::{
     SolverConfig,
 };
 use fem_space::{
-    H1Space,
+    H1Space, L2Space,
     fe_space::FESpace,
     constraints::{apply_dirichlet, boundary_dofs},
 };
@@ -152,15 +156,87 @@ fn main() {
 }
 
 fn solve_case(mesh: Mesh<2>, args: &Args) -> SolveResult {
+    let qo = 3u8;
+
+    if args.use_dg {
+        // ── DG (discontinuous Galerkin) formulation ──
+        let order = 1u8;
+        let space = L2Space::new(mesh.clone(), order);
+        let n_dofs = space.n_dofs();
+        let ifl = InteriorFaceList::build(space.mesh());
+
+        // Volume terms
+        let m = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo);
+        let s_vol = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: args.kappa }], qo);
+        let k_vol = Assembler::assemble_bilinear(
+            &space,
+            &[&ConvectionIntegrator { velocity: ConstantVectorCoeff(vec![args.vx, args.vy]) }],
+            qo,
+        );
+
+        // Interior face terms
+        let vel = ConstantVectorCoeff(vec![args.vx, args.vy]);
+        let mut k_coo = CooMatrix::new(n_dofs, n_dofs);
+        assemble_dg_interior_faces(&mut k_coo, space.mesh(), &space, &ifl, order, qo,
+            &DGAdvectionIntegrator { velocity: vel });
+        let k_face = k_coo.into_csr();
+
+        let mut s_coo = CooMatrix::new(n_dofs, n_dofs);
+        let penalty = 4.0; // (p+1)^2 = 4 for p=1
+        assemble_dg_interior_faces(&mut s_coo, space.mesh(), &space, &ifl, order, qo,
+            &SipDgDiffusion { kappa: args.kappa, penalty });
+        let s_face = s_coo.into_csr();
+
+        let k = spadd(&k_vol, &k_face);
+        let s = spadd(&s_vol, &s_face);
+
+        let solve_cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1200, verbose: false, ..SolverConfig::default() };
+        let minv_k = mass_inverse_times(&m, &s, &solve_cfg);
+        let minv_c = mass_inverse_times(&m, &k, &solve_cfg);
+
+        let split = AdvectionDiffusionSplit {
+            minv_c,
+            minv_k,
+            bc_dofs: vec![],
+        };
+
+        let n = n_dofs;
+        let u0 = vec![1.0; n];
+
+        let u_ref = rk4_reference(&split, &u0, args.t_end, args.dt.min(1.0e-4));
+        let reference_norm = vector_norm(&u_ref);
+
+        let imex_driver = ImexTimeStepper;
+        let mut u_euler = u0.clone();
+        let t_e = imex_driver.integrate_euler(&split, 0.0, args.t_end, &mut u_euler, args.dt);
+        let mut u_ssp2 = u0.clone();
+        let t_s = imex_driver.integrate_ssp2(&split, 0.0, args.t_end, &mut u_ssp2, args.dt);
+        let mut u_rk3 = u0.clone();
+        let t_r = imex_driver.integrate_rk3(&split, 0.0, args.t_end, &mut u_rk3, args.dt);
+        let mut u_ark3 = u0.clone();
+        let ark3 = ImexArk3 { rtol: 1e-6, atol: 1e-9, dt_min: 1e-10, dt_max: args.dt, ..Default::default() };
+        let (t_a, dt_last) = imex_driver.integrate_ark3(&split, 0.0, args.t_end, &mut u_ark3, args.dt, &ark3);
+
+        return SolveResult {
+            n: args.n, dt: args.dt, t_end: args.t_end, kappa: args.kappa,
+            vx: args.vx, vy: args.vy, n_dofs, reference_norm,
+            euler: build_method_result(&u_euler, &u_ref, t_e, None),
+            ssp2: build_method_result(&u_ssp2, &u_ref, t_s, None),
+            rk3: build_method_result(&u_rk3, &u_ref, t_r, None),
+            ark3: build_method_result(&u_ark3, &u_ref, t_a, Some(dt_last)),
+        };
+    }
+
+    // ── CG (continuous Galerkin) formulation ──
     let space = H1Space::new(mesh, 1);
     let n_dofs = space.n_dofs();
 
-    let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
-    let diff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: args.kappa }], 3);
+    let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo);
+    let diff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: args.kappa }], qo);
     let conv = Assembler::assemble_bilinear(
         &space,
         &[&ConvectionIntegrator { velocity: ConstantVectorCoeff(vec![args.vx, args.vy]) }],
-        3,
+        qo,
     );
 
     let dm = space.dof_manager();
@@ -348,6 +424,7 @@ struct Args {
     vx: f64,
     vy: f64,
     mesh_file: Option<String>,
+    use_dg: bool,
 }
 
 fn parse_args() -> Args {
@@ -359,6 +436,7 @@ fn parse_args() -> Args {
         vx: 1.0,
         vy: 0.3,
         mesh_file: None,
+        use_dg: true,
     };
 
     let mut it = std::env::args().skip(1);
@@ -371,6 +449,8 @@ fn parse_args() -> Args {
             "--kappa" => a.kappa = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
             "--vx" => a.vx = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0),
             "--vy" => a.vy = it.next().unwrap_or("0.3".into()).parse().unwrap_or(0.3),
+            "-dg" | "--discontinuous-galerkin" => a.use_dg = true,
+            "-cg" | "--continuous-galerkin" => a.use_dg = false,
             _ => {}
         }
     }
@@ -387,7 +467,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_default_case_preserves_expected_method_ordering() {
-        let args = Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None };
+        let args = Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false };
         let result = solve(&args);
         assert_eq!(result.n_dofs, 81);
         assert!((result.euler.final_time - result.t_end).abs() < 1.0e-12);
@@ -400,8 +480,8 @@ mod tests {
 
     #[test]
     fn ex41_imex_smaller_dt_improves_euler_and_rk3_accuracy() {
-        let coarse = solve(&Args { n: 8, dt: 0.02, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
-        let fine   = solve(&Args { n: 8, dt: 0.005, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
+        let coarse = solve(&Args { n: 8, dt: 0.02, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
+        let fine   = solve(&Args { n: 8, dt: 0.005, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
         assert!(fine.euler.error < coarse.euler.error * 0.5,
             "Euler refinement gain too small: coarse={} fine={}", coarse.euler.error, fine.euler.error);
         assert!(fine.rk3.error < coarse.rk3.error * 0.1,
@@ -414,7 +494,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_pure_diffusion_limit_favors_high_order_methods() {
-        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0, mesh_file: None });
+        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0, mesh_file: None, use_dg: false });
         assert!(result.euler.error < 5.0e-5, "Euler error too large in pure diffusion: {}", result.euler.error);
         assert!(result.ssp2.error < result.euler.error * 1.0e-2,
             "SSP2 should sharply improve in pure diffusion: euler={} ssp2={}", result.euler.error, result.ssp2.error);
@@ -424,7 +504,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_stronger_diffusion_keeps_high_order_schemes_accurate() {
-        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 1.0, vy: 0.3, mesh_file: None });
+        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
         assert!(result.euler.error.is_finite() && result.ssp2.error.is_finite());
         assert!(result.rk3.error < result.euler.error * 1.0e-2,
             "RK3 should remain far more accurate under stronger diffusion: euler={} rk3={}", result.euler.error, result.rk3.error);
@@ -436,15 +516,15 @@ mod tests {
     #[test]
     fn ex41_imex_dof_count_matches_p1_h1_formula() {
         for &n in &[6usize, 8usize, 10usize] {
-            let result = solve(&Args { n, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
+            let result = solve(&Args { n, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
             assert_eq!(result.n_dofs, (n + 1) * (n + 1));
         }
     }
 
     #[test]
     fn ex41_imex_higher_kappa_decays_faster_in_pure_diffusion() {
-        let low_kappa  = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0, mesh_file: None });
-        let high_kappa = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 0.0, vy: 0.0, mesh_file: None });
+        let low_kappa  = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0, mesh_file: None, use_dg: false });
+        let high_kappa = solve(&Args { n: 8, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 0.0, vy: 0.0, mesh_file: None, use_dg: false });
         assert!(low_kappa.rk3.solution_norm > 0.0 && high_kappa.rk3.solution_norm > 0.0);
         assert!(high_kappa.rk3.solution_norm < low_kappa.rk3.solution_norm,
             "higher kappa should increase decay: low={} high={}",
@@ -454,7 +534,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_zero_final_time_is_noop_for_all_methods() {
-        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.0, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
+        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.0, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
         assert!((result.euler.final_time - 0.0).abs() < 1.0e-14);
         assert!((result.ssp2.final_time - 0.0).abs() < 1.0e-14);
         assert!((result.rk3.final_time - 0.0).abs() < 1.0e-14);
@@ -467,7 +547,7 @@ mod tests {
 
     #[test]
     fn ex41_imex_ark3_last_dt_is_positive_and_bounded() {
-        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.215, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None });
+        let result = solve(&Args { n: 8, dt: 0.01, t_end: 0.215, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
         let dt_last = result.ark3.dt_last.expect("ARK3 should report last dt");
         assert!(dt_last > 0.0, "ARK3 last dt must be positive");
         assert!(dt_last <= result.dt + 1.0e-12,
