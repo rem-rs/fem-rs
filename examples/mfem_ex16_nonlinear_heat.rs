@@ -217,6 +217,7 @@ struct Args {
     dt: f64,
     alpha: f64,
     kappa: f64,
+    ode_solver_type: i32, // 1=BE, 2=SDIRK2, 3=SDIRK33, 22=Midpoint, 23=SDIRK23
 }
 
 fn parse_args() -> Args {
@@ -228,6 +229,7 @@ fn parse_args() -> Args {
         dt: 1.0e-2,
         alpha: 1.0e-2,
         kappa: 0.5,
+        ode_solver_type: 3, // SDIRK33 (default, matching C++ -s 23)
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -239,6 +241,7 @@ fn parse_args() -> Args {
             "-dt" | "--time-step" => a.dt        = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
             "-a"  | "--alpha"   => a.alpha       = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
             "-k"  | "--kappa"   => a.kappa       = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
+            "-s"  | "--ode-solver" => a.ode_solver_type = it.next().unwrap_or("3".into()).parse().unwrap_or(3),
             _ => {}
         }
     }
@@ -266,7 +269,7 @@ fn main() {
     let dim = 2;
 
     // 3. Define the ODE solver used for time integration.
-    //    SDIRK33 (type 23) — built-in SDIRK coefficients at the top of this file.
+    //    Types: 1=BE, 2=SDIRK2, 3=SDIRK33, 22=Midpoint, 23=SDIRK23, 34=SDIRK34
 
     // 4. Refine the mesh uniformly.
     let mesh = if args.ref_levels > 0 {
