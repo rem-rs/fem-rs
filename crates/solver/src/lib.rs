@@ -119,6 +119,7 @@ pub mod adjoint;
 pub mod bdf;
 pub mod complex_ams;
 pub mod dae;
+pub mod div_free;
 pub mod events;
 pub use block_operator::{
     BlockOperator,

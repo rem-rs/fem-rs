@@ -726,6 +726,114 @@ where
     coo.into_csr()
 }
 
+/// Assemble the mixed HCurl × HDiv weak curl matrix (magnetization coupling).
+///
+/// Computes `M[i,j] = ∫ ν · curl(ψ_j) · w_i dx`
+/// where `ψ_j ∈ H(curl)` (columns) and `w_i ∈ H(div)` (rows).
+///
+/// This is the matrix form of MFEM's `VectorFECurlIntegrator` on
+/// `ParMixedBilinearForm(HDivFESpace_, HCurlFESpace_)`.  Used by Tesla
+/// (magnetostatics) for magnetization source coupling `weakCurlMuInv_`.
+pub fn assemble_hcurl_hdiv_weak_curl<M: fem_mesh::topology::MeshTopology + Clone + 'static>(
+    nd_space: &HCurlSpace<M>,
+    rt_space: &HDivSpace<M>,
+    quad_order: u8,
+    nu: f64,
+) -> CsrMatrix<f64>
+where
+    M: fem_mesh::topology::MeshTopology,
+{
+    use crate::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian};
+    use fem_element::ReferenceElement;
+
+    let mesh = nd_space.mesh();
+    let dim = mesh.dim() as usize;
+    let n_rows = rt_space.n_dofs();
+    let n_cols = nd_space.n_dofs();
+    let mut coo = CooMatrix::new(n_rows, n_cols);
+
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let nd_ref = ref_elem_vec(et, nd_space.order(), SpaceType::HCurl)
+            .expect("HCurl ref elem");
+        let rt_ref = ref_elem_vec(et, rt_space.order(), SpaceType::HDiv)
+            .expect("HDiv ref elem");
+        let n_nd = nd_ref.n_dofs();
+        let n_rt = rt_ref.n_dofs();
+
+        let global_nd: Vec<usize> = nd_space.element_dofs(e)
+            .iter().map(|&d| d as usize).collect();
+        let global_rt: Vec<usize> = rt_space.element_dofs(e)
+            .iter().map(|&d| d as usize).collect();
+        let ng_nd = global_nd.len();
+        let ng_rt = global_rt.len();
+
+        let quad = nd_ref.quadrature(quad_order);
+        let mut me = vec![0.0; ng_rt * ng_nd];
+        let mut nd_curl = vec![0.0; n_nd * dim]; // curl of HCurl basis
+        let mut rt_basis = vec![0.0; n_rt * dim];
+
+        let use_iso = !matches!(et, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
+        let ge = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
+        let nodes = mesh.element_nodes(e);
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (w, jit, det_j): (f64, nalgebra::DMatrix<f64>, f64) = if use_iso {
+                let g: &dyn ReferenceElement = ge.as_deref().unwrap();
+                let (jac, det, _) = isoparametric_jacobian(mesh, &nodes, g, xi, dim);
+                (quad.weights[qi] * det.abs(), jac.try_inverse().unwrap().transpose(), det)
+            } else {
+                let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
+                (quad.weights[qi] * tr.det_j().abs(), tr.jacobian_inv_t().clone(), tr.det_j())
+            };
+
+            nd_ref.eval_curl(xi, &mut nd_curl);
+            rt_ref.eval_basis_vec(xi, &mut rt_basis);
+
+            let jac = jit.clone().try_inverse().map(|m| m.transpose())
+                .unwrap_or_else(|| nalgebra::DMatrix::identity(dim, dim));
+
+            for j in 0..ng_nd {
+                // Physical curl of HCurl basis: curl(ψ)_phys = (1/det_J) * J · curl(ψ)_ref (3D)
+                // or curl_2d(ψ)_phys = (1/det_J) * curl(ψ)_ref (2D scalar)
+                let (cx, cy, cz) = if dim == 2 {
+                    // 2D: curl gives scalar (z-component)
+                    let curl_ref = nd_curl[j];
+                    let curl_phys = curl_ref / det_j;
+                    (0.0, 0.0, curl_phys)
+                } else {
+                    // 3D: curl gives 3-vector, transform: curl_phys = (1/det_J) * J · curl_ref
+                    let id = 1.0 / det_j;
+                    let crx = nd_curl[j*dim];
+                    let cry = nd_curl[j*dim + 1];
+                    let crz = nd_curl[j*dim + 2];
+                    (id * (jac[(0,0)]*crx + jac[(0,1)]*cry + jac[(0,2)]*crz),
+                     id * (jac[(1,0)]*crx + jac[(1,1)]*cry + jac[(1,2)]*crz),
+                     id * (jac[(2,0)]*crx + jac[(2,1)]*cry + jac[(2,2)]*crz))
+                };
+
+                for i in 0..ng_rt {
+                    // HDiv Piola: w = (1/det_J) * J · w_ref
+                    let id = 1.0 / det_j;
+                    let wx = id * (jac[(0,0)]*rt_basis[i*dim] + if dim>1 {jac[(0,1)]*rt_basis[i*dim+1]} else {0.0} + if dim>2 {jac[(0,2)]*rt_basis[i*dim+2]} else {0.0});
+                    let wy = if dim>1 { id * (jac[(1,0)]*rt_basis[i*dim] + jac[(1,1)]*rt_basis[i*dim+1] + if dim>2 {jac[(1,2)]*rt_basis[i*dim+2]} else {0.0}) } else { 0.0 };
+                    let wz = if dim>2 { id * (jac[(2,0)]*rt_basis[i*dim] + jac[(2,1)]*rt_basis[i*dim+1] + jac[(2,2)]*rt_basis[i*dim+2]) } else { 0.0 };
+
+                    let dot = cx*wx + cy*wy + cz*wz;
+                    me[i * ng_nd + j] += w * nu * dot;
+                }
+            }
+        }
+        for (ir, &r) in global_rt.iter().enumerate() {
+            for (ic, &c) in global_nd.iter().enumerate() {
+                let v = me[ir * ng_nd + ic];
+                if v != 0.0 { coo.add(r, c, v); }
+            }
+        }
+    }
+    coo.into_csr()
+}
+
 /// Constant P0 reference element: 1 DOF, constant basis = 1.0, zero gradient.
 struct P0;
 

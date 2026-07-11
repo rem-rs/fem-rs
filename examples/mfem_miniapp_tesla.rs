@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 //! # Tesla Mini App: Simple Magnetostatics [serial 1:1 translation]
 //!
-//! Solves `∇×(ν∇×A) = J` with PEC BC using AMS preconditioned CG.
-//! Post-processes `B = ∇×A`.
+//! Solves `∇×(ν∇×A) = J` in 3D with PEC BC using AMS preconditioned CG.
 //!
 //! ## Usage
 //! ```text
@@ -15,8 +14,9 @@ use fem_assembly::mixed::assemble_hcurl_hdiv_mixed;
 use fem_assembly::standard::{CurlCurlIntegrator, VectorDomainLFIntegrator, VectorMassIntegrator};
 use fem_assembly::vector_assembler::VectorAssembler;
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::{fem_to_linlvo_csr, CooMatrix, CsrMatrix};
+use fem_linalg::{fem_to_linlvo_csr, CsrMatrix};
 use fem_mesh::{refine_uniform_3d, Mesh};
+use fem_solver::div_free::project_divergence_free;
 use fem_solver::{solve_cg, solve_pcg_ams, AmsSolverConfig, SolverConfig};
 use fem_space::constraints::dirichlet::boundary_dofs_hcurl;
 use fem_space::fe_space::FESpace;
@@ -24,147 +24,127 @@ use fem_space::{H1Space, HCurlSpace, HDivSpace};
 
 const MU0: f64 = 4.0e-7 * std::f64::consts::PI;
 
-/// Apply divergence-free projection: `jr = rhs - G·(G^T·M·G)^{-1}·G^T·M·rhs`
-/// Removes the irrotational (non-divergence-free) part of the RHS.
-fn project_div_free(
-    rhs: &mut [f64],
-    g: &CsrMatrix<f64>,
-    m: &CsrMatrix<f64>,
-    h1_space: &H1Space<Mesh<3>>,
-) {
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 200,
-        verbose: false, ..Default::default() };
-    let n_h1 = h1_space.n_dofs();
-    let n_nd = rhs.len();
-
-    // rhoh = G^T * M * rhs  (project RHS onto H1)
-    let mut m_rhs = vec![0.0; n_nd];
-    m.spmv(rhs, &mut m_rhs);
-    let mut rhoh = vec![0.0; n_h1];
-    for j in 0..n_nd {
-        for r in g.row_ptr[j]..g.row_ptr[j+1] {
-            rhoh[g.col_idx[r] as usize] += g.values[r] * m_rhs[j];
-        }
-    }
-
-    // Build A_h1 = G^T * M * G (H1 coarse operator)
-    let mut coo = CooMatrix::new(n_h1, n_h1);
-    for i in 0..n_h1 {
-        for r in g.row_ptr[i]..g.row_ptr[i+1] {
-            let k = g.col_idx[r] as usize;
-            let gik = g.values[r];
-            for c in g.row_ptr[k]..g.row_ptr[k+1] {
-                let j = g.col_idx[c] as usize;
-                let gkj = g.values[c];
-                // Find M[k,k] (use full M for consistency)
-                if let Some(p) = m.find_entry(k, j) {
-                    coo.add(i, j, gik * m.values[p] * gkj);
-                }
-            }
-        }
-    }
-    let a_h1 = coo.into_csr();
-
-    // Solve A_h1 * x = rhoh
-    let mut x_h1 = vec![0.0; n_h1];
-    let _ = solve_cg(&a_h1, &rhoh, &mut x_h1, &cfg);
-
-    // rhs -= G * x_h1
-    let mut gx = vec![0.0; n_nd];
-    g.spmv(&x_h1, &mut gx);
-    for i in 0..n_nd { rhs[i] -= gx[i]; }
-}
-
-/// Impose essential BC by zeroing rows/cols (AMS-compatible).
-fn apply_essential_bc_ams(mat: &mut CsrMatrix<f64>, rhs: &mut [f64], dofs: &[u32]) {
-    for &d in dofs {
-        let d_us = d as usize;
-        mat.apply_dirichlet_symmetric(d_us, 0.0, rhs);
-        if let Some(k) = mat.find_entry(d_us, d_us) {
-            mat.values[k] = 1.0;
-        }
-    }
-}
-
 pub struct TeslaSolver {
+    // Spaces
     h1: H1Space<Mesh<3>>,
     nd: HCurlSpace<Mesh<3>>,
     rt: HDivSpace<Mesh<3>>,
-    stiffness: CsrMatrix<f64>,
-    hdiv_mass: CsrMatrix<f64>,
-    weak_curl: CsrMatrix<f64>,
-    g_fem: CsrMatrix<f64>,
-    curl: CsrMatrix<f64>,
-    a: Vec<f64>,
-    b: Vec<f64>,
-    ess_dofs: Vec<u32>,
+
+    // Bilinear forms
+    curl_mu_inv_curl: CsrMatrix<f64>,  // ∇×(ν∇×)
+    h_curl_mass: CsrMatrix<f64>,       // ∫u·v on HCurl
+    h_div_h_curl_mu_inv: CsrMatrix<f64>, // Mixed HCurl×HDiv mass (ν)
+
+    // Discrete operators
+    grad: CsrMatrix<f64>,  // H1 → HCurl
+    curl: CsrMatrix<f64>,  // HCurl → HDiv
+
+    // Solution vectors
+    a: Vec<f64>,  // Vector potential (HCurl)
+    b: Vec<f64>,  // Magnetic flux (HDiv)
+    // BCs
+    ess_tdofs: Vec<u32>,
 }
 
 impl TeslaSolver {
     pub fn new(mesh: Mesh<3>, order: u8) -> Self {
         let h1 = H1Space::new(mesh.clone(), order);
         let nd = HCurlSpace::new(mesh.clone(), order);
-        let n_nd = nd.n_dofs();
         let rt = HDivSpace::new(mesh.clone(), 0); // RT0 for curl_3d compat
+        let n_nd = nd.n_dofs();
         let n_rt = rt.n_dofs();
-        let ess_dofs = boundary_dofs_hcurl(&mesh, &nd, &mesh.unique_boundary_tags());
+        let ess_tdofs = {
+            let tags = mesh.unique_boundary_tags();
+            boundary_dofs_hcurl(&mesh, &nd, &tags)
+        };
         let nu = 1.0 / MU0;
         let qo = (2 * order + 1).max(4);
 
-        let stiffness = VectorAssembler::assemble_bilinear(
-            &nd, &[&CurlCurlIntegrator { mu: nu },
-                   &VectorMassIntegrator { alpha: 1e-12 }], qo);
-        let hdiv_mass = VectorAssembler::assemble_bilinear(
-            &rt, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
-        let weak_curl = assemble_hcurl_hdiv_mixed(&nd, &rt, qo, nu);
-        let g_fem = DiscreteLinearOperator::gradient(&h1, &nd).expect("gradient");
+        // Assembled in constructor (C++ splits Assemble/Solve)
+        let curl_mu_inv_curl = VectorAssembler::assemble_bilinear(
+            &nd, &[&CurlCurlIntegrator { mu: nu }], qo);
+        let h_curl_mass = VectorAssembler::assemble_bilinear(
+            &nd, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
+        let h_div_h_curl_mu_inv = assemble_hcurl_hdiv_mixed(&nd, &rt, qo, nu);
+        let grad = DiscreteLinearOperator::gradient(&h1, &nd).expect("gradient");
         let curl = DiscreteLinearOperator::curl_3d(&nd, &rt).expect("curl_3d");
 
         TeslaSolver {
-            h1, nd, rt, stiffness, hdiv_mass, weak_curl,
-            g_fem, curl,
+            h1, nd, rt,
+            curl_mu_inv_curl, h_curl_mass, h_div_h_curl_mu_inv,
+            grad, curl,
             a: vec![0.0; n_nd],
             b: vec![0.0; n_rt],
-            ess_dofs,
+            ess_tdofs,
         }
     }
 
-    /// Solve ∇×(ν∇×A) = J with PEC BC, using AMS preconditioner.
-    /// `j_src`: current density J(x) as optional vector function.
-    /// `m_src`: magnetization M(x) as optional vector function.
+    /// Solve ∇×(ν∇×A) = J with PEC BC.
+    ///
+    /// Equivalent to MFEM's `TeslaSolver::Solve()`:
+    /// 1. Compute divergence-free current j_ from j_src
+    /// 2. AMS PCG for A
+    /// 3. B = ∇×A
+    /// 4. H = solve M_HCurl * h = M_mixed * B
     pub fn solve(
         &mut self,
         j_src: Option<Box<dyn Fn(&[f64], &mut [f64]) + Send + Sync>>,
-        _m_src: Option<Box<dyn Fn(&[f64], &mut [f64]) + Send + Sync>>,
     ) {
-        let cfg = AmsSolverConfig {
-            inner_cfg: SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500,
-                verbose: true, ..Default::default() },
-            ..Default::default()
-        };
-        let n = self.nd.n_dofs();
-        let mut rhs = vec![0.0; n];
+        let n_nd = self.nd.n_dofs();
 
-        // J source
-        if let Some(j) = j_src {
-            let src = VectorDomainLFIntegrator { f: FnVectorCoeff(j) };
-            rhs = VectorAssembler::assemble_linear(&self.nd, &[&src], 15);
+        // ── 1a. RHS from current density J ──────────────────────────────
+        let mut j = vec![0.0; n_nd];
+        if let Some(j_fn) = j_src {
+            let src = VectorDomainLFIntegrator { f: FnVectorCoeff(j_fn) };
+            j = VectorAssembler::assemble_linear(&self.nd, &[&src], 15);
         }
 
-        // Divergence-free projection of RHS
-        project_div_free(&mut rhs, &self.g_fem, &self.stiffness, &self.h1);
+        // ── 1b. Divergence-free projection of J ──────────────────────────
+        let cfg_h1 = SolverConfig {
+            rtol: 1e-12, atol: 0.0, max_iter: 200,
+            verbose: false, ..Default::default()
+        };
+        let solve_h1 = |a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64]| {
+            // Pin first DOF to handle gradient nullspace
+            use fem_space::constraints::dirichlet::eliminate_dirichlet;
+            let ess = vec![0u32];
+            let vals = vec![0.0];
+            let (red, rb, free, _) = eliminate_dirichlet(a, b, &ess, &vals);
+            let mut xr = vec![0.0; red.nrows];
+            solve_cg(&red, &rb, &mut xr, &cfg_h1).expect("H1 coarse solve");
+            for (i, &d) in free.iter().enumerate() { x[d as usize] = xr[i]; }
+        };
+        project_divergence_free(&mut j, &self.grad, &self.h_curl_mass,
+                                self.h1.n_dofs(), &solve_h1);
 
-        // Apply PEC BCs on the FULL system (AMS-compatible: zero rows/cols)
-        let mut a_ams = self.stiffness.clone();
-        apply_essential_bc_ams(&mut a_ams, &mut rhs, &self.ess_dofs);
+        // ── 1c. jd_ = M * j  (mass-matrix-weighted RHS) ─────────────────
+        let mut jd = vec![0.0; n_nd];
+        self.h_curl_mass.spmv(&j, &mut jd);
 
-        // AMS preconditioned CG
-        let g_linlvo = fem_to_linlvo_csr(&self.g_fem);
-        self.a = vec![0.0; n];
-        solve_pcg_ams(&a_ams, &g_linlvo, &rhs, &mut self.a, &cfg)
+        // ── 2. AMS solve for A ──────────────────────────────────────────
+        // Apply PEC BCs (AMS-compatible: zero rows/cols)
+        let mut a_ams = self.curl_mu_inv_curl.clone();
+        for &d in &self.ess_tdofs {
+            a_ams.apply_dirichlet_symmetric(d as usize, 0.0, &mut jd);
+            if let Some(k) = a_ams.find_entry(d as usize, d as usize) {
+                a_ams.values[k] = 1.0;
+            }
+        }
+
+        let g_linlvo = fem_to_linlvo_csr(&self.grad);
+        let ams_cfg = AmsSolverConfig {
+            inner_cfg: SolverConfig {
+                rtol: 1e-12, atol: 0.0, max_iter: 200,
+                verbose: true, ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut a = vec![0.0; n_nd];
+        solve_pcg_ams(&a_ams, &g_linlvo, &jd, &mut a, &ams_cfg)
             .expect("AMS PCG");
+        self.a = a;
 
-        // B = ∇×A
+        // ── 3. B = ∇×A ─────────────────────────────────────────────────
         self.curl.spmv(&self.a, &mut self.b);
     }
 
@@ -176,33 +156,34 @@ impl TeslaSolver {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut mesh_file = "data/beam-tet.mesh".to_string();
-    let mut order: u8 = 1; let mut refs = 0usize;
+    let mut order: u8 = 1;
+    let mut refs = 0usize;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-m"|"--mesh" => { i+=1; if i<args.len() { mesh_file=args[i].clone(); }}
-            "-o"|"--order" => { i+=1; if i<args.len() { order=args[i].parse().unwrap_or(1); }}
-            "-rs"|"--serial-ref-levels" => { i+=1; if i<args.len() { refs=args[i].parse().unwrap_or(0); }}
+            "-m"|"--mesh" => { i+=1; if i<args.len() { mesh_file = args[i].clone(); }}
+            "-o"|"--order" => { i+=1; if i<args.len() { order = args[i].parse().unwrap_or(1); }}
+            "-rs"|"--serial-ref-levels" => { i+=1; if i<args.len() { refs = args[i].parse().unwrap_or(0); }}
             _ => {}
         }
         i += 1;
     }
     let mfem = read_mfem_file(&mesh_file).expect("mesh");
-    let mut mesh: Mesh<3> = mfem.mesh3d.expect("3D");
+    let mut mesh: Mesh<3> = mfem.mesh3d.expect("3D mesh");
     for _ in 0..refs { mesh = refine_uniform_3d(&mesh); }
     eprintln!("mesh={mesh_file} o={order} r={refs}");
 
-    let mut s = TeslaSolver::new(mesh, order);
-    let (h1, nd, rt) = s.sizes();
+    let mut ts = TeslaSolver::new(mesh, order);
+    let (h1, nd, rt) = ts.sizes();
     println!("H1 {h1}  HCurl {nd}  HDiv {rt}");
 
     let j_coil = Box::new(|x: &[f64], out: &mut [f64]| {
         out[0] = 0.0; out[1] = 0.0;
         out[2] = if x[0].abs() < 0.3 && x[1].abs() < 0.3 { 1e6 } else { 0.0 };
     });
-    s.solve(Some(j_coil), None);
+    ts.solve(Some(j_coil));
 
-    let an = s.a.iter().map(|v| v*v).sum::<f64>().sqrt();
-    let bn = s.b.iter().map(|v| v*v).sum::<f64>().sqrt();
+    let an = ts.a.iter().map(|v| v*v).sum::<f64>().sqrt();
+    let bn = ts.b.iter().map(|v| v*v).sum::<f64>().sqrt();
     println!("|A|₂ = {an:.6e}  |B|₂ = {bn:.6e}");
 }
