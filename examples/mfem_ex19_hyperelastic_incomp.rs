@@ -69,7 +69,7 @@ fn res<M:MeshTopology>(m:&M,d:usize,ou:u8,op:u8,qo:u8,mu:f64,u:&[f64],p:&[f64],
             for k in 0..nu{for i in 0..d{for j in 0..d{F[(i,j)]+=ue[k*d+i]*gp[k*d+j];}}}
             let dJ=F.determinant();let iF=F.clone().try_inverse().unwrap_or_else(||DMatrix::<f64>::identity(d,d));let FT=iF.transpose();
             let mut pres=0.;for k in 0..np{pres+=pe[k]*pp[k];}
-            let mut P=DMatrix::<f64>::zeros(d,d);for i in 0..d{for j in 0..d{P[(i,j)]=mu*dJ*F[(i,j)]-pres*dJ*FT[(i,j)];}}
+            let mut P=DMatrix::<f64>::zeros(d,d);for i in 0..d{for j in 0..d{P[(i,j)]=mu*F[(i,j)]-pres*FT[(i,j)];}}
             for k in 0..nu{for i in 0..d{let mut s=0.;for j in 0..d{s+=P[(i,j)]*gp[k*d+j];}fu[k*d+i]+=w*s;}}
             for m in 0..np{fp[m]+=w*(dJ-1.)*pp[m];}
         }
@@ -180,14 +180,23 @@ fn jac_full<M:MeshTopology>(m:&M,d:usize,ou:u8,op:u8,qo:u8,mu:f64,u:&[f64],p:&[f
             let dJ=F.determinant();let iF=F.clone().try_inverse().unwrap_or_else(||DMatrix::<f64>::identity(d,d));let FT=iF.transpose();
             let mut pres=0.;for k in 0..np_{pres+=pe[k]*pp[k];}
             for a in 0..nu_{for id in 0..d{let r=a*d+id;for b in 0..nu_{for jd in 0..d{let c=b*d+jd;
-                let mut v=0.;for n in 0..d{for l in 0..d{
-                    v+=dJ*(mu*F[(id,l)]-pres*FT[(id,l)])*FT[(jd,n)]*gp[a*d+l]*gp[b*d+n];
-                    if jd==id&&n==l{v+=dJ*mu*gp[a*d+l]*gp[b*d+n];}
-                    v+=dJ*pres*FT[(id,n)]*FT[(jd,l)]*gp[a*d+l]*gp[b*d+n];
-                }}ku[r*nfu+c]+=v*w;
+                // Tangent C = ∂P/∂F for P = μ·F - p·F^{-T}
+                // C[id][a][jd][b] = μ·δ_{id,jd}·δ_{a,b} + pres·(F^{-T})_{id,b}·(F^{-T})_{jd,a}
+                let mut v=0.;
+                if id==jd{for l in 0..d{v+=mu*gp[a*d+l]*gp[b*d+l];}}
+                let ftn=FT[(id,0)]*gp[b*d+0]+if d>1{FT[(id,1)]*gp[b*d+1]}else{0.}+if d>2{FT[(id,2)]*gp[b*d+2]}else{0.};
+                let ftl=FT[(jd,0)]*gp[a*d+0]+if d>1{FT[(jd,1)]*gp[a*d+1]}else{0.}+if d>2{FT[(jd,2)]*gp[a*d+2]}else{0.};
+                v+=pres*ftn*ftl;
+                ku[r*nfu+c]+=v*w;
             }}}}
-            for ip in 0..np_{for ju in 0..nu_{for du_ in 0..d{let c=ju*d+du_;let mut v=0.;
-                for l in 0..d{v+=dJ*FT[(du_,l)]*gp[ju*d+l]*pp[ip];}v*=w;ky[ip*nfu+c]+=v;kx[c*np_+ip]-=v;}}}
+            for ip in 0..np_{for ju in 0..nu_{for du_ in 0..d{let c=ju*d+du_;
+                // K_pu[ip][c] = ∫ dJ·F^{-T} : ∇φ · ψ  (J-derivative, has dJ)
+                let mut vp=0.;for l in 0..d{vp+=dJ*FT[(du_,l)]*gp[ju*d+l]*pp[ip];}
+                ky[ip*nfu+c]+=vp*w;
+                // K_up[c][ip] = -∫ F^{-T} : ∇φ · ψ   (PK1 pressure derivative, no dJ)
+                let mut vu=0.;for l in 0..d{vu-=FT[(du_,l)]*gp[ju*d+l]*pp[ip];}
+                kx[c*np_+ip]+=vu*w;
+            }}}
         }
         for a in 0..nfu{let gi=eu[a];for b in 0..nfu{let gj=eu[b];let v=ku[a*nfu+b];co.add(gi,gj,v);}}
         for a in 0..nfu{let gi=eu[a];for b in 0..np_{let gj=ep[b];let v=kx[a*np_+b];co.add(gi,nu+gj,v);}}
