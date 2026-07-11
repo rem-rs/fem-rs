@@ -16,7 +16,7 @@
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{Mesh, topology::MeshTopology, ElementTransformation};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
 };
@@ -145,10 +145,10 @@ fn main() {
 
     // 8. Solve with PCG + geometric multigrid preconditioner
     let mg_config = GeometricMgConfig {
-        pre_sweeps: 2, post_sweeps: 2, jacobi_omega: 0.8,
+        pre_sweeps: 2, post_sweeps: 2, chebyshev_order: 2,
         coarse_max_iter: 200, coarse_rtol: 1e-12,
     };
-    let mg_precond = GeometricMgPrecond::new(mg_config);
+    let mg_precond = GeometricMgPrecond::new(mg_config, &hierarchy);
 
     // Implement PCG with MG preconditioner manually (matching C++ PCG(*A, M, B, X, ...))
     pcg_with_mg(&hierarchy, &mg_precond, &rhs, &mut x);
@@ -222,71 +222,59 @@ fn pcg_with_mg(h: &GeometricMgHierarchy, mg: &GeometricMgPrecond,
 // ─── Build prolongation between geometrically/order-refined spaces ────────────
 
 fn build_prolongation(coarse: &H1Space<Mesh<2>>, fine: &H1Space<Mesh<2>>) -> CsrMatrix<f64> {
-    let n_coarse = coarse.n_dofs();
     let n_fine = fine.n_dofs();
+    let n_coarse = coarse.n_dofs();
     let mut coo = CooMatrix::new(n_fine, n_coarse);
-
-    let dm_c = coarse.dof_manager();
-    let dm_f = fine.dof_manager();
 
     let c_order = coarse.order();
     let f_order = fine.order();
+    let same_mesh = coarse.mesh().n_elements() == fine.mesh().n_elements();
 
-    if f_order == c_order && coarse.mesh().n_elements() < fine.mesh().n_elements() {
-        // Geometric refinement: same order, finer mesh
-        // Fine vertices at coarse vertices → injection
-        // Fine vertices at coarse edge midpoints → average
-        for fi in 0..n_fine {
-            let fx = dm_f.dof_coord(fi as u32);
-            let mut matches: Vec<usize> = Vec::new();
-            for ci in 0..n_coarse {
-                let cx = dm_c.dof_coord(ci as u32);
-                let d2 = (fx[0]-cx[0]).powi(2) + (fx[1]-cx[1]).powi(2);
-                if d2 < 1e-20 { coo.add(fi, ci, 1.0); matches.clear(); break; }
-                if d2 < 1e-10 { matches.push(ci); }
-            }
-            if matches.len() == 2 { for &ci in &matches { coo.add(fi, ci, 0.5); } }
-        }
-    } else if f_order > c_order && coarse.mesh().n_elements() == fine.mesh().n_elements() {
-        // Order refinement: same mesh, higher order on fine
-        // Evaluate each coarse basis function at each fine DOF coordinate
-        let mesh = coarse.mesh();
-        for fi in 0..n_fine {
-            let fx = dm_f.dof_coord(fi as u32);
-            // Find which element contains this point
-            for e in mesh.elem_iter() {
-                let et = mesh.element_type(e);
-                let c_dofs: Vec<usize> = coarse.element_dofs(e).iter().map(|&d| d as usize).collect();
-                let f_dofs: Vec<usize> = fine.element_dofs(e).iter().map(|&d| d as usize).collect();
-                // Check if fi is in this element
-                if let Some(_pos) = f_dofs.iter().position(|&d| d == fi) {
-                    // Evaluate coarse basis at the fine DOF reference coordinate
-                    let ref_elem = ref_elem_for(et, c_order);
-                    let qr = ref_elem.quadrature(5);
-                    // Find the reference coordinate for the fine DOF
-                    for (_qi, xi) in qr.points.iter().enumerate() {
-                        let tr = ElementTransformation::from_simplex_nodes(mesh, mesh.element_nodes(e));
-                        let xp = tr.map_to_physical(xi);
-                        let d2 = (fx[0]-xp[0]).powi(2) + (fx[1]-xp[1]).powi(2);
-                        if d2 < 1e-10 {
-                            let mut phi = vec![0.0; ref_elem.n_dofs()];
-                            ref_elem.eval_basis(xi, &mut phi);
-                            for (ci, &c_global) in c_dofs.iter().enumerate() {
-                                coo.add(fi, c_global, phi[ci]);
-                            }
-                            break;
-                        }
+    if same_mesh && f_order > c_order {
+        // p-refinement: same mesh, higher order on fine.
+        // Evaluate each coarse basis function at every fine DOF coordinate.
+        let mesh: &Mesh<2> = coarse.mesh();
+        for e in mesh.elem_iter() {
+            let et = mesh.element_type(e);
+            let c_ref = ref_elem_for(et, c_order);
+            let f_ref = ref_elem_for(et, f_order);
+            let c_dofs: Vec<usize> = coarse.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let f_dofs: Vec<usize> = fine.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let f_coords = f_ref.dof_coords();
+            let n_c = c_dofs.len();
+            let mut phi = vec![0.0; n_c];
+
+            for (li, &fg) in f_dofs.iter().enumerate() {
+                let xi = &f_coords[li];
+                c_ref.eval_basis(xi, &mut phi);
+                for (ci, &cg) in c_dofs.iter().enumerate() {
+                    if phi[ci].abs() > 1e-14 {
+                        coo.add(fg, cg, phi[ci]);
                     }
-                    break;
                 }
             }
         }
+    } else if !same_mesh && f_order == c_order {
+        // Geometric refinement: finer mesh, same order.
+        // Fine mesh has more elements; each coarse DOF maps to one or more fine DOFs.
+        // Geometric refinement: coordinate matching works for same-order spaces
+        let dm_c = coarse.dof_manager();
+        let dm_f = fine.dof_manager();
+        for fi in 0..n_fine {
+            let fx = dm_f.dof_coord(fi as u32);
+            for ci in 0..n_coarse {
+                let cx = dm_c.dof_coord(ci as u32);
+                let d2 = (fx[0]-cx[0]).powi(2) + (fx[1]-cx[1]).powi(2);
+                if d2 < 1e-20 { coo.add(fi, ci, 1.0); break; }
+            }
+        }
     } else {
-        panic!("build_prolongation: unsupported space pair (c_order={}, f_order={}, c_mesh_ne={}, f_mesh_ne={})",
-               c_order, f_order, coarse.mesh().n_elements(), fine.mesh().n_elements());
+        panic!("build_prolongation: unsupported (c_order={}, f_order={}, same_mesh={})",
+               c_order, f_order, same_mesh);
     }
     coo.into_csr()
 }
+
 
 fn ref_elem_for(et: fem_mesh::element_type::ElementType, order: u8) -> Box<dyn fem_element::ReferenceElement> {
     use fem_element::lagrange::*;

@@ -102,6 +102,7 @@ pub mod block_operator;
 pub mod eigen;
 pub mod hypre;
 pub mod lor;
+pub mod chebyshev;
 pub mod geometric_mg;
 pub mod p_multigrid;
 pub mod multirate;
