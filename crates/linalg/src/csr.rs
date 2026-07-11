@@ -419,7 +419,7 @@ impl<T: Scalar> CsrMatrix<T> {
         }
     }
 
-    fn find_entry(&self, row: usize, col: usize) -> Option<usize> {
+    pub fn find_entry(&self, row: usize, col: usize) -> Option<usize> {
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
         let len = end - start;
