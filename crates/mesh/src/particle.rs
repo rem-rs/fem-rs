@@ -51,6 +51,14 @@ impl ParticleSet {
     /// Remove particles whose element is `None` (outside domain).
     pub fn remove_outside(&mut self) { self.particles.retain(|p| p.elem.is_some()); }
 
+    /// Retain only particles satisfying `predicate` (borrows `Particle`).
+    ///
+    /// MFEM equivalent: `ParticleSet::RemoveParticles` with a custom index list.
+    pub fn retain<F>(&mut self, mut predicate: F)
+    where F: FnMut(&Particle) -> bool {
+        self.particles.retain(|p| predicate(p));
+    }
+
     // ── Locate ──────────────────────────────────────────────────────────────
 
     /// Locate in 2D Tri3 mesh.

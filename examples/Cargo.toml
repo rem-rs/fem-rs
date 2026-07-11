@@ -606,6 +606,10 @@ path = "mfem_ex43_hdf5_checkpoint.rs"
 required-features = ["io_hdf5"]
 
 [[example]]
+name = "mfem_miniapp_lorentz"
+path = "mfem_miniapp_lorentz.rs"
+
+[[example]]
 name = "mfem_mc_random_field"
 path = "mfem_mc_random_field.rs"
 
