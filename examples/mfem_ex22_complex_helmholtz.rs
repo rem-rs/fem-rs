@@ -13,7 +13,15 @@ static mut SIGMA: f64 = 20.0;
 static mut OMEGA: f64 = 10.0;
 
 fn plane_wave(x: &[f64]) -> (f64, f64) {
-    unsafe { let k = (MU * OMEGA * (EPSILON * OMEGA + SIGMA)).sqrt(); let kx = k * x[x.len()-1]; (kx.cos(), -kx.sin()) }
+    unsafe {
+        let a_re = OMEGA * EPSILON; let a_im = -SIGMA;
+        let k2_re = MU * OMEGA * a_re; let k2_im = MU * OMEGA * a_im;
+        let r = (k2_re*k2_re + k2_im*k2_im).sqrt().sqrt();
+        let theta = 0.5 * k2_im.atan2(k2_re);
+        let k_re = r * theta.cos(); let k_im = r * theta.sin();
+        let kx = k_re * x[x.len()-1]; let ex = (k_im * x[x.len()-1]).exp();
+        (ex * kx.cos(), -ex * kx.sin())
+    }
 }
 
 fn main() {
@@ -84,4 +92,5 @@ fn main() {
         Err(e) => eprintln!("Solve failed: {e}"),
     }
 }
+
 
