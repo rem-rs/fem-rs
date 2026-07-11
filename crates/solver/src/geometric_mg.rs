@@ -144,22 +144,28 @@ impl MgChebyshevSmoother {
 
 fn estimate_max_eigenvalue_simple(a: &CsrMatrix<f64>, dinv: &[f64], bc: &[u32]) -> f64 {
     let n = a.nrows;
-    // Use Gershgorin circle: λ_max ≈ max_i (Σ_j |A[i,j]| / D[i])
-    // For the Jacobi-preconditioned Laplacian, this gives a good estimate.
-    let mut max_gersh = 0.0_f64;
-    for i in 0..n {
-        if bc.contains(&(i as u32)) { continue; }
-        let mut row_sum = 0.0;
-        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
-            row_sum += a.values[p].abs();
-        }
-        let val = row_sum * dinv[i];
-        if val > max_gersh { max_gersh = val; }
+    // Fast power iteration (10 iters) on D⁻¹A
+    let mut v = vec![1.0; n];
+    for i in 0..n { v[i] = 1.0 + (i as f64 % 5.0) * 0.1; }
+    for &d in bc { if (d as usize) < n { v[d as usize] = 0.0; } }
+    let normalize = |w: &mut [f64]| {
+        let nrm: f64 = w.iter().map(|x| x*x).sum::<f64>().sqrt().max(1e-30);
+        for x in w.iter_mut() { *x /= nrm; }
+    };
+    normalize(&mut v);
+    let mut lambda = 0.0;
+    let mut w = vec![0.0; n];
+    for _iter in 0..15 {
+        a.spmv(&v, &mut w);
+        for i in 0..n { w[i] *= dinv[i]; }
+        for &d in bc { if (d as usize) < n { w[d as usize] = 0.0; } }
+        let rq: f64 = (0..n).map(|i| v[i]*w[i]).sum();
+        if (rq - lambda).abs() < 1e-4 * rq.abs() && _iter > 2 { lambda = rq; break; }
+        lambda = rq;
+        normalize(&mut w);
+        v.copy_from_slice(&w);
     }
-    // The Gershgorin estimate is an upper bound. λ_max is typically less.
-    // For 2D Laplacian, use 0.9 * max_gersh as a rough estimate.
-    let lambda = 0.9 * max_gersh;
-    lambda.max(0.1)
+    lambda.abs().max(0.1).min(2.0)
 }
 
 /// Geometric multigrid V-cycle preconditioner.
@@ -205,12 +211,16 @@ impl GeometricMgPrecond {
                 max_iter: self.config.coarse_max_iter,
                 verbose: false, ..Default::default()
             };
-            let _ = crate::solve_cg(a, b, x, &cfg);
+            let _res = crate::solve_cg(a, b, x, &cfg);
+            // Debug: print coarse CG convergence
+            // eprintln!("  coarse CG lvl={} iters={} resid={:.6e}", lvl,
+            //           res.as_ref().map_or(0, |r| r.iterations),
+            //           res.as_ref().map_or(0.0, |r| r.final_residual));
             for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
             return;
         }
 
-        // Pre-smooth (skip if pre_sweeps == 0)
+        // Pre-smooth
         for _ in 0..self.config.pre_sweeps {
             self.smooth_level(lvl, a, b, x, &level.bc_dofs);
         }
@@ -219,15 +229,20 @@ impl GeometricMgPrecond {
         let mut ax = vec![0.0; n];
         a.spmv(x, &mut ax);
         let r: Vec<f64> = (0..n).map(|i| b[i] - ax[i]).collect();
+        let _r_norm: f64 = r.iter().map(|v| v*v).sum::<f64>().sqrt();
         let mut r_c = Vec::new();
         h.prolong[lvl].restrict(&r, &mut r_c);
+        let _r_c_norm: f64 = r_c.iter().map(|v| v*v).sum::<f64>().sqrt();
         let n_c = h.levels[lvl + 1].mat.nrows;
         let mut e_c = vec![0.0; n_c];
         self.v_cycle_level(h, lvl + 1, &r_c, &mut e_c);
+        let _e_c_norm: f64 = e_c.iter().map(|v| v*v).sum::<f64>().sqrt();
 
         // Prolongate correction (with BC enforcement)
         let mut corr = vec![0.0; n];
         h.prolong[lvl].prolong(&e_c, &mut corr);
+        let _corr_norm: f64 = corr.iter().map(|v| v*v).sum::<f64>().sqrt();
+        let _x_before = x.iter().map(|v| v*v).sum::<f64>().sqrt();
         for i in 0..n { x[i] += corr[i]; }
 
         // Post-smooth

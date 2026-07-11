@@ -120,8 +120,9 @@ fn main() {
         let qo = (2 * space.order() + 1).max(3) as u8;
         let mut mat = Assembler::assemble_bilinear(space, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
         let bc = boundary_dofs(space.mesh(), space.dof_manager(), &boundary_tags);
+        // Symmetric BC elimination (matching MFEM FormSystemMatrix for homogeneous BCs)
         let mut dummy = vec![0.0; mat.nrows];
-        for &d in &bc { mat.apply_dirichlet_row_zeroing(d as usize, 0.0, &mut dummy); }
+        for &d in &bc { mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy); }
         levels.push(GeometricMgLevel { mat, bc_dofs: bc });
     }
 
@@ -148,8 +149,8 @@ fn main() {
 
     // 8. Solve with PCG + geometric multigrid preconditioner
     let mg_config = GeometricMgConfig {
-        pre_sweeps: 1, post_sweeps: 1, chebyshev_order: 0,
-        jacobi_omega: 0.8, coarse_max_iter: 200, coarse_rtol: 1e-12,
+        pre_sweeps: 1, post_sweeps: 1, chebyshev_order: 2,
+        jacobi_omega: 0.8, coarse_max_iter: 500, coarse_rtol: 1e-14,
     };
     let mg_precond = GeometricMgPrecond::new(mg_config, &hierarchy);
 
