@@ -28,7 +28,7 @@ use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{
-    Mesh, ElementTransformation, ElementType,
+    Mesh, ElementTransformation, ElementType as EType,
     topology::MeshTopology,
 };
 use fem_solver::{solve_pcg_gssmoother, SolverConfig};
@@ -96,7 +96,7 @@ fn assemble_grad_mixed(nd: &HCurlSpace<Mesh<2>>, h1: &H1Space<Mesh<2>>, qo: u8) 
         let mut gr = vec![0.0; nr * dim];
         let mut gp = vec![0.0; nr * dim];
         let mut bv = vec![0.0; nc * dim];
-        let use_iso = !matches!(et, ElementType::Tri3 | ElementType::Tet4);
+        let use_iso = !matches!(et, EType::Tri3 | EType::Tet4);
         let geo_elem = if use_iso { Some(fem_assembly::geo_ref_elem_from_mesh(mesh, e)) } else { None };
         let nodes = mesh.element_nodes(e);
 
@@ -133,32 +133,46 @@ fn assemble_grad_mixed(nd: &HCurlSpace<Mesh<2>>, h1: &H1Space<Mesh<2>>, qo: u8) 
 }
 
 // ─── Mixed divergence matrix: H(div)→L² ───────────────────────────────────────
+// B[i,j] = ∫ div(ψ_j) * φ_i dx
+// div_phys = (1/det(J)) * div_ref → det(J) cancels in weak form:
+// B[i,j] = Σ w_ref_q * div_ref(ψ̂_j(xi_q)) * φ_i(xi_q) * sign_j
+// where w_ref_q are reference-domain quadrature weights (no det(J)).
 
 fn assemble_div_mixed(l2: &L2Space<Mesh<2>>, rt: &HDivSpace<Mesh<2>>, qo: u8) -> CsrMatrix<f64> {
     let mesh = l2.mesh();
+    let dim = 2;
     let mut coo = CooMatrix::new(l2.n_dofs(), rt.n_dofs());
     for e in mesh.elem_iter() {
         let et = mesh.element_type(e);
-        let lr = ref_elem_vol(et, l2.order()).unwrap();
-        let nl = lr.n_dofs();
-        let vr = ref_elem_vec(et, rt.order(), SpaceType::HDiv).unwrap();
+        let l2_order = l2.order();
+        let vr = ref_elem_vec(et, rt.order(), SpaceType::HDiv)
+            .expect("HDiv ref elem");
         let nv = vr.n_dofs();
+        let signs = rt.element_signs(e);
         let gl: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
         let gv: Vec<usize> = rt.element_dofs(e).iter().map(|&d| d as usize).collect();
         let n_l = gl.len();
         let n_v = gv.len();
-        let quad = lr.quadrature(qo);
+        let quad = vr.quadrature(qo);
         let mut me = vec![0.0; n_l * n_v];
-        let mut ph = vec![0.0; nl];
-        let mut dv = vec![0.0; nv * 2];
+        let mut dv = vec![0.0; nv * dim];
+        // Pre-compute L2 basis values at all quad points
+        let mut l2_phi: Vec<Vec<f64>> = Vec::new();
+        if l2_order > 0 {
+            let lr = ref_elem_vol(et, l2_order).unwrap();
+            for (_qi, xi) in quad.points.iter().enumerate() {
+                let mut ph = vec![0.0; lr.n_dofs()];
+                lr.eval_basis(xi, &mut ph);
+                l2_phi.push(ph);
+            }
+        }
         for (qi, xi) in quad.points.iter().enumerate() {
-            let tr = ElementTransformation::from_simplex_nodes(mesh, mesh.element_nodes(e));
-            let w = quad.weights[qi] * tr.det_j().abs();
-            lr.eval_basis(xi, &mut ph);
+            let w_ref = quad.weights[qi]; // reference weight (no det(J) — det(J) cancels)
             vr.eval_div(xi, &mut dv);
-            for j in 0..n_v {
-                for i in 0..n_l {
-                    me[i * n_v + j] += w * ph[i] * dv[j];
+            for i in 0..n_l {
+                let phi = if l2_order == 0 { 1.0 } else { l2_phi[qi][i] };
+                for j in 0..n_v {
+                    me[i * n_v + j] += w_ref * phi * dv[j] * signs[j];
                 }
             }
         }
@@ -187,7 +201,7 @@ fn l2e_hcurl(nd: &HCurlSpace<Mesh<2>>, d: &[f64], exact: &dyn Fn(&[f64]) -> Vec<
         let n_ldofs = vc.n_dofs();
         let nodes = mesh.element_nodes(e);
         let mut ref_bv = vec![0.0; n_ldofs * dim];
-        let use_iso = !matches!(et, ElementType::Tri3 | ElementType::Tet4);
+        let use_iso = !matches!(et, EType::Tri3 | EType::Tet4);
         let geo_elem = if use_iso { Some(fem_assembly::geo_ref_elem_from_mesh(mesh, e)) } else { None };
         for (qi, xi) in quad.points.iter().enumerate() {
             let (w, jit, xp): (f64, nalgebra::DMatrix<f64>, Vec<f64>) = if use_iso {
@@ -214,27 +228,72 @@ fn l2e_hcurl(nd: &HCurlSpace<Mesh<2>>, d: &[f64], exact: &dyn Fn(&[f64]) -> Vec<
     e2.sqrt()
 }
 
-fn l2e_l2(l2: &L2Space<Mesh<2>>, d: &[f64], exact: &dyn Fn(&[f64]) -> f64, qo: u8) -> f64 {
+fn l2e_l2(l2: &L2Space<Mesh<2>>, d: &[f64], exact: &dyn Fn(&[f64]) -> f64, qoq: u8) -> f64 {
+    let dim = 2;
     let mesh = l2.mesh();
     let mut e2 = 0.0;
     for e in mesh.elem_iter() {
         let et = mesh.element_type(e);
-        let lr = ref_elem_vol(et, l2.order()).unwrap();
-        let quad = lr.quadrature(qo);
+        let l2_order = l2.order();
+        let quad = if l2_order == 0 {
+            // P0: use HDiv reference element quadrature (element-appropriate)
+            let vr = ref_elem_vec(et, 0, SpaceType::HDiv).unwrap();
+            vr.quadrature(qoq)
+        } else {
+            let lr = ref_elem_vol(et, l2_order).unwrap();
+            lr.quadrature(qoq)
+        };
         let ng: Vec<usize> = l2.element_dofs(e).iter().map(|&x| x as usize).collect();
         let nn = ng.len();
-        let mut ph = vec![0.0; lr.n_dofs()];
+        let use_iso = !matches!(et, EType::Tri3 | EType::Tet4);
+        let geo_elem = if use_iso { Some(fem_assembly::geo_ref_elem_from_mesh(mesh, e)) } else { None };
+        let nodes = mesh.element_nodes(e);
+        let mut ph = if l2_order > 0 { vec![0.0; ref_elem_vol(et, l2_order).unwrap().n_dofs()] } else { vec![] };
         for (qi, xi) in quad.points.iter().enumerate() {
-            let tr = ElementTransformation::from_simplex_nodes(mesh, mesh.element_nodes(e));
-            let w = quad.weights[qi] * tr.det_j().abs();
-            lr.eval_basis(xi, &mut ph);
+            let (w, xp): (f64, Vec<f64>) = if use_iso {
+                let ge = geo_elem.as_ref().unwrap();
+                let (_jac, det, x) = fem_assembly::isoparametric_jacobian(mesh, &nodes, ge.as_deref().unwrap(), xi, dim);
+                (quad.weights[qi] * det.abs(), x)
+            } else {
+                let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+                (quad.weights[qi] * tr.det_j().abs(), tr.map_to_physical(xi))
+            };
             let mut n = 0.0;
-            for i in 0..nn { n += d[ng[i]] * ph[i]; }
-            let xp = tr.map_to_physical(xi);
+            if l2_order == 0 {
+                n = d[ng[0]]; // P0: single constant DOF per element
+            } else {
+                let lr = ref_elem_vol(et, l2_order).unwrap();
+                lr.eval_basis(xi, &mut ph);
+                for i in 0..nn { n += d[ng[i]] * ph[i]; }
+            }
             e2 += w * (n - exact(&xp)).powi(2);
         }
     }
     e2.sqrt()
+}
+
+/// Compute element area for a 2D element (Tri3 or Quad4).
+fn element_area(mesh: &Mesh<2>, e: u32) -> f64 {
+    let nodes = mesh.element_nodes(e);
+    match mesh.element_type(e) {
+        EType::Tri3 => {
+            let p0 = mesh.node_coords(nodes[0]);
+            let p1 = mesh.node_coords(nodes[1]);
+            let p2 = mesh.node_coords(nodes[2]);
+            0.5 * ((p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])).abs()
+        }
+        EType::Quad4 => {
+            // Split into 2 triangles and sum areas
+            let p0 = mesh.node_coords(nodes[0]);
+            let p1 = mesh.node_coords(nodes[1]);
+            let p2 = mesh.node_coords(nodes[2]);
+            let p3 = mesh.node_coords(nodes[3]);
+            let a1 = 0.5 * ((p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])).abs();
+            let a2 = 0.5 * ((p2[0]-p0[0])*(p3[1]-p0[1]) - (p2[1]-p0[1])*(p3[0]-p0[0])).abs();
+            a1 + a2
+        }
+        _ => 1.0,
+    }
 }
 
 fn xform_grad(jit: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize) {
@@ -244,27 +303,27 @@ fn xform_grad(jit: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize
     }
 }
 
-fn ref_elem_vol(et: ElementType, order: u8) -> Option<Box<dyn ReferenceElement>> {
+fn ref_elem_vol(et: EType, order: u8) -> Option<Box<dyn ReferenceElement>> {
     use fem_element::lagrange::*;
-    use fem_mesh::element_type::ElementType as ET;
+    // ElementType already imported as EType at top level
     match (et, order) {
-        (ET::Tri3, 0) => Some(Box::new(TriP1) as Box<dyn ReferenceElement>),
-        (ET::Tri3, 1) => Some(Box::new(TriP1) as Box<dyn ReferenceElement>),
-        (ET::Tri3, 2) => Some(Box::new(TriP2) as Box<dyn ReferenceElement>),
-        (ET::Quad4, 1) => Some(Box::new(fem_element::lagrange::quad::QuadQ1) as Box<dyn ReferenceElement>),
+        (EType::Tri3, 0) => Some(Box::new(TriP1) as Box<dyn ReferenceElement>),
+        (EType::Tri3, 1) => Some(Box::new(TriP1) as Box<dyn ReferenceElement>),
+        (EType::Tri3, 2) => Some(Box::new(TriP2) as Box<dyn ReferenceElement>),
+        (EType::Quad4, 1) => Some(Box::new(fem_element::lagrange::quad::QuadQ1) as Box<dyn ReferenceElement>),
         _ => { eprintln!("WARN: ref_elem_vol({et:?}, {order}) unhandled"); None }
     }
 }
 
-fn ref_elem_vec(et: ElementType, order: u8, sp: SpaceType) -> Option<Box<dyn fem_element::VectorReferenceElement>> {
+fn ref_elem_vec(et: EType, order: u8, sp: SpaceType) -> Option<Box<dyn fem_element::VectorReferenceElement>> {
     use fem_element::nedelec::*;
     use fem_element::raviart_thomas::*;
-    use fem_mesh::element_type::ElementType as ET;
+    // ElementType already imported as EType at top level
     match (et, order, sp) {
-        (ET::Tri3, 1, SpaceType::HCurl) => Some(Box::new(TriND1) as Box<dyn fem_element::VectorReferenceElement>),
-        (ET::Tri3, _, SpaceType::HDiv) => Some(Box::new(TriRT0) as Box<dyn fem_element::VectorReferenceElement>),
-        (ET::Quad4, 1, SpaceType::HCurl) => Some(Box::new(QuadND1) as Box<dyn fem_element::VectorReferenceElement>),
-        (ET::Quad4, _, SpaceType::HDiv) => Some(Box::new(QuadRT0) as Box<dyn fem_element::VectorReferenceElement>),
+        (EType::Tri3, 1, SpaceType::HCurl) => Some(Box::new(TriND1) as Box<dyn fem_element::VectorReferenceElement>),
+        (EType::Tri3, _, SpaceType::HDiv) => Some(Box::new(TriRT0) as Box<dyn fem_element::VectorReferenceElement>),
+        (EType::Quad4, 1, SpaceType::HCurl) => Some(Box::new(QuadND1) as Box<dyn fem_element::VectorReferenceElement>),
+        (EType::Quad4, _, SpaceType::HDiv) => Some(Box::new(QuadRT0) as Box<dyn fem_element::VectorReferenceElement>),
         _ => None,
     }
 }
@@ -332,45 +391,99 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
     let qo = (2 * order + 1).max(3) as u8;
     let rt_order = if order > 0 { order - 1 } else { 0 };
     let rt = HDivSpace::new(mesh.clone(), rt_order);
-    let l2 = L2Space::new(mesh.clone(), rt_order);
+    let l2_p = if rt_order > 0 { rt_order } else { 0 };
+    let l2 = L2Space::new(mesh.clone(), l2_p);
     println!("Number of Raviart-Thomas finite element unknowns: {}", rt.n_dofs());
     println!("Number of L2 finite element unknowns: {}", l2.n_dofs());
 
-    // Project exact v = (sin(πx), sin(πy)) onto H(div)
-    let v: Vec<f64> = rt.interpolate_vector(&|x| vec![(PI*x[0]).sin(), (PI*x[1]).sin()]).as_slice().to_vec();
+    // C++ ex24 prob 2: trial = grad p in H(div), exact = div(grad p) in L²
+    // grad p = (cos(x)*sin(y), sin(x)*cos(y))
+    let gradp = |x: &[f64]| vec![x[0].cos() * x[1].sin(), x[0].sin() * x[1].cos()];
+    // div(grad p) = -2*sin(x)*sin(y)
+    let div_gradp = |x: &[f64]| -2.0 * x[0].sin() * x[1].sin();
+
+    // Project grad p onto H(div) trial space
+    let v: Vec<f64> = rt.interpolate_vector(&gradp).as_slice().to_vec();
 
     // (a) Mixed form: solve M·f = D·v
     let d = assemble_div_mixed(&l2, &rt, qo);
     let mut rhs = vec![0.0; l2.n_dofs()];
     d.spmv(&v, &mut rhs);
 
-    let mass = fem_assembly::Assembler::assemble_bilinear(&l2, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], qo);
+    // Build L² mass matrix (P0: handle manually since assembler lacks P0 ref elem)
+    let is_p0 = l2.order() == 0;
+    let mass: CsrMatrix<f64> = if is_p0 {
+        // P0: diagonal mass matrix = element area for each DOF
+        let n = l2.n_dofs();
+        let mut coo = fem_linalg::CooMatrix::new(n, n);
+        for e in mesh.elem_iter() {
+            let dofs: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let area = element_area(mesh, e);
+            for &d in &dofs { coo.add(d, d, area); }
+        }
+        coo.into_csr()
+    } else {
+        fem_assembly::Assembler::assemble_bilinear(&l2, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], qo)
+    };
     let mut f_sol = vec![0.0; l2.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
     solve_pcg_gssmoother(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
 
-    // (b) Discrete divergence interpolant (HDiv→L2 div)
-    let dlo = DiscreteLinearOperator::divergence(&rt, &l2).expect("div DLO");
+    // (b) Discrete divergence interpolant: D * trial, then mass⁻¹ (matches C++ DivergenceInterpolator)
     let mut f_interp = vec![0.0; l2.n_dofs()];
-    dlo.spmv(&v, &mut f_interp);
+    d.spmv(&v, &mut f_interp);
+    // For P0: mass matrix is diagonal with element area; apply M⁻¹
+    if is_p0 {
+        for e in mesh.elem_iter() {
+            let area = element_area(mesh, e);
+            let l2_dofs: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
+            for &d in &l2_dofs { f_interp[d] /= area; }
+        }
+    }
 
-    // (c) Exact L² projection of div v_exact
-    let rhs_ex = fem_assembly::Assembler::assemble_linear(&l2, &[
-        &fem_assembly::standard::DomainSourceIntegrator::new(
-            |x: &[f64]| PI * x[0].cos() + PI * x[1].cos()
-        )
-    ], qo);
+    // (c) Exact L² projection of div(grad p) into L²
+    let rhs_ex = if is_p0 {
+        // Manual P0 RHS: ∫ div_gradp * φ_i dx with proper quadrature
+        let dim = 2;
+        let n = l2.n_dofs();
+        let mut r = vec![0.0; n];
+        for e in mesh.elem_iter() {
+            let et = mesh.element_type(e);
+            let dofs: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let vr = ref_elem_vec(et, 0, SpaceType::HDiv).unwrap();
+            let quad = vr.quadrature(qo);
+            let nodes = mesh.element_nodes(e);
+            let use_iso = !matches!(et, EType::Tri3 | EType::Tet4);
+            let geo_elem = if use_iso { Some(fem_assembly::geo_ref_elem_from_mesh(mesh, e)) } else { None };
+            for (qi, xi) in quad.points.iter().enumerate() {
+                let (w, xp) = if use_iso {
+                    let ge = geo_elem.as_ref().unwrap();
+                    let (_jac, det, x) = fem_assembly::isoparametric_jacobian(mesh, &nodes, ge.as_deref().unwrap(), xi, dim);
+                    (quad.weights[qi] * det.abs(), x)
+                } else {
+                    let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+                    (quad.weights[qi] * tr.det_j().abs(), tr.map_to_physical(xi))
+                };
+                for &d in &dofs { r[d] += w * div_gradp(&xp); }
+            }
+        }
+        r
+    } else {
+        fem_assembly::Assembler::assemble_linear(&l2, &[
+            &fem_assembly::standard::DomainSourceIntegrator::new(div_gradp)
+        ], qo)
+    };
     let mut f_ex = vec![0.0; l2.n_dofs()];
     solve_pcg_gssmoother(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
 
-    // Errors
-    let div_exact = |x: &[f64]| PI * x[0].cos() + PI * x[1].cos();
-    let e1 = l2e_l2(&l2, &f_sol, &div_exact, qo);
-    let e2 = l2e_l2(&l2, &f_interp, &div_exact, qo);
-    let e3 = l2e_l2(&l2, &f_ex, &div_exact, qo);
-    println!("\n Solution:   || f_h - div v ||_{{L_2}} = {:.8}", e1);
-    println!(" Interpolant: || f_h - div v ||_{{L_2}} = {:.8}", e2);
-    println!(" Projection:  || f_h - div v ||_{{L_2}} = {:.8}", e3);
+    // Errors (higher quadrature for accuracy)
+    let err_qo = (2 * order + 4).max(5) as u8;
+    let e1 = l2e_l2(&l2, &f_sol, &div_gradp, err_qo);
+    let e2 = l2e_l2(&l2, &f_interp, &div_gradp, err_qo);
+    let e3 = l2e_l2(&l2, &f_ex, &div_gradp, err_qo);
+    println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {:.8}", e1);
+    println!("\n Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {:.8}", e2);
+    println!("\n Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {:.8}", e3);
 }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
