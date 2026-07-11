@@ -247,3 +247,49 @@ impl<P: Preconditioner<Vector = DenseVec<f64>>> Preconditioner for BlockDiagPrec
         zs[n..].copy_from_slice(z_im.as_slice());
     }
 }
+
+/// Scaled preconditioner — wraps a precond and scales output by `scale`.
+/// Equivalent to C++ `ScaledOperator(pc, s)`.
+pub struct ScaledPrecond<P> {
+    pub inner: P,
+    pub scale: f64,
+}
+
+impl<P: Preconditioner<Vector = DenseVec<f64>>> Preconditioner for ScaledPrecond<P> {
+    type Vector = DenseVec<f64>;
+    fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
+        self.inner.apply_precond(x, z);
+        for v in z.as_mut_slice().iter_mut() { *v *= self.scale; }
+    }
+}
+
+/// Block-diagonal preconditioner with separate preconds for real and imaginary blocks.
+/// Equivalent to C++ `BlockDiagonalPreconditioner` with two distinct diagonal blocks.
+pub struct BlockDiagPrecondPair<
+    P1: Preconditioner<Vector = DenseVec<f64>>,
+    P2: Preconditioner<Vector = DenseVec<f64>>,
+> {
+    pub pre_re: P1,
+    pub pre_im: P2,
+    pub n: usize,
+}
+
+impl<
+    P1: Preconditioner<Vector = DenseVec<f64>>,
+    P2: Preconditioner<Vector = DenseVec<f64>>,
+> Preconditioner for BlockDiagPrecondPair<P1, P2> {
+    type Vector = DenseVec<f64>;
+    fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
+        let n = self.n;
+        let xs = x.as_slice();
+        let zs = z.as_mut_slice();
+        let x_re = DenseVec::from_vec(xs[..n].to_vec());
+        let mut z_re = DenseVec::zeros(n);
+        self.pre_re.apply_precond(&x_re, &mut z_re);
+        zs[..n].copy_from_slice(z_re.as_slice());
+        let x_im = DenseVec::from_vec(xs[n..].to_vec());
+        let mut z_im = DenseVec::zeros(n);
+        self.pre_im.apply_precond(&x_im, &mut z_im);
+        zs[n..].copy_from_slice(z_im.as_slice());
+    }
+}

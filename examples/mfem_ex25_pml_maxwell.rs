@@ -19,7 +19,7 @@ use fem_assembly::{
 };
 use fem_io::mfem;
 use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
-use fem_solver::{GSSmoother, DenseVec, linlvoPreconditioner as Preconditioner};
+use fem_solver::{GSSmoother, ScaledPrecond, BlockDiagPrecondPair};
 use fem_linalg::fem_to_linlvo_csr;
 use fem_space::{HCurlSpace, constraints::boundary_dofs_hcurl, fe_space::FESpace};
 use fem_mesh::{Mesh, topology::MeshTopology, element_type::ElementType};
@@ -310,47 +310,6 @@ fn source_fn(x: &[f64], dim: usize, comp_bdr: &[[f64; 2]], omega: f64) -> Vec<f6
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Scaled preconditioner (matches C++ ScaledOperator for HERMITIAN convention)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Wraps a preconditioner, scaling output by `scale` (C++ ScaledOperator).
-struct ScaledPrecond<P> {
-    inner: P,
-    scale: f64,
-}
-impl<P: Preconditioner<Vector = DenseVec<f64>>> Preconditioner for ScaledPrecond<P> {
-    type Vector = DenseVec<f64>;
-    fn apply_precond(&self, x: &Self::Vector, z: &mut Self::Vector) {
-        self.inner.apply_precond(x, z);
-        for v in z.as_mut_slice().iter_mut() { *v *= self.scale; }
-    }
-}
-
-/// Block-diagonal preconditioner with separate preconds for real and imag blocks.
-/// Matches C++ `BlockDiagonalPreconditioner` with two distinct diagonal blocks.
-struct BlockDiagPrecond2<'a> {
-    pre_re: &'a dyn Preconditioner<Vector = DenseVec<f64>>,
-    pre_im: &'a dyn Preconditioner<Vector = DenseVec<f64>>,
-    n: usize,
-}
-impl Preconditioner for BlockDiagPrecond2<'_> {
-    type Vector = DenseVec<f64>;
-    fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
-        let n = self.n;
-        let xs = x.as_slice();
-        let zs = z.as_mut_slice();
-        let x_re = DenseVec::from_vec(xs[..n].to_vec());
-        let mut z_re = DenseVec::zeros(n);
-        self.pre_re.apply_precond(&x_re, &mut z_re);
-        zs[..n].copy_from_slice(z_re.as_slice());
-        let x_im = DenseVec::from_vec(xs[n..].to_vec());
-        let mut z_im = DenseVec::zeros(n);
-        self.pre_im.apply_precond(&x_im, &mut z_im);
-        zs[n..].copy_from_slice(z_im.as_slice());
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Main solver
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -490,7 +449,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     // C++: pc_i = ScaledOperator(pc_r, s) where s = -1 for HERMITIAN convention
     let gs_im = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother_im");
     let pc_im = ScaledPrecond { inner: gs_im, scale: -1.0 };
-    let bp = BlockDiagPrecond2 { pre_re: &gs, pre_im: &pc_im, n };
+    let bp = BlockDiagPrecondPair { pre_re: gs, pre_im: pc_im, n };
 
     // ── Solve ─────────────────────────────────────────────────────────────────
     let mut flat_rhs = vec![0.0_f64; 2*n];
@@ -546,20 +505,47 @@ fn ref_elem_for(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     }
 }
 
-fn elem_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(nodes[col + 1]);
-        for row in 0..dim { j[(row, col)] = xc[row] - x0[row]; }
+fn elem_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize, et: ElementType, xi: &[f64])
+    -> (DMatrix<f64>, f64, Vec<f64>)
+{
+    match et {
+        ElementType::Quad4 => {
+            let xc: Vec<Vec<f64>> = (0..4).map(|k| mesh.node_coords(nodes[k]).to_vec()).collect();
+            let (xi_v, eta) = (xi[0], xi[1]);
+            let dndxi = |k: usize, e: f64| -> f64 { match k {
+                0 => -0.25*(1.0-e), 1 => 0.25*(1.0-e),
+                2 => 0.25*(1.0+e), 3 => -0.25*(1.0+e), _ => 0.0 }};
+            let dndeta = |k: usize, x: f64| -> f64 { match k {
+                0 => -0.25*(1.0-x), 1 => -0.25*(1.0+x),
+                2 => 0.25*(1.0+x), 3 => 0.25*(1.0-x), _ => 0.0 }};
+            let n = |k: usize, x: f64, e: f64| -> f64 { match k {
+                0 => 0.25*(1.0-x)*(1.0-e), 1 => 0.25*(1.0+x)*(1.0-e),
+                2 => 0.25*(1.0+x)*(1.0+e), 3 => 0.25*(1.0-x)*(1.0+e), _ => 0.0 }};
+            let mut j = DMatrix::<f64>::zeros(dim, dim);
+            for k in 0..4 {
+                j[(0,0)] += dndxi(k,eta)*xc[k][0]; j[(0,1)] += dndeta(k,xi_v)*xc[k][0];
+                j[(1,0)] += dndxi(k,eta)*xc[k][1]; j[(1,1)] += dndeta(k,xi_v)*xc[k][1];
+            }
+            let det = j.determinant();
+            let xp = vec![
+                n(0,xi_v,eta)*xc[0][0] + n(1,xi_v,eta)*xc[1][0] + n(2,xi_v,eta)*xc[2][0] + n(3,xi_v,eta)*xc[3][0],
+                n(0,xi_v,eta)*xc[0][1] + n(1,xi_v,eta)*xc[1][1] + n(2,xi_v,eta)*xc[2][1] + n(3,xi_v,eta)*xc[3][1]];
+            (j, det, xp)
+        }
+        _ => {
+            let x0 = mesh.node_coords(nodes[0]);
+            let mut j = DMatrix::<f64>::zeros(dim, dim);
+            for col in 0..dim {
+                let xc = mesh.node_coords(nodes[col + 1]);
+                for row in 0..dim { j[(row, col)] = xc[row] - x0[row]; }
+            }
+            let det_j = j.determinant();
+            let xp: Vec<f64> = (0..dim).map(|i| {
+                x0[i] + (0..dim).map(|k| j[(i,k)] * xi[k]).sum::<f64>()
+            }).collect();
+            (j, det_j, xp)
+        }
     }
-    (j.clone(), j.determinant())
-}
-
-fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {
-    let mut xp = x0.to_vec();
-    for i in 0..dim { for k in 0..dim { xp[i] += j[(i,k)] * xi[k]; } }
-    xp
 }
 
 #[allow(dead_code)]
@@ -570,18 +556,17 @@ fn compute_l2_error_vector<M: MeshTopology>(
     let mut err2 = 0.0;
     for e in mesh.elem_iter() {
         if exclude_tag.map_or(false, |et| mesh.element_tag(e) == et) { continue; }
-        let re = ref_elem_for(mesh.element_type(e), order);
+        let et = mesh.element_type(e);
+        let re = ref_elem_for(et, order);
         let n_ldofs = re.n_dofs(); let quad = re.quadrature(qo);
         let dofs = space.element_dofs(e); let nodes = mesh.element_nodes(e);
-        let (jac, det_j) = elem_jacobian(mesh, nodes, dim);
-        let x0 = mesh.node_coords(nodes[0]);
         let mut phi = vec![0.0; n_ldofs];
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * det_j.abs();
+            let (_, det_j_q, xp) = elem_jacobian(mesh, nodes, dim, et, xi);
+            let w = quad.weights[q] * det_j_q.abs();
             re.eval_basis(xi, &mut phi);
             let mut uh = vec![0.0; dim];
             for i in 0..n_ldofs { for d in 0..dim { uh[d] += x[dofs[i] as usize] * phi[i]; } }
-            let xp = phys_coords(x0, &jac, xi, dim);
             let exact = maxwell_solution(&xp, dim, prob, k);
             let diff2: f64 = (0..dim).map(|d| (uh[d] - exact[d].re).powi(2)).sum();
             err2 += w * diff2;
