@@ -85,11 +85,11 @@ path = "mfem_ex9_dg_advection.rs"
 
 [[example]]
 name = "heat_equation"
-path = "heat_equation.rs"
+path = "extra/heat_equation.rs"
 
 [[example]]
 name = "wave_equation"
-path = "wave_equation.rs"
+path = "extra/wave_equation.rs"
 
 [[example]]
 name = "mfem_ex23_wave_equation"
@@ -217,7 +217,7 @@ path = "mfem_ex40_stokes.rs"
 
 [[example]]
 name = "navier_stokes_kovasznay"
-path = "navier_stokes_kovasznay.rs"
+path = "extra/navier_stokes_kovasznay.rs"
 
 [[example]]
 name = "mfem_ex7_neumann_mixed_bc"
@@ -233,7 +233,7 @@ path = "mfem_ex8_dpg_poisson.rs"
 
 [[example]]
 name = "maxwell_time_domain"
-path = "maxwell_time_domain.rs"
+path = "extra/maxwell_time_domain.rs"
 
 [[example]]
 name = "mfem_tangential_drive_maxwell"
@@ -317,11 +317,11 @@ path = "mfem_ex33_fractional_laplacian.rs"
 
 [[example]]
 name = "dc_current"
-path = "dc_current.rs"
+path = "extra/dc_current.rs"
 
 [[example]]
 name = "wgpu_poisson"
-path = "wgpu_poisson.rs"
+path = "extra/wgpu_poisson.rs"
 
 [[example]]
 name = "mfem_tmop_mesh_quality"
@@ -329,7 +329,7 @@ path = "mfem_tmop_mesh_quality.rs"
 
 [[example]]
 name = "tmop_hex8_optimise"
-path = "tmop_hex8_optimise.rs"
+path = "extra/tmop_hex8_optimise.rs"
 
 [[example]]
 name = "mfem_miniapp_volta"
@@ -349,103 +349,103 @@ path = "mfem_miniapp_joule.rs"
 
 [[example]]
 name = "mfem_phasefield_fracture"
-path = "mfem_phasefield_fracture.rs"
+path = "extra/mfem_phasefield_fracture.rs"
 
 [[example]]
 name = "solver_comparison"
-path = "solver_comparison.rs"
+path = "extra/solver_comparison.rs"
 
 [[example]]
 name = "multiphysics_coupled_newton"
-path = "multiphysics_coupled_newton.rs"
+path = "extra/multiphysics_coupled_newton.rs"
 
 [[example]]
 name = "plasticity_j2_bar"
-path = "plasticity_j2_bar.rs"
+path = "extra/plasticity_j2_bar.rs"
 
 [[example]]
 name = "allen_cahn_evolution"
-path = "allen_cahn_evolution.rs"
+path = "extra/allen_cahn_evolution.rs"
 
 [[example]]
 name = "wg_stokes_cavity"
-path = "wg_stokes_cavity.rs"
+path = "extra/wg_stokes_cavity.rs"
 
 [[example]]
 name = "vem_poisson_polygonal"
-path = "vem_poisson_polygonal.rs"
+path = "extra/vem_poisson_polygonal.rs"
 
 [[example]]
 name = "dpg_poisson_2d"
-path = "dpg_poisson_2d.rs"
+path = "extra/dpg_poisson_2d.rs"
 
 [[example]]
 name = "hdg_stokes_channel"
-path = "hdg_stokes_channel.rs"
+path = "extra/hdg_stokes_channel.rs"
 
 [[example]]
 name = "hdg_elasticity_beam"
-path = "hdg_elasticity_beam.rs"
+path = "extra/hdg_elasticity_beam.rs"
 
 [[example]]
 name = "dpg_stokes_2d"
-path = "dpg_stokes_2d.rs"
+path = "extra/dpg_stokes_2d.rs"
 
 [[example]]
 name = "crystal_plasticity_fcc"
-path = "crystal_plasticity_fcc.rs"
+path = "extra/crystal_plasticity_fcc.rs"
 
 [[example]]
 name = "xfem_crack_propagation"
-path = "xfem_crack_propagation.rs"
+path = "extra/xfem_crack_propagation.rs"
 
 [[example]]
 name = "contact_active_set_3d"
-path = "contact_active_set_3d.rs"
+path = "extra/contact_active_set_3d.rs"
 
 [[example]]
 name = "cahn_hilliard_spinodal"
-path = "cahn_hilliard_spinodal.rs"
+path = "extra/cahn_hilliard_spinodal.rs"
 
 [[example]]
 name = "plasticity_dp_slope"
-path = "plasticity_dp_slope.rs"
+path = "extra/plasticity_dp_slope.rs"
 
 [[example]]
 name = "mesh_quality_tmop"
-path = "mesh_quality_tmop.rs"
+path = "extra/mesh_quality_tmop.rs"
 
 [[example]]
 name = "mfem_vec_ref_elem"
-path = "mfem_vec_ref_elem.rs"
+path = "extra/mfem_vec_ref_elem.rs"
 
 [[example]]
 name = "plor_hex_solve"
-path = "plor_hex_solve.rs"
+path = "extra/plor_hex_solve.rs"
 
 [[example]]
 name = "hyperelastic_hooke"
-path = "hyperelastic_hooke.rs"
+path = "extra/hyperelastic_hooke.rs"
 
 [[example]]
 name = "gslib_field_transfer"
-path = "gslib_field_transfer.rs"
+path = "extra/gslib_field_transfer.rs"
 
 [[example]]
 name = "spde_gaussian_field"
-path = "spde_gaussian_field.rs"
+path = "extra/spde_gaussian_field.rs"
 
 [[example]]
 name = "meshing_tmop_target_matrix"
-path = "meshing_tmop_target_matrix.rs"
+path = "extra/meshing_tmop_target_matrix.rs"
 
 [[example]]
 name = "fluids_navier_transient"
-path = "fluids_navier_transient.rs"
+path = "extra/fluids_navier_transient.rs"
 
 [[example]]
 name = "shifted_sbm_diffusion"
-path = "shifted_sbm_diffusion.rs"
+path = "extra/shifted_sbm_diffusion.rs"
 
 # ── Core MFEM examples (previously unregistered) ──
 
@@ -555,11 +555,11 @@ path = "mfem_ex45_moving_mesh_ale.rs"
 
 [[example]]
 name = "mfem_autodiff_nonlinear_poisson"
-path = "mfem_autodiff_nonlinear_poisson.rs"
+path = "extra/mfem_autodiff_nonlinear_poisson.rs"
 
 [[example]]
 name = "mfem_tribol_contact_patch"
-path = "mfem_tribol_contact_patch.rs"
+path = "extra/mfem_tribol_contact_patch.rs"
 
 [[example]]
 name = "mfem_pex12_parallel_elastic_eigen"
@@ -611,11 +611,11 @@ path = "mfem_miniapp_lorentz.rs"
 
 [[example]]
 name = "mfem_mc_random_field"
-path = "mfem_mc_random_field.rs"
+path = "extra/mfem_mc_random_field.rs"
 
 [[example]]
 name = "dbg_quadqk_grad"
-path = "dbg_quadqk_grad.rs"
+path = "extra/dbg_quadqk_grad.rs"
 
 [lib]
 name = "fem_examples"
