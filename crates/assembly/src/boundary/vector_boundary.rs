@@ -193,6 +193,25 @@ impl VectorBoundaryBilinearIntegrator for TangentialMassIntegrator {
 /// or [`VectorBoundaryLinearIntegrator`] implementations.
 pub struct VectorBoundaryAssembler;
 
+/// ∫ g · (v·n) ds — H(div) natural BC flux integrator.
+///
+/// MFEM equivalent: `VectorFEBoundaryFluxLFIntegrator`.
+/// Evaluates `∫ g (φᵢ·n) ds` for each boundary DOF `i`.
+pub struct HdivNormalFluxIntegrator<F: Fn(&[f64]) -> f64 + Send + Sync> {
+    pub g: F,
+}
+
+impl<F: Fn(&[f64]) -> f64 + Send + Sync> VectorBoundaryLinearIntegrator for HdivNormalFluxIntegrator<F> {
+    fn add_to_face_vector(&self, qp: &VectorBdQpData, f_elem: &mut [f64]) {
+        let g_val = (self.g)(&qp.x_phys);
+        let dim = qp.normal.len();
+        for i in 0..qp.n_dofs {
+            let vn: f64 = (0..dim).map(|c| qp.phi_vec[i * dim + c] * qp.normal[c]).sum();
+            f_elem[i] += g_val * vn * qp.weight;
+        }
+    }
+}
+
 impl VectorBoundaryAssembler {
     /// Assemble a boundary bilinear form over tagged boundary faces.
     ///

@@ -28,6 +28,7 @@
 
 use fem_assembly::{
     Assembler, MixedAssembler,
+    form::pin_pressure_dof,
     mixed::PressureDivIntegrator,
     standard::VectorDiffusionIntegrator,
 };
@@ -220,25 +221,6 @@ fn solve_case(mesh_in: Mesh<2>, nu: f64, lid_speed: f64) -> SolveResult {
 }
 
 /// Pin pressure DOF `dof` to zero by zeroing its row in B and column in B^T.
-fn pin_pressure_dof(
-    b: &mut fem_linalg::CsrMatrix<f64>,
-    bt: &mut fem_linalg::CsrMatrix<f64>,
-    dof: usize,
-) {
-    // Zero row `dof` in B (n_p × n_u)
-    for ptr in b.row_ptr[dof]..b.row_ptr[dof + 1] {
-        b.values[ptr] = 0.0;
-    }
-    // Zero column `dof` in B^T (n_u × n_p)
-    for i in 0..bt.nrows {
-        for ptr in bt.row_ptr[i]..bt.row_ptr[i + 1] {
-            if bt.col_idx[ptr] as usize == dof {
-                bt.values[ptr] = 0.0;
-            }
-        }
-    }
-}
-
 struct Args {
     n: usize,
     nu: f64,

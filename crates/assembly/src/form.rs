@@ -201,6 +201,28 @@ impl<S: FESpace> VectorLinearForm<S> {
     pub fn space(&self) -> &S { &self.space }
 }
 
+/// Pin a pressure DOF in a Stokes saddle-point system.
+///
+/// Zeroes row `dof` of `B` (n_p × n_u) and column `dof` of `B^T` (n_u × n_p)
+/// to remove the constant nullspace of the discrete pressure.
+/// Equivalent to MFEM's `EliminateEssentialBC` on a single pressure DOF.
+pub fn pin_pressure_dof(
+    b: &mut CsrMatrix<f64>,
+    bt: &mut CsrMatrix<f64>,
+    dof: usize,
+) {
+    for ptr in b.row_ptr[dof]..b.row_ptr[dof + 1] {
+        b.values[ptr] = 0.0;
+    }
+    for i in 0..bt.nrows {
+        for ptr in bt.row_ptr[i]..bt.row_ptr[i + 1] {
+            if bt.col_idx[ptr] as usize == dof {
+                bt.values[ptr] = 0.0;
+            }
+        }
+    }
+}
+
 /// Form the linear system by applying essential BCs (MFEM's `FormLinearSystem`).
 ///
 /// Eliminates essential DOFs from the system, returning the reduced matrix and RHS.

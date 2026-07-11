@@ -11,8 +11,7 @@ use std::io::Write;
 use fem_assembly::mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator};
 use fem_assembly::standard::VectorMassIntegrator;
 use fem_assembly::{
-    VectorAssembler, VectorBoundaryAssembler,
-    boundary::vector_boundary::{VectorBdQpData, VectorBoundaryLinearIntegrator},
+    VectorAssembler, VectorBoundaryAssembler, HdivNormalFluxIntegrator,
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{refine_uniform, Mesh};
@@ -83,19 +82,6 @@ fn main() {
 }
 
 fn p_exact(x: &[f64]) -> f64 { x[0].exp() * x[1].sin() }
-
-/// ∫ g * (v·n) ds — H(div) natural boundary condition flux integrator.
-/// 1:1 translation of MFEM's VectorFEBoundaryFluxLFIntegrator.
-struct HdivNormalFluxIntegrator { g: fn(&[f64]) -> f64 }
-impl VectorBoundaryLinearIntegrator for HdivNormalFluxIntegrator {
-    fn add_to_face_vector(&self, qp: &VectorBdQpData, f_elem: &mut [f64]) {
-        let g_val = (self.g)(&qp.x_phys);
-        for i in 0..qp.n_dofs {
-            let vn = qp.phi_vec[i*2]*qp.normal[0] + qp.phi_vec[i*2+1]*qp.normal[1];
-            f_elem[i] += g_val * vn * qp.weight;
-        }
-    }
-}
 
 struct Args { mesh: Option<String>, order: u8, visualization: bool }
 fn parse_args() -> Args {
