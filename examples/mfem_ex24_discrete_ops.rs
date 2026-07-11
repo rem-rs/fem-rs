@@ -272,30 +272,6 @@ fn l2e_l2(l2: &L2Space<Mesh<2>>, d: &[f64], exact: &dyn Fn(&[f64]) -> f64, qoq: 
     e2.sqrt()
 }
 
-/// Compute element area for a 2D element (Tri3 or Quad4).
-fn element_area(mesh: &Mesh<2>, e: u32) -> f64 {
-    let nodes = mesh.element_nodes(e);
-    match mesh.element_type(e) {
-        EType::Tri3 => {
-            let p0 = mesh.node_coords(nodes[0]);
-            let p1 = mesh.node_coords(nodes[1]);
-            let p2 = mesh.node_coords(nodes[2]);
-            0.5 * ((p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])).abs()
-        }
-        EType::Quad4 => {
-            // Split into 2 triangles and sum areas
-            let p0 = mesh.node_coords(nodes[0]);
-            let p1 = mesh.node_coords(nodes[1]);
-            let p2 = mesh.node_coords(nodes[2]);
-            let p3 = mesh.node_coords(nodes[3]);
-            let a1 = 0.5 * ((p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])).abs();
-            let a2 = 0.5 * ((p2[0]-p0[0])*(p3[1]-p0[1]) - (p2[1]-p0[1])*(p3[0]-p0[0])).abs();
-            a1 + a2
-        }
-        _ => 1.0,
-    }
-}
-
 fn xform_grad(jit: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize) {
     for i in 0..n {
         gp[i * 2] = jit[(0,0)] * gr[i*2] + jit[(0,1)] * gr[i*2+1];
@@ -410,69 +386,24 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
     let mut rhs = vec![0.0; l2.n_dofs()];
     d.spmv(&v, &mut rhs);
 
-    // Build L² mass matrix (P0: handle manually since assembler lacks P0 ref elem)
-    let is_p0 = l2.order() == 0;
-    let mass: CsrMatrix<f64> = if is_p0 {
-        // P0: diagonal mass matrix = element area for each DOF
-        let n = l2.n_dofs();
-        let mut coo = fem_linalg::CooMatrix::new(n, n);
-        for e in mesh.elem_iter() {
-            let dofs: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
-            let area = element_area(mesh, e);
-            for &d in &dofs { coo.add(d, d, area); }
-        }
-        coo.into_csr()
-    } else {
-        fem_assembly::Assembler::assemble_bilinear(&l2, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], qo)
-    };
+    // L² mass matrix (P0 now supported in assembler via new P0 ref element)
+    let mass = fem_assembly::Assembler::assemble_bilinear(
+        &l2, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], qo);
     let mut f_sol = vec![0.0; l2.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
     solve_pcg_gssmoother(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
 
-    // (b) Discrete divergence interpolant: D * trial, then mass⁻¹ (matches C++ DivergenceInterpolator)
+    // (b) Discrete divergence interpolant: reuse the mixed matrix D (same as C++ DivergenceInterpolator)
+    let mut f_interp_rhs = vec![0.0; l2.n_dofs()];
+    d.spmv(&v, &mut f_interp_rhs);
     let mut f_interp = vec![0.0; l2.n_dofs()];
-    d.spmv(&v, &mut f_interp);
-    // For P0: mass matrix is diagonal with element area; apply M⁻¹
-    if is_p0 {
-        for e in mesh.elem_iter() {
-            let area = element_area(mesh, e);
-            let l2_dofs: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
-            for &d in &l2_dofs { f_interp[d] /= area; }
-        }
-    }
+    let cfg_interp = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
+    solve_pcg_gssmoother(&mass, &f_interp_rhs, &mut f_interp, &cfg_interp).expect("interp mass solve");
 
     // (c) Exact L² projection of div(grad p) into L²
-    let rhs_ex = if is_p0 {
-        // Manual P0 RHS: ∫ div_gradp * φ_i dx with proper quadrature
-        let dim = 2;
-        let n = l2.n_dofs();
-        let mut r = vec![0.0; n];
-        for e in mesh.elem_iter() {
-            let et = mesh.element_type(e);
-            let dofs: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
-            let vr = ref_elem_vec(et, 0, SpaceType::HDiv).unwrap();
-            let quad = vr.quadrature(qo);
-            let nodes = mesh.element_nodes(e);
-            let use_iso = !matches!(et, EType::Tri3 | EType::Tet4);
-            let geo_elem = if use_iso { Some(fem_assembly::geo_ref_elem_from_mesh(mesh, e)) } else { None };
-            for (qi, xi) in quad.points.iter().enumerate() {
-                let (w, xp) = if use_iso {
-                    let ge = geo_elem.as_ref().unwrap();
-                    let (_jac, det, x) = fem_assembly::isoparametric_jacobian(mesh, &nodes, ge.as_deref().unwrap(), xi, dim);
-                    (quad.weights[qi] * det.abs(), x)
-                } else {
-                    let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-                    (quad.weights[qi] * tr.det_j().abs(), tr.map_to_physical(xi))
-                };
-                for &d in &dofs { r[d] += w * div_gradp(&xp); }
-            }
-        }
-        r
-    } else {
-        fem_assembly::Assembler::assemble_linear(&l2, &[
-            &fem_assembly::standard::DomainSourceIntegrator::new(div_gradp)
-        ], qo)
-    };
+    let rhs_ex = fem_assembly::Assembler::assemble_linear(&l2, &[
+        &fem_assembly::standard::DomainSourceIntegrator::new(div_gradp)
+    ], qo);
     let mut f_ex = vec![0.0; l2.n_dofs()];
     solve_pcg_gssmoother(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
 

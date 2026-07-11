@@ -1021,6 +1021,9 @@ impl DiscreteLinearOperator {
         let n_hdiv = hdiv_space.n_dofs();
         let mut coo = CooMatrix::<f64>::new(n_l2, n_hdiv);
 
+        // RT0 DOFs store v·n_unnormalized where n_unnormalized has magnitude = edge_length.
+        // The physical divergence formula: div(v)|_e = (1/area) * Σ sign_i * DOF_i
+        // where DOF_i already includes edge_length in the unnormalized normal.
         for e in mesh.elem_iter() {
             let hdiv_dofs = hdiv_space.element_dofs(e);
             let l2_dofs   = l2_space.element_dofs(e);

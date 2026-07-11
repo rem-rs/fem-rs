@@ -93,11 +93,28 @@ pub fn assembly_parallel_min_elems() -> usize {
     }
 }
 
+// ─── P0 (constant) reference element ─────────────────────────────────────────
+
+/// Constant (P0) reference element on the reference `[-1,1]²` domain.
+/// 1 DOF, basis ≡ 1.0, gradient ≡ 0.
+struct P0;
+
+impl ReferenceElement for P0 {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { 0 }
+    fn n_dofs(&self) -> usize { 1 }
+    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
+    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) { g[0] = 0.0; g[1] = 0.0; }
+    fn quadrature(&self, order: u8) -> QuadratureRule { QuadQ1.quadrature(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.0, 0.0]] }
+}
+
 // ─── Reference element factory ───────────────────────────────────────────────
 
 /// Return the solution reference element matching `elem_type` and polynomial `order`.
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
+        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
@@ -105,6 +122,7 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Tet4, 2)                           => Box::new(TetP2),
         (ElementType::Tet4, 3)                           => Box::new(TetP3),
+        (ElementType::Quad4, 0)                          => Box::new(P0),
         (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
         (ElementType::Quad4, 2)                          => Box::new(QuadQ2),
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
