@@ -125,6 +125,7 @@ macro_rules! boundary_linear_closure {
 }
 
 pub mod diffusion;
+pub mod tensor_diffusion;
 pub mod mass;
 pub mod neumann;
 pub mod source;
