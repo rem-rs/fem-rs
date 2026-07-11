@@ -8,7 +8,7 @@ use fem_assembly::mixed::{assemble_hcurl_hdiv_mixed, assemble_hcurl_hdiv_weak_cu
 use fem_assembly::standard::*;
 use fem_assembly::vector_assembler::VectorAssembler;
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::{fem_to_linlvo_csr, CsrMatrix};
+use fem_linalg::CsrMatrix;
 use fem_mesh::{refine_uniform_3d, Mesh};
 use fem_solver::div_free::project_divergence_free;
 use fem_solver::{solve_cg, solve_pcg_ams, AmsSolverConfig, AmsConfig, SolverConfig};
@@ -81,13 +81,14 @@ impl TeslaSolver {
             }
         }
 
-        let mut aa = self.curl_mu_inv_curl.clone();
-        for &d in &self.ess_dofs { aa.apply_dirichlet_symmetric(d as usize, 0.0, &mut jd);
-            if let Some(k) = aa.find_entry(d as usize, d as usize) { aa.values[k] = 1.0; } }
-        let gl = fem_to_linlvo_csr(&self.grad);
-        solve_pcg_ams(&aa, &gl, &jd, &mut self.a, &AmsSolverConfig{
-            inner_cfg: SolverConfig{rtol:1e-12,atol:0.0,max_iter:200,verbose:true,..Default::default()},
-            ams_cfg: AmsConfig{singularity_regularization:1e-6,..Default::default()},}).expect("AMS");
+        // Reduced system with CG (reliable for all mesh sizes)
+        let bv = vec![0.0; self.ess_dofs.len()];
+        let (red, rr, free, _) = form_linear_system(&self.curl_mu_inv_curl, &jd, &self.ess_dofs, &bv);
+        let mut xa = vec![0.0; red.nrows];
+        let cfg = SolverConfig{rtol:1e-12,atol:0.0,max_iter:2000,verbose:true,..Default::default()};
+        solve_cg(&red, &rr, &mut xa, &cfg).expect("PCG");
+        self.a = vec![0.0; n_nd];
+        for (i, &d) in free.iter().enumerate() { self.a[d as usize] = xa[i]; }
 
         self.curl.spmv(&self.a, &mut self.b);
         let mut bd = vec![0.0; n_nd];
