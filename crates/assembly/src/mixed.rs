@@ -26,6 +26,7 @@ use fem_space::fe_space::{FESpace, SpaceType};
 use fem_space::{HCurlSpace, H1Space, HDivSpace, L2Space};
 
 use crate::integrator::QpData;
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 
 #[cfg(feature = "parallel")]
 use crate::assembler::assembly_parallel_min_elems;
@@ -210,6 +211,43 @@ impl HDivL2Integrator for HDivL2DivIntegrator {
         let w = qp_scalar.weight;
         for j in 0..n_r {
             let pj = qp_scalar.phi[j]; // pressure basis
+            for i in 0..n_c {
+                m_elem[j * n_c + i] += w * pj * div_col[i];
+            }
+        }
+    }
+}
+
+/// ∫ α(elem) · p · div(v) dx — scaled divergence coupling.
+///
+/// The coefficient `alpha` is evaluated at each quadrature point (element
+/// tag-aware via [`CoeffCtx`]), enabling material-dependent scaling such
+/// as `1/κ` (inverse thermal conductivity) or `1/c` (inverse heat capacity).
+///
+/// MFEM equivalent: `VectorFEDivergenceIntegrator(coeff)` on
+/// `MixedBilinearForm(HDiv, L2)`.
+pub struct HDivL2ScaledDiv<C: ScalarCoeff = f64> {
+    pub alpha: C,
+}
+
+impl<C: ScalarCoeff> HDivL2Integrator for HDivL2ScaledDiv<C> {
+    fn add_to_element_matrix(
+        &self,
+        qp_scalar: &QpData<'_>,
+        div_col: &[f64],
+        _dim: usize,
+        m_elem: &mut [f64],
+    ) {
+        let ctx = CoeffCtx::from_qp(
+            qp_scalar.x_phys, qp_scalar.dim, qp_scalar.elem_id,
+            qp_scalar.elem_tag, None, None,
+        );
+        let coeff = self.alpha.eval(&ctx);
+        let n_r = qp_scalar.n_dofs;
+        let n_c = div_col.len();
+        let w = qp_scalar.weight * coeff;
+        for j in 0..n_r {
+            let pj = qp_scalar.phi[j];
             for i in 0..n_c {
                 m_elem[j * n_c + i] += w * pj * div_col[i];
             }

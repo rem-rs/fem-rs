@@ -706,6 +706,64 @@ impl MatrixCoeff for PwMatrixCoeff {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MeshDependentCoefficient — material property lookup by element tag
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Piecewise-constant coefficient selected by element material tag, with an
+/// optional scale factor.
+///
+/// MFEM equivalent: `MeshDependentCoefficient` (used by Joule mini-app for
+/// electrical conductivity, thermal conductivity, and heat capacity lookup
+/// from mesh attributes).
+///
+/// # Example
+/// ```rust,ignore
+/// let sigma = MeshDependentCoefficient::new([(1, 1e6), (2, 1.0)])
+///     .with_scale(1.0);
+/// ```
+#[derive(Clone)]
+pub struct MeshDependentCoefficient {
+    values: HashMap<i32, f64>,
+    default: f64,
+    scale: f64,
+}
+
+impl MeshDependentCoefficient {
+    /// Create from an iterator of `(tag, value)` pairs.
+    pub fn new(entries: impl IntoIterator<Item = (i32, f64)>) -> Self {
+        MeshDependentCoefficient {
+            values: entries.into_iter().collect(),
+            default: 0.0,
+            scale: 1.0,
+        }
+    }
+
+    /// Set the default value for unmatched tags.
+    pub fn with_default(mut self, default: f64) -> Self {
+        self.default = default;
+        self
+    }
+
+    /// Set the output scale factor (multiplied after tag lookup).
+    pub fn with_scale(mut self, scale: f64) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Update the scale factor in-place.
+    pub fn set_scale(&mut self, scale: f64) {
+        self.scale = scale;
+    }
+}
+
+impl ScalarCoeff for MeshDependentCoefficient {
+    #[inline]
+    fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
+        self.scale * *self.values.get(&ctx.elem_tag).unwrap_or(&self.default)
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Convenience free functions
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

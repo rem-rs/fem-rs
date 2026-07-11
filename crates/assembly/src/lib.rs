@@ -170,7 +170,7 @@ pub use boundary::vector_boundary::{
     VectorBoundaryAssembler, VectorBoundaryBilinearIntegrator, VectorBoundaryLinearIntegrator,
     VectorBdQpData, TangentialMassIntegrator,
 };
-pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator};
+pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator, HDivL2ScaledDiv};
 pub use block_assembler::{
     assemble_mixed_block, assemble_diagonal_block, assemble_system_2x2,
 };
@@ -229,7 +229,7 @@ pub use physics::thermoelastic::{
 pub use static_cond::{StaticCondensation, GlobalBacksolve, condense_global};
 pub use lor_factory::{build_lor_amg_h1, build_lor_amg_h1_3d};
 pub use form::{BilinearForm, LinearForm, VectorBilinearForm, VectorLinearForm, form_linear_system, recover_fem_solution};
-pub use postproc::coefficient::{ConstantMatrixCoeff, FnMatrixCoeff, PwMatrixCoeff, ScalarMatrixCoeff};
+pub use postproc::coefficient::{ConstantMatrixCoeff, FnMatrixCoeff, PwMatrixCoeff, ScalarMatrixCoeff, MeshDependentCoefficient};
 
 // 鈹€鈹€ Re-export sub-modules from reorganized directories 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 pub use physics::*;
