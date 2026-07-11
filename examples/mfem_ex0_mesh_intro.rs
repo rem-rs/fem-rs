@@ -223,7 +223,7 @@ mod tests {
             rtol: 1e-12,
             ..SolverConfig::default()
         };
-        let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("solver");
+        let res = solve_cg(&mat, &rhs, &mut u, &cfg).expect("solver");
         assert!(res.converged);
         assert!(res.final_residual < 1e-10);
 

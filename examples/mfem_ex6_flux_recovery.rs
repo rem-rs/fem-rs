@@ -413,7 +413,7 @@ mod tests {
             verbose: false,
             ..SolverConfig::default()
         };
-        solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("PCG solve");
+        solve_cg(&mat, &rhs, &mut u, &cfg).expect("CG solve");
         (u, space)
     }
 

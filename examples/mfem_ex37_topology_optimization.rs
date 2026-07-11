@@ -13,7 +13,7 @@
 use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, Mesh};
-use fem_solver::solve_sparse_cholesky;
+use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space};
 
 fn load_mesh(path: &str) -> Mesh<2> {
@@ -163,7 +163,9 @@ fn run_scalar_topology_optimization(args: &Args, mesh: Mesh<2>) -> TopOptResult 
         let zero_bcs = vec![0.0_f64; clamped.len()];
         fem_space::constraints::apply_dirichlet(&mut k, &mut rhs, &clamped, &zero_bcs);
 
-        let u = solve_sparse_cholesky(&k, &rhs).expect("topology optimization Cholesky solve failed");
+        let cfg = SolverConfig { rtol: 1e-12, max_iter: 10000, verbose: false, ..Default::default() };
+        let mut u = vec![0.0; k.nrows];
+        solve_cg(&k, &rhs, &mut u, &cfg).expect("topology optimization CG solve");
         let compliance = rhs.iter().zip(u.iter()).map(|(fi, ui)| fi * ui).sum::<f64>();
         if iter == 0 {
             initial_compliance = compliance;
@@ -402,8 +404,9 @@ fn run_elastic_topology_optimization(args: &Args, mesh: Mesh<2>) -> TopOptResult
             // rhs already 0 at clamped DOFs (no adjustment needed for homogeneous BC)
         }
 
-        let u = solve_sparse_cholesky(&k, &rhs)
-            .expect("elastic topology optimisation Cholesky solve failed");
+        let mut u = vec![0.0; k.nrows];
+        let cfg_el = SolverConfig { rtol: 1e-12, max_iter: 10000, verbose: false, ..Default::default() };
+        solve_cg(&k, &rhs, &mut u, &cfg_el).expect("elastic topology optimisation CG solve");
         let compliance = rhs.iter().zip(u.iter()).map(|(fi, ui)| fi * ui).sum::<f64>().abs();
         if iter == 0 {
             initial_compliance = compliance;
