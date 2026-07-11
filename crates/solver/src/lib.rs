@@ -102,6 +102,7 @@ pub mod block_operator;
 pub mod eigen;
 pub mod hypre;
 pub mod lor;
+pub mod geometric_mg;
 pub mod p_multigrid;
 pub mod multirate;
 pub mod multiphysics_sync;
@@ -251,6 +252,9 @@ pub use lor::{
     LorAmgPrecond, build_lor_operator, AmgConfig,
     solve_pcg_lor_amg, solve_gmres_lor_amg,
     GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg,
+};
+pub use geometric_mg::{
+    GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
 };
 pub use p_multigrid::{
     PmgHierarchy, PmgPrecond, solve_vcycle_pmg, fmg_solve, build_pmg_hierarchy_1d_laplacian,

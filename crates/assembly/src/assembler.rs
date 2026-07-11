@@ -10,7 +10,7 @@ use fem_core::types::DofId;
 use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk, VectorReferenceElement,
     lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
-                QuadQ1, QuadQ2, HexQ1},
+                QuadQ1, QuadQ2, QuadQ3, QuadQ4, HexQ1},
 };
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -125,6 +125,8 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Quad4, 0)                          => Box::new(P0),
         (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
         (ElementType::Quad4, 2)                          => Box::new(QuadQ2),
+        (ElementType::Quad4, 3)                          => Box::new(QuadQ3),
+        (ElementType::Quad4, 4)                          => Box::new(QuadQ4),
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => Box::new(PrismPk::new(order as usize)),
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) => Box::new(PyramidPk::new(order as usize)),

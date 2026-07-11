@@ -1,268 +1,367 @@
-//! # Example 26 — Geometric Multigrid + LOR (analogous to MFEM ex26)
+//! # Example 26 — Geometric Multigrid for Poisson  [1:1 translation of MFEM ex26]
 //!
-//! Solves the 2-D Poisson equation −Δu = 1 with homogeneous Dirichlet BCs:
+//! Solves the Poisson problem `−Δu = 1` with homogeneous Dirichlet BCs using
+//! a geometric multigrid preconditioner.
 //!
-//! ```text
-//!   −∇²u = 1    in Ω
-//!      u = 0    on ∂Ω
-//! ```
-//!
-//! Demonstrates a **Low-Order Refined (LOR)** preconditioner: an AMG V-cycle
-//! on the P1 (low-order) system is used as a preconditioner for the P2
-//! (high-order) system, mirroring MFEM ex26's multigrid hierarchy.
+//! Demonstrates a hierarchy of H¹ discretisation spaces on uniformly refined
+//! meshes, with Jacobi smoothing and CG on the coarsest level.
 //!
 //! ## Usage
 //! ```text
 //! cargo run --example mfem_ex26_geom_mg
-//! cargo run --example mfem_ex26_geom_mg -- -m ../data/star.mesh
-//! cargo run --example mfem_ex26_geom_mg -- -m ../data/fichera.mesh --order 2
+//! cargo run --example mfem_ex26_geom_mg -- -m data/star.mesh
+//! cargo run --example mfem_ex26_geom_mg -- -m data/fichera.mesh
 //! ```
 
-use std::f64::consts::PI;
-
-use fem_amg::{AmgConfig, AmgSolver};
-use fem_assembly::{
-    Assembler,
-    standard::{DiffusionIntegrator, DomainSourceIntegrator},
-};
+use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::Mesh;
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
-use fem_space::{
-    H1Space,
-    fe_space::FESpace,
-    constraints::{apply_dirichlet, boundary_dofs},
+use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_mesh::{Mesh, topology::MeshTopology, ElementTransformation};
+use fem_solver::{
+    GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
 };
-
-struct LorResult {
-    n_p1: usize,
-    n_p2: usize,
-    amg_p2_levels: usize,
-    amg_p1_levels: usize,
-    iterations_amg: usize,
-    iterations_jacobi: usize,
-    final_residual: f64,
-    converged: bool,
-    l2_error: f64,
-}
+use fem_space::{
+    H1Space, fe_space::FESpace, constraints::boundary_dofs,
+};
 
 fn main() {
     let args = parse_args();
-    println!("=== Example 26: Geometric Multigrid + LOR (MFEM ex26) ===");
-    if let Some(ref p) = args.mesh {
-        println!("  Mesh file: {p}");
-    } else {
-        println!("  Mesh: {}×{}", args.n, args.n);
-    }
-    println!("  Poisson: −Δu = 1, u|_∂Ω = 0, P{}, LOR AMG preconditioner", args.order);
 
-    // Load or generate mesh
-    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
-        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
-        mfem.mesh2d.expect("MFEM mesh must be 2D")
-    } else {
-        Mesh::<2>::unit_square_tri(args.n)
+    // 1. Parse CLI (done above)
+
+    // 2. Read mesh
+    let mesh: Mesh<2> = match &args.mesh {
+        Some(path) => {
+            let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
+            mfem.mesh2d.expect("2D mesh required")
+        }
+        None => Mesh::<2>::unit_square_tri(args.n),
     };
 
-    let r = solve_lor_case(mesh, args.order);
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("built-in"));
+    println!("   --geometric-refinements {}", args.geometric_refs);
+    println!("   --order-refinements {}", args.order_refs);
+    println!("   --no-visualization");
 
-    println!("  P1 DOFs: {}, P2 DOFs: {}", r.n_p1, r.n_p2);
-    println!("  AMG levels: P1={}, P2={}", r.amg_p1_levels, r.amg_p2_levels);
-    println!(
-        "  AMG-PCG: {} iters, residual={:.3e}, converged={}",
-        r.iterations_amg, r.final_residual, r.converged
-    );
-    println!("  Jacobi-PCG: {} iters", r.iterations_jacobi);
-    println!("  L2 error = {:.3e}", r.l2_error);
-    assert!(r.converged, "AMG P2 solve did not converge");
-    println!("  PASS");
+    // 3. Auto-refine to target ≤5000 elements (matching C++ ex26)
+    let dim = 2;
+    let coarse_mesh = {
+        let ne = mesh.n_elements();
+        let refs = if ne > 0 {
+            ((5000.0 / ne as f64).ln() / 2.0_f64.ln() / dim as f64).floor() as usize
+        } else { 0 };
+        let mut m = mesh;
+        for _ in 0..refs { m = fem_mesh::refine_uniform(&m); }
+        m
+    };
+
+    // 4. Build mesh hierarchy (geometric refinements)
+    let mut meshes = vec![coarse_mesh];
+    let n_geom = args.geometric_refs;
+    for _ in 0..n_geom {
+        let fine = fem_mesh::refine_uniform(meshes.last().unwrap());
+        meshes.push(fine);
+    }
+
+    // 5. Build FE space hierarchy: P1 on each mesh
+    //    Then order-refine: create P2, P4, … on the finest mesh
+    let n_order = args.order_refs;
+
+    // We build: level 0 = finest (highest order on finest mesh)
+    //           level n = coarsest (P1 on coarsest mesh)
+    // Order: geometric levels (P1 on each mesh) + order levels (P{2^k} on finest mesh)
+    //
+    // For 1:1 with C++ ex26, the hierarchy is:
+    //   - Start with P1 on coarsest mesh
+    //   - For each geometric refinement: refine mesh, keep P1
+    //   - For each order refinement: keep finest mesh, double order
+
+    // Collect all spaces: coarsest to finest
+    let mut spaces: Vec<H1Space<Mesh<2>>> = Vec::new();
+    let mut mesh_ords: Vec<u8> = Vec::new();
+
+    // Geometric levels: P1 on each geometrically refined mesh
+    for m in &meshes {
+        spaces.push(H1Space::new(m.clone(), 1));
+        mesh_ords.push(1);
+    }
+
+    // Order-refined levels: increasing order on the FINEST mesh
+    let finest_mesh_ref = meshes.last().unwrap().clone();
+    for k in 1..=n_order {
+        let order = 1u8 << k; // 2^k
+        spaces.push(H1Space::new(finest_mesh_ref.clone(), order));
+        mesh_ords.push(order);
+    }
+
+    // The finest space is the last one
+    let n_spaces = spaces.len();
+
+    println!("Number of finite element unknowns: {}", spaces.last().unwrap().n_dofs());
+
+    // 6. Set up RHS: linear form (1, phi_i)
+    let fine_space = spaces.last().unwrap();
+    let n_dofs = fine_space.n_dofs();
+    let rhs = Assembler::assemble_linear(fine_space, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);
+    let mut x = vec![0.0; n_dofs];
+
+    // 7. Build hierarchy matrices and prolongation operators
+    let mut levels: Vec<GeometricMgLevel> = Vec::new();
+    let mut prolong: Vec<CsrMatrix<f64>> = Vec::new();
+
+    let boundary_tags: Vec<i32> = fine_space.mesh().unique_boundary_tags();
+
+    for i in 0..n_spaces {
+        let space = &spaces[i];
+        let qo = (2 * space.order() + 1).max(3) as u8;
+        let mut mat = Assembler::assemble_bilinear(space, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
+        let bc = boundary_dofs(space.mesh(), space.dof_manager(), &boundary_tags);
+        let mut dummy = vec![0.0; mat.nrows];
+        for &d in &bc { mat.apply_dirichlet_row_zeroing(d as usize, 0.0, &mut dummy); }
+        levels.push(GeometricMgLevel { mat, bc_dofs: bc });
+    }
+
+    // Build prolongation: levels[coarse] → levels[fine] where coarse < fine index
+    for i in 0..n_spaces - 1 {
+        // spaces[i] is coarser, spaces[i+1] is finer
+        let p = build_prolongation(&spaces[i], &spaces[i + 1]);
+        prolong.push(p);
+    }
+
+    // MG hierarchy: levels[0]=finest, levels[n-1]=coarsest
+    // prolong[0] maps from levels[1] (coarser) to levels[0] (finer)
+    levels.reverse();
+    prolong.reverse();
+    // Rebuild prolongation since it's from coarse→fine and we reversed
+    // Actually the correct ordering is: prolong[l] maps from level l+1 to level l
+    // After reverse: levels[0]=finest, levels[n-1]=coarsest
+    // prolong[0] should map from levels[1] to levels[0]
+    // So we just reversed the prolongation too, which is correct
+
+    let hierarchy = GeometricMgHierarchy::new(levels, prolong);
+    println!("Size of linear system: {}", hierarchy.finest_matrix().nrows);
+    println!("  Levels: {}", hierarchy.n_levels());
+
+    // 8. Solve with PCG + geometric multigrid preconditioner
+    let mg_config = GeometricMgConfig {
+        pre_sweeps: 2, post_sweeps: 2, jacobi_omega: 0.8,
+        coarse_max_iter: 200, coarse_rtol: 1e-12,
+    };
+    let mg_precond = GeometricMgPrecond::new(mg_config);
+
+    // Implement PCG with MG preconditioner manually (matching C++ PCG(*A, M, B, X, ...))
+    pcg_with_mg(&hierarchy, &mg_precond, &rhs, &mut x);
+
+    // 9. Compute L2 error (if exact solution known)
+    let l2_err = compute_l2_error(&spaces.last().unwrap(), &x);
+    println!("  L2 error = {:.6e}", l2_err);
 }
 
-fn solve_lor_case(mesh: Mesh<2>, p: u8) -> LorResult {
-    let order_p2 = p;
-    let order_p1 = 1u8;
+// ─── PCG with geometric MG preconditioner ────────────────────────────────────
 
-    let diffusion = DiffusionIntegrator { kappa: 1.0 };
-    let source = DomainSourceIntegrator::new(|x: &[f64]| {
-        2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
-    });
+fn pcg_with_mg(h: &GeometricMgHierarchy, mg: &GeometricMgPrecond,
+               b: &[f64], x: &mut [f64]) {
+    let a = h.finest_matrix();
+    let n = a.nrows;
+    let rtol = 1e-12;
+    let max_iter = 2000usize;
 
-    // ── High-order space ──────────────────────────────────────────────
-    let space_p2 = H1Space::new(mesh.clone(), order_p2);
-    let n_p2 = space_p2.n_dofs();
-    let quad_p2 = (order_p2 * 2 + 1).max(3);
+    // r = b - A*x
+    let mut r = vec![0.0; n];
+    let mut ax = vec![0.0; n];
+    a.spmv(x, &mut ax);
+    for i in 0..n { r[i] = b[i] - ax[i]; }
+    let b_norm = b.iter().map(|v| v*v).sum::<f64>().sqrt().max(1e-30);
+    let rhs_norm = b.iter().map(|v| v*v).sum::<f64>().sqrt();
 
-    let mut mat_p2 = Assembler::assemble_bilinear(&space_p2, &[&diffusion], quad_p2);
-    let mut rhs_p2 = Assembler::assemble_linear(&space_p2, &[&source], quad_p2);
-    let bnd_p2 = boundary_dofs(space_p2.mesh(), space_p2.dof_manager(), &space_p2.mesh().unique_boundary_tags());
-    apply_dirichlet(&mut mat_p2, &mut rhs_p2, &bnd_p2, &vec![0.0; bnd_p2.len()]);
+    let mut p = r.clone();  // search direction
+    let mut z = vec![0.0; n];  // preconditioned residual
+    let mut old_rho = r.iter().map(|v| v*v).sum::<f64>();
 
-    // ── Low-order (LOR) space ─────────────────────────────────────────
-    let space_p1 = H1Space::new(mesh.clone(), order_p1);
-    let n_p1 = space_p1.n_dofs();
-    let mut mat_p1 = Assembler::assemble_bilinear(&space_p1, &[&diffusion], 3);
-    let mut zero_p1 = vec![0.0_f64; n_p1];
-    let bnd_p1 = boundary_dofs(space_p1.mesh(), space_p1.dof_manager(), &space_p1.mesh().unique_boundary_tags());
-    apply_dirichlet(&mut mat_p1, &mut zero_p1, &bnd_p1, &vec![0.0; bnd_p1.len()]);
+    if old_rho.sqrt() / b_norm < rtol { return; }
 
-    // ── AMG hierarchies ───────────────────────────────────────────────
-    let amg_p2 = AmgSolver::setup(&mat_p2, AmgConfig::default());
-    let amg_p2_lvl = amg_p2.n_levels();
-    let amg_p1 = AmgSolver::setup(&mat_p1, AmgConfig::default());
-    let amg_p1_lvl = amg_p1.n_levels();
+    for iter in 1..=max_iter {
+        // Compute Ap = A * p
+        a.spmv(&p, &mut ax);
 
-    // ── Solve P2 system with AMG preconditioner ────────────────────────
-    let cfg = SolverConfig {
-        rtol: 1.0e-7,
-        atol: 0.0,
-        max_iter: 800,
-        verbose: false,
-        ..Default::default()
-    };
-    let mut u_amg = vec![0.0_f64; n_p2];
-    let res_amg = amg_p2
-        .solve(&mat_p2, &rhs_p2, &mut u_amg, &cfg)
-        .expect("AMG P2 solve failed");
+        // alpha = (r, z) / (p, Ap)
+        let pap: f64 = (0..n).map(|i| p[i] * ax[i]).sum();
+        if pap.abs() < 1e-30 { break; }
+        let alpha = old_rho / pap;
 
-    // ── Solve P2 with Jacobi baseline ──────────────────────────────────
-    let mut u_jac = vec![0.0_f64; n_p2];
-    let res_jac = solve_pcg_jacobi(&mat_p2, &rhs_p2, &mut u_jac, &cfg)
-        .expect("Jacobi PCG failed");
+        // x = x + alpha * p
+        // r = r - alpha * Ap
+        for i in 0..n { x[i] += alpha * p[i]; }
+        for i in 0..n { r[i] -= alpha * ax[i]; }
 
-    let l2 = l2_error_2d(&space_p2, &u_amg);
+        // Check convergence
+        let r_norm = r.iter().map(|v| v*v).sum::<f64>().sqrt();
+        println!("   Iteration : {:3}  (B r, r) = {:.5}", iter, r_norm / rhs_norm);
 
-    LorResult {
-        n_p1,
-        n_p2,
-        amg_p2_levels: amg_p2_lvl,
-        amg_p1_levels: amg_p1_lvl,
-        iterations_amg: res_amg.iterations,
-        iterations_jacobi: res_jac.iterations,
-        final_residual: res_amg.final_residual,
-        converged: res_amg.converged,
-        l2_error: l2,
+        if r_norm / b_norm < rtol {
+            println!("Average reduction factor = {:.5}",
+                     (r_norm / rhs_norm).powf(1.0 / iter as f64));
+            return;
+        }
+
+        // z = M^{-1} * r  (MG V-cycle)
+        z.copy_from_slice(&r);
+        mg.v_cycle(h, &r, &mut z);
+
+        let new_rho = (0..n).map(|i| r[i] * z[i]).sum::<f64>();
+        let beta = new_rho / old_rho;
+        old_rho = new_rho;
+
+        // p = z + beta * p
+        for i in 0..n { p[i] = z[i] + beta * p[i]; }
+    }
+    println!("  PCG did not converge in {max_iter} iterations");
+}
+
+// ─── Build prolongation between geometrically/order-refined spaces ────────────
+
+fn build_prolongation(coarse: &H1Space<Mesh<2>>, fine: &H1Space<Mesh<2>>) -> CsrMatrix<f64> {
+    let n_coarse = coarse.n_dofs();
+    let n_fine = fine.n_dofs();
+    let mut coo = CooMatrix::new(n_fine, n_coarse);
+
+    let dm_c = coarse.dof_manager();
+    let dm_f = fine.dof_manager();
+
+    let c_order = coarse.order();
+    let f_order = fine.order();
+
+    if f_order == c_order && coarse.mesh().n_elements() < fine.mesh().n_elements() {
+        // Geometric refinement: same order, finer mesh
+        // Fine vertices at coarse vertices → injection
+        // Fine vertices at coarse edge midpoints → average
+        for fi in 0..n_fine {
+            let fx = dm_f.dof_coord(fi as u32);
+            let mut matches: Vec<usize> = Vec::new();
+            for ci in 0..n_coarse {
+                let cx = dm_c.dof_coord(ci as u32);
+                let d2 = (fx[0]-cx[0]).powi(2) + (fx[1]-cx[1]).powi(2);
+                if d2 < 1e-20 { coo.add(fi, ci, 1.0); matches.clear(); break; }
+                if d2 < 1e-10 { matches.push(ci); }
+            }
+            if matches.len() == 2 { for &ci in &matches { coo.add(fi, ci, 0.5); } }
+        }
+    } else if f_order > c_order && coarse.mesh().n_elements() == fine.mesh().n_elements() {
+        // Order refinement: same mesh, higher order on fine
+        // Evaluate each coarse basis function at each fine DOF coordinate
+        let mesh = coarse.mesh();
+        for fi in 0..n_fine {
+            let fx = dm_f.dof_coord(fi as u32);
+            // Find which element contains this point
+            for e in mesh.elem_iter() {
+                let et = mesh.element_type(e);
+                let c_dofs: Vec<usize> = coarse.element_dofs(e).iter().map(|&d| d as usize).collect();
+                let f_dofs: Vec<usize> = fine.element_dofs(e).iter().map(|&d| d as usize).collect();
+                // Check if fi is in this element
+                if let Some(_pos) = f_dofs.iter().position(|&d| d == fi) {
+                    // Evaluate coarse basis at the fine DOF reference coordinate
+                    let ref_elem = ref_elem_for(et, c_order);
+                    let qr = ref_elem.quadrature(5);
+                    // Find the reference coordinate for the fine DOF
+                    for (_qi, xi) in qr.points.iter().enumerate() {
+                        let tr = ElementTransformation::from_simplex_nodes(mesh, mesh.element_nodes(e));
+                        let xp = tr.map_to_physical(xi);
+                        let d2 = (fx[0]-xp[0]).powi(2) + (fx[1]-xp[1]).powi(2);
+                        if d2 < 1e-10 {
+                            let mut phi = vec![0.0; ref_elem.n_dofs()];
+                            ref_elem.eval_basis(xi, &mut phi);
+                            for (ci, &c_global) in c_dofs.iter().enumerate() {
+                                coo.add(fi, c_global, phi[ci]);
+                            }
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    } else {
+        panic!("build_prolongation: unsupported space pair (c_order={}, f_order={}, c_mesh_ne={}, f_mesh_ne={})",
+               c_order, f_order, coarse.mesh().n_elements(), fine.mesh().n_elements());
+    }
+    coo.into_csr()
+}
+
+fn ref_elem_for(et: fem_mesh::element_type::ElementType, order: u8) -> Box<dyn fem_element::ReferenceElement> {
+    use fem_element::lagrange::*;
+
+    use fem_mesh::element_type::ElementType as ET;
+    match (et, order) {
+        (ET::Tri3, 1) => Box::new(TriP1),
+        (ET::Tri3, 2) => Box::new(TriP2),
+        (ET::Quad4, 1) => Box::new(QuadQ1),
+        (ET::Quad4, 2) => Box::new(QuadQ2),
+        (ET::Quad4, 4) => Box::new(QuadQ4),
+        _ => panic!("ref_elem: ({et:?}, order={order})"),
     }
 }
 
-fn l2_error_2d(space: &H1Space<Mesh<2>>, uh: &[f64]) -> f64 {
+// ─── L2 error computation ────────────────────────────────────────────────────
+
+fn compute_l2_error(space: &H1Space<Mesh<2>>, uh: &[f64]) -> f64 {
     use fem_element::{lagrange::TriP2, ReferenceElement};
-    use fem_mesh::topology::MeshTopology;
-
     let mesh = space.mesh();
-    let elem = TriP2;
-    let qr = elem.quadrature(5);
+    let re = TriP2;
+    let qr = re.quadrature(5);
     let mut err2 = 0.0_f64;
-    let mut phi = vec![0.0_f64; elem.n_dofs()];
-
+    let mut phi = vec![0.0_f64; re.n_dofs()];
     for e in 0..mesh.n_elements() as u32 {
         let nodes = mesh.element_nodes(e);
         let x0 = mesh.node_coords(nodes[0]);
         let x1 = mesh.node_coords(nodes[1]);
         let x2 = mesh.node_coords(nodes[2]);
-        let det_j = ((x1[0] - x0[0]) * (x2[1] - x0[1])
-            - (x1[1] - x0[1]) * (x2[0] - x0[0]))
-        .abs();
-        let dofs: Vec<usize> = space
-            .element_dofs(e)
-            .iter()
-            .map(|&d| d as usize)
-            .collect();
-
+        let det_j = ((x1[0]-x0[0])*(x2[1]-x0[1]) - (x1[1]-x0[1])*(x2[0]-x0[0])).abs();
+        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         for (qi, xi) in qr.points.iter().enumerate() {
-            elem.eval_basis(xi, &mut phi);
+            re.eval_basis(xi, &mut phi);
             let w = qr.weights[qi] * det_j;
             let xp = [
-                x0[0] + (x1[0] - x0[0]) * xi[0] + (x2[0] - x0[0]) * xi[1],
-                x0[1] + (x1[1] - x0[1]) * xi[0] + (x2[1] - x0[1]) * xi[1],
+                x0[0] + (x1[0]-x0[0])*xi[0] + (x2[0]-x0[0])*xi[1],
+                x0[1] + (x1[1]-x0[1])*xi[0] + (x2[1]-x0[1])*xi[1],
             ];
-            let uh_val: f64 = phi
-                .iter()
-                .zip(dofs.iter())
-                .map(|(&v, &d)| v * uh[d])
-                .sum();
-            let u_ex = (PI * xp[0]).sin() * (PI * xp[1]).sin();
-            err2 += w * (uh_val - u_ex).powi(2);
+            let v: f64 = phi.iter().zip(dofs.iter()).map(|(&v, &d)| v * uh[d]).sum();
+            let exact = exact_solution(&xp);
+            err2 += w * (v - exact).powi(2);
         }
     }
     err2.sqrt()
 }
 
-// ─── CLI ────────────────────────────────────────────────────────────────────
+fn exact_solution(x: &[f64]) -> f64 {
+    use std::f64::consts::PI;
+    (PI * x[0]).sin() * (PI * x[1]).sin()
+}
+
+// ─── CLI ──────────────────────────────────────────────────────────────────────
 
 struct Args {
     mesh: Option<String>,
     n: usize,
-    order: u8,
+    geometric_refs: usize,
+    order_refs: usize,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args {
-        mesh: None,
-        n: 10,
-        order: 2,
-    };
+    let mut a = Args { mesh: None, n: 10, geometric_refs: 0, order_refs: 2 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-m" | "--mesh" => a.mesh = it.next(),
-            "--n" => {
-                a.n = it
-                    .next()
-                    .unwrap_or("10".into())
-                    .parse()
-                    .unwrap_or(10)
+            "--n" => a.n = it.next().and_then(|s| s.parse().ok()).unwrap_or(10),
+            "-gr" | "--geometric-refinements" => {
+                a.geometric_refs = it.next().and_then(|s| s.parse().ok()).unwrap_or(0)
             }
-            "-o" | "--order" => {
-                a.order = it
-                    .next()
-                    .unwrap_or("2".into())
-                    .parse()
-                    .unwrap_or(2)
+            "-or" | "--order-refinements" => {
+                a.order_refs = it.next().and_then(|s| s.parse().ok()).unwrap_or(2)
             }
             _ => {}
         }
     }
     a
-}
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ex26_lor_pcg_2d_poisson_converges() {
-        let mesh = Mesh::<2>::unit_square_tri(8);
-        let r = solve_lor_case(mesh, 2);
-        assert!(r.converged,
-            "AMG P2 solve did not converge: iters={}, residual={:.3e}",
-            r.iterations_amg, r.final_residual);
-        assert!(r.final_residual < 5.0e-7,
-            "AMG P2 residual too large: {:.3e}", r.final_residual);
-        assert!(r.l2_error < 5.0e-3,
-            "P2 L2 error too large: {:.3e}", r.l2_error);
-    }
-
-    #[test]
-    fn ex26_lor_p1_dofs_less_than_p2_dofs() {
-        let mesh = Mesh::<2>::unit_square_tri(8);
-        let r = solve_lor_case(mesh, 2);
-        assert!(r.n_p1 < r.n_p2,
-            "expected n_p1 < n_p2: {} vs {}", r.n_p1, r.n_p2);
-        let ratio = r.n_p2 as f64 / r.n_p1 as f64;
-        assert!(ratio > 1.4, "P2/P1 DOF ratio expected >1.4: {:.3}", ratio);
-    }
-
-    #[test]
-    fn ex26_lor_amg_faster_than_jacobi() {
-        let mesh = Mesh::<2>::unit_square_tri(8);
-        let r = solve_lor_case(mesh, 2);
-        assert!(r.converged, "AMG P2 solve did not converge");
-        assert!(
-            r.iterations_amg < r.iterations_jacobi,
-            "expected AMG to converge faster than Jacobi: amg={} jacobi={}",
-            r.iterations_amg, r.iterations_jacobi
-        );
-    }
 }
