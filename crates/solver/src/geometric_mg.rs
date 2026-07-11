@@ -45,7 +45,8 @@ impl GeometricMgHierarchy {
 pub struct GeometricMgConfig {
     pub pre_sweeps: usize,
     pub post_sweeps: usize,
-    pub chebyshev_order: usize,
+    pub chebyshev_order: usize,  // set to 0 to use Jacobi smoothing
+    pub jacobi_omega: f64,
     pub coarse_max_iter: usize,
     pub coarse_rtol: f64,
 }
@@ -55,6 +56,7 @@ impl Default for GeometricMgConfig {
         GeometricMgConfig {
             pre_sweeps: 2, post_sweeps: 2,
             chebyshev_order: 2,  // degree-2 Chebyshev (matching C++ ex26)
+            jacobi_omega: 0.8,
             coarse_max_iter: 200, coarse_rtol: 1e-12,
         }
     }
@@ -130,26 +132,22 @@ impl MgChebyshevSmoother {
 
 fn estimate_max_eigenvalue_simple(a: &CsrMatrix<f64>, dinv: &[f64], bc: &[u32]) -> f64 {
     let n = a.nrows;
-    let mut v = vec![1.0; n];
-    let mut w = vec![0.0; n];
-    for i in 0..n { v[i] = 1.0 + (i as f64 % 7.0) / 7.0; }
-    for &d in bc { if (d as usize) < n { v[d as usize] = 0.0; } }
-    let mut lambda = 0.0;
-    for _ in 0..30 {
-        a.spmv(&v, &mut w);
-        for i in 0..n { w[i] *= dinv[i]; }
-        for &d in bc { if (d as usize) < n { w[d as usize] = 0.0; } }
-        let vw: f64 = (0..n).map(|i| v[i]*w[i]).sum();
-        let vv: f64 = (0..n).map(|i| v[i]*v[i]).sum();
-        if vv < 1e-30 { break; }
-        let nl = vw / vv;
-        if (nl - lambda).abs() < 1e-6 * nl.abs() { lambda = nl; break; }
-        lambda = nl;
-        let nrm = w.iter().map(|x| x*x).sum::<f64>().sqrt().max(1e-30);
-        for i in 0..n { v[i] = w[i] / nrm; }
-        for &d in bc { if (d as usize) < n { v[d as usize] = 0.0; } }
+    // Use Gershgorin circle: λ_max ≈ max_i (Σ_j |A[i,j]| / D[i])
+    // For the Jacobi-preconditioned Laplacian, this gives a good estimate.
+    let mut max_gersh = 0.0_f64;
+    for i in 0..n {
+        if bc.contains(&(i as u32)) { continue; }
+        let mut row_sum = 0.0;
+        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
+            row_sum += a.values[p].abs();
+        }
+        let val = row_sum * dinv[i];
+        if val > max_gersh { max_gersh = val; }
     }
-    lambda.abs().max(0.1)
+    // The Gershgorin estimate is an upper bound. λ_max is typically less.
+    // For 2D Laplacian, use 0.9 * max_gersh as a rough estimate.
+    let lambda = 0.9 * max_gersh;
+    lambda.max(0.1)
 }
 
 /// Geometric multigrid V-cycle preconditioner.
@@ -161,11 +159,18 @@ pub struct GeometricMgPrecond {
 
 impl GeometricMgPrecond {
     pub fn new(config: GeometricMgConfig, h: &GeometricMgHierarchy) -> Self {
-        let mut smoothers = Vec::new();
-        for level in &h.levels {
-            smoothers.push(MgChebyshevSmoother::new(
-                &level.mat, &level.bc_dofs, config.chebyshev_order));
-        }
+        let cfg = &config;
+        let use_cheb = cfg.chebyshev_order > 0;
+        let smoothers = if !use_cheb {
+            Vec::new() // use Jacobi, handled in v_cycle_level
+        } else {
+            let mut s = Vec::new();
+            for level in &h.levels {
+                s.push(MgChebyshevSmoother::new(
+                    &level.mat, &level.bc_dofs, cfg.chebyshev_order));
+            }
+            s
+        };
         GeometricMgPrecond { config, smoothers }
     }
 

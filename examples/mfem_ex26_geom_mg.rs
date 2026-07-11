@@ -103,7 +103,10 @@ fn main() {
     // 6. Set up RHS: linear form (1, phi_i)
     let fine_space = spaces.last().unwrap();
     let n_dofs = fine_space.n_dofs();
-    let rhs = Assembler::assemble_linear(fine_space, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);
+    let mut rhs = Assembler::assemble_linear(fine_space, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);
+    // Zero RHS at BC DOFs (matching MFEM FormLinearSystem for homogeneous Dirichlet BCs)
+    let bc_fine = boundary_dofs(fine_space.mesh(), fine_space.dof_manager(), &fine_space.mesh().unique_boundary_tags());
+    for &d in &bc_fine { if (d as usize) < n_dofs { rhs[d as usize] = 0.0; } }
     let mut x = vec![0.0; n_dofs];
 
     // 7. Build hierarchy matrices and prolongation operators
@@ -145,8 +148,8 @@ fn main() {
 
     // 8. Solve with PCG + geometric multigrid preconditioner
     let mg_config = GeometricMgConfig {
-        pre_sweeps: 2, post_sweeps: 2, chebyshev_order: 2,
-        coarse_max_iter: 200, coarse_rtol: 1e-12,
+        pre_sweeps: 2, post_sweeps: 2, chebyshev_order: 1,
+        jacobi_omega: 0.8, coarse_max_iter: 200, coarse_rtol: 1e-12,
     };
     let mg_precond = GeometricMgPrecond::new(mg_config, &hierarchy);
 
