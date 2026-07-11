@@ -145,32 +145,15 @@ fn main() {
     }
 
     println!("Size of linear system: {}", a_mat.nrows);
+    let rhs_norm: f64 = rhs.iter().map(|v| v*v).sum::<f64>().sqrt();
+    println!("  RHS norm = {:.6e}", rhs_norm);
 
     // 11. PCG + GS smoother
     let mut x = vec![0.0; n_dofs];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 200, verbose: true, ..Default::default() };
     solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg).expect("PCG");
 
-    // Debug: compute projection of exact solution
-    let rhs_proj = assemble_rhs_projection(&mesh, &space, &u_exact, qo);
-    let mut proj_a = a_mat.clone();
-    let mut proj_rhs = rhs_proj.clone();
-    for &d in &ess_bdr {
-        let mut dummy = vec![0.0; n_dofs];
-        proj_a.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy);
-        if let Some(k) = proj_a.find_entry(d as usize, d as usize) { proj_a.values[k] = 1.0; }
-        proj_rhs[d as usize] = u_exact(&space.dof_manager().dof_coord(d));
-    }
-    let mut u_proj = vec![0.0; n_dofs];
-    solve_pcg_gssmoother(&proj_a, &proj_rhs, &mut u_proj, &cfg).expect("PCG proj");
-    let err_proj = l2_error_surface(&mesh, &space, &u_proj, &u_exact, (2*order+4).max(5) as u8);
-    println!("  L2 projection error = {:.8}", err_proj);
-
-    // Debug: compute L2 norm of numerical solution
-    let sol_norm = l2_error_surface(&mesh, &space, &x, &|_| 0.0, qo);
-    let exact_norm = l2_error_surface(&mesh, &space, &vec![0.0; n_dofs], &u_exact, qo.max(5));
-    println!("  ||u_h|| = {:.6e}, ||u_exact|| = {:.6e}", sol_norm, exact_norm);
-
+    // Debug: FEM solution at key DOFs
     // 13. L2 error (high quadrature for accuracy)
     let err_qo = (2 * order + 4).max(5) as u8;
     let err_u = l2_error_surface(&mesh, &space, &x, &u_exact, err_qo);
