@@ -609,6 +609,10 @@ required-features = ["io_hdf5"]
 name = "mfem_mc_random_field"
 path = "mfem_mc_random_field.rs"
 
+[[example]]
+name = "dbg_quadqk_grad"
+path = "dbg_quadqk_grad.rs"
+
 [lib]
 name = "fem_examples"
 

@@ -263,7 +263,10 @@ fn trans_cylinder(p: [f64; 3]) -> [f64; 3] {
     [ct, st, 0.25*(2.0*p[2] - 1.0)*(ct + 2.0)]
 }
 
-// ─── Surface Jacobian (Quad4, 3×2) ───────────────────────────────────────────
+// ─── Surface Jacobian (Quad4, 3×2) — analytical from trans_cylinder ───────────
+//
+// Uses the analytical mapping u(x,y,z) → (cos θ, sin θ, 0.25*(2z-1)*(cos θ+2))
+// to compute the exact Jacobian at any reference point.
 
 fn surface_jacobian(mesh: &Mesh<3>, nodes: &[u32], et: ElementType, xi: &[f64])
     -> (nalgebra::DMatrix<f64>, f64, Vec<f64>)
@@ -272,6 +275,7 @@ fn surface_jacobian(mesh: &Mesh<3>, nodes: &[u32], et: ElementType, xi: &[f64])
         ElementType::Quad4 => {
             let xc: Vec<Vec<f64>> = (0..4).map(|k| mesh.node_coords(nodes[k]).to_vec()).collect();
             let (xi_v, eta) = (xi[0], xi[1]);
+            // Q1 mapping of UNTRANSFORMED mesh: (x,y,z) from (ξ,η)
             let n = |k:usize,x:f64,e:f64| -> f64 { match k {
                 0=>0.25*(1.0-x)*(1.0-e),1=>0.25*(1.0+x)*(1.0-e),
                 2=>0.25*(1.0+x)*(1.0+e),3=>0.25*(1.0-x)*(1.0+e),_=>0.0}};
@@ -279,30 +283,81 @@ fn surface_jacobian(mesh: &Mesh<3>, nodes: &[u32], et: ElementType, xi: &[f64])
                 0=>-0.25*(1.0-e),1=>0.25*(1.0-e),2=>0.25*(1.0+e),3=>-0.25*(1.0+e),_=>0.0}};
             let dn_deta = |k:usize,x:f64| -> f64 { match k {
                 0=>-0.25*(1.0-x),1=>-0.25*(1.0+x),2=>0.25*(1.0+x),3=>0.25*(1.0-x),_=>0.0}};
-            let mut j = nalgebra::DMatrix::<f64>::zeros(3, 2);
+            let mut x = 0.0; let mut y = 0.0; let mut z = 0.0;
+            let mut dx_dxi = 0.0; let mut dy_dxi = 0.0; let mut dz_dxi = 0.0;
+            let mut dx_deta = 0.0; let mut dy_deta = 0.0; let mut dz_deta = 0.0;
             for k in 0..4 {
-                j[(0,0)] += dn_dxi(k,eta)*xc[k][0]; j[(0,1)] += dn_deta(k,xi_v)*xc[k][0];
-                j[(1,0)] += dn_dxi(k,eta)*xc[k][1]; j[(1,1)] += dn_deta(k,xi_v)*xc[k][1];
-                j[(2,0)] += dn_dxi(k,eta)*xc[k][2]; j[(2,1)] += dn_deta(k,xi_v)*xc[k][2];
+                let nk = n(k, xi_v, eta);
+                let dni = dn_dxi(k, eta);
+                let dne = dn_deta(k, xi_v);
+                x += nk * xc[k][0]; y += nk * xc[k][1]; z += nk * xc[k][2];
+                dx_dxi += dni * xc[k][0]; dy_dxi += dni * xc[k][1]; dz_dxi += dni * xc[k][2];
+                dx_deta += dne * xc[k][0]; dy_deta += dne * xc[k][1]; dz_deta += dne * xc[k][2];
             }
-            let dxi = [j[(0,0)],j[(1,0)],j[(2,0)]];
-            let deta = [j[(0,1)],j[(1,1)],j[(2,1)]];
-            let cross = [dxi[1]*deta[2]-dxi[2]*deta[1],
-                         dxi[2]*deta[0]-dxi[0]*deta[2],
-                         dxi[0]*deta[1]-dxi[1]*deta[0]];
+            // Analytical cylinder transform and its Jacobian (trans_cylinder)
+            let theta = cyl_theta(x, y);
+            let ct = theta.cos(); let st = theta.sin();
+            let dtheta_dx = cyl_dtheta_dx(x, y);
+            let dtheta_dy = cyl_dtheta_dy(x, y);
+            // Map physical (x,y,z) → cylindrical (X,Y,Z):
+            // X = cos(θ), Y = sin(θ), Z = 0.25*(2z-1)*(cos(θ)+2)
+            // Jacobian of the mapping: ∂(X,Y,Z)/∂(ξ,η) = ∂(X,Y,Z)/∂(x,y,z) * ∂(x,y,z)/∂(ξ,η)
+            let dX_dtheta = -st; let dY_dtheta = ct;
+            let r = ct + 2.0; let dz_factor = 0.25 * (2.0 * z - 1.0);
+            let dZ_dtheta = dz_factor * (-st); // ∂Z/∂θ = 0.25*(2z-1)*(-sin θ)
+            let dZ_dz = 0.5 * r; // ∂Z/∂z = 0.5*(cosθ+2)
+
+            let j00 = dX_dtheta * dtheta_dx * dx_dxi + dY_dtheta * dtheta_dy * dy_dxi;
+            let j01 = dX_dtheta * dtheta_dx * dx_deta + dY_dtheta * dtheta_dy * dy_deta;
+            let j10 = dX_dtheta * dtheta_dx * dx_dxi + dY_dtheta * dtheta_dy * dy_dxi;
+            let j11 = dX_dtheta * dtheta_dx * dx_deta + dY_dtheta * dtheta_dy * dy_deta;
+            let j20 = dZ_dtheta * (dtheta_dx*dx_dxi + dtheta_dy*dy_dxi) + dZ_dz * dz_dxi;
+            let j21 = dZ_dtheta * (dtheta_dx*dx_deta + dtheta_dy*dy_deta) + dZ_dz * dz_deta;
+
+            let mut j = nalgebra::DMatrix::<f64>::zeros(3, 2);
+            j[(0,0)] = j00; j[(0,1)] = j01;
+            j[(1,0)] = j10; j[(1,1)] = j11;
+            j[(2,0)] = j20; j[(2,1)] = j21;
+
+            let dxi_v = [j00, j10, j20];
+            let deta_v = [j01, j11, j21];
+            let cross = [dxi_v[1]*deta_v[2]-dxi_v[2]*deta_v[1],
+                         dxi_v[2]*deta_v[0]-dxi_v[0]*deta_v[2],
+                         dxi_v[0]*deta_v[1]-dxi_v[1]*deta_v[0]];
             let det = (cross[0]*cross[0]+cross[1]*cross[1]+cross[2]*cross[2]).sqrt();
-            let xp = vec![
-                [n(0,xi_v,eta),n(1,xi_v,eta),n(2,xi_v,eta),n(3,xi_v,eta)].iter()
-                    .zip(xc.iter()).map(|(n_,xc_)| n_*xc_[0]).sum(),
-                [n(0,xi_v,eta),n(1,xi_v,eta),n(2,xi_v,eta),n(3,xi_v,eta)].iter()
-                    .zip(xc.iter()).map(|(n_,xc_)| n_*xc_[1]).sum(),
-                [n(0,xi_v,eta),n(1,xi_v,eta),n(2,xi_v,eta),n(3,xi_v,eta)].iter()
-                    .zip(xc.iter()).map(|(n_,xc_)| n_*xc_[2]).sum(),
-            ];
+
+            // Physical point on cylinder
+            let xp = vec![ct, st, 0.25*(2.0*z-1.0)*r];
             (j, det, xp)
         }
         _ => (nalgebra::DMatrix::<f64>::zeros(3, 2), 1.0, vec![0.0; 3])
     }
+}
+
+/// Cylinder angle θ for a point (x,y) on the 4-sided flat tube.
+fn cyl_theta(x: f64, y: f64) -> f64 {
+    let tol = 1e-10;
+    if (y + 1.0).abs() < tol { 0.25*PI*(x - 2.0) }
+    else if (x - 1.0).abs() < tol { 0.25*PI*y }
+    else if (y - 1.0).abs() < tol { 0.25*PI*(2.0 - x) }
+    else if (x + 1.0).abs() < tol { 0.25*PI*(4.0 - y) }
+    else { 0.0 }
+}
+fn cyl_dtheta_dx(x: f64, y: f64) -> f64 {
+    let tol = 1e-10;
+    if (y + 1.0).abs() < tol { 0.25*PI }
+    else if (x - 1.0).abs() < tol { 0.0 }
+    else if (y - 1.0).abs() < tol { -0.25*PI }
+    else if (x + 1.0).abs() < tol { 0.0 }
+    else { 0.0 }
+}
+fn cyl_dtheta_dy(x: f64, y: f64) -> f64 {
+    let tol = 1e-10;
+    if (y + 1.0).abs() < tol { 0.0 }
+    else if (x - 1.0).abs() < tol { 0.25*PI }
+    else if (y - 1.0).abs() < tol { 0.0 }
+    else if (x + 1.0).abs() < tol { -0.25*PI }
+    else { 0.0 }
 }
 
 fn ref_elem_for(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
