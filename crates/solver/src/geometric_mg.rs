@@ -61,15 +61,18 @@ pub struct GeometricMgConfig {
     pub jacobi_omega: f64,
     pub coarse_max_iter: usize,
     pub coarse_rtol: f64,
+    /// Override λ_max estimate. None = auto-estimate.
+    pub max_eig_override: Option<f64>,
 }
 
 impl Default for GeometricMgConfig {
     fn default() -> Self {
         GeometricMgConfig {
             pre_sweeps: 2, post_sweeps: 2,
-            chebyshev_order: 2,  // degree-2 Chebyshev (matching C++ ex26)
+            chebyshev_order: 2,
             jacobi_omega: 0.8,
             coarse_max_iter: 200, coarse_rtol: 1e-12,
+            max_eig_override: None,
         }
     }
 }
@@ -82,15 +85,17 @@ pub struct MgChebyshevSmoother {
 }
 
 impl MgChebyshevSmoother {
-    fn new(a: &CsrMatrix<f64>, bc: &[u32], order: usize) -> Self {
+    fn new(a: &CsrMatrix<f64>, bc: &[u32], order: usize, max_eig_override: Option<f64>) -> Self {
         let n = a.nrows;
         let diag = a.diagonal();
         let mut dinv = vec![0.0; n];
         for i in 0..n { dinv[i] = if diag[i].abs() > 1e-30 { 1.0 / diag[i] } else { 1.0 }; }
         for &d in bc { if (d as usize) < n { dinv[d as usize] = 1.0; } }
 
-        // Estimate λ_max(D⁻¹A) via power iteration
-        let max_eig = estimate_max_eigenvalue_simple(a, &dinv, bc);
+        // Estimate λ_max(D⁻¹A) via power iteration, or use override
+        let max_eig = max_eig_override.unwrap_or_else(|| {
+            estimate_max_eigenvalue_simple(a, &dinv, bc)
+        });
 
         // MFEM OperatorChebyshevSmoother parameters
         let upper = 1.2 * max_eig;
@@ -119,32 +124,47 @@ impl MgChebyshevSmoother {
 
     fn smooth(&self, a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], bc: &[u32]) {
         let n = a.nrows;
-        // Compute residual: r = b - A*x
+        // Residual: r = b - A*x
         let mut r = vec![0.0; n];
         a.spmv(x, &mut r);
         for i in 0..n { r[i] = b[i] - r[i]; }
 
-        // Apply Chebyshev polynomial to residual: r ← p(D⁻¹A) D⁻¹ * r
+        // Symmetric Chebyshev smoother: Δ = D⁻¹/² * p(D¹/²*A*D¹/²) * D⁻¹/² * r
+        // where p(t) = Σ c_k * t^k is the Chebyshev polynomial.
+        let d_sqrt: Vec<f64> = (0..n).map(|i| (1.0 / self.dinv[i]).sqrt()).collect();
+        let d_inv_sqrt: Vec<f64> = (0..n).map(|i| self.dinv[i].sqrt()).collect();
+
+        // Scale residual: r' = D⁻¹/² * r
+        let mut v = vec![0.0; n];
+        for i in 0..n { v[i] = r[i] * d_inv_sqrt[i]; }
+
+        // Apply Chebyshev polynomial p(D¹/²*A*D¹/²) to v
+        // p(D¹/²*A*D¹/²) * v = Σ c_k * (D¹/²*A*D¹/²)^k * v
         let m = self.coeffs.len();
         let mut sol = vec![0.0; n];
-        let mut tmp = vec![0.0; n];
+        let mut w = vec![0.0; n];
         for k in 0..m {
-            if k > 0 { a.spmv(&tmp, &mut r); }
-            for i in 0..n { r[i] *= self.dinv[i]; }
             let c = self.coeffs[k];
-            for i in 0..n { sol[i] += c * r[i]; }
-            tmp.copy_from_slice(&r);
+            for i in 0..n { sol[i] += c * v[i]; }
+            if k + 1 < m {
+                // w = D¹/² * A * (D¹/² * v) = D¹/² * A * D¹/² * v
+                a.spmv(&v, &mut w);
+                for i in 0..n { w[i] *= d_sqrt[i]; }
+                v.copy_from_slice(&w);
+            }
         }
 
-        // x += correction
-        for i in 0..n { x[i] += sol[i]; }
+        // Scale back: Δ = D⁻¹/² * sol
+        for i in 0..n { x[i] += sol[i] * d_inv_sqrt[i]; }
         for &d in bc { if (d as usize) < n { x[d as usize] = 0.0; } }
     }
 }
 
 fn estimate_max_eigenvalue_simple(a: &CsrMatrix<f64>, dinv: &[f64], bc: &[u32]) -> f64 {
     let n = a.nrows;
-    // Fast power iteration (10 iters) on D⁻¹A
+    // Power iteration on D¹/²*A*D¹/² (symmetric, eigenvalues same as D⁻¹A).
+    // Use D⁻¹/² as preconditioner: v ← D¹/² * A * D¹/² * v
+    let d_sqrt: Vec<f64> = (0..n).map(|i| (1.0 / dinv[i]).sqrt()).collect();
     let mut v = vec![1.0; n];
     for i in 0..n { v[i] = 1.0 + (i as f64 % 5.0) * 0.1; }
     for &d in bc { if (d as usize) < n { v[d as usize] = 0.0; } }
@@ -155,9 +175,12 @@ fn estimate_max_eigenvalue_simple(a: &CsrMatrix<f64>, dinv: &[f64], bc: &[u32]) 
     normalize(&mut v);
     let mut lambda = 0.0;
     let mut w = vec![0.0; n];
-    for _iter in 0..15 {
-        a.spmv(&v, &mut w);
-        for i in 0..n { w[i] *= dinv[i]; }
+    let mut tmp = vec![0.0; n];
+    for _iter in 0..20 {
+        // w = D¹/² * A * D¹/² * v
+        for i in 0..n { tmp[i] = v[i] * d_sqrt[i]; }
+        a.spmv(&tmp, &mut w);
+        for i in 0..n { w[i] *= d_sqrt[i]; }
         for &d in bc { if (d as usize) < n { w[d as usize] = 0.0; } }
         let rq: f64 = (0..n).map(|i| v[i]*w[i]).sum();
         if (rq - lambda).abs() < 1e-4 * rq.abs() && _iter > 2 { lambda = rq; break; }
@@ -185,7 +208,7 @@ impl GeometricMgPrecond {
             let mut s = Vec::new();
             for level in &h.levels {
                 s.push(MgChebyshevSmoother::new(
-                    &level.mat, &level.bc_dofs, cfg.chebyshev_order));
+                    &level.mat, &level.bc_dofs, cfg.chebyshev_order, cfg.max_eig_override));
             }
             s
         };
