@@ -5,7 +5,7 @@ use std::io::Write;
 use fem_assembly::complex::{ComplexAssembler, ComplexSystem};
 use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
 use fem_linalg::{CooMatrix, SolverConfig};
-use fem_mesh::{refine_uniform, Mesh};
+use fem_mesh::{refine_uniform, topology::MeshTopology, Mesh};
 use fem_space::{FESpace, H1Space, constraints::boundary_dofs};
 use fem_solver::{linlvoPreconditioner, DenseVec, right_preconditioned_gmres};
 
@@ -37,7 +37,7 @@ fn main() {
     let omega=OMEGA;
     let mut sys:ComplexSystem=ComplexAssembler::assemble(
         &sp,&[&DiffusionIntegrator{kappa:1./MU}],&[&MassIntegrator{rho:EPSILON}],
-        &[&MassIntegrator{rho:SIGMA}],omega,3);
+        &[&MassIntegrator{rho:SIGMA}],omega,2*o+1);
 
     let dm=sp.dof_manager();let bdry=boundary_dofs(&mesh,dm,&[1,2,3,4]);
     let ess:Vec<usize>=bdry.iter().map(|&d|d as usize).collect();
@@ -77,14 +77,42 @@ fn main() {
         Err(e)=>eprintln!("  GMRES: {e}"),
     }
 
-    if ex{let mut er2=0.;let mut ei2=0.;
-        for s in 0..nd{let c=dm.dof_coord(s as u32);let(er,ei)=pw(c);
-            let d=X[s]-er;er2+=d*d;let d=X[nd+s]-ei;ei2+=d*d;}
-        println!("\n|| Re(u_h-u) || = {:.6e}",er2.sqrt());
-        println!("|| Im(u_h-u) || = {:.6e}\n",ei2.sqrt());}
+    if ex{use fem_element::ReferenceElement;
+        use fem_element::lagrange::{TriP1,TriP2,TriP3,quad::{QuadQ1,QuadQ2,QuadQ3,QuadQ4}};
+        fn refe(et:fem_mesh::element_type::ElementType,o:u8)->Box<dyn ReferenceElement>{match(et,o){
+            (fem_mesh::element_type::ElementType::Tri3,1)=>Box::new(TriP1),(fem_mesh::element_type::ElementType::Tri3,2)=>Box::new(TriP2),(fem_mesh::element_type::ElementType::Tri3,3)=>Box::new(TriP3),
+            (fem_mesh::element_type::ElementType::Quad4,1)=>Box::new(QuadQ1),(fem_mesh::element_type::ElementType::Quad4,2)=>Box::new(QuadQ2),
+            (fem_mesh::element_type::ElementType::Quad4,3)=>Box::new(QuadQ3),(fem_mesh::element_type::ElementType::Quad4,4)=>Box::new(QuadQ4),_=>Box::new(QuadQ1)}}
+        let mut er2=0.;let mut ei2=0.;
+        for e in 0..mesh.n_elements()as u32{
+            let et=mesh.element_type(e);let re=refe(et,o);let nld=re.n_dofs();let q=re.quadrature(2*o+1);
+            let mut phi=vec![0.;nld];let mut gr=vec![0.;nld*2];
+            let en=mesh.element_nodes(e);let ed:Vec<usize>=sp.element_dofs(e).iter().map(|&d|d as usize).collect();
+            let mut J=nalgebra::DMatrix::<f64>::zeros(2,2);
+            for(qi,xi)in q.points.iter().enumerate(){
+                re.eval_basis(xi,&mut phi);re.eval_grad_basis(xi,&mut gr);
+                J.fill(0.);let mut xp=[0.;2];
+                for k in 0..en.len(){let xk=mesh.node_coords(en[k]);
+                    for a in 0..2{for b in 0..2{J[(a,b)]+=xk[a]*gr[k*2+b];}xp[a]+=xk[a]*phi[k];}}
+                let w=q.weights[qi]*J.determinant().abs();
+                let mut ur=0.;let mut ui=0.;
+                for a in 0..nld{ur+=X[ed[a]]*phi[a];ui+=X[nd+ed[a]]*phi[a];}
+                let(er,ei)=pw(&xp);
+                let d1=ur-er;er2+=w*d1*d1;let d2=ui-ei;ei2+=w*d2*d2;
+            }
+        }
+        println!("\n|| Re(u_h-u) ||_L2 = {:.6e}",er2.sqrt());
+        println!("|| Im(u_h-u) ||_L2 = {:.6e}\n",ei2.sqrt());}
     if let Ok(mut f)=std::fs::File::create("sol_r.gf"){for i in 0..nd{writeln!(f,"{:.14e}",X[i]).ok();}}
     if let Ok(mut f)=std::fs::File::create("sol_i.gf"){for i in 0..nd{writeln!(f,"{:.14e}",X[nd+i]).ok();}}
 }
+
+
+
+
+
+
+
 
 
 
