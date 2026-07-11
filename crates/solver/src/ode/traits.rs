@@ -40,6 +40,28 @@ pub trait HamiltonianSystem: Send + Sync {
     fn grad_p(&self, q: &[f64], p: &[f64], out: &mut [f64]);
 }
 
+/// Second-order ODE system: `M · d²u/dt² = f(t, u, du/dt)`.
+///
+/// For wave-equation-type systems of the form
+/// `M · ü + C · u̇ + K · u = f(t)`.
+///
+/// MFEM equivalent: `SecondOrderTimeDependentOperator`.
+pub trait SecondOrderTimeDependentOperator: Send + Sync {
+    /// Compute `d²u/dt²` for the explicit scheme:
+    /// `M · d²u/dt² = f(t, u, du/dt)`.
+    fn mult(&self, t: f64, u: &[f64], dudt: &[f64], d2udt2: &mut [f64]);
+
+    /// Solve the backward-Euler-type implicit system:
+    /// `(M + γ·dt·C + β·dt²·K) · d²u/dt² = f(t, u + dt·du/dt + ...)`.
+    ///
+    /// The default calls `mult` (suitable for undamped systems where M
+    /// is the mass matrix and `d²u/dt² = M^{-1} · (-K·u)`).
+    fn implicit_solve(&self, dt: f64, t: f64, u: &[f64], dudt: &[f64], d2udt2: &mut [f64]) {
+        let _ = dt;
+        self.mult(t, u, dudt, d2udt2);
+    }
+}
+
 /// Split operator interface for IMEX methods.
 ///
 /// Represents systems of the form:

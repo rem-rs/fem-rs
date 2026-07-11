@@ -38,7 +38,7 @@ pub mod implicit;
 pub mod structural;
 pub mod imex;
 
-pub use traits::{TimeStepper, ImplicitTimeStepper, HamiltonianSystem, ImexOperator};
+pub use traits::{TimeStepper, ImplicitTimeStepper, HamiltonianSystem, ImexOperator, SecondOrderTimeDependentOperator};
 pub use symplectic::{VerletStepper, LeapfrogStepper, Yoshida4Stepper, SIAVSolver};
 pub use explicit::{ForwardEuler, Rk4, Rk45, AdamsBashforthMoulton, AbmState};
 pub use implicit::{ImplicitEuler, Sdirk2, Bdf2, Bdf2State, CrankNicolson};

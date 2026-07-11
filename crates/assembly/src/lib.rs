@@ -184,7 +184,7 @@ pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMa
 #[cfg(feature = "reed")]
 pub use reed::HcurlReedOperator;
 pub use postproc::grid_function::GridFunction;
-pub use postproc::grid_function::project_coefficient;
+pub use postproc::grid_function::{project_coefficient, project_hcurl_coefficient, project_hcurl_coefficient_2d};
 pub use iga::iga_assembler::{
     assemble_bilinear_diffusion_iga_1d, assemble_bilinear_diffusion_iga_1d_physical,
     assemble_bilinear_helmholtz_iga_1d, assemble_bilinear_helmholtz_iga_1d_physical,

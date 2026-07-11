@@ -506,6 +506,54 @@ pub fn project_bdr_coefficient_tangent(
     }
 }
 
+// ─── HCurl L² projection ───────────────────────────────────────────────────
+
+/// Project a vector function onto H(curl) via the mass-matrix solve
+/// `M · u = b`, where `b_i = ∫ f(x) · φ_i(x) dx`.
+///
+/// Equivalent to MFEM's `GridFunction::ProjectCoefficient` for ND spaces.
+/// The coefficient closure `f` receives `(x_phys, out)` and fills `out[0..dim]`.
+pub fn project_hcurl_coefficient(
+    nd_space: &HCurlSpace<fem_mesh::Mesh<3>>,
+    coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
+    quad_order: u8,
+) -> Vec<f64> {
+    use crate::vector_assembler::VectorAssembler;
+    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
+    use crate::coefficient::FnVectorCoeff;
+    use fem_solver::{solve_cg, SolverConfig};
+
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let m = VectorAssembler::assemble_bilinear(nd_space, &[&mass], quad_order);
+    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
+    let rhs = VectorAssembler::assemble_linear(nd_space, &[&src], quad_order);
+    let mut u = vec![0.0; nd_space.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
+    solve_cg(&m, &rhs, &mut u, &cfg).expect("HCurl L² projection CG solve");
+    u
+}
+
+/// 2-D variant: project a vector function onto H(curl) for a 2-D mesh.
+pub fn project_hcurl_coefficient_2d(
+    nd_space: &HCurlSpace<fem_mesh::Mesh<2>>,
+    coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
+    quad_order: u8,
+) -> Vec<f64> {
+    use crate::vector_assembler::VectorAssembler;
+    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
+    use crate::coefficient::FnVectorCoeff;
+    use fem_solver::{solve_cg, SolverConfig};
+
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let m = VectorAssembler::assemble_bilinear(nd_space, &[&mass], quad_order);
+    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
+    let rhs = VectorAssembler::assemble_linear(nd_space, &[&src], quad_order);
+    let mut u = vec![0.0; nd_space.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
+    solve_cg(&m, &rhs, &mut u, &cfg).expect("HCurl 2-D L² projection CG solve");
+    u
+}
+
 #[cfg(test)]
 mod tests {
     use fem_mesh::Mesh;
