@@ -122,8 +122,6 @@ fn solve_case(mesh_in: Mesh<2>, nu: f64, lid_speed: f64) -> SolveResult {
         &[&PressureDivIntegrator],
         quad_order,
     );
-    let bt_mat = b_mat.transpose();
-
     let mut f_u = vec![0.0_f64; velocity_dofs];
     let g_p = vec![0.0_f64; pressure_dofs];
 
@@ -142,20 +140,18 @@ fn solve_case(mesh_in: Mesh<2>, nu: f64, lid_speed: f64) -> SolveResult {
     fem_space::constraints::apply_dirichlet(&mut a_mat, &mut f_u, &bc_dofs, &bc_vals);
 
     let mut b_mat = b_mat;
-    let mut bt_mat = bt_mat;
+    let mut bt_mat = b_mat.transpose();
     pin_pressure_dof(&mut b_mat, &mut bt_mat, 0);
 
+    // Build [A B^T; B 0] block system.
+    // MFEM ex40 uses MINRES with block-diagonal preconditioner on the full
+    // saddle-point system.  Here we use SchurComplementSolver which is
+    // mathematically equivalent but converges faster for the serial case.
     let sys = BlockSystem { a: a_mat, bt: bt_mat, b: b_mat, c: None };
     let mut u_sol = vec![0.0_f64; velocity_dofs];
     let mut p_sol = vec![0.0_f64; pressure_dofs];
 
-    let cfg = SolverConfig {
-        rtol: 1e-8,
-        atol: 1e-12,
-        max_iter: 5_000,
-        verbose: false,
-        ..SolverConfig::default()
-    };
+    let cfg = SolverConfig { rtol: 1e-8, atol: 1e-12, max_iter: 5_000, verbose: false, ..SolverConfig::default() };
     let res = SchurComplementSolver::solve(&sys, &f_u, &g_p, &mut u_sol, &mut p_sol, &cfg)
         .expect("Stokes solve failed");
 
