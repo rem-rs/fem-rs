@@ -51,12 +51,8 @@ fn main() {
     println!("   --radius {}", args.hole_radius);
     if !args.visualization { println!("   --no-visualization"); }
 
-    // 2. Generate mesh (use unit square for testing; 2-hole mesh has issues)
-    let mesh = if false { // disabled: 2-hole mesh has degenerate elements
-        generate_2hole_mesh(args.ref_levels)
-    } else {
-        Mesh::<2>::unit_square_quad(8)
-    };
+    // 2. Generate mesh matching MFEM ex27's 2-hole geometry
+    let mesh = generate_2hole_mesh(args.ref_levels);
     let dim = 2;
 
     // 3. FE space
@@ -65,10 +61,11 @@ fn main() {
     let n_dofs = space.n_dofs();
     println!("\nNumber of finite element unknowns: {}", n_dofs);
 
-    // 4-5. Boundary markers and Dirichlet BC
-    // Unit square: tag 3=bottom(Dirichlet), 2=right(Neumann), 1=top(Robin), 4=left(natural)
-    let neumann_tag = 2;
-    let robin_tag = 1;
+    // 4-5. Boundary markers (matching MFEM ex27 tags)
+    // Tag 1: bottom → Neumann, Tag 2: top → Robin
+    // Tag 3: left hole → Dirichlet, Tag 4: right hole → natural
+    let neumann_tag = 1;
+    let robin_tag = 2;
     let dirichlet_tag = 3;
     let ess_bdr = if args.h1 {
         boundary_dofs(&mesh, space.dof_manager(), &[dirichlet_tag])
@@ -135,71 +132,62 @@ fn main() {
 
 fn generate_2hole_mesh(ref_levels: usize) -> Mesh<2> {
     // Build a Mesh<2> matching MFEM ex27's GenerateSerialMesh.
-    // Uses a mapped quad mesh: 6×4 quads with two circular holes.
-    // The mapping transforms the unit square [0,1]² to the 2-hole geometry.
-    let nx = 6; let ny = 4;
-    let mut nodes = Vec::new();
-    let mut elems = Vec::new();
-    // Vertices
-    for j in 0..=ny {
-        for i in 0..=nx {
-            let u = i as f64 / nx as f64;
-            let v = j as f64 / ny as f64;
-            let (x, y) = two_hole_map(u, v);
-            nodes.push([x, y]);
-        }
-    }
-    // Elements (Quad4)
-    for j in 0..ny {
-        for i in 0..nx {
-            let a = j * (nx + 1) + i;
-            let b = a + 1;
-            let c = (j + 1) * (nx + 1) + i + 1;
-            let d = c - 1;
-            elems.push([a as u32, b as u32, c as u32, d as u32]);
-        }
-    }
-    // Boundary edges (face_nodes): 4 sides + 2 holes
-    // Tag 1: bottom (j=0), Tag 2: top (j=ny), Tag 5: left (i=0), Tag 6: right (i=nx)
-    // Holes: edges around the two interior circular cutouts (tags 3, 4)
-    let mut faces: Vec<([u32; 2], i32)> = Vec::new();
-    // Bottom (tag 1)
-    for i in 0..nx { faces.push(([ (0)*(nx+1)+i, (0)*(nx+1)+i+1 ], 1)); }
-    // Top (tag 2)
-    for i in 0..nx { faces.push(([ (ny)*(nx+1)+i, (ny)*(nx+1)+i+1 ], 2)); }
-    // Left (tag 5)
-    for j in 0..ny { faces.push(([ (j)*(nx+1)+0, (j+1)*(nx+1)+0 ], 5)); }
-    // Right (tag 6)
-    for j in 0..ny { faces.push(([ (j)*(nx+1)+nx, (j+1)*(nx+1)+nx ], 6)); }
+    // 29 vertices, 16 quads, 24 boundary edges.
+    let a = unsafe { HOLE_RADIUS / std::f64::consts::SQRT_2 };
 
-    // Build mesh via Mesh::uniform
-    let n_nodes = nodes.len();
-    let mut coords = Vec::with_capacity(n_nodes * 2);
-    for n in &nodes { coords.push(n[0]); coords.push(n[1]); }
-    let conn: Vec<u32> = elems.iter().flat_map(|e| e.iter().copied()).collect();
-    let elem_tags = vec![1; elems.len()]; // single material
-    let face_conn: Vec<u32> = faces.iter().flat_map(|(e, _)| e.iter().copied()).collect();
-    let face_tags: Vec<i32> = faces.iter().map(|(_, t)| *t).collect();
-    let mesh = Mesh::<2>::uniform(coords, conn, elem_tags, ElementType::Quad4,
-                                  face_conn, face_tags, ElementType::Line2);
+    // Vertex coordinates in order (matching MFEM ex27.cpp lines 548-584)
+    let vertex_coords: [[f64; 2]; 29] = [
+        [-1.0, -0.5], [-1.0, 0.0], [-1.0, 0.5],      // 0-2: left side
+        [-0.5 - a, -a], [-0.5 - a, 0.0], [-0.5 - a, a],  // 3-5: left hole left
+        [-0.5, -0.5], [-0.5, -a], [-0.5, a], [-0.5, 0.5], // 6-9: left mid
+        [-0.5 + a, -a], [-0.5 + a, 0.0], [-0.5 + a, a],    // 10-12: left hole right
+        [0.0, -0.5], [0.0, 0.0], [0.0, 0.5],        // 13-15: center
+        [0.5 - a, -a], [0.5 - a, 0.0], [0.5 - a, a],    // 16-18: right hole left
+        [0.5, -0.5], [0.5, -a], [0.5, a], [0.5, 0.5],     // 19-22: right mid
+        [0.5 + a, -a], [0.5 + a, 0.0], [0.5 + a, a],    // 23-25: right hole right
+        [1.0, -0.5], [1.0, 0.0], [1.0, 0.5],        // 26-28: right side
+    ];
+
+    // Element connectivity (8 quads per half, 16 total, matching C++ lines 494-520)
+    let quad_data: [[u32; 4]; 16] = [
+        [0, 3, 4, 1], [1, 4, 5, 2], [5, 8, 9, 2], [8, 12, 15, 9],
+        [11, 14, 15, 12], [10, 13, 14, 11], [6, 13, 10, 7], [0, 6, 7, 3],
+        [13, 16, 17, 14], [14, 17, 18, 15], [18, 21, 22, 15], [21, 25, 28, 22],
+        [24, 27, 28, 25], [23, 26, 27, 24], [19, 26, 23, 20], [13, 19, 20, 16],
+    ];
+
+    // Boundary segments with tags (matching C++ lines 522-543)
+    // Tag 1: bottom, tag 2: top, tag 3: left hole, tag 4: right hole
+    // Tags 5,6: left/right periodic ends (identified later)
+    let bdr_data: [([u32; 2], i32); 24] = [
+        ([0, 6], 1), ([6, 13], 1), ([13, 19], 1), ([19, 26], 1),   // bottom
+        ([28, 22], 2), ([22, 15], 2), ([15, 9], 2), ([9, 2], 2),     // top
+        ([7, 3], 3), ([10, 7], 3), ([11, 10], 3), ([12, 11], 3),    // left hole
+        ([8, 12], 3), ([5, 8], 3), ([4, 5], 3), ([3, 4], 3),         // left hole cont.
+        ([20, 16], 4), ([23, 20], 4), ([24, 23], 4), ([25, 24], 4),  // right hole
+        ([21, 25], 4), ([18, 21], 4), ([17, 18], 4), ([16, 17], 4),  // right hole cont.
+    ];
+
+    let mut coords = Vec::with_capacity(29 * 2);
+    for &[x, y] in &vertex_coords { coords.push(x); coords.push(y); }
+    let conn: Vec<u32> = quad_data.iter().flat_map(|q| q.iter().copied()).collect();
+    let elem_tags = vec![1; 16];
+    let face_conn: Vec<u32> = bdr_data.iter().flat_map(|(e, _)| e.iter().copied()).collect();
+    let face_tags: Vec<i32> = bdr_data.iter().map(|(_, t)| *t).collect();
+
+    let mut mesh = Mesh::<2>::uniform(coords, conn, elem_tags, ElementType::Quad4,
+                                      face_conn, face_tags, ElementType::Line2);
+
+    // Make periodic: identify left end (tag 5) with right end (tag 6)
+    // The C++ identifies vertices 26/27/28 with 0/1/2
+    // But our mesh builder already creates unique vertices; we need to merge them
+    // using Mesh::make_periodic. However the tags 5,6 are not in our bdr_data
+    // because the C++ uses v2v remapping instead. For a 1:1 translation we skip
+    // periodic BC for now since H1 periodic requires special handling.
 
     // Refine
-    let mut mesh = mesh;
     for _ in 0..ref_levels { mesh = fem_mesh::refine_uniform(&mesh); }
     mesh
-}
-
-fn two_hole_map(u: f64, v: f64) -> (f64, f64) {
-    let a = unsafe { HOLE_RADIUS };
-    let sqrt2 = std::f64::consts::SQRT_2;
-    let d = 4.0 * a * (sqrt2 - 2.0 * a) * (1.0 - 2.0 * v);
-    let v0 = (1.0 + sqrt2) * (sqrt2 * a - 2.0 * v) *
-             ((4.0 - 3.0 * sqrt2) * a + (8.0 * (sqrt2 - 1.0) * a - 2.0) * v) / d;
-    let r = 2.0 * ((sqrt2 - 1.0) * a * a * (1.0 - 4.0 * v) +
-                   2.0 * (1.0 + sqrt2 * (1.0 + 2.0 * (2.0 * a - sqrt2 - 1.0) * a)) * v * v) / d;
-    let x = (u - 0.5) * (1.0 + 2.0 * r) + r;
-    let y = v0 + v;
-    (x, y)
 }
 
 // ─── Boundary assembly helpers ────────────────────────────────────────────────
