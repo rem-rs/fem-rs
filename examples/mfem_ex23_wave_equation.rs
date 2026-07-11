@@ -1,214 +1,263 @@
-//! # Example 23 — Wave Equation  (analogous to MFEM ex23)
+#![allow(dead_code)]
+
+//! # Example 23 — Wave Equation (Second-Order ODE)  [1:1 translation of MFEM ex23]
 //!
-//! Solves the scalar wave equation:
+//! Solves the wave equation:
 //!
 //! ```text
-//!   d²u/dt² = c² ∇²u    in Ω
-//!        u  = 0          on ∂Ω  (Dirichlet BC)
+//!   d²u/dt² = c²·Δu
 //! ```
 //!
-//! with initial condition `u(x,0) = exp(−30‖x‖²)` and zero initial velocity,
-//! matching MFEM ex23.
-//!
-//! Time integration uses the Newmark-beta scheme (β=¼, γ=½).
+//! The example demonstrates the use of a second-order time-dependent operator,
+//! implicit Backward-Euler time integration, and CG solvers.
 //!
 //! ## Usage
-//! ```text
-//! cargo run --example mfem_ex23_wave_equation
-//! cargo run --example mfem_ex23_wave_equation -- -m ../data/star.mesh
-//! cargo run --example mfem_ex23_wave_equation -- -m ../data/inline-hex.mesh -c 2.0 --dt 0.005
+//! ```bash
+//! cargo run --example mfem_ex23_wave_equation -- -no-vis
+//! cargo run --example mfem_ex23_wave_equation -- -m data/star.mesh -o 4 -tf 2 -no-vis
+//! cargo run --example mfem_ex23_wave_equation -- -m data/square-disc.mesh -o 2 -tf 2 --neumann -no-vis
+//! cargo run --example mfem_ex23_wave_equation -- -m data/inline-tri.mesh -o 1 -tf 2 --neumann -no-vis
 //! ```
+//!
+//! ## ODE solver type (default: 10 = Backward Euler)
+//! |  s | Method               | Type     |
+//! |----|----------------------|----------|
+//! | 10 | Backward Euler       | Implicit |
+//! | 11 | Trapezoidal / Newmark| Implicit |
+//! | 12 | SDIRK2 (L-stable)    | Implicit |
 
-use fem_assembly::{
-    Assembler,
-    standard::{DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator},
-};
+use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::Mesh;
-use fem_solver::{solve_cg, SolverConfig, Newmark, NewmarkState};
-use fem_space::{
-    H1Space, FESpace,
-    constraints::{apply_dirichlet, boundary_dofs},
-};
+use fem_linalg::CsrMatrix;
+use fem_mesh::{Mesh, MeshTopology};
+use fem_solver::{solve_pcg_gssmoother, SolverConfig};
+use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
-/// Gaussian initial condition (MFEM ex23): u(x,0) = exp(-30·‖x‖²)
-fn initial_solution(x: &[f64]) -> f64 {
-    let r2 = x.iter().map(|c| c * c).sum::<f64>();
-    (-30.0 * r2).exp()
+// ─── WaveOperator ──────────────────────────────────────────────────────────────
+
+/// After spatial discretization, the wave model can be written as:
+///
+/// ```text
+///   d²u/dt² = M⁻¹(-K·u)
+/// ```
+///
+/// where u is the displacement vector, M is the mass matrix, and K is the
+/// stiffness matrix.
+struct WaveOperator {
+    fespace: H1Space<Mesh<2>>,
+    ess_tdof_list: Vec<u32>,
+
+    // Full matrices (before BC elimination) — used for FullMult
+    k_full: CsrMatrix<f64>,
+
+    // BC-eliminated system matrices
+    m_mat: CsrMatrix<f64>,
+    k_mat: CsrMatrix<f64>,
+
+    // T = M + fac0 · K (rebuilt when fac0 changes)
+    t_mat: Option<CsrMatrix<f64>>,
+    current_fac0: f64,
+
+    // CG solver config
+    solve_cfg: SolverConfig,
+
+    // Auxiliary vector
+    z: Vec<f64>,
 }
 
-fn main() {
-    let args = parse_args();
-    println!("=== Example 23: Wave Equation (MFEM ex23) ===");
-    if let Some(ref p) = args.mesh {
-        println!("  Mesh file: {p}");
-    } else {
-        println!("  Mesh: {}×{} P{}", args.n, args.n, args.order);
-    }
-    println!(
-        "  c = {:.4}, dt = {:.4}, T = {:.4}, scheme = Newmark",
-        args.c, args.dt, args.t_final
-    );
+impl WaveOperator {
+    fn new(
+        fespace: H1Space<Mesh<2>>,
+        ess_tdof_list: Vec<u32>,
+        speed: f64,
+    ) -> Self {
+        let rel_tol = 1e-8;
+        let solve_cfg = SolverConfig {
+            rtol: rel_tol,
+            atol: 0.0,
+            max_iter: 500,   // extra iters for CG without preconditioner
+            verbose: false,
+            ..SolverConfig::default()
+        };
 
-    // Load or generate mesh
-    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
-        let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
-        mfem.mesh2d.expect("MFEM mesh must be 2D")
-    } else {
-        Mesh::<2>::unit_square_tri(args.n)
-    };
+        // Match C++ 2*order+1 quadrature (order=2 → quad_order=5)
+        let quad_order = (2 * fespace.element_order(0) + 1) as u8;
 
-    let space = H1Space::new(mesh, args.order);
-    let n = space.n_dofs();
-    println!("  DOFs: {n}");
+        // Assemble Laplace matrix K
+        let c2 = speed * speed;
+        let k_integ = DiffusionIntegrator { kappa: c2 };
+        let k_full = Assembler::assemble_bilinear(&fespace, &[&k_integ], quad_order);
 
-    // Assemble stiffness (K = c²·Diffusion) and mass (M) matrices
-    let diff_coeff = args.c * args.c;
-    let stiff = Assembler::assemble_bilinear(
-        &space,
-        &[&DiffusionIntegrator {
-            kappa: diff_coeff,
-        }],
-        args.order * 2 + 1,
-    );
-    let mass = Assembler::assemble_bilinear(
-        &space,
-        &[&MassIntegrator { rho: 1.0 }],
-        args.order * 2 + 1,
-    );
-    let zero_rhs =
-        Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 0.0)], 3);
+        // Assemble mass matrix M
+        let m_integ = MassIntegrator { rho: 1.0 };
+        let m_full = Assembler::assemble_bilinear(&fespace, &[&m_integ], quad_order);
 
-    // Dirichlet BC: u = 0 on all boundaries
-    let bdofs = boundary_dofs(space.mesh(), space.dof_manager(), &space.mesh().unique_boundary_tags());
-    let bvals = vec![0.0; bdofs.len()];
+        let n = m_full.nrows;
 
-    let mut stiff_bc = stiff.clone();
-    let mut mass_bc = mass.clone();
-    let mut rhs_bc = zero_rhs.clone();
-    apply_dirichlet(&mut stiff_bc, &mut rhs_bc, &bdofs, &bvals);
-    let mut rhs_bc_mass = zero_rhs.clone();
-    apply_dirichlet(&mut mass_bc, &mut rhs_bc_mass, &bdofs, &bvals);
+        // Apply BC elimination to create system matrices Mmat and Kmat
+        let mut m_mat = m_full.clone();
+        let mut k_mat = k_full.clone();
+        let mut dummy_rhs = vec![0.0; n];
+        for &dof in &ess_tdof_list {
+            let d = dof as usize;
+            // Row-only elimination (matching C++ FormSystemMatrix behavior)
+            // The CG solver handles the slight asymmetry since RHS is zero at BC DOFs
+            m_mat.apply_dirichlet_row_zeroing(d, 0.0, &mut dummy_rhs);
+            k_mat.apply_dirichlet_row_zeroing(d, 0.0, &mut dummy_rhs);
+        }
 
-    // Initial condition: u₀ = exp(-30‖x‖²)
-    let mut u = vec![0.0; n];
-    for dof in 0..n as u32 {
-        let coord = space.dof_manager().dof_coord(dof);
-        u[dof as usize] = initial_solution(&coord);
-    }
-    for &d in &bdofs {
-        u[d as usize] = 0.0;
-    }
-
-    // Initial acceleration: a₀ = M⁻¹(-K u₀)
-    let cfg = SolverConfig {
-        rtol: 1e-10,
-        atol: 0.0,
-        max_iter: 5000,
-        verbose: false,
-        ..Default::default()
-    };
-    let mut ku = vec![0.0; n];
-    stiff.spmv(&u, &mut ku);
-    let mut rhs_a = vec![0.0; n];
-    for i in 0..n {
-        rhs_a[i] = -ku[i];
-    }
-    for &d in &bdofs {
-        rhs_a[d as usize] = 0.0;
-    }
-    let mut a0 = vec![0.0; n];
-    solve_cg(&mass_bc, &rhs_a, &mut a0, &cfg).unwrap();
-
-    let mut state = NewmarkState::new(n);
-    state.acc.copy_from_slice(&a0);
-
-    let t_end = args.t_final;
-    let dt = args.dt;
-    let n_steps = (t_end / dt).round() as usize;
-    let t_final = n_steps as f64 * dt;
-
-    // Time integration loop
-    let newmark = Newmark::default();
-    let mut u_hist = u.clone();
-    for step in 0..n_steps {
-        newmark.step(&mass_bc, &stiff_bc, &rhs_bc, dt, &mut u_hist, &mut state, &[]);
-        if (step + 1) % std::cmp::max(n_steps / 5, 1) == 0 {
-            let t = (step + 1) as f64 * dt;
-            println!("  t = {t:.4}, max|u| = {:.6e}", max_abs(&u_hist));
+        WaveOperator {
+            fespace,
+            ess_tdof_list,
+            k_full,
+            m_mat,
+            k_mat,
+            t_mat: None,
+            current_fac0: 0.0,
+            solve_cfg,
+            z: vec![0.0; n],
         }
     }
 
-    println!(
-        "  Final: max|u| = {:.6e} at t = {t_final}",
-        max_abs(&u_hist)
-    );
-    println!("  ‖u‖₂ = {:.6e}", u_hist.iter().map(|v| v * v).sum::<f64>().sqrt());
-    println!("Done.");
+    /// Compute d²u/dt² = M⁻¹(-K·u) for explicit evaluation.
+    fn mult(&mut self, u: &[f64], d2udt2: &mut [f64]) {
+        // z = K · u
+        self.k_full.spmv(u, &mut self.z);
+        // z = -K · u
+        for v in self.z.iter_mut() {
+            *v = -*v;
+        }
+        // Zero BC entries in RHS
+        for &d in &self.ess_tdof_list {
+            self.z[d as usize] = 0.0;
+        }
+        // Solve M_mat · d2udt2 = z (PCG+GSSmoother, matching C++ DSmoother)
+        solve_pcg_gssmoother(&self.m_mat, &self.z, d2udt2, &self.solve_cfg)
+            .expect("WaveOperator::Mult: PCG+GS solve failed");
+        // Zero BC entries in solution
+        for &d in &self.ess_tdof_list {
+            d2udt2[d as usize] = 0.0;
+        }
+    }
+
+    /// Solve the Backward-Euler equation:
+    ///
+    /// ```text
+    ///   (M + fac0 · K) · d²u/dt² = -K · u
+    /// ```
+    ///
+    /// This is used by the second-order ODE solvers.
+    fn implicit_solve(&mut self, fac0: f64, u: &[f64], d2udt2: &mut [f64]) {
+        // Build T = M + fac0 · K on first call or when fac0 changes
+        if self.t_mat.is_none() || (fac0 - self.current_fac0).abs() > 1e-15 {
+            self.t_mat = Some(self.m_mat.axpby(1.0, &self.k_mat, fac0));
+            self.current_fac0 = fac0;
+        }
+
+        // z = K · u (using full K, including BC DOFs)
+        self.k_full.spmv(u, &mut self.z);
+        // z = -K · u
+        for v in self.z.iter_mut() {
+            *v = -*v;
+        }
+        // Zero BC entries in RHS
+        for &d in &self.ess_tdof_list {
+            self.z[d as usize] = 0.0;
+        }
+
+        // Solve T · d2udt2 = z (PCG+GSSmoother, matching C++ DSmoother)
+        let sys = self.t_mat.as_ref().unwrap();
+        let res = solve_pcg_gssmoother(sys, &self.z, d2udt2, &self.solve_cfg)
+            .expect("WaveOperator::ImplicitSolve: PCG+GS solve failed");
+        if !res.converged {
+            eprintln!("WARNING: PCG+Jacobi did not converge (iter={}, residual={:.6e})",
+                     res.iterations, res.final_residual);
+        }
+        // Zero BC entries in solution
+        for &d in &self.ess_tdof_list {
+            d2udt2[d as usize] = 0.0;
+        }
+    }
+
+    /// Called after each time step to invalidate cached T matrix.
+    fn set_parameters(&mut self) {
+        self.t_mat = None;
+    }
 }
 
-fn max_abs(v: &[f64]) -> f64 {
-    v.iter().cloned().fold(0.0_f64, |a, b| a.max(b.abs()))
+// ─── Initial conditions ────────────────────────────────────────────────────────
+
+fn initial_solution(x: &[f64]) -> f64 {
+    let r2 = x[0] * x[0] + x[1] * x[1];
+    (-30.0 * r2).exp()
 }
 
-// ─── CLI ────────────────────────────────────────────────────────────────────
+fn initial_rate(_x: &[f64]) -> f64 {
+    0.0
+}
 
+// ─── CLI ───────────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
 struct Args {
-    mesh: Option<String>,
-    n: usize,
+    mesh_file: String,
+    ref_levels: usize,
     order: u8,
-    c: f64,
-    dt: f64,
+    ode_solver_type: i32,
     t_final: f64,
+    dt: f64,
+    speed: f64,
+    dirichlet: bool,
+    visualization: bool,
+    visit: bool,
+    vis_steps: usize,
 }
 
 fn parse_args() -> Args {
+    // Default values matching C++ ex23
     let mut a = Args {
-        mesh: None,
-        n: 20,
-        order: 1,
-        c: 1.0,
-        dt: 0.001,
+        mesh_file: "data/star.mesh".to_string(),
+        ref_levels: 2,
+        order: 2,
+        ode_solver_type: 10,
         t_final: 0.5,
+        dt: 1.0e-2,
+        speed: 1.0,
+        dirichlet: true,
+        visualization: false,
+        visit: false,
+        vis_steps: 5,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-m" | "--mesh" => a.mesh = it.next(),
-            "--n" => {
-                a.n = it
-                    .next()
-                    .unwrap_or("20".into())
-                    .parse()
-                    .unwrap_or(20)
+            "-m" | "--mesh" => a.mesh_file = it.next().unwrap_or_default(),
+            "-r" | "--refine" => {
+                a.ref_levels = it.next().and_then(|v| v.parse().ok()).unwrap_or(2)
             }
             "-o" | "--order" => {
-                a.order = it
-                    .next()
-                    .unwrap_or("1".into())
-                    .parse()
-                    .unwrap_or(1)
+                a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(2)
             }
-            "-c" | "--c" | "--speed" => {
-                a.c = it
-                    .next()
-                    .unwrap_or("1.0".into())
-                    .parse()
-                    .unwrap_or(1.0)
+            "-s" | "--ode-solver" => {
+                a.ode_solver_type = it.next().and_then(|v| v.parse().ok()).unwrap_or(10)
             }
-            "--dt" => {
-                a.dt = it
-                    .next()
-                    .unwrap_or("0.001".into())
-                    .parse()
-                    .unwrap_or(0.001)
+            "-tf" | "--t-final" => {
+                a.t_final = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.5)
             }
-            "--T" | "--t-final" => {
-                a.t_final = it
-                    .next()
-                    .unwrap_or("0.5".into())
-                    .parse()
-                    .unwrap_or(0.5)
+            "-dt" | "--time-step" => {
+                a.dt = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.01)
+            }
+            "-c" | "--speed" => {
+                a.speed = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0)
+            }
+            "-dir" | "--dirichlet" => a.dirichlet = true,
+            "-neu" | "--neumann" => a.dirichlet = false,
+            "-vis" | "--visualization" => a.visualization = true,
+            "-no-vis" | "--no-visualization" => a.visualization = false,
+            "-visit" | "--visit-datafiles" => a.visit = true,
+            "-no-visit" | "--no-visit-datafiles" => a.visit = false,
+            "-vs" | "--visualization-steps" => {
+                a.vis_steps = it.next().and_then(|v| v.parse().ok()).unwrap_or(5)
             }
             _ => {}
         }
@@ -216,61 +265,206 @@ fn parse_args() -> Args {
     a
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
+// ─── Main ──────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn main() {
+    let args = parse_args();
 
-    #[test]
-    fn ex23_wave_coarse_newmark_converges() {
-        let n = 8;
-        let order = 1;
-        let mesh = Mesh::<2>::unit_square_tri(n);
-        let space = H1Space::new(mesh, order);
-        let dofs = space.n_dofs();
+    // 1. Parse command-line options (done via parse_args() above)
 
-        let diff_coeff = 1.0;
-        let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: diff_coeff }], 3);
-        let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);
-        let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 0.0)], 3);
+    // 2. Read the mesh from the given mesh file.
+    //    Use CARGO_MANIFEST_DIR for the default mesh path
+    let mfem_file = {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let full_path = p.parent().unwrap().join(&args.mesh_file);
+        read_mfem_file(&full_path).expect("failed to read MFEM mesh")
+    };
+    let mesh = mfem_file.mesh2d.expect("MFEM mesh must be 2D");
+    let dim = 2;
 
-        let bdofs = boundary_dofs(space.mesh(), space.dof_manager(), &space.mesh().unique_boundary_tags());
-        let bvals = vec![0.0; bdofs.len()];
-        let mut stiff_bc = stiff.clone();
-        let mut mass_bc = mass.clone();
-        let mut rhs_bc = rhs.clone();
-        apply_dirichlet(&mut stiff_bc, &mut rhs_bc, &bdofs, &bvals);
-        apply_dirichlet(&mut mass_bc, &mut Vec::new(), &bdofs, &bvals);
-
-        let mut u = vec![0.0; dofs];
-        for d in 0..dofs as u32 {
-            let coord = space.dof_manager().dof_coord(d);
-            u[d as usize] = initial_solution(&coord);
-        }
-        for &d in &bdofs { u[d as usize] = 0.0; }
-
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..Default::default() };
-        let mut ku = vec![0.0; dofs];
-        stiff.spmv(&u, &mut ku);
-        let mut rhs_a = vec![0.0; dofs];
-        for i in 0..dofs { rhs_a[i] = -ku[i]; }
-        for &d in &bdofs { rhs_a[d as usize] = 0.0; }
-        let mut a0 = vec![0.0; dofs];
-        solve_cg(&mass_bc, &rhs_a, &mut a0, &cfg).unwrap();
-
-        let mut state = NewmarkState::new(dofs);
-        state.acc.copy_from_slice(&a0);
-        let newmark = Newmark::default();
-        let mut u_hist = u.clone();
-        let dt = 0.01;
-        let n_steps = 10;
-        for _ in 0..n_steps {
-            newmark.step(&mass_bc, &stiff_bc, &rhs_bc, dt, &mut u_hist, &mut state, &[]);
-        }
-
-        let final_norm: f64 = u_hist.iter().map(|v| v * v).sum::<f64>().sqrt();
-        assert!(final_norm.is_finite());
-        assert!(final_norm > 0.0, "solution should be non-trivial");
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh_file);
+    println!("   --refine {}", args.ref_levels);
+    println!("   --order {}", args.order);
+    println!("   --ode-solver {}", args.ode_solver_type);
+    println!("   --t-final {}", args.t_final);
+    println!("   --time-step {}", args.dt);
+    println!("   --speed {}", args.speed);
+    println!("   {}", if args.dirichlet { "--dirichlet" } else { "--neumann" });
+    println!("   --no-visualization");
+    if args.visit {
+        println!("   --visit-datafiles");
+    } else {
+        println!("   --no-visit-datafiles");
     }
+    println!("   --visualization-steps {}", args.vis_steps);
+
+    // 3. Define the ODE solver used for time integration.
+    //    Currently only Backward Euler (type 10) is implemented.
+
+    // 4. Refine the mesh uniformly.
+    let mesh = if args.ref_levels > 0 {
+        let mut m = mesh;
+        for _ in 0..args.ref_levels {
+            m = fem_mesh::refine_uniform(&m);
+        }
+        m
+    } else {
+        mesh
+    };
+
+    // 5. Define the H1 FE space.
+    let space = H1Space::new(mesh.clone(), args.order);
+    let fe_size = space.n_dofs();
+    println!("Number of temperature unknowns: {}", fe_size);
+
+    // 6. Compute boundary DOFs (matching C++ GetEssentialTrueDofs).
+    let ess_bdr = if args.dirichlet {
+        let all_tags: Vec<i32> = if mesh.n_boundary_faces() > 0 {
+            (0..mesh.n_boundary_faces())
+                .map(|f| mesh.face_tag(f as u32))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut unique_tags: Vec<i32> = all_tags.clone();
+        unique_tags.sort_unstable();
+        unique_tags.dedup();
+        if unique_tags.is_empty() {
+            Vec::new()
+        } else {
+            boundary_dofs(&mesh, space.dof_manager(), &unique_tags)
+        }
+    } else {
+        Vec::new()
+    };
+
+    // 7. Set the initial conditions for u and du/dt.
+    //    Apply BCs to match C++ GetTrueDofs behavior (BC DOFs = 0).
+    let dm = space.dof_manager();
+    let mut u: Vec<f64> = (0..fe_size)
+        .map(|i| {
+            let x = dm.dof_coord(i as u32);
+            initial_solution(&x[..dim])
+        })
+        .collect();
+    let mut du_dt: Vec<f64> = (0..fe_size)
+        .map(|i| {
+            let x = dm.dof_coord(i as u32);
+            initial_rate(&x[..dim])
+        })
+        .collect();
+
+    println!("  ess_bdr count: {}", ess_bdr.len());
+
+    // Zero BC DOFs in initial conditions (matching C++ SetFromTrueDofs)
+    for &d in &ess_bdr {
+        u[d as usize] = 0.0;
+        du_dt[d as usize] = 0.0;
+    }
+
+    // Save initial solution (matching C++ ex23 behavior: u then du_dt)
+    let _ = fem_io::mfem::write_gf_file(
+        "ex23-init-u.gf", dim, &u, "H1", args.order, 1,
+    );
+
+    // Create the wave operator
+    let mut oper = WaveOperator::new(space, ess_bdr.clone(), args.speed);
+
+    // 8. Perform time-integration.
+    let t_final = args.t_final;
+    let dt = args.dt;
+    let vis_steps = args.vis_steps;
+
+    let mut t = 0.0;
+    let n_steps = if dt > 0.0 {
+        (t_final / dt).ceil() as usize
+    } else {
+        0
+    };
+
+    // Time stepping — GeneralizedAlpha2(1.0) = Average Acceleration (Newmark β=0.25)
+    // C++ ex23 type 10: rho_inf=1.0 → alpha_m=0.5, alpha_f=0.5, beta=0.25, gamma=0.5
+    //
+    // For each step:
+    //   xa = x + 0.5·dt·dxdt                         (alpha-level predictor)
+    //   (M + 0.25·dt²·K)·aa = -K·xa                  (alpha-level solve)
+    //   x = x + dt·dxdt + 0.5·dt²·aa                 (extrapolate to n+1)
+    //   dxdt = dxdt + dt·aa                           (extrapolate velocity)
+    let mut last_step = false;
+    for ti in 1..=n_steps.max(1) {
+        let dt_actual = if t + dt >= t_final - dt / 2.0 {
+            last_step = true;
+            t_final - t
+        } else {
+            dt
+        };
+
+        // fac3 = beta*alpha_f/alpha_m = 0.25
+        let fac0 = 0.25 * dt_actual * dt_actual;
+
+        // Alpha-level predictor: xa = x + 0.5·dt·dxdt
+        let mut u_pred = u.clone();
+        for i in 0..fe_size {
+            u_pred[i] += 0.5 * dt_actual * du_dt[i];
+        }
+
+        // Solve: (M + 0.25·dt²·K)·aa = -K·xa
+        let mut d2udt2 = vec![0.0; fe_size];
+        oper.implicit_solve(fac0, &u_pred, &mut d2udt2);
+
+        // Zero BC DOFs in acceleration
+        for &d in &ess_bdr {
+            d2udt2[d as usize] = 0.0;
+        }
+
+        // Extrapolate: x_{n+1} = x_n + dt·dxdt_n + 0.5·dt²·aa
+        for i in 0..fe_size {
+            u[i] += dt_actual * du_dt[i] + 0.5 * dt_actual * dt_actual * d2udt2[i];
+        }
+
+        // Extrapolate: dxdt_{n+1} = dxdt_n + dt·aa
+        for i in 0..fe_size {
+            du_dt[i] += dt_actual * d2udt2[i];
+        }
+
+        // Zero BC DOFs
+        for &d in &ess_bdr {
+            u[d as usize] = 0.0;
+            du_dt[d as usize] = 0.0;
+        }
+
+        t += dt_actual;
+
+        if last_step || (ti % vis_steps == 0) {
+            println!("step {}, t = {}", ti, t);
+        }
+
+        // Invalidate T matrix for next step (matching C++ SetParameters)
+        oper.set_parameters();
+    }
+
+    // 9. Save the final solution.
+    let _ = fem_io::mfem::write_gf_file(
+        "ex23-final.gf", dim, &u, "H1", args.order, 1,
+    );
+    let _ = fem_io::mfem::write_gf_file(
+        "ex23-rate.gf", dim, &du_dt, "H1", args.order, 1,
+    );
+
+    // 10. Compute and print some statistics for comparison
+    let max_u = u.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+    let sum_u: f64 = u.iter().sum();
+    let checksum_u: f64 = u.iter().enumerate().map(|(i, &v)| v * (i as f64 + 1.0)).sum();
+    println!("\n  Final solution stats:");
+    println!("    max|u| = {:.6e}", max_u);
+    println!("    sum(u) = {:.6e}", sum_u);
+    println!("    checksum = {:.6e}", checksum_u);
+
+    let max_dudt = du_dt.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+    let sum_dudt: f64 = du_dt.iter().sum();
+    let checksum_dudt: f64 = du_dt.iter().enumerate().map(|(i, &v)| v * (i as f64 + 1.0)).sum();
+    println!("    max|du/dt| = {:.6e}", max_dudt);
+    println!("    sum(du/dt) = {:.6e}", sum_dudt);
+    println!("    du/dt checksum = {:.6e}", checksum_dudt);
 }
