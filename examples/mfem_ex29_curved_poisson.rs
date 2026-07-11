@@ -145,15 +145,89 @@ fn main() {
     }
 
     println!("Size of linear system: {}", a_mat.nrows);
-    let rhs_norm: f64 = rhs.iter().map(|v| v*v).sum::<f64>().sqrt();
-    println!("  RHS norm = {:.6e}", rhs_norm);
+
+    // Compute surface area for verification
+    let mut total_area = 0.0;
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let re = ref_elem_for(et, order);
+        let quad = re.quadrature(qo);
+        let nodes = mesh.element_nodes(e);
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (_, det_j, _) = surface_jacobian(&mesh, &nodes, et, xi);
+            total_area += quad.weights[qi] * det_j;
+        }
+    }
+    println!("  Surface area = {:.6e}", total_area);
 
     // 11. PCG + GS smoother
-    let mut x = vec![0.0; n_dofs];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 200, verbose: true, ..Default::default() };
+    let mut x = vec![0.0; n_dofs];
     solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg).expect("PCG");
 
-    // Debug: FEM solution at key DOFs
+    // Debug: assemble L2 mass matrix and compute L2 projection error of exact solution
+    let mut m_coo = CooMatrix::new(n_dofs, n_dofs);
+    let mut rhs_proj = vec![0.0; n_dofs];
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let re = ref_elem_for(et, order);
+        let quad = re.quadrature(qo);
+        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let nodes = mesh.element_nodes(e);
+        let ng = dofs.len();
+        let n_ldofs = re.n_dofs();
+        let mut me = vec![0.0; ng*ng];
+        let mut fe = vec![0.0; ng];
+        let mut phi = vec![0.0; n_ldofs];
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (_, det_j, xp) = surface_jacobian(&mesh, &nodes, et, xi);
+            let w = quad.weights[qi] * det_j;
+            re.eval_basis(xi, &mut phi);
+            let ev = u_exact(&xp);
+            for i in 0..ng {
+                fe[i] += w * ev * phi[i];
+                for j in 0..ng { me[i*ng + j] += w * phi[i] * phi[j]; }
+            }
+        }
+        for (ir, &r) in dofs.iter().enumerate() {
+            rhs_proj[r] += fe[ir];
+            for (ic, &c) in dofs.iter().enumerate() {
+                let v = me[ir*ng + ic];
+                if v != 0.0 { m_coo.add(r, c, v); }
+            }
+        }
+    }
+    let mut m_mat = m_coo.into_csr();
+    for &d in &ess_bdr {
+        let mut dummy = vec![0.0; n_dofs];
+        m_mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy);
+        if let Some(k) = m_mat.find_entry(d as usize, d as usize) { m_mat.values[k] = 1.0; }
+        rhs_proj[d as usize] = 0.0;
+    }
+    let mut u_proj = vec![0.0; n_dofs];
+    solve_pcg_gssmoother(&m_mat, &rhs_proj, &mut u_proj, &cfg).expect("PCG proj");
+    let err_proj = l2_error_surface(&mesh, &space, &u_proj, &u_exact, (2*order+4).max(5) as u8);
+    println!("  L2 projection error = {:.8}", err_proj);
+    println!("  (Zero means exact solution is representable in P3 on this mesh)");
+
+    // Verify stiffness matrix: A * u_exact should equal rhs (u_exact solves PDE exactly)
+    let dm = space.dof_manager();
+    let mut u_ex = vec![0.0; n_dofs];
+    for d in 0..n_dofs { u_ex[d] = u_exact(dm.dof_coord(d as u32)); }
+    for &d in &ess_bdr { u_ex[d as usize] = 0.0; }
+    let mut auex = vec![0.0; n_dofs];
+    a_mat.spmv(&u_ex, &mut auex);
+    let res_stiff: f64 = (0..n_dofs).map(|i| (rhs[i]-auex[i]).powi(2)).sum::<f64>().sqrt();
+    let b_n: f64 = rhs.iter().map(|v| v*v).sum::<f64>().sqrt();
+    println!("  ||b - A*u_exact|| = {:.6e} (rel {:.6e})", res_stiff, res_stiff / b_n.max(1e-30));
+
+    // Debug A*u_exact vs rhs for key DOFs
+    println!("\n  RHS vs A*u_exact (first 12 DOFs):");
+    for d in 0..12.min(n_dofs) {
+        println!("    dof[{d:2}] rhs={:.6e} (A*uex)[{d}]={:.6e} diff={:.6e}",
+                 rhs[d], auex[d], rhs[d]-auex[d]);
+    }
+
     // 13. L2 error (high quadrature for accuracy)
     let err_qo = (2 * order + 4).max(5) as u8;
     let err_u = l2_error_surface(&mesh, &space, &x, &u_exact, err_qo);
