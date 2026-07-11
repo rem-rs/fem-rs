@@ -148,7 +148,7 @@ fn main() {
 
     // 8. Solve with PCG + geometric multigrid preconditioner
     let mg_config = GeometricMgConfig {
-        pre_sweeps: 2, post_sweeps: 2, chebyshev_order: 1,
+        pre_sweeps: 1, post_sweeps: 1, chebyshev_order: 0,
         jacobi_omega: 0.8, coarse_max_iter: 200, coarse_rtol: 1e-12,
     };
     let mg_precond = GeometricMgPrecond::new(mg_config, &hierarchy);

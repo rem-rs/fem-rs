@@ -12,6 +12,7 @@
 
 use fem_linalg::CsrMatrix;
 use crate::SolverConfig;
+use crate::constrained_operator::RectangularConstrainedOperator;
 
 /// A single level in the geometric multigrid hierarchy.
 pub struct GeometricMgLevel {
@@ -24,16 +25,27 @@ pub struct GeometricMgLevel {
 /// Geometric multigrid hierarchy.
 ///
 /// `levels[0]` = finest, `levels[n-1]` = coarsest.
-/// `prolong[l]` maps from level l+1 (coarse) to level l (fine).
+/// `prolong[l]` maps from level l+1 (coarse) to level l (fine) with BC enforcement.
 pub struct GeometricMgHierarchy {
     pub levels: Vec<GeometricMgLevel>,
-    pub prolong: Vec<CsrMatrix<f64>>,
+    pub prolong: Vec<RectangularConstrainedOperator>,
 }
 
 impl GeometricMgHierarchy {
-    pub fn new(levels: Vec<GeometricMgLevel>, prolong: Vec<CsrMatrix<f64>>) -> Self {
-        assert_eq!(prolong.len(), levels.len() - 1,
+    pub fn new(
+        levels: Vec<GeometricMgLevel>,
+        prolong_mat: Vec<CsrMatrix<f64>>,
+    ) -> Self {
+        assert_eq!(prolong_mat.len(), levels.len() - 1,
             "GeometricMgHierarchy: need len(prolong) == len(levels) - 1");
+        let mut prolong = Vec::with_capacity(prolong_mat.len());
+        for l in 0..prolong_mat.len() {
+            prolong.push(RectangularConstrainedOperator {
+                mat: prolong_mat[l].clone(),
+                ess_fine: levels[l].bc_dofs.clone(),
+                ess_coarse: levels[l + 1].bc_dofs.clone(),
+            });
+        }
         GeometricMgHierarchy { levels, prolong }
     }
     pub fn n_levels(&self) -> usize { self.levels.len() }
@@ -160,9 +172,9 @@ pub struct GeometricMgPrecond {
 impl GeometricMgPrecond {
     pub fn new(config: GeometricMgConfig, h: &GeometricMgHierarchy) -> Self {
         let cfg = &config;
-        let use_cheb = cfg.chebyshev_order > 0;
-        let smoothers = if !use_cheb {
-            Vec::new() // use Jacobi, handled in v_cycle_level
+        let smoothers = if cfg.chebyshev_order == 0 {
+            // Build Jacobi smoothers (guaranteed SPD)
+            Vec::new()
         } else {
             let mut s = Vec::new();
             for level in &h.levels {
@@ -174,8 +186,10 @@ impl GeometricMgPrecond {
         GeometricMgPrecond { config, smoothers }
     }
 
-    /// Apply one V-cycle: `x ← V-cycle(levels, prolong, b, x)`.
+    /// Apply one V-cycle: `x ← V-cycle(levels, prolong, b)` starting from zero.
     pub fn v_cycle(&self, h: &GeometricMgHierarchy, b: &[f64], x: &mut [f64]) {
+        // Start from zero (matching MFEM MultigridBase::ArrayMult: *Y(M-1,j) = 0.0)
+        for v in x.iter_mut() { *v = 0.0; }
         self.v_cycle_level(h, 0, b, x);
     }
 
@@ -196,44 +210,50 @@ impl GeometricMgPrecond {
             return;
         }
 
-        // Pre-smooth (Chebyshev)
-        self.smoothers[lvl].smooth(a, b, x, &level.bc_dofs);
-        for _ in 1..self.config.pre_sweeps {
-            self.smoothers[lvl].smooth(a, b, x, &level.bc_dofs);
+        // Pre-smooth (skip if pre_sweeps == 0)
+        for _ in 0..self.config.pre_sweeps {
+            self.smooth_level(lvl, a, b, x, &level.bc_dofs);
         }
 
-        // Restrict residual
+        // Restrict residual (with BC enforcement)
         let mut ax = vec![0.0; n];
         a.spmv(x, &mut ax);
-        let mut r = vec![0.0; n];
-        for i in 0..n { r[i] = b[i] - ax[i]; }
-        let r_c = spmv_transpose(&h.prolong[lvl], &r);
+        let r: Vec<f64> = (0..n).map(|i| b[i] - ax[i]).collect();
+        let mut r_c = Vec::new();
+        h.prolong[lvl].restrict(&r, &mut r_c);
         let n_c = h.levels[lvl + 1].mat.nrows;
         let mut e_c = vec![0.0; n_c];
         self.v_cycle_level(h, lvl + 1, &r_c, &mut e_c);
 
-        // Prolongate correction
+        // Prolongate correction (with BC enforcement)
         let mut corr = vec![0.0; n];
-        h.prolong[lvl].spmv(&e_c, &mut corr);
+        h.prolong[lvl].prolong(&e_c, &mut corr);
         for i in 0..n { x[i] += corr[i]; }
 
-        // Post-smooth (Chebyshev)
-        self.smoothers[lvl].smooth(a, b, x, &level.bc_dofs);
+        // Post-smooth
+        self.smooth_level(lvl, a, b, x, &level.bc_dofs);
         for _ in 1..self.config.post_sweeps {
-            self.smoothers[lvl].smooth(a, b, x, &level.bc_dofs);
+            self.smooth_level(lvl, a, b, x, &level.bc_dofs);
         }
         for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
     }
-}
 
-// ─── y = A^T * x ─────────────────────────────────────────────────────────────
-
-fn spmv_transpose(a: &CsrMatrix<f64>, x: &[f64]) -> Vec<f64> {
-    let mut y = vec![0.0; a.ncols];
-    for row in 0..a.nrows {
-        for p in a.row_ptr[row]..a.row_ptr[row + 1] {
-            y[a.col_idx[p] as usize] += a.values[p] * x[row];
+    fn smooth_level(&self, lvl: usize, a: &CsrMatrix<f64>, b: &[f64],
+                    x: &mut [f64], bc: &[u32]) {
+        if lvl < self.smoothers.len() {
+            self.smoothers[lvl].smooth(a, b, x, bc);
+        } else {
+            // Jacobi smoothing fallback
+            let diag = a.diagonal();
+            let mut r = vec![0.0; a.nrows];
+            a.spmv(x, &mut r);
+            for i in 0..r.len() { r[i] = b[i] - r[i]; }
+            let omega = self.config.jacobi_omega;
+            for i in 0..r.len() {
+                if diag[i].abs() > 1e-30 { x[i] += omega * r[i] / diag[i]; }
+            }
+            for &d in bc { if (d as usize) < x.len() { x[d as usize] = 0.0; } }
         }
     }
-    y
 }
+

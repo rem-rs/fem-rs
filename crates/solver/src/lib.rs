@@ -103,6 +103,7 @@ pub mod eigen;
 pub mod hypre;
 pub mod lor;
 pub mod chebyshev;
+pub mod constrained_operator;
 pub mod geometric_mg;
 pub mod p_multigrid;
 pub mod multirate;
@@ -254,6 +255,7 @@ pub use lor::{
     solve_pcg_lor_amg, solve_gmres_lor_amg,
     GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg,
 };
+pub use constrained_operator::RectangularConstrainedOperator;
 pub use geometric_mg::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
 };
