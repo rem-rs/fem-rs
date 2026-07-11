@@ -16,7 +16,8 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{refine_uniform, Mesh};
-use fem_solver::{solve_gmres, SolverConfig, block::{BlockSystem, MinresSolver}};
+use fem_solver::{SolverConfig, block::{BlockSystem, MinresSolver}};
+#[cfg(test)] use fem_solver::solve_gmres;
 use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
 
 fn main() {

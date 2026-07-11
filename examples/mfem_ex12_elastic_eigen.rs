@@ -39,8 +39,9 @@ use fem_assembly::{
     postproc::coefficient::PWConstCoeff,
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_linalg::CsrMatrix;
 use fem_mesh::{refine_uniform, Mesh};
-use fem_solver::eigen::{lobpcg_constrained_preconditioned, LobpcgConfig, EigenResult};
+use fem_solver::eigen::{lobpcg_constrained_preconditioned, LobpcgConfig};
 use fem_space::{VectorH1Space, fe_space::FESpace, constraints::boundary_dofs};
 use nalgebra::DMatrix;
 
@@ -212,6 +213,7 @@ fn main() {
     let cfg = LobpcgConfig {
         max_iter: 100,
         tol: 1e-8,
+        nullspace_skip: 0.0,
         verbose: false,
     };
 

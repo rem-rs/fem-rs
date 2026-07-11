@@ -239,8 +239,9 @@ fn main() {
     let derefine_threshold = hysteresis * max_elem_error;
     let _nc_limit = args.nc_limit;
 
-    let mut x = Vec::new();
-
+    let mut x = Vec::<f64>::new();
+    x.push(0.0); // dummy init — will be overwritten
+    x.pop();
     let mut time = 0.0;
     while time < t_final + 1e-10 {
         println!("\nTime {}", time);
