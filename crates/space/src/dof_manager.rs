@@ -1120,7 +1120,8 @@ impl DofManager {
     fn build_pk_quad<M: MeshTopology>(mesh: &M, order: u8) -> Self {
         let p = order as usize;
         assert!(p >= 3, "build_pk_quad: order must be >= 3");
-        let dim = 2usize;
+        // Use mesh spatial dimension (3 for surface meshes, 2 for planar)
+        let dim = mesh.dim() as usize;
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
         let edge_dofs_per = p - 1;
