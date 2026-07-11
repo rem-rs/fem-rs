@@ -156,16 +156,18 @@ fn generate_2hole_mesh(ref_levels: usize) -> Mesh<2> {
         [24, 27, 28, 25], [23, 26, 27, 24], [19, 26, 23, 20], [13, 19, 20, 16],
     ];
 
-    // Boundary segments with tags (matching C++ lines 522-543)
+    // Boundary segments with tags (matching C++ ex27, plus periodic ends)
     // Tag 1: bottom, tag 2: top, tag 3: left hole, tag 4: right hole
-    // Tags 5,6: left/right periodic ends (identified later)
-    let bdr_data: [([u32; 2], i32); 24] = [
+    // Tags 5,6: left/right periodic ends
+    let bdr_data: [([u32; 2], i32); 28] = [
         ([0, 6], 1), ([6, 13], 1), ([13, 19], 1), ([19, 26], 1),   // bottom
         ([28, 22], 2), ([22, 15], 2), ([15, 9], 2), ([9, 2], 2),     // top
         ([7, 3], 3), ([10, 7], 3), ([11, 10], 3), ([12, 11], 3),    // left hole
         ([8, 12], 3), ([5, 8], 3), ([4, 5], 3), ([3, 4], 3),         // left hole cont.
         ([20, 16], 4), ([23, 20], 4), ([24, 23], 4), ([25, 24], 4),  // right hole
         ([21, 25], 4), ([18, 21], 4), ([17, 18], 4), ([16, 17], 4),  // right hole cont.
+        ([0, 1], 5), ([1, 2], 5),   // left periodic end (tag 5)
+        ([26, 27], 6), ([27, 28], 6), // right periodic end (tag 6)
     ];
 
     let mut coords = Vec::with_capacity(29 * 2);
@@ -175,17 +177,16 @@ fn generate_2hole_mesh(ref_levels: usize) -> Mesh<2> {
     let face_conn: Vec<u32> = bdr_data.iter().flat_map(|(e, _)| e.iter().copied()).collect();
     let face_tags: Vec<i32> = bdr_data.iter().map(|(_, t)| *t).collect();
 
-    let mut mesh = Mesh::<2>::uniform(coords, conn, elem_tags, ElementType::Quad4,
-                                      face_conn, face_tags, ElementType::Line2);
+    let mesh = Mesh::<2>::uniform(coords, conn, elem_tags, ElementType::Quad4,
+                                   face_conn, face_tags, ElementType::Line2);
 
-    // Make periodic: identify left end (tag 5) with right end (tag 6)
-    // The C++ identifies vertices 26/27/28 with 0/1/2
-    // But our mesh builder already creates unique vertices; we need to merge them
-    // using Mesh::make_periodic. However the tags 5,6 are not in our bdr_data
-    // because the C++ uses v2v remapping instead. For a 1:1 translation we skip
-    // periodic BC for now since H1 periodic requires special handling.
+    // Make periodic: identify right end (tag 6) with left end (tag 5)
+    // Translation [2,0] maps right (x=1) to left (x=-1)
+    let mesh = mesh.make_periodic(&[(5, 6, [2.0_f64, 0.0_f64])], 1e-10)
+        .expect("make_periodic failed");
 
     // Refine
+    let mut mesh = mesh;
     for _ in 0..ref_levels { mesh = fem_mesh::refine_uniform(&mesh); }
     mesh
 }
