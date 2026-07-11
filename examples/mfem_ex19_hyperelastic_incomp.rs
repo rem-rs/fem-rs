@@ -132,7 +132,8 @@ fn run<M:MeshTopology+Clone>(mesh:M,order:u8,mu:f64,rtol:f64,atol:f64,maxit:usiz
             if np>0{
                 let mut zp=vec![0.;np];
                 let _=fem_solver::solve_pcg_gssmoother(&mass,&rr[nu..],&mut zp,&icfg);
-                for i in 0..np{zz[nu+i]=-1e-5*zp[i];}
+                // Schur: S^{-1} ≈ -μ·M_p^{-1}  (matching MFEM JacobianPreconditioner)
+                for i in 0..np{zz[nu+i]=-(1.0/mu)*zp[i];}
                 for i in 0..nu{let mut s=0.;for p in kup.row_ptr[i]..kup.row_ptr[i+1]{s+=kup.values[p]*zz[nu+kup.col_idx[p]as usize];}zz[i]=rr[i]-s;}
             }else{for i in 0..nu{zz[i]=rr[i];}}
             let mut zu=vec![0.;nu];
@@ -143,9 +144,19 @@ fn run<M:MeshTopology+Clone>(mesh:M,order:u8,mu:f64,rtol:f64,atol:f64,maxit:usiz
             Ok(r)=>println!("  GMRES: {} its res={:.3e}",r.iterations,r.final_residual),
             Err(e)=>eprintln!("GMRES: {e}"),
         }
-        for i in 0..nu{u[i]+=dx[i];}for i in 0..np{p[i]+=dx[nu+i];}
-        res(&mesh,d,order,op,qo,mu,&u,&p,&edu,&edp,&mut ru,&mut rp);
-        for&(d,_)in &du{ru[d]=0.;}
+        // Damped Newton with backtracking line search
+        let mut alpha=1.0;
+        let r0_ls=nr(&[ru.as_slice(),rp.as_slice()].concat());
+        for _ls in 0..8{
+            let mut ut=u.clone();let mut pt=p.clone();
+            for i in 0..nu{ut[i]+=alpha*dx[i];}for i in 0..np{pt[i]+=alpha*dx[nu+i];}
+            let mut rut=vec![0.;nu];let mut rpt=vec![0.;np];
+            res(&mesh,d,order,op,qo,mu,&ut,&pt,&edu,&edp,&mut rut,&mut rpt);
+            for&(dd,_)in &du{rut[dd]=0.;}
+            let rn=nr(&[rut.as_slice(),rpt.as_slice()].concat());
+            if rn<r0_ls*(1.0-1e-4*alpha){u=ut;p=pt;ru=rut;rp=rpt;break;}
+            alpha*=0.5;
+        }
     }
     println!("Saving...");
     if let Ok(mut f)=std::fs::File::create("deformation.sol"){writeln!(f,"{nu}").ok();for i in 0..nu{writeln!(f,"{:.14e}",u[i]).ok();}}
