@@ -122,34 +122,51 @@ impl MaxwellSolver {
         dt0
     }
 
+    /// Advance one time step using MFEM's symplectic scheme:
+    /// 1. E^{n+1} = E^n + dt·M_ε^{-1}·(C^T·μ⁻¹·B^n − L·E^n − J)
+    /// 2. B^{n+1} = B^n − dt·C·E^{n+1}
     pub fn step(&mut self, j_fn: &(dyn Fn(&[f64], f64, &mut [f64]) + Send + Sync)) {
         let dt = self.dt;
         let cfg = SolverConfig{rtol:1e-12,atol:0.0,max_iter:500,verbose:false,..Default::default()};
 
-        // 1. B^{n+1} = B^n + dt · (-C) · E^n  (explicit B update)
-        let mut ce = vec![0.0; self.rt.n_dofs()];
-        self.neg_curl.spmv(&self.e, &mut ce);
-        for i in 0..self.rt.n_dofs() { self.b[i] += dt * ce[i]; }
+        // MFEM symplectic scheme (lossless):
+        //   1. dEdt = M_ε^{-1} · W · B^n  (rhs = C^T·μ⁻¹·B^n)
+        //   2. E^{n+1} = E^n + dt · dEdt
+        //   3. B^{n+1} = B^n - dt · C · E^{n+1}  (uses updated E)
 
-        // 2. rhs = C^T · B^{n+1} − L·E^n − J
+        // 1. rhs = W · B^n  (W = C^T·μ⁻¹ from weak_curl_t)
         let mut rhs = vec![0.0; self.nd.n_dofs()];
         self.weak_curl_t.spmv(&self.b, &mut rhs);
-        if let Some(ref l) = self.m_loss { let mut le=vec![0.0;self.nd.n_dofs()]; l.spmv(&self.e, &mut le);
-            for i in 0..self.nd.n_dofs() { rhs[i] -= le[i]; } }
+        if let Some(ref l) = self.m_loss {
+            let mut le=vec![0.0;self.nd.n_dofs()]; l.spmv(&self.e, &mut le);
+            for i in 0..self.nd.n_dofs() { rhs[i] -= le[i]; }
+        }
         let jt = self.t;
         let jc = FnVectorCoeff(Box::new(move |x:&[f64],out:&mut[f64]| j_fn(x, jt, out)));
         let jv = VectorAssembler::assemble_linear(&self.nd, &[&VectorDomainLFIntegrator{f:jc}], 15);
         for i in 0..self.nd.n_dofs() { rhs[i] -= jv[i]; }
 
-        // 3. ΔE = A1^{-1} · rhs  (implicit E update)
+        // 2. Solve (M_ε + ½dt·L) · ΔE = rhs  → E^{n+1} = E^n + ΔE
         let mut a1 = self.m_eps.clone();
-        if let Some(ref l) = self.m_loss { let hdt=0.5*dt;
-            for r in 0..self.nd.n_dofs() { for ci in l.row_ptr[r]..l.row_ptr[r+1] {
-                let j=l.col_idx[ci]as usize; if let Some(p)=a1.find_entry(r,j){a1.values[p]+=hdt*l.values[ci];} } } }
+        if let Some(ref l) = self.m_loss {
+            let hdt=0.5*dt;
+            for r in 0..self.nd.n_dofs() {
+                for ci in l.row_ptr[r]..l.row_ptr[r+1] {
+                    let j=l.col_idx[ci]as usize;
+                    if let Some(p)=a1.find_entry(r,j){a1.values[p]+=hdt*l.values[ci];}
+                }
+            }
+        }
         let zv = vec![0.0; self.dbc_dofs.len()];
         let (rd,rr,fd,_) = form_linear_system(&a1, &rhs, &self.dbc_dofs, &zv);
-        let mut xr = vec![0.0; rd.nrows]; solve_cg(&rd, &rr, &mut xr, &cfg).expect("implicit");
+        let mut xr = vec![0.0; rd.nrows];
+        solve_cg(&rd, &rr, &mut xr, &cfg).expect("implicit");
         for (i,&d) in fd.iter().enumerate() { self.e[d as usize] += xr[i]; }
+
+        // 3. B^{n+1} = B^n - dt · C · E^{n+1}
+        let mut ce = vec![0.0; self.rt.n_dofs()];
+        self.neg_curl.spmv(&self.e, &mut ce);
+        for i in 0..self.rt.n_dofs() { self.b[i] += dt * ce[i]; }
 
         self.t += dt;
     }

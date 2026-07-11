@@ -11,7 +11,7 @@ use fem_io::mfem::read_mfem_file;
 use fem_linalg::{fem_to_linlvo_csr, CsrMatrix};
 use fem_mesh::{refine_uniform_3d, Mesh};
 use fem_solver::div_free::project_divergence_free;
-use fem_solver::{solve_cg, solve_pcg_ams, AmsSolverConfig, SolverConfig};
+use fem_solver::{solve_cg, solve_pcg_ams, AmsSolverConfig, AmsConfig, SolverConfig};
 use fem_space::constraints::dirichlet::boundary_dofs_hcurl;
 use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, HCurlSpace, HDivSpace};
@@ -86,7 +86,8 @@ impl TeslaSolver {
             if let Some(k) = aa.find_entry(d as usize, d as usize) { aa.values[k] = 1.0; } }
         let gl = fem_to_linlvo_csr(&self.grad);
         solve_pcg_ams(&aa, &gl, &jd, &mut self.a, &AmsSolverConfig{
-            inner_cfg: SolverConfig{rtol:1e-12,atol:0.0,max_iter:200,verbose:true,..Default::default()}, ..Default::default()}).expect("AMS");
+            inner_cfg: SolverConfig{rtol:1e-12,atol:0.0,max_iter:200,verbose:true,..Default::default()},
+            ams_cfg: AmsConfig{singularity_regularization:1e-6,..Default::default()},}).expect("AMS");
 
         self.curl.spmv(&self.a, &mut self.b);
         let mut bd = vec![0.0; n_nd];
