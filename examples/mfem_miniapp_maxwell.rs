@@ -122,21 +122,35 @@ impl MaxwellSolver {
         dt0
     }
 
-    /// Advance one time step using MFEM's symplectic scheme:
-    /// 1. E^{n+1} = E^n + dt·M_ε^{-1}·(C^T·μ⁻¹·B^n − L·E^n − J)
-    /// 2. B^{n+1} = B^n − dt·C·E^{n+1}
+    /// Advance one time step.  Correct energy-conserving scheme:
+    /// 1. H = M_μ⁻¹^{-1} · B^n       (HDiv mass solve → magnetic field)
+    /// 2. rhs = C^T · H − L·E^n − J   (discrete curl → HCurl RHS)
+    /// 3. ΔE = (M_ε + ½dt·L)^{-1} · rhs → E^{n+1} = E^n + ΔE
+    /// 4. B^{n+1} = B^n − dt · C · E^{n+1}
     pub fn step(&mut self, j_fn: &(dyn Fn(&[f64], f64, &mut [f64]) + Send + Sync)) {
         let dt = self.dt;
         let cfg = SolverConfig{rtol:1e-12,atol:0.0,max_iter:500,verbose:false,..Default::default()};
 
-        // MFEM symplectic scheme (lossless):
-        //   1. dEdt = M_ε^{-1} · W · B^n  (rhs = C^T·μ⁻¹·B^n)
-        //   2. E^{n+1} = E^n + dt · dEdt
-        //   3. B^{n+1} = B^n - dt · C · E^{n+1}  (uses updated E)
+        // 1. H = M_μ⁻¹^{-1} · B^n  (HDiv mass solve)
+        let mut h = vec![0.0; self.rt.n_dofs()];
+        let (rd_h, rr_h, fd_h, _) = form_linear_system(&self.m_mu_inv, &self.b, &[], &[] as &[f64]);
+        let mut xh = vec![0.0; rd_h.nrows];
+        solve_cg(&rd_h, &rr_h, &mut xh, &cfg).expect("HDiv mass");
+        for (i, &d) in fd_h.iter().enumerate() { h[d as usize] = xh[i]; }
 
-        // 1. rhs = W · B^n  (W = C^T·μ⁻¹ from weak_curl_t)
+        // 2. rhs = C^T · H − L·E^n − J  (discrete curl with proper H)
         let mut rhs = vec![0.0; self.nd.n_dofs()];
-        self.weak_curl_t.spmv(&self.b, &mut rhs);
+        // Use curl_t = transpose of topological curl C (NOT the weak curl)
+        let curl_t = { let mut coo = fem_linalg::CooMatrix::new(self.nd.n_dofs(), self.rt.n_dofs());
+            let c = fem_assembly::discrete_op::DiscreteLinearOperator::curl_3d(&self.nd, &self.rt).expect("curl_3d");
+            for r in 0..self.rt.n_dofs() {
+                for ci in c.row_ptr[r]..c.row_ptr[r+1] {
+                    coo.add(c.col_idx[ci]as usize, r, c.values[ci]);
+                }
+            }
+            coo.into_csr()
+        };
+        curl_t.spmv(&h, &mut rhs);
         if let Some(ref l) = self.m_loss {
             let mut le=vec![0.0;self.nd.n_dofs()]; l.spmv(&self.e, &mut le);
             for i in 0..self.nd.n_dofs() { rhs[i] -= le[i]; }
@@ -146,7 +160,7 @@ impl MaxwellSolver {
         let jv = VectorAssembler::assemble_linear(&self.nd, &[&VectorDomainLFIntegrator{f:jc}], 15);
         for i in 0..self.nd.n_dofs() { rhs[i] -= jv[i]; }
 
-        // 2. Solve (M_ε + ½dt·L) · ΔE = rhs  → E^{n+1} = E^n + ΔE
+        // 3. ΔE = (M_ε + ½dt·L)^{-1} · rhs  → E^{n+1} = E^n + ΔE
         let mut a1 = self.m_eps.clone();
         if let Some(ref l) = self.m_loss {
             let hdt=0.5*dt;
@@ -160,10 +174,10 @@ impl MaxwellSolver {
         let zv = vec![0.0; self.dbc_dofs.len()];
         let (rd,rr,fd,_) = form_linear_system(&a1, &rhs, &self.dbc_dofs, &zv);
         let mut xr = vec![0.0; rd.nrows];
-        solve_cg(&rd, &rr, &mut xr, &cfg).expect("implicit");
+        solve_cg(&rd, &rr, &mut xr, &cfg).expect("implicit E");
         for (i,&d) in fd.iter().enumerate() { self.e[d as usize] += xr[i]; }
 
-        // 3. B^{n+1} = B^n - dt · C · E^{n+1}
+        // 4. B^{n+1} = B^n − dt · C · E^{n+1}
         let mut ce = vec![0.0; self.rt.n_dofs()];
         self.neg_curl.spmv(&self.e, &mut ce);
         for i in 0..self.rt.n_dofs() { self.b[i] += dt * ce[i]; }
@@ -194,7 +208,7 @@ fn main() {
     for _ in 0..r{mesh=refine_uniform_3d(&mesh);}
 
     let mut ms=MaxwellSolver::new(mesh,o,&[],&[]);
-    ms.dt = 1.0e-10; // conservative CFL for 3D tet mesh
+    ms.dt = 1.0e-11; // conservative CFL for 3D tet mesh
     println!("HCurl {} HDiv {} dt={:.3e}",ms.nd.n_dofs(),ms.rt.n_dofs(),ms.dt);
     let j_fn=|x:&[f64],_t:f64,out:&mut[f64]|{
         out[0]=0.;out[1]=0.;out[2]=if x[0].abs()<0.2&&x[1].abs()<0.2&&x[2].abs()<0.2{1e6}else{0.};};
