@@ -256,6 +256,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             face_offsets: face_offsets_opt.clone(),
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
+            geometry: None,
         };
         Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
     } else {
@@ -273,6 +274,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             face_offsets: face_offsets_opt,
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
+            geometry: None,
         };
         Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
     }

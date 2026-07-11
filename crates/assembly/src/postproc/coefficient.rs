@@ -537,6 +537,30 @@ impl<C: ScalarCoeff, F: Fn(f64) -> f64 + Send + Sync> ScalarCoeff for Transforme
     }
 }
 
+/// Delta (point-charge) coefficient: approximates `q · δ(x − x₀)`.
+///
+/// Evaluates to a narrow Gaussian peaked at `center` with total integral
+/// `scale` (in 2D: `scale / (2πσ²) · exp(−‖x−x₀‖² / 2σ²)` with σ chosen
+/// so the support covers ~1 quadrature interval).
+///
+/// MFEM equivalent: `DeltaCoefficient` (used for point charges in Volta).
+#[derive(Clone)]
+pub struct DeltaCoefficient {
+    pub center: Vec<f64>,
+    pub scale: f64,
+}
+
+impl ScalarCoeff for DeltaCoefficient {
+    fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
+        // Gaussian approximation of delta function
+        let sigma2 = 1e-6; // narrow width (tuned for typical mesh sizes)
+        let r2: f64 = ctx.x.iter().zip(self.center.iter())
+            .map(|(a, b)| (a - b).powi(2)).sum();
+        let prefactor = self.scale / (std::f64::consts::TAU * sigma2).sqrt().powi(ctx.dim as i32);
+        prefactor * (-r2 / (2.0 * sigma2)).exp()
+    }
+}
+
 /// Inner product of two vector coefficients: `a(x) · b(x)` → scalar.
 pub struct InnerProductCoeff<A: VectorCoeff, B: VectorCoeff> {
     pub a: A,

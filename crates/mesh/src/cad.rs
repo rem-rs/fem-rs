@@ -562,6 +562,7 @@ impl ProjectionConfig {
         face_to_elem: mesh.face_to_elem.clone(),
         edge_conn: mesh.edge_conn.clone(),
         edge_to_elem: mesh.edge_to_elem.clone(),
+        geometry: None,
     }
 }
 

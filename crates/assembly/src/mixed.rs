@@ -621,6 +621,111 @@ where
     coo.into_csr()
 }
 
+/// Assemble the mixed HCurl × HDiv mass matrix (weak curl coupling).
+///
+/// Computes `M[i,j] = ∫ ε · ψ_j · w_i dx`
+/// where `ψ_j ∈ H(curl)` (columns) and `w_i ∈ H(div)` (rows).
+///
+/// This is the matrix form of MFEM's `VectorFEMassIntegrator` on
+/// `ParMixedBilinearForm(HCurlFESpace_, HDivFESpace_)`.  Used by
+/// Tesla (magnetostatics) and Volta (electrostatics) mini apps for
+/// coupling the vector potential A ∈ H(curl) to the flux B ∈ H(div).
+pub fn assemble_hcurl_hdiv_mixed<M: fem_mesh::topology::MeshTopology + Clone + 'static>(
+    nd_space: &HCurlSpace<M>,
+    rt_space: &HDivSpace<M>,
+    quad_order: u8,
+    eps: f64,
+) -> CsrMatrix<f64>
+where
+    M: fem_mesh::topology::MeshTopology,
+{
+    use crate::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian};
+    use fem_element::ReferenceElement;
+
+    let mesh = nd_space.mesh();
+    let dim = mesh.dim() as usize;
+    let n_rows = rt_space.n_dofs();
+    let n_cols = nd_space.n_dofs();
+    let mut coo = CooMatrix::new(n_rows, n_cols);
+
+    let nd_ord = nd_space.order();
+    let rt_ord = rt_space.order();
+
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let nd_ref = ref_elem_vec(et, nd_ord, SpaceType::HCurl)
+            .expect("HCurl ref elem");
+        let rt_ref = ref_elem_vec(et, rt_ord, SpaceType::HDiv)
+            .expect("HDiv ref elem");
+        let n_nd = nd_ref.n_dofs();
+        let n_rt = rt_ref.n_dofs();
+
+        let nd_s = nd_space.element_signs(e);
+        let rt_s = rt_space.element_signs(e);
+
+        let global_nd: Vec<usize> = nd_space.element_dofs(e)
+            .iter().map(|&d| d as usize).collect();
+        let global_rt: Vec<usize> = rt_space.element_dofs(e)
+            .iter().map(|&d| d as usize).collect();
+        let ng_nd = global_nd.len();
+        let ng_rt = global_rt.len();
+
+        let quad = nd_ref.quadrature(quad_order);
+        let mut me = vec![0.0; ng_rt * ng_nd];
+        let mut nd_basis = vec![0.0; n_nd * dim];
+        let mut rt_basis = vec![0.0; n_rt * dim];
+
+        let use_iso = !matches!(et, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
+        let ge = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
+        let nodes = mesh.element_nodes(e);
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (w, jit, det_j): (f64, nalgebra::DMatrix<f64>, f64) = if use_iso {
+                let g: &dyn ReferenceElement = ge.as_deref().unwrap();
+                let (jac, det, _) = isoparametric_jacobian(mesh, &nodes, g, xi, dim);
+                (quad.weights[qi] * det.abs(), jac.try_inverse().unwrap().transpose(), det)
+            } else {
+                let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
+                (quad.weights[qi] * tr.det_j().abs(), tr.jacobian_inv_t().clone(), tr.det_j())
+            };
+
+            nd_ref.eval_basis_vec(xi, &mut nd_basis);
+            rt_ref.eval_basis_vec(xi, &mut rt_basis);
+
+            // Original Jacobian J (from J^{-T})
+            let jac = jit.clone().try_inverse().map(|m| m.transpose())
+                .unwrap_or_else(|| nalgebra::DMatrix::identity(dim, dim));
+
+            for j in 0..ng_nd {
+                let sj_nd = nd_s.get(j).copied().unwrap_or(1.0);
+                // HCurl Piola: ψ = J^{-T} · ψ_ref
+                let nd_x = sj_nd * (0..dim).map(|d| jit[(0,d)] * nd_basis[j*dim + d]).sum::<f64>();
+                let nd_y = if dim > 1 { sj_nd * (0..dim).map(|d| jit[(1,d)] * nd_basis[j*dim + d]).sum::<f64>() } else { 0.0 };
+                let nd_z = if dim > 2 { sj_nd * (0..dim).map(|d| jit[(2,d)] * nd_basis[j*dim + d]).sum::<f64>() } else { 0.0 };
+
+                for i in 0..ng_rt {
+                    let sj_rt = rt_s.get(i).copied().unwrap_or(1.0);
+                    let inv_det = 1.0 / det_j;
+                    // HDiv Piola: w = (1/det_J) * J · w_ref
+                    let rt_x = sj_rt * inv_det * (0..dim).map(|d| jac[(0,d)] * rt_basis[i*dim + d]).sum::<f64>();
+                    let rt_y = if dim > 1 { sj_rt * inv_det * (0..dim).map(|d| jac[(1,d)] * rt_basis[i*dim + d]).sum::<f64>() } else { 0.0 };
+                    let rt_z = if dim > 2 { sj_rt * inv_det * (0..dim).map(|d| jac[(2,d)] * rt_basis[i*dim + d]).sum::<f64>() } else { 0.0 };
+
+                    let dot = nd_x * rt_x + nd_y * rt_y + nd_z * rt_z;
+                    me[i * ng_nd + j] += w * eps * dot;
+                }
+            }
+        }
+        for (ir, &r) in global_rt.iter().enumerate() {
+            for (ic, &c) in global_nd.iter().enumerate() {
+                let v = me[ir * ng_nd + ic];
+                if v != 0.0 { coo.add(r, c, v); }
+            }
+        }
+    }
+    coo.into_csr()
+}
+
 /// Constant P0 reference element: 1 DOF, constant basis = 1.0, zero gradient.
 struct P0;
 

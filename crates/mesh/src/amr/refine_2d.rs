@@ -496,7 +496,7 @@ pub fn p_refine_tri3_to_tri6(mesh:&Mesh<2>,marked:&[ElemId])->(Mesh<2>,std::coll
             let m01=edge_to_new_node[&ek(ns[0],ns[1])];let m12=edge_to_new_node[&ek(ns[1],ns[2])];let m02=edge_to_new_node[&ek(ns[0],ns[2])];
             new_conn.extend_from_slice(&[ns[0],ns[1],ns[2],m01,m12,m02]);elem_types_vec.push(ElementType::Tri6);elem_offsets.push(elem_offsets.last().unwrap()+6);}
         else{new_conn.extend_from_slice(&[ns[0],ns[1],ns[2]]);elem_types_vec.push(ElementType::Tri3);elem_offsets.push(elem_offsets.last().unwrap()+3);}}
-    let new_mesh=Mesh{coords:new_coords,conn:new_conn,elem_tags:mesh.elem_tags.clone(),elem_type:ElementType::Tri6,face_conn:mesh.face_conn.clone(),face_tags:mesh.face_tags.clone(),face_type:mesh.face_type,elem_types:Some(elem_types_vec),elem_offsets:Some(elem_offsets),face_types:None,face_offsets:None,face_to_elem:None,edge_conn:Vec::new(),edge_to_elem:Vec::new()};
+    let new_mesh=Mesh{coords:new_coords,conn:new_conn,elem_tags:mesh.elem_tags.clone(),elem_type:ElementType::Tri6,face_conn:mesh.face_conn.clone(),face_tags:mesh.face_tags.clone(),face_type:mesh.face_type,elem_types:Some(elem_types_vec),elem_offsets:Some(elem_offsets),face_types:None,face_offsets:None,face_to_elem:None,edge_conn:Vec::new(),edge_to_elem:Vec::new(),geometry:None};
     (new_mesh,edge_to_new_node)
 }
 

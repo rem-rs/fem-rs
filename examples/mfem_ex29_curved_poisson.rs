@@ -32,9 +32,15 @@ fn main() {
     // 3. Refine (only ref_levels=0 supported for surface meshes)
     if args.ref_levels > 0 { eprintln!("Warning: surface refinement not supported"); }
 
-    // 4. Transform to cylindrical surface
+    // 4. Transform to cylindrical surface with isoparametric geometry
+    let mesh_order = args.mesh_order;
     let mut mesh = mesh;
+    mesh.set_curvature(mesh_order);
     mesh.transform(|p| trans_cylinder(p));
+
+    println!("  Geometry order = {}", mesh_order);
+    println!("  Mesh nodes     = {} (vertices) + {} (geom)",
+             mesh.n_nodes(), mesh.n_geom_nodes().saturating_sub(mesh.n_nodes()));
 
     // 5. H1 space
     let order = args.order;
@@ -49,7 +55,7 @@ fn main() {
     } else { Vec::new() };
 
     // 7-9. Assemble system manually (surface mesh needs 3×2 Jacobian)
-    let qo = (2 * order + 1).max(3) as u8;
+    let qo = (2 * order + 1).max(3 + 3) as u8; // extra quadrature for curved geometry
     let mut a_coo = CooMatrix::new(n_dofs, n_dofs);
     let mut rhs = vec![0.0; n_dofs];
 
@@ -60,7 +66,7 @@ fn main() {
         let quad = re.quadrature(qo);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let ng = dofs.len();
-        let nodes = mesh.element_nodes(e);
+        let _nodes = mesh.element_nodes(e);
 
         let mut me = vec![0.0; ng * ng];
         let mut fe = vec![0.0; ng];
@@ -69,8 +75,8 @@ fn main() {
         let mut grad_phys = vec![0.0; n_ldofs * 3]; // 3 physical coordinates
 
         for (qi, xi) in quad.points.iter().enumerate() {
-            // Surface Jacobian: 3×2 matrix and determinant
-            let (j, det_j, xp) = surface_jacobian(&mesh, &nodes, et, xi);
+            // Isoparametric surface Jacobian: 3×2 matrix and determinant
+            let (j, det_j, xp) = surface_jacobian(&mesh, e, et, xi);
             let w = quad.weights[qi] * det_j;
             let (j00, j01, j10, j11, j20, j21) =
                 (j[(0,0)], j[(0,1)], j[(1,0)], j[(1,1)], j[(2,0)], j[(2,1)]);
@@ -122,6 +128,8 @@ fn main() {
             }
         }
 
+        // (geometry handled by surface_jacobian)
+
         for (ir, &r) in dofs.iter().enumerate() {
             rhs[r] += fe[ir];
             for (ic, &c) in dofs.iter().enumerate() {
@@ -152,9 +160,9 @@ fn main() {
         let et = mesh.element_type(e);
         let re = ref_elem_for(et, order);
         let quad = re.quadrature(qo);
-        let nodes = mesh.element_nodes(e);
+        let _nodes = mesh.element_nodes(e);
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (_, det_j, _) = surface_jacobian(&mesh, &nodes, et, xi);
+            let (_, det_j, _) = surface_jacobian(&mesh, e, et, xi);
             total_area += quad.weights[qi] * det_j;
         }
     }
@@ -173,14 +181,14 @@ fn main() {
         let re = ref_elem_for(et, order);
         let quad = re.quadrature(qo);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let nodes = mesh.element_nodes(e);
+        let _nodes = mesh.element_nodes(e);
         let ng = dofs.len();
         let n_ldofs = re.n_dofs();
         let mut me = vec![0.0; ng*ng];
         let mut fe = vec![0.0; ng];
         let mut phi = vec![0.0; n_ldofs];
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (_, det_j, xp) = surface_jacobian(&mesh, &nodes, et, xi);
+            let (_, det_j, xp) = surface_jacobian(&mesh, e, et, xi);
             let w = quad.weights[qi] * det_j;
             re.eval_basis(xi, &mut phi);
             let ev = u_exact(&xp);
@@ -229,7 +237,7 @@ fn main() {
     }
 
     // 13. L2 error (high quadrature for accuracy)
-    let err_qo = (2 * order + 4).max(5) as u8;
+    let err_qo = (2 * order + 6).max(8) as u8; // high quadrature for curved geometry
     let err_u = l2_error_surface(&mesh, &space, &x, &u_exact, err_qo);
     println!("\n|u - u_h|_2 = {:.8}", err_u);
 
@@ -263,101 +271,69 @@ fn trans_cylinder(p: [f64; 3]) -> [f64; 3] {
     [ct, st, 0.25*(2.0*p[2] - 1.0)*(ct + 2.0)]
 }
 
-// ─── Surface Jacobian (Quad4, 3×2) — analytical from trans_cylinder ───────────
+// ─── Surface Jacobian — isoparametric via geometry nodes ──────────────────────
 //
-// Uses the analytical mapping u(x,y,z) → (cos θ, sin θ, 0.25*(2z-1)*(cos θ+2))
-// to compute the exact Jacobian at any reference point.
+// Uses the mesh's high-order geometry nodes (created via SetCurvature) with
+// QuadQk basis functions to compute the 3×2 surface Jacobian.
 
-fn surface_jacobian(mesh: &Mesh<3>, nodes: &[u32], et: ElementType, xi: &[f64])
+fn surface_jacobian(mesh: &Mesh<3>, e: u32, _et: ElementType, xi: &[f64])
     -> (nalgebra::DMatrix<f64>, f64, Vec<f64>)
 {
-    match et {
-        ElementType::Quad4 => {
-            let xc: Vec<Vec<f64>> = (0..4).map(|k| mesh.node_coords(nodes[k]).to_vec()).collect();
-            let (xi_v, eta) = (xi[0], xi[1]);
-            // Q1 mapping of UNTRANSFORMED mesh: (x,y,z) from (ξ,η)
-            let n = |k:usize,x:f64,e:f64| -> f64 { match k {
-                0=>0.25*(1.0-x)*(1.0-e),1=>0.25*(1.0+x)*(1.0-e),
-                2=>0.25*(1.0+x)*(1.0+e),3=>0.25*(1.0-x)*(1.0+e),_=>0.0}};
-            let dn_dxi = |k:usize,e:f64| -> f64 { match k {
-                0=>-0.25*(1.0-e),1=>0.25*(1.0-e),2=>0.25*(1.0+e),3=>-0.25*(1.0+e),_=>0.0}};
-            let dn_deta = |k:usize,x:f64| -> f64 { match k {
-                0=>-0.25*(1.0-x),1=>-0.25*(1.0+x),2=>0.25*(1.0+x),3=>0.25*(1.0-x),_=>0.0}};
-            let mut x = 0.0; let mut y = 0.0; let mut z = 0.0;
-            let mut dx_dxi = 0.0; let mut dy_dxi = 0.0; let mut dz_dxi = 0.0;
-            let mut dx_deta = 0.0; let mut dy_deta = 0.0; let mut dz_deta = 0.0;
-            for k in 0..4 {
-                let nk = n(k, xi_v, eta);
-                let dni = dn_dxi(k, eta);
-                let dne = dn_deta(k, xi_v);
-                x += nk * xc[k][0]; y += nk * xc[k][1]; z += nk * xc[k][2];
-                dx_dxi += dni * xc[k][0]; dy_dxi += dni * xc[k][1]; dz_dxi += dni * xc[k][2];
-                dx_deta += dne * xc[k][0]; dy_deta += dne * xc[k][1]; dz_deta += dne * xc[k][2];
-            }
-            // Analytical cylinder transform and its Jacobian (trans_cylinder)
-            let theta = cyl_theta(x, y);
-            let ct = theta.cos(); let st = theta.sin();
-            let dtheta_dx = cyl_dtheta_dx(x, y);
-            let dtheta_dy = cyl_dtheta_dy(x, y);
-            // Map physical (x,y,z) → cylindrical (X,Y,Z):
-            // X = cos(θ), Y = sin(θ), Z = 0.25*(2z-1)*(cos(θ)+2)
-            // Jacobian of the mapping: ∂(X,Y,Z)/∂(ξ,η) = ∂(X,Y,Z)/∂(x,y,z) * ∂(x,y,z)/∂(ξ,η)
-            let dX_dtheta = -st; let dY_dtheta = ct;
-            let r = ct + 2.0; let dz_factor = 0.25 * (2.0 * z - 1.0);
-            let dZ_dtheta = dz_factor * (-st); // ∂Z/∂θ = 0.25*(2z-1)*(-sin θ)
-            let dZ_dz = 0.5 * r; // ∂Z/∂z = 0.5*(cosθ+2)
+    use fem_element::lagrange::factory::QuadQk;
+    use fem_element::lagrange::QuadQ1;
+    use fem_element::ReferenceElement;
 
-            let j00 = dX_dtheta * dtheta_dx * dx_dxi + dY_dtheta * dtheta_dy * dy_dxi;
-            let j01 = dX_dtheta * dtheta_dx * dx_deta + dY_dtheta * dtheta_dy * dy_deta;
-            let j10 = dX_dtheta * dtheta_dx * dx_dxi + dY_dtheta * dtheta_dy * dy_dxi;
-            let j11 = dX_dtheta * dtheta_dx * dx_deta + dY_dtheta * dtheta_dy * dy_deta;
-            let j20 = dZ_dtheta * (dtheta_dx*dx_dxi + dtheta_dy*dy_dxi) + dZ_dz * dz_dxi;
-            let j21 = dZ_dtheta * (dtheta_dx*dx_deta + dtheta_dy*dy_deta) + dZ_dz * dz_deta;
+    let geom_order = mesh.geom_order();
+    let (nodes, n_dofs, quad): (&[NodeId], usize, Box<dyn ReferenceElement>) = if geom_order > 1 {
+        let n = mesh.geom_elem_nodes(e);
+        let q: Box<dyn ReferenceElement> = Box::new(QuadQk::new(geom_order as usize));
+        let len = n.len();
+        (n, len, q)
+    } else {
+        // Linear geometry: use regular element nodes with Q1 basis
+        let n = mesh.elem_nodes(e);
+        let q: Box<dyn ReferenceElement> = Box::new(QuadQ1);
+        (n, 4, q)
+    };
 
-            let mut j = nalgebra::DMatrix::<f64>::zeros(3, 2);
-            j[(0,0)] = j00; j[(0,1)] = j01;
-            j[(1,0)] = j10; j[(1,1)] = j11;
-            j[(2,0)] = j20; j[(2,1)] = j21;
+    let mut phi = vec![0.0; n_dofs];
+    let mut grad_ref = vec![0.0; n_dofs * 2];
+    quad.eval_basis(xi, &mut phi);
+    quad.eval_grad_basis(xi, &mut grad_ref);
 
-            let dxi_v = [j00, j10, j20];
-            let deta_v = [j01, j11, j21];
-            let cross = [dxi_v[1]*deta_v[2]-dxi_v[2]*deta_v[1],
-                         dxi_v[2]*deta_v[0]-dxi_v[0]*deta_v[2],
-                         dxi_v[0]*deta_v[1]-dxi_v[1]*deta_v[0]];
-            let det = (cross[0]*cross[0]+cross[1]*cross[1]+cross[2]*cross[2]).sqrt();
+    // Helper: get node coords from geometry (if available) or regular coords
+    use fem_core::NodeId;
+    let get_coords = |gid: NodeId| -> [f64; 3] {
+        if geom_order > 1 { mesh.geom_node_coords(gid) }
+        else { mesh.coords_of(gid) }
+    };
 
-            // Physical point on cylinder
-            let xp = vec![ct, st, 0.25*(2.0*z-1.0)*r];
-            (j, det, xp)
-        }
-        _ => (nalgebra::DMatrix::<f64>::zeros(3, 2), 1.0, vec![0.0; 3])
+    // Physical position
+    let mut xp = [0.0; 3];
+    for k in 0..n_dofs {
+        let xk = get_coords(nodes[k]);
+        for d in 0..3 { xp[d] += xk[d] * phi[k]; }
     }
-}
 
-/// Cylinder angle θ for a point (x,y) on the 4-sided flat tube.
-fn cyl_theta(x: f64, y: f64) -> f64 {
-    let tol = 1e-10;
-    if (y + 1.0).abs() < tol { 0.25*PI*(x - 2.0) }
-    else if (x - 1.0).abs() < tol { 0.25*PI*y }
-    else if (y - 1.0).abs() < tol { 0.25*PI*(2.0 - x) }
-    else if (x + 1.0).abs() < tol { 0.25*PI*(4.0 - y) }
-    else { 0.0 }
-}
-fn cyl_dtheta_dx(x: f64, y: f64) -> f64 {
-    let tol = 1e-10;
-    if (y + 1.0).abs() < tol { 0.25*PI }
-    else if (x - 1.0).abs() < tol { 0.0 }
-    else if (y - 1.0).abs() < tol { -0.25*PI }
-    else if (x + 1.0).abs() < tol { 0.0 }
-    else { 0.0 }
-}
-fn cyl_dtheta_dy(x: f64, y: f64) -> f64 {
-    let tol = 1e-10;
-    if (y + 1.0).abs() < tol { 0.0 }
-    else if (x - 1.0).abs() < tol { 0.25*PI }
-    else if (y - 1.0).abs() < tol { 0.0 }
-    else if (x + 1.0).abs() < tol { -0.25*PI }
-    else { 0.0 }
+    // 3×2 Jacobian
+    let mut j = nalgebra::DMatrix::<f64>::zeros(3, 2);
+    for k in 0..n_dofs {
+        let xk = get_coords(nodes[k]);
+        j[(0,0)] += xk[0] * grad_ref[k*2];
+        j[(1,0)] += xk[1] * grad_ref[k*2];
+        j[(2,0)] += xk[2] * grad_ref[k*2];
+        j[(0,1)] += xk[0] * grad_ref[k*2+1];
+        j[(1,1)] += xk[1] * grad_ref[k*2+1];
+        j[(2,1)] += xk[2] * grad_ref[k*2+1];
+    }
+
+    let (j00,j01,j10,j11,j20,j21) = (j[(0,0)],j[(0,1)],j[(1,0)],j[(1,1)],j[(2,0)],j[(2,1)]);
+    let g00 = j00*j00 + j10*j10 + j20*j20;
+    let g01 = j00*j01 + j10*j11 + j20*j21;
+    let g11 = j01*j01 + j11*j11 + j21*j21;
+    let det = (g00*g11 - g01*g01).sqrt();
+
+    (j, det, xp.to_vec())
 }
 
 fn ref_elem_for(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
@@ -408,11 +384,11 @@ fn assemble_rhs_projection(mesh: &Mesh<3>, space: &H1Space<Mesh<3>>,
         let re = ref_elem_for(et, space.order());
         let quad = re.quadrature(qo);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let nodes = mesh.element_nodes(e);
+        let _nodes = mesh.element_nodes(e);
         let n_ldofs = re.n_dofs();
         let mut phi = vec![0.0; n_ldofs];
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (_, det_j, xp) = surface_jacobian(mesh, &nodes, et, xi);
+            let (_, det_j, xp) = surface_jacobian(mesh, e, et, xi);
             let w = quad.weights[qi] * det_j;
             re.eval_basis(xi, &mut phi);
             let ev = exact(&xp);
@@ -432,11 +408,11 @@ fn l2_error_surface(mesh: &Mesh<3>, space: &H1Space<Mesh<3>>, uh: &[f64],
         let re = ref_elem_for(et, space.order());
         let quad = re.quadrature(qo);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let nodes = mesh.element_nodes(e);
+        let _nodes = mesh.element_nodes(e);
         let n_ldofs = re.n_dofs();
         let mut phi = vec![0.0; n_ldofs];
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (_, det_j, xp) = surface_jacobian(mesh, &nodes, et, xi);
+            let (_, det_j, xp) = surface_jacobian(mesh, e, et, xi);
             let w = quad.weights[qi] * det_j;
             re.eval_basis(xi, &mut phi);
             let val: f64 = dofs.iter().zip(phi.iter()).map(|(&d, &p)| uh[d] * p).sum();
@@ -455,13 +431,13 @@ fn l2_error_flux(mesh: &Mesh<3>, space: &H1Space<Mesh<3>>, uh: &[f64],
         let re = ref_elem_for(et, space.order());
         let quad = re.quadrature(qo);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let nodes = mesh.element_nodes(e);
+        let _nodes = mesh.element_nodes(e);
         let n_ldofs = re.n_dofs();
         let mut phi = vec![0.0; n_ldofs];
         let mut grad_ref = vec![0.0; n_ldofs*2];
         let mut grad_phys = vec![0.0; n_ldofs*dim];
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (j, det_j, xp) = surface_jacobian(mesh, &nodes, et, xi);
+            let (j, det_j, xp) = surface_jacobian(mesh, e, et, xi);
             let w = quad.weights[qi] * det_j;
             let (j00,j01,j10,j11,j20,j21) = (j[(0,0)],j[(0,1)],j[(1,0)],j[(1,1)],j[(2,0)],j[(2,1)]);
 

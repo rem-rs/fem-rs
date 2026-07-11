@@ -130,7 +130,28 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
     pub fn project_coefficient(&mut self, coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync), quad_order: u8) {
         self.dofs = project_coefficient(self.space, coeff, quad_order);
     }
-    /// Create a new grid function from a space reference and DOF coefficients.
+
+    /// Project a scalar coefficient onto the boundary DOFs flagged by
+    /// `bdr_attr` using the given `DofManager`.
+    ///
+    /// Equivalent to MFEM's `GridFunction::ProjectBdrCoefficient` for H1
+    /// spaces.  The `dof_manager` is typically obtained from `space.dof_manager()`
+    /// when `S = H1Space<M>`.
+    pub fn project_bdr_coefficient(
+        &mut self,
+        coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+        bdr_attr: &[i32],
+        dm: &fem_space::DofManager,
+    ) {
+        use fem_space::constraints::dirichlet::boundary_dofs;
+        use fem_mesh::topology::MeshTopology;
+        let mesh = self.space.mesh();
+        let dofs = boundary_dofs(mesh, dm, bdr_attr);
+        for &d in &dofs {
+            let x = dm.dof_coord(d);
+            self.dofs[d as usize] = coeff(x);
+        }
+    }
     ///
     /// # Panics
     /// Panics if `dofs.len() != space.n_dofs()`.

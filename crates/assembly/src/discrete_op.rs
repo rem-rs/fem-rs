@@ -1015,7 +1015,14 @@ impl DiscreteLinearOperator {
             });
         }
 
-        let n_local_dofs = if dim == 2 { 3 } else { 4 };
+        let n_local_dofs = if dim == 2 {
+            // Tri has 3 edges (3 local DOFs), Quad has 4 edges (4 local DOFs)
+            let etype = mesh.element_type(0);
+            match etype {
+                ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => 4,
+                _ => 3,
+            }
+        } else { 4 };
 
         let n_l2   = l2_space.n_dofs();
         let n_hdiv = hdiv_space.n_dofs();

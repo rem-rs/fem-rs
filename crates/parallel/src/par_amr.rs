@@ -191,6 +191,7 @@ fn merge_submeshes(
         face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![],
+        geometry: None,
     })
 }
 
@@ -440,6 +441,7 @@ fn extract_submesh_elements<const D: usize>(
         face_to_elem: None,
         edge_conn: Vec::new(),
         edge_to_elem: Vec::new(),
+        geometry: None,
     }
 }
 
@@ -476,6 +478,7 @@ fn merge_two_meshes<const D: usize>(
         face_to_elem: None,
         edge_conn: Vec::new(),
         edge_to_elem: Vec::new(),
+        geometry: None,
     }
 }
 

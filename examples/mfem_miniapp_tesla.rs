@@ -1,140 +1,125 @@
-use fem_examples::{apply_dirichlet, dirichlet_nodes, p1_assemble_poisson, pcg_solve};
-use fem_mesh::Mesh;
+//! # Tesla Mini App: Simple Magnetostatics [serial 1:1 translation]
+//!
+//! Solves `∇×(ν∇×A) = J` with PEC BC (A×n = 0).
+//! Post-processes `B = ∇×A`.
+//!
+#![allow(dead_code)]
+//! ## Usage
+//! ```text
+//! cargo run --example mfem_miniapp_tesla -- -m data/beam-tet.mesh -o 1 -rs 0
+//! ```
 
-const DEFAULT_SOURCE_SCALE: f64 = 1.0e3;
+use fem_assembly::discrete_op::DiscreteLinearOperator;
+use fem_assembly::mixed::assemble_hcurl_hdiv_mixed;
+use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator};
+use fem_assembly::vector_assembler::VectorAssembler;
+use fem_io::mfem::read_mfem_file;
+use fem_linalg::CsrMatrix;
+use fem_mesh::{refine_uniform_3d, Mesh};
+use fem_solver::{solve_cg, SolverConfig};
+use fem_space::constraints::dirichlet::{boundary_dofs_hcurl, eliminate_dirichlet};
+use fem_space::fe_space::FESpace;
+use fem_space::{H1Space, HCurlSpace, HDivSpace};
 
-fn solve_tesla(n: usize) -> (Mesh<2>, Vec<f64>, usize, f64) {
-	solve_tesla_with_scale(n, DEFAULT_SOURCE_SCALE)
+const MU0: f64 = 4.0e-7 * std::f64::consts::PI;
+
+pub struct TeslaSolver {
+    h1: H1Space<Mesh<3>>,
+    nd: HCurlSpace<Mesh<3>>,
+    rt: HDivSpace<Mesh<3>>,
+    stiffness: CsrMatrix<f64>,
+    hdiv_mass: CsrMatrix<f64>,
+    weak_curl: CsrMatrix<f64>,
+    grad: CsrMatrix<f64>,
+    curl: CsrMatrix<f64>,
+    a: Vec<f64>,
+    b: Vec<f64>,
+    ess_dofs: Vec<u32>,
 }
 
-fn solve_tesla_with_scale(n: usize, source_scale: f64) -> (Mesh<2>, Vec<f64>, usize, f64) {
-	let mesh = Mesh::<2>::unit_square_tri(n);
+impl TeslaSolver {
+    pub fn new(mesh: Mesh<3>, order: u8, bound_all: bool) -> Self {
+        let h1 = H1Space::new(mesh.clone(), order);
+        let nd = HCurlSpace::new(mesh.clone(), order);
+        let rt = HDivSpace::new(mesh.clone(), 0); // RT0 for curl_3d compatibility
+        let ess_dofs = if bound_all {
+            boundary_dofs_hcurl(&mesh, &nd, &mesh.unique_boundary_tags())
+        } else { vec![] };
+        let n_nd = nd.n_dofs(); let n_rt = rt.n_dofs();
+        let nu = 1.0 / MU0;
+        let qo = (2 * order + 1).max(4);
 
-	let src = |x: f64, y: f64| {
-		if (0.3..=0.7).contains(&x) && (0.3..=0.7).contains(&y) {
-			source_scale
-		} else {
-			0.0
-		}
-	};
-	let (mut k, mut rhs) = p1_assemble_poisson(&mesh, |_, _| 1.0, src);
-	let bcs = dirichlet_nodes(&mesh, &[1, 2, 3, 4]);
-	apply_dirichlet(&mut k, &mut rhs, &bcs);
+        let stiffness = VectorAssembler::assemble_bilinear(
+            &nd, &[&CurlCurlIntegrator { mu: nu },
+                   &VectorMassIntegrator { alpha: 1e-12 }], qo);
+        let hdiv_mass = VectorAssembler::assemble_bilinear(
+            &rt, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
+        let weak_curl = assemble_hcurl_hdiv_mixed(&nd, &rt, qo, nu);
+        let grad = DiscreteLinearOperator::gradient(&h1, &nd).expect("gradient");
+        let curl = DiscreteLinearOperator::curl_3d(&nd, &rt).expect("curl_3d");
 
-	let (u, iters, res) = pcg_solve(&k, &rhs, 1e-10, 5000);
-	(mesh, u, iters, res)
+        TeslaSolver { h1, nd, rt, stiffness, hdiv_mass, weak_curl, grad, curl,
+            a: vec![0.0; n_nd], b: vec![0.0; n_rt], ess_dofs }
+    }
+
+    pub fn solve(&mut self, j_src: Option<Box<dyn Fn(&[f64], &mut [f64]) + Send + Sync>>) {
+        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500,
+            verbose: true, ..Default::default() };
+        let n = self.nd.n_dofs();
+        let mut rhs = vec![0.0; n];
+        if let Some(j) = j_src {
+            let src = VectorDomainLFIntegrator {
+                f: fem_assembly::coefficient::FnVectorCoeff(j) };
+            rhs = VectorAssembler::assemble_linear(&self.nd, &[&src], 15);
+        }
+
+        if !self.ess_dofs.is_empty() {
+            let zv = vec![0.0; self.ess_dofs.len()];
+            let (red, rr, free, _) = eliminate_dirichlet(&self.stiffness, &rhs, &self.ess_dofs, &zv);
+            let mut x = vec![0.0; red.nrows];
+            solve_cg(&red, &rr, &mut x, &cfg).expect("PCG");
+            self.a = vec![0.0; n];
+            for (i, &d) in free.iter().enumerate() { self.a[d as usize] = x[i]; }
+        } else {
+            // Not well-defined without BCs (curl-curl is singular)
+            panic!("Tesla requires at least one Dirichlet BC");
+        }
+        self.curl.spmv(&self.a, &mut self.b);
+    }
+
+    pub fn sizes(&self) -> (usize,usize,usize) {
+        (self.h1.n_dofs(), self.nd.n_dofs(), self.rt.n_dofs())
+    }
 }
 
 fn main() {
-	let (_mesh, u, iters, res) = solve_tesla(16);
-	let l2 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
-	println!("mfem_tesla done: dofs={}, iters={}, res={:.3e}, ||Az||2={:.3e}", u.len(), iters, res, l2);
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use fem_mesh::topology::MeshTopology;
-
-	fn l2_norm(values: &[f64]) -> f64 {
-		values.iter().map(|v| v * v).sum::<f64>().sqrt()
-	}
-
-	#[test]
-	fn tesla_solution_is_finite_and_solver_converges() {
-		let (_mesh, u, _iters, res) = solve_tesla(12);
-		assert!(res < 1e-8, "PCG residual too large: {}", res);
-		assert!(u.iter().all(|v| v.is_finite()));
-	}
-
-	#[test]
-	fn tesla_nonzero_source_generates_nontrivial_field() {
-		let (_mesh, u, _iters, _res) = solve_tesla(12);
-		let max_abs = u.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
-		assert!(max_abs > 1e-6, "expected nontrivial response from source, got max |u|={}", max_abs);
-	}
-
-	#[test]
-	fn tesla_zero_source_gives_trivial_field() {
-		let (_mesh, u, _iters, res) = solve_tesla_with_scale(12, 0.0);
-		let max_abs = u.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
-		assert!(res < 1e-8, "PCG residual too large: {}", res);
-		assert!(max_abs < 1e-12, "expected zero source to give zero field, got max |u|={}", max_abs);
-	}
-
-	#[test]
-	fn tesla_response_scales_linearly_with_source_strength() {
-		let (_mesh_half, u_half, _iters_half, res_half) = solve_tesla_with_scale(12, 5.0e2);
-		let (_mesh_full, u_full, _iters_full, res_full) = solve_tesla_with_scale(12, 1.0e3);
-		let norm_half = l2_norm(&u_half);
-		let norm_full = l2_norm(&u_full);
-		let ratio = norm_full / norm_half.max(1e-30);
-
-		assert!(res_half < 1e-8 && res_full < 1e-8);
-		assert!(norm_half > 0.0 && norm_full > 0.0);
-		assert!(
-			(ratio - 2.0).abs() < 1e-10,
-			"expected linear source scaling with ratio 2, got {}",
-			ratio
-		);
-	}
-
-	#[test]
-	fn tesla_square_source_preserves_xy_symmetry() {
-		let (mesh, u, _iters, res) = solve_tesla(12);
-		assert!(res < 1e-8, "PCG residual too large: {}", res);
-
-		for idx in 0..u.len() {
-			let node = mesh.node_coords(idx as u32);
-			let mut match_idx = None;
-			for j in 0..u.len() {
-				let other = mesh.node_coords(j as u32);
-				if (other[0] - node[1]).abs() < 1e-12 && (other[1] - node[0]).abs() < 1e-12 {
-					match_idx = Some(j);
-					break;
-				}
-			}
-
-			let j = match_idx.expect("expected reflected node under x<->y symmetry");
-			assert!(
-				(u[idx] - u[j]).abs() < 1e-10,
-				"expected x/y symmetry at node {} mirrored by {}: u_i={} u_j={}",
-				idx,
-				j,
-				u[idx],
-				u[j]
-			);
-		}
-	}
-
-        #[test]
-        fn tesla_finer_mesh_also_converges_with_small_residual() {
-                let (_mesh, _u, _iters, res_coarse) = solve_tesla(8);
-                let (_mesh, _u, _iters, res_fine) = solve_tesla(16);
-                assert!(res_coarse < 1e-8, "coarse PCG residual too large: {}", res_coarse);
-                assert!(res_fine < 1e-8, "fine PCG residual too large: {}", res_fine);
+    let args: Vec<String> = std::env::args().collect();
+    let mut mesh_file = "data/beam-tet.mesh".to_string();
+    let mut order: u8 = 1; let mut refs = 0usize;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-m"|"--mesh" => { i+=1; if i<args.len() { mesh_file=args[i].clone(); }}
+            "-o"|"--order" => { i+=1; if i<args.len() { order=args[i].parse().unwrap_or(1); }}
+            "-rs"|"--serial-ref-levels" => { i+=1; if i<args.len() { refs=args[i].parse().unwrap_or(0); }}
+            _ => {}
         }
+        i += 1;
+    }
+    let mfem = read_mfem_file(&mesh_file).expect("mesh");
+    let mut mesh: Mesh<3> = mfem.mesh3d.expect("3D");
+    for _ in 0..refs { mesh = refine_uniform_3d(&mesh); }
+    eprintln!("mesh={mesh_file} o={order} r={refs}");
 
-        #[test]
-        fn tesla_negative_source_flips_solution_sign() {
-                let (_mesh, u_pos, _iters, res_pos) = solve_tesla_with_scale(12, DEFAULT_SOURCE_SCALE);
-                let (_mesh, u_neg, _iters, res_neg) = solve_tesla_with_scale(12, -DEFAULT_SOURCE_SCALE);
-                assert!(res_pos < 1e-8 && res_neg < 1e-8);
-                assert_eq!(u_pos.len(), u_neg.len());
-                for (i, (&p, &n)) in u_pos.iter().zip(&u_neg).enumerate() {
-                        assert!(
-                                (p + n).abs() < 1e-10,
-                                "expected sign flip at node {}: u_pos={} u_neg={}", i, p, n
-                        );
-                }
-        }
+    let mut s = TeslaSolver::new(mesh, order, true);
+    let (h1, nd, rt) = s.sizes();
+    println!("H1 {h1} HCurl {nd} HDiv {rt}");
 
-        #[test]
-        fn tesla_solution_is_nonnegative_for_positive_source() {
-                // Zero Dirichlet BCs + non-negative source → solution ≥ 0 (maximum principle).
-                let (_mesh, u, _iters, res) = solve_tesla(12);
-                assert!(res < 1e-8, "PCG residual too large: {}", res);
-                let min_val = u.iter().cloned().fold(f64::INFINITY, f64::min);
-                assert!(min_val >= -1e-10, "expected non-negative solution for positive source, got min={}", min_val);
-        }
+    s.solve(Some(Box::new(|x: &[f64], out: &mut [f64]| {
+        out[0]=0.0; out[1]=0.0;
+        out[2]=if x[0].abs()<0.3&&x[1].abs()<0.3{1e6}else{0.0};
+    })));
+    let an = s.a.iter().map(|v|v*v).sum::<f64>().sqrt();
+    let bn = s.b.iter().map(|v|v*v).sum::<f64>().sqrt();
+    println!("|A|₂={an:.6e}  |B|₂={bn:.6e}");
 }

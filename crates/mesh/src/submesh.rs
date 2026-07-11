@@ -397,6 +397,7 @@ pub fn extract_submesh_3d(mesh: &Mesh<3>, element_tags: &[i32]) -> SubMesh3D {
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
+        geometry: None,
     };
 
     SubMesh3D {

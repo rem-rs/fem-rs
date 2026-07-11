@@ -111,6 +111,7 @@ pub fn build_supermesh(
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
+        geometry: None,
     };
 
     (mesh, sup_elems)
@@ -232,7 +233,7 @@ mod tests {
             elem_type: ElementType::Tri3, face_conn: vec![], face_tags: vec![],
             face_type: ElementType::Line2, elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None, face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![],
+            edge_conn: vec![], edge_to_elem: vec![], geometry: None,
         };
 
         let (super_mesh, elems) = build_supermesh(&mesh_a, &mesh_b);

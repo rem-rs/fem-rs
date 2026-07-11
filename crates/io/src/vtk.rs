@@ -386,6 +386,7 @@ pub fn write_vtu_higher_order<const D: usize>(
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![],
+        geometry: None,
     };
 
     let mut w = VtkWriter::new(&vis_mesh);

@@ -60,6 +60,30 @@ fn local_element_edges(dim: usize, elem_type: ElementType) -> Vec<[usize; 2]> {
     }
 }
 
+/// High-order geometry data for curved meshes (set via [`Mesh::set_curvature`]).
+///
+/// When present, the mesh's geometry is represented using polynomial order
+/// `order` basis functions (isoparametric or superparametric).  The `conn`
+/// array maps each element to its high-order geometry nodes, and `coords`
+/// stores their physical coordinates.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct GeometryData {
+    /// Geometric polynomial order (1 = linear, 2 = quadratic, …).
+    pub order: u8,
+    /// High-order geometry connectivity: for element `e`, the geometry-node
+    /// indices are `conn[e * nodes_per_elem .. (e+1) * nodes_per_elem]`.
+    pub conn: Vec<NodeId>,
+    /// Number of geometry nodes per element.
+    pub nodes_per_elem: usize,
+    /// Coordinates of geometry nodes.  Length = `n_nodes * D`.
+    /// Indices 0..n_vertices are the original vertex coordinates; additional
+    /// indices beyond that are edge/face/interior geometry nodes.
+    pub coords: Vec<f64>,
+    /// Total number of geometry nodes (≤ `coords.len() / D`).
+    pub n_nodes: usize,
+}
+
 /// Unstructured mesh with uniform or mixed element types.
 ///
 /// When all elements share the same type, `elem_type` determines the
@@ -116,6 +140,13 @@ pub struct Mesh<const D: usize> {
     /// CSR-like: `edge_to_elem[2*eid]` = first element, `[2*eid+1]` = second or `ElemId::MAX`.
     /// Built by [`build_edge_connectivity`].
     pub edge_to_elem: Vec<ElemId>,
+
+    // ─── High-order geometry (set via set_curvature) ─────────────────────────
+
+    /// High-order geometry data.  `None` means linear (Q1/P1) geometry.
+    #[cfg_attr(feature = "serialize", serde(default))]
+    #[cfg_attr(feature = "serialize", serde(skip_serializing_if = "Option::is_none"))]
+    pub geometry: Option<GeometryData>,
 }
 
 impl<const D: usize> Mesh<D> {
@@ -169,16 +200,198 @@ impl<const D: usize> Mesh<D> {
         std::array::from_fn(|i| self.coords[off + i])
     }
 
+    // ─── High-order geometry support ───────────────────────────────────────────
+
+    /// Geometric polynomial order of the mesh (1 = linear, the default).
+    pub fn geom_order(&self) -> u8 {
+        self.geometry.as_ref().map_or(1, |g| g.order)
+    }
+
+    /// Number of geometry nodes (0 if no high-order geometry).
+    pub fn n_geom_nodes(&self) -> usize {
+        self.geometry.as_ref().map_or(0, |g| g.n_nodes)
+    }
+
+    /// High-order geometry node indices for element `e`.
+    ///
+    /// Returns geometry nodes when `set_curvature` has been called,
+    /// otherwise falls back to the linear connectivity (`elem_nodes`).
+    pub fn geom_elem_nodes(&self, e: ElemId) -> &[NodeId] {
+        if let Some(ref geo) = self.geometry {
+            let off = e as usize * geo.nodes_per_elem;
+            &geo.conn[off..off + geo.nodes_per_elem]
+        } else {
+            self.elem_nodes(e)
+        }
+    }
+
+    /// Coordinates of a geometry node (index into the geometry coords array).
+    ///
+    /// # Panics
+    /// Panics if `gid` is out of range or no high-order geometry exists.
+    pub fn geom_node_coords(&self, gid: NodeId) -> [f64; D] {
+        let geo = self.geometry.as_ref().expect("no high-order geometry");
+        let off = gid as usize * D;
+        std::array::from_fn(|i| geo.coords[off + i])
+    }
+
+    // ─── SetCurvature ─────────────────────────────────────────────────────────
+
+    /// Create a high-order geometry representation (equivalent to MFEM's
+    /// `Mesh::SetCurvature`).
+    ///
+    /// Upgrades the mesh's geometric mapping from linear (Q1/P1) to arbitrary
+    /// polynomial order `order`.  New geometry nodes are inserted at edge and
+    /// interior positions and initialized with the Q1 linear interpolation of
+    /// the corner vertex coordinates.
+    ///
+    /// After calling this, [`transform`](Self::transform) applies the mapping
+    /// to ALL geometry nodes, giving a smooth isoparametric representation.
+    ///
+    /// Currently supports `Quad4` element type.  `order = 0` or `1` resets
+    /// to linear geometry.
+    pub fn set_curvature(&mut self, order: u8) {
+        if order <= 1 {
+            self.geometry = None;
+            return;
+        }
+        let p = order as usize;
+        // Only Quad4 for now (extend as needed)
+        assert!(self.elem_type == ElementType::Quad4,
+            "set_curvature: only Quad4 is currently supported");
+        assert_eq!(D, 3,
+            "set_curvature: Quad4 surface mesh requires D = 3");
+
+        use std::collections::HashMap;
+        use fem_element::lagrange::factory::QuadQk;
+        use fem_element::ReferenceElement;
+
+        let n_elems = self.n_elems();
+        let quad = QuadQk::new(p);
+        let npe_new = quad.n_dofs(); // (p+1)²
+        let n_verts = self.n_nodes();
+
+        // Reference node positions in QuadQk DOF order
+        let dof_ref = quad.dof_coords(); // Vec<Vec<f64>>, each of length 2
+
+        // Get vertex coordinates of each element for Q1 interpolation
+        let elem_verts: Vec<[NodeId; 4]> = (0..n_elems)
+            .map(|e| {
+                let n = self.elem_nodes(e as ElemId);
+                [n[0], n[1], n[2], n[3]]
+            })
+            .collect();
+
+        // Build geometry connectivity: each edge is shared via an edge map.
+        let mut geom_conn = vec![0u32; n_elems * npe_new];
+        let mut edge_map: HashMap<(NodeId, NodeId), Vec<NodeId>> = HashMap::new();
+        let mut next_geom = n_verts as NodeId;
+
+        // Geometry coords start with the original vertex coords
+        let mut geom_coords = self.coords.clone();
+
+        for e in 0..n_elems {
+            let verts = elem_verts[e];
+            let base = e * npe_new;
+
+            // Q1 basis functions at reference point (xi, eta) for interpolation:
+            // φ₀=(1-ξ)(1-η)/4, φ₁=(1+ξ)(1-η)/4, φ₂=(1+ξ)(1+η)/4, φ₃=(1-ξ)(1+η)/4
+            let q1_eval = |xi: f64, eta: f64| -> [f64; 4] {
+                [0.25*(1.0-xi)*(1.0-eta), 0.25*(1.0+xi)*(1.0-eta),
+                 0.25*(1.0+xi)*(1.0+eta), 0.25*(1.0-xi)*(1.0+eta)]
+            };
+
+            // Vertex DOFs: indices 0,1,2,3 are the original vertices
+            geom_conn[base..base+4].copy_from_slice(&verts);
+
+            // Edge vertex pairs for the quad: bottom(0→1), right(1→2), top(2→3), left(3→0)
+            let edge_verts = [
+                (verts[0], verts[1]), // bottom
+                (verts[1], verts[2]), // right
+                (verts[2], verts[3]), // top
+                (verts[3], verts[0]), // left
+            ];
+
+            let n_edge_dofs = p - 1; // interior nodes per edge (not counting vertices)
+            let mut pos = base + 4;
+
+            // Process each edge
+            for ei in 0..4 {
+                let (a, b) = edge_verts[ei];
+                let key = if a < b { (a, b) } else { (b, a) };
+                let ids = edge_map.entry(key).or_insert_with(|| {
+                    let ca = self.coords_of(a);
+                    let cb = self.coords_of(b);
+                    let mut new_ids = Vec::with_capacity(n_edge_dofs);
+                    for k in 1..p {
+                        let t = k as f64 / p as f64;
+                        let mut x = [0.0; D];
+                        for d in 0..D { x[d] = (1.0 - t) * ca[d] + t * cb[d]; }
+                        geom_coords.extend_from_slice(&x);
+                        new_ids.push(next_geom);
+                        next_geom += 1;
+                    }
+                    new_ids
+                });
+                // DOFs along this edge in QuadQk order
+                for id in ids.iter() {
+                    geom_conn[pos] = *id;
+                    pos += 1;
+                }
+            }
+
+            // Interior DOFs: (p-1)² — positions from dof_ref
+            for idx in 4 + 4 * n_edge_dofs..npe_new {
+                let rc = &dof_ref[idx];
+                let xi = rc[0];
+                let eta = rc[1];
+                let q1 = q1_eval(xi, eta);
+                let mut x = [0.0; D];
+                for v in 0..4 {
+                    let vc = self.coords_of(verts[v]);
+                    for d in 0..D { x[d] += q1[v] * vc[d]; }
+                }
+                geom_coords.extend_from_slice(&x);
+                geom_conn[pos] = next_geom;
+                pos += 1;
+                next_geom += 1;
+            }
+        }
+
+        self.geometry = Some(GeometryData {
+            order,
+            conn: geom_conn,
+            nodes_per_elem: npe_new,
+            coords: geom_coords,
+            n_nodes: next_geom as usize,
+        });
+    }
+
     // ─── Geometric transforms ────────────────────────────────────────────────
 
     /// Apply a coordinate transform `f` to every mesh node.
     /// The closure receives `[x, y]` (2-D) or `[x, y, z]` (3-D) and returns
     /// the transformed coordinate array.
+    ///
+    /// If high-order geometry is present (via [`set_curvature`](Self::set_curvature)),
+    /// both vertex and geometry-node coordinates are transformed.
     pub fn transform(&mut self, mut f: impl FnMut([f64; D]) -> [f64; D]) {
+        // Transform vertex coordinates
         for n in 0..self.n_nodes() {
             let out = f(self.coords_of(n as NodeId));
             let off = n * D;
             self.coords[off..off + D].copy_from_slice(&out);
+        }
+        // Transform geometry node coordinates (if any)
+        if let Some(ref mut geo) = self.geometry {
+            let n_geom = geo.coords.len() / D;
+            for n in 0..n_geom {
+                let off = n * D;
+                let mut p = [0.0; D];
+                p.copy_from_slice(&geo.coords[off..off + D]);
+                let q = f(p);
+                geo.coords[off..off + D].copy_from_slice(&q);
+            }
         }
     }
 
@@ -591,6 +804,7 @@ impl<const D: usize> Mesh<D> {
             elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
+            geometry: None,
         }
     }
 

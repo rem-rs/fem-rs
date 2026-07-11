@@ -601,7 +601,7 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 face_type: ElementType::Quad4,
                 elem_types: None, elem_offsets: None,
                 face_types: None, face_offsets: None,
-                face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+                face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             };
             let (m, _, _, _) = refine_nonconforming_hex(&hex8_mesh, &all);
             m
@@ -776,7 +776,7 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         face_conn: vec![], face_tags: vec![], face_type: ElementType::Tri3,
         elem_types: Some(new_types), elem_offsets: Some(new_offsets),
         face_types: None, face_offsets: None,
-        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
     };
     rebuild_3d_boundary(&mut result, mesh);
     result
@@ -826,7 +826,7 @@ pub fn refine_uniform_surface_tri3(mesh: &Mesh<3>) -> Mesh<3> {
         elem_types: None, elem_offsets: None,
         face_types: None, face_offsets: None,
         face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
+        edge_conn: vec![], edge_to_elem: vec![], geometry: None,
     }
 }
 
@@ -868,7 +868,7 @@ pub fn refine_uniform_surface_quad4(mesh: &Mesh<3>) -> Mesh<3> {
         elem_types: None, elem_offsets: None,
         face_types: None, face_offsets: None,
         face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
+        edge_conn: vec![], edge_to_elem: vec![], geometry: None,
     }
 }
 
@@ -943,7 +943,7 @@ pub fn refine_at_vertex_surface(mesh: &Mesh<3>, target: &[f64; 3]) -> Mesh<3> {
         elem_types: None, elem_offsets: None,
         face_types: None, face_offsets: None,
         face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
+        edge_conn: vec![], edge_to_elem: vec![], geometry: None,
     }
 }
 
@@ -4653,7 +4653,7 @@ fn refine_hex27_uniform_inner(mesh: &Mesh<3>, marked: &[ElemId], npe: usize) -> 
     let n_elems = mesh.n_elems();
     let mut hex8_conn = Vec::with_capacity(n_elems * 8);
     for e in 0..n_elems { let off = e * npe; hex8_conn.extend_from_slice(&mesh.conn[off..off+8]); }
-    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![] };
+    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None };
     refine_hex8_uniform(&hex8_mesh, marked)
 }
 
@@ -5684,7 +5684,7 @@ mod tests {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![],
+            edge_conn: vec![], edge_to_elem: vec![], geometry: None,
         };
 
         let vol_orig = prism6_vol(&mesh, 0);
@@ -5729,7 +5729,7 @@ mod tests {
             elem_types: None, elem_offsets: None,
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
-            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
         };
 
         let fine = refine_uniform_3d(&mesh);
@@ -5757,7 +5757,7 @@ mod tests {
             elem_types: None, elem_offsets: None,
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
-            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
         }
     }
 
@@ -5830,7 +5830,7 @@ mod tests {
             elem_types: None, elem_offsets: None,
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
-            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
         };
 
         // Refine only prism 0
@@ -5870,7 +5870,7 @@ mod tests {
             elem_types: None, elem_offsets: None,
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
-            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
         };
 
         let vol_orig = prism6_vol(&mesh, 0) + prism6_vol(&mesh, 1);
@@ -5925,7 +5925,7 @@ mod tests {
         let mesh = Mesh { coords:c, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex20,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex20_uniform(&mesh, &all);
         assert_eq!(fine.n_elems(), 8); assert_eq!(fine.elem_type, ElementType::Hex8); assert!(c.is_empty());
@@ -5946,7 +5946,7 @@ mod tests {
         let mesh = Mesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex27,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex27_uniform(&mesh, &all);
         assert_eq!(fine.n_elems(), 8); assert!(c.is_empty()); assert_eq!(fine.elem_type, ElementType::Hex8);
@@ -5971,7 +5971,7 @@ mod tests {
         let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
         let v0 = pyramid5_vol(&mesh, 0); assert!((v0-1.0/3.0).abs() < 1e-14);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c) = refine_pyramid5_uniform(&mesh, &all);
@@ -6001,7 +6001,7 @@ mod tests {
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
             face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
             face_offsets: Some(vec![0,4,7,10,13,16]),
-            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![] }
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None }
     }
 
     #[test] fn pyramid5_nc_refine_empty_is_identity() {
@@ -6030,7 +6030,7 @@ mod tests {
         let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
         let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &[0]);
         assert_eq!(nc.n_elems(), 17); assert!(ec.len()>=3); assert!(!tc.is_empty()); assert!(qc.is_empty());
         nc.check().unwrap();
@@ -6048,7 +6048,7 @@ mod tests {
         Mesh { coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![] }
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None }
     }
 
     #[test] fn prism_aniso_z_split_doubles_elements() {
@@ -6290,7 +6290,7 @@ mod tests {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![],
+            edge_conn: vec![], edge_to_elem: vec![], geometry: None,
         }
     }
 
@@ -6347,7 +6347,7 @@ mod tests {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![],
+            edge_conn: vec![], edge_to_elem: vec![], geometry: None,
         }
     }
 

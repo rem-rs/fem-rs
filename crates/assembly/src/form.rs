@@ -49,6 +49,15 @@ impl<S: FESpace> BilinearForm<S> {
     pub fn mat(&self) -> Option<&CsrMatrix<f64>> { self.cached.as_ref() }
     pub fn space(&self) -> &S { &self.space }
 
+    /// Compute `y += A * x` (MFEM's `BilinearForm::AddMult`).
+    ///
+    /// # Panics
+    /// Panics if `assemble()` has not been called first.
+    pub fn add_mult(&self, x: &[f64], y: &mut [f64]) {
+        let a = self.cached.as_ref().expect("assemble() must be called first");
+        a.spmv_add(1.0, x, 1.0, y);
+    }
+
     /// Eliminate essential (Dirichlet) BCs symmetrically.
     ///
     /// Modifies the cached matrix `A` and `rhs` in-place so that

@@ -133,6 +133,7 @@ pub fn read_obj<R: Read>(reader: R) -> FemResult<Mesh<3>> {
             }),
             face_types: None, face_offsets: None, face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
+            geometry: None,
         });
     } else {
         let n_tri = tri_conn.len() / 3;
