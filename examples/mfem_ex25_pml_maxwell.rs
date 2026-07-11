@@ -19,7 +19,7 @@ use fem_assembly::{
 };
 use fem_io::mfem;
 use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
-use fem_solver::{BlockDiagPrecond, GSSmoother};
+use fem_solver::{GSSmoother, DenseVec, linlvoPreconditioner as Preconditioner};
 use fem_linalg::fem_to_linlvo_csr;
 use fem_space::{HCurlSpace, constraints::boundary_dofs_hcurl, fe_space::FESpace};
 use fem_mesh::{Mesh, topology::MeshTopology, element_type::ElementType};
@@ -310,6 +310,47 @@ fn source_fn(x: &[f64], dim: usize, comp_bdr: &[[f64; 2]], omega: f64) -> Vec<f6
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Scaled preconditioner (matches C++ ScaledOperator for HERMITIAN convention)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Wraps a preconditioner, scaling output by `scale` (C++ ScaledOperator).
+struct ScaledPrecond<P> {
+    inner: P,
+    scale: f64,
+}
+impl<P: Preconditioner<Vector = DenseVec<f64>>> Preconditioner for ScaledPrecond<P> {
+    type Vector = DenseVec<f64>;
+    fn apply_precond(&self, x: &Self::Vector, z: &mut Self::Vector) {
+        self.inner.apply_precond(x, z);
+        for v in z.as_mut_slice().iter_mut() { *v *= self.scale; }
+    }
+}
+
+/// Block-diagonal preconditioner with separate preconds for real and imag blocks.
+/// Matches C++ `BlockDiagonalPreconditioner` with two distinct diagonal blocks.
+struct BlockDiagPrecond2<'a> {
+    pre_re: &'a dyn Preconditioner<Vector = DenseVec<f64>>,
+    pre_im: &'a dyn Preconditioner<Vector = DenseVec<f64>>,
+    n: usize,
+}
+impl Preconditioner for BlockDiagPrecond2<'_> {
+    type Vector = DenseVec<f64>;
+    fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
+        let n = self.n;
+        let xs = x.as_slice();
+        let zs = z.as_mut_slice();
+        let x_re = DenseVec::from_vec(xs[..n].to_vec());
+        let mut z_re = DenseVec::zeros(n);
+        self.pre_re.apply_precond(&x_re, &mut z_re);
+        zs[..n].copy_from_slice(z_re.as_slice());
+        let x_im = DenseVec::from_vec(xs[n..].to_vec());
+        let mut z_im = DenseVec::zeros(n);
+        self.pre_im.apply_precond(&x_im, &mut z_im);
+        zs[n..].copy_from_slice(z_im.as_slice());
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Main solver
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -444,17 +485,20 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
             prec_mat.values[p] = if c == d { 1.0 } else { 0.0 };
         }
     }
-    let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&prec_mat), 1.0).expect("GSSmoother");
-    let bp = BlockDiagPrecond { inner: gs, n };
+    let la = fem_to_linlvo_csr(&prec_mat);
+    let gs = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother");
+    // C++: pc_i = ScaledOperator(pc_r, s) where s = -1 for HERMITIAN convention
+    let gs_im = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother_im");
+    let pc_im = ScaledPrecond { inner: gs_im, scale: -1.0 };
+    let bp = BlockDiagPrecond2 { pre_re: &gs, pre_im: &pc_im, n };
 
-    // ── Solve (use GMRES+ILU0 for robustness, or GMRES+BlockDiag(GS) for speed) ──
+    // ── Solve ─────────────────────────────────────────────────────────────────
     let mut flat_rhs = vec![0.0_f64; 2*n];
     for i in 0..n { flat_rhs[i] = rhs_re[i]; }
     for i in 0..n { flat_rhs[n+i] = rhs_im[i]; }
     let mut x = vec![0.0; 2*n];
-    // Try GMRES+BlockDiag(GS) first; fallback logic handled by max_iter
     let res = fem_solver::solve_gmres_precond(&a, &flat_rhs, &mut x, 200, &bp,
-        &SolverConfig { rtol:1e-3, max_iter:2000, verbose:true, ..Default::default() })
+        &SolverConfig { rtol:1e-5, max_iter:2000, verbose:true, ..Default::default() })
         .expect("GMRES");
     println!("  GMRES converged in {} iters, final residual = {:.6e}",
              res.iterations, res.final_residual);
