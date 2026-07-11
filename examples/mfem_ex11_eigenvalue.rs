@@ -206,6 +206,7 @@ fn main() {
         max_iter: 300,
         tol: 1e-8,
         verbose: true,
+        nullspace_skip: 0.0,
     };
 
     let result: EigenResult = lobpcg_constrained(&a, Some(&m), args.nev, &constraints_mat, &lobpcg_cfg)
@@ -314,7 +315,7 @@ mod tests {
         // and Euclidean constraint projection.
         let n = 8;
         let (a, m, c) = build_constrained_system(n, 1);
-        let cfg = LobpcgConfig { max_iter: 100, tol: 1e-6, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 100, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
         let res = lobpcg_constrained(&a, Some(&m), 3, &c, &cfg).unwrap();
         assert_eq!(res.eigenvalues.len(), 3);
         assert!(res.converged, "LOBPCG must converge");

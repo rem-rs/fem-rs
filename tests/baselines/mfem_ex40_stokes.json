@@ -2,22 +2,22 @@
   "name": "mfem_ex40_stokes",
   "metrics": {
     "divergence_residual": {
-      "value": 2.1360738083312256e-8,
+      "value": 4.405609129234683e-8,
       "rtol": 0.0001,
       "atol": 1e-10
     },
     "iterations": {
-      "value": 234.0,
+      "value": 476.0,
       "rtol": 0.0001,
       "atol": 0.5
     },
     "momentum_residual": {
-      "value": 2.4375621749952504e-8,
+      "value": 4.224305448114951e-8,
       "rtol": 0.0001,
       "atol": 1e-10
     },
     "pressure_checksum": {
-      "value": 195.69795528147438,
+      "value": 2.8086836440371976,
       "rtol": 1e-6,
       "atol": 1e-10
     },
@@ -27,12 +27,12 @@
       "atol": 0.5
     },
     "pressure_norm": {
-      "value": 14.307293074475664,
+      "value": 3.6297649613188696,
       "rtol": 1e-6,
       "atol": 1e-10
     },
     "velocity_checksum": {
-      "value": 11689.841284213384,
+      "value": 13878.650253693346,
       "rtol": 1e-6,
       "atol": 1e-10
     },
@@ -42,7 +42,7 @@
       "atol": 0.5
     },
     "velocity_norm": {
-      "value": 5.988924566790428,
+      "value": 8.091418470959967,
       "rtol": 1e-6,
       "atol": 1e-10
     }

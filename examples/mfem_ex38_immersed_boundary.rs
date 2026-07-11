@@ -1195,6 +1195,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 8,
             nitsche_gamma: 20.0,
+            mesh_file: None,
             level_set: Some(LevelSetShape::Halfspace {
                 normal: [0.0, 1.0],
                 offset: 0.5,
@@ -1227,6 +1228,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 8,
             nitsche_gamma: 20.0,
+            mesh_file: None,
             level_set: Some(LevelSetShape::Halfspace {
                 normal: [0.0, 1.0],
                 offset: 0.5,
@@ -1252,6 +1254,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 6,
             nitsche_gamma: 10.0,
+            mesh_file: None,
             level_set: Some(LevelSetShape::Halfspace {
                 normal: [0.0, 1.0],
                 offset: 0.4,
@@ -1281,6 +1284,7 @@ mod tests {
         let args = Args {
             n: 10, radius: 0.25, cx: 0.5, cy: 0.5,
             alpha: 20.0, subdiv: 6, nitsche_gamma: 20.0,
+            mesh_file: None,
             level_set: None,
         };
         let r1 = solve_embedded_problem(&args);
@@ -1301,6 +1305,7 @@ mod tests {
             alpha: 20.0,
             subdiv: 8,
             nitsche_gamma: 20.0,
+            mesh_file: None,
             level_set: Some(LevelSetShape::Halfspace {
                 normal: [0.0, 1.0],
                 offset: 0.5,
