@@ -13,6 +13,8 @@ use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::fe_space::FESpace;
+use fem_space::{EdgeKey, HCurlSpace};
+use fem_mesh::Mesh;
 
 use crate::assembler::Assembler;
 use crate::standard::{DomainSourceIntegrator, MassIntegrator};
@@ -456,6 +458,54 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         err
     }
 }
+/// Project a vector function onto the tangential component of HCurl boundary DOFs.
+///
+/// For each boundary edge on a face with attribute in `bdr_attr`, evaluates
+/// `coeff(x_mid).tangential` at the edge midpoint and sets the HCurl DOF value.
+/// Equivalent to MFEM's `GridFunction::ProjectBdrCoefficientTangent` for ND spaces.
+pub fn project_bdr_coefficient_tangent(
+    nd_dofs: &mut [f64],
+    nd_space: &HCurlSpace<fem_mesh::Mesh<3>>,
+    coeff: &dyn Fn(&[f64], &mut [f64]),
+    bdr_attr: &[i32],
+) {
+    use std::collections::HashSet;
+    use fem_space::EdgeKey;
+    let mesh = nd_space.mesh();
+
+    // Collect boundary edges
+    let mut edges: HashSet<EdgeKey> = HashSet::new();
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        if bdr_attr.contains(&mesh.face_tag(f)) {
+            let nodes = mesh.face_nodes(f);
+            for i in 0..nodes.len() {
+                let a = nodes[i];
+                let b = nodes[(i + 1) % nodes.len()];
+                edges.insert(EdgeKey::new(a, b));
+            }
+        }
+    }
+    // Project onto each edge DOF
+    for ek in &edges {
+        if let Some(dofs) = nd_space.edge_dofs(*ek) {
+            let pa = mesh.node_coords(ek.0);
+            let pb = mesh.node_coords(ek.1);
+            let mid = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5, (pa[2] + pb[2]) * 0.5];
+            let mut fval = [0.0_f64; 3];
+            coeff(&mid, &mut fval);
+            // Tangential component: f · t  where t = (b-a)/|b-a|
+            let tx = pb[0] - pa[0];
+            let ty = pb[1] - pa[1];
+            let tz = pb[2] - pa[2];
+            let len = (tx*tx + ty*ty + tz*tz).sqrt();
+            if len > 0.0 {
+                let ft = (fval[0]*tx + fval[1]*ty + fval[2]*tz) / len;
+                for &d in &dofs { nd_dofs[d as usize] = ft; }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use fem_mesh::Mesh;
