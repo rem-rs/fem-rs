@@ -314,6 +314,8 @@ fn assemble_advection_operator(
                     weight: w_f,
                     phi_l: &phi_l,
                     phi_r: &phi_r,
+                    grad_phys_l: &gphys_l,
+                    grad_phys_r: &gphys_r,
                     normal: &normal_l,
                     x_phys: &xp,
                     elem_l: el,

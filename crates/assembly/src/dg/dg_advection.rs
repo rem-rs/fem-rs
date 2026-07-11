@@ -23,7 +23,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
-use crate::postproc::coefficient::{CoeffCtx, VectorCoeff};
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff, VectorCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 use crate::interior_faces::InteriorFaceList;
 
@@ -44,18 +44,23 @@ pub struct DgFaceQpData<'a> {
     pub phi_l: &'a [f64],
     /// Basis function values on the right element; length `n_dofs_r`.
     pub phi_r: &'a [f64],
+    /// Physical gradients on the left element; length `n_dofs_l × dim`.
+    /// Each row i * dim..(i+1)*dim is ∇φᵢ(x_qp) in physical coordinates.
+    pub grad_phys_l: &'a [f64],
+    /// Physical gradients on the right element; length `n_dofs_r × dim`.
+    pub grad_phys_r: &'a [f64],
     /// Unit normal pointing outward from the left element; length `dim`.
     pub normal: &'a [f64],
     /// Physical coordinates of this quadrature point; length `dim`.
     pub x_phys: &'a [f64],
-    /// Left element index.
+    /// Left element ID (for tag-dependent coefficients).
     pub elem_l: ElemId,
-    /// Right element index.
+    /// Right element ID.
     pub elem_r: ElemId,
-    /// Global DOF indices for the left element.
-    pub elem_dofs_l: Option<&'a [DofId]>,
-    /// Global DOF indices for the right element.
-    pub elem_dofs_r: Option<&'a [DofId]>,
+    /// Element DOF indices for the left element, if available.
+    pub elem_dofs_l: Option<&'a [u32]>,
+    /// Element DOF indices for the right element, if available.
+    pub elem_dofs_r: Option<&'a [u32]>,
 }
 
 // ─── DgFaceIntegrator trait ───────────────────────────────────────────────────
@@ -203,6 +208,8 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
                 weight: w_f,
                 phi_l: &phi_l,
                 phi_r: &phi_r,
+                grad_phys_l: &gphys_l,
+                grad_phys_r: &gphys_r,
                 normal: &normal_l,
                 x_phys: &xp,
                 elem_l: el,
@@ -222,6 +229,81 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
         for (i, &gi) in dofs_r.iter().enumerate() {
             for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, k_rl[i*n_l+j]); }
             for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, k_rr[i*n_r+j]); }
+        }
+    }
+}
+
+// ─── SIP-DG diffusion face integrator ─────────────────────────────────────────
+
+/// SIP-DG (Symmetric Interior Penalty) face integrator for diffusion.
+///
+/// Adds the interior face contribution:
+/// ```text
+///   -∫_F {κ∇u·n} [v] ds  — ∫_F [u] {κ∇v·n} ds  +  ∫_F (η/h_F) [u][v] ds
+/// ```
+/// where `[u] = u⁻ − u⁺`, `{u} = (u⁻ + u⁺)/2`, and `η = κ · penalty`.
+///
+/// MFEM equivalent: `DGDiffusionIntegrator`.
+pub struct SipDgDiffusion<C: ScalarCoeff = f64> {
+    /// Diffusion coefficient κ(x).
+    pub kappa: C,
+    /// Penalty parameter η (typically (p+1)² for interior faces).
+    pub penalty: f64,
+}
+
+impl<C: ScalarCoeff> DgFaceIntegrator for SipDgDiffusion<C> {
+    fn add_to_face_matrix(&self, qp: &DgFaceQpData<'_>,
+        k_ll: &mut [f64], k_lr: &mut [f64], k_rl: &mut [f64], k_rr: &mut [f64],
+    ) {
+        let dim = qp.dim;
+        let n_l = qp.n_dofs_l;
+        let n_r = qp.n_dofs_r;
+        let h_f = 1.0 / qp.weight.abs().sqrt().max(1e-30); // approximate h from face weight
+        // Evaluate κ at the QP (use left element's tag)
+        let ctx = CoeffCtx::from_qp(qp.x_phys, dim, qp.elem_l,
+            qp.elem_l as i32, None, None);
+        let kappa_val = self.kappa.eval(&ctx);
+        let eta = kappa_val * self.penalty / h_f;
+        let half_k = 0.5 * kappa_val;
+
+        for i in 0..n_l {
+            // ∇φᵢ·n  (left)
+            let dnl: f64 = (0..dim).map(|c| qp.grad_phys_l[i * dim + c] * qp.normal[c]).sum();
+            for j in 0..n_l {
+                let dnj: f64 = (0..dim).map(|c| qp.grad_phys_l[j * dim + c] * qp.normal[c]).sum();
+                k_ll[i * n_l + j] += qp.weight * (
+                    -half_k * dnj * qp.phi_l[i]   // consistency
+                    - half_k * dnl * qp.phi_l[j]   // symmetry
+                    + eta * qp.phi_l[j] * qp.phi_l[i]  // penalty
+                );
+            }
+            for j in 0..n_r {
+                let dnj: f64 = (0..dim).map(|c| qp.grad_phys_r[j * dim + c] * qp.normal[c]).sum();
+                k_lr[i * n_r + j] += qp.weight * (
+                    half_k * dnj * qp.phi_l[i]   // consistency (jump sign: u⁻ − u⁺)
+                    + half_k * dnl * qp.phi_r[j]   // symmetry
+                    - eta * qp.phi_r[j] * qp.phi_l[i]  // penalty
+                );
+            }
+        }
+        for i in 0..n_r {
+            let dni: f64 = (0..dim).map(|c| qp.grad_phys_r[i * dim + c] * qp.normal[c]).sum();
+            for j in 0..n_l {
+                let dnj: f64 = (0..dim).map(|c| qp.grad_phys_l[j * dim + c] * qp.normal[c]).sum();
+                k_rl[i * n_l + j] += qp.weight * (
+                    -half_k * dnj * qp.phi_r[i]   // consistency (jump sign: u⁻ − u⁺)
+                    - half_k * dni * qp.phi_l[j]   // symmetry
+                    + eta * qp.phi_l[j] * qp.phi_r[i]  // penalty
+                );
+            }
+            for j in 0..n_r {
+                let dnj: f64 = (0..dim).map(|c| qp.grad_phys_r[j * dim + c] * qp.normal[c]).sum();
+                k_rr[i * n_r + j] += qp.weight * (
+                    half_k * dnj * qp.phi_r[i]   // consistency
+                    + half_k * dni * qp.phi_r[j]   // symmetry
+                    - eta * qp.phi_r[j] * qp.phi_r[i]  // penalty
+                );
+            }
         }
     }
 }
