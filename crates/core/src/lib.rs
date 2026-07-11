@@ -41,6 +41,7 @@ pub mod error;
 pub mod point;
 pub mod scalar;
 pub mod types;
+pub mod util;
 
 // Flat re-exports for ergonomic use: `use fem_core::*` in other crates.
 pub use error::{FemError, FemResult};

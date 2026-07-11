@@ -1386,6 +1386,25 @@ impl<const D: usize> MeshTopology for Mesh<D> {
     fn edge_iter(&self) -> std::ops::Range<u32> { 0..self.n_edges() as u32 }
 }
 
+/// Compute the volume of a tetrahedral element in a 3-D mesh.
+pub fn tet_volume(mesh: &Mesh<3>, elem: u32) -> f64 {
+    let ns = mesh.element_nodes(elem);
+    let c = |k: usize| -> [f64; 3] {
+        let cc = mesh.node_coords(ns[k]);
+        [cc[0], cc[1], cc[2]]
+    };
+    let p = [c(0), c(1), c(2), c(3)];
+    // Volume = |det([p1-p0, p2-p0, p3-p0])| / 6
+    let (x0, y0, z0) = (p[0][0], p[0][1], p[0][2]);
+    let (x1, y1, z1) = (p[1][0], p[1][1], p[1][2]);
+    let (x2, y2, z2) = (p[2][0], p[2][1], p[2][2]);
+    let (x3, y3, z3) = (p[3][0], p[3][1], p[3][2]);
+    let det = (x1 - x0) * ((y2 - y0) * (z3 - z0) - (z2 - z0) * (y3 - y0))
+            - (y1 - y0) * ((x2 - x0) * (z3 - z0) - (z2 - z0) * (x3 - x0))
+            + (z1 - z0) * ((x2 - x0) * (y3 - y0) - (y2 - y0) * (x3 - x0));
+    det.abs() / 6.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

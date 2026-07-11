@@ -488,6 +488,87 @@ pub fn recover_gradient_nodal<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f6
     grad_accum
 }
 
+// ─── Element-wise scalar integration ────────────────────────────────────────
+
+/// Integrate piecewise-constant element values against a test basis on a 2-D
+/// mesh, returning one integrated scalar per element.
+///
+/// Each entry in `elem_values` is interpreted as a constant source over the
+/// corresponding element.  The result is the L²-type projection
+/// `result[e] = ∫_K s_e · w dx / ∫_K 1 dx` (element-average of the source
+/// against the FE test basis `w`).
+///
+/// Used by multiphysics template examples (Joule, EM-thermal-stress) for
+/// post-processing per-element diagnostics.
+pub fn integrate_element_scalar_2d<S: FESpace>(
+    mesh: &fem_mesh::Mesh<2>,
+    space: &S,
+    elem_values: &[f64],
+) -> Vec<f64> {
+    use fem_element::ReferenceElement;
+    use fem_mesh::element_type::ElementType;
+    let qo = (2 * space.order() + 1).max(4);
+    let ne = mesh.n_elements();
+    assert_eq!(elem_values.len(), ne, "integrate_element_scalar_2d: elem_values length mismatch");
+    let mut result = vec![0.0_f64; ne];
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let ok = matches!(et, ElementType::Tri3 | ElementType::Tri6 | ElementType::Quad4);
+        if !ok { continue; }
+        let ref_e = ref_elem_vol(et, space.order());
+        let quad = ref_e.quadrature(qo);
+        let nodes = mesh.element_nodes(e);
+        let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
+        let s = elem_values[e as usize];
+        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let n_ldofs = ref_e.n_dofs();
+        let mut phi = vec![0.0; n_ldofs];
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[qi] * tr.det_j().abs();
+            ref_e.eval_basis(xi, &mut phi);
+            for j in 0..n_ldofs {
+                result[dofs[j]] += w * s * phi[j];
+            }
+        }
+    }
+    result
+}
+
+/// Integrate piecewise-constant element values on a 3-D Tet4 mesh (same logic
+/// as [`integrate_element_scalar_2d`] but for 3-D).
+pub fn integrate_element_scalar_3d<S: FESpace>(
+    mesh: &fem_mesh::Mesh<3>,
+    space: &S,
+    elem_values: &[f64],
+) -> Vec<f64> {
+    use fem_element::ReferenceElement;
+    use fem_mesh::element_type::ElementType;
+    let qo = (2 * space.order() + 1).max(4);
+    let ne = mesh.n_elements();
+    assert_eq!(elem_values.len(), ne, "integrate_element_scalar_3d: elem_values length mismatch");
+    let mut result = vec![0.0_f64; ne];
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        if et != ElementType::Tet4 { continue; }
+        let ref_e = ref_elem_vol(et, space.order());
+        let quad = ref_e.quadrature(qo);
+        let nodes = mesh.element_nodes(e);
+        let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
+        let s = elem_values[e as usize];
+        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let n_ldofs = ref_e.n_dofs();
+        let mut phi = vec![0.0; n_ldofs];
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[qi] * tr.det_j().abs();
+            ref_e.eval_basis(xi, &mut phi);
+            for j in 0..n_ldofs {
+                result[dofs[j]] += w * s * phi[j];
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

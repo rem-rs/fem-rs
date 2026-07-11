@@ -51,7 +51,7 @@ pub use moving_mesh::{
 	laplacian_smooth_2d,
 };
 pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPointLocator};
-pub use simplex::Mesh;
+pub use simplex::{Mesh, tet_volume};
 pub use submesh::{SubMesh, SubMesh3D, extract_submesh, extract_submesh_3d, extract_submesh_by_name};
 pub use topology::MeshTopology;
 pub use transformation::ElementTransformation;

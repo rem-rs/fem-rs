@@ -22,7 +22,8 @@ pub struct MaxwellSolver {
     nd: HCurlSpace<Mesh<3>>,
     rt: HDivSpace<Mesh<3>>,
     neg_curl: CsrMatrix<f64>,  // −C
-    weak_curl_t: CsrMatrix<f64>, // (ν·curl)^T = C^T·μ⁻¹
+    curl_t: CsrMatrix<f64>,    // C^T
+    weak_curl_t: CsrMatrix<f64>, // C^T·μ⁻¹ (matching MFEM's WeakCurlMuInv_)
     m_eps: CsrMatrix<f64>,     // M_ε
     m_mu_inv: CsrMatrix<f64>,  // M_μ⁻¹
     m_loss: Option<CsrMatrix<f64>>, // σ + η⁻¹
@@ -40,22 +41,19 @@ impl MaxwellSolver {
         let dbc_dofs = if !dbc_tags.is_empty() { boundary_dofs_hcurl(&mesh, &nd, dbc_tags) } else { vec![] };
 
         let c = fem_assembly::discrete_op::DiscreteLinearOperator::curl_3d(&nd, &rt).expect("curl_3d");
-        let neg_curl = { let mut b=c.clone(); for v in b.values.iter_mut(){*v*=-1.0;} b };
-        // weak_curl = ∫ ν·curl(ψ)·w dx (HDiv×HCurl) = μ⁻¹·C
-        // weak_curl_t = C^T·μ⁻¹ (HCurl×HDiv) matches MFEM's WeakCurlMuInv_
+        let curl_t = c.transpose();
+        let neg_curl = { let mut b=c; for v in b.values.iter_mut(){*v*=-1.0;} b };
+        // weak_curl = ∫ ν·curl(ψ)·w dx (HDiv×HCurl) = C·μ⁻¹
+        // weak_curl_t = (C·μ⁻¹)^T = μ⁻¹·C^T  (matches MFEM's WeakCurlMuInv_ transpose)
         let nu = 1.0 / MU0;
-        let wc = assemble_hcurl_hdiv_weak_curl(&nd, &rt, qo, nu);
-        let weak_curl_t = { let mut coo=fem_linalg::CooMatrix::new(n_nd, n_rt);
-            for r in 0..n_rt { for ci in wc.row_ptr[r]..wc.row_ptr[r+1] {
-                coo.add(wc.col_idx[ci] as usize, r, wc.values[ci]); } }
-            coo.into_csr() };
+        let weak_curl_t = assemble_hcurl_hdiv_weak_curl(&nd, &rt, qo, nu).transpose();
 
         let m_eps = VectorAssembler::assemble_bilinear(&nd, &[&VectorMassIntegrator{alpha:EPS0}], qo);
         let m_mu_inv = VectorAssembler::assemble_bilinear(&rt, &[&VectorMassIntegrator{alpha:1.0/MU0}], qo);
         let m_loss = if !abc_tags.is_empty() { Some(VectorAssembler::assemble_bilinear(
             &nd, &[&VectorMassIntegrator{alpha:(EPS0/MU0).sqrt()}], qo)) } else { None };
 
-        Self { nd, rt, neg_curl, weak_curl_t, m_eps, m_mu_inv, m_loss,
+        Self { nd, rt, neg_curl, curl_t, weak_curl_t, m_eps, m_mu_inv, m_loss,
             e: vec![0.0; n_nd], b: vec![0.0; n_rt], dbc_dofs, dt: 0.0, t: 0.0 }
     }
 
@@ -138,19 +136,9 @@ impl MaxwellSolver {
         solve_cg(&rd_h, &rr_h, &mut xh, &cfg).expect("HDiv mass");
         for (i, &d) in fd_h.iter().enumerate() { h[d as usize] = xh[i]; }
 
-        // 2. rhs = C^T · H − L·E^n − J  (discrete curl with proper H)
+        // 2. rhs = C^T · H − L·E^n − J  (pre-computed curl_t in struct)
         let mut rhs = vec![0.0; self.nd.n_dofs()];
-        // Use curl_t = transpose of topological curl C (NOT the weak curl)
-        let curl_t = { let mut coo = fem_linalg::CooMatrix::new(self.nd.n_dofs(), self.rt.n_dofs());
-            let c = fem_assembly::discrete_op::DiscreteLinearOperator::curl_3d(&self.nd, &self.rt).expect("curl_3d");
-            for r in 0..self.rt.n_dofs() {
-                for ci in c.row_ptr[r]..c.row_ptr[r+1] {
-                    coo.add(c.col_idx[ci]as usize, r, c.values[ci]);
-                }
-            }
-            coo.into_csr()
-        };
-        curl_t.spmv(&h, &mut rhs);
+        self.curl_t.spmv(&h, &mut rhs);
         if let Some(ref l) = self.m_loss {
             let mut le=vec![0.0;self.nd.n_dofs()]; l.spmv(&self.e, &mut le);
             for i in 0..self.nd.n_dofs() { rhs[i] -= le[i]; }
