@@ -54,13 +54,25 @@ impl VoltaSolver {
             ess_tdofs }
     }
 
-    pub fn solve(&mut self) {
+    /// Solve with optional charge density source `rho_fn(x) -> ρ(x)`.
+    pub fn solve(&mut self, rho_fn: Option<&(dyn Fn(&[f64]) -> f64 + Send + Sync)>) {
         let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500,
             verbose: true, ..Default::default() };
         let n = self.h1.n_dofs();
-        let rhs = vec![0.0; n];
-        let bv = vec![0.0; self.ess_tdofs.len()];
-        let (red, rr, free, constrained) = form_linear_system(&self.div_eps_grad, &rhs, &self.ess_tdofs, &bv);
+        let rhs = if let Some(rho) = rho_fn {
+            // Assemble RHS: f_i = ∫ ρ·φ_i dx
+            use fem_assembly::standard::DomainSourceIntegrator;
+            let src = DomainSourceIntegrator::new(rho);
+            Assembler::assemble_linear(&self.h1, &[&src], 15)
+        } else {
+            vec![0.0; n]
+        };
+        // Pin first DOF if no BCs specified (remove nullspace)
+        let use_dofs: Vec<u32> = if self.ess_tdofs.is_empty() && rhs.iter().any(|&v| v.abs() > 1e-30) {
+            vec![0u32]
+        } else { self.ess_tdofs.clone() };
+        let bv = vec![0.0; use_dofs.len()];
+        let (red, rr, free, constrained) = form_linear_system(&self.div_eps_grad, &rhs, &use_dofs, &bv);
         let mut x = vec![0.0; red.nrows];
         solve_cg(&red, &rr, &mut x, &cfg).expect("PCG");
         self.phi = recover_fem_solution(&x, &free, &constrained, &bv, n);
@@ -95,7 +107,12 @@ fn main() {
 
     let mut s = VoltaSolver::new(mesh, o, &db);
     println!("H1 {} HCurl {} HDiv {} L2 {}", s.h1.n_dofs(), s.nd.n_dofs(), s.rt.n_dofs(), s.l2.n_dofs());
-    s.solve();
+    // Charged sphere source: ρ(r) = ρ₀ for r < R
+    let cs_src = |x: &[f64]| -> f64 {
+        let r2 = x[0].powi(2) + x[1].powi(2);
+        if r2 < 0.25 { 100.0 } else { 0.0 }  // ρ₀=100 inside radius=0.5
+    };
+    s.solve(Some(&cs_src));
     println!("|φ|={:.6e} |E|={:.6e} |D|={:.6e} |ρ|={:.6e}",
              s.phi.iter().map(|v|v*v).sum::<f64>().sqrt(),
              s.e.iter().map(|v|v*v).sum::<f64>().sqrt(),
