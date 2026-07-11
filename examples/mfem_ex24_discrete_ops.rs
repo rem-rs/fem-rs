@@ -21,7 +21,7 @@
 use std::f64::consts::PI;
 
 use fem_assembly::{
-    DiscreteLinearOperator, VectorAssembler,
+    DiscreteLinearOperator, VectorAssembler, mixed::assemble_hcurl_h1_gradient,
     standard::VectorMassIntegrator,
 };
 use fem_element::ReferenceElement;
@@ -316,8 +316,8 @@ fn run_grad(mesh: &Mesh<2>, order: u8) {
     // C++ ex24 prob 0: p(x) = sin(x)*sin(y)  (NOT sin(πx))
     let p: Vec<f64> = h1.interpolate(&|x| x[0].sin() * x[1].sin()).as_slice().to_vec();
 
-    // (a) Mixed form: solve M·E = B·p
-    let b = assemble_grad_mixed(&nd, &h1, qo);
+    // (a) Mixed form: solve M·E = B·p  (B via library assemble_hcurl_h1_gradient)
+    let b = assemble_hcurl_h1_gradient(&nd, &h1, qo);
     let mut rhs = vec![0.0; nd.n_dofs()];
     b.spmv(&p, &mut rhs);
 

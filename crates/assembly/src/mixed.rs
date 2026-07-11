@@ -23,6 +23,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use crate::vector_assembler::isoparametric_jacobian;
 use fem_space::fe_space::{FESpace, SpaceType};
+use fem_space::{HCurlSpace, H1Space, HDivSpace, L2Space};
 
 use crate::integrator::QpData;
 
@@ -408,6 +409,92 @@ where
         for (ir, &gr) in global_rows.iter().enumerate() {
             for (ic, &gc) in global_cols.iter().enumerate() {
                 coo.add(gr, gc, m_elem[ir * n_elem_c + ic]);
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Assemble HCurl × H¹ mixed GRADIENT bilinear form (transpose of the existing curl pairing).
+///
+/// Computes `B[i,j] = ∫ ∇φ_j · ψ_i dx` where:
+/// - Row space (test):  H(curl) — Nédélec basis `ψ_i`
+/// - Column space (trial): H¹ — scalar Lagrange basis `φ_j`
+///
+/// This is the transpose of `assemble_hcurl_h1_mixed`: here HCurl is the ROW,
+/// not the column.  Uses `eval_basis_vec` (not `eval_curl`) to evaluate the
+/// HCurl basis vectors at each quadrature point.
+pub fn assemble_hcurl_h1_gradient<M: fem_mesh::topology::MeshTopology + Clone + 'static>(
+    nd_space: &HCurlSpace<M>,
+    h1_space: &H1Space<M>,
+    quad_order: u8,
+) -> CsrMatrix<f64>
+where
+    M: fem_mesh::topology::MeshTopology,
+{
+    use fem_element::ReferenceElement;
+    use fem_linalg::CooMatrix;
+
+    let mesh = h1_space.mesh();
+    let dim = mesh.dim() as usize;
+    let n_rows = nd_space.n_dofs();
+    let n_cols = h1_space.n_dofs();
+    let mut coo = CooMatrix::new(n_rows, n_cols);
+
+    for e in mesh.elem_iter() {
+        let elem_type = mesh.element_type(e);
+        let h1_ref = crate::assembler::ref_elem_vol(elem_type, h1_space.order());
+        let n_h1 = h1_ref.n_dofs();
+
+        let nd_ref = ref_elem_vec(elem_type, nd_space.order(), SpaceType::HCurl)
+            .expect("assemble_hcurl_h1_gradient: HCurl ref elem");
+        let n_nd = nd_ref.n_dofs();
+        let signs = nd_space.element_signs(e);
+
+        let global_h1: Vec<usize> = h1_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let global_nd: Vec<usize> = nd_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let n_g_h1 = global_h1.len();
+        let n_g_nd = global_nd.len();
+        let quad = h1_ref.quadrature(quad_order);
+
+        let mut me = vec![0.0; n_g_nd * n_g_h1];
+        let mut phi = vec![0.0; n_h1];
+        let mut gr = vec![0.0; n_h1 * dim];
+        let mut gp = vec![0.0; n_h1 * dim];
+        let mut nd_basis = vec![0.0; n_nd * dim];
+
+        let use_iso = !matches!(elem_type, fem_mesh::element_type::ElementType::Tri3 | fem_mesh::element_type::ElementType::Tet4 | fem_mesh::element_type::ElementType::Line2);
+        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
+        let nodes = mesh.element_nodes(e);
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (w, jit): (f64, nalgebra::DMatrix<f64>) = if use_iso {
+                let ge = geo_elem.as_ref().unwrap();
+                let (jac, det, _xp) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+                (quad.weights[qi] * det.abs(), jac.try_inverse().unwrap().transpose())
+            } else {
+                let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
+                (quad.weights[qi] * tr.det_j().abs(), tr.jacobian_inv_t().clone())
+            };
+            h1_ref.eval_basis(xi, &mut phi);
+            h1_ref.eval_grad_basis(xi, &mut gr);
+            transform_grads(&jit, &gr, &mut gp, n_h1, dim);
+            nd_ref.eval_basis_vec(xi, &mut nd_basis);
+
+            for j in 0..n_g_h1 {
+                let g_j = &gp[j * dim..][..dim];
+                for i in 0..n_g_nd {
+                    let s = signs[i];
+                    let psi_x = s * (jit[(0,0)] * nd_basis[i*dim] + jit[(0,1)] * nd_basis[i*dim+1]);
+                    let psi_y = s * (jit[(1,0)] * nd_basis[i*dim] + jit[(1,1)] * nd_basis[i*dim+1]);
+                    me[i * n_g_h1 + j] += w * (g_j[0] * psi_x + g_j[1] * psi_y);
+                }
+            }
+        }
+        for (ir, &r) in global_nd.iter().enumerate() {
+            for (ic, &c) in global_h1.iter().enumerate() {
+                let v = me[ir * n_g_h1 + ic];
+                if v != 0.0 { coo.add(r, c, v); }
             }
         }
     }

@@ -112,7 +112,7 @@ impl ReferenceElement for P0 {
 // ─── Reference element factory ───────────────────────────────────────────────
 
 /// Return the solution reference element matching `elem_type` and polynomial `order`.
-fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
