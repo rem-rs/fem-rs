@@ -109,3 +109,29 @@ impl<C: MatrixCoeff> VectorBilinearIntegrator for VectorMassTensorIntegrator<C> 
         }
     }
 }
+
+/// Boundary mass integrator for H(curl) / H(div) spaces.
+/// Computes `∫_Γ α u · v dS` on boundary faces.
+pub struct VectorBoundaryMassIntegrator<C: ScalarCoeff = f64> {
+    pub alpha: C,
+}
+
+use crate::boundary::vector_boundary::{VectorBdQpData, VectorBoundaryBilinearIntegrator};
+
+impl<C: ScalarCoeff> VectorBoundaryBilinearIntegrator for VectorBoundaryMassIntegrator<C> {
+    fn add_to_face_matrix(&self, qp: &VectorBdQpData<'_>, k_face: &mut [f64]) {
+        let n = qp.n_dofs;
+        let dim = qp.dim;
+        let ctx = CoeffCtx::from_qp(qp.x_phys, dim, qp.elem_id, qp.elem_tag, None, None);
+        let w = qp.weight * self.alpha.eval(&ctx);
+        for i in 0..n {
+            for j in 0..n {
+                let mut dot = 0.0;
+                for c in 0..dim {
+                    dot += qp.phi_vec[i * dim + c] * qp.phi_vec[j * dim + c];
+                }
+                k_face[i * n + j] += w * dot;
+            }
+        }
+    }
+}

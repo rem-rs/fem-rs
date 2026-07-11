@@ -167,6 +167,10 @@ impl<S: FESpace> VectorBilinearForm<S> {
         self.cached = Some(mat);
         self.cached.as_ref().unwrap()
     }
+    /// Expose the cached matrix (MFEM's `BilinearForm::mat()`).
+    pub fn mat(&self) -> Option<&CsrMatrix<f64>> { self.cached.as_ref() }
+    /// Reference to the FE space.
+    pub fn space(&self) -> &S { &self.space }
 }
 
 // ─── VectorLinearForm ──────────────────────────────────────────────────────────
@@ -191,4 +195,31 @@ impl<S: FESpace> VectorLinearForm<S> {
         self.cached = Some(rhs);
         self.cached.as_ref().unwrap()
     }
+    /// Expose the cached vector (MFEM's `LinearForm`).
+    pub fn vec(&self) -> Option<&[f64]> { self.cached.as_deref() }
+    /// Reference to the FE space.
+    pub fn space(&self) -> &S { &self.space }
+}
+
+/// Form the linear system by applying essential BCs (MFEM's `FormLinearSystem`).
+///
+/// Eliminates essential DOFs from the system, returning the reduced matrix and RHS.
+pub fn form_linear_system(
+    a: &CsrMatrix<f64>,
+    rhs: &[f64],
+    ess_dofs: &[u32],
+    bc_vals: &[f64],
+) -> (CsrMatrix<f64>, Vec<f64>, Vec<usize>, Vec<usize>) {
+    fem_space::constraints::dirichlet::eliminate_dirichlet(a, rhs, ess_dofs, bc_vals)
+}
+
+/// Recover the full FEM solution (MFEM's `RecoverFEMSolution`).
+pub fn recover_fem_solution(
+    x_red: &[f64],
+    free: &[usize],
+    constrained: &[usize],
+    bc_vals: &[f64],
+    n_full: usize,
+) -> Vec<f64> {
+    fem_space::constraints::dirichlet::expand_from_reduced(x_red, free, constrained, bc_vals, n_full)
 }

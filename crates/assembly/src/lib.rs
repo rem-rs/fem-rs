@@ -228,7 +228,7 @@ pub use physics::thermoelastic::{
 };
 pub use static_cond::{StaticCondensation, GlobalBacksolve, condense_global};
 pub use lor_factory::{build_lor_amg_h1, build_lor_amg_h1_3d};
-pub use form::{BilinearForm, LinearForm, VectorBilinearForm, VectorLinearForm};
+pub use form::{BilinearForm, LinearForm, VectorBilinearForm, VectorLinearForm, form_linear_system, recover_fem_solution};
 pub use postproc::coefficient::{ConstantMatrixCoeff, FnMatrixCoeff, PwMatrixCoeff, ScalarMatrixCoeff};
 
 // 鈹€鈹€ Re-export sub-modules from reorganized directories 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
