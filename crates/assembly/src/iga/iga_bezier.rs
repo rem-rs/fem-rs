@@ -868,4 +868,31 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn bezier_2d_nonuniform_knots_matches_cdb() {
+        let kv_u = NurbsKnotVector::new(vec![0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0, 1.0, 1.0], 2);
+        let kv_v = NurbsKnotVector::new(vec![0.0, 0.0, 0.0, 0.3, 0.7, 1.0, 1.0, 1.0], 2);
+        let nu = kv_u.n_basis(); // 6
+        let nv = kv_v.n_basis(); // 5
+        let n_dof = nu * nv;     // 30
+        let ctrl: Vec<[f64; 2]> = (0..n_dof).map(|idx| {
+            let i = idx % nu;
+            let j = idx / nu;
+            [i as f64 / (nu - 1) as f64, j as f64 / (nv - 1) as f64]
+        }).collect();
+        let mesh = NurbsMesh2D::single_patch(kv_u, kv_v, ctrl, vec![1.0; n_dof]);
+        let k_bezier = assemble_iga_diffusion_2d_bezier(&mesh, 1.0, 4);
+        let k_cdb = assemble_iga_diffusion_2d(&mesh, 1.0, 4);
+        let n = k_bezier.nrows;
+        let mut max_diff = 0.0_f64;
+        for i in 0..n {
+            for ptr in k_bezier.row_ptr[i]..k_bezier.row_ptr[i+1] {
+                let j = k_bezier.col_idx[ptr] as usize;
+                let diff = (k_bezier.values[ptr] - k_cdb.get(i, j)).abs();
+                max_diff = max_diff.max(diff);
+            }
+        }
+        assert!(max_diff < 1e-10, "max diff for non-uniform 2D = {:.2e}", max_diff);
+    }
 }
