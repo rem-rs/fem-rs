@@ -243,7 +243,7 @@ pub fn apply_extraction_2d(C: &[f64], n_local: usize,
     for i in 0..n_local {
         let (mut s, mut sx, mut sy) = (0.0, 0.0, 0.0);
         for j in 0..n_local {
-            let ct = C[j * n_local + i];
+            let ct = C[i * n_local + j];
             s  += ct * phi_b[j];
             sx += ct * grads_b[j * 2];
             sy += ct * grads_b[j * 2 + 1];
@@ -336,7 +336,7 @@ pub fn apply_extraction_3d(C: &[f64], n_local: usize,
     for i in 0..n_local {
         let (mut s, mut sx, mut sy, mut sz) = (0.0, 0.0, 0.0, 0.0);
         for j in 0..n_local {
-            let ct = C[j * n_local + i];
+            let ct = C[i * n_local + j];
             s  += ct * phi_b[j];
             sx += ct * grads_b[j * 3];
             sy += ct * grads_b[j * 3 + 1];

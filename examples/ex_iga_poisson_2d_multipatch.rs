@@ -8,32 +8,36 @@ use fem_space::IgaMultiPatchMesh2D;
 use fem_solver::{SolverConfig, solve_cg};
 
 const P: usize = 2;
-const NU: usize = 8;
+const NU: usize = 9;  // odd so interface control point is at x = 0.5
 const NV: usize = 8;
 
 fn main() {
     let kv_v = NurbsKnotVector::uniform(P, NV - P);
-    let (nua, nub) = (NU / 2, NU - NU / 2);
-    // Per-patch knot vectors: each patch has its own number of control
-    // points in the u-direction.  The knot-vector basis count must match.
+    let nua = NU / 2 + 1;   // patch_a control points in u
+    let nub = NU - nua + 1; // patch_b control points in u
+
+    // Per-patch knot vectors matching each patch's control point dimensions
     let kv_a_u = NurbsKnotVector::uniform(P, nua - P);
     let kv_b_u = NurbsKnotVector::uniform(P, nub - P);
-    let patch_a = NurbsPatch2DData {
-        kv_u: kv_a_u, kv_v: kv_v.clone(),
-        control_pts: (0..NV).flat_map(|j| (0..nua).map(move |i| {
+
+    let build_ctrl = |start_i: usize, end_i: usize, nu_patch: usize| -> Vec<[f64; 2]> {
+        let mut pts = Vec::with_capacity(nu_patch * NV);
+        for j in 0..NV { for i in start_i..end_i {
             let u = i as f64 / (NU - 1) as f64;
             let v = j as f64 / (NV - 1) as f64;
-            [u, v]
-        })).collect(),
+            pts.push([u, v]);
+        }}
+        pts
+    };
+
+    let patch_a = NurbsPatch2DData {
+        kv_u: kv_a_u, kv_v: kv_v.clone(),
+        control_pts: build_ctrl(0, nua, nua),
         weights: vec![1.0; nua * NV], tag: 1,
     };
     let patch_b = NurbsPatch2DData {
         kv_u: kv_b_u, kv_v: kv_v,
-        control_pts: (0..NV).flat_map(|j| (0..nub).map(move |i| {
-            let u = (nua + i) as f64 / (NU - 1) as f64;
-            let v = j as f64 / (NV - 1) as f64;
-            [u, v]
-        })).collect(),
+        control_pts: build_ctrl(nua - 1, NU, nub),
         weights: vec![1.0; nub * NV], tag: 2,
     };
     let mesh = NurbsMesh2D {
