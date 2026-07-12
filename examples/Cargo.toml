@@ -629,6 +629,18 @@ path = "extra/mfem_mc_random_field.rs"
 name = "dbg_quadqk_grad"
 path = "extra/dbg_quadqk_grad.rs"
 
+[[example]]
+name = "iga_hyperelasticity_2d"
+path = "iga_hyperelasticity_2d.rs"
+
+[[example]]
+name = "iga_multipatch_helmholtz_2d"
+path = "iga_multipatch_helmholtz_2d.rs"
+
+[[example]]
+name = "iga_multipatch_c1_continuity"
+path = "iga_multipatch_c1_continuity.rs"
+
 [lib]
 name = "fem_examples"
 
