@@ -254,6 +254,101 @@ pub fn apply_extraction_2d(C: &[f64], n_local: usize,
     }
 }
 
+// ── 3-D Bezier extraction ──────────────────────────────────────────────────
+
+/// 3-D Bezier extraction data: Kronecker product C_w ⊗ C_v ⊗ C_u per element.
+pub struct BezierExtraction3D {
+    pub matrices: Vec<Vec<f64>>,
+    pub degree_u: usize,
+    pub degree_v: usize,
+    pub degree_w: usize,
+    pub n_elements_u: usize,
+    pub n_elements_v: usize,
+    pub n_elements_w: usize,
+    pub n_local: usize,
+}
+
+/// Compute 3-D extraction operators (tensor-product of 1-D).
+pub fn compute_extraction_3d(pd: &super::nurbs::NurbsPatch3DData) -> Option<BezierExtraction3D> {
+    let ext_u = compute_extraction_1d_full(&pd.kv_u)?;
+    let ext_v = compute_extraction_1d_full(&pd.kv_v)?;
+    let ext_w = compute_extraction_1d_full(&pd.kv_w)?;
+
+    let p = ext_u.degree; let q = ext_v.degree; let r = ext_w.degree;
+    let np1 = p + 1; let nq1 = q + 1; let nr1 = r + 1;
+    let n_local = np1 * nq1 * nr1;
+
+    let mut matrices = Vec::with_capacity(ext_u.n_elements * ext_v.n_elements * ext_w.n_elements);
+    for ew in 0..ext_w.n_elements {
+        let Cw = &ext_w.matrices[ew];
+        for ev in 0..ext_v.n_elements {
+            let Cv = &ext_v.matrices[ev];
+            for eu in 0..ext_u.n_elements {
+                let Cu = &ext_u.matrices[eu];
+                let mut C = vec![0.0; n_local * n_local];
+                for iw in 0..nr1 { for iv in 0..nq1 { for iu in 0..np1 {
+                    for jw in 0..nr1 { for jv in 0..nq1 { for ju in 0..np1 {
+                        let row = iw * nq1 * np1 + iv * np1 + iu;
+                        let col = jw * nq1 * np1 + jv * np1 + ju;
+                        C[row * n_local + col] = Cu[iu * np1 + ju]
+                                               * Cv[iv * nq1 + jv]
+                                               * Cw[iw * nr1 + jw];
+                    }}}
+                }}}
+                matrices.push(C);
+            }
+        }
+    }
+    Some(BezierExtraction3D {
+        matrices, degree_u: p, degree_v: q, degree_w: r,
+        n_elements_u: ext_u.n_elements,
+        n_elements_v: ext_v.n_elements,
+        n_elements_w: ext_w.n_elements,
+        n_local,
+    })
+}
+
+/// Evaluate 3-D Bernstein basis values and parametric gradients at (xi, eta, zeta).
+pub fn eval_bernstein_3d(p: usize, q: usize, r: usize, xi: f64, eta: f64, zeta: f64,
+    phi: &mut [f64], grads: &mut [f64])
+{
+    let bu = bernstein_vals(p, xi);
+    let bv = bernstein_vals(q, eta);
+    let bw = bernstein_vals(r, zeta);
+    let du = bernstein_ders(p, xi);
+    let dv = bernstein_ders(q, eta);
+    let dw = bernstein_ders(r, zeta);
+    let np1 = p + 1; let nq1 = q + 1; let nr1 = r + 1;
+    for k in 0..nr1 { for j in 0..nq1 { for i in 0..np1 {
+        let idx = k * nq1 * np1 + j * np1 + i;
+        phi[idx] = bu[i] * bv[j] * bw[k];
+        grads[idx * 3]     = du[i] * bv[j] * bw[k];
+        grads[idx * 3 + 1] = bu[i] * dv[j] * bw[k];
+        grads[idx * 3 + 2] = bu[i] * bv[j] * dw[k];
+    }}}
+}
+
+/// Apply 3-D extraction: phi_nurbs = C^T · phi_bernstein, grads_nurbs = C^T · grads_bernstein.
+pub fn apply_extraction_3d(C: &[f64], n_local: usize,
+    phi_b: &[f64], grads_b: &[f64],
+    phi_n: &mut [f64], grads_n: &mut [f64])
+{
+    for i in 0..n_local {
+        let (mut s, mut sx, mut sy, mut sz) = (0.0, 0.0, 0.0, 0.0);
+        for j in 0..n_local {
+            let ct = C[j * n_local + i];
+            s  += ct * phi_b[j];
+            sx += ct * grads_b[j * 3];
+            sy += ct * grads_b[j * 3 + 1];
+            sz += ct * grads_b[j * 3 + 2];
+        }
+        phi_n[i] = s;
+        grads_n[i * 3] = sx;
+        grads_n[i * 3 + 1] = sy;
+        grads_n[i * 3 + 2] = sz;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,5 +437,47 @@ mod tests {
         let (mut phi2, mut g2) = (vec![0.0; 9], vec![0.0; 18]);
         eval_bernstein_2d(2, 2, 0.5, 0.5, &mut phi2, &mut g2);
         assert!((phi2.iter().sum::<f64>() - 1.0).abs() < 1e-14);
+    }
+
+    // ── 3-D tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn ext_3d_basic() {
+        let pd = crate::nurbs::NurbsPatch3DData {
+            kv_u: KnotVector::uniform(1, 2), kv_v: KnotVector::uniform(1, 2),
+            kv_w: KnotVector::uniform(1, 2),
+            control_pts: vec![[0.0; 3]; 8], weights: vec![1.0; 8], tag: 1,
+        };
+        let ext = compute_extraction_3d(&pd).unwrap();
+        assert_eq!(ext.matrices.len(), 8); // 2×2×2 elements
+        assert_eq!(ext.n_local, 8);
+        // Identity for uniform degree 1
+        for C in &ext.matrices {
+            for i in 0..8 { assert!((C[i * 8 + i] - 1.0).abs() < 1e-14); }
+        }
+    }
+
+    #[test]
+    fn eval_bernstein_3d_partition_unity() {
+        let (mut phi, mut g) = (vec![0.0; 8], vec![0.0; 24]);
+        eval_bernstein_3d(1, 1, 1, 0.3, 0.7, 0.2, &mut phi, &mut g);
+        assert!((phi.iter().sum::<f64>() - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn apply_extraction_3d_identity_recovers_bernstein() {
+        let n_local = 8;
+        let mut phi_b = vec![0.0; n_local];
+        let mut grads_b = vec![0.0; n_local * 3];
+        eval_bernstein_3d(1, 1, 1, 0.4, 0.6, 0.3, &mut phi_b, &mut grads_b);
+        let mut C = vec![0.0; n_local * n_local];
+        for i in 0..n_local { C[i * n_local + i] = 1.0; }
+        let mut phi_n = vec![0.0; n_local];
+        let mut grads_n = vec![0.0; n_local * 3];
+        apply_extraction_3d(&C, n_local, &phi_b, &grads_b, &mut phi_n, &mut grads_n);
+        for i in 0..n_local {
+            assert!((phi_n[i] - phi_b[i]).abs() < 1e-14);
+            assert!((grads_n[i*3] - grads_b[i*3]).abs() < 1e-14);
+        }
     }
 }
