@@ -1,4 +1,4 @@
-//! Bezier extraction-based IGA assembly (2-D).
+//! Bezier extraction-based IGA assembly (2-D and 3-D).
 //!
 //! Replaces the Cox-de Boor recursion in [`super::iga`] with precomputed
 //! element extraction operators: Bernstein basis evaluation + matrix
@@ -50,6 +50,7 @@ fn element_dof_map(
     dof_offset: usize,
     out: &mut [usize],
 ) {
+    debug_assert!(span_idx_u >= p && span_idx_v >= q, "span index must be >= degree");
     let np1 = p + 1;
     let active_u_base = span_idx_u - p;
     let active_v_base = span_idx_v - q;
@@ -79,6 +80,7 @@ fn element_dof_map_3d(
     dof_offset: usize,
     out: &mut [usize],
 ) {
+    debug_assert!(span_u >= p && span_v >= q && span_w >= r, "span index must be >= degree");
     let np1 = p + 1;
     let nq1 = q + 1;
     let active_u_base = span_u - p;
@@ -720,7 +722,7 @@ mod tests {
     use crate::iga::{
         assemble_iga_diffusion_2d, assemble_iga_diffusion_3d,
         assemble_iga_load_2d, assemble_iga_load_3d,
-        assemble_iga_mass_2d,
+        assemble_iga_mass_2d, assemble_iga_mass_3d,
     };
     use fem_element::iga::NurbsKnotVector;
 
@@ -866,6 +868,27 @@ mod tests {
                 f_bezier[i],
                 f_cdb[i]
             );
+        }
+    }
+
+    #[test]
+    fn bezier_3d_mass_matches_cdb() {
+        let mesh = make_test_patch_3d();
+        let m_bezier = assemble_iga_mass_3d_bezier(&mesh, 1.0, 3);
+        let m_cdb = assemble_iga_mass_3d(&mesh, 1.0, 3);
+        assert_eq!(m_bezier.nrows, m_cdb.nrows);
+        let n = m_bezier.nrows;
+        for i in 0..n {
+            for ptr in m_bezier.row_ptr[i]..m_bezier.row_ptr[i + 1] {
+                let j = m_bezier.col_idx[ptr] as usize;
+                let v_bez = m_bezier.values[ptr];
+                let v_cdb = m_cdb.get(i, j);
+                assert!(
+                    (v_bez - v_cdb).abs() < 1e-14,
+                    "M3D[{i},{j}]: bezier={:.16e} cdb={:.16e}",
+                    v_bez, v_cdb
+                );
+            }
         }
     }
 
