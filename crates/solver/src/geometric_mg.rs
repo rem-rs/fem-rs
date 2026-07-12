@@ -52,27 +52,49 @@ impl GeometricMgHierarchy {
     pub fn finest_matrix(&self) -> &CsrMatrix<f64> { &self.levels[0].mat }
 }
 
+/// Multigrid cycle type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MgCycleType {
+    V,
+    W,
+}
+
+/// Multigrid smoother type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MgSmootherType {
+    /// Jacobi with configurable omega (chebyshev_order = 0)
+    Jacobi,
+    /// Chebyshev polynomial smoother (order 1-3)
+    Chebyshev(usize),
+    /// SSOR (forward + backward Gauss-Seidel)
+    Ssor,
+}
+
 /// Geometric multigrid V-cycle configuration.
 #[derive(Debug, Clone)]
 pub struct GeometricMgConfig {
     pub pre_sweeps: usize,
     pub post_sweeps: usize,
-    pub chebyshev_order: usize,  // set to 0 to use Jacobi smoothing
+    /// Smoother type (default: Chebyshev(2) for backward compatibility).
+    pub smoother: MgSmootherType,
     pub jacobi_omega: f64,
     pub coarse_max_iter: usize,
     pub coarse_rtol: f64,
     /// Override λ_max estimate. None = auto-estimate.
     pub max_eig_override: Option<f64>,
+    /// Multigrid cycle type (V or W). Default: V for backward compatibility.
+    pub cycle_type: MgCycleType,
 }
 
 impl Default for GeometricMgConfig {
     fn default() -> Self {
         GeometricMgConfig {
             pre_sweeps: 2, post_sweeps: 2,
-            chebyshev_order: 2,
+            smoother: MgSmootherType::Chebyshev(2),
             jacobi_omega: 0.8,
             coarse_max_iter: 200, coarse_rtol: 1e-12,
             max_eig_override: None,
+            cycle_type: MgCycleType::V,
         }
     }
 }
@@ -191,6 +213,51 @@ fn estimate_max_eigenvalue_simple(a: &CsrMatrix<f64>, dinv: &[f64], bc: &[u32]) 
     lambda.abs().max(0.1).min(2.0)
 }
 
+/// SSOR smoother: forward sweep then backward sweep with relaxation factor omega.
+/// Standard SSOR uses omega in (0, 2); omega = 1 gives symmetric Gauss-Seidel.
+fn ssor_smooth_level(a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], bc: &[u32], omega: f64) {
+    let n = a.nrows;
+    // Forward sweep (SOR)
+    for i in 0..n {
+        let mut diag = 0.0;
+        let mut sum = 0.0;
+        for ptr in a.row_ptr[i]..a.row_ptr[i + 1] {
+            let j = a.col_idx[ptr as usize] as usize;
+            if j == i {
+                diag = a.values[ptr as usize];
+            } else {
+                sum += a.values[ptr as usize] * x[j];
+            }
+        }
+        if diag.abs() > 1e-30 {
+            // x_i_new = (1-ω) * x_i_old + ω * (b_i - Σ_{j≠i} A_ij * x_j) / A_ii
+            x[i] = (1.0 - omega) * x[i] + omega * (b[i] - sum) / diag;
+        }
+    }
+    // Backward sweep (SOR, reversed)
+    for i in (0..n).rev() {
+        let mut diag = 0.0;
+        let mut sum = 0.0;
+        for ptr in a.row_ptr[i]..a.row_ptr[i + 1] {
+            let j = a.col_idx[ptr as usize] as usize;
+            if j == i {
+                diag = a.values[ptr as usize];
+            } else {
+                sum += a.values[ptr as usize] * x[j];
+            }
+        }
+        if diag.abs() > 1e-30 {
+            x[i] = (1.0 - omega) * x[i] + omega * (b[i] - sum) / diag;
+        }
+    }
+    // Re-apply BCs
+    for &d in bc {
+        if (d as usize) < n {
+            x[d as usize] = 0.0;
+        }
+    }
+}
+
 /// Geometric multigrid V-cycle preconditioner.
 pub struct GeometricMgPrecond {
     pub config: GeometricMgConfig,
@@ -200,29 +267,31 @@ pub struct GeometricMgPrecond {
 
 impl GeometricMgPrecond {
     pub fn new(config: GeometricMgConfig, h: &GeometricMgHierarchy) -> Self {
-        let cfg = &config;
-        let smoothers = if cfg.chebyshev_order == 0 {
-            // Build Jacobi smoothers (guaranteed SPD)
-            Vec::new()
-        } else {
-            let mut s = Vec::new();
-            for level in &h.levels {
-                s.push(MgChebyshevSmoother::new(
-                    &level.mat, &level.bc_dofs, cfg.chebyshev_order, cfg.max_eig_override));
+        let smoothers = match config.smoother {
+            MgSmootherType::Chebyshev(order) => {
+                let mut s = Vec::new();
+                for level in &h.levels {
+                    s.push(MgChebyshevSmoother::new(
+                        &level.mat, &level.bc_dofs, order, config.max_eig_override));
+                }
+                s
             }
-            s
+            _ => Vec::new(), // Jacobi and SSOR don't need pre-computed smoothers
         };
         GeometricMgPrecond { config, smoothers }
     }
 
-    /// Apply one V-cycle: `x ← V-cycle(levels, prolong, b)` starting from zero.
+    /// Apply one V/W-cycle: `x ← cycle(levels, prolong, b)` starting from zero.
     pub fn v_cycle(&self, h: &GeometricMgHierarchy, b: &[f64], x: &mut [f64]) {
         // Start from zero (matching MFEM MultigridBase::ArrayMult: *Y(M-1,j) = 0.0)
         for v in x.iter_mut() { *v = 0.0; }
-        self.v_cycle_level(h, 0, b, x);
+        let w_cycle = self.config.cycle_type == MgCycleType::W;
+        self.v_cycle_level_inner(h, 0, b, x, w_cycle);
     }
 
-    fn v_cycle_level(&self, h: &GeometricMgHierarchy, lvl: usize, b: &[f64], x: &mut [f64]) {
+    /// Core recursive cycle: handles both V-cycle and W-cycle.
+    fn v_cycle_level_inner(&self, h: &GeometricMgHierarchy, lvl: usize,
+                           b: &[f64], x: &mut [f64], w_cycle: bool) {
         let level = &h.levels[lvl];
         let a = &level.mat;
         let n = a.nrows;
@@ -235,10 +304,6 @@ impl GeometricMgPrecond {
                 verbose: false, ..Default::default()
             };
             let _res = crate::solve_cg(a, b, x, &cfg);
-            // Debug: print coarse CG convergence
-            // eprintln!("  coarse CG lvl={} iters={} resid={:.6e}", lvl,
-            //           res.as_ref().map_or(0, |r| r.iterations),
-            //           res.as_ref().map_or(0.0, |r| r.final_residual));
             for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
             return;
         }
@@ -248,25 +313,34 @@ impl GeometricMgPrecond {
             self.smooth_level(lvl, a, b, x, &level.bc_dofs);
         }
 
-        // Restrict residual (with BC enforcement)
+        // Restrict residual
         let mut ax = vec![0.0; n];
         a.spmv(x, &mut ax);
         let r: Vec<f64> = (0..n).map(|i| b[i] - ax[i]).collect();
-        let _r_norm: f64 = r.iter().map(|v| v*v).sum::<f64>().sqrt();
         let mut r_c = Vec::new();
         h.prolong[lvl].restrict(&r, &mut r_c);
-        let _r_c_norm: f64 = r_c.iter().map(|v| v*v).sum::<f64>().sqrt();
         let n_c = h.levels[lvl + 1].mat.nrows;
-        let mut e_c = vec![0.0; n_c];
-        self.v_cycle_level(h, lvl + 1, &r_c, &mut e_c);
-        let _e_c_norm: f64 = e_c.iter().map(|v| v*v).sum::<f64>().sqrt();
 
-        // Prolongate correction (with BC enforcement)
-        let mut corr = vec![0.0; n];
-        h.prolong[lvl].prolong(&e_c, &mut corr);
-        let _corr_norm: f64 = corr.iter().map(|v| v*v).sum::<f64>().sqrt();
-        let _x_before = x.iter().map(|v| v*v).sum::<f64>().sqrt();
-        for i in 0..n { x[i] += corr[i]; }
+        if w_cycle {
+            // W-cycle: two coarse solves where the second starts from
+            // the result of the first (non-zero initial guess), giving
+            // a more accurate coarse correction than a single V-cycle.
+            let mut e_c = vec![0.0; n_c];
+            self.v_cycle_level_inner(h, lvl + 1, &r_c, &mut e_c, true);
+            self.v_cycle_level_inner(h, lvl + 1, &r_c, &mut e_c, true);
+            // Prolongate correction
+            let mut corr = vec![0.0; n];
+            h.prolong[lvl].prolong(&e_c, &mut corr);
+            for i in 0..n { x[i] += corr[i]; }
+        } else {
+            let mut e_c = vec![0.0; n_c];
+            self.v_cycle_level_inner(h, lvl + 1, &r_c, &mut e_c, false);
+
+            // Prolongate correction
+            let mut corr = vec![0.0; n];
+            h.prolong[lvl].prolong(&e_c, &mut corr);
+            for i in 0..n { x[i] += corr[i]; }
+        }
 
         // Post-smooth
         self.smooth_level(lvl, a, b, x, &level.bc_dofs);
@@ -278,20 +352,180 @@ impl GeometricMgPrecond {
 
     fn smooth_level(&self, lvl: usize, a: &CsrMatrix<f64>, b: &[f64],
                     x: &mut [f64], bc: &[u32]) {
-        if lvl < self.smoothers.len() {
-            self.smoothers[lvl].smooth(a, b, x, bc);
-        } else {
-            // Jacobi smoothing fallback
-            let diag = a.diagonal();
-            let mut r = vec![0.0; a.nrows];
-            a.spmv(x, &mut r);
-            for i in 0..r.len() { r[i] = b[i] - r[i]; }
-            let omega = self.config.jacobi_omega;
-            for i in 0..r.len() {
-                if diag[i].abs() > 1e-30 { x[i] += omega * r[i] / diag[i]; }
+        match self.config.smoother {
+            MgSmootherType::Chebyshev(_) => {
+                if lvl < self.smoothers.len() {
+                    self.smoothers[lvl].smooth(a, b, x, bc);
+                } else {
+                    // Jacobi fallback
+                    self.jacobi_smooth_level(a, b, x, bc);
+                }
             }
-            for &d in bc { if (d as usize) < x.len() { x[d as usize] = 0.0; } }
+            MgSmootherType::Ssor => {
+                ssor_smooth_level(a, b, x, bc, self.config.jacobi_omega);
+            }
+            MgSmootherType::Jacobi => {
+                self.jacobi_smooth_level(a, b, x, bc);
+            }
         }
+    }
+
+    /// Plain Jacobi smoothing (omega from config).
+    fn jacobi_smooth_level(&self, a: &CsrMatrix<f64>, b: &[f64],
+                           x: &mut [f64], bc: &[u32]) {
+        let diag = a.diagonal();
+        let mut r = vec![0.0; a.nrows];
+        a.spmv(x, &mut r);
+        for i in 0..r.len() { r[i] = b[i] - r[i]; }
+        let omega = self.config.jacobi_omega;
+        for i in 0..r.len() {
+            if diag[i].abs() > 1e-30 { x[i] += omega * r[i] / diag[i]; }
+        }
+        for &d in bc { if (d as usize) < x.len() { x[d as usize] = 0.0; } }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fem_linalg::CooMatrix;
+
+    /// Build a 3-level 1D Poisson geometric MG hierarchy (finite difference).
+    /// Coarse level ~ n_c DOFs; each refinement doubles DOFs (linear interpolation).
+    fn build_1d_poisson_geom_hierarchy(n_coarse: usize) -> GeometricMgHierarchy {
+        let n_levels = 3;
+        let mut levels = Vec::new();
+        let mut prolong_mats = Vec::new();
+
+        let mut n = n_coarse;
+        for lvl in 0..n_levels {
+            let h = 1.0 / (n - 1) as f64;
+            let mut coo = CooMatrix::<f64>::new(n, n);
+            for i in 0..n {
+                if i > 0 {
+                    coo.add(i, i - 1, -1.0 / h);
+                }
+                coo.add(i, i, 2.0 / h);
+                if i + 1 < n {
+                    coo.add(i, i + 1, -1.0 / h);
+                }
+            }
+            let mut mat = coo.into_csr();
+            let bc_dofs = vec![0u32, (n - 1) as u32];
+            let mut dummy = vec![0.0; n];
+            for &d in &bc_dofs {
+                mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy);
+            }
+            levels.push(GeometricMgLevel {
+                mat,
+                bc_dofs: bc_dofs.clone(),
+            });
+
+            // Build prolongation (linear interpolation) to next finer level
+            if lvl + 1 < n_levels {
+                let n_fine = 2 * n - 1;
+                let mut p_coo = CooMatrix::<f64>::new(n_fine, n);
+                for i in 0..n_fine {
+                    if i % 2 == 0 {
+                        p_coo.add(i, i / 2, 1.0);
+                    } else {
+                        p_coo.add(i, i / 2, 0.5);
+                        p_coo.add(i, i / 2 + 1, 0.5);
+                    }
+                }
+                prolong_mats.push(p_coo.into_csr());
+            }
+            n = 2 * n - 1;
+        }
+
+        // Reverse so finest is first
+        levels.reverse();
+        prolong_mats.reverse();
+
+        GeometricMgHierarchy::new(levels, prolong_mats)
+    }
+
+    /// Simple preconditioned Richardson iteration with MG as preconditioner.
+    fn richardson_mg(
+        mg: &GeometricMgPrecond,
+        h: &GeometricMgHierarchy,
+        b: &[f64],
+        x: &mut [f64],
+        max_iter: usize,
+        rtol: f64,
+    ) -> usize {
+        let a = h.finest_matrix();
+        let n = a.nrows;
+        let b_nrm = b.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-30);
+        for iter in 0..max_iter {
+            let mut ax = vec![0.0; n];
+            a.spmv(x, &mut ax);
+            let r: Vec<f64> = (0..n).map(|i| b[i] - ax[i]).collect();
+            let res = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if res < rtol * b_nrm {
+                return iter;
+            }
+            let mut dx = vec![0.0; n];
+            mg.v_cycle(h, &r, &mut dx);
+            for i in 0..n {
+                x[i] += dx[i];
+            }
+        }
+        max_iter
+    }
+
+    #[test]
+    fn geometric_mg_w_cycle_converges_faster() {
+        let n_coarse = 9; // coarse DOFs = 9, fine DOFs = 33
+        let h = build_1d_poisson_geom_hierarchy(n_coarse);
+        let n = h.levels[0].mat.nrows;
+        eprintln!("  MG hierarchy DOFs per level:");
+        for (i, lvl) in h.levels.iter().enumerate() {
+            eprintln!("    level {}: {} DOFs", i, lvl.mat.nrows);
+        }
+
+        // RHS: all ones (compatible with homogeneous Dirichlet BCs)
+        let mut b = vec![1.0_f64; n];
+        for &d in &h.levels[0].bc_dofs {
+            if (d as usize) < n {
+                b[d as usize] = 0.0;
+            }
+        }
+
+        let max_iter = 200;
+        let rtol = 1e-8;
+
+        // V-cycle (Jacobi smoother)
+        let cfg_v = GeometricMgConfig {
+            cycle_type: MgCycleType::V,
+            smoother: MgSmootherType::Jacobi,
+            jacobi_omega: 0.67,
+            pre_sweeps: 2,
+            post_sweeps: 2,
+            ..Default::default()
+        };
+        let mg_v = GeometricMgPrecond::new(cfg_v, &h);
+        let mut x_v = vec![0.0; n];
+        let iters_v = richardson_mg(&mg_v, &h, &b, &mut x_v, max_iter, rtol);
+
+        // W-cycle (Jacobi smoother)
+        let cfg_w = GeometricMgConfig {
+            cycle_type: MgCycleType::W,
+            smoother: MgSmootherType::Jacobi,
+            jacobi_omega: 0.67,
+            pre_sweeps: 2,
+            post_sweeps: 2,
+            ..Default::default()
+        };
+        let mg_w = GeometricMgPrecond::new(cfg_w, &h);
+        let mut x_w = vec![0.0; n];
+        let iters_w = richardson_mg(&mg_w, &h, &b, &mut x_w, max_iter, rtol);
+
+        eprintln!("  V-cycle: {iters_v} iters, W-cycle: {iters_w} iters");
+        assert!(
+            iters_w <= iters_v,
+            "W-cycle ({iters_w}) should need <= V-cycle ({iters_v}) iterations"
+        );
     }
 }
 

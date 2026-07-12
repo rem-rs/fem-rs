@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fem-core   = { path = "../core" }
-fem-linalg = { path = "../linalg" }
-fem-mesh   = { path = "../mesh" }
-linlvo     = { git = "https://github.com/rem-rs/linlvo.git" }
-thiserror  = { workspace = true }
-rust-hdf5  = { version = "0.2", optional = true }
+fem-core    = { path = "../core" }
+fem-linalg  = { path = "../linalg" }
+fem-mesh    = { path = "../mesh" }
+fem-element = { path = "../element" }
+linlvo      = { git = "https://github.com/rem-rs/linlvo.git" }
+thiserror   = { workspace = true }
+rust-hdf5   = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -500,6 +500,303 @@ impl MeshTopology for IgaMultiPatchMesh2D {
     fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) { (0, None) }
 }
 
+// ─── Multi-patch 3D ──────────────────────────────────────────────────────────
+
+/// Return the global control-point indices on a given face of a 3-D tensor-product patch.
+///
+/// Faces are numbered:
+///   0: u = umin,   1: u = umax
+///   2: v = vmin,   3: v = vmax
+///   4: w = wmin,   5: w = wmax
+///
+/// DOFs are returned in canonical parametric order: the two remaining parametric
+/// directions are iterated with the second direction in the outer loop, matching the
+/// lexicographic DOF layout `dof = k·nu·nv + j·nu + i`.
+fn face_dof_indices_3d(nu: usize, nv: usize, nw: usize, face: usize) -> Vec<usize> {
+    match face {
+        0 => {
+            // u=0: parametric (v, w), outer=w, inner=v
+            let mut dofs = Vec::with_capacity(nv * nw);
+            for k in 0..nw {
+                for j in 0..nv {
+                    dofs.push(k * nu * nv + j * nu);
+                }
+            }
+            dofs
+        }
+        1 => {
+            // u=1: parametric (v, w), outer=w, inner=v
+            let i = nu - 1;
+            let mut dofs = Vec::with_capacity(nv * nw);
+            for k in 0..nw {
+                for j in 0..nv {
+                    dofs.push(k * nu * nv + j * nu + i);
+                }
+            }
+            dofs
+        }
+        2 => {
+            // v=0: parametric (u, w), outer=w, inner=u
+            let mut dofs = Vec::with_capacity(nu * nw);
+            for k in 0..nw {
+                for i in 0..nu {
+                    dofs.push(k * nu * nv + i);
+                }
+            }
+            dofs
+        }
+        3 => {
+            // v=1: parametric (u, w), outer=w, inner=u
+            let j0 = nv - 1;
+            let mut dofs = Vec::with_capacity(nu * nw);
+            for k in 0..nw {
+                for i in 0..nu {
+                    dofs.push(k * nu * nv + j0 * nu + i);
+                }
+            }
+            dofs
+        }
+        4 => {
+            // w=0: parametric (u, v), outer=v, inner=u
+            let mut dofs = Vec::with_capacity(nu * nv);
+            for j in 0..nv {
+                for i in 0..nu {
+                    dofs.push(j * nu + i);
+                }
+            }
+            dofs
+        }
+        5 => {
+            // w=1: parametric (u, v), outer=v, inner=u
+            let k0 = nw - 1;
+            let mut dofs = Vec::with_capacity(nu * nv);
+            for j in 0..nv {
+                for i in 0..nu {
+                    dofs.push(k0 * nu * nv + j * nu + i);
+                }
+            }
+            dofs
+        }
+        _ => vec![],
+    }
+}
+
+/// Build a global DOF map for a multi-patch 3D NURBS mesh.
+///
+/// For each pair in `face_connectivity`: maps the DOFs along patch_a's face `face_a`
+/// to the same global DOFs as patch_b's face `face_b` (C⁰ continuity).
+fn build_multi_patch_dof_maps_3d(
+    patches: &[fem_element::iga::NurbsPatch3DData],
+    face_conn: &[(usize, usize, usize, usize)],
+) -> (Vec<Vec<DofId>>, usize) {
+    let n_patches = patches.len();
+    let sizes: Vec<(usize, usize, usize)> = patches
+        .iter()
+        .map(|p| (p.kv_u.n_basis(), p.kv_v.n_basis(), p.kv_w.n_basis()))
+        .collect();
+
+    // Initialise with unique DOF numbers per patch so that unshared DOFs
+    // remain distinct after merging.
+    let mut dof_maps: Vec<Vec<DofId>> = Vec::with_capacity(n_patches);
+    let mut next_id: DofId = 0;
+    for i in 0..n_patches {
+        let n = sizes[i].0 * sizes[i].1 * sizes[i].2;
+        dof_maps.push((0..n).map(|_| { let id = next_id; next_id += 1; id }).collect());
+    }
+
+    for &(pa, fa, pb, fb) in face_conn {
+        let (nu_a, nv_a, nw_a) = sizes[pa];
+        let (nu_b, nv_b, nw_b) = sizes[pb];
+
+        let face_dofs_a = face_dof_indices_3d(nu_a, nv_a, nw_a, fa);
+        let face_dofs_b = face_dof_indices_3d(nu_b, nv_b, nw_b, fb);
+
+        let n_face = face_dofs_a.len().min(face_dofs_b.len());
+        for k in 0..n_face {
+            let local_a = face_dofs_a[k];
+            let local_b = face_dofs_b[k];
+            let global_a = dof_maps[pa][local_a];
+            let global_b = dof_maps[pb][local_b];
+
+            if global_a != global_b {
+                let (master, slave) = if global_a < global_b {
+                    (global_a, global_b)
+                } else {
+                    (global_b, global_a)
+                };
+                for patch_dofs in dof_maps.iter_mut() {
+                    for d in patch_dofs.iter_mut() {
+                        if *d == slave {
+                            *d = master;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Compact: reassign global DOF numbers sequentially.
+    let mut compact = std::collections::HashMap::new();
+    let mut next: DofId = 0;
+    for patch_dofs in dof_maps.iter_mut() {
+        for d in patch_dofs.iter_mut() {
+            let entry = compact.entry(*d).or_insert_with(|| {
+                let n = next;
+                next += 1;
+                n
+            });
+            *d = *entry;
+        }
+    }
+
+    (dof_maps, next as usize)
+}
+
+/// A multi-patch 3D IGA mesh: multiple single-patch 3D meshes stitched at shared
+/// faces.
+///
+/// Built from a [`NurbsMesh3D`] (which carries patch data and face connectivity).
+/// DOFs on shared faces are merged for C⁰ continuity.
+#[derive(Debug, Clone)]
+pub struct IgaMultiPatchMesh3D {
+    patch_meshes: Vec<IgaSinglePatchMesh3D>,
+    /// For each patch, its local DOF → global DOF mapping.
+    dof_maps: Vec<Vec<DofId>>,
+    n_global_dofs: usize,
+    /// All elements across all patches (global DOF indices).
+    global_connectivity: Vec<Vec<DofId>>,
+    /// Per-patch element ranges: (start_idx, end_idx).
+    #[allow(dead_code)]
+    patch_elem_ranges: Vec<(usize, usize)>,
+    element_type: ElementType,
+    n_nodes: usize,
+    node_coords: Vec<Vec<f64>>,
+}
+
+impl IgaMultiPatchMesh3D {
+    /// Build from a 3-D NURBS mesh with face connectivity.
+    pub fn from_nurbs_mesh(nurbs: &fem_element::iga::NurbsMesh3D) -> Self {
+        let (dof_maps, n_global_dofs) =
+            build_multi_patch_dof_maps_3d(&nurbs.patches, &nurbs.face_connectivity);
+
+        let mut global_connectivity = Vec::new();
+        let mut patch_elem_ranges = Vec::new();
+        let mut node_coords = Vec::new();
+        let mut patch_meshes = Vec::new();
+
+        for (pi, pd) in nurbs.patches.iter().enumerate() {
+            let pu = pd.kv_u.degree;
+            let qu = pd.kv_v.degree;
+            let ru = pd.kv_w.degree;
+            let nu = pd.kv_u.n_basis();
+            let nv = pd.kv_v.n_basis();
+            let nw = pd.kv_w.n_basis();
+            let knots_u = pd.kv_u.knots.clone();
+            let knots_v = pd.kv_v.knots.clone();
+            let knots_w = pd.kv_w.knots.clone();
+
+            let iga = IgaSpace3D::new_with_ctrl_points(
+                pu,
+                qu,
+                ru,
+                knots_u,
+                knots_v,
+                knots_w,
+                nu,
+                nv,
+                nw,
+                Some(pd.weights.clone()),
+                pd.control_pts.clone(),
+            )
+            .expect("valid IGA space from NURBS patch");
+
+            let mesh = IgaSinglePatchMesh3D::from_iga_space(&iga)
+                .expect("single-patch mesh from IGA space");
+
+            let start = global_connectivity.len();
+            for elem_dofs in &mesh.connectivity {
+                let global_dofs: Vec<DofId> = elem_dofs
+                    .iter()
+                    .map(|&d| dof_maps[pi][d as usize])
+                    .collect();
+                global_connectivity.push(global_dofs);
+            }
+            patch_elem_ranges.push((start, global_connectivity.len()));
+            patch_meshes.push(mesh);
+            node_coords.extend(
+                iga.control_points()
+                    .iter()
+                    .map(|&c| vec![c[0], c[1], c[2]]),
+            );
+        }
+
+        let element_type = if let Some(m) = patch_meshes.first() {
+            m.element_type
+        } else {
+            ElementType::Hex8
+        };
+
+        IgaMultiPatchMesh3D {
+            patch_meshes,
+            dof_maps,
+            n_global_dofs,
+            global_connectivity,
+            patch_elem_ranges,
+            element_type,
+            n_nodes: n_global_dofs,
+            node_coords,
+        }
+    }
+
+    pub fn n_global_dofs(&self) -> usize {
+        self.n_global_dofs
+    }
+
+    pub fn n_patches(&self) -> usize {
+        self.patch_meshes.len()
+    }
+
+    pub fn dof_map(&self, patch: usize) -> &[DofId] {
+        &self.dof_maps[patch]
+    }
+}
+
+impl MeshTopology for IgaMultiPatchMesh3D {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn n_nodes(&self) -> usize {
+        self.n_nodes
+    }
+    fn n_elements(&self) -> usize {
+        self.global_connectivity.len()
+    }
+    fn n_boundary_faces(&self) -> usize {
+        0
+    }
+    fn element_nodes(&self, elem: ElemId) -> &[NodeId] {
+        &self.global_connectivity[elem as usize]
+    }
+    fn element_type(&self, _elem: ElemId) -> ElementType {
+        self.element_type
+    }
+    fn element_tag(&self, _elem: ElemId) -> i32 {
+        0
+    }
+    fn node_coords(&self, node: NodeId) -> &[f64] {
+        &self.node_coords[node as usize]
+    }
+    fn face_nodes(&self, _face: FaceId) -> &[NodeId] {
+        &[]
+    }
+    fn face_tag(&self, _face: FaceId) -> i32 {
+        0
+    }
+    fn face_elements(&self, _face: FaceId) -> (ElemId, Option<ElemId>) {
+        (0, None)
+    }
+}
+
 // ─── 3D single-patch IGA FESpace ────────────────────────────────────────────
 
 /// One trilinear/trilinear-quadratic hex cell per non-empty parametric span
@@ -805,5 +1102,112 @@ mod tests {
 
         assert_ne!(dof_a[0], dof_b[1], "unshared DOF 0 vs 1 should differ");
         assert_ne!(dof_a[2], dof_b[3], "unshared DOF 2 vs 3 should differ");
+    }
+
+    // ─── 3D Multi-patch tests ───────────────────────────────────────────────────
+
+    fn make_double_patch_cube() -> fem_element::iga::NurbsMesh3D {
+        // Two cubes side by side in the u-(x-)direction.
+        // Each is P1×P1×P1 trilinear with 2×2×2 control points, 1×1×1 elements.
+        let kv = NurbsKnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1);
+
+        let patch_a = fem_element::iga::NurbsPatch3DData {
+            kv_u: kv.clone(),
+            kv_v: kv.clone(),
+            kv_w: kv.clone(),
+            control_pts: vec![
+                [0.0, 0.0, 0.0], [0.5, 0.0, 0.0],
+                [0.0, 1.0, 0.0], [0.5, 1.0, 0.0],
+                [0.0, 0.0, 1.0], [0.5, 0.0, 1.0],
+                [0.0, 1.0, 1.0], [0.5, 1.0, 1.0],
+            ],
+            weights: vec![1.0; 8],
+            tag: 1,
+        };
+
+        let patch_b = fem_element::iga::NurbsPatch3DData {
+            kv_u: kv.clone(),
+            kv_v: kv.clone(),
+            kv_w: kv,
+            control_pts: vec![
+                [0.5, 0.0, 0.0], [1.0, 0.0, 0.0],
+                [0.5, 1.0, 0.0], [1.0, 1.0, 0.0],
+                [0.5, 0.0, 1.0], [1.0, 0.0, 1.0],
+                [0.5, 1.0, 1.0], [1.0, 1.0, 1.0],
+            ],
+            weights: vec![1.0; 8],
+            tag: 2,
+        };
+
+        // Face 0 = umin, Face 1 = umax, Face 2 = vmin, Face 3 = vmax,
+        // Face 4 = wmin, Face 5 = wmax
+        // A.right(face 1) ↔ B.left(face 0)
+        fem_element::iga::NurbsMesh3D {
+            patches: vec![patch_a, patch_b],
+            face_connectivity: vec![(0, 1, 1, 0)],
+        }
+    }
+
+    #[test]
+    fn multi_patch_3d_creates_mesh() {
+        let nurbs = make_double_patch_cube();
+        let mp = IgaMultiPatchMesh3D::from_nurbs_mesh(&nurbs);
+
+        assert_eq!(mp.n_patches(), 2);
+        assert!(mp.n_global_dofs() > 0);
+        assert!(mp.n_global_dofs() < 16); // merged < 8+8
+        assert_eq!(mp.n_elements(), 2); // 1 element per patch × 2 patches
+    }
+
+    #[test]
+    fn multi_patch_3d_merges_shared_dofs() {
+        let nurbs = make_double_patch_cube();
+        let mp = IgaMultiPatchMesh3D::from_nurbs_mesh(&nurbs);
+
+        let dof_a = mp.dof_map(0);
+        let dof_b = mp.dof_map(1);
+
+        // A's face 1 (umax): DOFs {1, 3, 5, 7}  (i=nu-1)
+        // B's face 0 (umin): DOFs {0, 2, 4, 6}  (i=0)
+        // After merging with unique offsets, physically coincident DOFs
+        // at the shared interface (x=0.5) are mapped to the same global DOF.
+        assert_eq!(dof_a[1], dof_b[0], "shared DOF at (0.5,0,0)");
+        assert_eq!(dof_a[3], dof_b[2], "shared DOF at (0.5,1,0)");
+        assert_eq!(dof_a[5], dof_b[4], "shared DOF at (0.5,0,1)");
+        assert_eq!(dof_a[7], dof_b[6], "shared DOF at (0.5,1,1)");
+
+        // Unshared DOFs are different
+        assert_ne!(dof_a[0], dof_b[1], "unshared DOF 0 vs 1 should differ");
+        assert_ne!(dof_a[2], dof_b[3], "unshared DOF 2 vs 3 should differ");
+    }
+
+    #[test]
+    fn multi_patch_3d_n_global_dofs_is_correct() {
+        let nurbs = make_double_patch_cube();
+        let mp = IgaMultiPatchMesh3D::from_nurbs_mesh(&nurbs);
+
+        // 8 + 8 = 16 raw DOFs, 4 shared face DOFs merged → 12 unique
+        assert_eq!(mp.n_global_dofs(), 12);
+    }
+
+    #[test]
+    fn face_dof_indices_3d_has_expected_sizes() {
+        // nu=2, nv=3, nw=4
+        for face in 0..6 {
+            let dofs = face_dof_indices_3d(2, 3, 4, face);
+            let expected = match face {
+                0 | 1 => 3 * 4,     // nv × nw = 12
+                2 | 3 => 2 * 4,     // nu × nw = 8
+                4 | 5 => 2 * 3,     // nu × nv = 6
+                _ => 0,
+            };
+            assert_eq!(dofs.len(), expected, "face {face} should have {expected} DOFs");
+        }
+    }
+
+    #[test]
+    fn face_dof_indices_3d_rejects_invalid_face() {
+        let dofs = face_dof_indices_3d(2, 2, 2, 6);
+        assert!(dofs.is_empty());
     }
 }

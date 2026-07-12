@@ -32,7 +32,7 @@ fn exact_laplacian_eigenvalue(k: usize, n: usize) -> f64 {
 fn lobpcg_smallest_three_match_analytical() {
     let n = 30;
     let a = laplacian_1d(n);
-    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false };
+    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, None, 3, &cfg).unwrap();
 
     for k in 0..3 {
@@ -51,7 +51,7 @@ fn lobpcg_first_eigenvalue_converges_with_tolerance() {
     let exact = exact_laplacian_eigenvalue(1, n);
 
     for &tol in &[1e-4, 1e-6, 1e-8] {
-        let cfg = LobpcgConfig { max_iter: 500, tol, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 500, tol, verbose: false, nullspace_skip: 0.0 };
         let res = lobpcg(&a, None, 1, &cfg).unwrap();
         let err = (res.eigenvalues[0] - exact).abs();
         assert!(err < tol * 10.0,
@@ -63,7 +63,7 @@ fn lobpcg_first_eigenvalue_converges_with_tolerance() {
 fn lobpcg_eigenvalues_are_sorted_ascending() {
     let n = 20;
     let a = laplacian_1d(n);
-    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false };
+    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, None, 5, &cfg).unwrap();
     for i in 0..res.eigenvalues.len() - 1 {
         assert!(res.eigenvalues[i] < res.eigenvalues[i + 1],
@@ -75,7 +75,7 @@ fn lobpcg_eigenvalues_are_sorted_ascending() {
 fn lobpcg_eigenvectors_are_orthonormal() {
     let n = 20;
     let a = laplacian_1d(n);
-    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false };
+    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, None, 4, &cfg).unwrap();
     let xtx = res.eigenvectors.transpose() * &res.eigenvectors;
     for i in 0..4 {
@@ -90,10 +90,10 @@ fn lobpcg_eigenvectors_are_orthonormal() {
 
 #[test]
 fn lobpcg_rayleigh_quotient_matches_eigenvalue() {
-    // For each eigenpair (λᵢ, vᵢ), verify (vᵢᵀ A vᵢ) / (vᵢᵀ vᵢ) ≈ λᵢ.
+    // For each eigenpair (λ�? v�?, verify (vᵢᵀ A v�? / (vᵢᵀ v�? �?λ�?
     let n = 20;
     let a = laplacian_1d(n);
-    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false };
+    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, None, 3, &cfg).unwrap();
 
     for i in 0..3 {
@@ -126,12 +126,12 @@ fn lobpcg_generalized_known_spectrum() {
     for i in 0..n { coo_a.add(i, i, (i + 1) as f64); }
     let a = coo_a.into_csr();
     let b = identity(n);
-    let cfg = LobpcgConfig { max_iter: 300, tol: 1e-10, verbose: false };
+    let cfg = LobpcgConfig { max_iter: 300, tol: 1e-10, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, Some(&b), 3, &cfg).unwrap();
 
-    assert!((res.eigenvalues[0] - 1.0).abs() < 1e-8, "λ₀={:.6e} ≠ 1", res.eigenvalues[0]);
-    assert!((res.eigenvalues[1] - 2.0).abs() < 1e-8, "λ₁={:.6e} ≠ 2", res.eigenvalues[1]);
-    assert!((res.eigenvalues[2] - 3.0).abs() < 1e-8, "λ₂={:.6e} ≠ 3", res.eigenvalues[2]);
+    assert!((res.eigenvalues[0] - 1.0).abs() < 1e-8, "λ₀={:.6e} �?1", res.eigenvalues[0]);
+    assert!((res.eigenvalues[1] - 2.0).abs() < 1e-8, "λ�?{:.6e} �?2", res.eigenvalues[1]);
+    assert!((res.eigenvalues[2] - 3.0).abs() < 1e-8, "λ�?{:.6e} �?3", res.eigenvalues[2]);
 }
 
 // ─── Krylov-Schur ───────────────────────────────────────────────────────
@@ -155,7 +155,7 @@ fn krylov_schur_returns_k_eigenvalues() {
 fn lobpcg_scales_to_100x100() {
     let n = 100;
     let a = laplacian_1d(n);
-    let cfg = LobpcgConfig { max_iter: 1000, tol: 1e-6, verbose: false };
+    let cfg = LobpcgConfig { max_iter: 1000, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, None, 3, &cfg).unwrap();
     for k in 0..3 {
         let exact = exact_laplacian_eigenvalue(k + 1, n);
@@ -169,13 +169,13 @@ fn lobpcg_scales_to_100x100() {
 
 #[test]
 fn lobpcg_eigenpair_residual_small() {
-    // For each eigenpair, verify ‖A v - λ v‖ / ‖A‖ is small.
+    // For each eigenpair, verify ‖A v - λ v�?/ ‖A�?is small.
     let n = 30;
     let a = laplacian_1d(n);
-    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false };
+    let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, None, 3, &cfg).unwrap();
 
-    // Estimate ‖A‖ as the largest eigenvalue (Gershgorin bound: 4 for 1D Laplacian)
+    // Estimate ‖A�?as the largest eigenvalue (Gershgorin bound: 4 for 1D Laplacian)
     let a_norm = 4.0;
 
     for i in 0..3 {
@@ -186,11 +186,11 @@ fn lobpcg_eigenpair_residual_small() {
             if r > 0   { av[r] -= v_vec[r - 1]; }
             if r < n-1 { av[r] -= v_vec[r + 1]; }
         }
-        // residual = ‖Av - λv‖₂ / ‖A‖
+        // residual = ‖Av - λv‖₂ / ‖A�?
         let res_norm: f64 = av.iter().zip(v_vec.iter())
             .map(|(a, b)| (a - res.eigenvalues[i] * b).powi(2)).sum::<f64>().sqrt();
         let residual = res_norm / a_norm;
         assert!(residual < 1e-6,
-            "residual for λ[{i}]={:.6e}: ‖Av-λv‖/‖A‖={residual:.2e}", res.eigenvalues[i]);
+            "residual for λ[{i}]={:.6e}: ‖Av-λv�?‖A�?{residual:.2e}", res.eigenvalues[i]);
     }
 }

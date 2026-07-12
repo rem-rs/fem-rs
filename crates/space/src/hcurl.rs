@@ -633,7 +633,7 @@ mod tests {
     fn hcurl_dof_count_tri() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let space = HCurlSpace::new(mesh, 1);
-        assert_eq!(space.dofs_per_elem, 3);
+        assert_eq!(space.element_dofs(0).len(), 3);
         // Each triangle has 3 edges, 32 triangles, but edges are shared.
         // Expected: 56 unique edges.
         assert_eq!(space.n_dofs(), 56, "n_dofs should equal number of unique edges");
@@ -689,7 +689,7 @@ mod tests {
     fn hcurl_dof_count_quad_nd1() {
         let mesh = OneQuadMesh::unit();
         let space = HCurlSpace::new(mesh, 1);
-        assert_eq!(space.dofs_per_elem, 4);
+        assert_eq!(space.element_dofs(0).len(), 4);
         assert_eq!(space.n_dofs(), 4);
     }
 
@@ -697,7 +697,7 @@ mod tests {
     fn hcurl_dof_count_hex_nd1() {
         let mesh = OneHexMesh::unit();
         let space = HCurlSpace::new(mesh, 1);
-        assert_eq!(space.dofs_per_elem, 12);
+        assert_eq!(space.element_dofs(0).len(), 12);
         assert_eq!(space.n_dofs(), 12);
     }
 
@@ -705,7 +705,7 @@ mod tests {
     fn hcurl_dof_count_quad_nd2() {
         let mesh = OneQuadMesh::unit();
         let space = HCurlSpace::new(mesh, 2);
-        assert_eq!(space.dofs_per_elem, 12, "QuadND2: 8 edge + 4 interior");
+        assert_eq!(space.element_dofs(0).len(), 12, "QuadND2: 8 edge + 4 interior");
         assert_eq!(space.n_dofs(), 12);
     }
 
@@ -713,7 +713,7 @@ mod tests {
     fn hcurl_dof_count_hex_nd2() {
         let mesh = OneHexMesh::unit();
         let space = HCurlSpace::new(mesh, 2);
-        assert_eq!(space.dofs_per_elem, 54, "HexND2: 24 edge + 30 face/interior");
+        assert_eq!(space.element_dofs(0).len(), 54, "HexND2: 24 edge + 30 face/interior");
         assert_eq!(space.n_dofs(), 54);
     }
 
@@ -780,7 +780,7 @@ mod tests {
     fn hcurl_nd3_quad_dof_count() {
         let mesh = OneQuadMesh::unit();
         let space = HCurlSpace::new(mesh, 3);
-        assert_eq!(space.dofs_per_elem, 24, "QuadND3: 12 edge + 12 interior");
+        assert_eq!(space.element_dofs(0).len(), 24, "QuadND3: 12 edge + 12 interior");
         assert_eq!(space.n_dofs(), 24);
     }
 
@@ -788,7 +788,7 @@ mod tests {
     fn hcurl_nd3_hex_dof_count() {
         let mesh = OneHexMesh::unit();
         let space = HCurlSpace::new(mesh, 3);
-        assert_eq!(space.dofs_per_elem, 144, "HexND3: 36 edge + 108 face/interior");
+        assert_eq!(space.element_dofs(0).len(), 144, "HexND3: 36 edge + 108 face/interior");
         assert_eq!(space.n_dofs(), 144);
     }
 
@@ -803,14 +803,14 @@ mod tests {
     fn hcurl_nd3_tri_dof_count() {
         let mesh = Mesh::<2>::unit_square_tri(1);
         let space = HCurlSpace::new(mesh, 3);
-        assert_eq!(space.dofs_per_elem, 15, "TriND3: k*(k+2) = 15");
+        assert_eq!(space.element_dofs(0).len(), 15, "TriND3: k*(k+2) = 15");
     }
 
     #[test]
     fn hcurl_nd4_hex_dof_count() {
         let mesh = OneHexMesh::unit();
         let space = HCurlSpace::new(mesh, 4);
-        assert_eq!(space.dofs_per_elem, 300, "HexND4: 48 edge + 252 face/interior");
+        assert_eq!(space.element_dofs(0).len(), 300, "HexND4: 48 edge + 252 face/interior");
         assert_eq!(space.n_dofs(), 300);
     }
 

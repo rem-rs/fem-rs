@@ -793,6 +793,7 @@ name = "fem-io"
 version = "0.1.0"
 dependencies = [
  "fem-core",
+ "fem-element",
  "fem-linalg",
  "fem-mesh",
  "linlvo",

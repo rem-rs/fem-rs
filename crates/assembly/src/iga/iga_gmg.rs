@@ -20,6 +20,7 @@ use fem_element::iga::{NurbsKnotVector, NurbsMesh3D, NurbsPatch3DData};
 use fem_linalg::{CooMatrix, CsrMatrix, csr_spmm};
 use fem_solver::geometric_mg::{
     GeometricMgConfig, GeometricMgHierarchy, GeometricMgLevel, GeometricMgPrecond,
+    MgCycleType, MgSmootherType,
 };
 use fem_space::IgaMultiPatchMesh3D;
 use linlvo::core::preconditioner::Preconditioner;
@@ -1029,11 +1030,12 @@ mod tests {
         let mg_config = GeometricMgConfig {
             pre_sweeps: 2,
             post_sweeps: 2,
-            chebyshev_order: 0, // use Jacobi for robustness on 1-D Laplacian
+            smoother: MgSmootherType::Jacobi, // Jacobi for robustness on 1-D Laplacian
             jacobi_omega: 0.67,
             coarse_max_iter: 200,
             coarse_rtol: 1e-12,
             max_eig_override: None,
+            cycle_type: MgCycleType::V,
         };
         let mg = GeometricMgPrecond::new(mg_config, &h);
         let wrapper = IgaGmgPrecond::new(mg, &h);
@@ -1144,11 +1146,12 @@ mod tests {
         let mg_config = GeometricMgConfig {
             pre_sweeps: 2,
             post_sweeps: 2,
-            chebyshev_order: 0, // Jacobi smoothing for robustness
+            smoother: MgSmootherType::Jacobi, // Jacobi smoothing for robustness
             jacobi_omega: 0.67,
             coarse_max_iter: 500,
             coarse_rtol: 1e-10,
             max_eig_override: None,
+            cycle_type: MgCycleType::V,
         };
         let mg = GeometricMgPrecond::new(mg_config, &h);
         let wrapper = IgaGmgPrecond::new(mg, &h);

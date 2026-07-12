@@ -26,6 +26,7 @@ pub mod vtk;
 pub mod vtk_reader;
 pub mod matrix_market;
 pub mod mfem;
+pub mod nurbs_mesh;
 pub mod xdmf;
 pub mod glvis;
 pub mod pumi;

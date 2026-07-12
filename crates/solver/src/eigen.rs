@@ -964,7 +964,7 @@ mod tests {
         // λ_1 = 2 - 2cos(π/(n+1)) �?(π/(n+1))² for large n.
         let n = 20;
         let a = laplacian_1d(n);
-        let cfg = LobpcgConfig { max_iter: 300, tol: 1e-6, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 300, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
         let res = lobpcg(&a, None, 1, &cfg).unwrap();
         let exact = 2.0 - 2.0 * (std::f64::consts::PI / (n as f64 + 1.0)).cos();
         let err = (res.eigenvalues[0] - exact).abs();
@@ -976,7 +976,7 @@ mod tests {
         // Find 3 smallest eigenvalues of tridiagonal laplacian.
         let n = 20;
         let a = laplacian_1d(n);
-        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-6, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
         let res = lobpcg(&a, None, 3, &cfg).unwrap();
         assert_eq!(res.eigenvalues.len(), 3);
         // Eigenvalues should be sorted ascending.
@@ -998,7 +998,7 @@ mod tests {
         for i in 0..n { coo_a.add(i, i, (i + 1) as f64); }
         let a = coo_a.into_csr();
         let b = identity(n);
-        let cfg = LobpcgConfig { max_iter: 300, tol: 1e-6, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 300, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
         let res = lobpcg(&a, Some(&b), 2, &cfg).unwrap();
         let err0 = (res.eigenvalues[0] - 1.0).abs();
         let err1 = (res.eigenvalues[1] - 2.0).abs();
@@ -1010,7 +1010,7 @@ mod tests {
     fn lobpcg_eigenvectors_orthonormal() {
         let n = 20;
         let a = laplacian_1d(n);
-        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-6, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
         let res = lobpcg(&a, None, 3, &cfg).unwrap();
         // X^T X should be �?I_k.
         let xtx = res.eigenvectors.transpose() * &res.eigenvectors;
@@ -1042,7 +1042,7 @@ mod tests {
         let a = coo.into_csr();
         let b = identity(4);
         let constraints = DMatrix::<f64>::from_vec(4, 1, vec![1.0, 0.0, 0.0, 0.0]);
-        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
 
         let res = lobpcg_constrained(&a, Some(&b), 2, &constraints, &cfg).unwrap();
 
@@ -1062,7 +1062,7 @@ mod tests {
         let a = coo.into_csr();
         let b = identity(4);
         let constraints = DMatrix::<f64>::from_vec(4, 1, vec![1.0, 0.0, 0.0, 0.0]);
-        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
 
         // Exact diagonal inverse on unconstrained dofs acts as an ideal block preconditioner.
         let precond = |r: &DMatrix<f64>| {
@@ -1088,7 +1088,7 @@ mod tests {
     #[test]
     fn lobpcg_preconditioner_shape_mismatch_errors() {
         let a = laplacian_1d(8);
-        let cfg = LobpcgConfig { max_iter: 50, tol: 1e-6, verbose: false };
+        let cfg = LobpcgConfig { max_iter: 50, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
         let constraints = DMatrix::<f64>::zeros(8, 0);
 
         let err = lobpcg_constrained_preconditioned(

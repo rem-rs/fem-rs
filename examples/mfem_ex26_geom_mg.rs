@@ -19,6 +19,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
+    MgCycleType, MgSmootherType,
 };
 use fem_space::{
     H1Space, fe_space::FESpace, constraints::boundary_dofs,
@@ -149,8 +150,9 @@ fn main() {
 
     // 8. Solve with PCG + geometric multigrid preconditioner
     let mg_config = GeometricMgConfig {
-        pre_sweeps: 1, post_sweeps: 1, chebyshev_order: 2, max_eig_override: None,
+        pre_sweeps: 1, post_sweeps: 1, smoother: MgSmootherType::Chebyshev(2), max_eig_override: None,
         jacobi_omega: 0.8, coarse_max_iter: 500, coarse_rtol: 1e-14,
+        cycle_type: MgCycleType::V,
     };
     let mg_precond = GeometricMgPrecond::new(mg_config, &hierarchy);
 
