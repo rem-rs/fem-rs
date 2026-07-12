@@ -14,6 +14,8 @@ fem-amg     = { path = "../amg" }
 linlvo      = { git = "https://github.com/rem-rs/linlvo.git" }
 nalgebra    = { workspace = true }
 thiserror   = { workspace = true }
+fem-linalg-gpu = { path = "../linalg-gpu", optional = true }
+wgpu           = { version = "27", optional = true }
 reed        = { workspace = true, optional = true }
 reed-core   = { workspace = true, optional = true }
 reed-cpu    = { workspace = true, optional = true }
@@ -21,6 +23,7 @@ reed-cpu    = { workspace = true, optional = true }
 [features]
 default  = []
 parallel = ["dep:rayon", "fem-linalg/parallel"]
+gpu      = ["dep:fem-linalg-gpu", "dep:wgpu"]
 reed     = ["dep:reed", "dep:reed-core", "dep:reed-cpu"]
 
 [dependencies.rayon]
