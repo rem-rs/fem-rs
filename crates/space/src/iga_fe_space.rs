@@ -474,9 +474,15 @@ impl IgaMultiPatchMesh2D {
     /// auto-detects shared edges, and constructs the merged IGA mesh.
     ///
     /// This is the simplest way to go from CAD → IGA analysis.
+    ///
+    /// **Note:** This feature has moved to the professional edition (fem-pro).
+    /// Use `fem_pro::cad::step_to_nurbs_mesh` instead.
     pub fn from_step_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
-        let nurbs = fem_mesh::nurbs_from_cad::step_to_nurbs_mesh(path)?;
-        Ok(Self::from_nurbs_mesh(&nurbs))
+        Err(format!(
+            "STEP import is a professional-edition feature (fem-pro). \
+             Path requested: {}",
+            path.as_ref().display()
+        ))
     }
 
     pub fn dof_map(&self, patch: usize) -> &[DofId] { &self.dof_maps[patch] }

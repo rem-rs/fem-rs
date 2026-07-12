@@ -1,12 +1,10 @@
 pub mod contact;
-pub mod contact_iga;
 pub mod contact_mortar;
 pub mod contact_nitsche;
 pub mod contact_self;
 pub mod mortar;
 
 pub use contact::*;
-pub use contact_iga::*;
 pub use contact_mortar::*;
 pub use contact_nitsche::*;
 pub use contact_self::*;

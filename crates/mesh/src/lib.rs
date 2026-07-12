@@ -22,8 +22,6 @@ pub mod submesh;
 pub mod tmop;
 pub mod topology;
 pub mod transformation;
-pub mod step_iges;
-pub mod nurbs_from_cad;
 pub mod cut_cell;
 pub mod hp_amr;
 pub mod dec;
