@@ -1059,17 +1059,31 @@ pub fn h_refine_vk(pd: &NurbsPatch2DData, v: &[f64]) -> NurbsPatch2DData {
     let mut kk = pd.kv_v.clone(); let mut cc = pd.control_pts.to_vec(); let mut ww = pd.weights.to_vec();
     for &u in v {
         let cv = kk.n_basis();
+        let nn = cv + 1; // each insertion adds one basis function
+        let orig_knots = kk.knots.clone(); // all columns use the SAME original knot vector
+        kk = KnotVector::new(orig_knots.clone(), pv); // reset to original (will be updated after loop)
+        let mut new_cc = Vec::with_capacity(nu * nn);
+        let mut new_ww = Vec::with_capacity(nu * nn);
         for i in 0..nu {
             let cx: Vec<f64> = (0..cv).map(|j| cc[j*nu+i][0]*ww[j*nu+i]).collect();
             let cy: Vec<f64> = (0..cv).map(|j| cc[j*nu+i][1]*ww[j*nu+i]).collect();
             let cw: Vec<f64> = (0..cv).map(|j| ww[j*nu+i]).collect();
-            let (nk, rx) = insert_knot_1d(&kk.knots, &cx, pv, u);
-            let (_, ry) = insert_knot_1d(&kk.knots, &cy, pv, u);
-            let (_, rw) = insert_knot_1d(&kk.knots, &cw, pv, u);
-            kk = KnotVector::new(nk, pv); let nn = kk.n_basis();
-            if i == 0 { cc = (0..nu*nn).map(|_|[0.0,0.0]).collect::<Vec<_>>(); ww = vec![0.0; nu*nn]; }
-            for j in 0..nn { let w = rw[j]; if w.abs()>1e-300 { cc[j*nu+i]=[rx[j]/w,ry[j]/w]; } else { cc[j*nu+i]=[0.0,0.0]; } ww[j*nu+i]=w; }
+            let (nk, rx) = insert_knot_1d(&orig_knots, &cx, pv, u);
+            let (_, ry) = insert_knot_1d(&orig_knots, &cy, pv, u);
+            let (_, rw) = insert_knot_1d(&orig_knots, &cw, pv, u);
+            if i == 0 { kk = KnotVector::new(nk, pv); }
+            for j in 0..nn {
+                let w = rw[j];
+                if w.abs() > 1e-300 {
+                    new_cc.push([rx[j] / w, ry[j] / w]);
+                } else {
+                    new_cc.push([0.0, 0.0]);
+                }
+                new_ww.push(w);
+            }
         }
+        cc = new_cc;
+        ww = new_ww;
     }
     NurbsPatch2DData { kv_u: pd.kv_u.clone(), kv_v: kk, control_pts: cc, weights: ww, tag: pd.tag }
 }
