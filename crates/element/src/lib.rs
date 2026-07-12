@@ -57,6 +57,7 @@ pub mod iga;
 pub mod hierarchical;
 pub mod basis_cache;
 pub mod bezier_extraction;
+pub mod tmesh;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use quadrature::{TriQuadRule, tri_rule_named};

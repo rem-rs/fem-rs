@@ -4,6 +4,7 @@ pub mod iga_trim;
 pub mod iga_bezier;
 pub mod iga_gmg;
 pub mod iga_adaptivity;
+pub mod iga_tspline;
 
 pub use iga::*;
 pub use iga_assembler::*;
