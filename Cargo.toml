@@ -7,7 +7,6 @@ members = [
     "crates/space",
     "crates/assembly",
     "crates/linalg",
-    "crates/linalg-gpu",
     "crates/solver",
     "crates/amg",
     "crates/parallel",

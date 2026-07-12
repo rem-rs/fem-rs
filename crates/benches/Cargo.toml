@@ -9,7 +9,7 @@ fem-element = { path = "../element" }
 fem-core = { path = "../core" }
 fem-mesh = { path = "../mesh" }
 fem-space = { path = "../space" }
-fem-assembly = { path = "../assembly", features = ["gpu"] }
+fem-assembly = { path = "../assembly" }
 fem-linalg = { path = "../linalg" }
 fem-linalg-gpu = { path = "../linalg-gpu" }
 fem-solver = { path = "../solver", features = ["gpu"] }
