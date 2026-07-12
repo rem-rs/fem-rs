@@ -180,28 +180,54 @@ pub fn physical_map_2d(pd: &NurbsPatch2DData, xi: &[f64]) -> PhysMap2D {
 ///
 /// Returns `(phys_grads, det_j)` where `phys_grads` has length `n_dof * 2`:
 /// `phys_grads[a*2] = dR_A/dx`, `phys_grads[a*2+1] = dR_A/dy`.
+///
+/// Unlike calling [`physical_map_2d`] separately, this function reuses the
+/// already-evaluated parametric gradients to build the Jacobian, avoiding an
+/// extra `NurbsPatch2D` clone (saves ~3 Vec clones per Gauss point).
 pub fn physical_grads_2d(pd: &NurbsPatch2DData, xi: &[f64]) -> (Vec<f64>, f64) {
     use fem_element::iga::NurbsPatch2D;
 
     let patch = NurbsPatch2D::new(pd.kv_u.clone(), pd.kv_v.clone(), pd.weights.clone());
     let n_dof = patch.n_dofs();
 
+    // Evaluate parametric gradients ∇_ξ R_A and basis values R_A.
     let mut grads_xi = vec![0.0_f64; n_dof * 2];
     patch.eval_grad_basis(xi, &mut grads_xi);
+    let mut basis = vec![0.0_f64; n_dof];
+    patch.eval_basis(xi, &mut basis);
 
-    let map = physical_map_2d(pd, xi);
-    let ji = &map.jac_inv_t;
+    // Build Jacobian J from the parametric gradients and control points:
+    //   J[i][j] = Σ_A cpt[A][i] · dR_A/dξ_j
+    let mut jac = [[0.0_f64; 2]; 2];
+    let mut x_phys = [0.0_f64; 2];
+    for a in 0..n_dof {
+        let cx = pd.control_pts[a][0];
+        let cy = pd.control_pts[a][1];
+        let dru = grads_xi[a * 2];
+        let drv = grads_xi[a * 2 + 1];
+        jac[0][0] += cx * dru;  jac[0][1] += cx * drv;
+        jac[1][0] += cy * dru;  jac[1][1] += cy * drv;
+        x_phys[0] += basis[a] * cx;
+        x_phys[1] += basis[a] * cy;
+    }
+    let det_j = jac[0][0] * jac[1][1] - jac[0][1] * jac[1][0];
+    let inv_det = 1.0 / det_j;
+    // J^{-T} (row-major)
+    let ji = [
+        [jac[1][1] * inv_det, -jac[1][0] * inv_det],
+        [-jac[0][1] * inv_det,  jac[0][0] * inv_det],
+    ];
 
-    // ∇_x R_A = J^{-T} * ∇_ξ R_A
+    // ∇_x R_A = J^{-T} · ∇_ξ R_A
     let mut phys_grads = vec![0.0_f64; n_dof * 2];
     for a in 0..n_dof {
         let dru = grads_xi[a * 2];
         let drv = grads_xi[a * 2 + 1];
-        phys_grads[a * 2]     = ji[0][0] * dru + ji[0][1] * drv; // dR/dx
-        phys_grads[a * 2 + 1] = ji[1][0] * dru + ji[1][1] * drv; // dR/dy
+        phys_grads[a * 2]     = ji[0][0] * dru + ji[0][1] * drv;
+        phys_grads[a * 2 + 1] = ji[1][0] * dru + ji[1][1] * drv;
     }
 
-    (phys_grads, map.det_j)
+    (phys_grads, det_j)
 }
 
 // ─── 3-D physical map ────────────────────────────────────────────────────────
@@ -292,6 +318,9 @@ pub fn physical_map_3d(pd: &NurbsPatch3DData, xi: &[f64]) -> PhysMap3D {
 /// in a 3-D patch.
 ///
 /// Returns `(phys_grads, det_j)` where `phys_grads[a*3 + i] = dR_A/dx_i`.
+///
+/// Builds the Jacobian from the already-evaluated parametric gradients, avoiding
+/// an extra `NurbsPatch3D` clone per Gauss point.
 pub fn physical_grads_3d(pd: &NurbsPatch3DData, xi: &[f64]) -> (Vec<f64>, f64) {
     use fem_element::iga::NurbsPatch3D;
 
@@ -303,8 +332,21 @@ pub fn physical_grads_3d(pd: &NurbsPatch3DData, xi: &[f64]) -> (Vec<f64>, f64) {
     let mut grads_xi = vec![0.0_f64; n_dof * 3];
     patch.eval_grad_basis(xi, &mut grads_xi);
 
-    let map = physical_map_3d(pd, xi);
-    let ji = &map.jac_inv_t;
+    // Build 3×3 Jacobian from parametric gradients and control points.
+    let mut jac = [[0.0_f64; 3]; 3];
+    for a in 0..n_dof {
+        let dru = grads_xi[a * 3];
+        let drv = grads_xi[a * 3 + 1];
+        let drw = grads_xi[a * 3 + 2];
+        for i in 0..3 {
+            let xa = pd.control_pts[a][i];
+            jac[i][0] += xa * dru;
+            jac[i][1] += xa * drv;
+            jac[i][2] += xa * drw;
+        }
+    }
+    let det_j = det3(&jac);
+    let ji = inv_t3(&jac, det_j);
 
     let mut phys_grads = vec![0.0_f64; n_dof * 3];
     for a in 0..n_dof {
@@ -316,7 +358,7 @@ pub fn physical_grads_3d(pd: &NurbsPatch3DData, xi: &[f64]) -> (Vec<f64>, f64) {
         phys_grads[a * 3 + 2] = ji[2][0]*dru + ji[2][1]*drv + ji[2][2]*drw;
     }
 
-    (phys_grads, map.det_j)
+    (phys_grads, det_j)
 }
 
 // ─── 2-D single-patch global assembly ────────────────────────────────────────

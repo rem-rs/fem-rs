@@ -9,32 +9,9 @@
 
 use fem_element::bezier_extraction::{self, BezierExtraction2D, BezierExtraction3D};
 use fem_element::iga::{NurbsMesh2D, NurbsMesh3D, NurbsPatch2DData, NurbsPatch3DData};
-use fem_element::quadrature::seg_rule;
 use fem_linalg::{CooMatrix, CsrMatrix};
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Return (span_index, left, right) for each non-empty knot span.
-fn nonempty_spans(knots: &[f64]) -> Vec<(usize, f64, f64)> {
-    knots
-        .windows(2)
-        .enumerate()
-        .filter_map(|(i, w)| {
-            if w[1] > w[0] {
-                Some((i, w[0], w[1]))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// Gauss–Legendre points and weights on [0, 1].
-fn gauss_01(order: u8) -> (Vec<f64>, Vec<f64>) {
-    let seg = seg_rule(order);
-    let pts: Vec<f64> = seg.points.iter().map(|p| p[0]).collect();
-    (pts, seg.weights)
-}
+use super::iga_utils::{gauss_01, nonempty_spans};
 
 /// Build a local→global DOF mapping for an element, assuming row-major
 /// ordering (v slowest, u fastest) matching the control-pt layout.
@@ -108,8 +85,12 @@ fn element_dof_map_3d(
 /// - `phi[a]` = R_a(ξ,η) (NURBS basis values, length n_local, indexed by local DOF)
 /// - `phys_grads[a*2]` = dR_a/dx, `[a*2+1]` = dR_a/dy (local DOF indexing)
 ///
-/// `local_to_global` maps local DOF index `a` (0..n_local-1) to the global
-/// control-point / weight index for that active basis function.
+/// `patch_idx` maps local DOF index `a` (0..n_local-1) to the **patch-local**
+/// control-point / weight index.  This is the index into `pd.weights` and
+/// `pd.control_pts` **without** any multi-patch `dof_offset`.
+///
+/// `scratch_*` are pre-allocated scratch buffers (reused across Gauss points).
+/// Sizes: `phi_b`/`phi_n`/`phi_r` = n_local, `grads_b`/`grads_n`/`grads_r` = n_local * 2.
 ///
 /// # Panics
 /// Panics if the geometric Jacobian is degenerate (|det J| < 1e-14).
@@ -122,24 +103,27 @@ pub fn bezier_eval_2d(
     eta: f64,
     phi: &mut [f64],
     phys_grads: &mut [f64],
-    local_to_global: &[usize],
+    patch_idx: &[usize],
+    // scratch buffers (pre-allocated by caller, reused across Gauss points)
+    phi_b: &mut [f64],
+    grads_b: &mut [f64],
+    phi_n: &mut [f64],
+    grads_n: &mut [f64],
+    phi_r: &mut [f64],
+    grads_r: &mut [f64],
 ) -> f64 {
     let p = ext.degree_u;
     let q = ext.degree_v;
     let n_local = ext.n_local;
 
     // 1. Evaluate Bernstein basis + parametric gradients
-    let mut phi_b = vec![0.0_f64; n_local];
-    let mut grads_b = vec![0.0_f64; n_local * 2];
-    bezier_extraction::eval_bernstein_2d(p, q, xi, eta, &mut phi_b, &mut grads_b);
+    bezier_extraction::eval_bernstein_2d(p, q, xi, eta, phi_b, grads_b);
 
     // 2. Apply extraction: B-spline basis N = C^T · B
     let idx = elem_v * ext.n_elements_u + elem_u;
     let C = &ext.matrices[idx];
-    let mut phi_n = vec![0.0_f64; n_local];
-    let mut grads_n = vec![0.0_f64; n_local * 2];
     bezier_extraction::apply_extraction_2d(
-        C, n_local, &phi_b, &grads_b, &mut phi_n, &mut grads_n,
+        C, n_local, phi_b, grads_b, phi_n, grads_n,
     );
 
     // 3. NURBS rational weighting using global weights
@@ -148,7 +132,7 @@ pub fn bezier_eval_2d(
     let mut dW_du = 0.0_f64;
     let mut dW_dv = 0.0_f64;
     for a in 0..n_local {
-        let wa = w[local_to_global[a]];
+        let wa = w[patch_idx[a]];
         W += wa * phi_n[a];
         dW_du += wa * grads_n[a * 2];
         dW_dv += wa * grads_n[a * 2 + 1];
@@ -156,10 +140,8 @@ pub fn bezier_eval_2d(
     assert!(W.abs() > 1e-300, "NURBS denominator near zero");
     let inv_W = 1.0 / W;
     let inv_W2 = inv_W * inv_W;
-    let mut phi_r = vec![0.0_f64; n_local];
-    let mut grads_r = vec![0.0_f64; n_local * 2];
     for a in 0..n_local {
-        let wa = w[local_to_global[a]];
+        let wa = w[patch_idx[a]];
         let n_val = phi_n[a];
         let dn_du = grads_n[a * 2];
         let dn_dv = grads_n[a * 2 + 1];
@@ -171,7 +153,7 @@ pub fn bezier_eval_2d(
     // 4. Physical Jacobian: J[i][j] = Σ_A x_A[i] * dR_A/dξ_j
     let mut jac = [[0.0_f64; 2]; 2];
     for a in 0..n_local {
-        let gi = local_to_global[a];
+        let gi = patch_idx[a];
         let cx = pd.control_pts[gi][0];
         let cy = pd.control_pts[gi][1];
         jac[0][0] += cx * grads_r[a * 2]; // dx/du
@@ -210,8 +192,11 @@ pub fn bezier_eval_2d(
 /// - `phi[a]` = R_a(ξ,η,ζ) (NURBS basis values, length n_local)
 /// - `phys_grads[a*3..a*3+3]` = ∇R_a (physical gradient, length n_local*3)
 ///
-/// `local_to_global` maps local DOF index `a` (0..n_local-1) to the global
-/// control-point / weight index for that active basis function.
+/// `patch_idx` maps local DOF index `a` (0..n_local-1) to the **patch-local**
+/// control-point / weight index (without multi-patch `dof_offset`).
+///
+/// `scratch_*` are pre-allocated scratch buffers (reused across Gauss points).
+/// Sizes: `phi_b`/`phi_n`/`phi_r` = n_local, `grads_b`/`grads_n`/`grads_r` = n_local * 3.
 ///
 /// # Panics
 /// Panics if the geometric Jacobian is degenerate (|det J| < 1e-14).
@@ -226,7 +211,14 @@ pub fn bezier_eval_3d(
     zeta: f64,
     phi: &mut [f64],
     phys_grads: &mut [f64],
-    local_to_global: &[usize],
+    patch_idx: &[usize],
+    // scratch buffers (pre-allocated by caller, reused across Gauss points)
+    phi_b: &mut [f64],
+    grads_b: &mut [f64],
+    phi_n: &mut [f64],
+    grads_n: &mut [f64],
+    phi_r: &mut [f64],
+    grads_r: &mut [f64],
 ) -> f64 {
     let p = ext.degree_u;
     let q = ext.degree_v;
@@ -234,19 +226,15 @@ pub fn bezier_eval_3d(
     let n_local = ext.n_local;
 
     // 1. Evaluate Bernstein basis + parametric gradients
-    let mut phi_b = vec![0.0_f64; n_local];
-    let mut grads_b = vec![0.0_f64; n_local * 3];
-    bezier_extraction::eval_bernstein_3d(p, q, r, xi, eta, zeta, &mut phi_b, &mut grads_b);
+    bezier_extraction::eval_bernstein_3d(p, q, r, xi, eta, zeta, phi_b, grads_b);
 
     // 2. Apply extraction: B-spline basis N = C^T · B
     let idx = elem_w * ext.n_elements_v * ext.n_elements_u
             + elem_v * ext.n_elements_u
             + elem_u;
     let C = &ext.matrices[idx];
-    let mut phi_n = vec![0.0_f64; n_local];
-    let mut grads_n = vec![0.0_f64; n_local * 3];
     bezier_extraction::apply_extraction_3d(
-        C, n_local, &phi_b, &grads_b, &mut phi_n, &mut grads_n,
+        C, n_local, phi_b, grads_b, phi_n, grads_n,
     );
 
     // 3. NURBS rational weighting using global weights
@@ -256,7 +244,7 @@ pub fn bezier_eval_3d(
     let mut dW_dv = 0.0_f64;
     let mut dW_dw = 0.0_f64;
     for a in 0..n_local {
-        let wa = w[local_to_global[a]];
+        let wa = w[patch_idx[a]];
         W += wa * phi_n[a];
         dW_du += wa * grads_n[a * 3];
         dW_dv += wa * grads_n[a * 3 + 1];
@@ -265,10 +253,8 @@ pub fn bezier_eval_3d(
     assert!(W.abs() > 1e-300, "NURBS denominator near zero");
     let inv_W = 1.0 / W;
     let inv_W2 = inv_W * inv_W;
-    let mut phi_r = vec![0.0_f64; n_local];
-    let mut grads_r = vec![0.0_f64; n_local * 3];
     for a in 0..n_local {
-        let wa = w[local_to_global[a]];
+        let wa = w[patch_idx[a]];
         let nv = phi_n[a];
         let dn_du = grads_n[a * 3];
         let dn_dv = grads_n[a * 3 + 1];
@@ -282,7 +268,7 @@ pub fn bezier_eval_3d(
     // 4. 3×3 Jacobian
     let mut jac = [[0.0_f64; 3]; 3];
     for a in 0..n_local {
-        let gi = local_to_global[a];
+        let gi = patch_idx[a];
         for i in 0..3 {
             let xa = pd.control_pts[gi][i];
             jac[i][0] += xa * grads_r[a * 3];
@@ -351,17 +337,27 @@ pub fn assemble_iga_diffusion_2d_bezier(
 
         let mut phi = vec![0.0_f64; n_local];
         let mut phys_grads = vec![0.0_f64; n_local * 2];
+        let mut patch_idx = vec![0usize; n_local];
         let mut l2g = vec![0usize; n_local];
+        let mut phi_b = vec![0.0_f64; n_local];
+        let mut grads_b = vec![0.0_f64; n_local * 2];
+        let mut phi_n = vec![0.0_f64; n_local];
+        let mut grads_n = vec![0.0_f64; n_local * 2];
+        let mut phi_r = vec![0.0_f64; n_local];
+        let mut grads_r = vec![0.0_f64; n_local * 2];
 
         for (eu, (span_u, u0, u1)) in spans_u.iter().enumerate() {
             for (ev, (span_v, v0, v1)) in spans_v.iter().enumerate() {
+                element_dof_map(*span_u, *span_v, p, q, nu, 0, &mut patch_idx);
                 element_dof_map(*span_u, *span_v, p, q, nu, dof_offset, &mut l2g);
                 for (&qx, &wx) in qpts.iter().zip(&qwts) {
                     let xi = qx; // ξ ∈ [0,1]
                     for (&qy, &wy) in qpts.iter().zip(&qwts) {
                         let eta = qy; // η ∈ [0,1]
                         let det_j = bezier_eval_2d(
-                            pd, &ext, eu, ev, xi, eta, &mut phi, &mut phys_grads, &l2g,
+                            pd, &ext, eu, ev, xi, eta, &mut phi, &mut phys_grads, &patch_idx,
+                            &mut phi_b, &mut grads_b, &mut phi_n, &mut grads_n,
+                            &mut phi_r, &mut grads_r,
                         );
                         // det_j = |det(J_ξ→x)| already includes the element size
                         // because the Jacobian maps from [0,1]² to physical coords.
@@ -410,17 +406,27 @@ pub fn assemble_iga_mass_2d_bezier(
 
         let mut phi = vec![0.0_f64; n_local];
         let mut phys_grads = vec![0.0_f64; n_local * 2];
+        let mut patch_idx = vec![0usize; n_local];
         let mut l2g = vec![0usize; n_local];
+        let mut phi_b = vec![0.0_f64; n_local];
+        let mut grads_b = vec![0.0_f64; n_local * 2];
+        let mut phi_n = vec![0.0_f64; n_local];
+        let mut grads_n = vec![0.0_f64; n_local * 2];
+        let mut phi_r = vec![0.0_f64; n_local];
+        let mut grads_r = vec![0.0_f64; n_local * 2];
 
         for (eu, (span_u, u0, u1)) in spans_u.iter().enumerate() {
             for (ev, (span_v, v0, v1)) in spans_v.iter().enumerate() {
+                element_dof_map(*span_u, *span_v, p, q, nu, 0, &mut patch_idx);
                 element_dof_map(*span_u, *span_v, p, q, nu, dof_offset, &mut l2g);
                 for (&qx, &wx) in qpts.iter().zip(&qwts) {
                     let xi = qx;
                     for (&qy, &wy) in qpts.iter().zip(&qwts) {
                         let eta = qy;
                         let det_j = bezier_eval_2d(
-                            pd, &ext, eu, ev, xi, eta, &mut phi, &mut phys_grads, &l2g,
+                            pd, &ext, eu, ev, xi, eta, &mut phi, &mut phys_grads, &patch_idx,
+                            &mut phi_b, &mut grads_b, &mut phi_n, &mut grads_n,
+                            &mut phi_r, &mut grads_r,
                         );
                         let w = wx * wy * det_j.abs();
 
@@ -467,24 +473,34 @@ pub fn assemble_iga_load_2d_bezier(
 
         let mut phi = vec![0.0_f64; n_local];
         let mut phys_grads = vec![0.0_f64; n_local * 2];
+        let mut patch_idx = vec![0usize; n_local];
         let mut l2g = vec![0usize; n_local];
+        let mut phi_b = vec![0.0_f64; n_local];
+        let mut grads_b = vec![0.0_f64; n_local * 2];
+        let mut phi_n = vec![0.0_f64; n_local];
+        let mut grads_n = vec![0.0_f64; n_local * 2];
+        let mut phi_r = vec![0.0_f64; n_local];
+        let mut grads_r = vec![0.0_f64; n_local * 2];
 
         for (eu, (span_u, u0, u1)) in spans_u.iter().enumerate() {
             for (ev, (span_v, v0, v1)) in spans_v.iter().enumerate() {
+                element_dof_map(*span_u, *span_v, p, q, nu, 0, &mut patch_idx);
                 element_dof_map(*span_u, *span_v, p, q, nu, dof_offset, &mut l2g);
                 for (&qx, &wx) in qpts.iter().zip(&qwts) {
                     let xi = qx;
                     for (&qy, &wy) in qpts.iter().zip(&qwts) {
                         let eta = qy;
                         let det_j = bezier_eval_2d(
-                            pd, &ext, eu, ev, xi, eta, &mut phi, &mut phys_grads, &l2g,
+                            pd, &ext, eu, ev, xi, eta, &mut phi, &mut phys_grads, &patch_idx,
+                            &mut phi_b, &mut grads_b, &mut phi_n, &mut grads_n,
+                            &mut phi_r, &mut grads_r,
                         );
                         let w = wx * wy * det_j.abs();
 
                         // Physical coordinates for source evaluation
                         let mut x_phys = [0.0_f64; 2];
                         for a in 0..n_local {
-                            let gi = l2g[a];
+                            let gi = patch_idx[a];
                             x_phys[0] += phi[a] * pd.control_pts[gi][0];
                             x_phys[1] += phi[a] * pd.control_pts[gi][1];
                         }
@@ -532,11 +548,21 @@ pub fn assemble_iga_diffusion_3d_bezier(
 
         let mut phi = vec![0.0_f64; n_local];
         let mut phys_grads = vec![0.0_f64; n_local * 3];
+        let mut patch_idx = vec![0usize; n_local];
         let mut l2g = vec![0usize; n_local];
+        let mut phi_b = vec![0.0_f64; n_local];
+        let mut grads_b = vec![0.0_f64; n_local * 3];
+        let mut phi_n = vec![0.0_f64; n_local];
+        let mut grads_n = vec![0.0_f64; n_local * 3];
+        let mut phi_r = vec![0.0_f64; n_local];
+        let mut grads_r = vec![0.0_f64; n_local * 3];
 
         for (eu, (span_u, _, _)) in spans_u.iter().enumerate() {
             for (ev, (span_v, _, _)) in spans_v.iter().enumerate() {
                 for (ew, (span_w, _, _)) in spans_w.iter().enumerate() {
+                    element_dof_map_3d(
+                        *span_u, *span_v, *span_w, p, q, r, nu, nv, 0, &mut patch_idx,
+                    );
                     element_dof_map_3d(
                         *span_u, *span_v, *span_w, p, q, r, nu, nv, dof_offset, &mut l2g,
                     );
@@ -548,7 +574,9 @@ pub fn assemble_iga_diffusion_3d_bezier(
                                 let zeta = qz;
                                 let det_j = bezier_eval_3d(
                                     pd, &ext, eu, ev, ew, xi, eta, zeta,
-                                    &mut phi, &mut phys_grads, &l2g,
+                                    &mut phi, &mut phys_grads, &patch_idx,
+                                    &mut phi_b, &mut grads_b, &mut phi_n, &mut grads_n,
+                                    &mut phi_r, &mut grads_r,
                                 );
                                 let w = wx * wy * wz * det_j.abs();
 
@@ -601,11 +629,21 @@ pub fn assemble_iga_mass_3d_bezier(
 
         let mut phi = vec![0.0_f64; n_local];
         let mut phys_grads = vec![0.0_f64; n_local * 3];
+        let mut patch_idx = vec![0usize; n_local];
         let mut l2g = vec![0usize; n_local];
+        let mut phi_b = vec![0.0_f64; n_local];
+        let mut grads_b = vec![0.0_f64; n_local * 3];
+        let mut phi_n = vec![0.0_f64; n_local];
+        let mut grads_n = vec![0.0_f64; n_local * 3];
+        let mut phi_r = vec![0.0_f64; n_local];
+        let mut grads_r = vec![0.0_f64; n_local * 3];
 
         for (eu, (span_u, _, _)) in spans_u.iter().enumerate() {
             for (ev, (span_v, _, _)) in spans_v.iter().enumerate() {
                 for (ew, (span_w, _, _)) in spans_w.iter().enumerate() {
+                    element_dof_map_3d(
+                        *span_u, *span_v, *span_w, p, q, r, nu, nv, 0, &mut patch_idx,
+                    );
                     element_dof_map_3d(
                         *span_u, *span_v, *span_w, p, q, r, nu, nv, dof_offset, &mut l2g,
                     );
@@ -617,7 +655,9 @@ pub fn assemble_iga_mass_3d_bezier(
                                 let zeta = qz;
                                 let det_j = bezier_eval_3d(
                                     pd, &ext, eu, ev, ew, xi, eta, zeta,
-                                    &mut phi, &mut phys_grads, &l2g,
+                                    &mut phi, &mut phys_grads, &patch_idx,
+                                    &mut phi_b, &mut grads_b, &mut phi_n, &mut grads_n,
+                                    &mut phi_r, &mut grads_r,
                                 );
                                 let w = wx * wy * wz * det_j.abs();
 
@@ -669,11 +709,21 @@ pub fn assemble_iga_load_3d_bezier(
 
         let mut phi = vec![0.0_f64; n_local];
         let mut phys_grads = vec![0.0_f64; n_local * 3];
+        let mut patch_idx = vec![0usize; n_local];
         let mut l2g = vec![0usize; n_local];
+        let mut phi_b = vec![0.0_f64; n_local];
+        let mut grads_b = vec![0.0_f64; n_local * 3];
+        let mut phi_n = vec![0.0_f64; n_local];
+        let mut grads_n = vec![0.0_f64; n_local * 3];
+        let mut phi_r = vec![0.0_f64; n_local];
+        let mut grads_r = vec![0.0_f64; n_local * 3];
 
         for (eu, (span_u, _, _)) in spans_u.iter().enumerate() {
             for (ev, (span_v, _, _)) in spans_v.iter().enumerate() {
                 for (ew, (span_w, _, _)) in spans_w.iter().enumerate() {
+                    element_dof_map_3d(
+                        *span_u, *span_v, *span_w, p, q, r, nu, nv, 0, &mut patch_idx,
+                    );
                     element_dof_map_3d(
                         *span_u, *span_v, *span_w, p, q, r, nu, nv, dof_offset, &mut l2g,
                     );
@@ -685,14 +735,16 @@ pub fn assemble_iga_load_3d_bezier(
                                 let zeta = qz;
                                 let det_j = bezier_eval_3d(
                                     pd, &ext, eu, ev, ew, xi, eta, zeta,
-                                    &mut phi, &mut phys_grads, &l2g,
+                                    &mut phi, &mut phys_grads, &patch_idx,
+                                    &mut phi_b, &mut grads_b, &mut phi_n, &mut grads_n,
+                                    &mut phi_r, &mut grads_r,
                                 );
                                 let w = wx * wy * wz * det_j.abs();
 
                                 // Physical coordinates for source evaluation
                                 let mut x_phys = [0.0_f64; 3];
                                 for a in 0..n_local {
-                                    let gi = l2g[a];
+                                    let gi = patch_idx[a];
                                     x_phys[0] += phi[a] * pd.control_pts[gi][0];
                                     x_phys[1] += phi[a] * pd.control_pts[gi][1];
                                     x_phys[2] += phi[a] * pd.control_pts[gi][2];
@@ -1006,6 +1058,59 @@ mod tests {
                 (hess_x[a * 4 + 1] - hess_x[a * 4 + 2]).abs() < 1e-14,
                 "dof {a}: physical hessian not symmetric"
             );
+        }
+    }
+
+    #[test]
+    fn bezier_2d_multipatch_matches_cdb() {
+        // Two-patch mesh: each patch is degree-1 on [0,0.5] and [0.5,1].
+        // This exercises the bug fix: element_dof_map with dof_offset > 0
+        // must not be passed to bezier_eval_2d as a patch-index.
+        let p = 1;
+        let kv = NurbsKnotVector::uniform(p, 2);
+
+        let ctrl0: Vec<[f64; 2]> = (0..9)
+            .map(|idx| {
+                let i = idx % 3;
+                let j = idx / 3;
+                [i as f64 / 2.0 * 0.5, j as f64 / 2.0 * 0.5]
+            })
+            .collect();
+        let ctrl1: Vec<[f64; 2]> = (0..9)
+            .map(|idx| {
+                let i = idx % 3;
+                let j = idx / 3;
+                [0.5 + i as f64 / 2.0 * 0.5, j as f64 / 2.0 * 0.5]
+            })
+            .collect();
+
+        let patches = vec![
+            fem_element::iga::NurbsPatch2DData {
+                kv_u: kv.clone(), kv_v: kv.clone(),
+                control_pts: ctrl0, weights: vec![1.0; 9], tag: 0,
+            },
+            fem_element::iga::NurbsPatch2DData {
+                kv_u: kv.clone(), kv_v: kv.clone(),
+                control_pts: ctrl1, weights: vec![1.0; 9], tag: 1,
+            },
+        ];
+        let mesh = NurbsMesh2D { patches, edge_connectivity: vec![] };
+
+        // Cox-de Boor reference (multi-patch aware)
+        let k_cdb = assemble_iga_diffusion_2d(&mesh, 1.0, 3);
+        // Bezier path (with the bug fix)
+        let k_bez = assemble_iga_diffusion_2d_bezier(&mesh, 1.0, 3);
+
+        assert_eq!(k_bez.nrows, k_cdb.nrows);
+        let n = k_bez.nrows;
+        for i in 0..n {
+            for ptr in k_bez.row_ptr[i]..k_bez.row_ptr[i + 1] {
+                let j = k_bez.col_idx[ptr] as usize;
+                let diff = (k_bez.values[ptr] - k_cdb.get(i, j)).abs();
+                assert!(diff < 1e-14,
+                    "2-patch K[{i},{j}]: bez={:.14e} cdb={:.14e} diff={:.2e}",
+                    k_bez.values[ptr], k_cdb.get(i, j), diff);
+            }
         }
     }
 }

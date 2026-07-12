@@ -1,4 +1,5 @@
 pub mod assembly;
+pub mod iga_assembly;
 pub mod pa_apply;
 pub mod cg;
 #[cfg(feature = "amg")]
@@ -32,6 +33,14 @@ pub use assembly::{
     assemble_elasticity_2d_tri3_gpu,
     assemble_poisson_2d_p1_f64,
     triplets_f64_to_gpu_csr,
+};
+pub use iga_assembly::{
+    assemble_iga_bezier_diffusion_2d,
+    assemble_iga_bezier_mass_2d,
+    assemble_iga_bezier_diffusion_3d,
+    assemble_iga_bezier_mass_3d,
+    GpuIgaBezier2DElement,
+    GpuIgaBezier3DElement,
 };
 pub use buffer::DeviceBuffer;
 pub use context::{GpuContext, GpuFeatures};

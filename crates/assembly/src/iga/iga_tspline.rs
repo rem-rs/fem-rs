@@ -20,30 +20,82 @@
 //! T-junction positions have no DOF — they are not in the vertex list.
 
 use fem_element::quadrature::gauss_legendre_01;
-use fem_element::tmesh::{TCell, TMesh2D};
+use fem_element::tmesh::{TCell, TMesh2D, TVertex};
 use fem_linalg::{CooMatrix, CsrMatrix};
+
+// ─── NURBS rational weighting ───────────────────────────────────────────────
+
+/// Convert B-spline blending function values and gradients to NURBS rational
+/// form, given the active-vertex weights.
+///
+/// `eval_cell` returns **non-rational** B-spline values `N_a` and gradients
+/// `∇N_a`.  T-splines with non-unit weights need the NURBS rational form:
+///
+///   R_a = w_a · N_a / W          where  W = Σ_b w_b · N_b
+///
+///   ∇_ξ R_a = (w_a · ∇_ξ N_a · W - w_a · N_a · ∇_ξ W) / W²
+///
+/// # Returns
+///   `(W, dW_du, dW_dv)` — the denominator and its parametric gradients.
+fn tspline_rationalize(
+    active: &[usize],
+    vertices: &[TVertex],
+    phi: &mut [f64],
+    grads_u: &mut [f64],
+    grads_v: &mut [f64],
+) -> (f64, f64, f64) {
+    let n = active.len();
+    // Save the original B-spline values before overwriting (need them for
+    // the gradient formula where both N_a and ∇N_a appear).
+    let bspline_phi: Vec<f64> = phi.iter().copied().collect();
+
+    // 1. Denominator W = Σ w_b · N_b  and its parametric gradients.
+    let mut W = 0.0;
+    let mut dW_du = 0.0;
+    let mut dW_dv = 0.0;
+    for (a, &vidx) in active.iter().enumerate() {
+        let wa = vertices[vidx].weight;
+        W += wa * bspline_phi[a];
+        dW_du += wa * grads_u[a];
+        dW_dv += wa * grads_v[a];
+    }
+    assert!(W.abs() > 1e-300, "T-spline denominator near zero");
+    let invW = 1.0 / W;
+    let invW2 = invW * invW;
+
+    // 2. Rational values and gradients (overwrite phi / grads in-place).
+    for (a, &vidx) in active.iter().enumerate() {
+        let wa = vertices[vidx].weight;
+        let na = bspline_phi[a];
+        let dnu = grads_u[a];
+        let dnv = grads_v[a];
+
+        phi[a] = wa * na * invW;
+        grads_u[a] = (wa * dnu * W - wa * na * dW_du) * invW2;
+        grads_v[a] = (wa * dnv * W - wa * na * dW_dv) * invW2;
+    }
+
+    (W, dW_du, dW_dv)
+}
 
 // ─── Physical map helpers ───────────────────────────────────────────────────
 
 /// Compute the physical Jacobian determinant for a T-spline cell at parametric
 /// point `(u, v)`.
 ///
-/// Uses the control-point coordinates to build the physical map:
-///   x(u,v) = Σ_a R_a(u,v) * x_a
+/// `phi`, `grads_u`, `grads_v` must already be **NURBS rational** values
+/// (post-`tspline_rationalize`).
 ///
 /// Returns `(x, y, det_j, jac_inv_t)`.
 fn tspline_physical_map(
     tmesh: &TMesh2D,
     cell: &TCell,
-    u: f64,
-    v: f64,
     phi: &[f64],
     grads_u: &[f64],
     grads_v: &[f64],
 ) -> (f64, f64, f64, [[f64; 2]; 2]) {
     let active = tmesh.find_active_vertices(cell);
 
-    // Physical coordinates and Jacobian.
     let mut x = 0.0;
     let mut y = 0.0;
     let mut dx_du = 0.0;
@@ -53,23 +105,17 @@ fn tspline_physical_map(
 
     for (a, &vidx) in active.iter().enumerate() {
         let vtx = &tmesh.vertices[vidx];
-        let w = vtx.weight;
-        let r = phi[a] * w; // NURBS-weighted value
-        let dru = grads_u[a] * w;
-        let drv = grads_v[a] * w;
-
-        x += r * vtx.x;
-        y += r * vtx.y;
-        dx_du += dru * vtx.x;
-        dx_dv += drv * vtx.x;
-        dy_du += dru * vtx.y;
-        dy_dv += drv * vtx.y;
+        x += phi[a] * vtx.x;
+        y += phi[a] * vtx.y;
+        dx_du += grads_u[a] * vtx.x;
+        dx_dv += grads_v[a] * vtx.x;
+        dy_du += grads_u[a] * vtx.y;
+        dy_dv += grads_v[a] * vtx.y;
     }
 
     let det_j = dx_du * dy_dv - dx_dv * dy_du;
     let inv_det = 1.0 / det_j;
 
-    // J^{-T}: [ [dy_dv, -dy_du], [-dx_dv, dx_du] ] / det
     let jac_inv_t = [
         [dy_dv * inv_det, -dy_du * inv_det],
         [-dx_dv * inv_det, dx_du * inv_det],
@@ -125,10 +171,12 @@ pub fn assemble_tspline_diffusion_2d(
             for (j, &eta) in qpts.iter().enumerate() {
                 tmesh.eval_cell(cell, xi, eta, &mut phi, &mut grads_u, &mut grads_v);
 
-                // Physical coordinates at this point.
+                // Convert B-spline basis to NURBS rational form.
+                tspline_rationalize(&active, &tmesh.vertices, &mut phi, &mut grads_u, &mut grads_v);
+
+                // Physical coordinates and Jacobian (uses rational values).
                 let (_x, _y, det_j, jac_inv_t) = tspline_physical_map(
-                    tmesh, cell, u0 + xi * hu, v0 + eta * hv,
-                    &phi, &grads_u, &grads_v,
+                    tmesh, cell, &phi, &grads_u, &grads_v,
                 );
 
                 // Parametric → physical gradient transformation:
@@ -138,7 +186,6 @@ pub fn assemble_tspline_diffusion_2d(
                 for a in 0..n_active {
                     let dru = grads_u[a];
                     let drv = grads_v[a];
-                    // Physical gradients
                     let drx = jac_inv_t[0][0] * dru + jac_inv_t[0][1] * drv;
                     let dry = jac_inv_t[1][0] * dru + jac_inv_t[1][1] * drv;
 
@@ -194,10 +241,10 @@ pub fn assemble_tspline_mass_2d(
         for (i, &xi) in qpts.iter().enumerate() {
             for (j, &eta) in qpts.iter().enumerate() {
                 tmesh.eval_cell(cell, xi, eta, &mut phi, &mut grads_u, &mut grads_v);
+                tspline_rationalize(&active, &tmesh.vertices, &mut phi, &mut grads_u, &mut grads_v);
 
                 let (_x, _y, det_j, _) = tspline_physical_map(
-                    tmesh, cell, u0 + xi * hu, v0 + eta * hv,
-                    &phi, &grads_u, &grads_v,
+                    tmesh, cell, &phi, &grads_u, &grads_v,
                 );
 
                 let w = qwts[i] * qwts[j] * hu * hv * det_j.abs();
@@ -251,10 +298,10 @@ pub fn assemble_tspline_load_2d(
         for (i, &xi) in qpts.iter().enumerate() {
             for (j, &eta) in qpts.iter().enumerate() {
                 tmesh.eval_cell(cell, xi, eta, &mut phi, &mut grads_u, &mut grads_v);
+                tspline_rationalize(&active, &tmesh.vertices, &mut phi, &mut grads_u, &mut grads_v);
 
                 let (x_phys, y_phys, det_j, _) = tspline_physical_map(
-                    tmesh, cell, u0 + xi * hu, v0 + eta * hv,
-                    &phi, &grads_u, &grads_v,
+                    tmesh, cell, &phi, &grads_u, &grads_v,
                 );
 
                 let w = qwts[i] * qwts[j] * hu * hv * det_j.abs();
@@ -488,15 +535,10 @@ mod tests {
                 for (i, &xi) in qpts.iter().enumerate() {
                     for (j, &eta) in qpts.iter().enumerate() {
                         tmesh.eval_cell(cell, xi, eta, &mut phi, &mut gu, &mut gv);
+                        tspline_rationalize(&active, &tmesh.vertices, &mut phi, &mut gu, &mut gv);
 
                         let (x_phys, y_phys, det_j, _) = tspline_physical_map(
-                            &tmesh,
-                            cell,
-                            u0 + xi * hu,
-                            v0 + eta * hv,
-                            &phi,
-                            &gu,
-                            &gv,
+                            &tmesh, cell, &phi, &gu, &gv,
                         );
                         let w = qwts[i] * qwts[j] * hu * hv * det_j.abs();
                         let u_exact = x_phys * (1.0 - x_phys) * y_phys * (1.0 - y_phys);

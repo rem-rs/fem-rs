@@ -371,7 +371,7 @@ fn run_assembly_shader_f64(
 }
 
 /// Dispatch an f64 assembly shader with custom uniform parameters.
-fn run_assembly_shader_f64_with_params(
+pub(crate) fn run_assembly_shader_f64_with_params(
     gpu: &GpuContext,
     elem_bytes: &[u8],
     n_elem: usize,
