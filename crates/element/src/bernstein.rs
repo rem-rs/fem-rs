@@ -68,6 +68,28 @@ pub fn bernstein_ders(p: usize, t: f64) -> Vec<f64> {
     d
 }
 
+/// Evaluate all degree-p Bernstein basis second derivatives at t ∈ [0,1].
+/// dders[i] = d²/dt² B_{i,p}(t)
+///
+/// Uses the closed-form recurrence:
+///   d²B_{p,i}/dt² = p·(p-1)·(B_{p-2,i-2} - 2·B_{p-2,i-1} + B_{p-2,i})
+/// where B_{p,i} = 0 for i < 0 or i > p.
+pub fn bernstein_dders(p: usize, t: f64) -> Vec<f64> {
+    if p < 2 {
+        return vec![0.0; p + 1];
+    }
+    let v_low = bernstein_vals(p - 2, t);
+    let pf = p as f64 * (p - 1) as f64;
+    let mut d = Vec::with_capacity(p + 1);
+    for i in 0..=p {
+        let b1 = if i >= 2 { v_low[i - 2] } else { 0.0 };
+        let b2 = if i >= 1 && i <= p - 1 { v_low[i - 1] } else { 0.0 };
+        let b3 = if i <= p - 2 { v_low[i] } else { 0.0 };
+        d.push(pf * (b1 - 2.0 * b2 + b3));
+    }
+    d
+}
+
 /// Evaluate all 2D tensor-product Bernstein basis functions at (ξ, η) ∈ [0,1]².
 /// values[j*(p+1)+i] = B_{i,p}(ξ)·B_{j,p}(η)  (row-major, j outer, i inner)
 pub fn bernstein_vals_2d(p: usize, xi: f64, eta: f64) -> Vec<f64> {
@@ -334,6 +356,34 @@ mod tests {
                     assert!((d_analytic[i] - fd).abs() < 1e-7,
                         "p={p} t={t} i={i}: analytic={} fd={}", d_analytic[i], fd);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn bernstein_dders_fd() {
+        let h = 1e-8;
+        for p in 2..=6 {
+            // Avoid t very close to 0 or 1 where high-degree derivatives amplify FD error
+            for &t in &[0.1, 0.3, 0.5, 0.7] {
+                let dd_analytic = bernstein_dders(p, t);
+                let dp = bernstein_ders(p, t + h);
+                let dm = bernstein_ders(p, t - h);
+                for i in 0..=p {
+                    let fd = (dp[i] - dm[i]) / (2.0 * h);
+                    assert!((dd_analytic[i] - fd).abs() < 1e-6,
+                        "p={p} t={t} i={i}: analytic={} fd={}", dd_analytic[i], fd);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bernstein_dders_p0_p1_zero() {
+        for p in 0..=1 {
+            let dd = bernstein_dders(p, 0.5);
+            for i in 0..=p {
+                assert!((dd[i] - 0.0).abs() < 1e-14, "p={p} i={i}: dd={}", dd[i]);
             }
         }
     }

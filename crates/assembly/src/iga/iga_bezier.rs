@@ -714,6 +714,57 @@ pub fn assemble_iga_load_3d_bezier(
     rhs
 }
 
+// ─── Hessian transformation (parametric → physical) ──────────────────────────
+
+/// Transform parametric Hessians to physical Hessians (affine approximation).
+///
+/// For shell elements, the physical second derivatives are needed for the
+/// Kirchhoff-Love bending energy:
+///
+///   ∂²R/∂x² = (∂²R/∂u²) (∂u/∂x)² + (∂²R/∂v²) (∂v/∂x)²
+///             + 2 (∂²R/∂u∂v) (∂u/∂x)(∂v/∂x)
+///
+/// This is an affine approximation that ignores the second derivatives of the
+/// inverse mapping (∂²u/∂x², ∂²v/∂x², etc.).  This is exact when the Jacobian
+/// is constant (e.g., affine maps, h-refined meshes with small elements).
+///
+/// # Arguments
+/// * `hessian_xi` — parametric Hessians, stride 4 per DOF:
+///   `[d²R/du², d²R/dudv, d²R/dvdu, d²R/dv²]`
+/// * `ji` — inverse Jacobian `J^{-1}` as a 2×2 matrix
+/// * `n_dof` — number of DOFs
+/// * `hessian_x` — output physical Hessians, stride 4 per DOF:
+///   `[d²R/dx², d²R/dxdy, d²R/dydx, d²R/dy²]`
+pub fn hessian_parametric_to_physical(
+    hessian_xi: &[f64],
+    ji: &[[f64; 2]; 2],
+    n_dof: usize,
+    hessian_x: &mut [f64],
+) {
+    let j00 = ji[0][0];
+    let j01 = ji[0][1];
+    let j10 = ji[1][0];
+    let j11 = ji[1][1];
+
+    for a in 0..n_dof {
+        let d2u2 = hessian_xi[a * 4];
+        let d2v2 = hessian_xi[a * 4 + 3];
+        let d2uv = hessian_xi[a * 4 + 1]; // = d²R/dudv
+
+        // Affine approximation (ignoring second derivatives of inverse mapping)
+        // ∂²R/∂x² ≈ (∂²R/∂u²) (∂u/∂x)² + (∂²R/∂v²) (∂v/∂x)²
+        //            + 2 (∂²R/∂u∂v) (∂u/∂x)(∂v/∂x)
+        let d2x2 = d2u2 * j00 * j00 + d2v2 * j10 * j10 + 2.0 * d2uv * j00 * j10;
+        let d2y2 = d2u2 * j01 * j01 + d2v2 * j11 * j11 + 2.0 * d2uv * j01 * j11;
+        let d2xy = d2u2 * j00 * j01 + d2v2 * j10 * j11 + d2uv * (j00 * j11 + j01 * j10);
+
+        hessian_x[a * 4] = d2x2;
+        hessian_x[a * 4 + 1] = d2xy;
+        hessian_x[a * 4 + 2] = d2xy;
+        hessian_x[a * 4 + 3] = d2y2;
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -917,5 +968,44 @@ mod tests {
             }
         }
         assert!(max_diff < 1e-10, "max diff for non-uniform 2D = {:.2e}", max_diff);
+    }
+
+    // ── Hessian tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn hessian_physical_affine_mapping() {
+        // For an affine map J = [[2,0],[0,3]], J^{-1} = [[0.5,0],[0,1/3]]
+        // The hessian transformation should be invertible.
+        let ji = [[0.5_f64, 0.0_f64], [0.0_f64, 1.0_f64 / 3.0_f64]];
+        let n_dof = 2;
+        // Test with random hessian values
+        let hess_xi = vec![1.0, 0.5, 0.5, 2.0, 0.0, 0.1, 0.1, 0.0];
+        let mut hess_x = vec![0.0; n_dof * 4];
+        hessian_parametric_to_physical(&hess_xi, &ji, n_dof, &mut hess_x);
+        // For a diagonal J^{-1}, the transformation simplifies:
+        // d²R/dx² = d²R/du² * J^{-1}[0][0]²
+        // d²R/dy² = d²R/dv² * J^{-1}[1][1]²
+        // d²R/dxdy = d²R/dudv * J^{-1}[0][0] * J^{-1}[1][1]
+        assert!((hess_x[0] - 1.0 * 0.25).abs() < 1e-14, "d2x2 dof0: {}", hess_x[0]);
+        assert!((hess_x[3] - 2.0 / 9.0).abs() < 1e-14, "d2y2 dof0: {}", hess_x[3]);
+        assert!((hess_x[1] - 0.5 * 0.5 / 3.0).abs() < 1e-14, "d2xy dof0: {}", hess_x[1]);
+        assert!((hess_x[4] - 0.0).abs() < 1e-14, "d2x2 dof1: {}", hess_x[4]);
+        assert!((hess_x[7] - 0.0).abs() < 1e-14, "d2y2 dof1: {}", hess_x[7]);
+    }
+
+    #[test]
+    fn hessian_physical_symmetry_preserved() {
+        // The physical hessian must be symmetric: d²R/dxdy = d²R/dydx
+        let ji = [[1.2_f64, 0.5_f64], [-0.3_f64, 0.8_f64]];
+        let n_dof = 4;
+        let hess_xi: Vec<f64> = (0..n_dof * 4).map(|i| (i + 1) as f64 * 0.1).collect();
+        let mut hess_x = vec![0.0; n_dof * 4];
+        hessian_parametric_to_physical(&hess_xi, &ji, n_dof, &mut hess_x);
+        for a in 0..n_dof {
+            assert!(
+                (hess_x[a * 4 + 1] - hess_x[a * 4 + 2]).abs() < 1e-14,
+                "dof {a}: physical hessian not symmetric"
+            );
+        }
     }
 }

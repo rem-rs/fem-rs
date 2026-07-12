@@ -60,7 +60,7 @@ pub mod bezier_extraction;
 
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use quadrature::{TriQuadRule, tri_rule_named};
-pub use bernstein::{BernsteinSegPk, BernsteinQuadPk, BernsteinHexPk, bernstein_vals, bernstein_ders, bernstein_vals_2d, bernstein_vals_3d, bernstein_ders_2d};
+pub use bernstein::{BernsteinSegPk, BernsteinQuadPk, BernsteinHexPk, bernstein_vals, bernstein_ders, bernstein_dders, bernstein_vals_2d, bernstein_vals_3d, bernstein_ders_2d};
 pub use bernstein_simplex::{BernsteinTriPk, BernsteinTetPk};
 pub use serendipity::{QuadSerendipityPk, HexSerendipityPk};
 pub use lagrange::{HexQ1, HexQ2, HexQ3, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadP1, QuadP2, QuadP3, QuadP4, SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, TetP1, TetP2, TetP3, TetP4, TetP5, TetP6, TriP1, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8, TriP9, TriP10,

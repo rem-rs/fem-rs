@@ -13,7 +13,7 @@
 //! # Reference
 //! * Borden et al., "Isogeometric analysis with Bézier extraction" (CMAME 2011)
 
-use crate::bernstein::{bernstein_ders, bernstein_vals};
+use crate::bernstein::{bernstein_dders, bernstein_ders, bernstein_vals};
 use crate::nurbs::KnotVector;
 
 /// 1-D Bezier extraction data: one `(p+1)×(p+1)` identity matrix per element.
@@ -349,6 +349,71 @@ pub fn apply_extraction_3d(C: &[f64], n_local: usize,
     }
 }
 
+// ── Bernstein second derivatives (Hessians) for shell elements ──────────────
+
+/// Evaluate 2-D Bernstein basis parametric Hessians at `(xi, eta)`.
+///
+/// `hessians` must have length `(p+1)*(q+1) * 4`, layout per DOF `a`:
+/// - `hessians[a*4 + 0]` = d²B/dξ²
+/// - `hessians[a*4 + 1]` = d²B/dξdη
+/// - `hessians[a*4 + 2]` = d²B/dηdξ  (symmetric)
+/// - `hessians[a*4 + 3]` = d²B/dη²
+///
+/// For the tensor-product Bernstein basis B_i(ξ)·B_j(η):
+///   d²(B_i·B_j)/dξ²   = B''_i(ξ)·B_j(η)
+///   d²(B_i·B_j)/dη²   = B_i(ξ)·B''_j(η)
+///   d²(B_i·B_j)/dξdη  = B'_i(ξ)·B'_j(η)
+pub fn eval_bernstein_hessian_2d(
+    p: usize,
+    q: usize,
+    xi: f64,
+    eta: f64,
+    hessians: &mut [f64],
+) {
+    let bu = bernstein_vals(p, xi);
+    let bv = bernstein_vals(q, eta);
+    let du = bernstein_ders(p, xi);
+    let dv = bernstein_ders(q, eta);
+    let ddu = bernstein_dders(p, xi);
+    let ddv = bernstein_dders(q, eta);
+    let np1 = p + 1;
+    let nq1 = q + 1;
+    for j in 0..nq1 {
+        for i in 0..np1 {
+            let idx = j * np1 + i;
+            hessians[idx * 4] = ddu[i] * bv[j]; // d²/dξ²
+            hessians[idx * 4 + 1] = du[i] * dv[j]; // d²/dξdη
+            hessians[idx * 4 + 2] = du[i] * dv[j]; // symmetric
+            hessians[idx * 4 + 3] = bu[i] * ddv[j]; // d²/dη²
+        }
+    }
+}
+
+/// Apply 2-D extraction to Hessians: hessian_nurbs = C^T · hessian_bernstein.
+///
+/// Each Hessian has stride 4 per DOF: `[d2/dξ2, d2/dξdη, d2/dηdξ, d2/dη2]`.
+pub fn apply_extraction_hessian_2d(
+    C: &[f64],
+    n_local: usize,
+    hess_b: &[f64],
+    hess_n: &mut [f64],
+) {
+    for i in 0..n_local {
+        let (mut h_uu, mut h_uv, mut h_vu, mut h_vv) = (0.0, 0.0, 0.0, 0.0);
+        for j in 0..n_local {
+            let ct = C[i * n_local + j];
+            h_uu += ct * hess_b[j * 4];
+            h_uv += ct * hess_b[j * 4 + 1];
+            h_vu += ct * hess_b[j * 4 + 2];
+            h_vv += ct * hess_b[j * 4 + 3];
+        }
+        hess_n[i * 4] = h_uu;
+        hess_n[i * 4 + 1] = h_uv;
+        hess_n[i * 4 + 2] = h_vu;
+        hess_n[i * 4 + 3] = h_vv;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,6 +543,85 @@ mod tests {
         for i in 0..n_local {
             assert!((phi_n[i] - phi_b[i]).abs() < 1e-14);
             assert!((grads_n[i*3] - grads_b[i*3]).abs() < 1e-14);
+        }
+    }
+
+    // ── Hessian tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn bernstein_hessian_2d_closed_form() {
+        // Verify that eval_bernstein_hessian_2d matches the closed-form product
+        // of bernstein_dders × bernstein_vals for each tensor-product component.
+        for &p in &[2, 3] {
+            for &q in &[2, 3] {
+                for &xi in &[0.2, 0.5, 0.8] {
+                    for &eta in &[0.3, 0.6, 0.9] {
+                        let bu = bernstein_vals(p, xi);
+                        let bv = bernstein_vals(q, eta);
+                        let du = bernstein_ders(p, xi);
+                        let dv = bernstein_ders(q, eta);
+                        let ddu = bernstein_dders(p, xi);
+                        let ddv = bernstein_dders(q, eta);
+                        let np1 = p + 1;
+                        let nq1 = q + 1;
+                        let n_local = np1 * nq1;
+                        let mut hess = vec![0.0; n_local * 4];
+                        eval_bernstein_hessian_2d(p, q, xi, eta, &mut hess);
+                        for j in 0..nq1 {
+                            for i in 0..np1 {
+                                let idx = j * np1 + i;
+                                let expected_uu = ddu[i] * bv[j];
+                                let expected_uv = du[i] * dv[j];
+                                let expected_vv = bu[i] * ddv[j];
+                                assert!(
+                                    (hess[idx * 4] - expected_uu).abs() < 1e-14,
+                                    "p={p} q={q} ({xi},{eta}) [{i},{j}]: d2/dxi2 analytic={} expected={}",
+                                    hess[idx * 4], expected_uu
+                                );
+                                assert!(
+                                    (hess[idx * 4 + 1] - expected_uv).abs() < 1e-14,
+                                    "p={p} q={q} ({xi},{eta}) [{i},{j}]: d2/dxideta analytic={} expected={}",
+                                    hess[idx * 4 + 1], expected_uv
+                                );
+                                assert!(
+                                    (hess[idx * 4 + 3] - expected_vv).abs() < 1e-14,
+                                    "p={p} q={q} ({xi},{eta}) [{i},{j}]: d2/deta2 analytic={} expected={}",
+                                    hess[idx * 4 + 3], expected_vv
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn apply_extraction_hessian_2d_identity() {
+        let n_local = 6; // p=2, q=1 → 3*2 = 6
+        let p = 2;
+        let q = 1;
+        let mut hess_b = vec![0.0; n_local * 4];
+        eval_bernstein_hessian_2d(p, q, 0.4, 0.6, &mut hess_b);
+        let mut C = vec![0.0; n_local * n_local];
+        for i in 0..n_local {
+            C[i * n_local + i] = 1.0;
+        }
+        let mut hess_n = vec![0.0; n_local * 4];
+        apply_extraction_hessian_2d(&C, n_local, &hess_b, &mut hess_n);
+        for i in 0..n_local {
+            assert!(
+                (hess_n[i * 4] - hess_b[i * 4]).abs() < 1e-14,
+                "i={i}: d2/dxi2 mismatch"
+            );
+            assert!(
+                (hess_n[i * 4 + 1] - hess_b[i * 4 + 1]).abs() < 1e-14,
+                "i={i}: d2/dxideta mismatch"
+            );
+            assert!(
+                (hess_n[i * 4 + 3] - hess_b[i * 4 + 3]).abs() < 1e-14,
+                "i={i}: d2/deta2 mismatch"
+            );
         }
     }
 }

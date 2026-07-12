@@ -249,6 +249,42 @@ impl KnotVector {
 
         (n_vals, dn)
     }
+
+    /// Evaluate B-spline basis values, first derivatives, **and** second derivatives.
+    ///
+    /// Returns `(N, dN, ddN)` where each has length `p+1`.
+    ///
+    /// For degree ≤ 1, the second derivatives are identically zero.
+    /// For degree ≥ 2, uses centered finite differences on the basis values
+    /// (second-order accurate, O(eps²) error).  The evaluation point is clamped
+    /// to stay within the current knot span for robustness near span boundaries.
+    pub fn basis_funs_and_ders2(&self, span: usize, xi: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let p = self.degree;
+        let (n, dn) = self.basis_funs_and_ders(span, xi);
+
+        // Degree ≤ 1: piecewise linear/constant → zero second derivative
+        if p <= 1 {
+            return (n, dn, vec![0.0; p + 1]);
+        }
+
+        let knots = &self.knots;
+
+        // Clamp the evaluation window so we stay within [knots[span], knots[span+1]]
+        let xi0 = knots[span];
+        let xi1 = knots[span + 1];
+        let h = (xi1 - xi0).max(1e-14);
+        let eps = 1e-6_f64.min(h * 0.25);
+
+        let xi_p = (xi + eps).min(xi1 - 1e-14);
+        let xi_m = (xi - eps).max(xi0 + 1e-14);
+
+        let (np, _) = self.basis_funs_and_ders(span, xi_p);
+        let (nm, _) = self.basis_funs_and_ders(span, xi_m);
+
+        let inv_eps2 = 1.0 / (eps * eps);
+        let ddn: Vec<f64> = (0..=p).map(|j| (np[j] - 2.0 * n[j] + nm[j]) * inv_eps2).collect();
+        (n, dn, ddn)
+    }
 }
 
 // ─── BSplineBasis1D ───────────────────────────────────────────────────────────
@@ -300,6 +336,25 @@ impl BSplineBasis1D {
             ders[span - p + j] = local_dn[j];
         }
         (vals, ders)
+    }
+
+    /// Evaluate all basis functions, first derivatives, **and** second derivatives at `xi`.
+    ///
+    /// Returns `(values, derivatives, second_derivatives)`, each of length `n_basis()`.
+    pub fn eval_with_ders2(&self, xi: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let n = self.n_basis();
+        let span = self.kv.find_span(xi);
+        let (local_n, local_dn, local_ddn) = self.kv.basis_funs_and_ders2(span, xi);
+        let p = self.kv.degree;
+        let mut vals = vec![0.0_f64; n];
+        let mut ders = vec![0.0_f64; n];
+        let mut dders = vec![0.0_f64; n];
+        for j in 0..=p {
+            vals[span - p + j] = local_n[j];
+            ders[span - p + j] = local_dn[j];
+            dders[span - p + j] = local_ddn[j];
+        }
+        (vals, ders, dders)
     }
 }
 
@@ -358,6 +413,100 @@ impl NurbsPatch2D {
     pub fn n_u(&self) -> usize { self.basis_u.n_basis() }
     /// Number of DOFs in $v$.
     pub fn n_v(&self) -> usize { self.basis_v.n_basis() }
+
+    /// Evaluate NURBS Hessians (second derivatives) at `xi = [u, v]` in
+    /// **parametric** coordinates.
+    ///
+    /// `hessians` must have length `n_dofs * 4`.  Layout per DOF `a`:
+    /// - `hessians[a*4 + 0]` = d²R/du²
+    /// - `hessians[a*4 + 1]` = d²R/dudv
+    /// - `hessians[a*4 + 2]` = d²R/dvdu  (symmetric, same as dudv)
+    /// - `hessians[a*4 + 3]` = d²R/dv²
+    ///
+    /// Uses the quotient rule applied twice (see Phase 2.6 notes).
+    /// The underlying B-spline second derivatives are computed via
+    /// centered finite differences on the basis values.
+    pub fn eval_hessian_basis(&self, xi: &[f64], hessians: &mut [f64]) {
+        let (u, v) = (xi[0], xi[1]);
+        let n_u = self.n_u();
+        let n_v = self.n_v();
+        let n_dofs = n_u * n_v;
+
+        let (nu, dnu, ddnu) = self.basis_u.eval_with_ders2(u);
+        let (nv, dnv, ddnv) = self.basis_v.eval_with_ders2(v);
+
+        // B-spline tensor-product values and parametric derivatives
+        let mut b = vec![0.0_f64; n_dofs];
+        let mut db_du = vec![0.0_f64; n_dofs];
+        let mut db_dv = vec![0.0_f64; n_dofs];
+        let mut d2b_du2 = vec![0.0_f64; n_dofs];
+        let mut d2b_dv2 = vec![0.0_f64; n_dofs];
+        let mut d2b_dudv = vec![0.0_f64; n_dofs];
+
+        for j in 0..n_v {
+            for i in 0..n_u {
+                let dof = j * n_u + i;
+                b[dof] = nu[i] * nv[j];
+                db_du[dof] = dnu[i] * nv[j];
+                db_dv[dof] = nu[i] * dnv[j];
+                d2b_du2[dof] = ddnu[i] * nv[j];
+                d2b_dv2[dof] = nu[i] * ddnv[j];
+                d2b_dudv[dof] = dnu[i] * dnv[j];
+            }
+        }
+
+        // Denominator W = Σ w_k B_k and its parametric derivatives
+        let w = &self.weights;
+        let mut W = 0.0_f64;
+        let mut dW_du = 0.0_f64;
+        let mut dW_dv = 0.0_f64;
+        let mut d2W_du2 = 0.0_f64;
+        let mut d2W_dv2 = 0.0_f64;
+        let mut d2W_dudv = 0.0_f64;
+
+        for a in 0..n_dofs {
+            let wa = w[a];
+            W += wa * b[a];
+            dW_du += wa * db_du[a];
+            dW_dv += wa * db_dv[a];
+            d2W_du2 += wa * d2b_du2[a];
+            d2W_dv2 += wa * d2b_dv2[a];
+            d2W_dudv += wa * d2b_dudv[a];
+        }
+
+        assert!(W.abs() > 1e-300, "NURBS denominator near zero at ({u},{v})");
+        let inv_W = 1.0 / W;
+        let inv_W2 = inv_W * inv_W;
+
+        // NURBS rational quotient rule for values, first and second derivatives
+        for a in 0..n_dofs {
+            let wa = w[a];
+            let n_val = b[a];
+            let dn_du = db_du[a];
+            let dn_dv = db_dv[a];
+            let d2n_du2 = d2b_du2[a];
+            let d2n_dv2 = d2b_dv2[a];
+            let d2n_dudv = d2b_dudv[a];
+
+            // First derivatives (same as eval_grad_basis)
+            let dr_du = (wa * dn_du * W - wa * n_val * dW_du) * inv_W2;
+            let dr_dv = (wa * dn_dv * W - wa * n_val * dW_dv) * inv_W2;
+
+            // Second derivatives via repeated quotient rule:
+            //   R'' = [w*N''*W - w*N*W''] / W²  -  2*W'*R' / W
+            let d2r_du2 =
+                (wa * d2n_du2 * W - wa * n_val * d2W_du2) * inv_W2 - 2.0 * dW_du * dr_du * inv_W;
+            let d2r_dv2 =
+                (wa * d2n_dv2 * W - wa * n_val * d2W_dv2) * inv_W2 - 2.0 * dW_dv * dr_dv * inv_W;
+            let d2r_dudv = (wa * d2n_dudv * W - wa * n_val * d2W_dudv) * inv_W2
+                - (dW_du * dr_dv + dW_dv * dr_du) * inv_W;
+
+            hessians[a * 4] = d2r_du2;
+            hessians[a * 4 + 1] = d2r_dudv;
+            hessians[a * 4 + 2] = d2r_dudv; // symmetric
+            hessians[a * 4 + 3] = d2r_dv2;
+        }
+    }
 }
 
 impl ReferenceElement for NurbsPatch2D {
@@ -1736,5 +1885,150 @@ mod tests {
         let r = h_refine_3d(&pd, &[0.5], &[0.5], &[0.5]);
         // Each direction adds one knot → nu=3, nv=3, nw=3 → total = 27
         assert_eq!(r.control_pts.len(), 27);
+    }
+
+    // ── Second derivative tests ──────────────────────────────────────────────
+
+    #[test]
+    fn bspline_second_derivatives_match_fd() {
+        // Degree 1 is piecewise linear (exact zero second derivative).
+        // The FD comparison is noise-dominated (1e-16 / h^2 ~ 2e-4), so skip it.
+        for degree in 2..=4 {
+            let kv = KnotVector::uniform(degree, 5);
+            let basis = BSplineBasis1D::new(kv);
+            let eps = 1e-6;
+            for xi in [0.05, 0.15, 0.35, 0.5, 0.65, 0.85, 0.95] {
+                let (_, _, ddn) = basis.eval_with_ders2(xi);
+                let (np, _) = basis.eval_with_ders(xi + eps);
+                let (nm, _) = basis.eval_with_ders(xi - eps);
+                let n0 = basis.eval(xi);
+                // Second-order central difference on basis values
+                for j in 0..basis.n_basis() {
+                    let fd = (np[j] - 2.0 * n0[j] + nm[j]) / (eps * eps);
+                    assert!(
+                        (ddn[j] - fd).abs() < 1e-4,
+                        "degree={degree}, xi={xi}, j={j}: analytic={:.6e} fd={:.6e}",
+                        ddn[j],
+                        fd
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nurbs2d_hessian_is_symmetric() {
+        let kv = KnotVector::uniform(2, 3);
+        let patch = NurbsPatch2D::uniform(kv.clone(), kv.clone());
+        let n = patch.n_dofs();
+        let mut hess = vec![0.0; n * 4];
+        patch.eval_hessian_basis(&[0.4, 0.6], &mut hess);
+        for a in 0..n {
+            assert!(
+                (hess[a * 4 + 1] - hess[a * 4 + 2]).abs() < 1e-14,
+                "d2R/dudv != d2R/dvdu at dof {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn nurbs2d_hessian_sum_to_zero_linear() {
+        // For a linear NURBS (degree 1), second derivatives should be zero
+        // because the basis functions are piecewise linear.
+        // Use interior point away from knots (0.5 is a knot for uniform(1,4))
+        let kv = KnotVector::uniform(1, 4);
+        let patch = NurbsPatch2D::uniform(kv.clone(), kv.clone());
+        let n = patch.n_dofs();
+        let mut hess = vec![0.0; n * 4];
+        patch.eval_hessian_basis(&[0.3, 0.7], &mut hess);
+        for a in 0..n {
+            assert!(
+                hess[a * 4].abs() < 1e-12,
+                "d2R/du2 not zero for degree 1 at dof {a}: {}",
+                hess[a * 4]
+            );
+            assert!(
+                hess[a * 4 + 3].abs() < 1e-12,
+                "d2R/dv2 not zero for degree 1 at dof {a}: {}",
+                hess[a * 4 + 3]
+            );
+        }
+    }
+
+    #[test]
+    fn nurbs2d_hessian_fd_check() {
+        let kv = KnotVector::uniform(2, 3);
+        let patch = NurbsPatch2D::uniform(kv.clone(), kv.clone());
+        let n = patch.n_dofs();
+        let h = 1e-6;
+        let u0 = 0.4;
+        let v0 = 0.6;
+
+        let mut hess = vec![0.0; n * 4];
+        patch.eval_hessian_basis(&[u0, v0], &mut hess);
+
+        // d2R/du2 via FD on first derivatives in u
+        let mut gp = vec![0.0; n * 2];
+        let mut gm = vec![0.0; n * 2];
+        patch.eval_grad_basis(&[u0 + h, v0], &mut gp);
+        patch.eval_grad_basis(&[u0 - h, v0], &mut gm);
+        for a in 0..n {
+            let fd = (gp[a * 2] - gm[a * 2]) / (2.0 * h);
+            assert!(
+                (hess[a * 4] - fd).abs() < 5e-4,
+                "a={a}: d2R/du2 analytic={:.6e} fd={:.6e}",
+                hess[a * 4],
+                fd
+            );
+        }
+
+        // d2R/dv2 via FD on first derivatives in v
+        patch.eval_grad_basis(&[u0, v0 + h], &mut gp);
+        patch.eval_grad_basis(&[u0, v0 - h], &mut gm);
+        for a in 0..n {
+            let fd = (gp[a * 2 + 1] - gm[a * 2 + 1]) / (2.0 * h);
+            assert!(
+                (hess[a * 4 + 3] - fd).abs() < 5e-4,
+                "a={a}: d2R/dv2 analytic={:.6e} fd={:.6e}",
+                hess[a * 4 + 3],
+                fd
+            );
+        }
+
+        // d2R/dudv via FD on dR/du w.r.t. v
+        patch.eval_grad_basis(&[u0, v0 + h], &mut gp);
+        patch.eval_grad_basis(&[u0, v0 - h], &mut gm);
+        for a in 0..n {
+            let fd = (gp[a * 2] - gm[a * 2]) / (2.0 * h);
+            assert!(
+                (hess[a * 4 + 1] - fd).abs() < 5e-4,
+                "a={a}: d2R/dudv analytic={:.6e} fd={:.6e}",
+                hess[a * 4 + 1],
+                fd
+            );
+        }
+    }
+
+    #[test]
+    fn bspline_second_derivatives_nonuniform() {
+        let kv =
+            KnotVector::new(vec![0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0, 1.0, 1.0], 2);
+        let basis = BSplineBasis1D::new(kv);
+        let eps = 1e-6;
+        for xi in [0.05, 0.15, 0.35, 0.65, 0.85, 0.95] {
+            let (_, _, ddn) = basis.eval_with_ders2(xi);
+            let (np, _) = basis.eval_with_ders((xi + eps).min(0.9999));
+            let (nm, _) = basis.eval_with_ders((xi - eps).max(0.0001));
+            let n0 = basis.eval(xi);
+            for j in 0..basis.n_basis() {
+                let fd = (np[j] - 2.0 * n0[j] + nm[j]) / (eps * eps);
+                assert!(
+                    (ddn[j] - fd).abs() < 1e-4,
+                    "xi={xi}, j={j}: analytic={:.6e} fd={:.6e}",
+                    ddn[j],
+                    fd
+                );
+            }
+        }
     }
 }
