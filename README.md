@@ -31,6 +31,20 @@ fem-rs/
 └── examples/       fem-examples — MFEM-style examples + EM simulations + parallel examples
 ```
 
+---
+
+## Editions
+
+fem-rs is available in two editions:
+
+| Edition | License | Repository | Includes |
+|---------|---------|------------|----------|
+| **Community** (this repo) | Apache 2.0 | Public GitHub | Complete MFEM-comparable FEM library with WGSL GPU acceleration |
+| **Professional** (fem-pro) | Proprietary | Private | GPU (CUDA), T-spline IGA, trimmed NURBS, CAD integration (STEP/IGES), advanced solvers (FETI/BDDC, JDQZ), industry physics, enterprise features |
+
+The community edition is a **fully functional FEM library** — no crippleware.
+The professional edition builds on the community via plugin API traits (see [`EDITION_SPLIT.md`](./EDITION_SPLIT.md)).
+
 ### MFEM-Style Examples
 
 All examples listed in this section are intended to have a one-to-one correspondence

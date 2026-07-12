@@ -13,7 +13,7 @@
 |------|-----------|-------------|--------|
 | Serial (ex1–ex53) | 53 | 53 | **100%** |
 | Parallel (pex1–pex27+) | 27+ | 27 | **100%** (仅缺 pex26 几何 MG) |
-| IGA (ex_iga) | — | 5 | — |
+| IGA (ex_iga) | — | 5 OSS + N Pro | OSS: 单片 NURBS 示例; Pro: T-spline/trimmed/contact |
 
 ### 覆盖状态 — 已编号示例
 
@@ -128,7 +128,8 @@
 | HCurl (Nédélec) | ✅ `HCurlSpace` | ND/ND1 系列 |
 | HDiv (Raviart–Thomas) | ✅ `HdivSpace` | RT0/RT1 系列 |
 | Complex H¹ | ✅ `ComplexH1Space` | 对齐 |
-| IGA | ✅ `IgaFESpace` (1/2/3D) | 对齐 |
+| IGA (基础) | ✅ `IgaFESpace` (1/2/3D) | 对齐 MFEM (NURBS 基, 单片装配, Bezier 提取) |
+| IGA (高级) | ❌ → **Pro** | T-spline, trimmed NURBS, multi-patch C¹/C², IGA contact |
 | VEM | ✅ `VEMSpace` (任意阶) | **超越 MFEM** |
 | CR (Crouzeix–Raviart) | ✅ `CrSpace` | 对齐 |
 | Trace spaces | ✅ | 对齐 |
@@ -232,10 +233,12 @@
 
 | 能力 | 状态 |
 |------|------|
-| STEP 读取 | ✅ (B_SPLINE_SURFACE) |
-| IGES 读取 | ✅ |
+| STEP 读取 | Basic (B_SPLINE_SURFACE) in OSS, full → **Pro** |
+| IGES 读取 | Basic in OSS, full → **Pro** |
 | NURBS 片解析 | ✅ `NurbsPatch2D` |
 | CAD 模型分类 | ✅ `CadShape` |
+| Trimmed NURBS | ❌ → **Pro** |
+| OpenCASCADE 集成 | ❌ → **Pro** |
 
 ---
 
