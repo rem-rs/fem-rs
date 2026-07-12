@@ -1,8 +1,9 @@
 //! Shared utility functions for IGA modules.
 //!
-//! Consolidated definitions used across `iga.rs`, `iga_bezier.rs`,
-//! `iga_gpu.rs`, and `contact_iga.rs` — eliminates four copies of
-//! [`nonempty_spans`](fn@nonempty_spans).
+//! Consolidated definitions used across `iga.rs` and `iga_bezier.rs` —
+//! eliminates duplicate copies of [`nonempty_spans`](fn@nonempty_spans).
+//! (Advanced IGA modules — T-spline, trimmed NURBS, IGA contact —
+//! have moved to the professional edition.)
 
 use fem_element::quadrature::seg_rule;
 

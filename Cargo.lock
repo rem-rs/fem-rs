@@ -706,6 +706,7 @@ dependencies = [
  "fem-core",
  "fem-element",
  "fem-linalg",
+ "fem-linalg-gpu",
  "fem-mesh",
  "fem-regression",
  "fem-solver",
@@ -718,6 +719,7 @@ dependencies = [
  "reed-core",
  "reed-cpu",
  "thiserror 2.0.18",
+ "wgpu",
 ]
 
 [[package]]
