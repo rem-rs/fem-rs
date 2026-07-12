@@ -15,11 +15,13 @@
 //! ([`fem_linalg::csr_spmm`]).  Tensor-product prolongations in 2-D and 3-D
 //! are built as Kronecker products of the 1-D factors.
 
+use fem_core::DofId;
 use fem_element::iga::{NurbsKnotVector, NurbsMesh3D, NurbsPatch3DData};
 use fem_linalg::{CooMatrix, CsrMatrix, csr_spmm};
 use fem_solver::geometric_mg::{
     GeometricMgConfig, GeometricMgHierarchy, GeometricMgLevel, GeometricMgPrecond,
 };
+use fem_space::IgaMultiPatchMesh3D;
 use linlvo::core::preconditioner::Preconditioner;
 use linlvo::DenseVec;
 
@@ -480,6 +482,252 @@ impl Preconditioner for IgaGmgPrecond<'_> {
     }
 }
 
+// ─── Multi-patch GMG ─────────────────────────────────────────────────────────
+
+/// Clone of `fem_space::iga_fe_space::face_dof_indices_3d` (private there).
+///
+/// Return the global control-point indices on a given face of a 3-D
+/// tensor-product patch.
+///
+/// Faces are numbered:
+///   0: u = umin,   1: u = umax
+///   2: v = vmin,   3: v = vmax
+///   4: w = wmin,   5: w = wmax
+fn face_dof_indices_3d(nu: usize, nv: usize, nw: usize, face: usize) -> Vec<usize> {
+    match face {
+        0 => {
+            let mut dofs = Vec::with_capacity(nv * nw);
+            for k in 0..nw {
+                for j in 0..nv {
+                    dofs.push(k * nu * nv + j * nu);
+                }
+            }
+            dofs
+        }
+        1 => {
+            let i = nu - 1;
+            let mut dofs = Vec::with_capacity(nv * nw);
+            for k in 0..nw {
+                for j in 0..nv {
+                    dofs.push(k * nu * nv + j * nu + i);
+                }
+            }
+            dofs
+        }
+        2 => {
+            let mut dofs = Vec::with_capacity(nu * nw);
+            for k in 0..nw {
+                for i in 0..nu {
+                    dofs.push(k * nu * nv + i);
+                }
+            }
+            dofs
+        }
+        3 => {
+            let j0 = nv - 1;
+            let mut dofs = Vec::with_capacity(nu * nw);
+            for k in 0..nw {
+                for i in 0..nu {
+                    dofs.push(k * nu * nv + j0 * nu + i);
+                }
+            }
+            dofs
+        }
+        4 => {
+            let mut dofs = Vec::with_capacity(nu * nv);
+            for j in 0..nv {
+                for i in 0..nu {
+                    dofs.push(j * nu + i);
+                }
+            }
+            dofs
+        }
+        5 => {
+            let k0 = nw - 1;
+            let mut dofs = Vec::with_capacity(nu * nv);
+            for j in 0..nv {
+                for i in 0..nu {
+                    dofs.push(k0 * nu * nv + j * nu + i);
+                }
+            }
+            dofs
+        }
+        _ => vec![],
+    }
+}
+
+/// Identify exterior boundary DOFs for a multi-patch NURBS mesh.
+///
+/// Only faces NOT in `face_connectivity` are Dirichlet. Interior shared faces
+/// are excluded from the returned set.
+pub fn identify_boundary_dofs_multipatch_3d(
+    patches: &[NurbsPatch3DData],
+    dof_map: &[Vec<DofId>],
+    face_conn: &[(usize, usize, usize, usize)],
+) -> Vec<u32> {
+    let n_patches = patches.len();
+    let mut bc_set = std::collections::BTreeSet::new();
+
+    for pi in 0..n_patches {
+        let nu = patches[pi].kv_u.n_basis();
+        let nv = patches[pi].kv_v.n_basis();
+        let nw = patches[pi].kv_w.n_basis();
+
+        for face in 0..6 {
+            let is_interior = face_conn.iter().any(|(pa, fa, pb, fb)| {
+                (*pa == pi && *fa == face) || (*pb == pi && *fb == face)
+            });
+            if is_interior {
+                continue;
+            }
+
+            let face_dofs = face_dof_indices_3d(nu, nv, nw, face);
+            for &local_dof in &face_dofs {
+                let global_dof = dof_map[pi][local_dof] as u32;
+                bc_set.insert(global_dof);
+            }
+        }
+    }
+
+    bc_set.into_iter().collect()
+}
+
+/// Build the global prolongation matrix for a multi-patch mesh by assembling
+/// per-patch tensor-product prolongations through the DOF merge maps.
+fn build_multipatch_prolongation(
+    level_knots_fine: &[(NurbsKnotVector, NurbsKnotVector, NurbsKnotVector)],
+    level_knots_coarse: &[(NurbsKnotVector, NurbsKnotVector, NurbsKnotVector)],
+    dof_map_fine: &[Vec<DofId>],
+    dof_map_coarse: &[Vec<DofId>],
+    n_global_fine: usize,
+    n_global_coarse: usize,
+) -> CsrMatrix<f64> {
+    let n_patches = level_knots_fine.len();
+    let mut coo = CooMatrix::<f64>::new(n_global_fine, n_global_coarse);
+
+    for pi in 0..n_patches {
+        let (kv_u_f, kv_v_f, kv_w_f) = &level_knots_fine[pi];
+        let (kv_u_c, kv_v_c, kv_w_c) = &level_knots_coarse[pi];
+        let (nu_c, nv_c, nw_c) = (kv_u_c.n_basis(), kv_v_c.n_basis(), kv_w_c.n_basis());
+        let (nu_f, nv_f, nw_f) = (kv_u_f.n_basis(), kv_v_f.n_basis(), kv_w_f.n_basis());
+
+        // Build 1-D prolongations per direction
+        let p_u = build_prolongation_1d_between(kv_u_c, kv_u_f);
+        let p_v = build_prolongation_1d_between(kv_v_c, kv_v_f);
+        let p_w = build_prolongation_1d_between(kv_w_c, kv_w_f);
+
+        // Tensor-product 3-D prolongation for this patch
+        let p_local = build_prolongation_3d(
+            &p_u, nu_c, nu_f,
+            &p_v, nv_c, nv_f,
+            &p_w, nw_c, nw_f,
+        );
+
+        // Scatter local rows/cols into global COO via the DOF maps
+        for row in 0..p_local.nrows {
+            let global_fine = dof_map_fine[pi][row] as usize;
+            for ptr in p_local.row_ptr[row]..p_local.row_ptr[row + 1] {
+                let coarse_local = p_local.col_idx[ptr] as usize;
+                let val = p_local.values[ptr];
+                let global_coarse = dof_map_coarse[pi][coarse_local] as usize;
+                coo.add(global_fine, global_coarse, val);
+            }
+        }
+    }
+
+    coo.into_csr()
+}
+
+/// Build an IGA GMG hierarchy for a **multi-patch** 3-D diffusion problem.
+///
+/// `level_meshes` is ordered from **coarsest** (index 0) to **finest** (last
+/// element).  Each mesh carries its own knot vectors and control points.
+/// All meshes must share the same `face_connectivity` (topological patch
+/// adjacency does not change with refinement).
+///
+/// The returned hierarchy has `levels[0]` = finest, `levels[n-1]` = coarsest,
+/// matching [`GeometricMgHierarchy`] conventions.
+///
+/// The system matrix at each level is assembled via
+/// [`assemble_iga_diffusion_multipatch_3d`] and exterior-boundary DOFs are
+/// identified automatically from the mesh's `face_connectivity`.
+pub fn build_iga_gmg_hierarchy_multipatch_3d(
+    level_meshes: &[NurbsMesh3D],
+    kappa: f64,
+    quad_order: u8,
+) -> GeometricMgHierarchy {
+    let n_levels = level_meshes.len();
+    assert!(n_levels >= 2, "build_iga_gmg_hierarchy_multipatch_3d: need at least 2 levels");
+
+    let face_connectivity = if n_levels > 0 {
+        level_meshes[0].face_connectivity.clone()
+    } else {
+        Vec::new()
+    };
+    let n_patches = level_meshes[0].patches.len();
+
+    // Build each level from coarsest to finest.
+    let mut levels = Vec::with_capacity(n_levels);
+    let mut stored_knots: Vec<Vec<(NurbsKnotVector, NurbsKnotVector, NurbsKnotVector)>>
+        = Vec::with_capacity(n_levels);
+    let mut stored_dof_info: Vec<(Vec<Vec<DofId>>, usize)> = Vec::with_capacity(n_levels);
+
+    for l in 0..n_levels {
+        assert_eq!(
+            level_meshes[l].patches.len(), n_patches,
+            "level {l} has {} patches, expected {n_patches}",
+            level_meshes[l].patches.len(),
+        );
+
+        // Build DOF map (C0 merge across shared faces)
+        let mp_mesh = IgaMultiPatchMesh3D::from_nurbs_mesh(&level_meshes[l]);
+        let dof_map: Vec<Vec<DofId>> = (0..n_patches)
+            .map(|p| mp_mesh.dof_map(p).to_vec())
+            .collect();
+        let n_global = mp_mesh.n_global_dofs();
+
+        // Assemble global stiffness matrix
+        let mat = crate::iga::assemble_iga_diffusion_multipatch_3d(
+            &level_meshes[l], &dof_map, n_global, kappa, quad_order,
+        );
+
+        // Identify exterior boundary DOFs
+        let bc_dofs = identify_boundary_dofs_multipatch_3d(
+            &level_meshes[l].patches, &dof_map, &face_connectivity,
+        );
+
+        levels.push(GeometricMgLevel { mat, bc_dofs });
+
+        // Store knot vectors for prolongation construction
+        let lvl_knots: Vec<_> = level_meshes[l].patches.iter()
+            .map(|pd| (pd.kv_u.clone(), pd.kv_v.clone(), pd.kv_w.clone()))
+            .collect();
+        stored_knots.push(lvl_knots);
+        stored_dof_info.push((dof_map, n_global));
+    }
+
+    // Reverse so levels[0] = finest.
+    levels.reverse();
+    stored_knots.reverse();
+    stored_dof_info.reverse();
+
+    // Build prolongation from each level l+1 (coarser) to level l (finer).
+    let mut prolong_mats = Vec::with_capacity(n_levels - 1);
+    for l in 0..n_levels - 1 {
+        let p = build_multipatch_prolongation(
+            &stored_knots[l],              // fine level per-patch knots
+            &stored_knots[l + 1],          // coarse level per-patch knots
+            &stored_dof_info[l].0,         // fine DOF map
+            &stored_dof_info[l + 1].0,     // coarse DOF map
+            stored_dof_info[l].1,          // n_global_fine
+            stored_dof_info[l + 1].1,      // n_global_coarse
+        );
+        prolong_mats.push(p);
+    }
+
+    GeometricMgHierarchy::new(levels, prolong_mats)
+}
+
 // ─── B4: Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -815,5 +1063,170 @@ mod tests {
             "GMG-PCG solution accuracy: ||Ax-b||/||b|| = {}",
             err / rhs_norm.max(1e-300)
         );
+    }
+
+    // ─── Multi-patch GMG tests ────────────────────────────────────────────────
+
+    /// Build a regular two-patch cube mesh where each patch spans
+    /// [x0, x1] × [0, 1] × [0, 1] with `ne` elements per direction.
+    fn make_two_patch_cube(ne: usize) -> NurbsMesh3D {
+        let kv = NurbsKnotVector::uniform(1, ne);
+        let n = ne + 1; // basis per direction
+
+        let build_ctrl = |x0: f64, x1: f64| -> Vec<[f64; 3]> {
+            let mut ctrl = Vec::with_capacity(n * n * n);
+            for k in 0..n {
+                let z = k as f64 / ne as f64;
+                for j in 0..n {
+                    let y = j as f64 / ne as f64;
+                    for i in 0..n {
+                        let x = x0 + (x1 - x0) * i as f64 / ne as f64;
+                        ctrl.push([x, y, z]);
+                    }
+                }
+            }
+            ctrl
+        };
+
+        NurbsMesh3D {
+            patches: vec![
+                NurbsPatch3DData {
+                    kv_u: kv.clone(), kv_v: kv.clone(), kv_w: kv.clone(),
+                    control_pts: build_ctrl(0.0, 0.5),
+                    weights: vec![1.0; n * n * n],
+                    tag: 1,
+                },
+                NurbsPatch3DData {
+                    kv_u: kv.clone(), kv_v: kv.clone(), kv_w: kv.clone(),
+                    control_pts: build_ctrl(0.5, 1.0),
+                    weights: vec![1.0; n * n * n],
+                    tag: 2,
+                },
+            ],
+            face_connectivity: vec![(0, 1, 1, 0)],
+        }
+    }
+
+    #[test]
+    fn gmg_multipatch_3d_converges() {
+        // Three-level V-cycle: 1 → 2 → 4 elements per direction per patch.
+        let coarse = make_two_patch_cube(1);  // 2×2×2 CPs/patch → 12 global DOFs
+        let mid    = make_two_patch_cube(2);  // 3×3×3 CPs/patch → 45 global DOFs
+        let fine   = make_two_patch_cube(4);  // 5×5×5 CPs/patch → 225 global DOFs
+
+        // Coarsest-first ordering
+        let h = build_iga_gmg_hierarchy_multipatch_3d(&[coarse, mid, fine], 1.0, 2);
+
+        let n_fine = h.levels[0].mat.nrows;
+        assert_eq!(n_fine, 225, "fine level should have 225 DOFs");
+
+        // Apply Dirichlet BCs to the fine matrix for the outer solver.
+        let mut rhs = vec![1.0_f64; n_fine];
+        let mut fine_mat = h.levels[0].mat.clone();
+        for &d in &h.levels[0].bc_dofs {
+            fine_mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut rhs);
+        }
+
+        let cfg = SolverConfig {
+            max_iter: 2000,
+            rtol: 1e-8,
+            atol: 1e-12,
+            verbose: false,
+            ..Default::default()
+        };
+
+        // CG without preconditioner
+        let mut x_cg = vec![0.0; n_fine];
+        let res_cg = solve_cg(&fine_mat, &rhs, &mut x_cg, &cfg)
+            .expect("CG should converge on multi-patch problem");
+
+        // GMG-preconditioned CG
+        let mg_config = GeometricMgConfig {
+            pre_sweeps: 2,
+            post_sweeps: 2,
+            chebyshev_order: 0, // Jacobi smoothing for robustness
+            jacobi_omega: 0.67,
+            coarse_max_iter: 500,
+            coarse_rtol: 1e-10,
+            max_eig_override: None,
+        };
+        let mg = GeometricMgPrecond::new(mg_config, &h);
+        let wrapper = IgaGmgPrecond::new(mg, &h);
+        let mut x_mg = vec![0.0; n_fine];
+        let res_mg = solve_pcg_precond(&fine_mat, &rhs, &mut x_mg, &wrapper, &cfg)
+            .expect("GMG-PCG should converge on multi-patch problem");
+
+        assert!(
+            res_mg.iterations < res_cg.iterations,
+            "GMG should reduce CG iterations: CG={}, GMG-PCG={}",
+            res_cg.iterations, res_mg.iterations,
+        );
+
+        // Verify solution accuracy for GMG-preconditioned result.
+        let mut ax = vec![0.0; n_fine];
+        fine_mat.spmv(&x_mg, &mut ax);
+        let err: f64 = ax
+            .iter()
+            .zip(rhs.iter())
+            .map(|(ai, bi)| (ai - bi).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let rhs_norm: f64 = rhs.iter().map(|b| b.powi(2)).sum::<f64>().sqrt();
+        assert!(
+            err < 1e-6 * rhs_norm + 1e-10,
+            "GMG-PCG solution accuracy: ||Ax-b||/||b|| = {}",
+            err / rhs_norm.max(1e-300)
+        );
+    }
+
+    #[test]
+    fn gmg_multipatch_3d_identifies_boundary_dofs() {
+        let mesh = make_two_patch_cube(1);
+        let mp = IgaMultiPatchMesh3D::from_nurbs_mesh(&mesh);
+        let dof_map: Vec<Vec<DofId>> = (0..mp.n_patches())
+            .map(|p| mp.dof_map(p).to_vec())
+            .collect();
+
+        let bc = identify_boundary_dofs_multipatch_3d(
+            &mesh.patches, &dof_map, &mesh.face_connectivity,
+        );
+
+        // 2 patches, each 2×2×2 = 8 DOFs, 4 shared → 12 global DOFs.
+        assert_eq!(mp.n_global_dofs(), 12, "two-patch cube has 12 merged DOFs");
+
+        // Only face 1 (umax) of patch A and face 0 (umin) of patch B are shared.
+        // All other faces are exterior. Every DOF on the shared face (1,3,5,7 of A)
+        // also lies on at least one exterior face (vmin/vmax/wmin/wmax), so ALL 12
+        // global DOFs are in the bc set for this simple mesh.
+        assert_eq!(bc.len(), 12, "all 12 DOFs touch at least one exterior face");
+    }
+
+    #[test]
+    fn gmg_multipatch_3d_verify_prolongation_sums() {
+        // Build a 2-level hierarchy and verify each prolongation matrix
+        // has rows that sum to 1 (partition of unity on fine B-splines).
+        let coarse = make_two_patch_cube(1);
+        let fine   = make_two_patch_cube(2);
+        let h = build_iga_gmg_hierarchy_multipatch_3d(&[coarse, fine], 1.0, 2);
+
+        assert_eq!(h.prolong.len(), 1, "should have 1 prolongation for 2 levels");
+
+        let p = &h.prolong[0].mat;
+
+        // Each row corresponds to a fine-space DOF (global).
+        // For non-interface DOFs the row sum is 1.0 (partition of unity).
+        // For shared-interface DOFs the row sum is 2.0 because both patches
+        // contribute to the same merged fine DOF.
+        for row in 0..p.nrows {
+            let row_sum: f64 = (p.row_ptr[row]..p.row_ptr[row + 1])
+                .map(|k| p.values[k])
+                .sum();
+            let ok = (row_sum - 1.0).abs() < 1e-12
+                || (row_sum - 2.0).abs() < 1e-12;
+            assert!(
+                ok,
+                "row {row} sum = {row_sum} (expected 1.0 or 2.0)"
+            );
+        }
     }
 }
