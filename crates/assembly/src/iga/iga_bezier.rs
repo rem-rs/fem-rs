@@ -183,8 +183,6 @@ pub fn assemble_iga_diffusion_2d_bezier(
         let n_local = ext.n_local;
         let p = ext.degree_u;
         let q = ext.degree_v;
-        let np1 = p + 1;
-        let nq1 = q + 1;
         let nu = pd.kv_u.n_basis();
 
         let spans_u = nonempty_spans(&pd.kv_u.knots);
