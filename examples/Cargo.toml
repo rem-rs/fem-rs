@@ -74,6 +74,10 @@ name = "ex_iga_poisson_2d_multipatch"
 path = "ex_iga_poisson_2d_multipatch.rs"
 
 [[example]]
+name = "ex_iga_poisson_3d_multipatch"
+path = "ex_iga_poisson_3d_multipatch.rs"
+
+[[example]]
 name = "mfem_ex2_elasticity"
 path = "mfem_ex2_elasticity.rs"
 
