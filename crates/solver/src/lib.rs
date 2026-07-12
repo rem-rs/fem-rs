@@ -121,6 +121,9 @@ pub mod complex_ams;
 pub mod dae;
 pub mod div_free;
 pub mod events;
+/// Plugin API traits for pro-solver extensions.
+pub mod plugin;
+
 pub use block_operator::{
     BlockOperator,
     BlockOpMatrix,

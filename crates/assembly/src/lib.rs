@@ -151,6 +151,9 @@ pub use reed::{
     FemCeed, FemCeedError,
 };
 
+/// Plugin API traits for pro-assembly extensions.
+pub mod plugin;
+
 pub use h1_quad_order_hint::{h1_tet_quad_order, h1_tri_quad_order};
 
 pub use assembler::{Assembler, face_dofs_p1, face_dofs_p2};

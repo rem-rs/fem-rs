@@ -16,6 +16,9 @@
 //! - [`pvd`]            — ParaView `.pvd` collection writer
 //! - [`pvtu_writer`]    — ParaView `.pvtu` parallel piece collection writer
 
+/// Plugin API traits for pro IO extensions.
+pub mod plugin;
+
 pub mod gmsh;
 pub mod gmsh_writer;
 pub mod pvd;
