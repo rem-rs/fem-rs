@@ -160,6 +160,7 @@ fn build_mixed_mesh() -> Mesh<2> {
         face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![],
+        geometry: None,
     }
 }
 

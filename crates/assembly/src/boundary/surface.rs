@@ -646,6 +646,7 @@ mod tests {
             face_types: None, face_offsets: None,
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
+            geometry: None,
         }
     }
 
@@ -736,6 +737,7 @@ mod tests {
             face_types: None, face_offsets: None,
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
+            geometry: None,
         };
         let space = H1Space::new(mesh, 1);
 

@@ -28,6 +28,7 @@
 //!
 //! $$f_A   = \int_\Omega f\, R_A\, \mathrm{d}\Omega$$
 
+use fem_core::types::DofId;
 use fem_element::iga::{NurbsMesh2D, NurbsMesh3D, NurbsPatch2DData, NurbsPatch3DData};
 use fem_element::quadrature::seg_rule;
 use fem_element::reference::{QuadratureRule, ReferenceElement};
@@ -432,6 +433,98 @@ pub fn assemble_iga_load_2d(
     }
 
     rhs
+}
+
+// ─── 2-D multi-patch C⁰ assembly ───────────────────────────────────────────
+
+/// Assemble the diffusion stiffness matrix for a multi-patch 2-D NURBS mesh
+/// with C⁰ coupling via a DOF map.
+///
+/// Uses `dof_map[pi][a]` to map local patch DOF `a` to the global DOF index,
+/// merging shared DOFs along patch interfaces.
+pub fn assemble_iga_diffusion_multipatch_2d(
+    mesh: &NurbsMesh2D,
+    dof_map: &[Vec<DofId>],
+    n_global_dofs: usize,
+    kappa: f64,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let mut coo = CooMatrix::<f64>::new(n_global_dofs, n_global_dofs);
+    for (pi, pd) in mesh.patches.iter().enumerate() {
+        let elem = pd_to_patch2d(pd);
+        let n_dof = elem.n_dofs();
+        let qr = patch_quad_2d(pd, quad_order);
+        for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+            let (phys_grads, det_j) = physical_grads_2d(pd, qp_xi);
+            let w = qp_w * det_j.abs();
+            for a in 0..n_dof {
+                let ga = dof_map[pi][a] as usize;
+                for b in 0..n_dof {
+                    let gb = dof_map[pi][b] as usize;
+                    let dot = phys_grads[a*2]*phys_grads[b*2] + phys_grads[a*2+1]*phys_grads[b*2+1];
+                    coo.add(ga, gb, kappa * dot * w);
+                }
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Assemble the load vector for a multi-patch 2-D NURBS mesh with C⁰ coupling.
+pub fn assemble_iga_load_multipatch_2d(
+    mesh: &NurbsMesh2D,
+    dof_map: &[Vec<DofId>],
+    n_global_dofs: usize,
+    source: impl Fn(&[f64]) -> f64,
+    quad_order: u8,
+) -> Vec<f64> {
+    let mut rhs = vec![0.0_f64; n_global_dofs];
+    for (pi, pd) in mesh.patches.iter().enumerate() {
+        let elem = pd_to_patch2d(pd);
+        let n_dof = elem.n_dofs();
+        let qr = patch_quad_2d(pd, quad_order);
+        for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+            let map = physical_map_2d(pd, qp_xi);
+            let w = qp_w * map.det_j.abs();
+            let f_val = source(&map.x_phys);
+            let mut basis = vec![0.0_f64; n_dof];
+            elem.eval_basis(qp_xi, &mut basis);
+            for a in 0..n_dof {
+                rhs[dof_map[pi][a] as usize] += f_val * basis[a] * w;
+            }
+        }
+    }
+    rhs
+}
+
+/// Assemble the mass matrix for a multi-patch 2-D NURBS mesh with C⁰ coupling.
+pub fn assemble_iga_mass_multipatch_2d(
+    mesh: &NurbsMesh2D,
+    dof_map: &[Vec<DofId>],
+    n_global_dofs: usize,
+    rho: f64,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let mut coo = CooMatrix::<f64>::new(n_global_dofs, n_global_dofs);
+    for (pi, pd) in mesh.patches.iter().enumerate() {
+        let elem = pd_to_patch2d(pd);
+        let n_dof = elem.n_dofs();
+        let qr = patch_quad_2d(pd, quad_order);
+        for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+            let map = physical_map_2d(pd, qp_xi);
+            let w = qp_w * map.det_j.abs();
+            let mut basis = vec![0.0_f64; n_dof];
+            elem.eval_basis(qp_xi, &mut basis);
+            for a in 0..n_dof {
+                let ga = dof_map[pi][a] as usize;
+                for b in 0..n_dof {
+                    let gb = dof_map[pi][b] as usize;
+                    coo.add(ga, gb, rho * basis[a] * basis[b] * w);
+                }
+            }
+        }
+    }
+    coo.into_csr()
 }
 
 /// Assemble the 2-D linear elasticity stiffness matrix.
@@ -1753,5 +1846,48 @@ mod tests {
             assert!(norm > 0.0 && norm < 100.0, "||u||={:.6e} outside range", norm);
         }
         assert!(result.is_ok(), "3D Newton did not converge");
+    }
+}
+
+#[cfg(test)]
+mod multipatch_tests {
+    use super::*;
+    use fem_core::types::DofId;
+    use fem_element::iga::{NurbsKnotVector, NurbsMesh2D, NurbsPatch2DData};
+    use fem_space::IgaMultiPatchMesh2D;
+
+    fn make_two_patch_mesh() -> (NurbsMesh2D, Vec<Vec<DofId>>, usize) {
+        let kv = NurbsKnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1);
+        let patch_a = NurbsPatch2DData {
+            kv_u: kv.clone(), kv_v: kv.clone(),
+            control_pts: vec![[0.0,0.0],[0.5,0.0],[0.0,1.0],[0.5,1.0]],
+            weights: vec![1.0;4], tag: 1,
+        };
+        let patch_b = NurbsPatch2DData {
+            kv_u: kv.clone(), kv_v: kv,
+            control_pts: vec![[0.5,0.0],[1.0,0.0],[0.5,1.0],[1.0,1.0]],
+            weights: vec![1.0;4], tag: 2,
+        };
+        let nurbs = NurbsMesh2D { patches: vec![patch_a, patch_b], edge_connectivity: vec![(0,1,1,3)] };
+        let mp = IgaMultiPatchMesh2D::from_nurbs_mesh(&nurbs);
+        let dof_maps: Vec<Vec<DofId>> = (0..mp.n_patches()).map(|p| mp.dof_map(p).to_vec()).collect();
+        (nurbs, dof_maps, mp.n_global_dofs())
+    }
+
+    #[test]
+    fn test_multipatch_2d_diffusion_runs() {
+        let (mesh, dof_map, n_global) = make_two_patch_mesh();
+        let k = assemble_iga_diffusion_multipatch_2d(&mesh, &dof_map, n_global, 1.0, 3);
+        assert_eq!(k.nrows, n_global);
+        for i in 0..k.nrows {
+            let mut sum_row = 0.0_f64;
+            for p in k.row_ptr[i]..k.row_ptr[i+1] {
+                if k.col_idx[p] as usize == i {
+                    assert!(k.values[p] > 0.0, "diagonal entry K[{i},{i}] must be positive");
+                }
+                sum_row += k.values[p];
+            }
+            assert!(sum_row >= -1e-14, "row {i} sum = {sum_row} should be ≈ 0");
+        }
     }
 }
