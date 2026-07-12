@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::cad::{AnalyticSurface, CadShape};
+use crate::cad::{AnalyticSurface, CadShape, NurbsCadSurface2D, TrimLoop, TrimmedNurbsSurface};
 
 
 // ─── STEP physical file parser ─────────────────────────────────────────────────
@@ -175,6 +175,303 @@ fn extract_placement(
     Some((origin, z_axis, x_axis))
 }
 
+// ─── STEP parameter parsing helpers (handles nested parentheses) ──────────
+
+/// Split a STEP parameter string by top-level commas (outside parentheses).
+fn split_step_params(s: &str) -> Vec<String> {
+    let mut depth: i32 = 0;
+    let mut current = String::new();
+    let mut parts = Vec::new();
+    for c in s.chars() {
+        match c {
+            '(' => { depth += 1; current.push(c); }
+            ')' => { depth -= 1; current.push(c); }
+            ',' if depth == 0 => {
+                parts.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => { current.push(c); }
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        parts.push(trimmed);
+    }
+    parts
+}
+
+/// Strip the outermost pair of parentheses, if present.
+fn strip_parens(s: &str) -> &str {
+    let s = s.trim();
+    if let Some(inner) = s.strip_prefix('(') {
+        inner.strip_suffix(')').unwrap_or(inner)
+    } else {
+        s
+    }
+}
+
+/// Parse a parenthesised list of floating-point numbers: `(v1, v2, ...)`.
+fn parse_num_list(s: &str) -> Vec<f64> {
+    strip_parens(s)
+        .split(',')
+        .filter_map(|t| t.trim().parse::<f64>().ok())
+        .collect()
+}
+
+/// Parse a parenthesised list of integers: `(n1, n2, ...)`.
+fn parse_int_list(s: &str) -> Vec<usize> {
+    strip_parens(s)
+        .split(',')
+        .filter_map(|t| t.trim().parse::<usize>().ok())
+        .collect()
+}
+
+/// Expand knot multiplicities + unique knot values into a full knot vector.
+fn expand_knot_vector(mults: &[usize], knots: &[f64]) -> Vec<f64> {
+    let mut kv = Vec::new();
+    for (&m, &k) in mults.iter().zip(knots.iter()) {
+        for _ in 0..m {
+            kv.push(k);
+        }
+    }
+    kv
+}
+
+// ─── B-spline curve evaluation (de Boor algorithm) ───────────────────────
+
+/// Evaluate a 2-D B-spline curve at parameter `t` using the de Boor algorithm.
+fn eval_bspline_curve_2d(t: f64, p: usize, knots: &[f64], ctrl: &[[f64; 2]]) -> [f64; 2] {
+    let n = ctrl.len();
+    let m = knots.len();
+    let t = t.clamp(knots[p], knots[m - p - 1]);
+
+    // Find span index k such that t ∈ [knots[k], knots[k+1])
+    let mut k = p;
+    for i in (p + 1)..(m - p - 1) {
+        if knots[i] > t + 1e-14 {
+            break;
+        }
+        k = i;
+    }
+    if t >= knots[m - p - 1] {
+        k = (n - 1).max(p);
+    }
+    if k > n - 1 {
+        k = n - 1;
+    }
+
+    let start = if k >= p { k - p } else { 0 };
+    let end = if k < n { k } else { n - 1 };
+    let active_cnt = end - start + 1;
+
+    if active_cnt == 0 || p == 0 {
+        return ctrl[start.min(n - 1)];
+    }
+
+    let mut q: Vec<[f64; 2]> = (start..=end).map(|i| ctrl[i]).collect();
+
+    for r in 1..=p.min(active_cnt - 1) {
+        for j in (r..active_cnt).rev() {
+            let knot_idx = start + j;
+            let denom = knots[knot_idx + p + 1 - r] - knots[knot_idx];
+            if denom.abs() > 1e-14 {
+                let alpha = (t - knots[knot_idx]) / denom;
+                q[j][0] = (1.0 - alpha) * q[j - 1][0] + alpha * q[j][0];
+                q[j][1] = (1.0 - alpha) * q[j - 1][1] + alpha * q[j][1];
+            }
+        }
+    }
+    q[active_cnt - 1]
+}
+
+/// Sample a 2-D B-spline curve uniformly in its parameter domain.
+fn sample_bspline_curve_2d(
+    degree: usize,
+    knots: &[f64],
+    ctrl_pts: &[[f64; 2]],
+    n_samples: usize,
+) -> Vec<[f64; 2]> {
+    if ctrl_pts.is_empty() {
+        return Vec::new();
+    }
+    if degree == 0 || ctrl_pts.len() == 1 {
+        return ctrl_pts.to_vec();
+    }
+
+    let t_min = knots[degree];
+    let t_max = knots[knots.len() - degree - 1];
+
+    let mut result = Vec::with_capacity(n_samples);
+    for i in 0..n_samples {
+        let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1).max(1) as f64;
+        result.push(eval_bspline_curve_2d(t, degree, knots, ctrl_pts));
+    }
+    result
+}
+
+// ─── Entity-specific parsers ─────────────────────────────────────────────
+
+/// Parse a `B_SPLINE_CURVE_WITH_KNOTS` entity and sample its polygon.
+fn extract_bspline_curve_polygon(
+    entity: &StepEntity,
+    entities: &HashMap<usize, StepEntity>,
+) -> Option<Vec<[f64; 2]>> {
+    let parts = split_step_params(&entity.params);
+    if parts.len() < 9 {
+        return None;
+    }
+
+    let degree: usize = parts[1].trim().parse().ok()?;
+
+    // Extract control point references from (#ref1, #ref2, ...)
+    let cp_list_str = strip_parens(&parts[2]);
+    let cp_refs: Vec<&str> = cp_list_str.split(',').map(|s| s.trim()).collect();
+
+    let mut ctrl_pts: Vec<[f64; 2]> = Vec::new();
+    for ref_str in &cp_refs {
+        if let Some(id_str) = ref_str.strip_prefix('#') {
+            if let Ok(id) = id_str.trim().parse::<usize>() {
+                if let Some(cp_entity) = entities.get(&id) {
+                    if let Some(pt) = extract_point(cp_entity) {
+                        ctrl_pts.push([pt[0], pt[1]]);
+                    }
+                }
+            }
+        }
+    }
+    if ctrl_pts.is_empty() {
+        return None;
+    }
+
+    // Extract knot multiplicities and values
+    let mults: Vec<usize> = parse_int_list(&parts[6]);
+    let knots: Vec<f64> = parse_num_list(&parts[7]);
+    if mults.is_empty() || knots.is_empty() {
+        return None;
+    }
+
+    let full_kv = expand_knot_vector(&mults, &knots);
+
+    // Check for closed curve
+    let closed = parts[4].trim().contains(".T.");
+
+    let n_samples = if degree <= 1 { ctrl_pts.len() } else { 32 };
+    let mut poly = sample_bspline_curve_2d(degree, &full_kv, &ctrl_pts, n_samples);
+
+    // Close the polygon if needed
+    if closed && poly.len() > 1 {
+        let first = poly[0];
+        let last = poly[poly.len() - 1];
+        if (first[0] - last[0]).abs() > 1e-14 || (first[1] - last[1]).abs() > 1e-14 {
+            poly.push(first);
+        }
+    }
+
+    Some(poly)
+}
+
+/// Parse a `LINE` entity and return its two endpoints in (u,v).
+fn extract_line_segment(
+    entity: &StepEntity,
+    entities: &HashMap<usize, StepEntity>,
+) -> Option<Vec<[f64; 2]>> {
+    let parts = split_step_params(&entity.params);
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let origin_ref = resolve_ref(parts[1].trim(), entities)?;
+    let origin = extract_point(origin_ref)?;
+
+    let dir_entity = resolve_ref(parts[2].trim(), entities)?;
+    let (dx, dy) = if dir_entity.type_name == "VECTOR" {
+        let vparts = split_step_params(&dir_entity.params);
+        if vparts.len() < 3 {
+            return None;
+        }
+        let mag: f64 = parse_num_list(&vparts[2]).first().copied().unwrap_or(1.0);
+        let dir_ref = resolve_ref(vparts[1].trim(), entities)?;
+        let dir = extract_direction(dir_ref).unwrap_or([1.0, 0.0, 0.0]);
+        (dir[0] * mag, dir[1] * mag)
+    } else {
+        let dir = extract_direction(dir_entity).unwrap_or([1.0, 0.0, 0.0]);
+        (dir[0], dir[1])
+    };
+
+    Some(vec![[origin[0], origin[1]], [origin[0] + dx, origin[1] + dy]])
+}
+
+/// Parse a `B_SPLINE_SURFACE_WITH_KNOTS` entity into `NurbsCadSurface2D`.
+fn extract_bspline_surface(
+    entity: &StepEntity,
+    entities: &HashMap<usize, StepEntity>,
+) -> Option<NurbsCadSurface2D> {
+    let parts = split_step_params(&entity.params);
+    if parts.len() < 13 {
+        return None;
+    }
+
+    let _u_deg: usize = parts[1].trim().parse().ok()?;
+    let _v_deg: usize = parts[2].trim().parse().ok()?;
+
+    // Parse the 2-D control-point array: ((row0...),(row1...),...)
+    let cp_array_str = strip_parens(&parts[3]);
+    let row_strs = split_step_params(cp_array_str);
+
+    let mut ctrl_pts: Vec<[f64; 3]> = Vec::new();
+    for row_str in &row_strs {
+        let inner = strip_parens(row_str);
+        let cp_refs: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+        for ref_str in &cp_refs {
+            if let Some(id_str) = ref_str.strip_prefix('#') {
+                if let Ok(id) = id_str.trim().parse::<usize>() {
+                    if let Some(cp_entity) = entities.get(&id) {
+                        if let Some(pt) = extract_point(cp_entity) {
+                            ctrl_pts.push(pt);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if ctrl_pts.is_empty() {
+        return None;
+    }
+
+    // Parse knot vectors
+    let u_mults: Vec<usize> = parse_int_list(&parts[8]);
+    let v_mults: Vec<usize> = parse_int_list(&parts[9]);
+    let u_knots: Vec<f64> = parse_num_list(&parts[10]);
+    let v_knots: Vec<f64> = parse_num_list(&parts[11]);
+
+    let full_u_kv = expand_knot_vector(&u_mults, &u_knots);
+    let full_v_kv = expand_knot_vector(&v_mults, &v_knots);
+
+    if full_u_kv.is_empty() || full_v_kv.is_empty() {
+        return None;
+    }
+
+    // B_SPLINE_SURFACE has no weights; default to 1.0.
+    let weights = vec![1.0; ctrl_pts.len()];
+
+    Some(NurbsCadSurface2D::new(full_u_kv, full_v_kv, ctrl_pts, weights))
+}
+
+/// Extract a trimming curve (polygon) from a STEP curve entity reference.
+fn resolve_trim_curve(
+    entity: &StepEntity,
+    entities: &HashMap<usize, StepEntity>,
+) -> Option<Vec<[f64; 2]>> {
+    match entity.type_name.as_str() {
+        "B_SPLINE_CURVE_WITH_KNOTS" => extract_bspline_curve_polygon(entity, entities),
+        "LINE" => extract_line_segment(entity, entities),
+        _ => {
+            eprintln!("STEP: unsupported trimming curve type: {}", entity.type_name);
+            None
+        }
+    }
+}
+
 /// Convert a STEP entity to a CadShape.
 fn step_to_cad(
     entity: &StepEntity,
@@ -263,11 +560,50 @@ fn step_to_cad(
             None
         }
         "B_SPLINE_SURFACE_WITH_KNOTS" | "B_SPLINE_SURFACE" => {
-            // Extract NURBS data — for a minimal implementation, create
-            // a FacetedCadSurface from a coarse evaluation as fallback.
-            // Full NURBS surface extraction would need degree, knots, control points.
-            eprintln!("STEP: B_SPLINE_SURFACE detected — use IGES NURBS path or facet fallback");
-            None
+            // Full NURBS surface extraction from B-spline surface data.
+            if let Some(ncs) = extract_bspline_surface(entity, entities) {
+                Some(CadShape::Nurbs(ncs))
+            } else {
+                eprintln!("STEP: failed to parse B_SPLINE_SURFACE");
+                None
+            }
+        }
+        "TRIMMED_SURFACE" => {
+            // TRIMMED_SURFACE('', #surface_ref, (#trim1, #trim2, ...), sense)
+            let parts = split_step_params(&entity.params);
+            if parts.len() < 4 {
+                return None;
+            }
+            // Resolve the basis surface
+            let surface_ref = resolve_ref(&parts[1], entities)?;
+            let ncs = extract_bspline_surface(surface_ref, entities)?;
+
+            // Parse trimming curve references from (#ref1, #ref2, ...)
+            let trim_list_str = strip_parens(&parts[2]);
+            let trim_refs: Vec<&str> = trim_list_str.split(',').map(|s| s.trim()).collect();
+
+            let mut trim_loops: Vec<TrimLoop> = Vec::new();
+            for ref_str in &trim_refs {
+                if let Some(id_str) = ref_str.strip_prefix('#') {
+                    if let Ok(id) = id_str.trim().parse::<usize>() {
+                        if let Some(curve_entity) = entities.get(&id) {
+                            if let Some(poly) = resolve_trim_curve(curve_entity, entities) {
+                                trim_loops.push(TrimLoop::new(poly));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if trim_loops.is_empty() {
+                eprintln!("STEP: TRIMMED_SURFACE has no valid trimming curves");
+                return None;
+            }
+
+            Some(CadShape::TrimmedNurbs(TrimmedNurbsSurface {
+                surface: ncs,
+                trim_loops,
+            }))
         }
         _ => {
             // Skip unknown types
@@ -300,7 +636,7 @@ pub fn read_step_surfaces(path: impl AsRef<Path>) -> Result<Vec<(i32, CadShape)>
     let surface_types = [
         "PLANE", "CYLINDRICAL_SURFACE", "SPHERICAL_SURFACE",
         "TOROIDAL_SURFACE", "CONICAL_SURFACE", "B_SPLINE_SURFACE",
-        "B_SPLINE_SURFACE_WITH_KNOTS",
+        "B_SPLINE_SURFACE_WITH_KNOTS", "TRIMMED_SURFACE",
     ];
 
     for entity in entities.values() {
@@ -532,6 +868,78 @@ END-ISO-10303-21;"#;
     fn step_file_not_found() {
         let result = read_step_surfaces("/nonexistent/file.stp");
         assert!(result.is_err(), "should error on missing file");
+    }
+
+    #[test]
+    fn step_parse_trimmed_surface_with_bspline_curve() {
+        // B_SPLINE_SURFACE_WITH_KNOTS: degree-1 unit square with 2×2 CPs
+        // Trimming curve: degree-1 rectangle in parameter space
+        let content = r#"ISO-10303-21;
+HEADER;FILE_DESCRIPTION('');ENDSEC;
+DATA;
+#1 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));
+#2 = CARTESIAN_POINT('', (1.0, 0.0, 0.0));
+#3 = CARTESIAN_POINT('', (0.0, 1.0, 0.0));
+#4 = CARTESIAN_POINT('', (1.0, 1.0, 0.0));
+#5 = B_SPLINE_SURFACE_WITH_KNOTS('', 1, 1, ((#1, #2), (#3, #4)), .UNSPECIFIED., .F., .F., .F., (2, 2), (2, 2), (0.0, 1.0), (0.0, 1.0), .UNSPECIFIED.);
+#6 = CARTESIAN_POINT('', (0.2, 0.2, 0.0));
+#7 = CARTESIAN_POINT('', (0.8, 0.2, 0.0));
+#8 = CARTESIAN_POINT('', (0.8, 0.8, 0.0));
+#9 = CARTESIAN_POINT('', (0.2, 0.8, 0.0));
+#10 = CARTESIAN_POINT('', (0.2, 0.2, 0.0));
+#11 = B_SPLINE_CURVE_WITH_KNOTS('', 1, (#6, #7, #8, #9, #10), .UNSPECIFIED., .F., .F., (2, 1, 1, 1, 2), (0.0, 0.25, 0.5, 0.75, 1.0), .UNSPECIFIED.);
+#12 = TRIMMED_SURFACE('', #5, (#11), .T.);
+ENDSEC;
+END-ISO-10303-21;"#;
+        let f = write_temp_step(content);
+        let result = read_step_surfaces(f.path());
+        assert!(result.is_ok(), "STEP trimmed surface parse failed: {:?}", result.err());
+        let surfaces = result.unwrap();
+        assert_eq!(surfaces.len(), 1, "expected 1 surface");
+
+        let (tag, shape) = &surfaces[0];
+        assert_eq!(*tag, 1i32);
+        match shape {
+            CadShape::TrimmedNurbs(tns) => {
+                assert_eq!(tns.trim_loops.len(), 1, "expected 1 trim loop");
+                let loop0 = &tns.trim_loops[0];
+                assert!(loop0.vertices.len() >= 4, "trim loop should have ≥4 vertices");
+                // Center of the trim rect should be inside
+                assert!(loop0.contains(0.5, 0.5), "center of rect should be inside");
+                // Corners of the unit square should be outside (outside the trim rect)
+                assert!(!loop0.contains(0.0, 0.0), "corner (0,0) should be outside trim");
+                assert!(!loop0.contains(1.0, 1.0), "corner (1,1) should be outside trim");
+            }
+            other => panic!("expected TrimmedNurbs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_parse_bspline_surface_returns_nurbs() {
+        let content = r#"ISO-10303-21;
+HEADER;FILE_DESCRIPTION('');ENDSEC;
+DATA;
+#1 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));
+#2 = CARTESIAN_POINT('', (0.5, 0.0, 0.0));
+#3 = CARTESIAN_POINT('', (1.0, 0.0, 0.0));
+#4 = CARTESIAN_POINT('', (0.0, 1.0, 0.0));
+#5 = CARTESIAN_POINT('', (0.5, 1.0, 0.0));
+#6 = CARTESIAN_POINT('', (1.0, 1.0, 0.0));
+#7 = B_SPLINE_SURFACE_WITH_KNOTS('', 1, 1, ((#1, #2, #3), (#4, #5, #6)), .UNSPECIFIED., .F., .F., .F., (2, 2, 2), (2, 2, 2), (0.0, 0.5, 1.0), (0.0, 0.5, 1.0), .UNSPECIFIED.);
+ENDSEC;
+END-ISO-10303-21;"#;
+        let f = write_temp_step(content);
+        let surfaces = read_step_surfaces(f.path());
+        assert!(surfaces.is_ok(), "B_SPLINE_SURFACE parse failed: {:?}", surfaces.err());
+        let list = surfaces.unwrap();
+        assert_eq!(list.len(), 1);
+        match &list[0].1 {
+            CadShape::Nurbs(ncs) => {
+                // Should have 3×2 = 6 control points
+                assert_eq!(ncs.control_pts.len(), 6);
+            }
+            other => panic!("expected CadShape::Nurbs, got {other:?}"),
+        }
     }
 
     #[test]

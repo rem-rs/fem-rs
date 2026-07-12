@@ -450,6 +450,82 @@ impl CadModel for FacetedCadSurface {
     }
 }
 
+// ─── Trimming ─────────────────────────────────────────────────────────────────
+
+/// A closed boundary loop in `(u, v)` parameter space, used for NURBS surface
+/// trimming.
+///
+/// Each vertex is a 2-D point in the surface parameter space.  The polygon
+/// edges should be non-self-intersecting for a correct point-in-polygon test.
+#[derive(Debug, Clone)]
+pub struct TrimLoop {
+    pub vertices: Vec<[f64; 2]>,
+}
+
+impl TrimLoop {
+    /// Construct a new closed trim polygon from vertices.
+    /// Automatically closes the polygon if the first and last vertex differ.
+    pub fn new(mut vertices: Vec<[f64; 2]>) -> Self {
+        if vertices.len() > 1 {
+            let first = vertices[0];
+            let last = vertices[vertices.len() - 1];
+            if (first[0] - last[0]).abs() > 1e-14 || (first[1] - last[1]).abs() > 1e-14 {
+                vertices.push(first);
+            }
+        }
+        TrimLoop { vertices }
+    }
+
+    /// Ray-casting point-in-polygon test.
+    pub fn contains(&self, u: f64, v: f64) -> bool {
+        let mut inside = false;
+        let n = self.vertices.len();
+        if n == 0 {
+            return false;
+        }
+        let mut j = n - 1;
+        for i in 0..n {
+            let vi = self.vertices[i];
+            let vj = self.vertices[j];
+            if ((vi[1] > v) != (vj[1] > v))
+                && (u < (vj[0] - vi[0]) * (v - vi[1]) / (vj[1] - vi[1]) + vi[0])
+            {
+                inside = !inside;
+            }
+            j = i;
+        }
+        inside
+    }
+}
+
+/// A NURBS surface with associated trimming boundary loops.
+///
+/// The trimming loops define which parts of the surface are active for analysis.
+/// The active region is the intersection of all loop interiors (when sense is
+/// true) or the complement thereof.
+#[derive(Debug, Clone)]
+pub struct TrimmedNurbsSurface {
+    /// The underlying NURBS surface parameterization.
+    pub surface: NurbsCadSurface2D,
+    /// One or more trimming boundary loops in (u,v) parameter space.
+    pub trim_loops: Vec<TrimLoop>,
+}
+
+impl CadModel for TrimmedNurbsSurface {
+    fn eval(&self, u: f64, v: f64) -> [f64; 3] {
+        self.surface.eval(u, v)
+    }
+    fn normal(&self, u: f64, v: f64) -> [f64; 3] {
+        self.surface.normal(u, v)
+    }
+    fn parameter_range(&self) -> [f64; 4] {
+        self.surface.parameter_range()
+    }
+    fn project(&self, point: &[f64; 3]) -> (f64, f64, f64) {
+        self.surface.project(point)
+    }
+}
+
 // ─── CadShape dispatch ───────────────────────────────────────────────────────
 
 /// Dispatch wrapper over multiple CAD surface types.
@@ -457,6 +533,7 @@ impl CadModel for FacetedCadSurface {
 pub enum CadShape {
     Analytic(AnalyticSurface),
     Nurbs(NurbsCadSurface2D),
+    TrimmedNurbs(TrimmedNurbsSurface),
     Faceted(FacetedCadSurface),
 }
 
@@ -465,6 +542,7 @@ impl CadModel for CadShape {
         match self {
             Self::Analytic(a) => a.eval(u, v),
             Self::Nurbs(n) => n.eval(u, v),
+            Self::TrimmedNurbs(t) => t.eval(u, v),
             Self::Faceted(f) => f.eval(u, v),
         }
     }
@@ -472,6 +550,7 @@ impl CadModel for CadShape {
         match self {
             Self::Analytic(a) => a.normal(u, v),
             Self::Nurbs(n) => n.normal(u, v),
+            Self::TrimmedNurbs(t) => t.normal(u, v),
             Self::Faceted(f) => f.normal(u, v),
         }
     }
@@ -479,6 +558,7 @@ impl CadModel for CadShape {
         match self {
             Self::Analytic(a) => a.parameter_range(),
             Self::Nurbs(n) => n.parameter_range(),
+            Self::TrimmedNurbs(t) => t.parameter_range(),
             Self::Faceted(f) => f.parameter_range(),
         }
     }
@@ -486,6 +566,7 @@ impl CadModel for CadShape {
         match self {
             Self::Analytic(a) => a.project(point),
             Self::Nurbs(n) => n.project(point),
+            Self::TrimmedNurbs(t) => t.project(point),
             Self::Faceted(f) => f.project(point),
         }
     }

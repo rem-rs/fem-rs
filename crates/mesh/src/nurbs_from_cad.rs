@@ -123,6 +123,70 @@ fn detect_patch_edges(
     edges
 }
 
+/// Read a STEP file and return a NURBS mesh together with per-patch trim data.
+///
+/// The returned trim data has type `Vec<Vec<Vec<[f64; 2]>>>`:
+/// - Outer `Vec` — one entry per patch in the mesh
+/// - Middle `Vec` — each trimming boundary loop for that patch
+/// - Inner `Vec` — (u,v) vertices of a single closed loop
+///
+/// Patches without trimming have an empty middle `Vec`.
+///
+/// # Example
+/// ```rust,ignore
+/// use fem_mesh::nurbs_from_cad::read_trimmed_step_mesh;
+/// let (mesh, trim) = read_trimmed_step_mesh("trimmed_patch.stp")?;
+/// // trim[i] is the trim data for mesh.patches[i]
+/// ```
+pub fn read_trimmed_step_mesh(
+    path: impl AsRef<std::path::Path>,
+) -> Result<
+    (
+        fem_element::iga::NurbsMesh2D,
+        Vec<Vec<Vec<[f64; 2]>>>,
+    ),
+    String,
+> {
+    let surfaces = crate::step_iges::read_step_surfaces(path.as_ref())?;
+
+    let mut patches = Vec::new();
+    let mut trim_data: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+
+    for (tag, shape) in surfaces {
+        match shape {
+            CadShape::Nurbs(ncs) => {
+                let mut pd = ncs.into_patch_data();
+                pd.tag = tag;
+                patches.push(pd);
+                trim_data.push(Vec::new());
+            }
+            CadShape::TrimmedNurbs(tns) => {
+                let mut pd = tns.surface.into_patch_data();
+                pd.tag = tag;
+                let loops: Vec<Vec<[f64; 2]>> =
+                    tns.trim_loops.iter().map(|tl| tl.vertices.clone()).collect();
+                patches.push(pd);
+                trim_data.push(loops);
+            }
+            _ => { /* skip analytic / faceted surfaces */ }
+        }
+    }
+
+    if patches.is_empty() {
+        return Err("read_trimmed_step_mesh: no NURBS surfaces found".into());
+    }
+
+    let edge_conn = detect_patch_edges(&patches);
+
+    Ok((
+        fem_element::iga::NurbsMesh2D {
+            patches,
+            edge_connectivity: edge_conn,
+        },
+        trim_data,
+    ))
+}
+
 fn edges_match(a: &[[f64; 2]], b: &[[f64; 2]], eps: f64) -> bool {
     edges_match_forward(a, b, eps) || edges_match_reversed(a, b, eps)
 }
