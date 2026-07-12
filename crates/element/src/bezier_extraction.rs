@@ -192,8 +192,8 @@ pub fn compute_extraction_1d_full(kv: &KnotVector) -> Option<BezierExtraction1D>
 
 /// Compute 2-D extraction operators (tensor-product of 1-D).
 pub fn compute_extraction_2d(pd: &super::nurbs::NurbsPatch2DData) -> Option<BezierExtraction2D> {
-    let ext_u = compute_extraction_1d(&pd.kv_u)?;
-    let ext_v = compute_extraction_1d(&pd.kv_v)?;
+    let ext_u = compute_extraction_1d_full(&pd.kv_u)?;
+    let ext_v = compute_extraction_1d_full(&pd.kv_v)?;
 
     let p = ext_u.degree; let q = ext_v.degree;
     let np1 = p + 1; let nq1 = q + 1;
