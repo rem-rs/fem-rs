@@ -587,7 +587,10 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
         let nd = m.element_nodes(e);
         let faces: Vec<Vec<u32>> = if nd.len() >= 3 {
             let (n0,n1,n2) = (nd[0], nd[1], nd[2]);
-            if nd.len() == 3 || d == 2 { vec![vec![n0,n1], vec![n1,n2], vec![n0,n2]] }
+            // 2-D triangles (3 nodes) → 3 edges; 2-D quads (4 nodes) → 4 edges.
+            // The bare `d == 2` check is insufficient — quads also satisfy d == 2
+            // but need the full 4-edge list, not the triangle edge list.
+            if nd.len() == 3 { vec![vec![n0,n1], vec![n1,n2], vec![n0,n2]] }
             else if nd.len() >= 4 { let n3 = nd[3]; vec![vec![n0,n1], vec![n1,n2], vec![n2,n3], vec![n3,n0]] }
             else { continue; }
         } else if nd.len() >= 4 && d == 3 {

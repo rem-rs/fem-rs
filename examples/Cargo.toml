@@ -641,6 +641,10 @@ path = "iga_multipatch_helmholtz_2d.rs"
 name = "iga_multipatch_c1_continuity"
 path = "iga_multipatch_c1_continuity.rs"
 
+[[example]]
+name = "dealii_step6_poisson_amr"
+path = "dealii_step6_poisson_amr.rs"
+
 [lib]
 name = "fem_examples"
 
