@@ -200,46 +200,28 @@ impl<S: FESpace, K: ScalarCoeff> AmrAwareOperator for SimpleDiffusionOp<S, K> {
             let ns: Vec<u32> = mesh.element_nodes(e).to_vec();
             let c = |i: usize| mesh.node_coords(ns[i]);
 
-            if dim == 2 && order == 1 && (et == ElementType::Tri3 || et == ElementType::Quad4) {
-                let (gref, n) = if et == ElementType::Tri3 {
-                    (vec![[-1.0,-1.0],[1.0,0.0],[0.0,1.0]], 3)
-                } else {
-                    (vec![[-0.25,-0.25],[0.25,-0.25],[0.25,0.25],[-0.25,0.25]], 4)
-                };
-
-                let jac = if et == ElementType::Tri3 {
-                    [[c(1)[0]-c(0)[0], c(2)[0]-c(0)[0]],
-                     [c(1)[1]-c(0)[1], c(2)[1]-c(0)[1]]]
-                } else {
-                    [[0.25*(-c(0)[0]+c(1)[0]+c(2)[0]-c(3)[0]),
-                      0.25*(-c(0)[0]-c(1)[0]+c(2)[0]+c(3)[0])],
-                     [0.25*(-c(0)[1]+c(1)[1]+c(2)[1]-c(3)[1]),
-                      0.25*(-c(0)[1]-c(1)[1]+c(2)[1]+c(3)[1])]]
-                };
+            if dim == 2 && order == 1 && et == ElementType::Tri3 {
+                // ── Tri3: 1-point centroid quadrature (exact for P1) ──
+                let gref = [[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];
+                let n = 3;
+                let jac = [[c(1)[0]-c(0)[0], c(2)[0]-c(0)[0]],
+                           [c(1)[1]-c(0)[1], c(2)[1]-c(0)[1]]];
                 let det_j = jac[0][0] * jac[1][1] - jac[0][1] * jac[1][0];
                 let idet = if det_j.abs() > 1e-30 { 1.0 / det_j } else { 0.0 };
-                let area = 0.5 * det_j.abs();
+                let area = 0.5 * det_j.abs();  // ref triangle area 0.5, 1-pt weight = 0.5
 
-                // Physical gradients: ∇φ_i = J^{-T} · ∇ξ_i
-                let mut gx = vec![0.0; n];
-                let mut gy = vec![0.0; n];
+                let mut gx = [0.0; 3];
+                let mut gy = [0.0; 3];
                 for i in 0..n {
                     gx[i] = (jac[1][1] * gref[i][0] - jac[0][1] * gref[i][1]) * idet;
                     gy[i] = (-jac[1][0] * gref[i][0] + jac[0][0] * gref[i][1]) * idet;
                 }
 
-                // Element centroid for coefficient evaluation
-                let centroid = if et == ElementType::Tri3 {
-                    [(c(0)[0] + c(1)[0] + c(2)[0]) / 3.0,
-                     (c(0)[1] + c(1)[1] + c(2)[1]) / 3.0]
-                } else {
-                    [(c(0)[0] + c(1)[0] + c(2)[0] + c(3)[0]) / 4.0,
-                     (c(0)[1] + c(1)[1] + c(2)[1] + c(3)[1]) / 4.0]
-                };
+                let centroid = [(c(0)[0] + c(1)[0] + c(2)[0]) / 3.0,
+                                (c(0)[1] + c(1)[1] + c(2)[1]) / 3.0];
                 let ctx = CoeffCtx::from_qp(&centroid, dim, e, elem_tag, None, None);
                 let kappa_qp = self.kappa.eval(&ctx);
 
-                // K_e[i,j] = κ · |e| · (∇φ_i · ∇φ_j)
                 let xe: Vec<f64> = gd.iter().map(|&di| x[di]).collect();
                 for i in 0..n {
                     let mut yi = 0.0;
@@ -247,6 +229,69 @@ impl<S: FESpace, K: ScalarCoeff> AmrAwareOperator for SimpleDiffusionOp<S, K> {
                         yi += kappa_qp * area * (gx[i]*gx[j] + gy[i]*gy[j]) * xe[j];
                     }
                     y[gd[i]] += yi;
+                }
+            } else if dim == 2 && order == 1 && et == ElementType::Quad4 {
+                // ── Quad4 Q1: 2×2 Gauss-Legendre quadrature ──
+                // 2-point Gauss rule on [-1,1]: points = ±1/√3, weight = 1.
+                let gp = 1.0 / 3.0_f64.sqrt();
+                let pts = [[-gp, -gp], [gp, -gp], [gp, gp], [-gp, gp]];
+                let n = 4usize;
+
+                let xe: Vec<f64> = gd.iter().map(|&di| x[di]).collect();
+                for &[xi, eta] in &pts {
+                    // Q1 reference gradients at (ξ,η):
+                    //   dNi/dξ  = ±0.25*(1 ∓ η)  for corner i
+                    //   dNi/dη  = ±0.25*(1 ∓ ξ)  for corner i
+                    let dndxi = [
+                        -0.25 * (1.0 - eta),
+                         0.25 * (1.0 - eta),
+                         0.25 * (1.0 + eta),
+                        -0.25 * (1.0 + eta),
+                    ];
+                    let dndeta = [
+                        -0.25 * (1.0 - xi),
+                        -0.25 * (1.0 + xi),
+                         0.25 * (1.0 + xi),
+                         0.25 * (1.0 - xi),
+                    ];
+
+                    // Bilinear Jacobian at (ξ,η): J_{ij} = Σ_k (dNk/dξj) * x_k[i]
+                    let j00 = dndxi.iter().zip(ns.iter())
+                        .map(|(&d, &nid)| d * mesh.node_coords(nid)[0]).sum::<f64>();
+                    let j01 = dndeta.iter().zip(ns.iter())
+                        .map(|(&d, &nid)| d * mesh.node_coords(nid)[0]).sum::<f64>();
+                    let j10 = dndxi.iter().zip(ns.iter())
+                        .map(|(&d, &nid)| d * mesh.node_coords(nid)[1]).sum::<f64>();
+                    let j11 = dndeta.iter().zip(ns.iter())
+                        .map(|(&d, &nid)| d * mesh.node_coords(nid)[1]).sum::<f64>();
+
+                    let det_j = j00 * j11 - j01 * j10;
+                    let idet = if det_j.abs() > 1e-30 { 1.0 / det_j } else { 0.0 };
+                    let vol = det_j.abs();  // tensor-product weight = 1 per direction → total weight = 1
+
+                    // Physical gradients: ∇φ = J^{-T} ∇ξ
+                    let mut gx = [0.0; 4];
+                    let mut gy = [0.0; 4];
+                    for i in 0..n {
+                        gx[i] = (j11 * dndxi[i] - j01 * dndeta[i]) * idet;
+                        gy[i] = (-j10 * dndxi[i] + j00 * dndeta[i]) * idet;
+                    }
+
+                    // Physical coordinate of this Gauss point (for variable coefficients)
+                    let xp = [
+                        c(0)[0] + j00 * (xi + 1.0) / 2.0 + j01 * (eta + 1.0) / 2.0,
+                        c(0)[1] + j10 * (xi + 1.0) / 2.0 + j11 * (eta + 1.0) / 2.0,
+                    ];
+                    let ctx = CoeffCtx::from_qp(&xp, dim, e, elem_tag, None, None);
+                    let kappa_qp = self.kappa.eval(&ctx);
+
+                    for i in 0..n {
+                        let mut yi = 0.0;
+                        for j in 0..n {
+                            yi += kappa_qp * vol * (gx[i]*gx[j] + gy[i]*gy[j]) * xe[j];
+                        }
+                        y[gd[i]] += yi;
+                    }
                 }
             } else {
                 // Full quadrature for higher-order elements
