@@ -113,6 +113,7 @@ pub mod backend;
 pub mod comm;
 pub mod dof_partition;
 pub mod env;
+pub mod forest;
 pub mod ghost;
 pub mod gpu_mpi;
 pub mod launcher;
