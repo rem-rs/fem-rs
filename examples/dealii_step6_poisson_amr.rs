@@ -3,8 +3,7 @@
 //! This example solves -Δu = f on a unit square, with a manufactured
 //! solution u = arctan(α·(r - r₀)) that has a steep circular front.
 //! Adaptive mesh refinement is driven by the Kelly face-jump error
-//! indicator, with fixed-fraction marking (refine top 30%, coarsen
-//! bottom 3%).
+//! indicator, with fixed-fraction marking (refine top 30%).
 //!
 //! This mirrors the approach of deal.II tutorial step-6.
 //!

@@ -59,9 +59,9 @@ fn test_forest_2to1_balance_after_refine() {
     forest.refine_keys(&closure);
 
     // After balancing, verify the forest stats are consistent.
-    // The refine of 7 keys produces at least 28 active quadrants
-    // (each quadrant produces 4 children in 2-D), so n_active > 7
-    // verifies that the combined balance+refine pipeline completed.
+    // Refining closure.len() keys produces 4 * closure.len()
+    // active quadrants (each quadrant yields 4 children in 2-D),
+    // so n_active > 7 verifies the pipeline completed structurally.
     let stats = forest.stats();
     assert!(
         stats.max_level <= stats.min_level + 1,
