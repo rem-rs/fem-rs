@@ -15,13 +15,9 @@ use std::collections::{HashMap, HashSet};
 use fem_core::{ElemId, NodeId};
 use crate::element_type::ElementType;
 use crate::simplex::Mesh;
+use super::bisect::edge_key;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
-
-/// Canonical (sorted) edge key used for adjacency lookups.
-fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
-    if a < b { (a, b) } else { (b, a) }
-}
 
 /// Local (apex‑independent) edge index pairs for each supported element type.
 /// The returned slice contains each edge of a reference element as a pair of
@@ -168,9 +164,20 @@ impl RefinementTree {
             }
         }
 
-        // ── Record parent → children and child → parent ─────────────────
+        // ── Pre-compute carry-forward levels ────────────────────────
+        // Save old levels for unrefined elements *before* the children loop
+        // overwrites level entries at shared positions.
         let extra_per_refine = n_children.saturating_sub(1);
+        let mut carry_levels: Vec<(ElemId, u8)> = Vec::new();
+        for e in 0..n_elems_before as ElemId {
+            if !marked_set.contains(&e) {
+                let old_level = self.level.get(&e).copied().unwrap_or(0);
+                let new_pos = e as usize + marked_before[e as usize] * extra_per_refine;
+                carry_levels.push((new_pos as ElemId, old_level));
+            }
+        }
 
+        // ── Record parent → children and child → parent ─────────────────
         for &e in marked {
             let parent_level = self.level.get(&e).copied().unwrap_or(0);
             let start = e as usize + marked_before[e as usize] * extra_per_refine;
@@ -195,6 +202,15 @@ impl RefinementTree {
                 }
                 self.level.insert(child, parent_level + 1);
             }
+        }
+
+        // ── Propagate levels for carry-forward (unrefined) elements ──
+        // An unrefined element at old position `e` shifts to a new position
+        // based on how many refined elements (and their extra children) preceded
+        // it.  We copy its old level to the new position so that multi-level
+        // refinement doesn't lose the level for later queries and balance checks.
+        for (pos, level) in carry_levels {
+            self.level.insert(pos, level);
         }
     }
 
@@ -678,33 +694,11 @@ mod tests {
         // others stay at level 0
 
         let result = tree.enforce_2to1_balance(&mesh, &[0u32]);
-        // All elements should be in the closure because 0→1→2,3 cascade.
-        assert!(result.contains(&0));
-        assert!(result.contains(&1));
-        // 2 shares an edge with 1, 3 shares an edge with 1
-        // This mesh topology: edges of element 1 → connects to 0, 3 (two edges)
-        // Element 1 neighbours: 0 and 3 (diagonally opposite)
-        // Wait, let me check: the quad mesh has elements:
-        //   E0: [0,1,4,3]  E1: [1,2,5,4]  E2: [3,4,7,6]  E3: [4,5,8,7]
-        // Edge connections:
-        //   E0-E1: edge 1-4  (between (0,1) in E0 and (left edge) in E1)
-        // Actually, let me think. Shared edge between E0 and E1: E0 nodes [0,1,4,3],
-        // E1 nodes [1,2,5,4]. Shared nodes: 1 and 4. So edge 1-4 is shared.
-        // E0-E2: nodes [0,1,4,3] and [3,4,7,6]. Shared: 3 and 4. Edge 3-4.
-        // E1-E3: nodes [1,2,5,4] and [4,5,8,7]. Shared: 4 and 5. Edge 4-5.
-        // E2-E3: nodes [3,4,7,6] and [4,5,8,7]. Shared: 4 and 7. Edge 4-7.
-        // Also E1 and E2 don't share an edge (they share node 4 only).
-        // E0 doesn't share an edge with E3.
-        // So: E0 neighbours: E1, E2
-        //     E1 neighbours: E0, E3
-        //     E2 neighbours: E0, E3
-        //     E3 neighbours: E1, E2
-        // If 0→1 and 0→2 triggered, and 1→3 and 2→3, then all 4 are in closure.
-        // Let me verify with the implementation.
-        assert!(
-            result.len() >= 2,
-            "at least element 0 and its neighbours should be marked"
-        );
+        // E0 at level 2 forces its edge-neighbours E1 and E2 (level 0 < 2)
+        // into the closure.  E1/E2 are themselves at level 0, so they cannot
+        // force their own neighbours (0 < 0 is false), leaving E3 out.
+        // Closure = {0, 1, 2}.
+        assert_eq!(result, vec![0u32, 1, 2], "0→1,2 cascade only; E3 unreachable from level-0 E1/E2");
     }
 
     #[test]
