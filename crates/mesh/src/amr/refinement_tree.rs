@@ -237,10 +237,21 @@ impl RefinementTree {
 
     /// Siblings of `elem` (other children of the same parent).
     pub fn siblings_of(&self, elem: ElemId) -> Vec<ElemId> {
-        self.parent.get(&elem)
-            .and_then(|&p| self.children.get(&p))
-            .map(|kids| kids.iter().filter(|&&k| k != elem).copied().collect())
-            .unwrap_or_default()
+        // First try direct parent lookup
+        if let Some(&p) = self.parent.get(&elem) {
+            if let Some(kids) = self.children.get(&p) {
+                return kids.iter().filter(|&&k| k != elem).copied().collect();
+            }
+        }
+        // Fallback: scan all parents for one whose children include this elem
+        // (needed when a child shares its parent's ElemId, common in multi-level
+        //  refinement where parent_of returns None to avoid a self-loop).
+        for (&p, kids) in &self.children {
+            if kids.contains(&elem) {
+                return kids.iter().filter(|&&k| k != elem).copied().collect();
+            }
+        }
+        Vec::new()
     }
 
     /// Refinement level of `elem` (0 = initial mesh element).

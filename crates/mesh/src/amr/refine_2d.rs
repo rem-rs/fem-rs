@@ -539,8 +539,8 @@ pub fn longest_edge_tri(mesh:&Mesh<2>,ns:&[NodeId])->(NodeId,NodeId){
 
 // ─── 2-D Quad4 anisotropic ──────────────────────────────────────────────────
 
-pub fn refine_nonconforming_quad_aniso(mesh:&Mesh<2>,marked:&[(ElemId,QuadRefineDir)])->(Mesh<2>,Vec<HangingNodeConstraint>){
-    assert!(mesh.elem_type==ElementType::Quad4,"refine_nonconforming_quad_aniso: only Quad4");if marked.is_empty(){return(mesh.clone(),Vec::new());}
+pub fn refine_nonconforming_quad_aniso(mesh:&Mesh<2>,marked:&[(ElemId,QuadRefineDir)],project_boundary: Option<&ProjectionConfig>)->(Mesh<2>,Vec<HangingNodeConstraint>){
+    assert!(mesh.elem_type==ElementType::Quad4,"refine_nonconforming_quad_aniso: only Quad4");if marked.is_empty(){let m=if let Some(config)=project_boundary{project_boundary_to_cad(mesh,config,2)}else{mesh.clone()};return(m,Vec::new());}
     let n_elemes=mesh.n_elems();let marked_map:HashMap<ElemId,QuadRefineDir>=marked.iter().copied().collect();let marked_set:std::collections::HashSet<ElemId>=marked_map.keys().copied().collect();
     let mut edge_elems:HashMap<(NodeId,NodeId),Vec<ElemId>>=HashMap::new();
     for e in 0..n_elemes as ElemId{let ns=mesh.elem_nodes(e);for&(a,b)in &local_edges_quad(){edge_elems.entry(quad_edge_key(ns[a],ns[b])).or_default().push(e);}}
@@ -555,7 +555,11 @@ pub fn refine_nonconforming_quad_aniso(mesh:&Mesh<2>,marked:&[(ElemId,QuadRefine
     c.sort_by_key(|c|c.constrained);
     let nf=mesh.n_faces();let mut nfc=Vec::new();let mut nft=Vec::new();
     for f in 0..nf{let a=mesh.face_conn[2*f];let b=mesh.face_conn[2*f+1];let tag=mesh.face_tags[f];if let Some(&mid)=mm.get(&quad_edge_key(a,b)){nfc.extend_from_slice(&[a,mid]);nft.push(tag);nfc.extend_from_slice(&[mid,b]);nft.push(tag);}else{nfc.extend_from_slice(&[a,b]);nft.push(tag);}}
-    let nm=Mesh::uniform(nc,ncn,nt,ElementType::Quad4,nfc,nft,ElementType::Line2);(nm,c)
+    let mut nm=Mesh::uniform(nc,ncn,nt,ElementType::Quad4,nfc,nft,ElementType::Line2);
+    if let Some(config) = project_boundary {
+        nm = project_boundary_to_cad(&nm, config, 2);
+    }
+    (nm,c)
 }
 
 // ─── 2-D Tri3 anisotropic ───────────────────────────────────────────────────

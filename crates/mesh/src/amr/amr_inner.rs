@@ -1342,7 +1342,10 @@ pub fn refine_nonconforming_quad(
     );
 
     if marked.is_empty() {
-        return (mesh.clone(), Vec::new());
+        let mesh = if let Some(config) = project_boundary {
+            project_boundary_to_cad(mesh, config, 2)
+        } else { mesh.clone() };
+        return (mesh, Vec::new());
     }
 
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
@@ -3817,7 +3820,10 @@ pub fn refine_nonconforming_tri_aniso(
     );
 
     if marked.is_empty() {
-        return (mesh.clone(), Vec::new());
+        let mesh = if let Some(config) = project_boundary {
+            project_boundary_to_cad(mesh, config, 2)
+        } else { mesh.clone() };
+        return (mesh, Vec::new());
     }
 
     let n_elems = mesh.n_elems();
@@ -3973,7 +3979,10 @@ pub fn refine_nonconforming_tet_aniso(
     );
 
     if marked.is_empty() {
-        return (mesh.clone(), Vec::new());
+        let mesh = if let Some(config) = project_boundary {
+            project_boundary_to_cad(mesh, config, 3)
+        } else { mesh.clone() };
+        return (mesh, Vec::new());
     }
 
     let n_elems = mesh.n_elems();
