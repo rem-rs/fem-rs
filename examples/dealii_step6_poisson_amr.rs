@@ -56,20 +56,26 @@ fn exact_solution(pt: &[f64]) -> f64 {
 }
 
 /// RHS: -Δu
+///
+/// Derivation:
+///   u(r) = arctan(α·s),  s = r - R0
+///   du/dr = α / (1 + α²s²)
+///   d²u/dr² = -2α³s / (1 + α²s²)²
+///   Δu in 2D polar:  d²u/dr² + (1/r)·du/dr
+///   -Δu = 2α³s/(1+α²s²)² - α/(r·(1+α²s²))
 fn rhs_function(pt: &[f64]) -> f64 {
     let x = pt[0] - 0.5;
     let y = pt[1] - 0.5;
-    let r2 = x * x + y * y;
-    let r = r2.sqrt();
+    let r = (x * x + y * y).sqrt();
     if r < 1e-15 {
-        return 0.0;
+        return 0.0; // removable singularity at r=0
     }
-    let a2 = ALPHA * ALPHA;
-    let denom = (1.0 + a2 * (r - R0).powi(2)).powi(2);
-    // Analytical -Δ(arctan(α(r-r₀))) in 2D
-    let u_xx = -ALPHA * (1.0 - 2.0 * a2 * (r - R0) * x * x / r) / denom;
-    let u_yy = -ALPHA * (1.0 - 2.0 * a2 * (r - R0) * y * y / r) / denom;
-    -(u_xx + u_yy)
+    let s = r - R0;
+    let a = ALPHA;
+    let a2 = a * a;
+    let s2 = s * s;
+    let denom = 1.0 + a2 * s2;
+    2.0 * a2 * a * s / (denom * denom) - a / (r * denom)
 }
 
 // ─── CLI args ──────────────────────────────────────────────────────────────
