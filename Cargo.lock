@@ -851,8 +851,12 @@ dependencies = [
 name = "fem-mesh"
 version = "0.1.0"
 dependencies = [
+ "fem-assembly",
  "fem-core",
  "fem-element",
+ "fem-linalg",
+ "fem-solver",
+ "fem-space",
  "nalgebra 0.33.3",
  "serde",
  "serde_json",
