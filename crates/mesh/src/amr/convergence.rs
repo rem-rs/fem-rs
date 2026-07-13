@@ -19,22 +19,25 @@ pub struct ConvergenceRecord {
 ///
 /// # Type Parameters
 /// - `D`: spatial dimension (2 or 3)
-/// - `P`: problem definition (provides exact solution, RHS, BCs)
+#[derive(Default)]
 pub struct ConvergenceStudy<const D: usize> {
     pub records: Vec<ConvergenceRecord>,
 }
 
 impl<const D: usize> ConvergenceStudy<D> {
+    /// Create a new empty convergence study.
     pub fn new() -> Self {
         Self {
             records: Vec::new(),
         }
     }
 
+    /// Append a convergence record.
     pub fn push(&mut self, record: ConvergenceRecord) {
         self.records.push(record);
     }
 
+    /// Return the most recent record, if any.
     pub fn last(&self) -> Option<&ConvergenceRecord> {
         self.records.last()
     }
