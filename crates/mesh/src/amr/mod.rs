@@ -1,5 +1,6 @@
 //! Adaptive Mesh Refinement (AMR).
 pub mod convergence;
+pub use convergence::{ConvergenceStudy, ConvergenceRecord};
 mod amr_inner;
 pub mod anisotropy;
 mod bisect;
