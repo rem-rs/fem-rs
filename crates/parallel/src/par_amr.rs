@@ -3,9 +3,9 @@
 //! Provides [`par_refine_marked`] for distributed non-conforming refinement and
 //! [`par_repartition`] for load-rebalancing after refinement.
 
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, BTreeMap, HashSet};
 
-use fem_mesh::{Mesh, amr::NCState, topology::MeshTopology, boundary::BoundaryTag};
+use fem_mesh::{Mesh, amr::NCState, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, topology::MeshTopology, boundary::BoundaryTag};
 use fem_core::types::{ElemId, NodeId};
 
 use crate::{
@@ -49,20 +49,23 @@ pub struct ParRefinedMesh {
 }
 
 /// Perform one cycle of parallel non-conforming AMR.
+///
+/// To later derefine, use [`par_refine_marked_with_tree`] which returns a
+/// [`DerefineTree`] suitable for [`par_derefine_marked`].
 pub fn par_refine_marked(
     par_mesh: &ParallelMesh<Mesh<2>>,
     mut nc_state: NCState,
     marked:    &[ElemId],
     solution:  Option<&[f64]>,
 ) -> Result<ParRefinedMesh, ParAmrError> {
-    let local_mesh = par_mesh.local_mesh();
+    let coarse_mesh = par_mesh.local_mesh().clone();
     let comm       = par_mesh.comm().clone();
 
-    let (refined_mesh, _constraints, _midpoint_map) = nc_state.refine(local_mesh, marked);
+    let (refined_mesh, _constraints, _midpoint_map) = nc_state.refine(&coarse_mesh, marked);
     let n_new_elems = refined_mesh.n_elements();
 
     let prolongated = if let Some(sol) = solution {
-        prolongate_p1(local_mesh, &refined_mesh, sol)
+        prolongate_p1(&coarse_mesh, &refined_mesh, sol)
     } else {
         vec![]
     };
@@ -79,6 +82,256 @@ pub fn par_refine_marked(
         nc_state,
         solution: prolongated,
         n_new_elems,
+    })
+}
+
+/// Parallel non-conforming AMR that also returns a [`DerefineTree`] for later
+/// coarsening via [`par_derefine_marked`].
+///
+/// This is the counterpart of [`par_refine_marked`] that preserves the
+/// parent→children provenance required for parallel derefinement.
+pub fn par_refine_marked_with_tree(
+    par_mesh: &ParallelMesh<Mesh<2>>,
+    mut nc_state: NCState,
+    marked:    &[ElemId],
+    solution:  Option<&[f64]>,
+) -> Result<(ParRefinedMesh, DerefineTree), ParAmrError> {
+    let coarse_mesh = par_mesh.local_mesh().clone();
+    let comm       = par_mesh.comm().clone();
+
+    let (refined_mesh, _constraints, midpoint_map) = nc_state.refine(&coarse_mesh, marked);
+    let n_new_elems = refined_mesh.n_elements();
+
+    let prolongated = if let Some(sol) = solution {
+        prolongate_p1(&coarse_mesh, &refined_mesh, sol)
+    } else {
+        vec![]
+    };
+
+    let new_partition = MeshPartition::new_serial(
+        refined_mesh.n_nodes(),
+        refined_mesh.n_elements(),
+    );
+    let new_par_mesh = ParallelMesh::new(refined_mesh, comm, new_partition);
+
+    let tree = build_derefine_tree_from_refine(&coarse_mesh, marked, &midpoint_map);
+
+    Ok((ParRefinedMesh {
+        par_mesh: new_par_mesh,
+        nc_state,
+        solution: prolongated,
+        n_new_elems,
+    }, tree))
+}
+
+// ─── DerefineTree building ──────────────────────────────────────────────────
+
+/// Canonical edge key (sorted node pair) — mirrors `fem_mesh::amr::bisect::edge_key`.
+fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+    if a < b { (a, b) } else { (b, a) }
+}
+
+/// Build a [`DerefineTree`] from the inputs and outputs of
+/// [`NCState::refine`](fem_mesh::amr::NCState::refine).
+///
+/// `NCState::refine` performs red refinement (1 Tri3 → 4 children).  The
+/// children occupy consecutive positions in the refined element array,
+/// determined by how many elements before `e` were refined.  This function
+/// reconstructs the `DerefineTree` so that [`derefine_marked`] can roll back
+/// those refinements.
+pub fn build_derefine_tree_from_refine(
+    coarse_mesh: &Mesh<2>,
+    marked: &[ElemId],
+    midpoint_map: &HashMap<(NodeId, NodeId), NodeId>,
+) -> DerefineTree {
+    let marked_set: HashSet<ElemId> = marked.iter().copied().collect();
+    let mut records = HashMap::new();
+    let n_coarse = coarse_mesh.n_elems();
+    let mut n_refined_before = 0usize;
+
+    for e in 0..n_coarse as ElemId {
+        if marked_set.contains(&e) {
+            let ns = coarse_mesh.element_nodes(e);
+            let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2];
+
+            // Children start at position e + 3 × (#refined before e) in the
+            // refined element array (each refined element → 4 children,
+            // each unrefined → 1 element).
+            let start = e + 3 * n_refined_before as ElemId;
+
+            records.insert(e, DerefineRecord {
+                parent_nodes: [n0, n1, n2],
+                parent_tag: coarse_mesh.elem_tags[e as usize],
+                children: [start, start + 1, start + 2, start + 3],
+            });
+            n_refined_before += 1;
+        }
+    }
+
+    DerefineTree { records, midpoint_map: midpoint_map.clone() }
+}
+
+// ─── Parallel derefinement ──────────────────────────────────────────────────
+
+/// Result of a single parallel *de*refinement (coarsening) cycle.
+///
+/// Structurally identical to [`ParRefinedMesh`]; semantic difference is that
+/// `n_new_elems` is the coarsened element count (smaller than before).
+pub struct ParDerefinedMesh {
+    pub par_mesh:    ParallelMesh<Mesh<2>>,
+    pub nc_state:    NCState,
+    pub solution:    Vec<f64>,
+    pub n_new_elems: usize,
+}
+
+/// Coarsen previously refined elements in a distributed mesh.
+///
+/// # Parallel coordination protocol
+///
+/// 1. Each rank filters `marked_parents` to only those parents where **all 4
+///    children** reside on that rank (checked via the partition's
+///    `global_elem_ids` / `local_elem` lookup).
+/// 2. Rank-0 gather of per-parent `i64` votes (`1` = this rank owns all children,
+///    `0` = not) via `allreduce_sum_i64`.  Only parents with vote-sum `== 1`
+///    (children on exactly one rank) are coarsened — parents that straddle rank
+///    boundaries are **skipped** (future work: migrate children first).
+/// 3. Each rank builds a **local** [`DerefineTree`] whose children use local
+///    element indices, then calls the serial [`derefine_marked`].
+/// 4. The [`NCState`] is rolled back one level via `derefine_last()`.
+/// 5. The solution is restricted: for P1 elements the coarse-node values are
+///    unchanged (they share the same node IDs), so the vector is returned
+///    unmodified.
+///
+/// # Arguments
+/// * `par_mesh` — partitioned refined mesh.
+/// * `nc_state` — NCState from the refinement step (will be rolled back).
+/// * `derefine_tree` — parent→children tree from [`build_derefine_tree_from_refine`].
+/// * `marked_parents` — **global** ElemIds of parent elements to coarsen.
+/// * `solution` — optional solution vector on the refined mesh.
+pub fn par_derefine_marked(
+    par_mesh: &ParallelMesh<Mesh<2>>,
+    nc_state: &mut NCState,
+    derefine_tree: &DerefineTree,
+    marked_parents: &[ElemId],
+    solution: Option<&[f64]>,
+) -> Result<ParDerefinedMesh, ParAmrError> {
+    let local_mesh = par_mesh.local_mesh();
+    let partition = par_mesh.partition();
+    let comm = par_mesh.comm().clone();
+
+    if marked_parents.is_empty() {
+        return Ok(ParDerefinedMesh {
+            par_mesh: ParallelMesh::new(local_mesh.clone(), comm, partition.clone()),
+            nc_state: nc_state.clone(),
+            solution: solution.map(|s| s.to_vec()).unwrap_or_default(),
+            n_new_elems: local_mesh.n_elems(),
+        });
+    }
+
+    // ── Step 1: filter to parents whose children are all on this rank ─────
+    // Build a local DerefineTree with local element indices.
+    let mut local_records: HashMap<ElemId, DerefineRecord> = HashMap::new();
+    // Track per-parent "vote" for MPI coordination.
+    let mut votes: Vec<i64> = Vec::with_capacity(marked_parents.len());
+
+    for &parent_global in marked_parents {
+        let rec = match derefine_tree.records.get(&parent_global) {
+            Some(r) => r,
+            None => { votes.push(0); continue; }
+        };
+
+        // Check all 4 children are present on this rank.
+        let mut all_local = true;
+        let mut local_children = [0u32; 4];
+        for (j, &child_global) in rec.children.iter().enumerate() {
+            match partition.local_elem(child_global) {
+                Some(local_id) => local_children[j] = local_id,
+                None => { all_local = false; break; }
+            }
+        }
+
+        if all_local {
+            local_records.insert(parent_global, DerefineRecord {
+                parent_nodes: rec.parent_nodes,
+                parent_tag: rec.parent_tag,
+                children: local_children,
+            });
+            votes.push(1);
+        } else {
+            votes.push(0);
+        }
+    }
+
+    // ── Step 2: MPI coordination via per-parent Allreduce ─────────────────
+    // Sum votes across ranks.  A parent is derefinable iff sum == 1
+    // (exactly one rank owns all its children).
+    let size = comm.size();
+    let mut global_votes: Vec<i64> = if size > 1 {
+        let mut gv = votes.clone();
+        // allreduce_sum_i64 operates on a single value; we loop.
+        // For large numbers of parents this should be replaced with a
+        // single alltoallv, but for typical AMR it's fine.
+        for v in &mut gv {
+            *v = comm.allreduce_sum_i64(*v);
+        }
+        gv
+    } else {
+        votes // no-op for single-rank
+    };
+
+    // Build final local tree from parents with sum == 1.
+    let mut final_records: HashMap<ElemId, DerefineRecord> = HashMap::new();
+    for (i, &parent_global) in marked_parents.iter().enumerate() {
+        if i < global_votes.len() && global_votes[i] == 1 {
+            if let Some(rec) = local_records.get(&parent_global) {
+                final_records.insert(parent_global, rec.clone());
+            }
+        }
+    }
+
+    // ── Step 3: serial derefinement on the local mesh ─────────────────────
+    let derefinable_parents: Vec<ElemId> = final_records.keys().copied().collect();
+    if derefinable_parents.is_empty() {
+        return Ok(ParDerefinedMesh {
+            par_mesh: ParallelMesh::new(local_mesh.clone(), comm, partition.clone()),
+            nc_state: nc_state.clone(),
+            solution: solution.map(|s| s.to_vec()).unwrap_or_default(),
+            n_new_elems: local_mesh.n_elems(),
+        });
+    }
+
+    let local_tree = DerefineTree {
+        records: final_records,
+        midpoint_map: derefine_tree.midpoint_map.clone(),
+    };
+
+    let coarsened_mesh = derefine_marked(local_mesh, &local_tree, &derefinable_parents);
+
+    // ── Step 4: roll back NCState ─────────────────────────────────────────
+    nc_state.derefine_last();
+
+    // ── Step 5: restrict solution (P1: coarse nodes keep their values) ────
+    let restricted = if let Some(sol) = solution {
+        // derefine_marked keeps ALL nodes (coarse + orphans), so the
+        // solution vector length is unchanged for P1.
+        sol.to_vec()
+    } else {
+        vec![]
+    };
+
+    // ── Step 6: build new Partition + ParallelMesh ────────────────────────
+    let new_n_elems = coarsened_mesh.n_elems();
+    let new_partition = MeshPartition::new_serial(
+        coarsened_mesh.n_nodes(),
+        new_n_elems,
+    );
+    let new_par_mesh = ParallelMesh::new(coarsened_mesh, comm, new_partition);
+
+    Ok(ParDerefinedMesh {
+        par_mesh: new_par_mesh,
+        nc_state: nc_state.clone(),
+        solution: restricted,
+        n_new_elems: new_n_elems,
     })
 }
 
@@ -831,10 +1084,170 @@ mod tests {
             face_to_elem: None,
             edge_conn: Vec::new(),
             edge_to_elem: Vec::new(),
+            geometry: None,
         };
         let centroids = compute_centroids_simple(&mesh);
         assert_eq!(centroids.len(), 1);
         assert!((centroids[0][0] - 1.0 / 3.0).abs() < 1e-14, "centroid x={}", centroids[0][0]);
         assert!((centroids[0][1] - 1.0 / 3.0).abs() < 1e-14, "centroid y={}", centroids[0][1]);
+    }
+
+    // ─── DerefineTree building tests ──────────────────────────────────────────
+
+    #[test]
+    fn build_derefine_tree_all_refined() {
+        // unit_square_tri(1) = 2 triangles
+        let mesh = Mesh::<2>::unit_square_tri(1);
+        let n_elems = mesh.n_elems();
+        assert_eq!(n_elems, 2, "unit_square_tri(1) should have 2 triangles");
+        let marked: Vec<ElemId> = (0..n_elems as ElemId).collect();
+        let midpoint_map = HashMap::new(); // positions are computed algorithmically
+        let tree = build_derefine_tree_from_refine(&mesh, &marked, &midpoint_map);
+        assert_eq!(tree.records.len(), 2, "2 parents");
+        // Parent 0: first refined element → children at 0, 1, 2, 3
+        let r0 = &tree.records[&0u32];
+        assert_eq!(r0.children, [0, 1, 2, 3], "parent 0 children");
+        // Parent 1: second refined element, 1 refined before → children at 4, 5, 6, 7
+        let r1 = &tree.records[&1u32];
+        assert_eq!(r1.children, [4, 5, 6, 7], "parent 1 children");
+    }
+
+    #[test]
+    fn build_derefine_tree_partial_refine() {
+        let mesh = Mesh::<2>::unit_square_tri(3); // 3 elements
+        let marked: Vec<ElemId> = vec![0, 2]; // refine elements 0 and 2 only
+        let midpoint_map = HashMap::new(); // content not important for position test
+        let tree = build_derefine_tree_from_refine(&mesh, &marked, &midpoint_map);
+        assert_eq!(tree.records.len(), 2, "2 parents");
+        // Parent 0: first element, 0 refined before → children at 0, 1, 2, 3
+        assert_eq!(tree.records[&0u32].children, [0, 1, 2, 3], "parent 0 children");
+        // Parent 2: third element, 1 refined before (elem 0) → 2 + 3*1 = 5
+        assert_eq!(tree.records[&2u32].children, [5, 6, 7, 8], "parent 2 children");
+        // Element 1 (unrefined) has no record
+        assert!(!tree.records.contains_key(&1u32), "elem 1 should not be in tree");
+    }
+
+    // ─── Derefine cycle tests (refine → derefine → original) ─────────────────
+
+    #[test]
+    fn refine_then_derefine_restores_element_count() {
+        let (par_mesh, nc) = make_serial_par_mesh(2);
+        let n_before = par_mesh.local_mesh().n_elems();
+        let all_marked: Vec<ElemId> = (0..n_before as ElemId).collect();
+
+        // Refine with tree
+        let (refined, tree) =
+            par_refine_marked_with_tree(&par_mesh, nc, &all_marked, None).unwrap();
+        let n_refined = refined.par_mesh.local_mesh().n_elems();
+        assert!(n_refined > n_before, "refined count {} > {}", n_refined, n_before);
+
+        // Derefine all parents
+        let parents: Vec<ElemId> = tree.parents();
+        assert!(!parents.is_empty(), "should have parents to derefine");
+
+        let mut nc2 = refined.nc_state;
+        let result = par_derefine_marked(
+            &refined.par_mesh,
+            &mut nc2,
+            &tree,
+            &parents,
+            None,
+        ).unwrap();
+
+        assert_eq!(
+            result.par_mesh.local_mesh().n_elems(),
+            n_before,
+            "derefine should restore original element count"
+        );
+    }
+
+    #[test]
+    fn refine_then_derefine_partial() {
+        // unit_square_tri(3) = 2*3*3 = 18 triangles
+        let (par_mesh, nc) = make_serial_par_mesh(3);
+        let n_before = par_mesh.local_mesh().n_elems();
+        assert_eq!(n_before, 18, "unit_square_tri(3)");
+
+        // Refine elements 0 and 2 only
+        let marked: Vec<ElemId> = vec![0u32, 2u32];
+        let (refined, tree) =
+            par_refine_marked_with_tree(&par_mesh, nc, &marked, None).unwrap();
+        let n_refined = refined.par_mesh.local_mesh().n_elems();
+
+        // 2 refined (each →4) + 16 unrefined = 8 + 16 = 24
+        assert_eq!(n_refined, 24, "refined: 2*4 + 16 unrefined");
+
+        // Derefine both parents
+        let mut nc2 = refined.nc_state;
+        let result = par_derefine_marked(
+            &refined.par_mesh,
+            &mut nc2,
+            &tree,
+            &[0u32, 2u32],
+            None,
+        ).unwrap();
+
+        assert_eq!(
+            result.par_mesh.local_mesh().n_elems(),
+            n_before,
+            "should restore original count after partial derefine"
+        );
+    }
+
+    #[test]
+    fn derefine_preserves_solution() {
+        let (par_mesh, nc) = make_serial_par_mesh(2);
+        let solution: Vec<f64> = (0..par_mesh.local_mesh().n_nodes())
+            .map(|i| i as f64 * 0.5)
+            .collect();
+
+        // Refine
+        let all: Vec<ElemId> = (0..par_mesh.local_mesh().n_elems() as ElemId).collect();
+        let (refined, tree) =
+            par_refine_marked_with_tree(&par_mesh, nc, &all, Some(&solution)).unwrap();
+
+        // Solution should have been prolongated (longer vector)
+        assert!(refined.solution.len() >= solution.len());
+
+        // Derefine
+        let parents: Vec<ElemId> = tree.parents();
+        let mut nc2 = refined.nc_state;
+        let result = par_derefine_marked(
+            &refined.par_mesh,
+            &mut nc2,
+            &tree,
+            &parents,
+            Some(&refined.solution),
+        ).unwrap();
+
+        // After derefine, solution length should be back to original
+        // (derefine_marked keeps all nodes, so solution length unchanged)
+        assert_eq!(result.solution.len(), refined.solution.len());
+
+        // Corner node values should be preserved
+        let n_original = solution.len();
+        for i in 0..n_original {
+            let diff = (result.solution[i] - solution[i]).abs();
+            assert!(diff < 1e-14, "node {i}: expected {}, got {}", solution[i], result.solution[i]);
+        }
+    }
+
+    #[test]
+    fn par_refine_marked_with_tree_round_trip() {
+        // Verify that par_refine_marked_with_tree returns a consistent tree.
+        // unit_square_tri(2) = 8 elements
+        let (par_mesh, nc) = make_serial_par_mesh(2);
+        let n_elems = par_mesh.local_mesh().n_elems();
+        assert_eq!(n_elems, 8, "unit_square_tri(2)");
+        let all: Vec<ElemId> = (0..n_elems as ElemId).collect();
+        let (_refined, tree) =
+            par_refine_marked_with_tree(&par_mesh, nc, &all, None).unwrap();
+
+        let parents = tree.parents();
+        assert_eq!(parents.len(), n_elems, "all {} elements should have parent records", n_elems);
+        for &p in &parents {
+            let rec = tree.records.get(&p).unwrap();
+            assert_eq!(rec.children.len(), 4, "each parent should have 4 children");
+        }
     }
 }
