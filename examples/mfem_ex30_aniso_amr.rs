@@ -80,8 +80,8 @@ fn preprocess(mesh: &mut Mesh<2>, coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
 
         if global_osc < threshold || ne >= max_elements || marked.is_empty() { return (ne, global_osc); }
         match mesh.element_type(0) {
-            ElementType::Tri3 => *mesh = closure_refine_default(mesh, &marked),
-            ElementType::Quad4 => *mesh = refine_nonconforming_quad(mesh, &marked).0,
+            ElementType::Tri3 => *mesh = closure_refine_default(mesh, &marked, None),
+            ElementType::Quad4 => *mesh = refine_nonconforming_quad(mesh, &marked, None).0,
             _ => panic!("unsupported element type"),
         }
     }

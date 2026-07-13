@@ -38,7 +38,7 @@ pub use amr::{dorfler_mark, mark_for_derefinement, mark_for_p_refinement, p_refi
 pub use hp_amr::{HpAction, hp_mark, compute_smoothness_indicator, mark_smooth_for_p_refinement, mark_rough_for_h_refinement};
 pub use boundary::{BoundaryTag, NamedAttributeRegistry, NamedAttributeSet, PhysicalGroup};
 pub use cad::{CadShape, CadModel, AnalyticSurface, FacetedCadSurface, NurbsCadSurface2D, TrimLoop, TrimmedNurbsSurface, ProjectionConfig, project_boundary_to_cad, project_elevated_node};
-pub use curved::{CurvedMesh, JacobianCache, CurvedElementTransformation, refine_curved_2d, refine_curved_3d, refine_curved_3d_general, refine_curved_2d_nc, refine_curved_3d_nc, refine_curved_3d_nc_general};
+pub use curved::{CurvedMesh, JacobianCache, CurvedElementTransformation, refine_curved_2d, refine_curved_3d, refine_curved_3d_general, refine_curved_2d_nc, refine_curved_3d_nc, refine_curved_3d_nc_general, refine_curved_2d_nc_with_cad, refine_curved_3d_nc_with_cad};
 pub use element_type::ElementType;
 pub use lor::LorMesh;
 pub use moving_mesh::{

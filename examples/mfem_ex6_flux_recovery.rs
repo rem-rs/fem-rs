@@ -176,7 +176,7 @@ fn main() {
             prev_u = None;
         } else {
             // Conforming Tri3 closure refinement
-            let new_mesh = closure_refine_default(&mesh, &marked);
+            let new_mesh = closure_refine_default(&mesh, &marked, None);
             let mid_map = build_edge_midpoint_map(&mesh, &new_mesh);
             prev_u = Some(prolongate_p1(&u, new_mesh.n_nodes(), &mid_map));
             mesh = new_mesh;

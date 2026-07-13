@@ -8,6 +8,7 @@
 
 use fem_core::{ElemId, FaceId, NodeId};
 use nalgebra::DMatrix;
+use crate::cad::ProjectionConfig;
 use crate::element_type::ElementType;
 use crate::simplex::Mesh;
 use crate::topology::MeshTopology;
@@ -544,7 +545,7 @@ pub fn refine_curved_2d_nc(curved: &CurvedMesh<2>, marked: &[usize]) -> CurvedMe
     let npe = geo.n_dofs();
     let lin = _extract_linear_2d(curved);
     let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();
-    let fine = crate::amr::refine_nonconforming(&lin, &mid).0;
+    let fine = crate::amr::refine_nonconforming(&lin, &mid, None).0;
     _reinterpolate_curved_2d(curved, &fine, geo, npe)
 }
 
@@ -554,7 +555,27 @@ pub fn refine_curved_3d_nc(curved: &CurvedMesh<3>, marked: &[usize]) -> CurvedMe
     let npe = geo.n_dofs();
     let lin = _extract_linear_3d(curved);
     let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();
-    let fine = crate::amr::refine_nonconforming_3d(&lin, &mid).0;
+    let fine = crate::amr::refine_nonconforming_3d(&lin, &mid, None).0;
+    _reinterpolate_curved_3d(curved, &fine, geo, npe)
+}
+
+pub fn refine_curved_2d_nc_with_cad(curved: &CurvedMesh<2>, marked: &[usize], cad_config: &ProjectionConfig) -> CurvedMesh<2> {
+    let geo = fem_element::lagrange::factory::ref_elem(
+        fem_element::lagrange::factory::ElemType::Tri, curved.geom_order);
+    let npe = geo.n_dofs();
+    let lin = _extract_linear_2d(curved);
+    let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();
+    let fine = crate::amr::refine_nonconforming(&lin, &mid, Some(cad_config)).0;
+    _reinterpolate_curved_2d(curved, &fine, geo, npe)
+}
+
+pub fn refine_curved_3d_nc_with_cad(curved: &CurvedMesh<3>, marked: &[usize], cad_config: &ProjectionConfig) -> CurvedMesh<3> {
+    let geo = fem_element::lagrange::factory::ref_elem(
+        fem_element::lagrange::factory::ElemType::Tet, curved.geom_order);
+    let npe = geo.n_dofs();
+    let lin = _extract_linear_3d(curved);
+    let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();
+    let fine = crate::amr::refine_nonconforming_3d(&lin, &mid, Some(cad_config)).0;
     _reinterpolate_curved_3d(curved, &fine, geo, npe)
 }
 
@@ -783,13 +804,13 @@ pub fn refine_curved_3d_nc_general(curved: &CurvedMesh<3>, marked: &[usize]) -> 
 
     let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();
     let fine = if le == ElementType::Tet4 {
-        crate::amr::refine_nonconforming_3d(&lin, &mid).0
+        crate::amr::refine_nonconforming_3d(&lin, &mid, None).0
     } else {
         // For non-Tet4 linear meshes, use the NC refiner for that type
         match le {
-            ElementType::Hex8 => { let (m, _, _, _) = crate::amr::refine_nonconforming_hex(&lin, &mid); m }
-            ElementType::Prism6 => { let (m, _, _, _, _) = crate::amr::refine_nonconforming_prism(&lin, &mid); m }
-            ElementType::Pyramid5 => { let (m, _, _, _, _) = crate::amr::refine_nonconforming_pyramid(&lin, &mid); m }
+            ElementType::Hex8 => { let (m, _, _, _) = crate::amr::refine_nonconforming_hex(&lin, &mid, None); m }
+            ElementType::Prism6 => { let (m, _, _, _, _) = crate::amr::refine_nonconforming_prism(&lin, &mid, None); m }
+            ElementType::Pyramid5 => { let (m, _, _, _, _) = crate::amr::refine_nonconforming_pyramid(&lin, &mid, None); m }
             _ => unreachable!(),
         }
     };

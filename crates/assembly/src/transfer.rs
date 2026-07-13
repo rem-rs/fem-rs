@@ -1703,7 +1703,7 @@ mod nc_transfer_tests {
         let u_fn = &|x: &[f64]| x[0] + x[1];
         let u_coarse = space.interpolate(u_fn).as_slice().to_vec();
         let coarse_mesh = space.mesh();
-        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[0]);
+        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[0], None);
         let u_fine = apply_nc_prolongation_h1_full(&u_coarse, coarse_mesh, &fine_mesh, &constraints);
         for n in 0..fine_mesh.n_nodes() as fem_core::NodeId {
             let x = fine_mesh.node_coords(n);
@@ -1720,7 +1720,7 @@ mod nc_transfer_tests {
         let u_fn = &|x: &[f64]| x[0] * x[0] + x[1] * x[1];
         let u_coarse = space.interpolate(u_fn).as_slice().to_vec();
         let coarse_mesh = space.mesh();
-        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[0, 2]);
+        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[0, 2], None);
         let u_fine = apply_nc_prolongation_h1_full(&u_coarse, coarse_mesh, &fine_mesh, &constraints);
         // Injection: copy u_fine[0..n_coarse] directly
         let u_restored: Vec<f64> = u_fine[..coarse_mesh.n_nodes().min(u_fine.len())].to_vec();
@@ -1738,7 +1738,7 @@ mod nc_transfer_tests {
         let u_coarse = space.interpolate(u_fn).as_slice().to_vec();
         let n_coarse = u_coarse.len();
         let coarse_mesh = space.mesh();
-        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[1, 3]);
+        let (fine_mesh, constraints) = refine_nonconforming(coarse_mesh, &[1, 3], None);
         let n_fine = fine_mesh.n_nodes();
         let u_direct = apply_nc_prolongation_h1_full(&u_coarse, coarse_mesh, &fine_mesh, &constraints);
         let p = build_nc_prolongation_h1(n_fine, n_coarse, coarse_mesh, &fine_mesh, &constraints);

@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
 use fem_core::{NodeId, ElemId};
+use crate::cad::{ProjectionConfig, project_boundary_to_cad};
 use crate::element_type::ElementType;
 use crate::simplex::Mesh;
 use super::{HangingNodeConstraint, DerefineTree, DerefineRecord, QuadRefineDir, TriRefineDir};
@@ -179,7 +180,7 @@ fn detect_hanging_edges(
 /// The iteration limit (default 20) prevents infinite loops on pathological
 /// inputs.  Each pass may add elements, so the total cost is bounded by
 /// `O(n_passes · n_elems)`.
-pub fn closure_refine(mesh: &Mesh<2>, marked: &[ElemId], max_iter: usize) -> Mesh<2> {
+pub fn closure_refine(mesh: &Mesh<2>, marked: &[ElemId], max_iter: usize, project_boundary: Option<&ProjectionConfig>) -> Mesh<2> {
     assert!(
         mesh.elem_type == ElementType::Tri3,
         "closure_refine: only Tri3 meshes are supported"
@@ -219,12 +220,15 @@ pub fn closure_refine(mesh: &Mesh<2>, marked: &[ElemId], max_iter: usize) -> Mes
         to_refine = detect_hanging_edges(&current, &edge_elems);
     }
 
+    if let Some(config) = project_boundary {
+        current = project_boundary_to_cad(&current, config, 2);
+    }
     current
 }
 
 /// Convenience overload with a default iteration limit (20).
-pub fn closure_refine_default(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
-    closure_refine(mesh, marked, 20)
+pub fn closure_refine_default(mesh: &Mesh<2>, marked: &[ElemId], project_boundary: Option<&ProjectionConfig>) -> Mesh<2> {
+    closure_refine(mesh, marked, 20, project_boundary)
 }
 // (Placeholder — full implementation same as before, calls local_edges_tri etc.)
 pub fn refine_marked_with_tree(mesh: &Mesh<2>, marked: &[ElemId]) -> (Mesh<2>, DerefineTree) {
@@ -321,6 +325,7 @@ pub fn derefine_marked(mesh: &Mesh<2>, tree: &DerefineTree, parents: &[ElemId]) 
 pub fn refine_nonconforming(
     mesh: &Mesh<2>,
     marked: &[ElemId],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(mesh.elem_type == ElementType::Tri3, "refine_nonconforming: only Tri3");
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
@@ -345,7 +350,10 @@ pub fn refine_nonconforming(
     for f in 0..n_faces { let fn_slice=&mesh.face_conn[f*npf..(f+1)*npf];let a=fn_slice[0];let b=fn_slice[1];let tag=mesh.face_tags[f];
         if let Some(&mid)=midpoint_map.get(&edge_key(a,b)){new_face_conn.extend_from_slice(&[a,mid]);new_face_tags.push(tag);new_face_conn.extend_from_slice(&[mid,b]);new_face_tags.push(tag);}
         else{new_face_conn.extend_from_slice(&[a,b]);new_face_tags.push(tag);} }
-    let new_mesh=Mesh::uniform(new_coords,new_conn,new_tags,ElementType::Tri3,new_face_conn,new_face_tags,ElementType::Line2);
+    let mut new_mesh=Mesh::uniform(new_coords,new_conn,new_tags,ElementType::Tri3,new_face_conn,new_face_tags,ElementType::Line2);
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
+    }
     (new_mesh,constraints)
 }
 
@@ -507,7 +515,7 @@ pub fn p_prolongate_p1_to_p2(u_p1:&[f64],midpoint_map:&std::collections::HashMap
 
 // ─── 2-D Quad4 ──────────────────────────────────────────────────────────────
 
-pub fn refine_nonconforming_quad(mesh:&Mesh<2>,marked:&[ElemId])->(Mesh<2>,Vec<HangingNodeConstraint>){
+pub fn refine_nonconforming_quad(mesh:&Mesh<2>,marked:&[ElemId],project_boundary: Option<&ProjectionConfig>)->(Mesh<2>,Vec<HangingNodeConstraint>){
     assert!(mesh.elem_type==ElementType::Quad4,"refine_nonconforming_quad: only Quad4 meshes are supported");
     if marked.is_empty(){return(mesh.clone(),Vec::new());}
     let marked_set:std::collections::HashSet<ElemId>=marked.iter().copied().collect();let n_elems=mesh.n_elems();
@@ -526,7 +534,10 @@ pub fn refine_nonconforming_quad(mesh:&Mesh<2>,marked:&[ElemId])->(Mesh<2>,Vec<H
     constraints.sort_by_key(|c|c.constrained);
     let n_faces=mesh.n_faces();let mut new_face_conn=Vec::new();let mut new_face_tags=Vec::new();
     for f in 0..n_faces{let a=mesh.face_conn[2*f];let b=mesh.face_conn[2*f+1];let tag=mesh.face_tags[f];if let Some(&mid)=midpoint_map.get(&quad_edge_key(a,b)){new_face_conn.extend_from_slice(&[a,mid]);new_face_tags.push(tag);new_face_conn.extend_from_slice(&[mid,b]);new_face_tags.push(tag);}else{new_face_conn.extend_from_slice(&[a,b]);new_face_tags.push(tag);}}
-    let new_mesh=Mesh::uniform(new_coords,new_conn,new_tags,ElementType::Quad4,new_face_conn,new_face_tags,ElementType::Line2);
+    let mut new_mesh=Mesh::uniform(new_coords,new_conn,new_tags,ElementType::Quad4,new_face_conn,new_face_tags,ElementType::Line2);
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
+    }
     (new_mesh,constraints)
 }
 
@@ -564,7 +575,7 @@ pub fn refine_nonconforming_quad_aniso(mesh:&Mesh<2>,marked:&[(ElemId,QuadRefine
 
 // ─── 2-D Tri3 anisotropic ───────────────────────────────────────────────────
 
-pub fn refine_nonconforming_tri_aniso(mesh:&Mesh<2>,marked:&[(ElemId,TriRefineDir)])->(Mesh<2>,Vec<HangingNodeConstraint>){
+pub fn refine_nonconforming_tri_aniso(mesh:&Mesh<2>,marked:&[(ElemId,TriRefineDir)],project_boundary: Option<&ProjectionConfig>)->(Mesh<2>,Vec<HangingNodeConstraint>){
     assert!(mesh.elem_type==ElementType::Tri3,"refine_nonconforming_tri_aniso: only Tri3");if marked.is_empty(){return(mesh.clone(),Vec::new());}
     let n_elemes=mesh.n_elems();let marked_map:HashMap<ElemId,TriRefineDir>=marked.iter().copied().collect();let marked_set:std::collections::HashSet<ElemId>=marked_map.keys().copied().collect();
     let mut edge_elems:HashMap<(NodeId,NodeId),Vec<ElemId>>=HashMap::new();
@@ -579,7 +590,11 @@ pub fn refine_nonconforming_tri_aniso(mesh:&Mesh<2>,marked:&[(ElemId,TriRefineDi
     c.sort_by_key(|c|c.constrained);
     let nf=mesh.n_faces();let mut nfc=Vec::new();let mut nft=Vec::new();
     for f in 0..nf{let a=mesh.face_conn[2*f];let b=mesh.face_conn[2*f+1];let tag=mesh.face_tags[f];if let Some(&mid)=mm.get(&edge_key(a,b)){nfc.extend_from_slice(&[a,mid]);nft.push(tag);nfc.extend_from_slice(&[mid,b]);nft.push(tag);}else{nfc.extend_from_slice(&[a,b]);nft.push(tag);}}
-    let nm=Mesh::uniform(nc,ncn,nt,ElementType::Tri3,nfc,nft,ElementType::Line2);(nm,c)
+    let mut nm=Mesh::uniform(nc,ncn,nt,ElementType::Tri3,nfc,nft,ElementType::Line2);
+    if let Some(config) = project_boundary {
+        nm = project_boundary_to_cad(&nm, config, 2);
+    }
+    (nm,c)
 }
 
 #[cfg(test)]
@@ -591,7 +606,7 @@ mod tests {
     #[test]
     fn closure_single_element() {
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let c = closure_refine_default(&mesh, &[0]);
+        let c = closure_refine_default(&mesh, &[0], None);
         // Every edge should be shared by exactly 2 elements (or 1 on boundary).
         // For a conforming mesh, no edge should have a hanging node.
         let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
@@ -612,7 +627,7 @@ mod tests {
     #[test]
     fn closure_multiple_elements() {
         let mesh = Mesh::<2>::unit_square_tri(3);
-        let c = closure_refine_default(&mesh, &[0, 4, 7]);
+        let c = closure_refine_default(&mesh, &[0, 4, 7], None);
         let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
         for e in 0..c.n_elems() as ElemId {
             let ns = c.elem_nodes(e);
@@ -642,7 +657,7 @@ mod tests {
             (0..mesh.n_elems() as ElemId).step_by(3).collect(),
         ];
         for (trial, marked) in patterns.iter().enumerate() {
-            let c = closure_refine_default(&mesh, marked);
+            let c = closure_refine_default(&mesh, marked, None);
             let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
             for e in 0..c.n_elems() as ElemId {
                 let ns = c.elem_nodes(e);
@@ -672,7 +687,7 @@ mod tests {
                 if r < 0.3 { marked.push(e); }
             }
             if marked.is_empty() { marked.push((state % n as u64) as ElemId); }
-            let c = closure_refine_default(&mesh, &marked);
+            let c = closure_refine_default(&mesh, &marked, None);
             let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
             for e in 0..c.n_elems() as ElemId {
                 let ns = c.elem_nodes(e);
@@ -698,7 +713,7 @@ mod tests {
     #[test]
     fn closure_no_marked() {
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let c = closure_refine_default(&mesh, &[]);
+        let c = closure_refine_default(&mesh, &[], None);
         assert_eq!(c.n_elems(), mesh.n_elems());
     }
 
@@ -707,7 +722,7 @@ mod tests {
     fn closure_all_marked() {
         let mesh = Mesh::<2>::unit_square_tri(2);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let c = closure_refine_default(&mesh, &all);
+        let c = closure_refine_default(&mesh, &all, None);
         // All original elements are bisected into 4 children
         assert_eq!(c.n_elems(), mesh.n_elems() * 4);
         let mut edge_counts: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
@@ -726,9 +741,9 @@ mod tests {
     #[test]
     fn closure_idempotent() {
         let mesh = Mesh::<2>::unit_square_tri(3);
-        let c1 = closure_refine_default(&mesh, &[2, 5]);
+        let c1 = closure_refine_default(&mesh, &[2, 5], None);
         // Applying closure again with empty marking should not change anything
-        let c2 = closure_refine_default(&c1, &[]);
+        let c2 = closure_refine_default(&c1, &[], None);
         assert_eq!(c2.n_elems(), c1.n_elems());
     }
 }

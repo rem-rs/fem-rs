@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use fem_core::{FaceId, NodeId, ElemId};
 use crate::{element_type::ElementType, simplex::Mesh, rebuild_boundary::rebuild_3d_boundary};
+use crate::cad::{ProjectionConfig, project_boundary_to_cad};
 
 use super::bisect::{edge_key, local_edges_tri, refine_marked};
 
@@ -430,6 +431,7 @@ pub fn restrict_to_coarse_p1(u_fine: &[f64], n_nodes_coarse: usize) -> Vec<f64> 
 pub fn refine_nonconforming(
     mesh: &Mesh<2>,
     marked: &[ElemId],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Tri3,
@@ -535,10 +537,13 @@ pub fn refine_nonconforming(
         }
     }
 
-    let new_mesh = Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tri3,
         new_face_conn, new_face_tags, ElementType::Line2,
     );
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
+    }
 
     (new_mesh, constraints)
 }
@@ -554,7 +559,7 @@ pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
     match mesh.elem_type {
         ElementType::Tri3 => refine_marked(mesh, &all),
         ElementType::Quad4 => {
-            let (m, _constraints) = refine_nonconforming_quad(mesh, &all);
+            let (m, _constraints) = refine_nonconforming_quad(mesh, &all, None);
             m
         }
         _ => panic!(
@@ -577,11 +582,11 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     }
     let mut result = match mesh.elem_type {
         ElementType::Tet4 | ElementType::Tet10 => {
-            let (m, _, _) = refine_nonconforming_3d(mesh, &all);
+            let (m, _, _) = refine_nonconforming_3d(mesh, &all, None);
             m
         }
         ElementType::Hex8 => {
-            let (m, _, _, _) = refine_nonconforming_hex(mesh, &all);
+            let (m, _, _, _) = refine_nonconforming_hex(mesh, &all, None);
             m
         }
         ElementType::Hex20 | ElementType::Hex27 => {
@@ -603,7 +608,7 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 face_types: None, face_offsets: None,
                 face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             };
-            let (m, _, _, _) = refine_nonconforming_hex(&hex8_mesh, &all);
+            let (m, _, _, _) = refine_nonconforming_hex(&hex8_mesh, &all, None);
             m
         }
         ElementType::Prism6 => {
@@ -1042,9 +1047,13 @@ pub(crate) fn local_faces_prism_quad() -> [[usize; 4]; 3] {
 pub fn refine_nonconforming_3d(
     mesh: &Mesh<3>,
     marked: &[ElemId],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>) {
-    let (new_mesh, edge_constraints, face_constraints, _, _) =
+    let (mut new_mesh, edge_constraints, face_constraints, _, _) =
         refine_nonconforming_3d_internal(mesh, marked, None);
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 3);
+    }
     (new_mesh, edge_constraints, face_constraints)
 }
 
@@ -1335,6 +1344,7 @@ pub(crate) fn local_edges_quad() -> [(usize, usize); 4] {
 pub fn refine_nonconforming_quad(
     mesh: &Mesh<2>,
     marked: &[ElemId],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Quad4,
@@ -1466,10 +1476,13 @@ pub fn refine_nonconforming_quad(
         }
     }
 
-    let new_mesh = Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Quad4,
         new_face_conn, new_face_tags, ElementType::Line2,
     );
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
+    }
     (new_mesh, constraints)
 }
 
@@ -1709,6 +1722,7 @@ pub(crate) fn hex_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
 pub fn refine_nonconforming_hex(
     mesh: &Mesh<3>,
     marked: &[ElemId],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
     assert!(
         mesh.elem_type == ElementType::Hex8,
@@ -1716,7 +1730,11 @@ pub fn refine_nonconforming_hex(
     );
 
     if marked.is_empty() {
-        return (mesh.clone(), Vec::new(), Vec::new(), HashMap::new());
+        let mut m = mesh.clone();
+        if let Some(config) = project_boundary {
+            m = project_boundary_to_cad(&m, config, 3);
+        }
+        return (m, Vec::new(), Vec::new(), HashMap::new());
     }
 
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
@@ -2024,10 +2042,13 @@ pub fn refine_nonconforming_hex(
         }
     }
 
-    let new_mesh = Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 3);
+    }
     (new_mesh, constraints, face_constraints, midpoint_map)
 }
 
@@ -2321,6 +2342,7 @@ pub struct HangingQuadFaceConstraint {
 pub fn refine_nonconforming_prism(
     mesh: &Mesh<3>,
     marked: &[ElemId],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (
     Mesh<3>,
     Vec<HangingNodeConstraint>,
@@ -2328,7 +2350,10 @@ pub fn refine_nonconforming_prism(
     Vec<HangingQuadFaceConstraint>,
     HashMap<(NodeId, NodeId), NodeId>,
 ) {
-    let (m, ec, tc, qc, mm, _) = refine_nonconforming_prism_internal(mesh, marked, None);
+    let (mut m, ec, tc, qc, mm, _) = refine_nonconforming_prism_internal(mesh, marked, None);
+    if let Some(config) = project_boundary {
+        m = project_boundary_to_cad(&m, config, 3);
+    }
     (m, ec, tc, qc, mm)
 }
 
@@ -2725,6 +2750,7 @@ pub enum HexRefineDir {
 pub fn refine_nonconforming_quad_aniso(
     mesh:   &Mesh<2>,
     marked: &[(ElemId, QuadRefineDir)],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Quad4,
@@ -2732,7 +2758,11 @@ pub fn refine_nonconforming_quad_aniso(
     );
 
     if marked.is_empty() {
-        return (mesh.clone(), Vec::new());
+        let mut m = mesh.clone();
+        if let Some(config) = project_boundary {
+            m = project_boundary_to_cad(&m, config, 2);
+        }
+        return (m, Vec::new());
     }
 
     let n_elems = mesh.n_elems();
@@ -2905,7 +2935,7 @@ pub fn refine_nonconforming_quad_aniso(
     constraints.sort_by_key(|c| c.constrained);
     constraints.dedup_by_key(|c| c.constrained);
 
-    let new_mesh = Mesh::<2>::uniform(
+    let mut new_mesh = Mesh::<2>::uniform(
         new_coords,
         new_conn,
         new_elem_tags,
@@ -2914,6 +2944,9 @@ pub fn refine_nonconforming_quad_aniso(
         mesh.face_tags.clone(),
         mesh.face_type,
     );
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
+    }
     (new_mesh, constraints)
 }
 
@@ -2946,6 +2979,7 @@ pub fn refine_nonconforming_quad_aniso(
 pub fn refine_nonconforming_hex_aniso(
     mesh: &Mesh<3>,
     marked: &[(ElemId, HexRefineDir)],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Hex8,
@@ -2953,7 +2987,11 @@ pub fn refine_nonconforming_hex_aniso(
     );
 
     if marked.is_empty() {
-        return (mesh.clone(), Vec::new());
+        let mut m = mesh.clone();
+        if let Some(config) = project_boundary {
+            m = project_boundary_to_cad(&m, config, 3);
+        }
+        return (m, Vec::new());
     }
 
     // Separate `All` cases: delegate them via the isotropic refiner,
@@ -2971,7 +3009,7 @@ pub fn refine_nonconforming_hex_aniso(
 
     // If only isotropic splits requested, delegate.
     if directional.is_empty() {
-        let (m, c, _, _) = refine_nonconforming_hex(mesh, &all_ids);
+        let (m, c, _, _) = refine_nonconforming_hex(mesh, &all_ids, None);
         return (m, c);
     }
 
@@ -3341,10 +3379,13 @@ pub fn refine_nonconforming_hex_aniso(
         }
     }
 
-    let new_mesh = Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 3);
+    }
     (new_mesh, constraints)
 }
 
@@ -3813,6 +3854,7 @@ pub enum TriRefineDir {
 pub fn refine_nonconforming_tri_aniso(
     mesh: &Mesh<2>,
     marked: &[(ElemId, TriRefineDir)],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Tri3,
@@ -3941,10 +3983,13 @@ pub fn refine_nonconforming_tri_aniso(
         }
     }
 
-    let new_mesh = Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tri3,
         new_face_conn, new_face_tags, ElementType::Line2,
     );
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
+    }
     (new_mesh, constraints)
 }
 
@@ -3972,6 +4017,7 @@ pub enum TetRefineDir {
 pub fn refine_nonconforming_tet_aniso(
     mesh: &Mesh<3>,
     marked: &[(ElemId, TetRefineDir)],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     assert!(
         mesh.elem_type == ElementType::Tet4,
@@ -4202,10 +4248,13 @@ pub fn refine_nonconforming_tet_aniso(
         }
     }
 
-    let new_mesh = Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tet4,
         new_face_conn, new_face_tags, ElementType::Tri3,
     );
+    if let Some(config) = project_boundary {
+        new_mesh = project_boundary_to_cad(&new_mesh, config, 3);
+    }
     (new_mesh, constraints)
 }
 
@@ -4226,21 +4275,38 @@ pub enum PrismRefineDir { Edge0, Edge1, Edge2, Z, All, }
 pub fn refine_nonconforming_prism_aniso(
     mesh: &Mesh<3>,
     marked: &[(ElemId, PrismRefineDir)],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     assert!(mesh.elem_type == ElementType::Prism6, "refine_nonconforming_prism_aniso: only Prism6");
-    if marked.is_empty() { return (mesh.clone(), Vec::new()); }
+    if marked.is_empty() {
+        let mut m = mesh.clone();
+        if let Some(config) = project_boundary {
+            m = project_boundary_to_cad(&m, config, 3);
+        }
+        return (m, Vec::new());
+    }
 
     let all_ids: Vec<ElemId> = marked.iter().filter_map(|&(e,d)| if d==PrismRefineDir::All { Some(e) } else { None }).collect();
     let dirs: Vec<(ElemId, PrismRefineDir)> = marked.iter().copied().filter(|&(_,d)| d!=PrismRefineDir::All).collect();
 
     if !all_ids.is_empty() {
-        let (m, ec, _, _, _) = refine_nonconforming_prism(mesh, &all_ids);
+        let (m, ec, _, _, _) = refine_nonconforming_prism(mesh, &all_ids, None);
         // Re-refine directional marked elements on top of isotropic ones
-        if dirs.is_empty() { return (m, ec); }
+        if dirs.is_empty() {
+            let mut m2 = m;
+            if let Some(config) = project_boundary {
+                m2 = project_boundary_to_cad(&m2, config, 3);
+            }
+            return (m2, ec);
+        }
         // For simplicity, just delegate directional ones via the isotropic refiner too
-        let (m2, ec2, _, _, _) = refine_nonconforming_prism(&m, &dirs.iter().map(|&(e,_)|e).collect::<Vec<_>>());
+        let (m2, ec2, _, _, _) = refine_nonconforming_prism(&m, &dirs.iter().map(|&(e,_)|e).collect::<Vec<_>>(), None);
         let mut all_c = ec; all_c.extend(ec2); all_c.sort_by_key(|c|c.constrained); all_c.dedup_by_key(|c|c.constrained);
-        return (m2, all_c);
+        let mut m3 = m2;
+        if let Some(config) = project_boundary {
+            m3 = project_boundary_to_cad(&m3, config, 3);
+        }
+        return (m3, all_c);
     }
 
     let marked_map: HashMap<ElemId, PrismRefineDir> = dirs.iter().copied().collect();
@@ -4304,7 +4370,10 @@ pub fn refine_nonconforming_prism_aniso(
             _=>{for&n in fs{nfc.push(n);}nft.push(tag);}
         }
     }
-    let nm=Mesh::uniform(nc,ncn,nt,ElementType::Prism6,nfc,nft,mesh.face_type);
+    let mut nm=Mesh::uniform(nc,ncn,nt,ElementType::Prism6,nfc,nft,mesh.face_type);
+    if let Some(config) = project_boundary {
+        nm = project_boundary_to_cad(&nm, config, 3);
+    }
     (nm, c)
 }
 
@@ -4322,23 +4391,38 @@ pub enum PyramidRefineDir { Base, Apex, All, }
 pub fn refine_nonconforming_pyramid_aniso(
     mesh: &Mesh<3>,
     marked: &[(ElemId, PyramidRefineDir)],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
     assert!(mesh.elem_type == ElementType::Pyramid5, "refine_nonconforming_pyramid_aniso: only Pyramid5");
-    if marked.is_empty() { return (mesh.clone(), Vec::new()); }
+    if marked.is_empty() {
+        let mut m = mesh.clone();
+        if let Some(config) = project_boundary {
+            m = project_boundary_to_cad(&m, config, 3);
+        }
+        return (m, Vec::new());
+    }
 
     // For `All`, delegate to the full NC refinement
     let all_ids: Vec<ElemId> = marked.iter().filter_map(|&(e,d)| if d==PyramidRefineDir::All { Some(e) } else { None }).collect();
     if !all_ids.is_empty() {
-        let (m, ec, _, _, _) = refine_nonconforming_pyramid(mesh, &all_ids);
-        return (m, ec);
+        let (m, ec, _, _, _) = refine_nonconforming_pyramid(mesh, &all_ids, None);
+        let mut m2 = m;
+        if let Some(config) = project_boundary {
+            m2 = project_boundary_to_cad(&m2, config, 3);
+        }
+        return (m2, ec);
     }
 
     // Base and Apex splits are placeholders that produce Tet4 children
     // (full implementation would produce Pyramid5 children).
     // For now, delegate to the base-diagonal split which produces 2 tets per pyramid,
     // then refine those tets via the full NC refiner.
-    let (m, ec, _, _, _) = refine_nonconforming_pyramid(mesh, &marked.iter().map(|&(e,_)|e).collect::<Vec<_>>());
-    (m, ec)
+    let (m, ec, _, _, _) = refine_nonconforming_pyramid(mesh, &marked.iter().map(|&(e,_)|e).collect::<Vec<_>>(), None);
+    let mut m2 = m;
+    if let Some(config) = project_boundary {
+        m2 = project_boundary_to_cad(&m2, config, 3);
+    }
+    (m2, ec)
 }
 
 /// Local 8 edges of a Pyramid5 element.
@@ -4371,11 +4455,15 @@ pub fn refine_pyramid5_uniform(
 pub fn refine_nonconforming_pyramid(
     mesh: &Mesh<3>,
     marked: &[ElemId],
+    project_boundary: Option<&ProjectionConfig>,
 ) -> (
     Mesh<3>, Vec<HangingNodeConstraint>, Vec<HangingFaceConstraint>,
     Vec<HangingQuadFaceConstraint>, HashMap<(NodeId, NodeId), NodeId>,
 ) {
-    let (m, ec, tc, qc, mm, _) = refine_nonconforming_pyramid_internal(mesh, marked, None);
+    let (mut m, ec, tc, qc, mm, _) = refine_nonconforming_pyramid_internal(mesh, marked, None);
+    if let Some(config) = project_boundary {
+        m = project_boundary_to_cad(&m, config, 3);
+    }
     (m, ec, tc, qc, mm)
 }
 
@@ -4672,7 +4760,7 @@ fn refine_hex27_uniform_inner(mesh: &Mesh<3>, marked: &[ElemId], npe: usize) -> 
 mod tests {
     use crate::amr::*;
     use fem_core::{NodeId, ElemId};
-    use crate::{element_type::ElementType, simplex::Mesh, rebuild_boundary::rebuild_3d_boundary};
+    use crate::{element_type::ElementType, simplex::Mesh};
 
     #[test]
     fn uniform_refinement_element_count() {
@@ -5039,7 +5127,7 @@ mod tests {
     #[test]
     fn nc_refine_no_marked_is_identity() {
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let (nc, constraints) = refine_nonconforming(&mesh, &[]);
+        let (nc, constraints) = refine_nonconforming(&mesh, &[], None);
         assert_eq!(nc.n_elems(), mesh.n_elems());
         assert_eq!(nc.n_nodes(), mesh.n_nodes());
         assert!(constraints.is_empty());
@@ -5050,7 +5138,7 @@ mod tests {
         // Refining all elements → no hanging nodes (equivalent to uniform).
         let mesh = Mesh::<2>::unit_square_tri(2);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let (nc, constraints) = refine_nonconforming(&mesh, &all);
+        let (nc, constraints) = refine_nonconforming(&mesh, &all, None);
         assert_eq!(nc.n_elems(), 4 * mesh.n_elems());
         assert!(constraints.is_empty(),
             "all-marked NCMesh should have no hanging nodes, got {}", constraints.len());
@@ -5061,7 +5149,7 @@ mod tests {
         // Refine just element 0 of a 2×2 mesh → should produce hanging nodes
         // on the edges shared with unrefined neighbours.
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let (nc, constraints) = refine_nonconforming(&mesh, &[0]);
+        let (nc, constraints) = refine_nonconforming(&mesh, &[0], None);
 
         // Element 0 → 4 children, rest (7) unchanged → 7 + 4 = 11 elements.
         assert_eq!(nc.n_elems(), mesh.n_elems() - 1 + 4);
@@ -5083,7 +5171,7 @@ mod tests {
     #[test]
     fn nc_refine_hanging_node_coords_are_midpoints() {
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let (nc, constraints) = refine_nonconforming(&mesh, &[0]);
+        let (nc, constraints) = refine_nonconforming(&mesh, &[0], None);
 
         for c in &constraints {
             let mid_coords = nc.coords_of(c.constrained as NodeId);
@@ -5108,7 +5196,7 @@ mod tests {
         let marked = vec![0u32, 1, 2];
 
         let conforming = refine_marked(&mesh, &marked);
-        let (nc, _) = refine_nonconforming(&mesh, &marked);
+        let (nc, _) = refine_nonconforming(&mesh, &marked, None);
 
         assert!(
             nc.n_elems() <= conforming.n_elems(),
@@ -5121,12 +5209,12 @@ mod tests {
     fn nc_refine_two_levels() {
         // Refine once, then refine again on some new elements.
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let (nc1, c1) = refine_nonconforming(&mesh, &[0, 1]);
+        let (nc1, c1) = refine_nonconforming(&mesh, &[0, 1], None);
         assert!(!c1.is_empty() || mesh.n_elems() == 2,
             "first level should have constraints (or trivial mesh)");
 
         // Refine element 0 of the new mesh.
-        let (nc2, c2) = refine_nonconforming(&nc1, &[0]);
+        let (nc2, c2) = refine_nonconforming(&nc1, &[0], None);
         assert!(nc2.n_elems() > nc1.n_elems());
         // Second level may also produce hanging nodes.
         let _ = c2;
@@ -5136,7 +5224,7 @@ mod tests {
     fn nc_refine_mesh_valid() {
         // The resulting mesh should pass consistency check.
         let mesh = Mesh::<2>::unit_square_tri(3);
-        let (nc, _) = refine_nonconforming(&mesh, &[0, 3, 5]);
+        let (nc, _) = refine_nonconforming(&mesh, &[0, 3, 5], None);
         nc.check().unwrap();
     }
 
@@ -5277,7 +5365,7 @@ mod tests {
         let mesh = Mesh::<3>::unit_cube_tet(1);
         let n_elems_orig = mesh.n_elems();
 
-        let (refined, edge_constraints, face_constraints) = refine_nonconforming_3d(&mesh, &[0]);
+        let (refined, edge_constraints, face_constraints) = refine_nonconforming_3d(&mesh, &[0], None);
 
         // Refining 1 tet should create 8 children.
         // Total elems = 8 refined children + (n_elems_orig - 1) unchanged.
@@ -5302,7 +5390,7 @@ mod tests {
         let n_elems_orig = mesh.n_elems();
 
         // Refine the first tet only.
-        let (refined, edge_constr, face_constr) = refine_nonconforming_3d(&mesh, &[0]);
+        let (refined, edge_constr, face_constr) = refine_nonconforming_3d(&mesh, &[0], None);
 
         // Should have 8 children from refined tet + (n_elems_orig - 1) unchanged.
         let expected_elems = 8 + (n_elems_orig - 1);
@@ -5372,7 +5460,7 @@ mod tests {
     #[test]
     fn quad4_nonconforming_refine_empty() {
         let mesh = Mesh::<2>::unit_square_quad(2);
-        let (nc, constraints) = refine_nonconforming_quad(&mesh, &[]);
+        let (nc, constraints) = refine_nonconforming_quad(&mesh, &[], None);
         assert_eq!(nc.n_elems(), mesh.n_elems());
         assert_eq!(nc.n_nodes(), mesh.n_nodes());
         assert!(constraints.is_empty());
@@ -5382,7 +5470,7 @@ mod tests {
     fn quad4_nonconforming_refine_all_gives_no_constraints() {
         let mesh = Mesh::<2>::unit_square_quad(2);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let (nc, constraints) = refine_nonconforming_quad(&mesh, &all);
+        let (nc, constraints) = refine_nonconforming_quad(&mesh, &all, None);
         // Refining all → 4× as many elements, no hanging nodes
         assert_eq!(nc.n_elems(), mesh.n_elems() * 4);
         assert!(constraints.is_empty());
@@ -5392,7 +5480,7 @@ mod tests {
     #[test]
     fn quad4_nonconforming_refine_single_element_creates_constraints() {
         let mesh = Mesh::<2>::unit_square_quad(2);
-        let (nc, constraints) = refine_nonconforming_quad(&mesh, &[0]);
+        let (nc, constraints) = refine_nonconforming_quad(&mesh, &[0], None);
         // Element 0 split into 4, rest unchanged → total = 3 + 4 = 7
         assert_eq!(nc.n_elems(), 7);
         // Shared edges with unrefined neighbours create hanging constraints
@@ -5435,7 +5523,7 @@ mod tests {
     #[test]
     fn hex8_nonconforming_refine_empty() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
-        let (nc, constraints, _, _) = refine_nonconforming_hex(&mesh, &[]);
+        let (nc, constraints, _, _) = refine_nonconforming_hex(&mesh, &[], None);
         assert_eq!(nc.n_elems(), mesh.n_elems());
         assert_eq!(nc.n_nodes(), mesh.n_nodes());
         assert!(constraints.is_empty());
@@ -5445,7 +5533,7 @@ mod tests {
     fn hex8_nonconforming_refine_all_gives_no_constraints() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let (nc, constraints, fc, _) = refine_nonconforming_hex(&mesh, &all);
+        let (nc, constraints, fc, _) = refine_nonconforming_hex(&mesh, &all, None);
         assert_eq!(nc.n_elems(), mesh.n_elems() * 8);
         assert!(constraints.is_empty());
         assert!(fc.is_empty(), "uniform refine: no hanging quad faces");
@@ -5455,7 +5543,7 @@ mod tests {
     #[test]
     fn hex8_nonconforming_refine_single_element_creates_constraints() {
         let mesh = Mesh::<3>::unit_cube_hex(2);
-        let (nc, constraints, fc, _) = refine_nonconforming_hex(&mesh, &[0]);
+        let (nc, constraints, fc, _) = refine_nonconforming_hex(&mesh, &[0], None);
         // 1 element refined into 8, rest unchanged
         assert!(nc.n_elems() > mesh.n_elems());
         // Neighbouring unrefined elements cause hanging constraints
@@ -5471,7 +5559,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_quad(2);
         let n = mesh.n_elems();
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
-        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked, None);
         assert_eq!(refined.n_elems(), n + 1, "X split: one elem → 2, total {}", n + 1);
     }
 
@@ -5480,7 +5568,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_quad(2);
         let n = mesh.n_elems();
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::Y)];
-        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked, None);
         assert_eq!(refined.n_elems(), n + 1, "Y split: one elem → 2, total {}", n + 1);
     }
 
@@ -5489,14 +5577,14 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_quad(2);
         let n = mesh.n_elems();
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::Both)];
-        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked, None);
         assert_eq!(refined.n_elems(), n + 3, "Both split: one elem → 4, total {}", n + 3);
     }
 
     #[test]
     fn quad_aniso_empty_marked_is_identity() {
         let mesh = Mesh::<2>::unit_square_quad(3);
-        let (refined, constraints) = refine_nonconforming_quad_aniso(&mesh, &[]);
+        let (refined, constraints) = refine_nonconforming_quad_aniso(&mesh, &[], None);
         assert_eq!(refined.n_elems(), mesh.n_elems());
         assert_eq!(refined.n_nodes(), mesh.n_nodes());
         assert!(constraints.is_empty());
@@ -5507,7 +5595,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_quad(2);
         let n_nodes_before = mesh.n_nodes();
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
-        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        let (refined, _) = refine_nonconforming_quad_aniso(&mesh, &marked, None);
         // X split adds 2 midpoints (on bottom and top edges)
         assert_eq!(refined.n_nodes(), n_nodes_before + 2);
     }
@@ -5518,7 +5606,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_quad(2);
         if mesh.n_elems() < 2 { return; } // skip if not enough elements
         let marked: Vec<(ElemId, QuadRefineDir)> = vec![(0, QuadRefineDir::X)];
-        let (_, constraints) = refine_nonconforming_quad_aniso(&mesh, &marked);
+        let (_, constraints) = refine_nonconforming_quad_aniso(&mesh, &marked, None);
         // On shared edge, there should be hanging node constraints
         // (may be 0 if no shared edge with unrefined element — depends on mesh topology)
         let _ = constraints; // just ensure it runs without panic
@@ -5529,7 +5617,7 @@ mod tests {
     #[test]
     fn hex_aniso_x_split_gives_two_children() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
-        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)], None);
         // 1 element → 2 children along X
         assert_eq!(refined.n_elems(), 2);
     }
@@ -5537,49 +5625,49 @@ mod tests {
     #[test]
     fn hex_aniso_y_split_gives_two_children() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
-        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::Y)]);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::Y)], None);
         assert_eq!(refined.n_elems(), 2);
     }
 
     #[test]
     fn hex_aniso_z_split_gives_two_children() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
-        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::Z)]);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::Z)], None);
         assert_eq!(refined.n_elems(), 2);
     }
 
     #[test]
     fn hex_aniso_xy_split_gives_four_children() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
-        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::XY)]);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::XY)], None);
         assert_eq!(refined.n_elems(), 4);
     }
 
     #[test]
     fn hex_aniso_xz_split_gives_four_children() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
-        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::XZ)]);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::XZ)], None);
         assert_eq!(refined.n_elems(), 4);
     }
 
     #[test]
     fn hex_aniso_yz_split_gives_four_children() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
-        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::YZ)]);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::YZ)], None);
         assert_eq!(refined.n_elems(), 4);
     }
 
     #[test]
     fn hex_aniso_all_delegates_to_isotropic() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
-        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::All)]);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::All)], None);
         assert_eq!(refined.n_elems(), 8);
     }
 
     #[test]
     fn hex_aniso_empty_marked_is_identity() {
         let mesh = Mesh::<3>::unit_cube_hex(2);
-        let (refined, constraints) = refine_nonconforming_hex_aniso(&mesh, &[]);
+        let (refined, constraints) = refine_nonconforming_hex_aniso(&mesh, &[], None);
         assert_eq!(refined.n_elems(), mesh.n_elems());
         assert_eq!(refined.n_nodes(), mesh.n_nodes());
         assert!(constraints.is_empty());
@@ -5589,7 +5677,7 @@ mod tests {
     fn hex_aniso_x_split_adds_four_midpoints() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
         let n_before = mesh.n_nodes();
-        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
+        let (refined, _) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)], None);
         // X cut adds 4 edge midpoints on the 4 X-parallel edges
         assert_eq!(refined.n_nodes(), n_before + 4);
     }
@@ -5600,7 +5688,7 @@ mod tests {
         // neighbouring unrefined elements should produce hanging constraints.
         let mesh = Mesh::<3>::unit_cube_hex(2);
         if mesh.n_elems() < 2 { return; }
-        let (_, constraints) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)]);
+        let (_, constraints) = refine_nonconforming_hex_aniso(&mesh, &[(0, HexRefineDir::X)], None);
         // At least some hanging constraints expected on shared faces.
         assert!(!constraints.is_empty(), "expected hanging constraints on partial X-split");
     }
@@ -5773,7 +5861,7 @@ mod tests {
     #[test]
     fn prism6_nc_refine_empty_is_identity() {
         let mesh = make_single_prism_mesh();
-        let (nc, edge_c, tri_c, quad_c, mp) = refine_nonconforming_prism(&mesh, &[]);
+        let (nc, edge_c, tri_c, quad_c, mp) = refine_nonconforming_prism(&mesh, &[], None);
         assert_eq!(nc.n_elems(), mesh.n_elems());
         assert_eq!(nc.n_nodes(), mesh.n_nodes());
         assert!(edge_c.is_empty());
@@ -5786,7 +5874,7 @@ mod tests {
     fn prism6_nc_refine_all_gives_no_constraints() {
         let mesh = make_single_prism_mesh();
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let (nc, edge_c, tri_c, quad_c, _) = refine_nonconforming_prism(&mesh, &all);
+        let (nc, edge_c, tri_c, quad_c, _) = refine_nonconforming_prism(&mesh, &all, None);
         assert_eq!(nc.n_elems(), 8);
         assert!(edge_c.is_empty(), "all refined → no edge constraints");
         assert!(tri_c.is_empty(), "all refined → no tri face constraints");
@@ -5843,7 +5931,7 @@ mod tests {
         };
 
         // Refine only prism 0
-        let (nc, edge_c, tri_c, quad_c, _) = refine_nonconforming_prism(&mesh, &[0]);
+        let (nc, edge_c, tri_c, quad_c, _) = refine_nonconforming_prism(&mesh, &[0], None);
 
         assert_eq!(nc.n_elems(), 8 + 1, "first prism → 8 children, second unchanged → 9 total");
         assert!(!quad_c.is_empty(), "shared quad face nodes should produce quad face constraints");
@@ -5885,7 +5973,7 @@ mod tests {
         let vol_orig = prism6_vol(&mesh, 0) + prism6_vol(&mesh, 1);
         assert!((vol_orig - 1.0).abs() < 1e-14, "2 prisms, each 0.5 → total=1, got {}", vol_orig);
 
-        let (nc, _, _, _, _) = refine_nonconforming_prism(&mesh, &[0]);
+        let (nc, _, _, _, _) = refine_nonconforming_prism(&mesh, &[0], None);
         let vol_sum: f64 = (0..nc.n_elems())
             .map(|e| prism6_vol(&nc, e as ElemId))
             .sum();
@@ -5998,7 +6086,7 @@ mod tests {
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
             face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
             face_offsets: Some(vec![0,4,7,10,13,16]),
-            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![] };
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None };
         let fine = refine_uniform_3d(&mesh);
         assert_eq!(fine.n_elems(), 16); fine.check().unwrap();
     }
@@ -6015,7 +6103,7 @@ mod tests {
 
     #[test] fn pyramid5_nc_refine_empty_is_identity() {
         let mesh = make_pyramid_mesh();
-        let (nc, ec, tc, qc, mp) = refine_nonconforming_pyramid(&mesh, &[]);
+        let (nc, ec, tc, qc, mp) = refine_nonconforming_pyramid(&mesh, &[], None);
         assert_eq!(nc.n_elems(), mesh.n_elems()); assert_eq!(nc.n_nodes(), mesh.n_nodes());
         assert!(ec.is_empty()); assert!(tc.is_empty()); assert!(qc.is_empty()); assert!(mp.is_empty());
     }
@@ -6023,7 +6111,7 @@ mod tests {
     #[test] fn pyramid5_nc_refine_all_gives_no_constraints() {
         let mesh = make_pyramid_mesh();
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &all);
+        let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &all, None);
         assert_eq!(nc.n_elems(), 16); assert!(ec.is_empty()); assert!(tc.is_empty()); assert!(qc.is_empty());
         nc.check().unwrap();
     }
@@ -6040,7 +6128,7 @@ mod tests {
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
-        let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &[0]);
+        let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &[0], None);
         assert_eq!(nc.n_elems(), 17); assert!(ec.len()>=3); assert!(!tc.is_empty()); assert!(qc.is_empty());
         nc.check().unwrap();
     }
@@ -6062,32 +6150,32 @@ mod tests {
 
     #[test] fn prism_aniso_z_split_doubles_elements() {
         let mesh = make_prism_mesh(); let n = mesh.n_elems();
-        let (refined, _) = refine_nonconforming_prism_aniso(&mesh, &[(0, PrismRefineDir::Z)]);
+        let (refined, _) = refine_nonconforming_prism_aniso(&mesh, &[(0, PrismRefineDir::Z)], None);
         assert_eq!(refined.n_elems(), n+1, "Z split: one elem → 2, total {}", n+1);
     }
 
     #[test] fn prism_aniso_edge0_split_doubles_elements() {
         let mesh = make_prism_mesh(); let n = mesh.n_elems();
-        let (refined, _) = refine_nonconforming_prism_aniso(&mesh, &[(0, PrismRefineDir::Edge0)]);
+        let (refined, _) = refine_nonconforming_prism_aniso(&mesh, &[(0, PrismRefineDir::Edge0)], None);
         assert_eq!(refined.n_elems(), n+1, "Edge0 split: one elem → 2, total {}", n+1);
     }
 
     #[test] fn prism_aniso_all_delegates_to_isotropic() {
         let mesh = make_prism_mesh();
-        let (refined, _) = refine_nonconforming_prism_aniso(&mesh, &[(0, PrismRefineDir::All)]);
+        let (refined, _) = refine_nonconforming_prism_aniso(&mesh, &[(0, PrismRefineDir::All)], None);
         assert_eq!(refined.n_elems(), 8);
         refined.check().unwrap();
     }
 
     #[test] fn prism_aniso_empty_marked_is_identity() {
         let mesh = make_prism_mesh();
-        let (refined, c) = refine_nonconforming_prism_aniso(&mesh, &[]);
+        let (refined, c) = refine_nonconforming_prism_aniso(&mesh, &[], None);
         assert_eq!(refined.n_elems(), mesh.n_elems()); assert_eq!(refined.n_nodes(), mesh.n_nodes()); assert!(c.is_empty());
     }
 
     #[test] fn prism_aniso_z_split_adds_three_midpoints() {
         let mesh = make_prism_mesh(); let n0 = mesh.n_nodes();
-        let (refined, _) = refine_nonconforming_prism_aniso(&mesh, &[(0, PrismRefineDir::Z)]);
+        let (refined, _) = refine_nonconforming_prism_aniso(&mesh, &[(0, PrismRefineDir::Z)], None);
         assert_eq!(refined.n_nodes(), n0+3, "Z split adds 3 vertical edge mids");
     }
 
@@ -6095,14 +6183,14 @@ mod tests {
 
     #[test] fn pyramid_aniso_all_delegates_to_isotropic() {
         let mesh = make_pyramid_mesh();
-        let (refined, _) = refine_nonconforming_pyramid_aniso(&mesh, &[(0, PyramidRefineDir::All)]);
+        let (refined, _) = refine_nonconforming_pyramid_aniso(&mesh, &[(0, PyramidRefineDir::All)], None);
         assert_eq!(refined.n_elems(), 16);
         refined.check().unwrap();
     }
 
     #[test] fn pyramid_aniso_empty_marked_is_identity() {
         let mesh = make_pyramid_mesh();
-        let (refined, c) = refine_nonconforming_pyramid_aniso(&mesh, &[]);
+        let (refined, c) = refine_nonconforming_pyramid_aniso(&mesh, &[], None);
         assert_eq!(refined.n_elems(), mesh.n_elems()); assert!(c.is_empty());
     }
 

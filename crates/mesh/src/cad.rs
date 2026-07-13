@@ -728,4 +728,150 @@ mod tests {
         assert!(d > 0.0, "expected non-zero distance from plane");
         assert!((d - 0.5).abs() < 1e-10, "expected dist 0.5 got {d:.6e}");
     }
+
+    // ─── CAD projection integration with AMR ───────────────────────────────
+
+    #[test]
+    fn refine_nonconforming_2d_cad_projection_circle() {
+        use crate::amr::refine_nonconforming;
+
+        // Create a unit square mesh. Bottom edge (tag=1) will be projected
+        // onto a cylinder (circle in XY) of radius 0.5 centered at (0.5, 0.0).
+        let cyl = AnalyticSurface::cylinder([0.5, 0.0, 0.0], 0.5, 1.0);
+        let config = ProjectionConfig::new().with_surface(1, CadShape::Analytic(cyl));
+
+        let mesh = Mesh::<2>::unit_square_tri(2);
+
+        // Refine element 0 with CAD projection on boundary tag 1 (bottom edge).
+        let (refined, _) = refine_nonconforming(&mesh, &[0], Some(&config));
+
+        // Check that all bottom-edge (tag=1) boundary nodes lie on the circle.
+        for f in 0..refined.n_boundary_faces() as u32 {
+            if refined.face_tag(f) != 1 { continue; }
+            for &n in refined.face_nodes(f) {
+                let c = refined.node_coords(n);
+                let dx = c[0] - 0.5;
+                let dy = c[1] - 0.0;
+                let r = (dx * dx + dy * dy).sqrt();
+                assert!(
+                    (r - 0.5).abs() < 1e-12,
+                    "Boundary node {} on tag=1 face: radius {:.16e} != 0.5 (coords: [{}, {}])",
+                    n, r, c[0], c[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refine_nonconforming_2d_cad_noop_for_none() {
+        use crate::amr::refine_nonconforming;
+
+        // Without CAD config, boundary nodes should remain at their original positions.
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let (refined, _) = refine_nonconforming(&mesh, &[0], None);
+
+        // The new midpoint on the bottom edge should NOT be projected.
+        // Check that midpoints are at linear midpoints.
+        for f in 0..refined.n_boundary_faces() as u32 {
+            for &n in refined.face_nodes(f) {
+                let c = refined.node_coords(n);
+                // Original mesh width is 1.0, so all coordinates should be in [0,1].
+                assert!(c[0] >= -1e-12 && c[0] <= 1.0 + 1e-12,
+                    "Node {} x out of range: {}", n, c[0]);
+                assert!(c[1] >= -1e-12 && c[1] <= 1.0 + 1e-12,
+                    "Node {} y out of range: {}", n, c[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn closure_refine_with_cad_projection_cylinder_2d() {
+        use crate::amr::closure_refine_default;
+
+        // Use closure (conforming) refinement with CAD projection.
+        // Bottom edge (tag=1) projected onto a cylinder (circle in XY).
+        let cyl = AnalyticSurface::cylinder([0.5, 0.0, 0.0], 0.5, 1.0);
+        let config = ProjectionConfig::new().with_surface(1, CadShape::Analytic(cyl));
+
+        let mesh = Mesh::<2>::unit_square_tri(3);
+        let refined = closure_refine_default(&mesh, &[0, 4, 7], Some(&config));
+
+        // Verify all boundary nodes on tag=1 faces are on the circle.
+        for f in 0..refined.n_boundary_faces() as u32 {
+            if refined.face_tag(f) != 1 { continue; }
+            for &n in refined.face_nodes(f) {
+                let c = refined.node_coords(n);
+                let dx = c[0] - 0.5;
+                let dy = c[1] - 0.0;
+                let r = (dx * dx + dy * dy).sqrt();
+                assert!(
+                    (r - 0.5).abs() < 1e-12,
+                    "Closure-refined boundary node {} radius {:.16e} != 0.5 at ({}, {})",
+                    n, r, c[0], c[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn project_boundary_to_cad_3d_cylinder() {
+        // Create a 3D tet mesh and project the z=0 face (tag=1) onto a cylinder.
+        let r = (0.5_f64).sqrt();
+        let cylinder = AnalyticSurface::cylinder([0.5, 0.5, 0.0], r, 1.0);
+        let config = ProjectionConfig::new().with_surface(1, CadShape::Analytic(cylinder));
+
+        let mesh = Mesh::<3>::unit_cube_tet(1);
+
+        let projected = project_boundary_to_cad(&mesh, &config, 1);
+
+        // Check that the projected mesh has the right number of elements.
+        assert_eq!(projected.n_elems(), mesh.n_elems());
+
+        // Check that nodes on the projected boundary (tag=1, z=0 face) are on the cylinder.
+        for f in 0..projected.n_boundary_faces() as u32 {
+            if projected.face_tag(f) != 1 { continue; }
+            for &n in projected.face_nodes(f) {
+                let c = projected.node_coords(n);
+                let dx = c[0] - 0.5;
+                let dy = c[1] - 0.5;
+                let r_actual = (dx * dx + dy * dy).sqrt();
+                assert!(
+                    (r_actual - r).abs() < 1e-12,
+                    "3D projected node {} radius {:.16e} != {:.16e} at ({}, {}, {})",
+                    n, r_actual, r, c[0], c[1], c[2]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refine_nonconforming_3d_cad_projection_cylinder() {
+        use crate::amr::refine_nonconforming_3d;
+
+        // Project the z=0 face (tag=1) of a unit cube tet mesh onto a cylinder.
+        // The cylinder is centered at (0.5, 0.5, 0.0) with radius sqrt(0.5) so that
+        // the diagonal of the unit square (width 1) lies on the cylinder surface.
+        let r = (0.5_f64).sqrt(); // radius ≈ 0.7071
+        let cylinder = AnalyticSurface::cylinder([0.5, 0.5, 0.0], r, 1.0);
+        let config = ProjectionConfig::new().with_surface(1, CadShape::Analytic(cylinder));
+
+        let mesh = Mesh::<3>::unit_cube_tet(1);
+        let (refined, _, _) = refine_nonconforming_3d(&mesh, &[0], Some(&config));
+
+        // Verify all tag=1 (z=0 face) boundary nodes are on the cylinder surface.
+        for f in 0..refined.n_boundary_faces() as u32 {
+            if refined.face_tag(f) != 1 { continue; }
+            for &n in refined.face_nodes(f) {
+                let c = refined.node_coords(n);
+                let dx = c[0] - 0.5;
+                let dy = c[1] - 0.5;
+                let r_actual = (dx * dx + dy * dy).sqrt();
+                assert!(
+                    (r_actual - r).abs() < 1e-12,
+                    "3D NC-refined projected node {} radius {:.16e} != {:.16e} at ({}, {}, {})",
+                    n, r_actual, r, c[0], c[1], c[2]
+                );
+            }
+        }
+    }
 }

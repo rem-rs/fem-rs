@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn tc_single_hanging() {
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let (nc, constraints) = refine_nonconforming(&mesh, &[0]);
+        let (nc, constraints) = refine_nonconforming(&mesh, &[0], None);
         assert!(!constraints.is_empty());
         let c = make_conforming_tri(&nc, &constraints);
         assert!(c.n_nodes() > nc.n_nodes());
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn tc_no_hanging() {
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let (nc, cns) = refine_nonconforming(&mesh, &[]);
+        let (nc, cns) = refine_nonconforming(&mesh, &[], None);
         assert!(cns.is_empty());
         assert_eq!(make_conforming_tri(&nc, &cns).n_nodes(), nc.n_nodes());
     }
@@ -87,7 +87,7 @@ mod tests {
     fn tc_all_refined() {
         let mesh = Mesh::<2>::unit_square_tri(2);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let (nc, _) = refine_nonconforming(&mesh, &all);
+        let (nc, _) = refine_nonconforming(&mesh, &all, None);
         assert_eq!(make_conforming_tri(&nc, &[]).n_nodes(), nc.n_nodes());
     }
 }

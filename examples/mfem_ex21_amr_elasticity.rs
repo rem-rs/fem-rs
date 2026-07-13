@@ -80,7 +80,7 @@ fn main(){
             println!("  Max err: {me:.6e}");let marked=tef(&ind.eta,0.7);
             println!("  Marked {}",marked.len());
             if n>max_dofs||marked.is_empty(){break;}
-            let(nm,nc)=fem_mesh::amr::refine_nonconforming_quad(&mesh,&marked);
+            let(nm,nc)=fem_mesh::amr::refine_nonconforming_quad(&mesh,&marked,None);
             mesh=nm;ch=nc;
         }else{
             for&d in&ess{A.apply_dirichlet_row_zeroing(d,0.,&mut rhs);}
@@ -90,7 +90,7 @@ fn main(){
             println!("  Max err: {me:.6e}");let marked=tef(&ind.eta,0.7);
             println!("  Marked {}",marked.len());
             if n>max_dofs||marked.is_empty(){break;}
-            let(nm,nc)=fem_mesh::amr::refine_nonconforming_quad(&mesh,&marked);
+            let(nm,nc)=fem_mesh::amr::refine_nonconforming_quad(&mesh,&marked,None);
             mesh=nm;ch=nc;
         }
     }
