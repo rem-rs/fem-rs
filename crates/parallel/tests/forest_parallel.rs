@@ -14,17 +14,19 @@ use fem_parallel::forest::{
 use fem_parallel::Comm;
 
 /// Verify that non-uniform refinement followed by 2:1 balance enforcement
-/// produces a forest where max-min level <= 1.
+/// produces a consistent forest structure.
 ///
-/// The workflow: refine non-uniformly, compute the balance closure, refine
-/// additional quadrants identified by the closure, and verify the result.
+/// The workflow: refine non-uniformly, compute the balance closure (via the
+/// Forest-level API), refine all keys identified by the closure, and verify
+/// the resulting forest is structurally sound.
 ///
 /// Note: The current MortonKey encoding does not store the refinement level,
-/// which can cause key collisions when quadrants at different levels share the
-/// same (x,y) coordinate values. This limits the balance algorithm's ability
-/// to detect level gaps >1 across such entries.  This test exercises the
-/// API surface and verifies that the combined balance+refine path is
-/// structurally sound (no panics, stats consistent).
+/// which can cause key collisions when quadrants at different levels share
+/// the same (x,y) coordinate values. This limits the balance algorithm's
+/// ability to detect level gaps >1 across such entries in a Forest created
+/// through consecutive refine operations.  This test exercises the combined
+/// balance+refine API path and verifies structural integrity (no panics,
+/// stats consistent, active count increased correctly).
 #[test]
 fn test_forest_2to1_balance_after_refine() {
     let mut forest = make_single_tree_forest(serial_comm());
@@ -57,13 +59,20 @@ fn test_forest_2to1_balance_after_refine() {
     forest.refine_keys(&closure);
 
     // After balancing, verify the forest stats are consistent.
+    // The refine of 7 keys produces at least 28 active quadrants
+    // (each quadrant produces 4 children in 2-D), so n_active > 7
+    // verifies that the combined balance+refine pipeline completed.
     let stats = forest.stats();
     assert!(
         stats.max_level <= stats.min_level + 1,
         "max_level {} - min_level {} > 1 after balance",
         stats.max_level, stats.min_level
     );
-    assert!(stats.n_active > 0, "forest should have active quadrants");
+    assert!(
+        stats.n_active > 7,
+        "after balance+refine, active count ({}) should exceed initial 7",
+        stats.n_active
+    );
 }
 
 /// Verify the low-level 2:1 balance closure algorithm with a manually
@@ -95,31 +104,39 @@ fn test_balance_closure_single_level_no_cascade() {
 /// Verify that the balance closure correctly identifies a coarse neighbour
 /// when there is a level gap of 2 (violating the 2:1 rule).
 ///
-/// We construct a scenario with a level-3 and a level-1 quadrant
-/// that DO NOT share a MortonKey collision, ensuring the collision-free
-/// path in the algorithm can be exercised.
+/// We construct an active map with:
+/// - Level-3 quadrants at raw keys 16-19 (deinterleave: (4,0), (5,0),
+///   (4,1), (5,1) in an 8x8 level-3 grid).
+/// - Level-2 quadrants at raw keys 5-7.
+/// - A **level-1 quadrant at key 1** (coordinates (1,0)).
 ///
-/// Layout (level-3 coordinates, 8x8 grid):
-///   (4,0) key 16  |  (5,0) key 17   <- level 3
-///   A level-1 quadrant at (1,0) key 1 sits adjacent at x=0.5.
-///   The -x neighbour of key 16 at level 3 is (3,0) = key 5.
-///   Key 5 is NOT in the active map, so the ancestor walk climbs
-///   to (1,0) = key 1 at level 1.  Gap = 3 - 1 = 2 > 1 => cascade.
+/// When a level-3 marked quadrant has a missing same-level neighbour,
+/// the ancestor walk climbs the candidate's ancestor chain:
+///
+///   marked key 17 (5,0) → parent (2,0) key 4 → grandparent (1,0) key 1
+///
+/// Key 1 is found in the active map at level 1, giving a level gap of
+/// 3 - 1 = 2 > 1, so key 1 is added to the closure.
+///
+/// The same cascade also occurs for marked keys 18 and 19 through their
+/// respective ancestor chains which converge to (1,0) key 1.
 #[test]
 fn test_balance_closure_cascade_level_gap() {
     let mut active_map = HashMap::new();
 
-    // Level-3 quadrants: (4,0)-(5,1) = keys 16-19.
+    // Level-3 quadrants: keys 16-19.
     for &key_val in &[16u64, 17, 18, 19] {
         active_map.insert(MortonKey(key_val), 3u8);
     }
 
-    // Level-2 quadrants: (3,0) key 5, (2,1) key 6, (3,1) key 7.
+    // Level-2 quadrants: keys 5, 6, 7.
     for &key_val in &[5u64, 6, 7] {
         active_map.insert(MortonKey(key_val), 2u8);
     }
 
-    // Level-1 quadrant at (1,0) = key 1, adjacent to key 16's -x face.
+    // Level-1 quadrant at (1,0) = key 1.
+    // The ancestor walk from each level-3 marked key eventually reaches
+    // this key, producing a gap of 2 (>1) and triggering a cascade.
     active_map.insert(MortonKey(1), 1u8);
 
     // Mark the level-3 quadrants for refinement (to level 4).
@@ -136,30 +153,13 @@ fn test_balance_closure_cascade_level_gap() {
             "closure must contain marked key {:?}", k);
     }
 
-    // Key 16's -x neighbour at level 3 is (3,0) = key 5 (level 2).
-    // Gap = 3-2 = 1 => no cascade from key 5.
-    // Key 5 has -x neighbour (2,0) = key 4. Key 4 is not in the map.
-    // Ancestor of key 4 at level 1 is (1,0) = key 1 at level 1.
-    // But key 1's -x neighbour through key 16's ancestor chain:
-    //
-    // Key 16's -x neighbour at level 3 is (3,0) = key 5 at level 2.
-    // Gap = 1 => OK (no cascade).
-    //
-    // Key 16's +x neighbour is key 17 (level 3). Gap = 0.
-    // Key 16's +y neighbour is key 18 (level 3). Gap = 0.
-    //
-    // Key 17's +x neighbour is (6,0) = key 20. Not active.
-    //   Ancestor at level 2: (3,0) = key 5 at level 2. Gap = 3-2 = 1.
-    //   Ancestor at level 1: (1,0) = key 1 at level 1. Gap = 3-1 = 2 > 1!
-    //   -> key 1 should be added to the closure.
-    //
-    // Given that key 1 at level 2 (the ancestor) does NOT spatially
-    // coincide with key 1 at level 1 (the active_map entry) due to the
-    // MortonKey level encoding issue, this test documents the current
-    // algorithm behaviour rather than asserting a cascade.
-
-    // At minimum, the closure contains all marked keys.
-    assert!(closure.len() >= 4, "closure must contain at least the 4 marked keys");
+    // The ancestor walk from level-3 marked keys (17-19) finds key 1
+    // at level 1 (gap = 2 > 1), so the closure must contain key 1.
+    assert!(closure.len() > marked.len(),
+        "cascade should add coarse neighbour to closure (size {} > {})",
+        closure.len(), marked.len());
+    assert!(closure.contains(&MortonKey(1)),
+        "coarse neighbour key 1 (level-1 at (1,0)) must be in closure");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────
