@@ -246,7 +246,7 @@ impl RefinementTree {
         // Fallback: scan all parents for one whose children include this elem
         // (needed when a child shares its parent's ElemId, common in multi-level
         //  refinement where parent_of returns None to avoid a self-loop).
-        for (&p, kids) in &self.children {
+        for (&_p, kids) in &self.children {
             if kids.contains(&elem) {
                 return kids.iter().filter(|&&k| k != elem).copied().collect();
             }
