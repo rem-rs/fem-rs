@@ -6,7 +6,7 @@
 use std::collections::{HashMap, BTreeMap, HashSet};
 
 use fem_mesh::{Mesh, amr::NCState, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, topology::MeshTopology, boundary::BoundaryTag};
-use fem_core::types::{ElemId, NodeId};
+use fem_core::types::{ElemId, NodeId, Rank};
 
 use crate::{
     par_mesh::ParallelMesh,
@@ -184,6 +184,128 @@ pub struct ParDerefinedMesh {
     pub n_new_elems: usize,
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Return an unchanged [`ParDerefinedMesh`] — used when no derefinement occurs.
+fn make_unchanged_derefined_mesh(
+    local_mesh: &Mesh<2>,
+    comm: crate::Comm,
+    partition: &MeshPartition,
+    nc_state: &NCState,
+    solution: Option<&[f64]>,
+) -> ParDerefinedMesh {
+    ParDerefinedMesh {
+        par_mesh: ParallelMesh::new(local_mesh.clone(), comm, partition.clone()),
+        nc_state: nc_state.clone(),
+        solution: solution.map(|s| s.to_vec()).unwrap_or_default(),
+        n_new_elems: local_mesh.n_elems(),
+    }
+}
+
+/// Compact a coarsened mesh by removing orphaned (unused) nodes and build a
+/// partition that preserves the old partition's global-ID numbering.
+///
+/// After serial [`derefine_marked`], the mesh keeps *all* nodes from the fine
+/// mesh, but only a subset (coarse-parent nodes + any non-derefined children)
+/// are referenced by elements.  This function:
+///
+/// 1. Scans element and face connectivity for active node IDs.
+/// 2. Compacts the node array (removes unused entries).
+/// 3. Remaps connectivity to the compacted indices.
+/// 4. Builds a [`MeshPartition`] that preserves the old partition's global
+///    node/element IDs.
+/// 5. Restricts the solution vector to only the active nodes.
+fn compact_derefined_mesh(
+    mesh: &Mesh<2>,
+    old_partition: &MeshPartition,
+    dropped_children: &HashSet<ElemId>,
+    restored_parents: &[ElemId],
+    solution: Option<&[f64]>,
+    local_rank: Rank,
+) -> (Mesh<2>, MeshPartition, Vec<f64>) {
+    // ── 1. Collect active node IDs ──────────────────────────────────────────
+    let mut active: HashSet<NodeId> = HashSet::new();
+    for e in 0..mesh.n_elems() as ElemId {
+        for &n in mesh.element_nodes(e) {
+            active.insert(n);
+        }
+    }
+    for &n in &mesh.face_conn {
+        active.insert(n);
+    }
+
+    let mut sorted: Vec<NodeId> = active.into_iter().collect();
+    sorted.sort_unstable();
+    let n_active = sorted.len();
+
+    // ── 2. Build old->new node mapping and new coordinate array ─────────────
+    let mut old_to_new: HashMap<NodeId, NodeId> = HashMap::with_capacity(n_active);
+    let mut new_coords = Vec::with_capacity(n_active * 2);
+    let mut owned_global_nodes = Vec::with_capacity(n_active);
+
+    for (new_id, &old_id) in sorted.iter().enumerate() {
+        old_to_new.insert(old_id, new_id as NodeId);
+        owned_global_nodes.push(old_partition.global_node_ids[old_id as usize]);
+        let c = mesh.node_coords(old_id);
+        new_coords.extend_from_slice(&c[..2]);
+    }
+
+    // ── 3. Remap connectivity ───────────────────────────────────────────────
+    let new_conn: Vec<NodeId> = mesh.conn.iter()
+        .map(|&n| old_to_new[&n])
+        .collect();
+    let new_face_conn: Vec<NodeId> = mesh.face_conn.iter()
+        .map(|&n| old_to_new[&n])
+        .collect();
+
+    let new_mesh = Mesh::uniform(
+        new_coords,
+        new_conn,
+        mesh.elem_tags.clone(),
+        mesh.elem_type,
+        new_face_conn,
+        mesh.face_tags.clone(),
+        mesh.face_type,
+    );
+
+    // ── 4. Build element partition ──────────────────────────────────────────
+    let old_geids = &old_partition.global_elem_ids;
+    let old_n_elems = old_geids.len();
+    let new_n_elems = new_mesh.n_elems();
+
+    let mut owned_global_elems = Vec::with_capacity(new_n_elems);
+    for le in 0..old_n_elems as ElemId {
+        if !dropped_children.contains(&le) {
+            owned_global_elems.push(old_geids[le as usize]);
+        }
+    }
+    owned_global_elems.extend_from_slice(restored_parents);
+
+    debug_assert_eq!(
+        owned_global_elems.len(), new_n_elems,
+        "element count mismatch in compact_derefined_mesh"
+    );
+
+    let new_partition = MeshPartition::from_partitioner(
+        &owned_global_nodes,
+        &[], // no ghost nodes (serial partition after derefinement)
+        &owned_global_elems,
+        &[], // no ghost elems
+        local_rank,
+    );
+
+    // ── 5. Restrict solution ────────────────────────────────────────────────
+    let restricted = if let Some(sol) = solution {
+        sorted.iter().map(|&old_id| {
+            if (old_id as usize) < sol.len() { sol[old_id as usize] } else { 0.0 }
+        }).collect()
+    } else {
+        vec![]
+    };
+
+    (new_mesh, new_partition, restricted)
+}
+
 /// Coarsen previously refined elements in a distributed mesh.
 ///
 /// # Parallel coordination protocol
@@ -191,16 +313,22 @@ pub struct ParDerefinedMesh {
 /// 1. Each rank filters `marked_parents` to only those parents where **all 4
 ///    children** reside on that rank (checked via the partition's
 ///    `global_elem_ids` / `local_elem` lookup).
-/// 2. Rank-0 gather of per-parent `i64` votes (`1` = this rank owns all children,
-///    `0` = not) via `allreduce_sum_i64`.  Only parents with vote-sum `== 1`
+/// 2. Per-parent `i64` votes (`1` = this rank owns all children, `0` = not)
+///    exchanged via `allreduce_sum_i64`.  Only parents with vote-sum `== 1`
 ///    (children on exactly one rank) are coarsened — parents that straddle rank
 ///    boundaries are **skipped** (future work: migrate children first).
 /// 3. Each rank builds a **local** [`DerefineTree`] whose children use local
 ///    element indices, then calls the serial [`derefine_marked`].
 /// 4. The [`NCState`] is rolled back one level via `derefine_last()`.
-/// 5. The solution is restricted: for P1 elements the coarse-node values are
-///    unchanged (they share the same node IDs), so the vector is returned
-///    unmodified.
+/// 5. The mesh is compacted (orphaned midpoint nodes are removed) and the
+///    solution is restricted to the active (coarse) nodes.
+///
+/// # MPI Safety
+///
+/// `marked_parents` **must be identical on all ranks**.  If different ranks
+/// pass different parent lists, the per-parent `allreduce_sum_i64` will
+/// deadlock or produce inconsistent results.  Collectives require identical
+/// participation across ranks.
 ///
 /// # Arguments
 /// * `par_mesh` — partitioned refined mesh.
@@ -220,12 +348,9 @@ pub fn par_derefine_marked(
     let comm = par_mesh.comm().clone();
 
     if marked_parents.is_empty() {
-        return Ok(ParDerefinedMesh {
-            par_mesh: ParallelMesh::new(local_mesh.clone(), comm, partition.clone()),
-            nc_state: nc_state.clone(),
-            solution: solution.map(|s| s.to_vec()).unwrap_or_default(),
-            n_new_elems: local_mesh.n_elems(),
-        });
+        return Ok(make_unchanged_derefined_mesh(
+            local_mesh, comm, partition, nc_state, solution,
+        ));
     }
 
     // ── Step 1: filter to parents whose children are all on this rank ─────
@@ -282,7 +407,7 @@ pub fn par_derefine_marked(
     // Build final local tree from parents with sum == 1.
     let mut final_records: HashMap<ElemId, DerefineRecord> = HashMap::new();
     for (i, &parent_global) in marked_parents.iter().enumerate() {
-        if i < global_votes.len() && global_votes[i] == 1 {
+        if global_votes[i] == 1 {
             if let Some(rec) = local_records.get(&parent_global) {
                 final_records.insert(parent_global, rec.clone());
             }
@@ -292,13 +417,16 @@ pub fn par_derefine_marked(
     // ── Step 3: serial derefinement on the local mesh ─────────────────────
     let derefinable_parents: Vec<ElemId> = final_records.keys().copied().collect();
     if derefinable_parents.is_empty() {
-        return Ok(ParDerefinedMesh {
-            par_mesh: ParallelMesh::new(local_mesh.clone(), comm, partition.clone()),
-            nc_state: nc_state.clone(),
-            solution: solution.map(|s| s.to_vec()).unwrap_or_default(),
-            n_new_elems: local_mesh.n_elems(),
-        });
+        return Ok(make_unchanged_derefined_mesh(
+            local_mesh, comm, partition, nc_state, solution,
+        ));
     }
+
+    // Compute dropped children BEFORE consuming final_records.
+    let dropped_children: HashSet<ElemId> = final_records
+        .values()
+        .flat_map(|r| r.children.iter().copied())
+        .collect();
 
     let local_tree = DerefineTree {
         records: final_records,
@@ -310,22 +438,17 @@ pub fn par_derefine_marked(
     // ── Step 4: roll back NCState ─────────────────────────────────────────
     nc_state.derefine_last();
 
-    // ── Step 5: restrict solution (P1: coarse nodes keep their values) ────
-    let restricted = if let Some(sol) = solution {
-        // derefine_marked keeps ALL nodes (coarse + orphans), so the
-        // solution vector length is unchanged for P1.
-        sol.to_vec()
-    } else {
-        vec![]
-    };
-
-    // ── Step 6: build new Partition + ParallelMesh ────────────────────────
-    let new_n_elems = coarsened_mesh.n_elems();
-    let new_partition = MeshPartition::new_serial(
-        coarsened_mesh.n_nodes(),
-        new_n_elems,
+    // ── Step 5: compact mesh, restrict solution, build partition ─────────
+    let (compacted_mesh, new_partition, restricted) = compact_derefined_mesh(
+        &coarsened_mesh,
+        partition,
+        &dropped_children,
+        &derefinable_parents,
+        solution,
+        comm.rank() as Rank,
     );
-    let new_par_mesh = ParallelMesh::new(coarsened_mesh, comm, new_partition);
+    let new_n_elems = compacted_mesh.n_elems();
+    let new_par_mesh = ParallelMesh::new(compacted_mesh, comm, new_partition);
 
     Ok(ParDerefinedMesh {
         par_mesh: new_par_mesh,
@@ -1220,9 +1343,9 @@ mod tests {
             Some(&refined.solution),
         ).unwrap();
 
-        // After derefine, solution length should be back to original
-        // (derefine_marked keeps all nodes, so solution length unchanged)
-        assert_eq!(result.solution.len(), refined.solution.len());
+        // After derefine with compaction, solution length equals number of
+        // active nodes (original coarse nodes, since all were derefined).
+        assert_eq!(result.solution.len(), solution.len());
 
         // Corner node values should be preserved
         let n_original = solution.len();
