@@ -1,4 +1,5 @@
 //! Adaptive Mesh Refinement (AMR).
+pub mod convergence;
 mod amr_inner;
 pub mod anisotropy;
 mod bisect;

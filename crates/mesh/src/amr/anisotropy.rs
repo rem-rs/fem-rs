@@ -21,7 +21,7 @@
 //! - Dolejší 2004: "Anisotropic mesh adaptation for finite element problems"
 //! - Chen 2017: "Hessian-based anisotropic mesh adaptation"
 
-use fem_core::{ElemId, NodeId};
+use fem_core::ElemId;
 use crate::amr::{QuadRefineDir, HexRefineDir, TriRefineDir};
 use crate::amr::recovery::spr_recover_gradient_2d;
 use crate::element_type::ElementType;
@@ -686,7 +686,7 @@ pub fn degrade_anisotropic_tris(
     post_refine_aspects: &[f64],
     max_ratio: f64,
 ) {
-    marked.retain(|&(_, dir)| {
+    marked.retain(|&(_, _dir)| {
         // Keep only isotropic refinements for degraded elements.
         // This callback is intended for post-refinement quality checks;
         // elements whose actual refined aspect ratio is too high are
@@ -704,6 +704,7 @@ pub fn degrade_anisotropic_tris(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_core::NodeId;
     use crate::Mesh;
 
     // ── 2×2 eigenvalue test ───────────────────────────────────────────────
