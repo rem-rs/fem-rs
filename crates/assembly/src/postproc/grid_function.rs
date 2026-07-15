@@ -340,10 +340,9 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let elem_dofs = self.space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
 
-            // Check for high-order geometry (curved surface) — currently disabled
-            // due to a bug in the curved surface Jacobian metric. Use flat P1 only.
+            // Check for high-order geometry (curved surface).
             let g_order = mesh.geom_order();
-            let use_ho_geo = false;
+            let use_ho_geo = g_order > 1;
 
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let x0 = mesh.node_coords(nodes[0]);
