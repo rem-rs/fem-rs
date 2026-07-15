@@ -233,6 +233,72 @@ fn isoparametric_jacobian<M: MeshTopology>(
     (j, det, xp)
 }
 
+/// Surface element Jacobian info for 2D-in-3D meshes.
+///
+/// For a 2D surface element embedded in 3D space:
+/// - J is a 3×2 matrix (mapping from 2D reference to 3D physical)
+/// - G = J^T·J is the 2×2 metric tensor
+/// - measure = sqrt(det(G)) = |J₁ × J₂| (surface area element)
+/// - chol_Ginv is the lower-triangular Cholesky factor of G⁻¹,
+///   so that `(chol_Ginv · ∇_ref φ) · (chol_Ginv · ∇_ref ψ) = ∇_ref φ · G⁻¹ · ∇_ref ψ`
+///   which gives the correct surface gradient dot product in the assembly.
+///
+/// Returns `(measure, chol_Ginv_2x2, x_phys_3d)`.
+fn surface_jacobian<M: MeshTopology>(
+    mesh: &M,
+    nodes: &[u32],
+    geo_elem: &dyn ReferenceElement,
+    xi: &[f64],
+    embed_dim: usize,  // = 3 for Mesh<3>
+    tdim: usize,       // = 2 for surface
+) -> (f64, DMatrix<f64>, Vec<f64>) {
+    let n_geo = geo_elem.n_dofs();
+    let mut grad_geo = vec![0.0_f64; n_geo * tdim];
+    let mut phi_geo  = vec![0.0_f64; n_geo];
+    geo_elem.eval_grad_basis(xi, &mut grad_geo);
+    geo_elem.eval_basis(xi, &mut phi_geo);
+
+    // 3×2 Jacobian: J[i][d] = Σ_k x_k[i] · ∂φ_k/∂ξ_d
+    let mut j = vec![0.0_f64; embed_dim * tdim]; // column-major: [col0(3), col1(3)]
+    let mut xp = vec![0.0_f64; embed_dim];
+    for k in 0..n_geo {
+        let xk = mesh.node_coords(nodes[k]);
+        for i in 0..embed_dim {
+            xp[i] += phi_geo[k] * xk[i];
+            for d in 0..tdim {
+                j[i + d * embed_dim] += xk[i] * grad_geo[k * tdim + d];
+            }
+        }
+    }
+
+    // Metric G = J^T·J (2×2)
+    let g00 = j[0]*j[0] + j[1]*j[1] + j[2]*j[2]; // col0·col0
+    let g01 = j[0]*j[3] + j[1]*j[4] + j[2]*j[5]; // col0·col1
+    let g11 = j[3]*j[3] + j[4]*j[4] + j[5]*j[5]; // col1·col1
+
+    let det_g = g00 * g11 - g01 * g01;
+    let measure = det_g.sqrt();
+
+    // G⁻¹ (2×2 inverse metric)
+    let inv_det = 1.0 / det_g;
+    let a = g11 * inv_det;  // G⁻¹[0][0]
+    let b = -g01 * inv_det; // G⁻¹[0][1] = G⁻¹[1][0]
+    let c = g00 * inv_det;  // G⁻¹[1][1]
+
+    // Cholesky factor L of G⁻¹ (lower triangular: L·L^T = G⁻¹)
+    // L = [[l00, 0], [l10, l11]]
+    let l00 = a.sqrt();
+    let l10 = b / l00;
+    let l11 = (c - b * b / a).sqrt();
+
+    let mut chol = DMatrix::<f64>::zeros(tdim, tdim);
+    chol[(0, 0)] = l00;
+    chol[(1, 0)] = l10;
+    chol[(1, 1)] = l11;
+
+    (measure, chol, xp)
+}
+
 /// Transform reference gradients to physical gradients:
 /// `grad_phys[i] = J^{−T} grad_ref[i]`.
 fn transform_grads(
@@ -298,9 +364,12 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     coo: &mut CooMatrix<f64>,
     scratch: &mut ElementScratch,
 ) {
-    let mesh   = space.mesh();
-    let dim    = mesh.dim() as usize;
-    let order  = space.element_order(e);
+    let mesh    = space.mesh();
+    let edim    = mesh.dim() as usize;   // embedding dimension (2 or 3)
+    let tdim    = mesh.topological_dim() as usize; // element dimension (2 for surface)
+    let is_surface = edim != tdim;
+    let dim     = if is_surface { tdim } else { edim }; // assembly dimension
+    let order   = space.element_order(e);
 
     let elem_type = mesh.element_type(e);
     let ref_elem  = ref_elem_vol(elem_type, order);
@@ -315,7 +384,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let elem_tag = mesh.element_tag(e);
 
     let g_order = mesh.geom_order();
-    let affine = is_affine(elem_type, g_order);
+    let affine = !is_surface && is_affine(elem_type, g_order);
     let geo_elem = geo_ref_elem(mesh, e);
 
     let affine_tr = if affine {
@@ -334,6 +403,39 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     scratch.grad_phys.resize(n_ldofs * dim, 0.0);
 
     for (q, xi) in quad.points.iter().enumerate() {
+        if is_surface {
+            // ── Surface path (2D elements in 3D space) ─────────────────────────
+            // Geometry is always P1 (3 nodes for Tri3, 4 for Quad4), regardless
+            // of the solution order.  For isoparametric surface meshes the curved
+            // geometry is handled via `GeometryData`, not by increasing the
+            // solution-space order of the geometry element.
+            let geo_p1 = ref_elem_vol(elem_type, 1);
+            let (measure, chol_ginv, xp) =
+                surface_jacobian(mesh, nodes, geo_p1.as_ref(), xi, edim, tdim);
+            let w = quad.weights[q] * measure;
+
+            ref_elem.eval_basis(xi, &mut scratch.phi);
+            ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
+            // Transform 2D ref gradients via Cholesky factor of G⁻¹ (2×2).
+            // This gives: grad_surf · grad_surf = ∇_ref · G⁻¹ · ∇_ref
+            transform_grads(&chol_ginv, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
+
+            let qp = QpData {
+                n_dofs:    n_elem_dofs,
+                dim,
+                weight:    w,
+                phi:       &scratch.phi,
+                grad_phys: &scratch.grad_phys,
+                x_phys:    &xp,
+                elem_id:   e,
+                elem_tag,
+                elem_dofs: Some(&raw_dofs),
+            };
+            for integ in integrators {
+                integ.add_to_element_matrix(&qp, &mut scratch.k_elem);
+            }
+            continue;
+        }
         if affine {
             let tr = affine_tr.as_ref().unwrap();
             let w = quad.weights[q] * tr.det_j().abs();
@@ -400,9 +502,12 @@ fn accumulate_volume_linear_element<S: FESpace>(
     rhs: &mut [f64],
     scratch: &mut ElementScratch,
 ) {
-    let mesh   = space.mesh();
-    let dim    = mesh.dim() as usize;
-    let order  = space.element_order(e);
+    let mesh    = space.mesh();
+    let edim    = mesh.dim() as usize;
+    let tdim    = mesh.topological_dim() as usize;
+    let is_surface = edim != tdim;
+    let dim     = if is_surface { tdim } else { edim };
+    let order   = space.element_order(e);
 
     let elem_type = mesh.element_type(e);
     let ref_elem  = ref_elem_vol(elem_type, order);
@@ -416,7 +521,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
     let elem_tag = mesh.element_tag(e);
 
     let g_order = mesh.geom_order();
-    let affine = is_affine(elem_type, g_order);
+    let affine = !is_surface && is_affine(elem_type, g_order);
     let geo_elem = geo_ref_elem(mesh, e);
 
     let affine_tr = if affine {
@@ -436,7 +541,14 @@ fn accumulate_volume_linear_element<S: FESpace>(
 
     for (q, xi) in quad.points.iter().enumerate() {
         let (w, xp);
-        if affine {
+        if is_surface {
+            let geo_p1 = ref_elem_vol(elem_type, 1);
+            let (measure, _chol, xp_surf) =
+                surface_jacobian(mesh, nodes, geo_p1.as_ref(), xi, edim, tdim);
+            w = quad.weights[q] * measure;
+            ref_elem.eval_basis(xi, &mut scratch.phi);
+            xp = xp_surf;
+        } else if affine {
             let tr = affine_tr.as_ref().unwrap();
             w = quad.weights[q] * tr.det_j().abs();
             ref_elem.eval_basis(xi, &mut scratch.phi);

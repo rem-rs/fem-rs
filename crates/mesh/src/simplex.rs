@@ -212,41 +212,16 @@ impl<const D: usize> Mesh<D> {
         self.geometry.as_ref().map_or(0, |g| g.n_nodes)
     }
 
-    /// High-order geometry node indices for element `e`.
+    /// Promote the mesh to high-order (curved) geometry of the given order.
     ///
-    /// Returns geometry nodes when `set_curvature` has been called,
-    /// otherwise falls back to the linear connectivity (`elem_nodes`).
-    pub fn geom_elem_nodes(&self, e: ElemId) -> &[NodeId] {
-        if let Some(ref geo) = self.geometry {
-            let off = e as usize * geo.nodes_per_elem;
-            &geo.conn[off..off + geo.nodes_per_elem]
-        } else {
-            self.elem_nodes(e)
-        }
-    }
-
-    /// Coordinates of a geometry node (index into the geometry coords array).
+    /// This creates a `GeometryData` entry that maps each element to its
+    /// high-order geometry nodes, using the **same nodes** as the mesh vertices
+    /// for P1 (order 1). For order > 1, the high-order geometry nodes are
+    /// generated at the reference DOF locations, but currently uses the same
+    /// coordinates as the linear mesh (callers should snap or project afterward).
     ///
-    /// # Panics
-    /// Panics if `gid` is out of range or no high-order geometry exists.
-    pub fn geom_node_coords(&self, gid: NodeId) -> [f64; D] {
-        let geo = self.geometry.as_ref().expect("no high-order geometry");
-        let off = gid as usize * D;
-        std::array::from_fn(|i| geo.coords[off + i])
-    }
-
-    // ─── SetCurvature ─────────────────────────────────────────────────────────
-
-    /// Create a high-order geometry representation (equivalent to MFEM's
-    /// `Mesh::SetCurvature`).
-    ///
-    /// Upgrades the mesh's geometric mapping from linear (Q1/P1) to arbitrary
-    /// polynomial order `order`.  New geometry nodes are inserted at edge and
-    /// interior positions and initialized with the Q1 linear interpolation of
-    /// the corner vertex coordinates.
-    ///
-    /// After calling this, [`transform`](Self::transform) applies the mapping
-    /// to ALL geometry nodes, giving a smooth isoparametric representation.
+    /// For a sphere mesh, after calling `snap_to_sphere()`, the high-order
+    /// geometry nodes will lie on the sphere surface.
     ///
     /// Currently supports `Quad4` element type.  `order = 0` or `1` resets
     /// to linear geometry.
@@ -1311,6 +1286,91 @@ impl<const D: usize> Mesh<D> {
             coords, conn, elem_tags, ElementType::Hex8,
             face_conn, face_tags, ElementType::Quad4,
         )
+    }
+
+    /// Generate an octahedral mesh inscribed in the unit sphere.
+    ///
+    /// 6 vertices, 8 Tri3 elements, 2D surface in 3D space.
+    /// Each face has its own boundary attribute (1..8).
+    /// Matching MFEM's ex7 octahedron (inscribed in unit sphere).
+    pub fn unit_sphere_octahedron() -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 3, "unit_sphere_octahedron requires D = 3");
+        let coords = vec![
+            1.0,  0.0,  0.0,  // 0
+            0.0,  1.0,  0.0,  // 1
+           -1.0,  0.0,  0.0,  // 2
+            0.0, -1.0,  0.0,  // 3
+            0.0,  0.0,  1.0,  // 4 (north pole)
+            0.0,  0.0, -1.0,  // 5 (south pole)
+        ];
+        let conn: Vec<NodeId> = vec![
+            0, 1, 4,  1, 2, 4,  2, 3, 4,  3, 0, 4,
+            1, 0, 5,  2, 1, 5,  3, 2, 5,  0, 3, 5,
+        ];
+        let elem_tags: Vec<i32> = (1..=8).collect();
+        let face_conn: Vec<NodeId> = conn.clone();
+        let face_tags: Vec<i32> = elem_tags.clone();
+        Mesh::uniform(
+            coords, conn, elem_tags, ElementType::Tri3,
+            face_conn, face_tags, ElementType::Line2,
+        )
+    }
+
+    /// Generate a cube mesh inscribed in the unit sphere.
+    ///
+    /// 8 vertices, 6 Quad4 elements, 2D surface in 3D space.
+    /// Each face has its own boundary attribute (1..6).
+    /// Matching MFEM's ex7 cube (inscribed in unit sphere).
+    pub fn unit_sphere_cube() -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 3, "unit_sphere_cube requires D = 3");
+        let coords = vec![
+            -1.0, -1.0, -1.0,  // 0
+             1.0, -1.0, -1.0,  // 1
+             1.0,  1.0, -1.0,  // 2
+            -1.0,  1.0, -1.0,  // 3
+            -1.0, -1.0,  1.0,  // 4
+             1.0, -1.0,  1.0,  // 5
+             1.0,  1.0,  1.0,  // 6
+            -1.0,  1.0,  1.0,  // 7
+        ];
+        let conn: Vec<NodeId> = vec![
+            3, 2, 1, 0,  0, 1, 5, 4,  1, 2, 6, 5,
+            2, 3, 7, 6,  3, 0, 4, 7,  4, 5, 6, 7,
+        ];
+        let elem_tags: Vec<i32> = (1..=6).collect();
+        let face_conn: Vec<NodeId> = conn.clone();
+        let face_tags: Vec<i32> = elem_tags.clone();
+        Mesh::uniform(
+            coords, conn, elem_tags, ElementType::Quad4,
+            face_conn, face_tags, ElementType::Line2,
+        )
+    }
+
+    /// Snap all mesh nodes to the unit sphere surface.
+    ///
+    /// Each node's position is normalized to length 1.
+    /// (MFEM ex7 SnapNodes on the octahedron/cube mesh.)
+    pub fn snap_to_sphere(&mut self)
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 3, "snap_to_sphere requires D = 3");
+        for i in 0..self.n_nodes() {
+            let base = i * 3;
+            let x = self.coords[base];
+            let y = self.coords[base + 1];
+            let z = self.coords[base + 2];
+            let inv_len = 1.0 / (x * x + y * y + z * z).sqrt();
+            self.coords[base]     *= inv_len;
+            self.coords[base + 1] *= inv_len;
+            self.coords[base + 2] *= inv_len;
+        }
     }
 }
 

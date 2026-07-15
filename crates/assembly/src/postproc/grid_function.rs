@@ -42,16 +42,40 @@ fn simplex_jacobian<M: MeshTopology>(
     geo_nodes: &[u32],
     dim: usize,
 ) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(geo_nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(geo_nodes[col + 1]);
-        for row in 0..dim {
-            j[(row, col)] = xc[row] - x0[row];
+    let edim = mesh.dim() as usize;
+    if edim != dim {
+        // Surface mesh: compute 3×2 Jacobian using all coordinates,
+        // then use the norm of the cross product for the measure.
+        // J is a (edim × dim) matrix, but we only need |J₁ × J₂|.
+        let x0 = mesh.node_coords(geo_nodes[0]);
+        let x1 = mesh.node_coords(geo_nodes[1]);
+        let x2 = mesh.node_coords(geo_nodes[2]);
+        // Edge vectors in 3D
+        let mut e1 = [0.0f64; 3]; for i in 0..edim { e1[i] = x1[i] - x0[i]; }
+        let mut e2 = [0.0f64; 3]; for i in 0..edim { e2[i] = x2[i] - x0[i]; }
+        // Cross product
+        let cx = e1[1]*e2[2] - e1[2]*e2[1];
+        let cy = e1[2]*e2[0] - e1[0]*e2[2];
+        let cz = e1[0]*e2[1] - e1[1]*e2[0];
+        let area_2d = (cx*cx + cy*cy + cz*cz).sqrt();
+        // Return a 2×2 "dummy" Jacobian with the determinant = area_2d
+        // This preserves the J^{-T} computation for gradient transformation.
+        let mut j = DMatrix::<f64>::zeros(dim, dim);
+        j[(0,0)] = 1.0; j[(1,1)] = 1.0;
+        (j, area_2d)
+    } else {
+        // Standard flat mesh: dim×dim Jacobian
+        let x0 = mesh.node_coords(geo_nodes[0]);
+        let mut j = DMatrix::<f64>::zeros(dim, dim);
+        for col in 0..dim {
+            let xc = mesh.node_coords(geo_nodes[col + 1]);
+            for row in 0..dim {
+                j[(row, col)] = xc[row] - x0[row];
+            }
         }
+        let det = j.determinant();
+        (j, det)
     }
-    let det = j.determinant();
-    (j, det)
 }
 
 fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {
@@ -60,6 +84,17 @@ fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64>
         for k in 0..dim {
             xp[i] += j[(i, k)] * xi[k];
         }
+    }
+    xp
+}
+
+/// Physical coordinates for a surface triangle in 3D.
+/// Maps reference coords (ξ₁, ξ₂) to 3D using edge vectors e₁, e₂.
+fn surface_phys_coords(x0: &[f64], e1: &[f64], e2: &[f64], xi: &[f64]) -> Vec<f64> {
+    let n = x0.len();
+    let mut xp = x0.to_vec();
+    for i in 0..n {
+        xp[i] += e1[i] * xi[0] + e2[i] * xi[1];
     }
     xp
 }
@@ -211,7 +246,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
     /// Returns a vector of length `dim` containing `[∂u/∂x, ∂u/∂y, ...]`.
     pub fn evaluate_gradient_at_element(&self, elem: u32, xi: &[f64]) -> Vec<f64> {
         let mesh = self.space.mesh();
-        let dim = mesh.dim() as usize;
+        let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
         let elem_type = mesh.element_type(elem);
         let ref_elem = ref_elem_vol(elem_type, order);
@@ -250,7 +285,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         quad_order: u8,
     ) -> f64 {
         let mesh = self.space.mesh();
-        let dim = mesh.dim() as usize;
+        let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
 
         let mut err = 0.0;
@@ -291,7 +326,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         quad_order: u8,
     ) -> f64 {
         let mesh = self.space.mesh();
-        let dim = mesh.dim() as usize;
+        let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
 
         let mut err2 = 0.0;
@@ -308,6 +343,19 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let x0 = mesh.node_coords(nodes[0]);
 
+            // Surface mesh: compute edge vectors for correct 3D coordinate mapping.
+            let edim = mesh.dim() as usize;
+            let is_surface = edim != dim;
+            let (e1_3d, e2_3d) = if is_surface {
+                let x1 = mesh.node_coords(nodes[1]);
+                let x2 = mesh.node_coords(nodes[2]);
+                let mut e1 = vec![0.0; edim]; for i in 0..edim { e1[i] = x1[i] - x0[i]; }
+                let mut e2 = vec![0.0; edim]; for i in 0..edim { e2[i] = x2[i] - x0[i]; }
+                (e1, e2)
+            } else {
+                (vec![], vec![])
+            };
+
             let mut phi = vec![0.0; n_ldofs];
 
             for (q, xi) in quad.points.iter().enumerate() {
@@ -321,7 +369,11 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     uh += self.dofs[elem_dofs[i] as usize] * phi[i];
                 }
 
-                let xp = phys_coords(x0, &jac, xi, dim);
+                let xp = if is_surface {
+                    surface_phys_coords(x0, &e1_3d, &e2_3d, xi)
+                } else {
+                    phys_coords(x0, &jac, xi, dim)
+                };
                 let ue = exact(&xp);
 
                 err2 += w * (uh - ue) * (uh - ue);
@@ -345,7 +397,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         quad_order: u8,
     ) -> f64 {
         let mesh = self.space.mesh();
-        let dim = mesh.dim() as usize;
+        let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
 
         let mut err2 = 0.0;
@@ -417,7 +469,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         quad_order: u8,
     ) -> f64 {
         let mesh = self.space.mesh();
-        let dim = mesh.dim() as usize;
+        let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
 
         let mut err = 0.0;
