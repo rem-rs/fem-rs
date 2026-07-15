@@ -46,6 +46,15 @@ fn main() {
     let mesh: Mesh<2> = mfem.mesh2d.expect("2D mesh");
     let dim = 2;
 
+    // ── 1b. Detect periodic boundaries (for 'boundary 0' periodic meshes) ─────
+    let mesh = match mesh.detect_periodic_boundary(1e-8) {
+        Ok(pm) => pm,
+        Err(e) => {
+            eprintln!("  Periodic boundary detection skipped: {e}");
+            mesh
+        }
+    };
+
     // ── 2. Refine ─────────────────────────────────────────────────────────────
     let mesh = if args.refine > 0 {
         let mut m = mesh;

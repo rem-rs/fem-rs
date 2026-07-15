@@ -36,18 +36,24 @@ impl InteriorFaceList {
     /// Build the interior face list from `mesh`.
     ///
     /// Works for 2-D meshes (triangles, quads) and 3-D meshes (tetrahedra).
-    /// Supports periodic boundary detection: boundary faces at opposite sides
-    /// of a periodic domain are paired and added as interior faces.
+    /// For periodic meshes, call `mesh.detect_periodic_boundary()` first to
+    /// merge periodic node pairs, then `InteriorFaceList` will automatically
+    /// detect all interior faces via node-key matching.
     pub fn build<M: MeshTopology>(mesh: &M) -> Self {
         let dim = mesh.dim() as usize;
 
-        // Phase 1: standard interior face detection (node-key matching)
+        // Map from sorted face key → (elem_id, face_node_indices unsorted)
         let mut face_map: HashMap<Vec<NodeId>, (ElemId, Vec<NodeId>)> = HashMap::new();
         let mut interior = Vec::new();
 
         for e in mesh.elem_iter() {
             let nodes = mesh.element_nodes(e);
             let npe = nodes.len();
+
+            // Enumerate faces of this element.
+            // For a triangle (3 nodes): faces are pairs (0,1),(1,2),(0,2).
+            // For a quad (4 nodes in 2D): faces are pairs (0,1),(1,2),(2,3),(3,0).
+            // For a tet (4 nodes in 3D): faces are triples (0,1,2),(0,1,3),(0,2,3),(1,2,3).
             let local_faces = local_faces(npe, dim);
 
             for lf in &local_faces {
@@ -56,10 +62,12 @@ impl InteriorFaceList {
 
                 match face_map.remove(&key) {
                     None => {
+                        // First time we see this face.
                         let face_nodes: Vec<NodeId> = lf.iter().map(|&k| nodes[k]).collect();
                         face_map.insert(key, (e, face_nodes));
                     }
                     Some((other_elem, face_nodes)) => {
+                        // Second time → interior face.
                         interior.push(InteriorFace {
                             elem_left:  other_elem,
                             elem_right: e,
@@ -69,34 +77,7 @@ impl InteriorFaceList {
                 }
             }
         }
-
-        // Phase 2: periodic face detection — pair un-matched boundary faces
-        // by spatial position (for periodic meshes like periodic-square.mesh).
-        if dim == 2 && !face_map.is_empty() {
-            let mut boundary_edges: Vec<(ElemId, Vec<NodeId>)> = face_map.into_values().collect();
-            let mut used = vec![false; boundary_edges.len()];
-
-            for i in 0..boundary_edges.len() {
-                if used[i] { continue; }
-                for j in (i + 1)..boundary_edges.len() {
-                    if used[j] { continue; }
-                    if are_periodic_partners_2d(mesh, &boundary_edges[i], &boundary_edges[j]) {
-                        // Found a periodic pair — add as interior face.
-                        // Use the face_nodes from the entry with lower element index as canonical.
-                        let (el, fn_i) = &boundary_edges[i];
-                        let (er, _fn_j) = &boundary_edges[j];
-                        interior.push(InteriorFace {
-                            elem_left:  *el.min(er),
-                            elem_right: *el.max(er),
-                            face_nodes: fn_i.clone(),
-                        });
-                        used[i] = true;
-                        used[j] = true;
-                        break;
-                    }
-                }
-            }
-        }
+        // Remaining entries in face_map are boundary faces (one element only) — ignore.
 
         InteriorFaceList { faces: interior }
     }
@@ -104,91 +85,6 @@ impl InteriorFaceList {
     /// Number of interior faces.
     pub fn len(&self) -> usize { self.faces.len() }
     pub fn is_empty(&self) -> bool { self.faces.is_empty() }
-}
-
-/// Check if two boundary edges in 2D are periodic partners.
-///
-/// Two edges are periodic partners if they have approximately the same length,
-/// their normals point in opposite directions, and they are at corresponding
-/// positions on opposite sides of the domain (within tolerance).
-fn are_periodic_partners_2d<M: MeshTopology>(
-    mesh: &M,
-    entry_a: &(ElemId, Vec<NodeId>),
-    entry_b: &(ElemId, Vec<NodeId>),
-) -> bool {
-    let (elem_a, nodes_a) = entry_a;
-    let (elem_b, nodes_b) = entry_b;
-
-    // Edge vectors
-    let p0a = mesh.node_coords(nodes_a[0]);
-    let p1a = mesh.node_coords(nodes_a[1]);
-    let p0b = mesh.node_coords(nodes_b[0]);
-    let p1b = mesh.node_coords(nodes_b[1]);
-
-    let dxa = p1a[0] - p0a[0]; let dya = p1a[1] - p0a[1];
-    let dxb = p1b[0] - p0b[0]; let dyb = p1b[1] - p0b[1];
-
-    let len_a = (dxa*dxa + dya*dya).sqrt();
-    let len_b = (dxb*dxb + dyb*dyb).sqrt();
-
-    // Edge lengths should match within 1%
-    if (len_a - len_b).abs() > 0.01 * len_a.max(len_b) {
-        return false;
-    }
-
-    // Compute outward normals (left-normal of edge direction from elem perspective)
-    // For the left element, normal = (-dy, dx)/len
-    let nx_a = -dya / len_a; let ny_a = dxa / len_a;
-    let nx_b = -dyb / len_b; let ny_b = dxb / len_b;
-
-    // Ensure normals point outward from elements
-    let centroid_a = element_centroid(mesh, *elem_a);
-    let centroid_b = element_centroid(mesh, *elem_b);
-    let mid_a = [(p0a[0] + p1a[0]) / 2.0, (p0a[1] + p1a[1]) / 2.0];
-    let mid_b = [(p0b[0] + p1b[0]) / 2.0, (p0b[1] + p1b[1]) / 2.0];
-
-    // Normal from centroid to midpoint should point outward
-    let dot_a = nx_a * (mid_a[0] - centroid_a[0]) + ny_a * (mid_a[1] - centroid_a[1]);
-    let dot_b = nx_b * (mid_b[0] - centroid_b[0]) + ny_b * (mid_b[1] - centroid_b[1]);
-
-    // Flip normals if they point inward
-    let (nx_a, ny_a) = if dot_a < 0.0 { (-nx_a, -ny_a) } else { (nx_a, ny_a) };
-    let (nx_b, ny_b) = if dot_b < 0.0 { (-nx_b, -ny_b) } else { (nx_b, ny_b) };
-
-    // Periodic partners have opposite outward normals
-    let n_dot = nx_a * nx_b + ny_a * ny_b;
-    if n_dot > -0.5 {  // opposite means dot ≈ -1
-        return false;
-    }
-
-    // For periodic pairing, the node positions of edge A should map to
-    // node positions of edge B under a single translation vector.
-    // Compute two possible translation vectors:
-    //   shift1: node_a[0] → node_b[0], node_a[1] → node_b[1]
-    //   shift2: node_a[0] → node_b[1], node_a[1] → node_b[0] (swapped orientation)
-    let tol = 1e-8;
-
-    let shift1_x = p0b[0] - p0a[0]; let shift1_y = p0b[1] - p0a[1];
-    let match_shift1 = (p1b[0] - p1a[0] - shift1_x).abs() < tol
-                    && (p1b[1] - p1a[1] - shift1_y).abs() < tol;
-
-    let shift2_x = p1b[0] - p0a[0]; let shift2_y = p1b[1] - p0a[1];
-    let match_shift2 = (p0b[0] - p1a[0] - shift2_x).abs() < tol
-                    && (p0b[1] - p1a[1] - shift2_y).abs() < tol;
-
-    match_shift1 || match_shift2
-}
-
-/// Compute the centroid of a 2D element.
-fn element_centroid<M: MeshTopology>(mesh: &M, elem: ElemId) -> [f64; 2] {
-    let nodes = mesh.element_nodes(elem);
-    let mut cx = 0.0; let mut cy = 0.0;
-    for &n in nodes {
-        let c = mesh.node_coords(n);
-        cx += c[0]; cy += c[1];
-    }
-    let n = nodes.len() as f64;
-    [cx / n, cy / n]
 }
 
 /// Returns the local node index sets of the `faces_per_elem` faces of an element.

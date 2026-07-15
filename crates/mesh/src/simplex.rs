@@ -567,6 +567,214 @@ impl<const D: usize> Mesh<D> {
         Ok(out)
     }
 
+    /// Detect periodic boundaries from a `boundary 0` mesh.
+    ///
+    /// For meshes with no boundary faces (like `periodic-square.mesh`), this
+    /// method analyzes element connectivity to find unpaired edges (virtual
+    /// boundary edges), detects periodicity by matching opposite edges, and
+    /// returns a new mesh with periodic nodes merged.
+    ///
+    /// This enables `InteriorFaceList` to correctly find all interior faces
+    /// on periodic meshes, since merged nodes create shared node keys.
+    ///
+    /// # Arguments
+    /// * `tol` — geometric tolerance for node matching (e.g. 1e-8).
+    ///
+    /// # Returns
+    /// A new mesh with periodic node pairs merged.  The returned mesh has
+    /// no boundary faces on the periodic sides.
+    ///
+    /// # Panics
+    /// Panics if the mesh already has boundary faces or is not 2-D.
+    pub fn detect_periodic_boundary(&self, tol: f64) -> FemResult<Self> {
+        assert_eq!(D, 2, "detect_periodic_boundary requires dim=2");
+        if self.n_boundary_faces() > 0 {
+            // Mesh already has boundary faces — use make_periodic directly instead.
+            return Err(FemError::Mesh(
+                "detect_periodic_boundary: mesh already has boundary faces".into()
+            ));
+        }
+
+        // ── Step 1: find all virtual boundary edges ──────────────────────────
+        // An edge is a "virtual boundary edge" if it appears in only one element's
+        // connectivity.  We enumerate all element edges and track which elements
+        // reference each edge.
+        use std::collections::HashMap;
+
+        // key: sorted node pair → (elem_id, local_face_idx, unsorted_nodes)
+        let mut edge_map: HashMap<Vec<NodeId>, (ElemId, usize, Vec<NodeId>)> = HashMap::new();
+
+        for e in self.elem_iter() {
+            let en = self.elem_nodes(e);
+            let npe = en.len();
+            let local_faces = match npe {
+                3 => vec![vec![0usize, 1], vec![1, 2], vec![0, 2]],
+                4 => vec![vec![0, 1], vec![1, 2], vec![2, 3], vec![3, 0]],
+                _ => return Err(FemError::Mesh("unsupported element type".into())),
+            };
+            for (li, lf) in local_faces.iter().enumerate() {
+                let unsorted: Vec<NodeId> = lf.iter().map(|&k| en[k]).collect();
+                let mut key: Vec<NodeId> = unsorted.clone();
+                key.sort_unstable();
+                edge_map.entry(key).or_insert((e, li, unsorted));
+                // Note: for boundary 0 closed meshes, ALL edges should appear
+                // twice, but since nodes aren't identified across periodic
+                // boundaries, some edges appear only once.
+            }
+        }
+
+        // Edges that appear only once — these are virtual boundary edges
+        let boundary_edges: Vec<(ElemId, Vec<NodeId>)> = edge_map
+            .into_values()
+            .map(|(e, _li, nodes)| (e, nodes))
+            .collect();
+
+        if boundary_edges.is_empty() {
+            // No boundary edges found — mesh is already topologically closed.
+            return Ok(self.clone());
+        }
+
+        // ── Step 2: compute edge geometry ────────────────────────────────────
+        struct BdrEdge {
+            elem: ElemId,
+            nodes: Vec<NodeId>,
+            mid: [f64; 2],
+            normal: [f64; 2],
+        }
+
+        let mut bdr: Vec<BdrEdge> = boundary_edges
+            .iter()
+            .map(|(elem, nodes)| {
+                let p0 = self.node_coords(nodes[0]);
+                let p1 = self.node_coords(nodes[1]);
+                let dx = p1[0] - p0[0];
+                let dy = p1[1] - p0[1];
+                let len = (dx * dx + dy * dy).sqrt();
+                // Left-of-edge normal: (-dy, dx) / len
+                let nx = -dy / len;
+                let ny = dx / len;
+                // Adjust to point outward from the element
+                let elem_nodes = self.elem_nodes(*elem);
+                let centroid_x: f64 = elem_nodes.iter().map(|&n| self.node_coords(n)[0]).sum::<f64>() / elem_nodes.len() as f64;
+                let centroid_y: f64 = elem_nodes.iter().map(|&n| self.node_coords(n)[1]).sum::<f64>() / elem_nodes.len() as f64;
+                let mid_x = (p0[0] + p1[0]) / 2.0;
+                let mid_y = (p0[1] + p1[1]) / 2.0;
+                // Check if normal points from centroid toward midpoint
+                let dot = nx * (mid_x - centroid_x) + ny * (mid_y - centroid_y);
+                let (nx, ny) = if dot >= 0.0 { (nx, ny) } else { (-nx, -ny) };
+                BdrEdge {
+                    elem: *elem,
+                    nodes: nodes.clone(),
+                    mid: [mid_x, mid_y],
+                    normal: [nx, ny],
+                }
+            })
+            .collect();
+
+        // ── Step 3: group edges by normal direction ──────────────────────────
+        // For a rectangular periodic domain, normals are approx (-1,0), (1,0),
+        // (0,-1), (0,1).  Group by which axis component is dominant.
+        // left: nx < -0.5, right: nx > 0.5, bottom: ny < -0.5, top: ny > 0.5
+        let mut left: Vec<usize> = Vec::new();
+        let mut right: Vec<usize> = Vec::new();
+        let mut bottom: Vec<usize> = Vec::new();
+        let mut top: Vec<usize> = Vec::new();
+
+        for (i, e) in bdr.iter().enumerate() {
+            if e.normal[0] < -0.5 {
+                left.push(i);
+            } else if e.normal[0] > 0.5 {
+                right.push(i);
+            } else if e.normal[1] < -0.5 {
+                bottom.push(i);
+            } else if e.normal[1] > 0.5 {
+                top.push(i);
+            }
+        }
+
+        // Sort each group by position along the face (for consistent pairing)
+        // left/right: sort by y (increasing)
+        left.sort_by(|&a, &b| bdr[a].mid[1].partial_cmp(&bdr[b].mid[1]).unwrap());
+        right.sort_by(|&a, &b| bdr[a].mid[1].partial_cmp(&bdr[b].mid[1]).unwrap());
+        // bottom/top: sort by x (increasing)
+        bottom.sort_by(|&a, &b| bdr[a].mid[0].partial_cmp(&bdr[b].mid[0]).unwrap());
+        top.sort_by(|&a, &b| bdr[a].mid[0].partial_cmp(&bdr[b].mid[0]).unwrap());
+
+        // ── Step 4: build periodic pairs ────────────────────────────────────
+        // Each pair: (master_edge_list, slave_edge_list, translation)
+        let mut pairs_found: Vec<(Vec<Vec<u32>>, Vec<Vec<u32>>, [f64; 2])> = Vec::new();
+
+        // Left ↔ Right
+        if !left.is_empty() && !right.is_empty() && left.len() == right.len() {
+            let master: Vec<Vec<NodeId>> = left.iter().map(|&i| bdr[i].nodes.clone()).collect();
+            let slave: Vec<Vec<NodeId>> = right.iter().map(|&i| bdr[i].nodes.clone()).collect();
+            let dx = bdr[right[0]].mid[0] - bdr[left[0]].mid[0];
+            let dy = bdr[right[0]].mid[1] - bdr[left[0]].mid[1];
+            // For D=2, construct translation as [f64; D]
+            let translation = [dx, dy];
+            pairs_found.push((master, slave, translation));
+        }
+
+        // Bottom ↔ Top
+        if !bottom.is_empty() && !top.is_empty() && bottom.len() == top.len() {
+            let master: Vec<Vec<NodeId>> = bottom.iter().map(|&i| bdr[i].nodes.clone()).collect();
+            let slave: Vec<Vec<NodeId>> = top.iter().map(|&i| bdr[i].nodes.clone()).collect();
+            let dx = bdr[top[0]].mid[0] - bdr[bottom[0]].mid[0];
+            let dy = bdr[top[0]].mid[1] - bdr[bottom[0]].mid[1];
+            let translation = [dx, dy];
+            pairs_found.push((master, slave, translation));
+        }
+
+        if pairs_found.is_empty() {
+            return Err(FemError::Mesh(
+                "detect_periodic_boundary: could not pair any boundary edges".into(),
+            ));
+        }
+
+        // ── Step 5: create boundary faces + call make_periodic ──────────────
+        // Clone self and add boundary faces for the detected periodic edges.
+        let mut mesh_with_faces = self.clone();
+        // Use element tags from the adjacent element as boundary tags
+        let mut new_face_conn: Vec<NodeId> = Vec::new();
+        let mut new_face_tags: Vec<i32> = Vec::new();
+        let mut tag = 1i32;
+        let mut make_pairs: Vec<(i32, i32, [f64; D])> = Vec::new();
+
+        for (master_edges, slave_edges, translation) in &pairs_found {
+            let tag_a = tag;
+            tag += 1;
+            let tag_b = tag;
+            tag += 1;
+
+            // Master edges → tag_a
+            for edge_nodes in master_edges {
+                for &n in edge_nodes {
+                    new_face_conn.push(n);
+                }
+                new_face_tags.push(tag_a);
+            }
+            // Slave edges → tag_b
+            for edge_nodes in slave_edges {
+                for &n in edge_nodes {
+                    new_face_conn.push(n);
+                }
+                new_face_tags.push(tag_b);
+            }
+
+            let mut t = [0.0; D];
+            for d in 0..D.min(2) { t[d] = translation[d]; }
+            make_pairs.push((tag_a, tag_b, t));
+        }
+
+        // Set the boundary faces on the cloned mesh
+        mesh_with_faces.face_conn = new_face_conn;
+        mesh_with_faces.face_tags = new_face_tags;
+        mesh_with_faces.face_type = ElementType::Line2;
+
+        // Now call make_periodic to merge the nodes
+        mesh_with_faces.make_periodic(&make_pairs, tol)
+    }
+
     /// Create a periodic mesh by identifying matching node pairs on opposite
     /// boundary faces.
     ///
