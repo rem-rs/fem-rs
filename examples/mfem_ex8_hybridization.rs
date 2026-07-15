@@ -1,327 +1,165 @@
-//! # Example 8 — Static Condensation baseline (toward MFEM ex8/hybr)
-//!
-//! This example demonstrates the algebraic static-condensation primitive used by
-//! fem-rs non-conforming constraints, using a unit-source RHS (`f = 1`) matching
-//! the spirit of MFEM Example 8.
-//!
-//! MFEM ex8 solves `-Δu = 1` with homogeneous Dirichlet BC using a DPG
-//! formulation.  Here we use the same RHS (unit source) on a toy SPD system
-//! with a single hanging-node constraint:
-//!
-//! ```text
-//!   u_h = 0.5 * (u_a + u_b)
-//! ```
-//!
-//! by applying `apply_hanging_constraints` to a toy SPD system and comparing the
-//! free-DOF solution against an explicit reduced system solve.
-//!
-//! ## Usage
-//! ```bash
-//! cargo run --example mfem_ex8_hybridization
-//! cargo run --example mfem_ex8_hybridization -- -m ../data/star.mesh
-//! cargo run --example mfem_ex8_hybridization -- --rhs-scale 2.0
-//! ```
-
+// 1:1 MFEM ex8 — DPG Poisson w/ traces. Element-by-element normal eq assembly.
+use std::collections::HashMap;
+use std::time::Instant;
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::CooMatrix;
-use fem_mesh::amr::HangingNodeConstraint;
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
-use fem_space::constraints::{apply_hanging_constraints, recover_hanging_values};
+use fem_linalg::{CsrMatrix, CooMatrix};
+use fem_mesh::{Mesh, MeshTopology, refine_uniform};
 
 fn main() {
-    let args = parse_args();
+    let a = Args::parse(); let t0 = Instant::now();
+    let mesh: Mesh<2> = read_mfem_file(&a.mesh).expect("mesh").mesh2d.expect("2D");
+    let mut mesh = mesh;
+    let rl = (10000.0_f64/mesh.n_elems() as f64).ln()/(2.0_f64).ln()/2.0;
+    for _ in 0..rl.floor() as usize { mesh = refine_uniform(&mesh); }
+    let ne=mesh.n_elems(); let nn=mesh.n_nodes();
 
-    // Load mesh (if provided) for CLI consistency with MFEM examples.
-    if let Some(ref path) = args.mesh {
-        match read_mfem_file(path) {
-            Ok(mfem) => {
-                if let Some(m2) = mfem.mesh2d {
-                    println!("  Mesh: 2D, {} nodes, {} elements", m2.n_nodes(), m2.n_elems());
+    let npe=3; let nt=ne*npe; // P1 L2 test (matching MFEM ex8)
+    let mut edges:Vec<(u32,u32)>=vec![];
+    for e in 0..ne as u32{let v=mesh.elem_nodes(e);for i in 0..3{let a=v[i];let b=v[(i+1)%3];let k=if a<b{(a,b)}else{(b,a)};if!edges.contains(&k){edges.push(k);}}}
+    let nf=edges.len(); let nx=nn+nf;
+    let mut emap:HashMap<(u32,u32),u32>=HashMap::new(); for(i,k)in edges.iter().enumerate(){emap.insert(*k,i as u32);}
+    println!("ne={} nn={} nf={}",ne,nn,nf);
+
+    use fem_element::{lagrange::TriP1,ReferenceElement};
+    let tri1=TriP1; let qr=tri1.quadrature(3);
+
+    // Store per-element S (6×6), F (6×1), B0 (6×3), Bhat (6×3)
+    let mut eS:Vec<Vec<Vec<f64>>>=vec![vec![vec![0.0;npe];npe];ne];
+    let mut eF:Vec<Vec<f64>>=vec![vec![0.0;npe];ne];
+    let mut eB0:Vec<Vec<Vec<f64>>>=vec![vec![vec![0.0;3];npe];ne];
+    let mut eBh:Vec<Vec<Vec<f64>>>=vec![vec![vec![0.0;3];npe];ne];
+    let mut edge_of_elem:Vec<Vec<usize>>=vec![vec![0;3];ne];
+
+    for e in 0..ne as u32{
+        let v=mesh.elem_nodes(e); let ld:Vec<u32>=(0..npe as u32).map(|i|e*npe as u32+i).collect();
+        let x0=mesh.node_coords(v[0]);let x1=mesh.node_coords(v[1]);let x2=mesh.node_coords(v[2]);
+        let j00=x1[0]-x0[0];let j01=x2[0]-x0[0];let j10=x1[1]-x0[1];let j11=x2[1]-x0[1];
+        let det=(j00*j11-j01*j10).abs();let ijd=1.0/(j00*j11-j01*j10);
+        let grx=[-1.0,1.0,0.0];let gry=[-1.0,0.0,1.0];
+        let pgx:Vec<f64>=(0..3).map(|i|(grx[i]*j11-gry[i]*j10)*ijd).collect();
+        let pgy:Vec<f64>=(0..3).map(|i|(-grx[i]*j01+gry[i]*j00)*ijd).collect();
+        let mut ph=vec![0.0;npe];let mut dph=vec![0.0;npe*2];
+        for qi in 0..qr.points.len(){
+            let xi=&qr.points[qi];let w=qr.weights[qi]*det;
+            tri1.eval_basis(xi,&mut ph);tri1.eval_grad_basis(xi,&mut dph);
+            for li in 0..npe{
+                eF[e as usize][li]+=w*ph[li];
+                let gxi=(dph[li*2]*j11-dph[li*2+1]*j10)*ijd;
+                let gyi=(-dph[li*2]*j01+dph[li*2+1]*j00)*ijd;
+                for lj in 0..npe{
+                    let gxj=(dph[lj*2]*j11-dph[lj*2+1]*j10)*ijd;
+                    let gyj=(-dph[lj*2]*j01+dph[lj*2+1]*j00)*ijd;
+                    eS[e as usize][li][lj]+=(gxi*gxj+gyi*gyj+ph[li]*ph[lj])*w;
                 }
-                if let Some(m3) = mfem.mesh3d {
-                    println!("  Mesh: 3D, {} nodes, {} elements", m3.n_nodes(), m3.n_elems());
+                for ti in 0..3{
+                    eB0[e as usize][li][ti]+=(pgx[ti]*gxi+pgy[ti]*gyi)*w;
                 }
             }
-            Err(e) => eprintln!("  Warning: failed to read mesh '{:?}': {e}", path),
         }
-    }
-
-    let result = run_case(args.rhs_scale);
-
-    println!("=== MFEM Example 8: static condensation baseline ===");
-    println!("  rhs scale: {:.3}  (RHS coefficients all = {:.3}, matching MFEM f=1)", args.rhs_scale, args.rhs_scale);
-    println!("  iterations: {}", result.iterations);
-    println!("  final residual: {:.3e}", result.final_residual);
-    println!("  converged: {}", result.converged);
-    println!(
-        "  constrained consistency |u_h - 0.5(u_a+u_b)| = {:.3e}",
-        result.hanging_consistency
-    );
-    println!(
-        "  reduced-system agreement max(|u_free - u_ref|) = {:.3e}",
-        result.free_dof_mismatch
-    );
-    println!("  ||u||_2 = {:.3e}", result.solution_norm);
-    println!("  checksum = {:.8e}", result.solution_checksum);
-    println!();
-    println!("Note: this is the algebraic baseline toward ex8/hybridization; mixed/hybrid FEM kernels are still pending.");
-}
-
-struct CaseResult {
-    iterations: usize,
-    final_residual: f64,
-    converged: bool,
-    hanging_consistency: f64,
-    free_dof_mismatch: f64,
-    solution_norm: f64,
-    solution_checksum: f64,
-}
-
-/// Toy 3×3 SPD system with a unit-source RHS (matching MFEM ex8 f=1).
-fn run_case(rhs_scale: f64) -> CaseResult {
-    // A = 3×3 SPD with diagonal 4.0 and off-diagonal -1.0.
-    let a = [
-        [4.0, -1.0, -1.0],
-        [-1.0, 4.0, -1.0],
-        [-1.0, -1.0, 4.0],
-    ];
-    // MFEM ex8 uses f = 1 everywhere → all RHS entries equal.
-    // This also makes the system symmetric w.r.t. permutation.
-    let b = [1.0 * rhs_scale, 1.0 * rhs_scale, 1.0 * rhs_scale];
-
-    let mut mat = dense3_to_csr(a);
-    let mut rhs = b.to_vec();
-
-    let constraints = vec![HangingNodeConstraint {
-        constrained: 2,
-        parent_a: 0,
-        parent_b: 1,
-    }];
-
-    apply_hanging_constraints(&mut mat, &mut rhs, &constraints);
-
-    let mut x = vec![0.0_f64; 3];
-    let cfg = SolverConfig {
-        rtol: 1e-12,
-        atol: 0.0,
-        max_iter: 200,
-        verbose: false,
-        ..SolverConfig::default()
-    };
-    let solve =
-        solve_pcg_jacobi(&mat, &rhs, &mut x, &cfg).expect("PCG solve failed in ex8 baseline");
-    recover_hanging_values(&mut x, &constraints);
-
-    let x_ref = solve_reduced_reference(a, b);
-    let hanging_consistency = (x[2] - 0.5 * (x[0] + x[1])).abs();
-    let free_dof_mismatch = (x[0] - x_ref[0]).abs().max((x[1] - x_ref[1]).abs());
-    let solution_norm = x.iter().map(|value| value * value).sum::<f64>().sqrt();
-    let solution_checksum = x
-        .iter()
-        .enumerate()
-        .map(|(i, value)| (i as f64 + 1.0) * value)
-        .sum();
-
-    CaseResult {
-        iterations: solve.iterations,
-        final_residual: solve.final_residual,
-        converged: solve.converged,
-        hanging_consistency,
-        free_dof_mismatch,
-        solution_norm,
-        solution_checksum,
-    }
-}
-
-fn dense3_to_csr(a: [[f64; 3]; 3]) -> fem_linalg::CsrMatrix<f64> {
-    let mut coo = CooMatrix::<f64>::new(3, 3);
-    for (i, row) in a.iter().enumerate() {
-        for (j, val) in row.iter().enumerate() {
-            if val.abs() > 0.0 {
-                coo.add(i, j, *val);
+        // Edge data for this element
+        for ei in 0..3{
+            let a1=v[ei];let b1=v[(ei+1)%3];let k=if a1<b1{(a1,b1)}else{(b1,a1)};
+            edge_of_elem[e as usize][ei]=emap[&k]as usize;
+            let el=((mesh.node_coords(a1)[0]-mesh.node_coords(b1)[0]).powi(2)+(mesh.node_coords(a1)[1]-mesh.node_coords(b1)[1]).powi(2)).sqrt();
+            for qi in 0..2{
+                let x1d=(qi as f64+0.5)/2.0;let wf=0.5*el;
+                let xi=match ei{0=>vec![x1d,0.0],1=>vec![1.0-x1d,x1d],_=>vec![0.0,1.0-x1d]};
+                let mut phf=vec![0.0;npe];tri1.eval_basis(&xi,&mut phf);
+                for li in 0..npe{eBh[e as usize][li][ei]+=wf*phf[li];}
             }
         }
     }
-    coo.into_csr()
-}
+    eprintln!("  assembled");
 
-fn solve_reduced_reference(a: [[f64; 3]; 3], b: [f64; 3]) -> [f64; 2] {
-    // P maps free dofs [u0,u1] to full dofs [u0,u1,0.5(u0+u1)].
-    let p = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
+    // Build normal eq: A += B_e^T * S_e^{-1} * B_e, rhs += B_e^T * S_e^{-1} * F_e
+    let mut coo=CooMatrix::new(nx,nx); let mut rhs=vec![0.0;nx];
 
-    // AP = A * P (3x2)
-    let mut ap = [[0.0_f64; 2]; 3];
-    for i in 0..3 {
-        for j in 0..2 {
-            ap[i][j] = a[i][0] * p[0][j] + a[i][1] * p[1][j] + a[i][2] * p[2][j];
-        }
-    }
+    for e in 0..ne{
+        let ntd=6; // 3 H1 + 3 trace
+        let sinv=inv_n(&eS[e]);
+        let mut t=vec![vec![0.0;ntd];npe];
+        for i in 0..npe{for j in 0..ntd{for k in 0..npe{
+            let bkj=if j<3{eB0[e][k][j]}else{eBh[e][k][j-3]};
+            t[i][j]+=sinv[i][k]*bkj;
+        }}}
+        let mut ae=vec![vec![0.0;ntd];ntd];
+        for i in 0..ntd{for j in 0..ntd{for k in 0..npe{
+            let bki=if i<3{eB0[e][k][i]}else{eBh[e][k][i-3]};
+            ae[i][j]+=bki*t[k][j];
+        }}}
+        let mut w=vec![0.0;npe];for i in 0..npe{for j in 0..npe{w[i]+=sinv[i][j]*eF[e][j];}}
+        let mut rhse=vec![0.0;ntd];
+        for i in 0..ntd{for k in 0..npe{
+            let bki=if i<3{eB0[e][k][i]}else{eBh[e][k][i-3]};
+            rhse[i]+=bki*w[k];
+        }}
 
-    // Ared = P^T * A * P (2x2)
-    let mut ared = [[0.0_f64; 2]; 2];
-    for i in 0..2 {
-        for j in 0..2 {
-            ared[i][j] = p[0][i] * ap[0][j] + p[1][i] * ap[1][j] + p[2][i] * ap[2][j];
-        }
-    }
-
-    // bred = P^T * b (2)
-    let bred = [
-        p[0][0] * b[0] + p[1][0] * b[1] + p[2][0] * b[2],
-        p[0][1] * b[0] + p[1][1] * b[1] + p[2][1] * b[2],
-    ];
-
-    solve_2x2(ared, bred)
-}
-
-fn solve_2x2(a: [[f64; 2]; 2], b: [f64; 2]) -> [f64; 2] {
-    let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
-    assert!(det.abs() > 1e-14, "reduced 2x2 system is singular");
-    [
-        (b[0] * a[1][1] - b[1] * a[0][1]) / det,
-        (a[0][0] * b[1] - a[1][0] * b[0]) / det,
-    ]
-}
-
-struct Args {
-    mesh: Option<String>,
-    rhs_scale: f64,
-}
-
-fn parse_args() -> Args {
-    let mut args = Args {
-        mesh: None,
-        rhs_scale: 1.0,
-    };
-    let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "-m" | "--mesh" => {
-                args.mesh = it.next();
+        // Assemble into global system
+        let v=mesh.elem_nodes(e as u32);
+        let dofs:Vec<usize>=[vec![v[0]as usize,v[1]as usize,v[2]as usize],
+                             edge_of_elem[e].clone()].concat();
+        for i in 0..6usize{
+            rhs[dofs[i]]+=rhse[i];
+            for j in 0..6usize{
+                if ae[i][j].abs()>1e-15{coo.add(dofs[i],dofs[j],ae[i][j]);}
             }
-            "--rhs-scale" => {
-                args.rhs_scale = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0);
-            }
-            _ => {}
         }
     }
-    args
+
+    let mut a=coo.into_csr();
+    eprintln!("  normal eq: {}×{} ||rhs||={:.6e}",a.nrows,a.ncols,rhs.iter().map(|v|v*v).sum::<f64>().sqrt());
+
+    // Dirichlet BC
+    let mut bdr=vec![false;nn];
+    for f in 0..mesh.n_boundary_faces() as u32{for&n in mesh.face_nodes(f){bdr[n as usize]=true;}}
+    let mut coo2=CooMatrix::new(nx,nx);
+    for i in 0..nx{
+        let bi=i<nn&&bdr[i];
+        for p in a.row_ptr[i]..a.row_ptr[i+1]{let c=a.col_idx[p]as usize;
+            if bi||(c<nn&&bdr[c]){if i==c{coo2.add(i,i,1.0);}}else{coo2.add(i,c,a.values[p]);}}
+        if bi{rhs[i]=0.0;}
+    }
+    a=coo2.into_csr();
+
+    // Check RHS for interior H1 nodes
+    let h1_rhs:Vec<f64>=(0..nn).filter(|&i|!bdr[i]).map(|i|rhs[i]).collect();
+    let d:Vec<f64>=(0..nx).map(|i|{for p in a.row_ptr[i]..a.row_ptr[i+1]{if a.col_idx[p]as usize==i{return 1.0/a.values[p].max(1e-30);}}1.0}).collect();
+    let mut x=vec![0.0;nx];
+    let (it,res)=pcg(&a,&rhs,&mut x,&d,1e-12,10000);
+    println!("PCG: {} iters, resid {:.3e}",it,res);
+    println!("||x0||={:.6e} ||xhat||={:.6e}",(0..nn).map(|i|x[i]*x[i]).sum::<f64>().sqrt(),(nn..nx).map(|i|x[i]*x[i]).sum::<f64>().sqrt());
+    eprintln!("Time: {:.3}s",t0.elapsed().as_secs_f64());
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn inv_n(a:&[Vec<f64>])->Vec<Vec<f64>>{
+    let n=a.len();if n==0{return vec![];}if n==1{return vec![vec![1.0/a[0][0]]];}
+    let mut x=vec![vec![0.0;2*n];n];for i in 0..n{for j in 0..n{x[i][j]=a[i][j];}x[i][n+i]=1.0;}
+    for c in 0..n{let p=(c..n).find(|&r|x[r][c].abs()>1e-14).unwrap_or(c);x.swap(c,p);let ip=1.0/x[c][c];for j in 0..2*n{x[c][j]*=ip;}for r in 0..n{if r!=c{let f=x[r][c];for j in 0..2*n{x[r][j]-=f*x[c][j];}}}}
+    (0..n).map(|i|(0..n).map(|j|x[i][n+j]).collect()).collect()
+}
 
-    #[test]
-    fn ex8_static_condensation_matches_reduced_reference() {
-        let result = run_case(1.0);
-        assert!(result.converged);
-        assert!(result.final_residual < 1e-9, "residual too large: {}", result.final_residual);
-        assert!(result.hanging_consistency < 1e-12, "hanging consistency error: {}", result.hanging_consistency);
-        assert!(result.free_dof_mismatch < 1e-10, "free dof mismatch: {}", result.free_dof_mismatch);
+fn pcg(a:&CsrMatrix<f64>,b:&[f64],x:&mut[f64],d:&[f64],rtol:f64,mi:usize)->(usize,f64){
+    let n=b.len();if n==0{return(0,0.0);}
+    let mut r=vec![0.0;n];for i in 0..n{let mut s=0.0;for p in a.row_ptr[i]..a.row_ptr[i+1]{s+=a.values[p]*x[a.col_idx[p]as usize];}r[i]=b[i]-s;}
+    let mut z=vec![0.0;n];for i in 0..n{z[i]=r[i]*d[i];}
+    let mut p=z.clone();let mut rz:f64=r.iter().zip(z.iter()).map(|(ri,zi)|ri*zi).sum();
+    let bn=b.iter().map(|v|v*v).sum::<f64>().sqrt().max(1e-30);
+    for it in 1..=mi{
+        let mut ad=vec![0.0;n];for i in 0..n{for pj in a.row_ptr[i]..a.row_ptr[i+1]{ad[i]+=a.values[pj]*p[a.col_idx[pj]as usize];}}
+        let pap:f64=p.iter().zip(ad.iter()).map(|(pi,ai)|pi*ai).sum();
+        if pap.abs()<1e-30{return(it,r.iter().map(|v|v*v).sum::<f64>().sqrt());}
+        let al=rz/pap;for i in 0..n{x[i]+=al*p[i];r[i]-=al*ad[i];}
+        let rs=r.iter().map(|v|v*v).sum::<f64>().sqrt();
+        if rs<rtol*bn{return(it,rs);}
+        for i in 0..n{z[i]=r[i]*d[i];}
+        let nn:f64=r.iter().zip(z.iter()).map(|(ri,zi)|ri*zi).sum();
+        if rz.abs()<1e-30{return(it,rs);}
+        let bt=nn/rz;for i in 0..n{p[i]=z[i]+bt*p[i];}rz=nn;
     }
+    (mi,r.iter().map(|v|v*v).sum::<f64>().sqrt())
+}
 
-    #[test]
-    fn ex8_static_condensation_scales_linearly_with_rhs() {
-        let a = run_case(1.0);
-        let b = run_case(3.0);
-        assert!(a.converged && b.converged);
-        assert!(a.free_dof_mismatch < 1e-10);
-        assert!(b.free_dof_mismatch < 1e-10);
-        assert!(
-            (b.solution_norm / a.solution_norm - 3.0).abs() < 1.0e-12,
-            "solution norm ratio mismatch: a={} b={}",
-            a.solution_norm,
-            b.solution_norm
-        );
-        assert!(
-            (b.solution_checksum / a.solution_checksum - 3.0).abs() < 1.0e-12,
-            "solution checksum ratio mismatch: a={} b={}",
-            a.solution_checksum,
-            b.solution_checksum
-        );
-    }
-
-    #[test]
-    fn ex8_static_condensation_zero_rhs_gives_trivial_solution() {
-        let result = run_case(0.0);
-        assert!(result.converged);
-        assert!(result.hanging_consistency < 1.0e-12);
-        assert!(result.free_dof_mismatch < 1.0e-12);
-        assert!(result.solution_norm < 1.0e-14, "expected zero solution norm, got {}", result.solution_norm);
-        assert!(
-            result.solution_checksum.abs() < 1.0e-14,
-            "expected zero checksum, got {}",
-            result.solution_checksum
-        );
-    }
-
-    #[test]
-    fn ex8_static_condensation_sign_reversed_rhs_flips_solution() {
-        let positive = run_case(1.0);
-        let negative = run_case(-1.0);
-        assert!(positive.converged && negative.converged);
-        assert!(
-            (positive.solution_norm - negative.solution_norm).abs() < 1.0e-12,
-            "solution norm should be sign-invariant: positive={} negative={}",
-            positive.solution_norm,
-            negative.solution_norm
-        );
-        assert!(
-            (positive.solution_checksum + negative.solution_checksum).abs() < 1.0e-12,
-            "checksum should flip sign: positive={} negative={}",
-            positive.solution_checksum,
-            negative.solution_checksum
-        );
-    }
-
-    #[test]
-    fn ex8_hanging_consistency_is_scale_invariant() {
-        for &scale in &[0.001f64, 1.0, 1000.0] {
-            let r = run_case(scale);
-            assert!(r.converged, "scale={}: did not converge", scale);
-            assert!(r.hanging_consistency < 1.0e-12,
-                "scale={}: hanging consistency {:.3e} exceeds tolerance", scale, r.hanging_consistency);
-        }
-    }
-
-    #[test]
-    fn ex8_free_dof_mismatch_is_scale_invariant() {
-        for &scale in &[0.1f64, 5.0, 50.0] {
-            let r = run_case(scale);
-            assert!(r.converged, "scale={}: did not converge", scale);
-            assert!(r.free_dof_mismatch < 1.0e-10,
-                "scale={}: free_dof_mismatch {:.3e} exceeds tolerance", scale, r.free_dof_mismatch);
-        }
-    }
-
-    #[test]
-    fn ex8_large_rhs_scale_converges_and_maintains_accuracy() {
-        let large = run_case(100.0);
-        assert!(large.converged);
-        assert!(large.hanging_consistency < 1.0e-12,
-            "large-scale hanging consistency: {:.3e}", large.hanging_consistency);
-        assert!(large.free_dof_mismatch < 1.0e-10,
-            "large-scale free dof mismatch: {:.3e}", large.free_dof_mismatch);
-        let unit = run_case(1.0);
-        assert!((large.solution_norm / unit.solution_norm - 100.0).abs() < 1.0e-10,
-            "solution_norm ratio mismatch: {:.6}", large.solution_norm / unit.solution_norm);
-        assert!((large.solution_checksum / unit.solution_checksum - 100.0).abs() < 1.0e-10,
-            "checksum ratio mismatch: {:.6}", large.solution_checksum / unit.solution_checksum);
-    }
-
-    #[test]
-    fn ex8_fractional_scale_preserves_residual_and_consistency() {
-        let frac = run_case(0.25);
-        assert!(frac.converged);
-        assert!(frac.final_residual < 1.0e-9,
-            "fractional-scale residual too large: {:.3e}", frac.final_residual);
-        assert!(frac.hanging_consistency < 1.0e-12,
-            "fractional-scale hanging consistency: {:.3e}", frac.hanging_consistency);
-        assert!(frac.free_dof_mismatch < 1.0e-10,
-            "fractional-scale free dof mismatch: {:.3e}", frac.free_dof_mismatch);
-        let unit = run_case(1.0);
-        assert!((frac.solution_norm / unit.solution_norm - 0.25).abs() < 1.0e-12,
-            "solution_norm ratio mismatch: {:.6}", frac.solution_norm / unit.solution_norm);
-    }
+struct Args{mesh:String,order:u8}
+impl Args{
+    fn parse()->Self{let mut mesh="data/star.mesh".to_string();let mut order=1u8;let mut it=std::env::args().skip(1);while let Some(a)=it.next(){match a.as_str(){"-m"|"--mesh"=>mesh=it.next().unwrap_or(mesh),"-o"|"--order"=>order=it.next().and_then(|v|v.parse().ok()).unwrap_or(1),_=>{}}}Args{mesh,order}}
 }
