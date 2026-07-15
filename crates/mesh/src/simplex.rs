@@ -349,16 +349,13 @@ impl<const D: usize> Mesh<D> {
         use fem_element::lagrange::TriPk;
         use fem_element::ReferenceElement;
         let n_elems = self.n_elems();
-        let npe_new = (p + 1) * (p + 2) / 2; // TriPk DOFs
+        let npe_new = (p + 1) * (p + 2) / 2;
 
-        // Create geometry element for coordinate interpolation.
         let tri_pk = TriPk::new(p);
         let dof_coords = tri_pk.dof_coords();
 
-        // Build geometry connectivity: for each element, interpolate the DOF
-        // node positions from the P1 vertices, then snap to sphere.
         let mut geo_conn = Vec::with_capacity(n_elems * npe_new);
-        let mut geo_coords = self.coords.clone(); // start with mesh vertex coords
+        let mut geo_coords = self.coords.clone();
         let mut next_id = self.n_nodes() as NodeId;
 
         for e in 0..n_elems as NodeId {
@@ -366,24 +363,19 @@ impl<const D: usize> Mesh<D> {
             let (x0, x1, x2) = (self.node_coords(v[0]), self.node_coords(v[1]), self.node_coords(v[2]));
             for d in 0..npe_new {
                 let xi = &dof_coords[d];
-                // Count how many non-zero entries in xi (0, 1, or 2 for triangle):
-                // vertex (xi has exactly one entry=1), edge (two entries non-zero sum=1), interior
-                // Vertex: a DOF at a reference vertex where exactly one
-                // coordinate is 1 (and the rest are 0), OR all coordinates 0.
-                let all_zero = xi.iter().all(|&c| c.abs() < 1e-12);
-                let has_one = xi.iter().any(|&c| (c-1.0).abs() < 1e-12);
-                if all_zero {
-                    geo_conn.push(v[0]); // vertex 0 at (0,0)
-                } else if has_one {
-                    let vi = xi.iter().position(|&c| (c-1.0).abs() < 1e-12).unwrap_or(0);
-                    geo_conn.push(v[vi]);
-                } else {
-                    // Edge or interior DOF: create a new node at the P1-interpolated position.
+                let is_v0 = xi[0].abs() < 1e-12 && xi[1].abs() < 1e-12;
+                let is_v1 = (xi[0]-1.0).abs() < 1e-12;
+                let is_v2 = xi[0].abs() < 1e-12 && (xi[1]-1.0).abs() < 1e-12;
+                if is_v0 { geo_conn.push(v[0]); }
+                else if is_v1 { geo_conn.push(v[1]); }
+                else if is_v2 { geo_conn.push(v[2]); }
+                else {
                     let x = x0[0]*(1.0-xi[0]-xi[1]) + x1[0]*xi[0] + x2[0]*xi[1];
                     let y = x0[1]*(1.0-xi[0]-xi[1]) + x1[1]*xi[0] + x2[1]*xi[1];
                     let z = x0[2]*(1.0-xi[0]-xi[1]) + x1[2]*xi[0] + x2[2]*xi[1];
+                    let inv = 1.0 / (x*x + y*y + z*z).sqrt();
                     geo_conn.push(next_id);
-                    geo_coords.push(x); geo_coords.push(y); geo_coords.push(z);
+                    geo_coords.push(x*inv); geo_coords.push(y*inv); geo_coords.push(z*inv);
                     next_id += 1;
                 }
             }
