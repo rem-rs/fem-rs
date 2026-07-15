@@ -51,24 +51,20 @@ fn main() {
     };
     eprintln!("  Mesh: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
 
-    // ── 2. Refine and snap ──────────────────────────────────────────────────
+    // ── 2. Refine (NO snap until the end, matching MFEM snap-at-the-end) ─────
     let mut mesh = mesh;
-    for l in 0..=args.ref_levels {
-        if l > 0 {
-            match mesh.element_type(0) {
-                fem_mesh::element_type::ElementType::Tri3 =>
-                    mesh = fem_mesh::amr::refine_uniform_surface_tri3(&mesh),
-                _ =>
-                    mesh = fem_mesh::amr::refine_uniform_surface_quad4(&mesh),
-            }
+    for l in 0..args.ref_levels {
+        match mesh.element_type(0) {
+            fem_mesh::element_type::ElementType::Tri3 =>
+                mesh = fem_mesh::amr::refine_uniform_surface_tri3(&mesh),
+            _ =>
+                mesh = fem_mesh::amr::refine_uniform_surface_quad4(&mesh),
         }
-        mesh.snap_to_sphere();
     }
+    mesh.snap_to_sphere(); // single snap at the end (MFEM default)
     eprintln!("  After refinement: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
 
-    // ── 3. Set up high-order geometry (MFEM SetNodalFESpace) ────────────────
     let order = args.order;
-    if order > 1 { mesh.set_curvature(order); }
 
     // ── 4. H1 space ─────────────────────────────────────────────────────────
     let space = H1Space::new(mesh.clone(), order);
@@ -87,17 +83,14 @@ fn main() {
         &MassIntegrator{rho:1.0},
     ], quad);
 
-    let cfg = SolverConfig{rtol:1e-12,max_iter:200,verbose:false,..SolverConfig::default()};
+    let cfg = SolverConfig{rtol:1e-12,atol:0.0,max_iter:200,verbose:false,..SolverConfig::default()};
     let res = solve_pcg_gssmoother(&mat, &rhs, &mut u, &cfg).expect("PCG");
     if !res.converged { eprintln!("  PCG: No convergence!"); }
 
-    // ── 9. Diagnostics ──────────────────────────────────────────────────────
+    // ── 9. L2 error ─────────────────────────────────────────────────────────
     let gf = GridFunction::new(&space, u);
     let l2_err = gf.compute_l2_error(&analytic_solution, (order as u8)*2+2);
-    let one_norm = gf.compute_l1_error(&|_| 1.0, (order as u8)*2+2);
     println!("\nL2 norm of error: {}", l2_err);
-    eprintln!("  ∫1 dS = {}", one_norm); // should be 4π ≈ 12.566
-    eprintln!("  4π = {}", 4.0 * std::f64::consts::PI);
 
     eprintln!("\n  Total time: {:.3}s", t0.elapsed().as_secs_f64());
     eprintln!("  Done.");
@@ -143,7 +136,7 @@ mod tests {
         let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(analytic_rhs)], (order as u8)*2+1);
         let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator{kappa:1.0}, &MassIntegrator{rho:1.0}], (order as u8)*2);
         let mut u = vec![0.0; space.n_dofs()];
-        let cfg = SolverConfig{rtol:1e-12,max_iter:200,verbose:false,..SolverConfig::default()};
+        let cfg = SolverConfig{rtol:1e-12,atol:0.0,max_iter:200,verbose:false,..SolverConfig::default()};
         solve_pcg_gssmoother(&mat, &rhs, &mut u, &cfg).expect("PCG");
         let gf = GridFunction::new(&space, u);
         gf.compute_l2_error(&analytic_solution, (order as u8)*2+2)
