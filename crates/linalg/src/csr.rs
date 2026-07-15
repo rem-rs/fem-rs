@@ -574,6 +574,51 @@ impl<T: Scalar> CsrMatrix<T> {
             values:  t_values,
         }
     }
+
+    /// Sparse-sparse matrix multiply: C = self * B.
+    pub fn multiply(&self, b: &CsrMatrix<T>) -> CsrMatrix<T>
+    where T: Scalar {
+        assert_eq!(self.ncols, b.nrows, "multiply: dim mismatch");
+        let m = self.nrows;
+        let n = b.ncols;
+        let mut crp = vec![0usize; m + 1];
+        let mut cci: Vec<u32> = Vec::new();
+        let mut cv: Vec<T> = Vec::new();
+        let mut acc = vec![T::zero(); n];
+        let mut mark = vec![false; n];
+        for i in 0..m {
+            for pk in self.row_ptr[i]..self.row_ptr[i+1] {
+                let k = self.col_idx[pk] as usize;
+                let aik = self.values[pk];
+                for qj in b.row_ptr[k]..b.row_ptr[k+1] {
+                    let j = b.col_idx[qj] as usize;
+                    let v = aik * b.values[qj];
+                    if !mark[j] { mark[j] = true; acc[j] = v; cci.push(j as u32); }
+                    else { acc[j] = acc[j] + v; }
+                }
+            }
+            let off = cv.len();
+            for &j in &cci[off..] { cv.push(acc[j as usize]); acc[j as usize] = T::zero(); mark[j as usize] = false; }
+            crp[i+1] = cv.len();
+        }
+        for i in 0..m {
+            let s = crp[i]; let e = crp[i+1];
+            if e - s > 1 {
+                let mut p: Vec<(u32,T)> = (s..e).map(|p| (cci[p], cv[p])).collect();
+                p.sort_unstable_by(|a,b| a.0.cmp(&b.0));
+                for (p,(c,v)) in (s..e).zip(p) { cci[p]=c; cv[p]=v; }
+            }
+        }
+        CsrMatrix { nrows: m, ncols: n, row_ptr: crp, col_idx: cci, values: cv }
+    }
+
+    /// Triple product C = R^T * A * P.
+    pub fn rap_product(&self, a: &CsrMatrix<T>, p: &CsrMatrix<T>) -> CsrMatrix<T>
+    where T: Scalar {
+        let t = a.multiply(p);
+        let rt = self.transpose();
+        rt.multiply(&t)
+    }
 }
 
 // ─── Free functions ──────────────────────────────────────────────────────────
