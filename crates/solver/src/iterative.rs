@@ -152,6 +152,113 @@ where
     })
 }
 
+/// PCG with both operator and preconditioner as closures.
+///
+/// Solves `A x = b` where `A` is SPD and `apply(y, x)` computes `y = A * x`.
+/// The preconditioner `precond(z, r)` computes `z = M^{-1} * r`.
+///
+/// Suitable for matrix-free operators (e.g. DPG normal equations) and
+/// block-diagonal preconditioners that cannot be expressed as a single
+/// `CsrMatrix` or the `linlvo` `Preconditioner` trait.
+///
+/// # Arguments
+/// * `n`       — system dimension
+/// * `apply`   — `Fn(&[f64], &mut [f64])` computing `y = A * x`
+/// * `b`       — right-hand side
+/// * `x`       — initial guess / solution
+/// * `precond` — `Fn(&[f64], &mut [f64])` computing `z = M^{-1} * r`
+/// * `cfg`     — convergence parameters
+///
+/// # Returns
+/// `SolveResult` with convergence information.
+pub fn solve_pcg_operator_precond<A, P>(
+    n: usize,
+    apply: A,
+    b: &[f64],
+    x: &mut [f64],
+    precond: P,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    A: Fn(&[f64], &mut [f64]),
+    P: Fn(&[f64], &mut [f64]),
+{
+    if b.len() != n || x.len() != n {
+        return Err(SolverError::DimensionMismatch {
+            rows: n,
+            cols: n,
+            rhs: b.len(),
+        });
+    }
+
+    let mut r = vec![0.0; n];
+    let mut z = vec![0.0; n];
+    let mut p = vec![0.0; n];
+    let mut ap = vec![0.0; n];
+
+    // r = b - A * x0
+    apply(x, &mut ap);
+    for i in 0..n {
+        r[i] = b[i] - ap[i];
+    }
+
+    let norm_b = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
+
+    // z = M^{-1} * r
+    precond(&r, &mut z);
+    p.copy_from_slice(&z);
+
+    let mut rz = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
+    let mut res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if res_norm <= tol {
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: res_norm,
+        });
+    }
+
+    for iter in 0..cfg.max_iter {
+        apply(&p, &mut ap);
+
+        let p_ap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
+        if p_ap.abs() < 1e-32 {
+            return Err(SolverError::Linlvo(
+                "PCG operator breakdown: p^T A p is near zero".to_string(),
+            ));
+        }
+
+        let alpha = rz / p_ap;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+
+        res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if res_norm <= tol {
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter + 1,
+                final_residual: res_norm,
+            });
+        }
+
+        precond(&r, &mut z);
+        let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
+        let beta = rz_new / rz;
+        for i in 0..n {
+            p[i] = z[i] + beta * p[i];
+        }
+        rz = rz_new;
+    }
+
+    Err(SolverError::ConvergenceFailed {
+        max_iter: cfg.max_iter,
+        residual: res_norm,
+    })
+}
+
 // ─── GMRES operator ────────────────────────────────────────────────────────
 
 /// GMRES using a backend-agnostic operator callback.

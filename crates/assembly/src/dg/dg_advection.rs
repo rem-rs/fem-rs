@@ -16,6 +16,8 @@
 
 use nalgebra::DMatrix;
 
+use std::f64::consts::PI;
+
 use fem_core::types::{DofId, ElemId};
 use fem_element::{ReferenceElement,
     lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1}};
@@ -479,6 +481,247 @@ pub fn assemble_advection_boundary<M: MeshTopology, S: FESpace<Mesh=M>, V: Vecto
         }
     }
     rhs
+}
+
+/// Assemble both boundary K-matrix and RHS for advection (inflow/outflow).
+///
+/// - **Outflow** (b·n ≥ 0): adds `-w * vn * φ_i * φ_j` to K (upwind takes interior value)
+/// - **Inflow** (b·n < 0): adds `w * vn * φ_i * g_D` to RHS (weak Dirichlet)
+///
+/// Returns `(k_boundary, rhs_boundary)` matching MFEM's `NonconservativeDGTraceIntegrator`
+/// + `BoundaryFlowIntegrator` applied on boundary faces.
+pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoeff>(
+    space: &S,
+    velocity: &V,
+    tags: &[i32],
+    g_d: &dyn Fn(&[f64]) -> f64,
+    order: u8,
+    quad_order: u8,
+) -> (CsrMatrix<f64>, Vec<f64>) {
+    let mesh = space.mesh();
+    let dim = mesh.dim() as usize;
+    let n_dofs = space.n_dofs();
+    let mut rhs = vec![0.0_f64; n_dofs];
+    let mut coo = CooMatrix::new(n_dofs, n_dofs);
+
+    for f in mesh.face_iter() {
+        if !tags.contains(&mesh.face_tag(f)) { continue; }
+        let fnodes = mesh.face_nodes(f);
+        let h_f: f64;
+        let mut normal: Vec<f64>;
+
+        if dim == 2 {
+            let x0 = mesh.node_coords(fnodes[0]);
+            let x1 = mesh.node_coords(fnodes[1]);
+            let dx = x1[0] - x0[0];
+            let dy = x1[1] - x0[1];
+            h_f = (dx*dx + dy*dy).sqrt();
+            normal = vec![dy / h_f, -dx / h_f];
+        } else { return (coo.into_csr(), rhs); } // 3-D not implemented yet
+
+        let elem = find_face_elem(mesh, f, fnodes);
+        // Ensure normal points outward
+        orient_normal_outward(mesh, elem, fnodes, &mut normal);
+
+        let face_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
+        let ref_face = ref_elem_face(face_type, order);
+        let q_face = ref_face.quadrature(quad_order);
+
+        let et = mesh.element_type(elem);
+        let ref_elem = ref_elem_vol(et, order);
+        let n_dofs_e = ref_elem.n_dofs();
+        let dofs: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
+        let nodes = mesh.element_nodes(elem);
+        let (jac, _) = simplex_jac(mesh, nodes, dim);
+        let x0_e = mesh.node_coords(nodes[0]);
+
+        let mut f_elem = vec![0.0_f64; n_dofs_e];
+        let mut k_elem = vec![0.0_f64; n_dofs_e * n_dofs_e];
+        let mut phi = vec![0.0_f64; n_dofs_e];
+
+        for (qi, xi_f) in q_face.points.iter().enumerate() {
+            let w_f = q_face.weights[qi] * h_f;
+            let xp: Vec<f64> = {
+                let x0f = mesh.node_coords(fnodes[0]);
+                let x1f = mesh.node_coords(fnodes[1]);
+                let t = xi_f[0];
+                (0..dim).map(|i| (1.0 - t) * x0f[i] + t * x1f[i]).collect()
+            };
+            let xi = phys_to_ref(&jac, x0_e, &xp, dim);
+            ref_elem.eval_basis(&xi, &mut phi);
+
+            let ctx = CoeffCtx::from_qp(&xp, dim, elem, mesh.face_tag(f), None, None);
+            let mut b = [0.0_f64; 3];
+            velocity.eval(&ctx, &mut b[..dim]);
+            let vn: f64 = (0..dim).map(|i| b[i] * normal[i]).sum();
+
+            if vn >= 0.0 {
+                // Outflow: K_bdr[i,j] += -w * vn * φ_i * φ_j  (upwind takes interior value)
+                for i in 0..n_dofs_e {
+                    for j in 0..n_dofs_e {
+                        k_elem[i * n_dofs_e + j] += -w_f * vn * phi[i] * phi[j];
+                    }
+                }
+            } else {
+                // Inflow: RHS[i] += w * vn * φ_i * g_D
+                let g_val = g_d(&xp);
+                for i in 0..n_dofs_e {
+                    f_elem[i] += w_f * phi[i] * vn * g_val;
+                }
+            }
+        }
+
+        for (i, &gi) in dofs.iter().enumerate() {
+            rhs[gi] += f_elem[i];
+            for (j, &gj) in dofs.iter().enumerate() {
+                coo.add(gi, gj, k_elem[i * n_dofs_e + j]);
+            }
+        }
+    }
+
+    (coo.into_csr(), rhs)
+}
+
+// ─── DgAdvectionProblem ─────────────────────────────────────────────────────
+
+/// Problem types for DG advection, matching MFEM ex9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DgAdvectionProblem {
+    /// Translation (p=0): constant velocity, smooth IC advected across domain.
+    Translation = 0,
+    /// Rotation (p=1): clockwise rotation around origin, erfc IC.
+    Rotation = 1,
+    /// Rotation with different IC (p=2): same velocity as Rotation, sin² IC.
+    RotationP2 = 2,
+    /// Twisting rotation (p=3): space-dependent rotation speed, sin·sin IC.
+    Twist = 3,
+}
+
+/// Velocity function for DG advection problems.
+///
+/// Maps physical coordinate `x` to velocity vector `v`, using bounding box
+/// `bb_min`/`bb_max` to map to the reference [-1,1]^d domain.
+pub fn dg_velocity(p: DgAdvectionProblem, x: &[f64], bb_min: &[f64], bb_max: &[f64]) -> Vec<f64> {
+    let dim = x.len();
+    let mut X = vec![0.0; dim];
+    for i in 0..dim {
+        let center = (bb_min[i] + bb_max[i]) * 0.5;
+        X[i] = 2.0 * (x[i] - center) / (bb_max[i] - bb_min[i]);
+    }
+
+    match p {
+        DgAdvectionProblem::Translation => {
+            match dim {
+                1 => vec![1.0],
+                2 => vec![(2.0_f64 / 3.0).sqrt(), (1.0_f64 / 3.0).sqrt()],
+                3 => vec![(3.0_f64 / 6.0).sqrt(), (2.0_f64 / 6.0).sqrt(), (1.0_f64 / 6.0).sqrt()],
+                _ => vec![1.0; dim],
+            }
+        }
+        DgAdvectionProblem::Rotation | DgAdvectionProblem::RotationP2 => {
+            let w = PI / 2.0;
+            match dim {
+                1 => vec![1.0],
+                2 => vec![w * X[1], -w * X[0]],
+                3 => vec![w * X[1], -w * X[0], 0.0],
+                _ => vec![1.0; dim],
+            }
+        }
+        DgAdvectionProblem::Twist => {
+            let w = PI / 2.0;
+            let d = (X[0] + 1.0).max(0.0) * (1.0 - X[0]).max(0.0)
+                  * (X[1] + 1.0).max(0.0) * (1.0 - X[1]).max(0.0);
+            let d = d * d; // d^2
+            match dim {
+                1 => vec![1.0],
+                2 => vec![d * w * X[1], -d * w * X[0]],
+                3 => vec![d * w * X[1], -d * w * X[0], 0.0],
+                _ => vec![1.0; dim],
+            }
+        }
+    }
+}
+
+/// Initial condition for DG advection problems.
+pub fn dg_initial_condition(p: DgAdvectionProblem, x: &[f64], bb_min: &[f64], bb_max: &[f64]) -> f64 {
+    let dim = x.len();
+    let mut X = vec![0.0; dim];
+    for i in 0..dim {
+        let center = (bb_min[i] + bb_max[i]) * 0.5;
+        X[i] = 2.0 * (x[i] - center) / (bb_max[i] - bb_min[i]);
+    }
+
+    match p {
+        DgAdvectionProblem::Translation | DgAdvectionProblem::Rotation => {
+            match dim {
+                1 => (-40.0 * (X[0] - 0.5).powi(2)).exp(),
+                2 | 3 => {
+                    let rx = 0.45; let ry = 0.25;
+                    let cx = 0.0; let cy = -0.2;
+                    let w = 10.0;
+                    let mut s = 1.0;
+                    if dim == 3 {
+                        s = 1.0 + 0.25 * (2.0 * PI * X[2]).cos();
+                    }
+                    let rx = rx * s;
+                    let ry = ry * s;
+                    (libm::erfc(w * (X[0] - cx - rx)) * libm::erfc(-w * (X[0] - cx + rx))
+                   * libm::erfc(w * (X[1] - cy - ry)) * libm::erfc(-w * (X[1] - cy + ry))) / 16.0
+                }
+                _ => 0.0,
+            }
+        }
+        DgAdvectionProblem::RotationP2 => {
+            let rho = (X[0]*X[0] + X[1]*X[1]).sqrt();
+            let phi = X[1].atan2(X[0]);
+            (PI * rho).sin().powi(2) * (3.0 * phi).sin()
+        }
+        DgAdvectionProblem::Twist => {
+            let f = PI;
+            (f * X[0]).sin() * (f * X[1]).sin()
+        }
+    }
+}
+
+/// Inflow boundary condition for DG advection problems.
+/// Returns 0 for all problems in MFEM ex9.
+pub fn dg_inflow_bc(_p: DgAdvectionProblem, _x: &[f64]) -> f64 {
+    0.0
+}
+
+// ─── DgImplicitSolver ───────────────────────────────────────────────────────
+
+/// Implicit time-stepping solver for DG advection.
+///
+/// Solves `(M + β·dt·K_adv) · u_new = rhs` where β depends on time integrator.
+/// Uses GMRES + ILU(k) preconditioning, matching MFEM ex9's DG_Solver + BlockILU.
+///
+/// MFEM equivalent: `DG_Solver` class in ex9.cpp.
+pub fn solve_dg_implicit(
+    mass: &CsrMatrix<f64>,
+    k_adv: &CsrMatrix<f64>,
+    dt: f64,
+    rhs: &[f64],
+    u: &mut [f64],
+    cfg: &fem_solver::SolverConfig,
+) -> Result<fem_solver::SolveResult, fem_solver::SolverError> {
+    use fem_solver::{solve_gmres_iluk, SolverConfig};
+    let n = mass.nrows;
+    // A = M + dt*K  (backward Euler: β=1)
+    // Build A as CooMatrix to handle different sparsity patterns of M and K
+    let mut coo = fem_linalg::CooMatrix::new(n, n);
+    for i in 0..n {
+        // Add M contributions
+        for p in mass.row_ptr[i]..mass.row_ptr[i+1] {
+            coo.add(i, mass.col_idx[p] as usize, mass.values[p]);
+        }
+        // Add dt * K contributions
+        for p in k_adv.row_ptr[i]..k_adv.row_ptr[i+1] {
+            coo.add(i, k_adv.col_idx[p] as usize, dt * k_adv.values[p]);
+        }
+    }
+    let a = coo.into_csr();
+    solve_gmres_iluk(&a, rhs, u, 50, 1, cfg)
 }
 
 // ─── Explicit RHS wrapper ─────────────────────────────────────────────────────

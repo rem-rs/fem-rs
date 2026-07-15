@@ -240,10 +240,6 @@ name = "mfem_ex7_surface_poisson"
 path = "mfem_ex7_surface_poisson.rs"
 
 [[example]]
-name = "mfem_ex8_dpg_poisson"
-path = "mfem_ex8_dpg_poisson.rs"
-
-[[example]]
 name = "maxwell_time_domain"
 path = "extra/maxwell_time_domain.rs"
 

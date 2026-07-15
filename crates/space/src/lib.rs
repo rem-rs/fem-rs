@@ -35,6 +35,7 @@ pub mod trace_spaces;
 pub mod cr_space;
 pub mod vector_cr;
 pub mod vem;
+pub mod dpg_trace;
 
 pub mod complex;
 
@@ -55,5 +56,6 @@ pub use constraints::{apply_dirichlet, eliminate_dirichlet, expand_from_reduced,
 pub use iga::{IgaBoundary2D, IgaBoundary3D, IgaSpace1D, IgaSpace2D, IgaSpace3D};
 pub use block_fe_space::BlockFESpace;
 pub use trace_spaces::{HCurlTraceSpace, HDivTraceSpace};
+pub use dpg_trace::{DpgTraceSpace, FaceInfo};
 pub use complex::{ComplexGridFunction, ComplexSpace, apply_complex_dirichlet};
 

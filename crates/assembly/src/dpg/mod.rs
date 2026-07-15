@@ -5,6 +5,9 @@ pub mod dpg_framework;
 pub mod dpg_stokes;
 pub mod dpg_maxwell;
 pub mod dpg_elasticity;
+pub mod sinv;
+pub mod trace_jump;
+pub mod dpg_operator;
 
 pub use dpg::*;
 pub use dpg_2d::*;
@@ -13,3 +16,6 @@ pub use dpg_framework::*;
 pub use dpg_stokes::*;
 pub use dpg_maxwell::*;
 pub use dpg_elasticity::*;
+pub use sinv::SinvBuilder;
+pub use trace_jump::assemble_bhat;
+pub use dpg_operator::{DpgNormalOperator, build_shat, compute_dpg_residual};

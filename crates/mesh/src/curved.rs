@@ -77,7 +77,7 @@ impl<const D: usize> CurvedMesh<D> {
         // Use topological dimension (element type) rather than spatial dim D
         // so that surface meshes (Mesh<3> with Tri3) use triangle formulas.
         let topo_dim = mesh.element_type_at(0).dim() as usize;
-        let dim = D; // spatial dimension for coordinate arrays
+        let _dim = D; // spatial dimension for coordinate arrays
         let order = p as u8;
         let npe_new = fem_element::lagrange::factory::n_dofs_simplex(topo_dim, p);
         let n_linear_nodes = mesh.n_nodes();

@@ -1,394 +1,57 @@
 //! # Example 8 — DPG Poisson (2×2 block formulation)
 //!
-//! One-to-one translation of MFEM C++ ex8.
+//! One-to-one translation of MFEM C++ ex8 using the reusable DPG infrastructure.
 //!
 //! Solves `-Δu = 1` with homogeneous Dirichlet BC using the Discontinuous
 //! Petrov-Galerkin (DPG) method in its primal 2×2 block form.
 //!
 //! Three spaces:
 //! - **Trial (X0):** H¹ continuous (`order`)
-//! - **Interface (Xhat):** trace on mesh skeleton (`order - 1`)
+//! - **Interface (Xhat):** DPG trace on mesh skeleton (`order - 1`)
 //! - **Test (Y):** L² discontinuous (enriched)
 //!
 //! ## Usage
 //! ```bash
 //! cargo run --example mfem_ex8_dpg_2x2 -- -m data/star.mesh
 //! cargo run --example mfem_ex8_dpg_2x2 -- -m data/square-disc.mesh
+//! cargo run --example mfem_ex8_dpg_2x2 -- -m data/star.mesh -o 2
 //! ```
 
-#![allow(dead_code, unused_variables)]
-
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+
 use fem_assembly::{
     Assembler, MixedAssembler, MixedBilinearIntegrator,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
     integrator::QpData,
+    dpg::{SinvBuilder, assemble_bhat, DpgNormalOperator, build_shat},
 };
-use fem_element::{
-    ReferenceElement, reference::QuadratureRule,
-    lagrange::{TriP1, TriP2, TriP3, QuadQ1, QuadQ2},
-    quadrature::{seg_rule_arbitrary, tri_rule, quad_rule_arbitrary},
-};
-use fem_mesh::ElementTransformation;
-use fem_mesh::element_type::ElementType;
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{refine_uniform, topology::MeshTopology, Mesh};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::SolverConfig;
 use fem_space::{
-    H1Space, L2Space, fe_space::FESpace,
-    constraints::{apply_dirichlet, boundary_dofs},
+    H1Space, L2Space, DpgTraceSpace,
+    fe_space::FESpace,
+    constraints::{boundary_dofs, apply_dirichlet},
 };
 
-// ─── Mixed Diffusion Integrator ────────────────────────────────────────────────
+// ─── Mixed Diffusion Integrator (B0) ─────────────────────────────────────────
 
 struct MixedDiffusion;
 impl MixedBilinearIntegrator for MixedDiffusion {
     fn add_to_element_matrix(&self, qp_row: &QpData<'_>, qp_col: &QpData<'_>, m: &mut [f64]) {
-        let nr = qp_row.n_dofs; let nc = qp_col.n_dofs; let d = qp_col.dim; let w = qp_col.weight;
+        let nr = qp_row.n_dofs;
+        let nc = qp_col.n_dofs;
+        let d = qp_col.dim;
+        let w = qp_col.weight;
         for k in 0..d {
-            for i in 0..nr { let gik = qp_row.grad_phys[i*d+k];
-                for j in 0..nc { m[i*nc+j] += w * gik * qp_col.grad_phys[j*d+k]; }
-            }
-        }
-    }
-}
-
-// ─── Sinv: block-diagonal (M+K)^{-1} ──────────────────────────────────────────
-
-struct SinvData { elem_blocks: Vec<Vec<f64>>, n_test: usize, elem_dofs: Vec<Vec<usize>> }
-
-fn ref_elem_2d(et: ElementType, o: u8) -> (Box<dyn ReferenceElement>, usize) {
-    match (et, o) {
-        (ElementType::Tri3|ElementType::Tri6, 1) => (Box::new(TriP1), 3),
-        (ElementType::Tri3|ElementType::Tri6, 2) => (Box::new(TriP2), 6),
-        (ElementType::Tri3|ElementType::Tri6, 3) => (Box::new(TriP3), 10),
-        (ElementType::Quad4, 1) => (Box::new(QuadQ1), 4),
-        (ElementType::Quad4, 2) => (Box::new(QuadQ2), 9),
-        _ => panic!("ref_elem: ({et:?}, o={o})"),
-    }
-}
-fn get_qr(et: ElementType, qo: u8) -> QuadratureRule {
-    match et {
-        ElementType::Tri3|ElementType::Tri6 => tri_rule(qo),
-        ElementType::Quad4 => quad_rule_arbitrary(qo),
-        _ => panic!("qr: {et:?}"),
-    }
-}
-fn transform_grads(jit: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, d: usize) {
-    for i in 0..n { for j in 0..d {
-        let mut s = 0.0; for k in 0..d { s += jit[(j,k)] * gr[i*d+k]; }
-        gp[i*d+j] = s;
-    }}
-}
-
-/// Bilinear quad Jacobian at (xi, eta): J = [J00 J01; J10 J11]
-fn quad_jacobian(x: &[f64; 4], y: &[f64; 4], xi: f64, eta: f64) -> ([[f64;2];2], f64, [[f64;2];2]) {
-    let d_n = [
-        [eta-1.0, 1.0-eta, eta, -eta],           // ∂N/∂ξ
-        [xi-1.0, -xi, xi, 1.0-xi],               // ∂N/∂η
-    ];
-    let mut j = [[0.0;2];2];
-    for i in 0..4 {
-        j[0][0] += d_n[0][i]*x[i]; j[0][1] += d_n[0][i]*y[i];
-        j[1][0] += d_n[1][i]*x[i]; j[1][1] += d_n[1][i]*y[i];
-    }
-    let det = j[0][0]*j[1][1] - j[0][1]*j[1][0];
-    let id = 1.0/det.max(1e-30);
-    let jit = [[j[1][1]*id, -j[0][1]*id], [-j[1][0]*id, j[0][0]*id]];
-    (j, det.abs(), jit)
-}
-
-fn build_sinv<M: MeshTopology>(space: &impl FESpace<Mesh=M>, qo: u8) -> SinvData {
-    let mesh = space.mesh(); let ne = mesh.n_elements(); let order = space.order();
-    let et = mesh.element_type(0); let dim = 2;
-    let (ref_elem, nt) = ref_elem_2d(et, order);
-    let qr = get_qr(et, qo);
-    let is_tri = matches!(et, ElementType::Tri3|ElementType::Tri6);
-    let mut phi = vec![0.0; nt]; let mut dphi = vec![0.0; nt*dim];
-    let mut eb = Vec::with_capacity(ne); let mut ed = Vec::with_capacity(ne);
-    for e in mesh.elem_iter() {
-        let nodes = mesh.element_nodes(e);
-        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let tr = if is_tri {
-            Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
-        } else {
-            None
-        };
-        let xq: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(nodes.len()-1)])[0]).collect();
-        let yq: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(nodes.len()-1)])[1]).collect();
-        let (x4, y4): ([f64;4], [f64;4]) = ([xq[0],xq[1],xq[2],xq[3]], [yq[0],yq[1],yq[2],yq[3]]);
-        let mut mass = vec![0.0; nt*nt]; let mut stiff = vec![0.0; nt*nt];
-        for (xi, &wr) in qr.points.iter().zip(qr.weights.iter()) {
-            let (det_j, j00, j01, j10, j11) = if is_tri {
-                let t = tr.as_ref().unwrap();
-                (t.det_j().abs(), 0.0, 0.0, 0.0, 0.0) // placeholder, jit used below
-            } else {
-                let xi_f = xi[0]; let eta_f = xi[1];
-                let (j, det, _jit2) = quad_jacobian(&x4, &y4, xi_f, eta_f);
-                (det, j[0][0], j[0][1], j[1][0], j[1][1])
-            };
-            let w = wr * det_j;
-            ref_elem.eval_basis(xi, &mut phi); ref_elem.eval_grad_basis(xi, &mut dphi);
-            let mut gp = vec![0.0; nt*dim];
-            if is_tri {
-                let jit = tr.as_ref().unwrap().jacobian_inv_t().clone();
-                transform_grads(&jit, &dphi, &mut gp, nt, dim);
-            } else {
-                // Bilinear quad: J^{-T} = [[J11, -J01], [-J10, J00]] / det
-                let id = 1.0 / det_j.max(1e-30);
-                // J = [[∂x/∂ξ, ∂y/∂ξ], [∂x/∂η, ∂y/∂η]] (my convention)
-                // F^{-T} = [J11, -J01; -J10, J00] / det where F = J^T
-                for i in 0..nt {
-                    gp[i*dim]   = ( j11 * dphi[i*dim] - j01 * dphi[i*dim+1]) * id;
-                    gp[i*dim+1] = (-j10 * dphi[i*dim] + j00 * dphi[i*dim+1]) * id;
+            for i in 0..nr {
+                let gik = qp_row.grad_phys[i * d + k];
+                for j in 0..nc {
+                    m[i * nc + j] += w * gik * qp_col.grad_phys[j * d + k];
                 }
             }
-            for i in 0..nt { for j in 0..nt {
-                mass[i*nt+j] += w*phi[i]*phi[j];
-                let mut gdot = 0.0; for d in 0..dim { gdot += gp[i*dim+d] * gp[j*dim+d]; }
-                stiff[i*nt+j] += w * gdot;
-            }}
         }
-        for i in 0..nt { for j in 0..nt { mass[i*nt+j] += stiff[i*nt+j]; }}
-        solve_dense_inv(nt, &mut mass);
-        eb.push(mass); ed.push(dofs);
-    }
-    SinvData { elem_blocks: eb, n_test: nt, elem_dofs: ed }
-}
-
-fn apply_sinv(s: &SinvData, x: &[f64], y: &mut [f64]) {
-    y.fill(0.0);
-    let nt = s.n_test;
-    for (b, d) in s.elem_blocks.iter().zip(s.elem_dofs.iter()) {
-        for i in 0..nt { let mut v = 0.0; for j in 0..nt { v += b[i*nt+j]*x[d[j]]; } y[d[i]] = v; }
-    }
-}
-
-// ─── Edge enumeration (tri + quad) ────────────────────────────────────────────
-
-fn elem_edges(nodes: &[u32]) -> Vec<((u32,u32), usize)> {
-    let pairs: Vec<(usize,usize)> = match nodes.len() {
-        3 => vec![(0,1),(1,2),(0,2)],
-        4 => vec![(0,1),(1,2),(2,3),(3,0)],
-        _ => panic!("npe={}", nodes.len()),
-    };
-    pairs.iter().enumerate().map(|(i,&(a,b))| {
-        let key = if nodes[a] < nodes[b] {(nodes[a],nodes[b])} else {(nodes[b],nodes[a])};
-        (key, i)
-    }).collect()
-}
-
-fn edge_xi_tri(lf: usize, xi: f64) -> (f64,f64) {
-    match lf {0=>(xi,0.0),1=>(1.0-xi,xi),2=>(0.0,xi),_=>(0.0,0.0)}
-}
-fn edge_xi_quad(lf: usize, xi: f64) -> (f64,f64) {
-    match lf {0=>(xi,0.0),1=>(1.0,xi),2=>(1.0-xi,1.0),3=>(0.0,1.0-xi),_=>(0.0,0.0)}
-}
-
-// ─── Build all-face layout (boundary + interior) ──────────────────────────────
-
-struct BfaceInfo {
-    elem: u32, local_edge: usize, nodes: [u32; 2],
-}
-
-struct TraceLayout {
-    n_dofs: usize, dpf: usize, n_bfaces: usize,
-    face_offset: Vec<usize>,
-    /// Per-boundary-face info
-    bfaces: Vec<BfaceInfo>,
-    /// Interior face data: (el, er, ll, lr, [node0, node1])
-    interior_faces: Vec<(u32,u32,usize,usize,[u32;2])>,
-    interior_first: usize,
-}
-
-fn build_all_faces(mesh: &impl MeshTopology, order: u8) -> TraceLayout {
-    let dpf = (order as usize + 1).max(1);
-    let nbf = mesh.n_boundary_faces() as usize;
-
-    let mut bfaces: Vec<BfaceInfo> = Vec::with_capacity(nbf);
-    // Pre-build element edge map sorted_key → (elem, local_edge)
-    let mut edge_to_elem: HashMap<(u32,u32), (u32,usize)> = HashMap::new();
-    for e in mesh.elem_iter() {
-        let en = mesh.element_nodes(e);
-        for (key, li) in elem_edges(en) {
-            edge_to_elem.entry(key).or_insert((e, li));
-        }
-    }
-    for bf in 0..nbf {
-        let fnodes = mesh.face_nodes(bf as u32);
-        let key = if fnodes[0] < fnodes[1] {(fnodes[0], fnodes[1])} else {(fnodes[1], fnodes[0])};
-        if let Some(&(el, li)) = edge_to_elem.get(&key) {
-            bfaces.push(BfaceInfo { elem: el, local_edge: li, nodes: [key.0, key.1] });
-        } else {
-            panic!("boundary face {bf} (nodes {},{}) not in edge map", fnodes[0], fnodes[1]);
-        }
-    }
-
-    let mut edge_map: HashMap<(u32,u32), (u32,usize)> = HashMap::new();
-    let mut interior: Vec<(u32,u32,usize,usize,[u32;2])> = Vec::new();
-    for e in mesh.elem_iter() {
-        let en = mesh.element_nodes(e);
-        for (key, li) in elem_edges(en) {
-            if let Some(&(fe, fl)) = edge_map.get(&key) {
-                interior.push((fe, e, fl, li, [key.0, key.1]));
-            } else {
-                edge_map.insert(key, (e, li));
-            }
-        }
-    }
-
-    let n_ifaces = interior.len();
-    let n_faces = nbf + n_ifaces;
-    let mut off = Vec::with_capacity(n_faces);
-    for f in 0..n_faces { off.push(f * dpf); }
-
-    TraceLayout {
-        n_dofs: n_faces * dpf, dpf, n_bfaces: nbf,
-        face_offset: off, bfaces, interior_faces: interior,
-        interior_first: nbf,
-    }
-}
-
-// ─── Bhat assembly ────────────────────────────────────────────────────────────
-
-fn assemble_bhat<M: MeshTopology>(
-    mesh: &M, l2: &impl FESpace<Mesh=M>, trace: &TraceLayout,
-    test_order: u8, qo: u8,
-) -> CsrMatrix<f64> {
-    let nt = ref_elem_2d(mesh.element_type(0), test_order).1;
-    let mut coo = CooMatrix::new(l2.n_dofs(), trace.n_dofs);
-    let tri: Box<dyn ReferenceElement> = match test_order {
-        1 => Box::new(TriP1), 2 => Box::new(TriP2), 3 => Box::new(TriP3), _ => panic!(),
-    };
-    let eq = seg_rule_arbitrary(qo);
-    let mut phi = vec![0.0; nt];
-
-    // Boundary faces (use pre-computed trace.bfaces)
-    for (bf, info) in trace.bfaces.iter().enumerate() {
-        let td = trace.face_offset[bf];
-        let dofs: Vec<usize> = l2.element_dofs(info.elem).iter().map(|&d| d as usize).collect();
-        let elen = {
-            let pa = mesh.node_coords(info.nodes[0]); let pb = mesh.node_coords(info.nodes[1]);
-            ((pb[0]-pa[0]).powi(2)+(pb[1]-pa[1]).powi(2)).sqrt()
-        };
-        let npe = mesh.element_nodes(info.elem).len();
-        for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
-            let xi = xr[0]; let w = wr*elen;
-            let (rx,ry) = if npe==3 {edge_xi_tri(info.local_edge,xi)} else {edge_xi_quad(info.local_edge,xi)};
-            tri.eval_basis(&[rx,ry], &mut phi);
-            for i in 0..nt { coo.add(dofs[i], td, w*phi[i]); }
-        }
-    }
-
-    // Interior faces
-    for (fi, (el, er, ll, lr, nodes)) in trace.interior_faces.iter().enumerate() {
-        let fidx = trace.interior_first + fi;
-        let td = trace.face_offset[fidx];
-        let elen = {
-            let pa = mesh.node_coords(nodes[0]); let pb = mesh.node_coords(nodes[1]);
-            ((pb[0]-pa[0]).powi(2)+(pb[1]-pa[1]).powi(2)).sqrt()
-        };
-        let dl: Vec<usize> = l2.element_dofs(*el).iter().map(|&d| d as usize).collect();
-        let dr: Vec<usize> = l2.element_dofs(*er).iter().map(|&d| d as usize).collect();
-        let npe_l = mesh.element_nodes(*el).len();
-        let npe_r = mesh.element_nodes(*er).len();
-        for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
-            let xi = xr[0]; let w = wr*elen;
-            let (rxl,ryl) = if npe_l==3 {edge_xi_tri(*ll,xi)} else {edge_xi_quad(*ll,xi)};
-            tri.eval_basis(&[rxl,ryl], &mut phi);
-            for i in 0..nt { coo.add(dl[i], td, w*phi[i]); }
-            let (rxr,ryr) = if npe_r==3 {edge_xi_tri(*lr,1.0-xi)} else {edge_xi_quad(*lr,1.0-xi)};
-            tri.eval_basis(&[rxr,ryr], &mut phi);
-            for i in 0..nt { coo.add(dr[i], td, -w*phi[i]); }
-        }
-    }
-    coo.into_csr()
-}
-
-// ─── Shat = Bhatᵀ · S⁻¹ · Bhat ───────────────────────────────────────────────
-
-fn build_shat(bhat: &CsrMatrix<f64>, sinv: &SinvData, ntrace: usize) -> CsrMatrix<f64> {
-    let mut coo = CooMatrix::new(ntrace, ntrace);
-    let nt = sinv.n_test;
-    for (block, dofs) in sinv.elem_blocks.iter().zip(sinv.elem_dofs.iter()) {
-        let cols: Vec<Vec<(usize,f64)>> = (0..nt).map(|i| {
-            let mut v = Vec::new();
-            for p in bhat.row_ptr[dofs[i]]..bhat.row_ptr[dofs[i]+1] {
-                if bhat.values[p].abs() > 1e-30 { v.push((bhat.col_idx[p] as usize, bhat.values[p])); }
-            }
-            v
-        }).collect();
-        for i in 0..nt { for j in 0..nt {
-            let sij = block[i*nt+j];
-            if sij.abs() < 1e-30 { continue; }
-            for &(ci,vi) in &cols[i] { for &(cj,vj) in &cols[j] { coo.add(ci, cj, sij*vi*vj); } }
-        }}
-    }
-    coo.into_csr()
-}
-
-// ─── Dense inverse ────────────────────────────────────────────────────────────
-
-fn solve_dense_inv(n: usize, a: &mut [f64]) {
-    let a0 = a.to_vec();
-    let mut inv = vec![0.0; n*n];
-    for col in 0..n {
-        let mut ac = a0.clone();
-        let mut b = vec![0.0; n]; b[col] = 1.0;
-        for c in 0..n {
-            let mut best = c; let mut bv = ac[c*n+c].abs();
-            for r in (c+1)..n { let v = ac[r*n+c].abs(); if v > bv { bv=v; best=r; } }
-            if bv < 1e-30 { continue; }
-            if best != c { for k in c..n { ac.swap(c*n+k, best*n+k); } b.swap(c, best); }
-            let piv = ac[c*n+c];
-            for r in (c+1)..n { let f = ac[r*n+c]/piv;
-                for k in c..n { ac[r*n+k] -= f*ac[c*n+k]; } b[r] -= f*b[c]; }
-        }
-        for r in (0..n).rev() {
-            let mut s = b[r];
-            for k in (r+1)..n { s -= ac[r*n+k]*inv[k*n+col]; }
-            inv[r*n+col] = if ac[r*n+r].abs() > 1e-30 { s / ac[r*n+r] } else { 0.0 };
-        }
-    }
-    a.copy_from_slice(&inv);
-}
-
-// ─── Block CG preconditioner ─────────────────────────────────────────────────
-
-/// CG solve with zero initial guess, returning residual norm.
-fn cg_solve(mat: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], max_iter: usize, rtol: f64) -> f64 {
-    let n = mat.nrows;
-    x.fill(0.0); // zero initial guess (MFEM iterative_mode=false)
-    let mut r = b.to_vec();
-    // A = mat, start with x=0 → r = b - A*0 = b
-    let bnrm = (0..n).fold(0.0, |s,i| s + b[i]*b[i]).sqrt().max(1e-300);
-    let tol = (rtol * bnrm).max(1e-300);
-    let mut p = r.clone();
-    let mut rr = (0..n).fold(0.0, |s,i| s + r[i]*r[i]);
-    for _it in 0..max_iter {
-        if rr.sqrt() < tol { return rr.sqrt(); }
-        // Ap = A * p
-        let mut ap = vec![0.0; n];
-        for i in 0..n { for pp in mat.row_ptr[i]..mat.row_ptr[i+1] { ap[i] += mat.values[pp] * p[mat.col_idx[pp] as usize]; } }
-        let pap = (0..n).fold(0.0, |s,i| s + p[i]*ap[i]).max(1e-300);
-        let alpha = rr / pap;
-        for i in 0..n { x[i] += alpha * p[i]; r[i] -= alpha * ap[i]; }
-        let rr_new = (0..n).fold(0.0, |s,i| s + r[i]*r[i]);
-        let beta = rr_new / rr.max(1e-300);
-        rr = rr_new;
-        for i in 0..n { p[i] = r[i] + beta * p[i]; }
-    }
-    rr.sqrt()
-}
-
-fn block_cg_prec(r: &[f64], z: &mut [f64], sizes: &[usize], mats: &[&CsrMatrix<f64>], rtol: f64, max_it: usize) {
-    let mut off = 0;
-    for (k, &sz) in sizes.iter().enumerate() {
-        cg_solve(mats[k], &r[off..off+sz], &mut z[off..off+sz], max_it, rtol);
-        off += sz;
     }
 }
 
@@ -396,202 +59,219 @@ fn block_cg_prec(r: &[f64], z: &mut [f64], sizes: &[usize], mats: &[&CsrMatrix<f
 
 fn main() {
     let args = Args::parse();
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Read mesh ──────────────────────────────────────────────────────────
     let mfem = read_mfem_file(&args.mesh).expect("read mesh");
     let mesh: Mesh<2> = mfem.mesh2d.expect("2D mesh");
     let dim = 2;
+    eprintln!("  Mesh: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
 
-    // 3. Refine
-    let rl = { let ne = mesh.n_elems() as f64;
-        (10000.0/ne).ln().max(0.0)/(2.0_f64).ln()/dim as f64 } as usize;
-    let mesh = if rl > 0 { let mut m = mesh; for _ in 0..rl { m = refine_uniform(&m); }
-        eprintln!("  Refined: {} nodes, {} elements ({} lvl)", m.n_nodes(), m.n_elems(), rl); m
-    } else { mesh };
+    // ── 2. Refine ─────────────────────────────────────────────────────────────
+    let target_elems = 10000usize;
+    let rl = {
+        let ne = mesh.n_elems() as f64;
+        (target_elems as f64 / ne).ln().max(0.0) / (2.0_f64).ln() / dim as f64
+    } as usize;
+    // match MFEM ex8 refinement (~10000 elements)
+    let mesh = if rl > 0 {
+        let mut m = mesh;
+        for _ in 0..rl {
+            m = refine_uniform(&m);
+        }
+        eprintln!(
+            "  Refined: {} nodes, {} elements ({} lvl)",
+            m.n_nodes(),
+            m.n_elems(),
+            rl
+        );
+        m
+    } else {
+        mesh
+    };
 
-    // 4. Spaces
+    // ── 3. Spaces ─────────────────────────────────────────────────────────────
     let t_order = args.order;
-    let tr_order = if args.order > 0 { args.order-1 } else { 0 };
+    let tr_order = if args.order > 0 { args.order - 1 } else { 0 };
     let mut te_order = args.order;
-    if dim==2 && (args.order%2==0 || args.order>1) { te_order += 1; }
-    if te_order < t_order { eprintln!("  Warning: test not enriched"); }
+    if dim == 2 && (args.order % 2 == 0 || args.order > 1) {
+        te_order += 1;
+    }
+    if te_order < t_order {
+        eprintln!("  Warning: test space not enriched enough for primal trial space");
+    }
 
-    use fem_space::fe_space::FESpace;
     let x0 = H1Space::new(mesh.clone(), t_order);
     let test = L2Space::new(mesh.clone(), te_order);
-    let trace = build_all_faces(&mesh, tr_order);
+    let trace = DpgTraceSpace::new(mesh.clone(), tr_order);
 
-    let s0 = x0.n_dofs(); let s1 = trace.n_dofs; let st = test.n_dofs();
+    let s0 = x0.n_dofs();
+    let s1 = trace.n_dofs();
+    let st = test.n_dofs();
+
     println!("\nNumber of Unknowns:");
     println!("  Trial space,     X0   : {s0} (order {t_order})");
     println!("  Interface space, Xhat : {s1} (order {tr_order})");
     println!("  Test space,      Y    : {st} (order {te_order})\n");
 
-    // 5. F on test space
-    let qo = (te_order as u8*2+2).max(3);
-    let f_test = Assembler::assemble_linear(&test, &[&DomainSourceIntegrator::new(|_|1.0)], qo);
+    // ── 4. Linear form F on test space ────────────────────────────────────────
+    let qo = (te_order as u8 * 2 + 2).max(3);
+    let f_test = Assembler::assemble_linear(&test, &[&DomainSourceIntegrator::new(|_| 1.0)], qo);
 
-    // 6. B0 (trial × test diffusion)
+    // ── 5. B0 (trial × test diffusion) ────────────────────────────────────────
     let ess_tags: Vec<i32> = mesh.unique_boundary_tags();
     let dm = x0.dof_manager();
-    let ess_dofs: Vec<u32> = boundary_dofs(&mesh as &dyn MeshTopology, dm, &ess_tags);
+    let ess_dofs: Vec<u32> = boundary_dofs(&mesh as &dyn fem_mesh::topology::MeshTopology, dm, &ess_tags);
+    let ess_usize: Vec<usize> = ess_dofs.iter().map(|&d| d as usize).collect();
+
     let mut b0 = MixedAssembler::assemble_bilinear(&test, &x0, &[&MixedDiffusion], qo);
 
-    // EliminateTrialEssentialBC for homogeneous BC: zero BC columns of B0
-    // For the normal equation A = B^T * S^{-1} * B, zeroing column j of B0
-    // removes the contribution of x0[j] from B*x, so x0[j] stays at its initial 0.
+    // BC: zero columns of B0 for essential DOFs (homogeneous Dirichlet)
     for &d in &ess_dofs {
         let c = d as usize;
-        for row in 0..b0.nrows { for p in b0.row_ptr[row]..b0.row_ptr[row+1] {
-            if b0.col_idx[p] as usize == c { b0.values[p] = 0.0; }
-        }}
+        for row in 0..b0.nrows {
+            for p in b0.row_ptr[row]..b0.row_ptr[row + 1] {
+                if b0.col_idx[p] as usize == c {
+                    b0.values[p] = 0.0;
+                }
+            }
+        }
     }
 
-    // 7. Bhat (trace × test face coupling)
-    let qf = (te_order as u8*2).max(2);
-    let bhat = assemble_bhat(&mesh, &test, &trace, te_order, qf);
+    // ── 6. Bhat (trace × test face coupling) ──────────────────────────────────
+    let qf = (te_order as u8 * 2).max(2);
+    let bhat = assemble_bhat(&test, &trace, qf);
 
-    // 8. Sinv = (M+K)^{-1}
-    let sinv = build_sinv(&test, qo);
+    // ── 7. S^{-1} = (M + K)^{-1} on test space ────────────────────────────────
+    let sinv = SinvBuilder::build(&test, qo);
 
-    // 9. S0 (trial stiffness with BC)
-    let mut s0_mat = Assembler::assemble_bilinear(&x0, &[&DiffusionIntegrator{kappa:1.0}], qo);
+    // ── 8. S0 (trial stiffness with BC) ───────────────────────────────────────
+    let mut s0_mat = Assembler::assemble_bilinear(&x0, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
     let mut zr = vec![0.0; s0];
     apply_dirichlet(&mut s0_mat, &mut zr, &ess_dofs, &vec![0.0; ess_dofs.len()]);
 
-    // 10. RHS: b = B^T * S^{-1} * F
-    let mut sf = vec![0.0; st]; apply_sinv(&sinv, &f_test, &mut sf);
+    // ── 9. RHS: b = B^T * S^{-1} * F ──────────────────────────────────────────
+    let mut sf = vec![0.0; st];
+    sinv.apply(&f_test, &mut sf);
     let ntot = s0 + s1;
     let mut rhs = vec![0.0; ntot];
-    for i in 0..s0 { rhs[i] = b0_t(&b0, i, &sf); }
-    for i in 0..st { let v = sf[i]; if v.abs()<1e-30 {continue;}
-        for p in bhat.row_ptr[i]..bhat.row_ptr[i+1] { rhs[s0+bhat.col_idx[p] as usize] += bhat.values[p]*v; }
+    // b0^T * sf
+    for i in 0..s0 {
+        let mut v = 0.0;
+        for row in 0..b0.nrows {
+            for p in b0.row_ptr[row]..b0.row_ptr[row + 1] {
+                if b0.col_idx[p] as usize == i {
+                    v += b0.values[p] * sf[row];
+                    break;
+                }
+            }
+        }
+        rhs[i] = v;
     }
-    for &d in &ess_dofs { rhs[d as usize] = 0.0; }
+    // bhat^T * sf
+    for i in 0..st {
+        let v = sf[i];
+        if v.abs() < 1e-30 {
+            continue;
+        }
+        for p in bhat.row_ptr[i]..bhat.row_ptr[i + 1] {
+            rhs[s0 + bhat.col_idx[p] as usize] += bhat.values[p] * v;
+        }
+    }
+    for &d in &ess_dofs {
+        rhs[d as usize] = 0.0;
+    }
 
-    // 11. Shat = Bhat^T * S^{-1} * Bhat
+    // ── 10. Shat = Bhat^T * S^{-1} * Bhat (preconditioner block) ──────────────
     let shat = build_shat(&bhat, &sinv, s1);
 
-    // 12. Preconditioner
-    let pcfg = SolverConfig{rtol:1e-3,max_iter:200,verbose:false,..Default::default()};
-    let bsizes = vec![s0, s1];
-    let pmats = vec![&s0_mat as &CsrMatrix<f64>, &shat as &CsrMatrix<f64>];
-
-    // 13. PCG
-    let mut x = vec![0.0; ntot];
-    let a_op = |v: &[f64], w: &mut [f64]| {
-        w.fill(0.0);
-        // 1. tmp0 = B * v = B0*v0 + Bhat*v1
-        let mut t0 = vec![0.0; st];
-        for r in 0..st {
-            let mut s = 0.0;
-            for p in b0.row_ptr[r]..b0.row_ptr[r+1] { s += b0.values[p]*v[b0.col_idx[p] as usize]; }
-            for p in bhat.row_ptr[r]..bhat.row_ptr[r+1] { s += bhat.values[p]*v[s0+bhat.col_idx[p] as usize]; }
-            t0[r] = s;
+    // ── 11. Block-diagonal preconditioner ──────────────────────────────────────
+    // MFEM uses UMFPack direct solves for each block.  We approximate with
+    // inner CG solves (zero initial guess, matching MFEM iterative_mode=false).
+    let inner_cfg = SolverConfig {
+        rtol: 1e-3,
+        max_iter: 200,
+        verbose: false,
+        ..Default::default()
+    };
+    let s0_ref = &s0_mat;
+    let shat_ref = &shat;
+    let ess_pc = ess_usize.clone();
+    let precond = move |r: &[f64], z: &mut [f64]| {
+        // Block 0: S0^{-1} via CG with zero initial guess
+        z[..s0].fill(0.0);
+        fem_solver::solve_cg_operator(s0, s0, |x, y| s0_ref.spmv(x, y), &r[..s0], &mut z[..s0], &inner_cfg).ok();
+        // Block 1: Shat^{-1} via CG with zero initial guess
+        if s1 > 0 {
+            z[s0..].fill(0.0);
+            fem_solver::solve_cg_operator(s1, s1, |x, y| shat_ref.spmv(x, y), &r[s0..], &mut z[s0..], &inner_cfg).ok();
         }
-        // 2. t1 = S^{-1} * t0
-        let mut t1 = vec![0.0; st];
-        apply_sinv(&sinv, &t0, &mut t1);
-        // 3. w0 = B0^T * t1 (single pass)
-        for r in 0..st {
-            let tv = t1[r];
-            if tv.abs() < 1e-30 { continue; }
-            for p in b0.row_ptr[r]..b0.row_ptr[r+1] { w[b0.col_idx[p] as usize] += b0.values[p]*tv; }
-        }
-        // 4. w1 = Bhat^T * t1 (single pass)
-        for r in 0..st {
-            let tv = t1[r];
-            if tv.abs() < 1e-30 { continue; }
-            for p in bhat.row_ptr[r]..bhat.row_ptr[r+1] { w[s0+bhat.col_idx[p] as usize] += bhat.values[p]*tv; }
-        }
-        // BC
-        for &d in &ess_dofs { w[d as usize] = 0.0; }
+        for &d in &ess_pc { if d < s0 { z[d] = 0.0; } }
     };
 
-    let mut iter = 0usize;
-    let ess_set: std::collections::HashSet<usize> = ess_dofs.iter().map(|&d| d as usize).collect();
-    let bsizes = vec![s0, s1];
-    let pmats = vec![&s0_mat as &CsrMatrix<f64>, &shat as &CsrMatrix<f64>];
-    let res = pcg(ntot, &a_op, &rhs, &mut x, 200, 1e-12, 0.0,
-        |r,z| { block_cg_prec(r,z,&bsizes,&pmats,1e-3,200); for &d in &ess_dofs {z[d as usize]=0.0;} },
-        &ess_set, &mut iter,
-    );
-    println!("PCG: iterations={iter}, final residual={res:.3e}");
+    // ── 12. Normal equation operator A = B^T * S^{-1} * B ─────────────────────
+    let op = DpgNormalOperator::new(b0, bhat, sinv, ess_usize.clone());
+    let n_tot = op.n_total();
 
-    // 14. DPG residual ||Bx-F||_{S^{-1}}
-    let mut ls = vec![0.0; st];
-    for r in 0..st {
-        let mut s = 0.0;
-        for p in b0.row_ptr[r]..b0.row_ptr[r+1] { s += b0.values[p]*x[b0.col_idx[p] as usize]; }
-        for p in bhat.row_ptr[r]..bhat.row_ptr[r+1] { s += bhat.values[p]*x[s0+bhat.col_idx[p] as usize]; }
-        ls[r] = s - f_test[r];
+    // ── 13. PCG solve ─────────────────────────────────────────────────────────
+    let mut x = vec![0.0; n_tot];
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 2000,
+        verbose: false,
+        ..Default::default()
+    };
+    let result = fem_solver::solve_pcg_operator_precond(n_tot, op.as_closure(), &rhs, &mut x, precond, &cfg);
+    if let Ok(ref r) = result {
+        println!("PCG: iterations={}, final residual={:.3e}", r.iterations, r.final_residual);
+    } else {
+        eprintln!("PCG: solver warning, using partial solution");
     }
-    let mut sls = vec![0.0; st]; apply_sinv(&sinv, &ls, &mut sls);
-    let dres: f64 = ls.iter().zip(sls.iter()).map(|(a,b)| a*b).sum::<f64>().sqrt();
+
+    // ── 14. DPG residual ||Bx - F||_{S^{-1}} ──────────────────────────────────
+    let dres = op.compute_residual(&f_test, &x);
     println!("\n|| B0*x0 + Bhat*xhat - F ||_{{S^{{-1}}}} = {dres:.7}");
 
-    // 15. Save
-    let mut mf = File::create("refined.mesh").unwrap();
-    fem_io::mfem::write_mfem(&mut mf, &mesh, None).unwrap();
-    let mut sf = File::create("sol.gf").unwrap();
-    for i in 0..s0 { writeln!(sf, "{:.14e}", x[i]).unwrap(); }
-    eprintln!("  Wrote refined.mesh, sol.gf");
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-fn b0_t(b0: &CsrMatrix<f64>, col: usize, y: &[f64]) -> f64 {
-    let mut s = 0.0;
-    for row in 0..b0.nrows { for p in b0.row_ptr[row]..b0.row_ptr[row+1] {
-        if b0.col_idx[p] as usize == col { s += b0.values[p]*y[row]; break; }
-    }}
-    s
-}
-
-// ─── PCG ──────────────────────────────────────────────────────────────────────
-
-fn pcg(
-    n: usize, a: &dyn Fn(&[f64],&mut [f64]), b: &[f64], x: &mut [f64],
-    mi: usize, rtol: f64, atol: f64,
-    p: impl Fn(&[f64],&mut [f64]), ess: &std::collections::HashSet<usize>,
-    iter: &mut usize,
-) -> f64 {
-    let bn = dot(b,b).sqrt().max(1e-300); let tol = (rtol*bn).max(atol);
-    // Ensure x has BC enforced
-    for &d in ess { x[d] = 0.0; }
-    let mut r = vec![0.0; n]; a(x, &mut r); for i in 0..n { r[i] = b[i]-r[i]; }
-    let mut z = vec![0.0; n]; p(&r, &mut z);
-    let mut pk = z.clone(); let mut rz = dot(&r,&z);
-    for it in 1..=mi {
-        *iter = it;
-        let mut ap = vec![0.0; n]; a(&pk, &mut ap);
-        let mut pap = dot(&pk,&ap); if pap <= 0.0 && pap.abs() < 1e-30 { pap = 1e-30; }
-        let al = rz / pap;
-        for i in 0..n { x[i] += al*pk[i]; }
-        for &d in ess { x[d] = 0.0; } // enforce BC
-        for i in 0..n { r[i] -= al*ap[i]; }
-        let res = dot(&r,&r).sqrt();
-        if res < tol { return res; }
-        p(&r, &mut z); let rzn = dot(&r,&z); let be = rzn / rz.max(1e-30);
-        rz = rzn; for i in 0..n { pk[i] = z[i] + be*pk[i]; }
+    // ── 15. Output ────────────────────────────────────────────────────────────
+    {
+        let mut mf = File::create("refined.mesh").unwrap();
+        fem_io::mfem::write_mfem(&mut mf, &mesh, None).unwrap();
+        let mut sf = File::create("sol.gf").unwrap();
+        for i in 0..s0 {
+            writeln!(sf, "{:.14e}", x[i]).unwrap();
+        }
     }
-    let mut ax = vec![0.0; n]; a(x, &mut ax);
-    let mut res = 0.0; for i in 0..n { let d = b[i]-ax[i]; res += d*d; }
-    res.sqrt()
+    eprintln!("  Wrote refined.mesh, sol.gf");
+    eprintln!("  Total time: {:.3}s", t0.elapsed().as_secs_f64());
+    eprintln!("  Done.");
 }
-
-fn dot(a: &[f64], b: &[f64]) -> f64 { a.iter().zip(b).map(|(x,y)| x*y).sum() }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
-struct Args { mesh: String, order: u8 }
+struct Args {
+    mesh: String,
+    order: u8,
+}
+
 impl Args {
     fn parse() -> Self {
-        let mut mesh = "../data/star.mesh".to_string(); let mut order = 1u8;
+        let mut mesh = "../data/star.mesh".to_string();
+        let mut order = 1u8;
         let mut it = std::env::args().skip(1);
-        while let Some(arg) = it.next() { match arg.as_str() {
-            "-m"|"--mesh" => { if let Some(v)=it.next() { mesh=v; } }
-            "-o"|"--order" => { order=it.next().and_then(|s|s.parse().ok()).unwrap_or(1); }
-            _ => {}
-        }}
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "-m" | "--mesh" => {
+                    if let Some(v) = it.next() {
+                        mesh = v;
+                    }
+                }
+                "-o" | "--order" => {
+                    order = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                }
+                _ => {}
+            }
+        }
         Args { mesh, order }
     }
 }

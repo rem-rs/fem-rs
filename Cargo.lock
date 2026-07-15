@@ -711,6 +711,7 @@ dependencies = [
  "fem-regression",
  "fem-solver",
  "fem-space",
+ "libm",
  "linlvo",
  "nalgebra 0.33.3",
  "proptest",

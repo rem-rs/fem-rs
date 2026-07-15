@@ -13,6 +13,7 @@ fem-solver  = { path = "../solver" }
 fem-amg     = { path = "../amg" }
 linlvo      = { git = "https://github.com/rem-rs/linlvo.git" }
 nalgebra    = { workspace = true }
+libm        = "0.2"
 thiserror   = { workspace = true }
 fem-linalg-gpu = { path = "../linalg-gpu", optional = true }
 wgpu           = { version = "27", optional = true }

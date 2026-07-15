@@ -121,11 +121,11 @@ fn main() {
     }
     a=coo2.into_csr();
 
-    // Check RHS for interior H1 nodes
-    let h1_rhs:Vec<f64>=(0..nn).filter(|&i|!bdr[i]).map(|i|rhs[i]).collect();
-    let d:Vec<f64>=(0..nx).map(|i|{for p in a.row_ptr[i]..a.row_ptr[i+1]{if a.col_idx[p]as usize==i{return 1.0/a.values[p].max(1e-30);}}1.0}).collect();
+    // Block-diagonal preconditioner: S0 (H1 diffusion), Shat (trace)
+    let s0 = assemble_s0(&mesh, nn);
+    let shat = assemble_shat(&eBh, &eS, &eedge, ne, npe, nf);
     let mut x=vec![0.0;nx];
-    let (it,res)=pcg(&a,&rhs,&mut x,&d,1e-12,10000);
+    let (it,res)=pcg_block(&a,&rhs,&mut x,&s0,&shat,nn,1e-12,200);
     println!("PCG: {} iters, resid {:.3e}",it,res);
     println!("||x0||={:.6e} ||xhat||={:.6e}",(0..nn).map(|i|x[i]*x[i]).sum::<f64>().sqrt(),(nn..nx).map(|i|x[i]*x[i]).sum::<f64>().sqrt());
     eprintln!("Time: {:.3}s",t0.elapsed().as_secs_f64());
@@ -136,6 +136,69 @@ fn inv_n(a:&[Vec<f64>])->Vec<Vec<f64>>{
     let mut x=vec![vec![0.0;2*n];n];for i in 0..n{for j in 0..n{x[i][j]=a[i][j];}x[i][n+i]=1.0;}
     for c in 0..n{let p=(c..n).find(|&r|x[r][c].abs()>1e-14).unwrap_or(c);x.swap(c,p);let ip=1.0/x[c][c];for j in 0..2*n{x[c][j]*=ip;}for r in 0..n{if r!=c{let f=x[r][c];for j in 0..2*n{x[r][j]-=f*x[c][j];}}}}
     (0..n).map(|i|(0..n).map(|j|x[i][n+j]).collect()).collect()
+}
+
+fn assemble_s0(mesh:&Mesh<2>,nn:usize)->Vec<Vec<f64>>{
+    use fem_element::{lagrange::TriP1,ReferenceElement};let tri=TriP1;let qr=tri.quadrature(3);
+    let mut a=vec![vec![0.0;nn];nn];
+    for e in 0..mesh.n_elems() as u32{let v=mesh.elem_nodes(e);
+        let x0=mesh.node_coords(v[0]);let x1=mesh.node_coords(v[1]);let x2=mesh.node_coords(v[2]);
+        let j00=x1[0]-x0[0];let j01=x2[0]-x0[0];let j10=x1[1]-x0[1];let j11=x2[1]-x0[1];
+        let det=(j00*j11-j01*j10).abs();let ijd=1.0/(j00*j11-j01*j10);
+        let mut ph=vec![0.0;3];let mut dph=vec![0.0;6];
+        for qi in 0..qr.points.len(){let xi=&qr.points[qi];let w=qr.weights[qi]*det;
+            tri.eval_basis(xi,&mut ph);tri.eval_grad_basis(xi,&mut dph);
+            for i in 0..3{for j in 0..3{
+                let gi=(dph[i*2]*j11-dph[i*2+1]*j10)*ijd;let gj=(dph[j*2]*j11-dph[j*2+1]*j10)*ijd;
+                a[v[i]as usize][v[j]as usize]+=(gi*gj)*w;
+            }}
+        }
+    }
+    let mut bdr=vec![false;nn];for f in 0..mesh.n_boundary_faces() as u32{for&n in mesh.face_nodes(f){bdr[n as usize]=true;}}
+    for i in 0..nn{if bdr[i]{for j in 0..nn{a[i][j]=0.0;a[j][i]=0.0;}a[i][i]=1.0;}}
+    a
+}
+
+fn assemble_shat(eBh:&[Vec<Vec<f64>>],eS:&[Vec<Vec<f64>>],eedge:&[Vec<usize>],ne:usize,npe:usize,nf:usize)->Vec<Vec<f64>>{
+    let mut s=vec![vec![0.0;nf];nf];
+    for e in 0..ne{let sinv=inv_n(&eS[e]);let mut t=vec![vec![0.0;3];npe];
+        for i in 0..npe{for j in 0..3{for k in 0..npe{t[i][j]+=sinv[i][k]*eBh[e][k][j];}}}
+        for i in 0..3{for j in 0..3{for k in 0..npe{for l in 0..npe{s[eedge[e][i]][eedge[e][j]]+=eBh[e][k][i]*t[l][j];}}}}
+    }
+    s
+}
+
+fn pcg_block(a:&CsrMatrix<f64>,b:&[f64],x:&mut[f64],s0:&[Vec<f64>],shat:&[Vec<f64>],nn:usize,rtol:f64,mi:usize)->(usize,f64){
+    let n=b.len();if n==0{return(0,0.0);}
+    let mut r=vec![0.0;n];for i in 0..n{let mut s=0.0;for p in a.row_ptr[i]..a.row_ptr[i+1]{s+=a.values[p]*x[a.col_idx[p]as usize];}r[i]=b[i]-s;}
+    let mut z=vec![0.0;n];cg_dense(&s0,&r[..nn],&mut z[..nn],200);cg_dense(&shat,&r[nn..],&mut z[nn..],200);
+    let mut p=z.clone();let mut rz:f64=r.iter().zip(z.iter()).map(|(ri,zi)|ri*zi).sum();
+    let bn=b.iter().map(|v|v*v).sum::<f64>().sqrt().max(1e-30);
+    for it in 1..=mi{
+        let mut ad=vec![0.0;n];for i in 0..n{for pj in a.row_ptr[i]..a.row_ptr[i+1]{ad[i]+=a.values[pj]*p[a.col_idx[pj]as usize];}}
+        let pap:f64=p.iter().zip(ad.iter()).map(|(pi,ai)|pi*ai).sum();
+        if pap.abs()<1e-30{return(it,r.iter().map(|v|v*v).sum::<f64>().sqrt());}
+        let al=rz/pap;for i in 0..n{x[i]+=al*p[i];r[i]-=al*ad[i];}
+        let rs=r.iter().map(|v|v*v).sum::<f64>().sqrt();
+        if rs<rtol*bn{return(it,rs);}
+        cg_dense(&s0,&r[..nn],&mut z[..nn],200);cg_dense(&shat,&r[nn..],&mut z[nn..],200);
+        let nnv:f64=r.iter().zip(z.iter()).map(|(ri,zi)|ri*zi).sum();
+        if rz.abs()<1e-30{return(it,rs);}
+        let bt=nnv/rz;for i in 0..n{p[i]=z[i]+bt*p[i];}rz=nnv;
+    }
+    (mi,r.iter().map(|v|v*v).sum::<f64>().sqrt())
+}
+
+fn cg_dense(a:&[Vec<f64>],b:&[f64],x:&mut[f64],mi:usize){
+    let n=b.len();if n==0{return;}
+    let mut r=vec![0.0;n];for i in 0..n{let mut s=0.0;for j in 0..n{s+=a[i][j]*x[j];}r[i]=b[i]-s;}
+    let mut p=r.clone();let mut rr:f64=r.iter().map(|v|v*v).sum();
+    for _ in 0..mi{if rr<1e-30{break;}
+        let mut ap=vec![0.0;n];for i in 0..n{for j in 0..n{ap[i]+=a[i][j]*p[j];}}
+        let pap:f64=p.iter().zip(ap.iter()).map(|(pi,ai)|pi*ai).sum();if pap.abs()<1e-30{break;}
+        let al=rr/pap;for i in 0..n{x[i]+=al*p[i];r[i]-=al*ap[i];}
+        let nn:f64=r.iter().map(|v|v*v).sum();let bt=nn/rr;for i in 0..n{p[i]=r[i]+bt*p[i];}rr=nn;
+    }
 }
 
 fn pcg(a:&CsrMatrix<f64>,b:&[f64],x:&mut[f64],d:&[f64],rtol:f64,mi:usize)->(usize,f64){

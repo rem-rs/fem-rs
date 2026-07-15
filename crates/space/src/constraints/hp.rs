@@ -25,7 +25,6 @@
 //! performs this expansion implicitly via its recursive `expand_dof` helper.
 
 use std::collections::HashMap;
-use fem_linalg::CooMatrix;
 use crate::constraints::{LinearConstraint, apply_linear_constraints, recover_linear_values};
 use fem_mesh::HangingNodeConstraint;
 
@@ -166,7 +165,6 @@ pub fn build_edge_hp_constraints(
         // Compute interpolation weights from coarse edge DOFs
         let mut parents = Vec::new();
         for ci in 0..coarse_dofs.len() {
-            let x_ci = coarse_nodes[ci];
             let w = lagrange_basis(ci, x_coarse, &coarse_nodes);
             if w.abs() > 1e-30 {
                 parents.push((coarse_dofs[ci] as usize, w));
@@ -321,6 +319,7 @@ pub fn resolve_constraint_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_linalg::CooMatrix;
 
     // ── Lagrange basis tests ───────────────────────────────────────────────
 
@@ -582,7 +581,7 @@ mod tests {
                 let start = mat.row_ptr[i];
                 let end = mat.row_ptr[i + 1];
                 let mut s = rhs[i];
-                let mut diag = 1.0;
+                let mut diag: f64 = 1.0;
                 for p in start..end {
                     let j = mat.col_idx[p] as usize;
                     if j == i { diag = mat.values[p]; }
@@ -791,7 +790,7 @@ mod tests {
                 let start = mat.row_ptr[i];
                 let end = mat.row_ptr[i + 1];
                 let mut s = rhs[i];
-                let mut diag = 1.0;
+                let mut diag: f64 = 1.0;
                 for p in start..end {
                     let j = mat.col_idx[p] as usize;
                     if j == i { diag = mat.values[p]; }
@@ -834,7 +833,7 @@ mod tests {
                 let start = mat.row_ptr[i];
                 let end = mat.row_ptr[i + 1];
                 let mut s = rhs[i];
-                let mut diag = 1.0;
+                let mut diag: f64 = 1.0;
                 for p in start..end {
                     let j = mat.col_idx[p] as usize;
                     if j == i { diag = mat.values[p]; }
@@ -886,7 +885,7 @@ mod tests {
                 let start = mat.row_ptr[i];
                 let end = mat.row_ptr[i + 1];
                 let mut s = rhs[i];
-                let mut diag = 1.0;
+                let mut diag: f64 = 1.0;
                 for p in start..end {
                     let j = mat.col_idx[p] as usize;
                     if j == i { diag = mat.values[p]; }
