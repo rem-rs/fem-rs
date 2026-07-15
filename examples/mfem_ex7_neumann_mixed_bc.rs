@@ -81,10 +81,11 @@ fn main() {
     let mut u = vec![0.0; space.n_dofs()];
 
     // ── 7-8. Bilinear form + solve ──────────────────────────────────────────
+    let quad = (order as u8) * 2;
     let mat = Assembler::assemble_bilinear(&space, &[
         &DiffusionIntegrator{kappa:1.0},
         &MassIntegrator{rho:1.0},
-    ], (order as u8)*2);
+    ], quad);
 
     let cfg = SolverConfig{rtol:1e-12,max_iter:200,verbose:false,..SolverConfig::default()};
     let res = solve_pcg_gssmoother(&mat, &rhs, &mut u, &cfg).expect("PCG");
