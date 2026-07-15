@@ -66,8 +66,12 @@ fn main() {
     }
     eprintln!("  After refinement: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
 
-    // ── 3-4. H1 space ──────────────────────────────────────────────────────
+    // ── 3. Set up high-order geometry (MFEM SetNodalFESpace) ────────────────
+    // Disabled: curved assembly has a bug producing worse L² than flat P1.
+    // See issue #TBD — surface_jacobian with high-order elements needs debugging.
     let order = args.order;
+
+    // ── 4. H1 space ─────────────────────────────────────────────────────────
     let space = H1Space::new(mesh.clone(), order);
     println!("Number of unknowns: {}", space.n_dofs());
 

@@ -340,6 +340,11 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let elem_dofs = self.space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
 
+            // Check for high-order geometry (curved surface) — currently disabled
+            // due to a bug in the curved surface Jacobian metric. Use flat P1 only.
+            let g_order = mesh.geom_order();
+            let use_ho_geo = false;
+
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let x0 = mesh.node_coords(nodes[0]);
 
@@ -356,24 +361,66 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                 (vec![], vec![])
             };
 
+            // High-order geometry element for curved surface integration.
+            let geo_elem = if use_ho_geo {
+                Some(ref_elem_vol(elem_type, g_order))
+            } else {
+                None
+            };
+            let geo_nodes = if use_ho_geo {
+                mesh.geometry_nodes(e)
+            } else {
+                nodes
+            };
+
             let mut phi = vec![0.0; n_ldofs];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
+                let (w, xp) = if use_ho_geo && is_surface {
+                    // Curved surface: use geometry element for metric-based area + coords
+                    let ge = geo_elem.as_ref().unwrap();
+                    let tdim = dim;
+                    let mut grad_geo = vec![0.0; ge.n_dofs() * tdim];
+                    let mut phi_geo = vec![0.0; ge.n_dofs()];
+                    ge.eval_grad_basis(xi, &mut grad_geo);
+                    ge.eval_basis(xi, &mut phi_geo);
+
+                    // 3×2 Jacobian: J[i][d] = Σ_k x_k[i] · ∂φ_k/∂ξ_d
+                    let mut j = vec![0.0; edim * tdim];
+                    let mut xp_curved = vec![0.0; edim];
+                    for k in 0..ge.n_dofs() {
+                        let xk = mesh.geom_coords_of(geo_nodes[k]);
+                        for i in 0..edim {
+                            xp_curved[i] += phi_geo[k] * xk[i];
+                            for d in 0..tdim {
+                                j[i + d * edim] += xk[i] * grad_geo[k * tdim + d];
+                            }
+                        }
+                    }
+                    // Metric G = J^T·J → det(G)
+                    let g00 = j[0]*j[0] + j[1]*j[1] + j[2]*j[2];
+                    let g01 = j[0]*j[3] + j[1]*j[4] + j[2]*j[5];
+                    let g11 = j[3]*j[3] + j[4]*j[4] + j[5]*j[5];
+                    let det_g = (g00 * g11 - g01 * g01).abs();
+                    let measure = det_g.sqrt();
+                    (quad.weights[q] * measure, xp_curved)
+                } else if is_surface {
+                    let w = quad.weights[q] * det_j.abs();
+                    let xp = surface_phys_coords(x0, &e1_3d, &e2_3d, xi);
+                    (w, xp)
+                } else {
+                    let w = quad.weights[q] * det_j.abs();
+                    let xp = phys_coords(x0, &jac, xi, dim);
+                    (w, xp)
+                };
 
                 ref_elem.eval_basis(xi, &mut phi);
 
-                // u_h at this quadrature point.
                 let mut uh = 0.0;
                 for i in 0..n_ldofs {
                     uh += self.dofs[elem_dofs[i] as usize] * phi[i];
                 }
 
-                let xp = if is_surface {
-                    surface_phys_coords(x0, &e1_3d, &e2_3d, xi)
-                } else {
-                    phys_coords(x0, &jac, xi, dim)
-                };
                 let ue = exact(&xp);
 
                 err2 += w * (uh - ue) * (uh - ue);

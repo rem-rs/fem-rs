@@ -115,4 +115,27 @@ pub trait MeshTopology: Send + Sync {
     fn geom_order(&self) -> u8 {
         1
     }
+
+    /// High-order geometry node indices for element `elem`.
+    ///
+    /// Returns the node indices used for the isoparametric geometry mapping.
+    /// For standard affine meshes this is the same as [`element_nodes`].
+    /// For curved/high-order meshes it returns the full set of geometry DOF
+    /// node indices (e.g. 6 for a quadratic triangle).
+    ///
+    /// The length may differ from [`element_nodes`] when the mesh uses
+    /// high-order geometry.
+    fn geometry_nodes(&self, elem: ElemId) -> &[NodeId] {
+        self.element_nodes(elem)
+    }
+
+    /// Coordinates of a high-order geometry node.
+    ///
+    /// For flat (affine) meshes this returns the same as [`node_coords`].
+    /// For curved meshes (with [`GeometryData`](crate::GeometryData)), this
+    /// returns the high-order node coordinate which may differ from the linear
+    /// mesh vertex coordinate.
+    fn geom_coords_of(&self, node: NodeId) -> &[f64] {
+        self.node_coords(node)
+    }
 }

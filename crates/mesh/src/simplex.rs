@@ -231,11 +231,14 @@ impl<const D: usize> Mesh<D> {
             return;
         }
         let p = order as usize;
-        // Only Quad4 for now (extend as needed)
+        assert_eq!(D, 3, "set_curvature: surface mesh requires D = 3");
+
+        if self.elem_type == ElementType::Tri3 {
+            self.set_curvature_tri3(p);
+            return;
+        }
         assert!(self.elem_type == ElementType::Quad4,
-            "set_curvature: only Quad4 is currently supported");
-        assert_eq!(D, 3,
-            "set_curvature: Quad4 surface mesh requires D = 3");
+            "set_curvature: only Tri3 and Quad4 are currently supported");
 
         use std::collections::HashMap;
         use fem_element::lagrange::factory::QuadQk;
@@ -339,6 +342,59 @@ impl<const D: usize> Mesh<D> {
             nodes_per_elem: npe_new,
             coords: geom_coords,
             n_nodes: next_geom as usize,
+        });
+    }
+
+    fn set_curvature_tri3(&mut self, p: usize) {
+        use fem_element::lagrange::TriPk;
+        use fem_element::ReferenceElement;
+        let n_elems = self.n_elems();
+        let npe_new = (p + 1) * (p + 2) / 2; // TriPk DOFs
+
+        // Create geometry element for coordinate interpolation.
+        let tri_pk = TriPk::new(p);
+        let dof_coords = tri_pk.dof_coords();
+
+        // Build geometry connectivity: for each element, interpolate the DOF
+        // node positions from the P1 vertices, then snap to sphere.
+        let mut geo_conn = Vec::with_capacity(n_elems * npe_new);
+        let mut geo_coords = self.coords.clone(); // start with mesh vertex coords
+        let mut next_id = self.n_nodes() as NodeId;
+
+        for e in 0..n_elems as NodeId {
+            let v = self.elem_nodes(e);
+            let (x0, x1, x2) = (self.node_coords(v[0]), self.node_coords(v[1]), self.node_coords(v[2]));
+            for d in 0..npe_new {
+                let xi = &dof_coords[d];
+                // Count how many non-zero entries in xi (0, 1, or 2 for triangle):
+                // vertex (xi has exactly one entry=1), edge (two entries non-zero sum=1), interior
+                // Vertex: a DOF at a reference vertex where exactly one
+                // coordinate is 1 (and the rest are 0), OR all coordinates 0.
+                let all_zero = xi.iter().all(|&c| c.abs() < 1e-12);
+                let has_one = xi.iter().any(|&c| (c-1.0).abs() < 1e-12);
+                if all_zero {
+                    geo_conn.push(v[0]); // vertex 0 at (0,0)
+                } else if has_one {
+                    let vi = xi.iter().position(|&c| (c-1.0).abs() < 1e-12).unwrap_or(0);
+                    geo_conn.push(v[vi]);
+                } else {
+                    // Edge or interior DOF: create a new node at the P1-interpolated position.
+                    let x = x0[0]*(1.0-xi[0]-xi[1]) + x1[0]*xi[0] + x2[0]*xi[1];
+                    let y = x0[1]*(1.0-xi[0]-xi[1]) + x1[1]*xi[0] + x2[1]*xi[1];
+                    let z = x0[2]*(1.0-xi[0]-xi[1]) + x1[2]*xi[0] + x2[2]*xi[1];
+                    geo_conn.push(next_id);
+                    geo_coords.push(x); geo_coords.push(y); geo_coords.push(z);
+                    next_id += 1;
+                }
+            }
+        }
+
+        self.geometry = Some(GeometryData {
+            order: p as u8,
+            conn: geo_conn,
+            nodes_per_elem: npe_new,
+            coords: geo_coords,
+            n_nodes: next_id as usize,
         });
     }
 
@@ -1371,6 +1427,21 @@ impl<const D: usize> Mesh<D> {
             self.coords[base + 1] *= inv_len;
             self.coords[base + 2] *= inv_len;
         }
+        // Also snap geometry node coordinates.
+        if let Some(ref mut geo) = self.geometry {
+            for i in 0..geo.n_nodes {
+                let base = i * 3;
+                if base + 3 <= geo.coords.len() {
+                    let x = geo.coords[base];
+                    let y = geo.coords[base + 1];
+                    let z = geo.coords[base + 2];
+                    let inv_len = 1.0 / (x * x + y * y + z * z).sqrt();
+                    geo.coords[base]     *= inv_len;
+                    geo.coords[base + 1] *= inv_len;
+                    geo.coords[base + 2] *= inv_len;
+                }
+            }
+        }
     }
 }
 
@@ -1403,9 +1474,36 @@ impl<const D: usize> MeshTopology for Mesh<D> {
 
     fn element_tag(&self, elem: ElemId) -> i32 { self.elem_tags[elem as usize] }
 
+    fn geom_order(&self) -> u8 {
+        self.geometry.as_ref().map_or(1, |g| g.order)
+    }
+
+    fn geometry_nodes(&self, elem: ElemId) -> &[NodeId] {
+        if let Some(ref geo) = self.geometry {
+            let e = elem as usize;
+            let off = e * geo.nodes_per_elem;
+            &geo.conn[off..off + geo.nodes_per_elem]
+        } else {
+            self.element_nodes(elem)
+        }
+    }
+
     fn node_coords(&self, node: NodeId) -> &[f64] {
         let off = node as usize * D;
         &self.coords[off..off + D]
+    }
+
+    fn geom_coords_of(&self, node: NodeId) -> &[f64] {
+        if let Some(ref geo) = self.geometry {
+            let n = node as usize;
+            if n < geo.n_nodes {
+                let off = n * D;
+                if off + D <= geo.coords.len() {
+                    return &geo.coords[off..off + D];
+                }
+            }
+        }
+        self.node_coords(node)
     }
 
     fn face_nodes(&self, face: FaceId) -> &[NodeId] { self.bface_nodes(face) }

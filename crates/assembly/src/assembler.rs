@@ -221,7 +221,7 @@ fn isoparametric_jacobian<M: MeshTopology>(
     let mut xp = vec![0.0_f64; dim];
 
     for k in 0..n_geo {
-        let xk = mesh.node_coords(nodes[k]);
+        let xk = mesh.geom_coords_of(nodes[k]);
         for i in 0..dim {
             xp[i] += phi_geo[k] * xk[i];
             for d in 0..dim {
@@ -262,7 +262,7 @@ fn surface_jacobian<M: MeshTopology>(
     let mut j = vec![0.0_f64; embed_dim * tdim]; // column-major: [col0(3), col1(3)]
     let mut xp = vec![0.0_f64; embed_dim];
     for k in 0..n_geo {
-        let xk = mesh.node_coords(nodes[k]);
+        let xk = mesh.geom_coords_of(nodes[k]);
         for i in 0..embed_dim {
             xp[i] += phi_geo[k] * xk[i];
             for d in 0..tdim {
@@ -406,9 +406,14 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
         if is_surface {
             // ── Surface path (2D elements in 3D space) ─────────────────────────
             let geo_p1 = ref_elem_vol(elem_type, 1);
-            let geo: &dyn ReferenceElement = geo_elem.as_deref().unwrap_or(geo_p1.as_ref());
+            let (geo, geo_nds): (&dyn ReferenceElement, &[u32]) =
+                if let Some(ref ge) = geo_elem {
+                    (ge.as_ref(), mesh.geometry_nodes(e))
+                } else {
+                    (geo_p1.as_ref(), nodes)
+                };
             let (measure, chol_ginv, xp) =
-                surface_jacobian(mesh, nodes, geo, xi, edim, tdim);
+                surface_jacobian(mesh, geo_nds, geo, xi, edim, tdim);
             let w = quad.weights[q] * measure;
 
             ref_elem.eval_basis(xi, &mut scratch.phi);
@@ -458,8 +463,9 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
             continue;
         } else {
             let geo = geo_elem.as_ref().unwrap();
+            let geo_nds = if is_surface { nodes } else { mesh.geometry_nodes(e) };
             let (jac_qp, det_qp, xp_qp) =
-                isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
+                isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), xi, dim);
             let w = quad.weights[q] * det_qp.abs();
             let jit = jac_qp.try_inverse()
                 .expect("degenerate quad/hex element")
@@ -538,9 +544,14 @@ fn accumulate_volume_linear_element<S: FESpace>(
         let (w, xp);
         if is_surface {
             let geo_p1 = ref_elem_vol(elem_type, 1);
-            let geo: &dyn ReferenceElement = geo_elem.as_deref().unwrap_or(geo_p1.as_ref());
+            let (geo, geo_nds): (&dyn ReferenceElement, &[u32]) =
+                if let Some(ref ge) = geo_elem {
+                    (ge.as_ref(), mesh.geometry_nodes(e))
+                } else {
+                    (geo_p1.as_ref(), nodes)
+                };
             let (measure, _chol, xp_surf) =
-                surface_jacobian(mesh, nodes, geo, xi, edim, tdim);
+                surface_jacobian(mesh, geo_nds, geo, xi, edim, tdim);
             w = quad.weights[q] * measure;
             ref_elem.eval_basis(xi, &mut scratch.phi);
             xp = xp_surf;
@@ -553,8 +564,9 @@ fn accumulate_volume_linear_element<S: FESpace>(
             xp = tr.map_to_physical(xi);
         } else {
             let geo = geo_elem.as_ref().unwrap();
+            let geo_nds = if is_surface { nodes } else { mesh.geometry_nodes(e) };
             let (jac_qp, det_qp, xp_qp) =
-                isoparametric_jacobian(mesh, nodes, geo.as_ref(), xi, dim);
+                isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), xi, dim);
             w = quad.weights[q] * det_qp.abs();
             let jit = jac_qp.try_inverse()
                 .expect("degenerate quad/hex element").transpose();
