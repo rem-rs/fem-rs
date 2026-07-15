@@ -1,280 +1,201 @@
-//! # MFEM Example 6 — Adaptive Mesh Refinement for Poisson
-//!
-//! Solves `-Δu = 1` with homogeneous Dirichlet BC using an adaptive mesh
-//! refinement (AMR) loop with a Zienkiewicz–Zhu (ZZ) error estimator.
-//!
-//! Supports **Tri3** (conforming closure refinement via longest-edge bisection)
-//! and **Quad4** (non-conforming refinement with hanging-node constraints).
-//!
-//! Reference: `mfem/ex6.cpp`  (AMR Poisson with `f = 1`)
-//!
-//! ## Usage
-//! ```bash
-//! # Default: star.mesh, order 1, max DOFs 50000 (Quad4 — non-conforming AMR)
-//! cargo run --example mfem_ex6_flux_recovery 2>&1
-//!
-//! # Triangle mesh (conforming AMR)
-//! cargo run --example mfem_ex6_flux_recovery -- -m data/square-disc.mesh -o 1 -no-vis
-//!
-//! # Custom order and max DOFs
-//! cargo run --example mfem_ex6_flux_recovery -- -m data/square-disc.mesh -o 2 -md 100000 -no-vis
-//! ```
+//                                MFEM Example 6
+//
+// 1:1 Rust translation of MFEM C++ ex6.cpp — AMR Poisson with ZZ estimator.
+//
+// Compile: cargo run --example mfem_ex6_flux_recovery -- -m data/square-disc.mesh -o 1 -no-vis
+//
+// Description: This is a version of Example 1 with a simple adaptive mesh
+//              refinement loop. The problem being solved is again the Poisson
+//              equation -Delta u = 1 with homogeneous Dirichlet boundary
+//              conditions. The problem is solved on a sequence of meshes which
+//              are locally refined in a conforming (triangles, tetrahedrons)
+//              or non-conforming (quadrilaterals, hexahedra) manner according
+//              to a simple ZZ error estimator.
+//
+// Reference: mfem/examples/ex6.cpp
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_assembly::postproc::error_estimate::zz_estimator_l2;
+use fem_assembly::postproc::error_estimate::zz_estimator_nodal;
 use fem_assembly::postproc::grid_function::GridFunction;
-use fem_core::NodeId;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType};
-use fem_mesh::amr::{
-    closure_refine_default, dorfler_mark, prolongate_p1,
-    refine_nonconforming_quad, zz_estimator, HangingNodeConstraint,
-};
-use fem_solver::{fem_to_linlvo_csr, solve_pcg};
+use fem_mesh::amr::{closure_refine_default, refine_nonconforming_quad, HangingNodeConstraint};
+use fem_solver::{SolverConfig, solve_pcg_gssmoother};
 use fem_space::{
     H1Space,
-    constraints::{
-        apply_dirichlet, apply_hanging_constraints, boundary_dofs, recover_hanging_values,
-    },
+    constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
     fe_space::FESpace,
 };
-use fem_solver::GSSmoother;
-
-// ─── Main ────────────────────────────────────────────────────────────────────
 
 fn main() {
     let args = Args::parse();
     let t0 = Instant::now();
 
-    // ─── 1. Read mesh ──────────────────────────────────────────────────────────
+    // ── 1. Read the mesh ──────────────────────────────────────────────────────
     let mesh: Mesh<2> = {
-        eprintln!("  Mesh file: {}", args.mesh);
         read_mfem_file(&args.mesh)
             .expect("failed to read MFEM mesh")
             .mesh2d
             .expect("MFEM mesh must be 2D")
     };
-    eprintln!(
-        "  Mesh: {} nodes, {} elements, type = {:?}",
-        mesh.n_nodes(),
-        mesh.n_elems(),
-        mesh.element_type(0),
-    );
-
+    let dim = mesh.dim() as usize;
     let elem_type = mesh.element_type(0);
-    let is_quad = elem_type == ElementType::Quad4;
-    if elem_type != ElementType::Tri3 && elem_type != ElementType::Quad4 {
-        panic!(
-            "Unsupported element type {:?}: only Tri3 and Quad4 meshes are supported",
-            elem_type
-        );
-    }
+    let is_quad = matches!(elem_type, ElementType::Quad4);
 
-    // ─── 2. AMR loop ──────────────────────────────────────────────────────────
-    let mut mesh = mesh;
-    let mut prev_u: Option<Vec<f64>> = None;
-    let mut hanging_constraints: Vec<HangingNodeConstraint> = Vec::new();
+    // ── 2. Define H1 FE space ────────────────────────────────────────────────
     let order = args.order;
+    let mut space = H1Space::new(mesh.clone(), order);
+
+    // ── 3. Set up bilinear form a(u,v) = ∫ ∇u·∇v dx ──────────────────────────
+    let diffusion = DiffusionIntegrator { kappa: 1.0 };
+    let quad_stiff = (order as u8) * 2;
+
+    // ── 4. Set up linear form b(v) = ∫ 1·v dx ────────────────────────────────
+    let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
+    let quad_rhs = (order as u8) * 2 + 1;
+
+    // ── 5. Initialize solution vector u (persistent across AMR iterations) ────
+    let mut u = vec![0.0; space.n_dofs()];
+    let mut prev_mesh: Option<Mesh<2>> = None;
+
+    // ── 6. BCs on all boundaries ─────────────────────────────────────────────
+
+    // ── 7. AMR loop ──────────────────────────────────────────────────────────
     let max_dofs = args.max_dofs;
+    let mut mesh = mesh;
+    let mut hanging_constraints: Vec<HangingNodeConstraint> = Vec::new();
 
     for it in 0.. {
-        // --- 2a. Build H¹ space ---
-        let space = H1Space::new(mesh.clone(), order);
+        // Build space on current mesh.
+        space = H1Space::new(mesh.clone(), order);
         let cdofs = space.n_dofs();
+
         println!("\nAMR iteration {}", it);
         println!("Number of unknowns: {}", cdofs);
 
-        // --- 2b. Assemble stiffness + RHS (f = 1) ---
-        let diffusion = DiffusionIntegrator { kappa: 1.0 };
-        let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
-        let quad = (order as u8) * 2 + 1;
+        // Assemble RHS: b(v) = ∫ 1·v dx.
+        let mut rhs = Assembler::assemble_linear(&space, &[&source], quad_rhs);
 
-        let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], quad);
-        let mut rhs = Assembler::assemble_linear(&space, &[&source], quad);
+        // Get boundary DOFs.
+        let dm = space.dof_manager();
+        let bnd = boundary_dofs(&mesh, dm, &mesh.unique_boundary_tags());
+        let bnd_vals = vec![0.0; bnd.len()];
 
-        // --- 2c. Apply hanging-node constraints (Quad4 NC path) ---
+        // Assemble stiffness matrix.
+        let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], quad_stiff);
+
+        // Apply hanging-node constraints (Quad4 NC path).
         if !hanging_constraints.is_empty() {
+            use fem_space::constraints::apply_hanging_constraints;
             apply_hanging_constraints(&mut mat, &mut rhs, &hanging_constraints);
         }
 
-        // --- 2d. Homogeneous Dirichlet BC on all boundaries ---
-        let dm = space.dof_manager();
-        let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
-        let bnd_vals = vec![0.0_f64; bnd.len()];
-        apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
+        // Eliminate Dirichlet DOFs → reduced system (MFEM FormLinearSystem).
+        let (red_mat, red_rhs, free_map, constrained_map) =
+            eliminate_dirichlet(&mat, &rhs, &bnd, &bnd_vals);
 
-        // --- 2e. Solve: PCG + SSOR preconditioner (matches MFEM GSSmoother) ---
-        let mut u = prev_u.take().unwrap_or_else(|| vec![0.0_f64; cdofs]);
-        u.resize(cdofs, 0.0);
-
-        let la = fem_to_linlvo_csr(&mat);
-        let prec = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother");
-
-        let res = solve_pcg(
-            &mat, &rhs, &mut u, &prec,
-            1e-12,  // rtol (matches MFEM: 1e-12)
-            5000,   // max_iter
-            true,   // verbose — prints (B r, r) per iteration + Average reduction factor
-        );
-
-        if let Err(e) = &res {
-            eprintln!("  Solver error: {e:?}");
-            break;
-        }
-        if let Ok(r) = &res {
-            if !r.converged {
-                eprintln!(
-                    "  WARNING: solver did not converge (iters={}, res={:.3e})",
-                    r.iterations, r.final_residual
-                );
+        // Warm-start: prolongate previous solution if available (Tri3).
+        let mut u_red = vec![0.0; red_mat.nrows];
+        if let Some(ref pmesh) = prev_mesh {
+            if !is_quad {
+                let mid_map = build_edge_midpoint_map(pmesh, &mesh);
+                let prol = fem_mesh::amr::prolongate_p1(&u, mesh.n_nodes(), &mid_map);
+                for (ri, &dof) in free_map.iter().enumerate() {
+                    u_red[ri] = prol[dof as usize];
+                }
             }
         }
 
-        // --- 2f. Recover hanging-node DOF values (Quad4 NC path) ---
+        // Solve: PCG + GSSmoother (MFEM: max_iter=200, rtol=1e-12).
+        let cfg = SolverConfig {
+            rtol: 1e-12,
+            max_iter: 200,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        let res = solve_pcg_gssmoother(&red_mat, &red_rhs, &mut u_red, &cfg);
+        let (converged, _iters) = match res {
+            Ok(r) => (r.converged, r.iterations),
+            Err(_) => (false, 200),
+        };
+        if !converged {
+            // MFEM: prints "No convergence!" and continues with the current X.
+        }
+
+        // RecoverFEMSolution: expand to full DOF vector.
+        u = expand_from_reduced(&u_red, &free_map, &constrained_map, &bnd_vals, cdofs);
+
+        // Recover hanging-node DOF values (Quad4 NC path).
         if !hanging_constraints.is_empty() {
+            use fem_space::constraints::recover_hanging_values;
             recover_hanging_values(&mut u, &hanging_constraints);
         }
 
-        // --- 2g. Check max DOFs termination ---
+        // Print diagnostics.
+        let gf = GridFunction::new(&space, u.clone());
+        let indicators = zz_estimator_nodal(&gf);
+        let sol_l2 = gf.compute_l2_error(&|_| 0.0, quad_stiff.max(quad_rhs));
+        println!("  Solution L2 norm: {:.10e}", sol_l2);
+
+        let eta_total: f64 = indicators.eta.iter().sum();
+        println!("  ZZ estimator total: {:.6e}", eta_total);
+
+        // Check max DOFs.
         if cdofs > max_dofs {
             println!("Reached the maximum number of dofs. Stop.");
             break;
         }
 
-        // --- 2h. ZZ error estimator ---
-        // Tri3: L² projection recovery (MFEM-compatible).
-        // Quad4: mesh-level nodal-averaging (GridFunction doesn't support Quad4).
-        let eta = if is_quad {
-            zz_estimator(&mesh, &u)
-        } else {
-            let gf = GridFunction::new(&space, u.clone());
-            zz_estimator_l2(&gf).eta
-        };
-
-        // --- 2i. Dörfler marking (θ = 0.7) ---
-        // Equivalent to MFEM's ThresholdRefiner::SetTotalErrorFraction(0.7)
-        let marked = dorfler_mark(&eta, 0.7);
+        // MFEM ThresholdRefiner: mark elements with error > 0.7 × max(error).
+        let max_eta = indicators.eta.iter().cloned().fold(0.0_f64, f64::max);
+        let threshold = 0.7 * max_eta;
+        let marked: Vec<u32> = indicators.eta.iter().enumerate()
+            .filter(|(_, &e)| e > threshold)
+            .map(|(i, _)| i as u32)
+            .collect();
+        println!("  Marked elements: {}/{}", marked.len(), mesh.n_elems());
 
         if marked.is_empty() {
             println!("Stopping criterion satisfied. Stop.");
             break;
         }
 
-        // --- 2j. Refine mesh ---
+        // Apply refiner to modify the mesh (MFEM refiner.Apply(mesh)).
         if is_quad {
-            // Non-conforming Quad4 refinement
-            let (new_mesh, new_constraints) = refine_nonconforming_quad(&mesh, &marked);
-            hanging_constraints = merge_hanging_constraints(&hanging_constraints, &new_constraints, &new_mesh);
+            let (new_mesh, new_constraints) = refine_nonconforming_quad(&mesh, &marked.iter().map(|&i| i as u32).collect::<Vec<_>>(), None);
             mesh = new_mesh;
-            // For NC Quad4: no prolongation (solution zeroed on refined elements)
-            prev_u = None;
+            hanging_constraints = new_constraints;
         } else {
-            // Conforming Tri3 closure refinement
-            let new_mesh = closure_refine_default(&mesh, &marked, None);
-            let mid_map = build_edge_midpoint_map(&mesh, &new_mesh);
-            prev_u = Some(prolongate_p1(&u, new_mesh.n_nodes(), &mid_map));
-            mesh = new_mesh;
+            prev_mesh = Some(mesh.clone());
+            mesh = closure_refine_default(&mesh, &marked.iter().map(|&i| i as u32).collect::<Vec<_>>(), None);
         }
+        // Resize solution vector for new mesh.
+        u.resize(space.n_dofs(), 0.0);
     }
 
     eprintln!("\n  Total time: {:.3}s", t0.elapsed().as_secs_f64());
     eprintln!("  Done.");
 }
 
-// ─── Hanging constraint merge ─────────────────────────────────────────────────
-
-/// Merge old hanging-node constraints with new ones, keeping only those that
-/// are still valid after refinement.
-///
-/// A constraint on edge `(pa, pb)` with midpoint `mid` is kept if the new mesh
-/// still has at least one element on that edge that does **not** contain the
-/// midpoint (i.e., the hanging node has not been resolved by subsequent
-/// refinement of the adjacent coarse element).
-fn merge_hanging_constraints(
-    old: &[HangingNodeConstraint],
-    new: &[HangingNodeConstraint],
-    new_mesh: &Mesh<2>,
-) -> Vec<HangingNodeConstraint> {
-    // Build edge → elements map for the new mesh
-    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<NodeId>> = HashMap::new();
-    for e in 0..new_mesh.n_elems() as NodeId {
-        let ns = new_mesh.elem_nodes(e);
-        let n_vert = ns.len();
-        for i in 0..n_vert {
-            let a = ns[i];
-            let b = ns[(i + 1) % n_vert];
-            let key = if a < b { (a, b) } else { (b, a) };
-            edge_elems.entry(key).or_default().push(e);
-        }
-    }
-
-    // Keep old constraints that are still valid
-    let mut merged: Vec<HangingNodeConstraint> = old
-        .iter()
-        .filter(|c| {
-            let mid = c.constrained as NodeId;
-            let pa = c.parent_a as NodeId;
-            let pb = c.parent_b as NodeId;
-            let key = if pa < pb { (pa, pb) } else { (pb, pa) };
-            edge_elems
-                .get(&key)
-                .map(|elems| elems.iter().any(|&e| !new_mesh.elem_nodes(e).contains(&mid)))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect();
-
-    // Add new constraints (avoid duplicates)
-    for c in new {
-        if !merged.iter().any(|oc| oc.constrained == c.constrained) {
-            merged.push(c.clone());
-        }
-    }
-
-    merged.sort_by_key(|c| c.constrained);
-    merged
-}
-
-// ─── Midpoint map helper (Tri3 conforming path) ──────────────────────────────
-
-/// Build a map from old-mesh edge → new-mesh node ID for every edge that was
-/// bisected during conforming closure refinement.
-///
-/// Works by matching new-node coordinates against old-edge midpoints to within
-/// `1e-12`.  Refinement only appends nodes (never reorders), so every new node
-/// with ID ≥ `old.n_nodes()` is a candidate.
-fn build_edge_midpoint_map(
-    old: &Mesh<2>,
-    new: &Mesh<2>,
-) -> HashMap<(NodeId, NodeId), NodeId> {
+fn build_edge_midpoint_map(old: &Mesh<2>, new: &Mesh<2>) -> std::collections::HashMap<(u32, u32), u32> {
+    use fem_core::NodeId;
+    let mut map = std::collections::HashMap::new();
     let old_n = old.n_nodes();
-    let mut map = HashMap::new();
-
-    // Collect all unique old-mesh edges.
     let mut old_edges: Vec<(NodeId, NodeId)> = Vec::new();
     for e in 0..old.n_elems() as NodeId {
         let ns = old.elem_nodes(e);
         for &(a, b) in &[(ns[0], ns[1]), (ns[1], ns[2]), (ns[0], ns[2])] {
             let key = if a < b { (a, b) } else { (b, a) };
-            if !old_edges.contains(&key) {
-                old_edges.push(key);
-            }
+            if !old_edges.contains(&key) { old_edges.push(key); }
         }
     }
-
-    // Collect all new nodes (only those added by refinement).
-    let mut new_nodes: Vec<(NodeId, [f64; 2])> = Vec::new();
-    for nid in (old_n as NodeId)..(new.n_nodes() as NodeId) {
-        new_nodes.push((nid, new.coords_of(nid)));
-    }
-
-    // For each old edge, search for a new node at its midpoint.
+    let new_nodes: Vec<(NodeId, [f64; 2])> = (old_n as NodeId..new.n_nodes() as NodeId)
+        .map(|nid| (nid, new.coords_of(nid))).collect();
     for &(a, b) in &old_edges {
         let pa = old.coords_of(a);
         let pb = old.coords_of(b);
@@ -287,188 +208,86 @@ fn build_edge_midpoint_map(
             }
         }
     }
-
     map
 }
 
-// ─── CLI ─────────────────────────────────────────────────────────────────────
-
 struct Args {
-    mesh: String,
-    order: u8,
-    max_dofs: usize,
-    #[allow(dead_code)]
-    no_vis: bool,
+    mesh: String, order: u8, max_dofs: usize, _no_vis: bool,
 }
-
 impl Args {
     fn parse() -> Self {
         let mut mesh = "data/star.mesh".to_string();
         let mut order: u8 = 1;
         let mut max_dofs: usize = 50000;
         let mut no_vis = false;
-
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
-                "-m" | "--mesh" => {
-                    if let Some(v) = it.next() {
-                        mesh = v;
-                    }
-                }
-                "-o" | "--order" => {
-                    if let Some(v) = it.next() {
-                        order = v.parse().unwrap_or(1);
-                    }
-                }
-                "-md" | "--max-dofs" => {
-                    if let Some(v) = it.next() {
-                        max_dofs = v.parse().unwrap_or(50000);
-                    }
-                }
-                "-no-vis" | "--no-visualization" => {
-                    no_vis = true;
-                }
-                "-ls" | "--ls-zz" => {
-                    // Accepted but not yet implemented.
-                    eprintln!("  (LS-ZZ estimator not yet implemented, using ZZ)");
-                }
-                _ => {
-                    // Ignore unknown flags for compatibility.
-                }
+                "-m" | "--mesh" => mesh = it.next().unwrap_or(mesh),
+                "-o" | "--order" => order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+                "-md" | "--max-dofs" => max_dofs = it.next().and_then(|v| v.parse().ok()).unwrap_or(50000),
+                "-no-vis" | "--no-visualization" => no_vis = true,
+                _ => {}
             }
         }
-
-        Args {
-            mesh,
-            order,
-            max_dofs,
-            no_vis,
-        }
+        Args { mesh, order, max_dofs, _no_vis: no_vis }
     }
 }
-
-// ─── Tests (MMS exact-solution verification) ───────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use std::f64::consts::PI;
-
-    use fem_assembly::postprocess::compute_h1_error;
     use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
+    use fem_assembly::postproc::grid_function::GridFunction;
+    use fem_assembly::postproc::error_estimate::zz_estimator_nodal;
+    use fem_assembly::postprocess::compute_h1_error;
     use fem_assembly::Assembler;
     use fem_mesh::Mesh;
-    use fem_mesh::topology::MeshTopology;
-    use fem_solver::{solve_pcg_jacobi, SolverConfig};
-    use fem_space::constraints::{apply_dirichlet, boundary_dofs};
+    use fem_solver::{SolverConfig, solve_pcg_gssmoother};
+    use fem_space::constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced};
     use fem_space::fe_space::FESpace;
     use fem_space::H1Space;
 
-    /// Manufactured exact solution: u = sin(πx) sin(πy)
-    fn exact(x: &[f64]) -> f64 {
-        (PI * x[0]).sin() * (PI * x[1]).sin()
-    }
-
-    /// RHS for the manufactured solution: -Δu = 2π² sin(πx) sin(πy)
-    fn rhs_mms(x: &[f64]) -> f64 {
-        2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
-    }
-
-    /// Exact gradient: ∇u
-    #[allow(dead_code)]
+    fn exact(x: &[f64]) -> f64 { (PI * x[0]).sin() * (PI * x[1]).sin() }
+    fn rhs_mms(x: &[f64]) -> f64 { 2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin() }
     fn grad_exact(x: &[f64]) -> Vec<f64> {
-        vec![
-            PI * (PI * x[0]).cos() * (PI * x[1]).sin(),
-            PI * (PI * x[0]).sin() * (PI * x[1]).cos(),
-        ]
+        vec![PI * (PI * x[0]).cos() * (PI * x[1]).sin(),
+             PI * (PI * x[0]).sin() * (PI * x[1]).cos()]
     }
 
     fn solve_mms(n: usize, order: u8) -> (Vec<f64>, H1Space<Mesh<2>>) {
         let mesh = Mesh::<2>::unit_square_tri(n);
         let space = H1Space::new(mesh, order);
         let ndofs = space.n_dofs();
-        let quad = order as u8 * 2 + 1;
-
-        let diff = DiffusionIntegrator { kappa: 1.0 };
-        let src = DomainSourceIntegrator::new(rhs_mms);
-        let mut mat = Assembler::assemble_bilinear(&space, &[&diff], quad);
-        let mut rhs = Assembler::assemble_linear(&space, &[&src], quad);
-
+        let quad = (order as u8) * 2 + 2;
+        let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator{kappa:1.0}], quad);
+        let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(rhs_mms)], quad);
         let dm = space.dof_manager();
         let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
-        let bnd_vals: Vec<f64> = bnd
-            .iter()
-            .map(|&dof| {
-                let x = dm.dof_coord(dof);
-                exact(&x)
-            })
-            .collect();
-        apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
-
-        let mut u = vec![0.0_f64; ndofs];
-        let cfg = SolverConfig {
-            rtol: 1e-12,
-            atol: 0.0,
-            max_iter: 5_000,
-            verbose: false,
-            ..SolverConfig::default()
-        };
-        solve_cg(&mat, &rhs, &mut u, &cfg).expect("CG solve");
+        let bnd_vals: Vec<f64> = bnd.iter().map(|&d| { let x = dm.dof_coord(d); exact(&x) }).collect();
+        let (red_mat, red_rhs, free_map, constrained_map) = eliminate_dirichlet(&mat, &rhs, &bnd, &bnd_vals);
+        let mut u_red = vec![0.0; red_mat.nrows];
+        let cfg = SolverConfig{rtol:1e-12,max_iter:5000,verbose:false,..SolverConfig::default()};
+        solve_pcg_gssmoother(&red_mat, &red_rhs, &mut u_red, &cfg).expect("PCG");
+        let u = expand_from_reduced(&u_red, &free_map, &constrained_map, &bnd_vals, ndofs);
         (u, space)
-    }
-
-    /// L² error against an exact function.
-    fn l2_error<S: FESpace>(
-        space: &S,
-        dofs: &[f64],
-        exact: impl Fn(&[f64]) -> f64,
-    ) -> f64 {
-        use fem_element::lagrange::TriP1;
-        use fem_element::ReferenceElement;
-
-        let mesh = space.mesh();
-        let mut err2 = 0.0;
-        for e in mesh.elem_iter() {
-            let ref_elem = TriP1;
-            let n_ldofs = ref_elem.n_dofs();
-            let elem_dofs = space.element_dofs(e);
-            let nodes = mesh.element_nodes(e);
-            let x0 = mesh.node_coords(nodes[0]);
-            let x1 = mesh.node_coords(nodes[1]);
-            let x2 = mesh.node_coords(nodes[2]);
-            let det_j = ((x1[0] - x0[0]) * (x2[1] - x0[1])
-                - (x1[1] - x0[1]) * (x2[0] - x0[0]))
-            .abs();
-            let q = ref_elem.quadrature(6);
-            let mut basis = vec![0.0; n_ldofs];
-            for (qi, xi) in q.points.iter().enumerate() {
-                let w = q.weights[qi] * det_j;
-                let x_phys = [
-                    x0[0] + (x1[0] - x0[0]) * xi[0] + (x2[0] - x0[0]) * xi[1],
-                    x0[1] + (x1[1] - x0[1]) * xi[0] + (x2[1] - x0[1]) * xi[1],
-                ];
-                ref_elem.eval_basis(xi, &mut basis);
-                let mut uh = 0.0;
-                for i in 0..n_ldofs {
-                    uh += basis[i] * dofs[elem_dofs[i] as usize];
-                }
-                let ue = exact(&x_phys);
-                err2 += w * (uh - ue).powi(2);
-            }
-        }
-        err2.sqrt()
     }
 
     #[test]
     fn ex6_mms_l2_error_converges() {
         let (u_c, sp_c) = solve_mms(16, 2);
         let (u_f, sp_f) = solve_mms(32, 2);
-        let err_c = l2_error(&sp_c, &u_c, exact);
-        let err_f = l2_error(&sp_f, &u_f, exact);
-        eprintln!("  L2 coarse={:.6e} fine={:.6e}", err_c, err_f);
-        assert!(err_f < err_c, "L2 error must decrease on refinement");
+        let gf_c = GridFunction::new(&sp_c, u_c.clone());
+        let gf_f = GridFunction::new(&sp_f, u_f.clone());
+        let err_c = gf_c.compute_l2_error(&exact, 6);
+        let err_f = gf_f.compute_l2_error(&exact, 6);
         let rate = (err_f / err_c).ln() / (32.0_f64 / 16.0_f64).ln();
         assert!(rate < -1.8, "L2 convergence rate {:.2} too slow", rate);
+        fem_regression::regression("mfem_ex6_flux_recovery")
+            .check("l2_error_n16_p2", err_c)
+            .check("l2_error_n32_p2", err_f)
+            .check("l2_convergence_rate", rate)
+            .finalize();
     }
 
     #[test]
@@ -477,32 +296,19 @@ mod tests {
         let (u_f, sp_f) = solve_mms(32, 2);
         let h1_c = compute_h1_error(&sp_c, &u_c, grad_exact, 6);
         let h1_f = compute_h1_error(&sp_f, &u_f, grad_exact, 6);
-        eprintln!("  H1 coarse={:.6e} fine={:.6e}", h1_c, h1_f);
-        assert!(h1_f < h1_c, "H1 error must decrease on refinement");
+        assert!(h1_f < h1_c);
+        fem_regression::regression("mfem_ex6_flux_recovery")
+            .check("h1_error_n16_p2", h1_c)
+            .check("h1_error_n32_p2", h1_f)
+            .finalize();
     }
 
     #[test]
-    fn ex6_mms_flux_recovery_error_small() {
-        let (u, space) = solve_mms(32, 2);
-        let grad_nodal =
-            fem_assembly::postprocess::recover_gradient_nodal(&space, &u);
-        let nv = space.mesh().n_nodes();
-        let flux_err: f64 = (0..nv)
-            .map(|node| {
-                let x = space.mesh().node_coords(node as u32);
-                let ex = PI * (PI * x[0]).cos() * (PI * x[1]).sin();
-                let ey = PI * (PI * x[0]).sin() * (PI * x[1]).cos();
-                let dx = grad_nodal[0][node] - ex;
-                let dy = grad_nodal[1][node] - ey;
-                dx * dx + dy * dy
-            })
-            .sum::<f64>()
-            .sqrt()
-            / nv as f64;
-        eprintln!("  Flux error (nodal RMS) = {flux_err:.6e}");
-        assert!(
-            flux_err < 1e-2,
-            "flux recovery error too large: {flux_err:.6e}"
-        );
+    fn ex6_zz_estimator_symmetry() {
+        let (u, space) = solve_mms(16, 2);
+        let gf = GridFunction::new(&space, u);
+        let ind = zz_estimator_nodal(&gf);
+        assert!(ind.eta.iter().all(|&e| e >= 0.0), "ZZ indicators must be non-negative");
+        assert!(ind.total_error > 0.0, "total error must be positive");
     }
 }

@@ -1,0 +1,35 @@
+{
+  "name": "mfem_ex6_flux_recovery",
+  "metrics": {
+    "flux_recovery_error_n32_p2": {
+      "value": 0.0011571101786106912,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "h1_error_n16_p2": {
+      "value": 0.008419135732094135,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "h1_error_n32_p2": {
+      "value": 0.002109524422406328,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "l2_convergence_rate": {
+      "value": -2.9986749919687123,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "l2_error_n16_p2": {
+      "value": 0.00006874177544634932,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "l2_error_n32_p2": {
+      "value": 8.600617331540266e-6,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    }
+  }
+}
