@@ -91,10 +91,13 @@ fn main() {
     let res = solve_pcg_gssmoother(&mat, &rhs, &mut u, &cfg).expect("PCG");
     if !res.converged { eprintln!("  PCG: No convergence!"); }
 
-    // ── 9. L2 error ─────────────────────────────────────────────────────────
+    // ── 9. Diagnostics ──────────────────────────────────────────────────────
     let gf = GridFunction::new(&space, u);
     let l2_err = gf.compute_l2_error(&analytic_solution, (order as u8)*2+2);
+    let one_norm = gf.compute_l1_error(&|_| 1.0, (order as u8)*2+2);
     println!("\nL2 norm of error: {}", l2_err);
+    eprintln!("  ∫1 dS = {}", one_norm); // should be 4π ≈ 12.566
+    eprintln!("  4π = {}", 4.0 * std::f64::consts::PI);
 
     eprintln!("\n  Total time: {:.3}s", t0.elapsed().as_secs_f64());
     eprintln!("  Done.");
