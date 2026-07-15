@@ -241,14 +241,14 @@ impl<const D: usize> CurvedMesh<D> {
         }
 
         // Determine new element/face type
-        let new_elem_type = match (dim, p) {
+        let new_elem_type = match (topo_dim, p) {
             (2, 1) => ElementType::Tri3,
             (2, 2) => ElementType::Tri6,
             (3, 1) => ElementType::Tet4,
             (3, 2) => ElementType::Tet10,
             _ => mesh.elem_type,
         };
-        let new_face_type = match (dim, p) {
+        let new_face_type = match (topo_dim, p) {
             (2, _) => ElementType::Line2,
             (3, _) => ElementType::Tri3,
             _ => mesh.face_type,

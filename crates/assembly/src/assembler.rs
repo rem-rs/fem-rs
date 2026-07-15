@@ -405,19 +405,14 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     for (q, xi) in quad.points.iter().enumerate() {
         if is_surface {
             // ── Surface path (2D elements in 3D space) ─────────────────────────
-            // Geometry is always P1 (3 nodes for Tri3, 4 for Quad4), regardless
-            // of the solution order.  For isoparametric surface meshes the curved
-            // geometry is handled via `GeometryData`, not by increasing the
-            // solution-space order of the geometry element.
             let geo_p1 = ref_elem_vol(elem_type, 1);
+            let geo: &dyn ReferenceElement = geo_elem.as_deref().unwrap_or(geo_p1.as_ref());
             let (measure, chol_ginv, xp) =
-                surface_jacobian(mesh, nodes, geo_p1.as_ref(), xi, edim, tdim);
+                surface_jacobian(mesh, nodes, geo, xi, edim, tdim);
             let w = quad.weights[q] * measure;
 
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
-            // Transform 2D ref gradients via Cholesky factor of G⁻¹ (2×2).
-            // This gives: grad_surf · grad_surf = ∇_ref · G⁻¹ · ∇_ref
             transform_grads(&chol_ginv, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
 
             let qp = QpData {
@@ -543,8 +538,9 @@ fn accumulate_volume_linear_element<S: FESpace>(
         let (w, xp);
         if is_surface {
             let geo_p1 = ref_elem_vol(elem_type, 1);
+            let geo: &dyn ReferenceElement = geo_elem.as_deref().unwrap_or(geo_p1.as_ref());
             let (measure, _chol, xp_surf) =
-                surface_jacobian(mesh, nodes, geo_p1.as_ref(), xi, edim, tdim);
+                surface_jacobian(mesh, nodes, geo, xi, edim, tdim);
             w = quad.weights[q] * measure;
             ref_elem.eval_basis(xi, &mut scratch.phi);
             xp = xp_surf;
