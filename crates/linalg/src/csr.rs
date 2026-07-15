@@ -578,7 +578,13 @@ impl<T: Scalar> CsrMatrix<T> {
     /// Sparse-sparse matrix multiply: C = self * B.
     pub fn multiply(&self, b: &CsrMatrix<T>) -> CsrMatrix<T>
     where T: Scalar {
-        assert_eq!(self.ncols, b.nrows, "multiply: dim mismatch");
+        assert_eq!(self.ncols, b.nrows, "multiply: dim mismatch {}×{} * {}×{}",
+                   self.nrows, self.ncols, b.nrows, b.ncols);
+        // Validate column indices of both matrices
+        debug_assert!(self.col_idx.iter().all(|&c| (c as usize) < self.ncols),
+            "multiply: self has column {} >= ncols {}", self.col_idx.iter().max().unwrap_or(&0), self.ncols);
+        debug_assert!(b.col_idx.iter().all(|&c| (c as usize) < b.ncols),
+            "multiply: b has column {} >= ncols {}", b.col_idx.iter().max().unwrap_or(&0), b.ncols);
         let m = self.nrows;
         let n = b.ncols;
         let mut crp = vec![0usize; m + 1];
