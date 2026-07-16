@@ -40,6 +40,23 @@ solve_precond_restart!(solve_gmres_jacobi, Gmres<T>, JacobiPrecond<T>, "GMRES wi
 
 solve_precond_restart!(solve_gmres_ilu0, Gmres<T>, Ilu0Precond<T>, "GMRES with ILU(0) preconditioner.");
 
+/// GMRES with symmetric Gauss-Seidel (SSOR(ω=1)) preconditioner — MFEM GSSmoother.
+pub fn solve_gmres_gssmoother<T: linlvoScalar>(
+    a: &FemCsr<T>, b: &[T], x: &mut [T], restart: usize, cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let la = fem_to_linlvo_csr(a);
+    let lb = DenseVec::from_vec(b.to_vec());
+    let mut lx = DenseVec::from_vec(x.to_vec());
+    let prec = SsorPrecond::from_csr(&la, T::one()).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    let solver = Gmres::<T>::new(restart);
+    let res = solver
+        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
+        .map_err(SolverError::from)?;
+    x.copy_from_slice(lx.as_slice());
+    Ok(into_result(res))
+}
+
 solve_iterative_simple!(solve_bicgstab, BiCgStab<T>, "BiCGSTAB for non-symmetric systems; often faster than GMRES per iteration.");
 
 solve_iterative_restart!(solve_fgmres, Fgmres<T>, "Flexible GMRES - allows a variable preconditioner per iteration.", restart: usize);
