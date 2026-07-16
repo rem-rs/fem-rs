@@ -652,6 +652,24 @@ pub fn project_hcurl_coefficient_2d(
     u
 }
 
+/// Compute the L² norm of a vector field given its DOF values and the mass matrix.
+///
+/// ‖u‖_{L²} = sqrt(u^T M u)
+///
+/// where `M` is the mass matrix and `u` is the vector of DOF coefficients.
+///
+/// # Example
+/// ```ignore
+/// let mass = Assembler::assemble_bilinear(&space, &[&VectorH1MassIntegrator { kappa: 1.0 }], quad_order);
+/// let l2_norm = vector_l2_norm(&mass, &dofs);
+/// ```
+pub fn vector_l2_norm(mass: &CsrMatrix<f64>, dofs: &[f64]) -> f64 {
+    let mut m_u = vec![0.0; dofs.len()];
+    mass.spmv(dofs, &mut m_u);
+    let dot: f64 = dofs.iter().zip(m_u.iter()).map(|(a, b)| a * b).sum();
+    dot.max(0.0).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use fem_mesh::Mesh;

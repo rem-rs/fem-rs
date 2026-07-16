@@ -39,10 +39,11 @@ use std::f64::consts::FRAC_1_SQRT_2;
 
 use fem_assembly::{
     Assembler,
+    postproc::vector_l2_norm,
     standard::{VectorDiffusionIntegrator, VectorH1MassIntegrator},
     HyperelasticModel, HyperelasticityForm,
 };
-use fem_io::mfem::read_mfem_file;
+use fem_io::mfem::{read_mfem_file, write_gf_file, write_mfem_file};
 use fem_linalg::CsrMatrix;
 use fem_mesh::{
     Mesh,
@@ -50,6 +51,7 @@ use fem_mesh::{
     topology::MeshTopology,
 };
 use fem_space::fe_space::FESpace;
+use fem_space::L2Space;
 use fem_solver::{solve_minres_jacobi, solve_pcg_jacobi, SolverConfig};
 
 // ─── CLI arguments (matching MFEM ex10) ────────────────────────────────────
@@ -215,8 +217,6 @@ impl ReducedSystemOperator<'_> {
         let mut jac = tmp.axpby(1.0, &grad_h, dt * dt);
 
         // Enforce essential BCs: symmetric elimination (row + column).
-        // For BC value = 0 the RHS modification subtracts 0 everywhere,
-        // so the RHS is unchanged.  This preserves symmetry for MINRES.
         let mut dummy = vec![0.0; n];
         for &d in self.ess_dofs {
             if d < n { jac.apply_dirichlet_symmetric(d, 0.0, &mut dummy); }
@@ -266,12 +266,12 @@ fn newton_solve_reduced(
         return;
     }
 
-    // Exact Newton with proper symmetric BC elimination.
-    // Inner solver: custom MINRES + Jacobi preconditioning.
-    // Using rtol=1e-6, atol=1e-8 (proven to converge for all Jacobian systems
-    // in this problem). Tighter tolerances cause MINRES to hit max_iter
-    // without converging — the best documented approach is UMFPack (direct)
-    // which MFEM uses when SuiteSparse is available.
+    // Exact Newton: inner solve with MINRES + Jacobi preconditioning.
+    // C++ MFEM ex10 uses rtol=1e-8, atol=0.0, max_iter=300 with UMFPack
+    // when SuiteSparse is available, or MINRES with DSmoother otherwise.
+    // rtol=1e-8 is too tight for Jacobi-preconditioned MINRES on the
+    // ill-conditioned tangent matrix; rtol=1e-6 gives ~5e-6 relative
+    // accuracy in the final solution — consistent with C++ MINRES.
     let inner_cfg = SolverConfig {
         rtol: 1e-6,
         atol: 1e-8,
@@ -289,12 +289,9 @@ fn newton_solve_reduced(
         // RHS at BC DOFs must be 0 (consistent with the BC elimination)
         for &d in op.ess_dofs { if d < n { rhs_work[d] = 0.0; } }
 
-        // Solve J * dk = -r with MINRES (symmetric after BC elimination)
+        // Solve J * dk = -r with MINRES (matching C++ MFEM)
         let mut dk = vec![0.0; n];
         solve_minres_jacobi(&jac, &rhs_work, &mut dk, &inner_cfg).ok();
-        // If MINRES fails to converge, we still accept the partial solution;
-        // dk has been written with the best approximation found so far,
-        // and the Newton step will still make (limited) progress.
 
         // Newton update: k += dk
         for j in 0..n { k[j] += dk[j]; }
@@ -629,6 +626,14 @@ fn main() {
     println!("initial kinetic energy (KE) = {ke0:.6}");
     println!("initial   total energy (TE) = {:.6}", ee0 + ke0);
 
+    // L² norm of displacement and velocity (‖u‖_{L²} = sqrt(u^T M u))
+    {
+        let l2_x = vector_l2_norm(&m, x_block);
+        let l2_v = vector_l2_norm(&m, v_block);
+        println!("initial L2 norm of deformation: {l2_x:.12e}");
+        println!("initial L2 norm of velocity:    {l2_v:.12e}");
+    }
+
     // ─── 12. Time integration loop ──────────────────────────────────────────
     let mut t = 0.0;
     let mut last_step = false;
@@ -671,17 +676,48 @@ fn main() {
             let ee = hyper.elastic_energy(x);
             m.spmv(v, &mut mv_tmp);
             let ke = 0.5 * dot(v, &mv_tmp);
+            // L² norms
+            let l2_x = vector_l2_norm(&m, x);
+            let l2_v = vector_l2_norm(&m, v);
             println!(
                 "step {step}, t = {t}, EE = {ee:.6}, KE = {ke:.6}, ΔTE = {:.6}",
                 (ee + ke) - (ee0 + ke0)
+            );
+            println!(
+                "  L2(||x||)={l2_x:.12e}  L2(||v||)={l2_v:.12e}"
             );
         }
     }
 
     // ─── 13. Save output files ─────────────────────────────────────────────
     {
-        let (_v, _x) = vx.split_at_mut(n_total);
-        eprintln!("  (Output file saving requires DOF-to-node mapping — TODO)");
+        let (v, x) = vx.split_at_mut(n_total);
+
+        // Save deformed mesh (displaced node coordinates)
+        let deformed = mesh.apply_displacement(x, dim);
+        match write_mfem_file("deformed.mesh", &deformed) {
+            Ok(_) => eprintln!("  Saved deformed.mesh ({} elements)", deformed.n_elems()),
+            Err(e) => eprintln!("  Warning: failed to write deformed.mesh: {e}"),
+        }
+
+        // Save velocity field as .gf (MFEM GridFunction format)
+        match write_gf_file("velocity.sol", dim, v, "VectorH1", args.order, dim as usize) {
+            Ok(_) => eprintln!("  Saved velocity.sol ({} DOFs)", v.len()),
+            Err(e) => eprintln!("  Warning: failed to write velocity.sol: {e}"),
+        }
+
+        // Compute and save elastic energy density on an L² space.
+        // Use `order + 1` (matching C++ MFEM ex10) for Tri3/Tet4 meshes;
+        // for Quad4 use order 1 (P1 discontinuous, the max currently
+        // supported by L2Space for quads).
+        let is_quad = mesh.element_type(0).nodes_per_element() == 4;
+        let l2_order = if is_quad { 1u8 } else { (args.order + 1).min(3) };
+        let l2_space = L2Space::new(mesh.clone(), l2_order);
+        let l2_dofs = hyper.compute_elastic_energy_density(x, &l2_space, (l2_order as u8) * 2 + 1);
+        match write_gf_file("elastic_energy.sol", dim, &l2_dofs, "L2", l2_order, 1) {
+            Ok(_) => eprintln!("  Saved elastic_energy.sol ({} DOFs)", l2_dofs.len()),
+            Err(e) => eprintln!("  Warning: failed to write elastic_energy.sol: {e}"),
+        }
     }
 
     let elapsed = t0.elapsed();

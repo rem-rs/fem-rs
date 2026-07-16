@@ -39,6 +39,7 @@ use fem_element::{
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
+use fem_space::l2::L2Space;
 use fem_space::vector_h1::VectorH1Space;
 
 use crate::physics::nonlinear::{NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult};
@@ -529,6 +530,158 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
         }
         energy
     }
+
+    /// Compute elastic energy density projected onto an L² space.
+    ///
+    /// Returns an L² DOF vector where each entry stores `ψ(F)/det(F)`
+    /// (the elastic energy density in the **deformed** configuration).
+    ///
+    /// This mirrors the C++ MFEM ``ElasticEnergyCoefficient`` used in ex10:
+    /// `w.ProjectCoefficient(ElasticEnergyCoefficient(*model, x))`.
+    ///
+    /// # Algorithm
+    ///
+    /// For each element:
+    /// 1. Assemble the element L² mass matrix `M_e` and RHS `b_e` where
+    ///    `b_e[i] = ∫ φ̂ᵢ · ψ(F)/det(F) dx` (φ̂ are the L² basis functions).
+    /// 2. Solve the local system `M_e · c_e = b_e`.
+    /// 3. Write `c_e` into the global DOF vector.
+    ///
+    /// The element is parameterised by the H¹ displacement field `u`.
+    pub fn compute_elastic_energy_density(
+        &self,
+        u: &[f64],
+        l2_space: &L2Space<M>,
+        quad_order: u8,
+    ) -> Vec<f64> {
+        let mesh = self.space.mesh();
+        let dim = mesh.dim() as usize;
+        let h1_order = self.space.order();
+        let l2_order = l2_space.order();
+        let n_l2 = l2_space.n_dofs();
+        let mut edens = vec![0.0; n_l2];
+
+        // P0 special case: one constant DOF per element
+        if l2_order == 0 {
+            let mut elem_idx = 0;
+            for e in mesh.elem_iter() {
+                let elem_type = mesh.element_type(e);
+                let ref_elem = ref_elem_vol(elem_type, h1_order);
+                let n_ldofs = ref_elem.n_dofs();
+                let n_vec = n_ldofs * dim;
+                let quad = ref_elem.quadrature(quad_order);
+
+                let elem_dofs: Vec<usize> = self.space.element_dofs(e).iter()
+                    .map(|&d| d as usize).collect();
+                let mut u_elem = vec![0.0; n_vec];
+                for (k, &dof) in elem_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
+
+                let mut phi = vec![0.0; n_ldofs];
+                let mut gref = vec![0.0; n_ldofs * dim];
+                let mut gphys = vec![0.0; n_ldofs * dim];
+                let mut energy = 0.0;
+                let mut vol = 0.0;
+
+                for (q, xi) in quad.points.iter().enumerate() {
+                    ref_elem.eval_basis(xi, &mut phi);
+                    ref_elem.eval_grad_basis(xi, &mut gref);
+                    let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
+                    let w = quad.weights[q] * det_j.abs();
+                    xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
+
+                    let mut du = DMatrix::zeros(dim, dim);
+                    for k in 0..n_ldofs {
+                        for i in 0..dim {
+                            for j in 0..dim {
+                                du[(i, j)] += u_elem[k * dim + i] * gphys[k * dim + j];
+                            }
+                        }
+                    }
+                    let mut f_mat = DMatrix::identity(dim, dim);
+                    f_mat += &du;
+                    let psi = self.model.elastic_energy_density(&f_mat);
+                    let det_f = f_mat.determinant();
+                    let w_energy = if det_f.abs() > 1e-30 { psi / det_f.abs() } else { psi };
+                    energy += w * w_energy;
+                    vol += w;
+                }
+                edens[elem_idx] = if vol > 0.0 { energy / vol } else { 0.0 };
+                elem_idx += 1;
+            }
+            return edens;
+        }
+
+        // Orders ≥ 1: element-local L² projection
+        for e in mesh.elem_iter() {
+            let elem_type = mesh.element_type(e);
+            let h1_ref = ref_elem_vol(elem_type, h1_order);
+            let l2_ref = ref_elem_vol(elem_type, l2_order);
+            let n_h1 = h1_ref.n_dofs();
+            let n_l2_ldofs = l2_ref.n_dofs();
+            let n_vec = n_h1 * dim;
+            let quad = l2_ref.quadrature(quad_order);
+
+            // H¹ element DOFs (interleaved: x₀,y₀, x₁,y₁, …)
+            let h1_dofs: Vec<usize> = self.space.element_dofs(e).iter()
+                .map(|&d| d as usize).collect();
+            let mut u_elem = vec![0.0; n_vec];
+            for (k, &dof) in h1_dofs.iter().enumerate() { u_elem[k] = u[dof]; }
+
+            // L² element DOFs
+            let l2_dofs: Vec<usize> = l2_space.element_dofs(e).iter()
+                .map(|&d| d as usize).collect();
+
+            // Local mass matrix M_e and RHS b_e
+            let mut m_elem = vec![0.0; n_l2_ldofs * n_l2_ldofs];
+            let mut b_elem = vec![0.0; n_l2_ldofs];
+
+            let mut phi_h1 = vec![0.0; n_h1];
+            let mut gref_h1 = vec![0.0; n_h1 * dim];
+            let mut gphys_h1 = vec![0.0; n_h1 * dim];
+            let mut phi_l2 = vec![0.0; n_l2_ldofs];
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                h1_ref.eval_basis(xi, &mut phi_h1);
+                h1_ref.eval_grad_basis(xi, &mut gref_h1);
+                let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
+                let w = quad.weights[q] * det_j.abs();
+                xform_grads(&jit, &gref_h1, &mut gphys_h1, n_h1, dim);
+
+                // Deformation gradient F = I + ∇u
+                let mut du = DMatrix::zeros(dim, dim);
+                for k in 0..n_h1 {
+                    for i in 0..dim {
+                        for j in 0..dim {
+                            du[(i, j)] += u_elem[k * dim + i] * gphys_h1[k * dim + j];
+                        }
+                    }
+                }
+                let mut f_mat = DMatrix::identity(dim, dim);
+                f_mat += &du;
+                let psi = self.model.elastic_energy_density(&f_mat);
+                let det_f = f_mat.determinant();
+                // ψ(F)/det(F) = density in deformed configuration
+                let w_energy = if det_f.abs() > 1e-30 { psi / det_f.abs() } else { psi };
+
+                // L² basis at the same quadrature point
+                l2_ref.eval_basis(xi, &mut phi_l2);
+
+                for i in 0..n_l2_ldofs {
+                    b_elem[i] += w * phi_l2[i] * w_energy;
+                    for j in 0..n_l2_ldofs {
+                        m_elem[i * n_l2_ldofs + j] += w * phi_l2[i] * phi_l2[j];
+                    }
+                }
+            }
+
+            // Solve local system M_e · c_e = b_e via Gaussian elimination
+            let c_e = solve_local_system(&m_elem, &b_elem, n_l2_ldofs);
+            for (k, &dof) in l2_dofs.iter().enumerate() {
+                if dof < n_l2 { edens[dof] = c_e[k]; }
+            }
+        }
+        edens
+    }
 }
 
 impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
@@ -737,6 +890,50 @@ fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: us
             gp[i*dim+j] = s;
         }
     }
+}
+
+// ─── Helper: element-local linear system solve ───────────────────────────
+
+/// Solve a small dense system `M · x = b` (size n ≤ 20) by LU
+/// decomposition with partial pivoting (row-major storage).
+fn solve_local_system(m: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    debug_assert!(n <= 20, "solve_local_system: n={n} > 20 is not supported");
+    let mut a = m.to_vec();
+    let mut x = b.to_vec();
+    for col in 0..n {
+        let mut pivot = col;
+        let mut max_val = a[col * n + col].abs();
+        for row in (col + 1)..n {
+            let val = a[row * n + col].abs();
+            if val > max_val { max_val = val; pivot = row; }
+        }
+        if max_val < 1e-30 { continue; }
+        if pivot != col {
+            for j in col..n { a.swap(col * n + j, pivot * n + j); }
+            x.swap(col, pivot);
+        }
+        let diag = a[col * n + col];
+        for row in (col + 1)..n {
+            let factor = a[row * n + col] / diag;
+            if factor == 0.0 { continue; }
+            for j in (col + 1)..n {
+                a[row * n + j] -= factor * a[col * n + j];
+            }
+            a[row * n + col] = 0.0;
+            x[row] -= factor * x[col];
+        }
+    }
+    for col in (0..n).rev() {
+        let diag = a[col * n + col];
+        if diag.abs() < 1e-30 { continue; }
+        for row in (0..col).rev() {
+            if a[row * n + col] != 0.0 {
+                x[row] -= a[row * n + col] * x[col] / diag;
+            }
+        }
+        x[col] /= diag;
+    }
+    x
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

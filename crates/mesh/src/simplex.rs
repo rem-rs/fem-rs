@@ -428,6 +428,44 @@ impl<const D: usize> Mesh<D> {
         self.transform(|p| std::array::from_fn(|i| p[i] * s));
     }
 
+    /// Create a new mesh by displacing each node by a vector field.
+    ///
+    /// `displacement` is a flat array in **component-major** order
+    /// (all x-dofs `0..n_nodes`, then y-dofs, …) matching the
+    /// `VectorH1Space` DOF layout.  The first `n_nodes` entries of each
+    /// component block are assumed to correspond to the vertex DOFs.
+    /// Geometry nodes (high‑order curvature) are displaced identically.
+    pub fn apply_displacement(&self, displacement: &[f64], vdim: usize) -> Self {
+        let n_nodes = self.n_nodes();
+        let mut new_coords = self.coords.clone();
+        for n in 0..n_nodes {
+            for d in 0..D.min(vdim) {
+                let idx = d * n_nodes + n;
+                let val = if idx < displacement.len() { displacement[idx] } else { 0.0 };
+                new_coords[n * D + d] += val;
+            }
+        }
+        if let Some(ref geo) = self.geometry {
+            let n_geom = geo.coords.len() / D;
+            let mut new_geo_coords = geo.coords.clone();
+            for n in 0..n_geom {
+                for d in 0..D.min(vdim) {
+                    let idx = d * n_nodes + n;
+                    let val = if idx < displacement.len() { displacement[idx] } else { 0.0 };
+                    new_geo_coords[n * D + d] += val;
+                }
+            }
+            let mut m = self.clone();
+            m.coords = new_coords;
+            m.geometry = Some(GeometryData { coords: new_geo_coords, ..geo.clone() });
+            m
+        } else {
+            let mut m = self.clone();
+            m.coords = new_coords;
+            m
+        }
+    }
+
     /// Apply a 3×3 rotation matrix to all nodes (3-D only, panics for D ≠ 3).
     pub fn rotate_3d(&mut self, rot: &[[f64; 3]; 3]) {
         assert_eq!(D, 3, "rotate_3d requires dim=3");
