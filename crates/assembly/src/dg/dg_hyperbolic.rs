@@ -472,4 +472,155 @@ impl DgHyperbolicConservationLaws {
     pub fn max_char_speed(&self) -> f64 {
         self.max_char_speed.get()
     }
+
+    /// Compute the DG update: dudt = M⁻¹ (face_fluxes - Div·F(u)).
+    ///
+    /// `u` is the solution vector in **byNODES (DOF-major)** layout:
+    /// `index = e * dp * nq + i * nq + eq`
+    /// where `e` = element, `i` = local DOF, `eq` = equation index.
+    ///
+    /// Algorithm:
+    /// 1. Reset workspace `z` and `max_char_speed`.
+    /// 2. Interior faces: add numerical flux contribution (±f_hat).
+    /// 3. Boundary faces: reflecting wall BC (mirror normal velocity).
+    /// 4. Volume term: `z += weakdiv[e] · F_col` (if preassembled).
+    /// 5. Apply inverse mass: `dudt_e = invmass[e] · z_e`.
+    pub fn mult(&self, u: &[f64], dudt: &mut [f64]) {
+        let dp = self.dofs_per_elem;
+        let nq = self.n_eq;
+        let dim = self.dim;
+
+        // 1. Reset workspace
+        self.z.fill(0.0);
+        self.max_char_speed.set(0.0);
+
+        // 2. Interior face flux contributions
+        let mut uL = vec![0.0; nq];
+        let mut uR = vec![0.0; nq];
+        for face in &self.interior_faces {
+            let baseL = face.elem_l * dp * nq;
+            let baseR = face.elem_r * dp * nq;
+            for q in 0..face.qp_weights.len() {
+                // Interpolate states
+                uL.fill(0.0);
+                uR.fill(0.0);
+                for eq in 0..nq {
+                    for i in 0..dp {
+                        uL[eq] += face.basis_l[q][i] * u[baseL + i * nq + eq];
+                        uR[eq] += face.basis_r[q][i] * u[baseR + i * nq + eq];
+                    }
+                }
+                // Update max char speed
+                let cL = self.flux.max_speed(&uL, &face.normal);
+                let cR = self.flux.max_speed(&uR, &face.normal);
+                let c = cL.max(cR);
+                if c > self.max_char_speed.get() {
+                    self.max_char_speed.set(c);
+                }
+                // Numerical flux: Rusanov (local Lax-Friedrichs)
+                let f_hat = self.flux.numerical_flux(&uL, &uR, &face.normal);
+                let w = face.qp_weights[q];
+                // Add to z: +1 for L (outward normal), -1 for R
+                for eq in 0..nq {
+                    let fw = w * f_hat[eq];
+                    for i in 0..dp {
+                        self.z[baseL + i * nq + eq] += fw * face.basis_l[q][i];
+                        self.z[baseR + i * nq + eq] -= fw * face.basis_r[q][i];
+                    }
+                }
+            }
+        }
+
+        // 3. Boundary faces (reflecting wall BC)
+        let mut u_mirror = vec![0.0; nq];
+        for face in &self.boundary_faces {
+            let base = face.elem * dp * nq;
+            for q in 0..face.qp_weights.len() {
+                uL.fill(0.0);
+                for eq in 0..nq {
+                    for i in 0..dp {
+                        uL[eq] += face.basis[q][i] * u[base + i * nq + eq];
+                    }
+                }
+                // Mirror state for reflecting wall:
+                // Reverse normal component of momentum, keep density and energy
+                let nx = face.normal[0] / face.length;
+                let ny = face.normal[1] / face.length;
+                let vn = uL[1] * nx + uL[2] * ny; // normal momentum magnitude
+                u_mirror[0] = uL[0]; // density unchanged
+                u_mirror[1] = uL[1] - 2.0 * vn * nx; // reverse normal component
+                u_mirror[2] = uL[2] - 2.0 * vn * ny;
+                u_mirror[3] = uL[3]; // energy unchanged
+
+                let c = self
+                    .flux
+                    .max_speed(&uL, &face.normal)
+                    .max(self.flux.max_speed(&u_mirror, &face.normal));
+                if c > self.max_char_speed.get() {
+                    self.max_char_speed.set(c);
+                }
+                let f_hat = self.flux.numerical_flux(&uL, &u_mirror, &face.normal);
+                let w = face.qp_weights[q];
+                for eq in 0..nq {
+                    let fw = w * f_hat[eq];
+                    for i in 0..dp {
+                        self.z[base + i * nq + eq] += fw * face.basis[q][i];
+                    }
+                }
+            }
+        }
+
+        // 4. Volume term: weak divergence of F(u)
+        if self.preassemble_weakdiv {
+            let mut state = vec![0.0; nq];
+            let mut flux_qp = vec![0.0; nq * dim];
+            for e in 0..self.n_elems {
+                let base = e * dp * nq;
+                // f_all[(j * dim + d) * nq + eq] = F_d(u_j)[eq]
+                let mut f_all = vec![0.0; dp * dim * nq];
+                for j in 0..dp {
+                    for eq in 0..nq {
+                        state[eq] = u[base + j * nq + eq];
+                    }
+                    self.flux.compute_flux(&state, &[0.0, 0.0], &mut flux_qp);
+                    // flux_qp layout: [F_x(ρ), F_y(ρ), F_x(ρu), F_y(ρu), ...]
+                    // = flux_qp[eq * dim + d]
+                    for eq in 0..nq {
+                        for d in 0..dim {
+                            f_all[(j * dim + d) * nq + eq] = flux_qp[eq * dim + d];
+                        }
+                    }
+                }
+                // Matrix-vector: z_e(:,eq) += weakdiv[e] * f_col
+                let wd = &self.weakdiv[e]; // dp × (dp*dim)
+                for eq in 0..nq {
+                    // Build f_col: length dp*dim, f_col[j*dim+d] = F_d(u_j)[eq]
+                    let mut f_col = na::DVector::<f64>::zeros(dp * dim);
+                    for j in 0..dp {
+                        for d in 0..dim {
+                            f_col[j * dim + d] = f_all[(j * dim + d) * nq + eq];
+                        }
+                    }
+                    let zcol = wd * f_col; // dp × 1
+                    for i in 0..dp {
+                        self.z[base + i * nq + eq] += zcol[i];
+                    }
+                }
+            }
+        }
+
+        // 5. Apply inverse mass matrix
+        for e in 0..self.n_elems {
+            let base = e * dp * nq;
+            let inv = &self.invmass[e]; // dp × dp
+            for eq in 0..nq {
+                let zcol =
+                    na::DVector::<f64>::from_fn(dp, |i| self.z[base + i * nq + eq]);
+                let ycol = inv * zcol;
+                for i in 0..dp {
+                    dudt[base + i * nq + eq] = ycol[i];
+                }
+            }
+        }
+    }
 }
