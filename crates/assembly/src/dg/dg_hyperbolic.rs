@@ -174,6 +174,10 @@ pub struct DgHyperbolicConservationLaws {
     invmass: Vec<na::DMatrix<f64>>,
     weakdiv: Vec<na::DMatrix<f64>>,
     ref_elem: Box<dyn ReferenceElement>,
+    // Stored mesh for volume term direct quadrature
+    mesh_elem_nodes: Vec<[u32; 3]>,       // element → [n0, n1, n2]
+    mesh_node_coords: Vec<[f64; 2]>,      // node → [x, y]
+    elem_det_j: Vec<f64>,                  // per-element |detJ|
     flux: Box<dyn FluxFunction>,
     interior_faces: Vec<InteriorFace>,
     boundary_faces: Vec<BoundaryFace>,
@@ -266,14 +270,17 @@ fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
             ref_elem.eval_basis(&qr.points[q], &mut phi);
             ref_elem.eval_grad_basis(&qr.points[q], &mut gphi);
             for i in 0..dp {
+                // Physical gradient of test function φ_i: J^{-T} · ∇ξ_φ_i
+                let mut gphys_i = [0.0; 2];
+                for d in 0..dim {
+                    for k in 0..dim {
+                        gphys_i[d] += jit[d * dim + k] * gphi[i * dim + k];
+                    }
+                }
                 for j in 0..dp {
                     for d in 0..dim {
-                        // Transform gradient: grad_phys = J^{-T} * grad_ref
-                        let mut grad_phys = 0.0;
-                        for k in 0..dim {
-                            grad_phys += jit[d * dim + k] * gphi[j * dim + k];
-                        }
-                        wd[(i, j * dim + d)] += w * phi[i] * grad_phys;
+                        // wd[i, j*dim+d] = ∫ φ_j · ∂φ_i/∂x_d  (grad on TEST, weight from TRIAL)
+                        wd[(i, j * dim + d)] += w * phi[j] * gphys_i[d];
                     }
                 }
             }
@@ -573,8 +580,19 @@ impl DgHyperbolicConservationLaws {
             Vec::new()
         };
         let (interior_faces, boundary_faces) = build_faces(mesh, &*ref_elem);
-        // Face counts for debugging: interior={}, boundary={}
-        let _ = (interior_faces.len(), boundary_faces.len());
+        // Store mesh data for direct quadrature volume term
+        let mut mesh_elem_nodes = Vec::with_capacity(n_elems);
+        let mut elem_det_j = Vec::with_capacity(n_elems);
+        for e in 0..n_elems as u32 {
+            let nodes = mesh.element_nodes(e);
+            mesh_elem_nodes.push([nodes[0], nodes[1], nodes[2]]);
+            elem_det_j.push(element_det_j(mesh, e));
+        }
+        let mut mesh_node_coords = Vec::with_capacity(mesh.n_nodes());
+        for n in 0..mesh.n_nodes() as u32 {
+            let c = mesh.node_coords(n);
+            mesh_node_coords.push([c[0], c[1]]);
+        }
         Self {
             n_elems,
             dofs_per_elem,
@@ -590,6 +608,9 @@ impl DgHyperbolicConservationLaws {
             max_char_speed: std::cell::Cell::new(0.0),
             z: RefCell::new(vec![0.0; total_dofs]),
             preassemble_weakdiv,
+            mesh_elem_nodes,
+            mesh_node_coords,
+            elem_det_j,
         }
     }
 
@@ -646,7 +667,7 @@ impl DgHyperbolicConservationLaws {
                 if c > self.max_char_speed.get() { self.max_char_speed.set(c); }
                 let f_hat = self.flux.numerical_flux(&uL, &uR, &face.normal);
                 let w = face.qp_weights[q];
-                // Form 2: face = -ĝ·[[v]] = -ĝ·v_L + ĝ·v_R
+                // Form 2: face = -ĝ·[[v]] = +ĝ·v_L - ĝ·v_R
                 for eq in 0..nq {
                     let fw = w * f_hat[eq];
                     for i in 0..dp {
@@ -690,39 +711,60 @@ impl DgHyperbolicConservationLaws {
             }
         }
 
-        // 4. Volume term: weak divergence of F(u)
+        // 4. Volume term: direct quadrature (Form 2: +∫ F·∇v)
         if self.preassemble_weakdiv {
-            let mut state = vec![0.0; nq];
-            let mut flux_qp = vec![0.0; nq * dim];
-            for e in 0..self.n_elems {
-                let base = e * dp * nq;
-                // f_all[(j * dim + d) * nq + eq] = F_d(u_j)[eq]
-                let mut f_all = vec![0.0; dp * dim * nq];
-                for j in 0..dp {
-                    for eq in 0..nq { state[eq] = u[base + j * nq + eq]; }
-                    self.flux.compute_flux(&state, &[0.0, 0.0], &mut flux_qp);
-                    for eq in 0..nq {
-                        for d in 0..dim {
-                            f_all[(j * dim + d) * nq + eq] = flux_qp[eq * dim + d];
-                        }
+        //    Interpolate u to QP, compute flux F(u_qp), dot with∇φ_i.
+        let q_order = 2 * self.ref_elem.order();
+        let qr = self.ref_elem.quadrature(q_order);
+        let n_vol_qp = qr.n_points();
+        let mut phi = vec![0.0; dp];
+        let mut gphi = vec![0.0; dp * dim];
+        let mut state_qp = vec![0.0; nq];
+        let mut flux_qp = vec![0.0; nq * dim];
+        for e in 0..self.n_elems {
+            let base = e * dp * nq;
+            let det_j = self.elem_det_j[e];
+            // Precompute physical gradients of all test functions at each QP
+            // ∇x_φ_i(q) = J_e^{-T} · ∇ξ_φ_i(q)
+            let (_, jit) = {
+                let en = &self.mesh_elem_nodes[e];
+                let p0 = &self.mesh_node_coords[en[0] as usize];
+                let p1 = &self.mesh_node_coords[en[1] as usize];
+                let p2 = &self.mesh_node_coords[en[2] as usize];
+                let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
+                let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
+                let det = j11 * j22 - j12 * j21;
+                let inv_det = 1.0 / det;
+                (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+            };
+            for q in 0..n_vol_qp {
+                let xi = &qr.points[q];
+                let w = qr.weights[q] * det_j;
+                self.ref_elem.eval_basis(xi, &mut phi);
+                // Interpolate u to QP
+                state_qp.fill(0.0);
+                for eq in 0..nq {
+                    for i in 0..dp {
+                        state_qp[eq] += phi[i] * u[base + i * nq + eq];
                     }
                 }
-                let wd = &self.weakdiv[e];
-                for eq in 0..nq {
-                    let mut f_col = na::DVector::<f64>::zeros(dp * dim);
-                    for j in 0..dp {
-                        for d in 0..dim {
-                            f_col[j * dim + d] = f_all[(j * dim + d) * nq + eq];
-                        }
-                    }
-                    let zcol = wd * f_col;
-                    for i in 0..dp {
-                        z[base + i * nq + eq] += zcol[i];
+                // Compute physical flux at QP
+                self.flux.compute_flux(&state_qp, &[0.0, 0.0], &mut flux_qp);
+                // Evaluate physical gradient of test functions at this QP
+                self.ref_elem.eval_grad_basis(xi, &mut gphi);
+                for i in 0..dp {
+                    // ∇x_φ_i = J^{-T} · ∇ξ_φ_i
+                    let gx = jit[0] * gphi[i * dim] + jit[1] * gphi[i * dim + 1];
+                    let gy = jit[2] * gphi[i * dim] + jit[3] * gphi[i * dim + 1];
+                    // z[e,i,eq] += w * |detJ| * (F_x * gx + F_y * gy)
+                    for eq in 0..nq {
+                        z[base + i * nq + eq] += w * (flux_qp[eq*dim] * gx + flux_qp[eq*dim+1] * gy);
                     }
                 }
             }
         }
 
+        }
         // 5. Apply inverse mass matrix
         for e in 0..self.n_elems {
             let base = e * dp * nq;
