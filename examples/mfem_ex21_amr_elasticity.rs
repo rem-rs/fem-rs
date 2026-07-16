@@ -22,6 +22,7 @@ use fem_mesh::amr::HangingNodeConstraint;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::{Mesh, MeshTopology};
 use fem_solver::solve_pcg_gssmoother;
+use fem_solver::solve_sparse_lu;
 use fem_space::constraints::boundary_dofs;
 use fem_space::constraints::hanging_2d::{apply_hanging_constraints, recover_hanging_values};
 use fem_space::constraints::prolong::prolongate_pk_hanging;
@@ -86,6 +87,7 @@ fn main() {
     let mut _static_cond = false;
     let mut _flux_averaging = 0i32;
     let mut _visualization = false;
+    let mut use_direct = false; // SuiteSparse equivalent
     let max_dofs = 50000usize;
     let max_amr_itr = 20usize;
 
@@ -100,6 +102,7 @@ fn main() {
             "-f" | "--flux-averaging" => _flux_averaging = i.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "-vis" | "--visualization" => _visualization = true,
             "-no-vis" | "--no-visualization" => _visualization = false,
+            "-direct" | "--direct-solver" => use_direct = true,
             _ => {}
         }
     }
@@ -190,11 +193,17 @@ fn main() {
             vec![0.0_f64; n_dofs]
         };
 
-        // 10. Solve (PCG + GSSmoother)
-        let res = solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg);
-        match &res {
-            Ok(r) => println!("  PCG: {} its, res={:.3e}", r.iterations, r.final_residual),
-            Err(e) => eprintln!("  PCG error: {e}"),
+        // 10. Solve (direct LU or PCG+GSSmoother, matching C++ SuiteSparse/non-SuiteSparse)
+        if use_direct {
+            match solve_sparse_lu(&mat, &rhs) {
+                Ok(x_lu) => { x = x_lu; println!("  LU: direct solve"); }
+                Err(e) => eprintln!("  LU error: {e}"),
+            }
+        } else {
+            match solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg) {
+                Ok(r) => println!("  PCG: {} its, res={:.3e}", r.iterations, r.final_residual),
+                Err(e) => eprintln!("  PCG error: {e}"),
+            }
         }
 
         // 11. ZZ error estimator
