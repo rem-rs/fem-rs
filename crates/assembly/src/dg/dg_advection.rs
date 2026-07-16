@@ -18,7 +18,7 @@ use nalgebra::DMatrix;
 
 use std::f64::consts::PI;
 
-use fem_core::types::{DofId, ElemId};
+use fem_core::types::{DofId, ElemId, NodeId};
 use fem_element::{ReferenceElement,
     lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1}};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -580,6 +580,115 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
     }
 
     (coo.into_csr(), rhs)
+}
+
+/// Assemble periodic face pairs for DG advection.
+///
+/// Unlike `assemble_dg_interior_faces` which uses a single set of face nodes
+/// for both adjacent elements, periodic faces connect elements across the
+/// periodic boundary.  Each element's basis must be evaluated at its OWN face
+/// nodes so that `phys_to_ref` maps within the element's reference domain.
+///
+/// The normal is computed from the LEFT element's face nodes, then the flux
+/// contribution is evaluated separately on each element using its own geometry.
+pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoeff>(
+    coo: &mut CooMatrix<f64>,
+    mesh: &M,
+    space: &S,
+    pairs: &[(ElemId, ElemId, Vec<NodeId>, Vec<NodeId>)],  // (left_elem, right_elem, left_face_nodes, right_face_nodes)
+    order: u8,
+    quad_order: u8,
+    velocity: &V,
+) {
+    let dim = mesh.dim() as usize;
+    let ref_face = ref_elem_face(ElementType::Line2, order);
+    let q_face = ref_face.quadrature(quad_order);
+
+    for &(el_l, el_r, ref fn_l, ref fn_r) in pairs {
+        // Face geometry from LEFT element's face nodes
+        let p0 = mesh.node_coords(fn_l[0]);
+        let p1 = mesh.node_coords(fn_l[1]);
+        let dx = p1[0] - p0[0];
+        let dy = p1[1] - p0[1];
+        let h_f = (dx * dx + dy * dy).sqrt();
+        let normal_l = vec![dy / h_f, -dx / h_f];
+
+        // Get element data for both sides
+        let dofs_l: Vec<usize> = space.element_dofs(el_l).iter().map(|&d| d as usize).collect();
+        let dofs_r: Vec<usize> = space.element_dofs(el_r).iter().map(|&d| d as usize).collect();
+        let n_l = dofs_l.len();
+        let n_r = dofs_r.len();
+        let et_l = mesh.element_type(el_l);
+        let et_r = mesh.element_type(el_r);
+        let o_l = space.element_order(el_l);
+        let o_r = space.element_order(el_r);
+        let re_l = ref_elem_vol(et_l, o_l);
+        let re_r = ref_elem_vol(et_r, o_r);
+        let nodes_l = mesh.element_nodes(el_l);
+        let nodes_r = mesh.element_nodes(el_r);
+        let (jac_l, _) = simplex_jac(mesh, nodes_l, dim);
+        let (jac_r, _) = simplex_jac(mesh, nodes_r, dim);
+        let x0_l = mesh.node_coords(nodes_l[0]);
+        let x0_r = mesh.node_coords(nodes_r[0]);
+
+        let mut phi_l = vec![0.0; n_l];
+        let mut phi_r = vec![0.0; n_r];
+        let mut k_ll = vec![0.0; n_l * n_l];
+        let mut k_lr = vec![0.0; n_l * n_r];
+        let mut k_rl = vec![0.0; n_r * n_l];
+        let mut k_rr = vec![0.0; n_r * n_r];
+
+        for (qi, xi_f) in q_face.points.iter().enumerate() {
+            let w_f = q_face.weights[qi] * h_f;
+
+            // Physical point on LEFT element's face
+            let t = xi_f[0];
+            let xp_l: Vec<f64> = (0..dim).map(|i| {
+                let p0 = mesh.node_coords(fn_l[0]);
+                let p1 = mesh.node_coords(fn_l[1]);
+                (1.0 - t) * p0[i] + t * p1[i]
+            }).collect();
+
+            // Physical point on RIGHT element's face
+            let xp_r: Vec<f64> = (0..dim).map(|i| {
+                let p0 = mesh.node_coords(fn_r[0]);
+                let p1 = mesh.node_coords(fn_r[1]);
+                (1.0 - t) * p0[i] + t * p1[i]
+            }).collect();
+
+            // Map to reference coordinates
+            let xi_l = phys_to_ref(&jac_l, x0_l, &xp_l, dim);
+            let xi_r = phys_to_ref(&jac_r, x0_r, &xp_r, dim);
+
+            // Evaluate bases
+            re_l.eval_basis(&xi_l, &mut phi_l);
+            re_r.eval_basis(&xi_r, &mut phi_r);
+
+            // Velocity at left face QP
+            let ctx = CoeffCtx::from_qp(&xp_l, dim, el_l, 0, None, None);
+            let mut b = [0.0; 3];
+            velocity.eval(&ctx, &mut b[..dim]);
+            let vn: f64 = (0..dim).map(|i| b[i] * normal_l[i]).sum();
+
+            // Upwind flux (same as DGAdvectionIntegrator face term)
+            if vn >= 0.0 {
+                for i in 0..n_l { for j in 0..n_l { k_ll[i*n_l+j] += -w_f * vn * phi_l[i] * phi_l[j]; }}
+                for i in 0..n_r { for j in 0..n_l { k_rl[i*n_l+j] += w_f * vn * phi_r[i] * phi_l[j]; }}
+            } else {
+                for i in 0..n_l { for j in 0..n_r { k_lr[i*n_r+j] += -w_f * vn * phi_l[i] * phi_r[j]; }}
+                for i in 0..n_r { for j in 0..n_r { k_rr[i*n_r+j] += w_f * vn * phi_r[i] * phi_r[j]; }}
+            }
+        }
+
+        for (i, &gi) in dofs_l.iter().enumerate() {
+            for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, k_ll[i*n_l+j]); }
+            for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, k_lr[i*n_r+j]); }
+        }
+        for (i, &gi) in dofs_r.iter().enumerate() {
+            for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, k_rl[i*n_l+j]); }
+            for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, k_rr[i*n_r+j]); }
+        }
+    }
 }
 
 // ─── DgAdvectionProblem ─────────────────────────────────────────────────────

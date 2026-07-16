@@ -71,9 +71,9 @@ impl InteriorFaceList {
             }
         }
 
-        // Phase 2: periodic face detection (2D only, boundary 0 meshes)
+        // Phase 2: periodic face detection (2D only)
         // Find remaining unpaired edges and match them across periodic boundaries.
-        // Only applies when the mesh has NO boundary faces (fully periodic).
+        // Only applies when mesh has no boundary faces (fully periodic).
         if dim == 2 && !face_map.is_empty() && mesh.n_boundary_faces() == 0 {
             // Collect: (elem, face_nodes, normal)
             let mut bdr: Vec<(ElemId, Vec<u32>, Vec<f64>)> = face_map
@@ -113,18 +113,12 @@ impl InteriorFaceList {
                 neg.sort_by_key(|&i| (coord(i) * 1e6) as i64);
                 pos.sort_by_key(|&i| (coord(i) * 1e6) as i64);
                 for i in 0..neg.len() {
-                    let (el_neg, _, _) = &bdr[neg[i]];
+                    let (el_neg, ref nodes_neg, _) = &bdr[neg[i]];
                     let (el_pos, ref nodes_pos, _) = &bdr[pos[i]];
-                    // neg = left/bottom side, pos = right/top side.
-                    // elem_left = neg (left/bottom), elem_right = pos (right/top).
-                    // Use face_nodes from the POS element so the left-of-edge normal
-                    // points from neg toward pos (matching physical flow direction).
-                    interior.push(InteriorFace {
-                        elem_left: *el_neg,
-                        elem_right: *el_pos,
-                        face_nodes: nodes_pos.clone(),
-                    });
                 }
+                // Note: periodic faces need special handling because the
+                // face is not shared by adjacent elements in physical space.
+                // Use assemble_periodic_faces() at the application level.
             };
 
             group_and_pair(0, -0.5, 0.5);  // x: left vs right
