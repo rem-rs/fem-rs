@@ -208,6 +208,223 @@ fn residual(
     }
 }
 
+// ─── Jacobian assembly ─────────────────────────────────────────────────
+
+/// Assemble the block Jacobian J = [K_uu, K_up; K_pu, 0] and
+/// apply Dirichlet row-zeroing.
+///
+/// K_uu[(a,i),(b,j)] = ∫ C_{iIjJ} · ∂φ_a/∂X_I · ∂φ_b/∂X_J  dx
+///   C_{iIjJ} = μ·δ_{ij}·δ_{IJ} + p·F^{-T}_{jI}·F^{-T}_{iJ}
+///
+/// K_up[(a,i),m] = -∫ ψ_m · F^{-T}_{iJ} · ∂φ_a/∂X_J  dx
+///
+/// K_pu[m,(b,j)] =  ∫ J · F^{-T}_{jJ} · ∂φ_b/∂X_J · ψ_m  dx
+fn jacobian(
+    mesh: &impl MeshTopology,
+    dim: usize,
+    order: u8,
+    p_order: u8,
+    quad_order: u8,
+    mu: f64,
+    u: &[f64],
+    p: &[f64],
+    elem_dofs_u: &[Vec<usize>],
+    elem_dofs_p: &[Vec<usize>],
+    nu: usize,
+    np: usize,
+    du: &[(usize, f64)],
+) -> (Vec<usize>, BlockMatrix) {
+    let nt = nu + np;
+    let mut coo = CooMatrix::<f64>::new(nt, nt);
+
+    let ne = mesh.n_elements() as usize;
+    for e in 0..ne {
+        let et = mesh.element_type(e as u32);
+        let ru_ref = re(et, order);
+        let rp_ref = re(et, p_order);
+        let n_du = ru_ref.n_dofs();
+        let n_dp = rp_ref.n_dofs();
+        let n_vd = n_du * dim;
+
+        let eu: &[usize] = &elem_dofs_u[e];
+        let ep: &[usize] = &elem_dofs_p[e];
+
+        let mut ue = vec![0.0_f64; n_vd];
+        for (k, &g) in eu.iter().enumerate() {
+            ue[k] = u[g];
+        }
+        let mut pe = vec![0.0_f64; n_dp];
+        for (k, &g) in ep.iter().enumerate() {
+            pe[k] = p[g];
+        }
+
+        let q = ru_ref.quadrature(quad_order);
+        let mut phi_u = vec![0.0_f64; n_du];
+        let mut gr_u = vec![0.0_f64; n_du * dim];
+        let mut gp_u = vec![0.0_f64; n_du * dim];
+        let mut phi_p = vec![0.0_f64; n_dp];
+
+        // Element stiffness blocks
+        let mut kuu = vec![0.0_f64; n_vd * n_vd];
+        let mut kup = vec![0.0_f64; n_vd * n_dp];
+        let mut kpu = vec![0.0_f64; n_dp * n_vd];
+
+        for (qi, xi) in q.points.iter().enumerate() {
+            ru_ref.eval_basis(xi, &mut phi_u);
+            ru_ref.eval_grad_basis(xi, &mut gr_u);
+            rp_ref.eval_basis(xi, &mut phi_p);
+
+            let (det_j, ji) = jacf(mesh, e as u32, xi, dim);
+            xform_grads(&ji, &gr_u, &mut gp_u, n_du, dim);
+            let w = q.weights[qi] * det_j.abs();
+
+            // Deformation gradient
+            let mut F = DMatrix::<f64>::identity(dim, dim);
+            for k in 0..n_du {
+                for i in 0..dim {
+                    for j in 0..dim {
+                        F[(i, j)] += ue[k * dim + i] * gp_u[k * dim + j];
+                    }
+                }
+            }
+            let dJ = F.determinant();
+            let iF = F.try_inverse().unwrap_or_else(|| DMatrix::<f64>::identity(dim, dim));
+            let FT = iF.transpose();
+
+            let mut pres = 0.0;
+            for k in 0..n_dp {
+                pres += pe[k] * phi_p[k];
+            }
+
+            // K_uu: tangent stiffness
+            // C_{iIjJ} = μ·δ_{ij}·δ_{IJ} + p·F^{-T}_{jI}·F^{-T}_{iJ}
+            for a in 0..n_du {
+                for i in 0..dim {
+                    let row = a * dim + i;
+                    for b in 0..n_du {
+                        for j in 0..dim {
+                            let col = b * dim + j;
+
+                            // First term: μ·δ_{ij}·∇φ_a·∇φ_b
+                            let mut v = 0.0;
+                            if i == j {
+                                for l in 0..dim {
+                                    v += mu * gp_u[a * dim + l] * gp_u[b * dim + l];
+                                }
+                            }
+
+                            // Second term: p·F^{-T}_{jI}·F^{-T}_{iJ} · ∂φ_a/∂X_I · ∂φ_b/∂X_J
+                            // = p·(F^{-T}_{j,·}·∇φ_b) · (F^{-T}_{i,·}·∇φ_a)
+                            let ftn: f64 = (0..dim).map(|l| FT[(i, l)] * gp_u[b * dim + l]).sum();
+                            let ftl: f64 = (0..dim).map(|l| FT[(j, l)] * gp_u[a * dim + l]).sum();
+                            v += pres * ftn * ftl;
+
+                            kuu[row * n_vd + col] += v * w;
+                        }
+                    }
+                }
+            }
+
+            // K_up: ∂R_u/∂p
+            // = -∫ ψ_m · F^{-T}_{iJ} · ∂φ_a/∂X_J  dx
+            for a in 0..n_du {
+                for i in 0..dim {
+                    let row = a * dim + i;
+                    let ft_gp: f64 = (0..dim).map(|l| FT[(i, l)] * gp_u[a * dim + l]).sum();
+                    for m in 0..n_dp {
+                        kup[row * n_dp + m] -= w * ft_gp * phi_p[m];
+                    }
+                }
+            }
+
+            // K_pu: ∂R_p/∂u
+            // = ∫ J · F^{-T}_{jJ} · ∂φ_b/∂X_J · ψ_m  dx
+            for m in 0..n_dp {
+                for b in 0..n_du {
+                    for j in 0..dim {
+                        let col = b * dim + j;
+                        let ft_gp: f64 = (0..dim).map(|l| FT[(j, l)] * gp_u[b * dim + l]).sum();
+                        kpu[m * n_vd + col] += w * dJ * ft_gp * phi_p[m];
+                    }
+                }
+            }
+        }
+
+        // Scatter element blocks to global COO
+        for a in 0..n_vd {
+            let gi = eu[a] as usize;
+            for b in 0..n_vd {
+                let gj = eu[b] as usize;
+                coo.add(gi, gj, kuu[a * n_vd + b]);
+            }
+        }
+        for a in 0..n_vd {
+            let gi = eu[a] as usize;
+            for m in 0..n_dp {
+                let gj = ep[m] as usize;
+                coo.add(gi, nu + gj, kup[a * n_dp + m]);
+            }
+        }
+        for m in 0..n_dp {
+            let gi = ep[m] as usize;
+            for b in 0..n_vd {
+                let gj = eu[b] as usize;
+                coo.add(nu + gi, gj, kpu[m * n_vd + b]);
+            }
+        }
+    }
+
+    let mut flat = coo.into_csr();
+
+    // Apply Dirichlet row-zeroing to enforce essential BCs
+    let mut diag_scratch = vec![0.0_f64; nt];
+    for &(dof, _) in du {
+        flat.apply_dirichlet_row_zeroing(dof, 0.0, &mut diag_scratch);
+    }
+
+    // Wrap into BlockMatrix
+    let block_sizes = vec![nu, np];
+    let mut bm = BlockMatrix::new_square(block_sizes.clone());
+
+    // Extract K_uu block (rows 0..nu, cols 0..nu)
+    let mut coo_uu = CooMatrix::new(nu, nu);
+    for i in 0..nu {
+        for p in flat.row_ptr[i]..flat.row_ptr[i + 1] {
+            let c = flat.col_idx[p] as usize;
+            if c < nu {
+                coo_uu.add(i, c, flat.values[p]);
+            }
+        }
+    }
+    bm.set(0, 0, coo_uu.into_csr());
+
+    // Extract K_up block (rows 0..nu, cols nu..nu+np)
+    let mut coo_up = CooMatrix::new(nu, np);
+    for i in 0..nu {
+        for p in flat.row_ptr[i]..flat.row_ptr[i + 1] {
+            let c = flat.col_idx[p] as usize;
+            if c >= nu && c < nu + np {
+                coo_up.add(i, c - nu, flat.values[p]);
+            }
+        }
+    }
+    bm.set(0, 1, coo_up.into_csr());
+
+    // Extract K_pu block (rows nu..nu+np, cols 0..nu)
+    let mut coo_pu = CooMatrix::new(np, nu);
+    for i in nu..nu + np {
+        for p in flat.row_ptr[i]..flat.row_ptr[i + 1] {
+            let c = flat.col_idx[p] as usize;
+            if c < nu {
+                coo_pu.add(i - nu, c, flat.values[p]);
+            }
+        }
+    }
+    bm.set(1, 0, coo_pu.into_csr());
+
+    (block_sizes, bm)
+}
+
 fn main() {
     let args = Args::parse();
     println!("=== MFEM ex19: Incompressible neo-Hookean hyperelasticity ===");
@@ -292,6 +509,21 @@ fn main() {
 
     let r0 = nr(&[ru.as_slice(), rp.as_slice()].concat());
     println!("Newton 0 ||r|| = {r0:.5}");
+
+    // 8. Assemble initial Jacobian (verification)
+    let (block_sizes, jac) = jacobian(
+        &mesh, dim as usize, order, p_order, quad_order, args.mu,
+        &u, &p, &elem_dofs_u, &elem_dofs_p, nu, np, &du,
+    );
+    if let Some(kuu) = jac.get(0, 0) {
+        println!("  K_uu nnz = {}", kuu.nnz());
+    }
+    if let Some(kup) = jac.get(0, 1) {
+        println!("  K_up nnz = {}", kup.nnz());
+    }
+    if let Some(kpu) = jac.get(1, 0) {
+        println!("  K_pu nnz = {}", kpu.nnz());
+    }
 }
 
 struct Args {
