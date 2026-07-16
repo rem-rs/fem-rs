@@ -36,24 +36,19 @@ impl InteriorFaceList {
     /// Build the interior face list from `mesh`.
     ///
     /// Works for 2-D meshes (triangles, quads) and 3-D meshes (tetrahedra).
-    /// For periodic meshes, call `mesh.detect_periodic_boundary()` first to
-    /// merge periodic node pairs, then `InteriorFaceList` will automatically
-    /// detect all interior faces via node-key matching.
+    /// Phase 1 finds interior faces by standard node-key matching.
+    /// Phase 2 (2D only) detects periodic boundary faces by geometry matching
+    /// and adds them as interior face pairs WITHOUT merging mesh nodes.
     pub fn build<M: MeshTopology>(mesh: &M) -> Self {
         let dim = mesh.dim() as usize;
 
-        // Map from sorted face key → (elem_id, face_node_indices unsorted)
+        // Phase 1: standard interior face detection (node-key matching)
         let mut face_map: HashMap<Vec<NodeId>, (ElemId, Vec<NodeId>)> = HashMap::new();
         let mut interior = Vec::new();
 
         for e in mesh.elem_iter() {
             let nodes = mesh.element_nodes(e);
             let npe = nodes.len();
-
-            // Enumerate faces of this element.
-            // For a triangle (3 nodes): faces are pairs (0,1),(1,2),(0,2).
-            // For a quad (4 nodes in 2D): faces are pairs (0,1),(1,2),(2,3),(3,0).
-            // For a tet (4 nodes in 3D): faces are triples (0,1,2),(0,1,3),(0,2,3),(1,2,3).
             let local_faces = local_faces(npe, dim);
 
             for lf in &local_faces {
@@ -62,12 +57,10 @@ impl InteriorFaceList {
 
                 match face_map.remove(&key) {
                     None => {
-                        // First time we see this face.
                         let face_nodes: Vec<NodeId> = lf.iter().map(|&k| nodes[k]).collect();
                         face_map.insert(key, (e, face_nodes));
                     }
                     Some((other_elem, face_nodes)) => {
-                        // Second time → interior face.
                         interior.push(InteriorFace {
                             elem_left:  other_elem,
                             elem_right: e,
@@ -77,7 +70,65 @@ impl InteriorFaceList {
                 }
             }
         }
-        // Remaining entries in face_map are boundary faces (one element only) — ignore.
+
+        // Phase 2: periodic face detection (2D only)
+        // Find remaining unpaired edges and match them across periodic boundaries
+        if dim == 2 && !face_map.is_empty() {
+            // Collect: (elem, face_nodes, normal)
+            let mut bdr: Vec<(ElemId, Vec<u32>, Vec<f64>)> = face_map
+                .into_values()
+                .map(|(elem, nodes)| {
+                    let p0 = mesh.node_coords(nodes[0]);
+                    let p1 = mesh.node_coords(nodes[1]);
+                    let dx = p1[0] - p0[0];
+                    let dy = p1[1] - p0[1];
+                    let len = (dx * dx + dy * dy).sqrt();
+                    let (mut nx, mut ny) = (-dy / len, dx / len);
+                    // Determine outward direction using element centroid
+                    let en = mesh.element_nodes(elem);
+                    let cx: f64 = en.iter().map(|&n| mesh.node_coords(n)[0]).sum::<f64>() / en.len() as f64;
+                    let cy: f64 = en.iter().map(|&n| mesh.node_coords(n)[1]).sum::<f64>() / en.len() as f64;
+                    let mx = (p0[0] + p1[0]) / 2.0;
+                    let my = (p0[1] + p1[1]) / 2.0;
+                    if nx * (mx - cx) + ny * (my - cy) < 0.0 { nx = -nx; ny = -ny; }
+                    (elem, nodes, vec![nx, ny])
+                })
+                .collect();
+
+            // Group by normal direction and sort by midpoint position
+            let mut group_and_pair = |dir: usize, val: f64, opp_val: f64| {
+                // dir=0 for x(left/right), dir=1 for y(bottom/top)
+                let mut neg: Vec<usize> = (0..bdr.len()).filter(|&i| bdr[i].2[dir] < val).collect();
+                let mut pos: Vec<usize> = (0..bdr.len()).filter(|&i| bdr[i].2[dir] > opp_val).collect();
+                if neg.is_empty() || pos.is_empty() || neg.len() != pos.len() { return; }
+                // Sort by the OTHER coordinate
+                let other_dir = 1 - dir;
+                let coord = |idx: usize| -> f64 {
+                    let fnodes = &bdr[idx].1;
+                    let p0 = mesh.node_coords(fnodes[0]);
+                    let p1 = mesh.node_coords(fnodes[1]);
+                    (p0[other_dir] + p1[other_dir]) / 2.0
+                };
+                neg.sort_by_key(|&i| (coord(i) * 1e6) as i64);
+                pos.sort_by_key(|&i| (coord(i) * 1e6) as i64);
+                for i in 0..neg.len() {
+                    let (el_neg, _, _) = &bdr[neg[i]];
+                    let (el_pos, ref nodes_pos, _) = &bdr[pos[i]];
+                    // neg = left/bottom side, pos = right/top side.
+                    // elem_left = neg (left/bottom), elem_right = pos (right/top).
+                    // Use face_nodes from the POS element so the left-of-edge normal
+                    // points from neg toward pos (matching physical flow direction).
+                    interior.push(InteriorFace {
+                        elem_left: *el_neg,
+                        elem_right: *el_pos,
+                        face_nodes: nodes_pos.clone(),
+                    });
+                }
+            };
+
+            group_and_pair(0, -0.5, 0.5);  // x: left vs right
+            group_and_pair(1, -0.5, 0.5);  // y: bottom vs top
+        }
 
         InteriorFaceList { faces: interior }
     }
