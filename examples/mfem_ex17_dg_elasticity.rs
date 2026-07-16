@@ -174,6 +174,94 @@ fn main() {
     println!("kappa = {}, alpha = {}", kappa, alpha);
     println!("order = {}, ref_levels = {}", order, ref_levels);
     println!("=========================");
+
+    // 8. Output displaced mesh and solution (matching MFEM ex17 format)
+    {
+        println!("\nOutput ...");
+
+        let nn = mesh.n_nodes();
+        let mut displaced_coords: Vec<f64> = (0..nn)
+            .flat_map(|n| mesh.node_coords(n as u32).to_vec())
+            .collect();
+
+        // Map DG DOFs back to mesh nodes via element DOF connectivity
+        let mut u_x = vec![0.0_f64; nn];
+        let mut u_y = vec![0.0_f64; nn];
+        let mut count = vec![0_usize; nn];
+
+        for e in mesh.elem_iter() {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            for (k, &n) in nodes.iter().enumerate() {
+                let dof = dofs[k] as usize;
+                u_x[n as usize] += x[dof];
+                u_y[n as usize] += x[n_scalar + dof];
+                count[n as usize] += 1;
+            }
+        }
+        for n in 0..nn {
+            if count[n] > 0 {
+                u_x[n] /= count[n] as f64;
+                u_y[n] /= count[n] as f64;
+                displaced_coords[n * 2] += u_x[n];
+                displaced_coords[n * 2 + 1] += u_y[n];
+            }
+        }
+
+        // Write displaced.mesh
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create("displaced.mesh")
+                .expect("cannot create displaced.mesh");
+            writeln!(f, "MFEM mesh v1.0").ok();
+            writeln!(f, "").ok();
+            writeln!(f, "dimension").ok();
+            writeln!(f, "{}", mesh.dim()).ok();
+            writeln!(f, "").ok();
+            writeln!(f, "elements").ok();
+            writeln!(f, "{}", mesh.n_elems()).ok();
+            for e in mesh.elem_iter() {
+                let nodes = mesh.element_nodes(e);
+                let npe = nodes.len();
+                let et_str = match npe {
+                    3 => "Triangle",
+                    4 => "Quadrilateral",
+                    _ => "Element",
+                };
+                write!(f, "{} ", e).ok();
+                for &n in nodes {
+                    write!(f, "{} ", n).ok();
+                }
+                writeln!(f, "{}", et_str).ok();
+            }
+            writeln!(f, "").ok();
+            writeln!(f, "boundary").ok();
+            writeln!(f, "0").ok();
+            writeln!(f, "").ok();
+            writeln!(f, "vertices").ok();
+            writeln!(f, "{}", nn).ok();
+            for n in 0..nn {
+                writeln!(f, "{:.15e} {:.15e}",
+                    displaced_coords[n * 2], displaced_coords[n * 2 + 1]).ok();
+            }
+            writeln!(f, "").ok();
+            writeln!(f, "element_data").ok();
+            writeln!(f, "0").ok();
+            println!("  wrote displaced.mesh");
+        }
+
+        // Write sol.gf (simple ASCII format)
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create("sol.gf")
+                .expect("cannot create sol.gf");
+            writeln!(f, "{}", dim * n_scalar).ok();
+            for v in &x {
+                writeln!(f, "{:.15e}", v).ok();
+            }
+            println!("  wrote sol.gf");
+        }
+    }
 }
 
 // ─── DG Dirichlet RHS assembly ──────────────────────────────────────────────
