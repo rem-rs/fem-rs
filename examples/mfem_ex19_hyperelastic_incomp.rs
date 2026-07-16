@@ -19,6 +19,8 @@ use std::io::Write;
 use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix, SolverConfig};
+use fem_solver::block_operator::right_preconditioned_gmres;
+use fem_solver::{solve_cg, solve_gmres_gssmoother, SolveResult};
 use fem_mesh::{refine_uniform, MeshTopology};
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space, VectorH1Space};
 use fem_element::lagrange::{TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, QuadQ4};
@@ -88,6 +90,46 @@ fn xform_grads(ji: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usi
 /// Euclidean norm of a slice.
 fn nr(v: &[f64]) -> f64 {
     v.iter().map(|&x| x * x).sum::<f64>().sqrt()
+}
+
+// ─── Pressure mass matrix ──────────────────────────────────────────────
+
+fn build_pressure_mass(
+    mesh: impl MeshTopology + Clone,
+    p_order: u8,
+    quad_order: u8,
+    np: usize,
+) -> CsrMatrix<f64> {
+    use fem_space::fe_space::FESpace;
+    let space = H1Space::new(mesh.clone(), p_order);
+    let mut coo = CooMatrix::<f64>::new(np, np);
+    let ne = mesh.n_elements() as usize;
+    for e in 0..ne {
+        let et = mesh.element_type(e as u32);
+        let ref_elem = re(et, p_order);
+        let n_ldofs = ref_elem.n_dofs();
+        let edofs: Vec<usize> = space.element_dofs(e as u32)
+            .iter().map(|&d| d as usize).collect();
+        let q = ref_elem.quadrature(quad_order);
+        let mut phi = vec![0.0_f64; n_ldofs];
+        let mut me = vec![0.0_f64; n_ldofs * n_ldofs];
+        for (qi, xi) in q.points.iter().enumerate() {
+            ref_elem.eval_basis(xi, &mut phi);
+            let (_det_j, _ji) = jacf(&mesh, e as u32, xi, mesh.dim() as usize);
+            let w = q.weights[qi] * _det_j.abs();
+            for i in 0..n_ldofs {
+                for j in 0..n_ldofs {
+                    me[i * n_ldofs + j] += w * phi[i] * phi[j];
+                }
+            }
+        }
+        for a in 0..n_ldofs {
+            for b in 0..n_ldofs {
+                coo.add(edofs[a], edofs[b], me[a * n_ldofs + b]);
+            }
+        }
+    }
+    coo.into_csr()
 }
 
 // ─── Residual assembly ─────────────────────────────────────────────────
@@ -494,36 +536,186 @@ fn main() {
         .map(|e| p_space.element_dofs(e as u32).iter().map(|&d| d as usize).collect())
         .collect();
 
-    // 6. Quadrature order: 2*order + 3 (enough for the nonlinear integrand)
+    // 6. Quadrature order
     let quad_order = 2 * order + 3;
 
-    // 7. Compute initial residual
+    // 7. Pressure mass matrix (built once, used in preconditioner)
+    let p_mass = build_pressure_mass(mesh.clone(), p_order, quad_order, np);
+
+    // 8. Initial residual
     let mut ru = vec![0.0_f64; nu];
     let mut rp = vec![0.0_f64; np];
     residual(&mesh, dim as usize, order, p_order, quad_order, args.mu,
              &u, &p, &elem_dofs_u, &elem_dofs_p, &mut ru, &mut rp);
-    // Zero out BC DOFs in the displacement residual
-    for &(dof, _) in &du {
-        ru[dof] = 0.0;
-    }
+    for &(dof, _) in &du { ru[dof] = 0.0; }
 
     let r0 = nr(&[ru.as_slice(), rp.as_slice()].concat());
-    println!("Newton 0 ||r|| = {r0:.5}");
+    println!("Newton 0 ||r|| = {r0:.5e}");
+    if r0 < args.abs_tol {
+        println!("Initial residual below absolute tolerance, skipping Newton.");
+        return;
+    }
 
-    // 8. Assemble initial Jacobian (verification)
-    let (block_sizes, jac) = jacobian(
-        &mesh, dim as usize, order, p_order, quad_order, args.mu,
-        &u, &p, &elem_dofs_u, &elem_dofs_p, nu, np, &du,
-    );
-    if let Some(kuu) = jac.get(0, 0) {
-        println!("  K_uu nnz = {}", kuu.nnz());
+    // 9. Newton loop
+    let inner_cfg = SolverConfig {
+        rtol: 1e-8,
+        atol: 0.0,
+        max_iter: 300,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let k_cfg = SolverConfig {
+        rtol: 1e-8,
+        atol: 0.0,
+        max_iter: 200,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let s_cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 200,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let gamma = 1e-5;
+
+    for it in 1..=args.max_iter {
+        // Assemble Jacobian
+        let (_sizes, jac) = jacobian(
+            &mesh, dim as usize, order, p_order, quad_order, args.mu,
+            &u, &p, &elem_dofs_u, &elem_dofs_p, nu, np, &du,
+        );
+
+        // Build flat system matrix (full CSR for GMRES)
+        let mut coo_flat = CooMatrix::new(nu + np, nu + np);
+        for bi in 0..2 {
+            for bj in 0..2 {
+                if let Some(mat) = jac.get(bi, bj) {
+                    let row_off = if bi == 0 { 0 } else { nu };
+                    let col_off = if bj == 0 { 0 } else { nu };
+                    for i in 0..mat.nrows {
+                        for p in mat.row_ptr[i]..mat.row_ptr[i + 1] {
+                            coo_flat.add(
+                                row_off + i,
+                                col_off + mat.col_idx[p] as usize,
+                                mat.values[p],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let flat_mat = coo_flat.into_csr();
+
+        // RHS = -residual
+        let mut rhs = vec![0.0_f64; nu + np];
+        for i in 0..nu { rhs[i] = -ru[i]; }
+        for i in 0..np { rhs[nu + i] = -rp[i]; }
+
+        // Block preconditioner (matching MFEM JacobianPreconditioner):
+        //   z_p =  gamma * M_p^{-1} * r_p
+        //   z_u = K_uu^{-1} * (r_u - K_up * z_p)
+        let kuu = jac.get(0, 0).cloned().unwrap_or_else(|| {
+            CooMatrix::new(nu, nu).into_csr()
+        });
+        let kup = jac.get(0, 1).cloned().unwrap_or_else(|| {
+            CooMatrix::new(nu, np).into_csr()
+        });
+        let mp = p_mass.clone();
+
+        let s_cfg_inner = s_cfg.clone();
+        let k_cfg_inner = k_cfg.clone();
+        let precond = move |r: &[f64], z: &mut [f64]| {
+            // Pressure block: z_p = gamma * M_p^{-1} * r_p
+            let mut zp = vec![0.0_f64; np];
+            let _ = solve_cg(&mp, &r[nu..], &mut zp, &s_cfg_inner);
+            for i in 0..np {
+                z[nu + i] = gamma * zp[i];
+            }
+
+            // Displacement block: z_u = K_uu^{-1} * (r_u - K_up * z_p)
+            let mut kup_zp = vec![0.0_f64; nu];
+            kup.spmv(&z[nu..], &mut kup_zp);
+            let mut rhs_u = vec![0.0_f64; nu];
+            for i in 0..nu {
+                rhs_u[i] = r[i] - kup_zp[i];
+            }
+
+            let mut zu = vec![0.0_f64; nu];
+            let _ = solve_gmres_gssmoother(&kuu, &rhs_u, &mut zu, 200, &k_cfg_inner);
+            for i in 0..nu {
+                z[i] = zu[i];
+            }
+        };
+
+        // Solve: J * dx = -R
+        let mut dx = vec![0.0_f64; nu + np];
+        let result = right_preconditioned_gmres(
+            &flat_mat, &rhs, &mut dx, 30, &inner_cfg, &precond,
+        );
+
+        match &result {
+            Ok(r) => println!("  GMRES: {} its, res={:.3e}", r.iterations, r.final_residual),
+            Err(e) => eprintln!("  GMRES error: {e}"),
+        }
+
+        // Damped Newton with backtracking line search
+        let r_norm0 = nr(&[ru.as_slice(), rp.as_slice()].concat());
+        let mut alpha = 1.0_f64;
+        let mut accepted = false;
+        for _ls in 0..8 {
+            let mut u_trial = u.clone();
+            let mut p_trial = p.clone();
+            for i in 0..nu { u_trial[i] += alpha * dx[i]; }
+            for i in 0..np { p_trial[i] += alpha * dx[nu + i]; }
+
+            // Re-apply BCs (essential BC enforcement)
+            for &(dof, val) in &du { u_trial[dof] = val; }
+
+            let mut ru_t = vec![0.0_f64; nu];
+            let mut rp_t = vec![0.0_f64; np];
+            residual(&mesh, dim as usize, order, p_order, quad_order, args.mu,
+                     &u_trial, &p_trial, &elem_dofs_u, &elem_dofs_p,
+                     &mut ru_t, &mut rp_t);
+            for &(dof, _) in &du { ru_t[dof] = 0.0; }
+
+            let r_new = nr(&[ru_t.as_slice(), rp_t.as_slice()].concat());
+            if r_new < r_norm0 * (1.0 - 1e-4 * alpha) {
+                // Accept step
+                u.copy_from_slice(&u_trial);
+                p.copy_from_slice(&p_trial);
+                ru.copy_from_slice(&ru_t);
+                rp.copy_from_slice(&rp_t);
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+
+        if !accepted {
+            // Even with alpha=1/128, no decrease — accept the full Newton step anyway
+            for i in 0..nu { u[i] += dx[i]; }
+            for i in 0..np { p[i] += dx[nu + i]; }
+            for &(dof, val) in &du { u[dof] = val; }
+            // Recompute residual
+            residual(&mesh, dim as usize, order, p_order, quad_order, args.mu,
+                     &u, &p, &elem_dofs_u, &elem_dofs_p, &mut ru, &mut rp);
+            for &(dof, _) in &du { ru[dof] = 0.0; }
+        }
+
+        let r_norm = nr(&[ru.as_slice(), rp.as_slice()].concat());
+        println!("Newton {it:2} ||r|| = {r_norm:.5e}  r/r0 = {:.6}", r_norm / r0);
+
+        if r_norm < args.abs_tol || r_norm < r0 * args.rel_tol {
+            println!("Newton converged in {it} iterations.");
+            break;
+        }
     }
-    if let Some(kup) = jac.get(0, 1) {
-        println!("  K_up nnz = {}", kup.nnz());
-    }
-    if let Some(kpu) = jac.get(1, 0) {
-        println!("  K_pu nnz = {}", kpu.nnz());
-    }
+
+    println!("Saving output...");
+    // Output will be added in Task 5
+    println!("Done.");
 }
 
 struct Args {
