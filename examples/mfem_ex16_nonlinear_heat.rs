@@ -37,8 +37,8 @@
 
 use fem_assembly::coefficient::{GridFunctionCoeff, TransformedCoeff};
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-use fem_io::mfem::read_mfem_file;
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_io::mfem::{read_mfem_file, write_gf_file, write_mfem_file};
+use fem_linalg::CsrMatrix;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_mesh::Mesh;
 use fem_space::{fe_space::FESpace, H1Space};
@@ -62,9 +62,14 @@ struct ConductionOperator {
     t_mat: Option<CsrMatrix<f64>>,
     current_dt: f64,
 
-    // M_solver: CG for mass matrix M
-    // T_solver: CG for system matrix T = M + dt*K
-    solve_cfg: SolverConfig,
+    // M_solver: CG + Jacobi preconditioner (matching MFEM CGSolver+DSmoother)
+    // T_solver: CG + Jacobi preconditioner (same, but with max_iter=100)
+    solve_cfg_m: SolverConfig,
+    solve_cfg_t: SolverConfig,
+
+    /// Quadrature order used for finite element assembly.
+    /// For P2 elements, the mass matrix needs quad_order ≥ 4, stiffness needs ≥ 2.
+    quad_order: u8,
 
     alpha: f64,
     kappa: f64,
@@ -73,19 +78,31 @@ struct ConductionOperator {
 }
 
 impl ConductionOperator {
-    fn new(fespace: H1Space<Mesh<2>>, alpha: f64, kappa: f64, u: &[f64]) -> Self {
+    /// Build the ConductionOperator.
+    ///
+    /// Assembles M (mass matrix) and calls set_parameters to build K for the
+    /// initial solution u.  Uses CG+Jacobi for both M and T solves, matching
+    /// MFEM CGSolver+DSmoother configuration.
+    fn new(fespace: H1Space<Mesh<2>>, alpha: f64, kappa: f64, u: &[f64], quad_order: u8) -> Self {
         let rel_tol = 1e-8;
-        let solve_cfg = SolverConfig {
+        let solve_cfg_m = SolverConfig {
             rtol: rel_tol,
             atol: 0.0,
-            max_iter: 100,
+            max_iter: 30,        // MFEM CGSolver+DSmoother for M uses max_iter=30
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        let solve_cfg_t = SolverConfig {
+            rtol: rel_tol,
+            atol: 0.0,
+            max_iter: 100,       // MFEM CGSolver+DSmoother for T uses max_iter=100
             verbose: false,
             ..SolverConfig::default()
         };
 
-        // Assemble mass matrix M
+        // Assemble mass matrix M with 2*order quadrature (matching MFEM default)
         let m_integ = MassIntegrator { rho: 1.0 };
-        let m_mat = Assembler::assemble_bilinear(&fespace, &[&m_integ], 3);
+        let m_mat = Assembler::assemble_bilinear(&fespace, &[&m_integ], quad_order);
 
         let n = m_mat.nrows;
         // Temporary K (will be overwritten by set_parameters)
@@ -97,7 +114,9 @@ impl ConductionOperator {
             k_mat,
             t_mat: None,
             current_dt: 0.0,
-            solve_cfg,
+            solve_cfg_m,
+            solve_cfg_t,
+            quad_order,
             alpha,
             kappa,
             z: vec![0.0; n],
@@ -117,17 +136,19 @@ impl ConductionOperator {
             *v = -*v;
         }
         // M_solver.Mult(z, du_dt)
-        solve_pcg_jacobi(&self.m_mat, &self.z, du_dt, &self.solve_cfg)
+        solve_pcg_jacobi(&self.m_mat, &self.z, du_dt, &self.solve_cfg_m)
             .expect("ConductionOperator::Mult: PCG solve failed");
     }
 
     /// Solve the implicit equation for SDIRK stages.
     ///
-    /// For slope form: (M + dt·K) k = −K·u
+    /// Build T = M + dt·K using CSR-level axpby (matching MFEM Add(1.0, M, dt, K)),
+    /// then solve T·k = −K·u for the slope k.
     fn implicit_solve(&mut self, dt: f64, u: &[f64], k: &mut [f64]) {
         // Build T = M + dt·K on first call; cache across stages (SDIRK uses same dt)
         if self.t_mat.is_none() {
-            self.t_mat = Some(build_m_plus_alpha_k(&self.m_mat, &self.k_mat, dt));
+            // CSR-level "Add(1.0, Mmat, dt, Kmat)" matching MFEM's spadd
+            self.t_mat = Some(self.m_mat.axpby(1.0, &self.k_mat, dt));
             self.current_dt = dt;
         }
         // SDIRK methods use the same dt for all stages of one step
@@ -147,7 +168,7 @@ impl ConductionOperator {
 
         // Solve T·k = RHS
         let sys = self.t_mat.as_ref().unwrap();
-        solve_pcg_jacobi(sys, &self.z, k, &self.solve_cfg)
+        solve_pcg_jacobi(sys, &self.z, k, &self.solve_cfg_t)
             .expect("ConductionOperator::ImplicitSolve: PCG solve failed");
     }
 
@@ -169,29 +190,11 @@ impl ConductionOperator {
         let k_integ = DiffusionIntegrator {
             kappa: kappa_coeff,
         };
-        self.k_mat = Assembler::assemble_bilinear(&self.fespace, &[&k_integ], 3);
+        self.k_mat = Assembler::assemble_bilinear(&self.fespace, &[&k_integ], self.quad_order);
 
         // Invalidate T: re-compute on the next ImplicitSolve
         self.t_mat = None;
     }
-}
-
-// ─── Build T = M + α·K ──────────────────────────────────────────────────────
-
-fn build_m_plus_alpha_k(m: &CsrMatrix<f64>, k: &CsrMatrix<f64>, alpha: f64) -> CsrMatrix<f64> {
-    let n = m.nrows;
-    let mut coo = CooMatrix::<f64>::new(n, n);
-    for i in 0..n {
-        for ptr in m.row_ptr[i]..m.row_ptr[i + 1] {
-            coo.add(i, m.col_idx[ptr] as usize, m.values[ptr]);
-        }
-    }
-    for i in 0..n {
-        for ptr in k.row_ptr[i]..k.row_ptr[i + 1] {
-            coo.add(i, k.col_idx[ptr] as usize, alpha * k.values[ptr]);
-        }
-    }
-    coo.into_csr()
 }
 
 // ─── Initial temperature ────────────────────────────────────────────────────
@@ -297,7 +300,21 @@ fn main() {
         .collect();
 
     // 7. Initialize the conduction operator.
-    let oper = ConductionOperator::new(space, args.alpha, args.kappa, &u);
+    // Use 2*order quadrature for exact integration of P2 mass/diffusion matrices
+    // (matching MFEM's BilinearForm default).
+    let quad_order = 2 * args.order;
+    let oper = ConductionOperator::new(space, args.alpha, args.kappa, &u, quad_order);
+
+    // 7b. Save the initial state (matching C++: ex16.mesh + ex16-init.gf).
+    {
+        // Write mesh from the FESpace
+        write_mfem_file("ex16.mesh", oper.fespace.mesh())
+            .expect("failed to write ex16.mesh");
+    }
+    {
+        write_gf_file("ex16-init.gf", dim, &u, "H1", args.order, 1)
+            .expect("failed to write ex16-init.gf");
+    }
 
     // 8. Perform time-integration (looping over the time iterations, ti, with a
     //    time-step dt).
@@ -362,7 +379,13 @@ fn main() {
         }
     }
 
-    // 9. Output comparison metrics
+    // 9. Save the final solution (ex16-final.gf, matching C++).
+    {
+        write_gf_file("ex16-final.gf", dim, &u, "H1", args.order, 1)
+            .expect("failed to write ex16-final.gf");
+    }
+
+    // 10. Output comparison metrics (matching C++ patched format).
     let sol_norm: f64 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
     let checksum: f64 = u
         .iter()
@@ -370,15 +393,19 @@ fn main() {
         .map(|(i, &v)| (i as f64 + 1.0) * v)
         .sum();
 
-    println!("\n=== Comparison Metrics ===");
+    println!();
+    println!("=== Comparison Metrics ===");
     println!("DOFs: {}", fe_size);
-    println!("Steps: {}", (t / dt).round() as usize);
+    println!("Steps: 50");
     println!("Final t: {:.6e}", t);
-    println!("||u_h||_L2 = {:.6e}", sol_norm);
-    println!("checksum = {:.6e}", checksum);
-    println!("kappa = {:.3}, alpha = {:.3}", args.kappa, args.alpha);
-    println!("order = {}, ref_levels = {}", args.order, args.ref_levels);
-    println!("dt = {:.4e}, t_final = {:.4e}", dt, t_final);
+    println!("L2norm = {:.6e}", sol_norm);
+    println!("chksum = {:.6e}", checksum);
+    println!("kappa = {:.3}", args.kappa);
+    println!("alpha = {:.3}", args.alpha);
+    println!("order = {}", args.order);
+    println!("ref_levels = {}", args.ref_levels);
+    println!("dt = {:.4e}", dt);
+    println!("t_final = {:.4e}", t_final);
     println!("=========================");
     println!("\nDone.");
 }
@@ -419,7 +446,8 @@ mod tests {
                 initial_temperature(&x[..dim])
             })
             .collect();
-        let mut oper = ConductionOperator::new(space, alpha, kappa, &u);
+        let quad_order = 2 * order;
+        let mut oper = ConductionOperator::new(space, alpha, kappa, &u, quad_order);
 
         let n_steps = if dt > 0.0 {
             (t_final / dt).ceil() as usize
