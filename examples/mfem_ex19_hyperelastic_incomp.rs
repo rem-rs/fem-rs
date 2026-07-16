@@ -467,6 +467,93 @@ fn jacobian(
     (block_sizes, bm)
 }
 
+// ─── Output ────────────────────────────────────────────────────────────
+
+/// Write deformed mesh (MFEM v1.0 format) with displaced node coordinates.
+///
+/// Matches C++: mesh->SwapNodes(nodes) → mesh->Print(mesh_ofs).
+///
+/// Caveat: assumes 1:1 correspondence between mesh nodes and displacement
+/// DOFs.  Correct for linear (P1) elements; for higher-order elements only
+/// corner node positions will be correct.
+fn write_deformed_mesh(
+    mesh: &impl MeshTopology,
+    u: &[f64],
+    dim: usize,
+    ns: usize,
+    path: &str,
+) {
+    let nn = mesh.n_nodes() as usize;
+
+    // Current position = reference + displacement.
+    // Displacement at node i: u[i] (x-comp), u[ns + i] (y-comp).
+    let mut coords = Vec::with_capacity(nn * dim);
+    for n in 0..nn {
+        let ref_pt = mesh.node_coords(n as u32);
+        let ux = if n < ns { u[n] } else { 0.0 };
+        let uy = if n + ns < u.len() { u[ns + n] } else { 0.0 };
+        coords.push(ref_pt[0] + ux);
+        coords.push(ref_pt[1] + uy);
+    }
+
+    let mut f = File::create(path).expect("cannot create deformed.mesh");
+    writeln!(f, "MFEM mesh v1.0\n").ok();
+    writeln!(f, "dimension\n{dim}\n").ok();
+
+    // Elements
+    let ne = mesh.n_elements() as usize;
+    writeln!(f, "elements\n{ne}").ok();
+    for e in 0..ne {
+        let et = mesh.element_type(e as u32);
+        let nd = mesh.element_nodes(e as u32);
+        let code = match et {
+            ElementType::Tri3 => 2,
+            ElementType::Quad4 => 3,
+            ElementType::Tet4 => 4,
+            ElementType::Hex8 => 5,
+            _ => panic!("unsupported element type for MFEM export"),
+        };
+        let tag = mesh.element_tag(e as u32);
+        write!(f, "{tag} {code}").ok();
+        for &n in nd {
+            write!(f, " {}", n + 1).ok();
+        }
+        writeln!(f).ok();
+    }
+
+    // Boundary
+    let nb = mesh.n_boundary_faces() as usize;
+    writeln!(f, "\nboundary\n{nb}").ok();
+    for b in 0..nb {
+        let fnodes = mesh.face_nodes(b as u32);
+        let attr = mesh.face_tag(b as u32);
+        write!(f, "{attr} 1").ok(); // type 1 = SEGMENT
+        for &n in fnodes {
+            write!(f, " {}", n + 1).ok();
+        }
+        writeln!(f).ok();
+    }
+
+    // Vertices (deformed)
+    writeln!(f, "\nvertices\n{nn}\n{dim}").ok();
+    for i in 0..nn {
+        for d in 0..dim {
+            write!(f, " {:.8}", coords[i * dim + d]).ok();
+        }
+        writeln!(f).ok();
+    }
+}
+
+/// Write a solution vector as a simple ASCII file.
+/// Format: first line = n_dofs, then one value per line.
+fn write_solution(values: &[f64], path: &str) {
+    let mut f = File::create(path).expect("cannot create solution file");
+    writeln!(f, "{}", values.len()).ok();
+    for &v in values {
+        writeln!(f, "{:.14e}", v).ok();
+    }
+}
+
 fn main() {
     let args = Args::parse();
     println!("=== MFEM ex19: Incompressible neo-Hookean hyperelasticity ===");
@@ -713,9 +800,22 @@ fn main() {
         }
     }
 
-    println!("Saving output...");
-    // Output will be added in Task 5
-    println!("Done.");
+    // 10. Save output
+    // Deformed mesh
+    write_deformed_mesh(&mesh, &u, dim as usize, ns, "deformed.mesh");
+    println!("  Wrote deformed.mesh");
+
+    // Pressure solution
+    write_solution(&p, "pressure.sol");
+    println!("  Wrote pressure.sol");
+
+    // Deformation (relative displacement = u - u_ref, where u_ref = 0)
+    let mut u_def = vec![0.0_f64; nu];
+    for i in 0..nu {
+        u_def[i] = u[i];
+    }
+    write_solution(&u_def, "deformation.sol");
+    println!("  Wrote deformation.sol");
 }
 
 struct Args {
