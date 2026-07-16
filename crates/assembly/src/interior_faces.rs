@@ -71,9 +71,10 @@ impl InteriorFaceList {
             }
         }
 
-        // Phase 2: periodic face detection (2D only)
-        // Find remaining unpaired edges and match them across periodic boundaries
-        if dim == 2 && !face_map.is_empty() {
+        // Phase 2: periodic face detection (2D only, boundary 0 meshes)
+        // Find remaining unpaired edges and match them across periodic boundaries.
+        // Only applies when the mesh has NO boundary faces (fully periodic).
+        if dim == 2 && !face_map.is_empty() && mesh.n_boundary_faces() == 0 {
             // Collect: (elem, face_nodes, normal)
             let mut bdr: Vec<(ElemId, Vec<u32>, Vec<f64>)> = face_map
                 .into_values()
