@@ -20,7 +20,7 @@ use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix, SolverConfig};
 use fem_solver::block_operator::right_preconditioned_gmres;
-use fem_solver::{solve_cg, solve_gmres_gssmoother, SolveResult};
+use fem_solver::{solve_gmres_gssmoother, solve_pcg_gssmoother};
 use fem_mesh::{refine_uniform, MeshTopology};
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space, VectorH1Space};
 use fem_element::lagrange::{TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, QuadQ4};
@@ -115,8 +115,8 @@ fn build_pressure_mass(
         let mut me = vec![0.0_f64; n_ldofs * n_ldofs];
         for (qi, xi) in q.points.iter().enumerate() {
             ref_elem.eval_basis(xi, &mut phi);
-            let (_det_j, _ji) = jacf(&mesh, e as u32, xi, mesh.dim() as usize);
-            let w = q.weights[qi] * _det_j.abs();
+            let (det_j, _ji) = jacf(&mesh, e as u32, xi, mesh.dim() as usize);
+            let w = q.weights[qi] * det_j.abs();
             for i in 0..n_ldofs {
                 for j in 0..n_ldofs {
                     me[i * n_ldofs + j] += w * phi[i] * phi[j];
@@ -716,7 +716,7 @@ fn main() {
         let precond = move |r: &[f64], z: &mut [f64]| {
             // Pressure block: z_p = gamma * M_p^{-1} * r_p
             let mut zp = vec![0.0_f64; np];
-            let _ = solve_cg(&mp, &r[nu..], &mut zp, &s_cfg_inner);
+            let _ = solve_pcg_gssmoother(&mp, &r[nu..], &mut zp, &s_cfg_inner);
             for i in 0..np {
                 z[nu + i] = gamma * zp[i];
             }
@@ -862,7 +862,7 @@ mod tests {
     use fem_mesh::Mesh;
 
     #[test]
-    fn smoke_ex19_converges() {
+    fn zero_state_zero_residual() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let dim = 2;
         let order = 1;
