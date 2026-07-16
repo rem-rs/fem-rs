@@ -47,13 +47,12 @@ fn main() {
     let dim = 2;
 
     // ── 1b. Detect periodic boundaries (for 'boundary 0' periodic meshes) ─────
-    let mesh = match mesh.detect_periodic_boundary(1e-8) {
-        Ok(pm) => pm,
-        Err(e) => {
-            eprintln!("  Periodic boundary detection skipped: {e}");
-            mesh
+    let mesh = if mesh.n_boundary_faces() == 0 {
+        match mesh.detect_periodic_boundary(1e-8) {
+            Ok(pm) => pm,
+            Err(e) => { eprintln!("  Periodic boundary detection: {e}"); mesh }
         }
-    };
+    } else { mesh };
 
     // ── 2. Refine ─────────────────────────────────────────────────────────────
     let mesh = if args.refine > 0 {
@@ -144,6 +143,8 @@ fn main() {
     let k_adv = coo.into_csr();
 
     // ── 7. Initial condition ──────────────────────────────────────────────────
+    // Note: C++ uses DG_FECollection(BasisType::GaussLobatto) which makes
+    // ProjectCoefficient equivalent to pointwise interpolation for P1.
     let mut u = space.interpolate(&|x| dg_initial_condition(problem, x, &bb_min, &bb_max))
         .as_slice().to_vec();
 
