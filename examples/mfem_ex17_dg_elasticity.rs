@@ -352,7 +352,7 @@ where
             re.eval_grad_basis(&xi_e, &mut gref);
             xform_grads(&jit, &gref, &mut gphys, n, dim);
 
-            let pen = kappa * (lam + 2.0 * mu) / h_f;
+            let pen = kappa * (lam + 2.0 * mu) * h_f / (2.0 * det_j.abs());
 
             for a in 0..n {
                 let phi_a = phi[a];
@@ -369,7 +369,7 @@ where
                 // Penalty: -(κ/h) · u_D_comp · φ_a  (per component, sign from SIP)
                 for comp in 0..dim {
                     let u_d = dirichlet(&xp, comp);
-                    rhs[comp * n_scalar + dofs[a]] -= w_f * pen * phi_a * u_d;
+                    rhs[comp * n_scalar + dofs[a]] += w_f * pen * phi_a * u_d;
                 }
 
                 // Symmetry: α·Σᵢ (σ(φ_a·e_comp)·n)_i · u_D_i
