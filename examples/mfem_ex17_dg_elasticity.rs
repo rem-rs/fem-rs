@@ -21,7 +21,7 @@
 
 use fem_assembly::{DgElasticityAssembler, InteriorFaceList};
 use fem_io::mfem::read_mfem_file;
-use fem_solver::{solve_pcg_gssmoother, SolverConfig};
+use fem_solver::{solve_pcg_gssmoother, solve_gmres_gssmoother, SolverConfig};
 use fem_space::{fe_space::FESpace, L2Space};
 use fem_mesh::{refine_uniform, element_type::ElementType, topology::MeshTopology};
 
@@ -145,8 +145,13 @@ fn main() {
     // Compute initial residual norm ‖rhs - A·0‖ = ‖rhs‖
     let rhs_norm: f64 = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
     println!("  Initial ‖rhs‖ = {:.4}", rhs_norm);
-    println!("  PCG (symmetric, α=-1)");
-    let res = solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg);
+    let res = if alpha == -1.0 {
+        println!("  PCG (symmetric, α=-1)");
+        solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg)
+    } else {
+        println!("  GMRES (non-symmetric, α={})", alpha);
+        solve_gmres_gssmoother(&a_mat, &rhs, &mut x, 100, &cfg)
+    };
     let solve_result = res.expect("DG elasticity solve failed");
 
     println!("  Iterations: {}", solve_result.iterations);
