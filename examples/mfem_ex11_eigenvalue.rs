@@ -1,90 +1,58 @@
-//! # MFEM Example 11 — Laplace Eigenvalue (serial version)
+//! # Laplace Eigenvalue — 1:1 translation of MFEM ex11p.cpp
 //!
-//! 1:1 port of `mfem/examples/ex11p.cpp` (serial subset, 2D).
+//! Solves `-Δu = λ u` in Ω, `u = 0` on ∂Ω using LOBPCG.
 //!
-//! Solves the eigenvalue problem:
+//! Supports **2D/3D standard FEM** and **2D/3D NURBS IGA**.
+//! The isoparametric path (`-o -1`) uses the NURBS degree for IGA meshes
+//! or falls back to order 1 — matching MFEM ex11p.
 //!
-//! ```text
-//!   -Δu = λ u    in Ω
-//!     u = 0      on ∂Ω
-//! ```
-//!
-//! by discretizing the Laplacian and Mass operators using an H¹ FE space of
-//! the specified order, then solving the generalized eigenvalue problem
-//! `A x = λ M x` with the LOBPCG eigensolver.
+//! Two BC modes:
+//! | `-bc mfem` (default) | `EliminateEssentialBCDiag` + AMG‑CG |
+//! | `-bc proj` | Euclidean constraint matrix |
 //!
 //! ## Usage
-//! ```bash
-//! cargo run --example mfem_ex11_eigenvalue -- -m data/star.mesh
-//! cargo run --example mfem_ex11_eigenvalue -- -m data/star.mesh -o 2 -n 8
-//! cargo run --example mfem_ex11_eigenvalue -- -m data/square-disc.mesh -rs 3 -n 10
 //! ```
-//!
-//! ## CLI options (matching MFEM ex11p)
-//! | Flag | Default | Description |
-//! |------|---------|-------------|
-//! | `-m` / `--mesh` | `data/star.mesh` | Mesh file |
-//! | `-rs` / `--refine-serial` | 2 | Serial uniform refinement levels |
-//! | `-o` / `--order` | 1 | FE order (polynomial degree) |
-//! | `-n` / `--num-eigs` | 5 | Number of desired eigenmodes |
-//! | `-s` / `--seed` | 75 | Random seed for LOBPCG |
-//! | `-no-vis` | — | Disable visualization (default) |
+//! cargo run --example mfem_ex11_eigenvalue -- -m data/star.mesh
+//! cargo run --example mfem_ex11_eigenvalue -- -m data/beam-tet.mesh -rs 0 -n 3
+//! cargo run --example mfem_ex11_eigenvalue -- -m data/disc-nurbs.mesh -rs 0 -n 3 -o -1
+//! cargo run --example mfem_ex11_eigenvalue -- -m data/ball-nurbs.mesh -rs 0 -n 3 -o -1
+//! ```
 
+use fem_amg::{AmgConfig, solve_amg_cg};
 use fem_assembly::{
-    Assembler,
+    Assembler, postproc::vector_l2_norm,
     standard::{DiffusionIntegrator, MassIntegrator},
 };
-use fem_io::mfem::{read_mfem_file, write_mfem_file};
-use fem_mesh::{
-    Mesh,
-    MeshTopology,
-    amr::refine_uniform,
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d};
+use fem_io::nurbs_mesh::{read_nurbs_mesh_file, NurbsFile};
+use fem_linalg::{CsrMatrix, SolverConfig};
+use fem_mesh::{Mesh, amr::{refine_uniform, refine_uniform_3d}};
+use fem_solver::{
+    make_constraint_matrix,
+    eigen::{lobpcg_constrained, lobpcg_essential_bc, LobpcgConfig, EigenResult},
 };
-use fem_solver::eigen::{lobpcg_constrained, LobpcgConfig, EigenResult};
 use fem_space::{
-    H1Space,
-    fe_space::FESpace,
-    constraints::boundary_dofs,
+    H1Space, fe_space::FESpace,
+    constraints::collect_essential_dofs,
 };
 use std::io::Write;
 
-// ─── CLI arguments (matching MFEM ex11p) ────────────────────────────────────
+// ─── CLI ───────────────────────────────────────────────────────────────────
 
-#[allow(non_snake_case)]
-struct Args {
-    mesh: String,
-    ser_ref_levels: usize,
-    order: i32,
-    nev: usize,
-    seed: i32,
-}
+struct Args { mesh: String, ser_ref_levels: usize, order: i32, nev: usize, bc_mode: String }
 
 impl Args {
     fn parse() -> Self {
-        let mut a = Args {
-            mesh: "data/star.mesh".to_string(),
-            ser_ref_levels: 2,
-            order: 1,
-            nev: 5,
-            seed: 75,
-        };
+        let mut a = Args { mesh: "data/star.mesh".to_string(), ser_ref_levels: 2, order: 1, nev: 5, bc_mode: "mfem".to_string() };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
-                "-m" | "--mesh" => a.mesh = it.next().unwrap_or(a.mesh),
-                "-rs" | "--refine-serial" => {
-                    a.ser_ref_levels = it.next().and_then(|v| v.parse().ok()).unwrap_or(2)
-                }
-                "-o" | "--order" => {
-                    a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1)
-                }
-                "-n" | "--num-eigs" => {
-                    a.nev = it.next().and_then(|v| v.parse().ok()).unwrap_or(5)
-                }
-                "-s" | "--seed" => {
-                    a.seed = it.next().and_then(|v| v.parse().ok()).unwrap_or(75)
-                }
-                "-no-vis" => {} // accepted, no-op
+                "-m"|"--mesh" => a.mesh = it.next().unwrap_or(a.mesh),
+                "-rs"|"--refine-serial" => { a.ser_ref_levels = it.next().and_then(|v|v.parse().ok()).unwrap_or(2) }
+                "-o"|"--order" => { a.order = it.next().and_then(|v|v.parse().ok()).unwrap_or(1) }
+                "-n"|"--num-eigs" => { a.nev = it.next().and_then(|v|v.parse().ok()).unwrap_or(5) }
+                "-bc"|"--bc-mode" => { a.bc_mode = it.next().unwrap_or_else(||"mfem".to_string()) }
+                "-s"|"--seed"|"-no-vis" => {}
                 _ => {}
             }
         }
@@ -92,275 +60,203 @@ impl Args {
     }
 }
 
-// ─── Boundary helper ────────────────────────────────────────────────────────
+// ─── BC + preconditioner ──────────────────────────────────────────────────
 
-/// Collect essential (Dirichlet) boundary DOFs from all boundary attributes.
-fn collect_ess_dofs(mesh: &Mesh<2>, space: &H1Space<Mesh<2>>) -> Vec<usize> {
-    let bdr_tags = mesh.unique_boundary_tags();
-    if bdr_tags.is_empty() {
-        return Vec::new();
+/// Full symmetric elimination on A (row/col=0, diag=1) + diag-only elimination on M.
+/// A uses `apply_dirichlet_symmetric` to decouple BC DOFs from the interior,
+/// giving the AMG preconditioner a clean interior problem to work on.
+/// M uses `eliminate_essential_bc_diag` so BC eigenvalue is pushed to ≈5e307.
+/// `lobpcg_essential_bc` zeros BC DOFs throughout to handle B-norm underflow.
+fn eliminate_bc(a: &mut CsrMatrix<f64>, m: &mut CsrMatrix<f64>, ess: &[usize]) {
+    let n = a.nrows;
+    let mut zero = vec![0.0; n];
+    for &d in ess {
+        a.apply_dirichlet_symmetric(d, 0.0, &mut zero);
+        m.eliminate_essential_bc_diag(d, f64::MIN_POSITIVE);
     }
-    let dm = space.dof_manager();
-    boundary_dofs(mesh, dm, &bdr_tags)
-        .iter()
-        .map(|&d| d as usize)
-        .collect()
 }
 
-// ─── Main ───────────────────────────────────────────────────────────────────
+fn make_amg_precond(a: &CsrMatrix<f64>) -> impl Fn(&nalgebra::DMatrix<f64>) -> nalgebra::DMatrix<f64> + '_ {
+    let amg = AmgConfig::default();
+    let pcg = SolverConfig { rtol:1e-4, atol:1e-6, max_iter:10, ..Default::default() };
+    move |r:&nalgebra::DMatrix<f64>| {
+        let (nr, k) = (r.nrows(), r.ncols());
+        let mut z = nalgebra::DMatrix::zeros(nr, k);
+        for j in 0..k { let mut x = vec![0.0; nr]; let _ = solve_amg_cg(a, r.column(j).as_slice(), &mut x, &amg, &pcg); z.set_column(j, &nalgebra::DVector::from_vec(x)); }
+        z
+    }
+}
+
+fn solve_eig(a: &CsrMatrix<f64>, m: &CsrMatrix<f64>, ess: &[usize], nev: usize, bc: &str, label: &str) -> EigenResult {
+    let cfg = LobpcgConfig { max_iter:300, tol:1e-8, verbose:true, nullspace_skip:0.0 };
+    let t = std::time::Instant::now();
+    let r = match bc {
+        "mfem" => {
+            let (mut ab, mut mb) = (a.clone(), m.clone());
+            eliminate_bc(&mut ab, &mut mb, ess);
+            let p = make_amg_precond(&ab);
+            lobpcg_essential_bc(&ab, Some(&mb), nev, &nalgebra::DMatrix::zeros(0,0), p, ess, &cfg)
+        }
+        _ => { let c = make_constraint_matrix(a.nrows, ess); lobpcg_constrained(a, Some(m), nev, &c, &cfg) }
+    }.unwrap_or_else(|e| panic!("LOBPCG ({label}) failed: {e}"));
+    println!("  [{label}] {}/{} modes, converged={}, {} iters [{:.3}s]", r.eigenvalues.len(), nev, r.converged, r.iterations, t.elapsed().as_secs_f64());
+    println!("  {:<6}  {:>24}  {:>16}  {:>16}", "Mode", "λ", "f", "||v||_L²");
+    println!("  {}", "-".repeat(70));
+    for (i, &lam) in r.eigenvalues.iter().enumerate() {
+        let f = lam.sqrt() / (2.0*std::f64::consts::PI);
+        let l2 = vector_l2_norm(m, r.eigenvectors.column(i).as_slice());
+        println!("  {:<6}  {:>24.14e}  {:>16.6e}  {:>16.6e}", i+1, lam, f, l2);
+    }
+    r
+}
+
+fn save_modes(res: &EigenResult) {
+    for (i, lam) in res.eigenvalues.iter().enumerate() {
+        let f = format!("mode_{:02}.dat", i);
+        let mut o = std::fs::File::create(&f).unwrap_or_else(|e| panic!("cannot create {f}: {e}"));
+        for r in 0..res.eigenvectors.nrows() { writeln!(o, "{:.8e}", res.eigenvectors[(r,i)]).unwrap_or_default(); }
+        println!("  Saved eigenmode {:>2} -> '{f}' (λ = {:.6e})", i+1, lam);
+    }
+}
+
+// ─── 2D FEM ───────────────────────────────────────────────────────────────
+
+fn run_2d(mut mesh: Mesh<2>, args: &Args) {
+    println!("  Mesh: 2D, {} elems, {} nodes", mesh.n_elems(), mesh.n_nodes());
+    for _ in 0..args.ser_ref_levels { mesh = refine_uniform(&mesh); }
+    println!("  After ref: {} elems, {} nodes", mesh.n_elems(), mesh.n_nodes());
+
+    let fe = if args.order > 0 { args.order as u8 } else { 1 };
+    let sp = H1Space::new(mesh.clone(), fe);
+    let dm = sp.dof_manager();
+    let tags = mesh.unique_boundary_tags();
+    let ess: Vec<usize> = if tags.is_empty() { Vec::new() } else { collect_essential_dofs(&mesh, dm, &tags) };
+    println!("  Order: {fe}  NDoFs: {}  Ess BC: {}/{}", sp.n_dofs(), ess.len(), sp.n_dofs());
+
+    let qo = (fe as u8)*2+1;
+    let mut a = Assembler::assemble_bilinear(&sp, &[&DiffusionIntegrator{kappa:1.0}], qo);
+    if tags.is_empty() { let ms = Assembler::assemble_bilinear(&sp, &[&MassIntegrator{rho:1.0}], qo); a = a.axpby(1.0, &ms, 1.0); }
+    let m = Assembler::assemble_bilinear(&sp, &[&MassIntegrator{rho:1.0}], qo);
+
+    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "FEM2D");
+    let _ = write_mfem_file("refined.mesh", &mesh);
+    println!("  Saved refined mesh -> 'refined.mesh'");
+    save_modes(&res);
+}
+
+// ─── 3D FEM ───────────────────────────────────────────────────────────────
+
+fn run_3d(mut mesh: Mesh<3>, args: &Args) {
+    println!("  Mesh: 3D, {} elems, {} nodes", mesh.n_elems(), mesh.n_nodes());
+    for _ in 0..args.ser_ref_levels { mesh = refine_uniform_3d(&mesh); }
+    println!("  After ref: {} elems, {} nodes", mesh.n_elems(), mesh.n_nodes());
+
+    let fe = if args.order > 0 { args.order as u8 } else { 1 };
+    let sp = H1Space::new(mesh.clone(), fe);
+    let dm = sp.dof_manager();
+    let tags = mesh.unique_boundary_tags();
+    let ess: Vec<usize> = if tags.is_empty() { Vec::new() } else { collect_essential_dofs(&mesh, dm, &tags) };
+    println!("  Order: {fe}  NDoFs: {}  Ess BC: {}/{}", sp.n_dofs(), ess.len(), sp.n_dofs());
+
+    let qo = (fe as u8)*2+1;
+    let mut a = Assembler::assemble_bilinear(&sp, &[&DiffusionIntegrator{kappa:1.0}], qo);
+    if ess.is_empty() { let ms = Assembler::assemble_bilinear(&sp, &[&MassIntegrator{rho:1.0}], qo); a = a.axpby(1.0, &ms, 1.0); }
+    let m = Assembler::assemble_bilinear(&sp, &[&MassIntegrator{rho:1.0}], qo);
+
+    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "FEM3D");
+    let _ = write_mfem_file_3d("refined.mesh", &mesh);
+    println!("  Saved refined mesh -> 'refined.mesh'");
+    save_modes(&res);
+}
+
+// ─── IGA 2D ───────────────────────────────────────────────────────────────
+
+fn run_iga_2d(m: fem_element::nurbs::NurbsMesh2D, args: &Args) {
+    use fem_assembly::iga::{assemble_iga_diffusion_2d, assemble_iga_mass_2d};
+    let mesh = if args.ser_ref_levels > 0 { m.uniform_refine(args.ser_ref_levels) } else { m };
+    let p = if args.order > 0 { args.order as usize } else { mesh.patches[0].kv_u.degree };
+    let qo = (p as u8 + 2).max(3);
+    let a = assemble_iga_diffusion_2d(&mesh, 1.0, qo);
+    let m = assemble_iga_mass_2d(&mesh, 1.0, qo);
+    let n = a.nrows;
+    let (nu, nv) = (mesh.patches[0].kv_u.n_basis(), mesh.patches[0].kv_v.n_basis());
+    let mut ess = Vec::new();
+    for j in 0..nv { ess.push(j*nu); ess.push(j*nu+nu-1); }
+    for i in 0..nu { ess.push(i); ess.push((nv-1)*nu+i); }
+    ess.sort_unstable(); ess.dedup(); ess.retain(|&d| d < n);
+    println!("  IGA2D: p={p} grid={nu}×{nv} NDoFs={n} Ess BC: {}/{}", ess.len(), n);
+    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "IGA2D");
+    save_modes(&res);
+}
+
+// ─── IGA 3D ───────────────────────────────────────────────────────────────
+
+fn run_iga_3d(m: fem_element::nurbs::NurbsMesh3D, args: &Args) {
+    use fem_assembly::iga::{assemble_iga_diffusion_3d, assemble_iga_mass_3d};
+    let mesh = if args.ser_ref_levels > 0 { m.uniform_refine(args.ser_ref_levels) } else { m };
+    let p = if args.order > 0 { args.order as usize } else { mesh.patches[0].kv_u.degree };
+    let qo = (p as u8 + 2).max(3);
+    let a = assemble_iga_diffusion_3d(&mesh, 1.0, qo);
+    let m = assemble_iga_mass_3d(&mesh, 1.0, qo);
+    let n = a.nrows;
+    let (nu, nv, nw) = (mesh.patches[0].kv_u.n_basis(), mesh.patches[0].kv_v.n_basis(), mesh.patches[0].kv_w.n_basis());
+    let mut ess = Vec::new();
+    for k in 0..nw { for j in 0..nv { ess.push((k*nv+j)*nu); ess.push((k*nv+j)*nu+nu-1); }}
+    for k in 0..nw { for i in 0..nu { ess.push((k*nv+0)*nu+i); ess.push((k*nv+nv-1)*nu+i); }}
+    for j in 0..nv { for i in 0..nu { ess.push((0*nv+j)*nu+i); ess.push(((nw-1)*nv+j)*nu+i); }}
+    ess.sort_unstable(); ess.dedup(); ess.retain(|&d| d < n);
+    println!("  IGA3D: p={p} grid={nu}×{nv}×{nw} NDoFs={n} Ess BC: {}", ess.len());
+    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "IGA3D");
+    save_modes(&res);
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────
 
 fn main() {
     let args = Args::parse();
+    println!("Options: --mesh {} --refine-serial {} --order {} --num-eigs {} --bc-mode {}",
+             args.mesh, args.ser_ref_levels, args.order, args.nev, args.bc_mode);
 
-    // ─── 1. Print options ──────────────────────────────────────────────────
-    println!("Options used:");
-    println!("   --mesh {}", args.mesh);
-    println!("   --refine-serial {}", args.ser_ref_levels);
-    println!("   --order {}", args.order);
-    println!("   --num-eigs {}", args.nev);
-    println!("   --seed {}", args.seed);
-    println!("   --no-visualization");
-
-    // ─── 2. Read mesh (2D only) ────────────────────────────────────────────
-    let mfem = read_mfem_file(&args.mesh)
-        .expect("failed to read MFEM mesh");
-    let mut mesh: Mesh<2> = mfem.mesh2d
-        .expect("expected a 2D mesh (Mesh<2>); 3D meshes not yet supported in this serial translation");
-    let dim = mesh.dim() as usize;
-    println!("  Mesh: {} elements, {} nodes, dim={dim}", mesh.n_elems(), mesh.n_nodes());
-
-    // ─── 3. Serial refinement ──────────────────────────────────────────────
-    for _ in 0..args.ser_ref_levels {
-        mesh = refine_uniform(&mesh);
+    if let Ok(f) = read_mfem_file(&args.mesh) {
+        if let Some(m) = f.mesh2d { run_2d(m, &args); return; }
+        if let Some(m) = f.mesh3d { run_3d(m, &args); return; }
     }
-    println!(
-        "  After refinement: {} elements, {} nodes",
-        mesh.n_elems(),
-        mesh.n_nodes()
-    );
-
-    // ─── 4. FE space ───────────────────────────────────────────────────────
-    // MFEM: if order > 0, use H1_FECollection(order, dim);
-    //       else, isoparametric (skipped here — fall back to order 1).
-    let fe_order = if args.order > 0 { args.order as u8 } else { 1 };
-    let space = H1Space::new(mesh.clone(), fe_order);
-    let n_dofs = space.n_dofs();
-    println!("Number of unknowns: {n_dofs}");
-
-    // ─── 5. Essential boundary DOFs ────────────────────────────────────────
-    let ess_dofs = collect_ess_dofs(&mesh, &space);
-    println!("  Essential BC dofs: {} / {}", ess_dofs.len(), n_dofs);
-
-    // ─── 6. Assemble A (Laplacian) and M (Mass) ────────────────────────────
-    let quad_order = (fe_order as u8) * 2 + 1;
-
-    // A = DiffusionIntegrator(1.0)
-    let mut a = Assembler::assemble_bilinear(
-        &space,
-        &[&DiffusionIntegrator { kappa: 1.0 }],
-        quad_order,
-    );
-    // If no boundary (periodic / closed surface), add a mass term
-    // to shift the nullspace (matching MFEM ex11p).
-    if ess_dofs.is_empty() {
-        let m_shift = Assembler::assemble_bilinear(
-            &space,
-            &[&MassIntegrator { rho: 1.0 }],
-            quad_order,
-        );
-        a = a.axpby(1.0, &m_shift, 1.0);
+    if let Ok(n) = read_nurbs_mesh_file(&args.mesh) {
+        match n { NurbsFile::Mesh2D(m) => run_iga_2d(m, &args), NurbsFile::Mesh3D(m) => run_iga_3d(m, &args) }
+        return;
     }
-
-    // M = MassIntegrator(1.0)
-    let m = Assembler::assemble_bilinear(
-        &space,
-        &[&MassIntegrator { rho: 1.0 }],
-        quad_order,
-    );
-
-    // ─── 7. Essential BC constraints ──────────────────────────────────────────
-    // MFEM ex11p uses EliminateEssentialBCDiag with A[i,i]=1, M[i,i]≈2e-308,
-    // pushing Dirichlet eigenvalues out of the range for its B-orthogonalized
-    // LOBPCG.  Our LOBPCG uses B-orthogonalization for the search space, but
-    // the extreme M diagonal (2e-308) causes the Rayleigh-Ritz subspace to
-    // lose rank when residual vectors acquire BC DOF components through off-
-    // diagonal coupling.  Instead we project BC DOFs out via Euclidean
-    // algebraic constraints (which are numerically stable for any M diagonal).
-    use nalgebra::DMatrix;
-
-    let n_bc = ess_dofs.len();
-    let mut constraints_mat = DMatrix::<f64>::zeros(n_dofs, n_bc);
-    for (j, &d) in ess_dofs.iter().enumerate() {
-        constraints_mat[(d, j)] = 1.0;
-    }
-
-    // ─── 8. Solve A x = λ M x with LOBPCG ──────────────────────────────────
-    use std::time::Instant;
-    let t0 = Instant::now();
-
-    // The RandomSeed from args.seed: our LOBPCG uses a fixed seed (12345),
-    // so results are deterministic regardless of the CLI --seed.
-    let _ = args.seed;
-
-    let lobpcg_cfg = LobpcgConfig {
-        max_iter: 300,
-        tol: 1e-8,
-        verbose: true,
-        nullspace_skip: 0.0,
-    };
-
-    let result: EigenResult = lobpcg_constrained(&a, Some(&m), args.nev, &constraints_mat, &lobpcg_cfg)
-        .expect("LOBPCG solver failed");
-
-    let elapsed = t0.elapsed();
-    println!();
-
-    // ─── 9. Print eigenvalues ─────────────────────────────────────────────
-    println!(
-        "  Eigenmodes: {}/{}  ({} DOFs)",
-        result.eigenvalues.len(),
-        args.nev,
-        n_dofs
-    );
-    println!(
-        "  Converged: {} in {} iterations  [{:.3}s]",
-        result.converged,
-        result.iterations,
-        elapsed.as_secs_f64()
-    );
-    for (i, &lam) in result.eigenvalues.iter().enumerate() {
-        let f = lam.sqrt() / (2.0 * std::f64::consts::PI);
-        println!("  {:>4}: λ = {:.14e}  f ≈ {:.6e}", i + 1, lam, f);
-    }
-
-    // ─── 10. Save refined mesh and modes ──────────────────────────────────
-    // MFEM saves per-processor: "mesh.NNNNNN" and "mode_ii.NNNNNN".
-    // Serial version uses single files.
-    {
-        let _ = write_mfem_file("refined.mesh", &mesh);
-        println!("  Saved refined mesh -> 'refined.mesh'");
-
-        for (i, lam) in result.eigenvalues.iter().enumerate() {
-            let mode_file = format!("mode_{:02}.dat", i);
-            let mut f_out = std::fs::File::create(&mode_file).unwrap_or_else(|e| {
-                panic!("cannot create {mode_file}: {e}")
-            });
-            for r in 0..n_dofs {
-                let val = result.eigenvectors[(r, i)];
-                writeln!(f_out, "{:.8e}", val).unwrap_or_default();
-            }
-            println!(
-                "  Saved eigenmode {:>2} (λ = {:.6e}) -> '{mode_file}'",
-                i + 1,
-                lam
-            );
-        }
-    }
-
-    println!("\n  Done.");
+    panic!("Cannot read mesh: {}", args.mesh);
 }
+
+// ─── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use fem_mesh::Mesh;
     use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-    use fem_solver::eigen::{lobpcg_constrained, LobpcgConfig};
+    use fem_mesh::Mesh;
+    use fem_solver::{make_constraint_matrix, eigen::{lobpcg_constrained, LobpcgConfig}};
+    use fem_space::{H1Space, fe_space::FESpace, constraints::collect_essential_dofs};
 
-    /// Build constrained eigen-system: unmodified A, M + BC DOF constraint matrix.
-    fn build_constrained_system(n: usize, fe_order: u8) -> (fem_linalg::CsrMatrix<f64>,
-                                                           fem_linalg::CsrMatrix<f64>,
-                                                           nalgebra::DMatrix<f64>) {
+    fn build_system(n: usize, p: u8) -> (fem_linalg::CsrMatrix<f64>, fem_linalg::CsrMatrix<f64>, nalgebra::DMatrix<f64>) {
         let mesh = Mesh::<2>::unit_square_tri(n);
-        let space = H1Space::new(mesh, fe_order);
-        let quad = (fe_order as u8) * 2 + 1;
-        let dm = space.dof_manager();
-        let ess: Vec<usize> = fem_space::constraints::boundary_dofs(space.mesh(), dm, &[1, 2, 3, 4])
-            .iter().map(|&d| d as usize).collect();
-        let n_dofs = space.n_dofs();
-        let n_bc = ess.len();
-
-        let a = Assembler::assemble_bilinear(
-            &space, &[&DiffusionIntegrator { kappa: 1.0 }], quad,
-        );
-        let m = Assembler::assemble_bilinear(
-            &space, &[&MassIntegrator { rho: 1.0 }], quad,
-        );
-
-        let mut constraints = nalgebra::DMatrix::<f64>::zeros(n_dofs, n_bc);
-        for (j, &d) in ess.iter().enumerate() {
-            constraints[(d, j)] = 1.0;
-        }
-        (a, m, constraints)
+        let sp = H1Space::new(mesh, p);
+        let ess = collect_essential_dofs(sp.mesh(), sp.dof_manager(), &[1,2,3,4]);
+        let nd = sp.n_dofs();
+        let qo = (p as u8)*2+1;
+        let a = Assembler::assemble_bilinear(&sp, &[&DiffusionIntegrator{kappa:1.0}], qo);
+        let m = Assembler::assemble_bilinear(&sp, &[&MassIntegrator{rho:1.0}], qo);
+        (a, m, make_constraint_matrix(nd, &ess))
     }
 
-    /// Analytical eigenvalues for 2D Laplacian on unit square with
-    /// homogeneous Dirichlet BC: λ_{mn} = π²(m² + n²), m,n ≥ 1.
-    fn analytical_eigenvalues_square(k: usize) -> Vec<f64> {
+    fn analytic_ev(k: usize) -> Vec<f64> {
         use std::f64::consts::PI;
-        let mut vals = Vec::new();
-        for m in 1..=20 {
-            for n in 1..=20 {
-                vals.push(PI * PI * (m * m + n * n) as f64);
-            }
-        }
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        vals.truncate(k);
-        vals
+        let mut v = Vec::new();
+        for m in 1..=20 { for n in 1..=20 { v.push(PI*PI*(m*m+n*n) as f64); }}
+        v.sort_by(|a,b| a.partial_cmp(b).unwrap()); v.truncate(k); v
     }
 
-    #[test]
-    fn ex11_eigenvalue_smoke() {
-        // Basic smoke test: LOBPCG with B-orthogonalized search space
-        // and Euclidean constraint projection.
-        let n = 8;
-        let (a, m, c) = build_constrained_system(n, 1);
-        let cfg = LobpcgConfig { max_iter: 100, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
-        let res = lobpcg_constrained(&a, Some(&m), 3, &c, &cfg).unwrap();
-        assert_eq!(res.eigenvalues.len(), 3);
-        assert!(res.converged, "LOBPCG must converge");
-    }
-
-    #[test]
-    fn ex11_eigenvalue_unit_square_p1_accuracy() {
-        // For a unit square with P1 elements and homogeneous Dirichlet BC,
-        // the lowest eigenvalue should approach 2π² ≈ 19.739.
-        let n = 16;
-        let (a, m, c) = build_constrained_system(n, 1);
-        let cfg = LobpcgConfig { max_iter: 300, tol: 1e-8, verbose: false };
-        let res = lobpcg_constrained(&a, Some(&m), 4, &c, &cfg).unwrap();
-        let expected = analytical_eigenvalues_square(4);
-        for (i, (&lam, &ex)) in res.eigenvalues.iter().zip(expected.iter()).enumerate() {
-            let rel_err = (lam - ex).abs() / ex;
-            assert!(
-                rel_err < 0.15,
-                "λ[{}] = {:.6e}, expected {:.6e}, rel_err = {:.4e}",
-                i, lam, ex, rel_err
-            );
-        }
-    }
-
-    #[test]
-    fn ex11_eigenvalue_eigenvalues_sorted() {
-        let (a, m, c) = build_constrained_system(12, 1);
-        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-6, verbose: false };
-        let res = lobpcg_constrained(&a, Some(&m), 5, &c, &cfg).unwrap();
-        for i in 1..res.eigenvalues.len() {
-            assert!(
-                res.eigenvalues[i - 1] <= res.eigenvalues[i],
-                "eigenvalues must be sorted ascending: {:?}",
-                res.eigenvalues
-            );
-        }
-    }
-
-    #[test]
-    fn ex11_eigenvalue_all_positive() {
-        let (a, m, c) = build_constrained_system(10, 1);
-        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-6, verbose: false };
-        let res = lobpcg_constrained(&a, Some(&m), 3, &c, &cfg).unwrap();
-        for (i, &lam) in res.eigenvalues.iter().enumerate() {
-            assert!(lam > 0.0, "λ[{}] = {:.6e} must be positive", i, lam);
-        }
-    }
+    #[test] fn smoke() { let (a,m,c) = build_system(8,1); let r = lobpcg_constrained(&a, Some(&m), 3, &c, &LobpcgConfig{max_iter:100,tol:1e-6,..Default::default()}).unwrap(); assert_eq!(r.eigenvalues.len(),3); assert!(r.converged); }
+    #[test] fn accuracy() { let (a,m,c) = build_system(16,1); let r = lobpcg_constrained(&a, Some(&m), 4, &c, &LobpcgConfig{max_iter:300,tol:1e-8,..Default::default()}).unwrap(); let ex = analytic_ev(4); for (i,(&l,&e)) in r.eigenvalues.iter().zip(ex.iter()).enumerate() { assert!((l-e).abs()/e < 0.15, "λ[{i}] mismatch"); } }
+    #[test] fn sorted() { let (a,m,c) = build_system(12,1); let r = lobpcg_constrained(&a, Some(&m), 5, &c, &LobpcgConfig{max_iter:200,tol:1e-6,..Default::default()}).unwrap(); for i in 1..r.eigenvalues.len() { assert!(r.eigenvalues[i-1] <= r.eigenvalues[i]); } }
+    #[test] fn positive() { let (a,m,c) = build_system(10,1); let r = lobpcg_constrained(&a, Some(&m), 3, &c, &LobpcgConfig{max_iter:200,tol:1e-6,..Default::default()}).unwrap(); for &l in &r.eigenvalues { assert!(l > 0.0); } }
 }

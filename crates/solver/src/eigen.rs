@@ -68,6 +68,35 @@ pub struct EigenResult {
     pub converged: bool,
 }
 
+/// Build a Euclidean constraint matrix for use with [`lobpcg_constrained`].
+///
+/// Each column of the returned matrix is a basis vector with a single `1.0`
+/// at the DOF index specified by `ess_dofs`, giving a constraint space whose
+/// column span is the linear subspace of essential (Dirichlet) boundary DOFs.
+/// The solver then searches **orthogonally** to this subspace, which is
+/// mathematically equivalent to enforcing `u = 0` on those DOFs.
+///
+/// This is the recommended approach for serial LOBPCG without a preconditioner.
+/// For the alternative diagonal-elimination approach (matching MFEM's
+/// `EliminateEssentialBCDiag`), use [`lobpcg_essential_bc`] instead.
+///
+/// # Example
+/// ```rust,ignore
+/// let ess_dofs = collect_essential_dofs(mesh, dm, &[1, 2, 3, 4]);
+/// let constraints = make_constraint_matrix(n_dofs, &ess_dofs);
+/// let result = lobpcg_constrained(&a, Some(&m), k, &constraints, &cfg)?;
+/// ```
+pub fn make_constraint_matrix(n_dofs: usize, ess_dofs: &[usize]) -> DMatrix<f64> {
+    let n_bc = ess_dofs.len();
+    let mut c = DMatrix::<f64>::zeros(n_dofs, n_bc);
+    for (j, &d) in ess_dofs.iter().enumerate() {
+        if d < n_dofs {
+            c[(d, j)] = 1.0;
+        }
+    }
+    c
+}
+
 // ─── LOBPCG ──────────────────────────────────────────────────────────────────
 
 /// Compute the `k` smallest eigenpairs of `A x = λ B x` using LOBPCG.
@@ -213,7 +242,7 @@ fn lobpcg_projected(
         let xtbx = x.transpose() * &bx;
 
         // Eigenvalues of (XᵀAX) v = λ (XᵀBX) v
-        let ritz = small_generalized_eig(&xtax, &xtbx, k);
+        let ritz = solve_dense_generalized_eig(&xtax, &xtbx);
         lambdas.copy_from_slice(&ritz.0[..k]);
 
         // ── 4. Residuals R = AX - BX Λ ───────────────────────────────────────
@@ -303,7 +332,7 @@ fn lobpcg_projected(
         let wtaw = w.transpose() * &aw;
         let wtbw = w.transpose() * &bw;
 
-        let (ritz_vals, ritz_vecs) = small_generalized_eig(&wtaw, &wtbw, w.ncols());
+        let (ritz_vals, ritz_vecs) = solve_dense_generalized_eig(&wtaw, &wtbw);
 
         // Skip nullspace modes: eigenvalues below nullspace_skip are treated as
         // zero (gradient nullspace) and excluded from the Ritz selection.
@@ -531,7 +560,12 @@ fn b_times_vec(b: &CsrMatrix<f64>, v: &DVector<f64>) -> DVector<f64> {
 
 /// Solve small dense generalized eigenvalue problem `A v = λ B v`.
 /// Returns `(eigenvalues, eigenvectors)` sorted by ascending eigenvalue.
-fn small_generalized_eig(a: &DMatrix<f64>, b: &DMatrix<f64>, _k: usize) -> (Vec<f64>, DMatrix<f64>) {
+///
+/// Uses eigendecomposition of B to form B^{-1/2}, then solves the
+/// transformed standard symmetric eigenproblem `C y = λ y` where
+/// `C = B^{-1/2} A B^{-1/2}`.  This is numerically robust even when B
+/// is near-singular (eigenvalues below 1e-14 are clamped).
+pub fn solve_dense_generalized_eig(a: &DMatrix<f64>, b: &DMatrix<f64>) -> (Vec<f64>, DMatrix<f64>) {
     let n = a.nrows();
     // B-orthogonal basis: compute Cholesky of B, then solve B^{-1/2} A B^{-T/2} v = λ v.
     // For simplicity, use eigendecomposition of B to get B^{-1/2}.

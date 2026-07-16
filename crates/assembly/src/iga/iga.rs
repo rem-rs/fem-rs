@@ -441,6 +441,95 @@ pub fn assemble_iga_mass_2d(
     coo.into_csr()
 }
 
+/// Assemble the **vector** mass matrix for a 2-D NURBS mesh with interleaved DOFs.
+///
+/// Each control point contributes `dim = 2` DOFs: `2a` (x) and `2a+1` (y).
+/// The mass matrix is block-diagonal: `M_vec[2a+c, 2b+d] = ρ·∫R_a·R_b·δ_{cd} dΩ`.
+/// This matches the DOF layout used by [`assemble_iga_elasticity_2d`].
+pub fn assemble_iga_mass_2d_vec(
+    mesh: &NurbsMesh2D,
+    rho: f64,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let n_total: usize = mesh.patches.iter().map(|p| p.control_pts.len()).sum();
+    let n_vec = 2 * n_total;
+    let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
+
+    let mut dof_offset = 0usize;
+    for pd in &mesh.patches {
+        let elem = pd_to_patch2d(pd);
+        let n_dof = elem.n_dofs();
+        let qr = patch_quad_2d(pd, quad_order);
+
+        for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+            let map = physical_map_2d(pd, qp_xi);
+            let w = qp_w * map.det_j.abs();
+
+            let mut basis = vec![0.0_f64; n_dof];
+            elem.eval_basis(qp_xi, &mut basis);
+
+            for a in 0..n_dof {
+                let ba = rho * basis[a];
+                let row_x = 2 * (dof_offset + a);
+                let row_y = row_x + 1;
+                for b in 0..n_dof {
+                    let m = ba * basis[b] * w;
+                    let col_x = 2 * (dof_offset + b);
+                    let col_y = col_x + 1;
+                    coo.add(row_x, col_x, m);
+                    coo.add(row_y, col_y, m);
+                }
+            }
+        }
+        dof_offset += n_dof;
+    }
+
+    coo.into_csr()
+}
+
+/// Assemble the **vector** mass matrix for a 3-D NURBS mesh with interleaved DOFs.
+///
+/// Each control point contributes `dim = 3` DOFs: `3a` (x), `3a+1` (y), `3a+2` (z).
+pub fn assemble_iga_mass_3d_vec(
+    mesh: &NurbsMesh3D,
+    rho: f64,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let n_total: usize = mesh.patches.iter().map(|p| p.control_pts.len()).sum();
+    let n_vec = 3 * n_total;
+    let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
+
+    let mut dof_offset = 0usize;
+    for pd in &mesh.patches {
+        let elem = pd.patch_element_ref();
+        let n_dof = elem.n_dofs();
+        let qr = patch_quad_3d(pd, quad_order);
+
+        for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+            let (_, det_j) = physical_grads_3d(pd, qp_xi);
+            let w = qp_w * det_j.abs();
+
+            let mut basis = vec![0.0_f64; n_dof];
+            elem.eval_basis(qp_xi, &mut basis);
+
+            for a in 0..n_dof {
+                let ba = rho * basis[a];
+                let row0 = 3 * (dof_offset + a);
+                for b in 0..n_dof {
+                    let m = ba * basis[b] * w;
+                    let col0 = 3 * (dof_offset + b);
+                    coo.add(row0, col0, m);
+                    coo.add(row0 + 1, col0 + 1, m);
+                    coo.add(row0 + 2, col0 + 2, m);
+                }
+            }
+        }
+        dof_offset += n_dof;
+    }
+
+    coo.into_csr()
+}
+
 /// Assemble the load vector $f_A = \int f(\mathbf{x})\, R_A\,\mathrm{d}\Omega$
 /// for a 2-D NURBS mesh.
 ///

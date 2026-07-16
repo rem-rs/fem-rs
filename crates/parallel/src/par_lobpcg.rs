@@ -5,6 +5,7 @@
 
 use nalgebra as na;
 use na::DMatrix;
+use fem_solver::solve_dense_generalized_eig;
 use crate::par_csr::ParCsrMatrix;
 use crate::par_vector::ParVector;
 
@@ -26,21 +27,25 @@ pub fn par_lobpcg(
     max_iter: usize,
     tol: f64,
 ) -> ParLobpcgResult {
-    let n = a.n_owned;
+    let n_owned = a.n_owned();
+    let n_ghost = a.n_ghost();
     let comm = a.comm();
 
-    // Helper: allocate block of k parallel vectors.
+    // Helper: allocate block of k parallel vectors (with ghost space).
     let alloc_vec = || -> Vec<ParVector> {
-        (0..k).map(|_| ParVector::zeros_like(
-            &ParVector::from_local_raw(vec![0.0; n], n, a.ghost_exchange_arc(), comm.clone()),
-        )).collect()
+        (0..k).map(|_|
+            ParVector::from_local_raw(
+                vec![0.0; n_owned + n_ghost], n_owned, a.ghost_exchange_arc(), comm.clone(),
+            )
+        ).collect()
     };
 
     let mut x: Vec<ParVector> = (0..k).map(|j| {
-        let data: Vec<f64> = (0..n)
-            .map(|i| ((comm.rank() as usize * 1000 + i * k + j) as f64).fract() * 2.0 - 1.0)
-            .collect();
-        let mut v = ParVector::from_local_raw(data, n, a.ghost_exchange_arc(), comm.clone());
+        let mut data = vec![0.0; n_owned + n_ghost];
+        for i in 0..n_owned {
+            data[i] = ((comm.rank() as usize * 1000 + i * k + j) as f64).fract() * 2.0 - 1.0;
+        }
+        let mut v = ParVector::from_local_raw(data, n_owned, a.ghost_exchange_arc(), comm.clone());
         v.update_ghosts();
         v
     }).collect();
@@ -77,10 +82,13 @@ pub fn par_lobpcg(
         rj.axpy(1.0, &ax[j]);
         rj.axpy(-theta[j], &bx[j]);
 
-        let mut zd = vec![0.0; n];
+        let mut zd = vec![0.0; n_owned];
         precond(rj.owned_slice(), &mut zd);
-        z[j] = ParVector::from_local_raw(zd, n, a.ghost_exchange_arc(), comm.clone());
-        z[j].update_ghosts();
+        let mut zv = ParVector::from_local_raw(
+            { let mut d = vec![0.0; n_owned + n_ghost]; d[..n_owned].copy_from_slice(&zd); d },
+            n_owned, a.ghost_exchange_arc(), comm.clone());
+        zv.update_ghosts();
+        z[j] = zv;
         r[j] = rj;
     }
 
@@ -129,10 +137,13 @@ pub fn par_lobpcg(
             residuals[j] = rj.global_norm();
             max_res = max_res.max(residuals[j]);
 
-            let mut zd = vec![0.0; n];
+            let mut zd = vec![0.0; n_owned];
             precond(rj.owned_slice(), &mut zd);
-            z[j] = ParVector::from_local_raw(zd, n, a.ghost_exchange_arc(), comm.clone());
-            z[j].update_ghosts();
+            let mut zv = ParVector::from_local_raw(
+                { let mut d = vec![0.0; n_owned + n_ghost]; d[..n_owned].copy_from_slice(&zd); d },
+                n_owned, a.ghost_exchange_arc(), comm.clone());
+            zv.update_ghosts();
+            z[j] = zv;
             r[j] = rj;
         }
 
@@ -183,19 +194,9 @@ fn rayleigh_ritz(
     }
 
     // Generalized eigendecomposition: A_proj s = λ B_proj s.
-    // Use dense solve: B⁻¹ A s = λ s, then sort by λ.
-    let b_inv = match b_proj.clone().try_inverse() {
-        Some(bi) => bi,
-        None => na::DMatrix::identity(m, m),
-    };
-    let a_red = b_inv * a_proj;
-
-    // Use nalgebra's symmetric eigendecomposition (works for real eigenvalues).
-    let a_sym = &a_red + a_red.transpose();
-    let a_sym = a_sym * 0.5; // symmetrize for safety.
-    let eig = na::linalg::SymmetricEigen::new(a_sym);
-    let eigenvalues = eig.eigenvalues;
-    let eigenvectors = eig.eigenvectors;
+    // Use B^{-1/2} transform via eigendecomposition of B (numerically robust
+    // even for near-singular B, matching the serial LOBPCG approach).
+    let (eigenvalues, eigenvectors) = solve_dense_generalized_eig(&a_proj, &b_proj);
 
     let mut indices: Vec<usize> = (0..m).collect();
     indices.sort_by(|&i, &j| eigenvalues[i].partial_cmp(&eigenvalues[j]).unwrap());

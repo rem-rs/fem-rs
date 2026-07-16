@@ -146,6 +146,8 @@ pub use eigen::{
     arpack, WhichEigenvalue,
     feast_interval, IntervalEigenConfig,
     ame_solve, AmeConfig,
+    make_constraint_matrix,
+    solve_dense_generalized_eig,
 };
 pub use multiphysics::{
     CoupledProblem,

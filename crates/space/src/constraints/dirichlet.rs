@@ -127,7 +127,7 @@ pub fn expand_from_reduced(
 
 /// Identify which DOFs lie on boundary faces with the given tag(s).
 ///
-/// Returns sorted global DOF indices for all boundary nodes (and, for any
+/// Return sorted global DOF indices for all boundary nodes (and, for any
 /// order, edge and face DOFs) that lie on boundary faces whose tag is in `tags`.
 ///
 /// Uses `edge_pk_map` and `face_pk_map` from DofManager, which support
@@ -201,6 +201,26 @@ pub fn boundary_dofs(
     let mut out: Vec<DofId> = dof_set.into_iter().collect();
     out.sort_unstable();
     out
+}
+
+/// Convenience wrapper around [`boundary_dofs`] that returns `Vec<usize>` instead of `Vec<DofId>`.
+///
+/// This is the most common type needed for constraint matrix construction,
+/// Dirichlet elimination, and LOBPCG essential BC handling.
+///
+/// # Arguments
+/// * `mesh`  — mesh providing boundary face data
+/// * `dm`    — DOF manager for the space
+/// * `tags`  — boundary tags to select (e.g. `&[1, 2, 3, 4]` for all sides)
+pub fn collect_essential_dofs(
+    mesh: &dyn fem_mesh::topology::MeshTopology,
+    dm:   &DofManager,
+    tags: &[i32],
+) -> Vec<usize> {
+    boundary_dofs(mesh, dm, tags)
+        .into_iter()
+        .map(|d| d as usize)
+        .collect()
 }
 
 /// Identify H(curl) DOFs on boundary faces with the given tag(s).

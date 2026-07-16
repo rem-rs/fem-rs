@@ -3,6 +3,11 @@
 //! Solves `-Δu = λu` with homogeneous Dirichlet BC using LOBPCG
 //! preconditioned by AMG-CG, in a thread-parallel setting.
 //!
+//! **Current scope**: parallel assembly + serial eigenvalue solve on rank 0.
+//! A distributed solver [`fem_parallel::par_lobpcg::par_lobpcg`] exists but
+//! its Rayleigh–Ritz step needs robustness improvements (singular B_proj
+//! fallback) before it can replace the rank‑0 serial path.
+//!
 //! ## Usage
 //! ```bash
 //! cargo run --example mfem_pex11_parallel_eigenvalue -- --n 8 --ranks 2
@@ -46,9 +51,11 @@ fn main() {
         let ps = ParallelFESpace::new(H1Space::new(lm, 1), &pm, comm.clone());
         let n_global = ps.n_global_dofs();
 
+        // ── Parallel assembly ──────────────────────────────────────────────
         let mut stiff_p = ParAssembler::assemble_bilinear(&ps, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let _mass_p = ParAssembler::assemble_bilinear(&ps, &[&MassIntegrator { rho: 1.0 }], 3);
 
+        // ── Apply Dirichlet BC on parallel stiffness matrix ───────────────
         let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(),
             &ps.local_space().mesh().unique_boundary_tags());
         let dp = ps.dof_partition();
@@ -58,7 +65,7 @@ fn main() {
             if p < dp.n_owned_dofs { stiff_p.apply_dirichlet_par(p, 1.0, &mut tmp); }
         }
 
-        // Rank 0: serial reference solve
+        // ── Rank 0: serial reference solve with AMG‑CG preconditioner ────
         if comm.rank() == 0 {
             let ser_mesh = Mesh::<2>::unit_square_tri(n);
             let ser_space = H1Space::new(ser_mesh, 1);
@@ -71,7 +78,8 @@ fn main() {
             let zero = vec![0.0; bnd.len()];
             fem_space::constraints::apply_dirichlet(&mut a, &mut vec![0.0; ser_space.n_dofs()], &bnd, &zero);
 
-            eprintln!("  Rank 0: {} DOFs, computing eigenvalues...", ser_space.n_dofs());
+            eprintln!("  [pex11] dofs={n_global} ranks={} ser_dofs={} (serial solve on rank 0)",
+                      comm.size(), ser_space.n_dofs());
 
             let amg_cfg = AmgConfig::default();
             let pcg_cfg = SolverConfig {
@@ -117,6 +125,9 @@ fn main() {
         for (i, v) in vals.iter().enumerate() {
             println!("  lambda[{}] = {:.10e}", i, v);
         }
-        println!("  PASS");
+        // Verify: 5 positive eigenvalues, sorted ascending
+        let ok = vals.len() == 5 && vals.iter().all(|&v| v > 0.0)
+            && (1..vals.len()).all(|i| vals[i-1] <= vals[i]);
+        println!("  {}", if ok { "PASS" } else { "FAIL" });
     }
 }

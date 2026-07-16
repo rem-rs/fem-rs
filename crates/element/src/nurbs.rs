@@ -1137,6 +1137,33 @@ impl NurbsMesh2D {
     pub fn elevate_degree(&self, tu: usize, tv: usize) -> Self {
         NurbsMesh2D { patches: self.patches.iter().map(|p| elevate_deg_2d(p, tu, tv)).collect(), edge_connectivity: self.edge_connectivity.clone() }
     }
+
+    /// Refine each patch by inserting knots in u and v.
+    pub fn h_refine(&self, uvals: &[f64], vvals: &[f64]) -> Self {
+        NurbsMesh2D {
+            patches: self.patches.iter().map(|p| h_refine2d(p, uvals, vvals)).collect(),
+            edge_connectivity: self.edge_connectivity.clone(),
+        }
+    }
+
+    /// Apply `times` levels of uniform h‑refinement (knot insertion at span midpoints).
+    ///
+    /// Each level doubles the number of knot spans in each parametric direction.
+    pub fn uniform_refine(&self, times: usize) -> Self {
+        let mut mesh = self.clone();
+        for _ in 0..times {
+            let mut new_patches = Vec::new();
+            for p in &mesh.patches {
+                let u_mid: Vec<f64> = p.kv_u.knots.windows(2)
+                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
+                let v_mid: Vec<f64> = p.kv_v.knots.windows(2)
+                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
+                new_patches.push(h_refine2d(p, &u_mid, &v_mid));
+            }
+            mesh.patches = new_patches;
+        }
+        NurbsMesh2D { patches: mesh.patches, edge_connectivity: self.edge_connectivity.clone() }
+    }
 }
 
 // ─── Knot insertion ──────────────────────────────────────────────────────────
@@ -1498,6 +1525,27 @@ impl NurbsMesh3D {
                 .collect(),
             face_connectivity: self.face_connectivity.clone(),
         }
+    }
+
+    /// Apply `times` levels of uniform h‑refinement (knot insertion at span midpoints).
+    ///
+    /// Each level doubles the number of knot spans in each parametric direction.
+    pub fn uniform_refine(&self, times: usize) -> Self {
+        let mut mesh = self.clone();
+        for _ in 0..times {
+            let mut new_patches = Vec::new();
+            for p in &mesh.patches {
+                let u_mid: Vec<f64> = p.kv_u.knots.windows(2)
+                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
+                let v_mid: Vec<f64> = p.kv_v.knots.windows(2)
+                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
+                let w_mid: Vec<f64> = p.kv_w.knots.windows(2)
+                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
+                new_patches.push(h_refine_3d(p, &u_mid, &v_mid, &w_mid));
+            }
+            mesh.patches = new_patches;
+        }
+        NurbsMesh3D { patches: mesh.patches, face_connectivity: self.face_connectivity.clone() }
     }
 }
 

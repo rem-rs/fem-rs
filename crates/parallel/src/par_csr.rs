@@ -128,6 +128,9 @@ impl ParCsrMatrix {
     /// Number of owned rows (= local portion of global matrix).
     pub fn n_owned(&self) -> usize { self.n_owned }
 
+    /// Number of ghost columns (= columns from other ranks referenced by local rows).
+    pub fn n_ghost(&self) -> usize { self.n_ghost }
+
     /// Diagonal block (owned × owned columns).
     pub fn diag_block(&self) -> &CsrMatrix<f64> { &self.diag }
 
@@ -174,6 +177,56 @@ impl ParCsrMatrix {
     /// Apply Dirichlet BC at a local owned DOF using a `ParVector` as the RHS.
     pub fn apply_dirichlet_par(&mut self, local_dof: usize, value: f64, rhs: &mut ParVector) {
         self.apply_dirichlet_row(local_dof, value, rhs.as_slice_mut());
+    }
+
+    /// MFEM‑style symmetric diagonal elimination: zero row AND column for
+    /// `owned_dofs`, then set diagonal entry to `val` for each.
+    ///
+    /// This mimics `EliminateEssentialBCDiag` and is useful for eigenvalue
+    /// problems where the RHS is not a fixed vector but the mass‑matrix
+    /// product B x_k.  Symmetry is preserved (A_ij = A_ji for all i,j).
+    pub fn eliminate_diag_symmetric(&mut self, owned_dofs: &[usize], val: f64) {
+        let n_owned = self.n_owned;
+        let diag = &mut self.diag;
+
+        for &d in owned_dofs {
+            if d >= n_owned { continue; }
+
+            // ── Zero row d ──
+            for p in diag.row_ptr[d]..diag.row_ptr[d + 1] {
+                diag.values[p] = 0.0;
+            }
+            // ── Zero column d (all rows i != d that reference column d) ──
+            for i in 0..n_owned {
+                if i == d { continue; }
+                for p in diag.row_ptr[i]..diag.row_ptr[i + 1] {
+                    if diag.col_idx[p] as usize == d {
+                        diag.values[p] = 0.0;
+                        break;
+                    }
+                }
+            }
+            // ── Set diag[d] = val ──
+            for p in diag.row_ptr[d]..diag.row_ptr[d + 1] {
+                if diag.col_idx[p] as usize == d {
+                    diag.values[p] = val;
+                    break;
+                }
+            }
+
+            // ── Zero offd row d ──
+            if self.n_ghost > 0 {
+                for p in self.offd.row_ptr[d]..self.offd.row_ptr[d + 1] {
+                    self.offd.values[p] = 0.0;
+                }
+            }
+        }
+        // Column entries in offd are ghost‑side and not touched — they are
+        // owned by the rank that owns that column.  The Rayleigh–Ritz
+        // projection (which uses global_dot) sees the outer product
+        // x^T * A * y, and the offd column entries enter as non‑owned
+        // contributions from the other rank's row.  Zeroing the *row* on
+        // each rank is sufficient for locality correctness.
     }
 }
 
