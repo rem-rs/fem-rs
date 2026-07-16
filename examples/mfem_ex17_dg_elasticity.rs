@@ -352,7 +352,7 @@ where
             re.eval_grad_basis(&xi_e, &mut gref);
             xform_grads(&jit, &gref, &mut gphys, n, dim);
 
-            let pen = kappa * (lam + 2.0 * mu) * h_f / (2.0 * det_j.abs());
+            let pen = kappa * (lam + 2.0 * mu) / h_f;
 
             for a in 0..n {
                 let phi_a = phi[a];
