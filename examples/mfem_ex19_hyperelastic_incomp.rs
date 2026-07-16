@@ -855,3 +855,58 @@ impl Args {
         a
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fem_mesh::Mesh;
+
+    #[test]
+    fn smoke_ex19_converges() {
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let dim = 2;
+        let order = 1;
+        let p_order = 1;
+        let mu = 1.0;
+
+        let u_space = VectorH1Space::new(mesh.clone(), order, dim);
+        let p_space = H1Space::new(mesh.clone(), p_order);
+        let nu = u_space.n_dofs();
+        let np = p_space.n_dofs();
+        let ns = u_space.n_scalar_dofs();
+
+        // BC: all boundaries fixed (u=0) so zero displacement is equilibrium
+        let dm = u_space.scalar_dof_manager();
+        let all_bdr = boundary_dofs(u_space.mesh(), dm, &[1, 2, 3, 4]);
+        let mut du: Vec<(usize, f64)> = Vec::new();
+        for &d in &all_bdr {
+            du.push((d as usize, 0.0));
+            du.push((d as usize + ns, 0.0));
+        }
+
+        // Initial guess: zero
+        let mut u = vec![0.0_f64; nu];
+        let mut p = vec![0.0_f64; np];
+        for &(dof, val) in &du { u[dof] = val; }
+
+        let ne = mesh.n_elements() as usize;
+        let elem_dofs_u: Vec<Vec<usize>> = (0..ne)
+            .map(|e| u_space.element_dofs(e as u32).iter().map(|&d| d as usize).collect())
+            .collect();
+        let elem_dofs_p: Vec<Vec<usize>> = (0..ne)
+            .map(|e| p_space.element_dofs(e as u32).iter().map(|&d| d as usize).collect())
+            .collect();
+        let quad_order = 5;
+
+        let mut ru = vec![0.0_f64; nu];
+        let mut rp = vec![0.0_f64; np];
+        residual(&mesh, dim as usize, order, p_order, quad_order, mu,
+                 &u, &p, &elem_dofs_u, &elem_dofs_p, &mut ru, &mut rp);
+        // Zero residual at Dirichlet DOFs (reaction forces not included)
+        for &(dof, _) in &du { ru[dof] = 0.0; }
+        let r0 = nr(&[ru.as_slice(), rp.as_slice()].concat());
+        // With all boundaries fixed and zero displacement+pressure, the internal
+        // residual should be exactly zero (F=I, J-1=0)
+        assert!(r0 < 1e-14, "zero state should have zero residual, got {r0}");
+    }
+}

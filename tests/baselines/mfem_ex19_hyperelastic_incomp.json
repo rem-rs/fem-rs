@@ -1,0 +1,20 @@
+{
+  "test_name": "mfem_ex19_hyperelastic_incomp",
+  "description": "Incompressible neo-Hookean hyperelasticity — L2 norm of deformation and pressure DOFs",
+  "config": {
+    "mesh": "beam-quad.mesh",
+    "order": 2,
+    "refine": 0,
+    "mu": 1.0
+  },
+  "metrics": {
+    "deformation_l2": 8.6951665137e+00,
+    "pressure_l2": 4.0066408244e+00,
+    "newton_iterations": 3,
+    "final_residual": 5.61346e-05
+  },
+  "tolerances": {
+    "deformation_l2": { "rtol": 1e-4, "atol": 1e-8 },
+    "pressure_l2": { "rtol": 1e-4, "atol": 1e-8 }
+  }
+}
