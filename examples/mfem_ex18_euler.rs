@@ -423,7 +423,7 @@ fn main() {
         &mesh,
         order,
         Box::new(flux),
-        false, // volume term off
+        false, // volume off
     );
     let n_dofs = euler_op.n_dofs();
     println!("Number of unknowns: {}", n_dofs);
