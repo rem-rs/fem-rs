@@ -194,8 +194,8 @@ fn main() {
             let nodes = mesh.element_nodes(e);
             for (k, &n) in nodes.iter().enumerate() {
                 let dof = dofs[k] as usize;
-                u_x[n as usize] += x[dof];
-                u_y[n as usize] += x[n_scalar + dof];
+                u_x[n as usize] += x[dof * dim];
+                u_y[n as usize] += x[dof * dim + 1];
                 count[n as usize] += 1;
             }
         }
@@ -366,19 +366,19 @@ where
                         rhs_stress_flux(lam, mu, &ga, &normal, test_comp, dim);
                 }
 
-                // Penalty: -(κ/h) · u_D_comp · φ_a  (per component, sign from SIP)
+                // Penalty: +(κ/h)·u_D·v  (DOF-major: row = dof·dim + comp, matching matrix)
                 for comp in 0..dim {
                     let u_d = dirichlet(&xp, comp);
-                    rhs[comp * n_scalar + dofs[a]] += w_f * pen * phi_a * u_d;
+                    rhs[dofs[a] * dim + comp] += w_f * pen * phi_a * u_d;
                 }
 
-                // Symmetry: α·Σᵢ (σ(φ_a·e_comp)·n)_i · u_D_i
+                // Symmetry: α·σ(v)·n·u_D  (DOF-major: row = dof·dim + comp, matching matrix)
                 for comp in 0..dim {
                     let mut dot = 0.0;
                     for i in 0..dim {
                         dot += sn_flux[comp][i] * dirichlet(&xp, i);
                     }
-                    rhs[comp * n_scalar + dofs[a]] += w_f * alpha * dot;
+                    rhs[dofs[a] * dim + comp] += w_f * alpha * dot;
                 }
             }
         }
