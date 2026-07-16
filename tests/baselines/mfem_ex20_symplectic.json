@@ -1,0 +1,28 @@
+{
+  "test_name": "mfem_ex20_symplectic",
+  "description": "Symplectic integration of 1D Hamiltonian systems — energy mean and SD",
+  "config": {
+    "mesh": "none (ODE)",
+    "problems": ["harmonic", "pendulum", "gaussian_well", "quartic", "negative_quartic"]
+  },
+  "metrics": {
+    "p0_o1_n100_dt01_mean": 1.0020415168803083,
+    "p0_o1_n100_dt01_sd": 0.01749149778974546,
+    "p1_o2_n60_dt02_mean": 1.0026890720017863,
+    "p1_o2_n60_dt02_sd": 0.001655759694977939,
+    "p2_o4_n30_dt04_mean": 2.798686826884062,
+    "p2_o4_n30_dt04_sd": 0.5252822979993594,
+    "p0_o2_n200_dt005_mean": 1.000148699547083,
+    "p0_o2_n200_dt005_sd": 0.00011134972254945943
+  },
+  "tolerances": {
+    "p0_o1_n100_dt01_mean": { "rtol": 1e-14, "atol": 1e-14 },
+    "p0_o1_n100_dt01_sd": { "rtol": 1e-14, "atol": 1e-14 },
+    "p1_o2_n60_dt02_mean": { "rtol": 1e-14, "atol": 1e-14 },
+    "p1_o2_n60_dt02_sd": { "rtol": 1e-14, "atol": 1e-14 },
+    "p2_o4_n30_dt04_mean": { "rtol": 1e-14, "atol": 1e-14 },
+    "p2_o4_n30_dt04_sd": { "rtol": 1e-14, "atol": 1e-14 },
+    "p0_o2_n200_dt005_mean": { "rtol": 1e-14, "atol": 1e-14 },
+    "p0_o2_n200_dt005_sd": { "rtol": 1e-14, "atol": 1e-14 }
+  }
+}
