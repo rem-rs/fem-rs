@@ -1,0 +1,23 @@
+{
+  "test_name": "mfem_ex21_amr_elasticity",
+  "description": "AMR for linear elasticity (ZZ estimator, non-conforming quads)",
+  "config": {
+    "mesh": "beam-quad.mesh",
+    "order": 1,
+    "estimator": "ZZ",
+    "refinement_fraction": 0.7,
+    "solver": "PCG+GSSmoother",
+    "max_dofs": 50000
+  },
+  "metrics": {
+    "n_amr_iterations": 5,
+    "n_dofs_final": 710,
+    "pcg_its_iter0": 24,
+    "pcg_its_iter4": 102,
+    "max_err_final": 0.0
+  },
+  "tolerances": {
+    "n_amr_iterations": { "rtol": 0.0, "atol": 1 },
+    "n_dofs_final": { "rtol": 0.0, "atol": 50 }
+  }
+}
