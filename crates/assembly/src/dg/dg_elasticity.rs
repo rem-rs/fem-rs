@@ -536,7 +536,7 @@ fn assemble_boundary_face_stress<S: FESpace>(
         re.eval_grad_basis(&xi_e, &mut gref);
         xform_grads(&jit, &gref, &mut gphys, n, dim);
 
-        let pen = kappa * (lam + 2.0 * mu) / h_f;
+        let pen = kappa * (lam + 2.0 * mu) * h_f / (2.0 * det_j.abs());
 
         // Precompute stress flux for each basis×component
         let mut sn = vec![vec![vec![0.0_f64; dim]; dim]; n];
