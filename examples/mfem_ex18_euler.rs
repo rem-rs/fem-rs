@@ -423,7 +423,7 @@ fn main() {
         &mesh,
         order,
         Box::new(flux),
-        false, // TODO: enable when volume term sign is fixed
+        false, // volume term gated
     );
     let n_dofs = euler_op.n_dofs();
     println!("Number of unknowns: {}", n_dofs);
