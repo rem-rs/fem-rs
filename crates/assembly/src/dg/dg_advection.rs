@@ -606,12 +606,18 @@ pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoef
 
     for &(el_l, el_r, ref fn_l, ref fn_r) in pairs {
         // Face geometry from LEFT element's face nodes
+        // Periodic interface normal: opposite of the raw edge normal.
+        // The raw normal (dy/h_f, -dx/h_f) is the RIGHT-of-edge convention,
+        // which after orient_normal_outward gives the outward normal from
+        // the left element.  For periodic faces the interface normal should
+        // point FROM left element TO right element through the periodic
+        // boundary — the OPPOSITE of the outward normal.
         let p0 = mesh.node_coords(fn_l[0]);
         let p1 = mesh.node_coords(fn_l[1]);
         let dx = p1[0] - p0[0];
         let dy = p1[1] - p0[1];
         let h_f = (dx * dx + dy * dy).sqrt();
-        let normal_l = vec![dy / h_f, -dx / h_f];
+        let normal_l = vec![-dy / h_f, dx / h_f];
 
         // Get element data for both sides
         let dofs_l: Vec<usize> = space.element_dofs(el_l).iter().map(|&d| d as usize).collect();
