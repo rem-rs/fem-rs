@@ -7,6 +7,7 @@
 //! MFEM examples/ex18.hpp — DGHyperbolicConservationLaws
 
 use nalgebra as na;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use fem_element::reference::ReferenceElement;
 use fem_element::quadrature::gauss_legendre_01;
@@ -177,7 +178,7 @@ pub struct DgHyperbolicConservationLaws {
     interior_faces: Vec<InteriorFace>,
     boundary_faces: Vec<BoundaryFace>,
     max_char_speed: std::cell::Cell<f64>,
-    z: Vec<f64>,
+    z: RefCell<Vec<f64>>,
     preassemble_weakdiv: bool,
 }
 
@@ -192,19 +193,21 @@ fn make_ref_elem(_mesh: &dyn MeshTopology, order: u8) -> Box<dyn ReferenceElemen
     }
 }
 
-/// Compute element-wise inverse mass matrix M_e⁻¹.
-/// M_e[i,j] = Σ_q w_q · φ_i(xi_q) · φ_j(xi_q)
+/// Compute element-wise inverse mass matrix M_e⁻¹ in physical space.
+/// M_e[i,j] = Σ_q w_q · |detJ| · φ_i(xi_q) · φ_j(xi_q)
 fn compute_inv_mass(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_elems: usize) -> Vec<na::DMatrix<f64>> {
     let dp = ref_elem.n_dofs();
+    let dim = mesh.dim() as usize;
     let q_order = 2 * ref_elem.order();
     let qr = ref_elem.quadrature(q_order);
     let n_qp = qr.n_points();
     let mut phi = vec![0.0; dp];
     let mut invmass = Vec::with_capacity(n_elems);
-    for _e in 0..n_elems {
+    for e in 0..n_elems {
+        let det_j = element_det_j(mesh, e as u32);
         let mut m = na::DMatrix::<f64>::zeros(dp, dp);
         for q in 0..n_qp {
-            let w = qr.weights[q];
+            let w = qr.weights[q] * det_j;
             ref_elem.eval_basis(&qr.points[q], &mut phi);
             for i in 0..dp {
                 for j in 0..dp {
@@ -218,8 +221,34 @@ fn compute_inv_mass(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
     invmass
 }
 
-/// Compute element-wise weak divergence matrix.
-/// weakdiv[e][i, j*dim + d] = Σ_q w_q · φ_i(xi_q) · ∂φ_j/∂ξ_d(xi_q)
+/// Compute element Jacobian determinant for a Tri3 element.
+fn element_det_j(mesh: &dyn MeshTopology, elem: u32) -> f64 {
+    let nodes = mesh.element_nodes(elem);
+    let p0 = mesh.node_coords(nodes[0]);
+    let p1 = mesh.node_coords(nodes[1]);
+    let p2 = mesh.node_coords(nodes[2]);
+    let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
+    let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
+    (j11 * j22 - j12 * j21).abs()
+}
+
+/// Compute element Jacobian and its inverse-transpose for a Tri3 element.
+/// Returns (detJ, inv_jac_transpose) where inv_jac_transpose is flattened [2×2]: [Jit00, Jit01, Jit10, Jit11].
+fn element_jac_inv_transpose(mesh: &dyn MeshTopology, elem: u32) -> (f64, [f64; 4]) {
+    let nodes = mesh.element_nodes(elem);
+    let p0 = mesh.node_coords(nodes[0]);
+    let p1 = mesh.node_coords(nodes[1]);
+    let p2 = mesh.node_coords(nodes[2]);
+    let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
+    let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
+    let det = j11 * j22 - j12 * j21;
+    let inv_det = 1.0 / det;
+    // J^{-T} = 1/det * [j22, -j21; -j12, j11]
+    (det.abs(), [j22 * inv_det, -j21 * inv_det, -j12 * inv_det, j11 * inv_det])
+}
+
+/// Compute element-wise weak divergence matrix in physical space.
+/// weakdiv[e][i, j*dim + d] = Σ_q w_q · |detJ| · φ_i(xi_q) · (J^{-T} · ∇ξ_φ_j)_d
 fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_elems: usize) -> Vec<na::DMatrix<f64>> {
     let dp = ref_elem.n_dofs();
     let dim = mesh.dim() as usize;
@@ -229,16 +258,22 @@ fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
     let mut phi = vec![0.0; dp];
     let mut gphi = vec![0.0; dp * dim];
     let mut weakdiv = Vec::with_capacity(n_elems);
-    for _e in 0..n_elems {
+    for e in 0..n_elems {
+        let (det_j, jit) = element_jac_inv_transpose(mesh, e as u32);
         let mut wd = na::DMatrix::<f64>::zeros(dp, dp * dim);
         for q in 0..n_qp {
-            let w = qr.weights[q];
+            let w = qr.weights[q] * det_j;
             ref_elem.eval_basis(&qr.points[q], &mut phi);
             ref_elem.eval_grad_basis(&qr.points[q], &mut gphi);
             for i in 0..dp {
                 for j in 0..dp {
                     for d in 0..dim {
-                        wd[(i, j * dim + d)] += w * phi[i] * gphi[j * dim + d];
+                        // Transform gradient: grad_phys = J^{-T} * grad_ref
+                        let mut grad_phys = 0.0;
+                        for k in 0..dim {
+                            grad_phys += jit[d * dim + k] * gphi[j * dim + k];
+                        }
+                        wd[(i, j * dim + d)] += w * phi[i] * grad_phys;
                     }
                 }
             }
@@ -259,9 +294,40 @@ fn tri_face_ref(face: u8, t: f64, reverse: bool) -> [f64; 2] {
     }
 }
 
+/// Detect periodic face pairs from a list of boundary face candidates.
+///
+/// Groups boundary faces by their normal direction, then pairs faces from
+/// opposite sides (normals that are negatives of each other).  This handles
+/// the standard periodic-square.mesh case.
+fn detect_periodic_pairs(unpaired: &[(u32, u8, [f64;2])]) -> Vec<(usize, usize)> {
+    // Group by normal direction (quantized to ±x, ±y).
+    // For a square mesh periodic in both directions, opposite sides
+    // have normals that are exact opposites.
+    let eps = 1e-10_f64;
+    let mut pairs = Vec::new();
+    let n = unpaired.len();
+    let mut used = vec![false; n];
+    for i in 0..n {
+        if used[i] { continue; }
+        let ni = &unpaired[i].2;
+        for j in (i+1)..n {
+            if used[j] { continue; }
+            let nj = &unpaired[j].2;
+            // Check if normals are opposites: ni ≈ -nj
+            if (ni[0] + nj[0]).abs() < eps && (ni[1] + nj[1]).abs() < eps {
+                pairs.push((i, j));
+                used[i] = true;
+                used[j] = true;
+                break;
+            }
+        }
+    }
+    pairs
+}
+
 /// Build interior and boundary face structures for a triangle mesh.
+/// Detects periodic pairs from boundary faces with opposite normals.
 fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec<InteriorFace>, Vec<BoundaryFace>) {
-    let _dim = mesh.dim() as usize;
     let dp = ref_elem.n_dofs();
     let n_elems = mesh.n_elements() as u32;
     let n_qp = ((2 * ref_elem.order() + 1) as usize).min(4).max(1);
@@ -382,6 +448,9 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
         }
     }
 
+    // Build boundary face geometry for all unpaired edges
+    struct BoundInfo { elem: u32, lf: u8, normal: [f64; 2], length: f64 }
+    let mut bound_info: Vec<BoundInfo> = Vec::new();
     for &(elem, lf) in &unpaired {
         let enodes = mesh.element_nodes(elem);
         let (na, nb) = match lf {
@@ -395,7 +464,66 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
         let (dx, dy) = (pb[0] - pa[0], pb[1] - pa[1]);
         let normal = [-dy, dx];
         let length = (dx * dx + dy * dy).sqrt();
+        bound_info.push(BoundInfo { elem, lf, normal, length });
+    }
 
+    // Detect periodic pairs among boundary faces
+    let periodic_idx: Vec<(usize, usize)> = {
+        let unpaired_with_normals: Vec<(u32, u8, [f64;2])> = bound_info.iter()
+            .map(|b| (b.elem, b.lf, b.normal)).collect();
+        detect_periodic_pairs(&unpaired_with_normals)
+    };
+
+    // Track which bound_info entries are consumed by periodic pairing
+    let mut used_by_periodic = vec![false; bound_info.len()];
+    for &(i, j) in &periodic_idx {
+        used_by_periodic[i] = true;
+        used_by_periodic[j] = true;
+        // Create periodic interior face from pair (i, j)
+        let bi = &bound_info[i];
+        let bj = &bound_info[j];
+        let (elem_l, elem_r, normal, face_l, face_r) = {
+            // Use the element with smaller index as L, normal outward from L
+            if bi.elem < bj.elem {
+                (bi.elem as usize, bj.elem as usize, bi.normal, bi.lf, bj.lf)
+            } else {
+                (bj.elem as usize, bi.elem as usize, bj.normal, bj.lf, bi.lf)
+            }
+        };
+        let length = bi.length;  // both have same length for periodic square
+        let mut qp_ref_l = Vec::with_capacity(n_qp);
+        let mut qp_ref_r = Vec::with_capacity(n_qp);
+        let mut qp_w = Vec::with_capacity(n_qp);
+        let mut basis_l = Vec::with_capacity(n_qp);
+        let mut basis_r = Vec::with_capacity(n_qp);
+        let mut phi_l = vec![0.0; dp];
+        let mut phi_r = vec![0.0; dp];
+        for q in 0..n_qp {
+            let t = face_pts[q];
+            let w = face_wts[q];
+            qp_w.push(w * length);
+            let rl = tri_face_ref(face_l as u8, t, false);
+            qp_ref_l.push(rl);
+            ref_elem.eval_basis(&rl, &mut phi_l);
+            basis_l.push(phi_l.clone());
+            // For periodic pair, the other element's face QP uses the opposite
+            // face orientation (reverse = true) since it's the opposite side
+            let rr = tri_face_ref(face_r as u8, t, true);
+            qp_ref_r.push(rr);
+            ref_elem.eval_basis(&rr, &mut phi_r);
+            basis_r.push(phi_r.clone());
+        }
+        interior.push(InteriorFace {
+            elem_l, elem_r,
+            normal, length,
+            qp_ref_l, qp_ref_r, qp_weights: qp_w,
+            basis_l, basis_r,
+        });
+    }
+
+    // Remaining unpaired boundary faces become boundary faces
+    for (idx, bi) in bound_info.iter().enumerate() {
+        if used_by_periodic[idx] { continue; }
         let mut qp_ref = Vec::with_capacity(n_qp);
         let mut qp_w = Vec::with_capacity(n_qp);
         let mut basis = Vec::with_capacity(n_qp);
@@ -403,16 +531,16 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
         for q in 0..n_qp {
             let t = face_pts[q];
             let w = face_wts[q];
-            qp_w.push(w * length);
-            let r = tri_face_ref(lf, t, false);
+            qp_w.push(w * bi.length);
+            let r = tri_face_ref(bi.lf, t, false);
             qp_ref.push(r);
             ref_elem.eval_basis(&r, &mut phi);
             basis.push(phi.clone());
         }
         boundary.push(BoundaryFace {
-            elem: elem as usize,
-            normal,
-            length,
+            elem: bi.elem as usize,
+            normal: bi.normal,
+            length: bi.length,
             qp_ref,
             qp_weights: qp_w,
             basis,
@@ -445,6 +573,8 @@ impl DgHyperbolicConservationLaws {
             Vec::new()
         };
         let (interior_faces, boundary_faces) = build_faces(mesh, &*ref_elem);
+        // Face counts for debugging: interior={}, boundary={}
+        let _ = (interior_faces.len(), boundary_faces.len());
         Self {
             n_elems,
             dofs_per_elem,
@@ -458,7 +588,7 @@ impl DgHyperbolicConservationLaws {
             interior_faces,
             boundary_faces,
             max_char_speed: std::cell::Cell::new(0.0),
-            z: vec![0.0; total_dofs],
+            z: RefCell::new(vec![0.0; total_dofs]),
             preassemble_weakdiv,
         }
     }
@@ -491,7 +621,8 @@ impl DgHyperbolicConservationLaws {
         let dim = self.dim;
 
         // 1. Reset workspace
-        self.z.fill(0.0);
+        let mut z = self.z.borrow_mut();
+        z.fill(0.0);
         self.max_char_speed.set(0.0);
 
         // 2. Interior face flux contributions
@@ -501,7 +632,6 @@ impl DgHyperbolicConservationLaws {
             let baseL = face.elem_l * dp * nq;
             let baseR = face.elem_r * dp * nq;
             for q in 0..face.qp_weights.len() {
-                // Interpolate states
                 uL.fill(0.0);
                 uR.fill(0.0);
                 for eq in 0..nq {
@@ -510,22 +640,18 @@ impl DgHyperbolicConservationLaws {
                         uR[eq] += face.basis_r[q][i] * u[baseR + i * nq + eq];
                     }
                 }
-                // Update max char speed
                 let cL = self.flux.max_speed(&uL, &face.normal);
                 let cR = self.flux.max_speed(&uR, &face.normal);
                 let c = cL.max(cR);
-                if c > self.max_char_speed.get() {
-                    self.max_char_speed.set(c);
-                }
-                // Numerical flux: Rusanov (local Lax-Friedrichs)
+                if c > self.max_char_speed.get() { self.max_char_speed.set(c); }
                 let f_hat = self.flux.numerical_flux(&uL, &uR, &face.normal);
                 let w = face.qp_weights[q];
-                // Add to z: +1 for L (outward normal), -1 for R
+                // Form 2: face = -ĝ·[[v]] = -ĝ·v_L + ĝ·v_R
                 for eq in 0..nq {
                     let fw = w * f_hat[eq];
                     for i in 0..dp {
-                        self.z[baseL + i * nq + eq] += fw * face.basis_l[q][i];
-                        self.z[baseR + i * nq + eq] -= fw * face.basis_r[q][i];
+                        z[baseL + i * nq + eq] -= fw * face.basis_l[q][i];
+                        z[baseR + i * nq + eq] += fw * face.basis_r[q][i];
                     }
                 }
             }
@@ -542,29 +668,23 @@ impl DgHyperbolicConservationLaws {
                         uL[eq] += face.basis[q][i] * u[base + i * nq + eq];
                     }
                 }
-                // Mirror state for reflecting wall:
-                // Reverse normal component of momentum, keep density and energy
                 let nx = face.normal[0] / face.length;
                 let ny = face.normal[1] / face.length;
-                let vn = uL[1] * nx + uL[2] * ny; // normal momentum magnitude
-                u_mirror[0] = uL[0]; // density unchanged
-                u_mirror[1] = uL[1] - 2.0 * vn * nx; // reverse normal component
+                let vn = uL[1] * nx + uL[2] * ny;
+                u_mirror[0] = uL[0];
+                u_mirror[1] = uL[1] - 2.0 * vn * nx;
                 u_mirror[2] = uL[2] - 2.0 * vn * ny;
-                u_mirror[3] = uL[3]; // energy unchanged
-
-                let c = self
-                    .flux
-                    .max_speed(&uL, &face.normal)
+                u_mirror[3] = uL[3];
+                let c = self.flux.max_speed(&uL, &face.normal)
                     .max(self.flux.max_speed(&u_mirror, &face.normal));
-                if c > self.max_char_speed.get() {
-                    self.max_char_speed.set(c);
-                }
+                if c > self.max_char_speed.get() { self.max_char_speed.set(c); }
                 let f_hat = self.flux.numerical_flux(&uL, &u_mirror, &face.normal);
                 let w = face.qp_weights[q];
+                // Form 2: boundary face = -ĝ·v (only L side, no R element)
                 for eq in 0..nq {
                     let fw = w * f_hat[eq];
                     for i in 0..dp {
-                        self.z[base + i * nq + eq] += fw * face.basis[q][i];
+                        z[base + i * nq + eq] -= fw * face.basis[q][i];
                     }
                 }
             }
@@ -579,31 +699,25 @@ impl DgHyperbolicConservationLaws {
                 // f_all[(j * dim + d) * nq + eq] = F_d(u_j)[eq]
                 let mut f_all = vec![0.0; dp * dim * nq];
                 for j in 0..dp {
-                    for eq in 0..nq {
-                        state[eq] = u[base + j * nq + eq];
-                    }
+                    for eq in 0..nq { state[eq] = u[base + j * nq + eq]; }
                     self.flux.compute_flux(&state, &[0.0, 0.0], &mut flux_qp);
-                    // flux_qp layout: [F_x(ρ), F_y(ρ), F_x(ρu), F_y(ρu), ...]
-                    // = flux_qp[eq * dim + d]
                     for eq in 0..nq {
                         for d in 0..dim {
                             f_all[(j * dim + d) * nq + eq] = flux_qp[eq * dim + d];
                         }
                     }
                 }
-                // Matrix-vector: z_e(:,eq) += weakdiv[e] * f_col
-                let wd = &self.weakdiv[e]; // dp × (dp*dim)
+                let wd = &self.weakdiv[e];
                 for eq in 0..nq {
-                    // Build f_col: length dp*dim, f_col[j*dim+d] = F_d(u_j)[eq]
                     let mut f_col = na::DVector::<f64>::zeros(dp * dim);
                     for j in 0..dp {
                         for d in 0..dim {
                             f_col[j * dim + d] = f_all[(j * dim + d) * nq + eq];
                         }
                     }
-                    let zcol = wd * f_col; // dp × 1
+                    let zcol = wd * f_col;
                     for i in 0..dp {
-                        self.z[base + i * nq + eq] += zcol[i];
+                        z[base + i * nq + eq] += zcol[i];
                     }
                 }
             }
@@ -612,10 +726,12 @@ impl DgHyperbolicConservationLaws {
         // 5. Apply inverse mass matrix
         for e in 0..self.n_elems {
             let base = e * dp * nq;
-            let inv = &self.invmass[e]; // dp × dp
+            let inv = &self.invmass[e];
             for eq in 0..nq {
-                let zcol =
-                    na::DVector::<f64>::from_fn(dp, |i| self.z[base + i * nq + eq]);
+                let mut zcol = na::DVector::<f64>::zeros(dp);
+                for i in 0..dp {
+                    zcol[i] = z[base + i * nq + eq];
+                }
                 let ycol = inv * zcol;
                 for i in 0..dp {
                     dudt[base + i * nq + eq] = ycol[i];
