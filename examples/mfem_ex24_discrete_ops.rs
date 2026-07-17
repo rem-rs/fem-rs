@@ -494,93 +494,44 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
         qo,
     );
 
-    // (a) Compute div(v_h) projected onto L² via element-by-element solve
-    // For DG spaces, each element's mass matrix is independent, so we can
-    // solve locally:  f|_e = M_e^{-1} · D_e · v_e
-    let dim = 2;
+    // (a) Compute div(v_h) projected onto L² via vertex-wise evaluation
+    // For each element, evaluate divergence at the P1 nodes (vertices),
+    // then interpolate linearly over the element.
     let n_elem = mesh.n_elements();
     let mut f_sol = vec![0.0; l2.n_dofs()];
-    let ref_r = fem_assembly::mixed::ref_elem_vol(
-        mesh.element_type(0), l2.order()).expect("L2 ref elem");
-    let n_r = ref_r.n_dofs();
-    let ref_c = fem_assembly::mixed::ref_elem_vec(
-        mesh.element_type(0), rt.order(), fem_space::SpaceType::HDiv)
-        .expect("HDiv ref elem");
-    let n_c = ref_c.n_dofs();
-    let quad = ref_c.quadrature(qo);
+    let div_gradp = |x: &[f64]| -2.0 * x[0].sin() * x[1].sin();
 
     for e in 0..n_elem as u32 {
         let et = mesh.element_type(e);
-        let ref_r_e = fem_assembly::mixed::ref_elem_vol(et, l2.order()).expect("L2 ref elem");
         let ref_c_e = fem_assembly::mixed::ref_elem_vec(et, rt.order(), fem_space::SpaceType::HDiv)
             .expect("HDiv ref elem");
-        let n_ld2 = ref_r_e.n_dofs();
         let n_ldv = ref_c_e.n_dofs();
         let nodes = mesh.element_nodes(e);
         let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
         let signs = rt.element_signs(e);
-        let dofs_r: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
         let dofs_c: Vec<usize> = rt.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let dofs_r: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
 
-        let mut me = vec![0.0_f64; n_ld2 * n_ldv];  // D_elem (L2 rows × HDiv cols)
-        let mut mm = vec![0.0_f64; n_ld2 * n_ld2];  // M_elem (L2 × L2)
-        let mut phi_r = vec![0.0_f64; n_ld2];
+        // Get the 3 vertices of this triangle (P1 nodes are at vertices)
+        let n_verts = nodes.len().min(3);
         let mut div_c = vec![0.0_f64; n_ldv];
-        let mut div_s = vec![0.0_f64; n_ldv];
-
-        for (qi, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[qi] * tr.det_j().abs();
+        // For each vertex, compute div(v_h)
+        for vi in 0..n_verts {
+            // Vertex in reference coordinates for a standard triangle
+            let xi = match vi {
+                0 => [0.0, 0.0],  // vertex 0: (0,0)
+                1 => [1.0, 0.0],  // vertex 1: (1,0)
+                2 => [0.0, 1.0],  // vertex 2: (0,1)
+                _ => unreachable!(),
+            };
+            ref_c_e.eval_div(&xi, &mut div_c);
             let det_j = tr.det_j();
-            ref_r_e.eval_basis(xi, &mut phi_r);
-            ref_c_e.eval_div(xi, &mut div_c);
-
-            // Apply signs and Piola transform
-            for i in 0..n_ldv {
-                let s = if i < signs.len() { signs[i] } else { 1.0 };
-                div_s[i] = s * div_c[i] / det_j;
-            }
-
-            // Mass matrix: M += w · φ_i · φ_j
-            for i in 0..n_ld2 {
-                for j in 0..n_ld2 {
-                    mm[i * n_ld2 + j] += w * phi_r[i] * phi_r[j];
-                }
-            }
-            // Mixed matrix: D += w · φ_i · div_s[j]
-            for i in 0..n_ld2 {
-                for j in 0..n_ldv {
-                    me[i * n_ldv + j] += w * phi_r[i] * div_s[j];
-                }
-            }
-        }
-
-        // Compute f_elem = M_elem^{-1} · D_elem · v_elem
-        let mut rhs_loc = vec![0.0_f64; n_ld2];
-        for i in 0..n_ld2 {
+            let mut div_val = 0.0;
             for j in 0..n_ldv {
-                rhs_loc[i] += me[i * n_ldv + j] * v[dofs_c[j]];
+                let s = if j < signs.len() { signs[j] } else { 1.0 };
+                div_val += s * div_c[j] / det_j * v[dofs_c[j]];
             }
-        }
-
-        // Solve 3×3 system via Gaussian elimination
-        // (small enough for direct solve)
-        if n_ld2 == 1 {
-            f_sol[dofs_r[0]] = rhs_loc[0] / mm[0];
-        } else {
-            // Direct solve using nalgebra
-            let m_mat = nalgebra::DMatrix::from_row_slice(n_ld2, n_ld2, &mm);
-            let rhs_vec = nalgebra::DVector::from_vec(rhs_loc);
-            match m_mat.try_inverse() {
-                Some(inv) => {
-                    let f_loc = &inv * rhs_vec;
-                    for i in 0..n_ld2 {
-                        f_sol[dofs_r[i]] = f_loc[i];
-                    }
-                }
-                None => {
-                    eprintln!("Warning: singular mass matrix on element {e}");
-                }
-            }
+            f_sol[dofs_r[vi]] = div_val;
         }
     }
 
@@ -591,6 +542,12 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
         dlo.spmv(&v, &mut f_interp);
     }
 
+    // Debug: check f_sol stats
+    let max_f = f_sol.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let min_f = f_sol.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let mean_f = f_sol.iter().sum::<f64>() / f_sol.len() as f64;
+    println!("   f_sol: min={:.6e} max={:.6e} mean={:.6e}", min_f, max_f, mean_f);
+
     // (c) Exact L² projection of div(grad p) into L²
     let mass = fem_assembly::Assembler::assemble_bilinear(
         &l2, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], qo);
@@ -600,6 +557,10 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
     let mut f_ex = vec![0.0; l2.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
     solve_pcg_jacobi(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
+    let max_ex = f_ex.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let min_ex = f_ex.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let mean_ex = f_ex.iter().sum::<f64>() / f_ex.len() as f64;
+    println!("   f_ex:   min={:.6e} max={:.6e} mean={:.6e}", min_ex, max_ex, mean_ex);
     solve_pcg_jacobi(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
 
     // Errors (higher quadrature for accuracy)
