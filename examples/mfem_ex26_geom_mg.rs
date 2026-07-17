@@ -3,23 +3,12 @@
 //! Solves the Poisson problem `−Δu = 1` with homogeneous Dirichlet BCs using
 //! a geometric multigrid preconditioner.
 //!
-//! Demonstrates a hierarchy of H¹ discretisation spaces: P1 on the (auto-refined)
-//! coarse mesh, `gr` uniform geometric refinement levels, then `or` order
-//! refinements (orders 2, 4, …, 2^or) on the finest mesh. All levels use
-//! Chebyshev(2) smoothing with a CG solver on the coarsest level, and the
-//! multigrid V(1,1)-cycle preconditioners an outer PCG — exactly as MFEM's
-//! `DiffusionMultigrid` in `examples/ex26.cpp`.
-//!
 //! ## Usage
 //! ```text
 //! cargo run --example mfem_ex26_geom_mg
 //! cargo run --example mfem_ex26_geom_mg -- -m data/star.mesh
-//! cargo run --example mfem_ex26_geom_mg -- -m data/fichera.mesh  # (2D meshes only)
+//! cargo run --example mfem_ex26_geom_mg -- -m data/fichera.mesh
 //! ```
-//!
-//! ## Output
-//! Prints DOF count, linear system size, PCG iteration history and average
-//! reduction factor (same format as MFEM). Writes `refined.mesh` and `sol.gf`.
 
 use std::fs::File;
 use std::io::Write;
@@ -37,19 +26,15 @@ use fem_space::{
 };
 
 fn main() {
-    // 1. Parse command-line options.
     let args = parse_args();
+    let dim = 2;
 
-    // 2. Device setup — skipped (no Rust equivalent of MFEM's Device class).
-
-    // 3. Read the mesh from the given mesh file.
     let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
         Mesh::<2>::unit_square_tri(args.n)
     };
-    let dim = 2;
 
     println!("Options used:");
     println!("   --mesh {}", args.mesh.as_deref().unwrap_or("built-in"));
@@ -60,9 +45,7 @@ fn main() {
     println!("Device configuration: cpu");
     println!("Memory configuration: host-std");
 
-    // 4. Uniform refinement: largest level count giving ≤ 5000 elements
-    //    (matching the C++ code — the comment in ex26.cpp says 50,000, but
-    //    the formula uses 5000).
+    // 4. Uniform refinement onto coarse mesh.
     let coarse_mesh = {
         let ne = mesh.n_elements();
         let ref_levels = if ne > 0 {
@@ -73,9 +56,7 @@ fn main() {
         m
     };
 
-    // 5. Finite element space hierarchy: start with P1 on the coarse mesh,
-    //    add `gr` geometrically refined P1 levels, then `or` order-refined
-    //    levels (order 2^k) on the finest mesh — as in ex26.cpp step 5.
+    // 5. FE space hierarchy.
     let mut meshes = vec![coarse_mesh];
     for _ in 0..args.geometric_refs {
         let fine = fem_mesh::refine_uniform(meshes.last().unwrap());
@@ -94,24 +75,19 @@ fn main() {
 
     println!("Number of finite element unknowns: {}", spaces.last().unwrap().n_dofs());
 
-    // 6. RHS linear form (1, φ_i) on the finest space.
+    // 6. RHS.
     let fine_space = spaces.last().unwrap();
     let n_dofs = fine_space.n_dofs();
     let mut rhs = Assembler::assemble_linear(fine_space, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);
 
-    // 7. Solution vector, initialised to zero (satisfies the homogeneous BCs).
+    // 7. Solution vector.
     let mut x = vec![0.0; n_dofs];
 
-    // 8. Multigrid operator: per-level stiffness matrices with symmetric
-    //    essential-BC elimination (ess_bdr = all boundary attributes), plus
-    //    nodal prolongation operators between consecutive levels.
+    // 8. Build MG hierarchy: per-level matrices with symmetric BC elimination.
     let boundary_tags: Vec<i32> = fine_space.mesh().unique_boundary_tags();
-    {
-        // Zero the RHS at essential DOFs (homogeneous Dirichlet, cf.
-        // MFEM Multigrid::FormFineLinearSystem).
-        let bc_fine = boundary_dofs(fine_space.mesh(), fine_space.dof_manager(), &boundary_tags);
-        for &d in &bc_fine { rhs[d as usize] = 0.0; }
-    }
+    // Zero RHS at BC DOFs (matching MFEM Multigrid::FormFineLinearSystem).
+    let bc_fine = boundary_dofs(fine_space.mesh(), fine_space.dof_manager(), &boundary_tags);
+    for &d in &bc_fine { rhs[d as usize] = 0.0; }
 
     let mut levels: Vec<GeometricMgLevel> = Vec::new();
     let mut prolong: Vec<fem_linalg::CsrMatrix<f64>> = Vec::new();
@@ -125,22 +101,18 @@ fn main() {
         levels.push(GeometricMgLevel { mat, bc_dofs: bc });
     }
     for i in 0..n_spaces - 1 {
-        // spaces[i] is coarser, spaces[i+1] is finer.
         prolong.push(build_h1_prolongation_matrix(
             spaces[i].mesh(), spaces[i].dof_manager(),
             spaces[i + 1].mesh(), spaces[i + 1].dof_manager(),
         ));
     }
 
-    // GeometricMgHierarchy expects levels[0] = finest, prolong[l]: level l+1 → l.
     levels.reverse();
     prolong.reverse();
     let hierarchy = GeometricMgHierarchy::new(levels, prolong);
     println!("Size of linear system: {}", hierarchy.finest_matrix().nrows);
 
-    // 9. Solve A X = B with PCG preconditioned by one V(1,1)-cycle
-    //    (Chebyshev(2) smoothing, CG on the coarsest level with rtol 1e-2,
-    //    max 200 iterations — matching DiffusionMultigrid in ex26.cpp).
+    // 9. Solve with PCG + MG V(1,1)-cycle.
     let mg_config = GeometricMgConfig {
         pre_sweeps: 1, post_sweeps: 1,
         smoother: MgSmootherType::Chebyshev(2),
@@ -151,15 +123,12 @@ fn main() {
     };
     let mg = GeometricMgPrecond::new(mg_config, &hierarchy);
     let precond = GeometricMgAsPrecond { mg: &mg, hierarchy: &hierarchy };
-    // MFEM: PCG(*A, M, B, X, 1, 2000, 1e-12, 0.0) — stopping when
-    // (B r, r) ≤ 1e-12 · (B r₀, r₀).
+
     if let Err(e) = solve_pcg(hierarchy.finest_matrix(), &rhs, &mut x, &precond, 1e-12, 2000, true) {
         eprintln!("PCG: No convergence! ({e})");
     }
 
-    // 10. x already holds the finest-level grid function.
-
-    // 11. Save the refined mesh and the solution.
+    // 10. Save.
     {
         let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
         write_mfem(&mut mesh_f, fine_space.mesh(), None).expect("mesh write failed");
@@ -168,8 +137,6 @@ fn main() {
             writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
         }
     }
-
-    // 12. GLVis visualisation — not available in this port (-no-vis).
 }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────

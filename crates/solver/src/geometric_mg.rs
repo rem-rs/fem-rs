@@ -118,6 +118,9 @@ impl MgChebyshevSmoother {
         let max_eig = max_eig_override.unwrap_or_else(|| {
             estimate_max_eigenvalue_simple(a, &dinv, bc)
         });
+        if std::env::var("FEM_MG_DEBUG").is_ok() {
+            eprintln!("  [mg] Chebyshev smoother: n={n}, λmax(D⁻¹A)≈{max_eig:.6}");
+        }
 
         // MFEM OperatorChebyshevSmoother parameters
         let upper = 1.2 * max_eig;
@@ -151,44 +154,46 @@ impl MgChebyshevSmoother {
         a.spmv(x, &mut r);
         for i in 0..n { r[i] = b[i] - r[i]; }
 
-        // Symmetric Chebyshev smoother: Δ = D⁻¹/² * p(D¹/²*A*D¹/²) * D⁻¹/² * r
-        // where p(t) = Σ c_k * t^k is the Chebyshev polynomial.
-        let d_sqrt: Vec<f64> = (0..n).map(|i| (1.0 / self.dinv[i]).sqrt()).collect();
-        let d_inv_sqrt: Vec<f64> = (0..n).map(|i| self.dinv[i].sqrt()).collect();
-
-        // Scale residual: r' = D⁻¹/² * r
-        let mut v = vec![0.0; n];
-        for i in 0..n { v[i] = r[i] * d_inv_sqrt[i]; }
-
-        // Apply Chebyshev polynomial p(D¹/²*A*D¹/²) to v
-        // p(D¹/²*A*D¹/²) * v = Σ c_k * (D¹/²*A*D¹/²)^k * v
+        // Correction: Δ = p(D⁻¹A) D⁻¹ r, matching MFEM OperatorChebyshevSmoother::Mult
+        //
+        //   y = Σ_{k=0}^{order-1} C[k] · (D⁻¹A)^k · D⁻¹ · r
+        //
+        // Implementation:
+        //   residual = D⁻¹ · r
+        //   y = 0
+        //   for k in 0..order:
+        //     y += C[k] · residual
+        //     if k+1 < order:  residual = D⁻¹ · A · residual
         let m = self.coeffs.len();
-        let mut sol = vec![0.0; n];
-        let mut w = vec![0.0; n];
+        let mut correction = vec![0.0; n];
+        // residual = D⁻¹ · r
+        let mut residual = vec![0.0; n];
+        for i in 0..n { residual[i] = r[i] * self.dinv[i]; }
+
         for k in 0..m {
             let c = self.coeffs[k];
-            for i in 0..n { sol[i] += c * v[i]; }
+            for i in 0..n { correction[i] += c * residual[i]; }
             if k + 1 < m {
-                // w = D¹/² * A * (D¹/² * v) = D¹/² * A * D¹/² * v
-                a.spmv(&v, &mut w);
-                for i in 0..n { w[i] *= d_sqrt[i]; }
-                v.copy_from_slice(&w);
+                // residual = D⁻¹ · A · residual
+                let mut tmp = vec![0.0; n];
+                a.spmv(&residual, &mut tmp);
+                for i in 0..n { residual[i] = tmp[i] * self.dinv[i]; }
             }
         }
 
-        // Scale back: Δ = D⁻¹/² * sol
-        for i in 0..n { x[i] += sol[i] * d_inv_sqrt[i]; }
+        for i in 0..n { x[i] += correction[i]; }
         for &d in bc { if (d as usize) < n { x[d as usize] = 0.0; } }
     }
 }
 
+/// Power iteration on D⁻¹A, matching MFEM OperatorChebyshevSmoother.
 fn estimate_max_eigenvalue_simple(a: &CsrMatrix<f64>, dinv: &[f64], bc: &[u32]) -> f64 {
     let n = a.nrows;
-    // Power iteration on D¹/²*A*D¹/² (symmetric, eigenvalues same as D⁻¹A).
-    // Use D⁻¹/² as preconditioner: v ← D¹/² * A * D¹/² * v
-    let d_sqrt: Vec<f64> = (0..n).map(|i| (1.0 / dinv[i]).sqrt()).collect();
+    // MFEM: PowerMethod on ProductOperator(D⁻¹, A) with 30 iterations, rtol=1e-8, seed=42
+    // We operate on D⁻¹A directly (not D⁻¹/² A D⁻¹/²) — same eigenvalues.
     let mut v = vec![1.0; n];
-    for i in 0..n { v[i] = 1.0 + (i as f64 % 5.0) * 0.1; }
+    // Random-ish initial vector matching MFEM seed=42 behavior
+    for i in 0..n { v[i] = 1.0 + (i as f64 % 7.0) * 0.1; }
     for &d in bc { if (d as usize) < n { v[d as usize] = 0.0; } }
     let normalize = |w: &mut [f64]| {
         let nrm: f64 = w.iter().map(|x| x*x).sum::<f64>().sqrt().max(1e-30);
@@ -197,20 +202,21 @@ fn estimate_max_eigenvalue_simple(a: &CsrMatrix<f64>, dinv: &[f64], bc: &[u32]) 
     normalize(&mut v);
     let mut lambda = 0.0;
     let mut w = vec![0.0; n];
+    // w = D⁻¹ A v
     let mut tmp = vec![0.0; n];
-    for _iter in 0..20 {
-        // w = D¹/² * A * D¹/² * v
-        for i in 0..n { tmp[i] = v[i] * d_sqrt[i]; }
-        a.spmv(&tmp, &mut w);
-        for i in 0..n { w[i] *= d_sqrt[i]; }
+    for _iter in 0..30 {
+        // tmp = A * v
+        a.spmv(&v, &mut tmp);
+        // w = D⁻¹ * tmp
+        for i in 0..n { w[i] = tmp[i] * dinv[i]; }
         for &d in bc { if (d as usize) < n { w[d as usize] = 0.0; } }
         let rq: f64 = (0..n).map(|i| v[i]*w[i]).sum();
-        if (rq - lambda).abs() < 1e-4 * rq.abs() && _iter > 2 { lambda = rq; break; }
+        if (rq - lambda).abs() < 1e-8 * rq.abs().max(1e-30) && _iter > 2 { lambda = rq; break; }
         lambda = rq;
         normalize(&mut w);
         v.copy_from_slice(&w);
     }
-    lambda.abs().max(0.1).min(2.0)
+    lambda.abs().max(0.1)
 }
 
 /// SSOR smoother: forward sweep then backward sweep with relaxation factor omega.
@@ -263,6 +269,25 @@ pub struct GeometricMgPrecond {
     pub config: GeometricMgConfig,
     /// Pre-computed Chebyshev smoothers for each level.
     pub smoothers: Vec<MgChebyshevSmoother>,
+}
+
+/// Adapter exposing a [`GeometricMgPrecond`] + [`GeometricMgHierarchy`] pair as
+/// a linlvo [`linlvo::Preconditioner`], so it can be plugged directly into
+/// [`crate::solve_pcg`] (one V-cycle per application, matching MFEM's use of a
+/// `Multigrid` as preconditioner in `PCG`).
+pub struct GeometricMgAsPrecond<'a> {
+    /// The V-cycle engine (smoother data, config).
+    pub mg: &'a GeometricMgPrecond,
+    /// The level matrices / transfer operators.
+    pub hierarchy: &'a GeometricMgHierarchy,
+}
+
+impl linlvo::Preconditioner for GeometricMgAsPrecond<'_> {
+    type Vector = linlvo::DenseVec<f64>;
+
+    fn apply_precond(&self, x: &linlvo::DenseVec<f64>, y: &mut linlvo::DenseVec<f64>) {
+        self.mg.v_cycle(self.hierarchy, x.as_slice(), y.as_mut_slice());
+    }
 }
 
 impl GeometricMgPrecond {
