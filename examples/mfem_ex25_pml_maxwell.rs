@@ -464,10 +464,8 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         }),
     );
 
-    // Assemble → ComplexSystem → flat 2×2 block
+    // Assemble → SesquilinearForm → flat 2×2 block
     let cs = a.assemble();
-    let k_re = &cs.k_re;
-    let k_im = &cs.k_im;
     let a_mat = cs.to_flat_csr_with_conv(Convention::Hermitian);
 
     // ── RHS ──────────────────────────────────────────────────────────────
@@ -500,20 +498,6 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
             rhs_im[d as usize] = bc_im[d as usize];
         }
     }
-
-    // ── Build 2×2 block system (matching ComplexSystem::to_flat_csr) ────
-    let mut coo = CooMatrix::new(2*n, 2*n);
-    for i in 0..n {
-        for p in k_re.row_ptr[i]..k_re.row_ptr[i+1] {
-            let j = k_re.col_idx[p] as usize; let v = k_re.values[p];
-            if v != 0.0 { coo.add(i, j, v); coo.add(n+i, n+j, v); }
-        }
-        for p in k_im.row_ptr[i]..k_im.row_ptr[i+1] {
-            let j = k_im.col_idx[p] as usize; let v = k_im.values[p];
-            if v != 0.0 { coo.add(i, n+j, -v); coo.add(n+i, j, v); }
-        }
-    }
-    let a = coo.into_csr();
 
     // ── Preconditioner (1:1 with C++) ────────────────────────────────────
     // Non-PML: μ⁻¹·curlcurl + ω²ε·mass (with DIAG_ONE for BCs)

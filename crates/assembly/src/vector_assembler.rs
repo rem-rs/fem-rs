@@ -444,7 +444,7 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
         Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
     };
 
-    let mut f_elem = vec![0.0_f64; n_ldofs];
+    let mut f_elem = vec![0.0_f64; n_ldofs * dim];
     let mut ref_phi = vec![0.0; n_ldofs * dim];
     let mut ref_curl = vec![0.0; n_ldofs * curl_dim];
     let mut ref_div = vec![0.0; n_ldofs];
