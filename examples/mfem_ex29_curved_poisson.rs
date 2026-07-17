@@ -285,7 +285,7 @@ fn surface_jacobian(mesh: &Mesh<3>, e: u32, _et: ElementType, xi: &[f64])
 
     let geom_order = mesh.geom_order();
     let (nodes, n_dofs, quad): (&[NodeId], usize, Box<dyn ReferenceElement>) = if geom_order > 1 {
-        let n = mesh.geom_elem_nodes(e);
+        let n = mesh.geometry_nodes(e);
         let q: Box<dyn ReferenceElement> = Box::new(QuadQk::new(geom_order as usize));
         let len = n.len();
         (n, len, q)
@@ -304,8 +304,12 @@ fn surface_jacobian(mesh: &Mesh<3>, e: u32, _et: ElementType, xi: &[f64])
     // Helper: get node coords from geometry (if available) or regular coords
     use fem_core::NodeId;
     let get_coords = |gid: NodeId| -> [f64; 3] {
-        if geom_order > 1 { mesh.geom_node_coords(gid) }
-        else { mesh.coords_of(gid) }
+        if geom_order > 1 {
+            let c = mesh.geom_coords_of(gid);
+            [c[0], c[1], c[2]]
+        } else {
+            mesh.coords_of(gid)
+        }
     };
 
     // Physical position
