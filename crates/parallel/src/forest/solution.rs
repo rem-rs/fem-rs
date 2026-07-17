@@ -13,7 +13,6 @@
 //! The solution is stored as a flat `Vec<f64>` indexed by node ID in the
 //! same order as the forest produces them (Morton-order traversal).
 
-use crate::forest::quadrant::{MortonKey, Quadrant};
 use crate::forest::convert::{TreeBoundingBox, build_mesh_data};
 use crate::forest::forest::Forest;
 use fem_mesh::MeshTopology;
@@ -51,6 +50,7 @@ impl<const D: usize> PosIndex<D> {
         })
     }
 
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         self.positions.len()
     }
@@ -317,6 +317,7 @@ where
 mod tests {
     use super::*;
     use crate::backend::native::SerialBackend;
+    use crate::forest::quadrant::{MortonKey, Quadrant};
     use crate::Comm;
 
     fn serial_comm() -> Comm {

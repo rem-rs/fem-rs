@@ -179,7 +179,7 @@ impl Hash for MortonKey {
 
 /// Interleave bits of x and y for a 2-D Morton key.
 fn interleave_2d(x: u32, y: u32) -> u64 {
-    fn spread32(mut v: u32) -> u64 {
+    fn spread32(v: u32) -> u64 {
         let mut r = v as u64;
         r = (r | (r << 16)) & 0x0000FFFF0000FFFF;
         r = (r | (r << 8))  & 0x00FF00FF00FF00FF;
@@ -207,7 +207,7 @@ fn deinterleave_2d(code: u64) -> (u32, u32) {
 
 /// Interleave bits for a 3-D Morton key.
 fn interleave_3d(x: u32, y: u32, z: u32) -> u64 {
-    fn spread32_3d(mut v: u32) -> u64 {
+    fn spread32_3d(v: u32) -> u64 {
         let mut r = v as u64;
         r = (r | (r << 32)) & 0x1F00000000FFFF;
         r = (r | (r << 16)) & 0x1F0000FF0000FF;

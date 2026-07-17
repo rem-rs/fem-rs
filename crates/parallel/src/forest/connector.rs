@@ -11,9 +11,7 @@
 //! The [`Connector<D>`] type tracks the set of ghost quadrants for each
 //! neighbouring rank.
 
-use std::collections::{HashMap, HashSet};
-
-use fem_core::Rank;
+use std::collections::HashSet;
 
 use crate::forest::quadrant::{MortonKey, Quadrant, neighbour_key};
 use crate::forest::tree::Tree;

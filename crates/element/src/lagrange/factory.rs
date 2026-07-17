@@ -488,20 +488,79 @@ impl Lagrange1D {
 
     /// Evaluate values and first derivatives.
     pub(crate) fn val_d(&self, x: f64) -> (Vec<f64>, Vec<f64>) {
+        let n = self.nodes.len();
+        // Exact evaluation AT a node: the generic barycentric derivative
+        // formula hits a removable 0·∞ singularity there (l_i(x_k)=0 times
+        // Σ1/(x−x_j)=∞), so use the closed forms
+        //   l_k'(x_k) = Σ_{j≠k} 1/(x_k−x_j),
+        //   l_i'(x_k) = (w_i/w_k)/(x_k−x_i)   (i ≠ k).
+        if let Some(k) = self.nodes.iter().position(|&xj| (x - xj).abs() < 1e-14) {
+            let mut vals = vec![0.0_f64; n];
+            vals[k] = 1.0;
+            let mut ders = vec![0.0_f64; n];
+            for i in 0..n {
+                ders[i] = if i == k {
+                    self.nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|&(j, _)| j != k)
+                        .map(|(_, &xj)| 1.0 / (x - xj))
+                        .sum()
+                } else {
+                    self.bary_w[i] / self.bary_w[k] / (x - self.nodes[i])
+                };
+            }
+            return (vals, ders);
+        }
         let vals = self.val(x);
         let n = self.nodes.len();
         let mut ders = vec![0.0_f64; n];
         let mut sum_inv = 0.0_f64;
         for &xj in &self.nodes { sum_inv += 1.0 / (x - xj); }
         for i in 0..n {
-            let d = x - self.nodes[i];
-            ders[i] = if d.abs() > 1e-30 { vals[i] * (sum_inv - 1.0 / d) } else { 0.0 };
+            ders[i] = vals[i] * (sum_inv - 1.0 / (x - self.nodes[i]));
         }
         (vals, ders)
     }
 
     /// Evaluate values, first derivatives, and second derivatives.
     pub(crate) fn val_d_h(&self, x: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        // Exact evaluation AT a node (same singularity as in `val_d`), with
+        //   l_k''(x_k) = (Σ_{j≠k} 1/(x_k−x_j))² − Σ_{j≠k} 1/(x_k−x_j)²,
+        //   l_i''(x_k) = 2·l_i'(x_k)·Σ_{j∉{i,k}} 1/(x_k−x_j)   (i ≠ k).
+        if let Some(k) = self.nodes.iter().position(|&xj| (x - xj).abs() < 1e-14) {
+            let n = self.nodes.len();
+            let mut vals = vec![0.0_f64; n];
+            vals[k] = 1.0;
+            let mut ders = vec![0.0_f64; n];
+            let mut hess = vec![0.0_f64; n];
+            for i in 0..n {
+                if i == k {
+                    let mut s = 0.0_f64;
+                    let mut t = 0.0_f64;
+                    for (j, &xj) in self.nodes.iter().enumerate() {
+                        if j != k {
+                            s += 1.0 / (x - xj);
+                            t += 1.0 / ((x - xj) * (x - xj));
+                        }
+                    }
+                    ders[i] = s;
+                    hess[i] = s * s - t;
+                } else {
+                    let li = self.bary_w[i] / self.bary_w[k] / (x - self.nodes[i]);
+                    let r: f64 = self
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|&(j, _)| j != i && j != k)
+                        .map(|(_, &xj)| 1.0 / (x - xj))
+                        .sum();
+                    ders[i] = li;
+                    hess[i] = 2.0 * li * r;
+                }
+            }
+            return (vals, ders, hess);
+        }
         let vals = self.val(x);
         let n = self.nodes.len();
         let mut ders = vec![0.0_f64; n];
@@ -513,11 +572,8 @@ impl Lagrange1D {
         }
         for i in 0..n {
             let inv_i = 1.0 / (x - self.nodes[i]);
-            let si = if (x - self.nodes[i]).abs() > 1e-30 { s - inv_i } else { 0.0 };
-            ders[i] = vals[i] * si;
-            hess[i] = if (x - self.nodes[i]).abs() > 1e-30 {
-                vals[i] * (si * si - t + inv_i * inv_i)
-            } else { 0.0 };
+            ders[i] = vals[i] * (s - inv_i);
+            hess[i] = vals[i] * ((s - inv_i) * (s - inv_i) - t + inv_i * inv_i);
         }
         (vals, ders, hess)
     }
@@ -1238,6 +1294,83 @@ mod tests {
                     assert!((grads[i*3+1] - fd_y).abs() < 1e-4, "p={p} ({x},{y},{z}) i={i} gy");
                     assert!((grads[i*3+2] - fd_z).abs() < 4e-4, "p={p} ({x},{y},{z}) i={i} gz");
                 }
+            }
+        }
+    }
+
+    /// Regression test: `Lagrange1D::val_d` / `val_d_h` used to return 0/NaN
+    /// when evaluated exactly at a node (removable 0·∞ singularity in the
+    /// barycentric derivative formula). Verify against closed-form values and
+    /// finite differences.
+    #[test]
+    fn lagrange1d_derivatives_at_nodes() {
+        for p in [1usize, 2, 3, 4] {
+            let lag = Lagrange1D::new(p);
+            for (k, &xk) in lag.nodes.iter().enumerate() {
+                let (vals, ders) = lag.val_d(xk);
+                let (vals2, ders2, hess) = lag.val_d_h(xk);
+                assert_eq!(vals, vals2);
+                assert_eq!(ders, ders2);
+                // Values: l_i(x_k) = δ_ik
+                for i in 0..=p {
+                    let want = if i == k { 1.0 } else { 0.0 };
+                    assert!((vals[i] - want).abs() < 1e-14, "p={p} k={k} i={i} val");
+                }
+                // Derivatives must be finite and match central FD of `val`.
+                let h = 1e-7;
+                let vp = lag.val(xk + h);
+                let vm = lag.val(xk - h);
+                for i in 0..=p {
+                    assert!(ders[i].is_finite(), "p={p} k={k} i={i} der not finite");
+                    assert!(hess[i].is_finite(), "p={p} k={k} i={i} hess not finite");
+                    let fd = (vp[i] - vm[i]) / (2.0 * h);
+                    assert!((ders[i] - fd).abs() < 1e-6,
+                        "p={p} k={k} i={i}: der={} fd={fd}", ders[i]);
+                }
+                // Partition of unity: Σ l_i' = 0, Σ l_i'' = 0.
+                assert!(ders.iter().sum::<f64>().abs() < 1e-12, "p={p} k={k} Σder");
+                assert!(hess.iter().sum::<f64>().abs() < 1e-10, "p={p} k={k} Σhess");
+            }
+        }
+        // Closed forms: p=2, nodes {-1,0,1}, at x=-1:
+        //   l_0 = x(x-1)/2 → l_0'(-1) = -3/2, l_0''(-1) = 1
+        //   l_1 = 1-x²    → l_1'(-1) = 2,    l_1''(-1) = -2
+        //   l_2 = x(x+1)/2 → l_2'(-1) = -1/2, l_2''(-1) = 1
+        let lag = Lagrange1D::new(2);
+        let (_, ders, hess) = lag.val_d_h(-1.0);
+        assert!((ders[0] + 1.5).abs() < 1e-14);
+        assert!((ders[1] - 2.0).abs() < 1e-14);
+        assert!((ders[2] + 0.5).abs() < 1e-14);
+        assert!((hess[0] - 1.0).abs() < 1e-14);
+        assert!((hess[1] + 2.0).abs() < 1e-14);
+        assert!((hess[2] - 1.0).abs() < 1e-14);
+    }
+
+    /// QuadQk/HexQk gradients and Hessians at element vertices (uses the fixed
+    /// node path through `eval_grad_basis` / `eval_hessian`).
+    #[test]
+    fn quad_hex_grad_at_vertices_finite() {
+        for p in [1usize, 2, 4] {
+            let q = QuadQk::new(p);
+            let coords = q.dof_coords();
+            let mut g = vec![0.0_f64; q.n_dofs() * 2];
+            let mut hs = vec![0.0_f64; q.n_dofs() * 4];
+            for xi in &coords {
+                q.eval_grad_basis(xi, &mut g);
+                assert!(g.iter().all(|v| v.is_finite()), "QuadQk p={p} grad at {xi:?}");
+                q.eval_hessian(xi, &mut hs);
+                assert!(hs.iter().all(|v| v.is_finite()), "QuadQk p={p} hess at {xi:?}");
+                // Σ ∇φᵢ = 0 (partition of unity)
+                let (sx, sy): (f64, f64) =
+                    (0..q.n_dofs()).map(|i| (g[i * 2], g[i * 2 + 1])).fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
+                assert!(sx.abs() < 1e-12 && sy.abs() < 1e-12, "QuadQk p={p} Σgrad at {xi:?}");
+            }
+            let hx = HexQk::new(p.min(2));
+            let coords3 = hx.dof_coords();
+            let mut g3 = vec![0.0_f64; hx.n_dofs() * 3];
+            for xi in &coords3 {
+                hx.eval_grad_basis(xi, &mut g3);
+                assert!(g3.iter().all(|v| v.is_finite()), "HexQk grad at {xi:?}");
             }
         }
     }

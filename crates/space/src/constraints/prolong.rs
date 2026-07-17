@@ -239,3 +239,320 @@ pub fn prolongate_pk_hanging<M: MeshTopology>(
 
     u_fine
 }
+
+// ─── H¹ prolongation matrix (p- and h-refinement) ────────────────────────────
+
+use fem_element::ReferenceElement;
+use fem_linalg::{CooMatrix, CsrMatrix};
+
+/// Build the nodal H¹ prolongation matrix `P` (`n_fine × n_coarse`) between two
+/// H¹ spaces: `u_fine = P · u_coarse` interpolates a coarse-space function into
+/// the fine space. Row `f` of `P` contains the coarse basis functions evaluated
+/// at fine DOF `f`'s location (Galerkin transfer, matching MFEM's
+/// `FiniteElementSpace::GetUpdateOperator` / hierarchy prolongations).
+///
+/// Two refinement modes are supported:
+///
+/// - **p-refinement** (same mesh, `fine_dm.order > coarse_dm.order`): the coarse
+///   basis is evaluated at each fine DOF's reference coordinate, element by
+///   element. Shared fine DOFs are visited only once — by the Lagrange support
+///   property (basis functions of nodes not on a shared edge/vertex vanish
+///   there), any single adjacent element yields the complete row.
+/// - **h-refinement** (`fine_mesh` is a refinement of `coarse_mesh`): each fine
+///   DOF is located in a coarse element (barycentric test for triangles, Newton
+///   inversion of the bilinear map for quads) and the coarse basis is evaluated
+///   at the inverted reference point.
+///
+/// 2-D only (Tri3 / Quad4, straight-edged elements).
+pub fn build_h1_prolongation_matrix<M: MeshTopology>(
+    coarse_mesh: &M,
+    coarse_dm: &DofManager,
+    fine_mesh: &M,
+    fine_dm: &DofManager,
+) -> CsrMatrix<f64> {
+    assert_eq!(coarse_mesh.dim(), 2, "build_h1_prolongation_matrix: only 2-D supported");
+    let mut coo = CooMatrix::<f64>::new(fine_dm.n_dofs, coarse_dm.n_dofs);
+
+    if same_mesh_geometry(coarse_mesh, fine_mesh) {
+        build_prolongation_same_mesh(coarse_mesh, coarse_dm, fine_dm, &mut coo);
+    } else {
+        build_prolongation_nested_mesh(coarse_mesh, coarse_dm, fine_dm, &mut coo);
+    }
+    coo.into_csr()
+}
+
+/// Two meshes are "the same" when they have identical element/node counts and
+/// bitwise-identical node coordinates (e.g. clones used for p-refinement).
+fn same_mesh_geometry<M: MeshTopology>(a: &M, b: &M) -> bool {
+    if a.n_elements() != b.n_elements() || a.n_nodes() != b.n_nodes() {
+        return false;
+    }
+    for n in 0..a.n_nodes() as u32 {
+        let (ca, cb) = (a.node_coords(n), b.node_coords(n));
+        if ca.len() != cb.len() || ca.iter().zip(cb).any(|(x, y)| x != y) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reference Lagrange element for a 2-D mesh element type at any order.
+fn lagrange_ref_2d(et: fem_mesh::ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    use fem_element::lagrange::{QuadQk, TriPk};
+    match et {
+        fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6 => {
+            Box::new(TriPk::new(order as usize))
+        }
+        fem_mesh::ElementType::Quad4 => Box::new(QuadQk::new(order as usize)),
+        _ => panic!("build_h1_prolongation_matrix: unsupported element type {et:?}"),
+    }
+}
+
+/// p-refinement path: both spaces live on the same mesh.
+fn build_prolongation_same_mesh<M: MeshTopology>(
+    mesh: &M,
+    coarse_dm: &DofManager,
+    fine_dm: &DofManager,
+    coo: &mut CooMatrix<f64>,
+) {
+    let mut seen = vec![false; fine_dm.n_dofs];
+    for e in 0..mesh.n_elements() as u32 {
+        let et = mesh.element_type(e);
+        let c_ref = lagrange_ref_2d(et, coarse_dm.order);
+        let f_ref = lagrange_ref_2d(et, fine_dm.order);
+        let f_coords = f_ref.dof_coords();
+        let c_dofs = coarse_dm.element_dofs(e);
+        let f_dofs = fine_dm.element_dofs(e);
+        let mut phi = vec![0.0_f64; c_ref.n_dofs()];
+        for (li, &fg) in f_dofs.iter().enumerate() {
+            if seen[fg as usize] {
+                continue;
+            }
+            seen[fg as usize] = true;
+            c_ref.eval_basis(&f_coords[li], &mut phi);
+            for (ci, &cg) in c_dofs.iter().enumerate() {
+                if phi[ci].abs() > 1e-14 {
+                    coo.add(fg as usize, cg as usize, phi[ci]);
+                }
+            }
+        }
+    }
+}
+
+/// h-refinement path: locate every fine DOF in the coarse mesh and evaluate
+/// the coarse basis at the inverted reference coordinate.
+fn build_prolongation_nested_mesh<M: MeshTopology>(
+    coarse_mesh: &M,
+    coarse_dm: &DofManager,
+    fine_dm: &DofManager,
+    coo: &mut CooMatrix<f64>,
+) {
+    for f in 0..fine_dm.n_dofs as u32 {
+        let x = fine_dm.dof_coord(f);
+        let (e, xi) = locate_point_2d(coarse_mesh, x).unwrap_or_else(|| {
+            panic!("build_h1_prolongation_matrix: fine DOF {f} at {x:?} lies outside coarse mesh")
+        });
+        let c_ref = lagrange_ref_2d(coarse_mesh.element_type(e), coarse_dm.order);
+        let mut phi = vec![0.0_f64; c_ref.n_dofs()];
+        c_ref.eval_basis(&xi, &mut phi);
+        for (ci, &cg) in coarse_dm.element_dofs(e).iter().enumerate() {
+            if phi[ci].abs() > 1e-14 {
+                coo.add(f as usize, cg as usize, phi[ci]);
+            }
+        }
+    }
+}
+
+/// Locate physical point `x` in a 2-D mesh; returns `(element, reference ξ)`.
+fn locate_point_2d<M: MeshTopology>(mesh: &M, x: &[f64]) -> Option<(u32, [f64; 2])> {
+    const BBOX_EPS: f64 = 1e-12;
+    for e in 0..mesh.n_elements() as u32 {
+        let nodes = mesh.element_nodes(e);
+        // Axis-aligned bounding-box precheck.
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        for &nd in nodes {
+            let c = mesh.node_coords(nd);
+            for k in 0..2 {
+                lo[k] = lo[k].min(c[k]);
+                hi[k] = hi[k].max(c[k]);
+            }
+        }
+        if x[0] < lo[0] - BBOX_EPS
+            || x[0] > hi[0] + BBOX_EPS
+            || x[1] < lo[1] - BBOX_EPS
+            || x[1] > hi[1] + BBOX_EPS
+        {
+            continue;
+        }
+        match mesh.element_type(e) {
+            fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6 => {
+                let c0 = mesh.node_coords(nodes[0]);
+                let c1 = mesh.node_coords(nodes[1]);
+                let c2 = mesh.node_coords(nodes[2]);
+                let det = (c1[0] - c0[0]) * (c2[1] - c0[1]) - (c2[0] - c0[0]) * (c1[1] - c0[1]);
+                if det.abs() < 1e-14 {
+                    continue;
+                }
+                let l1 = ((x[0] - c0[0]) * (c2[1] - c0[1]) - (c2[0] - c0[0]) * (x[1] - c0[1])) / det;
+                let l2 = ((c1[0] - c0[0]) * (x[1] - c0[1]) - (x[0] - c0[0]) * (c1[1] - c0[1])) / det;
+                let l0 = 1.0 - l1 - l2;
+                let eps = 1e-10;
+                if l0 >= -eps && l1 >= -eps && l2 >= -eps {
+                    return Some((e, [l1, l2]));
+                }
+            }
+            fem_mesh::ElementType::Quad4 => {
+                let pts: [[f64; 2]; 4] = [
+                    [mesh.node_coords(nodes[0])[0], mesh.node_coords(nodes[0])[1]],
+                    [mesh.node_coords(nodes[1])[0], mesh.node_coords(nodes[1])[1]],
+                    [mesh.node_coords(nodes[2])[0], mesh.node_coords(nodes[2])[1]],
+                    [mesh.node_coords(nodes[3])[0], mesh.node_coords(nodes[3])[1]],
+                ];
+                if let Some(xi) = invert_quad_bilinear(&pts, x) {
+                    return Some((e, xi));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Invert the bilinear Q1 map of a quad by Newton iteration.
+/// Returns the reference coordinate `ξ ∈ [-1,1]²` if the point is inside.
+fn invert_quad_bilinear(pts: &[[f64; 2]; 4], x: &[f64]) -> Option<[f64; 2]> {
+    let q1 = fem_element::lagrange::QuadQk::new(1);
+    let mut xi = [0.0_f64; 2];
+    let mut n = [0.0_f64; 4];
+    let mut g = [0.0_f64; 8];
+    for _ in 0..25 {
+        q1.eval_basis(&xi, &mut n);
+        q1.eval_grad_basis(&xi, &mut g);
+        let (mut xm, mut j) = ([0.0_f64; 2], [[0.0_f64; 2]; 2]);
+        for i in 0..4 {
+            xm[0] += n[i] * pts[i][0];
+            xm[1] += n[i] * pts[i][1];
+            // grads layout: g[i * dim + d] = ∂φᵢ/∂ξ_d
+            j[0][0] += g[i * 2] * pts[i][0];
+            j[0][1] += g[i * 2 + 1] * pts[i][0];
+            j[1][0] += g[i * 2] * pts[i][1];
+            j[1][1] += g[i * 2 + 1] * pts[i][1];
+        }
+        let r = [x[0] - xm[0], x[1] - xm[1]];
+        let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+        if det.abs() < 1e-30 {
+            return None;
+        }
+        let d = [
+            (j[1][1] * r[0] - j[0][1] * r[1]) / det,
+            (-j[1][0] * r[0] + j[0][0] * r[1]) / det,
+        ];
+        xi[0] += d[0];
+        xi[1] += d[1];
+        if d[0].abs() + d[1].abs() < 1e-13 {
+            break;
+        }
+    }
+    let tol = 1e-9;
+    if xi[0].abs() <= 1.0 + tol && xi[1].abs() <= 1.0 + tol {
+        Some(xi)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod prolong_matrix_tests {
+    use super::*;
+    use fem_mesh::Mesh;
+
+    /// Every row of the nodal prolongation must sum to 1 (partition of unity
+    /// of the coarse basis). Guards against double-counted shared-DOF
+    /// contributions (a previous bug summed them per adjacent element).
+    fn assert_rows_sum_to_one(p: &CsrMatrix<f64>) {
+        for row in 0..p.nrows {
+            let s: f64 = p.values[p.row_ptr[row] as usize..p.row_ptr[row + 1] as usize]
+                .iter()
+                .sum();
+            assert!((s - 1.0).abs() < 1e-12, "row {row} sums to {s}, expected 1");
+        }
+    }
+
+    /// Interpolating a linear field (exactly representable in both spaces)
+    /// must reproduce it exactly at every fine DOF.
+    fn assert_linear_field_exact(
+        fine_dm: &DofManager,
+        p: &CsrMatrix<f64>,
+        u_coarse: &[f64],
+    ) {
+        let mut u_fine = vec![0.0; p.nrows];
+        p.spmv(u_coarse, &mut u_fine);
+        for f in 0..fine_dm.n_dofs as u32 {
+            let c = fine_dm.dof_coord(f);
+            let exact = c[0] + 2.0 * c[1];
+            assert!(
+                (u_fine[f as usize] - exact).abs() < 1e-12,
+                "DOF {f}: got {}, expected {exact}",
+                u_fine[f as usize]
+            );
+        }
+    }
+
+    fn linear_field(dm: &DofManager) -> Vec<f64> {
+        (0..dm.n_dofs as u32)
+            .map(|d| {
+                let c = dm.dof_coord(d);
+                c[0] + 2.0 * c[1]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn prolongation_p_refinement_quad() {
+        let mesh = Mesh::<2>::unit_square_quad(2);
+        let c_dm = DofManager::new(&mesh, 1);
+        let f_dm = DofManager::new(&mesh, 4);
+        let p = build_h1_prolongation_matrix(&mesh, &c_dm, &mesh, &f_dm);
+        assert_eq!(p.nrows, f_dm.n_dofs);
+        assert_eq!(p.ncols, c_dm.n_dofs);
+        assert_rows_sum_to_one(&p);
+        let u_c = linear_field(&c_dm);
+        assert_linear_field_exact(&f_dm, &p, &u_c);
+    }
+
+    #[test]
+    fn prolongation_p_refinement_tri() {
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let c_dm = DofManager::new(&mesh, 1);
+        let f_dm = DofManager::new(&mesh, 3);
+        let p = build_h1_prolongation_matrix(&mesh, &c_dm, &mesh, &f_dm);
+        assert_rows_sum_to_one(&p);
+        let u_c = linear_field(&c_dm);
+        assert_linear_field_exact(&f_dm, &p, &u_c);
+    }
+
+    #[test]
+    fn prolongation_h_refinement_quad() {
+        let coarse = Mesh::<2>::unit_square_quad(2);
+        let fine = fem_mesh::refine_uniform(&coarse);
+        let c_dm = DofManager::new(&coarse, 1);
+        let f_dm = DofManager::new(&fine, 1);
+        let p = build_h1_prolongation_matrix(&coarse, &c_dm, &fine, &f_dm);
+        assert_rows_sum_to_one(&p);
+        let u_c = linear_field(&c_dm);
+        assert_linear_field_exact(&f_dm, &p, &u_c);
+    }
+
+    #[test]
+    fn prolongation_h_refinement_tri() {
+        let coarse = Mesh::<2>::unit_square_tri(2);
+        let fine = fem_mesh::refine_uniform(&coarse);
+        let c_dm = DofManager::new(&coarse, 1);
+        let f_dm = DofManager::new(&fine, 1);
+        let p = build_h1_prolongation_matrix(&coarse, &c_dm, &fine, &f_dm);
+        assert_rows_sum_to_one(&p);
+        let u_c = linear_field(&c_dm);
+        assert_linear_field_exact(&f_dm, &p, &u_c);
+    }
+}

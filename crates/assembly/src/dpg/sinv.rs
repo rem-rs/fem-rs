@@ -39,6 +39,7 @@ pub struct SinvBuilder<M: MeshTopology> {
 
 // ─── Reference element + quadrature helpers ──────────────────────────────────
 
+#[allow(dead_code)]
 fn ref_elem(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),

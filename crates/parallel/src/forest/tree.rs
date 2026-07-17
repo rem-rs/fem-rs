@@ -19,6 +19,7 @@ pub struct Tree<const D: usize> {
     /// Cumulative element counts for prefix-sum based partitioning.
     /// `cumulative[i] = sum_{j < i} n_active_quadrants_in_tree(j)`.
     /// Used only in the forest-level partitioning; may be empty.
+    #[allow(dead_code)]
     pub(super) cumulative: Vec<usize>,
 }
 
@@ -94,7 +95,7 @@ impl<const D: usize> Tree<D> {
 
         // Insert children in reverse so that the final order is correct.
         // Actually, since `splice` replaces a range, we insert at once.
-        let mut tail = self.quadrants.split_off(insert_pos);
+        let tail = self.quadrants.split_off(insert_pos);
         self.quadrants.extend(children);
         self.quadrants.extend(tail);
 
@@ -297,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_tree_from_quadrants_is_sorted() {
-        let mut qs = vec![
+        let qs = vec![
             Quadrant::<2>::new(0, 2, 1, 0, 0, 0),
             Quadrant::<2>::new(0, 2, 0, 0, 0, 0),
         ];

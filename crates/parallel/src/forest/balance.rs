@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::quadrant::{MortonKey, Quadrant, neighbour_key};
+use super::quadrant::{MortonKey, neighbour_key};
 use super::tree::Tree;
 
 /// Compute the 2:1 balance closure for a set of quadrants marked for refinement.

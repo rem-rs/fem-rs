@@ -35,6 +35,7 @@ fn cons_to_prim(q: &[f64], gamma: f64) -> (f64, f64, f64, f64) {
 }
 
 /// Convert primitive variables to conserved variables.
+#[allow(dead_code)]
 fn prim_to_cons(rho: f64, u: f64, v: f64, p: f64, gamma: f64) -> [f64; 4] {
     let e = p / (gamma - 1.0) + 0.5 * rho * (u * u + v * v);
     [rho, rho * u, rho * v, e]
@@ -135,6 +136,7 @@ impl<F: FluxFunction> FluxFunction for RusanovFlux<F> {
 // ─── InteriorFace ─────────────────────────────────────────────────────────────
 
 /// Face data for an interior face shared by two elements.
+#[allow(dead_code)]
 struct InteriorFace {
     elem_l: usize,
     elem_r: usize,
@@ -150,6 +152,7 @@ struct InteriorFace {
 // ─── BoundaryFace ─────────────────────────────────────────────────────────────
 
 /// Face data for a boundary face.
+#[allow(dead_code)]
 struct BoundaryFace {
     elem: usize,
     normal: [f64; 2],
@@ -172,6 +175,7 @@ pub struct DgHyperbolicConservationLaws {
     dim: usize,
     total_dofs: usize,
     invmass: Vec<na::DMatrix<f64>>,
+    #[allow(dead_code)]
     weakdiv: Vec<na::DMatrix<f64>>,
     ref_elem: Box<dyn ReferenceElement>,
     // Stored mesh for volume term direct quadrature

@@ -127,6 +127,7 @@ pub fn par_refine_marked_with_tree(
 // ─── DerefineTree building ──────────────────────────────────────────────────
 
 /// Canonical edge key (sorted node pair) — mirrors `fem_mesh::amr::bisect::edge_key`.
+#[allow(dead_code)]
 fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     if a < b { (a, b) } else { (b, a) }
 }
@@ -391,7 +392,7 @@ pub fn par_derefine_marked(
     // Sum votes across ranks.  A parent is derefinable iff sum == 1
     // (exactly one rank owns all its children).
     let size = comm.size();
-    let mut global_votes: Vec<i64> = if size > 1 {
+    let global_votes: Vec<i64> = if size > 1 {
         let mut gv = votes.clone();
         // allreduce_sum_i64 operates on a single value; we loop.
         // For large numbers of parents this should be replaced with a

@@ -10,7 +10,6 @@ use fem_mesh::{Mesh, MeshTopology};
 use fem_core::{ElemId, NodeId};
 
 use crate::forest::quadrant::{MortonKey, Quadrant};
-use crate::forest::tree::Tree;
 use crate::forest::forest::Forest;
 
 // ─── Bounding box per tree ───────────────────────────────────────────────────
@@ -115,6 +114,7 @@ impl<const D: usize> NodeMap<D> {
         }
     }
 
+    #[allow(dead_code)]
     fn n_nodes(&self) -> usize {
         self.next_id as usize
     }

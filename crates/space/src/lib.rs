@@ -52,7 +52,7 @@ pub use restricted_hcurl::RestrictedHCurlSpace;
 pub use hdiv::HDivSpace;
 pub use iga_fe_space::{IgaFESpace1D, IgaFESpace2D, IgaFESpace3D, IgaSinglePatchMesh1D, IgaSinglePatchMesh2D, IgaSinglePatchMesh3D, IgaMultiPatchMesh2D, IgaMultiPatchMesh3D};
 pub use vector_h1::VectorH1Space;
-pub use constraints::{apply_dirichlet, eliminate_dirichlet, expand_from_reduced, apply_hanging_constraints, apply_hanging_face_constraints, recover_hanging_values, recover_hanging_face_values, prolongate_p2_hanging, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv, identify_periodic_dof_pairs, apply_periodic};
+pub use constraints::{apply_dirichlet, eliminate_dirichlet, expand_from_reduced, apply_hanging_constraints, apply_hanging_face_constraints, recover_hanging_values, recover_hanging_face_values, prolongate_p2_hanging, build_h1_prolongation_matrix, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv, identify_periodic_dof_pairs, apply_periodic};
 pub use iga::{IgaBoundary2D, IgaBoundary3D, IgaSpace1D, IgaSpace2D, IgaSpace3D};
 pub use block_fe_space::BlockFESpace;
 pub use trace_spaces::{HCurlTraceSpace, HDivTraceSpace};

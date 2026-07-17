@@ -10,6 +10,34 @@ use fem_linalg::{fem_to_linlvo_csr, into_result, SolverConfig, SolverError, Solv
 
 use crate::macros::check_dims;
 
+/// Format a float like C `printf("%g", x)` with 6 significant digits —
+/// matches MFEM's default `std::ostream` formatting for solver iteration logs
+/// (e.g. `0.6891`, `1.72051e-05`, `0.0273569`).
+pub fn fmt_g(x: f64) -> String {
+    const P: i32 = 6;
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    if !x.is_finite() {
+        return format!("{x}");
+    }
+    // Round to P significant digits; read back the decimal exponent.
+    let s = format!("{:.*e}", (P - 1) as usize, x);
+    let epos = s.find('e').unwrap();
+    let exp: i32 = s[epos + 1..].parse().unwrap();
+    if exp < -4 || exp >= P {
+        // Scientific notation: strip trailing zeros in the mantissa,
+        // exponent with sign and at least two digits.
+        let mant = s[..epos].trim_end_matches('0').trim_end_matches('.');
+        format!("{}e{}{:02}", mant, if exp < 0 { "-" } else { "+" }, exp.abs())
+    } else {
+        // Fixed notation with P−1−exp fractional digits, trailing zeros stripped.
+        let digits = (P - 1 - exp).max(0) as usize;
+        let f = format!("{:.*}", digits, x);
+        f.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 // ─── Macro-generated iterative solvers ──────────────────────────────────────
 
 solve_iterative_simple!(solve_cg, ConjugateGradient<T>, "Conjugate Gradient - for symmetric positive definite systems.");
@@ -658,7 +686,7 @@ where
     let mut w = DenseVec::zeros(n);
 
     if verbose {
-        eprintln!("   Iteration :    0  (B r, r) = {:.5e}", gamma0);
+        eprintln!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(gamma0));
     }
 
     for iter in 1..=max_iter {
@@ -674,16 +702,16 @@ where
         let gamma_new = r.dot(&z);      // (B r_{k+1}, r_{k+1})
 
         if verbose {
-            eprintln!("   Iteration : {:4}  (B r, r) = {:.5e}", iter, gamma_new);
+            eprintln!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(gamma_new));
         }
 
         if gamma_new < tol {
             x.copy_from_slice(lx.as_slice());
             let final_residual = gamma_new.sqrt();
             if verbose {
-                let reduction = final_residual / gamma0.sqrt();
-                let avg = reduction.powf(1.0 / iter as f64);
-                eprintln!("Average reduction factor = {:.6}", avg);
+                // MFEM: pow(betanom/nom0, 0.5/final_iter)
+                let avg = (gamma_new / gamma0).powf(0.5 / iter as f64);
+                eprintln!("Average reduction factor = {}", fmt_g(avg));
             }
             return Ok(SolveResult { converged: true, iterations: iter, final_residual });
         }

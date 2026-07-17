@@ -93,7 +93,13 @@ DOF 数一致（20801）✅，求解器配置一致 ✅，延长矩阵正确 ✅
 
 虽然数学上这些应该是等价的，但部分组装和完整 CSR 之间的**对角线数值差异**（由于不同的积分/组装路径）可能导致 Chebyshev 区间的微小偏移，累积成明显的收敛差距。
 
-**建议：** 在 linlvo 层实现 `PartialAssemblyOperator`（element-by-element mat-vec + 元素级别对角线），匹配 MFEM 的部分组装行为。此差距非 bug，属于实现策略差异。
+#### 已尝试：StoredElementOperator (element-by-element mat-vec)
+
+已实现 `StoredElementOperator`（存储元素矩阵的 element-by-element mat-vec），但在 Quad4 网格（star.mesh）上收敛性更差（>1486 iters 不收敛），说明 `build_stored_diffusion_elements` 中的几何处理有 bug（可能 `isoparametric_jacobian` 调用方式与 `Assembler` 不同）。已回滚。
+
+**正确的实现路径：** 需要修改 `Assembler::accumulate_volume_bilinear_element`，使其在计算元素矩阵时，同时返回一份副本给 element-by-element 算子，而不是自建元素矩阵计算路径。这确保元素矩阵与 CSR 完全一致。
+
+**当前状态：** 使用 CSR SpMV + 缩减系统，收敛性 28 iters vs C++ 4 iters。所有算法参数（幂迭代、平滑器结构、PCG 判据）已对齐。
 
 #### 输出格式
 - C++ 用 `%g` 格式（不定长），Rust 用 `fmt_g`（已对齐，微小差异）

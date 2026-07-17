@@ -8,8 +8,6 @@
 //! The forest supports distributed refinement and coarsening, 2:1 balance,
 //! ghost quadrant exchange, and conversion to/from [`Mesh<D>`].
 
-use std::collections::HashMap;
-
 use fem_core::Rank;
 
 use crate::forest::quadrant::{MortonKey, Quadrant};
@@ -75,6 +73,7 @@ pub struct Forest<const D: usize> {
     pub(super) comm: Comm,
     /// Cumulative local quadrant counts for prefix-sum partitioning.
     /// `tree_prefix[i] = number of quadrants in trees[0..i]`.
+    #[allow(dead_code)]
     pub(super) tree_prefix: Vec<usize>,
     /// Global forest statistics.
     pub(super) stats: ForestStats,
@@ -126,13 +125,13 @@ impl<const D: usize> Forest<D> {
     }
 
     /// Distribute trees across MPI ranks using Morton-order prefix-sum.
-    fn distribute_trees(trees: Vec<Tree<D>>, comm: Comm, n_trees: usize) -> Self {
+    fn distribute_trees(trees: Vec<Tree<D>>, comm: Comm, _n_trees: usize) -> Self {
         let size = comm.size();
         let rank = comm.rank() as Rank;
 
         // Count active quadrants per tree for the prefix-sum.
         let local_counts: Vec<usize> = trees.iter().map(|t| t.n_active()).collect();
-        let total_local: usize = local_counts.iter().sum();
+        let _total_local: usize = local_counts.iter().sum();
 
         // Global prefix-sum of quadrant counts (all-gather the counts).
         // For now (serial / single rank), all trees stay on this rank.
@@ -250,7 +249,7 @@ impl<const D: usize> Forest<D> {
 
         for tree in &mut self.trees {
             // Find indices of marked quadrants in this tree.
-            let mut to_refine: Vec<usize> = tree
+            let to_refine: Vec<usize> = tree
                 .quadrants()
                 .iter()
                 .enumerate()

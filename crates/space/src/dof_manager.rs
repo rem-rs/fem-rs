@@ -1171,11 +1171,14 @@ impl DofManager {
             use fem_element::lagrange::factory::{ref_elem, ElemType};
             let factory = ref_elem(ElemType::Quad, order);
             let ref_coords = factory.dof_coords();
-            let int_start = n_verts + edge_pk_map.len() * edge_dofs_per;
             for e in 0..n_elems as u32 {
                 let ns = mesh.element_nodes(e);
+                // Read the actual global DOF ids from dofs_flat: interior DOF
+                // ids are NOT a contiguous range (they interleave with edge
+                // DOFs created by later elements).
+                let ebase = e as usize * dofs_per_elem;
                 for k in 0..interior_dofs_per {
-                    let did = (int_start + e as usize * interior_dofs_per + k) as u32;
+                    let did = dofs_flat[ebase + n_verts + n_edges * edge_dofs_per + k];
                     let rc = &ref_coords[n_verts + n_edges * edge_dofs_per + k];
                     let c0 = mesh.node_coords(ns[0]); let c1 = mesh.node_coords(ns[1]);
                     let c2 = mesh.node_coords(ns[2]); let c3 = mesh.node_coords(ns[3]);
@@ -1269,7 +1272,7 @@ impl DofManager {
             use fem_element::lagrange::factory::{ref_elem, ElemType};
             let factory = ref_elem(ElemType::Hex, order);
             let ref_coords = factory.dof_coords();
-            let face_vol_start = n_verts + edge_pk_map.len() * edge_dofs_per;
+            let face_vol_start = n_verts + n_edges * edge_dofs_per;
             for e in 0..n_elems as u32 {
                 let ns = mesh.element_nodes(e);
                 let c = [
@@ -1278,8 +1281,12 @@ impl DofManager {
                     mesh.node_coords(ns[4]), mesh.node_coords(ns[5]),
                     mesh.node_coords(ns[6]), mesh.node_coords(ns[7]),
                 ];
+                // Read the actual global DOF ids from dofs_flat: face/volume
+                // DOF ids are NOT a contiguous range (they interleave with
+                // edge DOFs created by later elements).
+                let ebase = e as usize * dofs_per_elem;
                 for k in 0..(n_faces * face_dofs_per + volume_dofs_per) {
-                    let did = (face_vol_start + e as usize * (n_faces * face_dofs_per + volume_dofs_per) + k) as u32;
+                    let did = dofs_flat[ebase + face_vol_start + k];
                     let ri = n_verts + n_edges * edge_dofs_per + k;
                     let rc = &ref_coords[ri];
                     let (ex, ey, ez) = (rc[0], rc[1], rc[2]);

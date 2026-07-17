@@ -76,7 +76,7 @@ impl InteriorFaceList {
         // Only applies when mesh has no boundary faces (fully periodic).
         if dim == 2 && !face_map.is_empty() && mesh.n_boundary_faces() == 0 {
             // Collect: (elem, face_nodes, normal)
-            let mut bdr: Vec<(ElemId, Vec<u32>, Vec<f64>)> = face_map
+            let bdr: Vec<(ElemId, Vec<u32>, Vec<f64>)> = face_map
                 .into_values()
                 .map(|(elem, nodes)| {
                     let p0 = mesh.node_coords(nodes[0]);
@@ -97,7 +97,7 @@ impl InteriorFaceList {
                 .collect();
 
             // Group by normal direction and sort by midpoint position
-            let mut group_and_pair = |dir: usize, val: f64, opp_val: f64| {
+            let group_and_pair = |dir: usize, val: f64, opp_val: f64| {
                 // dir=0 for x(left/right), dir=1 for y(bottom/top)
                 let mut neg: Vec<usize> = (0..bdr.len()).filter(|&i| bdr[i].2[dir] < val).collect();
                 let mut pos: Vec<usize> = (0..bdr.len()).filter(|&i| bdr[i].2[dir] > opp_val).collect();
