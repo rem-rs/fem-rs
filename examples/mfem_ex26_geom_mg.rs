@@ -19,7 +19,7 @@ use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
     GeometricMgAsPrecond, MgCycleType, MgSmootherType, solve_pcg,
-    StoredElementOperator,
+    StoredElementOperator, PADiffusionOp,
 };
 use fem_space::{
     H1Space, fe_space::FESpace, constraints::boundary_dofs,
@@ -109,9 +109,24 @@ fn main() {
         for &d in &bc { mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy); }
         // Build element-by-element operator (raw matrices, no BC mods)
         let elem_op = StoredElementOperator {
-            elem_dofs, elem_mats, ldofs, n_elems, n_dofs: mat.nrows,
+            elem_dofs: elem_dofs.clone(), elem_mats: elem_mats.clone(),
+            ldofs, n_elems, n_dofs: mat.nrows,
         };
-        levels.push(GeometricMgLevel { mat, bc_dofs: bc, elem_op: Some(elem_op), raw_diag, raw_dinv });
+        // Build on-the-fly PA operator (matches MFEM AddMultPA)
+        let elem_dofs_clone = elem_dofs.clone();
+        let pa_op = PADiffusionOp::build(
+            space.mesh(), mat.nrows, space.order(), qo, 1.0,
+            |e| {
+                let e32 = e;
+                let start = e32 as usize * ldofs;
+                elem_dofs_clone[start..start + ldofs].to_vec()
+            },
+        );
+        levels.push(GeometricMgLevel {
+            mat, bc_dofs: bc,
+            elem_op: Some(elem_op), raw_diag, raw_dinv,
+            pa_op: Some(pa_op),
+        });
     }
     for i in 0..n_spaces - 1 {
         prolong.push(build_h1_prolongation_matrix(

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 fem-core   = { path = "../core" }
+fem-element = { path = "../element" }
 fem-linalg = { path = "../linalg", features = ["direct"] }
 fem-mesh   = { path = "../mesh" }
 nalgebra   = { workspace = true }

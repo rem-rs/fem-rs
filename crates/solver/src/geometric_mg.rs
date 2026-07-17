@@ -13,6 +13,184 @@
 use fem_linalg::CsrMatrix;
 use crate::SolverConfig;
 use crate::constrained_operator::RectangularConstrainedOperator;
+use fem_element::ReferenceElement;
+use fem_element::lagrange::factory::{TriPk, QuadQk};
+use fem_mesh::{topology::MeshTopology, ElementType};
+use nalgebra::DMatrix;
+
+// ─── PADiffusionOp: on-the-fly partial assembly diffusion operator ──────────
+
+/// On-the-fly diffusion operator matching MFEM `AddMultPA`.
+///
+/// Instead of storing element matrices, stores per-quadrature-point data:
+/// Jacobian⁻ᵀ, |detJ|, and pre-transformed gradient basis values.  At apply
+/// time, for each element and quadrature point:
+///
+///   1. Compute ∇u = Σⱼ xⱼ · ∇φⱼ(ξ)   (on-the-fly, no stored K_e)
+///   2. y[i] += w·|detJ|·κ·∇u·∇φ_i(ξ)
+///
+/// This produces different floating-point results than the stored element
+/// matrix approach (which forms K_e[i,j] = Σ w·|detJ|·∇φ_i·∇φ_j first).
+/// The on-the-fly order matches MFEM's `AssemblyLevel::PARTIAL`.
+pub struct PADiffusionOp {
+    pub elem_dofs: Vec<u32>,
+    /// Precomputed physical gradients: `grad_phys[(e*n_qp + q) * stride + i*dim + d]`
+    /// where `stride = ldofs * dim`.
+    pub grad_phys: Vec<f64>,
+    /// Quadrature weight × |detJ|: `weight_det[e * n_qp + q]`
+    pub weight_det: Vec<f64>,
+    pub ldofs: usize,
+    pub n_elems: usize,
+    pub n_qp: usize,
+    pub dim: usize,
+    pub n_dofs: usize,
+}
+
+impl PADiffusionOp {
+    /// Build from raw components (mesh + per-element DOF iterator).
+    ///
+    /// Supports 2-D Tri3 and Quad4 elements (affine + isoparametric).
+    /// `elem_dofs_fn(e)` returns the global DOF indices for element `e`.
+    pub fn build(
+        mesh: &dyn MeshTopology,
+        n_dofs: usize,
+        order: u8,
+        quad_order: u8,
+        kappa: f64,
+        mut elem_dofs_fn: impl FnMut(u32) -> Vec<u32>,
+    ) -> Self {
+        let n_elems = mesh.n_elements();
+        let dim = mesh.dim() as usize;
+        let et0 = mesh.element_type(0);
+
+        let ref_elem: Box<dyn ReferenceElement> = match et0 {
+            ElementType::Tri3 => Box::new(TriPk::new(order as usize)),
+            ElementType::Quad4 => Box::new(QuadQk::new(order as usize)),
+            _ => panic!("PADiffusionOp: unsupported {et0:?}"),
+        };
+        let ldofs = ref_elem.n_dofs();
+        let quad = ref_elem.quadrature(quad_order);
+        let n_qp = quad.points.len();
+
+        let mut all_dofs = Vec::with_capacity(n_elems * ldofs);
+        let mut all_grad = Vec::with_capacity(n_elems * n_qp * ldofs * dim);
+        let mut all_wdet = Vec::with_capacity(n_elems * n_qp);
+        let mut grad_ref = vec![0.0; ldofs * dim];
+        let mut grad_phys = vec![0.0; ldofs * dim];
+
+        for e in 0..n_elems as u32 {
+            let et = mesh.element_type(e);
+            let gd = elem_dofs_fn(e);
+            all_dofs.extend_from_slice(&gd);
+
+            let nodes = mesh.element_nodes(e);
+            let is_quad = matches!(et, ElementType::Quad4);
+
+            for (qi, xi) in quad.points.iter().enumerate() {
+                let (jac, det_j): (DMatrix<f64>, f64) = if is_quad {
+                    // Isoparametric Jacobian for Quad4 (bilinear mapping)
+                    let mut j = DMatrix::<f64>::zeros(dim, dim);
+                    let (xi_v, eta) = (xi[0], xi[1]);
+                    // Bilinear shape function derivatives at (ξ, η):
+                    // N0 = (1-ξ)(1-η), N1 = ξ(1-η), N2 = ξη, N3 = (1-ξ)η
+                    // dN/dξ: -(1-η), (1-η), η, -η
+                    // dN/dη: -(1-ξ), -ξ, ξ, (1-ξ)
+                    let dndxi = [-(1.0 - eta), (1.0 - eta), eta, -eta];
+                    let dndeta = [-(1.0 - xi_v), -xi_v, xi_v, (1.0 - xi_v)];
+                    for n in 0..4 {
+                        let xy = mesh.node_coords(nodes[n]);
+                        for d in 0..dim {
+                            j[(d, 0)] += xy[d] * dndxi[n];
+                            j[(d, 1)] += xy[d] * dndeta[n];
+                        }
+                    }
+                    (j.clone(), j.determinant())
+                } else {
+                    let x0 = mesh.node_coords(nodes[0]);
+                    let mut j = DMatrix::<f64>::zeros(dim, dim);
+                    for col in 0..dim {
+                        let xc = mesh.node_coords(nodes[col + 1]);
+                        for row in 0..dim { j[(row, col)] = xc[row] - x0[row]; }
+                    }
+                    (j.clone(), j.determinant())
+                };
+                let jit = jac.clone().try_inverse()
+                    .expect("degenerate element in PADiffusionOp")
+                    .transpose();
+                let w = quad.weights[qi] * det_j.abs();
+
+                ref_elem.eval_grad_basis(xi, &mut grad_ref);
+                for i in 0..ldofs {
+                    for d in 0..dim {
+                        let mut s = 0.0;
+                        for k in 0..dim { s += jit[(d, k)] * grad_ref[i * dim + k]; }
+                        grad_phys[i * dim + d] = s;
+                    }
+                }
+                all_grad.extend_from_slice(&grad_phys);
+                all_wdet.push(w * kappa);
+            }
+        }
+
+        PADiffusionOp {
+            elem_dofs: all_dofs,
+            grad_phys: all_grad,
+            weight_det: all_wdet,
+            ldofs, n_elems, n_qp, dim, n_dofs,
+        }
+    }
+
+    /// On-the-fly mat-vec: `y = A x`.  **No BC enforcement.**
+    pub fn mult_raw(&self, x: &[f64], y: &mut [f64]) {
+        for v in y.iter_mut() { *v = 0.0; }
+        let stride = self.ldofs * self.dim;
+        for e in 0..self.n_elems {
+            let dof_base = e * self.ldofs;
+            let wdet_base = e * self.n_qp;
+            let grad_base = e * self.n_qp * stride;
+
+            // Gather x_e
+            let mut xe = [0.0_f64; 64];
+            for i in 0..self.ldofs {
+                xe[i] = x[self.elem_dofs[dof_base + i] as usize];
+            }
+
+            for q in 0..self.n_qp {
+                let w = self.weight_det[wdet_base + q];
+                let gq = &self.grad_phys[grad_base + q * stride..];
+
+                // ∇u = Σⱼ xⱼ · ∇φⱼ(ξ)  (dim components)
+                let mut grad_u = [0.0_f64; 3];
+                for j in 0..self.ldofs {
+                    let gj = &gq[j * self.dim..];
+                    for d in 0..self.dim {
+                        grad_u[d] += xe[j] * gj[d];
+                    }
+                }
+
+                // y[i] += w·|detJ|·κ·∇u·∇φ_i
+                for i in 0..self.ldofs {
+                    let gi = &gq[i * self.dim..];
+                    let mut dot = 0.0;
+                    for d in 0..self.dim {
+                        dot += grad_u[d] * gi[d];
+                    }
+                    let idx = self.elem_dofs[dof_base + i] as usize;
+                    y[idx] += w * dot;
+                }
+            }
+        }
+    }
+
+    /// ConstrainedOperator-style mat-vec with BC enforcement.
+    pub fn mult_constrained(&self, x: &[f64], y: &mut [f64], bc_dofs: &[u32]) {
+        let mut xc = vec![0.0; self.n_dofs];
+        xc.copy_from_slice(x);
+        for &d in bc_dofs { if (d as usize) < xc.len() { xc[d as usize] = 0.0; } }
+        self.mult_raw(&xc, y);
+        for &d in bc_dofs { if (d as usize) < y.len() { y[d as usize] = 0.0; } }
+    }
+}
 
 /// Element-by-element stored matrix operator (ConstrainedOperator pattern).
 ///
@@ -82,6 +260,10 @@ pub struct GeometricMgLevel {
     pub raw_diag: Vec<f64>,
     /// Inverse of raw diagonal (1/diag[i] for non-zero, 1.0 for zero/BC DOFs).
     pub raw_dinv: Vec<f64>,
+    /// Optional on-the-fly partial assembly operator (matches MFEM AddMultPA).
+    /// When present, `mat_vec()` uses this first for the most accurate
+    /// floating-point order match to MFEM's `AssemblyLevel::PARTIAL`.
+    pub pa_op: Option<PADiffusionOp>,
 }
 
 /// Geometric multigrid hierarchy.
@@ -96,13 +278,11 @@ pub struct GeometricMgHierarchy {
 impl GeometricMgLevel {
     /// Perform mat-vec with ConstrainedOperator-style BC enforcement.
     ///
-    /// When `elem_op` is present, uses element-by-element with BC zeroing
-    /// (matching MFEM's `ConstrainedOperator(Mult(PA_operator, ess_tdofs))`).
-    ///
-    /// When absent, falls back to CSR `spmv` (the modified matrix already has
-    /// BC built in via `apply_dirichlet_symmetric`).
+    /// Priority: `pa_op` (on-the-fly PA) > `elem_op` (stored elem mats) > CSR spmv.
     pub fn mat_vec(&self, x: &[f64], y: &mut [f64]) {
-        if let Some(ref op) = self.elem_op {
+        if let Some(ref pa) = self.pa_op {
+            pa.mult_constrained(x, y, &self.bc_dofs);
+        } else if let Some(ref op) = self.elem_op {
             op.mult_constrained(x, y, &self.bc_dofs);
         } else {
             self.mat.spmv(x, y);
@@ -523,6 +703,7 @@ mod tests {
                 elem_op: None,
                 raw_diag: vec![],
                 raw_dinv: vec![],
+                pa_op: None,
             });
 
             // Build prolongation (linear interpolation) to next finer level
