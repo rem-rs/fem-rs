@@ -271,3 +271,72 @@ The Python bindings use PyO3 + maturin, located at `crates/python/`.
 The Python module exposes mesh generation, FE spaces (H¹/L²/VectorH¹/HCurl/ComplexH¹),
 assembly (stiffness/mass/source), linear solvers (CG/GMRES/PCG/BiCGSTAB/LU/Cholesky),
 extrusion, supermesh construction, and complex grid function operations.
+
+---
+
+# MFEM 示例翻译比对状态 (2026-07)
+
+## ✅ ex22 — 复数 Helmholtz (1:1 完成)
+
+| 维度 | 功能 | 状态 |
+|------|------|------|
+| p=0 (H1) | DiffusionIntegrator + MassIntegrator | ✅ |
+| p=1 (HCurl) | CurlCurlIntegrator + VectorMassIntegrator | ✅ |
+| p=2 (HDiv) | GradDivIntegrator + VectorMassIntegrator | ✅ |
+| 2D (Tri3/Quad4) | 全部三种变体 | ✅ |
+| 3D (Tet4/Hex8) | 全部三种变体 | ✅ |
+| CLI | -m -r -o -p -mu -eps -sigma --omega -f -a -herm | ✅ |
+| 求解器 | GMRES + 块对角 GS/DSmoother | ✅ |
+| 精确解 L² 误差 | inline-* 网格自动检测 | ✅ |
+| 输出 | refined.mesh + sol_r.gf + sol_i.gf + sol_z.gf | ✅ |
+
+**未对齐：** GLVis 可视化、Partial Assembly、输出文件精度 (8位 vs 14位)
+
+## ✅ ex23 — 波动方程 (1:1 完成)
+
+| 维度 | 功能 | 状态 |
+|------|------|------|
+| 空间类型 | H1 (标量) | ✅ |
+| 时间积分 | GeneralizedAlpha2 (s=10/11/12) | ✅ |
+| 2D/3D | Mesh<2> + Mesh<3> | ✅ |
+| 预条件器 | DSmoother (Jacobi) | ✅ |
+| 输出 | ex23.mesh + ex23-init.gf + ex23-final.gf | ✅ |
+| CLI | -m -r -o -s -tf -dt -c -dir/-neu -vis | ✅ |
+
+**未对齐：** GLVis 可视化、VisIt 输出、ODE 类型 11/12 未完整验证
+
+## ✅ ex24 — 离散算子 (1:1 完成，有降级)
+
+| 维度 | 功能 | 状态 |
+|------|------|------|
+| p=0 (grad) H1→HCurl | DiscreteLinearOperator::gradient + 混合矩阵 | ✅ |
+| p=1 (curl 3D) HCurl→HDiv | DiscreteLinearOperator::curl_3d + 弱 curl | ✅ |
+| p=2 (div) HDiv→L2 | assemble_hdiv_l2_mixed + DLO divergence | ✅ (o=1), ⚠️ (o=2) |
+| 2D | inline-tri.mesh + star.mesh | ✅ |
+| 求解器 | CG + DSmoother (Jacobi) | ✅ |
+| L² 投影 | project_coefficient / project_hcurl_coefficient / project_hdiv_coefficient_2d | ✅ |
+
+**注意：** p=2 o=2 (RT1→P1) 有已知 bug，误差 ~1.42。TriRT1 的 nodal basis test 已通过 (DOF_k(ψ_i)=δ_{ki})，但实际散度投影仍然不精确。降级到 RT0→P0 (o=1)。根源可能在 project_hdiv_coefficient_2d 或 sign 应用路径。
+
+**核心库修复 (`crates/`):**
+| 修复 | 文件 |
+|------|------|
+| 二阶 GeneralizedAlpha2 时间积分器 | `solver/src/ode/structural.rs` |
+| project_hdiv_coefficient_2d/3d (HDiv L² 投影) | `assembly/src/postproc/grid_function.rs` |
+| assemble_hcurl_hdiv_weak_curl: HCurl element_signs + 移除多余 1/detJ | `assembly/src/mixed.rs` |
+| TriRT1: Vandermonde 边顺序→TRI_FACES | `element/src/raviart_thomas/tri_rt1.rs` |
+| TriRT1: 矩 1 定义 t→2t-1 (对齐 MFEM) | `element/src/raviart_thomas/tri_rt1.rs` |
+| interpolate_vector RT1: 矩 1 定义 t→2t-1 | `space/src/hdiv.rs` |
+| INLINE 3D hex/tet 网格解析 | `io/src/mfem.rs` |
+
+---
+
+# MFEM 示例翻译比对状态 (2026-07)
+
+## ✅ ex22 — 复数 Helmholtz (1:1 完成)
+
+## ✅ ex23 — 波动方程 (1:1 完成)
+
+## ✅ ex24 — 离散算子 (1:1 完成，有降级)
+
+---
