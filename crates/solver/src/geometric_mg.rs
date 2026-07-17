@@ -14,12 +14,74 @@ use fem_linalg::CsrMatrix;
 use crate::SolverConfig;
 use crate::constrained_operator::RectangularConstrainedOperator;
 
+/// Element-by-element stored matrix operator (ConstrainedOperator pattern).
+///
+/// Precomputed element stiffness matrices applied via
+/// gather → dense mat-vec → scatter.  The element matrices come from the
+/// **same** integration loop as the CSR matrix (bitwise-identical).
+///
+/// BC enforcement follows the `ConstrainedOperator` pattern: zero BC DOFs in
+/// the input, multiply, zero BC DOFs in the output.
+pub struct StoredElementOperator {
+    /// Flattened global DOF indices: `elem_dofs[e * ld + i]`.
+    pub elem_dofs: Vec<u32>,
+    /// Flattened element matrices: `elem_mats[e * ld² + i * ld + j]`.
+    pub elem_mats: Vec<f64>,
+    /// Local DOFs per element.
+    pub ldofs: usize,
+    /// Number of elements.
+    pub n_elems: usize,
+    /// Total number of global DOFs.
+    pub n_dofs: usize,
+}
+
+impl StoredElementOperator {
+    /// Raw element-by-element mat-vec: `y = A x`.  **No BC enforcement.**
+    pub fn mult_raw(&self, x: &[f64], y: &mut [f64]) {
+        for v in y.iter_mut() { *v = 0.0; }
+        let ld = self.ldofs;
+        for e in 0..self.n_elems {
+            let dof_base = e * ld;
+            let mat_base = e * ld * ld;
+            let mut xe = [0.0_f64; 64];
+            for i in 0..ld {
+                xe[i] = x[self.elem_dofs[dof_base + i] as usize];
+            }
+            for i in 0..ld {
+                let mut sum = 0.0;
+                let row_off = mat_base + i * ld;
+                for j in 0..ld {
+                    sum += self.elem_mats[row_off + j] * xe[j];
+                }
+                y[self.elem_dofs[dof_base + i] as usize] += sum;
+            }
+        }
+    }
+
+    /// ConstrainedOperator-style mat-vec: `y = A x` with BC enforcement.
+    pub fn mult_constrained(&self, x: &[f64], y: &mut [f64], bc_dofs: &[u32]) {
+        let mut xc = vec![0.0; self.n_dofs];
+        xc.copy_from_slice(x);
+        for &d in bc_dofs { if (d as usize) < xc.len() { xc[d as usize] = 0.0; } }
+        self.mult_raw(&xc, y);
+        for &d in bc_dofs { if (d as usize) < y.len() { y[d as usize] = 0.0; } }
+    }
+}
+
 /// A single level in the geometric multigrid hierarchy.
 pub struct GeometricMgLevel {
     /// System matrix at this level.
     pub mat: CsrMatrix<f64>,
     /// Boundary DOF list for this level.
     pub bc_dofs: Vec<u32>,
+    /// Optional element-by-element operator.
+    /// When present, `mat_vec()` uses `mult_constrained` (ConstrainedOperator
+    /// pattern: zero BC in → raw mult → zero BC out).
+    pub elem_op: Option<StoredElementOperator>,
+    /// Diagonal from the raw (unmodified) matrix, used by Chebyshev smoother.
+    pub raw_diag: Vec<f64>,
+    /// Inverse of raw diagonal (1/diag[i] for non-zero, 1.0 for zero/BC DOFs).
+    pub raw_dinv: Vec<f64>,
 }
 
 /// Geometric multigrid hierarchy.
@@ -29,6 +91,23 @@ pub struct GeometricMgLevel {
 pub struct GeometricMgHierarchy {
     pub levels: Vec<GeometricMgLevel>,
     pub prolong: Vec<RectangularConstrainedOperator>,
+}
+
+impl GeometricMgLevel {
+    /// Perform mat-vec with ConstrainedOperator-style BC enforcement.
+    ///
+    /// When `elem_op` is present, uses element-by-element with BC zeroing
+    /// (matching MFEM's `ConstrainedOperator(Mult(PA_operator, ess_tdofs))`).
+    ///
+    /// When absent, falls back to CSR `spmv` (the modified matrix already has
+    /// BC built in via `apply_dirichlet_symmetric`).
+    pub fn mat_vec(&self, x: &[f64], y: &mut [f64]) {
+        if let Some(ref op) = self.elem_op {
+            op.mult_constrained(x, y, &self.bc_dofs);
+        } else {
+            self.mat.spmv(x, y);
+        }
+    }
 }
 
 impl GeometricMgHierarchy {
@@ -147,23 +226,17 @@ impl MgChebyshevSmoother {
         MgChebyshevSmoother { dinv, coeffs }
     }
 
-    fn smooth(&self, a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], bc: &[u32]) {
+    fn smooth(&self, level: &GeometricMgLevel, b: &[f64], x: &mut [f64]) {
+        let a = &level.mat;
         let n = a.nrows;
-        // Residual: r = b - A*x
+        // Residual: r = b - A*x (uses ConstrainedOperator mat-vec when elem_op present)
         let mut r = vec![0.0; n];
-        a.spmv(x, &mut r);
+        level.mat_vec(x, &mut r);
         for i in 0..n { r[i] = b[i] - r[i]; }
 
         // Correction: Δ = p(D⁻¹A) D⁻¹ r, matching MFEM OperatorChebyshevSmoother::Mult
         //
         //   y = Σ_{k=0}^{order-1} C[k] · (D⁻¹A)^k · D⁻¹ · r
-        //
-        // Implementation:
-        //   residual = D⁻¹ · r
-        //   y = 0
-        //   for k in 0..order:
-        //     y += C[k] · residual
-        //     if k+1 < order:  residual = D⁻¹ · A · residual
         let m = self.coeffs.len();
         let mut correction = vec![0.0; n];
         // residual = D⁻¹ · r
@@ -176,13 +249,13 @@ impl MgChebyshevSmoother {
             if k + 1 < m {
                 // residual = D⁻¹ · A · residual
                 let mut tmp = vec![0.0; n];
-                a.spmv(&residual, &mut tmp);
+                level.mat_vec(&residual, &mut tmp);
                 for i in 0..n { residual[i] = tmp[i] * self.dinv[i]; }
             }
         }
 
         for i in 0..n { x[i] += correction[i]; }
-        for &d in bc { if (d as usize) < n { x[d as usize] = 0.0; } }
+        for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
     }
 }
 
@@ -335,12 +408,12 @@ impl GeometricMgPrecond {
 
         // Pre-smooth
         for _ in 0..self.config.pre_sweeps {
-            self.smooth_level(lvl, a, b, x, &level.bc_dofs);
+            self.smooth_level(lvl, level, b, x);
         }
 
         // Restrict residual
         let mut ax = vec![0.0; n];
-        a.spmv(x, &mut ax);
+        level.mat_vec(x, &mut ax);
         let r: Vec<f64> = (0..n).map(|i| b[i] - ax[i]).collect();
         let mut r_c = Vec::new();
         h.prolong[lvl].restrict(&r, &mut r_c);
@@ -368,45 +441,48 @@ impl GeometricMgPrecond {
         }
 
         // Post-smooth
-        self.smooth_level(lvl, a, b, x, &level.bc_dofs);
+        self.smooth_level(lvl, level, b, x);
         for _ in 1..self.config.post_sweeps {
-            self.smooth_level(lvl, a, b, x, &level.bc_dofs);
+            self.smooth_level(lvl, level, b, x);
         }
         for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
     }
 
-    fn smooth_level(&self, lvl: usize, a: &CsrMatrix<f64>, b: &[f64],
-                    x: &mut [f64], bc: &[u32]) {
+    fn smooth_level(&self, lvl: usize, level: &GeometricMgLevel, b: &[f64],
+                    x: &mut [f64]) {
+        let a = &level.mat;
+        let bc = &level.bc_dofs;
         match self.config.smoother {
             MgSmootherType::Chebyshev(_) => {
                 if lvl < self.smoothers.len() {
-                    self.smoothers[lvl].smooth(a, b, x, bc);
+                    self.smoothers[lvl].smooth(level, b, x);
                 } else {
                     // Jacobi fallback
-                    self.jacobi_smooth_level(a, b, x, bc);
+                    self.jacobi_smooth_level(level, b, x);
                 }
             }
             MgSmootherType::Ssor => {
                 ssor_smooth_level(a, b, x, bc, self.config.jacobi_omega);
             }
             MgSmootherType::Jacobi => {
-                self.jacobi_smooth_level(a, b, x, bc);
+                self.jacobi_smooth_level(level, b, x);
             }
         }
     }
 
     /// Plain Jacobi smoothing (omega from config).
-    fn jacobi_smooth_level(&self, a: &CsrMatrix<f64>, b: &[f64],
-                           x: &mut [f64], bc: &[u32]) {
+    fn jacobi_smooth_level(&self, level: &GeometricMgLevel, b: &[f64],
+                           x: &mut [f64]) {
+        let a = &level.mat;
         let diag = a.diagonal();
         let mut r = vec![0.0; a.nrows];
-        a.spmv(x, &mut r);
+        level.mat_vec(x, &mut r);
         for i in 0..r.len() { r[i] = b[i] - r[i]; }
         let omega = self.config.jacobi_omega;
         for i in 0..r.len() {
             if diag[i].abs() > 1e-30 { x[i] += omega * r[i] / diag[i]; }
         }
-        for &d in bc { if (d as usize) < x.len() { x[d as usize] = 0.0; } }
+        for &d in &level.bc_dofs { if (d as usize) < x.len() { x[d as usize] = 0.0; } }
     }
 }
 
@@ -444,6 +520,9 @@ mod tests {
             levels.push(GeometricMgLevel {
                 mat,
                 bc_dofs: bc_dofs.clone(),
+                elem_op: None,
+                raw_diag: vec![],
+                raw_dinv: vec![],
             });
 
             // Build prolongation (linear interpolation) to next finer level

@@ -909,7 +909,50 @@ impl Assembler {
         coo.into_csr()
     }
 
-    // ── Volume linear form: f = Σ_e f_e ──────────────────────────────────────
+    /// Assemble the global matrix AND return per-element matrix data.
+    ///
+    /// Returns `(csr_matrix, elem_dofs, elem_mats, ldofs, n_elems)`:
+    /// - `csr_matrix` — same as [`assemble_bilinear`]
+    /// - `elem_dofs`  — flattened per-element DOFs: `elem_dofs[e * ld + i]`
+    /// - `elem_mats`  — flattened per-element matrices: `elem_mats[e * ld² + i * ld + j]`
+    ///
+    /// The element matrices come from the **exact same** integration loop as the CSR,
+    /// ensuring bitwise-identical element-level values.
+    pub fn assemble_bilinear_with_elements<S: FESpace>(
+        space:       &S,
+        integrators: &[&dyn BilinearIntegrator],
+        quad_order:  u8,
+    ) -> (CsrMatrix<f64>, Vec<u32>, Vec<f64>, usize, usize) {
+        let mesh    = space.mesh();
+        let n_dofs  = space.n_dofs();
+        let n_elems = mesh.n_elements();
+
+        let elem_type = mesh.element_type(0);
+        let ref_elem  = ref_elem_vol(elem_type, 1);
+        let quad      = ref_elem.quadrature(quad_order);
+
+        let elem0   = mesh.element_type(0);
+        let ref0    = ref_elem_vol(elem0, space.element_order(0));
+        let dofs_per_elem = ref0.n_dofs();
+        let est_nnz = n_elems as usize * dofs_per_elem * dofs_per_elem;
+
+        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+        coo.reserve(est_nnz.min(10_000_000));
+        let mut scratch = ElementScratch::new();
+
+        let mut all_dofs: Vec<u32> = Vec::with_capacity(n_elems * dofs_per_elem);
+        let mut all_mats: Vec<f64> = Vec::with_capacity(n_elems * dofs_per_elem * dofs_per_elem);
+        let mut ldofs = 0;
+
+        for e in mesh.elem_iter() {
+            accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut coo, &mut scratch);
+            let gd = &scratch.global_dofs;
+            ldofs = gd.len();
+            all_dofs.extend(gd.iter().map(|&d| d as u32));
+            all_mats.extend_from_slice(&scratch.k_elem);
+        }
+        (coo.into_csr(), all_dofs, all_mats, ldofs, n_elems)
+    }
 
     /// Assemble the global load vector for a linear form.
     pub fn assemble_linear<S: FESpace>(

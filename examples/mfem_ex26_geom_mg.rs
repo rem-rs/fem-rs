@@ -19,6 +19,7 @@ use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
     GeometricMgAsPrecond, MgCycleType, MgSmootherType, solve_pcg,
+    StoredElementOperator,
 };
 use fem_space::{
     H1Space, fe_space::FESpace, constraints::boundary_dofs,
@@ -94,11 +95,23 @@ fn main() {
     for i in 0..n_spaces {
         let space = &spaces[i];
         let qo = (2 * space.order() + 1).max(3) as u8;
-        let mut mat = Assembler::assemble_bilinear(space, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
+        // Assemble CSR + element matrices in one pass (same integration)
+        let (mut mat, elem_dofs, elem_mats, ldofs, n_elems) =
+            Assembler::assemble_bilinear_with_elements(
+                space, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
+        // Save raw diagonal before BC modification
+        let raw_diag = mat.diagonal();
+        let raw_dinv: Vec<f64> = raw_diag.iter()
+            .map(|&d| if d.abs() > 1e-30 { 1.0 / d } else { 1.0 }).collect();
+        // Apply symmetric BC elimination for the CSR matrix (PCG outer / coarse CG)
         let bc = boundary_dofs(space.mesh(), space.dof_manager(), &boundary_tags);
         let mut dummy = vec![0.0; mat.nrows];
         for &d in &bc { mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy); }
-        levels.push(GeometricMgLevel { mat, bc_dofs: bc });
+        // Build element-by-element operator (raw matrices, no BC mods)
+        let elem_op = StoredElementOperator {
+            elem_dofs, elem_mats, ldofs, n_elems, n_dofs: mat.nrows,
+        };
+        levels.push(GeometricMgLevel { mat, bc_dofs: bc, elem_op: Some(elem_op), raw_diag, raw_dinv });
     }
     for i in 0..n_spaces - 1 {
         prolong.push(build_h1_prolongation_matrix(
