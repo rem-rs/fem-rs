@@ -465,9 +465,8 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         }),
     );
 
-    // Assemble → SesquilinearForm → flat 2×2 block
-    let cs = a.assemble();
-    let a_mat = cs.to_flat_csr_with_conv(Convention::Hermitian);
+    // Assemble → SesquilinearForm
+    let mut cs = a.assemble();
 
     // ── RHS ──────────────────────────────────────────────────────────────
     let mut rhs_re = vec![0.0; n];
@@ -483,7 +482,8 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     }
 
     // ── Project BC (1:1 with C++ E_bdr_data_Re/Im + ProjectBdrCoefficientTangent) ──
-    // C++: returns 0 for boundary points inside PML
+    let mut bc_re = vec![0.0; n];
+    let mut bc_im = vec![0.0; n];
     if !ess_tdofs.is_empty() && exact_known {
         let pml_ref = pml.clone();
         let bc_fn_re = move |x: &[f64]| -> Vec<f64> {
@@ -505,13 +505,24 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
             let e = maxwell_solution(x, dim, prob, k);
             e.iter().map(|c| c.im).collect()
         };
-        let bc_re = space.interpolate_vector(&bc_fn_re);
-        let bc_im = space.interpolate_vector(&bc_fn_im);
-        for &d in &ess_tdofs {
-            rhs_re[d as usize] = bc_re[d as usize];
-            rhs_im[d as usize] = bc_im[d as usize];
-        }
+        let bc_re_full = space.interpolate_vector(&bc_fn_re);
+        let bc_im_full = space.interpolate_vector(&bc_fn_im);
+        bc_re.copy_from_slice(bc_re_full.as_slice());
+        bc_im.copy_from_slice(bc_im_full.as_slice());
     }
+
+    // Apply BC elimination to system matrix (1:1 with C++ FormLinearSystem)
+    let ess_tdofs_usize: Vec<usize> = ess_tdofs.iter().map(|&d| d as usize).collect();
+    let bc_re_ess: Vec<f64> = ess_tdofs.iter().map(|&d| bc_re[d as usize]).collect();
+    let bc_im_ess: Vec<f64> = ess_tdofs.iter().map(|&d| bc_im[d as usize]).collect();
+    let mut flat_rhs_init = vec![0.0_f64; 2*n];
+    for i in 0..n { flat_rhs_init[i] = rhs_re[i]; }
+    for i in 0..n { flat_rhs_init[n+i] = rhs_im[i]; }
+    cs.apply_dirichlet(&ess_tdofs_usize, &bc_re_ess, &bc_im_ess, &mut flat_rhs_init);
+    // Extract back modified RHS
+    for i in 0..n { rhs_re[i] = flat_rhs_init[i]; }
+    for i in 0..n { rhs_im[i] = flat_rhs_init[n+i]; }
+    let a_mat = cs.to_flat_csr_with_conv(Convention::Hermitian);
 
     // ── Preconditioner (1:1 with C++) ────────────────────────────────────
     // Non-PML: μ⁻¹·curlcurl + ω²ε·mass (with DIAG_ONE for BCs)
