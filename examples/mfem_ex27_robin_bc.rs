@@ -46,9 +46,9 @@ fn main() {
     }
 
     let mut x = vec![0.0; n];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 5000, verbose: false, ..Default::default() };
-    fem_solver::solve_cg(&stiff, &rhs, &mut x, &cfg).expect("CG");
-    println!("  Solved.");
+    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: true, ..Default::default() };
+    let res = fem_solver::solve_pcg_gssmoother(&stiff, &rhs, &mut x, &cfg).expect("PCG+GSSmoother");
+    println!("  Solved in {} iterations.", res.iterations);
 
     let _ = fem_io::mfem::write_gf_file("sol.gf", 2, &x, "H1", a.order as u8, 1);
 }
