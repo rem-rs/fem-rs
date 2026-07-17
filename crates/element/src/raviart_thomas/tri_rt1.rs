@@ -201,15 +201,15 @@ impl VectorReferenceElement for TriRT1 {
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
-            // edge f₀: hypotenuse, params 1/3 and 2/3 → (2/3,1/3) and (1/3,2/3)
-            vec![2.0/3.0, 1.0/3.0],
-            vec![1.0/3.0, 2.0/3.0],
-            // edge f₁: left edge, (0,1/3) and (0,2/3)
-            vec![0.0, 1.0/3.0],
-            vec![0.0, 2.0/3.0],
-            // edge f₂: bottom edge, (1/3,0) and (2/3,0)
+            // TRI_FACES[0]=(0,1): bottom edge, (1/3,0) and (2/3,0)
             vec![1.0/3.0, 0.0],
             vec![2.0/3.0, 0.0],
+            // TRI_FACES[1]=(1,2): hypotenuse, (2/3,1/3) and (1/3,2/3)
+            vec![2.0/3.0, 1.0/3.0],
+            vec![1.0/3.0, 2.0/3.0],
+            // TRI_FACES[2]=(0,2): left edge, (0,1/3) and (0,2/3)
+            vec![0.0, 1.0/3.0],
+            vec![0.0, 2.0/3.0],
             // interior
             vec![1.0/3.0, 1.0/3.0],
             vec![0.25, 0.25],
@@ -255,32 +255,32 @@ mod tests {
         let mut vals = vec![0.0; 16];
         let mut dof_mat = [[0.0f64; 8]; 8];
 
-        // Edge f₀: hypotenuse (1-t,t), normal (1,1)
-        for k in 0..4 {
-            let (t, w) = (gl_pts[k], gl_wts[k]);
-            elem.eval_basis_vec(&[1.0-t, t], &mut vals);
-            for i in 0..8 {
-                let nf = vals[i*2] + vals[i*2+1];
-                dof_mat[0][i] += w * nf;
-                dof_mat[1][i] += w * nf * t;
-            }
-        }
-        // Edge f₁: left (0,t), normal (-1,0)
-        for k in 0..4 {
-            let (t, w) = (gl_pts[k], gl_wts[k]);
-            elem.eval_basis_vec(&[0.0, t], &mut vals);
-            for i in 0..8 {
-                let nf = -vals[i*2];
-                dof_mat[2][i] += w * nf;
-                dof_mat[3][i] += w * nf * t;
-            }
-        }
-        // Edge f₂: bottom (t,0), normal (0,-1)
+        // Edge 0: bottom v0→v1 (t,0), normal (0,-1)  — TRI_FACES[0]
         for k in 0..4 {
             let (t, w) = (gl_pts[k], gl_wts[k]);
             elem.eval_basis_vec(&[t, 0.0], &mut vals);
             for i in 0..8 {
                 let nf = -vals[i*2+1];
+                dof_mat[0][i] += w * nf;
+                dof_mat[1][i] += w * nf * t;
+            }
+        }
+        // Edge 1: hypotenuse v1→v2 (1-t,t), normal (1,1)  — TRI_FACES[1]
+        for k in 0..4 {
+            let (t, w) = (gl_pts[k], gl_wts[k]);
+            elem.eval_basis_vec(&[1.0-t, t], &mut vals);
+            for i in 0..8 {
+                let nf = vals[i*2] + vals[i*2+1];
+                dof_mat[2][i] += w * nf;
+                dof_mat[3][i] += w * nf * t;
+            }
+        }
+        // Edge 2: left v0→v2 (0,t), normal (-1,0)  — TRI_FACES[2]
+        for k in 0..4 {
+            let (t, w) = (gl_pts[k], gl_wts[k]);
+            elem.eval_basis_vec(&[0.0, t], &mut vals);
+            for i in 0..8 {
+                let nf = -vals[i*2];
                 dof_mat[4][i] += w * nf;
                 dof_mat[5][i] += w * nf * t;
             }
