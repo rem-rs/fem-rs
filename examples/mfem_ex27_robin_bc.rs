@@ -86,16 +86,73 @@ fn gen_mesh(rl: usize) -> Mesh<2> {
     let mesh = mesh.make_periodic(&[(5, 6, [2.0_f64, 0.0_f64])], 1e-10)
         .expect("make_periodic failed");
     let mut m = mesh;
-    for _ in 0..rl { m = fem_mesh::refine_uniform(&m); }
+
+    // C++ flow: SetCurvature(3) → refine(×2) → Transform(trans)
+    // We need Q3-preserving refinement so vertices land on curved surface.
+    // Step 1: Set curvature on the coarse mesh
     m.set_curvature(3);
+    // Step 2: Refine with Q3-preserving vertex positions
+    let q3 = fem_element::lagrange::factory::QuadQk::new(3);
+    for _level in 0..rl {
+        // Evaluate parent Q3 at child vertex positions
+        let _n_elems_parent = m.n_elems();
+        let (child_vx, child_vy) = refine_q3(&m, &q3);
+        // Refine (standard linear, discards geometry)
+        m = fem_mesh::refine_uniform(&m);
+        // Correct vertex positions to Q3-evaluated values
+        for i in 0..m.n_nodes() {
+            if i < child_vx.len() {
+                let off = i * 2;
+                m.coords[off] = child_vx[i];
+                m.coords[off + 1] = child_vy[i];
+            }
+        }
+        // Re-apply curvature for next level or final mesh
+        m.set_curvature(3);
+    }
     m.transform(hole_transform);
     m
+}
+
+/// For each child vertex produced by uniform refinement of a Q3 mesh,
+/// evaluate the PARENT Q3 geometry to get the correct curved position.
+fn refine_q3(m: &Mesh<2>, q3: &fem_element::lagrange::factory::QuadQk)
+    -> (Vec<f64>, Vec<f64>) {
+    let n_parent = m.n_elems();
+    let mut vx = Vec::new();
+    let mut vy = Vec::new();
+    let _grad = vec![0.0; q3.n_dofs() * 2];
+    let mut phi = vec![0.0; q3.n_dofs()];
+
+    // For each parent element, evaluate Q3 at child vertex ref positions
+    // Child 0 (BL): n0(-1,-1), m01(0,-1), c(0,0), m30(-1,0)
+    // Child 1 (BR): m01(0,-1), n1(1,-1), m12(1,0), c(0,0)
+    // Child 2 (TR): c(0,0), m12(1,0), n2(1,1), m23(0,1)
+    // Child 3 (TL): m30(-1,0), c(0,0), m23(0,1), n3(-1,1)
+    // New vertices (not in parent): m01(0,-1), m12(1,0), m23(0,1), m30(-1,0), c(0,0)
+    let child_refs = [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, 0.0)];
+
+    // Use the SAME ordering as refine_nonconforming_quad to match vertex IDs
+    for e in 0..n_parent as u32 {
+        let g = m.geometry_nodes(e);
+        for &(xi, eta) in &child_refs {
+            q3.eval_basis(&[xi, eta], &mut phi);
+            let (mut x, mut y) = (0.0, 0.0);
+            for k in 0..q3.n_dofs() {
+                let xk = m.geom_coords_of(g[k]);
+                x += phi[k] * xk[0];
+                y += phi[k] * xk[1];
+            }
+            vx.push(x); vy.push(y);
+        }
+    }
+    (vx, vy)
 }
 
 fn hole_transform(p:[f64;2])->[f64;2] {
     let tol=1e-4;let(u,v)=(p[0],p[1]);
     if v>0.5-tol||v< -0.5+tol||u>1.0-tol||u< -1.0+tol||u.abs()<tol{return p}
-    let qt=|du:f64,fv:f64|{let a=unsafe{HOLE_RADIUS/std::f64::consts::SQRT_2};
+    let qt=|du:f64,fv:f64|{let a=unsafe{HOLE_RADIUS};
         let d=4.0*a*(std::f64::consts::SQRT_2-2.0*a)*(1.0-2.0*fv);
         let v0=(1.0+std::f64::consts::SQRT_2)*(std::f64::consts::SQRT_2*a-2.0*fv)*((4.0-3.0*std::f64::consts::SQRT_2)*a+(8.0*(std::f64::consts::SQRT_2-1.0)*a-2.0)*fv)/d;
         let r=2.0*((std::f64::consts::SQRT_2-1.0)*a*a*(1.0-4.0*fv)+2.0*(1.0+std::f64::consts::SQRT_2*(1.0+2.0*(2.0*a-std::f64::consts::SQRT_2-1.0)*a))*fv*fv)/d;
