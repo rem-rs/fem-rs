@@ -341,12 +341,8 @@ fn surface_jacobian(mesh: &Mesh<3>, e: u32, _et: ElementType, xi: &[f64])
 }
 
 fn ref_elem_for(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::quad::*;
     match (et, order) {
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (ElementType::Quad4, 3) => Box::new(QuadQ3),
-        (ElementType::Quad4, 4) => Box::new(QuadQ4),
+        (ElementType::Quad4, _) => Box::new(fem_element::lagrange::factory::QuadQk::new(order as usize)),
         _ => panic!("ref_elem: ({et:?}, order={order})"),
     }
 }
