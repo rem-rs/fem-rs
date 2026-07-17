@@ -223,15 +223,14 @@ impl<const D: usize> Mesh<D> {
     /// For a sphere mesh, after calling `snap_to_sphere()`, the high-order
     /// geometry nodes will lie on the sphere surface.
     ///
-    /// Currently supports `Quad4` element type.  `order = 0` or `1` resets
-    /// to linear geometry.
+    /// Supports `Quad4` (D=2 or D=3) and `Tri3` (D=3) element types.
+    /// `order = 0` or `1` resets to linear geometry.
     pub fn set_curvature(&mut self, order: u8) {
         if order <= 1 {
             self.geometry = None;
             return;
         }
         let p = order as usize;
-        assert_eq!(D, 3, "set_curvature: surface mesh requires D = 3");
 
         if self.elem_type == ElementType::Tri3 {
             self.set_curvature_tri3(p);

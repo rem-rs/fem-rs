@@ -1,30 +1,8 @@
-//! # Example 27 — Mixed Boundary Conditions  [1:1 translation of MFEM ex27]
-//!
-//! Solves −Δu = 0 on a rectangular mesh with two holes, using mixed BCs:
-//!
-//! ```text
-//!   Dirichlet: u = d        on tag 3 (left hole)
-//!   Neumann:   ∂u/∂n = g    on tag 1 (bottom)
-//!   Robin:     ∂u/∂n + a·u = b  on tag 2 (top)
-//!   Natural:   ∂u/∂n = 0    on tag 4 (right hole)
-//!   Periodic:  u(L) = u(R)  on left/right ends (tags 5,6)
-//! ```
-//!
-//! ## Usage
-//! ```text
-//! cargo run --example mfem_ex27_robin_bc
-//! cargo run --example mfem_ex27_robin_bc -- -dbc 8 -nbc -2
-//! cargo run --example mfem_ex27_robin_bc -- -rbc-a 1 -rbc-b 8
-//! ```
+//! MFEM ex27 — Mixed BCs. Periodic enforced via penalty on CooMatrix.
 
-#![allow(dead_code)]
-
-use fem_assembly::{
-    Assembler,
-    standard::DiffusionIntegrator,
-};
+use fem_assembly::{Assembler, standard::DiffusionIntegrator};
 use fem_element::ReferenceElement;
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CooMatrix;
 use fem_mesh::{Mesh, topology::MeshTopology, ElementType};
 use fem_solver::SolverConfig;
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
@@ -32,261 +10,180 @@ use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 static mut HOLE_RADIUS: f64 = 0.2;
 
 fn main() {
-    let mut args = parse_args();
-    if args.hole_radius < 0.01 { args.hole_radius = 0.01; }
-    if args.hole_radius > 0.49 { args.hole_radius = 0.49; }
-    unsafe { HOLE_RADIUS = args.hole_radius; }
+    let a = parse_args();
+    unsafe { HOLE_RADIUS = a.hole_radius.max(0.01).min(0.49); }
 
-    println!("Options used:");
-    println!("   --mesh (built-in 2-hole)");
-    println!("   --order {}", args.order);
-    println!("   --sigma {}", args.sigma);
-    println!("   --kappa {}", if args.kappa < 0.0 && !args.h1 { (args.order + 1).pow(2) as f64 } else { args.kappa });
-    println!("   --refine-serial {}", args.ref_levels);
-    println!("   --material-value {}", args.mat_val);
-    println!("   --dirichlet-value {}", args.dbc_val);
-    println!("   --neumann-value {}", args.nbc_val);
-    println!("   --robin-a-value {}", args.rbc_a_val);
-    println!("   --robin-b-value {}", args.rbc_b_val);
-    println!("   --radius {}", args.hole_radius);
-    if !args.visualization { println!("   --no-visualization"); }
-
-    // 2. Generate mesh matching MFEM ex27's 2-hole geometry
-    let mesh = generate_2hole_mesh(args.ref_levels);
-    let dim = 2;
-
-    // 3. FE space
-    let order = args.order;
-    let space = H1Space::new(mesh.clone(), order as u8);
-    let n_dofs = space.n_dofs();
-    println!("\nNumber of finite element unknowns: {}", n_dofs);
-
-    // 4-5. Boundary markers (matching MFEM ex27 tags)
-    // Tag 1: bottom → Neumann, Tag 2: top → Robin
-    // Tag 3: left hole → Dirichlet, Tag 4: right hole → natural
-    let neumann_tag = 1;
-    let robin_tag = 2;
-    let dirichlet_tag = 3;
-    let ess_bdr = if args.h1 {
-        boundary_dofs(&mesh, space.dof_manager(), &[dirichlet_tag])
-    } else {
-        Vec::new()
-    };
-
-    // 6. Set up bilinear form: −Δ
-    let mut stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: args.mat_val }], 3);
-
-    // H1: add Robin boundary mass: ∫ a·u·v ds on robin_tag
-    if args.h1 {
-        let robin_mass = assemble_boundary_mass(&space, &mesh, args.rbc_a_val, &[robin_tag], 3);
-        stiff = CsrMatrix::add(&stiff, &robin_mass);
-    }
-
-    // 8. RHS
-    let mut rhs = vec![0.0; n_dofs];
-
-    // Neumann BC: ∂u/∂n = nbc_val (with material coefficient: mat * ∂u/∂n = mat * nbc)
-    let neumann_rhs = assemble_boundary_linear(&space, &mesh, |_x, _n| args.mat_val * args.nbc_val, &[neumann_tag], 3);
-    for i in 0..n_dofs { rhs[i] += neumann_rhs[i]; }
-
-    // Robin RHS: contribution b (with mat coefficient)
-    let robin_rhs = assemble_boundary_linear(&space, &mesh, |_x, _n| args.mat_val * args.rbc_b_val, &[robin_tag], 3);
-    for i in 0..n_dofs { rhs[i] += robin_rhs[i]; }
-
-    // 9. Form linear system: apply Dirichlet BC on dirichlet_tag
-    //    Keep diag=1 at BC DOFs for CG (apply_dirichlet sets diag = bc_value)
-    let dbc_vals = vec![args.dbc_val; ess_bdr.len()];
-    for (&d, &val) in ess_bdr.iter().zip(dbc_vals.iter()) {
-        let mut dummy = vec![0.0; n_dofs];
-        stiff.apply_dirichlet_symmetric(d as usize, val, &mut dummy);
-        // Ensure diagonal = 1 (CG requires non-zero diagonal)
-        if let Some(k) = stiff.find_entry(d as usize, d as usize) {
-            stiff.values[k] = 1.0;
-        }
-        rhs[d as usize] = val;
-    }
-
-    // 10. Solve
-    let mut x = vec![0.0; n_dofs];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: false, ..Default::default() };
-    fem_solver::solve_cg(&stiff, &rhs, &mut x, &cfg).expect("CG");
-    println!("  Solved.");
-
-    // 13. Verify BCs (simplified averages)
-    let bc_dbc = boundary_dofs(&mesh, space.dof_manager(), &[3]);
-    let mut avg_dbc = 0.0;
-    for &d in &bc_dbc { avg_dbc += x[d as usize]; }
-    if !bc_dbc.is_empty() { avg_dbc /= bc_dbc.len() as f64; }
-    println!("\nVerifying boundary conditions");
-    println!("=============================");
-    println!("Average of solution on Gamma_dbc:\t{:.6}\t error {:.6}",
-             avg_dbc, (avg_dbc - args.dbc_val).abs());
-    println!("  (Dirichlet H1: DOFs on tag 3 are eliminated)");
-    println!("  (Neumann/Robin verification requires boundary flux integration)");
-
-    // 14. Save
-    let _ = fem_io::mfem::write_gf_file("sol.gf", dim, &x, "H1", order as u8, 1);
-}
-
-// ─── Mesh generation: 2-hole rectangle ───────────────────────────────────────
-
-fn generate_2hole_mesh(ref_levels: usize) -> Mesh<2> {
-    // Build a Mesh<2> matching MFEM ex27's GenerateSerialMesh.
-    // 29 vertices, 16 quads, 24 boundary edges.
-    let a = unsafe { HOLE_RADIUS / std::f64::consts::SQRT_2 };
-
-    // Vertex coordinates in order (matching MFEM ex27.cpp lines 548-584)
-    let vertex_coords: [[f64; 2]; 29] = [
-        [-1.0, -0.5], [-1.0, 0.0], [-1.0, 0.5],      // 0-2: left side
-        [-0.5 - a, -a], [-0.5 - a, 0.0], [-0.5 - a, a],  // 3-5: left hole left
-        [-0.5, -0.5], [-0.5, -a], [-0.5, a], [-0.5, 0.5], // 6-9: left mid
-        [-0.5 + a, -a], [-0.5 + a, 0.0], [-0.5 + a, a],    // 10-12: left hole right
-        [0.0, -0.5], [0.0, 0.0], [0.0, 0.5],        // 13-15: center
-        [0.5 - a, -a], [0.5 - a, 0.0], [0.5 - a, a],    // 16-18: right hole left
-        [0.5, -0.5], [0.5, -a], [0.5, a], [0.5, 0.5],     // 19-22: right mid
-        [0.5 + a, -a], [0.5 + a, 0.0], [0.5 + a, a],    // 23-25: right hole right
-        [1.0, -0.5], [1.0, 0.0], [1.0, 0.5],        // 26-28: right side
-    ];
-
-    // Element connectivity (8 quads per half, 16 total, matching C++ lines 494-520)
-    let quad_data: [[u32; 4]; 16] = [
-        [0, 3, 4, 1], [1, 4, 5, 2], [5, 8, 9, 2], [8, 12, 15, 9],
-        [11, 14, 15, 12], [10, 13, 14, 11], [6, 13, 10, 7], [0, 6, 7, 3],
-        [13, 16, 17, 14], [14, 17, 18, 15], [18, 21, 22, 15], [21, 25, 28, 22],
-        [24, 27, 28, 25], [23, 26, 27, 24], [19, 26, 23, 20], [13, 19, 20, 16],
-    ];
-
-    // Boundary segments with tags (matching C++ ex27, plus periodic ends)
-    // Tag 1: bottom, tag 2: top, tag 3: left hole, tag 4: right hole
-    // Tags 5,6: left/right periodic ends
-    let bdr_data: [([u32; 2], i32); 28] = [
-        ([0, 6], 1), ([6, 13], 1), ([13, 19], 1), ([19, 26], 1),   // bottom
-        ([28, 22], 2), ([22, 15], 2), ([15, 9], 2), ([9, 2], 2),     // top
-        ([7, 3], 3), ([10, 7], 3), ([11, 10], 3), ([12, 11], 3),    // left hole
-        ([8, 12], 3), ([5, 8], 3), ([4, 5], 3), ([3, 4], 3),         // left hole cont.
-        ([20, 16], 4), ([23, 20], 4), ([24, 23], 4), ([25, 24], 4),  // right hole
-        ([21, 25], 4), ([18, 21], 4), ([17, 18], 4), ([16, 17], 4),  // right hole cont.
-        ([0, 1], 5), ([1, 2], 5),   // left periodic end (tag 5)
-        ([26, 27], 6), ([27, 28], 6), // right periodic end (tag 6)
-    ];
-
-    let mut coords = Vec::with_capacity(29 * 2);
-    for &[x, y] in &vertex_coords { coords.push(x); coords.push(y); }
-    let conn: Vec<u32> = quad_data.iter().flat_map(|q| q.iter().copied()).collect();
-    let elem_tags = vec![1; 16];
-    let face_conn: Vec<u32> = bdr_data.iter().flat_map(|(e, _)| e.iter().copied()).collect();
-    let face_tags: Vec<i32> = bdr_data.iter().map(|(_, t)| *t).collect();
-
-    let mesh = Mesh::<2>::uniform(coords, conn, elem_tags, ElementType::Quad4,
-                                   face_conn, face_tags, ElementType::Line2);
-
-    // Make periodic: identify right end (tag 6) with left end (tag 5)
-    // Translation [2,0] maps right (x=1) to left (x=-1)
-    let mesh = mesh.make_periodic(&[(5, 6, [2.0_f64, 0.0_f64])], 1e-10)
-        .expect("make_periodic failed");
-
-    // Refine
-    let mut mesh = mesh;
-    for _ in 0..ref_levels { mesh = fem_mesh::refine_uniform(&mesh); }
-    mesh
-}
-
-// ─── Boundary assembly helpers ────────────────────────────────────────────────
-
-fn assemble_boundary_mass(space: &H1Space<Mesh<2>>, mesh: &Mesh<2>, alpha: f64, tags: &[i32], qo: u8) -> CsrMatrix<f64> {
+    let mesh = gen_mesh(a.ref_levels);
+    let space = H1Space::new(mesh.clone(), a.order as u8);
     let n = space.n_dofs();
-    let mut coo = CooMatrix::new(n, n);
-    for f in 0..mesh.n_boundary_faces() as u32 {
-        if !tags.contains(&mesh.face_tag(f)) { continue; }
-        let nodes = mesh.face_nodes(f);
-        let ref_elem = fem_element::lagrange::SegP1;
-        let quad = ref_elem.quadrature(qo);
-        let dofs: Vec<usize> = nodes.iter().map(|&n| n as usize).collect();
-        let n_dofs = dofs.len();
-        let mut me = vec![0.0; n_dofs * n_dofs];
-        let mut phi = vec![0.0; n_dofs];
-        for (qi, xi) in quad.points.iter().enumerate() {
-            let p0 = mesh.node_coords(nodes[0]);
-            let p1 = mesh.node_coords(nodes[1]);
-            let dx = p1[0] - p0[0]; let dy = p1[1] - p0[1];
-            let w = quad.weights[qi] * (dx*dx + dy*dy).sqrt();
-            ref_elem.eval_basis(xi, &mut phi);
-            for i in 0..n_dofs {
-                for j in 0..n_dofs {
-                    me[i * n_dofs + j] += w * alpha * phi[i] * phi[j];
+    println!("\nNumber of finite element unknowns: {}", n);
+
+    let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: a.mat_val }], 3);
+    let mut coo = CooMatrix::from(&stiff);
+
+    if a.h1 {
+        let robin = assemble_mass(&space, &mesh, a.rbc_a_val, &[2], 3);
+        coo.add(&robin);
+    }
+
+    let mut rhs = vec![0.0; n];
+    let nbc = assemble_linear(&space, &mesh, |_, _| a.mat_val * a.nbc_val, &[1], 3);
+    let rbc = assemble_linear(&space, &mesh, |_, _| a.mat_val * a.rbc_b_val, &[2], 3);
+    for i in 0..n { rhs[i] += nbc[i] + rbc[i]; }
+
+    // Periodic BC: penalty method (u_left = u_right)
+    let ld = boundary_dofs(&mesh, space.dof_manager(), &[5]);
+    let rd = boundary_dofs(&mesh, space.dof_manager(), &[6]);
+    let penalty = 1e10;
+    for (&l, &r) in ld.iter().zip(rd.iter()) {
+        coo.add(l as usize, l as usize, penalty);
+        coo.add(r as usize, r as usize, penalty);
+        coo.add(l as usize, r as usize, -penalty);
+        coo.add(r as usize, l as usize, -penalty);
+    }
+
+    // Dirichlet BC on tag 3
+    let ess = boundary_dofs(&mesh, space.dof_manager(), &[3]);
+    let mut stiff = coo.into_csr();
+    for &d in &ess {
+        let du = d as usize;
+        for j in stiff.row_ptr[du]..stiff.row_ptr[du+1] {
+            if stiff.col_idx[j] == du { stiff.values[j] = 1.0; }
+            else { stiff.values[j] = 0.0; }
+        }
+        for row in 0..n {
+            for j in stiff.row_ptr[row]..stiff.row_ptr[row+1] {
+                if stiff.col_idx[j] == du && row != du {
+                    stiff.values[j] = 0.0;
                 }
             }
         }
-        for i in 0..n_dofs {
-            for j in 0..n_dofs {
-                let v = me[i * n_dofs + j];
-                if v != 0.0 { coo.add(dofs[i], dofs[j], v); }
-            }
-        }
+        rhs[du] = a.dbc_val;
     }
-    coo.into_csr()
+
+    let mut x = vec![0.0; n];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 5000, verbose: false, ..Default::default() };
+    fem_solver::solve_cg(&stiff, &rhs, &mut x, &cfg).expect("CG");
+    println!("  Solved.");
+
+    // Copy periodic DOF values
+    for (&l, &r) in ld.iter().zip(rd.iter()) {
+        let avg = 0.5 * (x[l as usize] + x[r as usize]);
+        x[l as usize] = avg;
+        x[r as usize] = avg;
+    }
+
+    let _ = fem_io::mfem::write_gf_file("sol.gf", 2, &x, "H1", a.order as u8, 1);
 }
 
-fn assemble_boundary_linear<F: Fn(&[f64], &[f64]) -> f64>(space: &H1Space<Mesh<2>>, mesh: &Mesh<2>, f: F, tags: &[i32], qo: u8) -> Vec<f64> {
-    let n = space.n_dofs();
-    let mut rhs = vec![0.0; n];
-    for f_idx in 0..mesh.n_boundary_faces() as u32 {
-        if !tags.contains(&mesh.face_tag(f_idx)) { continue; }
-        let nodes = mesh.face_nodes(f_idx);
-        let ref_elem = fem_element::lagrange::SegP1;
-        let quad = ref_elem.quadrature(qo);
-        let dofs: Vec<usize> = nodes.iter().map(|&n| n as usize).collect();
-        let n_dofs = dofs.len();
-        let mut phi = vec![0.0; n_dofs];
-        for (qi, xi) in quad.points.iter().enumerate() {
-            let p0 = mesh.node_coords(nodes[0]);
-            let p1 = mesh.node_coords(nodes[1]);
-            let dx = p1[0] - p0[0]; let dy = p1[1] - p0[1];
-            let w = quad.weights[qi] * (dx*dx + dy*dy).sqrt();
-            let normal = [-dy, dx]; // outward normal (unnormalized length = edge_len)
-            let xp = [(1.0 - xi[0]) * p0[0] + xi[0] * p1[0],
-                      (1.0 - xi[0]) * p0[1] + xi[0] * p1[1]];
-            let val = f(&xp, &normal);
-            ref_elem.eval_basis(xi, &mut phi);
-            for i in 0..n_dofs { rhs[dofs[i]] += w * val * phi[i]; }
+fn gen_mesh(rl: usize) -> Mesh<2> {
+    let a = unsafe { HOLE_RADIUS / std::f64::consts::SQRT_2 };
+    let v: [[f64;2];29] = [
+        [-1.0,-0.5],[-1.0,0.0],[-1.0,0.5],
+        [-0.5-a,-a],[-0.5-a,0.0],[-0.5-a,a],
+        [-0.5,-0.5],[-0.5,-a],[-0.5,a],[-0.5,0.5],
+        [-0.5+a,-a],[-0.5+a,0.0],[-0.5+a,a],
+        [0.0,-0.5],[0.0,0.0],[0.0,0.5],
+        [0.5-a,-a],[0.5-a,0.0],[0.5-a,a],
+        [0.5,-0.5],[0.5,-a],[0.5,a],[0.5,0.5],
+        [0.5+a,-a],[0.5+a,0.0],[0.5+a,a],
+        [1.0,-0.5],[1.0,0.0],[1.0,0.5]];
+    let q:[[u32;4];16] = [
+        [0,3,4,1],[1,4,5,2],[5,8,9,2],[8,12,15,9],
+        [11,14,15,12],[10,13,14,11],[6,13,10,7],[0,6,7,3],
+        [13,16,17,14],[14,17,18,15],[18,21,22,15],[21,25,28,22],
+        [24,27,28,25],[23,26,27,24],[19,26,23,20],[13,19,20,16]];
+    let bf:[([u32;2],i32);28] = [
+        ([0,6],1),([6,13],1),([13,19],1),([19,26],1),
+        ([28,22],2),([22,15],2),([15,9],2),([9,2],2),
+        ([7,3],3),([10,7],3),([11,10],3),([12,11],3),
+        ([8,12],3),([5,8],3),([4,5],3),([3,4],3),
+        ([20,16],4),([23,20],4),([24,23],4),([25,24],4),
+        ([21,25],4),([18,21],4),([17,18],4),([16,17],4),
+        ([0,1],5),([1,2],5),([26,27],6),([27,28],6)];
+    let c:Vec<f64> = v.iter().flat_map(|&[x,y]|[x,y]).collect();
+    let e:Vec<u32> = q.iter().flat_map(|q|q.iter().copied()).collect();
+    let fc:Vec<u32> = bf.iter().flat_map(|(e,_)|e.iter().copied()).collect();
+    let ft:Vec<i32> = bf.iter().map(|(_,t)|*t).collect();
+    let mut m = Mesh::<2>::uniform(c,e,vec![1;16],ElementType::Quad4,fc,ft,ElementType::Line2);
+    for _ in 0..rl { m = fem_mesh::refine_uniform(&m); }
+    m.set_curvature(3);
+    m.transform(hole_transform);
+    m
+}
+
+fn hole_transform(p:[f64;2])->[f64;2] {
+    let tol=1e-4;let(u,v)=(p[0],p[1]);
+    if v>0.5-tol || v< -0.5+tol || u>1.0-tol || u< -1.0+tol || u.abs()<tol {return p}
+    let qt=|du:f64,fv:f64|{let a=unsafe{HOLE_RADIUS/std::f64::consts::SQRT_2};
+        let d=4.0*a*(std::f64::consts::SQRT_2-2.0*a)*(1.0-2.0*fv);
+        let v0=(1.0+std::f64::consts::SQRT_2)*(std::f64::consts::SQRT_2*a-2.0*fv)*((4.0-3.0*std::f64::consts::SQRT_2)*a+(8.0*(std::f64::consts::SQRT_2-1.0)*a-2.0)*fv)/d;
+        let r=2.0*((std::f64::consts::SQRT_2-1.0)*a*a*(1.0-4.0*fv)+2.0*(1.0+std::f64::consts::SQRT_2*(1.0+2.0*(2.0*a-std::f64::consts::SQRT_2-1.0)*a))*fv*fv)/d;
+        let t=if fv.abs()>1e-15{(fv/r).asin()*du/fv}else{0.0};
+        (r*t.sin(),r*t.cos()-v0)};
+    if u>0.0{
+        if v>(u-0.5).abs(){let(x,y)=qt(u-0.5,v);return[x+0.5,y]}
+        if v< -(u-0.5).abs(){let(x,y)=qt(u-0.5,-v);return[x+0.5,-y]}
+        if u-0.5>v.abs(){let(x,y)=qt(v,u-0.5);return[x+0.5,y]}
+        if u-0.5< -v.abs(){let(x,y)=qt(v,0.5-u);return[-x+0.5,y]}
+    }else{
+        if v>(u+0.5).abs(){let(x,y)=qt(u+0.5,v);return[x-0.5,y]}
+        if v< -(u+0.5).abs(){let(x,y)=qt(u+0.5,-v);return[x-0.5,-y]}
+        if u+0.5>v.abs(){let(x,y)=qt(v,u+0.5);return[x-0.5,y]}
+        if u+0.5< -v.abs(){let(x,y)=qt(v,-0.5-u);return[-x-0.5,y]}
+    }
+    p
+}
+
+fn assemble_mass(s:&H1Space<Mesh<2>>,m:&Mesh<2>,alpha:f64,tags:&[i32],qo:u8)->CooMatrix<f64>{
+    let n=s.n_dofs();let mut coo=CooMatrix::new(n,n);
+    for f in 0..m.n_boundary_faces() as u32{
+        if!tags.contains(&m.face_tag(f)){continue}
+        let ns=m.face_nodes(f);let re=fem_element::lagrange::SegP1;let q=re.quadrature(qo);
+        let dofs:Vec<_>=ns.iter().map(|&n|n as usize).collect();let nd=dofs.len();
+        let mut me=vec![0.0;nd*nd];let mut phi=vec![0.0;nd];
+        for(qi,xi) in q.points.iter().enumerate(){
+            let p0=m.node_coords(ns[0]);let p1=m.node_coords(ns[1]);
+            let(dx,dy)=(p1[0]-p0[0],p1[1]-p0[1]);let w=q.weights[qi]*(dx*dx+dy*dy).sqrt();
+            re.eval_basis(xi,&mut phi);
+            for i in 0..nd{for j in 0..nd{me[i*nd+j]+=w*alpha*phi[i]*phi[j]}}
+        }
+        for i in 0..nd{for j in 0..nd{let v=me[i*nd+j];if v!=0.0{coo.add(dofs[i],dofs[j],v)}}}
+    }
+    coo
+}
+
+fn assemble_linear<F:Fn(&[f64],&[f64])->f64>(s:&H1Space<Mesh<2>>,m:&Mesh<2>,f:F,tags:&[i32],qo:u8)->Vec<f64>{
+    let n=s.n_dofs();let mut rhs=vec![0.0;n];
+    for fi in 0..m.n_boundary_faces() as u32{
+        if!tags.contains(&m.face_tag(fi)){continue}
+        let ns=m.face_nodes(fi);let re=fem_element::lagrange::SegP1;let q=re.quadrature(qo);
+        let dofs:Vec<_>=ns.iter().map(|&n|n as usize).collect();let nd=dofs.len();let mut phi=vec![0.0;nd];
+        for(qi,xi) in q.points.iter().enumerate(){
+            let p0=m.node_coords(ns[0]);let p1=m.node_coords(ns[1]);
+            let(dx,dy)=(p1[0]-p0[0],p1[1]-p0[1]);let w=q.weights[qi]*(dx*dx+dy*dy).sqrt();
+            let normal=[-dy,dx];let xp=[(1.0-xi[0])*p0[0]+xi[0]*p1[0],(1.0-xi[0])*p0[1]+xi[0]*p1[1]];
+            let val=f(&xp,&normal);re.eval_basis(xi,&mut phi);
+            for i in 0..nd{rhs[dofs[i]]+=w*val*phi[i]}
         }
     }
     rhs
 }
 
-// ─── CLI ──────────────────────────────────────────────────────────────────────
-
-struct Args {
-    h1: bool, order: i32, sigma: f64, kappa: f64, ref_levels: usize,
-    mat_val: f64, dbc_val: f64, nbc_val: f64, rbc_a_val: f64, rbc_b_val: f64,
-    hole_radius: f64, visualization: bool,
-}
-
-fn parse_args() -> Args {
-    let mut a = Args {
-        h1: true, order: 1, sigma: -1.0, kappa: -1.0, ref_levels: 2,
-        mat_val: 1.0, dbc_val: 0.0, nbc_val: 1.0, rbc_a_val: 1.0, rbc_b_val: 1.0,
-        hole_radius: 0.2, visualization: false,
-    };
-    let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "-h1" | "--continuous" => a.h1 = true,
-            "-dg" | "--discontinuous" => a.h1 = false,
-            "-o" | "--order" => a.order = it.next().and_then(|s| s.parse().ok()).unwrap_or(1),
-            "-s" | "--sigma" => a.sigma = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1.0),
-            "-k" | "--kappa" => a.kappa = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1.0),
-            "-rs" | "--refine-serial" => a.ref_levels = it.next().and_then(|s| s.parse().ok()).unwrap_or(2),
-            "-mat" | "--material-value" => a.mat_val = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
-            "-dbc" | "--dirichlet-value" => a.dbc_val = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0),
-            "-nbc" | "--neumann-value" => a.nbc_val = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
-            "-rbc-a" | "--robin-a-value" => a.rbc_a_val = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
-            "-rbc-b" | "--robin-b-value" => a.rbc_b_val = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
-            "-a" | "--radius" => a.hole_radius = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.2),
-            "-vis" | "--visualization" => a.visualization = true,
-            "-no-vis" | "--no-visualization" => a.visualization = false,
-            _ => {}
-        }
-    }
+struct Args{h1:bool,order:i32,sigma:f64,kappa:f64,ref_levels:usize,mat_val:f64,dbc_val:f64,nbc_val:f64,rbc_a_val:f64,rbc_b_val:f64,hole_radius:f64,visualization:bool}
+fn parse_args()->Args{
+    let mut a=Args{h1:true,order:1,sigma:-1.0,kappa:-1.0,ref_levels:2,mat_val:1.0,dbc_val:0.0,nbc_val:1.0,rbc_a_val:1.0,rbc_b_val:1.0,hole_radius:0.2,visualization:false};
+    let mut it=std::env::args().skip(1);
+    while let Some(arg)=it.next(){match arg.as_str(){
+        "-h1"|"--continuous"=>a.h1=true,"-dg"|"--discontinuous"=>a.h1=false,
+        "-o"|"--order"=>a.order=it.next().and_then(|s|s.parse().ok()).unwrap_or(1),
+        "-rs"|"--refine-serial"=>a.ref_levels=it.next().and_then(|s|s.parse().ok()).unwrap_or(2),
+        "-mat"|"--material-value"=>a.mat_val=it.next().and_then(|s|s.parse().ok()).unwrap_or(1.0),
+        "-dbc"|"--dirichlet-value"=>a.dbc_val=it.next().and_then(|s|s.parse().ok()).unwrap_or(0.0),
+        "-nbc"|"--neumann-value"=>a.nbc_val=it.next().and_then(|s|s.parse().ok()).unwrap_or(1.0),
+        "-rbc-a"|"--robin-a-value"=>a.rbc_a_val=it.next().and_then(|s|s.parse().ok()).unwrap_or(1.0),
+        "-rbc-b"|"--robin-b-value"=>a.rbc_b_val=it.next().and_then(|s|s.parse().ok()).unwrap_or(1.0),
+        "-a"|"--radius"=>a.hole_radius=it.next().and_then(|s|s.parse().ok()).unwrap_or(0.2),
+        "-no-vis"|"--no-visualization"=>a.visualization=false,_=>{}}}
     a
 }
