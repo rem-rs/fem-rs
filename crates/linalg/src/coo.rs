@@ -88,6 +88,26 @@ impl<T: Scalar> CooMatrix<T> {
         self.vals.append(&mut other.vals);
     }
 
+    /// Build a COO matrix from an existing CSR matrix by iterating over
+    /// all stored entries.  Dimensions are preserved; duplicate (row, col)
+    /// entries from the CSR are emitted as separate triplets (they will be
+    /// summed on the next `into_csr()` call).
+    pub fn from_csr(csr: &CsrMatrix<T>) -> Self {
+        let nrows = csr.nrows;
+        let ncols = csr.ncols;
+        let nnz = csr.values.len();
+        let mut coo = Self::new(nrows, ncols);
+        coo.reserve(nnz);
+        for row in 0..nrows {
+            for j in csr.row_ptr[row]..csr.row_ptr[row + 1] {
+                coo.rows.push(row as u32);
+                coo.cols.push(csr.col_idx[j]);
+                coo.vals.push(csr.values[j]);
+            }
+        }
+        coo
+    }
+
     /// Convert to CSR, summing duplicate entries.
     ///
     /// Sorts all (row, col, val) triples globally by packed u64 key

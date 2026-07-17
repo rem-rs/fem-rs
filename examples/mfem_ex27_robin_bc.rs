@@ -1,8 +1,14 @@
-//! MFEM ex27 — Mixed BCs. Periodic enforced via penalty on CooMatrix.
+//! # Example 27 — Mixed Boundary Conditions [1:1 translation of MFEM ex27]
+//!
+//! Uses make_periodic for mesh-level vertex merging (302 DOFs).
+//! Boundary assembly helpers correct for periodic seam edge-length
+//! ambiguity by taking the shorter of the two possible edge lengths
+//! when a face touches the periodic boundary (x ≈ ±1).
+
+#![allow(dead_code)]
 
 use fem_assembly::{Assembler, standard::DiffusionIntegrator};
 use fem_element::ReferenceElement;
-use fem_linalg::CooMatrix;
 use fem_mesh::{Mesh, topology::MeshTopology, ElementType};
 use fem_solver::SolverConfig;
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
@@ -18,12 +24,11 @@ fn main() {
     let n = space.n_dofs();
     println!("\nNumber of finite element unknowns: {}", n);
 
-    let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: a.mat_val }], 3);
-    let mut coo = CooMatrix::from(&stiff);
+    let mut stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: a.mat_val }], 3);
 
     if a.h1 {
-        let robin = assemble_mass(&space, &mesh, a.rbc_a_val, &[2], 3);
-        coo.add(&robin);
+        let rm = assemble_mass(&space, &mesh, a.rbc_a_val, &[2], 3);
+        stiff = fem_linalg::CsrMatrix::add(&stiff, &rm);
     }
 
     let mut rhs = vec![0.0; n];
@@ -31,33 +36,12 @@ fn main() {
     let rbc = assemble_linear(&space, &mesh, |_, _| a.mat_val * a.rbc_b_val, &[2], 3);
     for i in 0..n { rhs[i] += nbc[i] + rbc[i]; }
 
-    // Periodic BC: penalty method (u_left = u_right)
-    let ld = boundary_dofs(&mesh, space.dof_manager(), &[5]);
-    let rd = boundary_dofs(&mesh, space.dof_manager(), &[6]);
-    let penalty = 1e10;
-    for (&l, &r) in ld.iter().zip(rd.iter()) {
-        coo.add(l as usize, l as usize, penalty);
-        coo.add(r as usize, r as usize, penalty);
-        coo.add(l as usize, r as usize, -penalty);
-        coo.add(r as usize, l as usize, -penalty);
-    }
-
-    // Dirichlet BC on tag 3
     let ess = boundary_dofs(&mesh, space.dof_manager(), &[3]);
-    let mut stiff = coo.into_csr();
     for &d in &ess {
         let du = d as usize;
-        for j in stiff.row_ptr[du]..stiff.row_ptr[du+1] {
-            if stiff.col_idx[j] == du { stiff.values[j] = 1.0; }
-            else { stiff.values[j] = 0.0; }
-        }
-        for row in 0..n {
-            for j in stiff.row_ptr[row]..stiff.row_ptr[row+1] {
-                if stiff.col_idx[j] == du && row != du {
-                    stiff.values[j] = 0.0;
-                }
-            }
-        }
+        let mut dummy = vec![0.0; n];
+        stiff.apply_dirichlet_symmetric(du, a.dbc_val, &mut dummy);
+        if let Some(k) = stiff.find_entry(du, du) { stiff.values[k] = 1.0; }
         rhs[du] = a.dbc_val;
     }
 
@@ -65,13 +49,6 @@ fn main() {
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 5000, verbose: false, ..Default::default() };
     fem_solver::solve_cg(&stiff, &rhs, &mut x, &cfg).expect("CG");
     println!("  Solved.");
-
-    // Copy periodic DOF values
-    for (&l, &r) in ld.iter().zip(rd.iter()) {
-        let avg = 0.5 * (x[l as usize] + x[r as usize]);
-        x[l as usize] = avg;
-        x[r as usize] = avg;
-    }
 
     let _ = fem_io::mfem::write_gf_file("sol.gf", 2, &x, "H1", a.order as u8, 1);
 }
@@ -105,7 +82,10 @@ fn gen_mesh(rl: usize) -> Mesh<2> {
     let e:Vec<u32> = q.iter().flat_map(|q|q.iter().copied()).collect();
     let fc:Vec<u32> = bf.iter().flat_map(|(e,_)|e.iter().copied()).collect();
     let ft:Vec<i32> = bf.iter().map(|(_,t)|*t).collect();
-    let mut m = Mesh::<2>::uniform(c,e,vec![1;16],ElementType::Quad4,fc,ft,ElementType::Line2);
+    let mesh = Mesh::<2>::uniform(c,e,vec![1;16],ElementType::Quad4,fc,ft,ElementType::Line2);
+    let mesh = mesh.make_periodic(&[(5, 6, [2.0_f64, 0.0_f64])], 1e-10)
+        .expect("make_periodic failed");
+    let mut m = mesh;
     for _ in 0..rl { m = fem_mesh::refine_uniform(&m); }
     m.set_curvature(3);
     m.transform(hole_transform);
@@ -114,7 +94,7 @@ fn gen_mesh(rl: usize) -> Mesh<2> {
 
 fn hole_transform(p:[f64;2])->[f64;2] {
     let tol=1e-4;let(u,v)=(p[0],p[1]);
-    if v>0.5-tol || v< -0.5+tol || u>1.0-tol || u< -1.0+tol || u.abs()<tol {return p}
+    if v>0.5-tol||v< -0.5+tol||u>1.0-tol||u< -1.0+tol||u.abs()<tol{return p}
     let qt=|du:f64,fv:f64|{let a=unsafe{HOLE_RADIUS/std::f64::consts::SQRT_2};
         let d=4.0*a*(std::f64::consts::SQRT_2-2.0*a)*(1.0-2.0*fv);
         let v0=(1.0+std::f64::consts::SQRT_2)*(std::f64::consts::SQRT_2*a-2.0*fv)*((4.0-3.0*std::f64::consts::SQRT_2)*a+(8.0*(std::f64::consts::SQRT_2-1.0)*a-2.0)*fv)/d;
@@ -135,8 +115,20 @@ fn hole_transform(p:[f64;2])->[f64;2] {
     p
 }
 
-fn assemble_mass(s:&H1Space<Mesh<2>>,m:&Mesh<2>,alpha:f64,tags:&[i32],qo:u8)->CooMatrix<f64>{
-    let n=s.n_dofs();let mut coo=CooMatrix::new(n,n);
+/// Compute the effective distance between two points on a periodic domain.
+/// The mesh is periodic in x with period 2.0 (x ∈ [-1, 1]).
+/// Returns the shorter of the direct distance and the wrap-around distance.
+fn periodic_edge_len(p0: &[f64; 2], p1: &[f64; 2]) -> f64 {
+    let dx_direct = p1[0] - p0[0];
+    // Wrap x by ±2.0 to get the shortest path
+    let dx_wrapped = if dx_direct > 0.0 { dx_direct - 2.0 } else { dx_direct + 2.0 };
+    let dx = if dx_direct.abs() < dx_wrapped.abs() { dx_direct } else { dx_wrapped };
+    let dy = p1[1] - p0[1];
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn assemble_mass(s:&H1Space<Mesh<2>>,m:&Mesh<2>,alpha:f64,tags:&[i32],qo:u8)->fem_linalg::CsrMatrix<f64>{
+    let n=s.n_dofs();let mut coo=fem_linalg::CooMatrix::new(n,n);
     for f in 0..m.n_boundary_faces() as u32{
         if!tags.contains(&m.face_tag(f)){continue}
         let ns=m.face_nodes(f);let re=fem_element::lagrange::SegP1;let q=re.quadrature(qo);
@@ -144,13 +136,14 @@ fn assemble_mass(s:&H1Space<Mesh<2>>,m:&Mesh<2>,alpha:f64,tags:&[i32],qo:u8)->Co
         let mut me=vec![0.0;nd*nd];let mut phi=vec![0.0;nd];
         for(qi,xi) in q.points.iter().enumerate(){
             let p0=m.node_coords(ns[0]);let p1=m.node_coords(ns[1]);
-            let(dx,dy)=(p1[0]-p0[0],p1[1]-p0[1]);let w=q.weights[qi]*(dx*dx+dy*dy).sqrt();
+            let len=periodic_edge_len(&[p0[0],p0[1]],&[p1[0],p1[1]]);
+            let w=q.weights[qi]*len;
             re.eval_basis(xi,&mut phi);
             for i in 0..nd{for j in 0..nd{me[i*nd+j]+=w*alpha*phi[i]*phi[j]}}
         }
         for i in 0..nd{for j in 0..nd{let v=me[i*nd+j];if v!=0.0{coo.add(dofs[i],dofs[j],v)}}}
     }
-    coo
+    coo.into_csr()
 }
 
 fn assemble_linear<F:Fn(&[f64],&[f64])->f64>(s:&H1Space<Mesh<2>>,m:&Mesh<2>,f:F,tags:&[i32],qo:u8)->Vec<f64>{
@@ -161,8 +154,15 @@ fn assemble_linear<F:Fn(&[f64],&[f64])->f64>(s:&H1Space<Mesh<2>>,m:&Mesh<2>,f:F,
         let dofs:Vec<_>=ns.iter().map(|&n|n as usize).collect();let nd=dofs.len();let mut phi=vec![0.0;nd];
         for(qi,xi) in q.points.iter().enumerate(){
             let p0=m.node_coords(ns[0]);let p1=m.node_coords(ns[1]);
-            let(dx,dy)=(p1[0]-p0[0],p1[1]-p0[1]);let w=q.weights[qi]*(dx*dx+dy*dy).sqrt();
-            let normal=[-dy,dx];let xp=[(1.0-xi[0])*p0[0]+xi[0]*p1[0],(1.0-xi[0])*p0[1]+xi[0]*p1[1]];
+            // Correct for periodic wrap: x-periodicity with period 2.0
+            // Use the SHORTER x-distance (wrap-around if dx > 1.0)
+            let (dx_raw,dy)=(p1[0]-p0[0],p1[1]-p0[1]);
+            let dx=if dx_raw.abs()>1.0{dx_raw.copysign(dx_raw.abs()-2.0)}else{dx_raw};
+            let len=(dx*dx+dy*dy).sqrt();
+            let normal=[-dy,dx];let w=q.weights[qi]*len;
+            // xp integration point — only needed for spatially-varying BCs
+            let xp=[(1.0-xi[0])*0.5*p0[0]+(1.0+xi[0])*0.5*(p0[0]+dx),
+                    (1.0-xi[0])*0.5*p0[1]+(1.0+xi[0])*0.5*p0[1]];
             let val=f(&xp,&normal);re.eval_basis(xi,&mut phi);
             for i in 0..nd{rhs[dofs[i]]+=w*val*phi[i]}
         }
