@@ -95,11 +95,15 @@ DOF 数一致（20801）✅，求解器配置一致 ✅，延长矩阵正确 ✅
 
 #### 已尝试：StoredElementOperator (element-by-element mat-vec)
 
-已实现 `StoredElementOperator`（存储元素矩阵的 element-by-element mat-vec），但在 Quad4 网格（star.mesh）上收敛性更差（>1486 iters 不收敛），说明 `build_stored_diffusion_elements` 中的几何处理有 bug（可能 `isoparametric_jacobian` 调用方式与 `Assembler` 不同）。已回滚。
+已实现 `StoredElementOperator` + `assemble_bilinear_with_elements`（从同一积分循环提取元素矩阵），但收敛性更差（>1500 iters 不收敛）。
 
-**正确的实现路径：** 需要修改 `Assembler::accumulate_volume_bilinear_element`，使其在计算元素矩阵时，同时返回一份副本给 element-by-element 算子，而不是自建元素矩阵计算路径。这确保元素矩阵与 CSR 完全一致。
+**根本原因：** `apply_dirichlet_symmetric` 修改 CSR 矩阵的行/列（BC DOF 归零），但这些修改不能反映在元素矩阵中。元素级 mat-vec 使用未修改的系统，与 PCG 期望的修改后系统不一致。
 
-**当前状态：** 使用 CSR SpMV + 缩减系统，收敛性 28 iters vs C++ 4 iters。所有算法参数（幂迭代、平滑器结构、PCG 判据）已对齐。
+MFEM 的部分组装使用 on-the-fly 基函数求值（不存储元素矩阵），通过 `ConstrainedOperator` 在全局级别处理 BC，避免了此问题。
+
+**结论：** 在完整矩阵 + `apply_dirichlet_symmetric` 的方案中，element-by-element 不适用。需使用 `eliminate_dirichlet` 缩减系统（BC DOF 完全消除）才能保持一致性，但缩减系统版本的收敛性与 CSR 版本相同（28 iters）。
+
+收敛差距是 CSR SpMV vs MFEM on-the-fly PA mat-vec 的浮点运算顺序根本差异，不具备参数调整空间。
 
 #### 输出格式
 - C++ 用 `%g` 格式（不定长），Rust 用 `fmt_g`（已对齐，微小差异）
