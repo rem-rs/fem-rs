@@ -575,9 +575,8 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         }
     }
     let la = fem_to_linlvo_csr(&prec_mat);
-    let gs = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother");
-    // pc_i = ScaledOperator(pc_r, s) where s = -1 for HERMITIAN convention
-    let gs_im = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother_im");
+    let gs = GSSmoother::from_csr(&la).expect("GSSmoother");
+    let gs_im = GSSmoother::from_csr(&la).expect("GSSmoother_im");
     let pc_im = ScaledPrecond { inner: gs_im, scale: -1.0 };
     let bp = BlockDiagPrecondPair { pre_re: gs, pre_im: pc_im, n };
 

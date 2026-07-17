@@ -63,10 +63,10 @@ pub use linlvo::DenseVec;
 /// Use with PCG for SPD systems:
 /// ```ignore
 /// use fem_solver::GSSmoother;
-/// let prec = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother");
+/// let prec = GSSmoother::from_csr(&la).expect("GSSmoother");
 /// let res = solve_pcg(&a, &b, &mut x, &prec, 1e-12, 200, true);
 /// ```
-pub type GSSmoother = linlvo::SsorPrecond<f64>;
+pub type GSSmoother = linlvo::GsPrecond<f64>;
 
 #[cfg(feature = "gpu")]
 pub mod cg_gpu;

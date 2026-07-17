@@ -405,7 +405,7 @@ fn solve_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     let pc_mat = VectorAssembler::assemble_bilinear(
         &space, &[&curl_curl, &pc_vec_mass1, &pc_vec_mass2], quad_order);
     let pc_linlvo = fem_to_linlvo_csr(&pc_mat);
-    let gsmoother = GSSmoother::from_csr(&pc_linlvo, 1.0).expect("GSSmoother setup");
+    let gsmoother = GSSmoother::from_csr(&pc_linlvo).expect("GSSmoother setup");
 
     let s: f64 = if cfg.herm_conv { -1.0 } else { 1.0 };
 
@@ -855,7 +855,7 @@ fn solve_p1_3d(mesh: &Mesh<3>, cfg: &Config, omega: f64,
                    &VectorMassIntegrator { alpha: neg_mass_coef },
                    &VectorMassIntegrator { alpha: loss_coef }], quad_order);
     let pc_linlvo = fem_to_linlvo_csr(&pc_mat);
-    let gsmoother = GSSmoother::from_csr(&pc_linlvo, 1.0).expect("GSSmoother");
+    let gsmoother = GSSmoother::from_csr(&pc_linlvo).expect("GSSmoother");
     let s: f64 = if cfg.herm_conv { -1.0 } else { 1.0 };
 
     let mut rhs = vec![0.0; 2 * n];
