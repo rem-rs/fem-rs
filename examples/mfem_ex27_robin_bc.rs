@@ -102,15 +102,23 @@ fn hole_transform(p:[f64;2])->[f64;2] {
         let t=if fv.abs()>1e-15{(fv/r).asin()*du/fv}else{0.0};
         (r*t.sin(),r*t.cos()-v0)};
     if u>0.0{
+        // Top-right: quad_trans(u-0.5, v) → (x, y)
         if v>(u-0.5).abs(){let(x,y)=qt(u-0.5,v);return[x+0.5,y]}
+        // Bottom-right: quad_trans(u-0.5, -v) → (x, y), then y = -y
         if v< -(u-0.5).abs(){let(x,y)=qt(u-0.5,-v);return[x+0.5,-y]}
-        if u-0.5>v.abs(){let(x,y)=qt(v,u-0.5);return[x+0.5,y]}
-        if u-0.5< -v.abs(){let(x,y)=qt(v,0.5-u);return[-x+0.5,y]}
+        // Right: quad_trans(v, u-0.5) → SWAPPED: x gets y, y gets x
+        if u-0.5>v.abs(){let(x,y)=qt(v,u-0.5);return[y+0.5,x]}
+        // Left: quad_trans(v, 0.5-u) → SWAPPED: x gets -y+0.5, y gets x
+        if u-0.5< -v.abs(){let(x,y)=qt(v,0.5-u);return[-y+0.5,x]}
     }else{
+        // Top-left: quad_trans(u+0.5, v) → (x, y), then x -= 0.5
         if v>(u+0.5).abs(){let(x,y)=qt(u+0.5,v);return[x-0.5,y]}
+        // Bottom-left: quad_trans(u+0.5, -v) → (x, y), then x -= 0.5, y = -y
         if v< -(u+0.5).abs(){let(x,y)=qt(u+0.5,-v);return[x-0.5,-y]}
-        if u+0.5>v.abs(){let(x,y)=qt(v,u+0.5);return[x-0.5,y]}
-        if u+0.5< -v.abs(){let(x,y)=qt(v,-0.5-u);return[-x-0.5,y]}
+        // Right: quad_trans(v, u+0.5) → SWAPPED: x gets y, y gets x, then x -= 0.5
+        if u+0.5>v.abs(){let(x,y)=qt(v,u+0.5);return[y-0.5,x]}
+        // Left: quad_trans(v, -0.5-u) → SWAPPED: x gets -y-0.5, y gets x
+        if u+0.5< -v.abs(){let(x,y)=qt(v,-0.5-u);return[-y-0.5,x]}
     }
     p
 }
