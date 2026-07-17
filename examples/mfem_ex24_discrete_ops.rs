@@ -505,11 +505,17 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
     solve_pcg_jacobi(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
 
-    // (b) Discrete divergence interpolant via mixed matrix (same as C++ DivergenceInterpolator)
+    // (b) Discrete divergence interpolant via DLO (matches C++ DivergenceInterpolator)
+    let dlo_div = DiscreteLinearOperator::divergence(&rt, &l2);
     let mut f_interp = vec![0.0; l2.n_dofs()];
     let mut interp_rhs = vec![0.0; l2.n_dofs()];
-    d.spmv(&v, &mut interp_rhs);
-    solve_pcg_jacobi(&mass, &interp_rhs, &mut f_interp, &cfg).expect("interp mass solve");
+    if let Ok(dlo) = dlo_div {
+        dlo.spmv(&v, &mut f_interp);
+    } else {
+        // Fallback: use mixed matrix D (works for RT0→P0)
+        d.spmv(&v, &mut interp_rhs);
+        solve_pcg_jacobi(&mass, &interp_rhs, &mut f_interp, &cfg).expect("interp mass solve");
+    }
 
     // (c) Exact L² projection of div(grad p) into L²
     let rhs_ex = fem_assembly::Assembler::assemble_linear(&l2, &[
