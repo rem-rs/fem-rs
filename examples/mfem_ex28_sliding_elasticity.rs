@@ -128,41 +128,46 @@ fn build_normal_constraints(
     constrained_att: &[i32],
 ) -> (CsrMatrix<f64>, Vec<usize>) {
     let n_scalar = space.n_scalar_dofs();
-    let mut rows: Vec<(usize, usize, f64)> = Vec::new(); // (row, col, val)
+    // For each constrained boundary node, accumulate (nx, ny, count)
+    use std::collections::HashMap;
+    let mut node_normals: HashMap<u32, (f64, f64, usize)> = HashMap::new();
 
-    // For each constrained attribute, find DOFs on that boundary
-    let mut row = 0usize;
     for &att in constrained_att {
         for f in 0..mesh.n_boundary_faces() as u32 {
             if mesh.face_tag(f) != att { continue; }
             let nodes = mesh.face_nodes(f);
+            let p0 = mesh.node_coords(nodes[0]);
+            let p1 = mesh.node_coords(nodes[1]);
+            let dx = p1[0] - p0[0]; let dy = p1[1] - p0[1];
+            let len = (dx*dx + dy*dy).sqrt();
+            if len < 1e-14 { continue; }
+            // Outward normal (CCW perpendicular): (dy, -dx) / len
+            let nx = dy / len;
+            let ny = -dx / len;
             for &nid in nodes.iter() {
-                // Compute unit normal for this boundary face
-                let p0 = mesh.node_coords(nodes[0]);
-                let p1 = mesh.node_coords(nodes[1]);
-                let dx = p1[0] - p0[0]; let dy = p1[1] - p0[1];
-                let len = (dx*dx + dy*dy).sqrt();
-                if len < 1e-14 { continue; }
-                // Outward normal (CCW perpendicular to edge direction)
-                let nx = dy / len;
-                let ny = -dx / len;
-
-                // Constraint: nx * u_x + ny * u_y = 0
-                // u_x DOF = nid, u_y DOF = nid + n_scalar
-                let dof_x = nid as usize;
-                let dof_y = dof_x + n_scalar;
-
-                rows.push((row, dof_x, nx));
-                rows.push((row, dof_y, ny));
-                row += 1;
+                let entry = node_normals.entry(nid).or_insert((0.0, 0.0, 0));
+                entry.0 += nx; entry.1 += ny; entry.2 += 1;
             }
         }
     }
 
-    let n_rows = row;
-    let n_total_space = space.n_dofs();
-    let mut coo = CooMatrix::new(n_rows, n_total_space);
-    for (r, c, v) in &rows { coo.add(*r, *c, *v); }
+    // Create one constraint row per unique node, using averaged normal
+    let n_total = space.n_dofs();
+    let mut coo = CooMatrix::new(node_normals.len(), n_total);
+    let mut sorted_nodes: Vec<_> = node_normals.into_iter().collect();
+    sorted_nodes.sort_by_key(|(n, _)| *n); // deterministic order
+
+    let n_rows = sorted_nodes.len();
+    for (row, (nid, (nx_sum, ny_sum, count))) in sorted_nodes.iter().enumerate() {
+        let inv = 1.0 / (*count as f64);
+        let nx = nx_sum * inv;
+        let ny = ny_sum * inv;
+        let dof_x = *nid as usize;
+        let dof_y = dof_x + n_scalar;
+        coo.add(row, dof_x, nx);
+        coo.add(row, dof_y, ny);
+    }
+
     (coo.into_csr(), (0..n_rows).collect())
 }
 
