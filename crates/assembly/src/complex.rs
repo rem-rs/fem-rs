@@ -1,18 +1,18 @@
 ﻿//! Complex-valued finite element assembly.
 //!
-//! Implements a **2脳2 real-block** strategy that avoids introducing complex
-//! number generics: the complex DOF vector `u = u_re + i路u_im` is stored as
-//! two separate real vectors, and the system matrix is a 2脳2 block:
+//! Implements a **2×2 real-block** strategy that avoids introducing complex
+//! number generics: the complex DOF vector `u = u_re + i·u_im` is stored as
+//! two separate real vectors, and the system matrix is a 2×2 block:
 //!
 //! ```text
-//! [ K - 蠅虏M    -蠅C ] [ u_re ]   [ f_re ]
-//! [ 蠅C       K-蠅虏M  ] [ u_im ] = [ f_im ]
+//! [ K - ω²M    -ωC ] [ u_re ]   [ f_re ]
+//! [ ωC       K-ω²M  ] [ u_im ] = [ f_im ]
 //! ```
 //!
 //! where `K`, `M`, `C` are standard real sparse matrices assembled from
 //! existing integrators.
 //!
-//! # Typical use 鈥?scalar H鹿 Helmholtz
+//! # Typical use — scalar H¹ Helmholtz
 //! ```rust,ignore
 //! use fem_assembly::complex::{ComplexAssembler, ComplexSystem};
 //! use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
@@ -21,12 +21,12 @@
 //! let space = H1Space::new(mesh, 1);
 //! let omega = 2.0 * PI;
 //!
-//! // 鈭捨攗 鈭?蠅虏u + i蠅路c路u = f
+//! // −∇·κ∇ + ω²ρu + iω·c·u = f
 //! let sys = ComplexAssembler::assemble(
 //!     &space,
 //!     &[&DiffusionIntegrator { kappa: 1.0 }],  // stiffness K
-//!     &[&MassIntegrator { rho: 1.0 }],           // mass M (multiplied by 蠅虏)
-//!     &[&MassIntegrator { rho: 0.1 }],           // damping C (multiplied by 蠅)
+//!     &[&MassIntegrator { rho: 1.0 }],           // mass M (multiplied by ω²)
+//!     &[&MassIntegrator { rho: 0.1 }],           // damping C (multiplied by ω)
 //!     omega, 3,
 //! );
 //! let x = sys.solve_gmres(&f_re, &f_im, &cfg)?;
@@ -41,6 +41,53 @@ use crate::assembler::Assembler;
 use crate::vector_assembler::VectorAssembler;
 use crate::integrator::{BilinearIntegrator, LinearIntegrator, QpData};
 use crate::vector_integrator::VectorBilinearIntegrator;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ComplexOperator — convention for 2×2 block layout
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Convention for the 2×2 real-block representation of a complex operator.
+///
+/// Controls the sign of the off-diagonal blocks when flattening a complex
+/// system `A = A_re + i·A_im` to a 2n×2n real matrix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Convention {
+    /// Hermitian convention (default):
+    /// ```text
+    /// [ A_re  -A_im ]
+    /// [ A_im   A_re ]
+    /// ```
+    /// This is the standard form where `A = A_re + i·A_im` and the
+    /// complex system `A·u = f` expands to the block system shown.
+    Hermitian,
+
+    /// Block-symmetric convention:
+    /// ```text
+    /// [ A_re   A_im ]
+    /// [ A_im  -A_re ]
+    /// ```
+    /// Used in some formulations where the complex operator has special
+    /// symmetry properties.
+    BlockSymmetric,
+}
+
+impl Convention {
+    /// Sign for the top-right block: `-1` for Hermitian, `+1` for BlockSymmetric.
+    pub fn tr_sign(&self) -> f64 {
+        match self {
+            Convention::Hermitian => -1.0,
+            Convention::BlockSymmetric => 1.0,
+        }
+    }
+
+    /// Sign for the bottom-right block: `+1` for Hermitian, `-1` for BlockSymmetric.
+    pub fn br_sign(&self) -> f64 {
+        match self {
+            Convention::Hermitian => 1.0,
+            Convention::BlockSymmetric => -1.0,
+        }
+    }
+}
 
 // 鈹€鈹€鈹€ ComplexSystem 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
@@ -311,7 +358,78 @@ impl ComplexLinearForm {
     }
 }
 
-// 鈹€鈹€鈹€ ComplexGridFunction 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// === SesquilinearForm ===
+
+pub struct SesquilinearForm<'a, S: FESpace + Send + Sync> {
+    space: &'a S,
+    conv: Convention,
+    quad_order: u8,
+    k_re_coo: CooMatrix<f64>,
+    k_im_coo: CooMatrix<f64>,
+    n: usize,
+}
+
+impl<'a, S: FESpace + Send + Sync> SesquilinearForm<'a, S> {
+    pub fn new(space: &'a S, conv: Convention, quad_order: u8) -> Self {
+        let n = space.n_dofs();
+        SesquilinearForm { space, conv, quad_order, k_re_coo: CooMatrix::new(n, n), k_im_coo: CooMatrix::new(n, n), n }
+    }
+
+    pub fn add_domain_integrator_pair(
+        &mut self,
+        re_integ: &dyn VectorBilinearIntegrator,
+        im_integ: Option<&dyn VectorBilinearIntegrator>,
+    ) {
+        let csr_re = VectorAssembler::assemble_bilinear(self.space, &[re_integ], self.quad_order);
+        for i in 0..self.n {
+            for p in csr_re.row_ptr[i]..csr_re.row_ptr[i + 1] {
+                let j = csr_re.col_idx[p] as usize;
+                let v = csr_re.values[p];
+                if v != 0.0 { self.k_re_coo.add(i, j, v); }
+            }
+        }
+        if let Some(im) = im_integ {
+            let csr_im = VectorAssembler::assemble_bilinear(self.space, &[im], self.quad_order);
+            for i in 0..self.n {
+                for p in csr_im.row_ptr[i]..csr_im.row_ptr[i + 1] {
+                    let j = csr_im.col_idx[p] as usize;
+                    let v = csr_im.values[p];
+                    if v != 0.0 { self.k_im_coo.add(i, j, v); }
+                }
+            }
+        }
+    }
+
+    pub fn assemble(self) -> ComplexSystem {
+        let SesquilinearForm { k_re_coo, k_im_coo, .. } = self;
+        ComplexSystem { k_re: k_re_coo.into_csr(), k_im: k_im_coo.into_csr(), omega: 0.0 }
+    }
+}
+
+impl ComplexSystem {
+    pub fn to_flat_csr_with_conv(&self, conv: Convention) -> CsrMatrix<f64> {
+        let n = self.n_dofs();
+        let tot = 2 * n;
+        let mut coo = CooMatrix::<f64>::new(tot, tot);
+        let tr = conv.tr_sign();
+        let br = conv.br_sign();
+        for i in 0..n {
+            for p in self.k_re.row_ptr[i]..self.k_re.row_ptr[i + 1] {
+                let j = self.k_re.col_idx[p] as usize;
+                let v = self.k_re.values[p];
+                if v != 0.0 { coo.add(i, j, v); coo.add(n + i, n + j, br * v); }
+            }
+        }
+        for i in 0..n {
+            for p in self.k_im.row_ptr[i]..self.k_im.row_ptr[i + 1] {
+                let j = self.k_im.col_idx[p] as usize;
+                let v = self.k_im.values[p];
+                if v != 0.0 { coo.add(i, n + j, tr * v); coo.add(n + i, j, v); }
+            }
+        }
+        coo.into_csr()
+    }
+}
 
 /// A complex grid function `u = u_re + i路u_im`.
 #[derive(Debug, Clone)]

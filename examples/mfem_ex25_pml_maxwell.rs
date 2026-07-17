@@ -379,80 +379,49 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     // ── Essential DOFs ───────────────────────────────────────────────────
     let ess_tdofs = boundary_dofs_hcurl(space.mesh(), &space, &ess_bdr_tags);
 
-    // ── Assemble complex system using core library coefficients ──────────
-    // 1:1 with C++ coefficient chain:
-    //   Non-PML curl-curl: RestrictedCoefficient(μ⁻¹, attr)
-    //   Non-PML mass:      RestrictedCoefficient(-ω²ε, attr) → omega2_eps * I
-    //   PML curl-curl re:  μ⁻¹ · VectorRestrictedCoefficient(StretchRe, attrPML)
-    //   PML curl-curl im:  μ⁻¹ · VectorRestrictedCoefficient(StretchIm, attrPML)
-    //   PML mass re:       -ω²ε · VectorRestrictedCoefficient(StretchRe, attrPML)
-    //   PML mass im:       -ω²ε · VectorRestrictedCoefficient(StretchIm, attrPML)
+    // ── Assemble complex system via SesquilinearForm (1:1 with C++) ──────
+    use fem_assembly::complex::{SesquilinearForm, Convention};
+    let mut a = SesquilinearForm::new(&space, Convention::Hermitian, qo);
 
     let attr     = vec![1];  // computational domain (element tag 1)
     let attr_pml = vec![2];  // PML region (element tag 2)
 
-    // ── Non-PML contribution (C++: CurlCurlIntegrator(restr_muinv) + VectorFEMassIntegrator(restr_omeg)) ──
-    let (nopml_cc, nopml_mass) = if dim == 2 {
-        // 2D: scalar curl-curl, diagonal matrix mass
-        let cc = VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlIntegrator {
-                mu: RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
-            }], qo);
-        let mass = VectorAssembler::assemble_bilinear(&space,
-            &[&VectorMassTensorIntegrator {
-                alpha: VectorRestrictedCoefficient {
-                    inner: ScalarMatrixCoeff(1.0_f64),
-                    attrs: attr.clone(),
-                }
-            }], qo);
-        (cc, mass)
-    } else {
-        // 3D: diagonal matrix curl-curl and mass
-        let cc = VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlTensorIntegrator {
-                mu: ScalarMatrixCoeff(
-                    RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
-                )
-            }], qo);
-        let mass = VectorAssembler::assemble_bilinear(&space,
-            &[&VectorMassTensorIntegrator {
-                alpha: VectorRestrictedCoefficient {
-                    inner: ScalarMatrixCoeff(1.0_f64),
-                    attrs: attr.clone(),
-                }
-            }], qo);
-        (cc, mass)
-    };
-    // k_re += cc + omega2_eps * mass
-    let mut k_re = nopml_cc.axpby(1.0, &nopml_mass, omega2_eps);
-    let mut k_im = CsrMatrix::new_empty(n, n);
+    // Non-PML: CurlCurlIntegrator(μ⁻¹) + VectorFEMassIntegrator(-ω²ε)
+    a.add_domain_integrator_pair(
+        &CurlCurlIntegrator {
+            mu: RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
+        },
+        None,
+    );
+    a.add_domain_integrator_pair(
+        &VectorMassTensorIntegrator {
+            alpha: VectorRestrictedCoefficient {
+                inner: ScalarMatrixCoeff(1.0_f64),
+                attrs: attr.clone(),
+            }
+        },
+        None,
+    );
 
-    // ── PML curl-curl: μ⁻¹ · stretch (re + im) ──────────────────────────────
+    // PML curl-curl: μ⁻¹ · stretch
     if dim == 2 {
-        // 2D: scalar stretch — use RestrictedCoefficient (ScalarCoeff) with CurlCurlIntegrator
-        let pml_cc_re = VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlIntegrator {
+        a.add_domain_integrator_pair(
+            &CurlCurlIntegrator {
                 mu: RestrictedCoefficient {
                     inner: PmlCurlScalar { pml: pml.clone() },
                     attrs: attr_pml.clone(),
                 }
-            }], qo);
-        // Scale by μ⁻¹
-        k_re = k_re.axpby(1.0, &pml_cc_re, mu_inv);
-
-        let pml_cc_im = VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlIntegrator {
+            },
+            Some(&CurlCurlIntegrator {
                 mu: RestrictedCoefficient {
                     inner: PmlCurlScalarIm { pml: pml.clone() },
                     attrs: attr_pml.clone(),
                 }
-            }], qo);
-        // Note: k_im uses the same sparsity pattern; k_im = μ⁻¹ * stretch_im
-        k_im = k_im.axpby(1.0, &pml_cc_im, mu_inv);
+            }),
+        );
     } else {
-        // 3D: diagonal matrix stretch (ScalarVectorProductCoefficient = scalar × diagonal matrix)
-        let pml_cc_re = VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlTensorIntegrator {
+        a.add_domain_integrator_pair(
+            &CurlCurlTensorIntegrator {
                 mu: ScalarVectorProductCoefficient {
                     scalar: mu_inv,
                     vector: VectorRestrictedCoefficient {
@@ -460,11 +429,8 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
                         attrs: attr_pml.clone(),
                     },
                 }
-            }], qo);
-        k_re = k_re.axpby(1.0, &pml_cc_re, 1.0);
-
-        let pml_cc_im = VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlTensorIntegrator {
+            },
+            Some(&CurlCurlTensorIntegrator {
                 mu: ScalarVectorProductCoefficient {
                     scalar: mu_inv,
                     vector: VectorRestrictedCoefficient {
@@ -472,65 +438,37 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
                         attrs: attr_pml.clone(),
                     },
                 }
-            }], qo);
-        k_im = k_im.axpby(1.0, &pml_cc_im, 1.0);
+            }),
+        );
     }
 
-    // ── PML mass: ω²ε · stretch (re + im) ──────────────────────────────────
-    if dim == 2 {
-        let pml_mass_re = VectorAssembler::assemble_bilinear(&space,
-            &[&VectorMassTensorIntegrator {
-                alpha: ScalarVectorProductCoefficient {
-                    scalar: omega2_eps,
-                    vector: VectorRestrictedCoefficient {
-                        inner: PmlMassMatRe { pml: pml.clone() },
-                        attrs: attr_pml.clone(),
-                    },
-                }
-            }], qo);
-        k_re = k_re.axpby(1.0, &pml_mass_re, 1.0);
+    // PML mass: ω²ε · stretch (diagonal matrix)
+    a.add_domain_integrator_pair(
+        &VectorMassTensorIntegrator {
+            alpha: ScalarVectorProductCoefficient {
+                scalar: omega2_eps,
+                vector: VectorRestrictedCoefficient {
+                    inner: PmlMassMatRe { pml: pml.clone() },
+                    attrs: attr_pml.clone(),
+                },
+            }
+        },
+        Some(&VectorMassTensorIntegrator {
+            alpha: ScalarVectorProductCoefficient {
+                scalar: omega2_eps,
+                vector: VectorRestrictedCoefficient {
+                    inner: PmlMassMatIm { pml: pml.clone() },
+                    attrs: attr_pml.clone(),
+                },
+            }
+        }),
+    );
 
-        let pml_mass_im = VectorAssembler::assemble_bilinear(&space,
-            &[&VectorMassTensorIntegrator {
-                alpha: ScalarVectorProductCoefficient {
-                    scalar: omega2_eps,
-                    vector: VectorRestrictedCoefficient {
-                        inner: PmlMassMatIm { pml: pml.clone() },
-                        attrs: attr_pml.clone(),
-                    },
-                }
-            }], qo);
-        k_im = k_im.axpby(1.0, &pml_mass_im, 1.0);
-    } else {
-        let pml_mass_re = VectorAssembler::assemble_bilinear(&space,
-            &[&VectorMassTensorIntegrator {
-                alpha: ScalarVectorProductCoefficient {
-                    scalar: omega2_eps,
-                    vector: VectorRestrictedCoefficient {
-                        inner: PmlMassMatRe { pml: pml.clone() },
-                        attrs: attr_pml.clone(),
-                    },
-                }
-            }], qo);
-        k_re = k_re.axpby(1.0, &pml_mass_re, 1.0);
-
-        let pml_mass_im = VectorAssembler::assemble_bilinear(&space,
-            &[&VectorMassTensorIntegrator {
-                alpha: ScalarVectorProductCoefficient {
-                    scalar: omega2_eps,
-                    vector: VectorRestrictedCoefficient {
-                        inner: PmlMassMatIm { pml: pml.clone() },
-                        attrs: attr_pml.clone(),
-                    },
-                }
-            }], qo);
-        k_im = k_im.axpby(1.0, &pml_mass_im, 1.0);
-    }
-
-    // Free the empty initial k_im if it was never populated (no PML)
-    if k_im.row_ptr.len() > 0 && k_im.row_ptr.iter().all(|&r| r == 0) {
-        k_im = CsrMatrix::new_empty(n, n);
-    }
+    // Assemble → ComplexSystem → flat 2×2 block
+    let cs = a.assemble();
+    let k_re = &cs.k_re;
+    let k_im = &cs.k_im;
+    let a_mat = cs.to_flat_csr_with_conv(Convention::Hermitian);
 
     // ── RHS ──────────────────────────────────────────────────────────────
     let mut rhs_re = vec![0.0; n];
@@ -664,7 +602,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     for i in 0..n { flat_rhs[i] = rhs_re[i]; }
     for i in 0..n { flat_rhs[n+i] = rhs_im[i]; }
     let mut x = vec![0.0; 2*n];
-    let res = fem_solver::solve_gmres_precond(&a, &flat_rhs, &mut x, 200, &bp,
+    let res = fem_solver::solve_gmres_precond(&a_mat, &flat_rhs, &mut x, 200, &bp,
         &SolverConfig { rtol:1e-5, max_iter:2000, verbose:true, ..Default::default() })
         .expect("GMRES");
     println!("  GMRES converged in {} iters, final residual = {:.6e}",

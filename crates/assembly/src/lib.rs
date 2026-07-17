@@ -161,7 +161,8 @@ pub use assembler::{Assembler, face_dofs_p1, face_dofs_p2};
 #[cfg(feature = "parallel")]
 pub use assembler::{assembly_parallel_min_elems, FEM_ASSEMBLY_PARALLEL_MIN_ELEMS};
 pub use backend::{CsrLinearOperator, LinearOperator, OperatorBackend};
-pub use complex::{ComplexAssembler, ComplexGridFunction, ComplexLinearForm, ComplexSystem};
+pub use complex::{ComplexAssembler, ComplexGridFunction, ComplexLinearForm, ComplexSystem,
+                   SesquilinearForm, Convention};
 pub use discrete_op::{DiscreteLinearOperator, DiscreteOpError};
 pub use integrator::{
     BdQpData, BilinearIntegrator, BoundaryBilinearIntegrator, BoundaryLinearIntegrator,
