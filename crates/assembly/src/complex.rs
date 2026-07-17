@@ -1,4 +1,4 @@
-﻿//! Complex-valued finite element assembly.
+//! Complex-valued finite element assembly.
 //!
 //! Implements a **2×2 real-block** strategy that avoids introducing complex
 //! number generics: the complex DOF vector `u = u_re + i·u_im` is stored as
@@ -362,6 +362,7 @@ impl ComplexLinearForm {
 
 pub struct SesquilinearForm<'a, S: FESpace + Send + Sync> {
     space: &'a S,
+    #[allow(dead_code)]
     conv: Convention,
     quad_order: u8,
     k_re_coo: CooMatrix<f64>,
