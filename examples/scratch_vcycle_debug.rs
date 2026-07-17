@@ -118,7 +118,7 @@ fn main() {
         let bc = boundary_dofs(space.mesh(), space.dof_manager(), &boundary_tags);
         let mut dummy = vec![0.0; mat.nrows];
         for &d in &bc { mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy); }
-        levels.push(GeometricMgLevel { mat, bc_dofs: bc, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None });
+        levels.push(GeometricMgLevel { mat, bc_dofs: bc, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None, sf_op: None });
     }
     for i in 0..n_spaces - 1 {
         // spaces[i] is coarser, spaces[i+1] is finer.

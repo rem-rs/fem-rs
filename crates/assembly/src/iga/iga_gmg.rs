@@ -425,7 +425,7 @@ pub fn build_iga_gmg_hierarchy_3d(
         let nw = kv_w.n_basis();
         let bc_dofs = identify_boundary_dofs_3d(nu, nv, nw);
 
-        levels.push(GeometricMgLevel { mat, bc_dofs, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None });
+        levels.push(GeometricMgLevel { mat, bc_dofs, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None, sf_op: None });
         stored_knots.push((kv_u.clone(), kv_v.clone(), kv_w.clone()));
     }
 
@@ -697,7 +697,7 @@ pub fn build_iga_gmg_hierarchy_multipatch_3d(
             &level_meshes[l].patches, &dof_map, &face_connectivity,
         );
 
-        levels.push(GeometricMgLevel { mat, bc_dofs, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None });
+        levels.push(GeometricMgLevel { mat, bc_dofs, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None, sf_op: None });
 
         // Store knot vectors for prolongation construction
         let lvl_knots: Vec<_> = level_meshes[l].patches.iter()
@@ -997,9 +997,9 @@ mod tests {
 
         // Levels must be ordered finest first.
         let levels = vec![
-            GeometricMgLevel { mat: fine_mat.clone(), bc_dofs: bc_fine.clone(), elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None },
-            GeometricMgLevel { mat: mid_mat, bc_dofs: bc_mid, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None },
-            GeometricMgLevel { mat: coarse_mat, bc_dofs: bc_coarse, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None },
+            GeometricMgLevel { mat: fine_mat.clone(), bc_dofs: bc_fine.clone(), elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None, sf_op: None },
+            GeometricMgLevel { mat: mid_mat, bc_dofs: bc_mid, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None, sf_op: None },
+            GeometricMgLevel { mat: coarse_mat, bc_dofs: bc_coarse, elem_op: None, raw_diag: vec![], raw_dinv: vec![], pa_op: None, sf_op: None },
         ];
 
         let h = GeometricMgHierarchy::new(levels, vec![p_mid_to_fine, p_coarse_to_mid]);

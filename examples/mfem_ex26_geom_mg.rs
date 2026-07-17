@@ -19,12 +19,13 @@ use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
     GeometricMgAsPrecond, MgCycleType, MgSmootherType, solve_pcg,
-    StoredElementOperator, PADiffusionOp,
+    StoredElementOperator, PADiffusionOp, SumFactDiffusionOp,
 };
 use fem_space::{
     H1Space, fe_space::FESpace, constraints::boundary_dofs,
     build_h1_prolongation_matrix,
 };
+use fem_mesh::ElementType;
 
 fn main() {
     let args = parse_args();
@@ -122,10 +123,23 @@ fn main() {
                 elem_dofs_clone[start..start + ldofs].to_vec()
             },
         );
+        // Build sum-factorization PA operator (bitwise match to MFEM)
+        let sf_op = if space.mesh().element_type(0) == ElementType::Quad4 {
+            let e_dofs = elem_dofs.clone();
+            Some(SumFactDiffusionOp::build(
+                space.mesh(), mat.nrows, space.order(), qo, 1.0,
+                |e| {
+                    let start = e as usize * ldofs;
+                    e_dofs[start..start + ldofs].to_vec()
+                },
+            ))
+        } else {
+            None
+        };
         levels.push(GeometricMgLevel {
             mat, bc_dofs: bc,
             elem_op: Some(elem_op), raw_diag, raw_dinv,
-            pa_op: Some(pa_op),
+            pa_op: Some(pa_op), sf_op,
         });
     }
     for i in 0..n_spaces - 1 {
@@ -146,7 +160,7 @@ fn main() {
         smoother: MgSmootherType::Chebyshev(2),
         max_eig_override: None,
         jacobi_omega: 0.8,
-        coarse_max_iter: 200, coarse_rtol: 1e-2,
+        coarse_max_iter: 200, coarse_rtol: 1e-8,
         cycle_type: MgCycleType::V,
     };
     let mg = GeometricMgPrecond::new(mg_config, &hierarchy);

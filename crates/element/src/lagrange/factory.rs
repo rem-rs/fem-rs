@@ -451,7 +451,12 @@ pub(crate) struct Lagrange1D {
 impl Lagrange1D {
     pub(crate) fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be >= 1");
-        let nodes: Vec<f64> = (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect();
+        // Use Gauss-Lobatto-Legendre nodes matching MFEM's H1_FECollection
+        // (BasisType::GaussLobatto).  For p=1,2 these are identical to
+        // equispaced; for p>=3 the GLL nodes cluster near the boundaries,
+        // eliminating Runge oscillations and matching MFEM's diagonal
+        // preconditioner spectral properties.
+        let (nodes, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
         let n = nodes.len();
         let mut bary_w = vec![1.0_f64; n];
         for i in 0..n {

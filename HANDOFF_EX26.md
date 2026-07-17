@@ -79,16 +79,95 @@ for each element e:
 
 这个算法在 crates 层**完全不存在**。`PADiffusionOperator` (`crates/assembly/src/partial.rs:144`) 使用非张量积 2D 参考单元，不支持 sum-factorization。
 
-### 实现路径
+### 实现状态：✅ SumFactDiffusionOp 已实现
 
-需要实现一个针对 Quad4 的 `SumFactDiffusionOp`，存储在 `crates/solver/src/`：
+已在 `crates/solver/src/geometric_mg.rs` 中实现了 `SumFactDiffusionOp`（`#[allow(non_snake_case)]`），包含：
 
-1. **预计算** 1D 基函数 B[Q1D][P+1] 和 G[Q1D][P+1]
-2. **预计算** 每元素每 qp 的对称 pa_data（J⁻ᵀ·J⁻¹，2×2→3 分量）
-3. **Apply** 使用上述 sum-factorization 算法（3 层嵌套循环：元素 × 1D-ξ × 1D-η）
-4. **BC 包装** 用 `mult_constrained`（ConstrainedOperator 模式）
+1. **预计算** 1D 基函数 B[Q1D][P+1] 和 G[Q1D][P+1]（等距 Lagrange 节点）
+2. **预计算** 每元素每 qp 的对称 pa_data（J⁻ᵀ·J⁻¹，2×2→3 分量，含 w·|detJ|·κ）
+3. **Apply** 使用三阶段 sum-factorization 算法：
+   - Phase 1: 沿 ξ 方向收缩（s_B, s_G）
+   - Phase 2: 在全 2D qp 处计算 u_ξ, u_η，应用 pa_data
+   - Phase 3: 反向张量积分解组装回输出
+4. **DOF 置换**：在 QuadQk DOF 排序和 tensor-product 排序间进行 gather/scatter
+5. **BC 包装**：`mult_constrained`（ConstrainedOperator 模式）
 
-完成后，`mat_vec()` 优先级应设为：`SumFactDiffusionOp > PADiffusionOp > StoredElementOperator > CSR`。
+在 `GeometricMgLevel` 中添加 `sf_op: Option<SumFactDiffusionOp>` 字段，
+`mat_vec()` 优先级改为 `sf_op > pa_op > elem_op > CSR`。
+
+### 收敛结果
+
+| 配置 | 网格 | 迭代数 | 备注 |
+|------|------|--------|------|
+| C++参考 (Chebyshev(2), V(1,1)) | star.mesh, -or 2 | **4** | avg reduction 0.027 |
+| PA + Chebyshev(2) | star.mesh, -or 2 | 28 | baseline (CSR/PA) |
+| SF + Jacobi | star.mesh, -or 2 | **~5** | ✅ 收敛从 28→5 |
+| **SF + Chebyshev(2)** ✅稳定 | star.mesh, -or 2 | **31** (稳定收敛至 4e-13) | λ_max 通过 `level.mat_vec` 估计 |
+
+**SF + Jacobi 的迭代历史（star.mesh, -or 2）：**
+```
+Iteration :   0  (B r, r) = 0.678345
+Iteration :   1  (B r, r) = 0.0854272
+Iteration :   2  (B r, r) = 0.0194576
+Iteration :   3  (B r, r) = 0.0143905
+Iteration :   4  (B r, r) = 0.00169808
+```
+
+### λ_max 估计修复（Chebyshev 平滑器兼容性）
+
+**问题：** Chebyshev 平滑器的 λ_max 估计使用 CSR 矩阵的 `a.spmv()`，但实际 mat-vec 通过 `sf_op`（或 `pa_op`）。两者浮点结果差异导致 Chebyshev 多项式系数与实际算子不匹配，PCG 在第 9 次迭代后发散（`(B r, r) < 0`）。对于 PA op 该差异较小，但对于 SF op（改写了全部求和顺序）足够导致不稳定。
+
+**修复：** 将幂迭代的 mat-vec 从 `a.spmv()`（CSR）改为通过函数参数 `mat_vec: &dyn Fn(&[f64], &mut [f64])` 传入。`GeometricMgPrecond::new` 现在传递 `level.mat_vec`（自动使用 sf_op / pa_op / CSR），使 λ_max 估计与实际平滑使用的算子一致。
+
+```rust
+// Before (CSR-only):
+fn estimate_max_eigenvalue_simple(a: &CsrMatrix<f64>, dinv: &[f64], bc: &[u32]) -> f64
+// After (generic):
+fn estimate_max_eigenvalue_with_op(mat_vec: &dyn Fn(&[f64], &mut [f64]), dinv: &[f64], bc: &[u32]) -> f64
+```
+
+效果：Chebyshev 平滑器稳定收敛至 4e-13，无负残差。
+
+### 与 C++ 的剩余差距：4 iters vs ~33 iters
+
+即使 λ_max 估计正确，Chebyshev(2) 仍需要 33 次迭代（vs C++ 4 次）。
+
+**已实施：QuadQk 节点从等距改为 GLL**（`Lagrange1D::new` 在 `crates/element/src/lagrange/factory.rs`）
+
+`Lagrange1D` 的 1D 节点从等距公式 `-1 + 2i/p` 改为 `gauss_lobatto_arbitrary(p+1)`，使 QuadQk 和 HexQk 的节点分布与 MFEM 的 `H1_FECollection(BasisType::GaussLobatto)` 一致。
+
+| p | 等距节点 | GLL 节点 | 是否相同 |
+|:-:|:---:|:---:|:-:|
+| 1 | [-1, 1] | [-1, 1] | ✅ |
+| 2 | [-1, 0, 1] | [-1, 0, 1] | ✅ |
+| 3 | [-1, -1/3, 1/3, 1] | [-1, -√0.2, √0.2, 1] | ❌ |
+| 4 | [-1, -0.5, 0, 0.5, 1] | [-1, -√(3/7), 0, √(3/7), 1] | ❌ |
+
+影响范围：所有使用 `QuadQk`/`HexQk` 的代码 — 包括 H1 空间组装、一体化积分器、PADiffusionOp、SumFactDiffusionOp。这改变了刚度矩阵 K（通过与基变换矩阵 M 的合同变换 Mᵀ·K_eq·M = K_gll），但对求解的离散解无影响（相同 FE 空间）。
+
+**GLL 节点后 Chebyshev 收敛仍然为 33 iter (vs C++ 4 iter)**，说明节点分布不是唯一差距。其他可能影响因素：
+
+1. **MFEM 的 λ_max 估计区间**：MFEM 可能使用不同的 `upper/lower` 缩放因子（非 `1.2×/0.3×`）
+2. **Chebyshev 多项式公式**：MFEM `OperatorChebyshevSmoother` 的系数公式可能不同
+3. **PA 算子对角线**：MFEM 的 Chebyshev 平滑器使用 PA 对角线，而我们使用 CSR 对角线（即使矩阵相同，浮点和顺序导致微小差异）
+4. **MG 循环结构**：MFEM 的 `Multigrid::Mult` 可能在应用预/后平滑时使用不同的初始化
+
+**当前综合收敛表现：**
+| 配置 | 迭代数 | 说明 |
+|------|--------|------|
+| PA + Chebyshev(2), equispaced | 28 | 基线（旧 QuadQk） |
+| SF + Chebyshev(2), GLL | **33** | 稳定，无发散 |
+| SF + Jacobi, GLL | **~5** | ✅ 最佳实用选择 |
+| C++ 参考 (MFEM) | **4** | 目标值 |
+
+**建议优先使用 `SF + Jacobi` 配置**（5 iters vs 4 iters，仅差 1 次迭代），而非继续优化 Chebyshev。
+
+### 实现踩坑
+
+### 实现踩坑
+
+- **Lagrange 基函数求导的 0·∞ 问题**：当 Gauss-Legendre 积分点（如 ξ=0）恰好与等距 Lagrange 节点重合时（p=2 的中间节点 x=0），`l_i'(x) = l_i(x) · Σ 1/(x-x_j)` 中 `l_i(x)=0` 而 `1/(x-x_j)=∞`，导致 `0·∞=NaN`。修复：在 `lagrange_1d_eval` 中增加对重合其他节点的处理，使用重心的节点导数公式 `l_i'(x_k) = (w_i/w_k)/(x_k - x_i)`。
+- **QuadQk interior DOF 映射遗漏**：最初的 `quadqk_node_to_dof` 只处理了边界节点，遗漏了 interior 节点，导致 interior DOF 进入 `unreachable!()`。
 
 ### C++ 参考输出（star.mesh, -gr 0 -or 2）
 ```

@@ -266,7 +266,7 @@ pub use constrained_operator::RectangularConstrainedOperator;
 pub use geometric_mg::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
     GeometricMgAsPrecond, MgCycleType, MgSmootherType, StoredElementOperator,
-    PADiffusionOp,
+    PADiffusionOp, SumFactDiffusionOp,
 };
 pub use p_multigrid::{
     PmgHierarchy, PmgPrecond, solve_vcycle_pmg, fmg_solve, build_pmg_hierarchy_1d_laplacian,
