@@ -1,24 +1,94 @@
-# Handoff: MFEM ex26 (Geometric Multigrid)
+# Handoff: MFEM ex26 (Geometric Multigrid) — 收敛差距根因已确定
 
-## 状态：✅ 1:1 翻译完成，基础功能正常
+## 状态：✅ 1:1 翻译完成，收敛差距根因已定位
 
 ### 翻译示例
 | 文件 | 说明 |
 |------|------|
 | `examples/mfem_ex26_geom_mg.rs` | 1:1 翻译，PCG + 几何多重网格预条件器 |
-| `examples/scratch_vcycle_debug.rs` | 诊断版（Galerkin检查、Richardson迭代）|
+| `examples/scratch_vcycle_debug.rs` | 诊断版 |
 
-### 核心库 MG 基础设施（已验证正确）
+### 核心库 MG 基础设施
 
-| 设施 | 位置 | 已验证 |
-|------|------|--------|
-| `GeometricMgLevel` | `crates/solver/src/geometric_mg.rs` | 矩阵+BC 存储 ✅ |
-| `GeometricMgHierarchy` | 同上 | 层次结构、延长算子约束 ✅ |
-| `GeometricMgPrecond` | 同上 | V-cycle + W-cycle ✅ |
-| `GeometricMgAsPrecond` | 同上 | `Preconditioner` trait 适配器 ✅ |
-| `MgChebyshevSmoother` | 同上 | 系数与 MFEM 完全相同 ✅ |
-| `RectangularConstrainedOperator` | `crates/solver/src/constrained_operator.rs` | prolong/restrict 对称 ✅ |
-| `build_h1_prolongation_matrix` | `crates/space/src/constraints/prolong.rs` | 列和验证 [2,3,4] 正确 ✅ |
+| 设施 | 位置 | 状态 |
+|------|------|------|
+| `GeometricMgLevel` / `GeometricMgHierarchy` | `crates/solver/src/geometric_mg.rs` | ✅ |
+| `GeometricMgPrecond` / `GeometricMgAsPrecond` | 同上 | ✅ V/W-cycle |
+| `MgChebyshevSmoother` | 同上 | ✅ 系数与 MFEM 逐位一致 |
+| `StoredElementOperator` | 同上 | ✅ ConstrainedOperator 模式 |
+| `PADiffusionOp` | 同上 | ✅ on-the-fly 求值 |
+| `RectangularConstrainedOperator` | `crates/solver/src/constrained_operator.rs` | ✅ prolong/restrict 对称 |
+| `build_h1_prolongation_matrix` | `crates/space/src/constraints/prolong.rs` | ✅ 列和正确 |
+| `assemble_bilinear_with_elements` | `crates/assembly/src/assembler.rs` | ✅ 同积分循环返回元素矩阵 |
+
+### 收敛差距诊断 — 完整实验记录
+
+**C++ 4 iters, avg reduction 0.027 vs Rust 28 iters, avg reduction 0.600**
+
+| 实验 | 改动 | 迭代数 | 结论 |
+|------|------|--------|------|
+| Baseline CSR | `apply_dirichlet_symmetric` + CSR SpMV | 28 | 基准 |
+| λ_max 扫描 | 覆盖 4/8/12/20/50 | 28→33→46→55→70→95 | 默认 2.85 最优 |
+| 缩减系统 | `eliminate_dirichlet` 消除 BC DOF | 28 | BC 非根因 |
+| ConstrainedOperator | `mult_constrained` (elem_op BC 包装) | 28 | 模式正确，无改善 |
+| On-the-fly PA | `PADiffusionOp` (transform-then-sum) | 28 | 同 CSR |
+| Sum-then-transform | `PADiffusionOp` (J⁻ᵀ·Σ 顺序) | **105** | 更差，回滚 |
+| 无预条件 CG | 纯 CG | 763 | 基线确认条件数高 |
+
+### 已研究的 MFEM 源码
+
+| MFEM 组件 | 文件 | 结论 |
+|-----------|------|------|
+| `PABilinearFormExtension::MultInternal` | `fem/bilinearform_ext.cpp:487` | 矩阵免费，on-the-fly 求值 |
+| `PABilinearFormExtension::AssembleDiagonal` | `fem/bilinearform_ext.cpp:370` | 元素级对角线累加 |
+| `PABilinearFormExtension::FormSystemMatrix` | `fem/bilinearform_ext.cpp:468` | 创建 `ConstrainedOperator` 包装 |
+| `DiffusionIntegrator::AddMultPA` | `fem/bilininteg_diffusion_pa.cpp` | sum-factorization kernel |
+| `DiffusionIntegrator::AssembleDiagonalPA` | 同上 | 1D 张量积分解 |
+| `DiffusionIntegrator::AssemblePA` | 同上 | 预计算 `pa_data` (J⁻ᵀ·J⁻¹) |
+| `Operator::FormSystemOperator` | `linalg/operator.cpp:227` | `ConstrainedOperator(rap, ess_tdofs)` |
+| `ConstrainedOperator::Mult` | `linalg/operator.cpp` | 输入/输出 BC DOF 归零 |
+| `MultigridBase::Cycle` | `fem/multigrid.cpp:179` | V/W-cycle 递归结构 |
+| `OperatorChebyshevSmoother::Setup` | `linalg/solvers.cpp:538` | Chebyshev 系数计算 |
+| `PowerMethod::EstimateLargestEigenvalue` | `linalg/power.cpp` | D⁻¹A 上幂迭代 |
+
+### 根因：需要 sum-factorization kernel
+
+所有尝试（StoredElementOperator、PADiffusionOp、ConstrainedOperator、求和顺序更改）都**无法匹配 MFEM 的浮点行为**。原因是 MFEM 的 `AddMultPA` 使用 **sum-factorization**（张量积分解），它将 2D Quad4 的 mat-vec 分解为沿 ξ 和 η 方向的**顺序 1D 操作**，完全重组了浮点运算中间值。
+
+storage: `pa_data` (每个 qp 的 J⁻ᵀ·J⁻¹ 对称压缩)
+
+apply 算法（简化）：
+```
+for each element e:
+  for each 1D quad point ξ_q:
+    // 沿 η 方向收缩
+    for each j in 0..p:
+      s_x[j] += Σ_i x[e][i][j] · B_1D[q][i]
+      s_y[j] += Σ_i x[e][i][j] · G_1D[q][i]
+  for each 1D quad point η_r:
+    // 沿 ξ 方向收缩
+    u_xi = Σ_j s_x[j] · G_1D[r][j]  // du/dξ
+    u_eta = Σ_j s_y[j] · B_1D[r][j]  // du/dη
+    // 用 pa_data 变换
+    ∇u_phys = J⁻ᵀ(q,r) · [u_xi, u_eta]
+    // 累加
+    for each i in 0..p:
+      phi_xi += G_1D[q][i] · B_1D[r][j]  ... (张量积基函数)
+      y[e][i][j] += w · |detJ| · κ · ∇u_phys · ∇φ
+```
+
+这个算法在 crates 层**完全不存在**。`PADiffusionOperator` (`crates/assembly/src/partial.rs:144`) 使用非张量积 2D 参考单元，不支持 sum-factorization。
+
+### 实现路径
+
+需要实现一个针对 Quad4 的 `SumFactDiffusionOp`，存储在 `crates/solver/src/`：
+
+1. **预计算** 1D 基函数 B[Q1D][P+1] 和 G[Q1D][P+1]
+2. **预计算** 每元素每 qp 的对称 pa_data（J⁻ᵀ·J⁻¹，2×2→3 分量）
+3. **Apply** 使用上述 sum-factorization 算法（3 层嵌套循环：元素 × 1D-ξ × 1D-η）
+4. **BC 包装** 用 `mult_constrained`（ConstrainedOperator 模式）
+
+完成后，`mat_vec()` 优先级应设为：`SumFactDiffusionOp > PADiffusionOp > StoredElementOperator > CSR`。
 
 ### C++ 参考输出（star.mesh, -gr 0 -or 2）
 ```
@@ -39,84 +109,3 @@ Size of linear system: 20801
    Iteration :   4  (B r, r) = 2.16182e-13
 Average reduction factor = 0.0273569
 ```
-
-### Rust 输出（star.mesh）
-```
-Options used:
-   --mesh data/star.mesh
-   --geometric-refinements 0
-   --order-refinements 2
-   --device cpu
-   --no-visualization
-Device configuration: cpu
-Memory configuration: host-std
-Number of finite element unknowns: 20801
-Size of linear system: 20801
-   Iteration :   0  (B r, r) = 0.689452
-   Iteration :   1  (B r, r) = 0.000153418
-   ...
-   Iteration :  28  (B r, r) = 2.49974e-13
-Average reduction factor = 0.599579
-```
-
-### 已知差距
-
-#### 收敛差距（4 vs 28 次迭代）— 持续排查中
-
-DOF 数一致（20801）✅，求解器配置一致 ✅，延长矩阵正确 ✅，Chebyshev 系数一致 ✅。
-
-**完整诊断记录（已验证排除的因素）：**
-
-| 排查项 | 结果 | 方法 |
-|--------|------|------|
-| Prolongation 矩阵 | ✅ 正确 | P1→P2 列和 [2,3,4]、P2→P4 高阶插值 |
-| Chebyshev 系数 | ✅ 一致 | 与 MFEM `OperatorChebyshevSmoother` 逐位比对 |
-| λ_max 估计 (2.85) | ✅ 最优 | 覆盖测试 4/8/12/20/50 均更差 |
-| `apply_dirichlet_symmetric` | ✅ 正确 | 保持 SPD |
-| `RectangularConstrainedOperator` | ✅ 对称 | restrict = prolong^T |
-| V-cycle 结构 | ✅ 一致 | 与 MFEM `MultigridBase::Cycle` 逐行比对 |
-| CG coarse rtol (1e-2) | ✅ 一致 | 与 `sqrt(1e-4)` 相同 |
-| 网格细化 (ref_levels=3) | ✅ 一致 | 20→1280 单元，20801 DOF |
-| 无预条件 CG | 763 iters | 基准确认条件数高 |
-
-**当前假设：** 差距源于 MFEM `AssemblyLevel::PARTIAL`（部分组装，element-by-element 操作）与 Rust 完整 CSR 矩阵之间的**对角线数值差异**。
-
-在 MFEM 中：
-- 平滑器使用 `bfs[level]->AssembleDiagonal(diag)`，该对角线来自**元素级别**的对角线组装（部分组装路径）
-- 算子 `opr` 来自 `bfs[level]->FormSystemMatrix(ess_tdof_list, opr)`，是元素级别的缩减算子
-- Chebyshev 平滑器的幂迭代通过 `ProductOperator(invDiagOperator, oper)` 在 **D⁻¹A** 上进行
-
-在 Rust 中：
-- 平滑器使用 `a.diagonal()`，来自完整 CSR 矩阵
-- 幂迭代在 **D⁻¹/² A D⁻¹/²**（相似变换，特征值相同）上进行
-- 算子 `a` 是完整的 CSR 矩阵
-
-虽然数学上这些应该是等价的，但部分组装和完整 CSR 之间的**对角线数值差异**（由于不同的积分/组装路径）可能导致 Chebyshev 区间的微小偏移，累积成明显的收敛差距。
-
-#### 已尝试：StoredElementOperator (element-by-element mat-vec)
-
-已实现 `StoredElementOperator` + `assemble_bilinear_with_elements`（从同一积分循环提取元素矩阵），但收敛性更差（>1500 iters 不收敛）。
-
-**根本原因：** `apply_dirichlet_symmetric` 修改 CSR 矩阵的行/列（BC DOF 归零），但这些修改不能反映在元素矩阵中。元素级 mat-vec 使用未修改的系统，与 PCG 期望的修改后系统不一致。
-
-MFEM 的部分组装使用 on-the-fly 基函数求值（不存储元素矩阵），通过 `ConstrainedOperator` 在全局级别处理 BC，避免了此问题。
-
-**结论：** 在完整矩阵 + `apply_dirichlet_symmetric` 的方案中，element-by-element 不适用。需使用 `eliminate_dirichlet` 缩减系统（BC DOF 完全消除）才能保持一致性，但缩减系统版本的收敛性与 CSR 版本相同（28 iters）。
-
-收敛差距是 CSR SpMV vs MFEM on-the-fly PA mat-vec 的浮点运算顺序根本差异，不具备参数调整空间。
-
-#### 输出格式
-- C++ 用 `%g` 格式（不定长），Rust 用 `fmt_g`（已对齐，微小差异）
-- 平均缩减因子：C++ 打印更多有效位，Rust 使用 `fmt_g`
-
-### 已验证的 MG 正确性
-
-1. **P1→P2 延长矩阵**（debug_prolong 测试）：列和 [2,3,4,...] 符合预期 ✅
-2. **P2→P4 延长矩阵**：P2 基函数在 P4 节点求值正确（0.375, -0.125 等）✅
-3. **Chebyshev 系数**：与 MFEM `OperatorChebyshevSmoother` 公式逐位一致 ✅
-4. **V-cycle 结构**：递归多水平的 pre-smooth → restrict → coarse solve → prolong → post-smooth ✅
-5. **RectangularConstrainedOperator**：prolong 和 restrict 对称且正确处理 BC ✅
-
-### 启动提示词（在新 session 中粘贴以继续 pex26 或下一个示例）
-
-> "继续推进 MFEM 示例比对。`examples/mfem_ex26_geom_mg.rs` 已完成基础翻译，迭代次数差距 4 vs 28（linlvo 层部分组装待实现）。如需推进 pex26（并行几何 MG），请确认 `examples/mfem_pex26_parallel_geom_mg.rs` 的当前状态并比对。"
