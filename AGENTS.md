@@ -111,7 +111,35 @@ git push
 | square-disc.mesh | 曲边界三角 | 0.0147 | 0.141 | ❌ 10x |
 | star.mesh | 四边形 | 0.016 | 2.162 | ❌ 大差距 |
 
+### ex25 完成状态
+
+**状态：** ✅ 1:1 翻译完成，核心库已补充 7 项基础设施（SesquilinearForm, RestrictedCoefficient 等），8 个 Bug 已修复。收敛差距 1.57x (C++ 251 vs Rust 394 iters)，原因在 linlvo 层需后续排查。详见 `HANDOFF_EX25.md`。
+
 三角形直线网格（beam-tri）完美匹配，说明组装路径（GradDivIntegrator + VectorMassIntegrator + Piola 变换）对仿射 Tri3 正确。四边形和曲边界网格的差异在**组装层**，目前原因未明。
+
+### ex26 完成状态
+
+**状态：** ✅ 1:1 翻译完成，基础功能正常。
+
+| 检查项 | 状态 | 说明 |
+|--------|------|------|
+| 默认网格 | ✅ | star.mesh 默认，unit_square_tri(n) 内置后备 |
+| 网格加密 | ✅ | `floor(log(5000/NE)/log(2)/dim)` 公式一致 |
+| 边界条件 | ✅ | 全边界 Dirichlet，`apply_dirichlet_symmetric` |
+| 求解器 | ✅ | PCG + MG(V(1,1), Chebyshev(2), CG coarse rtol=1e-2) |
+| 输出文件 | ✅ | `refined.mesh` + `sol.gf` |
+| 输出格式 | ✅ | "Iteration : N (B r, r) = ...", "Average reduction factor = ..." |
+| **收敛性** | ❌ | C++ 4 iters vs Rust 28 iters (avg red. 0.027 vs 0.600) |
+
+**收敛差距根因：** MFEM 使用 `AssemblyLevel::PARTIAL`（部分组装，element-by-element），Rust 使用完整 CSR 矩阵。虽然数学等价，但特征值估计、对角线数值、浮点运算顺序差异导致 Chebyshev 平滑器效率不同。
+
+**已验证正确的 MG 基础设施：**
+- 延长矩阵（P1→P2 列和 [2,3,4] 正确，P2→P4 高阶插值正确）
+- Chebyshev 系数与 MFEM `OperatorChebyshevSmoother` 逐位一致
+- V-cycle/W-cycle 递归结构，prolong/restrict 对称（`RectangularConstrainedOperator`）
+- 详见 `HANDOFF_EX26.md`
+
+**后续：** 如需改善收敛性，需在 linlvo 层实现 `PartialAssemblyOperator`（element-by-element mat-vec）。px26（并行几何 MG）示例 `examples/mfem_pex26_parallel_geom_mg.rs` 已存在。
 
 **已排除的原因：**
 - 插值符号修正（`interpolate_vector` 的 `element_sign`）：已验证正确

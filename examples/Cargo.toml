@@ -498,6 +498,10 @@ name = "mfem_ex26_geom_mg"
 path = "mfem_ex26_geom_mg.rs"
 
 [[example]]
+name = "scratch_vcycle_debug"
+path = "scratch_vcycle_debug.rs"
+
+[[example]]
 name = "mfem_ex28_sliding_elasticity"
 path = "mfem_ex28_sliding_elasticity.rs"
 
