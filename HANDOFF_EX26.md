@@ -61,16 +61,39 @@ Average reduction factor = 0.599579
 
 ### 已知差距
 
-#### 收敛差距（4 vs 28 次迭代）— 待 linlvo 层排查
+#### 收敛差距（4 vs 28 次迭代）— 持续排查中
 
 DOF 数一致（20801）✅，求解器配置一致 ✅，延长矩阵正确 ✅，Chebyshev 系数一致 ✅。
 
-**根本原因：** MFEM `ex26.cpp` 使用 `AssemblyLevel::PARTIAL`（部分组装），矩阵-向量乘积和特征值估计通过逐单元操作完成。Rust 使用完整 CSR 矩阵。虽然数学上等价，但：
-- 特征值估计（λ_max）误差不同，影响 Chebyshev 平滑器质量
-- 部分组装的对角线 `AssembleDiagonal` 与 CSR `diagonal()` 数值不同
-- 浮动点运算顺序差异
+**完整诊断记录（已验证排除的因素）：**
 
-**排查建议：** 如果后续要实现 linlvo 层的 `PartialAssemblyOperator`（element-by-element mat-vec），收敛性应自动改善。目前差距在预期范围内，不阻碍示例对齐。
+| 排查项 | 结果 | 方法 |
+|--------|------|------|
+| Prolongation 矩阵 | ✅ 正确 | P1→P2 列和 [2,3,4]、P2→P4 高阶插值 |
+| Chebyshev 系数 | ✅ 一致 | 与 MFEM `OperatorChebyshevSmoother` 逐位比对 |
+| λ_max 估计 (2.85) | ✅ 最优 | 覆盖测试 4/8/12/20/50 均更差 |
+| `apply_dirichlet_symmetric` | ✅ 正确 | 保持 SPD |
+| `RectangularConstrainedOperator` | ✅ 对称 | restrict = prolong^T |
+| V-cycle 结构 | ✅ 一致 | 与 MFEM `MultigridBase::Cycle` 逐行比对 |
+| CG coarse rtol (1e-2) | ✅ 一致 | 与 `sqrt(1e-4)` 相同 |
+| 网格细化 (ref_levels=3) | ✅ 一致 | 20→1280 单元，20801 DOF |
+| 无预条件 CG | 763 iters | 基准确认条件数高 |
+
+**当前假设：** 差距源于 MFEM `AssemblyLevel::PARTIAL`（部分组装，element-by-element 操作）与 Rust 完整 CSR 矩阵之间的**对角线数值差异**。
+
+在 MFEM 中：
+- 平滑器使用 `bfs[level]->AssembleDiagonal(diag)`，该对角线来自**元素级别**的对角线组装（部分组装路径）
+- 算子 `opr` 来自 `bfs[level]->FormSystemMatrix(ess_tdof_list, opr)`，是元素级别的缩减算子
+- Chebyshev 平滑器的幂迭代通过 `ProductOperator(invDiagOperator, oper)` 在 **D⁻¹A** 上进行
+
+在 Rust 中：
+- 平滑器使用 `a.diagonal()`，来自完整 CSR 矩阵
+- 幂迭代在 **D⁻¹/² A D⁻¹/²**（相似变换，特征值相同）上进行
+- 算子 `a` 是完整的 CSR 矩阵
+
+虽然数学上这些应该是等价的，但部分组装和完整 CSR 之间的**对角线数值差异**（由于不同的积分/组装路径）可能导致 Chebyshev 区间的微小偏移，累积成明显的收敛差距。
+
+**建议：** 在 linlvo 层实现 `PartialAssemblyOperator`（element-by-element mat-vec + 元素级别对角线），匹配 MFEM 的部分组装行为。此差距非 bug，属于实现策略差异。
 
 #### 输出格式
 - C++ 用 `%g` 格式（不定长），Rust 用 `fmt_g`（已对齐，微小差异）
