@@ -1,28 +1,21 @@
 # Handoff: MFEM ex29 (Curved-surface Poisson)
 
-## 状态：❌ L² 误差不匹配（~300×）
+## 状态：❌ 曲面扩散组装 300×误差，需逐个元素矩阵比对
 
-### 已修复的基础设施
-| 修复 | 文件 | 说明 |
-|------|------|------|
-| API 方法名 | `mfem_ex29_curved_poisson.rs` | `geom_elem_nodes`→`geometry_nodes` 等 |
-| `geom_coords_of` 类型适配 | 同上 | `&[f64]` → `[f64;3]` |
-| Quad 参考节点对齐 | `assembler.rs`, 示例 | 等距→GLL (`QuadQk`) |
+### 已验证
+- ✅ 扁平 Quad4 Laplacian 组装：在其他示例中正常工作
+- ✅ 梯度变换数学公式：等价于 MFEM
+- ✅ GLL 节点对齐：`ref_elem_vol` 已修复
+- ✅ 曲面路径代码逻辑：正确使用 `geometry_nodes` (16 Q3 节点，不是 4 顶点)
 
-### C++ 参考
-- 48 DOFs, PCG+GSSmoother, 7 次迭代
-- |u-u_h|₂ = 0.001386, |f-f_h|₂ = 0.007977
+### 未解决
+- `is_surface=true` 路径的曲面组装在所有场景下都产生 ~0.39 的 L² 误差
+- 即使是 σ=I（基本 Laplacian）也失败
+- 需要逐个元素矩阵比对（C++ `ComputeElementMatrix` vs Rust 输出）才能定位
+- C++ 构建环境需要稳定的 WSL 编译链
 
-### Rust 结果
-- 48 DOFs ✅, PCG+GSSmoother ✅
-- |u-u_h|₂ = 0.422 (300×), |f-f_h|₂ = 0.582
-
-### 已排除的原因
-- ❌ DOF 排序（`build_pk_quad` vs `QuadQ3`/`QuadQk`）：已验证一致
-- ❌ 参考节点位置（等距 vs GLL）：已修复，但未改善结果
-- ❌ 梯度变换数学公式（`J·G⁻¹·∇_ref` vs MFEM `adj(G)·Jᵀ·∇_ref/det(G)`）：已验证等价
-
-### 未排除的原因
-- `DofManager::dof_coord()` 对曲面网格使用线性插值，未使用 Q3 几何节点 → 影响 `||b-A*u_exact||` 测试但不影响 FE 解
-- 手动 `surface_jacobian` 实现可能有细节错误（如梯度方向、sigma 投影）
-- 建议：重写 ex29 改用 `Assembler::assemble_bilinear` 的 `is_surface=true` 路径 + `TensorDiffusionIntegrator`，传入投影后的 2×2 sigma
+### 建议
+在可构建 MFEM 的环境中：
+1. 修改 C++ ex29 在 `a.Assemble()` 后调用 `a.ComputeElementMatrix(0, elmat)` 输出单元 0 矩阵
+2. 在 Rust 中从 Assembler 内部提取相同单元矩阵
+3. 逐元素比对找出差异

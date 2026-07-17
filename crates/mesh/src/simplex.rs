@@ -300,8 +300,15 @@ impl<const D: usize> Mesh<D> {
                     let ca = self.coords_of(a);
                     let cb = self.coords_of(b);
                     let mut new_ids = Vec::with_capacity(n_edge_dofs);
-                    for k in 1..p {
-                        let t = k as f64 / p as f64;
+                    for j in 0..n_edge_dofs {
+                        let idx = 4 + ei * n_edge_dofs + j;
+                        let rc = &dof_ref[idx];
+                        // Edge is in QuadQk DOF order: use the varying coordinate
+                        // (xi=rc[0] for horizontal edges, eta=rc[1] for vertical)
+                        // but since edge runs in parameter space along the edge direction,
+                        // find which coord varies: for edges, one coord is ±1
+                        let varying = if rc[0].abs() < 1.0 { rc[0] } else { rc[1] };
+                        let t = (varying + 1.0) * 0.5; // map [-1,1] to [0,1]
                         let mut x = [0.0; D];
                         for d in 0..D { x[d] = (1.0 - t) * ca[d] + t * cb[d]; }
                         geom_coords.extend_from_slice(&x);
