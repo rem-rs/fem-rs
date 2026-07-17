@@ -69,39 +69,38 @@ fn build_vandermonde() -> [[f64; 8]; 8] {
 
     let mut mono = [0.0f64; 16];
 
-    // --- Edge f₀: hypotenuse v₁→v₂, param t: (1-t, t), n̂=(1,1), edge length=√2 ---
-    // DOF_0 = ∫₀¹ [(m_j)_x + (m_j)_y](1-t,t) · (1/√2) · √2 dt = ∫₀¹ [(m_j)_x+(m_j)_y](1-t,t) dt
-    // DOF_1 = ∫₀¹ [(m_j)_x + (m_j)_y](1-t,t) · t dt
-    // (The √2 from edge length and 1/√2 from unit normal cancel.)
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(1.0-t, t, &mut mono);
-        for j in 0..8 {
-            let nflux = mono[j*2] + mono[j*2+1]; // (n_x=1, n_y=1) dotted (unnormalized)
-            v[0][j] += w * nflux;
-            v[1][j] += w * nflux * t;
-        }
-    }
-    // --- Edge f₁: left edge v₀→v₂, param t: (0,t), n̂=(-1,0), length=1 ---
-    // DOF_2 = ∫₀¹ (−(m_j)_x)(0,t) dt
-    // DOF_3 = ∫₀¹ (−(m_j)_x)(0,t) · t dt
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(0.0, t, &mut mono);
-        for j in 0..8 {
-            let nflux = -mono[j*2]; // n=(−1,0)
-            v[2][j] += w * nflux;
-            v[3][j] += w * nflux * t;
-        }
-    }
-    // --- Edge f₂: bottom edge v₀→v₁, param t: (t,0), n̂=(0,-1), length=1 ---
-    // DOF_4 = ∫₀¹ (−(m_j)_y)(t,0) dt
-    // DOF_5 = ∫₀¹ (−(m_j)_y)(t,0) · t dt
+    // --- Edge 0 (TRI_FACES[0]): bottom edge v₀→v₁, param t: (t,0), n̂=(0,-1), length=1 ---
+    // DOF_0 = ∫₀¹ (−(m_j)_y)(t,0) dt
+    // DOF_1 = ∫₀¹ (−(m_j)_y)(t,0) · t dt
     for k in 0..4 {
         let (t, w) = (gl_pts[k], gl_wts[k]);
         eval_monomials(t, 0.0, &mut mono);
         for j in 0..8 {
             let nflux = -mono[j*2+1]; // n=(0,−1)
+            v[0][j] += w * nflux;
+            v[1][j] += w * nflux * t;
+        }
+    }
+    // --- Edge 1 (TRI_FACES[1]): hypotenuse v₁→v₂, param t: (1-t, t), n̂=(1,1) ---
+    // DOF_2 = ∫₀¹ [(m_j)_x + (m_j)_y](1-t,t) dt
+    // DOF_3 = ∫₀¹ [(m_j)_x + (m_j)_y](1-t,t) · t dt
+    for k in 0..4 {
+        let (t, w) = (gl_pts[k], gl_wts[k]);
+        eval_monomials(1.0-t, t, &mut mono);
+        for j in 0..8 {
+            let nflux = mono[j*2] + mono[j*2+1]; // (n_x=1, n_y=1)
+            v[2][j] += w * nflux;
+            v[3][j] += w * nflux * t;
+        }
+    }
+    // --- Edge 2 (TRI_FACES[2]): left edge v₀→v₂, param t: (0,t), n̂=(-1,0), length=1 ---
+    // DOF_4 = ∫₀¹ (−(m_j)_x)(0,t) dt
+    // DOF_5 = ∫₀¹ (−(m_j)_x)(0,t) · t dt
+    for k in 0..4 {
+        let (t, w) = (gl_pts[k], gl_wts[k]);
+        eval_monomials(0.0, t, &mut mono);
+        for j in 0..8 {
+            let nflux = -mono[j*2]; // n=(−1,0)
             v[4][j] += w * nflux;
             v[5][j] += w * nflux * t;
         }
