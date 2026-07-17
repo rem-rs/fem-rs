@@ -474,9 +474,8 @@ fn run_curl_3d(mesh: &Mesh<3>, order: u8) {
 
 fn run_div(mesh: &Mesh<2>, order: u8) {
     let qo = (2 * order + 1).max(3) as u8;
-    // RT1→P1 在 TriRT1 的 eval_div 中有已知 bug，回退到 RT0→P0
-    let rt_order = if order >= 2 { 0 } else if order > 0 { order - 1 } else { 0 };
-    let l2_p = rt_order;
+    let rt_order = if order > 0 { order - 1 } else { 0 };
+    let l2_p = if rt_order > 0 { rt_order } else { 0 };
     let rt = HDivSpace::new(mesh.clone(), rt_order);
     let l2 = L2Space::new(mesh.clone(), l2_p);
     println!("Number of Raviart-Thomas finite element unknowns: {}", rt.n_dofs());
@@ -485,15 +484,21 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
     // C++ ex24 prob 2: trial = grad p in H(div), exact = div(grad p) in L²
     let div_gradp = |x: &[f64]| -2.0 * x[0].sin() * x[1].sin();
 
-    // Project grad p onto H(div) trial space via L² projection (matching C++ ProjectCoefficient)
-    let v = project_hdiv_coefficient_2d(
-        &rt,
-        &|x: &[f64], out: &mut [f64]| {
-            out[0] = x[0].cos() * x[1].sin();
-            out[1] = x[0].sin() * x[1].cos();
-        },
-        qo,
-    );
+    // RT1→P1：直接用 interpolate_vector，绕过 project 可能的问题
+    let v = if order >= 2 {
+        rt.interpolate_vector(&|x: &[f64]| {
+            vec![x[0].cos() * x[1].sin(), x[0].sin() * x[1].cos()]
+        }).as_slice().to_vec()
+    } else {
+        project_hdiv_coefficient_2d(
+            &rt,
+            &|x: &[f64], out: &mut [f64]| {
+                out[0] = x[0].cos() * x[1].sin();
+                out[1] = x[0].sin() * x[1].cos();
+            },
+            qo,
+        )
+    };
 
     // (a) Mixed form: solve M·f = D·v
     let d = assemble_hdiv_l2_mixed(&l2, &rt, &[&HDivL2DivIntegrator], qo);
