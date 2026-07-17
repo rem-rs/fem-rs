@@ -604,6 +604,53 @@ pub fn project_bdr_coefficient_tangent(
     }
 }
 
+/// 2D version: project boundary edge tangent components for H(curl).
+///
+/// For each boundary edge on a face with attribute in `bdr_attr`, evaluates
+/// `coeff(x_mid).tangential` at the edge midpoint and sets the HCurl DOF value.
+/// Equivalent to MFEM's `GridFunction::ProjectBdrCoefficientTangent` for 2D ND spaces.
+pub fn project_bdr_coefficient_tangent_2d(
+    nd_dofs: &mut [f64],
+    nd_space: &HCurlSpace<fem_mesh::Mesh<2>>,
+    coeff: &dyn Fn(&[f64], &mut [f64]),
+    bdr_attr: &[i32],
+) {
+    use std::collections::HashSet;
+    use fem_space::EdgeKey;
+    let mesh = nd_space.mesh();
+
+    // Collect boundary edges
+    let mut edges: HashSet<EdgeKey> = HashSet::new();
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        if bdr_attr.contains(&mesh.face_tag(f)) {
+            let nodes = mesh.face_nodes(f);
+            for i in 0..nodes.len() {
+                let a = nodes[i];
+                let b = nodes[(i + 1) % nodes.len()];
+                edges.insert(EdgeKey::new(a, b));
+            }
+        }
+    }
+    // Project onto each edge DOF
+    for ek in &edges {
+        if let Some(dofs) = nd_space.edge_dofs(*ek) {
+            let pa = mesh.node_coords(ek.0);
+            let pb = mesh.node_coords(ek.1);
+            let mid = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5];
+            let mut fval = [0.0_f64; 2];
+            coeff(&mid, &mut fval);
+            // Tangential component: f · t  where t = (b-a)/|b-a|
+            let tx = pb[0] - pa[0];
+            let ty = pb[1] - pa[1];
+            let len = (tx*tx + ty*ty).sqrt();
+            if len > 0.0 {
+                let ft = (fval[0]*tx + fval[1]*ty) / len;
+                for &d in &dofs { nd_dofs[d as usize] = ft; }
+            }
+        }
+    }
+}
+
 // ─── HCurl L² projection ───────────────────────────────────────────────────
 
 /// Project a vector function onto H(curl) via the mass-matrix solve

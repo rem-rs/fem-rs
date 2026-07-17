@@ -674,13 +674,12 @@ impl<const D: usize> Mesh<D> {
 
         // ── Step 2: compute edge geometry ────────────────────────────────────
         struct BdrEdge {
-            elem: ElemId,
             nodes: Vec<NodeId>,
             mid: [f64; 2],
             normal: [f64; 2],
         }
 
-        let mut bdr: Vec<BdrEdge> = boundary_edges
+        let bdr: Vec<BdrEdge> = boundary_edges
             .iter()
             .map(|(elem, nodes)| {
                 let p0 = self.node_coords(nodes[0]);
@@ -701,7 +700,6 @@ impl<const D: usize> Mesh<D> {
                 let dot = nx * (mid_x - centroid_x) + ny * (mid_y - centroid_y);
                 let (nx, ny) = if dot >= 0.0 { (nx, ny) } else { (-nx, -ny) };
                 BdrEdge {
-                    elem: *elem,
                     nodes: nodes.clone(),
                     mid: [mid_x, mid_y],
                     normal: [nx, ny],

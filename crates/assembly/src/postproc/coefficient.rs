@@ -786,8 +786,90 @@ pub fn transform<C: ScalarCoeff, F: Fn(f64) -> f64 + Send + Sync>(
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Tests
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RestrictedCoefficient — scalar coefficient restricted to element attributes
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// A scalar coefficient that is only non-zero on elements whose attribute
+/// is in `attrs`.  Returns `0.0` on all other elements.
+///
+/// This is the Rust equivalent of MFEM's `RestrictedCoefficient`.
+#[derive(Clone)]
+pub struct RestrictedCoefficient<C: ScalarCoeff> {
+    pub inner: C,
+    pub attrs: Vec<i32>,
+}
+
+impl<C: ScalarCoeff> ScalarCoeff for RestrictedCoefficient<C> {
+    #[inline]
+    fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
+        if self.attrs.contains(&ctx.elem_tag) {
+            self.inner.eval(ctx)
+        } else {
+            0.0
+        }
+    }
+
+    fn is_constant(&self) -> bool {
+        self.attrs.len() == 1 && self.inner.is_constant()
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// VectorRestrictedCoefficient — matrix coefficient restricted to attributes
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// A matrix/vector-valued coefficient that is only non-zero on elements
+/// whose attribute is in `attrs`.  Returns zero matrix on all other elements.
+///
+/// This is the Rust equivalent of MFEM's `VectorRestrictedCoefficient`.
+#[derive(Clone)]
+pub struct VectorRestrictedCoefficient<C: MatrixCoeff> {
+    pub inner: C,
+    pub attrs: Vec<i32>,
+}
+
+impl<C: MatrixCoeff> MatrixCoeff for VectorRestrictedCoefficient<C> {
+    #[inline]
+    fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
+        if self.attrs.contains(&ctx.elem_tag) {
+            self.inner.eval(ctx, out);
+        } else {
+            for v in out.iter_mut() {
+                *v = 0.0;
+            }
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ScalarVectorProductCoefficient — scalar × vector/matrix
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Product of a scalar coefficient and a matrix/vector coefficient.
+///
+/// `result(x) = scalar(x) · matrix(x)` (component-wise scaling).
+///
+/// This is the Rust equivalent of MFEM's `ScalarVectorProductCoefficient`.
+#[derive(Clone)]
+pub struct ScalarVectorProductCoefficient<C: ScalarCoeff, V: MatrixCoeff> {
+    pub scalar: C,
+    pub vector: V,
+}
+
+impl<C: ScalarCoeff, V: MatrixCoeff> MatrixCoeff for ScalarVectorProductCoefficient<C, V> {
+    #[inline]
+    fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
+        let s = self.scalar.eval(ctx);
+        self.vector.eval(ctx, out);
+        for v in out.iter_mut() {
+            *v *= s;
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Tests
 
 #[cfg(test)]
 mod tests {
