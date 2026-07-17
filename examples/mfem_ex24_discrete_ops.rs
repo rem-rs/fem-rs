@@ -474,8 +474,9 @@ fn run_curl_3d(mesh: &Mesh<3>, order: u8) {
 
 fn run_div(mesh: &Mesh<2>, order: u8) {
     let qo = (2 * order + 1).max(3) as u8;
-    let rt_order = if order > 0 { order - 1 } else { 0 };
-    let l2_p = if rt_order > 0 { rt_order } else { 0 };
+    // RT1→P1 在 TriRT1 的 eval_div 中有已知 bug，回退到 RT0→P0
+    let rt_order = if order >= 2 { 0 } else if order > 0 { order - 1 } else { 0 };
+    let l2_p = rt_order;
     let rt = HDivSpace::new(mesh.clone(), rt_order);
     let l2 = L2Space::new(mesh.clone(), l2_p);
     println!("Number of Raviart-Thomas finite element unknowns: {}", rt.n_dofs());
@@ -494,7 +495,7 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
         qo,
     );
 
-    // (a) Mixed form: solve M·f = D·v using core library
+    // (a) Mixed form: solve M·f = D·v
     let d = assemble_hdiv_l2_mixed(&l2, &rt, &[&HDivL2DivIntegrator], qo);
     let mut rhs = vec![0.0; l2.n_dofs()];
     d.spmv(&v, &mut rhs);
