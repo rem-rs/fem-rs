@@ -494,38 +494,116 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
         qo,
     );
 
-    // (a) Mixed form: solve M·f = D·v using core library
-    let d = assemble_hdiv_l2_mixed(&l2, &rt, &[&HDivL2DivIntegrator], qo);
-    let mut rhs = vec![0.0; l2.n_dofs()];
-    d.spmv(&v, &mut rhs);
-
-    let mass = fem_assembly::Assembler::assemble_bilinear(
-        &l2, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], qo);
+    // (a) Compute div(v_h) projected onto L² via element-by-element solve
+    // For DG spaces, each element's mass matrix is independent, so we can
+    // solve locally:  f|_e = M_e^{-1} · D_e · v_e
+    let dim = 2;
+    let n_elem = mesh.n_elements();
     let mut f_sol = vec![0.0; l2.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_jacobi(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
+    let ref_r = fem_assembly::mixed::ref_elem_vol(
+        mesh.element_type(0), l2.order()).expect("L2 ref elem");
+    let n_r = ref_r.n_dofs();
+    let ref_c = fem_assembly::mixed::ref_elem_vec(
+        mesh.element_type(0), rt.order(), fem_space::SpaceType::HDiv)
+        .expect("HDiv ref elem");
+    let n_c = ref_c.n_dofs();
+    let quad = ref_c.quadrature(qo);
+
+    for e in 0..n_elem as u32 {
+        let et = mesh.element_type(e);
+        let ref_r_e = fem_assembly::mixed::ref_elem_vol(et, l2.order()).expect("L2 ref elem");
+        let ref_c_e = fem_assembly::mixed::ref_elem_vec(et, rt.order(), fem_space::SpaceType::HDiv)
+            .expect("HDiv ref elem");
+        let n_ld2 = ref_r_e.n_dofs();
+        let n_ldv = ref_c_e.n_dofs();
+        let nodes = mesh.element_nodes(e);
+        let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
+        let signs = rt.element_signs(e);
+        let dofs_r: Vec<usize> = l2.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let dofs_c: Vec<usize> = rt.element_dofs(e).iter().map(|&d| d as usize).collect();
+
+        let mut me = vec![0.0_f64; n_ld2 * n_ldv];  // D_elem (L2 rows × HDiv cols)
+        let mut mm = vec![0.0_f64; n_ld2 * n_ld2];  // M_elem (L2 × L2)
+        let mut phi_r = vec![0.0_f64; n_ld2];
+        let mut div_c = vec![0.0_f64; n_ldv];
+        let mut div_s = vec![0.0_f64; n_ldv];
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[qi] * tr.det_j().abs();
+            let det_j = tr.det_j();
+            ref_r_e.eval_basis(xi, &mut phi_r);
+            ref_c_e.eval_div(xi, &mut div_c);
+
+            // Apply signs and Piola transform
+            for i in 0..n_ldv {
+                let s = if i < signs.len() { signs[i] } else { 1.0 };
+                div_s[i] = s * div_c[i] / det_j;
+            }
+
+            // Mass matrix: M += w · φ_i · φ_j
+            for i in 0..n_ld2 {
+                for j in 0..n_ld2 {
+                    mm[i * n_ld2 + j] += w * phi_r[i] * phi_r[j];
+                }
+            }
+            // Mixed matrix: D += w · φ_i · div_s[j]
+            for i in 0..n_ld2 {
+                for j in 0..n_ldv {
+                    me[i * n_ldv + j] += w * phi_r[i] * div_s[j];
+                }
+            }
+        }
+
+        // Compute f_elem = M_elem^{-1} · D_elem · v_elem
+        let mut rhs_loc = vec![0.0_f64; n_ld2];
+        for i in 0..n_ld2 {
+            for j in 0..n_ldv {
+                rhs_loc[i] += me[i * n_ldv + j] * v[dofs_c[j]];
+            }
+        }
+
+        // Solve 3×3 system via Gaussian elimination
+        // (small enough for direct solve)
+        if n_ld2 == 1 {
+            f_sol[dofs_r[0]] = rhs_loc[0] / mm[0];
+        } else {
+            // Direct solve using nalgebra
+            let m_mat = nalgebra::DMatrix::from_row_slice(n_ld2, n_ld2, &mm);
+            let rhs_vec = nalgebra::DVector::from_vec(rhs_loc);
+            match m_mat.try_inverse() {
+                Some(inv) => {
+                    let f_loc = &inv * rhs_vec;
+                    for i in 0..n_ld2 {
+                        f_sol[dofs_r[i]] = f_loc[i];
+                    }
+                }
+                None => {
+                    eprintln!("Warning: singular mass matrix on element {e}");
+                }
+            }
+        }
+    }
 
     // (b) Discrete divergence interpolant via DLO (matches C++ DivergenceInterpolator)
-    let dlo_div = DiscreteLinearOperator::divergence(&rt, &l2);
     let mut f_interp = vec![0.0; l2.n_dofs()];
-    let mut interp_rhs = vec![0.0; l2.n_dofs()];
+    let dlo_div = DiscreteLinearOperator::divergence(&rt, &l2);
     if let Ok(dlo) = dlo_div {
         dlo.spmv(&v, &mut f_interp);
-    } else {
-        // Fallback: use mixed matrix D (works for RT0→P0)
-        d.spmv(&v, &mut interp_rhs);
-        solve_pcg_jacobi(&mass, &interp_rhs, &mut f_interp, &cfg).expect("interp mass solve");
     }
 
     // (c) Exact L² projection of div(grad p) into L²
+    let mass = fem_assembly::Assembler::assemble_bilinear(
+        &l2, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], qo);
     let rhs_ex = fem_assembly::Assembler::assemble_linear(&l2, &[
         &fem_assembly::standard::DomainSourceIntegrator::new(div_gradp)
     ], qo);
     let mut f_ex = vec![0.0; l2.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
+    solve_pcg_jacobi(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
     solve_pcg_jacobi(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
 
     // Errors (higher quadrature for accuracy)
-    let err_qo = (2 * order + 4).max(5) as u8;
+    let err_qo = (2 * order + 6).max(7) as u8;
     let e1 = l2e_l2(&l2, &f_sol, &div_gradp, err_qo);
     let e2 = l2e_l2(&l2, &f_interp, &div_gradp, err_qo);
     let e3 = l2e_l2(&l2, &f_ex, &div_gradp, err_qo);
