@@ -13,7 +13,7 @@ use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::fe_space::FESpace;
-use fem_space::{EdgeKey, HCurlSpace};
+use fem_space::{EdgeKey, HCurlSpace, HDivSpace};
 use fem_mesh::Mesh;
 
 use crate::assembler::Assembler;
@@ -649,6 +649,53 @@ pub fn project_hcurl_coefficient_2d(
     let mut u = vec![0.0; nd_space.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
     solve_cg(&m, &rhs, &mut u, &cfg).expect("HCurl 2-D L² projection CG solve");
+    u
+}
+
+/// Project a vector function onto H(div) for a 2-D mesh.
+///
+/// Computes the L² projection by solving `M · u = b` where `M` is the
+/// H(div) mass matrix and `b_i = ∫ f(x) · φ_i(x) dx`.
+///
+/// Equivalent to MFEM's `GridFunction::ProjectCoefficient` for RT spaces.
+pub fn project_hdiv_coefficient_2d(
+    rt_space: &HDivSpace<fem_mesh::Mesh<2>>,
+    coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
+    quad_order: u8,
+) -> Vec<f64> {
+    use crate::vector_assembler::VectorAssembler;
+    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
+    use crate::coefficient::FnVectorCoeff;
+    use fem_solver::{solve_cg, SolverConfig};
+
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let m = VectorAssembler::assemble_bilinear(rt_space, &[&mass], quad_order);
+    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
+    let rhs = VectorAssembler::assemble_linear(rt_space, &[&src], quad_order);
+    let mut u = vec![0.0; rt_space.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
+    solve_cg(&m, &rhs, &mut u, &cfg).expect("HDiv 2-D L² projection CG solve");
+    u
+}
+
+/// Project a vector function onto H(div) for a 3-D mesh.
+pub fn project_hdiv_coefficient_3d(
+    rt_space: &HDivSpace<fem_mesh::Mesh<3>>,
+    coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
+    quad_order: u8,
+) -> Vec<f64> {
+    use crate::vector_assembler::VectorAssembler;
+    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
+    use crate::coefficient::FnVectorCoeff;
+    use fem_solver::{solve_cg, SolverConfig};
+
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let m = VectorAssembler::assemble_bilinear(rt_space, &[&mass], quad_order);
+    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
+    let rhs = VectorAssembler::assemble_linear(rt_space, &[&src], quad_order);
+    let mut u = vec![0.0; rt_space.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
+    solve_cg(&m, &rhs, &mut u, &cfg).expect("HDiv 3-D L² projection CG solve");
     u
 }
 

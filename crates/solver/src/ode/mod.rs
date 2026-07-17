@@ -42,5 +42,6 @@ pub use traits::{TimeStepper, ImplicitTimeStepper, HamiltonianSystem, ImexOperat
 pub use symplectic::{VerletStepper, LeapfrogStepper, Yoshida4Stepper, SIAVSolver};
 pub use explicit::{ForwardEuler, Rk4, Rk45, AdamsBashforthMoulton, AbmState};
 pub use implicit::{ImplicitEuler, Sdirk2, Bdf2, Bdf2State, CrankNicolson};
-pub use structural::{Newmark, NewmarkState, GeneralizedAlpha, GeneralizedAlphaState};
+pub use structural::{Newmark, NewmarkState, GeneralizedAlpha, GeneralizedAlphaState,
+                     GeneralizedAlpha2, GeneralizedAlpha2State};
 pub use imex::{ImexTimeStepper, ImexArk3, ImexRk3, ImexEuler, ImexSsp2};

@@ -215,6 +215,7 @@ pub use ode::{
     Bdf2, Bdf2State,
     Newmark, NewmarkState,
     GeneralizedAlpha, GeneralizedAlphaState,
+    GeneralizedAlpha2, GeneralizedAlpha2State,
     ImexArk3,
     ImexRk3,
     ImexEuler,

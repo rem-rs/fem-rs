@@ -27,10 +27,10 @@
 //! | 12 | SDIRK2 (L-stable)    | Implicit |
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-use fem_io::mfem::read_mfem_file;
+use fem_io::mfem::{read_mfem_file, write_gf, write_mfem, write_mfem_file_3d};
 use fem_linalg::CsrMatrix;
 use fem_mesh::{Mesh, MeshTopology};
-use fem_solver::{solve_pcg_gssmoother, SolverConfig};
+use fem_solver::{solve_pcg_jacobi, SolverConfig, GeneralizedAlpha2, GeneralizedAlpha2State};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
 // ─── WaveOperator ──────────────────────────────────────────────────────────────
@@ -43,8 +43,8 @@ use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 ///
 /// where u is the displacement vector, M is the mass matrix, and K is the
 /// stiffness matrix.
-struct WaveOperator {
-    fespace: H1Space<Mesh<2>>,
+struct WaveOperator<M: MeshTopology> {
+    fespace: H1Space<M>,
     ess_tdof_list: Vec<u32>,
 
     // Full matrices (before BC elimination) — used for FullMult
@@ -65,9 +65,9 @@ struct WaveOperator {
     z: Vec<f64>,
 }
 
-impl WaveOperator {
+impl<M: MeshTopology + Send + Sync + Clone> WaveOperator<M> {
     fn new(
-        fespace: H1Space<Mesh<2>>,
+        fespace: H1Space<M>,
         ess_tdof_list: Vec<u32>,
         speed: f64,
     ) -> Self {
@@ -131,9 +131,9 @@ impl WaveOperator {
         for &d in &self.ess_tdof_list {
             self.z[d as usize] = 0.0;
         }
-        // Solve M_mat · d2udt2 = z (PCG+GSSmoother, matching C++ DSmoother)
-        solve_pcg_gssmoother(&self.m_mat, &self.z, d2udt2, &self.solve_cfg)
-            .expect("WaveOperator::Mult: PCG+GS solve failed");
+        // Solve M_mat · d2udt2 = z (PCG+Jacobi, matching C++ DSmoother)
+        solve_pcg_jacobi(&self.m_mat, &self.z, d2udt2, &self.solve_cfg)
+            .expect("WaveOperator::Mult: PCG+Jacobi solve failed");
         // Zero BC entries in solution
         for &d in &self.ess_tdof_list {
             d2udt2[d as usize] = 0.0;
@@ -165,10 +165,10 @@ impl WaveOperator {
             self.z[d as usize] = 0.0;
         }
 
-        // Solve T · d2udt2 = z (PCG+GSSmoother, matching C++ DSmoother)
+        // Solve T · d2udt2 = z (PCG+Jacobi, matching C++ DSmoother)
         let sys = self.t_mat.as_ref().unwrap();
-        let res = solve_pcg_gssmoother(sys, &self.z, d2udt2, &self.solve_cfg)
-            .expect("WaveOperator::ImplicitSolve: PCG+GS solve failed");
+        let res = solve_pcg_jacobi(sys, &self.z, d2udt2, &self.solve_cfg)
+            .expect("WaveOperator::ImplicitSolve: PCG+Jacobi solve failed");
         if !res.converged {
             eprintln!("WARNING: PCG+Jacobi did not converge (iter={}, residual={:.6e})",
                      res.iterations, res.final_residual);
@@ -183,6 +183,11 @@ impl WaveOperator {
     fn set_parameters(&mut self) {
         self.t_mat = None;
     }
+
+    /// Access the BC-eliminated mass matrix (for use with GeneralizedAlpha2).
+    pub fn mass_matrix(&self) -> &CsrMatrix<f64> { &self.m_mat }
+    /// Access the BC-eliminated stiffness matrix.
+    pub fn stiff_matrix(&self) -> &CsrMatrix<f64> { &self.k_mat }
 }
 
 // ─── Initial conditions ────────────────────────────────────────────────────────
@@ -273,14 +278,11 @@ fn main() {
     // 1. Parse command-line options (done via parse_args() above)
 
     // 2. Read the mesh from the given mesh file.
-    //    Use CARGO_MANIFEST_DIR for the default mesh path
     let mfem_file = {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let full_path = p.parent().unwrap().join(&args.mesh_file);
         read_mfem_file(&full_path).expect("failed to read MFEM mesh")
     };
-    let mesh = mfem_file.mesh2d.expect("MFEM mesh must be 2D");
-    let dim = 2;
 
     println!("Options used:");
     println!("   --mesh {}", args.mesh_file);
@@ -298,6 +300,19 @@ fn main() {
         println!("   --no-visit-datafiles");
     }
     println!("   --visualization-steps {}", args.vis_steps);
+
+    // Dispatch to 2D or 3D
+    if let Some(mesh) = mfem_file.mesh2d {
+        run_wave_2d(mesh, &args);
+    } else if let Some(mesh) = mfem_file.mesh3d {
+        run_wave_3d(mesh, &args);
+    } else {
+        panic!("No mesh found");
+    }
+}
+
+fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
+    let dim = 2;
 
     // 3. Define the ODE solver used for time integration.
     //    Currently only Backward Euler (type 10) is implemented.
@@ -363,10 +378,14 @@ fn main() {
         du_dt[d as usize] = 0.0;
     }
 
-    // Save initial solution (matching C++ ex23 behavior: u then du_dt)
-    let _ = fem_io::mfem::write_gf_file(
-        "ex23-init-u.gf", dim, &u, "H1", args.order, 1,
-    );
+    // Save initial solution (matching C++ ex23: ex23.mesh + ex23-init.gf with u + du_dt)
+    {
+        let mut mesh_f = std::fs::File::create("ex23.mesh").expect("create ex23.mesh");
+        write_mfem(&mut mesh_f, &mesh, None).expect("mesh write");
+        let mut init_f = std::fs::File::create("ex23-init.gf").expect("create ex23-init.gf");
+        write_gf(&mut init_f, dim, &u, "H1", args.order, 1).expect("write init u");
+        write_gf(&mut init_f, dim, &du_dt, "H1", args.order, 1).expect("write init du_dt");
+    }
 
     // Create the wave operator
     let mut oper = WaveOperator::new(space, ess_bdr.clone(), args.speed);
@@ -383,76 +402,173 @@ fn main() {
         0
     };
 
-    // Time stepping — GeneralizedAlpha2(1.0) = Average Acceleration (Newmark β=0.25)
-    // C++ ex23 type 10: rho_inf=1.0 → alpha_m=0.5, alpha_f=0.5, beta=0.25, gamma=0.5
-    //
-    // For each step:
-    //   xa = x + 0.5·dt·dxdt                         (alpha-level predictor)
-    //   (M + 0.25·dt²·K)·aa = -K·xa                  (alpha-level solve)
-    //   x = x + dt·dxdt + 0.5·dt²·aa                 (extrapolate to n+1)
-    //   dxdt = dxdt + dt·aa                           (extrapolate velocity)
+    // 8. Time integration using GeneralizedAlpha2 (core library).
+    let rho_inf = match args.ode_solver_type {
+        10 => 1.0_f64,
+        11 => 0.0_f64,
+        12 => 0.5_f64,
+        11 => 0.0_f64,
+        12 => 0.5_f64,
+        _ => { eprintln!("Warning: unsupported ODE solver type {}, using type 10", args.ode_solver_type); 1.0 }
+    };
+    let ga2 = GeneralizedAlpha2::new(rho_inf);
+    println!("   GeneralizedAlpha2: rho_inf={}", rho_inf);
+
+    let mut state = GeneralizedAlpha2State::new(fe_size);
+    state.vel.copy_from_slice(&du_dt);
+
+    let mut t = 0.0;
+    let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
+    let zero_force = vec![0.0; fe_size];
+
     let mut last_step = false;
     for ti in 1..=n_steps.max(1) {
         let dt_actual = if t + dt >= t_final - dt / 2.0 {
-            last_step = true;
-            t_final - t
-        } else {
-            dt
-        };
+            last_step = true; t_final - t
+        } else { dt };
 
-        // fac3 = beta*alpha_f/alpha_m = 0.25
-        let fac0 = 0.25 * dt_actual * dt_actual;
-
-        // Alpha-level predictor: xa = x + 0.5·dt·dxdt
-        let mut u_pred = u.clone();
-        for i in 0..fe_size {
-            u_pred[i] += 0.5 * dt_actual * du_dt[i];
-        }
-
-        // Solve: (M + 0.25·dt²·K)·aa = -K·xa
-        let mut d2udt2 = vec![0.0; fe_size];
-        oper.implicit_solve(fac0, &u_pred, &mut d2udt2);
-
-        // Zero BC DOFs in acceleration
-        for &d in &ess_bdr {
-            d2udt2[d as usize] = 0.0;
-        }
-
-        // Extrapolate: x_{n+1} = x_n + dt·dxdt_n + 0.5·dt²·aa
-        for i in 0..fe_size {
-            u[i] += dt_actual * du_dt[i] + 0.5 * dt_actual * dt_actual * d2udt2[i];
-        }
-
-        // Extrapolate: dxdt_{n+1} = dxdt_n + dt·aa
-        for i in 0..fe_size {
-            du_dt[i] += dt_actual * d2udt2[i];
-        }
-
-        // Zero BC DOFs
-        for &d in &ess_bdr {
-            u[d as usize] = 0.0;
-            du_dt[d as usize] = 0.0;
-        }
+        ga2.step(oper.mass_matrix(), oper.stiff_matrix(), &zero_force,
+                 dt_actual, &mut u, &mut state, &ess_bdr);
 
         t += dt_actual;
 
         if last_step || (ti % vis_steps == 0) {
             println!("step {}, t = {}", ti, t);
         }
-
-        // Invalidate T matrix for next step (matching C++ SetParameters)
         oper.set_parameters();
     }
 
-    // 9. Save the final solution.
-    let _ = fem_io::mfem::write_gf_file(
-        "ex23-final.gf", dim, &u, "H1", args.order, 1,
-    );
-    let _ = fem_io::mfem::write_gf_file(
-        "ex23-rate.gf", dim, &du_dt, "H1", args.order, 1,
-    );
+    du_dt.copy_from_slice(&state.vel);
+
+    // 9. Save the final solution (matching C++: ex23-final.gf with u then du_dt)
+    {
+        let mut final_f = std::fs::File::create("ex23-final.gf").expect("create ex23-final.gf");
+        write_gf(&mut final_f, dim, &u, "H1", args.order, 1).expect("write final u");
+        write_gf(&mut final_f, dim, &du_dt, "H1", args.order, 1).expect("write final du_dt");
+    }
 
     // 10. Compute and print some statistics for comparison
+    let max_u = u.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+    let sum_u: f64 = u.iter().sum();
+    let checksum_u: f64 = u.iter().enumerate().map(|(i, &v)| v * (i as f64 + 1.0)).sum();
+    println!("\n  Final solution stats:");
+    println!("    max|u| = {:.6e}", max_u);
+    println!("    sum(u) = {:.6e}", sum_u);
+    println!("    checksum = {:.6e}", checksum_u);
+
+    let max_dudt = du_dt.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+    let sum_dudt: f64 = du_dt.iter().sum();
+    let checksum_dudt: f64 = du_dt.iter().enumerate().map(|(i, &v)| v * (i as f64 + 1.0)).sum();
+    println!("    max|du/dt| = {:.6e}", max_dudt);
+    println!("    sum(du/dt) = {:.6e}", sum_dudt);
+    println!("    du/dt checksum = {:.6e}", checksum_dudt);
+}
+
+// ─── 3D wave equation ─────────────────────────────────────────────────────
+
+fn run_wave_3d(mut mesh: Mesh<3>, args: &Args) {
+    let dim = 3;
+
+    // 4. Refine the mesh uniformly.
+    let mesh = if args.ref_levels > 0 {
+        let mut m = mesh;
+        for _ in 0..args.ref_levels {
+            m = fem_mesh::refine_uniform_3d(&m);
+        }
+        m
+    } else {
+        mesh
+    };
+
+    // 5. Define the H1 FE space.
+    let space = H1Space::new(mesh.clone(), args.order);
+    let fe_size = space.n_dofs();
+    println!("Number of temperature unknowns: {}", fe_size);
+
+    // 6. Compute boundary DOFs (matching C++ GetEssentialTrueDofs).
+    let ess_bdr = if args.dirichlet {
+        let all_tags: Vec<i32> = if mesh.n_boundary_faces() > 0 {
+            (0..mesh.n_boundary_faces())
+                .map(|f| mesh.face_tag(f as u32))
+                .collect()
+        } else { Vec::new() };
+        let mut unique_tags: Vec<i32> = all_tags.clone();
+        unique_tags.sort_unstable();
+        unique_tags.dedup();
+        if unique_tags.is_empty() { Vec::new() }
+        else { boundary_dofs(&mesh, space.dof_manager(), &unique_tags) }
+    } else { Vec::new() };
+
+    // 7. Set the initial conditions for u and du/dt.
+    let dm = space.dof_manager();
+    let mut u: Vec<f64> = (0..fe_size)
+        .map(|i| { let x = dm.dof_coord(i as u32); initial_solution(&x[..dim]) })
+        .collect();
+    let mut du_dt: Vec<f64> = (0..fe_size)
+        .map(|i| { let x = dm.dof_coord(i as u32); initial_rate(&x[..dim]) })
+        .collect();
+
+    println!("  ess_bdr count: {}", ess_bdr.len());
+    for &d in &ess_bdr { u[d as usize] = 0.0; du_dt[d as usize] = 0.0; }
+
+    // Save initial solution
+    {
+        let _ = fem_io::mfem::write_mfem_file_3d("ex23.mesh", &mesh);
+        let mut init_f = std::fs::File::create("ex23-init.gf").expect("create ex23-init.gf");
+        write_gf(&mut init_f, dim, &u, "H1", args.order, 1).expect("write init u");
+        write_gf(&mut init_f, dim, &du_dt, "H1", args.order, 1).expect("write init du_dt");
+    }
+
+    // Create the wave operator
+    let mut oper = WaveOperator::new(space, ess_bdr.clone(), args.speed);
+
+    // 8. Time integration
+    let t_final = args.t_final;
+    let dt = args.dt;
+    let vis_steps = args.vis_steps;
+    let mut t = 0.0;
+    let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
+
+    let rho_inf = match args.ode_solver_type {
+        10 => 1.0_f64,
+        11 => 0.0_f64,
+        12 => 0.5_f64,
+        _ => { eprintln!("Warning: unsupported ODE solver type {}, using type 10", args.ode_solver_type); 1.0 }
+    };
+    let ga2 = GeneralizedAlpha2::new(rho_inf);
+    println!("   GeneralizedAlpha2: rho_inf={}", rho_inf);
+
+    let mut state = GeneralizedAlpha2State::new(fe_size);
+    state.vel.copy_from_slice(&du_dt);
+
+    let mut t = 0.0;
+    let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
+    let zero_force = vec![0.0; fe_size];
+
+    let mut last_step = false;
+    for ti in 1..=n_steps.max(1) {
+        let dt_actual = if t + dt >= t_final - dt / 2.0 {
+            last_step = true; t_final - t
+        } else { dt };
+
+        ga2.step(oper.mass_matrix(), oper.stiff_matrix(), &zero_force,
+                 dt_actual, &mut u, &mut state, &ess_bdr);
+
+        t += dt_actual;
+        if last_step || (ti % vis_steps == 0) { println!("step {}, t = {}", ti, t); }
+        oper.set_parameters();
+    }
+
+    du_dt.copy_from_slice(&state.vel);
+
+    // 9. Save the final solution
+    {
+        let mut final_f = std::fs::File::create("ex23-final.gf").expect("create ex23-final.gf");
+        write_gf(&mut final_f, dim, &u, "H1", args.order, 1).expect("write final u");
+        write_gf(&mut final_f, dim, &du_dt, "H1", args.order, 1).expect("write final du_dt");
+    }
+
+    // 10. Statistics
     let max_u = u.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
     let sum_u: f64 = u.iter().sum();
     let checksum_u: f64 = u.iter().enumerate().map(|(i, &v)| v * (i as f64 + 1.0)).sum();

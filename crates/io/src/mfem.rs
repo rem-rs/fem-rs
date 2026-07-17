@@ -510,8 +510,34 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             }
             Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
         }
+        "hex" => {
+            let n = nx.max(ny).max(_nz.unwrap_or(1));
+            let mut mesh = Mesh::<3>::unit_cube_hex(n);
+            let scale_x = sx / n as f64 * nx as f64;
+            let scale_y = sy / n as f64 * ny as f64;
+            let scale_z = _sz.unwrap_or(1.0) / n as f64 * _nz.unwrap_or(1) as f64;
+            for c in mesh.coords.chunks_mut(3) {
+                c[0] *= scale_x;
+                c[1] *= scale_y;
+                c[2] *= scale_z;
+            }
+            Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+        }
+        "tet" => {
+            let n = nx.max(ny).max(_nz.unwrap_or(1));
+            let mut mesh = Mesh::<3>::unit_cube_tet(n);
+            let scale_x = sx / n as f64 * nx as f64;
+            let scale_y = sy / n as f64 * ny as f64;
+            let scale_z = _sz.unwrap_or(1.0) / n as f64 * _nz.unwrap_or(1) as f64;
+            for c in mesh.coords.chunks_mut(3) {
+                c[0] *= scale_x;
+                c[1] *= scale_y;
+                c[2] *= scale_z;
+            }
+            Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+        }
         other => Err(FemError::Mesh(format!(
-            "INLINE mesh: unsupported type '{other}' (supported: tri, quad)"
+            "INLINE mesh: unsupported type '{other}' (supported: tri, quad, hex, tet)"
         ))),
     }
 }

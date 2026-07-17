@@ -146,6 +146,128 @@ impl Newmark {
     }
 }
 
+// ─── Generalized-α for second-order ODEs ─────────────────────────────────────
+
+/// Second-order generalized-α method for `M·ü + C·u̇ + K·u = f(t)`.
+///
+/// Parameters derived from spectral radius at infinity `ρ_∞ ∈ [0, 1]`:
+/// ```text
+///   α_m = (2 - ρ_∞) / (1 + ρ_∞)
+///   α_f = 1 / (1 + ρ_∞)
+///   γ   = 0.5 + α_m - α_f
+///   β   = 0.25 · (1 + α_m - α_f)²
+/// ```
+///
+/// Common choices:
+/// - `ρ_∞ = 1.0` → β=0.25, γ=0.5  (average acceleration / Newmark, **type 10**)
+/// - `ρ_∞ = 0.0` → β=1.0,  γ=1.5  (fully implicit, **type 11**)
+/// - `ρ_∞ = 0.5` → β=4/9,  γ=5/6  (L-stable, **type 12**)
+pub struct GeneralizedAlpha2 {
+    pub rho_inf: f64,
+}
+
+/// State for [`GeneralizedAlpha2`]: stores velocity and acceleration.
+pub struct GeneralizedAlpha2State {
+    pub vel: Vec<f64>,
+    pub acc: Vec<f64>,
+}
+
+impl GeneralizedAlpha2State {
+    pub fn new(n: usize) -> Self {
+        GeneralizedAlpha2State { vel: vec![0.0; n], acc: vec![0.0; n] }
+    }
+
+    pub fn init_from(vel: Vec<f64>, mass: &fem_linalg::CsrMatrix<f64>,
+                      stiff: &fem_linalg::CsrMatrix<f64>, u: &[f64], force: &[f64]) -> Self {
+        let n = u.len();
+        let mut ku = vec![0.0; n];
+        stiff.spmv(u, &mut ku);
+        let rhs: Vec<f64> = (0..n).map(|i| force[i] - ku[i]).collect();
+        let mut acc = vec![0.0; n];
+        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        solve_cg(mass, &rhs, &mut acc, &cfg).expect("GeneralizedAlpha2 init: mass solve failed");
+        GeneralizedAlpha2State { vel, acc }
+    }
+}
+
+impl GeneralizedAlpha2 {
+    pub fn new(rho_inf: f64) -> Self {
+        assert!(rho_inf >= 0.0 && rho_inf <= 1.0, "ρ_∞ must be in [0, 1]");
+        GeneralizedAlpha2 { rho_inf }
+    }
+
+    fn alpha_m(&self) -> f64 { (2.0 - self.rho_inf) / (1.0 + self.rho_inf) }
+    fn alpha_f(&self) -> f64 { 1.0 / (1.0 + self.rho_inf) }
+    fn gamma(&self) -> f64 { 0.5 + self.alpha_m() - self.alpha_f() }
+    fn beta(&self) -> f64 {
+        let g = 0.5 + self.alpha_m() - self.alpha_f();
+        0.25 * g * g
+    }
+
+    /// Advance one time step for M·ü + K·u = f(t).
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(
+        &self,
+        mass: &fem_linalg::CsrMatrix<f64>,
+        stiff: &fem_linalg::CsrMatrix<f64>,
+        force_new: &[f64],
+        dt: f64,
+        u: &mut [f64],
+        state: &mut GeneralizedAlpha2State,
+        bc_dofs: &[u32],
+    ) {
+        let n = u.len();
+        let b = self.beta();
+        let g = self.gamma();
+        let pred_coef = self.alpha_f() / self.alpha_m();
+
+        // Predict: u_pred = u + (α_f/α_m)·dt·v
+        let mut u_pred = vec![0.0; n];
+        for i in 0..n {
+            u_pred[i] = u[i] + pred_coef * dt * state.vel[i];
+        }
+
+        // Solve effective system: (M + β·dt²·K)·a_{n+1} = f_{n+1} - K·u_pred
+        let coeff = b * dt * dt;
+        let eff_stiff = build_effective_stiffness(mass, stiff, coeff);
+
+        let mut k_upred = vec![0.0; n];
+        stiff.spmv(&u_pred, &mut k_upred);
+        let mut rhs: Vec<f64> = (0..n).map(|i| force_new[i] - k_upred[i]).collect();
+
+        let mut eff = eff_stiff;
+        for &d in bc_dofs {
+            let d = d as usize;
+            eff.apply_dirichlet_row_zeroing(d, 0.0, &mut rhs);
+        }
+
+        let mut a_new = vec![0.0; n];
+        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
+        solve_cg(&eff, &rhs, &mut a_new, &cfg).expect("GeneralizedAlpha2: effective system solve failed");
+
+        // Correct: u_{n+1} = u + dt·v + dt²·[(0.5-β)·a_n + β·a_{n+1}]
+        for i in 0..n {
+            u[i] += dt * state.vel[i]
+                  + dt * dt * ((0.5 - b) * state.acc[i] + b * a_new[i]);
+        }
+
+        // Update velocity: v_{n+1} = v_n + dt·[(1-γ)·a_n + γ·a_{n+1}]
+        for i in 0..n {
+            state.vel[i] += dt * ((1.0 - g) * state.acc[i] + g * a_new[i]);
+        }
+
+        state.acc.copy_from_slice(&a_new);
+
+        // Zero BC DOFs
+        for &d in bc_dofs {
+            let d = d as usize;
+            u[d] = 0.0;
+            state.vel[d] = 0.0;
+            state.acc[d] = 0.0;
+        }
+    }
+}
+
 // ─── Generalized-α (first-order) ─────────────────────────────────────────────
 
 /// First-order generalized-α method (Jansen, Whiting & Hulbert, 2000) for the

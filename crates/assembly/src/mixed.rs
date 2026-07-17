@@ -815,6 +815,9 @@ where
         let ge = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
         let nodes = mesh.element_nodes(e);
 
+        // HCurl element signs — critical for correct orientation
+        let nd_signs = nd_space.element_signs(e);
+
         for (qi, xi) in quad.points.iter().enumerate() {
             let (w, jit, det_j): (f64, nalgebra::DMatrix<f64>, f64) = if use_iso {
                 let g: &dyn ReferenceElement = ge.as_deref().unwrap();
@@ -840,14 +843,15 @@ where
                     let curl_phys = curl_ref / det_j;
                     (0.0, 0.0, curl_phys)
                 } else {
-                    // 3D: curl gives 3-vector, transform: curl_phys = (1/det_J) * J · curl_ref
-                    let id = 1.0 / det_j;
+                    // 3D: curl gives 3-vector
+                    // MFEM VectorFECurlIntegrator: curl_phys = curl_ref · J^T
+                    // (= J · curl_ref, no 1/detJ factor — HDiv Piola absorbs it)
                     let crx = nd_curl[j*dim];
                     let cry = nd_curl[j*dim + 1];
                     let crz = nd_curl[j*dim + 2];
-                    (id * (jac[(0,0)]*crx + jac[(0,1)]*cry + jac[(0,2)]*crz),
-                     id * (jac[(1,0)]*crx + jac[(1,1)]*cry + jac[(1,2)]*crz),
-                     id * (jac[(2,0)]*crx + jac[(2,1)]*cry + jac[(2,2)]*crz))
+                    (jac[(0,0)]*crx + jac[(0,1)]*cry + jac[(0,2)]*crz,
+                     jac[(1,0)]*crx + jac[(1,1)]*cry + jac[(1,2)]*crz,
+                     jac[(2,0)]*crx + jac[(2,1)]*cry + jac[(2,2)]*crz)
                 };
 
                 for i in 0..ng_rt {
@@ -858,7 +862,8 @@ where
                     let wz = if dim>2 { id * (jac[(2,0)]*rt_basis[i*dim] + jac[(2,1)]*rt_basis[i*dim+1] + jac[(2,2)]*rt_basis[i*dim+2]) } else { 0.0 };
 
                     let dot = cx*wx + cy*wy + cz*wz;
-                    me[i * ng_nd + j] += w * nu * dot;
+                    let s_nd = if j < nd_signs.len() { nd_signs[j] } else { 1.0 };
+                    me[i * ng_nd + j] += w * nu * s_nd * dot;
                 }
             }
         }

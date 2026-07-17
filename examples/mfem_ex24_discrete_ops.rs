@@ -19,19 +19,23 @@
 #![allow(unused_imports, dead_code)]
 
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use fem_assembly::{
-    DiscreteLinearOperator, VectorAssembler, mixed::assemble_hcurl_h1_gradient,
+    DiscreteLinearOperator, VectorAssembler,
+    mixed::{assemble_hcurl_h1_gradient, assemble_hdiv_l2_mixed, HDivL2DivIntegrator},
+    project_coefficient, project_hcurl_coefficient, project_hcurl_coefficient_2d,
+    project_hdiv_coefficient_2d, project_hdiv_coefficient_3d,
     standard::VectorMassIntegrator,
 };
 use fem_element::ReferenceElement;
-use fem_io::mfem::read_mfem_file;
+use fem_io::mfem::{read_mfem_file, write_gf, write_mfem, write_mfem_file_3d};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{
     Mesh, ElementTransformation, ElementType as EType,
     topology::MeshTopology,
 };
-use fem_solver::{solve_pcg_gssmoother, SolverConfig};
+use fem_solver::{solve_pcg_jacobi, solve_gmres, SolverConfig};
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace, L2Space,
     fe_space::FESpace, SpaceType,
@@ -39,7 +43,7 @@ use fem_space::{
 
 fn main() {
     let args = parse_args();
-    let (mesh2d, _mesh3d) = match &args.mesh {
+    let (mesh2d, mesh3d) = match &args.mesh {
         Some(path) => {
             let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
             (mfem.mesh2d, mfem.mesh3d)
@@ -57,18 +61,24 @@ fn main() {
     println!("   --no-static-condensation\n   --no-partial-assembly\n   --no-visualization");
     match args.prob {
         0 => {
-            let mut m = mesh2d.expect("2D mesh needed");
+            let mut m = mesh2d.expect("2D mesh needed for prob 0");
             let l = rl(m.n_elements(), 2);
             for _ in 0..l { m = fem_mesh::refine_uniform(&m); }
             run_grad(&m, args.order);
         }
+        1 => {
+            let mut m = mesh3d.expect("3D mesh needed for prob 1");
+            let l = rl(m.n_elements(), 3);
+            for _ in 0..l { m = fem_mesh::refine_uniform_3d(&m); }
+            run_curl_3d(&m, args.order);
+        }
         2 => {
-            let mut m = mesh2d.expect("2D mesh needed");
+            let mut m = mesh2d.expect("2D mesh needed for prob 2");
             let l = rl(m.n_elements(), 2);
             for _ in 0..l { m = fem_mesh::refine_uniform(&m); }
             run_div(&m, args.order);
         }
-        _ => eprintln!("prob 1 (3D curl) not yet implemented"),
+        _ => eprintln!("Unrecognized problem type: {}", args.prob),
     }
 }
 
@@ -313,8 +323,9 @@ fn run_grad(mesh: &Mesh<2>, order: u8) {
     println!("Number of Nedelec finite element unknowns: {}", nd.n_dofs());
     println!("Number of H1 finite element unknowns: {}", h1.n_dofs());
 
-    // C++ ex24 prob 0: p(x) = sin(x)*sin(y)  (NOT sin(πx))
-    let p: Vec<f64> = h1.interpolate(&|x| x[0].sin() * x[1].sin()).as_slice().to_vec();
+    // C++ ex24 prob 0: p(x) = sin(x)*sin(y) — L² projection onto H1
+    let quad_order_p = (2 * order + 1).max(3) as u8;
+    let p = project_coefficient(&h1, &|x: &[f64]| x[0].sin() * x[1].sin(), quad_order_p);
 
     // (a) Mixed form: solve M·E = B·p  (B via library assemble_hcurl_h1_gradient)
     let b = assemble_hcurl_h1_gradient(&nd, &h1, qo);
@@ -324,7 +335,7 @@ fn run_grad(mesh: &Mesh<2>, order: u8) {
     let mass = VectorAssembler::assemble_bilinear(&nd, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
     let mut e_sol = vec![0.0; nd.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_gssmoother(&mass, &rhs, &mut e_sol, &cfg).expect("PCG solve failed");
+    solve_pcg_jacobi(&mass, &rhs, &mut e_sol, &cfg).expect("PCG solve failed");
 
     // (b) Discrete gradient interpolant
     let g = DiscreteLinearOperator::gradient(&h1, &nd).expect("grad DLO");
@@ -348,7 +359,7 @@ fn run_grad(mesh: &Mesh<2>, order: u8) {
         }
     ], qo);
     let mut e_ex = vec![0.0; nd.n_dofs()];
-    solve_pcg_gssmoother(&mass, &rhs_ex, &mut e_ex, &cfg).expect("exact PCG");
+    solve_pcg_jacobi(&mass, &rhs_ex, &mut e_ex, &cfg).expect("exact PCG");
 
     // C++ ex24 exact: grad p = (cos(x)*sin(y), sin(x)*cos(y))
     let err_qo = (2 * order + 4).max(5) as u8; // higher order for accurate error integration
@@ -356,12 +367,110 @@ fn run_grad(mesh: &Mesh<2>, order: u8) {
     let e1 = l2e_hcurl(&nd, &e_sol, &gradp, err_qo);
     let e2 = l2e_hcurl(&nd, &e_interp, &gradp, err_qo);
     let e3 = l2e_hcurl(&nd, &e_ex, &gradp, err_qo);
-    println!("\n Solution:  || E_h - grad p ||_{{L_2}} = {:.8}", e1);
-    println!(" Interpolant: || E_h - grad p ||_{{L_2}} = {:.8}", e2);
-    println!(" Projection:  || E_h - grad p ||_{{L_2}} = {:.8}", e3);
+    println!("\n Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e1);
+    println!(" Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e2);
+    println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e3);
+
+    // Output refined.mesh and sol.gf
+    {
+        use std::fs::File;
+        use std::io::Write;
+        let mut mf = File::create("refined.mesh").expect("create refined.mesh");
+        write_mfem(&mut mf, mesh, None).expect("write mesh");
+        let mut sf = File::create("sol.gf").expect("create sol.gf");
+        for &v in &e_sol { writeln!(sf, "{:.14e}", v).ok(); }
+    }
 }
 
-// ─── Problem 2: Div — div v: H(div)→L² ───────────────────────────────────────
+// ─── Problem 1: Curl (3D) — curl v: H(curl)→H(div) ───────────────────────────
+
+fn run_curl_3d(mesh: &Mesh<3>, order: u8) {
+    let qo = (2 * order + 1).max(3) as u8;
+    let dim = 3;
+    let nd_order = order;
+    let rt_order = if order > 0 { order - 1 } else { 0 };
+
+    let nd = HCurlSpace::new(mesh.clone(), nd_order);
+    let rt = HDivSpace::new(mesh.clone(), rt_order);
+    println!("Number of Nedelec finite element unknowns: {}", nd.n_dofs());
+    println!("Number of Raviart-Thomas finite element unknowns: {}", rt.n_dofs());
+
+    // C++ ex24 prob 1: v = (sin(κy), sin(κz), sin(κx)), κ = π
+    let kappa = std::f64::consts::PI;
+    let v_exact = |x: &[f64]| vec![(kappa * x[1]).sin(), (kappa * x[2]).sin(), (kappa * x[0]).sin()];
+
+    // Struct for curl v exact (thread-safe)
+    struct CurlVExact { kappa: f64 }
+    impl fem_assembly::postproc::coefficient::VectorCoeff for CurlVExact {
+        fn eval(&self, ctx: &fem_assembly::postproc::coefficient::CoeffCtx<'_>, out: &mut [f64]) {
+            let x = ctx.x;
+            out[0] = -self.kappa * (self.kappa * x[2]).cos();
+            out[1] = -self.kappa * (self.kappa * x[0]).cos();
+            out[2] = -self.kappa * (self.kappa * x[1]).cos();
+        }
+    }
+    let curl_v_exact = CurlVExact { kappa };
+
+    // Project v onto H(curl) trial space (L² projection, matching C++ ProjectCoefficient)
+    let v = project_hcurl_coefficient(
+        &nd,
+        &|x: &[f64], out: &mut [f64]| {
+            out[0] = (kappa * x[1]).sin();
+            out[1] = (kappa * x[2]).sin();
+            out[2] = (kappa * x[0]).sin();
+        },
+        qo,
+    );
+
+    // (a) Mixed form: solve M·w = C·v  (C = weak curl matrix: HCurl→HDiv)
+    // assemble_hcurl_hdiv_weak_curl computes ∫ curl(ψ_j)·w_i dx = C[i,j] where ψ∈HCurl, w∈HDiv
+    let c = fem_assembly::mixed::assemble_hcurl_hdiv_weak_curl(&nd, &rt, qo, 1.0);
+    let mut rhs = vec![0.0; rt.n_dofs()];
+    c.spmv(&v, &mut rhs);
+
+    let mass = VectorAssembler::assemble_bilinear(&rt, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
+    let mut w_sol = vec![0.0; rt.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
+    solve_pcg_jacobi(&mass, &rhs, &mut w_sol, &cfg).expect("PCG solve failed");
+
+    // (b) Discrete curl interpolant via DLO
+    let curl_dlo = DiscreteLinearOperator::curl_3d(&nd, &rt).expect("curl_3d DLO");
+    let mut w_interp = vec![0.0; rt.n_dofs()];
+    curl_dlo.spmv(&v, &mut w_interp);
+
+    // (c) Exact L² projection of curl v into H(div)
+    let rhs_ex = VectorAssembler::assemble_linear(&rt, &[
+        &fem_assembly::standard::VectorDomainLFIntegrator {
+            f: CurlVExact { kappa },  // implements VectorCoeff
+        }
+    ], qo);
+    let mut w_ex = vec![0.0; rt.n_dofs()];
+    solve_pcg_jacobi(&mass, &rhs_ex, &mut w_ex, &cfg).expect("exact PCG");
+
+    // Errors
+    let err_qo = (2 * order + 4).max(5) as u8;
+    let curl_fn = Arc::new(move |x: &[f64]| vec![
+        -kappa * (kappa * x[2]).cos(),
+        -kappa * (kappa * x[0]).cos(),
+        -kappa * (kappa * x[1]).cos(),
+    ]);
+    let e1 = l2e_hdiv_3d(mesh, &rt, &w_sol, curl_fn.clone(), err_qo);
+    let e2 = l2e_hdiv_3d(mesh, &rt, &w_interp, curl_fn.clone(), err_qo);
+    let e3 = l2e_hdiv_3d(mesh, &rt, &w_ex, curl_fn, err_qo);
+
+    println!("\n Solution of (E_h,w) = (curl v_h,w) for E_h and w in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e1);
+    println!(" Curl interpolant E_h = curl v_h in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e2);
+    println!(" Projection E_h of exact curl v in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e3);
+
+    // Output
+    {
+        use std::fs::File;
+        use std::io::Write;
+        write_mfem_file_3d("refined.mesh", mesh).expect("write mesh 3d");
+        let mut sf = File::create("sol.gf").expect("create sol.gf");
+        for &v in &w_sol { writeln!(sf, "{:.14e}", v).ok(); }
+    }
+}
 
 fn run_div(mesh: &Mesh<2>, order: u8) {
     let qo = (2 * order + 1).max(3) as u8;
@@ -373,48 +482,98 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
     println!("Number of L2 finite element unknowns: {}", l2.n_dofs());
 
     // C++ ex24 prob 2: trial = grad p in H(div), exact = div(grad p) in L²
-    // grad p = (cos(x)*sin(y), sin(x)*cos(y))
-    let gradp = |x: &[f64]| vec![x[0].cos() * x[1].sin(), x[0].sin() * x[1].cos()];
-    // div(grad p) = -2*sin(x)*sin(y)
     let div_gradp = |x: &[f64]| -2.0 * x[0].sin() * x[1].sin();
 
-    // Project grad p onto H(div) trial space
-    let v: Vec<f64> = rt.interpolate_vector(&gradp).as_slice().to_vec();
+    // Project grad p onto H(div) trial space via L² projection (matching C++ ProjectCoefficient)
+    let v = project_hdiv_coefficient_2d(
+        &rt,
+        &|x: &[f64], out: &mut [f64]| {
+            out[0] = x[0].cos() * x[1].sin();
+            out[1] = x[0].sin() * x[1].cos();
+        },
+        qo,
+    );
 
-    // (a) Mixed form: solve M·f = D·v
-    let d = assemble_div_mixed(&l2, &rt, qo);
+    // (a) Mixed form: solve M·f = D·v using core library
+    let d = assemble_hdiv_l2_mixed(&l2, &rt, &[&HDivL2DivIntegrator], qo);
     let mut rhs = vec![0.0; l2.n_dofs()];
     d.spmv(&v, &mut rhs);
 
-    // L² mass matrix (P0 now supported in assembler via new P0 ref element)
     let mass = fem_assembly::Assembler::assemble_bilinear(
         &l2, &[&fem_assembly::standard::MassIntegrator { rho: 1.0 }], qo);
     let mut f_sol = vec![0.0; l2.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_gssmoother(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
+    solve_pcg_jacobi(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
 
-    // (b) Discrete divergence interpolant: reuse the mixed matrix D (same as C++ DivergenceInterpolator)
-    let mut f_interp_rhs = vec![0.0; l2.n_dofs()];
-    d.spmv(&v, &mut f_interp_rhs);
+    // (b) Discrete divergence interpolant via mixed matrix (same as C++ DivergenceInterpolator)
     let mut f_interp = vec![0.0; l2.n_dofs()];
-    let cfg_interp = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_gssmoother(&mass, &f_interp_rhs, &mut f_interp, &cfg_interp).expect("interp mass solve");
+    let mut interp_rhs = vec![0.0; l2.n_dofs()];
+    d.spmv(&v, &mut interp_rhs);
+    solve_pcg_jacobi(&mass, &interp_rhs, &mut f_interp, &cfg).expect("interp mass solve");
 
     // (c) Exact L² projection of div(grad p) into L²
     let rhs_ex = fem_assembly::Assembler::assemble_linear(&l2, &[
         &fem_assembly::standard::DomainSourceIntegrator::new(div_gradp)
     ], qo);
     let mut f_ex = vec![0.0; l2.n_dofs()];
-    solve_pcg_gssmoother(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
+    solve_pcg_jacobi(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
 
     // Errors (higher quadrature for accuracy)
     let err_qo = (2 * order + 4).max(5) as u8;
     let e1 = l2e_l2(&l2, &f_sol, &div_gradp, err_qo);
     let e2 = l2e_l2(&l2, &f_interp, &div_gradp, err_qo);
     let e3 = l2e_l2(&l2, &f_ex, &div_gradp, err_qo);
-    println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {:.8}", e1);
-    println!("\n Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {:.8}", e2);
-    println!("\n Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {:.8}", e3);
+    println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e1);
+    println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e2);
+    println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e3);
+
+    // Output refined.mesh and sol.gf
+    {
+        use std::fs::File;
+        use std::io::Write;
+        let mut mf = File::create("refined.mesh").expect("create refined.mesh");
+        write_mfem(&mut mf, mesh, None).expect("write mesh");
+        let mut sf = File::create("sol.gf").expect("create sol.gf");
+        for &v in &f_sol { writeln!(sf, "{:.14e}", v).ok(); }
+    }
+}
+
+// ─── L² error for H(div) 3D via mass matrix ───────────────────────────────
+// Compute ||w - w_exact||_{L²} = sqrt((w-w_ex)ᵀ·M·(w-w_ex))
+
+fn l2e_hdiv_3d(
+    mesh: &Mesh<3>, rt: &HDivSpace<Mesh<3>>, d: &[f64],
+    exact: Arc<dyn Fn(&[f64]) -> Vec<f64> + Send + Sync>, qoq: u8) -> f64 {
+    // Use mass-matrix based error: ||w - w_ex||_L² = sqrt((d-w_ex)^T M (d-w_ex))
+    // where w_ex = M^{-1} * rhs_exact
+    use fem_assembly::standard::VectorDomainLFIntegrator;
+    let mass = VectorAssembler::assemble_bilinear(rt, &[&VectorMassIntegrator { alpha: 1.0 }], qoq);
+
+    // Build exact RHS via functor wrapper
+    let dim = 3;
+    let exact2 = exact.clone();
+    struct ExactWrap { f: Arc<dyn Fn(&[f64]) -> Vec<f64> + Send + Sync>, dim: usize }
+    impl fem_assembly::postproc::coefficient::VectorCoeff for ExactWrap {
+        fn eval(&self, ctx: &fem_assembly::postproc::coefficient::CoeffCtx<'_>, out: &mut [f64]) {
+            let v = (self.f)(ctx.x);
+            for i in 0..self.dim.min(v.len()) { out[i] = v[i]; }
+        }
+    }
+    let exact_wrap = ExactWrap { f: exact2, dim };
+    let rhs = VectorAssembler::assemble_linear(rt, &[
+        &VectorDomainLFIntegrator { f: exact_wrap }
+    ], qoq);
+
+    let mut w_ex = vec![0.0; rt.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
+    solve_pcg_jacobi(&mass, &rhs, &mut w_ex, &cfg).expect("l2e_hdiv_3d mass solve");
+
+    let mut diff = vec![0.0; rt.n_dofs()];
+    for i in 0..rt.n_dofs() { diff[i] = d[i] - w_ex[i]; }
+    let mut m_diff = vec![0.0; rt.n_dofs()];
+    mass.spmv(&diff, &mut m_diff);
+    let e2: f64 = diff.iter().zip(m_diff.iter()).map(|(a, b)| a * b).sum();
+    e2.sqrt()
 }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
