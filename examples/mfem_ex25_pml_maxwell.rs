@@ -473,27 +473,40 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     let mut rhs_re = vec![0.0; n];
     let mut rhs_im = vec![0.0; n];
     if prob == Prob::LoadSrc {
+        // C++: source in IMAGINARY part (AddDomainIntegrator(NULL, src))
         let comp_bdr: Vec<[f64; 2]> = (0..dim).map(|d| pml.comp_domain_bdr[d]).collect();
         let src_fn = |x: &[f64], _ctx: &VectorQpData<'_>| -> Vec<f64> {
             source_fn(x, dim, &comp_bdr, omega, args.eps, args.mu)
         };
         let vec = VectorAssembler::assemble_linear(&space, &[&VectorSrc { f: &src_fn }], qo);
-        rhs_re.copy_from_slice(&vec);
+        rhs_im.copy_from_slice(&vec);
     }
 
-    // ── Project BC (1:1 with C++ ProjectBdrCoefficientTangent) ──────────
-    // Note: For full 1:1 with C++, use project_bdr_coefficient_tangent on
-    // concrete Mesh<2>/Mesh<3>. Here we use interpolate_vector for the
-    // generic MeshTopology path (equivalent for HCurl edge DOFs).
+    // ── Project BC (1:1 with C++ E_bdr_data_Re/Im + ProjectBdrCoefficientTangent) ──
+    // C++: returns 0 for boundary points inside PML
     if !ess_tdofs.is_empty() && exact_known {
-        let bc_re = space.interpolate_vector(&|x: &[f64]| {
+        let pml_ref = pml.clone();
+        let bc_fn_re = move |x: &[f64]| -> Vec<f64> {
+            for d in 0..dim {
+                if x[d] >= pml_ref.comp_domain_bdr[d][1] || x[d] <= pml_ref.comp_domain_bdr[d][0] {
+                    return vec![0.0; dim];
+                }
+            }
             let e = maxwell_solution(x, dim, prob, k);
             e.iter().map(|c| c.re).collect()
-        });
-        let bc_im = space.interpolate_vector(&|x: &[f64]| {
+        };
+        let pml_ref = pml.clone();
+        let bc_fn_im = move |x: &[f64]| -> Vec<f64> {
+            for d in 0..dim {
+                if x[d] >= pml_ref.comp_domain_bdr[d][1] || x[d] <= pml_ref.comp_domain_bdr[d][0] {
+                    return vec![0.0; dim];
+                }
+            }
             let e = maxwell_solution(x, dim, prob, k);
             e.iter().map(|c| c.im).collect()
-        });
+        };
+        let bc_re = space.interpolate_vector(&bc_fn_re);
+        let bc_im = space.interpolate_vector(&bc_fn_im);
         for &d in &ess_tdofs {
             rhs_re[d as usize] = bc_re[d as usize];
             rhs_im[d as usize] = bc_im[d as usize];
