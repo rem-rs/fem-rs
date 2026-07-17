@@ -394,9 +394,10 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         None,
     );
     a.add_domain_integrator_pair(
+        // Non-PML mass: -ω²ε · I  (C++: RestrictedCoefficient(ConstantCoefficient(-ω²ε), attr))
         &VectorMassTensorIntegrator {
             alpha: VectorRestrictedCoefficient {
-                inner: ScalarMatrixCoeff(1.0_f64),
+                inner: ScalarMatrixCoeff(omega2_eps),
                 attrs: attr.clone(),
             }
         },
@@ -563,16 +564,12 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         }], qo);
     prec = prec.axpby(1.0, &pml_mass_abs, 1.0);
 
-    // Apply BC elimination to preconditioner (matching C++ DIAG_ONE)
-    let mut shift = CooMatrix::new(n, n);
-    for i in 0..n { shift.add(i, i, 1.0); }
-    let mut prec_mat = CsrMatrix::add(&prec, &shift.into_csr());
+    // Apply symmetric BC elimination to preconditioner (matching C++ FormSystemMatrix + DIAG_ONE)
+    let mut prec_mat = prec;
+    let mut dummy_rhs = vec![0.0; n];
     for &d in &ess_tdofs {
         let d = d as usize;
-        for p in prec_mat.row_ptr[d]..prec_mat.row_ptr[d+1] {
-            let c = prec_mat.col_idx[p] as usize;
-            prec_mat.values[p] = if c == d { 1.0 } else { 0.0 };
-        }
+        prec_mat.apply_dirichlet_symmetric(d, 1.0, &mut dummy_rhs);
     }
     let la = fem_to_linlvo_csr(&prec_mat);
     let gs = GSSmoother::from_csr(&la).expect("GSSmoother");
