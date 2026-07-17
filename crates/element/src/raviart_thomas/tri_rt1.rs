@@ -70,39 +70,39 @@ fn build_vandermonde() -> [[f64; 8]; 8] {
     let mut mono = [0.0f64; 16];
 
     // --- Edge 0 (TRI_FACES[0]): bottom edge v₀→v₁, param t: (t,0), n̂=(0,-1), length=1 ---
-    // DOF_0 = ∫₀¹ (−(m_j)_y)(t,0) dt
-    // DOF_1 = ∫₀¹ (−(m_j)_y)(t,0) · t dt
+    // DOF_0 = ∫₀¹ (m_j · n̂) dt  (moment 0)
+    // DOF_1 = ∫₀¹ (m_j · n̂) · (2t-1) dt  (moment 1, aligned with MFEM)
     for k in 0..4 {
         let (t, w) = (gl_pts[k], gl_wts[k]);
         eval_monomials(t, 0.0, &mut mono);
         for j in 0..8 {
             let nflux = -mono[j*2+1]; // n=(0,−1)
-            v[0][j] += w * nflux;
-            v[1][j] += w * nflux * t;
+            v[0][j] += w * nflux;          // moment 0
+            v[1][j] += w * nflux * (2.0*t - 1.0); // moment 1 with (2t-1)
         }
     }
     // --- Edge 1 (TRI_FACES[1]): hypotenuse v₁→v₂, param t: (1-t, t), n̂=(1,1) ---
-    // DOF_2 = ∫₀¹ [(m_j)_x + (m_j)_y](1-t,t) dt
-    // DOF_3 = ∫₀¹ [(m_j)_x + (m_j)_y](1-t,t) · t dt
+    // DOF_2 = ∫₀¹ (m_j · n̂) dt
+    // DOF_3 = ∫₀¹ (m_j · n̂) · (2t-1) dt
     for k in 0..4 {
         let (t, w) = (gl_pts[k], gl_wts[k]);
         eval_monomials(1.0-t, t, &mut mono);
         for j in 0..8 {
-            let nflux = mono[j*2] + mono[j*2+1]; // (n_x=1, n_y=1)
-            v[2][j] += w * nflux;
-            v[3][j] += w * nflux * t;
+            let nflux = mono[j*2] + mono[j*2+1]; // n=(1,1)
+            v[2][j] += w * nflux;                // moment 0
+            v[3][j] += w * nflux * (2.0*t - 1.0); // moment 1 with (2t-1)
         }
     }
     // --- Edge 2 (TRI_FACES[2]): left edge v₀→v₂, param t: (0,t), n̂=(-1,0), length=1 ---
-    // DOF_4 = ∫₀¹ (−(m_j)_x)(0,t) dt
-    // DOF_5 = ∫₀¹ (−(m_j)_x)(0,t) · t dt
+    // DOF_4 = ∫₀¹ (m_j · n̂) dt
+    // DOF_5 = ∫₀¹ (m_j · n̂) · (2t-1) dt
     for k in 0..4 {
         let (t, w) = (gl_pts[k], gl_wts[k]);
         eval_monomials(0.0, t, &mut mono);
         for j in 0..8 {
             let nflux = -mono[j*2]; // n=(−1,0)
-            v[4][j] += w * nflux;
-            v[5][j] += w * nflux * t;
+            v[4][j] += w * nflux;          // moment 0
+            v[5][j] += w * nflux * (2.0*t - 1.0); // moment 1 with (2t-1)
         }
     }
     // --- Interior DOFs: ∫_T (m_j)_x dA and ∫_T (m_j)_y dA ---
@@ -261,8 +261,8 @@ mod tests {
             elem.eval_basis_vec(&[t, 0.0], &mut vals);
             for i in 0..8 {
                 let nf = -vals[i*2+1];
-                dof_mat[0][i] += w * nf;
-                dof_mat[1][i] += w * nf * t;
+                dof_mat[0][i] += w * nf;             // moment 0
+                dof_mat[1][i] += w * nf * (2.0*t - 1.0); // moment 1 (2t-1)
             }
         }
         // Edge 1: hypotenuse v1→v2 (1-t,t), normal (1,1)  — TRI_FACES[1]
@@ -271,8 +271,8 @@ mod tests {
             elem.eval_basis_vec(&[1.0-t, t], &mut vals);
             for i in 0..8 {
                 let nf = vals[i*2] + vals[i*2+1];
-                dof_mat[2][i] += w * nf;
-                dof_mat[3][i] += w * nf * t;
+                dof_mat[2][i] += w * nf;             // moment 0
+                dof_mat[3][i] += w * nf * (2.0*t - 1.0); // moment 1 (2t-1)
             }
         }
         // Edge 2: left v0→v2 (0,t), normal (-1,0)  — TRI_FACES[2]
@@ -281,8 +281,8 @@ mod tests {
             elem.eval_basis_vec(&[0.0, t], &mut vals);
             for i in 0..8 {
                 let nf = -vals[i*2];
-                dof_mat[4][i] += w * nf;
-                dof_mat[5][i] += w * nf * t;
+                dof_mat[4][i] += w * nf;             // moment 0
+                dof_mat[5][i] += w * nf * (2.0*t - 1.0); // moment 1 (2t-1)
             }
         }
         // Interior

@@ -924,7 +924,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                             let fval = f(&pt);
                             let flux = fval[0] * normal[0] + fval[1] * normal[1];
                             mom0 += w * flux;
-                            mom1 += w * flux * t;
+                            mom1 += w * flux * (2.0 * t - 1.0); // MFEM-compatible moment 1
                         }
                         let r = result.as_slice_mut();
                         r[first_dof as usize]     = mom0;
