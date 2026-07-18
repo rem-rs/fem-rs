@@ -143,7 +143,7 @@ fn preprocess(mesh: &mut Mesh<2>,
               order: u8,
               threshold: f64,
               max_elements: usize,
-              _nc_limit: usize,
+              nc_limit: usize,
               enriched_order: u8) -> (usize, f64) {
     let quad_order = 2 * order + enriched_order;
 
@@ -174,6 +174,39 @@ fn preprocess(mesh: &mut Mesh<2>,
 
         if global_osc < threshold || ne as i64 >= max_elements as i64 || marked.is_empty() {
             return (ne, global_osc);
+        }
+
+        // MFEM LimitNCLevel(nc_limit=1): mark edge-neighbors of marked elements
+        // to maintain at most 1 level of nonconformity between adjacent elements.
+        if nc_limit > 0 && matches!(mesh.element_type(0), ElementType::Quad4) {
+            let mut edge_elems: std::collections::HashMap<(u32, u32), Vec<u32>> =
+                std::collections::HashMap::new();
+            for e in 0..ne as u32 {
+                let ns = mesh.element_nodes(e);
+                for i in 0..4 {
+                    let a = ns[i].min(ns[(i + 1) % 4]);
+                    let b = ns[i].max(ns[(i + 1) % 4]);
+                    edge_elems.entry((a, b)).or_default().push(e);
+                }
+            }
+            let mut propagate: Vec<u32> = marked.clone();
+            for &e in &marked {
+                let ns = mesh.element_nodes(e);
+                for i in 0..4 {
+                    let a = ns[i].min(ns[(i + 1) % 4]);
+                    let b = ns[i].max(ns[(i + 1) % 4]);
+                    if let Some(adj) = edge_elems.get(&(a, b)) {
+                        for &adj_e in adj {
+                            if !propagate.contains(&adj_e) {
+                                propagate.push(adj_e);
+                            }
+                        }
+                    }
+                }
+            }
+            if propagate.len() > marked.len() {
+                marked = propagate;
+            }
         }
 
         match mesh.element_type(0) {
