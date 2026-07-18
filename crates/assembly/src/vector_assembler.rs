@@ -102,7 +102,18 @@ pub fn geo_ref_elem_from_mesh(
     let ft = match et {
         ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
         ElementType::Tet4 | ElementType::Tet10 => FactoryElemType::Tet,
-        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => FactoryElemType::Quad,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
+            // For order 1 Quad/Hex/etc, use the standard [-1,1]² reference element
+            // (QuadQ1) instead of QuadQk::new(1) which is on [0,1]².  The
+            // FE basis (e.g. QuadND1) and its quadrature live on [-1,1]²,
+            // so the geometry element must match.
+            return if g <= 1 {
+                use fem_element::lagrange::QuadQ1;
+                Some(Box::new(QuadQ1))
+            } else {
+                Some(factory_ref_elem(FactoryElemType::Quad, g))
+            };
+        }
         ElementType::Hex8 | ElementType::Hex20 => FactoryElemType::Hex,
         ElementType::Prism6 | ElementType::Prism15 => FactoryElemType::Prism,
         _ => return None,
