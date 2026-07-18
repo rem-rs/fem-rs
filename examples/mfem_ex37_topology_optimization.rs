@@ -1,5 +1,4 @@
 //! # Example 37 — Topology optimization (1:1 with MFEM ex37)
-#![allow(unused_variables)]
 //!
 //! Minimum-compliance design with linear elasticity, SIMP material
 //! interpolation, Helmholtz-type PDE density filter, and entropic
@@ -132,17 +131,17 @@ impl ScalarCoeff for SIMPCoeff<'_> {
 
 // ── Strain energy computation (element-wise, for adjoint RHS) ──────────────
 
-/// Compute per-element strain energy density:
-///   S_e = -p·ρ̃^(p-1)·(1-ρ₀)·[λ|∇·u|² + 2μ|ε(u)|²]
+/// Compute per-element strain energy density for adjoint filter RHS.
 ///
-/// Returns a DOF vector on the filter space (one value per element,
-/// projected to filter-space DOFs via lumped mass).
-fn compute_strain_energy_rhs<M: MeshTopology>(
+/// Evaluates `-p·ρ̃^(p-1)·(1-ρ₀)·[λ|∇·u|² + 2μ|ε(u)|²]` at each Q1 quad
+/// element center using the isoparametric B-matrix and Jacobian.
+fn compute_strain_energy_rhs<M: MeshTopology + Clone>(
     filter_space: &H1Space<M>,
+    state_space: &VectorH1Space<M>,
     u_dofs: &[f64],
     rho_filter_dofs: &[f64],
     lambda: f64,
-    _mu: f64,
+    mu: f64,
     rho_min: f64,
     penal: f64,
 ) -> Vec<f64> {
@@ -150,28 +149,64 @@ fn compute_strain_energy_rhs<M: MeshTopology>(
     let nelems = mesh.n_elements();
     let mut rhs = vec![0.0_f64; filter_space.n_dofs()];
 
+    // Shape function gradients at element center (ξ=0.5, η=0.5) for Q1 quad
+    let dndxi  = [-0.5,  0.5,  0.5, -0.5];
+    let dndeta = [-0.5, -0.5,  0.5,  0.5];
+
     for e in 0..nelems as u32 {
-        let dofs = filter_space.element_dofs(e);
-        let rho_val = rho_filter_dofs[dofs[0] as usize];
+        let nodes = mesh.element_nodes(e);
+        let sdofs = state_space.element_dofs(e);
 
-        // Average nodal displacements for this element
-        let u_dofs_e: Vec<f64> = (0..4).map(|i| {
-            if i < 2 { u_dofs.get(dofs[0] as usize * 2 + i).copied().unwrap_or(0.0) }
-            else { u_dofs.get(dofs[0] as usize * 2 + i).copied().unwrap_or(0.0) }
-        }).collect();
+        // Node coordinates and displacements (interleaved: ux, uy per node)
+        let mut x = [0.0_f64; 4];
+        let mut y = [0.0_f64; 4];
+        let mut ue = [0.0_f64; 8];
+        for (i, &n) in nodes.iter().enumerate() {
+            let c = mesh.node_coords(n);
+            x[i] = c[0];
+            y[i] = c[1];
+            ue[2*i]     = u_dofs[sdofs[2*i] as usize];
+            ue[2*i + 1] = u_dofs[sdofs[2*i + 1] as usize];
+        }
 
-        // Element-constant approximation: ∇u ≈ 0 for constant-strain triangle
-        // For a proper Q1 quadrilateral, we'd compute the full B-matrix.
-        // Simplified: use average strain energy per DOF.
-        let strain_energy = 1.0; // placeholder — see below for full computation
-        let _ = u_dofs_e;
+        // Jacobian at element center
+        let j00: f64 = dndxi.iter().zip(x).map(|(&d, xi)| d * xi).sum();
+        let j01: f64 = dndeta.iter().zip(x).map(|(&d, xi)| d * xi).sum();
+        let j10: f64 = dndxi.iter().zip(y).map(|(&d, yi)| d * yi).sum();
+        let j11: f64 = dndeta.iter().zip(y).map(|(&d, yi)| d * yi).sum();
 
-        // Adjoint RHS value for this element
-        let adj_val = -penal * rho_val.powf(penal - 1.0) * (1.0 - rho_min) * strain_energy;
+        let det_j = j00 * j11 - j01 * j10;
+        if det_j.abs() < 1e-15 { continue; }
+        let inv_det = 1.0 / det_j;
 
-        // Distribute to filter-space DOFs
-        for &d in dofs {
-            rhs[d as usize] += adj_val / dofs.len() as f64;
+        // [dNi/dx; dNi/dy] = J^{-T} · [dNi/dξ; dNi/dη]
+        let mut dndx = [0.0_f64; 4];
+        let mut dndy = [0.0_f64; 4];
+        for i in 0..4 {
+            dndx[i] = ( j11 * dndxi[i] - j10 * dndeta[i]) * inv_det;
+            dndy[i] = (-j01 * dndxi[i] + j00 * dndeta[i]) * inv_det;
+        }
+
+        // Strain ε = B·u_e  (Voigt: εxx, εyy, γxy)
+        let eps_xx: f64 = (0..4).map(|i| dndx[i] * ue[2*i]).sum();
+        let eps_yy: f64 = (0..4).map(|i| dndy[i] * ue[2*i+1]).sum();
+        let gam_xy: f64 = (0..4).map(|i| dndy[i] * ue[2*i] + dndx[i] * ue[2*i+1]).sum();
+
+        // Strain energy density: λ(tr ε)² + 2μ|ε(u)|²_F
+        let div_u = eps_xx + eps_yy;
+        let sed = lambda * div_u * div_u
+            + 2.0 * mu * (eps_xx*eps_xx + eps_yy*eps_yy + 0.5*gam_xy*gam_xy);
+
+        // Average filtered density at element center
+        let fdofs = filter_space.element_dofs(e);
+        let rho_val: f64 = fdofs.iter().map(|&d| rho_filter_dofs[d as usize]).sum::<f64>()
+            / fdofs.len() as f64;
+
+        // Adjoint RHS: -p·ρ̃^(p-1)·(1-ρ₀)·SED
+        let adj_val = -penal * rho_val.powf(penal - 1.0) * (1.0 - rho_min) * sed;
+
+        for &d in fdofs {
+            rhs[d as usize] += adj_val / fdofs.len() as f64;
         }
     }
     rhs
@@ -298,7 +333,7 @@ fn main() {
 
         // d) Compute strain energy and adjoint filter RHS
         let adj_rhs = compute_strain_energy_rhs(
-            &filter_space, &u, &rho_filter_dofs,
+            &filter_space, &state_space, &u, &rho_filter_dofs,
             args.lambda, args.mu, args.rho_min, args.penal,
         );
 
