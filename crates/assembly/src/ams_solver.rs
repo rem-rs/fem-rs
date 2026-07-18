@@ -10,7 +10,7 @@
 
 use fem_amg::{AmgConfig, AmgSolver};
 use fem_linalg::{CooMatrix, CsrMatrix, SolveResult, fem_to_linlvo_csr};
-use fem_mesh::Mesh;
+use fem_mesh::MeshTopology;
 use fem_solver::{
     AmsSolverConfig, SolverConfig, solve_pcg_ams,
     eigen::{lobpcg_constrained_preconditioned, LobpcgConfig, EigenResult},
@@ -43,8 +43,8 @@ use crate::discrete_op::DiscreteLinearOperator;
 ///
 /// # Panics
 /// Panics if the discrete gradient construction fails or the solver fails.
-pub fn solve_hcurl_ams(
-    space: &HCurlSpace<Mesh<2>>,
+pub fn solve_hcurl_ams<M: MeshTopology + Clone + 'static>(
+    space: &HCurlSpace<M>,
     mat: &CsrMatrix<f64>,
     rhs: &[f64],
     pec_dofs: &[u32],

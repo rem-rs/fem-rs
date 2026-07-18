@@ -305,7 +305,7 @@ fn project_hcurl_exact(
     let n = m_mat.nrows;
     let mut u_proj = vec![0.0_f64; n];
     let m_linlvo = fem_linalg::fem_to_linlvo_csr(&m_mat);
-    let precond = fem_solver::GSSmoother::from_csr(&m_linlvo, 1.0)
+    let precond = fem_solver::GSSmoother::from_csr(&m_linlvo)
         .expect("GSSmoother for projection");
     solve_pcg(&m_mat, &m_rhs, &mut u_proj, &precond, 1e-12, 5000, false)
         .expect("projection solve failed");
