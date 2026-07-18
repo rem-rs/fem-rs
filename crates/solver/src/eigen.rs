@@ -118,6 +118,28 @@ pub fn lobpcg(
     lobpcg_projected(a, b, k, None, None, None, cfg)
 }
 
+/// Compute the `k` smallest eigenpairs of `A x = λ B x` using LOBPCG
+/// with a user-supplied residual preconditioner (no constraints).
+///
+/// The callback receives the current block residual matrix `R` (`n x k`) and
+/// should return an approximate preconditioned block `Z ≈ P^{-1} R` with the
+/// same shape.
+///
+/// This is the version to use when the preconditioner (e.g. AMS) handles
+/// the nullspace internally — no explicit gradient constraints needed.
+pub fn lobpcg_preconditioned<F>(
+    a: &CsrMatrix<f64>,
+    b: Option<&CsrMatrix<f64>>,
+    k: usize,
+    preconditioner: F,
+    cfg: &LobpcgConfig,
+) -> Result<EigenResult, String>
+where
+    F: Fn(&DMatrix<f64>) -> DMatrix<f64>,
+{
+    lobpcg_projected(a, b, k, None, Some(&preconditioner), None, cfg)
+}
+
 /// Compute the `k` smallest eigenpairs of `A x = λ B x` using LOBPCG,
 /// constrained to the complement of the column space of `constraints`.
 ///

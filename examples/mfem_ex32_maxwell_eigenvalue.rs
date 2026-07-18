@@ -22,7 +22,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::Mesh;
-use fem_solver::LobpcgConfig;
+use fem_solver::{lobpcg_preconditioned, LobpcgConfig};
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace,
     constraints::boundary_dofs_hcurl,
@@ -136,50 +136,45 @@ fn main() {
         m_mat.eliminate_essential_bc_diag(d as usize, 1e-8);
     }
 
-    // Discrete gradient G: H^1 -> H(Curl) for AMS preconditioner + gradient constraints.
+    // Discrete gradient G: H^1 -> H(Curl) for AMS preconditioner.
     let fec_h1 = H1Space::new(mesh.clone(), 1);
-    let n_h1 = fec_h1.n_dofs();
     let grad = DiscreteLinearOperator::gradient(&fec_h1, &fec_nd)
         .expect("gradient assembly failed");
-    let _g_linlvo = fem_linalg::fem_to_linlvo_csr(&grad);
+    let g_linlvo = fem_linalg::fem_to_linlvo_csr(&grad);
+    let a_linlvo = fem_linalg::fem_to_linlvo_csr(&a_mat);
 
-    // Gradient constraints (curl-curl nullspace) — LOBPCG constraint projection.
-    let mut constraints = nalgebra::DMatrix::<f64>::zeros(n_nd, n_h1);
-    for nd_dof in 0..n_nd {
-        let start = grad.row_ptr[nd_dof];
-        let end = grad.row_ptr[nd_dof + 1];
-        for j in start..end {
-            let h1_dof = grad.col_idx[j] as usize;
-            let val = grad.values[j];
-            constraints[(nd_dof, h1_dof)] = val;
-        }
-    }
-
-    // 8-9. Solve with LOBPCG + GSSmoother preconditioner.
-    eprintln!("\nSolving for eigenvalues (EliminateEssentialBCDiag + LOBPCG)");
+    // 8-9. AMS preconditioner + LOBPCG (1:1 with C++ HypreAME + HypreAMS).
+    use linlvo::precond::{AmsPrecond, AmsConfig};
+    let ams = match AmsPrecond::new(&a_linlvo, &g_linlvo, AmsConfig {
+        singularity_regularization: 1e-12,
+        ..Default::default()
+    }) {
+        Ok(p) => p,
+        Err(e) => panic!("AMS setup failed: {e}"),
+    };
+    eprintln!("\nSolving for eigenvalues (EliminateEssentialBCDiag + AMS-LOBPCG)");
     eprintln!("  Number of requested eigenmodes: {}", args.nev);
 
-    let a_csr = fem_linalg::fem_to_linlvo_csr(&a_mat);
-    let gs_smoother = match fem_solver::GSSmoother::from_csr(&a_csr) {
-        Ok(gs) => gs,
-        Err(e) => panic!("GSSmoother setup failed: {e}"),
-    };
-    let gs_precond = |r: &nalgebra::DMatrix<f64>| {
+    // Apply AMS per column (block LOBPCG passes multiple vectors)
+    let ams_precond = |r: &nalgebra::DMatrix<f64>| {
         let mut z = nalgebra::DMatrix::<f64>::zeros(r.nrows(), r.ncols());
-        use linlvo::Preconditioner;
+        use linlvo::core::preconditioner::Preconditioner;
         for j in 0..r.ncols() {
             let rv = linlvo::DenseVec::from_vec(r.column(j).iter().copied().collect());
             let mut zv = linlvo::DenseVec::zeros(n_nd);
-            gs_smoother.apply_precond(&rv, &mut zv);
+            ams.apply_precond(&rv, &mut zv);
             for i in 0..n_nd { z[(i, j)] = zv.as_slice()[i]; }
         }
         z
     };
 
-    let eig_result = fem_solver::lobpcg_constrained_preconditioned(
-        &a_mat, Some(&m_mat), args.nev, &constraints, gs_precond,
+    // LOBPCG without explicit gradient constraints (AMS handles nullspace
+    // internally, matching C++ HypreAME behaviour).
+    let eig_result = lobpcg_preconditioned(
+        &a_mat, Some(&m_mat), args.nev, ams_precond,
         &LobpcgConfig {
-            max_iter: 2000, tol: 1e-6, verbose: true, ..LobpcgConfig::default()
+            max_iter: 500, tol: 1e-8, verbose: true,
+            nullspace_skip: 0.0, // no explicit nullspace for AMS
         },
     ).expect("LOBPCG solve failed");
 

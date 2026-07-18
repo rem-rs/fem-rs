@@ -141,7 +141,7 @@ pub use block_operator::{
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{
-    lobpcg, lobpcg_constrained, lobpcg_constrained_preconditioned, lobpcg_essential_bc,
+    lobpcg, lobpcg_constrained, lobpcg_preconditioned, lobpcg_constrained_preconditioned, lobpcg_essential_bc,
     LobpcgConfig, LobpcgSolver, EigenResult, GeneralizedEigenSolver, krylov_schur,
     arpack, WhichEigenvalue,
     feast_interval, IntervalEigenConfig,
