@@ -83,6 +83,7 @@ const PYRAMID_FACES: [[usize; 4]; 5] = [
 // ─── Face DOF map ───────────────────────────────────────────────────────────
 
 /// Unified face-to-DOF lookup: edges in 2-D, triangular/quad faces in 3-D.
+#[derive(Clone)]
 enum FaceDofMap {
     Edges(HashMap<EdgeKey, DofId>),
     Faces(HashMap<FaceKey, DofId>),
