@@ -135,6 +135,7 @@ pub mod par_lobpcg;
 pub mod par_space;
 pub mod par_vector;
 pub mod par_vector_assembler;
+pub mod par_complex_csr;
 pub mod partition;
 pub mod rcb;
 pub mod sfc;
