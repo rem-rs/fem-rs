@@ -32,6 +32,7 @@ use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, GridFunction, standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator}};
 use fem_io::mfem::read_mfem_file;
+
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{MeshTopology, Mesh};
 use fem_solver::{SolverConfig, solve_pcg_jacobi};
@@ -44,9 +45,15 @@ fn main() {
     let mesh = match args.mesh_file {
         Some(ref p) => {
             let mfem = read_mfem_file(p).expect("failed to read MFEM mesh file");
-            mfem.mesh2d.expect("expected 2D mesh")
+            let mut m = mfem.mesh2d.expect("expected 2D mesh");
+            for _ in 0..args.refs { m = fem_mesh::amr::refine_uniform(&m); }
+            m
         }
-        None => Mesh::<2>::unit_square_tri(args.n),
+        None => {
+            let mut m = Mesh::<2>::unit_square_tri(args.n);
+            for _ in 0..args.refs { m = fem_mesh::amr::refine_uniform(&m); }
+            m
+        }
     };
 
     let result = solve_fractional_problem_with_method(mesh, args.s, args.method, args.n_quad, args.verification);
@@ -82,6 +89,7 @@ struct Args {
     s: f64,
     method: FractionalMethod,
     n_quad: usize,
+    refs: usize,
     mesh_file: Option<String>,
     verification: bool,
 }
@@ -114,6 +122,7 @@ fn parse_args() -> Args {
         s: 0.5,
         method: FractionalMethod::Rational,
         n_quad: 64,
+        refs: 3,
         mesh_file: None,
         verification: false,
     };
@@ -128,6 +137,9 @@ fn parse_args() -> Args {
             }
             "--s" => {
                 args.s = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5);
+            }
+            "-r" | "--refs" => {
+                args.refs = it.next().and_then(|v| v.parse().ok()).unwrap_or(3);
             }
             "--method" => {
                 let value = it.next().unwrap_or("rational".into()).to_ascii_lowercase();
