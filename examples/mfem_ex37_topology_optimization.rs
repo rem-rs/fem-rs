@@ -90,7 +90,7 @@ fn parse_args() -> Args {
     let mut args = Args {
         n: 18,
         iters: 20,
-        volfrac: 0.40,
+        volfrac: 0.50,
         penal: 3.0,
         rho_min: 1.0e-3,
         rmin: 0.18,
@@ -105,7 +105,7 @@ fn parse_args() -> Args {
             "-m" | "--mesh" => args.mesh_file = Some(it.next().unwrap_or("".into())),
             "--n" => args.n = it.next().unwrap_or("18".into()).parse().unwrap_or(18),
             "--iters" => args.iters = it.next().unwrap_or("20".into()).parse().unwrap_or(20),
-            "--volfrac" => args.volfrac = it.next().unwrap_or("0.4".into()).parse().unwrap_or(0.4),
+            "--volfrac" | "-v" => args.volfrac = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
             "--penal" => args.penal = it.next().unwrap_or("3.0".into()).parse().unwrap_or(3.0),
             "--model" => {
                 args.model = match it.next().as_deref() {
