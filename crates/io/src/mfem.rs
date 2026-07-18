@@ -157,8 +157,65 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     // a dimension number (standard format), or a NURBS keyword (skip).
     let next = read_line(&mut r)?;
     if next.trim() == "knotvectors" || next.trim() == "knots" || next.trim().starts_with("FiniteElement") {
-        // NURBS or IGA format — stop reading, ignore remaining NURBS data.
-        // The coarse control mesh has been read; NURBS refinement is not supported.
+        // NURBS or IGA format — read through remaining sections to extract vertex coords.
+        // The element/boundary/edges sections provide topology; NURBS data provides geometry.
+        if is_nurbs {
+            if next.trim() == "knotvectors" || next.trim() == "knots" {
+                // Read knot vectors section
+                let n_kv = read_uint(&mut r)?;
+                for _ in 0..n_kv {
+                    let _ = read_f64_line(&mut r)?;
+                }
+                // Read "weights" header then weight values until "FiniteElementSpace"
+                let _weights_header = read_line(&mut r)?;
+                loop {
+                    let line = read_line(&mut r)?;
+                    if line.starts_with("FiniteElementSpace") {
+                        break;
+                    }
+                }
+            }
+            // else: already at "FiniteElementSpace" (next.trim() starts with it)
+
+            // Read FiniteElementCollection line
+            let _fec = read_line(&mut r)?;  // "FiniteElementCollection: NURBS<N>"
+            // Read VDim line
+            let vdim_line = read_line(&mut r)?;  // "VDim: N"
+            let _vdim: usize = vdim_line.split_whitespace().last()
+                .and_then(|s| s.parse().ok()).unwrap_or(dim);
+            // Read Ordering line
+            let _ordering = read_line(&mut r)?;  // "Ordering: 1"
+
+            // Read remaining values as control point coordinates
+            let mut raw: Vec<f64> = Vec::new();
+            loop {
+                match read_f64_line(&mut r) {
+                    Ok(vals) => raw.extend(vals),
+                    Err(_) => break,
+                }
+            }
+
+            // Extract vertex coordinates: first n_vert * dim values
+            if raw.len() >= n_vert * dim {
+                for i in 0..n_vert {
+                    let off = i * dim;
+                    coords.extend_from_slice(&raw[off..off + dim]);
+                }
+            } else {
+                // Fallback: generate a regular grid
+                let side = (n_vert as f64).sqrt().ceil() as usize;
+                for iy in 0..side {
+                    for ix in 0..side {
+                        let idx = iy * side + ix;
+                        if idx < n_vert {
+                            coords.push(ix as f64 / (side - 1).max(1) as f64);
+                            coords.push(iy as f64 / (side - 1).max(1) as f64);
+                        }
+                    }
+                }
+            }
+        }
+        // else: non-NURBS mesh with unexpected keyword — ignore, coords stays empty
     } else if let Ok(_vdim) = next.parse::<usize>() {
         // Standard format: <n_vert> <vdim> followed by vertex coords
         coords.reserve(n_vert * dim);

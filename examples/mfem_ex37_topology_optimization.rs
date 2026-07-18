@@ -25,7 +25,30 @@ fn main() {
     let args = parse_args();
     let mesh = match args.mesh_file {
         Some(ref p) => load_mesh(p),
-        None => Mesh::<2>::unit_square_tri(args.n),
+        None => Mesh::<2>::make_cartesian_2d(3, 1, 3.0, 1.0),
+    };
+    // Apply boundary tags matching C++ ex37:
+    // left edge (x=0) → tag 1 (essential), all others → tag 2 (natural)
+    // First remap: find left-edge faces and reassign tag 1, rest → tag 2
+    let mesh = {
+        let mut m = mesh;
+        let mut new_face_tags: Vec<i32> = Vec::with_capacity(m.n_faces());
+        for bf in 0..m.n_faces() {
+            let nodes = m.bface_nodes(bf as u32);
+            let mut sum_x = 0.0;
+            for &n in nodes {
+                let c = m.node_coords(n);
+                sum_x += c[0];
+            }
+            let avg_x = sum_x / nodes.len() as f64;
+            if (avg_x - 0.0).abs() < 1e-10 {
+                new_face_tags.push(1); // left edge → essential BC
+            } else {
+                new_face_tags.push(2); // all other edges
+            }
+        }
+        m.face_tags = new_face_tags;
+        m
     };
     let result = run_topology_optimization(&args, mesh);
 
@@ -142,7 +165,7 @@ fn run_scalar_topology_optimization(args: &Args, mesh: Mesh<2>) -> TopOptResult 
     let filters = build_filter_neighbors(&elements, args.rmin);
 
     let dm = space.dof_manager();
-    let clamped = boundary_dofs(space.mesh(), dm, &[4]);
+    let clamped = boundary_dofs(space.mesh(), dm, &[1]);
     let load_dof = find_nearest_dof_on_right_boundary(&space, 0.5);
 
     let nelems = elements.len();
@@ -351,9 +374,9 @@ fn run_elastic_topology_optimization(args: &Args, mesh: Mesh<2>) -> TopOptResult
     let centroids: Vec<[f64; 2]> = elements.iter().map(|e| e.centroid).collect();
     let filter_neigh = build_filter_neighbors_from_centroids(&centroids, args.rmin);
 
-    // Clamp all DOFs on left edge (boundary tag 4 in unit_square_tri)
+    // Clamp all DOFs on left edge (boundary tag 1 after MakeCartesian2D remap)
     let dm = space.dof_manager();
-    let left_scalar = boundary_dofs(space.mesh(), dm, &[4]);
+    let left_scalar = boundary_dofs(space.mesh(), dm, &[1]);
     let ndofs_vec = 2 * space.n_dofs();
     let clamped_vec: Vec<u32> = left_scalar
         .iter()

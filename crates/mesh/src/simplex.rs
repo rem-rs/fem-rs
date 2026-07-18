@@ -1299,6 +1299,72 @@ impl<const D: usize> Mesh<D> {
         )
     }
 
+    /// Generate a Cartesian (structured) quad mesh for a rectangular domain.
+    ///
+    /// Creates `nx × ny` quadrilateral elements spanning `[0, sx] × [0, sy]`,
+    /// matching MFEM's `Mesh::MakeCartesian2D(nx, ny, QUADRILATERAL, true, sx, sy)`.
+    ///
+    /// Boundary tag convention:
+    /// - 1: bottom edge (y = 0)
+    /// - 2: right edge (x = sx)
+    /// - 3: top edge (y = sy)
+    /// - 4: left edge (x = 0)
+    pub fn make_cartesian_2d(nx: usize, ny: usize, sx: f64, sy: f64) -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 2, "make_cartesian_2d requires D = 2");
+        let npx = nx + 1;
+        let npy = ny + 1;
+        let mut coords = Vec::with_capacity(npx * npy * 2);
+        for j in 0..npy {
+            for i in 0..npx {
+                coords.push(i as f64 * sx / nx as f64);
+                coords.push(j as f64 * sy / ny as f64);
+            }
+        }
+
+        let nid = |i: usize, j: usize| -> NodeId { (j * npx + i) as NodeId };
+
+        let mut conn      = Vec::with_capacity(nx * ny * 4);
+        let mut elem_tags = Vec::with_capacity(nx * ny);
+        for j in 0..ny {
+            for i in 0..nx {
+                // Counter-clockwise: bottom-left, bottom-right, top-right, top-left
+                conn.extend_from_slice(&[nid(i,j), nid(i+1,j), nid(i+1,j+1), nid(i,j+1)]);
+                elem_tags.push(1);
+            }
+        }
+
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+        let add_edge = |fc: &mut Vec<NodeId>, ft: &mut Vec<i32>,
+                        a: NodeId, b: NodeId, tag: i32| {
+            fc.push(a); fc.push(b); ft.push(tag);
+        };
+        // Bottom edge (y = 0)
+        for i in 0..nx {
+            add_edge(&mut face_conn, &mut face_tags, nid(i,0), nid(i+1,0), 1);
+        }
+        // Right edge (x = sx)
+        for j in 0..ny {
+            add_edge(&mut face_conn, &mut face_tags, nid(nx,j), nid(nx,j+1), 2);
+        }
+        // Top edge (y = sy)
+        for i in 0..nx {
+            add_edge(&mut face_conn, &mut face_tags, nid(i+1,ny), nid(i,ny), 3);
+        }
+        // Left edge (x = 0)
+        for j in 0..ny {
+            add_edge(&mut face_conn, &mut face_tags, nid(0,j+1), nid(0,j), 4);
+        }
+
+        Mesh::uniform(
+            coords, conn, elem_tags, ElementType::Quad4,
+            face_conn, face_tags, ElementType::Line2,
+        )
+    }
+
     /// Generate a coaxial cable cross-section mesh (annular region).
     ///
     /// Outer square boundary `[-a, a]²`, inner circular conductor radius `r`.
