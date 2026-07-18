@@ -9,3 +9,4 @@ pub mod nonlinear_hyperelasticity;
 pub mod pf_solver;
 pub mod thermoelastic;
 pub mod vem_poisson;
+pub mod topology_optimization;
