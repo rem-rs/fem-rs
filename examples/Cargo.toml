@@ -224,8 +224,8 @@ name = "mfem_pex27_parallel_robin_bc"
 path = "mfem_pex27_parallel_robin_bc.rs"
 
 [[example]]
-name = "mfem_ex40_stokes"
-path = "mfem_ex40_stokes.rs"
+name = "mfem_phase40_stokes"
+path = "mfem_phase40_stokes.rs"
 
 [[example]]
 name = "navier_stokes_kovasznay"
@@ -650,3 +650,7 @@ name = "fem_examples"
 
 
 
+
+[[example]]
+name = "mfem_ex40_eikonal"
+path = "mfem_ex40_eikonal.rs"
