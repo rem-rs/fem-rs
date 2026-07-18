@@ -8,15 +8,15 @@
 //!   cargo run --example mfem_ex35_multidomain -- -m mesh.msh
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
-use fem_io::read_msh_file;
+use fem_io::mfem::read_mfem_file;
 use fem_linalg::CooMatrix;
 use fem_mesh::Mesh;
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
 fn load_mesh(path: &str) -> Mesh<2> {
-    let msh = read_msh_file(path).expect("failed to read mesh file");
-    msh.into_2d().expect("expected 2D mesh")
+    let mfem = read_mfem_file(path).expect("failed to read mesh file");
+    mfem.mesh2d.expect("expected 2D mesh")
 }
 
 fn main() {

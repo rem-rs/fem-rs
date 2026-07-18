@@ -18,7 +18,7 @@
 //! ```
 
 use fem_assembly::{Assembler, GridFunction, standard::DiffusionIntegrator};
-use fem_io::read_msh_file;
+use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::solve_sparse_cholesky;
@@ -38,8 +38,8 @@ fn main() {
     let args = parse_args();
     let mesh = match args.mesh_file {
         Some(ref p) => {
-            let msh = read_msh_file(p).expect("failed to read mesh file");
-            msh.into_2d().expect("expected 2D mesh")
+            let mfem = read_mfem_file(p).expect("failed to read mesh file");
+            mfem.mesh2d.expect("expected 2D mesh")
         }
         None => Mesh::<2>::unit_square_tri(args.n),
     };

@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use std::f64::consts::PI;
 
 use fem_assembly::{Assembler, GridFunction, standard::{DiffusionIntegrator, DomainSourceIntegrator, MassIntegrator}};
-use fem_io::read_msh_file;
+use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{MeshTopology, Mesh};
 use fem_solver::{SolverConfig, solve_pcg_jacobi};
@@ -43,8 +43,8 @@ fn main() {
 
     let mesh = match args.mesh_file {
         Some(ref p) => {
-            let msh = read_msh_file(p).expect("failed to read mesh file");
-            msh.into_2d().expect("expected 2D mesh")
+            let mfem = read_mfem_file(p).expect("failed to read MFEM mesh file");
+            mfem.mesh2d.expect("expected 2D mesh")
         }
         None => Mesh::<2>::unit_square_tri(args.n),
     };

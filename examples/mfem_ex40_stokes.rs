@@ -32,7 +32,7 @@ use fem_assembly::{
     mixed::PressureDivIntegrator,
     standard::VectorDiffusionIntegrator,
 };
-use fem_io::read_msh_file;
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::Mesh;
 use fem_solver::{BlockSystem, SchurComplementSolver, SolverConfig};
 use fem_space::{H1Space, VectorH1Space, fe_space::FESpace, constraints::boundary_dofs};
@@ -67,8 +67,9 @@ fn main() {
 
     let mesh = match args.mesh_file {
         Some(ref p) => {
-            let msh = read_msh_file(p).expect("failed to read mesh file");
-            msh.into_2d().expect("expected 2D mesh")
+            let mfem = read_mfem_file(p).expect("failed to read MFEM mesh file");
+            // let msh = mfem;
+            mfem.mesh2d.expect("expected 2D mesh")
         }
         None => Mesh::<2>::unit_square_tri(args.n),
     };

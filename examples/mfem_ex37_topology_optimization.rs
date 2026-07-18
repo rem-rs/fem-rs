@@ -10,15 +10,15 @@
 //! - same density filter + Heaviside + OC update
 //! - adjoint sensitivity via element strain energy
 
-use fem_io::read_msh_file;
+use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space};
 
 fn load_mesh(path: &str) -> Mesh<2> {
-    let msh = read_msh_file(path).expect("failed to read mesh file");
-    msh.into_2d().expect("expected 2D mesh")
+    let mfem = read_mfem_file(path).expect("failed to read mesh file");
+    mfem.mesh2d.expect("expected 2D mesh")
 }
 
 fn main() {
