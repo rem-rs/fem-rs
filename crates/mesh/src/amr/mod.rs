@@ -14,6 +14,7 @@ mod make_conforming;
 mod refinement_tree;
 mod schedule;
 pub mod smoothness;
+pub mod coeff_refiner;
 pub use amr_inner::*;
 pub use amr_inner::{
     refine_uniform_surface_tri3, refine_uniform_surface_quad4,
