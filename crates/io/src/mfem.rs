@@ -243,12 +243,31 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         }
         // Try to extract vertex coords from nodes data.
         // For H1 geometry: first n_vert DOFs are vertex positions.
-        // For L2/discontinuous geometry: DOFs are element-local.
-        // We try H1 ordering first, and fall back to a regular grid.
+        // For L2/discontinuous geometry: DOFs are element-local with duplicates
+        // (shared vertices stored per-element). Deduplicate by coordinate value.
         if raw.len() >= n_vert * dim {
-            for i in 0..n_vert {
-                let off = i * dim;
-                coords.extend_from_slice(&raw[off..off + dim]);
+            // Build unique coordinate list (dedup by rounded values)
+            let tol = 1e-10;
+            for chunk in raw.chunks(dim) {
+                if chunk.len() < dim { break; }
+                let mut dup = false;
+                for j in (0..coords.len()).step_by(dim) {
+                    let mut dist_sq = 0.0;
+                    for c in 0..dim {
+                        let d = coords[j + c] - chunk[c];
+                        dist_sq += d * d;
+                    }
+                    if dist_sq < tol {
+                        dup = true;
+                        break;
+                    }
+                }
+                if !dup {
+                    for &v in chunk.iter().take(dim) {
+                        coords.push(v);
+                    }
+                }
+                if coords.len() >= n_vert * dim { break; }
             }
         }
         // Fallback: generate regular grid (common for structured meshes).
