@@ -654,3 +654,7 @@ name = "fem_examples"
 [[example]]
 name = "mfem_ex40_eikonal"
 path = "mfem_ex40_eikonal.rs"
+
+[[example]]
+name = "mfem_ex39_compass"
+path = "mfem_ex39_compass.rs"
