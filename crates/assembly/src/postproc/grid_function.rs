@@ -88,6 +88,61 @@ fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64>
     xp
 }
 
+/// Element Jacobian: uses affine (simplex) Jacobian for triangles/tets,
+/// and isoparametric Jacobian for quads/hexes (evaluated at `xi`).
+///
+/// Returns `(jacobian_matrix, determinant, physical_coords)`.
+/// For surface meshes, the determinant is the area element.
+fn element_jacobian<M: MeshTopology>(
+    mesh: &M,
+    elem: u32,
+    nodes: &[u32],
+    xi: &[f64],
+    dim: usize,
+) -> (DMatrix<f64>, f64, Vec<f64>) {
+    let elem_type = mesh.element_type(elem);
+    let needs_iso = matches!(elem_type,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+        | ElementType::Hex8 | ElementType::Hex20
+        | ElementType::Prism6 | ElementType::Prism15
+        | ElementType::Pyramid5);
+
+    if needs_iso {
+        // Isoparametric mapping via geometry reference element
+        let geo = match elem_type {
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
+                ref_elem_vol(elem_type, mesh.geom_order().max(1)) as Box<dyn ReferenceElement>
+            }
+            _ => ref_elem_vol(ElementType::Quad4, 1) as Box<dyn ReferenceElement>,
+        };
+        let n_geo = geo.n_dofs();
+        let mut grad_geo = vec![0.0_f64; n_geo * dim];
+        let mut phi_geo = vec![0.0_f64; n_geo];
+        geo.eval_grad_basis(xi, &mut grad_geo);
+        geo.eval_basis(xi, &mut phi_geo);
+
+        let mut j = DMatrix::<f64>::zeros(dim, dim);
+        let mut xp = vec![0.0_f64; dim];
+        for k in 0..n_geo {
+            let xk = mesh.node_coords(nodes[k]);
+            for i in 0..dim {
+                xp[i] += phi_geo[k] * xk[i];
+                for d in 0..dim {
+                    j[(i, d)] += xk[i] * grad_geo[k * dim + d];
+                }
+            }
+        }
+        let det = j.determinant();
+        (j, det, xp)
+    } else {
+        let (jac, det) = simplex_jacobian(mesh, nodes, dim);
+        // For simplex elements, physical coords = x0 + J * xi
+        let x0 = mesh.node_coords(nodes[0]);
+        let xp = phys_coords(x0, &jac, xi, dim);
+        (jac, det, xp)
+    }
+}
+
 /// Physical coordinates for a surface triangle in 3D.
 /// Maps reference coords (ξ₁, ξ₂) to 3D using edge vectors e₁, e₂.
 fn surface_phys_coords(x0: &[f64], e1: &[f64], e2: &[f64], xi: &[f64]) -> Vec<f64> {
@@ -555,7 +610,75 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         }
         err
     }
+
+    /// Compute element-wise L² errors between this grid function and `exact`.
+    ///
+    /// Returns a vector of length `n_elements()` where entry `e` is
+    /// `‖u_h − u_exact‖_{L²(K_e)}`.
+    ///
+    /// Equivalent to MFEM's `GridFunction::ComputeElementL2Errors`.
+    pub fn compute_element_l2_errors(
+        &self,
+        exact: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+        quad_order: u8,
+    ) -> Vec<f64> {
+        let mesh = self.space.mesh();
+        let dim = mesh.topological_dim() as usize;
+        let order = self.space.order();
+        let ne = mesh.n_elements() as usize;
+        let mut errors = vec![0.0; ne];
+
+        for e in mesh.elem_iter() {
+            let eidx = e as usize;
+            let elem_type = mesh.element_type(e);
+            let ref_elem = ref_elem_vol(elem_type, order);
+            let n_ldofs = ref_elem.n_dofs();
+            let quad = ref_elem.quadrature(quad_order);
+            let elem_dofs = self.space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            let mut phi = vec![0.0; n_ldofs];
+            let mut err2 = 0.0;
+            for (q, xi) in quad.points.iter().enumerate() {
+                let (_jac, det_j, xp) = element_jacobian(mesh, e, nodes, xi, dim);
+                let w = quad.weights[q] * det_j.abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                let mut uh = 0.0;
+                for i in 0..n_ldofs {
+                    uh += self.dofs[elem_dofs[i] as usize] * phi[i];
+                }
+                let ue = exact(&xp);
+                err2 += w * (uh - ue) * (uh - ue);
+            }
+            errors[eidx] = err2.sqrt();
+        }
+        errors
+    }
 }
+/// Compute the L² norm of a coefficient function over the mesh.
+///
+/// Equivalent to MFEM's `ComputeLpNorm(2.0, coeff, mesh, irs)`.
+pub fn compute_coeff_l2_norm(
+    mesh: &impl MeshTopology,
+    coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+    quad_order: u8,
+) -> f64 {
+    let dim = mesh.topological_dim() as usize;
+    let mut norm2 = 0.0;
+    for e in mesh.elem_iter() {
+        let elem_type = mesh.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, 1);
+        let quad = ref_elem.quadrature(quad_order);
+        let nodes = mesh.element_nodes(e);
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (_jac, det_j, xp) = element_jacobian(mesh, e, nodes, xi, dim);
+            let w = quad.weights[q] * det_j.abs();
+            let fv = coeff(&xp);
+            norm2 += w * fv * fv;
+        }
+    }
+    norm2.sqrt()
+}
+
 /// Project a vector function onto the tangential component of HCurl boundary DOFs.
 ///
 /// For each boundary edge on a face with attribute in `bdr_attr`, evaluates
