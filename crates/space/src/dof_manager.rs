@@ -1185,11 +1185,11 @@ impl DofManager {
                     let u = rc[0]; let v = rc[1];
                     let base = did as usize * dim;
                     for d in 0..dim {
-                        // Bilinear mapping on [-1,1]² (QuadQk uses equispaced nodes on [-1,1]²)
-                        dof_coords[base + d] = 0.25*(1.0-u)*(1.0-v)*c0[d]
-                            + 0.25*(1.0+u)*(1.0-v)*c1[d]
-                            + 0.25*(1.0+u)*(1.0+v)*c2[d]
-                            + 0.25*(1.0-u)*(1.0+v)*c3[d];
+                        // Bilinear mapping on [0,1]² (QuadQk uses GLL nodes on [0,1]²)
+                        dof_coords[base + d] = (1.0-u)*(1.0-v)*c0[d]
+                            + u*(1.0-v)*c1[d]
+                            + u*v*c2[d]
+                            + (1.0-u)*v*c3[d];
                     }
                 }
             }

@@ -1076,7 +1076,7 @@ mod tests {
             Err(_) => {
                 // Fall back to PCG
                 let la = fem_linalg::fem_to_linlvo_csr(a);
-                let precond = fem_solver::GSSmoother::from_csr(&la, 1.0)
+                let precond = fem_solver::GSSmoother::from_csr(&la)
                     .expect("GSSmoother setup");
                 let mut x = vec![0.0; a.nrows];
                 fem_solver::solve_pcg(a, b, &mut x, &precond, 1e-10, 500, false)

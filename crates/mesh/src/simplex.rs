@@ -272,10 +272,10 @@ impl<const D: usize> Mesh<D> {
             let base = e * npe_new;
 
             // Q1 basis functions at reference point (xi, eta) for interpolation:
-            // φ₀=(1-ξ)(1-η)/4, φ₁=(1+ξ)(1-η)/4, φ₂=(1+ξ)(1+η)/4, φ₃=(1-ξ)(1+η)/4
+            // φ₀=(1-ξ)(1-η), φ₁=ξ(1-η), φ₂=ξη, φ₃=(1-ξ)η  (on [0,1]²)
             let q1_eval = |xi: f64, eta: f64| -> [f64; 4] {
-                [0.25*(1.0-xi)*(1.0-eta), 0.25*(1.0+xi)*(1.0-eta),
-                 0.25*(1.0+xi)*(1.0+eta), 0.25*(1.0-xi)*(1.0+eta)]
+                [(1.0-xi)*(1.0-eta), xi*(1.0-eta),
+                 xi*eta, (1.0-xi)*eta]
             };
 
             // Vertex DOFs: indices 0,1,2,3 are the original vertices
@@ -306,9 +306,14 @@ impl<const D: usize> Mesh<D> {
                         // Edge is in QuadQk DOF order: use the varying coordinate
                         // (xi=rc[0] for horizontal edges, eta=rc[1] for vertical)
                         // but since edge runs in parameter space along the edge direction,
-                        // find which coord varies: for edges, one coord is ±1
-                        let varying = if rc[0].abs() < 1.0 { rc[0] } else { rc[1] };
-                        let t = (varying + 1.0) * 0.5; // map [-1,1] to [0,1]
+                        // find which coord varies: for edges, one coord is 0 or 1
+                        let tol = 1e-12;
+                        let varying = if (rc[0] - 0.0).abs() > tol && (rc[0] - 1.0).abs() > tol {
+                            rc[0]
+                        } else {
+                            rc[1]
+                        };
+                        let t = varying; // already in [0,1]
                         let mut x = [0.0; D];
                         for d in 0..D { x[d] = (1.0 - t) * ca[d] + t * cb[d]; }
                         geom_coords.extend_from_slice(&x);

@@ -694,6 +694,39 @@ pub fn quad_rule(order: u8) -> QuadratureRule {
     QuadratureRule { points: pts, weights: wts }
 }
 
+/// Tensor-product Gauss-Legendre rule on the reference quad `[0,1]²`.
+///
+/// Uses `n×n` Gauss points; exact for polynomials of degree ≤ `2n-1` in each variable.
+/// Weights sum to 1 (area of `[0,1]²`).
+pub fn quad_rule_01(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 2) / 2).clamp(1, 4);
+    let (xs, ws) = gauss_legendre_01(n);
+    let mut pts = Vec::with_capacity(n * n);
+    let mut wts = Vec::with_capacity(n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            pts.push(vec![*xi, *xj]);
+            wts.push(wi * wj);
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
+/// Tensor-product Gauss-Legendre rule on `[0,1]²` for arbitrary order.
+pub fn quad_rule_01_arbitrary(order: u8) -> QuadratureRule {
+    let n = ((order as usize + 2) / 2).max(1);
+    let (xs, ws) = gauss_legendre_01_arbitrary(n);
+    let mut pts = Vec::with_capacity(n * n);
+    let mut wts = Vec::with_capacity(n * n);
+    for (xi, wi) in xs.iter().zip(ws.iter()) {
+        for (xj, wj) in xs.iter().zip(ws.iter()) {
+            pts.push(vec![*xi, *xj]);
+            wts.push(wi * wj);
+        }
+    }
+    QuadratureRule { points: pts, weights: wts }
+}
+
 // ─── Hexahedron [-1,1]³ ───────────────────────────────────────────────────────
 
 /// Tensor-product Gauss-Legendre rule on the reference hex `[-1,1]³`.

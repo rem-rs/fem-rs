@@ -449,7 +449,7 @@ mod tests {
             constrained: 2, parent_a: 0, parent_b: 0,
         }];
         let n = 3;
-        let mut c = build_constraint_matrix_2d(&constraints, n);
+        let c = build_constraint_matrix_2d(&constraints, n);
         // n_free = 2
         assert_eq!(c.nrows(), 2);
         assert_eq!(c.ncols(), 3);

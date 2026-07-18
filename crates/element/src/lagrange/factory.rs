@@ -19,7 +19,7 @@
 //! 3. Face interior DOFs (for each face)
 //! 4. Volume interior DOFs (for each element)
 
-use crate::quadrature::{seg_rule, tri_rule, tet_rule, quad_rule, hex_rule};
+use crate::quadrature::{seg_rule, tri_rule, tet_rule, quad_rule_01, hex_rule};
 use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 use crate::serendipity::{QuadSerendipityPk, HexSerendipityPk};
 use super::prism::PrismPk;
@@ -587,7 +587,11 @@ impl Lagrange1D {
 // ─── QuadQk ──────────────────────────────────────────────────────────────────
 
 
-/// Arbitrary-order Lagrange element on the reference quad `[-1,1]²` — `(p+1)²` DOFs.
+/// Arbitrary-order Lagrange element on the reference quad `[0,1]²` — `(p+1)²` DOFs.
+///
+/// Uses Gauss-Lobatto-Legendre (GLL) nodes, matching MFEM's `H1_FECollection`
+/// with `BasisType::GaussLobatto`.  Internally delegates to [`Lagrange1D`] on
+/// `[-1,1]` and maps points via `ξ = 2·x − 1`.
 pub struct QuadQk {
     order: usize,
     lag1d: Lagrange1D,
@@ -599,9 +603,18 @@ impl QuadQk {
         Self { order: p, lag1d: Lagrange1D::new(p) }
     }
 
+    /// Map a point `x` on `[0,1]` to `[-1,1]`.
+    fn to_std(&self, x: f64) -> f64 { 2.0 * x - 1.0 }
+
+    /// Chain-rule factor for first derivatives: d/dx = 2 · d/dξ.
+    fn grad_factor(&self) -> f64 { 2.0 }
+
+    /// Chain-rule factor for second derivatives: d²/dx² = 4 · d²/dξ².
+    fn hess_factor(&self) -> f64 { 4.0 }
+
     fn node_to_dof(&self, ix: usize, iy: usize) -> usize {
         let p = self.order;
-        let x = self.lag1d.nodes[ix];
+        let x = self.lag1d.nodes[ix]; // [-1,1]
         let y = self.lag1d.nodes[iy];
         let tol = 1e-12;
         let on_xmin = (x + 1.0).abs() < tol;
@@ -637,7 +650,8 @@ impl QuadQk {
         for iy in 0..=p {
             for ix in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
-                coords[dof] = [self.lag1d.nodes[ix], self.lag1d.nodes[iy]];
+                coords[dof] = [0.5 * (self.lag1d.nodes[ix] + 1.0),
+                               0.5 * (self.lag1d.nodes[iy] + 1.0)];
             }
         }
         coords
@@ -649,7 +663,10 @@ impl ReferenceElement for QuadQk {
     fn order(&self) -> u8 { self.order as u8 }
     fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 1) }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let (lx, ly) = (self.lag1d.val(xi[0]), self.lag1d.val(xi[1]));
+        // Map xi from [0,1] to [-1,1] for internal Lagrange1D evaluation
+        let x = self.to_std(xi[0]);
+        let y = self.to_std(xi[1]);
+        let (lx, ly) = (self.lag1d.val(x), self.lag1d.val(y));
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
@@ -658,33 +675,41 @@ impl ReferenceElement for QuadQk {
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (lx, dlx) = self.lag1d.val_d(xi[0]);
-        let (ly, dly) = self.lag1d.val_d(xi[1]);
+        // Map xi from [0,1] to [-1,1]; chain rule: d/dx = 2 · d/dξ
+        let x = self.to_std(xi[0]);
+        let y = self.to_std(xi[1]);
+        let (lx, dlx) = self.lag1d.val_d(x);
+        let (ly, dly) = self.lag1d.val_d(y);
+        let fac = self.grad_factor();
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
-                grads[dof * 2]     = dlx[ix] * ly[iy];
-                grads[dof * 2 + 1] = lx[ix]  * dly[iy];
+                grads[dof * 2]     = fac * dlx[ix] * ly[iy];
+                grads[dof * 2 + 1] = fac * lx[ix]  * dly[iy];
             }
         }
     }
     fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
-        let (lx, dlx, hlx) = self.lag1d.val_d_h(xi[0]);
-        let (ly, dly, hly) = self.lag1d.val_d_h(xi[1]);
+        // Map xi from [0,1] to [-1,1]; chain rule: d²/dx² = 4 · d²/dξ²
+        let x = self.to_std(xi[0]);
+        let y = self.to_std(xi[1]);
+        let (lx, dlx, hlx) = self.lag1d.val_d_h(x);
+        let (ly, dly, hly) = self.lag1d.val_d_h(y);
+        let fac = self.hess_factor();
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
                 let base = dof * 4;
-                hess[base]     = hlx[ix] * ly[iy];
-                hess[base + 1] = dlx[ix] * dly[iy];
+                hess[base]     = fac * hlx[ix] * ly[iy];
+                hess[base + 1] = fac * dlx[ix] * dly[iy];
                 hess[base + 2] = hess[base + 1];
-                hess[base + 3] = lx[ix]  * hly[iy];
+                hess[base + 3] = fac * lx[ix]  * hly[iy];
             }
         }
     }
-    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.all_dof_coords().iter().map(|c| c.to_vec()).collect()
     }
@@ -1072,8 +1097,11 @@ mod tests {
         let qk = QuadQk::new(1);
         let n = 4;
         let mut v1 = vec![0.0; n]; let mut v2 = vec![0.0; n];
-        for &(x,y) in &[(-1.0,-1.0),(1.0,-1.0),(1.0,1.0),(-1.0,1.0),(0.3,-0.5)] {
-            qk.eval_basis(&[x,y], &mut v1); QuadQ1.eval_basis(&[x,y], &mut v2);
+        // QuadQk uses [0,1]²; QuadQ1 uses [-1,1]².
+        // φ_QuadQk(x,y) = φ_QuadQ1(2x-1, 2y-1)
+        for &(x,y) in &[(0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0),(0.65,0.25)] {
+            qk.eval_basis(&[x,y], &mut v1);
+            QuadQ1.eval_basis(&[2.0*x-1.0, 2.0*y-1.0], &mut v2);
             for i in 0..n { assert!((v1[i]-v2[i]).abs() < 1e-13, "Q1 ({x},{y}) i={i}"); }
         }
     }
@@ -1084,11 +1112,14 @@ mod tests {
         let qk = QuadQk::new(2);
         let n = 9;
         let mut v1 = vec![0.0; n]; let mut v2 = vec![0.0; n];
+        // QuadQk uses [0,1]²; QuadQ2 uses [-1,1]².
+        // φ_QuadQk(x,y) = φ_QuadQ2(2x-1, 2y-1)
         for &(x,y) in &[
-            (-1.0,-1.0),(1.0,-1.0),(1.0,1.0),(-1.0,1.0),
-            (0.0,-1.0),(1.0,0.0),(0.0,1.0),(-1.0,0.0),(0.0,0.0),(0.3,-0.5),
+            (0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0),
+            (0.5,0.0),(1.0,0.5),(0.5,1.0),(0.0,0.5),(0.5,0.5),(0.65,0.25),
         ] {
-            qk.eval_basis(&[x,y], &mut v1); QuadQ2.eval_basis(&[x,y], &mut v2);
+            qk.eval_basis(&[x,y], &mut v1);
+            QuadQ2.eval_basis(&[2.0*x-1.0, 2.0*y-1.0], &mut v2);
             for i in 0..n { assert!((v1[i]-v2[i]).abs() < 1e-12, "Q2 ({x},{y}) i={i}"); }
         }
     }

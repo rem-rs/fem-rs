@@ -420,7 +420,7 @@ fn locate_point_2d<M: MeshTopology>(mesh: &M, x: &[f64]) -> Option<(u32, [f64; 2
 }
 
 /// Invert the bilinear Q1 map of a quad by Newton iteration.
-/// Returns the reference coordinate `ξ ∈ [-1,1]²` if the point is inside.
+/// Returns the reference coordinate `ξ ∈ [0,1]²` if the point is inside.
 fn invert_quad_bilinear(pts: &[[f64; 2]; 4], x: &[f64]) -> Option<[f64; 2]> {
     let q1 = fem_element::lagrange::QuadQk::new(1);
     let mut xi = [0.0_f64; 2];

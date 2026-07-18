@@ -298,8 +298,19 @@ fn surface_jacobian(mesh: &Mesh<3>, e: u32, _et: ElementType, xi: &[f64])
 
     let mut phi = vec![0.0; n_dofs];
     let mut grad_ref = vec![0.0; n_dofs * 2];
-    quad.eval_basis(xi, &mut phi);
-    quad.eval_grad_basis(xi, &mut grad_ref);
+    // QuadQk expects [0,1]²; QuadQ1 expects [-1,1]².
+    // For geom_order <= 1, map xi from [0,1]→[-1,1] before passing to QuadQ1.
+    if geom_order > 1 {
+        quad.eval_basis(xi, &mut phi);
+        quad.eval_grad_basis(xi, &mut grad_ref);
+    } else {
+        // Map point to [-1,1]² for QuadQ1
+        let xi_mapped = [2.0 * xi[0] - 1.0, 2.0 * xi[1] - 1.0];
+        quad.eval_basis(&xi_mapped, &mut phi);
+        quad.eval_grad_basis(&xi_mapped, &mut grad_ref);
+        // Chain rule: d/dx ∈ [0,1] = 2 · d/dξ ∈ [-1,1]
+        for g in grad_ref.iter_mut() { *g *= 2.0; }
+    }
 
     // Helper: get node coords from geometry (if available) or regular coords
     use fem_core::NodeId;

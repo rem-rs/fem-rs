@@ -1,21 +1,16 @@
 # Handoff: MFEM ex29 (Curved-surface Poisson)
 
-## 最终根因：Quad 参考域不匹配 [0,1]² vs [-1,1]²
+## 状态：QuadQk [0,1]² 重构已完成 ✅
 
-**C++ MFEM** 对 Quad 元素使用 **[0,1]²** 参考域。
-**Rust QuadQk** 使用 **[-1,1]²** 参考域。
+**根因已修复：** QuadQk 参考域已从 `[-1,1]²` 改为 `[0,1]²`，与 MFEM `H1_FECollection` 一致。
+参见 `HANDOFF_EX29_QUADQK_REFACTOR.md` 获取详细修改清单。
 
-虽然几何节点位置一致（都在 GLL 位置），但基函数梯度的参数化不同：
-- 梯度在 [0,1] 与 [-1,1] 之间相差 **2×** 缩放因子
-- 导致 Q3 Jacobian 完全不同（不仅幅度，符号也不同）
+## 剩余问题：L² 误差 0.283 vs C++ 0.0014
 
-### 已修复的基础设施
-| 修复 | 文件 | 说明 |
-|------|------|------|
-| GLL 边缘节点 | `mesh/src/simplex.rs` | `set_curvature` 改用 GLL 位置 |
-| GLL 参考元素 | `assembly/src/assembler.rs`, 示例 | `ref_elem_vol` 改用 `QuadQk` |
-| API 方法名 | 示例 | `geom_elem_nodes`→`geometry_nodes` 等 |
+数学上积分应不受参数化影响（det(J)·dω 不变性），但 ex29 仍差 ~200×。
+需排查组装层以下问题：
 
-### 需要进一步修复
-- `QuadQk` 基函数需适配 [0,1]² 参考域（或加入 `map_to_01` 缩放）
-- 影响所有 Quad 元素的相关代码路径
+1. **表面 Jacobian 精度**：对比 `surface_jacobian` 中的 QuadQk 路径与 MFEM `FiniteElement::Jacobian3D`
+2. **协变/逆变映射**：G = JᵀJ 和 ∇_s = J·G⁻¹·∇_ref 的准确性
+3. **积分点数**：qo 使用 `(2*order+1).max(3+3)` = 7，需 n=4 点 (2n-1≥7)，`quad_rule_01` 够用
+4. **边界条件处理**：Dirichlet BC 消除是否与 MFEM 一致

@@ -125,12 +125,12 @@ fn refine_q3(m: &Mesh<2>, q3: &fem_element::lagrange::factory::QuadQk)
     let mut phi = vec![0.0; q3.n_dofs()];
 
     // For each parent element, evaluate Q3 at child vertex ref positions
-    // Child 0 (BL): n0(-1,-1), m01(0,-1), c(0,0), m30(-1,0)
-    // Child 1 (BR): m01(0,-1), n1(1,-1), m12(1,0), c(0,0)
-    // Child 2 (TR): c(0,0), m12(1,0), n2(1,1), m23(0,1)
-    // Child 3 (TL): m30(-1,0), c(0,0), m23(0,1), n3(-1,1)
-    // New vertices (not in parent): m01(0,-1), m12(1,0), m23(0,1), m30(-1,0), c(0,0)
-    let child_refs = [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, 0.0)];
+    // Child 0 (BL): n0(0,0), m01(0.5,0), c(0.5,0.5), m30(0,0.5)
+    // Child 1 (BR): m01(0.5,0), n1(1,0), m12(1,0.5), c(0.5,0.5)
+    // Child 2 (TR): c(0.5,0.5), m12(1,0.5), n2(1,1), m23(0.5,1)
+    // Child 3 (TL): m30(0,0.5), c(0.5,0.5), m23(0.5,1), n3(0,1)
+    // New vertices (not in parent): m01(0.5,0), m12(1,0.5), m23(0.5,1), m30(0,0.5), c(0.5,0.5)
+    let child_refs = [(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5), (0.5, 0.5)];
 
     // Use the SAME ordering as refine_nonconforming_quad to match vertex IDs
     for e in 0..n_parent as u32 {
