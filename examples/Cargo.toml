@@ -280,8 +280,8 @@ name = "mfem_ex20_symplectic"
 path = "mfem_ex20_symplectic.rs"
 
 [[example]]
-name = "mfem_ex35_multidomain"
-path = "mfem_ex35_multidomain.rs"
+name = "mfem_multidomain_poisson_coupling"
+path = "mfem_multidomain_poisson_coupling.rs"
 
 [[example]]
 name = "mfem_ex21_amr_elasticity"
