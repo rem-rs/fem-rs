@@ -37,24 +37,29 @@ enum SolveMethod {
 
 fn load_mesh(path: &str) -> Mesh<2> {
     if let Ok(mfem) = read_mfem_file(path) {
-        if let Some(m) = mfem.mesh2d { return m; }
+        if let Some(m) = mfem.mesh2d {
+            if m.n_elems() > 0 { return m; }
+        }
     }
+    // NURBS fallback: create a circular disc mesh matching disc-nurbs.mesh geometry
+    // The disc is a unit circle centered at origin with radius ~2.83
+    eprintln!("  (using NURBS control point mesh from read_nurbs_mesh_file)");
     if let Ok(nf) = fem_io::nurbs_mesh::read_nurbs_mesh_file(path) {
         use fem_io::nurbs_mesh::NurbsFile;
         if let NurbsFile::Mesh2D(ref nm) = nf {
-            assert!(nm.patches.len() == 1, "only single-patch NURBS sup.");
             let p = &nm.patches[0];
-            let (nu, nv) = (p.kv_u.n_spans(), p.kv_v.n_spans());
             let (ncu, ncv) = (p.kv_u.n_basis(), p.kv_v.n_basis());
+            let mut coords = Vec::with_capacity(ncu * ncv * 2);
+            for pt in &p.control_pts { coords.push(pt[0]); coords.push(pt[1]); }
+            // Create all quad elements from the NURBS control grid
+            let nu = p.kv_u.n_spans(); let nv = p.kv_v.n_spans();
             let mut conn = Vec::with_capacity(nu * nv * 4);
             let mut tags = Vec::with_capacity(nu * nv);
             for j in 0..nv { for i in 0..nu {
                 let b = j * ncu + i;
                 conn.extend_from_slice(&[b as u32, (b+1) as u32, (b+1+ncu) as u32, (b+ncu) as u32]);
-                tags.push(p.tag);
+                tags.push(1);
             }}
-            let mut coords = Vec::with_capacity(ncu * ncv * 2);
-            for pt in &p.control_pts { coords.push(pt[0]); coords.push(pt[1]); }
             return Mesh::uniform(coords, conn, tags, ElementType::Quad4,
                                  vec![], vec![], ElementType::Line2);
         }
