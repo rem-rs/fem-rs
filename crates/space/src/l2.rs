@@ -83,12 +83,14 @@ impl<M: MeshTopology> L2Space<M> {
                 // P2 discontinuous on simplices:
                 //   Tri: 3 vertex + 3 edge-midpoint DOFs = 6
                 //   Tet: 4 vertex + 6 edge-midpoint DOFs = 10
+                //   Quad: (2+1)² = 9 DOFs per element (tensor product)
                 let npe0 = mesh.element_nodes(0).len();
                 let dofs_per_elem = match (dim, npe0) {
                     (2, 3) => 6,
+                    (2, 4) => 9,
                     (3, 4) => 10,
                     _ => panic!(
-                        "L2Space P2 currently supports Tri3 (2D) and Tet4 (3D), got dim={dim}, npe={npe0}"
+                        "L2Space P2 currently supports Tri3, Quad4 (2D) and Tet4 (3D), got dim={dim}, npe={npe0}"
                     ),
                 };
 
@@ -100,7 +102,7 @@ impl<M: MeshTopology> L2Space<M> {
                     let nodes = mesh.element_nodes(e);
                     let base_dof = e as usize * dofs_per_elem;
 
-                    if dim == 2 {
+                    if dim == 2 && npe0 == 3 {
                         let (n0, n1, n2) = (nodes[0], nodes[1], nodes[2]);
                         let p0 = mesh.node_coords(n0);
                         let p1 = mesh.node_coords(n1);
@@ -118,6 +120,23 @@ impl<M: MeshTopology> L2Space<M> {
                             dof_coords[(base_dof + 3) * 2 + d] = 0.5 * (p0[d] + p1[d]);
                             dof_coords[(base_dof + 4) * 2 + d] = 0.5 * (p1[d] + p2[d]);
                             dof_coords[(base_dof + 5) * 2 + d] = 0.5 * (p0[d] + p2[d]);
+                        }
+                    } else if dim == 2 && npe0 == 4 {
+                        // Q2 on Quad4: tensor product of 1D quadratic, 3×3=9 nodes
+                        let p0 = mesh.node_coords(nodes[0]);
+                        let p1 = mesh.node_coords(nodes[1]);
+                        let p2 = mesh.node_coords(nodes[2]);
+                        let p3 = mesh.node_coords(nodes[3]);
+                        let nq = 3usize; // nodes per direction = order + 1
+                        for j in 0..nq {
+                            for i in 0..nq {
+                                let xi = i as f64 / (nq - 1) as f64;
+                                let eta = j as f64 / (nq - 1) as f64;
+                                let omx = 1.0 - xi; let omy = 1.0 - eta;
+                                let idx = (base_dof + j * nq + i) * 2;
+                                dof_coords[idx]     = omx*omy*p0[0] + xi*omy*p1[0] + xi*eta*p2[0] + omx*eta*p3[0];
+                                dof_coords[idx + 1] = omx*omy*p0[1] + xi*omy*p1[1] + xi*eta*p2[1] + omx*eta*p3[1];
+                            }
                         }
                     } else {
                         let (n0, n1, n2, n3) = (nodes[0], nodes[1], nodes[2], nodes[3]);
@@ -161,10 +180,11 @@ impl<M: MeshTopology> L2Space<M> {
                 let ref_tri = TriP3.dof_coords();
                 let ref_tet = TetP3.dof_coords();
                 let dofs_per_elem = match (dim, npe0) {
-                    (2, 3) => ref_tri.len(),
-                    (3, 4) => ref_tet.len(),
+                    (2, 3) => ref_tri.len(),    // Tri: 10
+                    (2, 4) => 16,               // Quad: (3+1)² = 16
+                    (3, 4) => ref_tet.len(),    // Tet: 20
                     _ => panic!(
-                        "L2Space P3 currently supports Tri3 (2D) and Tet4 (3D), got dim={dim}, npe={npe0}"
+                        "L2Space P3 currently supports Tri3, Quad4 (2D) and Tet4 (3D), got dim={dim}, npe={npe0}"
                     ),
                 };
 
@@ -176,7 +196,7 @@ impl<M: MeshTopology> L2Space<M> {
                     let nodes = mesh.element_nodes(e);
                     let base_dof = e as usize * dofs_per_elem;
 
-                    if dim == 2 {
+                    if dim == 2 && npe0 == 3 {
                         let (n0, n1, n2) = (nodes[0], nodes[1], nodes[2]);
                         let p0 = mesh.node_coords(n0);
                         let p1 = mesh.node_coords(n1);
@@ -188,6 +208,23 @@ impl<M: MeshTopology> L2Space<M> {
                             dof_coords[base] = p0[0] + xi * (p1[0] - p0[0]) + eta * (p2[0] - p0[0]);
                             dof_coords[base + 1] =
                                 p0[1] + xi * (p1[1] - p0[1]) + eta * (p2[1] - p0[1]);
+                        }
+                    } else if dim == 2 && npe0 == 4 {
+                        // Q3 on Quad4: tensor product 4×4=16 nodes
+                        let p0 = mesh.node_coords(nodes[0]);
+                        let p1 = mesh.node_coords(nodes[1]);
+                        let p2 = mesh.node_coords(nodes[2]);
+                        let p3 = mesh.node_coords(nodes[3]);
+                        let nq = 4usize; // nodes per direction = order + 1
+                        for j in 0..nq {
+                            for i in 0..nq {
+                                let xi = i as f64 / (nq - 1) as f64;
+                                let eta = j as f64 / (nq - 1) as f64;
+                                let omx = 1.0 - xi; let omy = 1.0 - eta;
+                                let idx = (base_dof + j * nq + i) * 2;
+                                dof_coords[idx]     = omx*omy*p0[0] + xi*omy*p1[0] + xi*eta*p2[0] + omx*eta*p3[0];
+                                dof_coords[idx + 1] = omx*omy*p0[1] + xi*omy*p1[1] + xi*eta*p2[1] + omx*eta*p3[1];
+                            }
                         }
                     } else {
                         let (n0, n1, n2, n3) = (nodes[0], nodes[1], nodes[2], nodes[3]);

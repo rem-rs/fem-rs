@@ -20,7 +20,7 @@ use std::f64::consts::PI;
 
 use fem_core::types::{DofId, ElemId, NodeId};
 use fem_element::{ReferenceElement,
-    lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1}};
+    lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1, QuadQk}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -872,6 +872,7 @@ pub(crate) fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceEleme
         (ElementType::Tri3, 2) => Box::new(TriP2),
         (ElementType::Tri3, 3) => Box::new(TriP3),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
+        (ElementType::Quad4, order) if order > 1 => Box::new(QuadQk::new(order as usize)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
