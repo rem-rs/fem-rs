@@ -160,7 +160,7 @@ fn main() {
     eprintln!("  Number of requested eigenmodes: {}", args.nev);
 
     let a_csr = fem_linalg::fem_to_linlvo_csr(&a_mat);
-    let gs_smoother = match fem_solver::GSSmoother::from_csr(&a_csr, 1.0) {
+    let gs_smoother = match fem_solver::GSSmoother::from_csr(&a_csr) {
         Ok(gs) => gs,
         Err(e) => panic!("GSSmoother setup failed: {e}"),
     };
