@@ -24,28 +24,26 @@
 //! ```
 
 use std::time::Instant;
-use fem_assembly::postproc::grid_function::{GridFunction, project_coefficient, compute_coeff_l2_norm};
+use fem_assembly::postproc::grid_function::GridFunction;
+use fem_assembly::postproc::grid_function::compute_coeff_l2_norm;
 use fem_element::lagrange::QuadQ1;
 use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType,
     amr::{refine_nonconforming_quad, closure_refine_default}};
-use fem_space::L2Space;
+use fem_space::{L2Space, fe_space::FESpace};
 
 // ── Coefficient functions — exact 1:1 with MFEM ex30.cpp ───────────────
 
-/// Piecewise-affine function which is sometimes mesh-conforming (Function 0).
 fn affine_function(p: &[f64]) -> f64 {
     if p[0] < 0.0 { 1.0 + p[0] + p[1] } else { 1.0 }
 }
 
-/// Piecewise-constant function which is never mesh-conforming (Function 1).
 fn jump_function(p: &[f64]) -> f64 {
     let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
     if r > 0.4 && r < 0.6 { 1.0 } else { 5.0 }
 }
 
-/// Singular function: Laplacian of steep wavefront from [2] (Function 2).
 fn singular_function(p: &[f64]) -> f64 {
     let alpha: f64 = 1000.0;
     let xc: f64 = 0.75;
@@ -98,8 +96,20 @@ fn parse_args() -> Args {
     a
 }
 
-// ── Element size: |det(J)|^(1/dim) at element center ──────────────────
-// Approximates MFEM GetElementSize(type=1) = J.CalcSingularvalue(Dim-1).
+// ── Element size: h_min = sigma_min(J) at element center ──────────────
+// Exact match with MFEM GetElementSize(type=1) = J.CalcSingularvalue(Dim-1).
+// For 2D: sigma_min = |det(J)| / sigma_max.
+
+fn min_sv_2d(j: &nalgebra::DMatrix<f64>) -> f64 {
+    let a = j[(0,0)]; let b = j[(0,1)];
+    let c = j[(1,0)]; let d = j[(1,1)];
+    let det = (a*d - b*c).abs();
+    if det < 1e-300 { return 0.0; }
+    let frob2 = a*a + b*b + c*c + d*d;
+    let disc = (frob2*frob2 - 4.0*det*det).max(0.0);
+    let s_max = ((frob2 + disc.sqrt()) / 2.0).sqrt();
+    det / s_max
+}
 
 fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
     let dim = mesh.topological_dim() as usize;
@@ -109,7 +119,7 @@ fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
     if needs_iso {
         let geo = QuadQ1;
         let n_geo = geo.n_dofs();
-        let xi = [0.5; 2];
+        let xi = [0.0; 2];
         let mut grad = vec![0.0_f64; n_geo * dim];
         geo.eval_grad_basis(&xi[..dim], &mut grad);
         let mut j = nalgebra::DMatrix::<f64>::zeros(dim, dim);
@@ -121,7 +131,7 @@ fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
                 }
             }
         }
-        j.determinant().abs().powf(1.0 / dim as f64)
+        min_sv_2d(&j)
     } else {
         let x0 = mesh.node_coords(nodes[0]);
         let mut j = nalgebra::DMatrix::<f64>::zeros(dim, dim);
@@ -131,11 +141,11 @@ fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
                 j[(row, col)] = xc[row] - x0[row];
             }
         }
-        j.determinant().abs().powf(1.0 / dim as f64)
+        if dim == 2 { min_sv_2d(&j) } else { j.determinant().abs().powf(1.0 / dim as f64) }
     }
 }
 
-// ── Preprocess mesh: refine to resolve coefficient via L² oscillation ─
+// ── Preprocess mesh ───────────────────────────────────────────────────
 // 1:1 with MFEM CoefficientRefiner::PreprocessMesh.
 
 fn preprocess(mesh: &mut Mesh<2>,
@@ -150,8 +160,8 @@ fn preprocess(mesh: &mut Mesh<2>,
     for _iter in 0..10 {
         let ne = mesh.n_elems();
         let l2 = L2Space::new(mesh.clone(), order);
-        let dofs = project_coefficient(&l2, coeff, quad_order);
-        let gf = GridFunction::new(&l2, dofs);
+        let dofs = l2.interpolate(coeff);
+        let gf = GridFunction::new(&l2, dofs.as_slice().to_vec());
 
         let norm_of_coeff = compute_coeff_l2_norm(mesh, coeff, quad_order);
         let av_norm = norm_of_coeff / (ne as f64).sqrt();
@@ -176,8 +186,9 @@ fn preprocess(mesh: &mut Mesh<2>,
             return (ne, global_osc);
         }
 
-        // MFEM LimitNCLevel(nc_limit=1): mark edge-neighbors of marked elements
-        // to maintain at most 1 level of nonconformity between adjacent elements.
+        // Edge-neighbor propagation (approximates MFEM LimitNCLevel).
+        // Mark edge-neighbors of oscillatory elements so that hanging-node
+        // level differences never exceed 1 on the refined mesh.
         if nc_limit > 0 && matches!(mesh.element_type(0), ElementType::Quad4) {
             let mut edge_elems: std::collections::HashMap<(u32, u32), Vec<u32>> =
                 std::collections::HashMap::new();
@@ -229,9 +240,7 @@ fn main() {
         .mesh2d
         .expect("MFEM mesh must be 2D");
 
-    // Note: NURBS meshes (ball-nurbs, square-disc-nurbs, etc.) are not yet
-    // supported by Mesh<2>.  The C++ ex30 converts NURBS to polynomial curved
-    // via UniformRefinement + SetCurvature(2).
+    // Note: NURBS meshes are not supported by Mesh<2>.
 
     println!("Options used:");
     println!("   --mesh {}", args.mesh);

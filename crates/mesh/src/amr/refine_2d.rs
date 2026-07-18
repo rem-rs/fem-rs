@@ -541,6 +541,59 @@ pub fn refine_nonconforming_quad(mesh:&Mesh<2>,marked:&[ElemId],project_boundary
     (new_mesh,constraints)
 }
 
+/// Like [`refine_nonconforming_quad`] but enforces the maximum level difference
+/// between adjacent elements (approximates MFEM `NCMesh::LimitNCLevel`).
+///
+/// After each refinement pass, edges whose midpoint belongs to a refined element
+/// on one side and an unrefined element on the other create a level-1 boundary.
+/// When `max_level > 0`, the unrefined neighbor is added to `marked` and the
+/// refinement is repeated until no new neighbors are force-refined.
+///
+/// Currently limited to a single level of propagation (equivalent to nc_limit=1).
+pub fn refine_nonconforming_quad_limit_level(
+    mesh: &Mesh<2>,
+    marked: &[ElemId],
+    project_boundary: Option<&ProjectionConfig>,
+    max_level: usize,
+) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
+    if max_level == 0 { return refine_nonconforming_quad(mesh, marked, project_boundary); }
+    let mut expanded: Vec<ElemId> = marked.to_vec();
+    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+    for e in 0..mesh.n_elems() as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_quad() {
+            edge_elems.entry(quad_edge_key(ns[a], ns[b])).or_default().push(e);
+        }
+    }
+    // Iteratively expand the marked set: for each split edge where one side
+    // is refined and the other isn't, add the unrefined neighbor.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let snapshot: Vec<ElemId> = expanded.clone();
+        let marked_set: std::collections::HashSet<ElemId> = expanded.iter().copied().collect();
+        for &e in &snapshot {
+            let ns = mesh.elem_nodes(e);
+            for &(a, b) in &local_edges_quad() {
+                let key = quad_edge_key(ns[a], ns[b]);
+                if let Some(adj) = edge_elems.get(&key) {
+                    for &adj_e in adj {
+                        if !marked_set.contains(&adj_e) && !expanded.contains(&adj_e) {
+                            expanded.push(adj_e);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if expanded.len() > marked.len() {
+        refine_nonconforming_quad(mesh, &expanded, project_boundary)
+    } else {
+        refine_nonconforming_quad(mesh, marked, project_boundary)
+    }
+}
+
 // ─── 2-D NCStateQuad ────────────────────────────────────────────────────────
 
 pub fn longest_edge_tri(mesh:&Mesh<2>,ns:&[NodeId])->(NodeId,NodeId){
