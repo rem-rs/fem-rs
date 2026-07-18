@@ -28,7 +28,7 @@ use fem_linalg::{SolverConfig, PrintLevel};
 use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::solve_pcg_gssmoother;
 use fem_space::{
-    H1Space, FESpace, VectorH1Space,
+    H1Space, FESpace, L2Space, VectorH1Space,
     constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
 };
 
@@ -234,7 +234,7 @@ fn main() {
     let order = args.order as u8;
     let state_space = VectorH1Space::new(mesh.clone(), order, dim);
     let filter_space = H1Space::new(mesh.clone(), order);
-    let control_space = H1Space::new(mesh.clone(), (order - 1).max(1));
+    let control_space = L2Space::new(mesh.clone(), (order - 1).max(0));
 
     let n_state = state_space.n_dofs();
     let n_filter = filter_space.n_dofs();
@@ -256,26 +256,39 @@ fn main() {
     let clamped_vals = vec![0.0_f64; clamped.len()];
 
     // 5. Volume force: small circular region at (2.9, 0.5), force = (0, -1)
-    //    Assemble as linear form using the mesh geometry
-    let _center_x = 2.9;
-    let _center_y = 0.5;
-    let _load_r = 0.05;
+    //    Implemented manually since VectorAssembler doesn't support VectorH1+Quad4
+    let center_x = 2.9;
+    let center_y = 0.5;
+    let load_r = 0.05;
     let quad_order = (order * 2 + 1) as u8;
 
     let mut rhs_state = vec![0.0_f64; n_state];
-    // For simplicity: apply point load at right-boundary DOF nearest (0.5, 0.5)
-    let n_scalar_dm = filter_space.dof_manager();
-    let right_scalar = boundary_dofs(&mesh, n_scalar_dm, &[2]);
-    let load_dof_scalar = right_scalar.iter()
-        .min_by(|&&a, &&b| {
-            let ya = mesh.node_coords(a)[1];
-            let yb = mesh.node_coords(b)[1];
-            (ya - 0.5).abs().partial_cmp(&(yb - 0.5).abs()).unwrap()
-        })
-        .copied()
-        .unwrap_or(0) as usize;
-    let load_dof_y = load_dof_scalar + n_scalar;
-    rhs_state[load_dof_y] = -1.0;
+    {
+        // Assemble volume force integrated at element centers (trapezoidal).
+        // For Q1 quad, evaluate each node: if within load circle, contribute
+        // (force_density × elem_area / 4) to that node's y-DOF.
+        for e in 0..mesh.n_elements() as u32 {
+            let nodes = mesh.element_nodes(e);
+            let sdofs = state_space.element_dofs(e);
+            // Element area via cross product of diagonals (for Q1 quad)
+            let c0 = mesh.node_coords(nodes[0]);
+            let c1 = mesh.node_coords(nodes[1]);
+            let c2 = mesh.node_coords(nodes[2]);
+            let c3 = mesh.node_coords(nodes[3]);
+            let diag1_x = c2[0] - c0[0]; let diag1_y = c2[1] - c0[1];
+            let diag2_x = c3[0] - c1[0]; let diag2_y = c3[1] - c1[1];
+            let elem_area = 0.5 * (diag1_x * diag2_y - diag1_y * diag2_x).abs();
+            for (i, &n) in nodes.iter().enumerate() {
+                let coord = mesh.node_coords(n);
+                let dx = coord[0] - center_x;
+                let dy = coord[1] - center_y;
+                if dx * dx + dy * dy <= load_r * load_r {
+                    let dof_y = sdofs[2 * i + 1] as usize;
+                    rhs_state[dof_y] += -1.0 * elem_area / nodes.len() as f64;
+                }
+            }
+        }
+    }
 
     // 6. Initialize control variable ψ = inv_sigmoid(vol_frac)
     let mut psi = vec![inv_sigmoid(args.vol_frac); n_control];
@@ -284,8 +297,8 @@ fn main() {
     // 7. Pre-assemble the Helmholtz filter
     let filter = HelmholtzFilter::new_from_space(&filter_space, args.epsilon, quad_order);
 
-    // 8. Domain volume
-    let domain_volume = mesh.n_elements() as f64; // unit-area elements after refinement
+    // 8. Domain volume (actual physical area)
+    let domain_volume = 3.0 * 1.0;
     let target_volume = domain_volume * args.vol_frac;
 
     // 9. Optimization loop
@@ -341,15 +354,26 @@ fn main() {
         let w_filter = filter.solve_adjoint(&adj_rhs);
 
         // f) Project gradient: G = M_control⁻¹ · w̃
-        let w_in_control: Vec<f64> = {
-            let mut proj = vec![0.0_f64; n_control];
-            // Transfer w_filter (H¹) → control (H¹) via interpolation
-            // Simplified: restrict to matching DOFs
-            let n_common = n_control.min(n_filter);
-            proj[..n_common].copy_from_slice(&w_filter[..n_common]);
-            proj
-        };
-        grad = solve_l2_projection(&control_space, &w_in_control, quad_order);
+        // For L2(0) control space: assemble rhs[j] = ∫ w_filter · φ_j dx
+        // by integrating w_filter over each element via trapezoidal rule.
+        // Then solve M_control · G = rhs.
+        let mut control_rhs = vec![0.0_f64; n_control];
+        for e in 0..mesh.n_elements() as u32 {
+            let cdofs = control_space.element_dofs(e); // 1 DOF for L2(0)
+            let fdofs = filter_space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            let c0 = mesh.node_coords(nodes[0]);
+            let c2 = mesh.node_coords(nodes[2]);
+            let diag1_x = c2[0] - c0[0]; let diag1_y = c2[1] - c0[1];
+            let c1 = mesh.node_coords(nodes[1]);
+            let c3 = mesh.node_coords(nodes[3]);
+            let diag2_x = c3[0] - c1[0]; let diag2_y = c3[1] - c1[1];
+            let elem_area = 0.5 * (diag1_x * diag2_y - diag1_y * diag2_x).abs();
+            // Average w_filter over element
+            let w_avg: f64 = fdofs.iter().map(|&d| w_filter[d as usize]).sum::<f64>() / fdofs.len() as f64;
+            control_rhs[cdofs[0] as usize] = w_avg * elem_area;
+        }
+        grad = solve_l2_projection(&control_space, &control_rhs, quad_order);
 
         // g) Update ψ ← ψ - α·G
         for i in 0..n_control {

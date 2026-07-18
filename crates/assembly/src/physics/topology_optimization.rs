@@ -252,12 +252,37 @@ pub fn bregman_volume_projection<M: MeshTopology>(
     tol: f64,
     max_its: usize,
 ) -> f64 {
-    let nelems = space.mesh().n_elements() as u32;
+    let mesh = space.mesh();
+    let nelems = mesh.n_elements() as u32;
+
+    // Helper: compute element area for 2D quad/tri elements.
+    // For uniform meshes this is constant, but we compute per-element for generality.
+    let elem_area = |e: u32| -> f64 {
+        let nodes = mesh.element_nodes(e);
+        if nodes.len() == 4 {
+            // Quad: cross product of diagonals
+            let c0 = mesh.node_coords(nodes[0]);
+            let c2 = mesh.node_coords(nodes[2]);
+            let c1 = mesh.node_coords(nodes[1]);
+            let c3 = mesh.node_coords(nodes[3]);
+            let dx1 = c2[0] - c0[0]; let dy1 = c2[1] - c0[1];
+            let dx2 = c3[0] - c1[0]; let dy2 = c3[1] - c1[1];
+            0.5 * (dx1 * dy2 - dy1 * dx2).abs()
+        } else if nodes.len() == 3 {
+            // Triangle: cross product of two edges
+            let c0 = mesh.node_coords(nodes[0]);
+            let c1 = mesh.node_coords(nodes[1]);
+            let c2 = mesh.node_coords(nodes[2]);
+            0.5 * ((c1[0]-c0[0])*(c2[1]-c0[1]) - (c1[1]-c0[1])*(c2[0]-c0[0])).abs()
+        } else {
+            1.0 // fallback
+        }
+    };
 
     // Bracket and Illinois solve — closure lives only inside this block
     let c = {
         let f = |shift: f64| -> f64 {
-            let mut sum = 0.0;
+            let mut vol = 0.0;
             for e in 0..nelems {
                 let dofs = space.element_dofs(e);
                 let n_dofs = dofs.len() as f64;
@@ -265,9 +290,9 @@ pub fn bregman_volume_projection<M: MeshTopology>(
                 for &d in dofs {
                     avg += sigmoid(psi[d as usize] + shift);
                 }
-                sum += avg / n_dofs;
+                vol += (avg / n_dofs) * elem_area(e);
             }
-            sum - target_volume
+            vol - target_volume
         };
 
         // Bracket
@@ -342,7 +367,7 @@ pub fn bregman_volume_projection<M: MeshTopology>(
         for &d in dofs {
             avg += sigmoid(psi[d as usize]);
         }
-        final_vol += avg / n_dofs;
+        final_vol += (avg / n_dofs) * elem_area(e);
     }
     final_vol
 }
