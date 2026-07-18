@@ -1,21 +1,21 @@
 # Handoff: MFEM ex29 (Curved-surface Poisson)
 
-## 状态：❌ 曲面扩散组装 300×误差，需逐个元素矩阵比对
+## 最终根因：Quad 参考域不匹配 [0,1]² vs [-1,1]²
 
-### 已验证
-- ✅ 扁平 Quad4 Laplacian 组装：在其他示例中正常工作
-- ✅ 梯度变换数学公式：等价于 MFEM
-- ✅ GLL 节点对齐：`ref_elem_vol` 已修复
-- ✅ 曲面路径代码逻辑：正确使用 `geometry_nodes` (16 Q3 节点，不是 4 顶点)
+**C++ MFEM** 对 Quad 元素使用 **[0,1]²** 参考域。
+**Rust QuadQk** 使用 **[-1,1]²** 参考域。
 
-### 未解决
-- `is_surface=true` 路径的曲面组装在所有场景下都产生 ~0.39 的 L² 误差
-- 即使是 σ=I（基本 Laplacian）也失败
-- 需要逐个元素矩阵比对（C++ `ComputeElementMatrix` vs Rust 输出）才能定位
-- C++ 构建环境需要稳定的 WSL 编译链
+虽然几何节点位置一致（都在 GLL 位置），但基函数梯度的参数化不同：
+- 梯度在 [0,1] 与 [-1,1] 之间相差 **2×** 缩放因子
+- 导致 Q3 Jacobian 完全不同（不仅幅度，符号也不同）
 
-### 建议
-在可构建 MFEM 的环境中：
-1. 修改 C++ ex29 在 `a.Assemble()` 后调用 `a.ComputeElementMatrix(0, elmat)` 输出单元 0 矩阵
-2. 在 Rust 中从 Assembler 内部提取相同单元矩阵
-3. 逐元素比对找出差异
+### 已修复的基础设施
+| 修复 | 文件 | 说明 |
+|------|------|------|
+| GLL 边缘节点 | `mesh/src/simplex.rs` | `set_curvature` 改用 GLL 位置 |
+| GLL 参考元素 | `assembly/src/assembler.rs`, 示例 | `ref_elem_vol` 改用 `QuadQk` |
+| API 方法名 | 示例 | `geom_elem_nodes`→`geometry_nodes` 等 |
+
+### 需要进一步修复
+- `QuadQk` 基函数需适配 [0,1]² 参考域（或加入 `map_to_01` 缩放）
+- 影响所有 Quad 元素的相关代码路径
