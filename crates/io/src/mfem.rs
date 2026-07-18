@@ -71,7 +71,9 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         return read_mfem_inline(&mut r);
     }
 
-    if !line.trim().starts_with("MFEM mesh") {
+    let is_nurbs = line.trim().starts_with("MFEM NURBS mesh");
+
+    if !is_nurbs && !line.trim().starts_with("MFEM mesh") {
         return Err(FemError::Mesh(format!("expected 'MFEM mesh' header, got: {line}")));
     }
 
@@ -140,14 +142,24 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         face_conn.push(vals[2..].iter().map(|&v| fix_idx(v)).collect());
     }
 
-    read_line(&mut r)?;  // "vertices"
+    {
+        let next = read_line(&mut r)?;  // "edges" or "vertices"
+        if next.trim() == "edges" {
+            let n_edges = read_uint(&mut r)?;
+            for _ in 0..n_edges { read_uint_line(&mut r)?; }
+            read_line(&mut r)?;  // "vertices"
+        } // else already "vertices"
+    }
     let n_vert = read_uint(&mut r)?;
     let mut coords: Vec<f64> = Vec::new();
 
-    // Check if next line is "nodes" (MFEM v1.2 curved mesh format).
-    // If so, the vertex coords are embedded in the nodes section.
+    // Check if next line is "nodes" (MFEM v1.2 curved mesh format),
+    // a dimension number (standard format), or a NURBS keyword (skip).
     let next = read_line(&mut r)?;
-    if let Ok(_vdim) = next.parse::<usize>() {
+    if next.trim() == "knotvectors" || next.trim() == "knots" || next.trim().starts_with("FiniteElement") {
+        // NURBS or IGA format — stop reading, ignore remaining NURBS data.
+        // The coarse control mesh has been read; NURBS refinement is not supported.
+    } else if let Ok(_vdim) = next.parse::<usize>() {
         // Standard format: <n_vert> <vdim> followed by vertex coords
         coords.reserve(n_vert * dim);
         for _ in 0..n_vert {

@@ -21,6 +21,7 @@ use fem_assembly::{Assembler, GridFunction, standard::DiffusionIntegrator};
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{Mesh, topology::MeshTopology};
+use fem_mesh::ElementType;
 use fem_solver::solve_sparse_cholesky;
 use fem_space::{
     H1Space,
@@ -34,15 +35,44 @@ enum SolveMethod {
     SemismoothNewton,
 }
 
+fn load_mesh(path: &str) -> Mesh<2> {
+    if let Ok(mfem) = read_mfem_file(path) {
+        if let Some(m) = mfem.mesh2d { return m; }
+    }
+    if let Ok(nf) = fem_io::nurbs_mesh::read_nurbs_mesh_file(path) {
+        use fem_io::nurbs_mesh::NurbsFile;
+        if let NurbsFile::Mesh2D(ref nm) = nf {
+            assert!(nm.patches.len() == 1, "only single-patch NURBS sup.");
+            let p = &nm.patches[0];
+            let (nu, nv) = (p.kv_u.n_spans(), p.kv_v.n_spans());
+            let (ncu, ncv) = (p.kv_u.n_basis(), p.kv_v.n_basis());
+            let mut conn = Vec::with_capacity(nu * nv * 4);
+            let mut tags = Vec::with_capacity(nu * nv);
+            for j in 0..nv { for i in 0..nu {
+                let b = j * ncu + i;
+                conn.extend_from_slice(&[b as u32, (b+1) as u32, (b+1+ncu) as u32, (b+ncu) as u32]);
+                tags.push(p.tag);
+            }}
+            let mut coords = Vec::with_capacity(ncu * ncv * 2);
+            for pt in &p.control_pts { coords.push(pt[0]); coords.push(pt[1]); }
+            return Mesh::uniform(coords, conn, tags, ElementType::Quad4,
+                                 vec![], vec![], ElementType::Line2);
+        }
+    }
+    panic!("failed to load mesh: {path}");
+}
+
 fn main() {
     let args = parse_args();
-    let mesh = match args.mesh_file {
-        Some(ref p) => {
-            let mfem = read_mfem_file(p).expect("failed to read mesh file");
-            mfem.mesh2d.expect("expected 2D mesh")
-        }
+    let base = match args.mesh_file {
+        Some(ref p) => load_mesh(p),
         None => Mesh::<2>::unit_square_tri(args.n),
     };
+    let mesh = if args.refs > 0 {
+        let mut m = base;
+        for _ in 0..args.refs { m = fem_mesh::amr::refine_uniform(&m); }
+        m
+    } else { base };
     let result = solve_obstacle_problem(mesh, args.load, args.method);
 
     let method_label = match args.method {
@@ -66,6 +96,7 @@ fn main() {
 struct Args {
     n: usize,
     load: f64,
+    refs: usize,
     method: SolveMethod,
     mesh_file: Option<String>,
 }
@@ -83,7 +114,7 @@ struct ObstacleResult {
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { n: 20, load: -5.0, method: SolveMethod::Pdas, mesh_file: None };
+    let mut args = Args { n: 20, refs: 3, load: -5.0, method: SolveMethod::Pdas, mesh_file: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
