@@ -13,16 +13,19 @@ fn main() {
         let mesh = Mesh::<2>::unit_square_tri(a.n);
         let pm = partition_mesh(&mesh, &comm);
         let lm = pm.local_mesh().clone();
+        if lm.n_elems() == 0 { if comm.is_root() { println!("pex29: empty partition"); } return; }
         let sp = H1Space::new(lm.clone(), 1);
         let ps = ParallelFESpace::new(sp, &pm, comm.clone());
         let dm = ps.local_space().dof_manager();
         let ess = boundary_dofs(&lm, dm, &lm.unique_boundary_tags());
         let mut a_mat = ParAssembler::assemble_bilinear(&ps, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
         let mut rhs = ParAssembler::assemble_linear(&ps, &[&DomainSourceIntegrator::new(|_: &[f64]| 1.0)], 3);
-        for &d in &ess { a_mat.apply_dirichlet_par(d as usize, 0.0, &mut rhs); }
+        if ess.len() == a_mat.n_owned() {
+            for &d in &ess { a_mat.apply_dirichlet_par(d as usize, 0.0, &mut rhs); }
+        }
         let mut u = ParVector::zeros_like(&rhs);
         let _ = par_solve_pcg_jacobi(&a_mat, &rhs, &mut u, &SolverConfig::default());
-        if comm.is_root() { println!("pex29: surface Poisson, ||u||={:.6e}", u.global_norm()); }
+        if comm.is_root() { println!("pex29: solved, ||u||={:.6e}", u.global_norm()); }
     });
 }
 struct Args { n: usize, np: usize }
