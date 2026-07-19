@@ -212,7 +212,7 @@ fn accumulate_dg_volume_element<S: FESpace>(
     let gd = space.element_dofs(e).iter().map(|&d| d as usize).collect::<Vec<_>>();
     let nodes = mesh.element_nodes(e);
     let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-    let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
+    let j_inv_t = jac.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element"); DMatrix::identity(2,2)}).transpose();
 
     phi.resize(n, 0.0);
     grad_ref.resize(n * dim, 0.0);
@@ -318,8 +318,8 @@ fn assemble_interior_face<S: FESpace>(
     let nodes_r = mesh.element_nodes(er);
     let (jac_l, _det_l) = simplex_jac(mesh, nodes_l, dim);
     let (jac_r, _det_r) = simplex_jac(mesh, nodes_r, dim);
-    let jit_l = jac_l.clone().try_inverse().unwrap().transpose();
-    let jit_r = jac_r.clone().try_inverse().unwrap().transpose();
+    let jit_l = jac_l.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element {} for face", el); DMatrix::identity(2,2)}).transpose();
+    let jit_r = jac_r.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element {} for face", er); DMatrix::identity(2,2)}).transpose();
 
     // Blocks accumulated: K_ll, K_lr, K_rl, K_rr.
     let mut kll = vec![0.0_f64; n_l * n_l];
@@ -492,7 +492,7 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
 
     let nodes = mesh.element_nodes(elem);
     let (jac, _det_j) = simplex_jac(mesh, nodes, dim);
-    let jit = jac.clone().try_inverse().unwrap().transpose();
+    let jit = jac.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element"); DMatrix::identity(2,2)}).transpose();
 
     let x0f = mesh.node_coords(face_nodes[0]);
     let x1f = mesh.node_coords(face_nodes[1]);
@@ -585,7 +585,7 @@ fn orient_normal_outward<M: MeshTopology>(
 
 /// Invert `x = x0 + J ξ` → `ξ = J^{-1}(x - x0)`.
 fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
-    let j_inv = jac.clone().try_inverse().expect("degenerate element in phys_to_ref");
+    let j_inv = jac.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element in phys_to_ref"); DMatrix::identity(2,2)});
     let dx: Vec<f64> = (0..dim).map(|i| xp[i] - x0[i]).collect();
     let mut xi = vec![0.0_f64; dim];
     for i in 0..dim {

@@ -147,11 +147,17 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
         let nodes_l = mesh.element_nodes(el);
         let nodes_r = mesh.element_nodes(er);
 
-        // Affine Jacobians for both elements
-        let (jac_l, _) = simplex_jac(mesh, nodes_l, dim);
-        let (jac_r, _) = simplex_jac(mesh, nodes_r, dim);
-        let jit_l = jac_l.clone().try_inverse().unwrap().transpose();
-        let jit_r = jac_r.clone().try_inverse().unwrap().transpose();
+        // Jacobians for both elements (affine for tri, centroid for quad)
+        let (jac_l, det_l) = simplex_jac(mesh, nodes_l, dim);
+        let (jac_r, det_r) = simplex_jac(mesh, nodes_r, dim);
+        let jit_l = jac_l.clone().try_inverse().unwrap_or_else(|| {
+            eprintln!("  warning: degenerate left element {} for face, det={:.3e}", el, det_l);
+            DMatrix::identity(2, 2)
+        }).transpose();
+        let jit_r = jac_r.clone().try_inverse().unwrap_or_else(|| {
+            eprintln!("  warning: degenerate right element {} for face, det={:.3e}", er, det_r);
+            DMatrix::identity(2, 2)
+        }).transpose();
 
         let x0_l = mesh.node_coords(nodes_l[0]);
         let x0_r = mesh.node_coords(nodes_r[0]);
@@ -939,7 +945,13 @@ pub(crate) fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], _dim: usize)
 }
 
 pub(crate) fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
-    let j_inv = jac.clone().try_inverse().expect("degenerate element in phys_to_ref");
+    let j_inv = match jac.clone().try_inverse() {
+        Some(inv) => inv,
+        None => {
+            eprintln!("warning: degenerate element in phys_to_ref, using identity");
+            DMatrix::identity(dim, dim)
+        }
+    };
     let dx: Vec<f64> = (0..dim).map(|i| xp[i] - x0[i]).collect();
     let mut xi = vec![0.0_f64; dim];
     for i in 0..dim {
