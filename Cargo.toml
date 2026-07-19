@@ -15,7 +15,7 @@ members = [
     "crates/io_hdf5_parallel",
     "crates/wasm",
     "crates/python",
-    "crates/benches",
+    # "crates/benches",  // moved to fem-pro
     "crates/rmetis",
     "crates/regression",
     "crates/stochastic",

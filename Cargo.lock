@@ -724,24 +724,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fem-benches"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "fem-amg",
- "fem-assembly",
- "fem-core",
- "fem-element",
- "fem-linalg",
- "fem-linalg-gpu",
- "fem-mesh",
- "fem-solver",
- "fem-space",
- "pollster",
- "wgpu",
-]
-
-[[package]]
 name = "fem-core"
 version = "0.1.0"
 dependencies = [

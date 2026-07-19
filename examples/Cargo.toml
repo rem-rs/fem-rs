@@ -296,20 +296,12 @@ name = "mfem_ex47_multiphysics_templates"
 path = "mfem_ex47_multiphysics_templates.rs"
 
 [[example]]
-name = "template_joule_heating"
-path = "template_joule_heating.rs"
-
-[[example]]
 name = "mfem_ex49_template_fsi"
 path = "mfem_ex49_template_fsi.rs"
 
 [[example]]
 name = "mfem_ex50_template_acoustics_structure"
 path = "mfem_ex50_template_acoustics_structure.rs"
-
-[[example]]
-name = "thermal_em_stress_template"
-path = "thermal_em_stress_template.rs"
 
 [[example]]
 name = "mfem_ex52_template_reaction_flow_thermal"

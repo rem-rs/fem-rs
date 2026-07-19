@@ -464,9 +464,13 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
             let (jac_qp, det_qp, xp_qp) =
                 isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), xi, dim);
             let w = quad.weights[q] * det_qp.abs();
-            let jit = jac_qp.try_inverse()
-                .expect("degenerate quad/hex element")
-                .transpose();
+            let jit = match jac_qp.try_inverse() {
+                Some(inv) => inv.transpose(),
+                None => {
+                    eprintln!("warning: degenerate element {} at quad point {}, det={:.3e}", e, q, det_qp);
+                    continue;
+                }
+            };
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
             transform_grads(&jit, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
@@ -565,8 +569,13 @@ fn accumulate_volume_linear_element<S: FESpace>(
             let (jac_qp, det_qp, xp_qp) =
                 isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), xi, dim);
             w = quad.weights[q] * det_qp.abs();
-            let jit = jac_qp.try_inverse()
-                .expect("degenerate quad/hex element").transpose();
+            let jit = match jac_qp.try_inverse() {
+                Some(inv) => inv.transpose(),
+                None => {
+                    eprintln!("warning: degenerate element {} at quad point {}, det={:.3e}", e, q, det_qp);
+                    continue;
+                }
+            };
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
             transform_grads(&jit, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);

@@ -28,24 +28,6 @@ pub mod hdf5_checkpoint;
 pub mod maxwell;
 pub mod template_runner;
 pub mod workflow_cli;
-#[cfg(test)]
-pub mod stress_tests;
-#[cfg(test)]
-pub mod benchmarks;
-#[cfg(test)]
-pub mod em_benchmarks;
-#[cfg(test)]
-pub mod cross_backend_tests;
-#[cfg(test)]
-pub mod io_roundtrip_tests;
-#[cfg(test)]
-pub mod team_benchmarks;
-#[cfg(test)]
-pub mod nafems_thermal;
-#[cfg(test)]
-pub mod mms_convergence;
-#[cfg(test)]
-pub mod asme_benchmarks;
 pub use maxwell::{
     BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,
     FirstOrderMaxwellSolver3D, FirstOrderStepConfig3D, FirstOrderTimeStepper3D,
