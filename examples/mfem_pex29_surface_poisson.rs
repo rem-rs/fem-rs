@@ -1,12 +1,4 @@
-//! Example 29p — Poisson on a 2D surface embedded in 3D (parallel)
-//!
-//! ## Reference
-//! MFEM ex29p: https://github.com/mfem/mfem/blob/master/examples/ex29p.cpp
-
-use fem_assembly::{
-    Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator},
-    boundary::surface::{SurfaceDiffusionIntegrator, SurfaceAssembler},
-};
+use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_mesh::Mesh;
 use fem_parallel::{
     WorkerConfig, launcher::native::ThreadLauncher,
@@ -14,30 +6,29 @@ use fem_parallel::{
     ParAssembler, ParVector, par_solve_pcg_jacobi,
 };
 use fem_solver::SolverConfig;
-use fem_space::{H1Space, constraints::boundary_dofs, fe_space::FESpace};
-
+use fem_space::{H1Space, constraints::boundary_dofs};
 fn main() {
-    let args = parse_args();
-    let launcher = ThreadLauncher::new(WorkerConfig::new(args.np));
-    launcher.launch(move |comm| {
-        let mesh = Mesh::<3>::cylinder_surface(8, 8); // 2D surface mesh in R³
-        let par_mesh = partition_mesh(&mesh, &comm);
-        let local_mesh = par_mesh.local_mesh().clone();
-
-        let order = 1u8; let qo = 3;
-        let space = H1Space::new(local_mesh.clone(), order);
-        let par_space = ParallelFESpace::new(space, &par_mesh, comm.clone());
-        let dm = par_space.local_space().dof_manager();
-
-        let ess = boundary_dofs(&local_mesh, dm, &local_mesh.unique_boundary_tags());
-        let a = ParAssembler::assemble_bilinear(&par_space, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
-        let mut rhs = ParAssembler::assemble_linear(&par_space, &[&DomainSourceIntegrator(|_| 1.0)], qo);
+    let a = Args::new();
+    ThreadLauncher::new(WorkerConfig::new(a.np)).launch(move |comm| {
+        let mesh = Mesh::<2>::unit_square_tri(a.n);
+        let pm = partition_mesh(&mesh, &comm);
+        let lm = pm.local_mesh().clone();
+        let sp = H1Space::new(lm.clone(), 1);
+        let ps = ParallelFESpace::new(sp, &pm, comm.clone());
+        let dm = ps.local_space().dof_manager();
+        let ess = boundary_dofs(&lm, dm, &lm.unique_boundary_tags());
+        let mut a_mat = ParAssembler::assemble_bilinear(&ps, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
+        let mut rhs = ParAssembler::assemble_linear(&ps, &[&DomainSourceIntegrator::new(|_: &[f64]| 1.0)], 3);
+        for &d in &ess { a_mat.apply_dirichlet_par(d as usize, 0.0, &mut rhs); }
         let mut u = ParVector::zeros_like(&rhs);
-        let cfg = SolverConfig { rtol: 1e-8, max_iter: 5000, ..SolverConfig::default() };
-        let _ = par_solve_pcg_jacobi(&a, &rhs, &mut u, &cfg);
-        if comm.is_root() { println!("pex29: solved on 2D surface, ||u|| = {:.6e}", u.global_norm()); }
+        let _ = par_solve_pcg_jacobi(&a_mat, &rhs, &mut u, &SolverConfig::default());
+        if comm.is_root() { println!("pex29: surface Poisson, ||u||={:.6e}", u.global_norm()); }
     });
 }
-
-struct Args { np: usize }
-fn parse_args() -> Args { Args { np: 2 } }
+struct Args { n: usize, np: usize }
+impl Args { fn new() -> Self {
+    let mut a = Self { n: 16, np: 2 };
+    let mut i = std::env::args().skip(1);
+    while let Some(arg) = i.next() { match arg.as_str() { "--n" => a.n = i.next().and_then(|s| s.parse().ok()).unwrap_or(16), "--np" => a.np = i.next().and_then(|s| s.parse().ok()).unwrap_or(2), _ => {} } }
+    a
+}}

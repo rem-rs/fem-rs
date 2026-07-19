@@ -693,3 +693,19 @@ path = "mfem_pex39_named_attributes.rs"
 [[example]]
 name = "mfem_pex41_imex"
 path = "mfem_pex41_imex.rs"
+
+[[example]]
+name = "mfem_pex25_pml_maxwell"
+path = "mfem_pex25_pml_maxwell.rs"
+
+[[example]]
+name = "mfem_pex35_complex_oscillator"
+path = "mfem_pex35_complex_oscillator.rs"
+
+[[example]]
+name = "mfem_pex36_obstacle"
+path = "mfem_pex36_obstacle.rs"
+
+[[example]]
+name = "mfem_pex40_eikonal"
+path = "mfem_pex40_eikonal.rs"
