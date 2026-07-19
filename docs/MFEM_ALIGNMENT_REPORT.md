@@ -63,7 +63,7 @@
 | ex41 | `mfem_ex41_imex` | ✅ |
 | ex42 | `mfem_ex42_rom` | ✅ 新增 |
 | ex43 | `mfem_ex43_hdf5_checkpoint` | ✅ |
-| ex44 | `mfem_ex44_thermoelastic_coupled` | ✅ |
+| — | `ex_thermoelastic_coupled` | custom (not MFEM) |
 | ex45 | `mfem_ex45_moving_mesh_ale` | ✅ |
 | ex46 | `mfem_ex46_moving_mesh_heat` | ✅ |
 | ex47 | `mfem_ex47_multiphysics_templates` | ✅ |

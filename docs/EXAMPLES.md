@@ -149,12 +149,12 @@
 | [`mfem_ex40_stokes`](../examples/mfem_ex40_stokes.rs) | Stokes flow |
 | [`navier_stokes_kovasznay`](../examples/navier_stokes_kovasznay.rs) | NS Kovasznay MMS |
 
-## IMEX / Thermoelastic / ALE (ex41, ex44–46)
+## IMEX / Thermoelastic / ALE (ex41)
 
 | Example | Description |
 |---------|-------------|
 | [`mfem_ex41_imex`](../examples/mfem_ex41_imex.rs) | IMEX time stepping |
-| [`mfem_ex44_thermoelastic_coupled`](../examples/mfem_ex44_thermoelastic_coupled.rs) | Thermoelastic |
+| [`ex_thermoelastic_coupled`](../examples/ex_thermoelastic_coupled.rs) | Thermoelastic (custom) |
 | [`mfem_ex45_moving_mesh_ale`](../examples/mfem_ex45_moving_mesh_ale.rs) | ALE moving mesh |
 | [`mfem_ex46_moving_mesh_heat`](../examples/mfem_ex46_moving_mesh_heat.rs) | Moving mesh heat |
 

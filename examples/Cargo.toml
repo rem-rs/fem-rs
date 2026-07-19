@@ -550,8 +550,8 @@ name = "mfem_ex42_rom"
 path = "mfem_ex42_rom.rs"
 
 [[example]]
-name = "mfem_ex44_thermoelastic_coupled"
-path = "mfem_ex44_thermoelastic_coupled.rs"
+name = "ex_thermoelastic_coupled"
+path = "ex_thermoelastic_coupled.rs"
 
 [[example]]
 name = "mfem_ex45_moving_mesh_ale"
