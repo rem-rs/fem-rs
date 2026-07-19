@@ -665,3 +665,31 @@ path = "mfem_ex39_compass.rs"
 [[example]]
 name = "mfem_ex35_complex_oscillator"
 path = "mfem_ex35_complex_oscillator.rs"
+
+[[example]]
+name = "mfem_pex29_surface_poisson"
+path = "mfem_pex29_surface_poisson.rs"
+
+[[example]]
+name = "mfem_pex31_restricted_hcurl"
+path = "mfem_pex31_restricted_hcurl.rs"
+
+[[example]]
+name = "mfem_pex33_fractional_laplacian"
+path = "mfem_pex33_fractional_laplacian.rs"
+
+[[example]]
+name = "mfem_pex34_magnetostatics"
+path = "mfem_pex34_magnetostatics.rs"
+
+[[example]]
+name = "mfem_pex37_topology_optimization"
+path = "mfem_pex37_topology_optimization.rs"
+
+[[example]]
+name = "mfem_pex39_named_attributes"
+path = "mfem_pex39_named_attributes.rs"
+
+[[example]]
+name = "mfem_pex41_imex"
+path = "mfem_pex41_imex.rs"
