@@ -604,6 +604,9 @@ path = "mfem_pex26_parallel_geom_mg.rs"
 [[example]]
 name = "mfem_pex28_parallel_sliding_elasticity"
 path = "mfem_pex28_parallel_sliding_elasticity.rs"
+[[example]]
+name = "mfem_pex30_amr_preprocess"
+path = "mfem_pex30_amr_preprocess.rs"
 
 # ── Feature-gated examples ──
 
