@@ -17,7 +17,8 @@ fn main() {
     // Build mesh + track centroids
     let (mesh, centroids) = make_tri_strip_with_centroids(nx, ny.max(1), Lx, Ly);
 
-    let dg = DgEuler2D::with_order(mesh, order);
+    let mut dg = DgEuler2D::with_order(mesh, order);
+    dg.use_limiter = true; // enable limiter for shock capturing
     let dp = dg.dofs_per_elem();
     let n_elems = dg.n_dofs() / (dp * 4);
 
@@ -39,23 +40,8 @@ fn main() {
     println!("  h_min = {:.3e}, dt = {:.3e}, {} steps", h, dt_actual, n_steps);
 
     // SSP-RK3 time loop
-    for step in 0..n_steps.min(100) {
+    for step in 0..n_steps {
         dg.step_rk3(&mut u, dt_actual);
-        // Print state every 10 steps
-        if step % 10 == 0 || step == n_steps - 1 {
-            // Check min/max density and velocity
-            let mut rho_min = f64::MAX;
-            let mut rho_max = f64::MIN;
-            for e in 0..n_elems.min(20) {
-                for i in 0..dp {
-                    let rho = u[(e * dp + i) * 4];
-                    if rho < rho_min { rho_min = rho; }
-                    if rho > rho_max { rho_max = rho; }
-                }
-            }
-            eprintln!("  step={:>4} t={:.6e} ρ∈[{:.4e},{:.4e}]",
-                     step + 1, (step + 1) as f64 * dt_actual, rho_min, rho_max);
-        }
     }
 
     // Debug: print first few DOF values (always)

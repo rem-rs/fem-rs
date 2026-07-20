@@ -201,8 +201,8 @@ impl DgEuler2D {
                 for i in 0..dp { for c in 0..4 { uqp[c] += phi[i] * u[self.idx(e, c, i)]; }}
                 let fx = euler.flux_x(&uqp); let fy = euler.flux_y(&uqp);
                 for i in 0..dp {
-                    let gx = inv_j[0][0]*grad[i*dim] + inv_j[0][1]*grad[i*dim+1];
-                    let gy = inv_j[1][0]*grad[i*dim] + inv_j[1][1]*grad[i*dim+1];
+                    let gx = inv_j[0][0]*grad[i*dim] + inv_j[1][0]*grad[i*dim+1];
+                    let gy = inv_j[0][1]*grad[i*dim] + inv_j[1][1]*grad[i*dim+1];
                     for c in 0..4 { elem_vol[(i,c)] += vol * (fx[c]*gx + fy[c]*gy); }
                 }
             }
@@ -397,17 +397,70 @@ mod tests {
     }
 
     #[test]
+    fn p1_uniform_flow_rhs_trace() {
+        let dg = make_dg(2, 1); // 2×2 = 8 triangles
+        let u0 = dg.project_initial(&|_,_| (1.0, 0.0, 0.0, 1.0));
+        let du = dg.rhs(&u0);
+        let norm: f64 = du.iter().map(|v| v*v).sum::<f64>().sqrt();
+        eprintln!("  2×2: RHS norm = {:.6e}", norm);
+        // Print non-zero entries
+        for (i, &v) in du.iter().enumerate() {
+            if v.abs() > 1e-12 {
+                let dp = 3;
+                let e = i / (dp * 4);
+                let rem = i % (dp * 4);
+                let ld = rem / 4;
+                let c = rem % 4;
+                eprintln!("    du[{}] = {:.6e} (elem={}, ldof={}, comp={})", i, v, e, ld, c);
+            }
+        }
+        // Expect RHS to be ~0
+        assert!(norm < 1e-12, "RHS norm for uniform flow should be ~0, got {:.6e}", norm);
+    }
+
+    #[test]
     fn p1_uniform_flow_preserved_over_many_steps() {
         let dg = make_dg(4, 1);
-        // Uniform flow at rest: should be preserved by reflective BC
         let u0 = dg.project_initial(&|_,_| (1.0, 0.0, 0.0, 1.0));
+        
+        // Check if RHS is zero for uniform flow
+        let du = dg.rhs(&u0);
+        let norm: f64 = du.iter().map(|v| v*v).sum::<f64>().sqrt();
+        eprintln!("  RHS norm for uniform flow = {:.6e}", norm);
+        
+        if norm > 1e-14 {
+            // Find the max entry
+            let mut max_v = 0.0f64;
+            let mut max_i = 0usize;
+            for (i, &v) in du.iter().enumerate() {
+                if v.abs() > max_v.abs() {
+                    max_v = v;
+                    max_i = i;
+                }
+            }
+            let dp = dg.dofs_per_elem();
+            let e = max_i / (dp * 4);
+            let ld = (max_i % (dp * 4)) / 4;
+            let c = max_i % 4;
+            eprintln!("  Max RHS entry: du[{}] = {:.6e} (elem={}, ldof={}, comp={})",
+                     max_i, max_v, e, ld, c);
+        }
+        
         let mut u = u0.clone();
         let h = dg.h_min();
-        let dt = 0.1 * h / 3.0;  // safe CFL
-        for _ in 0..100 {
+        let dt = 0.1 * h / 3.0;
+        eprintln!("  h={:.6e}, dt={:.6e}", h, dt);
+        
+        for step in 0..100 {
             dg.step_rk3(&mut u, dt);
+            if step % 20 == 0 {
+                let du = dg.rhs(&u);
+                let norm: f64 = du.iter().map(|v| v*v).sum::<f64>().sqrt();
+                eprintln!("  step={}: RHS norm = {:.6e}, u[0] = {:.6e}", step, norm, u[0]);
+            }
         }
         let err: f64 = (0..dg.n_dofs()).map(|i| (u[i] - u0[i]).powi(2)).sum::<f64>().sqrt();
+        eprintln!("  Final error = {:.6e}", err);
         assert!(err < 1e-10, "uniform flow at rest should be steady, err={:.6e}", err);
     }
 }
