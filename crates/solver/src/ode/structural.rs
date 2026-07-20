@@ -417,6 +417,173 @@ impl GeneralizedAlpha {
     }
 }
 
+// ─── Central Difference Explicit (for lumped-mass explicit dynamics) ────────
+
+/// Explicit central difference method for second-order ODEs:
+///
+/// ```text
+///   M·a + C·v + K·u = f_ext(t)
+/// ```
+///
+/// With a **lumped (diagonal) mass matrix**, the acceleration solve is a
+/// simple scaling — no linear system required.  This is the method used
+/// by Abaqus/Explicit for crash / impact / large-deformation problems.
+///
+/// ## Algorithm (per step)
+///
+/// 1. Predict displacement:
+///    ```text
+///    u_{n+1} = u_n + Δt·v_n + (Δt²/2)·a_n
+///    ```
+///
+/// 2. Compute new acceleration via lumped mass:
+///    ```text
+///    a_{n+1} = M⁻¹ · f_total(t_{n+1}, u_{n+1}, v_n)
+///    ```
+///    where `f_total = f_ext - f_int - f_damp + f_contact`.
+///
+/// 3. Correct velocity:
+///    ```text
+///    v_{n+1} = v_n + Δt·((1−γ)·a_n + γ·a_{n+1})
+///    ```
+///    with `γ = 0.5` → trapezoidal (2nd order).
+///
+/// ## CFL stability
+///
+/// The method is conditionally stable.  The critical time step is:
+/// ```text
+/// Δt_crit = 2 / ω_max
+/// ```
+/// where `ω_max` is the highest natural frequency.  In practice use a safety
+/// factor `α ∈ [0.8, 0.98]` such that `Δt = α · Δt_crit`.
+///
+/// ## Abaqus equivalent
+/// - Explicit dynamics with central difference integration.
+/// - [`step`] is used inside an [`ExplicitDynamicsDriver`] that manages
+///   contact, mass lumping, and element force computation.
+pub struct CentralDifferenceExplicit {
+    /// Newmark γ parameter (default 0.5 = trapezoidal, 2nd order).
+    pub gamma: f64,
+}
+
+impl Default for CentralDifferenceExplicit {
+    fn default() -> Self {
+        CentralDifferenceExplicit { gamma: 0.5 }
+    }
+}
+
+/// State for the explicit central difference method: velocity + acceleration.
+pub struct ExplicitState {
+    pub vel: Vec<f64>,
+    pub acc: Vec<f64>,
+}
+
+impl ExplicitState {
+    pub fn new(n: usize) -> Self {
+        ExplicitState { vel: vec![0.0; n], acc: vec![0.0; n] }
+    }
+
+    /// Initialize acceleration from `M·a₀ = f_total₀`.
+    /// `mass_lumped` is the diagonal of the lumped mass matrix.
+    pub fn init_from(
+        vel: Vec<f64>,
+        mass_lumped: &[f64],
+        force_total: &[f64],
+    ) -> Self {
+        let n = vel.len();
+        let mut acc = vec![0.0; n];
+        for i in 0..n {
+            acc[i] = if mass_lumped[i].abs() > 1e-14 {
+                force_total[i] / mass_lumped[i]
+            } else {
+                0.0
+            };
+        }
+        ExplicitState { vel, acc }
+    }
+}
+
+impl CentralDifferenceExplicit {
+    /// Advance one explicit time step.
+    ///
+    /// Algorithm:
+    /// 1. Predict displacement: `u_{n+1} = u_n + Δt·v_n + (Δt²/2)·a_n`
+    /// 2. Call `force_fn(u_pred)` to compute total force at the predicted state
+    /// 3. Compute new acceleration: `a_{n+1} = M⁻¹ · force_total`
+    /// 4. Correct velocity: `v_{n+1} = v_n + Δt·((1−γ)·a_n + γ·a_{n+1})`
+    /// 5. Apply Dirichlet BCs
+    ///
+    /// # Arguments
+    /// * `mass_lumped` — diagonal entries of the lumped mass matrix
+    /// * `dt` — time step size
+    /// * `u` — displacement (mutated in-place: `u_n → u_{n+1}`)
+    /// * `state` — velocity and acceleration (mutated in-place)
+    /// * `bc_dofs` — Dirichlet DOFs to zero after the step
+    /// * `force_fn` — computes `f_total` at the predicted displacement `u_pred`
+    ///
+    /// The `force_fn` callback receives the predicted `u_pred` and must return
+    /// the total force vector `f_ext(t_{n+1}) - f_int(u_pred) + f_contact(u_pred)`.
+    /// This design lets the caller incorporate arbitrary forces (contact,
+    /// damping, nonlinear material) without the integrator knowing about them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step<F>(
+        &self,
+        mass_lumped: &[f64],
+        dt: f64,
+        u: &mut [f64],
+        state: &mut ExplicitState,
+        bc_dofs: &[u32],
+        force_fn: F,
+    ) where
+        F: Fn(&[f64]) -> Vec<f64>,
+    {
+        let n = u.len();
+        let g = self.gamma;
+        let half_dt2 = 0.5 * dt * dt;
+
+        // 1. Predict displacement
+        let mut u_pred = vec![0.0; n];
+        for i in 0..n {
+            u_pred[i] = u[i] + dt * state.vel[i] + half_dt2 * state.acc[i];
+        }
+
+        // Apply Dirichlet BCs to predicted displacement
+        for &d in bc_dofs {
+            u_pred[d as usize] = 0.0;
+        }
+
+        // 2. Compute total force at predicted state
+        let force_total = force_fn(&u_pred);
+
+        // 3. Write u = u_pred
+        u.copy_from_slice(&u_pred);
+
+        // 4. Compute new acceleration: a_{n+1} = M⁻¹ · f_total
+        let mut a_new = vec![0.0; n];
+        for i in 0..n {
+            a_new[i] = if mass_lumped[i].abs() > 1e-14 {
+                force_total[i] / mass_lumped[i]
+            } else {
+                0.0
+            };
+        }
+
+        // 5. Correct velocity: v_{n+1} = v_n + Δt·((1-γ)·a_n + γ·a_{n+1})
+        for i in 0..n {
+            state.vel[i] += dt * ((1.0 - g) * state.acc[i] + g * a_new[i]);
+        }
+
+        // 6. Apply Dirichlet BCs to velocity and acceleration
+        for &d in bc_dofs {
+            let d = d as usize;
+            state.vel[d] = 0.0;
+            a_new[d] = 0.0;
+        }
+
+        state.acc.copy_from_slice(&a_new);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +667,120 @@ mod tests {
             t += h;
         }
         assert!(v[0].abs() < 0.01, "GeneralizedAlpha stiff: did not decay; u={:.3e}", v[0]);
+    }
+
+    // ─── Central Difference Explicit tests ────────────────────────────────
+
+    #[test]
+    fn central_difference_free_vibration() {
+        // SDOF: m=1, k=π², ü + ω²·u = 0, u(0)=1, v(0)=0
+        let omega = std::f64::consts::PI;
+        let k = omega * omega;
+        let mass_lumped = vec![1.0_f64]; // lumped mass
+        let stiff_coo = {
+            let mut coo = CooMatrix::<f64>::new(1, 1);
+            coo.add(0, 0, k);
+            coo.into_csr()
+        };
+        let cd = CentralDifferenceExplicit::default();
+        let mut u = vec![1.0_f64];
+        let mut state = ExplicitState::new(1);
+        // initial acceleration: a₀ = M⁻¹(f₀ - K·u₀) = -ω²
+        state.acc[0] = -k;
+
+        let dt = 0.001; // << critical
+        let t_end = 1.0_f64;
+        let n_steps = (t_end / dt).round() as usize;
+        for _ in 0..n_steps {
+            let stiff = &stiff_coo;
+            cd.step(&mass_lumped, dt, &mut u, &mut state, &[], |u_pred| {
+                let mut ku = vec![0.0_f64; 1];
+                stiff.spmv(u_pred, &mut ku);
+                vec![-ku[0]]
+            });
+        }
+        let exact = (omega * t_end).cos();
+        let err = (u[0] - exact).abs();
+        // Central difference is 2nd-order accurate → small error
+        assert!(err < 0.001, "Central diff free vibration error={err:.4e} (exact={exact:.4})");
+    }
+
+    #[test]
+    fn central_difference_explicit_vs_newmark_beta0() {
+        // Compare CentralDifferenceExplicit against Newmark with β=0, γ=0.5
+        // (which is the same algorithm, but Newmark does a linear solve).
+        // For a lumped mass, the results should be identical.
+        let omega = 10.0_f64;
+        let k = omega * omega;
+        let mass_lumped = vec![1.0_f64; 1];
+        let mut mass_coo = CooMatrix::<f64>::new(1, 1);
+        mass_coo.add(0, 0, 1.0);
+        let mass = mass_coo.into_csr();
+        let mut stiff_coo = CooMatrix::<f64>::new(1, 1);
+        stiff_coo.add(0, 0, k);
+        let stiff = stiff_coo.into_csr();
+
+        let cd = CentralDifferenceExplicit::default();
+        let newmark = Newmark { beta: 0.0, gamma: 0.5 };
+
+        let dt = 0.001;
+        let t_end = 0.5_f64;
+        let n_steps = (t_end / dt).round() as usize;
+
+        // Run central difference
+        let mut u_cd = vec![1.0_f64];
+        let mut state_cd = ExplicitState::new(1);
+        state_cd.acc[0] = -k;
+
+        for _ in 0..n_steps {
+            let stiff = &stiff;
+            cd.step(&mass_lumped, dt, &mut u_cd, &mut state_cd, &[], |u_pred| {
+                let mut ku = vec![0.0_f64; 1];
+                stiff.spmv(u_pred, &mut ku);
+                vec![-ku[0]]
+            });
+        }
+
+        // Run Newmark β=0 (should solve M·a = f - K·u_pred, identical with lumped M)
+        let mut u_nm = vec![1.0_f64];
+        let mut state_nm = NewmarkState::new(1);
+        state_nm.acc[0] = -k;
+        let force = vec![0.0_f64];
+
+        for _ in 0..n_steps {
+            newmark.step(&mass, &stiff, &force, dt, &mut u_nm, &mut state_nm, &[]);
+        }
+
+        let diff = (u_cd[0] - u_nm[0]).abs();
+        assert!(diff < 1e-12, "Central diff vs Newmark β=0: diff={diff:.4e}");
+    }
+
+    #[test]
+    fn central_difference_bc() {
+        // DOF 0 is fixed (bc_dofs), DOF 1 is free.
+        // System: mass = diag([1, 1]), stiffness = diag([1e6, 0]).
+        // DOF 0 should stay at 0 despite initial displacement.
+        let mass_lumped = vec![1.0_f64, 1.0_f64];
+        let mut stiff_coo = CooMatrix::<f64>::new(2, 2);
+        stiff_coo.add(0, 0, 1e6_f64);
+        let stiff = stiff_coo.into_csr();
+
+        let cd = CentralDifferenceExplicit::default();
+        let mut u = vec![1.0_f64, 0.0_f64];
+        let mut state = ExplicitState::new(2);
+
+        let dt = 0.0001;
+        let bc_dofs = vec![0u32];
+        for _ in 0..10 {
+            let stiff = &stiff;
+            cd.step(&mass_lumped, dt, &mut u, &mut state, &bc_dofs, |u_pred| {
+                let mut ku = vec![0.0_f64; 2];
+                stiff.spmv(u_pred, &mut ku);
+                vec![-ku[0], -ku[1]]
+            });
+        }
+        assert!((u[0]).abs() < 1e-14, "BC DOF 0 should be zero, got {:.4e}", u[0]);
+        assert!((state.vel[0]).abs() < 1e-14, "BC vel[0] should be zero");
+        assert!((state.acc[0]).abs() < 1e-14, "BC acc[0] should be zero");
     }
 }

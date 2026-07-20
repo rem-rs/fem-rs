@@ -130,6 +130,10 @@ pub use xfem::*;
 pub mod contact;
 pub use contact::*;
 
+pub mod explicit_dynamics;
+
+pub mod umat_integration;
+
 /// Isogeometric Analysis (IGA).
 pub mod iga;
 pub use iga::*;

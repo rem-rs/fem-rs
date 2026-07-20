@@ -79,7 +79,7 @@ pub fn closest_point_on_segment(p: &[f64; 2], a: &[f64; 2], b: &[f64; 2]) -> ([f
 
 /// Segment bounding box for spatial search.
 #[derive(Debug, Clone, Copy)]
-struct SegmentBox {
+pub(crate) struct SegmentBox {
     seg_idx: usize,
     xmin: f64,
     xmax: f64,
@@ -90,7 +90,7 @@ struct SegmentBox {
 }
 
 /// Build a simple spatial hash for master boundary segments.
-fn build_segment_index<M: MeshTopology>(
+pub(crate) fn build_segment_index<M: MeshTopology>(
     master_mesh: &M,
     master_contact_tags: &[i32],
 ) -> Vec<SegmentBox> {
@@ -121,7 +121,7 @@ fn build_segment_index<M: MeshTopology>(
 }
 
 /// Find the closest master segment to a slave point.
-fn find_closest_segment(
+pub(crate) fn find_closest_segment(
     p: &[f64; 2],
     segments: &[SegmentBox],
     search_dist: f64,
