@@ -128,9 +128,10 @@ pub use xfem::*;
 
 /// Contact mechanics (Signorini, friction, mortar, Nitsche).
 pub mod contact;
+pub mod explicit_dynamics;
+pub mod explicit_j2;
 pub use contact::*;
 
-pub mod explicit_dynamics;
 
 pub mod umat_integration;
 

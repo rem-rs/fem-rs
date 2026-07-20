@@ -1105,8 +1105,24 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                 // ── Deformation gradient F = I + ∇u ──
                 let f = Self::def_grad(&u_elem, &gphys, dim, n_ldofs);
 
+                // NaN check
+                for i in 0..dim {
+                    for j in 0..dim {
+                        if f[(i,j)].is_nan() || f[(i,j)].is_infinite() {
+                            eprintln!("  [F NaN] elem={e} qp={q} F[{}][{}]={}", i, j, f[(i,j)]);
+                            eprintln!("    u_elem: {:?}", &u_elem[..n_vec.min(12)]);
+                            eprintln!("    gphys: {:?}", &gphys[..n_vec.min(12)]);
+                            return (f_vec, coo.into_csr());
+                        }
+                    }
+                }
+
                 // ── Green–Lagrange strain E = ½(FᵀF − I) ──
                 let e_strain = Self::green_lagrange(&f);
+                if e_strain.iter().any(|v| v.is_nan() || v.is_infinite()) {
+                    eprintln!("  [E NaN] elem={e} qp={q}, e_strain={:?}", e_strain);
+                    return (f_vec, coo.into_csr());
+                }
                 let mut e_strain_prev = vec![0.0; n_comp];
                 let si = self.qp_state_idx(el, q);
                 let alpha_prev = state[si][6];
@@ -1128,6 +1144,11 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                         s_trial[i] += c_e[(i, j)] * e_trial[j];
                     }
                 }
+                if s_trial.iter().any(|v| v.is_nan() || v.is_infinite()) {
+                    eprintln!("  [S NaN] elem={e} qp={q}, s_trial={:?}, e_trial={:?}, c_e diag={:?}",
+                        s_trial, e_trial, (0..n_comp).map(|i| c_e[(i,i)]).collect::<Vec<_>>());
+                    return (f_vec, coo.into_csr());
+                }
 
                 // Deviatoric trial stress
                 let tr = if is_2d { s_trial[0] + s_trial[1] }
@@ -1140,8 +1161,24 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                 if is_2d { s_dev[2] = s_trial[2]; }
                 else { s_dev[3..6].copy_from_slice(&s_trial[3..6]); }
 
-                let eta_norm = (s_dev.iter().map(|v| v * v).sum::<f64>()
-                    + 0.0).sqrt(); // full norm already summed over all comps
+                let eta_norm = {
+                    let sq = if is_2d {
+                        // Plane strain: include out-of-plane s'_zz = -(s'_xx + s'_yy)
+                        // and factor 2 for shear in Voigt notation.
+                        let s_zz = -(s_dev[0] + s_dev[1]);
+                        s_dev[0] * s_dev[0] + s_dev[1] * s_dev[1]
+                            + s_zz * s_zz
+                            + 2.0 * s_dev[2] * s_dev[2]
+                    } else {
+                        // 3D: factor 2 for shear components in Voigt notation
+                        s_dev[0] * s_dev[0] + s_dev[1] * s_dev[1]
+                            + s_dev[2] * s_dev[2]
+                            + 2.0 * (s_dev[3] * s_dev[3]
+                                   + s_dev[4] * s_dev[4]
+                                   + s_dev[5] * s_dev[5])
+                    };
+                    sq.sqrt().max(1e-300)
+                };
 
                 let mut alpha_new = alpha_prev;
                 let mut dgamma = 0.0_f64;
@@ -1168,6 +1205,13 @@ impl<M: MeshTopology> FiniteStrainPlasticity<M> {
                     }
                     if is_2d { s_ep[2] = s_new[2]; }
                     else { s_ep[3..6].copy_from_slice(&s_new[3..6]); }
+
+                    if s_ep.iter().any(|v| v.is_nan() || v.is_infinite()) {
+                        eprintln!("  [s_ep NaN] elem={e} qp={q}, factor={}, dgamma={}, eta_norm={}",
+                            factor, dgamma, eta_norm);
+                        eprintln!("    s_dev={:?}, s_new={:?}", s_dev, s_new);
+                        return (f_vec, coo.into_csr());
+                    }
 
                     // Consistent tangent (material part) — beta reserved for fully consistent tangent
                     let _beta = 2.0 * mu * (1.0 - 2.0 * mu * dgamma / eta_norm.max(1e-300));

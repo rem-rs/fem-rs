@@ -647,6 +647,10 @@ name = "fem_examples"
 
 
 [[example]]
+name = "taylor_bar_impact"
+path = "extra/taylor_bar_impact.rs"
+
+[[example]]
 name = "mfem_ex40_eikonal"
 path = "mfem_ex40_eikonal.rs"
 
