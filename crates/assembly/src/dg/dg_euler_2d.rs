@@ -40,9 +40,93 @@ impl Euler2D {
         let a=self.max_speed(ql).max(self.max_speed(qr));
         let mut f=[0.0;4]; for i in 0..4 { f[i]=0.5*(fl[i]+fr[i])-0.5*a*(qr[i]-ql[i]); } f
     }
+    pub fn roe_flux(&self, ql: &[f64; 4], qr: &[f64; 4], n: &[f64; 2]) -> [f64; 4] {
+        let g = self.gamma;
+        let (nx, ny) = (n[0], n[1]);
+        let (rl, ul, vl, pl) = self.cons_to_prim(ql);
+        let (rr, ur, vr, pr) = self.cons_to_prim(qr);
+        let hl = (ql[3] + pl) / rl;
+        let hr = (qr[3] + pr) / rr;
+        let srl = rl.sqrt(); let srr = rr.sqrt(); let isum = 1.0 / (srl + srr);
+        let u_h = (srl*ul + srr*ur) * isum;
+        let v_h = (srl*vl + srr*vr) * isum;
+        let h_h = (srl*hl + srr*hr) * isum;
+        let q2 = u_h*u_h + v_h*v_h;
+        let a2 = ((g - 1.0) * (h_h - 0.5*q2)).max(1e-14);
+        let a_h = a2.sqrt();
+        let vn_h = u_h*nx + v_h*ny;
+        let lam1 = vn_h - a_h; let lam2 = vn_h; let lam3 = vn_h + a_h;
+        let eps = 0.1 * a_h;
+        let fix = |l: f64| if l.abs() < eps { (l*l + eps*eps) / (2.0*eps) } else { l.abs() };
+        let (a1, a2, a3) = (fix(lam1), fix(lam2), fix(lam3));
+        let dr  = qr[0] - ql[0]; let dru = qr[1] - ql[1];
+        let drv = qr[2] - ql[2]; let dre = qr[3] - ql[3];
+        let dvs = dr - (qr[3] - qr[1]*ur - qr[2]*vr + pr/(g-1.0)) / (a_h*a_h) + (ql[3] - ql[1]*ul - ql[2]*vl + pl/(g-1.0)) / (a_h*a_h);
+        let dp = (qr[3] - qr[1]*ur - qr[2]*vr + pr/(g-1.0)) - (ql[3] - ql[1]*ul - ql[2]*vl + pl/(g-1.0));
+        let alpha1 = 0.5 * (dvs + dp / a_h) / a_h;
+        let alpha2 = dr - dp / (a_h*a_h);
+        let alpha3 = 0.5 * (dvs - dp / a_h) / a_h;
+        let r1 = [1.0, u_h - a_h*nx, v_h - a_h*ny, h_h - a_h*vn_h];
+        let r2 = [1.0, u_h, v_h, 0.5*q2 + h_h];
+        let r3 = [1.0, u_h + a_h*nx, v_h + a_h*ny, h_h + a_h*vn_h];
+        let fl = self.flux_n(ql, n); let fr = self.flux_n(qr, n);
+        let mut f = [0.0; 4];
+        for i in 0..4 {
+            f[i] = 0.5*(fl[i]+fr[i]) - 0.5*(a1*alpha1*r1[i] + a2*alpha2*r2[i] + a3*alpha3*r3[i]);
+        }
+        f
+    }
+    pub fn hllc_flux(&self, ql: &[f64; 4], qr: &[f64; 4], n: &[f64; 2]) -> [f64; 4] {
+        let g = self.gamma;
+        let (nx, ny) = (n[0], n[1]);
+        let (rl, ul, vl, pl) = self.cons_to_prim(ql);
+        let (rr, ur, vr, pr) = self.cons_to_prim(qr);
+        let al = (g*pl/rl).sqrt(); let ar = (g*pr/rr).sqrt();
+        let unl = ul*nx + vl*ny; let unr = ur*nx + vr*ny;
+        let rl_sqrt = rl.sqrt(); let rr_sqrt = rr.sqrt();
+        let u_tilde = (rl_sqrt*unl + rr_sqrt*unr) / (rl_sqrt + rr_sqrt);
+        let a_tilde = ((rl_sqrt*al + rr_sqrt*ar) / (rl_sqrt + rr_sqrt)
+                     + 0.5*(unl - unr).abs()).max(1e-14);
+        let s_l = (u_tilde - a_tilde).min(unl - al);
+        let s_r = (u_tilde + a_tilde).max(unr + ar);
+        let s_m = (pr - pl + rl*unl*(s_l - unl) - rr*unr*(s_r - unr))
+                / (rl*(s_l - unl) - rr*(s_r - unr)).max(1e-14);
+        let fl = self.flux_n(ql, n);
+        let fr = self.flux_n(qr, n);
+        if s_l >= 0.0 { return fl; }
+        if s_r <= 0.0 { return fr; }
+        if s_m >= 0.0 {
+            let fact = rl*(s_l - unl) / (s_l - s_m);
+            let mut qs = *ql;
+            qs[0] = fact;
+            qs[1] = fact * s_m * nx + ql[1] - rl*unl*nx;
+            qs[2] = fact * s_m * ny + ql[2] - rl*unl*ny;
+            qs[3] = fact * (ql[3]/rl + (s_m - unl)*(s_m + pl/(rl*(s_l - unl))));
+            let mut f = fl;
+            for i in 0..4 { f[i] += s_l * (qs[i] - ql[i]); }
+            f
+        } else {
+            let fact = rr*(s_r - unr) / (s_r - s_m);
+            let mut qs = *qr;
+            qs[0] = fact;
+            qs[1] = fact * s_m * nx + qr[1] - rr*unr*nx;
+            qs[2] = fact * s_m * ny + qr[2] - rr*unr*ny;
+            qs[3] = fact * (qr[3]/rr + (s_m - unr)*(s_m + pr/(rr*(s_r - unr))));
+            let mut f = fr;
+            for i in 0..4 { f[i] += s_r * (qs[i] - qr[i]); }
+            f
+        }
+    }
 }
 
-/// DG solver for 2-D Euler equations supporting arbitrary polynomial order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EulerFluxKind {
+    #[default]
+    LaxFriedrichs,
+    Roe,
+    Hllc,
+}
+
 pub struct DgEuler2D {
     mesh: Box<dyn MeshTopology + Send + Sync>,
     euler: Euler2D,
@@ -52,6 +136,7 @@ pub struct DgEuler2D {
     dofs_per_elem: usize,
     pub use_limiter: bool,
     pub periodic: bool,
+    pub flux_kind: EulerFluxKind,
 }
 
 impl DgEuler2D {
@@ -62,7 +147,7 @@ impl DgEuler2D {
         let re = ref_elem_vol(et, order);
         let dofs_per_elem = re.n_dofs();
         let n_dofs = n_elems * dofs_per_elem * 4;
-        Self { mesh: Box::new(mesh), euler: Euler2D::default(), n_elems, n_dofs, order, dofs_per_elem, use_limiter: false, periodic: false }
+        Self { mesh: Box::new(mesh), euler: Euler2D::default(), n_elems, n_dofs, order, dofs_per_elem, use_limiter: false, periodic: false, flux_kind: EulerFluxKind::default() }
     }
     pub fn n_dofs(&self) -> usize { self.n_dofs }
     pub fn dofs_per_elem(&self) -> usize { self.dofs_per_elem }
@@ -142,7 +227,11 @@ impl DgEuler2D {
                 for i in 0..dp { for c in 0..4 { ul[c] += phi[i] * u[self.idx(el, c, i)]; }}
                 re.eval_basis(&xi_r, &mut phi); let mut ur = [0.0; 4];
                 for i in 0..dp { for c in 0..4 { ur[c] += phi[i] * u[self.idx(er, c, i)]; }}
-                let fstar = euler.lax_friedrichs_flux(&ul, &ur, &[nx, ny]);
+                let fstar = match self.flux_kind {
+                    EulerFluxKind::LaxFriedrichs => euler.lax_friedrichs_flux(&ul, &ur, &[nx, ny]),
+                    EulerFluxKind::Roe => euler.roe_flux(&ul, &ur, &[nx, ny]),
+                    EulerFluxKind::Hllc => euler.hllc_flux(&ul, &ur, &[nx, ny]),
+                };
                 re.eval_basis(&xi_l, &mut phi);
                 for i in 0..dp { for c in 0..4 { du[self.idx(el, c, i)] -= w * phi[i] * fstar[c]; }}
                 re.eval_basis(&xi_r, &mut phi);
@@ -170,7 +259,11 @@ impl DgEuler2D {
                         let (r, uv, vv, p) = euler.cons_to_prim(&uqp);
                         let un = uv*nx+vv*ny;
                         let qref = euler.prim_to_cons(r, uv-2.*un*nx, vv-2.*un*ny, p);
-                        let fstar = euler.lax_friedrichs_flux(&uqp, &qref, &[nx, ny]);
+                        let fstar = match self.flux_kind {
+                            EulerFluxKind::LaxFriedrichs => euler.lax_friedrichs_flux(&uqp, &qref, &[nx, ny]),
+                            EulerFluxKind::Roe => euler.roe_flux(&uqp, &qref, &[nx, ny]),
+                            EulerFluxKind::Hllc => euler.hllc_flux(&uqp, &qref, &[nx, ny]),
+                        };
                         for i in 0..dp { for c in 0..4 { du[self.idx(e, c, i)] -= w * phi[i] * fstar[c]; }}
                     }
                 }
