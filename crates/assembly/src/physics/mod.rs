@@ -1,6 +1,7 @@
 pub mod adjoint_pde;
 pub mod cr_stokes;
 pub mod cutfem;
+pub mod fluid_cfd;
 pub mod fsi;
 pub mod hyperbolic;
 pub mod navier_stokes;
