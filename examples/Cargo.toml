@@ -654,6 +654,11 @@ path = "extra/taylor_bar_impact.rs"
 [[example]]
 name = "taylor_bar_impact_3d"
 path = "extra/taylor_bar_impact_3d.rs"
+
+[[example]]
+name = "dg_sod_shocktube"
+path = "extra/dg_sod_shocktube.rs"
+
 [[example]]
 name = "mfem_ex40_eikonal"
 path = "mfem_ex40_eikonal.rs"
