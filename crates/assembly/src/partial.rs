@@ -244,10 +244,34 @@ impl<S: FESpace> LumpedMassOperator<S> {
             let quad = re.quadrature(quad_order);
             let gd: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
             let nodes = mesh.element_nodes(e);
-            let (_, det_j) = simplex_jac(mesh, nodes, dim);
+            let is_iso = matches!(et, ElementType::Quad4 | ElementType::Hex8);
+            let (_, det_j_simplex) = if is_iso { (DMatrix::zeros(1,1), 1.0) } else { simplex_jac(mesh, nodes, dim) };
             phi.resize(nl, 0.0);
 
             for (qi, xi) in quad.points.iter().enumerate() {
+                let det_j = if is_iso {
+                    let geo = geo_ref_elem(et).expect("geo_ref_elem for Quad4/Hex8");
+                    let mut ref_grad = vec![0.0; nl * dim];
+                    geo.eval_grad_basis(xi, &mut ref_grad);
+                    let mut jac = vec![0.0; dim * dim];
+                    for k in 0..nl {
+                        let c = mesh.node_coords(nodes[k]);
+                        for i in 0..dim {
+                            for j in 0..dim {
+                                jac[i * dim + j] += c[i] * ref_grad[k * dim + j];
+                            }
+                        }
+                    }
+                    if dim == 2 {
+                        jac[0] * jac[3] - jac[1] * jac[2]
+                    } else {
+                        jac[0]*(jac[4]*jac[8]-jac[5]*jac[7])
+                        - jac[1]*(jac[3]*jac[8]-jac[5]*jac[6])
+                        + jac[2]*(jac[3]*jac[7]-jac[4]*jac[6])
+                    }
+                } else {
+                    det_j_simplex
+                };
                 let w = quad.weights[qi] * det_j.abs();
                 re.eval_basis(xi, &mut phi);
                 let phi_sum: f64 = phi.iter().sum();
@@ -289,6 +313,10 @@ fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
+        (ElementType::Quad4, 1) => Box::new(fem_element::lagrange::QuadQ1),
+        (ElementType::Quad4, 2) => Box::new(fem_element::lagrange::QuadQ2),
+        (ElementType::Hex8, 1) => Box::new(fem_element::lagrange::hex::HexQ1),
+        (ElementType::Hex8, 2) => Box::new(fem_element::lagrange::hex::HexQ2),
         _ => panic!("partial ref_elem: unsupported ({et:?}, {order})"),
     }
 }

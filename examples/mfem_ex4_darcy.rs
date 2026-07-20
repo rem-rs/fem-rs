@@ -35,7 +35,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_solver::{solve_pcg_precond, SolverConfig};
+use fem_solver::{SolverConfig};
 use fem_space::{
     HDivSpace,
     fe_space::FESpace,
@@ -231,16 +231,13 @@ fn main() {
         println!("Hybridized system: {n_trace}×{n_trace}");
 
         let sol_r = if n_trace > 0 {
-            let linlvo_h = fem_linalg::fem_to_linlvo_csr(h_mat);
-            let h_precond = fem_solver::GSSmoother::from_csr(&linlvo_h, 1.0)
-                .expect("GSSmoother for H");
             let cfg_h = SolverConfig {
                 rtol: 1e-10, max_iter: 500, verbose: false,
                 ..SolverConfig::default()
             };
             let mut sr = vec![0.0; n_trace];
-            let res = solve_pcg_precond(h_mat, &b_r, &mut sr, &h_precond, &cfg_h)
-                .expect("Hybridized PCG solve");
+            let res = fem_solver::solve_pcg_gssmoother(h_mat, &b_r, &mut sr, &cfg_h)
+                .expect("Hybridized PCG+GSSmoother solve");
             println!("  PCG+GSSmoother (trace): {} iters, ||r||/||b|| = {:.3e}",
                 res.iterations, res.final_residual);
             sr
@@ -276,9 +273,6 @@ fn main() {
         let n_sys = sys_mat.nrows;
         println!("Size of linear system: {n_sys}");
 
-        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
-        let precond = fem_solver::GSSmoother::from_csr(&linlvo_mat, 1.0)
-            .expect("SSOR preconditioner setup failed");
         let mut x_red = vec![0.0_f64; n_sys];
         let cfg = SolverConfig {
             rtol: 1e-10,
@@ -286,8 +280,8 @@ fn main() {
             verbose: false,
             ..SolverConfig::default()
         };
-        let result = solve_pcg_precond(&sys_mat, &sys_rhs, &mut x_red, &precond, &cfg)
-            .expect("PCG solve failed");
+        let result = fem_solver::solve_pcg_gssmoother(&sys_mat, &sys_rhs, &mut x_red, &cfg)
+            .expect("PCG+GSSmoother solve failed");
         println!(
             "PCG+GSSmoother: {} iterations, ||r||/||b|| = {:.3e}",
             result.iterations, result.final_residual,
@@ -573,9 +567,6 @@ mod tests {
             (mat, rhs, free, vec![], vec![])
         };
 
-        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&sys_mat);
-        let precond = fem_solver::GSSmoother::from_csr(&linlvo_mat, 1.0)
-            .expect("SSOR preconditioner setup failed");
         let mut x_red = vec![0.0_f64; sys_mat.nrows];
         let cfg = SolverConfig {
             rtol: 1e-10,
@@ -583,8 +574,8 @@ mod tests {
             verbose: false,
             ..SolverConfig::default()
         };
-        fem_solver::solve_pcg_precond(&sys_mat, &sys_rhs, &mut x_red, &precond, &cfg)
-            .expect("PCG solve failed");
+        fem_solver::solve_pcg_gssmoother(&sys_mat, &sys_rhs, &mut x_red, &cfg)
+            .expect("PCG+GSSmoother solve failed");
 
         let u = if !ess_bdr.is_empty() {
             expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
