@@ -55,8 +55,10 @@ impl<M: MeshTopology + Clone> TransientNsDriver<M> {
         let bt = b.transpose();
 
         // Velocity mass (block-diagonal from scalar mass)
+        // Build on the velocity scalar space (same order as vel_space)
+        let scalar_space = fem_space::H1Space::new(vel_space.mesh().clone(), vel_order);
         let scalar_mass = Assembler::assemble_bilinear(
-            &pres_space, &[&MassIntegrator { rho: 1.0 }], q);
+            &scalar_space, &[&MassIntegrator { rho: 1.0 }], q);
         let mut m_coo = CooMatrix::new(n_v, n_v);
         for c in 0..2 {
             let off = c * n_s;
@@ -152,6 +154,7 @@ impl<M: MeshTopology + Clone> TransientNsDriver<M> {
             }
         }
         for r in 0..n_p {
+            sys_coo.add(n_v + r, n_v + r, 1e-6); // pressure regularization
             for k in self.b.row_ptr[r]..self.b.row_ptr[r + 1] {
                 let col = self.b.col_idx[k] as usize;
                 let v = self.b.values[k];

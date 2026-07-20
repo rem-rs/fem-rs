@@ -701,3 +701,10 @@ path = "mfem_pex36_obstacle.rs"
 [[example]]
 name = "mfem_pex40_eikonal"
 path = "mfem_pex40_eikonal.rs"
+
+[[example]]
+name = "cfd_cavity"
+path = "cfd_cavity.rs"
+[[example]]
+name = "cfd_cavity_transient"
+path = "cfd_cavity_transient.rs"
