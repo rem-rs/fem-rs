@@ -1,3 +1,12 @@
+
+[[example]]
+name = "iga_linear_elasticity"
+path = "extra/iga_linear_elasticity.rs"
+
+[[example]]
+name = "iga_wave_equation"
+path = "extra/iga_wave_equation.rs"
+
 [features]
 default = []
 gpu = ["fem-solver/gpu", "fem-linalg-gpu", "wgpu", "bytemuck"]
