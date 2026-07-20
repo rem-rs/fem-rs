@@ -20,6 +20,7 @@ pub use dg_cdr::*;
 pub use dg_curved::*;
 pub use dg_elasticity::*;
 pub use dg_hyperbolic::*;
+#[allow(ambiguous_glob_reexports)]
 pub use dg_euler_2d::*;
 pub use dg_euler_3d::*;
 pub use dg_framework::*;

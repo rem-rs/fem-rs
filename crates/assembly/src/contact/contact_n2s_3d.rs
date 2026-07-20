@@ -552,7 +552,7 @@ pub fn assemble_general_contact_3d<M: MeshTopology>(
 
         // Merge
         let mut f_total = f_contact;
-        let mut k_total = k_contact;
+        let k_total = k_contact;
         for i in 0..f_total.len() {
             f_total[i] += f_self[i];
         }
@@ -578,8 +578,8 @@ fn assemble_self_contact_3d(
     cfg: &N2SContactConfig3D,
     n_total_dofs: usize,
 ) -> (Vec<f64>, CooMatrix<f64>) {
-    let mut f_self = vec![0.0_f64; n_total_dofs];
-    let mut k_self = CooMatrix::new(n_total_dofs, n_total_dofs);
+    let f_self = vec![0.0_f64; n_total_dofs];
+    let k_self = CooMatrix::new(n_total_dofs, n_total_dofs);
     let has_friction = cfg.mu > 0.0 && cfg.eps_t > 0.0 && u.is_some();
     let u_vec = u.unwrap_or(&[]);
 
