@@ -42,6 +42,7 @@ pub mod material;
 pub mod point;
 pub mod scalar;
 pub mod types;
+pub mod units;
 pub mod util;
 
 // Flat re-exports for ergonomic use: `use fem_core::*` in other crates.
