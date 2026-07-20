@@ -39,13 +39,24 @@ fn main() {
     println!("  h_min = {:.3e}, dt = {:.3e}, {} steps", h, dt_actual, n_steps);
 
     // SSP-RK3 time loop
-    for step in 0..n_steps {
+    for step in 0..n_steps.min(100) {
         dg.step_rk3(&mut u, dt_actual);
-        if !no_vis && (step + 1) % (n_steps.max(1) / 5).max(1) == 0 {
-            eprint!("\r  Step {:>5}/{}", step + 1, n_steps);
+        // Print state every 10 steps
+        if step % 10 == 0 || step == n_steps - 1 {
+            // Check min/max density and velocity
+            let mut rho_min = f64::MAX;
+            let mut rho_max = f64::MIN;
+            for e in 0..n_elems.min(20) {
+                for i in 0..dp {
+                    let rho = u[(e * dp + i) * 4];
+                    if rho < rho_min { rho_min = rho; }
+                    if rho > rho_max { rho_max = rho; }
+                }
+            }
+            eprintln!("  step={:>4} t={:.6e} ρ∈[{:.4e},{:.4e}]",
+                     step + 1, (step + 1) as f64 * dt_actual, rho_min, rho_max);
         }
     }
-    if !no_vis { eprintln!(); }
 
     // Debug: print first few DOF values (always)
     for i in 0..10.min(u.len()) {

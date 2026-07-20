@@ -395,4 +395,19 @@ mod tests {
         let dg2 = make_dg(6, 2);
         assert!(dg2.n_dofs() > dg1.n_dofs());
     }
+
+    #[test]
+    fn p1_uniform_flow_preserved_over_many_steps() {
+        let dg = make_dg(4, 1);
+        // Uniform flow at rest: should be preserved by reflective BC
+        let u0 = dg.project_initial(&|_,_| (1.0, 0.0, 0.0, 1.0));
+        let mut u = u0.clone();
+        let h = dg.h_min();
+        let dt = 0.1 * h / 3.0;  // safe CFL
+        for _ in 0..100 {
+            dg.step_rk3(&mut u, dt);
+        }
+        let err: f64 = (0..dg.n_dofs()).map(|i| (u[i] - u0[i]).powi(2)).sum::<f64>().sqrt();
+        assert!(err < 1e-10, "uniform flow at rest should be steady, err={:.6e}", err);
+    }
 }
