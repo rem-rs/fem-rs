@@ -43,11 +43,13 @@ pub use curved::{CurvedMesh, JacobianCache, CurvedElementTransformation, refine_
 pub use element_type::ElementType;
 pub use lor::LorMesh;
 pub use moving_mesh::{
-	MeshMotionConfig,
-	all_boundary_nodes,
-	apply_node_displacement,
-	boundary_nodes_with_tags,
-	laplacian_smooth_2d,
+    MeshMotionConfig,
+    all_boundary_nodes,
+    apply_node_displacement,
+    boundary_nodes_with_tags,
+    laplacian_smooth,
+    laplacian_smooth_2d,
+    laplacian_smooth_3d,
 };
 pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPointLocator};
 pub use simplex::{Mesh, tet_volume};

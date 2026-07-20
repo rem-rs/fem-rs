@@ -91,6 +91,8 @@ mod direct;
 pub use iterative::*;
 pub use precond::*;
 pub use direct::*;
+pub use newton::{NewtonRaphsonConfig, NewtonResult, NewtonStopReason, solve_newton, solve_newton_lu};
+
 pub use cached::{CachedPrecond, CachedSolver};
 
 // ─── Additional sub-modules ──────────────────────────────────────────────────
@@ -106,6 +108,7 @@ pub mod chebyshev;
 pub mod constrained_operator;
 pub mod geometric_mg;
 pub mod p_multigrid;
+pub mod newton;
 pub mod multirate;
 pub mod multiphysics_sync;
 pub mod multiphysics;

@@ -68,6 +68,7 @@
 //!   crates.
 
 pub mod amr_mf;
+pub mod amr_adaptive;
 pub mod assembler;
 pub mod backend;
 pub mod complex;
