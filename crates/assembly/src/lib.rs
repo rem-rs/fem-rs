@@ -125,8 +125,6 @@ pub mod wg;
 pub use wg::*;
 
 /// eXtended Finite Element Method (XFEM).
-pub mod xfem;
-pub use xfem::*;
 
 /// Contact mechanics (Signorini, friction, mortar, Nitsche).
 pub mod contact;
