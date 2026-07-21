@@ -324,12 +324,3 @@ path = "mfem_miniapp_tesla.rs"
 [[example]]
 name = "mfem_miniapp_volta"
 path = "mfem_miniapp_volta.rs"
-[[example]]
-name = "mfem_absorbing_maxwell"
-path = "mfem_absorbing_maxwell.rs"
-[[example]]
-name = "mfem_impedance_maxwell"
-path = "mfem_impedance_maxwell.rs"
-[[example]]
-name = "mfem_tmop_mesh_quality"
-path = "mfem_tmop_mesh_quality.rs"
