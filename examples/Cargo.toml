@@ -309,3 +309,27 @@ path = "mfem_pex8_parallel_p_multigrid.rs"
 [[example]]
 name = "mfem_pex9_parallel_dg_advection"
 path = "mfem_pex9_parallel_dg_advection.rs"
+[[example]]
+name = "mfem_miniapp_joule"
+path = "mfem_miniapp_joule.rs"
+[[example]]
+name = "mfem_miniapp_lorentz"
+path = "mfem_miniapp_lorentz.rs"
+[[example]]
+name = "mfem_miniapp_maxwell"
+path = "mfem_miniapp_maxwell.rs"
+[[example]]
+name = "mfem_miniapp_tesla"
+path = "mfem_miniapp_tesla.rs"
+[[example]]
+name = "mfem_miniapp_volta"
+path = "mfem_miniapp_volta.rs"
+[[example]]
+name = "mfem_absorbing_maxwell"
+path = "mfem_absorbing_maxwell.rs"
+[[example]]
+name = "mfem_impedance_maxwell"
+path = "mfem_impedance_maxwell.rs"
+[[example]]
+name = "mfem_tmop_mesh_quality"
+path = "mfem_tmop_mesh_quality.rs"
