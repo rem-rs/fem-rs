@@ -329,6 +329,10 @@ pub fn assemble_oseen_block<M: MeshTopology + Clone>(
 /// where r_u = f_vel - A_oseen·u_curr - Bᵀ·p_curr  and  r_p = f_pres - B·u_curr
 ///
 /// Returns (Δu, Δp) such that u_{k+1} = u_k + Δu, p_{k+1} = p_k + Δp.
+///
+/// When `mp` (pressure mass matrix) is provided, uses block-triangular
+/// preconditioned GMRES (StokesPrecond) for faster convergence.
+/// Without `mp`, falls back to plain GMRES on the flat system.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_oseen_step(
     a_oseen: &CsrMatrix<f64>,
@@ -339,6 +343,7 @@ pub fn solve_oseen_step(
     u_curr: &[f64],
     p_curr: &[f64],
     cfg: &fem_solver::SolverConfig,
+    mp: Option<&CsrMatrix<f64>>,
 ) -> Result<(Vec<f64>, Vec<f64>), fem_solver::SolverError> {
     let n_u = a_oseen.nrows;
     let n_p = b.nrows;
@@ -352,20 +357,42 @@ pub fn solve_oseen_step(
     for i in 0..n_u { r_u[i] = f_vel[i] - r_u[i]; }
     for i in 0..n_p { r_p[i] = f_pres[i] - r_p[i]; }
 
-    // Build flat saddle-point system [A Bᵀ; B 0] and solve with GMRES.
-    // Block-preconditioned GMRES is planned but plain GMRES with a moderate
-    // mesh works for low-to-moderate Re with sufficient iterations.
     let sys = fem_solver::BlockSystem { a: a_oseen.clone(), bt: bt.clone(), b: b.clone(), c: None };
     let n_total = n_u + n_p;
-    let flat = sys.to_flat_csr();
-    let mut rhs_flat = vec![0.0; n_total];
-    rhs_flat[..n_u].copy_from_slice(&r_u);
-    rhs_flat[n_u..].copy_from_slice(&r_p);
 
-    let mut x = vec![0.0; n_total];
-    fem_solver::solve_gmres(&flat, &rhs_flat, &mut x, 200, cfg)?;
+    if let Some(mp_mat) = mp {
+        // Block-triangular preconditioned GMRES (StokesPrecond)
+        use fem_solver::stokes_precond::StokesPrecond;
+        use fem_solver::block_operator::right_preconditioned_gmres;
 
-    Ok((x[..n_u].to_vec(), x[n_u..].to_vec()))
+        let precond = StokesPrecond::new(&sys, mp_mat.clone());
+        let flat = sys.to_flat_csr();
+        let mut rhs_flat = vec![0.0; n_total];
+        rhs_flat[..n_u].copy_from_slice(&r_u);
+        rhs_flat[n_u..].copy_from_slice(&r_p);
+
+        let mut x = vec![0.0; n_total];
+        right_preconditioned_gmres(&flat, &rhs_flat, &mut x, 200, cfg, |r, z| {
+            let (ru, rp) = r.split_at(n_u);
+            let (zu, zp) = z.split_at_mut(n_u);
+            let mut zu_owned = vec![0.0; n_u];
+            let mut zp_owned = vec![0.0; n_p];
+            if precond.apply(ru, rp, &mut zu_owned, &mut zp_owned).is_ok() {
+                zu.copy_from_slice(&zu_owned);
+                zp.copy_from_slice(&zp_owned);
+            }
+        })?;
+        Ok((x[..n_u].to_vec(), x[n_u..].to_vec()))
+    } else {
+        // Plain GMRES on flat system (no preconditioner)
+        let flat = sys.to_flat_csr();
+        let mut rhs_flat = vec![0.0; n_total];
+        rhs_flat[..n_u].copy_from_slice(&r_u);
+        rhs_flat[n_u..].copy_from_slice(&r_p);
+        let mut x = vec![0.0; n_total];
+        fem_solver::solve_gmres(&flat, &rhs_flat, &mut x, 200, cfg)?;
+        Ok((x[..n_u].to_vec(), x[n_u..].to_vec()))
+    }
 }
 
 /// Solve the steady incompressible Navier–Stokes equations via Picard iteration.
@@ -426,7 +453,7 @@ pub fn solve_ns_picard<M: MeshTopology + Clone>(
 
         let (du, dp) = solve_oseen_step(
             &a_oseen, &b, &bt,
-            f_vel, f_pres, &u, &p, &solver_cfg,
+            f_vel, f_pres, &u, &p, &solver_cfg, None,
         ).unwrap_or_else(|e| panic!("Oseen solve failed at iteration {iter}: {e}"));
 
         let du_norm: f64 = du.iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -633,7 +660,7 @@ mod tests {
         let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
 
         let (du, _dp) = solve_oseen_step(
-            &a_oseen, &b, &bt, &f_vel, &f_pres, &u_init, &p_init, &cfg,
+            &a_oseen, &b, &bt, &f_vel, &f_pres, &u_init, &p_init, &cfg, None,
         ).expect("Oseen solve failed");
 
         // div(u) residual should be near zero: B·u = 0
