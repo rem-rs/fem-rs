@@ -1010,8 +1010,7 @@ mod tests {
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0] + x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
-        let max_e = zz_estimator_l2(&gf).eta.iter().fold(0.0f64, |a, &b| a.max(b));
-        assert!(max_e < 1e-8, "L² estimator max error = {:.6e} (expected < 1e-8)", max_e);
+        for &e in &zz_estimator_l2(&gf).eta { assert!(e < 1e-12, "L² estimator should be exact for linear functions"); }
     }
 
     #[test] fn zz_l2_quadratic_nonzero() {
@@ -1020,14 +1019,13 @@ mod tests {
         let d = s.interpolate(&|x| x[0]*x[0] + x[1]*x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
         let eta = zz_estimator_l2(&gf).eta;
-        let total: f64 = eta.iter().sum();
-        assert!(total > 0.0f64, "L² estimator total = {:.6e} (expected > 0)", total);
+        assert!(eta.iter().sum::<f64>() > 0.0, "L² estimator should be > 0 for quadratic");
         // L² projection should give more accurate recovery → smaller total error
         let eta_naive = zz_estimator(&gf).eta;
         let total_l2: f64 = eta.iter().sum();
         let total_naive: f64 = eta_naive.iter().sum();
-        assert!(total_l2 < total_naive * 2.0,
-            "L² projection ({:.6e}) vs nodal averaging ({:.6e})",
+        assert!(total_l2 < total_naive,
+            "L² projection ({:.6e}) should beat nodal averaging ({:.6e}) for quadratic",
             total_l2, total_naive);
     }
 
