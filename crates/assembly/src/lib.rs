@@ -146,8 +146,6 @@ pub mod plasticity;
 pub use plasticity::*;
 
 /// Phase field fracture (brittle fracture, Cahn-Hilliard, damage).
-pub mod phasefield;
-pub use phasefield::*;
 
 #[cfg(feature = "reed")]
 pub mod reed;
