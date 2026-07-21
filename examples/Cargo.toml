@@ -1,11 +1,8 @@
 
-[[example]]
-name = "iga_linear_elasticity"
-path = "extra/iga_linear_elasticity.rs"
-
-[[example]]
-name = "iga_wave_equation"
-path = "extra/iga_wave_equation.rs"
+[package]
+name    = "fem-examples"
+version = "0.1.0"
+edition = "2021"
 
 [features]
 default = []
@@ -13,11 +10,6 @@ gpu = ["fem-solver/gpu", "fem-linalg-gpu", "wgpu", "bytemuck"]
 io_hdf5 = ["fem-io-hdf5-parallel/hdf5"]
 io_hdf5_mpi = ["fem-io-hdf5-parallel/hdf5-mpi"]
 parallel = ["fem-assembly/parallel", "fem-linalg/parallel"]
-
-[package]
-name    = "fem-examples"
-version = "0.1.0"
-edition = "2021"
 
 [dependencies]
 fem-core     = { path = "../crates/core" }
@@ -45,688 +37,275 @@ rand_distr   = "0.4"
 [dev-dependencies]
 fem-regression = { path = "../crates/regression" }
 
-[[example]]
-name = "mfem_ex1_poisson"
-path = "mfem_ex1_poisson.rs"
-
-[[example]]
-name = "mfem_ex1_gpu"
-path = "mfem_ex1_gpu.rs"
-required-features = ["gpu"]
-
-[[example]]
-name = "mfem_ex_iga_poisson_1d"
-path = "mfem_ex_iga_poisson_1d.rs"
-
-[[example]]
-name = "mfem_ex_iga_poisson_2d_patch"
-path = "mfem_ex_iga_poisson_2d_patch.rs"
-
-[[example]]
-name = "mfem_ex_iga_helmholtz_2d"
-path = "mfem_ex_iga_helmholtz_2d.rs"
-
-[[example]]
-name = "mfem_ex_iga_poisson_3d"
-path = "mfem_ex_iga_poisson_3d.rs"
-
-[[example]]
-name = "mfem_ex_iga_heat_2d"
-path = "mfem_ex_iga_heat_2d.rs"
-
-[[example]]
-name = "mfem_ex_iga_poisson_2d_multipatch"
-path = "mfem_ex_iga_poisson_2d_multipatch.rs"
-
-[[example]]
-name = "ex_iga_poisson_2d_multipatch"
-path = "ex_iga_poisson_2d_multipatch.rs"
-
-[[example]]
-name = "ex_iga_poisson_3d_multipatch"
-path = "ex_iga_poisson_3d_multipatch.rs"
-
-[[example]]
-name = "mfem_ex2_elasticity"
-path = "mfem_ex2_elasticity.rs"
-
-[[example]]
-name = "mfem_ex5_mixed_darcy"
-path = "mfem_ex5_mixed_darcy.rs"
-
-[[example]]
-name = "mfem_ex6_flux_recovery"
-path = "mfem_ex6_flux_recovery.rs"
-
-# One-to-one MFEM example targets only: mfem_ex* and mfem_pex*.
-
-[[example]]
-name = "mfem_ex9_dg_advection"
-path = "mfem_ex9_dg_advection.rs"
-
-[[example]]
-name = "heat_equation"
-path = "extra/heat_equation.rs"
-
-[[example]]
-name = "wave_equation"
-path = "extra/wave_equation.rs"
-
-[[example]]
-name = "mfem_ex23_wave_equation"
-path = "mfem_ex23_wave_equation.rs"
-
-[[example]]
-name = "mfem_ex24_discrete_ops"
-path = "mfem_ex24_discrete_ops.rs"
-
-[[example]]
-name = "mfem_ex27_robin_bc"
-path = "mfem_ex27_robin_bc.rs"
-
-[[example]]
-name = "mfem_ex4_darcy"
-path = "mfem_ex4_darcy.rs"
-
-[[example]]
-name = "mfem_ex15_dg_amr"
-path = "mfem_ex15_dg_amr.rs"
-
-[[example]]
-name = "mfem_ex15_tet_nc_amr"
-path = "mfem_ex15_tet_nc_amr.rs"
-
-[[example]]
-name = "mfem_ex15_dynamic_amr"
-path = "mfem_ex15_dynamic_amr.rs"
-
-[[example]]
-name = "mfem_ex17_dg_elasticity"
-path = "mfem_ex17_dg_elasticity.rs"
-
-[[example]]
-name = "mfem_ex18_euler"
-path = "mfem_ex18_euler.rs"
-
-[[example]]
-name = "mfem_ex16_nonlinear_heat"
-path = "mfem_ex16_nonlinear_heat.rs"
-
-[[example]]
-name = "mfem_pex1_parallel_poisson"
-path = "mfem_pex1_parallel_poisson.rs"
-
-[[example]]
-name = "mfem_pex2_mixed_darcy"
-path = "mfem_pex2_mixed_darcy.rs"
-
-[[example]]
-name = "mfem_pex3_maxwell_cavity"
-path = "mfem_pex3_maxwell_cavity.rs"
-
-[[example]]
-name = "mfem_pex4_parallel_heat"
-path = "mfem_pex4_parallel_heat.rs"
-
-[[example]]
-name = "mfem_pex5_hdiv_darcy"
-path = "mfem_pex5_hdiv_darcy.rs"
-
-[[example]]
-name = "mfem_pex2_parallel_elasticity"
-path = "mfem_pex2_parallel_elasticity.rs"
-
-[[example]]
-name = "mfem_pex6_parallel_amr"
-path = "mfem_pex6_parallel_amr.rs"
-
-[[example]]
-name = "mfem_pex9_parallel_dg_advection"
-path = "mfem_pex9_parallel_dg_advection.rs"
-
-[[example]]
-name = "mfem_pex16_parallel_nonlinear_heat"
-path = "mfem_pex16_parallel_nonlinear_heat.rs"
-
-[[example]]
-name = "mfem_pex7_parallel_surface"
-path = "mfem_pex7_parallel_surface.rs"
-
-[[example]]
-name = "mfem_pex8_parallel_p_multigrid"
-path = "mfem_pex8_parallel_p_multigrid.rs"
-
-[[example]]
-name = "mfem_pex10_parallel_hyperelastic"
-path = "mfem_pex10_parallel_hyperelastic.rs"
-
-[[example]]
-name = "mfem_pex11_parallel_eigenvalue"
-path = "mfem_pex11_parallel_eigenvalue.rs"
-
-[[example]]
-name = "mfem_pex15_parallel_dynamic_amr"
-path = "mfem_pex15_parallel_dynamic_amr.rs"
-
-[[example]]
-name = "mfem_pex17_parallel_dg_elasticity"
-path = "mfem_pex17_parallel_dg_elasticity.rs"
-
-[[example]]
-name = "mfem_pex18_parallel_euler"
-path = "mfem_pex18_parallel_euler.rs"
-
-[[example]]
-name = "mfem_pex20_parallel_symplectic"
-path = "mfem_pex20_parallel_symplectic.rs"
-
-[[example]]
-name = "mfem_pex22_parallel_complex_helmholtz"
-path = "mfem_pex22_parallel_complex_helmholtz.rs"
-
-[[example]]
-name = "mfem_pex23_parallel_wave"
-path = "mfem_pex23_parallel_wave.rs"
-
-[[example]]
-name = "mfem_pex27_parallel_robin_bc"
-path = "mfem_pex27_parallel_robin_bc.rs"
-
-[[example]]
-name = "mfem_phase40_stokes"
-path = "mfem_phase40_stokes.rs"
-
-[[example]]
-name = "navier_stokes_kovasznay"
-path = "extra/navier_stokes_kovasznay.rs"
-
-[[example]]
-name = "mfem_ex7_neumann_mixed_bc"
-path = "mfem_ex7_neumann_mixed_bc.rs"
-
-[[example]]
-name = "mfem_ex7_surface_poisson"
-path = "mfem_ex7_surface_poisson.rs"
-
-[[example]]
-name = "maxwell_time_domain"
-path = "extra/maxwell_time_domain.rs"
-
-[[example]]
-name = "mfem_tangential_drive_maxwell"
-path = "mfem_tangential_drive_maxwell.rs"
-
-[[example]]
-name = "mfem_ex39_named_attributes"
-path = "mfem_ex39_named_attributes.rs"
-
-[[example]]
-name = "mfem_ex13_eigenvalue"
-path = "mfem_ex13_eigenvalue.rs"
-
-[[example]]
-name = "mfem_ex12_elastic_eigen"
-path = "mfem_ex12_elastic_eigen.rs"
-
-[[example]]
-name = "mfem_ex14_dg_poisson"
-path = "mfem_ex14_dg_poisson.rs"
-
-[[example]]
-name = "mfem_ex10_hyperelastic_dyn"
-path = "mfem_ex10_hyperelastic_dyn.rs"
-
-[[example]]
-name = "mfem_ex19_hyperelastic_dyn_incomp"
-path = "mfem_ex19_hyperelastic_dyn_incomp.rs"
-
-[[example]]
-name = "mfem_ex19_hyperelastic_incomp"
-path = "mfem_ex19_hyperelastic_incomp.rs"
-
-[[example]]
-name = "mfem_ex20_symplectic"
-path = "mfem_ex20_symplectic.rs"
-
-[[example]]
-name = "mfem_multidomain_poisson_coupling"
-path = "mfem_multidomain_poisson_coupling.rs"
-
-[[example]]
-name = "mfem_ex21_amr_elasticity"
-path = "mfem_ex21_amr_elasticity.rs"
-
-[[example]]
-name = "mfem_ex46_moving_mesh_heat"
-path = "mfem_ex46_moving_mesh_heat.rs"
-
-[[example]]
-name = "mfem_ex47_multiphysics_templates"
-path = "mfem_ex47_multiphysics_templates.rs"
-
-[[example]]
-name = "mfem_ex49_template_fsi"
-path = "mfem_ex49_template_fsi.rs"
-
-[[example]]
-name = "mfem_ex50_template_acoustics_structure"
-path = "mfem_ex50_template_acoustics_structure.rs"
-
-[[example]]
-name = "mfem_ex52_template_reaction_flow_thermal"
-path = "mfem_ex52_template_reaction_flow_thermal.rs"
-
-[[example]]
-name = "electrothermal_3d"
-path = "electrothermal_3d.rs"
-
-[[example]]
-name = "mfem_ex33_fractional_laplacian"
-path = "mfem_ex33_fractional_laplacian.rs"
-
-[[example]]
-name = "dc_current"
-path = "extra/dc_current.rs"
-
-[[example]]
-name = "wgpu_poisson"
-path = "extra/wgpu_poisson.rs"
-
-[[example]]
-name = "mfem_tmop_mesh_quality"
-path = "mfem_tmop_mesh_quality.rs"
-
-[[example]]
-name = "tmop_hex8_optimise"
-path = "extra/tmop_hex8_optimise.rs"
-
-[[example]]
-name = "mfem_miniapp_volta"
-path = "mfem_miniapp_volta.rs"
-
-[[example]]
-name = "mfem_miniapp_tesla"
-path = "mfem_miniapp_tesla.rs"
-
-[[example]]
-name = "mfem_miniapp_maxwell"
-path = "mfem_miniapp_maxwell.rs"
-
-[[example]]
-name = "mfem_miniapp_joule"
-path = "mfem_miniapp_joule.rs"
-
-[[example]]
-name = "mfem_phasefield_fracture"
-path = "extra/mfem_phasefield_fracture.rs"
-
-[[example]]
-name = "solver_comparison"
-path = "extra/solver_comparison.rs"
-
-[[example]]
-name = "multiphysics_coupled_newton"
-path = "extra/multiphysics_coupled_newton.rs"
-
-[[example]]
-name = "plasticity_j2_bar"
-path = "extra/plasticity_j2_bar.rs"
-
-[[example]]
-name = "allen_cahn_evolution"
-path = "extra/allen_cahn_evolution.rs"
-
-[[example]]
-name = "wg_stokes_cavity"
-path = "extra/wg_stokes_cavity.rs"
-
-[[example]]
-name = "vem_poisson_polygonal"
-path = "extra/vem_poisson_polygonal.rs"
-
-[[example]]
-name = "dpg_poisson_2d"
-path = "extra/dpg_poisson_2d.rs"
-
-[[example]]
-name = "hdg_stokes_channel"
-path = "extra/hdg_stokes_channel.rs"
-
-[[example]]
-name = "hdg_elasticity_beam"
-path = "extra/hdg_elasticity_beam.rs"
-
-[[example]]
-name = "dpg_stokes_2d"
-path = "extra/dpg_stokes_2d.rs"
-
-[[example]]
-name = "crystal_plasticity_fcc"
-path = "extra/crystal_plasticity_fcc.rs"
-
-[[example]]
-name = "xfem_crack_propagation"
-path = "extra/xfem_crack_propagation.rs"
-
-[[example]]
-name = "contact_active_set_3d"
-path = "extra/contact_active_set_3d.rs"
-
-[[example]]
-name = "cahn_hilliard_spinodal"
-path = "extra/cahn_hilliard_spinodal.rs"
-
-[[example]]
-name = "plasticity_dp_slope"
-path = "extra/plasticity_dp_slope.rs"
-
-[[example]]
-name = "mesh_quality_tmop"
-path = "extra/mesh_quality_tmop.rs"
-
-[[example]]
-name = "mfem_vec_ref_elem"
-path = "extra/mfem_vec_ref_elem.rs"
-
-[[example]]
-name = "plor_hex_solve"
-path = "extra/plor_hex_solve.rs"
-
-[[example]]
-name = "hyperelastic_hooke"
-path = "extra/hyperelastic_hooke.rs"
-
-[[example]]
-name = "gslib_field_transfer"
-path = "extra/gslib_field_transfer.rs"
-
-[[example]]
-name = "spde_gaussian_field"
-path = "extra/spde_gaussian_field.rs"
-
-[[example]]
-name = "meshing_tmop_target_matrix"
-path = "extra/meshing_tmop_target_matrix.rs"
-
-[[example]]
-name = "fluids_navier_transient"
-path = "extra/fluids_navier_transient.rs"
-
-[[example]]
-name = "shifted_sbm_diffusion"
-path = "extra/shifted_sbm_diffusion.rs"
-
-# ── Core MFEM examples (previously unregistered) ──
-
+[lib]
+name = "fem_examples"
 [[example]]
 name = "mfem_ex0_mesh_intro"
 path = "mfem_ex0_mesh_intro.rs"
-
 [[example]]
-name = "mfem_ex3_maxwell_cavity"
-path = "mfem_ex3_maxwell_cavity.rs"
-
-[[example]]
-name = "mfem_ex8_hybridization"
-path = "mfem_ex8_hybridization.rs"
-
-[[example]]
-name = "mfem_ex8_dpg_2x2"
-path = "mfem_ex8_dpg_2x2.rs"
-
-[[example]]
-name = "mfem_ex11_p_multigrid"
-path = "mfem_ex11_p_multigrid.rs"
-
+name = "mfem_ex10_hyperelastic_dyn"
+path = "mfem_ex10_hyperelastic_dyn.rs"
 [[example]]
 name = "mfem_ex11_eigenvalue"
 path = "mfem_ex11_eigenvalue.rs"
-
 [[example]]
-name = "mfem_ex13_laplacian_eigen"
-path = "mfem_ex13_laplacian_eigen.rs"
-
+name = "mfem_ex11_p_multigrid"
+path = "mfem_ex11_p_multigrid.rs"
+[[example]]
+name = "mfem_ex12_elastic_eigen"
+path = "mfem_ex12_elastic_eigen.rs"
+[[example]]
+name = "mfem_ex13_eigenvalue"
+path = "mfem_ex13_eigenvalue.rs"
+[[example]]
+name = "mfem_ex14_dg_poisson"
+path = "mfem_ex14_dg_poisson.rs"
+[[example]]
+name = "mfem_ex15_dynamic_amr"
+path = "mfem_ex15_dynamic_amr.rs"
+[[example]]
+name = "mfem_ex16_nonlinear_heat"
+path = "mfem_ex16_nonlinear_heat.rs"
+[[example]]
+name = "mfem_ex17_dg_elasticity"
+path = "mfem_ex17_dg_elasticity.rs"
+[[example]]
+name = "mfem_ex18_euler"
+path = "mfem_ex18_euler.rs"
+[[example]]
+name = "mfem_ex19_hyperelastic_dyn_incomp"
+path = "mfem_ex19_hyperelastic_dyn_incomp.rs"
+[[example]]
+name = "mfem_ex19_hyperelastic_incomp"
+path = "mfem_ex19_hyperelastic_incomp.rs"
+[[example]]
+name = "mfem_ex1_gpu"
+path = "mfem_ex1_gpu.rs"
+[[example]]
+name = "mfem_ex1_poisson"
+path = "mfem_ex1_poisson.rs"
+[[example]]
+name = "mfem_ex1_poisson_gpu"
+path = "mfem_ex1_poisson_gpu.rs"
+[[example]]
+name = "mfem_ex20_symplectic"
+path = "mfem_ex20_symplectic.rs"
+[[example]]
+name = "mfem_ex21_amr_elasticity"
+path = "mfem_ex21_amr_elasticity.rs"
 [[example]]
 name = "mfem_ex22_complex_helmholtz"
 path = "mfem_ex22_complex_helmholtz.rs"
-
+[[example]]
+name = "mfem_ex23_wave_equation"
+path = "mfem_ex23_wave_equation.rs"
+[[example]]
+name = "mfem_ex24_discrete_ops"
+path = "mfem_ex24_discrete_ops.rs"
 [[example]]
 name = "mfem_ex25_pml_maxwell"
 path = "mfem_ex25_pml_maxwell.rs"
-
 [[example]]
 name = "mfem_ex26_geom_mg"
 path = "mfem_ex26_geom_mg.rs"
-
 [[example]]
-name = "scratch_vcycle_debug"
-path = "scratch_vcycle_debug.rs"
-
+name = "mfem_ex27_robin_bc"
+path = "mfem_ex27_robin_bc.rs"
 [[example]]
 name = "mfem_ex28_sliding_elasticity"
 path = "mfem_ex28_sliding_elasticity.rs"
-
 [[example]]
 name = "mfem_ex29_curved_poisson"
 path = "mfem_ex29_curved_poisson.rs"
-
+[[example]]
+name = "mfem_ex2_elasticity"
+path = "mfem_ex2_elasticity.rs"
 [[example]]
 name = "mfem_ex30_aniso_amr"
 path = "mfem_ex30_aniso_amr.rs"
-
 [[example]]
 name = "mfem_ex31_anisotropic_maxwell"
 path = "mfem_ex31_anisotropic_maxwell.rs"
-
-[[example]]
-name = "mfem_ex32_impedance_maxwell"
-path = "mfem_impedance_maxwell.rs"
-
 [[example]]
 name = "mfem_ex32_maxwell_eigenvalue"
 path = "mfem_ex32_maxwell_eigenvalue.rs"
-
 [[example]]
-name = "mfem_pex32_maxwell_eigenvalue"
-path = "mfem_pex32_maxwell_eigenvalue.rs"
-
-[[example]]
-name = "mfem_ex34_absorbing_maxwell"
-path = "mfem_absorbing_maxwell.rs"
-
+name = "mfem_ex33_fractional_laplacian"
+path = "mfem_ex33_fractional_laplacian.rs"
 [[example]]
 name = "mfem_ex34_magnetostatics"
 path = "mfem_ex34_magnetostatics.rs"
-
+[[example]]
+name = "mfem_ex35_complex_oscillator"
+path = "mfem_ex35_complex_oscillator.rs"
 [[example]]
 name = "mfem_ex36_obstacle"
 path = "mfem_ex36_obstacle.rs"
-
 [[example]]
 name = "mfem_ex37_topology_optimization"
 path = "mfem_ex37_topology_optimization.rs"
-
 [[example]]
 name = "mfem_ex38_immersed_boundary"
 path = "mfem_ex38_immersed_boundary.rs"
-
+[[example]]
+name = "mfem_ex39_compass"
+path = "mfem_ex39_compass.rs"
+[[example]]
+name = "mfem_ex39_named_attributes"
+path = "mfem_ex39_named_attributes.rs"
+[[example]]
+name = "mfem_ex3_maxwell_cavity"
+path = "mfem_ex3_maxwell_cavity.rs"
+[[example]]
+name = "mfem_ex40_eikonal"
+path = "mfem_ex40_eikonal.rs"
 [[example]]
 name = "mfem_ex41_imex"
 path = "mfem_ex41_imex.rs"
-
 [[example]]
-name = "mfem_ex42_rom"
-path = "mfem_ex42_rom.rs"
-
+name = "mfem_ex4_darcy"
+path = "mfem_ex4_darcy.rs"
 [[example]]
-name = "ex_thermoelastic_coupled"
-path = "ex_thermoelastic_coupled.rs"
-
+name = "mfem_ex5_mixed_darcy"
+path = "mfem_ex5_mixed_darcy.rs"
 [[example]]
-name = "mfem_ex45_moving_mesh_ale"
-path = "mfem_ex45_moving_mesh_ale.rs"
-
+name = "mfem_ex6_flux_recovery"
+path = "mfem_ex6_flux_recovery.rs"
 [[example]]
-name = "mfem_autodiff_nonlinear_poisson"
-path = "extra/mfem_autodiff_nonlinear_poisson.rs"
-
+name = "mfem_ex7_neumann_mixed_bc"
+path = "mfem_ex7_neumann_mixed_bc.rs"
 [[example]]
-name = "mfem_tribol_contact_patch"
-path = "extra/mfem_tribol_contact_patch.rs"
-
+name = "mfem_ex7_surface_poisson"
+path = "mfem_ex7_surface_poisson.rs"
+[[example]]
+name = "mfem_ex8_dpg_2x2"
+path = "mfem_ex8_dpg_2x2.rs"
+[[example]]
+name = "mfem_ex8_hybridization"
+path = "mfem_ex8_hybridization.rs"
+[[example]]
+name = "mfem_ex9_dg_advection"
+path = "mfem_ex9_dg_advection.rs"
+[[example]]
+name = "mfem_pex10_parallel_hyperelastic"
+path = "mfem_pex10_parallel_hyperelastic.rs"
+[[example]]
+name = "mfem_pex11_parallel_eigenvalue"
+path = "mfem_pex11_parallel_eigenvalue.rs"
 [[example]]
 name = "mfem_pex12_parallel_elastic_eigen"
 path = "mfem_pex12_parallel_elastic_eigen.rs"
-
 [[example]]
 name = "mfem_pex13_parallel_eigenvalue"
 path = "mfem_pex13_parallel_eigenvalue.rs"
-
 [[example]]
 name = "mfem_pex14_parallel_dg_poisson"
 path = "mfem_pex14_parallel_dg_poisson.rs"
-
+[[example]]
+name = "mfem_pex15_parallel_dynamic_amr"
+path = "mfem_pex15_parallel_dynamic_amr.rs"
+[[example]]
+name = "mfem_pex16_parallel_nonlinear_heat"
+path = "mfem_pex16_parallel_nonlinear_heat.rs"
+[[example]]
+name = "mfem_pex17_parallel_dg_elasticity"
+path = "mfem_pex17_parallel_dg_elasticity.rs"
+[[example]]
+name = "mfem_pex18_parallel_euler"
+path = "mfem_pex18_parallel_euler.rs"
 [[example]]
 name = "mfem_pex19_parallel_incomp_hyperelastic"
 path = "mfem_pex19_parallel_incomp_hyperelastic.rs"
-
+[[example]]
+name = "mfem_pex1_parallel_poisson"
+path = "mfem_pex1_parallel_poisson.rs"
+[[example]]
+name = "mfem_pex20_parallel_symplectic"
+path = "mfem_pex20_parallel_symplectic.rs"
 [[example]]
 name = "mfem_pex21_parallel_amr_elasticity"
 path = "mfem_pex21_parallel_amr_elasticity.rs"
-
+[[example]]
+name = "mfem_pex22_parallel_complex_helmholtz"
+path = "mfem_pex22_parallel_complex_helmholtz.rs"
+[[example]]
+name = "mfem_pex23_parallel_wave"
+path = "mfem_pex23_parallel_wave.rs"
 [[example]]
 name = "mfem_pex24_parallel_discrete_ops"
 path = "mfem_pex24_parallel_discrete_ops.rs"
-
+[[example]]
+name = "mfem_pex25_pml_maxwell"
+path = "mfem_pex25_pml_maxwell.rs"
 [[example]]
 name = "mfem_pex26_parallel_geom_mg"
 path = "mfem_pex26_parallel_geom_mg.rs"
-
+[[example]]
+name = "mfem_pex27_parallel_robin_bc"
+path = "mfem_pex27_parallel_robin_bc.rs"
 [[example]]
 name = "mfem_pex28_parallel_sliding_elasticity"
 path = "mfem_pex28_parallel_sliding_elasticity.rs"
 [[example]]
-name = "mfem_pex30_amr_preprocess"
-path = "mfem_pex30_amr_preprocess.rs"
-
-# ── Feature-gated examples ──
-
-[[example]]
-name = "mfem_ex1_poisson_gpu"
-path = "mfem_ex1_poisson_gpu.rs"
-required-features = ["gpu"]
-
-[[example]]
-name = "mfem_ex43_hdf5_checkpoint"
-path = "mfem_ex43_hdf5_checkpoint.rs"
-required-features = ["io_hdf5"]
-
-[[example]]
-name = "mfem_miniapp_lorentz"
-path = "mfem_miniapp_lorentz.rs"
-
-[[example]]
-name = "mfem_mc_random_field"
-path = "extra/mfem_mc_random_field.rs"
-
-[[example]]
-name = "dbg_quadqk_grad"
-path = "extra/dbg_quadqk_grad.rs"
-
-[[example]]
-name = "iga_hyperelasticity_2d"
-path = "iga_hyperelasticity_2d.rs"
-
-[[example]]
-name = "iga_multipatch_helmholtz_2d"
-path = "iga_multipatch_helmholtz_2d.rs"
-
-[[example]]
-name = "iga_multipatch_c1_continuity"
-path = "iga_multipatch_c1_continuity.rs"
-
-[[example]]
-name = "dealii_step6_poisson_amr"
-path = "dealii_step6_poisson_amr.rs"
-
-[lib]
-name = "fem_examples"
-
-
-
-
-[[example]]
-name = "taylor_bar_impact"
-path = "extra/taylor_bar_impact.rs"
-
-
-[[example]]
-name = "taylor_bar_impact_3d"
-path = "extra/taylor_bar_impact_3d.rs"
-
-[[example]]
-name = "dg_sod_shocktube"
-path = "extra/dg_sod_shocktube.rs"
-
-[[example]]
-name = "mfem_ex40_eikonal"
-path = "mfem_ex40_eikonal.rs"
-
-[[example]]
-name = "mfem_ex39_compass"
-path = "mfem_ex39_compass.rs"
-
-[[example]]
-name = "mfem_ex35_complex_oscillator"
-path = "mfem_ex35_complex_oscillator.rs"
-
-[[example]]
 name = "mfem_pex29_surface_poisson"
 path = "mfem_pex29_surface_poisson.rs"
-
+[[example]]
+name = "mfem_pex2_mixed_darcy"
+path = "mfem_pex2_mixed_darcy.rs"
+[[example]]
+name = "mfem_pex2_parallel_elasticity"
+path = "mfem_pex2_parallel_elasticity.rs"
+[[example]]
+name = "mfem_pex30_amr_preprocess"
+path = "mfem_pex30_amr_preprocess.rs"
 [[example]]
 name = "mfem_pex31_restricted_hcurl"
 path = "mfem_pex31_restricted_hcurl.rs"
-
+[[example]]
+name = "mfem_pex32_maxwell_eigenvalue"
+path = "mfem_pex32_maxwell_eigenvalue.rs"
 [[example]]
 name = "mfem_pex33_fractional_laplacian"
 path = "mfem_pex33_fractional_laplacian.rs"
-
 [[example]]
 name = "mfem_pex34_magnetostatics"
 path = "mfem_pex34_magnetostatics.rs"
-
-[[example]]
-name = "mfem_pex37_topology_optimization"
-path = "mfem_pex37_topology_optimization.rs"
-
-[[example]]
-name = "mfem_pex39_named_attributes"
-path = "mfem_pex39_named_attributes.rs"
-
-[[example]]
-name = "mfem_pex41_imex"
-path = "mfem_pex41_imex.rs"
-
-[[example]]
-name = "mfem_pex25_pml_maxwell"
-path = "mfem_pex25_pml_maxwell.rs"
-
 [[example]]
 name = "mfem_pex35_complex_oscillator"
 path = "mfem_pex35_complex_oscillator.rs"
-
 [[example]]
 name = "mfem_pex36_obstacle"
 path = "mfem_pex36_obstacle.rs"
-
+[[example]]
+name = "mfem_pex37_topology_optimization"
+path = "mfem_pex37_topology_optimization.rs"
+[[example]]
+name = "mfem_pex39_named_attributes"
+path = "mfem_pex39_named_attributes.rs"
+[[example]]
+name = "mfem_pex3_maxwell_cavity"
+path = "mfem_pex3_maxwell_cavity.rs"
 [[example]]
 name = "mfem_pex40_eikonal"
 path = "mfem_pex40_eikonal.rs"
-
 [[example]]
-name = "cfd_cavity"
-path = "cfd_cavity.rs"
+name = "mfem_pex41_imex"
+path = "mfem_pex41_imex.rs"
 [[example]]
-name = "cfd_cavity_transient"
-path = "cfd_cavity_transient.rs"
+name = "mfem_pex4_parallel_heat"
+path = "mfem_pex4_parallel_heat.rs"
+[[example]]
+name = "mfem_pex5_hdiv_darcy"
+path = "mfem_pex5_hdiv_darcy.rs"
+[[example]]
+name = "mfem_pex6_parallel_amr"
+path = "mfem_pex6_parallel_amr.rs"
+[[example]]
+name = "mfem_pex7_parallel_surface"
+path = "mfem_pex7_parallel_surface.rs"
+[[example]]
+name = "mfem_pex8_parallel_p_multigrid"
+path = "mfem_pex8_parallel_p_multigrid.rs"
+[[example]]
+name = "mfem_pex9_parallel_dg_advection"
+path = "mfem_pex9_parallel_dg_advection.rs"
