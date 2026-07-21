@@ -92,7 +92,7 @@ impl StokesPrecond {
     ///   zp = M_p^{-1} * rp   (Schur complement solve via CG)
     ///   zu = diag(A)^{-1} * (ru - B^T * zp)
     pub fn apply(&self, ru: &[f64], rp: &[f64], zu: &mut [f64], zp: &mut [f64]) -> Result<(), SolverError> {
-        solve_cg(&self.mp, rp, zp, &SolverConfig { rtol: 1e-3, atol: 0.0, max_iter: 50, verbose: false, ..SolverConfig::default() })?;
+        solve_cg(&self.mp, rp, zp, &SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() })?;
         let n_u = self.a.nrows;
         let mut bt_zp = vec![0.0; n_u];
         self.bt.spmv(zp, &mut bt_zp);

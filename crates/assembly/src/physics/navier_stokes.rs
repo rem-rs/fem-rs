@@ -361,38 +361,37 @@ pub fn solve_oseen_step(
     let n_total = n_u + n_p;
 
     if let Some(mp_mat) = mp {
-        // Block-triangular preconditioned GMRES (StokesPrecond)
-        use fem_solver::stokes_precond::StokesPrecond;
-        use fem_solver::block_operator::right_preconditioned_gmres;
-
-        let precond = StokesPrecond::new(&sys, mp_mat.clone());
-        let flat = sys.to_flat_csr();
-        let mut rhs_flat = vec![0.0; n_total];
-        rhs_flat[..n_u].copy_from_slice(&r_u);
-        rhs_flat[n_u..].copy_from_slice(&r_p);
-
-        let mut x = vec![0.0; n_total];
-        right_preconditioned_gmres(&flat, &rhs_flat, &mut x, 200, cfg, |r, z| {
-            let (ru, rp) = r.split_at(n_u);
-            let (zu, zp) = z.split_at_mut(n_u);
-            let mut zu_owned = vec![0.0; n_u];
-            let mut zp_owned = vec![0.0; n_p];
-            if precond.apply(ru, rp, &mut zu_owned, &mut zp_owned).is_ok() {
-                zu.copy_from_slice(&zu_owned);
-                zp.copy_from_slice(&zp_owned);
+        // Regularized saddle-point + FGMRES-ILUT (experimental).
+        // Falls back to plain GMRES if FGMRES-ILUT fails.
+        let eps_reg = 1e-6;
+        let mut coo_22 = CooMatrix::new(n_p, n_p);
+        for i in 0..n_p {
+            for p in mp_mat.row_ptr[i]..mp_mat.row_ptr[i + 1] {
+                let j = mp_mat.col_idx[p] as usize;
+                coo_22.add(i, j, -eps_reg * mp_mat.values[p]);
             }
-        })?;
-        Ok((x[..n_u].to_vec(), x[n_u..].to_vec()))
-    } else {
-        // Plain GMRES on flat system (no preconditioner)
-        let flat = sys.to_flat_csr();
+        }
+        let sys_reg = fem_solver::BlockSystem {
+            a: a_oseen.clone(), bt: bt.clone(), b: b.clone(),
+            c: Some(coo_22.into_csr()),
+        };
+        let flat = sys_reg.to_flat_csr();
         let mut rhs_flat = vec![0.0; n_total];
         rhs_flat[..n_u].copy_from_slice(&r_u);
         rhs_flat[n_u..].copy_from_slice(&r_p);
         let mut x = vec![0.0; n_total];
-        fem_solver::solve_gmres(&flat, &rhs_flat, &mut x, 200, cfg)?;
-        Ok((x[..n_u].to_vec(), x[n_u..].to_vec()))
+        if fem_solver::solve_fgmres_ilut(&flat, &rhs_flat, &mut x, 100, 1e-4, 50, cfg).is_ok() {
+            return Ok((x[..n_u].to_vec(), x[n_u..].to_vec()));
+        }
     }
+    // Fallback: plain GMRES on flat system (no preconditioner)
+    let flat = sys.to_flat_csr();
+    let mut rhs_flat = vec![0.0; n_total];
+    rhs_flat[..n_u].copy_from_slice(&r_u);
+    rhs_flat[n_u..].copy_from_slice(&r_p);
+    let mut x = vec![0.0; n_total];
+    fem_solver::solve_gmres(&flat, &rhs_flat, &mut x, 200, cfg)?;
+    Ok((x[..n_u].to_vec(), x[n_u..].to_vec()))
 }
 
 /// Solve the steady incompressible Navier–Stokes equations via Picard iteration.
