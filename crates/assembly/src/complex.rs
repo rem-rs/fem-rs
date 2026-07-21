@@ -812,6 +812,52 @@ impl NativeComplexAssembler {
     }
 }
 
+
+/// Solve the 3-D time-harmonic eddy current problem (K + i·ω·σ·M)·A = J.
+pub fn solve_complex_hcurl_3d(
+    k_mat: &CsrMatrix<f64>,
+    m_mat: &CsrMatrix<f64>,
+    sigma_cond: f64,
+    omega: f64,
+    pec_dofs: &[usize],
+    rtol: f64,
+    max_iter: usize,
+    restart: usize,
+) -> Result<ComplexGridFunction, String> {
+    let n_dofs = k_mat.nrows;
+    let omega_sigma = omega * sigma_cond;
+    let mut coo_re = CooMatrix::new(n_dofs, n_dofs);
+    let mut coo_im = CooMatrix::new(n_dofs, n_dofs);
+    for i in 0..n_dofs {
+        for p in k_mat.row_ptr[i]..k_mat.row_ptr[i + 1] {
+            let j = k_mat.col_idx[p] as usize;
+            coo_re.add(i, j, k_mat.values[p]);
+        }
+        if omega_sigma > 0.0 {
+            for p in m_mat.row_ptr[i]..m_mat.row_ptr[i + 1] {
+                let j = m_mat.col_idx[p] as usize;
+                coo_im.add(i, j, omega_sigma * m_mat.values[p]);
+            }
+        }
+    }
+    let csr = ComplexCsr::from_re_im(&coo_re.into_csr(), &coo_im.into_csr());
+    let mut sys = NativeComplexSystem { mat: csr, omega, n_dofs };
+    let mut r_re = vec![0.0; n_dofs];
+    let mut r_im = vec![0.0; n_dofs];
+    sys.apply_dirichlet(pec_dofs, &vec![0.0; pec_dofs.len()], &vec![0.0; pec_dofs.len()], &mut r_re, &mut r_im);
+    for &d in pec_dofs {
+        for i in 0..n_dofs {
+            if i == d { continue; }
+            for p in sys.mat.row_ptr[i]..sys.mat.row_ptr[i + 1] {
+                if sys.mat.col_idx[p] as usize == d {
+                    sys.mat.re_vals[p] = 0.0;
+                    sys.mat.im_vals[p] = 0.0;
+                }
+            }
+        }
+    }
+    sys.solve(&r_re, &r_im, rtol, max_iter, restart)
+}
 // 鈹€鈹€鈹€ Tests (NativeComplex) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 #[cfg(test)]
