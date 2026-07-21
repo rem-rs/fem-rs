@@ -145,6 +145,7 @@ pub mod boundary_flux;
 pub mod tangential_boundary;
 pub mod bbar;
 pub mod infinite;
+pub mod shell_mitc4;
 
 pub use diffusion::DiffusionIntegrator;
 pub use elasticity::ElasticityIntegrator;
@@ -164,5 +165,6 @@ pub use sum::SumIntegrator;
 pub use vector_source::VectorDomainLFIntegrator;
 pub use bbar::{assemble_bbar_elasticity, FBarIntegrator};
 pub use infinite::InfiniteDomainIntegrator;
+pub use shell_mitc4::{mitc4_shell_stiffness, mitc4_shell_mass};
 pub use boundary_flux::{BoundaryNormalLFIntegrator, VectorFEBoundaryFluxLFIntegrator};
 pub use tangential_boundary::TangentialTraceLFIntegrator;

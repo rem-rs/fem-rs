@@ -14,6 +14,7 @@
 
 /// A segment in 2D contact represented by its two endpoints.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct IndexedSegment {
     pub x0: [f64; 2],
     pub x1: [f64; 2],

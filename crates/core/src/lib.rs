@@ -1,3 +1,4 @@
+#![allow(non_snake_case, unused)]
 //! # fem-core
 //!
 //! Foundational types, traits, and error handling for the fem-rs workspace.
@@ -39,6 +40,7 @@
 
 pub mod error;
 pub mod material;
+pub mod hyperelastic;
 pub mod point;
 pub mod scalar;
 pub mod types;
