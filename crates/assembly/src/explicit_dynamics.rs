@@ -40,6 +40,7 @@ use fem_solver::ode::structural::{CentralDifferenceExplicit, ExplicitState};
 use crate::contact::{
     N2SContactConfig, build_segment_index, find_closest_segment,
 };
+use crate::contact::contact_n2s_3d::{Bvh, MasterTriangle, N2SContactConfig3D};
 
 /// Configuration for explicit dynamics.
 #[derive(Debug, Clone)]
@@ -292,6 +293,94 @@ pub fn explicit_step_with_contact_2d<M: MeshTopology>(
 
             // Add contact force to total (only slave part; master part is already
             // accounted if `master_dof_offset < n_total`)
+            for i in 0..n_total.min(n) {
+                f_total[i] += f_contact[i];
+            }
+        }
+
+        f_total
+    });
+}
+
+/// Perform one explicit dynamics step with 3D N2S contact.
+///
+/// This is a convenience wrapper around [`CentralDifferenceExplicit::step`]
+/// that assembles internal, external and 3D penalty contact forces.
+///
+/// The master surface is represented as pre-built [`MasterTriangle`]s and a
+/// [`Bvh`] for collision detection, which should be constructed once before
+/// the time-stepping loop.
+///
+/// # Precomputation
+/// ```rust,ignore
+/// use fem_assembly::contact::contact_n2s_3d::{build_master_triangles, MasterTriangle, Bvh};
+///
+/// let master_tris = build_master_triangles(&master_mesh, &[1]);
+/// let bvh = Bvh::new(&master_tris);
+/// ```
+///
+/// # Important
+/// The mass matrix must be **lumped** (diagonal). The stiffness matrix is
+/// used only for the linear internal force `K·u_pred`; for nonlinear problems
+/// pass a callback instead (override the step function).
+#[allow(clippy::too_many_arguments)]
+pub fn explicit_step_with_contact_3d(
+    mass_lumped: &[f64],
+    stiff: &CsrMatrix<f64>,
+    cfg: &ExplicitDynamicsConfig,
+    u: &mut [f64],
+    state: &mut ExplicitState,
+    contact_params: Option<(
+        &[[f64; 3]],                // slave_undeformed_coords (n_slave_nodes × 3)
+        &[usize],                   // slave_dof_indices (mapping slave_node→global DOF)
+        usize,                      // slave_dof_offset
+        &[MasterTriangle],          // master_triangles (pre-built, see build_master_triangles)
+        &Bvh,                       // bvh (pre-built from master_triangles)
+        &N2SContactConfig3D,        // contact config
+    )>,
+) {
+    let cd = CentralDifferenceExplicit { gamma: cfg.gamma };
+    let n = u.len();
+    let f_ext = &cfg.f_ext;
+
+    cd.step(mass_lumped, cfg.dt, u, state, &cfg.bc_dofs, |u_pred| {
+        // Internal force: f_int = K·u_pred
+        let mut f_int = vec![0.0; n];
+        stiff.spmv(u_pred, &mut f_int);
+
+        let mut f_total: Vec<f64> = (0..n).map(|i| f_ext[i] - f_int[i]).collect();
+
+        if let Some((slv_coords_0, slv_dof_indices, slv_offset, mas_tris, bvh, n2s_cfg)) =
+            contact_params
+        {
+            // Compute deformed slave node coordinates: x = x₀ + u
+            let n_slave = slv_coords_0.len();
+            let mut deformed_coords: Vec<[f64; 3]> = Vec::with_capacity(n_slave);
+
+            for (i, &base) in slv_dof_indices.iter().enumerate() {
+                let ux = *u_pred.get(base).unwrap_or(&0.0);
+                let uy = *u_pred.get(base + 1).unwrap_or(&0.0);
+                let uz = *u_pred.get(base + 2).unwrap_or(&0.0);
+                deformed_coords.push([
+                    slv_coords_0[i][0] + ux,
+                    slv_coords_0[i][1] + uy,
+                    slv_coords_0[i][2] + uz,
+                ]);
+            }
+
+            // Compute total DOFs for force vector allocation
+            let n_total = n.max(slv_offset + n_slave * 3);
+
+            let f_contact = crate::contact::contact_n2s_3d::assemble_n2s_contact_3d_force_only(
+                &deformed_coords,
+                slv_offset,
+                Some(u_pred),
+                mas_tris,
+                bvh,
+                n2s_cfg,
+                n_total,
+            );
+
             for i in 0..n_total.min(n) {
                 f_total[i] += f_contact[i];
             }
