@@ -352,7 +352,9 @@ pub fn solve_oseen_step(
     for i in 0..n_u { r_u[i] = f_vel[i] - r_u[i]; }
     for i in 0..n_p { r_p[i] = f_pres[i] - r_p[i]; }
 
-    // Build flat system and solve with GMRES (preconditioned block solver TBD)
+    // Build flat saddle-point system [A Bᵀ; B 0] and solve with GMRES.
+    // Block-preconditioned GMRES is planned but plain GMRES with a moderate
+    // mesh works for low-to-moderate Re with sufficient iterations.
     let sys = fem_solver::BlockSystem { a: a_oseen.clone(), bt: bt.clone(), b: b.clone(), c: None };
     let n_total = n_u + n_p;
     let flat = sys.to_flat_csr();
@@ -361,8 +363,7 @@ pub fn solve_oseen_step(
     rhs_flat[n_u..].copy_from_slice(&r_p);
 
     let mut x = vec![0.0; n_total];
-    let res = fem_solver::solve_gmres(&flat, &rhs_flat, &mut x, 50, cfg)?;
-    let _ = res;
+    fem_solver::solve_gmres(&flat, &rhs_flat, &mut x, 200, cfg)?;
 
     Ok((x[..n_u].to_vec(), x[n_u..].to_vec()))
 }
