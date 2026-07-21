@@ -145,10 +145,6 @@ pub mod boundary_flux;
 pub mod tangential_boundary;
 pub mod bbar;
 pub mod infinite;
-pub mod radiation;
-pub mod acoustic_coupling;
-pub mod piezoelectric;
-pub mod submodeling;
 
 pub use diffusion::DiffusionIntegrator;
 pub use elasticity::ElasticityIntegrator;
@@ -170,6 +166,3 @@ pub use bbar::{assemble_bbar_elasticity, FBarIntegrator};
 pub use infinite::InfiniteDomainIntegrator;
 pub use boundary_flux::{BoundaryNormalLFIntegrator, VectorFEBoundaryFluxLFIntegrator};
 pub use tangential_boundary::TangentialTraceLFIntegrator;
-pub use radiation::{RadiationTangentIntegrator, RadiationResidualIntegrator, STEFAN_BOLTZMANN,
-    view_factor_coaxial_disks, view_factor_parallel_rectangles};
-pub use piezoelectric::{PiezoMaterial, assemble_piezoelectric_coupling};

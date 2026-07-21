@@ -14,8 +14,6 @@
 //! ```
 
 use super::xfem::XfemLevelSet;
-use super::xfem_auxiliary_field::*;
-use super::xfem_interaction_integral::*;
 
 /// Material and numerical parameters for crack propagation.
 #[derive(Debug, Clone)]
@@ -71,60 +69,6 @@ pub fn estimate_sifs(
     (0.1, 0.0)
 }
 
-/// Extract SIFs using the interaction integral (domain form).
-///
-/// This is the production-grade method for computing K_I and K_II from
-/// an XFEM solution. It requires closures that provide the stress, strain,
-/// and displacement gradient fields at arbitrary points.
-///
-/// # Arguments
-///
-/// * `tip` — crack tip coordinates [x, y]
-/// * `crack_dir` — unit vector along the crack direction
-/// * `mu` — shear modulus
-/// * `nu` — Poisson's ratio
-/// * `E` — Young's modulus
-/// * `plane_stress` — true for plane stress, false for plane strain
-/// * `config` — crack propagation config (uses `sample_radius` as domain radius)
-/// * `stress_fn` — closure: `Fn(&[f64; 2]) -> [σ_xx, σ_yy, σ_xy]`
-/// * `strain_fn` — closure: `Fn(&[f64; 2]) -> [ε_xx, ε_yy, γ_xy]`
-/// * `disp_grad_fn` — closure: `Fn(&[f64; 2]) -> [∂u_x/∂x₁, ∂u_y/∂x₁]`
-///
-/// Returns `(K_I, K_II)`.
-pub fn estimate_sifs_interaction<F1, F2, F3>(
-    tip: &[f64; 2],
-    crack_dir: &[f64; 2],
-    mu: f64,
-    nu: f64,
-    E: f64,
-    plane_stress: bool,
-    config: &CrackPropagationConfig,
-    stress_fn: F1,
-    strain_fn: F2,
-    disp_grad_fn: F3,
-) -> (f64, f64)
-where
-    F1: Fn(&[f64; 2]) -> [f64; 3],
-    F2: Fn(&[f64; 2]) -> [f64; 3],
-    F3: Fn(&[f64; 2]) -> [f64; 2],
-{
-    let kappa = if plane_stress {
-        kappa_plane_stress(nu)
-    } else {
-        kappa_plane_strain(nu)
-    };
-    let e_prime = super::xfem_auxiliary_field::eprime(E, nu, plane_stress);
-
-    let int_config = InteractionIntegralConfig {
-        r_inner: config.sample_radius * 0.2,
-        r_outer: config.sample_radius,
-        n_sectors: 16,
-        n_radial: 4,
-    };
-
-    extract_sifs(tip, crack_dir, mu, kappa, e_prime, &int_config,
-        stress_fn, strain_fn, disp_grad_fn)
-}
 
 /// Compute the propagation angle using the **maximum hoop stress** criterion
 /// (Erdogan–Sih):
