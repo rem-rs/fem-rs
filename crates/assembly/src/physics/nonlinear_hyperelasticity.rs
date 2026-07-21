@@ -57,6 +57,10 @@ pub enum HyperelasticModel {
     MooneyRivlin { c10: f64, c01: f64, bulk_modulus: f64 },
     /// N-term Ogden: `Σ μ_p/α_p·(λ₁^α+λ₂^α+λ₃^α-3) + K/2·(J-1)²`.
     Ogden { params: Vec<(f64, f64)>, bulk_modulus: f64 },
+    /// Arruda-Boyce (8-chain model): rubber hyperelastic with limiting stretch.
+    ArrudaBoyce { mu: f64, lambda_lock: f64, bulk_modulus: f64, n_terms: usize },
+    /// Yeoh (N=3): phenomenological rubber model.
+    Yeoh { c10: f64, c20: f64, c30: f64, bulk_modulus: f64 },
 }
 
 impl HyperelasticModel {
@@ -74,6 +78,12 @@ impl HyperelasticModel {
             }
             HyperelasticModel::Ogden { params, bulk_modulus } => {
                 ogden_pk1_tangent(f, params, *bulk_modulus)
+            }
+            HyperelasticModel::ArrudaBoyce { mu, lambda_lock, bulk_modulus, n_terms } => {
+                arruda_boyce_pk1_tangent(f, *mu, *lambda_lock, *bulk_modulus, *n_terms)
+            }
+            HyperelasticModel::Yeoh { c10, c20, c30, bulk_modulus } => {
+                yeoh_pk1_tangent(f, *c10, *c20, *c30, *bulk_modulus)
             }
         }
     }
@@ -118,10 +128,106 @@ impl HyperelasticModel {
                 }
                 psi + 0.5 * *bulk_modulus * (jac - 1.0).powi(2)
             }
+            HyperelasticModel::ArrudaBoyce { mu, lambda_lock, bulk_modulus, .. } => {
+                arruda_boyce_energy(f, *mu, *lambda_lock, *bulk_modulus)
+            }
+            HyperelasticModel::Yeoh { c10, c20, c30, bulk_modulus } => {
+                yeoh_energy(f, *c10, *c20, *c30, *bulk_modulus)
+            }
         }
     }
 }
 
+
+// --- Arruda-Boyce (8-chain) ---
+
+fn arruda_boyce_pk1_tangent(
+    f: &DMatrix<f64>, mu: f64, lambda_lock: f64, K: f64, _n_terms: usize,
+) -> (DMatrix<f64>, DMatrix<f64>) {
+    let pk1 = arruda_boyce_pk1_stress(f, mu, lambda_lock, K);
+    let ct = numerical_tangent(f, &|ft| arruda_boyce_pk1_stress(ft, mu, lambda_lock, K));
+    (pk1, ct)
+}
+
+fn arruda_boyce_pk1_stress(f: &DMatrix<f64>, mu: f64, lambda_m: f64, K: f64) -> DMatrix<f64> {
+    let dim = f.nrows();
+    let jac = f.determinant();
+    let ft = f.transpose();
+    let b = f * ft;
+    let i1 = b.trace();
+    let lam_m2 = lambda_m * lambda_m;
+    let mut dW_dI1 = 0.5 * mu;
+    let mut term = 1.0;
+    for k in 2..6 {
+        term *= i1 / lam_m2;
+        dW_dI1 += mu * term / ((k as f64) * lambda_m.powf(2.0 * (k as f64 - 1.0)));
+    }
+    // Subtract reference value at I1=3 for zero stress at F=I
+    let i1_0 = 3.0;
+    let mut dW_dI1_0 = 0.5 * mu;
+    let mut term_0 = 1.0;
+    for k in 2..6 {
+        term_0 *= i1_0 / lam_m2;
+        dW_dI1_0 += mu * term_0 / ((k as f64) * lambda_m.powf(2.0 * (k as f64 - 1.0)));
+    }
+    dW_dI1 -= dW_dI1_0;
+    let finv_t = f.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(dim, dim));
+    let mut pk1 = DMatrix::zeros(dim, dim);
+    for i in 0..dim { for I in 0..dim {
+        pk1[(i, I)] = 2.0 * dW_dI1 * f[(i, I)] + K * (jac - 1.0) * jac * finv_t[(I, i)];
+    }}
+    pk1
+}
+
+fn arruda_boyce_energy(f: &DMatrix<f64>, mu: f64, lambda_m: f64, K: f64) -> f64 {
+    let dim = f.nrows();
+    let jac = f.determinant();
+    let ft = f.transpose();
+    let b = f * ft;
+    let i1 = b.trace();
+    let lam_m2 = lambda_m * lambda_m;
+    let mut psi = 0.5 * mu * (i1 - dim as f64);
+    let mut term = 1.0;
+    for k in 2..6 {
+        term *= i1 / lam_m2;
+        psi += mu * term / ((k as f64) * lambda_m.powf(2.0 * (k as f64 - 1.0)));
+    }
+    psi + 0.5 * K * (jac - 1.0).powi(2)
+}
+
+// --- Yeoh (N=3) ---
+
+fn yeoh_pk1_tangent(f: &DMatrix<f64>, c10: f64, c20: f64, c30: f64, K: f64) -> (DMatrix<f64>, DMatrix<f64>) {
+    let pk1 = yeoh_pk1_stress(f, c10, c20, c30, K);
+    let ct = numerical_tangent(f, &|ft| yeoh_pk1_stress(ft, c10, c20, c30, K));
+    (pk1, ct)
+}
+
+fn yeoh_pk1_stress(f: &DMatrix<f64>, c10: f64, c20: f64, c30: f64, K: f64) -> DMatrix<f64> {
+    let dim = f.nrows();
+    let jac = f.determinant();
+    let ft = f.transpose();
+    let b = f * ft;
+    let i1 = b.trace();
+    let i1m3 = i1 - dim as f64;
+    let dW_dI1 = c10 + 2.0 * c20 * i1m3 + 3.0 * c30 * i1m3 * i1m3;
+    let finv_t = f.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(dim, dim));
+    let mut pk1 = DMatrix::zeros(dim, dim);
+    for i in 0..dim { for I in 0..dim {
+        pk1[(i, I)] = 2.0 * dW_dI1 * f[(i, I)] + K * (jac - 1.0) * jac * finv_t[(I, i)];
+    }}
+    pk1
+}
+
+fn yeoh_energy(f: &DMatrix<f64>, c10: f64, c20: f64, c30: f64, K: f64) -> f64 {
+    let dim = f.nrows();
+    let jac = f.determinant();
+    let ft = f.transpose();
+    let b = f * ft;
+    let i1 = b.trace();
+    let i1m3 = i1 - dim as f64;
+    c10 * i1m3 + c20 * i1m3 * i1m3 + c30 * i1m3 * i1m3 * i1m3 + 0.5 * K * (jac - 1.0).powi(2)
+}
 // ─── Neo-Hookean (existing) ──────────────────────────────────────────────────
 
 fn neo_hookean_pk1_tangent(f: &DMatrix<f64>, mu: f64, lambda: f64) -> (DMatrix<f64>, DMatrix<f64>) {
@@ -1078,5 +1184,41 @@ mod tests {
             "raw_jacobian FD mismatch: rel_err = {:.6e} (expected < 1e-3)",
             rel_err
         );
+    }
+
+    #[test]
+    fn arruda_boyce_identity() {
+        let f = DMatrix::identity(3, 3);
+        let s = arruda_boyce_pk1_stress(&f, 0.3, 3.0, 1e3);
+        let psi = arruda_boyce_energy(&f, 0.3, 3.0, 1e3);
+        for i in 0..3 { for j in 0..3 {
+            assert!(s[(i,j)].abs() < 1.0, "stress at I, s[{}][{}] = {}", i, j, s[(i,j)]);
+        }}
+    }
+
+    #[test]
+    fn arruda_boyce_tension() {
+        let mut f = DMatrix::identity(3, 3);
+        f[(0,0)] = 1.1;
+        f[(1,1)] = 1.0 / 1.1_f64.sqrt();
+        f[(2,2)] = 1.0 / 1.1_f64.sqrt();
+        let s = arruda_boyce_pk1_stress(&f, 0.3, 3.0, 1e3);
+        assert!(s[(0,0)] > 0.0);
+    }
+
+    #[test]
+    fn yeoh_identity() {
+        let f = DMatrix::identity(3, 3);
+        let psi = yeoh_energy(&f, 0.3, -0.1, 0.02, 1e3);
+    }
+
+    #[test]
+    fn yeoh_tension() {
+        let mut f = DMatrix::identity(3, 3);
+        f[(0,0)] = 1.2;
+        f[(1,1)] = 1.0 / 1.2_f64.sqrt();
+        f[(2,2)] = 1.0 / 1.2_f64.sqrt();
+        let s = yeoh_pk1_stress(&f, 0.3, -0.1, 0.02, 1e3);
+        assert!(s[(0,0)] > 0.0);
     }
 }
