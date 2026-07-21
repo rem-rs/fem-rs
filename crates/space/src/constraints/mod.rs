@@ -21,6 +21,7 @@ pub mod linear;
 pub mod periodic;
 pub mod prolong;
 pub mod mpc;
+pub mod rbe3;
 
 pub use dirichlet::*;
 pub use hanging_2d::*;
@@ -31,6 +32,7 @@ pub use linear::*;
 pub use periodic::*;
 pub use prolong::*;
 pub use mpc::*;
+pub use rbe3::*;
 
 #[cfg(test)]
 mod tests {
