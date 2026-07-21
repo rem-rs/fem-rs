@@ -142,8 +142,6 @@ pub mod iga;
 pub use iga::*;
 
 /// Plasticity (J2, Drucker-Prager, crystal plasticity).
-pub mod plasticity;
-pub use plasticity::*;
 
 /// Phase field fracture (brittle fracture, Cahn-Hilliard, damage).
 
