@@ -155,3 +155,63 @@ impl PhysicsModelRegistry {
         self.models.get(name).map(|s| s.as_ref())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyIntegrator;
+    impl ProIntegrator for DummyIntegrator {
+        fn name(&self) -> &str { "DummyIntegrator" }
+        fn assemble_element_matrix(
+            &self, _element: &ElementInfo,
+            _trial: &dyn ReferenceElement, _test: &dyn ReferenceElement,
+        ) -> FemResult<DMatrix<f64>> { Ok(DMatrix::zeros(0, 0)) }
+    }
+
+    struct DummyModifier;
+    impl ProMeshModifier for DummyModifier {
+        fn name(&self) -> &str { "DummyModifier" }
+        fn modify(&self, _mesh: &mut Mesh<3>) -> FemResult<()> { Ok(()) }
+    }
+
+    struct DummyModel;
+    impl ProPhysicsModel for DummyModel {
+        fn name(&self) -> &str { "DummyModel" }
+        fn compute_residual(&self, _state: &[f64]) -> FemResult<Vec<f64>> { Ok(vec![]) }
+        fn compute_tangent(&self, _state: &[f64]) -> FemResult<Vec<f64>> { Ok(vec![]) }
+    }
+
+    #[test]
+    fn integrator_registry_register_and_get() {
+        let mut reg = IntegratorRegistry::global().lock().unwrap();
+        let name = "DummyIntegrator";
+        let _ = reg.integrators.remove(name);
+        reg.register(Box::new(DummyIntegrator));
+        assert!(reg.get(name).is_some());
+    }
+
+    #[test]
+    fn integrator_registry_not_found() {
+        let reg = IntegratorRegistry::global().lock().unwrap();
+        assert!(reg.get("NonExistent").is_none());
+    }
+
+    #[test]
+    fn mesh_modifier_registry_register_and_get() {
+        let mut reg = MeshModifierRegistry::global().lock().unwrap();
+        let name = "DummyModifier";
+        let _ = reg.modifiers.remove(name);
+        reg.register(Box::new(DummyModifier));
+        assert!(reg.get(name).is_some());
+    }
+
+    #[test]
+    fn physics_model_registry_register_and_get() {
+        let mut reg = PhysicsModelRegistry::global().lock().unwrap();
+        let name = "DummyModel";
+        let _ = reg.models.remove(name);
+        reg.register(Box::new(DummyModel));
+        assert!(reg.get(name).is_some());
+    }
+}
