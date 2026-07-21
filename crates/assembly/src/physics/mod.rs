@@ -12,7 +12,6 @@ pub mod navier_stokes;
 pub mod nonlinear;
 pub mod nonlinear_hyperelasticity;
 pub mod pf_solver;
-pub mod contact;
 pub mod thermoelastic;
 pub mod vem_poisson;
 pub mod topology_optimization;
