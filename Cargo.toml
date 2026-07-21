@@ -18,7 +18,6 @@ members = [
     # "crates/benches",  // moved to fem-pro
     "crates/rmetis",
     "crates/regression",
-    "crates/stochastic",
     "vendor/linger",
     "examples",
 ]

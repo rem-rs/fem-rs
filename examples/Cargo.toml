@@ -12,7 +12,6 @@ io_hdf5_mpi = ["fem-io-hdf5-parallel/hdf5-mpi"]
 parallel = ["fem-assembly/parallel", "fem-linalg/parallel"]
 
 [dependencies]
-fem-stochastic = { path = "../crates/stochastic" }
 fem-core     = { path = "../crates/core" }
 fem-mesh     = { path = "../crates/mesh" }
 fem-linalg   = { path = "../crates/linalg" }

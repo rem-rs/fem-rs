@@ -762,7 +762,6 @@ dependencies = [
  "fem-regression",
  "fem-solver",
  "fem-space",
- "fem-stochastic",
  "linlvo",
  "log",
  "nalgebra 0.33.3",
@@ -939,21 +938,6 @@ dependencies = [
  "fem-linalg",
  "fem-mesh",
  "nalgebra 0.33.3",
-]
-
-[[package]]
-name = "fem-stochastic"
-version = "0.1.0"
-dependencies = [
- "fem-assembly",
- "fem-core",
- "fem-linalg",
- "fem-mesh",
- "fem-solver",
- "fem-space",
- "nalgebra 0.33.3",
- "rand 0.8.6",
- "rand_distr",
 ]
 
 [[package]]
