@@ -103,6 +103,7 @@ pub use physics::navier_stokes::{
 pub mod physics;
 pub mod boundary;
 pub mod postproc;
+pub mod uel;
 
 // 鈹€鈹€ Method-family subdirectories 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 

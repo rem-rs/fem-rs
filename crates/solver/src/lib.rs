@@ -275,6 +275,7 @@ pub use p_multigrid::{
     PmgHierarchy, PmgPrecond, solve_vcycle_pmg, fmg_solve, build_pmg_hierarchy_1d_laplacian,
 };
 pub mod mixed_precision;
+pub mod mass_scaling;
 pub mod sli;
 pub mod stokes_precond;
 pub mod active_set;

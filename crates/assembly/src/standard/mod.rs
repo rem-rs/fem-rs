@@ -148,6 +148,7 @@ pub mod infinite;
 pub mod radiation;
 pub mod acoustic_coupling;
 pub mod piezoelectric;
+pub mod submodeling;
 
 pub use diffusion::DiffusionIntegrator;
 pub use elasticity::ElasticityIntegrator;
