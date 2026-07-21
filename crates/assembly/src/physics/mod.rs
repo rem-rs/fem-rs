@@ -1,16 +1,4 @@
-pub mod adjoint_pde;
-pub mod cr_stokes;
-pub mod cutfem;
-pub mod fluid_bcs;
-pub mod fluid_cfd;
-pub mod fluid_ns_transient;
-pub mod fluid_turbulence;
-pub mod fluid_cht;
-pub mod fsi;
-pub mod hyperbolic;
-pub mod navier_stokes;
 pub mod nonlinear;
 pub mod nonlinear_hyperelasticity;
-pub mod thermoelastic;
-pub mod vem_poisson;
 pub mod topology_optimization;
+pub mod hyperbolic;

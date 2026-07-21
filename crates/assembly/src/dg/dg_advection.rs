@@ -872,7 +872,7 @@ impl DgAdvectionRhs {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-pub(crate) fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriP2),
@@ -908,7 +908,7 @@ pub fn ref_elem_q1rot(et: ElementType) -> Box<dyn ReferenceElement> {
     }
 }
 
-pub(crate) fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+pub fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Line2, 1) => Box::new(SegP1),
         (ElementType::Line2, 2) => Box::new(SegP2),
@@ -918,7 +918,7 @@ pub(crate) fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElem
     }
 }
 
-pub(crate) fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], _dim: usize) -> (DMatrix<f64>, f64) {
+pub fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], _dim: usize) -> (DMatrix<f64>, f64) {
     if nodes.len() > 3 {
         // Quad element — centroid Jacobian of bilinear mapping
         let x: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[0]).collect();
@@ -944,7 +944,7 @@ pub(crate) fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], _dim: usize)
     (j, det)
 }
 
-pub(crate) fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
+pub fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
     let j_inv = match jac.clone().try_inverse() {
         Some(inv) => inv,
         None => {
@@ -960,7 +960,7 @@ pub(crate) fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize
     xi
 }
 
-pub(crate) fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
+pub fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
     for i in 0..n {
         for j in 0..dim {
             let mut s = 0.0;
@@ -997,7 +997,7 @@ pub(crate) fn orient_normal_outward<M: MeshTopology>(
     }
 }
 
-pub(crate) fn find_face_elem<M: MeshTopology>(mesh: &M, _face_id: u32, face_nodes: &[u32]) -> u32 {
+pub fn find_face_elem<M: MeshTopology>(mesh: &M, _face_id: u32, face_nodes: &[u32]) -> u32 {
     // Build a sorted key and scan elements
     let mut fkey: Vec<u32> = face_nodes.to_vec();
     fkey.sort_unstable();

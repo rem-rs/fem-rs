@@ -92,12 +92,6 @@ pub mod static_cond;
 pub mod h1_quad_order_hint;
 pub mod lor_factory;
 
-pub use physics::navier_stokes::{
-    assemble_convection_matrix, assemble_divergence_matrix,
-    assemble_oseen_block, assemble_pressure_mass,
-    solve_oseen_step, solve_ns_picard,
-    assemble_ale_convection_matrix, assemble_ale_oseen_block,
-};
 
 // 鈹€鈹€ Reorganised subdirectory modules 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 pub mod physics;
@@ -181,7 +175,6 @@ pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, Pressure
 pub use block_assembler::{
     assemble_mixed_block, assemble_diagonal_block, assemble_system_2x2,
 };
-pub use physics::hyperbolic::{HyperbolicFormIntegrator, NumericalFlux, HyperbolicConservationLaw, EulerConservationLaw, minmod, limiter_minmod_tet_p1};
 pub use interior_faces::InteriorFaceList;
 pub use physics::nonlinear::{LinearSolver, NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
 pub use physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};
@@ -224,17 +217,6 @@ pub use transfer::{
     ConservativeTransferReport,
     TransferError,
     TransferStats,
-};
-pub use physics::fsi::{
-    assemble_mesh_stiffness, solve_mesh_movement_laplacian,
-    fsi_interface_faces, fsi_interface_nodes,
-    nodal_displacement_to_dofs,
-    assemble_fluid_traction_to_struct,
-    FsiConfig, FsiReport, fsi_couple_step, fsi_partitioned_solve,
-};
-pub use physics::thermoelastic::{
-    assemble_thermal_expansion_rhs, assemble_heat_system,
-    solve_thermoelastic_staggered,
 };
 pub use static_cond::{StaticCondensation, GlobalBacksolve, condense_global};
 pub use lor_factory::{build_lor_amg_h1, build_lor_amg_h1_3d};
