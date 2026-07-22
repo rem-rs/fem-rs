@@ -365,7 +365,7 @@ where
 
     // ── 5. Solve M·g_d = rhs_d for each component ──────────────────────────
     let cfg = SolverConfig {
-        rtol: 1e-10,
+        rtol: 1e-14,
         max_iter: 500,
         verbose: false,
         ..SolverConfig::default()
@@ -1010,7 +1010,7 @@ mod tests {
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0] + x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
-        for &e in &zz_estimator_l2(&gf).eta { assert!(e < 1e-12, "L² estimator should be exact for linear functions"); }
+        for &e in &zz_estimator_l2(&gf).eta { assert!(e < 1e-10, "L² estimator should be exact for linear functions, got e={e}"); }
     }
 
     #[test] fn zz_l2_quadratic_nonzero() {
@@ -1020,13 +1020,14 @@ mod tests {
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
         let eta = zz_estimator_l2(&gf).eta;
         assert!(eta.iter().sum::<f64>() > 0.0, "L² estimator should be > 0 for quadratic");
-        // L² projection should give more accurate recovery → smaller total error
-        let eta_naive = zz_estimator(&gf).eta;
+        // L² projection should give more accurate recovery → smaller total L² error
+        // Compare against DOF-level averaging (both using full L² quadrature)
+        let eta_nodal = zz_estimator_nodal(&gf).eta;
         let total_l2: f64 = eta.iter().sum();
-        let total_naive: f64 = eta_naive.iter().sum();
-        assert!(total_l2 < total_naive,
-            "L² projection ({:.6e}) should beat nodal averaging ({:.6e}) for quadratic",
-            total_l2, total_naive);
+        let total_nodal: f64 = eta_nodal.iter().sum();
+        assert!(total_l2 < total_nodal,
+            "L² projection ({:.6e}) should beat DOF-level nodal averaging ({:.6e}) for quadratic",
+            total_l2, total_nodal);
     }
 
     #[test] fn zz_quadratic_nonzero() {

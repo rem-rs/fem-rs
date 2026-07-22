@@ -1136,7 +1136,7 @@ impl DiscreteLinearOperator {
                             let (fx, fy) = eval_field(k, xp, yp);
                             let flux = fx * nx + fy * ny;
                             mom0 += w * flux;
-                            mom1 += w * flux * t;
+                            mom1 += w * flux * (2.0 * t - 1.0);
                         }
                         dof_k[2 * edge_local] = mom0;
                         dof_k[2 * edge_local + 1] = mom1;

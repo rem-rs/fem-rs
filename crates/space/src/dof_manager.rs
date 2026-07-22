@@ -1160,10 +1160,12 @@ impl DofManager {
         }
         for (&EdgeKey(a, b), dofs) in &edge_pk_map {
             let ca = mesh.node_coords(a); let cb = mesh.node_coords(b);
+            // Use Gauss-Lobatto-Legendre positions consistent with QuadQk
+            let gll_nodes = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1).0;
             for (k, &did) in dofs.iter().enumerate() {
-                let t = (k + 1) as f64 / (edge_dofs_per + 1) as f64;
+                let t_gll = 0.5 * (gll_nodes[k + 1] + 1.0); // map [-1,1] → [0,1]
                 let base = did as usize * dim;
-                for d in 0..dim { dof_coords[base + d] = (1.0 - t) * ca[d] + t * cb[d]; }
+                for d in 0..dim { dof_coords[base + d] = (1.0 - t_gll) * ca[d] + t_gll * cb[d]; }
             }
         }
         // Interior DOFs: tensor-product coordinates using reference element
