@@ -19,6 +19,13 @@ const HEX_Q3_F64_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/hex_q3_f64
 const HEX_Q4_F64_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/hex_q4_f64.wgsl"));
 const TET4_F64_WGSL: &str  = include_str!(concat!(env!("OUT_DIR"), "/tet4_f64.wgsl"));
 
+// 2-D shaders (diffusion PA)
+const TRI3_WGSL: &str    = include_str!("../wgsl/tri3.wgsl");
+const QUAD_Q1_WGSL: &str = include_str!("../wgsl/quad_q1.wgsl");
+
+const TRI3_F64_WGSL: &str    = include_str!(concat!(env!("OUT_DIR"), "/tri3_f64.wgsl"));
+const QUAD_Q1_F64_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/quad_q1_f64.wgsl"));
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Shared host-side runners (f32 and f64)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -152,6 +159,26 @@ pub fn gpu_pa_apply_tet4(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], 
 
 pub fn gpu_pa_apply_tet4_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
     run_pa_shader_f64(gpu, TET4_F64_WGSL, pa, dofs, x, y, 4, 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2-D diffusion PA
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn gpu_pa_apply_tri3(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
+    run_pa_shader(gpu, TRI3_WGSL, pa, dofs, x, y, 3, 1);
+}
+
+pub fn gpu_pa_apply_tri3_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
+    run_pa_shader_f64(gpu, TRI3_F64_WGSL, pa, dofs, x, y, 3, 1);
+}
+
+pub fn gpu_pa_apply_quad_q1(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
+    run_pa_shader(gpu, QUAD_Q1_WGSL, pa, dofs, x, y, 4, 4);
+}
+
+pub fn gpu_pa_apply_quad_q1_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
+    run_pa_shader_f64(gpu, QUAD_Q1_F64_WGSL, pa, dofs, x, y, 4, 4);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
