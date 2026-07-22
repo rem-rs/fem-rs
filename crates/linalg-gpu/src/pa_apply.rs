@@ -2,6 +2,13 @@
 //! GPU computes element residuals; host scatters to global vector.
 
 use std::borrow::Cow;
+
+/// Convert a WGSL shader from f32 to f64 by substituting type names.
+/// Only the storage declarations and local type annotations are changed;
+/// numeric constants remain valid as they are inferred from context.
+fn wgsl_f32_to_f64(src: &str) -> String {
+    src.replace("f32", "f64")
+}
 use wgpu::util::DeviceExt;
 use crate::context::GpuContext;
 
@@ -107,6 +114,10 @@ for(var i=0u;i<27u;i++){er.vals[e*27u+i]=ye[i];}}
 
 pub fn gpu_pa_apply_hex_q2(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
     run_pa_shader(gpu, HEX_Q2_WGSL, pa, dofs, x, y, 27, 27);
+}
+
+pub fn gpu_pa_apply_hex_q2_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
+    run_pa_shader_f64(gpu, HEX_Q2_WGSL, pa, dofs, x, y, 27, 27);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -222,8 +233,16 @@ pub fn gpu_pa_apply_hex_q3(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32]
     run_pa_shader(gpu, HEX_Q3_WGSL, pa, dofs, x, y, 64, 64);
 }
 
+pub fn gpu_pa_apply_hex_q3_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
+    run_pa_shader_f64(gpu, HEX_Q3_WGSL, pa, dofs, x, y, 64, 64);
+}
+
 pub fn gpu_pa_apply_hex_q4(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
     run_pa_shader(gpu, HEX_Q4_WGSL, pa, dofs, x, y, 125, 125);
+}
+
+pub fn gpu_pa_apply_hex_q4_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
+    run_pa_shader_f64(gpu, HEX_Q4_WGSL, pa, dofs, x, y, 125, 125);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -259,6 +278,10 @@ for(var i=0u;i<4u;i++){er.vals[e*4u+i]=ye[i];}}
 
 pub fn gpu_pa_apply_tet4(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
     run_pa_shader(gpu, TET4_WGSL, pa, dofs, x, y, 4, 1);
+}
+
+pub fn gpu_pa_apply_tet4_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
+    run_pa_shader_f64(gpu, TET4_WGSL, pa, dofs, x, y, 4, 1);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -306,12 +329,61 @@ fn run_pa_shader(gpu: &GpuContext, wgsl: &str, pa: &[f32], dofs: &[u32], x: &[f3
     rdb.destroy();
 }
 
+/// Like `run_pa_shader` but for f64 input/output data.
+/// Requires `gpu.features.native_f64 == true`.
+#[allow(clippy::too_many_arguments)]
+fn run_pa_shader_f64(gpu: &GpuContext, wgsl: &str, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64],
+    ldof: usize, _nqp: usize) {
+    let _ = _nqp;
+    let dev = &gpu.device; let q = &gpu.queue; let ne = dofs.len() / ldof;
+    let elem_size = size_of::<f64>() as u64;
+    let pb = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("pa_f64"),contents:bytemuck::cast_slice(pa),usage:wgpu::BufferUsages::STORAGE,});
+    let db = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("dofs"),contents:bytemuck::cast_slice(dofs),usage:wgpu::BufferUsages::STORAGE,});
+    let xb = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("x_f64"),contents:bytemuck::cast_slice(x),usage:wgpu::BufferUsages::STORAGE,});
+    let buf_size = (ne as u64 * ldof as u64 * elem_size) as u64;
+    let rb = dev.create_buffer(&wgpu::BufferDescriptor{label:Some("res_f64"),size:buf_size,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false,});
+    let rdb = dev.create_buffer(&wgpu::BufferDescriptor{label:Some("rd_f64"),size:buf_size,usage:wgpu::BufferUsages::COPY_DST|wgpu::BufferUsages::MAP_READ,mapped_at_creation:false,});
+    let sh = dev.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("pa_sh_f64"),source:wgpu::ShaderSource::Wgsl(Cow::Owned(wgsl_f32_to_f64(wgsl))),});
+    let bgl = dev.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("pa_bgl_f64"),entries:&[
+        wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Storage{read_only:true},has_dynamic_offset:false,min_binding_size:None},count:None},
+        wgpu::BindGroupLayoutEntry{binding:1,visibility:wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Storage{read_only:true},has_dynamic_offset:false,min_binding_size:None},count:None},
+        wgpu::BindGroupLayoutEntry{binding:2,visibility:wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Storage{read_only:true},has_dynamic_offset:false,min_binding_size:None},count:None},
+        wgpu::BindGroupLayoutEntry{binding:3,visibility:wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Storage{read_only:false},has_dynamic_offset:false,min_binding_size:None},count:None},
+    ]});
+    let pl = dev.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("pa_pl_f64"),bind_group_layouts:&[&bgl],push_constant_ranges:&[],});
+    let pipe = dev.create_compute_pipeline(&wgpu::ComputePipelineDescriptor{label:Some("pa_pipe_f64"),layout:Some(&pl),module:&sh,entry_point:Some("cs_main"),compilation_options:Default::default(),cache:None,});
+    let bg = dev.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("pa_bg_f64"),layout:&bgl,entries:&[
+        wgpu::BindGroupEntry{binding:0,resource:pb.as_entire_binding()},
+        wgpu::BindGroupEntry{binding:1,resource:db.as_entire_binding()},
+        wgpu::BindGroupEntry{binding:2,resource:xb.as_entire_binding()},
+        wgpu::BindGroupEntry{binding:3,resource:rb.as_entire_binding()},
+    ]});
+    let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor{label:Some("pa_enc_f64")});
+    {let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor{label:Some("pa_cp_f64"),timestamp_writes:None});cpass.set_pipeline(&pipe);cpass.set_bind_group(0,&bg,&[]);cpass.dispatch_workgroups(ne as u32,1,1);}
+    enc.copy_buffer_to_buffer(&rb,0,&rdb,0,buf_size);
+    q.submit([enc.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let slice = rdb.slice(..);
+    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+    let _ = dev.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv().unwrap().unwrap();
+    let data = slice.get_mapped_range();
+    let vals: &[f64] = bytemuck::cast_slice(&data);
+    y.copy_from_slice(&vals[..ne * ldof]);
+    drop(data);
+    rdb.destroy();
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Hex Q1
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn gpu_pa_apply_hex_q1(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
     run_pa_shader(gpu, HEX_Q1_WGSL, pa, dofs, x, y, 8, 8);
+}
+
+pub fn gpu_pa_apply_hex_q1_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
+    run_pa_shader_f64(gpu, HEX_Q1_WGSL, pa, dofs, x, y, 8, 8);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -328,7 +400,11 @@ pub fn gpu_pa_apply_hex_q1(gpu: &GpuContext, pa: &[f32], dofs: &[u32], x: &[f32]
 /// - Gauss–Legendre quadrature table (p+1 points)
 /// - Lagrange basis evaluation at quadrature points via barycentric formula
 /// - Triple-nested qp loop with flux gather and scatter
-pub fn generate_hex_qk_wgsl(p: usize) -> String {
+///
+/// When `use_f64` is true, the generated shader uses `array<f64>` and `f64`
+/// types (requires `gpu.features.native_f64`).
+pub fn generate_hex_qk_wgsl(p: usize, use_f64: bool) -> String {
+    let fp = if use_f64 { "f64" } else { "f32" };
     let nq = p + 1;
     let nloc = nq * nq * nq;
     let (qpts, qwts) = gauss_legendre_f64(nq);
@@ -347,18 +423,18 @@ pub fn generate_hex_qk_wgsl(p: usize) -> String {
 
     // Build the WGSL shader as a single format string
     let wgsl = format!(r#"
-struct PD{{data:array<f32>}}struct ED{{dofs:array<u32>}}struct XV{{vals:array<f32>}}struct ER{{vals:array<f32>}}
+struct PD{{data:array<{fp}>}}struct ED{{dofs:array<u32>}}struct XV{{vals:array<{fp}>}}struct ER{{vals:array<{fp}>}}
 @group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
 @group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
-const GP:array<f32,{nq}>=array({qpts_str});
-const GW:array<f32,{nq}>=array({qwts_str});
-fn bary(t:f32,i:u32)->f32{{let n=array<f32,{nq}>({nodes_str});var r=1.0;for(var j=0u;j<{nq}u;j++){{if(j!=i){{r*=(t-n[j])/(n[i]-n[j]);}}}}return r;}}
-fn dary(t:f32,i:u32)->f32{{let n=array<f32,{nq}>({nodes_str});var r=0.0;for(var m=0u;m<{nq}u;m++){{if(m==i){{continue;}}var term=1.0/(n[i]-n[m]);for(var j=0u;j<{nq}u;j++){{if(j!=i&&j!=m){{term*=(t-n[j])/(n[i]-n[j]);}}}}r+=term;}}return r;}}
+const GP:array<{fp},{nq}>=array({qpts_str});
+const GW:array<{fp},{nq}>=array({qwts_str});
+fn bary(t:{fp},i:u32)->{fp}{{let n=array<{fp},{nq}>({nodes_str});var r=1.0;for(var j=0u;j<{nq}u;j++){{if(j!=i){{r*=(t-n[j])/(n[i]-n[j]);}}}}return r;}}
+fn dary(t:{fp},i:u32)->{fp}{{let n=array<{fp},{nq}>({nodes_str});var r=0.0;for(var m=0u;m<{nq}u;m++){{if(m==i){{continue;}}var term=1.0/(n[i]-n[m]);for(var j=0u;j<{nq}u;j++){{if(j!=i&&j!=m){{term*=(t-n[j])/(n[i]-n[j]);}}}}r+=term;}}return r;}}
 fn qka(n:u32)->u32{{return n%{nq}u;}}fn qkb(n:u32)->u32{{return(n/{nq}u)%{nq}u;}}fn qkc(n:u32)->u32{{return n/{nqp}u;}}
 @compute@workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id)gid:vec3<u32>){{
-let e=gid.x;var xe:array<f32,{nloc}>;for(var i=0u;i<{nloc}u;i++){{xe[i]=xv.vals[ed.dofs[e*{nloc}u+i]];}}
-var ye:array<f32,{nloc}>=array(0.0{zeros});
+let e=gid.x;var xe:array<{fp},{nloc}>;for(var i=0u;i<{nloc}u;i++){{xe[i]=xv.vals[ed.dofs[e*{nloc}u+i]];}}
+var ye:array<{fp},{nloc}>=array(0.0{zeros});
 for(var qz=0u;qz<{nq}u;qz++){{for(var qy=0u;qy<{nq}u;qy++){{for(var qx=0u;qx<{nq}u;qx++){{
 let qi=qz*{nqp}u+qy*{nq}u+qx;let off=(e*{nloc}u+qi)*11u;
 let j00=pd.data[off];let j01=pd.data[off+1u];let j02=pd.data[off+2u];
@@ -366,23 +442,23 @@ let j10=pd.data[off+3u];let j11=pd.data[off+4u];let j12=pd.data[off+5u];
 let j20=pd.data[off+6u];let j21=pd.data[off+7u];let j22=pd.data[off+8u];
 let sc=GW[qx]*GW[qy]*GW[qz]*pd.data[off+9u]*pd.data[off+10u];
 {bvals}
-var fl:array<f32,3>=array(0.0,0.0,0.0);
+var fl:array<{fp},3>=array(0.0,0.0,0.0);
 for(var j=0u;j<{nloc}u;j++){{let a=qka(j);let b=qkb(j);let c=qkc(j);
-let bx=array<f32,{nq}>({bxs});let by=array<f32,{nq}>({bys});let bz=array<f32,{nq}>({bzs});
-let dx=array<f32,{nq}>({dxs});let dy=array<f32,{nq}>({dys});let dz=array<f32,{nq}>({dzs});
+let bx=array<{fp},{nq}>({bxs});let by=array<{fp},{nq}>({bys});let bz=array<{fp},{nq}>({bzs});
+let dx=array<{fp},{nq}>({dxs});let dy=array<{fp},{nq}>({dys});let dz=array<{fp},{nq}>({dzs});
 let g0=dx[a]*by[b]*bz[c];let g1=bx[a]*dy[b]*bz[c];let g2=bx[a]*by[b]*dz[c];
 let pg0=j00*g0+j01*g1+j02*g2;let pg1=j10*g0+j11*g1+j12*g2;let pg2=j20*g0+j21*g1+j22*g2;
 fl[0]+=pg0*xe[j];fl[1]+=pg1*xe[j];fl[2]+=pg2*xe[j];}}
 for(var i=0u;i<{nloc}u;i++){{let a=qka(i);let b=qkb(i);let c=qkc(i);
-let bx=array<f32,{nq}>({bxs});let by=array<f32,{nq}>({bys});let bz=array<f32,{nq}>({bzs});
-let dx=array<f32,{nq}>({dxs});let dy=array<f32,{nq}>({dys});let dz=array<f32,{nq}>({dzs});
+let bx=array<{fp},{nq}>({{bxs}});let by=array<{fp},{nq}>({{bys}});let bz=array<{fp},{nq}>({{bzs}});
+let dx=array<{fp},{nq}>({{dxs}});let dy=array<{fp},{nq}>({{dys}});let dz=array<{fp},{nq}>({{dzs}});
 let g0=dx[a]*by[b]*bz[c];let g1=bx[a]*dy[b]*bz[c];let g2=bx[a]*by[b]*dz[c];
 let pg0=j00*g0+j01*g1+j02*g2;let pg1=j10*g0+j11*g1+j12*g2;let pg2=j20*g0+j21*g1+j22*g2;
 ye[i]+=sc*(pg0*fl[0]+pg1*fl[1]+pg2*fl[2]);}}
 }}}}
 for(var i=0u;i<{nloc}u;i++){{er.vals[e*{nloc}u+i]=ye[i];}}}}
 "#,
-        nq = nq, nloc = nloc, nqp = nqp,
+        nq = nq, nloc = nloc, nqp = nqp, fp = fp,
         qpts_str = qpts_str, qwts_str = qwts_str, nodes_str = nodes_str,
         bxs = bxs, dxs = dxs, bys = bys, dys = dys, bzs = bzs, dzs = dzs,
         zeros = (0..nloc-1).map(|_| ",0.0").collect::<String>(),
@@ -452,6 +528,13 @@ fn equispaced_1d_nodes(p: usize) -> Vec<f64> {
 /// Run a dynamically generated Qk PA shader.
 pub fn gpu_pa_apply_hex_qk(gpu: &GpuContext, p: usize, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
     let nloc = (p + 1) * (p + 1) * (p + 1);
-    let wgsl = generate_hex_qk_wgsl(p);
+    let wgsl = generate_hex_qk_wgsl(p, false);
     run_pa_shader(gpu, &wgsl, pa, dofs, x, y, nloc, nloc);
+}
+
+/// Run a dynamically generated Qk PA shader in f64.
+pub fn gpu_pa_apply_hex_qk_f64(gpu: &GpuContext, p: usize, pa: &[f64], dofs: &[u32], x: &[f64], y: &mut [f64]) {
+    let nloc = (p + 1) * (p + 1) * (p + 1);
+    let wgsl = generate_hex_qk_wgsl(p, true);
+    run_pa_shader_f64(gpu, &wgsl, pa, dofs, x, y, nloc, nloc);
 }
