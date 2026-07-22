@@ -74,6 +74,8 @@ pub mod gpu_base;
 pub mod cg_gpu;
 #[cfg(feature = "gpu")]
 pub mod gmres_gpu;
+#[cfg(feature = "gpu")]
+pub mod bicgstab_gpu;
 
 // ─── Re-export solver types from fem-linalg ───────────────────────────────────
 

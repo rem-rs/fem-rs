@@ -1098,6 +1098,26 @@ impl Assembler {
         space: &S,
         integrators: &[&dyn BilinearIntegrator],
     ) -> Result<CsrMatrix<f64>, String> {
+        Self::assemble_bilinear_gpu_impl(space, integrators, "diffusion")
+    }
+
+    /// Like [`assemble_bilinear_gpu`] but with explicit operator kind selection.
+    ///
+    /// `kind` must be one of `"diffusion"`, `"mass"`, or `"elasticity"`.
+    /// For elasticity the parameters are taken from the integrator (lambda, mu).
+    pub fn assemble_bilinear_gpu_with_kind<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn BilinearIntegrator],
+        kind: &str,
+    ) -> Result<CsrMatrix<f64>, String> {
+        Self::assemble_bilinear_gpu_impl(space, integrators, kind)
+    }
+
+    fn assemble_bilinear_gpu_impl<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn BilinearIntegrator],
+        kind: &str,
+    ) -> Result<CsrMatrix<f64>, String> {
         use fem_linalg_gpu::GpuContext;
         use fem_mesh::element_type::ElementType;
 
@@ -1109,18 +1129,23 @@ impl Assembler {
         let order = space.order();
 
         // Determine element type and dispatch
-        #[allow(clippy::type_complexity)]
         let (npe, npe_coords, dofs_per_elem, assemble_fn): (
             usize, usize, usize,
             fn(&GpuContext, &[f32], &[u32], usize) -> Vec<(u32, u32, f32)>,
-        ) = match (dim, &etype, order) {
-            (2, ElementType::Tri3, 1) => (3, 6, 3, fem_linalg_gpu::assemble_poisson_2d_p1),
-            (2, ElementType::Tri6, 2) => (6, 12, 6, fem_linalg_gpu::assemble_poisson_2d_p2),
-            (2, ElementType::Quad4, 1) => (4, 8, 4, fem_linalg_gpu::assemble_poisson_2d_q1),
-            (3, ElementType::Tet4 | ElementType::Tet10, 1) => (4, 12, 4, fem_linalg_gpu::assemble_poisson_3d_p1),
-            (3, ElementType::Hex8 | ElementType::Hex20, 1) => (8, 24, 8, fem_linalg_gpu::assemble_poisson_3d_hex8),
+        ) = match (kind, dim, &etype, order) {
+            // Diffusion
+            ("diffusion", 2, ElementType::Tri3, 1)  => (3, 6, 3, fem_linalg_gpu::assemble_poisson_2d_p1),
+            ("diffusion", 2, ElementType::Tri6, 2)  => (6, 12, 6, fem_linalg_gpu::assemble_poisson_2d_p2),
+            ("diffusion", 2, ElementType::Quad4, 1) => (4, 8, 4, fem_linalg_gpu::assemble_poisson_2d_q1),
+            ("diffusion", 3, ElementType::Tet4 | ElementType::Tet10, 1) => (4, 12, 4, fem_linalg_gpu::assemble_poisson_3d_p1),
+            ("diffusion", 3, ElementType::Hex8 | ElementType::Hex20, 1) => (8, 24, 8, fem_linalg_gpu::assemble_poisson_3d_hex8),
+            // Mass
+            ("mass", 2, ElementType::Tri3, 1)  => (3, 6, 3, fem_linalg_gpu::assemble_mass_2d_tri3),
+            ("mass", 2, ElementType::Quad4, 1) => (4, 8, 4, fem_linalg_gpu::assemble_mass_2d_quad4),
+            ("mass", 3, ElementType::Tet4 | ElementType::Tet10, 1) => (4, 12, 4, fem_linalg_gpu::assemble_mass_3d_tet4),
+            ("mass", 3, ElementType::Hex8 | ElementType::Hex20, 1) => (8, 24, 8, fem_linalg_gpu::assemble_mass_3d_hex8),
             _ => return Err(format!(
-                "GPU assembly: unsupported (dim={dim}, type={etype:?}, order={order})"
+                "GPU assembly: unsupported (kind={kind}, dim={dim}, type={etype:?}, order={order})"
             )),
         };
 
