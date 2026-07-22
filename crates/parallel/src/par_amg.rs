@@ -2,7 +2,6 @@
 //!
 //! Implements a distributed AMG V-cycle using **local smoothed aggregation**:
 //!
-#![allow(unused_variables, dead_code, unused_assignments, unused_mut)]
 //! 1. Each rank coarsens its owned rows independently (aggregates don't cross
 //!    partition boundaries).
 //! 2. Prolongation/restriction operators are distributed sparse matrices.

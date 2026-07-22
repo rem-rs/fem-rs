@@ -16,6 +16,8 @@
 //!
 //! This module supports **one domain per file** (serial, single-rank).
 //! The output can be ingested by ParaView, VisIt, or ashlar via Conduit.
+// Dead-code allow kept for parse helpers not yet called from public API.
+// TODO(sidre): remove once all parse_* functions are exercised.
 #![allow(dead_code)]
 
 use std::fmt::Write as FmtWrite;

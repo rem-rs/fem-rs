@@ -1,4 +1,7 @@
 #![allow(clippy::needless_range_loop)]
+// NOTE: This file is intentionally kept in sync with the identically-named
+// fem-pro/examples/src/lib.rs. When adding shared utility functions, update
+// BOTH copies until they can be consolidated into a shared examples-common crate.
 //! Shared FEM utilities for the em_* and Maxwell examples.
 //!
 //! Implements:
@@ -421,19 +424,6 @@ pub fn p1_gradient_2d(
         if det.abs() < 1e-30 { continue; }
 
         let inv = 1.0 / det;
-        let gphi_x = [
-            inv * ( j11 + j10),   // ∂φ₀/∂x
-            inv * (-j11),
-            inv * ( j10),
-        ];
-        let gphi_y = [
-            inv * ( j01 + j00),   // nope — redo sign carefully
-            inv * (-j01) * 0.0 + inv * (-j00) * 0.0, // placeholder
-            0.0,
-        ];
-        // Re-derive: J^{-T} = (1/det)*[j11, -j10; -j01, j00]
-        // ∇φ₀_phys = J^{-T}*(-1,-1)^T = (1/det)*[j11*(-1)+(-j10)*(-1), (-j01)*(-1)+j00*(-1)]
-        //           = (1/det)*[-j11+j10, j01-j00]
         let gphix = [
             inv * (-j11 + j10),
             inv *   j11,
@@ -444,7 +434,6 @@ pub fn p1_gradient_2d(
             inv * (-j01),
             inv *   j00,
         ];
-        let _ = (gphi_x, gphi_y);  // suppress unused warnings (above was placeholder)
 
         let ei = e as usize;
         for k in 0..3 {

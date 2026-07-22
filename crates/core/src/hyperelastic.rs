@@ -117,7 +117,7 @@ impl NeoHookean {
             }
         }
 
-        let tr_b_bar = trace_3x3(&b_bar);
+        // (tr_b_bar not needed for deviatoric Neo-Hookean stress)
 
         // Deviatoric Kirchhoff stress: τ_dev = μ · dev(b̄)
         let mut tau = [[0.0_f64; 3]; 3];
@@ -184,11 +184,10 @@ impl MooneyRivlin {
         let J = det_f(F);
         let b = left_cauchy_green(F);
         let Jm23 = J.powf(-2.0 / 3.0);
-        let Jm43 = Jm23 * Jm23;
 
         // Modified invariants
         let i1_bar = trace_3x3(&b) * Jm23;
-        let i2_bar = invariant_I2(&b) * Jm43;
+        // i2_bar = J^(-4/3)·I₂(b) — not used for simplified isotropic tangent
 
         // Modified left Cauchy-Green
         let mut b_bar = b;
@@ -277,7 +276,7 @@ impl Yeoh {
         let dw_di1 = self.c1 + 2.0 * self.c2 * xi + 3.0 * self.c3 * xi * xi;
 
         // d²W/dI₁̄² = 2·C₂ + 6·C₃·ξ
-        let d2w_di12 = 2.0 * self.c2 + 6.0 * self.c3 * xi;
+        // d²W/dI₁̄² = 2·C₂ + 6·C₃·ξ — not used for simplified isotropic tangent
 
         // Modified left Cauchy-Green
         let mut b_bar = b;
@@ -542,8 +541,7 @@ impl Ogden {
 
         // Build Cauchy stress from principal components (assume F aligns with principal basis)
         // For a general F, we need the eigenvectors. For now, use an isotropic approximation.
-        let b = left_cauchy_green(F);
-        let b_norm = trace_3x3(&b).sqrt().max(1e-16);
+        // (b_norm not used for the simplified isotropic tangent)
 
         // Compute Cauchy stress using the full tensor form
         let mut tau_bar = [[0.0; 3]; 3];
@@ -574,7 +572,7 @@ impl Ogden {
 
         // Effective shear modulus from Ogden: G = Σₚ μₚ · (λ̄₁^αₚ + λ̄₂^αₚ + λ̄₃^αₚ) / 3
         let mut G = 0.0;
-        for (t, (mu_p, alpha)) in self.terms.iter().enumerate() {
+        for (t, (mu_p, _alpha)) in self.terms.iter().enumerate() {
             G += mu_p * sum_lam_alpha[t] / 3.0;
         }
 

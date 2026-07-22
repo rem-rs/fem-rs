@@ -1,4 +1,6 @@
-#![allow(non_snake_case, unused)]
+// Crate-level attribute: non_snake_case allowed for physics notation (e.g. C10, D1 coefficients).
+// The unused attribute was removed — handle individual items with targeted #[allow(...)].
+#![allow(non_snake_case)]
 //! # fem-core
 //!
 //! Foundational types, traits, and error handling for the fem-rs workspace.
