@@ -1129,25 +1129,40 @@ impl Assembler {
         let order = space.order();
 
         // Determine element type and dispatch
-        let (npe, npe_coords, dofs_per_elem, assemble_fn): (
-            usize, usize, usize,
-            fn(&GpuContext, &[f32], &[u32], usize) -> Vec<(u32, u32, f32)>,
-        ) = match (kind, dim, &etype, order) {
+        let assemble_fn: Box<dyn Fn(&GpuContext, &[f32], &[u32], usize) -> Vec<(u32, u32, f32)>> =
+        match (kind, dim, &etype, order) {
             // Diffusion
-            ("diffusion", 2, ElementType::Tri3, 1)  => (3, 6, 3, fem_linalg_gpu::assemble_poisson_2d_p1),
-            ("diffusion", 2, ElementType::Tri6, 2)  => (6, 12, 6, fem_linalg_gpu::assemble_poisson_2d_p2),
-            ("diffusion", 2, ElementType::Quad4, 1) => (4, 8, 4, fem_linalg_gpu::assemble_poisson_2d_q1),
-            ("diffusion", 3, ElementType::Tet4 | ElementType::Tet10, 1) => (4, 12, 4, fem_linalg_gpu::assemble_poisson_3d_p1),
-            ("diffusion", 3, ElementType::Hex8 | ElementType::Hex20, 1) => (8, 24, 8, fem_linalg_gpu::assemble_poisson_3d_hex8),
+            ("diffusion", 2, ElementType::Tri3, 1)  => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_poisson_2d_p1(g,n,d,ne)),
+            ("diffusion", 2, ElementType::Tri6, 2)  => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_poisson_2d_p2(g,n,d,ne)),
+            ("diffusion", 2, ElementType::Quad4, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_poisson_2d_q1(g,n,d,ne)),
+            ("diffusion", 3, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_poisson_3d_p1(g,n,d,ne)),
+            ("diffusion", 3, ElementType::Hex8 | ElementType::Hex20, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_poisson_3d_hex8(g,n,d,ne)),
             // Mass
-            ("mass", 2, ElementType::Tri3, 1)  => (3, 6, 3, fem_linalg_gpu::assemble_mass_2d_tri3),
-            ("mass", 2, ElementType::Quad4, 1) => (4, 8, 4, fem_linalg_gpu::assemble_mass_2d_quad4),
-            ("mass", 3, ElementType::Tet4 | ElementType::Tet10, 1) => (4, 12, 4, fem_linalg_gpu::assemble_mass_3d_tet4),
-            ("mass", 3, ElementType::Hex8 | ElementType::Hex20, 1) => (8, 24, 8, fem_linalg_gpu::assemble_mass_3d_hex8),
+            ("mass", 2, ElementType::Tri3, 1)  => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_mass_2d_tri3(g,n,d,ne)),
+            ("mass", 2, ElementType::Quad4, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_mass_2d_quad4(g,n,d,ne)),
+            ("mass", 3, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_mass_3d_tet4(g,n,d,ne)),
+            ("mass", 3, ElementType::Hex8 | ElementType::Hex20, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_mass_3d_hex8(g,n,d,ne)),
+            // Elasticity (default lame parameters; call with integrator for actual values)
+            ("elasticity", 2, ElementType::Tri3, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_elasticity_2d_tri3(g,n,d,ne,1.0,1.0)),
+            ("elasticity", 3, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_elasticity_3d_tet4(g,n,d,ne,1.0,1.0)),
+            ("elasticity", 3, ElementType::Hex8 | ElementType::Hex20, 1) => Box::new(|g,n,d,ne| fem_linalg_gpu::assemble_elasticity_3d_hex8(g,n,d,ne,1.0,1.0)),
             _ => return Err(format!(
                 "GPU assembly: unsupported (kind={kind}, dim={dim}, type={etype:?}, order={order})"
             )),
         };
+
+        let npe = match &etype {
+            ElementType::Tri3 => 3,
+            ElementType::Tri6 => 6,
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => 4,
+            ElementType::Tet4 | ElementType::Tet10 => 4,
+            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => 8,
+            ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => 6,
+            ElementType::Pyramid5 | ElementType::Pyramid13 => 5,
+            _ => return Err(format!("GPU assembly: unsupported element type {etype:?}")),
+        };
+        let npe_coords = npe * dim as usize;
+        let dofs_per_elem = npe;
 
         let n_elem = mesh.n_elements();
         let n_dofs = space.n_dofs();
