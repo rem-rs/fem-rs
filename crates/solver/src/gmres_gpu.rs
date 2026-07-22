@@ -1,19 +1,23 @@
-//! GPU-resident restarted GMRES solver.
+//! GPU-native GMRES solver with restart (modified Gram-Schmidt Arnoldi).
 //!
-//! Uses modified Gram-Schmidt for Arnoldi with m-step restart.
-//! The Hessenberg least-squares is solved on CPU (tiny, O(m²)).
+//! All vectors live on the GPU; only dot products and the small Hessenberg
+//! least-squares problem (O(m²)) are handled on CPU.
+//!
+//! Relies on [`super::gpu_base::GpuSolverBase`] for shared resources.
 
 use fem_core::Scalar;
 use fem_linalg::CsrMatrix;
-use fem_linalg_gpu::{
-    DeviceBuffer, GpuContext, GpuCsrMatrix, GpuVector, SpmvPipeline, VectorOpsPipeline,
-};
+use fem_linalg_gpu::{GpuContext, GpuVector};
 use std::time::{Duration, Instant};
 use wgpu;
 use crate::{SolverConfig, SolveResult, SolverError};
+use super::gpu_base::GpuSolverBase;
 
-/// Default GMRES restart dimension.
 const DEFAULT_RESTART: usize = 30;
+
+/// Helper: convert Scalar to f64.
+#[inline(always)]
+fn sc_to_f64<T: Scalar>(v: T) -> f64 { v.to_f64().unwrap() }
 
 /// Timing breakdown for a fixed-iteration GMRES GPU run.
 #[derive(Clone, Debug, Default)]
@@ -30,21 +34,13 @@ pub struct GmresGpuProfile {
     pub final_residual: f64,
 }
 
-/// Reusable GPU GMRES workspace that keeps uploaded data and temporary buffers on device.
+/// Reusable GPU GMRES workspace.
 pub struct GmresGpuWorkspace<T: Scalar> {
-    n: u32,
+    base: GpuSolverBase<T>,
     restart: usize,
-    spmv: SpmvPipeline,
-    vops: VectorOpsPipeline,
-    gpu_a: GpuCsrMatrix<T>,
-    gpu_b: GpuVector<T>,
-    gpu_x: GpuVector<T>,
-    gpu_ax: GpuVector<T>,
-    gpu_r: GpuVector<T>,
     gpu_w: GpuVector<T>,
     basis: Vec<GpuVector<T>>,
-    dot_buf: DeviceBuffer,
-    b_norm: f64,
+    // CPU-side Hessenberg arrays
     h: Vec<f64>,
     s: Vec<f64>,
     cs: Vec<f64>,
@@ -53,527 +49,385 @@ pub struct GmresGpuWorkspace<T: Scalar> {
 }
 
 impl<T: Scalar> GmresGpuWorkspace<T> {
-    /// Build a reusable GPU GMRES workspace for a fixed matrix and right-hand side.
     pub fn new(ctx: &GpuContext, a: &CsrMatrix<T>, b: &[T]) -> Self {
-        let n = a.nrows as u32;
-        assert_eq!(a.ncols as u32, n, "matrix must be square");
-        assert_eq!(b.len() as u32, n);
-
-        let restart = DEFAULT_RESTART.min(n as usize);
-        let spmv = SpmvPipeline::new(&ctx.device, ctx.features.native_f64);
-        let vops = VectorOpsPipeline::new(&ctx.device, ctx.features.native_f64);
-        let gpu_a = GpuCsrMatrix::<T>::from_cpu(ctx, a);
-        let gpu_b = GpuVector::from_slice(ctx, b);
-        let gpu_x = GpuVector::<T>::zeros(ctx, n);
-        let gpu_ax = GpuVector::<T>::zeros(ctx, n);
-        let gpu_r = GpuVector::<T>::zeros(ctx, n);
-        let gpu_w = GpuVector::<T>::zeros(ctx, n);
-        let mut basis = Vec::with_capacity(restart + 1);
-        for _ in 0..=restart {
-            basis.push(GpuVector::<T>::zeros(ctx, n));
-        }
-
-        let n_wg = n.div_ceil(256);
-        let dot_buf = DeviceBuffer::with_staging(
-            &ctx.device,
-            n_wg as u64 * std::mem::size_of::<T>() as u64,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            "gmres_dot",
-        );
-        let b_norm = vops.compute_norm2(ctx, &gpu_b);
-        let h = vec![0.0f64; (restart + 1) * restart];
-        let s = vec![0.0f64; restart + 1];
-        let cs = vec![0.0f64; restart];
-        let sn = vec![0.0f64; restart];
-        let y = vec![0.0f64; restart];
-
+        let base = GpuSolverBase::new(ctx, a, b);
+        let n = base.n;
+        let m = DEFAULT_RESTART;
+        let basis = (0..=m).map(|_| GpuVector::<T>::zeros(ctx, n)).collect();
         Self {
-            n,
-            restart,
-            spmv,
-            vops,
-            gpu_a,
-            gpu_b,
-            gpu_x,
-            gpu_ax,
-            gpu_r,
-            gpu_w,
+            base, restart: m,
+            gpu_w: GpuVector::zeros(ctx, n),
             basis,
-            dot_buf,
-            b_norm,
-            h,
-            s,
-            cs,
-            sn,
-            y,
+            h: vec![0.0; (m + 1) * m], s: vec![0.0; m + 1],
+            cs: vec![0.0; m], sn: vec![0.0; m], y: vec![0.0; m],
         }
     }
 
-    /// Solve using the pre-uploaded matrix/rhs and reusable temporaries.
+    fn m(&self) -> usize { self.restart }
+
     pub fn solve(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig) -> Result<SolveResult, SolverError> {
-        assert_eq!(x.len() as u32, self.n);
-        self.gpu_x.write_from_slice(ctx, x);
-        solve_gmres_gpu_prepared(
-            ctx,
-            self.restart,
-            &self.spmv,
-            &self.vops,
-            &self.gpu_a,
-            &self.gpu_b,
-            &self.gpu_x,
-            &mut self.gpu_ax,
-            &mut self.gpu_r,
-            &mut self.gpu_w,
-            &mut self.basis,
-            &self.dot_buf,
-            self.b_norm,
-            &mut self.h,
-            &mut self.s,
-            &mut self.cs,
-            &mut self.sn,
-            &mut self.y,
-            None,
-            true,
-            true,
-            true,
-            x,
-            cfg,
-            None,
-        )
+        self.base.gpu_x.write_from_slice(ctx, x);
+        self.solve_gmres(ctx, x, cfg, false)
     }
 
-    /// Run a fixed number of GMRES iterations without early convergence exit.
-    /// Returns the final residual norm after the last iteration.
-    pub fn solve_fixed_iters(&mut self, ctx: &GpuContext, x: &mut [T], iterations: usize) -> f64 {
-        assert_eq!(x.len() as u32, self.n);
-        self.gpu_x.write_from_slice(ctx, x);
-        let cfg = SolverConfig {
-            rtol: 0.0,
-            atol: 0.0,
-            max_iter: iterations,
-            verbose: false,
-            print_level: crate::PrintLevel::Silent,
-        };
-        match solve_gmres_gpu_prepared(
-            ctx,
-            self.restart,
-            &self.spmv,
-            &self.vops,
-            &self.gpu_a,
-            &self.gpu_b,
-            &self.gpu_x,
-            &mut self.gpu_ax,
-            &mut self.gpu_r,
-            &mut self.gpu_w,
-            &mut self.basis,
-            &self.dot_buf,
-            self.b_norm,
-            &mut self.h,
-            &mut self.s,
-            &mut self.cs,
-            &mut self.sn,
-            &mut self.y,
-            Some(iterations),
-            true,
-            true,
-            true,
-            x,
-            &cfg,
-            None,
-        ) {
-            Ok(result) => result.final_residual,
-            Err(SolverError::ConvergenceFailed { residual, .. }) => residual,
-            Err(err) => panic!("fixed-iteration GMRES run failed unexpectedly: {err}"),
-        }
+    pub fn solve_fixed_iters(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig) -> Result<SolveResult, SolverError> {
+        self.base.gpu_x.write_from_slice(ctx, x);
+        self.solve_gmres(ctx, x, cfg, true)
     }
 
-    /// Run a fixed number of GMRES iterations for benchmarking without reading
-    /// the final solution back to the CPU.
-    pub fn measure_fixed_iters(&mut self, ctx: &GpuContext, initial_x: &[T], iterations: usize) -> f64 {
-        self.measure_fixed_iters_internal(ctx, initial_x, iterations, true, true)
+    // ── Performance measurement helpers ─────────────────────────────────────
+
+    pub fn measure_fixed_iters(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig) -> GmresGpuProfile {
+        self.measure(ctx, x, cfg, false, false)
     }
 
-    /// Run a fixed number of GMRES iterations for benchmarking while skipping
-    /// the final `x += V y` update. This isolates Arnoldi/readback cost.
-    pub fn measure_fixed_iters_arnoldi_only(&mut self, ctx: &GpuContext, initial_x: &[T], iterations: usize) -> f64 {
-        self.measure_fixed_iters_internal(ctx, initial_x, iterations, false, true)
+    pub fn measure_fixed_iters_arnoldi_only(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig) -> GmresGpuProfile {
+        self.measure(ctx, x, cfg, true, false)
     }
 
-    /// Run a fixed number of GMRES iterations for benchmarking while keeping the
-    /// SpMV and basis-normalization work but skipping orthogonalization.
-    pub fn measure_fixed_iters_spmv_only(&mut self, ctx: &GpuContext, initial_x: &[T], iterations: usize) -> f64 {
-        self.measure_fixed_iters_internal(ctx, initial_x, iterations, false, false)
+    pub fn measure_fixed_iters_spmv_only(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig) -> GmresGpuProfile {
+        self.measure(ctx, x, cfg, true, true)
     }
 
-    /// Run a fixed number of GMRES iterations and return a timing breakdown for
-    /// the real GPU solver path.
-    pub fn profile_fixed_iters(&mut self, ctx: &GpuContext, initial_x: &[T], iterations: usize) -> GmresGpuProfile {
-        assert_eq!(initial_x.len() as u32, self.n);
-        self.gpu_x.write_from_slice(ctx, initial_x);
-        let cfg = SolverConfig {
-            rtol: 0.0,
-            atol: 0.0,
-            max_iter: iterations,
-            verbose: false,
-            print_level: crate::PrintLevel::Silent,
-        };
-        let mut profile = GmresGpuProfile::default();
-        let residual = match solve_gmres_gpu_prepared(
-            ctx,
-            self.restart,
-            &self.spmv,
-            &self.vops,
-            &self.gpu_a,
-            &self.gpu_b,
-            &self.gpu_x,
-            &mut self.gpu_ax,
-            &mut self.gpu_r,
-            &mut self.gpu_w,
-            &mut self.basis,
-            &self.dot_buf,
-            self.b_norm,
-            &mut self.h,
-            &mut self.s,
-            &mut self.cs,
-            &mut self.sn,
-            &mut self.y,
-            Some(iterations),
-            false,
-            true,
-            true,
-            &mut [],
-            &cfg,
-            Some(&mut profile),
-        ) {
-            Ok(result) => result.final_residual,
-            Err(SolverError::ConvergenceFailed { residual, .. }) => residual,
-            Err(err) => panic!("fixed-iteration GMRES profiling failed unexpectedly: {err}"),
-        };
-        profile.final_residual = residual;
-        profile
+    pub fn profile_fixed_iters(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig) -> GmresGpuProfile {
+        self.profile(ctx, x, cfg)
     }
 
-    fn measure_fixed_iters_internal(
-        &mut self,
-        ctx: &GpuContext,
-        initial_x: &[T],
-        iterations: usize,
-        apply_solution_update: bool,
-        perform_orthogonalization: bool,
-    ) -> f64 {
-        assert_eq!(initial_x.len() as u32, self.n);
-        self.gpu_x.write_from_slice(ctx, initial_x);
-        let cfg = SolverConfig {
-            rtol: 0.0,
-            atol: 0.0,
-            max_iter: iterations,
-            verbose: false,
-            print_level: crate::PrintLevel::Silent,
-        };
-        match solve_gmres_gpu_prepared(
-            ctx,
-            self.restart,
-            &self.spmv,
-            &self.vops,
-            &self.gpu_a,
-            &self.gpu_b,
-            &self.gpu_x,
-            &mut self.gpu_ax,
-            &mut self.gpu_r,
-            &mut self.gpu_w,
-            &mut self.basis,
-            &self.dot_buf,
-            self.b_norm,
-            &mut self.h,
-            &mut self.s,
-            &mut self.cs,
-            &mut self.sn,
-            &mut self.y,
-            Some(iterations),
-            false,
-            apply_solution_update,
-            perform_orthogonalization,
-            &mut [],
-            &cfg,
-            None,
-        ) {
-            Ok(result) => result.final_residual,
-            Err(SolverError::ConvergenceFailed { residual, .. }) => residual,
-            Err(err) => panic!("fixed-iteration GMRES measurement failed unexpectedly: {err}"),
-        }
-    }
-}
+    // ── Core solver ─────────────────────────────────────────────────────────
 
-/// Solve `A x = b` using restarted GMRES on the GPU.
-pub fn solve_gmres_gpu(
-    ctx: &GpuContext,
-    a: &CsrMatrix<f64>,
-    b: &[f64],
-    x: &mut [f64],
-    cfg: &SolverConfig,
-) -> Result<SolveResult, SolverError> {
-    solve_gmres_gpu_impl(ctx, a, b, x, cfg)
-}
+    fn solve_gmres(&mut self, ctx: &GpuContext, _x: &mut [T], cfg: &SolverConfig, fixed_iters: bool) -> Result<SolveResult, SolverError> {
+        let max_iter = cfg.max_iter;
+        let tol = (cfg.rtol.max(1e-30) * self.base.b_norm).max(cfg.atol.max(1e-30));
+        let m = self.m();
 
-/// Solve `A x = b` using restarted GMRES on the GPU with `f32` buffers.
-pub fn solve_gmres_gpu_f32(
-    ctx: &GpuContext,
-    a: &CsrMatrix<f32>,
-    b: &[f32],
-    x: &mut [f32],
-    cfg: &SolverConfig,
-) -> Result<SolveResult, SolverError> {
-    solve_gmres_gpu_impl(ctx, a, b, x, cfg)
-}
+        // r = b - A*x
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_init") });
+        self.base.compute_residual(ctx, &mut enc);
+        ctx.queue.submit([enc.finish()]);
 
-fn solve_gmres_gpu_impl<T: Scalar>(
-    ctx: &GpuContext,
-    a: &CsrMatrix<T>,
-    b: &[T],
-    x: &mut [T],
-    cfg: &SolverConfig,
-) -> Result<SolveResult, SolverError> {
-    let mut workspace = GmresGpuWorkspace::new(ctx, a, b);
-    workspace.solve(ctx, x, cfg)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn solve_gmres_gpu_prepared<T: Scalar>(
-    ctx: &GpuContext,
-    restart: usize,
-    spmv: &SpmvPipeline,
-    vops: &VectorOpsPipeline,
-    a: &GpuCsrMatrix<T>,
-    b: &GpuVector<T>,
-    gpu_x: &GpuVector<T>,
-    gpu_ax: &mut GpuVector<T>,
-    gpu_r: &mut GpuVector<T>,
-    gpu_w: &mut GpuVector<T>,
-    basis: &mut [GpuVector<T>],
-    dot_buf: &DeviceBuffer,
-    b_norm: f64,
-    h: &mut [f64],
-    s: &mut [f64],
-    cs: &mut [f64],
-    sn: &mut [f64],
-    y: &mut [f64],
-    fixed_iterations: Option<usize>,
-    read_back_solution: bool,
-    apply_solution_update: bool,
-    perform_orthogonalization: bool,
-    x: &mut [T],
-    cfg: &SolverConfig,
-    mut profile: Option<&mut GmresGpuProfile>,
-) -> Result<SolveResult, SolverError> {
-    let total_start = Instant::now();
-    let tol = cfg.atol.max(cfg.rtol * b_norm);
-    let mut iter_count = 0usize;
-    let target_iterations = fixed_iterations.unwrap_or(cfg.max_iter);
-    let mut last_residual = f64::INFINITY;
-
-    while iter_count < target_iterations {
-        let local_restart = restart.min(target_iterations - iter_count);
-        let residual_start = Instant::now();
-        compute_residual_into(ctx, spmv, vops, a, b, gpu_x, gpu_ax, gpu_r);
-        let r_norm = vops.compute_norm2(ctx, gpu_r);
-        if let Some(ref mut profile) = profile {
-            profile.residual_phase += residual_start.elapsed();
-        }
-        last_residual = r_norm;
-
-        if fixed_iterations.is_none() && r_norm < tol {
-            if read_back_solution {
-                let cpu_x = gpu_x.read_to_cpu(ctx);
-                x.copy_from_slice(&cpu_x);
-            }
-            if let Some(ref mut profile) = profile {
-                profile.iterations = iter_count;
-                profile.final_residual = r_norm;
-                profile.total_phase = total_start.elapsed();
-            }
-            return Ok(SolveResult { converged: true, iterations: iter_count, final_residual: r_norm });
+        let mut r_norm = self.base.norm2(ctx, &self.base.gpu_r);
+        if r_norm <= tol && !fixed_iters {
+            _x.copy_from_slice(&self.base.read_solution(ctx));
+            return Ok(SolveResult { converged: true, iterations: 0, final_residual: r_norm });
         }
 
-        h.fill(0.0);
-        s.fill(0.0);
-        cs.fill(0.0);
-        sn.fill(0.0);
-        y.fill(0.0);
+        self.seed_basis(ctx, r_norm);
+        self.s[0] = r_norm;
 
-        let basis_seed_start = Instant::now();
-        {
-            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-            vops.encode_axpy(ctx, &mut enc, 1.0 / r_norm, gpu_r, 0.0, &basis[0]);
-            ctx.queue.submit(Some(enc.finish()));
-        }
-        if let Some(ref mut profile) = profile {
-            profile.basis_seed_phase += basis_seed_start.elapsed();
-        }
-
+        let mut h = vec![0.0_f64; (m + 1) * m];
+        let mut s = vec![0.0_f64; m + 1];
         s[0] = r_norm;
-        let mut gmres_r_norm = r_norm;
-        let mut j = 0usize;
+        let mut cs = vec![0.0_f64; m];
+        let mut sn = vec![0.0_f64; m];
+        let mut y = vec![0.0_f64; m];
+        let mut iter_count = 0u32;
 
-        for jj in 0..local_restart {
-            j = jj;
-            let spmv_start = Instant::now();
-            {
-                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                spmv.encode_spmv(ctx, &mut enc, 1.0, a, &basis[jj], 0.0, gpu_w);
-                ctx.queue.submit(Some(enc.finish()));
-            }
-            if let Some(ref mut profile) = profile {
-                profile.arnoldi_spmv_phase += spmv_start.elapsed();
-            }
+        'outer: loop {
+            for j in 0..m {
+                // w = A·basis[j]
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_arnoldi") });
+                self.base.spmv.encode_spmv(ctx, &mut enc, 1.0, &self.base.gpu_a, &self.basis[j], 0.0, &self.gpu_w);
+                ctx.queue.submit([enc.finish()]);
 
-            if perform_orthogonalization {
-                let orth_start = Instant::now();
-                for i in 0..=jj {
-                    let dot_val = vops.dispatch_dot_readback(ctx, gpu_w, &basis[i], dot_buf);
-                    h[i * restart + jj] = dot_val;
-                    {
-                        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                        vops.encode_axpy(ctx, &mut enc, -dot_val, &basis[i], 1.0, gpu_w);
-                        ctx.queue.submit(Some(enc.finish()));
+                // MGS orthogonalization
+                for i in 0..=j {
+                    let hij = self.base.dot_readback(ctx, &self.gpu_w, &self.basis[i]);
+                    h[i * m + j] = sc_to_f64(hij);
+                    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_mgs") });
+                    self.base.vops.encode_axpy(ctx, &mut enc, -h[i * m + j], &self.basis[i], 1.0, &self.gpu_w);
+                    ctx.queue.submit([enc.finish()]);
+                }
+
+                let w_norm = self.base.norm2(ctx, &self.gpu_w);
+                h[(j + 1) * m + j] = w_norm;
+
+                // Givens rotation
+                for i in 0..j {
+                    let tmp = cs[i] * h[i * m + j] + sn[i] * h[(i + 1) * m + j];
+                    h[(i + 1) * m + j] = -sn[i] * h[i * m + j] + cs[i] * h[(i + 1) * m + j];
+                    h[i * m + j] = tmp;
+                }
+                let hjj = h[j * m + j];
+                let hjp1j = h[(j + 1) * m + j];
+                let sq = (hjj * hjj + hjp1j * hjp1j).sqrt();
+                cs[j] = hjj / sq;
+                sn[j] = hjp1j / sq;
+                h[j * m + j] = sq;
+                h[(j + 1) * m + j] = 0.0;
+                s[j + 1] = -sn[j] * s[j];
+                s[j] = cs[j] * s[j];
+
+                if iter_count + 1 < max_iter as u32 {
+                    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_normalize") });
+                    self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / w_norm, &self.gpu_w, 0.0, &self.basis[j + 1]);
+                    ctx.queue.submit([enc.finish()]);
+                }
+
+                iter_count += 1;
+
+                if !fixed_iters {
+                    let r_norm_j = s[j + 1].abs();
+                    if r_norm_j <= tol || iter_count >= max_iter as u32 {
+                        let n_mini = j + 1;
+                        for i in (0..n_mini).rev() {
+                            let mut sum = s[i];
+                            for k in (i + 1)..n_mini { sum -= h[i * m + k] * y[k]; }
+                            y[i] = sum / h[i * m + i];
+                        }
+                        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_solution") });
+                        for i in 0..n_mini {
+                            self.base.vops.encode_axpy(ctx, &mut enc, y[i], &self.basis[i], 1.0, &self.base.gpu_x);
+                        }
+                        ctx.queue.submit([enc.finish()]);
+                        _x.copy_from_slice(&self.base.read_solution(ctx));
+                        return Ok(SolveResult { converged: r_norm_j <= tol, iterations: iter_count as usize, final_residual: r_norm_j });
                     }
                 }
-                if let Some(ref mut profile) = profile {
-                    profile.arnoldi_orthogonalization_phase += orth_start.elapsed();
+            }
+
+            if iter_count >= max_iter as u32 { break 'outer; }
+
+            // Restart
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_restart") });
+            self.base.compute_residual(ctx, &mut enc);
+            ctx.queue.submit([enc.finish()]);
+            r_norm = self.base.norm2(ctx, &self.base.gpu_r);
+            if r_norm <= tol && !fixed_iters {
+                _x.copy_from_slice(&self.base.read_solution(ctx));
+                return Ok(SolveResult { converged: true, iterations: iter_count as usize, final_residual: r_norm });
+            }
+            self.seed_basis(ctx, r_norm);
+            s[0] = r_norm;
+            for i in 1..=m { s[i] = 0.0; }
+            h.iter_mut().for_each(|x| *x = 0.0);
+        }
+
+        _x.copy_from_slice(&self.base.read_solution(ctx));
+        let final_res = if fixed_iters { self.base.norm2(ctx, &self.base.gpu_r) } else { r_norm };
+        Ok(SolveResult { converged: final_res <= tol, iterations: iter_count as usize, final_residual: final_res })
+    }
+
+    fn seed_basis(&self, ctx: &GpuContext, r_norm: f64) {
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_seed") });
+        self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / r_norm, &self.base.gpu_r, 0.0, &self.basis[0]);
+        ctx.queue.submit([enc.finish()]);
+    }
+
+    // ── Profiling ───────────────────────────────────────────────────────────
+
+    fn measure(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig, skip_orth: bool, skip_update: bool) -> GmresGpuProfile {
+        self.base.gpu_x.write_from_slice(ctx, x);
+        let total_start = Instant::now();
+        let mut prof = GmresGpuProfile::default();
+        let target = cfg.max_iter;
+        let m = self.m();
+
+        let t0 = Instant::now();
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_init") });
+        self.base.compute_residual(ctx, &mut enc);
+        ctx.queue.submit([enc.finish()]);
+        prof.residual_phase = t0.elapsed();
+
+        let t0 = Instant::now();
+        let r_norm = self.base.norm2(ctx, &self.base.gpu_r);
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_seed") });
+        self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / r_norm, &self.base.gpu_r, 0.0, &self.basis[0]);
+        ctx.queue.submit([enc.finish()]);
+        prof.basis_seed_phase = t0.elapsed();
+
+        let mut iter_count = 0usize;
+        while iter_count < target {
+            for j in 0..m {
+                let t_spmv = Instant::now();
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_spmv") });
+                self.base.spmv.encode_spmv(ctx, &mut enc, 1.0, &self.base.gpu_a, &self.basis[j], 0.0, &self.gpu_w);
+                ctx.queue.submit([enc.finish()]);
+                prof.arnoldi_spmv_phase += t_spmv.elapsed();
+
+                if skip_orth {
+                    let w_norm = self.base.norm2(ctx, &self.gpu_w);
+                    if iter_count + 1 < target {
+                        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_skip") });
+                        self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / w_norm, &self.gpu_w, 0.0, &self.basis[j + 1]);
+                        ctx.queue.submit([enc.finish()]);
+                    }
+                    iter_count += 1;
+                    if iter_count >= target { break; }
+                    continue;
                 }
-            }
 
-            let normalize_start = Instant::now();
-            let w_norm = vops.compute_norm2(ctx, gpu_w);
-            h[(jj + 1) * restart + jj] = w_norm;
-
-            for i in 0..jj {
-                let hi = h[i * restart + jj];
-                let hi1 = h[(i + 1) * restart + jj];
-                h[i * restart + jj] = cs[i] * hi + sn[i] * hi1;
-                h[(i + 1) * restart + jj] = -sn[i] * hi + cs[i] * hi1;
-            }
-
-            let h_jj = h[jj * restart + jj];
-            let h_j1j = h[(jj + 1) * restart + jj];
-            let denom = (h_jj * h_jj + h_j1j * h_j1j).sqrt();
-            if denom < 1e-30 {
-                break;
-            }
-            cs[jj] = h_jj / denom;
-            sn[jj] = h_j1j / denom;
-            h[jj * restart + jj] = denom;
-            h[(jj + 1) * restart + jj] = 0.0;
-
-            let sj = s[jj];
-            let sj1 = s[jj + 1];
-            s[jj] = cs[jj] * sj + sn[jj] * sj1;
-            s[jj + 1] = -sn[jj] * sj + cs[jj] * sj1;
-
-            gmres_r_norm = s[jj + 1].abs();
-            last_residual = gmres_r_norm;
-            iter_count += 1;
-
-            if fixed_iterations.is_none() && gmres_r_norm < tol {
-                break;
-            }
-
-            if w_norm > 1e-15 {
-                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                vops.encode_axpy(ctx, &mut enc, 1.0 / w_norm, gpu_w, 0.0, &basis[jj + 1]);
-                ctx.queue.submit(Some(enc.finish()));
-            } else {
-                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                vops.encode_axpy(ctx, &mut enc, 1.0, gpu_w, 0.0, &basis[jj + 1]);
-                ctx.queue.submit(Some(enc.finish()));
-            }
-            if let Some(ref mut profile) = profile {
-                profile.arnoldi_normalization_phase += normalize_start.elapsed();
-            }
-        }
-
-        if apply_solution_update {
-            let solution_update_start = Instant::now();
-            for ii in (0..=j).rev() {
-                let mut sum = s[ii];
-                for kk in ii + 1..=j {
-                    sum -= h[ii * restart + kk] * y[kk];
+                let t_orth = Instant::now();
+                for i in 0..=j {
+                    let hij = self.base.dot_readback(ctx, &self.gpu_w, &self.basis[i]);
+                    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_mgs") });
+                    self.base.vops.encode_axpy(ctx, &mut enc, -sc_to_f64(hij), &self.basis[i], 1.0, &self.gpu_w);
+                    ctx.queue.submit([enc.finish()]);
                 }
-                y[ii] = sum / h[ii * restart + ii];
-            }
+                prof.arnoldi_orthogonalization_phase += t_orth.elapsed();
 
-            for i in 0..=j {
-                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                vops.encode_axpy(ctx, &mut enc, y[i], &basis[i], 1.0, gpu_x);
-                ctx.queue.submit(Some(enc.finish()));
+                let t_norm = Instant::now();
+                let _w_norm = self.base.norm2(ctx, &self.gpu_w);
+                prof.arnoldi_normalization_phase += t_norm.elapsed();
+
+                if iter_count + 1 < target {
+                    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_norm") });
+                    self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / _w_norm, &self.gpu_w, 0.0, &self.basis[j + 1]);
+                    ctx.queue.submit([enc.finish()]);
+                }
+
+                iter_count += 1;
+                if iter_count >= target { break; }
             }
-            if let Some(ref mut profile) = profile {
-                profile.solution_update_phase += solution_update_start.elapsed();
-            }
+            if iter_count >= target { break; }
+
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_restart") });
+            self.base.compute_residual(ctx, &mut enc);
+            ctx.queue.submit([enc.finish()]);
+            let r_norm = self.base.norm2(ctx, &self.base.gpu_r);
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_reseed") });
+            self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / r_norm, &self.base.gpu_r, 0.0, &self.basis[0]);
+            ctx.queue.submit([enc.finish()]);
         }
 
-        if fixed_iterations.is_none() && gmres_r_norm < tol {
-            if read_back_solution {
-                let cpu_x = gpu_x.read_to_cpu(ctx);
-                x.copy_from_slice(&cpu_x);
+        prof.iterations = iter_count;
+
+        if !skip_update {
+            let t_sol = Instant::now();
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_solution") });
+            for i in 0..m.min(iter_count) {
+                self.base.vops.encode_axpy(ctx, &mut enc, self.y[i], &self.basis[i], 1.0, &self.base.gpu_x);
             }
-            if let Some(ref mut profile) = profile {
-                profile.iterations = iter_count;
-                profile.final_residual = gmres_r_norm;
-                profile.total_phase = total_start.elapsed();
-            }
-            return Ok(SolveResult { converged: true, iterations: iter_count, final_residual: gmres_r_norm });
+            ctx.queue.submit([enc.finish()]);
+            prof.solution_update_phase = t_sol.elapsed();
         }
+
+        let t_final = Instant::now();
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_measure_final") });
+        self.base.compute_residual(ctx, &mut enc);
+        ctx.queue.submit([enc.finish()]);
+        prof.final_residual = self.base.norm2(ctx, &self.base.gpu_r);
+        prof.finalization_phase = t_final.elapsed();
+        prof.total_phase = total_start.elapsed();
+        prof
     }
 
-    if fixed_iterations.is_some() && !read_back_solution {
-        if let Some(ref mut profile) = profile {
-            profile.iterations = iter_count;
-            profile.final_residual = last_residual;
-            profile.total_phase = total_start.elapsed();
-        }
-        return Err(SolverError::ConvergenceFailed { max_iter: target_iterations, residual: last_residual });
-    }
+    fn profile(&mut self, ctx: &GpuContext, x: &mut [T], cfg: &SolverConfig) -> GmresGpuProfile {
+        self.base.gpu_x.write_from_slice(ctx, x);
+        let total_start = Instant::now();
+        let mut prof = GmresGpuProfile::default();
+        let target = cfg.max_iter;
+        let m = self.m();
 
-    let finalization_start = Instant::now();
-    compute_residual_into(ctx, spmv, vops, a, b, gpu_x, gpu_ax, gpu_r);
-    let final_residual = vops.compute_norm2(ctx, gpu_r);
-    if read_back_solution {
-        let cpu_x = gpu_x.read_to_cpu(ctx);
-        x.copy_from_slice(&cpu_x);
+        let t0 = Instant::now();
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_init") });
+        self.base.compute_residual(ctx, &mut enc);
+        ctx.queue.submit([enc.finish()]);
+        prof.residual_phase = t0.elapsed();
+
+        let t0 = Instant::now();
+        let r_norm = self.base.norm2(ctx, &self.base.gpu_r);
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_seed") });
+        self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / r_norm, &self.base.gpu_r, 0.0, &self.basis[0]);
+        ctx.queue.submit([enc.finish()]);
+        prof.basis_seed_phase = t0.elapsed();
+
+        let mut h = vec![0.0_f64; (m + 1) * m];
+        let mut s = vec![0.0_f64; m + 1];
+        s[0] = r_norm;
+        let mut cs = vec![0.0_f64; m];
+        let mut sn = vec![0.0_f64; m];
+
+        let mut iter_count = 0usize;
+        while iter_count < target {
+            for j in 0..m {
+                let t_spmv = Instant::now();
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_spmv") });
+                self.base.spmv.encode_spmv(ctx, &mut enc, 1.0, &self.base.gpu_a, &self.basis[j], 0.0, &self.gpu_w);
+                ctx.queue.submit([enc.finish()]);
+                prof.arnoldi_spmv_phase += t_spmv.elapsed();
+
+                let t_orth = Instant::now();
+                for i in 0..=j {
+                    let hij = self.base.dot_readback(ctx, &self.gpu_w, &self.basis[i]);
+                    h[i * m + j] = sc_to_f64(hij);
+                    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_mgs") });
+                    self.base.vops.encode_axpy(ctx, &mut enc, -h[i * m + j], &self.basis[i], 1.0, &self.gpu_w);
+                    ctx.queue.submit([enc.finish()]);
+                }
+                prof.arnoldi_orthogonalization_phase += t_orth.elapsed();
+
+                let t_norm = Instant::now();
+                let w_norm = self.base.norm2(ctx, &self.gpu_w);
+                h[(j + 1) * m + j] = w_norm;
+                prof.arnoldi_normalization_phase += t_norm.elapsed();
+
+                for i in 0..j {
+                    let tmp = cs[i] * h[i * m + j] + sn[i] * h[(i + 1) * m + j];
+                    h[(i + 1) * m + j] = -sn[i] * h[i * m + j] + cs[i] * h[(i + 1) * m + j];
+                    h[i * m + j] = tmp;
+                }
+                let hjj = h[j * m + j];
+                let hjp1j = h[(j + 1) * m + j];
+                let sq = (hjj * hjj + hjp1j * hjp1j).sqrt();
+                cs[j] = hjj / sq; sn[j] = hjp1j / sq;
+                h[j * m + j] = sq; h[(j + 1) * m + j] = 0.0;
+                s[j + 1] = -sn[j] * s[j]; s[j] = cs[j] * s[j];
+
+                if iter_count + 1 < target {
+                    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_norm") });
+                    self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / w_norm, &self.gpu_w, 0.0, &self.basis[j + 1]);
+                    ctx.queue.submit([enc.finish()]);
+                }
+                iter_count += 1;
+                if iter_count >= target { break; }
+            }
+            if iter_count >= target { break; }
+
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_restart") });
+            self.base.compute_residual(ctx, &mut enc);
+            ctx.queue.submit([enc.finish()]);
+            let r_norm = self.base.norm2(ctx, &self.base.gpu_r);
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_reseed") });
+            self.base.vops.encode_axpy(ctx, &mut enc, 1.0 / r_norm, &self.base.gpu_r, 0.0, &self.basis[0]);
+            ctx.queue.submit([enc.finish()]);
+            s[0] = r_norm;
+            for i in 1..=m { s[i] = 0.0; }
+            h.iter_mut().for_each(|x| *x = 0.0);
+        }
+
+        prof.iterations = iter_count;
+        let n_mini = if iter_count % m == 0 { m } else { iter_count % m };
+
+        let t_sol = Instant::now();
+        for i in (0..n_mini).rev() {
+            let mut sum = s[i];
+            for j in (i + 1)..n_mini { sum -= h[i * m + j] * self.y[j]; }
+            self.y[i] = sum / h[i * m + i];
+        }
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_solution") });
+        for i in 0..n_mini {
+            self.base.vops.encode_axpy(ctx, &mut enc, self.y[i], &self.basis[i], 1.0, &self.base.gpu_x);
+        }
+        ctx.queue.submit([enc.finish()]);
+        prof.solution_update_phase = t_sol.elapsed();
+
+        let t_final = Instant::now();
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gmres_profile_final") });
+        self.base.compute_residual(ctx, &mut enc);
+        ctx.queue.submit([enc.finish()]);
+        prof.final_residual = self.base.norm2(ctx, &self.base.gpu_r);
+        prof.finalization_phase = t_final.elapsed();
+        prof.total_phase = total_start.elapsed();
+        prof
     }
-    if let Some(ref mut profile) = profile {
-        profile.iterations = iter_count;
-        profile.final_residual = final_residual;
-        profile.finalization_phase += finalization_start.elapsed();
-        profile.total_phase = total_start.elapsed();
-    }
-    Err(SolverError::ConvergenceFailed { max_iter: target_iterations, residual: final_residual })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compute_residual_into<T: Scalar>(
-    ctx: &GpuContext,
-    spmv: &SpmvPipeline,
-    vops: &VectorOpsPipeline,
-    a: &GpuCsrMatrix<T>,
-    b: &GpuVector<T>,
-    x: &GpuVector<T>,
-    ax: &mut GpuVector<T>,
-    r: &mut GpuVector<T>,
-) {
-    {
-        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        spmv.encode_spmv(ctx, &mut enc, 1.0, a, x, 0.0, ax);
-        ctx.queue.submit(Some(enc.finish()));
-    }
-    {
-        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        vops.encode_axpy(ctx, &mut enc, 1.0, b, 0.0, r);
-        ctx.queue.submit(Some(enc.finish()));
-    }
-    {
-        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        vops.encode_axpy(ctx, &mut enc, -1.0, ax, 1.0, r);
-        ctx.queue.submit(Some(enc.finish()));
-    }
+pub fn solve_gmres_gpu(ctx: &GpuContext, a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], cfg: &SolverConfig) -> Result<SolveResult, SolverError> {
+    let mut ws = GmresGpuWorkspace::<f64>::new(ctx, a, b);
+    ws.solve(ctx, x, cfg)
+}
+
+pub fn solve_gmres_gpu_f32(ctx: &GpuContext, a: &CsrMatrix<f32>, b: &[f32], x: &mut [f32], cfg: &SolverConfig) -> Result<SolveResult, SolverError> {
+    let mut ws = GmresGpuWorkspace::<f32>::new(ctx, a, b);
+    ws.solve(ctx, x, cfg)
 }

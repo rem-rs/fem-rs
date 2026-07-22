@@ -69,6 +69,8 @@ pub use linlvo::DenseVec;
 pub type GSSmoother = linlvo::GsPrecond<f64>;
 
 #[cfg(feature = "gpu")]
+pub mod gpu_base;
+#[cfg(feature = "gpu")]
 pub mod cg_gpu;
 #[cfg(feature = "gpu")]
 pub mod gmres_gpu;
