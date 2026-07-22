@@ -1105,6 +1105,7 @@ impl Assembler {
     ///
     /// `kind` must be one of `"diffusion"`, `"mass"`, or `"elasticity"`.
     /// For elasticity the parameters are taken from the integrator (lambda, mu).
+    #[cfg(feature = "gpu")]
     pub fn assemble_bilinear_gpu_with_kind<S: FESpace>(
         space: &S,
         integrators: &[&dyn BilinearIntegrator],
@@ -1113,6 +1114,7 @@ impl Assembler {
         Self::assemble_bilinear_gpu_impl(space, integrators, kind)
     }
 
+    #[cfg(feature = "gpu")]
     fn assemble_bilinear_gpu_impl<S: FESpace>(
         space: &S,
         integrators: &[&dyn BilinearIntegrator],

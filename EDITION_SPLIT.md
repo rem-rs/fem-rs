@@ -17,7 +17,7 @@ fem-rs as git submodule with additional crates:
 - **pro-solver** — FETI/BDDC, JDQZ, GPU-AMG, parallel-in-time
 - **pro-cad** — OpenCASCADE bindings, STEP/IGES import, defeaturing, mesh morphing
 - **pro-physics** — Advanced plasticity, NVH, fatigue, forming, EDA multi-physics, XFEM
-- **pro-enterprise** — REST API, cloud HPC, workflow, license management
+- **pro-workflow** — Workflow: problem definition, parameter management, project files, progress/cancel, license management
 
 ## Plugin API
 
