@@ -262,6 +262,16 @@ impl<T: linlvoScalar> AmgSolver<T> {
         self.hierarchy.n_levels()
     }
 
+    /// Access the system matrix at level `l` (0 = finest).
+    pub fn level_a(&self, l: usize) -> Option<&linlvo::CsrMatrix<T>> {
+        self.hierarchy.levels.get(l).map(|lev| &lev.a)
+    }
+
+    /// Access the prolongation matrix from level `l` to `l-1` (size: n_coarse × n_fine).
+    pub fn level_p(&self, l: usize) -> Option<&linlvo::CsrMatrix<T>> {
+        self.hierarchy.levels.get(l).and_then(|lev| lev.p.as_ref())
+    }
+
     /// Solve `A x = b` using the pre-built hierarchy.
     ///
     /// The hierarchy is cloned into the preconditioner wrapper so the
