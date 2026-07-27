@@ -57,7 +57,8 @@ pub fn solve_pcg_gssmoother<T: linlvoScalar>(
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let prec = GaussSeidelSmoother::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
-    let res = ConjugateGradient::default()
+    let cg = ConjugateGradient::new(usize::MAX); // match MFEM: no periodic residual recomputation
+    let res = cg
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());

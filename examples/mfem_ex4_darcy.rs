@@ -327,8 +327,8 @@ fn main() {
 
         let mut x = vec![0.0_f64; n_dofs];
         let cfg = SolverConfig {
-            rtol: 1e-10,
-            max_iter: 2000,
+            rtol: 1e-20,
+            max_iter: 10000,
             verbose: false,
             ..SolverConfig::default()
         };
@@ -616,7 +616,6 @@ mod tests {
             rtol: 1e-20,
             max_iter: 10000,
             verbose: false,
-            print_level: PrintLevel::Iterations,
             ..SolverConfig::default()
         };
         fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
