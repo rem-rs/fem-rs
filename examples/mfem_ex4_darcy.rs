@@ -557,6 +557,9 @@ mod tests {
         };
 
         let rt_order = if args.order >= 1 { args.order - 1 } else { 0 };
+        let aux_mesh = mesh.clone();
+        let aux_h1 = H1Space::new(aux_mesh.clone(), 1);
+        let aux_hcurl = HCurlSpace::new(aux_mesh, 1);
         let space = HDivSpace::new(mesh, rt_order);
         let n_dofs = space.n_dofs();
         let kappa = args.freq * PI;
@@ -596,8 +599,26 @@ mod tests {
             verbose: false,
             ..SolverConfig::default()
         };
-        fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
-            .expect("PCG+GSSmoother solve failed");
+        let ads_cfg = AdsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-10, max_iter: 2000, verbose: false, ..SolverConfig::default() },
+            ..AdsSolverConfig::default()
+        };
+        match (
+            DiscreteLinearOperator::curl_2d_hdiv(&aux_hcurl, &space),
+            DiscreteLinearOperator::gradient(&aux_h1, &aux_hcurl),
+        ) {
+            (Ok(c_fem), Ok(g_fem)) => {
+                let c_linlvo = fem_to_linlvo_csr(&c_fem);
+                let g_linlvo = fem_to_linlvo_csr(&g_fem);
+                solve_pcg_ads(&mat, &c_linlvo, &g_linlvo, &rhs, &mut x, &ads_cfg)
+                    .expect("PCG+ADS solve failed");
+            }
+            _ => {
+                eprintln!("ADS not supported — falling back to GSSmoother");
+                fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
+                    .expect("PCG+GSSmoother solve failed");
+            }
+        }
 
         let l2_err = fem_assembly::hdiv_error::compute_hdiv_l2_error(
             &space, &x, |p| exact_f(p, kappa),
