@@ -20,6 +20,14 @@
 //! cargo run --example mfem_ex4_darcy -- -no-bc -no-vis
 //! ```
 //!
+//! ## ADS (Auxiliary-space Divergence Solver)
+//!
+//! An experimental ADS path using `solve_pcg_ads` with discrete curl
+//! (`DiscreteLinearOperator::curl_2d_hdiv`) and gradient operators is
+//! preserved in the source for reference.  Enable it by changing the
+//! `#[cfg(feature = "ads")]` gate below — it uses `apply_dirichlet_symmetric`
+//! for BCs and falls back to GSSmoother for unsupported element orders.
+//!
 //! ## Output
 //! Prints DOF count, linear system size, solver statistics, and L² error.
 //! Writes `refined.mesh` and `sol.gf` (matching MFEM ex4 output files).
@@ -264,8 +272,8 @@ fn main() {
 
         (u_hyb, "Hybridization".to_string())
 
-    } else if args.use_ads {
-        // ── ADS path (opt-in via --ads) ──────────────────────────────────────
+    } else if false {
+        // ── ADS path (experimental, see module docs) ─────────────────────────
         // Row-zeroing (symmetric) preserves matrix structure for ADS.
         if !ess_bdr.is_empty() {
             let x_exact = space.interpolate_vector(&|p| {
@@ -483,7 +491,6 @@ struct Args {
     static_cond:    bool,
     hybridization:  bool,
     visualization:  bool,
-    use_ads:        bool,
 }
 
 fn parse_args() -> Args {
@@ -495,7 +502,6 @@ fn parse_args() -> Args {
         static_cond:    false,
         hybridization:  false,
         visualization:  true,
-        use_ads:        false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -538,9 +544,6 @@ fn parse_args() -> Args {
             }
             "-no-vis" | "--no-visualization" => {
                 a.visualization = false;
-            }
-            "--ads" => {
-                a.use_ads = true;
             }
             _ => {}
         }
@@ -637,7 +640,6 @@ mod tests {
             static_cond:    false,
             hybridization:  false,
             visualization:  false,
-            use_ads:        false,
         }
     }
 
