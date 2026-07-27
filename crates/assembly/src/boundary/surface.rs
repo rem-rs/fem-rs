@@ -569,48 +569,56 @@ impl SurfaceQuad4Assembler {
 
 // ─── Q2 basis on [-1, 1]² ─────────────────────────────────────────────────
 
-/// Evaluate all 9 Q2 basis functions at (ξ, η) on [-1, 1]².
-pub fn q2_basis(xi: f64, eta: f64) -> [f64; 9] {
-    let xp = 1.0 + xi;  let xm = 1.0 - xi;
-    let yp = 1.0 + eta; let ym = 1.0 - eta;
-    [
-        0.25 * xm * ym * (-xi - eta - 1.0),   // φ₀ corner (-1,-1)
-        0.25 * xp * ym * ( xi - eta - 1.0),   // φ₁ corner (+1,-1)
-        0.25 * xp * yp * ( xi + eta - 1.0),   // φ₂ corner (+1,+1)
-        0.25 * xm * yp * (-xi + eta - 1.0),   // φ₃ corner (-1,+1)
-        0.50 * (1.0 - xi*xi) * ym,            // φ₄ mid-edge bottom (0,-1)
-        0.50 * xp * (1.0 - eta*eta),          // φ₅ mid-edge right (+1,0)
-        0.50 * (1.0 - xi*xi) * yp,            // φ₆ mid-edge top (0,+1)
-        0.50 * xm * (1.0 - eta*eta),          // φ₇ mid-edge left (-1,0)
-        (1.0 - xi*xi) * (1.0 - eta*eta),      // φ₈ centre (0,0)
-    ]
+/// 1-D quadratic Lagrange basis on [-1, 1] with nodes at {-1, 0, +1}.
+fn lagrange_q1d(x: f64) -> [f64; 3] {
+    [x * (x - 1.0) / 2.0,   // ℓ₀, node at -1
+     (1.0 - x) * (1.0 + x), // ℓ₁, node at  0
+     x * (x + 1.0) / 2.0]   // ℓ₂, node at +1
 }
 
-/// Derivatives of Q2 basis: ∂φ/∂ξ and ∂φ/∂η at (ξ, η).
+fn lagrange_q1d_deriv(x: f64) -> [f64; 3] {
+    [x - 0.5,   // ℓ₀′
+     -2.0 * x,  // ℓ₁′
+     x + 0.5]   // ℓ₂′
+}
+
+/// Evaluate all 9 Q2 Lagrangian basis functions at (ξ, η) on [-1, 1]².
+///
+/// Node ordering (tensor-product):
+///   0: (-1,-1)  1: (+1,-1)  2: (+1,+1)  3: (-1,+1)
+///   4: ( 0,-1)  5: (+1, 0)  6: ( 0,+1)  7: (-1, 0)
+///   8: ( 0, 0)
+/// Basis: φ_{i×3+j}(ξ,η) = ℓ_i(ξ) · ℓ_j(η)
+pub fn q2_basis(xi: f64, eta: f64) -> [f64; 9] {
+    let lx = lagrange_q1d(xi);
+    let ly = lagrange_q1d(eta);
+    let mut phi = [0.0; 9];
+    let mut k = 0;
+    for j in 0..3 {
+        for i in 0..3 {
+            phi[k] = lx[i] * ly[j];
+            k += 1;
+        }
+    }
+    phi
+}
+
+/// Derivatives ∂φ/∂ξ and ∂φ/∂η for the 9-node Lagrangian Q2 basis.
 fn q2_basis_derivs(xi: f64, eta: f64) -> ([f64; 9], [f64; 9]) {
-    let x = xi;  let y = eta;
-    let dxi = [
-        0.25 * (1.0 - y) * (2.0*x + y),
-       -0.25 * (1.0 - y) * (2.0*x - y),
-        0.25 * (1.0 + y) * (2.0*x + y),
-       -0.25 * (1.0 + y) * (2.0*x - y),
-       -x * (1.0 - y),
-        0.5 * (1.0 - y*y),
-       -x * (1.0 + y),
-       -0.5 * (1.0 - y*y),
-       -2.0 * x * (1.0 - y*y),
-    ];
-    let det = [
-        0.25 * (1.0 - x) * (x + 2.0*y),
-        0.25 * (1.0 + x) * (-x + 2.0*y),
-        0.25 * (1.0 + x) * (x + 2.0*y),
-       -0.25 * (1.0 - x) * (x - 2.0*y),
-       -0.5 * (1.0 - x*x),
-       -y * (1.0 + x),
-        0.5 * (1.0 - x*x),
-       -y * (1.0 - x),
-       -2.0 * y * (1.0 - x*x),
-    ];
+    let lx  = lagrange_q1d(xi);
+    let ly  = lagrange_q1d(eta);
+    let dlx = lagrange_q1d_deriv(xi);
+    let dly = lagrange_q1d_deriv(eta);
+    let mut dxi = [0.0; 9];
+    let mut det = [0.0; 9];
+    let mut k = 0;
+    for j in 0..3 {
+        for i in 0..3 {
+            dxi[k] = dlx[i] * ly[j];
+            det[k] = lx[i] * dly[j];
+            k += 1;
+        }
+    }
     (dxi, det)
 }
 
@@ -689,12 +697,16 @@ const GL3: [[f64; 2]; 9] = [
     [ 0.0,                 0.0               ],
 ];
 const GL3_W: [f64; 3] = [0.5555555555555556, 0.8888888888888888, 0.5555555555555556];
-fn q2_quad_weight(qi: usize) -> f64 {
-    let wi = match qi { 1|3|5|7 => 1, 4|6 => 0, 2|8 => 2, _ => 0 };
-    let wj = match qi { 4|5 => 0, 1|7 => 1, 3|6 => 2, _ => 0 };
-    GL3_W[wi] * GL3_W[wj]
+pub fn q2_quad_weight(qi: usize) -> f64 {
+    // GL3 point → (xi_idx, eta_idx):
+    //   0:(-0.774,-0.774)→(0,0)  1:( 0.774,-0.774)→(2,0)  2:( 0.774, 0.774)→(2,2)
+    //   3:(-0.774, 0.774)→(0,2)  4:( 0.0,  -0.774)→(1,0)  5:( 0.774, 0.0  )→(2,1)
+    //   6:( 0.0,   0.774)→(1,2)  7:(-0.774, 0.0  )→(0,1)  8:( 0.0,   0.0  )→(1,1)
+    let i: usize = match qi { 0|3|7 => 0, 4|6|8 => 1, 1|2|5 => 2, _ => 0 };
+    let j: usize = match qi { 0|1|4 => 0, 5|7|8 => 1, 2|3|6 => 2, _ => 0 };
+    GL3_W[i] * GL3_W[j]
 }
-fn q2_quad_point(qi: usize) -> (f64, f64) { (GL3[qi][0], GL3[qi][1]) }
+pub fn q2_quad_point(qi: usize) -> (f64, f64) { (GL3[qi][0], GL3[qi][1]) }
 
 // ─── Diffusion (Laplace-Beltrami) ─────────────────────────────────────────
 
@@ -791,13 +803,34 @@ impl SurfaceQuad9LinearIntegrator for SurfaceQuad9DomainSourceIntegrator<'_> {
     }
 }
 
+/// Build 9 Q2 nodal coordinates from 4 corner nodes of a Quad4 mesh.
+/// Edge midpoints and centroid are projected onto the unit sphere
+/// to match the snapping applied to DofManager Q2 DOF coordinates.
+pub fn q2_coords_from_quad4<M: MeshTopology>(mesh: &M, nodes: &[u32]) -> [[f64; 3]; 9] {
+    let x0 = get_coord3(mesh, nodes[0]);
+    let x1 = get_coord3(mesh, nodes[1]);
+    let x2 = get_coord3(mesh, nodes[2]);
+    let x3 = get_coord3(mesh, nodes[3]);
+    let snap = |mut p: [f64; 3]| { let r = (p[0]*p[0]+p[1]*p[1]+p[2]*p[2]).sqrt().max(1e-30);
+                                   p[0]/=r; p[1]/=r; p[2]/=r; p };
+    let midpoint = |a: [f64; 3], b: [f64; 3]| snap([(a[0]+b[0])/2.0, (a[1]+b[1])/2.0, (a[2]+b[2])/2.0]);
+    let centre = snap([(x0[0]+x1[0]+x2[0]+x3[0])/4.0,
+                       (x0[1]+x1[1]+x2[1]+x3[1])/4.0,
+                       (x0[2]+x1[2]+x2[2]+x3[2])/4.0]);
+    [x0, x1, x2, x3, midpoint(x0,x1), midpoint(x1,x2), midpoint(x2,x3), midpoint(x3,x0), centre]
+}
+
 // ─── Quad9 Surface Assembler ──────────────────────────────────────────────
 
-/// Assemble surface forms on Quad9 (Q2, 9-node) elements.
+/// Assemble surface forms for Q2 (9 DOF/element) on a Quad4 mesh with H1 order=2.
+///
+/// Reads 4 vertex nodes from `mesh.element_nodes(e)`, builds the 9 Q2
+/// coordinates, and uses 9 DOFs from `space.element_dofs(e)` for global
+/// indexing.  This matches DofManager's `build_q2_quad` numbering.
 pub struct SurfaceQuad9Assembler;
 
 impl SurfaceQuad9Assembler {
-    /// Assemble a bilinear form over all Quad9 elements.
+    /// Assemble a bilinear form over all elements.
     pub fn assemble_bilinear<S: FESpace>(
         space: &S,
         integrators: &[&dyn SurfaceQuad9BilinearIntegrator],
@@ -809,12 +842,8 @@ impl SurfaceQuad9Assembler {
         for e in 0..ne {
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
-            if nodes.len() < 9 { continue; }
-            let x: [[f64; 3]; 9] = {
-                let mut arr = [[0.0; 3]; 9];
-                for i in 0..9 { let c = get_coord3(mesh, nodes[i]); arr[i] = [c[0], c[1], c[2]]; }
-                arr
-            };
+            if nodes.len() < 4 { continue; }
+            let x = q2_coords_from_quad4(mesh, nodes);
             let mut ke = [0.0; 81];
             for integ in integrators {
                 integ.add_to_element_matrix(&x, &mut ke);
@@ -828,7 +857,7 @@ impl SurfaceQuad9Assembler {
         coo.into_csr()
     }
 
-    /// Assemble a linear form over all Quad9 elements.
+    /// Assemble a linear form over all elements.
     pub fn assemble_linear<S: FESpace>(
         space: &S,
         integrators: &[&dyn SurfaceQuad9LinearIntegrator],
@@ -840,12 +869,8 @@ impl SurfaceQuad9Assembler {
         for e in 0..ne {
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
-            if nodes.len() < 9 { continue; }
-            let x: [[f64; 3]; 9] = {
-                let mut arr = [[0.0; 3]; 9];
-                for i in 0..9 { let c = get_coord3(mesh, nodes[i]); arr[i] = [c[0], c[1], c[2]]; }
-                arr
-            };
+            if nodes.len() < 4 { continue; }
+            let x = q2_coords_from_quad4(mesh, nodes);
             let mut fe = [0.0; 9];
             for integ in integrators {
                 integ.add_to_element_vector(&x, &mut fe);

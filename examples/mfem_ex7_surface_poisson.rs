@@ -94,10 +94,10 @@ fn main() {
         snap_nodes(&mut mesh);
     }
 
-    // Elevate Quad4 → Quad9 for high-order support (disabled — H1Space
-    // order=2 element_dofs don't map 1:1 to mesh nodes for quads).
-    // Use Quad4 assembly with order=1 instead.
-    let use_quad9 = false; // disabled pending H1Space Q2 support
+    // Quad9: H1Space order=2 on Quad4 mesh → 9 DOFs per element via
+    // DofManager::build_q2_quad.  The assembler reads 4 corner nodes and
+    // computes the 9 Q2 coordinates internally.
+    let use_quad9 = is_quad && args.order >= 2;
 
     let n_elems = mesh.n_elems();
     let n_nodes = mesh.n_nodes();
@@ -108,7 +108,13 @@ fn main() {
     // Tri6: use order=1 (DOFs = mesh nodes, assembly uses P2 bases).
     // Quad9: use order=2 to match the 9-node element topology.
     let h1_order = if use_tri6 { 1 } else if use_quad9 { 2 } else { args.order.min(1) };
-    let space = H1Space::new(mesh, h1_order);
+    let mut space = H1Space::new(mesh, h1_order);
+    // Snap edge-midpoint and centroid DOF coordinates to the sphere surface.
+    // DofManager builds straight-line averages; for the sphere geometry we
+    // need the radial projection (matching MFEM SetCurvature + snap behaviour).
+    if use_quad9 {
+        space.dof_manager_mut().snap_to_sphere();
+    }
     let n_dofs = space.n_dofs();
     println!("Number of unknowns: {}", n_dofs);
 
@@ -183,7 +189,7 @@ fn main() {
     };
     let mesh_ptr = space.mesh();
     let err2 = if use_quad9 {
-        quad9_l2_error(mesh_ptr, &u, &exact_fn)
+        quad9_l2_error(mesh_ptr, &space, &u, &exact_fn)
     } else if is_quad {
         quad4_l2_error(mesh_ptr, &u, &exact_fn)
     } else if use_tri6 {
@@ -396,85 +402,6 @@ fn refine_uniform_tri6(mesh: &Mesh<3>) -> Mesh<3> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  Quad9 (Q2 quadrilateral) helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Convert a Quad4 mesh to Quad9 by adding edge midpoints and a center
-/// node per element, all snapped to the unit sphere.
-fn elevate_to_quad9(mesh: &Mesh<3>) -> Mesh<3> {
-    let ne = mesh.n_elems();
-    let old_conn = &mesh.conn; // 4 indices per element
-    let n0 = mesh.n_nodes() as u32;
-
-    let mut coords = mesh.coords.clone();
-    let mut next_node = n0;
-
-    // Edge midpoint cache: (a,b) → new node id
-    let mut edge_map = std::collections::HashMap::<(u32, u32), u32>::new();
-    let mut center_map = std::collections::HashMap::<u32, u32>::new();
-
-    let add_edge = |a: u32, b: u32,
-                    coords: &mut Vec<f64>,
-                    map: &mut std::collections::HashMap<(u32, u32), u32>,
-                    next: &mut u32| -> u32 {
-        let key = if a < b { (a, b) } else { (b, a) };
-        *map.entry(key).or_insert_with(|| {
-            let j = *next; *next += 1;
-            let i3 = j as usize * 3;
-            let ia = a as usize * 3;
-            let ib = b as usize * 3;
-            let cx = (coords[ia] + coords[ib]) / 2.0;
-            let cy = (coords[ia+1] + coords[ib+1]) / 2.0;
-            let cz = (coords[ia+2] + coords[ib+2]) / 2.0;
-            let r = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-30);
-            coords.extend_from_slice(&[cx/r, cy/r, cz/r]);
-            j
-        })
-    };
-
-    let mut new_conn = Vec::with_capacity(ne * 9);
-
-    for e in 0..ne {
-        let i = e * 4;
-        let (n0, n1, n2, n3) = (old_conn[i], old_conn[i+1], old_conn[i+2], old_conn[i+3]);
-
-        // Edge midpoints (4)
-        let m0 = add_edge(n0, n1, &mut coords, &mut edge_map, &mut next_node);
-        let m1 = add_edge(n1, n2, &mut coords, &mut edge_map, &mut next_node);
-        let m2 = add_edge(n2, n3, &mut coords, &mut edge_map, &mut next_node);
-        let m3 = add_edge(n3, n0, &mut coords, &mut edge_map, &mut next_node);
-
-        // Centre node: average of the 4 corner midpoints projected to sphere
-        let c = *center_map.entry(e as u32).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            let (n0i, n1i, n2i, n3i) = (n0 as usize*3, n1 as usize*3, n2 as usize*3, n3 as usize*3);
-            let cx = (coords[n0i] + coords[n1i] + coords[n2i] + coords[n3i]) / 4.0;
-            let cy = (coords[n0i+1] + coords[n1i+1] + coords[n2i+1] + coords[n3i+1]) / 4.0;
-            let cz = (coords[n0i+2] + coords[n1i+2] + coords[n2i+2] + coords[n3i+2]) / 4.0;
-            let r = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-30);
-            coords.extend_from_slice(&[cx/r, cy/r, cz/r]);
-            j
-        });
-
-        // Quad9 node order: corners [0..3], edge mids [4..7], centre [8]
-        new_conn.extend_from_slice(&[n0, n1, n2, n3, m0, m1, m2, m3, c]);
-    }
-
-    Mesh {
-        coords, conn: new_conn,
-        elem_tags: mesh.elem_tags.clone(),
-        elem_type: ElementType::Quad4, // Keep Quad4 type; H1 space interprets order=2 → 9 DOFs
-        face_conn: vec![], face_tags: vec![],
-        face_type: ElementType::Line2,
-        elem_types: None, elem_offsets: None,
-        face_types: None, face_offsets: None,
-        face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 //  L² error helpers (one per element type)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -568,48 +495,30 @@ fn tri6_l2_error(mesh: &Mesh<3>, u: &[f64], exact: &dyn Fn(&[f64; 3]) -> f64) ->
     err2
 }
 
-fn quad9_l2_error(mesh: &Mesh<3>, u: &[f64], exact: &dyn Fn(&[f64; 3]) -> f64) -> f64 {
+fn quad9_l2_error(mesh: &Mesh<3>, space: &H1Space<Mesh<3>>, u: &[f64],
+                  exact: &dyn Fn(&[f64; 3]) -> f64) -> f64 {
+    use fem_assembly::boundary::surface::q2_coords_from_quad4;
     let mut err2 = 0.0;
     for e in 0..mesh.n_elems() as u32 {
+        let dofs = space.element_dofs(e);
+        if dofs.len() < 9 { continue; }
         let ns = mesh.element_nodes(e);
-
-        let x: [[f64; 3]; 9] = core::array::from_fn(|i| {
-            let c = mesh.node_coords(ns[i]);
-            [c[0], c[1], c[2]]
-        });
-
-        // 3×3 Gauss quadrature
+        let x = q2_coords_from_quad4(mesh, ns);
         for q in 0..9 {
-            let (xi, eta) = match q {
-                0 => (-0.7745966692414834, -0.7745966692414834),
-                1 => ( 0.7745966692414834, -0.7745966692414834),
-                2 => ( 0.7745966692414834,  0.7745966692414834),
-                3 => (-0.7745966692414834,  0.7745966692414834),
-                4 => ( 0.0,                -0.7745966692414834),
-                5 => ( 0.7745966692414834,  0.0               ),
-                6 => ( 0.0,                 0.7745966692414834),
-                7 => (-0.7745966692414834,  0.0               ),
-                8 => ( 0.0,                 0.0               ),
-                _ => unreachable!(),
-            };
-            let wi = match q { 1|3|5|7 => 1, 4|6 => 0, 2|8 => 2, _ => 0 };
-            let wj = match q { 4|5 => 0, 1|7 => 1, 3|6 => 2, _ => 0 };
-            let w = [0.5555555555555556, 0.8888888888888888, 0.5555555555555556][wi]
-                  * [0.5555555555555556, 0.8888888888888888, 0.5555555555555556][wj];
-
-            let jac = fem_assembly::boundary::surface::q2_jacobian_at(&x, xi, eta); // exposed as pub
+            let (xi, eta) = fem_assembly::boundary::surface::q2_quad_point(q);
+            let w   = fem_assembly::boundary::surface::q2_quad_weight(q);
+            let jac = fem_assembly::boundary::surface::q2_jacobian_at(&x, xi, eta);
             let g00 = jac[0][0]*jac[0][0] + jac[0][1]*jac[0][1] + jac[0][2]*jac[0][2];
             let g01 = jac[0][0]*jac[1][0] + jac[0][1]*jac[1][1] + jac[0][2]*jac[1][2];
             let g11 = jac[1][0]*jac[1][0] + jac[1][1]*jac[1][1] + jac[1][2]*jac[1][2];
             let sqrt_det_g = (g00*g11 - g01*g01).sqrt().max(1e-30);
-
             let phi = fem_assembly::boundary::surface::q2_basis(xi, eta);
             let xp = [
-                phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh.node_coords(n)[0]).sum::<f64>(),
-                phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh.node_coords(n)[1]).sum::<f64>(),
-                phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh.node_coords(n)[2]).sum::<f64>(),
+                (0..9).map(|i| phi[i] * x[i][0]).sum::<f64>(),
+                (0..9).map(|i| phi[i] * x[i][1]).sum::<f64>(),
+                (0..9).map(|i| phi[i] * x[i][2]).sum::<f64>(),
             ];
-            let uh = phi.iter().zip(ns.iter()).map(|(&p, &n)| p * u[n as usize]).sum::<f64>();
+            let uh = (0..9).map(|i| phi[i] * u[dofs[i] as usize]).sum::<f64>();
             let ue = exact(&xp);
             err2 += (uh - ue).powi(2) * w * sqrt_det_g;
         }

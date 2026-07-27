@@ -51,6 +51,8 @@ impl<M: MeshTopology> H1Space<M> {
 
     /// Reference to the DOF manager.
     pub fn dof_manager(&self) -> &DofManager { &self.dm }
+    /// Mutable reference to the DOF manager.
+    pub fn dof_manager_mut(&mut self) -> &mut DofManager { &mut self.dm }
 
     /// Current per-element orders (None for uniform).
     pub fn elem_orders(&self) -> Option<&[u8]> {

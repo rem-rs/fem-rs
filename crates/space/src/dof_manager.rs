@@ -221,6 +221,19 @@ impl DofManager {
         &self.dof_coords[start .. start + self.dim]
     }
 
+    /// Radially project all DOF coordinates beyond `n_vertex_dofs`
+    /// (edge midpoints, interior DOFs, …) onto the unit sphere.
+    /// Call this after construction when the geometry is a spherical surface.
+    pub fn snap_to_sphere(&mut self) {
+        for i in self.n_vertex_dofs..self.n_dofs {
+            let base = i * self.dim;
+            let mut r2 = 0.0_f64;
+            for d in 0..self.dim { r2 += self.dof_coords[base + d].powi(2); }
+            let r = r2.sqrt().max(1e-30);
+            for d in 0..self.dim { self.dof_coords[base + d] /= r; }
+        }
+    }
+
     // ─── P1 ──────────────────────────────────────────────────────────────────
 
     fn build_p1<M: MeshTopology>(mesh: &M) -> Self {
