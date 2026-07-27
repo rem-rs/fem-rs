@@ -32,6 +32,40 @@ pub fn apply_dirichlet(
     }
 }
 
+/// Apply Dirichlet BCs following MFEM's `FormLinearSystem` convention.
+///
+/// Modifies the matrix and RHS in-place so that constrained DOFs are set
+/// to their prescribed values, keeping the full N×N system (unlike
+/// [`eliminate_dirichlet`] which produces a reduced system).
+///
+/// After this call, for each constrained DOF `i`:
+/// - `mat[i,i] = 1`, `mat[i,j] = 0` for all `j ≠ i`
+/// - `rhs[i] = val[i]`
+/// - `rhs[other] -= mat[other, i] * val[i]` (column elimination, matching
+///   MFEM's symmetric elimination pass)
+///
+/// The caller should then solve the full N×N system (PCG / AMS / …) and
+/// read `x` directly — no `expand_from_reduced` needed.
+///
+/// # Panics
+/// Panics if `constrained_dofs.len() != values.len()` or `x.len() < n_full`.
+pub fn form_linear_system(
+    mat:              &mut CsrMatrix<f64>,
+    rhs:              &mut [f64],
+    x:                &mut [f64],
+    constrained_dofs: &[DofId],
+    values:           &[f64],
+) {
+    assert_eq!(constrained_dofs.len(), values.len(),
+        "constrained_dofs and values must have the same length");
+    // 1. Initialise solution vector with BC values.
+    for (&dof, &val) in constrained_dofs.iter().zip(values.iter()) {
+        x[dof as usize] = val;
+    }
+    // 2. Column elimination + row elimination (MFEM FormLinearSystem step).
+    apply_dirichlet(mat, rhs, constrained_dofs, values);
+}
+
 /// Build a reduced system by eliminating Dirichlet DOFs from the matrix.
 ///
 /// Returns `(reduced_mat, reduced_rhs, free_map, constrained_map)` where:

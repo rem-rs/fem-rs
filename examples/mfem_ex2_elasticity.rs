@@ -37,7 +37,7 @@ use fem_linalg::fem_to_linlvo_csr;
 use fem_space::{
     VectorH1Space,
     fe_space::FESpace,
-    constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
+    constraints::{boundary_dofs, form_linear_system},
 };
 use fem_solver::GSSmoother;
 
@@ -139,7 +139,7 @@ fn main() {
     let lambda_coeff = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
     let mu_coeff = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
     let elasticity = ElasticityIntegrator::new(lambda_coeff, mu_coeff);
-    let mat = Assembler::assemble_bilinear(&space, &[&elasticity], quad_order);
+    let mut mat = Assembler::assemble_bilinear(&space, &[&elasticity], quad_order);
 
     // 10. Form the linear system (eliminate essential BCs in‑place).
     if args.static_cond {
@@ -150,24 +150,19 @@ fn main() {
 
     println!("done.");
 
-    // 10b. Eliminate essential BCs to form the reduced system (matching MFEM
-    //      FormLinearSystem), so the preconditioner only sees active DOFs.
+    // 10b. Form the linear system (MFEM FormLinearSystem — in-place, full N×N).
     let n_full = n_dofs;
-    let (red_mat, red_rhs, free_map, constrained_map) =
-        eliminate_dirichlet(&mat, &rhs, &clamped, &clamped_vals);
+    let mut x = vec![0.0_f64; n_full];
+    form_linear_system(&mut mat, &mut rhs, &mut x, &clamped, &clamped_vals);
 
-    let n_sys = red_mat.nrows;
+    let n_sys = n_full;
     println!("Size of linear system: {n_sys}");
 
-    // 11. Solve the reduced system: PCG + GSSmoother (SSOR, ω = 1).
-    let linlvo_mat = fem_to_linlvo_csr(&red_mat);
+    // 11. Solve the full system: PCG + GSSmoother (SSOR, ω = 1).
+    let linlvo_mat = fem_to_linlvo_csr(&mat);
     let precond = GSSmoother::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
-    let mut x_red = vec![0.0_f64; n_sys];
-    let _res = solve_pcg(&red_mat, &red_rhs, &mut x_red, &precond, 1e-8, 500, true)
+    let _res = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-8, 500, true)
         .expect("elasticity solve failed");
-
-    // 12. Recover the full solution (MFEM RecoverFEMSolution).
-    let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &clamped_vals, n_full);
 
     // 13. Make the mesh curved based on the FE space — skipped for simplicity.
 
@@ -177,8 +172,8 @@ fn main() {
         let mut displaced_mesh = space.mesh().clone();
         let n_nodes = displaced_mesh.n_nodes();
         for i in 0..n_nodes {
-            displaced_mesh.coords[i * dim]     += u[i];             // x‑displacement
-            displaced_mesh.coords[i * dim + 1] += u[n_scalar + i];  // y‑displacement
+            displaced_mesh.coords[i * dim]     += x[i];             // x‑displacement
+            displaced_mesh.coords[i * dim + 1] += x[n_scalar + i];  // y‑displacement
         }
 
         // Write the displaced mesh.
@@ -187,7 +182,7 @@ fn main() {
 
         // Write the inverted solution (x → −x, matching MFEM ex2).
         let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
-        for &v in &u {
+        for &v in &x {
             writeln!(sol_f, "{:.14e}", -v).expect("sol write failed");
         }
         eprintln!("  Wrote displaced.mesh and sol.gf");
@@ -201,8 +196,8 @@ fn main() {
                 // one value per node.
                 sock.send_solution_2d_vector(
                     space.mesh(),
-                    &u[..n_scalar],
-                    &u[n_scalar..],
+                    &x[..n_scalar],
+                    &x[n_scalar..],
                     "u",
                 )
                 .ok();

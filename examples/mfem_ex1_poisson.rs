@@ -29,7 +29,7 @@ use fem_solver::solve_pcg;
 use fem_space::{
     H1Space,
     fe_space::FESpace,
-    constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
+    constraints::{boundary_dofs, form_linear_system},
 };
 use fem_solver::GSSmoother;
 
@@ -77,42 +77,38 @@ fn main() {
 
     // 7. Right-hand side: b(v) = ∫ 1·v dx.
     let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
-    let rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
+    let mut rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
 
     // 8. Solution vector x — zero initial guess (built by expand_from_reduced).
 
     // 9. Stiffness matrix: a(u, v) = ∫ ∇u · ∇v dx.
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
-    let mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
+    let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
 
-    // 10. Form the linear system (eliminate essential BCs).
+    // 10. Form the linear system (MFEM FormLinearSystem — in-place, full N×N).
     let bnd_vals = vec![0.0_f64; bnd.len()];
-    let (red_mat, red_rhs, free_map, constrained_map) =
-        eliminate_dirichlet(&mat, &rhs, &bnd, &bnd_vals);
+    let mut x = vec![0.0_f64; n_full];
+    form_linear_system(&mut mat, &mut rhs, &mut x, &bnd, &bnd_vals);
 
     // 11. Solve: PCG with symmetric Gauss-Seidel preconditoner (ω = 1 = GS).
-    let n_sys = red_mat.nrows;
-    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&red_mat);
+    let n_sys = n_full;
+    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
     let precond = GSSmoother::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
-    let mut x_red = vec![0.0_f64; n_sys];
     let _result =
-        solve_pcg(&red_mat, &red_rhs, &mut x_red, &precond, 1e-12, 500, true)
+        solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 500, true)
             .expect("solver failed");
 
-    // 12. Recover the full solution (MFEM RecoverFEMSolution).
-    let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_full);
-
-    // 13. Print summary.
+    // 12. Print summary.
     println!();
     println!("Number of finite element unknowns: {}", n_full);
-    println!("Size of linear system:            {}", n_full);
+    println!("Size of linear system:            {}", n_sys);
 
     // 14. Save the refined mesh and solution (MFEM ex1 step 13).
     {
         let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
         write_mfem(&mut mesh_f, mesh_ref, None).expect("mesh write failed");
         let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
-        for &v in &u {
+        for &v in &x {
             writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
         }
         eprintln!("  Wrote refined.mesh and sol.gf");
@@ -122,7 +118,7 @@ fn main() {
     if args.visualization {
         match fem_io::glvis::GlVisSocket::connect("localhost", 19916) {
             Ok(mut sock) => {
-                sock.send_solution_2d(mesh_ref, &u, "u").ok();
+                sock.send_solution_2d(mesh_ref, &x, "u").ok();
                 eprintln!("  Sent solution to GLVis (localhost:19916)");
             }
             Err(e) => eprintln!("  GLVis not available: {}", e),

@@ -43,7 +43,7 @@ use fem_solver::{solve_pcg, SolverConfig};
 use fem_space::{
     HCurlSpace,
     fe_space::FESpace,
-    constraints::{boundary_dofs_hcurl, eliminate_dirichlet, expand_from_reduced},
+    constraints::{boundary_dofs_hcurl, form_linear_system},
 };
 
 fn main() {
@@ -113,7 +113,7 @@ fn main() {
     let kappa = args.freq * PI;
     let source = MaxwellSource { kappa };
     let quad_order = args.order as u8 * 2 + 2;
-    let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+    let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
     // 8. Project the exact solution onto the H(curl) space (C++ step 8:
     //    x.ProjectCoefficient(E)).  These projected values serve as the
@@ -124,30 +124,36 @@ fn main() {
     // 9. Stiffness matrix: a(u, v) = ∫ (∇×u)·(∇×v) + u·v dx.
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
     let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-    let mat = VectorAssembler::assemble_bilinear(
+    let mut mat = VectorAssembler::assemble_bilinear(
         &space, &[&curl_curl, &vec_mass], quad_order,
     );
 
-    // 10. Column elimination: replicate MFEM's FormLinearSystem.
-    //     For each essential DOF j with value v_j:
-    //       rhs[i] -= A[i,j] * v_j   for all i ≠ j
-    //     (the diagonal entry A[j,j] is set to 1).
+    // 10. Form the linear system (MFEM FormLinearSystem — in-place, full N×N).
+    //     Column elimination: rhs -= A * bc_vals (for constrained DOFs).
+    //     Row elimination: A[i,:] = 0, A[i,i] = 1, rhs[i] = bc_val[i].
     print!("Assembling: matrix ... ");
     if args.static_cond {
         eprintln!("  Warning: static condensation not yet implemented — skipping.");
     }
-    let mut mat_bc = mat.clone();
-    let mut rhs_bc = rhs.clone();
-    for (&dof, &val) in ess_bdr.iter().zip(bc_vals.iter()) {
-        mat_bc.apply_dirichlet_symmetric(dof as usize, val, &mut rhs_bc);
-    }
+    let mut x = u_proj.clone();  // initial guess = projected exact solution
+    form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
     println!("done.");
 
-    // 11. Eliminate essential BC DOFs and solve the reduced system.
-    let ams_path = args.use_ams;
-    if ams_path {
-        // AMS path — uses the unmodified matrix (column elimination already done
-        // on mat_bc, but AMS needs the original mat for the discrete gradient).
+    println!("Size of linear system: {}", n_dofs);
+
+    // 11. Solve using PCG + AMS (default, matching MFEM ex3) or
+    //     PCG + GSSmoother (fallback with -no-ams).
+    if args.no_ams {
+        let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&mat);
+        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
+            .expect("GSSmoother setup");
+        let result = solve_pcg(
+            &mat, &rhs, &mut x, &precond,
+            1e-12, 2000, true,
+        ).expect("PCG+GSSmoother solve failed");
+        println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
+            result.iterations, result.final_residual);
+    } else {
         use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
         use fem_linalg::fem_to_linlvo_csr as ftl;
         let g = DiscreteLinearOperator::gradient(
@@ -155,13 +161,7 @@ fn main() {
             &space,
         ).expect("gradient assembly failed");
         let g_linlvo = ftl(&g);
-        // AMS path not yet updated for non-homogeneous BC — leaving as-is.
-        let mut ams_mat = mat.clone();
-        for &d in &ess_bdr {
-            ams_mat.eliminate_essential_bc_diag(d as usize, 1.0);
-        }
-        let mut x_full = u_proj.clone();
-        let result = solve_pcg_ams(&ams_mat, &g_linlvo, &rhs, &mut x_full, &AmsSolverConfig {
+        let result = solve_pcg_ams(&mat, &g_linlvo, &rhs, &mut x, &AmsSolverConfig {
             inner_cfg: SolverConfig {
                 rtol: 1e-12, atol: 1e-20, max_iter: 2000, verbose: true,
                 ..SolverConfig::default()
@@ -170,70 +170,28 @@ fn main() {
         }).expect("PCG+AMS solve failed");
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}",
             result.iterations, result.final_residual);
-        let u = x_full;
-
-        // L² error.
-        let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
-            &space, &u, |x| exact_e(x, kappa),
-        );
-        println!("\n|| E_h - E ||_{{L^2}} = {l2_err:.14e}\n");
-
-        // Save output.
-        {
-            let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
-            write_mfem(&mut mesh_f, space.mesh(), None).expect("mesh write failed");
-            let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
-            for &v in &u {
-                writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
-            }
-            eprintln!("  Wrote refined.mesh and sol.gf");
-        }
-        if args.visualization {
-            let _ = send_to_glvis(space.mesh(), &space, &u, "E");
-        }
-        return;
     }
 
-    let (red_mat, red_rhs, free_map, constrained_map) =
-        eliminate_dirichlet(&mat_bc, &rhs_bc, &ess_bdr, &bc_vals);
-    let n_sys = red_mat.nrows;
-    println!("  Reduced system size: {n_sys}");
-
-    let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&red_mat);
-    let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
-        .expect("GSSmoother setup");
-    let mut x_red = vec![0.0_f64; n_sys];
-    let result = solve_pcg(
-        &red_mat, &red_rhs, &mut x_red, &precond,
-        1e-12, 2000, true,
-    ).expect("PCG+GSSmoother solve failed");
-    println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
-        result.iterations, result.final_residual);
-
-    // Recover full solution: unconstrained DOFs from solve, constrained DOFs
-    // from the projected exact solution (non-homogeneous BC).
-    let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &bc_vals, n_dofs);
-
-    // 13. Compute and print the L² norm of the error against the exact solution.
+    // 12. Compute L² error.
     let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
-        &space, &u, |x| exact_e(x, kappa),
+        &space, &x, |x| exact_e(x, kappa),
     );
     println!("\n|| E_h - E ||_{{L^2}} = {l2_err:.14e}\n");
 
-    // 14. Save the refined mesh and the solution (matches MFEM ex3 output files).
+    // 13. Save the refined mesh and solution (matches MFEM ex3 output files).
     {
         let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
         write_mfem(&mut mesh_f, space.mesh(), None).expect("mesh write failed");
         let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
-        for &v in &u {
+        for &v in &x {
             writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
         }
         eprintln!("  Wrote refined.mesh and sol.gf");
     }
 
-    // 15. Send a nodal-projected view of the solution to GLVis.
+    // 14. Send solution to GLVis.
     if args.visualization {
-        match send_to_glvis(space.mesh(), &space, &u, "E") {
+        match send_to_glvis(space.mesh(), &space, &x, "E") {
             Ok(_) => eprintln!("  Sent solution to GLVis (localhost:19916)"),
             Err(e) => eprintln!("  GLVis not available: {e}"),
         }
@@ -409,8 +367,8 @@ struct Args {
     static_cond:   bool,
     visualization: bool,
     freq:          f64,
-    /// Use PCG+AMS preconditioner instead of PCG+GSSmoother.
-    use_ams:       bool,
+    /// Use PCG+GSSmoother instead of PCG+AMS (default matches MFEM ex3).
+    no_ams:       bool,
 }
 
 fn parse_args() -> Args {
@@ -421,7 +379,7 @@ fn parse_args() -> Args {
         static_cond:   false,
         visualization: true,
         freq:          1.0,
-        use_ams:       false,
+        no_ams:       false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -447,8 +405,8 @@ fn parse_args() -> Args {
             "-no-sc" | "--no-static-condensation" => {
                 a.static_cond = false;
             }
-            "-ams" | "--ams" => {
-                a.use_ams = true;
+            "-no-ams" | "--no-ams" => {
+                a.no_ams = true;
             }
             "-vis" | "--visualization" => {
                 a.visualization = true;
@@ -467,7 +425,6 @@ fn parse_args() -> Args {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_space::constraints::expand_from_reduced;
 
     fn solve_case(args: &Args) -> (Vec<f64>, usize, f64) {
         let mesh = if let Some(ref path) = args.mesh {
@@ -489,42 +446,31 @@ mod tests {
         let kappa = args.freq * PI;
         let source = MaxwellSource { kappa };
         let quad_order = args.order as u8 * 2 + 2;
-        let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+        let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
         let curl_curl = CurlCurlIntegrator { mu: 1.0 };
         let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-        let mat = VectorAssembler::assemble_bilinear(
+        let mut mat = VectorAssembler::assemble_bilinear(
             &space, &[&curl_curl, &vec_mass], quad_order,
         );
 
-        // Project exact solution and apply non-homogeneous BC (C++ ex3 step 8).
+        // Project exact solution and set up BCs (C++ ex3 step 8 / FormLinearSystem).
         let u_proj = project_hcurl_exact(&space, kappa, quad_order);
         let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
+        let mut x = u_proj.clone();
+        form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
 
-        let mut mat_bc = mat.clone();
-        let mut rhs_bc = rhs.clone();
-        for (&dof, &val) in ess_bdr.iter().zip(bc_vals.iter()) {
-            mat_bc.apply_dirichlet_symmetric(dof as usize, val, &mut rhs_bc);
-        }
-
-        let (sys_mat, sys_rhs, free_map, constrained_map) =
-            eliminate_dirichlet(&mat_bc, &rhs_bc, &ess_bdr, &bc_vals);
-
-        let n_sys = sys_mat.nrows;
-        let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&sys_mat);
+        let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&mat);
         let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
             .expect("GSSmoother setup failed");
-        let mut x_red = vec![0.0_f64; n_sys];
-        fem_solver::solve_pcg(&sys_mat, &sys_rhs, &mut x_red, &precond, 1e-12, 500, false)
+        fem_solver::solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 500, false)
             .expect("PCG solve failed");
 
-        let u = expand_from_reduced(&x_red, &free_map, &constrained_map, &bc_vals, n_dofs);
-
         let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
-            &space, &u, |x| exact_e(x, kappa),
+            &space, &x, |x| exact_e(x, kappa),
         );
 
-        (u, n_dofs, l2_err)
+        (x, n_dofs, l2_err)
     }
 
     fn default_args() -> Args {
@@ -535,7 +481,7 @@ mod tests {
             static_cond:   false,
             visualization: false,
             freq:          1.0,
-            use_ams:       false,
+            no_ams:        true,  // tests use GSSmoother (faster)
         }
     }
 
