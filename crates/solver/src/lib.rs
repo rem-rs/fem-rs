@@ -66,7 +66,7 @@ pub use linlvo::DenseVec;
 /// let prec = GSSmoother::from_csr(&la).expect("GSSmoother");
 /// let res = solve_pcg(&a, &b, &mut x, &prec, 1e-12, 200, true);
 /// ```
-pub type GSSmoother = linlvo::GsPrecond<f64>;
+pub type GSSmoother = linlvo::SsorPrecond<f64>;
 
 #[cfg(feature = "gpu")]
 pub mod gpu_base;

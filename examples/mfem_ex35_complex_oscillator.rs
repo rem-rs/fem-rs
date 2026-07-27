@@ -123,7 +123,7 @@ fn solve_h1(mesh: &Mesh<2>, order: u8, a: f64, b: f64, _c: f64, omega2: f64, ome
         mat.apply_dirichlet_symmetric(n + d as usize, 0.0, &mut rhs);
     }
     let mut x = vec![0.0; n2];
-    let precond = fem_solver::GSSmoother::from_csr(&fem_to_linlvo_csr(&mat)).expect("GS");
+    let precond = fem_solver::GSSmoother::from_csr(&fem_to_linlvo_csr(&mat), 1.0).expect("GS");
     fem_solver::solve_pcg(&mat, &rhs, &mut x, &precond, 1e-10, 5000, true).expect("PCG");
     println!("Size of linear system: {n2}");
     println!("  max|Re(u)| = {:.6e}", x[..n].iter().map(|v|v.abs()).fold(0.0_f64, f64::max));
@@ -158,7 +158,7 @@ fn solve_hcurl(mesh: &Mesh<2>, order: u8, a: f64, b: f64, _c: f64, omega2: f64, 
     let mut mat = sys_mat;
     for &d in &bdr { mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut rhs); mat.apply_dirichlet_symmetric(n + d as usize, 0.0, &mut rhs); }
     let mut x = vec![0.0; n2];
-    let precond = fem_solver::GSSmoother::from_csr(&fem_to_linlvo_csr(&mat)).expect("GS");
+    let precond = fem_solver::GSSmoother::from_csr(&fem_to_linlvo_csr(&mat), 1.0).expect("GS");
     fem_solver::solve_pcg(&mat, &rhs, &mut x, &precond, 1e-10, 5000, true).expect("PCG");
     println!("Size of linear system: {n2}");
 }
@@ -187,7 +187,7 @@ fn solve_hdiv(mesh: &Mesh<2>, order: u8, a: f64, b: f64, _c: f64, omega2: f64, o
     let mut mat = sys_mat;
     for &d in &bdr { mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut rhs); mat.apply_dirichlet_symmetric(n + d as usize, 0.0, &mut rhs); }
     let mut x = vec![0.0; n2];
-    let precond = fem_solver::GSSmoother::from_csr(&fem_to_linlvo_csr(&mat)).expect("GS");
+    let precond = fem_solver::GSSmoother::from_csr(&fem_to_linlvo_csr(&mat), 1.0).expect("GS");
     fem_solver::solve_pcg(&mat, &rhs, &mut x, &precond, 1e-10, 5000, true).expect("PCG");
     println!("Size of linear system: {n2}");
 }

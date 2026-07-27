@@ -1493,7 +1493,7 @@ pub fn solve_hcurl_jacobi(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, Solve
 /// PCG with SSOR(ω=1) preconditioner (symmetric Gauss-Seidel, GSSmoother).
 pub fn solve_hcurl_gssmoother(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, SolveResult) {
     let linlvo_mat = fem_linalg::fem_to_linlvo_csr(mat);
-    let precond = fem_solver::GSSmoother::from_csr(&linlvo_mat)
+    let precond = fem_solver::GSSmoother::from_csr(&linlvo_mat, 1.0)
         .expect("SSOR preconditioner setup failed");
     let mut u = vec![0.0_f64; rhs.len()];
     let cfg = SolverConfig {
