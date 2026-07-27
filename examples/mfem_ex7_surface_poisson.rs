@@ -98,8 +98,10 @@ fn main() {
     eprintln!("  Mesh: {} nodes, {} {} on unit sphere", n_nodes, n_elems, elem_name);
 
     // ── 3. Define H1 space ──────────────────────────────────────────────────
-    // For Tri6 mesh, use order=1 (DOFs = mesh nodes, assembly uses P2 bases)
-    let h1_order = if use_tri6 { 1 } else { args.order };
+    // Tri6: use order=1 (DOFs = mesh nodes, assembly uses P2 bases).
+    // Quad4: SurfaceQuad4Assembler is hardcoded for Q1 (4 DOFs/elem), so
+    //        force order=1 to avoid orphan Q2 DOFs with zero diagonal.
+    let h1_order = if use_tri6 || is_quad { 1 } else { args.order };
     let space = H1Space::new(mesh, h1_order);
     let n_dofs = space.n_dofs();
     println!("Number of unknowns: {}", n_dofs);
