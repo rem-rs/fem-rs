@@ -227,47 +227,21 @@ fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
     [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
 }
 
-// ─── Projection integrator ───────────────────────────────────────────────────
-//
-//   Evaluates the exact solution E at quadrature points for the mass-matrix
-//   projection M * u_proj = rhs_exact  (C++ ProjectCoefficient equivalent).
-
-struct ExactSolutionSource {
-    kappa: f64,
-}
-
-impl VectorLinearIntegrator for ExactSolutionSource {
-    fn add_to_element_vector(&self, qp: &VectorQpData<'_>, f_elem: &mut [f64]) {
-        let x = qp.x_phys;
-        let fx = (self.kappa * x[1]).sin();
-        let fy = (self.kappa * x[0]).sin();
-        for i in 0..qp.n_dofs {
-            let dot = qp.phi_vec[i * 2] * fx + qp.phi_vec[i * 2 + 1] * fy;
-            f_elem[i] += qp.weight * dot;
-        }
-    }
-}
-
-/// Project the exact H(curl) solution onto the FE space by solving the mass
-/// matrix system.  Returns the coefficient vector `u_proj` such that
-/// `u_proj ≈ E_exact` in the L² sense.
+/// Project the exact H(curl) solution onto the FE space by evaluating the
+/// Nédélec DOF functionals directly (edge-moment interpolation), matching
+/// MFEM's `ProjectCoefficient`.
+///
+/// For ND1 this is the tangential line integral `∫_e E·t̂ ds` on each edge
+/// (evaluated by midpoint rule), and likewise for higher-order moments.
+/// This is the correct approach for MFEM ex3 → it produces the same
+/// coefficient vector that FormLinearSystem expects for non-homogeneous
+/// Dirichlet BCs, unlike an L² mass-matrix projection.
 fn project_hcurl_exact(
     space: &HCurlSpace<Mesh<2>>,
     kappa: f64,
-    quad_order: u8,
+    _quad_order: u8,
 ) -> Vec<f64> {
-    let mass = VectorMassIntegrator { alpha: 1.0 };
-    let m_mat = VectorAssembler::assemble_bilinear(space, &[&mass], quad_order);
-    let source = ExactSolutionSource { kappa };
-    let m_rhs = VectorAssembler::assemble_linear(space, &[&source], quad_order);
-    let n = m_mat.nrows;
-    let mut u_proj = vec![0.0_f64; n];
-    let m_linlvo = fem_linalg::fem_to_linlvo_csr(&m_mat);
-    let precond = fem_solver::GSSmoother::from_csr(&m_linlvo, 1.0)
-        .expect("GSSmoother for projection");
-    solve_pcg(&m_mat, &m_rhs, &mut u_proj, &precond, 1e-12, 5000, false)
-        .expect("projection solve failed");
-    u_proj
+    space.interpolate_vector(&|x| exact_e(x, kappa).to_vec()).into_vec()
 }
 
 // ─── GLVis helper ────────────────────────────────────────────────────────────

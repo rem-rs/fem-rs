@@ -24,7 +24,7 @@ use std::sync::Arc;
 use fem_assembly::{
     DiscreteLinearOperator, VectorAssembler,
     mixed::{assemble_hcurl_h1_gradient, assemble_hdiv_l2_mixed, HDivL2DivIntegrator},
-    project_coefficient, project_hcurl_coefficient, project_hcurl_coefficient_2d,
+    project_coefficient,
     project_hdiv_coefficient_2d, project_hdiv_coefficient_3d,
     standard::VectorMassIntegrator,
 };
@@ -411,16 +411,10 @@ fn run_curl_3d(mesh: &Mesh<3>, order: u8) {
     }
     let curl_v_exact = CurlVExact { kappa };
 
-    // Project v onto H(curl) trial space (L² projection, matching C++ ProjectCoefficient)
-    let v = project_hcurl_coefficient(
-        &nd,
-        &|x: &[f64], out: &mut [f64]| {
-            out[0] = (kappa * x[1]).sin();
-            out[1] = (kappa * x[2]).sin();
-            out[2] = (kappa * x[0]).sin();
-        },
-        qo,
-    );
+    // Project v onto H(curl) trial space via DOF-functional interpolation
+    // (matching MFEM's ProjectCoefficient — evaluates edge moments directly
+    // instead of solving an L² mass-matrix system).
+    let v = nd.interpolate_vector(&v_exact).into_vec();
 
     // (a) Mixed form: solve M·w = C·v  (C = weak curl matrix: HCurl→HDiv)
     // assemble_hcurl_hdiv_weak_curl computes ∫ curl(ψ_j)·w_i dx = C[i,j] where ψ∈HCurl, w∈HDiv
