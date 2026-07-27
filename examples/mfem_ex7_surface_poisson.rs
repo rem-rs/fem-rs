@@ -19,7 +19,7 @@
 //! |------|---------|-------------|
 //! | `-e/--elem` | 0 | Element type (0=tri, 1=quad) |
 //! | `-r/--refine` | 2 | Uniform refinements |
-//! | `-o/--order` | 2 | FE order (only 1 supported) |
+//! | `-o/--order` | 2 | FE order (1 → P1, 2 → Tri6/Quad9) |
 //! | `-snap/--always-snap` | — | Snap after each refinement |
 //! | `-amr/--refine-locally` | 0 | Not yet implemented |
 //! | `-no-vis` | — | Disable GLVis (no-op) |
@@ -75,7 +75,14 @@ fn main() {
             } else {
                 refine_uniform_surface_tri3(&mesh)
             };
+            // C++: snap after each refinement only when -snap is set
+            if args.always_snap {
+                snap_nodes(&mut mesh);
+            }
         }
+    }
+    // C++: snap once at the end if -snap was NOT used
+    if !args.always_snap || args.ref_levels == 0 {
         snap_nodes(&mut mesh);
     }
 
@@ -243,7 +250,7 @@ fn main() {
         }
     }
     let l2_err = err2.sqrt();
-    println!("\nL2 norm of error: {:.10e}", l2_err);
+    println!("\nL2 error: {:.10e}", l2_err);
 
     // ── 7. Output files ─────────────────────────────────────────────────────
     {
