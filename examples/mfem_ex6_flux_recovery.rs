@@ -25,6 +25,7 @@ use fem_assembly::postproc::grid_function::GridFunction;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType};
 use fem_mesh::amr::{closure_refine_default, refine_nonconforming_quad, HangingNodeConstraint};
+use fem_linalg::PrintLevel;
 use fem_solver::{SolverConfig, solve_pcg_gssmoother};
 use fem_space::{
     H1Space,
@@ -111,11 +112,13 @@ fn main() {
             }
         }
 
-        // Solve: PCG + GSSmoother (MFEM: max_iter=200, rtol=1e-12).
+        // Solve: PCG + GSSmoother (MFEM: PCG(*A, M, B, X, 3, 200, 1e-12, 0.0)).
+        // C++ print_iter=3 → PrintLevel::Iterations in linlvo.
         let cfg = SolverConfig {
             rtol: 1e-12,
+            atol: 0.0,
             max_iter: 200,
-            verbose: false,
+            print_level: PrintLevel::Iterations,
             ..SolverConfig::default()
         };
         let res = solve_pcg_gssmoother(&red_mat, &red_rhs, &mut u_red, &cfg);
@@ -136,14 +139,9 @@ fn main() {
             recover_hanging_values(&mut u, &hanging_constraints);
         }
 
-        // Print diagnostics.
+        // Print ZZ estimator diagnostics.
         let gf = GridFunction::new(&space, u.clone());
         let indicators = zz_estimator_nodal(&gf);
-        let sol_l2 = gf.compute_l2_error(&|_| 0.0, quad_stiff.max(quad_rhs));
-        println!("  Solution L2 norm: {:.10e}", sol_l2);
-
-        let eta_total: f64 = indicators.eta.iter().sum();
-        println!("  ZZ estimator total: {:.6e}", eta_total);
 
         // Check max DOFs.
         if cdofs > max_dofs {
@@ -151,14 +149,19 @@ fn main() {
             break;
         }
 
-        // MFEM ThresholdRefiner: mark elements with error > 0.7 × max(error).
-        let max_eta = indicators.eta.iter().cloned().fold(0.0_f64, f64::max);
-        let threshold = 0.7 * max_eta;
-        let marked: Vec<u32> = indicators.eta.iter().enumerate()
-            .filter(|(_, &e)| e > threshold)
-            .map(|(i, _)| i as u32)
+        // MFEM ThresholdRefiner with SetTotalErrorFraction(0.7):
+        // sort elements by error descending, mark the smallest set whose
+        // cumulative error sum reaches ≥ 70 % of total error.
+        let mut eta: Vec<(usize, f64)> = indicators.eta.iter().copied().enumerate().collect();
+        let eta_total: f64 = eta.iter().map(|(_, e)| e).sum();
+        // Sort descending by error.
+        eta.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let mut cum = 0.0_f64;
+        let threshold = 0.7 * eta_total;
+        let marked: Vec<u32> = eta.iter()
+            .take_while(|(_, e)| { cum += e; cum <= threshold })
+            .map(|(i, _)| *i as u32)
             .collect();
-        println!("  Marked elements: {}/{}", marked.len(), mesh.n_elems());
 
         if marked.is_empty() {
             println!("Stopping criterion satisfied. Stop.");
@@ -212,13 +215,14 @@ fn build_edge_midpoint_map(old: &Mesh<2>, new: &Mesh<2>) -> std::collections::Ha
 }
 
 struct Args {
-    mesh: String, order: u8, max_dofs: usize, _no_vis: bool,
+    mesh: String, order: u8, max_dofs: usize, _ls_zz: bool, _no_vis: bool,
 }
 impl Args {
     fn parse() -> Self {
         let mut mesh = "data/star.mesh".to_string();
         let mut order: u8 = 1;
         let mut max_dofs: usize = 50000;
+        let mut ls_zz = false;
         let mut no_vis = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -226,11 +230,12 @@ impl Args {
                 "-m" | "--mesh" => mesh = it.next().unwrap_or(mesh),
                 "-o" | "--order" => order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
                 "-md" | "--max-dofs" => max_dofs = it.next().and_then(|v| v.parse().ok()).unwrap_or(50000),
+                "-ls" | "--ls-zz" => ls_zz = true,
                 "-no-vis" | "--no-visualization" => no_vis = true,
                 _ => {}
             }
         }
-        Args { mesh, order, max_dofs, _no_vis: no_vis }
+        Args { mesh, order, max_dofs, _ls_zz: ls_zz, _no_vis: no_vis }
     }
 }
 
