@@ -563,6 +563,301 @@ impl SurfaceQuad4Assembler {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  Quad9 (Q2, 9-node) surface integrators — matches MFEM's SetCurvature(2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Q2 basis on [-1, 1]² ─────────────────────────────────────────────────
+
+/// Evaluate all 9 Q2 basis functions at (ξ, η) on [-1, 1]².
+pub fn q2_basis(xi: f64, eta: f64) -> [f64; 9] {
+    let xp = 1.0 + xi;  let xm = 1.0 - xi;
+    let yp = 1.0 + eta; let ym = 1.0 - eta;
+    [
+        0.25 * xm * ym * (-xi - eta - 1.0),   // φ₀ corner (-1,-1)
+        0.25 * xp * ym * ( xi - eta - 1.0),   // φ₁ corner (+1,-1)
+        0.25 * xp * yp * ( xi + eta - 1.0),   // φ₂ corner (+1,+1)
+        0.25 * xm * yp * (-xi + eta - 1.0),   // φ₃ corner (-1,+1)
+        0.50 * (1.0 - xi*xi) * ym,            // φ₄ mid-edge bottom (0,-1)
+        0.50 * xp * (1.0 - eta*eta),          // φ₅ mid-edge right (+1,0)
+        0.50 * (1.0 - xi*xi) * yp,            // φ₆ mid-edge top (0,+1)
+        0.50 * xm * (1.0 - eta*eta),          // φ₇ mid-edge left (-1,0)
+        (1.0 - xi*xi) * (1.0 - eta*eta),      // φ₈ centre (0,0)
+    ]
+}
+
+/// Derivatives of Q2 basis: ∂φ/∂ξ and ∂φ/∂η at (ξ, η).
+fn q2_basis_derivs(xi: f64, eta: f64) -> ([f64; 9], [f64; 9]) {
+    let x = xi;  let y = eta;
+    let dxi = [
+        0.25 * (1.0 - y) * (2.0*x + y),
+       -0.25 * (1.0 - y) * (2.0*x - y),
+        0.25 * (1.0 + y) * (2.0*x + y),
+       -0.25 * (1.0 + y) * (2.0*x - y),
+       -x * (1.0 - y),
+        0.5 * (1.0 - y*y),
+       -x * (1.0 + y),
+       -0.5 * (1.0 - y*y),
+       -2.0 * x * (1.0 - y*y),
+    ];
+    let det = [
+        0.25 * (1.0 - x) * (x + 2.0*y),
+        0.25 * (1.0 + x) * (-x + 2.0*y),
+        0.25 * (1.0 + x) * (x + 2.0*y),
+       -0.25 * (1.0 - x) * (x - 2.0*y),
+       -0.5 * (1.0 - x*x),
+       -y * (1.0 + x),
+        0.5 * (1.0 - x*x),
+       -y * (1.0 - x),
+       -2.0 * y * (1.0 - x*x),
+    ];
+    (dxi, det)
+}
+
+/// Surface Jacobian for Q2 element at (ξ, η).
+pub fn q2_jacobian_at(x: &[[f64; 3]; 9], xi: f64, eta: f64) -> [[f64; 3]; 2] {
+    let (dxi, det) = q2_basis_derivs(xi, eta);
+    let mut j0 = [0.0; 3]; let mut j1 = [0.0; 3];
+    for i in 0..9 {
+        for c in 0..3 {
+            j0[c] += dxi[i] * x[i][c];
+            j1[c] += det[i] * x[i][c];
+        }
+    }
+    [j0, j1]
+}
+
+/// Metric tensor and surface area factor from a 2×3 Jacobian.
+fn q2_metric_at(j: &[[f64; 3]; 2]) -> (f64, f64) {
+    let g00 = j[0][0]*j[0][0] + j[0][1]*j[0][1] + j[0][2]*j[0][2];
+    let g01 = j[0][0]*j[1][0] + j[0][1]*j[1][1] + j[0][2]*j[1][2];
+    let g11 = j[1][0]*j[1][0] + j[1][1]*j[1][1] + j[1][2]*j[1][2];
+    let det_g = g00 * g11 - g01 * g01;
+    (det_g, det_g.sqrt().max(1e-30))
+}
+
+/// Pseudo-inverse for a 3×2 Jacobian (Quad9 variant).
+fn pseudo_inverse_quad9(j: &[[f64; 3]; 2], det_g: f64) -> [[f64; 2]; 3] {
+    let inv_det = 1.0 / det_g.max(1e-30);
+    let g00 = j[0][0]*j[0][0] + j[0][1]*j[0][1] + j[0][2]*j[0][2];
+    let g01 = j[0][0]*j[1][0] + j[0][1]*j[1][1] + j[0][2]*j[1][2];
+    let g11 = j[1][0]*j[1][0] + j[1][1]*j[1][1] + j[1][2]*j[1][2];
+    let ginvt = [[g11 * inv_det, -g01 * inv_det], [-g01 * inv_det, g00 * inv_det]];
+    let mut p = [[0.0; 2]; 3];
+    for r in 0..3 {
+        p[r][0] = ginvt[0][0] * j[0][r] + ginvt[0][1] * j[1][r];
+        p[r][1] = ginvt[1][0] * j[0][r] + ginvt[1][1] * j[1][r];
+    }
+    p
+}
+
+/// Surface gradients of Q2 basis at a point with pseudo-inverse.
+fn q2_surface_gradients_at(pinv: &[[f64; 2]; 3], xi: f64, eta: f64) -> [[f64; 3]; 9] {
+    let (dxi, det) = q2_basis_derivs(xi, eta);
+    let mut sg = [[0.0; 3]; 9];
+    for i in 0..9 {
+        for c in 0..3 {
+            sg[i][c] = dxi[i] * pinv[c][0] + det[i] * pinv[c][1];
+        }
+    }
+    sg
+}
+
+// ─── Traits ───────────────────────────────────────────────────────────────
+
+/// Bilinear form on Quad9: adds to a 9×9 element matrix.
+pub trait SurfaceQuad9BilinearIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 9], k_elem: &mut [f64; 81]);
+}
+
+/// Linear form on Quad9: adds to a 9-element vector.
+pub trait SurfaceQuad9LinearIntegrator {
+    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 9], f_elem: &mut [f64; 9]);
+}
+
+// ─── 3×3 Gauss-Legendre points on [-1, 1]² ────────────────────────────────
+
+const GL3: [[f64; 2]; 9] = [
+    [-0.7745966692414834, -0.7745966692414834],
+    [ 0.7745966692414834, -0.7745966692414834],
+    [ 0.7745966692414834,  0.7745966692414834],
+    [-0.7745966692414834,  0.7745966692414834],
+    [ 0.0,                -0.7745966692414834],
+    [ 0.7745966692414834,  0.0               ],
+    [ 0.0,                 0.7745966692414834],
+    [-0.7745966692414834,  0.0               ],
+    [ 0.0,                 0.0               ],
+];
+const GL3_W: [f64; 3] = [0.5555555555555556, 0.8888888888888888, 0.5555555555555556];
+fn q2_quad_weight(qi: usize) -> f64 {
+    let wi = match qi { 1|3|5|7 => 1, 4|6 => 0, 2|8 => 2, _ => 0 };
+    let wj = match qi { 4|5 => 0, 1|7 => 1, 3|6 => 2, _ => 0 };
+    GL3_W[wi] * GL3_W[wj]
+}
+fn q2_quad_point(qi: usize) -> (f64, f64) { (GL3[qi][0], GL3[qi][1]) }
+
+// ─── Diffusion (Laplace-Beltrami) ─────────────────────────────────────────
+
+/// Surface diffusion for Q2 (Quad9): `∫_Γ ∇_Γ u · ∇_Γ v dS`
+pub struct SurfaceQuad9DiffusionIntegrator;
+
+impl SurfaceQuad9DiffusionIntegrator {
+    pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 9], k_elem: &mut [f64; 81]) {
+        for q in 0..9 {
+            let (xi, eta) = q2_quad_point(q);
+            let w = q2_quad_weight(q);
+            let j = q2_jacobian_at(elem_nodes, xi, eta);
+            let (det_g, sqrt_det_g) = q2_metric_at(&j);
+            let pinv = pseudo_inverse_quad9(&j, det_g);
+            let sg = q2_surface_gradients_at(&pinv, xi, eta);
+            let area = w * sqrt_det_g;
+            for i in 0..9 {
+                for j in 0..9 {
+                    let dot = sg[i][0]*sg[j][0] + sg[i][1]*sg[j][1] + sg[i][2]*sg[j][2];
+                    k_elem[i * 9 + j] += dot * area;
+                }
+            }
+        }
+    }
+}
+
+impl SurfaceQuad9BilinearIntegrator for SurfaceQuad9DiffusionIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 9], k_elem: &mut [f64; 81]) {
+        self.add_to_element_matrix(elem_nodes, k_elem);
+    }
+}
+
+// ─── Mass ─────────────────────────────────────────────────────────────────
+
+/// Surface mass for Q2 (Quad9): `∫_Γ u v dS`
+pub struct SurfaceQuad9MassIntegrator;
+
+impl SurfaceQuad9MassIntegrator {
+    pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 9], k_elem: &mut [f64; 81]) {
+        for q in 0..9 {
+            let (xi, eta) = q2_quad_point(q);
+            let w = q2_quad_weight(q);
+            let j = q2_jacobian_at(elem_nodes, xi, eta);
+            let (_det_g, sqrt_det_g) = q2_metric_at(&j);
+            let area = w * sqrt_det_g;
+            let phi = q2_basis(xi, eta);
+            for i in 0..9 {
+                for j in 0..9 {
+                    k_elem[i * 9 + j] += phi[i] * phi[j] * area;
+                }
+            }
+        }
+    }
+}
+
+impl SurfaceQuad9BilinearIntegrator for SurfaceQuad9MassIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 9], k_elem: &mut [f64; 81]) {
+        self.add_to_element_matrix(elem_nodes, k_elem);
+    }
+}
+
+// ─── Domain source ────────────────────────────────────────────────────────
+
+/// Surface domain source for Q2 (Quad9): `∫_Γ f(x) v(x) dS`
+pub struct SurfaceQuad9DomainSourceIntegrator<'a> {
+    pub f: &'a dyn Fn(&[f64; 3]) -> f64,
+}
+
+impl SurfaceQuad9DomainSourceIntegrator<'_> {
+    pub fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 9], f_elem: &mut [f64; 9]) {
+        for q in 0..9 {
+            let (xi, eta) = q2_quad_point(q);
+            let w = q2_quad_weight(q);
+            let j = q2_jacobian_at(elem_nodes, xi, eta);
+            let (_det_g, sqrt_det_g) = q2_metric_at(&j);
+            let area = w * sqrt_det_g;
+            let phi = q2_basis(xi, eta);
+            let xp = [
+                phi.iter().zip(elem_nodes.iter()).map(|(&p, &n)| p * n[0]).sum::<f64>(),
+                phi.iter().zip(elem_nodes.iter()).map(|(&p, &n)| p * n[1]).sum::<f64>(),
+                phi.iter().zip(elem_nodes.iter()).map(|(&p, &n)| p * n[2]).sum::<f64>(),
+            ];
+            let f_val = (self.f)(&xp);
+            for i in 0..9 {
+                f_elem[i] += f_val * phi[i] * area;
+            }
+        }
+    }
+}
+
+impl SurfaceQuad9LinearIntegrator for SurfaceQuad9DomainSourceIntegrator<'_> {
+    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 9], f_elem: &mut [f64; 9]) {
+        self.add_to_element_vector(elem_nodes, f_elem);
+    }
+}
+
+// ─── Quad9 Surface Assembler ──────────────────────────────────────────────
+
+/// Assemble surface forms on Quad9 (Q2, 9-node) elements.
+pub struct SurfaceQuad9Assembler;
+
+impl SurfaceQuad9Assembler {
+    /// Assemble a bilinear form over all Quad9 elements.
+    pub fn assemble_bilinear<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn SurfaceQuad9BilinearIntegrator],
+    ) -> CsrMatrix<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let ne = mesh.n_elements() as u32;
+        let mut coo = CooMatrix::new(n_dofs, n_dofs);
+        for e in 0..ne {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            if nodes.len() < 9 { continue; }
+            let x: [[f64; 3]; 9] = {
+                let mut arr = [[0.0; 3]; 9];
+                for i in 0..9 { let c = get_coord3(mesh, nodes[i]); arr[i] = [c[0], c[1], c[2]]; }
+                arr
+            };
+            let mut ke = [0.0; 81];
+            for integ in integrators {
+                integ.add_to_element_matrix(&x, &mut ke);
+            }
+            for i in 0..9 {
+                for j in 0..9 {
+                    coo.add(dofs[i] as usize, dofs[j] as usize, ke[i * 9 + j]);
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// Assemble a linear form over all Quad9 elements.
+    pub fn assemble_linear<S: FESpace>(
+        space: &S,
+        integrators: &[&dyn SurfaceQuad9LinearIntegrator],
+    ) -> Vec<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let ne = mesh.n_elements() as u32;
+        let mut rhs = vec![0.0; n_dofs];
+        for e in 0..ne {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            if nodes.len() < 9 { continue; }
+            let x: [[f64; 3]; 9] = {
+                let mut arr = [[0.0; 3]; 9];
+                for i in 0..9 { let c = get_coord3(mesh, nodes[i]); arr[i] = [c[0], c[1], c[2]]; }
+                arr
+            };
+            let mut fe = [0.0; 9];
+            for integ in integrators {
+                integ.add_to_element_vector(&x, &mut fe);
+            }
+            for i in 0..9 {
+                rhs[dofs[i] as usize] += fe[i];
+            }
+        }
+        rhs
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
