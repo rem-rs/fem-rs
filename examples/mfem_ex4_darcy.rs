@@ -30,13 +30,16 @@ use std::io::Write;
 
 use fem_assembly::{
     VectorAssembler,
+    discrete_op::DiscreteLinearOperator,
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
     standard::{GradDivIntegrator, VectorMassIntegrator},
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_solver::{SolverConfig};
+use fem_solver::{solve_pcg_ads, AdsSolverConfig, SolverConfig};
 use fem_space::{
+    H1Space, HCurlSpace,
     HDivSpace,
     fe_space::FESpace,
     constraints::{boundary_dofs_hdiv, form_linear_system},
@@ -96,6 +99,11 @@ fn main() {
     // 5. H(div) Raviart-Thomas finite element space of order (args.order - 1).
     //    MFEM's RT_FECollection(order-1, dim) → RT0 for order=1, RT1 for order=2.
     let rt_order = if args.order >= 1 { args.order - 1 } else { 0 };
+
+    // Clone mesh for auxiliary spaces (ADS uses the de Rham complex).
+    let aux_mesh = mesh.clone();
+    let aux_h1 = H1Space::new(aux_mesh.clone(), 1);       // P1 — topological gradient
+    let aux_hcurl = HCurlSpace::new(aux_mesh, 1);          // ND1 — topological curl
     let space = HDivSpace::new(mesh, rt_order);
     let n_dofs = space.n_dofs();
     println!("\nNumber of finite element unknowns: {n_dofs}");
