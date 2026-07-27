@@ -272,7 +272,7 @@ fn main() {
                      (k * p[0]).cos() * (k * p[1]).sin()]
             });
             for &dof in &ess_bdr {
-                mat.apply_dirichlet_row_zeroing(dof as usize, x_exact[dof as usize], &mut rhs);
+                mat.apply_dirichlet_symmetric(dof as usize, x_exact[dof as usize], &mut rhs);
             }
         }
         let n_sys = n_dofs;
@@ -285,16 +285,41 @@ fn main() {
             verbose: false,
             ..SolverConfig::default()
         };
-        // Note: solver will be replaced with ADS in Task 3.
-        // For now keep GSSmoother so compilation works.
-        let result = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
-            .expect("PCG+GSSmoother solve failed");
+        let ads_cfg = AdsSolverConfig {
+            inner_cfg: SolverConfig {
+                rtol: 1e-10,
+                max_iter: 2000,
+                verbose: false,
+                ..SolverConfig::default()
+            },
+            ..AdsSolverConfig::default()
+        };
+
+        let (result, solver_label) = match (
+            DiscreteLinearOperator::curl_2d_hdiv(&aux_hcurl, &space),
+            DiscreteLinearOperator::gradient(&aux_h1, &aux_hcurl),
+        ) {
+            (Ok(c_fem), Ok(g_fem)) => {
+                let c_linlvo = fem_to_linlvo_csr(&c_fem);
+                let g_linlvo = fem_to_linlvo_csr(&g_fem);
+                let res = solve_pcg_ads(&mat, &c_linlvo, &g_linlvo, &rhs, &mut x, &ads_cfg)
+                    .expect("PCG+ADS solve failed");
+                (res, "PCG+ADS".to_string())
+            }
+            _ => {
+                // Fallback: unsupported order combination — use GSSmoother
+                eprintln!("ADS not supported at this order — falling back to GSSmoother");
+                let res = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
+                    .expect("PCG+GSSmoother solve failed");
+                (res, "PCG+GSSmoother (fallback)".to_string())
+            }
+        };
         println!(
-            "PCG+GSSmoother: {} iterations, ||r||/||b|| = {:.3e}",
-            result.iterations, result.final_residual,
+            "{}: {} iterations, ||r||/||b|| = {:.3e}",
+            solver_label, result.iterations, result.final_residual,
         );
 
-        (x, "PCG+GSSmoother".to_string())
+        (x, solver_label)
     };
 
     println!("Solver: {solver_label}");
@@ -560,7 +585,7 @@ mod tests {
                      (k * p[0]).cos() * (k * p[1]).sin()]
             });
             for &dof in &ess_bdr {
-                mat.apply_dirichlet_row_zeroing(dof as usize, x_exact[dof as usize], &mut rhs);
+                mat.apply_dirichlet_symmetric(dof as usize, x_exact[dof as usize], &mut rhs);
             }
         }
 
@@ -614,5 +639,59 @@ mod tests {
             .check_with("l2_error", l2_err,   1e-6, 1e-10)
             .check_with("n_dofs",   n_dofs as f64, 0.0, 0.5)
             .finalize();
+    }
+
+    #[test]
+    fn ex4_ads_tiny_converges() {
+        // Use a tiny 2×2 triangle mesh so ADS setup is instant even in debug mode.
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let aux_mesh = mesh.clone();
+        let aux_h1 = H1Space::new(aux_mesh.clone(), 1);
+        let aux_hcurl = HCurlSpace::new(aux_mesh, 1);
+        let space = HDivSpace::new(mesh, 0); // RT0
+        let n_dofs = space.n_dofs();
+        let kappa = std::f64::consts::PI;
+
+        let all_tags: Vec<i32> = space.mesh().unique_boundary_tags();
+        let ess_bdr = boundary_dofs_hdiv(space.mesh(), &space, &all_tags);
+
+        let source = MaxwellHSource { kappa };
+        let quad_order = 3;
+        let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+
+        let grad_div = GradDivIntegrator { kappa: 1.0 };
+        let vec_mass = VectorMassIntegrator { alpha: 1.0 };
+        let mut mat = VectorAssembler::assemble_bilinear(
+            &space, &[&grad_div, &vec_mass], quad_order,
+        );
+
+        // Row-zeroing BCs (symmetric — required for PCG/ADS).
+        let x_exact = space.interpolate_vector(&|p| {
+            vec![(kappa * p[1]).cos() * (kappa * p[0]).sin(),
+                 (kappa * p[0]).cos() * (kappa * p[1]).sin()]
+        });
+        for &dof in &ess_bdr {
+            mat.apply_dirichlet_symmetric(dof as usize, x_exact[dof as usize], &mut rhs);
+        }
+
+        // Build C and G, solve with ADS.
+        let c_fem = DiscreteLinearOperator::curl_2d_hdiv(&aux_hcurl, &space).unwrap();
+        let g_fem = DiscreteLinearOperator::gradient(&aux_h1, &aux_hcurl).unwrap();
+        eprintln!("C: {}×{}, G: {}×{}", c_fem.nrows, c_fem.ncols, g_fem.nrows, g_fem.ncols);
+
+        let c_linlvo = fem_to_linlvo_csr(&c_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_fem);
+
+        let mut x = vec![0.0_f64; n_dofs];
+        let ads_cfg = AdsSolverConfig {
+            inner_cfg: SolverConfig { rtol: 1e-8, max_iter: 1000, verbose: false, ..SolverConfig::default() },
+            ..AdsSolverConfig::default()
+        };
+        let res = solve_pcg_ads(&mat, &c_linlvo, &g_linlvo, &rhs, &mut x, &ads_cfg)
+            .expect("PCG+ADS solve failed");
+
+        assert!(res.converged, "ADS must converge on tiny mesh");
+        eprintln!("ADS tiny {} DOFs: {} iters, ||r||/||b|| = {:.3e}",
+            n_dofs, res.iterations, res.final_residual);
     }
 }
