@@ -59,7 +59,7 @@ fn main() {
     let mut b = rhs;
     for &d in &bdr { mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut b); }
     let mut x = vec![0.0; n];
-    let precond = GSSmoother::from_csr(&fem_to_linlvo_csr(&mat), 1.0).expect("GS");
+    let precond = GSSmoother::from_csr(&fem_to_linlvo_csr(&mat)).expect("GS");
     solve_pcg(&mat, &b, &mut x, &precond, 1e-12, 2000, true).expect("PCG");
     println!("Size of linear system: {n}");
 }

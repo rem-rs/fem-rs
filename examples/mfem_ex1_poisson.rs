@@ -93,7 +93,7 @@ fn main() {
     // 11. Solve: PCG with symmetric Gauss-Seidel preconditoner (ω = 1 = GS).
     let n_sys = n_full;
     let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
-    let precond = GSSmoother::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
+    let precond = GSSmoother::from_csr(&linlvo_mat).expect("SSOR setup failed");
     let _result =
         solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 500, true)
             .expect("solver failed");

@@ -2,7 +2,8 @@ use fem_linalg::CsrMatrix as FemCsr;
 use linlvo::{
     core::scalar::Scalar as linlvoScalar,
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
-    DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner, SsorPrecond,
+    DenseVec, GaussSeidelSmoother, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver,
+    Preconditioner, SsorPrecond,
 };
 use linlvo::precond::{IlukPrecond, IlutPrecond};
 use linlvo::{LinearOperator, Vector};
@@ -44,7 +45,10 @@ solve_iterative_simple!(solve_cg, ConjugateGradient<T>, "Conjugate Gradient - fo
 
 solve_precond_simple!(solve_pcg_jacobi, ConjugateGradient<T>, JacobiPrecond<T>, "Preconditioned CG with Jacobi preconditioner.");
 
-/// PCG with symmetric Gauss-Seidel (SSOR(ω=1)) preconditioner — MFEM GSSmoother.
+/// PCG with symmetric Gauss-Seidel (MFEM GSSmoother) preconditioner.
+///
+/// Uses MFEM-compatible full GS sweeps (forward + backward over ALL
+/// off-diagonal entries), not the analytic SSOR factorization.
 pub fn solve_pcg_gssmoother<T: linlvoScalar>(
     a: &FemCsr<T>, b: &[T], x: &mut [T], cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
@@ -52,7 +56,7 @@ pub fn solve_pcg_gssmoother<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = SsorPrecond::from_csr(&la, T::one()).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    let prec = GaussSeidelSmoother::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let res = ConjugateGradient::default()
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;

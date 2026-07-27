@@ -160,7 +160,7 @@ fn main() {
 
     // 11. Solve the full system: PCG + GSSmoother (SSOR, ω = 1).
     let linlvo_mat = fem_to_linlvo_csr(&mat);
-    let precond = GSSmoother::from_csr(&linlvo_mat, 1.0).expect("SSOR setup failed");
+    let precond = GSSmoother::from_csr(&linlvo_mat).expect("SSOR setup failed");
     let _res = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-8, 500, true)
         .expect("elasticity solve failed");
 

@@ -145,7 +145,7 @@ fn main() {
     //     PCG + GSSmoother (fallback with -no-ams).
     if args.no_ams {
         let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&mat);
-        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
+        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys)
             .expect("GSSmoother setup");
         let result = solve_pcg(
             &mat, &rhs, &mut x, &precond,
@@ -435,7 +435,7 @@ mod tests {
         form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
 
         let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&mat);
-        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys, 1.0)
+        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys)
             .expect("GSSmoother setup failed");
         fem_solver::solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 500, false)
             .expect("PCG solve failed");

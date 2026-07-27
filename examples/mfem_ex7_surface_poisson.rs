@@ -141,7 +141,7 @@ fn main() {
     // ── 5. Solve: PCG + SSOR(omega=1) ──────────────────────────────────────
     let mut u = vec![0.0; n_dofs];
     let la = fem_to_linlvo_csr(&a);
-    let prec = GSSmoother::from_csr(&la, 1.0).expect("GSSmoother");
+    let prec = GSSmoother::from_csr(&la).expect("GSSmoother");
     let res: SolveResult = solve_pcg(&a, &rhs, &mut u, &prec, 1e-12, 5000, true)
         .expect("PCG solve failed");
     if !res.converged {

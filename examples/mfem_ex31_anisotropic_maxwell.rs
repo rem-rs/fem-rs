@@ -242,7 +242,7 @@ fn main() {
     // 9. Solve.
     let cfg = SolverConfig { rtol: 1e-10, max_iter: 2000, verbose: false, ..Default::default() };
     let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
-    let precond = GSSmoother::from_csr(&linlvo_mat, 1.0).expect("GSSmoother");
+    let precond = GSSmoother::from_csr(&linlvo_mat).expect("GSSmoother");
     solve_pcg(&mat, &rhs, &mut x, &precond, cfg.rtol, cfg.max_iter, true).expect("PCG");
 
     // 10. H(Curl) error.
