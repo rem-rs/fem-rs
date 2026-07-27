@@ -39,7 +39,7 @@ use fem_solver::{SolverConfig};
 use fem_space::{
     HDivSpace,
     fe_space::FESpace,
-    constraints::{boundary_dofs_hdiv, eliminate_dirichlet, expand_from_reduced},
+    constraints::{boundary_dofs_hdiv, form_linear_system},
 };
 
 fn main() {
@@ -114,14 +114,14 @@ fn main() {
     //    f = (1+2κ²)(cos(κy)sin(κx), cos(κx)sin(κy)).
     let source = MaxwellHSource { kappa };
     let quad_order = args.order * 2 + 2;
-    let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+    let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
     // 8. Solution vector x — zero initial guess (will be set by Dirichlet below).
 
     // 9. Stiffness matrix: a(u, v) = ∫ α (∇·u)(∇·v) + β u·v dx.
     let grad_div = GradDivIntegrator { kappa: 1.0 };
     let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-    let mat = VectorAssembler::assemble_bilinear(
+    let mut mat = VectorAssembler::assemble_bilinear(
         &space, &[&grad_div, &vec_mass], quad_order,
     );
     print!("Assembling: matrix ... ");
@@ -256,43 +256,35 @@ fn main() {
         (u_hyb, "Hybridization".to_string())
 
     } else {
-        // ── Standard path: eliminate_dirichlet + PCG ────────────────────────
-        let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+        // ── Standard path: form_linear_system + PCG ────────────────────────
+        if !ess_bdr.is_empty() {
             let x_exact = space.interpolate_vector(&|p| {
                 let k = kappa;
                 vec![(k * p[1]).cos() * (k * p[0]).sin(),
                      (k * p[0]).cos() * (k * p[1]).sin()]
             });
             let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
-            let (rm, rf, fm, cm) = eliminate_dirichlet(&mat, &rhs, &ess_bdr, &bv);
-            (rm, rf, fm, cm, bv)
-        } else {
-            let free: Vec<usize> = (0..n_dofs).collect();
-            (mat, rhs, free, vec![], vec![])
-        };
-        let n_sys = sys_mat.nrows;
+            let mut x = vec![0.0_f64; n_dofs];
+            form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bv);
+        }
+        let n_sys = n_dofs;
         println!("Size of linear system: {n_sys}");
 
-        let mut x_red = vec![0.0_f64; n_sys];
+        let mut x = vec![0.0_f64; n_dofs];
         let cfg = SolverConfig {
             rtol: 1e-10,
             max_iter: 2000,
             verbose: false,
             ..SolverConfig::default()
         };
-        let result = fem_solver::solve_pcg_gssmoother(&sys_mat, &sys_rhs, &mut x_red, &cfg)
+        let result = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
             .expect("PCG+GSSmoother solve failed");
         println!(
             "PCG+GSSmoother: {} iterations, ||r||/||b|| = {:.3e}",
             result.iterations, result.final_residual,
         );
 
-        let u = if !ess_bdr.is_empty() {
-            expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
-        } else {
-            x_red
-        };
-        (u, "PCG+GSSmoother".to_string())
+        (x, "PCG+GSSmoother".to_string())
     };
 
     println!("Solver: {solver_label}");
@@ -543,51 +535,40 @@ mod tests {
 
         let source = MaxwellHSource { kappa };
         let quad_order = args.order * 2 + 2;
-        let rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
+        let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
         let grad_div = GradDivIntegrator { kappa: 1.0 };
         let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-        let mat = VectorAssembler::assemble_bilinear(
+        let mut mat = VectorAssembler::assemble_bilinear(
             &space, &[&grad_div, &vec_mass], quad_order,
         );
 
-        let (sys_mat, sys_rhs, free_map, constrained_map, bnd_vals) = if !ess_bdr.is_empty() {
+        if !ess_bdr.is_empty() {
             let x_exact = space.interpolate_vector(&|p| {
                 let k = kappa;
                 vec![(k * p[1]).cos() * (k * p[0]).sin(),
                      (k * p[0]).cos() * (k * p[1]).sin()]
             });
             let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
-            let (rm, rf, fm, cm) = fem_space::constraints::eliminate_dirichlet(
-                &mat, &rhs, &ess_bdr, &bv
-            );
-            (rm, rf, fm, cm, bv)
-        } else {
-            let free: Vec<usize> = (0..n_dofs).collect();
-            (mat, rhs, free, vec![], vec![])
-        };
+            let mut x = vec![0.0_f64; n_dofs];
+            form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bv);
+        }
 
-        let mut x_red = vec![0.0_f64; sys_mat.nrows];
+        let mut x = vec![0.0_f64; n_dofs];
         let cfg = SolverConfig {
             rtol: 1e-10,
             max_iter: 2000,
             verbose: false,
             ..SolverConfig::default()
         };
-        fem_solver::solve_pcg_gssmoother(&sys_mat, &sys_rhs, &mut x_red, &cfg)
+        fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
             .expect("PCG+GSSmoother solve failed");
 
-        let u = if !ess_bdr.is_empty() {
-            expand_from_reduced(&x_red, &free_map, &constrained_map, &bnd_vals, n_dofs)
-        } else {
-            x_red
-        };
-
         let l2_err = fem_assembly::hdiv_error::compute_hdiv_l2_error(
-            &space, &u, |x| exact_f(x, kappa),
+            &space, &x, |p| exact_f(p, kappa),
         );
 
-        (u, n_dofs, l2_err)
+        (x, n_dofs, l2_err)
     }
 
     fn default_args() -> Args {

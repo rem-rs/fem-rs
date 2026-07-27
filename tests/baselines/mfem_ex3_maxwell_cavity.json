@@ -2,7 +2,7 @@
   "name": "mfem_ex3_maxwell_cavity",
   "metrics": {
     "l2_error": {
-      "value": 0.14743845667390135,
+      "value": 0.11343535924717076,
       "rtol": 1e-6,
       "atol": 1e-10
     },
