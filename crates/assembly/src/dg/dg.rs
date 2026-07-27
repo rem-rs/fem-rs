@@ -360,7 +360,19 @@ fn assemble_interior_face<S: FESpace>(
         xform_grads(&jit_l, &gref_l, &mut gphys_l, n_l, dim);
         xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
 
-        let pen = sigma * kappa / h_f;
+        // MFEM-compatible penalty: 1/h = |adjJ * n| / det(J) where adjJ is the
+        // adjugate (cofactor) Jacobian and n is the outward unit normal.
+        let det_l = jac_l.determinant();
+        let det_r = jac_r.determinant();
+        let nrm_l = normal_l[0]; let nrm_r = normal_l[1];
+        // adjJ * n in 2D: adjJ = [[J11, -J01], [-J10, J00]]
+        let nw_lx =  jac_l[(1,1)] * nrm_l - jac_l[(0,1)] * nrm_r;
+        let nw_ly = -jac_l[(1,0)] * nrm_l + jac_l[(0,0)] * nrm_r;
+        let nw_rx = -jac_r[(1,1)] * nrm_l + jac_r[(0,1)] * nrm_r;
+        let nw_ry =  jac_r[(1,0)] * nrm_l - jac_r[(0,0)] * nrm_r;
+        let h_inv_l = (nw_lx * nw_lx + nw_ly * nw_ly).sqrt() / det_l.abs().max(1e-14);
+        let h_inv_r = (nw_rx * nw_rx + nw_ry * nw_ry).sqrt() / det_r.abs().max(1e-14);
+        let pen = sigma * kappa * 0.5 * (h_inv_l + h_inv_r);
 
         // SIP interior face terms using a single normal n = n_L (outward from left):
         //   -∫ {κ∇u·n}[v] ds - ∫ {κ∇v·n}[u] ds + pen ∫ [u][v] ds
@@ -511,7 +523,12 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
         re.eval_grad_basis(&xi_e, &mut gref);
         xform_grads(&jit, &gref, &mut gphys, n, dim);
 
-        let pen = sigma * kappa / h_f;
+        // MFEM-compatible penalty: 1/h = |adjJ * n| / det(J)
+        let det_j = jac.determinant();
+        let nw_x =  jac[(1,1)] * normal[0] - jac[(0,1)] * normal[1];
+        let nw_y = -jac[(1,0)] * normal[0] + jac[(0,0)] * normal[1];
+        let h_inv = (nw_x * nw_x + nw_y * nw_y).sqrt() / det_j.abs().max(1e-14);
+        let pen = sigma * kappa * h_inv;
 
         for i in 0..n {
             let phi_i   = phi[i];

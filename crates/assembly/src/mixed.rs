@@ -906,7 +906,7 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Tet4 | ElementType::Tet10, 3) => Box::new(TetP3),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (ElementType::Quad4, 3) => Box::new(fem_element::lagrange::QuadQk::new(3)),
+        (ElementType::Quad4, 3) => Box::new(QuadQ3),
         (ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadSerendipityPk::new(1)),
         (ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadSerendipityPk::new(2)),
         (ElementType::Quad8 | ElementType::Quad9, 3) => Box::new(QuadSerendipityPk::new(3)),
