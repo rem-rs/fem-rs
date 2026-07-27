@@ -7,7 +7,7 @@ use linlvo::{
 };
 use linlvo::precond::{IlukPrecond, IlutPrecond};
 use linlvo::{LinearOperator, Vector};
-use fem_linalg::{fem_to_linlvo_csr, into_result, SolverConfig, SolverError, SolveResult};
+use fem_linalg::{fem_to_linlvo_csr, into_result, SolverConfig, SolverError, SolveResult, PrintLevel};
 
 use crate::macros::check_dims;
 
@@ -143,7 +143,6 @@ where
     let mut r = vec![0.0; n];
     let mut p = vec![0.0; n];
     let mut ap = vec![0.0; n];
-
     // r0 = b - A*x0
     apply(x, &mut ap);
     for i in 0..n {
@@ -181,6 +180,7 @@ where
 
         let rs_new: f64 = r.iter().map(|v| v * v).sum();
         res_norm = rs_new.sqrt();
+
         if res_norm <= tol {
             return Ok(SolveResult {
                 converged: true,
@@ -200,6 +200,101 @@ where
         max_iter: cfg.max_iter,
         residual: res_norm,
     })
+}
+
+/// CG with operator and explicit diagonal (Jacobi) preconditioner.
+///
+/// Solves `A x = b` where `A` is SPD and `apply(y, x)` computes `y = A * x`.
+/// Uses `diag` (the diagonal of `A`) as a Jacobi preconditioner:
+/// `z[i] = r[i] / diag[i]`.  This significantly improves convergence for
+/// ill-conditioned stiffness matrices.
+///
+/// The diagonal must be strictly positive — pass `None` to skip preconditioning.
+///
+/// # Returns
+/// `SolveResult` with convergence information.
+pub fn solve_cg_jacobi_operator<F>(
+    nrows: usize,
+    ncols: usize,
+    apply: F,
+    b: &[f64],
+    x: &mut [f64],
+    diag: Option<&[f64]>,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    F: Fn(&[f64], &mut [f64]),
+{
+    if nrows != ncols || b.len() != nrows || x.len() != ncols {
+        return Err(SolverError::DimensionMismatch { rows: nrows, cols: ncols, rhs: b.len() });
+    }
+    let n = nrows;
+    let mut r = vec![0.0; n];
+    let mut z = vec![0.0; n];
+    let mut p = vec![0.0; n];
+    let mut ap = vec![0.0; n];
+    let mut ap_check = vec![0.0; n];
+
+    // r0 = b - A*x0
+    apply(x, &mut ap);
+    for i in 0..n { r[i] = b[i] - ap[i]; }
+
+    // Jacobi preconditioner: z = D^{-1} * r
+    if let Some(d) = diag {
+        for i in 0..n { z[i] = r[i] / d[i].max(1e-32); }
+    } else {
+        z.copy_from_slice(&r);
+    }
+    p.copy_from_slice(&z);
+
+    let norm_b = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
+
+    let mut rz = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
+    let mut res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if res_norm <= tol {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: res_norm });
+    }
+
+    let check_interval = cfg.to_linlvo().check_interval.max(1);
+    for iter in 0..cfg.max_iter {
+        apply(&p, &mut ap);
+        let p_ap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
+        if p_ap.abs() < 1e-32 {
+            return Err(SolverError::Linlvo("CG breakdown: p^T A p near zero".into()));
+        }
+
+        let alpha = rz / p_ap;
+        for i in 0..n { x[i] += alpha * p[i]; r[i] -= alpha * ap[i]; }
+
+        res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+
+        // Periodic true residual check (MFEM check_interval)
+        if res_norm > tol && (iter + 1) % check_interval == 0 {
+            apply(x, &mut ap_check);
+            let mut rs_true = 0.0;
+            for i in 0..n { let d = b[i] - ap_check[i]; rs_true += d * d; }
+            res_norm = rs_true.sqrt();
+        }
+
+        if res_norm <= tol {
+            return Ok(SolveResult { converged: true, iterations: iter + 1, final_residual: res_norm });
+        }
+
+        // Jacobi preconditioner
+        if let Some(d) = diag {
+            for i in 0..n { z[i] = r[i] / d[i].max(1e-32); }
+        } else {
+            z.copy_from_slice(&r);
+        }
+
+        let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
+        let beta = rz_new / rz;
+        for i in 0..n { p[i] = z[i] + beta * p[i]; }
+        rz = rz_new;
+    }
+
+    Err(SolverError::ConvergenceFailed { max_iter: cfg.max_iter, residual: res_norm })
 }
 
 /// PCG with both operator and preconditioner as closures.
@@ -252,20 +347,26 @@ where
         r[i] = b[i] - ap[i];
     }
 
-    let norm_b = b.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
-
     // z = M^{-1} * r
     precond(&r, &mut z);
     p.copy_from_slice(&z);
 
     let mut rz = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
-    let mut res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-    if res_norm <= tol {
+    let print_iter = cfg.effective_print_level() >= PrintLevel::Iterations;
+    let norm0 = z.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-32);
+    let mut z_norm = norm0;
+    let tol = cfg.atol.max(cfg.rtol * norm0);
+    if print_iter {
+        println!("   Iteration : {:>3}  (B r, r) = {}", 0, fmt_g(rz));
+    }
+    if z_norm <= tol {
+        if print_iter {
+            println!("Average reduction factor = {:.6}", 1.0);
+        }
         return Ok(SolveResult {
             converged: true,
             iterations: 0,
-            final_residual: res_norm,
+            final_residual: z_norm,
         });
     }
 
@@ -285,17 +386,27 @@ where
             r[i] -= alpha * ap[i];
         }
 
-        res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if res_norm <= tol {
+        // Compute updated preconditioned residual for convergence and log
+        precond(&r, &mut z);
+        let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
+        z_norm = z.iter().map(|v| v * v).sum::<f64>().sqrt();
+
+        if print_iter {
+            println!("   Iteration : {:>3}  (B r, r) = {}", iter + 1, fmt_g(rz_new));
+        }
+
+        if z_norm <= tol {
+            if print_iter {
+                let avg = (z_norm / norm0).powf(1.0 / (iter + 1) as f64);
+                println!("Average reduction factor = {:.6}", avg);
+            }
             return Ok(SolveResult {
                 converged: true,
                 iterations: iter + 1,
-                final_residual: res_norm,
+                final_residual: z_norm,
             });
         }
 
-        precond(&r, &mut z);
-        let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
         let beta = rz_new / rz;
         for i in 0..n {
             p[i] = z[i] + beta * p[i];
@@ -305,7 +416,7 @@ where
 
     Err(SolverError::ConvergenceFailed {
         max_iter: cfg.max_iter,
-        residual: res_norm,
+        residual: z_norm,
     })
 }
 

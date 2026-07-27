@@ -3,7 +3,7 @@
 //! Each element has independent DOFs — no continuity across element boundaries.
 
 use fem_core::types::DofId;
-use fem_element::{ReferenceElement, TetP3, TriP3};
+use fem_element::{ReferenceElement, TetP3, TriP3, lagrange::QuadQk};
 use fem_linalg::Vector;
 use fem_mesh::topology::MeshTopology;
 
@@ -210,23 +210,22 @@ impl<M: MeshTopology> L2Space<M> {
                                 p0[1] + xi * (p1[1] - p0[1]) + eta * (p2[1] - p0[1]);
                         }
                     } else if dim == 2 && npe0 == 4 {
-                        // Q3 on Quad4: tensor product 4×4=16 nodes
+                        // Q3 on Quad4: tensor product 4x4=16 nodes (Gauss-Lobatto, matching MFEM)
+                        let qk = QuadQk::new(order as usize);
+                        let ref_coords = qk.dof_coords();
                         let p0 = mesh.node_coords(nodes[0]);
                         let p1 = mesh.node_coords(nodes[1]);
                         let p2 = mesh.node_coords(nodes[2]);
                         let p3 = mesh.node_coords(nodes[3]);
-                        let nq = 4usize; // nodes per direction = order + 1
-                        for j in 0..nq {
-                            for i in 0..nq {
-                                let xi = i as f64 / (nq - 1) as f64;
-                                let eta = j as f64 / (nq - 1) as f64;
-                                let omx = 1.0 - xi; let omy = 1.0 - eta;
-                                let idx = (base_dof + j * nq + i) * 2;
-                                dof_coords[idx]     = omx*omy*p0[0] + xi*omy*p1[0] + xi*eta*p2[0] + omx*eta*p3[0];
-                                dof_coords[idx + 1] = omx*omy*p0[1] + xi*omy*p1[1] + xi*eta*p2[1] + omx*eta*p3[1];
-                            }
+                        for (i, rc) in ref_coords.iter().enumerate() {
+                            let xi = rc[0];
+                            let eta = rc[1];
+                            let omx = 1.0 - xi; let omy = 1.0 - eta;
+                            let idx = (base_dof + i) * 2;
+                            dof_coords[idx]     = omx*omy*p0[0] + xi*omy*p1[0] + xi*eta*p2[0] + omx*eta*p3[0];
+                            dof_coords[idx + 1] = omx*omy*p0[1] + xi*omy*p1[1] + xi*eta*p2[1] + omx*eta*p3[1];
                         }
-                    } else {
+                        } else {
                         let (n0, n1, n2, n3) = (nodes[0], nodes[1], nodes[2], nodes[3]);
                         let p0 = mesh.node_coords(n0);
                         let p1 = mesh.node_coords(n1);

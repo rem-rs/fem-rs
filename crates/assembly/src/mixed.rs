@@ -16,7 +16,7 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, HexQ1, HexQ2, HexQ3}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
+use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, QuadQk, HexQ1, HexQ2, HexQ3}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
 use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1, PrismRTk};
 use fem_element::nedelec::{TriND1, TetND1, QuadND1, QuadNDk, HexND1, HexNDk, PrismND1, PrismNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -906,7 +906,7 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Tet4 | ElementType::Tet10, 3) => Box::new(TetP3),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (ElementType::Quad4, 3) => Box::new(QuadQ3),
+        (ElementType::Quad4, 3) => Box::new(fem_element::lagrange::QuadQk::new(3)),
         (ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadSerendipityPk::new(1)),
         (ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadSerendipityPk::new(2)),
         (ElementType::Quad8 | ElementType::Quad9, 3) => Box::new(QuadSerendipityPk::new(3)),
@@ -1015,8 +1015,8 @@ fn accumulate_mixed_volume_element<SR, SC>(
     let nodes = mesh.element_nodes(e);
     let elem_tag = mesh.element_tag(e);
 
-    let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-    let j_inv_t = tr.jacobian_inv_t().clone();
+    let use_iso = !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
+    let geo_elem = if use_iso { crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e) } else { None };
 
     let mut m_elem = vec![0.0_f64; n_elem_r * n_elem_c];
     phi_r.resize(n_r, 0.0);
@@ -1027,7 +1027,19 @@ fn accumulate_mixed_volume_element<SR, SC>(
     grad_phys_c.resize(n_c * dim, 0.0);
 
     for (q, xi) in quad.points.iter().enumerate() {
-        let w = quad.weights[q] * tr.det_j().abs();
+        let (w, j_inv_t, xp) = if use_iso {
+            let ge = geo_elem.as_ref().unwrap();
+            let (jac, det_j, xp) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
+            let w_q = quad.weights[q] * det_j.abs();
+            let jit = jac.try_inverse().expect("invertible isoparametric Jacobian").transpose();
+            (w_q, jit, xp)
+        } else {
+            let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+            let w_q = quad.weights[q] * tr.det_j().abs();
+            let jit = tr.jacobian_inv_t().clone();
+            let xp_q = tr.map_to_physical(xi);
+            (w_q, jit, xp_q)
+        };
 
         ref_r.eval_basis(xi, &mut phi_r);
         ref_c.eval_basis(xi, &mut phi_c);
@@ -1035,7 +1047,6 @@ fn accumulate_mixed_volume_element<SR, SC>(
         ref_c.eval_grad_basis(xi, &mut grad_ref_c);
         transform_grads(&j_inv_t, &grad_ref_r, &mut grad_phys_r, n_r, dim);
         transform_grads(&j_inv_t, &grad_ref_c, &mut grad_phys_c, n_c, dim);
-        let xp = tr.map_to_physical(xi);
 
         let qp_r = QpData {
             n_dofs: n_elem_r,

@@ -29,6 +29,7 @@ use fem_assembly::{
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::SolverConfig;
+use fem_linalg::PrintLevel;
 use fem_space::{
     H1Space, L2Space, DpgTraceSpace,
     fe_space::FESpace,
@@ -60,6 +61,13 @@ impl MixedBilinearIntegrator for MixedDiffusion {
 fn main() {
     let args = Args::parse();
     let t0 = std::time::Instant::now();
+
+    // Display options (matching C++ args.PrintOptions(cout))
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --order {}", args.order);
+    println!("   --no-visualization");
+    println!();
 
     // ── 1. Read mesh ──────────────────────────────────────────────────────────
     let mfem = read_mfem_file(&args.mesh).expect("read mesh");
@@ -110,12 +118,12 @@ fn main() {
     let st = test.n_dofs();
 
     println!("\nNumber of Unknowns:");
-    println!("  Trial space,     X0   : {s0} (order {t_order})");
-    println!("  Interface space, Xhat : {s1} (order {tr_order})");
-    println!("  Test space,      Y    : {st} (order {te_order})\n");
+    println!(" Trial space,     X0   : {s0} (order {t_order})");
+    println!(" Interface space, Xhat : {s1} (order {tr_order})");
+    println!(" Test space,      Y    : {st} (order {te_order})\n");
 
     // ── 4. Linear form F on test space ────────────────────────────────────────
-    let qo = (te_order as u8 * 2 + 2).max(3);
+    let qo = 3; // 2×2 Gauss on quads → matches MFEM IntRules.Get(Quadrilateral, 3)
     let f_test = Assembler::assemble_linear(&test, &[&DomainSourceIntegrator::new(|_| 1.0)], qo);
 
     // ── 5. B0 (trial × test diffusion) ────────────────────────────────────────
@@ -218,8 +226,9 @@ fn main() {
     let cfg = SolverConfig {
         rtol: 1e-12,
         atol: 0.0,
-        max_iter: 2000,
+        max_iter: 200,
         verbose: false,
+        print_level: PrintLevel::Iterations,
         ..Default::default()
     };
     let result = fem_solver::solve_pcg_operator_precond(n_tot, op.as_closure(), &rhs, &mut x, precond, &cfg);
@@ -238,8 +247,19 @@ fn main() {
         let mut mf = File::create("refined.mesh").unwrap();
         fem_io::mfem::write_mfem(&mut mf, &mesh, None).unwrap();
         let mut sf = File::create("sol.gf").unwrap();
+        // MFEM GridFunction header (matching C++ x0.Save() precision(8))
+        writeln!(sf, "FiniteElementSpace").unwrap();
+        writeln!(sf, "FiniteElementCollection: H1_2D_P{}", args.order).unwrap();
+        writeln!(sf, "VDim: 1").unwrap();
+        writeln!(sf, "Ordering: 0").unwrap();
+        writeln!(sf).unwrap();
         for i in 0..s0 {
-            writeln!(sf, "{:.14e}", x[i]).unwrap();
+            // Match C++ precision(8): 8 significant digits in compact form
+            if x[i] == 0.0 {
+                writeln!(sf, "0").unwrap();
+            } else {
+                writeln!(sf, "{:.7e}", x[i]).unwrap();
+            }
         }
     }
     eprintln!("  Wrote refined.mesh, sol.gf");

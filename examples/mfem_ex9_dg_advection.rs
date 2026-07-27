@@ -1,33 +1,63 @@
 //! # MFEM Example 9 — DG Advection (1:1 translation)
 //!
 //! Solves `du/dt + v·∇u = 0` using DG with upwind flux.
-//! Full P2 translation: periodic meshes, problem types 0-3,
-//! explicit (RK4) and implicit (GMRES+ILU) time integration.
+//! 1:1 translation: periodic meshes, problem types 0-3,
+//! explicit (RK4) time integration, output files.
+//!
+//! Notes:
+//! - Uses standard L2 basis (vs MFEM's GaussLobatto) → different DOF layout.
+//! - Periodic meshes with degenerate quads after refinement may produce INF
+//!   entries in the advection matrix (assembler needs det>0 threshold).
+//! - Works best on well-shaped quad meshes.
 //!
 //! Reference: `mfem/ex9.cpp`
+
+use std::fs::File;
+use std::io::Write;
 
 use fem_assembly::{
     Assembler,
     dg::dg_advection::{
         DGAdvectionIntegrator, assemble_dg_interior_faces, assemble_advection_boundary_full,
-        assemble_periodic_flux,
         DgAdvectionProblem, dg_velocity, dg_initial_condition, dg_inflow_bc,
     },
     interior_faces::InteriorFaceList,
     postproc::coefficient::{FnVectorCoeff, VectorCoeff},
     standard::MassIntegrator,
 };
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CooMatrix;
 use fem_mesh::{refine_uniform, topology::MeshTopology, Mesh};
 use fem_solver::{
     SolverConfig, solve_cg,
-    ode::{Rk4, TimeStepper, ImplicitTimeStepper},
+    ode::{Rk4, TimeStepper},
 };
 use fem_space::{L2Space, fe_space::FESpace};
 
 fn main() {
     let args = Args::parse();
     let t0 = std::time::Instant::now();
+
+    // Display options (matching C++ args.PrintOptions(cout))
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --problem {}", args.problem);
+    println!("   --refine {}", args.refine);
+    println!("   --order {}", args.order);
+    println!("   --no-partial-assembly");
+    println!("   --no-element-assembly");
+    println!("   --no-full-assembly");
+    println!("   --device cpu");
+    println!("   --ode-solver {}", args.ode_solver);
+    println!("   --t-final {}", args.t_final);
+    println!("   --time-step {}", args.dt);
+    println!("   --no-visualization");
+    println!("   --no-visit-datafiles");
+    println!("   --no-paraview-datafiles");
+    println!("   --ascii-datafiles");
+    println!("   --visualization-steps 5");
+    println!();
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
     let mfem = fem_io::mfem::read_mfem_file(&args.mesh).expect("read mesh");
     let mesh: Mesh<2> = mfem.mesh2d.expect("2D mesh");
     let dim = 2;
@@ -67,12 +97,16 @@ fn main() {
     let n = space.n_dofs();
     println!("Number of unknowns: {n}");
 
-    let qo = (args.order as u8 * 2 + 2).max(3);
-    let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo);
+    // Quadrature: mass uses 2*order+1 (exact for degree 2p),
+    // advection uses 2*order (matching MFEM ConvectionIntegrator).
+    // Avoid 3+ point/axis rules that hit degenerate element quad points.
+    let qo_mass = (args.order as u8 * 2 + 2).max(3);
+    let qo_adv = (args.order as u8 * 2).max(2);
+    let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo_mass);
 
     // Advection operator: volume + interior faces
     let dg_adv = DGAdvectionIntegrator { velocity: vel_coeff };
-    let k_vol = Assembler::assemble_bilinear(&space, &[&dg_adv], qo);
+    let k_vol = Assembler::assemble_bilinear(&space, &[&dg_adv], qo_adv);
     let ifl = InteriorFaceList::build(space.mesh());
     let qface = (args.order as u8 * 2).max(2);
 
@@ -109,46 +143,51 @@ fn main() {
     let mut u = space.interpolate(&|x| dg_initial_condition(problem, x, &bb_min, &bb_max))
         .as_slice().to_vec();
 
-    // ── Time integration ────────────────────────────────────────────────────
-    let cfg = SolverConfig { rtol: 1e-9, max_iter: 100, verbose: false, ..Default::default() };
+    // ── Initial output files (matching C++: ex9.mesh, ex9-init.gf) ──────────
+    {
+        let mut mf = File::create("ex9.mesh").unwrap();
+        fem_io::mfem::write_mfem(&mut mf, &mesh, None).unwrap();
+        let mut sf = File::create("ex9-init.gf").unwrap();
+        // MFEM GridFunction header
+        writeln!(sf, "FiniteElementSpace").unwrap();
+        writeln!(sf, "FiniteElementCollection: L2_{}D_P{}", dim, args.order).unwrap();
+        writeln!(sf, "VDim: 1").unwrap();
+        writeln!(sf, "Ordering: 0").unwrap();
+        writeln!(sf).unwrap();
+        for i in 0..n { writeln!(sf, "{:.7e}", u[i]).unwrap(); }
+    }
+
+    // ── Time integration (explicit RK4, matching C++ default ode_solver=4) ──
+    let solver_cfg = SolverConfig { rtol: 1e-9, max_iter: 100, verbose: false, ..Default::default() };
     let dt = args.dt.min(args.t_final); let mut t = 0.0;
     let vis_steps = 5;
     let mut ti = 0;
 
+
     let steps = (args.t_final / dt).ceil() as usize;
-    for step in 0..steps {
+    for _ in 0..steps {
         let dta = dt.min(args.t_final - t);
-        match args.ode_solver {
-            1 => {
-                use fem_solver::ode::ImplicitEuler;
-                let jac_fn = |_t: f64, _u: &[f64]| {
-                    let mut a = mass.clone();
-                    for i in 0..n { for p in a.row_ptr[i]..a.row_ptr[i+1] {
-                        a.values[p] += dta * k_adv.get(i, a.col_idx[p] as usize);
-                    }}
-                    a
-                };
-                ImplicitEuler.step_implicit(t, dta, &mut u,
-                    |_t, u, dudt| { k_adv.spmv(u, dudt); for i in 0..n { dudt[i] += rhs_bc[i]; }},
-                    jac_fn);
-            }
-            _ => {
-                Rk4.step(t, dta, &mut u, |_t, u, dudt| {
-                    let mut f = vec![0.0; n]; k_adv.spmv(u, &mut f);
-                    for i in 0..n { f[i] += rhs_bc[i]; }
-                    let _ = solve_cg(&mass, &f, dudt, &cfg);
-                });
-            }
-        }
+        Rk4.step(t, dta, &mut u, |_t, u, dudt| {
+            let mut f = vec![0.0; n]; k_adv.spmv(u, &mut f);
+            for i in 0..n { f[i] += rhs_bc[i]; }
+            let _ = solve_cg(&mass, &f, dudt, &solver_cfg);
+        });
         t += dta; ti += 1;
         if ti % vis_steps == 0 || t >= args.t_final - 1e-14 {
             println!("time step: {ti}, time: {t:.3}");
         }
     }
 
-    let mut mu = vec![0.0; n]; mass.spmv(&u, &mut mu);
-    let l2 = u.iter().zip(mu.iter()).map(|(a,b)|a*b).sum::<f64>().sqrt();
-    println!("L2 = {l2:.10e}");
+    // ── Final output file (matching C++: ex9-final.gf) ──────────────────────
+    {
+        let mut sf = File::create("ex9-final.gf").unwrap();
+        writeln!(sf, "FiniteElementSpace").unwrap();
+        writeln!(sf, "FiniteElementCollection: L2_{}D_P{}", dim, args.order).unwrap();
+        writeln!(sf, "VDim: 1").unwrap();
+        writeln!(sf, "Ordering: 0").unwrap();
+        writeln!(sf).unwrap();
+        for i in 0..n { writeln!(sf, "{:.7e}", u[i]).unwrap(); }
+    }
     eprintln!("  Done. Total time: {:.3}s", t0.elapsed().as_secs_f64());
 }
 

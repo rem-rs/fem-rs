@@ -34,7 +34,7 @@ impl From<linlvo::SolverError> for SolverError {
 }
 
 /// Verbosity level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum PrintLevel {
     #[default] Silent,
     Summary,
