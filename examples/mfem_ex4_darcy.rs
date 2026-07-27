@@ -42,7 +42,7 @@ use fem_space::{
     H1Space, HCurlSpace,
     HDivSpace,
     fe_space::FESpace,
-    constraints::{boundary_dofs_hdiv, form_linear_system},
+    constraints::boundary_dofs_hdiv,
 };
 
 fn main() {
@@ -264,16 +264,16 @@ fn main() {
         (u_hyb, "Hybridization".to_string())
 
     } else {
-        // ── Standard path: form_linear_system + PCG ────────────────────────
+        // ── Standard path: row-zeroing + ADS ────────────────────────────────
         if !ess_bdr.is_empty() {
             let x_exact = space.interpolate_vector(&|p| {
                 let k = kappa;
                 vec![(k * p[1]).cos() * (k * p[0]).sin(),
                      (k * p[0]).cos() * (k * p[1]).sin()]
             });
-            let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
-            let mut x = vec![0.0_f64; n_dofs];
-            form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bv);
+            for &dof in &ess_bdr {
+                mat.apply_dirichlet_row_zeroing(dof as usize, x_exact[dof as usize], &mut rhs);
+            }
         }
         let n_sys = n_dofs;
         println!("Size of linear system: {n_sys}");
@@ -285,6 +285,8 @@ fn main() {
             verbose: false,
             ..SolverConfig::default()
         };
+        // Note: solver will be replaced with ADS in Task 3.
+        // For now keep GSSmoother so compilation works.
         let result = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
             .expect("PCG+GSSmoother solve failed");
         println!(
@@ -557,9 +559,9 @@ mod tests {
                 vec![(k * p[1]).cos() * (k * p[0]).sin(),
                      (k * p[0]).cos() * (k * p[1]).sin()]
             });
-            let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
-            let mut x = vec![0.0_f64; n_dofs];
-            form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bv);
+            for &dof in &ess_bdr {
+                mat.apply_dirichlet_row_zeroing(dof as usize, x_exact[dof as usize], &mut rhs);
+            }
         }
 
         let mut x = vec![0.0_f64; n_dofs];
