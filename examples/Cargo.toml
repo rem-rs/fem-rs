@@ -171,9 +171,6 @@ path = "mfem_ex5_mixed_darcy.rs"
 name = "mfem_ex6_flux_recovery"
 path = "mfem_ex6_flux_recovery.rs"
 [[example]]
-name = "mfem_ex7_neumann_mixed_bc"
-path = "mfem_ex7_neumann_mixed_bc.rs"
-[[example]]
 name = "mfem_ex7_surface_poisson"
 path = "mfem_ex7_surface_poisson.rs"
 [[example]]
