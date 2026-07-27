@@ -42,8 +42,9 @@ use fem_space::{
     H1Space, HCurlSpace,
     HDivSpace,
     fe_space::FESpace,
-    constraints::boundary_dofs_hdiv,
+    constraints::{boundary_dofs_hdiv, form_linear_system},
 };
+use fem_solver::PrintLevel;
 
 fn main() {
     // 1. Parse command-line options.
@@ -263,8 +264,9 @@ fn main() {
 
         (u_hyb, "Hybridization".to_string())
 
-    } else {
-        // ── Standard path: row-zeroing + ADS ────────────────────────────────
+    } else if args.use_ads {
+        // ── ADS path (opt-in via --ads) ──────────────────────────────────────
+        // Row-zeroing (symmetric) preserves matrix structure for ADS.
         if !ess_bdr.is_empty() {
             let x_exact = space.interpolate_vector(&|p| {
                 let k = kappa;
@@ -279,22 +281,11 @@ fn main() {
         println!("Size of linear system: {n_sys}");
 
         let mut x = vec![0.0_f64; n_dofs];
-        let cfg = SolverConfig {
-            rtol: 1e-10,
-            max_iter: 2000,
-            verbose: false,
-            ..SolverConfig::default()
-        };
+        let _cfg = SolverConfig { rtol: 1e-20, max_iter: 10000, verbose: false, print_level: PrintLevel::Iterations, ..SolverConfig::default() };
         let ads_cfg = AdsSolverConfig {
-            inner_cfg: SolverConfig {
-                rtol: 1e-10,
-                max_iter: 2000,
-                verbose: false,
-                ..SolverConfig::default()
-            },
+            inner_cfg: SolverConfig { rtol: 1e-10, max_iter: 2000, verbose: false, ..SolverConfig::default() },
             ..AdsSolverConfig::default()
         };
-
         let (result, solver_label) = match (
             DiscreteLinearOperator::curl_2d_hdiv(&aux_hcurl, &space),
             DiscreteLinearOperator::gradient(&aux_h1, &aux_hcurl),
@@ -307,9 +298,8 @@ fn main() {
                 (res, "PCG+ADS".to_string())
             }
             _ => {
-                // Fallback: unsupported order combination — use GSSmoother
                 eprintln!("ADS not supported at this order — falling back to GSSmoother");
-                let res = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
+                let res = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &_cfg)
                     .expect("PCG+GSSmoother solve failed");
                 (res, "PCG+GSSmoother (fallback)".to_string())
             }
@@ -318,8 +308,36 @@ fn main() {
             "{}: {} iterations, ||r||/||b|| = {:.3e}",
             solver_label, result.iterations, result.final_residual,
         );
-
         (x, solver_label)
+
+    } else {
+        // ── Standard path: 1:1 with MFEM ex4 (form_linear_system + GSSmoother) ─
+        if !ess_bdr.is_empty() {
+            let x_exact = space.interpolate_vector(&|p| {
+                let k = kappa;
+                vec![(k * p[1]).cos() * (k * p[0]).sin(),
+                     (k * p[0]).cos() * (k * p[1]).sin()]
+            });
+            let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
+            let mut x = vec![0.0_f64; n_dofs];
+            form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bv);
+        }
+        let n_sys = n_dofs;
+        println!("Size of linear system: {n_sys}");
+
+        let mut x = vec![0.0_f64; n_dofs];
+        let cfg = SolverConfig {
+            rtol: 1e-20,
+            max_iter: 10000,
+            verbose: false,
+            print_level: PrintLevel::Iterations,
+            ..SolverConfig::default()
+        };
+        let result = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
+            .expect("PCG+GSSmoother solve failed");
+        println!("PCG+GS: {} iterations, ||r||/||b|| = {:.3e}",
+            result.iterations, result.final_residual);
+        (x, "PCG+GSSmoother".to_string())
     };
 
     println!("Solver: {solver_label}");
@@ -466,6 +484,7 @@ struct Args {
     static_cond:    bool,
     hybridization:  bool,
     visualization:  bool,
+    use_ads:        bool,
 }
 
 fn parse_args() -> Args {
@@ -477,6 +496,7 @@ fn parse_args() -> Args {
         static_cond:    false,
         hybridization:  false,
         visualization:  true,
+        use_ads:        false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -520,6 +540,9 @@ fn parse_args() -> Args {
             "-no-vis" | "--no-visualization" => {
                 a.visualization = false;
             }
+            "--ads" => {
+                a.use_ads = true;
+            }
             _ => {}
         }
     }
@@ -557,9 +580,6 @@ mod tests {
         };
 
         let rt_order = if args.order >= 1 { args.order - 1 } else { 0 };
-        let aux_mesh = mesh.clone();
-        let aux_h1 = H1Space::new(aux_mesh.clone(), 1);
-        let aux_hcurl = HCurlSpace::new(aux_mesh, 1);
         let space = HDivSpace::new(mesh, rt_order);
         let n_dofs = space.n_dofs();
         let kappa = args.freq * PI;
@@ -587,38 +607,21 @@ mod tests {
                 vec![(k * p[1]).cos() * (k * p[0]).sin(),
                      (k * p[0]).cos() * (k * p[1]).sin()]
             });
-            for &dof in &ess_bdr {
-                mat.apply_dirichlet_symmetric(dof as usize, x_exact[dof as usize], &mut rhs);
-            }
+            let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
+            let mut x = vec![0.0_f64; n_dofs];
+            form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bv);
         }
 
         let mut x = vec![0.0_f64; n_dofs];
         let cfg = SolverConfig {
-            rtol: 1e-10,
-            max_iter: 2000,
+            rtol: 1e-20,
+            max_iter: 10000,
             verbose: false,
+            print_level: PrintLevel::Iterations,
             ..SolverConfig::default()
         };
-        let ads_cfg = AdsSolverConfig {
-            inner_cfg: SolverConfig { rtol: 1e-10, max_iter: 2000, verbose: false, ..SolverConfig::default() },
-            ..AdsSolverConfig::default()
-        };
-        match (
-            DiscreteLinearOperator::curl_2d_hdiv(&aux_hcurl, &space),
-            DiscreteLinearOperator::gradient(&aux_h1, &aux_hcurl),
-        ) {
-            (Ok(c_fem), Ok(g_fem)) => {
-                let c_linlvo = fem_to_linlvo_csr(&c_fem);
-                let g_linlvo = fem_to_linlvo_csr(&g_fem);
-                solve_pcg_ads(&mat, &c_linlvo, &g_linlvo, &rhs, &mut x, &ads_cfg)
-                    .expect("PCG+ADS solve failed");
-            }
-            _ => {
-                eprintln!("ADS not supported — falling back to GSSmoother");
-                fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
-                    .expect("PCG+GSSmoother solve failed");
-            }
-        }
+        fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
+            .expect("PCG+GSSmoother solve failed");
 
         let l2_err = fem_assembly::hdiv_error::compute_hdiv_l2_error(
             &space, &x, |p| exact_f(p, kappa),
@@ -636,6 +639,7 @@ mod tests {
             static_cond:    false,
             hybridization:  false,
             visualization:  false,
+            use_ads:        false,
         }
     }
 
