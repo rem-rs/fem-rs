@@ -334,6 +334,13 @@ fn main() {
                 let integrator = DiffusionIntegrator { kappa: 1.0 };
                 zz_estimator_mfem(&gf, &integrator).eta
             };
+            // Diagnostic: print error estimate stats
+            if !eta.is_empty() {
+                let mean: f64 = eta.iter().sum::<f64>() / eta.len() as f64;
+                let max = eta.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let n_marked = eta.iter().filter(|&&e| e > max_elem_error).count();
+                println!("  eta: mean={mean:.6e} max={max:.6e} >threshold={n_marked}/{}", eta.len());
+            }
             eta_last = eta.clone();
 
             // Threshold marking: refine if η > max_elem_error (matches MFEM ThresholdRefiner)
@@ -452,7 +459,7 @@ impl Args {
                 "-o" | "--order" => { if let Some(v) = it.next() { order = v.parse().unwrap_or(2); } }
                 "-e" | "--max-err" => { if let Some(v) = it.next() { max_elem_error = v.parse().unwrap_or(5.0e-3); } }
                 "-y" | "--hysteresis" => { if let Some(v) = it.next() { hysteresis = v.parse().unwrap_or(0.15); } }
-                "-r" | "--ref-levels" => { if let Some(v) = it.next() { ref_levels = v.parse().unwrap_or(0); } }
+                "-r" | "--ref-levels" | "-rs" | "--refine-serial" => { if let Some(v) = it.next() { ref_levels = v.parse().unwrap_or(0); } }
                 "-l" | "--nc-limit" => { if let Some(v) = it.next() { nc_limit = v.parse().unwrap_or(3); } }
                 "-tf" | "--t-final" => { if let Some(v) = it.next() { t_final = v.parse().unwrap_or(1.0); } }
                 "-est" | "--estimator" => { if let Some(v) = it.next() { estimator = v.parse().unwrap_or(0); } }
