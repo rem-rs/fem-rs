@@ -439,13 +439,13 @@ struct Args {
 
 impl Args {
     fn parse() -> Self {
-        let mut mesh = "data/star-hilbert.mesh".to_string();
+        let mut mesh = "data/star.mesh".to_string();
         let mut problem = 0;
         let mut nfeatures = 1;
         let mut order: u8 = 2;
         let mut max_elem_error = 5.0e-3;
         let mut hysteresis = 0.15;
-        let mut ref_levels = 0;
+        let mut ref_levels = 2;
         let mut nc_limit = 3;
         let mut t_final = 1.0;
         let mut estimator = 0;
