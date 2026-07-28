@@ -321,6 +321,17 @@ fn assemble_interior_face<S: FESpace>(
     let jit_l = jac_l.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element {} for face", el); DMatrix::identity(2,2)}).transpose();
     let jit_r = jac_r.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element {} for face", er); DMatrix::identity(2,2)}).transpose();
 
+    // Pre-compute quad vertex coords for per-point Jacobian evaluation.
+    let (xl, yl, xr, yr) = if nodes_l.len() > 3 || nodes_r.len() > 3 {
+        let xl: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes_l[k.min(nodes_l.len()-1)])[0]).collect();
+        let yl: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes_l[k.min(nodes_l.len()-1)])[1]).collect();
+        let xr: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes_r[k.min(nodes_r.len()-1)])[0]).collect();
+        let yr: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes_r[k.min(nodes_r.len()-1)])[1]).collect();
+        (xl, yl, xr, yr)
+    } else {
+        (vec![], vec![], vec![], vec![])
+    };
+
     // Blocks accumulated: K_ll, K_lr, K_rl, K_rr.
     let mut kll = vec![0.0_f64; n_l * n_l];
     let mut klr = vec![0.0_f64; n_l * n_r];
@@ -363,18 +374,41 @@ fn assemble_interior_face<S: FESpace>(
         xform_grads(&jit_l, &gref_l, &mut gphys_l, n_l, dim);
         xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
 
-        // MFEM-compatible penalty: 1/h = |adjJ * n| / det(J) where adjJ is the
-        // adjugate (cofactor) Jacobian and n is the outward unit normal.
-        let det_l = jac_l.determinant();
-        let det_r = jac_r.determinant();
+        // C++-style per-point Jacobian for quads (triangles use constant from simplex_jac).
+        let (jac_pt_l, det_l, jit_pt_l) = if nodes_l.len() > 3 {
+            let (j, d) = quad_jac_at(&xl, &yl, xi_l[0], xi_l[1]);
+            let d_safe = d.abs().max(1e-14);
+            let ji = j.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(2,2)).transpose();
+            (j, d_safe, ji)
+        } else {
+            (jac_l.clone(), jac_l.determinant().abs().max(1e-14), jit_l.clone())
+        };
+        let (jac_pt_r, det_r, jit_pt_r) = if nodes_r.len() > 3 {
+            let (j, d) = quad_jac_at(&xr, &yr, xi_r[0], xi_r[1]);
+            let d_safe = d.abs().max(1e-14);
+            let ji = j.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(2,2)).transpose();
+            (j, d_safe, ji)
+        } else {
+            (jac_r.clone(), jac_r.determinant().abs().max(1e-14), jit_r.clone())
+        };
+        // Re-compute physical gradients using the per-point Jacobian.
+        xform_grads(&jit_pt_l, &gref_l, &mut gphys_l, n_l, dim);
+        xform_grads(&jit_pt_r, &gref_r, &mut gphys_r, n_r, dim);
+
+        // C++ weight: w = ip.weight / det(J) / 2 (interior face averaging)
+        let w_l = h_f * face_weights[qi] / det_l / 2.0;
+        let w_r = h_f * face_weights[qi] / det_r / 2.0;
+
+        // MFEM-compatible penalty: wq = w * |nor|² where |nor| = h_f (in 2D).
+        // penalty = sigma * kappa * (wq_l + wq_r) / 2  (sigma from caller)
+        // For C++ SIPG (sigma=-1): penalty -= kappa * wq.
         let nrm_l = normal_l[0]; let nrm_r = normal_l[1];
-        // adjJ * n in 2D: adjJ = [[J11, -J01], [-J10, J00]]
-        let nw_lx =  jac_l[(1,1)] * nrm_l - jac_l[(0,1)] * nrm_r;
-        let nw_ly = -jac_l[(1,0)] * nrm_l + jac_l[(0,0)] * nrm_r;
-        let nw_rx = -jac_r[(1,1)] * nrm_l + jac_r[(0,1)] * nrm_r;
-        let nw_ry =  jac_r[(1,0)] * nrm_l - jac_r[(0,0)] * nrm_r;
-        let h_inv_l = (nw_lx * nw_lx + nw_ly * nw_ly).sqrt() / det_l.abs().max(1e-14);
-        let h_inv_r = (nw_rx * nw_rx + nw_ry * nw_ry).sqrt() / det_r.abs().max(1e-14);
+        let nw_lx =  jac_pt_l[(1,1)] * nrm_l - jac_pt_l[(0,1)] * nrm_r;
+        let nw_ly = -jac_pt_l[(1,0)] * nrm_l + jac_pt_l[(0,0)] * nrm_r;
+        let nw_rx = -jac_pt_r[(1,1)] * nrm_l + jac_pt_r[(0,1)] * nrm_r;
+        let nw_ry =  jac_pt_r[(1,0)] * nrm_l - jac_pt_r[(0,0)] * nrm_r;
+        let h_inv_l = (nw_lx * nw_lx + nw_ly * nw_ly).sqrt() / det_l;
+        let h_inv_r = (nw_rx * nw_rx + nw_ry * nw_ry).sqrt() / det_r;
         let pen = sigma * kappa * 0.5 * (h_inv_l + h_inv_r);
 
         // SIP interior face terms using a single normal n = n_L (outward from left):
@@ -639,6 +673,20 @@ fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tri3, 1)  => Box::new(TriP1),
         _ => panic!("dg ref_elem_face: unsupported ({et:?}, {order})"),
     }
+}
+
+/// Bilinear quad Jacobian at reference point (xi, eta) in [-1,1]².
+fn quad_jac_at(x: &[f64], y: &[f64], xi: f64, eta: f64) -> (DMatrix<f64>, f64) {
+    let om = 1.0;
+    let dxi  = [-(1.0-eta),  (1.0-eta),  (1.0+eta), -(1.0+eta)];
+    let deta = [-(1.0-xi),  -(1.0+xi),   (1.0+xi),   (1.0-xi)];
+    let mut j = DMatrix::<f64>::zeros(2, 2);
+    for k in 0..4 {
+        j[(0,0)] += dxi[k]  * x[k]; j[(0,1)] += deta[k] * x[k];
+        j[(1,0)] += dxi[k]  * y[k]; j[(1,1)] += deta[k] * y[k];
+    }
+    j *= 0.25;
+    (j.clone(), j.determinant())
 }
 
 fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
