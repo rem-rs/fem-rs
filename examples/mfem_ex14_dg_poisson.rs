@@ -10,7 +10,7 @@
 use fem_assembly::{Assembler, DgAssembler, InteriorFaceList, standard::DomainSourceIntegrator};
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::Mesh;
-use fem_solver::{solve_gmres, SolverConfig};
+use fem_solver::{solve_cg, SolverConfig};
 use fem_space::{L2Space, fe_space::FESpace};
 
 fn main() {
@@ -37,7 +37,7 @@ fn main() {
 
     let mut x = vec![0.0_f64; space.n_dofs()];
     let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
-    let result = solve_gmres(&a_mat, &rhs, &mut x, 30, &cfg).unwrap();
+    let result = solve_cg(&a_mat, &rhs, &mut x, &cfg).unwrap();
 
     let sol_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
     if let Some(ref path) = args.mesh { println!("  Mesh: {path}"); }
@@ -72,7 +72,7 @@ fn parse_args() -> Args {
 mod tests {
     use fem_assembly::{Assembler, DgAssembler, InteriorFaceList, standard::DomainSourceIntegrator};
     use fem_mesh::Mesh;
-    use fem_solver::solve_gmres;
+    use fem_solver::solve_cg;
     use fem_solver::SolverConfig;
     use fem_space::L2Space;
     use fem_space::fe_space::FESpace;
@@ -94,7 +94,7 @@ mod tests {
 
         let mut x = vec![0.0_f64; space.n_dofs()];
         let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
-        solve_gmres(&a_mat, &rhs, &mut x, 30, &cfg).unwrap();
+        solve_cg(&a_mat, &rhs, &mut x, &cfg).unwrap();
         x.iter().map(|v| v * v).sum::<f64>().sqrt()
     }
 
@@ -106,7 +106,7 @@ mod tests {
         let rhs = Assembler::assemble_linear(&space, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);
         let a = DgAssembler::assemble_sip(&space, &ifl, 1.0, 4.0, 3);
         let mut x = vec![0.0; space.n_dofs()];
-        let r = solve_gmres(&a, &rhs, &mut x, 30, &SolverConfig { max_iter: 500, ..SolverConfig::default() }).unwrap();
+        let r = solve_cg(&a, &rhs, &mut x, &SolverConfig { max_iter: 500, ..SolverConfig::default() }).unwrap();
         assert!(r.iterations > 0);
     }
 

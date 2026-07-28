@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 use nalgebra::DMatrix;
 
-use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3}};
+use fem_element::{ReferenceElement, lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1, QuadQ2, QuadQ3}};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -350,8 +350,11 @@ fn assemble_interior_face<S: FESpace>(
         let xp: Vec<f64> = (0..dim).map(|i| x0f[i] + (x1f[i] - x0f[i]) * xi_f[0]).collect();
 
         // Map physical point → reference coordinates of each element.
-        let xi_l = phys_to_ref(&jac_l, mesh.node_coords(nodes_l[0]), &xp, dim);
-        let xi_r = phys_to_ref(&jac_r, mesh.node_coords(nodes_r[0]), &xp, dim);
+        // phys_to_ref maps to [0,1]-based coords; for quads we shift to [-1,1].
+        let mut xi_l = phys_to_ref(&jac_l, mesh.node_coords(nodes_l[0]), &xp, dim);
+        let mut xi_r = phys_to_ref(&jac_r, mesh.node_coords(nodes_r[0]), &xp, dim);
+        if nodes_l.len() > 3 { for v in &mut xi_l { *v -= 1.0; } } // quad: centroid J → shift
+        if nodes_r.len() > 3 { for v in &mut xi_r { *v -= 1.0; } }
 
         re_l.eval_basis(&xi_l, &mut phi_l);
         re_r.eval_basis(&xi_r, &mut phi_r);
@@ -448,8 +451,9 @@ fn build_face_elem_map<M: MeshTopology>(mesh: &M, _order: u8) -> HashMap<u32, u3
     let mut vol_face_map: HashMap<Vec<u32>, u32> = HashMap::new();
 
     let local_faces_fn: fn(usize, usize) -> Vec<Vec<usize>> = |npe, d| match (npe, d) {
-        (3, 2) => vec![vec![0,1], vec![1,2], vec![0,2]],
-        (4, 3) => vec![vec![1,2,3], vec![0,2,3], vec![0,1,3], vec![0,1,2]],
+        (3, 2) => vec![vec![0,1], vec![1,2], vec![0,2]],    // triangle
+        (4, 2) => vec![vec![0,1], vec![1,2], vec![2,3], vec![0,3]], // quad
+        (4, 3) => vec![vec![1,2,3], vec![0,2,3], vec![0,1,3], vec![0,1,2]], // tet
         _ => vec![],
     };
 
@@ -517,7 +521,8 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
     for (qi, xi_f) in q_face.points.iter().enumerate() {
         let w_f = q_face.weights[qi] * h_f;
         let xp: Vec<f64> = (0..dim).map(|i| x0f[i] + (x1f[i] - x0f[i]) * xi_f[0]).collect();
-        let xi_e = phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim);
+        let mut xi_e = phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim);
+        if nodes.len() > 3 { for v in &mut xi_e { *v -= 1.0; } } // quad shift
 
         re.eval_basis(&xi_e, &mut phi);
         re.eval_grad_basis(&xi_e, &mut gref);
@@ -616,6 +621,9 @@ fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriP2),
         (ElementType::Tri3, 3) => Box::new(TriP3),
+        (ElementType::Quad4, 1) => Box::new(QuadQ1),
+        (ElementType::Quad4, 2) => Box::new(QuadQ2),
+        (ElementType::Quad4, 3) => Box::new(QuadQ3),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
@@ -634,6 +642,22 @@ fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
 }
 
 fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
+    if nodes.len() > 3 {
+        // Quad element — centroid Jacobian of bilinear mapping on [-1,1]²,
+        // Then scale by 0.5 for [0,1]-based ref coords used by phys_to_ref.
+        let x: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[0]).collect();
+        let y: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[1]).collect();
+        let dxi  = [-0.5,  0.5,  0.5, -0.5];
+        let deta = [-0.5, -0.5,  0.5,  0.5];
+        let mut j = DMatrix::<f64>::zeros(dim, dim);
+        for k in 0..4 {
+            j[(0,0)] += dxi[k]  * x[k]; j[(0,1)] += deta[k] * x[k];
+            j[(1,0)] += dxi[k]  * y[k]; j[(1,1)] += deta[k] * y[k];
+        }
+        let det = j.determinant();
+        return (j, det);
+    }
+    // Simplex: affine mapping from [0,1]^dim
     let x0 = mesh.node_coords(nodes[0]);
     let mut j = DMatrix::<f64>::zeros(dim, dim);
     for col in 0..dim {
