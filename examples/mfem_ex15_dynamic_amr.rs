@@ -15,7 +15,7 @@
 //! cargo run --example mfem_ex15_amr_poisson -- -m data/star-hilbert.mesh -o 1 -e 0.01 -no-vis -tf 0.05
 //! ````
 
-use std::collections::HashMap;
+// use std::collections::HashMap;
 use std::time::Instant;
 
 use fem_assembly::{
@@ -25,7 +25,7 @@ use fem_assembly::{
 use fem_assembly::postproc::error_estimate::{threshold_mark, kelly_estimator};
 use fem_assembly::postproc::flux_recovery::zz_estimator_mfem;
 use fem_assembly::postproc::grid_function::GridFunction;
-use fem_core::{ElemId, NodeId};
+use fem_core::ElemId;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType};
 use fem_mesh::amr::{
@@ -190,7 +190,7 @@ fn main() {
     println!("   --max-err {}", args.max_elem_error);
     println!("   --hysteresis {}", args.hysteresis);
     println!("   --ref-levels {}", args.ref_levels);
-    println!("   --nc-limit {}", args.nc_limit);
+    // println!("   --nc-limit {}", args.nc_limit); // TODO: pass to NCState::refine()
     println!("   --t-final {}", args.t_final);
     println!("   --estimator {}", args.estimator);
     println!("   --no-visualization");
@@ -237,7 +237,7 @@ fn main() {
     let max_elem_error = args.max_elem_error;
     let hysteresis = args.hysteresis;
     let derefine_threshold = hysteresis * max_elem_error;
-    let _nc_limit = args.nc_limit;
+    // let _nc_limit = args.nc_limit; // TODO: pass to NCState::refine()
 
     let mut x = Vec::<f64>::new();
     x.push(0.0); // dummy init — will be overwritten
@@ -251,7 +251,8 @@ fn main() {
         println!("\nRefinement:");
 
         // ─── 4a. Inner refinement loop ──────────────────────────────────────
-        let mut eta_last: Vec<f64> = Vec::new(); // keep last eta for derefinement
+        let mut eta_last: Vec<f64> = Vec::new();
+        let hist_before = refinement_history.len(); // detect new entries
 
         for ref_it in 1.. {
             // Build H1 space on current mesh
@@ -356,18 +357,18 @@ fn main() {
             // Record refinement for potential selective derefinement.
             refinement_history.push(marked.clone());
 
-            // Apply NC refinement
+            // Apply NC refinement. The returned constraints are the complete
+            // set rebuilt from scratch (matching C++ Mesh::Finalize()).
             let (new_mesh, new_constraints) = nc_state.refine(&mesh, &marked);
-            hanging_constraints = merge_hanging_constraints(&hanging_constraints, &new_constraints, &new_mesh);
+            hanging_constraints = new_constraints;
             mesh = new_mesh;
         }
 
         // ─── 4b. Selective derefinement ────────────────────────────────────
         // Matches MFEM ThresholdDerefiner::Apply: coarsen individual elements
         // whose children's error is below derefine_threshold.
-        // Only attempt derefinement if refinement actually happened this step.
-        let history_len = refinement_history.len();
-        if history_len > 0 && nc_state.can_derefine() && !eta_last.is_empty() {
+        // Only derefine entries added during THIS time step (hist_before guard).
+        if refinement_history.len() > hist_before && nc_state.can_derefine() && !eta_last.is_empty() {
             let old_marked = refinement_history.pop().unwrap();
             // Recover the pre-refinement mesh.
             if let Some((old_mesh, _old_constraints)) = nc_state.derefine_last() {
@@ -422,49 +423,11 @@ fn main() {
     println!("  Done.");
 }
 
-// ─── Hanging constraint merge (from ex6) ───────────────────────────────────────
-
-fn merge_hanging_constraints(
-    old: &[HangingNodeConstraint],
-    new: &[HangingNodeConstraint],
-    new_mesh: &Mesh<2>,
-) -> Vec<HangingNodeConstraint> {
-    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<NodeId>> = HashMap::new();
-    for e in 0..new_mesh.n_elems() as NodeId {
-        let ns = new_mesh.elem_nodes(e);
-        let n_vert = ns.len();
-        for i in 0..n_vert {
-            let a = ns[i];
-            let b = ns[(i + 1) % n_vert];
-            let key = if a < b { (a, b) } else { (b, a) };
-            edge_elems.entry(key).or_default().push(e);
-        }
-    }
-
-    let mut merged: Vec<HangingNodeConstraint> = old
-        .iter()
-        .filter(|c| {
-            let mid = c.constrained as NodeId;
-            let pa = c.parent_a as NodeId;
-            let pb = c.parent_b as NodeId;
-            let key = if pa < pb { (pa, pb) } else { (pb, pa) };
-            edge_elems
-                .get(&key)
-                .map(|elems| elems.iter().any(|&e| !new_mesh.elem_nodes(e).contains(&mid)))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect();
-
-    for c in new {
-        if !merged.iter().any(|oc| oc.constrained == c.constrained) {
-            merged.push(c.clone());
-        }
-    }
-
-    merged.sort_by_key(|c| c.constrained);
-    merged
-}
+// ─── Hanging constraint management ─────────────────────────────────────────────
+// Not needed as a standalone merge: NCState::{refine,derefine_last} both
+// return the complete constraint set rebuilt from scratch, matching C++
+// Mesh::Finalize().  See NCStateQuad::refine (amr_inner.rs:1636) and
+// NCState::refine (amr_inner.rs:311).
 
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -476,7 +439,9 @@ struct Args {
     max_elem_error: f64,
     hysteresis: f64,
     ref_levels: u32,
-    nc_limit: u32,
+    // TODO: nc_limit should be passed to NCState::refine() for 1:1 match
+    //       with C++ ThresholdRefiner::SetNCLimit.
+    // nc_limit: u32,
     t_final: f64,
     estimator: i32,
 }
@@ -490,7 +455,7 @@ impl Args {
         let mut max_elem_error = 5.0e-3;
         let mut hysteresis = 0.15;
         let mut ref_levels = 2;
-        let mut nc_limit = 3;
+        let mut _nc_limit = 3;
         let mut t_final = 1.0;
         let mut estimator = 0;
 
@@ -504,7 +469,7 @@ impl Args {
                 "-e" | "--max-err" => { if let Some(v) = it.next() { max_elem_error = v.parse().unwrap_or(5.0e-3); } }
                 "-y" | "--hysteresis" => { if let Some(v) = it.next() { hysteresis = v.parse().unwrap_or(0.15); } }
                 "-r" | "--ref-levels" | "-rs" | "--refine-serial" => { if let Some(v) = it.next() { ref_levels = v.parse().unwrap_or(0); } }
-                "-l" | "--nc-limit" => { if let Some(v) = it.next() { nc_limit = v.parse().unwrap_or(3); } }
+                "-l" | "--nc-limit" => { if let Some(v) = it.next() { _nc_limit = v.parse().unwrap_or(3); } }
                 "-tf" | "--t-final" => { if let Some(v) = it.next() { t_final = v.parse().unwrap_or(1.0); } }
                 "-est" | "--estimator" => { if let Some(v) = it.next() { estimator = v.parse().unwrap_or(0); } }
                 "-no-vis" | "--no-visualization" => { /* accepted but ignored */ }
@@ -521,7 +486,7 @@ impl Args {
             max_elem_error,
             hysteresis,
             ref_levels,
-            nc_limit,
+            // nc_limit,
             t_final,
             estimator,
         }
