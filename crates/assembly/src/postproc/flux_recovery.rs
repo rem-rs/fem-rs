@@ -22,11 +22,16 @@ use crate::postproc::grid_function::GridFunction;
 /// Mirrors MFEM's `BilinearFormIntegrator::ComputeElementFlux` and
 /// `ComputeFluxEnergy` used by `ZienkiewiczZhuEstimator`.
 pub trait FluxRecovery {
-    /// Compute the raw (element-local) flux at each flux-space DOF coordinate.
+    /// Compute the raw (element-local) flux via L² projection onto the flux space.
     ///
     /// For `DiffusionIntegrator` with constant κ, this evaluates `κ·∇u_h` at
-    /// each point and returns a flat array `[n_flux_dofs × dim]` where
-    /// `flux[i * dim + d]` = d-th component at the i-th DOF coordinate.
+    /// quadrature points, forms the element mass matrix `M_{ij} = ∫ φ_i φ_j dΩ`
+    /// and RHS `b_{i,d} = ∫ (κ·∇u_h)_d φ_i dΩ`, then solves `M·flux = b` for each
+    /// dimension component. This matches MFEM's default `ComputeElementFlux` which
+    /// L²-projects the flux rather than evaluating at DOF coordinates directly.
+    ///
+    /// Returns a flat array `[n_flux_dofs × dim]` where
+    /// `flux[i * dim + d]` = d-th component at the i-th flux-space DOF.
     fn compute_element_flux<M: MeshTopology, S: FESpace<Mesh = M>>(
         &self,
         mesh: &M,
@@ -38,7 +43,8 @@ pub trait FluxRecovery {
 
     /// Compute the squared energy norm of a flux-difference vector on `element`.
     ///
-    /// Returns `∫ |flux_diff|² dΩ` (the energy, not its square root).
+    /// Returns `∫ (1/κ) |flux_diff|² dΩ` — the energy norm (not its square root),
+    /// matching MFEM's `DiffusionIntegrator::ComputeFluxEnergy`.
     /// `flux_diff` has the same layout as `compute_element_flux` output.
     fn compute_flux_energy<M: MeshTopology>(
         &self,
@@ -156,16 +162,66 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         flux_dof_coords: &[Vec<f64>],
     ) -> Vec<f64> {
         let dim = mesh.dim() as usize;
-        let n_dofs_coords = flux_dof_coords.len();
+        let n_flux_dofs = flux_dof_coords.len();
         let elem_type = mesh.element_type(element);
-        let mut flux = vec![0.0; n_dofs_coords * dim];
+        let order = space.order();
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let nodes = mesh.element_nodes(element);
 
-        for (i, xi) in flux_dof_coords.iter().enumerate() {
+        // Quadrature rule for integration (2*order is exact for product of
+        // two order-p polynomials, which is the mass matrix integrand).
+        let quad_order = (order as u8) * 2;
+        let quad = ref_elem.quadrature(quad_order);
+
+        // Element mass matrix M_ij = ∫ φ_i φ_j dΩ
+        let mut mass = vec![0.0; n_flux_dofs * n_flux_dofs];
+        // RHS: b_{i,d} = ∫ (κ·∇u_h)_d * φ_i dΩ
+        let mut rhs = vec![0.0; n_flux_dofs * dim];
+        let mut phi = vec![0.0; n_flux_dofs];
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (_, det_j) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
+            let w_det = quad.weights[q] * det_j.abs();
+
+            // Evaluate κ·∇u_h at the quadrature point
             let grad = eval_grad_at(mesh, element, space, solution_dofs, xi, elem_type);
-            for d in 0..dim {
-                flux[i * dim + d] = self.kappa * grad[d];
+
+            // Evaluate flux-space basis functions at quadrature point
+            ref_elem.eval_basis(xi, &mut phi);
+
+            for i in 0..n_flux_dofs {
+                for j in 0..n_flux_dofs {
+                    mass[i * n_flux_dofs + j] += w_det * phi[i] * phi[j];
+                }
+                for d in 0..dim {
+                    rhs[i * dim + d] += w_det * phi[i] * self.kappa * grad[d];
+                }
             }
         }
+
+        // Solve M * flux_component = rhs_component for each dimension
+        // using LU decomposition of the small element mass matrix.
+        use nalgebra::{DMatrix, DVector};
+        let mass_mat = DMatrix::from_row_slice(n_flux_dofs, n_flux_dofs, &mass);
+        let lu = mass_mat.lu();
+
+        let mut flux = vec![0.0; n_flux_dofs * dim];
+        for d in 0..dim {
+            let mut b = DVector::from_vec(
+                (0..n_flux_dofs).map(|i| rhs[i * dim + d]).collect(),
+            );
+            if lu.solve(&mut b).is_some() {
+                for i in 0..n_flux_dofs {
+                    flux[i * dim + d] = b[i];
+                }
+            } else {
+                panic!(
+                    "Flux L2 projection: singular element mass matrix on element {}",
+                    element,
+                );
+            }
+        }
+
         flux
     }
 
@@ -218,7 +274,7 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let mut phi = vec![0.0; n_ldofs];
         for (q, xi) in quad.points.iter().enumerate() {
             let (_, det_j) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
-            let w_det = quad.weights[q] * det_j.abs() * self.kappa;
+            let w_det = quad.weights[q] * det_j.abs() / self.kappa;
             ref_elem.eval_basis(xi, &mut phi);
             for i in 0..n_ldofs {
                 for j in 0..n_ldofs {
@@ -450,10 +506,10 @@ mod tests {
         let int2 = DiffusionIntegrator { kappa: 4.0 };
         let eta1 = zz_estimator_mfem(&gf, &int1).eta;
         let eta2 = zz_estimator_mfem(&gf, &int2).eta;
-        // Flux = κ·∇u_h, diff_scales by κ, energy = ∫ κ·|diff|² → η ∝ κ^(3/2)
-        // For κ=4 vs κ=1: η_ratio = 4^(3/2) = 8
+        // Flux diff = κ·(∇u* - ∇u_h), energy = ∫ (1/κ)·|flux_diff|² → η ∝ √κ
+        // For κ=4 vs κ=1: η_ratio = √4 = 2
         for (e1, e2) in eta1.iter().zip(eta2.iter()) {
-            assert!((e2 / e1 - 8.0).abs() < 1e-10, "eta should scale as κ^(3/2), got ratio {:.6}", e2 / e1);
+            assert!((e2 / e1 - 2.0).abs() < 1e-10, "eta should scale as √κ, got ratio {:.6}", e2 / e1);
         }
     }
 }
