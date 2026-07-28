@@ -747,9 +747,12 @@ mod tests {
 
     #[test]
     fn dg_diff_energy_decreases() {
+        // Note: with the C++-style assembly, the penalty is purely sigma
+        // (no kappa factor), making the operator stiffer. Use a dt that respects
+        // the CFL: λ_max_new ≈ 5 × λ_max_old, so dt must be ~5× smaller.
         let dg = DgDiffusion2D::new(6, 0.1, 15.0);
         let mut u = dg.interpolate(|x| (std::f64::consts::PI * x[0]).sin());
-        let dt = 0.001;
+        let dt = 0.0001;
         let e0 = dg_energy(&u, dg.mass_diagonal());
         for _ in 0..20 {
             dg.step_rk3(&mut u, dt);

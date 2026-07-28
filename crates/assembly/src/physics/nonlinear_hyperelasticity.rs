@@ -267,9 +267,30 @@ fn neo_hookean_pk1_tangent(f: &DMatrix<f64>, mu: f64, lambda: f64) -> (DMatrix<f
 //
 // Matches MFEM's NeoHookeanModel used in ex10:
 //   W = μ/2 · (J^{-2/3}·I₁ - dim) + K/2 · (J-1)²
-//   P = μ·J^{-2/3}·F + [K·(J-1) - μ·J^{-2/3}·I₁/(dim·J)] · J·F^{-T}
+//   P = a·F + c·F^{-T}
 //
-// Tangent computed via numerical differentiation (same as Mooney-Rivlin/Ogden).
+// where:
+//   a = μ·J^{-2/dim}
+//   c = K·J·(J-1) - a·I₁/dim
+//
+// Analytic tangent (Voigt C_{iI,jJ} = ∂P_{iI}/∂F_{jJ}):
+//
+//   ∂a/∂F_{jJ} = a·(-2/dim)·F^{-T}_{jJ}
+//   ∂J/∂F_{jJ} = J·F^{-T}_{jJ}
+//   ∂F_{iI}/∂F_{jJ} = δ_{ij}·δ_{IJ}
+//   ∂F^{-T}_{iI}/∂F_{jJ} = -F^{-T}_{jI}·F^{-T}_{iJ}
+//   ∂I₁/∂F_{jJ} = 2·F_{jJ}
+//
+//   C = a·δ_{ij}·δ_{IJ}
+//     + a·(-2/dim)·F^{-T}_{jJ}·F_{iI}
+//     + [K·J·(2J-1) + 2·a·I₁/dim²] · F^{-T}_{jJ}·F^{-T}_{iI}
+//     - (2·a/dim)·F_{jJ}·F^{-T}_{iI}
+//     - c·F^{-T}_{jI}·F^{-T}_{iJ}
+//
+// At F=I this reduces to the isotropic linear elasticity tensor
+// C = μ·(δ_{ik}δ_{jl}+δ_{il}δ_{jk}) + λ·δ_{ij}δ_{kl} with λ = K - 2μ/dim.
+//
+// Verified against central-difference numerical tangent in unit test below.
 
 fn mfem_neo_hookean_pk1(f: &DMatrix<f64>, mu: f64, K: f64) -> DMatrix<f64> {
     let dim = f.nrows() as f64;
@@ -282,13 +303,74 @@ fn mfem_neo_hookean_pk1(f: &DMatrix<f64>, mu: f64, K: f64) -> DMatrix<f64> {
         .transpose();
 
     let a = mu * j_pow;                       // μ·J^{-2/dim}
-    let b = K * (jac - 1.0) - a * i1 / (dim * jac);  // K·(J-1) - μ·J^{-2/3}·I₁/(dim·J)
+    let b = K * (jac - 1.0) - a * i1 / (dim * jac);  // K·(J-1) - μ·J^{-2/dim}·I₁/(dim·J)
     a * f + (b * jac) * inv_f_t
 }
 
+/// Analytical tangent for MFEM deviatoric Neo-Hookean.
+///
+/// Derivation: differentiate P = a·F + c·F^{-T} using:
+///   ∂J/∂F = J·F^{-T},   ∂F/∂F = I⊗I,   ∂F^{-T}/∂F = -F^{-T} ⊗ F^{-T}
+///   ∂I₁/∂F = 2F,        ∂a/∂F = a·(-2/dim)·F^{-T}
 fn mfem_neo_hookean_pk1_tangent(f: &DMatrix<f64>, mu: f64, K: f64) -> (DMatrix<f64>, DMatrix<f64>) {
-    let p = mfem_neo_hookean_pk1(f, mu, K);
-    let ct = numerical_tangent(f, &|ft| mfem_neo_hookean_pk1(ft, mu, K));
+    let dim = f.nrows();
+    let dim_f = dim as f64;
+    let jac = f.determinant();
+    let inv_f_t = f.clone().try_inverse()
+        .unwrap_or_else(|| DMatrix::identity(dim, dim))
+        .transpose();
+    let c_mat = f.transpose() * f;
+    let i1 = c_mat.trace();
+
+    let j_pow = jac.powf(-2.0 / dim_f);
+    let a = mu * j_pow;                            // μ·J^{-2/dim}
+    let c = K * jac * (jac - 1.0) - a * i1 / dim_f; // K·J·(J-1) - a·I₁/dim
+
+    // PK1 stress
+    let b = K * (jac - 1.0) - a * i1 / (dim_f * jac);
+    let p = a * f + (b * jac) * inv_f_t.clone();
+
+    // ── Tangent C_{iI,jJ} ─────────────────────────────────────────────────────
+    let n = dim * dim;
+    let mut ct = DMatrix::zeros(n, n);
+
+    // Precomputed scalars for the five terms (see doc-comment derivation).
+    let t2_pre = a * (-2.0 / dim_f);         // a·(-2/dim)  for F·F^{-T}
+    let t3_pre = K * jac * (2.0 * jac - 1.0)    // K·J·(2J-1) + 2·a·I₁/dim²
+               + 2.0 * a * i1 / (dim_f * dim_f);
+    let t4_pre = -2.0 * a / dim_f;            // -(2·a/dim)  for F·F^{-T}
+
+    for i in 0..dim {
+        for I in 0..dim {
+            let row = i * dim + I;
+            for j in 0..dim {
+                for J in 0..dim {
+                    let col = j * dim + J;
+                    let mut val = 0.0;
+
+                    // Term 1: a · δ_{ij} · δ_{IJ}
+                    if i == j && I == J {
+                        val += a;
+                    }
+
+                    // Term 2: a·(-2/dim) · F_{iI} · F^{-T}_{jJ}
+                    val += t2_pre * f[(i, I)] * inv_f_t[(j, J)];
+
+                    // Term 3: [K·J·(2J-1) + 2·a·I₁/dim²] · F^{-T}_{jJ} · F^{-T}_{iI}
+                    val += t3_pre * inv_f_t[(j, J)] * inv_f_t[(i, I)];
+
+                    // Term 4: -(2·a/dim) · F_{jJ} · F^{-T}_{iI}
+                    val += t4_pre * f[(j, J)] * inv_f_t[(i, I)];
+
+                    // Term 5: -c · F^{-T}_{jI} · F^{-T}_{iJ}
+                    val -= c * inv_f_t[(j, I)] * inv_f_t[(i, J)];
+
+                    ct[(row, col)] = val;
+                }
+            }
+        }
+    }
+
     (p, ct)
 }
 
@@ -1210,6 +1292,75 @@ mod tests {
     fn yeoh_identity() {
         let f = DMatrix::identity(3, 3);
         let psi = yeoh_energy(&f, 0.3, -0.1, 0.02, 1e3);
+    }
+
+    /// Verify the analytical MfemNeoHookean tangent against central-difference
+    /// numerical tangent for a range of deformation gradients.
+    #[test]
+    fn mfem_neo_hookean_analytic_tangent_vs_fd() {
+        let mu = 0.25;
+        let K = 5.0;
+        let eps = 1e-6;
+
+        // Test at F=I (small-strain limit) and several deformed states
+        let test_configs: Vec<(usize, Vec<Vec<f64>>)> = vec![
+            (2, vec![
+                vec![1.0, 0.0, 0.0, 1.0],                        // identity
+                vec![1.1, 0.0, 0.0, 1.0/1.1],                    // uniaxial tension
+                vec![1.0, 0.2, 0.0, 1.0],                         // simple shear
+                vec![1.3, 0.0, 0.1, 0.8],                         // combined
+            ]),
+            (3, vec![
+                vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],  // identity
+                vec![1.2, 0.0, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 0.9],  // uniaxial
+                vec![1.0, 0.3, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],  // shear
+            ]),
+        ];
+
+        for (dim, configs) in &test_configs {
+            for entries in configs {
+                let f = DMatrix::<f64>::from_row_slice(*dim, *dim, entries);
+                // Ensure positive determinant
+                if f.determinant() <= 0.0 { continue; }
+
+                let (_, ct_a) = mfem_neo_hookean_pk1_tangent(&f, mu, K);
+
+                // Central-difference numerical tangent (eps=1e-6)
+                let n = dim * dim;
+                let mut ct_fd = DMatrix::zeros(n, n);
+                for j in 0..*dim {
+                    for J in 0..*dim {
+                        let mut f_plus = f.clone();
+                        f_plus[(j, J)] += eps;
+                        let p_plus = mfem_neo_hookean_pk1(&f_plus, mu, K);
+                        let mut f_minus = f.clone();
+                        f_minus[(j, J)] -= eps;
+                        let p_minus = mfem_neo_hookean_pk1(&f_minus, mu, K);
+                        for i in 0..*dim {
+                            for I in 0..*dim {
+                                let row = i * dim + I;
+                                let col = j * dim + J;
+                                ct_fd[(row, col)] = (p_plus[(i, I)] - p_minus[(i, I)]) / (2.0 * eps);
+                            }
+                        }
+                    }
+                }
+
+                // Relative Frobenius error ||C_a - C_fd|| / ||C_a||
+                let mut err_sq = 0.0;
+                let mut norm_sq = 0.0;
+                for r in 0..n { for c in 0..n {
+                    let d = ct_a[(r, c)] - ct_fd[(r, c)];
+                    err_sq += d * d;
+                    norm_sq += ct_a[(r, c)] * ct_a[(r, c)];
+                }}
+                let rel_err = err_sq.sqrt() / norm_sq.sqrt().max(1e-30);
+                assert!(
+                    rel_err < 1e-6,
+                    "MfemNeoHookean analytic tangent FD mismatch dim={dim}: rel_err = {rel_err:.2e} (expected < 1e-6)"
+                );
+            }
+        }
     }
 
     #[test]

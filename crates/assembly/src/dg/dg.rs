@@ -332,20 +332,23 @@ fn assemble_interior_face<S: FESpace>(
         (vec![], vec![], vec![], vec![])
     };
 
-    // Blocks accumulated: K_ll, K_lr, K_rl, K_rr.
-    let mut kll = vec![0.0_f64; n_l * n_l];
-    let mut klr = vec![0.0_f64; n_l * n_r];
-    let mut krl = vec![0.0_f64; n_r * n_l];
-    let mut krr = vec![0.0_f64; n_r * n_r];
-
-    // Map face quadrature points to physical coords, then back to reference
-    // coords of each element for basis evaluation.
-    let face_xi: Vec<Vec<f64>> = q_face.points.clone();
-    let face_weights = &q_face.weights;
-
-    // Physical face quadrature points.
+    // Physical face quadrature points (for nor and QP mapping).
     let x0f = mesh.node_coords(face_nodes[0]);
     let x1f = mesh.node_coords(face_nodes[1]);
+
+    // C++-style: nor = CalcOrtho(J_face) = unit_normal * h_f/2
+    // This is the UNNORMALIZED normal; |nor| = face Jacobian determinant = h_f/2.
+    // normal_l is already oriented outward from element 1 (left element).
+    let nor = vec![h_f / 2.0 * normal_l[0], h_f / 2.0 * normal_l[1]];
+    let nor_norm2 = h_f * h_f / 4.0;  // = |nor|² = h_f²/4
+
+    // Single ndofs×ndofs matrix per C++: elmat (consistency) + jmat (penalty, lower tri)
+    let ndofs = n_l + n_r;
+    let mut el_local = vec![0.0_f64; ndofs * ndofs];
+    let mut jm_local = vec![0.0_f64; ndofs * ndofs];
+
+    let face_xi: Vec<Vec<f64>> = q_face.points.clone();
+    let face_weights = &q_face.weights;
 
     let mut phi_l    = vec![0.0_f64; n_l];
     let mut phi_r    = vec![0.0_f64; n_r];
@@ -353,18 +356,19 @@ fn assemble_interior_face<S: FESpace>(
     let mut gref_r   = vec![0.0_f64; n_r * dim];
     let mut gphys_l  = vec![0.0_f64; n_l * dim];
     let mut gphys_r  = vec![0.0_f64; n_r * dim];
+    let mut dsf1dn   = vec![0.0_f64; n_l];
+    let mut dsf2dn   = vec![0.0_f64; n_r];
 
     for (qi, xi_f) in face_xi.iter().enumerate() {
-        let w_f = face_weights[qi] * h_f;
-
-        // Physical quadrature point on the face.
-        let xp: Vec<f64> = (0..dim).map(|i| x0f[i] + (x1f[i] - x0f[i]) * xi_f[0]).collect();
+        // Physical quadrature point on the face (linear mapping: [-1,1] → physical).
+        let xp: Vec<f64> = (0..dim).map(|i| {
+            0.5 * ((1.0 - xi_f[0]) * x0f[i] + (1.0 + xi_f[0]) * x1f[i])
+        }).collect();
 
         // Map physical point → reference coordinates of each element.
-        // phys_to_ref maps to [0,1]-based coords; for quads we shift to [-1,1].
         let mut xi_l = phys_to_ref(&jac_l, mesh.node_coords(nodes_l[0]), &xp, dim);
         let mut xi_r = phys_to_ref(&jac_r, mesh.node_coords(nodes_r[0]), &xp, dim);
-        if nodes_l.len() > 3 { for v in &mut xi_l { *v -= 1.0; } } // quad: centroid J → shift
+        if nodes_l.len() > 3 { for v in &mut xi_l { *v -= 1.0; } }
         if nodes_r.len() > 3 { for v in &mut xi_r { *v -= 1.0; } }
 
         re_l.eval_basis(&xi_l, &mut phi_l);
@@ -374,7 +378,7 @@ fn assemble_interior_face<S: FESpace>(
         xform_grads(&jit_l, &gref_l, &mut gphys_l, n_l, dim);
         xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
 
-        // C++-style per-point Jacobian for quads (triangles use constant from simplex_jac).
+        // Per-point Jacobian for quads (triangles use constant from simplex_jac).
         let (jac_pt_l, det_l, jit_pt_l) = if nodes_l.len() > 3 {
             let (j, d) = quad_jac_at(&xl, &yl, xi_l[0], xi_l[1]);
             let d_safe = d.abs().max(1e-14);
@@ -395,81 +399,118 @@ fn assemble_interior_face<S: FESpace>(
         xform_grads(&jit_pt_l, &gref_l, &mut gphys_l, n_l, dim);
         xform_grads(&jit_pt_r, &gref_r, &mut gphys_r, n_r, dim);
 
-        // C++ weight: w = ip.weight / det(J) / 2 (interior face averaging)
-        let w_l = h_f * face_weights[qi] / det_l / 2.0;
-        let w_r = h_f * face_weights[qi] / det_r / 2.0;
+        // ── C++ DGDiffusionIntegrator per-QP algorithm ──────────────────────
+        // w = ip.weight / det(J_elem) / 2  (interior face averaging)
+        //   → dshape·nh  where  nh = adjJ * (w * nor)
+        //   → dshape1dn[j] = det(J) * w * ∇_x φ_j · nor
+        //                    = (qw/2) * ∇_x φ_j · nor        (det(J)*w = qw/2)
 
-        // MFEM-compatible penalty: wq = w * |nor|² where |nor| = h_f (in 2D).
-        // penalty = sigma * kappa * (wq_l + wq_r) / 2  (sigma from caller)
-        // For C++ SIPG (sigma=-1): penalty -= kappa * wq.
-        let nrm_l = normal_l[0]; let nrm_r = normal_l[1];
-        let nw_lx =  jac_pt_l[(1,1)] * nrm_l - jac_pt_l[(0,1)] * nrm_r;
-        let nw_ly = -jac_pt_l[(1,0)] * nrm_l + jac_pt_l[(0,0)] * nrm_r;
-        let nw_rx = -jac_pt_r[(1,1)] * nrm_l + jac_pt_r[(0,1)] * nrm_r;
-        let nw_ry =  jac_pt_r[(1,0)] * nrm_l - jac_pt_r[(0,0)] * nrm_r;
-        let h_inv_l = (nw_lx * nw_lx + nw_ly * nw_ly).sqrt() / det_l;
-        let h_inv_r = (nw_rx * nw_rx + nw_ry * nw_ry).sqrt() / det_r;
-        let pen = sigma * kappa * 0.5 * (h_inv_l + h_inv_r);
+        let qw = face_weights[qi];  // ip.weight on reference face
 
-        // SIP interior face terms using a single normal n = n_L (outward from left):
-        //   -∫ {κ∇u·n}[v] ds - ∫ {κ∇v·n}[u] ds + pen ∫ [u][v] ds
-        // where [w] = w_L - w_R, {w} = (w_L + w_R)/2
-        // All gradients dotted with n_L (not n_R).
+        // Element 1 (left): ∇_x φ_j · nor → dsf1dn[j]
+        for j in 0..n_l {
+            let dot = gphys_l[j * dim] * nor[0] + gphys_l[j * dim + 1] * nor[1];
+            dsf1dn[j] = (qw / 2.0) * dot;
+        }
 
-        // Precompute ∇φ·n_L for all basis functions on both sides
-        let ngl: Vec<f64> = (0..n_l).map(|i| (0..dim).map(|d| gphys_l[i*dim+d] * normal_l[d]).sum::<f64>()).collect();
-        let ngr: Vec<f64> = (0..n_r).map(|i| (0..dim).map(|d| gphys_r[i*dim+d] * normal_l[d]).sum::<f64>()).collect();
+        // Element 2 (right): ∇_x φ_j · nor → dsf2dn[j]
+        for j in 0..n_r {
+            let dot = gphys_r[j * dim] * nor[0] + gphys_r[j * dim + 1] * nor[1];
+            dsf2dn[j] = (qw / 2.0) * dot;
+        }
 
-        // K_LL: a∈L, b∈L  → [v]=φ_bL, [u]=φ_aL, {∇u·n}=½∇φ_aL·n, {∇v·n}=½∇φ_bL·n
+        // ── Consistency matrix elmat (before sign) ──────────────────────────
+        // C++: elmat(i,j) += shape(i) * dshape·nh(j)
+        // A_11: test 1, trial 1
         for i in 0..n_l {
             for j in 0..n_l {
-                kll[i*n_l+j] += w_f * (
-                    -0.5 * kappa * ngl[i] * phi_l[j]
-                    -0.5 * kappa * ngl[j] * phi_l[i]
-                    + pen * phi_l[i] * phi_l[j]
-                );
+                el_local[i * ndofs + j] += phi_l[i] * dsf1dn[j];
             }
         }
-        // K_LR: a∈L, b∈R  → [v]=-φ_bR, [u]=φ_aL, {∇u·n}=½∇φ_aL·n, {∇v·n}=½∇φ_bR·n
+        // A_12: test 1, trial 2
         for i in 0..n_l {
             for j in 0..n_r {
-                klr[i*n_r+j] += w_f * (
-                     0.5 * kappa * ngl[i] * phi_r[j]    // from -{∇u·n}[v], [v]=-φ_bR
-                    -0.5 * kappa * ngr[j] * phi_l[i]    // from -{∇v·n}[u], [u]=φ_aL
-                    - pen * phi_l[i] * phi_r[j]          // from [u][v] = φ_aL·(-φ_bR)
-                );
+                el_local[i * ndofs + (n_l + j)] += phi_l[i] * dsf2dn[j];
             }
         }
-        // K_RL: a∈R, b∈L  → [v]=φ_bL, [u]=-φ_aR, {∇u·n}=½∇φ_aR·n, {∇v·n}=½∇φ_bL·n
+        // A_21: test 2, trial 1  (C++: -= shape2 * dshape1dn)
         for i in 0..n_r {
             for j in 0..n_l {
-                krl[i*n_l+j] += w_f * (
-                    -0.5 * kappa * ngr[i] * phi_l[j]    // from -{∇u·n}[v], [v]=φ_bL
-                    +0.5 * kappa * ngl[j] * phi_r[i]    // from -{∇v·n}[u], [u]=-φ_aR
-                    - pen * phi_r[i] * phi_l[j]          // from [u][v] = (-φ_aR)·φ_bL
-                );
+                el_local[(n_l + i) * ndofs + j] -= phi_r[i] * dsf1dn[j];
             }
         }
-        // K_RR: a∈R, b∈R  → [v]=-φ_bR, [u]=-φ_aR, {∇u·n}=½∇φ_aR·n, {∇v·n}=½∇φ_bR·n
+        // A_22: test 2, trial 2  (C++: -= shape2 * dshape2dn)
         for i in 0..n_r {
             for j in 0..n_r {
-                krr[i*n_r+j] += w_f * (
-                     0.5 * kappa * ngr[i] * phi_r[j]    // from -{∇u·n}[v], [v]=-φ_bR
-                    +0.5 * kappa * ngr[j] * phi_r[i]    // from -{∇v·n}[u], [u]=-φ_aR
-                    + pen * phi_r[i] * phi_r[j]          // from [u][v] = (-φ_aR)·(-φ_bR)
-                );
+                el_local[(n_l + i) * ndofs + (n_l + j)] -= phi_r[i] * dsf2dn[j];
+            }
+        }
+
+        // ── Penalty wq ──────────────────────────────────────────────────────
+        // wq = ni·nor = w * |nor|², summed over elements
+        // w1 = qw / det_l / 2, w2 = qw / det_r / 2
+        let wq = nor_norm2 * (qw / 2.0) * (1.0 / det_l + 1.0 / det_r);
+        // C++: jmat += kappa * wq * shape * shape  (kappa = penalty sigma here)
+        let jscale = sigma * wq;  // sigma = penalty parameter (caller's sigma)
+
+        // jmat lower-triangular block structure (C++ matches both symmetric halves)
+        // jmat_11
+        for i in 0..n_l {
+            let jsi = jscale * phi_l[i];
+            for j in 0..=i {
+                jm_local[i * ndofs + j] += jsi * phi_l[j];
+            }
+        }
+        // jmat_21 (C++: -= wq * shape2 * shape1)
+        for i in 0..n_r {
+            let ii = n_l + i;
+            let jsi = jscale * phi_r[i];
+            for j in 0..n_l {
+                jm_local[ii * ndofs + j] -= jsi * phi_l[j];
+            }
+        }
+        // jmat_22
+        for i in 0..n_r {
+            let ii = n_l + i;
+            let jsi = jscale * phi_r[i];
+            for j in 0..=i {
+                jm_local[ii * ndofs + (n_l + j)] += jsi * phi_r[j];
             }
         }
     }
 
-    // Scatter
+    // ── Combine: el_local = -kappa*el_local - kappa*el_local^T + jm_local ──
+    // C++: elmat = -elmat + sigma_cpp * elmat^T + jmat
+    //       with sigma_cpp = -1 (SIP), so: -elmat - elmat^T + jmat
+    // kappa = diffusion coefficient (elmat), sigma = penalty parameter (jmat)
+    for i in 0..ndofs {
+        for j in 0..i {
+            let aij = el_local[i * ndofs + j];
+            let aji = el_local[j * ndofs + i];
+            let mij = jm_local[i * ndofs + j];
+            el_local[i * ndofs + j] = -kappa * aij - kappa * aji + mij;
+            el_local[j * ndofs + i] = -kappa * aji - kappa * aij + mij;
+        }
+        let diag = el_local[i * ndofs + i];
+        el_local[i * ndofs + i] = -2.0 * kappa * diag + jm_local[i * ndofs + i];
+    }
+
+    // Scatter into global COO
     for (i, &gi) in dofs_l.iter().enumerate() {
-        for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, kll[i*n_l+j]); }
-        for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, klr[i*n_r+j]); }
+        for (j, &gj) in dofs_l.iter().enumerate() {
+            coo.add(gi, gj, el_local[i * ndofs + j]);
+        }
+        for (j, &gj) in dofs_r.iter().enumerate() {
+            coo.add(gi, gj, el_local[i * ndofs + (n_l + j)]);
+        }
     }
     for (i, &gi) in dofs_r.iter().enumerate() {
-        for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, krl[i*n_l+j]); }
-        for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, krr[i*n_r+j]); }
+        for (j, &gj) in dofs_l.iter().enumerate() {
+            coo.add(gi, gj, el_local[(n_l + i) * ndofs + j]);
+        }
+        for (j, &gj) in dofs_r.iter().enumerate() {
+            coo.add(gi, gj, el_local[(n_l + i) * ndofs + (n_l + j)]);
+        }
     }
 }
 
@@ -547,46 +588,82 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
     let x0f = mesh.node_coords(face_nodes[0]);
     let x1f = mesh.node_coords(face_nodes[1]);
 
-    let mut k_bd = vec![0.0_f64; n * n];
-    let mut phi   = vec![0.0_f64; n];
-    let mut gref  = vec![0.0_f64; n * dim];
-    let mut gphys = vec![0.0_f64; n * dim];
+    // C++-style: nor = CalcOrtho(face Jacobian) = (dy/2, -dx/2)
+    // C++-style: nor = unit_normal * h_f/2 (oriented outward from elem)
+    let nor = vec![h_f / 2.0 * normal[0], h_f / 2.0 * normal[1]];
+    let nor_norm2 = h_f * h_f / 4.0;  // = h_f²/4
+
+    let mut el_loc = vec![0.0_f64; n * n];
+    let mut jm_loc = vec![0.0_f64; n * n];
+    let mut phi    = vec![0.0_f64; n];
+    let mut gref   = vec![0.0_f64; n * dim];
+    let mut gphys  = vec![0.0_f64; n * dim];
+    let mut dsdn   = vec![0.0_f64; n];
 
     for (qi, xi_f) in q_face.points.iter().enumerate() {
-        let w_f = q_face.weights[qi] * h_f;
-        let xp: Vec<f64> = (0..dim).map(|i| x0f[i] + (x1f[i] - x0f[i]) * xi_f[0]).collect();
+        let qw = q_face.weights[qi];
+        let xp: Vec<f64> = (0..dim).map(|i| {
+            0.5 * ((1.0 - xi_f[0]) * x0f[i] + (1.0 + xi_f[0]) * x1f[i])
+        }).collect();
         let mut xi_e = phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim);
-        if nodes.len() > 3 { for v in &mut xi_e { *v -= 1.0; } } // quad shift
+        if nodes.len() > 3 { for v in &mut xi_e { *v -= 1.0; } }
 
         re.eval_basis(&xi_e, &mut phi);
         re.eval_grad_basis(&xi_e, &mut gref);
         xform_grads(&jit, &gref, &mut gphys, n, dim);
 
-        // MFEM-compatible penalty: 1/h = |adjJ * n| / det(J)
-        let det_j = jac.determinant();
-        let nw_x =  jac[(1,1)] * normal[0] - jac[(0,1)] * normal[1];
-        let nw_y = -jac[(1,0)] * normal[0] + jac[(0,0)] * normal[1];
-        let h_inv = (nw_x * nw_x + nw_y * nw_y).sqrt() / det_j.abs().max(1e-14);
-        let pen = sigma * kappa * h_inv;
+        // Per-point Jacobian for quads
+        let (det_j, jit_pt) = if nodes.len() > 3 {
+            // Need vertex coords for per-point Jacobian
+            let (_, det_j0) = simplex_jac(mesh, nodes, dim);
+            (det_j0.abs().max(1e-14), jit.clone())
+        } else {
+            (jac.determinant().abs().max(1e-14), jit.clone())
+        };
 
+        // ── C++ boundary face: w = qw / det(J) (no /2 for boundary) ─────────
+        // dshapedn[j] = det(J) * w * gphys[j] · nor
+        //             = qw * gphys[j] · nor          (det(J)*w = qw)
+        for j in 0..n {
+            let dot = gphys[j * dim] * nor[0] + gphys[j * dim + 1] * nor[1];
+            dsdn[j] = qw * dot;
+        }
+
+        // Consistency matrix (boundary: only block 1,1)
         for i in 0..n {
-            let phi_i   = phi[i];
-            let ngrad_i: f64 = (0..dim).map(|d| gphys[i*dim+d] * normal[d]).sum();
             for j in 0..n {
-                let phi_j   = phi[j];
-                let ngrad_j: f64 = (0..dim).map(|d| gphys[j*dim+d] * normal[d]).sum();
-                k_bd[i*n+j] += w_f * (
-                    -kappa * ngrad_i * phi_j
-                    -kappa * ngrad_j * phi_i
-                    + pen  * phi_i   * phi_j
-                );
+                el_loc[i * n + j] += phi[i] * dsdn[j];
+            }
+        }
+
+        // Penalty: wq = qw * |nor|² / det(J)  (boundary, no /2)
+        let wq = (qw / det_j) * nor_norm2;
+        let jscale = sigma * wq;  // sigma = penalty from caller
+
+        // jmat lower triangle
+        for i in 0..n {
+            let jsi = jscale * phi[i];
+            for j in 0..=i {
+                jm_loc[i * n + j] += jsi * phi[j];
             }
         }
     }
 
+    // ── Combine: el = -kappa*el - kappa*el^T + jm  (SIP) ────────────────────
+    for i in 0..n {
+        for j in 0..i {
+            let aij = el_loc[i * n + j];
+            let aji = el_loc[j * n + i];
+            let mij = jm_loc[i * n + j];
+            el_loc[i * n + j] = -kappa * aij - kappa * aji + mij;
+            el_loc[j * n + i] = -kappa * aji - kappa * aij + mij;
+        }
+        el_loc[i * n + i] = -2.0 * kappa * el_loc[i * n + i] + jm_loc[i * n + i];
+    }
+
     for (i, &gi) in dofs.iter().enumerate() {
         for (j, &gj) in dofs.iter().enumerate() {
-            coo.add(gi, gj, k_bd[i*n+j]);
+            coo.add(gi, gj, el_loc[i * n + j]);
         }
     }
 }
@@ -750,7 +827,26 @@ mod tests {
         }
     }
 
-    /// With a sufficiently large penalty the SIP matrix should be positive definite
+    /// SIP matrix should give positive energy for non-constant functions.
+    #[test]
+    fn sip_positive_energy() {
+        use fem_mesh::Mesh;
+        use fem_space::L2Space;
+        use crate::interior_faces::InteriorFaceList;
+
+        let mesh = Mesh::<2>::unit_square_tri(6);
+        let ifl = InteriorFaceList::build(&mesh);
+        let space = L2Space::new(mesh, 1);
+        let mat = DgAssembler::assemble_sip(&space, &ifl, 0.1, 15.0, 3);
+        // u = sin(πx)
+        let u_vec = space.interpolate(&|x| (std::f64::consts::PI * x[0]).sin());
+        let u_slice: &[f64] = u_vec.as_slice();
+        // Compute u^T * K * u
+        let mut ku = vec![0.0; u_slice.len()];
+        mat.spmv(u_slice, &mut ku);
+        let energy: f64 = u_slice.iter().zip(ku.iter()).map(|(ui, kui)| ui * kui).sum();
+        assert!(energy > 0.0, "u^T K u should be positive, got {energy}");
+    }
     /// (all eigenvalues > 0).  We check via Cholesky or by verifying row-dominant structure:
     /// diagonal entry should be the largest in each row for a well-conditioned problem.
     #[test]
