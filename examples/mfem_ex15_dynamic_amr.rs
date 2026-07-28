@@ -22,7 +22,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_assembly::postproc::error_estimate::{threshold_mark, derefine_mark, kelly_estimator};
+use fem_assembly::postproc::error_estimate::{threshold_mark, kelly_estimator};
 use fem_assembly::postproc::flux_recovery::zz_estimator_mfem;
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_core::{ElemId, NodeId};
@@ -243,6 +243,9 @@ fn main() {
     x.push(0.0); // dummy init — will be overwritten
     x.pop();
     let mut time = 0.0;
+    // Track which elements were refined in each pass for selective derefinement.
+    let mut refinement_history: Vec<Vec<ElemId>> = Vec::new();
+
     while time < t_final + 1e-10 {
         println!("\nTime {}", time);
         println!("\nRefinement:");
@@ -350,23 +353,64 @@ fn main() {
                 break;
             }
 
+            // Record refinement for potential selective derefinement.
+            refinement_history.push(marked.clone());
+
             // Apply NC refinement
             let (new_mesh, new_constraints) = nc_state.refine(&mesh, &marked);
             hanging_constraints = merge_hanging_constraints(&hanging_constraints, &new_constraints, &new_mesh);
             mesh = new_mesh;
         }
 
-        // ─── 4b. Derefinement step ─────────────────────────────────────────
-        if nc_state.can_derefine() && !eta_last.is_empty() {
-            // Use eta from the last refinement iteration (MFEM reuses estimator state)
-            let derefine_candidates = derefine_mark(&eta_last, derefine_threshold);
+        // ─── 4b. Selective derefinement ────────────────────────────────────
+        // Matches MFEM ThresholdDerefiner::Apply: coarsen individual elements
+        // whose children's error is below derefine_threshold.
+        // Only attempt derefinement if refinement actually happened this step.
+        let history_len = refinement_history.len();
+        if history_len > 0 && nc_state.can_derefine() && !eta_last.is_empty() {
+            let old_marked = refinement_history.pop().unwrap();
+            // Recover the pre-refinement mesh.
+            if let Some((old_mesh, _old_constraints)) = nc_state.derefine_last() {
+                // Compute which old marked elements should stay refined.
+                // The 4 children of a refined quad are contiguous in the current
+                // (pre-derefinement) element array. Mapping:
+                //   child_start = old_elem_idx + 3 * refined_before(old_elem_idx)
+                let mut keep_refined: Vec<ElemId> = Vec::new();
+                let mut refined_before: usize = 0;
+                let mut n_coarsened: usize = 0;
+                for &old_e in &old_marked {
+                    let child_start = old_e as usize + 3 * refined_before;
+                    refined_before += 1;
+                    if child_start + 4 > eta_last.len() {
+                        keep_refined.push(old_e);
+                        continue;
+                    }
+                    // Aggregate child errors (sum — matches C++ default op=1).
+                    let child_sum: f64 = eta_last[child_start..child_start + 4].iter().sum();
+                    if child_sum >= derefine_threshold {
+                        keep_refined.push(old_e);
+                    } else {
+                        n_coarsened += 1;
+                    }
+                }
 
-            // Derefine if at least one candidate exists below threshold
-            if !derefine_candidates.is_empty() && nc_state.can_derefine() {
-                if let Some((old_mesh, old_constraints)) = nc_state.derefine_last() {
-                    mesh = old_mesh;
-                    hanging_constraints = old_constraints;
-                    println!("\nDerefined elements.");
+                if n_coarsened > 0 {
+                    // Re-refine old mesh with only the elements that stay refined.
+                    let (new_mesh, new_constraints) = nc_state.refine(&old_mesh, &keep_refined);
+                    mesh = new_mesh;
+                    hanging_constraints = new_constraints;
+                    println!("  Selective derefinement: {n_coarsened}/{} parents coarsened",
+                        old_marked.len());
+                    // Re-push the new refinement to history for the next
+                    // time step (it replaces the popped entry).
+                    refinement_history.push(keep_refined);
+                } else {
+                    // No elements below threshold: restore the refinement as-is.
+                    let (restored_mesh, restored_constraints) =
+                        nc_state.refine(&old_mesh, &old_marked);
+                    mesh = restored_mesh;
+                    hanging_constraints = restored_constraints;
+                    refinement_history.push(old_marked);
                 }
             }
         }
