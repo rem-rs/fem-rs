@@ -658,7 +658,7 @@ pub fn assemble_iga_mass_multipatch_2d(
     coo.into_csr()
 }
 
-/// Assemble the 2-D linear elasticity stiffness matrix.
+/// Assemble the 2-D linear elasticity stiffness matrix with uniform material.
 ///
 /// Uses interleaved DOF ordering: control point `a` contributes DOFs
 /// `2a` (x-displacement) and `2a+1` (y-displacement).
@@ -681,14 +681,50 @@ pub fn assemble_iga_elasticity_2d(
     mu: f64,
     quad_order: u8,
 ) -> CsrMatrix<f64> {
+    assemble_iga_elasticity_2d_impl(mesh, quad_order, |_tag, _patch_idx| (lambda, mu))
+}
+
+/// Assemble the 2-D linear elasticity stiffness matrix with per-tag materials.
+///
+/// `materials` is a slice of `(tag, lambda, mu)` entries.  Each NURBS patch's
+/// `tag` is looked up in this slice to determine its material parameters.
+/// Uses the same strain-displacement matrix as [`assemble_iga_elasticity_2d`]
+/// but with patch-dependent D.
+///
+/// # Panics
+/// Panics if a patch tag is not found in `materials`.
+pub fn assemble_iga_elasticity_2d_multi(
+    mesh: &NurbsMesh2D,
+    materials: &[(i32, f64, f64)],
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    assemble_iga_elasticity_2d_impl(mesh, quad_order, |tag, _idx| {
+        materials.iter().copied()
+            .find(|(t, _, _)| *t == tag)
+            .map(|(_, l, m)| (l, m))
+            .unwrap_or_else(|| panic!(
+                "assemble_iga_elasticity_2d_multi: no material entry for tag={tag}"
+            ))
+    })
+}
+
+/// Shared implementation for 2-D IGA elasticity assembly.
+///
+/// The closure `get_material` receives `(tag, patch_index)` and returns
+/// `(lambda, mu)` for that patch.
+fn assemble_iga_elasticity_2d_impl(
+    mesh: &NurbsMesh2D,
+    quad_order: u8,
+    get_material: impl Fn(i32, usize) -> (f64, f64),
+) -> CsrMatrix<f64> {
     let n_total: usize = mesh.patches.iter().map(|p| p.control_pts.len()).sum();
     let n_vec = 2 * n_total;
     let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
 
-    let c1 = lambda + 2.0 * mu;  // D[0,0] and D[1,1]
-
     let mut dof_offset = 0usize;
-    for pd in &mesh.patches {
+    for (pi, pd) in mesh.patches.iter().enumerate() {
+        let (lambda, mu) = get_material(pd.tag, pi);
+        let c1 = lambda + 2.0 * mu;  // D[0,0] and D[1,1]
         let elem = pd_to_patch2d(pd);
         let n_dof = elem.n_dofs();
         let qr = patch_quad_2d(pd, quad_order);
@@ -841,19 +877,51 @@ pub fn assemble_iga_load_3d(
 /// `3a` (x-displacement), `3a+1` (y-displacement), `3a+2` (z-displacement).
 ///
 /// Isotropic 3-D elasticity (λ and μ are the Lamé parameters).
+/// Assemble the 3-D linear elasticity stiffness matrix with uniform material.
+///
+/// See [`assemble_iga_elasticity_2d`] for conventions.
 pub fn assemble_iga_elasticity_3d(
     mesh: &NurbsMesh3D,
     lambda: f64,
     mu: f64,
     quad_order: u8,
 ) -> CsrMatrix<f64> {
+    assemble_iga_elasticity_3d_impl(mesh, quad_order, |_tag, _idx| (lambda, mu))
+}
+
+/// Assemble the 3-D linear elasticity stiffness matrix with per-tag materials.
+///
+/// `materials` is a slice of `(tag, lambda, mu)` entries.
+/// See [`assemble_iga_elasticity_2d_multi`] for details.
+pub fn assemble_iga_elasticity_3d_multi(
+    mesh: &NurbsMesh3D,
+    materials: &[(i32, f64, f64)],
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    assemble_iga_elasticity_3d_impl(mesh, quad_order, |tag, _idx| {
+        materials.iter().copied()
+            .find(|(t, _, _)| *t == tag)
+            .map(|(_, l, m)| (l, m))
+            .unwrap_or_else(|| panic!(
+                "assemble_iga_elasticity_3d_multi: no material entry for tag={tag}"
+            ))
+    })
+}
+
+/// Shared implementation for 3-D IGA elasticity assembly.
+fn assemble_iga_elasticity_3d_impl(
+    mesh: &NurbsMesh3D,
+    quad_order: u8,
+    get_material: impl Fn(i32, usize) -> (f64, f64),
+) -> CsrMatrix<f64> {
     let n_total: usize = mesh.patches.iter().map(|p| p.control_pts.len()).sum();
     let n_vec = 3 * n_total;
     let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
-    let c1 = lambda + 2.0 * mu;
 
     let mut dof_offset = 0usize;
-    for pd in &mesh.patches {
+    for (pi, pd) in mesh.patches.iter().enumerate() {
+        let (lambda, mu) = get_material(pd.tag, pi);
+        let c1 = lambda + 2.0 * mu;
         let elem = pd.patch_element_ref();
         let n_dof = elem.n_dofs();
         let qr = patch_quad_3d(pd, quad_order);

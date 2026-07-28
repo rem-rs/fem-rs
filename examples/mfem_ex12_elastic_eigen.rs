@@ -27,7 +27,10 @@ use fem_assembly::{
     standard::{ElasticityIntegrator, VectorH1MassIntegrator},
     postproc::coefficient::PWConstCoeff,
 };
-use fem_assembly::iga::{assemble_iga_elasticity_2d, assemble_iga_elasticity_3d, assemble_iga_mass_2d_vec, assemble_iga_mass_3d_vec};
+use fem_assembly::iga::{
+    assemble_iga_elasticity_2d_multi, assemble_iga_elasticity_3d_multi,
+    assemble_iga_mass_2d_vec, assemble_iga_mass_3d_vec,
+};
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d};
 use fem_io::nurbs_mesh::{read_nurbs_mesh_file, NurbsFile};
 use fem_linalg::{CsrMatrix, fem_to_linlvo_csr};
@@ -265,8 +268,9 @@ fn run_3d(mut mesh: Mesh<3>, args: &Args) {
 fn run_iga_2d(m: fem_element::nurbs::NurbsMesh2D, args: &Args) {
     let mesh = if args.ser_ref_levels > 0 { m.uniform_refine(args.ser_ref_levels) } else { m };
     let p = if args.order > 0 { args.order as usize } else { mesh.patches[0].kv_u.degree };
-    // Note: IGA elasticity uses constant coeffs (multi-material not yet supported)
-    let a = assemble_iga_elasticity_2d(&mesh, 1.0, 1.0, (p as u8 + 2).max(3));
+    // Multi-material elasticity: tags 1→(λ=50, μ=50), 2→(λ=1, μ=1) matching
+    // the FEM path's PWConstCoeff with ([1, 50.0], [2, 1.0]) for both λ and μ.
+    let a = assemble_iga_elasticity_2d_multi(&mesh, &[(1, 50.0, 50.0), (2, 1.0, 1.0)], (p as u8 + 2).max(3));
     let m = assemble_iga_mass_2d_vec(&mesh, 1.0, (p as u8 + 2).max(3));
     let n = a.nrows;
     // Boundary DOFs: u=0 face (fixed end) for NURBS beam
@@ -284,7 +288,7 @@ fn run_iga_2d(m: fem_element::nurbs::NurbsMesh2D, args: &Args) {
 fn run_iga_3d(m: fem_element::nurbs::NurbsMesh3D, args: &Args) {
     let mesh = if args.ser_ref_levels > 0 { m.uniform_refine(args.ser_ref_levels) } else { m };
     let p = if args.order > 0 { args.order as usize } else { mesh.patches[0].kv_u.degree };
-    let a = assemble_iga_elasticity_3d(&mesh, 1.0, 1.0, (p as u8 + 2).max(3));
+    let a = assemble_iga_elasticity_3d_multi(&mesh, &[(1, 50.0, 50.0), (2, 1.0, 1.0)], (p as u8 + 2).max(3));
     let m = assemble_iga_mass_3d_vec(&mesh, 1.0, (p as u8 + 2).max(3));
     let n = a.nrows;
     // Boundary DOFs: u=0 face (fixed end) for NURBS beam
