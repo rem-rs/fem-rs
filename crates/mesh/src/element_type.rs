@@ -87,6 +87,28 @@ impl ElementType {
         }
     }
 
+    /// Convert to `fem_element::ElemType` for the reference-element factory.
+    pub fn to_elem_type(self) -> fem_element::lagrange::factory::ElemType {
+        use fem_element::lagrange::factory::ElemType;
+        match self {
+            Self::Line2 | Self::Line3 => ElemType::Seg,
+            Self::Tri3 | Self::Tri6 => ElemType::Tri,
+            Self::Tet4 | Self::Tet10 => ElemType::Tet,
+            Self::Quad4 | Self::Quad8 | Self::Quad9 => ElemType::Quad,
+            Self::Hex8 | Self::Hex20 | Self::Hex27 => ElemType::Hex,
+            Self::Prism6 | Self::Prism15 | Self::Prism18 => ElemType::Prism,
+            Self::Pyramid5 | Self::Pyramid13 => ElemType::Pyramid,
+            _ => panic!("to_elem_type: unsupported {self:?}"),
+        }
+    }
+
+    /// Return the reference element for this mesh type and polynomial order.
+    ///
+    /// Wraps `fem_element::ref_elem()` with the mesh-side `ElementType`.
+    pub fn ref_elem(self, order: u8) -> Box<dyn fem_element::ReferenceElement> {
+        fem_element::ref_elem(self.to_elem_type(), order)
+    }
+
     /// Map GMSH element type integer to `ElementType`.
     ///
     /// Returns `None` for unsupported or unknown type codes.

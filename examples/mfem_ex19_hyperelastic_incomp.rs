@@ -14,44 +14,13 @@
 
 #![allow(non_snake_case)]
 
-use fem_element::ReferenceElement;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix, SolverConfig};
 use fem_solver::block_operator::right_preconditioned_gmres;
 use fem_solver::{solve_gmres_gssmoother, solve_pcg_gssmoother};
 use fem_mesh::{refine_uniform, MeshTopology};
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space, VectorH1Space};
-use fem_element::lagrange::{TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, QuadQ4};
-use fem_element::lagrange::tet::{TetP1, TetP2, TetP3};
-use fem_element::lagrange::hex::{HexQ1, HexQ2, HexQ3};
-use fem_element::lagrange::prism::PrismPk;
-use fem_mesh::element_type::ElementType;
 use nalgebra::DMatrix;
-
-// ─── Reference element helpers ─────────────────────────────────────────
-
-/// Factory: return a reference element for the given type and order.
-fn re(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (et, order) {
-        (ElementType::Tri3, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) => Box::new(TriP2),
-        (ElementType::Tri3, 3) => Box::new(TriP3),
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (ElementType::Quad4, 3) => Box::new(QuadQ3),
-        (ElementType::Quad4, 4) => Box::new(QuadQ4),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
-        (ElementType::Hex8, 1) => Box::new(HexQ1),
-        (ElementType::Hex8, 2) => Box::new(HexQ2),
-        (ElementType::Hex8, 3) => Box::new(HexQ3),
-        (ElementType::Prism6, 1) => Box::new(PrismPk::new(1)),
-        (ElementType::Prism6, 2) => Box::new(PrismPk::new(2)),
-        (ElementType::Prism6, 3) => Box::new(PrismPk::new(3)),
-        _ => panic!("unsupported element type {et:?} x order {order}"),
-    }
-}
 
 /// Compute element Jacobian determinant and inverse-transpose at a reference point.
 /// Returns (detJ, J^{-T}) where J = ∂x/∂ξ.
@@ -60,7 +29,7 @@ fn jacf(m: &impl MeshTopology, elem: u32, xi: &[f64], dim: usize) -> (f64, DMatr
     let nd = m.element_nodes(elem);
     let n_ldofs = nd.len();
     // MFEM: uses FE collection for the mesh, here we use order=1 (linear geometry)
-    let re_geom = re(et, 1);
+    let re_geom = et.ref_elem(1);
     let mut grad = vec![0.0_f64; n_ldofs * dim];
     re_geom.eval_grad_basis(xi, &mut grad);
     let mut jac = DMatrix::<f64>::zeros(dim, dim);
@@ -110,7 +79,7 @@ fn build_pressure_mass(
     let ne = mesh.n_elements() as usize;
     for e in 0..ne {
         let et = mesh.element_type(e as u32);
-        let ref_elem = re(et, p_order);
+        let ref_elem = et.ref_elem(p_order);
         let n_ldofs = ref_elem.n_dofs();
         let edofs: Vec<usize> = space.element_dofs(e as u32)
             .iter().map(|&d| d as usize).collect();
@@ -161,8 +130,8 @@ fn residual(
     let ne = mesh.n_elements() as usize;
     for e in 0..ne {
         let et = mesh.element_type(e as u32);
-        let ru_ref = re(et, order);
-        let rp_ref = re(et, p_order);
+        let ru_ref = et.ref_elem(order);
+        let rp_ref = et.ref_elem(p_order);
         let n_du = ru_ref.n_dofs();       // scalar shape functions (displacement)
         let n_dp = rp_ref.n_dofs();       // scalar shape functions (pressure)
         let n_vd = n_du * dim;            // vector DOFs per element
@@ -286,8 +255,8 @@ fn jacobian(
     let ne = mesh.n_elements() as usize;
     for e in 0..ne {
         let et = mesh.element_type(e as u32);
-        let ru_ref = re(et, order);
-        let rp_ref = re(et, p_order);
+        let ru_ref = et.ref_elem(order);
+        let rp_ref = et.ref_elem(p_order);
         let n_du = ru_ref.n_dofs();
         let n_dp = rp_ref.n_dofs();
         let n_vd = n_du * dim;
