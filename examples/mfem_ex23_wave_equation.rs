@@ -28,7 +28,7 @@
 
 use std::io::Write;
 use fem_assembly::{
-    Assembler, project_coefficient,
+    Assembler,
     standard::{DiffusionIntegrator, MassIntegrator},
 };
 use fem_io::mfem::{read_mfem_file, write_gf, write_mfem_file, write_mfem_file_3d};
@@ -507,10 +507,9 @@ fn run_wave_3d(mut mesh: Mesh<3>, args: &Args) {
         }
     } else { Vec::new() };
 
-    // 7. Set initial conditions via L² projection (matching C++).
-    let quad_order_3d = (2 * args.order + 1) as u8;
-    let mut u = project_coefficient(&space, &|x: &[f64]| initial_solution(x), quad_order_3d);
-    let mut du_dt = project_coefficient(&space, &|x: &[f64]| initial_rate(x), quad_order_3d);
+    // 7. Set initial conditions via interpolation (matching C++ ProjectCoefficient for H1).
+    let mut u: Vec<f64> = space.interpolate(&|x: &[f64]| initial_solution(x)).into_vec();
+    let mut du_dt: Vec<f64> = space.interpolate(&|x: &[f64]| initial_rate(x)).into_vec();
     println!("  ess_bdr count: {}", ess_tdof_list.len());
     for &d in &ess_tdof_list { u[d as usize] = 0.0; du_dt[d as usize] = 0.0; }
 
