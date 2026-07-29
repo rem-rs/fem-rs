@@ -166,6 +166,44 @@ pub struct GeneralizedAlpha2 {
     pub rho_inf: f64,
 }
 
+/// Second-order ODE solver selector matching MFEM's `SecondOrderODESolver::Select`.
+///
+/// | type | MFEM name       | `rho_inf` | Rust equivalent     |
+/// |------|-----------------|-----------|---------------------|
+/// | 10   | Backward Euler  | 1.0       | [`GeneralizedAlpha2`] |
+/// | 11   | Trapezoidal / Newmark | 0.0  | [`GeneralizedAlpha2`] |
+/// | 12   | SDIRK2 (L-stable) | 0.5     | [`GeneralizedAlpha2`] |
+pub enum SecondOrderSolver {
+    /// Backward Euler-like (type 10, ρ_∞=1.0, β=0.25, γ=0.5).
+    BackwardEuler,
+    /// Trapezoidal / Newmark (type 11, ρ_∞=0.0, β=1.0, γ=1.5).
+    Trapezoidal,
+    /// SDIRK2 L-stable (type 12, ρ_∞=0.5, β=4/9, γ=5/6).
+    Sdirk2,
+}
+
+impl SecondOrderSolver {
+    /// Create from MFEM type code (10, 11, or 12).
+    /// Returns `BackwardEuler` for unknown codes.
+    pub fn from_type(code: i32) -> Self {
+        match code {
+            10 => SecondOrderSolver::BackwardEuler,
+            11 => SecondOrderSolver::Trapezoidal,
+            12 => SecondOrderSolver::Sdirk2,
+            _ => { eprintln!("SecondOrderSolver: unknown type {code}, using BackwardEuler"); SecondOrderSolver::BackwardEuler }
+        }
+    }
+
+    /// Return the `rho_inf` value for this solver type.
+    pub fn rho_inf(&self) -> f64 {
+        match self {
+            SecondOrderSolver::BackwardEuler => 1.0,
+            SecondOrderSolver::Trapezoidal => 0.0,
+            SecondOrderSolver::Sdirk2 => 0.5,
+        }
+    }
+}
+
 /// State for [`GeneralizedAlpha2`]: stores velocity and acceleration.
 pub struct GeneralizedAlpha2State {
     pub vel: Vec<f64>,
