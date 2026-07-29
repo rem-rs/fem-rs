@@ -919,46 +919,18 @@ pub fn compute_l2_error_hcurl<M: MeshTopology>(
             | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
             | ElementType::Prism6 | ElementType::Prism15
             | ElementType::Pyramid5);
-        let geo_elem = if use_iso { Some(et.ref_elem(mesh.geom_order().max(1))) } else { None };
+        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
 
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (w, xp) = if use_iso {
+            let (w, jac, xp) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
-                let mut grad_geo = vec![0.0; ge.n_dofs() * dim];
-                let mut phi_geo = vec![0.0; ge.n_dofs()];
-                ge.eval_grad_basis(xi, &mut grad_geo);
-                ge.eval_basis(xi, &mut phi_geo);
-                let mut jac = DMatrix::<f64>::zeros(dim, dim);
-                let mut xp_vec = vec![0.0; dim];
-                for k in 0..ge.n_dofs() {
-                    let xk = mesh.node_coords(nodes[k]);
-                    for i in 0..dim {
-                        xp_vec[i] += phi_geo[k] * xk[i];
-                        for d in 0..dim { jac[(i, d)] += xk[i] * grad_geo[k * dim + d]; }
-                    }
-                }
-                (quad.weights[qi] * jac.determinant().abs(), xp_vec)
+                let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+                (quad.weights[qi] * det.abs(), jac, xp_vec)
             } else {
                 let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
-                (quad.weights[qi] * jac.determinant().abs(), xp_vec)
+                (quad.weights[qi] * jac.determinant().abs(), jac, xp_vec)
             };
 
-            // Recompute Jacobian for Piola transform (separate from weight/xp for iso)
-            let (jac, _) = if use_iso {
-                let ge = geo_elem.as_ref().unwrap();
-                let mut grad_geo = vec![0.0; ge.n_dofs() * dim];
-                let mut phi_geo = vec![0.0; ge.n_dofs()];
-                ge.eval_grad_basis(xi, &mut grad_geo);
-                ge.eval_basis(xi, &mut phi_geo);
-                let mut jac = DMatrix::<f64>::zeros(dim, dim);
-                for k in 0..ge.n_dofs() {
-                    let xk = mesh.node_coords(nodes[k]);
-                    for i in 0..dim { for d in 0..dim { jac[(i, d)] += xk[i] * grad_geo[k * dim + d]; } }
-                }
-                (jac, vec![])
-            } else {
-                element_jacobian_at(mesh, e, xi, dim)
-            };
             let jac_inv_t = jac.try_inverse().unwrap_or_else(|| DMatrix::<f64>::identity(dim, dim)).transpose();
 
             vre.eval_basis_vec(xi, &mut ref_bv);
@@ -1018,25 +990,13 @@ pub fn compute_l2_error_hdiv<M: MeshTopology>(
             | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
             | ElementType::Prism6 | ElementType::Prism15
             | ElementType::Pyramid5);
-        let geo_elem = if use_iso { Some(et.ref_elem(mesh.geom_order().max(1))) } else { None };
+        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
 
         for (qi, xi) in quad.points.iter().enumerate() {
             let (w, jac, xp) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
-                let mut grad_geo = vec![0.0; ge.n_dofs() * dim];
-                let mut phi_geo = vec![0.0; ge.n_dofs()];
-                ge.eval_grad_basis(xi, &mut grad_geo);
-                ge.eval_basis(xi, &mut phi_geo);
-                let mut jac = DMatrix::<f64>::zeros(dim, dim);
-                let mut xp_vec = vec![0.0; dim];
-                for k in 0..ge.n_dofs() {
-                    let xk = mesh.node_coords(nodes[k]);
-                    for i in 0..dim {
-                        xp_vec[i] += phi_geo[k] * xk[i];
-                        for d in 0..dim { jac[(i, d)] += xk[i] * grad_geo[k * dim + d]; }
-                    }
-                }
-                (quad.weights[qi] * jac.determinant().abs(), jac, xp_vec)
+                let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+                (quad.weights[qi] * det.abs(), jac, xp_vec)
             } else {
                 let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
                 (quad.weights[qi] * jac.determinant().abs(), jac, xp_vec)
@@ -1096,7 +1056,7 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
             | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
             | ElementType::Prism6 | ElementType::Prism15
             | ElementType::Pyramid5);
-        let geo_elem = if use_iso { Some(et.ref_elem(mesh.geom_order().max(1))) } else { None };
+        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
 
         let (quad, n_ldofs, use_lagrange) = if order == 0 {
             // P0: use HDiv reference element's quadrature
@@ -1113,20 +1073,8 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
         for (qi, xi) in quad.points.iter().enumerate() {
             let (w, xp) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
-                let mut grad_geo = vec![0.0; ge.n_dofs() * dim];
-                let mut phi_geo = vec![0.0; ge.n_dofs()];
-                ge.eval_grad_basis(xi, &mut grad_geo);
-                ge.eval_basis(xi, &mut phi_geo);
-                let mut jac = DMatrix::<f64>::zeros(dim, dim);
-                let mut xp_vec = vec![0.0; dim];
-                for k in 0..ge.n_dofs() {
-                    let xk = mesh.node_coords(nodes[k]);
-                    for i in 0..dim {
-                        xp_vec[i] += phi_geo[k] * xk[i];
-                        for d in 0..dim { jac[(i, d)] += xk[i] * grad_geo[k * dim + d]; }
-                    }
-                }
-                (quad.weights[qi] * jac.determinant().abs(), xp_vec)
+                let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+                (quad.weights[qi] * det.abs(), xp_vec)
             } else {
                 let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
                 (quad.weights[qi] * jac.determinant().abs(), xp_vec)

@@ -171,6 +171,11 @@ fn mesh_type_to_factory(et: ElementType) -> FactoryElemType {
 ///
 /// Returns `Some` for non-affine elements (Quad/Hex with P1, or any element
 /// with `geom_order > 1`), `None` for affine P1 simplex elements.
+///
+/// **Important:** For Quad/Hex elements, uses QuadQ1/HexQ1 on [-1,1]^d to
+/// match the quadrature domain of the scalar/vector FE reference elements.
+/// Using QuadQk::new(1) / HexQk::new(1) (on [0,1]^d) would give a reference
+/// domain mismatch with the FE basis functions and quadrature rules.
 fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElement>> {
     let et = mesh.element_type(e);
     let g = mesh.geom_order();
@@ -180,6 +185,26 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
         | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
         | ElementType::Pyramid5 | ElementType::Pyramid13);
     if g == 1 && !is_quad_hex { return None; } // affine P1 simplex
+    // Quad/Hex elements use [-1,1]^d reference domain for FE basis and quadrature.
+    // The geometry element must match this domain — use QuadQ1/HexQ1 for P1 geometry.
+    use fem_element::lagrange::{QuadQ1, HexQ1};
+    match et {
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
+            return if g <= 1 {
+                Some(Box::new(QuadQ1) as Box<dyn ReferenceElement>)
+            } else {
+                Some(factory_ref_elem(FactoryElemType::Quad, g))
+            };
+        }
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
+            return if g <= 1 {
+                Some(Box::new(HexQ1) as Box<dyn ReferenceElement>)
+            } else {
+                Some(factory_ref_elem(FactoryElemType::Hex, g))
+            };
+        }
+        _ => {}
+    }
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);
     Some(factory_ref_elem(ft, order))
