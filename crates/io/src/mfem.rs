@@ -477,6 +477,21 @@ pub fn write_mfem_file_3d(path: impl AsRef<std::path::Path>, mesh: &Mesh<3>) -> 
     write_mfem(&mut file, &Mesh::<2>::unit_square_tri(2), Some(mesh))
 }
 
+/// Write a 2D mesh with custom vertex coordinates (e.g. displaced nodes).
+///
+/// `coords` is interleaved `[x0, y0, x1, y1, ...]`, length `n_nodes × dim`.
+/// Uses the mesh's topology (elements, boundaries) but replaces vertex positions.
+pub fn write_mfem_file_with_coords(
+    path: impl AsRef<std::path::Path>,
+    mesh: &Mesh<2>,
+    coords: &[f64],
+) -> FemResult<()> {
+    let mut displaced = mesh.clone();
+    let n = coords.len().min(displaced.coords.len());
+    displaced.coords[..n].copy_from_slice(&coords[..n]);
+    write_mfem_file(path, &displaced)
+}
+
 fn skip_comment(line: &str) -> &str {
     let trimmed = line.trim();
     if trimmed.starts_with('#') || trimmed.is_empty() { return ""; }

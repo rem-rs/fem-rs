@@ -259,7 +259,7 @@ fn main() {
     }
     {
         let mut f = File::create("cond_j.gf").expect("cond_j.gf");
-        write_mfem_gf(&mut f, &j_cond, &fec_rt).expect("write cond_j.gf");
+        fem_io::mfem::write_gf(&mut f, 2, &j_cond, "H1", 1, 1).expect("write cond_j.gf");
     }
 
     // 7. Transfer J from SubMesh RT to full mesh RT.
@@ -337,11 +337,11 @@ fn main() {
     }
     {
         let mut f = File::create("sol.gf").expect("sol.gf");
-        write_mfem_gf(&mut f, &a_sol, &fec_nd_full).expect("write sol.gf");
+        fem_io::mfem::write_gf(&mut f, 2, &a_sol, "ND", 1, 1).expect("write sol.gf");
     }
     {
         let mut f = File::create("dsol.gf").expect("dsol.gf");
-        write_mfem_gf(&mut f, &b_field, &fec_rt_curl).expect("write dsol.gf");
+        fem_io::mfem::write_gf(&mut f, 2, &b_field, "H1", 1, 1).expect("write dsol.gf");
     }
 
     eprintln!("\nFinished.");
@@ -438,18 +438,11 @@ fn assemble_hcurl_rhs(
     rhs
 }
 
-/// Write a GridFunction to a simple MFEM-format file.
-fn write_mfem_gf(
-    w: &mut impl Write,
-    values: &[f64],
-    _space: &impl FESpace,
-) -> Result<(), Box<dyn std::error::Error>> {
-    writeln!(w, "MFEM GridFunction v1.0")?;
-    writeln!(w, "\nsolution")?;
-    writeln!(w, "\nFiniteElementSpace")?;
-    writeln!(w, "FiniteElementCollection: ND1")?;
-    writeln!(w, "VDim: 1")?;
-    writeln!(w, "Ordering: byVDim")?;
-    for v in values { writeln!(w, "{:.15e}", v)?; }
+/// Write a solution vector in MFEM FiniteElementSpace format (GLVis-compatible).
+// MFEM: GridFunction::Save(std::ostream &)
+
+    for v in values {
+        writeln!(w, "{:.15e}", v)?;
+    }
     Ok(())
 }

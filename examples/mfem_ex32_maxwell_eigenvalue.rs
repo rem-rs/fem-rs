@@ -204,28 +204,15 @@ fn main() {
 
         let mode_name = format!("mode_{:02}.gf", i);
         let mut f = File::create(&mode_name).expect(&mode_name);
-        write_mfem_gf(&mut f, &mode_vec, &fec_nd).expect("write mode");
+        fem_io::mfem::write_gf(&mut f, 2, &mode_vec, "H1", 1, 1).expect("write mode");
 
         let curl_name = format!("mode_curl_{:02}.gf", i);
         let mut ff = File::create(&curl_name).expect(&curl_name);
-        write_mfem_gf(&mut ff, &curl_vec, &fec_rt).expect("write curl");
+        fem_io::mfem::write_gf(&mut ff, 2, &curl_vec, "H1", 1, 1).expect("write curl");
     }
 
     eprintln!("\nFinished.");
 }
 
-/// Write a GridFunction to a simple MFEM-format file.
-fn write_mfem_gf(
-    w: &mut impl Write,
-    values: &[f64],
-    _space: &impl FESpace,
-) -> Result<(), Box<dyn std::error::Error>> {
-    writeln!(w, "MFEM GridFunction v1.0")?;
-    writeln!(w, "\nsolution")?;
-    writeln!(w, "\nFiniteElementSpace")?;
-    writeln!(w, "FiniteElementCollection: ND1")?;
-    writeln!(w, "VDim: 1")?;
-    writeln!(w, "Ordering: byVDim")?;
-    for v in values { writeln!(w, "{:.15e}", v)?; }
-    Ok(())
-}
+/// Write a solution vector in MFEM FiniteElementSpace format (GLVis-compatible).
+// ─── Tests ────────────────────────────────────────────────────────────────────

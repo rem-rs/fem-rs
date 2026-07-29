@@ -16,7 +16,7 @@ use fem_assembly::postproc::error_estimate::zz_estimator;
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::standard::{ElasticityIntegrator, NeumannIntegrator};
 use fem_assembly::Assembler;
-use fem_io::mfem::read_mfem_file;
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_with_coords, write_mfem_gf_file};
 use fem_linalg::SolverConfig;
 use fem_mesh::amr::HangingNodeConstraint;
 use fem_mesh::element_type::ElementType;
@@ -52,32 +52,6 @@ fn duplicate_hanging_constraints(ch: &[HangingNodeConstraint], ns: usize) -> Vec
         vc.push(HangingNodeConstraint { constrained: c.constrained + ns, parent_a: c.parent_a + ns, parent_b: c.parent_b + ns });
     }
     vc
-}
-
-/// Write MFEM v1.0 mesh file with given vertex coordinates.
-fn write_mfem_mesh(mesh: &impl MeshTopology, coords: &[f64], dim: usize, path: &str) {
-    let nn = mesh.n_nodes() as usize;
-    let ne = mesh.n_elements() as usize;
-    let mut f = File::create(path).unwrap_or_else(|_| panic!("cannot create {path}"));
-    writeln!(f, "MFEM mesh v1.0\n\ndimension\n{dim}\n").ok();
-    writeln!(f, "elements\n{ne}").ok();
-    for e in 0..ne as u32 {
-        let et = mesh.element_type(e);
-        let nd = mesh.element_nodes(e);
-        let et_name = match et {
-            ElementType::Tri3 => "triangle",
-            ElementType::Quad4 => "quadrilateral",
-            _ => panic!("unsupported element type"),
-        };
-        write!(f, "{} {}", e + 1, et_name).ok();
-        for &n in nd { write!(f, " {}", n + 1).ok(); }
-        writeln!(f).ok();
-    }
-    writeln!(f, "\nboundary\n0\n\nvertices\n{nn}\n{dim}\n").ok();
-    for i in 0..nn {
-        for d in 0..dim { write!(f, "{:.16} ", coords[i * dim + d]).ok(); }
-        writeln!(f).ok();
-    }
 }
 
 fn main() {
@@ -256,7 +230,8 @@ fn main() {
     // Reference mesh
     let mut ref_coords = Vec::with_capacity(nn * dim);
     for n in 0..nn { let c = mesh.node_coords(n as u32); ref_coords.push(c[0]); ref_coords.push(c[1]); }
-    write_mfem_mesh(&mesh, &ref_coords, dim, "ex21_reference.mesh");
+    write_mfem_file("ex21_reference.mesh", &mesh)
+        .expect("cannot write reference mesh");
     println!("Wrote ex21_reference.mesh");
 
     // Deformed mesh + displacement (if solution exists)
@@ -269,7 +244,8 @@ fn main() {
             def_coords.push(c[0] + ux);
             def_coords.push(c[1] + uy);
         }
-        write_mfem_mesh(&mesh, &def_coords, dim, "ex21_deformed.mesh");
+        write_mfem_file_with_coords("ex21_deformed.mesh", &mesh, &def_coords)
+        .expect("cannot write deformed mesh");
         println!("Wrote ex21_deformed.mesh");
 
         let mut f = File::create("ex21_displacement.sol").expect("cannot create ex21_displacement.sol");
