@@ -220,12 +220,12 @@ fn main() {
             m
         } else { mesh };
         match cfg.prob {
-            0 => solve_p0(&mesh, &cfg, omega, mu, epsilon, sigma,
-                          stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known),
-            1 => solve_p1(&mesh, &cfg, omega, mu, epsilon, sigma,
-                          stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known),
-            2 => solve_p2(&mesh, &cfg, omega, mu, epsilon, sigma,
-                          stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known),
+            0 => solve_2d_p0(&mesh, &cfg, omega, mu, epsilon, sigma,
+                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known, 2),
+            1 => solve_2d_p1(&mesh, &cfg, omega, mu, epsilon, sigma,
+                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known, 2),
+            2 => solve_2d_p2(&mesh, &cfg, omega, mu, epsilon, sigma,
+                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known, 2),
             _ => unreachable!(),
         }
     } else if let Some(mesh3d) = data.mesh3d {
@@ -235,12 +235,12 @@ fn main() {
             m
         } else { mesh3d };
         match cfg.prob {
-            0 => solve_p0_3d(&mesh, &cfg, omega, mu, epsilon, sigma,
-                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known),
-            1 => solve_p1_3d(&mesh, &cfg, omega, mu, epsilon, sigma,
-                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known),
-            2 => solve_p2_3d(&mesh, &cfg, omega, mu, epsilon, sigma,
-                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known),
+            0 => solve_3d_p0(&mesh, &cfg, omega, mu, epsilon, sigma,
+                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known, 3),
+            1 => solve_3d_p1(&mesh, &cfg, omega, mu, epsilon, sigma,
+                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known, 3),
+            2 => solve_3d_p2(&mesh, &cfg, omega, mu, epsilon, sigma,
+                             stiffness_coef, mass_coef, loss_coef, quad_order, exact_sol_known, 3),
             _ => unreachable!(),
         }
     } else {
@@ -250,10 +250,10 @@ fn main() {
 
 // ─── p=0: Scalar H1 ───────────────────────────────────────────────────────
 
-fn solve_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
-            mu: f64, epsilon: f64, sigma: f64,
-            stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-            quad_order: u8, exact_sol_known: bool) {
+fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
+               mu: f64, epsilon: f64, sigma: f64,
+               stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
+               quad_order: u8, exact_sol_known: bool, dim: usize) {
     use fem_element::lagrange::{TriP1, TriP2, TriP3,
                                  quad::{QuadQ1, QuadQ2, QuadQ3, QuadQ4}};
 
@@ -284,7 +284,7 @@ fn solve_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     if exact_sol_known {
         let u_proj: Vec<f64> = (0..n).map(|d| {
             let c = dm.dof_coord(d as u32);
-            let (re, _im) = u0_exact(&c[..mesh.dim() as usize], mu, epsilon, sigma, omega);
+            let (re, _im) = u0_exact(&c[..dim], mu, epsilon, sigma, omega);
             re
         }).collect();
         let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d]).collect();
@@ -363,10 +363,10 @@ fn solve_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 
 // ─── p=1: H(Curl) ─────────────────────────────────────────────────────────
 
-fn solve_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
-            mu: f64, epsilon: f64, sigma: f64,
-            stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-            quad_order: u8, exact_sol_known: bool) {
+fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
+               mu: f64, epsilon: f64, sigma: f64,
+               stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
+               quad_order: u8, exact_sol_known: bool, dim: usize) {
     use fem_element::VectorReferenceElement;
     use fem_element::nedelec::TriND1;
 
@@ -463,10 +463,10 @@ fn solve_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 
 // ─── p=2: H(Div) ──────────────────────────────────────────────────────────
 
-fn solve_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
-            mu: f64, epsilon: f64, sigma: f64,
-            stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-            quad_order: u8, exact_sol_known: bool) {
+fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
+               mu: f64, epsilon: f64, sigma: f64,
+               stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
+               quad_order: u8, exact_sol_known: bool, dim: usize) {
     let rt_order = if cfg.order >= 1 { cfg.order as u8 - 1 } else { 0 };
     let space = HDivSpace::new(mesh.clone(), rt_order);
     let n = space.n_dofs();
@@ -666,10 +666,10 @@ fn element_jacobian_3d(mesh: &Mesh<3>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix
 
 // ─── p=0: H1 3D ───────────────────────────────────────────────────────────
 
-fn solve_p0_3d(mesh: &Mesh<3>, cfg: &Config, omega: f64,
+fn solve_3d_p0(mesh: &Mesh<3>, cfg: &Config, omega: f64,
                mu: f64, epsilon: f64, sigma: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-               quad_order: u8, exact_sol_known: bool) {
+               quad_order: u8, exact_sol_known: bool, dim: usize) {
     let space = H1Space::new(mesh.clone(), cfg.order as u8);
     let n = space.n_dofs();
     println!("Number of finite element unknowns: {}", n);
@@ -693,7 +693,7 @@ fn solve_p0_3d(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     if exact_sol_known {
         let u_proj: Vec<f64> = (0..n).map(|d| {
             let c = dm.dof_coord(d as u32);
-            let (re, _im) = u0_exact(&c[..mesh.dim() as usize], mu, epsilon, sigma, omega);
+            let (re, _im) = u0_exact(&c[..dim], mu, epsilon, sigma, omega);
             re
         }).collect();
         let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d]).collect();
@@ -761,10 +761,10 @@ fn solve_p0_3d(mesh: &Mesh<3>, cfg: &Config, omega: f64,
 
 // ─── p=1: HCurl 3D ────────────────────────────────────────────────────────
 
-fn solve_p1_3d(mesh: &Mesh<3>, cfg: &Config, omega: f64,
+fn solve_3d_p1(mesh: &Mesh<3>, cfg: &Config, omega: f64,
                mu: f64, epsilon: f64, sigma: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-               quad_order: u8, exact_sol_known: bool) {
+               quad_order: u8, exact_sol_known: bool, dim: usize) {
     let space = HCurlSpace::new(mesh.clone(), cfg.order as u8);
     let n = space.n_dofs();
     println!("Number of finite element unknowns: {}", n);
@@ -835,10 +835,10 @@ fn solve_p1_3d(mesh: &Mesh<3>, cfg: &Config, omega: f64,
 
 // ─── p=2: HDiv 3D ─────────────────────────────────────────────────────────
 
-fn solve_p2_3d(mesh: &Mesh<3>, cfg: &Config, omega: f64,
+fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
                mu: f64, epsilon: f64, sigma: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-               quad_order: u8, exact_sol_known: bool) {
+               quad_order: u8, exact_sol_known: bool, dim: usize) {
     let rt_order = if cfg.order >= 1 { cfg.order as u8 - 1 } else { 0 };
     let space = HDivSpace::new(mesh.clone(), rt_order);
     let n = space.n_dofs();
