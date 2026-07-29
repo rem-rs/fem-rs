@@ -153,14 +153,14 @@ impl NcState2 {
         }
     }
 
-    fn refine(&mut self, mesh: &Mesh<2>, marked: &[ElemId]) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
+    fn refine(&mut self, mesh: &Mesh<2>, marked: &[ElemId], nc_limit: u32) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
         match self {
             NcState2::Tri3(s) => {
-                let (new_mesh, constraints, _) = s.refine(mesh, marked);
+                let (new_mesh, constraints, _) = s.refine(mesh, marked, nc_limit);
                 (new_mesh, constraints)
             }
             NcState2::Quad4(s) => {
-                let (new_mesh, constraints, _) = s.refine(mesh, marked);
+                let (new_mesh, constraints, _) = s.refine(mesh, marked, nc_limit);
                 (new_mesh, constraints)
             }
         }
@@ -190,7 +190,7 @@ fn main() {
     println!("   --max-err {}", args.max_elem_error);
     println!("   --hysteresis {}", args.hysteresis);
     println!("   --ref-levels {}", args.ref_levels);
-    // println!("   --nc-limit {}", args.nc_limit); // TODO: pass to NCState::refine()
+    println!("   --nc-limit {}", args.nc_limit);
     println!("   --t-final {}", args.t_final);
     println!("   --estimator {}", args.estimator);
     println!("   --no-visualization");
@@ -237,7 +237,7 @@ fn main() {
     let max_elem_error = args.max_elem_error;
     let hysteresis = args.hysteresis;
     let derefine_threshold = hysteresis * max_elem_error;
-    // let _nc_limit = args.nc_limit; // TODO: pass to NCState::refine()
+    let nc_limit = args.nc_limit;
 
     let mut x = Vec::<f64>::new();
     x.push(0.0); // dummy init — will be overwritten
@@ -359,7 +359,7 @@ fn main() {
 
             // Apply NC refinement. The returned constraints are the complete
             // set rebuilt from scratch (matching C++ Mesh::Finalize()).
-            let (new_mesh, new_constraints) = nc_state.refine(&mesh, &marked);
+            let (new_mesh, new_constraints) = nc_state.refine(&mesh, &marked, nc_limit);
             hanging_constraints = new_constraints;
             mesh = new_mesh;
         }
@@ -397,7 +397,7 @@ fn main() {
 
                 if n_coarsened > 0 {
                     // Re-refine old mesh with only the elements that stay refined.
-                    let (new_mesh, new_constraints) = nc_state.refine(&old_mesh, &keep_refined);
+                    let (new_mesh, new_constraints) = nc_state.refine(&old_mesh, &keep_refined, nc_limit);
                     mesh = new_mesh;
                     hanging_constraints = new_constraints;
                     println!("  Selective derefinement: {n_coarsened}/{} parents coarsened",
@@ -408,7 +408,7 @@ fn main() {
                 } else {
                     // No elements below threshold: restore the refinement as-is.
                     let (restored_mesh, restored_constraints) =
-                        nc_state.refine(&old_mesh, &old_marked);
+                        nc_state.refine(&old_mesh, &old_marked, nc_limit);
                     mesh = restored_mesh;
                     hanging_constraints = restored_constraints;
                     refinement_history.push(old_marked);
@@ -439,9 +439,7 @@ struct Args {
     max_elem_error: f64,
     hysteresis: f64,
     ref_levels: u32,
-    // TODO: nc_limit should be passed to NCState::refine() for 1:1 match
-    //       with C++ ThresholdRefiner::SetNCLimit.
-    // nc_limit: u32,
+    nc_limit: u32,
     t_final: f64,
     estimator: i32,
 }
@@ -455,7 +453,7 @@ impl Args {
         let mut max_elem_error = 5.0e-3;
         let mut hysteresis = 0.15;
         let mut ref_levels = 2;
-        let mut _nc_limit = 3;
+        let mut nc_limit = 3;
         let mut t_final = 1.0;
         let mut estimator = 0;
 
@@ -469,7 +467,7 @@ impl Args {
                 "-e" | "--max-err" => { if let Some(v) = it.next() { max_elem_error = v.parse().unwrap_or(5.0e-3); } }
                 "-y" | "--hysteresis" => { if let Some(v) = it.next() { hysteresis = v.parse().unwrap_or(0.15); } }
                 "-r" | "--ref-levels" | "-rs" | "--refine-serial" => { if let Some(v) = it.next() { ref_levels = v.parse().unwrap_or(0); } }
-                "-l" | "--nc-limit" => { if let Some(v) = it.next() { _nc_limit = v.parse().unwrap_or(3); } }
+                "-l" | "--nc-limit" => { if let Some(v) = it.next() { nc_limit = v.parse().unwrap_or(3); } }
                 "-tf" | "--t-final" => { if let Some(v) = it.next() { t_final = v.parse().unwrap_or(1.0); } }
                 "-est" | "--estimator" => { if let Some(v) = it.next() { estimator = v.parse().unwrap_or(0); } }
                 "-no-vis" | "--no-visualization" => { /* accepted but ignored */ }
@@ -486,7 +484,7 @@ impl Args {
             max_elem_error,
             hysteresis,
             ref_levels,
-            // nc_limit,
+            nc_limit,
             t_final,
             estimator,
         }

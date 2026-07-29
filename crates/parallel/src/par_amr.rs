@@ -61,7 +61,7 @@ pub fn par_refine_marked(
     let coarse_mesh = par_mesh.local_mesh().clone();
     let comm       = par_mesh.comm().clone();
 
-    let (refined_mesh, _constraints, _midpoint_map) = nc_state.refine(&coarse_mesh, marked);
+    let (refined_mesh, _constraints, _midpoint_map) = nc_state.refine(&coarse_mesh, marked, 0);
     let n_new_elems = refined_mesh.n_elements();
 
     let prolongated = if let Some(sol) = solution {
@@ -99,7 +99,7 @@ pub fn par_refine_marked_with_tree(
     let coarse_mesh = par_mesh.local_mesh().clone();
     let comm       = par_mesh.comm().clone();
 
-    let (refined_mesh, _constraints, midpoint_map) = nc_state.refine(&coarse_mesh, marked);
+    let (refined_mesh, _constraints, midpoint_map) = nc_state.refine(&coarse_mesh, marked, 0);
     let n_new_elems = refined_mesh.n_elements();
 
     let prolongated = if let Some(sol) = solution {
@@ -1080,7 +1080,7 @@ mod tests {
         let coarse = Mesh::<2>::unit_square_tri(2);
         let mut nc = NCState::new();
         let marked: Vec<ElemId> = (0..coarse.n_elements() as ElemId).collect();
-        let (refined, _, _) = nc.refine(&coarse, &marked);
+        let (refined, _, _) = nc.refine(&coarse, &marked, 0);
         let sol_coarse = vec![3.14_f64; coarse.n_nodes()];
         let sol_fine = prolongate_p1(&coarse, &refined, &sol_coarse);
         for (i, &v) in sol_fine.iter().enumerate() {
@@ -1093,7 +1093,7 @@ mod tests {
         let coarse = Mesh::<2>::unit_square_tri(4);
         let mut nc = NCState::new();
         let marked: Vec<ElemId> = (0..coarse.n_elements() as ElemId).collect();
-        let (refined, _, _) = nc.refine(&coarse, &marked);
+        let (refined, _, _) = nc.refine(&coarse, &marked, 0);
         let sol_coarse: Vec<f64> = (0..coarse.n_nodes())
             .map(|i| { let c = coarse.node_coords(i as u32); c[0] + c[1] })
             .collect();

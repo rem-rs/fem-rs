@@ -43,6 +43,8 @@ pub struct NCState {
     /// Set of edges that currently have a midpoint (edge_key → midpoint node).
     /// Used to detect when a previous hanging node gets resolved.
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+    /// Edge refinement level: number of times each edge has been split.
+    edge_level: HashMap<(NodeId, NodeId), u32>,
     /// Refinement history snapshots for rollback-based derefinement.
     history: Vec<NCState2DSnapshot>,
 }
@@ -68,6 +70,7 @@ struct NCState2DSnapshot {
     mesh: Mesh<2>,
     constraints: Vec<HangingNodeConstraint>,
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+    edge_level: HashMap<(NodeId, NodeId), u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +164,7 @@ impl NCState {
         NCState {
             constraints: Vec::new(),
             active_midpoints: HashMap::new(),
+            edge_level: HashMap::new(),
             history: Vec::new(),
         }
     }
@@ -177,6 +181,10 @@ impl NCState {
 
     /// Perform one level of non-conforming refinement.
     ///
+    /// `nc_limit` limits the maximum refinement-level difference between
+    /// adjacent elements (0 = no limit).  When exceeded, the coarse neighbor
+    /// is also refined (propagation).
+    ///
     /// - Refines `marked` elements via red refinement (4 children each).
     /// - Tracks which previous hanging nodes get resolved.
     /// - Returns `(new_mesh, constraints, midpoint_map)` where `midpoint_map`
@@ -186,6 +194,7 @@ impl NCState {
         &mut self,
         mesh: &Mesh<2>,
         marked: &[ElemId],
+        nc_limit: u32,
     ) -> (Mesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
         assert!(
             mesh.elem_type == ElementType::Tri3,
@@ -196,13 +205,29 @@ impl NCState {
             return (mesh.clone(), self.constraints.clone(), HashMap::new());
         }
 
+        // ── nc_limit propagation ───────────────────────────────────────────
+        let n_elems = mesh.n_elems();
+        let prop_marked: Vec<ElemId> = if nc_limit > 0 {
+            let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+            for e in 0..n_elems as ElemId {
+                let ns = mesh.elem_nodes(e);
+                for &(a, b) in &local_edges_tri() {
+                    edge_elems.entry(edge_key(ns[a], ns[b])).or_default().push(e);
+                }
+            }
+            propagate_nc_limit_tri(marked, mesh, &edge_elems, &self.edge_level, nc_limit)
+        } else {
+            marked.to_vec()
+        };
+
         self.history.push(NCState2DSnapshot {
             mesh: mesh.clone(),
             constraints: self.constraints.clone(),
             active_midpoints: self.active_midpoints.clone(),
+            edge_level: self.edge_level.clone(),
         });
 
-        let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+        let marked_set: std::collections::HashSet<ElemId> = prop_marked.iter().copied().collect();
         let n_elems = mesh.n_elems();
 
         // ── 1. Build edge → adjacent element list ──────────────────────
@@ -220,7 +245,7 @@ impl NCState {
         let mut new_coords: Vec<f64> = mesh.coords.clone();
         let mut next_node = mesh.n_nodes() as NodeId;
 
-        for &e in marked {
+        for &e in &prop_marked {
             let ns = mesh.elem_nodes(e);
             for &(a, b) in &local_edges_tri() {
                 let key = edge_key(ns[a], ns[b]);
@@ -234,6 +259,11 @@ impl NCState {
                     new_coords.push(0.5 * (xa[0] + xb[0]));
                     new_coords.push(0.5 * (xa[1] + xb[1]));
                     let id = next_node;
+                    // Track edge refinement level: sub-edges get parent+1.
+                    let parent_level = self.edge_level.get(&key).copied().unwrap_or(0);
+                    self.edge_level.insert(edge_key(ns[a], id), parent_level + 1);
+                    self.edge_level.insert(edge_key(id, ns[b]), parent_level + 1);
+                    self.edge_level.remove(&key);
                     next_node += 1;
                     midpoint_map.insert(key, id);
                 }
@@ -365,8 +395,38 @@ impl NCState {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints.clone();
         self.active_midpoints = snap.active_midpoints;
+        self.edge_level = snap.edge_level;
         Some((snap.mesh, self.constraints.clone()))
     }
+}
+
+/// Propagate refinement to neighbors when nc_limit would be violated (Tri3).
+fn propagate_nc_limit_tri(
+    marked: &[ElemId],
+    mesh: &Mesh<2>,
+    edge_elems: &HashMap<(NodeId, NodeId), Vec<ElemId>>,
+    edge_level: &HashMap<(NodeId, NodeId), u32>,
+    nc_limit: u32,
+) -> Vec<ElemId> {
+    use std::collections::BTreeSet;
+    let mut result: BTreeSet<ElemId> = marked.iter().copied().collect();
+    let mut queue: Vec<ElemId> = marked.to_vec();
+    while let Some(e) = queue.pop() {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_tri() {
+            let key = edge_key(ns[a], ns[b]);
+            if edge_level.get(&key).copied().unwrap_or(0) >= nc_limit {
+                if let Some(neighbors) = edge_elems.get(&key) {
+                    for &n in neighbors {
+                        if n != e && result.insert(n) {
+                            queue.push(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result.into_iter().collect()
 }
 
 /// Prolongate (interpolate) a P1 solution vector from a coarser mesh to the
@@ -1493,6 +1553,8 @@ struct NCStateQuadSnapshot {
     mesh: Mesh<2>,
     constraints: Vec<HangingNodeConstraint>,
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+    /// Edge refinement level: number of times each edge has been split.
+    edge_level: HashMap<(NodeId, NodeId), u32>,
 }
 
 /// Accumulated state for multi-level non-conforming refinement of **Quad4** meshes.
@@ -1504,6 +1566,8 @@ struct NCStateQuadSnapshot {
 pub struct NCStateQuad {
     constraints: Vec<HangingNodeConstraint>,
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
+    /// Edge refinement level: number of times each edge has been split.
+    edge_level: HashMap<(NodeId, NodeId), u32>,
     history: Vec<NCStateQuadSnapshot>,
 }
 
@@ -1513,7 +1577,12 @@ impl Default for NCStateQuad {
 
 impl NCStateQuad {
     pub fn new() -> Self {
-        NCStateQuad { constraints: Vec::new(), active_midpoints: HashMap::new(), history: Vec::new() }
+        NCStateQuad {
+            constraints: Vec::new(),
+            active_midpoints: HashMap::new(),
+            edge_level: HashMap::new(),
+            history: Vec::new(),
+        }
     }
 
     pub fn constraints(&self) -> &[HangingNodeConstraint] { &self.constraints }
@@ -1521,11 +1590,16 @@ impl NCStateQuad {
 
     /// Perform one level of non-conforming refinement on a Quad4 mesh.
     ///
+    /// `nc_limit` limits the maximum refinement-level difference between
+    /// adjacent elements (0 = no limit).  When exceeded, the coarse neighbor
+    /// is also refined (propagation).
+    ///
     /// Returns `(new_mesh, constraints, midpoint_map)`.
     pub fn refine(
         &mut self,
         mesh: &Mesh<2>,
         marked: &[ElemId],
+        nc_limit: u32,
     ) -> (Mesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
         assert!(
             mesh.elem_type == ElementType::Quad4,
@@ -1536,15 +1610,32 @@ impl NCStateQuad {
             return (mesh.clone(), self.constraints.clone(), HashMap::new());
         }
 
+        // ── nc_limit propagation ─────────────────────────────────────────────
+        let n_elems = mesh.n_elems();
+        let prop_marked: Vec<ElemId> = if nc_limit > 0 {
+            let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
+            for e in 0..n_elems as ElemId {
+                let ns = mesh.elem_nodes(e);
+                for &(a, b) in &local_edges_quad() {
+                    edge_elems.entry(quad_edge_key(ns[a], ns[b])).or_default().push(e);
+                }
+            }
+            propagate_nc_limit_quad(marked, mesh, &edge_elems, &self.edge_level, nc_limit)
+        } else {
+            marked.to_vec()
+        };
+
         self.history.push(NCStateQuadSnapshot {
             mesh: mesh.clone(),
             constraints: self.constraints.clone(),
             active_midpoints: self.active_midpoints.clone(),
+            edge_level: self.edge_level.clone(),
         });
 
-        let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
+        let marked_set: std::collections::HashSet<ElemId> = prop_marked.iter().copied().collect();
         let n_elems = mesh.n_elems();
 
+        // ── nc_limit: rebuild edge_elems AFTER propagation ──────────────
         let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
         for e in 0..n_elems as ElemId {
             let ns = mesh.elem_nodes(e);
@@ -1558,7 +1649,7 @@ impl NCStateQuad {
         let mut new_coords: Vec<f64> = mesh.coords.clone();
         let mut next_node = mesh.n_nodes() as NodeId;
 
-        for &e in marked {
+        for &e in &prop_marked {
             let ns = mesh.elem_nodes(e);
             for &(a, b) in &local_edges_quad() {
                 let key = quad_edge_key(ns[a], ns[b]);
@@ -1570,7 +1661,13 @@ impl NCStateQuad {
                     let xb = mesh.coords_of(ns[b]);
                     new_coords.push(0.5 * (xa[0] + xb[0]));
                     new_coords.push(0.5 * (xa[1] + xb[1]));
-                    midpoint_map.insert(key, next_node);
+                    let new_mid = next_node;
+                    midpoint_map.insert(key, new_mid);
+                    // Track edge refinement level: sub-edges get parent+1.
+                    let parent_level = self.edge_level.get(&key).copied().unwrap_or(0);
+                    self.edge_level.insert(quad_edge_key(ns[a], new_mid), parent_level + 1);
+                    self.edge_level.insert(quad_edge_key(new_mid, ns[b]), parent_level + 1);
+                    self.edge_level.remove(&key);
                     next_node += 1;
                 }
             }
@@ -1662,8 +1759,38 @@ impl NCStateQuad {
         let snap = self.history.pop()?;
         self.constraints = snap.constraints.clone();
         self.active_midpoints = snap.active_midpoints;
+        self.edge_level = snap.edge_level;
         Some((snap.mesh, self.constraints.clone()))
     }
+}
+
+/// Propagate refinement to neighbors when nc_limit would be violated (Quad4).
+fn propagate_nc_limit_quad(
+    marked: &[ElemId],
+    mesh: &Mesh<2>,
+    edge_elems: &HashMap<(NodeId, NodeId), Vec<ElemId>>,
+    edge_level: &HashMap<(NodeId, NodeId), u32>,
+    nc_limit: u32,
+) -> Vec<ElemId> {
+    use std::collections::BTreeSet;
+    let mut result: BTreeSet<ElemId> = marked.iter().copied().collect();
+    let mut queue: Vec<ElemId> = marked.to_vec();
+    while let Some(e) = queue.pop() {
+        let ns = mesh.elem_nodes(e);
+        for &(a, b) in &local_edges_quad() {
+            let key = quad_edge_key(ns[a], ns[b]);
+            if edge_level.get(&key).copied().unwrap_or(0) >= nc_limit {
+                if let Some(neighbors) = edge_elems.get(&key) {
+                    for &n in neighbors {
+                        if n != e && result.insert(n) {
+                            queue.push(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result.into_iter().collect()
 }
 
 // ─── Hex8 non-conforming AMR ──────────────────────────────────────────────────
@@ -4865,7 +4992,7 @@ mod tests {
         let u0: Vec<f64> = (0..n0).map(|i| i as f64).collect();
 
         let mut nc = NCState::new();
-        let (_fine, _constraints, midpoint_map) = nc.refine(&mesh, &[0]);
+        let (_fine, _constraints, midpoint_map) = nc.refine(&mesh, &[0], 0);
         let uf = prolongate_p1(&u0, n0 + midpoint_map.len(), &midpoint_map);
         let ur = restrict_to_coarse_p1(&uf, n0);
 
@@ -5239,7 +5366,7 @@ mod tests {
             .collect();
 
         let mut nc = NCState::new();
-        let (fine, _, midpts) = nc.refine(&mesh, &[0, 1, 2]);
+        let (fine, _, midpts) = nc.refine(&mesh, &[0, 1, 2], 0);
         let u_fine = prolongate_p1(&u, fine.n_nodes(), &midpts);
 
         // Every node in the fine mesh should have u = x.
@@ -5258,7 +5385,7 @@ mod tests {
         let u: Vec<f64> = (0..mesh.n_nodes()).map(|i| i as f64 * 1.5).collect();
 
         let mut nc = NCState::new();
-        let (fine, _, midpts) = nc.refine(&mesh, &[0]);
+        let (fine, _, midpts) = nc.refine(&mesh, &[0], 0);
         let u_fine = prolongate_p1(&u, fine.n_nodes(), &midpts);
 
         // Coarse node values must be preserved.
@@ -5277,12 +5404,12 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_tri(2);
         let mut nc = NCState::new();
 
-        let (m1, c1, _) = nc.refine(&mesh, &[0, 1]);
+        let (m1, c1, _) = nc.refine(&mesh, &[0, 1], 0);
         assert!(!c1.is_empty());
         m1.check().unwrap();
 
         // Second level: refine some of the new elements.
-        let (m2, c2, _) = nc.refine(&m1, &[0, 1]);
+        let (m2, c2, _) = nc.refine(&m1, &[0, 1], 0);
         assert!(m2.n_elems() > m1.n_elems());
         m2.check().unwrap();
         let _ = c2;
@@ -5302,14 +5429,14 @@ mod tests {
 
         // Refine half the elements → hanging nodes.
         let half: Vec<ElemId> = (0..mesh.n_elems() as ElemId / 2).collect();
-        let (m1, c1, _) = nc.refine(&mesh, &half);
+        let (m1, c1, _) = nc.refine(&mesh, &half, 0);
         assert!(!c1.is_empty(), "should have hanging nodes after partial refinement");
         m1.check().unwrap();
 
         // Refine ALL elements → creates a uniformly finer mesh, but multi-level
         // hanging nodes can appear from depth mismatch.
         let all: Vec<ElemId> = (0..m1.n_elems() as ElemId).collect();
-        let (m2, c2, _) = nc.refine(&m1, &all);
+        let (m2, c2, _) = nc.refine(&m1, &all, 0);
         m2.check().unwrap();
         // The original hanging nodes may produce new constraints at deeper levels.
         // This is expected for multi-level NC refinement.
@@ -5325,10 +5452,10 @@ mod tests {
             .collect();
 
         let mut nc = NCState::new();
-        let (m1, _, mp1) = nc.refine(&mesh, &[0, 1]);
+        let (m1, _, mp1) = nc.refine(&mesh, &[0, 1], 0);
         let u1 = prolongate_p1(&u0, m1.n_nodes(), &mp1);
 
-        let (m2, _, mp2) = nc.refine(&m1, &[0]);
+        let (m2, _, mp2) = nc.refine(&m1, &[0], 0);
         let u2 = prolongate_p1(&u1, m2.n_nodes(), &mp2);
 
         // All nodes should still have u = x (exact for linear).
@@ -5346,7 +5473,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_tri(2);
         let mut nc = NCState::new();
 
-        let (m1, c1, _) = nc.refine(&mesh, &[0, 1]);
+        let (m1, c1, _) = nc.refine(&mesh, &[0, 1], 0);
         assert!(m1.n_elems() > mesh.n_elems());
         assert!(!c1.is_empty());
         assert!(nc.can_derefine());
@@ -5493,12 +5620,12 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_quad(2);
         let mut ncq = NCStateQuad::new();
 
-        let (m1, c1, _) = ncq.refine(&mesh, &[0]);
+        let (m1, c1, _) = ncq.refine(&mesh, &[0], 0);
         assert!(m1.n_elems() > mesh.n_elems());
         assert!(!c1.is_empty());
 
         // Refine a neighbour → some constraints should be resolved
-        let (m2, c2, _) = ncq.refine(&m1, &[1]);
+        let (m2, c2, _) = ncq.refine(&m1, &[1], 0);
         assert!(m2.n_elems() > m1.n_elems());
         let _ = c2; // constraints count may vary
         m2.check().unwrap();
@@ -5509,7 +5636,7 @@ mod tests {
         let mesh = Mesh::<2>::unit_square_quad(2);
         let mut ncq = NCStateQuad::new();
 
-        let (_m1, _, _) = ncq.refine(&mesh, &[0]);
+        let (_m1, _, _) = ncq.refine(&mesh, &[0], 0);
         assert!(ncq.can_derefine());
 
         let (m0, c0) = ncq.derefine_last().expect("expected rollback");

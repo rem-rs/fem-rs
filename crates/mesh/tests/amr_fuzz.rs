@@ -66,7 +66,7 @@ fn fuzz_refine_derefine_1000_steps_quad4() {
             }
             let marked: Vec<ElemId> = marked_set.into_iter().collect();
             if !marked.is_empty() {
-                let (new_mesh, _constraints, _midpoint_map) = nc.refine(&mesh, &marked);
+                let (new_mesh, _constraints, _midpoint_map) = nc.refine(&mesh, &marked, 0);
                 mesh = new_mesh;
                 total_steps += 1;
             }
@@ -135,7 +135,7 @@ fn fuzz_refine_derefine_500_steps_tri3() {
             }
             let marked: Vec<ElemId> = marked_set.into_iter().collect();
             if !marked.is_empty() {
-                let (new_mesh, _constraints, _midpoint_map) = nc.refine(&mesh, &marked);
+                let (new_mesh, _constraints, _midpoint_map) = nc.refine(&mesh, &marked, 0);
                 mesh = new_mesh;
                 total_steps += 1;
             }
