@@ -35,7 +35,7 @@ use fem_assembly::VectorAssembler;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
 use fem_linalg::{CsrMatrix, fem_to_linlvo_csr};
 use fem_element::ReferenceElement;
-use fem_mesh::{refine_uniform, topology::MeshTopology, Mesh};
+use fem_mesh::{element_jacobian_at, refine_uniform, topology::MeshTopology, Mesh};
 use fem_space::{FESpace, H1Space, HCurlSpace, HDivSpace};
 use fem_space::constraints::{boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
 use fem_solver::{linlvoPreconditioner, DenseVec, GSSmoother, right_preconditioned_gmres,
@@ -129,11 +129,34 @@ fn complex_kappa(mu: f64, epsilon: f64, sigma: f64, omega: f64) -> (f64, f64) {
 }
 
 /// u0_exact(x) = exp(-iκ·x_{dim-1}): returns (re, im).
+/// MFEM: u0_real_exact / u0_imag_exact
 fn u0_exact(x: &[f64], mu: f64, epsilon: f64, sigma: f64, omega: f64) -> (f64, f64) {
     let (kr, ki) = complex_kappa(mu, epsilon, sigma, omega);
     let z = x[x.len() - 1];
     let e = (ki * z).exp();
     (e * (-kr * z).cos(), e * (-kr * z).sin())
+}
+
+/// u1_exact for H(Curl): v[0] = u0_exact, other components = 0.
+/// MFEM: u1_real_exact / u1_imag_exact
+fn u1_exact(x: &[f64], dim: usize, mu: f64, epsilon: f64, sigma: f64, omega: f64) -> (Vec<f64>, Vec<f64>) {
+    let (re, im) = u0_exact(x, mu, epsilon, sigma, omega);
+    let mut vr = vec![0.0; dim];
+    let mut vi = vec![0.0; dim];
+    vr[0] = re;
+    vi[0] = im;
+    (vr, vi)
+}
+
+/// u2_exact for H(Div): v[dim-1] = u0_exact, other components = 0.
+/// MFEM: u2_real_exact / u2_imag_exact
+fn u2_exact(x: &[f64], dim: usize, mu: f64, epsilon: f64, sigma: f64, omega: f64) -> (Vec<f64>, Vec<f64>) {
+    let (re, im) = u0_exact(x, mu, epsilon, sigma, omega);
+    let mut vr = vec![0.0; dim];
+    let mut vi = vec![0.0; dim];
+    vr[dim - 1] = re;
+    vi[dim - 1] = im;
+    (vr, vi)
 }
 
 /// Check if mesh filename starts with "inline-".
@@ -145,32 +168,10 @@ fn is_inline_mesh(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Compute Jacobian matrix (2×2) for a linear element (Tri3, Quad4) at reference point xi.
-/// Uses the gradient of the scalar Lagrange basis.
+/// Compute Jacobian matrix and physical point. Uses library's element_jacobian_at.
 fn element_jacobian(mesh: &Mesh<2>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix<f64>, [f64; 2]) {
-    let en = mesh.element_nodes(e);
-    let n_nodes = en.len();
-    let mut J = nalgebra::DMatrix::<f64>::zeros(2, 2);
-    let mut xp = [0.0_f64; 2];
-
-    // Use P1 Lagrange reference element for Jacobian computation
-    use fem_element::lagrange::TriP1;
-    let ref_e = TriP1;
-    let mut phi = vec![0.0; 3];
-    let mut grad = vec![0.0; 6]; // 3 nodes × 2 grad components
-    ref_e.eval_basis(xi, &mut phi);
-    ref_e.eval_grad_basis(xi, &mut grad);
-
-    for k in 0..n_nodes.min(3) {
-        let xk = mesh.node_coords(en[k]);
-        for a in 0..2 {
-            for b in 0..2 {
-                J[(a, b)] += xk[a] * grad[k * 2 + b];
-            }
-            xp[a] += xk[a] * phi[k];
-        }
-    }
-    (J, xp)
+    let (J, xp) = element_jacobian_at(mesh, e, xi, 2);
+    (J, [xp[0], xp[1]])
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────
@@ -211,7 +212,7 @@ fn main() {
         let mesh = mesh2d;
         if mesh.dim() == 1 && cfg.prob != 0 {
             println!("Switching to problem type 0, H1 basis functions, for 1 dimensional mesh.");
-            return;
+            // Fall through to solve_p0 below
         }
         let mesh = if cfg.ref_levels > 0 {
             let mut m = mesh;
@@ -325,7 +326,7 @@ fn solve_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
         let mut er2 = 0.0; let mut ei2 = 0.0;
         for e in 0..mesh.n_elements() as u32 {
             let et = mesh.element_type(e);
-            let re = ref_element_h1(et, cfg.order as u8);
+            let re = et.ref_elem(cfg.order as u8);
             let nld = re.n_dofs();
             let q = re.quadrature(quad_order);
             let mut phi = vec![0.0; nld];
@@ -635,10 +636,6 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
 
 // ─── Output ───────────────────────────────────────────────────────────────
 
-fn ref_element_h1(et: fem_mesh::element_type::ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    et.ref_elem(order)
-}
-
 fn save_output(mesh: &Mesh<2>, gf: &ComplexGridFunction) {
     write_mfem_file("refined.mesh", mesh).ok();
     // Real part, imaginary part, and complex (interleaved) output
@@ -663,45 +660,8 @@ fn save_output(mesh: &Mesh<2>, gf: &ComplexGridFunction) {
 
 /// Compute 3D Jacobian (3x3) for a linear element (Tet4, Hex8).
 fn element_jacobian_3d(mesh: &Mesh<3>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix<f64>, [f64; 3]) {
-    let et = mesh.element_type(e);
-    // Use element-appropriate linear reference element for Jacobian
-    let (re, n_max): (Box<dyn ReferenceElement>, usize) = match et {
-        fem_mesh::element_type::ElementType::Hex8 => {
-            (Box::new(fem_element::lagrange::HexQ1), 8)
-        }
-        _ => {
-            (Box::new(fem_element::lagrange::TetP1), 4)
-        }
-    };
-    let mut phi = vec![0.0; n_max];
-    let mut grad = vec![0.0; n_max * 3];
-    re.eval_basis(xi, &mut phi);
-    re.eval_grad_basis(xi, &mut grad);
-    let en = mesh.element_nodes(e);
-    let n = en.len().min(n_max);
-    let mut J = nalgebra::DMatrix::<f64>::zeros(3, 3);
-    let mut xp = [0.0_f64; 3];
-    for k in 0..n {
-        let xk = mesh.node_coords(en[k]);
-        for a in 0..3 {
-            for b in 0..3 { J[(a, b)] += xk[a] * grad[k * 3 + b]; }
-            xp[a] += xk[a] * phi[k];
-        }
-    }
-    (J, xp)
-}
-
-fn ref_element_h1_3d(et: fem_mesh::element_type::ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::*;
-    match (et, order) {
-        (fem_mesh::element_type::ElementType::Tet4, 1) => Box::new(TetP1),
-        (fem_mesh::element_type::ElementType::Tet4, 2) => Box::new(TetP2),
-        (fem_mesh::element_type::ElementType::Tet4, 3) => Box::new(TetP3),
-        (fem_mesh::element_type::ElementType::Hex8, 1) => Box::new(HexQ1),
-        (fem_mesh::element_type::ElementType::Hex8, 2) => Box::new(HexQ2),
-        (fem_mesh::element_type::ElementType::Hex8, 3) => Box::new(HexQ3),
-        _ => Box::new(TetP1),
-    }
+    let (J, xp) = element_jacobian_at(mesh, e, xi, 3);
+    (J, [xp[0], xp[1], xp[2]])
 }
 
 // ─── p=0: H1 3D ───────────────────────────────────────────────────────────
@@ -769,7 +729,7 @@ fn solve_p0_3d(mesh: &Mesh<3>, cfg: &Config, omega: f64,
         let mut er2 = 0.0; let mut ei2 = 0.0;
         for e in 0..mesh.n_elements() as u32 {
             let et = mesh.element_type(e);
-            let re = ref_element_h1_3d(et, cfg.order as u8);
+            let re = et.ref_elem(cfg.order as u8);
             let nld = re.n_dofs();
             let q = re.quadrature(quad_order);
             let mut phi = vec![0.0; nld];

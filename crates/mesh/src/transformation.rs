@@ -149,6 +149,43 @@ pub fn xform_grads(ji: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim:
     }
 }
 
+/// Compute the full Jacobian matrix `J` and the physical point `x_phys`
+/// at a reference point for a given element.
+///
+/// Returns `(J, x_phys)` where `J_{ij} = ∂x_i/∂ξ_j` and `x_phys = x(ξ)`.
+/// Uses the linear (P1) reference element for the geometry mapping.
+///
+/// Supported element types: Tri3, Quad4, Tet4, Hex8, Prism6.
+///
+/// MFEM: `ElementTransformation::Jacobian()` + `ElementTransformation::Transform()`
+pub fn element_jacobian_at<M: MeshTopology>(
+    mesh: &M,
+    elem: u32,
+    xi: &[f64],
+    dim: usize,
+) -> (DMatrix<f64>, Vec<f64>) {
+    let et = mesh.element_type(elem);
+    let re = et.ref_elem(1);
+    let npe = re.n_dofs();
+    let mut grad = vec![0.0_f64; npe * dim];
+    let mut phi = vec![0.0_f64; npe];
+    re.eval_basis(xi, &mut phi);
+    re.eval_grad_basis(xi, &mut grad);
+    let nodes = mesh.element_nodes(elem);
+    let mut jac = DMatrix::<f64>::zeros(dim, dim);
+    let mut xp = vec![0.0_f64; dim];
+    for k in 0..npe {
+        let c = mesh.node_coords(nodes[k]);
+        for i in 0..dim {
+            xp[i] += c[i] * phi[k];
+            for j in 0..dim {
+                jac[(i, j)] += c[i] * grad[k * dim + j];
+            }
+        }
+    }
+    (jac, xp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
