@@ -11,6 +11,7 @@
 #![allow(non_snake_case)]
 
 use fem_assembly::assembler::face_dofs_p1;
+use fem_assembly::static_cond::condense_global;
 use fem_assembly::postproc::coefficient::PWConstCoeff;
 use fem_assembly::postproc::error_estimate::zz_estimator;
 use fem_assembly::postproc::grid_function::GridFunction;
@@ -56,7 +57,7 @@ fn main() {
     // 1. Parse command-line options (matching MFEM ex21)
     let mut mesh_file = "data/beam-tri.mesh".to_string();
     let mut order = 1u8;
-    let mut _static_cond = false;
+    let mut static_cond = false;
     let mut _flux_averaging = 0i32;
     let mut visualization = false;
     let mut use_direct = false; // SuiteSparse equivalent
@@ -69,8 +70,8 @@ fn main() {
             "-h" | "--help" => { eprintln!("Usage: ex21 [-m mesh] [-o order] [-sc/-no-sc] [-f 0|1] [-vis/-no-vis]"); return; }
             "-m" | "--mesh" => mesh_file = i.next().unwrap_or_default(),
             "-o" | "--order" => order = i.next().and_then(|v| v.parse().ok()).unwrap_or(1),
-            "-sc" | "--static-condensation" => _static_cond = true,
-            "-no-sc" | "--no-static-condensation" => _static_cond = false,
+            "-sc" | "--static-condensation" => static_cond = true,
+            "-no-sc" | "--no-static-condensation" => static_cond = false,
             "-f" | "--flux-averaging" => _flux_averaging = i.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "-vis" | "--visualization" => visualization = true,
             "-no-vis" | "--no-visualization" => visualization = false,
@@ -165,17 +166,49 @@ fn main() {
             vec![0.0_f64; n_dofs]
         };
 
-        // 10. Solve (direct LU or PCG+GSSmoother, matching C++ SuiteSparse/non-SuiteSparse)
+        // 10. Static condensation (matching MFEM EnableStaticCondensation)
+        let (solve_mat, solve_rhs, backsub) = if static_cond {
+            let bs = dm.bubble_dof_start;
+            let interior: Vec<usize> = (0..n_dofs).filter(|&d| (d % n_scalar) >= bs).collect();
+            if !interior.is_empty() {
+                let (cmat, crhs, bs) = condense_global(&mat, &rhs, &interior);
+                println!("  SC: {}=>{}, {} interior DOFs eliminated", n_dofs, cmat.nrows, interior.len());
+                (cmat, crhs, Some(bs))
+            } else {
+                (mat.clone(), rhs.clone(), None)
+            }
+        } else {
+            (mat.clone(), rhs.clone(), None)
+        };
+
+        // 11. Solve (direct LU or PCG+GSSmoother, matching C++ SuiteSparse/non-SuiteSparse)
+        let mut solve_x = vec![0.0_f64; solve_mat.nrows];
         if use_direct {
-            match solve_sparse_lu(&mat, &rhs) {
-                Ok(x_lu) => { x = x_lu; println!("  LU: direct solve"); }
+            match solve_sparse_lu(&solve_mat, &solve_rhs) {
+                Ok(x_lu) => { solve_x = x_lu; println!("  LU: direct solve"); }
                 Err(e) => eprintln!("  LU error: {e}"),
             }
         } else {
-            match solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg) {
+            match solve_pcg_gssmoother(&solve_mat, &solve_rhs, &mut solve_x, &cfg) {
                 Ok(r) => println!("  PCG: {} its, res={:.3e}", r.iterations, r.final_residual),
                 Err(e) => eprintln!("  PCG error: {e}"),
             }
+        }
+
+        // Back-substitute interior DOFs (MFEM: static condensation backsolve)
+        if let Some(bs) = &backsub {
+            match bs.backsolve(&solve_x, 1e-12, 2000) {
+                Ok(u_i) => {
+                    let mut full = vec![0.0_f64; n_dofs];
+                    for (k, &g) in bs.boundary.iter().enumerate() { full[g] = solve_x[k]; }
+                    for (k, &g) in bs.interior.iter().enumerate() { full[g] = u_i[k]; }
+                    x = full;
+                    println!("  SC backsolve: {} interior DOFs recovered", bs.interior.len());
+                }
+                Err(e) => eprintln!("  SC backsolve error: {e}"),
+            }
+        } else {
+            x = solve_x;
         }
 
         // 11. ZZ error estimator
