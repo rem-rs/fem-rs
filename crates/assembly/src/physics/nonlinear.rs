@@ -234,6 +234,85 @@ impl NewtonSolver {
 
         Err(NewtonResult { converged: false, iterations: self.cfg.max_iter, final_residual: r_norm })
     }
+
+    /// Solve with a custom linear solver closure (MFEM: NewtonSolver + custom J_solver).
+    ///
+    /// The `linear_solve` closure receives `(jacobian: &CsrMatrix, neg_rhs: &[f64], dx: &mut [f64])`
+    /// and must solve `J · dx = neg_rhs`.  Returns `Ok(())` on success.
+    ///
+    /// Useful for block preconditioners, GPU solves, or direct solvers not
+    /// covered by the built-in `LinearSolver` variants.
+    pub fn solve_custom(
+        &self,
+        form: &dyn NonlinearForm,
+        rhs: &[f64],
+        u: &mut [f64],
+        linear_solve: &dyn Fn(&CsrMatrix<f64>, &[f64], &mut [f64]) -> Result<(), ()>,
+    ) -> Result<NewtonResult, NewtonResult> {
+        let n = form.n_dofs();
+        assert_eq!(u.len(), n);
+        assert_eq!(rhs.len(), n);
+
+        let mut r = vec![0.0_f64; n];
+        let mut du = vec![0.0_f64; n];
+        let mut u_trial = vec![0.0_f64; n];
+        let mut r_trial = vec![0.0_f64; n];
+
+        form.residual(u, rhs, &mut r);
+        let r0 = norm2(&r);
+        if self.cfg.verbose {
+            println!("[Newton] iter=0 ||r||={r0:.3e}");
+        }
+        if r0 < self.cfg.atol {
+            return Ok(NewtonResult { converged: true, iterations: 0, final_residual: r0 });
+        }
+
+        let mut r_norm = r0;
+
+        for iter in 0..self.cfg.max_iter {
+            let jac = form.jacobian(u);
+
+            let neg_r: Vec<f64> = r.iter().map(|&v| -v).collect();
+            du.fill(0.0);
+            linear_solve(&jac, &neg_r, &mut du)
+                .map_err(|_| NewtonResult { converged: false, iterations: iter, final_residual: r_norm })?;
+
+            if self.cfg.line_search {
+                let mut alpha = 1.0_f64;
+                let mut accepted = false;
+                for _ in 0..=self.cfg.line_search_max_backtracks {
+                    for i in 0..n { u_trial[i] = u[i] + alpha * du[i]; }
+                    form.residual(&u_trial, rhs, &mut r_trial);
+                    let trial_norm = norm2(&r_trial);
+                    let target = ((1.0 - self.cfg.line_search_sufficient_decrease * alpha).max(0.0)) * r_norm;
+                    if trial_norm <= target {
+                        u.copy_from_slice(&u_trial);
+                        r.copy_from_slice(&r_trial);
+                        accepted = true;
+                        break;
+                    }
+                    alpha *= self.cfg.line_search_shrink;
+                    if alpha < self.cfg.line_search_min_alpha { break; }
+                }
+                if !accepted {
+                    for (ui, &dui) in u.iter_mut().zip(du.iter()) { *ui += dui; }
+                    form.residual(u, rhs, &mut r);
+                }
+            } else {
+                for (ui, &dui) in u.iter_mut().zip(du.iter()) { *ui += dui; }
+            }
+
+            r_norm = norm2(&r);
+            if self.cfg.verbose {
+                println!("[Newton] iter={} ||r||={r_norm:.3e}", iter + 1);
+            }
+            if r_norm < self.cfg.atol || r_norm < r0 * self.cfg.rtol {
+                return Ok(NewtonResult { converged: true, iterations: iter + 1, final_residual: r_norm });
+            }
+        }
+
+        Err(NewtonResult { converged: false, iterations: self.cfg.max_iter, final_residual: r_norm })
+    }
 }
 
 fn norm2(v: &[f64]) -> f64 {
