@@ -20,6 +20,8 @@
 //!   cargo run --example mfem_ex20_symplectic -- -o 2 -n 200 -dt 0.05 -p 1
 //!   cargo run --example mfem_ex20_symplectic -- -p 1 -o 1 -n 120 -dt 0.1
 
+use fem_io::mfem::{write_mfem_file, write_mfem_gf_file};
+use fem_mesh::{element_type::ElementType, Mesh};
 use fem_solver::{HamiltonianSystem, SIAVSolver};
 use std::fs::File;
 use std::io::Write;
@@ -106,10 +108,6 @@ fn main() {
     println!("   --time-step {dt}");
     println!("   --mass {m}");
     println!("   --spring-const {k}");
-    if visualization {
-        println!("   --visualization (GLVis) — not available on this platform");
-    }
-
     // 2. Create the symplectic integrator
     let sys = Hamiltonian { prob, m, k };
     let solver = SIAVSolver::new(order);
@@ -131,40 +129,98 @@ fn main() {
         writeln!(f, "{t}\t{}\t{}", q[0], p[0]).ok();
     }
 
-    // 5. Perform time-stepping
+    // 5. Allocate phase-space mesh for visualization
+    let nverts = if visualization { 2 * (nsteps + 1) } else { 0 };
+    let nelems = if visualization { nsteps } else { 0 };
+
+    // 6. Perform time-stepping
     let mut e_mean = 0.0f64;
+    let mut vis_mesh: Option<Mesh<2>> = if visualization {
+        Some(Mesh::<2>::uniform(
+            Vec::with_capacity(nverts * 2),  // coords
+            Vec::with_capacity(nelems * 4),  // conn
+            Vec::new(),                       // elem_tags
+            ElementType::Quad4,               // elem_type
+            Vec::new(),                       // face_conn (no boundary)
+            Vec::new(),                       // face_tags
+            ElementType::Line2,               // face_type
+        ))
+    } else {
+        None
+    };
+
     for i in 0..nsteps {
-        // 5a. Record initial state
+        // 6a. Record initial state
         if i == 0 {
             e[0] = hamiltonian(prob, m, k, q[0], p[0]);
             e_mean += e[0];
+
+            if let Some(ref mut vm) = vis_mesh {
+                vm.elem_tags.push(1); // tag for the first element
+                // Vertices: (0,0,0) and (q,p,0)
+                vm.coords.extend_from_slice(&[0.0, 0.0]);
+                vm.coords.extend_from_slice(&[q[0], p[0]]);
+            }
         }
 
-        // 5b. Advance the state
+        // 6b. Advance the state (MFEM: siaSolver.Step(q,p,t,dt))
         solver.step(&sys, &mut q, &mut p, dt);
         t += dt;
 
-        // 5c. Record the state
+        // 6c. Record energy
         e[i + 1] = hamiltonian(prob, m, k, q[0], p[0]);
         e_mean += e[i + 1];
 
-        // 5d. GnuPlot output
+        // 6d. GnuPlot output
         if let Some(ref mut f) = gpf {
             writeln!(f, "{t}\t{}\t{}\t{}", q[0], p[0], e[i + 1]).ok();
         }
-    }
 
-    // Finalize GnuPlot
-    if let Some(_) = gpf {
-        if gnuplot {
-            let mut inp = File::create("gnuplot_ex20.inp").expect("cannot create gnuplot_ex20.inp");
-            writeln!(inp, "plot 'ex20.dat' using 1:2 w l t 'q', \\").ok();
-            writeln!(inp, "     'ex20.dat' using 1:3 w l t 'p', \\").ok();
-            writeln!(inp, "     'ex20.dat' using 1:4 w l t 'H'").ok();
+        // 6e. Add to phase-space mesh (MFEM: mesh.AddVertex, mesh.AddQuad)
+        if let Some(ref mut vm) = vis_mesh {
+            let base = 2 * (i + 1);
+            // Vertex at top of ribbon: (0,0,t)
+            vm.coords.extend_from_slice(&[0.0, 0.0]);
+            // Vertex at (q,p,t)
+            vm.coords.extend_from_slice(&[q[0], p[0]]);
+            // Quad: (2i, 2(i+1), 2(i+1)+1, 2i+1) — MFEM AddQuad ordering
+            vm.conn.extend_from_slice(&[
+                base as u32 - 2,           // 2i
+                base as u32,                // 2(i+1)
+                base as u32 + 1,            // 2(i+1)+1
+                base as u32 - 1,            // 2i+1
+            ]);
+            vm.elem_tags.push(1);
         }
     }
 
-    // 6. Compute and display mean and standard deviation of the energy
+    // 7. Write visualization files (MFEM: socketstream to GLVis)
+    if visualization {
+        if let Some(ref vm) = vis_mesh {
+            write_mfem_file("ex20_phase.mesh", vm)
+                .expect("cannot write ex20_phase.mesh");
+            // Energy as GF (one value per vertex, repeated for each quad vertex)
+            let mut energy_vals = Vec::with_capacity(nverts);
+            for i in 0..=nsteps {
+                // Two vertices per step (the ribbon bottom and top share same energy)
+                energy_vals.push(e[i]);
+                energy_vals.push(e[i]);
+            }
+            write_mfem_gf_file("ex20_energy.gf", 2, &energy_vals, "H1", 1, 1, 8)
+                .expect("cannot write ex20_energy.gf");
+            println!("  Wrote ex20_phase.mesh, ex20_energy.gf — load with: glvis -m ex20_phase.mesh -g ex20_energy.gf");
+        }
+    }
+
+    // 8. Finalize GnuPlot
+    if gnuplot {
+        let mut inp = File::create("gnuplot_ex20.inp").expect("cannot create gnuplot_ex20.inp");
+        writeln!(inp, "plot 'ex20.dat' using 1:2 w l t 'q', \\").ok();
+        writeln!(inp, "     'ex20.dat' using 1:3 w l t 'p', \\").ok();
+        writeln!(inp, "     'ex20.dat' using 1:4 w l t 'H'").ok();
+    }
+
+    // 9. Compute and display mean and standard deviation of the energy
     e_mean /= n_en as f64;
     let e_var: f64 = e.iter().map(|&v| (v - e_mean).powi(2)).sum::<f64>() / n_en as f64;
     let e_sd = e_var.sqrt();
