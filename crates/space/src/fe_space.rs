@@ -21,6 +21,19 @@ pub enum SpaceType {
     VEM,
 }
 
+impl SpaceType {
+    /// Map this space type to the corresponding vector reference element family.
+    /// Returns `None` for scalar spaces (H1, L2).
+    pub fn to_vec_family(self) -> Option<fem_element::VecFamily> {
+        use fem_element::VecFamily;
+        match self {
+            SpaceType::HCurl => Some(VecFamily::Nedelec),
+            SpaceType::HDiv => Some(VecFamily::RaviartThomas),
+            SpaceType::H1 | SpaceType::L2 | SpaceType::VectorH1(_) | SpaceType::VEM => None,
+        }
+    }
+}
+
 /// A finite element space defined over a mesh.
 ///
 /// Provides:

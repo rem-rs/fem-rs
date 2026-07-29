@@ -7,13 +7,14 @@
 use nalgebra::DMatrix;
 
 use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
-use fem_element::ReferenceElement;
+use fem_element::{vec_ref_elem, VecFamily, ReferenceElement, VectorReferenceElement};
 use fem_linalg::CsrMatrix;
+use fem_mesh::element_jacobian_at;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::fe_space::FESpace;
-use fem_space::{EdgeKey, HCurlSpace, HDivSpace};
+use fem_space::{EdgeKey, HCurlSpace, HDivSpace, L2Space};
 use fem_mesh::Mesh;
 
 use crate::assembler::Assembler;
@@ -885,6 +886,269 @@ pub fn vector_l2_norm(mass: &CsrMatrix<f64>, dofs: &[f64]) -> f64 {
     mass.spmv(dofs, &mut m_u);
     let dot: f64 = dofs.iter().zip(m_u.iter()).map(|(a, b)| a * b).sum();
     dot.max(0.0).sqrt()
+}
+
+// ─── H(curl) L² error ────────────────────────────────────────────────────
+
+/// Compute the L² error of an H(curl) field against an exact vector field.
+///
+/// ‖u_h − u_exact‖_{L²} = (∫_Ω |u_h(x) − u_exact(x)|² dx)^{1/2}
+///
+/// Supports 2D and 3D meshes with affine and isoparametric geometry.
+pub fn compute_l2_error_hcurl<M: MeshTopology>(
+    dofs: &[f64],
+    nd_space: &HCurlSpace<M>,
+    exact: &(dyn Fn(&[f64]) -> Vec<f64> + Send + Sync),
+    quad_order: u8,
+) -> f64 {
+    let mesh = nd_space.mesh();
+    let dim = mesh.topological_dim() as usize;
+    let mut err2 = 0.0;
+
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let vre = vec_ref_elem(VecFamily::Nedelec, et.to_elem_type(), nd_space.order());
+        let n_ldofs = vre.n_dofs();
+        let quad = vre.quadrature(quad_order);
+        let elem_dofs: Vec<usize> = nd_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = nd_space.element_signs(e);
+        let mut ref_bv = vec![0.0; n_ldofs * dim];
+        let nodes = mesh.element_nodes(e);
+        let use_iso = matches!(et,
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+            | ElementType::Prism6 | ElementType::Prism15
+            | ElementType::Pyramid5);
+        let geo_elem = if use_iso { Some(et.ref_elem(mesh.geom_order().max(1))) } else { None };
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (w, xp) = if use_iso {
+                let ge = geo_elem.as_ref().unwrap();
+                let mut grad_geo = vec![0.0; ge.n_dofs() * dim];
+                let mut phi_geo = vec![0.0; ge.n_dofs()];
+                ge.eval_grad_basis(xi, &mut grad_geo);
+                ge.eval_basis(xi, &mut phi_geo);
+                let mut jac = DMatrix::<f64>::zeros(dim, dim);
+                let mut xp_vec = vec![0.0; dim];
+                for k in 0..ge.n_dofs() {
+                    let xk = mesh.node_coords(nodes[k]);
+                    for i in 0..dim {
+                        xp_vec[i] += phi_geo[k] * xk[i];
+                        for d in 0..dim { jac[(i, d)] += xk[i] * grad_geo[k * dim + d]; }
+                    }
+                }
+                (quad.weights[qi] * jac.determinant().abs(), xp_vec)
+            } else {
+                let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
+                (quad.weights[qi] * jac.determinant().abs(), xp_vec)
+            };
+
+            // Recompute Jacobian for Piola transform (separate from weight/xp for iso)
+            let (jac, _) = if use_iso {
+                let ge = geo_elem.as_ref().unwrap();
+                let mut grad_geo = vec![0.0; ge.n_dofs() * dim];
+                let mut phi_geo = vec![0.0; ge.n_dofs()];
+                ge.eval_grad_basis(xi, &mut grad_geo);
+                ge.eval_basis(xi, &mut phi_geo);
+                let mut jac = DMatrix::<f64>::zeros(dim, dim);
+                for k in 0..ge.n_dofs() {
+                    let xk = mesh.node_coords(nodes[k]);
+                    for i in 0..dim { for d in 0..dim { jac[(i, d)] += xk[i] * grad_geo[k * dim + d]; } }
+                }
+                (jac, vec![])
+            } else {
+                element_jacobian_at(mesh, e, xi, dim)
+            };
+            let jac_inv_t = jac.try_inverse().unwrap_or_else(|| DMatrix::<f64>::identity(dim, dim)).transpose();
+
+            vre.eval_basis_vec(xi, &mut ref_bv);
+
+            // HCurl covariant Piola: φ_phys = J^{-T} · φ̂_ref
+            let mut uh = vec![0.0; dim];
+            for i in 0..n_ldofs {
+                let s = signs[i] as f64;
+                let coeff = dofs[elem_dofs[i]];
+                for c in 0..dim {
+                    let mut sum = 0.0;
+                    for k in 0..dim {
+                        sum += jac_inv_t[(c, k)] * ref_bv[i * dim + k];
+                    }
+                    uh[c] += s * coeff * sum;
+                }
+            }
+
+            let ex = exact(&xp);
+            for c in 0..dim {
+                let d = uh[c] - ex[c];
+                err2 += w * d * d;
+            }
+        }
+    }
+    err2.max(0.0).sqrt()
+}
+
+// ─── H(div) L² error ─────────────────────────────────────────────────────
+
+/// Compute the L² error of an H(div) field against an exact vector field.
+///
+/// ‖w_h − w_exact‖_{L²} = (∫_Ω |w_h(x) − w_exact(x)|² dx)^{1/2}
+///
+/// Uses the contravariant Piola transform: ψ_phys = (1/det(J)) · J · ψ̂_ref
+pub fn compute_l2_error_hdiv<M: MeshTopology>(
+    dofs: &[f64],
+    rt_space: &HDivSpace<M>,
+    exact: &(dyn Fn(&[f64]) -> Vec<f64> + Send + Sync),
+    quad_order: u8,
+) -> f64 {
+    let mesh = rt_space.mesh();
+    let dim = mesh.topological_dim() as usize;
+    let mut err2 = 0.0;
+
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let vre = vec_ref_elem(VecFamily::RaviartThomas, et.to_elem_type(), rt_space.order());
+        let n_ldofs = vre.n_dofs();
+        let quad = vre.quadrature(quad_order);
+        let elem_dofs: Vec<usize> = rt_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = rt_space.element_signs(e);
+        let mut ref_bv = vec![0.0; n_ldofs * dim];
+        let nodes = mesh.element_nodes(e);
+        let use_iso = matches!(et,
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+            | ElementType::Prism6 | ElementType::Prism15
+            | ElementType::Pyramid5);
+        let geo_elem = if use_iso { Some(et.ref_elem(mesh.geom_order().max(1))) } else { None };
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (w, jac, xp) = if use_iso {
+                let ge = geo_elem.as_ref().unwrap();
+                let mut grad_geo = vec![0.0; ge.n_dofs() * dim];
+                let mut phi_geo = vec![0.0; ge.n_dofs()];
+                ge.eval_grad_basis(xi, &mut grad_geo);
+                ge.eval_basis(xi, &mut phi_geo);
+                let mut jac = DMatrix::<f64>::zeros(dim, dim);
+                let mut xp_vec = vec![0.0; dim];
+                for k in 0..ge.n_dofs() {
+                    let xk = mesh.node_coords(nodes[k]);
+                    for i in 0..dim {
+                        xp_vec[i] += phi_geo[k] * xk[i];
+                        for d in 0..dim { jac[(i, d)] += xk[i] * grad_geo[k * dim + d]; }
+                    }
+                }
+                (quad.weights[qi] * jac.determinant().abs(), jac, xp_vec)
+            } else {
+                let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
+                (quad.weights[qi] * jac.determinant().abs(), jac, xp_vec)
+            };
+
+            vre.eval_basis_vec(xi, &mut ref_bv);
+
+            // H(div) contravariant Piola: ψ_phys = (1/det(J)) · J · ψ̂_ref
+            let det_j = jac.determinant();
+            let inv_det = if det_j.abs() > 1e-80 { 1.0 / det_j } else { 0.0 };
+
+            let mut uh = vec![0.0; dim];
+            for i in 0..n_ldofs {
+                let s = signs[i] as f64;
+                let coeff = dofs[elem_dofs[i]];
+                for c in 0..dim {
+                    let mut sum = 0.0;
+                    for k in 0..dim {
+                        sum += jac[(c, k)] * ref_bv[i * dim + k];
+                    }
+                    uh[c] += s * coeff * inv_det * sum;
+                }
+            }
+
+            let ex = exact(&xp);
+            for c in 0..dim {
+                let d = uh[c] - ex[c];
+                err2 += w * d * d;
+            }
+        }
+    }
+    err2.max(0.0).sqrt()
+}
+
+// ─── L2 scalar L² error (P0-aware) ───────────────────────────────────────
+
+/// Compute the L² error of a scalar L² field against an exact scalar function.
+///
+/// Supports P0 (constant per element) and higher-order L2 spaces.
+/// For P0, uses the HDiv reference element's quadrature rule.
+pub fn compute_l2_error_l2<M: MeshTopology>(
+    dofs: &[f64],
+    l2_space: &L2Space<M>,
+    exact: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+    quad_order: u8,
+) -> f64 {
+    let mesh = l2_space.mesh();
+    let dim = mesh.topological_dim() as usize;
+    let order = l2_space.order();
+    let mut err2 = 0.0;
+
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let nodes = mesh.element_nodes(e);
+        let use_iso = matches!(et,
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+            | ElementType::Prism6 | ElementType::Prism15
+            | ElementType::Pyramid5);
+        let geo_elem = if use_iso { Some(et.ref_elem(mesh.geom_order().max(1))) } else { None };
+
+        let (quad, n_ldofs, use_lagrange) = if order == 0 {
+            // P0: use HDiv reference element's quadrature
+            let vre = vec_ref_elem(VecFamily::RaviartThomas, et.to_elem_type(), 0);
+            (vre.quadrature(quad_order), 1usize, false)
+        } else {
+            let re = et.ref_elem(order);
+            (re.quadrature(quad_order), re.n_dofs(), true)
+        };
+
+        let elem_dofs: Vec<usize> = l2_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let mut phi_buf = if use_lagrange { vec![0.0; n_ldofs] } else { vec![] };
+
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (w, xp) = if use_iso {
+                let ge = geo_elem.as_ref().unwrap();
+                let mut grad_geo = vec![0.0; ge.n_dofs() * dim];
+                let mut phi_geo = vec![0.0; ge.n_dofs()];
+                ge.eval_grad_basis(xi, &mut grad_geo);
+                ge.eval_basis(xi, &mut phi_geo);
+                let mut jac = DMatrix::<f64>::zeros(dim, dim);
+                let mut xp_vec = vec![0.0; dim];
+                for k in 0..ge.n_dofs() {
+                    let xk = mesh.node_coords(nodes[k]);
+                    for i in 0..dim {
+                        xp_vec[i] += phi_geo[k] * xk[i];
+                        for d in 0..dim { jac[(i, d)] += xk[i] * grad_geo[k * dim + d]; }
+                    }
+                }
+                (quad.weights[qi] * jac.determinant().abs(), xp_vec)
+            } else {
+                let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
+                (quad.weights[qi] * jac.determinant().abs(), xp_vec)
+            };
+
+            let uh = if order == 0 {
+                dofs[elem_dofs[0]]  // P0: single constant per element
+            } else {
+                let re = et.ref_elem(order);
+                re.eval_basis(xi, &mut phi_buf);
+                let mut val = 0.0;
+                for i in 0..n_ldofs {
+                    val += dofs[elem_dofs[i]] * phi_buf[i];
+                }
+                val
+            };
+
+            let ue = exact(&xp);
+            err2 += w * (uh - ue) * (uh - ue);
+        }
+    }
+    err2.max(0.0).sqrt()
 }
 
 #[cfg(test)]
