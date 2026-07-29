@@ -491,33 +491,34 @@ fn write_deformed_mesh(
 ) {
     let nn = mesh.n_nodes() as usize;
 
-    // Current position = reference + displacement.
-    // Displacement at node i: u[i] (x-comp), u[ns + i] (y-comp).
+    // Current position = reference + displacement (component-major ordering).
+    // Displacement at node i: comp 0 → u[i], comp 1 → u[ns+i], comp 2 → u[2*ns+i]
     let mut coords = Vec::with_capacity(nn * dim);
     for n in 0..nn {
         let ref_pt = mesh.node_coords(n as u32);
-        let ux = if n < ns { u[n] } else { 0.0 };
-        let uy = if n + ns < u.len() { u[ns + n] } else { 0.0 };
-        coords.push(ref_pt[0] + ux);
-        coords.push(ref_pt[1] + uy);
+        for d in 0..dim {
+            let u_d = if n < ns { u[d * ns + n] } else { 0.0 };
+            coords.push(ref_pt[d] + u_d);
+        }
     }
 
     let mut f = File::create(path).expect("cannot create deformed.mesh");
     writeln!(f, "MFEM mesh v1.0\n").ok();
     writeln!(f, "dimension\n{dim}\n").ok();
 
-    // Elements
+    // Elements (MFEM v1.0 geometry codes: 1=Seg 2=Tri 3=Quad 4=Tet 5=Hex 6=Prism)
     let ne = mesh.n_elements() as usize;
     writeln!(f, "elements\n{ne}").ok();
     for e in 0..ne {
         let et = mesh.element_type(e as u32);
         let nd = mesh.element_nodes(e as u32);
         let code = match et {
-            ElementType::Tri3 => 2,
-            ElementType::Quad4 => 3,
-            ElementType::Tet4 => 4,
-            ElementType::Hex8 => 5,
-            _ => panic!("unsupported element type for MFEM export"),
+            ElementType::Tri3   => 2,  // Triangle
+            ElementType::Quad4  => 3,  // Quadrilateral
+            ElementType::Tet4   => 4,  // Tetrahedron
+            ElementType::Hex8   => 5,  // Hexahedron
+            ElementType::Prism6 => 6,  // Wedge/Prism
+            _ => panic!("unsupported element type {et:?} for MFEM export"),
         };
         let tag = mesh.element_tag(e as u32);
         write!(f, "{tag} {code}").ok();
@@ -527,13 +528,19 @@ fn write_deformed_mesh(
         writeln!(f).ok();
     }
 
-    // Boundary
+    // Boundary (MFEM Geometry: 1=Point 2=Seg 3=Tri 4=Quad)
     let nb = mesh.n_boundary_faces() as usize;
     writeln!(f, "\nboundary\n{nb}").ok();
     for b in 0..nb {
         let fnodes = mesh.face_nodes(b as u32);
         let attr = mesh.face_tag(b as u32);
-        write!(f, "{attr} 1").ok(); // type 1 = SEGMENT
+        let face_type = match fnodes.len() {
+            2 => 1,  // SEGMENT (2D edge)
+            3 => 2,  // TRIANGLE (3D face on Tet/Prism)
+            4 => 3,  // QUADRILATERAL (3D face on Hex)
+            _ => panic!("unsupported boundary face with {} nodes", fnodes.len()),
+        };
+        write!(f, "{attr} {face_type}").ok();
         for &n in fnodes {
             write!(f, " {}", n + 1).ok();
         }
