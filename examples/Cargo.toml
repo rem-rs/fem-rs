@@ -72,9 +72,6 @@ path = "mfem_ex17_dg_elasticity.rs"
 name = "mfem_ex18_euler"
 path = "mfem_ex18_euler.rs"
 [[example]]
-name = "mfem_ex19_hyperelastic_dyn_incomp"
-path = "mfem_ex19_hyperelastic_dyn_incomp.rs"
-[[example]]
 name = "mfem_ex19_hyperelastic_incomp"
 path = "mfem_ex19_hyperelastic_incomp.rs"
 [[example]]
