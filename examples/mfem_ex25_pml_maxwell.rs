@@ -666,48 +666,6 @@ fn ref_elem_for(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     et.ref_elem(order)
 }
 
-fn elem_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize, et: ElementType, xi: &[f64])
-    -> (DMatrix<f64>, f64, Vec<f64>)
-{
-    match et {
-        ElementType::Quad4 => {
-            let xc: Vec<Vec<f64>> = (0..4).map(|k| mesh.node_coords(nodes[k]).to_vec()).collect();
-            let (xi_v, eta) = (xi[0], xi[1]);
-            let dndxi = |k: usize, e: f64| -> f64 { match k {
-                0 => -0.25*(1.0-e), 1 => 0.25*(1.0-e),
-                2 => 0.25*(1.0+e), 3 => -0.25*(1.0+e), _ => 0.0 }};
-            let dndeta = |k: usize, x: f64| -> f64 { match k {
-                0 => -0.25*(1.0-x), 1 => -0.25*(1.0+x),
-                2 => 0.25*(1.0+x), 3 => 0.25*(1.0-x), _ => 0.0 }};
-            let n = |k: usize, x: f64, e: f64| -> f64 { match k {
-                0 => 0.25*(1.0-x)*(1.0-e), 1 => 0.25*(1.0+x)*(1.0-e),
-                2 => 0.25*(1.0+x)*(1.0+e), 3 => 0.25*(1.0-x)*(1.0+e), _ => 0.0 }};
-            let mut j = DMatrix::<f64>::zeros(dim, dim);
-            for k in 0..4 {
-                j[(0,0)] += dndxi(k,eta)*xc[k][0]; j[(0,1)] += dndeta(k,xi_v)*xc[k][0];
-                j[(1,0)] += dndxi(k,eta)*xc[k][1]; j[(1,1)] += dndeta(k,xi_v)*xc[k][1];
-            }
-            let det = j.determinant();
-            let xp = vec![
-                n(0,xi_v,eta)*xc[0][0] + n(1,xi_v,eta)*xc[1][0] + n(2,xi_v,eta)*xc[2][0] + n(3,xi_v,eta)*xc[3][0],
-                n(0,xi_v,eta)*xc[0][1] + n(1,xi_v,eta)*xc[1][1] + n(2,xi_v,eta)*xc[2][1] + n(3,xi_v,eta)*xc[3][1]];
-            (j, det, xp)
-        }
-        _ => {
-            let x0 = mesh.node_coords(nodes[0]);
-            let mut j = DMatrix::<f64>::zeros(dim, dim);
-            for col in 0..dim {
-                let xc = mesh.node_coords(nodes[col + 1]);
-                for row in 0..dim { j[(row, col)] = xc[row] - x0[row]; }
-            }
-            let det_j = j.determinant();
-            let xp: Vec<f64> = (0..dim).map(|i| {
-                x0[i] + (0..dim).map(|k| j[(i,k)] * xi[k]).sum::<f64>()
-            }).collect();
-            (j, det_j, xp)
-        }
-    }
-}
 
 fn compute_l2_error<M: MeshTopology>(
     space: &HCurlSpace<M>, x: &[f64], dim: usize, prob: Prob, k: f64, qo: u8,
@@ -722,7 +680,8 @@ fn compute_l2_error<M: MeshTopology>(
         let dofs = space.element_dofs(e); let nodes = mesh.element_nodes(e);
         let mut phi = vec![0.0; n_ldofs];
         for (q, xi) in quad.points.iter().enumerate() {
-            let (_, det_j_q, xp) = elem_jacobian(mesh, nodes, dim, et, xi);
+            let (J_q, xp) = fem_mesh::element_jacobian_at(mesh, e, xi, dim);
+            let det_j_q = J_q.determinant().abs();
             let w = quad.weights[q] * det_j_q.abs();
             re.eval_basis(xi, &mut phi);
             let mut uh = vec![0.0; dim];
