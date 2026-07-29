@@ -37,7 +37,7 @@
 
 use fem_assembly::coefficient::{GridFunctionCoeff, TransformedCoeff};
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-use fem_io::mfem::{read_mfem_file, write_gf_file, write_mfem_file};
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::CsrMatrix;
 use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_mesh::Mesh;
@@ -51,6 +51,7 @@ use fem_space::{fe_space::FESpace, H1Space};
 /// and K is the diffusion operator with diffusivity depending on u: (κ + α·u).
 ///
 /// Class ConductionOperator represents the right-hand side of the above ODE.
+/// (C++ ex16.cpp:42-88 — class ConductionOperator : public TimeDependentOperator)
 struct ConductionOperator {
     fespace: H1Space<Mesh<2>>,
     #[allow(dead_code)]
@@ -83,24 +84,28 @@ impl ConductionOperator {
     /// Assembles M (mass matrix) and calls set_parameters to build K for the
     /// initial solution u.  Uses CG+Jacobi for both M and T solves, matching
     /// MFEM CGSolver+DSmoother configuration.
+    ///
+    /// (C++ ex16.cpp:275-306 — ConductionOperator::ConductionOperator)
     fn new(fespace: H1Space<Mesh<2>>, alpha: f64, kappa: f64, u: &[f64], quad_order: u8) -> Self {
         let rel_tol = 1e-8;
+        // C++ ex16.cpp:287-293 — M_solver: CGSolver+DSmoother, max_iter=30, rel_tol=1e-8
         let solve_cfg_m = SolverConfig {
             rtol: rel_tol,
             atol: 0.0,
-            max_iter: 30,        // MFEM CGSolver+DSmoother for M uses max_iter=30
+            max_iter: 30,
             verbose: false,
             ..SolverConfig::default()
         };
+        // C++ ex16.cpp:298-303 — T_solver: CGSolver+DSmoother, max_iter=100, rel_tol=1e-8
         let solve_cfg_t = SolverConfig {
             rtol: rel_tol,
             atol: 0.0,
-            max_iter: 100,       // MFEM CGSolver+DSmoother for T uses max_iter=100
+            max_iter: 100,
             verbose: false,
             ..SolverConfig::default()
         };
 
-        // Assemble mass matrix M with 2*order quadrature (matching MFEM default)
+        // C++ ex16.cpp:282-285 — Assemble M: BilinearForm + MassIntegrator → FormSystemMatrix
         let m_integ = MassIntegrator { rho: 1.0 };
         let m_mat = Assembler::assemble_bilinear(&fespace, &[&m_integ], quad_order);
 
@@ -126,6 +131,7 @@ impl ConductionOperator {
     }
 
     /// Compute `du_dt = M⁻¹(−K·u)` for explicit time integration.
+    /// (C++ ex16.cpp:308-316 — ConductionOperator::Mult)
     #[allow(dead_code)]
     fn mult(&mut self, u: &[f64], du_dt: &mut [f64]) {
         // Compute: du_dt = M^{-1}*-Ku
@@ -144,6 +150,7 @@ impl ConductionOperator {
     ///
     /// Build T = M + dt·K using CSR-level axpby (matching MFEM Add(1.0, M, dt, K)),
     /// then solve T·k = −K·u for the slope k.
+    /// (C++ ex16.cpp:318-334 — ConductionOperator::ImplicitSolve)
     fn implicit_solve(&mut self, dt: f64, u: &[f64], k: &mut [f64]) {
         // Build T = M + dt·K on first call; cache across stages (SDIRK uses same dt)
         if self.t_mat.is_none() {
@@ -176,6 +183,7 @@ impl ConductionOperator {
     ///
     /// Builds K with coefficient κ(u) = kappa + alpha·u at each quadrature point,
     /// then invalidates T so it is rebuilt on the next ImplicitSolve.
+    /// (C++ ex16.cpp:336-355 — ConductionOperator::SetParameters)
     fn set_parameters(&mut self, u: &[f64]) {
         // Build κ = kappa + alpha·u as a GridFunctionCoefficient
         let alpha = self.alpha;
@@ -197,14 +205,15 @@ impl ConductionOperator {
     }
 }
 
-// ─── Initial temperature ────────────────────────────────────────────────────
+// ─── Initial temperature (C++ ex16.cpp:364-374) ────────────────────────────
 
 fn initial_temperature(x: &[f64]) -> f64 {
     if x[0] * x[0] + x[1] * x[1] < 0.25 { 2.0 } else { 1.0 }
 }
 
 // ─── SDIRK33 coefficients ───────────────────────────────────────────────────
-
+// MFEM sdirk33_gamma, sdirk33_a21, sdirk33_a32, sdirk33_b from ode.cpp.
+// Values match MFEM's SDIRK33Solver to within machine epsilon (~1e-16).
 const SDIRK3_GAMMA: f64 = 0.435_866_521_508_459;
 const SDIRK3_A21: f64 = 0.564_133_478_491_541; // 1 − γ
 const SDIRK3_A32: f64 = 0.717_933_260_754_229_5;
@@ -254,15 +263,15 @@ fn parse_args() -> Args {
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 fn main() {
+    // C++ ex16.cpp:94-143 — 1. Parse command-line options.
     let args = parse_args();
-    // 1. Parse command-line options.
-    //    (done via parse_args() above)
 
-    // 2. Read the mesh from the given mesh file.
+    // C++ ex16.cpp:147-148 — 2. Read the mesh from the given mesh file.
     let mfem_file = if args.mesh_file.is_empty() {
         let path = {
             let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            p.parent().unwrap().join("data/star.mesh")
+            // examples/ → fem-rs/ → workspace root → data/
+            p.parent().unwrap().parent().unwrap().join("data/star.mesh")
         };
         read_mfem_file(&path).expect("failed to read default mesh (data/star.mesh)")
     } else {
@@ -271,10 +280,11 @@ fn main() {
     let mesh = mfem_file.mesh2d.expect("MFEM mesh must be 2D");
     let dim = 2;
 
-    // 3. Define the ODE solver used for time integration.
-    //    Types: 1=BE, 2=SDIRK2, 3=SDIRK33, 22=Midpoint, 23=SDIRK23, 34=SDIRK34
+    // C++ ex16.cpp:150-153 — 3. Define the ODE solver used for time integration.
+    //    C++: unique_ptr<ODESolver> ode_solver = ODESolver::Select(ode_solver_type);
+    //    Rust: hardcoded SDIRK33 (type 23, matches default C++ setting).
 
-    // 4. Refine the mesh uniformly.
+    // C++ ex16.cpp:154-161 — 4. Refine the mesh uniformly.
     let mesh = if args.ref_levels > 0 {
         let mut m = mesh;
         for _ in 0..args.ref_levels {
@@ -285,12 +295,14 @@ fn main() {
         mesh
     };
 
-    // 5. Define the H1 FE space.
+    // C++ ex16.cpp:163-169 — 5. Define the H1 FE space.
+    //     C++: H1_FECollection fe_coll(order, dim); FiniteElementSpace fespace(mesh, &fe_coll);
     let space = H1Space::new(mesh, args.order);
     let fe_size = space.n_dofs();
     println!("Number of temperature unknowns: {}", fe_size);
 
-    // 6. Set the initial conditions for u. All boundaries are considered natural.
+    // C++ ex16.cpp:172-179 — 6. Set the initial conditions for u. All boundaries are considered natural.
+    //     C++: FunctionCoefficient u_0(InitialTemperature); u_gf.ProjectCoefficient(u_0); u_gf.GetTrueDofs(u);
     let dm = space.dof_manager();
     let mut u: Vec<f64> = (0..fe_size)
         .map(|i| {
@@ -299,25 +311,26 @@ fn main() {
         })
         .collect();
 
-    // 7. Initialize the conduction operator.
-    // Use 2*order quadrature for exact integration of P2 mass/diffusion matrices
-    // (matching MFEM's BilinearForm default).
+    // C++ ex16.cpp:180-183 — 7. Initialize the conduction operator.
+    //     C++: ConductionOperator oper(fespace, alpha, kappa, u);
+    //     Quadrature: 2*order for exact integration matching MFEM's BilinearForm default.
     let quad_order = 2 * args.order;
     let oper = ConductionOperator::new(space, args.alpha, args.kappa, &u, quad_order);
 
-    // 7b. Save the initial state (matching C++: ex16.mesh + ex16-init.gf).
+    // 7b. Save the initial state (C++ ex16.cpp:184-191: ex16.mesh + ex16-init.gf).
+    //     C++ uses `omesh.precision(8); mesh->Print(omesh)` and `osol.precision(8); u_gf.Save(osol)`.
     {
-        // Write mesh from the FESpace
         write_mfem_file("ex16.mesh", oper.fespace.mesh())
             .expect("failed to write ex16.mesh");
     }
     {
-        write_gf_file("ex16-init.gf", dim, &u, "H1", args.order, 1)
+        // Write GF in MFEM-native FiniteElementSpace format with precision=8 (matching C++).
+        write_mfem_gf_file("ex16-init.gf", dim, &u, "H1", args.order, 1, 8)
             .expect("failed to write ex16-init.gf");
     }
 
-    // 8. Perform time-integration (looping over the time iterations, ti, with a
-    //    time-step dt).
+    // C++ ex16.cpp:226-258 — 8. Perform time-integration (looping over the time
+    //    iterations, ti, with a time-step dt).
     let t_final = args.t_final;
     let dt = args.dt;
 
@@ -379,13 +392,14 @@ fn main() {
         }
     }
 
-    // 9. Save the final solution (ex16-final.gf, matching C++).
+    // 9. Save the final solution (C++ ex16.cpp:263-267: ex16-final.gf).
     {
-        write_gf_file("ex16-final.gf", dim, &u, "H1", args.order, 1)
+        write_mfem_gf_file("ex16-final.gf", dim, &u, "H1", args.order, 1, 8)
             .expect("failed to write ex16-final.gf");
     }
 
-    // 10. Output comparison metrics (matching C++ patched format).
+    // 10. Output comparison metrics (C++ ex16.cpp:269-272 — console output + file I/O).
+    //     Rust adds L² norm and checksum for cross-implementation validation.
     let sol_norm: f64 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
     let checksum: f64 = u
         .iter()
@@ -501,7 +515,7 @@ mod tests {
     fn ex16_default_regression() {
         let path = {
             let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            p.parent().unwrap().join("data/star.mesh")
+            p.parent().unwrap().parent().unwrap().join("data/star.mesh")
         };
         let (dofs, steps, ft, norm, cs) = run_case(
             &path.to_string_lossy(),
@@ -523,7 +537,7 @@ mod tests {
     fn ex16_refinement_increases_dofs() {
         let path = {
             let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            p.parent().unwrap().join("data/star.mesh")
+            p.parent().unwrap().parent().unwrap().join("data/star.mesh")
         };
         let (dofs_c, _, _, _, _) = run_case(&path.to_string_lossy(), 1, 1, 0.01, 0.5, 0.01, 0.5);
         let (dofs_f, _, _, _, _) = run_case(&path.to_string_lossy(), 2, 2, 0.01, 0.5, 0.01, 0.5);
@@ -539,7 +553,7 @@ mod tests {
     fn ex16_solution_norm_positive_finite() {
         let path = {
             let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            p.parent().unwrap().join("data/star.mesh")
+            p.parent().unwrap().parent().unwrap().join("data/star.mesh")
         };
         let (_, _, _, norm, _) = run_case(&path.to_string_lossy(), 1, 1, 0.01, 0.2, 0.01, 0.5);
         assert!(

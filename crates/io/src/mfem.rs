@@ -706,6 +706,46 @@ pub fn write_gf_file(
     write_gf(&mut file, dim, dofs, space_type, order, vdim)
 }
 
+/// Write a `.gf` file in MFEM's native FiniteElementSpace format.
+///
+/// Produces files compatible with GLVis (`glvis -m mesh.mesh -g sol.gf`).
+/// The format matches MFEM's `GridFunction::Save(std::ostream &)` output:
+///
+/// ```text
+/// FiniteElementSpace
+/// FiniteElementCollection: H1_<dim>D_P<order>
+/// VDim: <vdim>
+/// Ordering: <ordering>
+/// <value 1>
+/// <value 2>
+/// ...
+/// ```
+///
+/// A `precision` of 8 reproduces the C++ `ostream::precision(8)` setting.
+/// For scalar fields (`vdim=1`) the ordering is `0` (byNODES); otherwise `1`.
+pub fn write_mfem_gf_file(
+    path: impl AsRef<std::path::Path>,
+    dim: usize, dofs: &[f64],
+    space_type: &str, order: u8, vdim: usize,
+    precision: usize,
+) -> FemResult<()> {
+    let mut file = std::fs::File::create(path)?;
+    // FiniteElementSpace header (matching MFEM GridFunction::Save)
+    writeln!(file, "FiniteElementSpace")?;
+    writeln!(file, "FiniteElementCollection: {space_type}_{dim}D_P{order}")?;
+    writeln!(file, "VDim: {vdim}")?;
+    writeln!(file, "Ordering: {}", if vdim == 1 { 0 } else { 1 })?;
+    writeln!(file)?;
+    // Values: precision controls total significant digits (C++ precision(8) → 8 sf)
+    // Use {:.prec$e} where prec = precision - 1 gives precision total significant digits
+    // (e.g. prec=7 gives 8 sf: "4.2830810e+01" for value 42.83081)
+    let sig_digits = precision.saturating_sub(1).max(0);
+    for v in dofs {
+        writeln!(file, "{:.prec$e}", v, prec = sig_digits)?;
+    }
+    Ok(())
+}
+
 /// Convenience: read a `.gf` file from disk.
 pub fn read_gf_file(path: impl AsRef<std::path::Path>) -> FemResult<(GfInfo, Vec<f64>)> {
     read_gf(std::fs::File::open(path)?)
