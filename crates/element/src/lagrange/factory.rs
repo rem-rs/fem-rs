@@ -967,6 +967,7 @@ pub fn vec_ref_elem(family: VecFamily, etype: ElemType, order: u8) -> Box<dyn Ve
     let p = order as usize;
     match (family, etype) {
         (VecFamily::Nedelec, ElemType::Tri) => Box::new(crate::nedelec::TriNDk::new(p)),
+        (VecFamily::Nedelec, ElemType::Quad) if p == 1 => Box::new(crate::nedelec::QuadND1),
         (VecFamily::Nedelec, ElemType::Quad) => Box::new(crate::nedelec::QuadNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Tet) => Box::new(crate::nedelec::TetNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Hex) => Box::new(crate::nedelec::HexNDk::new(p)),

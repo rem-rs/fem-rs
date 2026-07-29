@@ -659,19 +659,169 @@ pub fn refine_nonconforming(
 /// Uniformly refine all elements of a 2-D mesh.
 ///
 /// - Tri3  → 4 Tri3  (newest-vertex bisection).
-/// - Quad4 → 4 Quad4 (hanging-node conforming split).
+/// - Quad4 → 4 Quad4 (conforming split matching MFEM UniformRefinement2D_base).
 pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     match mesh.elem_type {
         ElementType::Tri3 => refine_marked(mesh, &all),
-        ElementType::Quad4 => {
-            let (m, _constraints) = refine_nonconforming_quad(mesh, &all, None);
-            m
-        }
+        ElementType::Quad4 => refine_uniform_quad4(mesh),
         _ => panic!(
             "refine_uniform: unsupported element type {:?} (only Tri3 and Quad4 are supported)",
             mesh.elem_type
         ),
+    }
+}
+
+/// Conforming Quad4 uniform refinement matching MFEM's UniformRefinement2D_base.
+///
+/// Each Quad4 is split into 4 sub-Quads by connecting edge midpoints and the
+/// element center.  Vertex ordering matches MFEM's quad_t::Edges convention:
+///
+/// ```text
+///   v[3] ---- e[3] ---- v[2]
+///     |                  |
+///    e[3]    center     e[2]
+///     |                  |
+///   v[0] ---- e[0] ---- v[1]      (CCW = v0→v1→v2→v3)
+/// ```
+///
+/// Child elements (CCW):
+///   - 0 (lower-left):  v[0],  e[0], center, e[3]
+///   - 1 (lower-right): e[0],  v[1], e[1],  center
+///   - 2 (upper-right): center, e[1], v[2],  e[2]
+///   - 3 (upper-left):  e[3],  center, e[2], v[3]
+///
+/// New vertex order: original vertices, then edge midpoints, then element centers.
+/// Edge midpoints are deduplicated via a (min,max) key so adjacent elements share them.
+fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
+    let dim = 2usize;
+    let npe = 4usize;
+    let n_orig_verts = mesh.n_nodes();
+    let n_elems = mesh.n_elems();
+    let n_bdr_faces = mesh.face_conn.len() / 2;
+
+    // Quad edges matching MFEM quad_t::Edges and HCurlSpace QUAD_EDGES.
+    const QUAD_EDGES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+
+    // Count unique edges (matching MFEM's edge numbering order).
+    let mut edge_set: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    let mut edge_list: Vec<(NodeId, NodeId)> = Vec::new();
+    for e in 0..n_elems {
+        let base = e * npe;
+        for &(li, lj) in &QUAD_EDGES {
+            let a = mesh.conn[base + li];
+            let b = mesh.conn[base + lj];
+            let key = (a.min(b), a.max(b));
+            edge_set.entry(key).or_insert_with(|| {
+                let idx = edge_list.len();
+                edge_list.push(key);
+                idx
+            });
+        }
+    }
+    for f in 0..n_bdr_faces {
+        let a = mesh.face_conn[f * 2];
+        let b = mesh.face_conn[f * 2 + 1];
+        let key = (a.min(b), a.max(b));
+        edge_set.entry(key).or_insert_with(|| {
+            let idx = edge_list.len();
+            edge_list.push(key);
+            idx
+        });
+    }
+    let n_edges = edge_list.len();
+
+    // Allocate new vertices: [orig | edge midpoints | element centers]
+    let n_new_verts = n_orig_verts + n_edges + n_elems;
+    let mut new_coords = vec![0.0_f64; n_new_verts * dim];
+    new_coords[..n_orig_verts * dim].copy_from_slice(&mesh.coords);
+
+    // Edge midpoint coordinates
+    for (ei, &(a, b)) in edge_list.iter().enumerate() {
+        let vi = n_orig_verts + ei;
+        let ca = &mesh.coords[a as usize * dim..(a as usize + 1) * dim];
+        let cb = &mesh.coords[b as usize * dim..(b as usize + 1) * dim];
+        new_coords[vi * dim]     = (ca[0] + cb[0]) * 0.5;
+        new_coords[vi * dim + 1] = (ca[1] + cb[1]) * 0.5;
+    }
+
+    let mut child_conn = Vec::with_capacity(n_elems * 4 * npe);
+    let mut new_tags = Vec::with_capacity(n_elems * 4);
+
+    for e in 0..n_elems {
+        let base = e * npe;
+        let v = [
+            mesh.conn[base],
+            mesh.conn[base + 1],
+            mesh.conn[base + 2],
+            mesh.conn[base + 3],
+        ];
+        let center_idx = (n_orig_verts + n_edges + e) as NodeId;
+
+        // Compute center coordinates (average of 4 corners)
+        let cidx = center_idx as usize;
+        for d in 0..dim {
+            let mut s = 0.0;
+            for &vi in &v {
+                s += mesh.coords[vi as usize * dim + d];
+            }
+            new_coords[cidx * dim + d] = s / 4.0;
+        }
+
+        // Global edge-midpoint indices for local edges 0..3
+        let e_mid: [NodeId; 4] = core::array::from_fn(|li| {
+            let (a, b) = QUAD_EDGES[li];
+            let key = (v[a].min(v[b]), v[a].max(v[b]));
+            (n_orig_verts + edge_set[&key]) as NodeId
+        });
+
+        // MFEM pattern: child elements (lines 9805-9812)
+        // 0 (lower-left):  v[0],  e[0], center, e[3]
+        child_conn.extend_from_slice(&[v[0], e_mid[0], center_idx, e_mid[3]]);
+        // 1 (lower-right): e[0],  v[1], e[1],  center
+        child_conn.extend_from_slice(&[e_mid[0], v[1], e_mid[1], center_idx]);
+        // 2 (upper-right): center, e[1], v[2],  e[2]
+        child_conn.extend_from_slice(&[center_idx, e_mid[1], v[2], e_mid[2]]);
+        // 3 (upper-left):  e[3],  center, e[2], v[3]
+        child_conn.extend_from_slice(&[e_mid[3], center_idx, e_mid[2], v[3]]);
+
+        let tag = mesh.elem_tags[e];
+        new_tags.extend_from_slice(&[tag, tag, tag, tag]);
+    }
+
+    // Boundary: each segment → 2 segments via midpoint
+    let mut new_face_conn = Vec::with_capacity(n_bdr_faces * 4);
+    let mut new_face_tags = Vec::with_capacity(n_bdr_faces * 2);
+    for f in 0..n_bdr_faces {
+        let a = mesh.face_conn[f * 2];
+        let b = mesh.face_conn[f * 2 + 1];
+        let key = (a.min(b), a.max(b));
+        let mid = (n_orig_verts + edge_set[&key]) as NodeId;
+        new_face_conn.push(a);
+        new_face_conn.push(mid);
+        new_face_conn.push(mid);
+        new_face_conn.push(b);
+        let tag = mesh.face_tags[f];
+        new_face_tags.push(tag);
+        new_face_tags.push(tag);
+    }
+
+    Mesh {
+        coords: new_coords,
+        conn: child_conn,
+        elem_tags: new_tags,
+        elem_type: ElementType::Quad4,
+        face_conn: new_face_conn,
+        face_tags: new_face_tags,
+        face_type: ElementType::Line2,
+        elem_types: None,
+        elem_offsets: None,
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        geometry: None,
     }
 }
 
