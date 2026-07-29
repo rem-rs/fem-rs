@@ -28,8 +28,6 @@ use fem_space::constraints::hanging_2d::{apply_hanging_constraints, recover_hang
 use fem_space::constraints::prolong::prolongate_pk_hanging;
 use fem_space::dof_manager::DofManager;
 use fem_space::{FESpace, VectorH1Space};
-use std::fs::File;
-use std::io::Write;
 
 /// Threshold refiner: mark elements with error above a fraction of total.
 fn mark_elements(eta: &[f64], fraction: f64) -> Vec<u32> {
@@ -60,7 +58,7 @@ fn main() {
     let mut order = 1u8;
     let mut _static_cond = false;
     let mut _flux_averaging = 0i32;
-    let mut _visualization = false;
+    let mut visualization = false;
     let mut use_direct = false; // SuiteSparse equivalent
     let max_dofs = 50000usize;
     let max_amr_itr = 20usize;
@@ -74,8 +72,8 @@ fn main() {
             "-sc" | "--static-condensation" => _static_cond = true,
             "-no-sc" | "--no-static-condensation" => _static_cond = false,
             "-f" | "--flux-averaging" => _flux_averaging = i.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-            "-vis" | "--visualization" => _visualization = true,
-            "-no-vis" | "--no-visualization" => _visualization = false,
+            "-vis" | "--visualization" => visualization = true,
+            "-no-vis" | "--no-visualization" => visualization = false,
             "-direct" | "--direct-solver" => use_direct = true,
             _ => {}
         }
@@ -248,9 +246,20 @@ fn main() {
         .expect("cannot write deformed mesh");
         println!("Wrote ex21_deformed.mesh");
 
-        let mut f = File::create("ex21_displacement.sol").expect("cannot create ex21_displacement.sol");
-        writeln!(f, "{}", u_final.len()).ok();
-        for &v in u_final { writeln!(f, "{:.16e}", v).ok(); }
+        // MFEM: x.Save(x_out) → GridFunction::Save
+        write_mfem_gf_file("ex21_displacement.sol", 2, u_final, "H1", order, 2, 16)
+            .expect("cannot write ex21_displacement.sol");
         println!("Wrote ex21_displacement.sol");
+
+        // MFEM: GLVis visualization (socketstream)
+        if visualization {
+            // Write deformed mesh + displacement for GLVis:
+            // glvis -m ex21_vis.mesh -g ex21_vis.sol
+            write_mfem_file_with_coords("ex21_vis.mesh", &mesh, &def_coords)
+                .expect("cannot write vis mesh");
+            write_mfem_gf_file("ex21_vis.sol", 2, u_final, "H1", order, 2, 16)
+                .expect("cannot write vis sol");
+            println!("  Wrote ex21_vis.mesh + ex21_vis.sol — load with: glvis -m ex21_vis.mesh -g ex21_vis.sol");
+        }
     }
 }
