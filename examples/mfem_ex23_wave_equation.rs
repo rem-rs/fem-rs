@@ -58,8 +58,9 @@ struct WaveOperator<M: MeshTopology> {
     t_mat: Option<CsrMatrix<f64>>,
     current_fac0: f64,
 
-    // CG solver config
+    // CG solver config (M_solver: 30 iters, T_solver: 100 iters)
     solve_cfg: SolverConfig,
+    solve_cfg_t: SolverConfig,
 
     // Auxiliary vector
     z: Vec<f64>,
@@ -72,13 +73,9 @@ impl<M: MeshTopology + Send + Sync + Clone> WaveOperator<M> {
         speed: f64,
     ) -> Self {
         let rel_tol = 1e-8;
-        let solve_cfg = SolverConfig {
-            rtol: rel_tol,
-            atol: 0.0,
-            max_iter: 500,   // extra iters for CG without preconditioner
-            verbose: false,
-            ..SolverConfig::default()
-        };
+        // MFEM: M_solver max_iter=30, T_solver max_iter=100
+        let solve_cfg = SolverConfig { rtol: rel_tol, atol: 0.0, max_iter: 30, verbose: false, ..SolverConfig::default() };
+        let solve_cfg_t = SolverConfig { rtol: rel_tol, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() };
 
         // Match C++ 2*order+1 quadrature (order=2 → quad_order=5)
         let quad_order = (2 * fespace.element_order(0) + 1) as u8;
@@ -115,6 +112,7 @@ impl<M: MeshTopology + Send + Sync + Clone> WaveOperator<M> {
             t_mat: None,
             current_fac0: 0.0,
             solve_cfg,
+            solve_cfg_t,
             z: vec![0.0; n],
         }
     }
@@ -167,7 +165,7 @@ impl<M: MeshTopology + Send + Sync + Clone> WaveOperator<M> {
 
         // Solve T · d2udt2 = z (PCG+Jacobi, matching C++ DSmoother)
         let sys = self.t_mat.as_ref().unwrap();
-        let res = solve_pcg_jacobi(sys, &self.z, d2udt2, &self.solve_cfg)
+        let res = solve_pcg_jacobi(sys, &self.z, d2udt2, &self.solve_cfg_t)
             .expect("WaveOperator::ImplicitSolve: PCG+Jacobi solve failed");
         if !res.converged {
             eprintln!("WARNING: PCG+Jacobi did not converge (iter={}, residual={:.6e})",
@@ -378,14 +376,11 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
         du_dt[d as usize] = 0.0;
     }
 
-    // Save initial solution (matching C++ ex23: ex23.mesh + ex23-init.gf with u + du_dt)
-    {
-        let mut mesh_f = std::fs::File::create("ex23.mesh").expect("create ex23.mesh");
-        write_mfem(&mut mesh_f, &mesh, None).expect("mesh write");
-        let mut init_f = std::fs::File::create("ex23-init.gf").expect("create ex23-init.gf");
-        write_gf(&mut init_f, dim, &u, "H1", args.order, 1).expect("write init u");
-        write_gf(&mut init_f, dim, &du_dt, "H1", args.order, 1).expect("write init du_dt");
-    }
+    // MFEM: mesh->Print(omesh) + u_gf.Save(osol) + dudt_gf.Save(osol)
+    write_mfem_file("ex23.mesh", &mesh).expect("mesh write");
+    let mut init_f = std::fs::File::create("ex23-init.gf").expect("create ex23-init.gf");
+    write_gf(&mut init_f, dim, &u, "H1", args.order, 1).expect("write init u");
+    write_gf(&mut init_f, dim, &du_dt, "H1", args.order, 1).expect("write init du_dt");
 
     // Create the wave operator
     let mut oper = WaveOperator::new(space, ess_bdr.clone(), args.speed);
