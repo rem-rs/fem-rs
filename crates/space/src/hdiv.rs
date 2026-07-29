@@ -100,6 +100,7 @@ enum FaceDofMap {
 /// Supports order 0 (RT0), 1 (RT1), and on **2-D triangles only** order 2 (RT2).
 /// Hex: orders 0 (RT0, 6 DOFs/elem) and 1 (RT1, 36 DOFs/elem).
 #[derive(Clone)]
+// MFEM: RT_FECollection (Raviart-Thomas)
 pub struct HDivSpace<M: MeshTopology> {
     mesh: M,
     order: u8,

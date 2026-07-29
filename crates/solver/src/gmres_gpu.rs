@@ -1,3 +1,4 @@
+// MFEM: GMRESSolver (GPU)
 //! GPU-native GMRES solver with restart (modified Gram-Schmidt Arnoldi).
 //!
 //! All vectors live on the GPU; only dot products and the small Hessenberg

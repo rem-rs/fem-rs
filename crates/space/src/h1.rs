@@ -13,6 +13,7 @@ use crate::p_refine::{self, PRefineConstraint, build_variable_order_dof_manager,
 /// Supports both uniform order (all elements same p) and variable order
 /// (per-element p from p-refinement).
 
+// MFEM: H1_FECollection / FiniteElementSpace
 pub struct H1Space<M: MeshTopology> {
     mesh:   M,
     dm:     DofManager,

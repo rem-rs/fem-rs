@@ -1,3 +1,4 @@
+// MFEM: CGSolver (GPU)
 //! GPU-native Conjugate Gradient (CG) solver.
 //!
 //! All vectors live on the GPU; only the residual norm is read back each

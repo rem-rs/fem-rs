@@ -5,13 +5,15 @@
 //!   Interior faces: stress-based SIP (consistency + symmetry + penalty)
 //!   Boundary faces: stress-based SIP for weak Dirichlet
 
-use std::collections::HashMap;
-
 use fem_element::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
+use super::dg_base::{
+    build_face_elem_map, face_geom_2d, orient_normal_outward, phys_to_ref,
+    ref_elem_face, ref_elem_vol, simplex_jac, xform_grads,
+};
 use crate::interior_faces::InteriorFaceList;
 
 /// DG elasticity assembler with full stress-based SIP.
@@ -601,156 +603,7 @@ fn scatter(
     }
 }
 
-// ─── Face-to-element map ───────────────────────────────────────────────────
-
-fn build_face_elem_map<M: MeshTopology>(mesh: &M, dim: usize) -> HashMap<u32, u32> {
-    let mut vol_face_map: HashMap<Vec<u32>, u32> = HashMap::new();
-    let local_faces = |npe: usize| -> Vec<Vec<usize>> {
-        match (npe, dim) {
-            (3, 2) => vec![vec![0, 1], vec![1, 2], vec![0, 2]],
-            (4, 2) => vec![vec![0, 1], vec![1, 2], vec![2, 3], vec![0, 3]],
-            (4, 3) => vec![
-                vec![1, 2, 3],
-                vec![0, 2, 3],
-                vec![0, 1, 3],
-                vec![0, 1, 2],
-            ],
-            _ => vec![],
-        }
-    };
-    for e in mesh.elem_iter() {
-        let nodes = mesh.element_nodes(e);
-        let npe = nodes.len();
-        for lf in local_faces(npe) {
-            let mut key: Vec<u32> = lf.iter().map(|&k| nodes[k]).collect();
-            key.sort_unstable();
-            vol_face_map.entry(key).or_insert(e);
-        }
-    }
-    let mut result = HashMap::new();
-    for f in mesh.face_iter() {
-        let fnodes = mesh.face_nodes(f);
-        let mut key: Vec<u32> = fnodes.to_vec();
-        key.sort_unstable();
-        if let Some(&elem) = vol_face_map.get(&key) {
-            result.insert(f, elem);
-        }
-    }
-    result
-}
-
-// ─── Geometry helpers (2-D only, mirrored from dg.rs) ──────────────────────
-
-fn face_geom_2d<M: MeshTopology>(mesh: &M, nodes: &[u32]) -> (f64, Vec<f64>) {
-    let x0 = mesh.node_coords(nodes[0]);
-    let x1 = mesh.node_coords(nodes[1]);
-    let dx = x1[0] - x0[0];
-    let dy = x1[1] - x0[1];
-    let len = (dx * dx + dy * dy).sqrt();
-    (len, vec![-dy / len, dx / len])
-}
-
-fn orient_normal_outward<M: MeshTopology>(
-    mesh: &M,
-    elem: u32,
-    face_nodes: &[u32],
-    normal: &mut [f64],
-) {
-    let dim = mesh.dim() as usize;
-    let enodes = mesh.element_nodes(elem);
-    let npe = enodes.len();
-    let mut centroid = vec![0.0_f64; dim];
-    for &n in enodes {
-        let c = mesh.node_coords(n);
-        for d in 0..dim {
-            centroid[d] += c[d];
-        }
-    }
-    for d in 0..dim {
-        centroid[d] /= npe as f64;
-    }
-    let mut midpoint = vec![0.0_f64; dim];
-    for &n in face_nodes {
-        let c = mesh.node_coords(n);
-        for d in 0..dim {
-            midpoint[d] += c[d];
-        }
-    }
-    for d in 0..dim {
-        midpoint[d] /= face_nodes.len() as f64;
-    }
-    let dot: f64 = (0..dim)
-        .map(|d| normal[d] * (midpoint[d] - centroid[d]))
-        .sum();
-    if dot < 0.0 {
-        for d in 0..dim {
-            normal[d] = -normal[d];
-        }
-    }
-}
-
-fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
-    let j_inv = jac
-        .clone()
-        .try_inverse()
-        .expect("degenerate element in phys_to_ref");
-    let dx: Vec<f64> = (0..dim).map(|i| xp[i] - x0[i]).collect();
-    let mut xi = vec![0.0_f64; dim];
-    for i in 0..dim {
-        for k in 0..dim {
-            xi[i] += j_inv[(i, k)] * dx[k];
-        }
-    }
-    xi
-}
-
-fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3};
-    match (et, order) {
-        (ElementType::Tri3, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) => Box::new(TriP2),
-        (ElementType::Tri3, 3) => Box::new(TriP3),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
-        (ElementType::Quad4, 1) => Box::new(fem_element::lagrange::QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(fem_element::lagrange::QuadQ2),
-        _ => panic!("ref_elem_vol: unsupported ({et:?}, order={order})"),
-    }
-}
-
-fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::{SegP1, SegP2, SegP3};
-    match (et, order) {
-        (ElementType::Line2, 1) => Box::new(SegP1),
-        (ElementType::Line2, 2) => Box::new(SegP2),
-        (ElementType::Line2, 3) => Box::new(SegP3),
-        _ => panic!("ref_elem_face: unsupported ({et:?}, order={order})"),
-    }
-}
-
-fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(nodes[col + 1]);
-        for row in 0..dim {
-            j[(row, col)] = xc[row] - x0[row];
-        }
-    }
-    let det = j.determinant();
-    (j, det)
-}
-
-fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
-    for i in 0..n {
-        for j in 0..dim {
-            gp[i * dim + j] = (0..dim).map(|k| jit[(j, k)] * gr[i * dim + k]).sum();
-        }
-    }
-}
-
-use nalgebra::DMatrix;
+// MFEM: DgElasticityAssembler — stress-based SIP
 
 #[cfg(test)]
 mod tests {

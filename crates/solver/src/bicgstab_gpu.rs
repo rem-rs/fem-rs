@@ -1,3 +1,4 @@
+// MFEM: BiCGSTABSolver (GPU)
 //! GPU-native BiCGSTAB solver.
 //!
 //! Suitable for non-symmetric systems. All vectors live on the GPU; only dot

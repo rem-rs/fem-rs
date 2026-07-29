@@ -117,6 +117,7 @@ pub(crate) const PYRAMID_QUAD_FACE: [(usize, usize, usize, usize); 1] = [
 ///
 /// Constructed from a [`MeshTopology`] with triangular or tetrahedral elements.
 /// Currently supports order 1 (ND1).
+// MFEM: ND_FECollection (Nedelec)
 pub struct HCurlSpace<M: MeshTopology> {
     mesh: M,
     order: u8,

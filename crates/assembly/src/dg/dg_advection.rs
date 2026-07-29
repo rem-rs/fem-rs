@@ -19,8 +19,7 @@ use nalgebra::DMatrix;
 use std::f64::consts::PI;
 
 use fem_core::types::{DofId, ElemId, NodeId};
-use fem_element::{ReferenceElement,
-    lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1, QuadQk}};
+use fem_element::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -870,26 +869,17 @@ impl DgAdvectionRhs {
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers (re-exported from dg_base) ────────────────────────────────────────
 
-pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (et, order) {
-        (ElementType::Tri3, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) => Box::new(TriP2),
-        (ElementType::Tri3, 3) => Box::new(TriP3),
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, order) if order > 1 => Box::new(QuadQk::new(order as usize)),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
-        _ => panic!("dg_adv ref_elem_vol: unsupported ({et:?}, {order})"),
-    }
-}
+pub use super::dg_base::ref_elem_vol_dynamic as ref_elem_vol;
+pub use super::dg_base::ref_elem_face;
+pub use super::dg_base::simplex_jac;
+pub use super::dg_base::find_face_elem;
+pub(crate) use super::dg_base::orient_normal_outward;
+use super::dg_base::phys_to_ref;
+use super::dg_base::xform_grads;
 
-/// Return a Crouzeix-Raviart reference element by type and order.
-///
-/// # Panics
-/// Panics if the requested CR element is not implemented.
+/// (Unique to this module) Return a Crouzeix-Raviart reference element.
 pub fn ref_elem_cr(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(fem_element::CrTri1),
@@ -900,7 +890,7 @@ pub fn ref_elem_cr(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     }
 }
 
-/// Return a Q1_rot (Rannacher-Turek) reference element for Quad4.
+/// (Unique to this module) Return a Q1_rot (Rannacher-Turek) reference element.
 pub fn ref_elem_q1rot(et: ElementType) -> Box<dyn ReferenceElement> {
     match et {
         ElementType::Quad4 => Box::new(fem_element::Q1RotRef),
@@ -908,108 +898,8 @@ pub fn ref_elem_q1rot(et: ElementType) -> Box<dyn ReferenceElement> {
     }
 }
 
-pub fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (et, order) {
-        (ElementType::Line2, 1) => Box::new(SegP1),
-        (ElementType::Line2, 2) => Box::new(SegP2),
-        (ElementType::Line2, 3) => Box::new(SegP3),
-        (ElementType::Tri3, 1)  => Box::new(TriP1),
-        _ => panic!("dg_adv ref_elem_face: unsupported ({et:?}, {order})"),
-    }
-}
-
-pub fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], _dim: usize) -> (DMatrix<f64>, f64) {
-    if nodes.len() > 3 {
-        // Quad element — centroid Jacobian of bilinear mapping
-        let x: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[0]).collect();
-        let y: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[1]).collect();
-        let dxi  = [-0.5,  0.5,  0.5, -0.5];
-        let deta = [-0.5, -0.5,  0.5,  0.5];
-        let mut j = DMatrix::<f64>::zeros(2, 2);
-        for k in 0..4 {
-            j[(0,0)] += dxi[k]  * x[k]; j[(0,1)] += deta[k] * x[k];
-            j[(1,0)] += dxi[k]  * y[k]; j[(1,1)] += deta[k] * y[k];
-        }
-        let det = j.determinant();
-        return (j, det);
-    }
-    // Simplex: affine mapping
-    let x0 = mesh.node_coords(nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(2, 2);
-    for col in 0..2 {
-        let xc = mesh.node_coords(nodes[col+1]);
-        for row in 0..2 { j[(row,col)] = xc[row] - x0[row]; }
-    }
-    let det = j.determinant();
-    (j, det)
-}
-
-pub fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
-    let j_inv = match jac.clone().try_inverse() {
-        Some(inv) => inv,
-        None => {
-            eprintln!("warning: degenerate element in phys_to_ref, using identity");
-            DMatrix::identity(dim, dim)
-        }
-    };
-    let dx: Vec<f64> = (0..dim).map(|i| xp[i] - x0[i]).collect();
-    let mut xi = vec![0.0_f64; dim];
-    for i in 0..dim {
-        for k in 0..dim { xi[i] += j_inv[(i,k)] * dx[k]; }
-    }
-    xi
-}
-
-pub fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
-    for i in 0..n {
-        for j in 0..dim {
-            let mut s = 0.0;
-            for k in 0..dim { s += jit[(j,k)] * gr[i*dim+k]; }
-            gp[i*dim+j] = s;
-        }
-    }
-}
-
-pub(crate) fn orient_normal_outward<M: MeshTopology>(
-    mesh: &M,
-    elem: u32,
-    face_nodes: &[u32],
-    normal: &mut [f64],
-) {
-    let dim = mesh.dim() as usize;
-    let enodes = mesh.element_nodes(elem);
-    let npe = enodes.len();
-    let mut centroid = vec![0.0_f64; dim];
-    for &n in enodes {
-        let c = mesh.node_coords(n);
-        for d in 0..dim { centroid[d] += c[d]; }
-    }
-    for d in 0..dim { centroid[d] /= npe as f64; }
-    let mut midpoint = vec![0.0_f64; dim];
-    for &n in face_nodes {
-        let c = mesh.node_coords(n);
-        for d in 0..dim { midpoint[d] += c[d]; }
-    }
-    for d in 0..dim { midpoint[d] /= face_nodes.len() as f64; }
-    let dot: f64 = (0..dim).map(|d| normal[d] * (midpoint[d] - centroid[d])).sum();
-    if dot < 0.0 {
-        for d in 0..dim { normal[d] = -normal[d]; }
-    }
-}
-
-pub fn find_face_elem<M: MeshTopology>(mesh: &M, _face_id: u32, face_nodes: &[u32]) -> u32 {
-    // Build a sorted key and scan elements
-    let mut fkey: Vec<u32> = face_nodes.to_vec();
-    fkey.sort_unstable();
-    for e in mesh.elem_iter() {
-        let enodes = mesh.element_nodes(e);
-        if enodes.len() < 3 { continue; }
-        // Check any 2 matching nodes = face belongs to this element
-        let count = fkey.iter().filter(|&n| enodes.contains(n)).count();
-        if count >= 2 { return e; }
-    }
-    0
-}
+// MFEM: DGAdvectionIntegrator — DGTraceIntegrator for advection
+// (struct defined above)
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

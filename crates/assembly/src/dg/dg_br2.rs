@@ -40,27 +40,17 @@ use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 use crate::interior_faces::InteriorFaceList;
 
-// ─── Helpers (affine P1 elements) ────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+use super::dg_base::{face_geom_2d, face_geom_3d};
 
 /// Face geometry: length/area and unit normal (outward from left element).
+// MFEM: Mesh::GetFaceGeometry
 fn face_geom<M: MeshTopology>(mesh: &M, face_nodes: &[u32]) -> (f64, Vec<f64>) {
-    let d = mesh.dim() as usize;
-    if d == 2 {
-        let a = mesh.node_coords(face_nodes[0]);
-        let b = mesh.node_coords(face_nodes[1]);
-        let dx = b[0] - a[0]; let dy = b[1] - a[1];
-        let h = (dx * dx + dy * dy).sqrt().max(1e-30);
-        (h, vec![-dy / h, dx / h]) // CCW outward normal from left element
+    if mesh.dim() == 2 {
+        face_geom_2d(mesh, face_nodes)
     } else {
-        let a = mesh.node_coords(face_nodes[0]);
-        let b = mesh.node_coords(face_nodes[1]);
-        let c = mesh.node_coords(face_nodes[2]);
-        let v1 = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
-        let v2 = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
-        let cr = [v1[1]*v2[2]-v1[2]*v2[1], v1[2]*v2[0]-v1[0]*v2[2], v1[0]*v2[1]-v1[1]*v2[0]];
-        let area = 0.5 * (cr[0]*cr[0]+cr[1]*cr[1]+cr[2]*cr[2]).sqrt().max(1e-30);
-        let nrm = (cr[0]*cr[0]+cr[1]*cr[1]+cr[2]*cr[2]).sqrt().max(1e-30);
-        (area, vec![cr[0]/nrm, cr[1]/nrm, cr[2]/nrm])
+        face_geom_3d(mesh, face_nodes)
     }
 }
 

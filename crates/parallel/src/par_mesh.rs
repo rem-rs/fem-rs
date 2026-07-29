@@ -34,6 +34,7 @@ use crate::{Comm, GhostExchange, MeshPartition};
 /// Construct via [`partition_mesh`](super::par_partition::partition_mesh)
 /// or any custom partitioner that builds a [`MeshPartition`] describing the
 /// local node/element ownership.
+// MFEM: ParMesh
 pub struct ParallelMesh<M: MeshTopology> {
     /// Sub-mesh local to this rank (local node / element indices).
     local_mesh: M,

@@ -190,6 +190,7 @@ fn div_assign_slice(v: &mut [f64], divisor: f64, len: usize) {
 ///
 /// Solves `A x = b` where `A` is a distributed SPD matrix.  All inner
 /// products are global reductions over owned DOFs.
+// MFEM: ParCGSolver
 pub fn par_solve_cg(
     a: &ParCsrMatrix,
     b: &ParVector,
@@ -528,6 +529,7 @@ pub fn par_solve_gmres_jacobi(
 ///
 /// Solves `A x = b` where `A` is a distributed symmetric matrix.
 /// Uses the Lanczos-based MINRES algorithm (Choi-Paige-Saunders).
+// MFEM: ParMINRESSolver
 pub fn par_solve_minres(
     a: &ParCsrMatrix,
     b: &ParVector,
@@ -674,6 +676,7 @@ pub fn par_solve_minres(
 }
 
 
+// MFEM: ParBiCGSTABSolver
 pub fn par_solve_bicgstab(
     a: &ParCsrMatrix, b: &ParVector, x: &mut ParVector, cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
@@ -1568,6 +1571,7 @@ pub fn par_direct_solve(
 /// ([`par_solve_gmres_jacobi`], [`par_solve_gmres_ilu0`], etc.) converge faster.
 ///
 /// `restart` is the Krylov subspace dimension before restart (must be `> 0`).
+// MFEM: ParGMRESSolver
 pub fn par_solve_gmres(
     a: &ParCsrMatrix,
     b: &ParVector,

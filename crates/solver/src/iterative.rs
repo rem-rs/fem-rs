@@ -120,6 +120,7 @@ solve_iterative_simple!(solve_tfqmr, Tfqmr<T>, "TFQMR - Transpose-Free Quasi-Min
 /// * `b`              — right-hand side.
 /// * `x`              — initial guess on entry, solution on exit.
 /// * `cfg`            — convergence parameters.
+// MFEM: CGSolver
 pub fn solve_cg_operator<F>(
     nrows: usize,
     ncols: usize,
@@ -426,6 +427,7 @@ where
 ///
 /// This entrypoint is intended for matrix-free or foreign-backend operators
 /// that can provide `y = A*x` without exposing a concrete CSR matrix.
+// MFEM: GMRESSolver
 pub fn solve_gmres_operator<F>(
     nrows: usize,
     ncols: usize,
@@ -611,6 +613,7 @@ where
 ///
 /// This entrypoint is intended for matrix-free or foreign-backend operators
 /// that can provide `y = A*x` without exposing a concrete CSR matrix.
+// MFEM: BiCGSTABSolver
 pub fn solve_bicgstab_operator<F>(
     nrows: usize,
     ncols: usize,
@@ -761,6 +764,7 @@ where
 /// convergence metric for PCG — rather than the true residual `‖r‖`.
 ///
 /// Prints per-iteration history when `verbose` is true.
+// MFEM: CGSolver with preconditioner
 pub fn solve_pcg<P>(
     a: &FemCsr<f64>,
     b: &[f64],
@@ -1074,6 +1078,7 @@ pub fn solve_minres(
 ///
 /// This entrypoint is intended for matrix-free or foreign-backend operators
 /// that can provide `y = A*x` without exposing a concrete CSR matrix.
+// MFEM: MINRESSolver
 pub fn solve_minres_operator<F>(
     nrows: usize,
     ncols: usize,

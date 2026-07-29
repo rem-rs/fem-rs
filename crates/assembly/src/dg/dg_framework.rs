@@ -13,20 +13,15 @@
 //!
 //! All solvers use **L² P1** on Tri3 meshes and **SSP-RK3** time stepping.
 
-use nalgebra::DMatrix;
 
-use fem_element::{
-    ReferenceElement,
-    lagrange::{SegP1, TriP1},
-};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{
-    element_type::ElementType,
-    topology::MeshTopology,
-    Mesh,
-};
+use fem_mesh::{element_type::ElementType, topology::MeshTopology, Mesh};
 use fem_space::{fe_space::FESpace, L2Space};
 
+use super::dg_base::{
+    orient_normal_outward, phys_to_ref, ref_elem_face, ref_elem_vol,
+    simplex_jac, xform_grads,
+};
 use crate::{
     assembler::Assembler,
     postproc::coefficient::ConstantVectorCoeff,
@@ -36,7 +31,7 @@ use crate::{
 use super::dg::DgAssembler;
 use super::dg_advection::{
     assemble_advection_boundary, assemble_dg_interior_faces,
-    orient_normal_outward, DgFaceIntegrator, DgFaceQpData,
+    DgFaceIntegrator, DgFaceQpData,
     DGAdvectionIntegrator,
 };
 
@@ -141,62 +136,7 @@ impl DgFaceIntegrator for AdvectionFaceIntegrator {
     }
 }
 
-// ─── Helpers (reused from dg_advection) ──────────────────────────────────────
-
-fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (et, order) {
-        (ElementType::Tri3, 1) => Box::new(TriP1),
-        _ => panic!("dg_framework ref_elem_vol: unsupported ({et:?}, {order})"),
-    }
-}
-
-fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (et, order) {
-        (ElementType::Line2, 1) => Box::new(SegP1),
-        (ElementType::Tri3, 1) => Box::new(TriP1),
-        _ => panic!("dg_framework ref_elem_face: unsupported ({et:?}, {order})"),
-    }
-}
-
-fn simplex_jac(mesh: &impl MeshTopology, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(nodes[0]);
-    let mut j = DMatrix::<f64>::zeros(dim, dim);
-    for col in 0..dim {
-        let xc = mesh.node_coords(nodes[col + 1]);
-        for row in 0..dim {
-            j[(row, col)] = xc[row] - x0[row];
-        }
-    }
-    let det = j.determinant();
-    (j, det)
-}
-
-fn phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
-    let j_inv = jac
-        .clone()
-        .try_inverse()
-        .expect("degenerate element in phys_to_ref");
-    let dx: Vec<f64> = (0..dim).map(|i| xp[i] - x0[i]).collect();
-    let mut xi = vec![0.0_f64; dim];
-    for i in 0..dim {
-        for k in 0..dim {
-            xi[i] += j_inv[(i, k)] * dx[k];
-        }
-    }
-    xi
-}
-
-fn xform_grads(jit: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
-    for i in 0..n {
-        for j in 0..dim {
-            let mut s = 0.0;
-            for k in 0..dim {
-                s += jit[(j, k)] * gr[i * dim + k];
-            }
-            gp[i * dim + j] = s;
-        }
-    }
-}
+// ─── Lumped mass ──────────────────────────────────────────────────────────────
 
 /// Build lumped mass diagonal from the assembled mass matrix.
 fn lumped_mass_diagonal(mass: &CsrMatrix<f64>) -> Vec<f64> {

@@ -1,3 +1,4 @@
+pub mod dg_base;
 pub mod dg;
 pub mod dg_advection;
 pub mod dg_br1;

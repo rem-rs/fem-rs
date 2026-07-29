@@ -22,6 +22,7 @@ use wgpu;
 /// precision of matrix/vector storage. Scalar operation coefficients
 /// (α, β for SpMV/axpy) are always `f64` regardless of `T`; they are
 /// cast inside the wgpu pipeline as needed.
+// MFEM: shared GPU solver base
 pub struct GpuSolverBase<T: Scalar> {
     /// Problem size.
     pub n: u32,

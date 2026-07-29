@@ -19,6 +19,7 @@ use crate::par_mesh::ParallelMesh;
 ///
 /// For P1 spaces, DOFs correspond 1:1 with mesh nodes.  For P2, edge DOFs
 /// are added with ownership based on the minimum-owner-rank rule.
+// MFEM: ParFiniteElementSpace
 pub struct ParallelFESpace<S: FESpace> {
     local_space: S,
     dof_partition: DofPartition,

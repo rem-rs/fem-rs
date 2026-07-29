@@ -27,6 +27,7 @@ pub enum SpaceType {
 /// - A count of global degrees of freedom.
 /// - Element→DOF maps (`element_dofs`).
 /// - Point-evaluation interpolation of scalar functions.
+// MFEM: FiniteElementSpace (abstract base)
 pub trait FESpace: Send + Sync {
     /// The mesh type this space is built on.
     type Mesh: MeshTopology;

@@ -21,6 +21,7 @@ use crate::fe_space::{FESpace, SpaceType};
 ///
 /// [`TriP3`]: fem_element::TriP3
 /// [`TetP3`]: fem_element::TetP3
+// MFEM: L2_FECollection / FiniteElementSpace (DG)
 pub struct L2Space<M: MeshTopology> {
     mesh:          M,
     order:         u8,
