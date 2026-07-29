@@ -27,7 +27,7 @@
 //! | 12 | SDIRK2 (L-stable)    | Implicit |
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-use fem_io::mfem::{read_mfem_file, write_gf, write_mfem, write_mfem_file_3d};
+use fem_io::mfem::{read_mfem_file, write_gf, write_mfem, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
 use fem_linalg::CsrMatrix;
 use fem_mesh::{Mesh, MeshTopology};
 use fem_solver::{solve_pcg_jacobi, SolverConfig, GeneralizedAlpha2, GeneralizedAlpha2State};

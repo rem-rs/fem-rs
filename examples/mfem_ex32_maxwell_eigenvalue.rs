@@ -1,4 +1,4 @@
-﻿//! # Example 32 — Maxwell eigenvalue problem  (1:1 with MFEM ex32)
+//! # Example 32 — Maxwell eigenvalue problem  (1:1 with MFEM ex32)
 //!
 //! Solves `curl curl E = λ ε E` with anisotropic dielectric tensor ε and
 //! homogeneous Dirichlet (PEC) boundary conditions E × n = 0.
@@ -20,7 +20,7 @@ use fem_assembly::{
     DiscreteLinearOperator, VectorAssembler, ConstantMatrixCoeff,
     standard::{CurlCurlIntegrator, VectorMassTensorIntegrator},
 };
-use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_io::mfem::{read_mfem_file, write_mfem_file_3d};
 use fem_mesh::Mesh;
 use fem_solver::{lobpcg_preconditioned, LobpcgConfig};
 use fem_space::{
@@ -188,11 +188,7 @@ fn main() {
         .expect("CurlInterpolator assembly failed");
 
     // 10. Save refined mesh and eigenmodes.
-    {
-        let mut f = File::create("refined.mesh").expect("refined.mesh");
-        let dummy2d = Mesh::<2>::unit_square_tri(1);
-        write_mfem(&mut f, &dummy2d, Some(&mesh)).expect("write refined.mesh");
-    }
+    write_mfem_file_3d("refined.mesh", &mesh).expect("write refined.mesh");
     for i in 0..n_found.min(args.nev) {
         
         let mode = eig_result.eigenvectors.column(i);
@@ -214,5 +210,4 @@ fn main() {
     eprintln!("\nFinished.");
 }
 
-/// Write a solution vector in MFEM FiniteElementSpace format (GLVis-compatible).
 // ─── Tests ────────────────────────────────────────────────────────────────────

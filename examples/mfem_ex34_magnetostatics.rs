@@ -437,12 +437,3 @@ fn assemble_hcurl_rhs(
     }
     rhs
 }
-
-/// Write a solution vector in MFEM FiniteElementSpace format (GLVis-compatible).
-// MFEM: GridFunction::Save(std::ostream &)
-
-    for v in values {
-        writeln!(w, "{:.15e}", v)?;
-    }
-    Ok(())
-}

@@ -29,7 +29,7 @@ use fem_assembly::{
     standard::VectorMassIntegrator,
 };
 use fem_element::ReferenceElement;
-use fem_io::mfem::{read_mfem_file, write_gf, write_mfem, write_mfem_file_3d};
+use fem_io::mfem::{read_mfem_file, write_gf, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{
     Mesh, ElementTransformation, ElementType as EType,
@@ -373,12 +373,8 @@ fn run_grad(mesh: &Mesh<2>, order: u8) {
 
     // Output refined.mesh and sol.gf
     {
-        use std::fs::File;
-        use std::io::Write;
-        let mut mf = File::create("refined.mesh").expect("create refined.mesh");
-        write_mfem(&mut mf, mesh, None).expect("write mesh");
-        let mut sf = File::create("sol.gf").expect("create sol.gf");
-        for &v in &e_sol { writeln!(sf, "{:.14e}", v).ok(); }
+        write_mfem_file("refined.mesh", mesh).expect("write mesh");
+        write_mfem_gf_file("sol.gf", 2, &e_sol, "H1", 1, 1, 14).expect("write sol.gf");
     }
 }
 
@@ -461,8 +457,7 @@ fn run_curl_3d(mesh: &Mesh<3>, order: u8) {
         use std::fs::File;
         use std::io::Write;
         write_mfem_file_3d("refined.mesh", mesh).expect("write mesh 3d");
-        let mut sf = File::create("sol.gf").expect("create sol.gf");
-        for &v in &w_sol { writeln!(sf, "{:.14e}", v).ok(); }
+        write_mfem_gf_file("sol.gf", 3, &w_sol, "H1", 1, 1, 14).expect("write sol.gf");
     }
 }
 
@@ -523,12 +518,8 @@ fn run_div(mesh: &Mesh<2>, order: u8) {
 
     // Output refined.mesh and sol.gf
     {
-        use std::fs::File;
-        use std::io::Write;
-        let mut mf = File::create("refined.mesh").expect("create refined.mesh");
-        write_mfem(&mut mf, mesh, None).expect("write mesh");
-        let mut sf = File::create("sol.gf").expect("create sol.gf");
-        for &v in &f_sol { writeln!(sf, "{:.14e}", v).ok(); }
+        write_mfem_file("refined.mesh", mesh).expect("write mesh");
+        write_mfem_gf_file("sol.gf", 2, &f_sol, "H1", 1, 1, 14).expect("write sol.gf");
     }
 }
 
