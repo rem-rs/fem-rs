@@ -210,7 +210,7 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
             let mut b = DVector::from_vec(
                 (0..n_flux_dofs).map(|i| rhs[i * dim + d]).collect(),
             );
-            if lu.solve(&mut b).is_some() {
+            if lu.solve_mut(&mut b) {
                 for i in 0..n_flux_dofs {
                     flux[i * dim + d] = b[i];
                 }
@@ -221,7 +221,6 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
                 );
             }
         }
-
         flux
     }
 
@@ -335,6 +334,7 @@ where
 
     for e in 0..ne as u32 {
         let raw = integrator.compute_element_flux(mesh, gf.space(), e, &dofs_vec, &dof_coords);
+        let elem_dofs = gf.space().element_dofs(e);
         let elem_dofs = gf.space().element_dofs(e);
         for (i, &gdof) in elem_dofs.iter().enumerate() {
             let idx = gdof as usize;
