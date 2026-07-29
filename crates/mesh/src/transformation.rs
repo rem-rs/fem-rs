@@ -1,7 +1,9 @@
 //! Element geometry transformation utilities.
 //!
-//! This module provides a lightweight wrapper equivalent to MFEM's
-//! `ElementTransformation` for affine simplex elements.
+//! Provides:
+//! - [`ElementTransformation`] — affine simplex transformation (MFEM `ElementTransformation`)
+//! - [`geometry_jacobian`] — compute Jacobian at a reference point for any element type
+//! - [`xform_grads`] — transform reference gradients to physical space
 
 use fem_core::ElemId;
 use nalgebra::DMatrix;
@@ -97,6 +99,53 @@ impl ElementTransformation {
             }
         }
         xp
+    }
+}
+
+/// Compute the geometry Jacobian determinant and inverse-transpose at a
+/// reference point for a mesh element of any type (MFEM: `ElementTransformation`).
+///
+/// Returns `(detJ, J^{-T})` where `J_{ij} = ∂x_i/∂ξ_j` is the Jacobian of
+/// the reference-to-physical mapping, computed from the element's nodal
+/// coordinates and the linear (P1) reference-element gradient basis.
+///
+/// Supports all element types: Tri3, Quad4, Tet4, Hex8, Prism6, etc.
+///
+/// # Panics
+/// Panics if the element's geometry Jacobian is singular.
+pub fn geometry_jacobian<M: MeshTopology>(
+    mesh: &M,
+    elem: u32,
+    xi: &[f64],
+    dim: usize,
+) -> (f64, DMatrix<f64>) {
+    let et = mesh.element_type(elem);
+    let nd = mesh.element_nodes(elem);
+    let n_ldofs = nd.len();
+    let re_geom = et.ref_elem(1);
+    let mut grad = vec![0.0_f64; n_ldofs * dim];
+    re_geom.eval_grad_basis(xi, &mut grad);
+    let mut jac = DMatrix::<f64>::zeros(dim, dim);
+    for k in 0..n_ldofs {
+        let x = mesh.node_coords(nd[k]);
+        for i in 0..dim {
+            for j in 0..dim {
+                jac[(i, j)] += x[i] * grad[k * dim + j];
+            }
+        }
+    }
+    let det = jac.determinant();
+    let inv = jac.try_inverse().expect("singular Jacobian in geometry_jacobian");
+    (det, inv.transpose())
+}
+
+/// Transform reference-element gradients to physical space:
+/// `∇_phys = J^{-T} ∇_ref` (MFEM: `ElementTransformation` gradient transform).
+pub fn xform_grads(ji: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
+    for a in 0..n {
+        for j in 0..dim {
+            gp[a * dim + j] = (0..dim).map(|k| ji[(j, k)] * gr[a * dim + k]).sum();
+        }
     }
 }
 

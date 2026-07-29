@@ -18,47 +18,11 @@ use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix, SolverConfig};
 use fem_solver::block_operator::right_preconditioned_gmres;
 use fem_solver::{solve_gmres_gssmoother, solve_pcg_gssmoother};
-use fem_mesh::{refine_uniform, MeshTopology};
+use fem_mesh::{refine_uniform, geometry_jacobian, xform_grads, MeshTopology};
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space, VectorH1Space};
 use nalgebra::DMatrix;
 
-/// Compute element Jacobian determinant and inverse-transpose at a reference point.
-/// Returns (detJ, J^{-T}) where J = ∂x/∂ξ.
-fn jacf(m: &impl MeshTopology, elem: u32, xi: &[f64], dim: usize) -> (f64, DMatrix<f64>) {
-    let et = m.element_type(elem);
-    let nd = m.element_nodes(elem);
-    let n_ldofs = nd.len();
-    // MFEM: uses FE collection for the mesh, here we use order=1 (linear geometry)
-    let re_geom = et.ref_elem(1);
-    let mut grad = vec![0.0_f64; n_ldofs * dim];
-    re_geom.eval_grad_basis(xi, &mut grad);
-    let mut jac = DMatrix::<f64>::zeros(dim, dim);
-    for k in 0..n_ldofs {
-        let x = m.node_coords(nd[k]);
-        for i in 0..dim {
-            for j in 0..dim {
-                jac[(i, j)] += x[i] * grad[k * dim + j];
-            }
-        }
-    }
-    let det = jac.determinant();
-    let inv = jac.try_inverse().expect("singular Jacobian");
-    (det, inv.transpose()) // return J^{-T} for covariant gradient transform
-}
-
-/// Transform reference-element gradients to physical space:
-///   gp[a*dim + j] = Σ_k J^{-T}_{(j,k)} * gr[a*dim + k]
-fn xform_grads(ji: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
-    for a in 0..n {
-        for j in 0..dim {
-            let mut s = 0.0;
-            for k in 0..dim {
-                s += ji[(j, k)] * gr[a * dim + k];
-            }
-            gp[a * dim + j] = s;
-        }
-    }
-}
+// jacf and xform_grads are now in fem-mesh: geometry_jacobian(), xform_grads()
 
 /// Euclidean norm of a slice.
 fn nr(v: &[f64]) -> f64 {
@@ -88,7 +52,7 @@ fn build_pressure_mass(
         let mut me = vec![0.0_f64; n_ldofs * n_ldofs];
         for (qi, xi) in q.points.iter().enumerate() {
             ref_elem.eval_basis(xi, &mut phi);
-            let (det_j, _ji) = jacf(&mesh, e as u32, xi, mesh.dim() as usize);
+            let (det_j, _ji) = geometry_jacobian(&mesh, e as u32, xi, mesh.dim() as usize);
             let w = q.weights[qi] * det_j.abs();
             for i in 0..n_ldofs {
                 for j in 0..n_ldofs {
@@ -162,7 +126,7 @@ fn residual(
             ru_ref.eval_grad_basis(xi, &mut gr_u);
             rp_ref.eval_basis(xi, &mut phi_p);
 
-            let (det_j, ji) = jacf(mesh, e as u32, xi, dim);
+            let (det_j, ji) = geometry_jacobian(mesh, e as u32, xi, dim);
             xform_grads(&ji, &gr_u, &mut gp_u, n_du, dim);
             let w = q.weights[qi] * det_j.abs();
 
@@ -289,7 +253,7 @@ fn jacobian(
             ru_ref.eval_grad_basis(xi, &mut gr_u);
             rp_ref.eval_basis(xi, &mut phi_p);
 
-            let (det_j, ji) = jacf(mesh, e as u32, xi, dim);
+            let (det_j, ji) = geometry_jacobian(mesh, e as u32, xi, dim);
             xform_grads(&ji, &gr_u, &mut gp_u, n_du, dim);
             let w = q.weights[qi] * det_j.abs();
 

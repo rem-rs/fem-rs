@@ -55,7 +55,7 @@ pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPoin
 pub use simplex::{Mesh, tet_volume};
 pub use submesh::{SubMesh, SubMesh3D, extract_submesh, extract_submesh_3d, extract_submesh_by_name};
 pub use topology::MeshTopology;
-pub use transformation::ElementTransformation;
+pub use transformation::{ElementTransformation, geometry_jacobian, xform_grads};
 pub use extrusion::{extrude_tri3_to_prisms, extrude_quad4_to_hex8};
 pub use particle::ParticleSet;
 pub use size_function::{
