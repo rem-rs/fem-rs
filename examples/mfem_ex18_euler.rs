@@ -21,13 +21,12 @@
 
 use fem_assembly::dg::{DgHyperbolicConservationLaws, EulerFlux, RusanovFlux, FluxFunction};
 use fem_element::reference::ReferenceElement;
-use fem_io::mfem::read_mfem_file;
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::refine_uniform;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::ode::explicit::{ForwardEuler, Rk4};
 use fem_solver::ode::traits::TimeStepper;
 use nalgebra as na;
-use std::io::Write;
 
 // ─── make_ref_elem (redefined locally since the one in dg_hyperbolic is private) ─
 
@@ -197,48 +196,7 @@ fn compute_h_min(mesh: &dyn MeshTopology) -> f64 {
     h
 }
 
-// ─── File output (C++ ex18.cpp:184-187 — displaced mesh + GF files) ──────────
-
-fn write_mfem_mesh_file(path: &str, mesh: &dyn MeshTopology) {
-    let mut f = std::fs::File::create(path).expect("Cannot create mesh file");
-    let n_elems = mesh.n_elements();
-    let n_nodes = mesh.n_nodes();
-    writeln!(f, "MFEM mesh v1.0").ok();
-    writeln!(f, "").ok();
-    writeln!(f, "dimension").ok();
-    writeln!(f, "2").ok();
-    writeln!(f, "").ok();
-    writeln!(f, "elements").ok();
-    writeln!(f, "{}", n_elems).ok();
-    for e in 0..n_elems as u32 {
-        let nodes = mesh.element_nodes(e);
-        write!(f, "{}", e).ok();
-        for &n in nodes {
-            write!(f, " {}", n).ok();
-        }
-        writeln!(f, " 2").ok(); // 2 = triangle in MFEM
-    }
-    writeln!(f, "").ok();
-    writeln!(f, "boundary").ok();
-    writeln!(f, "0").ok();
-    writeln!(f, "").ok();
-    writeln!(f, "vertices").ok();
-    writeln!(f, "{}", n_nodes).ok();
-    for n in 0..n_nodes as u32 {
-        let c = mesh.node_coords(n);
-        writeln!(f, "{:.15e} {:.15e}", c[0], c[1]).ok();
-    }
-}
-
-fn write_gf_file(path: &str, data: &[f64]) {
-    let mut f = std::fs::File::create(path).expect("Cannot create GF file");
-    writeln!(f, "{}", data.len()).ok();
-    for v in data {
-        writeln!(f, "{:.15e}", v).ok();
-    }
-}
-
-// ─── L^2 projection for initial condition (C++ ex18.cpp + ex18.hpp) ─────────
+// ─── L^2 projection for initial condition — MFEM: GridFunction::ProjectCoefficient
 
 fn project_initial<F: Fn(&[f64]) -> Vec<f64>>(
     u0: &F,
@@ -506,8 +464,9 @@ fn main() {
     let u0 = |x: &[f64]| euler_initial_condition(args.problem, x, 1.4);
     let mut sol = project_initial(&u0, &mesh, order, n_eq);
 
-    // C++ ex18.cpp:184-187 — Write initial mesh + solution files
-    write_mfem_mesh_file("euler-mesh.mesh", &mesh);
+    // MFEM: mesh->Print(ofs)
+    write_mfem_file("euler-mesh.mesh", &mesh)
+        .expect("cannot write euler-mesh.mesh");
     // Write individual equation components in MFEM FiniteElementSpace format
     let dp = make_ref_elem(&mesh, order).n_dofs();
     let n_elems = mesh.n_elements();
@@ -519,7 +478,8 @@ fn main() {
                 comp[e * dp + i] = sol[base + i * n_eq + eq];
             }
         }
-        write_gf_file(&format!("euler-{}-init.gf", eq), &comp);
+        write_mfem_gf_file(&format!("euler-{}-init.gf", eq), 2, &comp, "H1", order, 1, 15)
+            .expect("cannot write init gf");
     }
     println!("  --> saved initial mesh + solution files");
 
@@ -558,8 +518,9 @@ fn main() {
         }
     }
 
-    // C++ ex18.cpp:184-187 — Write final mesh + solution files
-    write_mfem_mesh_file("euler-mesh-final.mesh", &mesh);
+    // MFEM: mesh->Print(ofs)
+    write_mfem_file("euler-mesh-final.mesh", &mesh)
+        .expect("cannot write euler-mesh-final.mesh");
     let dp = make_ref_elem(&mesh, order).n_dofs();
     let n_elems = mesh.n_elements();
     for eq in 0..n_eq {
@@ -570,7 +531,8 @@ fn main() {
                 comp[e * dp + i] = sol[base + i * n_eq + eq];
             }
         }
-        write_gf_file(&format!("euler-{}-final.gf", eq), &comp);
+        write_mfem_gf_file(&format!("euler-{}-final.gf", eq), 2, &comp, "H1", order, 1, 15)
+            .expect("cannot write final gf");
     }
     println!("  --> saved final mesh + solution files");
 
