@@ -28,14 +28,11 @@
 
 #![allow(non_snake_case, dead_code, unused_imports)]
 
-use std::fs::File;
-use std::io::Write;
-
 use fem_assembly::complex::{ComplexAssembler, ComplexGridFunction, ComplexSystem};
 use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator,
                               CurlCurlIntegrator, GradDivIntegrator, VectorMassIntegrator};
 use fem_assembly::VectorAssembler;
-use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file_3d};
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
 use fem_linalg::{CsrMatrix, fem_to_linlvo_csr};
 use fem_element::ReferenceElement;
 use fem_mesh::{refine_uniform, topology::MeshTopology, Mesh};
@@ -643,25 +640,14 @@ fn ref_element_h1(et: fem_mesh::element_type::ElementType, order: u8) -> Box<dyn
 }
 
 fn save_output(mesh: &Mesh<2>, gf: &ComplexGridFunction) {
-    if let Ok(mut f) = File::create("refined.mesh") {
-        write_mfem(&mut f, mesh, None).ok();
-    }
-    if let Ok(mut f) = File::create("sol_r.gf") {
-        for &v in &gf.u_re {
-            writeln!(f, "{:.14e}", v).ok();
-        }
-    }
-    if let Ok(mut f) = File::create("sol_i.gf") {
-        for &v in &gf.u_im {
-            writeln!(f, "{:.14e}", v).ok();
-        }
-    }
-    if let Ok(mut f) = File::create("sol_z.gf") {
-        for i in 0..gf.u_re.len() {
-            writeln!(f, "{:.14e}", gf.u_re[i]).ok();
-            writeln!(f, "{:.14e}", gf.u_im[i]).ok();
-        }
-    }
+    write_mfem_file("refined.mesh", mesh).ok();
+    // Real part, imaginary part, and complex (interleaved) output
+    write_mfem_gf_file("sol_r.gf", 2, &gf.u_re, "H1", 0, 1, 14).ok();
+    write_mfem_gf_file("sol_i.gf", 2, &gf.u_im, "H1", 0, 1, 14).ok();
+    let n = gf.u_re.len();
+    let mut z = vec![0.0_f64; 2 * n];
+    for i in 0..n { z[2 * i] = gf.u_re[i]; z[2 * i + 1] = gf.u_im[i]; }
+    write_mfem_gf_file("sol_z.gf", 2, &z, "H1", 0, 2, 14).ok();
     let amp: Vec<f64> = gf.amplitude();
     let max_amp = amp.iter().cloned().fold(0.0_f64, f64::max);
     let min_amp = amp.iter().cloned().fold(f64::MAX, f64::min);
@@ -1034,18 +1020,12 @@ fn l2_error_hdiv_3d(mesh: &Mesh<3>, space: &HDivSpace<Mesh<3>>,
 fn save_output_3d(mesh: &Mesh<3>, gf: &ComplexGridFunction) {
     use fem_io::mfem::write_mfem_file_3d;
     let _ = write_mfem_file_3d("refined.mesh", mesh);
-    if let Ok(mut f) = File::create("sol_r.gf") {
-        for &v in &gf.u_re { writeln!(f, "{:.14e}", v).ok(); }
-    }
-    if let Ok(mut f) = File::create("sol_i.gf") {
-        for &v in &gf.u_im { writeln!(f, "{:.14e}", v).ok(); }
-    }
-    if let Ok(mut f) = File::create("sol_z.gf") {
-        for i in 0..gf.u_re.len() {
-            writeln!(f, "{:.14e}", gf.u_re[i]).ok();
-            writeln!(f, "{:.14e}", gf.u_im[i]).ok();
-        }
-    }
+    write_mfem_gf_file("sol_r.gf", 3, &gf.u_re, "H1", 0, 1, 14).ok();
+    write_mfem_gf_file("sol_i.gf", 3, &gf.u_im, "H1", 0, 1, 14).ok();
+    let n = gf.u_re.len();
+    let mut z = vec![0.0_f64; 2 * n];
+    for i in 0..n { z[2 * i] = gf.u_re[i]; z[2 * i + 1] = gf.u_im[i]; }
+    write_mfem_gf_file("sol_z.gf", 3, &z, "H1", 0, 2, 14).ok();
     let amp: Vec<f64> = gf.amplitude();
     let max_amp = amp.iter().cloned().fold(0.0_f64, f64::max);
     let min_amp = amp.iter().cloned().fold(f64::MAX, f64::min);
