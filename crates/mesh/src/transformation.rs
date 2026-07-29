@@ -113,8 +113,8 @@ impl ElementTransformation {
 ///
 /// # Panics
 /// Panics if the element's geometry Jacobian is singular.
-pub fn geometry_jacobian<M: MeshTopology>(
-    mesh: &M,
+pub fn geometry_jacobian(
+    mesh: &dyn MeshTopology,
     elem: u32,
     xi: &[f64],
     dim: usize,

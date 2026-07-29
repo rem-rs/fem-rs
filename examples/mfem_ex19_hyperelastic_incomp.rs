@@ -14,23 +14,20 @@
 
 #![allow(non_snake_case)]
 
+use fem_assembly::physics::mixed_hyperelasticity::MixedHyperelasticityForm;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix, SolverConfig};
 use fem_solver::block_operator::right_preconditioned_gmres;
 use fem_solver::{solve_gmres_gssmoother, solve_pcg_gssmoother};
-use fem_mesh::{refine_uniform, geometry_jacobian, xform_grads, MeshTopology};
+use fem_mesh::{geometry_jacobian, refine_uniform, MeshTopology};
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space, VectorH1Space};
-use nalgebra::DMatrix;
-
-// jacf and xform_grads are now in fem-mesh: geometry_jacobian(), xform_grads()
 
 /// Euclidean norm of a slice.
 fn nr(v: &[f64]) -> f64 {
     v.iter().map(|&x| x * x).sum::<f64>().sqrt()
 }
 
-// ─── Pressure mass matrix ──────────────────────────────────────────────
-
+// ─── Pressure mass matrix (MFEM: BilinearForm(MassIntegrator) on pressure space)
 fn build_pressure_mass(
     mesh: impl MeshTopology + Clone,
     p_order: u8,
@@ -67,341 +64,6 @@ fn build_pressure_mass(
         }
     }
     coo.into_csr()
-}
-
-// ─── Residual assembly ─────────────────────────────────────────────────
-
-/// Compute the residual vector [R_u; R_p] for the mixed u/p formulation.
-///
-/// R_u(i,a) = ∫ (μ·F_{iJ} - p·F^{-T}_{iJ}) · ∂φ_a/∂X_J  dx
-/// R_p(m)   = ∫ (J - 1) · ψ_m                              dx
-fn residual(
-    mesh: &impl MeshTopology,
-    dim: usize,
-    order: u8,
-    p_order: u8,
-    quad_order: u8,
-    mu: f64,
-    u: &[f64],
-    p: &[f64],
-    elem_dofs_u: &[Vec<usize>],
-    elem_dofs_p: &[Vec<usize>],
-    ru: &mut [f64],
-    rp: &mut [f64],
-) {
-    ru.fill(0.0);
-    rp.fill(0.0);
-    let ne = mesh.n_elements() as usize;
-    for e in 0..ne {
-        let et = mesh.element_type(e as u32);
-        let ru_ref = et.ref_elem(order);
-        let rp_ref = et.ref_elem(p_order);
-        let n_du = ru_ref.n_dofs();       // scalar shape functions (displacement)
-        let n_dp = rp_ref.n_dofs();       // scalar shape functions (pressure)
-        let n_vd = n_du * dim;            // vector DOFs per element
-
-        let eu: &[usize] = &elem_dofs_u[e];
-        let ep: &[usize] = &elem_dofs_p[e];
-
-        let mut ue = vec![0.0_f64; n_vd];
-        for (k, &g) in eu.iter().enumerate() {
-            ue[k] = u[g];
-        }
-        let mut pe = vec![0.0_f64; n_dp];
-        for (k, &g) in ep.iter().enumerate() {
-            pe[k] = p[g];
-        }
-
-        let q = ru_ref.quadrature(quad_order);
-        let mut phi_u = vec![0.0_f64; n_du];
-        let mut gr_u = vec![0.0_f64; n_du * dim];
-        let mut gp_u = vec![0.0_f64; n_du * dim];
-        let mut phi_p = vec![0.0_f64; n_dp];
-
-        let mut fu_e = vec![0.0_f64; n_vd];
-        let mut fp_e = vec![0.0_f64; n_dp];
-
-        for (qi, xi) in q.points.iter().enumerate() {
-            ru_ref.eval_basis(xi, &mut phi_u);
-            ru_ref.eval_grad_basis(xi, &mut gr_u);
-            rp_ref.eval_basis(xi, &mut phi_p);
-
-            let (det_j, ji) = geometry_jacobian(mesh, e as u32, xi, dim);
-            xform_grads(&ji, &gr_u, &mut gp_u, n_du, dim);
-            let w = q.weights[qi] * det_j.abs();
-
-            // Deformation gradient F = I + ∇u
-            let mut F = DMatrix::<f64>::identity(dim, dim);
-            for k in 0..n_du {
-                for i in 0..dim {
-                    for j in 0..dim {
-                        // ue[k*dim + i] = u_i component at scalar DOF k
-                        // gp_u[k*dim + j] = ∂φ_k/∂X_j
-                        F[(i, j)] += ue[k * dim + i] * gp_u[k * dim + j];
-                    }
-                }
-            }
-            let dJ = F.determinant();
-            let iF = F.clone().try_inverse().unwrap_or_else(|| DMatrix::<f64>::identity(dim, dim));
-            let FT = iF.transpose(); // F^{-T}
-
-            // Pressure at this QP
-            let mut pres = 0.0;
-            for k in 0..n_dp {
-                pres += pe[k] * phi_p[k];
-            }
-
-            // First Piola-Kirchhoff stress: P = μ·F - p·F^{-T}
-            let mut P = DMatrix::<f64>::zeros(dim, dim);
-            for i in 0..dim {
-                for j in 0..dim {
-                    P[(i, j)] = mu * F[(i, j)] - pres * FT[(i, j)];
-                }
-            }
-
-            // R_u contribution: P : ∇v  (v = φ_a · e_i)
-            for a in 0..n_du {
-                for i in 0..dim {
-                    let row = a * dim + i;
-                    let mut s = 0.0;
-                    for j in 0..dim {
-                        s += P[(i, j)] * gp_u[a * dim + j];
-                    }
-                    fu_e[row] += w * s;
-                }
-            }
-
-            // R_p contribution: (J - 1) · ψ
-            for m in 0..n_dp {
-                fp_e[m] += w * (dJ - 1.0) * phi_p[m];
-            }
-        }
-
-        // Scatter to global
-        for (k, &g) in eu.iter().enumerate() {
-            ru[g] += fu_e[k];
-        }
-        for (k, &g) in ep.iter().enumerate() {
-            rp[g] += fp_e[k];
-        }
-    }
-}
-
-// ─── Jacobian assembly ─────────────────────────────────────────────────
-
-/// Assemble the block Jacobian J = [K_uu, K_up; K_pu, 0] and
-/// apply Dirichlet row-zeroing.
-///
-/// K_uu[(a,i),(b,j)] = ∫ C_{iIjJ} · ∂φ_a/∂X_I · ∂φ_b/∂X_J  dx
-///   C_{iIjJ} = μ·δ_{ij}·δ_{IJ} + p·F^{-T}_{jI}·F^{-T}_{iJ}
-///
-/// K_up[(a,i),m] = -∫ ψ_m · F^{-T}_{iJ} · ∂φ_a/∂X_J  dx
-///
-/// K_pu[m,(b,j)] =  ∫ J · F^{-T}_{jJ} · ∂φ_b/∂X_J · ψ_m  dx
-fn jacobian(
-    mesh: &impl MeshTopology,
-    dim: usize,
-    order: u8,
-    p_order: u8,
-    quad_order: u8,
-    mu: f64,
-    u: &[f64],
-    p: &[f64],
-    elem_dofs_u: &[Vec<usize>],
-    elem_dofs_p: &[Vec<usize>],
-    nu: usize,
-    np: usize,
-    du: &[(usize, f64)],
-) -> (Vec<usize>, BlockMatrix) {
-    let nt = nu + np;
-    let mut coo = CooMatrix::<f64>::new(nt, nt);
-
-    let ne = mesh.n_elements() as usize;
-    for e in 0..ne {
-        let et = mesh.element_type(e as u32);
-        let ru_ref = et.ref_elem(order);
-        let rp_ref = et.ref_elem(p_order);
-        let n_du = ru_ref.n_dofs();
-        let n_dp = rp_ref.n_dofs();
-        let n_vd = n_du * dim;
-
-        let eu: &[usize] = &elem_dofs_u[e];
-        let ep: &[usize] = &elem_dofs_p[e];
-
-        let mut ue = vec![0.0_f64; n_vd];
-        for (k, &g) in eu.iter().enumerate() {
-            ue[k] = u[g];
-        }
-        let mut pe = vec![0.0_f64; n_dp];
-        for (k, &g) in ep.iter().enumerate() {
-            pe[k] = p[g];
-        }
-
-        let q = ru_ref.quadrature(quad_order);
-        let mut phi_u = vec![0.0_f64; n_du];
-        let mut gr_u = vec![0.0_f64; n_du * dim];
-        let mut gp_u = vec![0.0_f64; n_du * dim];
-        let mut phi_p = vec![0.0_f64; n_dp];
-
-        // Element stiffness blocks
-        let mut kuu = vec![0.0_f64; n_vd * n_vd];
-        let mut kup = vec![0.0_f64; n_vd * n_dp];
-        let mut kpu = vec![0.0_f64; n_dp * n_vd];
-
-        for (qi, xi) in q.points.iter().enumerate() {
-            ru_ref.eval_basis(xi, &mut phi_u);
-            ru_ref.eval_grad_basis(xi, &mut gr_u);
-            rp_ref.eval_basis(xi, &mut phi_p);
-
-            let (det_j, ji) = geometry_jacobian(mesh, e as u32, xi, dim);
-            xform_grads(&ji, &gr_u, &mut gp_u, n_du, dim);
-            let w = q.weights[qi] * det_j.abs();
-
-            // Deformation gradient
-            let mut F = DMatrix::<f64>::identity(dim, dim);
-            for k in 0..n_du {
-                for i in 0..dim {
-                    for j in 0..dim {
-                        F[(i, j)] += ue[k * dim + i] * gp_u[k * dim + j];
-                    }
-                }
-            }
-            let dJ = F.determinant();
-            let iF = F.try_inverse().unwrap_or_else(|| DMatrix::<f64>::identity(dim, dim));
-            let FT = iF.transpose();
-
-            let mut pres = 0.0;
-            for k in 0..n_dp {
-                pres += pe[k] * phi_p[k];
-            }
-
-            // K_uu: tangent stiffness
-            // C_{iIjJ} = μ·δ_{ij}·δ_{IJ} + p·F^{-T}_{jI}·F^{-T}_{iJ}
-            for a in 0..n_du {
-                for i in 0..dim {
-                    let row = a * dim + i;
-                    for b in 0..n_du {
-                        for j in 0..dim {
-                            let col = b * dim + j;
-
-                            // First term: μ·δ_{ij}·∇φ_a·∇φ_b
-                            let mut v = 0.0;
-                            if i == j {
-                                for l in 0..dim {
-                                    v += mu * gp_u[a * dim + l] * gp_u[b * dim + l];
-                                }
-                            }
-
-                            // Second term: p·F^{-T}_{jI}·F^{-T}_{iJ} · ∂φ_a/∂X_I · ∂φ_b/∂X_J
-                            // = p·(F^{-T}_{j,·}·∇φ_b) · (F^{-T}_{i,·}·∇φ_a)
-                            let ftn: f64 = (0..dim).map(|l| FT[(i, l)] * gp_u[b * dim + l]).sum();
-                            let ftl: f64 = (0..dim).map(|l| FT[(j, l)] * gp_u[a * dim + l]).sum();
-                            v += pres * ftn * ftl;
-
-                            kuu[row * n_vd + col] += v * w;
-                        }
-                    }
-                }
-            }
-
-            // K_up: ∂R_u/∂p
-            // = -∫ ψ_m · F^{-T}_{iJ} · ∂φ_a/∂X_J  dx
-            for a in 0..n_du {
-                for i in 0..dim {
-                    let row = a * dim + i;
-                    let ft_gp: f64 = (0..dim).map(|l| FT[(i, l)] * gp_u[a * dim + l]).sum();
-                    for m in 0..n_dp {
-                        kup[row * n_dp + m] -= w * ft_gp * phi_p[m];
-                    }
-                }
-            }
-
-            // K_pu: ∂R_p/∂u
-            // = ∫ J · F^{-T}_{jJ} · ∂φ_b/∂X_J · ψ_m  dx
-            for m in 0..n_dp {
-                for b in 0..n_du {
-                    for j in 0..dim {
-                        let col = b * dim + j;
-                        let ft_gp: f64 = (0..dim).map(|l| FT[(j, l)] * gp_u[b * dim + l]).sum();
-                        kpu[m * n_vd + col] += w * dJ * ft_gp * phi_p[m];
-                    }
-                }
-            }
-        }
-
-        // Scatter element blocks to global COO
-        for a in 0..n_vd {
-            let gi = eu[a] as usize;
-            for b in 0..n_vd {
-                let gj = eu[b] as usize;
-                coo.add(gi, gj, kuu[a * n_vd + b]);
-            }
-        }
-        for a in 0..n_vd {
-            let gi = eu[a] as usize;
-            for m in 0..n_dp {
-                let gj = ep[m] as usize;
-                coo.add(gi, nu + gj, kup[a * n_dp + m]);
-            }
-        }
-        for m in 0..n_dp {
-            let gi = ep[m] as usize;
-            for b in 0..n_vd {
-                let gj = eu[b] as usize;
-                coo.add(nu + gi, gj, kpu[m * n_vd + b]);
-            }
-        }
-    }
-
-    let mut flat = coo.into_csr();
-
-    // Apply Dirichlet row-zeroing to enforce essential BCs
-    let mut diag_scratch = vec![0.0_f64; nt];
-    for &(dof, _) in du {
-        flat.apply_dirichlet_row_zeroing(dof, 0.0, &mut diag_scratch);
-    }
-
-    // Wrap into BlockMatrix
-    let block_sizes = vec![nu, np];
-    let mut bm = BlockMatrix::new_square(block_sizes.clone());
-
-    // Extract K_uu block (rows 0..nu, cols 0..nu)
-    let mut coo_uu = CooMatrix::new(nu, nu);
-    for i in 0..nu {
-        for p in flat.row_ptr[i]..flat.row_ptr[i + 1] {
-            let c = flat.col_idx[p] as usize;
-            if c < nu {
-                coo_uu.add(i, c, flat.values[p]);
-            }
-        }
-    }
-    bm.set(0, 0, coo_uu.into_csr());
-
-    // Extract K_up block (rows 0..nu, cols nu..nu+np)
-    let mut coo_up = CooMatrix::new(nu, np);
-    for i in 0..nu {
-        for p in flat.row_ptr[i]..flat.row_ptr[i + 1] {
-            let c = flat.col_idx[p] as usize;
-            if c >= nu && c < nu + np {
-                coo_up.add(i, c - nu, flat.values[p]);
-            }
-        }
-    }
-    bm.set(0, 1, coo_up.into_csr());
-
-    // Extract K_pu block (rows nu..nu+np, cols 0..nu)
-    let mut coo_pu = CooMatrix::new(np, nu);
-    for i in nu..nu + np {
-        for p in flat.row_ptr[i]..flat.row_ptr[i + 1] {
-            let c = flat.col_idx[p] as usize;
-            if c < nu {
-                coo_pu.add(i - nu, c, flat.values[p]);
-            }
-        }
-    }
-    bm.set(1, 0, coo_pu.into_csr());
-
-    (block_sizes, bm)
 }
 
 fn main() {
@@ -473,8 +135,14 @@ fn main() {
         .map(|e| p_space.element_dofs(e as u32).iter().map(|&d| d as usize).collect())
         .collect();
 
-    // 6. Quadrature order
+    // 6. Build MixedHyperelasticityForm (moves residual/jacobian to library)
     let quad_order = 2 * order + 3;
+    let dim_u = dim as usize;
+    let form = MixedHyperelasticityForm::new(
+        Box::new(mesh.clone()),
+        dim_u, order, p_order, args.mu, nu, np, ns,
+        elem_dofs_u.clone(), elem_dofs_p.clone(), du.clone(),
+    );
 
     // 7. Pressure mass matrix (built once, used in preconditioner)
     let p_mass = build_pressure_mass(mesh.clone(), p_order, quad_order, np);
@@ -482,9 +150,7 @@ fn main() {
     // 8. Initial residual
     let mut ru = vec![0.0_f64; nu];
     let mut rp = vec![0.0_f64; np];
-    residual(&mesh, dim as usize, order, p_order, quad_order, args.mu,
-             &u, &p, &elem_dofs_u, &elem_dofs_p, &mut ru, &mut rp);
-    for &(dof, _) in &du { ru[dof] = 0.0; }
+    form.residual(&u, &p, &mut ru, &mut rp);
 
     let r0 = nr(&[ru.as_slice(), rp.as_slice()].concat());
     println!("Newton 0 ||r|| = {r0:.5e}");
@@ -522,13 +188,10 @@ fn main() {
 
     let mut converged = false;
     for it in 1..=args.max_iter {
-        // Assemble Jacobian
-        let (_sizes, jac) = jacobian(
-            &mesh, dim as usize, order, p_order, quad_order, args.mu,
-            &u, &p, &elem_dofs_u, &elem_dofs_p, nu, np, &du,
-        );
+        // Assemble Jacobian via library
+        let (_sizes, jac) = form.jacobian_blocks(&u, &p);
 
-        // Build flat system matrix (full CSR for GMRES)
+        // Flatten block matrix to CSR for GMRES
         let mut coo_flat = CooMatrix::new(nu + np, nu + np);
         for bi in 0..2 {
             for bj in 0..2 {
@@ -537,11 +200,7 @@ fn main() {
                     let col_off = if bj == 0 { 0 } else { nu };
                     for i in 0..mat.nrows {
                         for p in mat.row_ptr[i]..mat.row_ptr[i + 1] {
-                            coo_flat.add(
-                                row_off + i,
-                                col_off + mat.col_idx[p] as usize,
-                                mat.values[p],
-                            );
+                            coo_flat.add(row_off + i, col_off + mat.col_idx[p] as usize, mat.values[p]);
                         }
                     }
                 }
@@ -616,10 +275,7 @@ fn main() {
 
             let mut ru_t = vec![0.0_f64; nu];
             let mut rp_t = vec![0.0_f64; np];
-            residual(&mesh, dim as usize, order, p_order, quad_order, args.mu,
-                     &u_trial, &p_trial, &elem_dofs_u, &elem_dofs_p,
-                     &mut ru_t, &mut rp_t);
-            for &(dof, _) in &du { ru_t[dof] = 0.0; }
+            form.residual(&u_trial, &p_trial, &mut ru_t, &mut rp_t);
 
             let r_new = nr(&[ru_t.as_slice(), rp_t.as_slice()].concat());
             if r_new < r_norm0 * (1.0 - 1e-4 * alpha) {
@@ -640,9 +296,7 @@ fn main() {
             for i in 0..np { p[i] += dx[nu + i]; }
             for &(dof, val) in &du { u[dof] = val; }
             // Recompute residual
-            residual(&mesh, dim as usize, order, p_order, quad_order, args.mu,
-                     &u, &p, &elem_dofs_u, &elem_dofs_p, &mut ru, &mut rp);
-            for &(dof, _) in &du { ru[dof] = 0.0; }
+            form.residual(&u, &p, &mut ru, &mut rp);
         }
 
         let r_norm = nr(&[ru.as_slice(), rp.as_slice()].concat());
@@ -773,10 +427,11 @@ mod tests {
 
         let mut ru = vec![0.0_f64; nu];
         let mut rp = vec![0.0_f64; np];
-        residual(&mesh, dim as usize, order, p_order, quad_order, mu,
-                 &u, &p, &elem_dofs_u, &elem_dofs_p, &mut ru, &mut rp);
-        // Zero residual at Dirichlet DOFs (reaction forces not included)
-        for &(dof, _) in &du { ru[dof] = 0.0; }
+        let form = MixedHyperelasticityForm::new(
+            Box::new(mesh.clone()), dim as usize, order, p_order, mu,
+            nu, np, ns, elem_dofs_u, elem_dofs_p, du,
+        );
+        form.residual(&u, &p, &mut ru, &mut rp);
         let r0 = nr(&[ru.as_slice(), rp.as_slice()].concat());
         // With all boundaries fixed and zero displacement+pressure, the internal
         // residual should be exactly zero (F=I, J-1=0)
