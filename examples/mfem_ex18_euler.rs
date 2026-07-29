@@ -31,8 +31,13 @@ use std::io::Write;
 
 // ─── make_ref_elem (redefined locally since the one in dg_hyperbolic is private) ─
 
-fn make_ref_elem(_mesh: &dyn MeshTopology, order: u8) -> Box<dyn ReferenceElement> {
+fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> Box<dyn ReferenceElement> {
     use fem_element::lagrange::tri::{TriP1, TriP2, TriP3};
+    use fem_element::lagrange::QuadQ1;
+    if mesh.element_nodes(0).len() == 4 {
+        assert_eq!(order, 1, "Quad4 only supports order=1 (QuadQ1) currently");
+        return Box::new(QuadQ1);
+    }
     match order {
         1 => Box::new(TriP1),
         2 => Box::new(TriP2),
@@ -253,6 +258,7 @@ fn project_initial<F: Fn(&[f64]) -> Vec<f64>>(
     n_eq: usize,
 ) -> Vec<f64> {
     let ref_elem = make_ref_elem(mesh, order);
+    let is_quad = mesh.element_nodes(0).len() == 4;
     let dp = ref_elem.n_dofs();
     let n_elems = mesh.n_elements();
     let total = n_elems * dp * n_eq;
@@ -265,17 +271,31 @@ fn project_initial<F: Fn(&[f64]) -> Vec<f64>>(
 
     for e in 0..n_elems {
         let enodes = mesh.element_nodes(e as u32);
-        let p0 = mesh.node_coords(enodes[0]);
-        let p1 = mesh.node_coords(enodes[1]);
-        let p2 = mesh.node_coords(enodes[2]);
-        let det_j = (p1[0] - p0[0]) * (p2[1] - p0[1])
-            - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+        // Jacobian at QP (Tri3: constant; Quad4: varies per QP)
         let base = e * dp * n_eq;
 
         // Assemble mass matrix
         let mut m = na::DMatrix::<f64>::zeros(dp, dp);
         for q in 0..n_qp {
             let xi = &qr.points[q];
+            let det_j = if is_quad {
+                // Quad4: bilinear mapping Jacobian at (ξ, η)
+                let cn = |i: u32| { let c = mesh.node_coords(enodes[i as usize]); [c[0], c[1]] };
+                let p = [cn(0), cn(1), cn(2), cn(3)];
+                let (xi_q, eta_q) = (xi[0], xi[1]);
+                let dxi = [-(1.0-eta_q), (1.0-eta_q), (1.0+eta_q), -(1.0+eta_q)];
+                let deta = [-(1.0-xi_q), -(1.0+xi_q), (1.0+xi_q), (1.0-xi_q)];
+                let j11 = (dxi[0]*p[0][0]+dxi[1]*p[1][0]+dxi[2]*p[2][0]+dxi[3]*p[3][0])/4.0;
+                let j12 = (deta[0]*p[0][0]+deta[1]*p[1][0]+deta[2]*p[2][0]+deta[3]*p[3][0])/4.0;
+                let j21 = (dxi[0]*p[0][1]+dxi[1]*p[1][1]+dxi[2]*p[2][1]+dxi[3]*p[3][1])/4.0;
+                let j22 = (deta[0]*p[0][1]+deta[1]*p[1][1]+deta[2]*p[2][1]+deta[3]*p[3][1])/4.0;
+                (j11*j22 - j12*j21).abs()
+            } else {
+                let p0 = mesh.node_coords(enodes[0]);
+                let p1 = mesh.node_coords(enodes[1]);
+                let p2 = mesh.node_coords(enodes[2]);
+                ((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0])).abs()
+            };
             let w = qr.weights[q] * det_j;
             ref_elem.eval_basis(xi, &mut phi);
             for i in 0..dp {
@@ -291,9 +311,36 @@ fn project_initial<F: Fn(&[f64]) -> Vec<f64>>(
             let mut rhs = na::DVector::<f64>::zeros(dp);
             for q in 0..n_qp {
                 let xi = &qr.points[q];
-                let w = qr.weights[q] * det_j;
-                let px = p0[0] + xi[0] * (p1[0] - p0[0]) + xi[1] * (p2[0] - p0[0]);
-                let py = p0[1] + xi[0] * (p1[1] - p0[1]) + xi[1] * (p2[1] - p0[1]);
+                let det_j_q = if is_quad {
+                    let cn = |i: u32| { let c = mesh.node_coords(enodes[i as usize]); [c[0], c[1]] };
+                    let p = [cn(0), cn(1), cn(2), cn(3)];
+                    let (xi_q, eta_q) = (xi[0], xi[1]);
+                    let dxi = [-(1.0-eta_q), (1.0-eta_q), (1.0+eta_q), -(1.0+eta_q)];
+                    let deta = [-(1.0-xi_q), -(1.0+xi_q), (1.0+xi_q), (1.0-xi_q)];
+                    let j11 = (dxi[0]*p[0][0]+dxi[1]*p[1][0]+dxi[2]*p[2][0]+dxi[3]*p[3][0])/4.0;
+                    let j12 = (deta[0]*p[0][0]+deta[1]*p[1][0]+deta[2]*p[2][0]+deta[3]*p[3][0])/4.0;
+                    let j21 = (dxi[0]*p[0][1]+dxi[1]*p[1][1]+dxi[2]*p[2][1]+dxi[3]*p[3][1])/4.0;
+                    let j22 = (deta[0]*p[0][1]+deta[1]*p[1][1]+deta[2]*p[2][1]+deta[3]*p[3][1])/4.0;
+                    (j11*j22 - j12*j21).abs()
+                } else {
+                    let p0 = mesh.node_coords(enodes[0]);
+                    let p1 = mesh.node_coords(enodes[1]);
+                    let p2 = mesh.node_coords(enodes[2]);
+                    ((p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])).abs()
+                };
+                let w = qr.weights[q] * det_j_q;
+                let (px, py) = if is_quad {
+                    let cn = |i: u32| { let c = mesh.node_coords(enodes[i as usize]); [c[0], c[1]] };
+                    let p = [cn(0), cn(1), cn(2), cn(3)];
+                    let (xi_q, eta_q) = (xi[0], xi[1]);
+                    let n = [(1.0-xi_q)*(1.0-eta_q)/4.0, (1.0+xi_q)*(1.0-eta_q)/4.0,
+                             (1.0+xi_q)*(1.0+eta_q)/4.0, (1.0-xi_q)*(1.0+eta_q)/4.0];
+                    (n[0]*p[0][0]+n[1]*p[1][0]+n[2]*p[2][0]+n[3]*p[3][0],
+                     n[0]*p[0][1]+n[1]*p[1][1]+n[2]*p[2][1]+n[3]*p[3][1])
+                } else {
+                    (mesh.node_coords(enodes[0])[0] + xi[0]*(mesh.node_coords(enodes[1])[0]-mesh.node_coords(enodes[0])[0]) + xi[1]*(mesh.node_coords(enodes[2])[0]-mesh.node_coords(enodes[0])[0]),
+                     mesh.node_coords(enodes[0])[1] + xi[0]*(mesh.node_coords(enodes[1])[1]-mesh.node_coords(enodes[0])[1]) + xi[1]*(mesh.node_coords(enodes[2])[1]-mesh.node_coords(enodes[0])[1]))
+                };
                 let u0_vals = u0(&[px, py]);
                 ref_elem.eval_basis(xi, &mut phi);
                 for i in 0..dp {
@@ -320,6 +367,7 @@ fn compute_l2_error<F: Fn(&[f64]) -> Vec<f64>>(
     n_eq: usize,
 ) -> f64 {
     let ref_elem = make_ref_elem(mesh, order);
+    let is_quad = mesh.element_nodes(0).len() == 4;
     let dp = ref_elem.n_dofs();
     let q_order = 2 * order + 1;
     let qr = ref_elem.quadrature(q_order);
@@ -328,18 +376,34 @@ fn compute_l2_error<F: Fn(&[f64]) -> Vec<f64>>(
 
     for e in 0..mesh.n_elements() {
         let enodes = mesh.element_nodes(e as u32);
-        let p0 = mesh.node_coords(enodes[0]);
-        let p1 = mesh.node_coords(enodes[1]);
-        let p2 = mesh.node_coords(enodes[2]);
-        let det_j = (p1[0] - p0[0]) * (p2[1] - p0[1])
-            - (p1[1] - p0[1]) * (p2[0] - p0[0]);
         let base = e * dp * n_eq;
 
         for q in 0..qr.n_points() {
             let xi = &qr.points[q];
+            let (det_j, px, py) = if is_quad {
+                let cn = |i: u32| { let c = mesh.node_coords(enodes[i as usize]); [c[0], c[1]] };
+                let p = [cn(0), cn(1), cn(2), cn(3)];
+                let (xq, yq) = (xi[0], xi[1]);
+                let dxi = [-(1.0-yq), (1.0-yq), (1.0+yq), -(1.0+yq)];
+                let deta = [-(1.0-xq), -(1.0+xq), (1.0+xq), (1.0-xq)];
+                let j11 = (dxi[0]*p[0][0]+dxi[1]*p[1][0]+dxi[2]*p[2][0]+dxi[3]*p[3][0])/4.0;
+                let j12 = (deta[0]*p[0][0]+deta[1]*p[1][0]+deta[2]*p[2][0]+deta[3]*p[3][0])/4.0;
+                let j21 = (dxi[0]*p[0][1]+dxi[1]*p[1][1]+dxi[2]*p[2][1]+dxi[3]*p[3][1])/4.0;
+                let j22 = (deta[0]*p[0][1]+deta[1]*p[1][1]+deta[2]*p[2][1]+deta[3]*p[3][1])/4.0;
+                let det = (j11*j22 - j12*j21).abs();
+                let n = [(1.0-xq)*(1.0-yq)/4.0, (1.0+xq)*(1.0-yq)/4.0,
+                         (1.0+xq)*(1.0+yq)/4.0, (1.0-xq)*(1.0+yq)/4.0];
+                (det, n[0]*p[0][0]+n[1]*p[1][0]+n[2]*p[2][0]+n[3]*p[3][0],
+                      n[0]*p[0][1]+n[1]*p[1][1]+n[2]*p[2][1]+n[3]*p[3][1])
+            } else {
+                let p0 = mesh.node_coords(enodes[0]);
+                let p1 = mesh.node_coords(enodes[1]);
+                let p2 = mesh.node_coords(enodes[2]);
+                let det = ((p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])).abs();
+                (det, p0[0] + xi[0]*(p1[0]-p0[0]) + xi[1]*(p2[0]-p0[0]),
+                      p0[1] + xi[0]*(p1[1]-p0[1]) + xi[1]*(p2[1]-p0[1]))
+            };
             let w = qr.weights[q] * det_j;
-            let px = p0[0] + xi[0] * (p1[0] - p0[0]) + xi[1] * (p2[0] - p0[0]);
-            let py = p0[1] + xi[0] * (p1[1] - p0[1]) + xi[1] * (p2[1] - p0[1]);
             ref_elem.eval_basis(xi, &mut phi);
 
             // Interpolate sol at QP

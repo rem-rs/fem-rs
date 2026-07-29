@@ -12,7 +12,13 @@ use std::collections::{HashMap, HashSet};
 use fem_element::reference::ReferenceElement;
 use fem_element::quadrature::gauss_legendre_01;
 use fem_element::lagrange::tri::{TriP1, TriP2, TriP3};
+use fem_element::lagrange::QuadQ1;
+use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
+
+/// Element shape for dispatching Tri3 vs Quad4 code paths.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ElemShape { Tri, Quad }
 
 /// Physical flux function for hyperbolic conservation laws.
 pub trait FluxFunction: Send + Sync {
@@ -178,10 +184,11 @@ pub struct DgHyperbolicConservationLaws {
     #[allow(dead_code)]
     weakdiv: Vec<na::DMatrix<f64>>,
     ref_elem: Box<dyn ReferenceElement>,
+    elem_shape: ElemShape,
     // Stored mesh for volume term direct quadrature
-    mesh_elem_nodes: Vec<[u32; 3]>,       // element → [n0, n1, n2]
+    mesh_elem_nodes: Vec<Vec<u32>>,       // element → [n0, n1, ...] (3 for Tri3, 4 for Quad4)
     mesh_node_coords: Vec<[f64; 2]>,      // node → [x, y]
-    elem_det_j: Vec<f64>,                  // per-element |detJ|
+    elem_det_j: Vec<f64>,                  // per-element |detJ| (constant for Tri3, centroid for Quad4)
     flux: Box<dyn FluxFunction>,
     interior_faces: Vec<InteriorFace>,
     boundary_faces: Vec<BoundaryFace>,
@@ -192,31 +199,90 @@ pub struct DgHyperbolicConservationLaws {
 
 // ─── Helper functions ─────────────────────────────────────────────────────────
 
-fn make_ref_elem(_mesh: &dyn MeshTopology, order: u8) -> Box<dyn ReferenceElement> {
-    match order {
-        1 => Box::new(TriP1),
-        2 => Box::new(TriP2),
-        3 => Box::new(TriP3),
-        _ => Box::new(TriP1), // fallback for P0
+fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> (Box<dyn ReferenceElement>, ElemShape) {
+    let shape = if mesh.element_type(0) == ElementType::Quad4 {
+        ElemShape::Quad
+    } else {
+        ElemShape::Tri
+    };
+    match shape {
+        ElemShape::Quad => {
+            assert_eq!(order, 1, "Quad4 only supports order=1 (QuadQ1) currently");
+            (Box::new(QuadQ1), shape)
+        }
+        ElemShape::Tri => {
+            match order {
+                1 => (Box::new(TriP1), shape),
+                2 => (Box::new(TriP2), shape),
+                3 => (Box::new(TriP3), shape),
+                _ => (Box::new(TriP1), shape),
+            }
+        }
     }
 }
 
+/// Bilinear (Q1) Jacobian and J^{-T} at quadrature point (ξ, η) ∈ [-1,1]².
+/// Returns (detJ, [Jit00, Jit01, Jit10, Jit11]).
+fn quad4_jac_at_qp(p: &[[f64; 2]; 4], xi: f64, eta: f64) -> (f64, [f64; 4]) {
+    // dN/dξ:  [-(1-η), (1-η), (1+η), -(1+η)] / 4
+    // dN/dη:  [-(1-ξ), -(1+ξ), (1+ξ), (1-ξ)] / 4
+    let dxi = [-(1.0 - eta), (1.0 - eta), (1.0 + eta), -(1.0 + eta)];
+    let deta = [-(1.0 - xi), -(1.0 + xi), (1.0 + xi), (1.0 - xi)];
+    let j11 = (dxi[0]*p[0][0] + dxi[1]*p[1][0] + dxi[2]*p[2][0] + dxi[3]*p[3][0]) / 4.0;
+    let j12 = (deta[0]*p[0][0] + deta[1]*p[1][0] + deta[2]*p[2][0] + deta[3]*p[3][0]) / 4.0;
+    let j21 = (dxi[0]*p[0][1] + dxi[1]*p[1][1] + dxi[2]*p[2][1] + dxi[3]*p[3][1]) / 4.0;
+    let j22 = (deta[0]*p[0][1] + deta[1]*p[1][1] + deta[2]*p[2][1] + deta[3]*p[3][1]) / 4.0;
+    let det = j11 * j22 - j12 * j21;
+    let inv_det = 1.0 / det;
+    (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+}
+
+/// Helper: convert mesh.node_coords(&[f64]) to [f64; 2] for quad4_jac_at_qp.
+fn get_quad_nodes(mesh: &dyn MeshTopology, elem: u32) -> [[f64; 2]; 4] {
+    let nodes = mesh.element_nodes(elem);
+    [[mesh.node_coords(nodes[0])[0], mesh.node_coords(nodes[0])[1]],
+     [mesh.node_coords(nodes[1])[0], mesh.node_coords(nodes[1])[1]],
+     [mesh.node_coords(nodes[2])[0], mesh.node_coords(nodes[2])[1]],
+     [mesh.node_coords(nodes[3])[0], mesh.node_coords(nodes[3])[1]]]
+}
+
+/// Tri3 constant Jacobian.
+fn tri3_jac_at_qp(mesh: &dyn MeshTopology, elem: u32) -> (f64, [f64; 4]) {
+    let nodes = mesh.element_nodes(elem);
+    let p0 = mesh.node_coords(nodes[0]);
+    let p1 = mesh.node_coords(nodes[1]);
+    let p2 = mesh.node_coords(nodes[2]);
+    let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
+    let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
+    let det = j11 * j22 - j12 * j21;
+    let inv_det = 1.0 / det;
+    (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+}
+
 /// Compute element-wise inverse mass matrix M_e⁻¹ in physical space.
-/// M_e[i,j] = Σ_q w_q · |detJ| · φ_i(xi_q) · φ_j(xi_q)
-fn compute_inv_mass(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_elems: usize) -> Vec<na::DMatrix<f64>> {
+/// M_e[i,j] = Σ_q w_q · |detJ(ξ_q)| · φ_i(ξ_q) · φ_j(ξ_q)
+fn compute_inv_mass(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_elems: usize, shape: ElemShape) -> Vec<na::DMatrix<f64>> {
     let dp = ref_elem.n_dofs();
-    let dim = mesh.dim() as usize;
     let q_order = 2 * ref_elem.order();
     let qr = ref_elem.quadrature(q_order);
     let n_qp = qr.n_points();
     let mut phi = vec![0.0; dp];
     let mut invmass = Vec::with_capacity(n_elems);
     for e in 0..n_elems {
-        let det_j = element_det_j(mesh, e as u32);
         let mut m = na::DMatrix::<f64>::zeros(dp, dp);
         for q in 0..n_qp {
+            let xi = &qr.points[q];
+            let det_j = match shape {
+                ElemShape::Tri => tri3_jac_at_qp(mesh, e as u32).0,
+                ElemShape::Quad => {
+                    let nodes = mesh.element_nodes(e as u32);
+                    let p = get_quad_nodes(mesh, e as u32);
+                    let (det, _) = quad4_jac_at_qp(&p, xi[0], xi[1]);
+                    det
+                }
+            };
             let w = qr.weights[q] * det_j;
-            ref_elem.eval_basis(&qr.points[q], &mut phi);
+            ref_elem.eval_basis(xi, &mut phi);
             for i in 0..dp {
                 for j in 0..dp {
                     m[(i, j)] += w * phi[i] * phi[j];
@@ -229,35 +295,21 @@ fn compute_inv_mass(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
     invmass
 }
 
-/// Compute element Jacobian determinant for a Tri3 element.
-fn element_det_j(mesh: &dyn MeshTopology, elem: u32) -> f64 {
-    let nodes = mesh.element_nodes(elem);
-    let p0 = mesh.node_coords(nodes[0]);
-    let p1 = mesh.node_coords(nodes[1]);
-    let p2 = mesh.node_coords(nodes[2]);
-    let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
-    let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
-    (j11 * j22 - j12 * j21).abs()
-}
-
-/// Compute element Jacobian and its inverse-transpose for a Tri3 element.
-/// Returns (detJ, inv_jac_transpose) where inv_jac_transpose is flattened [2×2]: [Jit00, Jit01, Jit10, Jit11].
-fn element_jac_inv_transpose(mesh: &dyn MeshTopology, elem: u32) -> (f64, [f64; 4]) {
-    let nodes = mesh.element_nodes(elem);
-    let p0 = mesh.node_coords(nodes[0]);
-    let p1 = mesh.node_coords(nodes[1]);
-    let p2 = mesh.node_coords(nodes[2]);
-    let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
-    let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
-    let det = j11 * j22 - j12 * j21;
-    let inv_det = 1.0 / det;
-    // J^{-T} = 1/det * [j22, -j21; -j12, j11]
-    (det.abs(), [j22 * inv_det, -j21 * inv_det, -j12 * inv_det, j11 * inv_det])
+/// Element Jacobian at centroid for pre-stored elem_det_j (constant Tri3 or centroid Quad4).
+fn elem_centroid_jac(mesh: &dyn MeshTopology, elem: u32, shape: ElemShape) -> f64 {
+    match shape {
+        ElemShape::Tri => tri3_jac_at_qp(mesh, elem).0,
+        ElemShape::Quad => {
+            let nodes = mesh.element_nodes(elem);
+            let p = get_quad_nodes(mesh, elem);
+            quad4_jac_at_qp(&p, 0.0, 0.0).0  // centroid (ξ=0, η=0)
+        }
+    }
 }
 
 /// Compute element-wise weak divergence matrix in physical space.
-/// weakdiv[e][i, j*dim + d] = Σ_q w_q · |detJ| · φ_i(xi_q) · (J^{-T} · ∇ξ_φ_j)_d
-fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_elems: usize) -> Vec<na::DMatrix<f64>> {
+/// weakdiv[e][i, j*dim + d] = Σ_q w_q · |detJ(ξ_q)| · φ_i(ξ_q) · (J^{-T}(ξ_q) · ∇ξ_φ_j)_d
+fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_elems: usize, shape: ElemShape) -> Vec<na::DMatrix<f64>> {
     let dp = ref_elem.n_dofs();
     let dim = mesh.dim() as usize;
     let q_order = 2 * ref_elem.order();
@@ -267,14 +319,21 @@ fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
     let mut gphi = vec![0.0; dp * dim];
     let mut weakdiv = Vec::with_capacity(n_elems);
     for e in 0..n_elems {
-        let (det_j, jit) = element_jac_inv_transpose(mesh, e as u32);
         let mut wd = na::DMatrix::<f64>::zeros(dp, dp * dim);
         for q in 0..n_qp {
+            let xi = &qr.points[q];
+            let (det_j, jit) = match shape {
+                ElemShape::Tri => tri3_jac_at_qp(mesh, e as u32),
+                ElemShape::Quad => {
+                    let nodes = mesh.element_nodes(e as u32);
+                    let p = get_quad_nodes(mesh, e as u32);
+                    quad4_jac_at_qp(&p, xi[0], xi[1])
+                }
+            };
             let w = qr.weights[q] * det_j;
-            ref_elem.eval_basis(&qr.points[q], &mut phi);
-            ref_elem.eval_grad_basis(&qr.points[q], &mut gphi);
+            ref_elem.eval_basis(xi, &mut phi);
+            ref_elem.eval_grad_basis(xi, &mut gphi);
             for i in 0..dp {
-                // Physical gradient of test function φ_i: J^{-T} · ∇ξ_φ_i
                 let mut gphys_i = [0.0; 2];
                 for d in 0..dim {
                     for k in 0..dim {
@@ -283,7 +342,6 @@ fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
                 }
                 for j in 0..dp {
                     for d in 0..dim {
-                        // wd[i, j*dim+d] = ∫ φ_j · ∂φ_i/∂x_d  (grad on TEST, weight from TRIAL)
                         wd[(i, j * dim + d)] += w * phi[j] * gphys_i[d];
                     }
                 }
@@ -294,6 +352,31 @@ fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
     weakdiv
 }
 
+/// Tri3 face patterns: [local_node_a, local_node_b] for faces 0, 1, 2.
+const TRI3_FACES: [[usize; 2]; 3] = [[0, 1], [1, 2], [2, 0]];
+
+/// Quad4 face patterns: [local_node_a, local_node_b] for faces 0, 1, 2, 3.
+const QUAD4_FACES: [[usize; 2]; 4] = [[0, 1], [1, 2], [2, 3], [3, 0]];
+
+/// Get the two nodes of a face for a given element type.
+fn face_nodes(shape: ElemShape, enodes: &[u32], face: u8) -> (u32, u32) {
+    match shape {
+        ElemShape::Tri => match face {
+            0 => (enodes[0], enodes[1]),
+            1 => (enodes[1], enodes[2]),
+            2 => (enodes[2], enodes[0]),
+            _ => unreachable!(),
+        },
+        ElemShape::Quad => match face {
+            0 => (enodes[0], enodes[1]),
+            1 => (enodes[1], enodes[2]),
+            2 => (enodes[2], enodes[3]),
+            3 => (enodes[3], enodes[0]),
+            _ => unreachable!(),
+        },
+    }
+}
+
 /// Map a face-local coordinate `t ∈ [0,1]` to reference-triangle coordinates.
 fn tri_face_ref(face: u8, t: f64, reverse: bool) -> [f64; 2] {
     let t1 = if reverse { 1.0 - t } else { t };
@@ -302,6 +385,19 @@ fn tri_face_ref(face: u8, t: f64, reverse: bool) -> [f64; 2] {
         1 => [1.0 - t1, t1],
         2 => [0.0, 1.0 - t1],
         _ => panic!("Tri3 faces 0-2"),
+    }
+}
+
+/// Map a face-local coordinate `t ∈ [0,1]` to reference-quadrilateral `[-1,1]²` coordinates.
+fn quad_face_ref(face: u8, t: f64, reverse: bool) -> [f64; 2] {
+    let t1 = if reverse { 1.0 - t } else { t };
+    let xi = 2.0 * t1 - 1.0; // map [0,1] → [-1,1]
+    match face {
+        0 => [ xi, -1.0], // bottom: η = -1
+        1 => [ 1.0,  xi], // right:  ξ = +1
+        2 => [ xi,  1.0], // top:    η = +1
+        3 => [-1.0,  xi], // left:   ξ = -1
+        _ => panic!("Quad4 faces 0-3"),
     }
 }
 
@@ -336,13 +432,21 @@ fn detect_periodic_pairs(unpaired: &[(u32, u8, [f64;2])]) -> Vec<(usize, usize)>
     pairs
 }
 
-/// Build interior and boundary face structures for a triangle mesh.
+/// Build interior and boundary face structures.
+/// Supports Tri3 (3 faces) and Quad4 (4 faces) meshes.
 /// Detects periodic pairs from boundary faces with opposite normals.
 fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec<InteriorFace>, Vec<BoundaryFace>) {
     let dp = ref_elem.n_dofs();
     let n_elems = mesh.n_elements() as u32;
     let n_qp = ((2 * ref_elem.order() + 1) as usize).min(4).max(1);
     let (face_pts, face_wts) = gauss_legendre_01(n_qp);
+
+    // Detect element type from first element's node count
+    let shape = if mesh.element_nodes(0).len() == 4 { ElemShape::Quad } else { ElemShape::Tri };
+    let face_patterns: &[[usize; 2]] = match shape {
+        ElemShape::Quad => &QUAD4_FACES,
+        ElemShape::Tri  => &TRI3_FACES,
+    };
 
     // Record all element edges
     struct ElemEdge {
@@ -353,7 +457,7 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
     let mut edge_list: Vec<ElemEdge> = Vec::new();
     for e in 0..n_elems {
         let enodes = mesh.element_nodes(e);
-        for (lf, &[na, nb]) in [[0, 1], [1, 2], [2, 0]].iter().enumerate() {
+        for (lf, &[na, nb]) in face_patterns.iter().enumerate() {
             let (n0, n1) = (enodes[na].min(enodes[nb]), enodes[na].max(enodes[nb]));
             edge_list.push(ElemEdge {
                 nodes: [n0, n1],
@@ -396,12 +500,7 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
 
             // Normal outward from L
             let l_nodes = mesh.element_nodes(elem_l as u32);
-            let (na, nb) = match face_l {
-                0 => (l_nodes[0], l_nodes[1]),
-                1 => (l_nodes[1], l_nodes[2]),
-                2 => (l_nodes[2], l_nodes[0]),
-                _ => unreachable!(),
-            };
+            let (na, nb) = face_nodes(shape, &l_nodes, face_l as u8);
             let pa = mesh.node_coords(na);
             let pb = mesh.node_coords(nb);
             let (dx, dy) = (pb[0] - pa[0], pb[1] - pa[1]);
@@ -410,12 +509,7 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
 
             // Check orientation for R element
             let r_nodes = mesh.element_nodes(elem_r as u32);
-            let (r_na, _) = match face_r {
-                0 => (r_nodes[0], r_nodes[1]),
-                1 => (r_nodes[1], r_nodes[2]),
-                2 => (r_nodes[2], r_nodes[0]),
-                _ => unreachable!(),
-            };
+            let (r_na, _) = face_nodes(shape, &r_nodes, face_r as u8);
             let reverse_r = na != r_na;
 
             let mut qp_ref_l = Vec::with_capacity(n_qp);
@@ -429,11 +523,17 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
                 let t = face_pts[q];
                 let w = face_wts[q];
                 qp_w.push(w * length);
-                let rl = tri_face_ref(face_l as u8, t, false);
+                let rl = match shape {
+                    ElemShape::Tri => tri_face_ref(face_l as u8, t, false),
+                    ElemShape::Quad => quad_face_ref(face_l as u8, t, false),
+                };
                 qp_ref_l.push(rl);
                 ref_elem.eval_basis(&rl, &mut phi);
                 basis_l.push(phi.clone());
-                let rr = tri_face_ref(face_r as u8, t, reverse_r);
+                let rr = match shape {
+                    ElemShape::Tri => tri_face_ref(face_r as u8, t, reverse_r),
+                    ElemShape::Quad => quad_face_ref(face_r as u8, t, reverse_r),
+                };
                 qp_ref_r.push(rr);
                 ref_elem.eval_basis(&rr, &mut phi);
                 basis_r.push(phi.clone());
@@ -464,12 +564,7 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
     let mut bound_info: Vec<BoundInfo> = Vec::new();
     for &(elem, lf) in &unpaired {
         let enodes = mesh.element_nodes(elem);
-        let (na, nb) = match lf {
-            0 => (enodes[0], enodes[1]),
-            1 => (enodes[1], enodes[2]),
-            2 => (enodes[2], enodes[0]),
-            _ => unreachable!(),
-        };
+        let (na, nb) = face_nodes(shape, &enodes, lf as u8);
         let pa = mesh.node_coords(na);
         let pb = mesh.node_coords(nb);
         let (dx, dy) = (pb[0] - pa[0], pb[1] - pa[1]);
@@ -513,13 +608,13 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
             let t = face_pts[q];
             let w = face_wts[q];
             qp_w.push(w * length);
-            let rl = tri_face_ref(face_l as u8, t, false);
+            let rl = match shape { ElemShape::Tri => tri_face_ref(face_l as u8, t, false), ElemShape::Quad => quad_face_ref(face_l as u8, t, false) };
             qp_ref_l.push(rl);
             ref_elem.eval_basis(&rl, &mut phi_l);
             basis_l.push(phi_l.clone());
             // For periodic pair, the other element's face QP uses the opposite
             // face orientation (reverse = true) since it's the opposite side
-            let rr = tri_face_ref(face_r as u8, t, true);
+            let rr = match shape { ElemShape::Tri => tri_face_ref(face_r as u8, t, true), ElemShape::Quad => quad_face_ref(face_r as u8, t, true) };
             qp_ref_r.push(rr);
             ref_elem.eval_basis(&rr, &mut phi_r);
             basis_r.push(phi_r.clone());
@@ -543,7 +638,7 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
             let t = face_pts[q];
             let w = face_wts[q];
             qp_w.push(w * bi.length);
-            let r = tri_face_ref(bi.lf, t, false);
+            let r = match shape { ElemShape::Tri => tri_face_ref(bi.lf, t, false), ElemShape::Quad => quad_face_ref(bi.lf, t, false) };
             qp_ref.push(r);
             ref_elem.eval_basis(&r, &mut phi);
             basis.push(phi.clone());
@@ -574,12 +669,12 @@ impl DgHyperbolicConservationLaws {
         let n_elems = mesh.n_elements();
         let dim = mesh.dim() as usize;
         let n_eq = flux_fn.num_equations();
-        let ref_elem = make_ref_elem(mesh, order);
+        let (ref_elem, elem_shape) = make_ref_elem(mesh, order);
         let dofs_per_elem = ref_elem.n_dofs();
         let total_dofs = n_elems * dofs_per_elem * n_eq;
-        let invmass = compute_inv_mass(mesh, &*ref_elem, n_elems);
+        let invmass = compute_inv_mass(mesh, &*ref_elem, n_elems, elem_shape);
         let weakdiv = if preassemble_weakdiv {
-            compute_weak_div(mesh, &*ref_elem, n_elems)
+            compute_weak_div(mesh, &*ref_elem, n_elems, elem_shape)
         } else {
             Vec::new()
         };
@@ -589,8 +684,8 @@ impl DgHyperbolicConservationLaws {
         let mut elem_det_j = Vec::with_capacity(n_elems);
         for e in 0..n_elems as u32 {
             let nodes = mesh.element_nodes(e);
-            mesh_elem_nodes.push([nodes[0], nodes[1], nodes[2]]);
-            elem_det_j.push(element_det_j(mesh, e));
+            mesh_elem_nodes.push(nodes.to_vec());
+            elem_det_j.push(elem_centroid_jac(mesh, e, elem_shape));
         }
         let mut mesh_node_coords = Vec::with_capacity(mesh.n_nodes());
         for n in 0..mesh.n_nodes() as u32 {
@@ -606,6 +701,7 @@ impl DgHyperbolicConservationLaws {
             invmass,
             weakdiv,
             ref_elem,
+            elem_shape,
             flux: flux_fn,
             interior_faces,
             boundary_faces,
