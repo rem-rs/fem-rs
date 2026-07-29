@@ -239,7 +239,7 @@ impl GeneralizedAlpha2 {
     fn gamma(&self) -> f64 { 0.5 + self.alpha_m() - self.alpha_f() }
     fn beta(&self) -> f64 {
         let g = 0.5 + self.alpha_m() - self.alpha_f();
-        0.25 * g * g
+        0.25 * (g + 0.5) * (g + 0.5)  // MFEM: β = (γ+½)²/4
     }
 
     /// Advance one time step for M·ü + K·u = f(t).

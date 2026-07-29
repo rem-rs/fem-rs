@@ -353,10 +353,10 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
     };
     println!("  ess_bdr count: {}", ess_tdof_list.len());
 
-    // 7. Set initial conditions via L² projection (matching C++ ProjectCoefficient).
-    let quad_order = (2 * args.order + 1) as u8;
-    let mut u = project_coefficient(&space, &|x: &[f64]| initial_solution(x), quad_order);
-    let mut du_dt = project_coefficient(&space, &|x: &[f64]| initial_rate(x), quad_order);
+    // 7. Set initial conditions via interpolation at DOF points.
+    //    C++ GridFunction::ProjectCoefficient for H1 = direct interpolation.
+    let mut u: Vec<f64> = space.interpolate(&|x: &[f64]| initial_solution(x)).into_vec();
+    let mut du_dt: Vec<f64> = space.interpolate(&|x: &[f64]| initial_rate(x)).into_vec();
     for &d in &ess_tdof_list { u[d as usize] = 0.0; du_dt[d as usize] = 0.0; }
 
     // Save initial state with precision(8) (matching C++ Save+precision(8))
