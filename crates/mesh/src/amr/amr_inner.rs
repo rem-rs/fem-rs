@@ -400,6 +400,52 @@ impl NCState {
     }
 }
 
+/// Unified 2-D non-conforming AMR trait — matches C++ `Mesh::GeneralRefinement`.
+pub trait NcState2D {
+    /// Refine `marked` elements, returning `(new_mesh, constraints, midpoint_map)`.
+    fn refine(
+        &mut self,
+        mesh: &Mesh<2>,
+        marked: &[ElemId],
+        nc_limit: u32,
+    ) -> (Mesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>);
+
+    /// Roll back the last refinement pass.
+    fn derefine_last(&mut self) -> Option<(Mesh<2>, Vec<HangingNodeConstraint>)>;
+
+    /// Whether a rollback is available.
+    fn can_derefine(&self) -> bool;
+
+    /// Current hanging-node constraints.
+    fn constraints(&self) -> &[HangingNodeConstraint];
+}
+
+impl NcState2D for NCState {
+    fn refine(
+        &mut self, mesh: &Mesh<2>, marked: &[ElemId], nc_limit: u32,
+    ) -> (Mesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+        self.refine(mesh, marked, nc_limit)
+    }
+    fn derefine_last(&mut self) -> Option<(Mesh<2>, Vec<HangingNodeConstraint>)> {
+        self.derefine_last()
+    }
+    fn can_derefine(&self) -> bool { self.can_derefine() }
+    fn constraints(&self) -> &[HangingNodeConstraint] { self.constraints() }
+}
+
+impl NcState2D for NCStateQuad {
+    fn refine(
+        &mut self, mesh: &Mesh<2>, marked: &[ElemId], nc_limit: u32,
+    ) -> (Mesh<2>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+        self.refine(mesh, marked, nc_limit)
+    }
+    fn derefine_last(&mut self) -> Option<(Mesh<2>, Vec<HangingNodeConstraint>)> {
+        self.derefine_last()
+    }
+    fn can_derefine(&self) -> bool { self.can_derefine() }
+    fn constraints(&self) -> &[HangingNodeConstraint] { self.constraints() }
+}
+
 /// Propagate refinement to neighbors when nc_limit would be violated (Tri3).
 fn propagate_nc_limit_tri(
     marked: &[ElemId],

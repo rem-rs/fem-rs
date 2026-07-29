@@ -10,28 +10,24 @@
 //!
 //! ## Usage
 //! ```bash
-//! cargo run --example mfem_ex15_amr_poisson -- -m data/star-hilbert.mesh -no-vis
-//! cargo run --example mfem_ex15_amr_poisson -- -m data/amr-quad.mesh -o 2 -e 0.005 -no-vis
-//! cargo run --example mfem_ex15_amr_poisson -- -m data/star-hilbert.mesh -o 1 -e 0.01 -no-vis -tf 0.05
-//! ````
+//! cargo run --example mfem_ex15_dynamic_amr -- -m ../data/star.mesh -no-vis
+//! cargo run --example mfem_ex15_dynamic_amr -- -m ../data/star.mesh -o 1 -e 0.01 -no-vis -tf 0.05
+//! ```
 
-// use std::collections::HashMap;
 use std::time::Instant;
 
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_assembly::postproc::error_estimate::{threshold_mark, kelly_estimator};
-use fem_assembly::postproc::flux_recovery::zz_estimator_mfem;
+use fem_assembly::postproc::amr_refiner::{ThresholdRefiner, ThresholdDerefiner};
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_core::ElemId;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType};
 use fem_mesh::amr::{
-    NCState, NCStateQuad, HangingNodeConstraint,
+    NcState2D, NCState, NCStateQuad, HangingNodeConstraint,
 };
-
 use fem_space::{
     H1Space,
     constraints::{
@@ -46,7 +42,6 @@ const ALPHA: f64 = 0.02;
 static mut PROBLEM: i32 = 0;
 static mut NFEATURES: i32 = 1;
 
-// Spherical front with a Gaussian cross section and radius t
 fn front(x: f64, y: f64, z: f64, t: f64) -> f64 {
     let r = (x * x + y * y + z * z).sqrt();
     (-0.5 * ((r - t) / ALPHA).powi(2)).exp()
@@ -60,7 +55,6 @@ fn front_laplace(x: f64, y: f64, z: f64, t: f64, dim: i32) -> f64 {
     -(-0.5 * ((r - t) / ALPHA).powi(2)).exp() / a4 * (r_term + x2 + y2 + z2 + t2 - dim as f64 * a2)
 }
 
-// Smooth step function (arctan-based)
 fn ball(x: f64, y: f64, z: f64, t: f64) -> f64 {
     let r = (x * x + y * y + z * z).sqrt();
     -(2.0 * (r - t) / ALPHA).atan()
@@ -84,17 +78,12 @@ where
     F0: Fn(f64, f64, f64, f64) -> f64,
     F1: Fn(f64, f64, f64, f64) -> f64,
 {
-    let dim = pt.len();
-    let x = pt[0]; let y = pt[1]; let z = if dim == 3 { pt[2] } else { 0.0 };
+    let x = pt[0]; let y = pt[1]; let z = if pt.len() == 3 { pt[2] } else { 0.0 };
     let problem = unsafe { PROBLEM };
     let nfeatures = unsafe { NFEATURES };
-
     if problem == 0 {
-        if nfeatures <= 1 {
-            f0(x, y, z, t)
-        } else {
-            let mut sum = 0.0;
-            let two_pi = 2.0 * std::f64::consts::PI;
+        if nfeatures <= 1 { f0(x, y, z, t) } else {
+            let mut sum = 0.0; let two_pi = 2.0 * std::f64::consts::PI;
             for i in 0..nfeatures {
                 let x0 = 0.5 * (two_pi * i as f64 / nfeatures as f64).cos();
                 let y0 = 0.5 * (two_pi * i as f64 / nfeatures as f64).sin();
@@ -103,8 +92,7 @@ where
             sum
         }
     } else {
-        let mut sum = 0.0;
-        let two_pi = 2.0 * std::f64::consts::PI;
+        let mut sum = 0.0; let two_pi = 2.0 * std::f64::consts::PI;
         for i in 0..nfeatures {
             let x0 = 0.5 * (two_pi * i as f64 / nfeatures as f64 + std::f64::consts::PI * t).cos();
             let y0 = 0.5 * (two_pi * i as f64 / nfeatures as f64 + std::f64::consts::PI * t).sin();
@@ -114,62 +102,41 @@ where
     }
 }
 
-fn bdr_func(pt: &[f64], t: f64) -> f64 {
-    composite_func(pt, t, front, ball)
-}
+fn bdr_func(pt: &[f64], t: f64) -> f64 { composite_func(pt, t, front, ball) }
+fn rhs_func(pt: &[f64], t: f64) -> f64 { composite_func(pt, t, |x, y, z, t| front_laplace(x, y, z, t, pt.len() as i32), |x, y, z, t| ball_laplace(x, y, z, t, pt.len() as i32)) }
 
-fn rhs_func(pt: &[f64], t: f64) -> f64 {
-    composite_func(pt, t, |x, y, z, t| front_laplace(x, y, z, t, pt.len() as i32), |x, y, z, t| ball_laplace(x, y, z, t, pt.len() as i32))
-}
-
-// ─── Mesh element type check ──────────────────────────────────────────────────
+// ─── NcState2 wrapper (unifies Tri3 NCState + Quad4 NCStateQuad) ─────────────
 
 enum NcState2 {
     Tri3(NCState),
     Quad4(NCStateQuad),
 }
 
-impl NcState2 {
-    fn new(elem_type: ElementType) -> Self {
-        match elem_type {
-            ElementType::Tri3 => NcState2::Tri3(NCState::new()),
-            ElementType::Quad4 => NcState2::Quad4(NCStateQuad::new()),
-            _ => panic!("Unsupported element type {:?}: only Tri3 and Quad4 are supported", elem_type),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn constraints(&self) -> &[HangingNodeConstraint] {
+impl NcState2D for NcState2 {
+    fn refine(&mut self, mesh: &Mesh<2>, marked: &[ElemId], nc_limit: u32)
+        -> (Mesh<2>, Vec<HangingNodeConstraint>, std::collections::HashMap<(u32, u32), u32>)
+    {
         match self {
-            NcState2::Tri3(s) => s.constraints(),
-            NcState2::Quad4(s) => s.constraints(),
+            NcState2::Tri3(s) => s.refine(mesh, marked, nc_limit),
+            NcState2::Quad4(s) => s.refine(mesh, marked, nc_limit),
         }
     }
-
+    fn derefine_last(&mut self) -> Option<(Mesh<2>, Vec<HangingNodeConstraint>)> {
+        match self {
+            NcState2::Tri3(s) => s.derefine_last(),
+            NcState2::Quad4(s) => s.derefine_last(),
+        }
+    }
     fn can_derefine(&self) -> bool {
         match self {
             NcState2::Tri3(s) => s.can_derefine(),
             NcState2::Quad4(s) => s.can_derefine(),
         }
     }
-
-    fn refine(&mut self, mesh: &Mesh<2>, marked: &[ElemId], nc_limit: u32) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
+    fn constraints(&self) -> &[HangingNodeConstraint] {
         match self {
-            NcState2::Tri3(s) => {
-                let (new_mesh, constraints, _) = s.refine(mesh, marked, nc_limit);
-                (new_mesh, constraints)
-            }
-            NcState2::Quad4(s) => {
-                let (new_mesh, constraints, _) = s.refine(mesh, marked, nc_limit);
-                (new_mesh, constraints)
-            }
-        }
-    }
-
-    fn derefine_last(&mut self) -> Option<(Mesh<2>, Vec<HangingNodeConstraint>)> {
-        match self {
-            NcState2::Tri3(s) => s.derefine_last(),
-            NcState2::Quad4(s) => s.derefine_last(),
+            NcState2::Tri3(s) => s.constraints(),
+            NcState2::Quad4(s) => s.constraints(),
         }
     }
 }
@@ -194,7 +161,6 @@ fn main() {
     println!("   --t-final {}", args.t_final);
     println!("   --estimator {}", args.estimator);
     println!("   --no-visualization");
-    println!("   --no-visit-datafiles");
 
     // ─── 1. Read mesh ─────────────────────────────────────────────────────────
     let mesh: Mesh<2> = {
@@ -203,67 +169,47 @@ fn main() {
             .mesh2d
             .expect("MFEM mesh must be 2D")
     };
-    let _dim = fem_mesh::topology::MeshTopology::dim(&mesh);
     let elem_type = mesh.element_type(0);
-
     println!("\nMesh: {} nodes, {} elements, type = {:?}", mesh.n_nodes(), mesh.n_elems(), elem_type);
-    if elem_type != ElementType::Tri3 && elem_type != ElementType::Quad4 {
-        panic!("Unsupported element type {:?}: only Tri3 and Quad4", elem_type);
-    }
 
-    let mesh = mesh;
     let mut mesh = mesh;
+    let mut nc_state: NcState2 = match elem_type {
+        ElementType::Tri3 => NcState2::Tri3(NCState::new()),
+        ElementType::Quad4 => NcState2::Quad4(NCStateQuad::new()),
+        _ => panic!("unsupported element type {elem_type:?}"),
+    };
 
-    // ─── 2. Uniform refinement (matches C++: NURBS path + initial refs) ──────
+    // ─── 2. Uniform refinement (matches C++) ────────────────────────────────
     for _ in 0..args.ref_levels {
         mesh = fem_mesh::amr::refine_uniform(&mesh);
     }
-    // For NC AMR: we need to work with a conforming mesh first, then refine.
-    // The initial mesh needs to be non-conforming-capable.
-    let mut nc_state = NcState2::new(elem_type);
-    let mut hanging_constraints: Vec<HangingNodeConstraint> = Vec::new();
-
+    let order = args.order;
     println!("Initial mesh: {} nodes, {} elements", mesh.n_nodes(), mesh.n_elems());
 
-    // ─── 3. Solver setup ─────────────────────────────────────────────────────
-    let order = args.order;
+    // ─── 3. Threshold refiner / derefiner ────────────────────────────────────
+    let mut refiner = ThresholdRefiner::new(args.estimator == 1);
+    refiner.set_local_error_goal(args.max_elem_error);
+    refiner.set_nc_limit(args.nc_limit);
 
-    // Error estimator selection
-    let use_kelly = args.estimator == 1;
+    let mut derefiner = ThresholdDerefiner::new();
+    derefiner.set_threshold(args.hysteresis * args.max_elem_error);
 
-    // ─── 4. Outer time loop ──────────────────────────────────────────────────
+    // ─── 4. Time loop ────────────────────────────────────────────────────────
     let dt = 0.01;
-    let t_final = args.t_final;
-    let max_elem_error = args.max_elem_error;
-    let hysteresis = args.hysteresis;
-    let derefine_threshold = hysteresis * max_elem_error;
-    let nc_limit = args.nc_limit;
-
-    let mut x = Vec::<f64>::new();
-    x.push(0.0); // dummy init — will be overwritten
-    x.pop();
     let mut time = 0.0;
-    // Track which elements were refined in each pass for selective derefinement.
-    let mut refinement_history: Vec<Vec<ElemId>> = Vec::new();
-
-    while time < t_final + 1e-10 {
+    while time < args.t_final + 1e-10 {
         println!("\nTime {}", time);
         println!("\nRefinement:");
+        refiner.reset();
 
-        // ─── 4a. Inner refinement loop ──────────────────────────────────────
-        let mut eta_last: Vec<f64> = Vec::new();
-        let hist_before = refinement_history.len(); // detect new entries
-
-        for ref_it in 1.. {
-            // Build H1 space on current mesh
+        // ── 4a. Inner refinement loop ─────────────────────────────────────
+        for _it in 1.. {
             let space = H1Space::new(mesh.clone(), order);
             let cdofs = space.n_dofs();
-            println!("Iteration: {}, number of unknowns: {}", ref_it, cdofs);
+            let quad_rule = (order as u8) * 2 + 1;
 
             // Assemble stiffness matrix
             let diffusion = DiffusionIntegrator { kappa: 1.0 };
-            let quad_rule = (order as u8) * 2 + 1;
-
             let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], quad_rule);
 
             // Assemble RHS (time-dependent)
@@ -272,149 +218,59 @@ fn main() {
             let mut rhs_vec = Assembler::assemble_linear(&space, &[&source], quad_rule);
 
             // Apply hanging-node constraints
-            if !hanging_constraints.is_empty() {
-                apply_hanging_constraints(&mut mat, &mut rhs_vec, &hanging_constraints);
+            let hc = nc_state.constraints();
+            if !hc.is_empty() {
+                apply_hanging_constraints(&mut mat, &mut rhs_vec, hc);
             }
 
             // Dirichlet BC on all boundaries (time-dependent)
             let dm = space.dof_manager();
             let bnd_tags = space.mesh().unique_boundary_tags();
             let bnd = boundary_dofs(space.mesh(), dm, &bnd_tags);
-            let bnd_vals: Vec<f64> = bnd
-                .iter()
-                .map(|&dof| {
-                    let coord = dm.dof_coord(dof);
-                    bdr_func(&coord, time)
-                })
-                .collect();
-
-            // Apply Dirichlet BC in-place (like MFEM FormLinearSystem)
+            let bnd_vals: Vec<f64> = bnd.iter().map(|&dof| {
+                let coord = dm.dof_coord(dof);
+                bdr_func(&coord, time)
+            }).collect();
             fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs_vec, &bnd, &bnd_vals);
-
-            // Fix zero diagonals
-            let diag_vals = mat.diagonal();
-            for (row, &d) in diag_vals.iter().enumerate() {
-                if d == 0.0 {
-                    mat.eliminate_essential_bc_diag(row, 1.0);
-                }
+            for (row, &d) in mat.diagonal().iter().enumerate() {
+                if d == 0.0 { mat.eliminate_essential_bc_diag(row, 1.0); }
             }
 
-            // Solve with GSSmoother (matches MFEM GSSmoother)
+            // Solve
             let mut u = vec![0.0_f64; cdofs];
             let res = fem_solver::solve_pcg_gssmoother(
                 &mat, &rhs_vec, &mut u,
                 &fem_solver::SolverConfig {
-                    rtol: 1e-12,
-                    max_iter: 500,
-                    verbose: false,
-                    ..Default::default()
+                    rtol: 1e-12, max_iter: 500, verbose: false, ..Default::default()
                 },
             );
-
-            // On solver failure: keep previous solution, proceed to derefinement
-            if let Err(e) = &res {
-                eprintln!("  Solver error: {e:?} — skipping refinement step");
-                break;
-            }
-            if let Ok(r) = &res {
-                if !r.converged {
-                    eprintln!("  WARNING: solver did not converge (iters={}, res={:.3e}) — skipping refinement step", r.iterations, r.final_residual);
-                    break;
-                }
-            }
+            if res.is_err() { break; }
+            if res.as_ref().is_ok_and(|r| !r.converged) { break; }
 
             // Recover hanging-node values
-            if !hanging_constraints.is_empty() {
-                recover_hanging_values(&mut u, &hanging_constraints);
+            if !hc.is_empty() { recover_hanging_values(&mut u, hc); }
+
+            // Error estimation + refinement (matches C++ refiner.Apply(*mesh))
+            let gf = GridFunction::new(&space, u);
+            let ne_before = mesh.n_elems();
+            refiner.apply(&mut mesh, &mut nc_state, &gf, &diffusion);
+            let ne_after = mesh.n_elems();
+            let n_marked = if ne_after > ne_before {
+                refiner.last_marked.len()
+            } else { 0 };
+
+            // Diagnostic
+            if !refiner.eta.is_empty() {
+                let mean: f64 = refiner.eta.iter().sum::<f64>() / refiner.eta.len() as f64;
+                let max = refiner.eta.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                println!("  eta: mean={mean:.6e} max={max:.6e} >threshold={n_marked}/{}", refiner.eta.len());
             }
 
-            x = u;
-
-            // Error estimation using MFEM-style ZZ via FluxRecovery trait.
-            let gf = GridFunction::new(&space, x.clone());
-            let eta = if use_kelly {
-                kelly_estimator(&gf).eta
-            } else {
-                let integrator = DiffusionIntegrator { kappa: 1.0 };
-                zz_estimator_mfem(&gf, &integrator).eta
-            };
-            // Diagnostic: print error estimate stats
-            if !eta.is_empty() {
-                let mean: f64 = eta.iter().sum::<f64>() / eta.len() as f64;
-                let max = eta.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let n_marked = eta.iter().filter(|&&e| e > max_elem_error).count();
-                println!("  eta: mean={mean:.6e} max={max:.6e} >threshold={n_marked}/{}", eta.len());
-            }
-            eta_last = eta.clone();
-
-            // Threshold marking: refine if η > max_elem_error (matches MFEM ThresholdRefiner)
-            let marked = threshold_mark(&eta, max_elem_error);
-
-            if marked.is_empty() {
-                break;
-            }
-
-            // Record refinement for potential selective derefinement.
-            refinement_history.push(marked.clone());
-
-            // Apply NC refinement. The returned constraints are the complete
-            // set rebuilt from scratch (matching C++ Mesh::Finalize()).
-            let (new_mesh, new_constraints) = nc_state.refine(&mesh, &marked, nc_limit);
-            hanging_constraints = new_constraints;
-            mesh = new_mesh;
+            if refiner.stop() { break; }
         }
 
-        // ─── 4b. Selective derefinement ────────────────────────────────────
-        // Matches MFEM ThresholdDerefiner::Apply: coarsen individual elements
-        // whose children's error is below derefine_threshold.
-        // Only derefine entries added during THIS time step (hist_before guard).
-        if refinement_history.len() > hist_before && nc_state.can_derefine() && !eta_last.is_empty() {
-            let old_marked = refinement_history.pop().unwrap();
-            // Recover the pre-refinement mesh.
-            if let Some((old_mesh, _old_constraints)) = nc_state.derefine_last() {
-                // Compute which old marked elements should stay refined.
-                // The 4 children of a refined quad are contiguous in the current
-                // (pre-derefinement) element array. Mapping:
-                //   child_start = old_elem_idx + 3 * refined_before(old_elem_idx)
-                let mut keep_refined: Vec<ElemId> = Vec::new();
-                let mut refined_before: usize = 0;
-                let mut n_coarsened: usize = 0;
-                for &old_e in &old_marked {
-                    let child_start = old_e as usize + 3 * refined_before;
-                    refined_before += 1;
-                    if child_start + 4 > eta_last.len() {
-                        keep_refined.push(old_e);
-                        continue;
-                    }
-                    // Aggregate child errors (sum — matches C++ default op=1).
-                    let child_sum: f64 = eta_last[child_start..child_start + 4].iter().sum();
-                    if child_sum >= derefine_threshold {
-                        keep_refined.push(old_e);
-                    } else {
-                        n_coarsened += 1;
-                    }
-                }
-
-                if n_coarsened > 0 {
-                    // Re-refine old mesh with only the elements that stay refined.
-                    let (new_mesh, new_constraints) = nc_state.refine(&old_mesh, &keep_refined, nc_limit);
-                    mesh = new_mesh;
-                    hanging_constraints = new_constraints;
-                    println!("  Selective derefinement: {n_coarsened}/{} parents coarsened",
-                        old_marked.len());
-                    // Re-push the new refinement to history for the next
-                    // time step (it replaces the popped entry).
-                    refinement_history.push(keep_refined);
-                } else {
-                    // No elements below threshold: restore the refinement as-is.
-                    let (restored_mesh, restored_constraints) =
-                        nc_state.refine(&old_mesh, &old_marked, nc_limit);
-                    mesh = restored_mesh;
-                    hanging_constraints = restored_constraints;
-                    refinement_history.push(old_marked);
-                }
-            }
-        }
+        // ── 4b. Derefinement ─────────────────────────────────────────────
+        derefiner.apply(&mut mesh, &mut nc_state, &mut refiner);
 
         time += dt;
     }
@@ -422,12 +278,6 @@ fn main() {
     println!("\n  Total time: {:.3}s", t0.elapsed().as_secs_f64());
     println!("  Done.");
 }
-
-// ─── Hanging constraint management ─────────────────────────────────────────────
-// Not needed as a standalone merge: NCState::{refine,derefine_last} both
-// return the complete constraint set rebuilt from scratch, matching C++
-// Mesh::Finalize().  See NCStateQuad::refine (amr_inner.rs:1636) and
-// NCState::refine (amr_inner.rs:311).
 
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -476,17 +326,6 @@ impl Args {
             }
         }
 
-        Args {
-            mesh,
-            problem,
-            nfeatures,
-            order,
-            max_elem_error,
-            hysteresis,
-            ref_levels,
-            nc_limit,
-            t_final,
-            estimator,
-        }
+        Args { mesh, problem, nfeatures, order, max_elem_error, hysteresis, ref_levels, nc_limit, t_final, estimator }
     }
 }

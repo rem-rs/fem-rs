@@ -1,3 +1,4 @@
+pub mod amr_refiner;
 pub mod coefficient;
 pub mod error_estimate;
 pub mod flux_recovery;
