@@ -662,12 +662,27 @@ pub struct GfInfo {
 /// Write a `.gf` GridFunction file (minimal MFEM-compatible format).
 ///
 /// Stores dimension, space type, order, vdim, and DOF values.
+/// Default precision is 14 (C++ `precision(14)` → `{:.13e}`).
 pub fn write_gf<W: Write>(
     writer: &mut W,
     dim: usize, dofs: &[f64],
     space_type: &str, order: u8, vdim: usize,
 ) -> FemResult<()> {
+    write_gf_prec(writer, dim, dofs, space_type, order, vdim, 14)
+}
+
+/// Write a `.gf` file with explicit precision control.
+///
+/// `precision` is the number of significant digits (like C++ `ostream::precision()`).
+/// `precision=8` reproduces MFEM's default `precision(8)` setting.
+pub fn write_gf_prec<W: Write>(
+    writer: &mut W,
+    dim: usize, dofs: &[f64],
+    space_type: &str, order: u8, vdim: usize,
+    precision: usize,
+) -> FemResult<()> {
     let n = dofs.len();
+    let sig_digits = precision.saturating_sub(1).max(0);
     writeln!(writer, "MFEM grid function v1.0\n")?;
     writeln!(writer, "dimension\n{dim}\n")?;
     writeln!(writer, "n_dofs\n{n}\n")?;
@@ -675,7 +690,7 @@ pub fn write_gf<W: Write>(
     writeln!(writer, "vdim\n{vdim}\n")?;
     writeln!(writer, "space_type\n{space_type}\n")?;
     for v in dofs {
-        writeln!(writer, "{v:.16e}")?;
+        writeln!(writer, "{:.prec$e}", v, prec = sig_digits)?;
     }
     Ok(())
 }
