@@ -21,7 +21,7 @@ use fem_assembly::standard::VectorMassIntegrator;
 use fem_assembly::{
     VectorAssembler, VectorBoundaryAssembler, HdivNormalFluxIntegrator,
 };
-use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, Mesh};
 use fem_linalg::{CooMatrix, fem_to_linlvo_csr};
 use fem_solver::block::BlockSystem;
@@ -183,12 +183,9 @@ fn main() {
     println!("|| p_h - p_ex || / || p_ex || = {:.6e}", ep / np.max(1e-32));
 
     // ── Output ──────────────────────────────────────────────────────────
-    let mut mf = File::create("ex5.mesh").unwrap();
-    write_mfem(&mut mf, u_sp.mesh(), None).unwrap();
-    let mut uf = File::create("sol_u.gf").unwrap();
-    for &v in &x[..n_u] { writeln!(uf, "{:.14e}", v).unwrap(); }
-    let mut pf = File::create("sol_p.gf").unwrap();
-    for &v in &x[n_u..] { writeln!(pf, "{:.14e}", v).unwrap(); }
+    write_mfem_file("ex5.mesh", u_sp.mesh()).expect("mesh write failed");
+    write_mfem_gf_file("sol_u.gf", dim, &x[..n_u], "H1", args.order, dim, 14).expect("write sol_u");
+    write_mfem_gf_file("sol_p.gf", dim, &x[n_u..], "H1", args.order, 1, 14).expect("write sol_p");
     eprintln!("  Wrote ex5.mesh, sol_u.gf, sol_p.gf");
 }
 

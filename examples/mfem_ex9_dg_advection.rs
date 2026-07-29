@@ -12,8 +12,7 @@
 //!
 //! Reference: `mfem/ex9.cpp`
 
-use std::fs::File;
-use std::io::Write;
+use fem_io::mfem::{write_mfem_file, write_mfem_gf_file};
 
 use fem_assembly::{
     Assembler,
@@ -145,16 +144,8 @@ fn main() {
 
     // ── Initial output files (matching C++: ex9.mesh, ex9-init.gf) ──────────
     {
-        let mut mf = File::create("ex9.mesh").unwrap();
-        fem_io::mfem::write_mfem(&mut mf, &mesh, None).unwrap();
-        let mut sf = File::create("ex9-init.gf").unwrap();
-        // MFEM GridFunction header
-        writeln!(sf, "FiniteElementSpace").unwrap();
-        writeln!(sf, "FiniteElementCollection: L2_{}D_P{}", dim, args.order).unwrap();
-        writeln!(sf, "VDim: 1").unwrap();
-        writeln!(sf, "Ordering: 0").unwrap();
-        writeln!(sf).unwrap();
-        for i in 0..n { writeln!(sf, "{:.7e}", u[i]).unwrap(); }
+        write_mfem_file("ex9.mesh", &mesh).expect("mesh write failed");
+        write_mfem_gf_file("ex9-init.gf", dim, &u, "L2", args.order, 1, 7).expect("write init gf");
     }
 
     // ── Time integration (explicit RK4, matching C++ default ode_solver=4) ──
@@ -180,13 +171,7 @@ fn main() {
 
     // ── Final output file (matching C++: ex9-final.gf) ──────────────────────
     {
-        let mut sf = File::create("ex9-final.gf").unwrap();
-        writeln!(sf, "FiniteElementSpace").unwrap();
-        writeln!(sf, "FiniteElementCollection: L2_{}D_P{}", dim, args.order).unwrap();
-        writeln!(sf, "VDim: 1").unwrap();
-        writeln!(sf, "Ordering: 0").unwrap();
-        writeln!(sf).unwrap();
-        for i in 0..n { writeln!(sf, "{:.7e}", u[i]).unwrap(); }
+        write_mfem_gf_file("ex9-final.gf", dim, &u, "L2", args.order, 1, 7).expect("write final gf");
     }
     eprintln!("  Done. Total time: {:.3}s", t0.elapsed().as_secs_f64());
 }

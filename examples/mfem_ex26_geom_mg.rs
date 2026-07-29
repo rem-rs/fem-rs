@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
-use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
@@ -172,12 +172,8 @@ fn main() {
 
     // 10. Save.
     {
-        let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
-        write_mfem(&mut mesh_f, fine_space.mesh(), None).expect("mesh write failed");
-        let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
-        for &v in &x {
-            writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
-        }
+        write_mfem_file("refined.mesh", fine_space.mesh()).expect("mesh write failed");
+        write_mfem_gf_file("sol.gf", dim, &x, "H1", fine_space.order(), 1, 14).expect("sol write failed");
     }
 }
 

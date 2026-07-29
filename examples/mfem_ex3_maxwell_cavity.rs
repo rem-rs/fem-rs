@@ -37,7 +37,7 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
 };
 use fem_element::{nedelec::TriND1, VectorReferenceElement};
-use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
 use fem_solver::{solve_pcg, SolverConfig};
 use fem_space::{
@@ -180,12 +180,8 @@ fn main() {
 
     // 13. Save the refined mesh and solution (matches MFEM ex3 output files).
     {
-        let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
-        write_mfem(&mut mesh_f, space.mesh(), None).expect("mesh write failed");
-        let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
-        for &v in &x {
-            writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
-        }
+        write_mfem_file("refined.mesh", space.mesh()).expect("mesh write failed");
+        write_mfem_gf_file("sol.gf", dim, &x, "ND", args.order, dim, 14).expect("sol write failed");
         eprintln!("  Wrote refined.mesh and sol.gf");
     }
 

@@ -42,7 +42,7 @@ use fem_assembly::{
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
     standard::{GradDivIntegrator, VectorMassIntegrator},
 };
-use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
 use fem_solver::{solve_pcg_ads, AdsSolverConfig, SolverConfig};
@@ -357,12 +357,8 @@ fn main() {
 
     // 14. Save the refined mesh and the solution (matches MFEM ex4 output files).
     {
-        let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
-        write_mfem(&mut mesh_f, space.mesh(), None).expect("mesh write failed");
-        let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
-        for &v in &u {
-            writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
-        }
+        write_mfem_file("refined.mesh", space.mesh()).expect("mesh write failed");
+        write_mfem_gf_file("sol.gf", dim, &u, "H1", args.order, 1, 14).expect("sol write failed");
         eprintln!("  Wrote refined.mesh and sol.gf");
     }
 

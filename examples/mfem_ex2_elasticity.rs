@@ -30,7 +30,7 @@ use fem_assembly::{
     standard::{ElasticityIntegrator, NeumannIntegrator},
     postproc::coefficient::PWConstCoeff,
 };
-use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::solve_pcg;
 use fem_linalg::fem_to_linlvo_csr;
@@ -177,14 +177,11 @@ fn main() {
         }
 
         // Write the displaced mesh.
-        let mut mesh_f = File::create("displaced.mesh").expect("cannot create displaced.mesh");
-        write_mfem(&mut mesh_f, &displaced_mesh, None).expect("mesh write failed");
+        write_mfem_file("displaced.mesh", &displaced_mesh).expect("mesh write failed");
 
         // Write the inverted solution (x → −x, matching MFEM ex2).
-        let mut sol_f = File::create("sol.gf").expect("cannot create sol.gf");
-        for &v in &x {
-            writeln!(sol_f, "{:.14e}", -v).expect("sol write failed");
-        }
+        let neg_x: Vec<f64> = x.iter().map(|&v| -v).collect();
+        write_mfem_gf_file("sol.gf", dim, &neg_x, "H1", args.order, dim, 14).expect("sol write failed");
         eprintln!("  Wrote displaced.mesh and sol.gf");
     }
 

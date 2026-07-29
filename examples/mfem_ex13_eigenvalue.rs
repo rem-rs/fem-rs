@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::Write;
 use fem_amg::AmgConfig;
 use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg, solve_hcurl_eigen_ame};
-use fem_io::mfem::{read_mfem_file, write_mfem};
+use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file};
 use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::{SolverConfig, eigen::{LobpcgConfig, AmeConfig}};
 use fem_space::{H1Space, HCurlSpace, fe_space::FESpace};
@@ -84,8 +84,7 @@ fn main() {
     println!("{} iterations", result.iterations);
 
     {
-        let mut f = File::create("refined.mesh").expect("cannot create refined.mesh");
-        write_mfem(&mut f, space.mesh(), None).expect("mesh write failed");
+        write_mfem_file("refined.mesh", space.mesh()).expect("mesh write failed");
         eprintln!("  Saved refined mesh -> 'refined.mesh'");
         for i in 0..result.eigenvalues.len() {
             let mf = format!("mode_{:02}.dat", i);
