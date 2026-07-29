@@ -20,7 +20,7 @@
 //! -k / --kappa   — DG penalty (negative ⇒ (order+1)², default: -1)
 
 use fem_assembly::{DgElasticityAssembler, InteriorFaceList};
-use fem_io::mfem::read_mfem_file;
+use fem_io::mfem::{read_mfem_file, write_mfem_gf_file};
 use fem_solver::{solve_pcg_gssmoother, solve_gmres_gssmoother, SolverConfig};
 use fem_space::{fe_space::FESpace, L2Space};
 use fem_mesh::{refine_uniform, element_type::ElementType, topology::MeshTopology};
@@ -42,10 +42,10 @@ fn main() {
 
     println!("=== fem-rs Example 17: DG linear elasticity (SIP) ===");
 
-    // 1. Read mesh
+    // C++ ex17.cpp:139-149 — 2. Read the mesh from the given mesh file.
     let default_mesh = {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        p.parent().unwrap().join("data/beam-tri.mesh").to_string_lossy().to_string()
+        p.parent().unwrap().parent().unwrap().join("data/beam-tri.mesh").to_string_lossy().to_string()
     };
     let mesh_file = args.mesh_path.as_deref().unwrap_or(&default_mesh);
     let mfem = read_mfem_file(mesh_file).expect("failed to read MFEM mesh");
@@ -61,7 +61,7 @@ fn main() {
         max_attr, max_bdr
     );
 
-    // 2. Auto-refine: target ≈5000 elements
+    // C++ ex17.cpp:151-162 — 3. Refine the mesh to increase the resolution.
     let ref_levels = if args.refine < 0 {
         let n_elems = mesh.n_elems() as f64;
         ((5000.0_f64 / n_elems).ln() / 2.0_f64.ln() / dim as f64).floor() as usize
@@ -78,12 +78,14 @@ fn main() {
     } else {
         mesh
     };
+    // C++ ex17.cpp:160-162 — NURBS→curved conversion (no-op for non-NURBS meshes).
 
-    // 3. DG vector FE space (Gauss-Lobatto basis for sparsity, matching MFEM)
-    //    L2Space currently uses default basis; Gauss-Lobatto not directly
-    //    available via this API.
+    // C++ ex17.cpp:164-171 — 4. Define a DG vector finite element space on the mesh.
+    //     C++ uses DG_FECollection(order, dim, BasisType::GaussLobatto) for sparser matrix.
+    //     Rust uses L2Space (default basis; Gauss-Lobatto not directly available via this API).
     let order = args.order;
     println!("  order: {}", order);
+    // C++ ex17.cpp:133-136 — kappa default: (order+1)^2 when negative
     let kappa = if args.kappa < 0.0 {
         ((order + 1) * (order + 1)) as f64
     } else {
@@ -92,13 +94,14 @@ fn main() {
     let alpha = args.alpha;
     println!("  kappa: {}, alpha: {}", kappa, alpha);
 
+    // C++ ex17.cpp:164-171 — 4. DG vector FE space
     let space = L2Space::new(mesh.clone(), order);
     let n_elem = mesh.n_elems() as usize;
     let n_scalar = space.n_dofs();
     let n_total = dim * n_scalar;
     println!("Number of finite element unknowns: {}", n_total);
 
-    // 4. Per-element Lame constants (matching MFEM's PWConstCoefficient)
+    // C++ ex17.cpp:191-201 — 7. Set up Lame constants (PWConstCoefficient)
     //    Attribute 1 → λ=50, μ=50; others → λ=1, μ=1
     let mut lambda_elem = vec![1.0_f64; n_elem];
     let mut mu_elem = vec![1.0_f64; n_elem];
@@ -114,24 +117,27 @@ fn main() {
         n_elem, max_attr
     );
 
-    // 5. Assemble the DG-SIP system
+    // C++ ex17.cpp:203-215 — 8. Assemble RHS (DGElasticityDirichletLFIntegrator)
+    //     Rust: hand-coded assemble_dg_elasticity_dirichlet_rhs
     let ifl = InteriorFaceList::build(&mesh);
     let quad_order = (2 * order) as u8;
 
     println!("Assembling: r.h.s. ...");
-    // RHS from weak Dirichlet BC (DG penalty + stress flux)
     let rhs = assemble_dg_elasticity_dirichlet_rhs(
         &space, dim, kappa, alpha, &lambda_elem, &mu_elem, quad_order, &init_displacement,
     );
 
-    let dirichlet_attrs = [1, 2]; // boundary attributes 1 and 2 (matching MFEM ex17)
+    // C++ ex17.cpp:217-229 — 9. Assemble bilinear form (ElasticityIntegrator + DGElasticityIntegrator)
+    //     Rust: DgElasticityAssembler::assemble_sip_elasticity
+    let dirichlet_attrs = [1, 2];
     println!("matrix ...");
     let a_mat = DgElasticityAssembler::assemble_sip_elasticity(
         &space, &ifl, &lambda_elem, &mu_elem,
         kappa, alpha, dim, quad_order, &dirichlet_attrs,
     );
 
-    // 6. Solve
+    // C++ ex17.cpp:244-263 — 11. Solve (PCG for α=-1, GMRES otherwise)
+    //     C++: PCG/GMRES with GSSmoother, rtol²=1e-12, max_iter=5000
     let rtol = 1e-6;
     let cfg = SolverConfig {
         rtol: rtol * rtol,
@@ -142,7 +148,6 @@ fn main() {
     };
 
     let mut x = vec![0.0_f64; n_total];
-    // Compute initial residual norm ‖rhs - A·0‖ = ‖rhs‖
     let rhs_norm: f64 = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
     println!("  Initial ‖rhs‖ = {:.4}", rhs_norm);
     let res = if alpha == -1.0 {
@@ -157,7 +162,7 @@ fn main() {
     println!("  Iterations: {}", solve_result.iterations);
     println!("  Final residual: {:.3e}", solve_result.final_residual);
 
-    // 7. Output metrics
+    // C++ ex17.cpp:275-288 — 14. Output comparison metrics + files
     let sol_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
     let checksum: f64 = x
         .iter()
@@ -250,16 +255,19 @@ fn main() {
             println!("  wrote displaced.mesh");
         }
 
-        // Write sol.gf (simple ASCII format)
+        // Write sol.gf in MFEM FiniteElementSpace format (matching ex16)
         {
-            use std::io::Write;
-            let mut f = std::fs::File::create("sol.gf")
-                .expect("cannot create sol.gf");
-            writeln!(f, "{}", dim * n_scalar).ok();
-            for v in &x {
-                writeln!(f, "{:.15e}", v).ok();
+            // Split x into x- and y- displacement components (component-major layout)
+            let mut u_x = vec![0.0_f64; n_scalar];
+            let mut u_y = vec![0.0_f64; n_scalar];
+            for i in 0..n_scalar {
+                u_x[i] = x[i * dim];
+                u_y[i] = x[i * dim + 1];
             }
-            println!("  wrote sol.gf");
+            // Write vector GF with vdim=2
+            write_mfem_gf_file("sol.gf", dim, &x, "DG", args.order, dim, 8)
+                .expect("failed to write sol.gf");
+            println!("  wrote sol.gf (MFEM FiniteElementSpace format)");
         }
     }
 }
