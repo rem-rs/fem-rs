@@ -14,10 +14,8 @@
 
 #![allow(non_snake_case)]
 
-use std::fs::File;
-use std::io::Write;
 use fem_element::ReferenceElement;
-use fem_io::mfem::read_mfem_file;
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix, SolverConfig};
 use fem_solver::block_operator::right_preconditioned_gmres;
 use fem_solver::{solve_gmres_gssmoother, solve_pcg_gssmoother};
@@ -473,100 +471,6 @@ fn jacobian(
     (block_sizes, bm)
 }
 
-// ─── Output ────────────────────────────────────────────────────────────
-
-/// Write deformed mesh (MFEM v1.0 format) with displaced node coordinates.
-///
-/// Matches C++: mesh->SwapNodes(nodes) → mesh->Print(mesh_ofs).
-///
-/// Caveat: assumes 1:1 correspondence between mesh nodes and displacement
-/// DOFs.  Correct for linear (P1) elements; for higher-order elements only
-/// corner node positions will be correct.
-fn write_deformed_mesh(
-    mesh: &impl MeshTopology,
-    u: &[f64],
-    dim: usize,
-    ns: usize,
-    path: &str,
-) {
-    let nn = mesh.n_nodes() as usize;
-
-    // Current position = reference + displacement (component-major ordering).
-    // Displacement at node i: comp 0 → u[i], comp 1 → u[ns+i], comp 2 → u[2*ns+i]
-    let mut coords = Vec::with_capacity(nn * dim);
-    for n in 0..nn {
-        let ref_pt = mesh.node_coords(n as u32);
-        for d in 0..dim {
-            let u_d = if n < ns { u[d * ns + n] } else { 0.0 };
-            coords.push(ref_pt[d] + u_d);
-        }
-    }
-
-    let mut f = File::create(path).expect("cannot create deformed.mesh");
-    writeln!(f, "MFEM mesh v1.0\n").ok();
-    writeln!(f, "dimension\n{dim}\n").ok();
-
-    // Elements (MFEM v1.0 geometry codes: 1=Seg 2=Tri 3=Quad 4=Tet 5=Hex 6=Prism)
-    let ne = mesh.n_elements() as usize;
-    writeln!(f, "elements\n{ne}").ok();
-    for e in 0..ne {
-        let et = mesh.element_type(e as u32);
-        let nd = mesh.element_nodes(e as u32);
-        let code = match et {
-            ElementType::Tri3   => 2,  // Triangle
-            ElementType::Quad4  => 3,  // Quadrilateral
-            ElementType::Tet4   => 4,  // Tetrahedron
-            ElementType::Hex8   => 5,  // Hexahedron
-            ElementType::Prism6 => 6,  // Wedge/Prism
-            _ => panic!("unsupported element type {et:?} for MFEM export"),
-        };
-        let tag = mesh.element_tag(e as u32);
-        write!(f, "{tag} {code}").ok();
-        for &n in nd {
-            write!(f, " {}", n + 1).ok();
-        }
-        writeln!(f).ok();
-    }
-
-    // Boundary (MFEM Geometry: 1=Point 2=Seg 3=Tri 4=Quad)
-    let nb = mesh.n_boundary_faces() as usize;
-    writeln!(f, "\nboundary\n{nb}").ok();
-    for b in 0..nb {
-        let fnodes = mesh.face_nodes(b as u32);
-        let attr = mesh.face_tag(b as u32);
-        let face_type = match fnodes.len() {
-            2 => 1,  // SEGMENT (2D edge)
-            3 => 2,  // TRIANGLE (3D face on Tet/Prism)
-            4 => 3,  // QUADRILATERAL (3D face on Hex)
-            _ => panic!("unsupported boundary face with {} nodes", fnodes.len()),
-        };
-        write!(f, "{attr} {face_type}").ok();
-        for &n in fnodes {
-            write!(f, " {}", n + 1).ok();
-        }
-        writeln!(f).ok();
-    }
-
-    // Vertices (deformed)
-    writeln!(f, "\nvertices\n{nn}\n{dim}").ok();
-    for i in 0..nn {
-        for d in 0..dim {
-            write!(f, " {:.8}", coords[i * dim + d]).ok();
-        }
-        writeln!(f).ok();
-    }
-}
-
-/// Write a solution vector as a simple ASCII file.
-/// Format: first line = n_dofs, then one value per line.
-fn write_solution(values: &[f64], path: &str) {
-    let mut f = File::create(path).expect("cannot create solution file");
-    writeln!(f, "{}", values.len()).ok();
-    for &v in values {
-        writeln!(f, "{:.14e}", v).ok();
-    }
-}
-
 fn main() {
     let args = Args::parse();
     println!("=== MFEM ex19: Incompressible neo-Hookean hyperelasticity ===");
@@ -822,21 +726,30 @@ fn main() {
             args.max_iter, nr(&[ru.as_slice(), rp.as_slice()].concat()),
             args.rel_tol, args.abs_tol);
 
-    // 10. Save output
-    // Deformed mesh
-    write_deformed_mesh(&mesh, &u, dim as usize, ns, "deformed.mesh");
-    println!("  Wrote deformed.mesh");
+    // 10. Save output using fem-io library (matching MFEM SwapNodes+Print + GridFunction::Save)
+    // Deformed mesh: displace nodes then write via write_mfem_file
+    {
+        let dim_u = dim as usize;
+        let mut deformed_mesh = mesh.clone();
+        let nn = deformed_mesh.n_nodes() as usize;
+        for n in 0..nn.min(ns) {
+            for d in 0..dim_u {
+                deformed_mesh.coords[n * dim_u + d] += u[d * ns + n];
+            }
+        }
+        write_mfem_file("deformed.mesh", &deformed_mesh)
+            .expect("cannot write deformed.mesh");
+        println!("  Wrote deformed.mesh");
+    }
 
-    // Pressure solution
-    write_solution(&p, "pressure.sol");
+    // Pressure solution (MFEM: p_gf.Save(pressure_ofs))
+    write_mfem_gf_file("pressure.sol", dim as usize, &p, "H1", p_order, 1, 8)
+        .expect("cannot write pressure.sol");
     println!("  Wrote pressure.sol");
 
-    // Deformation (relative displacement = u - u_ref, where u_ref = 0)
-    let mut u_def = vec![0.0_f64; nu];
-    for i in 0..nu {
-        u_def[i] = u[i];
-    }
-    write_solution(&u_def, "deformation.sol");
+    // Deformation (MFEM: x_def = x_gf - x_ref; x_def.Save(deformation_ofs))
+    write_mfem_gf_file("deformation.sol", dim as usize, &u, "H1", order, dim as usize, 8)
+        .expect("cannot write deformation.sol");
     println!("  Wrote deformation.sol");
 }
 
