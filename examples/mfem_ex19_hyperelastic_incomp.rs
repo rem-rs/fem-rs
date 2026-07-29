@@ -26,6 +26,7 @@ use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space, VectorH1
 use fem_element::lagrange::{TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQ3, QuadQ4};
 use fem_element::lagrange::tet::{TetP1, TetP2, TetP3};
 use fem_element::lagrange::hex::{HexQ1, HexQ2, HexQ3};
+use fem_element::lagrange::prism::PrismPk;
 use fem_mesh::element_type::ElementType;
 use nalgebra::DMatrix;
 
@@ -47,6 +48,9 @@ fn re(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Hex8, 2) => Box::new(HexQ2),
         (ElementType::Hex8, 3) => Box::new(HexQ3),
+        (ElementType::Prism6, 1) => Box::new(PrismPk::new(1)),
+        (ElementType::Prism6, 2) => Box::new(PrismPk::new(2)),
+        (ElementType::Prism6, 3) => Box::new(PrismPk::new(3)),
         _ => panic!("unsupported element type {et:?} x order {order}"),
     }
 }
@@ -57,8 +61,10 @@ fn jacf(m: &impl MeshTopology, elem: u32, xi: &[f64], dim: usize) -> (f64, DMatr
     let et = m.element_type(elem);
     let nd = m.element_nodes(elem);
     let n_ldofs = nd.len();
+    // MFEM: uses FE collection for the mesh, here we use order=1 (linear geometry)
+    let re_geom = re(et, 1);
     let mut grad = vec![0.0_f64; n_ldofs * dim];
-    re(et, 1).eval_grad_basis(xi, &mut grad);
+    re_geom.eval_grad_basis(xi, &mut grad);
     let mut jac = DMatrix::<f64>::zeros(dim, dim);
     for k in 0..n_ldofs {
         let x = m.node_coords(nd[k]);
@@ -565,7 +571,7 @@ fn main() {
     for _ in 0..args.refine {
         mesh = refine_uniform(&mesh);
     }
-    let dim = 2;
+    let dim = mesh.dim() as u8;
     let order = args.order;
     let p_order = if order > 1 { order - 1 } else { 1 };
 
@@ -644,29 +650,33 @@ fn main() {
     }
 
     // 9. Newton loop
+    // MFEM: J_gmres rtol=1e-12, atol=1e-12, max_iter=300
     let inner_cfg = SolverConfig {
-        rtol: 1e-8,
-        atol: 0.0,
+        rtol: 1e-12,
+        atol: 1e-12,
         max_iter: 300,
         verbose: false,
         ..SolverConfig::default()
     };
+    // MFEM: stiff_pcg rel/abs tol=1e-8, max_iter=200
     let k_cfg = SolverConfig {
         rtol: 1e-8,
-        atol: 0.0,
+        atol: 1e-8,
         max_iter: 200,
         verbose: false,
         ..SolverConfig::default()
     };
+    // MFEM: mass_pcg rel/abs tol=1e-12, max_iter=200
     let s_cfg = SolverConfig {
         rtol: 1e-12,
-        atol: 0.0,
+        atol: 1e-12,
         max_iter: 200,
         verbose: false,
         ..SolverConfig::default()
     };
     let gamma = 1e-5;
 
+    let mut converged = false;
     for it in 1..=args.max_iter {
         // Assemble Jacobian
         let (_sizes, jac) = jacobian(
@@ -796,9 +806,14 @@ fn main() {
 
         if r_norm < args.abs_tol || r_norm < r0 * args.rel_tol {
             println!("Newton converged in {it} iterations.");
+            converged = true;
             break;
         }
     }
+    // MFEM: MFEM_VERIFY(newton_solver.GetConverged(), ...)
+    assert!(converged, "Newton solver did not converge in {} iterations (final ||r||={:.3e}, rtol={}, atol={})",
+            args.max_iter, nr(&[ru.as_slice(), rp.as_slice()].concat()),
+            args.rel_tol, args.abs_tol);
 
     // 10. Save output
     // Deformed mesh
@@ -826,6 +841,8 @@ struct Args {
     rel_tol: f64,
     abs_tol: f64,
     max_iter: usize,
+    #[allow(dead_code)]
+    visualization: bool,
 }
 
 impl Args {
@@ -838,6 +855,7 @@ impl Args {
             rel_tol: 1e-4,
             abs_tol: 1e-6,
             max_iter: 500,
+            visualization: true,  // MFEM defaults: enabled
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -849,6 +867,8 @@ impl Args {
                 "-rel" => a.rel_tol = it.next().and_then(|v| v.parse().ok()).unwrap_or(1e-4),
                 "-abs" => a.abs_tol = it.next().and_then(|v| v.parse().ok()).unwrap_or(1e-6),
                 "-it" => a.max_iter = it.next().and_then(|v| v.parse().ok()).unwrap_or(500),
+                "-vis" => a.visualization = true,
+                "-no-vis" => a.visualization = false,
                 _ => {}
             }
         }
