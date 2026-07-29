@@ -26,8 +26,13 @@
 //! | 11 | Trapezoidal / Newmark| Implicit |
 //! | 12 | SDIRK2 (L-stable)    | Implicit |
 
-use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
-use fem_io::mfem::{read_mfem_file, write_gf, write_mfem, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
+use std::io::Write;
+use fem_assembly::{
+    Assembler, project_coefficient,
+    standard::{DiffusionIntegrator, MassIntegrator},
+};
+use fem_io::mfem::{read_mfem_file, write_gf, write_mfem_file, write_mfem_file_3d};
+use fem_io::glvis::GlVisSocket;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{Mesh, MeshTopology};
 use fem_solver::{solve_pcg_jacobi, SolverConfig, GeneralizedAlpha2, GeneralizedAlpha2State};
@@ -313,7 +318,7 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
     let dim = 2;
 
     // 3. Define the ODE solver used for time integration.
-    //    Currently only Backward Euler (type 10) is implemented.
+    //    (handled below via GeneralizedAlpha2)
 
     // 4. Refine the mesh uniformly.
     let mesh = if args.ref_levels > 0 {
@@ -331,77 +336,68 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
     let fe_size = space.n_dofs();
     println!("Number of temperature unknowns: {}", fe_size);
 
-    // 6. Compute boundary DOFs (matching C++ GetEssentialTrueDofs).
-    let ess_bdr = if args.dirichlet {
-        let all_tags: Vec<i32> = if mesh.n_boundary_faces() > 0 {
-            (0..mesh.n_boundary_faces())
-                .map(|f| mesh.face_tag(f as u32))
-                .collect()
-        } else {
-            Vec::new()
+    // 6. Compute essential BC DOFs (matching C++ GetEssentialTrueDofs).
+    //    C++: ess_bdr is an array per boundary attribute (1=essential, 0=natural).
+    let ess_tdof_list: Vec<u32> = if args.dirichlet && mesh.n_boundary_faces() > 0 {
+        // All boundary attributes are essential (matching C++ ess_bdr = 1)
+        let unique_tags: Vec<i32> = {
+            let mut tags: Vec<i32> = (0..mesh.n_boundary_faces())
+                .map(|f| mesh.face_tag(f as u32)).collect();
+            tags.sort_unstable(); tags.dedup();
+            tags
         };
-        let mut unique_tags: Vec<i32> = all_tags.clone();
-        unique_tags.sort_unstable();
-        unique_tags.dedup();
-        if unique_tags.is_empty() {
-            Vec::new()
-        } else {
-            boundary_dofs(&mesh, space.dof_manager(), &unique_tags)
-        }
+        boundary_dofs(&mesh, space.dof_manager(), &unique_tags)
+            .into_iter().map(|d| d as u32).collect()
     } else {
         Vec::new()
     };
+    println!("  ess_bdr count: {}", ess_tdof_list.len());
 
-    // 7. Set the initial conditions for u and du/dt.
-    //    Apply BCs to match C++ GetTrueDofs behavior (BC DOFs = 0).
-    let dm = space.dof_manager();
-    let mut u: Vec<f64> = (0..fe_size)
-        .map(|i| {
-            let x = dm.dof_coord(i as u32);
-            initial_solution(&x[..dim])
-        })
-        .collect();
-    let mut du_dt: Vec<f64> = (0..fe_size)
-        .map(|i| {
-            let x = dm.dof_coord(i as u32);
-            initial_rate(&x[..dim])
-        })
-        .collect();
+    // 7. Set initial conditions via L² projection (matching C++ ProjectCoefficient).
+    let quad_order = (2 * args.order + 1) as u8;
+    let mut u = project_coefficient(&space, &|x: &[f64]| initial_solution(x), quad_order);
+    let mut du_dt = project_coefficient(&space, &|x: &[f64]| initial_rate(x), quad_order);
+    for &d in &ess_tdof_list { u[d as usize] = 0.0; du_dt[d as usize] = 0.0; }
 
-    println!("  ess_bdr count: {}", ess_bdr.len());
-
-    // Zero BC DOFs in initial conditions (matching C++ SetFromTrueDofs)
-    for &d in &ess_bdr {
-        u[d as usize] = 0.0;
-        du_dt[d as usize] = 0.0;
+    // Save initial state with precision(8) (matching C++ Save+precision(8))
+    write_mfem_file("ex23.mesh", &mesh).expect("write mesh");
+    {
+        let mut init_f = std::fs::File::create("ex23-init.gf").expect("create ex23-init.gf");
+        // Write header + u values (matching first Save)
+        writeln!(init_f, "FiniteElementSpace").ok();
+        writeln!(init_f, "FiniteElementCollection: H1_{dim}D_P{}", args.order).ok();
+        writeln!(init_f, "VDim: 1").ok();
+        writeln!(init_f, "Ordering: 0").ok();
+        writeln!(init_f).ok();
+        for v in &u { writeln!(init_f, "{:.7e}", v).ok(); }
+        // Append du/dt values (matching second Save — no header)
+        for v in &du_dt { writeln!(init_f, "{:.7e}", v).ok(); }
     }
 
-    // MFEM: mesh->Print(omesh) + u_gf.Save(osol) + dudt_gf.Save(osol)
-    write_mfem_file("ex23.mesh", &mesh).expect("mesh write");
-    let mut init_f = std::fs::File::create("ex23-init.gf").expect("create ex23-init.gf");
-    write_gf(&mut init_f, dim, &u, "H1", args.order, 1).expect("write init u");
-    write_gf(&mut init_f, dim, &du_dt, "H1", args.order, 1).expect("write init du_dt");
+    // Setup GLVis visualization socket (matching C++)
+    let mut glvis = if args.visualization {
+        match GlVisSocket::connect("localhost", 19916) {
+            Ok(s) => {
+                println!("GLVis visualization paused. Press space to resume.");
+                Some(s)
+            }
+            Err(_) => {
+                println!("GLVis visualization disabled (no server).");
+                None
+            }
+        }
+    } else { None };
 
     // Create the wave operator
-    let mut oper = WaveOperator::new(space, ess_bdr.clone(), args.speed);
+    let mut oper = WaveOperator::new(space, ess_tdof_list.clone(), args.speed);
 
-    // 8. Perform time-integration.
-    let t_final = args.t_final;
     let dt = args.dt;
+    let t_final = args.t_final;
     let vis_steps = args.vis_steps;
 
-    let mut t = 0.0;
-    let n_steps = if dt > 0.0 {
-        (t_final / dt).ceil() as usize
-    } else {
-        0
-    };
-
-    // 8. Time integration using GeneralizedAlpha2 (core library).
+    // 8. Time integration using GeneralizedAlpha2.
     let rho_inf = match args.ode_solver_type {
         10 => 1.0_f64,
-        11 => 0.0_f64,
-        12 => 0.5_f64,
         11 => 0.0_f64,
         12 => 0.5_f64,
         _ => { eprintln!("Warning: unsupported ODE solver type {}, using type 10", args.ode_solver_type); 1.0 }
@@ -416,6 +412,12 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
     let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
     let zero_force = vec![0.0; fe_size];
 
+    // Initial GLVis visualization
+    if let Some(ref mut vis) = glvis {
+        let _ = vis.send_solution_2d(&mesh, &u, "u");
+        let _ = vis.send_command("pause");
+    }
+
     let mut last_step = false;
     for ti in 1..=n_steps.max(1) {
         let dt_actual = if t + dt >= t_final - dt / 2.0 {
@@ -423,23 +425,31 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
         } else { dt };
 
         ga2.step(oper.mass_matrix(), oper.stiff_matrix(), &zero_force,
-                 dt_actual, &mut u, &mut state, &ess_bdr);
+                 dt_actual, &mut u, &mut state, &ess_tdof_list);
 
         t += dt_actual;
 
         if last_step || (ti % vis_steps == 0) {
             println!("step {}, t = {}", ti, t);
+            if let Some(ref mut vis) = glvis {
+                let _ = vis.send_solution_2d(&mesh, &u, "u");
+            }
         }
         oper.set_parameters();
     }
 
     du_dt.copy_from_slice(&state.vel);
 
-    // 9. Save the final solution (matching C++: ex23-final.gf with u then du_dt)
+    // 9. Save the final solution with precision(8) (matching C++)
     {
         let mut final_f = std::fs::File::create("ex23-final.gf").expect("create ex23-final.gf");
-        write_gf(&mut final_f, dim, &u, "H1", args.order, 1).expect("write final u");
-        write_gf(&mut final_f, dim, &du_dt, "H1", args.order, 1).expect("write final du_dt");
+        writeln!(final_f, "FiniteElementSpace").ok();
+        writeln!(final_f, "FiniteElementCollection: H1_{dim}D_P{}", args.order).ok();
+        writeln!(final_f, "VDim: 1").ok();
+        writeln!(final_f, "Ordering: 0").ok();
+        writeln!(final_f).ok();
+        for v in &u { writeln!(final_f, "{:.7e}", v).ok(); }
+        for v in &du_dt { writeln!(final_f, "{:.7e}", v).ok(); }
     }
 
     // 10. Compute and print some statistics for comparison
@@ -480,8 +490,8 @@ fn run_wave_3d(mut mesh: Mesh<3>, args: &Args) {
     let fe_size = space.n_dofs();
     println!("Number of temperature unknowns: {}", fe_size);
 
-    // 6. Compute boundary DOFs (matching C++ GetEssentialTrueDofs).
-    let ess_bdr = if args.dirichlet {
+    // 6. Compute essential BC DOFs (matching C++ GetEssentialTrueDofs).
+    let ess_tdof_list: Vec<u32> = if args.dirichlet {
         let all_tags: Vec<i32> = if mesh.n_boundary_faces() > 0 {
             (0..mesh.n_boundary_faces())
                 .map(|f| mesh.face_tag(f as u32))
@@ -491,31 +501,29 @@ fn run_wave_3d(mut mesh: Mesh<3>, args: &Args) {
         unique_tags.sort_unstable();
         unique_tags.dedup();
         if unique_tags.is_empty() { Vec::new() }
-        else { boundary_dofs(&mesh, space.dof_manager(), &unique_tags) }
+        else {
+            boundary_dofs(&mesh, space.dof_manager(), &unique_tags)
+                .into_iter().map(|d| d as u32).collect()
+        }
     } else { Vec::new() };
 
-    // 7. Set the initial conditions for u and du/dt.
-    let dm = space.dof_manager();
-    let mut u: Vec<f64> = (0..fe_size)
-        .map(|i| { let x = dm.dof_coord(i as u32); initial_solution(&x[..dim]) })
-        .collect();
-    let mut du_dt: Vec<f64> = (0..fe_size)
-        .map(|i| { let x = dm.dof_coord(i as u32); initial_rate(&x[..dim]) })
-        .collect();
+    // 7. Set initial conditions via L² projection (matching C++).
+    let quad_order_3d = (2 * args.order + 1) as u8;
+    let mut u = project_coefficient(&space, &|x: &[f64]| initial_solution(x), quad_order_3d);
+    let mut du_dt = project_coefficient(&space, &|x: &[f64]| initial_rate(x), quad_order_3d);
+    println!("  ess_bdr count: {}", ess_tdof_list.len());
+    for &d in &ess_tdof_list { u[d as usize] = 0.0; du_dt[d as usize] = 0.0; }
 
-    println!("  ess_bdr count: {}", ess_bdr.len());
-    for &d in &ess_bdr { u[d as usize] = 0.0; du_dt[d as usize] = 0.0; }
-
-    // Save initial solution
+    // Save initial solution (matching C++ precision(8))
     {
-        let _ = fem_io::mfem::write_mfem_file_3d("ex23.mesh", &mesh);
+        let _ = write_mfem_file_3d("ex23.mesh", &mesh);
         let mut init_f = std::fs::File::create("ex23-init.gf").expect("create ex23-init.gf");
         write_gf(&mut init_f, dim, &u, "H1", args.order, 1).expect("write init u");
         write_gf(&mut init_f, dim, &du_dt, "H1", args.order, 1).expect("write init du_dt");
     }
 
     // Create the wave operator
-    let mut oper = WaveOperator::new(space, ess_bdr.clone(), args.speed);
+    let mut oper = WaveOperator::new(space, ess_tdof_list.clone(), args.speed);
 
     // 8. Time integration
     let t_final = args.t_final;
@@ -547,7 +555,7 @@ fn run_wave_3d(mut mesh: Mesh<3>, args: &Args) {
         } else { dt };
 
         ga2.step(oper.mass_matrix(), oper.stiff_matrix(), &zero_force,
-                 dt_actual, &mut u, &mut state, &ess_bdr);
+                 dt_actual, &mut u, &mut state, &ess_tdof_list);
 
         t += dt_actual;
         if last_step || (ti % vis_steps == 0) { println!("step {}, t = {}", ti, t); }

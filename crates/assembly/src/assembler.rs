@@ -124,6 +124,8 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tet4, 3)                           => Box::new(TetP3),
         (ElementType::Quad4, 0)                          => Box::new(P0),
         (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
+        (ElementType::Quad4, 2)                          => Box::new(QuadQ2),
+        (ElementType::Quad4, 3)                          => Box::new(QuadQ3),
         (ElementType::Quad4, o)                          => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => Box::new(PrismPk::new(order as usize)),
