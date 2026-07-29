@@ -32,18 +32,7 @@ use std::io::Write;
 // ─── make_ref_elem (redefined locally since the one in dg_hyperbolic is private) ─
 
 fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::tri::{TriP1, TriP2, TriP3};
-    use fem_element::lagrange::QuadQ1;
-    if mesh.element_nodes(0).len() == 4 {
-        assert_eq!(order, 1, "Quad4 only supports order=1 (QuadQ1) currently");
-        return Box::new(QuadQ1);
-    }
-    match order {
-        1 => Box::new(TriP1),
-        2 => Box::new(TriP2),
-        3 => Box::new(TriP3),
-        _ => Box::new(TriP1),
-    }
+    mesh.element_type(0).ref_elem(order)
 }
 
 // ─── CLI Args (C++ ex18.cpp:65-83 — matching MFEM ex18 options) ──────────────

@@ -413,26 +413,9 @@ use nalgebra::DMatrix;
 use fem_element::lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3};
 use fem_element::ReferenceElement;
 
-fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (et, order) {
-        (ElementType::Tri3, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) => Box::new(TriP2),
-        (ElementType::Tri3, 3) => Box::new(TriP3),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
-        _ => panic!("ref_elem_vol: unsupported ({et:?}, order={order})"),
-    }
-}
+fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> { et.ref_elem(order) }
 
-fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (et, order) {
-        (ElementType::Line2, 1) => Box::new(SegP1),
-        (ElementType::Line2, 2) => Box::new(SegP2),
-        (ElementType::Line2, 3) => Box::new(SegP3),
-        _ => panic!("ref_elem_face: unsupported ({et:?}, order={order})"),
-    }
-}
+fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> { et.ref_elem(order) }
 
 fn simplex_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
     let x0 = mesh.node_coords(nodes[0]);

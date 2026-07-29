@@ -663,19 +663,7 @@ use fem_element::lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1, Qu
 use nalgebra::DMatrix;
 
 fn ref_elem_for(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (et, order) {
-        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
-        (ElementType::Quad4, 1) | (ElementType::Quad9, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) | (ElementType::Quad9, 2) => Box::new(QuadQ2),
-        (ElementType::Tet4, 1) | (ElementType::Tet10, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) | (ElementType::Tet10, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) | (ElementType::Tet10, 3) => Box::new(TetP3),
-        (ElementType::Hex8, 1) | (ElementType::Hex27, 1) => Box::new(HexQ1),
-        (ElementType::Hex8, 2) | (ElementType::Hex27, 2) => Box::new(HexQ2),
-        _ => panic!("ref_elem: ({et:?}, order={order})"),
-    }
+    et.ref_elem(order)
 }
 
 fn elem_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize, et: ElementType, xi: &[f64])

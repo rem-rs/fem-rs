@@ -639,17 +639,7 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
 // ─── Output ───────────────────────────────────────────────────────────────
 
 fn ref_element_h1(et: fem_mesh::element_type::ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::*;
-    match (et, order) {
-        (fem_mesh::element_type::ElementType::Tri3, 1) => Box::new(TriP1),
-        (fem_mesh::element_type::ElementType::Tri3, 2) => Box::new(TriP2),
-        (fem_mesh::element_type::ElementType::Tri3, 3) => Box::new(TriP3),
-        (fem_mesh::element_type::ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (fem_mesh::element_type::ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (fem_mesh::element_type::ElementType::Quad4, 3) => Box::new(QuadQ3),
-        (fem_mesh::element_type::ElementType::Quad4, 4) => Box::new(QuadQ4),
-        _ => Box::new(QuadQ1),
-    }
+    et.ref_elem(order)
 }
 
 fn save_output(mesh: &Mesh<2>, gf: &ComplexGridFunction) {
