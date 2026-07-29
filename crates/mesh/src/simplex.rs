@@ -1855,6 +1855,10 @@ impl<const D: usize> MeshTopology for Mesh<D> {
     }
 
     fn edge_iter(&self) -> std::ops::Range<u32> { 0..self.n_edges() as u32 }
+
+    fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync> {
+        Box::new(self.clone())
+    }
 }
 
 /// Compute the volume of a tetrahedral element in a 3-D mesh.

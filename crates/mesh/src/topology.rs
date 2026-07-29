@@ -138,4 +138,38 @@ pub trait MeshTopology: Send + Sync {
     fn geom_coords_of(&self, node: NodeId) -> &[f64] {
         self.node_coords(node)
     }
+
+    /// Clone the mesh into a boxed trait object.
+    /// Required for dimension-agnostic code with dynamic dispatch.
+    fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync + 'static> {
+        panic!("clone_mesh not implemented for this MeshTopology type");
+    }
+
+    /// Downcast to `dyn Any` for dimension-specific dispatch.
+    fn as_any(&self) -> &dyn std::any::Any {
+        panic!("as_any not implemented for this MeshTopology type");
+    }
+}
+
+impl MeshTopology for Box<dyn MeshTopology + Send + Sync + 'static> {
+    fn dim(&self) -> u8 { (**self).dim() }
+    fn topological_dim(&self) -> u8 { (**self).topological_dim() }
+    fn n_nodes(&self) -> usize { (**self).n_nodes() }
+    fn n_elements(&self) -> usize { (**self).n_elements() }
+    fn n_boundary_faces(&self) -> usize { (**self).n_boundary_faces() }
+    fn element_nodes(&self, elem: ElemId) -> &[NodeId] { (**self).element_nodes(elem) }
+    fn element_type(&self, elem: ElemId) -> ElementType { (**self).element_type(elem) }
+    fn element_tag(&self, elem: ElemId) -> i32 { (**self).element_tag(elem) }
+    fn node_coords(&self, node: NodeId) -> &[f64] { (**self).node_coords(node) }
+    fn face_nodes(&self, face: FaceId) -> &[NodeId] { (**self).face_nodes(face) }
+    fn face_tag(&self, face: FaceId) -> i32 { (**self).face_tag(face) }
+    fn face_elements(&self, face: FaceId) -> (ElemId, Option<ElemId>) { (**self).face_elements(face) }
+    fn n_edges(&self) -> usize { (**self).n_edges() }
+    fn edge_nodes(&self, eid: EdgeId) -> &[NodeId] { (**self).edge_nodes(eid) }
+    fn edge_elements(&self, eid: EdgeId) -> (ElemId, Option<ElemId>) { (**self).edge_elements(eid) }
+    fn face_orientation(&self, face: FaceId) -> u8 { (**self).face_orientation(face) }
+    fn geom_order(&self) -> u8 { (**self).geom_order() }
+    fn geometry_nodes(&self, elem: ElemId) -> &[NodeId] { (**self).geometry_nodes(elem) }
+    fn geom_coords_of(&self, node: NodeId) -> &[f64] { (**self).geom_coords_of(node) }
+    fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync + 'static> { (**self).clone_mesh() }
 }
