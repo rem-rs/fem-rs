@@ -41,7 +41,7 @@ fn make_ref_elem(_mesh: &dyn MeshTopology, order: u8) -> Box<dyn ReferenceElemen
     }
 }
 
-// ─── CLI Args ─────────────────────────────────────────────────────────────────
+// ─── CLI Args (C++ ex18.cpp:65-83 — matching MFEM ex18 options) ──────────────
 
 struct Args {
     mesh: String,
@@ -56,9 +56,15 @@ struct Args {
     vis_steps: usize,
 }
 
+fn default_mesh_path() -> String {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    p.parent().unwrap().parent().unwrap().join("data/periodic-square.mesh")
+        .to_string_lossy().to_string()
+}
+
 fn parse_args() -> Args {
     let mut a = Args {
-        mesh: "data/periodic-square.mesh".to_string(),
+        mesh: default_mesh_path(),
         problem: 1,
         refine: 1,
         order: 1,
@@ -107,7 +113,7 @@ fn parse_args() -> Args {
     a
 }
 
-// ─── Euler initial conditions (from C++ ex18.hpp) ─────────────────────────────
+// ─── Euler initial conditions (C++ ex18.hpp: EulerInitialCondition) ──────────
 
 fn euler_initial_condition(problem: i32, x: &[f64], gamma: f64) -> Vec<f64> {
     // Returns [rho, rho*u, rho*v, E] — conserved variables
@@ -180,7 +186,7 @@ fn euler_initial_condition(problem: i32, x: &[f64], gamma: f64) -> Vec<f64> {
     }
 }
 
-// ─── compute_h_min (for CFL) ──────────────────────────────────────────────────
+// ─── compute_h_min — CFL-based dt (C++ ex18.cpp:135-140) ─────────────────────
 
 fn compute_h_min(mesh: &dyn MeshTopology) -> f64 {
     let mut h = f64::MAX;
@@ -197,7 +203,7 @@ fn compute_h_min(mesh: &dyn MeshTopology) -> f64 {
     h
 }
 
-// ─── File output ──────────────────────────────────────────────────────────────
+// ─── File output (C++ ex18.cpp:184-187 — displaced mesh + GF files) ──────────
 
 fn write_mfem_mesh_file(path: &str, mesh: &dyn MeshTopology) {
     let mut f = std::fs::File::create(path).expect("Cannot create mesh file");
@@ -238,7 +244,7 @@ fn write_gf_file(path: &str, data: &[f64]) {
     }
 }
 
-// ─── L^2 projection for initial condition ─────────────────────────────────────
+// ─── L^2 projection for initial condition (C++ ex18.cpp + ex18.hpp) ─────────
 
 fn project_initial<F: Fn(&[f64]) -> Vec<f64>>(
     u0: &F,
@@ -304,7 +310,7 @@ fn project_initial<F: Fn(&[f64]) -> Vec<f64>>(
     u
 }
 
-// ─── L^2 error computation ────────────────────────────────────────────────────
+// ─── L^2 error computation (C++ ex18.cpp:195 — Rust adds explicit L² error) ──
 
 fn compute_l2_error<F: Fn(&[f64]) -> Vec<f64>>(
     sol: &[f64],
@@ -353,7 +359,7 @@ fn compute_l2_error<F: Fn(&[f64]) -> Vec<f64>>(
     err_sq.sqrt()
 }
 
-// ─── SSP-RK2 ──────────────────────────────────────────────────────────────────
+// ─── SSP-RK2 (C++ ex18.cpp: ODESolver::Select with type 2) ───────────────────
 
 struct SspRk2;
 impl TimeStepper for SspRk2 {
@@ -373,7 +379,7 @@ impl TimeStepper for SspRk2 {
     }
 }
 
-// ─── SSP-RK3 ──────────────────────────────────────────────────────────────────
+// ─── SSP-RK3 (C++ ex18.cpp: ODESolver::Select with type 3) ───────────────────
 
 struct SspRk3;
 impl TimeStepper for SspRk3 {
@@ -404,9 +410,10 @@ impl TimeStepper for SspRk3 {
 fn main() {
     let args = parse_args();
 
-    // Read mesh
+    // C++ ex18.cpp:107-115 — 1. Read mesh (EulerMesh or from file)
     let mfem = read_mfem_file(&args.mesh).expect("Failed to read mesh");
     let mut mesh = mfem.mesh2d.expect("2D mesh required");
+    // C++ ex18.cpp:117-122 — 2. Uniform refinement
     for _ in 0..args.refine {
         mesh = refine_uniform(&mesh);
     }
@@ -415,15 +422,16 @@ fn main() {
     let n_eq = dim + 2; // 4 for 2D Euler
     let order = args.order;
 
-    // Build DG operator
+    // C++ ex18.cpp:124-127 — 3. Build DG operator (ex18.hpp: DGBilinearForm + HyperbolicForm)
     let flux = RusanovFlux {
         inner: EulerFlux { gamma: 1.4 },
     };
+    // face-only: volume term disabled (known NaN issue with quad meshes, see handover)
     let euler_op = DgHyperbolicConservationLaws::new(
         &mesh,
         order,
         Box::new(flux),
-        false, // volume off
+        false, // volume off — known bug: NaN with volume term
     );
     let n_dofs = euler_op.n_dofs();
     println!("Number of unknowns: {}", n_dofs);
@@ -445,11 +453,12 @@ fn main() {
     let u0 = |x: &[f64]| euler_initial_condition(args.problem, x, 1.4);
     let mut sol = project_initial(&u0, &mesh, order, n_eq);
 
-    // Write initial output
+    // C++ ex18.cpp:184-187 — Write initial mesh + solution files
     write_mfem_mesh_file("euler-mesh.mesh", &mesh);
+    // Write individual equation components in MFEM FiniteElementSpace format
+    let dp = make_ref_elem(&mesh, order).n_dofs();
+    let n_elems = mesh.n_elements();
     for eq in 0..n_eq {
-        let dp = make_ref_elem(&mesh, order).n_dofs();
-        let n_elems = mesh.n_elements();
         let mut comp = vec![0.0; n_elems * dp];
         for e in 0..n_elems {
             let base = e * dp * n_eq;
@@ -479,7 +488,7 @@ fn main() {
     let n_steps = (args.t_final / dt).ceil() as usize;
     println!("  steps: {}, dt: {:.6e}", n_steps, dt);
 
-    // Time integration
+    // C++ ex18.cpp:175-182 — 4. Time integration (SSP-RK3, FE, SSP-RK2, RK4)
     let mut t = 0.0;
     for ti in 1..=n_steps {
         let dta = dt.min(args.t_final - t);
@@ -496,11 +505,11 @@ fn main() {
         }
     }
 
-    // Write final output
+    // C++ ex18.cpp:184-187 — Write final mesh + solution files
     write_mfem_mesh_file("euler-mesh-final.mesh", &mesh);
+    let dp = make_ref_elem(&mesh, order).n_dofs();
+    let n_elems = mesh.n_elements();
     for eq in 0..n_eq {
-        let dp = make_ref_elem(&mesh, order).n_dofs();
-        let n_elems = mesh.n_elements();
         let mut comp = vec![0.0; n_elems * dp];
         for e in 0..n_elems {
             let base = e * dp * n_eq;
@@ -512,6 +521,7 @@ fn main() {
     }
     println!("  --> saved final mesh + solution files");
 
+    // C++ ex18.cpp:195 — Compute L² error (Rust adds explicit error computation)
     let error = compute_l2_error(&sol, &u0, &mesh, order, n_eq);
     println!("Solution error: {:.15e}", error);
 }
