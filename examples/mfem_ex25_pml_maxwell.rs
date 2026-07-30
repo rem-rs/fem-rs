@@ -12,6 +12,8 @@
 //! ```
 
 use std::f64::consts::PI;
+use std::io::Write;
+use std::net::TcpStream;
 use nalgebra::Complex;
 use fem_assembly::{
     VectorAssembler,
@@ -19,17 +21,17 @@ use fem_assembly::{
                             RestrictedCoefficient, ScalarVectorProductCoefficient,
                             VectorRestrictedCoefficient,
                             ProductCoeff, ScalarMatrixCoeff},
+    postproc::grid_function::compute_l2_error_hcurl,
     standard::{CurlCurlIntegrator, CurlCurlTensorIntegrator,
                VectorMassTensorIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
-    project_bdr_coefficient_tangent, project_bdr_coefficient_tangent_2d,
 };
-use fem_io::mfem;
-use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
+use fem_io::mfem::{self, write_mfem};
+use fem_linalg::SolverConfig;
 use fem_solver::{GSSmoother, ScaledPrecond, BlockDiagPrecondPair};
 use fem_linalg::fem_to_linlvo_csr;
 use fem_space::{HCurlSpace, constraints::boundary_dofs_hcurl, fe_space::FESpace};
-use fem_mesh::{Mesh, topology::MeshTopology, element_type::ElementType};
+use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_mesh::refine_uniform;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -329,7 +331,7 @@ fn source_fn(x: &[f64], dim: usize, comp_bdr: &[[f64; 2]], omega: f64, eps: f64,
 
 fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     args: &Args, prob: Prob, exact_known: bool, pml: std::sync::Arc<PmlParams>,
-    bdr_tags: Vec<i32>) {
+    bdr_tags: Vec<i32>, herm_conv: bool, visualization: bool, mesh_data: &[u8]) {
 
     let dim = mesh.dim() as usize;
     let omega = 2.0*PI*args.freq;
@@ -381,7 +383,8 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
 
     // ── Assemble complex system via SesquilinearForm (1:1 with C++) ──────
     use fem_assembly::complex::{SesquilinearForm, Convention};
-    let mut a = SesquilinearForm::new(&space, Convention::Hermitian, qo);
+    let conv = if herm_conv { Convention::Hermitian } else { Convention::BlockSymmetric };
+    let mut a = SesquilinearForm::new(&space, conv, qo);
 
     let attr     = vec![1];  // computational domain (element tag 1)
     let attr_pml = vec![2];  // PML region (element tag 2)
@@ -522,7 +525,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     // Extract back modified RHS
     for i in 0..n { rhs_re[i] = flat_rhs_init[i]; }
     for i in 0..n { rhs_im[i] = flat_rhs_init[n+i]; }
-    let a_mat = cs.to_flat_csr_with_conv(Convention::Hermitian);
+    let a_mat = cs.to_flat_csr_with_conv(conv);
 
     // ── Preconditioner (1:1 with C++) ────────────────────────────────────
     // Non-PML: μ⁻¹·curlcurl + ω²ε·mass (with DIAG_ONE for BCs)
@@ -598,7 +601,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     let la = fem_to_linlvo_csr(&prec_mat);
     let gs = GSSmoother::from_csr(&la).expect("GSSmoother");
     let gs_im = GSSmoother::from_csr(&la).expect("GSSmoother_im");
-    let pc_im = ScaledPrecond { inner: gs_im, scale: -1.0 };
+    let pc_im = ScaledPrecond { inner: gs_im, scale: if herm_conv { -1.0 } else { 1.0 } };
     let bp = BlockDiagPrecondPair { pre_re: gs, pre_im: pc_im, n };
 
     // ── GMRES Solve ─────────────────────────────────────────────────────
@@ -612,23 +615,34 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     println!("  GMRES converged in {} iters, final residual = {:.6e}",
              res.iterations, res.final_residual);
 
-    // ── Error computation (1:1 with C++ output) ─────────────────────────
+    // ── Error computation (1:1 with C++ L2 error via ComputeL2Error) ────
     if exact_known {
         let qe = std::cmp::max(2, 2*args.order + 1) as u8;
-        let l2err2_re = compute_l2_error(&space, &x[..n], dim, prob, k, qe, Some(2), false);
-        let l2err2_im = compute_l2_error(&space, &x[n..], dim, prob, k, qe, Some(2), true);
+        let ne = space.mesh().n_elements() as usize;
+        let exclude: Vec<bool> = (0..ne)
+            .map(|e| space.mesh().element_tag(e as u32) == 2).collect();
+
+        let exact_re = |xp: &[f64]| -> Vec<f64> {
+            let e = maxwell_solution(xp, dim, prob, k);
+            (0..dim).map(|d| e[d].re).collect()
+        };
+        let exact_im = |xp: &[f64]| -> Vec<f64> {
+            let e = maxwell_solution(xp, dim, prob, k);
+            (0..dim).map(|d| e[d].im).collect()
+        };
+
+        let l2err_re = compute_l2_error_hcurl(&x[..n], &space, &exact_re, qe, Some(&exclude));
+        let l2err_im = compute_l2_error_hcurl(&x[n..], &space, &exact_im, qe, Some(&exclude));
+
         let zero = vec![0.0; n];
-        let norm2_re = compute_l2_error(&space, &zero, dim, prob, k, qe, Some(2), false);
-        let norm2_im = compute_l2_error(&space, &zero, dim, prob, k, qe, Some(2), true);
-        let l2err_re = l2err2_re.sqrt();
-        let l2err_im = l2err2_im.sqrt();
-        let norm_re = norm2_re.sqrt().max(1e-30);
-        let norm_im = norm2_im.sqrt().max(1e-30);
+        let norm_re = compute_l2_error_hcurl(&zero, &space, &exact_re, qe, Some(&exclude)).max(1e-30);
+        let norm_im = compute_l2_error_hcurl(&zero, &space, &exact_im, qe, Some(&exclude)).max(1e-30);
+
         println!("\n Relative Error (Re part): || E_h - E || / ||E|| = {:.6e}",
                  l2err_re / norm_re);
         println!(" Relative Error (Im part): || E_h - E || / ||E|| = {:.6e}",
                  l2err_im / norm_im);
-        println!(" Total Error: {:.6e}", (l2err2_re + l2err2_im).sqrt());
+        println!(" Total Error: {:.6e}", (l2err_re*l2err_re + l2err_im*l2err_im).sqrt());
     }
 
     // ── Output ──────────────────────────────────────────────────────────
@@ -638,6 +652,54 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     let _ = fem_io::mfem::write_gf_file("ex25-sol_r.gf", dim, &x[..n], "ND", args.order as u8, dim);
     let _ = fem_io::mfem::write_gf_file("ex25-sol_i.gf", dim, &x[n..], "ND", args.order as u8, dim);
     println!("  Wrote ex25-sol_r.gf, ex25-sol_i.gf");
+
+    // ── GLVis visualization (1:1 with C++ Section 17) ────────────────────
+    if visualization {
+        let keys = if dim == 3 {
+            if prob == Prob::Beam { "keys macFFiYYYYYYYYYYYYYYYYYY\n" }
+            else { "keys macF\n" }
+        } else {
+            if prob == Prob::Beam { "keys amrRljcUUuuu\n" }
+            else { "keys amrRljcUUuu\n" }
+        };
+
+        let glvis_send = |stream: &mut TcpStream, dofs: &[f64], title: &str| -> std::io::Result<()> {
+            write!(stream, "solution\n")?;
+            stream.write_all(mesh_data)?;
+            writeln!(stream, "FiniteElementSpace")?;
+            writeln!(stream, "FiniteElementCollection: ND_{dim}D_P{}", args.order)?;
+            writeln!(stream, "VDim: {dim}")?;
+            writeln!(stream, "Ordering: 1")?;
+            writeln!(stream)?;
+            for v in dofs { writeln!(stream, "{:.7e}", v)?; }
+            write!(stream, "{keys}")?;
+            writeln!(stream, "window_title '{title}'")?;
+            stream.flush()
+        };
+
+        if let Ok(mut sock) = TcpStream::connect("localhost:19916") {
+            let _ = glvis_send(&mut sock, &x[..n], "Solution real part");
+        }
+        if let Ok(mut sock) = TcpStream::connect("localhost:19916") {
+            let _ = glvis_send(&mut sock, &x[n..], "Solution imag part");
+        }
+
+        let mut x_t = vec![0.0; n];
+        if let Ok(mut sock) = TcpStream::connect("localhost:19916") {
+            for i in 0..n { x_t[i] = x[i]; }
+            let _ = glvis_send(&mut sock, &x_t, "Harmonic Solution (t = 0.0 T)");
+            let _ = writeln!(sock, "pause\n");
+            println!("GLVis visualization paused. Press space (in the GLVis window) to resume it.");
+            for i in 0..32 {
+                if sock.peer_addr().is_err() { break; }
+                let t = (i as f64) / 32.0;
+                let ct = (2.0 * PI * t).cos();
+                let st = (2.0 * PI * t).sin();
+                for j in 0..n { x_t[j] = ct * x[j] + st * x[j + n]; }
+                if glvis_send(&mut sock, &x_t, &format!("Harmonic Solution (t = {:.3} T)", t)).is_err() { break; }
+            }
+        }
+    }
 }
 
 // ─── Vector source integrator ─────────────────────────────────────────────
@@ -654,47 +716,6 @@ impl VectorLinearIntegrator for VectorSrc<'_> {
             }
         }
     }
-}
-
-// ─── L² error computation ────────────────────────────────────────────────
-
-use fem_element::ReferenceElement;
-use fem_element::lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3, QuadQ1, QuadQ2, HexQ1, HexQ2};
-use nalgebra::DMatrix;
-
-fn ref_elem_for(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    et.ref_elem(order)
-}
-
-
-fn compute_l2_error<M: MeshTopology>(
-    space: &HCurlSpace<M>, x: &[f64], dim: usize, prob: Prob, k: f64, qo: u8,
-    exclude_tag: Option<i32>, use_imag: bool) -> f64 {
-    let mesh = space.mesh(); let order = space.order();
-    let mut err2 = 0.0;
-    for e in mesh.elem_iter() {
-        if exclude_tag.map_or(false, |et| mesh.element_tag(e) == et) { continue; }
-        let et = mesh.element_type(e);
-        let re = ref_elem_for(et, order);
-        let n_ldofs = re.n_dofs(); let quad = re.quadrature(qo);
-        let dofs = space.element_dofs(e); let nodes = mesh.element_nodes(e);
-        let mut phi = vec![0.0; n_ldofs];
-        for (q, xi) in quad.points.iter().enumerate() {
-            let (J_q, xp) = fem_mesh::element_jacobian_at(mesh, e, xi, dim);
-            let det_j_q = J_q.determinant().abs();
-            let w = quad.weights[q] * det_j_q.abs();
-            re.eval_basis(xi, &mut phi);
-            let mut uh = vec![0.0; dim];
-            for i in 0..n_ldofs { for d in 0..dim { uh[d] += x[dofs[i] as usize] * phi[i]; } }
-            let exact = maxwell_solution(&xp, dim, prob, k);
-            let diff2: f64 = (0..dim).map(|d| {
-                let u_ex = if use_imag { exact[d].im } else { exact[d].re };
-                (uh[d] - u_ex).powi(2)
-            }).sum();
-            err2 += w * diff2;
-        }
-    }
-    err2
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -738,10 +759,12 @@ struct Args {
     freq: f64,
     mu: f64,
     eps: f64,
+    herm_conv: bool,
+    visualization: bool,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: None, order: 1, ref_levels: 3, iprob: 4, freq: 5.0, mu: 1.0, eps: 1.0 };
+    let mut a = Args { mesh: None, order: 1, ref_levels: 3, iprob: 4, freq: 5.0, mu: 1.0, eps: 1.0, herm_conv: true, visualization: true };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -752,6 +775,10 @@ fn parse_args() -> Args {
             "-f"|"--frequency" => a.freq = it.next().and_then(|s| s.parse().ok()).unwrap_or(5.0),
             "-mu"|"--permeability" => a.mu = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
             "-eps"|"--permittivity" => a.eps = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
+            "-herm"|"--hermitian" => a.herm_conv = true,
+            "-no-herm"|"--no-hermitian" => a.herm_conv = false,
+            "-vis"|"--visualization" => a.visualization = true,
+            "-no-vis"|"--no-visualization" => a.visualization = false,
             _ => {}
         }
     }
@@ -786,7 +813,10 @@ fn main() {
         let bdr_tags = mesh.unique_boundary_tags();
         tag_pml(&mut mesh, &pml_lo, &pml_hi);
         let pml = std::sync::Arc::new(PmlParams::new(&bb.0, &bb.1, &pml_lo, &pml_hi, k, 2));
-        solve_pml(mesh.clone(), &args, prob, exact_known, pml, bdr_tags);
+        let mut mesh_buf = Vec::new();
+        write_mfem(&mut mesh_buf, &mesh, None).unwrap();
+        solve_pml(mesh.clone(), &args, prob, exact_known, pml, bdr_tags,
+            args.herm_conv, args.visualization, &mesh_buf);
         let _ = fem_io::mfem::write_mfem_file("ex25.mesh", &mesh);
         println!("  Wrote ex25.mesh");
     } else {
@@ -796,7 +826,11 @@ fn main() {
         let bdr_tags = mesh.unique_boundary_tags();
         tag_pml(&mut mesh, &pml_lo, &pml_hi);
         let pml = std::sync::Arc::new(PmlParams::new(&bb.0, &bb.1, &pml_lo, &pml_hi, k, 3));
-        solve_pml(mesh.clone(), &args, prob, exact_known, pml, bdr_tags);
+        let mut mesh_buf = Vec::new();
+        let dummy_2d = Mesh::<2>::unit_square_tri(2);
+        write_mfem(&mut mesh_buf, &dummy_2d, Some(&mesh)).unwrap();
+        solve_pml(mesh.clone(), &args, prob, exact_known, pml, bdr_tags,
+            args.herm_conv, args.visualization, &mesh_buf);
         let _ = fem_io::mfem::write_mfem_file_3d("ex25.mesh", &mesh);
         println!("  Wrote ex25.mesh");
     }

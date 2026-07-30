@@ -235,9 +235,9 @@ fn solve_grad_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
     // L² errors (higher quadrature for accuracy)
     let err_qo = (2 * order + 4).max(5) as u8;
     let gradp = |x: &[f64]| gradp_exact(x);
-    let e1 = compute_l2_error_hcurl(&e_sol, &nd, &gradp, err_qo);
-    let e2 = compute_l2_error_hcurl(&e_interp, &nd, &gradp, err_qo);
-    let e3 = compute_l2_error_hcurl(&e_ex, &nd, &gradp, err_qo);
+    let e1 = compute_l2_error_hcurl(&e_sol, &nd, &gradp, err_qo, None);
+    let e2 = compute_l2_error_hcurl(&e_interp, &nd, &gradp, err_qo, None);
+    let e3 = compute_l2_error_hcurl(&e_ex, &nd, &gradp, err_qo, None);
     println!("\n Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e1);
     println!(" Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e2);
     println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e3);
@@ -358,8 +358,8 @@ fn solve_grad_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     // L² errors
     let err_qo = (2 * order + 4).max(5) as u8;
     let gradp = |x: &[f64]| gradp_exact(x);
-    let e1 = compute_l2_error_hcurl(&e_sol, &nd, &gradp, err_qo);
-    let e3 = compute_l2_error_hcurl(&e_ex, &nd, &gradp, err_qo);
+    let e1 = compute_l2_error_hcurl(&e_sol, &nd, &gradp, err_qo, None);
+    let e3 = compute_l2_error_hcurl(&e_ex, &nd, &gradp, err_qo, None);
     println!("\n Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e1);
     println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e3);
 

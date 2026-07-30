@@ -895,17 +895,25 @@ pub fn vector_l2_norm(mass: &CsrMatrix<f64>, dofs: &[f64]) -> f64 {
 /// ‖u_h − u_exact‖_{L²} = (∫_Ω |u_h(x) − u_exact(x)|² dx)^{1/2}
 ///
 /// Supports 2D and 3D meshes with affine and isoparametric geometry.
+///
+/// Elements for which `exclude_elems[e]` is `true` are skipped (e.g. PML
+/// region elements). Pass `None` to include all elements.
 pub fn compute_l2_error_hcurl<M: MeshTopology>(
     dofs: &[f64],
     nd_space: &HCurlSpace<M>,
     exact: &(dyn Fn(&[f64]) -> Vec<f64> + Send + Sync),
     quad_order: u8,
+    exclude_elems: Option<&[bool]>,
 ) -> f64 {
     let mesh = nd_space.mesh();
     let dim = mesh.topological_dim() as usize;
     let mut err2 = 0.0;
 
     for e in mesh.elem_iter() {
+        // Skip excluded elements (e.g. PML region)
+        if let Some(mask) = exclude_elems {
+            if e as usize >= mask.len() || mask[e as usize] { continue; }
+        }
         let et = mesh.element_type(e);
         let vre = vec_ref_elem(VecFamily::Nedelec, et.to_elem_type(), nd_space.order());
         let n_ldofs = vre.n_dofs();
