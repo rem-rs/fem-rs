@@ -664,27 +664,12 @@ pub fn spadd<T: Scalar>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> CsrMatrix<T> {
     assert_eq!(a.nrows, b.nrows, "spadd: row count mismatch");
     assert_eq!(a.ncols, b.ncols, "spadd: col count mismatch");
 
-    let m = a.nrows;
-    let mut row_ptr = Vec::with_capacity(m + 1);
-    let mut col_idx = Vec::new();
-    let mut values  = Vec::new();
-
-    row_ptr.push(0);
-
-    for i in 0..m {
-        let (ci, vi) = merge_rows(a, b, a.row_ptr[i], a.row_ptr[i + 1], b.row_ptr[i], b.row_ptr[i + 1]);
-        col_idx.extend_from_slice(&ci);
-        values.extend_from_slice(&vi);
-        row_ptr.push(col_idx.len());
-    }
-
-    CsrMatrix {
-        nrows: m,
-        ncols: a.ncols,
-        row_ptr,
-        col_idx,
-        values,
-    }
+    // CooMatrix::into_csr now uses insertion-order CSR.  For spadd (sorted merge),
+    // we convert back to COO and re-sort by (row, col) to guarantee sorted rows.
+    let mut coo = crate::coo::CooMatrix::from_csr(a);
+    let mut coo_b = crate::coo::CooMatrix::from_csr(b);
+    coo.append(coo_b);
+    coo.into_csr_sorted()
 }
 
 /// Parallel variant of [`spadd`] using Rayon.

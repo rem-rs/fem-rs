@@ -108,13 +108,38 @@ impl<T: Scalar> CooMatrix<T> {
         coo
     }
 
-    /// Convert to CSR, summing duplicate entries.
-    ///
-    /// Sorts all (row, col, val) triples globally by packed u64 key
-    /// `(row << 32 | col)`, then builds CSR in a single pass with
-    /// consecutive duplicate merging.
-    /// For large matrices (≥ 16k nnz) with the `parallel` feature, uses
-    /// Rayon parallel sort for additional speedup.
+    /// Convert to CSR with columns sorted by index (traditional COO→CSR).
+    /// Used by spadd (which requires sorted rows for its merge algorithm).
+    pub fn into_csr_sorted(mut self) -> CsrMatrix<T> {
+        let nnz = self.vals.len();
+        let nrows = self.nrows;
+        if nnz == 0 { return CsrMatrix::new_empty(nrows, self.ncols); }
+        let mut keys_vals: Vec<(u64, T)> = Vec::with_capacity(nnz);
+        for ((&r, &c), v) in self.rows.iter().zip(self.cols.iter()).zip(self.vals.drain(..)) {
+            keys_vals.push(((r as u64) << 32 | c as u64, v));
+        }
+        self.rows = Vec::new(); self.cols = Vec::new();
+        keys_vals.sort_unstable_by_key(|&(k, _)| k);
+        let mut out_ptr = vec![0usize; nrows + 1];
+        let mut out_col = Vec::<u32>::new();
+        let mut out_val = Vec::<T>::new();
+        let mut row = 0usize;
+        let mut last_col: Option<u32> = None;
+        for (k, v) in keys_vals {
+            let r = (k >> 32) as usize;
+            let c = (k & 0xFFFF_FFFF) as u32;
+            if r != row { last_col = None; }
+            while row < r { row += 1; out_ptr[row] = out_col.len(); }
+            if last_col == Some(c) { *out_val.last_mut().unwrap() = *out_val.last().unwrap() + v; }
+            else { last_col = Some(c); out_col.push(c); out_val.push(v); }
+        }
+        while row < nrows { row += 1; out_ptr[row] = out_col.len(); }
+        CsrMatrix { nrows, ncols: self.ncols, row_ptr: out_ptr, col_idx: out_col, values: out_val }
+    }
+
+    /// Convert to CSR with insertion-order columns (matching MFEM).
+    /// Two-phase: sort by (row, col) to merge duplicates, then
+    /// sort each row by insertion order for MFEM-compatible spmv.
     pub fn into_csr(mut self) -> CsrMatrix<T> {
         let nnz = self.vals.len();
         let nrows = self.nrows;
@@ -122,60 +147,48 @@ impl<T: Scalar> CooMatrix<T> {
             return CsrMatrix::new_empty(nrows, self.ncols);
         }
 
-        // 1. Pack (row, col) into u64 key, pair with value.
-        let mut keys_vals: Vec<(u64, T)> = Vec::with_capacity(nnz);
-        for ((&r, &c), v) in self.rows.iter().zip(self.cols.iter()).zip(self.vals.drain(..)) {
-            keys_vals.push(((r as u64) << 32 | c as u64, v));
+        // Track insertion order (MFEM: CSR columns in insertion order, not sorted).
+        struct Entry<T> { row: u32, col: u32, idx: u32, val: T }
+        let mut entries: Vec<Entry<T>> = Vec::with_capacity(nnz);
+        for (i, ((&r, &c), v)) in self.rows.iter().zip(self.cols.iter())
+            .zip(self.vals.drain(..)).enumerate()
+        {
+            entries.push(Entry { row: r, col: c, idx: i as u32, val: v });
         }
         self.rows = Vec::new();
         self.cols = Vec::new();
 
-        // 2. Sort globally by (row, col).
-        #[cfg(feature = "parallel")]
-        if nnz >= 16_000 {
-            keys_vals.par_sort_unstable_by_key(|&(k, _)| k);
-        } else {
-            keys_vals.sort_unstable_by_key(|&(k, _)| k);
-        }
-        #[cfg(not(feature = "parallel"))]
-        keys_vals.sort_unstable_by_key(|&(k, _)| k);
+        // Phase A: sort by (row, col) to merge duplicates.
+        entries.sort_unstable_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
 
-        // 3. Build CSR in a single pass, merging consecutive duplicates.
+        // Merge adjacent duplicates, keeping earliest insertion index.
+        let mut merged: Vec<Entry<T>> = Vec::with_capacity(entries.len());
+        for e in entries {
+            if let Some(last) = merged.last_mut() {
+                if last.row == e.row && last.col == e.col {
+                    last.val = last.val + e.val;
+                    last.idx = last.idx.min(e.idx);
+                    continue;
+                }
+            }
+            merged.push(e);
+        }
+
+        // Phase B: sort by (row, insertion_idx) for MFEM-compatible column order.
+        merged.sort_by(|a, b| a.row.cmp(&b.row).then(a.idx.cmp(&b.idx)));
+
+        // Build CSR from merged entries.
         let mut out_ptr = vec![0usize; nrows + 1];
         let mut out_col = Vec::<u32>::new();
         let mut out_val = Vec::<T>::new();
-
         let mut row = 0usize;
-        let mut last_col: Option<u32> = None;
-
-        for (k, v) in keys_vals {
-            let r = (k >> 32) as usize;
-            let c = (k & 0xFFFF_FFFF) as u32;
-
-            // Reset duplicate tracking on row transition before advancing.
-            if r != row {
-                last_col = None;
-            }
-            while row < r {
-                row += 1;
-                out_ptr[row] = out_col.len();
-            }
-
-            if last_col == Some(c) {
-                // Duplicate in the same row: sum.
-                *out_val.last_mut().unwrap() = *out_val.last().unwrap() + v;
-            } else {
-                last_col = Some(c);
-                out_col.push(c);
-                out_val.push(v);
-            }
+        for e in &merged {
+            let r = e.row as usize;
+            while row < r { row += 1; out_ptr[row] = out_col.len(); }
+            out_col.push(e.col);
+            out_val.push(e.val);
         }
-
-        // Fill remaining row_ptr entries for trailing empty rows.
-        while row < nrows {
-            row += 1;
-            out_ptr[row] = out_col.len();
-        }
+        while row < nrows { row += 1; out_ptr[row] = out_col.len(); }
 
         CsrMatrix { nrows, ncols: self.ncols, row_ptr: out_ptr, col_idx: out_col, values: out_val }
     }
