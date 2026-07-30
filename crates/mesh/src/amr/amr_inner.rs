@@ -719,15 +719,14 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
             });
         }
     }
+    // MFEM: boundary edges already in el_to_edge from element traversal.
+    // Verify no orphan boundary edges exist.
     for f in 0..n_bdr_faces {
         let a = mesh.face_conn[f * 2];
         let b = mesh.face_conn[f * 2 + 1];
         let key = (a.min(b), a.max(b));
-        edge_set.entry(key).or_insert_with(|| {
-            let idx = edge_list.len();
-            edge_list.push(key);
-            idx
-        });
+        debug_assert!(edge_set.contains_key(&key),
+            "orphan boundary edge ({},{}) — not found in any element", a, b);
     }
     let n_edges = edge_list.len();
 
