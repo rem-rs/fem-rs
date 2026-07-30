@@ -35,7 +35,7 @@ use fem_io::mfem::{read_mfem_file, write_gf, write_mfem_file, write_mfem_file_3d
 use fem_io::glvis::GlVisSocket;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{Mesh, MeshTopology};
-use fem_solver::{solve_pcg_jacobi, SolverConfig, GeneralizedAlpha2, GeneralizedAlpha2State};
+use fem_solver::{solve_pcg_jacobi, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
 // ─── WaveOperator ──────────────────────────────────────────────────────────────
@@ -395,24 +395,14 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
     let t_final = args.t_final;
     let vis_steps = args.vis_steps;
 
-    // 8. Time integration using GeneralizedAlpha2.
-    let rho_inf = match args.ode_solver_type {
-        10 => 1.0_f64,
-        11 => 0.0_f64,
-        12 => 0.5_f64,
-        _ => { eprintln!("Warning: unsupported ODE solver type {}, using type 10", args.ode_solver_type); 1.0 }
-    };
-    let ga2 = GeneralizedAlpha2::new(rho_inf);
-    println!("   GeneralizedAlpha2: rho_inf={}", rho_inf);
-
-    let mut state = GeneralizedAlpha2State::new(fe_size);
-    state.vel.copy_from_slice(&du_dt);
-
+    // 8. Time integration matching C++ BackwardEulerSolver exactly.
+    //    Step: ImplicitSolve(dt², dt, u, dudt) → a
+    //    T=M+dt²·K, z=-K·u, solve T·a=z, v+=dt·a, u+=dt·v, zero BC.
     let mut t = 0.0;
     let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
-    let zero_force = vec![0.0; fe_size];
+    let mut a = vec![0.0; fe_size];
+    let mut v = du_dt.clone();
 
-    // Initial GLVis visualization
     if let Some(ref mut vis) = glvis {
         let _ = vis.send_solution_2d(&mesh, &u, "u");
         let _ = vis.send_command("pause");
@@ -424,11 +414,14 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
             last_step = true; t_final - t
         } else { dt };
 
-        ga2.step(oper.mass_matrix(), oper.stiff_matrix(), &zero_force,
-                 dt_actual, &mut u, &mut state, &ess_tdof_list);
+        // C++: ImplicitSolve(dt², dt, u, dudt, a)
+        oper.implicit_solve(dt_actual * dt_actual, &u, &mut a);
+
+        // C++: dudt += dt*a, u += dt*dudt, SetSubVector(ess, 0)
+        for i in 0..fe_size { v[i] += dt_actual * a[i]; u[i] += dt_actual * v[i]; }
+        for &d in &ess_tdof_list { u[d as usize] = 0.0; v[d as usize] = 0.0; }
 
         t += dt_actual;
-
         if last_step || (ti % vis_steps == 0) {
             println!("step {}, t = {}", ti, t);
             if let Some(ref mut vis) = glvis {
@@ -437,8 +430,7 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
         }
         oper.set_parameters();
     }
-
-    du_dt.copy_from_slice(&state.vel);
+    du_dt.copy_from_slice(&v);
 
     // 9. Save the final solution with precision(8) (matching C++)
     {
@@ -531,37 +523,23 @@ fn run_wave_3d(mut mesh: Mesh<3>, args: &Args) {
     let mut t = 0.0;
     let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
 
-    let rho_inf = match args.ode_solver_type {
-        10 => 1.0_f64,
-        11 => 0.0_f64,
-        12 => 0.5_f64,
-        _ => { eprintln!("Warning: unsupported ODE solver type {}, using type 10", args.ode_solver_type); 1.0 }
-    };
-    let ga2 = GeneralizedAlpha2::new(rho_inf);
-    println!("   GeneralizedAlpha2: rho_inf={}", rho_inf);
-
-    let mut state = GeneralizedAlpha2State::new(fe_size);
-    state.vel.copy_from_slice(&du_dt);
-
-    let mut t = 0.0;
-    let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
-    let zero_force = vec![0.0; fe_size];
-
+    // 8. Time integration matching C++ BackwardEulerSolver.
+    let mut a3 = vec![0.0; fe_size];
+    let mut v3 = du_dt.clone();
     let mut last_step = false;
     for ti in 1..=n_steps.max(1) {
         let dt_actual = if t + dt >= t_final - dt / 2.0 {
             last_step = true; t_final - t
         } else { dt };
 
-        ga2.step(oper.mass_matrix(), oper.stiff_matrix(), &zero_force,
-                 dt_actual, &mut u, &mut state, &ess_tdof_list);
+        oper.implicit_solve(dt_actual * dt_actual, &u, &mut a3);
+        for i in 0..fe_size { v3[i] += dt_actual * a3[i]; u[i] += dt_actual * v3[i]; }
+        for &d in &ess_tdof_list { u[d as usize] = 0.0; v3[d as usize] = 0.0; }
 
         t += dt_actual;
         if last_step || (ti % vis_steps == 0) { println!("step {}, t = {}", ti, t); }
-        oper.set_parameters();
     }
-
-    du_dt.copy_from_slice(&state.vel);
+    du_dt.copy_from_slice(&v3);
 
     // 9. Save the final solution
     {
