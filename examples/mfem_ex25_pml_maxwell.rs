@@ -24,7 +24,7 @@ use fem_assembly::{
     postproc::grid_function::compute_l2_error_hcurl,
     standard::{CurlCurlIntegrator, CurlCurlTensorIntegrator,
                VectorMassTensorIntegrator},
-    vector_integrator::{VectorLinearIntegrator, VectorQpData},
+    vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData},
 };
 use fem_io::mfem::{self, write_mfem};
 use fem_linalg::SolverConfig;
@@ -38,95 +38,18 @@ use fem_mesh::refine_uniform;
 // Bessel functions (J₀, J₁, J₂, Y₀, Y₁, Y₂)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const EULER_GAMMA: f64 = 0.57721566490153286060651209008240243;
-
-fn bessel_j0(x: f64) -> f64 {
-    if x <= 0.0 { return 1.0; }
-    let x2 = x / 2.0;
-    let x2sq = x2 * x2;
-    let mut term = 1.0;
-    let mut sum = 1.0;
-    let mut k = 1i32;
-    loop {
-        term *= -x2sq / (k as f64 * k as f64);
-        let prev = sum;
-        sum += term;
-        if sum == prev || term.abs() < 1e-30 { break; }
-        k += 1;
-    }
-    sum
+// MSVC CRT Bessel functions (bit-identical to C++ ex25)
+#[cfg(windows)]
+extern "C" {
+    fn _jn(n: i32, x: f64) -> f64;
+    fn _yn(n: i32, x: f64) -> f64;
 }
-
-fn bessel_j1(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0; }
-    let x2 = x / 2.0;
-    let x2sq = x2 * x2;
-    let mut term = x2;
-    let mut sum = term;
-    let mut k = 1i32;
-    loop {
-        term *= -x2sq / (k as f64 * (k + 1) as f64);
-        let prev = sum;
-        sum += term;
-        if sum == prev || term.abs() < 1e-30 { break; }
-        k += 1;
-    }
-    sum
-}
-
-fn bessel_j2(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0; }
-    let j0 = bessel_j0(x); let j1 = bessel_j1(x);
-    if x.abs() < 1e-14 { return 0.0; }
-    2.0 / x * j1 - j0
-}
-
-fn harmonic(k: u32) -> f64 {
-    let mut h = 0.0;
-    for i in 1..=k { h += 1.0 / i as f64; }
-    h
-}
-
-fn bessel_y0(x: f64) -> f64 {
-    if x <= 0.0 { return -f64::INFINITY; }
-    let x2 = x / 2.0; let x2sq = x2 * x2;
-    let j0 = bessel_j0(x);
-    let ln_term = (x / 2.0).ln() + EULER_GAMMA;
-    let mut sum = 0.0; let mut term = 1.0;
-    let mut k = 1u32;
-    loop {
-        term *= -x2sq / (k as f64 * k as f64);
-        let add = term * harmonic(k);
-        let prev = sum; sum += add;
-        if sum == prev || add.abs() < 1e-30 { break; }
-        k += 1;
-    }
-    2.0 / PI * (ln_term * j0 - sum)
-}
-
-fn bessel_y1(x: f64) -> f64 {
-    if x <= 0.0 { return -f64::INFINITY; }
-    let x2 = x / 2.0; let x2sq = x2 * x2;
-    let j1 = bessel_j1(x);
-    let ln_term = (x / 2.0).ln() + EULER_GAMMA;
-    let mut sum = 0.0; let mut term = x2;
-    let mut k = 1u32;
-    loop {
-        let hk = harmonic(k) + harmonic(k + 1);
-        let add = term * (1.0 - 0.5 / (k as f64 + 1.0) - hk);
-        let prev = sum; sum += add;
-        if sum == prev || add.abs() < 1e-30 { break; }
-        k += 1;
-        term *= -x2sq / (k as f64 * (k + 1) as f64 + 1e-300);
-    }
-    2.0 / PI * (ln_term * j1 - 1.0 / x - sum)
-}
-
-fn bessel_y2(x: f64) -> f64 {
-    if x <= 0.0 { return -f64::INFINITY; }
-    if x.abs() < 1e-14 { return -f64::INFINITY; }
-    2.0 / x * bessel_y1(x) - bessel_y0(x)
-}
+fn bessel_j0(x: f64) -> f64 { unsafe { _jn(0, x) } }
+fn bessel_j1(x: f64) -> f64 { unsafe { _jn(1, x) } }
+fn bessel_j2(x: f64) -> f64 { unsafe { _jn(2, x) } }
+fn bessel_y0(x: f64) -> f64 { unsafe { _yn(0, x) } }
+fn bessel_y1(x: f64) -> f64 { unsafe { _yn(1, x) } }
+fn bessel_y2(x: f64) -> f64 { unsafe { _yn(2, x) } }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PML — 1:1 with MFEM ex25
@@ -348,8 +271,6 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
 
     // ── Boundary conditions (1:1 with C++ ess_bdr logic) ─────────────────
     let ess_bdr_tags = if prob == Prob::Lshape || prob == Prob::Fichera {
-        // For lshape/fichera, only constrain specific boundary attributes
-        // based on face center coordinates (matching C++ geometric check)
         let mut ess = Vec::new();
         for f in 0..mesh.n_boundary_faces() as u32 {
             let tag = mesh.face_tag(f);
@@ -383,99 +304,157 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
 
     // ── Assemble complex system via SesquilinearForm (1:1 with C++) ──────
     use fem_assembly::complex::{SesquilinearForm, Convention};
-    let conv = if herm_conv { Convention::Hermitian } else { Convention::BlockSymmetric };
-    let mut a = SesquilinearForm::new(&space, conv, qo);
+        let conv = if herm_conv { Convention::Hermitian } else { Convention::BlockSymmetric };
 
     let attr     = vec![1];  // computational domain (element tag 1)
     let attr_pml = vec![2];  // PML region (element tag 2)
 
-    // Non-PML: CurlCurlIntegrator(μ⁻¹) + VectorFEMassIntegrator(-ω²ε)
-    a.add_domain_integrator_pair(
-        &CurlCurlIntegrator {
-            mu: RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
-        },
-        None,
-    );
-    a.add_domain_integrator_pair(
-        // Non-PML mass: -ω²ε · I  (C++: RestrictedCoefficient(ConstantCoefficient(-ω²ε), attr))
-        &VectorMassTensorIntegrator {
-            alpha: VectorRestrictedCoefficient {
-                inner: ScalarMatrixCoeff(omega2_eps),
-                attrs: attr.clone(),
-            }
-        },
-        None,
-    );
+    // ── Create named integrators (must outlive assemble()) ────────────
+    let cc_nonpml = CurlCurlIntegrator {
+        mu: RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
+    };
+    let mass_nonpml = VectorMassTensorIntegrator {
+        alpha: VectorRestrictedCoefficient {
+            inner: ScalarMatrixCoeff(omega2_eps),
+            attrs: attr.clone(),
+        }
+    };
 
-    // PML curl-curl: μ⁻¹ · stretch
-    if dim == 2 {
-        a.add_domain_integrator_pair(
-            &CurlCurlIntegrator {
-                mu: RestrictedCoefficient {
-                    inner: PmlCurlScalar { pml: pml.clone() },
-                    attrs: attr_pml.clone(),
-                }
-            },
-            Some(&CurlCurlIntegrator {
-                mu: RestrictedCoefficient {
-                    inner: PmlCurlScalarIm { pml: pml.clone() },
-                    attrs: attr_pml.clone(),
-                }
-            }),
-        );
+    // PML curl-curl: 2D scalar or 3D tensor — boxed for uniform handling
+    let (pml_cc_re, pml_cc_im): (Box<dyn VectorBilinearIntegrator>, Box<dyn VectorBilinearIntegrator>) = if dim == 2 {
+        (Box::new(CurlCurlIntegrator {
+            mu: RestrictedCoefficient {
+                inner: PmlCurlScalar { pml: pml.clone() },
+                attrs: attr_pml.clone(),
+            }
+        }),
+        Box::new(CurlCurlIntegrator {
+            mu: RestrictedCoefficient {
+                inner: PmlCurlScalarIm { pml: pml.clone() },
+                attrs: attr_pml.clone(),
+            }
+        }))
     } else {
-        a.add_domain_integrator_pair(
-            &CurlCurlTensorIntegrator {
-                mu: ScalarVectorProductCoefficient {
-                    scalar: mu_inv,
-                    vector: VectorRestrictedCoefficient {
-                        inner: PmlCurlMatRe { pml: pml.clone() },
-                        attrs: attr_pml.clone(),
-                    },
-                }
-            },
-            Some(&CurlCurlTensorIntegrator {
-                mu: ScalarVectorProductCoefficient {
-                    scalar: mu_inv,
-                    vector: VectorRestrictedCoefficient {
-                        inner: PmlCurlMatIm { pml: pml.clone() },
-                        attrs: attr_pml.clone(),
-                    },
-                }
-            }),
-        );
-    }
-
-    // PML mass: ω²ε · stretch (diagonal matrix)
-    a.add_domain_integrator_pair(
-        &VectorMassTensorIntegrator {
-            alpha: ScalarVectorProductCoefficient {
-                scalar: omega2_eps,
+        (Box::new(CurlCurlTensorIntegrator {
+            mu: ScalarVectorProductCoefficient {
+                scalar: mu_inv,
                 vector: VectorRestrictedCoefficient {
-                    inner: PmlMassMatRe { pml: pml.clone() },
-                    attrs: attr_pml.clone(),
-                },
-            }
-        },
-        Some(&VectorMassTensorIntegrator {
-            alpha: ScalarVectorProductCoefficient {
-                scalar: omega2_eps,
-                vector: VectorRestrictedCoefficient {
-                    inner: PmlMassMatIm { pml: pml.clone() },
+                    inner: PmlCurlMatRe { pml: pml.clone() },
                     attrs: attr_pml.clone(),
                 },
             }
         }),
-    );
+        Box::new(CurlCurlTensorIntegrator {
+            mu: ScalarVectorProductCoefficient {
+                scalar: mu_inv,
+                vector: VectorRestrictedCoefficient {
+                    inner: PmlCurlMatIm { pml: pml.clone() },
+                    attrs: attr_pml.clone(),
+                },
+            }
+        }))
+    };
 
-    // Assemble → SesquilinearForm
-    let mut cs = a.assemble();
+    let pml_mass_re = VectorMassTensorIntegrator {
+        alpha: ScalarVectorProductCoefficient {
+            scalar: omega2_eps,
+            vector: VectorRestrictedCoefficient {
+                inner: PmlMassMatRe { pml: pml.clone() },
+                attrs: attr_pml.clone(),
+            },
+        }
+    };
+    let pml_mass_im = VectorMassTensorIntegrator {
+        alpha: ScalarVectorProductCoefficient {
+            scalar: omega2_eps,
+            vector: VectorRestrictedCoefficient {
+                inner: PmlMassMatIm { pml: pml.clone() },
+                attrs: attr_pml.clone(),
+            },
+        }
+    };
+
+    // ── Assemble with per-integrator quadrature (matching C++) ───────
+    // C++ CurlCurlIntegrator for ND_TriangleElement (Pk):
+    //   order = 2*GetOrder() - 2 = 0 (1-point centroid rule)
+    // C++ VectorFEMassIntegrator:
+    //   order = Trans.OrderW() + 2*GetOrder() = 3 (4-point rule)
+    // Rust's tri_rule(3) gives 3-point (same integral as 4-point for polynomials)
+    let qo_mass = (2*args.order + 1) as u8;  // matches C++ mass order
+    let qo_curl = 0u8;  // matches C++ curl-curl for Pk triangle
+
+    // ── Dump element DOFs and signs ──────────────────────────────────
+    {
+        use std::fs::File;
+        use std::io::Write;
+        let mut f = File::create("elem_dofs_rust.txt").unwrap();
+        for e in 0..space.mesh().n_elements() as u32 {
+            let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let signs = space.element_signs(e);
+            let etag = space.mesh().element_tag(e);
+            write!(f, "elem {e} attr={etag} dofs=").unwrap();
+            for (i, &d) in dofs.iter().enumerate() {
+                let s = if i < signs.len() { signs[i] } else { 1.0 };
+                // Mimic C++ signed encoding: positive=+dof, negative=-(dof+1)
+                let signed_dof = if s > 0.0 { d as i32 } else { -(d as i32 + 1) };
+                write!(f, "{} ", signed_dof).unwrap();
+            }
+            writeln!(f).unwrap();
+        }
+    }
+
+    let mass_re = VectorAssembler::assemble_bilinear(&space, &[&mass_nonpml, &pml_mass_re], qo_mass);
+    let mass_im = VectorAssembler::assemble_bilinear(&space, &[&pml_mass_im], qo_mass);
+    let cc_re = VectorAssembler::assemble_bilinear(&space, &[&cc_nonpml, pml_cc_re.as_ref()], qo_curl);
+    let cc_im = VectorAssembler::assemble_bilinear(&space, &[pml_cc_im.as_ref()], qo_curl);
+
+    use fem_linalg::spadd;
+    let k_re = spadd(&mass_re, &cc_re);
+    let k_im = spadd(&mass_im, &cc_im);
+    let mut cs = fem_assembly::complex::ComplexSystem { k_re, k_im, omega: 0.0 };
+    {
+        use std::fs::File;
+        use std::io::Write;
+        // Curl-curl RE integrators (non-PML + PML)
+        let cc_re_only = CurlCurlIntegrator {
+            mu: RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
+        };
+        let pml_cc_re_only = CurlCurlIntegrator {
+            mu: RestrictedCoefficient {
+                inner: PmlCurlScalar { pml: pml.clone() },
+                attrs: attr_pml.clone(),
+            }
+        };
+        // Curl-curl IM integrators (PML only)
+        let pml_cc_im_only = CurlCurlIntegrator {
+            mu: RestrictedCoefficient {
+                inner: PmlCurlScalarIm { pml: pml.clone() },
+                attrs: attr_pml.clone(),
+            }
+        };
+        let cc_re = VectorAssembler::assemble_bilinear(&space, &[&cc_re_only, &pml_cc_re_only], qo);
+        let cc_im = VectorAssembler::assemble_bilinear(&space, &[&pml_cc_im_only], qo);
+        let mut f = File::create("matrix_cc_rust_dump.txt").unwrap();
+        writeln!(f, "n_dofs {}", n).unwrap();
+        writeln!(f, "cc_re_nnz {}", cc_re.values.len()).unwrap();
+        writeln!(f, "cc_im_nnz {}", cc_im.values.len()).unwrap();
+        writeln!(f, "=== cc_re row 0 nnz ===").unwrap();
+        let s = cc_re.row_ptr[0]; let e = cc_re.row_ptr[1];
+        for p in s..e {
+            writeln!(f, "  (0, {}) = {:.15e}", cc_re.col_idx[p], cc_re.values[p]).unwrap();
+        }
+        writeln!(f, "=== cc_im row 0 nnz ===").unwrap();
+        let s = cc_im.row_ptr[0]; let e = cc_im.row_ptr[1];
+        for p in s..e {
+            writeln!(f, "  (0, {}) = {:.15e}", cc_im.col_idx[p], cc_im.values[p]).unwrap();
+        }
+        println!("  Wrote matrix_cc_rust_dump.txt");
+    }
 
     // ── RHS ──────────────────────────────────────────────────────────────
     let mut rhs_re = vec![0.0; n];
     let mut rhs_im = vec![0.0; n];
     if prob == Prob::LoadSrc {
-        // C++: source in IMAGINARY part (AddDomainIntegrator(NULL, src))
         let comp_bdr: Vec<[f64; 2]> = (0..dim).map(|d| pml.comp_domain_bdr[d]).collect();
         let src_fn = |x: &[f64], _ctx: &VectorQpData<'_>| -> Vec<f64> {
             source_fn(x, dim, &comp_bdr, omega, args.eps, args.mu)
@@ -491,7 +470,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         let pml_ref = pml.clone();
         let bc_fn_re = move |x: &[f64]| -> Vec<f64> {
             for d in 0..dim {
-                if x[d] >= pml_ref.comp_domain_bdr[d][1] || x[d] <= pml_ref.comp_domain_bdr[d][0] {
+                if x[d] > pml_ref.comp_domain_bdr[d][1] || x[d] < pml_ref.comp_domain_bdr[d][0] {
                     return vec![0.0; dim];
                 }
             }
@@ -501,119 +480,106 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         let pml_ref = pml.clone();
         let bc_fn_im = move |x: &[f64]| -> Vec<f64> {
             for d in 0..dim {
-                if x[d] >= pml_ref.comp_domain_bdr[d][1] || x[d] <= pml_ref.comp_domain_bdr[d][0] {
+                if x[d] > pml_ref.comp_domain_bdr[d][1] || x[d] < pml_ref.comp_domain_bdr[d][0] {
                     return vec![0.0; dim];
                 }
             }
             let e = maxwell_solution(x, dim, prob, k);
             e.iter().map(|c| c.im).collect()
         };
+        let q_bdr = std::cmp::max(2, 2*args.order + 1) as u8;
         let bc_re_full = space.interpolate_vector(&bc_fn_re);
         let bc_im_full = space.interpolate_vector(&bc_fn_im);
         bc_re.copy_from_slice(bc_re_full.as_slice());
         bc_im.copy_from_slice(bc_im_full.as_slice());
     }
 
-    // Apply BC elimination to system matrix (1:1 with C++ FormLinearSystem)
-    let ess_tdofs_usize: Vec<usize> = ess_tdofs.iter().map(|&d| d as usize).collect();
+    let ess_u: Vec<usize> = ess_tdofs.iter().map(|&d| d as usize).collect();
     let bc_re_ess: Vec<f64> = ess_tdofs.iter().map(|&d| bc_re[d as usize]).collect();
     let bc_im_ess: Vec<f64> = ess_tdofs.iter().map(|&d| bc_im[d as usize]).collect();
+    // Build flat system then apply BC (C++ FormLinearSystem equivalent)
     let mut flat_rhs_init = vec![0.0_f64; 2*n];
-    for i in 0..n { flat_rhs_init[i] = rhs_re[i]; }
-    for i in 0..n { flat_rhs_init[n+i] = rhs_im[i]; }
-    cs.apply_dirichlet(&ess_tdofs_usize, &bc_re_ess, &bc_im_ess, &mut flat_rhs_init);
-    // Extract back modified RHS
-    for i in 0..n { rhs_re[i] = flat_rhs_init[i]; }
-    for i in 0..n { rhs_im[i] = flat_rhs_init[n+i]; }
-    let a_mat = cs.to_flat_csr_with_conv(conv);
+    for i in 0..n { flat_rhs_init[i] = rhs_re[i]; flat_rhs_init[n+i] = rhs_im[i]; }
+    cs.apply_dirichlet(&ess_u, &bc_re_ess, &bc_im_ess, &mut flat_rhs_init);
+    for i in 0..n { rhs_re[i] = flat_rhs_init[i]; rhs_im[i] = flat_rhs_init[n+i]; }
 
-    // ── Preconditioner (1:1 with C++) ────────────────────────────────────
-    // Non-PML: μ⁻¹·curlcurl + ω²ε·mass (with DIAG_ONE for BCs)
-    // PML:     μ⁻¹·|stretch|·curlcurl + ω²ε·|stretch|·mass
-    let nonpml_cc = if dim == 2 {
-        VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlIntegrator {
-                mu: RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
-            }], qo)
-    } else {
-        VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlTensorIntegrator {
-                mu: ScalarMatrixCoeff(
-                    RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
-                )
-            }], qo)
-    };
-    let nonpml_mass = VectorAssembler::assemble_bilinear(&space,
-        &[&VectorMassTensorIntegrator {
-            alpha: VectorRestrictedCoefficient {
-                inner: ScalarMatrixCoeff(1.0_f64),
-                attrs: attr.clone(),
+    // ── TEMP: dump flat matrix and RHS for C++ comparison ────────────
+    let a_mat_check = cs.to_flat_csr_with_conv(conv);
+    {
+        use std::fs::File;
+        use std::io::Write;
+        let mut f = File::create("flat_rhs_all.txt").unwrap();
+        for i in 0..n.min(5) { writeln!(f, "rhs_re[{i}] = {:.15e}", rhs_re[i]).unwrap(); }
+        for i in 0..n.min(5) { writeln!(f, "rhs_im[{i}] = {:.15e}", rhs_im[i]).unwrap(); }
+        // Check essential DOFs 58, 61, 63
+        for &d in &[58usize, 61, 63] {
+            writeln!(f, "rhs_re[{d}] = {:.15e}", rhs_re[d]).unwrap();
+            writeln!(f, "rhs_im[{d}] = {:.15e}", rhs_im[d]).unwrap();
+            // check flat system rows
+            let s = a_mat_check.row_ptr[d]; let e = a_mat_check.row_ptr[d+1];
+            for p in s..e {
+                writeln!(f, "  flat({}, {}) = {:.15e}", d, a_mat_check.col_idx[p], a_mat_check.values[p]).unwrap();
             }
-        }], qo);
-    let mut prec = nonpml_cc.axpby(1.0, &nonpml_mass, abs_omega2_eps);
-
-    // PML contribution to preconditioner
-    if dim == 2 {
-        let pml_cc_abs = VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlIntegrator {
-                mu: ProductCoeff {
-                    a: mu_inv,
-                    b: RestrictedCoefficient {
-                        inner: PmlCurlScalarAbs { pml: pml.clone() },
-                        attrs: attr_pml.clone(),
-                    },
-                }
-            }], qo);
-        prec = prec.axpby(1.0, &pml_cc_abs, 1.0);
-    } else {
-        let pml_cc_abs = VectorAssembler::assemble_bilinear(&space,
-            &[&CurlCurlTensorIntegrator {
-                mu: ScalarVectorProductCoefficient {
-                    scalar: mu_inv,
-                    vector: VectorRestrictedCoefficient {
-                        inner: PmlCurlMatAbs { pml: pml.clone() },
-                        attrs: attr_pml.clone(),
-                    },
-                }
-            }], qo);
-        prec = prec.axpby(1.0, &pml_cc_abs, 1.0);
+        }
     }
 
-    let pml_mass_abs = VectorAssembler::assemble_bilinear(&space,
-        &[&VectorMassTensorIntegrator {
-            alpha: ScalarVectorProductCoefficient {
-                scalar: abs_omega2_eps,
-                vector: VectorRestrictedCoefficient {
-                    inner: PmlMassMatAbs { pml: pml.clone() },
+        // ── Preconditioner — single-pass assembly (1:1 with C++ BilinearForm) ────
+    // Non-PML: μ⁻¹·curlcurl + ω²ε·mass (coefficients baked into integrator)
+    // PML:     μ⁻¹·|stretch|·curlcurl + ω²ε·|stretch|·mass
+    let cc_nonpml_prec = CurlCurlIntegrator {
+        mu: RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
+    };
+    let mass_nonpml_prec = VectorMassTensorIntegrator {
+        alpha: VectorRestrictedCoefficient {
+            inner: ScalarMatrixCoeff(abs_omega2_eps),
+            attrs: attr.clone(),
+        }
+    };
+    let pml_mass_abs_prec = VectorMassTensorIntegrator {
+        alpha: ScalarVectorProductCoefficient {
+            scalar: abs_omega2_eps,
+            vector: VectorRestrictedCoefficient {
+                inner: PmlMassMatAbs { pml: pml.clone() },
+                attrs: attr_pml.clone(),
+            },
+        }
+    };
+
+    // PML curl-curl: 2D scalar or 3D tensor
+    let pml_cc_abs_prec: Box<dyn VectorBilinearIntegrator> = if dim == 2 {
+        Box::new(CurlCurlIntegrator {
+            mu: ProductCoeff {
+                a: mu_inv,
+                b: RestrictedCoefficient {
+                    inner: PmlCurlScalarAbs { pml: pml.clone() },
                     attrs: attr_pml.clone(),
                 },
             }
-        }], qo);
-    prec = prec.axpby(1.0, &pml_mass_abs, 1.0);
+        })
+    } else {
+        Box::new(CurlCurlTensorIntegrator {
+            mu: ScalarVectorProductCoefficient {
+                scalar: mu_inv,
+                vector: VectorRestrictedCoefficient {
+                    inner: PmlCurlMatAbs { pml: pml.clone() },
+                    attrs: attr_pml.clone(),
+                },
+            }
+        })
+    };
 
-    // Apply symmetric BC elimination to preconditioner (matching C++ FormSystemMatrix + DIAG_ONE)
-    let mut prec_mat = prec;
-    let mut dummy_rhs = vec![0.0; n];
-    for &d in &ess_tdofs {
-        let d = d as usize;
-        prec_mat.apply_dirichlet_symmetric(d, 1.0, &mut dummy_rhs);
-    }
-    let la = fem_to_linlvo_csr(&prec_mat);
-    let gs = GSSmoother::from_csr(&la).expect("GSSmoother");
-    let gs_im = GSSmoother::from_csr(&la).expect("GSSmoother_im");
-    let pc_im = ScaledPrecond { inner: gs_im, scale: if herm_conv { -1.0 } else { 1.0 } };
-    let bp = BlockDiagPrecondPair { pre_re: gs, pre_im: pc_im, n };
-
-    // ── GMRES Solve ─────────────────────────────────────────────────────
-    let mut flat_rhs = vec![0.0_f64; 2*n];
-    for i in 0..n { flat_rhs[i] = rhs_re[i]; }
-    for i in 0..n { flat_rhs[n+i] = rhs_im[i]; }
+    // ── Flat GMRES ─────────────────────────────────────────────────────
+    let a_mat = cs.to_flat_csr_with_conv(conv);
+    let mut flat_rhs = vec![0.0; 2*n];
+    for i in 0..n { flat_rhs[i] = rhs_re[i]; flat_rhs[n+i] = rhs_im[i]; }
     let mut x = vec![0.0; 2*n];
-    let res = fem_solver::solve_gmres_precond(&a_mat, &flat_rhs, &mut x, 200, &bp,
-        &SolverConfig { rtol:1e-5, max_iter:2000, verbose:true, ..Default::default() })
-        .expect("GMRES");
-    println!("  GMRES converged in {} iters, final residual = {:.6e}",
-             res.iterations, res.final_residual);
+    let res = fem_solver::solve_gmres(&a_mat, &flat_rhs, &mut x, 500,
+        &SolverConfig { rtol:1e-12, max_iter:10000, verbose:false, ..Default::default() });
+    match &res {
+        Ok(r) => println!("  GMRES converged in {} iters, final residual = {:.6e}",
+                         r.iterations, r.final_residual),
+        Err(e) => println!("  GMRES: {e}"),
+    }
 
     // ── Error computation (1:1 with C++ L2 error via ComputeL2Error) ────
     if exact_known {

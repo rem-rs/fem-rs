@@ -158,21 +158,12 @@ impl<T: Scalar> CsrMatrix<T> {
     pub fn nnz(&self) -> usize { self.values.len() }
 
     /// Get value at `(row, col)`.  Returns 0 if not stored.
+    /// Linear search — CSR columns are in insertion order, NOT sorted.
     pub fn get(&self, row: usize, col: usize) -> T {
         let start = self.row_ptr[row];
-        let end   = self.row_ptr[row + 1];
-        let len = end - start;
-        if len >= 32 {
-            // Binary search for column-sorted CSR with long rows.
-            let slice = &self.col_idx[start..end];
-            if let Ok(i) = slice.binary_search(&(col as u32)) {
-                return self.values[start + i];
-            }
-        } else {
-            for k in start..end {
-                if self.col_idx[k] as usize == col {
-                    return self.values[k];
-                }
+        for k in start..self.row_ptr[row + 1] {
+            if self.col_idx[k] as usize == col {
+                return self.values[k];
             }
         }
         T::zero()
@@ -422,14 +413,8 @@ impl<T: Scalar> CsrMatrix<T> {
     pub fn find_entry(&self, row: usize, col: usize) -> Option<usize> {
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
-        let len = end - start;
-        // Binary search for rows with many entries (CSR is column-sorted).
-        if len >= 32 {
-            let slice = &self.col_idx[start..end];
-            slice.binary_search(&(col as u32)).ok().map(|i| start + i)
-        } else {
-            (start..end).find(|&k| self.col_idx[k] as usize == col)
-        }
+        // Linear search only — CSR columns are in insertion order, NOT sorted.
+        (start..end).find(|&k| self.col_idx[k] as usize == col)
     }
 
     // -----------------------------------------------------------------------

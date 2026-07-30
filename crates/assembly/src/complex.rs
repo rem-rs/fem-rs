@@ -191,26 +191,33 @@ impl ComplexSystem {
             let val_re = bc_re[k];
             let val_im = bc_im[k];
 
-            // --- Real block row i: set to identity (diagonal=1) ---
-            self.k_re.apply_dirichlet_row_zeroing(i, val_re, rhs);
-            // --- Imaginary block row i: zero completely (no diagonal identity) ---
-            // In the flat system, k_im[i,:] appears in both top-right (鈭択_im)
-            // and bottom-left (+k_im) blocks.  We want those rows to be 0 so that
-            // the flat rows i and n+i decouple to: u_re[i]=val_re, u_im[i]=val_im.
-            zero_row(&mut self.k_im, i, &mut rhs[n..]);
-
+            // Column elimination + RHS correction for all rows j != i
+            for j in 0..n {
+                if j == i { continue; }
+                let mut a_re = 0.0_f64;
+                let mut a_im = 0.0_f64;
+                if let Some(p) = self.k_re.find_entry(j, i) {
+                    a_re = self.k_re.values[p];
+                    self.k_re.values[p] = 0.0;
+                }
+                if let Some(p) = self.k_im.find_entry(j, i) {
+                    a_im = self.k_im.values[p];
+                    self.k_im.values[p] = 0.0;
+                }
+                rhs[j]     -= a_re * val_re - a_im * val_im;
+                rhs[n + j] -= a_im * val_re + a_re * val_im;
+            }
+            // Row elimination: zero rows, set diagonal = 1 for real block
+            let start_re = self.k_re.row_ptr[i];
+            let end_re   = self.k_re.row_ptr[i + 1];
+            for p in start_re..end_re { self.k_re.values[p] = 0.0; }
+            if let Some(p) = self.k_re.find_entry(i, i) { self.k_re.values[p] = 1.0; }
+            let start_im = self.k_im.row_ptr[i];
+            let end_im   = self.k_im.row_ptr[i + 1];
+            for p in start_im..end_im { self.k_im.values[p] = 0.0; }
             rhs[i]     = val_re;
             rhs[n + i] = val_im;
         }
-    }
-}
-
-/// Zero all entries in a CSR row (including diagonal).  Does NOT modify rhs.
-fn zero_row(mat: &mut CsrMatrix<f64>, row: usize, _rhs: &mut [f64]) {
-    let start = mat.row_ptr[row];
-    let end   = mat.row_ptr[row + 1];
-    for k in start..end {
-        mat.values[k] = 0.0;
     }
 }
 
@@ -358,52 +365,59 @@ impl ComplexLinearForm {
     }
 }
 
-// === SesquilinearForm ===
+// === SesquilinearForm — deferred assembly (matching MFEM) ===
+//
+// Integrator pairs are stored by reference and assembled in a single pass
+// over elements, matching C++'s SesquilinearForm::AddDomainIntegrator + Assemble.
+// The caller MUST keep integrators alive until `assemble()` returns.
 
-pub struct SesquilinearForm<'a, S: FESpace + Send + Sync> {
+pub struct SesquilinearForm<'a, 'b, S: FESpace + Send + Sync> {
     space: &'a S,
-    #[allow(dead_code)]
     conv: Convention,
     quad_order: u8,
-    k_re_coo: CooMatrix<f64>,
-    k_im_coo: CooMatrix<f64>,
+    pairs: Vec<(&'b dyn VectorBilinearIntegrator, Option<&'b dyn VectorBilinearIntegrator>)>,
     n: usize,
 }
 
-impl<'a, S: FESpace + Send + Sync> SesquilinearForm<'a, S> {
+impl<'a, 'b, S: FESpace + Send + Sync> SesquilinearForm<'a, 'b, S> {
     pub fn new(space: &'a S, conv: Convention, quad_order: u8) -> Self {
         let n = space.n_dofs();
-        SesquilinearForm { space, conv, quad_order, k_re_coo: CooMatrix::new(n, n), k_im_coo: CooMatrix::new(n, n), n }
+        SesquilinearForm { space, conv, quad_order, pairs: Vec::new(), n }
     }
 
+    /// Store an integrator pair reference for later single-pass assembly.
+    /// Caller must keep integrators alive until `assemble()` is called.
     pub fn add_domain_integrator_pair(
         &mut self,
-        re_integ: &dyn VectorBilinearIntegrator,
-        im_integ: Option<&dyn VectorBilinearIntegrator>,
+        re_integ: &'b dyn VectorBilinearIntegrator,
+        im_integ: Option<&'b dyn VectorBilinearIntegrator>,
     ) {
-        let csr_re = VectorAssembler::assemble_bilinear(self.space, &[re_integ], self.quad_order);
-        for i in 0..self.n {
-            for p in csr_re.row_ptr[i]..csr_re.row_ptr[i + 1] {
-                let j = csr_re.col_idx[p] as usize;
-                let v = csr_re.values[p];
-                if v != 0.0 { self.k_re_coo.add(i, j, v); }
-            }
-        }
-        if let Some(im) = im_integ {
-            let csr_im = VectorAssembler::assemble_bilinear(self.space, &[im], self.quad_order);
-            for i in 0..self.n {
-                for p in csr_im.row_ptr[i]..csr_im.row_ptr[i + 1] {
-                    let j = csr_im.col_idx[p] as usize;
-                    let v = csr_im.values[p];
-                    if v != 0.0 { self.k_im_coo.add(i, j, v); }
-                }
-            }
-        }
+        self.pairs.push((re_integ, im_integ));
     }
 
+    /// Single-pass assembly: all RE integrators in one element loop,
+    /// all IM integrators in another, matching C++ assembly order.
     pub fn assemble(self) -> ComplexSystem {
-        let SesquilinearForm { k_re_coo, k_im_coo, .. } = self;
-        ComplexSystem { k_re: k_re_coo.into_csr(), k_im: k_im_coo.into_csr(), omega: 0.0 }
+        let mut re_all: Vec<&dyn VectorBilinearIntegrator> = Vec::new();
+        let mut im_all: Vec<&dyn VectorBilinearIntegrator> = Vec::new();
+        for (re, im) in &self.pairs {
+            re_all.push(*re);
+            if let Some(im) = im { im_all.push(*im); }
+        }
+
+        let k_re = if !re_all.is_empty() {
+            VectorAssembler::assemble_bilinear(self.space, &re_all, self.quad_order)
+        } else {
+            CooMatrix::new(self.n, self.n).into_csr()
+        };
+
+        let k_im = if !im_all.is_empty() {
+            VectorAssembler::assemble_bilinear(self.space, &im_all, self.quad_order)
+        } else {
+            CooMatrix::new(self.n, self.n).into_csr()
+        };
+
+        ComplexSystem { k_re, k_im, omega: 0.0 }
     }
 }
 
