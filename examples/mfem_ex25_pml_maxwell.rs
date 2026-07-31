@@ -530,17 +530,27 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         })
     };
 
-    // ── Flat GMRES (converges to machine precision) ────────────────────
+    // ── Dump RHS for comparison ────────────────────────────────────────
+    {
+        use std::fs::File;
+        use std::io::Write;
+        let mut f = File::create("rhs_rust.txt").unwrap();
+        for i in 0..n { writeln!(f, "re[{i}] = {:.15e}", rhs_re[i]).unwrap(); }
+        for i in 0..n { writeln!(f, "im[{i}] = {:.15e}", rhs_im[i]).unwrap(); }
+    }
+    // ── Direct solve for ground truth ──────────────────────────────────
     let a_mat = cs.to_flat_csr_with_conv(conv);
     let mut flat_rhs = vec![0.0; 2*n];
     for i in 0..n { flat_rhs[i] = rhs_re[i]; flat_rhs[n+i] = rhs_im[i]; }
+    let mut x = vec![0.0; 2*n];
+    // ── GMRES solve ────────────────────────────────────────────────────
     let mut x = vec![0.0; 2*n];
     let res = fem_solver::solve_gmres(&a_mat, &flat_rhs, &mut x, 500,
         &SolverConfig { rtol:1e-12, max_iter:10000, verbose:false, ..Default::default() });
     match &res {
         Ok(r) => println!("  GMRES converged in {} iters, final residual = {:.6e}",
                          r.iterations, r.final_residual),
-        Err(e) => println!("  GMRES: {e}"),
+        Err(e2) => println!("  GMRES: {e2}"),
     }
 
     // ── Error computation (1:1 with C++ L2 error via ComputeL2Error) ────
