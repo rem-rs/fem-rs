@@ -84,17 +84,25 @@ impl SumFactDiffusionOp {
         let dim = mesh.dim() as usize;
         assert_eq!(dim, 2, "SumFactDiffusionOp requires 2D");
 
-        // 1D Gauss-Legendre points on [-1, 1]
-        let q1d = ((quad_order as usize + 2) / 2).clamp(1, 4);
-        let (xi_1d, w_1d) = Self::gauss_legendre_1d(q1d);
+        // 1D Gauss-Legendre points on [-1, 1].  For Q_p diffusion the integrand
+        // is degree 2p in one tensor-product direction (∂_x φ has degree p in
+        // η), so P4 needs 5-point Gauss (exact to degree 9) — matching the CSR
+        // assembly after the same fix in `quad_rule_01`.
+        let q1d = ((quad_order as usize + 2) / 2).max(1);
+        let (xi_1d, w_1d) = if q1d <= 4 {
+            Self::gauss_legendre_1d(q1d)
+        } else {
+            fem_element::quadrature::gauss_legendre_arbitrary(q1d)
+        };
 
-        // 1D Lagrange nodes on [-1, 1] (equispaced, matching QuadQk node distribution)
+        // 1D Lagrange nodes on [-1, 1] — Gauss-Lobatto-Legendre, matching the
+        // QuadQk basis used by the CSR assembly (H1_FECollection BasisType::
+        // GaussLobatto).  For p = 1, 2 the GLL points coincide with the
+        // equispaced points; for p >= 3 they differ, so the old equispaced
+        // choice produced a different operator than the CSR matrix.
         let p = order as usize;
         let p1 = p + 1;
-        let mut nodes_1d = Vec::with_capacity(p1);
-        for i in 0..p1 {
-            nodes_1d.push(-1.0 + 2.0 * i as f64 / p as f64);
-        }
+        let (nodes_1d, _w) = fem_element::quadrature::gauss_lobatto_arbitrary(p1);
 
         // Precompute 1D basis: B[q][i] and G[q][i]
         let mut b_1d = vec![0.0; q1d * p1];
@@ -221,11 +229,12 @@ impl SumFactDiffusionOp {
 
         let p1 = self.p + 1;
         let q1d = self.q1d;
-        // Scratch arrays sized for max p=4 → p1=5, q1d=4
+        // Scratch arrays sized for max p=4 → p1=5, q1d=5 (P4 diffusion needs
+        // 5-point Gauss, exact to degree 9).
         let mut tp_x = [0.0f64; 25];  // max (p+1)² = 25
         let mut tp_y = [0.0f64; 25];
-        let mut s_b = [[0.0f64; 5]; 4]; // s_b[q][j], max q1d=4, p1=5
-        let mut s_g = [[0.0f64; 5]; 4];
+        let mut s_b = [[0.0f64; 8]; 8]; // s_b[q][j], max q1d=5, p1=5
+        let mut s_g = [[0.0f64; 8]; 8];
 
         for e in 0..self.n_elems {
             let dof_base = e * self.ldofs;
@@ -383,14 +392,20 @@ fn lagrange_1d_eval(nodes: &[f64], i: usize, x: f64) -> (f64, f64) {
 }
 
 /// Compute w_i / w_k where w_i = 1/Π_{j≠i}(xi - xj) are barycentric weights.
+///
+/// w_i / w_k = Π_{j≠k}(x_k − x_j) / Π_{j≠i}(x_i − x_j).
 fn barycentric_weight_ratio(nodes: &[f64], i: usize, k: usize) -> f64 {
-    let mut ratio = 1.0;
+    let mut wi = 1.0; // Π_{j≠i}(x_i − x_j)
+    let mut wk = 1.0; // Π_{j≠k}(x_k − x_j)
     for j in 0..nodes.len() {
-        if j != i && j != k {
-            ratio *= (nodes[i] - nodes[j]) / (nodes[k] - nodes[j]);
+        if j != i {
+            wi *= nodes[i] - nodes[j];
+        }
+        if j != k {
+            wk *= nodes[k] - nodes[j];
         }
     }
-    ratio
+    wk / wi
 }
 
 /// QuadQk node-to-DOF mapping: (ix, iy) in [0, p] → QuadQk DOF index.
@@ -629,10 +644,12 @@ impl StoredElementOperator {
     pub fn mult_raw(&self, x: &[f64], y: &mut [f64]) {
         for v in y.iter_mut() { *v = 0.0; }
         let ld = self.ldofs;
+        // Dynamic buffer: supports high-order 3-D elements (e.g. Hex8 P4 has
+        // (p+1)^3 = 125 local DOFs).
+        let mut xe = vec![0.0_f64; ld];
         for e in 0..self.n_elems {
             let dof_base = e * ld;
             let mat_base = e * ld * ld;
-            let mut xe = [0.0_f64; 64];
             for i in 0..ld {
                 xe[i] = x[self.elem_dofs[dof_base + i] as usize];
             }
@@ -759,6 +776,9 @@ pub struct GeometricMgConfig {
     pub coarse_rtol: f64,
     /// Override λ_max estimate. None = auto-estimate.
     pub max_eig_override: Option<f64>,
+    /// Per-level λ_max overrides (finest-first), matching `levels[]` order.
+    /// Empty = use [`Self::max_eig_override`] (or auto-estimate) on every level.
+    pub max_eig_overrides: Vec<Option<f64>>,
     /// Multigrid cycle type (V or W). Default: V for backward compatibility.
     pub cycle_type: MgCycleType,
 }
@@ -771,6 +791,7 @@ impl Default for GeometricMgConfig {
             jacobi_omega: 0.8,
             coarse_max_iter: 200, coarse_rtol: 1e-12,
             max_eig_override: None,
+            max_eig_overrides: Vec::new(),
             cycle_type: MgCycleType::V,
         }
     }
@@ -979,9 +1000,12 @@ impl GeometricMgPrecond {
         let smoothers = match config.smoother {
             MgSmootherType::Chebyshev(order) => {
                 let mut s = Vec::new();
-                for level in &h.levels {
+                for (li, level) in h.levels.iter().enumerate() {
+                    let override_eig = config.max_eig_overrides.get(li)
+                        .and_then(|o| *o)
+                        .or(config.max_eig_override);
                     s.push(MgChebyshevSmoother::new(
-                        &level.mat, &level.bc_dofs, order, config.max_eig_override,
+                        &level.mat, &level.bc_dofs, order, override_eig,
                         &|x, y| level.mat_vec(x, y)));
                 }
                 s
@@ -1013,7 +1037,13 @@ impl GeometricMgPrecond {
                 max_iter: self.config.coarse_max_iter,
                 verbose: false, ..Default::default()
             };
-            let _res = crate::solve_cg(a, b, x, &cfg);
+            let res = crate::solve_cg(a, b, x, &cfg);
+            if std::env::var("FEM_MG_DEBUG").is_ok() {
+                match &res {
+                    Ok(r) => eprintln!("[mg] coarse CG: {} iters, residual {:.3e}", r.iterations, r.final_residual),
+                    Err(e) => eprintln!("[mg] coarse CG FAILED: {e:?}"),
+                }
+            }
             for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
             return;
         }

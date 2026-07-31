@@ -1026,6 +1026,7 @@ mod tests {
             coarse_max_iter: 200,
             coarse_rtol: 1e-12,
             max_eig_override: None,
+            max_eig_overrides: Vec::new(),
             cycle_type: MgCycleType::V,
         };
         let mg = GeometricMgPrecond::new(mg_config, &h);
@@ -1142,6 +1143,7 @@ mod tests {
             coarse_max_iter: 500,
             coarse_rtol: 1e-10,
             max_eig_override: None,
+            max_eig_overrides: Vec::new(),
             cycle_type: MgCycleType::V,
         };
         let mg = GeometricMgPrecond::new(mg_config, &h);

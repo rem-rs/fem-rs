@@ -10,11 +10,12 @@
 //! cargo run --example mfem_ex26_geom_mg -- -m data/fichera.mesh
 //! ```
 
-use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
-use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
+use fem_io::mfem::{
+    read_mfem_file, write_mfem, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file,
+};
 use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_solver::{
     GeometricMgLevel, GeometricMgHierarchy, GeometricMgConfig, GeometricMgPrecond,
@@ -29,20 +30,67 @@ use fem_mesh::ElementType;
 
 fn main() {
     let args = parse_args();
-    let dim = 2;
-    let mut mesh_data = Vec::new();
 
-    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
+    if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
-        mfem.mesh2d.expect("MFEM mesh must be 2D")
+        match (mfem.mesh2d, mfem.mesh3d) {
+            (Some(m2), _) => solve(m2, &args),
+            (_, Some(m3)) => solve(m3, &args),
+            _ => panic!("MFEM mesh has neither a 2D nor a 3D representation"),
+        }
     } else {
-        Mesh::<2>::unit_square_tri(args.n)
-    };
-    // Serialize mesh for GLVis
-    write_mfem(&mut mesh_data, &mesh, None).unwrap();
+        // Default mesh: match C++ ex26 (`../data/star.mesh` relative to the build dir).
+        let mfem = read_mfem_file("data/star.mesh").expect("failed to read data/star.mesh");
+        solve(mfem.mesh2d.expect("data/star.mesh must be 2D"), &args);
+    }
+}
+
+/// Dimension-dispatch for the mesh operations that are split between 2-D and
+/// 3-D in the library (uniform refinement, MFEM mesh writers, GLVis serialization).
+trait Ex26Mesh: fem_mesh::topology::MeshTopology + Clone {
+    const DIM: usize;
+    fn uniform_refine(&self) -> Self;
+    fn glvis_bytes(&self) -> Vec<u8>;
+    fn write_refined(&self, path: &str);
+}
+
+impl Ex26Mesh for Mesh<2> {
+    const DIM: usize = 2;
+    fn uniform_refine(&self) -> Self { fem_mesh::refine_uniform(self) }
+    fn glvis_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        write_mfem(&mut v, self, None).unwrap();
+        v
+    }
+    fn write_refined(&self, path: &str) { write_mfem_file(path, self).expect("mesh write failed"); }
+}
+
+impl Ex26Mesh for Mesh<3> {
+    const DIM: usize = 3;
+    fn uniform_refine(&self) -> Self { fem_mesh::refine_uniform_3d(self) }
+    fn glvis_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        // write_mfem serializes the 3-D mesh via the `mesh_3d` argument.
+        write_mfem(&mut v, &Mesh::<2>::unit_square_tri(1), Some(self)).unwrap();
+        v
+    }
+    fn write_refined(&self, path: &str) { write_mfem_file_3d(path, self).expect("mesh write failed"); }
+}
+
+/// Run the ex26 solve for a `D`-dimensional mesh.
+///
+/// The `PADiffusionOp` / `SumFactDiffusionOp` partial-assembly operators are
+/// 2-D only (Tri3 / Quad4); for 3-D meshes the V-cycle falls back to the
+/// element-by-element operator (bitwise-identical to the CSR matrix).
+fn solve<const D: usize>(mesh: Mesh<D>, args: &Args)
+where
+    Mesh<D>: Ex26Mesh,
+{
+    let dim = D;
+    let mut mesh_data = mesh.glvis_bytes();
 
     println!("Options used:");
-    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("built-in"));
+    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("data/star.mesh"));
     println!("   --geometric-refinements {}", args.geometric_refs);
     println!("   --order-refinements {}", args.order_refs);
     println!("   --device cpu");
@@ -56,18 +104,18 @@ fn main() {
             ((5000.0 / ne as f64).ln() / 2.0_f64.ln() / dim as f64).floor() as usize
         } else { 0 };
         let mut m = mesh;
-        for _ in 0..ref_levels { m = fem_mesh::refine_uniform(&m); }
+        for _ in 0..ref_levels { m = m.uniform_refine(); }
         m
     };
 
     // 5. FE space hierarchy.
     let mut meshes = vec![coarse_mesh];
     for _ in 0..args.geometric_refs {
-        let fine = fem_mesh::refine_uniform(meshes.last().unwrap());
+        let fine = meshes.last().unwrap().uniform_refine();
         meshes.push(fine);
     }
 
-    let mut spaces: Vec<H1Space<Mesh<2>>> = Vec::new();
+    let mut spaces: Vec<H1Space<Mesh<D>>> = Vec::new();
     for m in &meshes {
         spaces.push(H1Space::new(m.clone(), 1));
     }
@@ -79,10 +127,12 @@ fn main() {
 
     println!("Number of finite element unknowns: {}", spaces.last().unwrap().n_dofs());
 
-    // 6. RHS.
+    // 6. RHS.  Match MFEM's LinearForm quadrature: integrate the P_order
+    //    source exactly (constant coefficient → rule of order `2*order+1`).
     let fine_space = spaces.last().unwrap();
     let n_dofs = fine_space.n_dofs();
-    let mut rhs = Assembler::assemble_linear(fine_space, &[&DomainSourceIntegrator::new(|_| 1.0)], 3);
+    let rhs_quad = (2 * fine_space.order() + 1).max(3) as u8;
+    let mut rhs = Assembler::assemble_linear(fine_space, &[&DomainSourceIntegrator::new(|_| 1.0)], rhs_quad);
 
     // 7. Solution vector.
     let mut x = vec![0.0; n_dofs];
@@ -92,6 +142,11 @@ fn main() {
     // Zero RHS at BC DOFs (matching MFEM Multigrid::FormFineLinearSystem).
     let bc_fine = boundary_dofs(fine_space.mesh(), fine_space.dof_manager(), &boundary_tags);
     for &d in &bc_fine { rhs[d as usize] = 0.0; }
+
+    // The on-the-fly PA operators are 2-D only (Tri3 / Quad4).  For 3-D meshes
+    // (Tet4 / Hex8) the V-cycle uses elem_op (bitwise-identical to the CSR).
+    let et0 = fine_space.mesh().element_type(0);
+    let use_pa = matches!(et0, ElementType::Tri3 | ElementType::Tri6 | ElementType::Quad4);
 
     let mut levels: Vec<GeometricMgLevel> = Vec::new();
     let mut prolong: Vec<fem_linalg::CsrMatrix<f64>> = Vec::new();
@@ -115,17 +170,22 @@ fn main() {
             elem_dofs: elem_dofs.clone(), elem_mats: elem_mats.clone(),
             ldofs, n_elems, n_dofs: mat.nrows,
         };
-        // Build on-the-fly PA operator (matches MFEM AddMultPA)
-        let elem_dofs_clone = elem_dofs.clone();
-        let pa_op = PADiffusionOp::build(
-            space.mesh(), mat.nrows, space.order(), qo, 1.0,
-            |e| {
-                let e32 = e;
-                let start = e32 as usize * ldofs;
-                elem_dofs_clone[start..start + ldofs].to_vec()
-            },
-        );
-        // Build sum-factorization PA operator (bitwise match to MFEM)
+        // Build on-the-fly PA operator (matches MFEM AddMultPA), 2-D only.
+        let pa_op = if use_pa {
+            let elem_dofs_clone = elem_dofs.clone();
+            Some(PADiffusionOp::build(
+                space.mesh(), mat.nrows, space.order(), qo, 1.0,
+                |e| {
+                    let start = e as usize * ldofs;
+                    elem_dofs_clone[start..start + ldofs].to_vec()
+                },
+            ))
+        } else {
+            None
+        };
+        // Sum-factorization PA operator (Quad4 only).  Uses GLL nodes matching
+        // the QuadQk basis of the CSR assembly (see SumFactDiffusionOp::build),
+        // so it reproduces the CSR operator up to ~1e-7 rounding.
         let sf_op = if space.mesh().element_type(0) == ElementType::Quad4 {
             let e_dofs = elem_dofs.clone();
             Some(SumFactDiffusionOp::build(
@@ -141,7 +201,7 @@ fn main() {
         levels.push(GeometricMgLevel {
             mat, bc_dofs: bc,
             elem_op: Some(elem_op), raw_diag, raw_dinv,
-            pa_op: Some(pa_op), sf_op,
+            pa_op, sf_op,
         });
     }
     for i in 0..n_spaces - 1 {
@@ -156,25 +216,30 @@ fn main() {
     let hierarchy = GeometricMgHierarchy::new(levels, prolong);
     println!("Size of linear system: {}", hierarchy.finest_matrix().nrows);
 
-    // 9. Solve with PCG + MG V(1,1)-cycle.
+    // 9. Solve with PCG + MG V(1,1)-cycle (matching C++: V-cycle, 1 pre + 1
+    //    post sweep, Chebyshev(2) smoothers, coarse CG rtol sqrt(1e-4)).
     let mg_config = GeometricMgConfig {
         pre_sweeps: 1, post_sweeps: 1,
         smoother: MgSmootherType::Chebyshev(2),
         max_eig_override: None,
+        max_eig_overrides: Vec::new(),
         jacobi_omega: 0.8,
-        coarse_max_iter: 200, coarse_rtol: 1e-8,
+        coarse_max_iter: 200,
+        coarse_rtol: (1e-4f64).sqrt(), // C++: pcg->SetRelTol(sqrt(1e-4))
         cycle_type: MgCycleType::V,
     };
     let mg = GeometricMgPrecond::new(mg_config, &hierarchy);
     let precond = GeometricMgAsPrecond { mg: &mg, hierarchy: &hierarchy };
 
+    // PCG tolerance: `1e-12` in the (B r, r) norm, equivalent to C++'s
+    // `PCG(..., 1e-12, 0.0)` (which internally uses SetRelTol(sqrt(1e-12))).
     if let Err(e) = solve_pcg(hierarchy.finest_matrix(), &rhs, &mut x, &precond, 1e-12, 2000, true) {
         eprintln!("PCG: No convergence! ({e})");
     }
 
     // 10. Save.
     {
-        write_mfem_file("refined.mesh", fine_space.mesh()).expect("mesh write failed");
+        fine_space.mesh().write_refined("refined.mesh");
         write_mfem_gf_file("sol.gf", dim, &x, "H1", fine_space.order(), 1, 14).expect("sol write failed");
     }
 
@@ -206,19 +271,18 @@ fn main() {
 
 struct Args {
     mesh: Option<String>,
-    n: usize,
     geometric_refs: usize,
     order_refs: usize,
     visualization: bool,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: None, n: 10, geometric_refs: 0, order_refs: 2, visualization: true };
+    // Default mesh matches C++ ex26 (`../data/star.mesh`).
+    let mut a = Args { mesh: None, geometric_refs: 0, order_refs: 2, visualization: true };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-m" | "--mesh" => a.mesh = it.next(),
-            "--n" => a.n = it.next().and_then(|s| s.parse().ok()).unwrap_or(10),
             "-gr" | "--geometric-refinements" => {
                 a.geometric_refs = it.next().and_then(|s| s.parse().ok()).unwrap_or(0)
             }

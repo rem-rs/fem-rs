@@ -422,11 +422,12 @@ fn build_prolongation_same_mesh<M: MeshTopology>(
     fine_dm: &DofManager,
     coo: &mut CooMatrix<f64>,
 ) {
+    let dim = mesh.dim() as usize;
     let mut seen = vec![false; fine_dm.n_dofs];
     for e in 0..mesh.n_elements() as u32 {
         let et = mesh.element_type(e);
-        let c_ref = lagrange_ref_2d(et, coarse_dm.order);
-        let f_ref = lagrange_ref_2d(et, fine_dm.order);
+        let c_ref = if dim == 2 { lagrange_ref_2d(et, coarse_dm.order) } else { lagrange_ref_3d(et, coarse_dm.order) };
+        let f_ref = if dim == 2 { lagrange_ref_2d(et, fine_dm.order) } else { lagrange_ref_3d(et, fine_dm.order) };
         let f_coords = f_ref.dof_coords();
         let c_dofs = coarse_dm.element_dofs(e);
         let f_dofs = fine_dm.element_dofs(e);

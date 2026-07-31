@@ -681,8 +681,8 @@ fn fact_f64(n: u32) -> f64 {
 /// Uses `n×n` Gauss points; exact for polynomials of degree ≤ `2n-1` in each variable.
 /// Weights sum to 4 (area of reference quad).
 pub fn quad_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 2) / 2).clamp(1, 4);
-    let (xs, ws) = gauss_legendre_1d(n);
+    let n = ((order as usize + 2) / 2).max(1);
+    let (xs, ws) = if n <= 4 { gauss_legendre_1d(n) } else { gauss_legendre_arbitrary(n) };
     let mut pts = Vec::with_capacity(n * n);
     let mut wts = Vec::with_capacity(n * n);
     for (xi, wi) in xs.iter().zip(ws.iter()) {
@@ -699,8 +699,8 @@ pub fn quad_rule(order: u8) -> QuadratureRule {
 /// Uses `n×n` Gauss points; exact for polynomials of degree ≤ `2n-1` in each variable.
 /// Weights sum to 1 (area of `[0,1]²`).
 pub fn quad_rule_01(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 2) / 2).clamp(1, 4);
-    let (xs, ws) = gauss_legendre_01(n);
+    let n = ((order as usize + 2) / 2).max(1);
+    let (xs, ws) = if n <= 4 { gauss_legendre_01(n) } else { gauss_legendre_01_arbitrary(n) };
     let mut pts = Vec::with_capacity(n * n);
     let mut wts = Vec::with_capacity(n * n);
     for (xi, wi) in xs.iter().zip(ws.iter()) {

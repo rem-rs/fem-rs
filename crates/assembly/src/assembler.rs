@@ -122,18 +122,65 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Tet4, 2)                           => Box::new(TetP2),
         (ElementType::Tet4, 3)                           => Box::new(TetP3),
+        (ElementType::Tet4, o)                           => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
         (ElementType::Quad4, 0)                          => Box::new(P0),
         (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
         (ElementType::Quad4, 2)                          => Box::new(QuadQ2),
         (ElementType::Quad4, 3)                          => Box::new(QuadQ3),
         (ElementType::Quad4, o)                          => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
+        (ElementType::Hex8, o)                           => Box::new(fem_element::lagrange::HexQk::new(o as usize)),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => Box::new(PrismPk::new(order as usize)),
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) => Box::new(PyramidPk::new(order as usize)),
         _ => panic!(
             "ref_elem_vol: unsupported combination (element_type={elem_type:?}, order={order}). \
              Try using a different polynomial order or a simplex mesh."
         ),
+    }
+}
+
+/// Does the solution reference element for `(elem_type, order)` live on the
+/// `[0,1]^d` reference domain (as opposed to `[-1,1]^d`)?
+///
+/// This is only true for `QuadQk` (Quad4, order >= 4), whose 1-D nodes and
+/// quadrature are Gauss-Lobatto-Legendre on `[0,1]`.  The geometry element
+/// (`QuadQ1`) and the lower-order quad elements (`QuadQ1/Q2/Q3`) live on
+/// `[-1,1]^d`, so quadrature points must be mapped with `2·x − 1` before being
+/// used for the geometry Jacobian.
+#[inline]
+fn solution_lives_on_01(elem_type: ElementType, order: u8) -> bool {
+    elem_type == ElementType::Quad4 && order >= 4
+}
+
+/// Map a quadrature point from the solution basis domain to the geometry
+/// element's reference domain.  Identity unless the solution lives on `[0,1]^d`.
+#[inline]
+fn geom_quad_point(elem_type: ElementType, order: u8, xi: &[f64]) -> Vec<f64> {
+    if solution_lives_on_01(elem_type, order) {
+        xi.iter().map(|x| 2.0 * x - 1.0).collect()
+    } else {
+        xi.to_vec()
+    }
+}
+
+/// Scale a geometry Jacobian evaluated at the mapped point into the solution's
+/// reference domain.  For QuadQk (solution on `[0,1]^d`) the chain rule from
+/// `[-1,1]^d` to `[0,1]^d` contributes a factor `2^d` to `|det J|`.  This makes
+/// the integration measure consistent for volume/mass forms (the gradient form
+/// in the bilinear assembler is invariant to this scaling because the same
+/// factor cancels against the `[0,1]^d` basis gradients).
+#[inline]
+fn scale_geometry_jacobian(
+    elem_type: ElementType,
+    order: u8,
+    jac: DMatrix<f64>,
+    det: f64,
+) -> (DMatrix<f64>, f64) {
+    if solution_lives_on_01(elem_type, order) {
+        let n = jac.ncols() as i32;
+        (jac * 2.0, det * 2.0f64.powi(n))
+    } else {
+        (jac, det)
     }
 }
 
@@ -437,8 +484,9 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 } else {
                     (geo_p1.as_ref(), nodes)
                 };
+            let xi_g = geom_quad_point(elem_type, order, xi);
             let (measure, chol_ginv, xp) =
-                surface_jacobian(mesh, geo_nds, geo, xi, edim, tdim);
+                surface_jacobian(mesh, geo_nds, geo, &xi_g, edim, tdim);
             let w = quad.weights[q] * measure;
 
             ref_elem.eval_basis(xi, &mut scratch.phi);
@@ -489,8 +537,10 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
         } else {
             let geo = geo_elem.as_ref().unwrap();
             let geo_nds = if is_surface { nodes } else { mesh.geometry_nodes(e) };
+            let xi_g = geom_quad_point(elem_type, order, xi);
             let (jac_qp, det_qp, xp_qp) =
-                isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), xi, dim);
+                isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), &xi_g, dim);
+            let (jac_qp, det_qp) = scale_geometry_jacobian(elem_type, order, jac_qp, det_qp);
             let w = quad.weights[q] * det_qp.abs();
             if det_qp.abs() < 1e-12 {
                 if cfg!(debug_assertions) {
@@ -579,8 +629,9 @@ fn accumulate_volume_linear_element<S: FESpace>(
                 } else {
                     (geo_p1.as_ref(), nodes)
                 };
+            let xi_g = geom_quad_point(elem_type, order, xi);
             let (measure, _chol, xp_surf) =
-                surface_jacobian(mesh, geo_nds, geo, xi, edim, tdim);
+                surface_jacobian(mesh, geo_nds, geo, &xi_g, edim, tdim);
             w = quad.weights[q] * measure;
             ref_elem.eval_basis(xi, &mut scratch.phi);
             xp = xp_surf;
@@ -594,8 +645,10 @@ fn accumulate_volume_linear_element<S: FESpace>(
         } else {
             let geo = geo_elem.as_ref().unwrap();
             let geo_nds = if is_surface { nodes } else { mesh.geometry_nodes(e) };
+            let xi_g = geom_quad_point(elem_type, order, xi);
             let (jac_qp, det_qp, xp_qp) =
-                isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), xi, dim);
+                isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), &xi_g, dim);
+            let (jac_qp, det_qp) = scale_geometry_jacobian(elem_type, order, jac_qp, det_qp);
             w = quad.weights[q] * det_qp.abs();
             if det_qp.abs() < 1e-12 {
                 if cfg!(debug_assertions) {
@@ -915,9 +968,11 @@ impl Assembler {
         let n_dofs = space.n_dofs();
 
         // Precompute quadrature rule from the first element's type (same for all).
+        // Use the ACTUAL solution order: for Quad4 order >= 4 the basis (QuadQk)
+        // lives on [0,1]^2 while order <= 3 (QuadQ1/Q2/Q3) lives on [-1,1]^2, and
+        // the quadrature domain must match the basis domain.
         let elem_type = mesh.element_type(0);
-        let ref_elem  = ref_elem_vol(elem_type, 1); // order doesn't matter for quadrature
-        let quad      = ref_elem.quadrature(quad_order);
+        let quad = ref_elem_vol(elem_type, space.element_order(0).max(1)).quadrature(quad_order);
 
         // Estimate raw nnz for COO pre-allocation.
         // Each element contributes `dofs_per_elem^2` triplets.
@@ -961,9 +1016,9 @@ impl Assembler {
         let n_dofs  = space.n_dofs();
         let n_elems = mesh.n_elements();
 
+        // Quadrature from the ACTUAL solution order (see assemble_bilinear).
         let elem_type = mesh.element_type(0);
-        let ref_elem  = ref_elem_vol(elem_type, 1);
-        let quad      = ref_elem.quadrature(quad_order);
+        let quad = ref_elem_vol(elem_type, space.element_order(0).max(1)).quadrature(quad_order);
 
         let elem0   = mesh.element_type(0);
         let ref0    = ref_elem_vol(elem0, space.element_order(0));
@@ -997,10 +1052,9 @@ impl Assembler {
         let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
 
-        // Precompute quadrature rule.
+        // Precompute quadrature rule from the ACTUAL solution order (see assemble_bilinear).
         let elem_type = mesh.element_type(0);
-        let ref_elem  = ref_elem_vol(elem_type, 1);
-        let quad      = ref_elem.quadrature(quad_order);
+        let quad = ref_elem_vol(elem_type, space.element_order(0).max(1)).quadrature(quad_order);
 
         #[cfg(feature = "parallel")]
         {

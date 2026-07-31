@@ -161,6 +161,7 @@ impl DofManager {
                         match npe {
                             6 => Self::build_p2_prism(mesh),
                             5 => Self::build_p2_pyramid(mesh),
+                            8 => Self::build_q2_hex(mesh),
                             _ => Self::build_p2_tet(mesh),
                         }
                     } else {
@@ -842,6 +843,132 @@ impl DofManager {
     }
 
     // ─── P2 (3-D Prism6) ──────────────────────────────────────────────────────
+
+    /// Q2 (trilinear-biquadratic tensor product) DOFs for a 3-D Hex8 mesh
+    /// — 27 DOFs per element: 8 vertices + 12 edge midpoints + 6 face centers
+    /// + 1 volume center.
+    ///
+    /// DOF ordering matches [`fem_element::HexQk`] at order 2:
+    ///   [0..8) vertices, [8..20) edges, [20..26) faces, [26] volume,
+    /// where the 12 edges and 6 faces use HexQk's enumeration.
+    fn build_q2_hex<M: MeshTopology>(mesh: &M) -> Self {
+        let n_nodes = mesh.n_nodes();
+        let n_elems = mesh.n_elements();
+        let dim = mesh.dim() as usize;
+        assert_eq!(mesh.topological_dim() as usize, 3, "build_q2_hex requires 3-D elements");
+
+        let dofs_per_elem = 27;
+        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
+        let mut qface_map: HashMap<QuadFaceKey, DofId> = HashMap::new();
+        let mut next_dof = n_nodes as DofId;
+        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
+
+        // HexQk edge enumeration (vertex-index pairs), see HexQk::node_to_dof.
+        const EDGES: [(usize, usize); 12] = [
+            (1, 5), (2, 6), (3, 7), (0, 4), (0, 3), (1, 2),
+            (5, 6), (4, 7), (0, 1), (3, 2), (7, 6), (4, 5),
+        ];
+        // HexQk face enumeration (vertex-index quads), face order:
+        // xmin, xmax, ymin, ymax, zmin, zmax.
+        const FACES: [[usize; 4]; 6] = [
+            [0, 3, 7, 4], [1, 2, 6, 5], [0, 1, 5, 4],
+            [3, 2, 6, 7], [0, 1, 2, 3], [4, 5, 6, 7],
+        ];
+
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            assert_eq!(ns.len(), 8, "build_q2_hex requires 8-node hexahedra");
+            let base = e as usize * dofs_per_elem;
+
+            // Vertices (positions 0..8)
+            for (k, &n) in ns.iter().enumerate() {
+                dofs_flat[base + k] = n;
+            }
+
+            // Edge midpoints (positions 8..20)
+            for (k, &(a, b)) in EDGES.iter().enumerate() {
+                let key = EdgeKey::new(ns[a], ns[b]);
+                let dof = *edge_map.entry(key).or_insert_with(|| {
+                    let d = next_dof; next_dof += 1; d
+                });
+                dofs_flat[base + 8 + k] = dof;
+            }
+
+            // Face centers (positions 20..26)
+            for (k, quad) in FACES.iter().enumerate() {
+                let key = QuadFaceKey::new(ns[quad[0]], ns[quad[1]], ns[quad[2]], ns[quad[3]]);
+                let dof = *qface_map.entry(key).or_insert_with(|| {
+                    let d = next_dof; next_dof += 1; d
+                });
+                dofs_flat[base + 20 + k] = dof;
+            }
+
+            // Volume center (position 26) — one per element.
+            dofs_flat[base + 26] = next_dof;
+            next_dof += 1;
+        }
+
+        let n_dofs = next_dof as usize;
+        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+
+        // Vertex coordinates.
+        for n in 0..n_nodes as u32 {
+            let c = mesh.node_coords(n);
+            dof_coords[n as usize * dim .. n as usize * dim + dim].copy_from_slice(c);
+        }
+        // Edge midpoints.
+        for (&EdgeKey(a, b), &dof_id) in &edge_map {
+            let ca = mesh.node_coords(a);
+            let cb = mesh.node_coords(b);
+            let base = dof_id as usize * dim;
+            for d in 0..dim {
+                dof_coords[base + d] = 0.5 * (ca[d] + cb[d]);
+            }
+        }
+        // Face centers (average of the 4 corners).
+        {
+            let mut face_nodes: HashMap<QuadFaceKey, [NodeId; 4]> = HashMap::new();
+            for e in 0..n_elems as u32 {
+                let ns = mesh.element_nodes(e);
+                for quad in FACES.iter() {
+                    face_nodes
+                        .entry(QuadFaceKey::new(ns[quad[0]], ns[quad[1]], ns[quad[2]], ns[quad[3]]))
+                        .or_insert([ns[quad[0]], ns[quad[1]], ns[quad[2]], ns[quad[3]]]);
+                }
+            }
+            for (&key, &dof_id) in &qface_map {
+                let nodes = face_nodes[&key];
+                let base = dof_id as usize * dim;
+                for d in 0..dim {
+                    dof_coords[base + d] = nodes.iter().map(|&n| mesh.node_coords(n)[d]).sum::<f64>() / 4.0;
+                }
+            }
+        }
+        // Volume centers (average of the 8 corners).
+        for e in 0..n_elems as u32 {
+            let base = e as usize * dofs_per_elem;
+            let vol_dof = dofs_flat[base + 26] as usize;
+            let ns = mesh.element_nodes(e);
+            let vbase = vol_dof * dim;
+            for d in 0..dim {
+                dof_coords[vbase + d] = ns.iter().map(|&n| mesh.node_coords(n)[d]).sum::<f64>() / 8.0;
+            }
+        }
+
+        DofManager {
+            order: 2, n_dofs, dofs_flat, dofs_per_elem,
+            elem_dof_offsets: None, dof_coords, dim,
+            n_vertex_dofs: n_nodes,
+            edge_dof_map: edge_map,
+            edge_dof2_map: HashMap::new(),
+            edge_pk_map: HashMap::new(),
+            face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
+            bubble_dof_start: n_dofs,
+            n_volume_dofs: 0,
+            elem_orders: None,
+        }
+    }
 
     fn build_p2_prism<M: MeshTopology>(mesh: &M) -> Self {
         let n_nodes = mesh.n_nodes();
