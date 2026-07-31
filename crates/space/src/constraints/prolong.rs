@@ -270,15 +270,122 @@ pub fn build_h1_prolongation_matrix<M: MeshTopology>(
     fine_mesh: &M,
     fine_dm: &DofManager,
 ) -> CsrMatrix<f64> {
-    assert_eq!(coarse_mesh.dim(), 2, "build_h1_prolongation_matrix: only 2-D supported");
+    let dim = coarse_mesh.dim() as usize;
     let mut coo = CooMatrix::<f64>::new(fine_dm.n_dofs, coarse_dm.n_dofs);
 
     if same_mesh_geometry(coarse_mesh, fine_mesh) {
         build_prolongation_same_mesh(coarse_mesh, coarse_dm, fine_dm, &mut coo);
+    } else if dim == 2 {
+        build_prolongation_nested_mesh_2d(coarse_mesh, coarse_dm, fine_dm, &mut coo);
     } else {
-        build_prolongation_nested_mesh(coarse_mesh, coarse_dm, fine_dm, &mut coo);
+        build_prolongation_nested_mesh_3d(coarse_mesh, coarse_dm, fine_dm, &mut coo);
     }
     coo.into_csr()
+}
+
+/// 3-D reference element factory.
+fn lagrange_ref_3d(et: fem_mesh::ElementType, order: u8) -> Box<dyn fem_element::ReferenceElement> {
+    use fem_element::lagrange::{TetPk, HexQk};
+    match et {
+        fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10 => {
+            Box::new(TetPk::new(order as usize))
+        }
+        fem_mesh::ElementType::Hex8 => Box::new(HexQk::new(order as usize)),
+        _ => panic!("build_h1_prolongation_matrix 3-D: unsupported element type {et:?}"),
+    }
+}
+
+/// Locate a physical point in a 3-D tet mesh; returns (element, barycentric ξ).
+fn locate_point_3d_tet<M: MeshTopology>(mesh: &M, x: &[f64]) -> Option<(u32, [f64; 3])> {
+    const EPS: f64 = 1e-10;
+    for e in 0..mesh.n_elements() as u32 {
+        let et = mesh.element_type(e);
+        if et != fem_mesh::ElementType::Tet4 && et != fem_mesh::ElementType::Tet10 { continue; }
+        let nodes = mesh.element_nodes(e);
+        let c: Vec<[f64; 3]> = nodes.iter().map(|&n| {
+            let p = mesh.node_coords(n);
+            [p[0], p[1], p[2]]
+        }).collect();
+        // Bounding box precheck
+        let mut lo = [f64::INFINITY; 3]; let mut hi = [f64::NEG_INFINITY; 3];
+        for p in &c {
+            for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); }
+        }
+        if x.iter().zip(lo.iter()).any(|(x, l)| *x < l - EPS)
+            || x.iter().zip(hi.iter()).any(|(x, h)| *x > h + EPS) { continue; }
+        // Barycentric coordinates via Jacobian: J = [c1-c0, c2-c0, c3-c0]
+        let (c0, c1, c2, c3) = (&c[0], &c[1], &c[2], &c[3]);
+        let (x0, y0, z0) = (c0[0], c0[1], c0[2]);
+        let j00 = c1[0]-x0; let j01 = c2[0]-x0; let j02 = c3[0]-x0;
+        let j10 = c1[1]-y0; let j11 = c2[1]-y0; let j12 = c3[1]-y0;
+        let j20 = c1[2]-z0; let j21 = c2[2]-z0; let j22 = c3[2]-z0;
+        let det = j00*(j11*j22-j12*j21) - j01*(j10*j22-j12*j20) + j02*(j10*j21-j11*j20);
+        if det.abs() < 1e-14 { continue; }
+        let inv = 1.0/det;
+        let dx = [x[0]-x0, x[1]-y0, x[2]-z0];
+        // λ = J^{-1} * dx using adjugate: λ_i = Σ_j adj(J)_{ji} * dx_j / det
+        let adj = |ci: usize, rj: usize| -> f64 {
+            let r = [if rj==0{1}else{0}, if rj<=1{2}else{1}];
+            let c = [if ci==0{1}else{0}, if ci<=1{2}else{1}];
+            let j = [[j00,j01,j02],[j10,j11,j12],[j20,j21,j22]];
+            let s = if (ci+rj)%2==0 {1.0} else {-1.0};
+            s * (j[r[0]][c[0]]*j[r[1]][c[1]] - j[r[0]][c[1]]*j[r[1]][c[0]])
+        };
+        let l1 = (adj(0,0)*dx[0] + adj(1,0)*dx[1] + adj(2,0)*dx[2]) * inv;
+        let l2 = (adj(0,1)*dx[0] + adj(1,1)*dx[1] + adj(2,1)*dx[2]) * inv;
+        let l3 = (adj(0,2)*dx[0] + adj(1,2)*dx[1] + adj(2,2)*dx[2]) * inv;
+        let l0 = 1.0 - l1 - l2 - l3;
+        if l0 >= -EPS && l1 >= -EPS && l2 >= -EPS && l3 >= -EPS {
+            return Some((e, [l1, l2, l3]));
+        }
+    }
+    None
+}
+
+/// 3-D prolongation: locate fine DOFs in coarse mesh, evaluate coarse basis.
+fn build_prolongation_nested_mesh_3d<M: MeshTopology>(
+    coarse_mesh: &M,
+    coarse_dm: &DofManager,
+    fine_dm: &DofManager,
+    coo: &mut CooMatrix<f64>,
+) {
+    for f in 0..fine_dm.n_dofs as u32 {
+        let x = fine_dm.dof_coord(f);
+        let (e, xi) = locate_point_3d_tet(coarse_mesh, x).unwrap_or_else(|| {
+            panic!("build_h1_prolongation_matrix 3-D: fine DOF {f} at {x:?} outside coarse mesh")
+        });
+        let c_ref = lagrange_ref_3d(coarse_mesh.element_type(e), coarse_dm.order);
+        let mut phi = vec![0.0_f64; c_ref.n_dofs()];
+        c_ref.eval_basis(&xi, &mut phi);
+        for (ci, &cg) in coarse_dm.element_dofs(e).iter().enumerate() {
+            if phi[ci].abs() > 1e-14 {
+                coo.add(f as usize, cg as usize, phi[ci]);
+            }
+        }
+    }
+}
+
+/// 2-D h-refinement prolongation (original implementation, renamed).
+fn build_prolongation_nested_mesh_2d<M: MeshTopology>(
+    coarse_mesh: &M,
+    coarse_dm: &DofManager,
+    fine_dm: &DofManager,
+    coo: &mut CooMatrix<f64>,
+) {
+    for f in 0..fine_dm.n_dofs as u32 {
+        let x = fine_dm.dof_coord(f);
+        let (e, xi) = locate_point_2d(coarse_mesh, x).unwrap_or_else(|| {
+            panic!("build_h1_prolongation_matrix: fine DOF {f} at {x:?} lies outside coarse mesh")
+        });
+        let c_ref = lagrange_ref_2d(coarse_mesh.element_type(e), coarse_dm.order);
+        let mut phi = vec![0.0_f64; c_ref.n_dofs()];
+        c_ref.eval_basis(&xi, &mut phi);
+        for (ci, &cg) in coarse_dm.element_dofs(e).iter().enumerate() {
+            if phi[ci].abs() > 1e-14 {
+                coo.add(f as usize, cg as usize, phi[ci]);
+            }
+        }
+    }
 }
 
 /// Two meshes are "the same" when they have identical element/node counts and
@@ -334,30 +441,6 @@ fn build_prolongation_same_mesh<M: MeshTopology>(
                 if phi[ci].abs() > 1e-14 {
                     coo.add(fg as usize, cg as usize, phi[ci]);
                 }
-            }
-        }
-    }
-}
-
-/// h-refinement path: locate every fine DOF in the coarse mesh and evaluate
-/// the coarse basis at the inverted reference coordinate.
-fn build_prolongation_nested_mesh<M: MeshTopology>(
-    coarse_mesh: &M,
-    coarse_dm: &DofManager,
-    fine_dm: &DofManager,
-    coo: &mut CooMatrix<f64>,
-) {
-    for f in 0..fine_dm.n_dofs as u32 {
-        let x = fine_dm.dof_coord(f);
-        let (e, xi) = locate_point_2d(coarse_mesh, x).unwrap_or_else(|| {
-            panic!("build_h1_prolongation_matrix: fine DOF {f} at {x:?} lies outside coarse mesh")
-        });
-        let c_ref = lagrange_ref_2d(coarse_mesh.element_type(e), coarse_dm.order);
-        let mut phi = vec![0.0_f64; c_ref.n_dofs()];
-        c_ref.eval_basis(&xi, &mut phi);
-        for (ci, &cg) in coarse_dm.element_dofs(e).iter().enumerate() {
-            if phi[ci].abs() > 1e-14 {
-                coo.add(f as usize, cg as usize, phi[ci]);
             }
         }
     }

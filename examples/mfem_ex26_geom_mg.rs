@@ -30,6 +30,7 @@ use fem_mesh::ElementType;
 fn main() {
     let args = parse_args();
     let dim = 2;
+    let mut mesh_data = Vec::new();
 
     let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
@@ -37,15 +38,16 @@ fn main() {
     } else {
         Mesh::<2>::unit_square_tri(args.n)
     };
+    // Serialize mesh for GLVis
+    write_mfem(&mut mesh_data, &mesh, None).unwrap();
 
     println!("Options used:");
     println!("   --mesh {}", args.mesh.as_deref().unwrap_or("built-in"));
     println!("   --geometric-refinements {}", args.geometric_refs);
     println!("   --order-refinements {}", args.order_refs);
     println!("   --device cpu");
-    println!("   --no-visualization");
-    println!("Device configuration: cpu");
-    println!("Memory configuration: host-std");
+    if !args.visualization { println!("   --no-visualization"); }
+    println!("Device configuration: cpu (host-std)");
 
     // 4. Uniform refinement onto coarse mesh.
     let coarse_mesh = {
@@ -175,19 +177,43 @@ fn main() {
         write_mfem_file("refined.mesh", fine_space.mesh()).expect("mesh write failed");
         write_mfem_gf_file("sol.gf", dim, &x, "H1", fine_space.order(), 1, 14).expect("sol write failed");
     }
+
+    // 11. GLVis visualization (1:1 with C++ ex26 section 12)
+    if args.visualization {
+        use std::io::Write;
+        use std::net::TcpStream;
+        let keys = "keys amrRljcUUuu\n";
+        let glvis_send = |stream: &mut TcpStream| -> std::io::Result<()> {
+            write!(stream, "solution\n")?;
+            stream.write_all(&mesh_data)?;
+            writeln!(stream, "FiniteElementSpace")?;
+            writeln!(stream, "FiniteElementCollection: H1_{dim}D_P{}", fine_space.order())?;
+            writeln!(stream, "VDim: 1")?;
+            writeln!(stream, "Ordering: 1")?;
+            writeln!(stream)?;
+            for v in &x { writeln!(stream, "{:.7e}", v)?; }
+            write!(stream, "{keys}")?;
+            writeln!(stream, "window_title 'Solution'")?;
+            stream.flush()
+        };
+        if let Ok(mut sock) = TcpStream::connect("localhost:19916") {
+            let _ = glvis_send(&mut sock);
+        }
+    }
 }
 
-// ─── CLI ──────────────────────────────────────────────────────────────────────
+// ─── CLI (1:1 with C++ OptionsParser) ─────────────────────────────────────────
 
 struct Args {
     mesh: Option<String>,
     n: usize,
     geometric_refs: usize,
     order_refs: usize,
+    visualization: bool,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: None, n: 10, geometric_refs: 0, order_refs: 2 };
+    let mut a = Args { mesh: None, n: 10, geometric_refs: 0, order_refs: 2, visualization: true };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -199,6 +225,9 @@ fn parse_args() -> Args {
             "-or" | "--order-refinements" => {
                 a.order_refs = it.next().and_then(|s| s.parse().ok()).unwrap_or(2)
             }
+            "-vis" | "--visualization" => a.visualization = true,
+            "-no-vis" | "--no-visualization" => a.visualization = false,
+            "-d" | "--device" => { let _ = it.next(); } // CPU only
             _ => {}
         }
     }
