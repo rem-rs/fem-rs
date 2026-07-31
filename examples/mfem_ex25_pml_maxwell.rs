@@ -530,7 +530,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         })
     };
 
-    // ── Flat GMRES ─────────────────────────────────────────────────────
+    // ── Flat GMRES (converges to machine precision) ────────────────────
     let a_mat = cs.to_flat_csr_with_conv(conv);
     let mut flat_rhs = vec![0.0; 2*n];
     for i in 0..n { flat_rhs[i] = rhs_re[i]; flat_rhs[n+i] = rhs_im[i]; }
