@@ -915,7 +915,8 @@ pub fn compute_l2_error_hcurl<M: MeshTopology>(
             if e as usize >= mask.len() || mask[e as usize] { continue; }
         }
         let et = mesh.element_type(e);
-        let vre = vec_ref_elem(VecFamily::Nedelec, et.to_elem_type(), nd_space.order());
+        let vre = crate::vector_assembler::vec_ref_elem(
+            fem_space::fe_space::SpaceType::HCurl, et, dim, nd_space.order());
         let n_ldofs = vre.n_dofs();
         let quad = vre.quadrature(quad_order);
         let elem_dofs: Vec<usize> = nd_space.element_dofs(e).iter().map(|&d| d as usize).collect();
@@ -986,7 +987,8 @@ pub fn compute_l2_error_hdiv<M: MeshTopology>(
 
     for e in mesh.elem_iter() {
         let et = mesh.element_type(e);
-        let vre = vec_ref_elem(VecFamily::RaviartThomas, et.to_elem_type(), rt_space.order());
+        let vre = crate::vector_assembler::vec_ref_elem(
+            fem_space::fe_space::SpaceType::HDiv, et, dim, rt_space.order());
         let n_ldofs = vre.n_dofs();
         let quad = vre.quadrature(quad_order);
         let elem_dofs: Vec<usize> = rt_space.element_dofs(e).iter().map(|&d| d as usize).collect();
@@ -1147,5 +1149,47 @@ mod tests {
         let err: f64 = coords.iter().zip(dofs.iter())
             .map(|(xi, &v)| (v - f(xi)).powi(2)).sum::<f64>().sqrt();
         assert!(err < 1e-14, "interpolation at nodes should match function: err={err:.6e}");
+    }
+
+    /// `compute_l2_error_hcurl` must reconstruct the FE field with the SAME
+    /// reference basis as the assembly, otherwise ‖E_h‖_L² disagrees with the
+    /// mass-matrix norm uᵀMu. Regression test for ex25: the error routine
+    /// previously used `fem_element::vec_ref_elem` (TriNDk Vandermonde basis)
+    /// instead of the assembly's `vector_assembler::vec_ref_elem` (TriND1
+    /// Whitney basis), inflating the reported L² error (0.817 vs C++ 0.144).
+    #[test]
+    fn hcurl_l2_norm_matches_mass_matrix() {
+        use crate::standard::VectorMassIntegrator;
+        use crate::vector_assembler::VectorAssembler;
+        use super::compute_l2_error_hcurl;
+        use fem_space::HCurlSpace;
+
+        let mesh = Mesh::<2>::unit_square_tri(6);
+        let space = HCurlSpace::new(mesh, 1);
+        let n = space.n_dofs();
+        let q = 3u8;
+
+        // Mass matrix via the assembly path (same reference basis as the
+        // system matrix that defines the solution DOFs).
+        let m = VectorAssembler::assemble_bilinear(
+            &space, &[&VectorMassIntegrator { alpha: 1.0 }], q);
+
+        // Deterministic pseudo-random DOF vector with nonzero curl content.
+        let u: Vec<f64> = (0..n).map(|i| {
+            let s = (i as f64 + 0.5) * 1.7;
+            s.sin() + 0.3 * (i as f64).cos()
+        }).collect();
+
+        // ‖E_h‖_L² via the error routine (exact field = 0).
+        let zero = |_xp: &[f64]| -> Vec<f64> { vec![0.0; 2] };
+        let norm_err = compute_l2_error_hcurl(&u, &space, &zero, q, None);
+
+        // ‖E_h‖_L² via the mass matrix: sqrt(uᵀ M u).
+        let mut mu = vec![0.0; n];
+        m.spmv(&u, &mut mu);
+        let norm_mass: f64 = u.iter().zip(mu.iter()).map(|(a, b)| a * b).sum::<f64>().sqrt();
+
+        assert!((norm_err - norm_mass).abs() < 1e-9 * norm_mass.max(1e-12),
+            "hcurl L2 norm mismatch: error-routine {norm_err:.10e} vs mass-matrix {norm_mass:.10e}");
     }
 }

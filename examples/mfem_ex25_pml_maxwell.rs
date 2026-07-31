@@ -383,26 +383,6 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     let qo_mass = (2*args.order + 1) as u8;  // matches C++ mass order
     let qo_curl = 0u8;  // matches C++ curl-curl for Pk triangle
 
-    // ── Dump element DOFs and signs ──────────────────────────────────
-    {
-        use std::fs::File;
-        use std::io::Write;
-        let mut f = File::create("elem_dofs_rust.txt").unwrap();
-        for e in 0..space.mesh().n_elements() as u32 {
-            let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-            let signs = space.element_signs(e);
-            let etag = space.mesh().element_tag(e);
-            write!(f, "elem {e} attr={etag} dofs=").unwrap();
-            for (i, &d) in dofs.iter().enumerate() {
-                let s = if i < signs.len() { signs[i] } else { 1.0 };
-                // Mimic C++ signed encoding: positive=+dof, negative=-(dof+1)
-                let signed_dof = if s > 0.0 { d as i32 } else { -(d as i32 + 1) };
-                write!(f, "{} ", signed_dof).unwrap();
-            }
-            writeln!(f).unwrap();
-        }
-    }
-
     let mass_re = VectorAssembler::assemble_bilinear(&space, &[&mass_nonpml, &pml_mass_re], qo_mass);
     let mass_im = VectorAssembler::assemble_bilinear(&space, &[&pml_mass_im], qo_mass);
     let cc_re = VectorAssembler::assemble_bilinear(&space, &[&cc_nonpml, pml_cc_re.as_ref()], qo_curl);
@@ -465,27 +445,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     cs.apply_dirichlet(&ess_u, &bc_re_ess, &bc_im_ess, &mut flat_rhs_init);
     for i in 0..n { rhs_re[i] = flat_rhs_init[i]; rhs_im[i] = flat_rhs_init[n+i]; }
 
-    // ── TEMP: dump flat matrix and RHS for C++ comparison ────────────
-    let a_mat_check = cs.to_flat_csr_with_conv(conv);
-    {
-        use std::fs::File;
-        use std::io::Write;
-        let mut f = File::create("flat_rhs_all.txt").unwrap();
-        for i in 0..n.min(5) { writeln!(f, "rhs_re[{i}] = {:.15e}", rhs_re[i]).unwrap(); }
-        for i in 0..n.min(5) { writeln!(f, "rhs_im[{i}] = {:.15e}", rhs_im[i]).unwrap(); }
-        // Check essential DOFs 58, 61, 63
-        for &d in &[58usize, 61, 63] {
-            writeln!(f, "rhs_re[{d}] = {:.15e}", rhs_re[d]).unwrap();
-            writeln!(f, "rhs_im[{d}] = {:.15e}", rhs_im[d]).unwrap();
-            // check flat system rows
-            let s = a_mat_check.row_ptr[d]; let e = a_mat_check.row_ptr[d+1];
-            for p in s..e {
-                writeln!(f, "  flat({}, {}) = {:.15e}", d, a_mat_check.col_idx[p], a_mat_check.values[p]).unwrap();
-            }
-        }
-    }
-
-        // ── Preconditioner — single-pass assembly (1:1 with C++ BilinearForm) ────
+    // ── Preconditioner — single-pass assembly (1:1 with C++ BilinearForm) ────
     // Non-PML: μ⁻¹·curlcurl + ω²ε·mass (coefficients baked into integrator)
     // PML:     μ⁻¹·|stretch|·curlcurl + ω²ε·|stretch|·mass
     let cc_nonpml_prec = CurlCurlIntegrator {
@@ -530,27 +490,51 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         })
     };
 
-    // ── Dump RHS for comparison ────────────────────────────────────────
-    {
-        use std::fs::File;
-        use std::io::Write;
-        let mut f = File::create("rhs_rust.txt").unwrap();
-        for i in 0..n { writeln!(f, "re[{i}] = {:.15e}", rhs_re[i]).unwrap(); }
-        for i in 0..n { writeln!(f, "im[{i}] = {:.15e}", rhs_im[i]).unwrap(); }
-    }
-    // ── Direct solve for ground truth ──────────────────────────────────
+    // ── Solve the flat 2n×2n real system (1:1 with C++ 14) ────────────────
     let a_mat = cs.to_flat_csr_with_conv(conv);
     let mut flat_rhs = vec![0.0; 2*n];
     for i in 0..n { flat_rhs[i] = rhs_re[i]; flat_rhs[n+i] = rhs_im[i]; }
     let mut x = vec![0.0; 2*n];
-    // ── GMRES solve ────────────────────────────────────────────────────
-    let mut x = vec![0.0; 2*n];
-    let res = fem_solver::solve_gmres(&a_mat, &flat_rhs, &mut x, 500,
-        &SolverConfig { rtol:1e-12, max_iter:10000, verbose:false, ..Default::default() });
+
+    // ── GMRES solve with block-diagonal GS preconditioner (1:1 with C++ 14b) ──
+    // C++: pc_r = GSSmoother(PCOpAh); pc_i = ScaledOperator(pc_r, s);
+    //      BlockDP = diag(pc_r, pc_i);  GMRES(KDim=200, MaxIter=2000, RelTol=1e-5)
+    let prec_mass = VectorAssembler::assemble_bilinear(
+        &space, &[&mass_nonpml_prec, &pml_mass_abs_prec], qo_mass);
+    let prec_cc = VectorAssembler::assemble_bilinear(
+        &space, &[&cc_nonpml_prec, pml_cc_abs_prec.as_ref()], qo_curl);
+    let mut prec_mat = spadd(&prec_mass, &prec_cc);
+
+    // FormSystemMatrix with DIAG_ONE: zero ess rows, set diagonal = 1
+    for &d in &ess_u {
+        let s = prec_mat.row_ptr[d];
+        let e = prec_mat.row_ptr[d + 1];
+        let mut found_diag = false;
+        for p in s..e {
+            if prec_mat.col_idx[p] as usize == d {
+                prec_mat.values[p] = 1.0;
+                found_diag = true;
+            } else {
+                prec_mat.values[p] = 0.0;
+            }
+        }
+        assert!(found_diag, "prec matrix missing diagonal for ess dof {d}");
+    }
+
+    let prec_la = fem_to_linlvo_csr(&prec_mat);
+    let prec_r = GSSmoother::from_csr(&prec_la).expect("prec GS smoother");
+    let prec_i = ScaledPrecond {
+        inner: GSSmoother::from_csr(&prec_la).expect("prec GS smoother"),
+        scale: conv.tr_sign(),   // C++: s = (HERMITIAN) ? -1 : +1
+    };
+    let block = BlockDiagPrecondPair { pre_re: prec_r, pre_im: prec_i, n };
+
+    let res = fem_solver::solve_gmres_precond(&a_mat, &flat_rhs, &mut x, 200, &block,
+        &SolverConfig { rtol: 1e-5, max_iter: 2000, verbose: false, ..Default::default() });
     match &res {
-        Ok(r) => println!("  GMRES converged in {} iters, final residual = {:.6e}",
+        Ok(r) => println!("  GMRES(+GS) converged in {} iters, final residual = {:.6e}",
                          r.iterations, r.final_residual),
-        Err(e2) => println!("  GMRES: {e2}"),
+        Err(e2) => println!("  GMRES(+GS): {e2}"),
     }
 
     // ── Error computation (1:1 with C++ L2 error via ComputeL2Error) ────
