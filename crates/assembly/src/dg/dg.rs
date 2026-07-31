@@ -70,6 +70,39 @@ impl DgAssembler {
         sigma:      f64,
         quad_order: u8,
     ) -> CsrMatrix<f64> {
+        // SIP: sigma_sign = -1, penalty applied on every boundary tag.
+        Self::assemble_dg(space, ifl, kappa, -1.0, sigma, quad_order, None)
+    }
+
+    /// General MFEM-style DG diffusion assembly.
+    ///
+    /// Mirrors MFEM's `DGDiffusionIntegrator(a, sigma, kappa)`:
+    /// - **Volume terms**: `∫ a ∇u·∇v dx`.
+    /// - **Interior face terms**: `−a·elmat + σ·a·elmatᵀ + κ·jmat`.
+    /// - **Boundary face terms** (only on `bdr_tags`, or all boundary faces when
+    ///   `bdr_tags` is `None`): the same penalty form — the weak enforcement of
+    ///   homogeneous Dirichlet BCs.
+    ///
+    /// # Arguments
+    /// - `space`      — the L² (DG) finite element space.
+    /// - `ifl`        — pre-built interior face list.
+    /// - `a`          — diffusion coefficient (scalar, uniform; MFEM `matCoef`).
+    /// - `sigma`      — symmetrization sign, +1 (NIP) or −1 (SIP); a value of
+    ///   −1 yields a symmetric matrix (PCG), any other value a non-symmetric one
+    ///   (GMRES).
+    /// - `penalty`    — DG penalty parameter (MFEM `kappa`; `(order+1)²` by default).
+    /// - `quad_order` — polynomial order the quadrature integrates exactly.
+    /// - `bdr_tags`   — boundary attributes on which the Dirichlet face penalty is
+    ///   applied; `None` means every boundary face.
+    pub fn assemble_dg<S: FESpace + Sync>(
+        space:      &S,
+        ifl:        &InteriorFaceList,
+        a:          f64,
+        sigma:      f64,
+        penalty:    f64,
+        quad_order: u8,
+        bdr_tags:   Option<&[i32]>,
+    ) -> CsrMatrix<f64> {
         let mesh   = space.mesh();
         let dim    = mesh.dim() as usize;
         let n_dofs = space.n_dofs();
@@ -81,14 +114,14 @@ impl DgAssembler {
         #[cfg(feature = "parallel")]
         {
             if mesh.n_elements() >= assembly_parallel_min_elems() {
-                coo.append(assemble_dg_volume_parallel(space, kappa, quad_order));
+                coo.append(assemble_dg_volume_parallel(space, a, quad_order));
             } else {
-                assemble_volume(&mut coo, space, kappa, quad_order);
+                assemble_volume(&mut coo, space, a, quad_order);
             }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            assemble_volume(&mut coo, space, kappa, quad_order);
+            assemble_volume(&mut coo, space, a, quad_order);
         }
 
         // ── 2. Interior face terms ─────────────────────────────────────────────
@@ -107,8 +140,9 @@ impl DgAssembler {
                             iface.elem_left,
                             iface.elem_right,
                             &iface.face_nodes,
-                            kappa,
+                            a,
                             sigma,
+                            penalty,
                             order,
                             quad_order,
                         );
@@ -126,7 +160,7 @@ impl DgAssembler {
                 for iface in &ifl.faces {
                     assemble_interior_face(
                         &mut coo, mesh, space, iface.elem_left, iface.elem_right,
-                        &iface.face_nodes, kappa, sigma, order, quad_order,
+                        &iface.face_nodes, a, sigma, penalty, order, quad_order,
                     );
                 }
             }
@@ -136,7 +170,7 @@ impl DgAssembler {
             for iface in &ifl.faces {
                 assemble_interior_face(
                     &mut coo, mesh, space, iface.elem_left, iface.elem_right,
-                    &iface.face_nodes, kappa, sigma, order, quad_order,
+                    &iface.face_nodes, a, sigma, penalty, order, quad_order,
                 );
             }
         }
@@ -146,7 +180,14 @@ impl DgAssembler {
         let face_to_elem = build_face_elem_map(mesh, dim);
         let boundary_pairs: Vec<(u32, u32)> = mesh
             .face_iter()
-            .filter_map(|f| face_to_elem.get(&f).copied().map(|e| (f, e)))
+            .filter_map(|f| {
+                if let Some(tags) = bdr_tags {
+                    if !tags.contains(&mesh.face_tag(f)) {
+                        return None;
+                    }
+                }
+                face_to_elem.get(&f).copied().map(|e| (f, e))
+            })
             .collect();
         #[cfg(feature = "parallel")]
         {
@@ -157,7 +198,8 @@ impl DgAssembler {
                     .map(|(f, elem)| {
                         let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
                         assemble_boundary_face_with_elem(
-                            &mut local, mesh, space, f, elem, kappa, sigma, order, quad_order,
+                            &mut local, mesh, space, f, elem, a, sigma, penalty, order,
+                            quad_order,
                         );
                         local
                     })
@@ -172,7 +214,7 @@ impl DgAssembler {
             } else {
                 for (f, elem) in &boundary_pairs {
                     assemble_boundary_face_with_elem(
-                        &mut coo, mesh, space, *f, *elem, kappa, sigma, order, quad_order,
+                        &mut coo, mesh, space, *f, *elem, a, sigma, penalty, order, quad_order,
                     );
                 }
             }
@@ -181,7 +223,7 @@ impl DgAssembler {
         {
             for (f, elem) in &boundary_pairs {
                 assemble_boundary_face_with_elem(
-                    &mut coo, mesh, space, *f, *elem, kappa, sigma, order, quad_order,
+                    &mut coo, mesh, space, *f, *elem, a, sigma, penalty, order, quad_order,
                 );
             }
         }
@@ -290,8 +332,9 @@ fn assemble_interior_face<S: FESpace>(
     el:         u32,
     er:         u32,
     face_nodes: &[u32],
-    kappa:      f64,
+    diff:       f64,
     sigma:      f64,
+    penalty:    f64,
     order:      u8,
     quad_order: u8,
 ) {
@@ -452,8 +495,8 @@ fn assemble_interior_face<S: FESpace>(
         // wq = ni·nor = w * |nor|², summed over elements
         // w1 = qw / det_l / 2, w2 = qw / det_r / 2
         let wq = nor_norm2 * (qw / 2.0) * (1.0 / det_l + 1.0 / det_r);
-        // C++: jmat += kappa * wq * shape * shape  (kappa = penalty sigma here)
-        let jscale = sigma * wq;  // sigma = penalty parameter (caller's sigma)
+        // C++: jmat += kappa * wq * shape * shape  (kappa = penalty here)
+        let jscale = penalty * wq;  // penalty = the caller's DG penalty κ
 
         // jmat lower-triangular block structure (C++ matches both symmetric halves)
         // jmat_11
@@ -481,20 +524,20 @@ fn assemble_interior_face<S: FESpace>(
         }
     }
 
-    // ── Combine: el_local = -kappa*el_local - kappa*el_local^T + jm_local ──
-    // C++: elmat = -elmat + sigma_cpp * elmat^T + jmat
-    //       with sigma_cpp = -1 (SIP), so: -elmat - elmat^T + jmat
-    // kappa = diffusion coefficient (elmat), sigma = penalty parameter (jmat)
+    // ── Combine: el_local = -diff*el + sigma*diff*el^T + jm_local ──
+    // MFEM: elmat = -elmat + sigma_cpp * elmat^T + jmat
+    //       (sigma_cpp = -1 → SIP: -elmat - elmat^T + jmat)
+    // diff = diffusion coefficient (elmat), penalty = DG penalty (jmat)
     for i in 0..ndofs {
         for j in 0..i {
             let aij = el_local[i * ndofs + j];
             let aji = el_local[j * ndofs + i];
             let mij = jm_local[i * ndofs + j];
-            el_local[i * ndofs + j] = -kappa * aij - kappa * aji + mij;
-            el_local[j * ndofs + i] = -kappa * aji - kappa * aij + mij;
+            el_local[i * ndofs + j] = sigma * diff * aji - diff * aij + mij;
+            el_local[j * ndofs + i] = sigma * diff * aij - diff * aji + mij;
         }
         let diag = el_local[i * ndofs + i];
-        el_local[i * ndofs + i] = -2.0 * kappa * diag + jm_local[i * ndofs + i];
+        el_local[i * ndofs + i] = (sigma - 1.0) * diff * diag + jm_local[i * ndofs + i];
     }
 
     // Scatter into global COO
@@ -526,8 +569,9 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
     space:      &S,
     face:       u32,
     elem:       u32,
-    kappa:      f64,
+    diff:       f64,
     sigma:      f64,
+    penalty:    f64,
     order:      u8,
     quad_order: u8,
 ) {
@@ -602,7 +646,7 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
 
         // Penalty: wq = qw * |nor|² / det(J)  (boundary, no /2)
         let wq = (qw / det_j) * nor_norm2;
-        let jscale = sigma * wq;  // sigma = penalty from caller
+        let jscale = penalty * wq;  // penalty = the caller's DG penalty κ
 
         // jmat lower triangle
         for i in 0..n {
@@ -613,16 +657,16 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
         }
     }
 
-    // ── Combine: el = -kappa*el - kappa*el^T + jm  (SIP) ────────────────────
+    // ── Combine: el = -diff*el + sigma*diff*el^T + jm  (SIP when sigma=-1) ──
     for i in 0..n {
         for j in 0..i {
             let aij = el_loc[i * n + j];
             let aji = el_loc[j * n + i];
             let mij = jm_loc[i * n + j];
-            el_loc[i * n + j] = -kappa * aij - kappa * aji + mij;
-            el_loc[j * n + i] = -kappa * aji - kappa * aij + mij;
+            el_loc[i * n + j] = sigma * diff * aji - diff * aij + mij;
+            el_loc[j * n + i] = sigma * diff * aij - diff * aji + mij;
         }
-        el_loc[i * n + i] = -2.0 * kappa * el_loc[i * n + i] + jm_loc[i * n + i];
+        el_loc[i * n + i] = (sigma - 1.0) * diff * el_loc[i * n + i] + jm_loc[i * n + i];
     }
 
     for (i, &gi) in dofs.iter().enumerate() {

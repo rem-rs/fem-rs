@@ -261,7 +261,12 @@ impl<const D: usize> Mesh<D> {
 
         // Build geometry connectivity: each edge is shared via an edge map.
         let mut geom_conn = vec![0u32; n_elems * npe_new];
-        let mut edge_map: HashMap<(NodeId, NodeId), Vec<NodeId>> = HashMap::new();
+        // Edge map: key = sorted vertex pair → (creator's first vertex, node ids in
+        // the creator's edge direction).  A second element sharing the edge in the
+        // OPPOSITE direction must consume the ids in reverse order, otherwise the
+        // shared Q3 edge nodes get associated with the wrong reference DOFs and the
+        // curved geometry (hence the Jacobian and the stiffness) is corrupted.
+        let mut edge_map: HashMap<(NodeId, NodeId), (NodeId, Vec<NodeId>)> = HashMap::new();
         let mut next_geom = n_verts as NodeId;
 
         // Geometry coords start with the original vertex coords
@@ -296,7 +301,7 @@ impl<const D: usize> Mesh<D> {
             for ei in 0..4 {
                 let (a, b) = edge_verts[ei];
                 let key = if a < b { (a, b) } else { (b, a) };
-                let ids = edge_map.entry(key).or_insert_with(|| {
+                let entry = edge_map.entry(key).or_insert_with(|| {
                     let ca = self.coords_of(a);
                     let cb = self.coords_of(b);
                     let mut new_ids = Vec::with_capacity(n_edge_dofs);
@@ -313,19 +318,36 @@ impl<const D: usize> Mesh<D> {
                         } else {
                             rc[1]
                         };
-                        let t = varying; // already in [0,1]
+                        // QuadQk DOF order runs bottom → right → top → left.  The
+                        // top (ei=2) and left (ei=3) edges run from their SECOND
+                        // reference corner back to the first, so the fraction of
+                        // the a→b segment is 1 − varying there (the Q3 node at
+                        // reference x=2/3 sits 1/3 of the way from the corner at
+                        // x=1).  Using `varying` directly mirrored those nodes and
+                        // corrupted the curved geometry (wrong Jacobian → wrong
+                        // stiffness).
+                        let t = if ei == 2 || ei == 3 { 1.0 - varying } else { varying };
                         let mut x = [0.0; D];
                         for d in 0..D { x[d] = (1.0 - t) * ca[d] + t * cb[d]; }
                         geom_coords.extend_from_slice(&x);
                         new_ids.push(next_geom);
                         next_geom += 1;
                     }
-                    new_ids
+                    (a, new_ids)
                 });
-                // DOFs along this edge in QuadQk order
-                for id in ids.iter() {
-                    geom_conn[pos] = *id;
-                    pos += 1;
+                // DOFs along this edge in QuadQk order; reverse for the element
+                // whose edge direction is opposite to the edge's creator.
+                let same_dir = entry.0 == a;
+                if same_dir {
+                    for id in entry.1.iter() {
+                        geom_conn[pos] = *id;
+                        pos += 1;
+                    }
+                } else {
+                    for id in entry.1.iter().rev() {
+                        geom_conn[pos] = *id;
+                        pos += 1;
+                    }
                 }
             }
 
