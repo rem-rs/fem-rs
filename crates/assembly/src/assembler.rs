@@ -139,48 +139,28 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
     }
 }
 
-/// Does the solution reference element for `(elem_type, order)` live on the
-/// `[0,1]^d` reference domain (as opposed to `[-1,1]^d`)?
-///
-/// This is only true for `QuadQk` (Quad4, order >= 4), whose 1-D nodes and
-/// quadrature are Gauss-Lobatto-Legendre on `[0,1]`.  The geometry element
-/// (`QuadQ1`) and the lower-order quad elements (`QuadQ1/Q2/Q3`) live on
-/// `[-1,1]^d`, so quadrature points must be mapped with `2·x − 1` before being
-/// used for the geometry Jacobian.
-#[inline]
-fn solution_lives_on_01(elem_type: ElementType, order: u8) -> bool {
-    elem_type == ElementType::Quad4 && order >= 4
-}
-
 /// Map a quadrature point from the solution basis domain to the geometry
-/// element's reference domain.  Identity unless the solution lives on `[0,1]^d`.
+/// element's reference domain.
+///
+/// For `Quad4` the *geometry* element is always `QuadQk` on `[0,1]^d`
+/// (`geo_ref_elem`), while the *solution* basis lives on `[-1,1]^d` for the
+/// fixed-order elements `QuadQ1/Q2/Q3` (order 1..=3) and on `[0,1]^d` for
+/// `QuadQk` (order ≥ 4).  The quadrature points come from the solution
+/// element, so:
+/// - order 1..=3: map `[-1,1] → [0,1]` with `(x+1)/2`;
+/// - order ≥ 4: already on `[0,1]`, identity.
+///
+/// Before this mapping was fixed, `[-1,1]` quadrature points were passed
+/// straight to the `[0,1]` geometry element, whose `to_std` chain-rule map
+/// pushed them outside the reference domain (`[-3,-1]`): the geometry
+/// polynomial was extrapolated there, corrupting the Jacobian (and hence the
+/// stiffness) on strongly curved cells (e.g. the ex27 hole regions).
 #[inline]
 fn geom_quad_point(elem_type: ElementType, order: u8, xi: &[f64]) -> Vec<f64> {
-    if solution_lives_on_01(elem_type, order) {
-        xi.iter().map(|x| 2.0 * x - 1.0).collect()
-    } else {
-        xi.to_vec()
-    }
-}
-
-/// Scale a geometry Jacobian evaluated at the mapped point into the solution's
-/// reference domain.  For QuadQk (solution on `[0,1]^d`) the chain rule from
-/// `[-1,1]^d` to `[0,1]^d` contributes a factor `2^d` to `|det J|`.  This makes
-/// the integration measure consistent for volume/mass forms (the gradient form
-/// in the bilinear assembler is invariant to this scaling because the same
-/// factor cancels against the `[0,1]^d` basis gradients).
-#[inline]
-fn scale_geometry_jacobian(
-    elem_type: ElementType,
-    order: u8,
-    jac: DMatrix<f64>,
-    det: f64,
-) -> (DMatrix<f64>, f64) {
-    if solution_lives_on_01(elem_type, order) {
-        let n = jac.ncols() as i32;
-        (jac * 2.0, det * 2.0f64.powi(n))
-    } else {
-        (jac, det)
+    match elem_type {
+        ElementType::Quad4 if order >= 4 => xi.to_vec(), // QuadQk on [0,1]^d
+        ElementType::Quad4 => xi.iter().map(|x| 0.5 * (x + 1.0)).collect(), // QuadQ1..3 on [-1,1]^d
+        _ => xi.to_vec(),
     }
 }
 
@@ -540,7 +520,6 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
             let xi_g = geom_quad_point(elem_type, order, xi);
             let (jac_qp, det_qp, xp_qp) =
                 isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), &xi_g, dim);
-            let (jac_qp, det_qp) = scale_geometry_jacobian(elem_type, order, jac_qp, det_qp);
             let w = quad.weights[q] * det_qp.abs();
             if det_qp.abs() < 1e-12 {
                 if cfg!(debug_assertions) {
@@ -648,7 +627,6 @@ fn accumulate_volume_linear_element<S: FESpace>(
             let xi_g = geom_quad_point(elem_type, order, xi);
             let (jac_qp, det_qp, xp_qp) =
                 isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), &xi_g, dim);
-            let (jac_qp, det_qp) = scale_geometry_jacobian(elem_type, order, jac_qp, det_qp);
             w = quad.weights[q] * det_qp.abs();
             if det_qp.abs() < 1e-12 {
                 if cfg!(debug_assertions) {
