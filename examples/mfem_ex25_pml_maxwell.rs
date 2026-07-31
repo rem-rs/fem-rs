@@ -412,44 +412,6 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     let k_re = spadd(&mass_re, &cc_re);
     let k_im = spadd(&mass_im, &cc_im);
     let mut cs = fem_assembly::complex::ComplexSystem { k_re, k_im, omega: 0.0 };
-    {
-        use std::fs::File;
-        use std::io::Write;
-        // Curl-curl RE integrators (non-PML + PML)
-        let cc_re_only = CurlCurlIntegrator {
-            mu: RestrictedCoefficient { inner: mu_inv, attrs: attr.clone() }
-        };
-        let pml_cc_re_only = CurlCurlIntegrator {
-            mu: RestrictedCoefficient {
-                inner: PmlCurlScalar { pml: pml.clone() },
-                attrs: attr_pml.clone(),
-            }
-        };
-        // Curl-curl IM integrators (PML only)
-        let pml_cc_im_only = CurlCurlIntegrator {
-            mu: RestrictedCoefficient {
-                inner: PmlCurlScalarIm { pml: pml.clone() },
-                attrs: attr_pml.clone(),
-            }
-        };
-        let cc_re = VectorAssembler::assemble_bilinear(&space, &[&cc_re_only, &pml_cc_re_only], qo);
-        let cc_im = VectorAssembler::assemble_bilinear(&space, &[&pml_cc_im_only], qo);
-        let mut f = File::create("matrix_cc_rust_dump.txt").unwrap();
-        writeln!(f, "n_dofs {}", n).unwrap();
-        writeln!(f, "cc_re_nnz {}", cc_re.values.len()).unwrap();
-        writeln!(f, "cc_im_nnz {}", cc_im.values.len()).unwrap();
-        writeln!(f, "=== cc_re row 0 nnz ===").unwrap();
-        let s = cc_re.row_ptr[0]; let e = cc_re.row_ptr[1];
-        for p in s..e {
-            writeln!(f, "  (0, {}) = {:.15e}", cc_re.col_idx[p], cc_re.values[p]).unwrap();
-        }
-        writeln!(f, "=== cc_im row 0 nnz ===").unwrap();
-        let s = cc_im.row_ptr[0]; let e = cc_im.row_ptr[1];
-        for p in s..e {
-            writeln!(f, "  (0, {}) = {:.15e}", cc_im.col_idx[p], cc_im.values[p]).unwrap();
-        }
-        println!("  Wrote matrix_cc_rust_dump.txt");
-    }
 
     // ── RHS ──────────────────────────────────────────────────────────────
     let mut rhs_re = vec![0.0; n];
