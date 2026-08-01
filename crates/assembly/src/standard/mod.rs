@@ -148,6 +148,7 @@ pub mod infinite;
 pub mod shell_mitc4;
 
 pub use diffusion::DiffusionIntegrator;
+pub use tensor_diffusion::TensorDiffusionIntegrator;
 pub use elasticity::ElasticityIntegrator;
 pub use mass::MassIntegrator;
 pub use neumann::NeumannIntegrator;

@@ -1023,7 +1023,9 @@ fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         // Quadrilateral elements (straight-sided or curved via isoparametric mapping)
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (ElementType::Quad4, 3) => Box::new(QuadQ3),
+        // order >= 3: GLL nodes on [0,1]^2 (MFEM H1 default); QuadQ3 is
+        // equidistant [-1,1]^2 and NOT MFEM-compatible at p=3.
+        (ElementType::Quad4, 3) => Box::new(fem_element::lagrange::QuadQk::new(3)),
         (ElementType::Quad4, 4) => Box::new(QuadQ4),
         _ => panic!("hyperelasticity ref_elem_vol: unsupported ({et:?}, {order})"),
     }

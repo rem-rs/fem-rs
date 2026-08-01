@@ -15,7 +15,7 @@ use fem_element::{
         SegP1, SegP2, SegP3,
         TriP1, TriP2, TriP3,
         TetP1, TetP2, TetP3,
-        QuadQ1, QuadQ2, QuadQ3, QuadQk,
+        QuadQ1, QuadQ2, QuadQk,
     },
 };
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -35,7 +35,9 @@ pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tri3, 3) => Box::new(TriP3),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (ElementType::Quad4, 3) => Box::new(QuadQ3),
+        // order >= 3 uses GLL nodes on [0,1]^2 (MFEM H1 default); QuadQ3 is
+        // equidistant [-1,1]^2 and NOT MFEM-compatible at p=3.
+        (ElementType::Quad4, 3) => Box::new(QuadQk::new(3)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),

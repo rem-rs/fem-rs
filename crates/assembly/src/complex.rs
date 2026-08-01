@@ -715,7 +715,7 @@ impl NativeComplexAssembler {
         quad_order: u8,
     ) -> NativeComplexSystem {
         use fem_element::{ReferenceElement,
-            lagrange::{TriP1, TriP2, TetP1, TetP2, QuadQ1, QuadQ2, QuadQ3, QuadQ4}};
+            lagrange::{TriP1, TriP2, TetP1, TetP2, QuadQ1, QuadQ2, QuadQ4}};
         use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
         let mesh    = space.mesh();
@@ -741,7 +741,7 @@ impl NativeComplexAssembler {
                 (ElementType::Tet4, _) => Box::new(TetP1),
                 (ElementType::Quad4, 1) => Box::new(QuadQ1),
                 (ElementType::Quad4, 2) => Box::new(QuadQ2),
-                (ElementType::Quad4, 3) => Box::new(QuadQ3),
+                (ElementType::Quad4, 3) => Box::new(fem_element::lagrange::QuadQk::new(3)),
                 (ElementType::Quad4, 4) => Box::new(QuadQ4),
                 _ => Box::new(TriP1),
             };

@@ -10,7 +10,7 @@ use fem_core::types::DofId;
 use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk, VectorReferenceElement,
     lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
-                QuadQ1, QuadQ2, QuadQ3, QuadQ4, HexQ1},
+                QuadQ1, QuadQ2, QuadQ4, HexQ1},
 };
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -126,7 +126,10 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Quad4, 0)                          => Box::new(P0),
         (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
         (ElementType::Quad4, 2)                          => Box::new(QuadQ2),
-        (ElementType::Quad4, 3)                          => Box::new(QuadQ3),
+        // order >= 3: Gauss-Lobatto-Legendre nodes on [0,1]^2 (matches MFEM
+        // H1_FECollection's default BasisType::GaussLobatto); QuadQ3 is
+        // equidistant on [-1,1]^2 and therefore NOT MFEM-compatible at p=3.
+        (ElementType::Quad4, 3)                          => Box::new(fem_element::lagrange::QuadQk::new(3)),
         (ElementType::Quad4, o)                          => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
         (ElementType::Hex8, o)                           => Box::new(fem_element::lagrange::HexQk::new(o as usize)),
@@ -158,8 +161,8 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
 #[inline]
 fn geom_quad_point(elem_type: ElementType, order: u8, xi: &[f64]) -> Vec<f64> {
     match elem_type {
-        ElementType::Quad4 if order >= 4 => xi.to_vec(), // QuadQk on [0,1]^d
-        ElementType::Quad4 => xi.iter().map(|x| 0.5 * (x + 1.0)).collect(), // QuadQ1..3 on [-1,1]^d
+        ElementType::Quad4 if order >= 3 => xi.to_vec(), // QuadQk on [0,1]^d (order >= 3, GLL)
+        ElementType::Quad4 => xi.iter().map(|x| 0.5 * (x + 1.0)).collect(), // QuadQ1..2 on [-1,1]^d
         _ => xi.to_vec(),
     }
 }
@@ -293,14 +296,18 @@ fn isoparametric_jacobian<M: MeshTopology>(
 /// Surface element Jacobian info for 2D-in-3D meshes.
 ///
 /// For a 2D surface element embedded in 3D space:
-/// - J is a 3×2 matrix (mapping from 2D reference to 3D physical)
-/// - G = J^T·J is the 2×2 metric tensor
+/// - J is a 3×2 matrix (mapping from 2D reference to 3D physical), returned
+///   column-major as a flat `Vec<f64>` of length `embed_dim * tdim`
+///   (`j[i + d*embed_dim] = ∂x_i/∂ξ_d`)
+/// - G = J^T·J is the 2×2 metric tensor; `ginv` is its inverse, row-major
+///   `[[a, b], [b, c]]`
 /// - measure = sqrt(det(G)) = |J₁ × J₂| (surface area element)
-/// - chol_Ginv is the lower-triangular Cholesky factor of G⁻¹,
-///   so that `(chol_Ginv · ∇_ref φ) · (chol_Ginv · ∇_ref ψ) = ∇_ref φ · G⁻¹ · ∇_ref ψ`
-///   which gives the correct surface gradient dot product in the assembly.
 ///
-/// Returns `(measure, chol_Ginv_2x2, x_phys_3d)`.
+/// The true physical (tangential) gradient of a reference-gradient is
+/// `∇_surf φ = J · G⁻¹ · ∇_ref φ` (3 components); the assembly uses that to
+/// support 3×3 matrix coefficients (e.g. MFEM ex29's anisotropic σ).
+///
+/// Returns `(measure, j, ginv, x_phys_3d)`.
 fn surface_jacobian<M: MeshTopology>(
     mesh: &M,
     nodes: &[u32],
@@ -308,15 +315,15 @@ fn surface_jacobian<M: MeshTopology>(
     xi: &[f64],
     embed_dim: usize,  // = 3 for Mesh<3>
     tdim: usize,       // = 2 for surface
-) -> (f64, DMatrix<f64>, Vec<f64>) {
+) -> (f64, Vec<f64>, [f64; 3], Vec<f64>) {
     let n_geo = geo_elem.n_dofs();
     let mut grad_geo = vec![0.0_f64; n_geo * tdim];
     let mut phi_geo  = vec![0.0_f64; n_geo];
     geo_elem.eval_grad_basis(xi, &mut grad_geo);
     geo_elem.eval_basis(xi, &mut phi_geo);
 
-    // 3×2 Jacobian: J[i][d] = Σ_k x_k[i] · ∂φ_k/∂ξ_d
-    let mut j = vec![0.0_f64; embed_dim * tdim]; // column-major: [col0(3), col1(3)]
+    // 3×2 Jacobian: J[i][d] = Σ_k x_k[i] · ∂φ_k/∂ξ_d  (column-major)
+    let mut j = vec![0.0_f64; embed_dim * tdim]; // [col0(3), col1(3)]
     let mut xp = vec![0.0_f64; embed_dim];
     for k in 0..n_geo {
         let xk = mesh.geom_coords_of(nodes[k]);
@@ -336,24 +343,13 @@ fn surface_jacobian<M: MeshTopology>(
     let det_g = g00 * g11 - g01 * g01;
     let measure = det_g.sqrt();
 
-    // G⁻¹ (2×2 inverse metric)
+    // G⁻¹ (2×2 inverse metric), row-major [[a, b], [b, c]]
     let inv_det = 1.0 / det_g;
-    let a = g11 * inv_det;  // G⁻¹[0][0]
-    let b = -g01 * inv_det; // G⁻¹[0][1] = G⁻¹[1][0]
-    let c = g00 * inv_det;  // G⁻¹[1][1]
+    let a = g11 * inv_det;
+    let b = -g01 * inv_det;
+    let c = g00 * inv_det;
 
-    // Cholesky factor L of G⁻¹ (lower triangular: L·L^T = G⁻¹)
-    // L = [[l00, 0], [l10, l11]]
-    let l00 = a.sqrt();
-    let l10 = b / l00;
-    let l11 = (c - b * b / a).sqrt();
-
-    let mut chol = DMatrix::<f64>::zeros(tdim, tdim);
-    chol[(0, 0)] = l00;
-    chol[(1, 0)] = l10;
-    chol[(1, 1)] = l11;
-
-    (measure, chol, xp)
+    (measure, j, [a, b, c], xp)
 }
 
 /// Transform reference gradients to physical gradients:
@@ -425,7 +421,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let edim    = mesh.dim() as usize;   // embedding dimension (2 or 3)
     let tdim    = mesh.topological_dim() as usize; // element dimension (2 for surface)
     let is_surface = edim != tdim;
-    let dim     = if is_surface { tdim } else { edim }; // assembly dimension
+    let dim     = if is_surface { edim } else { edim }; // surface: 3-component true gradients
     let order   = space.element_order(e);
 
     let elem_type = mesh.element_type(e);
@@ -470,13 +466,23 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                     (geo_p1.as_ref(), nodes)
                 };
             let xi_g = geom_quad_point(elem_type, order, xi);
-            let (measure, chol_ginv, xp) =
+            let (measure, j, ginv, xp) =
                 surface_jacobian(mesh, geo_nds, geo, &xi_g, edim, tdim);
             let w = quad.weights[q] * measure;
 
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
-            transform_grads(&chol_ginv, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
+            // True tangential gradients: ∇_surf φ_i = J · G⁻¹ · ∇_ref φ_i (3 comps)
+            let (j00, j01, j10, j11, j20, j21) = (j[0], j[3], j[1], j[4], j[2], j[5]);
+            let (gi00, gi01, gi11) = (ginv[0], ginv[1], ginv[2]);
+            for i in 0..n_ldofs {
+                let gr = &scratch.grad_ref[i * 2..i * 2 + 2];
+                let t0 = gi00 * gr[0] + gi01 * gr[1];
+                let t1 = gi01 * gr[0] + gi11 * gr[1];
+                scratch.grad_phys[i * 3]     = j00 * t0 + j01 * t1;
+                scratch.grad_phys[i * 3 + 1] = j10 * t0 + j11 * t1;
+                scratch.grad_phys[i * 3 + 2] = j20 * t0 + j21 * t1;
+            }
 
             let qp = QpData {
                 n_dofs:    n_elem_dofs,
@@ -567,10 +573,10 @@ fn accumulate_volume_linear_element<S: FESpace>(
     scratch: &mut ElementScratch,
 ) {
     let mesh    = space.mesh();
-    let edim    = mesh.dim() as usize;
+    let edim    = mesh.dim() as usize;   // embedding dimension (2 or 3)
     let tdim    = mesh.topological_dim() as usize;
     let is_surface = edim != tdim;
-    let dim     = if is_surface { tdim } else { edim };
+    let dim     = if is_surface { edim } else { edim };
     let order   = space.element_order(e);
 
     let elem_type = mesh.element_type(e);
@@ -614,7 +620,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
                     (geo_p1.as_ref(), nodes)
                 };
             let xi_g = geom_quad_point(elem_type, order, xi);
-            let (measure, _chol, xp_surf) =
+            let (measure, _j, _ginv, xp_surf) =
                 surface_jacobian(mesh, geo_nds, geo, &xi_g, edim, tdim);
             w = quad.weights[q] * measure;
             ref_elem.eval_basis(xi, &mut scratch.phi);
