@@ -19,7 +19,7 @@ use fem_mesh::{Mesh, topology::MeshTopology, element_type::ElementType};
 use fem_element::ReferenceElement;
 use fem_space::fe_space::FESpace;
 use fem_solver::{
-    BlockSystem, SchurComplementSolver, SolverConfig,
+    BlockSystem, SchurConstrainedSolver, SolverConfig,
 };
 
 fn main() {
@@ -76,7 +76,8 @@ fn main() {
         fem_assembly::constraints::build_normal_constraints(
             &mesh, space.scalar_dof_manager(), &[1, 4]);
 
-    // 11. Solve saddle-point system with Schur complement approach
+    // 11. Solve saddle-point system — MFEM SchurConstrainedSolver (GMRES(50)
+    //     on [A Bᵀ; B 0], block-diagonal preconditioner diag(GS(A), I)).
     //     System: [A  C^T; C  0] * [u; λ] = [b; 0]
     let n_c = c_mat.nrows;
     let mut c_coo = CooMatrix::new(n_c, n_total);
@@ -108,8 +109,8 @@ fn main() {
     let mut lagrange = vec![0.0; n_c];
 
     let cfg = SolverConfig { rtol: 1e-5, atol: 0.0, max_iter: 2000, verbose: true, ..Default::default() };
-    SchurComplementSolver::solve(&sys, &rhs, &vec![0.0; n_c], &mut u, &mut lagrange, &cfg)
-        .expect("SchurComplementSolver failed");
+    SchurConstrainedSolver::solve(&sys, &rhs, &vec![0.0; n_c], &mut u, &mut lagrange, &cfg)
+        .expect("SchurConstrainedSolver failed");
 
     // 12. Displaced mesh + solution output (matching C++ ex28: `x *= -1`
     //     before saving sol.gf — GLVis displacement sign convention; the

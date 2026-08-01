@@ -103,6 +103,7 @@ pub use cached::{CachedPrecond, CachedSolver};
 
 pub mod cached;
 pub mod block;
+pub mod constrained;
 pub mod block_gmres;
 pub mod block_operator;
 pub mod eigen;
@@ -146,6 +147,7 @@ pub use block_operator::{
     right_preconditioned_gmres,
 };
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
+pub use constrained::SchurConstrainedSolver;
 pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{
     lobpcg, lobpcg_constrained, lobpcg_preconditioned, lobpcg_constrained_preconditioned, lobpcg_essential_bc,

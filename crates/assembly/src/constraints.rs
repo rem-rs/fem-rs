@@ -74,37 +74,50 @@ pub fn build_normal_constraints<M: MeshTopology>(
     scalar_dofs: &DofManager,
     constrained_att: &[i32],
 ) -> (CsrMatrix<f64>, Vec<usize>) {
-    // Accumulate the summed normal + face count per (scalar DOF, attribute).
-    // BTreeMap iterates (dof, attr) in ascending order — the same row
-    // ordering MFEM produces (ascending tdof, ascending attribute).
-    let mut dof_normals: BTreeMap<(DofId, i32), (f64, f64, usize)> = BTreeMap::new();
+    // MFEM `BuildNormalConstraints` iterates boundary elements in face order
+    // and keeps a GLOBAL per-node visit counter (shared across attributes),
+    // applying an *incremental* average `(v−1)/v·pv + 1/v·nor` on every visit
+    // after the first.  A DOF first visited under attribute A and then under
+    // attribute B therefore gets its B row built with `pv = 0`, i.e. exactly
+    // ½·nor — the cross-attribute halving that in ex28 makes the corner's
+    // second constraint row `(-1/32, +3/320)` instead of the full normal.
+    // Replicating it (including the floating-point order) makes C bit-identical
+    // to MFEM's, so the whole saddle-point GMRES trajectory matches.
+    let mut visits: BTreeMap<DofId, usize> = BTreeMap::new();
+    let mut dof_normals: BTreeMap<(DofId, i32), (f64, f64)> = BTreeMap::new();
 
-    for &att in constrained_att {
-        for f in 0..mesh.n_boundary_faces() as u32 {
-            if mesh.face_tag(f) != att {
-                continue;
-            }
-            let nodes = mesh.face_nodes(f);
-            if nodes.len() < 2 {
-                continue;
-            }
-            let p0 = mesh.node_coords(nodes[0]);
-            let p1 = mesh.node_coords(nodes[1]);
-            let dx = p1[0] - p0[0];
-            let dy = p1[1] - p0[1];
-            if dx * dx + dy * dy < 1e-28 {
-                continue;
-            }
-            // Unscaled outward normal (CCW perpendicular): (dy, -dx).
-            // For straight segments this is the same at every DOF of the face
-            // (vertex and mid-edge), matching MFEM's CalcOrtho evaluated at
-            // each FE node.
-            let (nx, ny) = (dy, -dx);
-            for dof in boundary_face_dofs(mesh, scalar_dofs, f) {
-                let entry = dof_normals.entry((dof, att)).or_insert((0.0, 0.0, 0));
-                entry.0 += nx;
-                entry.1 += ny;
-                entry.2 += 1;
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        let att = mesh.face_tag(f);
+        if !constrained_att.contains(&att) {
+            continue;
+        }
+        let nodes = mesh.face_nodes(f);
+        if nodes.len() < 2 {
+            continue;
+        }
+        let p0 = mesh.node_coords(nodes[0]);
+        let p1 = mesh.node_coords(nodes[1]);
+        let dx = p1[0] - p0[0];
+        let dy = p1[1] - p0[1];
+        if dx * dx + dy * dy < 1e-28 {
+            continue;
+        }
+        // Unscaled normal (dy, -dx), the same at every DOF of a straight
+        // face (vertex and mid-edge), matching MFEM's CalcOrtho evaluated at
+        // each FE node (boundary element orientation is domain-on-left, so
+        // this matches MFEM's sign too).
+        let (nx, ny) = (dy, -dx);
+        for dof in boundary_face_dofs(mesh, scalar_dofs, f) {
+            let v = *visits.entry(dof).and_modify(|c| *c += 1).or_insert(1);
+            let e = dof_normals.entry((dof, att)).or_insert((0.0, 0.0));
+            if v == 1 {
+                e.0 += nx;
+                e.1 += ny;
+            } else {
+                let scale = (v - 1) as f64 / v as f64;
+                let inv = 1.0 / v as f64;
+                e.0 = scale * e.0 + inv * nx;
+                e.1 = scale * e.1 + inv * ny;
             }
         }
     }
@@ -115,20 +128,17 @@ pub fn build_normal_constraints<M: MeshTopology>(
     let mut coo = CooMatrix::new(n_rows, n_total);
     let mut rowstarts = vec![0usize];
     let mut prev_dof: Option<DofId> = None;
-    for (row, ((dof, _att), (nx_sum, ny_sum, count))) in dof_normals.iter().enumerate() {
+    for (row, ((dof, _att), (nx, ny))) in dof_normals.iter().enumerate() {
         if prev_dof != Some(*dof) {
             if row > 0 {
                 rowstarts.push(row);
             }
             prev_dof = Some(*dof);
         }
-        let inv = 1.0 / (*count as f64);
-        let nx = nx_sum * inv;
-        let ny = ny_sum * inv;
         let dof_x = *dof as usize;
         let dof_y = dof_x + n_scalar;
-        coo.add(row, dof_x, nx);
-        coo.add(row, dof_y, ny);
+        coo.add(row, dof_x, *nx);
+        coo.add(row, dof_y, *ny);
     }
     rowstarts.push(n_rows);
 
