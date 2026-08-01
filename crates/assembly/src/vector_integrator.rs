@@ -56,6 +56,15 @@ pub struct VectorQpData<'a> {
 /// integrators may share the same element matrix.
 pub trait VectorBilinearIntegrator: Send + Sync {
     fn add_to_element_matrix(&self, qp: &VectorQpData<'_>, k_elem: &mut [f64]);
+
+    /// Optional per-integrator quadrature order (MFEM semantics: each
+    /// integrator selects its own `IntRules` order via `GetIntegrationOrder`).
+    ///
+    /// Returns `None` to use the assembler's global `quad_order`.  When any
+    /// integrator in a form returns `Some(order)`, the assembler evaluates
+    /// that integrator on its own quadrature rule of the requested order,
+    /// independent of the others.
+    fn integration_order(&self, _space_order: u8) -> Option<u8> { None }
 }
 
 /// Accumulate a linear-form contribution for vector FE into the element
@@ -64,4 +73,10 @@ pub trait VectorBilinearIntegrator: Send + Sync {
 /// `f_elem` has length `n_dofs`.
 pub trait VectorLinearIntegrator: Send + Sync {
     fn add_to_element_vector(&self, qp: &VectorQpData<'_>, f_elem: &mut [f64]);
+
+    /// Optional per-integrator quadrature order (MFEM semantics: each
+    /// integrator selects its own `IntRules` order via `GetIntegrationOrder`).
+    ///
+    /// Returns `None` to use the assembler's global `quad_order`.
+    fn integration_order(&self, _space_order: u8) -> Option<u8> { None }
 }

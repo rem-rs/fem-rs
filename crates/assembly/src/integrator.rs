@@ -39,6 +39,15 @@ pub struct QpData<'a> {
 /// integrators may share the same element matrix.
 pub trait BilinearIntegrator: Send + Sync {
     fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]);
+
+    /// Optional per-integrator quadrature order (MFEM semantics: each
+    /// integrator selects its own `IntRules` order via `GetIntegrationOrder`).
+    ///
+    /// Returns `None` to use the assembler's global `quad_order`.  When any
+    /// integrator in a form returns `Some(order)`, the assembler evaluates
+    /// that integrator on its own quadrature rule of the requested order
+    /// (exact polynomials of degree ≤ `order`), independent of the others.
+    fn integration_order(&self, _space_order: u8) -> Option<u8> { None }
 }
 
 /// Accumulate a linear-form contribution into the element load vector.
@@ -48,6 +57,12 @@ pub trait BilinearIntegrator: Send + Sync {
 /// Implementors must **add** their contribution.
 pub trait LinearIntegrator: Send + Sync {
     fn add_to_element_vector(&self, qp: &QpData<'_>, f_elem: &mut [f64]);
+
+    /// Optional per-integrator quadrature order (MFEM semantics: each
+    /// integrator selects its own `IntRules` order via `GetIntegrationOrder`).
+    ///
+    /// Returns `None` to use the assembler's global `quad_order`.
+    fn integration_order(&self, _space_order: u8) -> Option<u8> { None }
 }
 
 // ─── Boundary (face) integrals ────────────────────────────────────────────────
@@ -137,4 +152,70 @@ impl BoundaryLinearIntegrator for RobinLFIntegrator {
             f_face[i] += w * source * qp.phi[i];
         }
     }
+}
+
+// ─── Per-integrator quadrature order wrapper ─────────────────────────────────
+
+/// Wrap a bilinear integrator and force its quadrature order (MFEM semantics:
+/// e.g. `CurlCurlIntegrator` on Pk spaces uses order `2p − 2`).
+///
+/// When an integrator wrapped with this is passed to
+/// [`Assembler::assemble_bilinear`] / [`VectorAssembler::assemble_bilinear`],
+/// it is evaluated on a quadrature rule of exactly `order` (exact for
+/// polynomials of degree ≤ `order`), independent of the form's global
+/// `quad_order`.
+///
+/// ```rust,ignore
+/// // Force the curl-curl (z-block) diffusion contribution to MFEM's
+/// // `IntRules.Get(SQUARE, 2p-2)` = order-0 single-point rule:
+/// let integ = FixedOrder::new(DiffusionIntegrator { kappa: 1.0 }, 0);
+/// ```
+pub struct FixedOrder<I> {
+    inner: I,
+    order: u8,
+}
+
+impl<I> FixedOrder<I> {
+    pub fn new(inner: I, order: u8) -> Self {
+        Self { inner, order }
+    }
+
+    /// Unwrap to the inner integrator.
+    pub fn into_inner(self) -> I { self.inner }
+}
+
+impl<I: BilinearIntegrator> BilinearIntegrator for FixedOrder<I> {
+    fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
+        self.inner.add_to_element_matrix(qp, k_elem);
+    }
+
+    fn integration_order(&self, _space_order: u8) -> Option<u8> { Some(self.order) }
+}
+
+impl<I: LinearIntegrator> LinearIntegrator for FixedOrder<I> {
+    fn add_to_element_vector(&self, qp: &QpData<'_>, f_elem: &mut [f64]) {
+        self.inner.add_to_element_vector(qp, f_elem);
+    }
+
+    fn integration_order(&self, _space_order: u8) -> Option<u8> { Some(self.order) }
+}
+
+impl<I: crate::vector_integrator::VectorBilinearIntegrator>
+    crate::vector_integrator::VectorBilinearIntegrator for FixedOrder<I>
+{
+    fn add_to_element_matrix(&self, qp: &crate::vector_integrator::VectorQpData<'_>, k_elem: &mut [f64]) {
+        self.inner.add_to_element_matrix(qp, k_elem);
+    }
+
+    fn integration_order(&self, _space_order: u8) -> Option<u8> { Some(self.order) }
+}
+
+impl<I: crate::vector_integrator::VectorLinearIntegrator>
+    crate::vector_integrator::VectorLinearIntegrator for FixedOrder<I>
+{
+    fn add_to_element_vector(&self, qp: &crate::vector_integrator::VectorQpData<'_>, f_elem: &mut [f64]) {
+        self.inner.add_to_element_vector(qp, f_elem);
+    }
+
+    fn integration_order(&self, _space_order: u8) -> Option<u8> { Some(self.order) }
 }

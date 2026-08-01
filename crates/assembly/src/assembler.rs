@@ -11,6 +11,7 @@ use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk, VectorReferenceElement,
     lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
                 QuadQ1, QuadQ2, QuadQ4, HexQ1},
+    quadrature::quad_rule_01,
 };
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -105,7 +106,7 @@ impl ReferenceElement for P0 {
     fn n_dofs(&self) -> usize { 1 }
     fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
     fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) { g[0] = 0.0; g[1] = 0.0; }
-    fn quadrature(&self, order: u8) -> QuadratureRule { QuadQ1.quadrature(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
     fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.0, 0.0]] }
 }
 
@@ -124,8 +125,13 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tet4, 3)                           => Box::new(TetP3),
         (ElementType::Tet4, o)                           => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
         (ElementType::Quad4, 0)                          => Box::new(P0),
-        (ElementType::Quad4, 1)                          => Box::new(QuadQ1),
-        (ElementType::Quad4, 2)                          => Box::new(QuadQ2),
+        // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
+        // H1_FECollection's default BasisType::GaussLobatto.  QuadQ1/Q2 were
+        // historically on [-1,1]^2; affine-embedding equivalent for the
+        // gradient (Diffusion) but NOT for the mass ∫φ² (4× off on [0,1]²),
+        // so the reference domain must be [0,1]^2 for all orders.
+        (ElementType::Quad4, 1)                          => Box::new(fem_element::lagrange::QuadQk::new(1)),
+        (ElementType::Quad4, 2)                          => Box::new(fem_element::lagrange::QuadQk::new(2)),
         // order >= 3: Gauss-Lobatto-Legendre nodes on [0,1]^2 (matches MFEM
         // H1_FECollection's default BasisType::GaussLobatto); QuadQ3 is
         // equidistant on [-1,1]^2 and therefore NOT MFEM-compatible at p=3.
@@ -159,12 +165,11 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
 /// polynomial was extrapolated there, corrupting the Jacobian (and hence the
 /// stiffness) on strongly curved cells (e.g. the ex27 hole regions).
 #[inline]
-fn geom_quad_point(elem_type: ElementType, order: u8, xi: &[f64]) -> Vec<f64> {
-    match elem_type {
-        ElementType::Quad4 if order >= 3 => xi.to_vec(), // QuadQk on [0,1]^d (order >= 3, GLL)
-        ElementType::Quad4 => xi.iter().map(|x| 0.5 * (x + 1.0)).collect(), // QuadQ1..2 on [-1,1]^d
-        _ => xi.to_vec(),
-    }
+fn geom_quad_point(_elem_type: ElementType, _order: u8, xi: &[f64]) -> Vec<f64> {
+    // All Quad4 solution bases now live on [0,1]^d (QuadQk, order >= 1), and
+    // simplex bases share their reference domain with the geometry element,
+    // so quadrature points always arrive in the geometry's reference domain.
+    xi.to_vec()
 }
 
 /// Return the solution reference element for a boundary face.
@@ -956,6 +961,36 @@ impl Assembler {
         let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
 
+        // MFEM semantics: each integrator may select its own quadrature order.
+        // If any integrator requests an explicit order, assemble integrators
+        // individually on their own quadrature rules and accumulate.
+        let space_order = space.element_order(0);
+        if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
+            let mut acc: Option<CsrMatrix<f64>> = None;
+            for integ in integrators {
+                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let m = Self::assemble_bilinear_inner(space, &[*integ], qo);
+                acc = Some(match acc {
+                    None => m,
+                    Some(a) => a.add(&m),
+                });
+            }
+            return acc.unwrap_or_else(|| CsrMatrix::new_empty(n_dofs, n_dofs));
+        }
+
+        Self::assemble_bilinear_inner(space, integrators, quad_order)
+    }
+
+    /// Core assembly loop shared by [`Self::assemble_bilinear`]; see there for
+    /// argument semantics.
+    fn assemble_bilinear_inner<S: FESpace>(
+        space:       &S,
+        integrators: &[&dyn BilinearIntegrator],
+        quad_order:  u8,
+    ) -> CsrMatrix<f64> {
+        let mesh   = space.mesh();
+        let n_dofs = space.n_dofs();
+
         // Precompute quadrature rule from the first element's type (same for all).
         // Use the ACTUAL solution order: for Quad4 order >= 4 the basis (QuadQk)
         // lives on [0,1]^2 while order <= 3 (QuadQ1/Q2/Q3) lives on [-1,1]^2, and
@@ -1034,6 +1069,31 @@ impl Assembler {
 
     /// Assemble the global load vector for a linear form.
     pub fn assemble_linear<S: FESpace>(
+        space:       &S,
+        integrators: &[&dyn LinearIntegrator],
+        quad_order:  u8,
+    ) -> Vec<f64> {
+        let mesh   = space.mesh();
+        let n_dofs = space.n_dofs();
+
+        // MFEM semantics: each integrator may select its own quadrature order
+        // (see `assemble_bilinear`).
+        let space_order = space.element_order(0);
+        if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
+            let mut acc = vec![0.0_f64; n_dofs];
+            for integ in integrators {
+                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let v = Self::assemble_linear_inner(space, &[*integ], qo);
+                for i in 0..n_dofs { acc[i] += v[i]; }
+            }
+            return acc;
+        }
+
+        Self::assemble_linear_inner(space, integrators, quad_order)
+    }
+
+    /// Core linear-form assembly loop shared by [`Self::assemble_linear`].
+    fn assemble_linear_inner<S: FESpace>(
         space:       &S,
         integrators: &[&dyn LinearIntegrator],
         quad_order:  u8,

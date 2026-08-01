@@ -369,6 +369,49 @@ impl<T: Scalar> CsrMatrix<T> {
         rhs[row] = value;
     }
 
+    /// Apply a Dirichlet BC in MFEM's `DIAG_KEEP` style (`EliminateRowCol`):
+    /// - zero the off-diagonal entries of row and column `row`;
+    /// - **keep** the diagonal entry `A[row,row]` unchanged;
+    /// - `rhs[row] = A[row,row] · value`;
+    /// - for every other row `j`: `rhs[j] -= A[j,row] · value`.
+    ///
+    /// This is numerically equivalent to [`Self::apply_dirichlet_symmetric`]
+    /// (same solution) but reproduces MFEM's `FormLinearSystem` / `EliminateBC`
+    /// with `diag_policy = DIAG_KEEP`, which matters for bitwise PCG history.
+    pub fn apply_dirichlet_keep_diag(
+        &mut self,
+        row: usize,
+        value: T,
+        rhs: &mut [T],
+    ) {
+        let start = self.row_ptr[row];
+        let end   = self.row_ptr[row + 1];
+
+        let mut diag_val = T::zero();
+        for k in start..end {
+            let other_row = self.col_idx[k] as usize;
+            if other_row == row {
+                diag_val = self.values[k];
+            } else {
+                // rhs[j] -= A[j,row]·value, then zero A[j,row] (symmetric CSR).
+                let a_ij = self.values[k];
+                if a_ij != T::zero() {
+                    rhs[other_row] -= a_ij * value;
+                    if let Some(pos) = self.find_entry(other_row, row) {
+                        self.values[pos] = T::zero();
+                    }
+                }
+            }
+        }
+        // Zero the off-diagonals of this row; keep the diagonal (DIAG_KEEP).
+        for k in start..end {
+            if self.col_idx[k] as usize != row {
+                self.values[k] = T::zero();
+            }
+        }
+        rhs[row] = diag_val * value;
+    }
+
     /// Apply Dirichlet BC (row-zeroing only, not symmetric).
     ///
     /// Faster than symmetric elimination; use when symmetry is not required.

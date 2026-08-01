@@ -114,6 +114,9 @@ path = "mfem_ex30_aniso_amr.rs"
 name = "mfem_ex31_anisotropic_maxwell"
 path = "mfem_ex31_anisotropic_maxwell.rs"
 [[example]]
+name = "mfem_ex31_dump"
+path = "mfem_ex31_dump.rs"
+[[example]]
 name = "mfem_ex32_maxwell_eigenvalue"
 path = "mfem_ex32_maxwell_eigenvalue.rs"
 [[example]]

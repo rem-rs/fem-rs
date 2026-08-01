@@ -560,6 +560,53 @@ impl VectorAssembler {
     {
         let mesh = space.mesh();
         let n_dofs = space.n_dofs();
+
+        // MFEM semantics: each integrator may select its own quadrature order.
+        // If any integrator requests an explicit order, assemble integrators
+        // individually on their own quadrature rules and accumulate.
+        let space_order = space.element_order(0);
+        if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
+            let mut acc: Option<CsrMatrix<f64>> = None;
+            for integ in integrators {
+                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let m = Self::assemble_bilinear_single(space, *integ, qo);
+                acc = Some(match acc {
+                    None => m,
+                    Some(a) => a.add(&m),
+                });
+            }
+            return acc.unwrap_or_else(|| CsrMatrix::new_empty(n_dofs, n_dofs));
+        }
+
+        Self::assemble_bilinear_single_many(space, integrators, quad_order)
+    }
+
+    /// Assemble one vector bilinear integrator on the given quadrature order.
+    fn assemble_bilinear_single<S>(
+        space: &S,
+        integ: &dyn VectorBilinearIntegrator,
+        quad_order: u8,
+    ) -> CsrMatrix<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        Self::assemble_bilinear_single_many(space, &[integ], quad_order)
+    }
+
+    /// Core bilinear assembly loop (no per-integrator order dispatch).
+    fn assemble_bilinear_single_many<S>(
+        space: &S,
+        integrators: &[&dyn VectorBilinearIntegrator],
+        quad_order: u8,
+    ) -> CsrMatrix<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+
         #[cfg(feature = "parallel")]
         {
             if mesh.n_elements() >= assembly_parallel_min_elems() {
@@ -767,6 +814,48 @@ impl VectorAssembler {
     {
         let mesh = space.mesh();
         let n_dofs = space.n_dofs();
+
+        // MFEM semantics: each integrator may select its own quadrature order.
+        let space_order = space.element_order(0);
+        if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
+            let mut acc = vec![0.0_f64; n_dofs];
+            for integ in integrators {
+                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let v = Self::assemble_linear_single(space, *integ, qo);
+                for i in 0..n_dofs { acc[i] += v[i]; }
+            }
+            return acc;
+        }
+
+        Self::assemble_linear_single_many(space, integrators, quad_order)
+    }
+
+    /// Assemble one vector linear integrator on the given quadrature order.
+    fn assemble_linear_single<S>(
+        space: &S,
+        integ: &dyn VectorLinearIntegrator,
+        quad_order: u8,
+    ) -> Vec<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        Self::assemble_linear_single_many(space, &[integ], quad_order)
+    }
+
+    /// Core load-vector assembly loop (no per-integrator order dispatch).
+    fn assemble_linear_single_many<S>(
+        space: &S,
+        integrators: &[&dyn VectorLinearIntegrator],
+        quad_order: u8,
+    ) -> Vec<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+
         #[cfg(feature = "parallel")]
         {
             if mesh.n_elements() >= assembly_parallel_min_elems() {

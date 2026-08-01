@@ -111,8 +111,8 @@ fn element_jacobian<M: MeshTopology>(
     if needs_iso {
         // Isoparametric mapping via geometry reference element.
         // Quad geometry lives on [0,1]^2 (QuadQk, matching MFEM's [0,1]^2
-        // reference square); ref_elem_vol(Quad4, 1) is QuadQ1 on [-1,1]^2 and
-        // would sample the Jacobian at the wrong reference points.
+        // reference square); the solution basis also lives on [0,1]^2 for
+        // all orders (QuadQk), so the Jacobian is sampled at matching points.
         let geo: Box<dyn ReferenceElement> = match elem_type {
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
                 use fem_element::lagrange::factory::QuadQk;
@@ -776,12 +776,18 @@ pub fn project_bdr_coefficient_tangent(
 /// For each boundary edge on a face with attribute in `bdr_attr`, evaluates
 /// `coeff(x_mid).tangential` at the edge midpoint and sets the HCurl DOF value.
 /// Equivalent to MFEM's `GridFunction::ProjectBdrCoefficientTangent` for 2D ND spaces.
+///
+/// **Lowest-order only** (`order == 1`): the single-point (midpoint) evaluation
+/// times the edge length matches MFEM's ND1 dof functional `u·(J t)`; for
+/// `order > 1` each edge has multiple DOFs which would need distinct moments.
 pub fn project_bdr_coefficient_tangent_2d(
     nd_dofs: &mut [f64],
     nd_space: &HCurlSpace<fem_mesh::Mesh<2>>,
     coeff: &dyn Fn(&[f64], &mut [f64]),
     bdr_attr: &[i32],
 ) {
+    assert_eq!(nd_space.order(), 1,
+        "project_bdr_coefficient_tangent_2d: ND order > 1 not supported (edge DOFs need moments)");
     use std::collections::HashSet;
     use fem_space::EdgeKey;
     let mesh = nd_space.mesh();
@@ -798,7 +804,11 @@ pub fn project_bdr_coefficient_tangent_2d(
             }
         }
     }
-    // Project onto each edge DOF
+    // Project onto each edge DOF.
+    // MFEM ND1 dof functional: ∫_e u·t̂ ds ≈ u(mid)·(J t) where J t is the
+    // *physical* tangent vector (length = edge length), i.e. the tangential
+    // component scaled by the edge length (cf. ND_R2D LocalInterpolation
+    // "I_k = vshape_k · J t_k").  Do NOT normalise the tangent.
     for ek in &edges {
         if let Some(dofs) = nd_space.edge_dofs(*ek) {
             let pa = mesh.node_coords(ek.0);
@@ -806,14 +816,11 @@ pub fn project_bdr_coefficient_tangent_2d(
             let mid = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5];
             let mut fval = [0.0_f64; 2];
             coeff(&mid, &mut fval);
-            // Tangential component: f · t  where t = (b-a)/|b-a|
+            // Tangential component scaled by edge length: f · (b-a)
             let tx = pb[0] - pa[0];
             let ty = pb[1] - pa[1];
-            let len = (tx*tx + ty*ty).sqrt();
-            if len > 0.0 {
-                let ft = (fval[0]*tx + fval[1]*ty) / len;
-                for &d in &dofs { nd_dofs[d as usize] = ft; }
-            }
+            let ft = fval[0] * tx + fval[1] * ty;
+            for &d in &dofs { nd_dofs[d as usize] = ft; }
         }
     }
 }
