@@ -1959,7 +1959,69 @@ impl NCStateQuad {
     }
 }
 
+/// Return the geometric split level of edge `(a, b)`: the depth of the
+/// midpoint chain (1 + max over both halves), matching MFEM's
+/// `NCMesh::EdgeSplitLevel`.  0 if the edge has no midpoint node.
+///
+/// The midpoint is located by quantized coordinate lookup, so coarse edges
+/// that were split by a finer neighbor are detected even though the edge
+/// itself is not present in the current mesh's edge map.
+pub(crate) fn edge_split_level_geo(
+    a: NodeId,
+    b: NodeId,
+    coords: &[[f64; 2]],
+    pos: &HashMap<(i64, i64), NodeId>,
+    memo: &mut HashMap<(NodeId, NodeId), u32>,
+) -> u32 {
+    let key = (a.min(b), a.max(b));
+    if let Some(&v) = memo.get(&key) { return v; }
+    let mx = 0.5 * (coords[a as usize][0] + coords[b as usize][0]);
+    let my = 0.5 * (coords[a as usize][1] + coords[b as usize][1]);
+    let q = ((mx * 1e10).round() as i64, (my * 1e10).round() as i64);
+    let v = if let Some(&m) = pos.get(&q) {
+        if m == a || m == b { 0 }
+        else {
+            1 + edge_split_level_geo(a, m, coords, pos, memo)
+                .max(edge_split_level_geo(m, b, coords, pos, memo))
+        }
+    } else { 0 };
+    memo.insert(key, v);
+    v
+}
+
+/// Mark every Quad4 element whose maximum edge-split level exceeds
+/// `nc_limit` — the exact semantics of MFEM's `NCMesh::GetLimitRefinements`.
+///
+/// The returned elements should be refined (in a separate batch, like MFEM's
+/// `LimitNCLevel` loop) until this returns empty.
+pub fn limit_nc_level_quad(mesh: &Mesh<2>, nc_limit: u32) -> Vec<ElemId> {
+    let n_nodes = mesh.n_nodes();
+    let coords: Vec<[f64; 2]> =
+        (0..n_nodes).map(|n| mesh.coords_of(n as NodeId)).collect();
+    let mut pos: HashMap<(i64, i64), NodeId> = HashMap::new();
+    for (n, c) in coords.iter().enumerate() {
+        let q = ((c[0] * 1e10).round() as i64, (c[1] * 1e10).round() as i64);
+        pos.entry(q).or_insert(n as NodeId);
+    }
+    let mut memo: HashMap<(NodeId, NodeId), u32> = HashMap::new();
+    let mut out = Vec::new();
+    for e in 0..mesh.n_elems() as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let mut splits = 0u32;
+        for &(la, lb) in &local_edges_quad() {
+            splits = splits.max(edge_split_level_geo(
+                ns[la], ns[lb], &coords, &pos, &mut memo));
+        }
+        if splits > nc_limit { out.push(e); }
+    }
+    out
+}
+
 /// Propagate refinement to neighbors when nc_limit would be violated (Quad4).
+///
+/// Uses the geometric edge-split level (MFEM `GetLimitRefinements` semantics):
+/// an element whose edges are split more than `nc_limit` times is added to the
+/// marked set, matching MFEM's `NCMesh::LimitNCLevel` propagation.
 fn propagate_nc_limit_quad(
     marked: &[ElemId],
     mesh: &Mesh<2>,
@@ -1967,23 +2029,13 @@ fn propagate_nc_limit_quad(
     edge_level: &HashMap<(NodeId, NodeId), u32>,
     nc_limit: u32,
 ) -> Vec<ElemId> {
+    let _ = (edge_elems, edge_level); // kept for signature compatibility
     use std::collections::BTreeSet;
     let mut result: BTreeSet<ElemId> = marked.iter().copied().collect();
-    let mut queue: Vec<ElemId> = marked.to_vec();
-    while let Some(e) = queue.pop() {
-        let ns = mesh.elem_nodes(e);
-        for &(a, b) in &local_edges_quad() {
-            let key = quad_edge_key(ns[a], ns[b]);
-            if edge_level.get(&key).copied().unwrap_or(0) >= nc_limit {
-                if let Some(neighbors) = edge_elems.get(&key) {
-                    for &n in neighbors {
-                        if n != e && result.insert(n) {
-                            queue.push(n);
-                        }
-                    }
-                }
-            }
-        }
+    // Elements whose edges are already split beyond nc_limit (either marked or
+    // their coarse neighbors) must be refined together.
+    for e in limit_nc_level_quad(mesh, nc_limit) {
+        result.insert(e);
     }
     result.into_iter().collect()
 }

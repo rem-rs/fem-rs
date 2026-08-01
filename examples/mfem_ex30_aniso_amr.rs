@@ -28,7 +28,7 @@ use fem_assembly::postproc::grid_function::{compute_coeff_l2_norm, GridFunction}
 use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType,
-    amr::{closure_refine_default, NCStateQuad}};
+    amr::{closure_refine_default, limit_nc_level_quad, NCStateQuad}};
 use fem_space::{L2Space, fe_space::FESpace};
 
 // ── Coefficient functions — exact 1:1 with MFEM ex30.cpp ───────────────
@@ -148,14 +148,9 @@ fn preprocess(mesh: &mut Mesh<2>,
               enriched_order: u8) -> (usize, f64) {
     let quad_order = 2 * order + enriched_order;
 
-    // Non-conforming refinement state (tracks active edge midpoints and edge
-    // refinement levels across iterations, exactly like MFEM's NCMesh).
+    // Non-conforming refinement state (tracks active edge midpoints across
+    // iterations, like MFEM's NCMesh).
     let mut ncstate = NCStateQuad::new();
-    // Per-element refinement level (0 = initial).  Used with the accumulated
-    // hanging-node constraints to enforce MFEM's LimitNCLevel: any fine
-    // element whose level exceeds a coarse neighbor by more than nc_limit
-    // triggers refinement of the coarse neighbor (1-irregular closure).
-    let mut levels: Vec<u32> = vec![0; mesh.n_elems()];
 
     for _iter in 0..10 {
         let ne = mesh.n_elems();
@@ -189,27 +184,19 @@ fn preprocess(mesh: &mut Mesh<2>,
             return (ne, global_osc);
         }
 
-        // LimitNCLevel(nc_limit): 1-irregular closure driven by the accumulated
-        // hanging-node constraints (NCStateQuad tracks them across iterations,
-        // using coarse-edge keys, approximating MFEM NCMesh::LimitNCLevel).
+        // LimitNCLevel(nc_limit): refine osc-marked elements, then keep
+        // refining any element whose edges are split more than nc_limit times
+        // (core limit_nc_level_quad, MFEM GetLimitRefinements semantics).
         // nc_limit == 0 means unlimited: no closure at all.
         match mesh.element_type(0) {
             ElementType::Tri3 => *mesh = closure_refine_default(mesh, &marked, None),
             ElementType::Quad4 => {
-                let (m, lv) = if nc_limit > 0 {
-                    refine_with_nc_limit(mesh, &levels, &marked, nc_limit, &mut ncstate)
+                let m = if nc_limit > 0 {
+                    refine_with_nc_limit(mesh, &marked, nc_limit, &mut ncstate)
                 } else {
-                    let (mm, _c, _m) = ncstate.refine(mesh, &marked, 0);
-                    let mut nl = Vec::with_capacity(mm.n_elems());
-                    for e in 0..ne as u32 {
-                        let lv0 = levels[e as usize];
-                        if marked.contains(&e) { for _ in 0..4 { nl.push(lv0 + 1); } }
-                        else { nl.push(lv0); }
-                    }
-                    (mm, nl)
+                    ncstate.refine(mesh, &marked, 0).0
                 };
                 *mesh = m;
-                levels = lv;
             }
             _ => panic!("unsupported element type"),
         }
@@ -217,66 +204,24 @@ fn preprocess(mesh: &mut Mesh<2>,
     (mesh.n_elems(), 0.0)
 }
 
-// Refine `marked` on `mesh`, then repeatedly refine coarse neighbors that are
-// more than nc_limit levels shallower than an adjacent fine element
-// (MFEM NCMesh::LimitNCLevel).  `ncstate` accumulates midpoints/levels across
-// all iterations.  Returns the final mesh and per-element levels.
-fn refine_with_nc_limit(mesh: &Mesh<2>, levels: &[u32], marked: &[u32],
+// Refine `marked` on `mesh`, then repeatedly refine elements whose edges are
+// split more than nc_limit times (MFEM LimitNCLevel, via the core-library
+// limit_nc_level_quad).  `ncstate` accumulates midpoints across iterations.
+fn refine_with_nc_limit(mesh: &Mesh<2>, marked: &[u32],
                         nc_limit: usize,
-                        ncstate: &mut NCStateQuad) -> (Mesh<2>, Vec<u32>) {
+                        ncstate: &mut NCStateQuad) -> Mesh<2> {
     let mut cur = mesh.clone();
-    let mut cur_levels = levels.to_vec();
     let mut to_refine: Vec<u32> = marked.to_vec();
     loop {
-        let (new_mesh, constraints, _midpoints) = ncstate.refine(&cur, &to_refine, 0);
-        // Rebuild per-element levels: element order is preserved, marked
-        // elements expand to 4 children with level+1.
-        let mut new_levels = Vec::with_capacity(new_mesh.n_elems());
-        for e in 0..cur.n_elems() as u32 {
-            let lv = cur_levels[e as usize];
-            if to_refine.contains(&e) {
-                for _ in 0..4 { new_levels.push(lv + 1); }
-            } else {
-                new_levels.push(lv);
-            }
-        }
-        debug_assert_eq!(new_levels.len(), new_mesh.n_elems(), "level rebuild mismatch");
-
-        // Find coarse elements (containing coarse edge parent_a-parent_b) that
-        // are more than nc_limit shallower than the fine element containing
-        // the hanging node `constrained`.
-        let mut extra: Vec<u32> = Vec::new();
-        let mut extra_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for c in &constraints {
-            let fine = new_mesh.elem_iter().find(|&e| {
-                new_mesh.element_nodes(e).contains(&(c.constrained as u32))
-            });
-            let coarse = new_mesh.elem_iter().find(|&e| {
-                let ns = new_mesh.element_nodes(e);
-                (0..4).any(|i| {
-                    let a = ns[i]; let b = ns[(i + 1) % 4];
-                    (a == c.parent_a as u32 && b == c.parent_b as u32)
-                        || (a == c.parent_b as u32 && b == c.parent_a as u32)
-                })
-            });
-            if let (Some(fe), Some(ce)) = (fine, coarse) {
-                let lf = new_levels[fe as usize];
-                let lc = new_levels[ce as usize];
-                // 1-irregular closure: refine the coarse neighbor when the
-                // fine-side depth exceeds the coarse level by more than
-                // nc_limit.  (Approximates MFEM LimitNCLevel; the residual
-                // discrepancy vs MFEM's exact NCMesh edge-split bookkeeping is
-                // a few elements per iteration.)
-                if lf > lc + nc_limit as u32 && extra_set.insert(ce) {
-                    extra.push(ce);
-                }
-            }
-        }
+        let (new_mesh, _constraints, _midpoints) = ncstate.refine(&cur, &to_refine, 0);
+        // MFEM GetLimitRefinements: mark every element whose edge-split level
+        // exceeds nc_limit; refine them in a separate batch (LimitNCLevel loop).
+        let extra: Vec<u32> = limit_nc_level_quad(&new_mesh, nc_limit as u32)
+            .into_iter().collect();
         if extra.is_empty() {
-            return (new_mesh, new_levels);
+            return new_mesh;
         }
         cur = new_mesh;
-        cur_levels = new_levels;
         to_refine = extra;
     }
 }
