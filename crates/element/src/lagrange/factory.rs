@@ -457,6 +457,11 @@ impl Lagrange1D {
         // eliminating Runge oscillations and matching MFEM's diagonal
         // preconditioner spectral properties.
         let (nodes, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
+        Self::from_nodes(nodes)
+    }
+
+    /// Build a 1D Lagrange interpolant on arbitrary nodes on `[-1,1]`.
+    pub(crate) fn from_nodes(nodes: Vec<f64>) -> Self {
         let n = nodes.len();
         let mut bary_w = vec![1.0_f64; n];
         for i in 0..n {
@@ -715,6 +720,119 @@ impl ReferenceElement for QuadQk {
     }
 }
 
+
+/// Arbitrary-order L² Lagrange element on `[0,1]²` with **Gauss-Legendre**
+/// nodes — `(p+1)²` DOFs, matching MFEM's `L2_FECollection` default
+/// `BasisType::GaussLegendre` (used by e.g. `CoefficientRefiner` and L2
+/// projection error estimation).  Unlike [`QuadQk`] (Gauss-Lobatto nodes
+/// including the boundary), GL nodes are interior-only.
+///
+/// The 1D basis uses the direct Lagrange formula `Π_{j≠i}(x−x_j)/(x_i−x_j)`
+/// on `[0,1]` (no reference-domain mapping), so the values match MFEM's L2
+/// element bit-for-bit.
+pub struct QuadL2GL {
+    order: usize,
+    nodes: Vec<f64>, // Gauss-Legendre nodes on [0,1]
+}
+
+impl QuadL2GL {
+    pub fn new(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        // Gauss-Legendre nodes on [-1,1] mapped to [0,1]
+        let (nodes, _w) = crate::quadrature::gauss_legendre_arbitrary(p + 1);
+        let nodes = nodes.iter().map(|x| 0.5 * (x + 1.0)).collect();
+        Self { order: p, nodes }
+    }
+
+    /// Direct 1D Lagrange values at `x` (on [0,1]).
+    fn lag1d_val(&self, x: f64) -> Vec<f64> {
+        self.nodes.iter().enumerate().map(|(i, &xi)| {
+            let mut v = 1.0;
+            for (j, &xj) in self.nodes.iter().enumerate() {
+                if j != i { v *= (x - xj) / (xi - xj); }
+            }
+            v
+        }).collect()
+    }
+
+    /// Direct 1D Lagrange derivative values at `x`.
+    fn lag1d_der(&self, x: f64) -> Vec<f64> {
+        self.nodes.iter().enumerate().map(|(i, &xi)| {
+            let mut s = 0.0;
+            for (m, &xm) in self.nodes.iter().enumerate() {
+                if m == i { continue; }
+                let mut t = 1.0 / (xi - xm);
+                for (j, &xj) in self.nodes.iter().enumerate() {
+                    if j != i && j != m { t *= (x - xj) / (xi - xj); }
+                }
+                s += t;
+            }
+            s
+        }).collect()
+    }
+
+    /// Tensor-product DOF ordering: dof = ix*(p+1) + iy (x varies slowest,
+    /// matching MFEM's L2 tensor order and bit-identical summation).
+    fn node_to_dof(&self, ix: usize, iy: usize) -> usize {
+        ix * (self.order + 1) + iy
+    }
+
+    fn all_dof_coords(&self) -> Vec<[f64; 2]> {
+        let p = self.order;
+        let n = (p + 1) * (p + 1);
+        let mut coords = vec![[0.0, 0.0]; n];
+        for ix in 0..=p {
+            for iy in 0..=p {
+                let dof = self.node_to_dof(ix, iy);
+                coords[dof] = [self.nodes[ix], self.nodes[iy]];
+            }
+        }
+        coords
+    }
+
+    /// Evaluate the 1D Lagrange basis (values, derivatives) at `t ∈ [0,1]`.
+    /// Exposed so assemblers can reproduce MFEM's bit-identical `(dof·l_x)·l_y`
+    /// summation order instead of a pre-multiplied tensor basis.
+    pub fn eval_1d(&self, t: f64) -> (Vec<f64>, Vec<f64>) {
+        (self.lag1d_val(t), self.lag1d_der(t))
+    }
+
+    /// Tensor-product DOF index for the `(ix, iy)` node.
+    pub fn dof_index(&self, ix: usize, iy: usize) -> usize {
+        self.node_to_dof(ix, iy)
+    }
+}
+
+impl ReferenceElement for QuadL2GL {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { self.order as u8 }
+    fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 1) }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let (lx, ly) = (self.lag1d_val(xi[0]), self.lag1d_val(xi[1]));
+        let p = self.order;
+        for ix in 0..=p {
+            for iy in 0..=p {
+                values[self.node_to_dof(ix, iy)] = lx[ix] * ly[iy];
+            }
+        }
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let (lx, dlx) = (self.lag1d_val(xi[0]), self.lag1d_der(xi[0]));
+        let (ly, dly) = (self.lag1d_val(xi[1]), self.lag1d_der(xi[1]));
+        let p = self.order;
+        for ix in 0..=p {
+            for iy in 0..=p {
+                let dof = self.node_to_dof(ix, iy);
+                grads[dof * 2]     = dlx[ix] * ly[iy];
+                grads[dof * 2 + 1] = lx[ix]  * dly[iy];
+            }
+        }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.all_dof_coords().iter().map(|c| c.to_vec()).collect()
+    }
+}
 
 // ─── HexQk ───────────────────────────────────────────────────────────────────
 

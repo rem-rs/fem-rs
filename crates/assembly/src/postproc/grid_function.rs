@@ -109,10 +109,14 @@ fn element_jacobian<M: MeshTopology>(
         | ElementType::Pyramid5);
 
     if needs_iso {
-        // Isoparametric mapping via geometry reference element
-        let geo = match elem_type {
+        // Isoparametric mapping via geometry reference element.
+        // Quad geometry lives on [0,1]^2 (QuadQk, matching MFEM's [0,1]^2
+        // reference square); ref_elem_vol(Quad4, 1) is QuadQ1 on [-1,1]^2 and
+        // would sample the Jacobian at the wrong reference points.
+        let geo: Box<dyn ReferenceElement> = match elem_type {
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
-                ref_elem_vol(elem_type, mesh.geom_order().max(1)) as Box<dyn ReferenceElement>
+                use fem_element::lagrange::factory::QuadQk;
+                Box::new(QuadQk::new(mesh.geom_order().max(1) as usize))
             }
             _ => ref_elem_vol(ElementType::Quad4, 1) as Box<dyn ReferenceElement>,
         };
@@ -632,21 +636,54 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         for e in mesh.elem_iter() {
             let eidx = e as usize;
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol(elem_type, order);
+            // L2 spaces use Gauss-Legendre node Lagrange bases (MFEM
+            // L2_FECollection default); QuadL2GL matches the L2Space DOF
+            // ordering.  Other spaces use the H1-style reference elements.
+            let ref_elem: Box<dyn ReferenceElement> =
+                if self.space.space_type() == fem_space::fe_space::SpaceType::L2
+                    && matches!(elem_type, ElementType::Quad4) {
+                    Box::new(fem_element::lagrange::QuadL2GL::new(order as usize))
+                } else {
+                    ref_elem_vol(elem_type, order)
+                };
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
             let elem_dofs = self.space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
             let mut phi = vec![0.0; n_ldofs];
             let mut err2 = 0.0;
+            // For L2 spaces on quads, reproduce MFEM's bit-identical
+            // (dof·l_x)·l_y tensor summation (left-associative) — a
+            // pre-multiplied phi = lx·ly differs by 1 ulp and flips
+            // threshold-edge markings in CoefficientRefiner.
+            let l2gl: Option<fem_element::lagrange::QuadL2GL> =
+                if self.space.space_type() == fem_space::fe_space::SpaceType::L2
+                    && matches!(elem_type, ElementType::Quad4) {
+                    Some(fem_element::lagrange::QuadL2GL::new(order as usize))
+                } else { None };
             for (q, xi) in quad.points.iter().enumerate() {
                 let (_jac, det_j, xp) = element_jacobian(mesh, e, nodes, xi, dim);
                 let w = quad.weights[q] * det_j.abs();
-                ref_elem.eval_basis(xi, &mut phi);
-                let mut uh = 0.0;
-                for i in 0..n_ldofs {
-                    uh += self.dofs[elem_dofs[i] as usize] * phi[i];
-                }
+                let uh = if let Some(ref gl) = l2gl {
+                    let p = order as usize;
+                    let (lx, _) = gl.eval_1d(xi[0]);
+                    let (ly, _) = gl.eval_1d(xi[1]);
+                    let mut s = 0.0;
+                    for ix in 0..=p {
+                        for iy in 0..=p {
+                            let k = gl.dof_index(ix, iy);
+                            s += self.dofs[elem_dofs[k] as usize] * lx[ix] * ly[iy];
+                        }
+                    }
+                    s
+                } else {
+                    ref_elem.eval_basis(xi, &mut phi);
+                    let mut s = 0.0;
+                    for i in 0..n_ldofs {
+                        s += self.dofs[elem_dofs[i] as usize] * phi[i];
+                    }
+                    s
+                };
                 let ue = exact(&xp);
                 err2 += w * (uh - ue) * (uh - ue);
             }
@@ -667,8 +704,14 @@ pub fn compute_coeff_l2_norm(
     let mut norm2 = 0.0;
     for e in mesh.elem_iter() {
         let elem_type = mesh.element_type(e);
-        let ref_elem = ref_elem_vol(elem_type, 1);
-        let quad = ref_elem.quadrature(quad_order);
+        // Quad integration lives on [0,1]^2 with weight sum 1 (MFEM IntRules
+        // convention); QuadQ1's quadrature is on [-1,1]^2 (weight sum 4) and
+        // would give 4x the MFEM norm.  Use quad_rule_01 for quads.
+        let quad = if matches!(elem_type, ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9) {
+            fem_element::quadrature::quad_rule_01(quad_order)
+        } else {
+            ref_elem_vol(elem_type, 1).quadrature(quad_order)
+        };
         let nodes = mesh.element_nodes(e);
         for (q, xi) in quad.points.iter().enumerate() {
             let (_jac, det_j, xp) = element_jacobian(mesh, e, nodes, xi, dim);

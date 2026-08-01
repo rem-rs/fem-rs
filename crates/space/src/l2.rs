@@ -66,16 +66,42 @@ impl<M: MeshTopology> L2Space<M> {
             }
             1 => {
                 // P1 discontinuous: one DOF per node per element (no sharing).
+                // DOF nodes are Gauss-Legendre points (MFEM L2_FECollection
+                // default BasisType::GaussLegendre), NOT element vertices.
                 let npe   = mesh.element_nodes(0).len();
                 let n_dofs = n_elems * npe;
                 let elem_dofs: Vec<DofId> = (0..n_dofs as DofId).collect();
                 let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+                let gl_quad: Option<Vec<Vec<f64>>> = if dim == 2 && npe == 4 {
+                    Some(fem_element::lagrange::QuadL2GL::new(1).dof_coords())
+                } else { None };
                 for e in 0..n_elems as u32 {
                     let nodes = mesh.element_nodes(e);
-                    for (k, &n) in nodes.iter().enumerate() {
-                        let c    = mesh.node_coords(n);
-                        let base = (e as usize * npe + k) * dim;
-                        dof_coords[base .. base + dim].copy_from_slice(c);
+                    if let Some(ref rc) = gl_quad {
+                        // Physical positions via the Q1 map evaluated with the
+                        // same basis evaluation as MFEM's ElementTransformation
+                        // (bit-identical to QuadQk(1) barycentric Lagrange).
+                        use fem_element::lagrange::factory::QuadQk;
+                        let q1 = QuadQk::new(1);
+                        let nq = q1.n_dofs();
+                        let mut phi = vec![0.0_f64; nq];
+                        for (k, c) in rc.iter().enumerate() {
+                            q1.eval_basis(c, &mut phi);
+                            let mut p = [0.0_f64; 2];
+                            for j in 0..nq {
+                                let cn = mesh.node_coords(nodes[j]);
+                                for d in 0..2 { p[d] += phi[j] * cn[d]; }
+                            }
+                            let base = (e as usize * npe + k) * dim;
+                            dof_coords[base] = p[0];
+                            dof_coords[base + 1] = p[1];
+                        }
+                    } else {
+                        for (k, &n) in nodes.iter().enumerate() {
+                            let c    = mesh.node_coords(n);
+                            let base = (e as usize * npe + k) * dim;
+                            dof_coords[base .. base + dim].copy_from_slice(c);
+                        }
                     }
                 }
                 L2Space { mesh, order, elem_dofs, dofs_per_elem: npe, n_dofs, dof_coords }
@@ -123,21 +149,19 @@ impl<M: MeshTopology> L2Space<M> {
                             dof_coords[(base_dof + 5) * 2 + d] = 0.5 * (p0[d] + p2[d]);
                         }
                     } else if dim == 2 && npe0 == 4 {
-                        // Q2 on Quad4: tensor product of 1D quadratic, 3×3=9 nodes
+                        // Q2 on Quad4: 3×3 = 9 Gauss-Legendre nodes (MFEM
+                        // L2_FECollection default BasisType::GaussLegendre)
                         let p0 = mesh.node_coords(nodes[0]);
                         let p1 = mesh.node_coords(nodes[1]);
                         let p2 = mesh.node_coords(nodes[2]);
                         let p3 = mesh.node_coords(nodes[3]);
-                        let nq = 3usize; // nodes per direction = order + 1
-                        for j in 0..nq {
-                            for i in 0..nq {
-                                let xi = i as f64 / (nq - 1) as f64;
-                                let eta = j as f64 / (nq - 1) as f64;
-                                let omx = 1.0 - xi; let omy = 1.0 - eta;
-                                let idx = (base_dof + j * nq + i) * 2;
-                                dof_coords[idx]     = omx*omy*p0[0] + xi*omy*p1[0] + xi*eta*p2[0] + omx*eta*p3[0];
-                                dof_coords[idx + 1] = omx*omy*p0[1] + xi*omy*p1[1] + xi*eta*p2[1] + omx*eta*p3[1];
-                            }
+                        let gl = fem_element::lagrange::QuadL2GL::new(2).dof_coords();
+                        for (k, c) in gl.iter().enumerate() {
+                            let (xi, eta) = (c[0], c[1]);
+                            let omx = 1.0 - xi; let omy = 1.0 - eta;
+                            let idx = (base_dof + k) * 2;
+                            dof_coords[idx]     = omx*omy*p0[0] + xi*omy*p1[0] + xi*eta*p2[0] + omx*eta*p3[0];
+                            dof_coords[idx + 1] = omx*omy*p0[1] + xi*omy*p1[1] + xi*eta*p2[1] + omx*eta*p3[1];
                         }
                     } else {
                         let (n0, n1, n2, n3) = (nodes[0], nodes[1], nodes[2], nodes[3]);
@@ -211,21 +235,18 @@ impl<M: MeshTopology> L2Space<M> {
                                 p0[1] + xi * (p1[1] - p0[1]) + eta * (p2[1] - p0[1]);
                         }
                     } else if dim == 2 && npe0 == 4 {
-                        // Q3 on Quad4: tensor product 4x4=16 nodes
+                        // Q3 on Quad4: 4×4 = 16 Gauss-Legendre nodes
                         let p0 = mesh.node_coords(nodes[0]);
                         let p1 = mesh.node_coords(nodes[1]);
                         let p2 = mesh.node_coords(nodes[2]);
                         let p3 = mesh.node_coords(nodes[3]);
-                        let nq = 4usize; // nodes per direction = order + 1
-                        for j in 0..nq {
-                            for i in 0..nq {
-                                let xi = i as f64 / (nq - 1) as f64;
-                                let eta = j as f64 / (nq - 1) as f64;
-                                let omx = 1.0 - xi; let omy = 1.0 - eta;
-                                let idx = (base_dof + j * nq + i) * 2;
-                                dof_coords[idx]     = omx*omy*p0[0] + xi*omy*p1[0] + xi*eta*p2[0] + omx*eta*p3[0];
-                                dof_coords[idx + 1] = omx*omy*p0[1] + xi*omy*p1[1] + xi*eta*p2[1] + omx*eta*p3[1];
-                            }
+                        let gl = fem_element::lagrange::QuadL2GL::new(3).dof_coords();
+                        for (k, c) in gl.iter().enumerate() {
+                            let (xi, eta) = (c[0], c[1]);
+                            let omx = 1.0 - xi; let omy = 1.0 - eta;
+                            let idx = (base_dof + k) * 2;
+                            dof_coords[idx]     = omx*omy*p0[0] + xi*omy*p1[0] + xi*eta*p2[0] + omx*eta*p3[0];
+                            dof_coords[idx + 1] = omx*omy*p0[1] + xi*omy*p1[1] + xi*eta*p2[1] + omx*eta*p3[1];
                         }
                         } else {
                         let (n0, n1, n2, n3) = (nodes[0], nodes[1], nodes[2], nodes[3]);

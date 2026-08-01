@@ -24,11 +24,12 @@
 //! ```
 
 use std::time::Instant;
-use fem_assembly::postproc::grid_function::compute_coeff_l2_norm;
+use fem_assembly::postproc::grid_function::{compute_coeff_l2_norm, GridFunction};
 use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType,
     amr::{closure_refine_default, NCStateQuad}};
+use fem_space::{L2Space, fe_space::FESpace};
 
 // ── Coefficient functions — exact 1:1 with MFEM ex30.cpp ───────────────
 
@@ -138,79 +139,6 @@ fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
 // ── Preprocess mesh ───────────────────────────────────────────────────
 // 1:1 with MFEM CoefficientRefiner::PreprocessMesh.
 
-// [TEMP ex30 verify] Element-wise ‖(Π−I)f‖_{L²(K)} using Gauss-Legendre node
-// interpolation of the Q1 (L2 P1) space — MFEM L2_FECollection default
-// BasisType::GaussLegendre.  On [0,1]²: nodes a=½(1−1/√3), b=½(1+1/√3).
-fn gl_p1_element_errors(mesh: &Mesh<2>,
-                        coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
-                        quad_order: u8) -> Vec<f64> {
-    use fem_element::lagrange::factory::QuadQk;
-    use fem_element::ReferenceElement;
-    let inv_s3 = 1.0 / 3.0_f64.sqrt();
-    let (a, b) = (0.5 * (1.0 - inv_s3), 0.5 * (1.0 + inv_s3));
-    let gl = [a, b];
-    let geo = QuadQk::new(1); // Q1 on [0,1]²
-    let n_geo = geo.n_dofs();
-    let mut phi = vec![0.0; n_geo];
-    let mut grad = vec![0.0; n_geo * 2];
-
-    let mut q1_map = |nodes: &[u32], xi: &[f64]| -> [f64; 2] {
-        geo.eval_basis(xi, &mut phi);
-        let mut xp = [0.0; 2];
-        for k in 0..n_geo {
-            let c = mesh.node_coords(nodes[k]);
-            for d in 0..2 { xp[d] += phi[k] * c[d]; }
-        }
-        xp
-    };
-
-    let mut errors = vec![0.0; mesh.n_elems()];
-    for e in mesh.elem_iter() {
-        let nodes = mesh.element_nodes(e);
-        // f at the 4 GL nodes (physical positions via Q1 map)
-        let mut fk = [[0.0; 2]; 2];
-        for i in 0..2 {
-            for j in 0..2 {
-                let xp = q1_map(nodes, &[gl[i], gl[j]]);
-                fk[i][j] = coeff(&xp);
-            }
-        }
-        // Πf(x,y) = Σ_{i,j} fk[i][j] l_i(x) l_j(y)
-        let interp = |x: f64, y: f64| -> f64 {
-            let lx = [(x - b) / (a - b), (x - a) / (b - a)];
-            let ly = [(y - b) / (a - b), (y - a) / (b - a)];
-            let mut s = 0.0;
-            for i in 0..2 {
-                for j in 0..2 { s += fk[i][j] * lx[i] * ly[j]; }
-            }
-            s
-        };
-        let quad = geo.quadrature(quad_order);
-        let mut err2 = 0.0;
-        for (q, xi) in quad.points.iter().enumerate() {
-            // Q1 map Jacobian (affine => constant, but computed generally)
-            geo.eval_grad_basis(xi, &mut grad);
-            let mut j = nalgebra::DMatrix::<f64>::zeros(2, 2);
-            for k in 0..n_geo {
-                let c = mesh.node_coords(nodes[k]);
-                for i in 0..2 {
-                    for d in 0..2 { j[(i, d)] += c[i] * grad[k * 2 + d]; }
-                }
-            }
-            let det = j.determinant().abs();
-            let xp = q1_map(nodes, xi);
-            let w = quad.weights[q] * det;
-            let d = interp(xi[0], xi[1]) - coeff(&xp);
-            err2 += w * d * d;
-        }
-        errors[e as usize] = err2.sqrt();
-    }
-    errors
-}
-
-// ── Preprocess mesh ───────────────────────────────────────────────────
-// 1:1 with MFEM CoefficientRefiner::PreprocessMesh.
-
 fn preprocess(mesh: &mut Mesh<2>,
               coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
               order: u8,
@@ -231,12 +159,16 @@ fn preprocess(mesh: &mut Mesh<2>,
 
     for _iter in 0..10 {
         let ne = mesh.n_elems();
+        let l2 = L2Space::new(mesh.clone(), order);
+        let dofs = l2.interpolate(coeff);
+        let gf = GridFunction::new(&l2, dofs.as_slice().to_vec());
+
         let norm_of_coeff = compute_coeff_l2_norm(mesh, coeff, quad_order);
         let av_norm = norm_of_coeff / (ne as f64).sqrt();
 
-        // [TEMP ex30 verify] GL-node L2 P1 interpolation (MFEM L2_FECollection
-        // default BasisType::GaussLegendre), replacing L2Space vertex nodes.
-        let element_norms = gl_p1_element_errors(mesh, coeff, quad_order);
+        // L2 P1 projection error via Gauss-Legendre node interpolation
+        // (core L2Space + QuadL2GL, matching MFEM L2_FECollection).
+        let element_norms = gf.compute_element_l2_errors(coeff, quad_order);
 
         let mut marked = Vec::new();
         let mut osc2 = 0.0;
