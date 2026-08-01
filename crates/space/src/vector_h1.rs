@@ -5,12 +5,15 @@
 //!
 //! # DOF layout
 //!
-//! DOFs are arranged **component-by-component** (block layout):
+//! The global layout is [`Ordering::ByNodes`] — **identical to MFEM's default
+//! `Ordering::byNODES`** (`vdof = dof + ndofs*vd`, block layout):
 //! - First `n_scalar` DOFs: x-component.
 //! - Next  `n_scalar` DOFs: y-component (and z for 3-D).
 //!
 //! This makes the sub-blocks `[u_x, u_y]` contiguous in the global vector,
-//! which aligns with `BlockVector` and block preconditioners.
+//! which aligns with `BlockVector` and block preconditioners.  The mapping
+//! `component c, scalar DOF s → c * n_scalar + s` is exactly
+//! `Ordering::ByNodes.map(n_scalar, dim, s, c)`.
 //!
 //! Within each component the DOF numbering matches the underlying scalar
 //! `DofManager` (vertex DOFs first, then edge DOFs for P2).
@@ -22,8 +25,9 @@
 //! ```text
 //! [phi_0_x, phi_0_y, phi_1_x, phi_1_y, ...]
 //! ```
-//! i.e. **interleaved** (node-major), which is the standard for elasticity
-//! finite elements and matches the `ElasticityIntegrator` implementation.
+//! i.e. **interleaved** (node-major) — the same list MFEM's
+//! `GetElementVDofs` returns under `byNODES` (`Ordering::ByNodes::dofs_to_vdofs`),
+//! and the standard layout for the `ElasticityIntegrator` element matrices.
 
 use fem_core::types::DofId;
 use fem_linalg::Vector;
@@ -31,6 +35,7 @@ use fem_mesh::topology::MeshTopology;
 
 use crate::dof_manager::DofManager;
 use crate::fe_space::{FESpace, SpaceType};
+use crate::ordering::Ordering;
 
 /// Vector-valued H¹ space: `dim` copies of a scalar H¹ Lagrange space.
 ///
@@ -74,7 +79,9 @@ impl<M: MeshTopology> VectorH1Space<M> {
         let dim_usize = dim as usize;
 
         // Build interleaved element DOF tables.
-        // Global DOF for component `c`, scalar DOF `s` = c * n_scalar + s.
+        // Global DOF for component `c`, scalar DOF `s` = c * n_scalar + s,
+        // which is `Ordering::ByNodes.map(n_scalar, dim, s, c)` (MFEM
+        // `byNODES`: `vdof = dof + ndofs*vd` — block layout).
         let dofs_per_elem = n_ldofs * dim_usize;
         let mut elem_dofs = Vec::with_capacity(n_elems * dofs_per_elem);
 
@@ -93,6 +100,13 @@ impl<M: MeshTopology> VectorH1Space<M> {
 
     /// Number of scalar DOFs per component.
     pub fn n_scalar_dofs(&self) -> usize { self.scalar_dm.n_dofs }
+
+    /// The vector-DOF ordering of this space.
+    ///
+    /// Always [`Ordering::ByNodes`] — MFEM's default `Ordering::byNODES`
+    /// (block layout `vdof = dof + ndofs*vd`); `.gf` files write
+    /// `Ordering: 0` for it.
+    pub fn ordering(&self) -> Ordering { Ordering::ByNodes }
 
     /// Reference to the underlying scalar DOF manager.
     pub fn scalar_dof_manager(&self) -> &DofManager { &self.scalar_dm }

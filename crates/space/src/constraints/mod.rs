@@ -284,7 +284,7 @@ mod tests {
         }
 
         let mut nc = NCState::new();
-        let (fine, _, _) = nc.refine(&coarse, &[0, 1, 2]);
+        let (fine, _, _) = nc.refine(&coarse, &[0, 1, 2], 0);
         let fine_dm = DofManager::new(&fine, 2);
 
         let u_fine = prolongate_p2_hanging(&coarse, &coarse_dm, &fine_dm, &u_coarse);

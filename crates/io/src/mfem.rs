@@ -737,7 +737,10 @@ pub fn write_gf_file(
 /// ```
 ///
 /// A `precision` of 8 reproduces the C++ `ostream::precision(8)` setting.
-/// For scalar fields (`vdim=1`) the ordering is `0` (byNODES); otherwise `1`.
+/// fem-rs vector FE spaces use `fem_space::Ordering::ByNodes` (= MFEM
+/// `Ordering::byNODES`, block layout: all component-0 DOFs, then component-1,
+/// …; `vdof = dof + ndofs*vd`), so the ordering line is always `0` —
+/// matching MFEM `GridFunction::Save`.
 pub fn write_mfem_gf_file(
     path: impl AsRef<std::path::Path>,
     dim: usize, dofs: &[f64],
@@ -749,7 +752,7 @@ pub fn write_mfem_gf_file(
     writeln!(file, "FiniteElementSpace")?;
     writeln!(file, "FiniteElementCollection: {space_type}_{dim}D_P{order}")?;
     writeln!(file, "VDim: {vdim}")?;
-    writeln!(file, "Ordering: {}", if vdim == 1 { 0 } else { 1 })?;
+    writeln!(file, "Ordering: 0")?;
     writeln!(file)?;
     // Values: precision controls total significant digits (C++ precision(8) → 8 sf)
     // Use {:.prec$e} where prec = precision - 1 gives precision total significant digits

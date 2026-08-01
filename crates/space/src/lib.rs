@@ -16,6 +16,7 @@
 
 pub mod dof_manager;
 pub mod fe_space;
+pub mod ordering;
 pub mod h1;
 pub mod h1_trace;
 pub mod l2;
@@ -41,6 +42,7 @@ pub mod complex;
 
 pub use dof_manager::{DofManager, EdgeKey, FaceKey};
 pub use fe_space::{FESpace, SpaceType};
+pub use ordering::Ordering;
 pub use h1::H1Space;
 pub use cr_space::CRSpace;
 pub use vector_cr::VectorCRSpace;

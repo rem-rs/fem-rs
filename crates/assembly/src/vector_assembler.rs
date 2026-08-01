@@ -103,10 +103,11 @@ pub fn geo_ref_elem_from_mesh(
         ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
         ElementType::Tet4 | ElementType::Tet10 => FactoryElemType::Tet,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
-            // For order 1 Quad/Hex/etc, use the standard [-1,1]² reference element
-            // (QuadQ1) instead of QuadQk::new(1) which is on [0,1]².  The
-            // FE basis (e.g. QuadND1) and its quadrature live on [-1,1]²,
-            // so the geometry element must match.
+            // NOTE: unlike the scalar assembler path (which maps quadrature
+            // points onto [0,1]^d via geom_quad_point and uses QuadQk), the
+            // vector assembler passes the solution-basis quadrature points
+            // UNMAPPED to isoparametric_jacobian — so the geometry element
+            // must live on the same [-1,1]² domain as the QuadND basis.
             return if g <= 1 {
                 use fem_element::lagrange::QuadQ1;
                 Some(Box::new(QuadQ1))

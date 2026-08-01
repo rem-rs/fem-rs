@@ -72,6 +72,7 @@ pub mod amr_adaptive;
 pub mod assembler;
 pub mod backend;
 pub mod complex;
+pub mod constraints;
 pub mod integrator;
 pub mod standard;
 pub mod block_assembler;
