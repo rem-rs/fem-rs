@@ -24,14 +24,11 @@
 //! ```
 
 use std::time::Instant;
-use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::postproc::grid_function::compute_coeff_l2_norm;
-use fem_element::lagrange::QuadQ1;
 use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType,
-    amr::{refine_nonconforming_quad, closure_refine_default}};
-use fem_space::{L2Space, fe_space::FESpace};
+    amr::{closure_refine_default, NCStateQuad}};
 
 // ── Coefficient functions — exact 1:1 with MFEM ex30.cpp ───────────────
 
@@ -96,20 +93,9 @@ fn parse_args() -> Args {
     a
 }
 
-// ── Element size: h_min = sigma_min(J) at element center ──────────────
-// Exact match with MFEM GetElementSize(type=1) = J.CalcSingularvalue(Dim-1).
-// For 2D: sigma_min = |det(J)| / sigma_max.
-
-fn min_sv_2d(j: &nalgebra::DMatrix<f64>) -> f64 {
-    let a = j[(0,0)]; let b = j[(0,1)];
-    let c = j[(1,0)]; let d = j[(1,1)];
-    let det = (a*d - b*c).abs();
-    if det < 1e-300 { return 0.0; }
-    let frob2 = a*a + b*b + c*c + d*d;
-    let disc = (frob2*frob2 - 4.0*det*det).max(0.0);
-    let s_max = ((frob2 + disc.sqrt()) / 2.0).sqrt();
-    det / s_max
-}
+// ── Element size: h = |det J|^(1/dim) at element center ─────────────────
+// Exact match with MFEM GetElementSize(i) DEFAULT type=0 (weight-based
+// size = |det J|^(1/Dim)); NOT type=1 (h_min = sigma_min).
 
 fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
     let dim = mesh.topological_dim() as usize;
@@ -117,9 +103,13 @@ fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
     let nodes = mesh.element_nodes(elem);
     let needs_iso = matches!(elem_type, ElementType::Quad4);
     if needs_iso {
-        let geo = QuadQ1;
+        // MFEM Quad reference domain is [0,1]^2 (BiLinear2DFiniteElement nodes
+        // (0,0),(1,0),(1,1),(0,1)); GetElementSize evaluates at GeomCenter =
+        // (0.5,0.5).  Using QuadQ1 ([-1,1]^2) here would scale J by 2 and give
+        // h twice the MFEM value.
+        let geo = fem_element::lagrange::factory::QuadQk::new(1);
         let n_geo = geo.n_dofs();
-        let xi = [0.0; 2];
+        let xi = [0.5, 0.5];
         let mut grad = vec![0.0_f64; n_geo * dim];
         geo.eval_grad_basis(&xi[..dim], &mut grad);
         let mut j = nalgebra::DMatrix::<f64>::zeros(dim, dim);
@@ -131,7 +121,7 @@ fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
                 }
             }
         }
-        min_sv_2d(&j)
+        j.determinant().abs().powf(1.0 / dim as f64)
     } else {
         let x0 = mesh.node_coords(nodes[0]);
         let mut j = nalgebra::DMatrix::<f64>::zeros(dim, dim);
@@ -141,8 +131,81 @@ fn element_size<M: MeshTopology>(mesh: &M, elem: u32) -> f64 {
                 j[(row, col)] = xc[row] - x0[row];
             }
         }
-        if dim == 2 { min_sv_2d(&j) } else { j.determinant().abs().powf(1.0 / dim as f64) }
+        j.determinant().abs().powf(1.0 / dim as f64)
     }
+}
+
+// ── Preprocess mesh ───────────────────────────────────────────────────
+// 1:1 with MFEM CoefficientRefiner::PreprocessMesh.
+
+// [TEMP ex30 verify] Element-wise ‖(Π−I)f‖_{L²(K)} using Gauss-Legendre node
+// interpolation of the Q1 (L2 P1) space — MFEM L2_FECollection default
+// BasisType::GaussLegendre.  On [0,1]²: nodes a=½(1−1/√3), b=½(1+1/√3).
+fn gl_p1_element_errors(mesh: &Mesh<2>,
+                        coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+                        quad_order: u8) -> Vec<f64> {
+    use fem_element::lagrange::factory::QuadQk;
+    use fem_element::ReferenceElement;
+    let inv_s3 = 1.0 / 3.0_f64.sqrt();
+    let (a, b) = (0.5 * (1.0 - inv_s3), 0.5 * (1.0 + inv_s3));
+    let gl = [a, b];
+    let geo = QuadQk::new(1); // Q1 on [0,1]²
+    let n_geo = geo.n_dofs();
+    let mut phi = vec![0.0; n_geo];
+    let mut grad = vec![0.0; n_geo * 2];
+
+    let mut q1_map = |nodes: &[u32], xi: &[f64]| -> [f64; 2] {
+        geo.eval_basis(xi, &mut phi);
+        let mut xp = [0.0; 2];
+        for k in 0..n_geo {
+            let c = mesh.node_coords(nodes[k]);
+            for d in 0..2 { xp[d] += phi[k] * c[d]; }
+        }
+        xp
+    };
+
+    let mut errors = vec![0.0; mesh.n_elems()];
+    for e in mesh.elem_iter() {
+        let nodes = mesh.element_nodes(e);
+        // f at the 4 GL nodes (physical positions via Q1 map)
+        let mut fk = [[0.0; 2]; 2];
+        for i in 0..2 {
+            for j in 0..2 {
+                let xp = q1_map(nodes, &[gl[i], gl[j]]);
+                fk[i][j] = coeff(&xp);
+            }
+        }
+        // Πf(x,y) = Σ_{i,j} fk[i][j] l_i(x) l_j(y)
+        let interp = |x: f64, y: f64| -> f64 {
+            let lx = [(x - b) / (a - b), (x - a) / (b - a)];
+            let ly = [(y - b) / (a - b), (y - a) / (b - a)];
+            let mut s = 0.0;
+            for i in 0..2 {
+                for j in 0..2 { s += fk[i][j] * lx[i] * ly[j]; }
+            }
+            s
+        };
+        let quad = geo.quadrature(quad_order);
+        let mut err2 = 0.0;
+        for (q, xi) in quad.points.iter().enumerate() {
+            // Q1 map Jacobian (affine => constant, but computed generally)
+            geo.eval_grad_basis(xi, &mut grad);
+            let mut j = nalgebra::DMatrix::<f64>::zeros(2, 2);
+            for k in 0..n_geo {
+                let c = mesh.node_coords(nodes[k]);
+                for i in 0..2 {
+                    for d in 0..2 { j[(i, d)] += c[i] * grad[k * 2 + d]; }
+                }
+            }
+            let det = j.determinant().abs();
+            let xp = q1_map(nodes, xi);
+            let w = quad.weights[q] * det;
+            let d = interp(xi[0], xi[1]) - coeff(&xp);
+            err2 += w * d * d;
+        }
+        errors[e as usize] = err2.sqrt();
+    }
+    errors
 }
 
 // ── Preprocess mesh ───────────────────────────────────────────────────
@@ -157,16 +220,23 @@ fn preprocess(mesh: &mut Mesh<2>,
               enriched_order: u8) -> (usize, f64) {
     let quad_order = 2 * order + enriched_order;
 
+    // Non-conforming refinement state (tracks active edge midpoints and edge
+    // refinement levels across iterations, exactly like MFEM's NCMesh).
+    let mut ncstate = NCStateQuad::new();
+    // Per-element refinement level (0 = initial).  Used with the accumulated
+    // hanging-node constraints to enforce MFEM's LimitNCLevel: any fine
+    // element whose level exceeds a coarse neighbor by more than nc_limit
+    // triggers refinement of the coarse neighbor (1-irregular closure).
+    let mut levels: Vec<u32> = vec![0; mesh.n_elems()];
+
     for _iter in 0..10 {
         let ne = mesh.n_elems();
-        let l2 = L2Space::new(mesh.clone(), order);
-        let dofs = l2.interpolate(coeff);
-        let gf = GridFunction::new(&l2, dofs.as_slice().to_vec());
-
         let norm_of_coeff = compute_coeff_l2_norm(mesh, coeff, quad_order);
         let av_norm = norm_of_coeff / (ne as f64).sqrt();
 
-        let element_norms = gf.compute_element_l2_errors(coeff, quad_order);
+        // [TEMP ex30 verify] GL-node L2 P1 interpolation (MFEM L2_FECollection
+        // default BasisType::GaussLegendre), replacing L2Space vertex nodes.
+        let element_norms = gl_p1_element_errors(mesh, coeff, quad_order);
 
         let mut marked = Vec::new();
         let mut osc2 = 0.0;
@@ -180,53 +250,103 @@ fn preprocess(mesh: &mut Mesh<2>,
             osc2 += element_osc * element_osc;
         }
 
-        let global_osc = osc2.sqrt() / norm_of_coeff.max(1e-30);
+        let global_osc = osc2.sqrt() / (norm_of_coeff + 1e-10);
 
-        if global_osc < threshold || ne as i64 >= max_elements as i64 || marked.is_empty() {
+
+        if global_osc < threshold || ne as i64 > max_elements as i64 || marked.is_empty() {
             return (ne, global_osc);
         }
 
-        // Edge-neighbor propagation (approximates MFEM LimitNCLevel).
-        // Mark edge-neighbors of oscillatory elements so that hanging-node
-        // level differences never exceed 1 on the refined mesh.
-        if nc_limit > 0 && matches!(mesh.element_type(0), ElementType::Quad4) {
-            let mut edge_elems: std::collections::HashMap<(u32, u32), Vec<u32>> =
-                std::collections::HashMap::new();
-            for e in 0..ne as u32 {
-                let ns = mesh.element_nodes(e);
-                for i in 0..4 {
-                    let a = ns[i].min(ns[(i + 1) % 4]);
-                    let b = ns[i].max(ns[(i + 1) % 4]);
-                    edge_elems.entry((a, b)).or_default().push(e);
-                }
-            }
-            let mut propagate: Vec<u32> = marked.clone();
-            for &e in &marked {
-                let ns = mesh.element_nodes(e);
-                for i in 0..4 {
-                    let a = ns[i].min(ns[(i + 1) % 4]);
-                    let b = ns[i].max(ns[(i + 1) % 4]);
-                    if let Some(adj) = edge_elems.get(&(a, b)) {
-                        for &adj_e in adj {
-                            if !propagate.contains(&adj_e) {
-                                propagate.push(adj_e);
-                            }
-                        }
-                    }
-                }
-            }
-            if propagate.len() > marked.len() {
-                marked = propagate;
-            }
-        }
-
+        // LimitNCLevel(nc_limit): 1-irregular closure driven by the accumulated
+        // hanging-node constraints (NCStateQuad tracks them across iterations,
+        // using coarse-edge keys, approximating MFEM NCMesh::LimitNCLevel).
+        // nc_limit == 0 means unlimited: no closure at all.
         match mesh.element_type(0) {
             ElementType::Tri3 => *mesh = closure_refine_default(mesh, &marked, None),
-            ElementType::Quad4 => *mesh = refine_nonconforming_quad(mesh, &marked, None).0,
+            ElementType::Quad4 => {
+                let (m, lv) = if nc_limit > 0 {
+                    refine_with_nc_limit(mesh, &levels, &marked, nc_limit, &mut ncstate)
+                } else {
+                    let (mm, _c, _m) = ncstate.refine(mesh, &marked, 0);
+                    let mut nl = Vec::with_capacity(mm.n_elems());
+                    for e in 0..ne as u32 {
+                        let lv0 = levels[e as usize];
+                        if marked.contains(&e) { for _ in 0..4 { nl.push(lv0 + 1); } }
+                        else { nl.push(lv0); }
+                    }
+                    (mm, nl)
+                };
+                *mesh = m;
+                levels = lv;
+            }
             _ => panic!("unsupported element type"),
         }
     }
     (mesh.n_elems(), 0.0)
+}
+
+// Refine `marked` on `mesh`, then repeatedly refine coarse neighbors that are
+// more than nc_limit levels shallower than an adjacent fine element
+// (MFEM NCMesh::LimitNCLevel).  `ncstate` accumulates midpoints/levels across
+// all iterations.  Returns the final mesh and per-element levels.
+fn refine_with_nc_limit(mesh: &Mesh<2>, levels: &[u32], marked: &[u32],
+                        nc_limit: usize,
+                        ncstate: &mut NCStateQuad) -> (Mesh<2>, Vec<u32>) {
+    let mut cur = mesh.clone();
+    let mut cur_levels = levels.to_vec();
+    let mut to_refine: Vec<u32> = marked.to_vec();
+    loop {
+        let (new_mesh, constraints, _midpoints) = ncstate.refine(&cur, &to_refine, 0);
+        // Rebuild per-element levels: element order is preserved, marked
+        // elements expand to 4 children with level+1.
+        let mut new_levels = Vec::with_capacity(new_mesh.n_elems());
+        for e in 0..cur.n_elems() as u32 {
+            let lv = cur_levels[e as usize];
+            if to_refine.contains(&e) {
+                for _ in 0..4 { new_levels.push(lv + 1); }
+            } else {
+                new_levels.push(lv);
+            }
+        }
+        debug_assert_eq!(new_levels.len(), new_mesh.n_elems(), "level rebuild mismatch");
+
+        // Find coarse elements (containing coarse edge parent_a-parent_b) that
+        // are more than nc_limit shallower than the fine element containing
+        // the hanging node `constrained`.
+        let mut extra: Vec<u32> = Vec::new();
+        let mut extra_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for c in &constraints {
+            let fine = new_mesh.elem_iter().find(|&e| {
+                new_mesh.element_nodes(e).contains(&(c.constrained as u32))
+            });
+            let coarse = new_mesh.elem_iter().find(|&e| {
+                let ns = new_mesh.element_nodes(e);
+                (0..4).any(|i| {
+                    let a = ns[i]; let b = ns[(i + 1) % 4];
+                    (a == c.parent_a as u32 && b == c.parent_b as u32)
+                        || (a == c.parent_b as u32 && b == c.parent_a as u32)
+                })
+            });
+            if let (Some(fe), Some(ce)) = (fine, coarse) {
+                let lf = new_levels[fe as usize];
+                let lc = new_levels[ce as usize];
+                // 1-irregular closure: refine the coarse neighbor when the
+                // fine-side depth exceeds the coarse level by more than
+                // nc_limit.  (Approximates MFEM LimitNCLevel; the residual
+                // discrepancy vs MFEM's exact NCMesh edge-split bookkeeping is
+                // a few elements per iteration.)
+                if lf > lc + nc_limit as u32 && extra_set.insert(ce) {
+                    extra.push(ce);
+                }
+            }
+        }
+        if extra.is_empty() {
+            return (new_mesh, new_levels);
+        }
+        cur = new_mesh;
+        cur_levels = new_levels;
+        to_refine = extra;
+    }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────
