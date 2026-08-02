@@ -913,8 +913,12 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         }
     }
 
-    // ── 2. Global tri/quad face center maps + body centers ─────────────────
-    let mut tri_fc: HashMap<(NodeId, NodeId, NodeId), NodeId> = HashMap::new();
+    // ── 2. Quad-face centers (hex/prism) + hex body centers ────────────────
+    // MFEM UniformRefinement3D_base: new vertices are edge midpoints +
+    // QUAD face centers (oface + NumOfQuadFaces) + HEX body centers
+    // (oelem + hex_counter).  Tetrahedra get ONLY edge midpoints (no tri-face
+    // or body centers), and prisms get no body centers — matching this keeps
+    // the refined vertex count/numbering identical to MFEM.
     let mut quad_fc: HashMap<[NodeId; 4], NodeId> = HashMap::new();
     let mut body_cc: HashMap<ElemId, NodeId> = HashMap::new();
 
@@ -931,24 +935,22 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         };
 
         match et {
-            ElementType::Tet4 => {
-                for &(a,b,c) in &local_faces_tet() {
-                    tri_fc.entry(face_key_3d(ns[a],ns[b],ns[c]))
-                        .or_insert_with(|| face_center(&[ns[a],ns[b],ns[c]]));
-                }
-            }
             ElementType::Hex8 => {
                 for f in &local_faces_hex() {
                     let fns = [ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]];
                     quad_fc.entry(quad_face_key(fns))
                         .or_insert_with(|| face_center(&fns));
                 }
+                // Hex body center (one per element, MFEM oelem + hex_counter).
+                body_cc.entry(e).or_insert_with(|| {
+                    let nv = ns.len() as f64;
+                    let (mut x,mut y,mut z) = (0.0,0.0,0.0);
+                    for &n in ns { let c = mesh.coords_of(n); x+=c[0]; y+=c[1]; z+=c[2]; }
+                    coords.extend_from_slice(&[x/nv, y/nv, z/nv]);
+                    let id = next_node; next_node += 1; id
+                });
             }
             ElementType::Prism6 => {
-                for &(a,b,c) in &local_faces_prism_tri() {
-                    tri_fc.entry(face_key_3d(ns[a],ns[b],ns[c]))
-                        .or_insert_with(|| face_center(&[ns[a],ns[b],ns[c]]));
-                }
                 for f in &local_faces_prism_quad() {
                     let fns = [ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]];
                     quad_fc.entry(quad_face_key(fns))
@@ -957,14 +959,6 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
             }
             _ => {}
         }
-        // Body center
-        body_cc.entry(e).or_insert_with(|| {
-            let nv = ns.len() as f64;
-            let (mut x,mut y,mut z) = (0.0,0.0,0.0);
-            for &n in ns { let c = mesh.coords_of(n); x+=c[0]; y+=c[1]; z+=c[2]; }
-            coords.extend_from_slice(&[x/nv, y/nv, z/nv]);
-            let id = next_node; next_node += 1; id
-        });
     }
 
     // ── 3. Generate child elements per type, using extend-then-push pattern ─
@@ -980,15 +974,21 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         let et = mesh.element_type_at(e);
         let ns = mesh.elem_nodes(e);
         let tag = mesh.elem_tags[e as usize];
-        let bc = body_cc[&e];
+        let bc = body_cc.get(&e).copied();
 
         match et {
             ElementType::Tet4 => {
                 let m01=mid!(ns[0],ns[1]);let m02=mid!(ns[0],ns[2]);let m03=mid!(ns[0],ns[3]);
                 let m12=mid!(ns[1],ns[2]);let m13=mid!(ns[1],ns[3]);let m23=mid!(ns[2],ns[3]);
+                // MFEM UniformRefinement3D_base (mesh.cpp): 4 corner tets +
+                // 4 interior tets from mv_all[rt] (best-aspect-ratio rt
+                // selection; regular/equilateral tets pick rt=0, the first).
+                // rt=0 mv: {0,5,1,2},{0,5,2,4},{0,5,4,3},{0,5,3,1} where
+                // e0=(0,1)=m01, e1=(0,2)=m02, e2=(0,3)=m03, e3=(1,2)=m12,
+                // e4=(1,3)=m13, e5=(2,3)=m23.
                 for &ch in &[
                     [ns[0],m01,m02,m03],[m01,ns[1],m12,m13],[m02,m12,ns[2],m23],[m03,m13,m23,ns[3]],
-                    [m01,m02,m12,m03],[m02,m12,m23,m03],[m01,m12,m13,m03],[m12,m13,m23,m03],
+                    [m01,m23,m02,m03],[m01,m23,m03,m13],[m01,m23,m13,m12],[m01,m23,m12,m02],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
                 for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Tet4); }
             }
@@ -1000,6 +1000,7 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                     let f=local_faces_hex()[fi]; quad_fc[&quad_face_key([ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]])]
                 };
                 let f0=qf(0);let f1=qf(1);let f2=qf(2);let f3=qf(3);let f4=qf(4);let f5=qf(5);
+                let bc = body_cc[&e];
                 for &ch in &[
                     [ns[0],e01,f0,e03,e04,f2,bc,f4],[ns[1],e01,f0,e12,e15,f2,bc,f5],
                     [ns[2],e12,f0,e23,e26,f3,bc,f5],[ns[3],e03,f0,e23,e37,f3,bc,f4],

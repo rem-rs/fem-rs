@@ -20,7 +20,7 @@ use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{
-    Assembler, VectorAssembler,
+    Assembler, GridFunction, VectorAssembler,
     discrete_op::DiscreteLinearOperator,
     mixed::{
         MixedVectorGradientIntegrator, assemble_h1_hdiv_mixed,
@@ -29,18 +29,17 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, DiffusionIntegrator, VectorMassIntegrator},
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
-use fem_linalg::{CsrMatrix, SolverConfig};
+use fem_linalg::{CsrMatrix, PrintLevel, SolverConfig};
 use fem_assembly::geo_ref_elem_from_mesh;
 use fem_mesh::{
     Mesh, extract_submesh_3d, SubMesh3D,
     ElementTransformation, ElementType, refine_uniform_3d,
     topology::MeshTopology,
 };
-use fem_linalg::fem_to_linlvo_csr;
-use fem_solver::{solve_pcg_ams, solve_pcg_ilu0};
+use fem_solver::{solve_cg, solve_pcg_gssmoother};
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace,
-    constraints::{boundary_dofs_hcurl, boundary_dofs_hdiv},
+    constraints::{boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv, form_linear_system},
     fe_space::FESpace, SpaceType,
 };
 
@@ -150,6 +149,7 @@ fn main() {
     let fec_rt = HDivSpace::new(mesh_cond.clone(), rt_order);
     eprintln!("  SubMesh H1 DOFs: {}, RT DOFs: {}",
         fec_h1.n_dofs(), fec_rt.n_dofs());
+    let n_h1 = fec_h1.n_dofs();
 
     // ── 6a. Solve for φ: -∇·(σ∇φ) = 0 on SubMesh ──────────────────────────
     let sigma_coef = 1.0;
@@ -159,55 +159,34 @@ fn main() {
         &fec_h1, &[&DiffusionIntegrator { kappa: sigma_coef }], quad_order,
     );
 
-    // For P1 H¹, boundary DOFs = unique nodes on tagged boundary faces.
-    fn bdr_dofs_p1(mesh: &Mesh<3>, tags: &[i32]) -> Vec<u32> {
-        let mut set: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        for f in 0..mesh.n_faces() as u32 {
-            let ft = mesh.face_tags[f as usize] as i32;
-            if tags.contains(&ft) {
-                let npf = if let Some(ref offs) = mesh.face_offsets {
-                    offs[f as usize + 1] - offs[f as usize]
-                } else {
-                    mesh.face_type.nodes_per_element()
-                };
-                let base = if let Some(ref offs) = mesh.face_offsets {
-                    offs[f as usize]
-                } else {
-                    f as usize * mesh.face_type.nodes_per_element()
-                };
-                for i in 0..npf {
-                    let n = mesh.face_conn[base + i];
-                    if (n as usize) < mesh.n_nodes() {
-                        set.insert(n);
-                    }
-                }
-            }
-        }
-        set.into_iter().collect()
-    }
-    let ess_dofs_phi = bdr_dofs_p1(&mesh_cond, &[PHI0_ATTR, PHI1_ATTR]);
-    let dofs_phi1 = bdr_dofs_p1(&mesh_cond, &[PHI1_ATTR]);
-
-    let n_h1 = fec_h1.n_dofs();
-    let mut bc_map = vec![0.0_f64; n_h1];
-    for &d in &dofs_phi1 { if (d as usize) < n_h1 { bc_map[d as usize] = 1.0; } }
-    let bc_vals: Vec<f64> = ess_dofs_phi.iter().map(|&d| bc_map[d as usize]).collect();
-
+    // ProjectBdrCoefficient: φ = 0 on phi0_attr (2), φ = 1 on phi1_attr (23),
+    // matching MFEM ex34.cpp (phi_h1.ProjectBdrCoefficient(zero/one, bdr)).
+    let dm_h1 = fec_h1.dof_manager();
     let mut phi = vec![0.0_f64; n_h1];
-    let mut h1_rhs = vec![0.0_f64; n_h1];
-    let (red_mat, red_rhs, h1_free, h1_constrained) =
-        eliminate_bc(&h1_stiffness, &mut h1_rhs, &ess_dofs_phi, &bc_vals, &mut phi);
+    {
+        let mut gf_phi = GridFunction::new(&fec_h1, phi.clone());
+        gf_phi.project_bdr_coefficient(&|_| 0.0, &[PHI0_ATTR], dm_h1);
+        gf_phi.project_bdr_coefficient(&|_| 1.0, &[PHI1_ATTR], dm_h1);
+        phi = gf_phi.dofs().to_vec();
+    }
+
+    // Essential BCs: phi0 + phi1 boundary attributes (MFEM GetEssentialTrueDofs).
+    let ess_dofs_phi = boundary_dofs(&mesh_cond, dm_h1, &[PHI0_ATTR, PHI1_ATTR]);
+    let ess_vals_phi: Vec<f64> = ess_dofs_phi.iter().map(|&d| phi[d as usize]).collect();
+
+    // FormLinearSystem (MFEM DIAG_KEEP) + PCG-GSSmoother (print 1, 200, 1e-12).
+    let mut mat_h1 = h1_stiffness.clone();
+    let mut B_h1 = vec![0.0_f64; n_h1];
+    let mut x_h1 = phi.clone();
+    form_linear_system(&mut mat_h1, &mut B_h1, &mut x_h1, &ess_dofs_phi, &ess_vals_phi);
 
     eprintln!("\nSolving for electric potential using PCG with a Gauss-Seidel preconditioner");
-    eprintln!("Size of linear system: {}", red_mat.nrows);
-
-    let mut x_h1 = vec![0.0_f64; red_mat.nrows];
-    let h1_result = solve_pcg_ilu0(&red_mat, &red_rhs, &mut x_h1, &SolverConfig {
-        rtol: 1e-12, max_iter: 200, verbose: true, ..SolverConfig::default()
-    }).expect("H1 PCG solve failed");
-    expand_solution(&x_h1, &h1_free, &h1_constrained, &bc_vals, &mut phi);
-    eprintln!("  Electric potential solve: {} iterations, final residual {}",
-        h1_result.iterations, h1_result.final_residual);
+    let h1_cfg = SolverConfig {
+        rtol: 1e-12, atol: 0.0, max_iter: 200,
+        verbose: true, print_level: PrintLevel::Iterations,
+    };
+    solve_pcg_gssmoother(&mat_h1, &B_h1, &mut x_h1, &h1_cfg).expect("H1 PCG solve failed");
+    phi = x_h1;
 
     // ── 6b. Solve for J = -σ∇φ in H(div) on SubMesh ───────────────────────
     let rt_mass = VectorAssembler::assemble_bilinear(
@@ -238,18 +217,22 @@ fn main() {
     jn_attrs.extend_from_slice(SYM_PLANE_ATTRS);
     let ess_dofs_rt = boundary_dofs_hdiv(fec_rt.mesh(), &fec_rt, &jn_attrs);
 
-    eprintln!("\nSolving for current density in H(Div) using CG");
-    eprintln!("Size of linear system: {}", n_rt - ess_dofs_rt.len());
+    eprintln!("\nSolving for current density in H(Div) using diagonally scaled CG");
+    eprintln!("Size of linear system: {}", n_rt);
 
+    // FormLinearSystem (DIAG_KEEP) + un-preconditioned CGSolver (rel_tol
+    // 1e-12, 2000 iters — matches MFEM ex34.cpp's `CGSolver cg`).
+    let mut mat_rt = rt_mass.clone();
+    let mut B_rt = b_rt.clone();
     let mut j_cond = vec![0.0_f64; n_rt];
-    let (red_rt, red_rhs_rt, rt_free, rt_constrained) =
-        eliminate_bc(&rt_mass, &mut b_rt, &ess_dofs_rt, &vec![0.0; ess_dofs_rt.len()], &mut j_cond);
-
-    let mut x_rt = vec![0.0_f64; red_rt.nrows];
-    let _j_result = solve_pcg_ilu0(&red_rt, &red_rhs_rt, &mut x_rt, &SolverConfig {
-        rtol: 1e-12, max_iter: 5000, verbose: true, ..SolverConfig::default()
-    }).expect("RT PCG+ILU0 solve failed");
-    expand_solution(&x_rt, &rt_free, &rt_constrained, &vec![0.0; ess_dofs_rt.len()], &mut j_cond);
+    let mut x_rt = j_cond.clone();
+    form_linear_system(&mut mat_rt, &mut B_rt, &mut x_rt, &ess_dofs_rt, &vec![0.0; ess_dofs_rt.len()]);
+    let rt_cfg = SolverConfig {
+        rtol: 1e-12, atol: 0.0, max_iter: 2000,
+        verbose: true, print_level: PrintLevel::Iterations,
+    };
+    solve_cg(&mat_rt, &B_rt, &mut x_rt, &rt_cfg).expect("RT CG solve failed");
+    j_cond = x_rt;
 
     // ── 6c. Save SubMesh and current density ───────────────────────────────
     {
@@ -274,7 +257,7 @@ fn main() {
     let n_nd = fec_nd_full.n_dofs();
     eprintln!("\nFull mesh ND DOFs: {}", n_nd);
 
-    let mut nd_stiffness = VectorAssembler::assemble_bilinear(
+    let nd_stiffness = VectorAssembler::assemble_bilinear(
         &fec_nd_full,
         &[
             &CurlCurlIntegrator { mu: 1.0 },
@@ -283,7 +266,7 @@ fn main() {
         quad_order,
     );
 
-    // RHS from J.
+    // RHS from J (VectorFEDomainLFIntegrator(jCoef) in MFEM).
     let nd_rhs = assemble_hcurl_rhs(&fec_nd_full, &fec_rt_full, &j_full, quad_order);
 
     // 8. Essential BC: PEC on all boundaries except symmetry planes.
@@ -295,35 +278,27 @@ fn main() {
     let ess_dofs_nd = if pec_tags.is_empty() { vec![] }
         else { boundary_dofs_hcurl(nd_mesh, &fec_nd_full, &pec_tags) };
 
-    eprintln!("\nSize of linear system: {}", n_nd - ess_dofs_nd.len());
-
-    // 13. Solve for A with AMS (Auxiliary-space Maxwell Solver) preconditioner.
-    //     AMS uses discrete gradient G: H¹ → H(Curl) to eliminate the curl nullspace.
-    let h1_full = H1Space::new(mesh.clone(), 1);
-    let grad = DiscreteLinearOperator::gradient(&h1_full, &fec_nd_full)
-        .expect("gradient assembly for AMS failed");
-
-    // Symmetric BC elimination (row + column) — required for AMS to stay SPD.
-    let mut ams_rhs = nd_rhs.clone();
-    for &d in &ess_dofs_nd {
-        nd_stiffness.apply_dirichlet_symmetric(d as usize, 0.0, &mut ams_rhs);
-    }
-    let g_linlvo = fem_to_linlvo_csr(&grad);
-
+    // 13. FormLinearSystem (DIAG_KEEP) + PCG-GSSmoother (print 1, 500, 1e-12)
+    //     matching MFEM ex34.cpp (non-PA path).
+    let mut mat_nd = nd_stiffness.clone();
+    let mut B_nd = nd_rhs.clone();
     let mut a_sol = vec![0.0_f64; n_nd];
-    eprintln!("\nSolving for magnetic vector potential using PCG with AMS");
+    let mut x_nd = a_sol.clone();
+    form_linear_system(&mut mat_nd, &mut B_nd, &mut x_nd, &ess_dofs_nd, &vec![0.0; ess_dofs_nd.len()]);
+
+    eprintln!("\nSolving for magnetic vector potential using CG with a Gauss-Seidel preconditioner");
     eprintln!("Size of linear system: {}", n_nd);
 
-    let nd_result = solve_pcg_ams(&nd_stiffness, &g_linlvo, &ams_rhs, &mut a_sol, &fem_solver::AmsSolverConfig {
-        inner_cfg: SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 200, verbose: true, ..SolverConfig::default() },
-        ams_cfg: fem_solver::AmsConfig::default(),
-    }).expect("ND PCG+AMS solve failed");
-
-    eprintln!("  ND solve: {} iterations, final residual {}",
-        nd_result.iterations, nd_result.final_residual);
+    let nd_cfg = SolverConfig {
+        rtol: 1e-12, atol: 0.0, max_iter: 500,
+        verbose: true, print_level: PrintLevel::Iterations,
+    };
+    solve_pcg_gssmoother(&mat_nd, &B_nd, &mut x_nd, &nd_cfg).expect("ND PCG solve failed");
+    a_sol = x_nd;
 
     // 17. Compute B = curl A.
     let fec_rt_curl = HDivSpace::new(mesh.clone(), rt_order);
+    eprintln!("TEMP nd_order={} rt_order={}", fec_nd_full.order(), fec_rt_curl.order());
     let curl_mat = DiscreteLinearOperator::curl_3d(&fec_nd_full, &fec_rt_curl)
         .expect("CurlInterpolator assembly failed");
     let mut b_field = vec![0.0_f64; fec_rt_curl.n_dofs()];

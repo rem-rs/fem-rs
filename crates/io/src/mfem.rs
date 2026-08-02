@@ -10,7 +10,11 @@
 use std::io::{BufRead, BufReader, Read, Write};
 
 use fem_core::{FemError, FemResult};
-use fem_mesh::{element_type::ElementType, simplex::Mesh};
+use fem_mesh::{
+    element_type::ElementType,
+    simplex::Mesh,
+    topology::MeshTopology,
+};
 
 fn mfem_elem_type(code: u32) -> Option<ElementType> {
     Some(match code {
@@ -348,7 +352,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         };
         Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
     } else {
-        let mesh = Mesh {
+        let mut mesh = Mesh {
             coords,
             conn: flat_elem,
             elem_tags,
@@ -364,7 +368,215 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             edge_conn: vec![], edge_to_elem: vec![],
             geometry: None,
         };
+        // MFEM's Mesh(filename, 1, 1) finalizes tetrahedral meshes with
+        // refine=1 → MarkTetMeshForRefinement (vertex rotation so the longest
+        // edge is (v0,v1)).  Apply the same so element/vertex numbering and
+        // the GS-sweep order match MFEM bit-for-bit.
+        mark_tet_mesh_for_refinement(&mut mesh);
         Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+    }
+}
+
+/// libstdc++ `std::sort` simulation (introsort + insertion sort,
+/// `_S_threshold = 16`) with a caller-supplied comparison (the `operator<`
+/// of the sorted type).  Needed to reproduce MFEM's
+/// `MarkTetMeshForRefinement` vertex ordering bit-for-bit: MFEM sorts the
+/// edge-length array with `std::sort` and `Pair`'s `operator<` compares the
+/// length ONLY, so ties are permuted by the exact libstdc++ introsort
+/// behaviour (which Rust's stable/unstable sorts do not reproduce).
+fn std_sort_by<T: Copy>(a: &mut [T], cmp: impl Fn(&T, &T) -> bool) {
+    const THRESHOLD: usize = 16;
+    fn lg(n: usize) -> usize {
+        let mut r = 0;
+        let mut v = n;
+        while v > 1 { v >>= 1; r += 1; }
+        r
+    }
+    fn move_median<T: Copy>(a: &mut [T], result: usize, x: usize, y: usize, z: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        let r = if cmp(&a[x], &a[y]) {
+            if cmp(&a[y], &a[z]) { y }
+            else if cmp(&a[x], &a[z]) { z }
+            else { x }
+        } else if cmp(&a[x], &a[z]) { x }
+        else if cmp(&a[y], &a[z]) { z }
+        else { y };
+        a.swap(result, r);
+    }
+    fn unguarded_partition<T: Copy>(a: &mut [T], first: usize, last: usize, pivot: usize, cmp: &impl Fn(&T, &T) -> bool) -> usize {
+        let mut f = first;
+        let mut l = last;
+        loop {
+            while cmp(&a[f], &a[pivot]) { f += 1; }
+            l -= 1;
+            while cmp(&a[pivot], &a[l]) { l -= 1; }
+            if !(f < l) { return f; }
+            a.swap(f, l);
+            f += 1;
+        }
+    }
+    fn unguarded_linear_insert<T: Copy>(a: &mut [T], last: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        let v = a[last];
+        let mut l = last;
+        let mut next = last - 1;
+        while next > 0 && cmp(&v, &a[next]) {
+            a[l] = a[next];
+            l = next;
+            next -= 1;
+        }
+        if next == 0 && cmp(&v, &a[0]) { a[l] = a[0]; a[0] = v; }
+        else { a[l] = v; }
+    }
+    fn insertion_sort<T: Copy>(a: &mut [T], first: usize, last: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        for i in first + 1..last {
+            if cmp(&a[i], &a[first]) {
+                let v = a[i];
+                a.copy_within(first..i, first + 1);
+                a[first] = v;
+            } else { unguarded_linear_insert(a, i, cmp); }
+        }
+    }
+    fn introsort_loop<T: Copy>(a: &mut [T], first: usize, last: usize, mut depth: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        let mut f = first;
+        let mut l = last;
+        while l - f > THRESHOLD {
+            if depth == 0 {
+                // __partial_sort fallback (heapsort); with the tetra edge
+                // lengths this path is not reached for the meshes in use.
+                insertion_sort(a, f, l, cmp);
+                return;
+            }
+            depth -= 1;
+            let mid = f + (l - f) / 2;
+            move_median(a, f, f + 1, mid, l - 1, cmp);
+            let cut = unguarded_partition(a, f + 1, l, f, cmp);
+            let left = cut - f;
+            let right = l - cut;
+            if left < right { introsort_loop(a, f, cut, depth, cmp); f = cut; }
+            else { introsort_loop(a, cut, l, depth, cmp); l = cut; }
+        }
+    }
+    fn final_insertion_sort<T: Copy>(a: &mut [T], first: usize, last: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        if last - first > THRESHOLD {
+            insertion_sort(a, first, first + THRESHOLD, cmp);
+            for i in first + THRESHOLD..last { unguarded_linear_insert(a, i, cmp); }
+        } else { insertion_sort(a, first, last, cmp); }
+    }
+    let n = a.len();
+    if n <= 1 { return; }
+    introsort_loop(a, 0, n, lg(n) * 2, &cmp);
+    final_insertion_sort(a, 0, n, &cmp);
+}
+
+/// 1:1 port of MFEM MarkTetMeshForRefinement: rotate each
+/// tetrahedron's vertex ordering so that the longest edge is (v0,v1) and the
+/// refinement "type" is encoded by a final swap.  MFEM calls this during
+/// `Mesh(filename, 1, 1)` finalization (`FinalizeTetMesh` with `refine=1`),
+/// so any 3-D mesh read with the default `read_mfem_file` must have it
+/// applied for the vertex/element numbering to match MFEM bit-for-bit.
+pub fn mark_tet_mesh_for_refinement(mesh: &mut Mesh<3>) {
+    use std::collections::HashMap;
+    let n = mesh.n_nodes();
+    let n_elems = mesh.n_elems();
+
+    // ── 1. GetVertexToVertexTable: edge ids in element × local-edge order ──
+    let mut edge_id: HashMap<(u32, u32), usize> = HashMap::new();
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    const TET_EDGES: [(usize, usize); 6] = [(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)];
+    const HEX_EDGES: [(usize, usize); 12] =
+        [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
+    const PRISM_EDGES: [(usize, usize); 9] =
+        [(0,1),(1,2),(0,2),(3,4),(4,5),(3,5),(0,3),(1,4),(2,5)];
+    for e in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(e);
+        let es: &[(usize, usize)] = match ns.len() {
+            4 => &TET_EDGES,
+            8 => &HEX_EDGES,
+            6 => &PRISM_EDGES,
+            _ => &[],
+        };
+        for &(a, b) in es {
+            let (i, j) = if ns[a] < ns[b] { (ns[a], ns[b]) } else { (ns[b], ns[a]) };
+            if !edge_id.contains_key(&(i, j)) {
+                edge_id.insert((i, j), edges.len());
+                edges.push((i, j));
+            }
+        }
+    }
+
+    // ── 2. GetEdgeOrdering: sort edge ids by length (ascending), ties are
+    //    permuted exactly like libstdc++ std::sort of Pair(real_t,int). ──
+    let len = |a: u32, b: u32| -> f64 {
+        let (i, j) = if a < b { (a, b) } else { (b, a) };
+        let ca = mesh.node_coords(i);
+        let cb = mesh.node_coords(j);
+        let mut s = 0.0;
+        for d in 0..3 {
+            let t = ca[d] - cb[d];
+            s += t * t;
+        }
+        s.sqrt()
+    };
+    let mut length_idx: Vec<(f64, usize)> = edges.iter().enumerate()
+        .map(|(k, &(a, b))| (len(a, b), k)).collect();
+    std_sort_by(&mut length_idx, |x, y| x.0 < y.0);
+    let mut order = vec![0usize; edges.len()];
+    for (pos, &(_, e)) in length_idx.iter().enumerate() {
+        order[e] = pos;
+    }
+
+    // ── 3. MarkEdge for each tetrahedron (2 phases) ────────────────────────
+    let eidx = |a: u32, b: u32| -> usize {
+        let (i, j) = if a < b { (a, b) } else { (b, a) };
+        edge_id[&(i, j)]
+    };
+    for e in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(e);
+        if ns.len() != 4 {
+            continue;
+        }
+        let mut L = order[eidx(ns[0], ns[1])];
+        let mut j = 0;
+        let mut l = order[eidx(ns[1], ns[2])]; if l > L { L = l; j = 1; }
+        l = order[eidx(ns[2], ns[0])]; if l > L { L = l; j = 2; }
+        l = order[eidx(ns[0], ns[3])]; if l > L { L = l; j = 3; }
+        l = order[eidx(ns[1], ns[3])]; if l > L { L = l; j = 4; }
+        l = order[eidx(ns[2], ns[3])]; if l > L { L = l; j = 5; }
+        let ind = [ns[0], ns[1], ns[2], ns[3]];
+        let mut newn: [u32; 4] = match j {
+            1 => [ind[1], ind[2], ind[0], ind[3]],
+            2 => [ind[2], ind[0], ind[1], ind[3]],
+            3 => [ind[3], ind[0], ind[2], ind[1]],
+            4 => [ind[1], ind[3], ind[2], ind[0]],
+            5 => [ind[2], ind[3], ind[0], ind[1]],
+            _ => [ind[0], ind[1], ind[2], ind[3]],
+        };
+        // Phase 2: pick the two longest remaining edges; depending on the
+        // "type", swap (0,1) and (2,3) (Tetrahedron::MarkEdge second part).
+        let mut ind0 = 2usize;
+        let mut ind1 = 1usize;
+        let mut L2 = order[eidx(newn[0], newn[2])];
+        let mut l2 = order[eidx(newn[0], newn[3])]; if l2 > L2 { L2 = l2; ind0 = 3; }
+        l2 = order[eidx(newn[2], newn[3])]; if l2 > L2 { ind0 = 5; }
+        L2 = order[eidx(newn[1], newn[2])];
+        l2 = order[eidx(newn[1], newn[3])]; if l2 > L2 { L2 = l2; ind1 = 4; }
+        l2 = order[eidx(newn[2], newn[3])]; if l2 > L2 { ind1 = 5; }
+        let swap_needed = match ind0 {
+            2 => false,
+            3 => ind1 != 1,
+            5 => ind1 == 4,
+            _ => false,
+        };
+        if swap_needed {
+            newn.swap(0, 1);
+            newn.swap(2, 3);
+        }
+        // Write back into the mesh connectivity.
+        let start = if let Some(ref offsets) = mesh.elem_offsets {
+            offsets[e as usize]
+        } else {
+            e as usize * 4
+        };
+        mesh.conn[start..start + 4].copy_from_slice(&newn);
     }
 }
 

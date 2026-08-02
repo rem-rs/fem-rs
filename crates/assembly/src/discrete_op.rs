@@ -1527,6 +1527,7 @@ impl DiscreteLinearOperator {
         match hcurl_space.order() {
             1 | 2 => {}
             order => {
+                eprintln!("TEMP curl_3d bad hcurl order = {order}");
                 return Err(DiscreteOpError::UnsupportedHCurlOrder {
                     op: "curl_3d",
                     order,
@@ -1582,6 +1583,20 @@ impl DiscreteLinearOperator {
             (0, 1), (3, 2), (7, 6), (4, 5),
             (0, 3), (1, 2), (5, 6), (4, 7),
             (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
+        // Prism6: faces (2 tri + 3 quad) matching HDivSpace::PRISM_FACES, edges
+        // matching HCurlSpace::PRISM_EDGES / PrismND1.
+        let prism_faces: [[usize; 4]; 5] = [
+            [0, 1, 2, 2], // bottom tri
+            [3, 4, 5, 5], // top tri
+            [0, 1, 4, 3], // quad 0
+            [1, 2, 5, 4], // quad 1
+            [0, 2, 5, 3], // quad 2
+        ];
+        let prism_edges: [(usize, usize); 9] = [
+            (0, 1), (0, 2), (1, 2), // bottom triangle
+            (3, 4), (3, 5), (4, 5), // top triangle
+            (0, 3), (1, 4), (2, 5), // vertical
         ];
 
         // Track visited face DOFs so each face is assembled exactly once.
@@ -1642,6 +1657,55 @@ impl DiscreteLinearOperator {
                                 let (gi, gj) = (verts[li], verts[lj]);
                                 (gi == a && gj == b) || (gi == b && gj == a)
                             }).expect("hex face boundary edge not found in element");
+                            let edge_dof = hcurl_dofs[edge_idx] as usize;
+                            coo.add(face_dof, edge_dof, stokes_sign);
+                        }
+                    }
+                }
+                ElementType::Prism6 => {
+                    // Prism faces: [0,1,2],[3,4,5] triangles + [0,1,4,3],
+                    // [1,2,5,4],[0,2,5,3] quads (HDivSpace::PRISM_FACES); edges
+                    // HCurlSpace::PRISM_EDGES.
+                    // RT face DOFs are oriented by FaceKey (ascending first-3
+                    // vertices) → face normal n = (s1-s0)×(s2-s0).  The local
+                    // ring is flipped when its Newell normal opposes n so the
+                    // Stokes cycle is right-handed w.r.t. the RT orientation.
+                    for (face_local, face_verts) in prism_faces.iter().enumerate() {
+                        let face_dof = hdiv_dofs[face_local] as usize;
+                        if !visited.insert(face_dof) {
+                            continue;
+                        }
+                        let nv = if face_verts[2] == face_verts[3] { 3 } else { 4 };
+                        let gv: Vec<u32> = face_verts[..nv].iter().map(|&li| verts[li]).collect();
+                        let mut s = [gv[0], gv[1], gv[2]];
+                        s.sort_unstable();
+                        let c0 = mesh.node_coords(s[0]);
+                        let c1 = mesh.node_coords(s[1]);
+                        let c2 = mesh.node_coords(s[2]);
+                        let nx = (c1[1]-c0[1])*(c2[2]-c0[2]) - (c1[2]-c0[2])*(c2[1]-c0[1]);
+                        let ny = (c1[2]-c0[2])*(c2[0]-c0[0]) - (c1[0]-c0[0])*(c2[2]-c0[2]);
+                        let nz = (c1[0]-c0[0])*(c2[1]-c0[1]) - (c1[1]-c0[1])*(c2[0]-c0[0]);
+                        let mut pn = [0.0_f64; 3];
+                        for k in 0..nv {
+                            let p = mesh.node_coords(gv[k]);
+                            let q = mesh.node_coords(gv[(k + 1) % nv]);
+                            pn[0] += (p[1]-q[1])*(p[2]+q[2]);
+                            pn[1] += (p[2]-q[2])*(p[0]+q[0]);
+                            pn[2] += (p[0]-q[0])*(p[1]+q[1]);
+                        }
+                        let flip = nx*pn[0] + ny*pn[1] + nz*pn[2] < 0.0;
+                        let ring: Vec<u32> = if flip {
+                            gv.iter().rev().copied().collect()
+                        } else {
+                            gv
+                        };
+                        for k in 0..nv {
+                            let (a, b) = (ring[k], ring[(k + 1) % nv]);
+                            let stokes_sign = if a < b { 1.0 } else { -1.0 };
+                            let edge_idx = prism_edges.iter().position(|&(li, lj)| {
+                                let (gi, gj) = (verts[li], verts[lj]);
+                                (gi == a && gj == b) || (gi == b && gj == a)
+                            }).expect("prism face boundary edge not found in element");
                             let edge_dof = hcurl_dofs[edge_idx] as usize;
                             coo.add(face_dof, edge_dof, stokes_sign);
                         }
