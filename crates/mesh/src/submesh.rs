@@ -341,6 +341,14 @@ pub fn extract_submesh_3d(mesh: &Mesh<3>, element_tags: &[i32]) -> SubMesh3D {
             let key = FaceKey(global_verts.clone());
 
             let (parent_tag, parent_face_id) = parent_boundary_face(mesh, &global_verts);
+            // Submesh-internal faces shared with the rest of the parent mesh
+            // (not parent boundary faces) get the MFEM treatment: attribute
+            // = max_bdr_attr + 1 (SubMeshUtils::AddBoundaryElements).
+            let parent_tag = if parent_face_id == FaceId::MAX {
+                mesh.face_tags.iter().copied().max().map_or(1, |m| m + 1) as i32
+            } else {
+                parent_tag
+            };
             face_counts
                 .entry(key)
                 .and_modify(|(tag, _pe, _nodes, _pfid)| {

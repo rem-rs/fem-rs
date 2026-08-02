@@ -9,8 +9,14 @@ use std::collections::HashMap;
 use fem_core::{ElemId, NodeId, FaceId};
 use crate::{BoundaryTag, ElementType, Mesh};
 
-/// Helper: a parent boundary face's vertex set and tag.
-struct ParentFace { verts: Vec<NodeId>, tag: i32 }
+/// Helper: a parent boundary face's vertex set, tag and coordinate cover
+/// (its vertices + edge midpoints + quad center) for exact child-face
+/// matching.
+struct ParentFace {
+    verts: Vec<NodeId>,
+    tag: i32,
+    cover: Vec<[f64; 3]>,
+}
 
 /// Rebuild boundary faces for a refined 3-D mesh using the original mesh's
 /// boundary data for tag propagation.
@@ -24,11 +30,35 @@ pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
     if refined.n_elems() == 0 { return; }
 
     // Build parent boundary face lookup: for each original boundary face,
-    // store its vertex set and tag.
+    // store its vertex set, tag and coordinate cover (vertices + edge
+    // midpoints + quad center).  A refined child face is a subdivision of
+    // exactly one parent face, so matching every child vertex coordinate
+    // against the parent cover is exact (the midpoint/center coordinates are
+    // computed with the same 0.5*(a+b)/averaging expressions the refinement
+    // used, so IEEE equality holds).
     let mut parent_faces: Vec<ParentFace> = Vec::new();
     for f in 0..original.n_faces() as FaceId {
         let bfv = original.bface_nodes(f);
-        parent_faces.push(ParentFace { verts: bfv.to_vec(), tag: original.face_tags[f as usize] as i32 });
+        let mut cover: Vec<[f64; 3]> = bfv.iter().map(|&v| original.coords_of(v)).collect();
+        let nv = bfv.len();
+        for i in 0..nv {
+            let a = original.coords_of(bfv[i]);
+            let b = original.coords_of(bfv[(i + 1) % nv]);
+            cover.push([0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])]);
+        }
+        if nv == 4 {
+            let mut c = [0.0; 3];
+            for &v in bfv.iter() {
+                let p = original.coords_of(v);
+                for k in 0..3 { c[k] += p[k] / 4.0; }
+            }
+            cover.push(c);
+        }
+        parent_faces.push(ParentFace {
+            verts: bfv.to_vec(),
+            tag: original.face_tags[f as usize] as i32,
+            cover,
+        });
     }
 
     // Count faces in the refined mesh.
@@ -70,8 +100,8 @@ pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
             _ => continue,
         };
 
-        // Find best matching parent face by vertex overlap.
-        let tag = find_best_tag(ring, &parent_faces);
+        // Find the exact parent face this child face subdivides.
+        let tag = find_exact_tag(ring, refined, &parent_faces);
 
         for &v in ring { new_face_conn.push(v); }
         new_face_tags.push(tag as BoundaryTag);
@@ -86,6 +116,26 @@ pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
     refined.face_types = if all_same { None } else { Some(new_face_types) };
     refined.face_offsets = if new_face_offsets.len() > 1 { Some(new_face_offsets) } else { None };
     refined.face_to_elem = None;
+}
+
+/// Match a refined child boundary face to the unique parent boundary face it
+/// subdivides: every child vertex (original vertex, edge midpoint, quad
+/// center) must lie in the parent face's coordinate cover.  Falls back to the
+/// old overlap heuristic only when no unique match is found.
+fn find_exact_tag(child: &[NodeId], refined: &Mesh<3>, parents: &[ParentFace]) -> i32 {
+    let child_coords: Vec<[f64; 3]> = child.iter().map(|&v| refined.coords_of(v)).collect();
+    let mut exact: Option<i32> = None;
+    let mut n_exact = 0;
+    for pf in parents {
+        if child_coords.iter().all(|c| pf.cover.contains(c)) {
+            n_exact += 1;
+            exact = Some(pf.tag);
+        }
+    }
+    if n_exact == 1 { return exact.unwrap(); }
+    // Fallback: overlap heuristic (e.g. degenerate/curved meshes where the
+    // coordinate identities are perturbed).
+    find_best_tag(child, parents)
 }
 
 /// Find the parent boundary face with the most vertex overlap.
