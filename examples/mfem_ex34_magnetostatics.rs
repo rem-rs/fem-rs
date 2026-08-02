@@ -170,15 +170,12 @@ fn main() {
         phi = gf_phi.dofs().to_vec();
     }
 
-    // Essential BCs: ALL boundary attributes — MFEM ex34.cpp uses
-    // `Array<int> ess_bdr(mesh_cond.bdr_attributes.Max()); ess_bdr = 1;`
-    // i.e. every boundary face (incl. submesh-internal faces tagged
-    // max_bdr_attr+1) is essential, so every submesh vertex is a Dirichlet
-    // DOF and the φ solve only reproduces the projected boundary values.
-    let mut all_attrs: Vec<i32> = mesh_cond.face_tags.iter().copied().collect();
-    all_attrs.sort_unstable();
-    all_attrs.dedup();
-    let ess_dofs_phi = boundary_dofs(&mesh_cond, dm_h1, &all_attrs);
+    // Essential BCs: phi0 + phi1 boundary attributes only — MFEM ex34.cpp
+    // `ComputeCurrentDensityOnSubMesh` sets `ess_bdr_phi` from phi0_attr (2)
+    // and phi1_attr (23) only (submesh-internal faces attr 25 are NOT
+    // essential, so φ has an interior solution there, driven by the
+    // Dirichlet values on attrs 2/23).
+    let ess_dofs_phi = boundary_dofs(&mesh_cond, dm_h1, &[PHI0_ATTR, PHI1_ATTR]);
     let ess_vals_phi: Vec<f64> = ess_dofs_phi.iter().map(|&d| phi[d as usize]).collect();
 
     // FormLinearSystem (MFEM DIAG_KEEP) + PCG-GSSmoother (print 1, 200, 1e-12).
@@ -194,14 +191,6 @@ fn main() {
     };
     solve_pcg_gssmoother(&mat_h1, &B_h1, &mut x_h1, &h1_cfg).expect("H1 PCG solve failed");
     phi = x_h1;
-    // TEMP-DUMP phi
-    {
-        let mut s = String::from("n_dofs\n");
-        s.push_str(&phi.len().to_string());
-        s.push_str("\nspace_type\nH1\n");
-        for v in &phi { s.push_str(&format!("{:.17e}\n", v)); }
-        std::fs::write("rust_phi.txt", s).unwrap();
-    }
 
     // ── 6b. Solve for J = -σ∇φ in H(div) on SubMesh ───────────────────────
     let rt_mass = VectorAssembler::assemble_bilinear(

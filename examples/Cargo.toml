@@ -138,6 +138,9 @@ path = "dbg_j2.rs"
 name = "dbg_rt0"
 path = "dbg_rt0.rs"
 [[example]]
+name = "dbg_phi2"
+path = "dbg_phi2.rs"
+[[example]]
 name = "mfem_ex34_magnetostatics"
 path = "mfem_ex34_magnetostatics.rs"
 [[example]]
