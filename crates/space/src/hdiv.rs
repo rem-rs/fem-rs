@@ -238,7 +238,11 @@ impl<M: MeshTopology> HDivSpace<M> {
                 ElementType::Hex8 => {
                     let interior = if order == 0 { 0 } else { 12 };
                     for fv in &HEX_FACES {
-                        let key = FaceKey::new(verts[fv[0]], verts[fv[1]], verts[fv[2]]);
+                        // canonical key from all 4 sorted vertices (shared
+                        // quad faces must map to one DOF)
+                        let mut v4 = [verts[fv[0]], verts[fv[1]], verts[fv[2]], verts[fv[3]]];
+                        v4.sort_unstable();
+                        let key = FaceKey::new(v4[0], v4[1], v4[2]);
                         if nd == 1 {
                             dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
                             signs_flat.push(1.0);
@@ -251,10 +255,17 @@ impl<M: MeshTopology> HDivSpace<M> {
                 }
                 ElementType::Prism6 => {
                     let interior = 0;
-                    // 2 tri faces + 3 quad faces (quad faces use first 3 verts)
+                    // 2 tri faces + 3 quad faces; PRISM_FACES pads tri faces
+                    // with a repeated 4th vertex.
                     for i in 0..5 {
                         let fv = &PRISM_FACES[i];
-                        let key = FaceKey::new(verts[fv[0]], verts[fv[1]], verts[fv[2]]);
+                        let key = if fv[2] == fv[3] {
+                            FaceKey::new(verts[fv[0]], verts[fv[1]], verts[fv[2]])
+                        } else {
+                            let mut v4 = [verts[fv[0]], verts[fv[1]], verts[fv[2]], verts[fv[3]]];
+                            v4.sort_unstable();
+                            FaceKey::new(v4[0], v4[1], v4[2])
+                        };
                         if nd == 1 {
                             dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
                             signs_flat.push(1.0);
@@ -639,7 +650,15 @@ impl<M: MeshTopology> HDivSpace<M> {
                     verts[face_verts[2]],
                     verts[face_verts[3]],
                 );
-                let key = FaceKey::new(a, b, c);
+                let key = {
+                    // MFEM RT0 has one DOF per unique (geometric) face; using
+                    // only the first 3 local vertices makes shared quad faces
+                    // look different between neighbouring elements.  Sort all
+                    // 4 vertices and take the first 3 for a canonical key.
+                    let mut v4 = [a, b, c, d];
+                    v4.sort_unstable();
+                    FaceKey::new(v4[0], v4[1], v4[2])
+                };
                 let sign = Self::compute_sign_3d_hex(&mesh, verts, a, b, c, d);
 
                 if dofs_per_face == 1 {
@@ -700,7 +719,16 @@ impl<M: MeshTopology> HDivSpace<M> {
                 let a = verts[face_verts[0]];
                 let b = verts[face_verts[1]];
                 let c = verts[face_verts[2]];
-                let key = FaceKey::new(a, b, c);
+                // PRISM_FACES pads triangles with a repeated 4th vertex;
+                // quad faces get a canonical key from all 4 sorted vertices.
+                let key = if face_verts[2] == face_verts[3] {
+                    FaceKey::new(a, b, c)
+                } else {
+                    let d = verts[face_verts[3]];
+                    let mut v4 = [a, b, c, d];
+                    v4.sort_unstable();
+                    FaceKey::new(v4[0], v4[1], v4[2])
+                };
                 if dofs_per_face == 1 {
                     let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
                     dofs_flat.push(dof);

@@ -993,23 +993,41 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Tet4); }
             }
             ElementType::Hex8 => {
-                let e01=mid!(ns[0],ns[1]);let e23=mid!(ns[2],ns[3]);let e03=mid!(ns[0],ns[3]);let e12=mid!(ns[1],ns[2]);
-                let e45=mid!(ns[4],ns[5]);let e67=mid!(ns[6],ns[7]);let e47=mid!(ns[4],ns[7]);let e56=mid!(ns[5],ns[6]);
-                let e04=mid!(ns[0],ns[4]);let e15=mid!(ns[1],ns[5]);let e26=mid!(ns[2],ns[6]);let e37=mid!(ns[3],ns[7]);
+                // MFEM hex_t::Edges: {0,1},{1,2},{3,2},{0,3},{4,5},{5,6},{7,6},
+                // {4,7},{0,4},{1,5},{2,6},{3,7}
+                let e0=mid!(ns[0],ns[1]);let e1=mid!(ns[1],ns[2]);let e2=mid!(ns[3],ns[2]);let e3=mid!(ns[0],ns[3]);
+                let e4=mid!(ns[4],ns[5]);let e5=mid!(ns[5],ns[6]);let e6=mid!(ns[7],ns[6]);let e7=mid!(ns[4],ns[7]);
+                let e8=mid!(ns[0],ns[4]);let e9=mid!(ns[1],ns[5]);let e10=mid!(ns[2],ns[6]);let e11=mid!(ns[3],ns[7]);
+                // MFEM hex_t::FaceVert: {3,2,1,0},{0,1,5,4},{1,2,6,5},
+                // {2,3,7,6},{3,0,4,7},{4,5,6,7} (bottom,front,right,back,left,top)
+                const MF_FACES: [[usize; 4]; 6] = [
+                    [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
+                    [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
+                ];
                 let qf = |fi: usize| -> NodeId {
-                    let f=local_faces_hex()[fi]; quad_fc[&quad_face_key([ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]])]
+                    let f = MF_FACES[fi];
+                    quad_fc[&quad_face_key([ns[f[0]], ns[f[1]], ns[f[2]], ns[f[3]]])]
                 };
                 let f0=qf(0);let f1=qf(1);let f2=qf(2);let f3=qf(3);let f4=qf(4);let f5=qf(5);
                 let bc = body_cc[&e];
+                // MFEM 8 children (UniformRefinement3D_base CUBE branch).
                 for &ch in &[
-                    [ns[0],e01,f0,e03,e04,f2,bc,f4],[ns[1],e01,f0,e12,e15,f2,bc,f5],
-                    [ns[2],e12,f0,e23,e26,f3,bc,f5],[ns[3],e03,f0,e23,e37,f3,bc,f4],
-                    [ns[4],e04,f1,e45,e47,f2,bc,f4],[ns[5],e15,f1,e45,e56,f2,bc,f5],
-                    [ns[6],e26,f1,e56,e67,f3,bc,f5],[ns[7],e37,f1,e67,e47,f3,bc,f4],
+                    [ns[0],e0,f0,e3,e8,f1,bc,f4],
+                    [e0,ns[1],e1,f0,f1,e9,f2,bc],
+                    [f0,e1,ns[2],e2,bc,f2,e10,f3],
+                    [e3,f0,e2,ns[3],f4,bc,f3,e11],
+                    [e8,f1,bc,f4,ns[4],e4,f5,e7],
+                    [f1,e9,f2,bc,e4,ns[5],e5,f5],
+                    [bc,f2,e10,f3,f5,e5,ns[6],e6],
+                    [f4,bc,f3,e11,e7,f5,e6,ns[7]],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
                 for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Hex8); }
             }
             ElementType::Prism6 => {
+                // MFEM wedge_t::Edges: {0,1},{1,2},{2,0},{3,4},{4,5},{5,3},
+                // {0,3},{1,4},{2,5} → e0=m01,e1=m12,e2=m02,e3=m34,e4=m45,
+                // e5=m35,e6=m03,e7=m14,e8=m25.  Quad faces FaceVert[2..5]:
+                // {0,1,4,3},{1,2,5,4},{2,0,3,5} → q0,q1,q2.
                 let m01=mid!(ns[0],ns[1]);let m02=mid!(ns[0],ns[2]);let m12=mid!(ns[1],ns[2]);
                 let m34=mid!(ns[3],ns[4]);let m35=mid!(ns[3],ns[5]);let m45=mid!(ns[4],ns[5]);
                 let m03=mid!(ns[0],ns[3]);let m14=mid!(ns[1],ns[4]);let m25=mid!(ns[2],ns[5]);
@@ -1017,11 +1035,16 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                     let f=local_faces_prism_quad()[fi]; quad_fc[&quad_face_key([ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]])]
                 };
                 let q0=qf(0);let q1=qf(1);let q2=qf(2);
+                // MFEM 8 children (UniformRefinement3D_base WEDGE branch).
                 for &ch in &[
-                    [ns[0],m01,m02,m03,q0,q2],[m01,ns[1],m12,q0,m14,q1],
-                    [m02,m12,ns[2],q2,q1,m25],[m01,m12,m02,q0,q1,q2],
-                    [m03,q0,q2,ns[3],m34,m35],[q0,m14,q1,m34,ns[4],m45],
-                    [q2,q1,m25,m35,m45,ns[5]],[q0,q1,q2,m34,m45,m35],
+                    [ns[0],m01,m02,m03,q0,q2],
+                    [m12,m02,m01,q1,q2,q0],
+                    [m01,ns[1],m12,q0,m14,q1],
+                    [m02,m12,ns[2],q2,q1,m25],
+                    [m03,q0,q2,ns[3],m34,m35],
+                    [q1,q2,q0,m45,m35,m34],
+                    [q0,m14,q1,m34,ns[4],m45],
+                    [q2,q1,m25,m35,m45,ns[5]],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
                 for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Prism6); }
             }
