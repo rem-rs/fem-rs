@@ -270,15 +270,19 @@ pub fn extract_submesh_3d(mesh: &Mesh<3>, element_tags: &[i32]) -> SubMesh3D {
     }
     assert!(!parent_elem_ids.is_empty(), "extract_submesh_3d: no elements match the given tags");
 
-    // Collect all vertices referenced by the selected elements.
-    let mut parent_nodes_set = HashSet::<NodeId>::new();
+    // Collect vertices in MFEM's SubMeshUtils::AddElementsToMesh order:
+    // element traversal × local vertex order, first occurrence assigns the
+    // submesh id (NOT sorted parent ids — that changes the H1/RT DOF
+    // ordering and hence the GS-sweep history).
+    let mut parent_nodes: Vec<NodeId> = Vec::new();
+    let mut seen_nodes = HashSet::<NodeId>::new();
     for &e in &parent_elem_ids {
         for &n in mesh.elem_nodes(e) {
-            parent_nodes_set.insert(n);
+            if seen_nodes.insert(n) {
+                parent_nodes.push(n);
+            }
         }
     }
-    let mut parent_nodes: Vec<NodeId> = parent_nodes_set.into_iter().collect();
-    parent_nodes.sort_unstable();
 
     let mut sub_of_parent = HashMap::<NodeId, NodeId>::new();
     for (si, &pn) in parent_nodes.iter().enumerate() {

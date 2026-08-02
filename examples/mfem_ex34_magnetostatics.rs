@@ -298,7 +298,6 @@ fn main() {
 
     // 17. Compute B = curl A.
     let fec_rt_curl = HDivSpace::new(mesh.clone(), rt_order);
-    eprintln!("TEMP nd_order={} rt_order={}", fec_nd_full.order(), fec_rt_curl.order());
     let curl_mat = DiscreteLinearOperator::curl_3d(&fec_nd_full, &fec_rt_curl)
         .expect("CurlInterpolator assembly failed");
     let mut b_field = vec![0.0_f64; fec_rt_curl.n_dofs()];
