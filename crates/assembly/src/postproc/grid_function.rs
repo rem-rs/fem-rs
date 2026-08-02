@@ -1257,4 +1257,44 @@ mod tests {
         assert!((norm_err - norm_mass).abs() < 1e-9 * norm_mass.max(1e-12),
             "hcurl L2 norm mismatch: error-routine {norm_err:.10e} vs mass-matrix {norm_mass:.10e}");
     }
+
+    /// Regression for ex33 (1:1 MFEM comparison): `compute_l2_error` on a
+    /// Quad4 mesh must use the same [0,1]² reference element (QuadQk) as the
+    /// assembler and map the (0,1) reference axis through node 3 (CCW
+    /// ordering).  The legacy QuadQ1/Q2 ([-1,1]²) mixed with the [0,1]²
+    /// quadrature rules, and the node-2 axis mapping, produced an L2 error of
+    /// ~0.0566 for a solution that is pointwise correct to 1e-6.
+    #[test]
+    fn quad4_l2_error_is_consistent() {
+        use crate::GridFunction;
+        use std::f64::consts::PI;
+
+        // 8×8 quad mesh on [0,1]² (same discretization as ex33's
+        // inline-quad verification configuration).
+        let mut mesh = Mesh::<2>::unit_square_quad(8);
+        for _ in 0..2 {
+            mesh = fem_mesh::refine_uniform(&mesh);
+        }
+        let space = H1Space::new(mesh, 2);
+        let sol = |x: &[f64]| -> f64 {
+            let mut v = 1.0;
+            for &xi in x {
+                v *= (PI * xi).sin();
+            }
+            v
+        };
+        let dofs = space.interpolate(&sol);
+        let gf = GridFunction::new(&space, dofs.as_slice().to_vec());
+
+        // ‖sol‖_L² = 1/2 on the unit square (independent of interpolation;
+        // quadrature(7) = 4×4 Gauss integrates the sine to ~1e-7).
+        let ex_norm = gf.compute_l2_error(&|_| 0.0, 7);
+        assert!((ex_norm - 0.5).abs() < 1e-5,
+            "‖sin(πx)sin(πy)‖_L² = {ex_norm:.10e}, expected 0.5");
+
+        // Q2 interpolation error of the smooth function on h=1/8 is O(h³),
+        // far below the 0.05+ error the old [-1,1]²/node-2 paths produced.
+        let l2 = gf.compute_l2_error(&sol, 7);
+        assert!(l2 < 1e-3, "Quad4 L2 error too large: {l2:.6e}");
+    }
 }

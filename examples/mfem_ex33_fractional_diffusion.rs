@@ -166,7 +166,9 @@ fn main() {
             }
         }
 
-        // 10.7 b now corresponds to the function g (no restriction matrix).
+        // 10.7 b now carries B = M·X (the mass-scaled right-hand side for the
+        //     next integer step / the fractional part).  Mirrors ex33.cpp
+        //     (no restriction matrix in serial): b = B.
         b = B;
     }
 
