@@ -42,8 +42,18 @@ impl ElementTransformation {
 
         let x0 = mesh.node_coords(geo_nodes[0]).to_vec();
         let mut jac = DMatrix::<f64>::zeros(dim, dim);
+        // Column order must match the reference-element axes of the SOLUTION
+        // basis.  For Tet4/Hex8 the node order is the axis order, but for
+        // Prism6 the PrismPk reference is (ξ0 = layer xi, ξ1 = tri eta,
+        // ξ2 = tri zeta) with vertices [0,1,2,3,4,5] =
+        // (0,0,0),(0,1,0),(0,0,1),(1,0,0),(1,1,0),(1,0,1) — so ∂x/∂ξ0 comes
+        // from vertex 3, ∂x/∂ξ1 from vertex 1, ∂x/∂ξ2 from vertex 2.
+        let col_of: Vec<usize> = match geo_nodes.len() {
+            6 => vec![3, 1, 2], // Prism6: (ξ0, ξ1, ξ2) = (layer, tri-eta, tri-zeta)
+            _ => (0..dim).map(|i| i + 1).collect(),
+        };
         for col in 0..dim {
-            let xc = mesh.node_coords(geo_nodes[col + 1]);
+            let xc = mesh.node_coords(geo_nodes[col_of[col]]);
             for row in 0..dim {
                 jac[(row, col)] = xc[row] - x0[row];
             }
