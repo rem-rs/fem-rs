@@ -132,6 +132,12 @@ path = "mfem_ex33_fractional_diffusion.rs"
 name = "dbg_e2v"
 path = "dbg_e2v.rs"
 [[example]]
+name = "dbg_j2"
+path = "dbg_j2.rs"
+[[example]]
+name = "dbg_rt0"
+path = "dbg_rt0.rs"
+[[example]]
 name = "mfem_ex34_magnetostatics"
 path = "mfem_ex34_magnetostatics.rs"
 [[example]]
