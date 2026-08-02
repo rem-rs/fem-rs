@@ -277,9 +277,10 @@ impl DiscreteLinearOperator {
                 }
                 ElementType::Tet4 | ElementType::Tet10 => &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
                 ElementType::Hex8 | ElementType::Hex20 => &[
-                    (0, 1), (3, 2), (4, 5), (7, 6),
-                    (0, 3), (1, 2), (4, 7), (5, 6),
-                    (0, 4), (1, 5), (2, 6), (3, 7),
+                    // MUST match HCurlSpace::HEX_EDGES order (hcurl.rs).
+                    (0, 1), (3, 2), (7, 6), (4, 5),   // x-edges
+                    (0, 3), (1, 2), (5, 6), (4, 7),   // y-edges
+                    (0, 4), (1, 5), (2, 6), (3, 7),   // z-edges
                 ],
                 ElementType::Prism6 | ElementType::Prism15 => &[
                     (0, 1), (0, 2), (1, 2), // bottom tri
@@ -1571,6 +1572,17 @@ impl DiscreteLinearOperator {
         let tet_edges: [(usize, usize); 6] = [
             (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
         ];
+        // Hex8: face order must match HDivSpace::HEX_FACES (hdiv.rs); edge order
+        // must match HCurlSpace::HEX_EDGES (hcurl.rs).
+        let hex_faces: [[usize; 4]; 6] = [
+            [0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4],
+            [2, 3, 7, 6], [0, 3, 7, 4], [1, 2, 6, 5],
+        ];
+        let hex_edges: [(usize, usize); 12] = [
+            (0, 1), (3, 2), (7, 6), (4, 5),
+            (0, 3), (1, 2), (5, 6), (4, 7),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
 
         // Track visited face DOFs so each face is assembled exactly once.
         let mut visited = HashSet::with_capacity(n_hdiv);
@@ -1580,34 +1592,70 @@ impl DiscreteLinearOperator {
             let hcurl_dofs = hcurl_space.element_dofs(e);
             let hdiv_dofs = hdiv_space.element_dofs(e);
 
-            for (face_local, &(la, lb, lc)) in tet_faces.iter().enumerate() {
-                let face_dof = hdiv_dofs[face_local] as usize;
+            match mesh.element_type(e) {
+                ElementType::Tet4 | ElementType::Tet10 => {
+                    for (face_local, &(la, lb, lc)) in tet_faces.iter().enumerate() {
+                        let face_dof = hdiv_dofs[face_local] as usize;
 
-                if !visited.insert(face_dof) {
-                    continue;
+                        if !visited.insert(face_dof) {
+                            continue;
+                        }
+
+                        // Global vertices of this face, sorted → canonical orientation.
+                        let mut fv = [verts[la], verts[lb], verts[lc]];
+                        fv.sort_unstable();
+
+                        // Boundary traversal fv[0]→fv[1]→fv[2]→fv[0] (right-hand
+                        // rule with the global face normal (p1−p0)×(p2−p0)).
+                        let face_boundary: [(u32, u32, f64); 3] = [
+                            (fv[0], fv[1],  1.0),
+                            (fv[1], fv[2],  1.0),
+                            (fv[0], fv[2], -1.0),
+                        ];
+
+                        for (gv0, gv1, stokes_sign) in face_boundary {
+                            // Find the local edge index whose global vertices match.
+                            let edge_idx = tet_edges.iter().position(|&(li, lj)| {
+                                let (gi, gj) = (verts[li], verts[lj]);
+                                (gi == gv0 && gj == gv1) || (gi == gv1 && gj == gv0)
+                            }).expect("face boundary edge not found in element");
+
+                            let edge_dof = hcurl_dofs[edge_idx] as usize;
+                            coo.add(face_dof, edge_dof, stokes_sign);
+                        }
+                    }
                 }
-
-                // Global vertices of this face, sorted → canonical orientation.
-                let mut fv = [verts[la], verts[lb], verts[lc]];
-                fv.sort_unstable();
-
-                // Boundary traversal fv[0]→fv[1]→fv[2]→fv[0] (right-hand rule
-                // with the global face normal (p1−p0)×(p2−p0)).
-                let face_boundary: [(u32, u32, f64); 3] = [
-                    (fv[0], fv[1],  1.0),
-                    (fv[1], fv[2],  1.0),
-                    (fv[0], fv[2], -1.0),
-                ];
-
-                for (gv0, gv1, stokes_sign) in face_boundary {
-                    // Find the local edge index whose global vertices match.
-                    let edge_idx = tet_edges.iter().position(|&(li, lj)| {
-                        let (gi, gj) = (verts[li], verts[lj]);
-                        (gi == gv0 && gj == gv1) || (gi == gv1 && gj == gv0)
-                    }).expect("face boundary edge not found in element");
-
-                    let edge_dof = hcurl_dofs[edge_idx] as usize;
-                    coo.add(face_dof, edge_dof, stokes_sign);
+                ElementType::Hex8 | ElementType::Hex20 => {
+                    for (face_local, face_verts) in hex_faces.iter().enumerate() {
+                        let face_dof = hdiv_dofs[face_local] as usize;
+                        if !visited.insert(face_dof) {
+                            continue;
+                        }
+                        // Quad face boundary cycle a→b→c→d→a; each edge's sign
+                        // follows the cycle direction vs the global (ascending
+                        // vertex id) DOF orientation.
+                        let gv: Vec<u32> = face_verts.iter().map(|&li| verts[li]).collect();
+                        for k in 0..4 {
+                            let (a, b) = (gv[k], gv[(k + 1) % 4]);
+                            let stokes_sign = if a < b { 1.0 } else { -1.0 };
+                            let edge_idx = hex_edges.iter().position(|&(li, lj)| {
+                                let (gi, gj) = (verts[li], verts[lj]);
+                                (gi == a && gj == b) || (gi == b && gj == a)
+                            }).expect("hex face boundary edge not found in element");
+                            let edge_dof = hcurl_dofs[edge_idx] as usize;
+                            coo.add(face_dof, edge_dof, stokes_sign);
+                        }
+                    }
+                }
+                other => {
+                    return Err(DiscreteOpError::UnsupportedDimension {
+                        op: "curl_3d",
+                        dim: 3,
+                    })
+                    .map_err(|_| DiscreteOpError::UnsupportedHCurlOrder {
+                        op: "curl_3d",
+                        order: other as u8,
+                    })?;
                 }
             }
         }

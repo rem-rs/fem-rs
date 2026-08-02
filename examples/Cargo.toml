@@ -120,6 +120,9 @@ path = "mfem_ex31_dump.rs"
 name = "mfem_ex32_maxwell_eigenvalue"
 path = "mfem_ex32_maxwell_eigenvalue.rs"
 [[example]]
+name = "mfem_ex32_dump"
+path = "mfem_ex32_dump.rs"
+[[example]]
 name = "mfem_ex33_fractional_laplacian"
 path = "mfem_ex33_fractional_laplacian.rs"
 [[example]]

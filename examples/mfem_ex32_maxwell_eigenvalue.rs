@@ -22,7 +22,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem_file_3d};
 use fem_mesh::Mesh;
-use fem_solver::{lobpcg_preconditioned, LobpcgConfig};
+use fem_solver::{lobpcg_essential_bc, LobpcgConfig};
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace,
     constraints::boundary_dofs_hcurl,
@@ -132,56 +132,53 @@ fn main() {
     //     A[i,i] = 1.0 shifts the eigenvalue at BC DOFs to ~4.5e307,
     //     pushing them out of the spectral range of interest.
     for &d in &ess_bdr_nd {
-        a_mat.eliminate_essential_bc_diag(d as usize, 1.0);
-        m_mat.eliminate_essential_bc_diag(d as usize, 1e-8);
+        a_mat.eliminate_essential_bc_diag_symmetric(d as usize, 1.0);
+        m_mat.eliminate_essential_bc_diag_symmetric(d as usize, f64::MIN_POSITIVE);
     }
 
     // Discrete gradient G: H^1 -> H(Curl) for AMS preconditioner.
     let fec_h1 = H1Space::new(mesh.clone(), 1);
     let grad = DiscreteLinearOperator::gradient(&fec_h1, &fec_nd)
         .expect("gradient assembly failed");
-    let g_linlvo = fem_linalg::fem_to_linlvo_csr(&grad);
-    let a_linlvo = fem_linalg::fem_to_linlvo_csr(&a_mat);
-
-    // 8-9. AMS preconditioner + LOBPCG (1:1 with C++ HypreAME + HypreAMS).
-    use linlvo::precond::{AmsPrecond, AmsConfig};
-    let ams = match AmsPrecond::new(&a_linlvo, &g_linlvo, AmsConfig {
-        singularity_regularization: 1e-12,
-        ..Default::default()
-    }) {
-        Ok(p) => p,
-        Err(e) => panic!("AMS setup failed: {e}"),
-    };
-    eprintln!("\nSolving for eigenvalues (EliminateEssentialBCDiag + AMS-LOBPCG)");
-    eprintln!("  Number of requested eigenmodes: {}", args.nev);
-
-    // Apply AMS per column (block LOBPCG passes multiple vectors)
-    let ams_precond = |r: &nalgebra::DMatrix<f64>| {
-        let mut z = nalgebra::DMatrix::<f64>::zeros(r.nrows(), r.ncols());
-        use linlvo::core::preconditioner::Preconditioner;
-        for j in 0..r.ncols() {
-            let rv = linlvo::DenseVec::from_vec(r.column(j).iter().copied().collect());
-            let mut zv = linlvo::DenseVec::zeros(n_nd);
-            ams.apply_precond(&rv, &mut zv);
-            for i in 0..n_nd { z[(i, j)] = zv.as_slice()[i]; }
+    // G_eff: drop boundary H1 columns — PEC φ|Γ=0 makes ∇φ vanish on boundary
+    // edges, so G_eff spans the nullspace of the *eliminated* A (verified:
+    // ||A_elim·G_eff|| ≈ 1e-15).  Mirrors MFEM HypreAMS which builds G from
+    // the FE space with its essential dofs.
+    let h1_bdr = fem_space::constraints::boundary_dofs(
+        &mesh, fec_h1.dof_manager(), &mesh.unique_boundary_tags());
+    let mut grad_eff_coo = fem_linalg::CooMatrix::<f64>::new(n_nd, fec_h1.n_dofs());
+    for r in 0..grad.nrows {
+        for k in grad.row_ptr[r]..grad.row_ptr[r + 1] {
+            let c = grad.col_idx[k] as usize;
+            if h1_bdr.contains(&(c as u32)) { continue; }
+            grad_eff_coo.add(r, c, grad.values[k]);
         }
-        z
-    };
+    }
+    let grad_eff = grad_eff_coo.into_csr();
+    let g_linlvo = fem_linalg::fem_to_linlvo_csr(&grad_eff);
+    let a_linlvo = fem_linalg::fem_to_linlvo_csr(&a_mat);
+    let m_linlvo = fem_linalg::fem_to_linlvo_csr(&m_mat);
 
-    // LOBPCG without explicit gradient constraints (AMS handles nullspace
-    // internally, matching C++ HypreAME behaviour).
-    let eig_result = lobpcg_preconditioned(
-        &a_mat, Some(&m_mat), args.nev, ams_precond,
-        &LobpcgConfig {
-            max_iter: 500, tol: 1e-8, verbose: true,
-            nullspace_skip: 0.0, // no explicit nullspace for AMS
-        },
-    ).expect("LOBPCG solve failed");
+    // 8-9. AME solver (1:1 with C++ HypreAME + HypreAMS):
+    // LOBPCG + inner PCG-AMS preconditioner + discrete divergence-free
+    // projector P = I − G(GᵀMG)⁻¹GᵀM which filters the curl-curl nullspace
+    // (gradient fields) — the same mechanism HYPRE's AME uses with
+    // HypreAMS::SetSingularProblem (cf. MFEM ex32p).
+    use linlvo::eigen::ame::AmeSolver;
+    eprintln!("\nSolving for eigenvalues (EliminateEssentialBCDiag + AME)");
+    eprintln!("  Number of requested eigenmodes: {}", args.nev);
+    let solver = AmeSolver::<f64>::new(args.nev)
+        .tol(1e-8)
+        .max_iter(500)
+        .singularity_regularization(1e-6)
+        .extra(10)
+        .verbose(true);
+    let result = solver.solve(&a_linlvo, &m_linlvo, &g_linlvo).expect("AME solve failed");
 
-    for (i, &lambda) in eig_result.eigenvalues.iter().enumerate() {
+    for (i, &lambda) in result.eigenvalues.iter().enumerate() {
         eprintln!("  Eigenmode H(Curl) {}: lambda = {:.15e}", i + 1, lambda);
     }
-    let n_found = eig_result.eigenvalues.len();
+    let n_found = result.eigenvalues.len();
 
     // Compute curl of each eigenmode via DiscreteLinearOperator.
     let curl_op = DiscreteLinearOperator::curl_3d(&fec_nd, &fec_rt)
@@ -191,8 +188,7 @@ fn main() {
     write_mfem_file_3d("refined.mesh", &mesh).expect("write refined.mesh");
     for i in 0..n_found.min(args.nev) {
         
-        let mode = eig_result.eigenvectors.column(i);
-        let mode_vec: Vec<f64> = mode.iter().copied().collect();
+        let mode_vec: Vec<f64> = result.eigenvectors[i].as_slice().to_vec();
 
         let mut curl_vec = vec![0.0_f64; n_rt];
         

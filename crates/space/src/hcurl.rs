@@ -314,6 +314,31 @@ impl<M: MeshTopology> HCurlSpace<M> {
         })
     }
 
+    /// Physical coordinates of every global DOF (MFEM `GetDofCoords` analog).
+    ///
+    /// For ND1 the DOF sits at the edge midpoint; for NDk (k≥2) at interior
+    /// points along the edge (equispaced — used only as a permutation anchor,
+    /// exact Gauss-Lobatto placement is not required for matching).
+    pub fn dof_coords(&self) -> Vec<[f64; 3]> {
+        let mut out = vec![[0.0f64; 3]; self.n_dofs()];
+        let dim = self.mesh.dim() as usize;
+        let nd = self.order as usize;
+        for (&EdgeKey(a, b), &first) in &self.edge_to_dof {
+            let pa = self.mesh.node_coords(a);
+            let pb = self.mesh.node_coords(b);
+            for m in 0..nd {
+                let t = if nd == 1 { 0.5 } else { (m as f64 + 1.0) / (nd as f64 + 1.0) };
+                let d = (first + m as u32) as usize;
+                for c in 0..3 {
+                    let xa = if c < dim { pa[c] } else { 0.0 };
+                    let xb = if c < dim { pb[c] } else { 0.0 };
+                    out[d][c] = (1.0 - t) * xa + t * xb;
+                }
+            }
+        }
+        out
+    }
+
     /// Number of unique edges in the mesh (== `n_dofs` for ND1).
     pub fn n_edges(&self) -> usize {
         self.edge_to_dof.len()

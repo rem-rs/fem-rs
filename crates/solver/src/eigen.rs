@@ -223,16 +223,21 @@ fn lobpcg_projected(
     assert_eq!(a.ncols, n, "A must be square");
     assert!(k >= 1 && k <= n, "k must be in [1, n]");
 
-    // Constraint basis: Euclidean-orthonormal regardless of B.
-    // When B has extreme diagonal entries (e.g. EliminateEssentialBCDiag
-    // with M[i,i] ≈ 2e-308), B-orthonormalizing constraints would drop
-    // BC DOF constraint vectors (B-norm below 1e-12).  Euclidean
-    // orthogonalization preserves them, and the subsequent project_out
-    // calls also use Euclidean projection for constraints (the search
-    // space itself is B-orthonormalised for Rayleigh-Ritz stability).
+    // Constraint basis (nullspace to project out), B-orthonormalized: with
+    // YᵀBY = I the projection V -= Y (Yᵀ B V) below is the exact B-projection
+    // (scipy's _applyConstraints, V -= Y cho_solve(YᵀBY, BYᵀV)).  The
+    // B-inner product is required: for the generalized problem the nullspace
+    // (λ=0) is B-orthogonal to the sought eigenvectors, while Euclidean
+    // projection leaves nullspace components that pollute the Rayleigh
+    // quotient (Ritz values below the true spectrum → stalling, cf. ex32).
+    // The f64::MIN_POSITIVE diagonal of M at BC DOFs does not poison the
+    // B-orthonormalization: BC components contribute min()·v_bc ≈ 0 to the
+    // B-inner product, so they are ignored while the column span (the full
+    // gradient nullspace, BC components included) is preserved.
     let constraint_basis = constraints
         .map(|c| orthonormal_basis(c.clone(), None))
         .unwrap_or_else(|| DMatrix::<f64>::zeros(n, 0));
+    let constraint_basis = orthonormal_basis(constraint_basis, b);
 
     if constraint_basis.ncols() + k > n {
         return Err(format!(
@@ -274,9 +279,8 @@ fn lobpcg_projected(
             let mut rj = r.column_mut(j);
             rj.axpy(-lj, &bxj, 1.0);
         }
-        // Project residual against Euclidean-orthonormal constraints (Euclidean inner
-        // product — constraints are not B-orthonormal).
-        project_out(&mut r, &constraint_basis, None);
+        // Project residual against the B-orthonormal constraint nullspace.
+        project_out(&mut r, &constraint_basis, b);
 
         // ── 5. Convergence check (zero BC DOFs excluded from residual) ───────
         if let Some(bc) = zero_dofs {
@@ -324,7 +328,7 @@ fn lobpcg_projected(
         };
         // Zero BC DOFs in Z (preconditioner may introduce components there).
         if let Some(bc) = zero_dofs { zero_rows(&mut z, bc); }
-        project_out(&mut z, &constraint_basis, None);
+        project_out(&mut z, &constraint_basis, b);
 
         // ── 7. Update X using local Rayleigh–Ritz in span(X, Z, P) ───────────
         // Build the combined basis W = [X | R | P] (skip P on first iter).
@@ -341,8 +345,8 @@ fn lobpcg_projected(
             w
         };
 
-        // Project out Euclidean constraints, then B-orthonormalise the search space.
-        project_out(&mut w, &constraint_basis, None);
+        // Project out the nullspace constraints (B-projection), then B-orthonormalise.
+        project_out(&mut w, &constraint_basis, b);
         w = orthonormal_basis(w, b);
         if w.ncols() < k {
             return Err("projected LOBPCG trial space lost rank".to_string());
@@ -377,9 +381,9 @@ fn lobpcg_projected(
 
         x = x_new;
         if let Some(bc) = zero_dofs { zero_rows(&mut x, bc); }
-        project_out(&mut x, &constraint_basis, None);
+        project_out(&mut x, &constraint_basis, b);
         if let Some(bc) = zero_dofs { zero_rows(&mut p, bc); }
-        project_out(&mut p, &constraint_basis, None);
+        project_out(&mut p, &constraint_basis, b);
         use_p = true;
 
         // Re-orthonormalise X (B-inner product when B is provided).
@@ -485,10 +489,13 @@ fn random_feasible_orthonormal(
         return Ok(x);
     }
 
-    let oversample = (k + constraints.ncols()).min(n);
+    // Small random block (k+5) is enough: after projecting out the
+    // constraint space (dimension n-constraints ≫ k) the columns stay
+    // independent, so B-orthonormalizing yields k usable vectors.
+    let oversample = (k + 5).min(n);
     for _ in 0..6 {
         let mut x = random_orthonormal(n, oversample);
-        project_out(&mut x, constraints, None);  // Euclidean projection against constraints
+        project_out(&mut x, constraints, b);  // B-projection against constraints
         let basis = orthonormal_basis(x, b);      // B-orthonormalise the search space
         if basis.ncols() >= k {
             return Ok(basis.columns(0, k).into_owned());
@@ -539,6 +546,10 @@ fn project_out(x: &mut DMatrix<f64>, basis: &DMatrix<f64>, b: Option<&CsrMatrix<
         return;
     }
 
+    // B-projection against a B-orthonormal basis (YᵀBY = I): V -= Y (Yᵀ B V).
+    // With B = None this is the Euclidean projection.  B-orthonormalizing the
+    // basis first makes this the exact nullspace projection for generalized
+    // eigenproblems (scipy `_applyConstraints`).
     let coeff = if let Some(bm) = b {
         let bx = spmm(bm, x);
         basis.transpose() * bx

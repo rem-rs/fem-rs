@@ -40,16 +40,17 @@ pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
         let local_faces = local_faces_3d(et);
         for lfv in &local_faces {
             if lfv.iter().any(|&i| i >= verts.len()) { continue; }
-            let sorted: Vec<u32> = {
-                let mut v: Vec<u32> = lfv.iter().map(|&i| verts[i]).collect();
-                v.sort_unstable();
-                v
-            };
-            let key = FaceKey3(sorted.clone());
+            // Keep the ring order of the face (as seen from this element) —
+            // sorting would destroy the cycle order that boundary edge
+            // collection (boundary_dofs_hcurl) relies on.
+            let ring: Vec<u32> = lfv.iter().map(|&i| verts[i]).collect();
+            let mut sorted = ring.clone();
+            sorted.sort_unstable();
+            let key = FaceKey3(sorted);
             face_counts
                 .entry(key)
                 .and_modify(|(cnt, _)| *cnt += 1)
-                .or_insert((1, sorted));
+                .or_insert((1, ring));
         }
     }
 
@@ -60,19 +61,19 @@ pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
     let mut new_face_offsets = Vec::<usize>::new();
     new_face_offsets.push(0);
 
-    for (_, &(count, ref verts)) in &face_counts {
+    for (_, &(count, ref ring)) in &face_counts {
         if count != 1 { continue; }
 
-        let ftype = match verts.len() {
+        let ftype = match ring.len() {
             3 => ElementType::Tri3,
             4 => ElementType::Quad4,
             _ => continue,
         };
 
         // Find best matching parent face by vertex overlap.
-        let tag = find_best_tag(verts, &parent_faces);
+        let tag = find_best_tag(ring, &parent_faces);
 
-        for &v in verts { new_face_conn.push(v); }
+        for &v in ring { new_face_conn.push(v); }
         new_face_tags.push(tag as BoundaryTag);
         new_face_types.push(ftype);
         new_face_offsets.push(new_face_conn.len());

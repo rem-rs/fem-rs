@@ -453,6 +453,40 @@ impl<T: Scalar> CsrMatrix<T> {
         }
     }
 
+    /// MFEM `EliminateRowColDiag` semantics (used by `EliminateEssentialBCDiag`
+    /// for eigenvalue problems): zero **all** off-diagonals of row and column
+    /// `row` (symmetric CSR), and set the diagonal to `diag_val`.
+    ///
+    /// Unlike [`Self::eliminate_essential_bc_diag`] this removes the coupling
+    /// of essential dofs entirely — shifting their eigenvalue to
+    /// `A[row,row]/M[row,row]` (≈1/min() for MFEM's `numeric_limits::min()`
+    /// M-elimination), which is what pushes Dirichlet eigenmodes out of the
+    /// spectral range of interest in ex11/ex12/ex32.
+    pub fn eliminate_essential_bc_diag_symmetric(&mut self, row: usize, diag_val: T) {
+        let start = self.row_ptr[row];
+        let end   = self.row_ptr[row + 1];
+
+        // Zero the column entries A[other,row] (symmetric CSR: A[other,row]
+        // exists iff A[row,other] exists).
+        for k in start..end {
+            let other_row = self.col_idx[k] as usize;
+            if other_row == row { continue; }
+            let a_ij = self.values[k];
+            if a_ij == T::zero() { continue; }
+            if let Some(pos) = self.find_entry(other_row, row) {
+                self.values[pos] = T::zero();
+            }
+        }
+
+        // Zero the entire row, then set the diagonal.
+        for k in start..end {
+            self.values[k] = T::zero();
+        }
+        if let Some(k) = self.find_entry(row, row) {
+            self.values[k] = diag_val;
+        }
+    }
+
     pub fn find_entry(&self, row: usize, col: usize) -> Option<usize> {
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
