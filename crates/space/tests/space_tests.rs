@@ -228,11 +228,12 @@ fn apply_dirichlet_zeros_rhs_at_boundary() {
         );
     }
 
-    // Diagonal at boundary DOFs should be 1 (from row-zeroing).
+    // Diagonal at boundary DOFs: MFEM DIAG_KEEP keeps the assembled diagonal
+    // (row/column zeroed, diagonal NOT set to 1).
     for &d in &bnd {
         assert!(
-            (mat.get(d as usize, d as usize) - 1.0).abs() < 1e-14,
-            "diagonal at boundary DOF {d} should be 1 after Dirichlet"
+            (mat.get(d as usize, d as usize) - 2.0).abs() < 1e-14,
+            "diagonal at boundary DOF {d} should be kept (=2.0) after Dirichlet"
         );
     }
 }

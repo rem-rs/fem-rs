@@ -383,6 +383,10 @@ impl DofManager {
         let dofs_per_elem = 9;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
+        // Phase 1: edge midpoint DOFs (positions 4–7).  MFEM numbers ALL
+        // vertex DOFs, then ALL edge DOFs, then ALL interior (face) DOFs —
+        // do NOT interleave interior DOFs with edge DOFs (that would shift
+        // edge numbering vs MFEM and change the GS-smoother sweep order).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             assert_eq!(ns.len(), 4, "build_q2_quad requires Quad4 elements");
@@ -405,13 +409,20 @@ impl DofManager {
                 });
                 dofs_flat[base + 4 + k] = dof;
             }
-
-            // Interior DOF (position 8) — one per element, unique.
-            dofs_flat[base + 8] = next_dof;
-            next_dof += 1;
         }
 
-        let n_dofs = next_dof as usize;
+        // Phase 2: interior (face) DOFs (position 8) — one per element, all
+        // numbered after every edge DOF, matching MFEM's vertex→edge→face
+        // ordering.
+        let n_edge_dofs = edge_map.len();
+        let mut interior_dof = (n_nodes + n_edge_dofs) as DofId;
+        for e in 0..n_elems as u32 {
+            let base = e as usize * dofs_per_elem;
+            dofs_flat[base + 8] = interior_dof;
+            interior_dof += 1;
+        }
+
+        let n_dofs = interior_dof as usize;
 
         // Build DOF coordinates.
         let mut dof_coords = vec![0.0_f64; n_dofs * dim];

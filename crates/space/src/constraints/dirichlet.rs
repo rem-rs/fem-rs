@@ -28,7 +28,12 @@ pub fn apply_dirichlet(
     assert_eq!(constrained_dofs.len(), values.len(),
         "constrained_dofs and values must have the same length");
     for (&dof, &val) in constrained_dofs.iter().zip(values.iter()) {
-        mat.apply_dirichlet_symmetric(dof as usize, val, rhs);
+        // MFEM 4.9 BilinearForm::FormLinearSystem defaults to diag_policy =
+        // DIAG_KEEP (bilinearform.hpp: diag_policy = DIAG_KEEP): the diagonal
+        // A[i,i] is KEPT and rhs[i] = A[i,i]·val.  DIAG_ONE (diagonal = 1)
+        // gives the same solution in exact arithmetic but a different matrix,
+        // hence a different PCG/GS history (ex33: 2× iteration count).
+        mat.apply_dirichlet_keep_diag(dof as usize, val, rhs);
     }
 }
 

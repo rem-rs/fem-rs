@@ -65,7 +65,7 @@ impl SolverConfig {
             PrintLevel::Summary => linlvo::VerboseLevel::Summary,
             _ => linlvo::VerboseLevel::Iterations,
         };
-        linlvo::SolverParams { rtol: self.rtol, atol: self.atol, max_iter: self.max_iter, verbose: level, check_interval: 10 }
+        linlvo::SolverParams { rtol: self.rtol, atol: self.atol, max_iter: self.max_iter, verbose: level, check_interval: 0 }
     }
 
     pub fn effective_print_level(&self) -> PrintLevel {

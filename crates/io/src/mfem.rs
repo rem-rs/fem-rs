@@ -603,14 +603,52 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
         }
         "quad" => {
-            let n = nx.max(ny);
-            let mut mesh = Mesh::<2>::unit_square_quad(n);
-            let scale_x = sx / n as f64 * nx as f64;
-            let scale_y = sy / n as f64 * ny as f64;
-            for c in mesh.coords.chunks_mut(2) {
-                c[0] *= scale_x;
-                c[1] *= scale_y;
+            // MFEM's INLINE quad mesh uses Hilbert space-filling-curve element
+            // ordering (ReadInlineMesh → Make2D(..., sfc_ordering=true) →
+            // NCMesh::GridSfcOrdering2D), NOT row-major.  The element
+            // numbering must match for bit-identical assembly/GS-sweep order.
+            let nxv = nx + 1;
+            let nyv = ny + 1;
+            let mut coords = Vec::with_capacity(nxv * nyv * 2);
+            for j in 0..nyv {
+                for i in 0..nxv {
+                    coords.push(i as f64 / nx as f64 * sx);
+                    coords.push(j as f64 / ny as f64 * sy);
+                }
             }
+            let mut sfc: Vec<(i32, i32)> = Vec::new();
+            hilbert_sfc_2d(0, 0, nx as i32, 0, 0, ny as i32, &mut sfc);
+            let id = |x: i32, y: i32| (y * nxv as i32 + x) as u32;
+            let mut conn = Vec::with_capacity(sfc.len() * 4);
+            let mut elem_tags = Vec::with_capacity(sfc.len());
+            for &(i, j) in &sfc {
+                conn.extend([id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1)]);
+                elem_tags.push(1);
+            }
+            // Boundary segments (MFEM Make2D): bottom attr 1, right attr 2,
+            // top attr 3, left attr 4 — directions follow MFEM.
+            let mut face_conn = Vec::with_capacity(2 * (nx + ny) * 2);
+            let mut face_tags = Vec::with_capacity(2 * (nx + ny));
+            for i in 0..nx {
+                face_conn.extend([id(i as i32, 0), id(i as i32 + 1, 0)]);
+                face_tags.push(1);
+            }
+            for j in 0..ny {
+                face_conn.extend([id(nx as i32, j as i32), id(nx as i32, j as i32 + 1)]);
+                face_tags.push(2);
+            }
+            for i in 0..nx {
+                face_conn.extend([id(i as i32 + 1, ny as i32), id(i as i32, ny as i32)]);
+                face_tags.push(3);
+            }
+            for j in 0..ny {
+                face_conn.extend([id(0, j as i32 + 1), id(0, j as i32)]);
+                face_tags.push(4);
+            }
+            let mesh = Mesh::uniform(
+                coords, conn, elem_tags, ElementType::Quad4,
+                face_conn, face_tags, ElementType::Line2,
+            );
             Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
         }
         "hex" => {
@@ -642,6 +680,79 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
         other => Err(FemError::Mesh(format!(
             "INLINE mesh: unsupported type '{other}' (supported: tri, quad, hex, tet)"
         ))),
+    }
+}
+
+/// Sign function (MFEM ncmesh.cpp `sgn`).
+fn sfc_sgn(x: i32) -> i32 {
+    if x < 0 { -1 } else if x > 0 { 1 } else { 0 }
+}
+
+/// Hilbert space-filling curve in 2-D — 1:1 port of MFEM's
+/// `NCMesh::HilbertSfc2D` (ncmesh.cpp).  Appends `(x, y)` grid coordinates
+/// in Hilbert-curve order; used by `GridSfcOrdering2D` for INLINE quad meshes.
+fn hilbert_sfc_2d(
+    x: i32, y: i32, ax: i32, ay: i32, bx: i32, by: i32,
+    coords: &mut Vec<(i32, i32)>,
+) {
+    let w = (ax + ay).abs();
+    let h = (bx + by).abs();
+    let dax = sfc_sgn(ax);
+    let day = sfc_sgn(ay);
+    let dbx = sfc_sgn(bx);
+    let dby = sfc_sgn(by);
+
+    if h == 1 {
+        // trivial row fill
+        let (mut x, mut y) = (x, y);
+        for _ in 0..w {
+            coords.push((x, y));
+            x += dax;
+            y += day;
+        }
+        return;
+    }
+    if w == 1 {
+        // trivial column fill
+        let (mut x, mut y) = (x, y);
+        for _ in 0..h {
+            coords.push((x, y));
+            x += dbx;
+            y += dby;
+        }
+        return;
+    }
+
+    let mut ax2 = ax / 2;
+    let mut ay2 = ay / 2;
+    let mut bx2 = bx / 2;
+    let mut by2 = by / 2;
+    let w2 = (ax2 + ay2).abs();
+    let h2 = (bx2 + by2).abs();
+
+    if 2 * w > 3 * h {
+        // long case: split in two parts only
+        if (w2 & 1) != 0 && w > 2 {
+            ax2 += dax;
+            ay2 += day; // prefer even steps
+        }
+        hilbert_sfc_2d(x, y, ax2, ay2, bx, by, coords);
+        hilbert_sfc_2d(x + ax2, y + ay2, ax - ax2, ay - ay2, bx, by, coords);
+    } else {
+        // standard case: one step up, one long horizontal step, one step down
+        if (h2 & 1) != 0 && h > 2 {
+            bx2 += dbx;
+            by2 += dby; // prefer even steps
+        }
+        hilbert_sfc_2d(x, y, bx2, by2, ax2, ay2, coords);
+        hilbert_sfc_2d(x + bx2, y + by2, ax, ay, bx - bx2, by - by2, coords);
+        hilbert_sfc_2d(
+            x + (ax - dax) + (bx2 - dbx),
+            y + (ay - day) + (by2 - dby),
+            -bx2, -by2,
+            -(ax - ax2), -(ay - ay2),
+            coords,
+        );
     }
 }
 

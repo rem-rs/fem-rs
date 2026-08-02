@@ -102,11 +102,15 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
             let m01 = *midpoint_map.get(&edge_key(n0, n1)).unwrap();
             let m12 = *midpoint_map.get(&edge_key(n1, n2)).unwrap();
             let m02 = *midpoint_map.get(&edge_key(n0, n2)).unwrap();
-            // 4 children
+            // MFEM UniformRefinement2D_base (mesh.cpp) child order:
+            //   [v0,e0,e2] corner(n0), [e1,e2,e0] CENTER, [e0,v1,e1] corner(n1),
+            //   [e2,e1,v2] corner(n2)  — the center triangle is child 1, NOT
+            //   last; matching this keeps the refined element numbering (and
+            //   hence the GS-sweep order) bit-identical to MFEM.
             new_conn.extend_from_slice(&[n0,  m01, m02]);  new_tags.push(tag);
+            new_conn.extend_from_slice(&[m12, m02, m01]);  new_tags.push(tag); // center
             new_conn.extend_from_slice(&[m01, n1,  m12]);  new_tags.push(tag);
             new_conn.extend_from_slice(&[m02, m12, n2 ]);  new_tags.push(tag);
-            new_conn.extend_from_slice(&[m01, m12, m02]);  new_tags.push(tag); // inner
         } else {
             // Unchanged element — copy as-is.
             for k in 0..npe { new_conn.push(ns[k]); }

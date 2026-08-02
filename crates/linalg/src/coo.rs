@@ -174,8 +174,12 @@ impl<T: Scalar> CooMatrix<T> {
             merged.push(e);
         }
 
-        // Phase B: sort by (row, insertion_idx) for MFEM-compatible column order.
-        merged.sort_by(|a, b| a.row.cmp(&b.row).then(a.idx.cmp(&b.idx)));
+        // Phase B: sort by (row, DESCENDING insertion_idx) — MFEM's open
+        // SparseMatrix prepends new columns to the per-row linked list
+        // (sparsemat.hpp SearchRow: node->Prev = Rows[row]; Rows[row] = node),
+        // so the finalized CSR column order is the REVERSE of the insertion
+        // order.  Matching this makes GS-smoother sweeps bit-identical.
+        merged.sort_by(|a, b| a.row.cmp(&b.row).then(b.idx.cmp(&a.idx)));
 
         // Build CSR from merged entries.
         let mut out_ptr = vec![0usize; nrows + 1];
@@ -204,7 +208,10 @@ mod tests {
         ca.add(1, 0, 10.0); ca.add(2, 0, 20.0); ca.add(2, 1, 30.0);
         let a = ca.into_csr();
         assert_eq!(a.row_ptr, [0, 0, 1, 3], "A row_ptr");
-        assert_eq!(a.col_idx, [0, 0, 1], "A col_idx");
+        // MFEM open-matrix column order is the REVERSE of insertion order
+        // (head-insert linked list): row 2 was inserted (2,0) then (2,1), so
+        // the finalized column order is [1, 0].
+        assert_eq!(a.col_idx, [0, 1, 0], "A col_idx");
         assert!((a.get(1, 0) - 10.0).abs() < 1e-14);
         assert!((a.get(2, 0) - 20.0).abs() < 1e-14);
         assert!((a.get(2, 1) - 30.0).abs() < 1e-14);

@@ -53,7 +53,9 @@ mod tests {
     fn apply_dirichlet_zero_bc() {
         let (mut mat, mut rhs) = simple_system();
         apply_dirichlet(&mut mat, &mut rhs, &[0], &[0.0]);
-        assert!((mat.get(0, 0) - 1.0).abs() < 1e-14);
+        // MFEM diag_policy = DIAG_KEEP (FormLinearSystem default): the
+        // diagonal A[0,0] is KEPT, rhs[0] = A[0,0]·val = 0.
+        assert!((mat.get(0, 0) - 2.0).abs() < 1e-14);
         assert!((mat.get(0, 1)).abs() < 1e-14);
         assert!((rhs[0]).abs() < 1e-14);
     }
@@ -62,8 +64,9 @@ mod tests {
     fn apply_dirichlet_nonzero_bc() {
         let (mut mat, mut rhs) = simple_system();
         apply_dirichlet(&mut mat, &mut rhs, &[2], &[5.0]);
-        assert!((mat.get(2, 2) - 1.0).abs() < 1e-14);
-        assert!((rhs[2] - 5.0).abs() < 1e-14);
+        // DIAG_KEEP: diagonal kept, rhs[2] = A[2,2]·val = 2·5 = 10.
+        assert!((mat.get(2, 2) - 2.0).abs() < 1e-14);
+        assert!((rhs[2] - 10.0).abs() < 1e-14);
     }
 
     #[test]
