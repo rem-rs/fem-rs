@@ -126,6 +126,9 @@ path = "mfem_ex32_dump.rs"
 name = "mfem_ex33_fractional_laplacian"
 path = "mfem_ex33_fractional_laplacian.rs"
 [[example]]
+name = "mfem_ex33_fractional_diffusion"
+path = "mfem_ex33_fractional_diffusion.rs"
+[[example]]
 name = "mfem_ex34_magnetostatics"
 path = "mfem_ex34_magnetostatics.rs"
 [[example]]

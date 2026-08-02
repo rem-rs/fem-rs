@@ -6,7 +6,7 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
+use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
 use fem_element::{vec_ref_elem, VecFamily, ReferenceElement, VectorReferenceElement};
 use fem_linalg::CsrMatrix;
 use fem_mesh::element_jacobian_at;
@@ -27,8 +27,11 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
+        // Quad4: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — must match the
+        // assembler's reference element (assembler.rs::ref_elem_vol).  The
+        // legacy QuadQ1/Q2/Q3 live on [-1,1]^2 while quadrature rules
+        // (quad_rule_01) live on [0,1]^2 — mixing them gave wrong L2 errors.
+        (ElementType::Quad4, o) => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
@@ -50,7 +53,9 @@ fn simplex_jacobian<M: MeshTopology>(
         // J is a (edim × dim) matrix, but we only need |J₁ × J₂|.
         let x0 = mesh.node_coords(geo_nodes[0]);
         let x1 = mesh.node_coords(geo_nodes[1]);
-        let x2 = mesh.node_coords(geo_nodes[2]);
+        // Quad4 reference axes (0,0),(1,0),(0,1) map to nodes 1 and 3 (CCW);
+        // simplices use node 2 for the second axis.
+        let x2 = mesh.node_coords(geo_nodes[if geo_nodes.len() >= 4 { 3 } else { 2 }]);
         // Edge vectors in 3D
         let mut e1 = [0.0f64; 3]; for i in 0..edim { e1[i] = x1[i] - x0[i]; }
         let mut e2 = [0.0f64; 3]; for i in 0..edim { e2[i] = x2[i] - x0[i]; }
@@ -65,11 +70,19 @@ fn simplex_jacobian<M: MeshTopology>(
         j[(0,0)] = 1.0; j[(1,1)] = 1.0;
         (j, area_2d)
     } else {
-        // Standard flat mesh: dim×dim Jacobian
+        // Standard flat mesh: dim×dim Jacobian.
+        // Reference axes map to physical nodes: Quad4 is CCW
+        // (0,0),(1,0),(1,1),(0,1) so the (0,1) axis is node 3 (not node 2);
+        // Hex8 +x/+y/+z corners are nodes 1/3/4; simplices use nodes 1..dim.
         let x0 = mesh.node_coords(geo_nodes[0]);
+        let axis_nodes: &[usize] = match (dim, geo_nodes.len()) {
+            (2, 4) => &[1, 3],      // Quad4
+            (3, 8) => &[1, 3, 4],   // Hex8
+            _ => &[1, 2, 3],        // Tri3/Tri6 (dim=2), Tet4/Tet10 (dim=3)
+        };
         let mut j = DMatrix::<f64>::zeros(dim, dim);
         for col in 0..dim {
-            let xc = mesh.node_coords(geo_nodes[col + 1]);
+            let xc = mesh.node_coords(geo_nodes[axis_nodes[col]]);
             for row in 0..dim {
                 j[(row, col)] = xc[row] - x0[row];
             }
@@ -412,7 +425,9 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let is_surface = edim != dim;
             let (e1_3d, e2_3d) = if is_surface {
                 let x1 = mesh.node_coords(nodes[1]);
-                let x2 = mesh.node_coords(nodes[2]);
+                // Quad4 CCW: the (0,1) reference axis maps to node 3 (see
+                // simplex_jacobian); simplices use node 2.
+                let x2 = mesh.node_coords(nodes[if nodes.len() >= 4 { 3 } else { 2 }]);
                 let mut e1 = vec![0.0; edim]; for i in 0..edim { e1[i] = x1[i] - x0[i]; }
                 let mut e2 = vec![0.0; edim]; for i in 0..edim { e2[i] = x2[i] - x0[i]; }
                 (e1, e2)
