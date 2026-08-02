@@ -14,7 +14,6 @@
 
 use std::f64::consts::SQRT_2;
 use std::fs::File;
-use std::io::Write;
 
 use fem_assembly::{
     DiscreteLinearOperator, VectorAssembler, ConstantMatrixCoeff,
@@ -22,7 +21,6 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem_file_3d};
 use fem_mesh::Mesh;
-use fem_solver::{lobpcg_essential_bc, LobpcgConfig};
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace,
     constraints::boundary_dofs_hcurl,
@@ -155,7 +153,9 @@ fn main() {
         }
     }
     let grad_eff = grad_eff_coo.into_csr();
-    let g_linlvo = fem_linalg::fem_to_linlvo_csr(&grad_eff);
+    // AMS uses the FULL gradient (like HypreAMS); the AME solver derives the
+    // eliminated G_eff internally (hypre_AMESetup boundary-edge detection).
+    let g_linlvo = fem_linalg::fem_to_linlvo_csr(&grad);
     let a_linlvo = fem_linalg::fem_to_linlvo_csr(&a_mat);
     let m_linlvo = fem_linalg::fem_to_linlvo_csr(&m_mat);
 
@@ -172,11 +172,32 @@ fn main() {
         .max_iter(500)
         .singularity_regularization(1e-6)
         .extra(10)
+        .zero_dofs(ess_bdr_nd.iter().map(|&d| d as usize).collect())
         .verbose(true);
     let result = solver.solve(&a_linlvo, &m_linlvo, &g_linlvo).expect("AME solve failed");
 
+    // Verify the converged eigenvector is divergence-free: ||G_effᵀ M v|| ≈ 0.
+    if let Some(v0) = result.eigenvectors.first() {
+        let grad_eff_t = grad_eff.transpose();
+        let mut mv = vec![0.0_f64; n_nd];
+        for r in 0..n_nd {
+            for k in m_mat.row_ptr[r]..m_mat.row_ptr[r + 1] {
+                mv[r] += m_mat.values[k] * v0.as_slice()[m_mat.col_idx[k] as usize];
+            }
+        }
+        let mut gtmv = vec![0.0_f64; grad_eff_t.nrows];
+        for r in 0..grad_eff_t.nrows {
+            for k in grad_eff_t.row_ptr[r]..grad_eff_t.row_ptr[r + 1] {
+                gtmv[r] += grad_eff_t.values[k] * mv[grad_eff_t.col_idx[k] as usize];
+            }
+        }
+        let gtmv_norm: f64 = gtmv.iter().map(|x| x * x).sum::<f64>().sqrt();
+        eprintln!("DIAG: ||G_effᵀ·M·v0|| = {gtmv_norm:.3e}  (should be ≈ 0 for div-free v)");
+    }
+
     for (i, &lambda) in result.eigenvalues.iter().enumerate() {
-        eprintln!("  Eigenmode H(Curl) {}: lambda = {:.15e}", i + 1, lambda);
+        let res = result.residuals.get(i).copied().unwrap_or(0.0);
+        eprintln!("  Eigenmode H(Curl) {}: lambda = {:.15e}   res = {res:.3e}", i + 1, lambda);
     }
     let n_found = result.eigenvalues.len();
 
