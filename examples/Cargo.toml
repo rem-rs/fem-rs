@@ -147,6 +147,9 @@ path = "dbg_elmat2.rs"
 name = "dbg_prism"
 path = "dbg_prism.rs"
 [[example]]
+name = "dbg_prism2"
+path = "dbg_prism2.rs"
+[[example]]
 name = "mfem_ex34_magnetostatics"
 path = "mfem_ex34_magnetostatics.rs"
 [[example]]

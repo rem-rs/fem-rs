@@ -429,7 +429,24 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let dim     = if is_surface { edim } else { edim }; // surface: 3-component true gradients
     let order   = space.element_order(e);
 
-    let elem_type = mesh.element_type(e);
+    // Mixed meshes (e.g. Tet4 + Prism6): the quadrature rule passed in is
+    // built from the FIRST element type, which is invalid on other element
+    // types (wrong reference domain / weights).  Re-derive the rule from
+    // this element's own reference element whenever the type differs.
+    let elem_type0 = mesh.element_type(0);
+    let elem_type  = mesh.element_type(e);
+    let quad_owned;
+    let quad: &QuadratureRule = if elem_type == elem_type0 {
+        quad
+    } else {
+        let qo = integrators.iter()
+            .filter_map(|i| i.integration_order(order))
+            .next()
+            .unwrap_or(quad.points.len() as u8 / 2);
+        quad_owned = ref_elem_vol(elem_type, order).quadrature(qo);
+        &quad_owned
+    };
+
     let ref_elem  = ref_elem_vol(elem_type, order);
     let n_ldofs   = ref_elem.n_dofs();
 
