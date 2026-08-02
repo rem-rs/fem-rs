@@ -246,6 +246,22 @@ impl VectorReferenceElement for PrismRTk {
     fn n_dofs(&self) -> usize { self.n }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
+        if self.k == 0 {
+            // MFEM RT_WedgeElement(0) tensor product (CalcVShape in
+            // fe_rt.cpp): reference axes are xi = layer, (eta,zeta) = triangle
+            // plane.  DOF order = wedge face order (bottom/top tri, then 3
+            // quads with t_dof = 2D RT0-triangle edges 0,1,2):
+            //   Φ₀(bottom) = (xi−1, 0, 0)     Φ₁(top) = (xi, 0, 0)
+            //   Φ₂ = (0, η, ζ−1)  Φ₃ = (0, η, ζ)  Φ₄ = (0, η−1, ζ)
+            let (a, b, c) = (xi[0], xi[1], xi[2]);
+            values.fill(0.0);
+            values[0] = a - 1.0;
+            values[3] = a;
+            values[7] = b;          values[8]  = c - 1.0;
+            values[10] = b;         values[11] = c;
+            values[13] = b - 1.0;   values[14] = c;
+            return;
+        }
         let mut mv = vec![0.0_f64; self.monos.len()];
         for (j, m) in self.monos.iter().enumerate() {
             mv[j] = eval_mono(m, xi[0], xi[1], xi[2]);
@@ -287,6 +303,16 @@ impl VectorReferenceElement for PrismRTk {
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
+        if self.k == 0 {
+            // div of MFEM wedge RT0: tri dofs (∂/∂xi of (xi±1)) = 1,
+            // quad dofs (∂/∂η + ∂/∂ζ of the 2D RT0 edge) = 1 + 1 = 2.
+            div_vals[0] = 1.0;
+            div_vals[1] = 1.0;
+            div_vals[2] = 2.0;
+            div_vals[3] = 2.0;
+            div_vals[4] = 2.0;
+            return;
+        }
         let h = 1e-6; let n3 = self.n * 3;
         let mut vp = vec![0.0; n3]; let mut vm = vec![0.0; n3];
         for i in 0..self.n {
