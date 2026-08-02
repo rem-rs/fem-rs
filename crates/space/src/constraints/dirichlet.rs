@@ -339,7 +339,24 @@ pub fn boundary_dofs_hdiv<M: fem_mesh::topology::MeshTopology>(
                 }
             } else {
                 if nodes.len() >= 3 {
-                    space.tri_face_dof(FaceKey::new(nodes[0], nodes[1], nodes[2]))
+                    if nodes.len() == 3 {
+                        space.tri_face_dof(FaceKey::new(nodes[0], nodes[1], nodes[2]))
+                    } else {
+                        // Quad face: the HDivSpace quad DOF key uses the
+                        // first 3 vertices of the element-face ring, but the
+                        // boundary ring may start at a different vertex —
+                        // try all 4 triplets of the quad.
+                        let mut found = None;
+                        for (i, j, k) in [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)] {
+                            if let Some(d) =
+                                space.tri_face_dof(FaceKey::new(nodes[i], nodes[j], nodes[k]))
+                            {
+                                found = Some(d);
+                                break;
+                            }
+                        }
+                        found
+                    }
                 } else {
                     None
                 }
