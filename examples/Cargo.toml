@@ -153,6 +153,9 @@ path = "dbg_prism2.rs"
 name = "dbg_prismrt0"
 path = "dbg_prismrt0.rs"
 [[example]]
+name = "dbg_signs"
+path = "dbg_signs.rs"
+[[example]]
 name = "mfem_ex34_magnetostatics"
 path = "mfem_ex34_magnetostatics.rs"
 [[example]]
