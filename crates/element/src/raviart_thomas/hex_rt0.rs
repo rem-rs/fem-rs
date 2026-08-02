@@ -6,13 +6,14 @@
 //! v₀=(-1,-1,-1), v₁=(1,-1,-1), v₂=(1,1,-1), v₃=(-1,1,-1),
 //! v₄=(-1,-1, 1), v₅=(1,-1, 1), v₆=(1,1, 1), v₇=(-1,1, 1).
 //!
-//! Faces with outward unit normals:
+//! Faces with outward unit normals (MFEM CUBE `FaceVert` ordering — bottom,
+//! front, right, back, left, top):
 //! - f₀: z=−1  (bottom),  n̂ = ( 0,  0, −1),  area = 4
-//! - f₁: z= 1  (top),     n̂ = ( 0,  0,  1),  area = 4
-//! - f₂: y=−1  (near),    n̂ = ( 0, −1,  0),  area = 4
-//! - f₃: y= 1  (far),     n̂ = ( 0,  1,  0),  area = 4
+//! - f₁: y=−1  (front),   n̂ = ( 0, −1,  0),  area = 4
+//! - f₂: x= 1  (right),   n̂ = ( 1,  0,  0),  area = 4
+//! - f₃: y= 1  (back),    n̂ = ( 0,  1,  0),  area = 4
 //! - f₄: x=−1  (left),    n̂ = (−1,  0,  0),  area = 4
-//! - f₅: x= 1  (right),   n̂ = ( 1,  0,  0),  area = 4
+//! - f₅: z= 1  (top),     n̂ = ( 0,  0,  1),  area = 4
 //!
 //! # Basis functions
 //!
@@ -20,11 +21,11 @@
 //!
 //! ```text
 //! Φ₀ = (0, 0, (ζ−1)/8)   — face f₀ (z=−1)
-//! Φ₁ = (0, 0, (1+ζ)/8)   — face f₁ (z= 1)
-//! Φ₂ = (0, (η−1)/8, 0)   — face f₂ (y=−1)
+//! Φ₁ = (0, (η−1)/8, 0)   — face f₁ (y=−1)
+//! Φ₂ = ((1+ξ)/8, 0, 0)   — face f₂ (x= 1)
 //! Φ₃ = (0, (1+η)/8, 0)   — face f₃ (y= 1)
 //! Φ₄ = ((ξ−1)/8, 0, 0)   — face f₄ (x=−1)
-//! Φ₅ = ((1+ξ)/8, 0, 0)   — face f₅ (x= 1)
+//! Φ₅ = (0, 0, (1+ζ)/8)   — face f₅ (z= 1)
 //! ```
 //!
 //! Each satisfies `∫_{f_j} Φ_i · n̂_j dS = δ_ij`.
@@ -45,12 +46,13 @@ impl VectorReferenceElement for HexRT0 {
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y, z) = (xi[0], xi[1], xi[2]);
-        values[0] = 0.0; values[1] = 0.0; values[2] = (z - 1.0) / 8.0;
-        values[3] = 0.0; values[4] = 0.0; values[5] = (1.0 + z) / 8.0;
-        values[6] = 0.0; values[7] = (y - 1.0) / 8.0; values[8] = 0.0;
-        values[9] = 0.0; values[10] = (1.0 + y) / 8.0; values[11] = 0.0;
-        values[12] = (x - 1.0) / 8.0; values[13] = 0.0; values[14] = 0.0;
-        values[15] = (1.0 + x) / 8.0; values[16] = 0.0; values[17] = 0.0;
+        // MFEM CUBE FaceVert ordering: bottom, front, right, back, left, top.
+        values[0] = 0.0; values[1] = 0.0; values[2] = (z - 1.0) / 8.0;   // z=−1
+        values[3] = 0.0; values[4] = (y - 1.0) / 8.0; values[5] = 0.0;   // y=−1
+        values[6] = (1.0 + x) / 8.0; values[7] = 0.0; values[8] = 0.0;   // x=+1
+        values[9] = 0.0; values[10] = (1.0 + y) / 8.0; values[11] = 0.0; // y=+1
+        values[12] = (x - 1.0) / 8.0; values[13] = 0.0; values[14] = 0.0; // x=−1
+        values[15] = 0.0; values[16] = 0.0; values[17] = (1.0 + z) / 8.0; // z=+1
     }
 
     fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {
@@ -71,12 +73,12 @@ impl VectorReferenceElement for HexRT0 {
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
-            vec![0.0, 0.0, -1.0],
-            vec![0.0, 0.0, 1.0],
-            vec![0.0, -1.0, 0.0],
-            vec![0.0, 1.0, 0.0],
-            vec![-1.0, 0.0, 0.0],
-            vec![1.0, 0.0, 0.0],
+            vec![0.0, 0.0, -1.0], // z=−1
+            vec![0.0, -1.0, 0.0], // y=−1
+            vec![1.0, 0.0, 0.0],  // x=+1
+            vec![0.0, 1.0, 0.0],  // y=+1
+            vec![-1.0, 0.0, 0.0], // x=−1
+            vec![0.0, 0.0, 1.0],  // z=+1
         ]
     }
 }
@@ -101,12 +103,12 @@ mod tests {
     fn rt0_nodal_basis() {
         let elem = HexRT0;
         let faces: [([f64; 3], f64); 6] = [
-            ([0.0, 0.0, -1.0], 4.0),
-            ([0.0, 0.0, 1.0], 4.0),
-            ([0.0, -1.0, 0.0], 4.0),
-            ([0.0, 1.0, 0.0], 4.0),
-            ([-1.0, 0.0, 0.0], 4.0),
-            ([1.0, 0.0, 0.0], 4.0),
+            ([0.0, 0.0, -1.0], 4.0), // z=−1
+            ([0.0, -1.0, 0.0], 4.0), // y=−1
+            ([1.0, 0.0, 0.0], 4.0),  // x=+1
+            ([0.0, 1.0, 0.0], 4.0),  // y=+1
+            ([-1.0, 0.0, 0.0], 4.0), // x=−1
+            ([0.0, 0.0, 1.0], 4.0),  // z=+1
         ];
 
         let mids = elem.dof_coords();

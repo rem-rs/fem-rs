@@ -1567,35 +1567,36 @@ impl DiscreteLinearOperator {
         let mut coo = CooMatrix::<f64>::new(n_hdiv, n_hcurl);
 
         // Local face / edge tables matching HDivSpace / HCurlSpace.
+        // Face order = MFEM tet FaceVert (canonical, Elem1 orientation).
         let tet_faces: [(usize, usize, usize); 4] = [
-            (1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2),
+            (1, 2, 3), (0, 3, 2), (0, 1, 3), (0, 2, 1),
         ];
         let tet_edges: [(usize, usize); 6] = [
             (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
         ];
-        // Hex8: face order must match HDivSpace::HEX_FACES (hdiv.rs); edge order
-        // must match HCurlSpace::HEX_EDGES (hcurl.rs).
+        // Hex8: face order must match HDivSpace::HEX_FACES (MFEM CUBE FaceVert);
+        // edge order must match HCurlSpace::HEX_EDGES (MFEM CUBE Edges).
         let hex_faces: [[usize; 4]; 6] = [
-            [0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4],
-            [2, 3, 7, 6], [0, 3, 7, 4], [1, 2, 6, 5],
+            [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
+            [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
         ];
         let hex_edges: [(usize, usize); 12] = [
-            (0, 1), (3, 2), (7, 6), (4, 5),
-            (0, 3), (1, 2), (5, 6), (4, 7),
+            (0, 1), (1, 2), (3, 2), (0, 3),
+            (4, 5), (5, 6), (7, 6), (4, 7),
             (0, 4), (1, 5), (2, 6), (3, 7),
         ];
-        // Prism6: faces (2 tri + 3 quad) matching HDivSpace::PRISM_FACES, edges
-        // matching HCurlSpace::PRISM_EDGES / PrismND1.
+        // Prism6: faces matching HDivSpace::PRISM_FACES_CANON (MFEM PRISM
+        // FaceVert), edges matching HCurlSpace::PRISM_EDGES (MFEM PRISM Edges).
         let prism_faces: [[usize; 4]; 5] = [
-            [0, 1, 2, 2], // bottom tri
-            [3, 4, 5, 5], // top tri
+            [0, 2, 1, 0], // bottom tri
+            [3, 4, 5, 0], // top tri
             [0, 1, 4, 3], // quad 0
             [1, 2, 5, 4], // quad 1
-            [0, 2, 5, 3], // quad 2
+            [2, 0, 3, 5], // quad 2
         ];
         let prism_edges: [(usize, usize); 9] = [
-            (0, 1), (0, 2), (1, 2), // bottom triangle
-            (3, 4), (3, 5), (4, 5), // top triangle
+            (0, 1), (1, 2), (2, 0), // bottom triangle
+            (3, 4), (4, 5), (5, 3), // top triangle
             (0, 3), (1, 4), (2, 5), // vertical
         ];
 
@@ -1616,16 +1617,17 @@ impl DiscreteLinearOperator {
                             continue;
                         }
 
-                        // Global vertices of this face, sorted → canonical orientation.
-                        let mut fv = [verts[la], verts[lb], verts[lc]];
-                        fv.sort_unstable();
-
-                        // Boundary traversal fv[0]→fv[1]→fv[2]→fv[0] (right-hand
-                        // rule with the global face normal (p1−p0)×(p2−p0)).
+                        // Boundary traversal a→b→c→a along the canonical (Elem1)
+                        // face orientation — normal (p_b−p_a)×(p_c−p_a) — matching
+                        // HDivSpace's RT face orientation so div∘curl = 0 with the
+                        // RT signs.  Each boundary edge's sign accounts for the
+                        // HCurl DOF direction (min→max vertex id).
+                        let a = verts[la]; let b = verts[lb]; let c = verts[lc];
+                        let sgn = |x: u32, y: u32| if x < y { 1.0 } else { -1.0 };
                         let face_boundary: [(u32, u32, f64); 3] = [
-                            (fv[0], fv[1],  1.0),
-                            (fv[1], fv[2],  1.0),
-                            (fv[0], fv[2], -1.0),
+                            (a, b, sgn(a, b)),
+                            (b, c, sgn(b, c)),
+                            (a, c, -sgn(a, c)), // c→a contributes +sgn(c,a)
                         ];
 
                         for (gv0, gv1, stokes_sign) in face_boundary {
@@ -1663,13 +1665,9 @@ impl DiscreteLinearOperator {
                     }
                 }
                 ElementType::Prism6 => {
-                    // Prism faces: [0,1,2],[3,4,5] triangles + [0,1,4,3],
-                    // [1,2,5,4],[0,2,5,3] quads (HDivSpace::PRISM_FACES); edges
-                    // HCurlSpace::PRISM_EDGES.
-                    // RT face DOFs are oriented by FaceKey (ascending first-3
-                    // vertices) → face normal n = (s1-s0)×(s2-s0).  The local
-                    // ring is flipped when its Newell normal opposes n so the
-                    // Stokes cycle is right-handed w.r.t. the RT orientation.
+                    // Canonical (Elem1) face orientation = MFEM PRISM FaceVert;
+                    // the ring direction already gives the canonical face normal
+                    // (no Newell flip needed — matches HDivSpace's RT sign).
                     for (face_local, face_verts) in prism_faces.iter().enumerate() {
                         let face_dof = hdiv_dofs[face_local] as usize;
                         if !visited.insert(face_dof) {
@@ -1677,30 +1675,8 @@ impl DiscreteLinearOperator {
                         }
                         let nv = if face_verts[2] == face_verts[3] { 3 } else { 4 };
                         let gv: Vec<u32> = face_verts[..nv].iter().map(|&li| verts[li]).collect();
-                        let mut s = [gv[0], gv[1], gv[2]];
-                        s.sort_unstable();
-                        let c0 = mesh.node_coords(s[0]);
-                        let c1 = mesh.node_coords(s[1]);
-                        let c2 = mesh.node_coords(s[2]);
-                        let nx = (c1[1]-c0[1])*(c2[2]-c0[2]) - (c1[2]-c0[2])*(c2[1]-c0[1]);
-                        let ny = (c1[2]-c0[2])*(c2[0]-c0[0]) - (c1[0]-c0[0])*(c2[2]-c0[2]);
-                        let nz = (c1[0]-c0[0])*(c2[1]-c0[1]) - (c1[1]-c0[1])*(c2[0]-c0[0]);
-                        let mut pn = [0.0_f64; 3];
                         for k in 0..nv {
-                            let p = mesh.node_coords(gv[k]);
-                            let q = mesh.node_coords(gv[(k + 1) % nv]);
-                            pn[0] += (p[1]-q[1])*(p[2]+q[2]);
-                            pn[1] += (p[2]-q[2])*(p[0]+q[0]);
-                            pn[2] += (p[0]-q[0])*(p[1]+q[1]);
-                        }
-                        let flip = nx*pn[0] + ny*pn[1] + nz*pn[2] < 0.0;
-                        let ring: Vec<u32> = if flip {
-                            gv.iter().rev().copied().collect()
-                        } else {
-                            gv
-                        };
-                        for k in 0..nv {
-                            let (a, b) = (ring[k], ring[(k + 1) % nv]);
+                            let (a, b) = (gv[k], gv[(k + 1) % nv]);
                             let stokes_sign = if a < b { 1.0 } else { -1.0 };
                             let edge_idx = prism_edges.iter().position(|&(li, lj)| {
                                 let (gi, gj) = (verts[li], verts[lj]);

@@ -627,32 +627,54 @@ where
         let mut j_inv_t = nalgebra::DMatrix::<f64>::identity(dim, dim);
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let (w, xp) = if use_iso {
+            let (w, det_j, xp) = if use_iso {
                 let ge = geo_elem.as_ref().expect("geo_ref_elem");
                 let (jac, det_j, x) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
                 j_inv_t = jac.clone().try_inverse().expect("invertible Jacobian").transpose();
-                (quad.weights[q] * det_j, x)
+                (quad.weights[q] * det_j.abs(), det_j, x)
             } else {
                 let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
                 j_inv_t = tr.jacobian_inv_t().clone();
-                (quad.weights[q] * tr.det_j().abs(), tr.map_to_physical(xi))
+                (quad.weights[q] * tr.det_j().abs(), tr.det_j(), tr.map_to_physical(xi))
             };
             ref_r.eval_basis(xi, &mut phi_r);
             ref_r.eval_grad_basis(xi, &mut grad_r);
             transform_grads(&j_inv_t, &grad_r, &mut grad_phys, n_r, dim);
             ref_c.eval_basis_vec(xi, &mut vec_col);
+            // Piola-transform the HDiv trial shapes (MFEM CalcTestShape uses
+            // the Piola map for RT elements):  w = (1/det J) J ŵ.
+            // Together with the |det J| quadrature weight this yields
+            // ∫ ∇φ·w = Σ w_q · sign(det J) · ∇φ̂·ŵ, i.e. the reference-domain
+            // integral — the geometric factors cancel, matching MFEM.
+            let jac = j_inv_t.clone().try_inverse().map(|m| m.transpose())
+                .unwrap_or_else(|| nalgebra::DMatrix::identity(dim, dim));
+            let mut vec_col_piola = vec![0.0; n_c * dim];
+            for i in 0..n_c {
+                for r in 0..dim {
+                    let mut acc = 0.0;
+                    for c in 0..dim {
+                        acc += jac[(r, c)] * vec_col[i * dim + c];
+                    }
+                    vec_col_piola[i * dim + r] = acc / det_j;
+                }
+            }
             let qp_r = QpData {
                 n_dofs: n_elem_r, dim, weight: w, phi: &phi_r,
                 grad_phys: &grad_phys,
                 x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None,
             };
             for integ in integrators {
-                integ.add_to_element_matrix(&qp_r, &vec_col, dim, &mut m_elem);
+                integ.add_to_element_matrix(&qp_r, &vec_col_piola, dim, &mut m_elem);
             }
         }
+        // HDiv column signs: MFEM encodes the RT face-orientation sign into
+        // the (possibly negative) column vdofs, so the assembled entries must
+        // be scaled by the column sign (row = H¹ is unsigned).
+        let col_signs = col_space.element_signs(e);
         for (ir, &gr) in global_rows.iter().enumerate() {
             for (ic, &gc) in global_cols.iter().enumerate() {
-                coo.add(gr, gc, m_elem[ir * n_elem_c + ic]);
+                let sc = col_signs.and_then(|s| s.get(ic)).copied().unwrap_or(1.0);
+                coo.add(gr, gc, sc * m_elem[ir * n_elem_c + ic]);
             }
         }
     }

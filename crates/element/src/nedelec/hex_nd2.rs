@@ -29,9 +29,11 @@ impl VectorReferenceElement for HexND2 {
         }
 
         for e in 0..12 {
+            // MFEM CUBE Edges ordering: e0,e2,e4,e6 = x-edges; e1,e3,e5,e7 =
+            // y-edges; e8..e11 = z-edges.
             let (s0, s1) = match e {
-                0..=3 => (0.5 * (1.0 - x), 0.5 * (1.0 + x)),
-                4..=7 => (0.5 * (1.0 - y), 0.5 * (1.0 + y)),
+                0 | 2 | 4 | 6 => (0.5 * (1.0 - x), 0.5 * (1.0 + x)),
+                1 | 3 | 5 | 7 => (0.5 * (1.0 - y), 0.5 * (1.0 + y)),
                 _ => (0.5 * (1.0 - z), 0.5 * (1.0 + z)),
             };
             for d in 0..3 {
@@ -54,9 +56,11 @@ impl VectorReferenceElement for HexND2 {
         }
 
         for e in 0..12 {
+            // MFEM CUBE Edges ordering: e0,e2,e4,e6 = x-edges; e1,e3,e5,e7 =
+            // y-edges; e8..e11 = z-edges.
             let (s0, s1) = match e {
-                0..=3 => (0.5 * (1.0 - x), 0.5 * (1.0 + x)),
-                4..=7 => (0.5 * (1.0 - y), 0.5 * (1.0 + y)),
+                0 | 2 | 4 | 6 => (0.5 * (1.0 - x), 0.5 * (1.0 + x)),
+                1 | 3 | 5 | 7 => (0.5 * (1.0 - y), 0.5 * (1.0 + y)),
                 _ => (0.5 * (1.0 - z), 0.5 * (1.0 + z)),
             };
             for d in 0..3 {

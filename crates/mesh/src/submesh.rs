@@ -212,15 +212,26 @@ impl SubMesh3D {
         n_parent_dofs: usize,
         sub_elem_dofs: &impl Fn(u32) -> Vec<u32>,
         par_elem_dofs: &impl Fn(u32) -> Vec<u32>,
+        sub_elem_signs: &impl Fn(u32) -> Vec<f64>,
+        par_elem_signs: &impl Fn(u32) -> Vec<f64>,
     ) -> Vec<f64> {
         let mut out = vec![0.0_f64; n_parent_dofs];
         let mut cnt = vec![0usize; n_parent_dofs];
         for (si, &pe) in self.parent_elem_ids.iter().enumerate() {
             let sub_edofs = sub_elem_dofs(si as u32);
             let par_edofs = par_elem_dofs(pe);
-            for (&sd, &pd) in sub_edofs.iter().zip(par_edofs.iter()) {
-                let pd = pd as usize;
-                out[pd] += sub_dofs[sd as usize];
+            let sub_signs = sub_elem_signs(si as u32);
+            let par_signs = par_elem_signs(pe);
+            for k in 0..sub_edofs.len().min(par_edofs.len()) {
+                let sd = sub_edofs[k] as usize;
+                let pd = par_edofs[k] as usize;
+                // MFEM SubMeshUtils::BuildVdofToVdofMap: the sub-domain and
+                // parent-domain FE spaces may use different canonical face
+                // orientations, so the transfered value must be sign-flipped
+                // when the element-local orientations disagree.
+                let ss = sub_signs.get(k).copied().unwrap_or(1.0);
+                let sp = par_signs.get(k).copied().unwrap_or(1.0);
+                out[pd] += sp * ss * sub_dofs[sd];
                 cnt[pd] += 1;
             }
         }

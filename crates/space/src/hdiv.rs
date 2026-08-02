@@ -49,15 +49,23 @@ const TET_FACES: [(usize, usize, usize); 4] = [
 ];
 
 /// Local face definitions for 3-D hexahedra (HexRT0 ordering).
-/// Convention: (z=-1, z=1, y=-1, y=1, x=-1, x=1).
-/// Each face is a 4-sided quadrilateral (vᵢ,vⱼ,vₖ,vₗ).
+///
+/// Ordering = MFEM `Geometry::Constants<Geometry::CUBE>::FaceVert` (bottom,
+/// front, right, back, left, top) so that face numbering and the RT0 basis
+/// ordering match MFEM bit-for-bit:
+/// - 0: {3,2,1,0}  z=−1 (bottom)
+/// - 1: {0,1,5,4}  y=−1 (front)
+/// - 2: {1,2,6,5}  x=+1 (right)
+/// - 3: {2,3,7,6}  y=+1 (back)
+/// - 4: {3,0,4,7}  x=−1 (left)
+/// - 5: {4,5,6,7}  z=+1 (top)
 const HEX_FACES: [[usize; 4]; 6] = [
-    [0, 1, 2, 3], // z=-1 (bottom)
-    [4, 5, 6, 7], // z= 1 (top)
+    [3, 2, 1, 0], // z=-1 (bottom)
     [0, 1, 5, 4], // y=-1 (front)
-    [2, 3, 7, 6], // y= 1 (back)
-    [0, 3, 7, 4], // x=-1 (left)
-    [1, 2, 6, 5], // x= 1 (right)
+    [1, 2, 6, 5], // x=+1 (right)
+    [2, 3, 7, 6], // y=+1 (back)
+    [3, 0, 4, 7], // x=-1 (left)
+    [4, 5, 6, 7], // z=+1 (top)
 ];
 
 /// Prism faces: 2 tri + 3 quad; ordered for RT DOF mapping.
@@ -79,6 +87,84 @@ const PYRAMID_FACES: [[usize; 4]; 5] = [
     [3, 0, 4, 4],    // tri face (apex)
     [0, 1, 2, 3],    // base quad
 ];
+
+// ─── MFEM canonical face orientation tables ─────────────────────────────────
+//
+// These mirror `Geometry::Constants<...>::FaceVert` in MFEM's fem/geom.cpp.
+// MFEM's canonical face orientation is the local-face vertex ordering of the
+// first element that owns the face (Elem1, orientation 0).  The RT
+// DofTransformation sign for an element-face pair is obtained by comparing
+// the element's local face ordering against this canonical ordering via
+// `Mesh::GetTriOrientation` / `Mesh::GetQuadOrientation` and taking the
+// parity of the orientation: `RT_FECollection::DofOrderForOrientation`
+// returns a sign flip for every odd orientation (for all RT orders).
+
+/// MFEM `Constants<Geometry::TETRAHEDRON>::FaceVert` (canonical ordering).
+const TET_FACES_CANON: [[usize; 3]; 4] = [
+    [1, 2, 3], // opposite v₀
+    [0, 3, 2], // opposite v₁
+    [0, 1, 3], // opposite v₂
+    [0, 2, 1], // opposite v₃
+];
+
+/// MFEM `Constants<Geometry::PRISM>::FaceVert` (tri faces padded with a dummy 4th).
+const PRISM_FACES_CANON: [[usize; 4]; 5] = [
+    [0, 2, 1, 0], // bottom (tri)
+    [3, 4, 5, 0], // top (tri)
+    [0, 1, 4, 3], // quad 0 (front)
+    [1, 2, 5, 4], // quad 1 (right)
+    [2, 0, 3, 5], // quad 2 (left)
+];
+
+/// MFEM `Constants<Geometry::PYRAMID>::FaceVert` (tri faces padded).
+/// Rust [`PYRAMID_FACES`] lists 4 tri faces first, then the base quad; MFEM
+/// lists the base quad first.  Maps Rust face index → MFEM face index.
+const PYRAMID_FACES_CANON: [[usize; 4]; 5] = [
+    [3, 2, 1, 0], // base quad
+    [0, 1, 4, 0], // tri (apex)
+    [1, 2, 4, 0], // tri (apex)
+    [2, 3, 4, 0], // tri (apex)
+    [3, 0, 4, 0], // tri (apex)
+];
+const PYRAMID_MFEM_FACE_IDX: [usize; 5] = [1, 2, 3, 4, 0];
+
+/// Canonical (Elem1) ordering of a face, tracked per `FaceKey` while building.
+#[derive(Clone, Copy)]
+enum FaceCanon {
+    Tri([u32; 3]),
+    Quad([u32; 4]),
+}
+
+/// MFEM `Mesh::GetTriOrientation(base, test)`: index of the permutation that
+/// transforms `test` into `base` (`test[tri_orientation[j][i]] == base[i]`).
+/// Orientations 1, 3, 5 are odd permutations (flip).
+fn tri_orientation(base: [u32; 3], test: [u32; 3]) -> usize {
+    if test[0] == base[0] {
+        if test[1] == base[1] { 0 } else { 5 }
+    } else if test[0] == base[1] {
+        if test[1] == base[0] { 1 } else { 2 }
+    } else {
+        // test[0] == base[2]
+        if test[1] == base[0] { 4 } else { 3 }
+    }
+}
+
+/// MFEM `Mesh::GetQuadOrientation(base, test)` → orientation in 0..=7.
+/// Odd orientations are flips.
+fn quad_orientation(base: [u32; 4], test: [u32; 4]) -> usize {
+    let mut i = 0;
+    while test[i] != base[0] {
+        i += 1;
+    }
+    if test[(i + 1) % 4] == base[1] { 2 * i } else { 2 * i + 1 }
+}
+
+/// RT `DofOrderForOrientation`: odd orientation flips the sign of the face DOFs
+/// (for all RT orders — `RT_FECollection::InitFaces` puts a `-1-` prefix on
+/// every odd-orientation row of `TriDofOrd`/`QuadDofOrd`).
+fn rt_face_sign(orientation: usize) -> f64 {
+    if orientation % 2 == 1 { -1.0 } else { 1.0 }
+}
 
 // ─── Face DOF map ───────────────────────────────────────────────────────────
 
@@ -209,6 +295,9 @@ impl<M: MeshTopology> HDivSpace<M> {
         let dofs_per_face = (order as usize) + 1;
         let n_elem = mesh.n_elements();
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        // Tracks the MFEM canonical (Elem1) vertex ordering of each face so
+        // that element-face RT signs can be computed topologically.
+        let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::new();
         let mut signs_flat = Vec::new();
@@ -223,32 +312,48 @@ impl<M: MeshTopology> HDivSpace<M> {
             match et {
                 ElementType::Tet4 | ElementType::Tet10 => {
                     let interior = if order == 0 { 0 } else if order == 1 { 2 } else { 6 };
-                    for &(la, lb, lc) in &TET_FACES {
-                        let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                    for lf in 0..4 {
+                        // Canonical ordering = MFEM tet FaceVert (not the
+                        // simple opposite-vertex triple used for the key).
+                        let [la, lb, lc] = TET_FACES_CANON[lf];
+                        let local = [verts[la], verts[lb], verts[lc]];
+                        let key = FaceKey::new(local[0], local[1], local[2]);
+                        let sign = match face_canon.get(&key) {
+                            Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
+                            _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                        };
                         if nd == 1 {
                             dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
-                            signs_flat.push(1.0);
+                            signs_flat.push(sign);
                         } else {
                             let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
-                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(1.0); }
+                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(sign); }
                         }
                     }
                     for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
                 }
                 ElementType::Hex8 => {
                     let interior = if order == 0 { 0 } else { 12 };
-                    for fv in &HEX_FACES {
+                    for (hf, &fv) in HEX_FACES.iter().enumerate() {
                         // canonical key from all 4 sorted vertices (shared
                         // quad faces must map to one DOF)
                         let mut v4 = [verts[fv[0]], verts[fv[1]], verts[fv[2]], verts[fv[3]]];
                         v4.sort_unstable();
                         let key = FaceKey::new(v4[0], v4[1], v4[2]);
+                        // Canonical ordering = MFEM hex FaceVert (HEX_FACES
+                        // already follows that ordering).
+                        let c = HEX_FACES[hf];
+                        let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
+                        let sign = match face_canon.get(&key) {
+                            Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
+                            _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                        };
                         if nd == 1 {
                             dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
-                            signs_flat.push(1.0);
+                            signs_flat.push(sign);
                         } else {
                             let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
-                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(1.0); }
+                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(sign); }
                         }
                     }
                     for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
@@ -266,12 +371,27 @@ impl<M: MeshTopology> HDivSpace<M> {
                             v4.sort_unstable();
                             FaceKey::new(v4[0], v4[1], v4[2])
                         };
+                        // Canonical ordering = MFEM prism FaceVert.
+                        let c = PRISM_FACES_CANON[i];
+                        let sign = if fv[2] == fv[3] {
+                            let local = [verts[c[0]], verts[c[1]], verts[c[2]]];
+                            match face_canon.get(&key) {
+                                Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
+                                _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                            }
+                        } else {
+                            let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
+                            match face_canon.get(&key) {
+                                Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
+                                _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                            }
+                        };
                         if nd == 1 {
                             dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
-                            signs_flat.push(1.0);
+                            signs_flat.push(sign);
                         } else {
                             let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
-                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(1.0); }
+                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(sign); }
                         }
                     }
                     for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
@@ -440,16 +560,22 @@ impl<M: MeshTopology> HDivSpace<M> {
         let n_elem = mesh.n_elements();
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
 
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
-            for (face_idx, &(la, lb, lc)) in TET_FACES.iter().enumerate() {
-                let (ga, gb, gc) = (verts[la], verts[lb], verts[lc]);
-                let key = FaceKey::new(ga, gb, gc);
-                let sign = Self::compute_sign_3d_tet(&mesh, verts, face_idx, &key);
+            for lf in 0..4 {
+                // Canonical ordering = MFEM tet FaceVert.
+                let [la, lb, lc] = TET_FACES_CANON[lf];
+                let local = [verts[la], verts[lb], verts[lc]];
+                let key = FaceKey::new(local[0], local[1], local[2]);
+                let sign = match face_canon.get(&key) {
+                    Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
+                    _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                };
 
                 if dofs_per_face == 1 {
                     let dof = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=1; d });
@@ -481,49 +607,6 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_type: ElementType::Tet4,
             is_bdm,
         }
-    }
-
-    /// Compute the orientation sign for a 3-D face (triangle).
-    ///
-    /// The global face normal is defined by the cross product of edges
-    /// of the sorted vertex triple.  The local outward normal points
-    /// away from the opposite vertex.  Sign = +1 if they agree.
-    fn compute_sign_3d_tet(mesh: &M, verts: &[u32], face_idx: usize, key: &FaceKey) -> f64 {
-        let p0 = mesh.node_coords(key.0);
-        let p1 = mesh.node_coords(key.1);
-        let p2 = mesh.node_coords(key.2);
-
-        // Global face normal: (p1−p0) × (p2−p0)
-        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-        let n_global = [
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0],
-        ];
-
-        // The outward direction is away from the opposite vertex.
-        let opp_local = face_idx;
-        let opp_global = verts[opp_local];
-        let po = mesh.node_coords(opp_global);
-
-        let centroid = [
-            (p0[0] + p1[0] + p2[0]) / 3.0,
-            (p0[1] + p1[1] + p2[1]) / 3.0,
-            (p0[2] + p1[2] + p2[2]) / 3.0,
-        ];
-        // outward = centroid − opposite_vertex
-        let outward = [
-            centroid[0] - po[0],
-            centroid[1] - po[1],
-            centroid[2] - po[2],
-        ];
-
-        let dot = n_global[0] * outward[0]
-            + n_global[1] * outward[1]
-            + n_global[2] * outward[2];
-
-        if dot > 0.0 { 1.0 } else { -1.0 }
     }
 
     // ─── 2-D quadrilateral construction ───────────────────────────────────
@@ -637,13 +720,14 @@ impl<M: MeshTopology> HDivSpace<M> {
         let n_elem = mesh.n_elements();
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
 
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
-            for face_verts in &HEX_FACES {
+            for (hf, face_verts) in HEX_FACES.iter().enumerate() {
                 let (a, b, c, d) = (
                     verts[face_verts[0]],
                     verts[face_verts[1]],
@@ -659,7 +743,14 @@ impl<M: MeshTopology> HDivSpace<M> {
                     v4.sort_unstable();
                     FaceKey::new(v4[0], v4[1], v4[2])
                 };
-                let sign = Self::compute_sign_3d_hex(&mesh, verts, a, b, c, d);
+                // Canonical ordering = MFEM hex FaceVert (HEX_FACES already
+                // follows that ordering).
+                let c = HEX_FACES[hf];
+                let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
+                let sign = match face_canon.get(&key) {
+                    Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
+                    _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                };
 
                 if dofs_per_face == 1 {
                     let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
@@ -709,13 +800,15 @@ impl<M: MeshTopology> HDivSpace<M> {
         let n_elem = mesh.n_elements();
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
 
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
-            for face_verts in &PRISM_FACES {
+            for i in 0..5 {
+                let face_verts = &PRISM_FACES[i];
                 let a = verts[face_verts[0]];
                 let b = verts[face_verts[1]];
                 let c = verts[face_verts[2]];
@@ -729,10 +822,25 @@ impl<M: MeshTopology> HDivSpace<M> {
                     v4.sort_unstable();
                     FaceKey::new(v4[0], v4[1], v4[2])
                 };
+                // Canonical ordering = MFEM prism FaceVert.
+                let cf = PRISM_FACES_CANON[i];
+                let sign = if face_verts[2] == face_verts[3] {
+                    let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]]];
+                    match face_canon.get(&key) {
+                        Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
+                        _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                    }
+                } else {
+                    let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]], verts[cf[3]]];
+                    match face_canon.get(&key) {
+                        Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
+                        _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                    }
+                };
                 if dofs_per_face == 1 {
                     let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
                     dofs_flat.push(dof);
-                    signs_flat.push(1.0);
+                    signs_flat.push(sign);
                 } else {
                     let nd = dofs_per_face as u32;
                     let first = *face_map.entry(key).or_insert_with(|| {
@@ -740,7 +848,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                     });
                     for k in 0..dofs_per_face {
                         dofs_flat.push(first + k as u32);
-                        signs_flat.push(1.0);
+                        signs_flat.push(sign);
                     }
                 }
             }
@@ -774,21 +882,39 @@ impl<M: MeshTopology> HDivSpace<M> {
         let n_elem = mesh.n_elements();
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
 
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
-            for face_verts in &PYRAMID_FACES {
+            for i in 0..5 {
+                let face_verts = &PYRAMID_FACES[i];
                 let a = verts[face_verts[0]];
                 let b = verts[face_verts[1]];
                 let c = verts[face_verts[2]];
                 let key = FaceKey::new(a, b, c);
+                // Canonical ordering = MFEM pyramid FaceVert (Rust lists the 4
+                // tri faces first, then the base quad).
+                let cf = PYRAMID_FACES_CANON[PYRAMID_MFEM_FACE_IDX[i]];
+                let sign = if face_verts[2] == face_verts[3] {
+                    let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]]];
+                    match face_canon.get(&key) {
+                        Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
+                        _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                    }
+                } else {
+                    let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]], verts[cf[3]]];
+                    match face_canon.get(&key) {
+                        Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
+                        _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                    }
+                };
                 if dofs_per_face == 1 {
                     let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
                     dofs_flat.push(dof);
-                    signs_flat.push(1.0);
+                    signs_flat.push(sign);
                 } else {
                     let nd = dofs_per_face as u32;
                     let first = *face_map.entry(key).or_insert_with(|| {
@@ -796,7 +922,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                     });
                     for k in 0..dofs_per_face {
                         dofs_flat.push(first + k as u32);
-                        signs_flat.push(1.0);
+                        signs_flat.push(sign);
                     }
                 }
             }
@@ -819,42 +945,6 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_type: ElementType::Pyramid5,
             is_bdm: false,
         }
-    }
-
-    /// Compute the orientation sign for a 3-D hex face (quadrilateral).
-    fn compute_sign_3d_hex(mesh: &M, verts: &[u32], a: u32, b: u32, c: u32, d: u32) -> f64 {
-        let pa = mesh.node_coords(a);
-        let pb = mesh.node_coords(b);
-        let pc = mesh.node_coords(c);
-        let pd = mesh.node_coords(d);
-
-        // Face centroid
-        let cx_f = (pa[0] + pb[0] + pc[0] + pd[0]) / 4.0;
-        let cy_f = (pa[1] + pb[1] + pc[1] + pd[1]) / 4.0;
-        let cz_f = (pa[2] + pb[2] + pc[2] + pd[2]) / 4.0;
-
-        // Element centroid
-        let mut cx_e = 0.0; let mut cy_e = 0.0; let mut cz_e = 0.0;
-        for &v in verts {
-            let p = mesh.node_coords(v);
-            cx_e += p[0]; cy_e += p[1]; cz_e += p[2];
-        }
-        let nv = verts.len() as f64;
-        cx_e /= nv; cy_e /= nv; cz_e /= nv;
-
-        // Face normal via first triangle (a,b,c)
-        let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
-        let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-        let n_global = [
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0],
-        ];
-
-        // outward = face_centroid → element_centroid
-        let outward = [cx_e - cx_f, cy_e - cy_f, cz_e - cz_f];
-        let dot = n_global[0] * outward[0] + n_global[1] * outward[1] + n_global[2] * outward[2];
-        if dot > 0.0 { 1.0 } else { -1.0 }
     }
 
     // ─── Public API ─────────────────────────────────────────────────────────

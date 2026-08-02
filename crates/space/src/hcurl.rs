@@ -11,11 +11,12 @@
 //!
 //! ## Sign convention
 //!
-//! A global edge orientation is defined as "from smaller to larger vertex
-//! index."  When a local edge traverses vertices in this same direction the
-//! sign is +1; otherwise the sign is −1.  The assembler multiplies each
-//! basis-function value by its sign to guarantee tangential continuity
-//! across elements.
+//! The canonical orientation of an edge is from the smaller to the larger
+//! vertex id — mirroring MFEM's `DSTable`-based `GetElementToEdgeTable`, whose
+//! `Push(a,b)` stores every edge as (min, max).  A local edge traversing the
+//! vertices in this direction has sign +1; otherwise −1.  The assembler
+//! multiplies each basis-function value by its sign to guarantee tangential
+//! continuity across elements.
 
 use std::collections::HashMap;
 
@@ -43,21 +44,23 @@ const TET_EDGES: [(usize, usize); 6] = [
 
 /// Local edge vertex pairs for 3-D hexahedra (Hex8 ordering).
 ///
-/// Ordering MUST match the HexNDk basis function ordering:
-///   edges 0..3:  x-edges (bottom-front, bottom-back, top-back, top-front)
-///   edges 4..7:  y-edges (left-front, right-front, right-back, left-back)
-///   edges 8..11: z-edges (left-front, right-front, right-back, left-back)
+/// Ordering = MFEM `Geometry::Constants<Geometry::CUBE>::Edges` so that edge
+/// numbering and the HexND1 basis ordering match MFEM bit-for-bit:
+///   (0,1),(1,2),(3,2),(0,3),(4,5),(5,6),(7,6),(4,7),(0,4),(1,5),(2,6),(3,7)
 const HEX_EDGES: [(usize, usize); 12] = [
-    (0, 1), (3, 2), (7, 6), (4, 5),   // x-edges (y0=-1,+1,+1,-1; z0=-1,-1,+1,+1)
-    (0, 3), (1, 2), (5, 6), (4, 7),   // y-edges (x0=-1,+1,+1,-1; z0=-1,-1,+1,+1)
-    (0, 4), (1, 5), (2, 6), (3, 7),   // z-edges (x0=-1,+1,+1,-1; y0=-1,-1,+1,+1)
+    (0, 1), (1, 2), (3, 2), (0, 3),
+    (4, 5), (5, 6), (7, 6), (4, 7),
+    (0, 4), (1, 5), (2, 6), (3, 7),
 ];
 
 /// Local edge vertex pairs for prism (Prism6 ordering).
-/// Ordering MUST match PrismND1 element EDGES table.
+///
+/// Ordering = MFEM `Geometry::Constants<Geometry::PRISM>::Edges` so that edge
+/// numbering and the PrismND1 basis ordering match MFEM bit-for-bit:
+///   (0,1),(1,2),(2,0),(3,4),(4,5),(5,3),(0,3),(1,4),(2,5)
 const PRISM_EDGES: [(usize, usize); 9] = [
-    (0, 1), (0, 2), (1, 2), // bottom triangle
-    (3, 4), (3, 5), (4, 5), // top triangle
+    (0, 1), (1, 2), (2, 0), // bottom triangle
+    (3, 4), (4, 5), (5, 3), // top triangle
     (0, 3), (1, 4), (2, 5), // vertical
 ];
 
@@ -182,6 +185,12 @@ impl<M: MeshTopology> HCurlSpace<M> {
             for &(li, lj) in local_edges {
                 let (gi, gj) = (verts[li], verts[lj]);
                 let key = EdgeKey::new(gi, gj);
+                // MFEM's canonical edge direction is (min, max): the DSTable
+                // used by `Mesh::GetElementToEdgeTable` swaps its Push
+                // arguments so every edge is stored/ordered from the smaller
+                // to the larger vertex id.  ND1's sign for an element-edge
+                // pair is +1 when the local direction agrees with the
+                // canonical (min→max) direction and −1 otherwise.
                 let sign = if gi < gj { 1.0 } else { -1.0 };
                 let nd = dofs_per_edge as u32;
                 let first_dof = *edge_to_dof.entry(key).or_insert_with(|| {

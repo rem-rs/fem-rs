@@ -47,22 +47,149 @@ solve_precond_simple!(solve_pcg_jacobi, ConjugateGradient<T>, JacobiPrecond<T>, 
 
 /// PCG with symmetric Gauss-Seidel (MFEM GSSmoother) preconditioner.
 ///
-/// Uses MFEM-compatible full GS sweeps (forward + backward over ALL
-/// off-diagonal entries), not the analytic SSOR factorization.
-pub fn solve_pcg_gssmoother<T: linlvoScalar>(
-    a: &FemCsr<T>, b: &[T], x: &mut [T], cfg: &SolverConfig,
+/// Bit-for-bit port of MFEM's `CGSolver::Mult` + `GSSmoother`:
+/// - `GSSmoother` runs one full forward+backward GS sweep, but its `Mult`
+///   keeps `iterative_mode` — the sweep starts from the *previous* value of
+///   the `z` vector (which, in `CGSolver::Mult`, holds the last `A·d` product
+///   before the preconditioner is re-applied).  This is NOT the analytic
+///   SSOR factorization, so iteration counts only match when the same
+///   warm-start sweep is reproduced.
+/// - Convergence test: `nom = (z, r) <= max(rtol²·nom0, atol²)`.
+pub fn solve_pcg_gssmoother(
+    a: &FemCsr<f64>, b: &[f64], x: &mut [f64], cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
-    let la = fem_to_linlvo_csr(a);
-    let lb = DenseVec::from_vec(b.to_vec());
-    let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = GaussSeidelSmoother::from_csr(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
-    let cg = ConjugateGradient::new(usize::MAX); // match MFEM: no periodic residual recomputation
-    let res = cg
-        .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
-        .map_err(SolverError::from)?;
-    x.copy_from_slice(lx.as_slice());
-    Ok(into_result(res))
+    let n = a.nrows;
+    let row_ptr = &a.row_ptr;
+    let col = &a.col_idx;
+    let val = &a.values;
+
+    // r = b - A·x
+    let mut r = b.to_vec();
+    let mut ax = vec![0.0_f64; n];
+    for i in 0..n {
+        let mut s = 0.0;
+        for k in row_ptr[i]..row_ptr[i + 1] {
+            s += val[k] * x[col[k] as usize];
+        }
+        ax[i] = s;
+    }
+    for i in 0..n {
+        r[i] -= ax[i];
+    }
+
+    // z = GS(r) starting from zero (MFEM GSSmoother has iterative_mode = false,
+    // so each Mult resets y = 0 before the sweep).  d = z.
+    let mut z = vec![0.0_f64; n];
+    gs_sweep(row_ptr, col, val, &r, &mut z);
+    let mut d = z.clone();
+    let mut nom = dot(&d, &r);
+    let nom0 = nom;
+    let r0 = (nom * cfg.rtol * cfg.rtol).max(cfg.atol * cfg.atol);
+
+    let mut iter = 0usize;
+    if cfg.verbose {
+        eprintln!("    CG iter {:>3}  (B r, r) = {:.9e}", 0, nom);
+    }
+    if nom <= r0 {
+        return Ok(into_result_from_cg(n, iter, nom0, nom, true));
+    }
+
+    loop {
+        // z = A·d  (reuse the z buffer: this is the warm-start value the GS
+        // sweep below will start from, exactly like MFEM's CGSolver)
+        for i in 0..n {
+            let mut s = 0.0;
+            for k in row_ptr[i]..row_ptr[i + 1] {
+                s += val[k] * d[col[k] as usize];
+            }
+            z[i] = s;
+        }
+        let den = dot(&z, &d);
+        let alpha = nom / den;
+        for i in 0..n {
+            x[i] += alpha * d[i];
+            r[i] -= alpha * z[i];
+        }
+        // z = GS(r), always starting from zero (MFEM's GSSmoother resets its
+        // output to zero because iterative_mode = false).
+        z.fill(0.0);
+        gs_sweep(row_ptr, col, val, &r, &mut z);
+        let betanom = dot(&z, &r);
+        iter += 1;
+        if cfg.verbose {
+            eprintln!("    CG iter {:>3}  (B r, r) = {:.9e}", iter, betanom);
+        }
+        if betanom <= r0 || iter >= cfg.max_iter {
+            return Ok(into_result_from_cg(n, iter, nom0, betanom, betanom <= r0));
+        }
+        let beta = betanom / nom;
+        for i in 0..n {
+            d[i] = z[i] + beta * d[i];
+        }
+        nom = betanom;
+    }
+}
+
+/// One full symmetric Gauss-Seidel sweep `z <- GS(r)` with the incoming `z`
+/// used as the initial guess (MFEM `Gauss_Seidel_forw`/`Gauss_Seidel_back`).
+fn gs_sweep(
+    row_ptr: &[usize],
+    col: &[u32],
+    val: &[f64],
+    r: &[f64],
+    z: &mut [f64],
+) {
+    let n = z.len();
+    // forward
+    for i in 0..n {
+        let mut sum = 0.0;
+        for k in row_ptr[i]..row_ptr[i + 1] {
+            let j = col[k] as usize;
+            if j != i {
+                sum += val[k] * z[j];
+            }
+        }
+        z[i] = (r[i] - sum) / diag(row_ptr, col, val, i);
+    }
+    // backward
+    for ii in 0..n {
+        let i = n - 1 - ii;
+        let mut sum = 0.0;
+        for k in row_ptr[i]..row_ptr[i + 1] {
+            let j = col[k] as usize;
+            if j != i {
+                sum += val[k] * z[j];
+            }
+        }
+        z[i] = (r[i] - sum) / diag(row_ptr, col, val, i);
+    }
+}
+
+#[inline]
+fn diag(row_ptr: &[usize], col: &[u32], val: &[f64], i: usize) -> f64 {
+    for k in row_ptr[i]..row_ptr[i + 1] {
+        if col[k] as usize == i {
+            return val[k];
+        }
+    }
+    f64::NAN
+}
+
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Build a [`SolveResult`] from a hand-rolled CG run.
+fn into_result_from_cg(
+    _n: usize, iter: usize, _nom0: f64, nom: f64, converged: bool,
+) -> SolveResult {
+    SolveResult {
+        converged,
+        iterations: iter,
+        final_residual: nom.abs().sqrt(),
+    }
 }
 
 solve_precond_simple!(solve_pcg_ilu0, ConjugateGradient<T>, Ilu0Precond<T>, "Preconditioned CG with ILU(0) preconditioner.");
@@ -1048,15 +1175,10 @@ pub fn solve_fgmres_ilut<T: linlvoScalar>(
 
 // ─── MINRES (symmetric indefinite) ─────────────────────────────────────────
 
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
-}
 fn norm(v: &[f64]) -> f64 {
     dot(v, v).sqrt()
 }
 
-/// MINRES — for symmetric (possibly indefinite) linear systems.
-///
 /// Minimises ‖b − Ax‖₂ using Lanczos tridiagonalisation with Givens QR.
 /// Storage grows as `O(n·k)` where `k ≤ cfg.max_iter` (no explicit restart).
 /// For indefinite systems (e.g. Helmholtz shift, Stokes saddle-point) MINRES

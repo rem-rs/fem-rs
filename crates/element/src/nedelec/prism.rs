@@ -26,8 +26,9 @@ fn barycentric(xi: f64, eta: f64, zeta: f64) -> ([f64; 6], [[f64; 3]; 6]) {
 }
 
 const EDGES: [(usize, usize); 9] = [
-    (0, 1), (0, 2), (1, 2),  // bottom tri
-    (3, 4), (3, 5), (4, 5),  // top tri
+    // MFEM `Constants<Geometry::PRISM>::Edges` ordering.
+    (0, 1), (1, 2), (2, 0),  // bottom tri
+    (3, 4), (4, 5), (5, 3),  // top tri
     (0, 3), (1, 4), (2, 5),  // vertical
 ];
 
@@ -40,23 +41,65 @@ impl VectorReferenceElement for PrismND1 {
     fn order(&self) -> u8 { 1 }
     fn n_dofs(&self) -> usize { 9 }
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
-        let (lam, grad) = barycentric(xi[0], xi[1], xi[2]);
-        for (e, &(i, j)) in EDGES.iter().enumerate() {
-            values[e * 3]     = lam[i] * grad[j][0] - lam[j] * grad[i][0];
-            values[e * 3 + 1] = lam[i] * grad[j][1] - lam[j] * grad[i][1];
-            values[e * 3 + 2] = lam[i] * grad[j][2] - lam[j] * grad[i][2];
+        // Reference coordinates (Rust): (ξ, η, ζ) with ξ the extrusion and
+        // (η, ζ) the unit triangle.  MFEM's wedge uses (x,y,z) with the
+        // triangle in (x,y) and extrusion z — the Rust axis order is
+        // (ξ,η,ζ) = (z,x,y).  Basis = tensor product
+        //   NDTriangle(η,ζ) ⊗ H1Segment(ξ)  for the 6 triangle edges,
+        //   H1Triangle(η,ζ) ⊗ NDSegment     for the 3 vertical edges.
+        let (xi_, eta, zeta) = (xi[0], xi[1], xi[2]);
+        let lam0 = 1.0 - eta - zeta; // H1 triangle basis
+        let lam1 = eta;
+        let lam2 = zeta;
+        // NDTriangle edge bases (Whitney 1-forms, Rust TriND1, with edge 2
+        // oriented (2,0) per MFEM ND_TriangleElement — opposite to Rust's
+        // TriND1 (0,2) convention, hence the sign flip on e2):
+        //   e0 (0,1): (1−ζ, η),  e1 (1,2): (−ζ, η),  e2 (2,0): (−ζ, η−1)
+        let tri_x = [1.0 - zeta, -zeta, -zeta];
+        let tri_y = [eta, eta, eta - 1.0];
+        for e in 0..3 {
+            // layer 0 (ξ=0) and layer 1 (ξ=1)
+            let s0 = 1.0 - xi_;
+            let s1 = xi_;
+            // 3-D components in Rust order (ξ, η, ζ) = MFEM (z, x, y):
+            // triangle-edge dofs live in the (η,ζ) plane → components 1,2.
+            values[e * 3] = 0.0;
+            values[e * 3 + 1] = tri_x[e] * s0;
+            values[e * 3 + 2] = tri_y[e] * s0;
+            values[(e + 3) * 3] = 0.0;
+            values[(e + 3) * 3 + 1] = tri_x[e] * s1;
+            values[(e + 3) * 3 + 2] = tri_y[e] * s1;
         }
+        // vertical edges: (λ_k, 0, 0) in (ξ,η,ζ) components.
+        values[6 * 3] = lam0; values[6 * 3 + 1] = 0.0; values[6 * 3 + 2] = 0.0;
+        values[7 * 3] = lam1; values[7 * 3 + 1] = 0.0; values[7 * 3 + 2] = 0.0;
+        values[8 * 3] = lam2; values[8 * 3 + 1] = 0.0; values[8 * 3 + 2] = 0.0;
     }
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
-        let (_, grad) = barycentric(xi[0], xi[1], xi[2]);
-        for (e, &(i, j)) in EDGES.iter().enumerate() {
-            let gi = grad[i]; let gj = grad[j];
-            let cx = gi[1]*gj[2] - gi[2]*gj[1];
-            let cy = gi[2]*gj[0] - gi[0]*gj[2];
-            let cz = gi[0]*gj[1] - gi[1]*gj[0];
-            curl_vals[e * 3] = 2.0 * cx;
-            curl_vals[e * 3 + 1] = 2.0 * cy;
-            curl_vals[e * 3 + 2] = 2.0 * cz;
+        let (xi_, eta, zeta) = (xi[0], xi[1], xi[2]);
+        // MFEM ND_WedgeElement::CalcCurlShape in Rust (ξ,η,ζ) = (z,x,y) order:
+        //   tri-edge dof: curl = (tn_curl·s, −tn_y·ds, tn_x·ds)
+        //   vertical dof: curl = (0, ∂λ/∂ζ, −∂λ/∂η)
+        let tri_x = [1.0 - zeta, -zeta, -zeta];
+        let tri_y = [eta, eta, eta - 1.0];
+        let tri_curl = [2.0, 2.0, 2.0]; // 2-D curls (e2 oriented (2,0))
+        for e in 0..3 {
+            for (k, sgn) in [(0usize, 1.0f64), (3, -1.0)].iter() {
+                let s = if *sgn > 0.0 { 1.0 - xi_ } else { xi_ };
+                let ds = if *sgn > 0.0 { -1.0 } else { 1.0 };
+                let i = e + k;
+                curl_vals[i * 3] = tri_curl[e] * s;
+                curl_vals[i * 3 + 1] = -tri_y[e] * ds;
+                curl_vals[i * 3 + 2] = tri_x[e] * ds;
+            }
+        }
+        // vertical edges: ∇λ₀ = (−1,−1), ∇λ₁ = (1,0), ∇λ₂ = (0,1) in (η,ζ).
+        let dlam = [[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]];
+        for k in 0..3 {
+            let i = 6 + k;
+            curl_vals[i * 3] = 0.0;
+            curl_vals[i * 3 + 1] = dlam[k][1];     // ∂λ/∂ζ
+            curl_vals[i * 3 + 2] = -dlam[k][0];    // −∂λ/∂η
         }
     }
     fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
@@ -187,16 +230,18 @@ fn edge_dof_value(m: &Mono, edge: usize, p: usize) -> f64 {
 }
 
 fn edge_geom(edge: usize) -> ([f64; 3], [f64; 3]) {
+    // MFEM `Constants<Geometry::PRISM>::Edges` ordering:
+    // (0,1),(1,2),(2,0),(3,4),(4,5),(5,3),(0,3),(1,4),(2,5).
     match edge {
-        0 => ([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-        1 => ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
-        2 => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
-        3 => ([1.0, 0.0, 0.0], [1.0, 1.0, 0.0]),
-        4 => ([1.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
-        5 => ([1.0, 1.0, 0.0], [1.0, 0.0, 1.0]),
-        6 => ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
-        7 => ([0.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
-        _ => ([0.0, 0.0, 1.0], [1.0, 0.0, 1.0]),
+        0 => ([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // (0,1)
+        1 => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]), // (1,2)
+        2 => ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]), // (2,0)
+        3 => ([1.0, 0.0, 0.0], [1.0, 1.0, 0.0]), // (3,4)
+        4 => ([1.0, 1.0, 0.0], [1.0, 0.0, 1.0]), // (4,5)
+        5 => ([1.0, 0.0, 1.0], [1.0, 0.0, 0.0]), // (5,3)
+        6 => ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]), // (0,3)
+        7 => ([0.0, 1.0, 0.0], [1.0, 1.0, 0.0]), // (1,4)
+        _ => ([0.0, 0.0, 1.0], [1.0, 0.0, 1.0]), // (2,5)
     }
 }
 

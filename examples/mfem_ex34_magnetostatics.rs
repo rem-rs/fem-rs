@@ -255,7 +255,9 @@ fn main() {
 
     let sub_elem_dofs = |e: u32| fec_rt.element_dofs(e).to_vec();
     let par_elem_dofs = |e: u32| fec_rt_full.element_dofs(e).to_vec();
-    let j_full = submesh.transfer_dofs_to_parent(&j_cond, fec_rt_full.n_dofs(), &sub_elem_dofs, &par_elem_dofs);
+    let sub_elem_signs = |e: u32| fec_rt.element_signs(e).to_vec();
+    let par_elem_signs = |e: u32| fec_rt_full.element_signs(e).to_vec();
+    let j_full = submesh.transfer_dofs_to_parent(&j_cond, fec_rt_full.n_dofs(), &sub_elem_dofs, &par_elem_dofs, &sub_elem_signs, &par_elem_signs);
 
     // 9–12. HCurl system: curl curl + delta·I.
     let n_nd = fec_nd_full.n_dofs();
@@ -374,6 +376,8 @@ fn assemble_hcurl_rhs(
 
         let nd_dofs: Vec<u32> = nd_space.element_dofs(e).iter().copied().collect();
         let rt_dofs: Vec<u32> = rt_space.element_dofs(e).iter().copied().collect();
+        let nd_s = nd_space.element_signs(e);
+        let rt_s = rt_space.element_signs(e);
         let n_nd = nd_dofs.len();
         let n_rt = rt_dofs.len();
 
@@ -383,29 +387,52 @@ fn assemble_hcurl_rhs(
 
         let mut nd_phi = vec![0.0; n_nd * dim];
         let mut rt_phi = vec![0.0; n_rt * dim];
+        let mut nd_phys = vec![0.0; n_nd * dim];
+        let mut rt_phys = vec![0.0; n_rt * dim];
         let mut f_elem = vec![0.0; n_nd];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let det_j = if use_iso {
+            let (jit, jac, det_j) = if use_iso {
                 let ge = geo_elem.as_ref().expect("geo_ref_elem");
-                let (_jac, dj, _x) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
-                dj
+                let (jac, dj, _x) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
+                let jit = jac.clone().try_inverse().expect("invertible Jacobian").transpose();
+                (jit, jac, dj)
             } else {
                 let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-                tr.det_j().abs()
+                (tr.jacobian_inv_t().clone(), tr.jacobian().clone(), tr.det_j())
             };
-            let w = quad.weights[q] * det_j;
+            let w = quad.weights[q] * det_j.abs();
 
             nd_ref.eval_basis_vec(xi, &mut nd_phi);
             rt_ref.eval_basis_vec(xi, &mut rt_phi);
 
+            // Piola transforms + orientation signs (MFEM VectorFEDomainLFIntegrator):
+            //   ND:  w_i = sign_i · J^{-T} ŵ_i
+            //   RT:  φ_j = sign_j · (1/det J) J φ̂_j
+            for i in 0..n_nd {
+                let s = nd_s.get(i).copied().unwrap_or(1.0);
+                for r in 0..dim {
+                    let mut acc = 0.0;
+                    for c in 0..dim { acc += jit[(r, c)] * nd_phi[i * dim + c]; }
+                    nd_phys[i * dim + r] = s * acc;
+                }
+            }
+            for j in 0..n_rt {
+                let s = rt_s.get(j).copied().unwrap_or(1.0);
+                for r in 0..dim {
+                    let mut acc = 0.0;
+                    for c in 0..dim { acc += jac[(r, c)] * rt_phi[j * dim + c]; }
+                    rt_phys[j * dim + r] = s * acc / det_j;
+                }
+            }
+
             let mut j_at_q = [0.0_f64; 3];
             for j in 0..n_rt {
                 let jv = j_dofs[rt_dofs[j] as usize];
-                for c in 0..3 { j_at_q[c] += jv * rt_phi[j * 3 + c]; }
+                for c in 0..3 { j_at_q[c] += jv * rt_phys[j * 3 + c]; }
             }
             for i in 0..n_nd {
-                let dot = (0..3).map(|c| nd_phi[i * 3 + c] * j_at_q[c]).sum::<f64>();
+                let dot = (0..3).map(|c| nd_phys[i * 3 + c] * j_at_q[c]).sum::<f64>();
                 f_elem[i] += w * dot;
             }
         }
