@@ -888,12 +888,15 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let n_elems = mesh.n_elems();
     let mut coords = mesh.coords.clone();
     let mut em: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
-    let mut next_node = mesh.n_nodes() as NodeId;
+    let next_node0 = mesh.n_nodes() as NodeId;
 
     // ── 1. Global edge midpoint map ────────────────────────────────────────
     let tet_edges = local_edges_tet();
     let hex_edges = local_edges_hex();
     let prism_edges = local_edges_prism();
+    // (edge_key, insertion id) pairs in element × local-edge order — this IS
+    // MFEM's GetVertexToVertexTable ordering.
+    let mut em_ids: Vec<((NodeId, NodeId), usize)> = Vec::new();
     for e in 0..n_elems as ElemId {
         let et = mesh.element_type_at(e);
         let ns = mesh.elem_nodes(e);
@@ -905,59 +908,108 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         };
         for &(a, b) in edges {
             let key = edge_key(ns[a], ns[b]);
-            em.entry(key).or_insert_with(|| {
-                let ca = mesh.coords_of(ns[a]); let cb = mesh.coords_of(ns[b]);
-                coords.extend_from_slice(&[0.5*(ca[0]+cb[0]), 0.5*(ca[1]+cb[1]), 0.5*(ca[2]+cb[2])]);
-                let id = next_node; next_node += 1; id
-            });
+            if !em.contains_key(&key) {
+                let id = em_ids.len();
+                em.insert(key, id as NodeId); // temporary id (insertion order)
+                em_ids.push((key, id));
+            }
         }
     }
 
-    // ── 2. Quad-face centers (hex/prism) + hex body centers ────────────────
+    // ── 1b. e2v re-mapping (MFEM UniformRefinement3D_base):
+    //   e2v[edge] = position of the edge in J_v2v after sorting each row
+    //   [row_start, end) with libstdc++ std::sort (Pair compares only the
+    //   column id j).  The refined edge-midpoint vertex id = oedge + e2v[em].
+    let n_verts = mesh.n_nodes();
+    let mut rows: Vec<Vec<(u32, usize)>> = vec![Vec::new(); n_verts];
+    for (eid, &(key, _)) in em_ids.iter().enumerate() {
+        let (i, j) = key;
+        rows[i as usize].push((j, eid));
+    }
+    let mut j_v2v: Vec<(i32, usize)> = Vec::new();
+    for i in 0..n_verts {
+        let start = j_v2v.len();
+        for &(j, eid) in &rows[i] {
+            j_v2v.push((j as i32, eid));
+        }
+        // std::sort(row_start, end): sorts [start..len) by column id only.
+        std_sort_by(&mut j_v2v[start..], |x, y| x.0 < y.0);
+    }
+    let mut e2v = vec![0usize; em_ids.len()];
+    for (pos, &(_, eid)) in j_v2v.iter().enumerate() {
+        e2v[eid] = pos;
+    }
+    // Edge-midpoint vertex id = oedge + e2v[insertion id]; coords must be
+    // stored in vertex-id order (oedge..oedge+n_edges).
+    let mut mid_coords = vec![[0.0_f64; 3]; em_ids.len()];
+    for (id, &(key, _)) in em_ids.iter().enumerate() {
+        let (a, b) = key;
+        let ca = mesh.coords_of(a);
+        let cb = mesh.coords_of(b);
+        mid_coords[e2v[id]] = [0.5*(ca[0]+cb[0]), 0.5*(ca[1]+cb[1]), 0.5*(ca[2]+cb[2])];
+    }
+    for c in &mid_coords {
+        coords.extend_from_slice(c);
+    }
+    for (id, &(key, _)) in em_ids.iter().enumerate() {
+        em.insert(key, next_node0 + e2v[id] as NodeId);
+    }
+    let mut next_node = next_node0 + em_ids.len() as NodeId; // oface start
+
+    // ── 2. Quad-face centers (hex/prism), THEN hex body centers ───────────
     // MFEM UniformRefinement3D_base: new vertices are edge midpoints +
-    // QUAD face centers (oface + NumOfQuadFaces) + HEX body centers
-    // (oelem + hex_counter).  Tetrahedra get ONLY edge midpoints (no tri-face
-    // or body centers), and prisms get no body centers — matching this keeps
-    // the refined vertex count/numbering identical to MFEM.
+    // QUAD face centers (oface + f2qf, all of them) + HEX body centers
+    // (oelem + hex_counter, AFTER all quad faces).  Tetrahedra get ONLY edge
+    // midpoints; prisms get no body centers.
     let mut quad_fc: HashMap<[NodeId; 4], NodeId> = HashMap::new();
     let mut body_cc: HashMap<ElemId, NodeId> = HashMap::new();
+    const MF_HEX_FACES: [[usize; 4]; 6] = [
+        [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
+        [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
+    ];
 
+    // Pass A: quad face centers in element × MFEM-face order (f2qf order).
     for e in 0..n_elems as ElemId {
         let et = mesh.element_type_at(e);
         let ns = mesh.elem_nodes(e);
-
-        let mut face_center = |fv: &[NodeId]| -> NodeId {
-            let (mut x, mut y, mut z) = (0.0,0.0,0.0);
-            let nv = fv.len() as f64;
-            for &n in fv { let c = mesh.coords_of(n); x+=c[0]; y+=c[1]; z+=c[2]; }
-            coords.extend_from_slice(&[x/nv, y/nv, z/nv]);
-            let id = next_node; next_node += 1; id
-        };
-
         match et {
             ElementType::Hex8 => {
-                for f in &local_faces_hex() {
-                    let fns = [ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]];
-                    quad_fc.entry(quad_face_key(fns))
-                        .or_insert_with(|| face_center(&fns));
+                for f in &MF_HEX_FACES {
+                    let fns = [ns[f[0]], ns[f[1]], ns[f[2]], ns[f[3]]];
+                    quad_fc.entry(quad_face_key(fns)).or_insert_with(|| {
+                        let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
+                        for &n in &fns { let c = mesh.coords_of(n); x += c[0]; y += c[1]; z += c[2]; }
+                        coords.extend_from_slice(&[x / 4.0, y / 4.0, z / 4.0]);
+                        let id = next_node; next_node += 1; id
+                    });
                 }
-                // Hex body center (one per element, MFEM oelem + hex_counter).
-                body_cc.entry(e).or_insert_with(|| {
-                    let nv = ns.len() as f64;
-                    let (mut x,mut y,mut z) = (0.0,0.0,0.0);
-                    for &n in ns { let c = mesh.coords_of(n); x+=c[0]; y+=c[1]; z+=c[2]; }
-                    coords.extend_from_slice(&[x/nv, y/nv, z/nv]);
-                    let id = next_node; next_node += 1; id
-                });
             }
             ElementType::Prism6 => {
                 for f in &local_faces_prism_quad() {
-                    let fns = [ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]];
-                    quad_fc.entry(quad_face_key(fns))
-                        .or_insert_with(|| face_center(&fns));
+                    let fns = [ns[f[0]], ns[f[1]], ns[f[2]], ns[f[3]]];
+                    quad_fc.entry(quad_face_key(fns)).or_insert_with(|| {
+                        let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
+                        for &n in &fns { let c = mesh.coords_of(n); x += c[0]; y += c[1]; z += c[2]; }
+                        coords.extend_from_slice(&[x / 4.0, y / 4.0, z / 4.0]);
+                        let id = next_node; next_node += 1; id
+                    });
                 }
             }
             _ => {}
+        }
+    }
+
+    // Pass B: hex body centers (after ALL quad face centers, oelem + hex_counter).
+    for e in 0..n_elems as ElemId {
+        if mesh.element_type_at(e) == ElementType::Hex8 {
+            let ns = mesh.elem_nodes(e);
+            body_cc.entry(e).or_insert_with(|| {
+                let nv = ns.len() as f64;
+                let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
+                for &n in ns { let c = mesh.coords_of(n); x += c[0]; y += c[1]; z += c[2]; }
+                coords.extend_from_slice(&[x / nv, y / nv, z / nv]);
+                let id = next_node; next_node += 1; id
+            });
         }
     }
 
@@ -6913,4 +6965,89 @@ mod tests {
         let max = eta.iter().cloned().fold(0.0, f64::max);
         assert!(max < 10.0, "linear u,z on Pyramid → DWR ~0, got {max:.3e}");
     }
+}
+
+/// libstdc++ `std::sort` simulation (introsort + insertion sort) with a
+/// caller-supplied comparison — bit-exact port used by MFEM's
+/// `UniformRefinement3D_base` e2v re-mapping (sorts each row
+/// `[row_start, end)` of `Pair<int,int>` comparing only the column id).
+fn std_sort_by<T: Copy>(a: &mut [T], cmp: impl Fn(&T, &T) -> bool) {
+    const THRESHOLD: usize = 16;
+    fn lg(n: usize) -> usize {
+        let mut r = 0;
+        let mut v = n;
+        while v > 1 { v >>= 1; r += 1; }
+        r
+    }
+    fn move_median<T: Copy>(a: &mut [T], result: usize, x: usize, y: usize, z: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        let r = if cmp(&a[x], &a[y]) {
+            if cmp(&a[y], &a[z]) { y }
+            else if cmp(&a[x], &a[z]) { z }
+            else { x }
+        } else if cmp(&a[x], &a[z]) { x }
+        else if cmp(&a[y], &a[z]) { z }
+        else { y };
+        a.swap(result, r);
+    }
+    fn unguarded_partition<T: Copy>(a: &mut [T], first: usize, last: usize, pivot: usize, cmp: &impl Fn(&T, &T) -> bool) -> usize {
+        let mut f = first;
+        let mut l = last;
+        loop {
+            while cmp(&a[f], &a[pivot]) { f += 1; }
+            l -= 1;
+            while cmp(&a[pivot], &a[l]) { l -= 1; }
+            if !(f < l) { return f; }
+            a.swap(f, l);
+            f += 1;
+        }
+    }
+    fn unguarded_linear_insert<T: Copy>(a: &mut [T], last: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        let v = a[last];
+        let mut l = last;
+        let mut next = last - 1;
+        while next > 0 && cmp(&v, &a[next]) {
+            a[l] = a[next];
+            l = next;
+            next -= 1;
+        }
+        if next == 0 && cmp(&v, &a[0]) { a[l] = a[0]; a[0] = v; }
+        else { a[l] = v; }
+    }
+    fn insertion_sort<T: Copy>(a: &mut [T], first: usize, last: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        for i in first + 1..last {
+            if cmp(&a[i], &a[first]) {
+                let v = a[i];
+                a.copy_within(first..i, first + 1);
+                a[first] = v;
+            } else { unguarded_linear_insert(a, i, cmp); }
+        }
+    }
+    fn introsort_loop<T: Copy>(a: &mut [T], first: usize, last: usize, mut depth: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        let mut f = first;
+        let mut l = last;
+        while l - f > THRESHOLD {
+            if depth == 0 {
+                insertion_sort(a, f, l, cmp);
+                return;
+            }
+            depth -= 1;
+            let mid = f + (l - f) / 2;
+            move_median(a, f, f + 1, mid, l - 1, cmp);
+            let cut = unguarded_partition(a, f + 1, l, f, cmp);
+            let left = cut - f;
+            let right = l - cut;
+            if left < right { introsort_loop(a, f, cut, depth, cmp); f = cut; }
+            else { introsort_loop(a, cut, l, depth, cmp); l = cut; }
+        }
+    }
+    fn final_insertion_sort<T: Copy>(a: &mut [T], first: usize, last: usize, cmp: &impl Fn(&T, &T) -> bool) {
+        if last - first > THRESHOLD {
+            insertion_sort(a, first, first + THRESHOLD, cmp);
+            for i in first + THRESHOLD..last { unguarded_linear_insert(a, i, cmp); }
+        } else { insertion_sort(a, first, last, cmp); }
+    }
+    let n = a.len();
+    if n <= 1 { return; }
+    introsort_loop(a, 0, n, lg(n) * 2, &cmp);
+    final_insertion_sort(a, 0, n, &cmp);
 }
