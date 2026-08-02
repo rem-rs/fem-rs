@@ -661,8 +661,27 @@ mod tests {
             1.2364446030194172,
             0.16695839505676074,
         ];
+        let ref_c = [
+            12203.679276445595,
+            222.67999399384544,
+            51.773584135029758,
+            19.939594734618325,
+            9.290650617314629,
+            4.6706524735993993,
+            2.4088492159824804,
+            1.2461015684184986,
+            0.63937694833422642,
+            0.31925689946218788,
+            0.13670730022888855,
+        ];
         let mut dp: Vec<f64> = poles.iter().map(|&p| -p).collect();
         dp.sort_by(|a, b| b.partial_cmp(a).unwrap()); // descending, like the C++ dump
+        let mut cp: Vec<(f64, f64)> = coeffs
+            .iter()
+            .zip(poles.iter())
+            .map(|(&c, &p)| (c, -p))
+            .collect();
+        cp.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         for i in 0..11 {
             // SVD implementation difference (nalgebra vs LAPACK dgesvd).
             assert!(
@@ -671,6 +690,13 @@ mod tests {
                 i,
                 dp[i],
                 ref_d[i]
+            );
+            assert!(
+                rel_diff(cp[i].0, ref_c[i]) < 1e-6,
+                "c[{}] = {:.17e} vs C++ {:.17e}",
+                i,
+                cp[i].0,
+                ref_c[i]
             );
         }
     }
