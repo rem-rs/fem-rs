@@ -36,6 +36,7 @@ use fem_io::mfem::read_mfem_file;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{
     BoundarySubMesh, Mesh, extract_boundary_submesh, refine_uniform_3d,
+    topology::MeshTopology,
 };
 use fem_solver::eigen::{
     AmeConfig, ame_solve,
@@ -590,12 +591,14 @@ fn solve_hcurl(
     let mut x_im = u_im.clone();
     let imag_scale = if herm_conv { -1.0 } else { 1.0 };
     // p1 (H(curl)): MFEM uses HypreAMS on the real block; the auxiliary-space
-    // Maxwell preconditioner needs the incidence discrete gradient G: H¹→H(curl).
+    // Maxwell preconditioner needs the incidence discrete gradient G: H¹→H(curl)
+    // and the vertex coordinates (for the 3-D face auxiliary space).
     let h1 = H1Space::new(mesh.clone(), 1);
     let g = fem_assembly::discrete_op::DiscreteLinearOperator::gradient(&h1, &fes)
         .expect("discrete gradient construction failed");
+    let coords = mesh_vertex_coords(mesh);
     let (iters, res) = solve_complex_system(
-        &sys.k_re, &sys.k_im, &pc_op, PrecondKind::Ams(g),
+        &sys.k_re, &sys.k_im, &pc_op, PrecondKind::Ams(g, coords),
         &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
     );
     println!("FGMRES: Number of iterations: {iters}");
@@ -691,8 +694,9 @@ enum PrecondKind {
     /// BoomerAMG on the eliminated real operator (p0).
     Amg,
     /// HypreAMS (auxiliary-space Maxwell) on the eliminated real operator,
-    /// with the H¹→H(curl) discrete gradient (incidence form) as `g` (p1).
-    Ams(CsrMatrix<f64>),
+    /// with the H¹→H(curl) discrete gradient (incidence form) as `g` and the
+    /// H¹ vertex coordinates (row-major, 3·n_nodes) for the face space (p1).
+    Ams(CsrMatrix<f64>, Vec<f64>),
 }
 
 /// Solve the 2n×2n complex system with FGMRES and a block-diagonal
@@ -787,23 +791,27 @@ fn solve_complex_system(
             };
             PcInner::Amg(linlvo::amg::AmgPrecond::new(linlvo::amg::AmgHierarchy::build(la, cfg)))
         }
-        PrecondKind::Ams(g) => {
+        PrecondKind::Ams(g, coords) => {
             // HypreAMS on pcOp with the incidence discrete gradient
             // (MFEM: HypreAMS(pcOp, &fespace)).
             let lg = fem_linalg::fem_to_linlvo_csr(&g);
-            // Multi-sweep Hiptmair-Xu smoothing; the single-sweep Jacobi form
-            // of linlvo's AMS converges too slowly on the near-singular ex35
-            // pcOp (curl-curl + mass with λ_min ≈ 4e-3).
+            // Full HYPRE AMS structure: symmetric GS + V(1,1) cycle with the
+            // 3-D face (curl) auxiliary space Pi = [Pi_x, Pi_y, Pi_z]
+            // (cycle_type = 13), matching MFEM's HypreAMS defaults.
             let ams_cfg = linlvo::precond::AmsConfig {
                 smoother_sweeps: 1,
                 smoother_omega: 1.0,
-                // HYPRE AMS defaults: symmetric GS smoother + V(1,1) cycle.
                 edge_smoother: linlvo::precond::AmsEdgeSmoother::SymmetricGaussSeidel,
                 cycle: linlvo::precond::AmsCycle::MultiplicativeV11,
-                node_solver: linlvo::precond::AuxSpaceSolver::Ilu0,
+                face_space: true,
+                node_solver: linlvo::precond::AuxSpaceSolver::Amg(linlvo::amg::AmgConfig {
+                    coarse_threshold: 9,
+                    max_levels: 25,
+                    ..Default::default()
+                }),
                 singularity_regularization: 0.0,
             };
-            let ams = linlvo::precond::AmsPrecond::new(&la, &lg, ams_cfg)
+            let ams = linlvo::precond::AmsPrecond::with_coords(&la, &lg, &coords, ams_cfg)
                 .expect("AMS preconditioner setup failed");
             PcInner::Ams(ams)
         }
@@ -822,6 +830,20 @@ fn solve_complex_system(
     x_re.copy_from_slice(&x[..n]);
     x_im.copy_from_slice(&x[n..]);
     (res.iterations, res.final_residual)
+}
+
+/// H¹ P1 vertex coordinates, row-major `[x, y, z, ...]` (`n_nodes × 3`).
+/// H¹ P1 DOF ids coincide with vertex ids, so this maps 1:1 onto the columns
+/// of the discrete gradient `G`.
+fn mesh_vertex_coords(mesh: &Mesh<3>) -> Vec<f64> {
+    let mut c = vec![0.0_f64; mesh.n_nodes() * 3];
+    for v in 0..mesh.n_nodes() {
+        let co = mesh.node_coords(v as u32);
+        c[v * 3] = co[0];
+        c[v * 3 + 1] = co[1];
+        c[v * 3 + 2] = co[2];
+    }
+    c
 }
 
 /// Transfer ND (edge) DOFs from the port space to the full H(Curl) space.
