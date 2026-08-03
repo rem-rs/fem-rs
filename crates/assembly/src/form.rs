@@ -106,8 +106,7 @@ impl<S: FESpace> BilinearForm<S> {
     }
 
     /// Fast diagonal-only BC elimination for SPD systems.
-    pub fn eliminate_essential_bc_from_diag(&mut self, ess_dofs: &[usize], bc_vals: &[f64], rhs: &mut [f64]) {
-        let a = self.cached.as_mut().expect("assemble() must be called first");
+    pub fn eliminate_essential_bc_from_diag(&mut self, ess_dofs: &[usize], bc_vals: &[f64], rhs: &mut [f64]) {        let a = self.cached.as_mut().expect("assemble() must be called first");
         for (pos, &d) in ess_dofs.iter().enumerate() {
             for r in a.row_ptr[d]..a.row_ptr[d + 1] {
                 if a.col_idx[r] as usize == d {
@@ -116,6 +115,37 @@ impl<S: FESpace> BilinearForm<S> {
                 }
             }
             rhs[d] = bc_vals[pos];
+        }
+    }
+}
+
+// ─── Free helpers: MFEM SparseMatrix::EliminateCols ───────────────────────────
+
+/// Eliminate essential columns from a (possibly rectangular) matrix —
+/// 1:1 port of MFEM `SparseMatrix::EliminateCols(cols, &x, &b)`.
+///
+/// For every row `i` and stored entry `(i, c)` with `c` an essential column:
+/// `b[i] -= A[i,c] * x[c]`, then `A[i,c] = 0`.  Used e.g. for
+/// `MixedBilinearForm::EliminateTrialEssentialBC` (ex36 obstacle problem).
+pub fn eliminate_cols(
+    a: &mut CsrMatrix<f64>,
+    ess_cols: &[usize],
+    x: &[f64],
+    rhs: &mut [f64],
+) {
+    let mut marker = vec![false; a.ncols];
+    for &c in ess_cols {
+        if c < a.ncols {
+            marker[c] = true;
+        }
+    }
+    for i in 0..a.nrows {
+        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
+            let c = a.col_idx[p] as usize;
+            if marker[c] {
+                rhs[i] -= a.values[p] * x[c];
+                a.values[p] = 0.0;
+            }
         }
     }
 }

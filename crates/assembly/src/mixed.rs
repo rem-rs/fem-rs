@@ -94,6 +94,31 @@ impl MixedBilinearIntegrator for PressureDivIntegrator {
     }
 }
 
+/// `b(v, u) = ∫ v · u dx` — scalar mass coupling (MFEM `MixedScalarMassIntegrator`).
+///
+/// Row space = test space (e.g. L²), column space = trial space (e.g. H¹).
+/// The assembled matrix satisfies `B[j, i] += w * φ_row_j * φ_col_i`.
+pub struct ScalarMassIntegrator;
+
+impl MixedBilinearIntegrator for ScalarMassIntegrator {
+    fn add_to_element_matrix(
+        &self,
+        qp_row: &QpData<'_>,
+        qp_col: &QpData<'_>,
+        m_elem: &mut [f64],
+    ) {
+        let n_r = qp_row.n_dofs;
+        let n_c = qp_col.n_dofs;
+        let w = qp_row.weight;
+        for j in 0..n_r {
+            let pj = qp_row.phi[j];
+            for i in 0..n_c {
+                m_elem[j * n_c + i] += w * pj * qp_col.phi[i];
+            }
+        }
+    }
+}
+
 /// `b(u, p) = ∫ (∇·u) p dx` — positive sign variant, also useful for Darcy.
 pub struct DivIntegrator;
 
@@ -974,8 +999,8 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetP1),
         (ElementType::Tet4 | ElementType::Tet10, 2) => Box::new(TetP2),
         (ElementType::Tet4 | ElementType::Tet10, 3) => Box::new(TetP3),
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
+        (ElementType::Quad4, 1) => Box::new(QuadQk::new(1)),
+        (ElementType::Quad4, 2) => Box::new(QuadQk::new(2)),
         (ElementType::Quad4, 3) => Box::new(QuadQk::new(3)),
         (ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadSerendipityPk::new(1)),
         (ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadSerendipityPk::new(2)),
@@ -1087,6 +1112,9 @@ fn accumulate_mixed_volume_element<SR, SC>(
 
     let use_iso = !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
     let geo_elem = if use_iso { crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e) } else { None };
+    // High-order geometry: use the geometry nodes (P2 etc.) not just the
+    // linear element vertices, so isoparametric_jacobian can index them.
+    let geom_nodes = if mesh.geom_order() > 1 { mesh.geometry_nodes(e) } else { nodes };
 
     let mut m_elem = vec![0.0_f64; n_elem_r * n_elem_c];
     phi_r.resize(n_r, 0.0);
@@ -1099,7 +1127,7 @@ fn accumulate_mixed_volume_element<SR, SC>(
     for (q, xi) in quad.points.iter().enumerate() {
         let (w, j_inv_t, xp) = if use_iso {
             let ge = geo_elem.as_ref().unwrap();
-            let (jac, det_j, xp) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
+            let (jac, det_j, xp) = isoparametric_jacobian(mesh, geom_nodes, ge.as_ref(), xi, dim);
             let w_q = quad.weights[q] * det_j.abs();
             let jit = jac.try_inverse().expect("invertible isoparametric Jacobian").transpose();
             (w_q, jit, xp)

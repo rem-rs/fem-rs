@@ -150,7 +150,7 @@ pub fn isoparametric_jacobian<M: MeshTopology>(
     let mut xp = vec![0.0_f64; dim];
 
     for k in 0..n_geo {
-        let xk = mesh.node_coords(nodes[k]);
+        let xk = mesh.geom_coords_of(nodes[k]);
         for i in 0..dim {
             xp[i] += phi_geo[k] * xk[i];
             for d in 0..dim {

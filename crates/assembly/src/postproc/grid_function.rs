@@ -7,7 +7,8 @@
 use nalgebra::DMatrix;
 
 use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
-use fem_element::{vec_ref_elem, VecFamily, ReferenceElement, VectorReferenceElement};
+use fem_element::quadrature::quad_rule_01;
+use fem_element::{vec_ref_elem, VecFamily, ReferenceElement, QuadratureRule, VectorReferenceElement};
 use fem_linalg::CsrMatrix;
 use fem_mesh::element_jacobian_at;
 use fem_mesh::element_type::ElementType;
@@ -27,10 +28,12 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
-        // Quad4: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — must match the
+        // Quad4: order 0 (L² P0) is the constant element; orders 1+ use
+        // QuadQk (Gauss-Lobatto nodes on [0,1]^2) — must match the
         // assembler's reference element (assembler.rs::ref_elem_vol).  The
         // legacy QuadQ1/Q2/Q3 live on [-1,1]^2 while quadrature rules
         // (quad_rule_01) live on [0,1]^2 — mixing them gave wrong L2 errors.
+        (ElementType::Quad4, 0) => Box::new(P0),
         (ElementType::Quad4, o) => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
@@ -39,10 +42,25 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
     }
 }
 
+/// Constant (P0) reference element on `[0,1]²` — 1 DOF, basis ≡ 1.
+struct P0;
+
+impl ReferenceElement for P0 {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { 0 }
+    fn n_dofs(&self) -> usize { 1 }
+    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
+    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
+        g[0] = 0.0;
+        g[1] = 0.0;
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.5, 0.5]] }
+}
+
 // ─── Jacobian helpers (same as assembler.rs) ───────────────────────────────
 
-fn simplex_jacobian<M: MeshTopology>(
-    mesh: &M,
+fn simplex_jacobian<M: MeshTopology>(    mesh: &M,
     geo_nodes: &[u32],
     dim: usize,
 ) -> (DMatrix<f64>, f64) {
@@ -92,14 +110,55 @@ fn simplex_jacobian<M: MeshTopology>(
     }
 }
 
-fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {
-    let mut xp = x0.to_vec();
+fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {    let mut xp = x0.to_vec();
     for i in 0..dim {
         for k in 0..dim {
             xp[i] += j[(i, k)] * xi[k];
         }
     }
     xp
+}
+
+/// High-order geometry Jacobian for volume elements (curved bodies).
+///
+/// `J_{ij}(ξ) = Σ_k x_k[i] · ∂φ_k/∂ξ_j` where `φ_k` are the **geometry**
+/// basis functions (e.g. `QuadQk` on `[0,1]^d`) and `x_k` the high-order
+/// geometry node coordinates from [`MeshTopology::geom_coords_of`].
+///
+/// Returns `(J_col_major, det J, x_phys)` with `J` stored column-major
+/// (`j[i + d·dim] = ∂x_i/∂ξ_d`), matching the scalar assembler.
+fn iso_jacobian_geom<M: MeshTopology>(
+    mesh: &M,
+    nodes: &[u32],
+    geo_elem: &dyn ReferenceElement,
+    xi: &[f64],
+    dim: usize,
+) -> (Vec<f64>, f64, Vec<f64>) {
+    let n_geo = geo_elem.n_dofs();
+    let mut grad_geo = vec![0.0_f64; n_geo * dim];
+    let mut phi_geo = vec![0.0_f64; n_geo];
+    geo_elem.eval_grad_basis(xi, &mut grad_geo);
+    geo_elem.eval_basis(xi, &mut phi_geo);
+
+    let mut j = vec![0.0_f64; dim * dim];
+    let mut xp = vec![0.0_f64; dim];
+    for k in 0..n_geo {
+        let xk = mesh.geom_coords_of(nodes[k]);
+        for i in 0..dim {
+            xp[i] += phi_geo[k] * xk[i];
+            for d in 0..dim {
+                j[i + d * dim] += xk[i] * grad_geo[k * dim + d];
+            }
+        }
+    }
+    let det = match dim {
+        2 => j[0] * j[3] - j[1] * j[2],
+        3 => j[0] * (j[4] * j[8] - j[5] * j[7])
+            - j[1] * (j[3] * j[8] - j[5] * j[6])
+            + j[2] * (j[3] * j[7] - j[4] * j[6]),
+        _ => panic!("iso_jacobian_geom: unsupported dim {dim}"),
+    };
+    (j, det, xp)
 }
 
 /// Element Jacobian: uses affine (simplex) Jacobian for triangles/tets,
@@ -450,8 +509,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let mut phi = vec![0.0; n_ldofs];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let (w, xp) = if use_ho_geo && is_surface {
-                    // Curved surface: use geometry element for metric-based area + coords
+                let (w, xp) = if use_ho_geo && is_surface {                    // Curved surface: use geometry element for metric-based area + coords
                     let ge = geo_elem.as_ref().unwrap();
                     let tdim = dim;
                     let mut grad_geo = vec![0.0; ge.n_dofs() * tdim];
@@ -478,6 +536,15 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     let det_g = (g00 * g11 - g01 * g01).abs();
                     let measure = det_g.sqrt();
                     (quad.weights[q] * measure, xp_curved)
+                } else if use_ho_geo {
+                    // Volume element with high-order geometry (curved 2D/3D
+                    // body): evaluate through the geometry element, which
+                    // shares the [0,1]^d reference domain with the QuadQk
+                    // solution basis.
+                    let ge = geo_elem.as_ref().unwrap();
+                    let (jac, det_j, xp) =
+                        iso_jacobian_geom(mesh, geo_nodes, ge.as_ref(), xi, dim);
+                    (quad.weights[q] * det_j.abs(), xp)
                 } else if is_surface {
                     let w = quad.weights[q] * det_j.abs();
                     let xp = surface_phys_coords(x0, &e1_3d, &e2_3d, xi);
@@ -532,6 +599,20 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let elem_dofs = self.space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
 
+            // High-order geometry path (curved bodies and surfaces).
+            let g_order = mesh.geom_order();
+            let use_ho_geo = g_order > 1;
+            let geo_elem = if use_ho_geo {
+                Some(ref_elem_vol(elem_type, g_order))
+            } else {
+                None
+            };
+            let geo_nodes = if use_ho_geo {
+                mesh.geometry_nodes(e)
+            } else {
+                nodes
+            };
+
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
             let x0 = mesh.node_coords(nodes[0]);
@@ -540,7 +621,20 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let mut grad_phys = vec![0.0; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
+                let (w, j_inv_t, xp) = if use_ho_geo {
+                    // Curved volume/surface: Jacobian from the geometry
+                    // element (same [0,1]^d reference domain as QuadQk).
+                    let ge = geo_elem.as_ref().unwrap();
+                    let (jac_g, det_g, xp) =
+                        iso_jacobian_geom(mesh, geo_nodes, ge.as_ref(), xi, dim);
+                    let jm = DMatrix::from_fn(dim, dim, |i, d| jac_g[i + d * dim]);
+                    let jit = jm.try_inverse().expect("invertible geometry Jacobian").transpose();
+                    (quad.weights[q] * det_g.abs(), jit, xp)
+                } else {
+                    let w = quad.weights[q] * det_j.abs();
+                    let xp = phys_coords(x0, &jac, xi, dim);
+                    (w, j_inv_t.clone(), xp)
+                };
 
                 ref_elem.eval_grad_basis(xi, &mut grad_ref);
                 transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, dim);
@@ -554,7 +648,6 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     }
                 }
 
-                let xp = phys_coords(x0, &jac, xi, dim);
                 let ge = exact_grad(&xp);
 
                 let mut diff2 = 0.0;

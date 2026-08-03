@@ -6,6 +6,8 @@
 //! F(v) = ∫_Ω f(x) v dx
 //! ```
 
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
+
 domain_linear_closure!(DomainSourceIntegrator,
     "Linear integrator for the domain source term `∫ f(x) v dx`.
 
@@ -24,6 +26,37 @@ let integ = DomainSourceIntegrator::new(|x| {
         f_elem[i] += w * qp.phi[i];
     }
 });
+
+/// Domain source integrator with an arbitrary [`ScalarCoeff`] coefficient.
+///
+/// MFEM equivalent: `DomainLFIntegrator(Coefficient)` — computes
+/// `F(v) = ∫_Ω f(x) v dx` where `f` is evaluated through a [`CoeffCtx`]
+/// (GridFunction values via `phi`/`elem_dofs`, element tags, …).
+pub struct DomainSourceIntegratorCoeff<C: ScalarCoeff> {
+    /// The source coefficient `f`.
+    pub f: C,
+}
+
+impl<C: ScalarCoeff> DomainSourceIntegratorCoeff<C> {
+    /// Create the integrator from a coefficient.
+    pub fn new(f: C) -> Self {
+        DomainSourceIntegratorCoeff { f }
+    }
+}
+
+impl<C: ScalarCoeff> LinearIntegrator for DomainSourceIntegratorCoeff<C> {
+    fn add_to_element_vector(&self, qp: &QpData<'_>, f_elem: &mut [f64]) {
+        let n = qp.n_dofs;
+        let ctx = CoeffCtx::from_qp(
+            qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag,
+            Some(qp.phi), qp.elem_dofs,
+        );
+        let w = qp.weight * self.f.eval(&ctx);
+        for i in 0..n {
+            f_elem[i] += w * qp.phi[i];
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -148,6 +148,7 @@ pub use block_operator::{
 };
 pub use block::{BlockSystem, BlockDiagonalPrecond, BlockTriangularPrecond, SchurComplementSolver, MinresSolver};
 pub use constrained::SchurConstrainedSolver;
+pub use constrained::solve_gmres_block_diag_gs;
 pub use block_gmres::{solve_block_gmres, BlockGmresConfig};
 pub use eigen::{
     lobpcg, lobpcg_constrained, lobpcg_preconditioned, lobpcg_constrained_preconditioned, lobpcg_essential_bc,

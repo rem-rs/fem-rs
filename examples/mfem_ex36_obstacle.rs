@@ -1,618 +1,577 @@
-//! # Example 36 �?Obstacle problem (toward MFEM ex36)
+//! # Example 36 — Obstacle problem (proximal Galerkin) — 1:1 port of MFEM ex36
 //!
-//! Solves the constrained minimization problem
+//! Solves the bound-constrained energy minimization problem
 //!
 //! ```text
-//!   minimize  1/2 ∫|∇u|² dx - ∫f u dx
-//!   subject to u >= ψ in Ω,   u = 0 on ∂Ω
+//!   minimize  ||∇u||²   subject to   u ≥ ϕ  in H¹₀
 //! ```
 //!
-//! on the unit square using a primal-dual active-set (PDAS) iteration on the
-//! assembled H¹ stiffness matrix.
+//! (the obstacle problem) on a circular domain using the **proximal Galerkin**
+//! finite element method of Keith & Surowiec (arXiv:2307.12444): a nonlinear
+//! mixed formulation with slack variable `ψ = ln(u)`, solved by Newton
+//! iterations on a 2×2 block system
+//!
+//! ```text
+//!   [ A00   A01 ] [ Δu  ]   [ rhs0 ]
+//!   [ A10   A11 ] [ Δψ  ] = [ rhs1 ]
+//! ```
+//!
+//! with `A00 = α∇²` (H¹), `A10 = ∫ v·u` (L² × H¹), `A01 = A10ᵀ`,
+//! `A11 = Mass(−exp(−ψ)) − 1e-6·Mass` (L²), solved by GMRES with a
+//! block-diagonal GS preconditioner — a 1:1 port of MFEM `examples/ex36.cpp`.
+//!
+//! ## Geometry
+//!
+//! The C++ reference reads `data/disc-nurbs.mesh` (a 5-patch quadratic NURBS
+//! disk), refines 3 times, converts the geometry to P2 (`SetCurvature(2)`)
+//! and rescales by `2√2` to a unit-radius domain.  fem-rs currently lacks
+//! NURBS knot-insertion refinement, so the resulting 320-element P2 geometry
+//! (every element's 9 Gauss–Lobatto node coordinates, identical to what the
+//! C++ run assembles on) is precomputed by the reference and read from
+//! `data/disc_p2_geom.txt`.  The Newton solver itself is a full 1:1 port.
 //!
 //! ## Usage
 //! ```
-//! cargo run --example mfem_ex36_obstacle
-//! cargo run --example mfem_ex36_obstacle -- --n 24 --load -7.5
-//! cargo run --example mfem_ex36_obstacle -- -m mesh.msh
+//! cargo run --example mfem_ex36_obstacle -- -o 1 -r 3 -mi 10 -tol 1e-5 -step 1 -vis
+//! cargo run --example mfem_ex36_obstacle -- -no-vis
 //! ```
 
-use fem_assembly::{Assembler, GridFunction, standard::DiffusionIntegrator};
-use fem_io::mfem::read_mfem_file;
-use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{Mesh, topology::MeshTopology};
-use fem_solver::solve_sparse_cholesky;
-use fem_space::{
-    H1Space,
-    constraints::{apply_dirichlet, boundary_dofs},
-    fe_space::FESpace,
-};
+use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum SolveMethod {
-    Pdas,
-    SemismoothNewton,
+use fem_assembly::constraints::boundary_face_dofs;
+use fem_assembly::mixed::ScalarMassIntegrator;
+use fem_assembly::postproc::coefficient::{CoeffCtx, FnCoeff, ScalarCoeff, SumCoeff, TransformedCoeff};
+use fem_assembly::postproc::grid_function::GridFunction;
+use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegratorCoeff, MassIntegrator};
+use fem_assembly::{eliminate_cols, Assembler, MixedAssembler};
+use fem_linalg::{CsrMatrix, SolverConfig};
+use fem_mesh::topology::MeshTopology;
+use fem_mesh::{ElementType, Mesh};
+use fem_solver::solve_gmres_block_diag_gs;
+use fem_space::fe_space::FESpace;
+use fem_space::{H1Space, L2Space};
+
+// ─── Physical functions (1:1 with ex36.cpp) ─────────────────────────────────
+
+/// `ϕ(x)` — the obstacle: a half-sphere centered at the origin.
+fn spherical_obstacle(pt: &[f64]) -> f64 {
+    let x = pt[0];
+    let y = pt[1];
+    let r = (x * x + y * y).sqrt();
+    let r0 = 0.5_f64;
+    let beta = 0.9_f64;
+
+    let b = r0 * beta;
+    let tmp = (r0 * r0 - b * b).sqrt();
+    let big_b = tmp + b * b / tmp;
+    let big_c = -b / tmp;
+
+    if r > b {
+        big_b + r * big_c
+    } else {
+        (r0 * r0 - r * r).sqrt()
+    }
 }
 
-fn load_mesh(path: &str) -> Mesh<2> {
-    let mfem = read_mfem_file(path).expect("failed to read mesh file");
-    mfem.mesh2d.expect("expected 2D mesh")
+/// Closed-form exact solution.
+fn exact_solution_obstacle(pt: &[f64]) -> f64 {
+    let x = pt[0];
+    let y = pt[1];
+    let r = (x * x + y * y).sqrt();
+    let r0 = 0.5_f64;
+    let a = 0.348982574111686_f64;
+    let big_a = -0.340129705945858_f64;
+
+    if r > a {
+        big_a * r.ln()
+    } else {
+        (r0 * r0 - r * r).sqrt()
+    }
 }
 
-fn main() {
-    let args = parse_args();
-    let base = match args.mesh_file {
-        Some(ref p) => load_mesh(p),
-        None => Mesh::<2>::unit_square_tri(args.n),
+/// Gradient of the exact solution.
+fn exact_solution_gradient_obstacle(pt: &[f64]) -> Vec<f64> {
+    let x = pt[0];
+    let y = pt[1];
+    let r = (x * x + y * y).sqrt();
+    let r0 = 0.5_f64;
+    let a = 0.348982574111686_f64;
+    let big_a = -0.340129705945858_f64;
+
+    if r > a {
+        vec![big_a * x / (r * r), big_a * y / (r * r)]
+    } else {
+        vec![-x / (r0 * r0 - r * r).sqrt(), -y / (r0 * r0 - r * r).sqrt()]
+    }
+}
+
+/// Initial guess `u₀ = 1 − |x|²`.
+fn ic_func(x: &[f64]) -> f64 {
+    let mut rr = 0.0;
+    for &xi in x {
+        rr += xi * xi;
+    }
+    1.0 - rr
+}
+
+// ─── Coefficients ────────────────────────────────────────────────────────────
+
+/// Element-constant (L² P0) grid-function coefficient: value = dof of element.
+struct L2P0Coeff {
+    values: Vec<f64>,
+}
+
+impl ScalarCoeff for L2P0Coeff {
+    fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 {
+        self.values[ctx.elem_id as usize]
+    }
+}
+
+// ─── MFEM `SparseMatrix::EliminateRowCol` with DIAG_ONE (1:1) ────────────────
+
+/// Eliminate essential rows/columns of `a` the way MFEM
+/// `BilinearForm::EliminateEssentialBC(..., DIAG_ONE)` does via
+/// `SparseMatrix::EliminateRowCol`: for each essential DOF `rc`,
+/// zero the row entries, correct `rhs[c] -= x[rc]·A[c,rc]` using the column
+/// entries (then zero them), set `A[rc,rc] = 1` and `rhs[rc] = x[rc]`.
+fn eliminate_rowcol_diag_one(
+    a: &mut CsrMatrix<f64>,
+    ess: &[usize],
+    x: &[f64],
+    rhs: &mut [f64],
+) {
+    for &rc in ess {
+        for p in a.row_ptr[rc]..a.row_ptr[rc + 1] {
+            let c = a.col_idx[p] as usize;
+            if c == rc {
+                a.values[p] = 1.0;
+            } else {
+                a.values[p] = 0.0;
+                // Find (c, rc) and correct rhs[c] (MFEM EliminateRowCol order).
+                for q in a.row_ptr[c]..a.row_ptr[c + 1] {
+                    if a.col_idx[q] as usize == rc {
+                        rhs[c] -= x[rc] * a.values[q];
+                        a.values[q] = 0.0;
+                        break;
+                    }
+                }
+            }
+        }
+        rhs[rc] = x[rc];
+    }
+}
+
+// ─── Mesh: reconstruct the disk (topology + P2 geometry from the reference) ──
+
+/// Build the mesh the C++ reference assembles on: the `disc-nurbs.mesh`
+/// NURBS disk refined 3×, converted to P2 geometry (`SetCurvature(2)`) and
+/// rescaled by `2√2`.
+///
+/// **Topology** (element/vertex connectivity, vertex ids) is read from
+/// `data/disc_p2_topo.txt`, dumped from the C++ reference (the P2 DOF space
+/// lives on the mesh topology: 337 vertices, 656 edge midpoints, 320 element
+/// centers = 1313 DOFs).
+///
+/// **Geometry** (the 9 P2 nodes per element, in QuadQ2 layout) is read from
+/// `data/disc_p2_geom.txt`, also dumped from the C++ reference — the P2
+/// node coordinates (MFEM `GridFunction` with interleaved layout, dof `d` at
+/// `(nodes(2d), nodes(2d+1))`), deduplicated by position into the
+/// `GeometryData` used for isoparametric Jacobians.
+fn load_nurbs_disc() -> Mesh<2> {
+    // ── Topology from the C++ reference (control-grid mesh) ────────────────
+    let topo = std::fs::read_to_string("data/disc_p2_topo.txt")
+        .expect("failed to read disc P2 topology");
+    let vals: Vec<f64> = topo
+        .split_whitespace()
+        .map(|s| s.parse().expect("non-numeric token in topology file"))
+        .collect();
+    let n_vert = vals[0] as usize;
+    let mut idx = 1;
+    let mut vert_coords = Vec::with_capacity(n_vert * 2);
+    for _ in 0..n_vert {
+        vert_coords.push(vals[idx]);
+        vert_coords.push(vals[idx + 1]);
+        idx += 2;
+    }
+    let n_elem = vals[idx] as usize;
+    idx += 1;
+    let mut conn = Vec::with_capacity(n_elem * 4);
+    for _ in 0..n_elem {
+        for _ in 0..4 {
+            conn.push(vals[idx] as u32);
+            idx += 1;
+        }
+    }
+    let n_face = vals[idx] as usize;
+    idx += 1;
+    let mut face_conn = Vec::with_capacity(n_face * 2);
+    let mut face_tags = Vec::with_capacity(n_face);
+    for _ in 0..n_face {
+        face_conn.push(vals[idx] as u32);
+        face_conn.push(vals[idx + 1] as u32);
+        face_tags.push(1);
+        idx += 2;
+    }
+
+    // ── Geometry: 9 P2 nodes per element from the reference dump ───────────
+    let geom_txt = std::fs::read_to_string("data/disc_p2_geom.txt")
+        .expect("failed to read disc P2 geometry");
+    let gvals: Vec<f64> = geom_txt
+        .split_whitespace()
+        .map(|s| s.parse().expect("non-numeric token in geometry file"))
+        .collect();
+    assert_eq!(gvals.len(), 1 + n_elem * 9 * 2, "geometry file length mismatch");
+
+    // Global geometry-node dedup with tolerance (seam points coincide).
+    let tol = 1e-12;
+    let mut node_coords: Vec<f64> = Vec::new();
+    let mut elem_geom_conn: Vec<u32> = Vec::with_capacity(n_elem * 9);
+    let mut gi = 1;
+    for _e in 0..n_elem {
+        for _k in 0..9 {
+            let x = gvals[gi];
+            let y = gvals[gi + 1];
+            gi += 2;
+            let mut id = None;
+            for (i, c) in node_coords.chunks(2).enumerate() {
+                let dx = c[0] - x;
+                let dy = c[1] - y;
+                if dx * dx + dy * dy < tol * tol {
+                    id = Some(i as u32);
+                    break;
+                }
+            }
+            let id = match id {
+                Some(i) => i,
+                None => {
+                    let i = (node_coords.len() / 2) as u32;
+                    node_coords.push(x);
+                    node_coords.push(y);
+                    i
+                }
+            };
+            elem_geom_conn.push(id);
+        }
+    }
+    let n_geom = node_coords.len() / 2;
+
+    let mut mesh = Mesh::uniform(
+        vert_coords,
+        conn,
+        vec![1; n_elem],
+        ElementType::Quad4,
+        face_conn,
+        face_tags,
+        ElementType::Line2,
+    );
+    mesh.geometry = Some(fem_mesh::simplex::GeometryData {
+        order: 2,
+        conn: elem_geom_conn,
+        nodes_per_elem: 9,
+        coords: node_coords,
+        n_nodes: n_geom,
+    });
+    mesh
+}
+
+/// H¹ nodal interpolation on the P2 geometry: for each element, evaluate `f`
+/// at the 9 geometry nodes (QuadQk layout) and assign to the element DOFs.
+fn interpolate_h1_geom(
+    h1: &H1Space<Mesh<2>>,
+    mesh: &Mesh<2>,
+    f: &dyn Fn(&[f64]) -> f64,
+) -> Vec<f64> {
+    let geom = mesh.geometry.as_ref().unwrap();
+    let mut v = vec![0.0; h1.n_dofs()];
+    for e in 0..mesh.n_elems() as u32 {
+        let dofs = h1.element_dofs(e);
+        for k in 0..9 {
+            let node = geom.conn[e as usize * 9 + k];
+            let c = mesh.geom_coords_of(node);
+            v[dofs[k] as usize] = f(c);
+        }
+    }
+    v
+}
+
+// ─── C++ `std::cout` default-format printing (precision 6, defaultfloat) ────
+
+fn cpp_6(x: f64) -> String {
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    let e = x.abs().log10().floor() as i32;
+    let s = if e >= -4 && e < 6 {
+        let dec = (5 - e).max(0) as usize;
+        format!("{:.*}", dec, x)
+    } else {
+        let s = format!("{:.5e}", x);
+        let mut it = s.split('e');
+        let mant = it.next().unwrap().to_string();
+        let exp: i32 = it.next().unwrap().parse().unwrap();
+        format!("{}e{:02}", mant, exp)
     };
-    let mesh = if args.refs > 0 {
-        let mut m = base;
-        for _ in 0..args.refs { m = fem_mesh::amr::refine_uniform(&m); }
-        m
-    } else { base };
-    let result = solve_obstacle_problem(mesh, args.load, args.method);
-
-    let method_label = match args.method {
-        SolveMethod::Pdas => "PDAS",
-        SolveMethod::SemismoothNewton => "Semismooth Newton",
-    };
-    println!("=== fem-rs Example 36: obstacle problem ({method_label}) ===");
-    println!("  Mesh: {}x{} subdivisions, P1 elements", args.n, args.n);
-    println!("  Load: {:.3}", args.load);
-    println!("  Iterations: {}", result.iterations);
-    println!("  Final update: {:.3e}", result.final_update);
-    println!("  Feasibility min(u-psi): {:.3e}", result.min_gap);
-    println!("  Contact DOFs: {}", result.contact_dofs);
-    println!("  Min multiplier (Au-b): {:.3e}", result.min_multiplier);
-    println!("  Complementarity max|(Au-b)(u-psi)|: {:.3e}", result.complementarity);
-    println!("  Unconstrained min(u-psi): {:.3e}", result.unconstrained_min_gap);
-    println!("  L2 distance to obstacle: {:.3e}", result.obstacle_l2_distance);
+    // C++ defaultfloat strips trailing zeros.
+    if s.contains('.') {
+        let t = s.trim_end_matches('0');
+        let t = t.trim_end_matches('.');
+        if t.is_empty() || t == "-" {
+            s
+        } else {
+            t.to_string()
+        }
+    } else {
+        s
+    }
 }
 
-#[derive(Debug, Clone)]
+// ─── Command-line options (same flags as ex36.cpp) ───────────────────────────
+
 struct Args {
-    n: usize,
-    load: f64,
+    order: u8,
     refs: usize,
-    method: SolveMethod,
-    mesh_file: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ObstacleResult {
-    iterations: usize,
-    final_update: f64,
-    min_gap: f64,
-    contact_dofs: usize,
-    min_multiplier: f64,
-    complementarity: f64,
-    unconstrained_min_gap: f64,
-    obstacle_l2_distance: f64,
+    max_it: usize,
+    tol: f64,
+    alpha: f64,
+    visualization: bool,
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { n: 20, refs: 3, load: -5.0, method: SolveMethod::Pdas, mesh_file: None };
+    let mut args = Args {
+        order: 1,
+        refs: 3,
+        max_it: 10,
+        tol: 1e-5,
+        alpha: 1.0,
+        visualization: true,
+    };
     let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "-m" | "--mesh" => {
-                args.mesh_file = Some(it.next().unwrap_or("".into()));
-            }
-            "--n" => {
-                args.n = it.next().unwrap_or("20".into()).parse().unwrap_or(20);
-            }
-            "--load" => {
-                args.load = it.next().unwrap_or("-5.0".into()).parse().unwrap_or(-5.0);
-            }
-            "--method" => {
-                args.method = match it.next().as_deref() {
-                    Some("ssn") | Some("semismooth") => SolveMethod::SemismoothNewton,
-                    _ => SolveMethod::Pdas,
-                };
-            }
-            _ => {}
+    while let Some(a) = it.next() {
+        let mut next = || it.next().expect(&format!("missing value for {a}"));
+        match a.as_str() {
+            "-o" | "--order" => args.order = next().parse().unwrap(),
+            "-r" | "--refs" => args.refs = next().parse().unwrap(),
+            "-mi" | "--max-it" => args.max_it = next().parse().unwrap(),
+            "-tol" | "--tol" => args.tol = next().parse().unwrap(),
+            "-step" | "--step" => args.alpha = next().parse().unwrap(),
+            "-vis" | "--visualization" => args.visualization = true,
+            "-no-vis" | "--no-visualization" => args.visualization = false,
+            other => panic!("unknown option: {other}"),
         }
     }
     args
 }
 
-fn solve_obstacle_problem(mesh: Mesh<2>, load: f64, method: SolveMethod) -> ObstacleResult {
-    let space = H1Space::new(mesh, 1);
-    let ndofs = space.n_dofs();
+// ─── Main ────────────────────────────────────────────────────────────────────
 
-    let mut mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
-    let mut rhs = assemble_constant_rhs(&space, load);
+fn main() {
+    let args = parse_args();
+    let order = args.order;
 
-    let dm = space.dof_manager();
-    let boundary = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
-    let boundary_mask = dof_mask(ndofs, &boundary);
-    apply_dirichlet(&mut mat, &mut rhs, &boundary, &vec![0.0; boundary.len()]);
+    // Print the options the way MFEM's OptionsParser does.
+    println!("Options used:");
+    println!("   --order {}", order);
+    println!("   --refs {}", args.refs);
+    println!("   --max-it {}", args.max_it);
+    println!("   --tol {}", cpp_6(args.tol));
+    println!("   --step {}", cpp_6(args.alpha));
+    println!(
+        "   {}",
+        if args.visualization { "--visualization" } else { "--no-visualization" }
+    );
 
-    let mut obstacle = space.interpolate(&obstacle_profile).into_vec();
-    for &dof in &boundary {
-        obstacle[dof as usize] = 0.0;
-    }
+    // 2. Mesh: the C++ reference refines disc-nurbs.mesh 3× and converts to
+    //    P2 geometry; the resulting 320-element P2 grid is read here.
+    let mesh = load_nurbs_disc();
 
-    let mut unconstrained = vec![0.0; ndofs];
-    gauss_seidel_solve(&mat, &rhs, &mut unconstrained, &boundary_mask, 3_000, 1e-13);
-    let unconstrained_min_gap = unconstrained.iter().zip(obstacle.iter())
-        .map(|(u, psi)| u - psi)
-        .fold(f64::INFINITY, f64::min);
+    // 3. Finite element spaces: H¹(order+1) × L²(order−1).
+    let h1 = H1Space::new(mesh.clone(), order + 1);
+    let l2 = L2Space::new(mesh.clone(), order.saturating_sub(1));
+    let n_h1 = h1.n_dofs();
+    let n_l2 = l2.n_dofs();
+    println!("Number of H1 finite element unknowns: {n_h1}");
+    println!("Number of L2 finite element unknowns: {n_l2}");
 
-    let (solution, iterations, final_update) = match method {
-        SolveMethod::Pdas => primal_dual_active_set(
-            &mat,
-            &rhs,
-            &obstacle,
-            &boundary_mask,
-            80,
-            1e-10,
-        ),
-        SolveMethod::SemismoothNewton => semismooth_newton(
-            &mat,
-            &rhs,
-            &obstacle,
-            &boundary_mask,
-            80,
-            1e-10,
-        ),
-    };
-
-    let (min_gap, contact_dofs, min_multiplier, complementarity) =
-        obstacle_kkt_metrics(&mat, &rhs, &solution, &obstacle, &boundary_mask);
-
-    let gf_solution = GridFunction::new(&space, solution.clone());
-    let obstacle_l2_distance = gf_solution.compute_l2_error(&obstacle_profile, 4);
-
-    ObstacleResult {
-        iterations,
-        final_update,
-        min_gap,
-        contact_dofs,
-        min_multiplier,
-        complementarity,
-        unconstrained_min_gap,
-        obstacle_l2_distance,
-    }
-}
-
-fn obstacle_profile(x: &[f64]) -> f64 {
-    let dx = x[0] - 0.5;
-    let dy = x[1] - 0.5;
-    0.12 - 2.0 * (dx * dx + dy * dy)
-}
-
-fn assemble_constant_rhs<S: FESpace>(space: &S, load: f64) -> Vec<f64> {
-    let mesh = space.mesh();
-    let mut rhs = vec![0.0_f64; space.n_dofs()];
-
-    for elem in 0..mesh.n_elements() as u32 {
-        let nodes = mesh.element_nodes(elem);
-        let x0 = mesh.node_coords(nodes[0]);
-        let x1 = mesh.node_coords(nodes[1]);
-        let x2 = mesh.node_coords(nodes[2]);
-        let area = 0.5 * ((x1[0] - x0[0]) * (x2[1] - x0[1]) - (x1[1] - x0[1]) * (x2[0] - x0[0])).abs();
-        let local = load * area / 3.0;
-        for &dof in space.element_dofs(elem) {
-            rhs[dof as usize] += local;
+    // 4. Essential boundary DOFs: the whole boundary (u = 0 on ∂Ω).
+    let mut ess_set = BTreeSet::new();
+    for f in 0..mesh.n_faces() as u32 {
+        for d in boundary_face_dofs(&mesh, h1.dof_manager(), f) {
+            ess_set.insert(d as usize);
         }
     }
+    let ess_dofs: Vec<usize> = ess_set.into_iter().collect();
 
-    rhs
-}
+    // 5. Initial guess: u₀ = 1 − |x|² (nodal interpolation on the P2 geometry).
+    let geom = mesh.geometry.as_ref().unwrap();
+    let u0 = interpolate_h1_geom(&h1, &mesh, &ic_func);
+    let mut u_old = u0;
+    let mut u_new = vec![0.0; n_h1];
 
-fn dof_mask(ndofs: usize, dofs: &[u32]) -> Vec<bool> {
-    let mut mask = vec![false; ndofs];
-    for &dof in dofs {
-        mask[dof as usize] = true;
+    // 6. Slack variable ψ₀ = clamp(ln(u₀ − ϕ), −36), element-wise (L² P0).
+    let mut psi = vec![0.0; n_l2];
+    for e in 0..n_l2 {
+        let center_node = geom.conn[e * 9 + 8]; // QuadQ2 center node
+        let c = mesh.geom_coords_of(center_node);
+        let u0c = ic_func(c);
+        let val = (u0c - spherical_obstacle(c)).ln();
+        psi[e] = val.max(-36.0);
     }
-    mask
-}
+    let mut psi_old = psi.clone();
 
-fn gauss_seidel_solve(
-    mat: &CsrMatrix<f64>,
-    rhs: &[f64],
-    x: &mut [f64],
-    constrained: &[bool],
-    max_iter: usize,
-    tol: f64,
-) {
-    for _ in 0..max_iter {
-        let mut max_update = 0.0_f64;
-        for row in 0..mat.nrows {
-            if constrained[row] {
-                x[row] = rhs[row];
-                continue;
+    // 7. Newton iteration (outer loop).
+    let mut x0 = vec![0.0; n_h1]; // u block — persists across inner iterations
+    let mut x1 = vec![0.0; n_l2]; // δψ block
+    let mut total_iterations = 0usize;
+    let mut increment_u = 0.1f64;
+    let mut outer = 0usize;
+    let mut last_j = 0usize;
+
+    for k in 0..args.max_it {
+        outer = k;
+        println!("\nOUTER ITERATION {}", k + 1);
+
+        for j in 0..10 {
+            last_j = j;
+            total_iterations += 1;
+
+            // rhs0 = α·f(=0) + (ψ_old − ψ)  on H¹.
+            let psi_old_minus_psi = SumCoeff {
+                a: L2P0Coeff { values: psi_old.clone() },
+                b: TransformedCoeff {
+                    inner: L2P0Coeff { values: psi.clone() },
+                    transform: |t| -t,
+                },
+            };
+            let integ0 = DomainSourceIntegratorCoeff::new(psi_old_minus_psi);
+            let mut rhs0 = Assembler::assemble_linear(&h1, &[&integ0], 4);
+
+            // rhs1 = exp(ψ) + ϕ  on L².
+            let exp_psi = TransformedCoeff {
+                inner: L2P0Coeff { values: psi.clone() },
+                transform: |t| t.exp(),
+            };
+            let obstacle_cf = FnCoeff(|x: &[f64]| spherical_obstacle(x));
+            let rhs1_cf = SumCoeff { a: exp_psi, b: obstacle_cf };
+            let integ1 = DomainSourceIntegratorCoeff::new(rhs1_cf);
+            let mut rhs1 = Assembler::assemble_linear(&l2, &[&integ1], 0);
+
+            // A00 = α ∇²  on H¹, then EliminateEssentialBC(..., DIAG_ONE).
+            let mut a00 = Assembler::assemble_bilinear(
+                &h1,
+                &[&DiffusionIntegrator { kappa: args.alpha }],
+                5,
+            );
+            eliminate_rowcol_diag_one(&mut a00, &ess_dofs, &x0, &mut rhs0);
+
+            // A10 = ∫ v·u  (L² rows × H¹ cols), then EliminateTrialEssentialBC.
+            let mut a10 = MixedAssembler::assemble_bilinear(
+                &l2,
+                &h1,
+                &[&ScalarMassIntegrator],
+                5,
+            );
+            eliminate_cols(&mut a10, &ess_dofs, &x0, &mut rhs1);
+            let a01 = a10.transpose();
+
+            // A11 = Mass(−exp(ψ)) − 1e-6·Mass  on L² (spectrum shift).
+            let neg_exp_psi = TransformedCoeff {
+                inner: L2P0Coeff { values: psi.clone() },
+                transform: |t| -t.exp(),
+            };
+            let a11 = Assembler::assemble_bilinear(
+                &l2,
+                &[&MassIntegrator { rho: neg_exp_psi }, &MassIntegrator { rho: -1e-6 }],
+                3,
+            );
+
+            // GMRES(A, prec, rhs, x, 0, 10000, 500, 1e-12, 0.0) with
+            // BlockDiagonalPreconditioner(GSSmoother(A00), GSSmoother(A11)).
+            let cfg = SolverConfig {
+                rtol: 1e-12,
+                atol: 0.0,
+                max_iter: 10000,
+                verbose: std::env::var("FEM_EX36_GMRES_DEBUG").is_ok(),
+                ..Default::default()
+            };
+            solve_gmres_block_diag_gs(
+                &a00, &a01, &a10, &a11,
+                &rhs0, &rhs1,
+                &mut x0, &mut x1,
+                500, &cfg,
+            );
+
+            // Newton update size: ‖u_old − u_new‖_{L²}.
+            u_new.copy_from_slice(&x0);
+            let mut tmp = vec![0.0; n_h1];
+            for i in 0..n_h1 {
+                tmp[i] = u_old[i] - u_new[i];
             }
-            let start = mat.row_ptr[row];
-            let end = mat.row_ptr[row + 1];
-            let mut diag = 0.0;
-            let mut sigma = 0.0;
-            for idx in start..end {
-                let col = mat.col_idx[idx] as usize;
-                let val = mat.values[idx];
-                if col == row {
-                    diag = val;
-                } else {
-                    sigma += val * x[col];
-                }
+            let newton_size = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 4);
+
+            // ψ += γ·δψ  (γ = 1).
+            for (p, d) in psi.iter_mut().zip(x1.iter()) {
+                *p += d;
             }
-            let next = (rhs[row] - sigma) / diag;
-            max_update = max_update.max((next - x[row]).abs());
-            x[row] = next;
-        }
-        if max_update < tol {
-            return;
-        }
-    }
-}
 
-fn primal_dual_active_set(
-    mat: &CsrMatrix<f64>,
-    rhs: &[f64],
-    obstacle: &[f64],
-    constrained: &[bool],
-    max_iter: usize,
-    tol: f64,
-) -> (Vec<f64>, usize, f64) {
-    let n = mat.nrows;
-    let mut x = obstacle.to_vec();
-    for i in 0..n {
-        if constrained[i] {
-            x[i] = rhs[i];
-        }
-    }
-
-    let mut prev_active = vec![false; n];
-    let mut final_update = f64::INFINITY;
-
-    for iter in 0..max_iter {
-        let mut ax = vec![0.0_f64; n];
-        mat.spmv(&x, &mut ax);
-
-        let mut active = vec![false; n];
-        for i in 0..n {
-            if constrained[i] {
-                active[i] = true;
-                continue;
+            if args.visualization {
+                println!("Newton_update_size = {}", cpp_6(newton_size));
             }
-            let lambda_i = ax[i] - rhs[i];
-            let gap_i = x[i] - obstacle[i];
-            active[i] = gap_i <= 1e-10 && lambda_i > 1e-10;
-        }
-
-        let mut free = Vec::new();
-        let mut fixed = vec![false; n];
-        for i in 0..n {
-            if active[i] || constrained[i] {
-                fixed[i] = true;
-            } else {
-                free.push(i);
+            if newton_size < increment_u {
+                break;
             }
         }
 
-        let mut x_new = x.clone();
-        for i in 0..n {
-            if fixed[i] {
-                x_new[i] = if constrained[i] { rhs[i] } else { obstacle[i] };
-            }
+        // Increment: ‖u_new − u_old‖_{L²}.
+        let mut tmp = vec![0.0; n_h1];
+        for i in 0..n_h1 {
+            tmp[i] = u_new[i] - u_old[i];
+        }
+        increment_u = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 4);
+
+        println!("Number of Newton iterations = {}", last_j + 1);
+        println!("Increment (|| uₕ - uₕ_prvs||) = {}", cpp_6(increment_u));
+
+        u_old.copy_from_slice(&u_new);
+        psi_old.copy_from_slice(&psi);
+
+        if increment_u < args.tol || outer == args.max_it - 1 {
+            break;
         }
 
-        if !free.is_empty() {
-            let (a_ff, b_f) = reduced_free_system(mat, rhs, &free, &fixed, &x_new);
-            let u_f = solve_sparse_cholesky(&a_ff, &b_f).expect("PDAS reduced solve failed");
-            for (k, &gi) in free.iter().enumerate() {
-                x_new[gi] = u_f[k].max(obstacle[gi]);
-            }
-        }
-
-        let mut max_update = 0.0_f64;
-        for i in 0..n {
-            max_update = max_update.max((x_new[i] - x[i]).abs());
-        }
-        final_update = max_update;
-
-        let active_unchanged = active == prev_active;
-        x = x_new;
-        prev_active = active;
-
-        if active_unchanged && max_update < tol {
-            return (x, iter + 1, final_update);
-        }
-    }
-
-    (x, max_iter, final_update)
-}
-
-fn reduced_free_system(
-    mat: &CsrMatrix<f64>,
-    rhs: &[f64],
-    free: &[usize],
-    fixed: &[bool],
-    x_fixed: &[f64],
-) -> (CsrMatrix<f64>, Vec<f64>) {
-    let nf = free.len();
-    let mut inv = vec![usize::MAX; mat.nrows];
-    for (i, &g) in free.iter().enumerate() {
-        inv[g] = i;
-    }
-
-    let mut coo = CooMatrix::<f64>::new(nf, nf);
-    let mut b = vec![0.0_f64; nf];
-
-    for (ri, &gi) in free.iter().enumerate() {
-        let mut rhs_i = rhs[gi];
-        for idx in mat.row_ptr[gi]..mat.row_ptr[gi + 1] {
-            let gj = mat.col_idx[idx] as usize;
-            let aij = mat.values[idx];
-            let cj = inv[gj];
-            if cj != usize::MAX {
-                coo.add(ri, cj, aij);
-            } else if fixed[gj] {
-                rhs_i -= aij * x_fixed[gj];
-            }
-        }
-        b[ri] = rhs_i;
-    }
-
-    (coo.into_csr(), b)
-}
-
-/// Semismooth Newton method for the obstacle problem.
-///
-/// Reformulates KKT complementarity using the `min` function:
-///   φᵢ(u) = min(uᵢ − ψᵢ,  fᵢ − [Au]ᵢ) = 0
-///
-/// Each Newton step:
-/// - Inactive DOFs (free): solve A u_new = f (standard PDE residual)
-/// - Active DOFs (contact): u_new[i] = ψ[i]   (enforce contact constraint)
-///
-/// Converges locally with quadratic rate; no requirement to wait for
-/// active-set stabilisation between steps (unlike PDAS).
-fn semismooth_newton(
-    mat: &CsrMatrix<f64>,
-    rhs: &[f64],
-    obstacle: &[f64],
-    constrained: &[bool],
-    max_iter: usize,
-    tol: f64,
-) -> (Vec<f64>, usize, f64) {
-    let n = mat.nrows;
-    // Start at the obstacle (same as PDAS) so that the active set is meaningful
-    // from the very first iteration.
-    let mut u = obstacle.to_vec();
-    for i in 0..n {
-        if constrained[i] {
-            u[i] = rhs[i];
-        }
-    }
-
-    let mut final_update = f64::INFINITY;
-
-    for iter in 0..max_iter {
-        // Compute residual Au
-        let mut au = vec![0.0_f64; n];
-        mat.spmv(&u, &mut au);
-
-        // SSN active-set criterion: same two-sided KKT check as PDAS
-        //   gap ≤ 0  (primal: at obstacle)  AND  multiplier > 0  (dual: contact force)
-        // Using this criterion makes SSN and PDAS converge to the same KKT solution;
-        // the algorithmic distinction is that SSN does NOT require the active set to
-        // stabilise between steps — it terminates as soon as the Newton step is small.
-        let mut active = vec![false; n];
-        for i in 0..n {
-            if constrained[i] {
-                active[i] = true;
-                continue;
-            }
-            let gap = u[i] - obstacle[i];
-            let multiplier = au[i] - rhs[i];
-            active[i] = gap <= 1e-10 && multiplier > 0.0;
-        }
-
-        // Build Newton step: solve for u_new directly
-        //   active dofs → u_new[i] = obstacle[i]
-        //   free dofs   → A_free * u_new_free = rhs_free (with contact rows eliminated)
-        let free: Vec<usize> = (0..n)
-            .filter(|&i| !active[i] && !constrained[i])
-            .collect();
-        let fixed: Vec<bool> = (0..n).map(|i| active[i] || constrained[i]).collect();
-
-        let mut u_new = u.clone();
-        for i in 0..n {
-            if active[i] {
-                u_new[i] = if constrained[i] { rhs[i] } else { obstacle[i] };
-            }
-        }
-
-        if !free.is_empty() {
-            let (a_ff, b_f) = reduced_free_system(mat, rhs, &free, &fixed, &u_new);
-            let u_f = solve_sparse_cholesky(&a_ff, &b_f)
-                .expect("SSN reduced solve failed");
-            for (k, &gi) in free.iter().enumerate() {
-                // enforce feasibility: solution may not go below obstacle
-                u_new[gi] = u_f[k].max(obstacle[gi]);
-            }
-        }
-
-        let mut max_update = 0.0_f64;
-        for i in 0..n {
-            max_update = max_update.max((u_new[i] - u[i]).abs());
-        }
-        final_update = max_update;
-        u = u_new;
-
-        // SSN convergence: Newton step is small (no active-set stabilisation required)
-        if max_update < tol {
-            return (u, iter + 1, final_update);
-        }
-    }
-
-    (u, max_iter, final_update)
-}
-
-fn obstacle_kkt_metrics(
-    mat: &CsrMatrix<f64>,
-    rhs: &[f64],
-    solution: &[f64],
-    obstacle: &[f64],
-    constrained: &[bool],
-) -> (f64, usize, f64, f64) {
-    let mut residual = vec![0.0_f64; mat.nrows];
-    mat.spmv(solution, &mut residual);
-
-    let mut min_gap = f64::INFINITY;
-    let mut min_multiplier = f64::INFINITY;
-    let mut complementarity: f64 = 0.0;
-    let mut contact_dofs = 0usize;
-
-    for i in 0..mat.nrows {
-        if constrained[i] {
-            continue;
-        }
-        let gap = solution[i] - obstacle[i];
-        let multiplier = residual[i] - rhs[i];
-        min_gap = min_gap.min(gap);
-        min_multiplier = min_multiplier.min(multiplier);
-        complementarity = complementarity.max((gap * multiplier).abs());
-        if gap <= 1e-8 {
-            contact_dofs += 1;
-        }
-    }
-
-    (min_gap, contact_dofs, min_multiplier, complementarity)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn m(n: usize) -> Mesh<2> { Mesh::<2>::unit_square_tri(n) }
-
-    #[test]
-    fn ex36_obstacle_solution_is_feasible_and_has_contact() {
-        let result = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
-        assert!(result.final_update < 1e-8, "final update too large: {}", result.final_update);
-        assert!(result.min_gap >= -1e-8, "solution violated obstacle: {}", result.min_gap);
-        assert!(result.min_multiplier >= -1e-6, "negative multiplier: {}", result.min_multiplier);
-        assert!(result.complementarity < 1e-6, "complementarity too large: {}", result.complementarity);
-        assert!(result.contact_dofs > 0, "expected a non-empty contact set");
-    }
-
-    #[test]
-    fn ex36_obstacle_improves_on_unconstrained_solution() {
-        let result = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
-        assert!(result.unconstrained_min_gap < -1e-3, "unconstrained solution should violate obstacle: {}", result.unconstrained_min_gap);
-        assert!(result.min_gap >= -1e-8, "projected solution should be feasible: {}", result.min_gap);
-    }
-
-    #[test]
-    fn ex36_stronger_downward_loads_expand_contact_set() {
-        let light = solve_obstacle_problem(m(14), -2.0, SolveMethod::Pdas);
-        let medium = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
-        let strong = solve_obstacle_problem(m(14), -8.0, SolveMethod::Pdas);
-
-        for (label, result) in [("light", &light), ("medium", &medium), ("strong", &strong)] {
-            assert!(result.min_gap >= -1e-8, "{label} load violated obstacle: {}", result.min_gap);
-            assert!(result.min_multiplier >= -1e-6, "{label} load had negative multiplier: {}", result.min_multiplier);
-            assert!(result.complementarity < 1e-6, "{label} load complementarity too large: {}", result.complementarity);
-        }
-
-        assert!(
-            light.contact_dofs < medium.contact_dofs && medium.contact_dofs < strong.contact_dofs,
-            "expected stronger downward load to enlarge contact set, got light={} medium={} strong={}",
-            light.contact_dofs,
-            medium.contact_dofs,
-            strong.contact_dofs
+        let h1_err = GridFunction::new(&h1, u_old.clone()).compute_h1_full_error(
+            &|x: &[f64]| exact_solution_obstacle(x),
+            &|x: &[f64]| exact_solution_gradient_obstacle(x),
+            4,
         );
-        assert!(
-            light.obstacle_l2_distance > medium.obstacle_l2_distance
-                && medium.obstacle_l2_distance > strong.obstacle_l2_distance,
-            "expected stronger downward load to move solution closer to obstacle, got light={} medium={} strong={}",
-            light.obstacle_l2_distance,
-            medium.obstacle_l2_distance,
-            strong.obstacle_l2_distance
-        );
+        println!("H1-error  (|| u - uₕᵏ||)       = {}", cpp_6(h1_err));
     }
 
-    #[test]
-    fn ex36_upward_load_has_smaller_contact_than_downward_load() {
-        let upward = solve_obstacle_problem(m(14), 1.0, SolveMethod::Pdas);
-        let downward = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
+    println!("\n Outer iterations: {}", outer + 1);
+    println!(" Total iterations: {}", total_iterations);
+    println!(" Total dofs:       {}", n_h1 + n_l2);
 
-        assert!(upward.min_gap >= -1e-8, "upward load violated obstacle: {}", upward.min_gap);
-        assert!(upward.complementarity < 1e-6, "upward load complementarity too large: {}", upward.complementarity);
-        assert!(
-            upward.contact_dofs < downward.contact_dofs,
-            "expected upward load to reduce contact set, got upward={} downward={}",
-            upward.contact_dofs,
-            downward.contact_dofs
-        );
-        assert!(
-            upward.obstacle_l2_distance > downward.obstacle_l2_distance,
-            "expected upward load solution to sit farther from obstacle, got upward={} downward={}",
-            upward.obstacle_l2_distance,
-            downward.obstacle_l2_distance
-        );
+    // 8. Final errors.
+    let gf = GridFunction::new(&h1, u_old.clone());
+    let l2_err = gf.compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 4);
+    let h1_err = gf.compute_h1_full_error(
+        &|x: &[f64]| exact_solution_obstacle(x),
+        &|x: &[f64]| exact_solution_gradient_obstacle(x),
+        4,
+    );
+
+    // u_alt = exp(ψₕ) + ϕ, element-wise (L² P0 projection at element
+    // centers), then L² error vs exact — MFEM's
+    // `ExponentialGridFunctionCoefficient(psi_gf, obstacle)`.
+    let mut u_alt = vec![0.0; n_l2];
+    for e in 0..n_l2 {
+        let center_node = geom.conn[e * 9 + 8];
+        let c = mesh.geom_coords_of(center_node);
+        u_alt[e] = psi[e].exp() + spherical_obstacle(c);
     }
+    let l2_alt = GridFunction::new(&l2, u_alt)
+        .compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 0);
 
-    // ── Semismooth Newton tests ──────────────────────────────────────────────
-
-    #[test]
-    fn ex36_ssn_solution_is_feasible_and_has_contact() {
-        let result = solve_obstacle_problem(m(14), -5.0, SolveMethod::SemismoothNewton);
-        assert!(result.final_update < 1e-8, "SSN: final update too large: {}", result.final_update);
-        assert!(result.min_gap >= -1e-8, "SSN: solution violated obstacle: {}", result.min_gap);
-        assert!(result.min_multiplier >= -1e-6, "SSN: negative multiplier: {}", result.min_multiplier);
-        assert!(result.complementarity < 1e-6, "SSN: complementarity too large: {}", result.complementarity);
-        assert!(result.contact_dofs > 0, "SSN: expected a non-empty contact set");
-    }
-
-    #[test]
-    fn ex36_ssn_agrees_with_pdas() {
-        let pdas = solve_obstacle_problem(m(14), -5.0, SolveMethod::Pdas);
-        let ssn  = solve_obstacle_problem(m(14), -5.0, SolveMethod::SemismoothNewton);
-
-        let l2_diff = (pdas.obstacle_l2_distance - ssn.obstacle_l2_distance).abs();
-        assert!(
-            l2_diff < 1e-6,
-            "SSN and PDAS L2 distances differ too much: pdas={} ssn={}",
-            pdas.obstacle_l2_distance, ssn.obstacle_l2_distance
-        );
-        assert_eq!(
-            pdas.contact_dofs, ssn.contact_dofs,
-            "SSN and PDAS contact sets differ: pdas={} ssn={}",
-            pdas.contact_dofs, ssn.contact_dofs
-        );
-        assert!(
-            pdas.complementarity < 1e-6 && ssn.complementarity < 1e-6,
-            "both methods should satisfy complementarity: pdas={} ssn={}",
-            pdas.complementarity, ssn.complementarity
-        );
-    }
-
-    #[test]
-    fn ex36_ssn_converges_in_few_iterations() {
-        // SSN has quadratic local convergence; should need ≤ 20 outer iterations
-        // on a moderate mesh with a well-posed load.
-        let result = solve_obstacle_problem(m(20), -5.0, SolveMethod::SemismoothNewton);
-        assert!(result.iterations <= 20,
-            "SSN took too many iterations: {}", result.iterations);
-        assert!(result.min_gap >= -1e-8, "SSN: obstacle violated: {}", result.min_gap);
-        assert!(result.complementarity < 1e-6, "SSN: complementarity too large: {}", result.complementarity);
-    }
-
-    /// A finer mesh must still produce a feasible solution for both solvers.
-    #[test]
-    fn ex36_finer_mesh_preserves_obstacle_feasibility() {
-        for method in [SolveMethod::Pdas, SolveMethod::SemismoothNewton] {
-            let result = solve_obstacle_problem(m(20), -5.0, method);
-            assert!(result.min_gap >= -1e-8,
-                "finer mesh violated obstacle: min_gap={}", result.min_gap);
-            assert!(result.complementarity < 1e-6,
-                "finer mesh complementarity too large: {}", result.complementarity);
-            assert!(result.contact_dofs > 0,
-                "finer mesh should still have non-empty contact set");
-        }
-    }
+    println!("\n Final L2-error (|| u - uₕ||)          = {}", cpp_6(l2_err));
+    println!(" Final H1-error (|| u - uₕ||)          = {}", cpp_6(h1_err));
+    println!(" Final L2-error (|| u - ϕ - exp(ψₕ)||) = {}", cpp_6(l2_alt));
 }

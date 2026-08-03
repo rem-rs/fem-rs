@@ -153,6 +153,7 @@ pub use elasticity::ElasticityIntegrator;
 pub use mass::MassIntegrator;
 pub use neumann::NeumannIntegrator;
 pub use source::DomainSourceIntegrator;
+pub use source::DomainSourceIntegratorCoeff;
 pub use curl_curl::{CurlCurlIntegrator, CurlCurlTensorIntegrator};
 pub use vector_mass::{VectorMassIntegrator, VectorMassTensorIntegrator};
 pub use convection::ConvectionIntegrator;

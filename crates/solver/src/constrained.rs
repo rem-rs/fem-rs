@@ -70,16 +70,25 @@ impl SchurConstrainedSolver {
 
 // ─── MFEM GMRESSolver::Mult (left-preconditioned, restart m) ────────────────
 
+/// Generic MFEM `GMRESSolver::Mult` — the 1:1 port used by
+/// [`SchurConstrainedSolver`] (via [`gmres_schur`]) and by the 2×2 block
+/// solver [`solve_gmres_block_diag_gs`].
+///
+/// `apply` computes `y = A x`; `apply_pc` computes `y = M x` (the
+/// preconditioner, e.g. a block-diagonal GS smoother).  `x` is the in/out
+/// initial guess; like MFEM's `GMRESSolver` (`iterative_mode = false` by
+/// default) the iteration always starts from the zero vector and `x`'s input
+/// value only matters through the caller's RHS/BC handling.
 #[allow(clippy::too_many_arguments)]
-fn gmres_schur(
-    sys: &BlockSystem,      // the saddle-point system [A Bᵀ; B 0]
+fn gmres_core(
+    n: usize,
+    apply: &dyn Fn(&[f64], &mut [f64]),
+    apply_pc: &dyn Fn(&[f64], &mut [f64]),
     b: &[f64],
     x: &mut [f64],
     m: usize,               // restart dimension (MFEM default 50)
     cfg: &SolverConfig,
 ) -> (bool, usize, f64) {
-    let n_u = sys.n_u();
-    let n = b.len();
     let mut r = vec![0.0_f64; n];
     let mut w = vec![0.0_f64; n];
 
@@ -88,11 +97,11 @@ fn gmres_schur(
 
     // r = A x (= 0);  w = b − A x = b;  r = M w  (r is zero here, so the GS
     // initial guess is 0 — same as MFEM).
-    apply_system(sys, x, &mut r);
+    apply(x, &mut r);
     for i in 0..n {
         w[i] = b[i] - r[i];
     }
-    apply_block_pc(&sys.a, n_u, &w, &mut r);
+    apply_pc(&w, &mut r);
 
     let mut beta = norm2(&r);
     let final_norm = (cfg.rtol * beta).max(cfg.atol);
@@ -123,8 +132,8 @@ fn gmres_schur(
         while i < m && j <= cfg.max_iter {
             // r = A v[i];  w = M r  (GS zeroes its output first, so the
             // previous contents of w do not matter — MFEM iterative_mode=false).
-            apply_system(sys, &v[i], &mut r);
-            apply_block_pc(&sys.a, n_u, &r, &mut w);
+            apply(&v[i], &mut r);
+            apply_pc(&r, &mut w);
 
             // Arnoldi: H(k,i) = w·v[k],  w −= H(k,i) v[k]
             for k in 0..=i {
@@ -170,11 +179,11 @@ fn gmres_schur(
         update_x(x, i.saturating_sub(1), &h, &s, &v);
 
         // r = M (b − A x) (GS output is zeroed first, as in MFEM).
-        apply_system(sys, x, &mut r);
+        apply(x, &mut r);
         for t in 0..n {
             w[t] = b[t] - r[t];
         }
-        apply_block_pc(&sys.a, n_u, &w, &mut r);
+        apply_pc(&w, &mut r);
         beta = norm2(&r);
         if beta <= final_norm {
             return (true, j, beta);
@@ -183,6 +192,24 @@ fn gmres_schur(
     }
 
     (false, cfg.max_iter, beta)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gmres_schur(
+    sys: &BlockSystem,      // the saddle-point system [A Bᵀ; B 0]
+    b: &[f64],
+    x: &mut [f64],
+    m: usize,               // restart dimension (MFEM default 50)
+    cfg: &SolverConfig,
+) -> (bool, usize, f64) {
+    let n = b.len();
+    let n_u = sys.n_u();
+    gmres_core(
+        n,
+        &|xv, y| apply_system(sys, xv, y),
+        &|xv, y| apply_block_pc(&sys.a, n_u, xv, y),
+        b, x, m, cfg,
+    )
 }
 
 // ─── Block-diagonal preconditioner diag(GS(A), I) ───────────────────────────
@@ -343,4 +370,72 @@ fn axpy_inplace(alpha: f64, x: &[f64], y: &mut [f64]) {
     for (yi, &xi) in y.iter_mut().zip(x) {
         *yi += alpha * xi;
     }
+}
+
+// ─── 2×2 block GMRES with block-diagonal GS preconditioner (ex36) ───────────
+
+/// Solve the 2×2 block system
+/// `[A00 A01; A10 A11] [x0; x1] = [b0; b1]` with GMRES preconditioned by
+/// `M = diag(GS(A00), GS(A11))` — a 1:1 port of MFEM's `GMRES` +
+/// `BlockDiagonalPreconditioner(GSSmoother(A00), GSSmoother(A11))` (ex36
+/// obstacle problem).
+///
+/// `A01` must be the transpose of `A10` (as in MFEM, where `A01 =
+/// Transpose(A10)`).  `x0`/`x1` are in/out initial guesses; the GMRES
+/// iteration itself starts from zero (MFEM `iterative_mode = false`), so the
+/// input values only enter through the caller's essential-BC RHS handling.
+/// Returns `(converged, iterations, final_preconditioned_residual)`.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_gmres_block_diag_gs(
+    a00: &CsrMatrix<f64>,
+    a01: &CsrMatrix<f64>,
+    a10: &CsrMatrix<f64>,
+    a11: &CsrMatrix<f64>,
+    b0: &[f64],
+    b1: &[f64],
+    x0: &mut [f64],
+    x1: &mut [f64],
+    restart: usize,      // MFEM GMRES restart / MR dimension (ex36: 500)
+    cfg: &SolverConfig,
+) -> (bool, usize, f64) {
+    let n0 = x0.len();
+    let n1 = x1.len();
+    assert_eq!(a00.nrows, n0, "A00 rows must match x0");
+    assert_eq!(a10.nrows, n1, "A10 rows must match x1");
+    assert_eq!(a11.nrows, n1, "A11 rows must match x1");
+    assert_eq!(b0.len(), n0);
+    assert_eq!(b1.len(), n1);
+
+    let n = n0 + n1;
+    let mut b = vec![0.0_f64; n];
+    b[..n0].copy_from_slice(b0);
+    b[n0..].copy_from_slice(b1);
+
+    let mut x = vec![0.0_f64; n];
+
+    let res = gmres_core(
+        n,
+        &|xv, y| {
+            // Row block 0: y0 = A00 x0, then += A01 x1  (MFEM BlockOperator
+            // column-iteration order preserves the floating-point sum).
+            spmv_into(a00, &xv[..n0], &mut y[..n0]);
+            spmv_add(a01, &xv[n0..], &mut y[..n0]);
+            // Row block 1: y1 = A10 x0, then += A11 x1.
+            spmv_into(a10, &xv[..n0], &mut y[n0..]);
+            spmv_add(a11, &xv[n0..], &mut y[n0..]);
+        },
+        &|xv, y| {
+            // BlockDiagonalPreconditioner::Mult: each GSSmoother zeroes its
+            // output first (iterative_mode = false), then sweeps fwd+back.
+            y[..n0].fill(0.0);
+            gs_symmetric(a00, &xv[..n0], &mut y[..n0]);
+            y[n0..].fill(0.0);
+            gs_symmetric(a11, &xv[n0..], &mut y[n0..]);
+        },
+        &b, &mut x, restart, cfg,
+    );
+
+    x0.copy_from_slice(&x[..n0]);
+    x1.copy_from_slice(&x[n0..]);
+    res
 }
