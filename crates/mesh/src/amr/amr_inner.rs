@@ -880,6 +880,256 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     result
 }
 
+/// MFEM `UniformRefinement3D_base` best-aspect-ratio refinement-type
+/// selection (rt_algo = 1): computes the aspect ratio κ = max(σ0/σ2) of two
+/// candidate octahedron splits per refinement type and picks the type with
+/// the smallest κ.  `J` is the element Jacobian at the centroid (constant
+/// for a linear tet), transformed by the inverse regular-tet Jacobian
+/// (`Geometry::JacToPerfJac` with `PerfGeomToGeomJac[TETRAHEDRON]`).
+pub fn tet_select_rt_debug(mesh: &Mesh<3>, ns: &[NodeId]) -> usize {
+    let c = |i: usize| mesh.coords_of(ns[i]);
+    let (v0, v1, v2, v3) = (c(0), c(1), c(2), c(3));
+    // J[axis][col] = v_{col+1} - v0
+    let mut j = [[0.0_f64; 3]; 3];
+    for t in 0..3 {
+        j[t][0] = v1[t] - v0[t];
+        j[t][1] = v2[t] - v0[t];
+        j[t][2] = v3[t] - v0[t];
+    }
+    // Em: cols 0-2 = 0.5*J, cols 3-5 = 0.5*(J_i + J_j).
+    let mut em = [[0.0_f64; 6]; 3];
+    for t in 0..3 {
+        for s in 0..3 {
+            em[t][s] = 0.5 * j[t][s];
+        }
+        em[t][3] = 0.5 * (j[t][0] + j[t][1]);
+        em[t][4] = 0.5 * (j[t][0] + j[t][2]);
+        em[t][5] = 0.5 * (j[t][1] + j[t][2]);
+    }
+    // Inverse of the regular-tet Jacobian (GetPerfPointMat(TETRAHEDRON)).
+    let s3 = 3f64.sqrt();
+    let s6 = 6f64.sqrt();
+    let perf_inv = [
+        [1.0, -1.0 / s3, -1.0 / s6],
+        [0.0, 2.0 / s3, -1.0 / s6],
+        [0.0, 0.0, (1.5f64).sqrt()],
+    ];
+    // Aspect ratio of a candidate split: κ = max(σ0/σ2 over the two Jacobians).
+    let kappa_of = |js1: &[[f64; 3]; 3], js2: &[[f64; 3]; 3]| -> f64 {
+        let ar = |js: &[[f64; 3]; 3]| -> f64 {
+            // Jp = Js * PerfGeomToGeomJac[TET]
+            let mut jp = [[0.0_f64; 3]; 3];
+            for t in 0..3 {
+                for c in 0..3 {
+                    jp[t][c] = js[t][0] * perf_inv[0][c]
+                        + js[t][1] * perf_inv[1][c]
+                        + js[t][2] * perf_inv[2][c];
+                }
+            }
+            let m = nalgebra::Matrix3::from_fn(|t, s| jp[t][s]);
+            let sv = m.svd(true, false).singular_values;
+            if sv[2].abs() < 1e-300 { f64::INFINITY } else { sv[0] / sv[2] }
+        };
+        ar(js1).max(ar(js2))
+    };
+    // rt = 0
+    let js = [
+        [em[0][5] - em[0][0], em[0][1] - em[0][0], em[0][2] - em[0][0]],
+        [em[1][5] - em[1][0], em[1][1] - em[1][0], em[1][2] - em[1][0]],
+        [em[2][5] - em[2][0], em[2][1] - em[2][0], em[2][2] - em[2][0]],
+    ];
+    let js2 = [
+        [em[0][5] - em[0][0], em[0][2] - em[0][0], em[0][4] - em[0][0]],
+        [em[1][5] - em[1][0], em[1][2] - em[1][0], em[1][4] - em[1][0]],
+        [em[2][5] - em[2][0], em[2][2] - em[2][0], em[2][4] - em[2][0]],
+    ];
+    let mut kappa_min = kappa_of(&js, &js2);
+    let mut rt = 0usize;
+    // rt = 1
+    let js = [
+        [em[0][0] - em[0][1], em[0][4] - em[0][1], em[0][2] - em[0][1]],
+        [em[1][0] - em[1][1], em[1][4] - em[1][1], em[1][2] - em[1][1]],
+        [em[2][0] - em[2][1], em[2][4] - em[2][1], em[2][2] - em[2][1]],
+    ];
+    let js2 = [
+        [em[0][2] - em[0][1], em[0][4] - em[0][1], em[0][5] - em[0][1]],
+        [em[1][2] - em[1][1], em[1][4] - em[1][1], em[1][5] - em[1][1]],
+        [em[2][2] - em[2][1], em[2][4] - em[2][1], em[2][5] - em[2][1]],
+    ];
+    let kappa = kappa_of(&js, &js2);
+    // MFEM's CalcSingularvalue returns bit-identical values for symmetric
+    // candidates (rt tie), while the SVD here carries ~1e-15 noise; use a
+    // tolerance so ties keep the default rt=0 exactly like MFEM.
+    const KAPPA_TOL: f64 = 1e-12;
+    if kappa < kappa_min - KAPPA_TOL {
+        kappa_min = kappa;
+        rt = 1;
+    }
+    // rt = 2
+    let js = [
+        [em[0][0] - em[0][2], em[0][1] - em[0][2], em[0][3] - em[0][2]],
+        [em[1][0] - em[1][2], em[1][1] - em[1][2], em[1][3] - em[1][2]],
+        [em[2][0] - em[2][2], em[2][1] - em[2][2], em[2][3] - em[2][2]],
+    ];
+    let js2 = [
+        [em[0][1] - em[0][2], em[0][5] - em[0][2], em[0][3] - em[0][2]],
+        [em[1][1] - em[1][2], em[1][5] - em[1][2], em[1][3] - em[1][2]],
+        [em[2][1] - em[2][2], em[2][5] - em[2][2], em[2][3] - em[2][2]],
+    ];
+    let kappa = kappa_of(&js, &js2);
+    if kappa < kappa_min - 1e-12 {
+        rt = 2;
+    }
+    rt
+}
+
+/// MFEM `Mesh::MarkTetMeshForRefinement`: rotates each tetrahedron so that
+/// vertices 0-1 is the longest edge (and the two longest remaining edges are
+/// in canonical positions), and marks each boundary triangle similarly.
+///
+/// The "edge length" used for ordering is the *rank* of the edge's geometric
+/// length among all mesh edges (`Mesh::GetEdgeOrdering`): equal-length ties
+/// are broken by libstdc++ `std::sort` order (simulated by [`std_sort_by`]).
+///
+/// Only tetrahedra and triangular boundary faces are re-ordered (hex/prism
+/// elements and quad boundary faces are untouched, matching MFEM).
+pub fn mark_tet_mesh_for_refinement(mesh: &mut Mesh<3>) {
+    // ── 1. Edge ids (insertion order over elements × local edges, same as
+    //         MFEM's DSTable v_to_v) and geometric edge lengths.  The local
+    //         edge order must match MFEM's Geometry::Constants Edges tables
+    //         (tet {0,1},{0,2},{0,3},{1,2},{1,3},{2,3}; hex and prism below). ──
+    let tet_edges: [[usize; 2]; 6] = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+    let hex_edges: [[usize; 2]; 12] = [
+        [0, 1], [1, 2], [3, 2], [0, 3], [4, 5], [5, 6], [7, 6], [4, 7],
+        [0, 4], [1, 5], [2, 6], [3, 7],
+    ];
+    let prism_edges: [[usize; 2]; 9] = [
+        [0, 1], [1, 2], [2, 0], [3, 4], [4, 5], [5, 3], [0, 3], [1, 4], [2, 5],
+    ];
+    let mut em: HashMap<(u32, u32), usize> = HashMap::new();
+    let mut edge_len: Vec<f64> = Vec::new();
+    for e in 0..mesh.n_elems() as ElemId {
+        let et = mesh.element_type_at(e);
+        let ns = mesh.elem_nodes(e);
+        let edges: &[[usize; 2]] = match et {
+            ElementType::Tet4 | ElementType::Tet10 => &tet_edges,
+            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => &hex_edges,
+            ElementType::Prism6 | ElementType::Prism15 => &prism_edges,
+            _ => &[],
+        };
+        for &[a, b] in edges {
+            let key = edge_key(ns[a], ns[b]);
+            if !em.contains_key(&key) {
+                let ca = mesh.coords_of(key.0);
+                let cb = mesh.coords_of(key.1);
+                let d = (ca[0]-cb[0]).powi(2) + (ca[1]-cb[1]).powi(2) + (ca[2]-cb[2]).powi(2);
+                em.insert(key, em.len());
+                edge_len.push(d.sqrt());
+            }
+        }
+    }
+    // ── 2. Edge ordering by geometric length (libstdc++ std::sort, Pair
+    //         compares only the length field → unstable for equal lengths). ──
+    let n_edges = em.len();
+    // rows[i] = neighbors of vertex i in column order (DSTable RowIterator).
+    let mut rows: Vec<Vec<(u32, usize)>> = vec![Vec::new(); mesh.n_nodes()];
+    for (&(a, b), &id) in em.iter() {
+        rows[a as usize].push((b, id));
+    }
+    for r in rows.iter_mut() {
+        r.sort_by_key(|x| x.0);
+    }
+    let mut length_idx: Vec<(f64, usize)> = Vec::with_capacity(n_edges);
+    for r in &rows {
+        for &(_, id) in r {
+            length_idx.push((edge_len[id], id));
+        }
+    }
+    std_sort_by(&mut length_idx, |x, y| x.0 < y.0);
+    let mut order = vec![0usize; n_edges];
+    for (i, &(_, id)) in length_idx.iter().enumerate() {
+        order[id] = i;
+    }
+    // ── 3. MarkEdge for every tetrahedron. ────────────────────────────────
+    let len_of = |a: u32, b: u32| -> usize {
+        order[em[&edge_key(a, b)]]
+    };
+    for e in 0..mesh.n_elems() as ElemId {
+        if mesh.element_type_at(e) != ElementType::Tet4 {
+            continue;
+        }
+        let ns = mesh.elem_nodes(e);
+        let mut n = [ns[0], ns[1], ns[2], ns[3]];
+        mark_edge_tet(&mut n, len_of);
+        let off = mesh.elem_offsets.as_ref().map_or(e as usize * 4, |o| o[e as usize]);
+        mesh.conn[off..off + 4].copy_from_slice(&n);
+    }
+    // ── 4. MarkEdge for every triangular boundary face. ───────────────────
+    for f in 0..mesh.n_faces() as FaceId {
+        if mesh.face_type_at(f) != ElementType::Tri3 {
+            continue;
+        }
+        let bfv = mesh.bface_nodes(f);
+        let mut n = [bfv[0], bfv[1], bfv[2]];
+        mark_edge_tri(&mut n, len_of);
+        let off = mesh.face_offsets.as_ref().map_or(f as usize * 3, |o| o[f as usize]);
+        mesh.face_conn[off..off + 3].copy_from_slice(&n);
+    }
+}
+
+/// Tetrahedron::MarkEdge — longest-edge rotation + canonical edge placement.
+fn mark_edge_tet(n: &mut [u32; 4], len: impl Fn(u32, u32) -> usize) {
+    let mut l = len(n[0], n[1]);
+    let mut j = 0;
+    if len(n[1], n[2]) > l { l = len(n[1], n[2]); j = 1; }
+    if len(n[2], n[0]) > l { l = len(n[2], n[0]); j = 2; }
+    if len(n[0], n[3]) > l { l = len(n[0], n[3]); j = 3; }
+    if len(n[1], n[3]) > l { l = len(n[1], n[3]); j = 4; }
+    if len(n[2], n[3]) > l { j = 5; }
+    let ind = *n;
+    match j {
+        1 => { n[0] = ind[1]; n[1] = ind[2]; n[2] = ind[0]; }
+        2 => { n[0] = ind[2]; n[1] = ind[0]; n[2] = ind[1]; }
+        3 => { n[0] = ind[3]; n[1] = ind[0]; n[2] = ind[2]; n[3] = ind[1]; }
+        4 => { n[0] = ind[1]; n[1] = ind[3]; n[2] = ind[2]; n[3] = ind[0]; }
+        5 => { n[0] = ind[2]; n[1] = ind[3]; n[2] = ind[0]; n[3] = ind[1]; }
+        _ => {}
+    }
+    // Second part: canonical placement of the two remaining longest edges;
+    // only some TYPE combinations swap (0,1) and (2,3).
+    let mut i0 = 2usize;
+    let mut i1 = 1usize;
+    l = len(n[0], n[2]);
+    if len(n[0], n[3]) > l { l = len(n[0], n[3]); i0 = 3; }
+    if len(n[2], n[3]) > l { i0 = 5; }
+    l = len(n[1], n[2]);
+    if len(n[1], n[3]) > l { l = len(n[1], n[3]); i1 = 4; }
+    if len(n[2], n[3]) > l { i1 = 5; }
+    let swap = match i0 {
+        2 => false,           // PU / A / M
+        3 => i1 != 1,         // A: no; PU/M: yes
+        _ => i1 == 4,         // M(1): no; M(4): yes; O: no
+    };
+    if swap {
+        n.swap(0, 1);
+        n.swap(2, 3);
+    }
+}
+
+/// Triangle::MarkEdge — longest-edge rotation (moves longest edge to 0-1).
+fn mark_edge_tri(n: &mut [u32; 3], len: impl Fn(u32, u32) -> usize) {
+    let mut l = len(n[0], n[1]);
+    let mut j = 0;
+    if len(n[1], n[2]) > l { l = len(n[1], n[2]); j = 1; }
+    if len(n[2], n[0]) > l { j = 2; }
+    let ind = *n;
+    match j {
+        1 => { n[0] = ind[1]; n[1] = ind[2]; n[2] = ind[0]; }
+        2 => { n[0] = ind[2]; n[1] = ind[0]; n[2] = ind[1]; }
+        _ => {}
+    }
+}
+
 /// Refine a mixed-element 3-D mesh using a shared edge-midpoint map.
 ///
 /// All element types contribute to and use the same edge midpoint map,
@@ -1033,15 +1283,32 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 let m01=mid!(ns[0],ns[1]);let m02=mid!(ns[0],ns[2]);let m03=mid!(ns[0],ns[3]);
                 let m12=mid!(ns[1],ns[2]);let m13=mid!(ns[1],ns[3]);let m23=mid!(ns[2],ns[3]);
                 // MFEM UniformRefinement3D_base (mesh.cpp): 4 corner tets +
-                // 4 interior tets from mv_all[rt] (best-aspect-ratio rt
-                // selection; regular/equilateral tets pick rt=0, the first).
-                // rt=0 mv: {0,5,1,2},{0,5,2,4},{0,5,4,3},{0,5,3,1} where
+                // 4 interior tets from mv_all[rt], where rt is chosen by the
+                // best-aspect-ratio algorithm (rt_algo = 1) using the
+                // Jacobian at the tet centroid.
+                let rt = tet_select_rt_debug(mesh, ns);
+                let mv = match rt {
+                    0 => [
+                        [0, 5, 1, 2], [0, 5, 2, 4], [0, 5, 4, 3], [0, 5, 3, 1],
+                    ],
+                    1 => [
+                        [1, 0, 4, 2], [1, 2, 4, 5], [1, 5, 4, 3], [1, 3, 4, 0],
+                    ],
+                    _ => [
+                        [2, 0, 1, 3], [2, 1, 5, 3], [2, 5, 4, 3], [2, 4, 0, 3],
+                    ],
+                };
                 // e0=(0,1)=m01, e1=(0,2)=m02, e2=(0,3)=m03, e3=(1,2)=m12,
                 // e4=(1,3)=m13, e5=(2,3)=m23.
                 for &ch in &[
                     [ns[0],m01,m02,m03],[m01,ns[1],m12,m13],[m02,m12,ns[2],m23],[m03,m13,m23,ns[3]],
-                    [m01,m23,m02,m03],[m01,m23,m03,m13],[m01,m23,m13,m12],[m01,m23,m12,m02],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
+                let e = [m01, m02, m03, m12, m13, m23];
+                for k in 0..4 {
+                    let ch = [e[mv[k][0]], e[mv[k][1]], e[mv[k][2]], e[mv[k][3]]];
+                    new_conn.extend_from_slice(&ch);
+                    new_offsets.push(new_conn.len());
+                }
                 for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Tet4); }
             }
             ElementType::Hex8 => {

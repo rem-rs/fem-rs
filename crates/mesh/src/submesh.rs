@@ -161,6 +161,188 @@ pub fn extract_submesh_by_name(
     Ok(extract_submesh(mesh, &set.element_tags))
 }
 
+// ─── Boundary SubMesh (MFEM SubMesh::CreateFromBoundary) ─────────────────
+
+/// Boundary submesh extracted from a 3-D parent mesh (MFEM
+/// `SubMesh::CreateFromBoundary` equivalent).
+///
+/// The submesh elements are the boundary faces of the parent mesh whose
+/// boundary attribute belongs to `bdr_tags`.  The result is a 2-D surface
+/// mesh (Tri3/Quad4 elements with Line2 boundary) embedded in 3-D space.
+///
+/// Vertex numbering follows MFEM `SubMeshUtils::AddElementsToMesh`
+/// (`from_boundary = true`): faces are traversed in parent boundary order and
+/// their vertices are numbered by first occurrence.  Element order is the
+/// parent boundary-face order filtered by attribute.
+#[derive(Debug, Clone)]
+pub struct BoundarySubMesh {
+    /// 2-D surface mesh (Tri3/Quad4 elements) embedded in 3-D.
+    pub mesh: Mesh<3>,
+    /// sub element i → parent boundary face id (index into parent face arrays).
+    pub parent_face_ids: Vec<FaceId>,
+    /// parent_node_of_sub[sub_node_id] = parent_node_id.
+    pub parent_node_of_sub: Vec<NodeId>,
+}
+
+impl BoundarySubMesh {
+    /// Number of submesh (surface) elements.
+    pub fn n_elems(&self) -> usize {
+        self.mesh.n_elems()
+    }
+
+    /// Transfer nodal values from parent mesh to the submesh (by node id).
+    pub fn transfer_from_parent(&self, parent_values: &[f64]) -> Vec<f64> {
+        self.parent_node_of_sub
+            .iter()
+            .map(|&pn| parent_values[pn as usize])
+            .collect()
+    }
+
+    /// Transfer nodal values from submesh back to parent mesh.
+    pub fn transfer_to_parent(&self, sub_values: &[f64], parent_n_nodes: usize) -> Vec<f64> {
+        let mut out = vec![0.0_f64; parent_n_nodes];
+        for (si, &pn) in self.parent_node_of_sub.iter().enumerate() {
+            out[pn as usize] = sub_values[si];
+        }
+        out
+    }
+}
+
+/// Local edge connectivity (vertex indices into the element's nodes) for the
+/// boundary-face element types of a 3-D parent mesh.
+fn local_edge_vertices_2d(elem_type: ElementType) -> Vec<[usize; 2]> {
+    match elem_type {
+        ElementType::Tri3 | ElementType::Tri6 => {
+            vec![[0, 1], [1, 2], [0, 2]]
+        }
+        ElementType::Quad4 | ElementType::Quad9 => {
+            vec![[0, 1], [1, 2], [2, 3], [0, 3]]
+        }
+        _ => vec![],
+    }
+}
+
+/// Extract a 2-D surface submesh from the boundary faces of a 3-D parent mesh
+/// (1:1 with MFEM `SubMesh::CreateFromBoundary`).
+///
+/// Only boundary faces whose attribute is in `bdr_tags` become submesh
+/// elements.  Vertices are numbered by first occurrence while traversing the
+/// parent boundary faces in order (MFEM `SubMeshUtils::AddElementsToMesh`).
+pub fn extract_boundary_submesh(mesh: &Mesh<3>, bdr_tags: &[i32]) -> BoundarySubMesh {
+    let tag_set: HashSet<i32> = bdr_tags.iter().copied().collect();
+
+    // Selected parent boundary faces, in parent boundary order.
+    let mut parent_face_ids = Vec::<FaceId>::new();
+    for f in 0..mesh.n_faces() as FaceId {
+        if tag_set.contains(&(mesh.face_tags[f as usize] as i32)) {
+            parent_face_ids.push(f);
+        }
+    }
+    assert!(
+        !parent_face_ids.is_empty(),
+        "extract_boundary_submesh: no boundary faces match the given tags"
+    );
+
+    // Number vertices by first occurrence (face-local vertex order).
+    let mut parent_nodes: Vec<NodeId> = Vec::new();
+    let mut seen_nodes = HashSet::<NodeId>::new();
+    for &f in &parent_face_ids {
+        let bfv = mesh.bface_nodes(f);
+        for &n in bfv {
+            if seen_nodes.insert(n) {
+                parent_nodes.push(n);
+            }
+        }
+    }
+
+    let mut sub_of_parent = HashMap::<NodeId, NodeId>::new();
+    for (si, &pn) in parent_nodes.iter().enumerate() {
+        sub_of_parent.insert(pn, si as NodeId);
+    }
+
+    // Submesh coordinates (3-D embedding).
+    let mut sub_coords = Vec::<f64>::with_capacity(parent_nodes.len() * 3);
+    for &pn in &parent_nodes {
+        let [x, y, z] = mesh.coords_of(pn);
+        sub_coords.push(x);
+        sub_coords.push(y);
+        sub_coords.push(z);
+    }
+
+    // Elements: one per selected boundary face, using the face's vertex order.
+    let mut sub_conn = Vec::<NodeId>::new();
+    let mut sub_elem_tags = Vec::<i32>::new();
+    let mut sub_elem_types = Vec::<ElementType>::new();
+    let mut sub_elem_offsets = Vec::<usize>::new();
+    sub_elem_offsets.push(0);
+    for &f in &parent_face_ids {
+        let ft = mesh.face_type_at(f);
+        assert!(
+            ft == ElementType::Tri3 || ft == ElementType::Quad4,
+            "extract_boundary_submesh: unsupported boundary face type {ft:?}"
+        );
+        for &n in mesh.bface_nodes(f) {
+            sub_conn.push(sub_of_parent[&n]);
+        }
+        sub_elem_tags.push(mesh.face_tags[f as usize] as i32);
+        sub_elem_types.push(ft);
+        sub_elem_offsets.push(sub_conn.len());
+    }
+
+    // Boundary edges of the submesh: edges of the surface elements that belong
+    // to exactly one element.
+    let mut edge_counts: HashMap<[NodeId; 2], usize> = HashMap::new();
+    for (i, &ft) in sub_elem_types.iter().enumerate() {
+        let start = sub_elem_offsets[i];
+        let ns: Vec<NodeId> = sub_conn[start..sub_elem_offsets[i + 1]].to_vec();
+        for ev in local_edge_vertices_2d(ft) {
+            let a = ns[ev[0]];
+            let b = ns[ev[1]];
+            let key = if a < b { [a, b] } else { [b, a] };
+            *edge_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+    let mut sub_face_conn = Vec::<NodeId>::new();
+    let mut sub_face_tags = Vec::<i32>::new();
+    for (key, &cnt) in &edge_counts {
+        if cnt == 1 {
+            // Boundary edge (Line2), tag 1 (attribute value not used by the
+            // H1/L2 port spaces; MFEM SubMesh::AddBoundaryElements assigns
+            // attribute max+1 for internal-cut faces).
+            sub_face_conn.push(key[0]);
+            sub_face_conn.push(key[1]);
+            sub_face_tags.push(1);
+        }
+    }
+
+    let all_uniform = sub_elem_types.iter().all(|&t| t == sub_elem_types[0]);
+    let first_type = sub_elem_types[0];
+
+    let sub_mesh = Mesh {
+        coords: sub_coords,
+        conn: sub_conn,
+        elem_tags: sub_elem_tags,
+        elem_type: if all_uniform { first_type } else { ElementType::Tri3 },
+        face_conn: sub_face_conn,
+        face_tags: sub_face_tags.into_iter().map(|t| t as crate::BoundaryTag).collect(),
+        face_type: ElementType::Line2,
+        elem_types: if all_uniform { None } else { Some(sub_elem_types) },
+        elem_offsets: if all_uniform { None } else { Some(sub_elem_offsets) },
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        geometry: None,
+    };
+
+    BoundarySubMesh {
+        mesh: sub_mesh,
+        parent_face_ids,
+        parent_node_of_sub: parent_nodes,
+    }
+}
+
 // ─── 3-D SubMesh ──────────────────────────────────────────────────────────
 
 /// Submesh view extracted from a 3-D parent mesh.
@@ -451,6 +633,65 @@ fn parent_boundary_face(mesh: &Mesh<3>, face_verts: &[u32]) -> (i32, FaceId) {
 mod tests {
     use super::*;
     use crate::NamedAttributeSet;
+
+    /// Two Tets sharing face {0,1,2}; tet0 boundary faces (attr 1):
+    /// [1,2,3],[0,2,3],[0,1,3]; tet1 boundary faces (attr 2):
+    /// [0,2,4],[1,2,4],[1,0,4].
+    fn two_tets_mixed_attr() -> Mesh<3> {
+        let coords = vec![
+            0.0, 0.0, 0.0, // 0
+            1.0, 0.0, 0.0, // 1
+            0.0, 1.0, 0.0, // 2
+            0.0, 0.0, 1.0, // 3
+            0.0, 0.0, 2.0, // 4
+        ];
+        let conn = vec![0u32, 1, 2, 3, 1, 0, 2, 4];
+        let elem_tags = vec![1i32, 2];
+        let face_conn = vec![1u32, 2, 3, 0, 2, 3, 0, 1, 3, 0, 2, 4, 1, 2, 4, 1, 0, 4];
+        let face_tags = vec![1i32, 1, 1, 2, 2, 2];
+        Mesh {
+            coords,
+            conn,
+            elem_tags,
+            elem_type: ElementType::Tet4,
+            face_conn,
+            face_tags: face_tags.into_iter().map(|t| t as crate::BoundaryTag).collect(),
+            face_type: ElementType::Tri3,
+            elem_types: None,
+            elem_offsets: None,
+            face_types: None,
+            face_offsets: None,
+            face_to_elem: None,
+            edge_conn: vec![],
+            edge_to_elem: vec![],
+            geometry: None,
+        }
+    }
+
+    #[test]
+    fn extract_boundary_submesh_by_attr() {
+        let m = two_tets_mixed_attr();
+        let sub = extract_boundary_submesh(&m, &[2]);
+        assert_eq!(sub.n_elems(), 3);
+        assert_eq!(sub.parent_face_ids, vec![3, 4, 5]);
+        // Vertices numbered by first occurrence over faces (0,2,4),(1,2,4),(1,0,4).
+        assert_eq!(sub.parent_node_of_sub, vec![0, 2, 4, 1]);
+        // Submesh element connectivity (local vertex ids):
+        // face3 (0,2,4) -> 0,1,2 ; face4 (1,2,4) -> 3,1,2 ; face5 (1,0,4) -> 3,0,2
+        assert_eq!(sub.mesh.conn, vec![0, 1, 2, 3, 1, 2, 3, 0, 2]);
+        // Boundary edges: {0,1},{1,2},{0,2} shared-face edges (Line2), 3 edges.
+        assert_eq!(sub.mesh.n_faces(), 3);
+        assert_eq!(sub.mesh.face_type, ElementType::Line2);
+        // Node transfer round-trip.
+        let parent_vals: Vec<f64> = (0..m.n_nodes()).map(|i| i as f64 * 10.0).collect();
+        let sub_vals = sub.transfer_from_parent(&parent_vals);
+        let back = sub.transfer_to_parent(&sub_vals, m.n_nodes());
+        assert_eq!(back[0], 0.0);
+        assert_eq!(back[2], 20.0);
+        assert_eq!(back[4], 40.0);
+        assert_eq!(back[1], 10.0);
+        assert_eq!(back[3], 0.0);
+    }
 
     #[test]
     fn extract_submesh_by_tag() {

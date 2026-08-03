@@ -3,177 +3,128 @@
 //! 3-D refinement functions (`refine_nonconforming_3d`, `refine_nonconforming_hex`,
 //! `refine_prism6_uniform`) produce meshes without `face_conn` / `face_tags`.
 //! This module provides `rebuild_3d_boundary` to reconstruct them from the
-//! element connectivity and the original mesh.
+//! original mesh's boundary faces, matching MFEM's `UniformRefinement3D_base`
+//! boundary-element generation **exactly**:
+//!
+//! - **order**: for each original boundary face (in order), its 4 child faces
+//!   are emitted in MFEM's refinement-template order;
+//! - **vertex order**: each child face uses MFEM's template vertex order
+//!   (e.g. tri child 0 = `(v0, mid(e0), mid(e2))`).
+//!
+//! This makes the refined mesh's `face_conn` identical to MFEM's boundary
+//! element order, which is required for 1:1 port-submesh extraction
+//! (`SubMesh::CreateFromBoundary` traversal order) and hence for
+//! `SubMesh::Transfer` dof-mapping equality (MFEM ex35).
 
 use std::collections::HashMap;
-use fem_core::{ElemId, NodeId, FaceId};
+use fem_core::{ElemId, NodeId};
 use crate::{BoundaryTag, ElementType, Mesh};
 
-/// Helper: a parent boundary face's vertex set, tag and coordinate cover
-/// (its vertices + edge midpoints + quad center) for exact child-face
-/// matching.
-struct ParentFace {
-    verts: Vec<NodeId>,
-    tag: i32,
-    cover: Vec<[f64; 3]>,
+/// Exact-bit coordinate key for refined-vertex lookup (midpoints / face
+/// centers are computed with the same expressions as the refinement, so IEEE
+/// equality holds).
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+struct CKey([u64; 3]);
+
+impl CKey {
+    fn of(c: &[f64; 3]) -> Self {
+        CKey([c[0].to_bits(), c[1].to_bits(), c[2].to_bits()])
+    }
 }
 
-/// Rebuild boundary faces for a refined 3-D mesh using the original mesh's
-/// boundary data for tag propagation.
+/// Rebuild boundary faces for a refined 3-D mesh.
 ///
-/// Scans all elements in the refined mesh, identifies faces that belong to
-/// exactly one element (boundary faces), and assigns boundary tags by matching
-/// against the original mesh's `face_conn`.
+/// Generates the child faces of every original boundary face using MFEM's
+/// `UniformRefinement3D_base` templates (mesh.cpp `new_boundary`):
 ///
-/// Uses vertex overlap matching (max overlap wins, any positive overlap accepted).
+/// Triangle `(v0,v1,v2)` with edge midpoints `m0=(v0v1), m1=(v1v2), m2=(v2v0)`:
+/// ```text
+///   ch0: (v0, m0, m2)      ch1: (m1, m2, m0)
+///   ch2: (m0, v1, m1)      ch3: (m2, m1, v2)
+/// ```
+/// Quadrilateral `(v0..v3)` with edge midpoints `m0..m3` and face center `qf`:
+/// ```text
+///   ch0: (v0, m0, qf, m3)  ch1: (m0, v1, m1, qf)
+///   ch2: (qf, m1, v2, m2)  ch3: (m3, qf, m2, v3)
+/// ```
 pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
     if refined.n_elems() == 0 { return; }
 
-    // Build parent boundary face lookup: for each original boundary face,
-    // store its vertex set, tag and coordinate cover (vertices + edge
-    // midpoints + quad center).  A refined child face is a subdivision of
-    // exactly one parent face, so matching every child vertex coordinate
-    // against the parent cover is exact (the midpoint/center coordinates are
-    // computed with the same 0.5*(a+b)/averaging expressions the refinement
-    // used, so IEEE equality holds).
-    let mut parent_faces: Vec<ParentFace> = Vec::new();
-    for f in 0..original.n_faces() as FaceId {
-        let bfv = original.bface_nodes(f);
-        let mut cover: Vec<[f64; 3]> = bfv.iter().map(|&v| original.coords_of(v)).collect();
-        let nv = bfv.len();
-        for i in 0..nv {
-            let a = original.coords_of(bfv[i]);
-            let b = original.coords_of(bfv[(i + 1) % nv]);
-            cover.push([0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])]);
-        }
-        if nv == 4 {
-            let mut c = [0.0; 3];
-            for &v in bfv.iter() {
-                let p = original.coords_of(v);
-                for k in 0..3 { c[k] += p[k] / 4.0; }
-            }
-            cover.push(c);
-        }
-        parent_faces.push(ParentFace {
-            verts: bfv.to_vec(),
-            tag: original.face_tags[f as usize] as i32,
-            cover,
-        });
+    // New vertices of the refined mesh: edge midpoints, quad-face centers and
+    // hex body centers, appended after the old vertices (MFEM offsets oedge /
+    // oface / oelem).  Look them up by exact coordinates.
+    let mut by_coord: HashMap<CKey, NodeId> = HashMap::new();
+    for v in original.n_nodes() as NodeId..refined.n_nodes() as NodeId {
+        let c = refined.coords_of(v);
+        by_coord.insert(CKey::of(&c), v);
     }
+    let mid = |a: NodeId, b: NodeId| -> NodeId {
+        let ca = original.coords_of(a);
+        let cb = original.coords_of(b);
+        let key = CKey::of(&[0.5 * (ca[0] + cb[0]), 0.5 * (ca[1] + cb[1]), 0.5 * (ca[2] + cb[2])]);
+        by_coord
+            .get(&key)
+            .copied()
+            .expect("rebuild_3d_boundary: refined edge-midpoint vertex not found")
+    };
 
-    // Count faces in the refined mesh.
-    let mut face_counts: HashMap<FaceKey3, (usize, Vec<NodeId>)> = HashMap::new();
-
-    for e in 0..refined.n_elems() as ElemId {
-        let et = refined.element_type_at(e);
-        let verts = refined.elem_nodes(e);
-        let local_faces = local_faces_3d(et);
-        for lfv in &local_faces {
-            if lfv.iter().any(|&i| i >= verts.len()) { continue; }
-            // Keep the ring order of the face (as seen from this element) —
-            // sorting would destroy the cycle order that boundary edge
-            // collection (boundary_dofs_hcurl) relies on.
-            let ring: Vec<u32> = lfv.iter().map(|&i| verts[i]).collect();
-            let mut sorted = ring.clone();
-            sorted.sort_unstable();
-            let key = FaceKey3(sorted);
-            face_counts
-                .entry(key)
-                .and_modify(|(cnt, _)| *cnt += 1)
-                .or_insert((1, ring));
-        }
-    }
-
-    // Boundary faces: those counted exactly once.
     let mut new_face_conn = Vec::<NodeId>::new();
     let mut new_face_tags = Vec::<BoundaryTag>::new();
     let mut new_face_types = Vec::<ElementType>::new();
     let mut new_face_offsets = Vec::<usize>::new();
     new_face_offsets.push(0);
 
-    for (_, &(count, ref ring)) in &face_counts {
-        if count != 1 { continue; }
+    // Faces are emitted in original boundary order × child-template order,
+    // exactly like MFEM's `new_boundary` loop over GetBdrElement(i).
+    for f in 0..original.n_faces() as ElemId {
+        let bfv = original.bface_nodes(f as u32);
+        let nv = bfv.len();
+        if nv != 3 && nv != 4 { continue; }
+        let tag = original.face_tags[f as usize];
 
-        let ftype = match ring.len() {
-            3 => ElementType::Tri3,
-            4 => ElementType::Quad4,
-            _ => continue,
+        let mut m = Vec::with_capacity(nv);
+        for k in 0..nv {
+            m.push(mid(bfv[k], bfv[(k + 1) % nv]));
+        }
+
+        let mut emit = |conn: &[NodeId], ftype: ElementType| {
+            new_face_conn.extend_from_slice(conn);
+            new_face_offsets.push(new_face_conn.len());
+            new_face_types.push(ftype);
+            new_face_tags.push(tag);
         };
 
-        // Find the exact parent face this child face subdivides.
-        let tag = find_exact_tag(ring, refined, &parent_faces);
-
-        for &v in ring { new_face_conn.push(v); }
-        new_face_tags.push(tag as BoundaryTag);
-        new_face_types.push(ftype);
-        new_face_offsets.push(new_face_conn.len());
+        if nv == 3 {
+            let (v0, v1, v2) = (bfv[0], bfv[1], bfv[2]);
+            let (m0, m1, m2) = (m[0], m[1], m[2]);
+            emit(&[v0, m0, m2], ElementType::Tri3);
+            emit(&[m1, m2, m0], ElementType::Tri3);
+            emit(&[m0, v1, m1], ElementType::Tri3);
+            emit(&[m2, m1, v2], ElementType::Tri3);
+        } else {
+            let (v0, v1, v2, v3) = (bfv[0], bfv[1], bfv[2], bfv[3]);
+            let (m0, m1, m2, m3) = (m[0], m[1], m[2], m[3]);
+            // Quad face center: same expression as the refinement
+            // (x/4.0 accumulation order must match refine_mixed_3d:
+            //  sum then divide by 4).
+            let mut s = [0.0_f64; 3];
+            for &v in bfv {
+                let p = original.coords_of(v);
+                for k in 0..3 { s[k] += p[k]; }
+            }
+            let qf = by_coord[&CKey::of(&[s[0] / 4.0, s[1] / 4.0, s[2] / 4.0])];
+            emit(&[v0, m0, qf, m3], ElementType::Quad4);
+            emit(&[m0, v1, m1, qf], ElementType::Quad4);
+            emit(&[qf, m1, v2, m2], ElementType::Quad4);
+            emit(&[m3, qf, m2, v3], ElementType::Quad4);
+        }
     }
 
     refined.face_conn = new_face_conn;
     refined.face_tags = new_face_tags;
-    refined.face_type = if new_face_types.is_empty() { ElementType::Tri3 } else { new_face_types[0] };
     let all_same = new_face_types.len() <= 1 || new_face_types.iter().all(|&t| t == new_face_types[0]);
+    refined.face_type = if new_face_types.is_empty() { ElementType::Tri3 } else { new_face_types[0] };
     refined.face_types = if all_same { None } else { Some(new_face_types) };
     refined.face_offsets = if new_face_offsets.len() > 1 { Some(new_face_offsets) } else { None };
     refined.face_to_elem = None;
 }
-
-/// Match a refined child boundary face to the unique parent boundary face it
-/// subdivides: every child vertex (original vertex, edge midpoint, quad
-/// center) must lie in the parent face's coordinate cover.  Falls back to the
-/// old overlap heuristic only when no unique match is found.
-fn find_exact_tag(child: &[NodeId], refined: &Mesh<3>, parents: &[ParentFace]) -> i32 {
-    let child_coords: Vec<[f64; 3]> = child.iter().map(|&v| refined.coords_of(v)).collect();
-    let mut exact: Option<i32> = None;
-    let mut n_exact = 0;
-    for pf in parents {
-        if child_coords.iter().all(|c| pf.cover.contains(c)) {
-            n_exact += 1;
-            exact = Some(pf.tag);
-        }
-    }
-    if n_exact == 1 { return exact.unwrap(); }
-    // Fallback: overlap heuristic (e.g. degenerate/curved meshes where the
-    // coordinate identities are perturbed).
-    find_best_tag(child, parents)
-}
-
-/// Find the parent boundary face with the most vertex overlap.
-/// Accepts any overlap > 0.
-fn find_best_tag(verts: &[NodeId], parents: &[ParentFace]) -> i32 {
-    let set: std::collections::BTreeSet<u32> = verts.iter().copied().collect();
-    // Use overlap FRACTION (overlap / parent.n_verts) as the metric.
-    // This correctly prefers a small parent face (tri) over a large one (quad)
-    // when both share the same number of vertices with the child.
-    let mut best = (0.0f64, 1i32);
-    for pf in parents {
-        let pf_set: std::collections::BTreeSet<u32> = pf.verts.iter().copied().collect();
-        let overlap = set.intersection(&pf_set).count();
-        let pnv = pf.verts.len().max(1);
-        let score = (overlap * 100) as f64 / pnv as f64; // percentage match
-        if score > best.0 { best = (score, pf.tag); }
-    }
-    best.1
-}
-
-/// Local face vertices for 3-D element types.
-fn local_faces_3d(elem_type: ElementType) -> Vec<Vec<usize>> {
-    match elem_type {
-        ElementType::Tet4 | ElementType::Tet10 => vec![
-            vec![1, 2, 3], vec![0, 2, 3], vec![0, 1, 3], vec![0, 1, 2],
-        ],
-        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => vec![
-            vec![0, 1, 2, 3], vec![4, 5, 6, 7],
-            vec![0, 1, 5, 4], vec![2, 3, 7, 6],
-            vec![0, 3, 7, 4], vec![1, 2, 6, 5],
-        ],
-        ElementType::Prism6 | ElementType::Prism15 => vec![
-            vec![0, 1, 2], vec![3, 4, 5],
-            vec![0, 1, 4, 3], vec![1, 2, 5, 4], vec![0, 2, 5, 3],
-        ],
-        _ => vec![],
-    }
-}
-
-#[derive(Hash, Eq, PartialEq, Clone, Debug)]
-struct FaceKey3(Vec<NodeId>);
