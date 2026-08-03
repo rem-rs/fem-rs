@@ -21,7 +21,7 @@
 //! matches MFEM to ~1 ulp and the solution to machine precision (ex28:
 //! sol.gf max|diff| = 1e-15).
 
-use fem_linalg::{CsrMatrix, SolverConfig, SolveResult};
+use fem_linalg::{CsrMatrix, SolveResult, SolverConfig};
 
 use crate::block::BlockSystem;
 
@@ -58,13 +58,16 @@ impl SchurConstrainedSolver {
         rhs[n_u..].copy_from_slice(g);
 
         let mut x = vec![0.0_f64; n];
-        let (converged, iterations, final_residual) =
-            gmres_schur(sys, &rhs, &mut x, 50, cfg);
+        let (converged, iterations, final_residual) = gmres_schur(sys, &rhs, &mut x, 50, cfg);
 
         u.copy_from_slice(&x[..n_u]);
         p.copy_from_slice(&x[n_u..]);
 
-        Ok(SolveResult { converged, iterations, final_residual })
+        Ok(SolveResult {
+            converged,
+            iterations,
+            final_residual,
+        })
     }
 }
 
@@ -86,7 +89,7 @@ fn gmres_core(
     apply_pc: &dyn Fn(&[f64], &mut [f64]),
     b: &[f64],
     x: &mut [f64],
-    m: usize,               // restart dimension (MFEM default 50)
+    m: usize, // restart dimension (MFEM default 50)
     cfg: &SolverConfig,
 ) -> (bool, usize, f64) {
     let mut r = vec![0.0_f64; n];
@@ -108,7 +111,10 @@ fn gmres_core(
 
     let mut j = 1usize; // global iteration counter (1-based, as in MFEM)
     if cfg.verbose {
-        println!("   Pass : {:2}   Iteration : {:3}  ||B r|| = {:.8}", 1, 0, beta);
+        println!(
+            "   Pass : {:2}   Iteration : {:3}  ||B r|| = {:.17}",
+            1, 0, beta
+        );
     }
     if beta <= final_norm {
         return (true, 0, beta);
@@ -167,7 +173,10 @@ fn gmres_core(
                 return (true, j, resid);
             }
             if cfg.verbose {
-                println!("   Pass : {:2}   Iteration : {:3}  ||B r|| = {:.8}", pass, j, resid);
+                println!(
+                    "   Pass : {:2}   Iteration : {:3}  ||B r|| = {:.17}",
+                    pass, j, resid
+                );
             }
             i += 1;
             j += 1;
@@ -196,10 +205,10 @@ fn gmres_core(
 
 #[allow(clippy::too_many_arguments)]
 fn gmres_schur(
-    sys: &BlockSystem,      // the saddle-point system [A Bᵀ; B 0]
+    sys: &BlockSystem, // the saddle-point system [A Bᵀ; B 0]
     b: &[f64],
     x: &mut [f64],
-    m: usize,               // restart dimension (MFEM default 50)
+    m: usize, // restart dimension (MFEM default 50)
     cfg: &SolverConfig,
 ) -> (bool, usize, f64) {
     let n = b.len();
@@ -208,7 +217,10 @@ fn gmres_schur(
         n,
         &|xv, y| apply_system(sys, xv, y),
         &|xv, y| apply_block_pc(&sys.a, n_u, xv, y),
-        b, x, m, cfg,
+        b,
+        x,
+        m,
+        cfg,
     )
 }
 
@@ -395,7 +407,7 @@ pub fn solve_gmres_block_diag_gs(
     b1: &[f64],
     x0: &mut [f64],
     x1: &mut [f64],
-    restart: usize,      // MFEM GMRES restart / MR dimension (ex36: 500)
+    restart: usize, // MFEM GMRES restart / MR dimension (ex36: 500)
     cfg: &SolverConfig,
 ) -> (bool, usize, f64) {
     let n0 = x0.len();
@@ -432,7 +444,10 @@ pub fn solve_gmres_block_diag_gs(
             y[n0..].fill(0.0);
             gs_symmetric(a11, &xv[n0..], &mut y[n0..]);
         },
-        &b, &mut x, restart, cfg,
+        &b,
+        &mut x,
+        restart,
+        cfg,
     );
 
     x0.copy_from_slice(&x[..n0]);

@@ -31,14 +31,47 @@ fn gauss_legendre_1d(n: usize) -> (Vec<f64>, Vec<f64>) {
     }
 }
 
-/// Gauss-Legendre rule on `[0, 1]` with `n` points (transform from `[-1,1]`).
+/// Gauss-Legendre rule on `[0, 1]` with `n` points.
 ///
-/// Weights sum to 1.
+/// Nodes/weights for `n = 1..4` are hard-coded with the same high-precision
+/// values as MFEM's `QuadratureFunctions1D::GaussLegendre` (which hard-codes
+/// `n ≤ 3` and Newton-iterates `n ≥ 4`) — computing them as `0.5·(x+1)` from
+/// the `[-1,1]` rule differs from MFEM by ~1 ulp and propagates into matrix
+/// entries on curved meshes.  Weights sum to 1.
 pub fn gauss_legendre_01(n: usize) -> (Vec<f64>, Vec<f64>) {
-    let (xs, ws) = gauss_legendre_1d(n);
-    let pts = xs.iter().map(|x| 0.5 * (x + 1.0)).collect();
-    let wts = ws.iter().map(|w| 0.5 * w).collect();
-    (pts, wts)
+    match n {
+        1 => (vec![0.5], vec![1.0]),
+        2 => (
+            vec![0.21132486540518710671, 0.78867513459481286553],
+            vec![0.5, 0.5],
+        ),
+        3 => (
+            vec![0.11270166537925831174, 0.5, 0.88729833462074170214],
+            vec![
+                0.27777777777777779011,
+                0.44444444444444441977,
+                0.27777777777777779011,
+            ],
+        ),
+        4 => (
+            vec![
+                0.069431844202973699853,
+                0.33000947820757187134,
+                0.66999052179242812866,
+                0.93056815579702634178,
+            ],
+            vec![
+                0.1739274225687268971,
+                0.32607257743127299188,
+                0.32607257743127299188,
+                0.1739274225687268971,
+            ],
+        ),
+        _ => {
+            let (xs, ws) = gauss_legendre_01_arbitrary(n);
+            (xs, ws)
+        }
+    }
 }
 
 // ─── Gauss-Lobatto on [-1,1] ──────────────────────────────────────────────────
@@ -71,7 +104,13 @@ fn gauss_lobatto_1d(n: usize) -> (Vec<f64>, Vec<f64>) {
             let x = (3.0_f64 / 7.0).sqrt();
             (
                 vec![-1.0, -x, 0.0, x, 1.0],
-                vec![1.0 / 10.0, 49.0 / 90.0, 32.0 / 45.0, 49.0 / 90.0, 1.0 / 10.0],
+                vec![
+                    1.0 / 10.0,
+                    49.0 / 90.0,
+                    32.0 / 45.0,
+                    49.0 / 90.0,
+                    1.0 / 10.0,
+                ],
             )
         }
         _ => panic!("gauss_lobatto_1d: only n=2..5 supported, got {n}"),
@@ -117,7 +156,10 @@ pub fn quad_lobatto_rule(order: u8) -> QuadratureRule {
             wts.push(wi * wj);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 /// Tensor-product Gauss-Lobatto rule on the reference hex `[-1,1]³`.
@@ -137,7 +179,10 @@ pub fn hex_lobatto_rule(order: u8) -> QuadratureRule {
             }
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 // ─── Arbitrary-order Gauss-Legendre on [-1,1] ────────────────────────────────
@@ -227,7 +272,7 @@ fn legendre_poly(n: usize, x: f64) -> (f64, f64) {
         return (x, 1.0); // P_1 = x, P_0 = 1
     }
     let mut pn1 = 1.0f64; // P_0
-    let mut pn = x;         // P_1
+    let mut pn = x; // P_1
     for k in 2..=n {
         let k_f = k as f64;
         let pn_next = ((2.0 * k_f - 1.0) * x * pn - (k_f - 1.0) * pn1) / k_f;
@@ -353,7 +398,7 @@ pub fn seg_rule_arbitrary(order: u8) -> QuadratureRule {
     let n = ((order as usize + 2) / 2).max(1);
     let (pts, wts) = gauss_legendre_01_arbitrary(n);
     QuadratureRule {
-        points:  pts.into_iter().map(|x| vec![x]).collect(),
+        points: pts.into_iter().map(|x| vec![x]).collect(),
         weights: wts,
     }
 }
@@ -384,7 +429,10 @@ pub fn quad_rule_arbitrary(order: u8) -> QuadratureRule {
             wts.push(wi * wj);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 /// Tensor-product Gauss-Legendre rule on the reference hex `[-1,1]³` for arbitrary order.
@@ -404,7 +452,10 @@ pub fn hex_rule_arbitrary(order: u8) -> QuadratureRule {
             }
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 /// Tensor-product Gauss-Lobatto rule on the reference quad `[-1,1]²` for arbitrary order.
@@ -419,7 +470,10 @@ pub fn quad_lobatto_rule_arbitrary(order: u8) -> QuadratureRule {
             wts.push(wi * wj);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 /// Tensor-product Gauss-Lobatto rule on the reference hex `[-1,1]³` for arbitrary order.
@@ -436,7 +490,10 @@ pub fn hex_lobatto_rule_arbitrary(order: u8) -> QuadratureRule {
             }
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 // ─── Segment [0,1] ────────────────────────────────────────────────────────────
@@ -449,7 +506,7 @@ pub fn seg_rule(order: u8) -> QuadratureRule {
     let n = ((order as usize + 2) / 2).clamp(1, 4);
     let (pts, wts) = gauss_legendre_01(n);
     QuadratureRule {
-        points:  pts.into_iter().map(|x| vec![x]).collect(),
+        points: pts.into_iter().map(|x| vec![x]).collect(),
         weights: wts,
     }
 }
@@ -469,7 +526,7 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
     if order <= 1 {
         // 1-point centroid rule (exact for degree 1)
         QuadratureRule {
-            points:  vec![vec![1.0 / 3.0, 1.0 / 3.0]],
+            points: vec![vec![1.0 / 3.0, 1.0 / 3.0]],
             weights: vec![0.5],
         }
     } else if order <= 3 {
@@ -477,7 +534,7 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
         let a = 1.0 / 6.0;
         let b = 2.0 / 3.0;
         QuadratureRule {
-            points:  vec![vec![a, a], vec![b, a], vec![a, b]],
+            points: vec![vec![a, a], vec![b, a], vec![a, b]],
             weights: vec![a, a, a],
         }
     } else if order <= 5 {
@@ -516,18 +573,22 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
         QuadratureRule {
             points: vec![
                 // Type 0: permutations of (a, a, 1-2a)
-                vec![a, a1], vec![a1, a], vec![a, a],
+                vec![a, a1],
+                vec![a1, a],
+                vec![a, a],
                 // Type 1: permutations of (b, b, 1-2b)
-                vec![b, b1], vec![b1, b], vec![b, b],
+                vec![b, b1],
+                vec![b1, b],
+                vec![b, b],
                 // Type 2: 6 permutations of (c, d, e)
-                vec![d, e], vec![e, d], vec![c, e],
-                vec![e, c], vec![c, d], vec![d, c],
+                vec![d, e],
+                vec![e, d],
+                vec![c, e],
+                vec![e, c],
+                vec![c, d],
+                vec![d, c],
             ],
-            weights: vec![
-                wa, wa, wa,
-                wb, wb, wb,
-                wc, wc, wc, wc, wc, wc,
-            ],
+            weights: vec![wa, wa, wa, wb, wb, wb, wc, wc, wc, wc, wc, wc],
         }
     } else if order <= 7 {
         // 15-point Witherden-Vincent rule (exact for degree 7)
@@ -554,7 +615,7 @@ pub fn tet_rule(order: u8) -> QuadratureRule {
     if order <= 1 {
         // 1-point centroid (exact degree 1)
         QuadratureRule {
-            points:  vec![vec![0.25, 0.25, 0.25]],
+            points: vec![vec![0.25, 0.25, 0.25]],
             weights: vec![1.0 / 6.0],
         }
     } else if order <= 2 {
@@ -562,12 +623,7 @@ pub fn tet_rule(order: u8) -> QuadratureRule {
         let a = 0.138_196_601_125_010_5;
         let b = 0.585_410_196_624_968_5;
         QuadratureRule {
-            points: vec![
-                vec![a, a, a],
-                vec![b, a, a],
-                vec![a, b, a],
-                vec![a, a, b],
-            ],
+            points: vec![vec![a, a, a], vec![b, a, a], vec![a, b, a], vec![a, a, b]],
             weights: vec![1.0 / 24.0; 4],
         }
     } else if order <= 5 {
@@ -596,46 +652,65 @@ fn grundmann_moller_tet(s: u32) -> QuadratureRule {
     let d: u32 = 3;
 
     // Generate point sets for each level i = 0..=s.
-    let levels: Vec<Vec<[f64; 3]>> = (0..=s).map(|i| {
-        let si = s - i;
-        let m = (2 * si + d + 1) as f64;
-        simplex_points(si, d + 1).iter().map(|coords| {
-            let bary: Vec<f64> = coords.iter().map(|&j| (2.0 * j as f64 + 1.0) / m).collect();
-            [bary[1], bary[2], bary[3]]
-        }).collect()
-    }).collect();
+    let levels: Vec<Vec<[f64; 3]>> = (0..=s)
+        .map(|i| {
+            let si = s - i;
+            let m = (2 * si + d + 1) as f64;
+            simplex_points(si, d + 1)
+                .iter()
+                .map(|coords| {
+                    let bary: Vec<f64> =
+                        coords.iter().map(|&j| (2.0 * j as f64 + 1.0) / m).collect();
+                    [bary[1], bary[2], bary[3]]
+                })
+                .collect()
+        })
+        .collect();
 
     // For each level i, all points share the same weight w_i.
     // Compute sum of x₁^{2k} over all points at level i.
     let n = (s + 1) as usize;
-    let level_sums: Vec<Vec<f64>> = (0..n).map(|i| {
-        (0..n).map(|k| {
-            levels[i].iter().map(|p| p[0].powi((2 * k) as i32)).sum::<f64>()
-        }).collect()
-    }).collect();
+    let level_sums: Vec<Vec<f64>> = (0..n)
+        .map(|i| {
+            (0..n)
+                .map(|k| {
+                    levels[i]
+                        .iter()
+                        .map(|p| p[0].powi((2 * k) as i32))
+                        .sum::<f64>()
+                })
+                .collect()
+        })
+        .collect();
 
     // Exact integrals of x^{2k} over T³: (2k)! / (2k+3)!
-    let exact: Vec<f64> = (0..n).map(|k| {
-        fact_f64((2 * k) as u32) / fact_f64((2 * k + 3) as u32)
-    }).collect();
+    let exact: Vec<f64> = (0..n)
+        .map(|k| fact_f64((2 * k) as u32) / fact_f64((2 * k + 3) as u32))
+        .collect();
 
     // Solve the (s+1)×(s+1) linear system for per-level weights.
-    let mut mat: Vec<Vec<f64>> = (0..n).map(|k| {
-        let mut row: Vec<f64> = (0..n).map(|i| level_sums[i][k]).collect();
-        row.push(exact[k]);
-        row
-    }).collect();
+    let mut mat: Vec<Vec<f64>> = (0..n)
+        .map(|k| {
+            let mut row: Vec<f64> = (0..n).map(|i| level_sums[i][k]).collect();
+            row.push(exact[k]);
+            row
+        })
+        .collect();
     for col in 0..n {
-        let piv = (col..n).max_by(|&a, &b|
-            mat[a][col].abs().partial_cmp(&mat[b][col].abs()).unwrap()
-        ).unwrap();
+        let piv = (col..n)
+            .max_by(|&a, &b| mat[a][col].abs().partial_cmp(&mat[b][col].abs()).unwrap())
+            .unwrap();
         mat.swap(col, piv);
         let scale = mat[col][col];
-        for j in col..=n { mat[col][j] /= scale; }
+        for j in col..=n {
+            mat[col][j] /= scale;
+        }
         for row in 0..n {
             if row != col {
                 let f = mat[row][col];
-                for j in col..=n { mat[row][j] -= f * mat[col][j]; }
+                for j in col..=n {
+                    mat[row][j] -= f * mat[col][j];
+                }
             }
         }
     }
@@ -650,7 +725,10 @@ fn grundmann_moller_tet(s: u32) -> QuadratureRule {
             wts.push(ws_per_level[i]);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 /// All non-negative integer vectors (j_0,...,j_{n-1}) with sum = s.
@@ -673,7 +751,6 @@ fn fact_f64(n: u32) -> f64 {
     (1..=n as u64).map(|x| x as f64).product::<f64>().max(1.0)
 }
 
-
 // ─── Quadrilateral [-1,1]² ────────────────────────────────────────────────────
 
 /// Tensor-product Gauss-Legendre rule on the reference quad `[-1,1]²`.
@@ -682,7 +759,11 @@ fn fact_f64(n: u32) -> f64 {
 /// Weights sum to 4 (area of reference quad).
 pub fn quad_rule(order: u8) -> QuadratureRule {
     let n = ((order as usize + 2) / 2).max(1);
-    let (xs, ws) = if n <= 4 { gauss_legendre_1d(n) } else { gauss_legendre_arbitrary(n) };
+    let (xs, ws) = if n <= 4 {
+        gauss_legendre_1d(n)
+    } else {
+        gauss_legendre_arbitrary(n)
+    };
     let mut pts = Vec::with_capacity(n * n);
     let mut wts = Vec::with_capacity(n * n);
     for (xi, wi) in xs.iter().zip(ws.iter()) {
@@ -691,7 +772,10 @@ pub fn quad_rule(order: u8) -> QuadratureRule {
             wts.push(wi * wj);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 /// Tensor-product Gauss-Legendre rule on the reference quad `[0,1]²`.
@@ -700,16 +784,26 @@ pub fn quad_rule(order: u8) -> QuadratureRule {
 /// Weights sum to 1 (area of `[0,1]²`).
 pub fn quad_rule_01(order: u8) -> QuadratureRule {
     let n = ((order as usize + 2) / 2).max(1);
-    let (xs, ws) = if n <= 4 { gauss_legendre_01(n) } else { gauss_legendre_01_arbitrary(n) };
+    let (xs, ws) = if n <= 4 {
+        gauss_legendre_01(n)
+    } else {
+        gauss_legendre_01_arbitrary(n)
+    };
     let mut pts = Vec::with_capacity(n * n);
     let mut wts = Vec::with_capacity(n * n);
-    for (xi, wi) in xs.iter().zip(ws.iter()) {
-        for (xj, wj) in xs.iter().zip(ws.iter()) {
-            pts.push(vec![*xi, *xj]);
+    // MFEM's tensor-product order: the first index varies fastest
+    // (GetQuadrature(SQUARE) lists (x1,y1),(x2,y1),(x1,y2),(x2,y2), …), so
+    // the summation order of quadrature weights matches MFEM bit-for-bit.
+    for (yj, wj) in xs.iter().zip(ws.iter()) {
+        for (xi, wi) in xs.iter().zip(ws.iter()) {
+            pts.push(vec![*xi, *yj]);
             wts.push(wi * wj);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 /// Tensor-product Gauss-Legendre rule on `[0,1]²` for arbitrary order.
@@ -724,7 +818,10 @@ pub fn quad_rule_01_arbitrary(order: u8) -> QuadratureRule {
             wts.push(wi * wj);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 // ─── Hexahedron [-1,1]³ ───────────────────────────────────────────────────────
@@ -735,7 +832,11 @@ pub fn quad_rule_01_arbitrary(order: u8) -> QuadratureRule {
 /// Weights sum to 8 (volume of reference hex).
 pub fn hex_rule(order: u8) -> QuadratureRule {
     let n = ((order as usize + 2) / 2).max(1);
-    let (xs, ws) = if n <= 4 { gauss_legendre_1d(n) } else { gauss_legendre_arbitrary(n) };
+    let (xs, ws) = if n <= 4 {
+        gauss_legendre_1d(n)
+    } else {
+        gauss_legendre_arbitrary(n)
+    };
     let mut pts = Vec::with_capacity(n * n * n);
     let mut wts = Vec::with_capacity(n * n * n);
     for (xi, wi) in xs.iter().zip(ws.iter()) {
@@ -746,7 +847,10 @@ pub fn hex_rule(order: u8) -> QuadratureRule {
             }
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 // ─── Arbitrary-order triangle quadrature ─────────────────────────────────────
@@ -759,7 +863,7 @@ pub fn tri_rule_arbitrary(order: u8) -> QuadratureRule {
     if order <= 1 {
         // 1-point centroid rule (exact for degree 1)
         QuadratureRule {
-            points:  vec![vec![1.0 / 3.0, 1.0 / 3.0]],
+            points: vec![vec![1.0 / 3.0, 1.0 / 3.0]],
             weights: vec![0.5],
         }
     } else if order <= 3 {
@@ -767,7 +871,7 @@ pub fn tri_rule_arbitrary(order: u8) -> QuadratureRule {
         let a = 1.0 / 6.0;
         let b = 2.0 / 3.0;
         QuadratureRule {
-            points:  vec![vec![a, a], vec![b, a], vec![a, b]],
+            points: vec![vec![a, a], vec![b, a], vec![a, b]],
             weights: vec![a, a, a],
         }
     } else if order <= 5 {
@@ -792,49 +896,70 @@ pub fn tri_rule_arbitrary(order: u8) -> QuadratureRule {
 /// Weights sum to 1/d! (volume of the unit simplex).
 fn grundmann_moller_simplex(d: u32, s: u32) -> QuadratureRule {
     // Generate point sets for each level i = 0..=s.
-    let levels: Vec<Vec<Vec<f64>>> = (0..=s).map(|i| {
-        let si = s - i;
-        let m = (2 * si + d + 1) as f64;
-        simplex_points(si, d + 1).iter().map(|coords| {
-            let bary: Vec<f64> = coords.iter().map(|&j| (2.0 * j as f64 + 1.0) / m).collect();
-            // Convert from barycentric to Cartesian: drop first barycentric coordinate
-            bary[1..].to_vec()
-        }).collect()
-    }).collect();
+    let levels: Vec<Vec<Vec<f64>>> = (0..=s)
+        .map(|i| {
+            let si = s - i;
+            let m = (2 * si + d + 1) as f64;
+            simplex_points(si, d + 1)
+                .iter()
+                .map(|coords| {
+                    let bary: Vec<f64> =
+                        coords.iter().map(|&j| (2.0 * j as f64 + 1.0) / m).collect();
+                    // Convert from barycentric to Cartesian: drop first barycentric coordinate
+                    bary[1..].to_vec()
+                })
+                .collect()
+        })
+        .collect();
 
     // For each level i, all points share the same weight w_i.
     // Compute sum of x₁^{2k} over all points at level i.
     let n = (s + 1) as usize;
-    let level_sums: Vec<Vec<f64>> = (0..n).map(|i| {
-        (0..n).map(|k| {
-            levels[i].iter().map(|p| p[0].powi((2 * k) as i32)).sum::<f64>()
-        }).collect()
-    }).collect();
+    let level_sums: Vec<Vec<f64>> = (0..n)
+        .map(|i| {
+            (0..n)
+                .map(|k| {
+                    levels[i]
+                        .iter()
+                        .map(|p| p[0].powi((2 * k) as i32))
+                        .sum::<f64>()
+                })
+                .collect()
+        })
+        .collect();
 
     // Exact integrals of x^{2k} over the unit simplex in d dimensions:
     // (2k)! / (2k+d)!
-    let exact: Vec<f64> = (0..n).map(|k| {
-        let k2 = (2 * k) as u32;
-        fact_f64(k2) / fact_f64(k2 + d)
-    }).collect();
+    let exact: Vec<f64> = (0..n)
+        .map(|k| {
+            let k2 = (2 * k) as u32;
+            fact_f64(k2) / fact_f64(k2 + d)
+        })
+        .collect();
 
     // Solve the (s+1)×(s+1) linear system for per-level weights.
-    let mut mat: Vec<Vec<f64>> = (0..n).map(|k| {
-        let mut row: Vec<f64> = (0..n).map(|i| level_sums[i][k]).collect();
-        row.push(exact[k]);
-        row
-    }).collect();
+    let mut mat: Vec<Vec<f64>> = (0..n)
+        .map(|k| {
+            let mut row: Vec<f64> = (0..n).map(|i| level_sums[i][k]).collect();
+            row.push(exact[k]);
+            row
+        })
+        .collect();
     for col in 0..n {
-        let piv = (col..n).max_by(|&a, &b|
-            mat[a][col].abs().partial_cmp(&mat[b][col].abs()).unwrap()
-        ).unwrap();
+        let piv = (col..n)
+            .max_by(|&a, &b| mat[a][col].abs().partial_cmp(&mat[b][col].abs()).unwrap())
+            .unwrap();
         mat.swap(col, piv);
         let scale = mat[col][col];
-        for j in col..=n { mat[col][j] /= scale; }
+        for j in col..=n {
+            mat[col][j] /= scale;
+        }
         for row in 0..n {
             if row != col {
                 let f = mat[row][col];
-                for j in col..=n { mat[row][j] -= f * mat[col][j]; }
+                for j in col..=n {
+                    mat[row][j] -= f * mat[col][j];
+                }
             }
         }
     }
@@ -849,7 +974,10 @@ fn grundmann_moller_simplex(d: u32, s: u32) -> QuadratureRule {
             wts.push(ws_per_level[i]);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 /// Quadrature rule on the reference tetrahedron `(0,0,0),(1,0,0),(0,1,0),(0,0,1)` for arbitrary order.
@@ -860,7 +988,7 @@ pub fn tet_rule_arbitrary(order: u8) -> QuadratureRule {
     if order <= 1 {
         // 1-point centroid (exact degree 1)
         QuadratureRule {
-            points:  vec![vec![0.25, 0.25, 0.25]],
+            points: vec![vec![0.25, 0.25, 0.25]],
             weights: vec![1.0 / 6.0],
         }
     } else if order <= 2 {
@@ -868,12 +996,7 @@ pub fn tet_rule_arbitrary(order: u8) -> QuadratureRule {
         let a = 0.138_196_601_125_010_5;
         let b = 0.585_410_196_624_968_5;
         QuadratureRule {
-            points: vec![
-                vec![a, a, a],
-                vec![b, a, a],
-                vec![a, b, a],
-                vec![a, a, b],
-            ],
+            points: vec![vec![a, a, a], vec![b, a, a], vec![a, b, a], vec![a, a, b]],
             weights: vec![1.0 / 24.0; 4],
         }
     } else {
@@ -940,16 +1063,16 @@ impl TriQuadRule {
             3..=5 => Self::Dunavant7Deg5,
             6..=6 => Self::Dunavant12Deg6,
             7..=7 => Self::Witherden15Deg7,
-            _     => Self::Dunavant19Deg9,
+            _ => Self::Dunavant19Deg9,
         }
     }
 
     /// The number of quadrature points in this rule.
     pub fn n_points(self) -> usize {
         match self {
-            Self::Centroid1Deg1  => 1,
-            Self::Gaussian3Deg2  => 3,
-            Self::Dunavant7Deg5  => 7,
+            Self::Centroid1Deg1 => 1,
+            Self::Gaussian3Deg2 => 3,
+            Self::Dunavant7Deg5 => 7,
             Self::Dunavant12Deg6 => 12,
             Self::Witherden15Deg7 => 15,
             Self::Dunavant19Deg9 => 19,
@@ -959,9 +1082,9 @@ impl TriQuadRule {
     /// The polynomial degree for which this rule is exact.
     pub fn exact_degree(self) -> u8 {
         match self {
-            Self::Centroid1Deg1  => 1,
-            Self::Gaussian3Deg2  => 2,
-            Self::Dunavant7Deg5  => 5,
+            Self::Centroid1Deg1 => 1,
+            Self::Gaussian3Deg2 => 2,
+            Self::Dunavant7Deg5 => 5,
             Self::Dunavant12Deg6 => 6,
             Self::Witherden15Deg7 => 7,
             Self::Dunavant19Deg9 => 9,
@@ -971,9 +1094,9 @@ impl TriQuadRule {
     /// Compute and return the [`QuadratureRule`] for this variant.
     pub fn rule(self) -> QuadratureRule {
         match self {
-            Self::Centroid1Deg1  => tri_rule(1),
-            Self::Gaussian3Deg2  => tri_rule(2),
-            Self::Dunavant7Deg5  => tri_rule(5),
+            Self::Centroid1Deg1 => tri_rule(1),
+            Self::Gaussian3Deg2 => tri_rule(2),
+            Self::Dunavant7Deg5 => tri_rule(5),
             Self::Dunavant12Deg6 => dunavant_tri_12(),
             Self::Witherden15Deg7 => witherden_tri_15(),
             Self::Dunavant19Deg9 => dunavant_tri_19(),
@@ -1013,8 +1136,12 @@ fn dunavant_tri_12() -> QuadratureRule {
         ($a:expr, $b:expr) => {{
             let c = 1.0 - $a - $b;
             vec![
-                vec![$a, $b], vec![$a, c], vec![$b, $a],
-                vec![$b, c],  vec![c, $a], vec![c, $b],
+                vec![$a, $b],
+                vec![$a, c],
+                vec![$b, $a],
+                vec![$b, c],
+                vec![c, $a],
+                vec![c, $b],
             ]
         }};
     }
@@ -1022,9 +1149,18 @@ fn dunavant_tri_12() -> QuadratureRule {
     let mut points: Vec<Vec<f64>> = Vec::new();
     let mut weights: Vec<f64> = Vec::new();
 
-    for p in s21!(a1) { points.push(p); weights.push(w1); }
-    for p in s21!(a2) { points.push(p); weights.push(w2); }
-    for p in s111!(a3, b3) { points.push(p); weights.push(w3); }
+    for p in s21!(a1) {
+        points.push(p);
+        weights.push(w1);
+    }
+    for p in s21!(a2) {
+        points.push(p);
+        weights.push(w2);
+    }
+    for p in s111!(a3, b3) {
+        points.push(p);
+        weights.push(w3);
+    }
 
     QuadratureRule { points, weights }
 }
@@ -1058,8 +1194,12 @@ fn witherden_tri_15() -> QuadratureRule {
         ($a:expr, $b:expr) => {{
             let c = 1.0 - $a - $b;
             vec![
-                vec![$a, $b], vec![$a, c], vec![$b, $a],
-                vec![$b, c],  vec![c, $a], vec![c, $b],
+                vec![$a, $b],
+                vec![$a, c],
+                vec![$b, $a],
+                vec![$b, c],
+                vec![c, $a],
+                vec![c, $b],
             ]
         }};
     }
@@ -1067,10 +1207,22 @@ fn witherden_tri_15() -> QuadratureRule {
     let mut points: Vec<Vec<f64>> = Vec::new();
     let mut weights: Vec<f64> = Vec::new();
 
-    for p in s21!(a1) { points.push(p); weights.push(w1); }
-    for p in s21!(a2) { points.push(p); weights.push(w2); }
-    for p in s21!(a3) { points.push(p); weights.push(w3); }
-    for p in s111!(a4, b4) { points.push(p); weights.push(w4); }
+    for p in s21!(a1) {
+        points.push(p);
+        weights.push(w1);
+    }
+    for p in s21!(a2) {
+        points.push(p);
+        weights.push(w2);
+    }
+    for p in s21!(a3) {
+        points.push(p);
+        weights.push(w3);
+    }
+    for p in s111!(a4, b4) {
+        points.push(p);
+        weights.push(w4);
+    }
 
     QuadratureRule { points, weights }
 }
@@ -1107,8 +1259,12 @@ fn dunavant_tri_19() -> QuadratureRule {
         ($a:expr, $b:expr) => {{
             let c = 1.0 - $a - $b;
             vec![
-                vec![$a, $b], vec![$a, c], vec![$b, $a],
-                vec![$b, c],  vec![c, $a], vec![c, $b],
+                vec![$a, $b],
+                vec![$a, c],
+                vec![$b, $a],
+                vec![$b, c],
+                vec![c, $a],
+                vec![c, $b],
             ]
         }};
     }
@@ -1116,12 +1272,28 @@ fn dunavant_tri_19() -> QuadratureRule {
     let mut points: Vec<Vec<f64>> = Vec::new();
     let mut weights: Vec<f64> = Vec::new();
 
-    points.push(vec![1.0/3.0, 1.0/3.0]);  weights.push(wc);
-    for p in s21!(a1) { points.push(p); weights.push(w1); }
-    for p in s21!(a2) { points.push(p); weights.push(w2); }
-    for p in s21!(a3) { points.push(p); weights.push(w3); }
-    for p in s21!(a4) { points.push(p); weights.push(w4); }
-    for p in s111!(a5, b5) { points.push(p); weights.push(w5); }
+    points.push(vec![1.0 / 3.0, 1.0 / 3.0]);
+    weights.push(wc);
+    for p in s21!(a1) {
+        points.push(p);
+        weights.push(w1);
+    }
+    for p in s21!(a2) {
+        points.push(p);
+        weights.push(w2);
+    }
+    for p in s21!(a3) {
+        points.push(p);
+        weights.push(w3);
+    }
+    for p in s21!(a4) {
+        points.push(p);
+        weights.push(w4);
+    }
+    for p in s111!(a5, b5) {
+        points.push(p);
+        weights.push(w5);
+    }
 
     QuadratureRule { points, weights }
 }
@@ -1149,7 +1321,10 @@ pub fn prism_rule(order: u8) -> QuadratureRule {
             wts.push(tri.weights[t] * seg.weights[s]);
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 // ─── Pyramid ───────────────────────────────────────────────────────────────────
@@ -1184,7 +1359,10 @@ pub fn pyramid_rule(order: u8) -> QuadratureRule {
             }
         }
     }
-    QuadratureRule { points: pts, weights: wts }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
 }
 
 #[cfg(test)]
@@ -1245,7 +1423,10 @@ mod tests {
     #[test]
     fn seg_integrate_x_squared() {
         let r = seg_rule(3);
-        let val: f64 = r.weights.iter().zip(r.points.iter())
+        let val: f64 = r
+            .weights
+            .iter()
+            .zip(r.points.iter())
             .map(|(w, p)| w * p[0].powi(2))
             .sum();
         assert!((val - 1.0 / 3.0).abs() < 1e-14);
@@ -1277,7 +1458,10 @@ mod tests {
         for n in 2..=5 {
             let (pts, _) = gauss_lobatto_01(n);
             assert!((pts[0]).abs() < 1e-14, "n={n}: first point should be 0");
-            assert!((pts[n - 1] - 1.0).abs() < 1e-14, "n={n}: last point should be 1");
+            assert!(
+                (pts[n - 1] - 1.0).abs() < 1e-14,
+                "n={n}: last point should be 1"
+            );
         }
     }
 
@@ -1285,7 +1469,10 @@ mod tests {
     fn seg_lobatto_integrate_x_squared() {
         // 3-point Lobatto on [0,1] is exact for degree 3 => x² should be exact.
         let r = seg_lobatto_rule(2);
-        let val: f64 = r.weights.iter().zip(r.points.iter())
+        let val: f64 = r
+            .weights
+            .iter()
+            .zip(r.points.iter())
             .map(|(w, p)| w * p[0].powi(2))
             .sum();
         assert!((val - 1.0 / 3.0).abs() < 1e-14, "got {val}");
@@ -1343,7 +1530,10 @@ mod tests {
     fn pyramid_integrate_z() {
         // ∫_pyramid z dV = ∫₀¹ z·(1-z)² dz = 1/12
         let r = pyramid_rule(5);
-        let val: f64 = r.weights.iter().zip(r.points.iter())
+        let val: f64 = r
+            .weights
+            .iter()
+            .zip(r.points.iter())
             .map(|(w, p)| w * p[2])
             .sum();
         assert!((val - 1.0 / 12.0).abs() < 1e-10, "got {val}");
@@ -1353,17 +1543,13 @@ mod tests {
     fn lobatto_exactness_degree() {
         // n=3 Lobatto on [-1,1] should integrate x³ exactly (degree 2n-3=3)
         let (xs, ws) = super::gauss_lobatto_1d(3);
-        let val: f64 = xs.iter().zip(ws.iter())
-            .map(|(x, w)| w * x.powi(3))
-            .sum();
+        let val: f64 = xs.iter().zip(ws.iter()).map(|(x, w)| w * x.powi(3)).sum();
         // ∫_{-1}^{1} x³ dx = 0
         assert!(val.abs() < 1e-14, "integral of x³ = {val}");
 
         // n=4 Lobatto should integrate x⁵ exactly (degree 2*4-3=5)
         let (xs, ws) = super::gauss_lobatto_1d(4);
-        let val: f64 = xs.iter().zip(ws.iter())
-            .map(|(x, w)| w * x.powi(5))
-            .sum();
+        let val: f64 = xs.iter().zip(ws.iter()).map(|(x, w)| w * x.powi(5)).sum();
         assert!(val.abs() < 1e-14, "integral of x⁵ = {val}");
     }
 }
@@ -1377,8 +1563,11 @@ mod tet_quad_tests {
         for order in [1u8, 2, 3, 5, 6, 7] {
             let rule = tet_rule(order);
             let wsum: f64 = rule.weights.iter().sum();
-            assert!((wsum - 1.0/6.0).abs() < 1e-12,
-                "tet_rule(order={order}): weight sum = {wsum:.12} (expected {})", 1.0/6.0);
+            assert!(
+                (wsum - 1.0 / 6.0).abs() < 1e-12,
+                "tet_rule(order={order}): weight sum = {wsum:.12} (expected {})",
+                1.0 / 6.0
+            );
         }
     }
     #[test]
@@ -1407,7 +1596,9 @@ mod tri_named_quad_tests {
     }
 
     fn integrate_monomial(rule: &QuadratureRule, i: u32, j: u32) -> f64 {
-        rule.weights.iter().zip(rule.points.iter())
+        rule.weights
+            .iter()
+            .zip(rule.points.iter())
             .map(|(w, p)| w * p[0].powi(i as i32) * p[1].powi(j as i32))
             .sum()
     }
@@ -1416,9 +1607,9 @@ mod tri_named_quad_tests {
 
     #[test]
     fn tri_quad_rule_n_points() {
-        assert_eq!(TriQuadRule::Centroid1Deg1.n_points(),  1);
-        assert_eq!(TriQuadRule::Gaussian3Deg2.n_points(),  3);
-        assert_eq!(TriQuadRule::Dunavant7Deg5.n_points(),  7);
+        assert_eq!(TriQuadRule::Centroid1Deg1.n_points(), 1);
+        assert_eq!(TriQuadRule::Gaussian3Deg2.n_points(), 3);
+        assert_eq!(TriQuadRule::Dunavant7Deg5.n_points(), 7);
         assert_eq!(TriQuadRule::Dunavant12Deg6.n_points(), 12);
         assert_eq!(TriQuadRule::Witherden15Deg7.n_points(), 15);
         assert_eq!(TriQuadRule::Dunavant19Deg9.n_points(), 19);
@@ -1426,7 +1617,7 @@ mod tri_named_quad_tests {
 
     #[test]
     fn tri_quad_rule_exact_degree() {
-        assert_eq!(TriQuadRule::Centroid1Deg1.exact_degree(),  1);
+        assert_eq!(TriQuadRule::Centroid1Deg1.exact_degree(), 1);
         assert_eq!(TriQuadRule::Witherden15Deg7.exact_degree(), 7);
         assert_eq!(TriQuadRule::Dunavant19Deg9.exact_degree(), 9);
     }
@@ -1471,10 +1662,13 @@ mod tri_named_quad_tests {
     fn centroid_deg1_exact() {
         let qr = TriQuadRule::Centroid1Deg1.rule();
         // Exact for degree 1: x^0, y^0 (=0.5), x^1 (1/6), y^1 (1/6)
-        for (i, j) in [(0,0),(1,0),(0,1)] {
+        for (i, j) in [(0, 0), (1, 0), (0, 1)] {
             let got = integrate_monomial(&qr, i, j);
             let exp = monomial_exact(i, j);
-            assert!((got - exp).abs() < 1e-14, "x^{i} y^{j}: got={got}, exp={exp}");
+            assert!(
+                (got - exp).abs() < 1e-14,
+                "x^{i} y^{j}: got={got}, exp={exp}"
+            );
         }
     }
 
@@ -1482,10 +1676,13 @@ mod tri_named_quad_tests {
     fn gaussian3_deg2_exact() {
         let qr = TriQuadRule::Gaussian3Deg2.rule();
         // All monomials x^i y^j with i+j <= 2
-        for (i, j) in [(0,0),(1,0),(0,1),(2,0),(1,1),(0,2)] {
+        for (i, j) in [(0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2)] {
             let got = integrate_monomial(&qr, i, j);
             let exp = monomial_exact(i, j);
-            assert!((got - exp).abs() < 1e-14, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+            assert!(
+                (got - exp).abs() < 1e-14,
+                "x^{i} y^{j}: got={got:.12}, exp={exp:.12}"
+            );
         }
     }
 
@@ -1496,7 +1693,10 @@ mod tri_named_quad_tests {
             for j in 0u32..=(5 - i) {
                 let got = integrate_monomial(&qr, i, j);
                 let exp = monomial_exact(i, j);
-                assert!((got - exp).abs() < 1e-12, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+                assert!(
+                    (got - exp).abs() < 1e-12,
+                    "x^{i} y^{j}: got={got:.12}, exp={exp:.12}"
+                );
             }
         }
     }
@@ -1508,7 +1708,10 @@ mod tri_named_quad_tests {
             for j in 0u32..=(6 - i) {
                 let got = integrate_monomial(&qr, i, j);
                 let exp = monomial_exact(i, j);
-                assert!((got - exp).abs() < 1e-10, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+                assert!(
+                    (got - exp).abs() < 1e-10,
+                    "x^{i} y^{j}: got={got:.12}, exp={exp:.12}"
+                );
             }
         }
     }
@@ -1520,7 +1723,10 @@ mod tri_named_quad_tests {
             for j in 0u32..=(7 - i) {
                 let got = integrate_monomial(&qr, i, j);
                 let exp = monomial_exact(i, j);
-                assert!((got - exp).abs() < 1e-10, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+                assert!(
+                    (got - exp).abs() < 1e-10,
+                    "x^{i} y^{j}: got={got:.12}, exp={exp:.12}"
+                );
             }
         }
     }
@@ -1532,7 +1738,10 @@ mod tri_named_quad_tests {
             for j in 0u32..=(9 - i) {
                 let got = integrate_monomial(&qr, i, j);
                 let exp = monomial_exact(i, j);
-                assert!((got - exp).abs() < 1e-9, "x^{i} y^{j}: got={got:.12}, exp={exp:.12}");
+                assert!(
+                    (got - exp).abs() < 1e-9,
+                    "x^{i} y^{j}: got={got:.12}, exp={exp:.12}"
+                );
             }
         }
     }

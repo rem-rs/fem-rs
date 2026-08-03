@@ -19,11 +19,11 @@
 //! 3. Face interior DOFs (for each face)
 //! 4. Volume interior DOFs (for each element)
 
-use crate::quadrature::{seg_rule, tri_rule, tet_rule, quad_rule_01, hex_rule};
-use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
-use crate::serendipity::{QuadSerendipityPk, HexSerendipityPk};
 use super::prism::PrismPk;
 use super::pyramid::PyramidPk;
+use crate::quadrature::{hex_rule, quad_rule_01, seg_rule, tet_rule, tri_rule};
+use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
+use crate::serendipity::{HexSerendipityPk, QuadSerendipityPk};
 
 // ─── Helpers: equispaced nodes ────────────────────────────────────────────────
 
@@ -36,10 +36,19 @@ fn equispaced_nodes_tri(p: usize) -> Vec<[f64; 2]> {
     nodes.push([0.0, 0.0]);
     nodes.push([1.0, 0.0]);
     nodes.push([0.0, 1.0]);
-    if p == 1 { return nodes; }
-    for k in 1..p { nodes.push([k as f64 / p as f64, 0.0]); }
-    for k in 1..p { let t = k as f64 / p as f64; nodes.push([1.0 - t, t]); }
-    for k in 1..p { nodes.push([0.0, k as f64 / p as f64]); }
+    if p == 1 {
+        return nodes;
+    }
+    for k in 1..p {
+        nodes.push([k as f64 / p as f64, 0.0]);
+    }
+    for k in 1..p {
+        let t = k as f64 / p as f64;
+        nodes.push([1.0 - t, t]);
+    }
+    for k in 1..p {
+        nodes.push([0.0, k as f64 / p as f64]);
+    }
     for j in 1..=(p - 2) {
         for i in 1..=(p - 1 - j) {
             nodes.push([i as f64 / p as f64, j as f64 / p as f64]);
@@ -55,13 +64,30 @@ fn equispaced_nodes_tet(p: usize) -> Vec<[f64; 3]> {
     nodes.push([1.0, 0.0, 0.0]);
     nodes.push([0.0, 1.0, 0.0]);
     nodes.push([0.0, 0.0, 1.0]);
-    if p == 1 { return nodes; }
-    for k in 1..p { nodes.push([k as f64 / p as f64, 0.0, 0.0]); }
-    for k in 1..p { nodes.push([0.0, k as f64 / p as f64, 0.0]); }
-    for k in 1..p { nodes.push([0.0, 0.0, k as f64 / p as f64]); }
-    for k in 1..p { let t = k as f64 / p as f64; nodes.push([1.0 - t, t, 0.0]); }
-    for k in 1..p { let t = k as f64 / p as f64; nodes.push([1.0 - t, 0.0, t]); }
-    for k in 1..p { let t = k as f64 / p as f64; nodes.push([0.0, 1.0 - t, t]); }
+    if p == 1 {
+        return nodes;
+    }
+    for k in 1..p {
+        nodes.push([k as f64 / p as f64, 0.0, 0.0]);
+    }
+    for k in 1..p {
+        nodes.push([0.0, k as f64 / p as f64, 0.0]);
+    }
+    for k in 1..p {
+        nodes.push([0.0, 0.0, k as f64 / p as f64]);
+    }
+    for k in 1..p {
+        let t = k as f64 / p as f64;
+        nodes.push([1.0 - t, t, 0.0]);
+    }
+    for k in 1..p {
+        let t = k as f64 / p as f64;
+        nodes.push([1.0 - t, 0.0, t]);
+    }
+    for k in 1..p {
+        let t = k as f64 / p as f64;
+        nodes.push([0.0, 1.0 - t, t]);
+    }
     for j in 1..=(p.saturating_sub(2)) {
         for i in 1..=(p - 1 - j) {
             nodes.push([i as f64 / p as f64, j as f64 / p as f64, 0.0]);
@@ -87,12 +113,21 @@ fn equispaced_nodes_tet(p: usize) -> Vec<[f64; 3]> {
     for k in 1..=(p.saturating_sub(3)) {
         for j in 1..=(p - 2 - k) {
             for i in 1..=(p - 1 - j - k) {
-                nodes.push([i as f64 / p as f64, j as f64 / p as f64, k as f64 / p as f64]);
+                nodes.push([
+                    i as f64 / p as f64,
+                    j as f64 / p as f64,
+                    k as f64 / p as f64,
+                ]);
             }
         }
     }
     let expected = (p + 1) * (p + 2) * (p + 3) / 6;
-    debug_assert_eq!(nodes.len(), expected, "tet p={p}: got {} nodes, expected {expected}", nodes.len());
+    debug_assert_eq!(
+        nodes.len(),
+        expected,
+        "tet p={p}: got {} nodes, expected {expected}",
+        nodes.len()
+    );
     nodes
 }
 
@@ -115,9 +150,15 @@ impl SegPk {
 }
 
 impl ReferenceElement for SegPk {
-    fn dim(&self) -> u8 { 1 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { self.order + 1 }
+    fn dim(&self) -> u8 {
+        1
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.order + 1
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let p = self.order;
         let t = p as f64 * xi[0];
@@ -140,9 +181,14 @@ impl ReferenceElement for SegPk {
             hess[dof_idx] = p2 * lagrange_hess(dof_idx, p, t);
         }
     }
-    fn quadrature(&self, order: u8) -> QuadratureRule { seg_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        seg_rule(order)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        equispaced_nodes_1d(self.order).iter().map(|&x| vec![x]).collect()
+        equispaced_nodes_1d(self.order)
+            .iter()
+            .map(|&x| vec![x])
+            .collect()
     }
 }
 
@@ -200,7 +246,9 @@ pub fn lagrange_hess(n: usize, p: usize, t: f64) -> f64 {
 /// This is the correct building block for simplex Lagrange elements, NOT the
 /// standard Lagrange polynomial through integer nodes.
 pub fn rising_val(n: usize, t: f64) -> f64 {
-    if n == 0 { return 1.0; }
+    if n == 0 {
+        return 1.0;
+    }
     let mut val = 1.0;
     for a in 0..n {
         val *= (t - a as f64) / (n as f64 - a as f64);
@@ -212,7 +260,9 @@ pub fn rising_val(n: usize, t: f64) -> f64 {
 /// L_n(t) = Π_{a=0}^{n-1} (t-a)/(n-a), so
 /// L_n'(t) = Σ_{b=0}^{n-1} 1/(n-b) · Π_{a≠b} (t-a)/(n-a)
 pub fn rising_deriv(n: usize, t: f64) -> f64 {
-    if n == 0 { return 0.0; }
+    if n == 0 {
+        return 0.0;
+    }
     let nf = n as f64;
     let mut sum = 0.0;
     for b in 0..n {
@@ -230,7 +280,9 @@ pub fn rising_deriv(n: usize, t: f64) -> f64 {
 /// Second derivative of the rising-factorial basis L_n''(t).
 /// L_n''(t) = L_n(t) * [(Σ 1/(t-a))² - Σ 1/(t-a)²]
 pub fn rising_hess(n: usize, t: f64) -> f64 {
-    if n == 0 { return 0.0; }
+    if n == 0 {
+        return 0.0;
+    }
     let ln = rising_val(n, t);
     let _nf = n as f64;
     let mut s1 = 0.0; // Σ 1/(t-a)
@@ -261,21 +313,32 @@ impl TriPk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be ≥ 1");
         let nodes = equispaced_nodes_tri(p);
-        let ijk: Vec<(usize, usize, usize)> = nodes.iter()
+        let ijk: Vec<(usize, usize, usize)> = nodes
+            .iter()
             .map(|n| {
                 let i = (n[0] * p as f64).round() as usize;
                 let j = (n[1] * p as f64).round() as usize;
                 (i, j, p - i - j)
             })
             .collect();
-        Self { order: p, nodes, ijk }
+        Self {
+            order: p,
+            nodes,
+            ijk,
+        }
     }
 }
 
 impl ReferenceElement for TriPk {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 2) / 2 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.order + 1) * (self.order + 2) / 2
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let p = self.order;
         let pf = p as f64;
@@ -283,9 +346,7 @@ impl ReferenceElement for TriPk {
         let t1 = pf * xi[1];
         let t2 = pf * (1.0 - xi[0] - xi[1]);
         for (dof_idx, &(i, j, k)) in self.ijk.iter().enumerate() {
-            values[dof_idx] = rising_val(i, t0)
-                            * rising_val(j, t1)
-                            * rising_val(k, t2);
+            values[dof_idx] = rising_val(i, t0) * rising_val(j, t1) * rising_val(k, t2);
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
@@ -302,7 +363,7 @@ impl ReferenceElement for TriPk {
             let dj = rising_deriv(j, t1);
             let dk = rising_deriv(k, t2);
             // ∂φ/∂ξ = p·(di·vj·vk - vi·vj·dk)
-            grads[dof_idx * 2]     = pf * (di * vj * vk - vi * vj * dk);
+            grads[dof_idx * 2] = pf * (di * vj * vk - vi * vj * dk);
             // ∂φ/∂η = p·(vi·dj·vk - vi·vj·dk)
             grads[dof_idx * 2 + 1] = pf * (vi * dj * vk - vi * vj * dk);
         }
@@ -315,18 +376,26 @@ impl ReferenceElement for TriPk {
         let t1 = pf * xi[1];
         let t2 = pf * (1.0 - xi[0] - xi[1]);
         for (dof_idx, &(i, j, k)) in self.ijk.iter().enumerate() {
-            let vi  = rising_val(i, t0);   let vj  = rising_val(j, t1);   let vk  = rising_val(k, t2);
-            let di  = rising_deriv(i, t0);  let dj  = rising_deriv(j, t1);  let dk  = rising_deriv(k, t2);
-            let hii = rising_hess(i, t0);  let hjj = rising_hess(j, t1);  let hkk = rising_hess(k, t2);
+            let vi = rising_val(i, t0);
+            let vj = rising_val(j, t1);
+            let vk = rising_val(k, t2);
+            let di = rising_deriv(i, t0);
+            let dj = rising_deriv(j, t1);
+            let dk = rising_deriv(k, t2);
+            let hii = rising_hess(i, t0);
+            let hjj = rising_hess(j, t1);
+            let hkk = rising_hess(k, t2);
             let base = dof_idx * 4;
             // ∂²φ/∂ξ², ∂²φ/∂ξ∂η, ∂²φ/∂η∂ξ, ∂²φ/∂η²
-            hess[base]     = pf2 * (hii * vj * vk - 2.0 * di * vj * dk + vi * vj * hkk);
+            hess[base] = pf2 * (hii * vj * vk - 2.0 * di * vj * dk + vi * vj * hkk);
             hess[base + 1] = pf2 * (di * dj * vk - di * vj * dk - vi * dj * dk + vi * vj * hkk);
             hess[base + 2] = hess[base + 1];
             hess[base + 3] = pf2 * (vi * hjj * vk - 2.0 * vi * dj * dk + vi * vj * hkk);
         }
     }
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.nodes.iter().map(|c| vec![c[0], c[1]]).collect()
     }
@@ -349,7 +418,8 @@ impl TetPk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be ≥ 1");
         let nodes = equispaced_nodes_tet(p);
-        let ijkl: Vec<(usize, usize, usize, usize)> = nodes.iter()
+        let ijkl: Vec<(usize, usize, usize, usize)> = nodes
+            .iter()
             .map(|n| {
                 let i = (n[0] * p as f64).round() as usize;
                 let j = (n[1] * p as f64).round() as usize;
@@ -357,14 +427,24 @@ impl TetPk {
                 (i, j, k, p - i - j - k)
             })
             .collect();
-        Self { order: p, nodes, ijkl }
+        Self {
+            order: p,
+            nodes,
+            ijkl,
+        }
     }
 }
 
 impl ReferenceElement for TetPk {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 2) * (self.order + 3) / 6 }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.order + 1) * (self.order + 2) * (self.order + 3) / 6
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let p = self.order;
         let pf = p as f64;
@@ -373,10 +453,8 @@ impl ReferenceElement for TetPk {
         let t2 = pf * xi[2];
         let t3 = pf * (1.0 - xi[0] - xi[1] - xi[2]);
         for (dof_idx, &(i, j, k, l)) in self.ijkl.iter().enumerate() {
-            values[dof_idx] = rising_val(i, t0)
-                            * rising_val(j, t1)
-                            * rising_val(k, t2)
-                            * rising_val(l, t3);
+            values[dof_idx] =
+                rising_val(i, t0) * rising_val(j, t1) * rising_val(k, t2) * rising_val(l, t3);
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
@@ -395,7 +473,7 @@ impl ReferenceElement for TetPk {
             let dj = rising_deriv(j, t1);
             let dk = rising_deriv(k, t2);
             let dl = rising_deriv(l, t3);
-            grads[dof_idx * 3]     = pf * (di * vj * vk * vl - vi * vj * vk * dl);
+            grads[dof_idx * 3] = pf * (di * vj * vk * vl - vi * vj * vk * dl);
             grads[dof_idx * 3 + 1] = pf * (vi * dj * vk * vl - vi * vj * vk * dl);
             grads[dof_idx * 3 + 2] = pf * (vi * vj * dk * vl - vi * vj * vk * dl);
         }
@@ -409,33 +487,45 @@ impl ReferenceElement for TetPk {
         let t2 = pf * xi[2];
         let t3 = pf * (1.0 - xi[0] - xi[1] - xi[2]);
         for (dof_idx, &(i, j, k, l)) in self.ijkl.iter().enumerate() {
-            let vi  = rising_val(i, t0);  let vj  = rising_val(j, t1);
-            let vk  = rising_val(k, t2);  let vl  = rising_val(l, t3);
-            let di  = rising_deriv(i, t0); let dj  = rising_deriv(j, t1);
-            let dk  = rising_deriv(k, t2); let dl  = rising_deriv(l, t3);
-            let hii = rising_hess(i, t0); let hjj = rising_hess(j, t1);
-            let hkk = rising_hess(k, t2); let hll = rising_hess(l, t3);
+            let vi = rising_val(i, t0);
+            let vj = rising_val(j, t1);
+            let vk = rising_val(k, t2);
+            let vl = rising_val(l, t3);
+            let di = rising_deriv(i, t0);
+            let dj = rising_deriv(j, t1);
+            let dk = rising_deriv(k, t2);
+            let dl = rising_deriv(l, t3);
+            let hii = rising_hess(i, t0);
+            let hjj = rising_hess(j, t1);
+            let hkk = rising_hess(k, t2);
+            let hll = rising_hess(l, t3);
             let base = dof_idx * 9;
             // d²φ/dξ², d²φ/dξdη, d²φ/dξdζ
-            hess[base]     = pf2 * (hii*vj*vk*vl - 2.0*di*vj*vk*dl + vi*vj*vk*hll);
-            hess[base + 1] = pf2 * (di*dj*vk*vl - di*vj*vk*dl - vi*dj*vk*dl + vi*vj*vk*hll);
-            hess[base + 2] = pf2 * (di*vj*dk*vl - di*vj*vk*dl - vi*vj*dk*dl + vi*vj*vk*hll);
+            hess[base] = pf2 * (hii * vj * vk * vl - 2.0 * di * vj * vk * dl + vi * vj * vk * hll);
+            hess[base + 1] = pf2
+                * (di * dj * vk * vl - di * vj * vk * dl - vi * dj * vk * dl + vi * vj * vk * hll);
+            hess[base + 2] = pf2
+                * (di * vj * dk * vl - di * vj * vk * dl - vi * vj * dk * dl + vi * vj * vk * hll);
             // d²φ/dηdξ, d²φ/dη², d²φ/dηdζ
             hess[base + 3] = hess[base + 1];
-            hess[base + 4] = pf2 * (vi*hjj*vk*vl - 2.0*vi*dj*vk*dl + vi*vj*vk*hll);
-            hess[base + 5] = pf2 * (vi*dj*dk*vl - vi*dj*vk*dl - vi*vj*dk*dl + vi*vj*vk*hll);
+            hess[base + 4] =
+                pf2 * (vi * hjj * vk * vl - 2.0 * vi * dj * vk * dl + vi * vj * vk * hll);
+            hess[base + 5] = pf2
+                * (vi * dj * dk * vl - vi * dj * vk * dl - vi * vj * dk * dl + vi * vj * vk * hll);
             // d²φ/dζdξ, d²φ/dζdη, d²φ/dζ²
             hess[base + 6] = hess[base + 2];
             hess[base + 7] = hess[base + 5];
-            hess[base + 8] = pf2 * (vi*vj*hkk*vl - 2.0*vi*vj*dk*dl + vi*vj*vk*hll);
+            hess[base + 8] =
+                pf2 * (vi * vj * hkk * vl - 2.0 * vi * vj * dk * dl + vi * vj * vk * hll);
         }
     }
-    fn quadrature(&self, order: u8) -> QuadratureRule { tet_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tet_rule(order)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.nodes.iter().map(|c| vec![c[0], c[1], c[2]]).collect()
     }
 }
-
 
 // ─── Lagrange1D: shared 1D barycentric basis for Quad and Hex ──────────────
 
@@ -466,7 +556,9 @@ impl Lagrange1D {
         let mut bary_w = vec![1.0_f64; n];
         for i in 0..n {
             for j in 0..n {
-                if j != i { bary_w[i] *= nodes[i] - nodes[j]; }
+                if j != i {
+                    bary_w[i] *= nodes[i] - nodes[j];
+                }
             }
             bary_w[i] = 1.0 / bary_w[i];
         }
@@ -475,7 +567,9 @@ impl Lagrange1D {
 
     fn ell(&self, x: f64) -> f64 {
         let mut e = 1.0_f64;
-        for &xj in &self.nodes { e *= x - xj; }
+        for &xj in &self.nodes {
+            e *= x - xj;
+        }
         e
     }
 
@@ -486,7 +580,10 @@ impl Lagrange1D {
         let ell = self.ell(x);
         if ell.abs() < 1e-30 {
             for (i, &xi) in self.nodes.iter().enumerate() {
-                if (x - xi).abs() < 1e-30 { vals[i] = 1.0; break; }
+                if (x - xi).abs() < 1e-30 {
+                    vals[i] = 1.0;
+                    break;
+                }
             }
             return vals;
         }
@@ -526,7 +623,9 @@ impl Lagrange1D {
         let n = self.nodes.len();
         let mut ders = vec![0.0_f64; n];
         let mut sum_inv = 0.0_f64;
-        for &xj in &self.nodes { sum_inv += 1.0 / (x - xj); }
+        for &xj in &self.nodes {
+            sum_inv += 1.0 / (x - xj);
+        }
         for i in 0..n {
             ders[i] = vals[i] * (sum_inv - 1.0 / (x - self.nodes[i]));
         }
@@ -575,10 +674,12 @@ impl Lagrange1D {
         let n = self.nodes.len();
         let mut ders = vec![0.0_f64; n];
         let mut hess = vec![0.0_f64; n];
-        let mut s = 0.0_f64; let mut t = 0.0_f64;
+        let mut s = 0.0_f64;
+        let mut t = 0.0_f64;
         for &xj in &self.nodes {
             let inv = 1.0 / (x - xj);
-            s += inv; t += inv * inv;
+            s += inv;
+            t += inv * inv;
         }
         for i in 0..n {
             let inv_i = 1.0 / (x - self.nodes[i]);
@@ -591,56 +692,146 @@ impl Lagrange1D {
 
 // ─── QuadQk ──────────────────────────────────────────────────────────────────
 
-
 /// Arbitrary-order Lagrange element on the reference quad `[0,1]²` — `(p+1)²` DOFs.
 ///
-/// Uses Gauss-Lobatto-Legendre (GLL) nodes, matching MFEM's `H1_FECollection`
-/// with `BasisType::GaussLobatto`.  Internally delegates to [`Lagrange1D`] on
-/// `[-1,1]` and maps points via `ξ = 2·x − 1`.
+/// Uses Gauss-Lobatto-Legendre (GLL) nodes matching MFEM's `H1_FECollection`
+/// with `BasisType::GaussLobatto`.  Basis values and derivatives use the same
+/// stable-centre barycentric formula as MFEM's `Poly_1D::Basis::Eval`
+/// (Barycentric) **directly on `[0,1]`** — bit-identical to the C++ values
+/// (previously evaluated on `[-1,1]` via `ξ = 2·x − 1` with a chain factor,
+/// which differed from MFEM by ~1 ulp and propagated into matrix entries).
 pub struct QuadQk {
     order: usize,
     lag1d: Lagrange1D,
+    /// GLL nodes on `[0,1]` (`0.5·(lag1d.nodes+1)`), used by the MFEM
+    /// barycentric evaluation and `node_to_dof`.
+    gll01: Vec<f64>,
 }
 
 impl QuadQk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be >= 1");
-        Self { order: p, lag1d: Lagrange1D::new(p) }
+        let lag1d = Lagrange1D::new(p);
+        let gll01 = lag1d.nodes.iter().map(|&x| 0.5 * (x + 1.0)).collect();
+        Self {
+            order: p,
+            lag1d,
+            gll01,
+        }
     }
 
-    /// Map a point `x` on `[0,1]` to `[-1,1]`.
-    fn to_std(&self, x: f64) -> f64 { 2.0 * x - 1.0 }
+    /// Map a point `x` on `[0,1]` to `[-1,1]` (legacy path, kept for the
+    /// second-derivative evaluation which still uses `Lagrange1D`).
+    fn to_std(&self, x: f64) -> f64 {
+        2.0 * x - 1.0
+    }
 
     /// Chain-rule factor for first derivatives: d/dx = 2 · d/dξ.
-    fn grad_factor(&self) -> f64 { 2.0 }
+    fn grad_factor(&self) -> f64 {
+        2.0
+    }
 
     /// Chain-rule factor for second derivatives: d²/dx² = 4 · d²/dξ².
-    fn hess_factor(&self) -> f64 { 4.0 }
+    fn hess_factor(&self) -> f64 {
+        4.0
+    }
+
+    /// MFEM `Poly_1D::Basis::Eval` (Barycentric) on `[0,1]`: stable-centre
+    /// barycentric Lagrange values and first derivatives at `y`.
+    fn mfem_bary_1d(&self, y: f64) -> (Vec<f64>, Vec<f64>) {
+        let p = self.order;
+        let n = p + 1;
+        let x = &self.gll01;
+        // Barycentric weights w_i = 1/∏_{j≠i}(x_i − x_j)
+        let mut w = vec![1.0; n];
+        for i in 0..n {
+            for j in 0..n {
+                if j != i {
+                    w[i] *= x[i] - x[j];
+                }
+            }
+            w[i] = 1.0 / w[i];
+        }
+        // Stable centre k: lk = ∏ over the nodes on one side of y.
+        let mut k = 0usize;
+        let mut lk = 1.0;
+        while k < p {
+            if y >= (x[k] + x[k + 1]) / 2.0 {
+                lk *= y - x[k];
+                k += 1;
+            } else {
+                for i in k + 1..=p {
+                    lk *= y - x[i];
+                }
+                break;
+            }
+        }
+        let l = lk * (y - x[k]);
+        let mut sk = 0.0;
+        let mut u = vec![0.0; n];
+        for i in 0..k {
+            let si = 1.0 / (y - x[i]);
+            sk += si;
+            u[i] = l * si * w[i];
+        }
+        u[k] = lk * w[k];
+        for i in k + 1..=p {
+            let si = 1.0 / (y - x[i]);
+            sk += si;
+            u[i] = l * si * w[i];
+        }
+        let lp = l * sk + lk;
+        let mut d = vec![0.0; n];
+        for i in 0..k {
+            d[i] = (lp * w[i] - u[i]) / (y - x[i]);
+        }
+        d[k] = sk * u[k];
+        for i in k + 1..=p {
+            d[i] = (lp * w[i] - u[i]) / (y - x[i]);
+        }
+        (u, d)
+    }
 
     fn node_to_dof(&self, ix: usize, iy: usize) -> usize {
         let p = self.order;
-        let x = self.lag1d.nodes[ix]; // [-1,1]
-        let y = self.lag1d.nodes[iy];
+        let x = self.gll01[ix]; // [0,1]
+        let y = self.gll01[iy];
         let tol = 1e-12;
-        let on_xmin = (x + 1.0).abs() < tol;
+        let on_xmin = x.abs() < tol;
         let on_xmax = (x - 1.0).abs() < tol;
-        let on_ymin = (y + 1.0).abs() < tol;
+        let on_ymin = y.abs() < tol;
         let on_ymax = (y - 1.0).abs() < tol;
         let on_boundary = on_xmin || on_xmax || on_ymin || on_ymax;
 
         if on_boundary {
-            if on_xmin && on_ymin { return 0; }
-            if on_xmax && on_ymin { return 1; }
-            if on_xmax && on_ymax { return 2; }
-            if on_xmin && on_ymax { return 3; }
+            if on_xmin && on_ymin {
+                return 0;
+            }
+            if on_xmax && on_ymin {
+                return 1;
+            }
+            if on_xmax && on_ymax {
+                return 2;
+            }
+            if on_xmin && on_ymax {
+                return 3;
+            }
             let mut idx = 4usize;
-            if on_ymin { return idx + (ix - 1); }
+            if on_ymin {
+                return idx + (ix - 1);
+            }
             idx += p - 1;
-            if on_xmax { return idx + (iy - 1); }
+            if on_xmax {
+                return idx + (iy - 1);
+            }
             idx += p - 1;
-            if on_ymax { return idx + (p - 1 - ix); }
+            if on_ymax {
+                return idx + (p - 1 - ix);
+            }
             idx += p - 1;
-            if on_xmin { return idx + (p - 1 - iy); }
+            if on_xmin {
+                return idx + (p - 1 - iy);
+            }
             unreachable!()
         } else {
             let base = 4 + 4 * (p - 1);
@@ -655,8 +846,7 @@ impl QuadQk {
         for iy in 0..=p {
             for ix in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
-                coords[dof] = [0.5 * (self.lag1d.nodes[ix] + 1.0),
-                               0.5 * (self.lag1d.nodes[iy] + 1.0)];
+                coords[dof] = [self.gll01[ix], self.gll01[iy]];
             }
         }
         coords
@@ -664,14 +854,19 @@ impl QuadQk {
 }
 
 impl ReferenceElement for QuadQk {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 1) }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.order + 1) * (self.order + 1)
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        // Map xi from [0,1] to [-1,1] for internal Lagrange1D evaluation
-        let x = self.to_std(xi[0]);
-        let y = self.to_std(xi[1]);
-        let (lx, ly) = (self.lag1d.val(x), self.lag1d.val(y));
+        // MFEM [0,1] barycentric basis (no chain-rule mapping).
+        let (lx, _) = self.mfem_bary_1d(xi[0]);
+        let (ly, _) = self.mfem_bary_1d(xi[1]);
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
@@ -680,18 +875,15 @@ impl ReferenceElement for QuadQk {
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        // Map xi from [0,1] to [-1,1]; chain rule: d/dx = 2 · d/dξ
-        let x = self.to_std(xi[0]);
-        let y = self.to_std(xi[1]);
-        let (lx, dlx) = self.lag1d.val_d(x);
-        let (ly, dly) = self.lag1d.val_d(y);
-        let fac = self.grad_factor();
+        // MFEM [0,1] barycentric basis; gradients are exact (no chain factor).
+        let (lx, dlx) = self.mfem_bary_1d(xi[0]);
+        let (ly, dly) = self.mfem_bary_1d(xi[1]);
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
-                grads[dof * 2]     = fac * dlx[ix] * ly[iy];
-                grads[dof * 2 + 1] = fac * lx[ix]  * dly[iy];
+                grads[dof * 2] = dlx[ix] * ly[iy];
+                grads[dof * 2 + 1] = lx[ix] * dly[iy];
             }
         }
     }
@@ -707,19 +899,20 @@ impl ReferenceElement for QuadQk {
             for ix in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
                 let base = dof * 4;
-                hess[base]     = fac * hlx[ix] * ly[iy];
+                hess[base] = fac * hlx[ix] * ly[iy];
                 hess[base + 1] = fac * dlx[ix] * dly[iy];
                 hess[base + 2] = hess[base + 1];
-                hess[base + 3] = fac * lx[ix]  * hly[iy];
+                hess[base + 3] = fac * lx[ix] * hly[iy];
             }
         }
     }
-    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        quad_rule_01(order)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.all_dof_coords().iter().map(|c| c.to_vec()).collect()
     }
 }
-
 
 /// Arbitrary-order L² Lagrange element on `[0,1]²` with **Gauss-Legendre**
 /// nodes — `(p+1)²` DOFs, matching MFEM's `L2_FECollection` default
@@ -746,29 +939,43 @@ impl QuadL2GL {
 
     /// Direct 1D Lagrange values at `x` (on [0,1]).
     fn lag1d_val(&self, x: f64) -> Vec<f64> {
-        self.nodes.iter().enumerate().map(|(i, &xi)| {
-            let mut v = 1.0;
-            for (j, &xj) in self.nodes.iter().enumerate() {
-                if j != i { v *= (x - xj) / (xi - xj); }
-            }
-            v
-        }).collect()
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| {
+                let mut v = 1.0;
+                for (j, &xj) in self.nodes.iter().enumerate() {
+                    if j != i {
+                        v *= (x - xj) / (xi - xj);
+                    }
+                }
+                v
+            })
+            .collect()
     }
 
     /// Direct 1D Lagrange derivative values at `x`.
     fn lag1d_der(&self, x: f64) -> Vec<f64> {
-        self.nodes.iter().enumerate().map(|(i, &xi)| {
-            let mut s = 0.0;
-            for (m, &xm) in self.nodes.iter().enumerate() {
-                if m == i { continue; }
-                let mut t = 1.0 / (xi - xm);
-                for (j, &xj) in self.nodes.iter().enumerate() {
-                    if j != i && j != m { t *= (x - xj) / (xi - xj); }
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| {
+                let mut s = 0.0;
+                for (m, &xm) in self.nodes.iter().enumerate() {
+                    if m == i {
+                        continue;
+                    }
+                    let mut t = 1.0 / (xi - xm);
+                    for (j, &xj) in self.nodes.iter().enumerate() {
+                        if j != i && j != m {
+                            t *= (x - xj) / (xi - xj);
+                        }
+                    }
+                    s += t;
                 }
-                s += t;
-            }
-            s
-        }).collect()
+                s
+            })
+            .collect()
     }
 
     /// Tensor-product DOF ordering: dof = ix*(p+1) + iy (x varies slowest,
@@ -804,9 +1011,15 @@ impl QuadL2GL {
 }
 
 impl ReferenceElement for QuadL2GL {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 1) }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.order + 1) * (self.order + 1)
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let (lx, ly) = (self.lag1d_val(xi[0]), self.lag1d_val(xi[1]));
         let p = self.order;
@@ -823,19 +1036,20 @@ impl ReferenceElement for QuadL2GL {
         for ix in 0..=p {
             for iy in 0..=p {
                 let dof = self.node_to_dof(ix, iy);
-                grads[dof * 2]     = dlx[ix] * ly[iy];
-                grads[dof * 2 + 1] = lx[ix]  * dly[iy];
+                grads[dof * 2] = dlx[ix] * ly[iy];
+                grads[dof * 2 + 1] = lx[ix] * dly[iy];
             }
         }
     }
-    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        quad_rule_01(order)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.all_dof_coords().iter().map(|c| c.to_vec()).collect()
     }
 }
 
 // ─── HexQk ───────────────────────────────────────────────────────────────────
-
 
 /// Arbitrary-order Lagrange element on the reference hex `[-1,1]³` — `(p+1)³` DOFs.
 pub struct HexQk {
@@ -846,7 +1060,10 @@ pub struct HexQk {
 impl HexQk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be >= 1");
-        Self { order: p, lag1d: Lagrange1D::new(p) }
+        Self {
+            order: p,
+            lag1d: Lagrange1D::new(p),
+        }
     }
 
     fn node_to_dof(&self, ix: usize, iy: usize, iz: usize) -> usize {
@@ -864,15 +1081,23 @@ impl HexQk {
         let on_zmax = (z - 1.0).abs() < tol;
 
         let n_faces = [on_xmin, on_xmax, on_ymin, on_ymax, on_zmin, on_zmax]
-            .iter().filter(|&&b| b).count();
+            .iter()
+            .filter(|&&b| b)
+            .count();
 
         if n_faces >= 3 {
             let vx = if on_xmin { 0 } else { 1 };
             let vy = if on_ymin { 0 } else { 1 };
             let vz = if on_zmin { 0 } else { 1 };
             return match (vx, vy, vz) {
-                (0,0,0) => 0, (1,0,0) => 1, (1,1,0) => 2, (0,1,0) => 3,
-                (0,0,1) => 4, (1,0,1) => 5, (1,1,1) => 6, (0,1,1) => 7,
+                (0, 0, 0) => 0,
+                (1, 0, 0) => 1,
+                (1, 1, 0) => 2,
+                (0, 1, 0) => 3,
+                (0, 0, 1) => 4,
+                (1, 0, 1) => 5,
+                (1, 1, 1) => 6,
+                (0, 1, 1) => 7,
                 _ => unreachable!(),
             };
         }
@@ -914,12 +1139,29 @@ impl HexQk {
 
             if idx > 0 && idx < p {
                 let faces: Vec<usize> = [on_xmin, on_xmax, on_ymin, on_ymax, on_zmin, on_zmax]
-                    .iter().enumerate().filter(|(_, &b)| b).map(|(i, _)| i).collect();
-                let (f0, f1) = if faces[0] < faces[1] { (faces[0], faces[1]) } else { (faces[1], faces[0]) };
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &b)| b)
+                    .map(|(i, _)| i)
+                    .collect();
+                let (f0, f1) = if faces[0] < faces[1] {
+                    (faces[0], faces[1])
+                } else {
+                    (faces[1], faces[0])
+                };
                 let ei = match (f0, f1) {
-                    (1, 2) => 0, (1, 3) => 1, (0, 3) => 2, (0, 2) => 3,
-                    (0, 4) => 4, (1, 4) => 5, (1, 5) => 6, (0, 5) => 7,
-                    (2, 4) => 8, (3, 4) => 9, (3, 5) => 10, (2, 5) => 11,
+                    (1, 2) => 0,
+                    (1, 3) => 1,
+                    (0, 3) => 2,
+                    (0, 2) => 3,
+                    (0, 4) => 4,
+                    (1, 4) => 5,
+                    (1, 5) => 6,
+                    (0, 5) => 7,
+                    (2, 4) => 8,
+                    (3, 4) => 9,
+                    (3, 5) => 10,
+                    (2, 5) => 11,
                     _ => 0,
                 };
                 return base + ei * (p - 1) + (local - 1);
@@ -931,14 +1173,23 @@ impl HexQk {
             return vol_base + (iz - 1) * (p - 1) * (p - 1) + (iy - 1) * (p - 1) + (ix - 1);
         }
 
-        if p < 2 { return 0; }
+        if p < 2 {
+            return 0;
+        }
         base += 12 * (p - 1);
-        let face_idx = if on_xmin { 0 }
-            else if on_xmax { 1 }
-            else if on_ymin { 2 }
-            else if on_ymax { 3 }
-            else if on_zmin { 4 }
-            else { 5 };
+        let face_idx = if on_xmin {
+            0
+        } else if on_xmax {
+            1
+        } else if on_ymin {
+            2
+        } else if on_ymax {
+            3
+        } else if on_zmin {
+            4
+        } else {
+            5
+        };
 
         let (va, vb) = match face_idx {
             0 | 1 => (iy, iz),
@@ -970,7 +1221,11 @@ impl HexQk {
             for iy in 0..=p {
                 for ix in 0..=p {
                     let dof = self.node_to_dof(ix, iy, iz);
-                    coords[dof] = [self.lag1d.nodes[ix], self.lag1d.nodes[iy], self.lag1d.nodes[iz]];
+                    coords[dof] = [
+                        self.lag1d.nodes[ix],
+                        self.lag1d.nodes[iy],
+                        self.lag1d.nodes[iz],
+                    ];
                 }
             }
         }
@@ -979,11 +1234,22 @@ impl HexQk {
 }
 
 impl ReferenceElement for HexQk {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { let p = self.order + 1; p * p * p }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        let p = self.order + 1;
+        p * p * p
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let (lx, ly, lz) = (self.lag1d.val(xi[0]), self.lag1d.val(xi[1]), self.lag1d.val(xi[2]));
+        let (lx, ly, lz) = (
+            self.lag1d.val(xi[0]),
+            self.lag1d.val(xi[1]),
+            self.lag1d.val(xi[2]),
+        );
         let p = self.order;
         for iz in 0..=p {
             for iy in 0..=p {
@@ -1002,9 +1268,9 @@ impl ReferenceElement for HexQk {
             for iy in 0..=p {
                 for ix in 0..=p {
                     let dof = self.node_to_dof(ix, iy, iz);
-                    grads[dof * 3]     = dlx[ix] * ly[iy]  * lz[iz];
-                    grads[dof * 3 + 1] = lx[ix]  * dly[iy] * lz[iz];
-                    grads[dof * 3 + 2] = lx[ix]  * ly[iy]  * dlz[iz];
+                    grads[dof * 3] = dlx[ix] * ly[iy] * lz[iz];
+                    grads[dof * 3 + 1] = lx[ix] * dly[iy] * lz[iz];
+                    grads[dof * 3 + 2] = lx[ix] * ly[iy] * dlz[iz];
                 }
             }
         }
@@ -1019,42 +1285,52 @@ impl ReferenceElement for HexQk {
                 for ix in 0..=p {
                     let dof = self.node_to_dof(ix, iy, iz);
                     let b = dof * 9;
-                    hess[b]     = hlx[ix] * ly[iy]  * lz[iz];
+                    hess[b] = hlx[ix] * ly[iy] * lz[iz];
                     hess[b + 1] = dlx[ix] * dly[iy] * lz[iz];
-                    hess[b + 2] = dlx[ix] * ly[iy]  * dlz[iz];
+                    hess[b + 2] = dlx[ix] * ly[iy] * dlz[iz];
                     hess[b + 3] = hess[b + 1];
-                    hess[b + 4] = lx[ix]  * hly[iy] * lz[iz];
-                    hess[b + 5] = lx[ix]  * dly[iy] * dlz[iz];
+                    hess[b + 4] = lx[ix] * hly[iy] * lz[iz];
+                    hess[b + 5] = lx[ix] * dly[iy] * dlz[iz];
                     hess[b + 6] = hess[b + 2];
                     hess[b + 7] = hess[b + 5];
-                    hess[b + 8] = lx[ix]  * ly[iy]  * hlz[iz];
+                    hess[b + 8] = lx[ix] * ly[iy] * hlz[iz];
                 }
             }
         }
     }
-    fn quadrature(&self, order: u8) -> QuadratureRule { hex_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        hex_rule(order)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.all_dof_coords().iter().map(|c| c.to_vec()).collect()
     }
 }
 
-
-
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 /// Element type identifier for the factory function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ElemType { Seg, Tri, Tet, Quad, Hex, Prism, Pyramid, QuadSerendipity, HexSerendipity }
+pub enum ElemType {
+    Seg,
+    Tri,
+    Tet,
+    Quad,
+    Hex,
+    Prism,
+    Pyramid,
+    QuadSerendipity,
+    HexSerendipity,
+}
 
 /// Create a reference element of the given type and order.
 pub fn ref_elem(etype: ElemType, order: u8) -> Box<dyn ReferenceElement> {
     match etype {
-        ElemType::Seg     => Box::new(SegPk::new(order as usize)),
-        ElemType::Tri     => Box::new(TriPk::new(order as usize)),
-        ElemType::Tet     => Box::new(TetPk::new(order as usize)),
-        ElemType::Quad    => Box::new(QuadQk::new(order as usize)),
-        ElemType::Hex     => Box::new(HexQk::new(order as usize)),
-        ElemType::Prism   => Box::new(PrismPk::new(order as usize)),
+        ElemType::Seg => Box::new(SegPk::new(order as usize)),
+        ElemType::Tri => Box::new(TriPk::new(order as usize)),
+        ElemType::Tet => Box::new(TetPk::new(order as usize)),
+        ElemType::Quad => Box::new(QuadQk::new(order as usize)),
+        ElemType::Hex => Box::new(HexQk::new(order as usize)),
+        ElemType::Prism => Box::new(PrismPk::new(order as usize)),
         ElemType::Pyramid => Box::new(PyramidPk::new(order as usize)),
         ElemType::QuadSerendipity => Box::new(QuadSerendipityPk::new(order as usize)),
         ElemType::HexSerendipity => Box::new(HexSerendipityPk::new(order as usize)),
@@ -1072,16 +1348,26 @@ pub type LagrangePyramid = PyramidPk;
 /// Number of DOFs for a simplex element of given dimension and order.
 pub fn n_dofs_simplex(dim: usize, order: usize) -> usize {
     let mut num = 1usize;
-    for i in 1..=dim { num = num * (order + i) / i; }
+    for i in 1..=dim {
+        num = num * (order + i) / i;
+    }
     num
 }
 
 /// Family of vector-valued reference elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VecFamily { Nedelec, RaviartThomas, BrezziDouglasMarini }
+pub enum VecFamily {
+    Nedelec,
+    RaviartThomas,
+    BrezziDouglasMarini,
+}
 
 /// Create a vector-valued reference element by family, type, and order.
-pub fn vec_ref_elem(family: VecFamily, etype: ElemType, order: u8) -> Box<dyn VectorReferenceElement> {
+pub fn vec_ref_elem(
+    family: VecFamily,
+    etype: ElemType,
+    order: u8,
+) -> Box<dyn VectorReferenceElement> {
     let p = order as usize;
     match (family, etype) {
         (VecFamily::Nedelec, ElemType::Tri) => Box::new(crate::nedelec::TriNDk::new(p)),
@@ -1091,20 +1377,48 @@ pub fn vec_ref_elem(family: VecFamily, etype: ElemType, order: u8) -> Box<dyn Ve
         (VecFamily::Nedelec, ElemType::Hex) => Box::new(crate::nedelec::HexNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Prism) => Box::new(crate::nedelec::PrismNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Pyramid) => Box::new(crate::nedelec::PyraNDk::new(p)),
-        (VecFamily::RaviartThomas, ElemType::Tri) if p == 0 => Box::new(crate::raviart_thomas::TriRT0),
-        (VecFamily::RaviartThomas, ElemType::Quad) if p == 0 => Box::new(crate::raviart_thomas::QuadRT0),
-        (VecFamily::RaviartThomas, ElemType::Tet) if p == 0 => Box::new(crate::raviart_thomas::TetRT0),
-        (VecFamily::RaviartThomas, ElemType::Hex) if p == 0 => Box::new(crate::raviart_thomas::HexRT0),
-        (VecFamily::RaviartThomas, ElemType::Tri) => Box::new(crate::raviart_thomas::TriRTk::new(p)),
-        (VecFamily::RaviartThomas, ElemType::Quad) => Box::new(crate::raviart_thomas::QuadRTk::new(p)),
-        (VecFamily::RaviartThomas, ElemType::Tet) => Box::new(crate::raviart_thomas::TetRTk::new(p)),
-        (VecFamily::RaviartThomas, ElemType::Hex) => Box::new(crate::raviart_thomas::HexRTk::new(p)),
-        (VecFamily::RaviartThomas, ElemType::Prism) => Box::new(crate::raviart_thomas::PrismRTk::new(p)),
-        (VecFamily::RaviartThomas, ElemType::Pyramid) => Box::new(crate::raviart_thomas::PyraRTk::new(p)),
-        (VecFamily::BrezziDouglasMarini, ElemType::Tri) => Box::new(crate::brezzi_douglas_marini::TriBDMk::new(p)),
-        (VecFamily::BrezziDouglasMarini, ElemType::Quad) => Box::new(crate::brezzi_douglas_marini::QuadBDMk::new(p)),
-        (VecFamily::BrezziDouglasMarini, ElemType::Tet) => Box::new(crate::brezzi_douglas_marini::TetBDMk::new(p)),
-        (VecFamily::BrezziDouglasMarini, ElemType::Hex) => Box::new(crate::brezzi_douglas_marini::HexBDMk::new(p)),
+        (VecFamily::RaviartThomas, ElemType::Tri) if p == 0 => {
+            Box::new(crate::raviart_thomas::TriRT0)
+        }
+        (VecFamily::RaviartThomas, ElemType::Quad) if p == 0 => {
+            Box::new(crate::raviart_thomas::QuadRT0)
+        }
+        (VecFamily::RaviartThomas, ElemType::Tet) if p == 0 => {
+            Box::new(crate::raviart_thomas::TetRT0)
+        }
+        (VecFamily::RaviartThomas, ElemType::Hex) if p == 0 => {
+            Box::new(crate::raviart_thomas::HexRT0)
+        }
+        (VecFamily::RaviartThomas, ElemType::Tri) => {
+            Box::new(crate::raviart_thomas::TriRTk::new(p))
+        }
+        (VecFamily::RaviartThomas, ElemType::Quad) => {
+            Box::new(crate::raviart_thomas::QuadRTk::new(p))
+        }
+        (VecFamily::RaviartThomas, ElemType::Tet) => {
+            Box::new(crate::raviart_thomas::TetRTk::new(p))
+        }
+        (VecFamily::RaviartThomas, ElemType::Hex) => {
+            Box::new(crate::raviart_thomas::HexRTk::new(p))
+        }
+        (VecFamily::RaviartThomas, ElemType::Prism) => {
+            Box::new(crate::raviart_thomas::PrismRTk::new(p))
+        }
+        (VecFamily::RaviartThomas, ElemType::Pyramid) => {
+            Box::new(crate::raviart_thomas::PyraRTk::new(p))
+        }
+        (VecFamily::BrezziDouglasMarini, ElemType::Tri) => {
+            Box::new(crate::brezzi_douglas_marini::TriBDMk::new(p))
+        }
+        (VecFamily::BrezziDouglasMarini, ElemType::Quad) => {
+            Box::new(crate::brezzi_douglas_marini::QuadBDMk::new(p))
+        }
+        (VecFamily::BrezziDouglasMarini, ElemType::Tet) => {
+            Box::new(crate::brezzi_douglas_marini::TetBDMk::new(p))
+        }
+        (VecFamily::BrezziDouglasMarini, ElemType::Hex) => {
+            Box::new(crate::brezzi_douglas_marini::HexBDMk::new(p))
+        }
         _ => panic!("vec_ref_elem: unsupported (family={family:?}, type={etype:?})"),
     }
 }
@@ -1122,8 +1436,12 @@ mod tests {
         for pt in &rule.points {
             elem.eval_basis(pt, &mut phi);
             let s: f64 = phi.iter().sum();
-            assert!((s - 1.0).abs() < 1e-10,
-                "POU failed for dim={} p={order} at {:?}: sum={s}", elem.dim(), pt);
+            assert!(
+                (s - 1.0).abs() < 1e-10,
+                "POU failed for dim={} p={order} at {:?}: sum={s}",
+                elem.dim(),
+                pt
+            );
         }
     }
 
@@ -1136,8 +1454,11 @@ mod tests {
             elem.eval_grad_basis(pt, &mut g);
             for d in 0..dim {
                 let s: f64 = (0..elem.n_dofs()).map(|i| g[i * dim + d]).sum();
-                assert!(s.abs() < 1e-10,
-                    "grad sum d={d} = {s} for dim={} p={order}", elem.dim());
+                assert!(
+                    s.abs() < 1e-10,
+                    "grad sum d={d} = {s} for dim={} p={order}",
+                    elem.dim()
+                );
             }
         }
     }
@@ -1150,17 +1471,35 @@ mod tests {
             elem.eval_basis(coord, &mut phi);
             for j in 0..n {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((phi[j] - expected).abs() < 1e-10,
-                    "nodal interp: node {i}, basis {j}: expected {expected}, got {}", phi[j]);
+                assert!(
+                    (phi[j] - expected).abs() < 1e-10,
+                    "nodal interp: node {i}, basis {j}: expected {expected}, got {}",
+                    phi[j]
+                );
             }
         }
     }
 
     // ── SegPk ─────────────────────────────────────────────────────────────
 
-    #[test] fn seg_pk_pou() { for p in 1..=5 { check_pou(&SegPk::new(p)); } }
-    #[test] fn seg_pk_grad_zero() { for p in 1..=5 { check_grad_zero(&SegPk::new(p)); } }
-    #[test] fn seg_pk_nodal_interp() { for p in 1..=5 { check_nodal_interp(&SegPk::new(p)); } }
+    #[test]
+    fn seg_pk_pou() {
+        for p in 1..=5 {
+            check_pou(&SegPk::new(p));
+        }
+    }
+    #[test]
+    fn seg_pk_grad_zero() {
+        for p in 1..=5 {
+            check_grad_zero(&SegPk::new(p));
+        }
+    }
+    #[test]
+    fn seg_pk_nodal_interp() {
+        for p in 1..=5 {
+            check_nodal_interp(&SegPk::new(p));
+        }
+    }
 
     // ── TriPk ─────────────────────────────────────────────────────────────
     // Note: gradient_fd tests p=1..=5 (direct Lagrange formula, no Vandermonde).
@@ -1168,26 +1507,59 @@ mod tests {
     // Windows debug stack when called in a loop; tested at single order.
     // p=5 passes gradient_fd with 1e-5 tolerance on all DOFs.
 
-    #[test] fn tri_pk_pou() { check_pou(&TriPk::new(3)); }
-    #[test] fn tri_pk_grad_zero() { check_grad_zero(&TriPk::new(3)); }
-    #[test] fn tri_pk_nodal_interp() { check_nodal_interp(&TriPk::new(3)); }
+    #[test]
+    fn tri_pk_pou() {
+        check_pou(&TriPk::new(3));
+    }
+    #[test]
+    fn tri_pk_grad_zero() {
+        check_grad_zero(&TriPk::new(3));
+    }
+    #[test]
+    fn tri_pk_nodal_interp() {
+        check_nodal_interp(&TriPk::new(3));
+    }
 
     // ── TetPk ─────────────────────────────────────────────────────────────
 
-    #[test] fn tet_pk_pou() { check_pou(&TetPk::new(3)); }
-    #[test] fn tet_pk_grad_zero() { check_grad_zero(&TetPk::new(3)); }
-    #[test] fn tet_pk_nodal_interp() { check_nodal_interp(&TetPk::new(3)); }
-    #[test] fn tet_pk_n_dofs() { for p in 1..=8 { assert_eq!(TetPk::new(p).n_dofs(), (p+1)*(p+2)*(p+3)/6); } }
+    #[test]
+    fn tet_pk_pou() {
+        check_pou(&TetPk::new(3));
+    }
+    #[test]
+    fn tet_pk_grad_zero() {
+        check_grad_zero(&TetPk::new(3));
+    }
+    #[test]
+    fn tet_pk_nodal_interp() {
+        check_nodal_interp(&TetPk::new(3));
+    }
+    #[test]
+    fn tet_pk_n_dofs() {
+        for p in 1..=8 {
+            assert_eq!(TetPk::new(p).n_dofs(), (p + 1) * (p + 2) * (p + 3) / 6);
+        }
+    }
 
     #[test]
     fn tet_pk_matches_p1() {
         use crate::lagrange::TetP1;
         let pk = TetPk::new(1);
         let n = 4;
-        let mut v1 = vec![0.0; n]; let mut v2 = vec![0.0; n];
-        for &(x,y,z) in &[(0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0),(0.25,0.25,0.25)] {
-            pk.eval_basis(&[x,y,z], &mut v1); TetP1.eval_basis(&[x,y,z], &mut v2);
-            for i in 0..n { assert!((v1[i]-v2[i]).abs() < 1e-13, "tet p=1 ({x},{y},{z}) i={i}"); }
+        let mut v1 = vec![0.0; n];
+        let mut v2 = vec![0.0; n];
+        for &(x, y, z) in &[
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.25, 0.25, 0.25),
+        ] {
+            pk.eval_basis(&[x, y, z], &mut v1);
+            TetP1.eval_basis(&[x, y, z], &mut v2);
+            for i in 0..n {
+                assert!((v1[i] - v2[i]).abs() < 1e-13, "tet p=1 ({x},{y},{z}) i={i}");
+            }
         }
     }
 
@@ -1196,36 +1568,71 @@ mod tests {
         use crate::lagrange::TetP2;
         let pk = TetPk::new(2);
         let n = 10;
-        let mut v1 = vec![0.0; n]; let mut v2 = vec![0.0; n];
-        for &(x,y,z) in &[
-            (0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0),
-            (0.5,0.0,0.0),(0.0,0.5,0.0),(0.0,0.0,0.5),
-            (0.5,0.5,0.0),(0.5,0.0,0.5),(0.0,0.5,0.5),(0.2,0.3,0.1),
+        let mut v1 = vec![0.0; n];
+        let mut v2 = vec![0.0; n];
+        for &(x, y, z) in &[
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.5, 0.0, 0.0),
+            (0.0, 0.5, 0.0),
+            (0.0, 0.0, 0.5),
+            (0.5, 0.5, 0.0),
+            (0.5, 0.0, 0.5),
+            (0.0, 0.5, 0.5),
+            (0.2, 0.3, 0.1),
         ] {
-            pk.eval_basis(&[x,y,z], &mut v1); TetP2.eval_basis(&[x,y,z], &mut v2);
-            for i in 0..n { assert!((v1[i]-v2[i]).abs() < 1e-12, "tet p=2 ({x},{y},{z}) i={i}"); }
+            pk.eval_basis(&[x, y, z], &mut v1);
+            TetP2.eval_basis(&[x, y, z], &mut v2);
+            for i in 0..n {
+                assert!((v1[i] - v2[i]).abs() < 1e-12, "tet p=2 ({x},{y},{z}) i={i}");
+            }
         }
     }
 
     // ── QuadQk ────────────────────────────────────────────────────────────
 
-    #[test] fn quad_qk_pou() { for p in 1..=6 { check_pou(&QuadQk::new(p)); } }
-    #[test] fn quad_qk_grad_zero() { for p in 1..=6 { check_grad_zero(&QuadQk::new(p)); } }
-    #[test] fn quad_qk_nodal_interp() { for p in 1..=6 { check_nodal_interp(&QuadQk::new(p)); } }
-    #[test] fn quad_qk_n_dofs() { for p in 1..=8 { assert_eq!(QuadQk::new(p).n_dofs(), (p+1)*(p+1)); } }
+    #[test]
+    fn quad_qk_pou() {
+        for p in 1..=6 {
+            check_pou(&QuadQk::new(p));
+        }
+    }
+    #[test]
+    fn quad_qk_grad_zero() {
+        for p in 1..=6 {
+            check_grad_zero(&QuadQk::new(p));
+        }
+    }
+    #[test]
+    fn quad_qk_nodal_interp() {
+        for p in 1..=6 {
+            check_nodal_interp(&QuadQk::new(p));
+        }
+    }
+    #[test]
+    fn quad_qk_n_dofs() {
+        for p in 1..=8 {
+            assert_eq!(QuadQk::new(p).n_dofs(), (p + 1) * (p + 1));
+        }
+    }
 
     #[test]
     fn quad_qk_matches_q1() {
         use crate::lagrange::QuadQ1;
         let qk = QuadQk::new(1);
         let n = 4;
-        let mut v1 = vec![0.0; n]; let mut v2 = vec![0.0; n];
+        let mut v1 = vec![0.0; n];
+        let mut v2 = vec![0.0; n];
         // QuadQk uses [0,1]²; QuadQ1 uses [-1,1]².
         // φ_QuadQk(x,y) = φ_QuadQ1(2x-1, 2y-1)
-        for &(x,y) in &[(0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0),(0.65,0.25)] {
-            qk.eval_basis(&[x,y], &mut v1);
-            QuadQ1.eval_basis(&[2.0*x-1.0, 2.0*y-1.0], &mut v2);
-            for i in 0..n { assert!((v1[i]-v2[i]).abs() < 1e-13, "Q1 ({x},{y}) i={i}"); }
+        for &(x, y) in &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.65, 0.25)] {
+            qk.eval_basis(&[x, y], &mut v1);
+            QuadQ1.eval_basis(&[2.0 * x - 1.0, 2.0 * y - 1.0], &mut v2);
+            for i in 0..n {
+                assert!((v1[i] - v2[i]).abs() < 1e-13, "Q1 ({x},{y}) i={i}");
+            }
         }
     }
 
@@ -1234,38 +1641,81 @@ mod tests {
         use crate::lagrange::QuadQ2;
         let qk = QuadQk::new(2);
         let n = 9;
-        let mut v1 = vec![0.0; n]; let mut v2 = vec![0.0; n];
+        let mut v1 = vec![0.0; n];
+        let mut v2 = vec![0.0; n];
         // QuadQk uses [0,1]²; QuadQ2 uses [-1,1]².
         // φ_QuadQk(x,y) = φ_QuadQ2(2x-1, 2y-1)
-        for &(x,y) in &[
-            (0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0),
-            (0.5,0.0),(1.0,0.5),(0.5,1.0),(0.0,0.5),(0.5,0.5),(0.65,0.25),
+        for &(x, y) in &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.0, 0.5),
+            (0.5, 0.5),
+            (0.65, 0.25),
         ] {
-            qk.eval_basis(&[x,y], &mut v1);
-            QuadQ2.eval_basis(&[2.0*x-1.0, 2.0*y-1.0], &mut v2);
-            for i in 0..n { assert!((v1[i]-v2[i]).abs() < 1e-12, "Q2 ({x},{y}) i={i}"); }
+            qk.eval_basis(&[x, y], &mut v1);
+            QuadQ2.eval_basis(&[2.0 * x - 1.0, 2.0 * y - 1.0], &mut v2);
+            for i in 0..n {
+                assert!((v1[i] - v2[i]).abs() < 1e-12, "Q2 ({x},{y}) i={i}");
+            }
         }
     }
 
     // ── HexQk ─────────────────────────────────────────────────────────────
 
-    #[test] fn hex_qk_pou() { for p in 1..=4 { check_pou(&HexQk::new(p)); } }
-    #[test] fn hex_qk_grad_zero() { for p in 1..=4 { check_grad_zero(&HexQk::new(p)); } }
-    #[test] fn hex_qk_nodal_interp() { for p in 1..=4 { check_nodal_interp(&HexQk::new(p)); } }
-    #[test] fn hex_qk_n_dofs() { for p in 1..=6 { let pp=p+1; assert_eq!(HexQk::new(p).n_dofs(), pp*pp*pp); } }
+    #[test]
+    fn hex_qk_pou() {
+        for p in 1..=4 {
+            check_pou(&HexQk::new(p));
+        }
+    }
+    #[test]
+    fn hex_qk_grad_zero() {
+        for p in 1..=4 {
+            check_grad_zero(&HexQk::new(p));
+        }
+    }
+    #[test]
+    fn hex_qk_nodal_interp() {
+        for p in 1..=4 {
+            check_nodal_interp(&HexQk::new(p));
+        }
+    }
+    #[test]
+    fn hex_qk_n_dofs() {
+        for p in 1..=6 {
+            let pp = p + 1;
+            assert_eq!(HexQk::new(p).n_dofs(), pp * pp * pp);
+        }
+    }
 
     #[test]
     fn hex_qk_matches_q1() {
         use crate::lagrange::HexQ1;
         let qk = HexQk::new(1);
         let n = 8;
-        let mut v1 = vec![0.0; n]; let mut v2 = vec![0.0; n];
-        for &(x,y,z) in &[
-            (-1.0,-1.0,-1.0),(1.0,-1.0,-1.0),(1.0,1.0,-1.0),(-1.0,1.0,-1.0),
-            (-1.0,-1.0,1.0),(1.0,-1.0,1.0),(1.0,1.0,1.0),(-1.0,1.0,1.0),(0.3,-0.5,0.7),
+        let mut v1 = vec![0.0; n];
+        let mut v2 = vec![0.0; n];
+        for &(x, y, z) in &[
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+            (0.3, -0.5, 0.7),
         ] {
-            qk.eval_basis(&[x,y,z], &mut v1); HexQ1.eval_basis(&[x,y,z], &mut v2);
-            for i in 0..n { assert!((v1[i]-v2[i]).abs() < 1e-13, "H1 ({x},{y},{z}) i={i}"); }
+            qk.eval_basis(&[x, y, z], &mut v1);
+            HexQ1.eval_basis(&[x, y, z], &mut v2);
+            for i in 0..n {
+                assert!((v1[i] - v2[i]).abs() < 1e-13, "H1 ({x},{y},{z}) i={i}");
+            }
         }
     }
 
@@ -1301,10 +1751,11 @@ mod tests {
     #[test]
     fn seg_pk_gradient_fd() {
         let h = 1e-7;
-        for p in 1..=4 { // Monomial Vandermonde conditioning degrades for p > 5
+        for p in 1..=4 {
+            // Monomial Vandermonde conditioning degrades for p > 5
             let elem = SegPk::new(p);
             let n = elem.n_dofs();
-            let (mut vc, mut vx, mut grads) = (vec![0.0;n], vec![0.0;n], vec![0.0;n]);
+            let (mut vc, mut vx, mut grads) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
             for &x in &[0.1, 0.5, 0.9] {
                 elem.eval_basis(&[x], &mut vc);
                 elem.eval_basis(&[x + h], &mut vx);
@@ -1323,17 +1774,28 @@ mod tests {
         for p in 1..=5 {
             let elem = TriPk::new(p);
             let n = elem.n_dofs();
-            let (mut vc, mut vx, mut vy, mut grads) = (vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*2]);
-            for &(x,y) in &[(0.2,0.3),(0.5,0.2),(1.0/3.0,1.0/3.0)] {
-                elem.eval_basis(&[x,y], &mut vc);
-                elem.eval_basis(&[x+h,y], &mut vx);
-                elem.eval_basis(&[x,y+h], &mut vy);
-                elem.eval_grad_basis(&[x,y], &mut grads);
+            let (mut vc, mut vx, mut vy, mut grads) =
+                (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n * 2]);
+            for &(x, y) in &[(0.2, 0.3), (0.5, 0.2), (1.0 / 3.0, 1.0 / 3.0)] {
+                elem.eval_basis(&[x, y], &mut vc);
+                elem.eval_basis(&[x + h, y], &mut vx);
+                elem.eval_basis(&[x, y + h], &mut vy);
+                elem.eval_grad_basis(&[x, y], &mut grads);
                 for i in 0..n {
                     let fd_x = (vx[i] - vc[i]) / h;
                     let fd_y = (vy[i] - vc[i]) / h;
-                    assert!((grads[i*2] - fd_x).abs() < 1e-5, "p={p} ({x},{y}) i={i} gx: analytic={} fd={}", grads[i*2], fd_x);
-                    assert!((grads[i*2+1] - fd_y).abs() < 1e-5, "p={p} ({x},{y}) i={i} gy: analytic={} fd={}", grads[i*2+1], fd_y);
+                    assert!(
+                        (grads[i * 2] - fd_x).abs() < 1e-5,
+                        "p={p} ({x},{y}) i={i} gx: analytic={} fd={}",
+                        grads[i * 2],
+                        fd_x
+                    );
+                    assert!(
+                        (grads[i * 2 + 1] - fd_y).abs() < 1e-5,
+                        "p={p} ({x},{y}) i={i} gy: analytic={} fd={}",
+                        grads[i * 2 + 1],
+                        fd_y
+                    );
                 }
             }
         }
@@ -1346,21 +1808,34 @@ mod tests {
             let elem = TetPk::new(p);
             let n = elem.n_dofs();
             let (mut vc, mut vx, mut vy, mut vz, mut grads) = (
-                vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*3]
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n * 3],
             );
-            for &(x,y,z) in &[(0.15,0.2,0.25),(0.3,0.3,0.1)] {
-                elem.eval_basis(&[x,y,z], &mut vc);
-                elem.eval_basis(&[x+h,y,z], &mut vx);
-                elem.eval_basis(&[x,y+h,z], &mut vy);
-                elem.eval_basis(&[x,y,z+h], &mut vz);
-                elem.eval_grad_basis(&[x,y,z], &mut grads);
+            for &(x, y, z) in &[(0.15, 0.2, 0.25), (0.3, 0.3, 0.1)] {
+                elem.eval_basis(&[x, y, z], &mut vc);
+                elem.eval_basis(&[x + h, y, z], &mut vx);
+                elem.eval_basis(&[x, y + h, z], &mut vy);
+                elem.eval_basis(&[x, y, z + h], &mut vz);
+                elem.eval_grad_basis(&[x, y, z], &mut grads);
                 for i in 0..n {
                     let fd_x = (vx[i] - vc[i]) / h;
                     let fd_y = (vy[i] - vc[i]) / h;
                     let fd_z = (vz[i] - vc[i]) / h;
-                    assert!((grads[i*3] - fd_x).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gx");
-                    assert!((grads[i*3+1] - fd_y).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gy");
-                    assert!((grads[i*3+2] - fd_z).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gz");
+                    assert!(
+                        (grads[i * 3] - fd_x).abs() < 1e-5,
+                        "p={p} ({x},{y},{z}) i={i} gx"
+                    );
+                    assert!(
+                        (grads[i * 3 + 1] - fd_y).abs() < 1e-5,
+                        "p={p} ({x},{y},{z}) i={i} gy"
+                    );
+                    assert!(
+                        (grads[i * 3 + 2] - fd_z).abs() < 1e-5,
+                        "p={p} ({x},{y},{z}) i={i} gz"
+                    );
                 }
             }
         }
@@ -1368,13 +1843,23 @@ mod tests {
 
     // ── PrismPk ────────────────────────────────────────────────────────────
 
-    #[test] fn prism_pk_pou() { check_pou(&PrismPk::new(2)); }
-    #[test] fn prism_pk_grad_zero() { check_grad_zero(&PrismPk::new(2)); }
-    #[test] fn prism_pk_nodal_interp() { check_nodal_interp(&PrismPk::new(2)); }
-    #[test] fn prism_pk_n_dofs() {
+    #[test]
+    fn prism_pk_pou() {
+        check_pou(&PrismPk::new(2));
+    }
+    #[test]
+    fn prism_pk_grad_zero() {
+        check_grad_zero(&PrismPk::new(2));
+    }
+    #[test]
+    fn prism_pk_nodal_interp() {
+        check_nodal_interp(&PrismPk::new(2));
+    }
+    #[test]
+    fn prism_pk_n_dofs() {
         for p in 1..=5 {
-            let n_tri = (p+1)*(p+2)/2;
-            assert_eq!(PrismPk::new(p).n_dofs(), (p+1)*n_tri);
+            let n_tri = (p + 1) * (p + 2) / 2;
+            assert_eq!(PrismPk::new(p).n_dofs(), (p + 1) * n_tri);
         }
     }
 
@@ -1385,7 +1870,11 @@ mod tests {
             let elem = PrismPk::new(p);
             let n = elem.n_dofs();
             let (mut vc, mut vx, mut vy, mut vz, mut grads) = (
-                vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*3]
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n * 3],
             );
             let test_pts: &[[f64; 3]] = if p == 1 {
                 &[[0.3, 0.2, 0.1]]
@@ -1394,19 +1883,30 @@ mod tests {
             };
             for pt in test_pts {
                 let (x, y, z) = (pt[0], pt[1], pt[2]);
-                if y + z > 0.95 { continue; }
+                if y + z > 0.95 {
+                    continue;
+                }
                 elem.eval_basis(&[x, y, z], &mut vc);
-                elem.eval_basis(&[x+h, y, z], &mut vx);
-                elem.eval_basis(&[x, y+h, z], &mut vy);
-                elem.eval_basis(&[x, y, z+h], &mut vz);
+                elem.eval_basis(&[x + h, y, z], &mut vx);
+                elem.eval_basis(&[x, y + h, z], &mut vy);
+                elem.eval_basis(&[x, y, z + h], &mut vz);
                 elem.eval_grad_basis(&[x, y, z], &mut grads);
                 for i in 0..n {
                     let fd_x = (vx[i] - vc[i]) / h;
                     let fd_y = (vy[i] - vc[i]) / h;
                     let fd_z = (vz[i] - vc[i]) / h;
-                    assert!((grads[i*3] - fd_x).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gx");
-                    assert!((grads[i*3+1] - fd_y).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gy");
-                    assert!((grads[i*3+2] - fd_z).abs() < 1e-5, "p={p} ({x},{y},{z}) i={i} gz");
+                    assert!(
+                        (grads[i * 3] - fd_x).abs() < 1e-5,
+                        "p={p} ({x},{y},{z}) i={i} gx"
+                    );
+                    assert!(
+                        (grads[i * 3 + 1] - fd_y).abs() < 1e-5,
+                        "p={p} ({x},{y},{z}) i={i} gy"
+                    );
+                    assert!(
+                        (grads[i * 3 + 2] - fd_z).abs() < 1e-5,
+                        "p={p} ({x},{y},{z}) i={i} gz"
+                    );
                 }
             }
         }
@@ -1414,10 +1914,20 @@ mod tests {
 
     // ── PyramidPk ──────────────────────────────────────────────────────────
 
-    #[test] fn pyramid_pk_pou() { check_pou(&PyramidPk::new(2)); }
-    #[test] fn pyramid_pk_grad_zero() { check_grad_zero(&PyramidPk::new(2)); }
-    #[test] fn pyramid_pk_nodal_interp() { check_nodal_interp(&PyramidPk::new(2)); }
-    #[test] fn pyramid_pk_n_dofs() {
+    #[test]
+    fn pyramid_pk_pou() {
+        check_pou(&PyramidPk::new(2));
+    }
+    #[test]
+    fn pyramid_pk_grad_zero() {
+        check_grad_zero(&PyramidPk::new(2));
+    }
+    #[test]
+    fn pyramid_pk_nodal_interp() {
+        check_nodal_interp(&PyramidPk::new(2));
+    }
+    #[test]
+    fn pyramid_pk_n_dofs() {
         assert_eq!(PyramidPk::new(1).n_dofs(), 5);
         assert_eq!(PyramidPk::new(2).n_dofs(), 14);
         assert_eq!(PyramidPk::new(3).n_dofs(), 30);
@@ -1430,7 +1940,11 @@ mod tests {
             let elem = PyramidPk::new(p);
             let n = elem.n_dofs();
             let (mut vc, mut vx, mut vy, mut vz, mut grads) = (
-                vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*3]
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n * 3],
             );
             let test_pts: &[[f64; 3]] = if p == 1 {
                 &[[0.1, 0.1, 0.1]]
@@ -1439,19 +1953,30 @@ mod tests {
             };
             for pt in test_pts {
                 let (x, y, z) = (pt[0], pt[1], pt[2]);
-                if x + z > 0.8 || y + z > 0.8 { continue; }
+                if x + z > 0.8 || y + z > 0.8 {
+                    continue;
+                }
                 elem.eval_basis(&[x, y, z], &mut vc);
-                elem.eval_basis(&[x+h, y, z], &mut vx);
-                elem.eval_basis(&[x, y+h, z], &mut vy);
-                elem.eval_basis(&[x, y, z+h], &mut vz);
+                elem.eval_basis(&[x + h, y, z], &mut vx);
+                elem.eval_basis(&[x, y + h, z], &mut vy);
+                elem.eval_basis(&[x, y, z + h], &mut vz);
                 elem.eval_grad_basis(&[x, y, z], &mut grads);
                 for i in 0..n {
                     let fd_x = (vx[i] - vc[i]) / h;
                     let fd_y = (vy[i] - vc[i]) / h;
                     let fd_z = (vz[i] - vc[i]) / h;
-                    assert!((grads[i*3] - fd_x).abs() < 1e-4, "p={p} ({x},{y},{z}) i={i} gx");
-                    assert!((grads[i*3+1] - fd_y).abs() < 1e-4, "p={p} ({x},{y},{z}) i={i} gy");
-                    assert!((grads[i*3+2] - fd_z).abs() < 4e-4, "p={p} ({x},{y},{z}) i={i} gz");
+                    assert!(
+                        (grads[i * 3] - fd_x).abs() < 1e-4,
+                        "p={p} ({x},{y},{z}) i={i} gx"
+                    );
+                    assert!(
+                        (grads[i * 3 + 1] - fd_y).abs() < 1e-4,
+                        "p={p} ({x},{y},{z}) i={i} gy"
+                    );
+                    assert!(
+                        (grads[i * 3 + 2] - fd_z).abs() < 4e-4,
+                        "p={p} ({x},{y},{z}) i={i} gz"
+                    );
                 }
             }
         }
@@ -1483,8 +2008,11 @@ mod tests {
                     assert!(ders[i].is_finite(), "p={p} k={k} i={i} der not finite");
                     assert!(hess[i].is_finite(), "p={p} k={k} i={i} hess not finite");
                     let fd = (vp[i] - vm[i]) / (2.0 * h);
-                    assert!((ders[i] - fd).abs() < 1e-6,
-                        "p={p} k={k} i={i}: der={} fd={fd}", ders[i]);
+                    assert!(
+                        (ders[i] - fd).abs() < 1e-6,
+                        "p={p} k={k} i={i}: der={} fd={fd}",
+                        ders[i]
+                    );
                 }
                 // Partition of unity: Σ l_i' = 0, Σ l_i'' = 0.
                 assert!(ders.iter().sum::<f64>().abs() < 1e-12, "p={p} k={k} Σder");
@@ -1516,13 +2044,23 @@ mod tests {
             let mut hs = vec![0.0_f64; q.n_dofs() * 4];
             for xi in &coords {
                 q.eval_grad_basis(xi, &mut g);
-                assert!(g.iter().all(|v| v.is_finite()), "QuadQk p={p} grad at {xi:?}");
+                assert!(
+                    g.iter().all(|v| v.is_finite()),
+                    "QuadQk p={p} grad at {xi:?}"
+                );
                 q.eval_hessian(xi, &mut hs);
-                assert!(hs.iter().all(|v| v.is_finite()), "QuadQk p={p} hess at {xi:?}");
+                assert!(
+                    hs.iter().all(|v| v.is_finite()),
+                    "QuadQk p={p} hess at {xi:?}"
+                );
                 // Σ ∇φᵢ = 0 (partition of unity)
-                let (sx, sy): (f64, f64) =
-                    (0..q.n_dofs()).map(|i| (g[i * 2], g[i * 2 + 1])).fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
-                assert!(sx.abs() < 1e-12 && sy.abs() < 1e-12, "QuadQk p={p} Σgrad at {xi:?}");
+                let (sx, sy): (f64, f64) = (0..q.n_dofs())
+                    .map(|i| (g[i * 2], g[i * 2 + 1]))
+                    .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
+                assert!(
+                    sx.abs() < 1e-12 && sy.abs() < 1e-12,
+                    "QuadQk p={p} Σgrad at {xi:?}"
+                );
             }
             let hx = HexQk::new(p.min(2));
             let coords3 = hx.dof_coords();

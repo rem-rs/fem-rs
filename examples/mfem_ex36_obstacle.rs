@@ -40,7 +40,9 @@ use std::collections::BTreeSet;
 
 use fem_assembly::constraints::boundary_face_dofs;
 use fem_assembly::mixed::ScalarMassIntegrator;
-use fem_assembly::postproc::coefficient::{CoeffCtx, FnCoeff, ScalarCoeff, SumCoeff, TransformedCoeff};
+use fem_assembly::postproc::coefficient::{
+    CoeffCtx, FnCoeff, ScalarCoeff, SumCoeff, TransformedCoeff,
+};
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegratorCoeff, MassIntegrator};
 use fem_assembly::{eliminate_cols, Assembler, MixedAssembler};
@@ -134,12 +136,7 @@ impl ScalarCoeff for L2P0Coeff {
 /// `SparseMatrix::EliminateRowCol`: for each essential DOF `rc`,
 /// zero the row entries, correct `rhs[c] -= x[rc]·A[c,rc]` using the column
 /// entries (then zero them), set `A[rc,rc] = 1` and `rhs[rc] = x[rc]`.
-fn eliminate_rowcol_diag_one(
-    a: &mut CsrMatrix<f64>,
-    ess: &[usize],
-    x: &[f64],
-    rhs: &mut [f64],
-) {
+fn eliminate_rowcol_diag_one(a: &mut CsrMatrix<f64>, ess: &[usize], x: &[f64], rhs: &mut [f64]) {
     for &rc in ess {
         for p in a.row_ptr[rc]..a.row_ptr[rc + 1] {
             let c = a.col_idx[p] as usize;
@@ -179,8 +176,8 @@ fn eliminate_rowcol_diag_one(
 /// `GeometryData` used for isoparametric Jacobians.
 fn load_nurbs_disc() -> Mesh<2> {
     // ── Topology from the C++ reference (control-grid mesh) ────────────────
-    let topo = std::fs::read_to_string("data/disc_p2_topo.txt")
-        .expect("failed to read disc P2 topology");
+    let topo =
+        std::fs::read_to_string("data/disc_p2_topo.txt").expect("failed to read disc P2 topology");
     let vals: Vec<f64> = topo
         .split_whitespace()
         .map(|s| s.parse().expect("non-numeric token in topology file"))
@@ -214,13 +211,17 @@ fn load_nurbs_disc() -> Mesh<2> {
     }
 
     // ── Geometry: 9 P2 nodes per element from the reference dump ───────────
-    let geom_txt = std::fs::read_to_string("data/disc_p2_geom.txt")
-        .expect("failed to read disc P2 geometry");
+    let geom_txt =
+        std::fs::read_to_string("data/disc_p2_geom.txt").expect("failed to read disc P2 geometry");
     let gvals: Vec<f64> = geom_txt
         .split_whitespace()
         .map(|s| s.parse().expect("non-numeric token in geometry file"))
         .collect();
-    assert_eq!(gvals.len(), 1 + n_elem * 9 * 2, "geometry file length mismatch");
+    assert_eq!(
+        gvals.len(),
+        1 + n_elem * 9 * 2,
+        "geometry file length mismatch"
+    );
 
     // Global geometry-node dedup with tolerance (seam points coincide).
     let tol = 1e-12;
@@ -377,7 +378,11 @@ fn main() {
     println!("   --step {}", cpp_6(args.alpha));
     println!(
         "   {}",
-        if args.visualization { "--visualization" } else { "--no-visualization" }
+        if args.visualization {
+            "--visualization"
+        } else {
+            "--no-visualization"
+        }
     );
 
     // 2. Mesh: the C++ reference refines disc-nurbs.mesh 3× and converts to
@@ -436,9 +441,13 @@ fn main() {
 
             // rhs0 = α·f(=0) + (ψ_old − ψ)  on H¹.
             let psi_old_minus_psi = SumCoeff {
-                a: L2P0Coeff { values: psi_old.clone() },
+                a: L2P0Coeff {
+                    values: psi_old.clone(),
+                },
                 b: TransformedCoeff {
-                    inner: L2P0Coeff { values: psi.clone() },
+                    inner: L2P0Coeff {
+                        values: psi.clone(),
+                    },
                     transform: |t| -t,
                 },
             };
@@ -447,40 +456,42 @@ fn main() {
 
             // rhs1 = exp(ψ) + ϕ  on L².
             let exp_psi = TransformedCoeff {
-                inner: L2P0Coeff { values: psi.clone() },
+                inner: L2P0Coeff {
+                    values: psi.clone(),
+                },
                 transform: |t| t.exp(),
             };
             let obstacle_cf = FnCoeff(|x: &[f64]| spherical_obstacle(x));
-            let rhs1_cf = SumCoeff { a: exp_psi, b: obstacle_cf };
+            let rhs1_cf = SumCoeff {
+                a: exp_psi,
+                b: obstacle_cf,
+            };
             let integ1 = DomainSourceIntegratorCoeff::new(rhs1_cf);
             let mut rhs1 = Assembler::assemble_linear(&l2, &[&integ1], 0);
 
             // A00 = α ∇²  on H¹, then EliminateEssentialBC(..., DIAG_ONE).
-            let mut a00 = Assembler::assemble_bilinear(
-                &h1,
-                &[&DiffusionIntegrator { kappa: args.alpha }],
-                5,
-            );
+            let mut a00 =
+                Assembler::assemble_bilinear(&h1, &[&DiffusionIntegrator { kappa: args.alpha }], 5);
             eliminate_rowcol_diag_one(&mut a00, &ess_dofs, &x0, &mut rhs0);
 
             // A10 = ∫ v·u  (L² rows × H¹ cols), then EliminateTrialEssentialBC.
-            let mut a10 = MixedAssembler::assemble_bilinear(
-                &l2,
-                &h1,
-                &[&ScalarMassIntegrator],
-                5,
-            );
+            let mut a10 = MixedAssembler::assemble_bilinear(&l2, &h1, &[&ScalarMassIntegrator], 5);
             eliminate_cols(&mut a10, &ess_dofs, &x0, &mut rhs1);
             let a01 = a10.transpose();
 
             // A11 = Mass(−exp(ψ)) − 1e-6·Mass  on L² (spectrum shift).
             let neg_exp_psi = TransformedCoeff {
-                inner: L2P0Coeff { values: psi.clone() },
+                inner: L2P0Coeff {
+                    values: psi.clone(),
+                },
                 transform: |t| -t.exp(),
             };
             let a11 = Assembler::assemble_bilinear(
                 &l2,
-                &[&MassIntegrator { rho: neg_exp_psi }, &MassIntegrator { rho: -1e-6 }],
+                &[
+                    &MassIntegrator { rho: neg_exp_psi },
+                    &MassIntegrator { rho: -1e-6 },
+                ],
                 3,
             );
 
@@ -494,12 +505,8 @@ fn main() {
                 ..Default::default()
             };
             solve_gmres_block_diag_gs(
-                &a00, &a01, &a10, &a11,
-                &rhs0, &rhs1,
-                &mut x0, &mut x1,
-                500, &cfg,
+                &a00, &a01, &a10, &a11, &rhs0, &rhs1, &mut x0, &mut x1, 500, &cfg,
             );
-
             // Newton update size: ‖u_old − u_new‖_{L²}.
             u_new.copy_from_slice(&x0);
             let mut tmp = vec![0.0; n_h1];
@@ -568,10 +575,13 @@ fn main() {
         let c = mesh.geom_coords_of(center_node);
         u_alt[e] = psi[e].exp() + spherical_obstacle(c);
     }
-    let l2_alt = GridFunction::new(&l2, u_alt)
-        .compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 0);
+    let l2_alt =
+        GridFunction::new(&l2, u_alt).compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 0);
 
-    println!("\n Final L2-error (|| u - uₕ||)          = {}", cpp_6(l2_err));
+    println!(
+        "\n Final L2-error (|| u - uₕ||)          = {}",
+        cpp_6(l2_err)
+    );
     println!(" Final H1-error (|| u - uₕ||)          = {}", cpp_6(h1_err));
     println!(" Final L2-error (|| u - ϕ - exp(ψₕ)||) = {}", cpp_6(l2_alt));
 }
