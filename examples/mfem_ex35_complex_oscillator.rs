@@ -515,7 +515,8 @@ fn solve_h1(
     let mut x_im = u_im.clone();
     let imag_scale = if herm_conv { -1.0 } else { 1.0 };
     let (iters, res) = solve_complex_system(
-        &sys.k_re, &sys.k_im, &pc_op, &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
+        &sys.k_re, &sys.k_im, &pc_op, PrecondKind::Amg,
+        &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
     );
     println!("FGMRES: Number of iterations: {iters}");
     println!("FGMRES: Final relative residual: {res:.6e}");
@@ -588,8 +589,14 @@ fn solve_hcurl(
     let mut x_re = u_re.clone();
     let mut x_im = u_im.clone();
     let imag_scale = if herm_conv { -1.0 } else { 1.0 };
+    // p1 (H(curl)): MFEM uses HypreAMS on the real block; the auxiliary-space
+    // Maxwell preconditioner needs the incidence discrete gradient G: H¹→H(curl).
+    let h1 = H1Space::new(mesh.clone(), 1);
+    let g = fem_assembly::discrete_op::DiscreteLinearOperator::gradient(&h1, &fes)
+        .expect("discrete gradient construction failed");
     let (iters, res) = solve_complex_system(
-        &sys.k_re, &sys.k_im, &pc_op, &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
+        &sys.k_re, &sys.k_im, &pc_op, PrecondKind::Ams(g),
+        &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
     );
     println!("FGMRES: Number of iterations: {iters}");
     println!("FGMRES: Final relative residual: {res:.6e}");
@@ -664,8 +671,11 @@ fn solve_hdiv(
     let mut x_re = u_re.clone();
     let mut x_im = u_im.clone();
     let imag_scale = if herm_conv { -1.0 } else { 1.0 };
+    // p2 (H(div)): MFEM uses HypreADS; fem-rs falls back to AMG (known
+    // boundary — the C++ reference itself does not converge in 1000 steps).
     let (iters, res) = solve_complex_system(
-        &sys.k_re, &sys.k_im, &pc_op, &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
+        &sys.k_re, &sys.k_im, &pc_op, PrecondKind::Amg,
+        &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
     );
     println!("FGMRES: Number of iterations: {iters}");
     println!("FGMRES: Final relative residual: {res:.6e}");
@@ -675,10 +685,20 @@ fn solve_hdiv(
 
 // ─── Generic port → full transfers (edge/face DOFs) ─────────────────────────
 
-/// Solve the 2n×2n complex system with FGMRES and an AMG preconditioner on
-/// the (eliminated) real operator `pc_op`, block-diagonal `[AMG, ±AMG]` —
-/// the same structure as MFEM ex35p's FGMRES + BoomerAMG block-diagonal
-/// preconditioner.
+/// Preconditioner selection for the real block of the complex system
+/// (MFEM ex35p: BoomerAMG for p0, HypreAMS for p1, HypreADS for p2).
+enum PrecondKind {
+    /// BoomerAMG on the eliminated real operator (p0).
+    Amg,
+    /// HypreAMS (auxiliary-space Maxwell) on the eliminated real operator,
+    /// with the H¹→H(curl) discrete gradient (incidence form) as `g` (p1).
+    Ams(CsrMatrix<f64>),
+}
+
+/// Solve the 2n×2n complex system with FGMRES and a block-diagonal
+/// preconditioner `[P, ±P]` on the (eliminated) real operator `pc_op` — the
+/// same structure as MFEM ex35p's FGMRES + block-diagonal preconditioner
+/// (BoomerAMG for p0, HypreAMS for p1).
 ///
 /// The AMG coarsest level is solved with a direct sparse LU (see
 /// `linlvo::amg` cycle changes): the previous 50-sweep smoothing diverged on
@@ -689,6 +709,7 @@ fn solve_complex_system(
     a_re: &CsrMatrix<f64>,
     a_im: &CsrMatrix<f64>,
     pc_op: &CsrMatrix<f64>,
+    pc_kind: PrecondKind,
     rhs_re: &[f64],
     rhs_im: &[f64],
     x_re: &mut Vec<f64>,
@@ -711,35 +732,21 @@ fn solve_complex_system(
     }
     let flat = flat.into_csr();
 
-    // AMG on pc_op (MFEM: BoomerAMG on FormSystemMatrix(pcOp)).
-    let la = fem_linalg::fem_to_linlvo_csr(pc_op);
-    let cfg = linlvo::amg::AmgConfig {
-        theta: 0.25,
-        strategy: linlvo::amg::CoarsenStrategy::RugeStüben,
-        smoother: linlvo::amg::SmootherType::GaussSeidel,
-        pre_sweeps: 1,
-        post_sweeps: 1,
-        coarse_threshold: 9,
-        max_levels: 25,
-        ..Default::default()
-    };
-    let amg = linlvo::amg::AmgPrecond::new(linlvo::amg::AmgHierarchy::build(la, cfg));
-
-    // Block-diagonal [AMG, scale·AMG] on the flat 2n vector.
-    struct BdAmg<'a> {
-        amg: &'a linlvo::amg::AmgPrecond<f64>,
+    // Block-diagonal [P, scale·P] on the flat 2n vector.
+    struct BdPC<P> {
+        pc: P,
         n: usize,
         scale_im: f64,
     }
-    impl linlvo::Preconditioner for BdAmg<'_> {
+    impl<P: linlvo::Preconditioner<Vector = linlvo::DenseVec<f64>>> linlvo::Preconditioner for BdPC<P> {
         type Vector = linlvo::DenseVec<f64>;
         fn apply_precond(&self, r: &linlvo::DenseVec<f64>, z: &mut linlvo::DenseVec<f64>) {
             let n = self.n;
             let mut zr = linlvo::DenseVec::zeros(n);
             let mut zi = linlvo::DenseVec::zeros(n);
-            self.amg
+            self.pc
                 .apply_precond(&linlvo::DenseVec::from_vec(r.as_slice()[..n].to_vec()), &mut zr);
-            self.amg
+            self.pc
                 .apply_precond(&linlvo::DenseVec::from_vec(r.as_slice()[n..].to_vec()), &mut zi);
             let zs = z.as_mut_slice();
             for i in 0..n {
@@ -748,7 +755,60 @@ fn solve_complex_system(
             }
         }
     }
-    let pc = BdAmg { amg: &amg, n, scale_im: imag_scale };
+
+    let la = fem_linalg::fem_to_linlvo_csr(pc_op);
+    // Build the real-block preconditioner (AMG or AMS) as an enum so the
+    // block-diagonal wrapper can hold a single concrete type.
+    enum PcInner {
+        Amg(linlvo::amg::AmgPrecond<f64>),
+        Ams(linlvo::precond::AmsPrecond<f64>),
+    }
+    impl linlvo::Preconditioner for PcInner {
+        type Vector = linlvo::DenseVec<f64>;
+        fn apply_precond(&self, r: &linlvo::DenseVec<f64>, z: &mut linlvo::DenseVec<f64>) {
+            match self {
+                PcInner::Amg(p) => p.apply_precond(r, z),
+                PcInner::Ams(p) => p.apply_precond(r, z),
+            }
+        }
+    }
+    let inner = match pc_kind {
+        PrecondKind::Amg => {
+            // AMG on pc_op (MFEM: BoomerAMG on FormSystemMatrix(pcOp)).
+            let cfg = linlvo::amg::AmgConfig {
+                theta: 0.25,
+                strategy: linlvo::amg::CoarsenStrategy::RugeStüben,
+                smoother: linlvo::amg::SmootherType::GaussSeidel,
+                pre_sweeps: 1,
+                post_sweeps: 1,
+                coarse_threshold: 9,
+                max_levels: 25,
+                ..Default::default()
+            };
+            PcInner::Amg(linlvo::amg::AmgPrecond::new(linlvo::amg::AmgHierarchy::build(la, cfg)))
+        }
+        PrecondKind::Ams(g) => {
+            // HypreAMS on pcOp with the incidence discrete gradient
+            // (MFEM: HypreAMS(pcOp, &fespace)).
+            let lg = fem_linalg::fem_to_linlvo_csr(&g);
+            // Multi-sweep Hiptmair-Xu smoothing; the single-sweep Jacobi form
+            // of linlvo's AMS converges too slowly on the near-singular ex35
+            // pcOp (curl-curl + mass with λ_min ≈ 4e-3).
+            let ams_cfg = linlvo::precond::AmsConfig {
+                smoother_sweeps: 1,
+                smoother_omega: 1.0,
+                // HYPRE AMS defaults: symmetric GS smoother + V(1,1) cycle.
+                edge_smoother: linlvo::precond::AmsEdgeSmoother::SymmetricGaussSeidel,
+                cycle: linlvo::precond::AmsCycle::MultiplicativeV11,
+                node_solver: linlvo::precond::AuxSpaceSolver::Ilu0,
+                singularity_regularization: 0.0,
+            };
+            let ams = linlvo::precond::AmsPrecond::new(&la, &lg, ams_cfg)
+                .expect("AMS preconditioner setup failed");
+            PcInner::Ams(ams)
+        }
+    };
+    let pc = BdPC { pc: inner, n, scale_im: imag_scale };
 
     let mut rhs = vec![0.0; 2 * n];
     rhs[..n].copy_from_slice(rhs_re);
@@ -771,25 +831,29 @@ fn transfer_edge_dofs(
     port: &BoundarySubMesh,
     port_bc: &[f64],
     _parent: &Mesh<3>,
-    _parent_fes: &HCurlSpace<Mesh<3>>,
+    parent_fes: &HCurlSpace<Mesh<3>>,
     out: &mut [f64],
 ) {
-    // Port HCurl order-1 space: 1 DOF per port edge.  Build the map from
-    // port edges (canonical vertex pairs) to parent boundary-face edges.
+    use fem_space::dof_manager::EdgeKey;
+
+    // Port HCurl space on the boundary submesh (order matches the parent).
+    let port_fes = HCurlSpace::new(port.mesh.clone(), parent_fes.order());
+
+    // Each port edge (canonical sub-vertex pair) maps to a parent edge via
+    // parent_node_of_sub; both spaces number their edge DOFs by the same
+    // canonical (min, max) vertex pair, so the values transfer directly
+    // (no sign flip needed — EdgeKey is always (min, max)).
     let port_edges: Vec<(u32, u32)> = port_edge_pairs(port);
-    for (k, (a, b)) in port_edges.iter().enumerate() {
-        // Parent vertex ids of this port edge.
-        let pa = port.parent_node_of_sub[*a as usize];
-        let pb = port.parent_node_of_sub[*b as usize];
-        // Full HCurl DOF for parent edge (pa, pb): use DofManager edge map.
-        let key = fem_space::dof_manager::EdgeKey::new(pa.min(pb), pa.max(pb));
-        if let Some(dof) = parent_edge_dof(&key) {
-            if (dof as usize) < out.len() {
-                out[dof as usize] = port_bc[k];
-            }
+    for (a, b) in port_edges {
+        let key = EdgeKey::new(a, b);
+        let Some(port_dof) = port_fes.edge_dof(key) else { continue };
+        let pa = port.parent_node_of_sub[a as usize];
+        let pb = port.parent_node_of_sub[b as usize];
+        let Some(full_dof) = parent_fes.edge_dof(EdgeKey::new(pa, pb)) else { continue };
+        if (full_dof as usize) < out.len() {
+            out[full_dof as usize] = port_bc[port_dof as usize];
         }
     }
-    let _ = port_edges;
 }
 
 /// Port edge pairs for H(Curl) order-1 (one edge DOF per edge).
@@ -808,12 +872,6 @@ fn port_edge_pairs(port: &BoundarySubMesh) -> Vec<(u32, u32)> {
         }
     }
     edges
-}
-
-/// Placeholder: parent edge → full HCurl DOF lookup.  Real implementation
-/// uses the DofManager edge maps (see `dof_manager::EdgeKey`).
-fn parent_edge_dof(_key: &fem_space::dof_manager::EdgeKey) -> Option<u32> {
-    None
 }
 
 /// Transfer RT (face) DOFs from the port L² space to the full H(Div) space.

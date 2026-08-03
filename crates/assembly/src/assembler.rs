@@ -313,7 +313,7 @@ fn isoparametric_jacobian<M: MeshTopology>(
 /// support 3×3 matrix coefficients (e.g. MFEM ex29's anisotropic σ).
 ///
 /// Returns `(measure, j, ginv, x_phys_3d)`.
-fn surface_jacobian<M: MeshTopology>(
+pub(crate) fn surface_jacobian<M: MeshTopology>(
     mesh: &M,
     nodes: &[u32],
     geo_elem: &dyn ReferenceElement,

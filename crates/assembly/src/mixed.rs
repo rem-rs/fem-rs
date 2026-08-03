@@ -474,7 +474,10 @@ where
     use fem_linalg::CooMatrix;
 
     let mesh = h1_space.mesh();
-    let dim = mesh.dim() as usize;
+    let edim = mesh.dim() as usize;
+    let tdim = mesh.topological_dim() as usize;
+    let is_surface = edim != tdim;
+    let dim = edim;
     let n_rows = nd_space.n_dofs();
     let n_cols = h1_space.n_dofs();
     let mut coo = CooMatrix::new(n_rows, n_cols);
@@ -487,6 +490,7 @@ where
         let nd_ref = ref_elem_vec(elem_type, nd_space.order(), SpaceType::HCurl)
             .expect("assemble_hcurl_h1_gradient: HCurl ref elem");
         let n_nd = nd_ref.n_dofs();
+        let ref_dim = nd_ref.dim() as usize; // 2 on surfaces
         let signs = nd_space.element_signs(e);
 
         let global_h1: Vec<usize> = h1_space.element_dofs(e).iter().map(|&d| d as usize).collect();
@@ -497,15 +501,59 @@ where
 
         let mut me = vec![0.0; n_g_nd * n_g_h1];
         let mut phi = vec![0.0; n_h1];
-        let mut gr = vec![0.0; n_h1 * dim];
+        let mut gr = vec![0.0; n_h1 * ref_dim];
         let mut gp = vec![0.0; n_h1 * dim];
-        let mut nd_basis = vec![0.0; n_nd * dim];
+        let mut nd_basis = vec![0.0; n_nd * ref_dim];
 
         let use_iso = !matches!(elem_type, fem_mesh::element_type::ElementType::Tri3 | fem_mesh::element_type::ElementType::Tet4 | fem_mesh::element_type::ElementType::Line2);
-        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
+        let geo_elem = if use_iso || is_surface { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
         let nodes = mesh.element_nodes(e);
 
         for (qi, xi) in quad.points.iter().enumerate() {
+            if is_surface {
+                // ── Surface path (2-D elements embedded in 3-D) ─────────────
+                // Geometry: P1 simplex (Tri3) or the mesh's isoparametric
+                // geometry (Quad4), on the same reference domain as the bases.
+                let geo_p1 = crate::assembler::ref_elem_vol(elem_type, 1);
+                let (geo, geo_nds): (&dyn ReferenceElement, &[u32]) =
+                    if let Some(ref ge) = geo_elem {
+                        (ge.as_ref(), mesh.geometry_nodes(e))
+                    } else {
+                        (geo_p1.as_ref(), nodes)
+                    };
+                let (measure, j, ginv, _xp) =
+                    crate::assembler::surface_jacobian(mesh, geo_nds, geo, xi, edim, tdim);
+                let w = quad.weights[qi] * measure;
+
+                h1_ref.eval_basis(xi, &mut phi);
+                h1_ref.eval_grad_basis(xi, &mut gr);
+                // Tangential gradient: ∇_surf φ = J·G⁻¹·∇_ref φ (3 comps)
+                for k in 0..n_h1 {
+                    let (g0, g1) = (gr[k * 2], gr[k * 2 + 1]);
+                    let t0 = ginv[0] * g0 + ginv[1] * g1;
+                    let t1 = ginv[1] * g0 + ginv[2] * g1;
+                    gp[k * 3] = j[0] * t0 + j[3] * t1;
+                    gp[k * 3 + 1] = j[1] * t0 + j[4] * t1;
+                    gp[k * 3 + 2] = j[2] * t0 + j[5] * t1;
+                }
+                nd_ref.eval_basis_vec(xi, &mut nd_basis);
+                // Physical ND basis: ψ = J·G⁻¹·ψ_ref (3 comps)
+                for i in 0..n_g_nd {
+                    let s = signs[i];
+                    let (p0, p1) = (nd_basis[i * 2], nd_basis[i * 2 + 1]);
+                    let t0 = ginv[0] * p0 + ginv[1] * p1;
+                    let t1 = ginv[1] * p0 + ginv[2] * p1;
+                    let psi0 = s * (j[0] * t0 + j[3] * t1);
+                    let psi1 = s * (j[1] * t0 + j[4] * t1);
+                    let psi2 = s * (j[2] * t0 + j[5] * t1);
+                    for jj in 0..n_g_h1 {
+                        let g_j = &gp[jj * 3..][..3];
+                        me[i * n_g_h1 + jj] += w * (g_j[0] * psi0 + g_j[1] * psi1 + g_j[2] * psi2);
+                    }
+                }
+                continue;
+            }
+
             let (w, jit): (f64, nalgebra::DMatrix<f64>) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
                 let (jac, det, _xp) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);

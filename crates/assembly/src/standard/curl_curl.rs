@@ -38,8 +38,9 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for CurlCurlIntegrator<C> {
         );
         let w_mu = qp.weight * self.mu.eval(&ctx);
 
-        if qp.dim == 2 {
-            // Scalar curl: curl[i] is a single f64 — already outer-product form.
+        if qp.dim == 2 || qp.is_surface {
+            // Scalar curl (2-D, or 2-D surface embedded in 3-D): curl[i] is a
+            // single f64 — already outer-product form.
             for i in 0..n {
                 for j in 0..n {
                     k_elem[i * n + j] += w_mu * qp.curl[i] * qp.curl[j];
@@ -111,8 +112,8 @@ impl<C: MatrixCoeff> VectorBilinearIntegrator for CurlCurlTensorIntegrator<C> {
             None, None,
         );
 
-        if dim == 2 {
-            // Scalar curl in 2-D: only M[0,0] contributes.
+        if dim == 2 || qp.is_surface {
+            // Scalar curl in 2-D (or on a 2-D surface in 3-D): only M[0,0] contributes.
             let mut m_buf = [0.0_f64; 4];
             self.mu.eval(&ctx, &mut m_buf);
             let w_mu00 = qp.weight * m_buf[0];

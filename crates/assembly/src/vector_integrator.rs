@@ -17,8 +17,13 @@ use fem_core::types::ElemId;
 pub struct VectorQpData<'a> {
     /// Number of local DOFs on this element.
     pub n_dofs: usize,
-    /// Spatial dimension (2 or 3).
+    /// Spatial dimension (2 or 3; for surface meshes this is the embedding
+    /// dimension, so `phi_vec` has 3 physical components).
     pub dim: usize,
+    /// True when the element is a 2-D surface embedded in 3-D (mesh
+    /// `dim()` != `topological_dim()`).  On surfaces the curl of an H(curl)
+    /// basis function is a **scalar** (as in 2-D), stored in `curl[i]`.
+    pub is_surface: bool,
     /// Effective integration weight: quadrature weight × |det J|.
     pub weight: f64,
     /// Vector basis function values at this quadrature point.

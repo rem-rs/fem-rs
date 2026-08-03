@@ -43,9 +43,18 @@ pub(crate) fn vec_ref_elem(
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriND1),
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriND2),
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
+        // 2-D surface elements embedded in 3-D (e.g. a boundary submesh of a
+        // 3-D mesh): `dim = 3` is the embedding dimension, the reference
+        // element is the same 2-D Nédélec basis as the `dim = 2` cases.
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, 1) => Box::new(TriND1),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
         (SpaceType::HCurl, ElementType::Quad4, 2, 1) => Box::new(QuadND1),
         (SpaceType::HCurl, ElementType::Quad4, 2, 2) => Box::new(QuadND2),
         (SpaceType::HCurl, ElementType::Quad4, 2, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
+        (SpaceType::HCurl, ElementType::Quad4, 3, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Quad4, 3, 2) => Box::new(QuadND2),
+        (SpaceType::HCurl, ElementType::Quad4, 3, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetND1),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, o) if o >= 3 => Box::new(TetNDk::new(o as usize)),
@@ -273,23 +282,30 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
     coo: &mut CooMatrix<f64>,
 ) {
     let mesh = space.mesh();
-    let dim = mesh.dim() as usize;
+    let edim = mesh.dim() as usize;      // embedding dimension (3 for a surface mesh)
+    let tdim = mesh.topological_dim() as usize; // element dimension (2 for a surface mesh)
+    let is_surface = edim != tdim;
+    let dim = edim;                       // physical component count of phi_vec
     let stype = space.space_type();
     let elem_type = mesh.element_type(e);
-    let ref_elem = vec_ref_elem(stype, elem_type, dim, space.order());
+    let ref_elem = vec_ref_elem(stype, elem_type, edim, space.order());
     let n_ldofs_ref = ref_elem.n_dofs();
+    let ref_dim = ref_elem.dim() as usize; // 2 for surface Nédélec, == dim otherwise
     let global_dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
     let n_total = global_dofs.len();
     let n_interior = n_total - n_ldofs_ref;
     let quad = ref_elem.quadrature(quad_order);
-    let curl_dim = if dim == 2 { 1 } else { 3 };
+    // Scalar curl in 2-D **and** on 2-D surfaces embedded in 3-D (MFEM
+    // `FiniteElement::GetCurlDim()` is 1 for dim-2 reference elements).
+    let curl_dim = if dim == 2 || is_surface { 1 } else { 3 };
     let signs = space.element_signs(e);
     let nodes = mesh.element_nodes(e);
     let elem_tag = mesh.element_tag(e);
     let use_iso = !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2)
         || mesh.geom_order() > 1;
     let geo_elem = geo_ref_elem_from_mesh(mesh, e);
-    let affine_tr = if use_iso {
+    let affine_tr = if use_iso || is_surface {
+        // Surface elements never use the (square) simplex transformation.
         None
     } else {
         Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
@@ -301,7 +317,7 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
     let n = n_total;            // total DOFs per element
     let mut k_elem = vec![0.0_f64; n * n];
     let mut k_edge = k_elem.clone(); // n_e×n_e block, filled by integrator then copied
-    let mut ref_phi = vec![0.0; n_e * dim];
+    let mut ref_phi = vec![0.0; n_e * ref_dim];
     let mut ref_curl = vec![0.0; n_e * curl_dim];
     let mut ref_div = vec![0.0; n_e];
     let mut phys_phi = vec![0.0; n_e * dim];
@@ -309,6 +325,129 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
     let mut phys_div = vec![0.0; n_e];
 
     for (q, xi) in quad.points.iter().enumerate() {
+        if is_surface {
+            // ── Surface path (2-D Nédélec element embedded in 3-D) ──────────
+            // Geometry: P1 simplex or the mesh's isoparametric geometry,
+            // living on the same reference domain as the solution basis.
+            let geo_p1 = crate::assembler::ref_elem_vol(elem_type, 1);
+            let (geo, geo_nds): (&dyn ReferenceElement, &[u32]) =
+                if let Some(ref ge) = geo_elem {
+                    (ge.as_ref(), mesh.geometry_nodes(e))
+                } else {
+                    (geo_p1.as_ref(), nodes)
+                };
+            let (measure, j, ginv, xp) =
+                crate::assembler::surface_jacobian(mesh, geo_nds, geo, xi, edim, tdim);
+            let w = quad.weights[q] * measure;
+
+            ref_elem.eval_basis_vec(xi, &mut ref_phi);
+            ref_elem.eval_curl(xi, &mut ref_curl);
+            ref_elem.eval_div(xi, &mut ref_div);
+
+            match stype {
+                SpaceType::HCurl => {
+                    // Covariant Piola on a surface: φ_phys = J·G⁻¹·φ_ref
+                    // (3 physical components from the 2-D reference values).
+                    for i in 0..n_e {
+                        let (p0, p1) = (ref_phi[i * 2], ref_phi[i * 2 + 1]);
+                        let t0 = ginv[0] * p0 + ginv[1] * p1;
+                        let t1 = ginv[1] * p0 + ginv[2] * p1;
+                        phys_phi[i * 3] = j[0] * t0 + j[3] * t1;
+                        phys_phi[i * 3 + 1] = j[1] * t0 + j[4] * t1;
+                        phys_phi[i * 3 + 2] = j[2] * t0 + j[5] * t1;
+                    }
+                    // Surface curl: scalar curl_ref / measure (MFEM
+                    // `CalcPhysCurlShape` for dim-2 reference elements).
+                    let inv_measure = 1.0 / measure;
+                    for i in 0..n_e {
+                        phys_curl[i] = ref_curl[i] * inv_measure;
+                    }
+                    phys_div.copy_from_slice(&ref_div[..n_e]);
+                }
+                SpaceType::HDiv => {
+                    panic!("VectorAssembler: H(div) on surface elements is not supported");
+                }
+                _ => panic!("VectorAssembler: unsupported space type {stype:?}"),
+            }
+
+            if let Some(s) = signs {
+                apply_signs(s, &mut phys_phi, &mut phys_curl, &mut phys_div, n_e, dim, curl_dim);
+            }
+
+            // Edge-edge block (n_e × n_e)
+            let qp = VectorQpData {
+                n_dofs: n_e, dim, is_surface, weight: w,
+                phi_vec: &phys_phi, curl: &phys_curl, div: &phys_div,
+                x_phys: &xp, elem_id: e, elem_tag,
+            };
+            for integ in integrators {
+                integ.add_to_element_matrix(&qp, &mut k_edge[..n_e * n_e]);
+            }
+            // Copy edge-edge block to k_elem with correct stride n (not n_e)
+            for i in 0..n_e {
+                for j in 0..n_e {
+                    k_elem[i * n + j] += k_edge[i * n_e + j];
+                }
+            }
+            // Zero k_edge for next quadrature point (integrator accumulates into it)
+            for v in k_edge[..n_e * n_e].iter_mut() { *v = 0.0; }
+
+            // Interior DOFs (bubble modes) on a surface: same gradient-bubble
+            // basis as the flat case, Piola-mapped through J·G⁻¹.
+            if n_i > 0 && elem_type == ElementType::Quad4 {
+                let x = xi[0]; let y = xi[1];
+                let k = space.order() as usize;
+                let n_per_dir = k;
+                let mut int_phi = vec![0.0_f64; n_i * 2];
+                let mut idx = 0;
+                for m in 0..n_per_dir {
+                    let s = ((15.0 * (2.0 * m as f64 + 1.0)) / 32.0).sqrt();
+                    let b = s * (1.0 - y * y) * x.powi(m as i32);
+                    int_phi[idx * 2] = b; int_phi[idx * 2 + 1] = 0.0; idx += 1;
+                }
+                for m in 0..n_per_dir {
+                    let s = ((15.0 * (2.0 * m as f64 + 1.0)) / 32.0).sqrt();
+                    let b = s * (1.0 - x * x) * y.powi(m as i32);
+                    int_phi[idx * 2] = 0.0; int_phi[idx * 2 + 1] = b; idx += 1;
+                }
+                debug_assert_eq!(idx, n_i);
+
+                let mut int_phys = vec![0.0_f64; n_i * dim];
+                for i in 0..n_i {
+                    let (p0, p1) = (int_phi[i * 2], int_phi[i * 2 + 1]);
+                    let t0 = ginv[0] * p0 + ginv[1] * p1;
+                    let t1 = ginv[1] * p0 + ginv[2] * p1;
+                    int_phys[i * 3] = j[0] * t0 + j[3] * t1;
+                    int_phys[i * 3 + 1] = j[1] * t0 + j[4] * t1;
+                    int_phys[i * 3 + 2] = j[2] * t0 + j[5] * t1;
+                }
+
+                // Edge-interior mass coupling
+                for ie in 0..n_e {
+                    for ji in 0..n_i {
+                        let mut dot = 0.0;
+                        for d in 0..dim {
+                            dot += phys_phi[ie * dim + d] * int_phys[ji * dim + d];
+                        }
+                        k_elem[ie * n + (n_e + ji)] += w * dot;
+                        k_elem[(n_e + ji) * n + ie] += w * dot;
+                    }
+                }
+                // Interior-interior mass
+                for i in 0..n_i {
+                    for j in 0..=i {
+                        let mut dot = 0.0;
+                        for d in 0..dim {
+                            dot += int_phys[i * dim + d] * int_phys[j * dim + d];
+                        }
+                        k_elem[(n_e + i) * n + (n_e + j)] += w * dot;
+                        if i != j { k_elem[(n_e + j) * n + (n_e + i)] += w * dot; }
+                    }
+                }
+            }
+            continue;
+        }
+
         let (jac, det_j, xp) = if use_iso {
             let ge = geo_elem
                 .as_ref()
@@ -349,7 +488,7 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
 
         // Edge-edge block (n_e × n_e)
         let qp = VectorQpData {
-            n_dofs: n_e, dim, weight: w,
+            n_dofs: n_e, dim, is_surface, weight: w,
             phi_vec: &phys_phi, curl: &phys_curl, div: &phys_div,
             x_phys: &xp, elem_id: e, elem_tag,
         };
@@ -436,13 +575,17 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
     rhs: &mut [f64],
 ) {
     let mesh = space.mesh();
-    let dim = mesh.dim() as usize;
+    let edim = mesh.dim() as usize;
+    let tdim = mesh.topological_dim() as usize;
+    let is_surface = edim != tdim;
+    let dim = edim;
     let stype = space.space_type();
     let elem_type = mesh.element_type(e);
-    let ref_elem = vec_ref_elem(stype, elem_type, dim, space.order());
+    let ref_elem = vec_ref_elem(stype, elem_type, edim, space.order());
     let n_ldofs = ref_elem.n_dofs();
+    let ref_dim = ref_elem.dim() as usize;
     let quad = ref_elem.quadrature(quad_order);
-    let curl_dim = if dim == 2 { 1 } else { 3 };
+    let curl_dim = if dim == 2 || is_surface { 1 } else { 3 };
     let global_dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
     let signs = space.element_signs(e);
     let nodes = mesh.element_nodes(e);
@@ -450,14 +593,15 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
     let use_iso = !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2)
         || mesh.geom_order() > 1;
     let geo_elem = geo_ref_elem_from_mesh(mesh, e);
-    let affine_tr = if use_iso {
+    let affine_tr = if use_iso || is_surface {
+        // Surface elements never use the (square) simplex transformation.
         None
     } else {
         Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
     };
 
     let mut f_elem = vec![0.0_f64; n_ldofs * dim];
-    let mut ref_phi = vec![0.0; n_ldofs * dim];
+    let mut ref_phi = vec![0.0; n_ldofs * ref_dim];
     let mut ref_curl = vec![0.0; n_ldofs * curl_dim];
     let mut ref_div = vec![0.0; n_ldofs];
     let mut phys_phi = vec![0.0; n_ldofs * dim];
@@ -465,6 +609,75 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
     let mut phys_div = vec![0.0; n_ldofs];
 
     for (q, xi) in quad.points.iter().enumerate() {
+        if is_surface {
+            let geo_p1 = crate::assembler::ref_elem_vol(elem_type, 1);
+            let (geo, geo_nds): (&dyn ReferenceElement, &[u32]) =
+                if let Some(ref ge) = geo_elem {
+                    (ge.as_ref(), mesh.geometry_nodes(e))
+                } else {
+                    (geo_p1.as_ref(), nodes)
+                };
+            let (measure, j, ginv, xp) =
+                crate::assembler::surface_jacobian(mesh, geo_nds, geo, xi, edim, tdim);
+            let w = quad.weights[q] * measure;
+
+            ref_elem.eval_basis_vec(xi, &mut ref_phi);
+            ref_elem.eval_curl(xi, &mut ref_curl);
+            ref_elem.eval_div(xi, &mut ref_div);
+
+            match stype {
+                SpaceType::HCurl => {
+                    for i in 0..n_ldofs {
+                        let (p0, p1) = (ref_phi[i * 2], ref_phi[i * 2 + 1]);
+                        let t0 = ginv[0] * p0 + ginv[1] * p1;
+                        let t1 = ginv[1] * p0 + ginv[2] * p1;
+                        phys_phi[i * 3] = j[0] * t0 + j[3] * t1;
+                        phys_phi[i * 3 + 1] = j[1] * t0 + j[4] * t1;
+                        phys_phi[i * 3 + 2] = j[2] * t0 + j[5] * t1;
+                    }
+                    let inv_measure = 1.0 / measure;
+                    for i in 0..n_ldofs {
+                        phys_curl[i] = ref_curl[i] * inv_measure;
+                    }
+                    phys_div.copy_from_slice(&ref_div[..n_ldofs]);
+                }
+                SpaceType::HDiv => {
+                    panic!("VectorAssembler: H(div) on surface elements is not supported");
+                }
+                _ => panic!("VectorAssembler: unsupported space type {stype:?}"),
+            }
+
+            if let Some(s) = signs {
+                apply_signs(
+                    s,
+                    &mut phys_phi,
+                    &mut phys_curl,
+                    &mut phys_div,
+                    n_ldofs,
+                    dim,
+                    curl_dim,
+                );
+            }
+
+            let qp = VectorQpData {
+                n_dofs: n_ldofs,
+                dim,
+                is_surface,
+                weight: w,
+                phi_vec: &phys_phi,
+                curl: &phys_curl,
+                div: &phys_div,
+                x_phys: &xp,
+                elem_id: e,
+                elem_tag,
+            };
+
+            for integ in integrators {
+                integ.add_to_element_vector(&qp, &mut f_elem);
+            }
+            continue;
+        }
+
         let (jac, det_j, xp) = if use_iso {
             let ge = geo_elem
                 .as_ref()
@@ -514,6 +727,7 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
         let qp = VectorQpData {
             n_dofs: n_ldofs,
             dim,
+            is_surface,
             weight: w,
             phi_vec: &phys_phi,
             curl: &phys_curl,
