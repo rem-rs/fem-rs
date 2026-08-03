@@ -1140,6 +1140,79 @@ mod tests {
         assert_eq!(rhs.len(), n);
     }
 
+    /// A single triangle embedded in 3-D (z = 0 plane) and its flat 2-D twin.
+    /// The surface H(curl) assembly must reduce exactly to the 2-D result when
+    /// the embedding is planar (φ_phys = J·G⁻¹·φ_ref degenerates to J⁻ᵀ on a
+    /// plane; curl_phys = curl_ref/measure degenerates to curl_ref/|det J|).
+    #[test]
+    fn surface_hcurl_flat_embedding_matches_2d() {
+        use fem_core::{ElemId, FaceId, NodeId};
+        use fem_mesh::element_type::ElementType;
+        use fem_mesh::topology::MeshTopology;
+
+        macro_rules! tri_mesh {
+            ($name:ident, $dim:expr) => {
+                struct $name;
+                impl MeshTopology for $name {
+                    fn dim(&self) -> u8 { $dim }
+                    fn topological_dim(&self) -> u8 { if $dim == 3 { 2 } else { $dim } }
+                    fn n_nodes(&self) -> usize { 3 }
+                    fn n_elements(&self) -> usize { 1 }
+                    fn n_boundary_faces(&self) -> usize { 3 }
+                    fn element_type(&self, _e: ElemId) -> ElementType { ElementType::Tri3 }
+                    fn element_tag(&self, _e: ElemId) -> i32 { 1 }
+                    fn element_nodes(&self, _e: ElemId) -> &[NodeId] { &[0, 1, 2] }
+                    fn node_coords(&self, n: NodeId) -> &[f64] {
+                        match n {
+                            0 => &[0.0, 0.0, 0.0][..$dim],
+                            1 => &[1.0, 0.0, 0.0][..$dim],
+                            2 => &[0.0, 1.0, 0.0][..$dim],
+                            _ => &[0.0; 3][..$dim],
+                        }
+                    }
+                    fn face_nodes(&self, f: FaceId) -> &[NodeId] {
+                        match f { 0 => &[0, 1], 1 => &[1, 2], 2 => &[0, 2], _ => &[0, 0] }
+                    }
+                    fn face_tag(&self, _f: FaceId) -> i32 { 1 }
+                    fn face_elements(&self, _f: FaceId) -> (ElemId, Option<ElemId>) { (0, None) }
+                }
+            };
+        }
+        tri_mesh!(PlaneTri3d, 3); // dim()=3, topological_dim()=2 via element type
+        tri_mesh!(FlatTri2d, 2);
+
+        let surface = HCurlSpace::new(PlaneTri3d, 1);
+        let flat = HCurlSpace::new(FlatTri2d, 1);
+        assert_eq!(surface.n_dofs(), 3);
+        assert_eq!(flat.n_dofs(), 3);
+
+        let s_mat = VectorAssembler::assemble_bilinear(
+            &surface,
+            &[&crate::standard::CurlCurlIntegrator { mu: 1.0 },
+              &crate::standard::VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let f_mat = VectorAssembler::assemble_bilinear(
+            &flat,
+            &[&crate::standard::CurlCurlIntegrator { mu: 1.0 },
+              &crate::standard::VectorMassIntegrator { alpha: 1.0 }],
+            3,
+        );
+        let sd = s_mat.to_dense();
+        let fd = f_mat.to_dense();
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (sd[i * 3 + j] - fd[i * 3 + j]).abs() < 1e-12,
+                    "surface vs flat mismatch at [{i},{j}]: {:.12e} vs {:.12e}",
+                    sd[i * 3 + j],
+                    fd[i * 3 + j],
+                );
+            }
+        }
+        eprintln!("  ✅ planar surface H(curl) assembly == 2-D (bit-for-bit)");
+    }
+
     #[test]
     fn curl_hdiv_pairing_nd2_rt2_shape_and_nonempty() {
         let mesh = Mesh::<2>::unit_square_tri(3);
