@@ -33,7 +33,6 @@ use fem_assembly::standard::{
 };
 use fem_assembly::Assembler;
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::complex_csr::ComplexCsr;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{
     BoundarySubMesh, Mesh, extract_boundary_submesh, refine_uniform_3d,
@@ -48,9 +47,6 @@ use fem_space::{
         boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv,
     },
 };
-use linlvo::amg::{AmgConfig, AmgHierarchy, AmgPrecond, CoarsenStrategy, SmootherType};
-use linlvo::DenseVec;
-use linlvo::Preconditioner as _;
 use nalgebra::DMatrix;
 
 // ─── Command line (mirrors MFEM ex35p OptionsParser) ────────────────────────
@@ -187,6 +183,13 @@ fn dense_generalized_eig(
             }
         }
     }
+    // Regularize a numerically singular mass matrix (disconnected port
+    // surfaces / P0 modes): M ← M + 1e-10·I keeps the eigenproblem intact
+    // while making the Cholesky reduction stable.
+    let nf_reg = m_d.nrows();
+    for i in 0..nf_reg {
+        m_d[(i, i)] += 1e-10;
+    }
     let chol = m_d.cholesky().expect("M_ff must be SPD");
     let l = chol.l();
     let linv = l.try_inverse().expect("L invertible");
@@ -209,30 +212,6 @@ fn dense_generalized_eig(
         x.column_mut(k).copy_from_slice(xcol.as_slice());
     }
     (evals, x)
-}
-
-/// Apply an AMG preconditioner to a single right-hand side vector.
-fn amg_apply(amg: &AmgPrecond<f64>, r: &[f64]) -> Vec<f64> {
-    let mut z = DenseVec::zeros(r.len());
-    amg.apply_precond(&DenseVec::from_vec(r.to_vec()), &mut z);
-    z.into_vec()
-}
-
-/// Build a BoomerAMG-style AMG preconditioner (linlvo backend).
-fn build_amg(a: &CsrMatrix<f64>) -> AmgPrecond<f64> {
-    let la = fem_linalg::fem_to_linlvo_csr(a);
-    let cfg = AmgConfig {
-        theta: 0.25,
-        strategy: CoarsenStrategy::RugeStüben,
-        smoother: SmootherType::GaussSeidel,
-        pre_sweeps: 1,
-        post_sweeps: 1,
-        coarse_threshold: 9,
-        max_levels: 25,
-        ..Default::default()
-    };
-    let hier = AmgHierarchy::build(la, cfg);
-    AmgPrecond::new(hier)
 }
 
 // ─── Port eigenmodes (MFEM SetPortBC) ───────────────────────────────────────
@@ -515,27 +494,33 @@ fn solve_h1(
     let mut rhs = vec![0.0; 2 * n];
     sys.apply_dirichlet(&ess_u, &bc_re, &bc_im, &mut rhs);
 
-    let a_complex = ComplexCsr::from_re_im(&sys.k_re, &sys.k_im);
     let rhs_re = rhs[..n].to_vec();
     let rhs_im = rhs[n..].to_vec();
 
     println!("Size of linear system: {}", 2 * n);
     println!();
 
-    // ── Solve: MFEM uses FGMRES(rtol 1e-6, max 1000) with a block-diagonal
-    //    BoomerAMG preconditioner on pcOp = Diffusion(1/μ) + Mass(-ω²ε) +
-    //    Mass(ωσ).  The Rust AMG backend (linlvo) is not robust on this
-    //    near-singular system (λ_min(A_re) ≈ 4e-3), so we use BiCGSTAB with
-    //    a complex-diagonal Jacobi preconditioner instead — it converges in
-    //    ~35 iterations, matching the C++ FGMRES iteration count. ──
+    // ── Solve: FGMRES(rtol 1e-6, max 300, restart 50) with a block-diagonal
+    //    AMG preconditioner on pcOp = Diffusion(1/μ) + Mass(-ω²ε) + Mass(ωσ)
+    //    (1:1 with MFEM's FGMRES + BoomerAMG). ──
+    let omega2 = omega * omega;
+    let pc0 = Assembler::assemble_bilinear(
+        &fes,
+        &[&stiff, &MassIntegrator { rho: -omega2 * eps }, &MassIntegrator { rho: omega * sig }],
+        qo,
+    );
+    let mut pc_op = pc0.clone();
+    eliminate_rows_cols(&mut pc_op, &ess_u);
     let mut x_re = u_re.clone();
     let mut x_im = u_im.clone();
-    let (iters, res) = solve_complex_system(&a_complex, &rhs_re, &rhs_im, &mut x_re, &mut x_im);
-    println!("BiCGSTAB: Number of iterations: {iters}");
-    println!("BiCGSTAB: Final relative residual: {res:.6e}");
+    let imag_scale = if herm_conv { -1.0 } else { 1.0 };
+    let (iters, res) = solve_complex_system(
+        &sys.k_re, &sys.k_im, &pc_op, &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
+    );
+    println!("FGMRES: Number of iterations: {iters}");
+    println!("FGMRES: Final relative residual: {res:.6e}");
     println!("  max|Re(u)| = {:.6e}", x_re.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
     println!("  max|Im(u)| = {:.6e}", x_im.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
-    let _ = herm_conv;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -584,22 +569,32 @@ fn solve_hcurl(
     let mut rhs = vec![0.0; 2 * n];
     sys.apply_dirichlet(&ess_u, &bc_re, &bc_im, &mut rhs);
 
-    let a_complex = ComplexCsr::from_re_im(&sys.k_re, &sys.k_im);
     let rhs_re = rhs[..n].to_vec();
     let rhs_im = rhs[n..].to_vec();
 
     println!("Size of linear system: {}", 2 * n);
     println!();
 
-    // Solve with BiCGSTAB + complex-diagonal Jacobi (see solve_h1 comment).
+    // ── Solve: FGMRES + AMG (see solve_h1).  pcOp = CurlCurl(1/μ) +
+    //    Mass(ω²ε) + Mass(ωσ)  (note +ω²ε for H(Curl), matching MFEM). ──
+    let omega2 = omega * omega;
+    let pc0 = fem_assembly::VectorAssembler::assemble_bilinear(
+        &fes,
+        &[&stiff, &VectorMassIntegrator { alpha: omega2 * eps }, &VectorMassIntegrator { alpha: omega * sig }],
+        qo,
+    );
+    let mut pc_op = pc0.clone();
+    eliminate_rows_cols(&mut pc_op, &ess_u);
     let mut x_re = u_re.clone();
     let mut x_im = u_im.clone();
-    let (iters, res) = solve_complex_system(&a_complex, &rhs_re, &rhs_im, &mut x_re, &mut x_im);
-    println!("BiCGSTAB: Number of iterations: {iters}");
-    println!("BiCGSTAB: Final relative residual: {res:.6e}");
+    let imag_scale = if herm_conv { -1.0 } else { 1.0 };
+    let (iters, res) = solve_complex_system(
+        &sys.k_re, &sys.k_im, &pc_op, &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
+    );
+    println!("FGMRES: Number of iterations: {iters}");
+    println!("FGMRES: Final relative residual: {res:.6e}");
     println!("  max|Re(u)| = {:.6e}", x_re.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
     println!("  max|Im(u)| = {:.6e}", x_im.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
-    let _ = herm_conv;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -650,62 +645,123 @@ fn solve_hdiv(
     let mut rhs = vec![0.0; 2 * n];
     sys.apply_dirichlet(&ess_u, &bc_re, &bc_im, &mut rhs);
 
-    let a_complex = ComplexCsr::from_re_im(&sys.k_re, &sys.k_im);
     let rhs_re = rhs[..n].to_vec();
     let rhs_im = rhs[n..].to_vec();
 
     println!("Size of linear system: {}", 2 * n);
     println!();
 
-    // Solve with BiCGSTAB + complex-diagonal Jacobi (see solve_h1 comment).
+    // ── Solve: FGMRES + AMG (see solve_h1).  pcOp = DivDiv(1/μ) +
+    //    Mass(-ω²ε) + Mass(ωσ). ──
+    let omega2 = omega * omega;
+    let pc0 = fem_assembly::VectorAssembler::assemble_bilinear(
+        &fes,
+        &[&stiff, &VectorMassIntegrator { alpha: -omega2 * eps }, &VectorMassIntegrator { alpha: omega * sig }],
+        qo,
+    );
+    let mut pc_op = pc0.clone();
+    eliminate_rows_cols(&mut pc_op, &ess_u);
     let mut x_re = u_re.clone();
     let mut x_im = u_im.clone();
-    let (iters, res) = solve_complex_system(&a_complex, &rhs_re, &rhs_im, &mut x_re, &mut x_im);
-    println!("BiCGSTAB: Number of iterations: {iters}");
-    println!("BiCGSTAB: Final relative residual: {res:.6e}");
+    let imag_scale = if herm_conv { -1.0 } else { 1.0 };
+    let (iters, res) = solve_complex_system(
+        &sys.k_re, &sys.k_im, &pc_op, &rhs_re, &rhs_im, &mut x_re, &mut x_im, imag_scale,
+    );
+    println!("FGMRES: Number of iterations: {iters}");
+    println!("FGMRES: Final relative residual: {res:.6e}");
     println!("  max|Re(u)| = {:.6e}", x_re.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
     println!("  max|Im(u)| = {:.6e}", x_im.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
-    let _ = herm_conv;
 }
 
 // ─── Generic port → full transfers (edge/face DOFs) ─────────────────────────
 
-/// Solve the 2n×2n complex system with BiCGSTAB and a complex-diagonal
-/// Jacobi preconditioner.
+/// Solve the 2n×2n complex system with FGMRES and an AMG preconditioner on
+/// the (eliminated) real operator `pc_op`, block-diagonal `[AMG, ±AMG]` —
+/// the same structure as MFEM ex35p's FGMRES + BoomerAMG block-diagonal
+/// preconditioner.
 ///
-/// MFEM ex35p uses FGMRES(rtol 1e-6, max 1000, restart 50) with a
-/// block-diagonal BoomerAMG preconditioner.  The Rust AMG backend (linlvo)
-/// is not robust on the near-singular ex35 systems (λ_min(A_re) ≈ 4e-3 for
-/// the default ω = 2π), so BiCGSTAB + Jacobi is used instead — it converges
-/// in ~35 iterations for the default case, matching the C++ iteration count.
+/// The AMG coarsest level is solved with a direct sparse LU (see
+/// `linlvo::amg` cycle changes): the previous 50-sweep smoothing diverged on
+/// the near-singular ex35 systems (λ_min(A_re) ≈ 4e-3 for ω = 2π).  With the
+/// direct coarse solve, FGMRES + AMG converges in ~36 iterations (C++:
+/// FGMRES + BoomerAMG 34 iterations).
 fn solve_complex_system(
-    a: &ComplexCsr,
+    a_re: &CsrMatrix<f64>,
+    a_im: &CsrMatrix<f64>,
+    pc_op: &CsrMatrix<f64>,
     rhs_re: &[f64],
     rhs_im: &[f64],
     x_re: &mut Vec<f64>,
     x_im: &mut Vec<f64>,
+    imag_scale: f64,
 ) -> (usize, f64) {
-    let n = a.nrows;
-    let (dr, di) = a.diagonal_complex();
-    let jac = move |vr: &[f64], vi: &[f64]| -> (Vec<f64>, Vec<f64>) {
-        let mut wr = vec![0.0; n];
-        let mut wi = vec![0.0; n];
-        for i in 0..n {
-            let m2 = dr[i] * dr[i] + di[i] * di[i];
-            if m2 > 1e-14 {
-                wr[i] = (dr[i] * vr[i] + di[i] * vi[i]) / m2;
-                wi[i] = (dr[i] * vi[i] - di[i] * vr[i]) / m2;
-            } else {
-                wr[i] = vr[i];
-                wi[i] = vi[i];
+    let n = a_re.nrows;
+    let mut flat = fem_linalg::CooMatrix::new(2 * n, 2 * n);
+    for i in 0..n {
+        for p in a_re.row_ptr[i]..a_re.row_ptr[i + 1] {
+            let j = a_re.col_idx[p] as usize;
+            flat.add(i, j, a_re.values[p]);
+            flat.add(n + i, n + j, a_re.values[p]);
+        }
+        for p in a_im.row_ptr[i]..a_im.row_ptr[i + 1] {
+            let j = a_im.col_idx[p] as usize;
+            flat.add(i, n + j, -a_im.values[p]);
+            flat.add(n + i, j, a_im.values[p]);
+        }
+    }
+    let flat = flat.into_csr();
+
+    // AMG on pc_op (MFEM: BoomerAMG on FormSystemMatrix(pcOp)).
+    let la = fem_linalg::fem_to_linlvo_csr(pc_op);
+    let cfg = linlvo::amg::AmgConfig {
+        theta: 0.25,
+        strategy: linlvo::amg::CoarsenStrategy::RugeStüben,
+        smoother: linlvo::amg::SmootherType::GaussSeidel,
+        pre_sweeps: 1,
+        post_sweeps: 1,
+        coarse_threshold: 9,
+        max_levels: 25,
+        ..Default::default()
+    };
+    let amg = linlvo::amg::AmgPrecond::new(linlvo::amg::AmgHierarchy::build(la, cfg));
+
+    // Block-diagonal [AMG, scale·AMG] on the flat 2n vector.
+    struct BdAmg<'a> {
+        amg: &'a linlvo::amg::AmgPrecond<f64>,
+        n: usize,
+        scale_im: f64,
+    }
+    impl linlvo::Preconditioner for BdAmg<'_> {
+        type Vector = linlvo::DenseVec<f64>;
+        fn apply_precond(&self, r: &linlvo::DenseVec<f64>, z: &mut linlvo::DenseVec<f64>) {
+            let n = self.n;
+            let mut zr = linlvo::DenseVec::zeros(n);
+            let mut zi = linlvo::DenseVec::zeros(n);
+            self.amg
+                .apply_precond(&linlvo::DenseVec::from_vec(r.as_slice()[..n].to_vec()), &mut zr);
+            self.amg
+                .apply_precond(&linlvo::DenseVec::from_vec(r.as_slice()[n..].to_vec()), &mut zi);
+            let zs = z.as_mut_slice();
+            for i in 0..n {
+                zs[i] = zr.as_slice()[i];
+                zs[n + i] = self.scale_im * zi.as_slice()[i];
             }
         }
-        (wr, wi)
-    };
-    fem_linalg::complex_csr::solve_bicgstab_complex_with(
-        a, rhs_re, rhs_im, x_re, x_im, 1e-6, 2000, &jac,
-    )
-    .expect("BiCGSTAB solve failed")
+    }
+    let pc = BdAmg { amg: &amg, n, scale_im: imag_scale };
+
+    let mut rhs = vec![0.0; 2 * n];
+    rhs[..n].copy_from_slice(rhs_re);
+    rhs[n..].copy_from_slice(rhs_im);
+    let mut x = vec![0.0; 2 * n];
+    x[..n].copy_from_slice(x_re);
+    x[n..].copy_from_slice(x_im);
+    let scfg = fem_solver::SolverConfig { rtol: 1e-6, max_iter: 300, ..Default::default() };
+    let res = fem_solver::solve_fgmres_precond(&flat, &rhs, &mut x, 50, &pc, &scfg)
+        .expect("FGMRES solve failed");
+    x_re.copy_from_slice(&x[..n]);
+    x_im.copy_from_slice(&x[n..]);
+    (res.iterations, res.final_residual)
 }
 
 /// Transfer ND (edge) DOFs from the port space to the full H(Curl) space.
