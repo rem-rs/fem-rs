@@ -48,7 +48,7 @@ pub use cr_space::CRSpace;
 pub use vector_cr::VectorCRSpace;
 pub use h1_trace::H1TraceSpace;
 pub use face_space::FaceSpace;
-pub use l2::L2Space;
+pub use l2::{L2Basis, L2Space};
 pub use hcurl::HCurlSpace;
 pub use restricted_hcurl::RestrictedHCurlSpace;
 pub use hdiv::HDivSpace;

@@ -421,6 +421,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     quad: &QuadratureRule,
     coo: &mut CooMatrix<f64>,
     scratch: &mut ElementScratch,
+    ref_elem: &dyn ReferenceElement,
 ) {
     let mesh    = space.mesh();
     let edim    = mesh.dim() as usize;   // embedding dimension (2 or 3)
@@ -447,7 +448,8 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
         &quad_owned
     };
 
-    let ref_elem  = ref_elem_vol(elem_type, order);
+    // Use the caller-provided reference element (custom basis, e.g. Bernstein
+    // QuadPosQk for MFEM's H1_FECollection BasisType::Positive).
     let n_ldofs   = ref_elem.n_dofs();
 
     let raw_dofs: &[DofId] = space.element_dofs(e);
@@ -819,6 +821,7 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
     space: &S,
     integrators: &[&dyn BilinearIntegrator],
     quad: &QuadratureRule,
+    ref_elem: &dyn ReferenceElement,
 ) -> CsrMatrix<f64> {
     let mesh = space.mesh();
     let n_dofs = space.n_dofs();
@@ -847,7 +850,7 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
                 (coo, ElementScratch::new())
             },
             |(mut local_coo, mut scratch), e| {
-                accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut local_coo, &mut scratch);
+                accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut local_coo, &mut scratch, ref_elem);
                 (local_coo, scratch)
             },
         )
@@ -975,18 +978,17 @@ impl Assembler {
         integrators: &[&dyn BilinearIntegrator],
         quad_order:  u8,
     ) -> CsrMatrix<f64> {
-        let mesh   = space.mesh();
-        let n_dofs = space.n_dofs();
-
         // MFEM semantics: each integrator may select its own quadrature order.
         // If any integrator requests an explicit order, assemble integrators
         // individually on their own quadrature rules and accumulate.
+        let mesh   = space.mesh();
+        let n_dofs = space.n_dofs();
         let space_order = space.element_order(0);
         if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
             let mut acc: Option<CsrMatrix<f64>> = None;
             for integ in integrators {
                 let qo = integ.integration_order(space_order).unwrap_or(quad_order);
-                let m = Self::assemble_bilinear_inner(space, &[*integ], qo);
+                let m = Self::assemble_bilinear_inner(space, &[*integ], qo, None);
                 acc = Some(match acc {
                     None => m,
                     Some(a) => a.add(&m),
@@ -995,7 +997,42 @@ impl Assembler {
             return acc.unwrap_or_else(|| CsrMatrix::new_empty(n_dofs, n_dofs));
         }
 
-        Self::assemble_bilinear_inner(space, integrators, quad_order)
+        Self::assemble_bilinear_inner(space, integrators, quad_order, None)
+    }
+
+    /// Assemble a bilinear form using an explicit reference element (custom
+    /// basis) instead of the space's default one.
+    ///
+    /// Used to reproduce MFEM spaces with a non-default `BasisType`, e.g.
+    /// `BasisType::Positive` (Bernstein) for the elasticity space of ex37:
+    /// the DOF layout (H1 ordering) is unchanged, only the basis functions
+    /// differ, so the same `FESpace` can be assembled with `QuadPosQk`.
+    pub fn assemble_bilinear_with_ref<S: FESpace>(
+        space:       &S,
+        integrators: &[&dyn BilinearIntegrator],
+        quad_order:  u8,
+        ref_elem:    &dyn ReferenceElement,
+    ) -> CsrMatrix<f64> {
+        // MFEM semantics: each integrator may select its own quadrature order.
+        // If any integrator requests an explicit order, assemble integrators
+        // individually on their own quadrature rules and accumulate.
+        let mesh   = space.mesh();
+        let n_dofs = space.n_dofs();
+        let space_order = space.element_order(0);
+        if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
+            let mut acc: Option<CsrMatrix<f64>> = None;
+            for integ in integrators {
+                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let m = Self::assemble_bilinear_inner(space, &[*integ], qo, Some(ref_elem));
+                acc = Some(match acc {
+                    None => m,
+                    Some(a) => a.add(&m),
+                });
+            }
+            return acc.unwrap_or_else(|| CsrMatrix::new_empty(n_dofs, n_dofs));
+        }
+
+        Self::assemble_bilinear_inner(space, integrators, quad_order, Some(ref_elem))
     }
 
     /// Core assembly loop shared by [`Self::assemble_bilinear`]; see there for
@@ -1004,6 +1041,7 @@ impl Assembler {
         space:       &S,
         integrators: &[&dyn BilinearIntegrator],
         quad_order:  u8,
+        ref_elem_override: Option<&dyn ReferenceElement>,
     ) -> CsrMatrix<f64> {
         let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
@@ -1013,20 +1051,26 @@ impl Assembler {
         // lives on [0,1]^2 while order <= 3 (QuadQ1/Q2/Q3) lives on [-1,1]^2, and
         // the quadrature domain must match the basis domain.
         let elem_type = mesh.element_type(0);
-        let quad = ref_elem_vol(elem_type, space.element_order(0).max(1)).quadrature(quad_order);
+        let owned_default;
+        let ref_elem: &dyn ReferenceElement = match ref_elem_override {
+            Some(r) => r,
+            None => {
+                owned_default = ref_elem_vol(elem_type, space.element_order(0).max(1));
+                &*owned_default
+            }
+        };
+        let quad = ref_elem.quadrature(quad_order);
 
         // Estimate raw nnz for COO pre-allocation.
         // Each element contributes `dofs_per_elem^2` triplets.
         // Use first element's n_dofs for uniform-order meshes (common case).
-        let elem0    = mesh.element_type(0);
-        let ref0     = ref_elem_vol(elem0, space.element_order(0));
-        let dofs_per_elem = ref0.n_dofs();
+        let dofs_per_elem = ref_elem.n_dofs();
         let est_nnz  = mesh.n_elements() as usize * dofs_per_elem * dofs_per_elem;
 
         #[cfg(feature = "parallel")]
         {
             if mesh.n_elements() >= assembly_parallel_min_elems() {
-                return assemble_bilinear_volume_parallel(space, integrators, &quad);
+                return assemble_bilinear_volume_parallel(space, integrators, &quad, ref_elem);
             }
         }
 
@@ -1034,7 +1078,7 @@ impl Assembler {
         coo.reserve(est_nnz.min(10_000_000)); // cap to avoid giant pre-allocs for hp meshes
         let mut scratch = ElementScratch::new();
         for e in mesh.elem_iter() {
-            accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut coo, &mut scratch);
+            accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut coo, &mut scratch, ref_elem);
         }
         coo.into_csr()
     }
@@ -1059,11 +1103,10 @@ impl Assembler {
 
         // Quadrature from the ACTUAL solution order (see assemble_bilinear).
         let elem_type = mesh.element_type(0);
-        let quad = ref_elem_vol(elem_type, space.element_order(0).max(1)).quadrature(quad_order);
+        let owned_default = ref_elem_vol(elem_type, space.element_order(0).max(1));
+        let quad = owned_default.quadrature(quad_order);
 
-        let elem0   = mesh.element_type(0);
-        let ref0    = ref_elem_vol(elem0, space.element_order(0));
-        let dofs_per_elem = ref0.n_dofs();
+        let dofs_per_elem = owned_default.n_dofs();
         let est_nnz = n_elems as usize * dofs_per_elem * dofs_per_elem;
 
         let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
@@ -1075,7 +1118,7 @@ impl Assembler {
         let mut ldofs = 0;
 
         for e in mesh.elem_iter() {
-            accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut coo, &mut scratch);
+            accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut coo, &mut scratch, &*owned_default);
             let gd = &scratch.global_dofs;
             ldofs = gd.len();
             all_dofs.extend(gd.iter().map(|&d| d as u32));

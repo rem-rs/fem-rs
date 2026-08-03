@@ -23,7 +23,9 @@ use fem_space::{
 use fem_solver::{solve_pcg_gssmoother};
 
 use crate::Assembler;
+use crate::assembler::ref_elem_vol;
 use crate::standard::{DiffusionIntegrator, MassIntegrator};
+use fem_mesh::element_jacobian_at;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Sigmoid helpers
@@ -77,6 +79,9 @@ pub struct HelmholtzFilter {
     constrained_map: Vec<usize>,
     /// Number of reduced (free) DOFs.
     n_sys: usize,
+    /// Quadrature order used to assemble the system (also used for the
+    /// `solve_forward` RHS integral `∫ ρ_e φ_d dx`).
+    quad_order: u8,
     /// Solver config.
     cfg: SolverConfig,
 }
@@ -127,6 +132,7 @@ impl HelmholtzFilter {
             free_map,
             constrained_map,
             n_sys,
+            quad_order,
             cfg: SolverConfig {
                 rtol: 1e-12,
                 atol: 0.0,
@@ -142,30 +148,45 @@ impl HelmholtzFilter {
         self.n_sys
     }
 
+    /// Reference to the full filter system matrix `ε²·K + M`.
+    pub fn system_matrix(&self) -> &CsrMatrix<f64> {
+        &self.af
+    }
+
     /// Solve the forward filter: `Af · ρ̃ = M · ρ`.
     ///
     /// `rho_design` is the element-wise constant design density (length = n_elems).
+    /// The RHS is the exact lumped integral `rhs[d] = Σ_e ρ_e ∫_e φ_d dx`
+    /// (equivalent to `M · ρ` for piecewise-constant `ρ`), assembled with the
+    /// same quadrature rule as the system matrix.
     /// Returns the filtered density DOF vector.
     pub fn solve_forward<M: MeshTopology>(
         &self,
         rho_design: &[f64],
         space: &impl FESpace<Mesh = M>,
     ) -> Vec<f64> {
+        let mesh = space.mesh();
         let n = space.n_dofs();
-        let mut rhs = vec![0.0_f64; n];
+        let dim = mesh.dim() as usize;
+        let nelems = mesh.n_elements() as u32;
 
-        // RHS = M · ρ_elem
-        let nelems = space.mesh().n_elements();
-        for e in 0..nelems as u32 {
+        let elem_type = mesh.element_type(0);
+        let ref_elem = ref_elem_vol(elem_type, space.element_order(0).max(1));
+        let n_ldofs = ref_elem.n_dofs();
+        let quad = ref_elem.quadrature(self.quad_order);
+        let mut phi = vec![0.0_f64; n_ldofs];
+
+        let mut rhs = vec![0.0_f64; n];
+        for e in 0..nelems {
             let dofs = space.element_dofs(e);
             let rho_e = rho_design[e as usize];
-            for &d in dofs {
-                let d_idx = d as usize;
-                for j in self.mass.row_ptr[d_idx]..self.mass.row_ptr[d_idx + 1] {
-                    if self.mass.col_idx[j] as usize == d_idx {
-                        rhs[d_idx] += self.mass.values[j] * rho_e;
-                        break;
-                    }
+            for (q, xi) in quad.points.iter().enumerate() {
+                let (jac, _xp) = element_jacobian_at(mesh, e, xi, dim);
+                let det_j = jac[(0, 0)] * jac[(1, 1)] - jac[(0, 1)] * jac[(1, 0)];
+                let w = quad.weights[q] * det_j.abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                for (i, &d) in dofs.iter().enumerate() {
+                    rhs[d as usize] += rho_e * phi[i] * w;
                 }
             }
         }

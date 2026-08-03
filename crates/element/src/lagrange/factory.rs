@@ -690,6 +690,200 @@ impl Lagrange1D {
     }
 }
 
+// ─── QuadPosQk (Bernstein / H1 Positive basis) ─────────────────────────────
+
+/// Binomial coefficient `C(n, k)` as an integer.
+fn binom_coeff(n: usize, k: usize) -> usize {
+    let k = k.min(n - k);
+    let mut c = 1usize;
+    for i in 0..k {
+        c = c * (n - i) / (i + 1);
+    }
+    c
+}
+
+/// 1D Bernstein basis values at `x ∈ [0,1]` — bit-identical to MFEM's
+/// `Poly_1D::CalcBinomTerms(p, x, 1-x, u)` (same accumulation order).
+fn bernstein_1d(p: usize, x: f64) -> Vec<f64> {
+    let mut u = vec![0.0_f64; p + 1];
+    if p == 0 {
+        u[0] = 1.0;
+        return u;
+    }
+    let y = 1.0 - x;
+    let mut z = x;
+    let mut i = 1usize;
+    while i < p {
+        u[i] = binom_coeff(p, i) as f64 * z;
+        z *= x;
+        i += 1;
+    }
+    u[p] = z;
+    z = y;
+    i -= 1;
+    while i > 0 {
+        u[i] *= z;
+        z *= y;
+        i -= 1;
+    }
+    u[0] = z;
+    u
+}
+
+/// 1D Bernstein basis values and derivatives — bit-identical to MFEM's
+/// `Poly_1D::CalcBinomTerms(p, x, 1-x, u, d)`.
+fn bernstein_1d_d(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut u = vec![0.0_f64; p + 1];
+    let mut d = vec![0.0_f64; p + 1];
+    if p == 0 {
+        u[0] = 1.0;
+        d[0] = 0.0;
+        return (u, d);
+    }
+    let y = 1.0 - x;
+    let xpy = x + y;
+    let ptx = p as f64 * x;
+    let mut z = 1.0;
+    let mut i = 1usize;
+    while i < p {
+        d[i] = binom_coeff(p, i) as f64 * z * (i as f64 * xpy - ptx);
+        z *= x;
+        u[i] = binom_coeff(p, i) as f64 * z;
+        i += 1;
+    }
+    d[p] = p as f64 * z;
+    u[p] = z * x;
+    z = 1.0;
+    i -= 1;
+    while i > 0 {
+        d[i] *= z;
+        z *= y;
+        u[i] *= z;
+        i -= 1;
+    }
+    d[0] = -(p as f64) * z;
+    u[0] = z * y;
+    (u, d)
+}
+
+/// Map a lexicographic tensor index `(ix, iy)` to the H1 DOF ordering
+/// (vertices → edges → interior), identical to `QuadQk::node_to_dof` and to
+/// MFEM's `H1_DOF_MAP`.
+fn pos_dof_map(p: usize, ix: usize, iy: usize) -> usize {
+    let x = ix as f64 / p as f64;
+    let y = iy as f64 / p as f64;
+    let tol = 1e-12;
+    let on_xmin = x.abs() < tol;
+    let on_xmax = (x - 1.0).abs() < tol;
+    let on_ymin = y.abs() < tol;
+    let on_ymax = (y - 1.0).abs() < tol;
+    let on_boundary = on_xmin || on_xmax || on_ymin || on_ymax;
+    if on_boundary {
+        if on_xmin && on_ymin {
+            return 0;
+        }
+        if on_xmax && on_ymin {
+            return 1;
+        }
+        if on_xmax && on_ymax {
+            return 2;
+        }
+        if on_xmin && on_ymax {
+            return 3;
+        }
+        let mut idx = 4usize;
+        if on_ymin {
+            return idx + (ix - 1);
+        }
+        idx += p - 1;
+        if on_xmax {
+            return idx + (iy - 1);
+        }
+        idx += p - 1;
+        if on_ymax {
+            return idx + (p - 1 - ix);
+        }
+        idx += p - 1;
+        if on_xmin {
+            return idx + (p - 1 - iy);
+        }
+        unreachable!()
+    } else {
+        let base = 4 + 4 * (p - 1);
+        base + (iy - 1) * (p - 1) + (ix - 1)
+    }
+}
+
+/// Arbitrary-order Bernstein (H1 "Positive") element on the reference quad
+/// `[0,1]²` — `(p+1)²` DOFs at the **equidistant** nodes `(i/p, j/p)`, ordered
+/// by the H1 DOF map (vertices → edges → interior).
+///
+/// Matches MFEM's `H1Pos_QuadrilateralElement` (`H1_FECollection` with
+/// `BasisType::Positive`): the basis functions are the Bernstein polynomials
+/// `B_i^p(x)·B_j^p(y)`, and DOFs hold **Bernstein coefficients** (not nodal
+/// values) — for `p = 2` the interior basis is `4x(1-x)y(1-y)`, i.e. a quarter
+/// of the interior GLL bubble, which is exactly the 16× diagonal difference
+/// observed between MFEM's `Positive` elasticity assembly and the standard GLL
+/// assembly.
+pub struct QuadPosQk {
+    order: usize,
+}
+
+impl QuadPosQk {
+    pub fn new(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        QuadPosQk { order: p }
+    }
+}
+
+impl ReferenceElement for QuadPosQk {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { self.order as u8 }
+    fn n_dofs(&self) -> usize { (self.order + 1) * (self.order + 1) }
+
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let p = self.order;
+        let bx = bernstein_1d(p, xi[0]);
+        let by = bernstein_1d(p, xi[1]);
+        // Lexicographic order (j slowest), reordered by H1 map.
+        for j in 0..=p {
+            for i in 0..=p {
+                values[pos_dof_map(p, i, j)] = bx[i] * by[j];
+            }
+        }
+    }
+
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let p = self.order;
+        let (bx, dbx) = bernstein_1d_d(p, xi[0]);
+        let (by, dby) = bernstein_1d_d(p, xi[1]);
+        for j in 0..=p {
+            for i in 0..=p {
+                let dof = pos_dof_map(p, i, j);
+                grads[dof * 2] = dbx[i] * by[j];
+                grads[dof * 2 + 1] = bx[i] * dby[j];
+            }
+        }
+    }
+
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        quad_rule_01(order)
+    }
+
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        let p = self.order;
+        let n = (p + 1) * (p + 1);
+        let mut coords = vec![vec![0.0_f64; 2]; n];
+        for j in 0..=p {
+            for i in 0..=p {
+                let dof = pos_dof_map(p, i, j);
+                coords[dof] = vec![i as f64 / p as f64, j as f64 / p as f64];
+            }
+        }
+        coords
+    }
+}
+
 // ─── QuadQk ──────────────────────────────────────────────────────────────────
 
 /// Arbitrary-order Lagrange element on the reference quad `[0,1]²` — `(p+1)²` DOFs.

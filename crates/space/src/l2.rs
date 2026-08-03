@@ -25,12 +25,32 @@ use crate::fe_space::{FESpace, SpaceType};
 pub struct L2Space<M: MeshTopology> {
     mesh:          M,
     order:         u8,
+    basis:         L2Basis,
     /// `elem_dofs[e * dofs_per_elem .. (e+1) * dofs_per_elem]` = global DOF indices.
     elem_dofs:     Vec<DofId>,
     dofs_per_elem: usize,
     n_dofs:        usize,
     /// DOF node coordinates (flat, `n_dofs * dim`).
     dof_coords:    Vec<f64>,
+}
+
+/// Node placement of the discontinuous Lagrange basis on the reference element.
+///
+/// Mirrors MFEM's `L2_FECollection` `BasisType` argument: the default is
+/// `GaussLegendre` (interior GL nodes); `GaussLobatto` matches `BasisType::GaussLobatto`
+/// (used e.g. by MFEM ex37's control space `L2_FECollection(order-1, dim,
+/// BasisType::GaussLobatto)`).
+///
+/// For tensor-product Quad4 elements both bases have the same number of DOFs
+/// per element; they differ only in node location, which matters for
+/// interpolation (`interpolate`) and for any code that evaluates the field at
+/// its DOF nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum L2Basis {
+    /// Gauss-Legendre nodes (MFEM `L2_FECollection` default).
+    GaussLegendre,
+    /// Gauss-Lobatto nodes (MFEM `BasisType::GaussLobatto`).
+    GaussLobatto,
 }
 
 impl<M: MeshTopology> L2Space<M> {
@@ -42,6 +62,11 @@ impl<M: MeshTopology> L2Space<M> {
     /// # Panics
     /// Panics if `order > 3`, or if `order == 3` on an unsupported mesh type.
     pub fn new(mesh: M, order: u8) -> Self {
+        Self::new_with_basis(mesh, order, L2Basis::GaussLegendre)
+    }
+
+    /// Build the L² space with an explicit basis node placement.
+    pub fn new_with_basis(mesh: M, order: u8, basis: L2Basis) -> Self {
         assert!(order <= 3, "L2Space: order {order} not supported (max 3)");
         let dim = mesh.dim() as usize;
         let n_elems = mesh.n_elements();
@@ -62,22 +87,34 @@ impl<M: MeshTopology> L2Space<M> {
                     let npe = nodes.len() as f64;
                     for d in 0..dim { dof_coords[base + d] /= npe; }
                 }
-                L2Space { mesh, order, elem_dofs, dofs_per_elem: 1, n_dofs, dof_coords }
+                L2Space { mesh, order, basis, elem_dofs, dofs_per_elem: 1, n_dofs, dof_coords }
             }
             1 => {
                 // P1 discontinuous: one DOF per node per element (no sharing).
-                // DOF nodes are Gauss-Legendre points (MFEM L2_FECollection
-                // default BasisType::GaussLegendre), NOT element vertices.
+                // DOF nodes are Gauss-Legendre points by default (MFEM
+                // L2_FECollection default BasisType::GaussLegendre); with
+                // L2Basis::GaussLobatto they are the GLL nodes, which coincide
+                // with the QuadQk(1) reference nodes used by the assembler.
                 let npe   = mesh.element_nodes(0).len();
                 let n_dofs = n_elems * npe;
                 let elem_dofs: Vec<DofId> = (0..n_dofs as DofId).collect();
                 let mut dof_coords = vec![0.0_f64; n_dofs * dim];
-                let gl_quad: Option<Vec<Vec<f64>>> = if dim == 2 && npe == 4 {
-                    Some(fem_element::lagrange::QuadL2GL::new(1).dof_coords())
+                let ref_coords: Option<Vec<Vec<f64>>> = if dim == 2 && npe == 4 {
+                    Some(match basis {
+                        L2Basis::GaussLegendre => {
+                            fem_element::lagrange::QuadL2GL::new(1).dof_coords()
+                        }
+                        // GLL order-1 nodes == quad corner points, in the
+                        // lexicographic (tensor) order used by MFEM's
+                        // L2_FECollection (L2_DOF_MAP): (0,0),(1,0),(0,1),(1,1).
+                        L2Basis::GaussLobatto => {
+                            vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 1.0]]
+                        }
+                    })
                 } else { None };
                 for e in 0..n_elems as u32 {
                     let nodes = mesh.element_nodes(e);
-                    if let Some(ref rc) = gl_quad {
+                    if let Some(ref rc) = ref_coords {
                         // Physical positions via the Q1 map evaluated with the
                         // same basis evaluation as MFEM's ElementTransformation
                         // (bit-identical to QuadQk(1) barycentric Lagrange).
@@ -104,7 +141,7 @@ impl<M: MeshTopology> L2Space<M> {
                         }
                     }
                 }
-                L2Space { mesh, order, elem_dofs, dofs_per_elem: npe, n_dofs, dof_coords }
+                L2Space { mesh, order, basis, elem_dofs, dofs_per_elem: npe, n_dofs, dof_coords }
             }
             2 => {
                 // P2 discontinuous on simplices:
@@ -193,6 +230,7 @@ impl<M: MeshTopology> L2Space<M> {
                 L2Space {
                     mesh,
                     order,
+                    basis,
                     elem_dofs,
                     dofs_per_elem,
                     n_dofs,
@@ -278,6 +316,7 @@ impl<M: MeshTopology> L2Space<M> {
                 L2Space {
                     mesh,
                     order,
+                    basis,
                     elem_dofs,
                     dofs_per_elem,
                     n_dofs,
