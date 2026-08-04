@@ -31,18 +31,22 @@
 //! solver.step(0.0, &mut u, rhs);
 //! ```
 
-pub mod traits;
-pub mod symplectic;
 pub mod explicit;
+pub mod imex;
 pub mod implicit;
 pub mod structural;
-pub mod imex;
+pub mod symplectic;
+pub mod traits;
 
-pub use traits::{TimeStepper, ImplicitTimeStepper, HamiltonianSystem, ImexOperator};
-pub use symplectic::{VerletStepper, LeapfrogStepper, Yoshida4Stepper, SIAVSolver};
-pub use explicit::{ForwardEuler, Rk4, Rk45, AdamsBashforthMoulton, AbmState};
-pub use implicit::{ImplicitEuler, Sdirk2, Bdf2, Bdf2State, CrankNicolson};
-pub use structural::{Newmark, NewmarkState, GeneralizedAlpha, GeneralizedAlphaState,
-                     GeneralizedAlpha2, GeneralizedAlpha2State, SecondOrderSolver,
-                     CentralDifferenceExplicit, ExplicitState};
-pub use imex::{ImexTimeStepper, ImexArk3, ImexRk3, ImexEuler, ImexSsp2};
+pub use explicit::{AbmState, AdamsBashforthMoulton, ForwardEuler, Rk4, Rk45};
+pub use imex::{
+    ImexArk3, ImexDirkRk3, ImexEuler, ImexExpImplEuler, ImexRk2_222, ImexRk2_232, ImexRk3,
+    ImexSsp2, ImexTimeStepper,
+};
+pub use implicit::{Bdf2, Bdf2State, CrankNicolson, ImplicitEuler, Sdirk2};
+pub use structural::{
+    CentralDifferenceExplicit, ExplicitState, GeneralizedAlpha, GeneralizedAlpha2,
+    GeneralizedAlpha2State, GeneralizedAlphaState, Newmark, NewmarkState, SecondOrderSolver,
+};
+pub use symplectic::{LeapfrogStepper, SIAVSolver, VerletStepper, Yoshida4Stepper};
+pub use traits::{HamiltonianSystem, ImexOperator, ImplicitTimeStepper, TimeStepper};

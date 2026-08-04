@@ -1,579 +1,516 @@
-//! mfem_ex41_imex - FEM advection-diffusion with IMEX time integration.
+//! mfem_ex41_imex — 1:1 port of MFEM Example 41.
 //!
-//! Semi-discrete model on H1 space:
-//!   M du/dt + C u + K u = 0
-//! where
-//!   C: convection matrix from (b · grad u, v)
-//!   K: diffusion stiffness from kappa * (grad u, grad v)
+//! Solves the time-dependent advection-diffusion equation
+//! `du/dt + v·grad(u) − a·div(grad(u)) = 0` on a (possibly geometrically
+//! periodic) mesh, using a Discontinuous Galerkin (DG) discretization
+//! (`NonconservativeDGTraceIntegrator` + `DGDiffusionIntegrator`) and an IMEX
+//! ODE time integrator (`M du/dt + (C + K) u = 0`; `-s 64` = IMEX_DIRK_RK3).
 //!
-//! IMEX split:
-//!   explicit:  f_E(u) = -M^{-1} C u
-//!   implicit:  f_I(u) = -M^{-1} K u
-//!
-//! This example compares:
-//!   - IMEX Euler
-//!   - IMEX SSP2
-//!   - IMEX RK3 (fixed-step)
-//!   - IMEX ARK3 (adaptive)
-//! against a fine-step RK4 reference trajectory.
+//! Defaults match MFEM ex41: `-m ../data/periodic-square.mesh -p 0 -r 2 -o 3
+//! -s 64 -tf 10 -dt 0.01 -dc 0.01` (DG).  `-cg` switches to continuous
+//! Galerkin (H1).  The `-s` ODE-solver selector is honoured for 61 (IMEX
+//! Euler), 62 (IMEXRK2(2,2,2)), 63 (IMEXRK2(2,3,2)) and 64 (IMEX_DIRK_RK3,
+//! default); only 64 is implemented as a bit-for-bit MFEM port.
 
 use std::f64::consts::PI;
 
 use fem_assembly::{
     Assembler,
     coefficient::ConstantVectorCoeff,
-    dg::dg_advection::{
-        assemble_dg_interior_faces, DGAdvectionIntegrator, SipDgDiffusion,
-    },
-    interior_faces::InteriorFaceList,
+    dg::dg_imex::{assemble_ex41_bdr_faces, assemble_ex41_interior_faces, build_bdr_face_locs, build_face_locs},
     standard::{ConvectionIntegrator, DiffusionIntegrator, MassIntegrator},
 };
-use fem_io::{read_msh_file, mfem::read_mfem_file};
-use fem_linalg::{spadd, CooMatrix, CsrMatrix};
-use fem_mesh::{Mesh, amr::refine_uniform};
+use fem_core::types::DofId;
+use fem_io::mfem::read_mfem_file;
+use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_mesh::{Mesh, amr::refine_uniform, topology::MeshTopology};
 use fem_solver::{
-    solve_cg,
-    ImexArk3, ImexOperator, ImexTimeStepper,
-    Rk4, TimeStepper,
-    SolverConfig,
+    ImexDirkRk3, ImexExpImplEuler, ImexOperator, ImexRk2_222, ImexRk2_232, SolverConfig,
+    solve_pcg_blockilu, solve_pcg_dsmoother,
 };
-use fem_space::{
-    H1Space, L2Space,
-    fe_space::FESpace,
-    constraints::{apply_dirichlet, boundary_dofs},
-};
+use fem_space::{L2Basis, L2Space, H1Space, fe_space::FESpace};
 
-#[derive(Clone)]
-struct AdvectionDiffusionSplit {
-    minv_c: CsrMatrix<f64>,
-    minv_k: CsrMatrix<f64>,
-    bc_dofs: Vec<u32>,
-}
-
-struct MethodResult {
-    final_time: f64,
-    error: f64,
-    solution_norm: f64,
-    checksum: f64,
-    dt_last: Option<f64>,
-}
-
-struct SolveResult {
-    n: usize,
-    dt: f64,
-    t_end: f64,
-    kappa: f64,
-    vx: f64,
-    vy: f64,
-    n_dofs: usize,
-    reference_norm: f64,
-    euler: MethodResult,
-    ssp2: MethodResult,
-    rk3: MethodResult,
-    ark3: MethodResult,
-}
-
-impl ImexOperator for AdvectionDiffusionSplit {
-    fn explicit(&self, _t: f64, u: &[f64], out: &mut [f64]) {
-        self.minv_c.spmv(u, out);
-        for v in out.iter_mut() {
-            *v = -*v;
-        }
-        for &d in &self.bc_dofs {
-            out[d as usize] = 0.0;
-        }
-    }
-
-    fn implicit(&self, _t: f64, u: &[f64], out: &mut [f64]) {
-        self.minv_k.spmv(u, out);
-        for v in out.iter_mut() {
-            *v = -*v;
-        }
-        for &d in &self.bc_dofs {
-            out[d as usize] = 0.0;
-        }
-    }
-
-    fn jac_implicit(&self, _t: f64, _u: &[f64]) -> CsrMatrix<f64> {
-        scale_csr(&self.minv_k, -1.0)
-    }
-}
-
-fn main() {
-    let args = parse_args();
-
-    let base = match args.mesh_file {
-        Some(ref p) => {
-            // Try MFEM format first, then GMSH
-            if let Ok(mfem) = read_mfem_file(p) {
-                mfem.mesh2d.expect("expected 2D mesh from MFEM file")
-            } else {
-                let msh = read_msh_file(p).expect("failed to read mesh file");
-                msh.into_2d().expect("expected 2D mesh")
-            }
-        }
-        None => Mesh::<2>::unit_square_tri(args.n),
-    };
-
-    // Apply uniform refinement to match C++ ex41's ref_levels
-    let mesh = if args.ref_levels > 0 {
-        let mut m = base;
-        for _ in 0..args.ref_levels {
-            m = refine_uniform(&m);
-        }
-        m
-    } else {
-        base
-    };
-
-    println!("=== mfem_ex41_imex: FEM advection-diffusion with IMEX ===");
-    println!("  mesh n={}, dt={}, T={}", args.n, args.dt, args.t_end);
-    println!("  kappa={}, velocity=({}, {})", args.kappa, args.vx, args.vy);
-
-    let result = solve_case(mesh, &args);
-
-    println!("  confirmed dofs={}", result.n_dofs);
-    println!(
-        "  params: n={}, dt={}, T={}, kappa={}, velocity=({}, {})",
-        result.n,
-        result.dt,
-        result.t_end,
-        result.kappa,
-        result.vx,
-        result.vy,
-    );
-    println!("  ||u_ref||_2 = {:.3e}", result.reference_norm);
-    print_method("Euler", &result.euler);
-    print_method("SSP2", &result.ssp2);
-    print_method("RK3", &result.rk3);
-    print_method("ARK3", &result.ark3);
-
-    assert!(
-        result.euler.error.is_finite()
-            && result.ssp2.error.is_finite()
-            && result.rk3.error.is_finite()
-            && result.ark3.error.is_finite(),
-        "non-finite error detected"
-    );
-    assert!(
-        result.rk3.error <= result.euler.error,
-        "RK3 should be more accurate than Euler: rk3={:.3e}, euler={:.3e}",
-        result.rk3.error,
-        result.euler.error,
-    );
-    assert!(
-        result.ark3.error <= result.rk3.error * 1.2,
-        "ARK3 should be comparable to or better than RK3: ark3={:.3e}, rk3={:.3e}",
-        result.ark3.error,
-        result.rk3.error,
-    );
-
-    println!("  PASS");
-}
-
-fn solve_case(mesh: Mesh<2>, args: &Args) -> SolveResult {
-    let qo = 3u8;
-
-    if args.use_dg {
-        // ── DG (discontinuous Galerkin) formulation ──
-        let order = args.order;
-        let space = L2Space::new(mesh.clone(), order);
-        let n_dofs = space.n_dofs();
-        let ifl = InteriorFaceList::build(space.mesh());
-
-        // Volume terms
-        let m = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo);
-        let s_vol = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: args.kappa }], qo);
-        let k_vol = Assembler::assemble_bilinear(
-            &space,
-            &[&ConvectionIntegrator { velocity: ConstantVectorCoeff(vec![args.vx, args.vy]) }],
-            qo,
-        );
-
-        // Interior face terms
-        let vel = ConstantVectorCoeff(vec![args.vx, args.vy]);
-        let mut k_coo = CooMatrix::new(n_dofs, n_dofs);
-        assemble_dg_interior_faces(&mut k_coo, space.mesh(), &space, &ifl, order, qo,
-            &DGAdvectionIntegrator { velocity: vel });
-        let k_face = k_coo.into_csr();
-
-        let mut s_coo = CooMatrix::new(n_dofs, n_dofs);
-        let penalty = 4.0; // (p+1)^2 = 4 for p=1
-        assemble_dg_interior_faces(&mut s_coo, space.mesh(), &space, &ifl, order, qo,
-            &SipDgDiffusion { kappa: args.kappa, penalty });
-        let s_face = s_coo.into_csr();
-
-        let k = spadd(&k_vol, &k_face);
-        let s = spadd(&s_vol, &s_face);
-
-        let solve_cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1200, verbose: false, ..SolverConfig::default() };
-        let minv_k = mass_inverse_times(&m, &s, &solve_cfg);
-        let minv_c = mass_inverse_times(&m, &k, &solve_cfg);
-
-        let split = AdvectionDiffusionSplit {
-            minv_c,
-            minv_k,
-            bc_dofs: vec![],
-        };
-
-        let n = n_dofs;
-        let u0 = vec![1.0; n];
-
-        let u_ref = rk4_reference(&split, &u0, args.t_end, args.dt.min(1.0e-4));
-        let reference_norm = vector_norm(&u_ref);
-
-        let imex_driver = ImexTimeStepper;
-        let mut u_euler = u0.clone();
-        let t_e = imex_driver.integrate_euler(&split, 0.0, args.t_end, &mut u_euler, args.dt);
-        let mut u_ssp2 = u0.clone();
-        let t_s = imex_driver.integrate_ssp2(&split, 0.0, args.t_end, &mut u_ssp2, args.dt);
-        let mut u_rk3 = u0.clone();
-        let t_r = imex_driver.integrate_rk3(&split, 0.0, args.t_end, &mut u_rk3, args.dt);
-        let mut u_ark3 = u0.clone();
-        let ark3 = ImexArk3 { rtol: 1e-6, atol: 1e-9, dt_min: 1e-10, dt_max: args.dt, ..Default::default() };
-        let (t_a, dt_last) = imex_driver.integrate_ark3(&split, 0.0, args.t_end, &mut u_ark3, args.dt, &ark3);
-
-        return SolveResult {
-            n: args.n, dt: args.dt, t_end: args.t_end, kappa: args.kappa,
-            vx: args.vx, vy: args.vy, n_dofs, reference_norm,
-            euler: build_method_result(&u_euler, &u_ref, t_e, None),
-            ssp2: build_method_result(&u_ssp2, &u_ref, t_s, None),
-            rk3: build_method_result(&u_rk3, &u_ref, t_r, None),
-            ark3: build_method_result(&u_ark3, &u_ref, t_a, Some(dt_last)),
-        };
-    }
-
-    // ── CG (continuous Galerkin) formulation ──
-    let space = H1Space::new(mesh, args.order);
-    let n_dofs = space.n_dofs();
-
-    let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo);
-    let diff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: args.kappa }], qo);
-    let conv = Assembler::assemble_bilinear(
-        &space,
-        &[&ConvectionIntegrator { velocity: ConstantVectorCoeff(vec![args.vx, args.vy]) }],
-        qo,
-    );
-
-    let dm = space.dof_manager();
-    let bnd = boundary_dofs(space.mesh(), dm, &space.mesh().unique_boundary_tags());
-
-    let mut m_bc = mass.clone();
-    let mut k_bc = diff.clone();
-    let mut c_bc = conv.clone();
-    let mut dummy = vec![0.0f64; n_dofs];
-    let vals = vec![0.0f64; bnd.len()];
-    apply_dirichlet(&mut m_bc, &mut dummy, &bnd, &vals);
-    apply_dirichlet(&mut k_bc, &mut dummy, &bnd, &vals);
-    apply_dirichlet(&mut c_bc, &mut dummy, &bnd, &vals);
-
-    let solve_cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1200, verbose: false, ..SolverConfig::default() };
-
-    let minv_k = mass_inverse_times(&m_bc, &k_bc, &solve_cfg);
-    let minv_c = mass_inverse_times(&m_bc, &c_bc, &solve_cfg);
-
-    let split = AdvectionDiffusionSplit {
-        minv_c,
-        minv_k,
-        bc_dofs: bnd.clone(),
-    };
-
-    let u0 = initial_condition(dm, n_dofs, &bnd);
-
-    let u_ref = rk4_reference(&split, &u0, args.t_end, args.dt.min(1.0e-4));
-    let reference_norm = vector_norm(&u_ref);
-
-    let imex_driver = ImexTimeStepper;
-
-    let mut u_euler = u0.clone();
-    let t_e = imex_driver.integrate_euler(&split, 0.0, args.t_end, &mut u_euler, args.dt);
-
-    let mut u_ssp2 = u0.clone();
-    let t_s = imex_driver.integrate_ssp2(&split, 0.0, args.t_end, &mut u_ssp2, args.dt);
-
-    let mut u_rk3 = u0.clone();
-    let t_r = imex_driver.integrate_rk3(&split, 0.0, args.t_end, &mut u_rk3, args.dt);
-
-    let mut u_ark3 = u0.clone();
-    let ark3 = ImexArk3 { rtol: 1e-6, atol: 1e-9, dt_min: 1e-10, dt_max: args.dt, ..Default::default() };
-    let (t_a, dt_last) = imex_driver.integrate_ark3(&split, 0.0, args.t_end, &mut u_ark3, args.dt, &ark3);
-
-    SolveResult {
-        n: args.n,
-        dt: args.dt,
-        t_end: args.t_end,
-        kappa: args.kappa,
-        vx: args.vx,
-        vy: args.vy,
-        n_dofs,
-        reference_norm,
-        euler: build_method_result(&u_euler, &u_ref, t_e, None),
-        ssp2: build_method_result(&u_ssp2, &u_ref, t_s, None),
-        rk3: build_method_result(&u_rk3, &u_ref, t_r, None),
-        ark3: build_method_result(&u_ark3, &u_ref, t_a, Some(dt_last)),
-    }
-}
-
-fn rk4_reference(op: &AdvectionDiffusionSplit, u0: &[f64], t_end: f64, dt_ref: f64) -> Vec<f64> {
-    let rhs = |t: f64, u: &[f64], out: &mut [f64]| {
-        let mut fe = vec![0.0f64; u.len()];
-        let mut fi = vec![0.0f64; u.len()];
-        op.explicit(t, u, &mut fe);
-        op.implicit(t, u, &mut fi);
-        for i in 0..u.len() {
-            out[i] = fe[i] + fi[i];
-        }
-    };
-
-    let rk4 = Rk4;
-    let mut u = u0.to_vec();
-    let mut t = 0.0;
-    while t < t_end - 1e-14 {
-        let h = dt_ref.min(t_end - t);
-        rk4.step(t, h, &mut u, &rhs);
-        t += h;
-    }
-    u
-}
-
-fn initial_condition(dm: &fem_space::DofManager, n: usize, bnd: &[u32]) -> Vec<f64> {
-    let mut u: Vec<f64> = (0..n)
-        .map(|i| {
-            let x = dm.dof_coord(i as u32);
-            (PI * x[0]).sin() * (PI * x[1]).sin()
-        })
-        .collect();
-    for &d in bnd {
-        u[d as usize] = 0.0;
-    }
-    u
-}
-
-fn l2_error(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len().max(1) as f64;
-    let mut s = 0.0;
-    for i in 0..a.len() {
-        let d = a[i] - b[i];
-        s += d * d;
-    }
-    (s / n).sqrt()
-}
-
-fn vector_norm(values: &[f64]) -> f64 {
-    values.iter().map(|value| value * value).sum::<f64>().sqrt()
-}
-
-fn checksum(values: &[f64]) -> f64 {
-    values
-        .iter()
-        .enumerate()
-        .map(|(i, value)| (i as f64 + 1.0) * value)
-        .sum::<f64>()
-}
-
-fn build_method_result(solution: &[f64], reference: &[f64], final_time: f64, dt_last: Option<f64>) -> MethodResult {
-    MethodResult {
-        final_time,
-        error: l2_error(solution, reference),
-        solution_norm: vector_norm(solution),
-        checksum: checksum(solution),
-        dt_last,
-    }
-}
-
-fn print_method(name: &str, result: &MethodResult) {
-    println!(
-        "  {name}: t_final={:.6}, err={:.3e}, ||u||_2={:.3e}, checksum={:.8e}",
-        result.final_time,
-        result.error,
-        result.solution_norm,
-        result.checksum,
-    );
-    if let Some(dt_last) = result.dt_last {
-        println!("    {name} last dt = {:.3e}", dt_last);
-    }
-}
-
-fn mass_inverse_times(m: &CsrMatrix<f64>, a: &CsrMatrix<f64>, cfg: &SolverConfig) -> CsrMatrix<f64> {
-    let n = m.nrows;
-
-    // Build column-wise RHS vectors from CSR A.
-    let mut cols: Vec<Vec<f64>> = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
-            let j = a.col_idx[p] as usize;
-            cols[j][i] = a.values[p];
-        }
-    }
-
-    let mut coo = CooMatrix::<f64>::new(n, n);
-
-    for j in 0..n {
-        let rhs = &cols[j];
-        let mut x = vec![0.0f64; n];
-        solve_cg(m, rhs, &mut x, cfg).expect("mass_inverse_times: CG solve failed");
-        for (i, &v) in x.iter().enumerate() {
-            if v.abs() > 1e-14 {
-                coo.add(i, j, v);
-            }
-        }
-    }
-
-    coo.into_csr()
-}
-
-fn scale_csr(mat: &CsrMatrix<f64>, alpha: f64) -> CsrMatrix<f64> {
-    CsrMatrix {
-        nrows: mat.nrows,
-        ncols: mat.ncols,
-        row_ptr: mat.row_ptr.clone(),
-        col_idx: mat.col_idx.clone(),
-        values: mat.values.iter().map(|&v| alpha * v).collect(),
-    }
-}
+// ─── Coefficient functions (problem 0..3) ──────────────────────────────────
 
 struct Args {
-    n: usize,
+    mesh_file: String,
+    problem: usize,
     ref_levels: usize,
-    order: u8,
+    order: usize,
+    ode_solver_type: usize,
+    t_final: f64,
     dt: f64,
-    t_end: f64,
-    kappa: f64,
-    vx: f64,
-    vy: f64,
-    mesh_file: Option<String>,
-    use_dg: bool,
+    diffusion_term: f64,
+    cg: bool,
+    vis_steps: usize,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
-        n: 8,
-        ref_levels: 0,
+        mesh_file: "data/periodic-square.mesh".into(),
+        problem: 0,
+        ref_levels: 2,
         order: 3,
+        ode_solver_type: 64,
+        t_final: 10.0,
         dt: 0.01,
-        t_end: 10.0,
-        kappa: 0.01,
-        vx: 1.0,
-        vy: 0.3,
-        mesh_file: None,
-        use_dg: true,
+        diffusion_term: 0.01,
+        cg: false,
+        vis_steps: 50,
     };
-
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
+        let mut val = || it.next().unwrap_or_default();
         match arg.as_str() {
-            "-m" | "--mesh" => a.mesh_file = Some(it.next().unwrap_or("".into())),
-            "--n" => a.n = it.next().unwrap_or("8".into()).parse().unwrap_or(8),
-            "-r" | "--refine" => a.ref_levels = it.next().unwrap_or("0".into()).parse().unwrap_or(0),
-            "-o" | "--order" => a.order = it.next().unwrap_or("3".into()).parse().unwrap_or(3),
-            "--dt" => a.dt = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
-            "--T" | "--t-final" | "-tf" => a.t_end = it.next().unwrap_or("10.0".into()).parse().unwrap_or(10.0),
-            "--kappa" | "-dc" => a.kappa = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
-            "--vx" => a.vx = it.next().unwrap_or("1.0".into()).parse().unwrap_or(1.0),
-            "--vy" => a.vy = it.next().unwrap_or("0.3".into()).parse().unwrap_or(0.3),
-            "-dg" | "--discontinuous-galerkin" => a.use_dg = true,
-            "-cg" | "--continuous-galerkin" => a.use_dg = false,
+            "-m" | "--mesh" => a.mesh_file = val(),
+            "-p" | "--problem" => a.problem = val().parse().unwrap_or(a.problem),
+            "-r" | "--refine" => a.ref_levels = val().parse().unwrap_or(a.ref_levels),
+            "-o" | "--order" => a.order = val().parse().unwrap_or(a.order),
+            "-s" | "--ode-solver" => a.ode_solver_type = val().parse().unwrap_or(a.ode_solver_type),
+            "-tf" | "--t-final" => a.t_final = val().parse().unwrap_or(a.t_final),
+            "-dt" | "--time-step" => a.dt = val().parse().unwrap_or(a.dt),
+            "-dc" | "--diffusion-coeff" => a.diffusion_term = val().parse().unwrap_or(a.diffusion_term),
+            "-vs" | "--visualization-steps" => a.vis_steps = val().parse().unwrap_or(a.vis_steps),
+            "-cg" | "--continuous-galerkin" => a.cg = true,
+            "-dg" | "--discontinuous-galerkin" => a.cg = false,
             _ => {}
         }
     }
     a
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn solve(args: &Args) -> SolveResult {
-        solve_case(Mesh::<2>::unit_square_tri(args.n), args)
+/// Velocity coefficient (MFEM `velocity_function`).
+fn velocity_function(problem: usize, bb_min: &[f64], bb_max: &[f64], x: &[f64], v: &mut [f64]) {
+    let dim = x.len();
+    let mut xr = vec![0.0; dim];
+    for i in 0..dim {
+        let center = (bb_min[i] + bb_max[i]) * 0.5;
+        xr[i] = 2.0 * (x[i] - center) / (bb_max[i] - bb_min[i]);
     }
-
-    #[test]
-    fn ex41_imex_default_case_preserves_expected_method_ordering() {
-        let args = Args { n: 8, ref_levels: 0, order: 1, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false };
-        let result = solve(&args);
-        assert_eq!(result.n_dofs, 81);
-        assert!((result.euler.final_time - result.t_end).abs() < 1.0e-12);
-        assert!((result.ark3.final_time - result.t_end).abs() < 1.0e-12);
-        assert!(result.euler.error < 8.0e-3, "Euler error too large: {}", result.euler.error);
-        assert!(result.ssp2.error < result.euler.error, "SSP2 should improve on Euler in the default case");
-        assert!(result.rk3.error < 1.0e-4, "RK3 should track the reference closely: {}", result.rk3.error);
-        assert!(result.ark3.error < result.rk3.error, "ARK3 should beat RK3 in the default case");
-    }
-
-    #[test]
-    fn ex41_imex_smaller_dt_improves_euler_and_rk3_accuracy() {
-        let coarse = solve(&Args { n: 8, ref_levels: 0, order: 1, dt: 0.02, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
-        let fine   = solve(&Args { n: 8, ref_levels: 0, order: 1, dt: 0.005, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
-        assert!(fine.euler.error < coarse.euler.error * 0.5,
-            "Euler refinement gain too small: coarse={} fine={}", coarse.euler.error, fine.euler.error);
-        assert!(fine.rk3.error < coarse.rk3.error * 0.1,
-            "RK3 refinement gain too small: coarse={} fine={}", coarse.rk3.error, fine.rk3.error);
-        assert!(fine.ark3.error <= coarse.ark3.error * 1.1,
-            "adaptive ARK3 should remain at least as accurate when the user dt shrinks: coarse={} fine={}",
-            coarse.ark3.error,
-            fine.ark3.error);
-    }
-
-    #[test]
-    fn ex41_imex_pure_diffusion_limit_favors_high_order_methods() {
-        let result = solve(&Args { n: 8, ref_levels: 0, order: 1, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0, mesh_file: None, use_dg: false });
-        assert!(result.euler.error < 5.0e-5, "Euler error too large in pure diffusion: {}", result.euler.error);
-        assert!(result.ssp2.error < result.euler.error * 1.0e-2,
-            "SSP2 should sharply improve in pure diffusion: euler={} ssp2={}", result.euler.error, result.ssp2.error);
-        assert!(result.rk3.error < 1.0e-8, "RK3 should be nearly exact in pure diffusion: {}", result.rk3.error);
-        assert!(result.ark3.error < 1.0e-8, "ARK3 should be nearly exact in pure diffusion: {}", result.ark3.error);
-    }
-
-    #[test]
-    fn ex41_imex_stronger_diffusion_keeps_high_order_schemes_accurate() {
-        let result = solve(&Args { n: 8, ref_levels: 0, order: 1, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
-        assert!(result.euler.error.is_finite() && result.ssp2.error.is_finite());
-        assert!(result.rk3.error < result.euler.error * 1.0e-2,
-            "RK3 should remain far more accurate under stronger diffusion: euler={} rk3={}", result.euler.error, result.rk3.error);
-        assert!(result.ark3.error < 1.0e-6,
-            "ARK3 error too large under stronger diffusion: {}", result.ark3.error);
-        assert!(result.ark3.dt_last.unwrap_or(result.dt) <= result.dt + 1.0e-12);
-    }
-
-    #[test]
-    fn ex41_imex_dof_count_matches_p1_h1_formula() {
-        for &n in &[6usize, 8usize, 10usize] {
-            let result = solve(&Args { n, ref_levels: 0, order: 1, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
-            assert_eq!(result.n_dofs, (n + 1) * (n + 1));
+    match problem {
+        0 => {
+            match dim {
+                1 => v[0] = 1.0,
+                2 => {
+                    v[0] = (2.0f64 / 3.0f64).sqrt();
+                    v[1] = (1.0f64 / 3.0f64).sqrt();
+                }
+                3 => {
+                    v[0] = (3.0f64 / 6.0f64).sqrt();
+                    v[1] = (2.0f64 / 6.0f64).sqrt();
+                    v[2] = (1.0f64 / 6.0f64).sqrt();
+                }
+                _ => {}
+            }
         }
-    }
-
-    #[test]
-    fn ex41_imex_higher_kappa_decays_faster_in_pure_diffusion() {
-        let low_kappa  = solve(&Args { n: 8, ref_levels: 0, order: 1, dt: 0.01, t_end: 0.2, kappa: 0.01, vx: 0.0, vy: 0.0, mesh_file: None, use_dg: false });
-        let high_kappa = solve(&Args { n: 8, ref_levels: 0, order: 1, dt: 0.01, t_end: 0.2, kappa: 0.05, vx: 0.0, vy: 0.0, mesh_file: None, use_dg: false });
-        assert!(low_kappa.rk3.solution_norm > 0.0 && high_kappa.rk3.solution_norm > 0.0);
-        assert!(high_kappa.rk3.solution_norm < low_kappa.rk3.solution_norm,
-            "higher kappa should increase decay: low={} high={}",
-            low_kappa.rk3.solution_norm,
-            high_kappa.rk3.solution_norm);
-    }
-
-    #[test]
-    fn ex41_imex_zero_final_time_is_noop_for_all_methods() {
-        let result = solve(&Args { n: 8, ref_levels: 0, order: 1, dt: 0.01, t_end: 0.0, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
-        assert!((result.euler.final_time - 0.0).abs() < 1.0e-14);
-        assert!((result.ssp2.final_time - 0.0).abs() < 1.0e-14);
-        assert!((result.rk3.final_time - 0.0).abs() < 1.0e-14);
-        assert!((result.ark3.final_time - 0.0).abs() < 1.0e-14);
-        assert!(result.euler.error < 1.0e-14);
-        assert!(result.ssp2.error < 1.0e-14);
-        assert!(result.rk3.error < 1.0e-14);
-        assert!(result.ark3.error < 1.0e-14);
-    }
-
-    #[test]
-    fn ex41_imex_ark3_last_dt_is_positive_and_bounded() {
-        let result = solve(&Args { n: 8, ref_levels: 0, order: 1, dt: 0.01, t_end: 0.215, kappa: 0.01, vx: 1.0, vy: 0.3, mesh_file: None, use_dg: false });
-        let dt_last = result.ark3.dt_last.expect("ARK3 should report last dt");
-        assert!(dt_last > 0.0, "ARK3 last dt must be positive");
-        assert!(dt_last <= result.dt + 1.0e-12,
-            "ARK3 last dt must not exceed user dt: last={} dt={}", dt_last, result.dt);
+        1 | 2 => {
+            let w = PI / 2.0;
+            match dim {
+                1 => v[0] = 1.0,
+                2 => {
+                    v[0] = w * xr[1];
+                    v[1] = -w * xr[0];
+                }
+                3 => {
+                    v[0] = w * xr[1];
+                    v[1] = -w * xr[0];
+                    v[2] = 0.0;
+                }
+                _ => {}
+            }
+        }
+        3 => {
+            let w = PI / 2.0;
+            let d = (xr[0] + 1.0).max(0.0) * (1.0 - xr[0]).max(0.0)
+                * (xr[1] + 1.0).max(0.0) * (1.0 - xr[1]).max(0.0);
+            let d = d * d;
+            match dim {
+                1 => v[0] = 1.0,
+                2 => {
+                    v[0] = d * w * xr[1];
+                    v[1] = -d * w * xr[0];
+                }
+                3 => {
+                    v[0] = d * w * xr[1];
+                    v[1] = -d * w * xr[0];
+                    v[2] = 0.0;
+                }
+                _ => {}
+            }
+        }
+        _ => {}
     }
 }
 
+/// Initial condition (MFEM `u0_function`).
+fn u0_function(problem: usize, bb_min: &[f64], bb_max: &[f64], x: &[f64]) -> f64 {
+    let dim = x.len();
+    let mut xr = vec![0.0; dim];
+    for i in 0..dim {
+        let center = (bb_min[i] + bb_max[i]) * 0.5;
+        xr[i] = 2.0 * (x[i] - center) / (bb_max[i] - bb_min[i]);
+    }
+    match problem {
+        0 | 1 => match dim {
+            1 => (-40.0 * (xr[0] - 0.5).powi(2)).exp(),
+            _ => {
+                let rx = 0.45;
+                let ry = 0.25;
+                let cx = 0.0;
+                let cy = -0.2;
+                let w = 10.0;
+                let (mut rx, mut ry) = (rx, ry);
+                if dim == 3 {
+                    let s = 1.0 + 0.25 * (2.0 * PI * xr[2]).cos();
+                    rx *= s;
+                    ry *= s;
+                }
+                (libm::erfc(w * (xr[0] - cx - rx)) * libm::erfc(-w * (xr[0] - cx + rx))
+                    * libm::erfc(w * (xr[1] - cy - ry)) * libm::erfc(-w * (xr[1] - cy + ry)))
+                    / 16.0
+            }
+        },
+        2 => {
+            let rho = (xr[0] * xr[0] + xr[1] * xr[1]).sqrt();
+            let phi = xr[1].atan2(xr[0]);
+            (PI * rho).sin().powi(2) * (3.0 * phi).sin()
+        }
+        3 => {
+            let f = PI;
+            (f * xr[0]).sin() * (f * xr[1]).sin()
+        }
+        _ => 0.0,
+    }
+}
+
+// ─── Evolution operator (MFEM IMEX_Evolution) ─────────────────────────────
+
+/// `M du/dt = K u - S u + b`, explicit part `M⁻¹K u`, implicit part solves
+/// `(M + dt·S) k = -S·u` — bit-for-bit MFEM `IMEX_Evolution`.
+struct ImexEvolution {
+    m: CsrMatrix<f64>,
+    k: CsrMatrix<f64>,
+    s: CsrMatrix<f64>,
+}
+
+impl ImexEvolution {
+    fn spmv(csr: &CsrMatrix<f64>, x: &[f64], out: &mut [f64]) {
+        csr.spmv(x, out);
+    }
+}
+
+impl ImexOperator for ImexEvolution {
+    fn explicit(&self, _t: f64, u: &[f64], out: &mut [f64]) {
+        // Mult1: y = M^{-1} (K u + b), b = 0.  CG + DSmoother (rtol 1e-9,
+        // max 100, iterative_mode = false).
+        let n = u.len();
+        let mut kx = vec![0.0f64; n];
+        Self::spmv(&self.k, u, &mut kx);
+        let cfg = SolverConfig {
+            rtol: 1e-9,
+            atol: 0.0,
+            max_iter: 100,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        solve_pcg_dsmoother(&self.m, &kx, out, &cfg).expect("Mult1 CG solve failed");
+    }
+
+    fn implicit(&self, _t: f64, u: &[f64], out: &mut [f64]) {
+        // Not used by ImexDirkRk3 (which calls implicit_solve directly), but
+        // provided for completeness: f_I = -M^{-1} S u.
+        let n = u.len();
+        let mut sx = vec![0.0f64; n];
+        Self::spmv(&self.s, u, &mut sx);
+        let cfg = SolverConfig {
+            rtol: 1e-9,
+            atol: 0.0,
+            max_iter: 100,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        let mut rhs = vec![0.0f64; n];
+        for i in 0..n {
+            rhs[i] = -sx[i];
+        }
+        solve_pcg_dsmoother(&self.m, &rhs, out, &cfg).expect("implicit CG solve failed");
+    }
+
+    fn jac_implicit(&self, _t: f64, _u: &[f64]) -> CsrMatrix<f64> {
+        // Not needed by the ex41 operator (implicit_solve is overridden).
+        let n = self.m.nrows;
+        let mut coo = CooMatrix::new(n, n);
+        for i in 0..n {
+            coo.add(i, i, 0.0);
+        }
+        coo.into_csr()
+    }
+
+    fn implicit_solve(&self, dt: f64, x: &[f64], k: &mut [f64]) {
+        // ImplicitSolve2: (M + dt·S) k = -S·x, CG + BlockILU (rtol 1e-9,
+        // max 100, iterative_mode = false).
+        let n = x.len();
+        let mut sx = vec![0.0f64; n];
+        Self::spmv(&self.s, x, &mut sx);
+        for i in 0..n {
+            sx[i] = -sx[i];
+        }
+        // A = M + dt·S — MFEM builds it as `A = S; A *= dt; A += M`, i.e. the
+        // per-entry summation order is `dt*S + M` (S first, then M).  Mirror
+        // that order for bit-identical values.
+        let mut a_coo = CooMatrix::new(n, n);
+        for i in 0..n {
+            for p in self.s.row_ptr[i]..self.s.row_ptr[i + 1] {
+                a_coo.add(i, self.s.col_idx[p] as usize, dt * self.s.values[p]);
+            }
+            for p in self.m.row_ptr[i]..self.m.row_ptr[i + 1] {
+                a_coo.add(i, self.m.col_idx[p] as usize, self.m.values[p]);
+            }
+        }
+        let a: CsrMatrix<f64> = a_coo.into_csr();
+        let cfg = SolverConfig {
+            rtol: 1e-9,
+            atol: 0.0,
+            max_iter: 100,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        solve_pcg_blockilu(&a, &sx, k, &cfg, 16).expect("ImplicitSolve2 CG solve failed");
+    }
+}
+
+// ─── main ──────────────────────────────────────────────────────────────────
+
+fn main() {
+    let args = parse_args();
+
+    // 2. Read the mesh (geometrically periodic meshes supported).
+    let mf = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");
+    let base = mf.mesh2d.expect("expected a 2D mesh");
+
+    // 4. Refine the mesh.
+    let mut mesh = base;
+    for _ in 0..args.ref_levels {
+        mesh = refine_uniform(&mesh);
+    }
+    // NURBS meshes would call SetCurvature(max(order,1)) here; the reader
+    // does not support NURBS, so nothing to do.
+    let dim = 2usize;
+    let _ = dim;
+
+    // Bounding box (MFEM GetBoundingBox(bb_min, bb_max, max(order,1))).
+    let mut bb_min = vec![f64::INFINITY; 2];
+    let mut bb_max = vec![f64::NEG_INFINITY; 2];
+    for e in 0..mesh.n_elements() {
+        let gn = mesh.geometry_nodes(e as u32);
+        for &n in gn {
+            let c = mesh.geom_coords_of(n);
+            for d in 0..2 {
+                bb_min[d] = bb_min[d].min(c[d]);
+                bb_max[d] = bb_max[d].max(c[d]);
+            }
+        }
+    }
+
+    // 5. FE space.
+    let kappa = (args.order + 1) * (args.order + 1);
+    let n_dofs;
+    let mut u: Vec<f64>;
+    let m: CsrMatrix<f64>;
+    let k: CsrMatrix<f64>;
+    let s: CsrMatrix<f64>;
+    let dof_coords: Vec<f64>;
+
+    if args.cg {
+        // Continuous Galerkin (-cg): H1 space, no face integrators.
+        let space = H1Space::new(mesh, args.order as u8);
+        n_dofs = space.n_dofs();
+        let qo = 2 * args.order as u8;
+        m = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo);
+        s = Assembler::assemble_bilinear(
+            &space,
+            &[&DiffusionIntegrator { kappa: args.diffusion_term }],
+            qo,
+        );
+        let vel = {
+            let bb_min = bb_min.clone();
+            let bb_max = bb_max.clone();
+            let problem = args.problem;
+            fem_assembly::postproc::coefficient::FnVectorCoeff(move |x: &[f64], out: &mut [f64]| {
+                velocity_function(problem, &bb_min, &bb_max, x, out);
+            })
+        };
+        let k_vol = Assembler::assemble_bilinear(
+            &space,
+            &[&ConvectionIntegrator { velocity: vel }],
+            qo,
+        );
+        // K = alpha * Convection with alpha = -1.
+        let mut k_coo = CooMatrix::new(n_dofs, n_dofs);
+        for i in 0..n_dofs {
+            for p in k_vol.row_ptr[i]..k_vol.row_ptr[i + 1] {
+                k_coo.add(i, k_vol.col_idx[p] as usize, -k_vol.values[p]);
+            }
+        }
+        k = k_coo.into_csr();
+        // u0 at H1 dofs.
+        let dm = space.dof_manager();
+        u = vec![0.0f64; n_dofs];
+        for i in 0..n_dofs {
+            let x = dm.dof_coord(i as DofId);
+            u[i] = u0_function(args.problem, &bb_min, &bb_max, x);
+        }
+        dof_coords = vec![];
+    } else {
+        let space = L2Space::new_with_basis(mesh.clone(), args.order as u8, L2Basis::GaussLobatto);
+        n_dofs = space.n_dofs();
+        dof_coords = space.dof_coords().to_vec();
+
+        // 6. Assemble M, K, S.
+        let qo = 2 * args.order as u8;
+        m = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo);
+        let s_vol = Assembler::assemble_bilinear(
+            &space,
+            &[&DiffusionIntegrator { kappa: args.diffusion_term }],
+            qo,
+        );
+        let k_vol = Assembler::assemble_bilinear(
+            &space,
+            &[&ConvectionIntegrator {
+                velocity: ConstantVectorCoeff(vec![
+                    ((2.0f64) / 3.0f64).sqrt(),
+                    ((1.0f64) / 3.0f64).sqrt(),
+                ]),
+            }],
+            qo,
+        );
+
+        // Face integrators: NonconservativeDGTraceIntegrator(vel, -1) and
+        // DGDiffusionIntegrator(diff, sigma=-1, kappa).
+        let faces = build_face_locs(&mesh);
+        let vel = |_x: f64, _y: f64| -> [f64; 2] {
+            let mut v = [0.0f64; 2];
+            velocity_function(args.problem, &bb_min, &bb_max, &[_x, _y], &mut v);
+            v
+        };
+        let alpha = -1.0;
+        let sigma = -1.0;
+        let mut k_face_coo = CooMatrix::new(n_dofs, n_dofs);
+        assemble_ex41_interior_faces(
+            &mut k_face_coo,
+            &mesh,
+            &space,
+            &faces,
+            &vel,
+            alpha,
+            0.0,
+            sigma,
+            0.0,
+        );
+        let mut s_face_coo = CooMatrix::new(n_dofs, n_dofs);
+        let zero_vel = |_: f64, _: f64| -> [f64; 2] { [0.0, 0.0] };
+        assemble_ex41_interior_faces(
+            &mut s_face_coo,
+            &mesh,
+            &space,
+            &faces,
+            &zero_vel,
+            0.0,
+            args.diffusion_term,
+            sigma,
+            kappa as f64,
+        );
+        // Boundary faces (MFEM AddBdrFaceIntegrator, ndof2==0 branch).
+        let bdr_faces = build_bdr_face_locs(&mesh);
+        if !bdr_faces.is_empty() {
+            assemble_ex41_bdr_faces(
+                &mut k_face_coo,
+                &mesh,
+                &space,
+                &bdr_faces,
+                &vel,
+                alpha,
+                0.0,
+                sigma,
+                0.0,
+            );
+            assemble_ex41_bdr_faces(
+                &mut s_face_coo,
+                &mesh,
+                &space,
+                &bdr_faces,
+                &zero_vel,
+                0.0,
+                args.diffusion_term,
+                sigma,
+                kappa as f64,
+            );
+        }
+        let k_face = k_face_coo.into_csr();
+        let s_face = s_face_coo.into_csr();
+
+        // K = -ConvectionIntegrator + trace ; S = Diffusion + diffusion-face.
+        let mut k_coo = CooMatrix::new(n_dofs, n_dofs);
+        for i in 0..n_dofs {
+            for p in k_vol.row_ptr[i]..k_vol.row_ptr[i + 1] {
+                k_coo.add(i, k_vol.col_idx[p] as usize, -k_vol.values[p]);
+            }
+            for p in k_face.row_ptr[i]..k_face.row_ptr[i + 1] {
+                k_coo.add(i, k_face.col_idx[p] as usize, k_face.values[p]);
+            }
+        }
+        k = k_coo.into_csr();
+        let _ = &k_vol;
+        let mut s_coo = CooMatrix::new(n_dofs, n_dofs);
+        for i in 0..n_dofs {
+            for p in s_vol.row_ptr[i]..s_vol.row_ptr[i + 1] {
+                s_coo.add(i, s_vol.col_idx[p] as usize, s_vol.values[p]);
+            }
+            for p in s_face.row_ptr[i]..s_face.row_ptr[i + 1] {
+                s_coo.add(i, s_face.col_idx[p] as usize, s_face.values[p]);
+            }
+        }
+        s = s_coo.into_csr();
+
+        // 7. Initial conditions.
+        u = vec![0.0f64; n_dofs];
+        for (i, ch) in dof_coords.chunks(2).enumerate() {
+            u[i] = u0_function(args.problem, &bb_min, &bb_max, ch);
+        }
+    }
+
+    println!("Number of unknowns: {n_dofs}");
+
+    // 9. Time integration.
+    let adv = ImexEvolution { m, k, s };
+
+    let mut t = 0.0f64;
+    let mut u_vec = u;
+    let mut ti = 0usize;
+    let mut done = false;
+    let dirk = ImexDirkRk3;
+    let euler_imex = ImexExpImplEuler;
+    let rk2_222 = ImexRk2_222;
+    let rk2_232 = ImexRk2_232;
+    while !done {
+        let dt_real = args.dt.min(args.t_final - t);
+        // ODE solver selector: 61 = IMEXExpImplEuler, 62 = IMEXRK2(2,2,2),
+        // 63 = IMEXRK2_3StageExplicit, 64 = IMEX_DIRK_RK3 — all 1:1 MFEM ports.
+        match args.ode_solver_type {
+            64 => dirk.step(&adv, &mut t, dt_real, &mut u_vec),
+            61 => euler_imex.step(&adv, &mut t, dt_real, &mut u_vec),
+            62 => rk2_222.step(&adv, &mut t, dt_real, &mut u_vec),
+            63 => rk2_232.step(&adv, &mut t, dt_real, &mut u_vec),
+            _ => {
+                dirk.step(&adv, &mut t, dt_real, &mut u_vec);
+            }
+        }
+        ti += 1;
+        done = t >= args.t_final - 1e-8 * args.dt;
+        if done || ti % args.vis_steps == 0 {
+            // MFEM prints `time: t` with the default ostream precision (6
+            // significant digits).
+            println!("time step: {ti}, time: {}", fem_solver::fmt_g(t));
+        }
+    }
+}
