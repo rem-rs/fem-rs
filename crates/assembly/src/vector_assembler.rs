@@ -83,8 +83,10 @@ pub(crate) fn vec_ref_elem(
 
 pub(crate) fn geo_ref_elem(elem_type: ElementType) -> Option<Box<dyn ReferenceElement>> {
     // Legacy path for Quad4/Hex8 with geom_order=1 (used by reed/partial assembly).
+    // Quad vector bases (RT/ND) and the QuadQk geometry share the [0,1]^d
+    // reference domain, so use QuadQk (order 1) instead of the [-1,1]² QuadQ1.
     match elem_type {
-        ElementType::Quad4 => Some(Box::new(QuadQ1)),
+        ElementType::Quad4 => Some(Box::new(fem_element::lagrange::factory::QuadQk::new(1))),
         ElementType::Hex8 => Some(Box::new(HexQ1)),
         _ => None,
     }
@@ -112,17 +114,9 @@ pub fn geo_ref_elem_from_mesh(
         ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
         ElementType::Tet4 | ElementType::Tet10 => FactoryElemType::Tet,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
-            // NOTE: unlike the scalar assembler path (which maps quadrature
-            // points onto [0,1]^d via geom_quad_point and uses QuadQk), the
-            // vector assembler passes the solution-basis quadrature points
-            // UNMAPPED to isoparametric_jacobian — so the geometry element
-            // must live on the same [-1,1]² domain as the QuadND basis.
-            return if g <= 1 {
-                use fem_element::lagrange::QuadQ1;
-                Some(Box::new(QuadQ1))
-            } else {
-                Some(factory_ref_elem(FactoryElemType::Quad, g))
-            };
+            // Quad vector bases (RT/ND) and the QuadQk geometry share the
+            // [0,1]² reference domain — use QuadQk for every geometric order.
+            return Some(factory_ref_elem(FactoryElemType::Quad, g.max(1)));
         }
         ElementType::Hex8 | ElementType::Hex20 => FactoryElemType::Hex,
         ElementType::Prism6 | ElementType::Prism15 => FactoryElemType::Prism,
@@ -379,6 +373,7 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
                 n_dofs: n_e, dim, is_surface, weight: w,
                 phi_vec: &phys_phi, curl: &phys_curl, div: &phys_div,
                 x_phys: &xp, elem_id: e, elem_tag,
+                elem_dofs: Some(space.element_dofs(e)),
             };
             for integ in integrators {
                 integ.add_to_element_matrix(&qp, &mut k_edge[..n_e * n_e]);
@@ -393,7 +388,9 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
             for v in k_edge[..n_e * n_e].iter_mut() { *v = 0.0; }
 
             // Interior DOFs (bubble modes) on a surface: same gradient-bubble
-            // basis as the flat case, Piola-mapped through J·G⁻¹.
+            // basis as the flat case, Piola-mapped through J·G⁻¹.  The bubble
+            // lives on [0,1]² (matching the RT/ND basis): y(1-y)·x^m and
+            // x(1-x)·y^m, normalized so ∫b² = 1 over [0,1]².
             if n_i > 0 && elem_type == ElementType::Quad4 {
                 let x = xi[0]; let y = xi[1];
                 let k = space.order() as usize;
@@ -401,13 +398,13 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
                 let mut int_phi = vec![0.0_f64; n_i * 2];
                 let mut idx = 0;
                 for m in 0..n_per_dir {
-                    let s = ((15.0 * (2.0 * m as f64 + 1.0)) / 32.0).sqrt();
-                    let b = s * (1.0 - y * y) * x.powi(m as i32);
+                    let s = (30.0 * (2.0 * m as f64 + 1.0)).sqrt();
+                    let b = s * y * (1.0 - y) * x.powi(m as i32);
                     int_phi[idx * 2] = b; int_phi[idx * 2 + 1] = 0.0; idx += 1;
                 }
                 for m in 0..n_per_dir {
-                    let s = ((15.0 * (2.0 * m as f64 + 1.0)) / 32.0).sqrt();
-                    let b = s * (1.0 - x * x) * y.powi(m as i32);
+                    let s = (30.0 * (2.0 * m as f64 + 1.0)).sqrt();
+                    let b = s * x * (1.0 - x) * y.powi(m as i32);
                     int_phi[idx * 2] = 0.0; int_phi[idx * 2 + 1] = b; idx += 1;
                 }
                 debug_assert_eq!(idx, n_i);
@@ -452,7 +449,14 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
             let ge = geo_elem
                 .as_ref()
                 .expect("missing geometry reference element for isoparametric vector assembly");
-            isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim)
+            // Isoparametric geometry: the Jacobian must be built from the
+            // mesh's geometry nodes (Tri6 has 6 nodes), NOT the solution
+            // element nodes (Tri3 has 3).
+            let geo_nds = mesh.geometry_nodes(e);
+            // QuadQk geometry lives on [0,1]² — the same reference domain as
+            // the RT/ND solution basis after the domain unification, so the
+            // quadrature point needs no mapping.
+            isoparametric_jacobian(mesh, geo_nds, ge.as_ref(), xi, dim)
         } else {
             let tr = affine_tr.as_ref().unwrap();
             (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
@@ -491,6 +495,7 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
             n_dofs: n_e, dim, is_surface, weight: w,
             phi_vec: &phys_phi, curl: &phys_curl, div: &phys_div,
             x_phys: &xp, elem_id: e, elem_tag,
+            elem_dofs: Some(space.element_dofs(e)),
         };
         for integ in integrators {
             integ.add_to_element_matrix(&qp, &mut k_edge[..n_e * n_e]);
@@ -670,6 +675,7 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
                 x_phys: &xp,
                 elem_id: e,
                 elem_tag,
+                elem_dofs: Some(space.element_dofs(e)),
             };
 
             for integ in integrators {
@@ -682,7 +688,14 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
             let ge = geo_elem
                 .as_ref()
                 .expect("missing geometry reference element for isoparametric vector assembly");
-            isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim)
+            // Isoparametric geometry: the Jacobian must be built from the
+            // mesh's geometry nodes (Tri6 has 6 nodes), NOT the solution
+            // element nodes (Tri3 has 3).
+            let geo_nds = mesh.geometry_nodes(e);
+            // QuadQk geometry lives on [0,1]² — the same reference domain as
+            // the RT/ND solution basis after the domain unification, so the
+            // quadrature point needs no mapping.
+            isoparametric_jacobian(mesh, geo_nds, ge.as_ref(), xi, dim)
         } else {
             let tr = affine_tr.as_ref().unwrap();
             (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
@@ -735,6 +748,7 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
             x_phys: &xp,
             elem_id: e,
             elem_tag,
+            elem_dofs: Some(space.element_dofs(e)),
         };
 
         for integ in integrators {
@@ -1264,19 +1278,21 @@ mod tests {
         let ref_elem = QuadND1;
         let n_ldofs = ref_elem.n_dofs();
         let dim = 2;
-        let xi = &[0.0, 0.0];
+        let xi = &[0.5, 0.5]; // centre of the [0,1]² reference domain
 
         // Check: isoparametric_jacobian
         let mut ref_phi = vec![0.0; n_ldofs * dim];
         ref_elem.eval_basis_vec(xi, &mut ref_phi);
-        let geo_elem = fem_element::lagrange::QuadQ1;
+        let geo_elem = fem_element::lagrange::factory::QuadQk::new(1);
         let (jac, det_j, _xp) = isoparametric_jacobian(
             space.mesh(), space.mesh().element_nodes(0), &geo_elem, xi, dim,
         );
-        let j_exp = DMatrix::from_row_slice(2, 2, &[0.5, 0.0, 0.15, 0.5]);
-        let jit_exp = DMatrix::from_row_slice(2, 2, &[2.0, -0.6, 0.0, 2.0]);
+        // ShearQuad vertices v0=(0,0), v1=(1,0.3), v2=(1,1.3), v3=(0,1) mapped
+        // from [0,1]²: at (0.5,0.5) the Jacobian is [1,0; 0.3,1].
+        let j_exp = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.3, 1.0]);
+        let jit_exp = DMatrix::from_row_slice(2, 2, &[1.0, -0.3, 0.0, 1.0]);
         assert!((&jac - &j_exp).norm() < 1e-14, "Jacobian mismatch");
-        assert!((det_j - 0.25).abs() < 1e-14, "det(J) mismatch");
+        assert!((det_j - 1.0).abs() < 1e-14, "det(J) mismatch");
         let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
         assert!((&j_inv_t - &jit_exp).norm() < 1e-14, "J^(-T) mismatch");
 

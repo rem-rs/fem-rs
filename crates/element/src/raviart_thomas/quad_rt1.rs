@@ -1,250 +1,106 @@
-//! Raviart-Thomas RT1 element on the reference quadrilateral `[-1,1]^2`.
+//! Raviart-Thomas RT1 element on the reference quadrilateral `[0,1]^2`.
 //!
-//! # Space: `RT₁ = Q_{2,1} × Q_{1,2}`
+//! A 1:1 port of MFEM's `RT_QuadrilateralElement` with `p = 1`
+//! (fem/fe/fe_rt.cpp), the element behind `RT_FECollection(1, 2)` — the one
+//! ex40 (and every current MFEM H(div) example) actually uses.
 //!
-//! 12 DOFs: 2 normal moments per edge (4 edges × 2) + 4 interior moments.
+//! # Tensor-product structure
 //!
-//! # Monomial basis (12 functions)
-//! x-direction: (1,0), (ξ,0), (η,0), (ξ²,0), (ξη,0), (ξ²η,0)
-//! y-direction: (0,1), (0,ξ), (0,η), (0,η²), (0,ξη), (0,ξη²)
+//! 12 DOFs = 8 edge normal traces + 4 interior moments.  The basis is a
+//! tensor product of 1-D bases on `[0,1]`:
 //!
-//! # DOF functionals
-//! Edge 0 (bottom, y=-1): ∫ -Φ_y dξ, ∫ -ξ·Φ_y dξ
-//! Edge 1 (right, x=+1):  ∫ Φ_x dη, ∫ η·Φ_x dη
-//! Edge 2 (top, y=+1):    ∫ Φ_y dξ, ∫ ξ·Φ_y dξ
-//! Edge 3 (left, x=-1):   ∫ -Φ_x dη, ∫ -η·Φ_x dη
-//! Interior: ∫ Φ_x, ∫ ξ·Φ_x, ∫ Φ_y, ∫ η·Φ_y
+//! - closed basis `c_i` (Gauss-Lobatto nodes `{0, 1/2, 1}`, `Poly_1D`):
+//!   - `c0(t) = 2t² − 3t + 1`, `c1(t) = −4t² + 4t`, `c2(t) = 2t² − t`
+//! - open basis `o_j` (Gauss-Legendre nodes `{a, b}`, `a = (1−1/√3)/2`,
+//!   `b = 1−a`, `d = b−a = 1/√3`):
+//!   - `o0(t) = (b−t)/d`, `o1(t) = (t−a)/d`
+//!
+//! x-components `s·c_i(x)·o_j(y)`, y-components `s·o_i(x)·c_j(y)`, with the
+//! signs and DOF permutation taken from MFEM's `dof_map` (p = 1):
+//! `[-8, 8, 2, -7, -10, 3, -1, -2, -11, 11, 5, 4]`.
 
-use std::sync::OnceLock;
-
-use crate::quadrature::quad_rule;
+use crate::quadrature::quad_rule_01;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
-/// Monomials in `Q_{2,1} × Q_{1,2}`.
-/// Returns a 24-element array: [x_mono_0_x, x_mono_0_y, ..., y_mono_5_x, y_mono_5_y]
-fn eval_monomials(x: f64, y: f64, vals: &mut [f64; 24]) {
-    // Q_{2,1} — x-direction monomials
-    vals[0] = 1.0;  vals[1] = 0.0;   // (1, 0)
-    vals[2] = x;    vals[3] = 0.0;   // (ξ, 0)
-    vals[4] = y;    vals[5] = 0.0;   // (η, 0)
-    vals[6] = x*x;  vals[7] = 0.0;   // (ξ², 0)
-    vals[8] = x*y;  vals[9] = 0.0;   // (ξη, 0)
-    vals[10]= x*x*y; vals[11]= 0.0;  // (ξ²η, 0)
-    // Q_{1,2} — y-direction monomials
-    vals[12]= 0.0;  vals[13]= 1.0;   // (0, 1)
-    vals[14]= 0.0;  vals[15]= x;     // (0, ξ)
-    vals[16]= 0.0;  vals[17]= y;     // (0, η)
-    vals[18]= 0.0;  vals[19]= y*y;   // (0, η²)
-    vals[20]= 0.0;  vals[21]= x*y;   // (0, ξη)
-    vals[22]= 0.0;  vals[23]= x*y*y; // (0, ξη²)
+/// Open (Gauss-Legendre) nodes and width for p = 1.
+const A: f64 = 0.21132486540518713; // (1 - 1/√3)/2
+const B: f64 = 0.7886751345948129; // (1 + 1/√3)/2
+const D: f64 = 0.5773502691896258; // b - a = 1/√3
+
+#[inline]
+fn c0(t: f64) -> f64 {
+    2.0 * t * t - 3.0 * t + 1.0
+}
+#[inline]
+fn c1(t: f64) -> f64 {
+    -4.0 * t * t + 4.0 * t
+}
+#[inline]
+fn c2(t: f64) -> f64 {
+    2.0 * t * t - t
+}
+#[inline]
+fn dc0(t: f64) -> f64 {
+    4.0 * t - 3.0
+}
+#[inline]
+fn dc1(t: f64) -> f64 {
+    4.0 - 8.0 * t
+}
+#[inline]
+fn dc2(t: f64) -> f64 {
+    4.0 * t - 1.0
+}
+#[inline]
+fn o0(t: f64) -> f64 {
+    (B - t) / D
+}
+#[inline]
+fn o1(t: f64) -> f64 {
+    (t - A) / D
 }
 
-/// div of each monomial (12 values).
-fn eval_monomial_divs(x: f64, y: f64, divs: &mut [f64; 12]) {
-    // (1,0): div=0
-    divs[0] = 0.0;
-    // (ξ,0): div=1
-    divs[1] = 1.0;
-    // (η,0): div=0
-    divs[2] = 0.0;
-    // (ξ²,0): div=2ξ
-    divs[3] = 2.0 * x;
-    // (ξη,0): div=η
-    divs[4] = y;
-    // (ξ²η,0): div=2ξη
-    divs[5] = 2.0 * x * y;
-    // (0,1): div=0
-    divs[6] = 0.0;
-    // (0,ξ): div=0
-    divs[7] = 0.0;
-    // (0,η): div=1
-    divs[8] = 1.0;
-    // (0,η²): div=2η
-    divs[9] = 2.0 * y;
-    // (0,ξη): div=ξ
-    divs[10] = x;
-    // (0,ξη²): div=2ξη
-    divs[11] = 2.0 * x * y;
-}
-
-/// Cached transformation matrix: basis = monomials × V⁻¹
-static COEFF: OnceLock<[[f64; 12]; 12]> = OnceLock::new();
-
-fn get_coeff() -> &'static [[f64; 12]; 12] {
-    COEFF.get_or_init(build_vandermonde_inv)
-}
-
-/// Build the 12×12 inverse Vandermonde: V[DOF_i][monomial_j] = DOF_i(m_j).
-/// The transformation matrix is V⁻¹; applying it to DOF values yields monomial coefficients.
-fn build_vandermonde_inv() -> [[f64; 12]; 12] {
-    let mut v = [[0.0f64; 12]; 12];
-    let quad = quad_rule(6);
-    let mut mono = [0.0f64; 24];
-
-    // 4-point Gauss-Legendre on [-1,1] for edge integrals
-    let gl_pts = [
-        -0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526,
-    ];
-    let gl_wts = [0.34785484513745385, 0.6521451548625461, 0.6521451548625461, 0.34785484513745385];
-
-    // Edge 0: bottom, y=-1, n=(0,-1): DOF = -∫ Φ_y dξ
-    // Edge 0 DOF 0: ∫ -Φ_y dξ
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(t, -1.0, &mut mono);
-        for j in 0..12 {
-            v[0][j] += -mono[2 * j + 1] * w;
-        }
-    }
-    // Edge 0 DOF 1: ∫ -ξ·Φ_y dξ
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(t, -1.0, &mut mono);
-        for j in 0..12 {
-            v[1][j] += -t * mono[2 * j + 1] * w;
-        }
-    }
-
-    // Edge 1: right, x=1, n=(1,0): DOF = ∫ Φ_x dη
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(1.0, t, &mut mono);
-        for j in 0..12 {
-            v[2][j] += mono[2 * j] * w;
-        }
-    }
-    // Edge 1 moment 1: ∫ η·Φ_x dη
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(1.0, t, &mut mono);
-        for j in 0..12 {
-            v[3][j] += t * mono[2 * j] * w;
-        }
-    }
-
-    // Edge 2: top, y=1, n=(0,1): DOF = ∫ Φ_y dξ
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(t, 1.0, &mut mono);
-        for j in 0..12 {
-            v[4][j] += mono[2 * j + 1] * w;
-        }
-    }
-    // Edge 2 moment 1: ∫ ξ·Φ_y dξ
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(t, 1.0, &mut mono);
-        for j in 0..12 {
-            v[5][j] += t * mono[2 * j + 1] * w;
-        }
-    }
-
-    // Edge 3: left, x=-1, n=(-1,0): DOF = -∫ Φ_x dη
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(-1.0, t, &mut mono);
-        for j in 0..12 {
-            v[6][j] += -mono[2 * j] * w;
-        }
-    }
-    // Edge 3 moment 1: -∫ η·Φ_x dη
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(-1.0, t, &mut mono);
-        for j in 0..12 {
-            v[7][j] += -t * mono[2 * j] * w;
-        }
-    }
-
-    // Interior DOFs: ∫ Φ_x, ∫ ξ·Φ_x, ∫ Φ_y, ∫ η·Φ_y
-    for (qp, qw) in quad.points.iter().zip(quad.weights.iter()) {
-        eval_monomials(qp[0], qp[1], &mut mono);
-        let w = qw * 4.0; // area of [-1,1]² = 4
-        for j in 0..12 {
-            v[8][j] += mono[2 * j] * w;
-            v[9][j] += qp[0] * mono[2 * j] * w;
-            v[10][j] += mono[2 * j + 1] * w;
-            v[11][j] += qp[1] * mono[2 * j + 1] * w;
-        }
-    }
-
-    invert_12x12(&v)
-}
-
-/// Invert a 12×12 matrix via Gaussian elimination with partial pivoting.
-fn invert_12x12(v: &[[f64; 12]; 12]) -> [[f64; 12]; 12] {
-    let mut a = [[0.0f64; 24]; 12];
-    for i in 0..12 {
-        for j in 0..12 {
-            a[i][j] = v[i][j];
-        }
-        a[i][12 + i] = 1.0;
-    }
-
-    for col in 0..12 {
-        // Pivot
-        let mut best = col;
-        let mut best_val = a[col][col].abs();
-        for row in (col + 1)..12 {
-            let val = a[row][col].abs();
-            if val > best_val {
-                best_val = val;
-                best = row;
-            }
-        }
-        if best_val < 1e-30 {
-            continue;
-        }
-        if best != col {
-            a.swap(col, best);
-        }
-
-        let pivot = a[col][col];
-        for c in col..24 {
-            a[col][c] /= pivot;
-        }
-
-        for row in 0..12 {
-            if row == col {
-                continue;
-            }
-            let factor = a[row][col];
-            for c in col..24 {
-                a[row][c] -= factor * a[col][c];
-            }
-        }
-    }
-
-    let mut inv = [[0.0f64; 12]; 12];
-    for i in 0..12 {
-        for j in 0..12 {
-            inv[i][j] = a[i][12 + j];
-        }
-    }
-    inv
-}
-
-/// Quadrilateral RT1 element — 12 DOFs.
+/// Quadrilateral RT1 element — 12 DOFs (MFEM `RT_QuadrilateralElement(1)`).
 pub struct QuadRT1;
 
 impl VectorReferenceElement for QuadRT1 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 1 }
-    fn n_dofs(&self) -> usize { 12 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn n_dofs(&self) -> usize {
+        12
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
-        let coeff = get_coeff();
-        let mut mono = [0.0f64; 24];
-        eval_monomials(x, y, &mut mono);
-        for j in 0..12 {
-            values[2 * j] = 0.0;
-            values[2 * j + 1] = 0.0;
-            for k in 0..12 {
-                values[2 * j] += coeff[k][j] * mono[2 * k];
-                values[2 * j + 1] += coeff[k][j] * mono[2 * k + 1];
-            }
-        }
+        // x-components (from dof_map): s·c_i(x)·o_j(y)
+        values[0] = 0.0;
+        values[1] = -o0(x) * c0(y);      // dof0
+        values[0 + 2] = 0.0;
+        values[1 + 2] = -o1(x) * c0(y);  // dof1
+        values[4] = c2(x) * o0(y);       // dof2
+        values[5] = 0.0;
+        values[6] = c2(x) * o1(y);       // dof3
+        values[7] = 0.0;
+        values[8] = 0.0;
+        values[9] = o1(x) * c2(y);       // dof4
+        values[10] = 0.0;
+        values[11] = o0(x) * c2(y);      // dof5
+        values[12] = -c0(x) * o1(y);     // dof6
+        values[13] = 0.0;
+        values[14] = -c0(x) * o0(y);     // dof7
+        values[15] = 0.0;
+        values[16] = c1(x) * o0(y);      // dof8
+        values[17] = 0.0;
+        values[18] = -c1(x) * o1(y);     // dof9
+        values[19] = 0.0;
+        values[20] = 0.0;
+        values[21] = -o0(x) * c1(y);     // dof10
+        values[22] = 0.0;
+        values[23] = o1(x) * c1(y);      // dof11
     }
 
     fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {
@@ -254,29 +110,41 @@ impl VectorReferenceElement for QuadRT1 {
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
-        let coeff = get_coeff();
-        let mut divs = [0.0f64; 12];
-        eval_monomial_divs(xi[0], xi[1], &mut divs);
-        for j in 0..12 {
-            div_vals[j] = 0.0;
-            for k in 0..12 {
-                div_vals[j] += coeff[k][j] * divs[k];
-            }
-        }
+        let (x, y) = (xi[0], xi[1]);
+        div_vals[0] = -o0(x) * dc0(y);
+        div_vals[1] = -o1(x) * dc0(y);
+        div_vals[2] = dc2(x) * o0(y);
+        div_vals[3] = dc2(x) * o1(y);
+        div_vals[4] = o1(x) * dc2(y);
+        div_vals[5] = o0(x) * dc2(y);
+        div_vals[6] = -dc0(x) * o1(y);
+        div_vals[7] = -dc0(x) * o0(y);
+        div_vals[8] = dc1(x) * o0(y);
+        div_vals[9] = -dc1(x) * o1(y);
+        div_vals[10] = -o0(x) * dc1(y);
+        div_vals[11] = o1(x) * dc1(y);
     }
 
     fn quadrature(&self, order: u8) -> QuadratureRule {
-        quad_rule(order)
+        quad_rule_01(order)
     }
 
+    /// MFEM `RT_QuadrilateralElement(1)` node coordinates (edge traces at
+    /// the two Gauss points, interiors at the tensor grid).
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
-            vec![0.0, -1.0], vec![0.0, -1.0],
-            vec![1.0, 0.0],  vec![1.0, 0.0],
-            vec![0.0, 1.0],  vec![0.0, 1.0],
-            vec![-1.0, 0.0], vec![-1.0, 0.0],
-            vec![0.0, 0.0],  vec![0.0, 0.0],
-            vec![0.0, 0.0],  vec![0.0, 0.0],
+            vec![A, 0.0],        // 0 bottom (x = a)
+            vec![B, 0.0],        // 1 bottom (x = b)
+            vec![1.0, A],        // 2 right  (y = a)
+            vec![1.0, B],        // 3 right  (y = b)
+            vec![B, 1.0],        // 4 top    (x = b)
+            vec![A, 1.0],        // 5 top    (x = a)
+            vec![0.0, B],        // 6 left   (y = b)
+            vec![0.0, A],        // 7 left   (y = a)
+            vec![0.5, A],        // 8 interior
+            vec![0.5, B],        // 9 interior
+            vec![A, 0.5],        // 10 interior
+            vec![B, 0.5],        // 11 interior
         ]
     }
 }
@@ -298,26 +166,53 @@ mod tests {
         for pt in &q.points {
             elem.eval_basis_vec(pt, &mut vals);
             for (i, &v) in vals.iter().enumerate() {
-                assert!((v).is_finite(), "value[{i}] = {v}");
+                assert!(v.is_finite(), "value[{i}] = {v}");
             }
         }
     }
 
     #[test]
-    fn quad_rt1_nodal_basis_small_error() {
+    fn quad_rt1_nodal_basis() {
+        // MFEM RT_QuadrilateralElement edge DOFs are nodal normal traces at
+        // the node coordinates above: DOF_j(Φ_i) = δ_ij for j = 0..7 (the
+        // interior DOFs 8..11 are integral moments, not nodal).
         let elem = QuadRT1;
+        let coords = elem.dof_coords();
+        let norms = [[0.0, -1.0], [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]];
         let mut vals = vec![0.0; 24];
-        let gl = [-0.8611363, -0.339981, 0.339981, 0.8611363];
-        let gw = [0.3478548, 0.6521451, 0.6521451, 0.3478548];
-
-        // Edge 0 (bottom, y=-1, n=(0,-1)):
-        // DOF_0 = ∫ -Φ_y dξ should be approximately δ_{0,0}
-        let mut integral = 0.0;
-        for k in 0..4 {
-            elem.eval_basis_vec(&[gl[k], -1.0], &mut vals);
-            integral += -vals[1] * gw[k];
+        for j in 0..8 {
+            elem.eval_basis_vec(&coords[j], &mut vals);
+            let edge = j / 2;
+            for i in 0..12 {
+                let tr = vals[i * 2] * norms[edge][0] + vals[i * 2 + 1] * norms[edge][1];
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (tr - expected).abs() < 1e-12,
+                    "DOF_{j}(Phi_{i}) = {tr}, expected {expected}"
+                );
+            }
         }
-        assert!((integral - 1.0).abs() < 0.4,
-            "quad_rt1: edge0 DOF_0 got={integral:.3}");
+    }
+
+    #[test]
+    fn rt1_mass_diagonal_matches_mfem() {
+        // MFEM single-unit-square RT1 mass: edge diag = 1/15, interior = 4/15.
+        let elem = QuadRT1;
+        let qr = elem.quadrature(5);
+        let mut vals = vec![0.0; 24];
+        let mut diag = vec![0.0; 12];
+        for (q, pt) in qr.points.iter().enumerate() {
+            elem.eval_basis_vec(pt, &mut vals);
+            let w = qr.weights[q];
+            for i in 0..12 {
+                diag[i] += w * (vals[i * 2] * vals[i * 2] + vals[i * 2 + 1] * vals[i * 2 + 1]);
+            }
+        }
+        for i in 0..8 {
+            assert!((diag[i] - 1.0 / 15.0).abs() < 1e-13, "edge diag[{i}] = {}", diag[i]);
+        }
+        for i in 8..12 {
+            assert!((diag[i] - 4.0 / 15.0).abs() < 1e-13, "interior diag[{i}] = {}", diag[i]);
+        }
     }
 }

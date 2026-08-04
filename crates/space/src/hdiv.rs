@@ -617,8 +617,25 @@ impl<M: MeshTopology> HDivSpace<M> {
         let dofs_per_elem = QUAD_FACES.len() * dofs_per_edge + interior_dofs;
         let n_elem = mesh.n_elements();
 
-        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
-        let mut next_dof: DofId = 0;
+        // Global edge numbering follows element-traversal order — exactly
+        // how MFEM builds its mesh edge table — and MFEM assigns
+        // `edge_id * dofs_per_edge` consecutive DOFs per edge, then all
+        // interior DOFs (per element) after every edge DOF.
+        let mut edge_index: HashMap<EdgeKey, u32> = HashMap::new();
+        let mut n_edges: u32 = 0;
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for &(li, lj) in &QUAD_FACES {
+                let key = EdgeKey::new(verts[li], verts[lj]);
+                if !edge_index.contains_key(&key) {
+                    edge_index.insert(key, n_edges);
+                    n_edges += 1;
+                }
+            }
+        }
+        let nd = dofs_per_edge as u32;
+        let mut next_dof: DofId = n_edges * nd; // interior DOF base
+
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
 
@@ -626,33 +643,41 @@ impl<M: MeshTopology> HDivSpace<M> {
             let verts = mesh.element_nodes(e);
             for &(li, lj) in &QUAD_FACES {
                 let (gi, gj) = (verts[li], verts[lj]);
-                let key = EdgeKey::new(gi, gj);
                 let sign = Self::compute_sign_2d_quad(&mesh, verts, li, gi, gj);
+                let idx = edge_index[&EdgeKey::new(gi, gj)];
 
                 if dofs_per_edge == 1 {
-                    let dof = *edge_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
-                    dofs_flat.push(dof);
+                    dofs_flat.push(idx * nd);
                     signs_flat.push(sign);
                 } else {
-                    let nd = dofs_per_edge as u32;
-                    let first = *edge_map.entry(key).or_insert_with(|| {
-                        let d = next_dof;
-                        next_dof += nd;
-                        d
-                    });
+                    let first = idx * nd;
+                    // MFEM `RT_FECollection::DofOrderForOrientation` reverses
+                    // the per-edge DOF order when the element's local edge
+                    // direction opposes the global canonical (min,max)
+                    // direction (cor < 0); the assembled signs (below) then
+                    // carry the −1 from `EncodeDof`.  Without the reversal the
+                    // global matrix columns would be permuted relative to
+                    // MFEM for RT1 (2 DOFs/edge).
+                    let rev = sign < 0.0;
                     for k in 0..dofs_per_edge {
-                        dofs_flat.push(first + k as u32);
+                        let kk = if rev { dofs_per_edge - 1 - k } else { k };
+                        dofs_flat.push(first + kk as u32);
                         signs_flat.push(sign);
                     }
                 }
             }
             // Interior bubble DOFs (QuadRT1: ∫ Φ_x, ∫ ξ·Φ_x, ∫ Φ_y, ∫ η·Φ_y)
+            // — MFEM numbers all edge DOFs first, then interior DOFs per
+            // element (elem_id * 4 + j).
             for _ in 0..interior_dofs {
                 dofs_flat.push(next_dof);
                 next_dof += 1;
                 signs_flat.push(1.0);
             }
         }
+
+        let edge_map: HashMap<EdgeKey, DofId> =
+            edge_index.into_iter().map(|(k, i)| (k, i * nd)).collect();
 
         HDivSpace {
             mesh,
@@ -669,46 +694,17 @@ impl<M: MeshTopology> HDivSpace<M> {
     }
 
     /// Compute the orientation sign for a 2-D face (edge) on quads.
-    /// Global edge normal points outward from the element centroid.
-    /// Sign = +1 if the canonical (gi→gj) normal agrees with outward.
+    ///
+    /// MFEM RT convention: the sign is +1 when the element's local edge
+    /// direction (gi→gj, in element traversal order) agrees with the global
+    /// canonical edge direction (min,max), and −1 otherwise.  This matches
+    /// MFEM's `FiniteElementSpace::GetElementVDofs` for RT spaces (the RT
+    /// normal-moment DOF on an edge points along the edge's canonical
+    /// direction; MFEM `DofOrdering` fixes the sign by comparing the local
+    /// and global edge orientations).
     fn compute_sign_2d_quad(mesh: &M, verts: &[u32], _li: usize, gi: u32, gj: u32) -> f64 {
-        let pa = mesh.node_coords(gi);
-        let pb = mesh.node_coords(gj);
-        let tx = pb[0] - pa[0];
-        let ty = pb[1] - pa[1];
-        // Normal to edge gi→gj (90° CCW): (−ty, tx)
-        let nx = -ty;
-        let ny = tx;
-
-        // Element centroid for outward check.
-        let mut cx = 0.0; let mut cy = 0.0;
-        for &v in verts {
-            let p = mesh.node_coords(v);
-            cx += p[0]; cy += p[1];
-        }
-        cx /= verts.len() as f64;
-        cy /= verts.len() as f64;
-
-        // Edge midpoint
-        let mx = 0.5 * (pa[0] + pb[0]);
-        let my = 0.5 * (pa[1] + pb[1]);
-        // outward = midpoint → centroid points INTO the element;
-        // outward = centroid → midpoint (mx-cx) points OUTWARD.
-        let outward_x = mx - cx;
-        let outward_y = my - cy;
-        let dot = nx * outward_x + ny * outward_y;
-
-        // `normal = [-ty, tx]` is the 90° CCW rotation of edge gi→gj.
-        // For a CCW element this always points INWARD.
-        // outward_flip = -1 when the CCW normal disagrees with outward.
-        //
-        // global_flip: the EdgeKey stores edges canonically as (min, max).
-        // When gi > gj, the element's edge direction is opposite to the
-        // canonical direction, so the CCW normal above is also reversed.
-        // We must flip the sign to compensate.
-        let outward_flip = if dot > 0.0 { 1.0 } else { -1.0 };
-        let global_flip = if gi < gj { 1.0 } else { -1.0 };
-        global_flip * outward_flip
+        let _ = (mesh, verts);
+        if gi < gj { 1.0 } else { -1.0 }
     }
 
     // ─── 3-D hexahedron construction ───────────────────────────────────────
