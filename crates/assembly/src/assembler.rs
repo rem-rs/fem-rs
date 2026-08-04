@@ -17,6 +17,7 @@ use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as F
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
+use fem_space::SpaceType;
 
 use crate::integrator::{BdQpData, BoundaryBilinearIntegrator, BoundaryLinearIntegrator, BilinearIntegrator, LinearIntegrator, QpData};
 
@@ -111,6 +112,37 @@ impl ReferenceElement for P0 {
 }
 
 // ─── Reference element factory ───────────────────────────────────────────────
+
+/// Return the solution reference element matching `elem_type` and polynomial
+/// `order` for an **L2/DG** space: quad DOFs use MFEM's lexicographic tensor
+/// order (`DG_FECollection`), all other element types keep the H1 topological
+/// ordering (which MFEM's L2 spaces on simplices also use).
+pub(crate) fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    if elem_type == ElementType::Quad4 {
+        match order {
+            0 => Box::new(P0),
+            1 => Box::new(fem_element::lagrange::QuadQk::new_lex(1)),
+            2 => Box::new(fem_element::lagrange::QuadQk::new_lex(2)),
+            o => Box::new(fem_element::lagrange::QuadQk::new_lex(o as usize)),
+        }
+    } else {
+        ref_elem_vol(elem_type, order)
+    }
+}
+
+/// Reference element for `space`: L2/DG spaces get the lexicographic quad
+/// DOF ordering ([`ref_elem_vol_l2`]), H1 spaces the topological one.
+pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
+    space: &S,
+    elem_type: ElementType,
+    order: u8,
+) -> Box<dyn ReferenceElement> {
+    if space.space_type() == SpaceType::L2 {
+        ref_elem_vol_l2(elem_type, order)
+    } else {
+        ref_elem_vol(elem_type, order)
+    }
+}
 
 /// Return the solution reference element matching `elem_type` and polynomial `order`.
 pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
@@ -282,19 +314,49 @@ fn isoparametric_jacobian<M: MeshTopology>(
     geo_elem.eval_grad_basis(xi, &mut grad_geo);
     geo_elem.eval_basis(xi, &mut phi_geo);
 
+    // MFEM's mesh-nodes field (L2_T1_2D_P1) uses the LEX tensor order
+    // (dof2=(0,1), dof3=(1,1)); Rust's geo_elem for quads is QuadQk (H1
+    // topological order: v2=(1,1), v3=(0,1)).  Reorder both the geometry
+    // nodes and the basis rows to lex so the Jacobian accumulation order is
+    // bit-identical to MFEM's EvalJacobian.
+    let (nodes_r, grad_r, phi_r): (Vec<u32>, Vec<f64>, Vec<f64>) =
+        if dim == 2 && nodes.len() == 4 {
+            let mut grad_lex = vec![0.0; n_geo * dim];
+            let mut phi_lex = vec![0.0; n_geo];
+            for (li, &hi) in [0usize, 1, 3, 2].iter().enumerate() {
+                grad_lex[li * dim..li * dim + dim]
+                    .copy_from_slice(&grad_geo[hi * dim..hi * dim + dim]);
+                phi_lex[li] = phi_geo[hi];
+            }
+            (
+                vec![nodes[0], nodes[1], nodes[3], nodes[2]],
+                grad_lex,
+                phi_lex,
+            )
+        } else {
+            (nodes.to_vec(), grad_geo, phi_geo)
+        };
+
     let mut j = DMatrix::<f64>::zeros(dim, dim);
     let mut xp = vec![0.0_f64; dim];
 
     for k in 0..n_geo {
-        let xk = mesh.geom_coords_of(nodes[k]);
+        let xk = mesh.geom_coords_of(nodes_r[k]);
         for i in 0..dim {
-            xp[i] += phi_geo[k] * xk[i];
+            // MFEM kernels::Mult/AddMult fuse the accumulation (FMA).
+            xp[i] = phi_r[k].mul_add(xk[i], xp[i]);
             for d in 0..dim {
-                j[(i, d)] += xk[i] * grad_geo[k * dim + d];
+                j[(i, d)] = xk[i].mul_add(grad_r[k * dim + d], j[(i, d)]);
             }
         }
     }
-    let det = j.determinant();
+    // MFEM CalcDeterminant: 2D det = J00*J11 - J01*J10 (nalgebra's
+    // DMatrix::determinant can differ by 1 ulp for 2x2).
+    let det = if dim == 2 {
+        j[(0, 0)] * j[(1, 1)] - j[(0, 1)] * j[(1, 0)]
+    } else {
+        j.determinant()
+    };
     (j, det, xp)
 }
 
@@ -419,6 +481,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     e: u32,
     integrators: &[&dyn BilinearIntegrator],
     quad: &QuadratureRule,
+    quad_order: u8,
     coo: &mut CooMatrix<f64>,
     scratch: &mut ElementScratch,
     ref_elem: &dyn ReferenceElement,
@@ -437,15 +500,23 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let elem_type0 = mesh.element_type(0);
     let elem_type  = mesh.element_type(e);
     let quad_owned;
+    let ref_elem_owned;
     let quad: &QuadratureRule = if elem_type == elem_type0 {
         quad
     } else {
-        let qo = integrators.iter()
-            .filter_map(|i| i.integration_order(order))
-            .next()
-            .unwrap_or(quad.points.len() as u8 / 2);
-        quad_owned = ref_elem_vol(elem_type, order).quadrature(qo);
+        // Mixed meshes: use the caller's quadrature order (like the uniform
+        // path) instead of reverse-engineering it from the first element's
+        // point count.
+        quad_owned = ref_elem_vol_for_space(space, elem_type, order).quadrature(quad_order);
         &quad_owned
+    };
+    // Mixed meshes: also re-derive the reference element itself (basis,
+    // n_dofs) when the element type differs from the first element's.
+    let ref_elem: &dyn ReferenceElement = if elem_type == elem_type0 {
+        ref_elem
+    } else {
+        ref_elem_owned = ref_elem_vol_for_space(space, elem_type, order);
+        &*ref_elem_owned
     };
 
     // Use the caller-provided reference element (custom basis, e.g. Bernstein
@@ -593,6 +664,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
     e: u32,
     integrators: &[&dyn LinearIntegrator],
     quad: &QuadratureRule,
+    quad_order: u8,
     rhs: &mut [f64],
     scratch: &mut ElementScratch,
 ) {
@@ -604,8 +676,17 @@ fn accumulate_volume_linear_element<S: FESpace>(
     let order   = space.element_order(e);
 
     let elem_type = mesh.element_type(e);
-    let ref_elem  = ref_elem_vol(elem_type, order);
+    let ref_elem  = ref_elem_vol_for_space(space, elem_type, order);
     let n_ldofs   = ref_elem.n_dofs();
+    let quad_owned;
+    // Mixed meshes: the passed-in rule is built from the FIRST element type;
+    // re-derive it from this element's own reference element (same order).
+    let quad: &QuadratureRule = if mesh.element_type(0) == elem_type {
+        quad
+    } else {
+        quad_owned = ref_elem.quadrature(quad_order);
+        &quad_owned
+    };
 
     let raw_dofs: &[DofId] = space.element_dofs(e);
     scratch.global_dofs.clear();
@@ -821,6 +902,7 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
     space: &S,
     integrators: &[&dyn BilinearIntegrator],
     quad: &QuadratureRule,
+    quad_order: u8,
     ref_elem: &dyn ReferenceElement,
 ) -> CsrMatrix<f64> {
     let mesh = space.mesh();
@@ -850,7 +932,7 @@ fn assemble_bilinear_volume_parallel<S: FESpace>(
                 (coo, ElementScratch::new())
             },
             |(mut local_coo, mut scratch), e| {
-                accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut local_coo, &mut scratch, ref_elem);
+                accumulate_volume_bilinear_element(space, e, integrators, &quad, quad_order, &mut local_coo, &mut scratch, ref_elem);
                 (local_coo, scratch)
             },
         )
@@ -870,6 +952,7 @@ fn assemble_linear_volume_parallel<S: FESpace>(
     space: &S,
     integrators: &[&dyn LinearIntegrator],
     quad: &QuadratureRule,
+    quad_order: u8,
 ) -> Vec<f64> {
     let mesh = space.mesh();
     let n_dofs = space.n_dofs();
@@ -878,7 +961,7 @@ fn assemble_linear_volume_parallel<S: FESpace>(
         .fold(
             || (vec![0.0_f64; n_dofs], ElementScratch::new()),
             |(mut local_rhs, mut scratch), e| {
-                accumulate_volume_linear_element(space, e, integrators, quad, &mut local_rhs, &mut scratch);
+                accumulate_volume_linear_element(space, e, integrators, quad, quad_order, &mut local_rhs, &mut scratch);
                 (local_rhs, scratch)
             },
         )
@@ -988,7 +1071,7 @@ impl Assembler {
             let mut acc: Option<CsrMatrix<f64>> = None;
             for integ in integrators {
                 let qo = integ.integration_order(space_order).unwrap_or(quad_order);
-                let m = Self::assemble_bilinear_inner(space, &[*integ], qo, None);
+                let m = Self::assemble_bilinear_inner(space, &[*integ], qo, None, None);
                 acc = Some(match acc {
                     None => m,
                     Some(a) => a.add(&m),
@@ -997,7 +1080,39 @@ impl Assembler {
             return acc.unwrap_or_else(|| CsrMatrix::new_empty(n_dofs, n_dofs));
         }
 
-        Self::assemble_bilinear_inner(space, integrators, quad_order, None)
+        Self::assemble_bilinear_inner(space, integrators, quad_order, None, None)
+    }
+
+    /// Assemble a bilinear form where each integrator is applied on a subset
+    /// of elements selected by an element-attribute marker (MFEM
+    /// `BilinearForm::AddDomainIntegrator(integ, marker)`).
+    ///
+    /// # Arguments
+    /// * `space`       — finite element space (provides mesh + DOF map).
+    /// * `integrators` — `(integrator, marker)` pairs; a `None` marker means
+    ///   the integrator applies to all elements.  A marker is an array of
+    ///   length `max_attr` (the largest element attribute number in the mesh)
+    ///   with `marker[attr-1] = 1` selecting attribute `attr` (MFEM
+    ///   `AttributeSets::AttrToMarker` layout).
+    /// * `quad_order`  — polynomial order that the quadrature rule integrates exactly.
+    ///
+    /// # Returns
+    /// Assembled `CsrMatrix<f64>` in CSR format.
+    pub fn assemble_bilinear_marked<S: FESpace>(
+        space:       &S,
+        integrators: &[(&dyn BilinearIntegrator, Option<&[i32]>)],
+        quad_order:  u8,
+    ) -> CsrMatrix<f64> {
+        let n_dofs = space.n_dofs();
+        let mut acc: Option<CsrMatrix<f64>> = None;
+        for (integ, marker) in integrators {
+            let m = Self::assemble_bilinear_inner(space, &[*integ], quad_order, None, *marker);
+            acc = Some(match acc {
+                None => m,
+                Some(a) => a.add(&m),
+            });
+        }
+        acc.unwrap_or_else(|| CsrMatrix::new_empty(n_dofs, n_dofs))
     }
 
     /// Assemble a bilinear form using an explicit reference element (custom
@@ -1023,7 +1138,7 @@ impl Assembler {
             let mut acc: Option<CsrMatrix<f64>> = None;
             for integ in integrators {
                 let qo = integ.integration_order(space_order).unwrap_or(quad_order);
-                let m = Self::assemble_bilinear_inner(space, &[*integ], qo, Some(ref_elem));
+                let m = Self::assemble_bilinear_inner(space, &[*integ], qo, Some(ref_elem), None);
                 acc = Some(match acc {
                     None => m,
                     Some(a) => a.add(&m),
@@ -1032,7 +1147,7 @@ impl Assembler {
             return acc.unwrap_or_else(|| CsrMatrix::new_empty(n_dofs, n_dofs));
         }
 
-        Self::assemble_bilinear_inner(space, integrators, quad_order, Some(ref_elem))
+        Self::assemble_bilinear_inner(space, integrators, quad_order, Some(ref_elem), None)
     }
 
     /// Core assembly loop shared by [`Self::assemble_bilinear`]; see there for
@@ -1042,6 +1157,7 @@ impl Assembler {
         integrators: &[&dyn BilinearIntegrator],
         quad_order:  u8,
         ref_elem_override: Option<&dyn ReferenceElement>,
+        elem_marker: Option<&[i32]>,
     ) -> CsrMatrix<f64> {
         let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
@@ -1055,7 +1171,7 @@ impl Assembler {
         let ref_elem: &dyn ReferenceElement = match ref_elem_override {
             Some(r) => r,
             None => {
-                owned_default = ref_elem_vol(elem_type, space.element_order(0).max(1));
+                owned_default = ref_elem_vol_for_space(space, elem_type, space.element_order(0).max(1));
                 &*owned_default
             }
         };
@@ -1069,8 +1185,8 @@ impl Assembler {
 
         #[cfg(feature = "parallel")]
         {
-            if mesh.n_elements() >= assembly_parallel_min_elems() {
-                return assemble_bilinear_volume_parallel(space, integrators, &quad, ref_elem);
+            if elem_marker.is_none() && mesh.n_elements() >= assembly_parallel_min_elems() {
+                return assemble_bilinear_volume_parallel(space, integrators, &quad, quad_order, ref_elem);
             }
         }
 
@@ -1078,7 +1194,13 @@ impl Assembler {
         coo.reserve(est_nnz.min(10_000_000)); // cap to avoid giant pre-allocs for hp meshes
         let mut scratch = ElementScratch::new();
         for e in mesh.elem_iter() {
-            accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut coo, &mut scratch, ref_elem);
+            if let Some(marker) = elem_marker {
+                let tag = mesh.element_tag(e);
+                if tag <= 0 || (tag as usize) > marker.len() || marker[(tag - 1) as usize] == 0 {
+                    continue;
+                }
+            }
+            accumulate_volume_bilinear_element(space, e, integrators, &quad, quad_order, &mut coo, &mut scratch, ref_elem);
         }
         coo.into_csr()
     }
@@ -1103,7 +1225,7 @@ impl Assembler {
 
         // Quadrature from the ACTUAL solution order (see assemble_bilinear).
         let elem_type = mesh.element_type(0);
-        let owned_default = ref_elem_vol(elem_type, space.element_order(0).max(1));
+        let owned_default = ref_elem_vol_for_space(space, elem_type, space.element_order(0).max(1));
         let quad = owned_default.quadrature(quad_order);
 
         let dofs_per_elem = owned_default.n_dofs();
@@ -1118,7 +1240,7 @@ impl Assembler {
         let mut ldofs = 0;
 
         for e in mesh.elem_iter() {
-            accumulate_volume_bilinear_element(space, e, integrators, &quad, &mut coo, &mut scratch, &*owned_default);
+            accumulate_volume_bilinear_element(space, e, integrators, &quad, quad_order, &mut coo, &mut scratch, &*owned_default);
             let gd = &scratch.global_dofs;
             ldofs = gd.len();
             all_dofs.extend(gd.iter().map(|&d| d as u32));
@@ -1143,13 +1265,33 @@ impl Assembler {
             let mut acc = vec![0.0_f64; n_dofs];
             for integ in integrators {
                 let qo = integ.integration_order(space_order).unwrap_or(quad_order);
-                let v = Self::assemble_linear_inner(space, &[*integ], qo);
+                let v = Self::assemble_linear_inner(space, &[*integ], qo, None);
                 for i in 0..n_dofs { acc[i] += v[i]; }
             }
             return acc;
         }
 
-        Self::assemble_linear_inner(space, integrators, quad_order)
+        Self::assemble_linear_inner(space, integrators, quad_order, None)
+    }
+
+    /// Assemble a linear form where each integrator is applied on a subset of
+    /// elements selected by an element-attribute marker (MFEM
+    /// `LinearForm::AddDomainIntegrator(integ, marker)`).
+    ///
+    /// Marker layout is the same as [`Self::assemble_bilinear_marked`]:
+    /// length `max_attr` with `marker[attr-1] = 1` selecting attribute `attr`.
+    pub fn assemble_linear_marked<S: FESpace>(
+        space:       &S,
+        integrators: &[(&dyn LinearIntegrator, Option<&[i32]>)],
+        quad_order:  u8,
+    ) -> Vec<f64> {
+        let n_dofs = space.n_dofs();
+        let mut acc = vec![0.0_f64; n_dofs];
+        for (integ, marker) in integrators {
+            let v = Self::assemble_linear_inner(space, &[*integ], quad_order, *marker);
+            for i in 0..n_dofs { acc[i] += v[i]; }
+        }
+        acc
     }
 
     /// Core linear-form assembly loop shared by [`Self::assemble_linear`].
@@ -1157,25 +1299,32 @@ impl Assembler {
         space:       &S,
         integrators: &[&dyn LinearIntegrator],
         quad_order:  u8,
+        elem_marker: Option<&[i32]>,
     ) -> Vec<f64> {
         let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
 
         // Precompute quadrature rule from the ACTUAL solution order (see assemble_bilinear).
         let elem_type = mesh.element_type(0);
-        let quad = ref_elem_vol(elem_type, space.element_order(0).max(1)).quadrature(quad_order);
+        let quad = ref_elem_vol_for_space(space, elem_type, space.element_order(0).max(1)).quadrature(quad_order);
 
         #[cfg(feature = "parallel")]
         {
-            if mesh.n_elements() >= assembly_parallel_min_elems() {
-                return assemble_linear_volume_parallel(space, integrators, &quad);
+            if elem_marker.is_none() && mesh.n_elements() >= assembly_parallel_min_elems() {
+                return assemble_linear_volume_parallel(space, integrators, &quad, quad_order);
             }
         }
 
         let mut rhs = vec![0.0_f64; n_dofs];
         let mut scratch = ElementScratch::new();
         for e in mesh.elem_iter() {
-            accumulate_volume_linear_element(space, e, integrators, &quad, &mut rhs, &mut scratch);
+            if let Some(marker) = elem_marker {
+                let tag = mesh.element_tag(e);
+                if tag <= 0 || (tag as usize) > marker.len() || marker[(tag - 1) as usize] == 0 {
+                    continue;
+                }
+            }
+            accumulate_volume_linear_element(space, e, integrators, &quad, quad_order, &mut rhs, &mut scratch);
         }
         rhs
     }

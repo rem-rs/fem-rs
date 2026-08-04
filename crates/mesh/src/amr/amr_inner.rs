@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use fem_core::{FaceId, NodeId, ElemId};
-use crate::{element_type::ElementType, simplex::Mesh, rebuild_boundary::rebuild_3d_boundary};
+use crate::{element_type::ElementType, simplex::{GeometryData, Mesh}, rebuild_boundary::rebuild_3d_boundary};
 use crate::cad::{ProjectionConfig, project_boundary_to_cad};
 
 use super::bisect::{edge_key, local_edges_tri, refine_marked};
@@ -662,13 +662,239 @@ pub fn refine_nonconforming(
 /// - Quad4 → 4 Quad4 (conforming split matching MFEM UniformRefinement2D_base).
 pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-    match mesh.elem_type {
+    // Mixed Tri3+Quad4 meshes: per-element-type refinement with a shared
+    // edge-midpoint map (MFEM UniformRefinement2D_base handles mixed meshes).
+    if mesh.elem_types.is_some() {
+        return refine_uniform_2d_mixed(mesh);
+    }    match mesh.elem_type {
         ElementType::Tri3 => refine_marked(mesh, &all),
         ElementType::Quad4 => refine_uniform_quad4(mesh),
         _ => panic!(
             "refine_uniform: unsupported element type {:?} (only Tri3 and Quad4 are supported)",
             mesh.elem_type
         ),
+    }
+}
+
+/// Rotate each Tri3 element's vertex indices so that edge (0,1) is the
+/// longest edge — a 1:1 port of MFEM `Mesh::MarkTriMeshForRefinement`
+/// (`mesh/mesh.cpp`), which MFEM runs on load when the mesh constructor's
+/// `refine` flag is set (e.g. `Mesh(mesh_file, 1, 1)`).
+///
+/// This reordering changes the *local* vertex order of each triangle; the
+/// global vertex numbering is unchanged.  It matters for 1:1 fidelity of
+/// subsequent `UniformRefinement` because the new edge-midpoint vertex ids
+/// follow the element × local-edge traversal order, which depends on the
+/// rotated local ordering (see `refine_uniform_2d_mixed`).
+///
+/// Quad4 elements are left untouched (MFEM only rotates triangles).
+pub fn mark_tri_mesh_for_refinement(mesh: &mut Mesh<2>) {
+    const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
+    let n_elems = mesh.n_elems();
+    for e in 0..n_elems as ElemId {
+        if mesh.element_type_at(e) != ElementType::Tri3 {
+            continue;
+        }
+        let ns = mesh.elem_nodes(e);
+        // Squared lengths of the three edges: d[0] = |v0-v1|², d[1] = |v1-v2|²,
+        // d[2] = |v2-v0|²  (MFEM Triangle::MarkEdge, 2-D).
+        let mut d = [0.0_f64; 3];
+        for (i, &(li, lj)) in TRI_EDGES.iter().enumerate() {
+            let a = mesh.coords_of(ns[li]);
+            let b = mesh.coords_of(ns[lj]);
+            d[i] = (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
+        }
+        // MFEM: shift selects the longest edge; indices are rotated so the
+        // longest edge ends up between local vertices 0 and 1.
+        let shift = if d[0] >= d[1] {
+            if d[0] >= d[2] { 0 } else { 2 }
+        } else if d[1] >= d[2] { 1 } else { 2 };
+        if shift == 0 {
+            continue;
+        }
+        // Rewrite the element's conn slice (elem_offsets aware).
+        let start = if let Some(ref offs) = mesh.elem_offsets {
+            offs[e as usize]
+        } else {
+            e as usize * 3
+        };
+        let end = if let Some(ref offs) = mesh.elem_offsets {
+            offs[e as usize + 1]
+        } else {
+            start + 3
+        };
+        let (a, b, c) = (mesh.conn[start], mesh.conn[start + 1], mesh.conn[start + 2]);
+        match shift {
+            // case 1: [v0,v1,v2] → [v1,v2,v0]
+            1 => { mesh.conn[start] = b; mesh.conn[start + 1] = c; mesh.conn[start + 2] = a; }
+            // case 2: [v0,v1,v2] → [v2,v0,v1]
+            _ => { mesh.conn[start] = c; mesh.conn[start + 1] = a; mesh.conn[start + 2] = b; }
+        }
+        debug_assert!(end <= mesh.conn.len());
+    }
+}
+
+/// Uniform refinement of a mixed Tri3 + Quad4 2-D mesh, matching MFEM's
+/// `UniformRefinement2D_base` (which supports mixed element types).
+///
+/// Vertex layout follows MFEM exactly:
+/// - original vertices (0..n_verts),
+/// - edge midpoints `oedge + i` in `el_to_edge` (element × local-edge) order,
+/// - quad center vertices `oelem + q` appended AFTER all edge midpoints, one
+///   per quadrilateral element in element order (`quad_counter`).
+///
+/// Each Tri3 → 4 Tri3 children (red refinement), each Quad4 → 4 Quad4
+/// children, boundary segments → 2 segments, all child attributes copied.
+fn refine_uniform_2d_mixed(mesh: &Mesh<2>) -> Mesh<2> {
+    let dim = 2usize;
+    let n_verts = mesh.n_nodes();
+    let n_elems = mesh.n_elems();
+
+    // ── 1. Global edge map in element × local-edge order (MFEM el_to_edge) ──
+    const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
+    const QUAD_EDGES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+    let mut edge_map: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    let mut edge_list: Vec<(NodeId, NodeId)> = Vec::new();
+    for e in 0..n_elems as ElemId {
+        let et = mesh.element_type_at(e);
+        let ns = mesh.elem_nodes(e);
+        let edges = match et {
+            ElementType::Tri3 | ElementType::Tri6 => &TRI_EDGES[..],
+            ElementType::Quad4 => &QUAD_EDGES[..],
+            _ => panic!("refine_uniform_2d_mixed: unsupported element type {et:?}"),
+        };
+        for &(li, lj) in edges {
+            let key = (ns[li].min(ns[lj]), ns[li].max(ns[lj]));
+            edge_map.entry(key).or_insert_with(|| {
+                let id = edge_list.len();
+                edge_list.push(key);
+                id
+            });
+        }
+    }
+    let n_edges = edge_list.len();
+
+    // ── 2. Count quads: their centers are appended after all edge midpoints ──
+    let mut n_quads = 0usize;
+    for e in 0..n_elems as ElemId {
+        if mesh.element_type_at(e) == ElementType::Quad4 { n_quads += 1; }
+    }
+    let oedge = n_verts;
+    let oelem = oedge + n_edges;
+    let n_new_verts = oelem + n_quads;
+    let mut new_coords = vec![0.0_f64; n_new_verts * dim];
+    new_coords[..n_verts * dim].copy_from_slice(&mesh.coords);
+
+    // Edge midpoint coordinates, stored at vertex id `oedge + edge_id`
+    // (MFEM UniformRefinement2D_base calls AverageVertices(vv, 2, oedge+e[ei])
+    // in element order — the vertex index oedge+edge_id matches our map).
+    for (ei, &(a, b)) in edge_list.iter().enumerate() {
+        let vi = oedge + ei;
+        let ca = &mesh.coords[a as usize * dim..(a as usize + 1) * dim];
+        let cb = &mesh.coords[b as usize * dim..(b as usize + 1) * dim];
+        new_coords[vi * dim]     = (ca[0] + cb[0]) * 0.5;
+        new_coords[vi * dim + 1] = (ca[1] + cb[1]) * 0.5;
+    }
+
+    // ── 3. Children: Tri3 → 4 Tri3, Quad4 → 4 Quad4, in element order ───────
+    let mut child_conn = Vec::with_capacity(n_elems * 4 * 4);
+    let mut child_tags = Vec::with_capacity(n_elems * 4);
+    let mut child_types = Vec::with_capacity(n_elems * 4);
+    let mut child_offsets: Vec<usize> = vec![0];
+    let mut quad_counter = 0usize;
+
+    for e in 0..n_elems as ElemId {
+        let et = mesh.element_type_at(e);
+        let ns = mesh.elem_nodes(e);
+        let tag = mesh.elem_tags[e as usize];
+        let e_mid: Vec<NodeId> = match et {
+            ElementType::Tri3 | ElementType::Tri6 => TRI_EDGES.iter().map(|&(li, lj)| {
+                let key = (ns[li].min(ns[lj]), ns[li].max(ns[lj]));
+                (oedge + edge_map[&key]) as NodeId
+            }).collect(),
+            _ => QUAD_EDGES.iter().map(|&(li, lj)| {
+                let key = (ns[li].min(ns[lj]), ns[li].max(ns[lj]));
+                (oedge + edge_map[&key]) as NodeId
+            }).collect(),
+        };
+        match et {
+            ElementType::Tri3 | ElementType::Tri6 => {
+                // MFEM UniformRefinement2D_base child order (lines 9787-9794):
+                //   [v0, e0, e2], [e1, e2, e0](center), [e0, v1, e1], [e2, e1, v2]
+                for c in [
+                    [ns[0], e_mid[0], e_mid[2]],
+                    [e_mid[1], e_mid[2], e_mid[0]],
+                    [e_mid[0], ns[1], e_mid[1]],
+                    [e_mid[2], e_mid[1], ns[2]],
+                ] {
+                    child_conn.extend_from_slice(&c);
+                    child_offsets.push(child_conn.len());
+                    child_types.push(ElementType::Tri3);
+                }
+            }
+            _ => {
+                let center_idx = (oelem + quad_counter) as NodeId;
+                quad_counter += 1;
+                let cidx = center_idx as usize;
+                for d in 0..dim {
+                    let mut s = 0.0;
+                    for &vi in ns {
+                        s += mesh.coords[vi as usize * dim + d];
+                    }
+                    new_coords[cidx * dim + d] = s / 4.0;
+                }
+                // MFEM UniformRefinement2D_base (lines 9805-9812):
+                //   [v0, e0, center, e3], [e0, v1, e1, center],
+                //   [center, e1, v2, e2], [e3, center, e2, v3]
+                for c in [
+                    [ns[0], e_mid[0], center_idx, e_mid[3]],
+                    [e_mid[0], ns[1], e_mid[1], center_idx],
+                    [center_idx, e_mid[1], ns[2], e_mid[2]],
+                    [e_mid[3], center_idx, e_mid[2], ns[3]],
+                ] {
+                    child_conn.extend_from_slice(&c);
+                    child_offsets.push(child_conn.len());
+                    child_types.push(ElementType::Quad4);
+                }
+            }
+        }
+        child_tags.push(tag);
+        child_tags.push(tag);
+        child_tags.push(tag);
+        child_tags.push(tag);
+    }
+
+    // ── 4. Boundary: each segment → 2 segments via edge midpoint ───────────
+    let n_faces = mesh.n_faces();
+    let mut new_face_conn = Vec::with_capacity(n_faces * 4);
+    let mut new_face_tags = Vec::with_capacity(n_faces * 2);
+    for f in 0..n_faces {
+        let a = mesh.face_conn[f * 2];
+        let b = mesh.face_conn[f * 2 + 1];
+        let key = (a.min(b), a.max(b));
+        let mid = (oedge + edge_map[&key]) as NodeId;
+        new_face_conn.extend_from_slice(&[a, mid, mid, b]);
+        let tag = mesh.face_tags[f];
+        new_face_tags.push(tag);
+        new_face_tags.push(tag);
+    }
+
+    Mesh {
+        coords: new_coords,
+        conn: child_conn,
+        elem_tags: child_tags,
+        elem_type: mesh.elem_type,
+        face_conn: new_face_conn,
+        face_tags: new_face_tags,
+        face_type: ElementType::Line2,
+        elem_types: Some(child_types),
+        elem_offsets: Some(child_offsets),
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        geometry: None,
     }
 }
 
@@ -735,7 +961,8 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
     let mut new_coords = vec![0.0_f64; n_new_verts * dim];
     new_coords[..n_orig_verts * dim].copy_from_slice(&mesh.coords);
 
-    // Edge midpoint coordinates
+    // Edge midpoint coordinates (folded vertices: average of the two vertex
+    // coordinates — MFEM's edge transformation, which uses `vertices`).
     for (ei, &(a, b)) in edge_list.iter().enumerate() {
         let vi = n_orig_verts + ei;
         let ca = &mesh.coords[a as usize * dim..(a as usize + 1) * dim];
@@ -743,6 +970,26 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         new_coords[vi * dim]     = (ca[0] + cb[0]) * 0.5;
         new_coords[vi * dim + 1] = (ca[1] + cb[1]) * 0.5;
     }
+
+    // Per-element geometry propagation (if the parent mesh carries one).
+    // The child elements get independent geometry nodes computed from the
+    // *parent element's own* geometry (MFEM `nodes` update), which keeps the
+    // two sides of a periodic seam geometrically distinct.
+    let parent_geom: Option<Vec<[[f64; 2]; 4]>> = mesh.geometry.as_ref().map(|g| {
+        (0..n_elems)
+            .map(|e| {
+                let off = e * g.nodes_per_elem;
+                let mut out = [[0.0_f64; 2]; 4];
+                for k in 0..4 {
+                    let c = &g.coords[g.conn[off + k] as usize * dim..(g.conn[off + k] as usize + 1) * dim];
+                    out[k] = [c[0], c[1]];
+                }
+                out
+            })
+            .collect()
+    });
+    let mut child_geom_conn: Vec<NodeId> = Vec::new();
+    let mut child_geom_coords: Vec<f64> = Vec::new();
 
     let mut child_conn = Vec::with_capacity(n_elems * 4 * npe);
     let mut new_tags = Vec::with_capacity(n_elems * 4);
@@ -757,12 +1004,20 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         ];
         let center_idx = (n_orig_verts + n_edges + e) as NodeId;
 
-        // Compute center coordinates (average of 4 corners)
+        // Parent element's own geometry nodes (g[i] corresponds to v[i]).
+        let g = parent_geom.as_ref().map(|pg| pg[e]);
+
+        // Center coordinate: from the parent element's own geometry (MFEM
+        // evaluates the element transformation at the center).  Falls back to
+        // the folded-vertex average when no per-element geometry exists.
         let cidx = center_idx as usize;
         for d in 0..dim {
             let mut s = 0.0;
-            for &vi in &v {
-                s += mesh.coords[vi as usize * dim + d];
+            for gi in 0..4 {
+                s += match &g {
+                    Some(pg) => pg[gi][d],
+                    None => mesh.coords[v[gi] as usize * dim + d],
+                };
             }
             new_coords[cidx * dim + d] = s / 4.0;
         }
@@ -783,6 +1038,39 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         child_conn.extend_from_slice(&[center_idx, e_mid[1], v[2], e_mid[2]]);
         // 3 (upper-left):  e[3],  center, e[2], v[3]
         child_conn.extend_from_slice(&[e_mid[3], center_idx, e_mid[2], v[3]]);
+
+        // Child geometry (per-element independent nodes), when the parent has
+        // geometry.  The child nodes follow the same H1 vertex ordering as
+        // `child_conn` (v0=LL, v1=LR, v2=UR, v3=UL); parent geometry nodes are
+        // already in that order (the reader normalised the L2 lexicographic
+        // order to H1).  H1 edges: bottom=(0,1), right=(1,2), top=(2,3),
+        // left=(3,0).
+        if let Some(pg) = &g {
+            let em = [
+                avg2(&pg[0], &pg[1]), // bottom edge midpoint
+                avg2(&pg[1], &pg[2]), // right edge midpoint
+                avg2(&pg[2], &pg[3]), // top edge midpoint
+                avg2(&pg[3], &pg[0]), // left edge midpoint
+            ];
+            // MFEM RefinementMatrix column order is the L2-lex DOF order
+            // ((0,0),(1,0),(0,1),(1,1)) — H1 pg order is (0,0),(1,0),(1,1),(0,1),
+            // so the last two swap.  The 0.25-weighted column sums differ by
+            // 1 ulp depending on order (bit-identical target verified).
+            let cc = avg4(&pg[0], &pg[1], &pg[3], &pg[2]);
+            let children: [[[f64; 2]; 4]; 4] = [
+                [pg[0], em[0], cc, em[3]], // LL: v0, bottom-mid, center, left-mid
+                [em[0], pg[1], em[1], cc], // LR: bottom-mid, v1, right-mid, center
+                [cc, em[1], pg[2], em[2]], // UR: center, right-mid, v2, top-mid
+                [em[3], cc, em[2], pg[3]], // UL: left-mid, center, top-mid, v3
+            ];
+            for c in children {
+                for node in c {
+                    child_geom_conn.push((child_geom_coords.len() / dim) as NodeId);
+                    child_geom_coords.push(node[0]);
+                    child_geom_coords.push(node[1]);
+                }
+            }
+        }
 
         let tag = mesh.elem_tags[e];
         new_tags.extend_from_slice(&[tag, tag, tag, tag]);
@@ -820,8 +1108,32 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
-        geometry: None,
+        geometry: parent_geom.map(|_| {
+            let n_geom = child_geom_coords.len() / dim;
+            GeometryData {
+                order: 1,
+                conn: child_geom_conn,
+                nodes_per_elem: 4,
+                coords: child_geom_coords,
+                n_nodes: n_geom,
+            }
+        }),
     }
+}
+
+/// Average of two 2-D points.
+fn avg2(a: &[f64; 2], b: &[f64; 2]) -> [f64; 2] {
+    // MFEM RefinementMatrix interpolation: the sparse-matrix Mult accumulates
+    // 0.5*p0 then fuses 0.5*p1 via FMA (kernels::Mult).
+    [0.5f64.mul_add(b[0], 0.5 * a[0]), 0.5f64.mul_add(b[1], 0.5 * a[1])]
+}
+
+/// Average of four 2-D points.
+fn avg4(a: &[f64; 2], b: &[f64; 2], c: &[f64; 2], d: &[f64; 2]) -> [f64; 2] {
+    [
+        0.25f64.mul_add(d[0], 0.25f64.mul_add(c[0], 0.25 * a[0] + 0.25 * b[0])),
+        0.25f64.mul_add(d[1], 0.25f64.mul_add(c[1], 0.25 * a[1] + 0.25 * b[1])),
+    ]
 }
 
 /// Uniformly refine all elements of a 3-D mesh, dispatching to the appropriate

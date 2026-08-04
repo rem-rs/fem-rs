@@ -18,7 +18,7 @@ let integ = BoundaryMassIntegrator { alpha: 1.0 };
 ```", |qp, k_face, n, w| {
     for i in 0..n {
         for j in 0..n {
-            k_face[i * n + j] += w * qp.phi[i] * qp.phi[j];
+            k_face[i * n + j] = (w * qp.phi[i]).mul_add(qp.phi[j], k_face[i * n + j]);
         }
     }
 });

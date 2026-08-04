@@ -79,9 +79,14 @@ impl BlockIlu {
 
         // Block graph matrix C (used only for the reordering): C(i,j) =
         // sqrt(sum of A(i,j)² over the block).
+        // MFEM builds C as an open SparseMatrix (`C.Add` in ascending
+        // `std::set` order → head-inserted linked list → the finalized CSR
+        // rows are in *descending* column order).  The MDF weight sums iterate
+        // the C row in that order, so we must store `c_rows` descending to be
+        // bit-identical (a 1-ulp difference flips WeightMinHeap tie-breaks).
         let mut c_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nbr];
         for iblock in 0..nbr {
-            for &jblock in &unique_block_cols[iblock] {
+            for &jblock in unique_block_cols[iblock].iter().rev() {
                 let mut s = 0.0;
                 for bi in 0..bs {
                     let i = iblock * bs + bi;

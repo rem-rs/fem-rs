@@ -185,6 +185,65 @@ fn u0_function(problem: usize, bb_min: &[f64], bb_max: &[f64], x: &[f64]) -> f64
 
 // ─── Evolution operator (MFEM IMEX_Evolution) ─────────────────────────────
 
+/// MFEM `SparseMatrix::operator+=` semantics: `out = primary + scale*secondary`
+/// with the *row-internal column order* of MFEM's open SparseMatrix.
+///
+/// MFEM keeps one linked list per row (`SearchRow` head-inserts new columns,
+/// existing columns are accumulated in place) and `Finalize()` does NOT sort —
+/// so `A = s; A *= dt; A += m` keeps `s`'s column order and only *head-inserts*
+/// `m`'s columns that are missing from `s`.  `primary`'s column order is
+/// preserved verbatim; `secondary`'s columns already present in the row are
+/// accumulated in place, its new columns are head-inserted (in reverse of the
+/// `secondary` row order, matching the linked-list head-insert).
+///
+/// The Rust `CooMatrix::into_csr()` merge (sort by (row,col) then reverse by
+/// insertion index) would re-order columns, so ex41 must build M/S/K/A with
+/// this function instead of `coo.into_csr()` to be bit-identical to MFEM.
+fn merge_csr_mfem_plus_eq(
+    primary: &CsrMatrix<f64>,
+    secondary: &CsrMatrix<f64>,
+    scale_secondary: f64,
+) -> CsrMatrix<f64> {
+    let n = primary.nrows;
+    debug_assert_eq!(n, secondary.nrows);
+    let mut row_ptr = vec![0usize; n + 1];
+    let mut col_idx: Vec<u32> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+    for i in 0..n {
+        // primary row i, in order.
+        let mut row: Vec<(u32, f64)> = Vec::new();
+        for k in primary.row_ptr[i]..primary.row_ptr[i + 1] {
+            row.push((primary.col_idx[k], primary.values[k]));
+        }
+        // secondary row i: accumulate existing columns, collect new ones.
+        let mut new_cols: Vec<(u32, f64)> = Vec::new();
+        for k in secondary.row_ptr[i]..secondary.row_ptr[i + 1] {
+            let j = secondary.col_idx[k];
+            if let Some(p) = row.iter().position(|(c, _)| *c == j) {
+                row[p].1 += scale_secondary * secondary.values[k];
+            } else {
+                new_cols.push((j, scale_secondary * secondary.values[k]));
+            }
+        }
+        // Head-insert new columns (MFEM SearchRow: node->Prev = Rows[row]).
+        for (j, v) in new_cols.into_iter().rev() {
+            row.insert(0, (j, v));
+        }
+        for (j, v) in row {
+            col_idx.push(j);
+            values.push(v);
+        }
+        row_ptr[i + 1] = col_idx.len();
+    }
+    CsrMatrix { nrows: n, ncols: primary.ncols, row_ptr, col_idx, values }
+}
+
+/// Scale every value of a CSR matrix (structure unchanged).
+fn scale_csr(a: &CsrMatrix<f64>, s: f64) -> CsrMatrix<f64> {
+    let values = a.values.iter().map(|v| s * v).collect();
+    CsrMatrix { nrows: a.nrows, ncols: a.ncols, row_ptr: a.row_ptr.clone(), col_idx: a.col_idx.clone(), values }
+}
+
 /// `M du/dt = K u - S u + b`, explicit part `M⁻¹K u`, implicit part solves
 /// `(M + dt·S) k = -S·u` — bit-for-bit MFEM `IMEX_Evolution`.
 struct ImexEvolution {
@@ -255,19 +314,11 @@ impl ImexOperator for ImexEvolution {
         for i in 0..n {
             sx[i] = -sx[i];
         }
-        // A = M + dt·S — MFEM builds it as `A = S; A *= dt; A += M`, i.e. the
-        // per-entry summation order is `dt*S + M` (S first, then M).  Mirror
-        // that order for bit-identical values.
-        let mut a_coo = CooMatrix::new(n, n);
-        for i in 0..n {
-            for p in self.s.row_ptr[i]..self.s.row_ptr[i + 1] {
-                a_coo.add(i, self.s.col_idx[p] as usize, dt * self.s.values[p]);
-            }
-            for p in self.m.row_ptr[i]..self.m.row_ptr[i + 1] {
-                a_coo.add(i, self.m.col_idx[p] as usize, self.m.values[p]);
-            }
-        }
-        let a: CsrMatrix<f64> = a_coo.into_csr();
+        // A = M + dt·S — MFEM builds it as `A = S; A *= dt; A += M` (per-entry
+        // summation order `dt*S + M`, `S`'s column order preserved by the
+        // open-matrix SearchRow semantics — see merge_csr_mfem_plus_eq).
+        let scaled_s = scale_csr(&self.s, dt);
+        let a = merge_csr_mfem_plus_eq(&scaled_s, &self.m, 1.0);
         let cfg = SolverConfig {
             rtol: 1e-9,
             atol: 0.0,
@@ -446,31 +497,15 @@ fn main() {
                 kappa as f64,
             );
         }
+        // K = -ConvectionIntegrator + trace ; S = Diffusion + diffusion-face.
+        // MFEM: K = alpha*Convection (alpha=-1) + NonconservativeDGTrace,
+        // S = Diffusion + DGDiffusion — assembled into ONE open SparseMatrix
+        // (domain integrators first, then face integrators), so the column
+        // order is preserved by merge_csr_mfem_plus_eq instead of coo merge.
         let k_face = k_face_coo.into_csr();
         let s_face = s_face_coo.into_csr();
-
-        // K = -ConvectionIntegrator + trace ; S = Diffusion + diffusion-face.
-        let mut k_coo = CooMatrix::new(n_dofs, n_dofs);
-        for i in 0..n_dofs {
-            for p in k_vol.row_ptr[i]..k_vol.row_ptr[i + 1] {
-                k_coo.add(i, k_vol.col_idx[p] as usize, -k_vol.values[p]);
-            }
-            for p in k_face.row_ptr[i]..k_face.row_ptr[i + 1] {
-                k_coo.add(i, k_face.col_idx[p] as usize, k_face.values[p]);
-            }
-        }
-        k = k_coo.into_csr();
-        let _ = &k_vol;
-        let mut s_coo = CooMatrix::new(n_dofs, n_dofs);
-        for i in 0..n_dofs {
-            for p in s_vol.row_ptr[i]..s_vol.row_ptr[i + 1] {
-                s_coo.add(i, s_vol.col_idx[p] as usize, s_vol.values[p]);
-            }
-            for p in s_face.row_ptr[i]..s_face.row_ptr[i + 1] {
-                s_coo.add(i, s_face.col_idx[p] as usize, s_face.values[p]);
-            }
-        }
-        s = s_coo.into_csr();
+        k = merge_csr_mfem_plus_eq(&k_face, &k_vol, -1.0);
+        s = merge_csr_mfem_plus_eq(&s_face, &s_vol, 1.0);
 
         // 7. Initial conditions.
         u = vec![0.0f64; n_dofs];

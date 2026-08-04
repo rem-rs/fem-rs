@@ -9,6 +9,15 @@ use fem_mesh::topology::MeshTopology;
 
 use crate::fe_space::{FESpace, SpaceType};
 
+/// Physical corner `k` of element `e`: per-element geometry when the mesh
+/// carries one (geometrically periodic meshes store per-element independent
+/// geometry), otherwise the shared node coordinates.
+fn corner_coords<M: MeshTopology>(mesh: &M, e: u32, k: usize) -> [f64; 2] {
+    let gn = mesh.geometry_nodes(e);
+    let c = mesh.geom_coords_of(gn[k]);
+    [c[0], c[1]]
+}
+
 /// Scalar L² (discontinuous) finite element space.
 ///
 /// - **P0** (`order = 0`): one DOF per element (piecewise constant).
@@ -188,10 +197,10 @@ impl<M: MeshTopology> L2Space<M> {
                     } else if dim == 2 && npe0 == 4 {
                         // Q2 on Quad4: 3×3 = 9 Gauss-Legendre nodes (MFEM
                         // L2_FECollection default BasisType::GaussLegendre)
-                        let p0 = mesh.node_coords(nodes[0]);
-                        let p1 = mesh.node_coords(nodes[1]);
-                        let p2 = mesh.node_coords(nodes[2]);
-                        let p3 = mesh.node_coords(nodes[3]);
+                        let p0 = corner_coords(&mesh, e, 0);
+                        let p1 = corner_coords(&mesh, e, 1);
+                        let p2 = corner_coords(&mesh, e, 2);
+                        let p3 = corner_coords(&mesh, e, 3);
                         let gl = fem_element::lagrange::QuadL2GL::new(2).dof_coords();
                         for (k, c) in gl.iter().enumerate() {
                             let (xi, eta) = (c[0], c[1]);
@@ -273,13 +282,29 @@ impl<M: MeshTopology> L2Space<M> {
                                 p0[1] + xi * (p1[1] - p0[1]) + eta * (p2[1] - p0[1]);
                         }
                     } else if dim == 2 && npe0 == 4 {
-                        // Q3 on Quad4: 4×4 = 16 Gauss-Legendre nodes
-                        let p0 = mesh.node_coords(nodes[0]);
-                        let p1 = mesh.node_coords(nodes[1]);
-                        let p2 = mesh.node_coords(nodes[2]);
-                        let p3 = mesh.node_coords(nodes[3]);
-                        let gl = fem_element::lagrange::QuadL2GL::new(3).dof_coords();
-                        for (k, c) in gl.iter().enumerate() {
+                        // Q3 on Quad4: 4×4 = 16 nodes.  With L2Basis::GaussLobatto
+                        // (MFEM DG_FECollection(3, 2, BasisType::GaussLobatto))
+                        // the DOF nodes are the GLL tensor nodes in MFEM's
+                        // H1/QuadQk dof ordering (vertices, edges, interior) —
+                        // the same ordering as the QuadQk(3) assembly basis.
+                        // With L2Basis::GaussLegendre keep the GL nodes.
+                        let p0 = corner_coords(&mesh, e, 0);
+                        let p1 = corner_coords(&mesh, e, 1);
+                        let p2 = corner_coords(&mesh, e, 2);
+                        let p3 = corner_coords(&mesh, e, 3);
+                        let ref_coords: Vec<Vec<f64>> = match basis {
+                            // MFEM `DG_FECollection` (GaussLobatto) uses the
+                            // lexicographic tensor DOF ordering (x fastest),
+                            // NOT the H1 topological ordering — hence
+                            // `QuadQk::new_lex`, not `QuadQk::new`.
+                            L2Basis::GaussLobatto => {
+                                fem_element::lagrange::factory::QuadQk::new_lex(3).dof_coords()
+                            }
+                            L2Basis::GaussLegendre => {
+                                fem_element::lagrange::QuadL2GL::new(3).dof_coords()
+                            }
+                        };
+                        for (k, c) in ref_coords.iter().enumerate() {
                             let (xi, eta) = (c[0], c[1]);
                             let omx = 1.0 - xi; let omy = 1.0 - eta;
                             let idx = (base_dof + k) * 2;
@@ -325,6 +350,14 @@ impl<M: MeshTopology> L2Space<M> {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+impl<M: MeshTopology> L2Space<M> {
+    /// Flat DOF-node coordinates (`n_dofs * dim`), in the same per-element
+    /// order as the assembly basis (H1/QuadQk order for quads).
+    pub fn dof_coords(&self) -> &[f64] {
+        &self.dof_coords
     }
 }
 

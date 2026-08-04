@@ -16,10 +16,16 @@ For `ρ = 1` this is the standard L² mass matrix.
 # use fem_assembly::standard::MassIntegrator;
 let integ = MassIntegrator { rho: 1.0 };
 ```", |qp, k_elem, n, w| {
+    // MFEM AddMult_a_VVt: avi = a*v(i) once, the symmetric (j,i) entry
+    // shares the SAME avivj product (bit-identical).
     for i in 0..n {
-        for j in 0..n {
-            k_elem[i * n + j] += w * qp.phi[i] * qp.phi[j];
+        let avi = w * qp.phi[i];
+        for j in 0..i {
+            let avivj = avi * qp.phi[j];
+            k_elem[i * n + j] += avivj;
+            k_elem[j * n + i] += avivj;
         }
+        k_elem[i * n + i] += avi * qp.phi[i];
     }
 });
 

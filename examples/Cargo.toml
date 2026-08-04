@@ -27,6 +27,7 @@ fem-linalg-gpu = { path = "../crates/linalg-gpu", optional = true }
 wgpu           = { version = "27", optional = true }
 bytemuck       = { workspace = true, optional = true }
 nalgebra     = { workspace = true }
+libm         = "0.2"
 linlvo       = { git = "https://github.com/rem-rs/linlvo.git" }
 log          = { workspace = true }
 env_logger   = { workspace = true }
@@ -186,8 +187,8 @@ path = "mfem_ex40_eikonal.rs"
 name = "mfem_ex41_imex"
 path = "mfem_ex41_imex.rs"
 [[example]]
-name = "mfem_ex4_darcy"
-path = "mfem_ex4_darcy.rs"
+name = "dbg_ex41_dump"
+path = "dbg_ex41_dump.rs"
 [[example]]
 name = "mfem_ex5_mixed_darcy"
 path = "mfem_ex5_mixed_darcy.rs"

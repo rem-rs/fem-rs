@@ -900,6 +900,11 @@ pub struct QuadQk {
     /// GLL nodes on `[0,1]` (`0.5·(lag1d.nodes+1)`), used by the MFEM
     /// barycentric evaluation and `node_to_dof`.
     gll01: Vec<f64>,
+    /// DOF ordering: `false` = MFEM H1_FECollection topological order
+    /// (vertices → edges → interior, see [`QuadQk::node_to_dof`]);
+    /// `true` = lexicographic tensor-product order `ix + iy*(p+1)` (x fastest),
+    /// which is what MFEM's `DG_FECollection`/`L2_FECollection` use.
+    lex: bool,
 }
 
 impl QuadQk {
@@ -911,6 +916,26 @@ impl QuadQk {
             order: p,
             lag1d,
             gll01,
+            lex: false,
+        }
+    }
+
+    /// QuadQk with **lexicographic** (tensor-product) DOF ordering — matches
+    /// MFEM `DG_FECollection`/`L2_FECollection` (per-element DOFs are the GLL
+    /// nodes in row-major order `ix + iy*(p+1)`, x fastest).  The default
+    /// [`QuadQk::new`] keeps the H1 topological ordering.
+    pub fn new_lex(p: usize) -> Self {
+        let mut q = QuadQk::new(p);
+        q.lex = true;
+        q
+    }
+
+    /// DOF index for the tensor node `(ix, iy)`.
+    fn dof_index(&self, ix: usize, iy: usize) -> usize {
+        if self.lex {
+            ix + iy * (self.order + 1)
+        } else {
+            self.node_to_dof(ix, iy)
         }
     }
 
@@ -932,6 +957,13 @@ impl QuadQk {
 
     /// MFEM `Poly_1D::Basis::Eval` (Barycentric) on `[0,1]`: stable-centre
     /// barycentric Lagrange values and first derivatives at `y`.
+    ///
+    /// This mirrors MFEM's *value+derivative* overload
+    /// (`Eval(y, u, d)`), which computes the values as `u(i) = l·si·w(i)`
+    /// with `si = 1/(y−x(i))`.  [`QuadQk::mfem_bary_val`] mirrors the
+    /// value-only overload (`Eval(y, u)`) used by `CalcShape`, which instead
+    /// divides: `u(i) = l·w(i)/(y−x(i))` — the two differ by 1 ulp and
+    /// picking the wrong one breaks bit-identical assembly.
     fn mfem_bary_1d(&self, y: f64) -> (Vec<f64>, Vec<f64>) {
         let p = self.order;
         let n = p + 1;
@@ -984,6 +1016,51 @@ impl QuadQk {
             d[i] = (lp * w[i] - u[i]) / (y - x[i]);
         }
         (u, d)
+    }
+
+    /// MFEM `Poly_1D::Basis::Eval(y, u)` (value-only overload, used by
+    /// `CalcShape`): barycentric Lagrange values with the **division** form
+    /// `u(i) = l·w(i)/(y − x(i))` — bit-for-bit different (1 ulp) from the
+    /// reciprocal-multiplication form in [`QuadQk::mfem_bary_1d`].
+    fn mfem_bary_val(&self, y: f64) -> Vec<f64> {
+        let p = self.order;
+        let n = p + 1;
+        let x = &self.gll01;
+        // Barycentric weights w_i = 1/∏_{j≠i}(x_i − x_j)
+        let mut w = vec![1.0; n];
+        for i in 0..n {
+            for j in 0..n {
+                if j != i {
+                    w[i] *= x[i] - x[j];
+                }
+            }
+            w[i] = 1.0 / w[i];
+        }
+        // Stable centre k (identical to mfem_bary_1d).
+        let mut k = 0usize;
+        let mut lk = 1.0;
+        while k < p {
+            if y >= (x[k] + x[k + 1]) / 2.0 {
+                lk *= y - x[k];
+                k += 1;
+            } else {
+                for i in k + 1..=p {
+                    lk *= y - x[i];
+                }
+                break;
+            }
+        }
+        let l = lk * (y - x[k]);
+        let mut u = vec![0.0; n];
+        // MFEM value-only Eval: u(i) = l * w(i) / (y - x(i)).
+        for i in 0..k {
+            u[i] = l * w[i] / (y - x[i]);
+        }
+        u[k] = lk * w[k];
+        for i in k + 1..=p {
+            u[i] = l * w[i] / (y - x[i]);
+        }
+        u
     }
 
     fn node_to_dof(&self, ix: usize, iy: usize) -> usize {
@@ -1039,7 +1116,7 @@ impl QuadQk {
         let mut coords = vec![[0.0, 0.0]; n];
         for iy in 0..=p {
             for ix in 0..=p {
-                let dof = self.node_to_dof(ix, iy);
+                let dof = self.dof_index(ix, iy);
                 coords[dof] = [self.gll01[ix], self.gll01[iy]];
             }
         }
@@ -1058,13 +1135,15 @@ impl ReferenceElement for QuadQk {
         (self.order + 1) * (self.order + 1)
     }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        // MFEM [0,1] barycentric basis (no chain-rule mapping).
-        let (lx, _) = self.mfem_bary_1d(xi[0]);
-        let (ly, _) = self.mfem_bary_1d(xi[1]);
+        // MFEM [0,1] barycentric basis (no chain-rule mapping).  MFEM's
+        // `CalcShape` uses the *value-only* `Poly_1D::Basis::Eval` overload
+        // (division form) — see `mfem_bary_val`.
+        let lx = self.mfem_bary_val(xi[0]);
+        let ly = self.mfem_bary_val(xi[1]);
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
-                values[self.node_to_dof(ix, iy)] = lx[ix] * ly[iy];
+                values[self.dof_index(ix, iy)] = lx[ix] * ly[iy];
             }
         }
     }
@@ -1075,7 +1154,7 @@ impl ReferenceElement for QuadQk {
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
-                let dof = self.node_to_dof(ix, iy);
+                let dof = self.dof_index(ix, iy);
                 grads[dof * 2] = dlx[ix] * ly[iy];
                 grads[dof * 2 + 1] = lx[ix] * dly[iy];
             }

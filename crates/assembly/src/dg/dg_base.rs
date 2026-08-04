@@ -37,7 +37,7 @@ pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         // order >= 3 uses GLL nodes on [0,1]^2 (MFEM H1 default); QuadQ3 is
         // equidistant [-1,1]^2 and NOT MFEM-compatible at p=3.
-        (ElementType::Quad4, 3) => Box::new(QuadQk::new(3)),
+        (ElementType::Quad4, 3) => Box::new(QuadQk::new_lex(3)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
@@ -50,7 +50,7 @@ pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
 // MFEM: FECollection::FiniteElementForGeometry
 pub fn ref_elem_vol_dynamic(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
-        (ElementType::Quad4, order) if order > 2 => Box::new(QuadQk::new(order as usize)),
+        (ElementType::Quad4, order) if order > 2 => Box::new(QuadQk::new_lex(order as usize)),
         _ => ref_elem_vol(et, order),
     }
 }

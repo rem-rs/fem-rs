@@ -163,21 +163,34 @@ fn bilinear_map(g: &[[f64; 2]; 4], xi: f64, eta: f64) -> [f64; 2] {
 }
 
 /// Jacobian matrix J = [dp/dxi, dp/deta] (2x2) at a reference point.
-fn jacobian(g: &[[f64; 2]; 4], xi: f64, eta: f64) -> [[f64; 2]; 2] {
-    let omy = 1.0 - eta;
-    let omx = 1.0 - xi;
-    // dp/dxi
-    let dxi = [
-        omy * (g[1][0] - g[0][0]) + eta * (g[2][0] - g[3][0]),
-        omy * (g[1][1] - g[0][1]) + eta * (g[2][1] - g[3][1]),
-    ];
-    // dp/deta
-    let deta = [
-        omx * (g[3][0] - g[0][0]) + xi * (g[2][0] - g[1][0]),
-        omx * (g[3][1] - g[0][1]) + xi * (g[2][1] - g[1][1]),
-    ];
-    [[dxi[0], deta[0]], [dxi[1], deta[1]]]
+///
+/// MFEM `IsoparametricTransformation::EvalJacobian` computes
+/// `dFdx = PointMat * dshape`, where `PointMat` holds the element's geometry
+/// nodes in the *L2 lex* DOF order (`L2_T1_2D_P1` mesh-nodes field) and
+/// `dshape` is the P1-quad `CalcDShape` (Poly_1D barycentric).  The analytic
+/// bilinear derivative `omy*(g1-g0) + eta*(g2-g3)` is mathematically equal but
+/// floats to a different last ulp, which flips BlockILU's MDF tie-breaks.
+pub fn jacobian(g: &[[f64; 2]; 4], xi: f64, eta: f64) -> [[f64; 2]; 2] {
+    // L2-lex geometry-node order: dof2=(0,1) ↔ local node 3, dof3=(1,1) ↔ local node 2.
+    let pm = [g[0], g[1], g[3], g[2]];
+    let mut dphi = [0.0f64; 8];
+    P1_GEOM.eval_grad_basis(&[xi, eta], &mut dphi);
+    let mut j = [[0.0f64; 2]; 2];
+    for k in 0..4 {
+        // MFEM's kernels::AddMult is compiled with FMA: dFdx += dshape*PointMat
+        // fuses the multiply into the accumulation (1-ulp difference from the
+        // unfused form).  Use mul_add to match bit-for-bit.
+        j[0][0] = dphi[k * 2].mul_add(pm[k][0], j[0][0]);
+        j[1][0] = dphi[k * 2].mul_add(pm[k][1], j[1][0]);
+        j[0][1] = dphi[k * 2 + 1].mul_add(pm[k][0], j[0][1]);
+        j[1][1] = dphi[k * 2 + 1].mul_add(pm[k][1], j[1][1]);
+    }
+    j
 }
+
+/// P1-quad geometry basis in L2-lex order (the mesh's `L2_T1_2D_P1` nodes
+/// field), shared by all face assembly.
+static P1_GEOM: std::sync::LazyLock<QuadQk> = std::sync::LazyLock::new(|| QuadQk::new_lex(1));
 
 fn det2(j: &[[f64; 2]; 2]) -> f64 {
     j[0][0] * j[1][1] - j[0][1] * j[1][0]
@@ -190,8 +203,10 @@ fn loc_map(edge: usize, flip: bool, xi: f64) -> (f64, f64) {
     match edge {
         0 => (t, 0.0),     // bottom: (0,0)->(1,0)
         1 => (1.0, t),     // right: (1,0)->(1,1)
-        2 => (1.0 - t, 1.0), // top: (1,1)->(0,1)
-        3 => (0.0, 1.0 - t), // left: (0,1)->(0,0)
+        // top/left with flip: MFEM's Loc2.Transform keeps the *raw* xi on the
+        // active component — `1-(1-xi)` would round to a different ulp.
+        2 => (if flip { xi } else { 1.0 - t }, 1.0), // top: (1,1)->(0,1)
+        3 => (0.0, if flip { xi } else { 1.0 - t }), // left: (0,1)->(0,0)
         _ => unreachable!(),
     }
 }
@@ -247,7 +262,7 @@ pub fn assemble_ex41_bdr_faces<F>(
     if let Some(g) = mesh.geometry.as_ref() {
         debug_assert_eq!(g.nodes_per_elem, 4);
     }
-    let re = QuadQk::new(order as usize);
+    let re = QuadQk::new_lex(order as usize);
     let n_dofs = re.n_dofs();
     let mut phi1 = vec![0.0f64; n_dofs];
     let mut dphi1 = vec![0.0f64; n_dofs * 2];
@@ -301,7 +316,7 @@ pub fn assemble_ex41_bdr_faces<F>(
             if w != 0.0 {
                 for i in 0..nd1 {
                     for j in 0..nd1 {
-                        k_ll[i * nd1 + j] += w * phi1[i] * phi1[j];
+                        k_ll[i * nd1 + j] = (w * phi1[i]).mul_add(phi1[j], k_ll[i * nd1 + j]);
                     }
                 }
             }
@@ -328,20 +343,22 @@ pub fn assemble_ex41_bdr_faces<F>(
             // ni = w * nor
             let ni = [w * nor[0], w * nor[1]];
             // nh = adjJ * ni
+            // adjJ.Mult(ni, nh) — MFEM kernels::Mult fuses the 2nd column
+            // into the accumulator (FMA), so use mul_add.
             let nh = [
-                adj1[0][0] * ni[0] + adj1[0][1] * ni[1],
-                adj1[1][0] * ni[0] + adj1[1][1] * ni[1],
+                adj1[0][0].mul_add(ni[0], adj1[0][1] * ni[1]),
+                adj1[1][0].mul_add(ni[0], adj1[1][1] * ni[1]),
             ];
             // dshape1dn[j] = dshape1(j,:) . nh
             let mut dshape1dn = vec![0.0f64; nd1];
             for j in 0..nd1 {
-                dshape1dn[j] = dphi1[j * 2] * nh[0] + dphi1[j * 2 + 1] * nh[1];
+                dshape1dn[j] = dphi1[j * 2].mul_add(nh[0], dphi1[j * 2 + 1] * nh[1]);
             }
             let wq = ni[0] * nor[0] + ni[1] * nor[1];
             // elmat (1,1): s1 * dshape1dn^T
             for i in 0..nd1 {
                 for j in 0..nd1 {
-                    el[i * nd1 + j] += phi1[i] * dshape1dn[j];
+                    el[i * nd1 + j] = phi1[i].mul_add(dshape1dn[j], el[i * nd1 + j]);
                 }
             }
             if kappa != 0.0 {
@@ -350,7 +367,7 @@ pub fn assemble_ex41_bdr_faces<F>(
                 for i in 0..nd1 {
                     let wsi = wqk * phi1[i];
                     for j in 0..=i {
-                        jm[i * nd1 + j] += wsi * phi1[j];
+                        jm[i * nd1 + j] = wsi.mul_add(phi1[j], jm[i * nd1 + j]);
                     }
                 }
             }
@@ -410,7 +427,7 @@ pub fn assemble_ex41_interior_faces<F>(
     if let Some(g) = mesh.geometry.as_ref() {
         debug_assert_eq!(g.nodes_per_elem, 4);
     }
-    let re = QuadQk::new(order as usize);
+    let re = QuadQk::new_lex(order as usize);
     let n_dofs = re.n_dofs();
     let mut phi1 = vec![0.0f64; n_dofs];
     let mut phi2 = vec![0.0f64; n_dofs];
@@ -484,26 +501,26 @@ pub fn assemble_ex41_interior_faces<F>(
             if w1 != 0.0 {
                 for i in 0..nd1 {
                     for j in 0..nd1 {
-                        k_ll[i * nd1 + j] += w1 * phi1[i] * phi1[j];
+                        k_ll[i * nd1 + j] = (w1 * phi1[i]).mul_add(phi1[j], k_ll[i * nd1 + j]);
                     }
                 }
                 // K12(r,c) = -w1 * s2[c] * s1[r]  (r = Elem1 dof row, c = Elem2 dof col)
                 for r in 0..nd1 {
                     for c in 0..nd2 {
-                        k_lr[r * nd2 + c] += -w1 * phi2[c] * phi1[r];
+                        k_lr[r * nd2 + c] = (-(w1 * phi2[c])).mul_add(phi1[r], k_lr[r * nd2 + c]);
                     }
                 }
             }
             if w2 != 0.0 {
                 for i in 0..nd2 {
                     for j in 0..nd2 {
-                        k_rr[i * nd2 + j] += w2 * phi2[i] * phi2[j];
+                        k_rr[i * nd2 + j] = (w2 * phi2[i]).mul_add(phi2[j], k_rr[i * nd2 + j]);
                     }
                 }
                 // K21(r,c) = -w2 * s1[c] * s2[r]  (r = Elem2 dof row, c = Elem1 dof col)
                 for r in 0..nd2 {
                     for c in 0..nd1 {
-                        k_rl[r * nd1 + c] += -w2 * phi1[c] * phi2[r];
+                        k_rl[r * nd1 + c] = (-(w2 * phi1[c])).mul_add(phi2[r], k_rl[r * nd1 + c]);
                     }
                 }
             }
@@ -528,21 +545,25 @@ pub fn assemble_ex41_interior_faces<F>(
             let adj1 = [[j1[1][1], -j1[0][1]], [-j1[1][0], j1[0][0]]];
             let mut w = ipw / det1;
             if nd2 > 0 {
-                w /= 2.0;
+                // MFEM: w = ip.weight/2/Weight() — divide by 2 FIRST, then by
+                // the determinant (bit-different from (ipw/det)/2).
+                w = ipw / 2.0 / det1;
             }
             // Q == diffusion coefficient (MFEM ConstantCoefficient diff).
             w *= diff;
             // ni = w * nor  (Q == 1 constant diffusion coefficient)
             let ni = [w * nor[0], w * nor[1]];
             // nh = adjJ * ni
+            // adjJ.Mult(ni, nh) — MFEM kernels::Mult fuses the 2nd column
+            // into the accumulator (FMA), so use mul_add.
             let nh = [
-                adj1[0][0] * ni[0] + adj1[0][1] * ni[1],
-                adj1[1][0] * ni[0] + adj1[1][1] * ni[1],
+                adj1[0][0].mul_add(ni[0], adj1[0][1] * ni[1]),
+                adj1[1][0].mul_add(ni[0], adj1[1][1] * ni[1]),
             ];
             // dshape1dn[j] = dshape1(j,:) . nh
             let mut dshape1dn = vec![0.0f64; nd1];
             for j in 0..nd1 {
-                dshape1dn[j] = dphi1[j * 2] * nh[0] + dphi1[j * 2 + 1] * nh[1];
+                dshape1dn[j] = dphi1[j * 2].mul_add(nh[0], dphi1[j * 2 + 1] * nh[1]);
             }
             let mut wq = ni[0] * nor[0] + ni[1] * nor[1];
             // elmat block (1,1): s1 * dshape1dn^T
@@ -563,13 +584,13 @@ pub fn assemble_ex41_interior_faces<F>(
                 ];
                 let mut dshape2dn = vec![0.0f64; nd2];
                 for j in 0..nd2 {
-                    dshape2dn[j] = dphi2[j * 2] * nh2[0] + dphi2[j * 2 + 1] * nh2[1];
+                    dshape2dn[j] = dphi2[j * 2].mul_add(nh2[0], dphi2[j * 2 + 1] * nh2[1]);
                 }
                 wq += ni2[0] * nor[0] + ni2[1] * nor[1];
                 // elmat (1,2): s1 * dshape2dn^T
                 for i in 0..nd1 {
                     for j in 0..nd2 {
-                        el[i * (nd1 + nd2) + (nd1 + j)] += phi1[i] * dshape2dn[j];
+                        el[i * (nd1 + nd2) + (nd1 + j)] = phi1[i].mul_add(dshape2dn[j], el[i * (nd1 + nd2) + (nd1 + j)]);
                     }
                 }
                 // elmat (2,1): - s2 * dshape1dn^T
@@ -589,16 +610,16 @@ pub fn assemble_ex41_interior_faces<F>(
                 wq *= kappa;
                 for i in 0..nd1 {
                     for j in 0..nd1 {
-                        jm[i * (nd1 + nd2) + j] += wq * phi1[i] * phi1[j];
+                        jm[i * (nd1 + nd2) + j] = (wq * phi1[i]).mul_add(phi1[j], jm[i * (nd1 + nd2) + j]);
                     }
                 }
                 if nd2 > 0 {
                     for i in 0..nd2 {
                         for j in 0..nd1 {
-                            jm[(nd1 + i) * (nd1 + nd2) + j] -= wq * phi2[i] * phi1[j];
+                            jm[(nd1 + i) * (nd1 + nd2) + j] = (-(wq * phi2[i])).mul_add(phi1[j], jm[(nd1 + i) * (nd1 + nd2) + j]);
                         }
                         for j in 0..nd2 {
-                            jm[(nd1 + i) * (nd1 + nd2) + (nd1 + j)] += wq * phi2[i] * phi2[j];
+                            jm[(nd1 + i) * (nd1 + nd2) + (nd1 + j)] = (wq * phi2[i]).mul_add(phi2[j], jm[(nd1 + i) * (nd1 + nd2) + (nd1 + j)]);
                         }
                     }
                 }
