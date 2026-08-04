@@ -63,6 +63,9 @@ pub(crate) fn vec_ref_elem(
         (SpaceType::HCurl, ElementType::Hex8, 3, o) if o >= 3 => Box::new(HexNDk::new(o as usize)),
         (SpaceType::HDiv, ElementType::Quad4, 2, 0) => Box::new(QuadRT0),
         (SpaceType::HDiv, ElementType::Quad4, 2, 1) => Box::new(QuadRT1),
+        (SpaceType::HDiv, ElementType::Quad4, 2, o) if o >= 2 => {
+            Box::new(fem_element::raviart_thomas::QuadRTk::new(o as usize))
+        }
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 0) => Box::new(TriRT0),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriRT1),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriRT2),

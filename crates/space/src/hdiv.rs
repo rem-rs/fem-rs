@@ -265,8 +265,8 @@ impl<M: MeshTopology> HDivSpace<M> {
                 "HDivSpace: Tri RT supports orders 0, 1, 2"
             ),
             (2, ElementType::Quad4) => assert!(
-                order <= 1,
-                "HDivSpace: Quad RT supports orders 0 and 1"
+                order <= 6,
+                "HDivSpace: Quad RT supports orders 0..=6 (QuadRTk)"
             ),
             (3, ElementType::Tet4 | ElementType::Tet10) => assert!(
                 order <= 2,
@@ -612,8 +612,14 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 2-D quadrilateral construction ───────────────────────────────────
 
     fn build_2d_quad(mesh: M, order: u8) -> Self {
-        let dofs_per_edge = (order as usize) + 1; // 1 for RT0, 2 for RT1
-        let interior_dofs = if order == 0 { 0 } else { 4 };
+        let dofs_per_edge = (order as usize) + 1; // 1 for RT0, k+1 for RTk
+        // Interior DOFs of RT_QuadrilateralElement(k): 2k(k+1) (k(k+1) per
+        // component).  k=0 → 0, k=1 → 4, k=2 → 12.
+        let interior_dofs = if order == 0 {
+            0
+        } else {
+            2 * order as usize * (order as usize + 1)
+        };
         let dofs_per_elem = QUAD_FACES.len() * dofs_per_edge + interior_dofs;
         let n_elem = mesh.n_elements();
 

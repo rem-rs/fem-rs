@@ -21,7 +21,7 @@ use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetR
 use fem_element::nedelec::{TriND1, TetND1, QuadND1, QuadNDk, HexND1, HexNDk, PrismND1, PrismNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
-use crate::vector_assembler::isoparametric_jacobian;
+use crate::vector_assembler::{isoparametric_jacobian, geo_ref_elem_from_mesh};
 use fem_space::fe_space::{FESpace, SpaceType};
 use fem_space::{HCurlSpace, H1Space, HDivSpace, L2Space};
 
@@ -313,8 +313,13 @@ where
         let global_cols: Vec<usize> = col_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
         let elem_tag = mesh.element_tag(e);
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let _j_inv_t = tr.jacobian_inv_t().clone();
+
+        // Isoparametric geometry (e.g. Tri6 from SetCurvature(2)): the
+        // Jacobian must be built from the mesh's geometry nodes and the
+        // matching reference element; otherwise use the affine P1 simplex
+        // transformation.
+        let use_iso = mesh.geom_order() > 1;
+        let geo_elem = geo_ref_elem_from_mesh(mesh, e);
 
         // Apply H(div) orientation signs (contravariant Piola sign) from
         // the velocity space — VectorAssembler does this for the mass matrix,
@@ -330,7 +335,17 @@ where
         let mut div_c_signed = vec![0.0; n_c];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * tr.det_j().abs();
+            let (jac_q, det_j, xp) = if use_iso {
+                let ge = geo_elem
+                    .as_ref()
+                    .expect("missing geometry reference element for isoparametric mixed assembly");
+                let geo_nds = mesh.geometry_nodes(e);
+                isoparametric_jacobian(mesh, geo_nds, ge.as_ref(), xi, dim)
+            } else {
+                let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+                (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
+            };
+            let w = quad.weights[q] * det_j.abs();
 
             ref_r.eval_basis(xi, &mut phi_r);
             ref_c.eval_div(xi, &mut div_c_vec);
@@ -339,7 +354,6 @@ where
             // phys_div = ref_div / detJ  (since the Piola transform for H(div)
             // has div_phys = div_ref / detJ).  The quadrature weight already
             // includes |detJ|, so the product w * div_phys = q_weight * div_ref.
-            let det_j = tr.det_j();
             if let Some(signs) = signs_opt {
                 for i in 0..n_c.min(signs.len()) {
                     div_c_signed[i] = signs[i] * div_c_vec[i] / det_j;
@@ -353,7 +367,6 @@ where
                 }
             }
 
-            let xp = tr.map_to_physical(xi);
             let qp_r = QpData {
                 n_dofs: n_elem_r,
                 dim,
@@ -1024,6 +1037,9 @@ pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Resu
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriRT1),
         (SpaceType::HDiv, ElementType::Quad4, 0) => Box::new(QuadRT0),
         (SpaceType::HDiv, ElementType::Quad4, 1) => Box::new(QuadRT1),
+        (SpaceType::HDiv, ElementType::Quad4, o) if o >= 2 => {
+            Box::new(fem_element::raviart_thomas::QuadRTk::new(o as usize))
+        }
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 0) => Box::new(TetRT0),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetRT1),
         (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRT0),
