@@ -192,9 +192,16 @@ pub fn boundary_dofs(
     for f in 0..mesh.n_boundary_faces() as u32 {
         if tags.contains(&mesh.face_tag(f)) {
             let nodes = mesh.face_nodes(f);
-            // Vertex DOFs: all boundary face nodes
+            // Vertex DOFs: all boundary face nodes.  On NC meshes the global
+            // vertex DOF ids follow MFEM's vertex-view order (phys_to_vertex_dof),
+            // so a physical node id must NOT be used directly as the DOF id.
             for &node in nodes {
-                dof_set.insert(node as DofId);
+                let d = dm
+                    .phys_to_vertex_dof
+                    .get(&node)
+                    .copied()
+                    .unwrap_or(node as DofId);
+                dof_set.insert(d);
             }
             // Edge keys from face boundary
             for i in 0..nodes.len() {

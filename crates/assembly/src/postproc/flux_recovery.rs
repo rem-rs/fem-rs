@@ -436,11 +436,15 @@ where
     // flux-space constraint handling (SumFluxAndCount applies the
     // FESpace's constraints during averaging; InvTransformPrimal fills
     // constrained DOFs with the P2 interpolation of their masters).
-    for c in constraints {
-        let idx = c.constrained;
-        for d in 0..dim {
-            flux_avg[idx][d] = c.parents().map(|(p, coeff)| coeff * flux_avg[p][d]).sum();
-        }
+    // IMPORTANT: constrained DOFs may depend on other constrained DOFs
+    // (chains) — resolve in topological order (masters first), exactly like
+    // MFEM's multi-round finalization.  A single pass over `constraints` in
+    // arbitrary order reads stale parent values for chains (ex15 T001:
+    // elements 39 85 167 213 295 got err 0.0062 vs C++ 0.00022).
+    for d in 0..dim {
+        let mut comp: Vec<f64> = flux_avg.iter().map(|v| v[d]).collect();
+        recover_hanging_values(&mut comp, constraints);
+        for (i, &v) in comp.iter().enumerate() { flux_avg[i][d] = v; }
     }
 
     // ── Step 3: per-element error ────────────────────────────────────────────

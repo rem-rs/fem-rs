@@ -207,7 +207,13 @@ pub fn build_conforming_prolongation(
             }
         }
     }
-    coo.into_csr()
+    // MFEM's cP: identity rows are added in DOF order; slave rows are merged
+    // over the finalization rounds.  Empirically (ex15 T001) sorting the
+    // columns to ascending true-DOF order matches MFEM's cP column order in
+    // all but 12 slave rows (e.g. row 494: MFEM "68,530,502" vs ascending
+    // "68,502,530"); NOT sorting matches even fewer.  Sorting keeps the
+    // RA·cP accumulation order closest to MFEM.
+    coo.into_csr_sorted()
 }
 
 /// Assemble the true-DOF system exactly like MFEM `BilinearForm::ConformingAssemble`
@@ -282,6 +288,132 @@ pub fn recover_hanging_values(
     for c in remaining {
         x[c.constrained] = c.parents().map(|(p, coeff)| coeff * x[p]).sum();
     }
+}
+
+/// Upgrade mesh-level P1 hanging-node constraints to P2 (quadratic H1) DOF
+/// constraints, reproducing MFEM's `GetTransferMatrix`-based constraints.
+///
+/// For each P1 constraint `u[mid] = 0.5(u[a]+u[b])` the edge `(a,b)` is a
+/// coarse (master) edge of the current mesh that has been split at `mid`.
+/// MFEM constrains every slave sub-edge midpoint with the master-edge P2
+/// basis (`NodalLocalInterpolation`):
+///
+///   u[vertex DOF @ mid] = u[edge DOF e]                      (identity)
+///   u[slave DOF @ t]    = φ0(t) u[a] + φ1(t) u[e] + φ2(t) u[b]
+///     φ0 = 2t²-3t+1, φ1 = -4t²+4t, φ2 = 2t²-t                (t = 1/4, 3/4, …)
+///
+/// `midpoints` is the mesh's active edge-midpoint map: the recursion walks
+/// all split sub-edges of `(a,b)` (MFEM `TraverseEdge`), so slaves of slaves
+/// (edges that were re-split by a deeper neighbor) are also constrained to
+/// the *nearest unsplit* ancestor edge — exactly MFEM's `slave.masters`.
+///
+/// The P1 constraints carry *physical* node ids; the output constraints carry
+/// *vertex-view* DOF ids (via
+/// [`crate::dof_manager::DofManager::phys_to_vertex_dof`]), while the
+/// `edge_dof_map` keys stay physical.  This makes the resulting cP rows match
+/// MFEM bit-for-bit on multi-level NC meshes.
+pub fn p2_hanging_constraints(
+    p1: &[HangingNodeConstraint],
+    dm: &crate::dof_manager::DofManager,
+    midpoints: &std::collections::HashMap<(u32, u32), u32>,
+) -> Vec<HangingNodeConstraint> {
+    use crate::dof_manager::EdgeKey;
+    let mut out: Vec<HangingNodeConstraint> = Vec::new();
+    let v2d = &dm.phys_to_vertex_dof;
+    let edge_key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
+
+    for c in p1 {
+        let (mid_p, a_p, b_p) = (c.constrained as u32, c.parent_a as u32, c.parent_b as u32);
+        let (mid, a, b) = (v2d[&mid_p] as usize, v2d[&a_p] as usize, v2d[&b_p] as usize);
+        // coarse-edge midpoint DOF (edge_dof_map keyed by physical node pair)
+        let e = dm.edge_dof_map.get(&EdgeKey::new(a_p, b_p)).copied();
+        let Some(e) = e else { continue };
+        let e = e as usize;
+        // mid vertex DOF == coarse-edge midpoint DOF (same point).
+        if mid != e {
+            out.push(HangingNodeConstraint::new_weighted(mid, e, e, 0.5, 0.5, vec![]));
+        }
+        // Recursively constrain every split sub-edge midpoint of (a,b) with
+        // the master-edge P2 basis at its position t in [0,1] (MFEM
+        // TraverseEdge): each sub-edge (x,y) that exists in the edge table is
+        // a slave; if it was split further, its halves are slaves too.
+        fn collect(
+            x: u32,
+            y: u32,
+            t0: f64,
+            t1: f64,
+            a: usize,
+            b: usize,
+            e: usize,
+            midpoints: &std::collections::HashMap<(u32, u32), u32>,
+            dm: &crate::dof_manager::DofManager,
+            out: &mut Vec<HangingNodeConstraint>,
+        ) {
+            let key = if x < y { (x, y) } else { (y, x) };
+            // Sub-edge (x,y) exists in the mesh edge table -> its midpoint
+            // DOF is a slave of the coarse edge (a,b) at t = 0.5*(t0+t1).
+            if let Some(&s) = dm.edge_dof_map.get(&EdgeKey::new(x, y)) {
+                let s = s as usize;
+                if s != e {
+                    let t = 0.5 * (t0 + t1);
+                    let c0 = 2.0 * t * t - 3.0 * t + 1.0;
+                    let c1 = -4.0 * t * t + 4.0 * t;
+                    let c2 = 2.0 * t * t - t;
+                    if (c0.abs() > 1e-14 || c2.abs() > 1e-14 || c1.abs() > 1e-14)
+                        && s != a && s != b
+                    {
+                        out.push(HangingNodeConstraint::new_weighted(
+                            s, a, b, c0, c2, vec![(e, c1)],
+                        ));
+                    }
+                }
+            }
+            // MFEM AddDependencies: every slave edge contributes its endpoint
+            // DOFs as well (GetEdgeDofs returns [V0, V1, mid]).  A hanging
+            // endpoint (e.g. a t=1/4 point like dof 369 on master (99,373))
+            // is constrained by the master-edge P2 basis at its position:
+            //   u(t) = φ0(t)·u(a) + φ1(t)·u(e) + φ2(t)·u(b)
+            // Self-dependencies (mdof == sdof) are skipped, and only dofs not
+            // already constrained are added (MFEM `!deps.RowSize(sdof)`).
+            // NOTE: this runs BEFORE the midpoints check — MFEM's TraverseEdge
+            // walks every *existing* edge (element edge OR historical split
+            // edge), not only split edges.  E.g. the element edge (69,365)
+            // (edge dof 1137) has no split record in Rust yet C++ constrains
+            // its endpoint 365 (t=1/4) as a slave of master (69,369); gating
+            // this block on `midpoints` dropped those 10 constraints
+            // (85 92 131 147 234 241 275 291 369 375).
+            for (endpoint, t_end) in [(x, t0), (y, t1)] {
+                let Some(&sdof_p) = dm.phys_to_vertex_dof.get(&endpoint) else { continue };
+                let sdof = sdof_p as usize;
+                if out.iter().any(|c| c.constrained == sdof) { continue; }
+                let c0 = 2.0 * t_end * t_end - 3.0 * t_end + 1.0;
+                let c1 = -4.0 * t_end * t_end + 4.0 * t_end;
+                let c2 = 2.0 * t_end * t_end - t_end;
+                if c0.abs() < 1e-14 && c1.abs() < 1e-14 && c2.abs() < 1e-14 { continue; }
+                let mut parts: Vec<(usize, f64)> = Vec::new();
+                if a != sdof && c0.abs() > 1e-14 { parts.push((a, c0)); }
+                if e != sdof && c1.abs() > 1e-14 { parts.push((e, c1)); }
+                if b != sdof && c2.abs() > 1e-14 { parts.push((b, c2)); }
+                if parts.is_empty() { continue; }
+                let (pa, ca) = parts[0];
+                if parts.len() == 1 {
+                    out.push(HangingNodeConstraint::new_weighted(sdof, pa, pa, ca, ca, vec![]));
+                } else {
+                    let (pb, cb) = parts[1];
+                    out.push(HangingNodeConstraint::new_weighted(
+                        sdof, pa, pb, ca, cb, parts[2..].to_vec(),
+                    ));
+                }
+            }
+            // If (x,y) was split further, its halves are slaves too.
+            let Some(&m) = midpoints.get(&key) else { return };
+            let tm = 0.5 * (t0 + t1);
+            collect(x, m, t0, tm, a, b, e, midpoints, dm, out);
+            collect(m, y, tm, t1, a, b, e, midpoints, dm, out);
+        }
+        collect(a_p, b_p, 0.0, 1.0, a, b, e, midpoints, dm, &mut out);
+    }
+    out
 }
 
 /// Apply hanging face constraints (3-D) to the assembled system `(K, f)`.

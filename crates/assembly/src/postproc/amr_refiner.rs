@@ -84,15 +84,21 @@ impl ThresholdRefiner {
         nc_state: &mut dyn NcState2D,
         gf: &GridFunction<'_, S>,
         integrator: &F,
+        dof_constraints: Option<&[HangingNodeConstraint]>,
     ) {
         // ── 1. Error estimation ────────────────────────────────────────────
         // On NC (non-conforming) meshes the flux space carries hanging-node
         // constraints; MFEM's SumFluxAndCount propagates them, so use the NC
         // variant (matches ex15: EnsureNCMesh → GeneralRefinement → NC path).
+        // For P2 spaces the flux-space constraints must be the DOF-level P2
+        // constraints (vertex-view ids), NOT the mesh-level P1 constraints
+        // (physical node ids) — the latter index the averaged flux array with
+        // physical ids and corrupt the estimator on multi-level NC meshes.
+        let constraints = dof_constraints.unwrap_or_else(|| nc_state.constraints());
         let indicators = if self.use_kelly {
             kelly_estimator(gf)
         } else {
-            zz_estimator_mfem_nc(gf, integrator, nc_state.constraints())
+            zz_estimator_mfem_nc(gf, integrator, constraints)
         };
         self.eta = indicators.eta;
 

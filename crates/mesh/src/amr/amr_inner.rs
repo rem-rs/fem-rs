@@ -474,6 +474,13 @@ pub trait NcState2D {
     /// Current hanging-node constraints.
     fn constraints(&self) -> &[HangingNodeConstraint];
 
+    /// Active edge midpoints (parent edge -> midpoint node) of the current
+    /// mesh — used by the P2 constraint upgrade to walk split sub-edges.
+    fn midpoints(&self) -> &HashMap<(NodeId, NodeId), NodeId> {
+        static EMPTY: std::sync::OnceLock<HashMap<(NodeId, NodeId), NodeId>> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(|| HashMap::new())
+    }
+
     /// Tree-node indices of derefinable groups (children all leaves).
     fn deref_groups(&self) -> Vec<usize> { Vec::new() }
 
@@ -519,6 +526,7 @@ impl NcState2D for NCStateQuad {
     fn derefine_groups(&mut self, mesh: &Mesh<2>, groups: &[usize]) -> Option<Mesh<2>> {
         self.derefine_groups(mesh, groups)
     }
+    fn midpoints(&self) -> &HashMap<(NodeId, NodeId), NodeId> { self.active_midpoints() }
 }
 
 /// Propagate refinement to neighbors when nc_limit would be violated (Tri3).
@@ -971,7 +979,8 @@ fn refine_uniform_2d_mixed(mesh: &Mesh<2>) -> Mesh<2> {
         edge_conn: vec![],
         edge_to_elem: vec![],
         geometry: None,
-    }
+            nc_vertex_view: None,
+}
 }
 
 /// Conforming Quad4 uniform refinement matching MFEM's UniformRefinement2D_base.
@@ -1184,6 +1193,7 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
+        nc_vertex_view: None,
         geometry: parent_geom.map(|_| {
             let n_geom = child_geom_coords.len() / dim;
             GeometryData {
@@ -1250,7 +1260,8 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 elem_types: None, elem_offsets: None,
                 face_types: None, face_offsets: None,
                 face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-            };
+            nc_vertex_view: None,
+};
             let (m, _, _, _) = refine_nonconforming_hex(&hex8_mesh, &all, None);
             m
         }
@@ -1768,7 +1779,8 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         elem_types: Some(new_types), elem_offsets: Some(new_offsets),
         face_types: None, face_offsets: None,
         face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-    };
+            nc_vertex_view: None,
+};
     rebuild_3d_boundary(&mut result, mesh);
     result
 }
@@ -1818,7 +1830,8 @@ pub fn refine_uniform_surface_tri3(mesh: &Mesh<3>) -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-    }
+            nc_vertex_view: None,
+}
 }
 
 /// Uniformly refine all Quad4 elements of a **surface** mesh (`Mesh<3>`).
@@ -1860,7 +1873,8 @@ pub fn refine_uniform_surface_quad4(mesh: &Mesh<3>) -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-    }
+            nc_vertex_view: None,
+}
 }
 
 /// Refine elements of a Tri3 surface mesh near a target vertex, matching
@@ -1935,7 +1949,8 @@ pub fn refine_at_vertex_surface(mesh: &Mesh<3>, target: &[f64; 3]) -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-    }
+            nc_vertex_view: None,
+}
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -2321,6 +2336,52 @@ pub(crate) fn local_edges_quad() -> [(usize, usize); 4] {
     [(0, 1), (1, 2), (2, 3), (3, 0)]
 }
 
+/// MFEM `NCMesh::InitRootState` (ncmesh.cpp) for 2-D quad meshes: assign a
+/// Hilbert-curve state (0..7) to every initial (root) element so that
+/// `CollectLeafElements` visits its children along the space-filling curve.
+///
+/// For each root the entry node is the exit node of the previous root
+/// (`entry_node`), and the state is chosen so the curve exits through a node
+/// shared with the next root.
+fn init_root_states_quad(mesh: &Mesh<2>) -> Vec<u8> {
+    let n_roots = mesh.n_elems();
+    let mut states = vec![0u8; n_roots];
+    let mut entry_node: i64 = -2; // MFEM: FindNodeExt returns -1 for -2
+    for i in 0..n_roots {
+        let el = mesh.elem_nodes(i as ElemId);
+        // FindNodeExt(el, entry_node, false): local index of entry_node in el.
+        let v_in = if entry_node >= 0 {
+            el.iter().position(|&n| n as i64 == entry_node)
+        } else {
+            None
+        };
+        let v_in = v_in.unwrap_or(0);
+        // shared[k] = whether el's k-th node also belongs to the next root.
+        let mut shared = [false; 4];
+        if i + 1 < n_roots {
+            let next = mesh.elem_nodes((i + 1) as ElemId);
+            for j in 0..4 {
+                if let Some(p) = el.iter().position(|&n| n == next[j]) {
+                    shared[p] = true;
+                }
+            }
+        }
+        // state = Dim * v_in, then nudge by j so the exit node is shared.
+        let mut state = (2 * v_in) as usize;
+        for j in 0..2 {
+            let exit = QUAD_HILBERT_CHILD_ORDER[state + j][3] as usize;
+            if shared[exit] {
+                state += j;
+                break;
+            }
+        }
+        states[i] = state as u8;
+        let exit = QUAD_HILBERT_CHILD_ORDER[state][3] as usize;
+        entry_node = el[exit] as i64;
+    }
+    states
+}
+
 /// Non-conforming (hanging-node) refinement for a 2-D Quad4 mesh.
 ///
 /// Each marked Quad4 element is split into **4 child Quad4s** by bisecting
@@ -2486,7 +2547,27 @@ struct NCStateQuadSnapshot {
     active_midpoints: HashMap<(NodeId, NodeId), NodeId>,
     /// Edge refinement level: number of times each edge has been split.
     edge_level: HashMap<(NodeId, NodeId), u32>,
+    /// Leaf-element order (MFEM `leaf_elements`, Hilbert SFC) at snapshot time.
+    leaf_order: Vec<ElemId>,
+    /// element → root mapping at snapshot time.
+    elem_root: HashMap<ElemId, usize>,
 }
+
+/// MFEM `quad_hilbert_child_order` (ncmesh_tables.hpp): the order in which the
+/// 4 children of a refined quad are visited, per Hilbert-curve state.  This
+/// determines the *leaf element order* (`CollectLeafElements`) and hence the
+/// MFEM Mesh element numbering, edge table order and face (element-centre)
+/// DOF numbering — all of which feed the H1 Q2 global DOF numbering.
+const QUAD_HILBERT_CHILD_ORDER: [[u8; 4]; 8] = [
+    [0, 1, 2, 3], [0, 3, 2, 1], [1, 2, 3, 0], [1, 0, 3, 2],
+    [2, 3, 0, 1], [2, 1, 0, 3], [3, 0, 1, 2], [3, 2, 1, 0],
+];
+/// MFEM `quad_hilbert_child_state`: the state passed to each child when
+/// recursing along `QUAD_HILBERT_CHILD_ORDER[state]`.
+const QUAD_HILBERT_CHILD_STATE: [[u8; 4]; 8] = [
+    [1, 0, 0, 5], [0, 1, 1, 4], [3, 2, 2, 7], [2, 3, 3, 6],
+    [5, 4, 4, 1], [4, 5, 5, 0], [7, 6, 6, 3], [6, 7, 7, 2],
+];
 
 /// One 4-split of a Quad4 parent element in the NC refinement tree.
 ///
@@ -2500,7 +2581,10 @@ struct QuadRefineNode {
     parent_tag: i32,
     /// Current-mesh element indices of the 4 children.  Only meaningful while
     /// the matching `child_leaf[k]` is true (element numbering shifts on
-    /// every subsequent refinement pass).
+    /// every subsequent refinement pass).  `children[k]` is the element
+    /// produced by MFEM child slot `k` (XY split: 0 = n0 corner, 1 = n1
+    /// corner, 2 = n2 corner, 3 = n3 corner) — the Hilbert SFC order only
+    /// affects the *leaf output order*, not the child slots.
     children: [ElemId; 4],
     /// Whether each child is still a leaf element of the current mesh.
     child_leaf: [bool; 4],
@@ -2511,6 +2595,9 @@ struct QuadRefineNode {
     /// parent element becomes a leaf again, so the ancestor's `child_leaf`
     /// slot must be restored to `true` (MFEM `DerefineElement` semantics).
     parent: Option<(usize, usize)>,
+    /// Hilbert-curve state (MFEM `root_state` / recursion state) of this
+    /// node, used to order its children in the leaf sequence.
+    state: u8,
 }
 
 impl QuadRefineNode {
@@ -2534,6 +2621,21 @@ pub struct NCStateQuad {
     /// Current-mesh element → (tree node index, child slot) for leaf children
     /// that participate in the refinement tree.
     elem_to_node: HashMap<ElemId, (usize, usize)>,
+    /// MFEM `root_state` per initial (root) element, from `InitRootState`.
+    /// Only meaningful once the first refinement has been applied to the
+    /// initial mesh; the number of roots equals the initial element count.
+    root_states: Vec<u8>,
+    /// Number of top-level (original) mesh nodes — MFEM assigns these the
+    /// first `GetNV()` vertex DOFs (UpdateVertices STEP 1-2).
+    top_level_nodes: usize,
+    /// Current leaf-element order (MFEM `leaf_elements` after
+    /// `CollectLeafElements`): the order in which elements appear in the
+    /// refined mesh.  Drives element numbering, the edge table and hence the
+    /// MFEM-compatible global DOF numbering.
+    leaf_order: Vec<ElemId>,
+    /// Current-mesh element → initial (root) element id.  Used to recover the
+    /// MFEM `root_state` of unrefined root leaves during refinement.
+    elem_root: HashMap<ElemId, usize>,
 }
 
 impl Default for NCStateQuad {
@@ -2549,11 +2651,22 @@ impl NCStateQuad {
             history: Vec::new(),
             refine_tree: Vec::new(),
             elem_to_node: HashMap::new(),
+            root_states: Vec::new(),
+            top_level_nodes: 0,
+            leaf_order: Vec::new(),
+            elem_root: HashMap::new(),
         }
     }
 
     pub fn constraints(&self) -> &[HangingNodeConstraint] { &self.constraints }
     pub fn can_derefine(&self) -> bool { !self.history.is_empty() }
+    /// Active edge midpoints: (parent edge endpoints) -> midpoint node, for
+    /// every edge of the current mesh that has been split (MFEM's edge nodes).
+    /// P2 constraint generation walks this to find all slave sub-edges of a
+    /// coarse (master) edge (MFEM TraverseEdge / BuildEdgeList semantics).
+    pub fn active_midpoints(&self) -> &HashMap<(NodeId, NodeId), NodeId> {
+        &self.active_midpoints
+    }
 
     /// Perform one level of non-conforming refinement on a Quad4 mesh.
     ///
@@ -2592,22 +2705,98 @@ impl NCStateQuad {
             marked.to_vec()
         };
 
+        // ── First refinement: initialize MFEM root states & leaf order ──
+        // (must happen BEFORE the snapshot is pushed, otherwise derefine_last
+        // would restore an empty leaf_order)
+        if self.root_states.is_empty() {
+            self.top_level_nodes = mesh.n_nodes();
+            self.root_states = init_root_states_quad(mesh);
+            self.leaf_order = (0..mesh.n_elems() as ElemId).collect();
+            self.elem_root = (0..mesh.n_elems() as usize)
+                .map(|e| (e as ElemId, e))
+                .collect();
+        }
+
         self.history.push(NCStateQuadSnapshot {
             mesh: mesh.clone(),
             constraints: self.constraints.clone(),
             active_midpoints: self.active_midpoints.clone(),
             edge_level: self.edge_level.clone(),
+            leaf_order: self.leaf_order.clone(),
+            elem_root: self.elem_root.clone(),
         });
 
         let marked_set: std::collections::HashSet<ElemId> = prop_marked.iter().copied().collect();
         let n_elems = mesh.n_elems();
+        assert_eq!(n_elems, self.leaf_order.len(), "leaf_order out of sync");
+        for &e in &prop_marked {
+            assert!(
+                self.leaf_order.contains(&e),
+                "marked elem {e} not in leaf_order (n_elems={n_elems}, leaf_order_len={})",
+                self.leaf_order.len()
+            );
+        }
+
+        // ── Hilbert state of each refined element ────────────────────────────
+        // A refined element is either a live leaf child of a tree node
+        // (state = child_state[parent.state][slot]) or an unrefined initial
+        // root (state = root_states[root]).  Precompute into a map so the
+        // tree update and node-creation phases can both use it.
+        let mut elem_state: HashMap<ElemId, u8> = HashMap::new();
+        {
+            let (etn, tree, eroot, rstates) =
+                (&self.elem_to_node, &self.refine_tree, &self.elem_root, &self.root_states);
+            for &e in &prop_marked {
+                let st = if let Some(&(ni, k)) = etn.get(&e) {
+                    // e is child slot `k` of tree node ni.  The child state
+                    // must be looked up by the HILBERT position of that slot
+                    // in QUAD_HILBERT_CHILD_ORDER[parent.state] (MFEM
+                    // CollectLeafElements: `ch = order[state][i];
+                    // st = child_state[state][i]`) — indexing by slot k is
+                    // wrong whenever the order is not the identity.
+                    let pstate = tree[ni].state as usize;
+                    let hpos = QUAD_HILBERT_CHILD_ORDER[pstate]
+                        .iter()
+                        .position(|&c| c as usize == k)
+                        .expect("child slot in order table");
+                    QUAD_HILBERT_CHILD_STATE[pstate][hpos]
+                } else {
+                    let root = eroot.get(&e).copied().unwrap_or(e as usize);
+                    rstates[root]
+                };
+                elem_state.insert(e, st);
+            }
+        }
+
+        // ── New leaf order (MFEM CollectLeafElements: Hilbert SFC) ──────────
+        // Unrefined elements keep their leaf-order position; refined elements
+        // expand in place to their 4 children ordered by the Hilbert table.
+        // `new_leaf_order` entries: (old element, child slot) with
+        // slot == usize::MAX for unrefined elements.
+        let mut new_leaf_order: Vec<(ElemId, usize)> = Vec::with_capacity(n_elems + 3 * prop_marked.len());
+        for &e in &self.leaf_order {
+            if marked_set.contains(&e) {
+                let st = elem_state[&e] as usize;
+                for &ch in &QUAD_HILBERT_CHILD_ORDER[st] {
+                    new_leaf_order.push((e, ch as usize));
+                }
+            } else {
+                new_leaf_order.push((e, usize::MAX));
+            }
+        }
+        // (old element, child slot) -> new element id (only for refined).
+        let mut child_new_id: HashMap<(ElemId, usize), ElemId> = HashMap::new();
+        // old element -> new element id (unrefined only).
+        let mut elem_new_id: HashMap<ElemId, ElemId> = HashMap::new();
+        for (idx, &(e, ch)) in new_leaf_order.iter().enumerate() {
+            if ch != usize::MAX {
+                child_new_id.insert((e, ch), idx as ElemId);
+            } else {
+                elem_new_id.insert(e, idx as ElemId);
+            }
+        }
 
         // ── Update the refinement tree (MFEM GetDerefinementTable support) ──
-        // New element numbering: unrefined e keeps `e + 3·before(e)`; refined
-        // e expands to 4 children at `e + 3·before(e) .. +4`.
-        let before: Vec<usize> = (0..n_elems as usize)
-            .map(|e| prop_marked.iter().filter(|&&m| (m as usize) < e).count())
-            .collect();
         // 1) children of the current tree that get refined this pass cease to
         //    be leaves (their numbering is no longer tracked in the tree).
         let old_elem_to_node = std::mem::take(&mut self.elem_to_node);
@@ -2618,37 +2807,51 @@ impl NCStateQuad {
                 }
             }
         }
-        // 2) create a fresh tree node for every refined element.
+        // 2) create a fresh tree node for every refined element.  Children
+        //    are stored by MFEM child slot 0..3 (XY split), NOT in Hilbert
+        //    order — Hilbert order only affects the leaf output sequence.
         let old_tree_len = self.refine_tree.len();
         for &e in &prop_marked {
             let ns = mesh.elem_nodes(e);
-            let base = e as usize + 3 * before[e as usize];
+            let st = elem_state[&e];
             let node = QuadRefineNode {
                 parent_nodes: [ns[0], ns[1], ns[2], ns[3]],
                 parent_tag: mesh.elem_tags[e as usize],
                 children: [
-                    base as ElemId, (base + 1) as ElemId,
-                    (base + 2) as ElemId, (base + 3) as ElemId,
+                    child_new_id[&(e, 0)], child_new_id[&(e, 1)],
+                    child_new_id[&(e, 2)], child_new_id[&(e, 3)],
                 ],
                 child_leaf: [true; 4],
                 alive: true,
                 // if the refined element was itself a leaf child of an
                 // ancestor tree node, remember where it sits
                 parent: old_elem_to_node.get(&e).copied(),
+                state: st,
             };
             let ni = self.refine_tree.len();
             self.refine_tree.push(node);
             for k in 0..4 {
-                self.elem_to_node.insert((base + k) as ElemId, (ni, k));
+                self.elem_to_node.insert(child_new_id[&(e, k)], (ni, k));
             }
         }
         // 3) renumber surviving leaf children of pre-existing tree nodes.
-        for node in &mut self.refine_tree[..old_tree_len] {
+        for (ni, node) in self.refine_tree.iter_mut().enumerate().take(old_tree_len) {
             if !node.alive { continue; }
             for k in 0..4 {
                 if node.child_leaf[k] {
-                    let c = node.children[k] as usize;
-                    node.children[k] = (c + 3 * before[c]) as ElemId;
+                    let c = node.children[k];
+                    match elem_new_id.get(&c) {
+                        Some(&nid) => node.children[k] = nid,
+                        None => {
+                            // The child is not in the new leaf order: it was
+                            // either derefined away (the recovered parent
+                            // element replaced it) or refined this pass
+                            // (marked).  Either way it is no longer a leaf of
+                            // the current mesh — keep the stale id would let
+                            // it alias a later element (tree corruption).
+                            node.child_leaf[k] = false;
+                        }
+                    }
                 }
             }
         }
@@ -2656,9 +2859,17 @@ impl NCStateQuad {
         for (e, &(ni, k)) in &old_elem_to_node {
             let node = &self.refine_tree[ni];
             if !node.alive || !node.child_leaf[k] { continue; }
-            let e = *e as usize;
-            if marked_set.contains(&(e as ElemId)) { continue; }
-            self.elem_to_node.insert((e + 3 * before[e]) as ElemId, (ni, k));
+            if marked_set.contains(e) { continue; }            self.elem_to_node.insert(elem_new_id[e], (ni, k));
+        }
+        // 5) rebuild elem_root and leaf_order for the new mesh.  new_leaf_order
+        //    is already in new-id order, so assign positionally.
+        let old_elem_root = self.elem_root.clone();
+        self.elem_root.clear();
+        self.leaf_order.clear();
+        for (idx, &(e, _)) in new_leaf_order.iter().enumerate() {
+            let root = old_elem_root[&e];
+            self.elem_root.insert(idx as ElemId, root);
+            self.leaf_order.push(idx as ElemId);
         }
 
         // ── nc_limit: rebuild edge_elems AFTER propagation ──────────────
@@ -2670,64 +2881,158 @@ impl NCStateQuad {
             }
         }
 
+        // ── Create new nodes in MFEM vertex-view order ──────────────────────
+        // MFEM UpdateVertices STEP 3 assigns the non-top-level vertex DOFs by
+        // scanning the (Hilbert-ordered) leaf elements and numbering each
+        // new corner on first appearance.  Equivalent here: scan the refined
+        // elements in old leaf_order, and within each element scan its 4
+        // children in Hilbert order, creating edge midpoints and the centre
+        // node on first appearance (edge midpoints shared across elements are
+        // deduplicated by the midpoint map).
         let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
         let mut center_map:   HashMap<ElemId, NodeId>           = HashMap::new();
         let mut new_coords: Vec<f64> = mesh.coords.clone();
         let mut next_node = mesh.n_nodes() as NodeId;
 
+        // Refined elements in leaf (Hilbert) order — the order in which they
+        // appear in the old leaf_order; propagate any stragglers at the end.
+        let mut marked_leaf: Vec<ElemId> = self.leaf_order.iter()
+            .filter(|e| marked_set.contains(e))
+            .copied()
+            .collect();
         for &e in &prop_marked {
+            if !marked_leaf.contains(&e) { marked_leaf.push(e); }
+        }
+
+        // edge-level updates recorded while creating midpoints (parent edge
+        // removed, two sub-edges added) — applied after the creation loop.
+        let mut edge_level_updates: Vec<((NodeId, NodeId), u32)> = Vec::new();
+        let mut edge_level_removals: Vec<(NodeId, NodeId)> = Vec::new();
+
+        for &e in &marked_leaf {
+            let st = elem_state[&e] as usize;
             let ns = mesh.elem_nodes(e);
-            for &(a, b) in &local_edges_quad() {
-                let key = quad_edge_key(ns[a], ns[b]);
-                if midpoint_map.contains_key(&key) { continue; }
-                if let Some(&mid) = self.active_midpoints.get(&key) {
-                    midpoint_map.insert(key, mid);
-                } else {
-                    let xa = mesh.coords_of(ns[a]);
-                    let xb = mesh.coords_of(ns[b]);
-                    new_coords.push(0.5 * (xa[0] + xb[0]));
-                    new_coords.push(0.5 * (xa[1] + xb[1]));
-                    let new_mid = next_node;
-                    midpoint_map.insert(key, new_mid);
-                    // Track edge refinement level: sub-edges get parent+1.
-                    let parent_level = self.edge_level.get(&key).copied().unwrap_or(0);
-                    self.edge_level.insert(quad_edge_key(ns[a], new_mid), parent_level + 1);
-                    self.edge_level.insert(quad_edge_key(new_mid, ns[b]), parent_level + 1);
-                    self.edge_level.remove(&key);
-                    next_node += 1;
+            let (n0, n1, n2, n3) = (ns[0], ns[1], ns[2], ns[3]);
+            // get-or-create midpoint of edge (a,b)
+            let mut mid = |a: NodeId, b: NodeId,
+                           midpoint_map: &mut HashMap<(NodeId, NodeId), NodeId>,
+                           new_coords: &mut Vec<f64>,
+                           next_node: &mut NodeId| -> NodeId {
+                let key = quad_edge_key(a, b);
+                if let Some(&m) = midpoint_map.get(&key) { return m; }
+                if let Some(&m) = self.active_midpoints.get(&key) {
+                    midpoint_map.insert(key, m);
+                    return m;
+                }
+                let xa = mesh.coords_of(a);
+                let xb = mesh.coords_of(b);
+                // MFEM CalcVertexPos for a scale-0.5 edge node:
+                //   pos = (1-s)·pa + s·pb = 0.5·pa + 0.5·pb
+                // (NOT 0.5·(pa+pb) — differs by 1 ulp and propagates into the
+                // refined elements' Jacobians and element matrices).
+                new_coords.push(0.5 * xa[0] + 0.5 * xb[0]);
+                new_coords.push(0.5 * xa[1] + 0.5 * xb[1]);
+                let m = *next_node;
+                *next_node += 1;
+                midpoint_map.insert(key, m);
+                let parent_level = self.edge_level.get(&key).copied().unwrap_or(0);
+                edge_level_updates.push((quad_edge_key(a, m), parent_level + 1));
+                edge_level_updates.push((quad_edge_key(m, b), parent_level + 1));
+                edge_level_removals.push(key);
+                m
+            };
+            // get-or-create centre of element e
+            let mut centre = |e: ElemId,
+                              center_map: &mut HashMap<ElemId, NodeId>,
+                              new_coords: &mut Vec<f64>,
+                              next_node: &mut NodeId| -> NodeId {
+                if let Some(&c) = center_map.get(&e) { return c; }
+                // MFEM XY split centre: midel = nodes.GetId(mid01, mid23) with
+                // CalcVertexPos = 0.5·pos(mid01) + 0.5·pos(mid23), where each
+                // midpoint uses the same 0.5·pa + 0.5·pb formula.  (A 4-corner
+                // average differs in the last ulp.)
+                let ns2 = mesh.elem_nodes(e);
+                let (m01x, m01y) = {
+                    let xa = mesh.coords_of(ns2[0]);
+                    let xb = mesh.coords_of(ns2[1]);
+                    (0.5 * xa[0] + 0.5 * xb[0], 0.5 * xa[1] + 0.5 * xb[1])
+                };
+                let (m23x, m23y) = {
+                    let xa = mesh.coords_of(ns2[2]);
+                    let xb = mesh.coords_of(ns2[3]);
+                    (0.5 * xa[0] + 0.5 * xb[0], 0.5 * xa[1] + 0.5 * xb[1])
+                };
+                new_coords.push(0.5 * m01x + 0.5 * m23x);
+                new_coords.push(0.5 * m01y + 0.5 * m23y);
+                let id = *next_node;
+                *next_node += 1;
+                center_map.insert(e, id);
+                id
+            };
+            // scan children in Hilbert order; per child scan its 4 corners in
+            // MFEM XY-split order, creating midpoints / centre on first use.
+            for &ch in &QUAD_HILBERT_CHILD_ORDER[st] {
+                match ch {
+                    0 => {
+                        let _ = mid(n0, n1, &mut midpoint_map, &mut new_coords, &mut next_node);
+                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node);
+                        let _ = mid(n3, n0, &mut midpoint_map, &mut new_coords, &mut next_node);
+                    }
+                    1 => {
+                        let _ = mid(n0, n1, &mut midpoint_map, &mut new_coords, &mut next_node);
+                        let _ = mid(n1, n2, &mut midpoint_map, &mut new_coords, &mut next_node);
+                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node);
+                    }
+                    2 => {
+                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node);
+                        let _ = mid(n1, n2, &mut midpoint_map, &mut new_coords, &mut next_node);
+                        let _ = mid(n2, n3, &mut midpoint_map, &mut new_coords, &mut next_node);
+                    }
+                    3 => {
+                        let _ = mid(n3, n0, &mut midpoint_map, &mut new_coords, &mut next_node);
+                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node);
+                        let _ = mid(n2, n3, &mut midpoint_map, &mut new_coords, &mut next_node);
+                    }
+                    _ => unreachable!(),
                 }
             }
-            center_map.entry(e).or_insert_with(|| {
-                let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
-                for k in 0..4 { let c = mesh.coords_of(ns[k]); cx += c[0]; cy += c[1]; }
-                new_coords.push(cx / 4.0); new_coords.push(cy / 4.0);
-                let id = next_node; next_node += 1; id
-            });
+        }
+        // apply deferred edge-level updates
+        for (k, lvl) in edge_level_updates {
+            self.edge_level.insert(k, lvl);
+        }
+        for k in edge_level_removals {
+            self.edge_level.remove(&k);
         }
 
         let mut new_conn: Vec<NodeId> = Vec::new();
         let mut new_tags: Vec<i32>    = Vec::new();
-        for e in 0..n_elems as ElemId {
+        // Elements are output in the NEW (Hilbert) leaf order; each refined
+        // element contributes its 4 children in Hilbert order, matching the
+        // MFEM `CollectLeafElements` sequence.
+        for &(e, ch) in &new_leaf_order {
             let ns = mesh.elem_nodes(e);
             let tag = mesh.elem_tags[e as usize];
-            if marked_set.contains(&e) {
+            if ch == usize::MAX {
+                for k in 0..4 { new_conn.push(ns[k]); }
+                new_tags.push(tag);
+            } else {
                 let n0 = ns[0]; let n1 = ns[1]; let n2 = ns[2]; let n3 = ns[3];
                 let m01 = *midpoint_map.get(&quad_edge_key(n0, n1)).unwrap();
                 let m12 = *midpoint_map.get(&quad_edge_key(n1, n2)).unwrap();
                 let m23 = *midpoint_map.get(&quad_edge_key(n2, n3)).unwrap();
                 let m30 = *midpoint_map.get(&quad_edge_key(n3, n0)).unwrap();
                 let c   = *center_map.get(&e).unwrap();
-                // MFEM child numbering (NonconformingRefinement, quad 4-split):
-                //   child0 = lower-left  (n0, m01, c, m30)
-                //   child1 = upper-left  (m30, c, m23, n3)
-                //   child2 = upper-right (c, m12, n2, m23)
-                //   child3 = lower-right (m01, n1, m12, c)
-                new_conn.extend_from_slice(&[n0,  m01, c,   m30]); new_tags.push(tag);
-                new_conn.extend_from_slice(&[m30, c,   m23, n3 ]); new_tags.push(tag);
-                new_conn.extend_from_slice(&[c,   m12, n2,  m23]); new_tags.push(tag);
-                new_conn.extend_from_slice(&[m01, n1,  m12, c  ]); new_tags.push(tag);
-            } else {
-                for k in 0..4 { new_conn.push(ns[k]); }
+                // MFEM XY-split child corner order (RefineElement):
+                //   child0 = (n0, m01, c, m30)   child1 = (m01, n1, m12, c)
+                //   child2 = (c, m12, n2, m23)   child3 = (m30, c, m23, n3)
+                match ch {
+                    0 => new_conn.extend_from_slice(&[n0,  m01, c,   m30]),
+                    1 => new_conn.extend_from_slice(&[m01, n1,  m12, c  ]),
+                    2 => new_conn.extend_from_slice(&[c,   m12, n2,  m23]),
+                    3 => new_conn.extend_from_slice(&[m30, c,   m23, n3 ]),
+                    _ => unreachable!(),
+                }
                 new_tags.push(tag);
             }
         }
@@ -2748,19 +3053,62 @@ impl NCStateQuad {
         let new_node_set: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
 
         let mut new_constraints = Vec::new();
+        // ── MFEM BuildEdgeList master/slave semantics ─────────────────────
+        // A coarse (master) edge is a split edge that is exposed on a leaf
+        // element.  Its split sub-edges are SLAVE edges: their midpoints are
+        // constrained by the master-edge P2 basis.  A sub-edge that is itself
+        // split and exposed must NOT generate its own P1 constraint (it would
+        // double-constrain the midpoint with a different master).  So we keep
+        // only the "true master" edges: candidates minus every edge that lies
+        // on the split chain of another candidate.
+        let mut candidate: std::collections::HashSet<(NodeId, NodeId)> = Default::default();
         for (&(a, b), &mid) in &self.active_midpoints {
-            if !new_node_set.contains(&mid) { continue; }
-            let parent_exists = new_edge_elems.contains_key(&quad_edge_key(a, b));
-            if parent_exists {
-                new_constraints.push(HangingNodeConstraint {
-                    constrained: mid as usize,
-                    parent_a: a as usize,
-                    parent_b: b as usize,
-                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
-});
+            if new_node_set.contains(&mid)
+                && new_edge_elems.contains_key(&quad_edge_key(a, b))
+            {
+                candidate.insert(quad_edge_key(a, b));
             }
         }
-        self.active_midpoints.retain(|_, mid| new_node_set.contains(mid));
+        fn remove_slaves(
+            a: NodeId,
+            b: NodeId,
+            masters: &mut std::collections::HashSet<(NodeId, NodeId)>,
+            midpoints: &HashMap<(NodeId, NodeId), NodeId>,
+        ) {
+            let key = quad_edge_key(a, b);
+            if let Some(&mid) = midpoints.get(&key) {
+                masters.remove(&quad_edge_key(a, mid));
+                remove_slaves(a, mid, masters, midpoints);
+                masters.remove(&quad_edge_key(mid, b));
+                remove_slaves(mid, b, masters, midpoints);
+            }
+        }
+        let mut masters = candidate.clone();
+        for &(a, b) in &candidate {
+            if masters.contains(&(a, b)) {
+                remove_slaves(a, b, &mut masters, &self.active_midpoints);
+            }
+        }
+        for (&(a, b), &mid) in &self.active_midpoints {
+            if !new_node_set.contains(&mid) { continue; }
+            if !masters.contains(&quad_edge_key(a, b)) { continue; }
+            if std::env::var("EX15_DBG_DEREF").is_ok() {
+                let has = self.active_midpoints.contains_key(&quad_edge_key(a, b));
+                eprintln!("REFINE-P1 {} <- {} + {} (in_active={has})", mid, a, b);
+            }
+            new_constraints.push(HangingNodeConstraint {
+                constrained: mid as usize,
+                parent_a: a as usize,
+                parent_b: b as usize,
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+            });
+        }
+        // Keep every historical split midpoint whose node id is still valid
+        // (refinement only appends nodes, so all old ids stay valid).  MFEM
+        // keeps its edge-node history even when a split point is not a corner
+        // of any element; deleting it here loses deep slave constraints.
+        let n_nodes_after = new_coords.len() / 2;
+        self.active_midpoints.retain(|_, mid| (*mid as usize) < n_nodes_after);
         new_constraints.sort_by_key(|c| c.constrained);
         self.constraints = new_constraints.clone();
 
@@ -2780,10 +3128,55 @@ impl NCStateQuad {
             }
         }
 
-        let new_mesh = Mesh::uniform(
+        // MFEM vertex-view order (UpdateVertices): top-level (original) nodes
+        // first, then every non-top-level node in leaf-element (Hilbert SFC)
+        // order — first appearance when scanning the elements in leaf_order.
+        // The DofManager reads this to make the global vertex DOF ids match
+        // MFEM on the (multi-level) NC mesh.
+        let mut view: Vec<NodeId> = (0..self.top_level_nodes as NodeId).collect();
+        let mut seen: std::collections::HashSet<NodeId> = view.iter().copied().collect();
+        for &e in &self.leaf_order {
+            let off = e as usize * 4;
+            for k in 0..4 {
+                let n = new_conn[off + k];
+                if seen.insert(n) {
+                    view.push(n);
+                }
+            }
+        }
+        debug_assert_eq!(view.len(), new_coords.len() / 2, "vertex view size mismatch");
+
+        let mut new_mesh = Mesh::uniform(
             new_coords, new_conn, new_tags, ElementType::Quad4,
             new_face_conn, new_face_tags, ElementType::Line2,
         );
+        new_mesh.nc_vertex_view = Some(view);
+        if std::env::var("EX15_DBG_DEREF").is_ok() {
+            let mut all: std::collections::HashSet<ElemId> = Default::default();
+            let mut dups: Vec<(usize, usize, ElemId)> = Vec::new();
+            for (ni, node) in self.refine_tree.iter().enumerate() {
+                if !node.alive { continue; }
+                for (k, &c) in node.children.iter().enumerate() {
+                    if node.child_leaf[k] && !all.insert(c) { dups.push((ni, k, c)); }
+                }
+            }
+            eprintln!("REFINE-DONE leaf-children-dups={dups:?}");
+            if !dups.is_empty() {
+                let mut by_node: std::collections::BTreeMap<usize, Vec<ElemId>> = Default::default();
+                for &(ni, _, _) in &dups { by_node.entry(ni).or_default(); }
+                for &(ni, k, c) in &dups {
+                    by_node.entry(ni).or_default().push(c);
+                }
+                for (ni, cs) in by_node {
+                    let node = &self.refine_tree[ni];
+                    eprintln!(
+                        "REFINE-DUP node={ni} children={:?} leaf={:?} parent={:?}",
+                        node.children, node.child_leaf, node.parent
+                    );
+                    let _ = cs;
+                }
+            }
+        }
         (new_mesh, self.constraints.clone(), midpoint_map)
     }
 
@@ -2792,6 +3185,8 @@ impl NCStateQuad {
         self.constraints = snap.constraints.clone();
         self.active_midpoints = snap.active_midpoints;
         self.edge_level = snap.edge_level;
+        self.leaf_order = snap.leaf_order;
+        self.elem_root = snap.elem_root;
         Some((snap.mesh, self.constraints.clone()))
     }
 
@@ -2799,6 +3194,15 @@ impl NCStateQuad {
     /// current mesh — the MFEM `GetDerefinementTable` groups.  A group may be
     /// coarsened (derefined) if its aggregated error is below the threshold.
     pub fn deref_groups(&self) -> Vec<usize> {
+        if std::env::var("EX15_DBG_DEREF").is_ok() {
+            let mut info: Vec<String> = Vec::new();
+            for (i, n) in self.refine_tree.iter().enumerate() {
+                if n.derefinable() {
+                    info.push(format!("{i}:{:?}", n.children));
+                }
+            }
+            eprintln!("DEREF-ALL groups={} {}", info.len(), info.join(" "));
+        }
         self.refine_tree
             .iter()
             .enumerate()
@@ -2825,10 +3229,80 @@ impl NCStateQuad {
         for &ni in groups {
             let node = &self.refine_tree[ni];
             if !node.derefinable() { continue; }
-            for k in 0..4 { removed.insert(node.children[k]); }
-            parents.push((node.children[0], node.parent_nodes, node.parent_tag));
+            for k in 0..4 {
+                let c = node.children[k];
+                if !removed.insert(c) {
+                    eprintln!(
+                        "DBG deref: group {ni} child {c} (slot {k}) already removed; tree children={:?}",
+                        node.children
+                    );
+                }
+            }
+            // MFEM DerefineElement: the recovered parent element's corners are
+            // exactly the corners of its 4 children (XY split layout):
+            //   child0=(n0,m01,c,m30)  child1=(m01,n1,m12,c)
+            //   child2=(c,m12,n2,m23)  child3=(m30,c,m23,n3)
+            // so parent corner k = child slot k's corner k.  Recovering them
+            // from the current-mesh children (instead of the stale historical
+            // parent_nodes ids) keeps the parent geometry valid even after
+            // repeated derefinements have compacted away orphan nodes.
+            let cc: Vec<[NodeId; 4]> = node
+                .children
+                .iter()
+                .map(|&c| {
+                    let ns = mesh.elem_nodes(c);
+                    [ns[0], ns[1], ns[2], ns[3]]
+                })
+                .collect();
+            let parent_nodes =
+                [cc[0][0], cc[1][1], cc[2][2], cc[3][3]];
+            parents.push((node.children[0], parent_nodes, node.parent_tag));
         }
         if parents.is_empty() { return None; }
+        if std::env::var("EX15_DBG_DEREF").is_ok() {
+            let mut all: std::collections::HashSet<ElemId> = Default::default();
+            let mut dups: Vec<(usize, usize, ElemId)> = Vec::new();
+            for (ni, node) in self.refine_tree.iter().enumerate() {
+                if !node.alive { continue; }
+                for (k, &c) in node.children.iter().enumerate() {
+                    if node.child_leaf[k] && !all.insert(c) { dups.push((ni, k, c)); }
+                }
+            }
+            eprintln!("DBG deref pre-check all-leaf-children-dups={dups:?}");
+            let mut all2: std::collections::HashSet<ElemId> = Default::default();
+            let mut dups2: Vec<ElemId> = Vec::new();
+            for &ni in groups {
+                let node = &self.refine_tree[ni];
+                for &c in &node.children {
+                    if !all2.insert(c) { dups2.push(c); }
+                }
+            }
+            eprintln!("DBG deref groups={} children-dups={dups2:?}", groups.len());
+            for &ni in groups.iter().take(20) {
+                let node = &self.refine_tree[ni];
+                eprintln!(
+                    "  tree[{ni}] children={:?} leaf={:?} alive={} parent={:?} state={} parent_nodes={:?}",
+                    node.children, node.child_leaf, node.alive, node.parent, node.state, node.parent_nodes
+                );
+                // ancestor chain
+                let mut cur = node.parent;
+                let mut chain = Vec::new();
+                while let Some((pi, pk)) = cur {
+                    chain.push((pi, pk));
+                    cur = self.refine_tree[pi].parent;
+                }
+                eprintln!("  tree[{ni}] ancestor-chain={chain:?}");
+            }
+        }
+        if std::env::var("EX15_DBG_DEREF").is_ok() {
+            for &ni in groups {
+                let node = &self.refine_tree[ni];
+                eprintln!(
+                    "DBG GRP node={ni} parent={:?} children={:?} leaf={:?}",
+                    node.parent, node.children, node.child_leaf
+                );
+            }
+        }
         parents.sort_by_key(|&(slot, _, _)| slot);
 
         // New element numbering after coarsening: `new_id(e) = e - shift[e]`
@@ -2842,35 +3316,95 @@ impl NCStateQuad {
                 if removed.contains(&(e as ElemId)) { cnt += 1; }
             }
         }
-        for node in &mut self.refine_tree {
-            if !node.alive { continue; }
-            for k in 0..4 {
-                if node.child_leaf[k] {
-                    let c = node.children[k] as usize;
-                    node.children[k] = (c - shift[c]) as ElemId;
-                }
+        if std::env::var("EX15_DBG_DEREF").is_ok() {
+            for ni in [0usize, 9, 11, 12, 14] {
+                if ni >= self.refine_tree.len() { continue; }
+                let node = &self.refine_tree[ni];
+                let vals: Vec<String> = node
+                    .children
+                    .iter()
+                    .map(|&c| {
+                        let c = c as usize;
+                        format!(
+                            "{c}(r={},sh={})",
+                            removed.contains(&(c as ElemId)),
+                            c - shift[c]
+                        )
+                    })
+                    .collect();
+                eprintln!("DEREF-RENUM tree[{ni}] alive={} children=[{}]", node.alive, vals.join(" "));
             }
         }
         // When a group is derefined its parent element becomes a leaf again;
         // restore the ancestor slot (MFEM DerefineElement) and register the
         // recovered parent in elem_to_node so later refinements track it.
+        //
+        // The parent element's new id is its position in the compressed
+        // element sequence: it occupies its first child's (removed) slot, so
+        // its id comes from `new_id_of[children[0]]` (NOT `slot - shift[slot]`
+        // — for contiguous removed regions that maps several distinct parent
+        // elements onto the same id and corrupts the tree).
+        let mut new_id_of: HashMap<ElemId, ElemId> = HashMap::new();
+        {
+            let mut cnt = 0usize;
+            let mut pit = 0usize;
+            for e in 0..n_elems as ElemId {
+                while pit < parents.len() && parents[pit].0 <= e {
+                    new_id_of.insert(parents[pit].0, cnt as ElemId);
+                    cnt += 1;
+                    pit += 1;
+                }
+                if !removed.contains(&e) {
+                    new_id_of.insert(e, cnt as ElemId);
+                    cnt += 1;
+                }
+            }
+        }
         let mut restored: Vec<(ElemId, usize, usize)> = Vec::new(); // (parent_elem_id, anc_node, anc_slot)
         for &ni in groups {
             let node = &self.refine_tree[ni];
             if let Some((pi, pk)) = node.parent {
                 // parent element occupies its first child's (removed) slot
-                let slot = node.children[0] as usize;
-                restored.push(((slot - shift[slot]) as ElemId, pi, pk));
+                let slot = node.children[0];
+                let pe = new_id_of[&slot];
+                if std::env::var("EX15_DBG_DEREF").is_ok() && (pi == 5 || pi == 9) {
+                    eprintln!(
+                        "DBG RESTORE group={ni} parent=({pi},{pk}) children[0]={slot} pe={pe} child_leaf={:?}",
+                        node.child_leaf
+                    );
+                }
+                restored.push((pe, pi, pk));
+            }
+        }
+        for node in &mut self.refine_tree {
+            if !node.alive { continue; }
+            for k in 0..4 {
+                if node.child_leaf[k] {
+                    let c = node.children[k] as usize;
+                    if removed.contains(&(c as ElemId)) {
+                        // The child was coarsened away this pass.  Do NOT
+                        // renumber it: that maps onto a surviving element and
+                        // makes two tree nodes share one element.
+                        node.child_leaf[k] = false;
+                    } else {
+                        node.children[k] = new_id_of[&(c as ElemId)];
+                    }
+                }
             }
         }
         let old_etn = std::mem::take(&mut self.elem_to_node);
         for (e, v) in old_etn {
-            let e = e as usize;
-            if removed.contains(&(e as ElemId)) { continue; }
-            self.elem_to_node.insert((e - shift[e]) as ElemId, v);
+            let e = e as ElemId;
+            if removed.contains(&e) { continue; }
+            self.elem_to_node.insert(new_id_of[&e], v);
         }
         for (pe, pi, pk) in restored {
             self.refine_tree[pi].child_leaf[pk] = true;
+            // The recovered parent element occupies its derefined child's
+            // slot in the ancestor node (MFEM DerefineElement restores the
+            // child element at the parent position); keep children[] in sync
+            // so later refinements renumber it correctly.
+            self.refine_tree[pi].children[pk] = pe;
             self.elem_to_node.insert(pe, (pi, pk));
         }
 
@@ -2907,6 +3441,34 @@ impl NCStateQuad {
             .map(|(p, &t)| (quad_edge_key(p[0], p[1]), t))
             .collect();
         let used: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
+        // A boundary edge is an element edge used by exactly one element.
+        // MFEM rebuilds the boundary from the coarsened mesh, so edges that
+        // become boundary after coarsening (parent edges of removed children)
+        // must be recovered too — the old face table only knows the *child*
+        // (finer) edges, so walk down the split chain of the edge to find its
+        // attribute (DerefineElement's RegisterFaces inherits the child's
+        // face attribute).
+        let mut edge_adj: std::collections::HashMap<(NodeId, NodeId), u32> = Default::default();
+        for e in 0..new_tags.len() as ElemId {
+            let ns = &new_conn[e as usize * 4..e as usize * 4 + 4];
+            for &(a, b) in &local_edges_quad() {
+                *edge_adj.entry(quad_edge_key(ns[a], ns[b])).or_insert(0) += 1;
+            }
+        }
+        fn face_tag_of(
+            a: NodeId,
+            b: NodeId,
+            old_face_tag: &std::collections::HashMap<(NodeId, NodeId), i32>,
+            midpoints: &HashMap<(NodeId, NodeId), NodeId>,
+        ) -> Option<i32> {
+            let key = quad_edge_key(a, b);
+            if let Some(&t) = old_face_tag.get(&key) { return Some(t); }
+            if let Some(&m) = midpoints.get(&key) {
+                if let Some(t) = face_tag_of(a, m, old_face_tag, midpoints) { return Some(t); }
+                if let Some(t) = face_tag_of(m, b, old_face_tag, midpoints) { return Some(t); }
+            }
+            None
+        }
         let mut new_face_conn: Vec<NodeId> = Vec::new();
         let mut new_face_tags: Vec<i32> = Vec::new();
         for e in 0..new_tags.len() as ElemId {
@@ -2914,7 +3476,11 @@ impl NCStateQuad {
             for &(a, b) in &local_edges_quad() {
                 let key = quad_edge_key(ns[a], ns[b]);
                 if !used.contains(&ns[a]) || !used.contains(&ns[b]) { continue; }
+                if edge_adj[&key] != 1 { continue; } // interior edge
                 if let Some(&t) = old_face_tag.get(&key) {
+                    new_face_conn.extend_from_slice(&[ns[a], ns[b]]);
+                    new_face_tags.push(t);
+                } else if let Some(t) = face_tag_of(ns[a], ns[b], &old_face_tag, &self.active_midpoints) {
                     new_face_conn.extend_from_slice(&[ns[a], ns[b]]);
                     new_face_tags.push(t);
                 }
@@ -2924,9 +3490,26 @@ impl NCStateQuad {
         // ── Compact node numbering (drop orphan nodes of removed children) ──
         // MFEM's NCMesh::Update() deletes unused nodes after Derefine; keep
         // only nodes referenced by the new connectivity and remap everything.
+        // IMPORTANT: nodes referenced by the active edge-midpoint map (split
+        // endpoints + midpoints) must survive even if no element uses them —
+        // MFEM keeps its edge-node history so a later TraverseEdge can still
+        // find sub-edge midpoints and constrain deep slaves.  Dropping them
+        // here silently loses the split history (slave constraints vanish).
+        let mut keep: std::collections::HashSet<NodeId> = Default::default();
+        for (&(a, b), &mid) in &self.active_midpoints {
+            keep.insert(a);
+            keep.insert(b);
+            keep.insert(mid);
+        }
         let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
         let mut new_coords: Vec<f64> = Vec::new();
         for &n in &new_conn {
+            if !node_map.contains_key(&n) {
+                node_map.insert(n, node_map.len() as NodeId);
+                new_coords.extend_from_slice(&mesh.coords_of(n));
+            }
+        }
+        for &n in &keep {
             if !node_map.contains_key(&n) {
                 node_map.insert(n, node_map.len() as NodeId);
                 new_coords.extend_from_slice(&mesh.coords_of(n));
@@ -2943,7 +3526,22 @@ impl NCStateQuad {
         for (ni, node) in self.refine_tree.iter_mut().enumerate() {
             if !node.derefinable() { continue; }
             for k in 0..4 {
-                node.parent_nodes[k] = node_map[&node.parent_nodes[k]];
+                if let Some(&rn) = node_map.get(&node.parent_nodes[k]) {
+                    node.parent_nodes[k] = rn;
+                } else {
+                    // The parent element's corner node may be a hanging node
+                    // of a still-refined neighbour that got compacted away.
+                    // Recover the top-level node via the child's corners
+                    // (MFEM RetrieveNode semantics): the parent corners are
+                    // exactly the corners of its children that survive.
+                    // Fall back: keep the old id (the parent element is not
+                    // derefinable while children remain, so this only matters
+                    // for geometry; safest is to leave it unchanged).
+                    eprintln!(
+                        "warn: parent_nodes[{}] of tree node {} (id {}) missing after compaction",
+                        k, ni, node.parent_nodes[k]
+                    );
+                }
             }
         }
         // remap active midpoints, dropping orphans (nodes no longer in use)
@@ -2952,7 +3550,11 @@ impl NCStateQuad {
             if let (Some(&ra), Some(&rb), Some(&rm)) =
                 (node_map.get(&a), node_map.get(&b), node_map.get(&mid))
             {
-                self.active_midpoints.insert((ra, rb), rm);
+                // Keep keys canonicalized (min,max) — the P2 constraint walk
+                // and P1 generation rely on canonical keys; an uncanonicalized
+                // key after a derefinement silently breaks the midpoint-chain
+                // recursion (slave constraints lost).
+                self.active_midpoints.insert(quad_edge_key(ra, rb), rm);
             }
         }
         // remap edge levels, dropping orphan edges
@@ -2963,7 +3565,7 @@ impl NCStateQuad {
             }
         }
 
-        let new_mesh = Mesh::uniform(
+        let mut new_mesh = Mesh::uniform(
             new_coords, new_conn.clone(), new_tags, ElementType::Quad4,
             new_face_conn, new_face_tags, ElementType::Line2,
         );
@@ -2975,6 +3577,55 @@ impl NCStateQuad {
             }
         }
         self.elem_to_node.retain(|_, &mut (ni, _)| self.refine_tree[ni].alive);
+
+        // ── Rebuild leaf_order & elem_root for the coarsened mesh ───────────
+        // MFEM DerefineElement: the recovered parent element replaces its 4
+        // children in the leaf sequence (at the first child's position).
+        // New element ids match how new_conn was assembled above: surviving
+        // elements keep their relative order (compressed), and each recovered
+        // parent takes the id at its first child's (removed) slot.
+        let old_leaf_order = std::mem::take(&mut self.leaf_order);
+        let old_elem_root = std::mem::take(&mut self.elem_root);
+        // `new_id_of` was already built above (before `restored`) — reuse it.
+        self.leaf_order.clear();
+        self.elem_root.clear();
+        for &e in &old_leaf_order {
+            if removed.contains(&e) {
+                // first removed child of a group = parent slot: insert parent
+                if new_id_of.contains_key(&e) {
+                    let pe = new_id_of[&e];
+                    let root = old_elem_root[&e];
+                    self.leaf_order.push(pe);
+                    self.elem_root.insert(pe, root);
+                }
+                continue;
+            }
+            let ne = new_id_of[&e];
+            let root = old_elem_root[&e];
+            self.leaf_order.push(ne);
+            self.elem_root.insert(ne, root);
+        }
+        if std::env::var("EX15_DBG_DEREF").is_ok() {
+            eprintln!(
+                "DEREF groups={} old_le={} new_le={} mesh_ne={} parents={:?}",
+                groups.len(), old_leaf_order.len(), self.leaf_order.len(), new_mesh.n_elems(),
+                parents.iter().map(|p| p.0).collect::<Vec<_>>()
+            );
+            let mut missing: Vec<ElemId> = (0..new_mesh.n_elems() as ElemId)
+                .filter(|e| !self.leaf_order.contains(e))
+                .collect();
+            eprintln!("  missing-from-leaf_order: {missing:?}");
+            let mut dup: Vec<ElemId> = Vec::new();
+            let mut seen: std::collections::HashSet<ElemId> = Default::default();
+            for &e in &self.leaf_order {
+                if !seen.insert(e) { dup.push(e); }
+            }
+            eprintln!("  dup-in-leaf_order: {dup:?}");
+            let mut m2: std::collections::HashSet<ElemId> = (0..new_mesh.n_elems() as ElemId).collect();
+            for &e in &self.leaf_order { m2.remove(&e); }
+            let _ = missing;
+            eprintln!("  unaccounted-mesh-elems: {:?}", m2.iter().collect::<Vec<_>>());
+        }
 
         // Drop midpoints whose parent edge no longer exists after coarsening.
         let new_edge_elems: std::collections::HashMap<(NodeId, NodeId), Vec<u32>> = {
@@ -2988,27 +3639,113 @@ impl NCStateQuad {
             m
         };
         let new_node_set: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
-        self.active_midpoints.retain(|&(a, b), &mut mid| {
-            new_node_set.contains(&mid) && new_edge_elems.contains_key(&quad_edge_key(a, b))
+        // MFEM keeps an edge-node while its edge_refc > 0, i.e. while the edge
+        // itself is referenced by a leaf element (ReferenceElement bumps
+        // edge_refc on every element edge; UnreferenceElement only deletes
+        // when the refcount hits zero).  The midpoint node does NOT have to be
+        // an element corner — e.g. the t=1/8 hanging point 365' on element
+        // edge (69,365) survives because (69,365) is an element edge.  The old
+        // `new_node_set.contains(&mid)` requirement dropped such deep split
+        // records, breaking the P2 TraverseEdge chain (slave constraints for
+        // dofs 85 92 131 147 234 241 275 291 369 375 vanished).  Keep a split
+        // record if the edge itself or one of its sub-edges is an element edge.
+        self.active_midpoints.retain(|&(a, b), &mut _mid| {
+            new_edge_elems.contains_key(&quad_edge_key(a, b))
+                || new_edge_elems.contains_key(&quad_edge_key(a, _mid))
+                || new_edge_elems.contains_key(&quad_edge_key(_mid, b))
         });
 
         // Rebuild hanging-node constraints for the coarsened mesh.
         let mut new_constraints: Vec<HangingNodeConstraint> = Vec::new();
+        // MFEM BuildEdgeList master/slave semantics (see refine): keep only
+        // true master edges (exposed split edges not on another split chain).
+        let mut candidate: std::collections::HashSet<(NodeId, NodeId)> = Default::default();
+        for (&(a, b), &mid) in &self.active_midpoints {
+            if new_node_set.contains(&mid)
+                && new_edge_elems.contains_key(&quad_edge_key(a, b))
+            {
+                candidate.insert(quad_edge_key(a, b));
+            }
+        }
+        fn remove_slaves(
+            a: NodeId,
+            b: NodeId,
+            masters: &mut std::collections::HashSet<(NodeId, NodeId)>,
+            midpoints: &HashMap<(NodeId, NodeId), NodeId>,
+        ) {
+            let key = quad_edge_key(a, b);
+            if let Some(&mid) = midpoints.get(&key) {
+                masters.remove(&quad_edge_key(a, mid));
+                remove_slaves(a, mid, masters, midpoints);
+                masters.remove(&quad_edge_key(mid, b));
+                remove_slaves(mid, b, masters, midpoints);
+            }
+        }
+        let mut masters = candidate.clone();
+        for &(a, b) in &candidate {
+            if masters.contains(&(a, b)) {
+                remove_slaves(a, b, &mut masters, &self.active_midpoints);
+            }
+        }
         for (&(a, b), &mid) in &self.active_midpoints {
             if !new_node_set.contains(&mid) { continue; }
-            if new_edge_elems.contains_key(&quad_edge_key(a, b)) {
-                new_constraints.push(HangingNodeConstraint {
-                    constrained: mid as usize,
-                    parent_a: a as usize,
-                    parent_b: b as usize,
-                    coeff_a: 0.5,
-                    coeff_b: 0.5,
-                    extra: Vec::new(),
-                });
-            }
+            if !masters.contains(&quad_edge_key(a, b)) { continue; }
+            new_constraints.push(HangingNodeConstraint {
+                constrained: mid as usize,
+                parent_a: a as usize,
+                parent_b: b as usize,
+                coeff_a: 0.5,
+                coeff_b: 0.5,
+                extra: Vec::new(),
+            });
         }
         new_constraints.sort_by_key(|c| c.constrained);
         self.constraints = new_constraints;
+
+        if std::env::var("EX15_DBG_DEREF").is_ok() {
+            for ni in [9usize, 11, 12, 14] {                if ni < self.refine_tree.len() {
+                    let node = &self.refine_tree[ni];
+                    eprintln!(
+                        "POST-DEREF tree[{ni}] children={:?} leaf={:?} alive={}",
+                        node.children, node.child_leaf, node.alive
+                    );
+                }
+            }
+            let mut etn: Vec<_> = self.elem_to_node.iter().collect();
+            etn.sort();
+            let head: Vec<_> = etn.iter().filter(|(e, _)| **e < 80 || **e > 300).take(60).map(|(&e, &(ni, k))| format!("{e}:({ni},{k})")).collect();
+            eprintln!("POST-DEREF elem_to_node (sample): {}", head.join(" "));
+        }
+
+        // Rebuild the NC vertex view (MFEM NCMesh::Update -> UpdateVertices):
+        // top-level (original) nodes first, then every other node in
+        // leaf-element (Hilbert SFC) order — first appearance when scanning
+        // the elements in leaf_order.  Without this the DofManager falls back
+        // to the identity phys->dof map and the P2 constraints / Dirichlet
+        // boundary DOFs / ZZ flux constraints all use wrong ids after a
+        // derefinement (silently corrupting the solve).
+        {
+            let mut view: Vec<NodeId> = (0..self.top_level_nodes as NodeId)
+                .filter_map(|n| node_map.get(&n).copied())
+                .collect();
+            let mut seen: std::collections::HashSet<NodeId> = view.iter().copied().collect();
+            for &e in &self.leaf_order {
+                let off = e as usize * 4;
+                for k in 0..4 {
+                    let n = new_conn[off + k];
+                    if seen.insert(n) {
+                        view.push(n);
+                    }
+                }
+            }
+            // Note: preserved (non-element) nodes kept for the edge-midpoint
+            // history are NOT part of the vertex view — they are not DOFs
+            // (MFEM's vertex table only covers element-used nodes).  They only
+            // exist in the mesh node table so the constraint walk can still
+            // reference them; build_q2_quad sizes the vertex DOF block by
+            // view.len(), excluding them.
+            new_mesh.nc_vertex_view = Some(view);
+        }
 
         Some(new_mesh)
     }
@@ -6198,7 +6935,7 @@ fn refine_hex27_uniform_inner(mesh: &Mesh<3>, marked: &[ElemId], npe: usize) -> 
     let n_elems = mesh.n_elems();
     let mut hex8_conn = Vec::with_capacity(n_elems * 8);
     for e in 0..n_elems { let off = e * npe; hex8_conn.extend_from_slice(&mesh.conn[off..off+8]); }
-    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None };
+    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None };
     refine_hex8_uniform(&hex8_mesh, marked)
 }
 
@@ -7230,7 +7967,8 @@ mod tests {
             face_offsets: Some(face_offsets),
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-        };
+            nc_vertex_view: None,
+};
 
         let vol_orig = prism6_vol(&mesh, 0);
         assert!((vol_orig - 0.5).abs() < 1e-14, "original volume={}", vol_orig);
@@ -7275,7 +8013,8 @@ mod tests {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-        };
+            nc_vertex_view: None,
+};
 
         let fine = refine_uniform_3d(&mesh);
         assert_eq!(fine.n_elems(), 8);
@@ -7303,7 +8042,8 @@ mod tests {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-        }
+            nc_vertex_view: None,
+}
     }
 
     #[test]
@@ -7376,7 +8116,8 @@ mod tests {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-        };
+            nc_vertex_view: None,
+};
 
         // Refine only prism 0
         let (nc, edge_c, tri_c, quad_c, _) = refine_nonconforming_prism(&mesh, &[0], None);
@@ -7416,7 +8157,8 @@ mod tests {
             face_types: Some(face_types),
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-        };
+            nc_vertex_view: None,
+};
 
         let vol_orig = prism6_vol(&mesh, 0) + prism6_vol(&mesh, 1);
         assert!((vol_orig - 1.0).abs() < 1e-14, "2 prisms, each 0.5 → total=1, got {}", vol_orig);
@@ -7470,7 +8212,7 @@ mod tests {
         let mesh = Mesh { coords:c, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex20,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex20_uniform(&mesh, &all);
         assert_eq!(fine.n_elems(), 8); assert_eq!(fine.elem_type, ElementType::Hex8); assert!(c.is_empty());
@@ -7491,7 +8233,7 @@ mod tests {
         let mesh = Mesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex27,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex27_uniform(&mesh, &all);
         assert_eq!(fine.n_elems(), 8); assert!(c.is_empty()); assert_eq!(fine.elem_type, ElementType::Hex8);
@@ -7516,7 +8258,7 @@ mod tests {
         let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let v0 = pyramid5_vol(&mesh, 0); assert!((v0-1.0/3.0).abs() < 1e-14);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c) = refine_pyramid5_uniform(&mesh, &all);
@@ -7534,7 +8276,7 @@ mod tests {
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
             face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
             face_offsets: Some(vec![0,4,7,10,13,16]),
-            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None };
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None };
         let fine = refine_uniform_3d(&mesh);
         assert_eq!(fine.n_elems(), 16); fine.check().unwrap();
     }
@@ -7546,7 +8288,7 @@ mod tests {
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
             face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
             face_offsets: Some(vec![0,4,7,10,13,16]),
-            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None }
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None }
     }
 
     #[test] fn pyramid5_nc_refine_empty_is_identity() {
@@ -7575,7 +8317,7 @@ mod tests {
         let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &[0], None);
         assert_eq!(nc.n_elems(), 17); assert!(ec.len()>=3); assert!(!tc.is_empty()); assert!(qc.is_empty());
         nc.check().unwrap();
@@ -7593,7 +8335,7 @@ mod tests {
         Mesh { coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], geometry:None }
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None }
     }
 
     #[test] fn prism_aniso_z_split_doubles_elements() {
@@ -7836,7 +8578,8 @@ mod tests {
             face_offsets: Some(face_offsets),
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-        }
+            nc_vertex_view: None,
+}
     }
 
     #[test] fn zz_3d_general_linear_prism() {
@@ -7893,7 +8636,8 @@ mod tests {
             face_offsets: Some(face_offsets),
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-        }
+            nc_vertex_view: None,
+}
     }
 
     #[test] fn zz_3d_general_linear_pyramid() {

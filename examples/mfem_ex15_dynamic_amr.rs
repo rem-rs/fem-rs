@@ -139,6 +139,12 @@ impl NcState2D for NcState2 {
             NcState2::Quad4(s) => s.constraints(),
         }
     }
+    fn midpoints(&self) -> &std::collections::HashMap<(u32, u32), u32> {
+        match self {
+            NcState2::Tri3(_) => NcState2D::midpoints(self),
+            NcState2::Quad4(s) => s.active_midpoints(),
+        }
+    }
     fn deref_groups(&self) -> Vec<usize> {
         match self {
             NcState2::Tri3(s) => s.deref_groups(),
@@ -157,54 +163,6 @@ impl NcState2D for NcState2 {
             NcState2::Quad4(s) => s.derefine_groups(mesh, groups),
         }
     }
-}
-
-// ─── P2 hanging-node constraint upgrade ───────────────────────────────────────
-// Rust's NCState generates P1-style constraints `u[mid] = 0.5(u[a]+u[b])` at the
-// mesh level. For P2 (quadratic H1) spaces MFEM instead constrains the
-// *fine-edge midpoint DOFs* (the 1/4 and 3/4 points of a coarse edge) with the
-// parent-edge P2 basis (GetTransferMatrix):
-//     u[S1] = 0.375 u[a] + 0.75 u[E] - 0.125 u[b]   (1/4 point)
-//     u[S2] = -0.125 u[a] + 0.75 u[E] + 0.375 u[b]  (3/4 point)
-// and ties the coarse-edge-midpoint vertex DOF `mid` to the coarse-edge-mid
-// DOF `E` (same physical point).  `E` remains a free DOF.
-fn p2_constraints(
-    p1: &[HangingNodeConstraint],
-    dm: &fem_space::dof_manager::DofManager,
-) -> Vec<HangingNodeConstraint> {
-    use fem_space::dof_manager::EdgeKey;
-    let mut out: Vec<HangingNodeConstraint> = Vec::new();
-    for c in p1 {
-        let (mid, a, b) = (c.constrained, c.parent_a, c.parent_b);
-        // NOTE: edge_dof_map keys are canonicalized via EdgeKey::new (min,max);
-        // constructing EdgeKey(a, b) directly would miss reversed edges.
-        let e = dm.edge_dof_map.get(&EdgeKey::new(a as u32, b as u32)).copied();
-        let Some(e) = e else { continue };
-        let e = e as usize;
-        // mid vertex DOF == coarse-edge midpoint DOF (same point).
-        if mid != e {
-            out.push(HangingNodeConstraint::new_weighted(mid, e, e, 0.5, 0.5, vec![]));
-        }
-        // fine edge (a, mid): midpoint at the 1/4 point of the coarse edge.
-        if let Some(&s1) = dm.edge_dof_map.get(&EdgeKey::new(a as u32, mid as u32)) {
-            let s1 = s1 as usize;
-            if s1 != mid && s1 != e {
-                out.push(HangingNodeConstraint::new_weighted(
-                    s1, a, b, 0.375, -0.125, vec![(e, 0.75)],
-                ));
-            }
-        }
-        // fine edge (mid, b): midpoint at the 3/4 point of the coarse edge.
-        if let Some(&s2) = dm.edge_dof_map.get(&EdgeKey::new(mid as u32, b as u32)) {
-            let s2 = s2 as usize;
-            if s2 != mid && s2 != e {
-                out.push(HangingNodeConstraint::new_weighted(
-                    s2, a, b, -0.125, 0.375, vec![(e, 0.75)],
-                ));
-            }
-        }
-    }
-    out
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
@@ -293,7 +251,11 @@ fn main() {
             // MFEM P2 transfer-matrix constraints (fine-edge midpoints).
             let dm0 = space.dof_manager();
             let hc = if order == 2 {
-                p2_constraints(nc_state.constraints(), dm0)
+                fem_space::constraints::p2_hanging_constraints(
+                    nc_state.constraints(),
+                    dm0,
+                    nc_state.midpoints(),
+                )
             } else {
                 nc_state.constraints().to_vec()
             };
@@ -340,7 +302,7 @@ fn main() {
             let res = fem_solver::solve_pcg_gssmoother(
                 &mat_true, &rhs_true, &mut x_true,
                 &fem_solver::SolverConfig {
-                    rtol: 1e-12, max_iter: 500, verbose: false, ..Default::default()
+                    rtol: 1e-6, max_iter: 500, verbose: false, ..Default::default() // MFEM PCG(RTOL=1e-12) → CGSolver rel_tol=sqrt(1e-12)=1e-6
                 },
             );
             if res.is_err() { break; }
@@ -353,14 +315,20 @@ fn main() {
             // Recover hanging-node values
             if !hc.is_empty() { recover_hanging_values(&mut u, &hc); }
 
-            // Error estimation + refinement (matches C++ refiner.Apply(*mesh))
+            // Error estimation + refinement (matches C++ refiner.Apply(*mesh)).
+            // The estimator's flux space is an H1×sdim space of the same order,
+            // so its hanging constraints are the P2 DOF constraints (not the
+            // mesh-level P1 constraints).
             let gf = GridFunction::new(&space, u);
             let ne_before = mesh.n_elems();
-            refiner.apply(&mut mesh, &mut nc_state, &gf, &diffusion);
+            refiner.apply(&mut mesh, &mut nc_state, &gf, &diffusion, Some(&hc));
             let ne_after = mesh.n_elems();
             let n_marked = if ne_after > ne_before {
                 refiner.last_marked.len()
             } else { 0 };
+            if std::env::var("EX15_DBG_MARKED").is_ok() {
+                println!("DBG it{ref_it} ne={ne_after} marked={n_marked} marks={:?}", refiner.last_marked);
+            }
 
             // C++ ex15.cpp:317-320 — `if (refiner.Stop()) break;`
             if refiner.stop() { break; }
