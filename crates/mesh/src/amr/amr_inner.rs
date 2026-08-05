@@ -2628,6 +2628,14 @@ pub struct NCStateQuad {
     /// Number of top-level (original) mesh nodes — MFEM assigns these the
     /// first `GetNV()` vertex DOFs (UpdateVertices STEP 1-2).
     top_level_nodes: usize,
+    /// Current mesh-node ids of the top-level (original) vertices, in
+    /// creation order (id order of the initial mesh).  MFEM's NCMesh node
+    /// table is append-only (derefinement never renumbers nodes), so the
+    /// original vertices always keep ids 0..N0-1 there; Rust's deref
+    /// compacts node ids, so this Vec is remapped through the compaction
+    /// map after every derefinement to keep the vertex-view top-level block
+    /// (and hence the vertex DOF numbering) MFEM-compatible.
+    top_level_ids: Vec<NodeId>,
     /// Current leaf-element order (MFEM `leaf_elements` after
     /// `CollectLeafElements`): the order in which elements appear in the
     /// refined mesh.  Drives element numbering, the edge table and hence the
@@ -2653,6 +2661,7 @@ impl NCStateQuad {
             elem_to_node: HashMap::new(),
             root_states: Vec::new(),
             top_level_nodes: 0,
+            top_level_ids: Vec::new(),
             leaf_order: Vec::new(),
             elem_root: HashMap::new(),
         }
@@ -2710,6 +2719,7 @@ impl NCStateQuad {
         // would restore an empty leaf_order)
         if self.root_states.is_empty() {
             self.top_level_nodes = mesh.n_nodes();
+            self.top_level_ids = (0..mesh.n_nodes() as NodeId).collect();
             self.root_states = init_root_states_quad(mesh);
             self.leaf_order = (0..mesh.n_elems() as ElemId).collect();
             self.elem_root = (0..mesh.n_elems() as usize)
@@ -3133,7 +3143,7 @@ impl NCStateQuad {
         // order — first appearance when scanning the elements in leaf_order.
         // The DofManager reads this to make the global vertex DOF ids match
         // MFEM on the (multi-level) NC mesh.
-        let mut view: Vec<NodeId> = (0..self.top_level_nodes as NodeId).collect();
+        let mut view: Vec<NodeId> = self.top_level_ids.clone();
         let mut seen: std::collections::HashSet<NodeId> = view.iter().copied().collect();
         for &e in &self.leaf_order {
             let off = e as usize * 4;
@@ -3648,11 +3658,25 @@ impl NCStateQuad {
         // `new_node_set.contains(&mid)` requirement dropped such deep split
         // records, breaking the P2 TraverseEdge chain (slave constraints for
         // dofs 85 92 131 147 234 241 275 291 369 375 vanished).  Keep a split
-        // record if the edge itself or one of its sub-edges is an element edge.
-        self.active_midpoints.retain(|&(a, b), &mut _mid| {
-            new_edge_elems.contains_key(&quad_edge_key(a, b))
-                || new_edge_elems.contains_key(&quad_edge_key(a, _mid))
-                || new_edge_elems.contains_key(&quad_edge_key(_mid, b))
+        // record if the edge itself or ANY descendant sub-edge (recursively —
+        // MFEM's ReferenceElement recursion bumps edge_refc all the way up the
+        // split tree) is an element edge.
+        fn split_edge_referenced(
+            a: NodeId,
+            b: NodeId,
+            midpoints: &HashMap<(NodeId, NodeId), NodeId>,
+            new_edge_elems: &std::collections::HashMap<(NodeId, NodeId), Vec<u32>>,
+        ) -> bool {
+            if new_edge_elems.contains_key(&quad_edge_key(a, b)) { return true; }
+            if let Some(&mid) = midpoints.get(&quad_edge_key(a, b)) {
+                if split_edge_referenced(a, mid, midpoints, new_edge_elems) { return true; }
+                if split_edge_referenced(mid, b, midpoints, new_edge_elems) { return true; }
+            }
+            false
+        }
+        let mp_snapshot = self.active_midpoints.clone();
+        self.active_midpoints.retain(|&(a, b), _mid| {
+            split_edge_referenced(a, b, &mp_snapshot, &new_edge_elems)
         });
 
         // Rebuild hanging-node constraints for the coarsened mesh.
@@ -3725,9 +3749,16 @@ impl NCStateQuad {
         // boundary DOFs / ZZ flux constraints all use wrong ids after a
         // derefinement (silently corrupting the solve).
         {
-            let mut view: Vec<NodeId> = (0..self.top_level_nodes as NodeId)
-                .filter_map(|n| node_map.get(&n).copied())
+            // MFEM's NCMesh node table is append-only, so the top-level
+            // vertices keep their creation ids 0..N0-1 across derefinements;
+            // Rust compacts node ids, so remap the tracked top-level ids
+            // through the compaction map (keeping their original order).
+            self.top_level_ids = self
+                .top_level_ids
+                .iter()
+                .filter_map(|&n| node_map.get(&n).copied())
                 .collect();
+            let mut view: Vec<NodeId> = self.top_level_ids.clone();
             let mut seen: std::collections::HashSet<NodeId> = view.iter().copied().collect();
             for &e in &self.leaf_order {
                 let off = e as usize * 4;

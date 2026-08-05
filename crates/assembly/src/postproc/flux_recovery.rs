@@ -106,48 +106,6 @@ fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usiz
     }
 }
 
-fn transform_grads(j_inv_t: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim: usize) {
-    for i in 0..n {
-        for j in 0..dim {
-            let mut s = 0.0;
-            for k in 0..dim { s += j_inv_t[(j, k)] * gr[i * dim + k]; }
-            gp[i * dim + j] = s;
-        }
-    }
-}
-
-/// Evaluate the physical gradient ∇u_h at reference point `xi` on element `e`.
-fn eval_grad_at<M: MeshTopology>(
-    mesh: &M,
-    elem: u32,
-    space: &impl FESpace<Mesh = M>,
-    dofs: &[f64],
-    xi: &[f64],
-    elem_type: ElementType,
-) -> Vec<f64> {
-    let dim = mesh.dim() as usize;
-    let order = space.order();
-    let ref_elem = ref_elem_vol(elem_type, order);
-    let n_ldofs = ref_elem.n_dofs();
-    let elem_dofs = space.element_dofs(elem);
-    let nodes = mesh.element_nodes(elem);
-
-    let (jac, _det) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
-    let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
-
-    let mut grad_ref = vec![0.0; n_ldofs * dim];
-    ref_elem.eval_grad_basis(xi, &mut grad_ref);
-    let mut grad_phys = vec![0.0; n_ldofs * dim];
-    transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, dim);
-
-    let mut grad = vec![0.0; dim];
-    for i in 0..n_ldofs {
-        let c = dofs[elem_dofs[i] as usize];
-        for d in 0..dim { grad[d] += c * grad_phys[i * dim + d]; }
-    }
-    grad
-}
-
 // ─── Implementation for DiffusionIntegrator ──────────────────────────────────
 
 use crate::standard::DiffusionIntegrator;
@@ -166,59 +124,44 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let elem_type = mesh.element_type(element);
         let order = space.order();
         let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
         let nodes = mesh.element_nodes(element);
+        let elem_dofs = space.element_dofs(element);
 
-        // Quadrature rule for integration (2*order is exact for product of
-        // two order-p polynomials, which is the mass matrix integrand).
-        let quad_order = (order as u8) * 2;
-        let quad = ref_elem.quadrature(quad_order);
-
-        // Element mass matrix M_ij = ∫ φ_i φ_j dΩ
-        let mut mass = vec![0.0; n_flux_dofs * n_flux_dofs];
-        // RHS: b_{i,d} = ∫ (κ·∇u_h)_d * φ_i dΩ
-        let mut rhs = vec![0.0; n_flux_dofs * dim];
-        let mut phi = vec![0.0; n_flux_dofs];
-
-        for (q, xi) in quad.points.iter().enumerate() {
-            let (_, det_j) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
-            let w_det = quad.weights[q] * det_j.abs();
-
-            // Evaluate κ·∇u_h at the quadrature point
-            let grad = eval_grad_at(mesh, element, space, solution_dofs, xi, elem_type);
-
-            // Evaluate flux-space basis functions at quadrature point
-            ref_elem.eval_basis(xi, &mut phi);
-
-            for i in 0..n_flux_dofs {
-                for j in 0..n_flux_dofs {
-                    mass[i * n_flux_dofs + j] += w_det * phi[i] * phi[j];
-                }
-                for d in 0..dim {
-                    rhs[i * dim + d] += w_det * phi[i] * self.kappa * grad[d];
-                }
-            }
-        }
-
-        // Solve M * flux_component = rhs_component for each dimension
-        // using LU decomposition of the small element mass matrix.
-        use nalgebra::{DMatrix, DVector};
-        let mass_mat = DMatrix::from_row_slice(n_flux_dofs, n_flux_dofs, &mass);
-        let lu = mass_mat.lu();
-
+        // MFEM DiffusionIntegrator::ComputeElementFlux evaluates κ·∇u_h at the
+        // flux-space DOF nodes (fluxelem.GetNodes()) directly — no L²
+        // projection, no quadrature.  Per node:
+        //   vec_j     = Σ_i u_i · ∂φ_i/∂ξ_j          (reference gradient,
+        //                                             dshape.MultTranspose(u))
+        //   vecdxt_i  = Σ_j (J^{-1})_{j,i} · vec_j   (invdfdx.MultTranspose)
+        //   flux(i,d) = κ · vecdxt_d
+        // Order of operations (combine first, then transform) matches MFEM
+        // bit-for-bit; an L² projection (even though mathematically equal for
+        // P1 gradients ⊂ P2) differs in the last ulps and flips elements near
+        // the AMR error threshold.
+        let mut grad_ref = vec![0.0; n_ldofs * dim];
+        let mut vec = vec![0.0; dim];
         let mut flux = vec![0.0; n_flux_dofs * dim];
-        for d in 0..dim {
-            let mut b = DVector::from_vec(
-                (0..n_flux_dofs).map(|i| rhs[i * dim + d]).collect(),
-            );
-            if lu.solve_mut(&mut b) {
-                for i in 0..n_flux_dofs {
-                    flux[i * dim + d] = b[i];
+        for (i, xi) in flux_dof_coords.iter().enumerate() {
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            for j in 0..dim {
+                let mut s = 0.0;
+                for k in 0..n_ldofs {
+                    s += solution_dofs[elem_dofs[k] as usize] * grad_ref[k * dim + j];
                 }
-            } else {
-                panic!(
-                    "Flux L2 projection: singular element mass matrix on element {}",
-                    element,
-                );
+                vec[j] = s;
+            }
+            let (jac, _) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
+            let j_inv = jac.try_inverse().unwrap_or_default();
+            for d in 0..dim {
+                let mut s = 0.0;
+                for j in 0..dim {
+                    s += j_inv[(j, d)] * vec[j];
+                }
+                // MFEM's ZienkiewiczZhuEstimator defaults to with_coeff=false,
+                // so ComputeElementFlux returns the raw gradient (no κ factor);
+                // ComputeFluxEnergy applies the coefficient (Q->Eval) instead.
+                flux[i * dim + d] = s;
             }
         }
         flux
@@ -232,25 +175,10 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
     ) -> f64 {
         let dim = mesh.dim() as usize;
         let elem_type = mesh.element_type(element);
-        let order = match elem_type {
-            ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10 => 1.max(
-                match elem_type {
-                    ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10 => {
-                        // Order from the element type: P1=1, P2=2, P3=3
-                        // But this is a geometry order, not FE order.
-                        // The flux space order should match the solution space.
-                        // We use the solution space order which we don't have here.
-                        // Fallback: use 2*order for quadrature (same as zz_estimator_nodal).
-                        1
-                    }
-                    _ => 1,
-                }
-            ),
-            _ => 1,
-        };
-        // We need the FE order to determine quadrature. Derive from flux_diff length.
+        // The flux space has the same order as the solution space (ex15: the
+        // estimator's flux FES is built from the same H1_FECollection).  The
+        // FE order is inferred from the flux_diff layout (n_dofs per component).
         let n_flux_dofs = if dim > 0 { flux_diff.len() / dim } else { 0 };
-        // The order can be inferred: for P1, n_flux_dofs=3; for P2, n_flux_dofs=6; for Q1, n_flux_dofs=4; for Q2, n_flux_dofs=9.
         let fe_order = match (elem_type, n_flux_dofs) {
             (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => 1,
             (ElementType::Tri3, 6) | (ElementType::Tri6, 6) => 2,
@@ -262,38 +190,42 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
             (ElementType::Tet4, 20) => 3,
             _ => 1,
         };
+        // MFEM: order = 2 * fluxelem.GetOrder(); IntRules.Get(geom, order).
         let quad_order = (fe_order as u8) * 2;
         let ref_elem = ref_elem_vol(elem_type, fe_order as u8);
         let n_ldofs = ref_elem.n_dofs();
         let nodes = mesh.element_nodes(element);
         let quad = ref_elem.quadrature(quad_order);
 
-        // Build element mass matrix
-        let mut m_elem = vec![0.0; n_ldofs * n_ldofs];
+        // MFEM ComputeFluxEnergy: for each quadrature point
+        //   pointflux_d = Σ_j flux_diff(j,d) · φ_j(ip)      (CalcPhysShape:
+        //                reference basis evaluated at the physical point,
+        //                i.e. the reference basis for VALUE elements)
+        //   energy += Trans.Weight()·ip.weight · (pointflux·pointflux)
+        //   (with coeff Q: ·Q->Eval; ex15 uses ConstantCoefficient(1.0))
         let mut phi = vec![0.0; n_ldofs];
+        let mut pointflux = vec![0.0; dim];
+        let mut energy = 0.0;
         for (q, xi) in quad.points.iter().enumerate() {
             let (_, det_j) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
-            let w_det = quad.weights[q] * det_j.abs() / self.kappa;
+            let w = quad.weights[q] * det_j.abs();
             ref_elem.eval_basis(xi, &mut phi);
-            for i in 0..n_ldofs {
+            for d in 0..dim {
+                let mut s = 0.0;
                 for j in 0..n_ldofs {
-                    m_elem[i * n_ldofs + j] += w_det * phi[i] * phi[j];
+                    s += flux_diff[j * dim + d] * phi[j];
                 }
+                pointflux[d] = s;
             }
-        }
-
-        // Compute energy: Σ_d (f_d)^T * M_elem * (f_d)
-        let mut eng = 0.0;
-        for d in 0..dim {
-            for i in 0..n_ldofs {
-                let mut row_sum = 0.0;
-                for j in 0..n_ldofs {
-                    row_sum += m_elem[i * n_ldofs + j] * flux_diff[j * dim + d];
-                }
-                eng += flux_diff[i * dim + d] * row_sum;
+            let mut e = 0.0;
+            for d in 0..dim {
+                e += pointflux[d] * pointflux[d];
             }
+            // Q->Eval == kappa for DiffusionIntegrator (ConstantCoefficient
+            // one(1.0) in ex15) — multiply by kappa like MFEM's `e *= Q`.
+            energy += w * self.kappa * e;
         }
-        eng
+        energy
     }
 }
 
@@ -391,7 +323,6 @@ where
     S: FESpace<Mesh = M>,
     F: FluxRecovery,
 {
-    use fem_space::constraints::recover_hanging_values;
     let mesh: &M = gf.space().mesh();
     let ne = mesh.n_elements();
     let nd = gf.space().n_dofs();
@@ -430,22 +361,15 @@ where
             }
         }
     }
-
-    // Apply hanging-node constraints: recover constrained DOF values
-    // from parent DOFs via the constraint relationship, matching MFEM's
-    // flux-space constraint handling (SumFluxAndCount applies the
-    // FESpace's constraints during averaging; InvTransformPrimal fills
-    // constrained DOFs with the P2 interpolation of their masters).
-    // IMPORTANT: constrained DOFs may depend on other constrained DOFs
-    // (chains) — resolve in topological order (masters first), exactly like
-    // MFEM's multi-round finalization.  A single pass over `constraints` in
-    // arbitrary order reads stale parent values for chains (ex15 T001:
-    // elements 39 85 167 213 295 got err 0.0062 vs C++ 0.00022).
-    for d in 0..dim {
-        let mut comp: Vec<f64> = flux_avg.iter().map(|v| v[d]).collect();
-        recover_hanging_values(&mut comp, constraints);
-        for (i, &v) in comp.iter().enumerate() { flux_avg[i][d] = v; }
-    }
+    // NOTE: no hanging-node recovery on the averaged flux.  MFEM's flux space
+    // here is the same H1 order-2 space as the solution (ex15.cpp uses `fec`);
+    // H1_FECollection does NOT override DofTransformationForGeometry, so
+    // fdoftrans.TransformPrimal / InvTransformPrimal in ZZErrorEstimator /
+    // SumFluxAndCount are no-ops — the averaged flux keeps its directly
+    // averaged slave-DOF values (a slave DOF shared by one element simply
+    // keeps that element's raw flux).  Applying recover_hanging_values here
+    // overwrote slaves with the master interpolation and systematically
+    // biased the estimator (ex15: ~3.7x err on hanging clusters).
 
     // ── Step 3: per-element error ────────────────────────────────────────────
     let mut eta = vec![0.0; ne];

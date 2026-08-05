@@ -306,7 +306,10 @@ fn main() {
                 },
             );
             if res.is_err() { break; }
-            if res.as_ref().is_ok_and(|r| !r.converged) { break; }
+            // MFEM ex15.cpp:286-287 does NOT check PCG convergence — it uses the
+            // (possibly unconverged after 500 iterations) iterate directly.
+            // Breaking here would silently skip all refinement for later time
+            // steps on large meshes (C++ keeps refining).
             // Expand true-DOF solution back to the full vector (RecoverFEMSolution).
             for (&td, &v) in true_dofs.iter().zip(x_true.iter()) {
                 u[td] = v;

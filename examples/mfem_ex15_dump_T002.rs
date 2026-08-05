@@ -68,7 +68,7 @@ fn main() {
     let mut dump_t002 = false;
     let mut marked_printed = false;
 
-    while time < 0.021 {
+    while time < 0.071 {
         refiner.reset();
         let mut ref_it = 1usize;
         loop {
@@ -112,17 +112,33 @@ fn main() {
             }
             for (&td, &v) in true_dofs.iter().zip(x_true.iter()) { u[td] = v; }
             if !hc.is_empty() {
-                for c in &hc {
-                    let v = c.coeff_a * u[c.parent_a] + c.coeff_b * u[c.parent_b]
-                        + c.extra.iter().map(|&(m, w)| w * u[m]).sum::<f64>();
-                    u[c.constrained] = v;
-                }
+                fem_space::constraints::recover_hanging_values(&mut u, &hc);
             }
 
             // ── dump (before refinement, on the solved mesh) ──
             if (time - 0.02).abs() < 1e-9 && ref_it == 1 && !dump_t002 {
                 dump_t002 = true;
                 println!("T002IT1 dofs={cdofs} elems={} nodes={}", mesh.n_elems(), mesh.n_nodes());
+                if let Some(view) = mesh.nc_vertex_view() {
+                    println!("T002NODE {}", view.len());
+                    for (d, &n) in view.iter().enumerate() {
+                        let p = mesh.node_coords(n);
+                        println!("{d} {:.17} {:.17}", p[0], p[1]);
+                    }
+                } else {
+                    println!("T002NODE {}", mesh.n_nodes());
+                    for n in 0..mesh.n_nodes() as u32 {
+                        let p = mesh.node_coords(n);
+                        println!("{n} {:.17} {:.17}", p[0], p[1]);
+                    }
+                }
+                println!("T002MESH {}", mesh.n_elems());
+                for e in 0..mesh.n_elems() as u32 {
+                    let ns = mesh.elem_nodes(e);
+                    println!("{e} {} {} {} {}", ns[0], ns[1], ns[2], ns[3]);
+                }
+                println!("T002CP {}", true_dofs.len());
+                for (i, &td) in true_dofs.iter().enumerate() { println!("CPR {i} {td}:1"); }
                 println!("ATRUE {} {} {}", mat_true.nrows, mat_true.ncols, mat_true.nnz());
                 for i in 0..mat_true.nrows {
                     for k in mat_true.row_ptr[i]..mat_true.row_ptr[i + 1] {
@@ -132,6 +148,29 @@ fn main() {
                 println!("BTRUE {}", rhs_true.len());
                 for (i, &v) in rhs_true.iter().enumerate() { println!("{i} {v:.17e}"); }
                 println!("SOLU {cdofs}");
+                for (d, &v) in u.iter().enumerate() { println!("{d} {v:.17e}"); }
+            }
+            if ((time - 0.07).abs() < 1e-9 || (time - 0.06).abs() < 1e-9 || (time - 0.05).abs() < 1e-9 || (time - 0.04).abs() < 1e-9 || (time - 0.03).abs() < 1e-9) && ref_it == 1 {
+                println!("T006CP t={time} dofs={} true={} nconstr={}", cdofs, true_dofs.len(), hc.len());
+                if (time - 0.06).abs() < 1e-9 {
+                for c in &hc {
+                    print!("TDEP {} <- {}:{}", c.constrained, c.parent_a, c.coeff_a);
+                    if c.parent_b != c.parent_a || c.coeff_b != c.coeff_a {
+                        print!(" {}:{}", c.parent_b, c.coeff_b);
+                    }
+                    for &(m, w) in &c.extra { print!(" {}:{:.17}", m, w); }
+                    println!();
+                }
+                }
+                println!("T006ATRUE {} {} {}", mat_true.nrows, mat_true.ncols, mat_true.nnz());
+                for i in 0..mat_true.nrows {
+                    for k in mat_true.row_ptr[i]..mat_true.row_ptr[i + 1] {
+                        println!("{} {} {:.17e}", i, mat_true.col_idx[k], mat_true.values[k]);
+                    }
+                }
+                println!("T006BTRUE {}", rhs_true.len());
+                for (i, &v) in rhs_true.iter().enumerate() { println!("{i} {v:.17e}"); }
+                println!("T006SOLU {cdofs}");
                 for (d, &v) in u.iter().enumerate() { println!("{d} {v:.17e}"); }
             }
             if (time - 0.01).abs() < 1e-9 && ref_it == 1 && !dump_t001 {
@@ -340,12 +379,135 @@ fn main() {
                     println!();
                 }
             }
+            if ((time - 0.01).abs() < 1e-9 || (time - 0.06).abs() < 1e-9) && ref_it == 1 {
+                // manual estimator run (same inputs as refiner.apply below) so the
+                // per-dof flux dump runs BEFORE the mesh is refined
+                use fem_assembly::postproc::flux_recovery::zz_estimator_mfem_nc;
+                let indicators = zz_estimator_mfem_nc(&gf, &diffusion, &hc);
+                println!("ETA {}", indicators.eta.len());
+                for (i, &e) in indicators.eta.iter().enumerate() { println!("{i} {e:.17e}"); }
+                // ── per-dof flux composition dump (mirrors zz_estimator_mfem_nc
+                //    internals: SumFluxAndCount + compute_element_flux + diff +
+                //    compute_flux_energy), for elements 0/39/127 ──
+                {
+                    use fem_assembly::postproc::flux_recovery::FluxRecovery;
+                    use fem_element::ReferenceElement;
+                    use fem_element::lagrange::QuadQ2;
+                    let re: Box<dyn ReferenceElement> = Box::new(QuadQ2);
+                    let dof_coords = re.dof_coords();
+                    let nd2 = space.n_dofs();
+                    let dim2 = 2usize;
+                    let n_ldofs = dof_coords.len();
+                    let mut fsum = vec![vec![0.0f64; dim2]; nd2];
+                    let mut fcnt = vec![0usize; nd2];
+                    for e in 0..mesh.n_elems() as u32 {
+                        let raw = diffusion.compute_element_flux(&mesh, &space, e, &u, &dof_coords);
+                        let ed = space.element_dofs(e);
+                        for (i, &gd) in ed.iter().enumerate() {
+                            let idx = gd as usize;
+                            for d in 0..dim2 { fsum[idx][d] += raw[i * dim2 + d]; }
+                            fcnt[idx] += 1;
+                        }
+                    }
+                    let mut favg = vec![vec![0.0f64; dim2]; nd2];
+                    for i in 0..nd2 {
+                        let c = fcnt[i] as f64;
+                        if c > 0.0 { for d in 0..dim2 { favg[i][d] = fsum[i][d] / c; } }
+                    }
+                    let dump_elems: &[u32] = if (time - 0.06).abs() < 1e-9 { &[362, 407, 471] } else { &[0, 39, 118] };
+                    for &e in dump_elems {
+                        // ── diagnostics: quadrature points, mass matrix, and
+                        //    pointwise interpolation at Q2_NODES ──
+                        {
+                            let quad = re.quadrature(4);
+                            print!("E{e}QUAD");
+                            for p in &quad.points { print!(" ({:.6},{:.6})", p[0], p[1]); }
+                            println!();
+                            let nodes = mesh.element_nodes(e);
+                            let c = |i: usize| mesh.node_coords(nodes[i]);
+                            let mut mass = vec![0.0f64; 81];
+                            for (q, xi) in quad.points.iter().enumerate() {
+                                let (e1, n1) = (xi[0], xi[1]);
+                                let det_j = 0.25 * (-(1.0 - n1) * c(0)[0] + (1.0 - n1) * c(1)[0] + (1.0 + n1) * c(2)[0] - (1.0 + n1) * c(3)[0])
+                                    * 0.25 * (-(1.0 - e1) * c(0)[1] - (1.0 + e1) * c(1)[1] + (1.0 + e1) * c(2)[1] + (1.0 - e1) * c(3)[1])
+                                    - 0.25 * (-(1.0 - n1) * c(0)[1] + (1.0 - n1) * c(1)[1] + (1.0 + n1) * c(2)[1] - (1.0 + n1) * c(3)[1])
+                                    * 0.25 * (-(1.0 - e1) * c(0)[0] - (1.0 + e1) * c(1)[0] + (1.0 + e1) * c(2)[0] + (1.0 - e1) * c(3)[0]);
+                                let w_det = quad.weights[q] * det_j.abs();
+                                let mut phi = vec![0.0f64; 9];
+                                re.eval_basis(xi, &mut phi);
+                                for i in 0..9 { for j in 0..9 { mass[i * 9 + j] += w_det * phi[i] * phi[j]; } }
+                            }
+                            let mut offmax = 0.0f64;
+                            for i in 0..9 { for j in 0..9 { if i != j { offmax = offmax.max(mass[i * 9 + j].abs()); } } }
+                            println!("E{e}MASS diag={:.6e}..{:.6e} offmax={:.6e}",
+                                (0..9).map(|i| mass[i * 9 + i]).fold(f64::INFINITY, f64::min),
+                                (0..9).map(|i| mass[i * 9 + i]).fold(0.0f64, f64::max), offmax);
+                            // pointwise κ∇u_h at Q2_NODES (interpolation)
+                            let q2n = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0),
+                                       (0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, 0.0)];
+                            let ed = space.element_dofs(e);
+                            let mut gr = vec![0.0f64; 18];
+                            for (k, &(qx, qy)) in q2n.iter().enumerate() {
+                                let xi = [qx, qy];
+                                let (e1, n1) = (qx, qy);
+                                let j00 = 0.25 * (-(1.0 - n1) * c(0)[0] + (1.0 - n1) * c(1)[0] + (1.0 + n1) * c(2)[0] - (1.0 + n1) * c(3)[0]);
+                                let j01 = 0.25 * (-(1.0 - e1) * c(0)[0] - (1.0 + e1) * c(1)[0] + (1.0 + e1) * c(2)[0] + (1.0 - e1) * c(3)[0]);
+                                let j10 = 0.25 * (-(1.0 - n1) * c(0)[1] + (1.0 - n1) * c(1)[1] + (1.0 + n1) * c(2)[1] - (1.0 + n1) * c(3)[1]);
+                                let j11 = 0.25 * (-(1.0 - e1) * c(0)[1] - (1.0 + e1) * c(1)[1] + (1.0 + e1) * c(2)[1] + (1.0 - e1) * c(3)[1]);
+                                let det = j00 * j11 - j01 * j10;
+                                let jit = [[j11 / det, -j01 / det], [-j10 / det, j00 / det]];
+                                re.eval_grad_basis(&xi, &mut gr);
+                                let mut g = [0.0f64; 2];
+                                for i in 0..9 {
+                                    let gx = jit[0][0] * gr[i * 2] + jit[0][1] * gr[i * 2 + 1];
+                                    let gy = jit[1][0] * gr[i * 2] + jit[1][1] * gr[i * 2 + 1];
+                                    let v = u[ed[i] as usize];
+                                    g[0] += v * gx; g[1] += v * gy;
+                                }
+                                println!("E{e}GRAD {k} {:.17e} {:.17e}", diffusion.kappa * g[0], diffusion.kappa * g[1]);
+                            }
+                        }
+                        let raw = diffusion.compute_element_flux(&mesh, &space, e, &u, &dof_coords);
+                        let ed = space.element_dofs(e);
+                        println!("E{e}EDOF");
+                        for (i, &gd) in ed.iter().enumerate() {
+                            let mut cs = String::new();
+                            for c in &hc {
+                                if c.constrained as u32 == gd {
+                                    cs.push_str(&format!(" [{} <- {}:{:.6} {}:{:.6} extra={:?}]",
+                                        gd, c.parent_a, c.coeff_a, c.parent_b, c.coeff_b, c.extra));
+                                }
+                            }
+                            println!("E{e}EDOF {i} gd={gd} u={:.17e}{cs}", u[gd as usize]);
+                        }
+                        println!("E{e}FLD {n_ldofs} {dim2}");
+                        for (i, &gd) in ed.iter().enumerate() {
+                            for d in 0..dim2 {
+                                println!("E{e}FL {i} {d} {:.17e}", raw[i * dim2 + d]);
+                            }
+                        }
+                        for (i, &gd) in ed.iter().enumerate() {
+                            for d in 0..dim2 {
+                                println!("E{e}FLA {i} {d} {:.17e}", favg[gd as usize][d]);
+                            }
+                        }
+                        let mut diff = vec![0.0f64; n_ldofs * dim2];
+                        for (i, &gd) in ed.iter().enumerate() {
+                            for d in 0..dim2 {
+                                diff[i * dim2 + d] = raw[i * dim2 + d] - favg[gd as usize][d];
+                                println!("E{e}DIFF {i} {d} {:.17e}", diff[i * dim2 + d]);
+                            }
+                        }
+                        let eng = diffusion.compute_flux_energy(&mesh, e, &diff);
+                        println!("E{e}ENG {eng:.17e} {}", eng.sqrt());
+                        print!("E{e}UL");
+                        for &gd in ed.iter() { print!(" {:.17e}", u[gd as usize]); }
+                        println!();
+                    }
+                }
+            }
             let ne_before = mesh.n_elems();
             refiner.apply(&mut mesh, &mut nc_state, &gf, &diffusion, Some(&hc));
-            if (time - 0.01).abs() < 1e-9 && ref_it == 1 {
-                println!("ETA {}", refiner.eta.len());
-                for (i, &e) in refiner.eta.iter().enumerate() { println!("{i} {e:.17e}"); }
-            }
             let ne_after = mesh.n_elems();
             let n_marked = if ne_after > ne_before { refiner.last_marked.len() } else { 0 };
             if (dump_t001 || dump_t002) && !marked_printed {
