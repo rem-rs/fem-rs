@@ -32,7 +32,9 @@ pub fn apply_hanging_constraints(
 
     let mut constraint_map = std::collections::HashMap::new();
     for c in constraints {
-        constraint_map.insert(c.constrained, (c.parent_a, c.parent_b));
+        // u[constrained] = coeff_a·u[a] + coeff_b·u[b] + Σ extra (P1/P2 weighted)
+        let parents: Vec<(usize, f64)> = c.parents().collect();
+        constraint_map.insert(c.constrained, parents);
     }
 
     // Recursively expand a DOF into its free-DOF contributions.
@@ -41,14 +43,15 @@ pub fn apply_hanging_constraints(
     fn expand_dof(
         dof: usize,
         weight: f64,
-        constraint_map: &std::collections::HashMap<usize, (usize, usize)>,
+        constraint_map: &std::collections::HashMap<usize, Vec<(usize, f64)>>,
         out: &mut Vec<(usize, f64)>,
         depth: usize,
     ) {
         if depth > 20 { return; } // safety guard against cycles
-        if let Some(&(a, b)) = constraint_map.get(&dof) {
-            expand_dof(a, weight * 0.5, constraint_map, out, depth + 1);
-            expand_dof(b, weight * 0.5, constraint_map, out, depth + 1);
+        if let Some(parents) = constraint_map.get(&dof) {
+            for &(p, coeff) in parents {
+                expand_dof(p, weight * coeff, constraint_map, out, depth + 1);
+            }
         } else {
             out.push((dof, weight));
         }
@@ -135,10 +138,11 @@ pub fn recover_hanging_values(
     for _ in 0..constraints.len() + 1 {
         let mut progress = false;
         remaining.retain(|c| {
-            let a_free = !constrained_set.contains(&c.parent_a) || resolved.contains(&c.parent_a);
-            let b_free = !constrained_set.contains(&c.parent_b) || resolved.contains(&c.parent_b);
-            if a_free && b_free {
-                x[c.constrained] = 0.5 * (x[c.parent_a] + x[c.parent_b]);
+            let parents_free = c.parents().all(|(p, _)| {
+                !constrained_set.contains(&p) || resolved.contains(&p)
+            });
+            if parents_free {
+                x[c.constrained] = c.parents().map(|(p, coeff)| coeff * x[p]).sum();
                 resolved.insert(c.constrained);
                 progress = true;
                 false // remove from remaining
@@ -151,7 +155,7 @@ pub fn recover_hanging_values(
 
     // Handle any remaining (shouldn't happen with valid constraints, but just in case).
     for c in remaining {
-        x[c.constrained] = 0.5 * (x[c.parent_a] + x[c.parent_b]);
+        x[c.constrained] = c.parents().map(|(p, coeff)| coeff * x[p]).sum();
     }
 }
 

@@ -12,14 +12,68 @@ use super::bisect::{edge_key, local_edges_tri, refine_marked};
 
 // ─── Hanging-node constraint ──────────────────────────────────────────────────
 
-/// A hanging-node constraint: `u[constrained] = 0.5*(u[parent_a] + u[parent_b])`.
+/// A hanging-node constraint: `u[constrained] = Σ coeff_i·u[parent_i]`.
+///
+/// P1 (linear) meshes use the classic form `u[c] = 0.5·u[a] + 0.5·u[b]`
+/// (coeff_a = coeff_b = 0.5, extra empty). P2 (quadratic) hanging nodes
+/// interpolate with the parent-edge P2 basis: the constrained DOF is a
+/// *fine-edge midpoint* lying at the 1/4 or 3/4 point of a coarse edge, and
+/// `extra` carries the coarse-edge-midpoint DOF with coefficient 3/4
+/// (matching MFEM `FiniteElement::GetTransferMatrix`).
 #[derive(Debug, Clone)]
 pub struct HangingNodeConstraint {
     /// The constrained (hanging) node DOF index.
     pub constrained: usize,
-    /// The two parent node DOF indices (the edge endpoints).
+    /// The first parent node DOF index.
     pub parent_a:    usize,
+    /// The second parent node DOF index.
     pub parent_b:    usize,
+    /// Coefficient of `parent_a` (P1: 0.5).
+    pub coeff_a:     f64,
+    /// Coefficient of `parent_b` (P1: 0.5).
+    pub coeff_b:     f64,
+    /// Extra parent DOFs with coefficients (P2 coarse-edge midpoint: [(mid, 0.75)]).
+    pub extra:       Vec<(usize, f64)>,
+}
+
+impl HangingNodeConstraint {
+    /// P1 constraint `u[c] = 0.5·(u[a] + u[b])`.
+    pub fn new_p1(constrained: usize, parent_a: usize, parent_b: usize) -> Self {
+        HangingNodeConstraint {
+            constrained,
+            parent_a,
+            parent_b,
+            coeff_a: 0.5,
+            coeff_b: 0.5,
+            extra: Vec::new(),
+        }
+    }
+
+    /// Arbitrary weighted constraint `u[c] = coeff_a·u[a] + coeff_b·u[b] + Σ extra`.
+    pub fn new_weighted(
+        constrained: usize,
+        parent_a: usize,
+        parent_b: usize,
+        coeff_a: f64,
+        coeff_b: f64,
+        extra: Vec<(usize, f64)>,
+    ) -> Self {
+        HangingNodeConstraint {
+            constrained,
+            parent_a,
+            parent_b,
+            coeff_a,
+            coeff_b,
+            extra,
+        }
+    }
+
+    /// All (parent, coefficient) pairs.
+    pub fn parents(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        std::iter::once((self.parent_a, self.coeff_a))
+            .chain(std::iter::once((self.parent_b, self.coeff_b)))
+            .chain(self.extra.iter().copied())
+    }
 }
 
 /// Accumulated state for multi-level non-conforming refinement.
@@ -344,7 +398,8 @@ impl NCState {
                     constrained: mid as usize,
                     parent_a: a as usize,
                     parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             } else if adj_a < 2 || adj_b < 2 {
                 // Sub-edges not fully surrounded → boundary hanging node
                 // (can happen on the mesh boundary — skip, not truly hanging).
@@ -616,7 +671,8 @@ pub fn refine_nonconforming(
                     constrained: mid as usize,
                     parent_a: a as usize,
                     parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
     }
@@ -2108,17 +2164,20 @@ fn refine_nonconforming_3d_internal(
             constrained: mab as usize,
             parent_a: a as usize,
             parent_b: b as usize,
-        });
+        coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
         edge_constraints.push(HangingNodeConstraint {
             constrained: mbc as usize,
             parent_a: b as usize,
             parent_b: c as usize,
-        });
+        coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
         edge_constraints.push(HangingNodeConstraint {
             constrained: mac as usize,
             parent_a: a as usize,
             parent_b: c as usize,
-        });
+        coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
 
         face_constraints.push(HangingFaceConstraint {
             constrained: mab as usize,
@@ -2165,7 +2224,8 @@ fn refine_nonconforming_3d_internal(
                 constrained: mid as usize,
                 parent_a: a as usize,
                 parent_b: b as usize,
-            });
+            coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
         }
     }
     rebuilt_constraints.sort_by_key(|c| c.constrained);
@@ -2363,7 +2423,8 @@ pub fn refine_nonconforming_quad(
                     constrained: mid as usize,
                     parent_a: a as usize,
                     parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
     }
@@ -2541,10 +2602,15 @@ impl NCStateQuad {
                 let m23 = *midpoint_map.get(&quad_edge_key(n2, n3)).unwrap();
                 let m30 = *midpoint_map.get(&quad_edge_key(n3, n0)).unwrap();
                 let c   = *center_map.get(&e).unwrap();
+                // MFEM child numbering (NonconformingRefinement, quad 4-split):
+                //   child0 = lower-left  (n0, m01, c, m30)
+                //   child1 = upper-left  (m30, c, m23, n3)
+                //   child2 = upper-right (c, m12, n2, m23)
+                //   child3 = lower-right (m01, n1, m12, c)
                 new_conn.extend_from_slice(&[n0,  m01, c,   m30]); new_tags.push(tag);
-                new_conn.extend_from_slice(&[m01, n1,  m12, c  ]); new_tags.push(tag);
-                new_conn.extend_from_slice(&[c,   m12, n2,  m23]); new_tags.push(tag);
                 new_conn.extend_from_slice(&[m30, c,   m23, n3 ]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[c,   m12, n2,  m23]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[m01, n1,  m12, c  ]); new_tags.push(tag);
             } else {
                 for k in 0..4 { new_conn.push(ns[k]); }
                 new_tags.push(tag);
@@ -2575,7 +2641,8 @@ impl NCStateQuad {
                     constrained: mid as usize,
                     parent_a: a as usize,
                     parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
         self.active_midpoints.retain(|_, mid| new_node_set.contains(mid));
@@ -2969,7 +3036,8 @@ pub fn refine_nonconforming_hex(
                     constrained: mid as usize,
                     parent_a: a as usize,
                     parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
     }
@@ -3003,10 +3071,10 @@ pub fn refine_nonconforming_hex(
         let mda = midpoint_map.get(&edge_key(d, a)).copied();
         if let (Some(mab), Some(mbc), Some(mcd), Some(mda)) = (mab, mbc, mcd, mda) {
             if let Some(&fc) = face_center_map.get(fns) {
-                constraints.push(HangingNodeConstraint { constrained: mab as usize, parent_a: a as usize, parent_b: b as usize });
-                constraints.push(HangingNodeConstraint { constrained: mbc as usize, parent_a: b as usize, parent_b: c as usize });
-                constraints.push(HangingNodeConstraint { constrained: mcd as usize, parent_a: c as usize, parent_b: d as usize });
-                constraints.push(HangingNodeConstraint { constrained: mda as usize, parent_a: d as usize, parent_b: a as usize });
+                constraints.push(HangingNodeConstraint::new_p1(mab as usize, a as usize, b as usize));
+                constraints.push(HangingNodeConstraint::new_p1(mbc as usize, b as usize, c as usize));
+                constraints.push(HangingNodeConstraint::new_p1(mcd as usize, c as usize, d as usize));
+                constraints.push(HangingNodeConstraint::new_p1(mda as usize, d as usize, a as usize));
                 face_constraints.push(HangingQuadFaceConstraint {
                     constrained: fc as usize,
                     parent_a: a as usize, parent_b: b as usize,
@@ -3273,7 +3341,8 @@ pub fn refine_prism6_uniform(
                     constrained: mid as usize,
                     parent_a: a as usize,
                     parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
     }
@@ -3566,7 +3635,8 @@ fn refine_nonconforming_prism_internal(
                     constrained: mid as usize,
                     parent_a: a as usize,
                     parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
     }
@@ -3587,13 +3657,16 @@ fn refine_nonconforming_prism_internal(
             // All 3 edge midpoints exist → this tri face is hanging
             edge_constraints.push(HangingNodeConstraint {
                 constrained: mab as usize, parent_a: a as usize, parent_b: b as usize,
-            });
+            coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             edge_constraints.push(HangingNodeConstraint {
                 constrained: mbc as usize, parent_a: b as usize, parent_b: c as usize,
-            });
+            coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             edge_constraints.push(HangingNodeConstraint {
                 constrained: mac as usize, parent_a: a as usize, parent_b: c as usize,
-            });
+            coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             tri_face_constraints.push(HangingFaceConstraint {
                 constrained: mab as usize, parent_a: a as usize,
                 parent_b: b as usize, parent_c: c as usize,
@@ -3632,16 +3705,20 @@ fn refine_nonconforming_prism_internal(
             if let Some(&fc) = quad_face_center_map.get(fns) {
                 edge_constraints.push(HangingNodeConstraint {
                     constrained: mab as usize, parent_a: a as usize, parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                 edge_constraints.push(HangingNodeConstraint {
                     constrained: mbc as usize, parent_a: b as usize, parent_b: c as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                 edge_constraints.push(HangingNodeConstraint {
                     constrained: mcd as usize, parent_a: c as usize, parent_b: d as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                 edge_constraints.push(HangingNodeConstraint {
                     constrained: mda as usize, parent_a: d as usize, parent_b: a as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                 quad_face_constraints.push(HangingQuadFaceConstraint {
                     constrained: fc as usize,             // the face center is the hanging node
                     parent_a: a as usize, parent_b: b as usize,
@@ -3952,7 +4029,8 @@ pub fn refine_nonconforming_quad_aniso(
                                 constrained: mid as usize,
                                 parent_a:    edge.0 as usize,
                                 parent_b:    edge.1 as usize,
-                            });
+                            coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                             break;
                         }
                     }
@@ -4356,7 +4434,8 @@ pub fn refine_nonconforming_hex_aniso(
                     constrained: mid as usize,
                     parent_a: a as usize,
                     parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
     }
@@ -4764,7 +4843,8 @@ fn refine_nonconforming_hex_internal(
         if current_edge_set.contains(&edge_key(a, b)) {
             edge_constraints.push(HangingNodeConstraint {
                 constrained: mid as usize, parent_a: a as usize, parent_b: b as usize,
-            });
+            coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
         }
     }
     edge_constraints.sort_by_key(|c| c.constrained);
@@ -4794,16 +4874,20 @@ fn refine_nonconforming_hex_internal(
             if let Some(&fc) = face_center_map.get(fns) {
                 edge_constraints.push(HangingNodeConstraint {
                     constrained: mab as usize, parent_a: a as usize, parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                 edge_constraints.push(HangingNodeConstraint {
                     constrained: mbc as usize, parent_a: b as usize, parent_b: c as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                 edge_constraints.push(HangingNodeConstraint {
                     constrained: mcd as usize, parent_a: c as usize, parent_b: d as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                 edge_constraints.push(HangingNodeConstraint {
                     constrained: mda as usize, parent_a: d as usize, parent_b: a as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
                 face_constraints.push(HangingQuadFaceConstraint {
                     constrained: fc as usize,
                     parent_a: a as usize, parent_b: b as usize,
@@ -4989,7 +5073,8 @@ pub fn refine_nonconforming_tri_aniso(
             if adj.iter().any(|e| !marked_set.contains(e)) {
                 constraints.push(HangingNodeConstraint {
                     constrained: mid as usize, parent_a: a as usize, parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
     }
@@ -5245,7 +5330,8 @@ pub fn refine_nonconforming_tet_aniso(
             if adj.iter().any(|e| !marked_set.contains(e)) {
                 constraints.push(HangingNodeConstraint {
                     constrained: mid as usize, parent_a: a as usize, parent_b: b as usize,
-                });
+                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+});
             }
         }
     }
@@ -5383,7 +5469,7 @@ pub fn refine_nonconforming_prism_aniso(
     }
 
     let mut c = Vec::new();
-    for (&(a,b),&mid) in &mm { if let Some(adj)=edge_elems.get(&(a,b)) { if adj.iter().any(|e|!marked_set.contains(e)) { c.push(HangingNodeConstraint{constrained:mid as usize,parent_a:a as usize,parent_b:b as usize}); } } }
+    for (&(a,b),&mid) in &mm { if let Some(adj)=edge_elems.get(&(a,b)) { if adj.iter().any(|e|!marked_set.contains(e)) { c.push(HangingNodeConstraint::new_p1(mid as usize,a as usize,b as usize)); } } }
     c.sort_by_key(|c|c.constrained);
 
     let nbf=mesh.n_faces();let mut nfc=Vec::new();let mut nft=Vec::new();
@@ -5588,7 +5674,7 @@ fn refine_nonconforming_pyramid_internal(
     let mut ec = Vec::new();
     for (&(a,b),&mid) in &midpoint_map {
         if let Some(adj) = edge_elems.get(&(a,b)) {
-            if adj.iter().any(|e|!marked_set.contains(e)) { ec.push(HangingNodeConstraint{constrained:mid as usize,parent_a:a as usize,parent_b:b as usize}); }
+            if adj.iter().any(|e|!marked_set.contains(e)) { ec.push(HangingNodeConstraint::new_p1(mid as usize,a as usize,b as usize)); }
         }
     }
     ec.sort_by_key(|c|c.constrained); ec.dedup_by_key(|c|c.constrained);
@@ -5599,9 +5685,9 @@ fn refine_nonconforming_pyramid_internal(
         if adj.iter().filter(|&&e|marked_set.contains(&e)).count()!=1 { continue; }
         let (a,b,c)=*key;
         if let(Some(&mab),Some(&mbc),Some(&mac))=(midpoint_map.get(&edge_key(a,b)),midpoint_map.get(&edge_key(b,c)),midpoint_map.get(&edge_key(a,c))) {
-            ec.push(HangingNodeConstraint{constrained:mab as usize,parent_a:a as usize,parent_b:b as usize});
-            ec.push(HangingNodeConstraint{constrained:mbc as usize,parent_a:b as usize,parent_b:c as usize});
-            ec.push(HangingNodeConstraint{constrained:mac as usize,parent_a:a as usize,parent_b:c as usize});
+            ec.push(HangingNodeConstraint::new_p1(mab as usize,a as usize,b as usize));
+            ec.push(HangingNodeConstraint::new_p1(mbc as usize,b as usize,c as usize));
+            ec.push(HangingNodeConstraint::new_p1(mac as usize,a as usize,c as usize));
             tc.push(HangingFaceConstraint{constrained:mab as usize,parent_a:a as usize,parent_b:b as usize,parent_c:c as usize});
         }
     }
@@ -5620,10 +5706,10 @@ fn refine_nonconforming_pyramid_internal(
         let [a,b,c,d] = fn4;
         if let(Some(mab),Some(mbc),Some(mcd),Some(mda))=(midpoint_map.get(&edge_key(a,b)).copied(),midpoint_map.get(&edge_key(b,c)).copied(),midpoint_map.get(&edge_key(c,d)).copied(),midpoint_map.get(&edge_key(d,a)).copied()) {
             if let Some(&fc) = quad_face_center_map.get(fns) {
-                ec.push(HangingNodeConstraint{constrained:mab as usize,parent_a:a as usize,parent_b:b as usize});
-                ec.push(HangingNodeConstraint{constrained:mbc as usize,parent_a:b as usize,parent_b:c as usize});
-                ec.push(HangingNodeConstraint{constrained:mcd as usize,parent_a:c as usize,parent_b:d as usize});
-                ec.push(HangingNodeConstraint{constrained:mda as usize,parent_a:d as usize,parent_b:a as usize});
+                ec.push(HangingNodeConstraint::new_p1(mab as usize,a as usize,b as usize));
+                ec.push(HangingNodeConstraint::new_p1(mbc as usize,b as usize,c as usize));
+                ec.push(HangingNodeConstraint::new_p1(mcd as usize,c as usize,d as usize));
+                ec.push(HangingNodeConstraint::new_p1(mda as usize,d as usize,a as usize));
                 qc.push(HangingQuadFaceConstraint{constrained:fc as usize,parent_a:a as usize,parent_b:b as usize,parent_c:c as usize,parent_d:d as usize});
             }
         }
@@ -5743,7 +5829,7 @@ pub fn refine_hex8_uniform(
         } else { for k in 0..8 { ncn.push(ns[k]); } nt.push(tag); }
     }
     let mut c = Vec::new();
-    for (&(a,b),&mid) in &mm { if let Some(adj)=edge_elems.get(&(a,b)) { if adj.iter().any(|e|!marked_set.contains(e)) { c.push(HangingNodeConstraint{constrained:mid as usize,parent_a:a as usize,parent_b:b as usize}); } } }
+    for (&(a,b),&mid) in &mm { if let Some(adj)=edge_elems.get(&(a,b)) { if adj.iter().any(|e|!marked_set.contains(e)) { c.push(HangingNodeConstraint::new_p1(mid as usize,a as usize,b as usize)); } } }
     c.sort_by_key(|c|c.constrained);
     // boundary faces
     let nbf=mesh.n_faces();let mut nfc=Vec::new();let mut nft=Vec::new();

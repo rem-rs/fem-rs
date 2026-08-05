@@ -434,13 +434,12 @@ where
     // Apply hanging-node constraints: recover constrained DOF values
     // from parent DOFs via the constraint relationship, matching MFEM's
     // flux-space constraint handling (SumFluxAndCount applies the
-    // FESpace's constraints during averaging).
+    // FESpace's constraints during averaging; InvTransformPrimal fills
+    // constrained DOFs with the P2 interpolation of their masters).
     for c in constraints {
         let idx = c.constrained;
-        let pa = c.parent_a;
-        let pb = c.parent_b;
         for d in 0..dim {
-            flux_avg[idx][d] = 0.5 * (flux_avg[pa][d] + flux_avg[pb][d]);
+            flux_avg[idx][d] = c.parents().map(|(p, coeff)| coeff * flux_avg[p][d]).sum();
         }
     }
 

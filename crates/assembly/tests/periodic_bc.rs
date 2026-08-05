@@ -114,11 +114,9 @@ fn solve_periodic_poisson(n: usize, order: u8) -> f64 {
 
     // Convert pairs to HangingNodeConstraints (slave = master, unit weight).
     let periodic_constraints: Vec<HangingNodeConstraint> = pairs.iter()
-        .map(|&(slave, master)| HangingNodeConstraint {
-            constrained: slave as usize,
-            parent_a:    master as usize,
-            parent_b:    master as usize,
-        })
+        .map(|&(slave, master)| HangingNodeConstraint::new_weighted(
+            slave as usize, master as usize, master as usize, 0.5, 0.5, vec![],
+        ))
         .collect();
 
     // Apply periodicity first (eliminates slave DOFs).

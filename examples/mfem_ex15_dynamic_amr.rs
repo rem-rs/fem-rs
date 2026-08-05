@@ -141,6 +141,52 @@ impl NcState2D for NcState2 {
     }
 }
 
+// ─── P2 hanging-node constraint upgrade ───────────────────────────────────────
+// Rust's NCState generates P1-style constraints `u[mid] = 0.5(u[a]+u[b])` at the
+// mesh level. For P2 (quadratic H1) spaces MFEM instead constrains the
+// *fine-edge midpoint DOFs* (the 1/4 and 3/4 points of a coarse edge) with the
+// parent-edge P2 basis (GetTransferMatrix):
+//     u[S1] = 0.375 u[a] + 0.75 u[E] - 0.125 u[b]   (1/4 point)
+//     u[S2] = -0.125 u[a] + 0.75 u[E] + 0.375 u[b]  (3/4 point)
+// and ties the coarse-edge-midpoint vertex DOF `mid` to the coarse-edge-mid
+// DOF `E` (same physical point).  `E` remains a free DOF.
+fn p2_constraints(
+    p1: &[HangingNodeConstraint],
+    dm: &fem_space::dof_manager::DofManager,
+) -> Vec<HangingNodeConstraint> {
+    use fem_space::dof_manager::EdgeKey;
+    let mut out: Vec<HangingNodeConstraint> = Vec::new();
+    for c in p1 {
+        let (mid, a, b) = (c.constrained, c.parent_a, c.parent_b);
+        let e = dm.edge_dof_map.get(&EdgeKey(a as u32, b as u32)).copied();
+        let Some(e) = e else { continue };
+        let e = e as usize;
+        // mid vertex DOF == coarse-edge midpoint DOF (same point).
+        if mid != e {
+            out.push(HangingNodeConstraint::new_weighted(mid, e, e, 0.5, 0.5, vec![]));
+        }
+        // fine edge (a, mid): midpoint at the 1/4 point of the coarse edge.
+        if let Some(&s1) = dm.edge_dof_map.get(&EdgeKey(a as u32, mid as u32)) {
+            let s1 = s1 as usize;
+            if s1 != mid && s1 != e {
+                out.push(HangingNodeConstraint::new_weighted(
+                    s1, a, b, 0.375, -0.125, vec![(e, 0.75)],
+                ));
+            }
+        }
+        // fine edge (mid, b): midpoint at the 3/4 point of the coarse edge.
+        if let Some(&s2) = dm.edge_dof_map.get(&EdgeKey(mid as u32, b as u32)) {
+            let s2 = s2 as usize;
+            if s2 != mid && s2 != e {
+                out.push(HangingNodeConstraint::new_weighted(
+                    s2, a, b, -0.125, 0.375, vec![(e, 0.75)],
+                ));
+            }
+        }
+    }
+    out
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -194,18 +240,23 @@ fn main() {
     let mut derefiner = ThresholdDerefiner::new();
     derefiner.set_threshold(args.hysteresis * args.max_elem_error);
 
-    // ─── 4. Time loop ────────────────────────────────────────────────────────
+    // ─── 4. Time loop (C++ ex15.cpp:250: `for (time = 0.0; time < t_final + 1e-10; time += 0.01)`) ──
     let dt = 0.01;
     let mut time = 0.0;
     while time < args.t_final + 1e-10 {
-        println!("\nTime {}", time);
-        println!("\nRefinement:");
+        println!("\nTime {}\n", fmt_g6(time));
+        println!("Refinement:");
+        // C++ ex15.cpp:259-260 — refiner.Reset(); derefiner.Reset();
         refiner.reset();
 
-        // ── 4a. Inner refinement loop ─────────────────────────────────────
-        for _it in 1.. {
+        // ── 4a. Inner refinement loop (C++ ex15.cpp:264: `for (int ref_it = 1; ; ref_it++)`) ─
+        let mut ref_it = 1usize;
+        loop {
             let space = H1Space::new(mesh.clone(), order);
             let cdofs = space.n_dofs();
+            // C++ ex15.cpp:266-267 — `cout << "Iteration: " << ref_it << ", number of unknowns: "
+            //                          << fespace.GetVSize() << endl;`
+            println!("Iteration: {}, number of unknowns: {}", ref_it, cdofs);
             let quad_rule = (order as u8) * 2 + 1;
 
             // Assemble stiffness matrix
@@ -217,13 +268,23 @@ fn main() {
             let source = DomainSourceIntegrator::new(rhs_fn);
             let mut rhs_vec = Assembler::assemble_linear(&space, &[&source], quad_rule);
 
-            // Apply hanging-node constraints
-            let hc = nc_state.constraints();
+            // Apply hanging-node constraints.
+            // P2: upgrade the mesh-level P1 constraints (0.5 average) to the
+            // MFEM P2 transfer-matrix constraints (fine-edge midpoints).
+            let dm0 = space.dof_manager();
+            let hc = if order == 2 {
+                p2_constraints(nc_state.constraints(), dm0)
+            } else {
+                nc_state.constraints().to_vec()
+            };
             if !hc.is_empty() {
-                apply_hanging_constraints(&mut mat, &mut rhs_vec, hc);
+                apply_hanging_constraints(&mut mat, &mut rhs_vec, &hc);
             }
 
-            // Dirichlet BC on all boundaries (time-dependent)
+            // Dirichlet BC on all boundaries (time-dependent).
+            // C++ ex15.cpp:275 — `x.ProjectBdrCoefficient(bdr, ess_bdr)`
+            // C++ ex15.cpp:281-283 — `a.FormLinearSystem(ess_tdof_list, x, b, A, X, B)`
+            // (DIAG_KEEP: diagonal kept, rhs_i = A_ii · bdr_val)
             let dm = space.dof_manager();
             let bnd_tags = space.mesh().unique_boundary_tags();
             let bnd = boundary_dofs(space.mesh(), dm, &bnd_tags);
@@ -232,11 +293,8 @@ fn main() {
                 bdr_func(&coord, time)
             }).collect();
             fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs_vec, &bnd, &bnd_vals);
-            for (row, &d) in mat.diagonal().iter().enumerate() {
-                if d == 0.0 { mat.eliminate_essential_bc_diag(row, 1.0); }
-            }
 
-            // Solve
+            // Solve (C++ ex15.cpp:286-287 — `GSSmoother M(A); PCG(A, M, B, X, 0, 500, 1e-12, 0.0)`)
             let mut u = vec![0.0_f64; cdofs];
             let res = fem_solver::solve_pcg_gssmoother(
                 &mat, &rhs_vec, &mut u,
@@ -248,7 +306,7 @@ fn main() {
             if res.as_ref().is_ok_and(|r| !r.converged) { break; }
 
             // Recover hanging-node values
-            if !hc.is_empty() { recover_hanging_values(&mut u, hc); }
+            if !hc.is_empty() { recover_hanging_values(&mut u, &hc); }
 
             // Error estimation + refinement (matches C++ refiner.Apply(*mesh))
             let gf = GridFunction::new(&space, u);
@@ -259,18 +317,16 @@ fn main() {
                 refiner.last_marked.len()
             } else { 0 };
 
-            // Diagnostic
-            if !refiner.eta.is_empty() {
-                let mean: f64 = refiner.eta.iter().sum::<f64>() / refiner.eta.len() as f64;
-                let max = refiner.eta.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                println!("  eta: mean={mean:.6e} max={max:.6e} >threshold={n_marked}/{}", refiner.eta.len());
-            }
-
+            // C++ ex15.cpp:317-320 — `if (refiner.Stop()) break;`
             if refiner.stop() { break; }
+            ref_it += 1;
         }
 
-        // ── 4b. Derefinement ─────────────────────────────────────────────
-        derefiner.apply(&mut mesh, &mut nc_state, &mut refiner);
+        // ── 4b. Derefinement (C++ ex15.cpp:330-336: `if (derefiner.Apply(mesh))`
+        //          → `cout << "\nDerefined elements." << endl;`)
+        // TODO(ex15): derefiner child-index assumption broken on NC meshes — disabled while aligning the refine path.
+        let _ = (&mut derefiner, &mut nc_state, &mut refiner);
+        let _ne_before = mesh.n_elems();
 
         time += dt;
     }
@@ -280,6 +336,62 @@ fn main() {
 }
 
 // ─── CLI ───────────────────────────────────────────────────────────────────────
+
+/// Mimic C++ `std::cout << v` under the default `cout.precision(6)`
+/// (defaultfloat, i.e. printf-style `%g` with 6 significant digits).
+/// C++ ex15.cpp prints `time` with the default stream format.
+fn fmt_g6(v: f64) -> String {
+    let p = 6usize; // significant digits
+    let sci = format!("{:.5e}", v); // 5 decimals = 6 significant digits
+    let (mant, exp) = sci.split_once('e').expect("sci format");
+    let exp: i32 = exp.parse().expect("exp");
+    let neg = mant.starts_with('-');
+    let mant = mant.trim_start_matches('-');
+    let mut digits: Vec<char> = mant.chars().filter(|c| c.is_ascii_digit()).collect();
+    while digits.len() > 1 && digits[digits.len() - 1] == '0' {
+        digits.pop();
+    }
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    if exp >= -4 && exp < p as i32 {
+        if exp >= 0 {
+            let int_len = (exp + 1) as usize;
+            if int_len >= digits.len() {
+                out.push_str(&digits.iter().collect::<String>());
+                out.push_str(&"0".repeat(int_len - digits.len()));
+            } else {
+                out.push_str(&digits[..int_len].iter().collect::<String>());
+                out.push('.');
+                out.push_str(&digits[int_len..].iter().collect::<String>());
+            }
+        } else {
+            out.push('0');
+            out.push('.');
+            out.push_str(&"0".repeat((-exp - 1) as usize));
+            out.push_str(&digits.iter().collect::<String>());
+        }
+    } else {
+        out.push(digits[0]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..].iter().collect::<String>());
+        }
+        out.push('e');
+        if exp < 0 {
+            out.push('-');
+        } else {
+            out.push('+');
+        }
+        let e = exp.abs();
+        if e < 10 {
+            out.push('0');
+        }
+        out.push_str(&e.to_string());
+    }
+    out
+}
 
 struct Args {
     mesh: String,
@@ -296,13 +408,14 @@ struct Args {
 
 impl Args {
     fn parse() -> Self {
-        let mut mesh = "data/star.mesh".to_string();
+        // C++ ex15.cpp:78-89 默认参数
+        let mut mesh = "data/star-hilbert.mesh".to_string();
         let mut problem = 0;
         let mut nfeatures = 1;
         let mut order: u8 = 2;
         let mut max_elem_error = 5.0e-3;
         let mut hysteresis = 0.15;
-        let mut ref_levels = 2;
+        let mut ref_levels = 0;
         let mut nc_limit = 3;
         let mut t_final = 1.0;
         let mut estimator = 0;
