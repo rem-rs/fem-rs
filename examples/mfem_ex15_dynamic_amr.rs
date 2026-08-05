@@ -297,20 +297,11 @@ fn main() {
             } else {
                 nc_state.constraints().to_vec()
             };
-            if !hc.is_empty() {
-                apply_hanging_constraints(&mut mat, &mut rhs_vec, &hc);
-            }
-
-            // ── Reduce to the true-DOF system (MFEM FormLinearSystem with the
-            //    conforming prolongation cP: PᵀAP and Pᵀb on unconstrained DOFs).
-            //    This makes the GSSmoother sweep order and PCG history match
-            //    MFEM bit-for-bit (full-N + identity rows would give a
-            //    different GS order and ~1e-7 solution drift).
-            let (mat_true, rhs_true, true_dofs) = if hc.is_empty() {
-                (mat.clone(), rhs_vec.clone(), (0..cdofs).collect())
-            } else {
-                fem_space::constraints::reduce_hanging_system(&mat, &rhs_vec, &hc)
-            };
+            // ── True-DOF system (MFEM ConformingAssemble: R=cPᵀ, RA=R·A,
+            //    A_true=RA·cP, b_true=R·b).  This reproduces MFEM's
+            //    GSSmoother sweep order and PCG history bit-for-bit.
+            let (mat_true, rhs_true, true_dofs) =
+                fem_space::constraints::conforming_assemble(&mat, &rhs_vec, &hc);
 
             // Dirichlet BC on all boundaries (time-dependent), restricted to
             // true DOFs (C++: ess_tdof_list = GetEssentialTrueDofs).

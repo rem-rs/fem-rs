@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::{csr_spmm, CooMatrix, CsrMatrix};
 use fem_mesh::amr::{HangingFaceConstraint, HangingNodeConstraint};
 
 /// Apply hanging-node constraints to the assembled system `(K, f)`.
@@ -150,6 +150,92 @@ pub fn reduce_hanging_system(
     }
     let b_true: Vec<f64> = true_dofs.iter().map(|&d| rhs[d]).collect();
     (coo.into_csr(), b_true, true_dofs)
+}
+
+/// Build the conforming prolongation matrix cP (ndofs × n_true), mirroring
+/// MFEM `FiniteElementSpace::GetConformingProlongation`: each true DOF row is
+/// the unit vector; each constrained ("slave") DOF row is its expansion onto
+/// true DOFs (the recursively-eliminated dependency coefficients — MFEM
+/// fespace.cpp `BuildConformingInterpolation` + `DofFinalizable` loop).
+///
+/// Row/column ordering follows MFEM: rows in original DOF order, columns in
+/// true-DOF ascending order.
+pub fn build_conforming_prolongation(
+    n: usize,
+    constraints: &[HangingNodeConstraint],
+) -> CsrMatrix<f64> {
+    use std::collections::{HashMap, HashSet};
+    let constrained: HashSet<usize> = constraints.iter().map(|c| c.constrained).collect();
+    let true_dofs: Vec<usize> = (0..n).filter(|d| !constrained.contains(d)).collect();
+    let true_idx: HashMap<usize, usize> = true_dofs
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| (d, i))
+        .collect();
+    let constraint_map: HashMap<usize, Vec<(usize, f64)>> = constraints
+        .iter()
+        .map(|c| (c.constrained, c.parents().collect()))
+        .collect();
+
+    fn expand_dof(
+        dof: usize,
+        weight: f64,
+        constraint_map: &HashMap<usize, Vec<(usize, f64)>>,
+        out: &mut Vec<(usize, f64)>,
+        depth: usize,
+    ) {
+        if depth > 20 { return; }
+        if let Some(parents) = constraint_map.get(&dof) {
+            for &(p, coeff) in parents {
+                expand_dof(p, weight * coeff, constraint_map, out, depth + 1);
+            }
+        } else {
+            out.push((dof, weight));
+        }
+    }
+
+    let mut coo = CooMatrix::<f64>::new(n, true_dofs.len());
+    for (ti, &td) in true_dofs.iter().enumerate() {
+        coo.add(td, ti, 1.0);
+    }
+    for c in constraints {
+        let mut targets: Vec<(usize, f64)> = Vec::new();
+        expand_dof(c.constrained, 1.0, &constraint_map, &mut targets, 0);
+        for (t, w) in targets {
+            if let Some(&tj) = true_idx.get(&t) {
+                coo.add(c.constrained, tj, w);
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Assemble the true-DOF system exactly like MFEM `BilinearForm::ConformingAssemble`
+/// followed by `FormLinearSystem`: R = cPᵀ, RA = R·A, A_true = RA·cP, b_true = R·b.
+///
+/// Uses the same sparse-matrix multiplication order (row-major i→k→j sweep)
+/// as MFEM `SparseMatrix::Mult`, so the resulting A_true/b_true match MFEM
+/// bit-for-bit when `build_conforming_prolongation` matches MFEM's cP.
+///
+/// Returns `(A_true, b_true, true_dofs)`.
+pub fn conforming_assemble(
+    a: &CsrMatrix<f64>,
+    b: &[f64],
+    constraints: &[HangingNodeConstraint],
+) -> (CsrMatrix<f64>, Vec<f64>, Vec<usize>) {
+    if constraints.is_empty() {
+        return (a.clone(), b.to_vec(), (0..a.nrows).collect());
+    }
+    let p = build_conforming_prolongation(a.nrows, constraints);
+    let r = p.transpose();
+    let ra = csr_spmm(&r, a);
+    let a_true = csr_spmm(&ra, &p);
+    let mut b_true = vec![0.0_f64; r.nrows];
+    r.spmv(b, &mut b_true);
+    let true_dofs: Vec<usize> = (0..a.nrows)
+        .filter(|d| !constraints.iter().any(|c| c.constrained == *d))
+        .collect();
+    (a_true, b_true, true_dofs)
 }
 
 /// Recover hanging-node DOF values after solving.
