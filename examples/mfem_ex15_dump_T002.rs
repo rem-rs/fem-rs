@@ -59,6 +59,7 @@ fn main() {
     refiner.set_nc_limit(3);
     let mut derefiner = ThresholdDerefiner::new();
     derefiner.set_threshold(0.15 * 0.005);
+    derefiner.set_nc_limit(3);
 
     let dt = 0.01;
     let mut time = 0.0;
@@ -68,7 +69,7 @@ fn main() {
     let mut dump_t002 = false;
     let mut marked_printed = false;
 
-    while time < 0.071 {
+    while time < 0.931 {
         refiner.reset();
         let mut ref_it = 1usize;
         loop {
@@ -150,7 +151,10 @@ fn main() {
                 println!("SOLU {cdofs}");
                 for (d, &v) in u.iter().enumerate() { println!("{d} {v:.17e}"); }
             }
-            if ((time - 0.07).abs() < 1e-9 || (time - 0.06).abs() < 1e-9 || (time - 0.05).abs() < 1e-9 || (time - 0.04).abs() < 1e-9 || (time - 0.03).abs() < 1e-9) && ref_it == 1 {
+            let t_in_range = [0.03f64, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.93]
+                .iter()
+                .any(|&t| (time - t).abs() < 1e-9);
+            if t_in_range && ref_it == 1 {
                 println!("T006CP t={time} dofs={} true={} nconstr={}", cdofs, true_dofs.len(), hc.len());
                 if (time - 0.06).abs() < 1e-9 {
                 for c in &hc {

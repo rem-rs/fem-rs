@@ -163,6 +163,12 @@ impl NcState2D for NcState2 {
             NcState2::Quad4(s) => s.derefine_groups(mesh, groups),
         }
     }
+    fn deref_group_nc_ok(&self, node: usize, nc_limit: u32, mesh: &Mesh<2>) -> bool {
+        match self {
+            NcState2::Tri3(s) => s.deref_group_nc_ok(node, nc_limit, mesh),
+            NcState2::Quad4(s) => s.deref_group_nc_ok(node, nc_limit, mesh),
+        }
+    }
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
@@ -217,6 +223,7 @@ fn main() {
 
     let mut derefiner = ThresholdDerefiner::new();
     derefiner.set_threshold(args.hysteresis * args.max_elem_error);
+    derefiner.set_nc_limit(args.nc_limit); // MFEM ex15.cpp: derefiner.SetNCLimit(nc_limit)
 
     // ─── 4. Time loop (C++ ex15.cpp:250: `for (time = 0.0; time < t_final + 1e-10; time += 0.01)`) ──
     let dt = 0.01;
@@ -331,6 +338,12 @@ fn main() {
             } else { 0 };
             if std::env::var("EX15_DBG_MARKED").is_ok() {
                 println!("DBG it{ref_it} ne={ne_after} marked={n_marked} marks={:?}", refiner.last_marked);
+            }
+            // dump per-element err at Time 0.93 it2 (the derefiner input) for
+            // cross-checking against the C++ ERR dump
+            if (time - 0.93).abs() < 1e-9 && ref_it == 1 {
+                println!("ETA93 {}", refiner.eta.len());
+                for (i, &e) in refiner.eta.iter().enumerate() { println!("{i} {e:.17e}"); }
             }
 
             // C++ ex15.cpp:317-320 — `if (refiner.Stop()) break;`

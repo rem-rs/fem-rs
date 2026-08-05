@@ -493,6 +493,13 @@ pub trait NcState2D {
     fn derefine_groups(&mut self, _mesh: &Mesh<2>, _groups: &[usize]) -> Option<Mesh<2>> {
         None
     }
+
+    /// MFEM `NCMesh::CheckDerefinementNCLevel`: whether derefining tree-node
+    /// `node` keeps the max NC level between adjacent elements within
+    /// `nc_limit`.  Default: always allowed (no NC limit).
+    fn deref_group_nc_ok(&self, _node: usize, _nc_limit: u32, _mesh: &Mesh<2>) -> bool {
+        true
+    }
 }
 
 impl NcState2D for NCState {
@@ -527,6 +534,9 @@ impl NcState2D for NCStateQuad {
         self.derefine_groups(mesh, groups)
     }
     fn midpoints(&self) -> &HashMap<(NodeId, NodeId), NodeId> { self.active_midpoints() }
+    fn deref_group_nc_ok(&self, node: usize, nc_limit: u32, mesh: &Mesh<2>) -> bool {
+        self.deref_group_nc_ok(node, nc_limit, mesh)
+    }
 }
 
 /// Propagate refinement to neighbors when nc_limit would be violated (Tri3).
@@ -3226,6 +3236,51 @@ impl NCStateQuad {
         self.refine_tree[node].children
     }
 
+    /// MFEM `NCMesh::CheckDerefinementNCLevel` (Quad4): a derefinement group
+    /// is level-ok when no child's k-direction split depth reaches
+    /// `max_nc_level` while the parent was refined in that direction.
+    /// Rust's quad refinement is always a 4-split (XY), so the parent
+    /// `ref_type` sets both bits — both directions are checked:
+    ///   splits[0] = max(EdgeSplitLevel(edge0), EdgeSplitLevel(edge2))
+    ///   splits[1] = max(EdgeSplitLevel(edge1), EdgeSplitLevel(edge3))
+    pub fn deref_group_nc_ok(&self, node: usize, nc_limit: u32, mesh: &Mesh<2>) -> bool {
+        if nc_limit == 0 { return true; }
+        let Some(tn) = self.refine_tree.get(node) else { return true; };
+        if !tn.derefinable() { return true; }
+        let coords: Vec<[f64; 2]> =
+            (0..mesh.n_nodes()).map(|n| mesh.coords_of(n as NodeId)).collect();
+        let mut pos: HashMap<(i64, i64), NodeId> = HashMap::new();
+        for (n, c) in coords.iter().enumerate() {
+            let q = ((c[0] * 1e10).round() as i64, (c[1] * 1e10).round() as i64);
+            pos.entry(q).or_insert(n as NodeId);
+        }
+        let mut memo: HashMap<(NodeId, NodeId), u32> = HashMap::new();
+        // MFEM HasVertex(): only element-corner midpoints count.
+        let mut is_vertex: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        for e in 0..mesh.n_elems() as ElemId {
+            for &n in mesh.elem_nodes(e) { is_vertex.insert(n); }
+        }
+        let mut worst: Vec<(u32, u32)> = Vec::new();
+        for &c in &tn.children {
+            let ns = mesh.elem_nodes(c);
+            let s0 = edge_split_level_geo(ns[0], ns[1], &coords, &pos, &is_vertex, &mut memo)
+                .max(edge_split_level_geo(ns[2], ns[3], &coords, &pos, &is_vertex, &mut memo));
+            let s1 = edge_split_level_geo(ns[1], ns[2], &coords, &pos, &is_vertex, &mut memo)
+                .max(edge_split_level_geo(ns[3], ns[0], &coords, &pos, &is_vertex, &mut memo));
+            worst.push((s0, s1));
+            if s0 >= nc_limit || s1 >= nc_limit {
+                if std::env::var("EX15_DBG_DEREF").is_ok() {
+                    eprintln!("DBG nc_ok: group {node} child {c} ns={ns:?} splits=({s0},{s1}) limit={nc_limit}");
+                }
+                return false;
+            }
+        }
+        if std::env::var("EX15_DBG_DEREF").is_ok() && worst.iter().any(|&(a, b)| a > 0 || b > 0) {
+            eprintln!("DBG nc_ok: group {node} children={:?} all-splits={worst:?}", tn.children);
+        }
+        true
+    }
+
     /// Coarsen (derefine) the given tree-node groups: remove their leaf
     /// children from `mesh` and restore each parent element at the position
     /// of its first child.  Returns the new mesh.  Hanging-node state
@@ -3788,12 +3843,17 @@ impl NCStateQuad {
 ///
 /// The midpoint is located by quantized coordinate lookup, so coarse edges
 /// that were split by a finer neighbor are detected even though the edge
-/// itself is not present in the current mesh's edge map.
+/// itself is not present in the current mesh's edge map.  Like MFEM
+/// (`!nodes[mid].HasVertex() -> 0`), a midpoint that is NOT an element
+/// corner (not in `is_vertex`) does NOT count — deep split chains whose
+/// midpoints stopped being element corners stop contributing (deref'd
+/// away sub-chains must not inflate the level).
 pub(crate) fn edge_split_level_geo(
     a: NodeId,
     b: NodeId,
     coords: &[[f64; 2]],
     pos: &HashMap<(i64, i64), NodeId>,
+    is_vertex: &std::collections::HashSet<NodeId>,
     memo: &mut HashMap<(NodeId, NodeId), u32>,
 ) -> u32 {
     let key = (a.min(b), a.max(b));
@@ -3802,10 +3862,10 @@ pub(crate) fn edge_split_level_geo(
     let my = 0.5 * (coords[a as usize][1] + coords[b as usize][1]);
     let q = ((mx * 1e10).round() as i64, (my * 1e10).round() as i64);
     let v = if let Some(&m) = pos.get(&q) {
-        if m == a || m == b { 0 }
+        if m == a || m == b || !is_vertex.contains(&m) { 0 }
         else {
-            1 + edge_split_level_geo(a, m, coords, pos, memo)
-                .max(edge_split_level_geo(m, b, coords, pos, memo))
+            1 + edge_split_level_geo(a, m, coords, pos, is_vertex, memo)
+                .max(edge_split_level_geo(m, b, coords, pos, is_vertex, memo))
         }
     } else { 0 };
     memo.insert(key, v);
@@ -3828,12 +3888,17 @@ pub fn limit_nc_level_quad(mesh: &Mesh<2>, nc_limit: u32) -> Vec<ElemId> {
     }
     let mut memo: HashMap<(NodeId, NodeId), u32> = HashMap::new();
     let mut out = Vec::new();
+    // MFEM HasVertex(): a midpoint counts only while it is an element corner.
+    let mut is_vertex: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for e in 0..mesh.n_elems() as ElemId {
+        for &n in mesh.elem_nodes(e) { is_vertex.insert(n); }
+    }
     for e in 0..mesh.n_elems() as ElemId {
         let ns = mesh.elem_nodes(e);
         let mut splits = 0u32;
         for &(la, lb) in &local_edges_quad() {
             splits = splits.max(edge_split_level_geo(
-                ns[la], ns[lb], &coords, &pos, &mut memo));
+                ns[la], ns[lb], &coords, &pos, &is_vertex, &mut memo));
         }
         if splits > nc_limit { out.push(e); }
     }

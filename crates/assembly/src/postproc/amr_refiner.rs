@@ -129,13 +129,19 @@ impl ThresholdRefiner {
 /// `NCMesh::GetDerefinementTable` + `Derefine`.
 pub struct ThresholdDerefiner {
     threshold: f64,
+    nc_limit: u32,
 }
 
 impl ThresholdDerefiner {
-    pub fn new() -> Self { ThresholdDerefiner { threshold: 0.0 } }
+    pub fn new() -> Self { ThresholdDerefiner { threshold: 0.0, nc_limit: 0 } }
 
     /// Elements whose children's aggregate error falls below `thresh` are coarsened.
     pub fn set_threshold(&mut self, thresh: f64) { self.threshold = thresh; }
+
+    /// Maximum NC level difference between adjacent elements after
+    /// derefinement (0 = unlimited).  MFEM `ThresholdDerefiner::SetNCLimit`;
+    /// ex15.cpp calls `derefiner.SetNCLimit(nc_limit)` (3).
+    pub fn set_nc_limit(&mut self, limit: u32) { self.nc_limit = limit; }
 
     /// Apply selective derefinement using `refiner.eta` (errors on the current
     /// mesh).  On return, `*mesh` and `refiner.constraints` are updated.
@@ -158,13 +164,36 @@ impl ThresholdDerefiner {
         if groups.is_empty() { return false; }
 
         let mut to_derefine: Vec<usize> = Vec::new();
+        let mut nc_filtered = 0usize;
+        let mut agg_below = 0usize;
         for &g in &groups {
+            // MFEM CheckDerefinementNCLevel: skip groups whose coarsening
+            // would exceed the max NC level between adjacent elements.
+            if self.nc_limit > 0 && !nc_state.deref_group_nc_ok(g, self.nc_limit, mesh) {
+                nc_filtered += 1;
+                continue;
+            }
             let children = nc_state.deref_group_children(g);
             if children.iter().any(|&c| c as usize >= refiner.eta.len()) { continue; }
             let agg: f64 = children.iter().map(|&c| refiner.eta[c as usize]).sum();
             if agg < self.threshold {
                 to_derefine.push(g);
+                agg_below += 1;
             }
+        }
+        if std::env::var("EX15_DBG_DEREF").is_ok() {
+            let mut aggs: Vec<f64> = Vec::new();
+            for &g in &groups {
+                if self.nc_limit > 0 && !nc_state.deref_group_nc_ok(g, self.nc_limit, mesh) { continue; }
+                let children = nc_state.deref_group_children(g);
+                if children.iter().any(|&c| c as usize >= refiner.eta.len()) { continue; }
+                let agg: f64 = children.iter().map(|&c| refiner.eta[c as usize]).sum();
+                if agg < self.threshold { aggs.push(agg); }
+            }
+            aggs.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            eprintln!("DBG derefiner: groups={} nc_filtered={nc_filtered} agg_below={agg_below} chosen={} top5-agg={:?}",
+                groups.len(), to_derefine.len(),
+                aggs.iter().take(5).map(|a| format!("{a:.6e}")).collect::<Vec<_>>());
         }
         if to_derefine.is_empty() { return false; }
 
